@@ -1,0 +1,38 @@
+#include <node/peerman_args.h>
+
+#include <common/args.h>
+#include <net_processing.h>
+
+#include <algorithm>
+#include <limits>
+
+namespace node {
+
+void ApplyArgsManOptions(const ArgsManager& argsman, PeerManager::Options& options)
+{
+    if (auto value{argsman.GetBoolArg("-txreconciliation")}) options.reconcile_txs = *value;
+
+    if (auto value{argsman.GetIntArg("-maxorphantx")}) {
+        options.max_orphan_txs = uint32_t((std::clamp<int64_t>(*value, 0, std::numeric_limits<uint32_t>::max())));
+    }
+
+    if (auto value{argsman.GetIntArg("-blockreconstructionextratxn")}) {
+        options.max_extra_txs = uint32_t((std::clamp<int64_t>(*value, 0, std::numeric_limits<uint32_t>::max())));
+    }
+
+    if (auto value{argsman.GetFixedPointArg("-blockreconstructionextratxnsize", /*decimals=*/ 4)}) {
+        // NOTE: GetFixedPointArg only allows values up to 18 digits
+        options.max_extra_txs_size = 100 * (size_t)std::clamp<int64_t>(*value, 0, std::numeric_limits<size_t>::max() / 100);
+    }
+
+    if (auto value{argsman.GetBoolArg("-capturemessages")}) options.capture_messages = *value;
+
+    if (auto value{argsman.GetBoolArg("-blocksonly")}) options.ignore_incoming_txs = *value;
+
+    if (auto value{argsman.GetIntArg("-minsmilev2version")}) {
+        options.min_smile_v2_version = int(std::clamp<int64_t>(*value, 0, std::numeric_limits<int>::max()));
+    }
+}
+
+} // namespace node
+

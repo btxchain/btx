@@ -1,0 +1,15 @@
+build/
+dist/
+*.o
+benchmark_results.txt
+__pycache__
+python/build/
+*.egg-info/
+node_modules/
+**.gcno
+**.lcov
+**/target/
+tags
+TAGS
+rust-toolchain.toml
+Cargo.lock

@@ -1,0 +1,63 @@
+# Build subdirectories.
+/*build*
+!/build-aux
+!/build_msvc
+
+*.pyc
+
+# Only ignore unexpected patches
+*.patch
+!contrib/guix/patches/*.patch
+!depends/patches/**/*.patch
+
+/CMakeUserPresets.json
+
+# Previous releases
+/releases
+
+#build tests
+test/lint/test_runner/target/
+
+# Benchmark binaries
+test/benchmark/matmul_bench
+
+/guix-build-*
+
+/ci/scratch/
+
+# BTX local orchestration/test runtime artifacts
+/.btx-parallel-test-logs/
+/.btx-production-readiness/
+/.btx-validation/
+/.btx-metal/
+/.ci-fuzz-corpus/
+/.ci-fuzz-corpus-local/
+/.ci-remote-logs/
+/.ci-local/
+/.ci-logs/
+/.ci-failed-logs/
+/.local-mac-matrix/
+/.ci-lint-venv*/
+/test/cache/
+/test/config.ini
+
+# Local CI live-capture artifacts (scripts/ci tooling)
+/.ci-live-*/
+/.ci-live-*.zip
+/.ci-live-*.json
+/.ci-jobs-*.json
+
+# Lint caches
+/.ruff_cache/
+
+# Local GitHub Actions runner folders/secrets (never commit)
+/.actions-runner*/
+github.key
+
+# Editor/IDE artifacts
+/.idea/
+/.vscode/
+.DS_Store
+*.swp
+*~
+.cache/*

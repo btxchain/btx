@@ -1,0 +1,12 @@
+contrib/faststart/README.md
+contrib/faststart/btx-agent-setup.py
+contrib/faststart/btx-faststart.py
+contrib/faststart/miner-faststart.sh
+contrib/faststart/service-faststart.sh
+contrib/faststart/snapshot-manifest.example.json
+contrib/mining/README.md
+contrib/mining/backup-wallet.sh
+contrib/mining/live-mining-loop.sh
+contrib/mining/start-live-mining.sh
+contrib/mining/stop-live-mining.sh
+doc/btx-download-and-go.md

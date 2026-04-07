@@ -1,0 +1,36 @@
+# /etc/conf.d/btxd: config file for /etc/init.d/btxd
+
+# Config file location
+#BTXD_CONFIGFILE="/etc/btx/btx.conf"
+
+# What directory to write pidfile to?  (created and owned by $BTXD_USER)
+#BTXD_PIDDIR="/run/btxd"
+
+# What filename to give the pidfile
+#BTXD_PIDFILE="${BTXD_PIDDIR}/${SVCNAME}.pid"
+
+# Where to write btxd data (be mindful that the blockchain is large)
+#BTXD_DATADIR="/var/lib/btxd"
+
+# Location to write debug log
+#BTXD_LOGDIR="/var/log/btxd"
+
+# User and group to own btxd process
+#BTXD_USER="btx"
+#BTXD_GROUP="btx"
+
+# Path to btxd executable
+#BTXD_BIN="/usr/bin/btxd"
+
+# Nice value to run btxd under
+#BTXD_NICE=0
+
+# Additional options (avoid -conf and -datadir, use flags above)
+#BTXD_OPTS=""
+
+# The timeout in seconds OpenRC will wait for btxd to terminate
+# after a SIGTERM has been raised.
+# Note that this will be mapped as argument to start-stop-daemon's
+# '--retry' option, which means you can specify a retry schedule
+# here. For more information see man 8 start-stop-daemon.
+BTXD_SIGTERM_TIMEOUT=600

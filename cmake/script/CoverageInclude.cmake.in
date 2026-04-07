@@ -1,0 +1,253 @@
+# Copyright (c) 2024-present The Bitcoin Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://opensource.org/license/mit/.
+
+if(POLICY CMP0009)
+  cmake_policy(SET CMP0009 NEW)
+endif()
+if(POLICY CMP0057)
+  cmake_policy(SET CMP0057 NEW)
+endif()
+
+if("@CMAKE_CXX_COMPILER_ID@" STREQUAL "Clang")
+  find_program(LLVM_COV_EXECUTABLE llvm-cov REQUIRED)
+  set(COV_TOOL "${LLVM_COV_EXECUTABLE} gcov")
+else()
+  find_program(GCOV_EXECUTABLE gcov REQUIRED)
+  set(COV_TOOL "${GCOV_EXECUTABLE}")
+endif()
+
+set(COVERAGE_SOURCE_ROOT "@PROJECT_SOURCE_DIR@/src")
+set(COVERAGE_BUILD_ROOT "@PROJECT_BINARY_DIR@")
+set(COVERAGE_SCRIPT_ROOT "${CMAKE_CURRENT_LIST_DIR}")
+
+# COV_TOOL is used to replace a placeholder.
+configure_file(
+  ${CMAKE_CURRENT_LIST_DIR}/cov_tool_wrapper.sh.in ${CMAKE_CURRENT_LIST_DIR}/cov_tool_wrapper.sh
+  FILE_PERMISSIONS OWNER_READ OWNER_EXECUTE
+                   GROUP_READ GROUP_EXECUTE
+                   WORLD_READ
+  @ONLY
+)
+
+function(coverage_prepare_gcovr_workspace)
+  file(GLOB_RECURSE coverage_gcov_files LIST_DIRECTORIES false "${COVERAGE_SCRIPT_ROOT}/*.gcov")
+  if(coverage_gcov_files)
+    file(REMOVE ${coverage_gcov_files})
+  endif()
+
+  file(GLOB_RECURSE coverage_build_dirs LIST_DIRECTORIES true "${COVERAGE_SCRIPT_ROOT}/src/*")
+  set(coverage_mirror_roots "${COVERAGE_SCRIPT_ROOT}/src")
+  foreach(coverage_dir IN LISTS coverage_build_dirs)
+    if(IS_DIRECTORY "${coverage_dir}" AND "${coverage_dir}" MATCHES [[/CMakeFiles$]])
+      get_filename_component(coverage_root "${coverage_dir}" DIRECTORY)
+      list(APPEND coverage_mirror_roots "${coverage_root}")
+    endif()
+  endforeach()
+  list(REMOVE_DUPLICATES coverage_mirror_roots)
+
+  foreach(coverage_root IN LISTS coverage_mirror_roots)
+    file(RELATIVE_PATH coverage_relative_root "${COVERAGE_SCRIPT_ROOT}/src" "${coverage_root}")
+    if(coverage_relative_root STREQUAL "")
+      set(coverage_source_dir "${COVERAGE_SOURCE_ROOT}")
+    else()
+      set(coverage_source_dir "${COVERAGE_SOURCE_ROOT}/${coverage_relative_root}")
+    endif()
+    if(NOT IS_DIRECTORY "${coverage_source_dir}")
+      continue()
+    endif()
+
+    file(GLOB coverage_source_entries LIST_DIRECTORIES true "${coverage_source_dir}/*")
+    set(coverage_source_names)
+    foreach(coverage_entry IN LISTS coverage_source_entries)
+      get_filename_component(coverage_name "${coverage_entry}" NAME)
+      if(coverage_name STREQUAL "CMakeFiles")
+        continue()
+      endif()
+      list(APPEND coverage_source_names "${coverage_name}")
+    endforeach()
+
+    file(GLOB coverage_existing_entries LIST_DIRECTORIES true "${coverage_root}/*")
+    foreach(coverage_existing_entry IN LISTS coverage_existing_entries)
+      get_filename_component(coverage_existing_name "${coverage_existing_entry}" NAME)
+      if(coverage_existing_name STREQUAL "CMakeFiles")
+        continue()
+      endif()
+      if(IS_SYMLINK "${coverage_existing_entry}" AND NOT coverage_existing_name IN_LIST coverage_source_names)
+        file(REMOVE "${coverage_existing_entry}")
+      endif()
+    endforeach()
+
+    foreach(coverage_entry IN LISTS coverage_source_entries)
+      get_filename_component(coverage_name "${coverage_entry}" NAME)
+      if(coverage_name STREQUAL "CMakeFiles")
+        continue()
+      endif()
+      set(coverage_destination "${coverage_root}/${coverage_name}")
+      if(IS_SYMLINK "${coverage_destination}")
+        file(READ_SYMLINK "${coverage_destination}" coverage_target)
+        if(IS_ABSOLUTE "${coverage_target}")
+          set(coverage_target_path "${coverage_target}")
+        else()
+          set(coverage_target_path "${coverage_root}/${coverage_target}")
+        endif()
+        get_filename_component(coverage_target_real "${coverage_target_path}" REALPATH)
+        get_filename_component(coverage_entry_real "${coverage_entry}" REALPATH)
+        if(NOT coverage_target_real STREQUAL coverage_entry_real)
+          file(REMOVE "${coverage_destination}")
+        else()
+          continue()
+        endif()
+      elseif(EXISTS "${coverage_destination}")
+        continue()
+      endif()
+
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E create_symlink "${coverage_entry}" "${coverage_destination}"
+        COMMAND_ERROR_IS_FATAL ANY
+      )
+    endforeach()
+  endforeach()
+endfunction()
+
+function(coverage_reset_gcov_data)
+  file(GLOB_RECURSE coverage_gcda_files LIST_DIRECTORIES false "${COVERAGE_SCRIPT_ROOT}/*.gcda")
+  if(coverage_gcda_files)
+    file(REMOVE ${coverage_gcda_files})
+  endif()
+
+  file(GLOB_RECURSE coverage_gcov_files LIST_DIRECTORIES false "${COVERAGE_SCRIPT_ROOT}/*.gcov")
+  if(coverage_gcov_files)
+    file(REMOVE ${coverage_gcov_files})
+  endif()
+endfunction()
+
+function(coverage_capture_gcovr_trace output_file)
+  coverage_prepare_gcovr_workspace()
+  execute_process(
+    COMMAND ${GCOVR_COLLECT_COMMAND} --json "${output_file}"
+    WORKING_DIRECTORY ${COVERAGE_SCRIPT_ROOT}
+    COMMAND_ERROR_IS_FATAL ANY
+  )
+endfunction()
+
+function(coverage_write_gcovr_report output_file)
+  set(coverage_tracefiles ${ARGN})
+  set(coverage_command ${GCOVR_REPORT_COMMAND})
+  foreach(coverage_tracefile IN LISTS coverage_tracefiles)
+    list(APPEND coverage_command --add-tracefile "${coverage_tracefile}")
+  endforeach()
+
+  get_filename_component(coverage_output_dir "${output_file}" DIRECTORY)
+  file(MAKE_DIRECTORY "${coverage_output_dir}")
+
+  execute_process(
+    COMMAND ${coverage_command} --html-details "${output_file}"
+    WORKING_DIRECTORY ${COVERAGE_SCRIPT_ROOT}
+    COMMAND_ERROR_IS_FATAL ANY
+  )
+endfunction()
+
+function(coverage_write_gcovr_summary output_file)
+  set(coverage_tracefiles ${ARGN})
+  set(coverage_command ${GCOVR_REPORT_COMMAND})
+  foreach(coverage_tracefile IN LISTS coverage_tracefiles)
+    list(APPEND coverage_command --add-tracefile "${coverage_tracefile}")
+  endforeach()
+
+  execute_process(
+    COMMAND ${coverage_command} --txt-summary
+    WORKING_DIRECTORY ${COVERAGE_SCRIPT_ROOT}
+    COMMAND_ERROR_IS_FATAL ANY
+    OUTPUT_VARIABLE coverage_summary
+  )
+  file(WRITE "${output_file}" "${coverage_summary}")
+endfunction()
+
+find_program(LCOV_EXECUTABLE lcov)
+find_program(GENHTML_EXECUTABLE genhtml)
+
+if(LCOV_EXECUTABLE AND GENHTML_EXECUTABLE)
+  set(COVERAGE_BACKEND "lcov")
+
+  separate_arguments(LCOV_OPTS)
+  set(LCOV_COMMAND ${LCOV_EXECUTABLE} --gcov-tool ${COVERAGE_SCRIPT_ROOT}/cov_tool_wrapper.sh ${LCOV_OPTS})
+  set(GENHTML_COMMAND ${GENHTML_EXECUTABLE} --show-details ${LCOV_OPTS})
+
+  find_program(GREP_EXECUTABLE grep REQUIRED)
+  find_program(AWK_EXECUTABLE awk REQUIRED)
+
+  set(LCOV_FILTER_COMMAND ./filter-lcov.py)
+  list(APPEND LCOV_FILTER_COMMAND -p "/usr/local/")
+  list(APPEND LCOV_FILTER_COMMAND -p "/usr/include/")
+  list(APPEND LCOV_FILTER_COMMAND -p "/usr/lib/")
+  list(APPEND LCOV_FILTER_COMMAND -p "/usr/lib64/")
+  list(APPEND LCOV_FILTER_COMMAND -p "src/leveldb/")
+  list(APPEND LCOV_FILTER_COMMAND -p "src/crc32c/")
+  list(APPEND LCOV_FILTER_COMMAND -p "src/bench/")
+  list(APPEND LCOV_FILTER_COMMAND -p "src/crypto/ctaes")
+  list(APPEND LCOV_FILTER_COMMAND -p "src/minisketch")
+  list(APPEND LCOV_FILTER_COMMAND -p "src/secp256k1")
+  list(APPEND LCOV_FILTER_COMMAND -p "depends")
+
+  execute_process(
+    COMMAND ${LCOV_COMMAND} --capture --initial --directory src --output-file baseline.info
+    WORKING_DIRECTORY ${COVERAGE_SCRIPT_ROOT}
+    COMMAND_ERROR_IS_FATAL ANY
+  )
+  execute_process(
+    COMMAND ${LCOV_FILTER_COMMAND} baseline.info baseline_filtered.info
+    WORKING_DIRECTORY ${COVERAGE_SCRIPT_ROOT}
+    COMMAND_ERROR_IS_FATAL ANY
+  )
+  execute_process(
+    COMMAND ${LCOV_COMMAND} --add-tracefile baseline_filtered.info --output-file baseline_filtered.info
+    WORKING_DIRECTORY ${COVERAGE_SCRIPT_ROOT}
+    COMMAND_ERROR_IS_FATAL ANY
+  )
+else()
+  set(COVERAGE_BACKEND "gcovr")
+
+  if(NOT DEFINED GCOVR_EXECUTABLE AND DEFINED ENV{GCOVR_EXECUTABLE})
+    set(GCOVR_EXECUTABLE "$ENV{GCOVR_EXECUTABLE}")
+  endif()
+  if(DEFINED GCOVR_EXECUTABLE)
+    if(IS_ABSOLUTE "${GCOVR_EXECUTABLE}")
+      if(NOT EXISTS "${GCOVR_EXECUTABLE}")
+        message(FATAL_ERROR "GCOVR_EXECUTABLE points to a missing file: ${GCOVR_EXECUTABLE}")
+      endif()
+    else()
+      find_program(GCOVR_EXECUTABLE "${GCOVR_EXECUTABLE}" REQUIRED)
+    endif()
+  else()
+    find_program(GCOVR_EXECUTABLE gcovr REQUIRED)
+  endif()
+
+  separate_arguments(GCOVR_OPTS)
+  set(GCOVR_COLLECT_COMMAND
+    ${GCOVR_EXECUTABLE}
+    --root "${COVERAGE_SOURCE_ROOT}"
+    --object-directory "${COVERAGE_SCRIPT_ROOT}"
+    --gcov-executable "${COVERAGE_SCRIPT_ROOT}/cov_tool_wrapper.sh"
+    --gcov-ignore-errors source_not_found
+    --gcov-ignore-errors output_error
+    --gcov-ignore-errors no_working_dir_found
+    --exclude-directories "${COVERAGE_SCRIPT_ROOT}/src/crc32c"
+    --exclude-directories "${COVERAGE_SCRIPT_ROOT}/src/leveldb"
+    --exclude-directories "${COVERAGE_SCRIPT_ROOT}/src/secp256k1"
+    --exclude "^bench/.*"
+    --exclude "^crc32c/.*"
+    --exclude "^crypto/ctaes/.*"
+    --exclude "^leveldb/.*"
+    --exclude "^minisketch/.*"
+    --exclude "^secp256k1/.*"
+    ${GCOVR_OPTS}
+  )
+  set(GCOVR_REPORT_COMMAND
+    ${GCOVR_EXECUTABLE}
+    --root "${COVERAGE_SOURCE_ROOT}"
+    ${GCOVR_OPTS}
+  )
+
+  coverage_prepare_gcovr_workspace()
+endif()

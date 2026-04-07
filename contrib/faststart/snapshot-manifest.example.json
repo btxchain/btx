@@ -1,0 +1,23 @@
+{
+  "main": {
+    "url": "https://example.com/btx/snapshots/main-snapshot.dat",
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "filename": "mainnet-utxo-55000.dat",
+    "height": 55000,
+    "blockhash": "db5e6530e55606be66aa78fe3f711e9dc4406ee4b26dde2ed819103c37d97d63"
+  },
+  "testnet4": {
+    "url": "https://example.com/btx/snapshots/testnet4-snapshot.dat",
+    "sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    "filename": "testnet4-snapshot.dat",
+    "height": 61000,
+    "blockhash": "f2bc3fb2eca6aa6059c4d0178b56efe038d46aa440d406905ef752179aa0e1a4"
+  },
+  "signet": {
+    "url": "https://example.com/btx/snapshots/signet-snapshot.dat",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "filename": "signet-snapshot.dat",
+    "height": 61000,
+    "blockhash": "f2bc3fb2eca6aa6059c4d0178b56efe038d46aa440d406905ef752179aa0e1a4"
+  }
+}

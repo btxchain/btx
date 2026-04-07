@@ -1,0 +1,176 @@
+/fuzz/run_all_fuzzers.sh                                                                                                                             9.1s  Fri Apr 25 10:46:23 2025
+Running all fuzz targets in parallel: keypair_generation sign_verify cross_algorithm key_parsing signature_parsing
+--- Starting fuzzer: cross_algorithm ---
+--- Starting fuzzer: keypair_generation ---
+--- Starting fuzzer: sign_verify ---
+--- Starting fuzzer: key_parsing ---
+--- Starting fuzzer: signature_parsing ---
+     Running `fuzz/target/x86_64-unknown-linux-gnu/release/cross_algorithm -artifact_prefix=/home/hunter/Projects/pqc/libbitcoinpqc/fuzz/artifacts/cross_algorithm/ /home/hunter/Projects/pqc/libbitcoinpqc/fuzz/corpus/cross_algorithm`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 2416094420
+INFO: Loaded 1 modules   (21002 inline 8-bit counters): 21002 [0x5c4378f253f0, 0x5c4378f2a5fa),
+INFO: Loaded 1 PC tables (21002 PCs): 21002 [0x5c4378f2a600,0x5c4378f7c6a0),
+INFO:        0 files found in /home/hunter/Projects/pqc/libbitcoinpqc/fuzz/corpus/cross_algorithm
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED cov: 19 ft: 20 corp: 1/1b exec/s: 0 rss: 48Mb
+    Finished `release` profile [optimized + debuginfo] target(s) in 2.69s
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.18s
+     Running `fuzz/target/x86_64-unknown-linux-gnu/release/keypair_generation -artifact_prefix=/home/hunter/Projects/pqc/libbitcoinpqc/fuzz/artifacts/keypair_generation/ /home/hunter/Projects/pqc/libbitcoinpqc/fuzz/corpus/keypair_generation`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 2420079927
+INFO: Loaded 1 modules   (20737 inline 8-bit counters): 20737 [0x604bb8a91270, 0x604bb8a96371),
+INFO: Loaded 1 PC tables (20737 PCs): 20737 [0x604bb8a96378,0x604bb8ae7388),
+INFO:        4 files found in /home/hunter/Projects/pqc/libbitcoinpqc/fuzz/corpus/keypair_generation
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 4 min: 129b max: 129b total: 516b rss: 47Mb
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.19s
+     Running `fuzz/target/x86_64-unknown-linux-gnu/release/sign_verify -artifact_prefix=/home/hunter/Projects/pqc/libbitcoinpqc/fuzz/artifacts/sign_verify/ /home/hunter/Projects/pqc/libbitcoinpqc/fuzz/corpus/sign_verify`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 2427464392
+INFO: Loaded 1 modules   (20974 inline 8-bit counters): 20974 [0x63f5c0000430, 0x63f5c000561e),
+INFO: Loaded 1 PC tables (20974 PCs): 20974 [0x63f5c0005620,0x63f5c0057500),
+INFO:        0 files found in /home/hunter/Projects/pqc/libbitcoinpqc/fuzz/corpus/sign_verify
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED cov: 19 ft: 20 corp: 1/1b exec/s: 0 rss: 45Mb
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.56s
+     Running `fuzz/target/x86_64-unknown-linux-gnu/release/key_parsing -artifact_prefix=/home/hunter/Projects/pqc/libbitcoinpqc/fuzz/artifacts/key_parsing/ /home/hunter/Projects/pqc/libbitcoinpqc/fuzz/corpus/key_parsing`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 2432138094
+INFO: Loaded 1 modules   (20738 inline 8-bit counters): 20738 [0x645adaae9270, 0x645adaaee372),
+INFO: Loaded 1 PC tables (20738 PCs): 20738 [0x645adaaee378,0x645adab3f398),
+INFO:        0 files found in /home/hunter/Projects/pqc/libbitcoinpqc/fuzz/corpus/key_parsing
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED cov: 37 ft: 38 corp: 1/1b exec/s: 0 rss: 45Mb
+#4	NEW    cov: 39 ft: 40 corp: 2/2b lim: 4 exec/s: 0 rss: 45Mb L: 1/1 MS: 2 ShuffleBytes-ChangeByte-
+#15	NEW    cov: 41 ft: 42 corp: 3/4b lim: 4 exec/s: 0 rss: 45Mb L: 2/2 MS: 1 InsertByte-
+#21	NEW    cov: 43 ft: 44 corp: 4/6b lim: 4 exec/s: 0 rss: 45Mb L: 2/2 MS: 1 ChangeBinInt-
+#138	REDUCE cov: 43 ft: 44 corp: 4/5b lim: 4 exec/s: 0 rss: 47Mb L: 1/2 MS: 2 ShuffleBytes-EraseBytes-
+#375	REDUCE cov: 43 ft: 44 corp: 4/4b lim: 6 exec/s: 0 rss: 47Mb L: 1/1 MS: 2 ShuffleBytes-EraseBytes-
+#680	REDUCE cov: 44 ft: 45 corp: 5/12b lim: 8 exec/s: 0 rss: 47Mb L: 8/8 MS: 5 InsertRepeatedBytes-EraseBytes-InsertByte-ChangeByte-CrossOver-
+#3550	REDUCE cov: 50 ft: 51 corp: 6/45b lim: 33 exec/s: 0 rss: 48Mb L: 33/33 MS: 5 CopyPart-ChangeByte-CopyPart-InsertRepeatedBytes-CrossOver-
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+     Running `fuzz/target/x86_64-unknown-linux-gnu/release/signature_parsing -artifact_prefix=/home/hunter/Projects/pqc/libbitcoinpqc/fuzz/artifacts/signature_parsing/ /home/hunter/Projects/pqc/libbitcoinpqc/fuzz/corpus/signature_parsing`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 2512484958
+INFO: Loaded 1 modules   (20712 inline 8-bit counters): 20712 [0x563d379d6270, 0x563d379db358),
+INFO: Loaded 1 PC tables (20712 PCs): 20712 [0x563d379db358,0x563d37a2c1d8),
+INFO:        0 files found in /home/hunter/Projects/pqc/libbitcoinpqc/fuzz/corpus/signature_parsing
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED cov: 28 ft: 29 corp: 1/1b exec/s: 0 rss: 45Mb
+#6	NEW    cov: 29 ft: 30 corp: 2/3b lim: 4 exec/s: 0 rss: 45Mb L: 2/2 MS: 4 ShuffleBytes-CopyPart-ShuffleBytes-ChangeByte-
+#20	NEW    cov: 30 ft: 31 corp: 3/7b lim: 4 exec/s: 0 rss: 47Mb L: 4/4 MS: 4 CrossOver-CopyPart-CMP-ChangeBinInt- DE: "\377\377"-
+#31	NEW    cov: 31 ft: 32 corp: 4/9b lim: 4 exec/s: 0 rss: 47Mb L: 2/4 MS: 1 InsertByte-
+#123	REDUCE cov: 31 ft: 32 corp: 4/8b lim: 4 exec/s: 0 rss: 47Mb L: 1/4 MS: 2 ChangeBinInt-EraseBytes-
+#180	REDUCE cov: 31 ft: 32 corp: 4/7b lim: 4 exec/s: 0 rss: 47Mb L: 3/3 MS: 2 ShuffleBytes-EraseBytes-
+#191	REDUCE cov: 31 ft: 32 corp: 4/6b lim: 4 exec/s: 0 rss: 47Mb L: 1/3 MS: 1 EraseBytes-
+#200	REDUCE cov: 31 ft: 32 corp: 4/5b lim: 4 exec/s: 0 rss: 47Mb L: 2/2 MS: 4 CrossOver-CopyPart-ChangeBit-EraseBytes-
+#379	REDUCE cov: 31 ft: 32 corp: 4/4b lim: 4 exec/s: 0 rss: 47Mb L: 1/1 MS: 4 CMP-ShuffleBytes-ChangeBit-EraseBytes- DE: "\001\000"-
+#830	REDUCE cov: 32 ft: 33 corp: 5/12b lim: 8 exec/s: 0 rss: 48Mb L: 8/8 MS: 1 InsertRepeatedBytes-
+#6967	REDUCE cov: 37 ft: 38 corp: 6/77b lim: 68 exec/s: 0 rss: 48Mb L: 65/65 MS: 2 CopyPart-InsertRepeatedBytes-
+#5	INITED cov: 41 ft: 42 corp: 4/516b exec/s: 0 rss: 52Mb
+#21	NEW    cov: 42 ft: 44 corp: 5/615b lim: 129 exec/s: 0 rss: 52Mb L: 99/129 MS: 1 EraseBytes-
+	NEW_FUNC[1/4]: 0x5c4378b045e0 in core::ptr::drop_in_place$LT$bitcoinpqc..SecretKey$GT$::h6059cf8040e36a38 /home/hunter/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:524
+#47	REDUCE cov: 42 ft: 44 corp: 5/605b lim: 129 exec/s: 0 rss: 52Mb L: 89/129 MS: 1 EraseBytes-
+#52	REDUCE cov: 42 ft: 44 corp: 5/585b lim: 129 exec/s: 0 rss: 52Mb L: 69/129 MS: 5 InsertByte-ShuffleBytes-CrossOver-ChangeBinInt-EraseBytes-
+	NEW_FUNC[1/1]: 0x645ada745ee0 in _$LT$bitcoinpqc..SecretKey$u20$as$u20$core..ops..drop..Drop$GT$::drop::hfd0245cc145361e9 /home/hunter/Projects/pqc/libbitcoinpqc/src/lib.rs:274
+#3691	NEW    cov: 58 ft: 59 corp: 7/78b lim: 33 exec/s: 0 rss: 48Mb L: 33/33 MS: 1 CrossOver-
+#3744	NEW    cov: 60 ft: 61 corp: 8/111b lim: 33 exec/s: 0 rss: 48Mb L: 33/33 MS: 3 ShuffleBytes-ChangeBinInt-ChangeByte-
+#7342	NEW    cov: 63 ft: 64 corp: 9/176b lim: 68 exec/s: 0 rss: 48Mb L: 65/65 MS: 3 CMP-CrossOver-InsertByte- DE: "\001\000"-
+	NEW_FUNC[2/4]: 0x5c4378b80ee0 in _$LT$bitcoinpqc..SecretKey$u20$as$u20$core..ops..drop..Drop$GT$::drop::hfd0245cc145361e9 /home/hunter/Projects/pqc/libbitcoinpqc/src/lib.rs:274
+#16437	NEW    cov: 55 ft: 57 corp: 2/158b lim: 163 exec/s: 0 rss: 50Mb L: 157/157 MS: 5 CopyPart-CopyPart-InsertRepeatedBytes-InsertRepeatedBytes-CMP- DE: "\377\377\377\377\377\377\377z"-
+	NEW_FUNC[1/2]: 0x5c4378b07bb0 in _$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$core..clone..Clone$GT$::clone::hc345d965bd3841bb /home/hunter/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3318
+	NEW_FUNC[2/2]: 0x5c4378b848d0 in bitcoinpqc::verify::h33067318d4f4719c /home/hunter/Projects/pqc/libbitcoinpqc/src/lib.rs:561
+#16438	NEW    cov: 92 ft: 99 corp: 3/315b lim: 163 exec/s: 0 rss: 52Mb L: 157/157 MS: 1 ChangeASCIIInt-
+#29236	NEW    cov: 64 ft: 65 corp: 10/209b lim: 285 exec/s: 0 rss: 50Mb L: 33/65 MS: 4 ShuffleBytes-ChangeBit-InsertRepeatedBytes-CrossOver-
+#16486	REDUCE cov: 92 ft: 99 corp: 3/311b lim: 163 exec/s: 0 rss: 56Mb L: 153/157 MS: 3 CopyPart-EraseBytes-PersAutoDict- DE: "\377\377\377\377\377\377\377z"-
+#16574	REDUCE cov: 92 ft: 99 corp: 3/308b lim: 163 exec/s: 16574 rss: 60Mb L: 150/157 MS: 3 InsertByte-EraseBytes-InsertRepeatedBytes-
+#90	REDUCE cov: 42 ft: 44 corp: 5/583b lim: 129 exec/s: 90 rss: 52Mb L: 67/129 MS: 3 CMP-ChangeBinInt-EraseBytes- DE: "\377\377\377\377"-
+#92	REDUCE cov: 42 ft: 44 corp: 5/540b lim: 129 exec/s: 92 rss: 52Mb L: 24/129 MS: 2 CMP-CrossOver- DE: "\377\377\377\377\377\377\377\377"-
+#123	REDUCE cov: 42 ft: 44 corp: 5/537b lim: 129 exec/s: 123 rss: 52Mb L: 21/129 MS: 1 EraseBytes-
+#125	REDUCE cov: 42 ft: 44 corp: 5/528b lim: 129 exec/s: 125 rss: 52Mb L: 12/129 MS: 2 CMP-EraseBytes- DE: "\000\000\000\000\000\000\000f"-
+#146	REDUCE cov: 42 ft: 44 corp: 5/522b lim: 129 exec/s: 146 rss: 52Mb L: 6/129 MS: 1 EraseBytes-
+	NEW_FUNC[1/6]: 0x63f5bfbe05e0 in core::ptr::drop_in_place$LT$bitcoinpqc..SecretKey$GT$::hbe70475d19333e6a /home/hunter/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:524
+	NEW_FUNC[2/6]: 0x63f5bfbe3bb0 in _$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$core..clone..Clone$GT$::clone::hfa906a19917719ff /home/hunter/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3318
+#15631	NEW    cov: 71 ft: 73 corp: 2/157b lim: 156 exec/s: 15631 rss: 49Mb L: 156/156 MS: 4 ChangeByte-InsertRepeatedBytes-InsertRepeatedBytes-CopyPart-
+#163	REDUCE cov: 42 ft: 44 corp: 5/520b lim: 129 exec/s: 81 rss: 52Mb L: 4/129 MS: 2 ShuffleBytes-EraseBytes-
+#1048576	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 524288 rss: 163Mb
+#256	pulse  cov: 42 ft: 44 corp: 5/520b lim: 129 exec/s: 85 rss: 53Mb
+#264	REDUCE cov: 42 ft: 44 corp: 5/518b lim: 129 exec/s: 88 rss: 53Mb L: 2/129 MS: 1 EraseBytes-
+#265	REDUCE cov: 42 ft: 44 corp: 5/517b lim: 129 exec/s: 88 rss: 53Mb L: 1/129 MS: 1 EraseBytes-
+#2097152	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 699050 rss: 245Mb
+#2097152	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 419430 rss: 277Mb
+#4194304	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 599186 rss: 444Mb
+#512	pulse  cov: 42 ft: 44 corp: 5/517b lim: 129 exec/s: 73 rss: 53Mb
+#4194304	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 466033 rss: 510Mb
+#1024	pulse  cov: 42 ft: 44 corp: 5/517b lim: 136 exec/s: 93 rss: 56Mb
+#8388608	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 559240 rss: 560Mb
+#15674	REDUCE cov: 71 ft: 73 corp: 2/153b lim: 156 exec/s: 979 rss: 52Mb L: 152/152 MS: 3 ChangeBit-ChangeBinInt-EraseBytes-
+#8388608	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 441505 rss: 524Mb
+#2048	pulse  cov: 42 ft: 44 corp: 5/517b lim: 143 exec/s: 81 rss: 60Mb
+#16777216	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 559240 rss: 561Mb
+#16777216	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 453438 rss: 524Mb
+#15781	REDUCE cov: 75 ft: 77 corp: 3/305b lim: 156 exec/s: 292 rss: 53Mb L: 152/152 MS: 2 CopyPart-CMP- DE: "\261\036\000\000\000\000\000\000"-
+#32768	pulse  cov: 92 ft: 99 corp: 3/308b lim: 317 exec/s: 595 rss: 367Mb
+#4096	pulse  cov: 42 ft: 44 corp: 5/517b lim: 164 exec/s: 71 rss: 72Mb
+#33554432	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 559240 rss: 561Mb
+^[[2~#33554432	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 453438 rss: 524Mb
+#15893	REDUCE cov: 75 ft: 77 corp: 3/303b lim: 156 exec/s: 209 rss: 55Mb L: 150/152 MS: 2 CrossOver-InsertRepeatedBytes-
+#16096	REDUCE cov: 75 ft: 77 corp: 3/302b lim: 156 exec/s: 149 rss: 59Mb L: 151/151 MS: 3 CopyPart-ChangeByte-CrossOver-
+#67108864	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 559240 rss: 561Mb
+#8192	pulse  cov: 42 ft: 44 corp: 5/517b lim: 206 exec/s: 60 rss: 95Mb
+#67108864	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 453438 rss: 525Mb
+#65536	pulse  cov: 92 ft: 99 corp: 3/308b lim: 643 exec/s: 383 rss: 368Mb
+#16316	REDUCE cov: 75 ft: 77 corp: 3/301b lim: 156 exec/s: 91 rss: 67Mb L: 150/150 MS: 5 CrossOver-ChangeByte-ChangeBinInt-EraseBytes-CopyPart-
+#16384	pulse  cov: 75 ft: 77 corp: 3/301b lim: 156 exec/s: 84 rss: 69Mb
+#134217728	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 559240 rss: 561Mb
+#16384	pulse  cov: 42 ft: 44 corp: 5/517b lim: 286 exec/s: 57 rss: 141Mb
+#16817	REDUCE cov: 79 ft: 81 corp: 4/451b lim: 156 exec/s: 57 rss: 86Mb L: 150/150 MS: 1 ChangeByte-
+#134217728	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 451911 rss: 525Mb
+#131072	pulse  cov: 92 ft: 99 corp: 3/308b lim: 1300 exec/s: 325 rss: 368Mb
+#17749	NEW    cov: 82 ft: 85 corp: 5/602b lim: 163 exec/s: 39 rss: 112Mb L: 151/151 MS: 2 ChangeBit-InsertByte-
+#268435456	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 556920 rss: 561Mb
+#18271	REDUCE cov: 82 ft: 85 corp: 5/601b lim: 163 exec/s: 36 rss: 124Mb L: 150/150 MS: 2 CrossOver-EraseBytes-
+#32768	pulse  cov: 42 ft: 44 corp: 5/517b lim: 446 exec/s: 56 rss: 241Mb
+#268435456	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 451152 rss: 526Mb
+#262144	pulse  cov: 92 ft: 99 corp: 3/308b lim: 2600 exec/s: 302 rss: 368Mb
+#536870912	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 556342 rss: 561Mb
+#536870912	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 451911 rss: 527Mb
+#65536	pulse  cov: 42 ft: 44 corp: 5/517b lim: 770 exec/s: 54 rss: 377Mb
+#524288	pulse  cov: 92 ft: 99 corp: 3/308b lim: 4096 exec/s: 291 rss: 369Mb
+#1073741824	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 556631 rss: 561Mb
+#1073741824	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 451531 rss: 527Mb
+#131072	pulse  cov: 42 ft: 44 corp: 5/517b lim: 1421 exec/s: 52 rss: 379Mb
+#32768	pulse  cov: 82 ft: 85 corp: 5/601b lim: 301 exec/s: 13 rss: 370Mb
+#1048576	pulse  cov: 92 ft: 99 corp: 3/308b lim: 4096 exec/s: 283 rss: 369Mb
+#2147483648	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 554189 rss: 563Mb
+#2147483648	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 447485 rss: 528Mb
+#262144	pulse  cov: 42 ft: 44 corp: 5/517b lim: 2733 exec/s: 50 rss: 379Mb
+#65536	pulse  cov: 82 ft: 85 corp: 5/601b lim: 625 exec/s: 8 rss: 373Mb
+#2097152	pulse  cov: 92 ft: 99 corp: 3/308b lim: 4096 exec/s: 275 rss: 370Mb
+#4294967296	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 542156 rss: 563Mb
+#4294967296	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 436746 rss: 528Mb
+#524288	pulse  cov: 42 ft: 44 corp: 5/517b lim: 4096 exec/s: 49 rss: 380Mb
+#4194304	pulse  cov: 92 ft: 99 corp: 3/308b lim: 4096 exec/s: 263 rss: 397Mb
+#8589934592	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 513260 rss: 563Mb
+#131072	pulse  cov: 82 ft: 85 corp: 5/601b lim: 1280 exec/s: 7 rss: 397Mb
+#8589934592	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 419922 rss: 531Mb
+#1048576	pulse  cov: 42 ft: 44 corp: 5/517b lim: 4096 exec/s: 48 rss: 382Mb
+#8388608	pulse  cov: 92 ft: 99 corp: 3/308b lim: 4096 exec/s: 263 rss: 397Mb
+#17179869184	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 530439 rss: 563Mb
+#262144	pulse  cov: 82 ft: 85 corp: 5/601b lim: 2589 exec/s: 7 rss: 397Mb
+#17179869184	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 422182 rss: 531Mb
+#2097152	pulse  cov: 42 ft: 44 corp: 5/517b lim: 4096 exec/s: 47 rss: 382Mb
+#16777216	pulse  cov: 92 ft: 99 corp: 3/308b lim: 4096 exec/s: 250 rss: 397Mb
+#34359738368	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 492323 rss: 563Mb
+#524288	pulse  cov: 82 ft: 85 corp: 5/601b lim: 4096 exec/s: 6 rss: 397Mb
+#34359738368	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 405913 rss: 531Mb
+#4194304	pulse  cov: 42 ft: 44 corp: 5/517b lim: 4096 exec/s: 47 rss: 382Mb
+#33554432	pulse  cov: 92 ft: 99 corp: 3/308b lim: 4096 exec/s: 255 rss: 397Mb
+#68719476736	pulse  cov: 37 ft: 38 corp: 6/77b lim: 4096 exec/s: 514814 rss: 563Mb
+#1048576	pulse  cov: 82 ft: 85 corp: 5/601b lim: 4096 exec/s: 6 rss: 397Mb
+#68719476736	pulse  cov: 64 ft: 65 corp: 10/209b lim: 4096 exec/s: 421643 rss: 531Mb
+#8388608	pulse  cov: 42 ft: 44 corp: 5/517b lim: 4096 exec/s: 48 rss: 382Mb

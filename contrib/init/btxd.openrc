@@ -1,0 +1,116 @@
+#!/sbin/openrc-run
+
+# backward compatibility for existing layout
+#
+if [ -d "/var/lib/btx/.btx" ]; then
+	BTXD_DEFAULT_DATADIR="/var/lib/btx/.btx"
+else
+	BTXD_DEFAULT_DATADIR="/var/lib/btxd"
+fi
+
+BTXD_CONFIGFILE=${BTXD_CONFIGFILE:-/etc/btx/btx.conf}
+BTXD_PIDDIR=${BTXD_PIDDIR:-/run/btxd}
+BTXD_PIDFILE=${BTXD_PIDFILE:-${BTXD_PIDDIR}/${SVCNAME}.pid}
+BTXD_DATADIR=${BTXD_DATADIR:-${BTXD_DEFAULT_DATADIR}}
+BTXD_LOGDIR=${BTXD_LOGDIR:-/var/log/btxd}
+BTXD_USER=${BTXD_USER:-btx}
+BTXD_GROUP=${BTXD_GROUP:-btx}
+BTXD_BIN=${BTXD_BIN:-/usr/bin/btxd}
+BTXD_NICE=${BTXD_NICE:-${NICELEVEL:-0}}
+BTXD_OPTS="${BTXD_OPTS:-}"
+
+name="BTX daemon"
+description="BTX post-quantum blockchain P2P network daemon"
+
+required_files="${BTXD_CONFIGFILE}"
+pidfile="${BTXD_PIDFILE}"
+in_background_fake="start"
+
+depend() {
+	need localmount net
+}
+
+# verify
+# 1) that the datadir exists and is writable (or create it)
+# 2) that a directory for the pid exists and is writable
+# 3) ownership and permissions on the config file
+start_pre() {
+	checkpath \
+	-d \
+	--mode 0750 \
+	--owner "${BTXD_USER}:${BTXD_GROUP}" \
+	"${BTXD_DATADIR}"
+
+	checkpath \
+	-d \
+	--mode 0755 \
+	--owner "${BTXD_USER}:${BTXD_GROUP}" \
+	"${BTXD_PIDDIR}"
+
+	checkpath -f \
+	-o "${BTXD_USER}:${BTXD_GROUP}" \
+	-m 0660 \
+	"${BTXD_CONFIGFILE}"
+
+	checkpath -d --mode 0755 --owner "${BTXD_USER}:${BTXD_GROUP}" "${BTXD_LOGDIR}"
+
+	checkconfig || return 1
+}
+
+start() {
+	ebegin "Starting ${name} in background"
+	mark_service_inactive
+	if start-stop-daemon \
+		--pidfile="${BTXD_PIDFILE}" \
+		--chdir="${BTXD_DATADIR}" \
+		--user="${BTXD_USER}:${BTXD_GROUP}" \
+		--nice="${BTXD_NICE}" \
+		--exec="${BTXD_BIN}" \
+		-- \
+		-pid="${BTXD_PIDFILE}" \
+		-conf="${BTXD_CONFIGFILE}" \
+		-datadir="${BTXD_DATADIR}" \
+		-daemonwait \
+		-debuglogfile="${BTXD_LOGDIR}/debug.log" \
+		-rpccookieperms=group \
+		${BTXD_OPTS}
+	then
+		IN_BACKGROUND=yes rc-service "${SVCNAME}" --quiet start
+	else
+		rc-service "${SVCNAME}" --quiet zap
+	fi &
+}
+
+stop() {
+	ebegin "Stopping ${name}"
+	start-stop-daemon --stop \
+		--pidfile="${BTXD_PIDFILE}" \
+		--retry="${BTXD_SIGTERM_TIMEOUT}" \
+		--exec="${BTXD_BIN}"
+	eend $?
+}
+
+checkconfig()
+{
+	if grep -qs '^rpcuser=' "${BTXD_CONFIGFILE}" && \
+		! grep -qs '^rpcpassword=' "${BTXD_CONFIGFILE}" ; then
+		eerror ""
+		eerror "ERROR: You must set a secure rpcpassword to run btxd."
+		eerror "The setting must appear in ${BTXD_CONFIGFILE}"
+		eerror ""
+		eerror "This password is security critical to securing wallets "
+		eerror "and must not be the same as the rpcuser setting."
+		eerror "You can generate a suitable random password using the following "
+		eerror "command from the shell:"
+		eerror ""
+		eerror "bash -c 'tr -dc a-zA-Z0-9 < /dev/urandom | head -c32 && echo'"
+		eerror ""
+		eerror "It is recommended that you also set alertnotify so you are "
+		eerror "notified of problems:"
+		eerror ""
+		eerror "ie: alertnotify=echo %%s | mail -s \"BTX Alert\"" \
+			"admin@foo.com"
+		eerror ""
+		return 1
+	fi
+}

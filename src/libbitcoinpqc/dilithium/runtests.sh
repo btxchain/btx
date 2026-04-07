@@ -1,0 +1,33 @@
+#!/bin/sh -e
+nproc="${nproc:-2}"
+
+ARCH="${ARCH:-amd64}"
+ARCH="${TRAVIS_CPU_ARCH:-$ARCH}"
+
+if [ "$ARCH" = "amd64" -a "$TRAVIS_OS_NAME" != "osx" ]; then
+  DIRS="ref avx2"
+else
+  DIRS="ref"
+fi
+
+if [ "$ARCH" = "amd64" -o "$ARCH" = "arm64" ]; then
+  export CC=/usr/bin/clang
+  export CFLAGS="-fsanitize=undefined,address ${CFLAGS}"
+fi
+
+for dir in $DIRS; do
+  make -j$(nproc) -C $dir clean
+  make -j$(nproc) -C $dir
+  for alg in 2 3 5; do
+    #valgrind --vex-guest-max-insns=25 ./$dir/test/test_dilithium$alg
+    ./$dir/test/test_dilithium$alg &
+    PID1=$!
+    echo testvec$alg
+    ./$dir/test/test_vectors$alg > tvecs$alg &
+    PID2=$!
+    wait $PID1 $PID2
+  done
+  shasum -a256 -c SHA256SUMS
+done
+
+exit 0

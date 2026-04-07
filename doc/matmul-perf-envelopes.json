@@ -1,0 +1,12 @@
+{
+  "default_profile": "apple_silicon_m1_64g_20260219",
+  "profiles": {
+    "apple_silicon_m1_64g_20260219": {
+      "description": "M1 MacBook Pro 64GB local baseline envelope captured on 2026-02-19 with ~20% headroom.",
+      "solve_mainnet_ms_max": 80.0,
+      "solve_testnet_ms_max": 58.0,
+      "metal_digest_mainnet_ms_max": 50.0,
+      "metal_digest_testnet_ms_max": 48.0
+    }
+  }
+}

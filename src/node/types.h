@@ -1,0 +1,92 @@
+// Copyright (c) 2010-2021 The Bitcoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+//! @file node/types.h is a home for public enum and struct type definitions
+//! that are used internally by node code, but also used externally by wallet,
+//! mining or GUI code.
+//!
+//! This file is intended to define only simple types that do not have external
+//! dependencies. More complicated types should be defined in dedicated header
+//! files.
+
+#ifndef BITCOIN_NODE_TYPES_H
+#define BITCOIN_NODE_TYPES_H
+
+#include <policy/feerate.h>
+#include <policy/policy.h>
+
+#include <cstddef>
+#include <script/script.h>
+#include <vector>
+
+namespace node {
+enum class TransactionError {
+    OK, //!< No error
+    MISSING_INPUTS,
+    ALREADY_IN_UTXO_SET,
+    MEMPOOL_REJECTED,
+    MEMPOOL_ERROR,
+    MAX_FEE_EXCEEDED,
+    MAX_BURN_EXCEEDED,
+    INVALID_PACKAGE,
+};
+
+static const bool DEFAULT_PRINT_MODIFIED_FEE = false;
+
+struct BlockCreateOptions {
+    /**
+     * Set false to omit mempool transactions
+     */
+    bool use_mempool{true};
+    /**
+     * The default reserved size for the fixed-size block header,
+     * transaction count and coinbase transaction.
+     */
+    size_t block_reserved_size{DEFAULT_BLOCK_RESERVED_SIZE};
+    /**
+     * The default reserved weight for the fixed-size block header,
+     * transaction count and coinbase transaction.
+     */
+    size_t block_reserved_weight{DEFAULT_BLOCK_RESERVED_WEIGHT};
+    /**
+     * The maximum additional sigops which the pool will add in coinbase
+     * transaction outputs.
+     */
+    size_t coinbase_output_max_additional_sigops{400};
+	    /**
+	     * Script to put in the coinbase transaction. The default is an
+	     * witness v2 P2MR dummy output to keep block templates valid under
+	     * P2MR-only consensus rules.
+	     *
+	     * Should only be used for tests, when the default doesn't suffice.
+     *
+     * Note that higher level code like the getblocktemplate RPC may omit the
+     * coinbase transaction entirely. It's instead constructed by pool software
+     * using fields like coinbasevalue, coinbaseaux and default_witness_commitment.
+     * This software typically also controls the payout outputs, even for solo
+     * mining.
+     *
+     * The size and sigops are not checked against
+	     * coinbase_max_additional_weight and coinbase_output_max_additional_sigops.
+	     */
+	    CScript coinbase_output_script{CScript{} << OP_2 << std::vector<unsigned char>(32, 0x01)};
+
+    // Configuration parameters for the block size
+    size_t nBlockMaxWeight{DEFAULT_BLOCK_MAX_WEIGHT};
+    size_t nBlockMaxSize{DEFAULT_BLOCK_MAX_SIZE};
+    CFeeRate blockMinFeeRate{DEFAULT_BLOCK_MIN_TX_FEE};
+    // Whether to call TestBlockValidity() at the end of CreateNewBlock().
+    bool test_block_validity{true};
+    bool print_modified_fee{DEFAULT_PRINT_MODIFIED_FEE};
+    // Allow RPC template providers to surface chain-guard status without
+    // disabling the local daemon's own mining pause.
+    bool bypass_chain_guard{false};
+
+    BlockCreateOptions Clamped() const;
+
+    friend bool operator==(const BlockCreateOptions& a, const BlockCreateOptions& b) noexcept = default;
+};
+} // namespace node
+
+#endif // BITCOIN_NODE_TYPES_H

@@ -1,0 +1,288 @@
+# Copyright (c) 2026 The BTX developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+name: BTX Release Assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Git ref to check out before cutting the release
+        required: false
+        default: main
+      tag:
+        description: Release tag to stage or publish, for example v29.2
+        required: false
+        default: ""
+      release_name:
+        description: Optional human-readable release title
+        required: false
+        default: ""
+      build_with_guix:
+        description: Run contrib/guix/guix-build on the release runner
+        required: false
+        type: boolean
+        default: false
+      guix_output_dir:
+        description: Optional path to an existing guix-build-*/output directory on the release runner
+        required: false
+        default: ""
+      attestations_dir:
+        description: Optional path to the guix.sigs release directory on the release runner
+        required: false
+        default: ""
+      snapshot:
+        description: Optional existing snapshot.dat path on the release runner
+        required: false
+        default: ""
+      snapshot_manifest:
+        description: Optional existing snapshot.manifest.json path on the release runner
+        required: false
+        default: ""
+      generate_snapshot:
+        description: Generate snapshot.dat and snapshot.manifest.json on the release runner
+        required: false
+        type: boolean
+        default: false
+      rollback:
+        description: Rollback height or blockhash used when generate_snapshot=true
+        required: false
+        default: ""
+      btx_cli:
+        description: Path to btx-cli used for snapshot generation
+        required: false
+        default: btx-cli
+      chain:
+        description: Human-readable chain label for snapshot generation
+        required: false
+        default: main
+      rpc_args:
+        description: Newline-delimited extra btx-cli RPC args for snapshot generation
+        required: false
+        default: ""
+      checksum_signature:
+        description: Optional existing SHA256SUMS.asc path on the release runner
+        required: false
+        default: ""
+      sign_with:
+        description: Optional local GPG key name used to sign SHA256SUMS
+        required: false
+        default: ""
+      gpg_passphrase_env:
+        description: Optional environment variable name used for loopback GPG signing
+        required: false
+        default: BTX_GPG_PASSPHRASE
+      body_file:
+        description: Optional release notes file path on the release runner
+        required: false
+        default: ""
+      publish:
+        description: Publish to GitHub Releases after staging and validation
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-release-automation:
+    name: validate release bundle and publisher scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Smoke test release automation
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/release/collect_release_assets.py \
+            scripts/release/publish_github_release.py \
+            scripts/release/cut_release.py \
+            scripts/release/cut_local_release.py \
+            scripts/release/package_release_archive.py \
+            contrib/faststart/btx-agent-setup.py
+          python3 scripts/release/collect_release_assets.py --help >/dev/null
+          python3 scripts/release/publish_github_release.py --help >/dev/null
+          python3 scripts/release/cut_release.py --help >/dev/null
+          python3 scripts/release/cut_local_release.py --help >/dev/null
+          python3 scripts/release/package_release_archive.py --help >/dev/null
+          python3 contrib/faststart/btx-agent-setup.py --help >/dev/null
+
+          workdir="$(mktemp -d)"
+          archive_root="${workdir}/archives"
+          bundle_dir="${workdir}/bundle"
+          attestations_root="${workdir}/guix.sigs/0.0.0-test/alice"
+          mkdir -p "${archive_root}" "${workdir}/bin"
+          mkdir -p "${attestations_root}"
+
+          printf '#!/bin/sh\nexit 0\n' > "${workdir}/bin/btxd"
+          printf '#!/bin/sh\nexit 0\n' > "${workdir}/bin/btx-cli"
+          chmod +x "${workdir}/bin/btxd" "${workdir}/bin/btx-cli"
+          printf 'snapshot payload\n' > "${workdir}/snapshot.dat"
+          printf 'dummy attestation\n' > "${attestations_root}/noncodesigned.SHA256SUMS"
+
+          for platform_id in linux-x86_64 linux-arm64 windows-x86_64 macos-x86_64 macos-arm64; do
+            python3 scripts/release/package_release_archive.py \
+              --output-dir "${archive_root}" \
+              --version 0.0.0-test \
+              --platform-id "${platform_id}" \
+              --btxd "${workdir}/bin/btxd" \
+              --btx-cli "${workdir}/bin/btx-cli" \
+              >/dev/null
+          done
+
+          python3 - "${workdir}/snapshot.dat" "${workdir}/snapshot.manifest.json" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          snapshot = Path(sys.argv[1])
+          manifest = {
+              "format_version": 1,
+              "chain": "main",
+              "height": 60776,
+              "base_block_hash": "4569a09197d96a405ca776fb5274b7de0efaa2ec4e3bafa464bc2ac2ad5c50a0",
+              "snapshot_sha256": hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+          }
+          Path(sys.argv[2]).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+          python3 scripts/release/collect_release_assets.py \
+            --output-dir "${bundle_dir}" \
+            --source "${archive_root}" \
+            --attestations-dir "${workdir}/guix.sigs/0.0.0-test" \
+            --snapshot "${workdir}/snapshot.dat" \
+            --snapshot-manifest "${workdir}/snapshot.manifest.json" \
+            --release-tag v0.0.0-test \
+            --release-name "BTX test release"
+
+          test -f "${bundle_dir}/SHA256SUMS"
+          test -f "${bundle_dir}/snapshot.dat"
+          test -f "${bundle_dir}/snapshot.manifest.json"
+          test -f "${bundle_dir}/btx-release-manifest.json"
+          grep -q 'snapshot.dat' "${bundle_dir}/SHA256SUMS"
+          grep -q 'snapshot.manifest.json' "${bundle_dir}/SHA256SUMS"
+          grep -q 'btx-release-manifest.json' "${bundle_dir}/SHA256SUMS"
+          grep -q 'guix-attestations-alice-noncodesigned.SHA256SUMS' "${bundle_dir}/SHA256SUMS"
+
+          python3 scripts/release/publish_github_release.py \
+            --repo btxchain/btx-node \
+            --tag v0.0.0-test \
+            --bundle-dir "${bundle_dir}" \
+            --dry-run
+
+          python3 contrib/faststart/btx-agent-setup.py \
+            --release-manifest "${bundle_dir}/btx-release-manifest.json" \
+            --platform linux-x86_64 \
+            --install-dir "${workdir}/install" \
+            --json >/dev/null
+
+          test -f "${workdir}/install/btx-0.0.0-test/bin/btxd"
+          test -f "${workdir}/install/btx-0.0.0-test/contrib/faststart/btx-faststart.py"
+          test -f "${workdir}/install/btx-0.0.0-test/contrib/mining/start-live-mining.sh"
+
+  cut-release-bundle:
+    name: cut release bundle
+    if: ${{ inputs.tag != '' }}
+    needs: validate-release-automation
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - btx-release
+    timeout-minutes: 360
+    env:
+      BTX_GITHUB_TOKEN: ${{ secrets.BTX_GITHUB_TOKEN }}
+      BTX_GPG_PASSPHRASE: ${{ secrets.BTX_GPG_PASSPHRASE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cut release bundle
+        run: |
+          set -euo pipefail
+          bundle_dir="${RUNNER_TEMP}/btx-release-bundle"
+          cmd=(
+            python3 scripts/release/cut_release.py
+            --repo btxchain/btx-node
+            --tag "${{ inputs.tag }}"
+            --bundle-dir "${bundle_dir}"
+          )
+
+          if [[ -n "${{ inputs.release_name }}" ]]; then
+            cmd+=(--release-name "${{ inputs.release_name }}")
+          fi
+          if [[ "${{ inputs.build_with_guix }}" == 'true' ]]; then
+            cmd+=(--build-with-guix)
+          fi
+          if [[ -n "${{ inputs.guix_output_dir }}" ]]; then
+            cmd+=(--guix-output-dir "${{ inputs.guix_output_dir }}")
+          fi
+          if [[ -n "${{ inputs.attestations_dir }}" ]]; then
+            cmd+=(--attestations-dir "${{ inputs.attestations_dir }}")
+          fi
+          if [[ "${{ inputs.generate_snapshot }}" == 'true' ]]; then
+            cmd+=(--generate-snapshot --btx-cli "${{ inputs.btx_cli }}" --chain "${{ inputs.chain }}")
+            if [[ -n "${{ inputs.rollback }}" ]]; then
+              cmd+=(--rollback "${{ inputs.rollback }}")
+            fi
+            while IFS= read -r rpc_arg; do
+              [[ -n "${rpc_arg}" ]] || continue
+              cmd+=("--rpc-arg=${rpc_arg}")
+            done <<<"${{ inputs.rpc_args }}"
+          else
+            if [[ -n "${{ inputs.snapshot }}" ]]; then
+              cmd+=(--snapshot "${{ inputs.snapshot }}")
+            fi
+            if [[ -n "${{ inputs.snapshot_manifest }}" ]]; then
+              cmd+=(--snapshot-manifest "${{ inputs.snapshot_manifest }}")
+            fi
+          fi
+          if [[ -n "${{ inputs.checksum_signature }}" ]]; then
+            cmd+=(--checksum-signature "${{ inputs.checksum_signature }}")
+          fi
+          if [[ -n "${{ inputs.sign_with }}" ]]; then
+            cmd+=(--sign-with "${{ inputs.sign_with }}")
+          fi
+          if [[ -n "${{ inputs.gpg_passphrase_env }}" ]]; then
+            cmd+=(--gpg-passphrase-env "${{ inputs.gpg_passphrase_env }}")
+          fi
+          if [[ -n "${{ inputs.body_file }}" ]]; then
+            cmd+=(--body-file "${{ inputs.body_file }}")
+          fi
+          if [[ "${{ inputs.publish }}" == 'true' ]]; then
+            cmd+=(--publish)
+          fi
+          cmd+=(--smoke-platform linux-x86_64)
+
+          printf 'Running release command:\n'
+          printf '  %q' "${cmd[@]}"
+          printf '\n'
+          "${cmd[@]}"
+
+      - name: Upload bundle artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btx-release-bundle-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/btx-release-bundle

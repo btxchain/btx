@@ -1,0 +1,33 @@
+language: c
+os: linux
+dist: bionic
+compiler:
+  - gcc
+  - clang
+arch:
+  - amd64
+  - arm64
+  - ppc64le
+  - s390x
+script: ./runtests.sh
+
+jobs:
+  include:
+    - os: osx
+      osx_image: xcode11.6
+      compiler: clang
+      env:
+        - CFLAGS="-I/usr/local/opt/openssl@1.1/include/"
+        - NISTFLAGS="-I/usr/local/opt/openssl@1.1/include/"
+        - LDFLAGS="-L/usr/local/opt/openssl@1.1/lib/"
+
+    - stage: coverage
+      os: linux
+      compiler: gcc
+      before_install:
+        - sudo apt-get update
+        - sudo apt-get install -y lcov
+        - gem install coveralls-lcov
+      script: ./runlcov.sh
+      after_success:
+        - coveralls-lcov ref/dilithium.lcov

@@ -1,0 +1,54 @@
+[package]
+name = "libbitcoinpqc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.bitcoinpqc]
+path = ".."
+
+# Renamed and repurposed from the original target
+[[bin]]
+name = "keypair_generation"
+path = "fuzz_targets/keypair_generation_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# New target for sign and verify operations
+[[bin]]
+name = "sign_verify"
+path = "fuzz_targets/sign_verify_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# New target for cross-algorithm verification
+[[bin]]
+name = "cross_algorithm"
+path = "fuzz_targets/cross_algorithm_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# New target for key parsing
+[[bin]]
+name = "key_parsing"
+path = "fuzz_targets/key_parsing_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# New target for signature parsing
+[[bin]]
+name = "signature_parsing"
+path = "fuzz_targets/signature_parsing_fuzz.rs"
+test = false
+doc = false
+bench = false

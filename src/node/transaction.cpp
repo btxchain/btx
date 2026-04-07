@@ -1,0 +1,214 @@
+// Copyright (c) 2010 Satoshi Nakamoto
+// Copyright (c) 2009-2021 The Bitcoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <consensus/validation.h>
+#include <dandelion.h>
+#include <index/txindex.h>
+#include <net.h>
+#include <net_processing.h>
+#include <netmessagemaker.h>
+#include <protocol.h>
+#include <node/blockstorage.h>
+#include <node/context.h>
+#include <node/types.h>
+#include <txmempool.h>
+#include <validation.h>
+#include <validationinterface.h>
+#include <node/transaction.h>
+#include <init.h>
+
+#include <future>
+
+namespace node {
+static TransactionError HandleATMPError(const TxValidationState& state, std::string& err_string_out)
+{
+    err_string_out = state.ToString();
+    if (state.IsInvalid()) {
+        if (state.GetResult() == TxValidationResult::TX_MISSING_INPUTS) {
+            return TransactionError::MISSING_INPUTS;
+        }
+        return TransactionError::MEMPOOL_REJECTED;
+    } else {
+        return TransactionError::MEMPOOL_ERROR;
+    }
+}
+
+TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef tx, std::string& err_string, const std::variant<CAmount, CFeeRate>& max_tx_fee, bool relay, bool wait_callback, const ignore_rejects_type& ignore_rejects)
+{
+    // BroadcastTransaction can be called by RPC or by the wallet.
+    // chainman, mempool and peerman are initialized before the RPC server and wallet are started
+    // and reset after the RPC sever and wallet are stopped.
+    if (!node.chainman || !node.mempool) {
+        err_string = "node not ready for transaction broadcast";
+        return TransactionError::MEMPOOL_ERROR;
+    }
+    if (!node.peerman || !node.connman || ShutdownRequested(node)) {
+        err_string = "node shutting down or networking unavailable";
+        return TransactionError::MEMPOOL_ERROR;
+    }
+
+    std::promise<void> promise;
+    Txid txid = tx->GetHash();
+    uint256 wtxid = tx->GetWitnessHash();
+    bool callback_set = false;
+    int active_height{0};
+
+    {
+        LOCK(cs_main);
+
+        // If the transaction is already confirmed in the chain, don't do anything
+        // and return early.
+        CCoinsViewCache &view = node.chainman->ActiveChainstate().CoinsTip();
+        for (size_t o = 0; o < tx->vout.size(); o++) {
+            const Coin& existingCoin = view.AccessCoin(COutPoint(txid, o));
+            // IsSpent doesn't mean the coin is spent, it means the output doesn't exist.
+            // So if the output does exist, then this transaction exists in the chain.
+            if (!existingCoin.IsSpent()) return TransactionError::ALREADY_IN_UTXO_SET;
+        }
+
+        if (auto mempool_tx = node.mempool->get(txid); mempool_tx) {
+            // There's already a transaction in the mempool with this txid. Don't
+            // try to submit this transaction to the mempool (since it'll be
+            // rejected as a TX_CONFLICT), but do attempt to reannounce the mempool
+            // transaction if relay=true.
+            //
+            // The mempool transaction may have the same or different witness (and
+            // wtxid) as this transaction. Use the mempool's wtxid for reannouncement.
+            wtxid = mempool_tx->GetWitnessHash();
+        } else {
+            // Transaction is not already in the mempool.
+            bool max_tx_fee_set{(std::holds_alternative<CAmount>(max_tx_fee) ? std::get<CAmount>(max_tx_fee) : std::get<CFeeRate>(max_tx_fee).GetFeePerK()) > 0};
+            if (ignore_rejects.count("absurdly-high-fee") || ignore_rejects.count("max-fee-exceeded")) {
+                max_tx_fee_set = false;
+            }
+            if (max_tx_fee_set) {
+                // First, call ATMP with test_accept and check the fee. If ATMP
+                // fails here, return error immediately.
+                const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ true, ignore_rejects);
+                if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
+                    return HandleATMPError(result.m_state, err_string);
+                } else {
+                    CAmount max_tx_fee_abs;
+                    if (std::holds_alternative<CFeeRate>(max_tx_fee)) {
+                        max_tx_fee_abs = std::get<CFeeRate>(max_tx_fee).GetFee(*Assert(result.m_vsize));
+                    } else {
+                        max_tx_fee_abs = std::get<CAmount>(max_tx_fee);
+                    }
+                    if (result.m_base_fees.value() > max_tx_fee_abs) {
+                        return TransactionError::MAX_FEE_EXCEEDED;
+                    }
+                }
+            }
+            // Try to submit the transaction to the mempool.
+            const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ false, ignore_rejects);
+            if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
+                return HandleATMPError(result.m_state, err_string);
+            }
+
+            // Transaction was accepted to the mempool.
+
+            if (wait_callback && node.validation_signals) {
+                // For transactions broadcast from outside the wallet, make sure
+                // that the wallet has been notified of the transaction before
+                // continuing.
+                //
+                // This prevents a race where a user might call sendrawtransaction
+                // with a transaction to/from their wallet, immediately call some
+                // wallet RPC, and get a stale result because callbacks have not
+                // yet been processed.
+                node.validation_signals->CallFunctionInValidationInterfaceQueue([&promise] {
+                    promise.set_value();
+                });
+                callback_set = true;
+            }
+        }
+
+        // Cache height while cs_main is held for Dandelion++ activation check.
+        active_height = node.chainman->ActiveHeight();
+    } // cs_main
+
+    if (callback_set) {
+        // Wait until Validation Interface clients have been notified of the
+        // transaction entering the mempool.
+        promise.get_future().wait();
+    }
+
+    if (relay) {
+        bool stemmed = false;
+
+        // Use Dandelion++ stem relay if available and active.
+        if (node.dandelion && node.dandelion->IsActive(active_height)) {
+            const size_t tx_size = ::GetSerializeSize(TX_WITH_WITNESS(tx));
+            auto [result, relay_dest] = node.dandelion->AcceptStemTransaction(tx, /*from_peer=*/-1, tx_size);
+            if (result == Dandelion::DandelionManager::AcceptResult::ACCEPTED && relay_dest.has_value()) {
+                bool sent_dltx = false;
+                node.connman->ForNode(relay_dest.value(), [&](CNode* pnode) {
+                    if (pnode->m_supports_dandelion) {
+                        node.connman->PushMessage(pnode, NetMsg::Make(NetMsgType::DLTX, TX_WITH_WITNESS(tx)));
+                        sent_dltx = true;
+                    }
+                    return true;
+                });
+                if (sent_dltx) {
+                    stemmed = true;
+                } else {
+                    // DLTX not sent (peer disconnected or doesn't support
+                    // Dandelion); remove from stempool and relay normally.
+                    node.dandelion->RemoveFromStemPool(txid);
+                    node.peerman->RelayTransaction(txid, wtxid);
+                }
+            } else {
+                // Dandelion couldn't stem — relay normally.
+                node.peerman->RelayTransaction(txid, wtxid);
+            }
+        } else {
+            node.peerman->RelayTransaction(txid, wtxid);
+        }
+
+        if (!stemmed) {
+            // Only add to unbroadcast set when NOT using Dandelion++ stem relay.
+            // When stemmed, the embargo mechanism handles rebroadcast; adding to
+            // the unbroadcast set would cause ReattemptInitialBroadcast to fluff
+            // the transaction to all peers, bypassing Dandelion++ privacy.
+            node.mempool->AddUnbroadcastTx(txid);
+        }
+    }
+
+    return TransactionError::OK;
+}
+
+CTransactionRef GetTransaction(const CBlockIndex* const block_index, const CTxMemPool* const mempool, const uint256& hash, uint256& hashBlock, const BlockManager& blockman)
+{
+    if (mempool && !block_index) {
+        CTransactionRef ptx = mempool->get(hash);
+        if (ptx) return ptx;
+    }
+    if (g_txindex) {
+        CTransactionRef tx;
+        uint256 block_hash;
+        if (g_txindex->FindTx(hash, block_hash, tx)) {
+            if (!block_index || block_index->GetBlockHash() == block_hash) {
+                // Don't return the transaction if the provided block hash doesn't match.
+                // The case where a transaction appears in multiple blocks (e.g. reorgs or
+                // BIP30) is handled by the block lookup below.
+                hashBlock = block_hash;
+                return tx;
+            }
+        }
+    }
+    if (block_index) {
+        CBlock block;
+        if (blockman.ReadBlock(block, *block_index)) {
+            for (const auto& tx : block.vtx) {
+                if (tx->GetHash() == hash) {
+                    hashBlock = block_index->GetBlockHash();
+                    return tx;
+                }
+            }
+        }
+    }
+    return nullptr;
+}
+} // namespace node

@@ -1,0 +1,15 @@
+commons:
+  - name: common_ref
+    folder_name: ref
+    sources: fips202.c fips202.h
+  - name: common_avx2
+    folder_name: avx2
+    sources: f1600x4.S fips202.c fips202.h fips202x4.c fips202x4.h
+    supported_platforms:
+      - architecture: x86_64
+        operating_systems:
+          - Darwin
+          - Linux
+        required_flags:
+          - avx2
+          - popcnt

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Bitcoin Knots Security Policy
+    url: https://bitcoinknots.org/contact/
+    about: View security policy
+  - name: Bitcoin Knots Website
+    url: https://bitcoinknots.org
+    about: User-oriented information

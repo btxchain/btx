@@ -1,0 +1,50 @@
+#!/bin/sh
+
+# Copyright (c) 2024-present The Bitcoin Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://opensource.org/license/mit/.
+
+"@COV_TOOL@" "$@"
+status=$?
+
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$PWD" "@COVERAGE_SOURCE_ROOT@" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+cwd = Path(sys.argv[1])
+source_root = Path(sys.argv[2])
+
+for gcov_path in cwd.glob("*.gcov"):
+    try:
+        lines = gcov_path.read_text(errors="ignore").splitlines(True)
+    except OSError:
+        continue
+
+    changed = False
+    for index, line in enumerate(lines[:12]):
+        marker = "Source:"
+        marker_index = line.find(marker)
+        if marker_index == -1:
+            continue
+
+        relative_path = line[marker_index + len(marker):].strip()
+        if not relative_path or os.path.isabs(relative_path):
+            break
+
+        candidate = (source_root / relative_path).resolve()
+        if not candidate.exists():
+            break
+
+        suffix = "\n" if line.endswith("\n") else ""
+        lines[index] = f"{line[:marker_index + len(marker)]}{candidate}{suffix}"
+        changed = True
+        break
+
+    if changed:
+        gcov_path.write_text("".join(lines))
+PY
+fi
+
+exit "${status}"
