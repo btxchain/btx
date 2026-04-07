@@ -27,14 +27,14 @@ get_directory_property(precious_variables CACHE_VARIABLES)
 # Project / Package metadata
 #=============================
 set(CLIENT_NAME "BTX")
-set(CLIENT_VERSION_MAJOR 29)
-set(CLIENT_VERSION_MINOR 4)
-set(CLIENT_VERSION_BUILD 0)
+set(CLIENT_VERSION_MAJOR 0)
+set(CLIENT_VERSION_MINOR 29)
+set(CLIENT_VERSION_BUILD 5)
 set(CLIENT_VERSION_RC 0)
 set(CLIENT_VERSION_IS_RELEASE "true")
 set(COPYRIGHT_YEAR "2026")
 
-set(CLIENT_VERSION_SUFFIX ".btx20260306")
+set(CLIENT_VERSION_SUFFIX "")
 
 # During the enabling of the CXX and CXXOBJ languages, we modify
 # CMake's compiler/linker invocation strings by appending the content
@@ -55,7 +55,7 @@ set(CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
 project(BTXCore
   VERSION ${CLIENT_VERSION_MAJOR}.${CLIENT_VERSION_MINOR}.${CLIENT_VERSION_BUILD}
   DESCRIPTION "BTX blockchain node software"
-  HOMEPAGE_URL "https://btxchain.org/"
+  HOMEPAGE_URL "https://btx.dev/"
   LANGUAGES NONE
 )
 
@@ -66,7 +66,7 @@ endif()
 
 set(COPYRIGHT_HOLDERS "The %s developers")
 set(COPYRIGHT_HOLDERS_FINAL "The ${CLIENT_NAME} developers")
-set(CLIENT_BUGREPORT "https://github.com/bitcoinknots/bitcoin/issues")
+set(CLIENT_BUGREPORT "https://github.com/btxchain/btx/issues")
 
 #=============================
 # Language setup

@@ -74,8 +74,8 @@ One-shot install + bootstrap
 
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
-  --repo btxchain/btx-node \
-  --release-tag v29.2-btx1 \
+  --repo btxchain/btx \
+  --release-tag v0.29.5 \
   --preset service \
   --datadir="$HOME/.btx-service"
 ```
@@ -98,8 +98,8 @@ handing off to mining or service automation:
 
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
-  --repo btxchain/btx-node \
-  --release-tag v29.2-btx1 \
+  --repo btxchain/btx \
+  --release-tag v0.29.5 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"

@@ -1,6 +1,6 @@
-Bitcoin Knots version 29.4.knots20260220 is now available from:
+BTX version 0.29.5 is now available from:
 
-  <https://bitcoinknots.org/files/29.x/29.4.knots20260220/>
+  <https://github.com/btxchain/btx/releases/tag/v0.29.5>
 
 This release includes BTX launch-readiness hardening, Apple Silicon MatMul
 mining safety/performance updates, full lifecycle validation tooling for
@@ -8,11 +8,11 @@ macOS/CentOS interoperability, and post-quantum wallet policy enforcement.
 
 Please report bugs using the issue tracker at GitHub:
 
-  <https://github.com/bitcoinknots/bitcoin/issues>
+  <https://github.com/btxchain/btx/issues>
 
 To receive security and update notifications, please subscribe to:
 
-  <https://bitcoinknots.org/list/announcements/join/>
+  <https://btx.dev/>
 
 How to Upgrade
 ==============
@@ -24,13 +24,13 @@ or `bitcoind`/`bitcoin-qt` (on Linux).
 
 Upgrading directly from very old versions of Bitcoin Core or Knots is possible,
 but it might take some time if the data directory needs to be migrated. Old
-wallet versions of Bitcoin Knots are generally supported.
+wallet versions derived from the BTX lineage are generally supported.
 
 Compatibility
 ==============
 
-Bitcoin Knots is supported on operating systems using the Linux kernel, macOS
-13+, and Windows 10+. It is not recommended to use Bitcoin Knots on
+BTX is supported on operating systems using the Linux kernel, macOS
+13+, and Windows 10+. It is not recommended to use BTX on
 unsupported systems.
 
 Known Bugs
@@ -44,7 +44,7 @@ This could result in reporting a lower virtual size than is actually used for
 mempool or mining purposes.
 
 Due to disruption of the shared Bitcoin Transifex repository, this release
-still does not include updated translations, and Bitcoin Knots may be unable
+still does not include updated translations, and BTX may be unable
 to do so until/unless that is resolved.
 
 Notable changes

@@ -2,8 +2,8 @@
 
 ## Supported Versions
 
-See our website for versions of Bitcoin Knots that are currently supported with
-security updates: https://bitcoinknots.org/
+See our website for versions of BTX that are currently supported with
+security updates: https://btx.dev/
 
 ## Reporting a Vulnerability
 

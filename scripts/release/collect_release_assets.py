@@ -122,6 +122,14 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def generated_at_utc() -> str:
+    raw = os.environ.get("SOURCE_DATE_EPOCH")
+    if raw is not None and raw.strip():
+        timestamp = int(raw.strip())
+        return datetime.fromtimestamp(timestamp, timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 def load_json_object(path: Path, label: str) -> dict[str, object]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -398,7 +406,7 @@ def build_manifest(
 
     return {
         "format_version": 1,
-        "generated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "generated_at_utc": generated_at_utc(),
         "release_tag": args.release_tag,
         "release_name": args.release_name,
         "checksum_file": checksum_name,

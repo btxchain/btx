@@ -1,7 +1,7 @@
 # BTX Node
 
-BTX is a post-quantum, AI-infrastructure-friendly blockchain derived from
-[Bitcoin Knots](https://github.com/bitcoinknots/bitcoin) v29.2. It replaces
+BTX is a post-quantum, AI-infrastructure-friendly blockchain derived from an
+earlier Bitcoin Knots v29.2 codebase. It replaces
 Bitcoin's SHA-256d proof of work with **MatMul PoW** — a novel consensus
 mechanism based on matrix multiplication over a finite field — adds
 **post-quantum transaction signatures** via witness v2 P2MR outputs, provides a
@@ -602,8 +602,8 @@ The shortest operator path is:
 export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
-  --repo btxchain/btx-node \
-  --release-tag v29.2-btx1 \
+  --repo btxchain/btx \
+  --release-tag v0.29.5 \
   --preset service \
   --datadir="$HOME/.btx"
 ```
@@ -1124,7 +1124,7 @@ doc/
 
 ### Upstream Reference
 
-BTX was forked from Bitcoin Knots v29.2:
+BTX was originally forked from Bitcoin Knots v29.2:
 [Bitcoin Knots](https://github.com/bitcoinknots/bitcoin)
 
 ---
