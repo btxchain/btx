@@ -121,10 +121,9 @@ $(otool -L "$REAL" | awk 'NR>1 {{print $1}}')
 EOF
   if [ -n "$missing" ]; then
     echo "BTX {binary_name} is missing runtime libraries:$missing" >&2
-    echo "Homebrew libevent is required for this native preview build." >&2
-    echo "Install it with: brew install libevent" >&2
-    echo "Apple Silicon default prefix: /opt/homebrew/opt/libevent/lib" >&2
-    echo "Intel default prefix: /usr/local/opt/libevent/lib" >&2
+    echo "Install the matching Homebrew runtime packages with: brew install libevent sqlite zeromq" >&2
+    echo "Apple Silicon default prefixes: /opt/homebrew/opt/libevent/lib /opt/homebrew/opt/sqlite/lib /opt/homebrew/opt/zeromq/lib" >&2
+    echo "Intel default prefixes: /usr/local/opt/libevent/lib /usr/local/opt/sqlite/lib /usr/local/opt/zeromq/lib" >&2
     echo "The packaged binary is located at: $REAL" >&2
     exit 127
   fi
