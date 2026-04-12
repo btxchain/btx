@@ -32,6 +32,7 @@
 
 #include <tinyformat.h>
 
+#include <algorithm>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -1383,6 +1384,118 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_persisted_account_registry_sta
         BOOST_REQUIRE(state_commitment.has_value());
         BOOST_CHECK_EQUAL(shielded::registry::ComputeShieldedStateCommitmentHash(*state_commitment),
                           expected_state_commitment_hash);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_refreshes_anchor_history_when_commitment_index_is_rebuilt,
+                        PersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
+    const uint256 historical_anchor = shielded::ShieldedMerkleTree{}.Root();
+    auto simulate_node_restart = [&]() -> ChainstateManager& {
+        ChainstateManager& current_chainman = *Assert(m_node.chainman);
+
+        for (Chainstate* cs : current_chainman.GetAll()) {
+            LOCK(::cs_main);
+            cs->ForceFlushStateToDisk();
+        }
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            current_chainman.ResetChainstates();
+            BOOST_CHECK_EQUAL(current_chainman.GetAll().size(), 0);
+            m_node.notifications = std::make_unique<KernelNotifications>(
+                Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+            const ChainstateManager::Options chainman_opts{
+                .chainparams = ::Params(),
+                .datadir = current_chainman.m_options.datadir,
+                .notifications = *m_node.notifications,
+                .signals = m_node.validation_signals.get(),
+            };
+            const BlockManager::Options blockman_opts{
+                .chainparams = chainman_opts.chainparams,
+                .blocks_dir = m_args.GetBlocksDirPath(),
+                .notifications = chainman_opts.notifications,
+                .block_tree_db_params = DBParams{
+                    .path = current_chainman.m_options.datadir / "blocks" / "index",
+                    .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                    .memory_only = m_block_tree_db_in_memory,
+                },
+            };
+            m_node.chainman.reset();
+            m_node.chainman = std::make_unique<ChainstateManager>(
+                *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        }
+        return *Assert(m_node.chainman);
+    };
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_CHECK(chainman.IsShieldedAnchorValid(historical_anchor));
+
+        shielded::ShieldedMerkleTree persisted_tree;
+        std::vector<uint256> persisted_anchor_roots;
+        uint256 persisted_tip_hash;
+        int32_t persisted_tip_height{-1};
+        CAmount persisted_pool_balance{0};
+        std::optional<uint256> persisted_commitment_index_digest;
+        std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
+            persisted_account_registry_snapshot;
+        BOOST_REQUIRE(chainman.ReadPersistedShieldedState(persisted_tree,
+                                                          persisted_anchor_roots,
+                                                          persisted_tip_hash,
+                                                          persisted_tip_height,
+                                                          persisted_pool_balance,
+                                                          persisted_commitment_index_digest,
+                                                          persisted_account_registry_snapshot));
+        BOOST_REQUIRE_GT(persisted_anchor_roots.size(), 1U);
+        persisted_anchor_roots.assign(1, chainman.GetShieldedMerkleTree().Root());
+        persisted_commitment_index_digest = GetRandHash();
+        BOOST_REQUIRE(chainman.WritePersistedShieldedState(persisted_tree,
+                                                           persisted_anchor_roots,
+                                                           persisted_tip_hash,
+                                                           persisted_tip_height,
+                                                           persisted_pool_balance,
+                                                           persisted_commitment_index_digest,
+                                                           persisted_account_registry_snapshot));
+    }
+
+    ChainstateManager& chainman_restarted = simulate_node_restart();
+
+    this->LoadVerifyActivateChainstate();
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
+        BOOST_CHECK(chainman_restarted.GetShieldedMerkleTree().HasCommitmentIndex());
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedMerkleTree().Size(),
+                          rebalance_fixture.reserve_outputs.size());
+        BOOST_CHECK(chainman_restarted.IsShieldedAnchorValid(historical_anchor));
+
+        shielded::ShieldedMerkleTree persisted_tree;
+        std::vector<uint256> persisted_anchor_roots;
+        uint256 persisted_tip_hash;
+        int32_t persisted_tip_height{-1};
+        CAmount persisted_pool_balance{0};
+        std::optional<uint256> persisted_commitment_index_digest;
+        std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
+            persisted_account_registry_snapshot;
+        BOOST_REQUIRE(chainman_restarted.ReadPersistedShieldedState(persisted_tree,
+                                                                    persisted_anchor_roots,
+                                                                    persisted_tip_hash,
+                                                                    persisted_tip_height,
+                                                                    persisted_pool_balance,
+                                                                    persisted_commitment_index_digest,
+                                                                    persisted_account_registry_snapshot));
+        BOOST_CHECK_GT(persisted_anchor_roots.size(), 1U);
+        BOOST_CHECK(std::find(persisted_anchor_roots.begin(),
+                              persisted_anchor_roots.end(),
+                              historical_anchor) != persisted_anchor_roots.end());
     }
 }
 
