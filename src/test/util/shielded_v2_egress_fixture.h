@@ -26,6 +26,10 @@
 #include <string>
 #include <vector>
 
+#ifdef OPAQUE
+#undef OPAQUE
+#endif
+
 namespace test::shielded {
 
 inline std::string DescribeInvalidBundleForFixture(const ::shielded::v2::TransactionBundle& bundle)

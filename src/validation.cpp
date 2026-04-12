@@ -10778,8 +10778,11 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         if (m_shielded_anchor_roots.empty()) {
             m_shielded_anchor_roots.push_front(m_shielded_merkle_tree.Root());
         }
+        const std::vector<uint256> loaded_anchor_roots{
+            m_shielded_anchor_roots.begin(), m_shielded_anchor_roots.end()};
         m_shielded_account_registry_roots.clear();
         m_shielded_account_registry_roots.push_front(m_shielded_account_registry.Root());
+        bool repaired_persisted_state{false};
         auto restore_rebuilt_commitment_index = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
             AssertLockHeld(::cs_main);
             shielded::ShieldedMerkleTree rebuilt_tree;
@@ -10802,9 +10805,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                 return false;
             }
             m_shielded_merkle_tree = std::move(rebuilt_tree);
-            if (!PersistShieldedState(tip)) {
-                return false;
-            }
+            repaired_persisted_state = true;
             return true;
         };
 
@@ -10863,9 +10864,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                                                              m_shielded_account_registry)) {
                         return false;
                     }
-                    if (!PersistShieldedState(tip)) {
-                        return false;
-                    }
+                    repaired_persisted_state = true;
                     return true;
                 };
             if (persisted_account_registry_snapshot.has_value()) {
@@ -10893,6 +10892,22 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                         "persisted state missing account registry snapshot")) {
                     return false;
                 }
+            }
+            if (!RebuildShieldedAnchorHistory(*m_active_chainstate, tip)) {
+                return false;
+            }
+            const bool anchor_history_changed =
+                loaded_anchor_roots.size() != m_shielded_anchor_roots.size() ||
+                !std::equal(loaded_anchor_roots.begin(),
+                            loaded_anchor_roots.end(),
+                            m_shielded_anchor_roots.begin());
+            if (anchor_history_changed) {
+                LogPrintf("EnsureShieldedStateInitialized: refreshed persisted anchor history at height=%d hash=%s tracked=%u rebuilt=%u\n",
+                          persisted_tip_height,
+                          persisted_tip_hash.ToString(),
+                          static_cast<unsigned int>(loaded_anchor_roots.size()),
+                          static_cast<unsigned int>(m_shielded_anchor_roots.size()));
+                repaired_persisted_state = true;
             }
             if (!RebuildShieldedAccountRegistryHistory(*m_active_chainstate, tip)) {
                 if (!rebuild_account_registry_from_chain(
@@ -10952,6 +10967,10 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                 m_shielded_pool_balance = ShieldedPoolBalance{};
                 m_shielded_state_initialized = false;
                 return rebuild_from_chain();
+            }
+            if (repaired_persisted_state && !PersistShieldedState(tip)) {
+                m_shielded_state_initialized = false;
+                return false;
             }
             LogPrintf("EnsureShieldedStateInitialized: restored persisted state at height=%d hash=%s tree_size=%u root=%s\n",
                       persisted_tip_height,
