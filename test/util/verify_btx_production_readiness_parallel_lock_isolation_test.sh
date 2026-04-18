@@ -49,7 +49,6 @@ BTX_PARALLEL_JOB_TIMEOUT_SECONDS=20 \
   --skip-m7-timeout-check \
   --skip-m7-parallel-check \
   --skip-parallel-timeout-check \
-  --skip-swarm-timeout-check \
   --skip-production-loop-guard \
   --skip-live-p2p \
   --skip-live-mining
