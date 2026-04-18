@@ -1,6 +1,6 @@
 # BTX Windows 11 Compile Handbook
 
-This handbook is the public step-by-step Windows 11 path for people who want to
+This handbook is the step-by-step Windows 11 path for people who want to
 build BTX from source for the first time.
 
 It is written for a normal Windows 11 x64 machine and aims to get you from:

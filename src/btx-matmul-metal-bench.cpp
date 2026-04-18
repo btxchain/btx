@@ -8,6 +8,7 @@
 #include <metal/matmul_accel.h>
 #include <primitives/block.h>
 #include <uint256.h>
+#include <util/translation.h>
 
 #include <univalue.h>
 
@@ -27,6 +28,8 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+
+const TranslateFn G_TRANSLATION_FUN{nullptr};
 
 namespace {
 

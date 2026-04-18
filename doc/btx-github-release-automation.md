@@ -27,8 +27,8 @@ Example:
 ```bash
 python3 scripts/release/cut_release.py \
   --repo btxchain/btx-node \
-  --tag v29.2 \
-  --release-name "BTX 29.2" \
+  --tag v0.29.5 \
+  --release-name "BTX 0.29.5" \
   --build-with-guix \
   --generate-snapshot \
   --rollback 60776 \
@@ -63,8 +63,8 @@ python3 scripts/release/collect_release_assets.py \
   --source /path/to/guix-build-29.2/output/darwin-arm64 \
   --snapshot /tmp/snapshot.dat \
   --snapshot-manifest /tmp/snapshot.manifest.json \
-  --release-tag v29.2 \
-  --release-name "BTX 29.2" \
+  --release-tag v0.29.5 \
+  --release-name "BTX 0.29.5" \
   --sign-with release-signing-key
 ```
 
@@ -99,7 +99,7 @@ release:
 ```bash
 python3 scripts/release/publish_github_release.py \
   --repo btxchain/btx-node \
-  --tag v29.2 \
+  --tag v0.29.5 \
   --bundle-dir /tmp/btx-release \
   --token-file /path/to/github.key \
   --publish
@@ -120,7 +120,7 @@ bundle contract:
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx-node \
-  --release-tag v29.2 \
+  --release-tag v0.29.5 \
   --preset service \
   --datadir /tmp/btx-service-smoke \
   --json
@@ -143,6 +143,12 @@ The `BTX Release Assets` workflow now has two roles:
   `scripts/release/cut_release.py` on a provisioned release runner and upload
   the resulting bundle as a workflow artifact before or during publication
 
+When snapshot generation is enabled, that self-hosted workflow also uploads the
+generated `snapshot.report.json` and `snapshot.manifest.json` as a separate
+artifact. That gives maintainers the ready-to-apply assumeutxo report needed to
+update `src/kernel/chainparams.cpp` from a runner that already has access to
+the trusted synced node and release inputs.
+
 The self-hosted job is intentionally parameterized around runner-local paths for
 Guix outputs, snapshot artifacts, and guix.sigs state, because those release
 inputs are too large or too sensitive to manufacture inside the workflow
@@ -157,8 +163,8 @@ When you want to ship native-built CLI archives without Guix attestations, use
 ```bash
 python3 scripts/release/cut_local_release.py \
   --repo btxchain/btx-node \
-  --tag v29.4.0-native-cli1 \
-  --release-name "BTX 29.4.0 Native CLI (macOS arm64 + Linux arm64)" \
+  --tag v0.29.5 \
+  --release-name "BTX 0.29.5" \
   --bundle-dir /tmp/btx-native-cli-bundle \
   --platform-spec "macos-arm64;/path/to/macos/btxd;/path/to/macos/btx-cli" \
   --platform-spec "linux-arm64;/path/to/linux/btxd;/path/to/linux/btx-cli" \

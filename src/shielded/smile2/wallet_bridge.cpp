@@ -358,12 +358,14 @@ std::optional<SmileProofResult> CreateSmileProof(
     std::vector<uint256>& serial_hashes,
     int64_t public_fee,
     SmileProofCodecPolicy codec_policy,
-    bool bind_anonset_context)
+    bool bind_anonset_context,
+    std::string* error)
 {
     static_assert(shielded::lattice::MAX_RING_SIZE <= NUM_NTT_SLOTS,
                   "DIRECT_SMILE supported ring size ceiling must fit in one SMILE recursion round");
     const auto fail = [&](const char* reason) -> std::optional<SmileProofResult> {
         LogDebug(BCLog::VALIDATION, "CreateSmileProof: aborting before prove loop: %s\n", reason);
+        if (error != nullptr) *error = reason;
         return std::nullopt;
     };
     if (inputs.empty() || outputs.empty()) return fail("empty inputs or outputs");
@@ -454,6 +456,8 @@ std::optional<SmileProofResult> CreateSmileProof(
     }
 
     std::optional<SmileCTProof> verified_proof;
+    bool saw_candidate_proof{false};
+    std::string prove_error;
     for (uint32_t attempt = 0; attempt < MAX_SMILE_PROOF_SELF_VERIFY_ATTEMPTS; ++attempt) {
         const uint64_t rng_seed = DeriveProofAttemptSeed(rng_entropy, attempt);
         LogDebug(BCLog::VALIDATION, "CreateSmileProof: starting ProveCT inputs=%u outputs=%u anon_set=%u attempt=%u\n",
@@ -461,11 +465,18 @@ std::optional<SmileProofResult> CreateSmileProof(
                   static_cast<unsigned int>(ct_outputs.size()),
                   static_cast<unsigned int>(pub.anon_set.size()),
                   attempt);
-        auto proof = TryProveCT(ct_inputs, ct_outputs, pub, rng_seed, public_fee, bind_anonset_context);
+        auto proof = TryProveCT(ct_inputs,
+                                ct_outputs,
+                                pub,
+                                rng_seed,
+                                public_fee,
+                                bind_anonset_context,
+                                &prove_error);
         if (!proof.has_value()) {
             LogDebug(BCLog::VALIDATION, "CreateSmileProof: ProveCT exhausted or rejected attempt=%u\n", attempt);
             continue;
         }
+        saw_candidate_proof = true;
         LogDebug(BCLog::VALIDATION, "CreateSmileProof: ProveCT done, serial_numbers=%u output_coins=%u attempt=%u\n",
                   static_cast<unsigned int>(proof->serial_numbers.size()),
                   static_cast<unsigned int>(proof->output_coins.size()),
@@ -491,6 +502,13 @@ std::optional<SmileProofResult> CreateSmileProof(
                   attempt);
     }
     if (!verified_proof.has_value()) {
+        if (error != nullptr) {
+            if (!saw_candidate_proof && !prove_error.empty()) {
+                *error = prove_error;
+            } else {
+                *error = saw_candidate_proof ? "self-verify-failed" : "prove-exhausted";
+            }
+        }
         return std::nullopt;
     }
     SmileCTProof& proof = *verified_proof;
@@ -502,6 +520,7 @@ std::optional<SmileProofResult> CreateSmileProof(
         const uint256 serial_hash = ComputeSmileSerialHash(proof.serial_numbers[i]);
         const auto expected_nullifier = ComputeSmileNullifierFromNote(global_seed, inputs[i].note);
         if (!expected_nullifier.has_value() || *expected_nullifier != serial_hash) {
+            if (error != nullptr) *error = "serial-mismatch";
             return std::nullopt;
         }
         serial_hashes.push_back(serial_hash);
@@ -515,6 +534,7 @@ std::optional<SmileProofResult> CreateSmileProof(
         const BDLOPCommitment expected_output_coin = BuildPublicCoinFromNote(outputs[i]);
         if (result.output_coins[i].t0 != expected_output_coin.t0 ||
             result.output_coins[i].t_msg != expected_output_coin.t_msg) {
+            if (error != nullptr) *error = "output-coin-mismatch";
             return std::nullopt;
         }
     }

@@ -211,7 +211,8 @@ shielded::v2::TransactionBundle MakeSyntheticEgressBundle(size_t output_count,
 
 shielded::v2::TransactionBundle MakeSyntheticIngressBundle(size_t nullifier_count,
                                                            uint32_t seed,
-                                                           const uint256& spend_anchor)
+                                                           const uint256& spend_anchor,
+                                                           const uint256& account_registry_anchor)
 {
     shielded::v2::TransactionBundle bundle;
     bundle.header.family_id = shielded::v2::TransactionFamily::V2_INGRESS_BATCH;
@@ -231,7 +232,7 @@ shielded::v2::TransactionBundle MakeSyntheticIngressBundle(size_t nullifier_coun
     const auto registry_witness =
         test::shielded::MakeSingleLeafRegistryWitness(spend_note_commitment, spend_account);
     assert(registry_witness.has_value());
-    payload.account_registry_anchor = registry_witness->first;
+    payload.account_registry_anchor = account_registry_anchor;
     const size_t spend_count = nullifier_count > 1 ? nullifier_count - 1 : 1;
     payload.consumed_spends.reserve(spend_count);
     for (size_t i = 0; i < spend_count; ++i) {
@@ -269,7 +270,9 @@ shielded::v2::TransactionBundle MakeSyntheticIngressBundle(size_t nullifier_coun
     return bundle;
 }
 
-shielded::v2::TransactionBundle MakeSyntheticSendBundle(uint32_t seed, const uint256& spend_anchor)
+shielded::v2::TransactionBundle MakeSyntheticSendBundle(uint32_t seed,
+                                                        const uint256& spend_anchor,
+                                                        const uint256& account_registry_anchor)
 {
     shielded::v2::TransactionBundle bundle;
     bundle.header.family_id = shielded::v2::TransactionFamily::V2_SEND;
@@ -299,7 +302,7 @@ shielded::v2::TransactionBundle MakeSyntheticSendBundle(uint32_t seed, const uin
     spend.note_commitment = spend_note_commitment;
     spend.value_commitment = DeterministicHash(seed * 23 + 4);
     payload.spends = {spend};
-    payload.account_registry_anchor = registry_witness->first;
+    payload.account_registry_anchor = account_registry_anchor;
 
     shielded::v2::OutputDescription output;
     output.note_class = shielded::v2::NoteClass::USER;
@@ -396,6 +399,11 @@ BlockAssembler::Options MakeSyntheticBlockAssemblerOptions()
     return options;
 }
 
+int32_t GetCurrentSyntheticValidationHeight(TestChain100Setup& setup)
+{
+    return WITH_LOCK(::cs_main, return Assert(setup.m_node.chainman)->ActiveChain().Height() + 1);
+}
+
 uint256 GetCurrentSyntheticSpendAnchor(TestChain100Setup& setup)
 {
     uint256 spend_anchor;
@@ -409,10 +417,30 @@ uint256 GetCurrentSyntheticSpendAnchor(TestChain100Setup& setup)
     return spend_anchor;
 }
 
+uint256 GetCurrentSyntheticAccountRegistryAnchor(TestChain100Setup& setup)
+{
+    uint256 account_registry_anchor;
+    {
+        LOCK(::cs_main);
+        ChainstateManager& chainman{*Assert(setup.m_node.chainman)};
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        account_registry_anchor = chainman.GetShieldedAccountRegistryRoot();
+    }
+    BOOST_REQUIRE(!account_registry_anchor.IsNull());
+    return account_registry_anchor;
+}
+
 uint256 ConfirmSyntheticSettlementAnchorDigest(TestChain100Setup& setup,
                                                const CScript& script_pub_key)
 {
-    const auto fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture();
+    const auto& consensus = Params().GetConsensus();
+    const int32_t validation_height = GetCurrentSyntheticValidationHeight(setup);
+    const auto fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture(
+        /*output_count=*/2,
+        /*proof_receipt_count=*/1,
+        /*required_receipts=*/1,
+        &consensus,
+        validation_height);
     setup.CreateAndProcessBlock({fixture.tx}, script_pub_key);
 
     BOOST_CHECK(WITH_LOCK(::cs_main,
@@ -446,6 +474,7 @@ struct ScopedShieldedRegistryEntryConsensus
         consensus.nMaxShieldedAccountRegistryEntries = registry_entry_limit;
     }
 };
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(miner_tests, MinerTestingSetup)
@@ -1077,6 +1106,7 @@ void MinerTestingSetup::TestShieldedAnchorTemplateCleanup(const CScript& scriptP
     CTxMemPool& tx_mempool{MakeMempool()};
     TestMemPoolEntryHelper entry;
     Txid stale_txid;
+    Txid stale_registry_txid;
 
     {
         LOCK2(::cs_main, tx_mempool.cs);
@@ -1084,7 +1114,9 @@ void MinerTestingSetup::TestShieldedAnchorTemplateCleanup(const CScript& scriptP
         BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
 
         const uint256 stale_anchor = chainman.GetShieldedMerkleTree().Root();
+        const uint256 stale_registry_anchor = chainman.GetShieldedAccountRegistryRoot();
         BOOST_REQUIRE(!stale_anchor.IsNull());
+        BOOST_REQUIRE(!stale_registry_anchor.IsNull());
 
         CMutableTransaction tx;
         tx.vin.resize(1);
@@ -1104,10 +1136,27 @@ void MinerTestingSetup::TestShieldedAnchorTemplateCleanup(const CScript& scriptP
         AddToMempool(tx_mempool, entry.Fee(1000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx));
         BOOST_REQUIRE(tx_mempool.exists(GenTxid::Txid(stale_txid)));
 
+        CMutableTransaction v2_tx;
+        v2_tx.vin.resize(1);
+        v2_tx.vin[0].prevout.hash = txFirst[1]->GetHash();
+        v2_tx.vin[0].prevout.n = 0;
+        v2_tx.vin[0].scriptSig = CScript() << OP_1;
+        v2_tx.vout.resize(1);
+        v2_tx.vout[0].nValue = 5000000000LL - 2000;
+        v2_tx.shielded_bundle.v2_bundle =
+            MakeSyntheticSendBundle(/*seed=*/90'000, stale_anchor, stale_registry_anchor);
+        stale_registry_txid = v2_tx.GetHash();
+
+        AddToMempool(tx_mempool,
+                     entry.Fee(2000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(v2_tx));
+        BOOST_REQUIRE(tx_mempool.exists(GenTxid::Txid(stale_registry_txid)));
+
         for (int i = 0; i <= SHIELDED_ANCHOR_DEPTH; ++i) {
             chainman.RecordShieldedAnchorRoot(GetRandHash());
+            chainman.RecordShieldedAccountRegistryRoot(GetRandHash());
         }
         BOOST_CHECK(HasInvalidShieldedAnchors(CTransaction{tx}, chainman));
+        BOOST_CHECK(HasInvalidShieldedAnchors(CTransaction{v2_tx}, chainman));
     }
 
     auto block_template = mining->createNewBlock(options);
@@ -1117,9 +1166,11 @@ void MinerTestingSetup::TestShieldedAnchorTemplateCleanup(const CScript& scriptP
     {
         LOCK(tx_mempool.cs);
         BOOST_CHECK(!tx_mempool.exists(GenTxid::Txid(stale_txid)));
+        BOOST_CHECK(!tx_mempool.exists(GenTxid::Txid(stale_registry_txid)));
     }
     for (const auto& block_tx : block.vtx) {
         BOOST_CHECK(block_tx->GetHash() != stale_txid);
+        BOOST_CHECK(block_tx->GetHash() != stale_registry_txid);
     }
 }
 
@@ -1262,6 +1313,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_fills_last_scan_slot_when_scan_capacity_is_
     BlockAssembler::Options options = MakeSyntheticBlockAssemblerOptions();
     const uint256 settlement_anchor = ConfirmSyntheticSettlementAnchorDigest(*this, options.coinbase_output_script);
     const uint256 spend_anchor = GetCurrentSyntheticSpendAnchor(*this);
+    const uint256 account_registry_anchor = GetCurrentSyntheticAccountRegistryAnchor(*this);
     CTxMemPool& tx_mempool{MakeMempool()};
     size_t funding_index{0};
     auto next_funding_tx = [&]() -> const CTransactionRef& {
@@ -1300,8 +1352,9 @@ BOOST_AUTO_TEST_CASE(block_assembler_fills_last_scan_slot_when_scan_capacity_is_
                                                 20'001,
                                                 /*fee=*/100'000,
                                                 MakeSyntheticIngressBundle(SCARCITY_TEST_RESOURCE_UNITS,
-                                                                          20'001,
-                                                                          spend_anchor),
+                                                                           20'001,
+                                                                           spend_anchor,
+                                                                           account_registry_anchor),
                                                 sequence++);
 
         const auto& scan_entry = GetSyntheticMinerEntry(tx_mempool, scan_txid);
@@ -1325,6 +1378,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_fills_last_tree_slot_when_tree_capacity_is_
     BlockAssembler::Options options = MakeSyntheticBlockAssemblerOptions();
     const uint256 settlement_anchor = ConfirmSyntheticSettlementAnchorDigest(*this, options.coinbase_output_script);
     const uint256 spend_anchor = GetCurrentSyntheticSpendAnchor(*this);
+    const uint256 account_registry_anchor = GetCurrentSyntheticAccountRegistryAnchor(*this);
     CTxMemPool& tx_mempool{MakeMempool()};
     size_t funding_index{0};
     auto next_funding_tx = [&]() -> const CTransactionRef& {
@@ -1344,7 +1398,8 @@ BOOST_AUTO_TEST_CASE(block_assembler_fills_last_tree_slot_when_tree_capacity_is_
                                         /*fee=*/1'000'000,
                                         MakeSyntheticIngressBundle(SCARCITY_TEST_RESOURCE_UNITS,
                                                                    30'000 + static_cast<uint32_t>(i),
-                                                                   spend_anchor),
+                                                                   spend_anchor,
+                                                                   account_registry_anchor),
                                         sequence++);
         }
 
@@ -1353,8 +1408,9 @@ BOOST_AUTO_TEST_CASE(block_assembler_fills_last_tree_slot_when_tree_capacity_is_
                                                 40'000,
                                                 /*fee=*/150'000,
                                                 MakeSyntheticIngressBundle(SCARCITY_TEST_RESOURCE_UNITS,
-                                                                          40'000,
-                                                                          spend_anchor),
+                                                                           40'000,
+                                                                           spend_anchor,
+                                                                           account_registry_anchor),
                                                 sequence++);
         scan_txid = AddSyntheticShieldedMinerTx(tx_mempool,
                                                 next_funding_tx(),
@@ -1385,6 +1441,9 @@ BOOST_AUTO_TEST_CASE(block_assembler_fills_last_tree_slot_when_tree_capacity_is_
 BOOST_AUTO_TEST_CASE(mixed_family_mempool_trim_evicts_lowest_feerate_entry)
 {
     const uint256 spend_anchor = GetCurrentSyntheticSpendAnchor(*this);
+    const uint256 account_registry_anchor = GetCurrentSyntheticAccountRegistryAnchor(*this);
+    const auto& consensus = Params().GetConsensus();
+    const int32_t validation_height = GetCurrentSyntheticValidationHeight(*this);
     CTxMemPool& tx_mempool{MakeMempool()};
     size_t funding_index{0};
     auto next_funding_tx = [&]() -> const CTransactionRef& {
@@ -1392,9 +1451,21 @@ BOOST_AUTO_TEST_CASE(mixed_family_mempool_trim_evicts_lowest_feerate_entry)
         return m_coinbase_txns.at(funding_index++);
     };
 
-    const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture();
-    const auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture();
-    auto settlement_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture();
+    const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture(
+        /*output_count=*/2,
+        &consensus,
+        validation_height);
+    const auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
+        /*reserve_output_count=*/1,
+        /*settlement_window=*/144,
+        &consensus,
+        validation_height);
+    auto settlement_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture(
+        /*output_count=*/2,
+        /*proof_receipt_count=*/1,
+        /*required_receipts=*/1,
+        &consensus,
+        validation_height);
     test::shielded::AttachSettlementAnchorReserveBinding(settlement_fixture.tx,
                                                          rebalance_fixture.reserve_deltas,
                                                          rebalance_fixture.manifest_id);
@@ -1413,7 +1484,9 @@ BOOST_AUTO_TEST_CASE(mixed_family_mempool_trim_evicts_lowest_feerate_entry)
                                                 next_funding_tx(),
                                                 50'000,
                                                 /*fee=*/20'000,
-                                                MakeSyntheticSendBundle(50'000, spend_anchor),
+                                                MakeSyntheticSendBundle(50'000,
+                                                                        spend_anchor,
+                                                                        account_registry_anchor),
                                                 sequence++);
         ingress_txid = AddSyntheticShieldedMinerTx(tx_mempool,
                                                    next_funding_tx(),
@@ -1421,7 +1494,8 @@ BOOST_AUTO_TEST_CASE(mixed_family_mempool_trim_evicts_lowest_feerate_entry)
                                                    /*fee=*/420'000,
                                                    MakeSyntheticIngressBundle(/*nullifier_count=*/16,
                                                                               50'001,
-                                                                              spend_anchor),
+                                                                              spend_anchor,
+                                                                              account_registry_anchor),
                                                    sequence++);
         egress_txid = AddSyntheticShieldedMinerTx(tx_mempool,
                                                   next_funding_tx(),
@@ -1477,14 +1551,26 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
 {
     BlockAssembler::Options options = MakeSyntheticBlockAssemblerOptions();
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const auto& consensus = Params().GetConsensus();
+    const int32_t validation_height = GetCurrentSyntheticValidationHeight(*this);
 
-    const auto prerequisite_rebalance_fixture = test::shielded::BuildV2RebalanceFixture();
+    const auto prerequisite_rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
+        /*reserve_output_count=*/1,
+        /*settlement_window=*/144,
+        &consensus,
+        validation_height);
     const auto prerequisite_settlement_anchor_fixture =
-        test::shielded::BuildV2SettlementAnchorReceiptFixture();
+        test::shielded::BuildV2SettlementAnchorReceiptFixture(
+            /*output_count=*/2,
+            /*proof_receipt_count=*/1,
+            /*required_receipts=*/1,
+            &consensus,
+            validation_height);
     CreateAndProcessBlock({prerequisite_rebalance_fixture.tx, prerequisite_settlement_anchor_fixture.tx},
                           script_pub_key);
 
     const uint256 spend_anchor = GetCurrentSyntheticSpendAnchor(*this);
+    const uint256 account_registry_anchor = GetCurrentSyntheticAccountRegistryAnchor(*this);
     CTxMemPool& tx_mempool{MakeMempool()};
     size_t funding_index{0};
     auto next_funding_tx = [&]() -> const CTransactionRef& {
@@ -1492,9 +1578,21 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
         return m_coinbase_txns.at(funding_index++);
     };
 
-    const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture();
-    const auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture();
-    auto settlement_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture();
+    const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture(
+        /*output_count=*/2,
+        &consensus,
+        validation_height);
+    const auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
+        /*reserve_output_count=*/1,
+        /*settlement_window=*/144,
+        &consensus,
+        validation_height);
+    auto settlement_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture(
+        /*output_count=*/2,
+        /*proof_receipt_count=*/1,
+        /*required_receipts=*/1,
+        &consensus,
+        validation_height);
     test::shielded::AttachSettlementAnchorReserveBinding(settlement_fixture.tx,
                                                          prerequisite_rebalance_fixture.reserve_deltas,
                                                          prerequisite_rebalance_fixture.manifest_id);
@@ -1509,7 +1607,9 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
                                                            next_funding_tx(),
                                                            60'000,
                                                            /*fee=*/900'000,
-                                                           MakeSyntheticSendBundle(60'000, spend_anchor),
+                                                           MakeSyntheticSendBundle(60'000,
+                                                                                   spend_anchor,
+                                                                                   account_registry_anchor),
                                                            sequence++);
         const Txid ingress_txid = AddSyntheticShieldedMinerTx(tx_mempool,
                                                               next_funding_tx(),
@@ -1517,7 +1617,8 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
                                                               /*fee=*/700'000,
                                                               MakeSyntheticIngressBundle(/*nullifier_count=*/12,
                                                                                          60'001,
-                                                                                         spend_anchor),
+                                                                                         spend_anchor,
+                                                                                         account_registry_anchor),
                                                               sequence++);
         const Txid egress_txid = AddSyntheticShieldedMinerTx(tx_mempool,
                                                              next_funding_tx(),
@@ -1650,7 +1751,6 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_same_block_rebalance_settlement_and_
     auto options = MakeSyntheticBlockAssemblerOptions();
     options.test_block_validity = true;
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
-
     const auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture();
     const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture(/*output_count=*/2);
     auto settlement_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture(egress_fixture);
@@ -1725,7 +1825,11 @@ BOOST_AUTO_TEST_CASE(block_assembler_skips_rebalance_that_exceeds_account_regist
     auto options = MakeSyntheticBlockAssemblerOptions();
     options.test_block_validity = true;
 
-    const auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture(/*reserve_output_count=*/2);
+    const auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
+        /*reserve_output_count=*/2,
+        /*settlement_window=*/144,
+        &consensus,
+        active_height + 1);
     BOOST_REQUIRE_EQUAL(rebalance_fixture.tx.GetShieldedBundle().GetShieldedOutputCount(), 2U);
 
     CTxMemPool& tx_mempool{MakeMempool()};
@@ -1761,7 +1865,11 @@ BOOST_AUTO_TEST_CASE(block_assembler_skips_rebalance_that_exceeds_account_regist
     auto options = MakeSyntheticBlockAssemblerOptions();
     options.test_block_validity = true;
 
-    const auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture(/*reserve_output_count=*/2);
+    const auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
+        /*reserve_output_count=*/2,
+        /*settlement_window=*/144,
+        &consensus,
+        active_height + 1);
     BOOST_REQUIRE_EQUAL(rebalance_fixture.tx.GetShieldedBundle().GetShieldedOutputCount(), 2U);
 
     CTxMemPool& tx_mempool{MakeMempool()};

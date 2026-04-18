@@ -925,7 +925,15 @@ SmileMembershipProof ProveMembershipWithRetryBudget(
     const size_t g_slot = ComputeGSlot(m);
     const size_t psi_slot = ComputePsiSlot(m);
 
-    DetRng rng(rng_seed);
+    size_t retries_left = retries_remaining;
+    size_t rejected_attempts = rejected_attempts_so_far;
+    uint64_t attempt_seed = rng_seed;
+
+retry_attempt:
+    {
+    // Keep rejection retries iterative so a hostile seed cannot exhaust the
+    // retry budget by exhausting the stack first.
+    DetRng rng(attempt_seed);
 
     // ------------------------------------------------------------------
     // Step 1: Decompose index into m one-hot vectors
@@ -1072,16 +1080,11 @@ SmileMembershipProof ProveMembershipWithRetryBudget(
             c0s[j].Reduce();
         }
         if (!RejectionSample(z0, c0s, MEMBERSHIP_SIGMA_KEY, rng, RejectionMode::Rej0)) {
-            if (retries_remaining == 0) return {};
-            return ProveMembershipWithRetryBudget(
-                anon_set,
-                secret_index,
-                sk,
-                rng_seed + 1,
-                retries_remaining - 1,
-                bind_anonset_context,
-                rejected_attempts_so_far + 1,
-                accepted_attempt_out);
+            if (retries_left == 0) return {};
+            --retries_left;
+            ++rejected_attempts;
+            ++attempt_seed;
+            goto retry_attempt;
         }
     }
 
@@ -1353,16 +1356,11 @@ SmileMembershipProof ProveMembershipWithRetryBudget(
             cr[j].Reduce();
         }
         if (!RejectionSample(z, cr, MEMBERSHIP_SIGMA_MASK, rng, RejectionMode::Rej1)) {
-            if (retries_remaining == 0) return {};
-            return ProveMembershipWithRetryBudget(
-                anon_set,
-                secret_index,
-                sk,
-                rng_seed + 1,
-                retries_remaining - 1,
-                bind_anonset_context,
-                rejected_attempts_so_far + 1,
-                accepted_attempt_out);
+            if (retries_left == 0) return {};
+            --retries_left;
+            ++rejected_attempts;
+            ++attempt_seed;
+            goto retry_attempt;
         }
     }
 
@@ -1378,10 +1376,11 @@ SmileMembershipProof ProveMembershipWithRetryBudget(
     proof.seed_c0 = seed_c0;
     proof.seed_c = seed_c;
     if (accepted_attempt_out != nullptr) {
-        *accepted_attempt_out = rejected_attempts_so_far;
+        *accepted_attempt_out = rejected_attempts;
     }
 
     return proof;
+    }
 }
 
 SmileMembershipProof ProveMembership(

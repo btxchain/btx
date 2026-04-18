@@ -1844,8 +1844,12 @@ std::optional<std::vector<std::vector<smile2::wallet::SmileRingMember>>> BuildV2
 
             const auto account_it = public_accounts.find(cache_it->second);
             const auto leaf_it = account_leaf_commitments.find(cache_it->second);
-            if (account_it == public_accounts.end() || leaf_it == account_leaf_commitments.end()) {
-                reject_reason = "bad-smile2-ring-member-account";
+            if (account_it == public_accounts.end()) {
+                reject_reason = "bad-smile2-ring-member-public-account";
+                return std::nullopt;
+            }
+            if (leaf_it == account_leaf_commitments.end()) {
+                reject_reason = "bad-smile2-ring-member-account-leaf";
                 return std::nullopt;
             }
 
@@ -1855,7 +1859,7 @@ std::optional<std::vector<std::vector<smile2::wallet::SmileRingMember>>> BuildV2
                 account_it->second,
                 leaf_it->second);
             if (!member.has_value()) {
-                reject_reason = "bad-smile2-ring-member-account";
+                reject_reason = "bad-smile2-ring-member-account-leaf";
                 return std::nullopt;
             }
             ring.push_back(std::move(*member));

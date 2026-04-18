@@ -286,3 +286,13 @@ jobs:
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/btx-release-bundle
+
+      - name: Upload snapshot metadata artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btx-release-snapshot-metadata-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            ${{ github.workspace }}/release-artifacts/*/snapshot/snapshot.report.json
+            ${{ github.workspace }}/release-artifacts/*/snapshot/snapshot.manifest.json

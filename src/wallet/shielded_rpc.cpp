@@ -54,6 +54,7 @@ static constexpr size_t DEFAULT_SHIELD_SWEEP_MAX_INPUTS_PER_CHUNK{64};
 static constexpr size_t MIN_SHIELD_SWEEP_MAX_INPUTS_PER_CHUNK{4};
 static constexpr int MAX_SHIELD_SWEEP_REBUILD_ATTEMPTS{8};
 static constexpr int MAX_SHIELDED_FEE_CONVERGENCE_ATTEMPTS{8};
+static constexpr int MAX_SHIELDED_STALE_ANCHOR_REBUILD_ATTEMPTS{3};
 static constexpr uint64_t DEFAULT_BRIDGE_PROVER_BLOCK_INTERVAL_MILLIS{90'000};
 static constexpr uint32_t DEFAULT_V2_REBALANCE_SETTLEMENT_WINDOW{144};
 static constexpr int64_t BRIDGE_FEE_HEADROOM_SCALE{1000};
@@ -5971,11 +5972,21 @@ void EnsureBridgeFeeHeadroomOrThrow(const BridgeFeeHeadroomAssessment& assessmen
 [[nodiscard]] bool CommitShieldedTransaction(const std::shared_ptr<CWallet>& pwallet,
                                              const CTransactionRef& tx,
                                              std::string& error,
+                                             bool* mempool_rejected = nullptr,
                                              mapValue_t map_value = {})
 {
+    if (mempool_rejected != nullptr) {
+        *mempool_rejected = false;
+    }
     LOCK(pwallet->cs_wallet);
+    std::string broadcast_error;
     try {
-        pwallet->CommitTransaction(tx, std::move(map_value), {}, /*bypass_maxtxfee=*/false);
+        pwallet->CommitTransaction(
+            tx,
+            std::move(map_value),
+            {},
+            /*bypass_maxtxfee=*/false,
+            &broadcast_error);
     } catch (const std::exception& e) {
         error = e.what();
     }
@@ -5997,23 +6008,92 @@ void EnsureBridgeFeeHeadroomOrThrow(const BridgeFeeHeadroomAssessment& assessmen
 
     if (!wtx->InMempool() && pwallet->GetTxDepthInMainChain(*wtx) <= 0) {
         pwallet->AbandonTransaction(tx->GetHash());
-        error = "Shielded transaction created but rejected from mempool (policy or consensus)";
+        if (mempool_rejected != nullptr) {
+            *mempool_rejected = true;
+        }
+        error = broadcast_error.empty()
+            ? "Shielded transaction created but rejected from mempool (policy or consensus)"
+            : broadcast_error;
         return false;
     }
     return true;
+}
+
+[[nodiscard]] bool IsBadShieldedAnchorReject(const std::string& error)
+{
+    return error.find("bad-shielded-anchor") != std::string::npos;
+}
+
+struct ShieldedCommitResult
+{
+    bool committed{false};
+    bool mempool_rejected{false};
+    bool stale_anchor{false};
+    std::string error;
+};
+
+[[nodiscard]] ShieldedCommitResult CommitShieldedTransactionResult(const std::shared_ptr<CWallet>& pwallet,
+                                                                  const CTransactionRef& tx,
+                                                                  mapValue_t map_value = {})
+{
+    ShieldedCommitResult result;
+    result.committed = CommitShieldedTransaction(
+        pwallet,
+        tx,
+        result.error,
+        &result.mempool_rejected,
+        std::move(map_value));
+    result.stale_anchor = result.mempool_rejected && IsBadShieldedAnchorReject(result.error);
+    return result;
+}
+
+[[noreturn]] void ThrowShieldedCommitError(const ShieldedCommitResult& result)
+{
+    const auto code = result.mempool_rejected ? RPC_VERIFY_REJECTED : RPC_WALLET_ERROR;
+    throw JSONRPCError(code, result.error.empty() ? "Shielded transaction commit failed" : result.error);
+}
+
+template <typename BuildFunc, typename CleanupFunc>
+CTransactionRef BuildAndCommitShieldedTransactionWithAnchorRetry(const std::shared_ptr<CWallet>& pwallet,
+                                                                 const char* rpc_name,
+                                                                 const mapValue_t& map_value,
+                                                                 BuildFunc&& build_tx,
+                                                                 CleanupFunc&& cleanup)
+{
+    for (int anchor_attempt = 0; anchor_attempt < MAX_SHIELDED_STALE_ANCHOR_REBUILD_ATTEMPTS; ++anchor_attempt) {
+        const CTransactionRef tx = build_tx();
+        const auto result = CommitShieldedTransactionResult(pwallet, tx, mapValue_t{map_value});
+        if (result.committed) {
+            return tx;
+        }
+
+        cleanup();
+        if (result.stale_anchor &&
+            anchor_attempt + 1 < MAX_SHIELDED_STALE_ANCHOR_REBUILD_ATTEMPTS) {
+            LogPrintf("%s: retrying shielded transaction after stale anchor reject attempt=%u/%u (%s)\n",
+                      rpc_name,
+                      static_cast<unsigned int>(anchor_attempt + 2),
+                      static_cast<unsigned int>(MAX_SHIELDED_STALE_ANCHOR_REBUILD_ATTEMPTS),
+                      result.error);
+            pwallet->BlockUntilSyncedToCurrentChain();
+            continue;
+        }
+
+        ThrowShieldedCommitError(result);
+    }
+
+    throw JSONRPCError(
+        RPC_WALLET_ERROR,
+        strprintf("%s exhausted stale-anchor rebuild attempts", rpc_name));
 }
 
 void CommitShieldedTransactionOrThrow(const std::shared_ptr<CWallet>& pwallet,
                                       const CTransactionRef& tx,
                                       mapValue_t map_value = {})
 {
-    std::string error;
-    if (CommitShieldedTransaction(pwallet, tx, error, std::move(map_value))) return;
-
-    const RPCErrorCode code = error == "Shielded transaction created but rejected from mempool (policy or consensus)"
-        ? RPC_VERIFY_REJECTED
-        : RPC_WALLET_ERROR;
-    throw JSONRPCError(code, error);
+    const auto result = CommitShieldedTransactionResult(pwallet, tx, std::move(map_value));
+    if (result.committed) return;
+    ThrowShieldedCommitError(result);
 }
 
 void AbandonReplacedShieldedTransactionIfStale(const std::shared_ptr<CWallet>& pwallet, const uint256& conflict_txid)
@@ -7081,7 +7161,6 @@ RPCHelpMan z_sendtoaddress()
                 }
             }
 
-            CTransactionRef tx;
             std::vector<Nullifier> reserved_nullifiers;
 
             // Helper: release any pending-spend reservations still held.
@@ -7136,95 +7215,103 @@ RPCHelpMan z_sendtoaddress()
                         /*has_shielded_bundle=*/true);
             }
 
-            try {
-            for (int attempt = 0; attempt < MAX_SHIELDED_FEE_CONVERGENCE_ATTEMPTS; ++attempt) {
-                // Release nullifier reservations from any prior iteration so
-                // that the notes become eligible for selection again.
-                release_reservations();
+            const auto tx = BuildAndCommitShieldedTransactionWithAnchorRetry(
+                pwallet,
+                "z_sendtoaddress",
+                map_value,
+                [&]() -> CTransactionRef {
+                    CTransactionRef built_tx;
+                    try {
+                        for (int attempt = 0; attempt < MAX_SHIELDED_FEE_CONVERGENCE_ATTEMPTS; ++attempt) {
+                            // Release nullifier reservations from any prior iteration so
+                            // that the notes become eligible for selection again.
+                            release_reservations();
 
-                if (subtract_fee && requested_amount <= fee) {
-                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount must be greater than fee when subtractfeefromamount is true");
-                }
+                            if (subtract_fee && requested_amount <= fee) {
+                                throw JSONRPCError(
+                                    RPC_INVALID_PARAMETER,
+                                    "Amount must be greater than fee when subtractfeefromamount is true");
+                            }
 
-                const CAmount recipient_amount = subtract_fee ? requested_amount - fee : requested_amount;
-                const std::optional<CAmount> required_total = subtract_fee
-                    ? std::make_optional(requested_amount)
-                    : CheckedAdd(requested_amount, fee);
-                if (!required_total.has_value() || !MoneyRange(*required_total)) {
-                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount + fee overflows");
-                }
+                            const CAmount recipient_amount = subtract_fee ? requested_amount - fee : requested_amount;
+                            const std::optional<CAmount> required_total = subtract_fee
+                                ? std::make_optional(requested_amount)
+                                : CheckedAdd(requested_amount, fee);
+                            if (!required_total.has_value() || !MoneyRange(*required_total)) {
+                                throw JSONRPCError(RPC_INVALID_PARAMETER, "Amount + fee overflows");
+                            }
 
-                std::optional<CMutableTransaction> mtx;
-                std::string create_error;
-                {
-                    LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
-                    AssertLockHeld(pwallet->m_shielded_wallet->cs_shielded);
+                            std::optional<CMutableTransaction> mtx;
+                            std::string create_error;
+                            {
+                                LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                                AssertLockHeld(pwallet->m_shielded_wallet->cs_shielded);
 
-                    const CAmount shielded_balance = pwallet->m_shielded_wallet->GetShieldedBalance(/*min_depth=*/1);
-                    if (shielded_balance < *required_total) {
-                        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient shielded funds");
+                                const CAmount shielded_balance = pwallet->m_shielded_wallet->GetShieldedBalance(/*min_depth=*/1);
+                                if (shielded_balance < *required_total) {
+                                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient shielded funds");
+                                }
+
+                                mtx = pwallet->m_shielded_wallet->CreateShieldedSpend(
+                                    {{*dest, recipient_amount}},
+                                    /*transparent_recipients=*/{},
+                                    fee,
+                                    /*allow_transparent_fallback=*/false,
+                                    &create_error,
+                                    conflict_selection.has_value() ? &*conflict_selection : nullptr);
+                                if (mtx.has_value()) {
+                                    reserved_nullifiers = CollectShieldedNullifiers(mtx->shielded_bundle);
+                                    pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
+                                }
+                            }
+
+                            if (!mtx.has_value()) {
+                                throw JSONRPCError(
+                                    RPC_WALLET_ERROR,
+                                    create_error.empty() ? "Failed to create shielded v2 send transaction" : create_error);
+                            }
+
+                            CTransactionRef candidate = MakeTransactionRef(std::move(*mtx));
+                            const CAmount required_fee = RequiredMempoolFee(*pwallet, *candidate);
+                            if (explicit_fee) {
+                                if (fee >= required_fee) {
+                                    built_tx = std::move(candidate);
+                                    break;
+                                }
+                                throw JSONRPCError(
+                                    RPC_WALLET_ERROR,
+                                    strprintf("Fee too low for transaction size. Required at least %s", FormatMoney(required_fee)));
+                            }
+
+                            const CAmount desired_fee = ComputeShieldedAutoFee(
+                                *pwallet,
+                                coin_control,
+                                ShieldedRelayVirtualSize(*candidate),
+                                candidate->HasShieldedBundle());
+                            if (fee >= desired_fee) {
+                                built_tx = std::move(candidate);
+                                break;
+                            }
+
+                            fee = desired_fee;
+                        }
+
+                        if (!built_tx) {
+                            throw JSONRPCError(
+                                RPC_WALLET_ERROR,
+                                "Failed to build fee-compliant shielded v2 send transaction");
+                        }
+                    } catch (...) {
+                        // Any throw from the loop or the !built_tx check above must
+                        // release reservations so that the notes are not permanently locked.
+                        release_reservations();
+                        throw;
                     }
-
-                    mtx = pwallet->m_shielded_wallet->CreateShieldedSpend(
-                        {{*dest, recipient_amount}},
-                        /*transparent_recipients=*/{},
-                        fee,
-                        /*allow_transparent_fallback=*/false,
-                        &create_error,
-                        conflict_selection.has_value() ? &*conflict_selection : nullptr);
-                    if (mtx.has_value()) {
-                        reserved_nullifiers = CollectShieldedNullifiers(mtx->shielded_bundle);
-                        pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
-                    }
-                }
-
-                if (!mtx.has_value()) {
-                    throw JSONRPCError(
-                        RPC_WALLET_ERROR,
-                        create_error.empty() ? "Failed to create shielded v2 send transaction" : create_error);
-                }
-
-                CTransactionRef candidate = MakeTransactionRef(std::move(*mtx));
-                const CAmount required_fee = RequiredMempoolFee(*pwallet, *candidate);
-                if (explicit_fee) {
-                    if (fee >= required_fee) {
-                        tx = std::move(candidate);
-                        break;
-                    }
-                    throw JSONRPCError(
-                        RPC_WALLET_ERROR,
-                        strprintf("Fee too low for transaction size. Required at least %s", FormatMoney(required_fee)));
-                }
-
-                const CAmount desired_fee = ComputeShieldedAutoFee(
-                    *pwallet,
-                    coin_control,
-                    ShieldedRelayVirtualSize(*candidate),
-                    candidate->HasShieldedBundle());
-                if (fee >= desired_fee) {
-                    tx = std::move(candidate);
-                    break;
-                }
-
-                fee = desired_fee;
-            }
-
-            if (!tx) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "Failed to build fee-compliant shielded v2 send transaction");
-            }
-            } catch (...) {
-                // Any throw from the loop or the !tx check above must release
-                // reservations so that the notes are not permanently locked.
-                release_reservations();
-                throw;
-            }
-
-            try {
-                CommitShieldedTransactionOrThrow(pwallet, tx, map_value);
-            } catch (...) {
-                release_reservations();
-                throw;
-            }
+                    return built_tx;
+                },
+                [&]() {
+                    release_reservations();
+                });
             if (conflict_txid.has_value()) {
                 AbandonReplacedShieldedTransactionIfStale(pwallet, *conflict_txid);
             }
@@ -7531,7 +7618,6 @@ RPCHelpMan z_sendmany()
                 return std::make_pair(std::move(shielded_recipients), std::move(transparent_recipients));
             };
 
-            CTransactionRef tx;
             std::vector<Nullifier> reserved_nullifiers;
             const auto release_reservations = [&]() {
                 if (reserved_nullifiers.empty()) return;
@@ -7582,71 +7668,75 @@ RPCHelpMan z_sendmany()
                         /*has_shielded_bundle=*/true);
             }
 
-            try {
-            for (int attempt = 0; attempt < MAX_SHIELDED_FEE_CONVERGENCE_ATTEMPTS; ++attempt) {
-                release_reservations();
-                const auto [shielded_recipients, transparent_recipients] = materialize_recipients(fee);
+            const auto tx = BuildAndCommitShieldedTransactionWithAnchorRetry(
+                pwallet,
+                "z_sendmany",
+                /*map_value=*/{},
+                [&]() -> CTransactionRef {
+                    CTransactionRef built_tx;
+                    try {
+                        for (int attempt = 0; attempt < MAX_SHIELDED_FEE_CONVERGENCE_ATTEMPTS; ++attempt) {
+                            release_reservations();
+                            const auto [shielded_recipients, transparent_recipients] = materialize_recipients(fee);
 
-                std::optional<CMutableTransaction> mtx;
-                std::string create_error;
-                {
-                    LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
-                    mtx = pwallet->m_shielded_wallet->CreateShieldedSpend(
-                        shielded_recipients,
-                        transparent_recipients,
-                        fee,
-                        /*allow_transparent_fallback=*/true,
-                        &create_error,
-                        conflict_selection.has_value() ? &*conflict_selection : nullptr);
-                    if (mtx.has_value()) {
-                        reserved_nullifiers = CollectShieldedNullifiers(mtx->shielded_bundle);
-                        pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
+                            std::optional<CMutableTransaction> mtx;
+                            std::string create_error;
+                            {
+                                LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                                mtx = pwallet->m_shielded_wallet->CreateShieldedSpend(
+                                    shielded_recipients,
+                                    transparent_recipients,
+                                    fee,
+                                    /*allow_transparent_fallback=*/true,
+                                    &create_error,
+                                    conflict_selection.has_value() ? &*conflict_selection : nullptr);
+                                if (mtx.has_value()) {
+                                    reserved_nullifiers = CollectShieldedNullifiers(mtx->shielded_bundle);
+                                    pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
+                                }
+                            }
+                            if (!mtx.has_value()) {
+                                throw JSONRPCError(
+                                    RPC_WALLET_ERROR,
+                                    create_error.empty() ? "Failed to create shielded transaction" : create_error);
+                            }
+
+                            CTransactionRef candidate = MakeTransactionRef(std::move(*mtx));
+                            const CAmount required_fee = RequiredMempoolFee(*pwallet, *candidate);
+                            if (explicit_fee) {
+                                if (fee >= required_fee) {
+                                    built_tx = std::move(candidate);
+                                    break;
+                                }
+                                throw JSONRPCError(
+                                    RPC_WALLET_ERROR,
+                                    strprintf("Fee too low for transaction size. Required at least %s", FormatMoney(required_fee)));
+                            }
+
+                            const CAmount desired_fee = ComputeShieldedAutoFee(
+                                *pwallet,
+                                coin_control,
+                                ShieldedRelayVirtualSize(*candidate),
+                                candidate->HasShieldedBundle());
+                            if (fee >= desired_fee) {
+                                built_tx = std::move(candidate);
+                                break;
+                            }
+
+                            fee = desired_fee;
+                        }
+                        if (!built_tx) {
+                            throw JSONRPCError(RPC_WALLET_ERROR, "Failed to build fee-compliant shielded transaction");
+                        }
+                    } catch (...) {
+                        release_reservations();
+                        throw;
                     }
-                }
-                if (!mtx.has_value()) {
-                    throw JSONRPCError(
-                        RPC_WALLET_ERROR,
-                        create_error.empty() ? "Failed to create shielded transaction" : create_error);
-                }
-
-                CTransactionRef candidate = MakeTransactionRef(std::move(*mtx));
-                const CAmount required_fee = RequiredMempoolFee(*pwallet, *candidate);
-                if (explicit_fee) {
-                    if (fee >= required_fee) {
-                        tx = std::move(candidate);
-                        break;
-                    }
-                    throw JSONRPCError(
-                        RPC_WALLET_ERROR,
-                        strprintf("Fee too low for transaction size. Required at least %s", FormatMoney(required_fee)));
-                }
-
-                const CAmount desired_fee = ComputeShieldedAutoFee(
-                    *pwallet,
-                    coin_control,
-                    ShieldedRelayVirtualSize(*candidate),
-                    candidate->HasShieldedBundle());
-                if (fee >= desired_fee) {
-                    tx = std::move(candidate);
-                    break;
-                }
-
-                fee = desired_fee;
-            }
-            if (!tx) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "Failed to build fee-compliant shielded transaction");
-            }
-            } catch (...) {
-                release_reservations();
-                throw;
-            }
-
-            try {
-                CommitShieldedTransactionOrThrow(pwallet, tx);
-            } catch (...) {
-                release_reservations();
-                throw;
-            }
+                    return built_tx;
+                },
+                [&]() {
+                    release_reservations();
+                });
             if (conflict_txid.has_value()) {
                 AbandonReplacedShieldedTransactionIfStale(pwallet, *conflict_txid);
             }
@@ -8408,10 +8498,11 @@ RPCHelpMan z_mergenotes()
     return RPCHelpMan{
         "z_mergenotes",
         "\nMerge several small shielded notes into one.\n"
-        "The live direct-SMILE spend path currently merges at most two shielded inputs per transaction,\n"
-        "so repeated calls may be required when a wallet holds many small notes.\n",
+        "The merge path stays inside the live direct-spend envelope,\n"
+        "so repeated calls may still be required when a wallet holds many small notes.\n"
+        "This is the supported wallet-level consolidation path for high-note-count miner wallets.\n",
         {
-            {"max_notes", RPCArg::Type::NUM, RPCArg::Default{10}, "Maximum notes requested for merge (live path currently uses up to 2 per tx)"},
+            {"max_notes", RPCArg::Type::NUM, RPCArg::Default{10}, "Maximum notes requested for merge (the current live merge path uses up to 8 notes per tx)"},
             {"fee", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(10000)}, "Fee"},
         },
         RPCResult{
@@ -8419,6 +8510,7 @@ RPCHelpMan z_mergenotes()
             {
                 {RPCResult::Type::STR_HEX, "txid", "Transaction id"},
                 {RPCResult::Type::NUM, "merged_notes", "Merged note count"},
+                {RPCResult::Type::NUM, "remaining_spendable_notes", "Remaining confirmed spendable note count after reserving the merge inputs"},
             }},
         RPCExamples{HelpExampleCli("z_mergenotes", "")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
@@ -8443,66 +8535,81 @@ RPCHelpMan z_mergenotes()
             }
 
             size_t merged_count{0};
-            CTransactionRef tx;
             // R5-520: Track reserved nullifiers for merge notes.
             std::vector<Nullifier> reserved_nullifiers;
-            for (int attempt = 0; attempt < MAX_SHIELDED_FEE_CONVERGENCE_ATTEMPTS; ++attempt) {
-                std::optional<CMutableTransaction> mtx;
-                std::string create_error;
-                {
-                    LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
-                    if (!reserved_nullifiers.empty()) {
-                        pwallet->m_shielded_wallet->ReleasePendingSpends(reserved_nullifiers);
-                        reserved_nullifiers.clear();
-                    }
-                    merged_count = std::min({max_notes,
-                                             pwallet->m_shielded_wallet->GetSpendableNotes(1).size(),
-                                             static_cast<size_t>(shielded::v2::MAX_LIVE_DIRECT_SMILE_SPENDS)});
-                    mtx = pwallet->m_shielded_wallet->MergeNotes(max_notes, fee, &create_error);
-                    if (mtx.has_value()) {
-                        reserved_nullifiers = CollectShieldedNullifiers(mtx->shielded_bundle);
-                        pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
-                    }
-                }
-                if (!mtx.has_value()) {
-                    throw JSONRPCError(
-                        RPC_WALLET_ERROR,
-                        create_error.empty() ? "No merge candidate notes found" : create_error);
-                }
-
-                CTransactionRef candidate = MakeTransactionRef(std::move(*mtx));
-                const CAmount required_fee = RequiredMempoolFee(*pwallet, *candidate);
-                if (fee >= required_fee) {
-                    tx = std::move(candidate);
-                    break;
-                }
-
-                if (explicit_fee) {
-                    LOCK(pwallet->m_shielded_wallet->cs_shielded);
-                    pwallet->m_shielded_wallet->ReleasePendingSpends(reserved_nullifiers);
-                    throw JSONRPCError(
-                        RPC_WALLET_ERROR,
-                        strprintf("Fee too low for transaction size. Required at least %s", FormatMoney(required_fee)));
-                }
-                fee = required_fee;
-            }
-            if (!tx) {
+            const auto release_reservations = [&]() {
+                if (reserved_nullifiers.empty()) return;
                 LOCK(pwallet->m_shielded_wallet->cs_shielded);
                 pwallet->m_shielded_wallet->ReleasePendingSpends(reserved_nullifiers);
-                throw JSONRPCError(RPC_WALLET_ERROR, "Failed to create fee-compliant merge transaction");
-            }
+                reserved_nullifiers.clear();
+            };
+            const auto tx = BuildAndCommitShieldedTransactionWithAnchorRetry(
+                pwallet,
+                "z_mergenotes",
+                /*map_value=*/{},
+                [&]() -> CTransactionRef {
+                    CTransactionRef built_tx;
+                    try {
+                        for (int attempt = 0; attempt < MAX_SHIELDED_FEE_CONVERGENCE_ATTEMPTS; ++attempt) {
+                            std::optional<CMutableTransaction> mtx;
+                            std::string create_error;
+                            {
+                                LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                                if (!reserved_nullifiers.empty()) {
+                                    pwallet->m_shielded_wallet->ReleasePendingSpends(reserved_nullifiers);
+                                    reserved_nullifiers.clear();
+                                }
+                                merged_count = std::min({max_notes,
+                                                         pwallet->m_shielded_wallet->GetSpendableNotes(1).size(),
+                                                         static_cast<size_t>(shielded::v2::MAX_LIVE_DIRECT_SMILE_SPENDS)});
+                                mtx = pwallet->m_shielded_wallet->MergeNotes(max_notes, fee, &create_error);
+                                if (mtx.has_value()) {
+                                    merged_count = mtx->shielded_bundle.GetShieldedInputCount();
+                                    reserved_nullifiers = CollectShieldedNullifiers(mtx->shielded_bundle);
+                                    pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
+                                }
+                            }
+                            if (!mtx.has_value()) {
+                                throw JSONRPCError(
+                                    RPC_WALLET_ERROR,
+                                    create_error.empty() ? "No merge candidate notes found" : create_error);
+                            }
 
-            try {
-                CommitShieldedTransactionOrThrow(pwallet, tx);
-            } catch (...) {
-                LOCK(pwallet->m_shielded_wallet->cs_shielded);
-                pwallet->m_shielded_wallet->ReleasePendingSpends(reserved_nullifiers);
-                throw;
-            }
+                            CTransactionRef candidate = MakeTransactionRef(std::move(*mtx));
+                            const CAmount required_fee = RequiredMempoolFee(*pwallet, *candidate);
+                            if (fee >= required_fee) {
+                                built_tx = std::move(candidate);
+                                break;
+                            }
+
+                            if (explicit_fee) {
+                                release_reservations();
+                                throw JSONRPCError(
+                                    RPC_WALLET_ERROR,
+                                    strprintf("Fee too low for transaction size. Required at least %s", FormatMoney(required_fee)));
+                            }
+                            fee = required_fee;
+                        }
+                        if (!built_tx) {
+                            throw JSONRPCError(RPC_WALLET_ERROR, "Failed to create fee-compliant merge transaction");
+                        }
+                    } catch (...) {
+                        release_reservations();
+                        throw;
+                    }
+                    return built_tx;
+                },
+                [&]() {
+                    release_reservations();
+                });
 
             UniValue out(UniValue::VOBJ);
             out.pushKV("txid", tx->GetHash().GetHex());
             out.pushKV("merged_notes", static_cast<int64_t>(merged_count));
+            const auto remaining_spendable_notes = WITH_LOCK(
+                pwallet->m_shielded_wallet->cs_shielded,
+                return pwallet->m_shielded_wallet->GetSpendableNotes(1).size());
+            out.pushKV("remaining_spendable_notes", static_cast<int64_t>(remaining_spendable_notes));
             return out;
         }};
 }

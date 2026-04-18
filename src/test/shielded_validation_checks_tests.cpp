@@ -1226,7 +1226,7 @@ BOOST_AUTO_TEST_CASE(proof_check_rejects_v2_send_missing_public_account_snapshot
                                   fixture.account_leaf_commitments));
     const auto res = check();
     BOOST_REQUIRE(res.has_value());
-    BOOST_CHECK_EQUAL(*res, "bad-smile2-ring-member-account");
+    BOOST_CHECK_EQUAL(*res, "bad-smile2-ring-member-public-account");
 }
 
 BOOST_AUTO_TEST_CASE(proof_check_rejects_v2_send_missing_account_leaf_snapshot_entry)
@@ -1245,7 +1245,7 @@ BOOST_AUTO_TEST_CASE(proof_check_rejects_v2_send_missing_account_leaf_snapshot_e
                                   fixture.account_leaf_commitments));
     const auto res = check();
     BOOST_REQUIRE(res.has_value());
-    BOOST_CHECK_EQUAL(*res, "bad-smile2-ring-member-account");
+    BOOST_CHECK_EQUAL(*res, "bad-smile2-ring-member-account-leaf");
 }
 
 BOOST_AUTO_TEST_CASE(proof_check_v2_send_enforces_extension_digest_only_after_activation_height)

@@ -15,6 +15,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <uint256.h>
 #include <vector>
 
@@ -291,7 +292,8 @@ std::optional<SmileCTProof> TryProveCT(
     const CTPublicData& pub,
     uint64_t rng_seed,
     int64_t public_fee = 0,
-    bool bind_anonset_context = false);
+    bool bind_anonset_context = false,
+    std::string* error = nullptr);
 
 // Legacy wrapper used by existing tests and helper call sites that still
 // treat failure as an empty/default proof object.

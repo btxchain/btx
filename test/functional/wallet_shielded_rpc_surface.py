@@ -33,6 +33,8 @@ from test_framework.util import (
     assert_raises_rpc_error,
 )
 
+LIVE_DIRECT_LIMIT = 8
+
 
 class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
     def add_options(self, parser):
@@ -276,6 +278,25 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
 
         notes_after = wallet.z_listunspent(1, 9999999, False)
         assert len(notes_after) >= 1
+
+        self.log.info("Fallback path: z_mergenotes avoids a fee-insufficient tiny-note prefix when a viable live merge set exists")
+        node.createwallet(wallet_name="mergefallback", descriptors=True)
+        mergefallback = encrypt_and_unlock_wallet(node, "mergefallback")
+        mergefallback_addr = mergefallback.z_getnewaddress()
+        for _ in range(LIVE_DIRECT_LIMIT):
+            dust_send = wallet.z_sendmany([{"address": mergefallback_addr, "amount": Decimal("0.00000100")}])
+            assert dust_send["txid"] in node.getrawmempool()
+            self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
+        for _ in range(2):
+            large_send = wallet.z_sendmany([{"address": mergefallback_addr, "amount": Decimal("0.20")}])
+            assert large_send["txid"] in node.getrawmempool()
+            self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
+        assert_equal(int(mergefallback.z_getbalance()["note_count"]), LIVE_DIRECT_LIMIT + 2)
+        mergefallback_merge = mergefallback.z_mergenotes(LIVE_DIRECT_LIMIT)
+        assert mergefallback_merge["txid"] in node.getrawmempool()
+        assert_equal(mergefallback_merge["merged_notes"], LIVE_DIRECT_LIMIT)
+        assert_equal(mergefallback.z_viewtransaction(mergefallback_merge["txid"])["family"], "v2_send")
+        self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
 
         self.log.info("Build-only bridge egress RPCs return canonical wallet-visible chunk metadata")
         egress_recipients = [

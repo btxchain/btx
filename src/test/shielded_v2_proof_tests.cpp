@@ -472,6 +472,68 @@ SmileV2SendFixture BuildSmileV2SendFixture(unsigned char seed_base = 0x61)
     return fixture;
 }
 
+shielded::v2::TransactionBundle BuildPostforkGenericSmileSendBundle()
+{
+    using namespace shielded::v2;
+
+    auto fixture = BuildSmileV2SendFixture();
+    auto* bundle = fixture.tx.shielded_bundle.v2_bundle ? &*fixture.tx.shielded_bundle.v2_bundle : nullptr;
+    BOOST_REQUIRE(bundle != nullptr);
+
+    auto& payload = std::get<SendPayload>(bundle->payload);
+    payload.output_encoding = SendOutputEncoding::SMILE_COMPACT_POSTFORK;
+    payload.output_scan_domain = ScanDomain::OPAQUE;
+    for (auto& output : payload.outputs) {
+        output.encrypted_note.scan_domain = ScanDomain::OPAQUE;
+    }
+
+    const auto& consensus = Params().GetConsensus();
+    const int32_t postfork_height = consensus.nShieldedMatRiCTDisableHeight;
+    BOOST_REQUIRE(postfork_height >= 0);
+
+    bundle->header.family_id = GetWireTransactionFamilyForValidationHeight(
+        TransactionFamily::V2_SEND,
+        &consensus,
+        postfork_height);
+    bundle->header.proof_envelope.proof_kind = GetWireProofKindForValidationHeight(
+        TransactionFamily::V2_SEND,
+        ProofKind::DIRECT_SMILE,
+        &consensus,
+        postfork_height);
+    bundle->header.proof_envelope.membership_proof_kind =
+        GetWireProofComponentKindForValidationHeight(ProofComponentKind::SMILE_MEMBERSHIP,
+                                                     &consensus,
+                                                     postfork_height);
+    bundle->header.proof_envelope.amount_proof_kind =
+        GetWireProofComponentKindForValidationHeight(ProofComponentKind::SMILE_BALANCE,
+                                                     &consensus,
+                                                     postfork_height);
+    bundle->header.proof_envelope.balance_proof_kind =
+        GetWireProofComponentKindForValidationHeight(ProofComponentKind::SMILE_BALANCE,
+                                                     &consensus,
+                                                     postfork_height);
+    bundle->header.proof_envelope.settlement_binding_kind =
+        GetWireSettlementBindingKindForValidationHeight(TransactionFamily::V2_SEND,
+                                                        SettlementBindingKind::NONE,
+                                                        &consensus,
+                                                        postfork_height);
+    bundle->header.payload_digest = ComputeSendPayloadDigest(payload);
+
+    auto output_chunks = BuildDerivedGenericOutputChunks(bundle->payload);
+    BOOST_REQUIRE(output_chunks.has_value());
+    bundle->output_chunks = std::move(*output_chunks);
+    bundle->header.output_chunk_root = bundle->output_chunks.empty()
+        ? uint256::ZERO
+        : ComputeOutputChunkRoot(Span<const OutputChunkDescriptor>{bundle->output_chunks.data(),
+                                                                   bundle->output_chunks.size()});
+    bundle->header.output_chunk_count = bundle->output_chunks.size();
+    bundle->header.proof_envelope.statement_digest =
+        v2proof::ComputeV2SendStatementDigest(CTransaction{fixture.tx}, consensus, postfork_height);
+
+    BOOST_REQUIRE(bundle->IsValid());
+    return *bundle;
+}
+
 DataStream SerializeBundleWithExplicitProofPayload(
     const shielded::v2::TransactionBundle& bundle,
     Span<const uint8_t> proof_payload_bytes)
@@ -883,10 +945,7 @@ BOOST_AUTO_TEST_CASE(v2_send_parse_rejects_trailing_witness_bytes)
 
 BOOST_AUTO_TEST_CASE(postfork_generic_send_bundle_roundtrip_strips_padded_opaque_proof_payload)
 {
-    auto fixture = BuildV2SendFixture();
-    auto bundle = *fixture.tx.shielded_bundle.v2_bundle;
-    bundle.header.family_id = shielded::v2::TransactionFamily::V2_GENERIC;
-    BOOST_REQUIRE(bundle.IsValid());
+    auto bundle = BuildPostforkGenericSmileSendBundle();
 
     const auto raw_proof_payload = bundle.proof_payload;
     const auto padded_proof_payload = shielded::v2::SerializeProofPayloadBytes(bundle);
@@ -911,10 +970,7 @@ BOOST_AUTO_TEST_CASE(postfork_generic_send_bundle_roundtrip_strips_padded_opaque
 
 BOOST_AUTO_TEST_CASE(postfork_generic_send_bundle_rejects_noncanonical_unpadded_opaque_proof_payload)
 {
-    auto fixture = BuildV2SendFixture();
-    auto bundle = *fixture.tx.shielded_bundle.v2_bundle;
-    bundle.header.family_id = shielded::v2::TransactionFamily::V2_GENERIC;
-    BOOST_REQUIRE(bundle.IsValid());
+    auto bundle = BuildPostforkGenericSmileSendBundle();
     BOOST_REQUIRE_LT(bundle.proof_payload.size(),
                      shielded::v2::SerializeProofPayloadBytes(bundle).size());
 
@@ -1046,7 +1102,7 @@ BOOST_AUTO_TEST_CASE(v2_send_smile_ring_reconstruction_requires_public_accounts)
                                                              account_leaf_commitments,
                                                              reject_reason);
     BOOST_CHECK(!ring_members.has_value());
-    BOOST_CHECK_EQUAL(reject_reason, "bad-smile2-ring-member-account");
+    BOOST_CHECK_EQUAL(reject_reason, "bad-smile2-ring-member-public-account");
 }
 
 BOOST_AUTO_TEST_CASE(v2_send_smile_ring_reconstruction_can_be_recovered_from_committed_registry_state)
@@ -1112,7 +1168,7 @@ BOOST_AUTO_TEST_CASE(v2_send_smile_ring_reconstruction_requires_account_leaf_com
                                                              account_leaf_commitments,
                                                              reject_reason);
     BOOST_CHECK(!ring_members.has_value());
-    BOOST_CHECK_EQUAL(reject_reason, "bad-smile2-ring-member-account");
+    BOOST_CHECK_EQUAL(reject_reason, "bad-smile2-ring-member-account-leaf");
 }
 
 BOOST_AUTO_TEST_CASE(v2_send_smile_verifier_rejects_account_leaf_binding_mismatch)

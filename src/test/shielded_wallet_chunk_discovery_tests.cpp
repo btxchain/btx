@@ -288,13 +288,13 @@ struct ShieldedWalletChunkDiscoverySetup : public TestChain100Setup
     std::shared_ptr<wallet::CShieldedWallet> shielded_wallet;
     wallet::ShieldedAddress owned_addr;
     mlkem::PublicKey owned_kem_pk{};
+    SecureString passphrase{"test-passphrase"};
 
     ShieldedWalletChunkDiscoverySetup()
         : TestChain100Setup{ChainType::REGTEST},
           wallet(m_node.chain.get(), "", wallet::CreateMockableWalletDatabase())
     {
         BOOST_REQUIRE(wallet.LoadWallet() == wallet::DBErrors::LOAD_OK);
-        SecureString passphrase{"test-passphrase"};
         BOOST_REQUIRE(wallet.EncryptWallet(passphrase));
         BOOST_REQUIRE(wallet.Unlock(passphrase));
         wallet.m_shielded_wallet = std::make_shared<wallet::CShieldedWallet>(wallet);
@@ -403,7 +403,7 @@ BOOST_AUTO_TEST_CASE(block_scan_discovers_owned_egress_output_only_when_chunks_a
     };
     const auto fixture = test::shielded::BuildV2EgressReceiptFixture(
         outputs,
-        {2, 1},
+        {},
         foreign_note_a.value + foreign_note_b.value + owned_note.value);
     const CTransaction tx{fixture.tx};
 
@@ -426,23 +426,18 @@ BOOST_AUTO_TEST_CASE(block_scan_discovers_owned_egress_output_only_when_chunks_a
     BOOST_REQUIRE(cached_view.has_value());
     BOOST_REQUIRE_EQUAL(cached_view->family, "v2_egress_batch");
     BOOST_REQUIRE_EQUAL(cached_view->outputs.size(), outputs.size());
-    BOOST_REQUIRE_EQUAL(cached_view->output_chunks.size(), 2U);
+    BOOST_REQUIRE_EQUAL(cached_view->output_chunks.size(), 1U);
     BOOST_CHECK(!cached_view->outputs[0].is_ours);
     BOOST_CHECK(!cached_view->outputs[1].is_ours);
     BOOST_CHECK(cached_view->outputs[2].is_ours);
     BOOST_CHECK_EQUAL(cached_view->outputs[2].amount, owned_note.value);
     BOOST_CHECK_EQUAL(cached_view->output_chunks[0].scan_domain, "opaque");
     BOOST_CHECK_EQUAL(cached_view->output_chunks[0].first_output_index, 0U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].output_count, 2U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_output_count, 0U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_amount, 0);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].scan_domain, "opaque");
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].first_output_index, 2U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].output_count, 1U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].owned_output_count, 1U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].owned_amount, owned_note.value);
-    BOOST_CHECK(!cached_view->output_chunks[1].scan_hint_commitment.IsNull());
-    BOOST_CHECK(!cached_view->output_chunks[1].ciphertext_commitment.IsNull());
+    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].output_count, 3U);
+    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_output_count, 1U);
+    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_amount, owned_note.value);
+    BOOST_CHECK(!cached_view->output_chunks[0].scan_hint_commitment.IsNull());
+    BOOST_CHECK(!cached_view->output_chunks[0].ciphertext_commitment.IsNull());
 }
 
 BOOST_AUTO_TEST_CASE(mempool_scan_skips_egress_outputs_when_chunk_commitment_is_tampered)
@@ -463,7 +458,7 @@ BOOST_AUTO_TEST_CASE(mempool_scan_skips_egress_outputs_when_chunk_commitment_is_
     };
     auto fixture = test::shielded::BuildV2EgressReceiptFixture(
         outputs,
-        {2, 1},
+        {},
         owned_note.value + 6 * COIN + 7 * COIN);
     fixture.tx.shielded_bundle.v2_bundle->output_chunks[0].scan_hint_commitment = uint256{0xcc};
     const CTransaction tx{fixture.tx};
@@ -491,7 +486,7 @@ BOOST_AUTO_TEST_CASE(mempool_scan_caches_egress_chunk_summaries_for_canonical_bu
     };
     const auto fixture = test::shielded::BuildV2EgressReceiptFixture(
         outputs,
-        {2, 2},
+        {},
         foreign_note_a.value + owned_note_a.value + foreign_note_b.value + owned_note_b.value);
     const CTransaction tx{fixture.tx};
 
@@ -501,15 +496,11 @@ BOOST_AUTO_TEST_CASE(mempool_scan_caches_egress_chunk_summaries_for_canonical_bu
     const auto cached_view = shielded_wallet->GetCachedTransactionView(tx.GetHash());
     BOOST_REQUIRE(cached_view.has_value());
     BOOST_REQUIRE_EQUAL(cached_view->family, "v2_egress_batch");
-    BOOST_REQUIRE_EQUAL(cached_view->output_chunks.size(), 2U);
+    BOOST_REQUIRE_EQUAL(cached_view->output_chunks.size(), 1U);
     BOOST_CHECK_EQUAL(cached_view->output_chunks[0].first_output_index, 0U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].output_count, 2U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_output_count, 1U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_amount, owned_note_a.value);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].first_output_index, 2U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].output_count, 2U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].owned_output_count, 1U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].owned_amount, owned_note_b.value);
+    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].output_count, 4U);
+    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_output_count, 2U);
+    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_amount, owned_note_a.value + owned_note_b.value);
 }
 
 CTransaction BuildMinimalV2SendTransaction(const uint256& recipient_pk_hash,
@@ -781,6 +772,46 @@ BOOST_AUTO_TEST_CASE(imported_viewing_key_survives_wallet_mempool_to_block_callb
     BOOST_REQUIRE_EQUAL(notes.size(), 1U);
     BOOST_CHECK_EQUAL(notes.front().note.value, live_value);
     BOOST_CHECK(!notes.front().is_mine_spend);
+}
+
+BOOST_AUTO_TEST_CASE(locked_scan_owned_note_rehydrates_to_spendable_on_unlock)
+{
+    const CAmount value = 41 * COIN / 100;
+    const CTransaction tx =
+        BuildMinimalV2SendTransaction(owned_addr.pk_hash, owned_kem_pk, value, 0xf6);
+
+    CBlock block;
+    block.vtx.push_back(MakeTransactionRef(tx));
+
+    BOOST_REQUIRE(wallet.Lock());
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        shielded_wallet->ScanBlock(block, /*height=*/1);
+
+        const auto notes = shielded_wallet->GetUnspentNotes(/*min_depth=*/0);
+        BOOST_REQUIRE_EQUAL(notes.size(), 1U);
+        BOOST_CHECK(!notes.front().is_mine_spend);
+
+        const auto summary = shielded_wallet->GetShieldedBalanceSummary(/*min_depth=*/0);
+        BOOST_CHECK_EQUAL(summary.spendable, 0);
+        BOOST_CHECK_EQUAL(summary.watchonly, value);
+    }
+
+    BOOST_REQUIRE(wallet.Unlock(passphrase));
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        BOOST_CHECK(shielded_wallet->MaybeRehydrateSpendingKeys());
+
+        const auto notes = shielded_wallet->GetUnspentNotes(/*min_depth=*/0);
+        BOOST_REQUIRE_EQUAL(notes.size(), 1U);
+        BOOST_CHECK(notes.front().is_mine_spend);
+
+        const auto summary = shielded_wallet->GetShieldedBalanceSummary(/*min_depth=*/0);
+        BOOST_CHECK_EQUAL(summary.spendable, value);
+        BOOST_CHECK_EQUAL(summary.watchonly, 0);
+        BOOST_CHECK_EQUAL(shielded_wallet->GetShieldedBalance(/*min_depth=*/0), value);
+        BOOST_REQUIRE_EQUAL(shielded_wallet->GetSpendableNotes(/*min_depth=*/0).size(), 1U);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(block_scan_deduplicates_v2_send_commitments_across_transactions)

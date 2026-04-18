@@ -1,0 +1,197 @@
+# Copyright (c) 2023-present The Bitcoin Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+name: BTX Readiness CI
+
+on:
+  workflow_dispatch:
+
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  centos-gate:
+    name: centos native container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      CC: gcc
+      CXX: g++
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Linux build deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            clang \
+            lld \
+            curl \
+            jq \
+            python3-zmq \
+            libboost-dev \
+            libevent-dev \
+            libminiupnpc-dev \
+            libsqlite3-dev \
+            libssl-dev \
+            libzmq3-dev
+
+      - name: Toolchain info
+        run: |
+          set -euo pipefail
+          uname -a
+          if command -v lsb_release >/dev/null 2>&1; then lsb_release -a; fi
+          gcc --version || true
+          cmake --version
+          python3 --version
+
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          echo "=== Before cleanup ==="
+          df -h /tmp
+          # Remove large preinstalled packages to free /tmp (which shares the root partition)
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
+          sudo apt-get clean || true
+          docker system prune --force --volumes || true
+          echo "=== After cleanup ==="
+          df -h /tmp
+
+      - name: Run target
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/run_ci_target.sh
+          scripts/ci/run_ci_target.sh "platform-native-centos"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btx-ci-platform-native-centos-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            .btx-parallel-test-logs
+            .btx-production-readiness/logs
+            .btx-validation
+            .btx-production-readiness/production-readiness-report.json
+
+  ci-matrix:
+    name: ${{ matrix.name }}
+    needs: centos-gate
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    env:
+      CC: clang
+      CXX: clang++
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: lint
+            target: lint
+            runs_on: ubuntu-24.04
+            timeout_minutes: 45
+          - name: tidy
+            target: tidy
+            runs_on: macos-14
+            timeout_minutes: 45
+          - name: ctest
+            target: ctest
+            runs_on: ubuntu-24.04
+            timeout_minutes: 90
+          - name: fuzz regression
+            target: fuzz
+            runs_on: ubuntu-24.04
+            timeout_minutes: 45
+          - name: functional matmul
+            target: functional-matmul
+            runs_on: ubuntu-24.04
+            timeout_minutes: 45
+          - name: sanitizer mining smoke
+            target: sanitizer-smoke
+            runs_on: ubuntu-24.04
+            timeout_minutes: 90
+          - name: launch blockers
+            target: launch-blockers
+            runs_on: ubuntu-24.04
+            timeout_minutes: 45
+          - name: production readiness
+            target: production-readiness
+            runs_on: ubuntu-24.04
+            timeout_minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        if: matrix.target == 'lint'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            clang \
+            lld \
+            curl \
+            jq \
+            python3-zmq \
+            libboost-dev \
+            libevent-dev \
+            libminiupnpc-dev \
+            libsqlite3-dev \
+            libssl-dev \
+            libzmq3-dev
+
+      - name: Install macOS tidy deps
+        if: runner.os == 'macOS' && matrix.target == 'tidy'
+        run: |
+          set -euo pipefail
+          brew install llvm ninja
+
+      - name: Toolchain info
+        run: |
+          set -euo pipefail
+          uname -a
+          if command -v sw_vers >/dev/null 2>&1; then sw_vers; fi
+          if command -v lsb_release >/dev/null 2>&1; then lsb_release -a; fi
+          clang --version || true
+          gcc --version || true
+          cmake --version
+          python3 --version
+          if command -v python3.11 >/dev/null 2>&1; then python3.11 --version; fi
+
+      - name: Run target
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/run_ci_target.sh
+          scripts/ci/run_ci_target.sh "${{ matrix.target }}"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btx-ci-${{ matrix.target }}-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            .btx-parallel-test-logs
+            .btx-production-readiness/logs
+            .btx-validation
+            .btx-production-readiness/production-readiness-report.json

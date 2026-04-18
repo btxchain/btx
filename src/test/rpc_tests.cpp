@@ -489,6 +489,39 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_pq_wallet_methods)
     BOOST_CHECK_EQUAL(result[3].get_bool(), true);
 }
 
+BOOST_AUTO_TEST_CASE(rpc_convert_values_btx_mining_methods)
+{
+    UniValue result;
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("getdifficultyhealth", {"960"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 1U);
+    BOOST_CHECK_EQUAL(result[0].getInt<int>(), 960);
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("getmatmulchallengeprofile", {"1", "0.25", "0.75", "2", "35"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 5U);
+    BOOST_CHECK_CLOSE(result[0].get_real(), 1.0, 0.0001);
+    BOOST_CHECK_CLOSE(result[1].get_real(), 0.25, 0.0001);
+    BOOST_CHECK_CLOSE(result[2].get_real(), 0.75, 0.0001);
+    BOOST_CHECK_EQUAL(result[3].getInt<int>(), 2);
+    BOOST_CHECK_CLOSE(result[4].get_real(), 35.0, 0.0001);
+
+    const std::string challenge{R"({"kind":"matmul_service_challenge_v1"})"};
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("solvematmulservicechallenge", {challenge, "500000", "250", "4"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 4U);
+    BOOST_CHECK(result[0].isObject());
+    BOOST_CHECK_EQUAL(result[0]["kind"].get_str(), "matmul_service_challenge_v1");
+    BOOST_CHECK_EQUAL(result[1].getInt<int64_t>(), 500000);
+    BOOST_CHECK_EQUAL(result[2].getInt<int64_t>(), 250);
+    BOOST_CHECK_EQUAL(result[3].getInt<int>(), 4);
+
+    const std::string proofs{R"([{"challenge":{"kind":"matmul_service_challenge_v1"},"nonce64_hex":"0000000000000000","digest_hex":"0000000000000000000000000000000000000000000000000000000000000000"}])"};
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("verifymatmulserviceproofs", {proofs, "false"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 2U);
+    BOOST_CHECK(result[0].isArray());
+    BOOST_CHECK_EQUAL(result[0][0]["challenge"]["kind"].get_str(), "matmul_service_challenge_v1");
+    BOOST_CHECK_EQUAL(result[1].get_bool(), false);
+}
+
 BOOST_AUTO_TEST_CASE(rpc_getblockstats_calculate_percentiles_by_weight)
 {
     int64_t total_weight = 200;

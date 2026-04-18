@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 import tarfile
@@ -76,11 +77,17 @@ class PackageReleaseArchiveTest(unittest.TestCase):
             self.assertTrue(archive_path.is_file())
             with tarfile.open(archive_path, "r:gz") as archive:
                 names = set(archive.getnames())
-            self.assertIn("btx-29.2/bin/btxd", names)
-            self.assertIn("btx-29.2/bin/btx-cli", names)
-            self.assertIn("btx-29.2/contrib/faststart/btx-faststart.py", names)
-            self.assertIn("btx-29.2/contrib/mining/start-live-mining.sh", names)
-            self.assertIn("btx-29.2/doc/btx-download-and-go.md", names)
+                self.assertIn("btx-29.2/bin/btxd", names)
+                self.assertIn("btx-29.2/bin/btx-cli", names)
+                self.assertIn("btx-29.2/libexec/btxd.real", names)
+                self.assertIn("btx-29.2/libexec/btx-cli.real", names)
+                self.assertIn("btx-29.2/contrib/faststart/btx-faststart.py", names)
+                self.assertIn("btx-29.2/contrib/mining/start-live-mining.sh", names)
+                self.assertIn("btx-29.2/doc/btx-download-and-go.md", names)
+
+                wrapper = archive.extractfile("btx-29.2/bin/btxd")
+                assert wrapper is not None
+                self.assertIn("missing runtime libraries", wrapper.read().decode("utf-8"))
 
     def test_windows_archive_uses_zip_and_exe_names(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -131,6 +138,59 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                     source_root=source_root,
                     temp_root=root / "temp",
                 )
+
+    def test_tarball_is_reproducible_with_source_date_epoch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            source_root = self._build_source_root(root)
+            btxd, btx_cli = self._write_binaries(root)
+            output_a = root / "out-a"
+            output_b = root / "out-b"
+
+            original_epoch = os.environ.get("SOURCE_DATE_EPOCH")
+            os.environ["SOURCE_DATE_EPOCH"] = "1712534400"
+            try:
+                self.module.main(
+                    [
+                        "--output-dir",
+                        str(output_a),
+                        "--version",
+                        "29.2",
+                        "--platform-id",
+                        "linux-x86_64",
+                        "--btxd",
+                        str(btxd),
+                        "--btx-cli",
+                        str(btx_cli),
+                        "--source-root",
+                        str(source_root),
+                    ]
+                )
+                self.module.main(
+                    [
+                        "--output-dir",
+                        str(output_b),
+                        "--version",
+                        "29.2",
+                        "--platform-id",
+                        "linux-x86_64",
+                        "--btxd",
+                        str(btxd),
+                        "--btx-cli",
+                        str(btx_cli),
+                        "--source-root",
+                        str(source_root),
+                    ]
+                )
+            finally:
+                if original_epoch is None:
+                    os.environ.pop("SOURCE_DATE_EPOCH", None)
+                else:
+                    os.environ["SOURCE_DATE_EPOCH"] = original_epoch
+
+            archive_a = output_a / "btx-29.2-x86_64-linux-gnu.tar.gz"
+            archive_b = output_b / "btx-29.2-x86_64-linux-gnu.tar.gz"
+            self.assertEqual(archive_a.read_bytes(), archive_b.read_bytes())
 
 
 if __name__ == "__main__":

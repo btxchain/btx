@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <chainparams.h>
 #include <consensus/amount.h>
 #include <crypto/chacha20poly1305.h>
 #include <hash.h>
@@ -1382,8 +1383,13 @@ BOOST_AUTO_TEST_CASE(e2e_wallet_create_consensus_validate)
     // 8. Create immutable CTransaction.
     const CTransaction tx{mtx};
 
-    // 9. Validate via CShieldedProofCheck.
-    CShieldedProofCheck proof_check(tx, std::make_shared<shielded::ShieldedMerkleTree>(tree));
+    // 9. Validate via CShieldedProofCheck in a prefork MatRiCT context.
+    const auto& consensus = Params().GetConsensus();
+    const int32_t prefork_height = std::max<int32_t>(1, consensus.nShieldedMatRiCTDisableHeight - 1);
+    CShieldedProofCheck proof_check(tx,
+                                    consensus,
+                                    prefork_height,
+                                    std::make_shared<shielded::ShieldedMerkleTree>(tree));
     const auto proof_result = proof_check();
     BOOST_CHECK_MESSAGE(!proof_result.has_value(),
         "Proof check failed: " + proof_result.value_or(""));

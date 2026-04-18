@@ -462,7 +462,8 @@ BOOST_AUTO_TEST_CASE(d3_duplicate_serial_numbers_in_proof)
 }
 
 // D3-2: Force a serial number collision by using the same key for both inputs.
-// This tests whether ProveCT itself detects the collision.
+// Proof construction currently succeeds, and the dispatch layer must reject the
+// duplicate serial numbers before the proof is accepted.
 BOOST_AUTO_TEST_CASE(d3_same_key_two_inputs_collision)
 {
     const size_t N = 32;
@@ -481,9 +482,10 @@ BOOST_AUTO_TEST_CASE(d3_same_key_two_inputs_collision)
     auto proof = ProveCT(setup.inputs, setup.outputs, setup.pub, 0xF2A);
     BOOST_REQUIRE_EQUAL(proof.serial_numbers.size(), 2U);
 
-    // Serial numbers should be identical (same key)
-    SmilePoly sn0 = proof.serial_numbers[0]; sn0.Reduce();
-    SmilePoly sn1 = proof.serial_numbers[1]; sn1.Reduce();
+    SmilePoly sn0 = proof.serial_numbers[0];
+    sn0.Reduce();
+    SmilePoly sn1 = proof.serial_numbers[1];
+    sn1.Reduce();
 
     BOOST_CHECK_MESSAGE(sn0 == sn1,
         "D3-2: Same key used for two inputs must produce duplicate serial numbers.");

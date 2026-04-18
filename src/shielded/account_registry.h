@@ -412,6 +412,7 @@ public:
                                                     DBOptions options = {});
     static void ResetPayloadStore();
     [[nodiscard]] static bool HasPayloadStore();
+    [[nodiscard]] bool HasAttachedPayloadStore() const { return m_payload_store != nullptr; }
 
     [[nodiscard]] size_t Size() const { return m_entries.size(); }
     [[nodiscard]] bool Empty() const { return m_entries.empty(); }

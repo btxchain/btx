@@ -421,6 +421,11 @@ uint256 HashMatrixWords(Span<const field::Element> words)
     return digest;
 }
 
+uint256 FinalizeTranscriptDigestFromWords(Span<const field::Element> words)
+{
+    return HashMatrixWords(words);
+}
+
 uint256 FinalizeProductCommittedDigestFromHash(const uint256& c_prime_hash,
                                                const uint256& sigma,
                                                uint32_t dim,

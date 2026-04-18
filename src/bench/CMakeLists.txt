@@ -75,11 +75,28 @@ target_raw_data_sources(bench_bitcoin NAMESPACE benchmark::data
 
 target_link_libraries(bench_bitcoin
   core_interface
-  test_util
   $<TARGET_NAME_IF_EXISTS:bitcoinconsensus>
-  bitcoin_node
   Boost::headers
 )
+if(UNIX AND NOT APPLE)
+  if(ENABLE_WALLET)
+    target_link_btx_linux_archive_group(bench_bitcoin
+      test_util
+      ${BTX_NODE_WALLET_ARCHIVES}
+    )
+  else()
+    target_link_btx_linux_archive_group(bench_bitcoin
+      test_util
+      ${BTX_NODE_ARCHIVES}
+    )
+  endif()
+else()
+  target_link_libraries(bench_bitcoin
+    test_util
+    bitcoin_node
+    $<$<BOOL:${ENABLE_WALLET}>:bitcoin_wallet>
+  )
+endif()
 
 if(ENABLE_WALLET)
   target_sources(bench_bitcoin
@@ -92,7 +109,6 @@ if(ENABLE_WALLET)
       wallet_ismine.cpp
       wallet_migration.cpp
   )
-  target_link_libraries(bench_bitcoin bitcoin_wallet)
 endif()
 
 # Canonical BTX build target name while preserving legacy bench_bitcoin target.

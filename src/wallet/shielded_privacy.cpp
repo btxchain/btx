@@ -9,6 +9,7 @@
 #include <hash.h>
 #include <random.h>
 #include <shielded/ringct/ring_selection.h>
+#include <shielded/v2_send.h>
 #include <util/strencodings.h>
 #include <wallet/shielded_coins.h>
 
@@ -90,6 +91,24 @@ CAmount GetShieldedDustThresholdForHeight(const CFeeRate& relay_dust_fee, int32_
 CAmount GetShieldedMinimumChangeReserveForHeight(const CFeeRate& relay_dust_fee, int32_t height)
 {
     return std::max<CAmount>(1, GetShieldedDustThresholdForHeight(relay_dust_fee, height));
+}
+
+bool PreferExactBalanceShieldedChangeReserve(CAmount change,
+                                             size_t selected_note_count,
+                                             size_t shielded_recipient_count,
+                                             size_t transparent_recipient_count)
+{
+    return change == 0 &&
+           selected_note_count > 1 &&
+           shielded_recipient_count == 1 &&
+           transparent_recipient_count == 0;
+}
+
+bool SelectionFitsDirectShieldedSpendLimits(size_t selected_note_count, size_t ring_size)
+{
+    return selected_note_count <= shielded::v2::MAX_DIRECT_SPENDS &&
+           selected_note_count <= shielded::v2::MAX_LIVE_DIRECT_SMILE_SPENDS &&
+           selected_note_count <= ring_size;
 }
 
 uint64_t GetShieldedMinimumPrivacyTreeSizeForHeight(size_t ring_size, int32_t height)

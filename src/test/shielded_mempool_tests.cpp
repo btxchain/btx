@@ -42,7 +42,9 @@ CMutableTransaction BuildShieldedTx(const Nullifier& nf)
     return mtx;
 }
 
-CMutableTransaction BuildShieldedV2SendTx(const Nullifier& nf, const uint256& spend_anchor)
+CMutableTransaction BuildShieldedV2SendTx(const Nullifier& nf,
+                                          const uint256& spend_anchor,
+                                          const uint256& account_registry_anchor = uint256{})
 {
     using namespace shielded::v2;
 
@@ -76,7 +78,8 @@ CMutableTransaction BuildShieldedV2SendTx(const Nullifier& nf, const uint256& sp
 
     SendPayload payload;
     payload.spend_anchor = spend_anchor;
-    payload.account_registry_anchor = registry_witness->first;
+    payload.account_registry_anchor =
+        account_registry_anchor.IsNull() ? registry_witness->first : account_registry_anchor;
     payload.spends = {spend};
     payload.outputs = {output};
     payload.fee = 1;
@@ -258,9 +261,12 @@ BOOST_FIXTURE_TEST_CASE(shielded_v2_anchor_cleanup_evicts_stale_transactions, Te
     BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
 
     const uint256 stale_anchor = chainman.GetShieldedMerkleTree().Root();
+    const uint256 current_registry_anchor = chainman.GetShieldedAccountRegistryRoot();
     BOOST_REQUIRE(!stale_anchor.IsNull());
+    BOOST_REQUIRE(!current_registry_anchor.IsNull());
 
-    const auto stale_tx = MakeTransactionRef(BuildShieldedV2SendTx(GetRandHash(), stale_anchor));
+    const auto stale_tx = MakeTransactionRef(
+        BuildShieldedV2SendTx(GetRandHash(), stale_anchor, current_registry_anchor));
 
     TestMemPoolEntryHelper entry;
     AddToMempool(pool, entry.FromTx(stale_tx));
@@ -275,6 +281,52 @@ BOOST_FIXTURE_TEST_CASE(shielded_v2_anchor_cleanup_evicts_stale_transactions, Te
 
     RemoveStaleShieldedAnchorMempoolTransactions(pool, chainman.ActiveChain(), chainman);
     BOOST_CHECK(!pool.exists(GenTxid::Txid(stale_tx->GetHash())));
+}
+
+BOOST_FIXTURE_TEST_CASE(shielded_v2_registry_anchor_cleanup_evicts_stale_transactions, TestingSetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+
+    LOCK2(::cs_main, pool.cs);
+    BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+
+    const uint256 spend_anchor = chainman.GetShieldedMerkleTree().Root();
+    const uint256 stale_registry_anchor = chainman.GetShieldedAccountRegistryRoot();
+    BOOST_REQUIRE(!spend_anchor.IsNull());
+    BOOST_REQUIRE(!stale_registry_anchor.IsNull());
+
+    const auto stale_tx = MakeTransactionRef(
+        BuildShieldedV2SendTx(GetRandHash(), spend_anchor, stale_registry_anchor));
+    const auto stale_txid = GenTxid::Txid(stale_tx->GetHash());
+
+    TestMemPoolEntryHelper entry;
+    AddToMempool(pool, entry.FromTx(stale_tx));
+    BOOST_REQUIRE(pool.exists(stale_txid));
+    BOOST_CHECK(!HasInvalidShieldedAnchors(*stale_tx, chainman));
+
+    for (int i = 0; i <= SHIELDED_ANCHOR_DEPTH; ++i) {
+        chainman.RecordShieldedAccountRegistryRoot(GetRandHash());
+    }
+    BOOST_CHECK(!chainman.IsShieldedAccountRegistryRootValid(stale_registry_anchor));
+    BOOST_CHECK(HasInvalidShieldedAnchors(*stale_tx, chainman));
+
+    const uint256 fresh_registry_anchor = GetRandHash();
+    BOOST_REQUIRE(!fresh_registry_anchor.IsNull());
+    chainman.RecordShieldedAccountRegistryRoot(fresh_registry_anchor);
+    BOOST_CHECK(chainman.IsShieldedAccountRegistryRootValid(fresh_registry_anchor));
+
+    const auto fresh_tx = MakeTransactionRef(
+        BuildShieldedV2SendTx(GetRandHash(), spend_anchor, fresh_registry_anchor));
+    const auto fresh_txid = GenTxid::Txid(fresh_tx->GetHash());
+    AddToMempool(pool, entry.FromTx(fresh_tx));
+    BOOST_REQUIRE(pool.exists(fresh_txid));
+    BOOST_CHECK(!HasInvalidShieldedAnchors(*fresh_tx, chainman));
+
+    RemoveStaleShieldedAnchorMempoolTransactions(pool, chainman.ActiveChain(), chainman);
+
+    BOOST_CHECK(!pool.exists(stale_txid));
+    BOOST_CHECK(pool.exists(fresh_txid));
 }
 
 BOOST_FIXTURE_TEST_CASE(shielded_v2_egress_cleanup_preserves_valid_anchor_refs_and_evicts_missing_ones, TestChain100Setup)

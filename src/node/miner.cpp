@@ -121,6 +121,14 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
         }
     }
 
+    for (const auto& account_registry_anchor :
+         CollectShieldedAccountRegistryRefs(tx.GetShieldedBundle())) {
+        if (account_registry_anchor.IsNull()) continue;
+        if (!chainman.IsShieldedAccountRegistryRootValid(account_registry_anchor)) {
+            return false;
+        }
+    }
+
     for (const auto& manifest_id : CollectReferencedShieldedNettingManifests(tx)) {
         if (manifest_id.IsNull()) continue;
         if (!chainman.IsShieldedNettingManifestValid(manifest_id) &&
