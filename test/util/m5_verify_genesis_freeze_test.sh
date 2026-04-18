@@ -51,13 +51,13 @@ case "${cmd}" in
   getblockhash)
     case "${network}" in
       main)
-        echo "6db39cd6aa03d259232d301776550df7caa9a25da237b52c6ea74f2f5a0fbf1c"
+        echo "75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"
         ;;
       testnet)
-        echo "f1dde19eaa71533c46fd5892799e7e034500bf305a63f5cb60ee613d51cf0289"
+        echo "f2bc3fb2eca6aa6059c4d0178b56efe038d46aa440d406905ef752179aa0e1a4"
         ;;
       regtest)
-        echo "bbc501af18e6b3a69a43c6f134d4b9710bd96dff17ee07fa648c297438495247"
+        echo "521ad0951ed299e9c56aeb7db8188972772067560351b8e55adf71dbed532360"
         ;;
     esac
     ;;
@@ -66,25 +66,25 @@ case "${cmd}" in
     case "${network}" in
       main)
         nonce="0"
-        nonce64="9"
+        nonce64="1"
         bits="20147ae1"
-        time="1772582400"
+        time="1773878400"
         matmul_dim="512"
-        matmul_digest="14551a9264a117521ebfaa2b4e17853b5dc1c2bdd4b2bfbe93ba71b16ec31023"
+        matmul_digest="07226e4fdc368a067ef904b9fdddf9763e2782fda4e695788240077805643edd"
         seed_a="a8a82ec830e8346550cad66c4cf43985dddd6a056d4bed2a5dcace445fa924ab"
         seed_b="f9aaa742cdbfb26be3d22d743b548740ff0a9e00f9cc977c1fb03df85fdf978d"
-        blockhash="6db39cd6aa03d259232d301776550df7caa9a25da237b52c6ea74f2f5a0fbf1c"
+        blockhash="75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"
         ;;
       testnet)
         nonce="0"
         nonce64="238"
         bits="20027525"
-        time="1772582400"
+        time="1773878400"
         matmul_dim="256"
-        matmul_digest="010bc73b4dab4871b55ad56e6e16b44aa69f64b2dae7725d19e85c81977232d2"
+        matmul_digest="00230371b05217711a10cf44983c2ffc3d82da06369fd0e640b6d20c033e38da"
         seed_a="a8a82ec830e8346550cad66c4cf43985dddd6a056d4bed2a5dcace445fa924ab"
         seed_b="f9aaa742cdbfb26be3d22d743b548740ff0a9e00f9cc977c1fb03df85fdf978d"
-        blockhash="f1dde19eaa71533c46fd5892799e7e034500bf305a63f5cb60ee613d51cf0289"
+        blockhash="f2bc3fb2eca6aa6059c4d0178b56efe038d46aa440d406905ef752179aa0e1a4"
         ;;
       regtest)
         nonce="2"
@@ -92,10 +92,10 @@ case "${cmd}" in
         bits="207fffff"
         time="1296688602"
         matmul_dim="64"
-        matmul_digest="6e7004077d6bb961cfe2d82977d0cad1f7e3843cc6c9ceb981fd3c059c78d27c"
+        matmul_digest="7ff451fb9e39ebaa8447435600978167d9cb8b9ee1d6933eb5e1ad84d05a2a37"
         seed_a="a8a82ec830e8346550cad66c4cf43985dddd6a056d4bed2a5dcace445fa924ab"
         seed_b="f9aaa742cdbfb26be3d22d743b548740ff0a9e00f9cc977c1fb03df85fdf978d"
-        blockhash="bbc501af18e6b3a69a43c6f134d4b9710bd96dff17ee07fa648c297438495247"
+        blockhash="521ad0951ed299e9c56aeb7db8188972772067560351b8e55adf71dbed532360"
         ;;
     esac
 
@@ -115,7 +115,7 @@ dim_v = int(sys.argv[4])
 matmul_digest = bytes.fromhex(sys.argv[5])
 seed_a = bytes.fromhex(sys.argv[6])
 seed_b = bytes.fromhex(sys.argv[7])
-merkle = bytes.fromhex("4b33106f07de6b56e6358304f44fae90f8698d81137497433a381848c9807951")
+merkle = bytes.fromhex("94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a")
 header = (
     (1).to_bytes(4, "little")
     + bytes(32)  # prev block hash (null)
@@ -134,7 +134,7 @@ PY
     fi
 
     cat <<JSON
-{"hash":"${blockhash}","time":${time},"bits":"${bits}","nonce":${nonce},"merkleroot":"4b33106f07de6b56e6358304f44fae90f8698d81137497433a381848c9807951"}
+{"hash":"${blockhash}","time":${time},"bits":"${bits}","nonce":${nonce},"merkleroot":"94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a"}
 JSON
     ;;
   stop)
