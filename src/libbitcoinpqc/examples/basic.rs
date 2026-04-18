@@ -22,11 +22,9 @@ fn test_algorithm(algorithm: Algorithm, name: &str, random_data: &[u8]) {
 
     // Get key and signature sizes
     let pk_size = bitcoinpqc::public_key_size(algorithm);
-    let sk_size = bitcoinpqc::secret_key_size(algorithm);
     let sig_size = bitcoinpqc::signature_size(algorithm);
 
     println!("Public key size: {pk_size} bytes");
-    println!("Secret key size: {sk_size} bytes");
     println!("Signature size: {sig_size} bytes");
 
     // Generate a key pair

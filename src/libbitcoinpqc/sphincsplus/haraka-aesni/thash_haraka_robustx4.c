@@ -8,6 +8,14 @@
 
 #include "harakax4.h"
 
+static void secure_memzero(void *ptr, size_t len)
+{
+    volatile unsigned char *p = (volatile unsigned char *)ptr;
+    while (len--) {
+        *p++ = 0;
+    }
+}
+
 /**
  * 4-way parallel version of thash; takes 4x as much input and output
  */
@@ -52,9 +60,9 @@ void thashx4(unsigned char *out0,
         /* skip memcpy(buf_tmp, buf_tmp, SPX_ADDR_BYTES); already in place */
 
         /* skip memset(buf_tmp, 0, SPX_ADDR_BYTES); remained untouched */
-        memset(buf_tmp + 32, 0, SPX_ADDR_BYTES);
+        secure_memzero(buf_tmp + 32, SPX_ADDR_BYTES);
         /* skip memset(buf_tmp + 64, 0, SPX_ADDR_BYTES); contains addr1 */
-        memset(buf_tmp + 96, 0, SPX_ADDR_BYTES);
+        secure_memzero(buf_tmp + 96, SPX_ADDR_BYTES);
 
         for (i = 0; i < SPX_N; i++) {
             buf_tmp[SPX_ADDR_BYTES + i]       = in0[i] ^ outbuf[i];
