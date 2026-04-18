@@ -382,7 +382,7 @@ std::optional<SmileProofResult> CreateSmileProof(
         if (!inp.note.IsValid()) return fail("invalid input note");
         if (inp.ring_index >= ring_members.size()) return fail("input ring index out of range");
         if (inp.account_leaf_commitment.IsNull()) return fail("null input account leaf commitment");
-        if (inp.note.value < 0 || inp.note.value >= Q) return fail("input note value out of range");
+        if (inp.note.value <= 0) return fail("input note value out of range");
         const uint256 effective_note_commitment =
             inp.note_commitment.IsNull() ? inp.note.GetCommitment() : inp.note_commitment;
         if (ring_members[inp.ring_index].note_commitment != effective_note_commitment) {
@@ -409,7 +409,7 @@ std::optional<SmileProofResult> CreateSmileProof(
     int64_t total_output_amount{0};
     for (const ShieldedNote& output_note : outputs) {
         if (!output_note.IsValid()) return fail("invalid output note");
-        if (output_note.value < 0 || output_note.value >= Q) return fail("output note value out of range");
+        if (output_note.value <= 0) return fail("output note value out of range");
         const auto next_total = CheckedAdd(total_output_amount, output_note.value);
         if (!next_total) return fail("output total overflow");
         total_output_amount = *next_total;
