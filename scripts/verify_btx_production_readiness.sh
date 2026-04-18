@@ -33,7 +33,6 @@ Options:
   --skip-m7-parallel-check     Skip test/util/m7_parallel_readiness_test.sh
   --skip-parallel-timeout-check
                                Skip test/util/test_btx_parallel_timeout_guard_test.sh
-  --skip-swarm-timeout-check   Skip test/util/codex_swarm_timeout_test.sh
   --skip-production-loop-guard Skip test/util/verify_btx_production_loop_test.sh
   --skip-live-p2p             Skip dual-node live P2P sync/relay validation
   --skip-live-mining           Skip strict regtest live mining check
@@ -43,7 +42,7 @@ EOF
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build-btx"
-ARTIFACT_PATH="${ROOT_DIR}/.codex-swarm/production-readiness-report.json"
+ARTIFACT_PATH="${ROOT_DIR}/.btx-production-readiness/production-readiness-report.json"
 LOG_ROOT="${ROOT_DIR}/.btx-production-readiness/logs"
 CHECK_TIMEOUT_SECONDS=600
 SKIP_PARALLEL_GATE=0
@@ -60,7 +59,6 @@ MATMUL_PERF_ENVELOPE="${ROOT_DIR}/doc/matmul-perf-envelopes.json"
 SKIP_M7_TIMEOUT_CHECK=0
 SKIP_M7_PARALLEL_CHECK=0
 SKIP_PARALLEL_TIMEOUT_CHECK=0
-SKIP_SWARM_TIMEOUT_CHECK=0
 SKIP_PRODUCTION_LOOP_GUARD=0
 SKIP_LIVE_P2P=0
 SKIP_LIVE_MINING=0
@@ -137,10 +135,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-parallel-timeout-check)
       SKIP_PARALLEL_TIMEOUT_CHECK=1
-      shift
-      ;;
-    --skip-swarm-timeout-check)
-      SKIP_SWARM_TIMEOUT_CHECK=1
       shift
       ;;
     --skip-production-loop-guard)
@@ -333,7 +327,6 @@ check_binaries() {
   [[ -x "${BUILD_DIR}/bin/btx-genesis" ]]
   [[ -x "${ROOT_DIR}/scripts/test_btx_parallel.sh" ]]
   [[ -x "${ROOT_DIR}/scripts/verify_btx_production_loop.sh" ]]
-  [[ -x "${ROOT_DIR}/scripts/codex_swarm.sh" ]]
   [[ -x "${ROOT_DIR}/scripts/m7_mining_readiness.sh" ]]
   [[ -x "${ROOT_DIR}/scripts/m7_miner_pool_e2e.py" ]]
   [[ -x "${ROOT_DIR}/scripts/m5_verify_genesis_freeze.sh" ]]
@@ -352,7 +345,6 @@ check_binaries() {
   [[ -x "${ROOT_DIR}/test/util/m7_parallel_readiness_test.sh" ]]
   [[ -x "${ROOT_DIR}/test/util/test_btx_parallel_timeout_guard_test.sh" ]]
   [[ -x "${ROOT_DIR}/test/util/verify_btx_production_readiness_parallel_lock_isolation_test.sh" ]]
-  [[ -x "${ROOT_DIR}/test/util/codex_swarm_timeout_test.sh" ]]
   [[ -x "${ROOT_DIR}/test/util/m5_verify_genesis_freeze_test.sh" ]]
   [[ -x "${ROOT_DIR}/test/util/verify_btx_launch_blockers_test.sh" ]]
 }
@@ -502,11 +494,6 @@ fi
 if [[ "${SKIP_PARALLEL_TIMEOUT_CHECK}" -eq 0 ]]; then
   run_check "parallel_timeout_guard" "Parallel gate enforces per-job timeout and force-kill semantics" \
     bash -lc "cd '${ROOT_DIR}' && bash test/util/test_btx_parallel_timeout_guard_test.sh"
-fi
-
-if [[ "${SKIP_SWARM_TIMEOUT_CHECK}" -eq 0 ]]; then
-  run_check "swarm_timeout_guard" "Swarm timeout guard detects and terminates hanging workers" \
-    bash -lc "cd '${ROOT_DIR}' && test/util/codex_swarm_timeout_test.sh"
 fi
 
 if [[ "${SKIP_PRODUCTION_LOOP_GUARD}" -eq 0 ]]; then

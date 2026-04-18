@@ -30,7 +30,7 @@ test/benchmark/matmul_bench
 /.btx-production-readiness/
 /.btx-validation/
 /.btx-metal/
-/.codex-swarm/
+/.btx-swarm/
 /.ci-fuzz-corpus/
 /.ci-fuzz-corpus-local/
 /.ci-remote-logs/

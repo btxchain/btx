@@ -44,7 +44,6 @@ required = {
     "m7_timeout_guard",
     "m7_parallel_isolation",
     "parallel_timeout_guard",
-    "swarm_timeout_guard",
     "production_loop_guard",
     "live_dual_node_p2p",
     "live_strict_mining",
