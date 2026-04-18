@@ -707,17 +707,27 @@ def main():
         ("Serialization: GAMMA fits Signed24", vectors["serialization_bounds"]["GAMMA_RESPONSE_fits_Signed24"]),
     ]
 
-    for name, result in checks:
-        status = "PASS" if result else "FAIL"
-        print(f"  [{status}] {name}")
-        if not result:
+    failed_checks = []
+    for check_label, check_passed in checks:
+        if not check_passed:
+            failed_checks.append(check_label)
             all_pass = False
+    if failed_checks:
+        for failed_check in failed_checks:
+            print(f"  [FAIL] {failed_check}")
+    else:
+        print(f"  Algebraic checks passed: {len(checks)}/{len(checks)}")
 
+    failed_trials = []
     for ct in vectors["challenge_structure_tests"]:
-        status = "PASS" if ct["structure_valid"] else "FAIL"
-        print(f"  [{status}] Challenge structure trial {ct['trial']}: {ct['message']}")
         if not ct["structure_valid"]:
+            failed_trials.append(ct["trial"])
             all_pass = False
+    if failed_trials:
+        for failed_trial in failed_trials:
+            print(f"  [FAIL] Challenge structure trial {failed_trial}")
+    else:
+        print(f"  Challenge structure trials passed: {len(vectors['challenge_structure_tests'])}/{len(vectors['challenge_structure_tests'])}")
 
     print()
 

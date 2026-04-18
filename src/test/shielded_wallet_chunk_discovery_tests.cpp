@@ -345,6 +345,26 @@ BOOST_AUTO_TEST_CASE(v2_scan_discovers_owned_outputs_across_multiple_local_keyse
     BOOST_CHECK_EQUAL(values[1], 17 * COIN);
 }
 
+BOOST_AUTO_TEST_CASE(large_owned_user_note_remains_spendable_after_scan)
+{
+    LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+    OutputDescription large_output = BuildOutput(
+        MakeNote(owned_addr.pk_hash, 20'000 * COIN, 0x53),
+        owned_kem_pk,
+        ScanDomain::USER,
+        0x63);
+    const auto fixture = test::shielded::BuildV2EgressReceiptFixture(
+        std::vector<OutputDescription>{large_output});
+
+    CBlock block;
+    block.vtx.push_back(MakeTransactionRef(CTransaction{fixture.tx}));
+    shielded_wallet->ScanBlock(block, /*height=*/1);
+
+    const auto spendable = shielded_wallet->GetSpendableNotes(/*min_depth=*/1);
+    BOOST_REQUIRE_EQUAL(spendable.size(), 1U);
+    BOOST_CHECK_EQUAL(spendable.front().note.value, 20'000 * COIN);
+}
+
 BOOST_AUTO_TEST_CASE(revoked_address_is_rejected_after_postfork_privacy_boundary)
 {
     wallet::ShieldedAddress revoked_addr;

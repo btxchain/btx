@@ -151,14 +151,11 @@ struct ResolvedV2ShieldedRecipient
     return true;
 }
 
-[[nodiscard]] constexpr CAmount GetShieldedSmileValueLimit()
+[[nodiscard]] bool IsShieldedAmountCompatible(CAmount value)
 {
-    return static_cast<CAmount>(smile2::Q) - 1;
-}
-
-[[nodiscard]] bool IsShieldedSmileValueCompatible(CAmount value)
-{
-    return value > 0 && MoneyRange(value) && value < static_cast<CAmount>(smile2::Q);
+    // SMILE encodes amounts as 32 base-4 digits, so wallet amount validity is
+    // bounded by MoneyRange rather than the proof field modulus q.
+    return value > 0 && MoneyRange(value);
 }
 
 [[nodiscard]] uint256 ViewOnlyNullifier(const uint256& commitment)
@@ -2654,12 +2651,11 @@ std::vector<ShieldedCoin> CShieldedWallet::GetSpendableNotes(int min_depth) cons
     for (const auto& [nf, coin] : m_notes) {
         if (coin.is_spent || !coin.is_mine_spend) continue;
         if (!IsWalletSpendableNoteClass(coin.note_class)) continue;
-        if (!IsShieldedSmileValueCompatible(coin.note.value)) {
+        if (!IsShieldedAmountCompatible(coin.note.value)) {
             LogDebug(BCLog::WALLETDB,
-                     "CShieldedWallet::GetSpendableNotes skipping note commitment=%s value=%lld outside SMILE range (< %lld)\n",
+                     "CShieldedWallet::GetSpendableNotes skipping note commitment=%s value=%lld outside supported wallet amount range\n",
                      coin.commitment.ToString(),
-                     static_cast<long long>(coin.note.value),
-                     static_cast<long long>(GetShieldedSmileValueLimit() + 1));
+                     static_cast<long long>(coin.note.value));
             continue;
         }
         // R5-520: Skip notes that are reserved by an in-flight transaction.
@@ -2745,8 +2741,8 @@ std::optional<ShieldedSpendSelectionEstimate> CShieldedWallet::EstimateDirectSpe
 
     CAmount total_input{0};
     for (const auto& coin : selected) {
-        if (!IsShieldedSmileValueCompatible(coin.note.value)) {
-            return fail("selected note exceeds SMILE input value limit");
+        if (!IsShieldedAmountCompatible(coin.note.value)) {
+            return fail("selected note has invalid amount");
         }
         const auto next = CheckedAdd(total_input, coin.note.value);
         if (!next || !MoneyRange(*next)) return fail("selected input total overflow");
@@ -2779,8 +2775,8 @@ std::optional<ShieldedSpendSelectionEstimate> CShieldedWallet::EstimateDirectSpe
 
         CAmount reserved_total{0};
         for (const auto& coin : reserved_selection) {
-            if (!IsShieldedSmileValueCompatible(coin.note.value)) {
-                return fail("selected note exceeds SMILE input value limit");
+            if (!IsShieldedAmountCompatible(coin.note.value)) {
+                return fail("selected note has invalid amount");
             }
             const auto next = CheckedAdd(reserved_total, coin.note.value);
             if (!next || !MoneyRange(*next)) return fail("selected input total overflow");
@@ -2901,8 +2897,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
 
     for (const auto& [_, amount] : shielded_recipients) {
         if (amount <= 0 || !MoneyRange(amount)) return fail("invalid shielded recipient amount");
-        if (!IsShieldedSmileValueCompatible(amount)) {
-            return fail("shielded recipient amount exceeds SMILE note value limit");
+        if (!IsShieldedAmountCompatible(amount)) {
+            return fail("shielded recipient amount is out of range");
         }
         if (shielded_dust_threshold > 0 && amount < shielded_dust_threshold) {
             return fail("shielded recipient amount below dust threshold");
@@ -2930,8 +2926,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
         }
         if (selection.selected.empty()) return fail("no spendable notes selected");
         for (const auto& coin : selection.selected) {
-            if (!IsShieldedSmileValueCompatible(coin.note.value)) {
-                return fail("selected note exceeds SMILE input value limit");
+            if (!IsShieldedAmountCompatible(coin.note.value)) {
+                return fail("selected note has invalid amount");
             }
             const auto next = CheckedAdd(selection.total_input, coin.note.value);
             if (!next || !MoneyRange(*next)) return fail("selected input total overflow");
@@ -3002,8 +2998,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
         }
         CAmount reserved_total{0};
         for (const auto& coin : reserved_selection) {
-            if (!IsShieldedSmileValueCompatible(coin.note.value)) {
-                return fail("selected note exceeds SMILE input value limit");
+            if (!IsShieldedAmountCompatible(coin.note.value)) {
+                return fail("selected note has invalid amount");
             }
             const auto next = CheckedAdd(reserved_total, coin.note.value);
             if (!next || !MoneyRange(*next)) return fail("selected input total overflow");
@@ -3267,8 +3263,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
                      static_cast<long long>(amount));
             return fail("invalid output note");
         }
-        if (!IsShieldedSmileValueCompatible(note.value)) {
-            return fail("shielded output exceeds SMILE note value limit");
+        if (!IsShieldedAmountCompatible(note.value)) {
+            return fail("shielded output amount is out of range");
         }
 
         const auto bound_note = shielded::NoteEncryption::EncryptBoundNote(note, recipient_kem_pk);
@@ -4274,7 +4270,7 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateTransparentToShieldedS
     CAmount total_shielded_out{0};
     for (const auto& [_, amount] : shielded_recipients) {
         if (amount <= 0 || !MoneyRange(amount)) return fail("invalid shielded recipient amount");
-        if (!IsShieldedSmileValueCompatible(amount)) return fail("shielded recipient amount exceeds SMILE note value limit");
+        if (!IsShieldedAmountCompatible(amount)) return fail("shielded recipient amount is out of range");
         const auto next = CheckedAdd(total_shielded_out, amount);
         if (!next || !MoneyRange(*next)) return fail("shielded recipient total overflow");
         total_shielded_out = *next;
@@ -4348,8 +4344,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateTransparentToShieldedS
             if (error != nullptr) *error = "invalid output note";
             return false;
         }
-        if (!IsShieldedSmileValueCompatible(note.value)) {
-            if (error != nullptr) *error = "shielded output exceeds SMILE note value limit";
+        if (!IsShieldedAmountCompatible(note.value)) {
+            if (error != nullptr) *error = "shielded output amount is out of range";
             return false;
         }
         if (shielded_dust_threshold > 0 && note.value < shielded_dust_threshold) {
@@ -4704,8 +4700,8 @@ std::optional<CMutableTransaction> CShieldedWallet::ShieldFunds(const std::vecto
         if (note.value <= 0 || !MoneyRange(note.value) || note.recipient_pk_hash.IsNull()) {
             return fail(strprintf("generated note is invalid for destination %s", address.Encode()));
         }
-        if (!IsShieldedSmileValueCompatible(note.value)) {
-            return fail(strprintf("shielded output exceeds SMILE note value limit for %s", address.Encode()));
+        if (!IsShieldedAmountCompatible(note.value)) {
+            return fail(strprintf("shielded output amount is out of range for %s", address.Encode()));
         }
         if (shielded_dust_threshold > 0 && note.value < shielded_dust_threshold) {
             return fail(strprintf("shielded output below dust threshold for %s", address.Encode()));
@@ -4941,8 +4937,8 @@ std::optional<PartiallySignedTransaction> CShieldedWallet::ShieldFundsPSBT(
             }
             return std::nullopt;
         }
-        if (!IsShieldedSmileValueCompatible(note.value)) {
-            if (error != nullptr) *error = "shielded output exceeds SMILE note value limit";
+        if (!IsShieldedAmountCompatible(note.value)) {
+            if (error != nullptr) *error = "shielded output amount is out of range";
             return std::nullopt;
         }
         if (shielded_dust_threshold > 0 && note.value < shielded_dust_threshold) {
