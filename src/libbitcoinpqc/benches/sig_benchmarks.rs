@@ -187,17 +187,15 @@ fn bench_sizes(c: &mut Criterion) {
     debug_println!("Key and Signature Sizes (bytes):");
     debug_println!("ML-DSA-44:");
     debug_println!(
-        "  Public key: {}, Secret key: {}, Signature: {}",
+        "  Public key: {}, Signature: {}",
         ml_pk_size,
-        ml_sk_size,
         ml_sig_size
     );
 
     debug_println!("SLH-DSA-128S:");
     debug_println!(
-        "  Public key: {}, Secret key: {}, Signature: {}",
+        "  Public key: {}, Signature: {}",
         slh_pk_size,
-        slh_sk_size,
         slh_sig_size
     );
 
