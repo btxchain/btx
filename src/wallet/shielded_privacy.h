@@ -30,6 +30,12 @@ namespace wallet {
                                                         int32_t height);
 [[nodiscard]] CAmount GetShieldedMinimumChangeReserveForHeight(const CFeeRate& relay_dust_fee,
                                                                int32_t height);
+[[nodiscard]] bool PreferExactBalanceShieldedChangeReserve(CAmount change,
+                                                           size_t selected_note_count,
+                                                           size_t shielded_recipient_count,
+                                                           size_t transparent_recipient_count);
+[[nodiscard]] bool SelectionFitsDirectShieldedSpendLimits(size_t selected_note_count,
+                                                          size_t ring_size);
 [[nodiscard]] uint64_t GetShieldedMinimumPrivacyTreeSizeForHeight(size_t ring_size,
                                                                   int32_t height);
 [[nodiscard]] size_t GetShieldedHistoricalRingExclusionLimit(size_t ring_size,

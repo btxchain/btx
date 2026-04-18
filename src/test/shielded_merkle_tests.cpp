@@ -275,6 +275,56 @@ BOOST_AUTO_TEST_CASE(memory_only_tree_does_not_mutate_persistent_commitment_inde
     BOOST_CHECK(*wallet_tree.CommitmentAt(0) == wallet_a);
 }
 
+BOOST_AUTO_TEST_CASE(detached_scratch_tree_does_not_reattach_incompatible_persistent_index)
+{
+    struct CommitmentStoreResetGuard {
+        ~CommitmentStoreResetGuard()
+        {
+            ShieldedMerkleTree::ResetCommitmentIndexStore();
+        }
+    } guard;
+
+    ShieldedMerkleTree::ResetCommitmentIndexStore();
+    const fs::path db_path = m_path_root / "shielded_merkle_detached_reattach_guard";
+    BOOST_REQUIRE(ShieldedMerkleTree::ConfigureCommitmentIndexStore(db_path,
+                                                                     /*db_cache_bytes=*/1 << 20,
+                                                                     /*lru_capacity=*/1024,
+                                                                     /*memory_only=*/false,
+                                                                     /*wipe_data=*/true));
+
+    ShieldedMerkleTree live_tree;
+    std::vector<uint256> live_commitments;
+    for (uint32_t i = 0; i < 5; ++i) {
+        const uint256 commitment = MakeCommitment(10'000 + i);
+        live_commitments.push_back(commitment);
+        live_tree.Append(commitment);
+    }
+
+    ShieldedMerkleTree scratch_tree = live_tree;
+    BOOST_REQUIRE(scratch_tree.DetachToMemoryOnly());
+    BOOST_REQUIRE(scratch_tree.Truncate(3));
+
+    const uint256 alt_a = MakeCommitment(20'001);
+    const uint256 alt_b = MakeCommitment(20'002);
+    scratch_tree.Append(alt_a);
+    scratch_tree.Append(alt_b);
+
+    BOOST_REQUIRE(scratch_tree.AttachConfiguredCommitmentIndexStore());
+
+    const auto live_pos3 = live_tree.CommitmentAt(3);
+    const auto live_pos4 = live_tree.CommitmentAt(4);
+    const auto scratch_pos3 = scratch_tree.CommitmentAt(3);
+    const auto scratch_pos4 = scratch_tree.CommitmentAt(4);
+    BOOST_REQUIRE(live_pos3.has_value());
+    BOOST_REQUIRE(live_pos4.has_value());
+    BOOST_REQUIRE(scratch_pos3.has_value());
+    BOOST_REQUIRE(scratch_pos4.has_value());
+    BOOST_CHECK_EQUAL(*live_pos3, live_commitments[3]);
+    BOOST_CHECK_EQUAL(*live_pos4, live_commitments[4]);
+    BOOST_CHECK_EQUAL(*scratch_pos3, alt_a);
+    BOOST_CHECK_EQUAL(*scratch_pos4, alt_b);
+}
+
 BOOST_AUTO_TEST_CASE(commitment_lookup_unavailable_after_tree_deserialize)
 {
     ShieldedMerkleTree tree;

@@ -2210,7 +2210,8 @@ std::optional<SmileCTProof> TryProveCT(
     const CTPublicData& pub,
     uint64_t rng_seed,
     int64_t public_fee,
-    bool bind_anonset_context)
+    bool bind_anonset_context,
+    std::string* error)
 {
     size_t m_in = inputs.size();
     size_t n_out = outputs.size();
@@ -2424,6 +2425,12 @@ std::optional<SmileCTProof> TryProveCT(
     assert(n_aux_msg == aux_layout.TotalSlots());
     auto aux_ck_seed = TranscriptHash(public_transcript);
     auto aux_ck = BDLOPCommitmentKey::Generate(aux_ck_seed, n_aux_msg);
+
+    std::string last_retry_error{"rejection-exhausted"};
+    const auto set_retry_error = [&](const char* reason) {
+        last_retry_error = reason;
+        if (error != nullptr) *error = reason;
+    };
 
     for (size_t rejection_retry = 0; rejection_retry < MAX_PROVE_CT_REJECTION_RETRIES; ++rejection_retry) {
         const uint64_t attempt_seed = rng_seed + (PROVE_CT_RETRY_STRIDE * rejection_retry);
@@ -2671,7 +2678,10 @@ std::optional<SmileCTProof> TryProveCT(
     SmilePoly c0_chal = HashToMonomialChallenge(proof.seed_c0.data(), 32, domainsep::CT_C0);
 
     // 13. z0 = y0 + c0·s for each input (with rejection sampling)
-    bool retry_attempt{false};
+    SmilePolyVec combined_z0;
+    SmilePolyVec combined_c0s;
+    combined_z0.reserve(m_in * KEY_COLS);
+    combined_c0s.reserve(m_in * KEY_COLS);
     for (size_t inp = 0; inp < m_in; ++inp) {
         proof.z0[inp].resize(KEY_COLS);
         SmilePolyVec c0s(KEY_COLS);
@@ -2680,16 +2690,19 @@ std::optional<SmileCTProof> TryProveCT(
             c0s[j].Reduce();
             proof.z0[inp][j] = y0_masks[inp][j] + c0s[j];
             proof.z0[inp][j].Reduce();
-        }
-        if (!RejectionSample(proof.z0[inp], c0s, SIGMA_KEY, rng)) {
-            retry_attempt = true;
-            break;
+            combined_z0.push_back(proof.z0[inp][j]);
+            combined_c0s.push_back(c0s[j]);
         }
     }
-    if (retry_attempt) {
+    if (!RejectionSample(combined_z0, combined_c0s, SIGMA_KEY, rng)) {
+        set_retry_error("rejection-exhausted-z0");
         continue;
     }
 
+    SmilePolyVec combined_tuple_z;
+    SmilePolyVec combined_tuple_c;
+    combined_tuple_z.reserve(m_in * coin_ck.rand_dim());
+    combined_tuple_c.reserve(m_in * coin_ck.rand_dim());
     for (size_t inp = 0; inp < m_in; ++inp) {
         SmilePolyVec tuple_z(coin_ck.rand_dim());
         SmilePolyVec tuple_c(coin_ck.rand_dim());
@@ -2698,11 +2711,8 @@ std::optional<SmileCTProof> TryProveCT(
             tuple_c[j] = NttMul(c0_chal, inputs[inp].coin_r[j]);
             tuple_z[j] = y0_coin_masks[inp][j] + tuple_c[j];
             tuple_z[j].Reduce();
-        }
-        if (use_postfork_tuple_hardening &&
-            !RejectionSample(tuple_z, tuple_c, tuple_coin_sigma, rng)) {
-            retry_attempt = true;
-            break;
+            combined_tuple_z.push_back(tuple_z[j]);
+            combined_tuple_c.push_back(tuple_c[j]);
         }
         for (size_t j = 0; j < coin_ck.rand_dim(); ++j) {
             proof.input_tuples[inp].z_coin[j] = tuple_z[j];
@@ -2716,7 +2726,9 @@ std::optional<SmileCTProof> TryProveCT(
         proof.input_tuples[inp].z_leaf = y0_leaf_masks[inp] + tuple_leaf_c;
         proof.input_tuples[inp].z_leaf.Reduce();
     }
-    if (retry_attempt) {
+    if (use_postfork_tuple_hardening &&
+        !RejectionSample(combined_tuple_z, combined_tuple_c, tuple_coin_sigma, rng)) {
+        set_retry_error("rejection-exhausted-tuple-z");
         continue;
     }
     const int64_t combined_coin_sigma = ComputeCoinOpeningSigma(m_in + n_out);
@@ -2941,6 +2953,7 @@ std::optional<SmileCTProof> TryProveCT(
             proof.z[j].Reduce();
         }
         if (!RejectionSample(proof.z, cr, SIGMA_MASK, rng)) {
+            set_retry_error("rejection-exhausted-z");
             continue;
         }
     }
@@ -2964,6 +2977,7 @@ std::optional<SmileCTProof> TryProveCT(
                              c_coin_opening,
                              combined_coin_sigma,
                              rng)) {
+            set_retry_error("rejection-exhausted-coin-opening-z");
             continue;
         }
     }
@@ -3038,6 +3052,7 @@ std::optional<SmileCTProof> TryProveCT(
               static_cast<unsigned int>(m_in),
               static_cast<unsigned int>(n_out),
               static_cast<unsigned int>(N));
+    if (error != nullptr) *error = last_retry_error;
     return std::nullopt;
 }
 

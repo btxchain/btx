@@ -811,6 +811,39 @@ std::vector<uint256> CollectShieldedAnchors(const CShieldedBundle& bundle)
     return out;
 }
 
+std::vector<uint256> CollectShieldedAccountRegistryRefs(const CShieldedBundle& bundle)
+{
+    std::vector<uint256> out;
+    if (!bundle.HasV2Bundle()) return out;
+
+    const auto* v2_bundle = bundle.GetV2Bundle();
+    if (v2_bundle == nullptr) return out;
+
+    switch (shielded::v2::GetBundleSemanticFamily(*v2_bundle)) {
+    case shielded::v2::TransactionFamily::V2_SEND: {
+        const auto& payload = std::get<shielded::v2::SendPayload>(v2_bundle->payload);
+        if (!payload.account_registry_anchor.IsNull()) {
+            out.push_back(payload.account_registry_anchor);
+        }
+        break;
+    }
+    case shielded::v2::TransactionFamily::V2_INGRESS_BATCH: {
+        const auto& payload = std::get<shielded::v2::IngressBatchPayload>(v2_bundle->payload);
+        if (!payload.account_registry_anchor.IsNull()) {
+            out.push_back(payload.account_registry_anchor);
+        }
+        break;
+    }
+    case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
+    case shielded::v2::TransactionFamily::V2_REBALANCE:
+    case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
+    case shielded::v2::TransactionFamily::V2_LIFECYCLE:
+    case shielded::v2::TransactionFamily::V2_GENERIC:
+        break;
+    }
+    return out;
+}
+
 std::vector<uint256> CollectShieldedSettlementAnchorRefs(const CShieldedBundle& bundle)
 {
     std::vector<uint256> out;

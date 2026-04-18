@@ -38,6 +38,8 @@ using shielded::BridgeDirection;
 using shielded::BridgeProofDescriptor;
 using namespace shielded::v2;
 
+constexpr uint32_t MAX_INGRESS_FIXTURE_BUILD_ATTEMPTS{32};
+
 [[nodiscard]] ShieldedNote MakeNote(CAmount value, unsigned char seed)
 {
     ShieldedNote note;
@@ -629,16 +631,26 @@ BuildContextualIngressRingMembers(const V2IngressContext& context,
     tx_template.nLockTime = 23;
 
     std::string reject_reason;
-    std::array<unsigned char, 32> rng_entropy{};
-    rng_entropy.fill(0xA5);
-    auto built = BuildV2IngressBatchTransaction(tx_template,
-                                                fixture.tree.Root(),
-                                                fixture.input,
-                                                spending_key,
-                                                reject_reason,
-                                                Span<const unsigned char>{rng_entropy.data(), rng_entropy.size()},
-                                                effective_consensus,
-                                                validation_height);
+    std::optional<V2IngressBuildResult> built;
+    for (uint32_t attempt = 0; attempt < MAX_INGRESS_FIXTURE_BUILD_ATTEMPTS; ++attempt) {
+        std::array<unsigned char, 32> rng_entropy{};
+        HashWriter hw;
+        hw << std::string{"BTX_Test_V2_Ingress_Fixture_Rng_V1"} << attempt;
+        const uint256 attempt_seed = hw.GetSHA256();
+        std::copy(attempt_seed.begin(), attempt_seed.end(), rng_entropy.begin());
+
+        built = BuildV2IngressBatchTransaction(tx_template,
+                                               fixture.tree.Root(),
+                                               fixture.input,
+                                               spending_key,
+                                               reject_reason,
+                                               Span<const unsigned char>{rng_entropy.data(), rng_entropy.size()},
+                                               effective_consensus,
+                                               validation_height);
+        if (built.has_value() || reject_reason != "bad-shielded-v2-ingress-smile-proof") {
+            break;
+        }
+    }
     BOOST_REQUIRE_MESSAGE(built.has_value(), reject_reason);
     BOOST_CHECK(built->IsValid());
     fixture.built = std::move(*built);

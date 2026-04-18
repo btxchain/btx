@@ -13,6 +13,7 @@
 #include <consensus/amount.h>
 #include <cuckoocache.h>
 #include <deploymentstatus.h>
+#include <functional>
 #include <kernel/chain.h>
 #include <kernel/chainparams.h>
 #include <kernel/chainstatemanager_opts.h>
@@ -64,6 +65,14 @@ class DisconnectedBlockTransactions;
 struct PrecomputedTransactionData;
 struct LockPoints;
 struct AssumeutxoData;
+
+enum class ShieldedAutoRepairKind {
+    ANCHOR_HISTORY,
+    STATE_REBUILD,
+};
+
+using ShieldedAutoRepairGeneration = std::tuple<uint256, uint64_t, uint256>;
+
 namespace node {
 class SnapshotMetadata;
 class ShieldedSnapshotSectionHeader;
@@ -1042,6 +1051,12 @@ private:
     std::deque<uint256> m_shielded_account_registry_roots GUARDED_BY(::cs_main);
     ShieldedPoolBalance m_shielded_pool_balance GUARDED_BY(::cs_main);
     bool m_shielded_state_initialized GUARDED_BY(::cs_main){false};
+    std::optional<ShieldedAutoRepairGeneration> m_last_shielded_anchor_auto_repair_generation GUARDED_BY(::cs_main);
+    std::optional<ShieldedAutoRepairGeneration> m_last_shielded_state_rebuild_generation GUARDED_BY(::cs_main);
+    uint64_t m_shielded_anchor_auto_repair_attempts GUARDED_BY(::cs_main){0};
+    uint64_t m_shielded_state_rebuild_attempts GUARDED_BY(::cs_main){0};
+    std::function<void(ShieldedAutoRepairKind)> m_shielded_auto_repair_hook_for_test
+        GUARDED_BY(::cs_main);
 
     //! Timers and counters used for benchmarking validation in both background
     //! and active chainstates.
@@ -1518,6 +1533,9 @@ public:
     /** Test/diagnostic hook to overwrite the persisted shielded pool balance. */
     [[nodiscard]] bool WriteShieldedPoolBalanceForTest(CAmount balance) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Test/diagnostic hook to replace the in-memory recent anchor window. */
+    void SetShieldedAnchorRootsForTest(const std::vector<uint256>& roots) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Iterate over persisted nullifiers in on-disk order. */
     template <typename Fn>
     bool ForEachShieldedNullifier(Fn&& fn) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
@@ -1556,6 +1574,20 @@ public:
     /** Rebuild the anchor-history window to match the provided chain tip. */
     [[nodiscard]] bool RebuildShieldedAnchorHistory(const Chainstate& chainstate,
                                                     const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Repair the active in-memory anchor-history window from the active chain tip. */
+    [[nodiscard]] bool RepairShieldedAnchorHistoryFromActiveChain() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * After startup repairs local shielded state, clear failure flags for
+     * shielded root-invalid blocks whose parent remains on the active chain so
+     * ActivateBestChain() can retry them once under repaired local state.
+     */
+    void AutoReconsiderShieldedInvalidBlocksAfterStartupRepair() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Return true once per active tip for each automatic shielded repair class. */
+    [[nodiscard]] bool MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind kind)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Push the current account-registry root into the bounded anchor-history window. */
     void RecordShieldedAccountRegistryRoot(const uint256& root) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -1596,6 +1628,21 @@ public:
         AutoFile& file,
         const node::ShieldedSnapshotSectionHeader& header,
         const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Rebuild the active shielded state from the active chain tip. */
+    [[nodiscard]] bool RebuildShieldedStateFromActiveChain() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Test hook to inspect bounded automatic shielded repair attempts. */
+    [[nodiscard]] uint64_t GetShieldedAutoRepairAttemptCountForTest(ShieldedAutoRepairKind kind) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Test hook to pause or observe automatic shielded repair attempts. */
+    void SetShieldedAutoRepairHookForTest(std::function<void(ShieldedAutoRepairKind)> hook)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Run the installed automatic shielded repair test hook, if any. */
+    void RunShieldedAutoRepairHookForTest(ShieldedAutoRepairKind kind) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     [[nodiscard]] std::optional<shielded::registry::ShieldedAccountRegistrySnapshot>
     ExportShieldedAccountRegistrySnapshot(
         const Chainstate& chainstate,
@@ -1603,6 +1650,12 @@ public:
 
     /** Return true if a shielded anchor is currently valid for spending. */
     [[nodiscard]] bool IsShieldedAnchorValid(const uint256& anchor) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    [[nodiscard]] const std::deque<uint256>& GetShieldedAnchorRoots() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return m_shielded_anchor_roots;
+    }
 
     /** Return the active shielded commitment tree snapshot. */
     [[nodiscard]] const shielded::ShieldedMerkleTree& GetShieldedMerkleTree() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)

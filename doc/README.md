@@ -90,6 +90,7 @@ The following are developer notes on how to build BTX Node on your native platfo
 - [Dependencies](dependencies.md)
 - [macOS Build Notes](build-osx.md)
 - [Unix Build Notes](build-unix.md)
+- [BTX CUDA MatMul Optimization Notes](btx-cuda-matmul-optimization-notes-2026-04-13.md)
 - [Windows Build Notes](build-windows-msvc.md)
 - [FreeBSD Build Notes](build-freebsd.md)
 - [OpenBSD Build Notes](build-openbsd.md)

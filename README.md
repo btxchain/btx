@@ -1,7 +1,7 @@
 # BTX Node
 
-BTX is a post-quantum, AI-infrastructure-friendly blockchain derived from
-[Bitcoin Knots](https://github.com/bitcoinknots/bitcoin) v29.2. It replaces
+BTX is a post-quantum, AI-infrastructure-friendly blockchain derived from an
+earlier Bitcoin Knots v29.2 codebase. It replaces
 Bitcoin's SHA-256d proof of work with **MatMul PoW** — a novel consensus
 mechanism based on matrix multiplication over a finite field — adds
 **post-quantum transaction signatures** via witness v2 P2MR outputs, provides a
@@ -560,8 +560,8 @@ For native CLI release assembly without Guix, see
 `scripts/release/cut_local_release.py` together with
 [doc/btx-github-release-automation.md](doc/btx-github-release-automation.md).
 
-If you only need the bundled precompiled CLI archives from this snapshot, use
-the files in `contrib/prebuilt/releases/`.
+If you only need the generic precompiled Windows x64 CLI archive from this
+branch, use the files in `contrib/prebuilt/windows/`.
 
 ### Build Options
 
@@ -596,6 +596,12 @@ binary users: install a precompiled archive, load the matching rollback
 snapshot, and begin using wallet, mining, and service RPCs before a full
 historical sync finishes.
 
+Fast-start support in the current tree:
+
+- `main`: supported with published assumeutxo metadata baked into the binaries
+- `regtest`: supported for default-consensus development and CI flows
+- `testnet`, `testnet4`, and `signet`: snapshot tooling exists, but there are no compiled assumeutxo entries yet, so fast-start bootstrap is not currently supported there
+
 The shortest operator path is:
 
 ```bash
@@ -603,7 +609,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx-node \
-  --release-tag v29.2-btx1 \
+  --release-tag v0.29.5 \
   --preset service \
   --datadir="$HOME/.btx"
 ```
@@ -675,6 +681,7 @@ prune=4096
 
 # Bootstrap peers
 minimumchainwork=0
+retainshieldedcommitmentindex=1
 dnsseed=1
 fixedseeds=1
 addnode=node.btx.tools:19335
@@ -691,6 +698,11 @@ Or generate a profile automatically:
 # Archival node
 ./contrib/devtools/gen-btx-node-conf.sh archival > ~/.btx/btx.conf
 ```
+
+The baseline config keeps `retainshieldedcommitmentindex=1` so shielded
+wallets and assumeutxo-backed nodes restart without rebuilding the commitment
+lookup index from historical shielded data. Set it to `0` only if you
+intentionally want the slower externalized-retention posture.
 
 ### Checking Status
 
@@ -944,6 +956,21 @@ contrib/mining/backup-wallet.sh \
 
 Backend selection: `BTX_MATMUL_BACKEND` (`cpu|metal|mlx|cuda`).
 
+To run `btxd` with CUDA selected as the MatMul backend on a CUDA-enabled
+build:
+
+```bash
+BTX_MATMUL_BACKEND=cuda ./build/bin/btxd \
+  -datadir="$HOME/.btx" \
+  -server=1
+```
+
+To verify that the local CUDA backend is compiled and runtime-ready:
+
+```bash
+./build/bin/btx-matmul-backend-info --backend cuda
+```
+
 ---
 
 ## Running Tests
@@ -1124,7 +1151,7 @@ doc/
 
 ### Upstream Reference
 
-BTX was forked from Bitcoin Knots v29.2:
+BTX was originally forked from Bitcoin Knots v29.2:
 [Bitcoin Knots](https://github.com/bitcoinknots/bitcoin)
 
 ---

@@ -30,4 +30,3 @@ target_sources(test_btx
     ../../test/shielded_coin_selection_tests.cpp
     ../../test/shielded_wallet_address_tests.cpp
 )
-target_link_libraries(test_btx bitcoin_wallet)

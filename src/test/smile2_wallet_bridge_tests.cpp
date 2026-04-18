@@ -165,6 +165,43 @@ BOOST_AUTO_TEST_CASE(w5_end_to_end_proof)
     }
 }
 
+BOOST_AUTO_TEST_CASE(w5b_end_to_end_proof_accepts_amounts_above_q)
+{
+    std::vector<SmileRingMember> ring_members = MakePlaceholderRing(/*count=*/32, /*seed_base=*/0x28);
+    const CAmount large_amount = 20000 * COIN;
+    BOOST_REQUIRE_GT(large_amount, static_cast<CAmount>(Q));
+
+    const ShieldedNote input_note = MakeNote(/*value=*/large_amount, /*seed=*/0x33);
+    auto real_member = BuildRingMemberFromNote(SMILE_GLOBAL_SEED, input_note);
+    BOOST_REQUIRE(real_member.has_value());
+    ring_members[6] = *real_member;
+
+    SmileInputMaterial input;
+    input.note = input_note;
+    input.account_leaf_commitment = real_member->account_leaf_commitment;
+    input.ring_index = 6;
+
+    const ShieldedNote out_a = MakeNote(/*value=*/12345 * COIN, /*seed=*/0x43);
+    const ShieldedNote out_b = MakeNote(/*value=*/7655 * COIN, /*seed=*/0x53);
+
+    std::vector<uint8_t> entropy(32, 0x6d);
+    std::vector<uint256> serial_hashes;
+
+    auto proof_bytes = CreateSmileProof(
+        SMILE_GLOBAL_SEED,
+        {input},
+        {out_a, out_b},
+        Span<const SmileRingMember>{ring_members.data(), ring_members.size()},
+        Span<const uint8_t>(entropy),
+        serial_hashes);
+
+    BOOST_CHECK(proof_bytes.has_value());
+    if (proof_bytes) {
+        BOOST_CHECK_GT(proof_bytes->proof_bytes.size(), 0u);
+        BOOST_CHECK_EQUAL(serial_hashes.size(), 1u);
+    }
+}
+
 // W6: Serial number hashes are deterministic
 BOOST_AUTO_TEST_CASE(w6_serial_determinism)
 {

@@ -586,6 +586,127 @@ grep -q "peer-bootstrap-refresh reason=insufficient_peer_consensus attempted=2 s
 grep -q "addnode cached-a.example:19335 onetry" "${STATE_DIR}/addnode.log"
 grep -q "addnode cached-b.example:19335 onetry" "${STATE_DIR}/addnode.log"
 
+STATE_DIR="${TMPDIR}/state-peer-stall"
+RESULTS_DIR="${TMPDIR}/results-peer-stall"
+mkdir -p "${STATE_DIR}" "${RESULTS_DIR}"
+NODE_PIDFILE="${STATE_DIR}/managed.pid"
+
+cat > "${TMPDIR}/fake-cli-peer-stall" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="${STATE_DIR:?}"
+NODE_PIDFILE="${NODE_PIDFILE:?}"
+cmd=""
+for arg in "$@"; do
+  case "${arg}" in
+    getblockcount|getmininginfo|getpeerinfo|addnode|setnetworkactive|disconnectnode|stop)
+      cmd="${arg}"
+      ;;
+  esac
+done
+
+case "${cmd}" in
+  getblockcount)
+    echo 100
+    ;;
+  getmininginfo)
+    cat <<JSON
+{"chain_guard":{"healthy":false,"should_pause_mining":true,"reason":"insufficient_peer_consensus","local_tip":100,"median_peer_tip":-1,"peer_count":0,"near_tip_peers":0}}
+JSON
+    ;;
+  getpeerinfo)
+    cat <<JSON
+[{"inbound":false,"addr":"stale-a.example:19335","connection_type":"manual","synced_headers":-1,"synced_blocks":-1},{"inbound":false,"addr":"healthy-a.example:19335","connection_type":"manual","synced_headers":100,"synced_blocks":100}]
+JSON
+    ;;
+  addnode)
+    printf '%s\n' "$*" >> "${STATE_DIR}/addnode.log"
+    echo null
+    ;;
+  setnetworkactive)
+    printf '%s\n' "$*" >> "${STATE_DIR}/setnetworkactive.log"
+    echo true
+    ;;
+  disconnectnode)
+    printf '%s\n' "$*" >> "${STATE_DIR}/disconnect.log"
+    echo null
+    ;;
+  stop)
+    printf 'stop %s\n' "$*" >> "${STATE_DIR}/events.log"
+    if [[ -f "${NODE_PIDFILE}" ]]; then
+      pid="$(tr -d '\n' < "${NODE_PIDFILE}")"
+      if [[ "${pid}" =~ ^[0-9]+$ ]]; then
+        kill "${pid}" >/dev/null 2>&1 || true
+      fi
+    fi
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "${TMPDIR}/fake-cli-peer-stall"
+
+cat > "${TMPDIR}/fake-btxd-peer-stall" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="${STATE_DIR:?}"
+PIDFILE=""
+for arg in "$@"; do
+  case "${arg}" in
+    -pid=*)
+      PIDFILE="${arg#*=}"
+      ;;
+  esac
+done
+printf 'start %s\n' "$*" >> "${STATE_DIR}/events.log"
+(
+  trap 'exit 0' TERM INT
+  while true; do
+    sleep 1
+  done
+) &
+child_pid=$!
+if [[ -n "${PIDFILE}" ]]; then
+  printf '%s\n' "${child_pid}" > "${PIDFILE}"
+fi
+exit 0
+EOF
+chmod +x "${TMPDIR}/fake-btxd-peer-stall"
+
+STATE_DIR="${STATE_DIR}" \
+NODE_PIDFILE="${NODE_PIDFILE}" \
+BTX_MINING_CLI="${TMPDIR}/fake-cli-peer-stall" \
+BTX_MINING_DAEMON="${TMPDIR}/fake-btxd-peer-stall" \
+BTX_MINING_NODE_PIDFILE="${NODE_PIDFILE}" \
+BTX_MINING_BOOTSTRAP_ADDNODES="node-a.example:19335,node-b.example:19335" \
+BTX_MINING_PEER_REMEDIATION_THRESHOLD=1 \
+BTX_MINING_PEER_REMEDIATION_COOLDOWN_SECS=0 \
+BTX_MINING_HEALTH_RESTART_THRESHOLD=2 \
+BTX_MINING_RESTART_COOLDOWN_SECS=0 \
+BTX_MINING_WAIT_FOR_RPC_SECS=1 \
+BTX_MINING_STARTUP_GRACE_SECS=0 \
+BTX_MINING_SYNC_STALL_RESTART_SECS=0 \
+BTX_MINING_MAX_LOOPS=5 \
+"${SCRIPT_DIR}/live-mining-loop.sh" \
+  --results-dir="${RESULTS_DIR}" \
+  --address-file="${TMPDIR}/address.txt" \
+  --sleep=0 >/dev/null 2>&1
+
+grep -q "peer-stale-disconnect reason=insufficient_peer_consensus attempted=1 disconnected=1 failed=0" "${RESULTS_DIR}/live-mining-health.log"
+grep -q "peer-bootstrap-refresh reason=insufficient_peer_consensus attempted=2 succeeded=2 failed=0" "${RESULTS_DIR}/live-mining-health.log"
+grep -q "restarting-node reason=chain_guard_insufficient_peer_consensus" "${RESULTS_DIR}/live-mining-health.log"
+grep -q "disconnectnode stale-a.example:19335" "${STATE_DIR}/disconnect.log"
+grep -q "addnode node-a.example:19335 onetry" "${STATE_DIR}/addnode.log"
+grep -q "setnetworkactive true" "${STATE_DIR}/setnetworkactive.log"
+if grep -q "disconnectnode healthy-a.example:19335" "${STATE_DIR}/disconnect.log"; then
+  echo "healthy peer should not have been disconnected during stale-peer remediation" >&2
+  exit 1
+fi
+
+cleanup_pidfile "${NODE_PIDFILE}"
+
 STATE_DIR="${TMPDIR}/state-idle"
 RESULTS_DIR="${TMPDIR}/results-idle"
 mkdir -p "${STATE_DIR}" "${RESULTS_DIR}"

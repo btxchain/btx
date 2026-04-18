@@ -49,8 +49,8 @@ struct ChainstateManagerOpts {
     //! If the tip is older than this, the node is considered to be in initial block download.
     std::chrono::seconds max_tip_age{DEFAULT_MAX_TIP_AGE};
     MatMulValidationMode matmul_validation_mode{MatMulValidationMode::CONSENSUS};
-    //! Secondary dev/audit profile: keep the shielded commitment-position index on disk.
-    bool retain_shielded_commitment_index{false};
+    //! Default operator profile: keep the shielded commitment-position index on disk for fast restart and snapshot recovery.
+    bool retain_shielded_commitment_index{true};
     DBOptions coins_db{};
     CoinsViewOptions coins_view{};
     Notifications& notifications;

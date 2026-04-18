@@ -11,11 +11,16 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 class CBlockHeader;
+
+namespace btx::cuda {
+struct MatMulGeneratedInputsDevice;
+}
 
 namespace matmul {
 
@@ -38,8 +43,9 @@ struct DigestResult {
 
 struct PreparedDigestInputs {
     uint256 sigma;
-    noise::NoisePair noise;
+    std::optional<noise::NoisePair> noise;
     std::vector<field::Element> compress_vec;
+    std::shared_ptr<const btx::cuda::MatMulGeneratedInputsDevice> cuda_generated_inputs;
 };
 
 struct BackendRuntimeStats {
@@ -53,12 +59,15 @@ struct BackendRuntimeStats {
     uint64_t metal_digest_mismatches{0};
     uint64_t metal_retry_without_uploaded_base_attempts{0};
     uint64_t metal_retry_without_uploaded_base_successes{0};
+    uint64_t cuda_successes{0};
+    uint64_t cuda_fallbacks_to_cpu{0};
     uint64_t gpu_input_generation_attempts{0};
     uint64_t gpu_input_generation_successes{0};
     uint64_t gpu_input_generation_failures{0};
     uint64_t gpu_input_auto_disabled_skips{0};
     bool gpu_input_auto_disabled{false};
     std::string last_metal_fallback_error{};
+    std::string last_cuda_fallback_error{};
     std::string last_gpu_input_error{};
 };
 
@@ -96,6 +105,9 @@ uint256 ComputeDigestCpuFromPreparedInputs(const Matrix& A,
                                            const PreparedDigestInputs& prepared,
                                            uint32_t transcript_block_size,
                                            DigestScheme digest_scheme = DigestScheme::TRANSCRIPT);
+noise::NoisePair ResolvePreparedNoiseForCpu(const PreparedDigestInputs& prepared,
+                                            uint32_t n,
+                                            uint32_t noise_rank);
 
 PreparedDigestInputs PrepareMatMulDigestInputs(const CBlockHeader& block,
                                                uint32_t transcript_block_size,

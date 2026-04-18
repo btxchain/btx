@@ -723,7 +723,8 @@ public:
     void CommitTransaction(CTransactionRef tx,
                            mapValue_t mapValue,
                            std::vector<std::pair<std::string, std::string>> orderForm,
-                           bool bypass_maxtxfee = false);
+                           bool bypass_maxtxfee = false,
+                           std::string* broadcast_error = nullptr);
 
     /** Pass this transaction to node for mempool insertion and relay to peers if flag set to true */
     bool SubmitTxMemoryPoolAndRelay(CWalletTx& wtx,

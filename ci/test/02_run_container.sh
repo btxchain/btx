@@ -161,6 +161,7 @@ RSYNC_EXCLUDES=(
   "build-*/"
   "ci/scratch/"
   ".tmp*/"
+  ".codex-swarm/"
   ".ci-fuzz-corpus/"
   ".ci-lint-venv*/"
 )

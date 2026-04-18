@@ -59,6 +59,7 @@ struct MatMulSolvePipelineStats {
     uint64_t async_prepare_submissions{0};
     uint64_t async_prepare_completions{0};
     uint32_t async_prepare_worker_threads{0};
+    uint32_t prefetch_depth{1};
     uint32_t batch_size{1};
     uint64_t batched_digest_requests{0};
     uint64_t batched_nonce_attempts{0};
@@ -194,7 +195,10 @@ MatMulSolveRuntimeStats ProbeMatMulSolveRuntimeStats();
 void ResetMatMulSolveRuntimeStats();
 MatMulValidationRuntimeStats ProbeMatMulValidationRuntimeStats();
 void ResetMatMulValidationRuntimeStats();
-void RegisterMatMulDigestCompareAttempt(const CBlockHeader& block, const uint256& backend_digest, const uint256& cpu_digest);
+void RegisterMatMulDigestCompareAttempt(const CBlockHeader& block,
+                                        const uint256& backend_digest,
+                                        const uint256& cpu_digest,
+                                        const char* backend_label = "metal");
 uint32_t GetMatMulPreHashEpsilonBitsForHeight(const Consensus::Params& params, int32_t block_height);
 MatMulPreHashEpsilonBitsInfo GetMatMulPreHashEpsilonBitsInfo(int32_t current_tip_height, const Consensus::Params& params);
 bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t& max_tries,

@@ -489,10 +489,16 @@ class BTXFaststartFunctionalTest(BitcoinTestFramework):
             text=True,
         )
         self.wait_until(
-            lambda: "restarting-node reason=rpc_unavailable" in health_log.read_text(encoding="utf-8")
+            lambda: (
+                "restarting-node reason=rpc_unavailable" in health_log.read_text(encoding="utf-8")
+                or "rpc-unavailable-start-attempt" in health_log.read_text(encoding="utf-8")
+            )
         )
         self.wait_until(
-            lambda: "restart-complete reason=rpc_unavailable" in health_log.read_text(encoding="utf-8")
+            lambda: (
+                "restart-complete reason=rpc_unavailable" in health_log.read_text(encoding="utf-8")
+                or "rpc-unavailable-start-complete" in health_log.read_text(encoding="utf-8")
+            )
         )
         self.wait_until(
             lambda: subprocess.run(

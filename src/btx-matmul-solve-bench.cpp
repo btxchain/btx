@@ -5,11 +5,15 @@
 #include <arith_uint256.h>
 #include <chainparams.h>
 #include <common/args.h>
+#include <cuda/matmul_accel.h>
+#include <matmul/backend_capabilities.h>
+#include <matmul/accelerated_solver.h>
 #include <metal/matmul_accel.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <uint256.h>
 #include <util/chaintype.h>
+#include <util/translation.h>
 
 #include <univalue.h>
 
@@ -28,6 +32,8 @@
 #include <thread>
 #include <vector>
 
+const TranslateFn G_TRANSLATION_FUN{nullptr};
+
 namespace {
 constexpr uint32_t MAINNET_LIVE_LIKE_NBITS{0x1f00a598U};
 
@@ -45,6 +51,8 @@ struct Options {
     std::optional<std::string> async_override;
     std::optional<std::string> gpu_inputs_override;
     std::optional<std::string> batch_size_override;
+    std::optional<std::string> digest_slice_size_override;
+    std::optional<std::string> prefetch_depth_override;
     std::optional<std::string> prepare_workers_override;
     std::optional<std::string> pool_slots_override;
     std::optional<std::string> solver_threads_override;
@@ -83,7 +91,7 @@ void PrintUsage(std::ostream& out)
         << " [--parallel <count>]"
         << " [--backend <cpu|metal|cuda|mlx>]"
         << " [--async <0|1>] [--gpu-inputs <0|1>]"
-        << " [--batch-size <count>] [--prepare-workers <count>]"
+        << " [--batch-size <count>] [--digest-slice-size <count>] [--prefetch-depth <count>] [--prepare-workers <count>]"
         << " [--pool-slots <count>] [--solver-threads <count>]" << std::endl;
 }
 
@@ -199,6 +207,18 @@ bool ParseArgs(int argc, char* argv[], Options& options)
             consumed = true;
             if (!parse_kv("--batch-size", [&](std::string_view value) {
                     options.batch_size_override = std::string{value};
+                    return true;
+                })) return false;
+        } else if (arg == "--digest-slice-size" || arg.rfind("--digest-slice-size=", 0) == 0) {
+            consumed = true;
+            if (!parse_kv("--digest-slice-size", [&](std::string_view value) {
+                    options.digest_slice_size_override = std::string{value};
+                    return true;
+                })) return false;
+        } else if (arg == "--prefetch-depth" || arg.rfind("--prefetch-depth=", 0) == 0) {
+            consumed = true;
+            if (!parse_kv("--prefetch-depth", [&](std::string_view value) {
+                    options.prefetch_depth_override = std::string{value};
                     return true;
                 })) return false;
         } else if (arg == "--prepare-workers" || arg.rfind("--prepare-workers=", 0) == 0) {
@@ -410,8 +430,11 @@ int main(int argc, char* argv[])
     ScopedEnvOverride async_env("BTX_MATMUL_PIPELINE_ASYNC", options.async_override);
     ScopedEnvOverride gpu_inputs_env("BTX_MATMUL_GPU_INPUTS", options.gpu_inputs_override);
     ScopedEnvOverride batch_size_env("BTX_MATMUL_SOLVE_BATCH_SIZE", options.batch_size_override);
+    ScopedEnvOverride digest_slice_size_env("BTX_MATMUL_DIGEST_SLICE_SIZE", options.digest_slice_size_override);
+    ScopedEnvOverride prefetch_depth_env("BTX_MATMUL_PREPARE_PREFETCH_DEPTH", options.prefetch_depth_override);
     ScopedEnvOverride prepare_workers_env("BTX_MATMUL_PREPARE_WORKERS", options.prepare_workers_override);
     ScopedEnvOverride pool_slots_env("BTX_MATMUL_METAL_POOL_SLOTS", options.pool_slots_override);
+    ScopedEnvOverride cuda_pool_slots_env("BTX_MATMUL_CUDA_POOL_SLOTS", options.pool_slots_override);
     ScopedEnvOverride solver_threads_env("BTX_MATMUL_SOLVER_THREADS", options.solver_threads_override);
 
     ArgsManager args;
@@ -431,6 +454,7 @@ int main(int argc, char* argv[])
     uint64_t solved_count{0};
     MatMulSolvePipelineStats last_pipeline{};
     MatMulSolveRuntimeStats last_runtime{};
+    matmul::accelerated::BackendRuntimeStats last_backend_runtime{};
 
     for (uint32_t i = 0; i < options.iterations; ++i) {
         const IterationResult iteration = RunSolveIteration(options, consensus, i);
@@ -439,6 +463,7 @@ int main(int argc, char* argv[])
         solved_count += iteration.solved_count;
         last_pipeline = ProbeMatMulSolvePipelineStats();
         last_runtime = ProbeMatMulSolveRuntimeStats();
+        last_backend_runtime = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
     }
 
     UniValue output(UniValue::VOBJ);
@@ -456,6 +481,8 @@ int main(int argc, char* argv[])
     options_obj.pushKV("async_override", options.async_override.has_value() ? UniValue(*options.async_override) : UniValue());
     options_obj.pushKV("gpu_inputs_override", options.gpu_inputs_override.has_value() ? UniValue(*options.gpu_inputs_override) : UniValue());
     options_obj.pushKV("batch_size_override", options.batch_size_override.has_value() ? UniValue(*options.batch_size_override) : UniValue());
+    options_obj.pushKV("digest_slice_size_override", options.digest_slice_size_override.has_value() ? UniValue(*options.digest_slice_size_override) : UniValue());
+    options_obj.pushKV("prefetch_depth_override", options.prefetch_depth_override.has_value() ? UniValue(*options.prefetch_depth_override) : UniValue());
     options_obj.pushKV("prepare_workers_override", options.prepare_workers_override.has_value() ? UniValue(*options.prepare_workers_override) : UniValue());
     options_obj.pushKV("pool_slots_override", options.pool_slots_override.has_value() ? UniValue(*options.pool_slots_override) : UniValue());
     options_obj.pushKV("solver_threads_override", options.solver_threads_override.has_value() ? UniValue(*options.solver_threads_override) : UniValue());
@@ -464,6 +491,18 @@ int main(int argc, char* argv[])
     output.pushKV("solved_count", solved_count);
     output.pushKV("elapsed_s", SummarizeSeries(elapsed_s_values));
     output.pushKV("nonces_per_sec", SummarizeSeries(nonces_per_sec_values));
+
+    const char* backend_env_value = std::getenv("BTX_MATMUL_BACKEND");
+    const std::string requested_backend = backend_env_value != nullptr ? backend_env_value :
+#if defined(__APPLE__)
+        "metal";
+#else
+        "cpu";
+#endif
+    const auto backend_selection = matmul::backend::ResolveRequestedBackend(requested_backend);
+    output.pushKV("requested_backend", matmul::backend::ToString(backend_selection.requested));
+    output.pushKV("active_backend", matmul::backend::ToString(backend_selection.active));
+    output.pushKV("backend_selection_reason", backend_selection.reason);
 
     UniValue pipeline_obj(UniValue::VOBJ);
     pipeline_obj.pushKV("parallel_solver_enabled", last_pipeline.parallel_solver_enabled);
@@ -474,6 +513,7 @@ int main(int argc, char* argv[])
     pipeline_obj.pushKV("overlapped_prepares", last_pipeline.overlapped_prepares);
     pipeline_obj.pushKV("prefetched_batches", last_pipeline.prefetched_batches);
     pipeline_obj.pushKV("prefetched_inputs", last_pipeline.prefetched_inputs);
+    pipeline_obj.pushKV("prefetch_depth", last_pipeline.prefetch_depth);
     pipeline_obj.pushKV("async_prepare_submissions", last_pipeline.async_prepare_submissions);
     pipeline_obj.pushKV("async_prepare_completions", last_pipeline.async_prepare_completions);
     pipeline_obj.pushKV("async_prepare_worker_threads", last_pipeline.async_prepare_worker_threads);
@@ -491,23 +531,80 @@ int main(int argc, char* argv[])
     runtime_obj.pushKV("max_elapsed_us", last_runtime.max_elapsed_us);
     output.pushKV("last_runtime_stats", std::move(runtime_obj));
 
-    const auto pool_stats = btx::metal::ProbeMatMulBufferPool();
+    UniValue backend_runtime_obj(UniValue::VOBJ);
+    backend_runtime_obj.pushKV("digest_requests", last_backend_runtime.digest_requests);
+    backend_runtime_obj.pushKV("requested_cpu", last_backend_runtime.requested_cpu);
+    backend_runtime_obj.pushKV("requested_metal", last_backend_runtime.requested_metal);
+    backend_runtime_obj.pushKV("requested_cuda", last_backend_runtime.requested_cuda);
+    backend_runtime_obj.pushKV("requested_unknown", last_backend_runtime.requested_unknown);
+    backend_runtime_obj.pushKV("metal_successes", last_backend_runtime.metal_successes);
+    backend_runtime_obj.pushKV("metal_fallbacks_to_cpu", last_backend_runtime.metal_fallbacks_to_cpu);
+    backend_runtime_obj.pushKV("metal_digest_mismatches", last_backend_runtime.metal_digest_mismatches);
+    backend_runtime_obj.pushKV("metal_retry_without_uploaded_base_attempts", last_backend_runtime.metal_retry_without_uploaded_base_attempts);
+    backend_runtime_obj.pushKV("metal_retry_without_uploaded_base_successes", last_backend_runtime.metal_retry_without_uploaded_base_successes);
+    backend_runtime_obj.pushKV("cuda_successes", last_backend_runtime.cuda_successes);
+    backend_runtime_obj.pushKV("cuda_fallbacks_to_cpu", last_backend_runtime.cuda_fallbacks_to_cpu);
+    backend_runtime_obj.pushKV("gpu_input_generation_attempts", last_backend_runtime.gpu_input_generation_attempts);
+    backend_runtime_obj.pushKV("gpu_input_generation_successes", last_backend_runtime.gpu_input_generation_successes);
+    backend_runtime_obj.pushKV("gpu_input_generation_failures", last_backend_runtime.gpu_input_generation_failures);
+    backend_runtime_obj.pushKV("gpu_input_auto_disabled_skips", last_backend_runtime.gpu_input_auto_disabled_skips);
+    backend_runtime_obj.pushKV("gpu_input_auto_disabled", last_backend_runtime.gpu_input_auto_disabled);
+    backend_runtime_obj.pushKV("last_metal_fallback_error", last_backend_runtime.last_metal_fallback_error);
+    backend_runtime_obj.pushKV("last_cuda_fallback_error", last_backend_runtime.last_cuda_fallback_error);
+    backend_runtime_obj.pushKV("last_gpu_input_error", last_backend_runtime.last_gpu_input_error);
+    output.pushKV("last_backend_runtime_stats", std::move(backend_runtime_obj));
+
     UniValue pool_obj(UniValue::VOBJ);
-    pool_obj.pushKV("available", pool_stats.available);
-    pool_obj.pushKV("initialized", pool_stats.initialized);
-    pool_obj.pushKV("allocation_events", pool_stats.allocation_events);
-    pool_obj.pushKV("reuse_events", pool_stats.reuse_events);
-    pool_obj.pushKV("wait_events", pool_stats.wait_events);
-    pool_obj.pushKV("slot_count", pool_stats.slot_count);
-    pool_obj.pushKV("active_slots", pool_stats.active_slots);
-    pool_obj.pushKV("high_water_slots", pool_stats.high_water_slots);
-    pool_obj.pushKV("inflight_submissions", pool_stats.inflight_submissions);
-    pool_obj.pushKV("peak_inflight_submissions", pool_stats.peak_inflight_submissions);
-    pool_obj.pushKV("completed_submissions", pool_stats.completed_submissions);
-    pool_obj.pushKV("n", pool_stats.n);
-    pool_obj.pushKV("b", pool_stats.b);
-    pool_obj.pushKV("r", pool_stats.r);
-    pool_obj.pushKV("reason", pool_stats.reason);
+
+    auto push_pool_stats = [&](const auto& pool_stats, const char* backend_name) {
+        output.pushKV("buffer_pool_backend", backend_name);
+        pool_obj.pushKV("available", pool_stats.available);
+        pool_obj.pushKV("initialized", pool_stats.initialized);
+        pool_obj.pushKV("allocation_events", pool_stats.allocation_events);
+        pool_obj.pushKV("reuse_events", pool_stats.reuse_events);
+        pool_obj.pushKV("wait_events", pool_stats.wait_events);
+        pool_obj.pushKV("slot_count", pool_stats.slot_count);
+        pool_obj.pushKV("active_slots", pool_stats.active_slots);
+        pool_obj.pushKV("high_water_slots", pool_stats.high_water_slots);
+        pool_obj.pushKV("inflight_submissions", pool_stats.inflight_submissions);
+        pool_obj.pushKV("peak_inflight_submissions", pool_stats.peak_inflight_submissions);
+        pool_obj.pushKV("completed_submissions", pool_stats.completed_submissions);
+        pool_obj.pushKV("n", pool_stats.n);
+        pool_obj.pushKV("b", pool_stats.b);
+        pool_obj.pushKV("r", pool_stats.r);
+        pool_obj.pushKV("reason", pool_stats.reason);
+    };
+
+    const auto buffer_pool_backend =
+        backend_selection.requested == matmul::backend::Kind::METAL || backend_selection.requested == matmul::backend::Kind::CUDA
+        ? backend_selection.requested
+        : backend_selection.active;
+    switch (buffer_pool_backend) {
+    case matmul::backend::Kind::CUDA:
+        push_pool_stats(btx::cuda::ProbeMatMulBufferPool(), "cuda");
+        break;
+    case matmul::backend::Kind::METAL:
+        push_pool_stats(btx::metal::ProbeMatMulBufferPool(), "metal");
+        break;
+    case matmul::backend::Kind::CPU:
+        pool_obj.pushKV("available", false);
+        pool_obj.pushKV("initialized", false);
+        pool_obj.pushKV("allocation_events", 0);
+        pool_obj.pushKV("reuse_events", 0);
+        pool_obj.pushKV("wait_events", 0);
+        pool_obj.pushKV("slot_count", 0);
+        pool_obj.pushKV("active_slots", 0);
+        pool_obj.pushKV("high_water_slots", 0);
+        pool_obj.pushKV("inflight_submissions", 0);
+        pool_obj.pushKV("peak_inflight_submissions", 0);
+        pool_obj.pushKV("completed_submissions", 0);
+        pool_obj.pushKV("n", 0);
+        pool_obj.pushKV("b", 0);
+        pool_obj.pushKV("r", 0);
+        pool_obj.pushKV("reason", "no_gpu_buffer_pool_for_backend");
+        output.pushKV("buffer_pool_backend", "cpu");
+        break;
+    }
     output.pushKV("buffer_pool_stats", std::move(pool_obj));
 
     std::cout << output.write(2) << std::endl;

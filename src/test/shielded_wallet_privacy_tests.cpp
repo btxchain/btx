@@ -81,6 +81,37 @@ BOOST_AUTO_TEST_CASE(shielded_dust_threshold_activates_at_disable_height)
                    wallet::GetShieldedDustThresholdForHeight(relay_dust_fee, activation_height));
 }
 
+BOOST_AUTO_TEST_CASE(exact_balance_shielded_change_reserve_is_best_effort)
+{
+    BOOST_CHECK(wallet::PreferExactBalanceShieldedChangeReserve(/*change=*/0,
+                                                                /*selected_note_count=*/2,
+                                                                /*shielded_recipient_count=*/1,
+                                                                /*transparent_recipient_count=*/0));
+    BOOST_CHECK(!wallet::PreferExactBalanceShieldedChangeReserve(/*change=*/1,
+                                                                 /*selected_note_count=*/2,
+                                                                 /*shielded_recipient_count=*/1,
+                                                                 /*transparent_recipient_count=*/0));
+    BOOST_CHECK(!wallet::PreferExactBalanceShieldedChangeReserve(/*change=*/0,
+                                                                 /*selected_note_count=*/1,
+                                                                 /*shielded_recipient_count=*/1,
+                                                                 /*transparent_recipient_count=*/0));
+    BOOST_CHECK(!wallet::PreferExactBalanceShieldedChangeReserve(/*change=*/0,
+                                                                 /*selected_note_count=*/2,
+                                                                 /*shielded_recipient_count=*/2,
+                                                                 /*transparent_recipient_count=*/0));
+    BOOST_CHECK(!wallet::PreferExactBalanceShieldedChangeReserve(/*change=*/0,
+                                                                 /*selected_note_count=*/2,
+                                                                 /*shielded_recipient_count=*/1,
+                                                                 /*transparent_recipient_count=*/1));
+
+    BOOST_CHECK(wallet::SelectionFitsDirectShieldedSpendLimits(/*selected_note_count=*/8,
+                                                               shielded::lattice::RING_SIZE));
+    BOOST_CHECK(!wallet::SelectionFitsDirectShieldedSpendLimits(/*selected_note_count=*/9,
+                                                                shielded::lattice::RING_SIZE));
+    BOOST_CHECK(!wallet::SelectionFitsDirectShieldedSpendLimits(/*selected_note_count=*/8,
+                                                                /*ring_size=*/7));
+}
+
 BOOST_AUTO_TEST_CASE(shielded_minimum_privacy_tree_size_activates_at_disable_height)
 {
     const int32_t activation_height = Params().GetConsensus().nShieldedMatRiCTDisableHeight;

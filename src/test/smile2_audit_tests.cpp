@@ -998,8 +998,8 @@ BOOST_AUTO_TEST_CASE(b5_proof_size_scaling)
             MakeCtInput(0, keys[0], 100, static_cast<uint64_t>(0xE0) + N, 0, N)
         };
         std::vector<CTOutput> outputs = MakeCtOutputs({100}, 0xE000 + N);
-        auto cproof = ProveValidCTWithRetries(inputs, outputs, pub, 1, 1, 888, 4);
         if (N <= NUM_NTT_SLOTS) {
+            auto cproof = ProveValidCTWithRetries(inputs, outputs, pub, 1, 1, 888, 4);
             BOOST_REQUIRE_MESSAGE(cproof.has_value(),
                                   "B5: expected a valid CT proof within the retry budget for supported anonymity set");
             size_t csize = cproof->SerializedSize();
@@ -1014,8 +1014,8 @@ BOOST_AUTO_TEST_CASE(b5_proof_size_scaling)
             BOOST_TEST_MESSAGE("  " << N << " | "
                                << msize/1024.0 << " KB | "
                                << "unsupported" << " | " << target);
-            BOOST_CHECK(!cproof.has_value() || cproof->serial_numbers.empty());
-            BOOST_CHECK(!cproof.has_value() || !VerifyCT(*cproof, 1, 1, pub));
+            auto cproof = TryProveCT(inputs, outputs, pub, 888);
+            BOOST_CHECK(!cproof.has_value());
         }
     }
 }

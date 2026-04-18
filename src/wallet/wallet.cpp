@@ -2848,10 +2848,14 @@ OutputType CWallet::TransactionChangeType(const std::optional<OutputType>& chang
 void CWallet::CommitTransaction(CTransactionRef tx,
                                 mapValue_t mapValue,
                                 std::vector<std::pair<std::string, std::string>> orderForm,
-                                bool bypass_maxtxfee)
+                                bool bypass_maxtxfee,
+                                std::string* broadcast_error)
 {
     LOCK(cs_wallet);
     WalletLogPrintf("CommitTransaction:\n%s\n", util::RemoveSuffixView(tx->ToString(), "\n"));
+    if (broadcast_error != nullptr) {
+        broadcast_error->clear();
+    }
 
     // Add tx to wallet, because if it has change it's also ours,
     // otherwise just for transaction history.
@@ -2884,6 +2888,9 @@ void CWallet::CommitTransaction(CTransactionRef tx,
 
     std::string err_string;
     if (!SubmitTxMemoryPoolAndRelay(*wtx, err_string, true, bypass_maxtxfee)) {
+        if (broadcast_error != nullptr) {
+            *broadcast_error = err_string;
+        }
         WalletLogPrintf("CommitTransaction(): Transaction cannot be broadcast immediately, %s\n", err_string);
         // NOTE: if we expect the failure to be long term or permanent, instead delete wtx from the wallet and return failure.
     }
