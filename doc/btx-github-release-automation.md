@@ -26,7 +26,7 @@ Example:
 
 ```bash
 python3 scripts/release/cut_release.py \
-  --repo btxchain/btx-node \
+  --repo btxchain/btx \
   --tag v0.29.5 \
   --release-name "BTX 0.29.5" \
   --build-with-guix \
@@ -98,7 +98,7 @@ release:
 
 ```bash
 python3 scripts/release/publish_github_release.py \
-  --repo btxchain/btx-node \
+  --repo btxchain/btx \
   --tag v0.29.5 \
   --bundle-dir /tmp/btx-release \
   --token-file /path/to/github.key \
@@ -119,7 +119,7 @@ bundle contract:
 
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
-  --repo btxchain/btx-node \
+  --repo btxchain/btx \
   --release-tag v0.29.5 \
   --preset service \
   --datadir /tmp/btx-service-smoke \
@@ -162,7 +162,7 @@ When you want to ship native-built CLI archives without Guix attestations, use
 
 ```bash
 python3 scripts/release/cut_local_release.py \
-  --repo btxchain/btx-node \
+  --repo btxchain/btx \
   --tag v0.29.5 \
   --release-name "BTX 0.29.5" \
   --bundle-dir /tmp/btx-native-cli-bundle \
