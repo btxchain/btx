@@ -33,7 +33,6 @@
 #include <wallet/shielded_wallet.h>
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
-#include <shielded/smile2/params.h>
 #include <shielded/v2_egress.h>
 #include <shielded/v2_ingress.h>
 
@@ -60,11 +59,6 @@ static constexpr int64_t BRIDGE_FEE_HEADROOM_SCALE{1000};
 static constexpr int64_t DEFAULT_BRIDGE_FEE_HEADROOM_MULTIPLIER_MILLI{2000};
 static constexpr const char* TAG_REBALANCE_MANIFEST_GROSS_FLOW{"BTX_RPC_Rebalance_Manifest_Gross_Flow_V1"};
 static constexpr const char* TAG_REBALANCE_MANIFEST_AUTH{"BTX_RPC_Rebalance_Manifest_Authorization_V1"};
-
-[[nodiscard]] constexpr CAmount GetShieldingChunkSmileValueLimit()
-{
-    return static_cast<CAmount>(smile2::Q) - 1;
-}
 
 [[nodiscard]] CAmount RequiredMempoolFee(const CWallet& wallet, size_t relay_vsize, bool has_shielded_bundle);
 [[nodiscard]] CAmount RequiredMempoolFee(const CWallet& wallet, const CTransaction& tx);
@@ -6706,7 +6700,7 @@ void AppendBridgePsbtRelayFeeAnalysis(UniValue& out,
     }
 
     input_limit = std::max(policy.min_inputs_per_chunk, input_limit);
-    const CAmount chunk_requested = std::min(remaining_requested, GetShieldingChunkSmileValueLimit());
+    const CAmount chunk_requested = remaining_requested;
     for (int rebuild = 0; rebuild < MAX_SHIELD_SWEEP_REBUILD_ATTEMPTS; ++rebuild) {
         std::vector<TransparentShieldingUTXO> selected;
         selected.reserve(std::min(input_limit, available_coins.size()));
@@ -7730,10 +7724,6 @@ RPCHelpMan z_shieldcoinbase()
                         const auto next = CheckedAdd(total_in, wtx.tx->vout[n].nValue);
                         if (!next || !MoneyRange(*next)) {
                             throw JSONRPCError(RPC_WALLET_ERROR, "Input value overflow");
-                        }
-                        const CAmount fee_floor = explicit_fee ? fee : CAmount{10000};
-                        if (*next - fee_floor > GetShieldingChunkSmileValueLimit()) {
-                            break;
                         }
                         utxos.push_back(outpoint);
                         total_in = *next;

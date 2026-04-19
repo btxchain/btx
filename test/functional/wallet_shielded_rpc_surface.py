@@ -222,12 +222,12 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
         assert_equal(shielded_coinbase["shielding_inputs"], 1)
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
 
-        self.log.info("Happy path: z_shieldcoinbase caps oversized batches to the SMILE note limit instead of overbuilding")
-        capped_coinbase = wallet.z_shieldcoinbase(wallet.z_getnewaddress(), None, 50, 6, "economical")
-        assert capped_coinbase["txid"] in node.getrawmempool()
-        assert_greater_than(capped_coinbase["amount"], Decimal("0"))
-        assert_greater_than(capped_coinbase["shielding_inputs"], 1)
-        assert capped_coinbase["shielding_inputs"] <= 50
+        self.log.info("Happy path: z_shieldcoinbase accepts larger batches without applying the obsolete SMILE note cap")
+        large_batch = wallet.z_shieldcoinbase(wallet.z_getnewaddress(), None, 50, 6, "economical")
+        assert large_batch["txid"] in node.getrawmempool()
+        assert_greater_than(large_batch["amount"], Decimal("42.94966336"))
+        assert_greater_than(large_batch["shielding_inputs"], 1)
+        assert large_batch["shielding_inputs"] <= 50
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
 
         self.log.info("Create additional shielded notes to exercise merge and view RPCs")

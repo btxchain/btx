@@ -78,6 +78,24 @@ uint256 DeriveUint256(std::string_view tag, uint32_t index)
     return value;
 }
 
+test::shielded::V2EgressReceiptFixture BuildChunkedEgressFixture(
+    std::vector<OutputDescription> outputs,
+    std::vector<uint32_t> output_chunk_sizes,
+    CAmount total_amount)
+{
+    const auto& consensus = Params().GetConsensus();
+    if (consensus.nShieldedMatRiCTDisableHeight <= 0) {
+        throw std::runtime_error("invalid shielded generic-wire activation height fixture");
+    }
+    return test::shielded::BuildV2EgressReceiptFixture(std::move(outputs),
+                                                       std::move(output_chunk_sizes),
+                                                       total_amount,
+                                                       /*proof_receipt_count=*/1,
+                                                       /*required_receipts=*/1,
+                                                       &consensus,
+                                                       consensus.nShieldedMatRiCTDisableHeight - 1);
+}
+
 ShieldedNote MakeNote(const uint256& recipient_pk_hash, CAmount value, uint32_t seed)
 {
     ShieldedNote note;
@@ -401,7 +419,7 @@ BOOST_AUTO_TEST_CASE(block_scan_discovers_owned_egress_output_only_when_chunks_a
         BuildOutput(foreign_note_b, foreign_recipient_b.pk, ScanDomain::BATCH, 0xa2),
         BuildOutput(owned_note, owned_kem_pk, ScanDomain::BATCH, 0xa3),
     };
-    const auto fixture = test::shielded::BuildV2EgressReceiptFixture(
+    const auto fixture = BuildChunkedEgressFixture(
         outputs,
         {2, 1},
         foreign_note_a.value + foreign_note_b.value + owned_note.value);
@@ -461,7 +479,7 @@ BOOST_AUTO_TEST_CASE(mempool_scan_skips_egress_outputs_when_chunk_commitment_is_
                     ScanDomain::BATCH,
                     0xb6),
     };
-    auto fixture = test::shielded::BuildV2EgressReceiptFixture(
+    auto fixture = BuildChunkedEgressFixture(
         outputs,
         {2, 1},
         owned_note.value + 6 * COIN + 7 * COIN);
@@ -489,7 +507,7 @@ BOOST_AUTO_TEST_CASE(mempool_scan_caches_egress_chunk_summaries_for_canonical_bu
         BuildOutput(foreign_note_b, foreign_recipient_b.pk, ScanDomain::BATCH, 0xc7),
         BuildOutput(owned_note_b, owned_kem_pk, ScanDomain::BATCH, 0xc8),
     };
-    const auto fixture = test::shielded::BuildV2EgressReceiptFixture(
+    const auto fixture = BuildChunkedEgressFixture(
         outputs,
         {2, 2},
         foreign_note_a.value + owned_note_a.value + foreign_note_b.value + owned_note_b.value);

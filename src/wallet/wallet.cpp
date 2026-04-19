@@ -100,8 +100,6 @@ using util::ToString;
 namespace wallet {
 
 namespace {
-constexpr CAmount MAX_SHIELDED_AUTO_SHIELD_OUTPUT_VALUE{static_cast<CAmount>(smile2::Q) - 1};
-
 int SaturatingIntFromInt64(const int64_t value)
 {
     if (value > std::numeric_limits<int>::max()) return std::numeric_limits<int>::max();
@@ -1812,7 +1810,6 @@ void CWallet::MaybeAutoShieldCoinbase()
                 if (IsLockedCoin(outpoint)) continue;
                 const auto next = CheckedAdd(total_in, wtx.tx->vout[n].nValue);
                 if (!next || !MoneyRange(*next)) break;
-                if (*next - 10000 > MAX_SHIELDED_AUTO_SHIELD_OUTPUT_VALUE) break;
                 mature_coinbase_utxos.push_back(outpoint);
                 total_in = *next;
                 if (static_cast<int>(mature_coinbase_utxos.size()) >= AUTO_SHIELD_BATCH_LIMIT) break;
