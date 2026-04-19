@@ -21,6 +21,49 @@ See below for instructions on how to [install the dependencies on popular Linux
 distributions](#linux-distribution-specific-instructions), or the
 [dependencies](#dependencies) section for a complete overview.
 
+## Optional: Enable the CUDA MatMul Backend
+
+Linux builds can enable the NVIDIA CUDA MatMul mining backend explicitly.
+This is opt-in and requires:
+
+- An NVIDIA driver that supports your GPU
+- A working CUDA toolkit / `nvcc`
+- An explicit SM architecture list via `BTX_CUDA_ARCHITECTURES`
+
+Example for a toolkit installed in `/usr/local/cuda`:
+
+```bash
+cmake -B build \
+  -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON \
+  -DCUDAToolkit_ROOT=/usr/local/cuda \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+  -DBTX_CUDA_ARCHITECTURES=120
+
+cmake --build build -j"$(nproc)"
+```
+
+CUDA development and validation for the Linux backend were performed against
+CUDA Toolkit `13.2`, the current CUDA Toolkit documentation line as of April
+2026, installed at `/usr/local/cuda`. On this workstation,
+`/usr/local/cuda/bin/nvcc --version` reports `release 13.2, V13.2.51`.
+
+Use the correct SM value for your GPU. `BTX_CUDA_ARCHITECTURES` also accepts a
+semicolon-separated list.
+
+After building, confirm that the backend is available on the local machine:
+
+```bash
+./build/bin/btx-matmul-backend-info --backend cuda
+```
+
+If CUDA runtime probing succeeds, the output will report:
+
+- `"active_backend": "cuda"`
+- `"reason": "ready"`
+
+For current CUDA runtime defaults, pool behavior, and optimization notes, see
+`btx-cuda-matmul-optimization-notes-2026-04-13.md`.
+
 ## Memory Requirements
 
 C++ compilers are memory-hungry. It is recommended to have at least 1.5 GB of

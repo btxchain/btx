@@ -64,11 +64,11 @@ Release Process
   - Use the release-bundling helpers in [BTX GitHub Release Automation](/doc/btx-github-release-automation.md) to stage the final release directory and upload the bundle to GitHub Releases once the binaries, snapshot, and checksum artifacts are ready.
     The same height considerations for `defaultAssumeValid` apply.
   - Preferred operator path once the builder and canonical-node inputs are ready:
-    - `python3 scripts/release/cut_release.py --repo btxchain/btx-node --tag <tag> --release-name <title> --build-with-guix --generate-snapshot --rollback <height or hash> --btx-cli ./build-btx/bin/btx-cli --rpc-arg=-datadir=<canonical-node-datadir> --rpc-arg=-rpcuser=<user> --rpc-arg=-rpcpassword=<pass> --attestations-dir <path-to-guix.sigs>/<version> --sign-with <release-gpg-key> --body-file doc/release-notes.md --token-file <github.key> --publish --bundle-dir /tmp/btx-release-bundle`
+    - `python3 scripts/release/cut_release.py --repo btxchain/btx --tag <tag> --release-name <title> --build-with-guix --generate-snapshot --rollback <height or hash> --btx-cli ./build-btx/bin/btx-cli --rpc-arg=-datadir=<canonical-node-datadir> --rpc-arg=-rpcuser=<user> --rpc-arg=-rpcpassword=<pass> --attestations-dir <path-to-guix.sigs>/<version> --sign-with <release-gpg-key> --body-file doc/release-notes.md --token-file <github.key> --publish --bundle-dir /tmp/btx-release-bundle`
     - this command runs the same bundle collector and publisher used below, but it also stitches the Guix outputs, snapshot generation, attestation staging, and GitHub publish contract into one operator workflow
     - if you are staging from already-built outputs instead of building in place, pass `--guix-output-dir <guix-build-version/output>` and omit `--build-with-guix`
   - Native CLI preview path when you intentionally want a non-Guix release track:
-    - `python3 scripts/release/cut_local_release.py --repo btxchain/btx-node --tag <tag-native-cli> --release-name <title> --platform-spec "macos-arm64;<path-to-btxd>;<path-to-btx-cli>" --platform-spec "linux-arm64;<path-to-btxd>;<path-to-btx-cli>" --bundle-dir /tmp/btx-native-cli-release --token-file <github.key> --smoke-platform macos-arm64 --publish`
+    - `python3 scripts/release/cut_local_release.py --repo btxchain/btx --tag <tag> --release-name <title> --platform-spec "macos-arm64;<path-to-btxd>;<path-to-btx-cli>" --platform-spec "linux-arm64;<path-to-btxd>;<path-to-btx-cli>" --platform-spec "linux-x86_64;<path-to-btxd>;<path-to-btx-cli>" --bundle-dir /tmp/btx-native-cli-release --token-file <github.key> --smoke-platform macos-arm64 --publish`
     - use this only for clearly labeled native-built CLI releases; it does not claim Guix reproducibility or signer attestation coverage
     - if you do not also pass snapshot artifacts and a checksum signature, treat the output as a binary-install track rather than a full download-and-go release
   - Assemble the final fast-start bundle after the multi-architecture build finishes:
@@ -77,7 +77,7 @@ Release Process
     - the collector now fails the staging step if any supported primary archive is missing, so a successful run implies the generated `btx-release-manifest.json` contains one `platform_assets` entry for each supported primary archive
     - if a `guix.sigs/<version>` directory is available, pass `--attestations-dir <path-to-guix.sigs>/<version>` so the final bundle also publishes signer-qualified attestation assets and records them in `attestation_assets`
   - Publish the bundle to GitHub Releases:
-    - `python3 scripts/release/publish_github_release.py --repo btxchain/btx-node --tag <tag> --bundle-dir /tmp/btx-release-bundle --body-file <release-notes.md> --token-file <github.key> --publish`
+    - `python3 scripts/release/publish_github_release.py --repo btxchain/btx --tag <tag> --bundle-dir /tmp/btx-release-bundle --body-file <release-notes.md> --token-file <github.key> --publish`
     - the publisher now refuses bundles whose on-disk assets drift from `SHA256SUMS`, and it verifies `SHA256SUMS.asc` locally whenever the bundle manifest advertises a checksum signature, so it acts as a second contract check before upload
   - Smoke-test the published bundle contract before announcing the release:
     - `python3 contrib/faststart/btx-agent-setup.py --release-manifest /tmp/btx-release-bundle/btx-release-manifest.json --asset-base-url /tmp/btx-release-bundle --platform linux-x86_64 --install-dir /tmp/btx-faststart-smoke --json`

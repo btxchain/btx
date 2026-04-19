@@ -163,8 +163,8 @@ class ShieldedV2MultinodeValidationTest(BitcoinTestFramework):
         blockchaininfo = node.getblockchaininfo()
         assert_equal(blockchaininfo["blocks"], expected_height)
         assert_equal(blockchaininfo["headers"], expected_height)
-        assert_equal(blockchaininfo["shielded_retention"]["profile"], "externalized")
-        assert_equal(blockchaininfo["shielded_retention"]["retain_shielded_commitment_index"], False)
+        assert_equal(blockchaininfo["shielded_retention"]["profile"], "full_commitment_index")
+        assert_equal(blockchaininfo["shielded_retention"]["retain_shielded_commitment_index"], True)
         assert_equal(blockchaininfo["snapshot_sync"]["active"], False)
         assert_equal(blockchaininfo["snapshot_sync"]["background_validation_in_progress"], False)
 

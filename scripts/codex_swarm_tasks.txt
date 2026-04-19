@@ -1,4 +1,0 @@
-# task_id|prompt
-m4-block-hash-semantics|Implement BTX KAWPOW-native block-hash semantics across consensus and index paths, then run pow_tests, kawpow_tests, and feature_btx_kawpow_consensus.py, and commit.
-m5-solved-main-test-genesis|Regenerate solved KAWPOW main/test genesis tuples (nonce64 + mixhash + powhash), lock constants in chainparams, update tests, and commit.
-m7-miner-e2e-readiness|Integrate BTX-specific miner/pool readiness artifacts, validate end-to-end submission path against BTX regtest/testnet assumptions, add docs/scripts, and commit.

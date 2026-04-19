@@ -930,6 +930,9 @@ static UniValue BuildSolvePipelineRuntimeProfile()
     obj.pushKV("cpu_confirm_candidates", stats.cpu_confirm_candidates);
     obj.pushKV("prepared_inputs", stats.prepared_inputs);
     obj.pushKV("overlapped_prepares", stats.overlapped_prepares);
+    obj.pushKV("prefetched_batches", stats.prefetched_batches);
+    obj.pushKV("prefetched_inputs", stats.prefetched_inputs);
+    obj.pushKV("prefetch_depth", static_cast<uint64_t>(stats.prefetch_depth));
     obj.pushKV("async_prepare_submissions", stats.async_prepare_submissions);
     obj.pushKV("async_prepare_completions", stats.async_prepare_completions);
     obj.pushKV("async_prepare_worker_threads", static_cast<uint64_t>(stats.async_prepare_worker_threads));
@@ -1209,12 +1212,15 @@ static UniValue BuildBackendRuntimeProfile()
     obj.pushKV("metal_digest_mismatches", stats.metal_digest_mismatches);
     obj.pushKV("metal_retry_without_uploaded_base_attempts", stats.metal_retry_without_uploaded_base_attempts);
     obj.pushKV("metal_retry_without_uploaded_base_successes", stats.metal_retry_without_uploaded_base_successes);
+    obj.pushKV("cuda_successes", stats.cuda_successes);
+    obj.pushKV("cuda_fallbacks_to_cpu", stats.cuda_fallbacks_to_cpu);
     obj.pushKV("gpu_input_generation_attempts", stats.gpu_input_generation_attempts);
     obj.pushKV("gpu_input_generation_successes", stats.gpu_input_generation_successes);
     obj.pushKV("gpu_input_generation_failures", stats.gpu_input_generation_failures);
     obj.pushKV("gpu_input_auto_disabled_skips", stats.gpu_input_auto_disabled_skips);
     obj.pushKV("gpu_input_auto_disabled", stats.gpu_input_auto_disabled);
     obj.pushKV("last_metal_fallback_error", stats.last_metal_fallback_error);
+    obj.pushKV("last_cuda_fallback_error", stats.last_cuda_fallback_error);
     obj.pushKV("last_gpu_input_error", stats.last_gpu_input_error);
     return obj;
 }
@@ -5319,6 +5325,9 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::BOOL, "cpu_confirm_candidates", "Whether candidate digests are CPU-confirmed"},
                                     {RPCResult::Type::NUM, "prepared_inputs", "Prepared input batches observed"},
                                     {RPCResult::Type::NUM, "overlapped_prepares", "Overlapped nonce preparations observed"},
+                                    {RPCResult::Type::NUM, "prefetched_batches", "Prefetched future nonce batches observed"},
+                                    {RPCResult::Type::NUM, "prefetched_inputs", "Prefetched nonce inputs observed"},
+                                    {RPCResult::Type::NUM, "prefetch_depth", "Configured future-batch prefetch depth"},
                                     {RPCResult::Type::NUM, "async_prepare_submissions", "Async nonce-prepare submissions observed"},
                                     {RPCResult::Type::NUM, "async_prepare_completions", "Async nonce-prepare completions observed"},
                                     {RPCResult::Type::NUM, "async_prepare_worker_threads", "Prepare worker threads currently configured"},
@@ -5412,12 +5421,15 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::NUM, "metal_digest_mismatches", "Metal digest mismatches detected"},
                                     {RPCResult::Type::NUM, "metal_retry_without_uploaded_base_attempts", "Metal retries attempted without uploaded base matrices"},
                                     {RPCResult::Type::NUM, "metal_retry_without_uploaded_base_successes", "Successful retries without uploaded base matrices"},
+                                    {RPCResult::Type::NUM, "cuda_successes", "Successful CUDA digest computations"},
+                                    {RPCResult::Type::NUM, "cuda_fallbacks_to_cpu", "CUDA requests that fell back to CPU"},
                                     {RPCResult::Type::NUM, "gpu_input_generation_attempts", "GPU input-generation attempts"},
                                     {RPCResult::Type::NUM, "gpu_input_generation_successes", "Successful GPU input-generation attempts"},
                                     {RPCResult::Type::NUM, "gpu_input_generation_failures", "Failed GPU input-generation attempts"},
                                     {RPCResult::Type::NUM, "gpu_input_auto_disabled_skips", "AUTO-mode GPU input skips after disablement"},
                                     {RPCResult::Type::BOOL, "gpu_input_auto_disabled", "Whether GPU input AUTO mode is disabled"},
                                     {RPCResult::Type::STR, "last_metal_fallback_error", "Most recent Metal fallback error"},
+                                    {RPCResult::Type::STR, "last_cuda_fallback_error", "Most recent CUDA fallback error"},
                                     {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                                 }},
                             }},
@@ -5568,6 +5580,9 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::BOOL, "cpu_confirm_candidates", "Whether candidate digests are CPU-confirmed"},
                                     {RPCResult::Type::NUM, "prepared_inputs", "Prepared input batches observed"},
                                     {RPCResult::Type::NUM, "overlapped_prepares", "Overlapped nonce preparations observed"},
+                                    {RPCResult::Type::NUM, "prefetched_batches", "Prefetched future nonce batches observed"},
+                                    {RPCResult::Type::NUM, "prefetched_inputs", "Prefetched nonce inputs observed"},
+                                    {RPCResult::Type::NUM, "prefetch_depth", "Configured future-batch prefetch depth"},
                                     {RPCResult::Type::NUM, "async_prepare_submissions", "Async nonce-prepare submissions observed"},
                                     {RPCResult::Type::NUM, "async_prepare_completions", "Async nonce-prepare completions observed"},
                                     {RPCResult::Type::NUM, "async_prepare_worker_threads", "Prepare worker threads currently configured"},
@@ -5661,12 +5676,15 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::NUM, "metal_digest_mismatches", "Metal digest mismatches detected"},
                                     {RPCResult::Type::NUM, "metal_retry_without_uploaded_base_attempts", "Metal retries attempted without uploaded base matrices"},
                                     {RPCResult::Type::NUM, "metal_retry_without_uploaded_base_successes", "Successful retries without uploaded base matrices"},
+                                    {RPCResult::Type::NUM, "cuda_successes", "Successful CUDA digest computations"},
+                                    {RPCResult::Type::NUM, "cuda_fallbacks_to_cpu", "CUDA requests that fell back to CPU"},
                                     {RPCResult::Type::NUM, "gpu_input_generation_attempts", "GPU input-generation attempts"},
                                     {RPCResult::Type::NUM, "gpu_input_generation_successes", "Successful GPU input-generation attempts"},
                                     {RPCResult::Type::NUM, "gpu_input_generation_failures", "Failed GPU input-generation attempts"},
                                     {RPCResult::Type::NUM, "gpu_input_auto_disabled_skips", "AUTO-mode GPU input skips after disablement"},
                                     {RPCResult::Type::BOOL, "gpu_input_auto_disabled", "Whether GPU input AUTO mode is disabled"},
                                     {RPCResult::Type::STR, "last_metal_fallback_error", "Most recent Metal fallback error"},
+                                    {RPCResult::Type::STR, "last_cuda_fallback_error", "Most recent CUDA fallback error"},
                                     {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                                 }},
                             }},

@@ -62,9 +62,12 @@ If you want that workflow to install the right precompiled archive first,
 bootstrap flow with the `miner` or `service` preset.
 
 This repository hardcodes the accepted snapshot metadata in
-`src/kernel/chainparams.cpp`. BTX mainnet currently hardcodes the activation-
-boundary rollback snapshot at height `60760`; future releases should append
-newer entries instead of regressing to snapshot-less bootstraps.
+`src/kernel/chainparams.cpp`. The current tree accepts mainnet rollback
+snapshots at heights `55000`, `60760`, `64900`, `71260`, and `71435`, and
+ships default-consensus regtest entries at `110`, `299`, and `61010` for local
+development and CI flows. `testnet`, `testnet4`, and `signet` do not yet have
+compiled assumeutxo entries, so new public-chain reports must be generated and
+applied before fast-start bootstrap is supported there.
 
 ### BTX shielded-state appendix
 
@@ -85,6 +88,14 @@ nullifier stores, persists the resulting tip-linked state, and can then restart
 from the snapshot chainstate without needing a historical block walk. This is
 the BTX-specific fix that makes "download the binary, load the snapshot, restart
 later, and keep using wallet/mining/service RPCs" viable.
+
+BTX also now defaults to `retainshieldedcommitmentindex=1`, which keeps the
+shielded commitment-position index on disk across restart and snapshot
+recovery. That retained index is what prevents later starts from paying a
+second historical shielded-state rebuild tax just to answer commitment lookup
+queries again. Operators who explicitly prefer the lower-retained externalized
+posture can set `-retainshieldedcommitmentindex=0`, but should expect slower
+restart recovery as the node rebuilds that index from chain data.
 
 ### Pruning
 

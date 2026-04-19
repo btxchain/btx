@@ -69,8 +69,8 @@ Quick start:
 
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
-  --repo btxchain/btx-node \
-  --release-tag v29.2-btx1 \
+  --repo btxchain/btx \
+  --release-tag v0.29.5 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"
@@ -106,9 +106,11 @@ If you want the supervisor to actively re-seed peer discovery when
 `BTX_MINING_BOOTSTRAP_PEERS` (or the legacy `BTX_MINING_BOOTSTRAP_ADDNODES`)
 to a comma-separated host list such as
 `node1.example:19335,node2.example:19335`. The loop will issue
-`addnode ... onetry` refreshes after repeated weak-peer observations, while
-`BTX_MINING_SYNC_STALL_RESTART_SECS` controls how long it waits for real sync
-progress before restarting a stalled daemon. Once the node has been healthy,
+`disconnectnode` calls for obviously stale manual peers followed by
+`addnode ... onetry` refreshes after repeated weak-peer observations. If the
+node still does not make tip progress for `BTX_MINING_SYNC_STALL_RESTART_SECS`,
+the supervisor escalates to a daemon restart so startup recovery can rebuild
+local state instead of sitting paused indefinitely. Once the node has been healthy,
 the loop also caches its last healthy outbound peers in
 `$RESULTS_DIR/live-peer-cache.txt` and retries those first during later
 peer-consensus recovery.

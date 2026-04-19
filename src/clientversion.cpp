@@ -20,7 +20,7 @@ using util::Join;
  * for both bitcoind and bitcoin-qt, to make it harder for attackers to
  * target servers or GUI users specifically.
  */
-const std::string UA_NAME("Satoshi");
+const std::string UA_NAME("BTX");
 
 
 #include <bitcoin-build-info.h>
@@ -31,7 +31,7 @@ const std::string UA_NAME("Satoshi");
 //   - "// No build information available", if proper git information is not available
 
 //! git will put "#define GIT_COMMIT_ID ..." on the next line inside archives. 
-#define GIT_COMMIT_ID "9e4926ce3fdf2a5f51143774e56db64dc802c2e8"
+#define GIT_COMMIT_ID "a9da006e5c8cac003dc404d363549709ae86161f"
 
 #ifdef BUILD_GIT_TAG
     #define BUILD_DESC BUILD_GIT_TAG
@@ -66,17 +66,10 @@ std::string FormatFullVersion()
  */
 std::string FormatSubVersion(const std::string& name, int nClientVersion, const std::vector<std::string>& comments, const bool base_name_only)
 {
+    (void)base_name_only;
     std::string comments_str;
     if (!comments.empty()) comments_str = strprintf("(%s)", Join(comments, "; "));
-    std::string ua = strprintf("/%s:%s%s/", name, FormatVersion(nClientVersion), comments_str);
-    if (!base_name_only) {
-        static const auto ua_knots = []() -> std::string {
-            const auto pos{CLIENT_BUILD.find(".knots")};
-            return "Knots:" + CLIENT_BUILD.substr(pos + 6) + "/";
-        }();
-        ua += ua_knots;
-    }
-    return ua;
+    return strprintf("/%s:%s%s/", name, FormatVersion(nClientVersion), comments_str);
 }
 
 std::string CopyrightHolders(const std::string& strPrefix)
@@ -93,7 +86,7 @@ std::string CopyrightHolders(const std::string& strPrefix)
 
 std::string LicenseInfo()
 {
-    const std::string URL_SOURCE_CODE = "<https://github.com/bitcoinknots/bitcoin>";
+    const std::string URL_SOURCE_CODE = "<https://github.com/btxchain/btx>";
 
     return CopyrightHolders(strprintf(_("Copyright (C) %i-%i"), 2009, COPYRIGHT_YEAR).translated + " ") + "\n" +
            "\n" +

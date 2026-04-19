@@ -33,6 +33,8 @@ from test_framework.util import (
     assert_raises_rpc_error,
 )
 
+LIVE_DIRECT_LIMIT = 8
+
 
 class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
     def add_options(self, parser):
@@ -65,7 +67,7 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
         self.log.info("Edge case: z_shieldcoinbase rejects when no mature coinbase exists")
         assert_raises_rpc_error(-4, "No mature coinbase outputs available", wallet.z_shieldcoinbase)
 
-        self.log.info("Fallback path: z_sendmany deposits directly from transparent funds when shielded balance is insufficient")
+        self.log.info("Post-fork direct transparent fallback is disabled and must route through bridge ingress")
         funding_mine_addr = funding_wallet.getnewaddress()
         fund_trusted_transparent_balance(
             self, node, funding_wallet, funding_mine_addr, Decimal("2.0"), maturity_blocks=101, sync_fun=self.no_op
@@ -74,18 +76,12 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
         funding_wallet.sendtoaddress(deposit_taddr, Decimal("1.0"))
         self.generatetoaddress(node, 1, funding_mine_addr, sync_fun=self.no_op)
         fallback_dest = deposit_wallet.z_getnewaddress()
-        fallback_send = deposit_wallet.z_sendmany([{"address": fallback_dest, "amount": Decimal("0.75")}])
-        assert fallback_send["txid"] in node.getrawmempool()
-        assert_equal(fallback_send["spends"], 0)
-        assert_greater_than(fallback_send["outputs"], 0)
-        fallback_view = deposit_wallet.z_viewtransaction(fallback_send["txid"])
-        assert_equal(fallback_view["family"], "v2_send")
-        assert_equal(len(fallback_view["spends"]), 0)
-        assert_equal(fallback_view["output_chunks"], [])
-        assert any(output["amount"] == Decimal("0.75") and output["is_ours"] for output in fallback_view["outputs"])
-        self.generatetoaddress(node, 1, funding_mine_addr, sync_fun=self.no_op)
-        fallback_notes = deposit_wallet.z_listunspent(1, 9999999, False)
-        assert any(note["amount"] == Decimal("0.75") for note in fallback_notes)
+        assert_raises_rpc_error(
+            -4,
+            "post-fork direct transparent shielding is disabled; use bridge ingress",
+            deposit_wallet.z_sendmany,
+            [{"address": fallback_dest, "amount": Decimal("0.75")}],
+        )
 
         mine_addr = wallet.getnewaddress()
         self.generatetoaddress(node, 130, mine_addr, sync_fun=self.no_op)
@@ -98,13 +94,13 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
         shield_plan = wallet.z_planshieldfunds(Decimal("5.0"), z_coinbase)
         assert shield_plan["estimated_chunk_count"] >= 1
         assert shield_plan["policy"]["recommended_max_inputs_per_chunk"] >= 1
-        assert shield_plan["policy"]["selection_strategy"] == "largest-first"
+        assert shield_plan["policy"]["selection_strategy"] == "coinbase-largest-first"
         shield_cb = wallet.z_shieldfunds(Decimal("5.0"), z_coinbase)
         shield_cb_txid = shield_cb["txid"]
         assert shield_cb_txid in node.getrawmempool()
         assert_greater_than(shield_cb["transparent_inputs"], 0)
 
-        view_cb = wallet.z_viewtransaction(shield_cb_txid)
+        view_cb = wallet.z_viewtransaction(shield_cb_txid, True)
         assert view_cb["family"] == "v2_send"
         assert len(view_cb["outputs"]) >= 1
         assert_equal(view_cb["output_chunks"], [])
@@ -142,10 +138,10 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
         sender_zero_conf = wallet.z_getbalance(0)
         assert_greater_than_or_equal(Decimal(sender_zero_conf["balance"]), Decimal("0"))
         assert_equal(Decimal(sender_zero_conf["balance"]), Decimal(seeded["balance"]) - zero_conf_send["fee"])
-        assert any(note["amount"] == Decimal("0.33") for note in wallet.z_listunspent(0, 9999999, False))
-        assert not any(note["amount"] == Decimal("0.33") for note in wallet.z_listunspent(1, 9999999, False))
+        assert any(note["amount"] == Decimal("0.33") for note in wallet.z_listunspent(0, 9999999, False, True))
+        assert not any(note["amount"] == Decimal("0.33") for note in wallet.z_listunspent(1, 9999999, False, True))
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
-        assert any(note["amount"] == Decimal("0.33") for note in wallet.z_listunspent(1, 9999999, False))
+        assert any(note["amount"] == Decimal("0.33") for note in wallet.z_listunspent(1, 9999999, False, True))
 
         self.log.info("Edge cases: parameter and funding validation")
         assert_raises_rpc_error(-8, "Amount must be positive", wallet.z_shieldfunds, Decimal("0"))
@@ -174,7 +170,8 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
             "economical",
         )
         assert sendto_result["txid"] in node.getrawmempool()
-        assert_equal(sendto_result["family"], "v2_send")
+        assert_equal(sendto_result["family"], "shielded_v2")
+        assert sendto_result["family_redacted"]
         assert_greater_than(sendto_result["fee"], Decimal("0"))
         assert_greater_than(sendto_result["fee"], Decimal("0.0001"))
         assert sendto_result["fee"] in {
@@ -184,9 +181,10 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
             Decimal("0.0032"),
             Decimal("0.0064"),
         }
-        assert_greater_than(sendto_result["spends"], 0)
-        assert_greater_than(sendto_result["outputs"], 0)
-        sendto_view = wallet.z_viewtransaction(sendto_result["txid"])
+        assert sendto_result["io_counts_redacted"]
+        assert "spends" not in sendto_result
+        assert "outputs" not in sendto_result
+        sendto_view = wallet.z_viewtransaction(sendto_result["txid"], True)
         assert_equal(sendto_view["family"], "v2_send")
         assert_equal(sendto_view["output_chunks"], [])
         expected_sendto_amount = Decimal("0.25") - sendto_result["fee"]
@@ -210,7 +208,7 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
         )
         assert split_send["txid"] in node.getrawmempool()
         assert_equal(split_send["fee"], split_fee)
-        split_view = wallet.z_viewtransaction(split_send["txid"])
+        split_view = wallet.z_viewtransaction(split_send["txid"], True)
         assert any(output["amount"] == Decimal("0.29919999") and output["is_ours"] for output in split_view["outputs"])
         assert any(output["amount"] == Decimal("0.1992") and output["is_ours"] for output in split_view["outputs"])
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
@@ -222,12 +220,12 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
         assert_equal(shielded_coinbase["shielding_inputs"], 1)
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
 
-        self.log.info("Happy path: z_shieldcoinbase caps oversized batches to the SMILE note limit instead of overbuilding")
-        capped_coinbase = wallet.z_shieldcoinbase(wallet.z_getnewaddress(), None, 50, 6, "economical")
-        assert capped_coinbase["txid"] in node.getrawmempool()
-        assert_greater_than(capped_coinbase["amount"], Decimal("0"))
-        assert_greater_than(capped_coinbase["shielding_inputs"], 1)
-        assert capped_coinbase["shielding_inputs"] <= 50
+        self.log.info("Happy path: z_shieldcoinbase accepts larger batches without applying the obsolete SMILE note cap")
+        large_batch = wallet.z_shieldcoinbase(wallet.z_getnewaddress(), None, 50, 6, "economical")
+        assert large_batch["txid"] in node.getrawmempool()
+        assert_greater_than(large_batch["amount"], Decimal("42.94966336"))
+        assert_greater_than(large_batch["shielding_inputs"], 1)
+        assert large_batch["shielding_inputs"] <= 50
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
 
         self.log.info("Create additional shielded notes to exercise merge and view RPCs")
@@ -235,15 +233,16 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
         for i in range(2):
             shield_res = wallet.z_sendmany([{"address": merge_target, "amount": Decimal("0.2")}])
             assert shield_res["txid"] in node.getrawmempool()
-            assert_greater_than(shield_res["spends"], 0)
-            assert_greater_than(shield_res["outputs"], 0)
+            assert shield_res["io_counts_redacted"]
+            assert "spends" not in shield_res
+            assert "outputs" not in shield_res
             if i == 0:
-                send_view = wallet.z_viewtransaction(shield_res["txid"])
+                send_view = wallet.z_viewtransaction(shield_res["txid"], True)
                 assert send_view["family"] == "v2_send"
                 assert_equal(send_view["output_chunks"], [])
             self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
 
-        notes_before = wallet.z_listunspent(1, 9999999, False)
+        notes_before = wallet.z_listunspent(1, 9999999, False, True)
         assert len(notes_before) >= 3
 
         self.log.info("Edge case: z_mergenotes enforces minimum note count parameter")
@@ -267,15 +266,34 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
         assert merge_txid in node.getrawmempool()
         assert_greater_than(merge["merged_notes"], 1)
 
-        merge_view = wallet.z_viewtransaction(merge_txid)
+        merge_view = wallet.z_viewtransaction(merge_txid, True)
         assert merge_view["family"] == "v2_send"
         assert len(merge_view["spends"]) >= 1
         assert len(merge_view["outputs"]) >= 1
         assert_equal(merge_view["output_chunks"], [])
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
 
-        notes_after = wallet.z_listunspent(1, 9999999, False)
+        notes_after = wallet.z_listunspent(1, 9999999, False, True)
         assert len(notes_after) >= 1
+
+        self.log.info("Fallback path: z_mergenotes avoids a fee-insufficient small-note prefix when a viable live merge set exists")
+        node.createwallet(wallet_name="mergefallback", descriptors=True)
+        mergefallback = encrypt_and_unlock_wallet(node, "mergefallback")
+        mergefallback_addr = mergefallback.z_getnewaddress()
+        for _ in range(LIVE_DIRECT_LIMIT):
+            dust_send = wallet.z_sendmany([{"address": mergefallback_addr, "amount": Decimal("0.00100000")}])
+            assert dust_send["txid"] in node.getrawmempool()
+            self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
+        for _ in range(2):
+            large_send = wallet.z_sendmany([{"address": mergefallback_addr, "amount": Decimal("0.20")}])
+            assert large_send["txid"] in node.getrawmempool()
+            self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
+        assert_equal(int(mergefallback.z_getbalance()["note_count"]), LIVE_DIRECT_LIMIT + 2)
+        mergefallback_merge = mergefallback.z_mergenotes(LIVE_DIRECT_LIMIT)
+        assert mergefallback_merge["txid"] in node.getrawmempool()
+        assert_equal(mergefallback_merge["merged_notes"], LIVE_DIRECT_LIMIT)
+        assert_equal(mergefallback.z_viewtransaction(mergefallback_merge["txid"], True)["family"], "v2_send")
+        self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
 
         self.log.info("Build-only bridge egress RPCs return canonical wallet-visible chunk metadata")
         egress_recipients = [
@@ -318,7 +336,8 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
             [proof_receipt["proof_receipt_hex"]],
             egress_recipients,
         )
-        assert_equal(egress_tx["family"], "v2_egress_batch")
+        assert_equal(egress_tx["family"], "shielded_v2")
+        assert egress_tx["family_redacted"]
         assert_equal(egress_tx["statement_hash"], egress_statement["statement_hash"])
         assert_equal(egress_tx["descriptor_count"], 1)
         assert_equal(egress_tx["proof_receipt_count"], 1)
@@ -411,7 +430,8 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
                 "proof_receipt_policy": ingress_proof_receipt_policy,
             },
         )
-        assert_equal(ingress_tx["family"], "v2_ingress_batch")
+        assert_equal(ingress_tx["family"], "shielded_v2")
+        assert ingress_tx["family_redacted"]
         assert_equal(ingress_tx["statement_hash"], ingress_statement["statement_hash"])
         assert_equal(ingress_tx["external_anchor"], ingress_anchor["external_anchor"])
         assert_equal(ingress_tx["proof_receipt_count"], 1)
@@ -522,7 +542,8 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
                 "proof_receipt_policy": hybrid_proof_receipt_policy,
             },
         )
-        assert_equal(hybrid_ingress_tx["family"], "v2_ingress_batch")
+        assert_equal(hybrid_ingress_tx["family"], "shielded_v2")
+        assert hybrid_ingress_tx["family_redacted"]
         assert_equal(hybrid_ingress_tx["statement_hash"], hybrid_ingress_statement["statement_hash"])
         assert_equal(hybrid_ingress_tx["external_anchor"], hybrid_anchor["external_anchor"])
         assert_equal(hybrid_ingress_tx["verification_bundle"], hybrid_anchor["verification_bundle"])
@@ -541,7 +562,7 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
             len(decoded_hybrid_ingress["shielded"]["payload"]["reserve_outputs"]),
             len(hybrid_ingress_tx["reserve_outputs"]),
         )
-        assert_equal(decoded_hybrid_ingress["shielded"]["header"]["proof_envelope"]["settlement_binding_kind"], "native_batch")
+        assert_equal(decoded_hybrid_ingress["shielded"]["header"]["proof_envelope"]["settlement_binding_kind"], "generic_postfork")
 
         self.log.info("Build-only bridge ingress RPCs support multi-shard reserve-plus-intent batches")
         ingress_multishard_mine_addr = ingress_multishard_wallet.getnewaddress()
@@ -550,9 +571,7 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
         )
         multishard_seed_addr = ingress_multishard_wallet.z_getnewaddress()
         for _ in range(2):
-            multishard_seed = ingress_multishard_wallet.z_sendmany(
-                [{"address": multishard_seed_addr, "amount": Decimal("0.50")}]
-            )
+            multishard_seed = ingress_multishard_wallet.z_shieldfunds(Decimal("0.50"), multishard_seed_addr)
             assert multishard_seed["txid"] in node.getrawmempool()
             self.generatetoaddress(node, 1, ingress_multishard_mine_addr, sync_fun=self.no_op)
 
@@ -605,7 +624,8 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
                 "proof_receipt_policy": ingress_proof_receipt_policy,
             },
         )
-        assert_equal(multishard_tx["family"], "v2_ingress_batch")
+        assert_equal(multishard_tx["family"], "shielded_v2")
+        assert multishard_tx["family_redacted"]
         assert_equal(multishard_tx["statement_hash"], multishard_statement["statement_hash"])
         assert_equal(multishard_tx["external_anchor"], multishard_anchor["external_anchor"])
         assert_equal(multishard_tx["proof_receipt_count"], 1)

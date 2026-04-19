@@ -20,13 +20,13 @@ class ShieldedSnapshotRetentionProfileTest(BitcoinTestFramework):
         self.num_nodes = 2
         self.extra_args = [
             [],
-            ["-retainshieldedcommitmentindex=1"],
+            ["-retainshieldedcommitmentindex=0"],
         ]
 
     def run_test(self):
         expectations = [
-            ("externalized", False),
             ("full_commitment_index", True),
+            ("externalized", False),
         ]
 
         for index, (profile, retain_commitment_index) in enumerate(expectations):

@@ -70,6 +70,9 @@ rpcport=19334
 # Allow young-chain bootstrap
 minimumchainwork=0
 
+# Keep shielded commitment lookups on disk so restart and snapshot recovery stay fast.
+retainshieldedcommitmentindex=1
+
 # Runtime defaults
 dbcache=4096
 maxmempool=300

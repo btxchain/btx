@@ -539,6 +539,18 @@ private:
 
     [[nodiscard]] std::vector<unsigned char> GetMasterSeed() const;
     [[nodiscard]] int GetChainTipHeight() const;
+    [[nodiscard]] const ShieldedKeySet* FindLoadedSpendingKeysetForRecipient(
+        const uint256& recipient_pk_hash) const EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    [[nodiscard]] std::optional<Nullifier> ComputeOwnedNullifier(
+        const ShieldedCoin& coin,
+        const std::vector<unsigned char>& master_seed,
+        const ShieldedKeySet& keyset) const EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    [[nodiscard]] size_t RepairOwnedNoteSpendMetadataForMap(
+        std::map<Nullifier, ShieldedCoin>& note_map,
+        const char* map_name,
+        const std::vector<unsigned char>& master_seed) EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    [[nodiscard]] bool RepairOwnedNoteSpendMetadata(
+        const std::vector<unsigned char>& master_seed) EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
     void PruneStalePendingSpends() const EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
     [[nodiscard]] std::optional<CMutableTransaction> CreateV2Send(
         const std::vector<std::pair<ShieldedAddress, CAmount>>& shielded_recipients,

@@ -13,7 +13,7 @@ path = pathlib.Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 
 required_snippets = [
-    "../infra/btx-seed-server-spec.md",
+    "infra/btx-seed-server-spec.md",
     "generate_shielded_matrict_plus_transcript_corpus",
     "shielded_matrict_plus_tests,shielded_proof_adversarial_tests",
     "check_shielded_matrict_plus_transcripts.py",
@@ -70,7 +70,7 @@ manifest = {
             "copied_to": str(output_dir / "source_snapshot" / "doc" / "btx-production-readiness-matrix.md"),
         },
         {
-            "source": str(module.REPO_ROOT.parent / "infra" / "btx-seed-server-spec.md"),
+            "source": str(module.REPO_ROOT / "infra" / "btx-seed-server-spec.md"),
             "copied_to": str(output_dir / "source_snapshot" / "infra" / "btx-seed-server-spec.md"),
         },
     ],
@@ -98,7 +98,7 @@ if sanitized["source_files"][0]["source"] != "<repo>/doc/btx-production-readines
     raise SystemExit("repo snapshot source path was not sanitized")
 if sanitized["source_files"][0]["copied_to"] != "source_snapshot/doc/btx-production-readiness-matrix.md":
     raise SystemExit("repo snapshot copied_to path was not relativized")
-if sanitized["source_files"][1]["source"] != "<workspace>/infra/btx-seed-server-spec.md":
+if sanitized["source_files"][1]["source"] != "<repo>/infra/btx-seed-server-spec.md":
     raise SystemExit("workspace snapshot source path was not sanitized")
 if sanitized["source_files"][1]["copied_to"] != "source_snapshot/infra/btx-seed-server-spec.md":
     raise SystemExit("workspace snapshot copied_to path was not relativized")

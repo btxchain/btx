@@ -104,11 +104,14 @@ class AssumeutxoTest(BitcoinTestFramework):
         """Use the pregenerated, deterministic chain up to height 199."""
         self.num_nodes = 4
         self.rpc_timeout = 120
+        # Keep explicit externalized nodes in this test so both retention
+        # surfaces stay covered after the default switched to retained
+        # commitment indexing for operator-facing fast starts.
         self.extra_args = [
-            [],
-            ["-fastprune", "-prune=1", "-blockfilterindex=1", "-coinstatsindex=1"],
+            ["-retainshieldedcommitmentindex=0"],
+            ["-fastprune", "-prune=1", "-blockfilterindex=1", "-coinstatsindex=1", "-retainshieldedcommitmentindex=0"],
             ["-persistmempool=0","-txindex=1", "-blockfilterindex=1", "-coinstatsindex=1", "-retainshieldedcommitmentindex=1"],
-            []
+            ["-retainshieldedcommitmentindex=0"]
         ]
 
     def setup_network(self):

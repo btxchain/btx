@@ -4,6 +4,7 @@
 
 #include <matmul/backend_capabilities.h>
 
+#include <cuda/matmul_accel.h>
 #include <metal/matmul_accel.h>
 
 #include <algorithm>
@@ -60,10 +61,11 @@ Capability MetalCapability()
 Capability CudaCapability()
 {
 #if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+    const auto probe = btx::cuda::ProbeMatMulDigestAcceleration();
     return Capability{
         .compiled = true,
-        .available = false,
-        .reason = "runtime_probe_not_implemented",
+        .available = probe.available,
+        .reason = probe.reason,
     };
 #else
     return Capability{

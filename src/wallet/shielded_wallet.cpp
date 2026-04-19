@@ -151,14 +151,11 @@ struct ResolvedV2ShieldedRecipient
     return true;
 }
 
-[[nodiscard]] constexpr CAmount GetShieldedSmileValueLimit()
+[[nodiscard]] bool IsShieldedAmountCompatible(CAmount value)
 {
-    return static_cast<CAmount>(smile2::Q) - 1;
-}
-
-[[nodiscard]] bool IsShieldedSmileValueCompatible(CAmount value)
-{
-    return value > 0 && MoneyRange(value) && value < static_cast<CAmount>(smile2::Q);
+    // SMILE encodes amounts as 32 base-4 digits, so wallet amount validity is
+    // bounded by MoneyRange rather than the proof field modulus q.
+    return value > 0 && MoneyRange(value);
 }
 
 [[nodiscard]] uint256 ViewOnlyNullifier(const uint256& commitment)
@@ -2654,12 +2651,11 @@ std::vector<ShieldedCoin> CShieldedWallet::GetSpendableNotes(int min_depth) cons
     for (const auto& [nf, coin] : m_notes) {
         if (coin.is_spent || !coin.is_mine_spend) continue;
         if (!IsWalletSpendableNoteClass(coin.note_class)) continue;
-        if (!IsShieldedSmileValueCompatible(coin.note.value)) {
+        if (!IsShieldedAmountCompatible(coin.note.value)) {
             LogDebug(BCLog::WALLETDB,
-                     "CShieldedWallet::GetSpendableNotes skipping note commitment=%s value=%lld outside SMILE range (< %lld)\n",
+                     "CShieldedWallet::GetSpendableNotes skipping note commitment=%s value=%lld outside supported wallet amount range\n",
                      coin.commitment.ToString(),
-                     static_cast<long long>(coin.note.value),
-                     static_cast<long long>(GetShieldedSmileValueLimit() + 1));
+                     static_cast<long long>(coin.note.value));
             continue;
         }
         // R5-520: Skip notes that are reserved by an in-flight transaction.
@@ -2739,14 +2735,17 @@ std::optional<ShieldedSpendSelectionEstimate> CShieldedWallet::EstimateDirectSpe
     }
 
     const size_t ring_size = GetConfiguredShieldedRingSize();
+    if (selected.size() > shielded::v2::MAX_LIVE_DIRECT_SMILE_SPENDS) {
+        return fail("selected note count exceeds live direct shielded spend limit");
+    }
     if (selected.size() > ring_size) {
-        return fail("selected note count exceeds SMILE shared ring limit");
+        return fail("selected note count exceeds configured shielded ring size");
     }
 
     CAmount total_input{0};
     for (const auto& coin : selected) {
-        if (!IsShieldedSmileValueCompatible(coin.note.value)) {
-            return fail("selected note exceeds SMILE input value limit");
+        if (!IsShieldedAmountCompatible(coin.note.value)) {
+            return fail("selected note has invalid amount");
         }
         const auto next = CheckedAdd(total_input, coin.note.value);
         if (!next || !MoneyRange(*next)) return fail("selected input total overflow");
@@ -2755,56 +2754,58 @@ std::optional<ShieldedSpendSelectionEstimate> CShieldedWallet::EstimateDirectSpe
     if (total_input < total_needed) return fail("selected input below total needed");
 
     CAmount change = total_input - total_needed;
-    const bool reserve_shielded_change =
-        change == 0 &&
-        selected.size() > 1 &&
-        shielded_recipients.size() == 1 &&
-        transparent_recipients.empty();
+    const bool prefer_shielded_change_reserve =
+        PreferExactBalanceShieldedChangeReserve(change,
+                                                selected.size(),
+                                                shielded_recipients.size(),
+                                                transparent_recipients.size());
+    const bool require_change_reserve =
+        change == 0 && shielded_recipients.empty() && !transparent_recipients.empty();
     if (selected_override == nullptr &&
-        ((change == 0 && shielded_recipients.empty() && !transparent_recipients.empty()) ||
-         reserve_shielded_change)) {
+        (require_change_reserve || prefer_shielded_change_reserve)) {
         const auto reserved_target = CheckedAdd(total_needed, CAmount{1});
         if (!reserved_target || !MoneyRange(*reserved_target)) {
-            return fail(reserve_shielded_change
-                            ? "shielded send change reserve overflow"
-                            : "unshield change reserve overflow");
-        }
-
-        auto reserved_selection = SelectNotes(*reserved_target, fee, prefer_minimal_inputs);
-        if (reserved_selection.empty()) {
-            return fail(reserve_shielded_change
-                            ? "exact-balance shielded send requires at least 1 sat change reserve"
-                            : "exact-balance unshield requires at least 1 sat change reserve");
-        }
-
-        CAmount reserved_total{0};
-        for (const auto& coin : reserved_selection) {
-            if (!IsShieldedSmileValueCompatible(coin.note.value)) {
-                return fail("selected note exceeds SMILE input value limit");
+            if (require_change_reserve) {
+                return fail("unshield change reserve overflow");
             }
-            const auto next = CheckedAdd(reserved_total, coin.note.value);
-            if (!next || !MoneyRange(*next)) return fail("selected input total overflow");
-            reserved_total = *next;
         }
-        if (reserved_total < *reserved_target) {
-            return fail(reserve_shielded_change
-                            ? "exact-balance shielded send requires at least 1 sat change reserve"
-                            : "exact-balance unshield requires at least 1 sat change reserve");
-        }
+        if (reserved_target && MoneyRange(*reserved_target)) {
+            auto reserved_selection = SelectNotes(*reserved_target, fee, prefer_minimal_inputs);
+            CAmount reserved_total{0};
+            bool reserved_selection_valid{!reserved_selection.empty()};
+            for (const auto& coin : reserved_selection) {
+                if (!IsShieldedAmountCompatible(coin.note.value)) {
+                    return fail("selected note has invalid amount");
+                }
+                const auto next = CheckedAdd(reserved_total, coin.note.value);
+                if (!next || !MoneyRange(*next)) return fail("selected input total overflow");
+                reserved_total = *next;
+            }
+            reserved_selection_valid =
+                reserved_selection_valid &&
+                reserved_total >= *reserved_target &&
+                (!prefer_shielded_change_reserve ||
+                 SelectionFitsDirectShieldedSpendLimits(reserved_selection.size(), ring_size));
 
-        selected = std::move(reserved_selection);
-        total_input = reserved_total;
-        change = total_input - total_needed;
+            if (reserved_selection_valid) {
+                selected = std::move(reserved_selection);
+                total_input = reserved_total;
+                change = total_input - total_needed;
+            }
+            if (!reserved_selection_valid && require_change_reserve) {
+                return fail("exact-balance unshield requires at least 1 sat change reserve");
+            }
+        }
     }
 
     if (selected.size() > shielded::v2::MAX_DIRECT_SPENDS) {
         return fail("selected note count exceeds v2 spend limit");
     }
     if (selected.size() > shielded::v2::MAX_LIVE_DIRECT_SMILE_SPENDS) {
-        return fail("direct shielded send currently supports at most 2 shielded inputs; merge notes first");
+        return fail("selected note count exceeds live direct shielded spend limit");
     }
-    if (selected.size() > shielded::lattice::RING_SIZE) {
-        return fail("selected note count exceeds SMILE shared ring limit");
+    if (selected.size() > ring_size) {
+        return fail("selected note count exceeds configured shielded ring size");
     }
 
     const size_t shielded_output_count = shielded_recipients.size() + (change > 0 ? 1 : 0);
@@ -2901,8 +2902,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
 
     for (const auto& [_, amount] : shielded_recipients) {
         if (amount <= 0 || !MoneyRange(amount)) return fail("invalid shielded recipient amount");
-        if (!IsShieldedSmileValueCompatible(amount)) {
-            return fail("shielded recipient amount exceeds SMILE note value limit");
+        if (!IsShieldedAmountCompatible(amount)) {
+            return fail("shielded recipient amount is out of range");
         }
         if (shielded_dust_threshold > 0 && amount < shielded_dust_threshold) {
             return fail("shielded recipient amount below dust threshold");
@@ -2930,8 +2931,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
         }
         if (selection.selected.empty()) return fail("no spendable notes selected");
         for (const auto& coin : selection.selected) {
-            if (!IsShieldedSmileValueCompatible(coin.note.value)) {
-                return fail("selected note exceeds SMILE input value limit");
+            if (!IsShieldedAmountCompatible(coin.note.value)) {
+                return fail("selected note has invalid amount");
             }
             const auto next = CheckedAdd(selection.total_input, coin.note.value);
             if (!next || !MoneyRange(*next)) return fail("selected input total overflow");
@@ -2953,8 +2954,11 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
 
     auto& selected = selection.selected;
     CAmount change = selection.change;
+    if (selected.size() > shielded::v2::MAX_LIVE_DIRECT_SMILE_SPENDS) {
+        return fail("selected note count exceeds live direct shielded spend limit");
+    }
     if (selected.size() > ring_size) {
-        return fail("selected note count exceeds SMILE shared ring limit");
+        return fail("selected note count exceeds configured shielded ring size");
     }
 
     if (!m_tree.HasCommitmentIndex()) {
@@ -2969,59 +2973,63 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
 
     CAmount total_input = selection.total_input;
     const bool prefer_minimal_inputs = !transparent_recipients.empty();
-    const bool reserve_shielded_change =
-        change == 0 &&
-        selected.size() > 1 &&
-        shielded_recipients.size() == 1 &&
-        transparent_recipients.empty();
+    const bool prefer_shielded_change_reserve =
+        PreferExactBalanceShieldedChangeReserve(change,
+                                                selected.size(),
+                                                shielded_recipients.size(),
+                                                transparent_recipients.size());
     const bool dust_change_needs_reserve =
         shielded_dust_threshold > 0 &&
         change > 0 &&
         change < minimum_change_reserve;
+    const bool require_change_reserve =
+        (change == 0 && shielded_recipients.empty() && !transparent_recipients.empty()) ||
+        dust_change_needs_reserve;
     if (selected_override == nullptr &&
-        ((change == 0 && shielded_recipients.empty() && !transparent_recipients.empty()) ||
-         dust_change_needs_reserve ||
-         reserve_shielded_change)) {
+        (require_change_reserve || prefer_shielded_change_reserve)) {
         const auto reserved_target = CheckedAdd(
             selection.total_needed,
-            dust_change_needs_reserve || reserve_shielded_change || !shielded_recipients.empty()
+            dust_change_needs_reserve || prefer_shielded_change_reserve || !shielded_recipients.empty()
                 ? minimum_change_reserve
                 : CAmount{1});
         if (!reserved_target || !MoneyRange(*reserved_target)) {
-            return fail(reserve_shielded_change
-                            ? "shielded send change reserve overflow"
-                            : "unshield change reserve overflow");
-        }
-        auto reserved_selection = SelectNotes(*reserved_target, fee, prefer_minimal_inputs);
-        if (reserved_selection.empty()) {
-            return fail(dust_change_needs_reserve
-                            ? "shielded send requires change above the post-fork dust threshold"
-                            : (reserve_shielded_change
-                                   ? "exact-balance shielded send requires post-fork change reserve"
-                                   : "exact-balance unshield requires post-fork change reserve"));
-        }
-        CAmount reserved_total{0};
-        for (const auto& coin : reserved_selection) {
-            if (!IsShieldedSmileValueCompatible(coin.note.value)) {
-                return fail("selected note exceeds SMILE input value limit");
+            if (require_change_reserve) {
+                return fail(shielded_recipients.empty()
+                                ? "unshield change reserve overflow"
+                                : "shielded send change reserve overflow");
             }
-            const auto next = CheckedAdd(reserved_total, coin.note.value);
-            if (!next || !MoneyRange(*next)) return fail("selected input total overflow");
-            reserved_total = *next;
         }
-        if (reserved_total < *reserved_target) {
-            return fail(dust_change_needs_reserve
-                            ? "shielded send requires change above the post-fork dust threshold"
-                            : (reserve_shielded_change
-                                   ? "exact-balance shielded send requires post-fork change reserve"
-                                   : "exact-balance unshield requires post-fork change reserve"));
+        if (reserved_target && MoneyRange(*reserved_target)) {
+            auto reserved_selection = SelectNotes(*reserved_target, fee, prefer_minimal_inputs);
+            CAmount reserved_total{0};
+            bool reserved_selection_valid{!reserved_selection.empty()};
+            for (const auto& coin : reserved_selection) {
+                if (!IsShieldedAmountCompatible(coin.note.value)) {
+                    return fail("selected note has invalid amount");
+                }
+                const auto next = CheckedAdd(reserved_total, coin.note.value);
+                if (!next || !MoneyRange(*next)) return fail("selected input total overflow");
+                reserved_total = *next;
+            }
+            reserved_selection_valid =
+                reserved_selection_valid &&
+                reserved_total >= *reserved_target &&
+                (!prefer_shielded_change_reserve ||
+                 SelectionFitsDirectShieldedSpendLimits(reserved_selection.size(), ring_size));
+            if (reserved_selection_valid) {
+                selected = std::move(reserved_selection);
+                total_input = reserved_total;
+                change = total_input - selection.total_needed;
+                selection.total_input = total_input;
+                selection.change = change;
+                selection.shielded_output_count = shielded_recipients.size() + (change > 0 ? 1 : 0);
+            }
+            if (!reserved_selection_valid && require_change_reserve) {
+                return fail(dust_change_needs_reserve
+                                ? "shielded send requires change above the post-fork dust threshold"
+                                : "exact-balance unshield requires post-fork change reserve");
+            }
         }
-        selected = std::move(reserved_selection);
-        total_input = reserved_total;
-        change = total_input - selection.total_needed;
-        selection.total_input = total_input;
-        selection.change = change;
-        selection.shielded_output_count = shielded_recipients.size() + (change > 0 ? 1 : 0);
     }
     if (shielded_dust_threshold > 0 && change > 0 && change < minimum_change_reserve) {
         return fail("shielded change would fall below the post-fork dust threshold");
@@ -3030,10 +3038,10 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
         return fail("selected note count exceeds v2 spend limit");
     }
     if (selected.size() > shielded::v2::MAX_LIVE_DIRECT_SMILE_SPENDS) {
-        return fail("direct shielded send currently supports at most 2 shielded inputs; merge notes first");
+        return fail("selected note count exceeds live direct shielded spend limit");
     }
-    if (selected.size() > shielded::lattice::RING_SIZE) {
-        return fail("selected note count exceeds SMILE shared ring limit");
+    if (selected.size() > ring_size) {
+        return fail("selected note count exceeds configured shielded ring size");
     }
     const size_t output_count = selection.shielded_output_count;
     if (output_count > shielded::v2::MAX_DIRECT_OUTPUTS) {
@@ -3267,8 +3275,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
                      static_cast<long long>(amount));
             return fail("invalid output note");
         }
-        if (!IsShieldedSmileValueCompatible(note.value)) {
-            return fail("shielded output exceeds SMILE note value limit");
+        if (!IsShieldedAmountCompatible(note.value)) {
+            return fail("shielded output amount is out of range");
         }
 
         const auto bound_note = shielded::NoteEncryption::EncryptBoundNote(note, recipient_kem_pk);
@@ -3329,7 +3337,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
             &consensus,
             validation_height);
         memory_cleanse(proof_rng_entropy.data(), proof_rng_entropy.size());
-        if (built.has_value() || reject_reason != "bad-shielded-v2-builder-proof") {
+        if (built.has_value() ||
+            reject_reason.rfind("bad-shielded-v2-builder-proof", /*pos=*/0) != 0) {
             break;
         }
         LogDebug(BCLog::WALLETDB,
@@ -4274,7 +4283,7 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateTransparentToShieldedS
     CAmount total_shielded_out{0};
     for (const auto& [_, amount] : shielded_recipients) {
         if (amount <= 0 || !MoneyRange(amount)) return fail("invalid shielded recipient amount");
-        if (!IsShieldedSmileValueCompatible(amount)) return fail("shielded recipient amount exceeds SMILE note value limit");
+        if (!IsShieldedAmountCompatible(amount)) return fail("shielded recipient amount is out of range");
         const auto next = CheckedAdd(total_shielded_out, amount);
         if (!next || !MoneyRange(*next)) return fail("shielded recipient total overflow");
         total_shielded_out = *next;
@@ -4348,8 +4357,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateTransparentToShieldedS
             if (error != nullptr) *error = "invalid output note";
             return false;
         }
-        if (!IsShieldedSmileValueCompatible(note.value)) {
-            if (error != nullptr) *error = "shielded output exceeds SMILE note value limit";
+        if (!IsShieldedAmountCompatible(note.value)) {
+            if (error != nullptr) *error = "shielded output amount is out of range";
             return false;
         }
         if (shielded_dust_threshold > 0 && note.value < shielded_dust_threshold) {
@@ -4704,8 +4713,8 @@ std::optional<CMutableTransaction> CShieldedWallet::ShieldFunds(const std::vecto
         if (note.value <= 0 || !MoneyRange(note.value) || note.recipient_pk_hash.IsNull()) {
             return fail(strprintf("generated note is invalid for destination %s", address.Encode()));
         }
-        if (!IsShieldedSmileValueCompatible(note.value)) {
-            return fail(strprintf("shielded output exceeds SMILE note value limit for %s", address.Encode()));
+        if (!IsShieldedAmountCompatible(note.value)) {
+            return fail(strprintf("shielded output amount is out of range for %s", address.Encode()));
         }
         if (shielded_dust_threshold > 0 && note.value < shielded_dust_threshold) {
             return fail(strprintf("shielded output below dust threshold for %s", address.Encode()));
@@ -4941,8 +4950,8 @@ std::optional<PartiallySignedTransaction> CShieldedWallet::ShieldFundsPSBT(
             }
             return std::nullopt;
         }
-        if (!IsShieldedSmileValueCompatible(note.value)) {
-            if (error != nullptr) *error = "shielded output exceeds SMILE note value limit";
+        if (!IsShieldedAmountCompatible(note.value)) {
+            if (error != nullptr) *error = "shielded output amount is out of range";
             return std::nullopt;
         }
         if (shielded_dust_threshold > 0 && note.value < shielded_dust_threshold) {
@@ -5027,8 +5036,16 @@ std::optional<CMutableTransaction> CShieldedWallet::UnshieldFunds(CAmount amount
 
 std::optional<CMutableTransaction> CShieldedWallet::MergeNotes(size_t max_notes, CAmount fee, std::string* error)
 {
+    static constexpr size_t MAX_LIVE_MERGE_NOTES_PER_TX{
+        static_cast<size_t>(shielded::v2::MAX_LIVE_DIRECT_SMILE_SPENDS)};
     AssertLockHeld(cs_shielded);
     MaybeRehydrateSpendingKeys();
+    CatchUpToChainTip();
+    const int32_t validation_height = NextShieldedBuildValidationHeight(m_parent_wallet.chain());
+    fee = shielded::RoundShieldedFeeToCanonicalBucket(
+        fee,
+        Params().GetConsensus(),
+        validation_height);
     if (!RequireEncryptedShieldedWallet(m_parent_wallet, "CShieldedWallet::MergeNotes", error)) {
         return std::nullopt;
     }
@@ -5080,22 +5097,46 @@ std::optional<CMutableTransaction> CShieldedWallet::MergeNotes(size_t max_notes,
         const size_t merge_count =
             std::min({max_notes,
                       group_notes.size(),
-                      static_cast<size_t>(shielded::v2::MAX_LIVE_DIRECT_SMILE_SPENDS)});
+                      MAX_LIVE_MERGE_NOTES_PER_TX});
         if (merge_count < 2) continue;
 
-        std::vector<ShieldedCoin> selected_group(group_notes.begin(), group_notes.begin() + merge_count);
-        CAmount total{0};
-        bool overflow{false};
-        for (const auto& coin : selected_group) {
-            const auto next = CheckedAdd(total, coin.note.value);
-            if (!next || !MoneyRange(*next)) {
-                last_error = "Merge input total overflow";
-                overflow = true;
-                break;
+        auto select_total = [&](std::vector<ShieldedCoin>& selected,
+                                std::vector<ShieldedCoin>::const_iterator begin_it,
+                                std::vector<ShieldedCoin>::const_iterator end_it,
+                                CAmount& sum_out) {
+            selected.assign(begin_it, end_it);
+            sum_out = 0;
+            for (const auto& coin : selected) {
+                const auto next = CheckedAdd(sum_out, coin.note.value);
+                if (!next || !MoneyRange(*next)) {
+                    last_error = "Merge input total overflow";
+                    return false;
+                }
+                sum_out = *next;
             }
-            total = *next;
+            return true;
+        };
+
+        std::vector<ShieldedCoin> selected_group;
+        CAmount total{0};
+        if (!select_total(selected_group,
+                          group_notes.begin(),
+                          group_notes.begin() + merge_count,
+                          total)) {
+            continue;
         }
-        if (overflow) continue;
+
+        // Prefer collapsing the smallest notes first, but if that prefix cannot
+        // fund the fixed merge fee, fall back to a fee-viable slice so miner
+        // wallets with lots of dust can still make consolidation progress.
+        if (total <= fee && group_notes.size() > merge_count) {
+            if (!select_total(selected_group,
+                              group_notes.end() - merge_count,
+                              group_notes.end(),
+                              total)) {
+                continue;
+            }
+        }
 
         const CAmount merged_value = total - fee;
         if (merged_value <= 0) {
@@ -5364,6 +5405,127 @@ int CShieldedWallet::GetChainTipHeight() const
 {
     const auto tip = m_parent_wallet.chain().getHeight();
     return tip.value_or(0);
+}
+
+const ShieldedKeySet* CShieldedWallet::FindLoadedSpendingKeysetForRecipient(
+    const uint256& recipient_pk_hash) const
+{
+    AssertLockHeld(cs_shielded);
+    for (const auto& [_, keyset] : m_key_sets) {
+        if (!keyset.has_spending_key || !keyset.spending_key_loaded || !keyset.spending_key.IsValid()) continue;
+        if (keyset.spending_pk_hash == recipient_pk_hash) return &keyset;
+    }
+    return nullptr;
+}
+
+std::optional<Nullifier> CShieldedWallet::ComputeOwnedNullifier(
+    const ShieldedCoin& coin,
+    const std::vector<unsigned char>& master_seed,
+    const ShieldedKeySet& keyset) const
+{
+    AssertLockHeld(cs_shielded);
+    if (master_seed.empty()) return std::nullopt;
+
+    if (coin.account_leaf_hint.has_value() && coin.account_leaf_hint->IsValid()) {
+        const auto smile_nullifier = smile2::wallet::ComputeSmileNullifierFromNote(
+            smile2::wallet::SMILE_GLOBAL_SEED,
+            coin.note);
+        if (smile_nullifier.has_value()) return *smile_nullifier;
+    }
+
+    std::vector<unsigned char> spend_secret = DeriveShieldedSpendSecretMaterial(master_seed, keyset);
+    ScopedByteVectorCleanse spend_secret_cleanse(spend_secret);
+    if (spend_secret.empty()) return std::nullopt;
+
+    Nullifier spend_nullifier;
+    if (!shielded::ringct::DeriveInputNullifierForNote(
+            spend_nullifier,
+            Span<const unsigned char>{spend_secret.data(), spend_secret.size()},
+            coin.note,
+            coin.commitment)) {
+        return std::nullopt;
+    }
+    return spend_nullifier;
+}
+
+size_t CShieldedWallet::RepairOwnedNoteSpendMetadataForMap(
+    std::map<Nullifier, ShieldedCoin>& note_map,
+    const char* map_name,
+    const std::vector<unsigned char>& master_seed)
+{
+    AssertLockHeld(cs_shielded);
+    size_t repaired_count{0};
+    for (auto it = note_map.begin(); it != note_map.end();) {
+        const Nullifier old_nullifier = it->first;
+        ShieldedCoin repaired_coin = it->second;
+
+        const ShieldedKeySet* signing_keyset =
+            FindLoadedSpendingKeysetForRecipient(repaired_coin.note.recipient_pk_hash);
+        if (signing_keyset == nullptr) {
+            ++it;
+            continue;
+        }
+
+        const auto expected_nullifier =
+            ComputeOwnedNullifier(repaired_coin, master_seed, *signing_keyset);
+        if (!expected_nullifier.has_value()) {
+            ++it;
+            continue;
+        }
+
+        if (repaired_coin.is_mine_spend && *expected_nullifier == old_nullifier) {
+            ++it;
+            continue;
+        }
+
+        const auto collision_it = note_map.find(*expected_nullifier);
+        if (*expected_nullifier != old_nullifier &&
+            collision_it != note_map.end() &&
+            collision_it != it) {
+            LogPrintf("CShieldedWallet::RepairOwnedNoteSpendMetadata skipping %s note commitment=%s due to nullifier collision\n",
+                      map_name,
+                      repaired_coin.commitment.ToString());
+            ++it;
+            continue;
+        }
+
+        repaired_coin.is_mine_spend = true;
+        repaired_coin.nullifier = *expected_nullifier;
+
+        if (*expected_nullifier == old_nullifier) {
+            it->second = std::move(repaired_coin);
+            ++it;
+        } else {
+            auto erase_it = it++;
+            note_map.erase(erase_it);
+            note_map.emplace(*expected_nullifier, std::move(repaired_coin));
+            if (m_spent_nullifiers.erase(old_nullifier) > 0) {
+                m_spent_nullifiers.insert(*expected_nullifier);
+            }
+            if (m_pending_spends.erase(old_nullifier) > 0) {
+                m_pending_spends.insert(*expected_nullifier);
+            }
+        }
+        ++repaired_count;
+    }
+    return repaired_count;
+}
+
+bool CShieldedWallet::RepairOwnedNoteSpendMetadata(const std::vector<unsigned char>& master_seed)
+{
+    AssertLockHeld(cs_shielded);
+    if (master_seed.empty()) return false;
+
+    const size_t repaired_confirmed =
+        RepairOwnedNoteSpendMetadataForMap(m_notes, "confirmed", master_seed);
+    const size_t repaired_mempool =
+        RepairOwnedNoteSpendMetadataForMap(m_mempool_notes, "mempool", master_seed);
+    if (repaired_confirmed == 0 && repaired_mempool == 0) return false;
+
+    LogPrintf("CShieldedWallet::RepairOwnedNoteSpendMetadata repaired %u confirmed and %u mempool note(s)\n",
+              static_cast<unsigned int>(repaired_confirmed),
+              static_cast<unsigned int>(repaired_mempool));
+    return true;
 }
 
 std::vector<ShieldedCoin> CShieldedWallet::SelectNotes(CAmount target,
@@ -5948,6 +6110,10 @@ void CShieldedWallet::LoadPersistedState()
             m_spent_nullifiers.insert(restored.nullifier);
         }
     }
+    if (!master_seed.empty()) {
+        const bool repaired_owned_notes = RepairOwnedNoteSpendMetadata(master_seed);
+        (void)repaired_owned_notes;
+    }
     for (const auto& [commitment, witness] : state.witnesses) {
         m_witnesses[commitment] = witness;
     }
@@ -6119,33 +6285,40 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
             break;
         }
     }
-    if (!have_missing_spending_keys) {
-        return rehydrated;
-    }
-
     std::vector<unsigned char> master_seed = GetMasterSeed();
     ScopedByteVectorCleanse master_seed_cleanse_rehydrate(master_seed);
-    if (master_seed.empty()) {
+    if (have_missing_spending_keys && master_seed.empty()) {
         return rehydrated;
     }
 
-    bool loaded_any{false};
-    for (auto& [addr, keyset] : m_key_sets) {
-        if (!keyset.has_spending_key || keyset.spending_key_loaded) {
-            continue;
+    if (have_missing_spending_keys) {
+        bool loaded_any{false};
+        for (auto& [addr, keyset] : m_key_sets) {
+            if (!keyset.has_spending_key || keyset.spending_key_loaded) {
+                continue;
+            }
+            if (!DeriveSpendingKeyForKeyset(master_seed, keyset)) {
+                LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys dropping invalid spending authority for addr=%s\n",
+                          addr.Encode());
+                keyset.has_spending_key = false;
+                continue;
+            }
+            loaded_any = true;
         }
-        if (!DeriveSpendingKeyForKeyset(master_seed, keyset)) {
-            LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys dropping invalid spending authority for addr=%s\n",
-                      addr.Encode());
-            keyset.has_spending_key = false;
-            continue;
+
+        if (loaded_any) {
+            LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys rebuilt spend authorities; rescanning active chain\n");
+            RebuildFromActiveChain();
+            m_locked_state_incomplete = false;
+            rehydrated = true;
+            return rehydrated;
         }
-        loaded_any = true;
     }
 
-    if (loaded_any) {
-        LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys rebuilt spend authorities; rescanning active chain\n");
-        RebuildFromActiveChain();
+    if (!master_seed.empty() && RepairOwnedNoteSpendMetadata(master_seed)) {
+        if (!PersistState()) {
+            LogPrintf("CShieldedWallet: failed to persist state after repairing owned note spend metadata\n");
+        }
         m_locked_state_incomplete = false;
         rehydrated = true;
     }

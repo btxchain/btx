@@ -192,6 +192,19 @@ public:
      */
     [[nodiscard]] bool RemoveLast(uint64_t count);
 
+    /**
+     * Materialize the commitment index into private in-memory storage so this
+     * tree can be mutated without touching the shared persistent index.
+     */
+    [[nodiscard]] bool DetachToMemoryOnly();
+
+    /**
+     * Best-effort reattach the configured shared commitment-index store after
+     * a detached scratch tree has been finalized. Falls back to retaining the
+     * private in-memory index when no compatible shared store is available.
+     */
+    [[nodiscard]] bool AttachConfiguredCommitmentIndexStore();
+
     [[nodiscard]] IndexStorageMode GetIndexStorageMode() const { return m_index_storage_mode_; }
 
     // --- Accessors for witness internals ------------------------------------

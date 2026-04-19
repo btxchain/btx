@@ -583,6 +583,85 @@ bool ShieldedMerkleTree::RemoveLast(uint64_t count)
     return Truncate(size_ - count);
 }
 
+bool ShieldedMerkleTree::DetachToMemoryOnly()
+{
+    std::vector<uint256> detached_commitments;
+    detached_commitments.reserve(static_cast<size_t>(size_));
+
+    if (size_ > 0) {
+        if (!HasCommitmentIndex()) return false;
+        if (commitment_index_store_) {
+            detached_commitments = commitment_index_store_->ReadRange(0, size_);
+            if (detached_commitments.size() != static_cast<size_t>(size_)) {
+                return false;
+            }
+        } else if (commitment_index_mem_) {
+            if (commitment_index_mem_->size() < size_) {
+                return false;
+            }
+            detached_commitments.assign(commitment_index_mem_->begin(),
+                                        commitment_index_mem_->begin() + size_);
+        } else {
+            return false;
+        }
+    }
+
+    commitment_index_store_.reset();
+    m_index_storage_mode_ = IndexStorageMode::MEMORY_ONLY;
+    commitment_index_enabled_ = true;
+    commitment_index_mem_ =
+        std::make_shared<std::vector<uint256>>(std::move(detached_commitments));
+    EnsureCheckpointsWritable();
+    return true;
+}
+
+bool ShieldedMerkleTree::AttachConfiguredCommitmentIndexStore()
+{
+    std::shared_ptr<CommitmentIndexStore> configured_store;
+    {
+        std::lock_guard<std::mutex> lock(s_commitment_store_mutex);
+        configured_store = s_commitment_store;
+    }
+    if (!configured_store) {
+        commitment_index_store_.reset();
+        commitment_index_enabled_ = true;
+        m_index_storage_mode_ = IndexStorageMode::AUTO;
+        return size_ == 0 ||
+               (commitment_index_mem_ &&
+                commitment_index_mem_->size() >= static_cast<size_t>(size_));
+    }
+
+    if (size_ > 0 &&
+        (!commitment_index_mem_ ||
+         commitment_index_mem_->size() < static_cast<size_t>(size_))) {
+        return false;
+    }
+
+    if (size_ > 0) {
+        const auto persisted_commitments = configured_store->ReadRange(0, size_);
+        const auto expected_size = static_cast<size_t>(size_);
+        const bool compatible_prefix =
+            persisted_commitments.size() == expected_size &&
+            std::equal(persisted_commitments.begin(),
+                       persisted_commitments.end(),
+                       commitment_index_mem_->begin());
+        if (!compatible_prefix) {
+            LogPrintf("ShieldedMerkleTree::AttachConfiguredCommitmentIndexStore keeping detached in-memory index for size=%u because the configured store prefix is incompatible\n",
+                      static_cast<unsigned int>(size_));
+            commitment_index_store_.reset();
+            commitment_index_enabled_ = true;
+            m_index_storage_mode_ = IndexStorageMode::AUTO;
+            return true;
+        }
+    }
+
+    commitment_index_store_ = std::move(configured_store);
+    commitment_index_mem_.reset();
+    commitment_index_enabled_ = true;
+    m_index_storage_mode_ = IndexStorageMode::AUTO;
+    return true;
+}
+
 ShieldedMerkleWitness ShieldedMerkleTree::Witness() const
 {
     return ShieldedMerkleWitness(*this);

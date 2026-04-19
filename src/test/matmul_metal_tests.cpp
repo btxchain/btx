@@ -286,6 +286,10 @@ BOOST_AUTO_TEST_CASE(metal_kernel_profile_and_profiling_report_runtime_values)
     BOOST_CHECK_GT(kernel.specialized_shape_count, 0U);
     BOOST_CHECK_GT(kernel.fused_prefix_threadgroup_threads, 0U);
     BOOST_CHECK(!kernel.specialization_reason.empty());
+    BOOST_CHECK(kernel.cooperative_tensor_prepared);
+    BOOST_CHECK(!kernel.cooperative_tensor_active);
+    BOOST_CHECK(!kernel.cooperative_tensor_reason.empty());
+    BOOST_CHECK(kernel.cooperative_tensor_reason.find("simdgroup_uint32_reduce") != std::string::npos);
     BOOST_CHECK(!kernel.library_source.empty());
     BOOST_CHECK(!profiling.reason.empty());
 }
@@ -446,6 +450,13 @@ BOOST_AUTO_TEST_CASE(metal_batch_digest_matches_single_digest_sequence)
 
 BOOST_AUTO_TEST_CASE(metal_product_digest_batch_matches_single_digest_sequence)
 {
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
+    if (!capability.available) {
+        BOOST_TEST_MESSAGE("Skipping prepared-batch Metal product digest test: Metal backend unavailable ("
+            << capability.reason << ")");
+        return;
+    }
+
     constexpr uint32_t kN = 16;
     constexpr uint32_t kB = 8;
     constexpr uint32_t kR = 4;
@@ -486,15 +497,10 @@ BOOST_AUTO_TEST_CASE(metal_product_digest_batch_matches_single_digest_sequence)
         matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
     BOOST_REQUIRE_EQUAL(batch.size(), kBatchSize);
 
-    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
     for (uint32_t i = 0; i < kBatchSize; ++i) {
         BOOST_REQUIRE(batch[i].ok);
         BOOST_CHECK_EQUAL(batch[i].digest, single_digests[i]);
-        if (capability.available) {
-            BOOST_CHECK_EQUAL(batch[i].backend, matmul::backend::Kind::METAL);
-        } else {
-            BOOST_CHECK_EQUAL(batch[i].backend, matmul::backend::Kind::CPU);
-        }
+        BOOST_CHECK_EQUAL(batch[i].backend, matmul::backend::Kind::METAL);
     }
 }
 

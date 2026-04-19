@@ -262,13 +262,32 @@ target_compile_definitions(test_btx PRIVATE
 
 target_link_libraries(test_btx
   core_interface
-  test_util
   $<TARGET_NAME_IF_EXISTS:bitcoinconsensus>
-  bitcoin_cli
-  bitcoin_node
   Boost::headers
   libevent::extra
 )
+if(UNIX AND NOT APPLE)
+  if(TARGET bitcoin_wallet)
+    target_link_btx_linux_archive_group(test_btx
+      test_util
+      bitcoin_cli
+      ${BTX_NODE_WALLET_ARCHIVES}
+    )
+  else()
+    target_link_btx_linux_archive_group(test_btx
+      test_util
+      bitcoin_cli
+      ${BTX_NODE_ARCHIVES}
+    )
+  endif()
+else()
+  target_link_libraries(test_btx
+    test_util
+    bitcoin_cli
+    bitcoin_node
+    $<TARGET_NAME_IF_EXISTS:bitcoin_wallet>
+  )
+endif()
 
 add_library(test_translation_stub OBJECT
   util/translation_stub.cpp
@@ -276,6 +295,17 @@ add_library(test_translation_stub OBJECT
 
 function(add_test_translation_stub target)
   target_sources(${target} PRIVATE $<TARGET_OBJECTS:test_translation_stub>)
+endfunction()
+
+function(link_shielded_report_target target)
+  target_link_libraries(${target}
+    core_interface
+  )
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(${target} ${BTX_NODE_ARCHIVES})
+  else()
+    target_link_libraries(${target} bitcoin_node)
+  endif()
 endfunction()
 
 add_executable(generate_shielded_matrict_plus_vectors
@@ -286,11 +316,7 @@ set_target_properties(generate_shielded_matrict_plus_vectors PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_shielded_matrict_plus_vectors)
-target_link_libraries(generate_shielded_matrict_plus_vectors
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_matrict_plus_vectors)
 
 add_executable(generate_shielded_matrict_plus_runtime_report
   generate_shielded_matrict_plus_runtime_report.cpp
@@ -304,11 +330,7 @@ target_compile_definitions(generate_shielded_matrict_plus_runtime_report PRIVATE
   BTX_REFERENCE_TEST_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/test/reference/shielded_test_vectors.json\"
 )
 add_test_translation_stub(generate_shielded_matrict_plus_runtime_report)
-target_link_libraries(generate_shielded_matrict_plus_runtime_report
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_matrict_plus_runtime_report)
 
 add_executable(generate_shielded_matrict_plus_transcript_corpus
   generate_shielded_matrict_plus_transcript_corpus.cpp
@@ -318,11 +340,7 @@ set_target_properties(generate_shielded_matrict_plus_transcript_corpus PROPERTIE
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_shielded_matrict_plus_transcript_corpus)
-target_link_libraries(generate_shielded_matrict_plus_transcript_corpus
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_matrict_plus_transcript_corpus)
 
 add_executable(generate_shielded_ingress_runtime_report
   generate_shielded_ingress_runtime_report.cpp
@@ -333,11 +351,7 @@ set_target_properties(generate_shielded_ingress_runtime_report PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_shielded_ingress_runtime_report)
-target_link_libraries(generate_shielded_ingress_runtime_report
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_ingress_runtime_report)
 
 add_executable(generate_shielded_ingress_proof_runtime_report
   generate_shielded_ingress_proof_runtime_report.cpp
@@ -348,11 +362,7 @@ set_target_properties(generate_shielded_ingress_proof_runtime_report PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_shielded_ingress_proof_runtime_report)
-target_link_libraries(generate_shielded_ingress_proof_runtime_report
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_ingress_proof_runtime_report)
 
 add_executable(generate_shielded_scan_hint_runtime_report
   generate_shielded_scan_hint_runtime_report.cpp
@@ -363,11 +373,7 @@ set_target_properties(generate_shielded_scan_hint_runtime_report PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_shielded_scan_hint_runtime_report)
-target_link_libraries(generate_shielded_scan_hint_runtime_report
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_scan_hint_runtime_report)
 
 add_executable(generate_shielded_chunk_runtime_report
   generate_shielded_chunk_runtime_report.cpp
@@ -378,11 +384,7 @@ set_target_properties(generate_shielded_chunk_runtime_report PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_shielded_chunk_runtime_report)
-target_link_libraries(generate_shielded_chunk_runtime_report
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_chunk_runtime_report)
 
 add_executable(generate_shielded_v2_send_runtime_report
   generate_shielded_v2_send_runtime_report.cpp
@@ -393,11 +395,7 @@ set_target_properties(generate_shielded_v2_send_runtime_report PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_shielded_v2_send_runtime_report)
-target_link_libraries(generate_shielded_v2_send_runtime_report
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_v2_send_runtime_report)
 
 add_executable(generate_shielded_v2_egress_runtime_report
   generate_shielded_v2_egress_runtime_report.cpp
@@ -408,11 +406,7 @@ set_target_properties(generate_shielded_v2_egress_runtime_report PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_shielded_v2_egress_runtime_report)
-target_link_libraries(generate_shielded_v2_egress_runtime_report
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_v2_egress_runtime_report)
 
 add_executable(generate_shielded_v2_netting_capacity_report
   generate_shielded_v2_netting_capacity_report.cpp
@@ -423,11 +417,7 @@ set_target_properties(generate_shielded_v2_netting_capacity_report PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_shielded_v2_netting_capacity_report)
-target_link_libraries(generate_shielded_v2_netting_capacity_report
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_v2_netting_capacity_report)
 
 add_executable(generate_shielded_v2_chain_growth_projection_report
   generate_shielded_v2_chain_growth_projection_report.cpp
@@ -442,11 +432,7 @@ set_target_properties(generate_shielded_v2_chain_growth_projection_report PROPER
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_shielded_v2_chain_growth_projection_report)
-target_link_libraries(generate_shielded_v2_chain_growth_projection_report
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_v2_chain_growth_projection_report)
 
 add_executable(generate_smile2_proof_redesign_report
   generate_smile2_proof_redesign_report.cpp
@@ -459,11 +445,7 @@ set_target_properties(generate_smile2_proof_redesign_report PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_smile2_proof_redesign_report)
-target_link_libraries(generate_smile2_proof_redesign_report
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_smile2_proof_redesign_report)
 
 add_executable(generate_shielded_relay_fixture_tx
   generate_shielded_relay_fixture_tx.cpp
@@ -474,11 +456,7 @@ set_target_properties(generate_shielded_relay_fixture_tx PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_shielded_relay_fixture_tx)
-target_link_libraries(generate_shielded_relay_fixture_tx
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_relay_fixture_tx)
 
 add_executable(generate_shielded_v2_adversarial_proof_corpus
   generate_shielded_v2_adversarial_proof_corpus.cpp
@@ -489,11 +467,7 @@ set_target_properties(generate_shielded_v2_adversarial_proof_corpus PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 add_test_translation_stub(generate_shielded_v2_adversarial_proof_corpus)
-target_link_libraries(generate_shielded_v2_adversarial_proof_corpus
-  PRIVATE
-    core_interface
-    bitcoin_node
-)
+link_shielded_report_target(generate_shielded_v2_adversarial_proof_corpus)
 
 if(ENABLE_WALLET)
   add_subdirectory(${PROJECT_SOURCE_DIR}/src/wallet/test wallet)

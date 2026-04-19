@@ -24,10 +24,9 @@
 
 namespace shielded::v2 {
 
-// The wire surface can encode more inputs, but the live audited direct-SMILE
-// proving path is only considered production-ready for up to two shielded
-// spends per transaction. Wider spend sets should be consolidated first.
-static constexpr uint64_t MAX_LIVE_DIRECT_SMILE_SPENDS{2};
+// The wider wire surface can encode more, but the current live direct-SMILE
+// launch surface is operated at an 8-spend ceiling.
+static constexpr uint64_t MAX_LIVE_DIRECT_SMILE_SPENDS{8};
 
 struct V2SendSpendInput
 {

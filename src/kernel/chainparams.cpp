@@ -229,12 +229,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0;
 
-        // Mainnet anchor refreshed on 2026-04-03 at height 60760 from a synced
-        // post-restart node so stale post-restart history below the latest
+        // Mainnet anchor refreshed on 2026-04-14 at height 71'433 from a
+        // synced canonical node so stale history below the current public
         // release floor is rejected quickly.
-        consensus.nMinimumChainWork = uint256{"000000000000000000000000000000000000000000000000000000006c95388a"};
+        consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000000000000000278daaa26"};
         // Assume signatures valid up to the same anchored block to speed sync.
-        consensus.defaultAssumeValid = uint256{"6528ebf50342363b63c17afd851a28307bc2c0fac596373ca9f59c30726d169c"};
+        consensus.defaultAssumeValid = uint256{"d58f6755e52467ed624dfcd0be4e8ee0731b8e7525e8dc4cf9482879d0dfe3f8"};
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -247,10 +247,10 @@ public:
         pchMessageStart[3] = 0x01;
         nDefaultPort = 19335;
         nPruneAfterHeight = 100000;
-        // Measured from the 2026-04-03 mainnet release-candidate datadir:
-        // ~3.7 GiB blocks plus ~80 MiB chain/shielded state, rounded up so
-        // users see a conservative disk estimate before sync begins.
-        m_assumed_blockchain_size = 5;
+        // Measured from the 2026-04-14 mainnet canonical datadir at height
+        // 71'435: ~14.5 GiB blocks plus ~210 MiB chain/shielded state, rounded
+        // up so users see a conservative disk estimate before sync begins.
+        m_assumed_blockchain_size = 16;
         m_assumed_chain_state_size = 1;
 
         genesis = CreateBTXGenesisBlock(
@@ -288,7 +288,7 @@ public:
         checkpointData = {
             {
                 {0, uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"}},
-                {60760, uint256{"6528ebf50342363b63c17afd851a28307bc2c0fac596373ca9f59c30726d169c"}},
+                {71433, uint256{"d58f6755e52467ed624dfcd0be4e8ee0731b8e7525e8dc4cf9482879d0dfe3f8"}},
             }
         };
         m_assumeutxo_data = {
@@ -306,11 +306,32 @@ public:
                 .m_chain_tx_count = 66'205,
                 .blockhash = consteval_ctor(uint256{"6528ebf50342363b63c17afd851a28307bc2c0fac596373ca9f59c30726d169c"}),
             },
+            {
+                // main assumeutxo snapshot at height 64'900
+                .height = 64'900,
+                .hash_serialized = AssumeutxoHash{uint256{"696f6ae3bcfed21881647be3871bf9574eb02fc10b7082677cc29a9b98529459"}},
+                .m_chain_tx_count = 73'257,
+                .blockhash = consteval_ctor(uint256{"6e5ebacea9f8168371f7c0255e7314aefa69516224675aa326166dbbf39b85f0"}),
+            },
+            {
+                // main assumeutxo snapshot at height 71'260
+                .height = 71'260,
+                .hash_serialized = AssumeutxoHash{uint256{"46c2582d63ebb1aaf3865f0541e39287c59970ce890253c426b65911eb87e5fa"}},
+                .m_chain_tx_count = 83'531,
+                .blockhash = consteval_ctor(uint256{"993ddd9ccd08820ad4df089de6a444ffacc788b1b3b9015657d60e353fbad924"}),
+            },
+            {
+                // main assumeutxo snapshot at height 71'435
+                .height = 71'435,
+                .hash_serialized = AssumeutxoHash{uint256{"9739e6a5891433d542617d28ae71131d976fe60d51a06af87db49f4a0c5a68d6"}},
+                .m_chain_tx_count = 83'851,
+                .blockhash = consteval_ctor(uint256{"46f81957ac0d40c57eef01810f4da3abb8e8a2c67ebb9fd88f36b1cc5a8e7be0"}),
+            },
         };
         chainTxData = ChainTxData{
-            .nTime = 1775199100,
-            .tx_count = 66221,
-            .dTxRate = 0.019766869333,
+            .nTime = 1776151754,
+            .tx_count = 83851,
+            .dTxRate = 0.018807452734,
         };
     }
 };
@@ -907,11 +928,11 @@ public:
         consensus.nMaxShieldedRingSize = 32;
         consensus.nShieldedMerkleTreeDepth = 32;
         consensus.nShieldedPoolActivationHeight = 0;
-        consensus.nShieldedTxBindingActivationHeight = 61'000;
-        consensus.nShieldedBridgeTagActivationHeight = 61'000;
-        consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
+        consensus.nShieldedTxBindingActivationHeight = 0;  // Activate at genesis for instant regtest
+        consensus.nShieldedBridgeTagActivationHeight = 0;  // Activate at genesis for instant regtest
+        consensus.nShieldedSmileRiceCodecDisableHeight = 0;  // Activate at genesis for instant regtest
         consensus.nShieldedMatRiCTDisableHeight =
-            opts.shielded_matrict_disable_height.value_or(61'000);
+            opts.shielded_matrict_disable_height.value_or(0);  // Activate at genesis for instant regtest
         consensus.nShieldedPQ128UpgradeHeight =
             opts.shielded_pq128_upgrade_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedSettlementAnchorMaturity = 6;
@@ -1042,7 +1063,18 @@ public:
                     .hash_serialized = AssumeutxoHash{uint256{"0ffcf7afd7682a59057ad717784b70ca8fb86cf9209912ccca20261aafa5001a"}},
                     .m_chain_tx_count = 300,
                     .blockhash = consteval_ctor(uint256{"78e6ea382d4d5466b1d8421c1b8789e9c7cde9de8b6da4042be00ca2948a4860"}),
-                }
+                },
+                {
+                    // Post-shielded-activation regtest snapshot for btx-p2p
+                    // fast-start testing. IsMockableChain() allows height-only
+                    // matching, and validation treats all-zero blockhash /
+                    // hash_serialized as a mockable-chain wildcard so any
+                    // regtest snapshot at this height can be used.
+                    .height = 61'010,
+                    .hash_serialized = AssumeutxoHash{uint256{"0000000000000000000000000000000000000000000000000000000000000000"}},
+                    .m_chain_tx_count = 61'011,
+                    .blockhash = consteval_ctor(uint256{"0000000000000000000000000000000000000000000000000000000000000000"}),
+                },
             };
         } else {
             // Consensus-altering regtest overrides invalidate canned snapshot metadata.

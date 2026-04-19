@@ -5459,6 +5459,15 @@ __constant__ uint32_t d_V[256];
 // Total shared: 17*16 + 16*16 + 16*16 + 256 = 1,060 uint32 = 4,240 bytes.
 // Well within 48 KiB default shared memory limit.
 
+Implementation status note, April 13, 2026:
+
+The kernel below is still the optimized target design for CUDA, not a
+line-for-line description of the current shipped Linux CUDA backend. The live
+implementation now has the fused finalize path and a warp-synchronous reduction
+tail, but it does not yet ship the shared-memory tiled finalize rewrite,
+constant-memory compression-vector path, or the `512/16/8` finalize
+specialization described in this appendix.
+
 __global__ void MatMulTranscriptKernel(
     const uint32_t* __restrict__ A,   // n*n, row-major, values in [0, q)
     const uint32_t* __restrict__ B,   // n*n, row-major

@@ -555,6 +555,7 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
 
         std::vector<uint256> serial_hashes;
         const auto& shared_smile_ring_members = spend_inputs.front().smile_ring_members;
+        std::string smile_error;
         auto smile_result = smile2::wallet::CreateSmileProof(
             smile2::wallet::SMILE_GLOBAL_SEED,
             smile_inputs,
@@ -565,11 +566,20 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
             serial_hashes,
             payload.value_balance,
             smile2::SmileProofCodecPolicy::CANONICAL_NO_RICE,
-            bind_smile_anonset_context);
-        if (!smile_result.has_value() ||
-            serial_hashes.size() != payload.spends.size() ||
-            smile_result->output_coins.size() != payload.outputs.size()) {
-            reject_reason = "bad-shielded-v2-builder-proof";
+            bind_smile_anonset_context,
+            &smile_error);
+        if (!smile_result.has_value()) {
+            reject_reason = smile_error.empty()
+                ? "bad-shielded-v2-builder-proof-create"
+                : strprintf("bad-shielded-v2-builder-proof-create-%s", smile_error);
+            return std::nullopt;
+        }
+        if (serial_hashes.size() != payload.spends.size()) {
+            reject_reason = "bad-shielded-v2-builder-proof-serial-count";
+            return std::nullopt;
+        }
+        if (smile_result->output_coins.size() != payload.outputs.size()) {
+            reject_reason = "bad-shielded-v2-builder-proof-output-count";
             return std::nullopt;
         }
 
@@ -650,7 +660,7 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
                                                               /*reject_rice_codec=*/false,
                                                               bind_smile_anonset_context);
             verify_err.has_value()) {
-            reject_reason = "bad-shielded-v2-builder-proof";
+            reject_reason = "bad-shielded-v2-builder-proof-verify";
             return std::nullopt;
         }
 
