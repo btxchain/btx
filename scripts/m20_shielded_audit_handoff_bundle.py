@@ -28,7 +28,7 @@ SOURCE_FILES = [
     "doc/btx-shielded-external-review-closeout.md",
     "doc/btx-production-readiness-matrix.md",
     "doc/btx-shielded-v2-overhaul-tracker-2026-03-14.md",
-    "../infra/btx-seed-server-spec.md",
+    "infra/btx-seed-server-spec.md",
     "src/test/generate_shielded_matrict_plus_transcript_corpus.cpp",
     "src/test/generate_shielded_v2_adversarial_proof_corpus.cpp",
     "src/test/shielded_matrict_plus_tests.cpp",

@@ -13,6 +13,20 @@ else()
   option(BTX_ENABLE_METAL "Enable optional Metal acceleration helpers for BTX utilities" OFF)
 endif()
 option(BTX_ENABLE_CUDA_EXPERIMENTAL "Enable experimental CUDA backend scaffolding for BTX miner integration" OFF)
+set(BTX_CUDA_ARCHITECTURES "" CACHE STRING "Semicolon-separated CUDA SM architectures for the experimental MatMul backend (for example 120)")
+
+if(BTX_ENABLE_CUDA_EXPERIMENTAL)
+  include(CheckLanguage)
+  check_language(CUDA)
+  if(NOT CMAKE_CUDA_COMPILER)
+    message(FATAL_ERROR "BTX_ENABLE_CUDA_EXPERIMENTAL=ON requires a CUDA compiler. Set CMAKE_CUDA_COMPILER or install a supported toolkit.")
+  endif()
+  if(BTX_CUDA_ARCHITECTURES STREQUAL "")
+    message(FATAL_ERROR "BTX_ENABLE_CUDA_EXPERIMENTAL=ON requires BTX_CUDA_ARCHITECTURES to be set explicitly.")
+  endif()
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+endif()
 
 #=============================
 # Subprojects
@@ -128,6 +142,16 @@ add_subdirectory(util)
 if(WITH_MULTIPROCESS)
   add_subdirectory(ipc)
 endif()
+
+add_library(bitcoin_db STATIC EXCLUDE_FROM_ALL
+  dbwrapper.cpp
+)
+target_link_libraries(bitcoin_db
+  PRIVATE
+    core_interface
+    bitcoin_util
+    leveldb
+)
 
 add_library(bitcoin_consensus STATIC EXCLUDE_FROM_ALL
   arith_uint256.cpp
@@ -285,6 +309,7 @@ add_library(bitcoin_shielded STATIC EXCLUDE_FROM_ALL
 target_link_libraries(bitcoin_shielded
   PRIVATE
     core_interface
+    bitcoin_db
     bitcoin_common
     bitcoin_consensus
     bitcoin_crypto
@@ -367,7 +392,23 @@ else()
   )
 endif()
 if(BTX_ENABLE_CUDA_EXPERIMENTAL)
+  target_sources(btx_matmul_backend PRIVATE
+    cuda/cuda_context.cpp
+    cuda/matmul_accel.cu
+    cuda/oracle_accel.cu
+  )
   target_compile_definitions(btx_matmul_backend PRIVATE BTX_ENABLE_CUDA_EXPERIMENTAL=1)
+  target_link_libraries(btx_matmul_backend PRIVATE CUDA::cudart)
+  set_target_properties(btx_matmul_backend PROPERTIES
+    CUDA_ARCHITECTURES "${BTX_CUDA_ARCHITECTURES}"
+    CUDA_STANDARD 20
+    CUDA_STANDARD_REQUIRED ON
+  )
+else()
+  target_sources(btx_matmul_backend PRIVATE
+    cuda/matmul_accel_stub.cpp
+    cuda/oracle_accel_stub.cpp
+  )
 endif()
 target_link_libraries(btx_matmul_backend PRIVATE core_interface)
 target_link_libraries(bitcoin_common PUBLIC btx_matmul_backend)
@@ -419,6 +460,49 @@ function(add_btx_target_alias alias_name target_name)
   endif()
 endfunction()
 
+function(target_link_btx_linux_archive_group target)
+  if(UNIX AND NOT APPLE)
+    target_link_libraries(${target}
+      -Wl,--start-group
+      ${ARGN}
+      -Wl,--end-group
+    )
+  else()
+    target_link_libraries(${target} ${ARGN})
+  endif()
+endfunction()
+
+set(BTX_BASE_ARCHIVES
+  bitcoin_common
+  bitcoin_shielded
+  bitcoin_db
+  univalue
+  btx_matmul_backend
+  bitcoin_consensus
+  bitcoin_util
+  bitcoin_clientversion
+  bitcoinpqc
+  secp256k1
+  bitcoin_crypto
+  leveldb
+  crc32c
+)
+
+set(BTX_NODE_ARCHIVES
+  bitcoin_node
+  ${BTX_BASE_ARCHIVES}
+)
+
+set(BTX_WALLET_ARCHIVES
+  bitcoin_wallet
+  ${BTX_BASE_ARCHIVES}
+)
+
+set(BTX_NODE_WALLET_ARCHIVES
+  bitcoin_wallet
+  ${BTX_NODE_ARCHIVES}
+)
+
 if(ENABLE_WALLET)
   add_subdirectory(wallet)
 
@@ -432,9 +516,13 @@ if(ENABLE_WALLET)
     add_windows_resources(bitcoin-wallet bitcoin-wallet-res.rc)
     target_link_libraries(bitcoin-wallet
       core_interface
-      bitcoin_wallet
       Boost::headers
     )
+    if(UNIX AND NOT APPLE)
+      target_link_btx_linux_archive_group(bitcoin-wallet ${BTX_NODE_WALLET_ARCHIVES})
+    else()
+      target_link_libraries(bitcoin-wallet bitcoin_wallet)
+    endif()
     install_binary_component(bitcoin-wallet HAS_MANPAGE)
     add_legacy_binary_alias(bitcoin-wallet bitcoin-wallet)
     add_btx_target_alias(btx-wallet bitcoin-wallet)
@@ -452,7 +540,6 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   blockfilter.cpp
   consensus/tx_verify.cpp
   dandelion.cpp
-  dbwrapper.cpp
   deploymentstatus.cpp
   flatfile.cpp
   headerssync.cpp
@@ -547,6 +634,7 @@ target_link_libraries(bitcoin_node
     bitcoin_common
   PRIVATE
     core_interface
+    bitcoin_db
     bitcoin_shielded
     $<TARGET_NAME_IF_EXISTS:bitcoin_zmq>
     leveldb
@@ -569,9 +657,19 @@ if(BUILD_DAEMON)
   add_windows_resources(bitcoind bitcoind-res.rc)
   target_link_libraries(bitcoind
     core_interface
-    bitcoin_node
-    $<TARGET_NAME_IF_EXISTS:bitcoin_wallet>
   )
+  if(UNIX AND NOT APPLE)
+    if(TARGET bitcoin_wallet)
+      target_link_btx_linux_archive_group(bitcoind ${BTX_NODE_WALLET_ARCHIVES})
+    else()
+      target_link_btx_linux_archive_group(bitcoind ${BTX_NODE_ARCHIVES})
+    endif()
+  else()
+    target_link_libraries(bitcoind
+      bitcoin_node
+      $<TARGET_NAME_IF_EXISTS:bitcoin_wallet>
+    )
+  endif()
   install_binary_component(bitcoind HAS_MANPAGE)
   add_legacy_binary_alias(bitcoind bitcoind)
   add_btx_target_alias(btxd bitcoind)
@@ -584,10 +682,20 @@ if(WITH_MULTIPROCESS AND BUILD_DAEMON)
   set_target_properties(bitcoin-node PROPERTIES OUTPUT_NAME btx-node)
   target_link_libraries(bitcoin-node
     core_interface
-    bitcoin_node
     bitcoin_ipc
-    $<TARGET_NAME_IF_EXISTS:bitcoin_wallet>
   )
+  if(UNIX AND NOT APPLE)
+    if(TARGET bitcoin_wallet)
+      target_link_btx_linux_archive_group(bitcoin-node ${BTX_NODE_WALLET_ARCHIVES})
+    else()
+      target_link_btx_linux_archive_group(bitcoin-node ${BTX_NODE_ARCHIVES})
+    endif()
+  else()
+    target_link_libraries(bitcoin-node
+      bitcoin_node
+      $<TARGET_NAME_IF_EXISTS:bitcoin_wallet>
+    )
+  endif()
   install_binary_component(bitcoin-node)
   add_btx_target_alias(btx-node bitcoin-node)
 endif()
@@ -642,13 +750,18 @@ if(BUILD_TX)
   add_executable(bitcoin-tx bitcoin-tx.cpp)
   set_target_properties(bitcoin-tx PROPERTIES OUTPUT_NAME btx-tx)
   add_windows_resources(bitcoin-tx bitcoin-tx-res.rc)
+  target_include_directories(bitcoin-tx PRIVATE
+    $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
+  )
   target_link_libraries(bitcoin-tx
     core_interface
-    bitcoin_common
-    bitcoin_shielded
   )
-  if(APPLE)
-    target_link_options(bitcoin-tx PRIVATE -Wl,-no_warn_duplicate_libraries)
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(bitcoin-tx ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(bitcoin-tx
+      bitcoin_shielded
+    )
   endif()
   install_binary_component(bitcoin-tx HAS_MANPAGE)
   add_legacy_binary_alias(bitcoin-tx bitcoin-tx)
@@ -662,11 +775,13 @@ if(BUILD_UTIL)
   add_windows_resources(bitcoin-util bitcoin-util-res.rc)
   target_link_libraries(bitcoin-util
     core_interface
-    bitcoin_common
-    bitcoin_shielded
   )
-  if(APPLE)
-    target_link_options(bitcoin-util PRIVATE -Wl,-no_warn_duplicate_libraries)
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(bitcoin-util ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(bitcoin-util
+      bitcoin_shielded
+    )
   endif()
   install_binary_component(bitcoin-util HAS_MANPAGE)
   add_legacy_binary_alias(bitcoin-util bitcoin-util)
@@ -675,57 +790,51 @@ if(BUILD_UTIL)
   add_executable(btx-matmul-backend-info btx-matmul-backend-info.cpp)
   target_link_libraries(btx-matmul-backend-info
     core_interface
-    bitcoin_common
   )
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(btx-matmul-backend-info ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(btx-matmul-backend-info bitcoin_common)
+  endif()
   install_binary_component(btx-matmul-backend-info)
 
   add_executable(btx-matmul-metal-bench btx-matmul-metal-bench.cpp)
   target_link_libraries(btx-matmul-metal-bench
     core_interface
-    bitcoin_common
   )
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(btx-matmul-metal-bench ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(btx-matmul-metal-bench bitcoin_common)
+  endif()
   install_binary_component(btx-matmul-metal-bench)
 
   add_executable(btx-matmul-solve-bench btx-matmul-solve-bench.cpp)
+  target_include_directories(btx-matmul-solve-bench PRIVATE
+    $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
+  )
   target_link_libraries(btx-matmul-solve-bench
     core_interface
-    bitcoin_common
-    bitcoin_shielded
   )
-  if(APPLE)
-    target_link_options(btx-matmul-solve-bench PRIVATE -Wl,-no_warn_duplicate_libraries)
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(btx-matmul-solve-bench ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(btx-matmul-solve-bench
+      bitcoin_shielded
+    )
   endif()
   install_binary_component(btx-matmul-solve-bench)
 
   add_executable(btx-genesis btx-genesis.cpp)
-
-  # btx-genesis pulls in several static libs with circular dependencies
-  # (e.g. util <-> crypto <-> consensus). GNU ld on Linux is sensitive to
-  # archive order, so wrap the full static set in a group to avoid undefined refs.
+  target_link_libraries(btx-genesis
+    core_interface
+  )
   if(UNIX AND NOT APPLE)
-    target_link_libraries(btx-genesis PRIVATE
-      -Wl,--start-group
-      core_interface
-      btx_matmul_backend
-      bitcoin_common
-      bitcoin_shielded
-      bitcoin_util
-      bitcoin_clientversion
-      bitcoin_consensus
-      bitcoin_crypto
-      bitcoinpqc
-      secp256k1
-      -Wl,--end-group
-    )
+    target_link_btx_linux_archive_group(btx-genesis ${BTX_BASE_ARCHIVES})
   else()
-    target_link_libraries(btx-genesis PRIVATE
-      core_interface
-      bitcoin_common
+    target_link_libraries(btx-genesis
       bitcoin_shielded
     )
-  endif()
-  if(APPLE)
-    target_link_options(btx-genesis PRIVATE -Wl,-no_warn_duplicate_libraries)
   endif()
   install_binary_component(btx-genesis)
 endif()

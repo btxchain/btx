@@ -20,10 +20,30 @@ using namespace smile2;
 
 namespace {
 
+constexpr uint64_t INTEGRATION_TEST_PROOF_RETRY_STRIDE{0xD1B54A32D192ED03ULL};
+constexpr uint32_t MAX_INTEGRATION_TEST_PROOF_ATTEMPTS{32};
+
 std::array<uint8_t, 32> MakeSeed(uint8_t val) {
     std::array<uint8_t, 32> seed{};
     seed[0] = val;
     return seed;
+}
+
+std::optional<SmileCTProof> TryProveCtWithRetriesForTest(const std::vector<CTInput>& inputs,
+                                                         const std::vector<CTOutput>& outputs,
+                                                         const CTPublicData& pub,
+                                                         uint64_t base_seed,
+                                                         int64_t public_fee = 0,
+                                                         bool bind_anonset_context = false)
+{
+    for (uint32_t attempt = 0; attempt < MAX_INTEGRATION_TEST_PROOF_ATTEMPTS; ++attempt) {
+        const uint64_t attempt_seed = base_seed + (INTEGRATION_TEST_PROOF_RETRY_STRIDE * attempt);
+        if (auto proof = TryProveCT(
+                inputs, outputs, pub, attempt_seed, public_fee, bind_anonset_context)) {
+            return proof;
+        }
+    }
+    return std::nullopt;
 }
 
 BDLOPCommitmentKey GetPublicCoinCommitmentKey()
@@ -190,32 +210,36 @@ BOOST_AUTO_TEST_CASE(p3_m12_context_bound_ct_transcript_requires_v2_mode)
     const size_t N = 32;
     auto setup = IntegrationTestSetup::Create(N, 2, 2, {120, 80}, {100, 100}, 202);
 
-    const auto legacy_proof = ProveCT(setup.inputs, setup.outputs, setup.pub, 0x12345678ULL);
-    const auto bound_proof = ProveCT(setup.inputs,
-                                     setup.outputs,
-                                     setup.pub,
-                                     0x12345678ULL,
-                                     /*public_fee=*/0,
-                                     /*bind_anonset_context=*/true);
+    const auto legacy_proof = TryProveCtWithRetriesForTest(
+        setup.inputs, setup.outputs, setup.pub, 0x12345678ULL);
+    const auto bound_proof = TryProveCtWithRetriesForTest(setup.inputs,
+                                                          setup.outputs,
+                                                          setup.pub,
+                                                          0x12345678ULL,
+                                                          /*public_fee=*/0,
+                                                          /*bind_anonset_context=*/true);
 
-    BOOST_REQUIRE(!ValidateSmile2Proof(legacy_proof, 2, 2, legacy_proof.output_coins, setup.pub).has_value());
-    BOOST_REQUIRE(!ValidateSmile2Proof(bound_proof,
+    BOOST_REQUIRE(legacy_proof.has_value());
+    BOOST_REQUIRE(bound_proof.has_value());
+
+    BOOST_REQUIRE(!ValidateSmile2Proof(*legacy_proof, 2, 2, legacy_proof->output_coins, setup.pub).has_value());
+    BOOST_REQUIRE(!ValidateSmile2Proof(*bound_proof,
                                        2,
                                        2,
-                                       bound_proof.output_coins,
+                                       bound_proof->output_coins,
                                        setup.pub,
                                        /*public_fee=*/0,
                                        /*bind_anonset_context=*/true)
                        .has_value());
-    BOOST_CHECK(ValidateSmile2Proof(legacy_proof,
+    BOOST_CHECK(ValidateSmile2Proof(*legacy_proof,
                                     2,
                                     2,
-                                    legacy_proof.output_coins,
+                                    legacy_proof->output_coins,
                                     setup.pub,
                                     /*public_fee=*/0,
                                     /*bind_anonset_context=*/true)
                     .has_value());
-    BOOST_CHECK(ValidateSmile2Proof(bound_proof, 2, 2, bound_proof.output_coins, setup.pub).has_value());
+    BOOST_CHECK(ValidateSmile2Proof(*bound_proof, 2, 2, bound_proof->output_coins, setup.pub).has_value());
 }
 
 // [P5-G2] Consensus rejects invalid/tampered proof.

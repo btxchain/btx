@@ -462,6 +462,48 @@ refresh_live_peer_cache() {
   return 1
 }
 
+disconnect_stale_outbound_peers() {
+  local reason="$1"
+  local tmp_err
+  local peer_json
+  local attempted=0
+  local disconnected=0
+  local failed=0
+
+  tmp_err="$(mktemp)"
+  if ! peer_json="$(rpc_cli getpeerinfo 2>"${tmp_err}")"; then
+    append_file_if_present "${tmp_err}" "${ERR}"
+    rm -f "${tmp_err}"
+    return 1
+  fi
+  rm -f "${tmp_err}"
+
+  while IFS= read -r node; do
+    [[ -n "${node}" ]] || continue
+    ((attempted += 1))
+    if rpc_cli disconnectnode "${node}" >>"${LOG}" 2>>"${ERR}"; then
+      ((disconnected += 1))
+    else
+      ((failed += 1))
+    fi
+  done < <(
+    jq -r '
+      .[]
+      | select((.inbound // false) | not)
+      | select((.connection_type // "") == "manual")
+      | select((.synced_headers // -1) < 0 and (.synced_blocks // -1) < 0)
+      | .addr // empty
+    ' <<<"${peer_json}" | awk 'NF && !seen[$0]++'
+  )
+
+  if (( attempted == 0 )); then
+    return 1
+  fi
+
+  log_health "peer-stale-disconnect reason=${reason} attempted=${attempted} disconnected=${disconnected} failed=${failed}"
+  (( disconnected > 0 ))
+}
+
 refresh_peer_bootstrap() {
   local reason="$1"
   local now
@@ -518,9 +560,13 @@ should_defer_chain_guard_restart() {
   case "${reason}" in
     insufficient_peer_consensus)
       if (( peer_count < 2 )) && (( same_reason_streak >= PEER_REMEDIATION_THRESHOLD )); then
+        disconnect_stale_outbound_peers "${reason}" || true
         refresh_peer_bootstrap "${reason}" || true
       fi
-      return 0
+      if (( now - last_tip_progress_epoch < SYNC_STALL_RESTART_SECS )); then
+        return 0
+      fi
+      return 1
       ;;
   esac
 

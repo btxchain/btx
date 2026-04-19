@@ -69,7 +69,7 @@ ctest --test-dir build --build-config Release  # Append "-j N" for N parallel te
 
 ### 6. Packaging a Generic Windows CLI Archive
 
-For a generic Windows x64 archive from the public BTX tree, use the
+For a generic Windows x64 archive from the BTX tree, use the
 `windows-clangcl-static` preset. This path builds the daemon / CLI subset with
 `clang-cl` plus Ninja, avoids machine-specific tuning, and produces the same
 `windows-x86_64` archive shape used by the release helpers.
@@ -86,7 +86,7 @@ Then configure, build, and package:
 ```powershell
 cmake --preset windows-clangcl-static
 cmake --build build --target btxd btx-cli
-python scripts/release/package_release_archive.py --output-dir build\release --version 29.4.0-generic-win64 --platform-id windows-x86_64 --btxd build\bin\btxd.exe --btx-cli build\bin\btx-cli.exe
+python scripts/release/package_release_archive.py --output-dir build\release --version <version> --platform-id windows-x86_64 --btxd build\bin\btxd.exe --btx-cli build\bin\btx-cli.exe
 ```
 
 The resulting `build\release\btx-<version>-x86_64-w64-mingw32.zip` archive

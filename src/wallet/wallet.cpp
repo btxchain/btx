@@ -100,8 +100,6 @@ using util::ToString;
 namespace wallet {
 
 namespace {
-constexpr CAmount MAX_SHIELDED_AUTO_SHIELD_OUTPUT_VALUE{static_cast<CAmount>(smile2::Q) - 1};
-
 int SaturatingIntFromInt64(const int64_t value)
 {
     if (value > std::numeric_limits<int>::max()) return std::numeric_limits<int>::max();
@@ -1812,7 +1810,6 @@ void CWallet::MaybeAutoShieldCoinbase()
                 if (IsLockedCoin(outpoint)) continue;
                 const auto next = CheckedAdd(total_in, wtx.tx->vout[n].nValue);
                 if (!next || !MoneyRange(*next)) break;
-                if (*next - 10000 > MAX_SHIELDED_AUTO_SHIELD_OUTPUT_VALUE) break;
                 mature_coinbase_utxos.push_back(outpoint);
                 total_in = *next;
                 if (static_cast<int>(mature_coinbase_utxos.size()) >= AUTO_SHIELD_BATCH_LIMIT) break;
@@ -2848,10 +2845,14 @@ OutputType CWallet::TransactionChangeType(const std::optional<OutputType>& chang
 void CWallet::CommitTransaction(CTransactionRef tx,
                                 mapValue_t mapValue,
                                 std::vector<std::pair<std::string, std::string>> orderForm,
-                                bool bypass_maxtxfee)
+                                bool bypass_maxtxfee,
+                                std::string* broadcast_error)
 {
     LOCK(cs_wallet);
     WalletLogPrintf("CommitTransaction:\n%s\n", util::RemoveSuffixView(tx->ToString(), "\n"));
+    if (broadcast_error != nullptr) {
+        broadcast_error->clear();
+    }
 
     // Add tx to wallet, because if it has change it's also ours,
     // otherwise just for transaction history.
@@ -2884,6 +2885,9 @@ void CWallet::CommitTransaction(CTransactionRef tx,
 
     std::string err_string;
     if (!SubmitTxMemoryPoolAndRelay(*wtx, err_string, true, bypass_maxtxfee)) {
+        if (broadcast_error != nullptr) {
+            *broadcast_error = err_string;
+        }
         WalletLogPrintf("CommitTransaction(): Transaction cannot be broadcast immediately, %s\n", err_string);
         // NOTE: if we expect the failure to be long term or permanent, instead delete wtx from the wallet and return failure.
     }

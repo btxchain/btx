@@ -20,8 +20,8 @@ For agentic or unattended installs, the shortest end-to-end flow is:
 export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
-  --repo btxchain/btx-node \
-  --release-tag v29.2-btx1 \
+  --repo btxchain/btx \
+  --release-tag v0.29.5 \
   --preset miner \
   --datadir="$HOME/.btx"
 ```
@@ -44,8 +44,8 @@ progress on stderr and prints a clean JSON summary on stdout:
 
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
-  --repo btxchain/btx-node \
-  --release-tag v29.2-btx1 \
+  --repo btxchain/btx \
+  --release-tag v0.29.5 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"

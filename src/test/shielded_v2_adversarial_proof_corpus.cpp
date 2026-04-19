@@ -180,9 +180,9 @@ std::optional<AdversarialProofCorpus> BuildV2SendAdversarialProofCorpus(
             corpus,
             base_tx,
             "witness_real_index_oob",
-            "Force the spend witness real_index past the ring bound so witness validation rejects it.",
+            "Force the spend witness real_index past the ring bound so proof verification rejects it.",
             "bad-shielded-proof",
-            "witness_parse",
+            "proof_verify",
             [base_witness](CMutableTransaction&,
                            ::shielded::v2::TransactionBundle& bundle,
                            std::string& out_reject) {

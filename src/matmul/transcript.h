@@ -58,6 +58,7 @@ uint256 ReplayCanonicalHashWithReusableCleanProducts(
  *  image of C'. Validators can rebuild the compressed image from the carried
  *  C' payload in O(n^2) and then use Freivalds to confirm A'B' == C'. */
 uint256 HashMatrixWords(Span<const field::Element> words);
+uint256 FinalizeTranscriptDigestFromWords(Span<const field::Element> words);
 uint256 FinalizeProductCommittedDigestFromHash(const uint256& c_prime_hash,
                                                const uint256& sigma,
                                                uint32_t dim,

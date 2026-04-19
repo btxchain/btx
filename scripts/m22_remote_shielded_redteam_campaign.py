@@ -97,6 +97,14 @@ def manifest_path_prefixes(path: Path) -> list[str]:
         text = str(candidate)
         if text not in prefixes:
             prefixes.append(text)
+        if text.startswith("/private/tmp/"):
+            alt = text.removeprefix("/private") if text != "/private/tmp" else "/tmp"
+            if alt not in prefixes:
+                prefixes.append(alt)
+        elif text.startswith("/tmp/"):
+            alt = f"/private{text}"
+            if alt not in prefixes:
+                prefixes.append(alt)
     return prefixes
 
 
@@ -105,6 +113,10 @@ def manifest_display_path(output_dir: Path, value: str) -> str:
         (output_dir, ""),
         (REPO_ROOT, "<repo>"),
         (Path.home(), "~"),
+        # Preserve sanitization for bundled example manifests that use
+        # placeholder paths rather than the local operator's actual home/repo.
+        (Path("/home/example/btxchain/btx-node"), "<repo>"),
+        (Path("/home/example"), "~"),
     ):
         for root_str in manifest_path_prefixes(root):
             if value == root_str:

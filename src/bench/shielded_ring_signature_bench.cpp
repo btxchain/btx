@@ -50,7 +50,8 @@ std::vector<lattice::PolyVec> BuildBenchInputSecrets(const std::vector<std::vect
 void RingSignatureCreateBench(benchmark::Bench& bench)
 {
     const std::vector<std::vector<uint256>> ring_members = BuildBenchRingMembers(/*input_count=*/2);
-    const std::vector<size_t> real_indices{3, 11};
+    assert(lattice::RING_SIZE >= 2);
+    const std::vector<size_t> real_indices{0, lattice::RING_SIZE - 1};
     const std::vector<unsigned char> spending_key(32, 0x9A);
     const std::vector<lattice::PolyVec> input_secrets = BuildBenchInputSecrets(ring_members, real_indices, spending_key);
     assert(input_secrets.size() == ring_members.size());
@@ -67,7 +68,8 @@ void RingSignatureCreateBench(benchmark::Bench& bench)
 void RingSignatureVerifyBench(benchmark::Bench& bench)
 {
     const std::vector<std::vector<uint256>> ring_members = BuildBenchRingMembers(/*input_count=*/2);
-    const std::vector<size_t> real_indices{4, 12};
+    assert(lattice::RING_SIZE >= 2);
+    const std::vector<size_t> real_indices{0, lattice::RING_SIZE - 1};
     const std::vector<unsigned char> spending_key(32, 0x71);
     const std::vector<lattice::PolyVec> input_secrets = BuildBenchInputSecrets(ring_members, real_indices, spending_key);
     assert(input_secrets.size() == ring_members.size());

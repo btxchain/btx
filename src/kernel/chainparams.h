@@ -135,6 +135,11 @@ public:
     {
         return FindFirst(m_assumeutxo_data, [&](const auto& d) { return d.blockhash == blockhash; });
     }
+    bool AssumeutxoHashMatches(const AssumeutxoData& data, const uint256& actual_hash) const
+    {
+        return (m_is_mockable_chain && data.hash_serialized == AssumeutxoHash{uint256{}}) ||
+            data.hash_serialized == AssumeutxoHash{actual_hash};
+    }
 
     const ChainTxData& TxData() const { return chainTxData; }
 

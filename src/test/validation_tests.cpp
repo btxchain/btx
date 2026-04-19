@@ -232,19 +232,61 @@ BOOST_AUTO_TEST_CASE(signet_parse_tests)
     BOOST_CHECK(!CheckSignetBlockSolution(block, signet_params->GetConsensus()));
 }
 
-//! Test retrieval of valid assumeutxo values.
-BOOST_AUTO_TEST_CASE(test_assumeutxo)
+//! Test retrieval of valid regtest assumeutxo values.
+BOOST_AUTO_TEST_CASE(test_regtest_assumeutxo)
 {
     const auto params = CreateChainParams(*m_node.args, ChainType::REGTEST);
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
+    const std::vector<int> expected_snapshot_heights{110, 299, 61'010};
+    struct SnapshotExpectation {
+        int height;
+        const char* hash_serialized;
+        int chain_tx_count;
+        const char* blockhash;
+    };
+    const std::vector<SnapshotExpectation> expected_snapshots{
+        {
+            110,
+            "c35580bfd4f6c2ab69a8b1ac446962e5aacb164dc13e237867bd2170b91d7c98",
+            111,
+            "9e3817054fd9df2c2a27f647a3b9f55f8bc91f05168753543a902074a8f21700",
+        },
+        {
+            299,
+            "0ffcf7afd7682a59057ad717784b70ca8fb86cf9209912ccca20261aafa5001a",
+            300,
+            "78e6ea382d4d5466b1d8421c1b8789e9c7cde9de8b6da4042be00ca2948a4860",
+        },
+        {
+            61'010,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            61'011,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        },
+    };
 
     // These heights don't have assumeutxo configurations associated, per the contents
     // of kernel/chainparams.cpp.
     const std::vector<int> bad_heights{0, 100, 111, 115, 209, 211};
 
-    for (const auto& snapshot_height : snapshot_heights) {
-        const auto out = params->AssumeutxoForHeight(snapshot_height);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
+    BOOST_CHECK_EQUAL_COLLECTIONS(snapshot_heights.begin(),
+                                  snapshot_heights.end(),
+                                  expected_snapshot_heights.begin(),
+                                  expected_snapshot_heights.end());
+
+    for (const auto& expected_snapshot : expected_snapshots) {
+        const auto out = params->AssumeutxoForHeight(expected_snapshot.height);
         BOOST_REQUIRE(out);
+        const auto expected_hash = uint256::FromHex(expected_snapshot.hash_serialized);
+        BOOST_REQUIRE(expected_hash.has_value());
+        BOOST_CHECK_EQUAL(out->height, expected_snapshot.height);
+        BOOST_CHECK_EQUAL(out->hash_serialized.ToString(), expected_snapshot.hash_serialized);
+        BOOST_CHECK_EQUAL(out->m_chain_tx_count, expected_snapshot.chain_tx_count);
+        BOOST_CHECK_EQUAL(out->blockhash.GetHex(), expected_snapshot.blockhash);
+        BOOST_CHECK(params->AssumeutxoHashMatches(*out, *expected_hash));
+        BOOST_CHECK_EQUAL(params->AssumeutxoHashMatches(*out, uint256{1}),
+                          expected_snapshot.height == 61'010);
 
         const auto out_by_hash = params->AssumeutxoForBlockhash(out->blockhash);
         BOOST_REQUIRE(out_by_hash);
@@ -263,13 +305,25 @@ BOOST_AUTO_TEST_CASE(test_assumeutxo)
 
 BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
 {
-    // After chain reset, mainnet assumeutxo data is empty.  Verify that no
-    // snapshot is returned for any height.
+    // Mainnet snapshots are anchored again; verify the published heights and a
+    // few positive/negative lookups.
     const auto params = CreateChainParams(*m_node.args, ChainType::MAIN);
-    BOOST_CHECK(!params->AssumeutxoForHeight(55'000));
+    const auto snapshot_heights = params->GetAvailableSnapshotHeights();
+    const std::vector<int> expected_snapshot_heights{55'000, 60'760, 64'900, 71'260, 71'435};
+
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
+    BOOST_CHECK_EQUAL_COLLECTIONS(snapshot_heights.begin(),
+                                  snapshot_heights.end(),
+                                  expected_snapshot_heights.begin(),
+                                  expected_snapshot_heights.end());
+
+    BOOST_CHECK(params->AssumeutxoForHeight(55'000));
+    BOOST_CHECK(params->AssumeutxoForHeight(60'760));
+    BOOST_CHECK(params->AssumeutxoForHeight(64'900));
+    BOOST_CHECK(params->AssumeutxoForHeight(71'260));
+    BOOST_CHECK(params->AssumeutxoForHeight(71'435));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
     BOOST_CHECK(!params->AssumeutxoForHeight(0));
-    BOOST_CHECK(params->GetAvailableSnapshotHeights().empty());
 }
 
 BOOST_AUTO_TEST_CASE(block_malleation)

@@ -321,6 +321,7 @@ struct CShieldedBundle {
     const CShieldedBundle& bundle,
     bool use_nonced_bridge_tag = false);
 [[nodiscard]] std::vector<uint256> CollectShieldedAnchors(const CShieldedBundle& bundle);
+[[nodiscard]] std::vector<uint256> CollectShieldedAccountRegistryRefs(const CShieldedBundle& bundle);
 [[nodiscard]] std::vector<uint256> CollectShieldedSettlementAnchorRefs(const CShieldedBundle& bundle);
 [[nodiscard]] std::optional<CAmount> TryGetShieldedStateValueBalance(const CShieldedBundle& bundle,
                                                                      std::string& reject_reason);

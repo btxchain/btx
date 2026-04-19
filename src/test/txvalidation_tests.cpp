@@ -38,10 +38,15 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
+#include <future>
 #include <map>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 
 BOOST_AUTO_TEST_SUITE(txvalidation_tests)
 
@@ -235,7 +240,9 @@ void ExpectBlockAccepted(TestChain100Setup& setup, const CBlock& block)
 }
 
 [[nodiscard]] test::shielded::V2SettlementAnchorReceiptFixture BuildSettlementAnchorFromEgressFixture(
-    const test::shielded::V2EgressReceiptFixture& egress_fixture)
+    const test::shielded::V2EgressReceiptFixture& egress_fixture,
+    const Consensus::Params* consensus = nullptr,
+    int32_t validation_height = std::numeric_limits<int32_t>::max())
 {
     test::shielded::V2SettlementAnchorReceiptFixture fixture;
     fixture.statement = egress_fixture.statement;
@@ -271,14 +278,17 @@ void ExpectBlockAccepted(TestChain100Setup& setup, const CBlock& block)
                                                 fixture.witness.proof_receipts.size()});
     payload.batch_statement_digests = {shielded::ComputeBridgeBatchStatementHash(fixture.statement)};
 
-    const auto* egress_bundle = egress_fixture.tx.shielded_bundle.GetV2Bundle();
     shielded::v2::TransactionBundle bundle;
-    bundle.header.family_id =
-        (egress_bundle != nullptr &&
-         shielded::v2::IsGenericTransactionFamily(egress_bundle->header.family_id))
-        ? shielded::v2::TransactionFamily::V2_GENERIC
-        : shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR;
+    bundle.header.family_id = test::shielded::ResolveFixtureWireFamily(
+        shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR,
+        consensus,
+        validation_height);
     bundle.header.proof_envelope = abstract_context.material.statement.envelope;
+    test::shielded::ApplyFixtureWireEnvelopeKinds(
+        shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR,
+        bundle.header.proof_envelope,
+        consensus,
+        validation_height);
     bundle.payload = payload;
 
     auto proof_shard = abstract_context.material.proof_shards.front();
@@ -292,6 +302,27 @@ void ExpectBlockAccepted(TestChain100Setup& setup, const CBlock& block)
     BOOST_REQUIRE(bundle.IsValid());
 
     fixture.tx.shielded_bundle.v2_bundle = bundle;
+    return fixture;
+}
+
+[[nodiscard]] test::shielded::V2SettlementAnchorReceiptFixture BuildSettlementAnchorHybridFromEgressFixture(
+    const test::shielded::V2EgressReceiptFixture& egress_fixture,
+    const Consensus::Params* consensus = nullptr,
+    int32_t validation_height = std::numeric_limits<int32_t>::max())
+{
+    auto fixture = test::shielded::BuildV2SettlementAnchorHybridReceiptFixture(egress_fixture);
+    auto* bundle = fixture.tx.shielded_bundle.v2_bundle ? &*fixture.tx.shielded_bundle.v2_bundle : nullptr;
+    BOOST_REQUIRE(bundle != nullptr);
+    bundle->header.family_id = test::shielded::ResolveFixtureWireFamily(
+        shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR,
+        consensus,
+        validation_height);
+    test::shielded::ApplyFixtureWireEnvelopeKinds(
+        shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR,
+        bundle->header.proof_envelope,
+        consensus,
+        validation_height);
+    BOOST_REQUIRE(bundle->IsValid());
     return fixture;
 }
 
@@ -315,7 +346,8 @@ void ExpectBlockAccepted(TestChain100Setup& setup, const CBlock& block)
 [[nodiscard]] std::optional<std::vector<smile2::wallet::SmileRingMember>> BuildSmileRingMembersFromNotes(
     const std::vector<ShieldedNote>& ring_notes,
     const std::vector<uint256>& ring_members,
-    const shielded::registry::AccountLeafHint& account_leaf_hint)
+    const shielded::registry::AccountLeafHint& account_leaf_hint,
+    const std::map<uint256, uint256>* known_account_leaf_commitments = nullptr)
 {
     if (ring_notes.size() != ring_members.size()) {
         return std::nullopt;
@@ -324,12 +356,22 @@ void ExpectBlockAccepted(TestChain100Setup& setup, const CBlock& block)
     std::vector<smile2::wallet::SmileRingMember> members;
     members.reserve(ring_members.size());
     for (size_t i = 0; i < ring_members.size(); ++i) {
-        const auto leaf_commitment = shielded::registry::ComputeAccountLeafCommitmentFromNote(
-            ring_notes[i],
-            ring_members[i],
-            account_leaf_hint);
+        std::optional<uint256> leaf_commitment;
+        if (known_account_leaf_commitments != nullptr) {
+            const auto it = known_account_leaf_commitments->find(ring_members[i]);
+            if (it != known_account_leaf_commitments->end()) {
+                leaf_commitment = it->second;
+            }
+        }
         if (!leaf_commitment.has_value()) {
-            return std::nullopt;
+            const auto candidates = shielded::registry::CollectAccountLeafCommitmentCandidatesFromNote(
+                ring_notes[i],
+                ring_members[i],
+                account_leaf_hint);
+            if (candidates.size() != 1U) {
+                return std::nullopt;
+            }
+            leaf_commitment = candidates.front();
         }
         auto member = smile2::wallet::BuildRingMemberFromNote(
             smile2::wallet::SMILE_GLOBAL_SEED,
@@ -357,14 +399,20 @@ void ExpectBlockAccepted(TestChain100Setup& setup, const CBlock& block)
     }
 
     for (auto& spend_input : spend_inputs) {
-        const auto account_leaf_commitment = test::shielded::ComputeAccountLeafCommitment(spend_input);
-        if (!account_leaf_commitment.has_value()) {
+        const auto account_leaf_commitments =
+            shielded::registry::CollectAccountLeafCommitmentCandidatesFromNote(
+                spend_input.note,
+                test::shielded::EffectiveNoteCommitment(spend_input),
+                *spend_input.account_leaf_hint);
+        if (account_leaf_commitments.empty()) {
             return false;
         }
-        const auto witness = registry.BuildSpendWitnessByCommitment(*account_leaf_commitment);
-        if (!witness.has_value()) {
-            return false;
+        std::optional<shielded::registry::ShieldedAccountRegistrySpendWitness> witness;
+        for (const auto& account_leaf_commitment : account_leaf_commitments) {
+            witness = registry.BuildSpendWitnessByCommitment(account_leaf_commitment);
+            if (witness.has_value()) break;
         }
+        if (!witness.has_value()) return false;
         spend_input.account_registry_anchor = registry_root;
         spend_input.account_registry_proof = std::move(*witness);
     }
@@ -940,6 +988,9 @@ struct V2DirectSendChainFixture
     V2DirectSendChainFixture fixture;
     fixture.spending_key.assign(32, 0x44);
     BOOST_REQUIRE_GE(seeded_note_count, shielded::lattice::RING_SIZE);
+    Consensus::Params& mutable_consensus =
+        const_cast<Consensus::Params&>(consensus != nullptr ? *consensus : Params().GetConsensus());
+    const Consensus::Params* effective_consensus = &mutable_consensus;
 
     ChainstateManager& chainman = *Assert(setup.m_node.chainman);
     BOOST_REQUIRE(WITH_LOCK(cs_main, return chainman.EnsureShieldedStateInitialized()));
@@ -982,20 +1033,15 @@ struct V2DirectSendChainFixture
     ReSignCoinbaseSpend(setup, seeded->tx, funding_tx);
 
     const CScript block_script = GetScriptForDestination(PKHash(setup.coinbaseKey.GetPubKey()));
-    int32_t original_disable_height{0};
+    int32_t original_disable_height{mutable_consensus.nShieldedMatRiCTDisableHeight};
     bool restore_disable_height{false};
-    if (consensus != nullptr) {
-        auto& mutable_consensus = const_cast<Consensus::Params&>(*consensus);
-        const int32_t seed_block_height = WITH_LOCK(cs_main, return chainman.ActiveChain().Height() + 1);
-        if (mutable_consensus.IsShieldedMatRiCTDisabled(seed_block_height)) {
-            original_disable_height = mutable_consensus.nShieldedMatRiCTDisableHeight;
-            mutable_consensus.nShieldedMatRiCTDisableHeight = seed_block_height + 1;
-            restore_disable_height = true;
-        }
+    const int32_t seed_block_height = WITH_LOCK(cs_main, return chainman.ActiveChain().Height() + 1);
+    if (mutable_consensus.IsShieldedMatRiCTDisabled(seed_block_height)) {
+        mutable_consensus.nShieldedMatRiCTDisableHeight = seed_block_height + 1;
+        restore_disable_height = true;
     }
     setup.CreateAndProcessBlock({seeded->tx}, block_script);
     if (restore_disable_height) {
-        auto& mutable_consensus = const_cast<Consensus::Params&>(*consensus);
         mutable_consensus.nShieldedMatRiCTDisableHeight = original_disable_height;
     }
 
@@ -1037,7 +1083,7 @@ struct V2DirectSendChainFixture
         /*seed=*/0xd1);
     const auto output_input = BuildDirectSendOutputInput(output_note, /*recipient_seed=*/0xe1);
 
-    if (consensus != nullptr && validation_height == std::numeric_limits<int32_t>::max()) {
+    if (validation_height == std::numeric_limits<int32_t>::max()) {
         validation_height = WITH_LOCK(cs_main, return chainman.ActiveChain().Height() + 1);
     }
     std::optional<shielded::v2::V2SendBuildResult> built;
@@ -1058,7 +1104,7 @@ struct V2DirectSendChainFixture
             Span<const unsigned char>{fixture.spending_key.data(), fixture.spending_key.size()},
             reject_reason,
             Span<const unsigned char>{rng_entropy.data(), rng_entropy.size()},
-            consensus,
+            effective_consensus,
             validation_height);
         if (built.has_value() || reject_reason != "bad-shielded-v2-builder-proof") {
             break;
@@ -1072,7 +1118,7 @@ struct V2DirectSendChainFixture
     BOOST_REQUIRE_EQUAL(bundle->header.family_id,
                         shielded::v2::GetWireTransactionFamilyForValidationHeight(
                             TransactionFamily::V2_SEND,
-                            consensus,
+                            effective_consensus,
                             validation_height));
     BOOST_REQUIRE(shielded::v2::BundleHasSemanticFamily(*bundle, TransactionFamily::V2_SEND));
     const auto& payload = std::get<shielded::v2::SendPayload>(bundle->payload);
@@ -1441,7 +1487,11 @@ bool RemoveShieldedSmilePublicAccountForTest(ChainstateManager& chainman,
     auto& public_accounts =
         const_cast<std::map<uint256, smile2::CompactPublicAccount>&>(
             chainman.GetShieldedSmilePublicAccounts());
-    return public_accounts.erase(commitment) == 1;
+    const bool erased = public_accounts.erase(commitment) == 1;
+    if (erased) {
+        chainman.InvalidateShieldedAccountStateSnapshotCaches();
+    }
+    return erased;
 }
 
 bool RemoveShieldedAccountLeafCommitmentForTest(ChainstateManager& chainman,
@@ -1450,7 +1500,11 @@ bool RemoveShieldedAccountLeafCommitmentForTest(ChainstateManager& chainman,
     auto& account_leaf_commitments =
         const_cast<std::map<uint256, uint256>&>(
             chainman.GetShieldedAccountLeafCommitments());
-    return account_leaf_commitments.erase(commitment) == 1;
+    const bool erased = account_leaf_commitments.erase(commitment) == 1;
+    if (erased) {
+        chainman.InvalidateShieldedAccountStateSnapshotCaches();
+    }
+    return erased;
 }
 
 void EnsureIngressAccountRegistryAnchorTracked(TestChain100Setup& setup,
@@ -1484,7 +1538,8 @@ void CheckIngressValueBalances(const V2IngressChainFixture& fixture)
                                                               IngressSettlementWitnessKind settlement_kind =
                                                                   IngressSettlementWitnessKind::PROOF_ONLY,
                                                               size_t seeded_note_count =
-                                                                  shielded::lattice::RING_SIZE,
+                                                                  shielded::ringct::GetMinimumPrivacyTreeSize(
+                                                                      shielded::lattice::RING_SIZE),
                                                               const Consensus::Params* consensus = nullptr,
                                                               int32_t validation_height =
                                                                   std::numeric_limits<int32_t>::max());
@@ -1496,7 +1551,8 @@ void CheckIngressValueBalances(const V2IngressChainFixture& fixture)
                                                               IngressSettlementWitnessKind settlement_kind =
                                                                   IngressSettlementWitnessKind::PROOF_ONLY,
                                                               size_t seeded_note_count =
-                                                                  shielded::lattice::RING_SIZE,
+                                                                  shielded::ringct::GetMinimumPrivacyTreeSize(
+                                                                      shielded::lattice::RING_SIZE),
                                                               const Consensus::Params* consensus = nullptr,
                                                               int32_t validation_height =
                                                                   std::numeric_limits<int32_t>::max())
@@ -1567,6 +1623,7 @@ void CheckIngressValueBalances(const V2IngressChainFixture& fixture)
 
     ChainstateManager& chainman = *Assert(setup.m_node.chainman);
     BOOST_REQUIRE(WITH_LOCK(cs_main, return chainman.EnsureShieldedStateInitialized()));
+    Consensus::Params& mutable_consensus = const_cast<Consensus::Params&>(*effective_consensus);
     const int32_t seed_validation_height =
         WITH_LOCK(cs_main, return chainman.ActiveChain().Height() + 1);
     if (validation_height == std::numeric_limits<int32_t>::max()) {
@@ -1615,7 +1672,9 @@ void CheckIngressValueBalances(const V2IngressChainFixture& fixture)
             /*proof_receipt_count=*/1,
             /*required_receipts=*/1,
             effective_consensus,
-            seed_validation_height));
+            seed_validation_height),
+        effective_consensus,
+        seed_validation_height);
     const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture(
         std::move(funding_outputs),
         {},
@@ -1629,6 +1688,10 @@ void CheckIngressValueBalances(const V2IngressChainFixture& fixture)
         seed_validation_height);
 
     const CScript block_script = GetScriptForDestination(PKHash(setup.coinbaseKey.GetPubKey()));
+    const ScopedConsensusU32Override restore_anchor_maturity{
+        mutable_consensus.nShieldedSettlementAnchorMaturity,
+        mutable_consensus.nShieldedSettlementAnchorMaturity};
+    mutable_consensus.nShieldedSettlementAnchorMaturity = 0;
     setup.CreateAndProcessBlock({settlement_anchor_fixture.tx}, block_script);
     setup.CreateAndProcessBlock({egress_fixture.tx}, block_script);
 
@@ -1638,6 +1701,8 @@ void CheckIngressValueBalances(const V2IngressChainFixture& fixture)
     BOOST_REQUIRE(!fixture.spend_anchor.IsNull());
     const auto account_registry = WITH_LOCK(cs_main, return chainman.GetShieldedAccountRegistry());
     BOOST_REQUIRE(!account_registry.Root().IsNull());
+    const auto& account_leaf_commitments =
+        WITH_LOCK(cs_main, return chainman.GetShieldedAccountLeafCommitments());
     const auto& egress_payload = std::get<shielded::v2::EgressBatchPayload>(
         egress_fixture.tx.shielded_bundle.v2_bundle->payload);
     const auto egress_account_leaf_hint = shielded::registry::MakeEgressAccountLeafHint(
@@ -1656,7 +1721,10 @@ void CheckIngressValueBalances(const V2IngressChainFixture& fixture)
         selected_ring_notes.push_back(ring_notes[position]);
     }
     auto shared_smile_ring_members =
-        BuildSmileRingMembersFromNotes(selected_ring_notes, ring_members, *egress_account_leaf_hint);
+        BuildSmileRingMembersFromNotes(selected_ring_notes,
+                                       ring_members,
+                                       *egress_account_leaf_hint,
+                                       &account_leaf_commitments);
     BOOST_REQUIRE(shared_smile_ring_members.has_value());
 
     V2IngressBuildInput input;
@@ -1786,7 +1854,11 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_reject_coinbase, TestChain100Setup)
 
 BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_v2_egress_after_settlement_anchor_and_evicts_it_after_reorg, TestChain100Setup)
 {
-    const auto& consensus = Params().GetConsensus();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const ScopedConsensusU32Override restore_maturity{
+        consensus.nShieldedSettlementAnchorMaturity,
+        consensus.nShieldedSettlementAnchorMaturity};
+    consensus.nShieldedSettlementAnchorMaturity = 0;
     const int32_t validation_height = NextShieldedValidationHeight(*this);
     const auto settlement_anchor_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture(
         /*output_count=*/2,
@@ -1866,13 +1938,17 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_v2_egress_after_settlement_anchor_and
         same_block.GetHash(),
         WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()));
     BOOST_CHECK(WITH_LOCK(cs_main,
-                          return m_node.chainman->IsShieldedSettlementAnchorValid(
+                          return !m_node.chainman->IsShieldedSettlementAnchorValid(
                               same_block_settlement_anchor_fixture.settlement_anchor_digest)));
 }
 
 BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_v2_egress_when_imported_receipt_is_missing_from_witness_set, TestChain100Setup)
 {
-    const auto& consensus = Params().GetConsensus();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const ScopedConsensusU32Override restore_maturity{
+        consensus.nShieldedSettlementAnchorMaturity,
+        consensus.nShieldedSettlementAnchorMaturity};
+    consensus.nShieldedSettlementAnchorMaturity = 0;
     const int32_t validation_height = NextShieldedValidationHeight(*this);
     auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture(
         /*output_count=*/2,
@@ -1886,7 +1962,10 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_v2_egress_when_imported_receipt_is_mi
     settlement_anchor_source.receipt = settlement_anchor_source.witness.proof_receipts.back();
     settlement_anchor_source.witness.proof_receipts = {settlement_anchor_source.witness.proof_receipts.back()};
     BOOST_REQUIRE(settlement_anchor_source.witness.IsValid());
-    const auto settlement_anchor_fixture = BuildSettlementAnchorFromEgressFixture(settlement_anchor_source);
+    const auto settlement_anchor_fixture = BuildSettlementAnchorFromEgressFixture(
+        settlement_anchor_source,
+        &consensus,
+        validation_height);
 
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({settlement_anchor_fixture.tx}, script_pub_key);
@@ -1940,13 +2019,20 @@ BOOST_FIXTURE_TEST_CASE(block_rejects_v2_egress_when_shielded_scan_units_exceed_
         consensus,
         consensus.nMaxBlockShieldedScanUnits,
         consensus.nMaxBlockShieldedTreeUpdateUnits};
+    const ScopedConsensusU32Override restore_maturity{
+        consensus.nShieldedSettlementAnchorMaturity,
+        consensus.nShieldedSettlementAnchorMaturity};
     consensus.nMaxBlockShieldedScanUnits = 2;
+    consensus.nShieldedSettlementAnchorMaturity = 0;
+    const int32_t validation_height = NextShieldedValidationHeight(*this);
 
-    const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture(/*output_count=*/2);
+    const auto egress_fixture =
+        test::shielded::BuildV2EgressReceiptFixture(/*output_count=*/2, &consensus, validation_height);
     const auto usage = GetShieldedResourceUsage(egress_fixture.tx.GetShieldedBundle());
     BOOST_REQUIRE_EQUAL(usage.scan_units, 3U);
     BOOST_REQUIRE_EQUAL(usage.tree_update_units, 2U);
-    const auto settlement_anchor_fixture = BuildSettlementAnchorFromEgressFixture(egress_fixture);
+    const auto settlement_anchor_fixture =
+        BuildSettlementAnchorFromEgressFixture(egress_fixture, &consensus, validation_height);
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     const int active_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
 
@@ -1964,13 +2050,20 @@ BOOST_FIXTURE_TEST_CASE(block_rejects_v2_egress_when_shielded_tree_updates_excee
         consensus,
         consensus.nMaxBlockShieldedScanUnits,
         consensus.nMaxBlockShieldedTreeUpdateUnits};
+    const ScopedConsensusU32Override restore_maturity{
+        consensus.nShieldedSettlementAnchorMaturity,
+        consensus.nShieldedSettlementAnchorMaturity};
     consensus.nMaxBlockShieldedTreeUpdateUnits = 1;
+    consensus.nShieldedSettlementAnchorMaturity = 0;
+    const int32_t validation_height = NextShieldedValidationHeight(*this);
 
-    const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture(/*output_count=*/2);
+    const auto egress_fixture =
+        test::shielded::BuildV2EgressReceiptFixture(/*output_count=*/2, &consensus, validation_height);
     const auto usage = GetShieldedResourceUsage(egress_fixture.tx.GetShieldedBundle());
     BOOST_REQUIRE_EQUAL(usage.scan_units, 3U);
     BOOST_REQUIRE_EQUAL(usage.tree_update_units, 2U);
-    const auto settlement_anchor_fixture = BuildSettlementAnchorFromEgressFixture(egress_fixture);
+    const auto settlement_anchor_fixture =
+        BuildSettlementAnchorFromEgressFixture(egress_fixture, &consensus, validation_height);
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     const int active_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
 
@@ -2111,7 +2204,11 @@ BOOST_FIXTURE_TEST_CASE(block_rejects_shielded_account_registry_total_entry_limi
 
 BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_hybrid_v2_egress_after_settlement_anchor_and_evicts_it_after_reorg, TestChain100Setup)
 {
-    const auto& consensus = Params().GetConsensus();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const ScopedConsensusU32Override restore_maturity{
+        consensus.nShieldedSettlementAnchorMaturity,
+        consensus.nShieldedSettlementAnchorMaturity};
+    consensus.nShieldedSettlementAnchorMaturity = 0;
     const int32_t validation_height = NextShieldedValidationHeight(*this);
     const auto egress_fixture = test::shielded::BuildV2EgressHybridReceiptFixture(
         /*output_count=*/2,
@@ -2120,7 +2217,7 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_hybrid_v2_egress_after_settlement_anc
         &consensus,
         validation_height);
     const auto settlement_anchor_fixture =
-        test::shielded::BuildV2SettlementAnchorHybridReceiptFixture(egress_fixture);
+        BuildSettlementAnchorHybridFromEgressFixture(egress_fixture, &consensus, validation_height);
     const auto same_block_egress_fixture =
         test::shielded::BuildV2EgressHybridReceiptFixture(
             /*output_count=*/3,
@@ -2129,7 +2226,10 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_hybrid_v2_egress_after_settlement_anc
             &consensus,
             validation_height);
     const auto same_block_settlement_anchor_fixture =
-        test::shielded::BuildV2SettlementAnchorHybridReceiptFixture(same_block_egress_fixture);
+        BuildSettlementAnchorHybridFromEgressFixture(
+            same_block_egress_fixture,
+            &consensus,
+            validation_height);
     const auto egress_tx = MakeTransactionRef(egress_fixture.tx);
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
 
@@ -2187,13 +2287,17 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_hybrid_v2_egress_after_settlement_anc
         same_block.GetHash(),
         WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()));
     BOOST_CHECK(WITH_LOCK(cs_main,
-                          return m_node.chainman->IsShieldedSettlementAnchorValid(
+                          return !m_node.chainman->IsShieldedSettlementAnchorValid(
                               same_block_settlement_anchor_fixture.settlement_anchor_digest)));
 }
 
 BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_multi_receipt_hybrid_v2_egress_after_settlement_anchor_and_evicts_it_after_reorg, TestChain100Setup)
 {
-    const auto& consensus = Params().GetConsensus();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const ScopedConsensusU32Override restore_maturity{
+        consensus.nShieldedSettlementAnchorMaturity,
+        consensus.nShieldedSettlementAnchorMaturity};
+    consensus.nShieldedSettlementAnchorMaturity = 0;
     const int32_t validation_height = NextShieldedValidationHeight(*this);
     const auto egress_fixture = test::shielded::BuildV2EgressHybridReceiptFixture(
         /*output_count=*/2,
@@ -2202,7 +2306,7 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_multi_receipt_hybrid_v2_egress_after_
         &consensus,
         validation_height);
     const auto settlement_anchor_fixture =
-        test::shielded::BuildV2SettlementAnchorHybridReceiptFixture(egress_fixture);
+        BuildSettlementAnchorHybridFromEgressFixture(egress_fixture, &consensus, validation_height);
     const auto same_block_egress_fixture = test::shielded::BuildV2EgressHybridReceiptFixture(
         /*output_count=*/3,
         /*proof_receipt_count=*/2,
@@ -2210,7 +2314,10 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_multi_receipt_hybrid_v2_egress_after_
         &consensus,
         validation_height);
     const auto same_block_settlement_anchor_fixture =
-        test::shielded::BuildV2SettlementAnchorHybridReceiptFixture(same_block_egress_fixture);
+        BuildSettlementAnchorHybridFromEgressFixture(
+            same_block_egress_fixture,
+            &consensus,
+            validation_height);
     const auto egress_tx = MakeTransactionRef(egress_fixture.tx);
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
 
@@ -2268,7 +2375,7 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_multi_receipt_hybrid_v2_egress_after_
         same_block.GetHash(),
         WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()));
     BOOST_CHECK(WITH_LOCK(cs_main,
-                          return m_node.chainman->IsShieldedSettlementAnchorValid(
+                          return !m_node.chainman->IsShieldedSettlementAnchorValid(
                               same_block_settlement_anchor_fixture.settlement_anchor_digest)));
 }
 
@@ -2426,11 +2533,12 @@ BOOST_FIXTURE_TEST_CASE(tx_connects_reserve_bound_v2_settlement_anchor_and_rewin
 {
     const auto& consensus = Params().GetConsensus();
     const int32_t validation_height = NextShieldedValidationHeight(*this);
-    const auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
+    auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
         /*reserve_output_count=*/1,
         /*settlement_window=*/144,
         &consensus,
         validation_height);
+    AttachCoinbaseFeeCarrier(*this, rebalance_fixture.tx, m_coinbase_txns[0]);
     auto fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture(
         /*output_count=*/2,
         /*proof_receipt_count=*/1,
@@ -3702,9 +3810,111 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_v2_send_subminimum_ring_witness_with_
     BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
 }
 
-BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_v2_send_missing_smile_public_account_snapshot_entry, TestChain100Setup)
+BOOST_FIXTURE_TEST_CASE(tx_mempool_auto_recovers_v2_send_missing_smile_public_account_snapshot_entry, TestChain100Setup)
 {
-    const auto fixture = BuildV2DirectSendChainFixture(*this);
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t tip_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
+    const ScopedConsensusHeightOverride restore{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    consensus.nShieldedMatRiCTDisableHeight = tip_height + 2;
+
+    const auto fixture = BuildV2DirectSendChainFixture(*this, &consensus);
+    const auto missing_commitment =
+        WITH_LOCK(cs_main, return m_node.chainman->GetShieldedMerkleTree().CommitmentAt(0));
+    BOOST_REQUIRE(missing_commitment.has_value());
+    BOOST_REQUIRE(WITH_LOCK(cs_main,
+                            return RemoveShieldedSmilePublicAccountForTest(*m_node.chainman,
+                                                                           *missing_commitment)));
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedSmilePublicAccounts().count(
+                                    *missing_commitment)),
+                      0U);
+
+    const MempoolAcceptResult result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
+
+    BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_CHECK(result.m_state.IsValid());
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
+                                    ShieldedAutoRepairKind::STATE_REBUILD)),
+                      1U);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedSmilePublicAccounts().count(
+                                    *missing_commitment)),
+                      1U);
+
+    const MempoolAcceptResult retried_result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
+    BOOST_CHECK(retried_result.m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_CHECK(retried_result.m_state.IsValid());
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
+                                    ShieldedAutoRepairKind::STATE_REBUILD)),
+                      1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(block_auto_recovers_v2_send_missing_account_leaf_snapshot_entry, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t tip_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
+    const ScopedConsensusHeightOverride restore{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    consensus.nShieldedMatRiCTDisableHeight = tip_height + 2;
+
+    const auto fixture = BuildV2DirectSendChainFixture(*this, &consensus);
+    const auto missing_commitment =
+        WITH_LOCK(cs_main, return m_node.chainman->GetShieldedMerkleTree().CommitmentAt(0));
+    BOOST_REQUIRE(missing_commitment.has_value());
+    BOOST_REQUIRE(WITH_LOCK(cs_main,
+                            return RemoveShieldedAccountLeafCommitmentForTest(*m_node.chainman,
+                                                                              *missing_commitment)));
+    BOOST_REQUIRE(WITH_LOCK(cs_main, return m_node.chainman->m_script_check_queue_enabled));
+    BOOST_REQUIRE(WITH_LOCK(cs_main, return m_node.chainman->GetShieldedProofCheckQueue().HasThreads()));
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedAccountLeafCommitments().count(
+                                    *missing_commitment)),
+                      0U);
+
+    const int active_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock accepted_block = CreateAndProcessBlock({fixture.built.tx}, script_pub_key);
+    const uint256 accepted_hash = accepted_block.GetHash();
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height()),
+                      active_height + 1);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveTip()->GetBlockHash()),
+                      accepted_hash);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
+                                    ShieldedAutoRepairKind::STATE_REBUILD)),
+                      1U);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedAccountLeafCommitments().count(
+                                    *missing_commitment)),
+                      1U);
+    CBlockIndex* accepted_index =
+        WITH_LOCK(cs_main, return m_node.chainman->m_blockman.LookupBlockIndex(accepted_hash));
+    BOOST_REQUIRE(accepted_index != nullptr);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return accepted_index->nStatus & BLOCK_FAILED_MASK), 0U);
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(cs_main, return m_node.chainman->m_failed_blocks.count(accepted_index)), 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(tx_mempool_auto_recovery_serializes_concurrent_inbound_v2_send_requests,
+                        TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t tip_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
+    const ScopedConsensusHeightOverride restore{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    consensus.nShieldedMatRiCTDisableHeight = tip_height + 2;
+
+    const auto fixture = BuildV2DirectSendChainFixture(*this, &consensus);
     const auto missing_commitment =
         WITH_LOCK(cs_main, return m_node.chainman->GetShieldedMerkleTree().CommitmentAt(0));
     BOOST_REQUIRE(missing_commitment.has_value());
@@ -3712,32 +3922,70 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_v2_send_missing_smile_public_account_
                             return RemoveShieldedSmilePublicAccountForTest(*m_node.chainman,
                                                                            *missing_commitment)));
 
-    const MempoolAcceptResult result = WITH_LOCK(
-        cs_main,
-        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
+    std::mutex hook_mutex;
+    std::condition_variable hook_cv;
+    bool hook_entered{false};
+    bool release_hook{false};
 
-    BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::INVALID);
-    BOOST_CHECK(result.m_state.IsInvalid());
-    BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "bad-smile2-ring-member-account");
-    BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
-}
+    WITH_LOCK(cs_main,
+              m_node.chainman->SetShieldedAutoRepairHookForTest(
+                  [&](ShieldedAutoRepairKind kind) {
+                      if (kind != ShieldedAutoRepairKind::STATE_REBUILD) return;
+                      std::unique_lock<std::mutex> lock{hook_mutex};
+                      hook_entered = true;
+                      hook_cv.notify_all();
+                      hook_cv.wait(lock, [&] { return release_hook; });
+                  }));
 
-BOOST_FIXTURE_TEST_CASE(block_rejects_v2_send_missing_account_leaf_snapshot_entry, TestChain100Setup)
-{
-    const auto fixture = BuildV2DirectSendChainFixture(*this);
-    const auto missing_commitment =
-        WITH_LOCK(cs_main, return m_node.chainman->GetShieldedMerkleTree().CommitmentAt(0));
-    BOOST_REQUIRE(missing_commitment.has_value());
-    BOOST_REQUIRE(WITH_LOCK(cs_main,
-                            return RemoveShieldedAccountLeafCommitmentForTest(*m_node.chainman,
-                                                                              *missing_commitment)));
+    std::promise<MempoolAcceptResult> first_promise;
+    auto first_future = first_promise.get_future();
+    std::thread first_thread([&] {
+        first_promise.set_value(WITH_LOCK(
+            cs_main,
+            return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx),
+                                                       /*test_accept=*/true)));
+    });
 
-    const int active_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
-    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
-    const CBlock block =
-        CreateBlock({fixture.built.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
-    ExpectBlockRejected(*this, block, "bad-smile2-ring-member-account");
-    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height()), active_height);
+    {
+        std::unique_lock<std::mutex> lock{hook_mutex};
+        BOOST_REQUIRE(hook_cv.wait_for(lock, std::chrono::seconds{5}, [&] { return hook_entered; }));
+    }
+
+    std::promise<MempoolAcceptResult> second_promise;
+    auto second_future = second_promise.get_future();
+    std::thread second_thread([&] {
+        second_promise.set_value(WITH_LOCK(
+            cs_main,
+            return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx),
+                                                       /*test_accept=*/true)));
+    });
+
+    BOOST_CHECK(second_future.wait_for(std::chrono::milliseconds{100}) == std::future_status::timeout);
+
+    {
+        std::lock_guard<std::mutex> lock{hook_mutex};
+        release_hook = true;
+    }
+    hook_cv.notify_all();
+
+    first_thread.join();
+    second_thread.join();
+    WITH_LOCK(cs_main, m_node.chainman->SetShieldedAutoRepairHookForTest({}));
+
+    const MempoolAcceptResult first_result = first_future.get();
+    const MempoolAcceptResult second_result = second_future.get();
+    BOOST_CHECK(first_result.m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_CHECK(first_result.m_state.IsValid());
+    BOOST_CHECK(second_result.m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_CHECK(second_result.m_state.IsValid());
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
+                                    ShieldedAutoRepairKind::STATE_REBUILD)),
+                      1U);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedSmilePublicAccounts().count(
+                                    *missing_commitment)),
+                      1U);
 }
 
 BOOST_FIXTURE_TEST_CASE(tx_mempool_activation_gates_noncanonical_smile_v2_send, TestChain100Setup)
@@ -3819,14 +4067,13 @@ BOOST_FIXTURE_TEST_CASE(block_rejects_noncanonical_smile_v2_send_at_codec_disabl
 
 BOOST_FIXTURE_TEST_CASE(tx_mempool_activation_gates_legacy_smile_anonset_binding, TestChain100Setup)
 {
-    const auto fixture = BuildV2DirectSendChainFixture(*this);
-
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
     const int32_t tip_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
     const ScopedConsensusHeightOverride restore{
         consensus.nShieldedMatRiCTDisableHeight,
         consensus.nShieldedMatRiCTDisableHeight};
-    consensus.nShieldedMatRiCTDisableHeight = tip_height + 2;
+    consensus.nShieldedMatRiCTDisableHeight = tip_height + 3;
+    const auto fixture = BuildV2DirectSendChainFixture(*this, &consensus);
 
     const auto pre_activation = WITH_LOCK(
         cs_main,
@@ -3837,7 +4084,7 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_activation_gates_legacy_smile_anonset_binding
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({}, script_pub_key);
     BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height()),
-                      tip_height + 1);
+                      tip_height + 2);
 
     const auto post_activation = WITH_LOCK(
         cs_main,
@@ -4125,6 +4372,52 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_postfork_mixed_direct_v2_send, TestCh
     BOOST_CHECK_MESSAGE(result.m_state.IsInvalid(), result.m_state.GetRejectReason());
     BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "bad-shielded-proof");
     BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    tx_mempool_rejects_postfork_mixed_direct_v2_send_after_single_auto_rebuild_retry,
+    TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t tip_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
+    const ScopedConsensusHeightOverride restore{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    consensus.nShieldedMatRiCTDisableHeight = tip_height + 1;
+    auto fixture = BuildV2DirectSendChainFixture(*this,
+                                                 &consensus,
+                                                 consensus.nShieldedMatRiCTDisableHeight,
+                                                 V2_DIRECT_SEND_FEE);
+    fixture.built.tx.vout.emplace_back(25'000, GetScriptForDestination(WitnessV2P2MR(uint256::ONE)));
+    m_node.mempool->PrioritiseTransaction(fixture.built.tx.GetHash(), COIN);
+
+    const auto result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
+
+    BOOST_CHECK_MESSAGE(result.m_result_type == MempoolAcceptResult::ResultType::INVALID,
+                        result.m_state.GetRejectReason());
+    BOOST_CHECK_MESSAGE(result.m_state.IsInvalid(), result.m_state.GetRejectReason());
+    BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "bad-shielded-proof");
+    BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
+                                    ShieldedAutoRepairKind::STATE_REBUILD)),
+                      1U);
+
+    const auto retried_result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
+
+    BOOST_CHECK_MESSAGE(retried_result.m_result_type == MempoolAcceptResult::ResultType::INVALID,
+                        retried_result.m_state.GetRejectReason());
+    BOOST_CHECK_MESSAGE(retried_result.m_state.IsInvalid(), retried_result.m_state.GetRejectReason());
+    BOOST_CHECK_EQUAL(retried_result.m_state.GetRejectReason(), "bad-shielded-proof");
+    BOOST_CHECK(retried_result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
+                                    ShieldedAutoRepairKind::STATE_REBUILD)),
+                      1U);
 }
 
 BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_postfork_legacy_compact_direct_send_encoding, TestChain100Setup)
@@ -4580,19 +4873,20 @@ BOOST_FIXTURE_TEST_CASE(block_rejects_v2_ingress_small_anonymity_pool_after_acti
 
 BOOST_FIXTURE_TEST_CASE(block_rejects_legacy_smile_v2_send_at_anonset_binding_height, TestChain100Setup)
 {
-    const auto fixture = BuildV2DirectSendChainFixture(*this);
-
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
     const int32_t active_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
     const ScopedConsensusHeightOverride restore{
         consensus.nShieldedMatRiCTDisableHeight,
         consensus.nShieldedMatRiCTDisableHeight};
-    consensus.nShieldedMatRiCTDisableHeight = active_height + 1;
+    consensus.nShieldedMatRiCTDisableHeight = active_height + 3;
+    const auto fixture = BuildV2DirectSendChainFixture(*this, &consensus);
 
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({}, script_pub_key);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height()), active_height + 2);
     const CBlock block = CreateBlock({fixture.built.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
     ExpectBlockRejected(*this, block, "bad-shielded-v2-family-wire");
-    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height()), active_height);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height()), active_height + 2);
 }
 
 // Generate a number of random, nonexistent outpoints.

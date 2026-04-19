@@ -3,15 +3,20 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
 #include <chainparams.h>
-#include <dbwrapper.h>
-#include <consensus/validation.h>
 #include <addresstype.h>
+#include <consensus/validation.h>
+#include <crypto/chacha20poly1305.h>
+#include <dbwrapper.h>
 #include <kernel/disconnected_transactions.h>
+#include <node/chainstate.h>
 #include <node/chainstatemanager_args.h>
 #include <node/kernel_notifications.h>
 #include <node/utxo_snapshot.h>
 #include <random.h>
 #include <rpc/blockchain.h>
+#include <script/sign.h>
+#include <script/signingprovider.h>
+#include <shielded/account_registry.h>
 #include <shielded/validation.h>
 #include <sync.h>
 #include <test/util/chainstate.h>
@@ -32,7 +37,7 @@
 
 #include <tinyformat.h>
 
-#include <algorithm>
+#include <map>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -42,6 +47,9 @@ using node::KernelNotifications;
 using node::SnapshotMetadata;
 
 namespace {
+
+constexpr CAmount CHAINSTATE_REBALANCE_FEE{40'000};
+constexpr CAmount CHAINSTATE_SHIELD_ONLY_FEE{100'000};
 
 int32_t NextShieldedFixtureHeight(const ChainstateManager& chainman)
 {
@@ -53,15 +61,74 @@ const Consensus::Params& ShieldedFixtureConsensus()
     return Params().GetConsensus();
 }
 
-auto BuildChainstateRebalanceFixture(const ChainstateManager& chainman,
+void ReSignCoinbaseSpend(TestChain100Setup& setup,
+                         CMutableTransaction& tx,
+                         const CTransactionRef& funding_tx)
+{
+    FillableSigningProvider keystore;
+    BOOST_REQUIRE(keystore.AddKey(setup.coinbaseKey));
+    BOOST_REQUIRE_LT(0U, funding_tx->vout.size());
+
+    std::map<COutPoint, Coin> input_coins;
+    input_coins.emplace(COutPoint{funding_tx->GetHash(), 0},
+                        Coin{funding_tx->vout[0], /*nHeight=*/0, /*fCoinBase=*/true});
+
+    std::map<int, bilingual_str> input_errors;
+    BOOST_REQUIRE(SignTransaction(tx, &keystore, input_coins, SIGHASH_ALL, input_errors));
+}
+
+void AttachCoinbaseFeeCarrier(TestChain100Setup& setup,
+                              CMutableTransaction& tx,
+                              const CTransactionRef& funding_tx,
+                              CAmount fee = CHAINSTATE_REBALANCE_FEE)
+{
+    BOOST_REQUIRE_LT(0U, funding_tx->vout.size());
+    BOOST_REQUIRE_GT(funding_tx->vout[0].nValue, fee);
+
+    tx.vin = {CTxIn{COutPoint{funding_tx->GetHash(), 0}}};
+    tx.vout = {CTxOut{funding_tx->vout[0].nValue - fee,
+                      GetScriptForDestination(WitnessV2P2MR(uint256::ONE))}};
+
+    ReSignCoinbaseSpend(setup, tx, funding_tx);
+}
+
+CMutableTransaction BuildLegacyShieldOnlyTx(TestChain100Setup& setup,
+                                            const CTransactionRef& funding_tx,
+                                            const uint256& merkle_anchor,
+                                            CAmount fee = CHAINSTATE_SHIELD_ONLY_FEE)
+{
+    BOOST_REQUIRE_GT(funding_tx->vout.size(), 0U);
+    BOOST_REQUIRE_GT(funding_tx->vout[0].nValue, fee);
+    BOOST_REQUIRE(!merkle_anchor.IsNull());
+
+    CMutableTransaction tx;
+    tx.vin = {CTxIn{COutPoint{funding_tx->GetHash(), 0}}};
+
+    CShieldedOutput output;
+    output.note_commitment = GetRandHash();
+    output.merkle_anchor = merkle_anchor;
+    output.encrypted_note.aead_ciphertext.assign(AEADChaCha20Poly1305::EXPANSION, 0x00);
+    tx.shielded_bundle.shielded_outputs.push_back(output);
+    tx.shielded_bundle.value_balance = -(funding_tx->vout[0].nValue - fee);
+
+    ReSignCoinbaseSpend(setup, tx, funding_tx);
+    return tx;
+}
+
+auto BuildChainstateRebalanceFixture(TestChain100Setup& setup,
+                                     const ChainstateManager& chainman,
                                      size_t reserve_output_count = 1,
                                      uint32_t settlement_window = 144)
 {
-    return test::shielded::BuildV2RebalanceFixture(
+    BOOST_REQUIRE_GT(setup.m_coinbase_txns.size(), 0U);
+
+    auto fixture = test::shielded::BuildV2RebalanceFixture(
         reserve_output_count,
         settlement_window,
         &ShieldedFixtureConsensus(),
         NextShieldedFixtureHeight(chainman));
+    AttachCoinbaseFeeCarrier(setup, fixture.tx, setup.m_coinbase_txns[0]);
+    return fixture;
 }
 
 auto BuildChainstateSettlementAnchorReceiptFixture(const ChainstateManager& chainman,
@@ -857,7 +924,6 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_shielded_state_when_commitmen
     const uint256 fake_commitment = GetRandHash();
     const auto settlement_anchor_fixture = BuildChainstateSettlementAnchorReceiptFixture(chainman);
     const fs::path shielded_section_path = m_args.GetDataDirNet() / "shielded_section.dat";
-    const fs::path commitment_index_db_path = m_args.GetDataDirNet() / "shielded_state" / "commitments";
     auto simulate_node_restart = [&]() -> ChainstateManager& {
         ChainstateManager& current_chainman = *Assert(m_node.chainman);
 
@@ -921,7 +987,6 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_shielded_state_when_commitmen
         BOOST_REQUIRE(chainman.HasShieldedState());
         BOOST_CHECK_EQUAL(chainman.GetShieldedMerkleTree().Size(), 1U);
         BOOST_CHECK(chainman.GetShieldedMerkleTree().HasCommitmentIndex());
-        BOOST_CHECK(!fs::exists(commitment_index_db_path));
         BOOST_CHECK(chainman.IsShieldedSettlementAnchorValid(
             settlement_anchor_fixture.settlement_anchor_digest));
 
@@ -931,8 +996,6 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_shielded_state_when_commitmen
     }
 
     ChainstateManager& chainman_restarted = simulate_node_restart();
-    BOOST_CHECK(!fs::exists(commitment_index_db_path));
-
     this->LoadVerifyActivateChainstate();
 
     {
@@ -951,7 +1014,6 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_version4_snapshot_settlement_a
     ChainstateManager& chainman = *Assert(m_node.chainman);
     const auto settlement_anchor_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture();
     const fs::path shielded_section_path = m_args.GetDataDirNet() / "shielded_section_v4.dat";
-    const fs::path commitment_index_db_path = m_args.GetDataDirNet() / "shielded_state" / "commitments";
     auto simulate_node_restart = [&]() -> ChainstateManager& {
         ChainstateManager& current_chainman = *Assert(m_node.chainman);
 
@@ -1011,14 +1073,11 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_version4_snapshot_settlement_a
         BOOST_REQUIRE(chainman.HasShieldedState());
         BOOST_CHECK_EQUAL(chainman.GetShieldedMerkleTree().Size(), 0U);
         BOOST_CHECK(chainman.GetShieldedMerkleTree().HasCommitmentIndex());
-        BOOST_CHECK(!fs::exists(commitment_index_db_path));
         BOOST_CHECK(chainman.IsShieldedSettlementAnchorValid(
             settlement_anchor_fixture.settlement_anchor_digest));
     }
 
     ChainstateManager& chainman_restarted = simulate_node_restart();
-    BOOST_CHECK(!fs::exists(commitment_index_db_path));
-
     this->LoadVerifyActivateChainstate();
 
     {
@@ -1035,7 +1094,8 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_version4_snapshot_settlement_a
     }
 }
 
-BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_version5_snapshot_account_registry_state, PersistedTestChain100Setup)
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_chain_equivalent_snapshot_account_registry_state,
+                        PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
     const fs::path shielded_section_path = m_args.GetDataDirNet() / "shielded_section_v5_registry.dat";
@@ -1076,18 +1136,135 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_version5_snapshot_account_regi
         return *Assert(m_node.chainman);
     };
 
-    shielded::registry::ShieldedAccountRegistryState expected_registry;
-    const auto account_a = test::shielded::MakeDeterministicCompactPublicAccount(/*seed=*/0x41, /*value=*/5100);
-    const auto account_b = test::shielded::MakeDeterministicCompactPublicAccount(/*seed=*/0x42, /*value=*/5200);
-    const auto account_c = test::shielded::MakeDeterministicCompactPublicAccount(/*seed=*/0x43, /*value=*/5300);
-    const std::vector<shielded::registry::ShieldedAccountLeaf> account_leaves{
-        *test::shielded::BuildDirectAccountLeaf(smile2::ComputeCompactPublicAccountHash(account_a), account_a),
-        *test::shielded::BuildDirectAccountLeaf(smile2::ComputeCompactPublicAccountHash(account_b), account_b),
-        *test::shielded::BuildDirectAccountLeaf(smile2::ComputeCompactPublicAccountHash(account_c), account_c),
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman, /*reserve_output_count=*/3);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
+
+    shielded::registry::ShieldedAccountRegistrySnapshot snapshot;
+    uint256 expected_registry_root;
+    size_t expected_registry_size{0};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        const CBlockIndex* const tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip != nullptr);
+        const auto exported_snapshot =
+            chainman.ExportShieldedAccountRegistrySnapshot(chainman.ActiveChainstate(), tip);
+        BOOST_REQUIRE(exported_snapshot.has_value());
+        snapshot = *exported_snapshot;
+        BOOST_REQUIRE(snapshot.IsValid());
+        expected_registry_root = chainman.GetShieldedAccountRegistryRoot();
+        expected_registry_size = chainman.GetShieldedAccountRegistryEntryCount();
+    }
+
+    {
+        AutoFile outfile{fsbridge::fopen(shielded_section_path, "wb")};
+        BOOST_REQUIRE(!outfile.IsNull());
+        for (const auto& entry : snapshot.entries) {
+            outfile << entry;
+        }
+        BOOST_REQUIRE_EQUAL(outfile.fclose(), 0);
+    }
+
+    node::ShieldedSnapshotSectionHeader header;
+    header.m_snapshot_version = node::SnapshotMetadata::CURRENT_VERSION;
+    header.m_account_registry_entry_count = snapshot.entries.size();
+
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* const tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip != nullptr);
+
+        AutoFile infile{fsbridge::fopen(shielded_section_path, "rb")};
+        BOOST_REQUIRE(!infile.IsNull());
+        BOOST_REQUIRE(chainman.LoadShieldedSnapshotSection(infile, header, tip));
+        BOOST_REQUIRE(chainman.HasShieldedState());
+        BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryEntryCount(), expected_registry_size);
+        BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryRoot(), expected_registry_root);
+        const auto state_commitment = chainman.GetShieldedStateCommitment();
+        BOOST_REQUIRE(state_commitment.has_value());
+        BOOST_CHECK_EQUAL(state_commitment->account_registry_root, expected_registry_root);
+    }
+
+    ChainstateManager& chainman_restarted = simulate_node_restart();
+
+    this->LoadVerifyActivateChainstate();
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryEntryCount(),
+                          expected_registry_size);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(),
+                          expected_registry_root);
+        const auto state_commitment = chainman_restarted.GetShieldedStateCommitment();
+        BOOST_REQUIRE(state_commitment.has_value());
+        BOOST_CHECK_EQUAL(state_commitment->account_registry_root, expected_registry_root);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    chainstatemanager_rebuilds_non_chain_equivalent_snapshot_account_registry_state_on_restart,
+    PersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const fs::path shielded_section_path =
+        m_args.GetDataDirNet() / "shielded_section_non_chain_registry.dat";
+    auto simulate_node_restart = [&]() -> ChainstateManager& {
+        ChainstateManager& current_chainman = *Assert(m_node.chainman);
+
+        for (Chainstate* cs : current_chainman.GetAll()) {
+            LOCK(::cs_main);
+            cs->ForceFlushStateToDisk();
+        }
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            current_chainman.ResetChainstates();
+            BOOST_CHECK_EQUAL(current_chainman.GetAll().size(), 0);
+            m_node.notifications = std::make_unique<KernelNotifications>(
+                Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+            const ChainstateManager::Options chainman_opts{
+                .chainparams = ::Params(),
+                .datadir = current_chainman.m_options.datadir,
+                .notifications = *m_node.notifications,
+                .signals = m_node.validation_signals.get(),
+            };
+            const BlockManager::Options blockman_opts{
+                .chainparams = chainman_opts.chainparams,
+                .blocks_dir = m_args.GetBlocksDirPath(),
+                .notifications = chainman_opts.notifications,
+                .block_tree_db_params = DBParams{
+                    .path = current_chainman.m_options.datadir / "blocks" / "index",
+                    .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                    .memory_only = m_block_tree_db_in_memory,
+                },
+            };
+            m_node.chainman.reset();
+            m_node.chainman = std::make_unique<ChainstateManager>(
+                *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        }
+        return *Assert(m_node.chainman);
     };
-    BOOST_REQUIRE(expected_registry.Append(
+
+    shielded::registry::ShieldedAccountRegistryState synthetic_registry;
+    const auto account_a =
+        test::shielded::MakeDeterministicCompactPublicAccount(/*seed=*/0x41, /*value=*/5100);
+    const auto account_b =
+        test::shielded::MakeDeterministicCompactPublicAccount(/*seed=*/0x42, /*value=*/5200);
+    const auto account_c =
+        test::shielded::MakeDeterministicCompactPublicAccount(/*seed=*/0x43, /*value=*/5300);
+    const std::vector<shielded::registry::ShieldedAccountLeaf> account_leaves{
+        *test::shielded::BuildDirectAccountLeaf(smile2::ComputeCompactPublicAccountHash(account_a),
+                                                account_a),
+        *test::shielded::BuildDirectAccountLeaf(smile2::ComputeCompactPublicAccountHash(account_b),
+                                                account_b),
+        *test::shielded::BuildDirectAccountLeaf(smile2::ComputeCompactPublicAccountHash(account_c),
+                                                account_c),
+    };
+    BOOST_REQUIRE(synthetic_registry.Append(
         Span<const shielded::registry::ShieldedAccountLeaf>{account_leaves.data(), account_leaves.size()}));
-    const auto snapshot = expected_registry.ExportSnapshot();
+    const auto snapshot = synthetic_registry.ExportSnapshot();
     BOOST_REQUIRE(snapshot.IsValid());
 
     {
@@ -1113,10 +1290,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_version5_snapshot_account_regi
         BOOST_REQUIRE(chainman.LoadShieldedSnapshotSection(infile, header, tip));
         BOOST_REQUIRE(chainman.HasShieldedState());
         BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryEntryCount(), snapshot.entries.size());
-        BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryRoot(), expected_registry.Root());
-        const auto state_commitment = chainman.GetShieldedStateCommitment();
-        BOOST_REQUIRE(state_commitment.has_value());
-        BOOST_CHECK_EQUAL(state_commitment->account_registry_root, expected_registry.Root());
+        BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryRoot(), synthetic_registry.Root());
     }
 
     ChainstateManager& chainman_restarted = simulate_node_restart();
@@ -1126,8 +1300,10 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_version5_snapshot_account_regi
     {
         LOCK(::cs_main);
         BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
-        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryEntryCount(), snapshot.entries.size());
-        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(), expected_registry.Root());
+        shielded::registry::ShieldedAccountRegistryState expected_registry;
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryEntryCount(), 0U);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(),
+                          expected_registry.Root());
         const auto state_commitment = chainman_restarted.GetShieldedStateCommitment();
         BOOST_REQUIRE(state_commitment.has_value());
         BOOST_CHECK_EQUAL(state_commitment->account_registry_root, expected_registry.Root());
@@ -1137,7 +1313,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_version5_snapshot_account_regi
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_retains_commitment_index_when_configured, PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
     const fs::path commitment_index_db_path = m_args.GetDataDirNet() / "shielded_state" / "commitments";
     auto simulate_node_restart = [&](bool retain_commitment_index) -> ChainstateManager& {
         ChainstateManager& current_chainman = *Assert(m_node.chainman);
@@ -1221,8 +1397,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_retains_commitment_index_when_configur
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_persisted_netting_manifest_state, PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
-    const fs::path commitment_index_db_path = m_args.GetDataDirNet() / "shielded_state" / "commitments";
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
     auto simulate_node_restart = [&]() -> ChainstateManager& {
         ChainstateManager& current_chainman = *Assert(m_node.chainman);
 
@@ -1281,8 +1456,6 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_persisted_netting_manifest_sta
     }
 
     ChainstateManager& chainman_restarted = simulate_node_restart();
-    BOOST_CHECK(!fs::exists(commitment_index_db_path));
-
     this->LoadVerifyActivateChainstate();
 
     {
@@ -1305,7 +1478,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_persisted_netting_manifest_sta
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_persisted_account_registry_state, PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
     const fs::path datadir = chainman.m_options.datadir;
     auto simulate_node_restart = [&]() -> ChainstateManager& {
         ChainstateManager& current_chainman = *Assert(m_node.chainman);
@@ -1347,23 +1520,15 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_persisted_account_registry_sta
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
 
-    shielded::registry::ShieldedAccountRegistryState expected_registry;
-    for (size_t output_index = 0; output_index < rebalance_fixture.reserve_outputs.size(); ++output_index) {
-        const auto account_leaf = shielded::registry::BuildRebalanceAccountLeaf(
-            rebalance_fixture.reserve_outputs[output_index],
-            rebalance_fixture.manifest_id);
-        BOOST_REQUIRE(account_leaf.has_value());
-        BOOST_REQUIRE(expected_registry.Append(
-            Span<const shielded::registry::ShieldedAccountLeaf>{&*account_leaf, 1}));
-    }
-
+    uint256 expected_registry_root;
+    uint64_t expected_registry_size{0};
     uint256 expected_state_commitment_hash;
     {
         LOCK(::cs_main);
         BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
-        BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryEntryCount(),
-                          rebalance_fixture.reserve_outputs.size());
-        BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryRoot(), expected_registry.Root());
+        expected_registry_size = chainman.GetShieldedAccountRegistryEntryCount();
+        expected_registry_root = chainman.GetShieldedAccountRegistryRoot();
+        BOOST_CHECK_EQUAL(expected_registry_size, rebalance_fixture.reserve_outputs.size());
         const auto state_commitment = chainman.GetShieldedStateCommitment();
         BOOST_REQUIRE(state_commitment.has_value());
         expected_state_commitment_hash =
@@ -1378,8 +1543,8 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_persisted_account_registry_sta
         LOCK(::cs_main);
         BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
         BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryEntryCount(),
-                          rebalance_fixture.reserve_outputs.size());
-        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(), expected_registry.Root());
+                          expected_registry_size);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(), expected_registry_root);
         const auto state_commitment = chainman_restarted.GetShieldedStateCommitment();
         BOOST_REQUIRE(state_commitment.has_value());
         BOOST_CHECK_EQUAL(shielded::registry::ComputeShieldedStateCommitmentHash(*state_commitment),
@@ -1387,12 +1552,11 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_reloads_persisted_account_registry_sta
     }
 }
 
-BOOST_FIXTURE_TEST_CASE(chainstatemanager_refreshes_anchor_history_when_commitment_index_is_rebuilt,
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_anchor_history_when_commitment_index_is_restored,
                         PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
-    const uint256 historical_anchor = shielded::ShieldedMerkleTree{}.Root();
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
     auto simulate_node_restart = [&]() -> ChainstateManager& {
         ChainstateManager& current_chainman = *Assert(m_node.chainman);
 
@@ -1433,10 +1597,11 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_refreshes_anchor_history_when_commitme
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
 
+    uint256 expected_current_root;
+    uint256 expected_previous_root;
     {
         LOCK(::cs_main);
         BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
-        BOOST_CHECK(chainman.IsShieldedAnchorValid(historical_anchor));
 
         shielded::ShieldedMerkleTree persisted_tree;
         std::vector<uint256> persisted_anchor_roots;
@@ -1453,11 +1618,21 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_refreshes_anchor_history_when_commitme
                                                           persisted_pool_balance,
                                                           persisted_commitment_index_digest,
                                                           persisted_account_registry_snapshot));
-        BOOST_REQUIRE_GT(persisted_anchor_roots.size(), 1U);
-        persisted_anchor_roots.assign(1, chainman.GetShieldedMerkleTree().Root());
-        persisted_commitment_index_digest = GetRandHash();
+        BOOST_REQUIRE_GE(persisted_anchor_roots.size(), 2U);
+        expected_current_root = persisted_tree.Root();
+        BOOST_REQUIRE(!expected_current_root.IsNull());
+        const auto previous_root_it = std::find_if(
+            persisted_anchor_roots.begin(),
+            persisted_anchor_roots.end(),
+            [&](const uint256& candidate) { return candidate != expected_current_root; });
+        BOOST_REQUIRE(previous_root_it != persisted_anchor_roots.end());
+        expected_previous_root = *previous_root_it;
+        BOOST_CHECK(chainman.IsShieldedAnchorValid(expected_current_root));
+        BOOST_CHECK(chainman.IsShieldedAnchorValid(expected_previous_root));
+
+        const std::vector<uint256> stale_anchor_roots{expected_current_root};
         BOOST_REQUIRE(chainman.WritePersistedShieldedState(persisted_tree,
-                                                           persisted_anchor_roots,
+                                                           stale_anchor_roots,
                                                            persisted_tip_hash,
                                                            persisted_tip_height,
                                                            persisted_pool_balance,
@@ -1473,9 +1648,50 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_refreshes_anchor_history_when_commitme
         LOCK(::cs_main);
         BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
         BOOST_CHECK(chainman_restarted.GetShieldedMerkleTree().HasCommitmentIndex());
-        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedMerkleTree().Size(),
-                          rebalance_fixture.reserve_outputs.size());
-        BOOST_CHECK(chainman_restarted.IsShieldedAnchorValid(historical_anchor));
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedMerkleTree().Root(), expected_current_root);
+        BOOST_CHECK(chainman_restarted.IsShieldedAnchorValid(expected_current_root));
+        BOOST_CHECK(chainman_restarted.IsShieldedAnchorValid(expected_previous_root));
+
+        shielded::ShieldedMerkleTree restored_tree;
+        std::vector<uint256> restored_anchor_roots;
+        uint256 restored_tip_hash;
+        int32_t restored_tip_height{-1};
+        CAmount restored_pool_balance{0};
+        std::optional<uint256> restored_commitment_index_digest;
+        std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
+            restored_account_registry_snapshot;
+        BOOST_REQUIRE(chainman_restarted.ReadPersistedShieldedState(
+            restored_tree,
+            restored_anchor_roots,
+            restored_tip_hash,
+            restored_tip_height,
+            restored_pool_balance,
+            restored_commitment_index_digest,
+            restored_account_registry_snapshot));
+        BOOST_CHECK_EQUAL(restored_tree.Root(), expected_current_root);
+        BOOST_REQUIRE_GE(restored_anchor_roots.size(), 2U);
+        BOOST_CHECK_EQUAL(restored_anchor_roots[0], expected_current_root);
+        BOOST_CHECK_EQUAL(restored_anchor_roots[1], expected_previous_root);
+        const auto restored_commitment = chainman_restarted.GetShieldedMerkleTree().CommitmentAt(0);
+        BOOST_REQUIRE(restored_commitment.has_value());
+        BOOST_CHECK_EQUAL(*restored_commitment, rebalance_fixture.reserve_outputs.front().note_commitment);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_repairs_in_memory_anchor_history_from_active_chain,
+                        PersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
+
+    uint256 expected_current_root;
+    uint256 expected_previous_root;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
 
         shielded::ShieldedMerkleTree persisted_tree;
         std::vector<uint256> persisted_anchor_roots;
@@ -1485,17 +1701,326 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_refreshes_anchor_history_when_commitme
         std::optional<uint256> persisted_commitment_index_digest;
         std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
             persisted_account_registry_snapshot;
-        BOOST_REQUIRE(chainman_restarted.ReadPersistedShieldedState(persisted_tree,
-                                                                    persisted_anchor_roots,
-                                                                    persisted_tip_hash,
-                                                                    persisted_tip_height,
-                                                                    persisted_pool_balance,
-                                                                    persisted_commitment_index_digest,
-                                                                    persisted_account_registry_snapshot));
-        BOOST_CHECK_GT(persisted_anchor_roots.size(), 1U);
-        BOOST_CHECK(std::find(persisted_anchor_roots.begin(),
-                              persisted_anchor_roots.end(),
-                              historical_anchor) != persisted_anchor_roots.end());
+        BOOST_REQUIRE(chainman.ReadPersistedShieldedState(persisted_tree,
+                                                          persisted_anchor_roots,
+                                                          persisted_tip_hash,
+                                                          persisted_tip_height,
+                                                          persisted_pool_balance,
+                                                          persisted_commitment_index_digest,
+                                                          persisted_account_registry_snapshot));
+        BOOST_REQUIRE_GE(persisted_anchor_roots.size(), 2U);
+        expected_current_root = persisted_tree.Root();
+        BOOST_REQUIRE(!expected_current_root.IsNull());
+        const auto previous_root_it = std::find_if(
+            persisted_anchor_roots.begin(),
+            persisted_anchor_roots.end(),
+            [&](const uint256& candidate) { return candidate != expected_current_root; });
+        BOOST_REQUIRE(previous_root_it != persisted_anchor_roots.end());
+        expected_previous_root = *previous_root_it;
+
+        chainman.SetShieldedAnchorRootsForTest({expected_current_root});
+        BOOST_CHECK(!chainman.IsShieldedAnchorValid(expected_previous_root));
+
+        BOOST_REQUIRE(chainman.RepairShieldedAnchorHistoryFromActiveChain());
+        BOOST_CHECK(chainman.IsShieldedAnchorValid(expected_current_root));
+        BOOST_CHECK(chainman.IsShieldedAnchorValid(expected_previous_root));
+
+        std::vector<uint256> repaired_anchor_roots;
+        BOOST_REQUIRE(chainman.ReadPersistedShieldedState(persisted_tree,
+                                                          repaired_anchor_roots,
+                                                          persisted_tip_hash,
+                                                          persisted_tip_height,
+                                                          persisted_pool_balance,
+                                                          persisted_commitment_index_digest,
+                                                          persisted_account_registry_snapshot));
+        BOOST_REQUIRE_GE(repaired_anchor_roots.size(), 2U);
+        BOOST_CHECK_EQUAL(repaired_anchor_roots[0], expected_current_root);
+        BOOST_CHECK_EQUAL(repaired_anchor_roots[1], expected_previous_root);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_limits_auto_repair_attempts_to_once_per_shielded_state_generation,
+                        TestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_CHECK(chainman.MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind::ANCHOR_HISTORY));
+        BOOST_CHECK(!chainman.MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind::ANCHOR_HISTORY));
+        BOOST_CHECK(chainman.MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind::STATE_REBUILD));
+        BOOST_CHECK(!chainman.MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind::STATE_REBUILD));
+        BOOST_CHECK_EQUAL(
+            chainman.GetShieldedAutoRepairAttemptCountForTest(ShieldedAutoRepairKind::ANCHOR_HISTORY),
+            1U);
+        BOOST_CHECK_EQUAL(
+            chainman.GetShieldedAutoRepairAttemptCountForTest(ShieldedAutoRepairKind::STATE_REBUILD),
+            1U);
+    }
+
+    CreateAndProcessBlock({}, script_pub_key);
+
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(!chainman.MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind::ANCHOR_HISTORY));
+        BOOST_CHECK(!chainman.MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind::STATE_REBUILD));
+        BOOST_CHECK_EQUAL(
+            chainman.GetShieldedAutoRepairAttemptCountForTest(ShieldedAutoRepairKind::ANCHOR_HISTORY),
+            1U);
+        BOOST_CHECK_EQUAL(
+            chainman.GetShieldedAutoRepairAttemptCountForTest(ShieldedAutoRepairKind::STATE_REBUILD),
+            1U);
+    }
+
+    CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
+
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind::ANCHOR_HISTORY));
+        BOOST_CHECK(chainman.MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind::STATE_REBUILD));
+        BOOST_CHECK_EQUAL(
+            chainman.GetShieldedAutoRepairAttemptCountForTest(ShieldedAutoRepairKind::ANCHOR_HISTORY),
+            2U);
+        BOOST_CHECK_EQUAL(
+            chainman.GetShieldedAutoRepairAttemptCountForTest(ShieldedAutoRepairKind::STATE_REBUILD),
+            2U);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_auto_repairs_stale_anchor_history_for_mempool_accept,
+                        TestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
+
+    uint256 current_root;
+    uint256 previous_root;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        const auto& anchor_roots = chainman.GetShieldedAnchorRoots();
+        BOOST_REQUIRE_GE(anchor_roots.size(), 2U);
+        current_root = anchor_roots[0];
+        previous_root = anchor_roots[1];
+        BOOST_REQUIRE(!previous_root.IsNull());
+        chainman.SetShieldedAnchorRootsForTest({current_root});
+        BOOST_CHECK(!chainman.IsShieldedAnchorValid(previous_root));
+    }
+
+    const auto tx_ref = MakeTransactionRef(
+        BuildLegacyShieldOnlyTx(*this, m_coinbase_txns[1], previous_root));
+    const auto result = WITH_LOCK(
+        ::cs_main,
+        return AcceptToMemoryPool(
+            chainman.ActiveChainstate(), tx_ref, GetTime(), /*bypass_limits=*/true, /*test_accept=*/true));
+    BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::VALID);
+
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.IsShieldedAnchorValid(previous_root));
+        BOOST_CHECK_EQUAL(
+            chainman.GetShieldedAutoRepairAttemptCountForTest(ShieldedAutoRepairKind::ANCHOR_HISTORY),
+            1U);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_auto_repairs_stale_anchor_history_for_block_connect,
+                        TestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
+
+    uint256 current_root;
+    uint256 previous_root;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        const auto& anchor_roots = chainman.GetShieldedAnchorRoots();
+        BOOST_REQUIRE_GE(anchor_roots.size(), 2U);
+        current_root = anchor_roots[0];
+        previous_root = anchor_roots[1];
+        BOOST_REQUIRE(!previous_root.IsNull());
+        chainman.SetShieldedAnchorRootsForTest({current_root});
+        BOOST_CHECK(!chainman.IsShieldedAnchorValid(previous_root));
+    }
+
+    const CMutableTransaction shield_only_tx =
+        BuildLegacyShieldOnlyTx(*this, m_coinbase_txns[1], previous_root);
+    const CBlock accepted_block = CreateAndProcessBlock({shield_only_tx}, script_pub_key);
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_CHECK_EQUAL(chainman.ActiveTip()->GetBlockHash(), accepted_block.GetHash());
+        BOOST_CHECK(chainman.IsShieldedAnchorValid(previous_root));
+        BOOST_CHECK_EQUAL(
+            chainman.GetShieldedAutoRepairAttemptCountForTest(ShieldedAutoRepairKind::ANCHOR_HISTORY),
+            1U);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    chainstatemanager_startup_repairs_stale_anchor_history_and_auto_reconsiders_failed_shielded_block,
+    PersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
+
+    uint256 previous_root;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        const auto& anchor_roots = chainman.GetShieldedAnchorRoots();
+        BOOST_REQUIRE_GE(anchor_roots.size(), 2U);
+        previous_root = anchor_roots[1];
+        BOOST_REQUIRE(!previous_root.IsNull());
+    }
+
+    const CMutableTransaction shield_only_tx =
+        BuildLegacyShieldOnlyTx(*this, m_coinbase_txns[1], previous_root);
+    const CBlock invalid_block =
+        CreateBlock({shield_only_tx}, script_pub_key, chainman.ActiveChainstate(), /*use_mempool=*/false);
+    const uint256 invalid_hash = invalid_block.GetHash();
+    CBlockIndex* accepted_index{nullptr};
+
+    {
+        LOCK(::cs_main);
+        BlockValidationState accept_state;
+        bool new_block{false};
+        BOOST_REQUIRE(chainman.AcceptBlock(std::make_shared<const CBlock>(invalid_block),
+                                           accept_state,
+                                           &accepted_index,
+                                           /*fRequested=*/true,
+                                           /*dbp=*/nullptr,
+                                           &new_block,
+                                           /*min_pow_checked=*/true));
+        BOOST_REQUIRE(new_block);
+        BOOST_REQUIRE(accept_state.IsValid());
+        BOOST_REQUIRE(accepted_index != nullptr);
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_CHECK_NE(chainman.ActiveTip()->GetBlockHash(), invalid_hash);
+
+        shielded::ShieldedMerkleTree persisted_tree;
+        std::vector<uint256> persisted_anchor_roots;
+        uint256 persisted_tip_hash;
+        int32_t persisted_tip_height{-1};
+        CAmount persisted_pool_balance{0};
+        std::optional<uint256> persisted_commitment_index_digest;
+        std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
+            persisted_account_registry_snapshot;
+        BOOST_REQUIRE(chainman.ReadPersistedShieldedState(persisted_tree,
+                                                          persisted_anchor_roots,
+                                                          persisted_tip_hash,
+                                                          persisted_tip_height,
+                                                          persisted_pool_balance,
+                                                          persisted_commitment_index_digest,
+                                                          persisted_account_registry_snapshot));
+        BOOST_REQUIRE_GE(persisted_anchor_roots.size(), 2U);
+        persisted_anchor_roots.resize(1);
+        BOOST_REQUIRE(chainman.WritePersistedShieldedState(
+            persisted_tree,
+            persisted_anchor_roots,
+            persisted_tip_hash,
+            persisted_tip_height,
+            persisted_pool_balance,
+            persisted_commitment_index_digest,
+            persisted_account_registry_snapshot));
+    }
+
+    BlockValidationState invalidate_state;
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(invalidate_state, accepted_index));
+    BOOST_REQUIRE(invalidate_state.IsValid());
+
+    {
+        LOCK(::cs_main);
+        CBlockIndex* invalid_index = chainman.m_blockman.LookupBlockIndex(invalid_hash);
+        BOOST_REQUIRE(invalid_index != nullptr);
+        BOOST_CHECK(invalid_index->nStatus & BLOCK_FAILED_VALID);
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_CHECK_NE(chainman.ActiveTip()->GetBlockHash(), invalid_hash);
+    }
+
+    auto restart_node = [&]() -> ChainstateManager& {
+        ChainstateManager& current_chainman = *Assert(m_node.chainman);
+
+        for (Chainstate* cs : current_chainman.GetAll()) {
+            LOCK(::cs_main);
+            cs->ForceFlushStateToDisk();
+        }
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            current_chainman.ResetChainstates();
+            BOOST_CHECK_EQUAL(current_chainman.GetAll().size(), 0);
+            m_node.notifications = std::make_unique<KernelNotifications>(
+                Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+            const ChainstateManager::Options chainman_opts{
+                .chainparams = ::Params(),
+                .datadir = current_chainman.m_options.datadir,
+                .notifications = *m_node.notifications,
+                .signals = m_node.validation_signals.get(),
+            };
+            const BlockManager::Options blockman_opts{
+                .chainparams = chainman_opts.chainparams,
+                .blocks_dir = m_args.GetBlocksDirPath(),
+                .notifications = chainman_opts.notifications,
+                .block_tree_db_params = DBParams{
+                    .path = current_chainman.m_options.datadir / "blocks" / "index",
+                    .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                    .memory_only = m_block_tree_db_in_memory,
+                },
+            };
+            m_node.chainman.reset();
+            m_node.chainman = std::make_unique<ChainstateManager>(
+                *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        }
+        return *Assert(m_node.chainman);
+    };
+
+    ChainstateManager& chainman_restarted = restart_node();
+    node::ChainstateLoadOptions options;
+    options.mempool = Assert(m_node.mempool.get());
+    options.coins_db_in_memory = m_coins_db_in_memory;
+    options.wipe_chainstate_db = false;
+    options.prune = chainman_restarted.m_blockman.IsPruneMode();
+    options.check_blocks = m_args.GetIntArg("-checkblocks", DEFAULT_CHECKBLOCKS);
+    options.check_level = m_args.GetIntArg("-checklevel", DEFAULT_CHECKLEVEL);
+    options.require_full_verification =
+        m_args.IsArgSet("-checkblocks") || m_args.IsArgSet("-checklevel");
+    const auto load_result = node::LoadChainstate(chainman_restarted, m_kernel_cache_sizes, options);
+    BOOST_REQUIRE(std::get<0>(load_result) == node::ChainstateLoadStatus::SUCCESS);
+    const auto verify_result = node::VerifyLoadedChainstate(chainman_restarted, options);
+    BOOST_REQUIRE(std::get<0>(verify_result) == node::ChainstateLoadStatus::SUCCESS);
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
+        BOOST_CHECK(chainman_restarted.IsShieldedAnchorValid(previous_root));
+        CBlockIndex* reconsidered_index = chainman_restarted.m_blockman.LookupBlockIndex(invalid_hash);
+        BOOST_REQUIRE(reconsidered_index != nullptr);
+        BOOST_CHECK_EQUAL(reconsidered_index->nStatus & BLOCK_FAILED_MASK, 0U);
+    }
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainman_restarted.ActiveChainstate().ActivateBestChain(state));
+    BOOST_CHECK(state.IsValid());
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
+        BOOST_CHECK_EQUAL(chainman_restarted.ActiveTip()->GetBlockHash(), invalid_hash);
+        CBlockIndex* reconsidered_index = chainman_restarted.m_blockman.LookupBlockIndex(invalid_hash);
+        BOOST_REQUIRE(reconsidered_index != nullptr);
+        BOOST_CHECK_EQUAL(reconsidered_index->nStatus & BLOCK_FAILED_MASK, 0U);
     }
 }
 
@@ -1503,28 +2028,20 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_truncated_persisted_account_r
                         PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
-
-    shielded::registry::ShieldedAccountRegistryState expected_registry;
-    for (size_t output_index = 0; output_index < rebalance_fixture.reserve_outputs.size(); ++output_index) {
-        const auto account_leaf = shielded::registry::BuildRebalanceAccountLeaf(
-            rebalance_fixture.reserve_outputs[output_index],
-            rebalance_fixture.manifest_id);
-        BOOST_REQUIRE(account_leaf.has_value());
-        BOOST_REQUIRE(expected_registry.Append(
-            Span<const shielded::registry::ShieldedAccountLeaf>{&*account_leaf, 1}));
-    }
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
 
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
 
+    uint256 expected_registry_root;
+    uint64_t expected_registry_size{0};
     uint256 expected_state_commitment_hash;
     {
         LOCK(::cs_main);
         BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
-        BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryEntryCount(),
-                          expected_registry.Size());
-        BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryRoot(), expected_registry.Root());
+        expected_registry_size = chainman.GetShieldedAccountRegistryEntryCount();
+        expected_registry_root = chainman.GetShieldedAccountRegistryRoot();
+        BOOST_CHECK_EQUAL(expected_registry_size, rebalance_fixture.reserve_outputs.size());
         const auto state_commitment = chainman.GetShieldedStateCommitment();
         BOOST_REQUIRE(state_commitment.has_value());
         expected_state_commitment_hash =
@@ -1605,9 +2122,9 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_truncated_persisted_account_r
         LOCK(::cs_main);
         BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
         BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryEntryCount(),
-                          expected_registry.Size());
+                          expected_registry_size);
         BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(),
-                          expected_registry.Root());
+                          expected_registry_root);
         const auto state_commitment = chainman_restarted.GetShieldedStateCommitment();
         BOOST_REQUIRE(state_commitment.has_value());
         BOOST_CHECK_EQUAL(shielded::registry::ComputeShieldedStateCommitmentHash(*state_commitment),
@@ -1636,8 +2153,8 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_truncated_persisted_account_r
             shielded::registry::ShieldedAccountRegistryState::RestorePersisted(
             *persisted_account_registry_snapshot);
         BOOST_REQUIRE(restored_registry.has_value());
-        BOOST_CHECK_EQUAL(restored_registry->Size(), expected_registry.Size());
-        BOOST_CHECK_EQUAL(restored_registry->Root(), expected_registry.Root());
+        BOOST_CHECK_EQUAL(restored_registry->Size(), expected_registry_size);
+        BOOST_CHECK_EQUAL(restored_registry->Root(), expected_registry_root);
     }
 }
 
@@ -1646,7 +2163,7 @@ BOOST_FIXTURE_TEST_CASE(
     PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
     const fs::path datadir = chainman.m_options.datadir;
     auto shutdown_node = [&]() {
         ChainstateManager& current_chainman = *Assert(m_node.chainman);
@@ -1690,25 +2207,18 @@ BOOST_FIXTURE_TEST_CASE(
         return *Assert(m_node.chainman);
     };
 
-    shielded::registry::ShieldedAccountRegistryState expected_registry;
-    for (size_t output_index = 0; output_index < rebalance_fixture.reserve_outputs.size(); ++output_index) {
-        const auto account_leaf = shielded::registry::BuildRebalanceAccountLeaf(
-            rebalance_fixture.reserve_outputs[output_index],
-            rebalance_fixture.manifest_id);
-        BOOST_REQUIRE(account_leaf.has_value());
-        BOOST_REQUIRE(expected_registry.Append(
-            Span<const shielded::registry::ShieldedAccountLeaf>{&*account_leaf, 1}));
-    }
-
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
 
+    uint64_t expected_registry_size{0};
+    uint256 expected_registry_root;
     std::optional<uint64_t> erased_leaf_index;
     {
         LOCK(::cs_main);
         BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
-        BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryEntryCount(), expected_registry.Size());
-        BOOST_CHECK_EQUAL(chainman.GetShieldedAccountRegistryRoot(), expected_registry.Root());
+        expected_registry_size = chainman.GetShieldedAccountRegistryEntryCount();
+        expected_registry_root = chainman.GetShieldedAccountRegistryRoot();
+        BOOST_CHECK_EQUAL(expected_registry_size, rebalance_fixture.reserve_outputs.size());
 
         shielded::ShieldedMerkleTree persisted_tree;
         std::vector<uint256> persisted_anchor_roots;
@@ -1728,7 +2238,7 @@ BOOST_FIXTURE_TEST_CASE(
         BOOST_REQUIRE(persisted_account_registry_snapshot.has_value());
         BOOST_REQUIRE_GT(persisted_account_registry_snapshot->entries.size(), 0U);
         erased_leaf_index = persisted_account_registry_snapshot->entries.back().leaf_index;
-        BOOST_CHECK_EQUAL(*erased_leaf_index, expected_registry.Size() - 1);
+        BOOST_CHECK_EQUAL(*erased_leaf_index, expected_registry_size - 1);
     }
 
     shutdown_node();
@@ -1752,9 +2262,9 @@ BOOST_FIXTURE_TEST_CASE(
         LOCK(::cs_main);
         BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
         BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryEntryCount(),
-                          expected_registry.Size());
+                          expected_registry_size);
         BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(),
-                          expected_registry.Root());
+                          expected_registry_root);
 
         shielded::ShieldedMerkleTree persisted_tree;
         std::vector<uint256> persisted_anchor_roots;
@@ -1772,10 +2282,167 @@ BOOST_FIXTURE_TEST_CASE(
                                                                     persisted_commitment_index_digest,
                                                                     persisted_account_registry_snapshot));
         BOOST_REQUIRE(persisted_account_registry_snapshot.has_value());
-        BOOST_CHECK_EQUAL(persisted_account_registry_snapshot->entries.size(), expected_registry.Size());
+        BOOST_CHECK_EQUAL(persisted_account_registry_snapshot->entries.size(), expected_registry_size);
         BOOST_CHECK(chainman_restarted.GetShieldedAccountRegistry().CanMaterializeAllEntries());
         BOOST_REQUIRE(chainman_restarted.GetShieldedAccountRegistry().MaterializeEntry(
-            expected_registry.Size() - 1).has_value());
+            expected_registry_size - 1).has_value());
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(
+    chainstatemanager_rebuilds_from_chain_when_persisted_account_registry_snapshot_semantically_drifts,
+    PersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
+    const fs::path datadir = chainman.m_options.datadir;
+    auto shutdown_node = [&]() {
+        ChainstateManager& current_chainman = *Assert(m_node.chainman);
+
+        for (Chainstate* cs : current_chainman.GetAll()) {
+            LOCK(::cs_main);
+            cs->ForceFlushStateToDisk();
+        }
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            current_chainman.ResetChainstates();
+            BOOST_CHECK_EQUAL(current_chainman.GetAll().size(), 0);
+            m_node.chainman.reset();
+        }
+    };
+    auto restart_node = [&]() -> ChainstateManager& {
+        {
+            LOCK(::cs_main);
+            m_node.notifications = std::make_unique<KernelNotifications>(
+                Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+            const ChainstateManager::Options chainman_opts{
+                .chainparams = ::Params(),
+                .datadir = datadir,
+                .notifications = *m_node.notifications,
+                .signals = m_node.validation_signals.get(),
+            };
+            const BlockManager::Options blockman_opts{
+                .chainparams = chainman_opts.chainparams,
+                .blocks_dir = m_args.GetBlocksDirPath(),
+                .notifications = chainman_opts.notifications,
+                .block_tree_db_params = DBParams{
+                    .path = datadir / "blocks" / "index",
+                    .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                    .memory_only = m_block_tree_db_in_memory,
+                },
+            };
+            m_node.chainman = std::make_unique<ChainstateManager>(
+                *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        }
+        return *Assert(m_node.chainman);
+    };
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
+
+    uint256 expected_registry_root;
+    uint64_t expected_registry_size{0};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        expected_registry_root = chainman.GetShieldedAccountRegistryRoot();
+        expected_registry_size = chainman.GetShieldedAccountRegistryEntryCount();
+        BOOST_REQUIRE_GT(expected_registry_size, 0U);
+
+        shielded::ShieldedMerkleTree persisted_tree;
+        std::vector<uint256> persisted_anchor_roots;
+        uint256 persisted_tip_hash;
+        int32_t persisted_tip_height{-1};
+        CAmount persisted_pool_balance{0};
+        std::optional<uint256> persisted_commitment_index_digest;
+        std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
+            persisted_account_registry_snapshot;
+        BOOST_REQUIRE(chainman.ReadPersistedShieldedState(persisted_tree,
+                                                          persisted_anchor_roots,
+                                                          persisted_tip_hash,
+                                                          persisted_tip_height,
+                                                          persisted_pool_balance,
+                                                          persisted_commitment_index_digest,
+                                                          persisted_account_registry_snapshot));
+        BOOST_REQUIRE(persisted_account_registry_snapshot.has_value());
+        BOOST_REQUIRE_GT(persisted_account_registry_snapshot->entries.size(), 0U);
+
+        uint256 tampered_account_leaf_commitment;
+        uint256 tampered_entry_commitment;
+        const auto& persisted_entries = persisted_account_registry_snapshot->entries;
+        const auto& persisted_entry = persisted_entries.back();
+        do {
+            tampered_account_leaf_commitment = GetRandHash();
+        } while (tampered_account_leaf_commitment.IsNull() ||
+                 tampered_account_leaf_commitment ==
+                     persisted_entry.account_leaf_commitment ||
+                 std::any_of(persisted_entries.begin(),
+                             persisted_entries.end() - 1,
+                             [&](const auto& entry) {
+                                 return entry.account_leaf_commitment ==
+                                     tampered_account_leaf_commitment;
+                             }));
+        do {
+            tampered_entry_commitment = GetRandHash();
+        } while (tampered_entry_commitment.IsNull() ||
+                 tampered_entry_commitment == persisted_entry.entry_commitment ||
+                 std::any_of(persisted_entries.begin(),
+                             persisted_entries.end() - 1,
+                             [&](const auto& entry) {
+                                 return entry.entry_commitment == tampered_entry_commitment;
+                             }));
+
+        persisted_account_registry_snapshot->entries.back().account_leaf_commitment =
+            tampered_account_leaf_commitment;
+        persisted_account_registry_snapshot->entries.back().entry_commitment =
+            tampered_entry_commitment;
+        BOOST_REQUIRE(persisted_account_registry_snapshot->IsValid());
+
+        BOOST_REQUIRE(chainman.WritePersistedShieldedState(persisted_tree,
+                                                           persisted_anchor_roots,
+                                                           persisted_tip_hash,
+                                                           persisted_tip_height,
+                                                           persisted_pool_balance,
+                                                           persisted_commitment_index_digest,
+                                                           persisted_account_registry_snapshot));
+    }
+
+    shutdown_node();
+
+    ChainstateManager& chainman_restarted = restart_node();
+    this->LoadVerifyActivateChainstate();
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(),
+                          expected_registry_root);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryEntryCount(),
+                          expected_registry_size);
+
+        shielded::ShieldedMerkleTree persisted_tree;
+        std::vector<uint256> persisted_anchor_roots;
+        uint256 persisted_tip_hash;
+        int32_t persisted_tip_height{-1};
+        CAmount persisted_pool_balance{0};
+        std::optional<uint256> persisted_commitment_index_digest;
+        std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
+            persisted_account_registry_snapshot;
+        BOOST_REQUIRE(chainman_restarted.ReadPersistedShieldedState(persisted_tree,
+                                                                    persisted_anchor_roots,
+                                                                    persisted_tip_hash,
+                                                                    persisted_tip_height,
+                                                                    persisted_pool_balance,
+                                                                    persisted_commitment_index_digest,
+                                                                    persisted_account_registry_snapshot));
+        BOOST_REQUIRE(persisted_account_registry_snapshot.has_value());
+        const auto restored_registry =
+            shielded::registry::ShieldedAccountRegistryState::RestorePersisted(
+                *persisted_account_registry_snapshot);
+        BOOST_REQUIRE(restored_registry.has_value());
+        BOOST_CHECK_EQUAL(restored_registry->Root(), expected_registry_root);
+        BOOST_CHECK_EQUAL(restored_registry->Size(), expected_registry_size);
     }
 }
 
@@ -1783,7 +2450,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_prunes_disconnected_account_registry_p
                         PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
 
     CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
@@ -1884,7 +2551,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_missing_account_registry_payl
                         PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
 
@@ -2084,7 +2751,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_full_shielded_state_from_chai
         return *Assert(m_node.chainman);
     };
 
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
     const auto settlement_fixture = BuildChainstateSettlementAnchorReceiptFixture(chainman);
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
@@ -2260,7 +2927,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_prepared_shielded_transition_
                                                           source_account_registry_snapshot));
     }
 
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
     const auto settlement_fixture = BuildChainstateSettlementAnchorReceiptFixture(chainman);
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
@@ -2274,8 +2941,8 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_prepared_shielded_transition_
     CAmount expected_pool_balance{0};
     uint256 expected_registry_root;
     size_t expected_registry_size{0};
-    ShieldedStateMutationMarker prepared_marker;
     {
+        ShieldedStateMutationMarker prepared_marker;
         LOCK(::cs_main);
         BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
         BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
@@ -2314,6 +2981,9 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_prepared_shielded_transition_
                                                            source_account_registry_snapshot));
         BOOST_REQUIRE(chainman.WriteShieldedMutationMarker(prepared_marker));
     }
+
+    source_tree = shielded::ShieldedMerkleTree{
+        shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
 
     ChainstateManager& chainman_restarted = simulate_node_restart();
     this->LoadVerifyActivateChainstate();
@@ -2375,7 +3045,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_from_chain_when_persisted_nul
         return *Assert(m_node.chainman);
     };
 
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
 
@@ -2478,7 +3148,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_from_chain_when_persisted_bri
         return *Assert(m_node.chainman);
     };
 
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
     const auto settlement_fixture = BuildChainstateSettlementAnchorReceiptFixture(chainman);
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
@@ -2546,7 +3216,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_builds_shielded_proof_audit_archive, T
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
 
-    const auto rebalance_fixture = BuildChainstateRebalanceFixture(chainman);
+    const auto rebalance_fixture = BuildChainstateRebalanceFixture(*this, chainman);
     const auto settlement_fixture = BuildChainstateSettlementAnchorReceiptFixture(chainman);
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({rebalance_fixture.tx}, script_pub_key);
@@ -2646,7 +3316,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=spv"}).matmul_validation_mode, kernel::MatMulValidationMode::SPV);
     BOOST_CHECK(!get_opts({"-matmulvalidation=invalid"}));
 
-    BOOST_CHECK_EQUAL(get_valid_opts({}).retain_shielded_commitment_index, false);
+    BOOST_CHECK_EQUAL(get_valid_opts({}).retain_shielded_commitment_index, true);
     BOOST_CHECK_EQUAL(get_valid_opts({"-retainshieldedcommitmentindex"}).retain_shielded_commitment_index, true);
     BOOST_CHECK_EQUAL(get_valid_opts({"-retainshieldedcommitmentindex=1"}).retain_shielded_commitment_index, true);
     BOOST_CHECK_EQUAL(get_valid_opts({"-retainshieldedcommitmentindex=0"}).retain_shielded_commitment_index, false);

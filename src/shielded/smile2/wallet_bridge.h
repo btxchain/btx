@@ -135,7 +135,8 @@ std::optional<SmileProofResult> CreateSmileProof(
     std::vector<uint256>& serial_hashes,
     int64_t public_fee = 0,
     SmileProofCodecPolicy codec_policy = SmileProofCodecPolicy::CANONICAL_NO_RICE,
-    bool bind_anonset_context = false);
+    bool bind_anonset_context = false,
+    std::string* error = nullptr);
 
 /** Well-known global seed for the SMILE A matrix.
  *  Derived from SHA256("BTX-SMILE-V2-GLOBAL-MATRIX-SEED-V1"). */

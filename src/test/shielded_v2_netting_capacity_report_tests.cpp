@@ -3,6 +3,7 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <test/shielded_v2_netting_capacity_report.h>
+#include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -11,7 +12,7 @@
 namespace btx::test::shieldedv2netting {
 namespace {
 
-BOOST_AUTO_TEST_SUITE(shielded_v2_netting_capacity_report_tests)
+BOOST_FIXTURE_TEST_SUITE(shielded_v2_netting_capacity_report_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(capacity_report_rejects_invalid_config)
 {

@@ -24,6 +24,12 @@ Entry points
 - `service-faststart.sh` starts the bootstrap flow with the service-oriented preset.
 - `btx-faststart.py` is the shared orchestrator and can be called directly.
 
+Current support matrix
+
+- `main`: supported with compiled assumeutxo metadata and published release snapshots
+- `regtest`: supported for default-consensus dev/test flows
+- `testnet`, `testnet4`, `signet`: unsupported for fast-start until `src/kernel/chainparams.cpp` gains real assumeutxo entries for those chains
+
 Presets
 
 - `miner` keeps the node in a compact, mining-friendly state:
@@ -33,6 +39,13 @@ Presets
 - `service` keeps the node in a service-oriented state:
   `prune=0`, `txindex=1`, `blockfilterindex=1`, `coinstatsindex=1`, and
   `retainshieldedcommitmentindex=1`.
+
+BTX now treats retained shielded commitment indexing as the normal
+operator-facing posture because it keeps restart and snapshot recovery fast for
+wallet, mining, and service users. The fast-start presets still write
+`retainshieldedcommitmentindex=1` explicitly so the generated config remains
+clear and portable; use `retainshieldedcommitmentindex=0` only if you
+intentionally want the slower externalized path.
 
 For horizontally scaled service gateways, add
 `--matmul-service-challenge-file=/shared/path/matmul_service_challenges.dat`
@@ -75,7 +88,7 @@ One-shot install + bootstrap
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx-node \
-  --release-tag v29.2-btx1 \
+  --release-tag v0.29.5 \
   --preset service \
   --datadir="$HOME/.btx-service"
 ```
@@ -99,7 +112,7 @@ handing off to mining or service automation:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx-node \
-  --release-tag v29.2-btx1 \
+  --release-tag v0.29.5 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"
@@ -130,8 +143,8 @@ Manifest shape
     "url": "https://.../main-snapshot.dat",
     "sha256": "..."
   },
-  "testnet4": {
-    "url": "https://.../testnet4-snapshot.dat",
+  "regtest": {
+    "url": "https://.../regtest-snapshot.dat",
     "sha256": "..."
   }
 }
@@ -142,6 +155,11 @@ pass `--snapshot-manifest=/path/to/manifest.json` or
 `--snapshot-url=https://...` directly. If those URLs point at a private GitHub
 release, `btx-faststart.py` also honors `BTX_GITHUB_TOKEN`, `GITHUB_TOKEN`, or
 `GH_TOKEN` for the manifest and snapshot asset downloads.
+
+A manifest entry by itself is not enough for public test chains. `loadtxoutset`
+will still reject snapshots for `testnet`, `testnet4`, or `signet` until the
+corresponding serialized hash and block metadata are compiled into
+`src/kernel/chainparams.cpp`.
 
 Example
 
