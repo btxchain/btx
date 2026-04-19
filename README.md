@@ -609,7 +609,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.29.5 \
+  --release-tag v0.29.6 \
   --preset service \
   --datadir="$HOME/.btx"
 ```

@@ -27,8 +27,8 @@ Example:
 ```bash
 python3 scripts/release/cut_release.py \
   --repo btxchain/btx \
-  --tag v0.29.5 \
-  --release-name "BTX 0.29.5" \
+  --tag v0.29.6 \
+  --release-name "BTX 0.29.6" \
   --build-with-guix \
   --generate-snapshot \
   --rollback 60776 \
@@ -63,8 +63,8 @@ python3 scripts/release/collect_release_assets.py \
   --source /path/to/guix-build-29.2/output/darwin-arm64 \
   --snapshot /tmp/snapshot.dat \
   --snapshot-manifest /tmp/snapshot.manifest.json \
-  --release-tag v0.29.5 \
-  --release-name "BTX 0.29.5" \
+  --release-tag v0.29.6 \
+  --release-name "BTX 0.29.6" \
   --sign-with release-signing-key
 ```
 
@@ -99,7 +99,7 @@ release:
 ```bash
 python3 scripts/release/publish_github_release.py \
   --repo btxchain/btx \
-  --tag v0.29.5 \
+  --tag v0.29.6 \
   --bundle-dir /tmp/btx-release \
   --token-file /path/to/github.key \
   --publish
@@ -120,7 +120,7 @@ bundle contract:
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.29.5 \
+  --release-tag v0.29.6 \
   --preset service \
   --datadir /tmp/btx-service-smoke \
   --json
@@ -163,8 +163,8 @@ When you want to ship native-built CLI archives without Guix attestations, use
 ```bash
 python3 scripts/release/cut_local_release.py \
   --repo btxchain/btx \
-  --tag v0.29.5 \
-  --release-name "BTX 0.29.5" \
+  --tag v0.29.6 \
+  --release-name "BTX 0.29.6" \
   --bundle-dir /tmp/btx-native-cli-bundle \
   --platform-spec "macos-arm64;/path/to/macos/btxd;/path/to/macos/btx-cli" \
   --platform-spec "linux-arm64;/path/to/linux/btxd;/path/to/linux/btx-cli" \

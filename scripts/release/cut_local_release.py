@@ -38,7 +38,7 @@ def default_smoke_install_dir(bundle_dir: Path, platform_id: str) -> Path:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default="btxchain/btx", help="GitHub repository in owner/name form.")
-    parser.add_argument("--tag", required=True, help="Release tag to stage or publish, for example v0.29.5.")
+    parser.add_argument("--tag", required=True, help="Release tag to stage or publish, for example v0.29.6.")
     parser.add_argument("--release-name", help="Human-readable release title. Defaults to the tag name.")
     parser.add_argument(
         "--repo-root",
