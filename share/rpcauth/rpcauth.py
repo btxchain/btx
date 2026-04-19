@@ -53,7 +53,12 @@ def main():
             outfile.write(rpcauth + "\n")
 
     if args.json:
-        odict = {'username': args.username, 'credential': args.credential}
+        odict = {
+            'username': args.username,
+            # Preserve the historical JSON surface for external tooling.
+            'password': args.credential,
+            'credential': args.credential,
+        }
         if not args.output:
             odict['rpcauth'] = rpcauth
         json.dump(odict, sys.stdout)
