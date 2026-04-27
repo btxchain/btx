@@ -883,6 +883,8 @@ void RegisterAccountLeafCommitment(std::map<uint256, uint256>& account_leaf_comm
         switch (*family) {
         case shielded::v2::TransactionFamily::V2_SEND:
             return "v2_send";
+        case shielded::v2::V2_SPEND_PATH_RECOVERY:
+            return "v2_spend_path_recovery";
         case shielded::v2::TransactionFamily::V2_LIFECYCLE:
             return "v2_lifecycle";
         case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
@@ -2170,6 +2172,23 @@ void CShieldedWallet::ScanBlock(const CBlock& block, int height)
                     }
                     break;
                 }
+                case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+                    const auto& payload =
+                        std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
+                    const shielded::registry::AccountLeafHint account_leaf_hint =
+                        shielded::registry::MakeDirectSendAccountLeafHint();
+                    for (const auto& output : payload.outputs) {
+                        RecordScannedOutput(block,
+                                            height,
+                                            output,
+                                            account_leaf_hint,
+                                            master_seed,
+                                            block_commitments_seen,
+                                            tx_view,
+                                            tx_has_local_visibility);
+                    }
+                    break;
+                }
                 case shielded::v2::TransactionFamily::V2_LIFECYCLE:
                     break;
                 case shielded::v2::TransactionFamily::V2_INGRESS_BATCH: {
@@ -2439,6 +2458,21 @@ void CShieldedWallet::TransactionAddedToMempool(const CTransaction& tx)
             switch (shielded::v2::GetBundleSemanticFamily(*v2_bundle)) {
             case shielded::v2::TransactionFamily::V2_SEND: {
                 const auto& payload = std::get<shielded::v2::SendPayload>(v2_bundle->payload);
+                const shielded::registry::AccountLeafHint account_leaf_hint =
+                    shielded::registry::MakeDirectSendAccountLeafHint();
+                for (const auto& output : payload.outputs) {
+                    RecordMempoolOutput(txid,
+                                        output,
+                                        account_leaf_hint,
+                                        master_seed,
+                                        tx_view,
+                                        tx_has_local_visibility);
+                }
+                break;
+            }
+            case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+                const auto& payload =
+                    std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
                 const shielded::registry::AccountLeafHint account_leaf_hint =
                     shielded::registry::MakeDirectSendAccountLeafHint();
                 for (const auto& output : payload.outputs) {

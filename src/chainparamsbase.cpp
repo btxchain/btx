@@ -29,6 +29,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
     argsman.AddArg("-regtestgenesisversion=<n>", "Override regtest genesis nVersion field (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-mldsadisableheight=<n>", "Set ML-DSA consensus disable height for regtest (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-regtestshieldedmatrictdisableheight=<n>", "Override regtest shielded MatRiCT disable height (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-regtestshieldedspendpathrecoveryactivationheight=<n>", "Override regtest spend-path recovery activation height (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-regtestmatmulbindingheight=<n>", "Override regtest MatMul Freivalds transcript-binding activation height (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-regtestmatmulproductdigestheight=<n>", "Override regtest MatMul product-committed digest activation height (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-regtestmatmulrequireproductpayload=<0|1>", "Override whether regtest MatMul blocks must carry a product payload (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);

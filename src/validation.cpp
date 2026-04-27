@@ -554,6 +554,7 @@ namespace {
 
     const auto* v2_bundle = bundle.GetV2Bundle();
     if (v2_bundle == nullptr) {
+        LogShieldedV2ContextReject("retired-matrict-v2-bundle-null", bundle);
         reject_reason = "bad-shielded-v2-contextual";
         return false;
     }
@@ -604,6 +605,7 @@ namespace {
     if (bundle.HasV2Bundle()) {
         const auto* v2_bundle = bundle.GetV2Bundle();
         if (v2_bundle == nullptr) {
+            LogShieldedV2ContextReject("precheck-ring-positions-v2-bundle-null", bundle);
             reject_reason = "bad-shielded-v2-contextual";
             return false;
         }
@@ -622,7 +624,13 @@ namespace {
             }
             return true;
         }
+        case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+            auto witness = shielded::v2::proof::ParseSpendPathRecoveryWitness(*v2_bundle, reject_reason);
+            if (!witness.has_value()) return false;
+            return check_ring_positions(witness->spends);
+        }
         default:
+            LogShieldedV2ContextReject("precheck-ring-positions-unsupported-family", bundle);
             reject_reason = "bad-shielded-v2-contextual";
             return false;
         }
@@ -645,6 +653,7 @@ namespace {
 
     const auto* v2_bundle = bundle.GetV2Bundle();
     if (v2_bundle == nullptr) {
+        LogShieldedV2ContextReject("reject-small-privacy-pool-v2-bundle-null", bundle);
         reject_reason = "bad-shielded-v2-contextual";
         return false;
     }
@@ -789,6 +798,7 @@ template <typename Spend>
 
     const auto* v2_bundle = bundle.GetV2Bundle();
     if (v2_bundle == nullptr) {
+        LogShieldedV2ContextReject("account-registry-refs-v2-bundle-null", bundle);
         reject_reason = "bad-shielded-v2-contextual";
         return false;
     }
@@ -811,6 +821,7 @@ template <typename Spend>
             chainman,
             reject_reason);
     }
+    case shielded::v2::V2_SPEND_PATH_RECOVERY:
     case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
     case shielded::v2::TransactionFamily::V2_REBALANCE:
     case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
@@ -818,6 +829,7 @@ template <typename Spend>
     case shielded::v2::TransactionFamily::V2_GENERIC:
         return true;
     }
+    LogShieldedV2ContextReject("account-registry-refs-unsupported-family", bundle);
     reject_reason = "bad-shielded-v2-contextual";
     return false;
 }
@@ -1027,6 +1039,7 @@ template <typename Spend>
     return bundle.HasShieldedInputs() ||
            (bundle.HasV2Bundle() &&
             (bundle.GetTransactionFamily() == shielded::v2::TransactionFamily::V2_SEND ||
+             bundle.GetTransactionFamily() == shielded::v2::V2_SPEND_PATH_RECOVERY ||
              bundle.GetTransactionFamily() == shielded::v2::TransactionFamily::V2_EGRESS_BATCH ||
              bundle.GetTransactionFamily() == shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR ||
              bundle.GetTransactionFamily() == shielded::v2::TransactionFamily::V2_LIFECYCLE));
@@ -2906,12 +2919,22 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             }
         }
         if (bundle.HasV2Bundle() &&
+            bundle.GetTransactionFamily() == shielded::v2::V2_SPEND_PATH_RECOVERY) {
+            if (!consensus.IsShieldedSpendPathRecoveryActive(next_block_height)) {
+                LogShieldedV2ContextReject("mempool-v2-spend-path-recovery-disabled", bundle);
+                return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                     "bad-shielded-v2-spend-path-recovery-disabled");
+            }
+        }
+        if (bundle.HasV2Bundle() &&
             bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_SEND &&
+            bundle.GetTransactionFamily() != shielded::v2::V2_SPEND_PATH_RECOVERY &&
             bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_INGRESS_BATCH &&
             bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_EGRESS_BATCH &&
             bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR &&
             bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_REBALANCE &&
             bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_LIFECYCLE) {
+            LogShieldedV2ContextReject("mempool-allowed-family", bundle);
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-shielded-v2-contextual");
         }
         std::string retired_matrict_reject;
@@ -3002,6 +3025,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             case shielded::v2::TransactionFamily::V2_LIFECYCLE:
                 break;
             case shielded::v2::TransactionFamily::V2_GENERIC:
+                LogShieldedV2ContextReject("mempool-v2-generic-family", bundle);
                 return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-shielded-v2-contextual");
             }
         }
@@ -5684,12 +5708,23 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             }
 
             if (bundle.HasV2Bundle() &&
+                bundle.GetTransactionFamily() == shielded::v2::V2_SPEND_PATH_RECOVERY) {
+                if (!params.GetConsensus().IsShieldedSpendPathRecoveryActive(pindex->nHeight)) {
+                    LogShieldedV2ContextReject("block-v2-spend-path-recovery-disabled", bundle);
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  "bad-shielded-v2-spend-path-recovery-disabled");
+                    break;
+                }
+            }
+            if (bundle.HasV2Bundle() &&
                 bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_SEND &&
+                bundle.GetTransactionFamily() != shielded::v2::V2_SPEND_PATH_RECOVERY &&
                 bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_INGRESS_BATCH &&
                 bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_EGRESS_BATCH &&
                 bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR &&
                 bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_REBALANCE &&
                 bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_LIFECYCLE) {
+                LogShieldedV2ContextReject("block-allowed-family", bundle);
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-shielded-v2-contextual");
                 break;
             }
@@ -5913,6 +5948,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 case shielded::v2::TransactionFamily::V2_LIFECYCLE:
                     break;
                 case shielded::v2::TransactionFamily::V2_GENERIC:
+                    LogShieldedV2ContextReject("block-v2-generic-family", bundle);
                     state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-shielded-v2-contextual");
                     break;
                 }

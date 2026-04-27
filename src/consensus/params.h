@@ -248,6 +248,7 @@ struct Params {
     int32_t nShieldedBridgeTagActivationHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedSmileRiceCodecDisableHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedMatRiCTDisableHeight{std::numeric_limits<int32_t>::max()};
+    int32_t nShieldedSpendPathRecoveryActivationHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedPQ128UpgradeHeight{std::numeric_limits<int32_t>::max()};
     uint32_t nShieldedSettlementAnchorMaturity{6};
     int32_t nMLDSADisableHeight{std::numeric_limits<int32_t>::max()};
@@ -330,6 +331,12 @@ struct Params {
         return height >= 0 &&
             nShieldedMatRiCTDisableHeight != std::numeric_limits<int32_t>::max() &&
             height >= nShieldedMatRiCTDisableHeight;
+    }
+    bool IsShieldedSpendPathRecoveryActive(int32_t height) const
+    {
+        return height >= 0 &&
+            nShieldedSpendPathRecoveryActivationHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nShieldedSpendPathRecoveryActivationHeight;
     }
     bool IsShieldedPQ128UpgradeActive(int32_t height) const
     {

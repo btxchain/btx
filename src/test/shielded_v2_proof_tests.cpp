@@ -534,6 +534,85 @@ shielded::v2::TransactionBundle BuildPostforkGenericSmileSendBundle()
     return *bundle;
 }
 
+SmileV2SendFixture BuildPostforkSpendPathRecoveryFixture(unsigned char seed_base = 0x61)
+{
+    using namespace shielded::v2;
+
+    auto fixture = BuildSmileV2SendFixture(seed_base);
+    auto* bundle = fixture.tx.shielded_bundle.v2_bundle ? &*fixture.tx.shielded_bundle.v2_bundle : nullptr;
+    BOOST_REQUIRE(bundle != nullptr);
+
+    const auto send = std::get<SendPayload>(bundle->payload);
+    SpendPathRecoveryPayload recovery;
+    recovery.spend_anchor = send.spend_anchor;
+    recovery.spends = send.spends;
+    recovery.outputs = send.outputs;
+    recovery.fee = send.fee;
+    for (auto& spend : recovery.spends) {
+        spend.merkle_anchor = recovery.spend_anchor;
+        if (spend.note_commitment.IsNull()) {
+            const auto recovered_commitment =
+                std::find_if(fixture.account_leaf_commitments.begin(),
+                             fixture.account_leaf_commitments.end(),
+                             [&](const auto& entry) {
+                                 return entry.second == spend.account_leaf_commitment;
+                             });
+            BOOST_REQUIRE(recovered_commitment != fixture.account_leaf_commitments.end());
+            spend.note_commitment = recovered_commitment->first;
+        }
+    }
+    for (auto& output : recovery.outputs) {
+        output.encrypted_note.scan_domain = ScanDomain::OPAQUE;
+    }
+
+    const auto& consensus = Params().GetConsensus();
+    const int32_t postfork_height = consensus.nShieldedMatRiCTDisableHeight;
+    BOOST_REQUIRE(postfork_height >= 0);
+
+    bundle->header.family_id = GetWireTransactionFamilyForValidationHeight(
+        V2_SPEND_PATH_RECOVERY,
+        &consensus,
+        postfork_height);
+    bundle->header.proof_envelope.proof_kind = GetWireProofKindForValidationHeight(
+        V2_SPEND_PATH_RECOVERY,
+        ProofKind::DIRECT_SMILE,
+        &consensus,
+        postfork_height);
+    bundle->header.proof_envelope.membership_proof_kind =
+        GetWireProofComponentKindForValidationHeight(ProofComponentKind::SMILE_MEMBERSHIP,
+                                                     &consensus,
+                                                     postfork_height);
+    bundle->header.proof_envelope.amount_proof_kind =
+        GetWireProofComponentKindForValidationHeight(ProofComponentKind::SMILE_BALANCE,
+                                                     &consensus,
+                                                     postfork_height);
+    bundle->header.proof_envelope.balance_proof_kind =
+        GetWireProofComponentKindForValidationHeight(ProofComponentKind::SMILE_BALANCE,
+                                                     &consensus,
+                                                     postfork_height);
+    bundle->header.proof_envelope.settlement_binding_kind =
+        GetWireSettlementBindingKindForValidationHeight(V2_SPEND_PATH_RECOVERY,
+                                                        SettlementBindingKind::NONE,
+                                                        &consensus,
+                                                        postfork_height);
+    bundle->payload = recovery;
+    bundle->header.payload_digest = ComputeSpendPathRecoveryPayloadDigest(recovery);
+
+    auto output_chunks = BuildDerivedGenericOutputChunks(bundle->payload);
+    BOOST_REQUIRE(output_chunks.has_value());
+    bundle->output_chunks = std::move(*output_chunks);
+    bundle->header.output_chunk_root = bundle->output_chunks.empty()
+        ? uint256::ZERO
+        : ComputeOutputChunkRoot(Span<const OutputChunkDescriptor>{bundle->output_chunks.data(),
+                                                                   bundle->output_chunks.size()});
+    bundle->header.output_chunk_count = bundle->output_chunks.size();
+    bundle->header.proof_envelope.statement_digest =
+        v2proof::ComputeSpendPathRecoveryStatementDigest(CTransaction{fixture.tx});
+
+    BOOST_REQUIRE(bundle->IsValid());
+    return fixture;
+}
+
 DataStream SerializeBundleWithExplicitProofPayload(
     const shielded::v2::TransactionBundle& bundle,
     Span<const uint8_t> proof_payload_bytes)
@@ -786,6 +865,28 @@ BOOST_AUTO_TEST_CASE(v2_send_statement_tracks_stripped_tx_digest)
                 statement.envelope.statement_digest);
 }
 
+BOOST_AUTO_TEST_CASE(spend_path_recovery_statement_tracks_stripped_tx_digest)
+{
+    auto fixture = BuildPostforkSpendPathRecoveryFixture();
+    const CTransaction tx{fixture.tx};
+
+    const v2proof::ProofStatement statement = v2proof::DescribeSpendPathRecoveryStatement(tx);
+    BOOST_CHECK(statement.IsValid());
+    BOOST_CHECK(statement.domain == v2proof::VerificationDomain::SPEND_PATH_RECOVERY);
+    BOOST_CHECK(statement.envelope.statement_digest ==
+                v2proof::ComputeSpendPathRecoveryStatementDigest(tx));
+
+    CMutableTransaction proof_mutated = fixture.tx;
+    proof_mutated.shielded_bundle.v2_bundle->proof_payload.push_back(0xff);
+    BOOST_CHECK(v2proof::ComputeSpendPathRecoveryStatementDigest(CTransaction{proof_mutated}) ==
+                statement.envelope.statement_digest);
+
+    CMutableTransaction tx_context_mutated = fixture.tx;
+    tx_context_mutated.nLockTime ^= 1;
+    BOOST_CHECK(v2proof::ComputeSpendPathRecoveryStatementDigest(
+                    CTransaction{tx_context_mutated}) != statement.envelope.statement_digest);
+}
+
 BOOST_AUTO_TEST_CASE(v2_send_statement_digest_binds_genesis_after_disable_height)
 {
     auto fixture = BuildSmileV2SendFixture();
@@ -850,6 +951,104 @@ BOOST_AUTO_TEST_CASE(v2_send_context_parses_and_verifies)
                                                              reject_reason);
     BOOST_REQUIRE(ring_members.has_value());
     BOOST_CHECK(v2proof::VerifyV2SendProof(bundle, *context, *ring_members));
+}
+
+BOOST_AUTO_TEST_CASE(spend_path_recovery_context_parses_under_disabled_scaffold)
+{
+    auto fixture = BuildPostforkSpendPathRecoveryFixture();
+    const CTransaction tx{fixture.tx};
+    const auto& bundle = *fixture.tx.shielded_bundle.v2_bundle;
+
+    const v2proof::ProofStatement statement =
+        v2proof::DescribeSpendPathRecoveryStatement(tx);
+    std::string reject_reason;
+    auto context = v2proof::ParseSpendPathRecoveryProof(bundle, statement, reject_reason);
+    BOOST_REQUIRE_MESSAGE(context.has_value(), reject_reason);
+    BOOST_CHECK(context->IsValid(/*expected_input_count=*/1, /*expected_output_count=*/1));
+    BOOST_CHECK(context->material.statement.domain ==
+                v2proof::VerificationDomain::SPEND_PATH_RECOVERY);
+    BOOST_CHECK(context->material.payload_location == v2proof::PayloadLocation::INLINE_WITNESS);
+    BOOST_REQUIRE_EQUAL(context->material.proof_shards.size(), 1U);
+    BOOST_CHECK_EQUAL(context->material.proof_shards[0].leaf_count, 1U);
+    BOOST_CHECK_EQUAL(context->material.proof_shards[0].proof_payload_size,
+                      bundle.proof_payload.size());
+
+    auto nullifiers = v2proof::ExtractBoundNullifiers(*context,
+                                                      /*expected_input_count=*/1,
+                                                      /*expected_output_count=*/1,
+                                                      reject_reason);
+    BOOST_REQUIRE(nullifiers.has_value());
+    BOOST_CHECK_EQUAL(nullifiers->size(), 1U);
+    BOOST_CHECK((*nullifiers)[0] ==
+                std::get<shielded::v2::SpendPathRecoveryPayload>(bundle.payload).spends[0].nullifier);
+}
+
+BOOST_AUTO_TEST_CASE(spend_path_recovery_context_rejects_wrong_statement_digest)
+{
+    auto fixture = BuildPostforkSpendPathRecoveryFixture();
+    CMutableTransaction mutated = fixture.tx;
+    mutated.nLockTime ^= 1;
+
+    std::string reject_reason;
+    auto context = v2proof::ParseSpendPathRecoveryProof(
+        *mutated.shielded_bundle.v2_bundle,
+        v2proof::DescribeSpendPathRecoveryStatement(CTransaction{mutated}),
+        reject_reason);
+    BOOST_CHECK(!context.has_value());
+    BOOST_CHECK_EQUAL(reject_reason, "bad-shielded-proof");
+}
+
+BOOST_AUTO_TEST_CASE(spend_path_recovery_context_rejects_missing_proof_payload)
+{
+    auto fixture = BuildPostforkSpendPathRecoveryFixture();
+    fixture.tx.shielded_bundle.v2_bundle->proof_payload.clear();
+
+    std::string reject_reason;
+    auto context = v2proof::ParseSpendPathRecoveryProof(
+        *fixture.tx.shielded_bundle.v2_bundle,
+        v2proof::DescribeSpendPathRecoveryStatement(CTransaction{fixture.tx}),
+        reject_reason);
+    BOOST_CHECK(!context.has_value());
+    BOOST_CHECK_EQUAL(reject_reason, "bad-shielded-proof-missing");
+}
+
+BOOST_AUTO_TEST_CASE(spend_path_recovery_context_rejects_malformed_witness_encoding)
+{
+    auto fixture = BuildPostforkSpendPathRecoveryFixture();
+    fixture.tx.shielded_bundle.v2_bundle->proof_payload = {0x80};
+
+    std::string reject_reason;
+    auto context = v2proof::ParseSpendPathRecoveryProof(
+        *fixture.tx.shielded_bundle.v2_bundle,
+        v2proof::DescribeSpendPathRecoveryStatement(CTransaction{fixture.tx}),
+        reject_reason);
+    BOOST_CHECK(!context.has_value());
+    BOOST_CHECK_EQUAL(reject_reason, "bad-shielded-proof-encoding");
+}
+
+BOOST_AUTO_TEST_CASE(spend_path_recovery_smile_proof_verifies_against_recovery_context)
+{
+    auto fixture = BuildPostforkSpendPathRecoveryFixture();
+    const auto& bundle = *fixture.tx.shielded_bundle.v2_bundle;
+    const auto statement =
+        v2proof::DescribeSpendPathRecoveryStatement(CTransaction{fixture.tx});
+
+    std::string reject_reason;
+    auto context = v2proof::ParseSpendPathRecoveryProof(bundle, statement, reject_reason);
+    BOOST_REQUIRE_MESSAGE(context.has_value(), reject_reason);
+
+    auto ring_members = v2proof::BuildSpendPathRecoverySmileRingMembers(
+        bundle,
+        *context,
+        fixture.tree,
+        fixture.public_accounts,
+        fixture.account_leaf_commitments,
+        reject_reason);
+    BOOST_REQUIRE_MESSAGE(ring_members.has_value(), reject_reason);
+
+    BOOST_CHECK(v2proof::VerifySpendPathRecoveryProof(bundle,
+                                                      *context,
+                                                      *ring_members));
 }
 
 BOOST_AUTO_TEST_CASE(v2_send_context_rejects_wrong_statement_digest)

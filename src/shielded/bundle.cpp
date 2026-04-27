@@ -62,6 +62,8 @@ constexpr uint64_t SHIELDED_VERIFY_UNITS_PER_SETTLEMENT_PROOF{100};
     switch (shielded::v2::GetBundleSemanticFamily(bundle)) {
     case shielded::v2::TransactionFamily::V2_SEND:
         return std::get<shielded::v2::SendPayload>(bundle.payload).spends.size();
+    case shielded::v2::V2_SPEND_PATH_RECOVERY:
+        return std::get<shielded::v2::SpendPathRecoveryPayload>(bundle.payload).spends.size();
     case shielded::v2::TransactionFamily::V2_LIFECYCLE:
         return 0;
     case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
@@ -80,6 +82,8 @@ constexpr uint64_t SHIELDED_VERIFY_UNITS_PER_SETTLEMENT_PROOF{100};
     switch (shielded::v2::GetBundleSemanticFamily(bundle)) {
     case shielded::v2::TransactionFamily::V2_SEND:
         return std::get<shielded::v2::SendPayload>(bundle.payload).outputs.size();
+    case shielded::v2::V2_SPEND_PATH_RECOVERY:
+        return std::get<shielded::v2::SpendPathRecoveryPayload>(bundle.payload).outputs.size();
     case shielded::v2::TransactionFamily::V2_LIFECYCLE:
         return 0;
     case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
@@ -420,6 +424,14 @@ std::vector<Nullifier> CollectShieldedNullifiers(const CShieldedBundle& bundle)
             }
             break;
         }
+        case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+            const auto& payload =
+                std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
+            for (const auto& spend : payload.spends) {
+                out.push_back(spend.nullifier);
+            }
+            break;
+        }
         case shielded::v2::TransactionFamily::V2_INGRESS_BATCH: {
             const auto& payload = std::get<shielded::v2::IngressBatchPayload>(v2_bundle->payload);
             for (const auto& spend : payload.consumed_spends) {
@@ -453,6 +465,14 @@ std::vector<uint256> CollectShieldedOutputCommitments(const CShieldedBundle& bun
         switch (shielded::v2::GetBundleSemanticFamily(*v2_bundle)) {
         case shielded::v2::TransactionFamily::V2_SEND: {
             const auto& payload = std::get<shielded::v2::SendPayload>(v2_bundle->payload);
+            for (const auto& output : payload.outputs) {
+                out.push_back(output.note_commitment);
+            }
+            break;
+        }
+        case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+            const auto& payload =
+                std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
             for (const auto& output : payload.outputs) {
                 out.push_back(output.note_commitment);
             }
@@ -513,6 +533,10 @@ std::vector<std::pair<uint256, smile2::CompactPublicAccount>> CollectShieldedOut
         case shielded::v2::TransactionFamily::V2_SEND:
             append_outputs(std::get<shielded::v2::SendPayload>(v2_bundle->payload).outputs);
             break;
+        case shielded::v2::V2_SPEND_PATH_RECOVERY:
+            append_outputs(
+                std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload).outputs);
+            break;
         case shielded::v2::TransactionFamily::V2_LIFECYCLE:
             break;
         case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
@@ -555,6 +579,16 @@ std::optional<std::vector<uint256>> CollectShieldedOutputAccountLeafCommitments(
         switch (shielded::v2::GetBundleSemanticFamily(*v2_bundle)) {
         case shielded::v2::TransactionFamily::V2_SEND: {
             const auto& payload = std::get<shielded::v2::SendPayload>(v2_bundle->payload);
+            for (const auto& output : payload.outputs) {
+                if (!append_leaf_commitment(shielded::registry::BuildDirectSendAccountLeaf(output))) {
+                    return std::nullopt;
+                }
+            }
+            break;
+        }
+        case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+            const auto& payload =
+                std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
             for (const auto& output : payload.outputs) {
                 if (!append_leaf_commitment(shielded::registry::BuildDirectSendAccountLeaf(output))) {
                     return std::nullopt;
@@ -630,6 +664,16 @@ shielded::registry::CollectShieldedOutputAccountLeaves(const CShieldedBundle& bu
         switch (shielded::v2::GetBundleSemanticFamily(*v2_bundle)) {
         case shielded::v2::TransactionFamily::V2_SEND: {
             const auto& payload = std::get<shielded::v2::SendPayload>(v2_bundle->payload);
+            for (const auto& output : payload.outputs) {
+                if (!append_leaf(shielded::registry::BuildDirectSendAccountLeaf(output))) {
+                    return std::nullopt;
+                }
+            }
+            break;
+        }
+        case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+            const auto& payload =
+                std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
             for (const auto& output : payload.outputs) {
                 if (!append_leaf(shielded::registry::BuildDirectSendAccountLeaf(output))) {
                     return std::nullopt;
@@ -717,6 +761,17 @@ std::optional<std::vector<std::pair<uint256, uint256>>> CollectShieldedOutputAcc
             }
             break;
         }
+        case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+            const auto& payload =
+                std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
+            for (const auto& output : payload.outputs) {
+                if (!append_leaf_entry(output.note_commitment,
+                                       shielded::registry::BuildDirectSendAccountLeaf(output))) {
+                    return std::nullopt;
+                }
+            }
+            break;
+        }
         case shielded::v2::TransactionFamily::V2_LIFECYCLE:
             break;
         case shielded::v2::TransactionFamily::V2_INGRESS_BATCH: {
@@ -779,6 +834,18 @@ std::vector<uint256> CollectShieldedAnchors(const CShieldedBundle& bundle)
         switch (shielded::v2::GetBundleSemanticFamily(*v2_bundle)) {
         case shielded::v2::TransactionFamily::V2_SEND: {
             const auto& payload = std::get<shielded::v2::SendPayload>(v2_bundle->payload);
+            out.reserve(payload.spends.size() + (payload.spends.empty() ? 0 : 1));
+            if (!payload.spends.empty()) {
+                out.push_back(payload.spend_anchor);
+            }
+            for (const auto& spend : payload.spends) {
+                out.push_back(spend.merkle_anchor);
+            }
+            break;
+        }
+        case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+            const auto& payload =
+                std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
             out.reserve(payload.spends.size() + (payload.spends.empty() ? 0 : 1));
             if (!payload.spends.empty()) {
                 out.push_back(payload.spend_anchor);
@@ -890,6 +957,8 @@ std::optional<CAmount> TryGetShieldedStateValueBalance(const CShieldedBundle& bu
     switch (shielded::v2::GetBundleSemanticFamily(*v2_bundle)) {
     case shielded::v2::TransactionFamily::V2_SEND:
         return std::get<shielded::v2::SendPayload>(v2_bundle->payload).value_balance;
+    case shielded::v2::V2_SPEND_PATH_RECOVERY:
+        return std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload).fee;
     case shielded::v2::TransactionFamily::V2_LIFECYCLE:
         return CAmount{0};
     case shielded::v2::TransactionFamily::V2_INGRESS_BATCH: {
@@ -940,6 +1009,8 @@ CAmount GetShieldedTxValueBalance(const CShieldedBundle& bundle)
     switch (shielded::v2::GetBundleSemanticFamily(*v2_bundle)) {
     case shielded::v2::TransactionFamily::V2_SEND:
         return std::get<shielded::v2::SendPayload>(v2_bundle->payload).value_balance;
+    case shielded::v2::V2_SPEND_PATH_RECOVERY:
+        return std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload).fee;
     case shielded::v2::TransactionFamily::V2_LIFECYCLE:
         return 0;
     case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
@@ -1020,6 +1091,13 @@ ShieldedResourceUsage GetShieldedResourceUsage(const CShieldedBundle& bundle)
         usage.verify_units =
             static_cast<uint64_t>(payload.spends.size()) * spend_verify_units +
             static_cast<uint64_t>(payload.outputs.size()) * SHIELDED_VERIFY_UNITS_PER_DIRECT_OUTPUT;
+        usage.scan_units = payload.outputs.size();
+        usage.tree_update_units = payload.spends.size() + payload.outputs.size();
+        break;
+    }
+    case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+        const auto& payload =
+            std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle.payload);
         usage.scan_units = payload.outputs.size();
         usage.tree_update_units = payload.spends.size() + payload.outputs.size();
         break;

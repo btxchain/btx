@@ -378,6 +378,8 @@ void EnsureShieldedViewingKeyWalletOrThrow(const CWallet& wallet)
         switch (*family) {
         case shielded::v2::TransactionFamily::V2_SEND:
             return "v2_send";
+        case shielded::v2::V2_SPEND_PATH_RECOVERY:
+            return "v2_spend_path_recovery";
         case shielded::v2::TransactionFamily::V2_LIFECYCLE:
             return "v2_lifecycle";
         case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:

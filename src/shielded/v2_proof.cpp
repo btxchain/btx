@@ -37,6 +37,8 @@ constexpr std::string_view TAG_DIRECT_VALUE_COMMIT{"BTX_ShieldedV2_Direct_Value_
 constexpr std::string_view TAG_V2_SEND_EXTENSION{"BTX_ShieldedV2_Send_Extension_V1"};
 constexpr std::string_view TAG_V2_SEND_STATEMENT{"BTX_ShieldedV2_Send_Statement_V1"};
 constexpr std::string_view TAG_V2_SEND_STATEMENT_CHAIN_BOUND{"BTX_ShieldedV2_Send_Statement_V2"};
+constexpr std::string_view TAG_SPEND_PATH_RECOVERY_STATEMENT{
+    "BTX_ShieldedV2_SpendPathRecovery_Statement_V1"};
 constexpr std::string_view TAG_RECEIPT_VALUE_COMMIT{"BTX_ShieldedV2_Receipt_Value_Commit_V1"};
 constexpr std::string_view TAG_CLAIM_VALUE_COMMIT{"BTX_ShieldedV2_Claim_Value_Commit_V1"};
 constexpr std::string_view TAG_NATIVE_BATCH_STATEMENT{"BTX_ShieldedV2_Native_Batch_Statement_V1"};
@@ -259,6 +261,36 @@ DeserializeProofReceiptMetadata(Span<const uint8_t> bytes)
     return accounts;
 }
 
+[[nodiscard]] std::optional<std::vector<smile2::CompactPublicAccount>> ReconstructSmileOutputAccounts(
+    const SpendPathRecoveryPayload& payload,
+    Span<const smile2::BDLOPCommitment> output_coins)
+{
+    if (payload.outputs.size() != output_coins.size()) {
+        return std::nullopt;
+    }
+
+    std::vector<smile2::CompactPublicAccount> accounts;
+    accounts.reserve(payload.outputs.size());
+    for (size_t output_index = 0; output_index < payload.outputs.size(); ++output_index) {
+        const auto key_data = ResolveOutputPublicKeyData(payload.outputs[output_index]);
+        if (!key_data.has_value() || !HasCanonicalSmileOutputCoin(output_coins[output_index])) {
+            return std::nullopt;
+        }
+        auto reconstructed = smile2::BuildCompactPublicAccountFromPublicParts(
+            *key_data,
+            output_coins[output_index]);
+        if (!reconstructed.has_value() ||
+            smile2::ComputeCompactPublicAccountHash(*reconstructed) !=
+                payload.outputs[output_index].note_commitment ||
+            smile2::ComputeSmileOutputCoinHash(output_coins[output_index]) !=
+                payload.outputs[output_index].value_commitment) {
+            return std::nullopt;
+        }
+        accounts.push_back(std::move(*reconstructed));
+    }
+    return accounts;
+}
+
 [[nodiscard]] std::optional<std::vector<smile2::BDLOPCommitment>> CollectSmileOutputCoins(
     const V2SendWitness& witness,
     size_t expected_output_count)
@@ -374,6 +406,57 @@ DeserializeProofReceiptMetadata(Span<const uint8_t> bytes)
 
     descriptor.statement_digest = statement.envelope.statement_digest;
     // SMILE proof metadata: just store the proof size.
+    DataStream meta;
+    ::Serialize(meta, COMPACTSIZE(static_cast<uint64_t>(smile_bytes.size())));
+    descriptor.proof_metadata = ToByteVector(meta);
+    descriptor.proof_payload_offset = 0;
+    descriptor.proof_payload_size = payload_size;
+    return descriptor;
+}
+
+[[nodiscard]] ProofShardDescriptor BuildSmileDirectProofShard(const std::vector<uint8_t>& smile_bytes,
+                                                              const SpendPathRecoveryPayload& payload,
+                                                              Span<const uint256> smile_output_coin_hashes,
+                                                              const ProofStatement& statement,
+                                                              uint32_t payload_size)
+{
+    ProofShardDescriptor descriptor;
+    descriptor.first_leaf_index = 0;
+    descriptor.leaf_count = static_cast<uint32_t>(payload.spends.size());
+
+    HashWriter leaf_hw;
+    leaf_hw << std::string{TAG_DIRECT_LEAF_SUBROOT}
+            << smile_bytes
+            << payload.spend_anchor;
+    for (const auto& spend : payload.spends) {
+        leaf_hw << spend.merkle_anchor
+                << spend.nullifier
+                << spend.note_commitment;
+    }
+    descriptor.leaf_subroot = leaf_hw.GetSHA256();
+
+    HashWriter null_hw;
+    null_hw << std::string{TAG_DIRECT_NULLIFIER_COMMIT}
+            << smile_bytes
+            << payload.spend_anchor;
+    for (const auto& spend : payload.spends) {
+        null_hw << spend.nullifier;
+    }
+    descriptor.nullifier_commitment = null_hw.GetSHA256();
+
+    HashWriter value_hw;
+    value_hw << std::string{TAG_DIRECT_VALUE_COMMIT}
+             << smile_bytes
+             << payload.fee;
+    for (const auto& output : payload.outputs) {
+        value_hw << static_cast<uint8_t>(output.note_class)
+                 << output.note_commitment
+                 << output.value_commitment;
+    }
+    value_hw << std::vector<uint256>{smile_output_coin_hashes.begin(), smile_output_coin_hashes.end()};
+    descriptor.value_commitment = value_hw.GetSHA256();
+
+    descriptor.statement_digest = statement.envelope.statement_digest;
     DataStream meta;
     ::Serialize(meta, COMPACTSIZE(static_cast<uint64_t>(smile_bytes.size())));
     descriptor.proof_metadata = ToByteVector(meta);
@@ -615,6 +698,7 @@ bool IsValidVerificationDomain(VerificationDomain domain)
     switch (domain) {
     case VerificationDomain::DIRECT_SPEND:
     case VerificationDomain::BATCH_SETTLEMENT:
+    case VerificationDomain::SPEND_PATH_RECOVERY:
         return true;
     }
     return false;
@@ -639,6 +723,8 @@ const char* GetVerificationDomainName(VerificationDomain domain)
         return "direct_spend";
     case VerificationDomain::BATCH_SETTLEMENT:
         return "batch_settlement";
+    case VerificationDomain::SPEND_PATH_RECOVERY:
+        return "spend_path_recovery";
     }
     return "unknown";
 }
@@ -671,11 +757,23 @@ bool ProofStatement::IsValid() const
     }
 
     if (envelope.proof_kind == ProofKind::NONE) {
-        return domain == VerificationDomain::DIRECT_SPEND &&
-               EnvelopeHasNoProofComponents(envelope) &&
-               (envelope.settlement_binding_kind == SettlementBindingKind::NONE ||
-                shielded::v2::IsGenericShieldedSettlementBindingKind(envelope.settlement_binding_kind)) &&
-               envelope.statement_digest.IsNull();
+        const bool no_components = EnvelopeHasNoProofComponents(envelope);
+        if (!no_components || !envelope.statement_digest.IsNull()) {
+            return false;
+        }
+        switch (domain) {
+        case VerificationDomain::DIRECT_SPEND:
+            return envelope.settlement_binding_kind == SettlementBindingKind::NONE ||
+                   shielded::v2::IsGenericShieldedSettlementBindingKind(
+                       envelope.settlement_binding_kind);
+        case VerificationDomain::SPEND_PATH_RECOVERY:
+            return envelope.settlement_binding_kind == SettlementBindingKind::NONE ||
+                   shielded::v2::IsGenericPostforkSettlementBindingKind(
+                       envelope.settlement_binding_kind);
+        case VerificationDomain::BATCH_SETTLEMENT:
+            return false;
+        }
+        return false;
     }
 
     if (envelope.statement_digest.IsNull()) {
@@ -691,6 +789,21 @@ bool ProofStatement::IsValid() const
                envelope.balance_proof_kind != ProofComponentKind::NONE &&
                (envelope.settlement_binding_kind == SettlementBindingKind::NONE ||
                 shielded::v2::IsGenericShieldedSettlementBindingKind(envelope.settlement_binding_kind));
+    case VerificationDomain::SPEND_PATH_RECOVERY:
+        if (envelope.proof_kind == ProofKind::NONE) {
+            return EnvelopeHasNoProofComponents(envelope) &&
+                   (envelope.settlement_binding_kind == SettlementBindingKind::NONE ||
+                    shielded::v2::IsGenericPostforkSettlementBindingKind(
+                        envelope.settlement_binding_kind));
+        }
+        return (envelope.proof_kind == ProofKind::DIRECT_MATRICT ||
+                IsDirectSmileLikeProofKind(envelope.proof_kind)) &&
+               envelope.membership_proof_kind != ProofComponentKind::NONE &&
+               envelope.amount_proof_kind != ProofComponentKind::NONE &&
+               envelope.balance_proof_kind != ProofComponentKind::NONE &&
+               (envelope.settlement_binding_kind == SettlementBindingKind::NONE ||
+                shielded::v2::IsGenericPostforkSettlementBindingKind(
+                    envelope.settlement_binding_kind));
     case VerificationDomain::BATCH_SETTLEMENT:
         if (envelope.proof_kind == ProofKind::GENERIC_OPAQUE) {
             const bool no_components = EnvelopeHasNoProofComponents(envelope);
@@ -861,6 +974,30 @@ bool V2SendContext::IsValid(size_t expected_input_count, size_t expected_output_
         return expected_input_count == 0 &&
                !witness.use_smile &&
                material.proof_payload.empty();
+    }
+
+    if (witness.use_smile) {
+        if (!IsDirectSmileLikeProofKind(material.statement.envelope.proof_kind)) {
+            return false;
+        }
+    } else if (material.statement.envelope.proof_kind != ProofKind::DIRECT_MATRICT) {
+        return false;
+    }
+
+    return SerializeToBytes(witness) == material.proof_payload;
+}
+
+bool SpendPathRecoveryContext::IsValid(size_t expected_input_count, size_t expected_output_count) const
+{
+    if (material.statement.domain != VerificationDomain::SPEND_PATH_RECOVERY ||
+        material.payload_location != PayloadLocation::INLINE_WITNESS ||
+        !witness.IsValid(expected_input_count, expected_output_count) ||
+        !material.IsValid(expected_input_count)) {
+        return false;
+    }
+
+    if (material.statement.envelope.proof_kind == ProofKind::NONE) {
+        return false;
     }
 
     if (witness.use_smile) {
@@ -1059,6 +1196,29 @@ uint256 ComputeV2SendExtensionDigest(const CTransaction& tx)
     return hw.GetSHA256();
 }
 
+uint256 ComputeSpendPathRecoveryStatementDigest(const CTransaction& tx)
+{
+    if (!tx.HasShieldedBundle()) return uint256{};
+    const CShieldedBundle& shielded_bundle = tx.GetShieldedBundle();
+    if (!shielded_bundle.HasV2Bundle()) return uint256{};
+    const auto* v2_bundle = shielded_bundle.GetV2Bundle();
+    if (v2_bundle == nullptr ||
+        !BundleHasSemanticFamily(*v2_bundle, V2_SPEND_PATH_RECOVERY)) {
+        return uint256{};
+    }
+
+    CMutableTransaction tx_stripped{tx};
+    if (!tx_stripped.shielded_bundle.v2_bundle.has_value()) return uint256{};
+    auto& stripped_v2_bundle = *tx_stripped.shielded_bundle.v2_bundle;
+    stripped_v2_bundle.proof_payload.clear();
+    stripped_v2_bundle.header.proof_envelope.statement_digest = uint256{};
+
+    const CTransaction immutable_tx_stripped{tx_stripped};
+    HashWriter hw;
+    hw << std::string{TAG_SPEND_PATH_RECOVERY_STATEMENT} << TX_WITH_WITNESS(immutable_tx_stripped);
+    return hw.GetSHA256();
+}
+
 ProofStatement DescribeV2SendStatement(const CTransaction& tx,
                                        std::optional<uint256> extension_digest_override)
 {
@@ -1148,6 +1308,47 @@ ProofStatement DescribeV2SendStatement(const CTransaction& tx,
                                                                                       &consensus,
                                                                                       validation_height),
                                       digest,
+                                      extension_digest);
+    return statement;
+}
+
+ProofStatement DescribeSpendPathRecoveryStatement(
+    const CTransaction& tx,
+    std::optional<uint256> extension_digest_override)
+{
+    ProofStatement statement;
+    statement.domain = VerificationDomain::SPEND_PATH_RECOVERY;
+    const auto* v2_bundle = tx.HasShieldedBundle() ? tx.GetShieldedBundle().GetV2Bundle() : nullptr;
+    if (v2_bundle == nullptr ||
+        !BundleHasSemanticFamily(*v2_bundle, V2_SPEND_PATH_RECOVERY)) {
+        statement.envelope.version = 0;
+        return statement;
+    }
+
+    uint256 extension_digest;
+    if (extension_digest_override.has_value()) {
+        extension_digest = *extension_digest_override;
+    } else {
+        extension_digest = v2_bundle->header.proof_envelope.extension_digest;
+    }
+
+    if (v2_bundle->header.proof_envelope.proof_kind == ProofKind::NONE) {
+        statement.envelope = MakeEnvelope(ProofKind::NONE,
+                                          ProofComponentKind::NONE,
+                                          ProofComponentKind::NONE,
+                                          ProofComponentKind::NONE,
+                                          v2_bundle->header.proof_envelope.settlement_binding_kind,
+                                          uint256{},
+                                          extension_digest);
+        return statement;
+    }
+
+    statement.envelope = MakeEnvelope(v2_bundle->header.proof_envelope.proof_kind,
+                                      v2_bundle->header.proof_envelope.membership_proof_kind,
+                                      v2_bundle->header.proof_envelope.amount_proof_kind,
+                                      v2_bundle->header.proof_envelope.balance_proof_kind,
+                                      v2_bundle->header.proof_envelope.settlement_binding_kind,
+                                      ComputeSpendPathRecoveryStatementDigest(tx),
                                       extension_digest);
     return statement;
 }
@@ -1312,6 +1513,43 @@ std::optional<std::shared_ptr<const MatRiCTProof>> ParseLegacyDirectSpendNativeP
     return std::make_shared<MatRiCTProof>(std::move(*parsed));
 }
 
+std::optional<V2SendWitness> ParseInlineDirectWitnessPayload(const std::vector<uint8_t>& proof_payload,
+                                                             size_t expected_input_count,
+                                                             size_t expected_output_count,
+                                                             std::string& reject_reason)
+{
+    if (proof_payload.empty()) {
+        reject_reason = "bad-shielded-proof-missing";
+        return std::nullopt;
+    }
+
+    DataStream ds{proof_payload};
+    V2SendWitness witness;
+    try {
+        ds >> witness;
+    } catch (const std::exception&) {
+        reject_reason = "bad-shielded-proof-encoding";
+        return std::nullopt;
+    }
+    if (!ds.empty()) {
+        reject_reason = "bad-shielded-proof-encoding";
+        return std::nullopt;
+    }
+
+    for (const auto& spend : witness.spends) {
+        if (!shielded::lattice::IsSupportedRingSize(spend.ring_positions.size())) {
+            reject_reason = "bad-shielded-ring-positions";
+            return std::nullopt;
+        }
+    }
+
+    if (!witness.IsValid(expected_input_count, expected_output_count)) {
+        reject_reason = "bad-shielded-proof";
+        return std::nullopt;
+    }
+    return witness;
+}
+
 std::optional<V2SendWitness> ParseV2SendWitness(const shielded::v2::TransactionBundle& bundle,
                                                 std::string& reject_reason)
 {
@@ -1333,36 +1571,31 @@ std::optional<V2SendWitness> ParseV2SendWitness(const shielded::v2::TransactionB
         }
         return witness;
     }
-    if (bundle.proof_payload.empty()) {
-        reject_reason = "bad-shielded-proof-missing";
-        return std::nullopt;
-    }
+    return ParseInlineDirectWitnessPayload(bundle.proof_payload,
+                                          payload.spends.size(),
+                                          payload.outputs.size(),
+                                          reject_reason);
+}
 
-    DataStream ds{bundle.proof_payload};
-    V2SendWitness witness;
-    try {
-        ds >> witness;
-    } catch (const std::exception&) {
-        reject_reason = "bad-shielded-proof-encoding";
-        return std::nullopt;
-    }
-    if (!ds.empty()) {
-        reject_reason = "bad-shielded-proof-encoding";
-        return std::nullopt;
-    }
-
-    for (const auto& spend : witness.spends) {
-        if (!shielded::lattice::IsSupportedRingSize(spend.ring_positions.size())) {
-            reject_reason = "bad-shielded-ring-positions";
-            return std::nullopt;
-        }
-    }
-
-    if (!witness.IsValid(payload.spends.size(), payload.outputs.size())) {
+std::optional<V2SendWitness> ParseSpendPathRecoveryWitness(const shielded::v2::TransactionBundle& bundle,
+                                                           std::string& reject_reason)
+{
+    if (!BundleHasSemanticFamily(bundle, V2_SPEND_PATH_RECOVERY) ||
+        !std::holds_alternative<SpendPathRecoveryPayload>(bundle.payload)) {
         reject_reason = "bad-shielded-proof";
         return std::nullopt;
     }
-    return witness;
+
+    const auto& payload = std::get<SpendPathRecoveryPayload>(bundle.payload);
+    if (bundle.header.proof_envelope.proof_kind == ProofKind::NONE) {
+        reject_reason = "bad-shielded-proof";
+        return std::nullopt;
+    }
+
+    return ParseInlineDirectWitnessPayload(bundle.proof_payload,
+                                          payload.spends.size(),
+                                          payload.outputs.size(),
+                                          reject_reason);
 }
 
 std::optional<std::shared_ptr<const MatRiCTProof>> ParseV2SendNativeProof(
@@ -1553,6 +1786,43 @@ V2SendContext BindV2SendProof(const shielded::v2::TransactionBundle& bundle,
     return context;
 }
 
+SpendPathRecoveryContext BindSpendPathRecoveryProof(const shielded::v2::TransactionBundle& bundle,
+                                                    const ProofStatement& statement,
+                                                    V2SendWitness witness)
+{
+    SpendPathRecoveryContext context;
+    context.material.statement = statement;
+    context.material.payload_location = PayloadLocation::INLINE_WITNESS;
+    context.material.proof_payload = bundle.proof_payload;
+    if (witness.use_smile) {
+        const auto& payload = std::get<SpendPathRecoveryPayload>(bundle.payload);
+        const auto output_coins = CollectSmileOutputCoins(witness, payload.outputs.size());
+        if (!output_coins.has_value()) {
+            context.witness = std::move(witness);
+            return context;
+        }
+        std::vector<uint256> smile_output_coin_hashes;
+        smile_output_coin_hashes.reserve(output_coins->size());
+        for (const auto& coin : *output_coins) {
+            smile_output_coin_hashes.push_back(smile2::ComputeSmileOutputCoinHash(coin));
+        }
+        context.material.proof_shards.push_back(
+            BuildSmileDirectProofShard(witness.smile_proof_bytes,
+                                       payload,
+                                       Span<const uint256>{smile_output_coin_hashes.data(),
+                                                           smile_output_coin_hashes.size()},
+                                       statement,
+                                       static_cast<uint32_t>(bundle.proof_payload.size())));
+    } else {
+        context.material.proof_shards.push_back(
+            BuildLegacyDirectProofShard(witness.native_proof,
+                                        statement,
+                                        static_cast<uint32_t>(bundle.proof_payload.size())));
+    }
+    context.witness = std::move(witness);
+    return context;
+}
+
 std::optional<V2SendContext> ParseV2SendProof(const shielded::v2::TransactionBundle& bundle,
                                               const ProofStatement& statement,
                                               std::string& reject_reason)
@@ -1588,6 +1858,33 @@ std::optional<V2SendContext> ParseV2SendProof(const shielded::v2::TransactionBun
     }
     auto context = BindV2SendProof(bundle, statement, std::move(*witness));
     const auto& payload = std::get<SendPayload>(bundle.payload);
+    if (!context.IsValid(payload.spends.size(), payload.outputs.size())) {
+        reject_reason = "bad-shielded-proof";
+        return std::nullopt;
+    }
+    return context;
+}
+
+std::optional<SpendPathRecoveryContext> ParseSpendPathRecoveryProof(
+    const shielded::v2::TransactionBundle& bundle,
+    const ProofStatement& statement,
+    std::string& reject_reason)
+{
+    if (!BundleHasSemanticFamily(bundle, V2_SPEND_PATH_RECOVERY) ||
+        !std::holds_alternative<SpendPathRecoveryPayload>(bundle.payload)) {
+        reject_reason = "bad-shielded-proof";
+        return std::nullopt;
+    }
+    if (!ProofEnvelopesMatch(bundle.header.proof_envelope, statement.envelope)) {
+        reject_reason = "bad-shielded-proof";
+        return std::nullopt;
+    }
+
+    auto witness = ParseSpendPathRecoveryWitness(bundle, reject_reason);
+    if (!witness.has_value()) return std::nullopt;
+
+    auto context = BindSpendPathRecoveryProof(bundle, statement, std::move(*witness));
+    const auto& payload = std::get<SpendPathRecoveryPayload>(bundle.payload);
     if (!context.IsValid(payload.spends.size(), payload.outputs.size())) {
         reject_reason = "bad-shielded-proof";
         return std::nullopt;
@@ -1676,6 +1973,23 @@ std::optional<std::vector<Nullifier>> ExtractBoundNullifiers(const V2SendContext
         return out;
     }
     return ExtractBoundNullifiers(context.witness.native_proof, expected_input_count, reject_reason);
+}
+
+std::optional<std::vector<Nullifier>> ExtractBoundNullifiers(const SpendPathRecoveryContext& context,
+                                                             size_t expected_input_count,
+                                                             size_t expected_output_count,
+                                                             std::string& reject_reason,
+                                                             bool reject_rice_codec)
+{
+    V2SendContext direct_context;
+    direct_context.material = context.material;
+    direct_context.witness = context.witness;
+    direct_context.material.statement.domain = VerificationDomain::DIRECT_SPEND;
+    return ExtractBoundNullifiers(direct_context,
+                                  expected_input_count,
+                                  expected_output_count,
+                                  reject_reason,
+                                  reject_rice_codec);
 }
 
 std::optional<std::vector<std::vector<uint256>>> BuildLegacyDirectSpendRingMembers(
@@ -1796,6 +2110,74 @@ std::optional<std::vector<std::vector<uint256>>> BuildV2SendRingMembers(
     return ring_members;
 }
 
+std::optional<std::vector<std::vector<uint256>>> BuildSpendPathRecoveryRingMembers(
+    const shielded::v2::TransactionBundle& bundle,
+    const SpendPathRecoveryContext& context,
+    const shielded::ShieldedMerkleTree& tree,
+    std::string& reject_reason)
+{
+    if (!BundleHasSemanticFamily(bundle, V2_SPEND_PATH_RECOVERY) ||
+        !std::holds_alternative<SpendPathRecoveryPayload>(bundle.payload)) {
+        reject_reason = "bad-shielded-proof";
+        return std::nullopt;
+    }
+
+    const auto& payload = std::get<SpendPathRecoveryPayload>(bundle.payload);
+    if (!context.IsValid(payload.spends.size(), payload.outputs.size())) {
+        reject_reason = "bad-shielded-proof";
+        return std::nullopt;
+    }
+
+    std::vector<std::vector<uint256>> ring_members;
+    ring_members.reserve(payload.spends.size());
+    std::unordered_map<uint64_t, uint256> commitment_cache;
+    commitment_cache.reserve(payload.spends.size() *
+                             static_cast<size_t>(shielded::lattice::MAX_RING_SIZE));
+
+    for (size_t spend_index = 0; spend_index < payload.spends.size(); ++spend_index) {
+        const auto& witness_spend = context.witness.spends[spend_index];
+        if (!witness_spend.IsValid()) {
+            reject_reason = "bad-shielded-ring-positions";
+            return std::nullopt;
+        }
+
+        const size_t required_unique_members = static_cast<size_t>(
+            std::min<uint64_t>(tree.Size(), static_cast<uint64_t>(witness_spend.ring_positions.size())));
+        std::set<uint64_t> unique_positions;
+
+        std::vector<uint256> ring;
+        ring.reserve(witness_spend.ring_positions.size());
+        for (const uint64_t pos : witness_spend.ring_positions) {
+            unique_positions.insert(pos);
+            auto cache_it = commitment_cache.find(pos);
+            if (cache_it == commitment_cache.end()) {
+                auto commitment = tree.CommitmentAt(pos);
+                if (!commitment.has_value()) {
+                    LogPrintf("BuildSpendPathRecoveryRingMembers failed: missing commitment at pos=%u tree_size=%u has_index=%d spend_index=%u family=%u\n",
+                              static_cast<unsigned int>(pos),
+                              static_cast<unsigned int>(tree.Size()),
+                              tree.HasCommitmentIndex() ? 1 : 0,
+                              static_cast<unsigned int>(spend_index),
+                              static_cast<unsigned int>(GetBundleSemanticFamily(bundle)));
+                    reject_reason = "bad-shielded-ring-member-position";
+                    return std::nullopt;
+                }
+                cache_it = commitment_cache.emplace(pos, *commitment).first;
+            }
+            ring.push_back(cache_it->second);
+        }
+
+        if (unique_positions.size() < required_unique_members) {
+            reject_reason = "bad-shielded-ring-member-insufficient-diversity";
+            return std::nullopt;
+        }
+
+        ring_members.push_back(std::move(ring));
+    }
+
+    return ring_members;
+}
+
 std::optional<std::vector<std::vector<smile2::wallet::SmileRingMember>>> BuildV2SendSmileRingMembers(
     const shielded::v2::TransactionBundle& bundle,
     const V2SendContext& context,
@@ -1811,6 +2193,101 @@ std::optional<std::vector<std::vector<smile2::wallet::SmileRingMember>>> BuildV2
     }
 
     const auto& payload = std::get<SendPayload>(bundle.payload);
+    if (!context.IsValid(payload.spends.size(), payload.outputs.size()) || !context.witness.use_smile) {
+        reject_reason = "bad-shielded-proof";
+        return std::nullopt;
+    }
+
+    std::vector<std::vector<smile2::wallet::SmileRingMember>> ring_members;
+    ring_members.reserve(payload.spends.size());
+    std::unordered_map<uint64_t, uint256> commitment_cache;
+    commitment_cache.reserve(payload.spends.size() *
+                             static_cast<size_t>(shielded::lattice::MAX_RING_SIZE));
+
+    for (size_t spend_index = 0; spend_index < payload.spends.size(); ++spend_index) {
+        const auto& witness_spend = context.witness.spends[spend_index];
+        if (!witness_spend.IsValid()) {
+            reject_reason = "bad-shielded-ring-positions";
+            return std::nullopt;
+        }
+
+        std::vector<smile2::wallet::SmileRingMember> ring;
+        ring.reserve(witness_spend.ring_positions.size());
+        for (const uint64_t pos : witness_spend.ring_positions) {
+            auto cache_it = commitment_cache.find(pos);
+            if (cache_it == commitment_cache.end()) {
+                auto commitment = tree.CommitmentAt(pos);
+                if (!commitment.has_value()) {
+                    reject_reason = "bad-shielded-ring-member-position";
+                    return std::nullopt;
+                }
+                cache_it = commitment_cache.emplace(pos, *commitment).first;
+            }
+
+            const auto account_it = public_accounts.find(cache_it->second);
+            const auto leaf_it = account_leaf_commitments.find(cache_it->second);
+            if (account_it == public_accounts.end()) {
+                reject_reason = "bad-smile2-ring-member-public-account";
+                return std::nullopt;
+            }
+            if (leaf_it == account_leaf_commitments.end()) {
+                reject_reason = "bad-smile2-ring-member-account-leaf";
+                return std::nullopt;
+            }
+
+            auto member = smile2::wallet::BuildRingMemberFromCompactPublicAccount(
+                smile2::wallet::SMILE_GLOBAL_SEED,
+                cache_it->second,
+                account_it->second,
+                leaf_it->second);
+            if (!member.has_value()) {
+                reject_reason = "bad-smile2-ring-member-account-leaf";
+                return std::nullopt;
+            }
+            ring.push_back(std::move(*member));
+        }
+
+        ring_members.push_back(std::move(ring));
+    }
+
+    if (!ring_members.empty()) {
+        const auto& reference_positions = context.witness.spends.front().ring_positions;
+        const auto& reference_ring = ring_members.front();
+        for (size_t spend_index = 1; spend_index < ring_members.size(); ++spend_index) {
+            if (context.witness.spends[spend_index].ring_positions != reference_positions ||
+                ring_members[spend_index].size() != reference_ring.size()) {
+                reject_reason = "bad-smile2-shared-ring";
+                return std::nullopt;
+            }
+            for (size_t i = 0; i < reference_ring.size(); ++i) {
+                if (ring_members[spend_index][i].note_commitment != reference_ring[i].note_commitment ||
+                    ring_members[spend_index][i].account_leaf_commitment !=
+                        reference_ring[i].account_leaf_commitment) {
+                    reject_reason = "bad-smile2-shared-ring";
+                    return std::nullopt;
+                }
+            }
+        }
+    }
+
+    return ring_members;
+}
+
+std::optional<std::vector<std::vector<smile2::wallet::SmileRingMember>>> BuildSpendPathRecoverySmileRingMembers(
+    const shielded::v2::TransactionBundle& bundle,
+    const SpendPathRecoveryContext& context,
+    const shielded::ShieldedMerkleTree& tree,
+    const std::map<uint256, smile2::CompactPublicAccount>& public_accounts,
+    const std::map<uint256, uint256>& account_leaf_commitments,
+    std::string& reject_reason)
+{
+    if (!BundleHasSemanticFamily(bundle, V2_SPEND_PATH_RECOVERY) ||
+        !std::holds_alternative<SpendPathRecoveryPayload>(bundle.payload)) {
+        reject_reason = "bad-shielded-proof";
+        return std::nullopt;
+    }
+
+    const auto& payload = std::get<SpendPathRecoveryPayload>(bundle.payload);
     if (!context.IsValid(payload.spends.size(), payload.outputs.size()) || !context.witness.use_smile) {
         reject_reason = "bad-shielded-proof";
         return std::nullopt;
@@ -2101,6 +2578,200 @@ bool VerifyV2SendProof(
                                             *output_coins,
                                             pub,
                                             payload.value_balance,
+                                            reject_rice_codec,
+                                            bind_anonset_context)
+                .has_value();
+}
+
+bool VerifySpendPathRecoveryProof(const shielded::v2::TransactionBundle& bundle,
+                                  const SpendPathRecoveryContext& context,
+                                  const std::vector<std::vector<uint256>>& ring_members)
+{
+    if (!BundleHasSemanticFamily(bundle, V2_SPEND_PATH_RECOVERY) ||
+        !std::holds_alternative<SpendPathRecoveryPayload>(bundle.payload)) {
+        LogPrintf("VerifySpendPathRecoveryProof rejected invalid bundle family=%u wire_family=%u\n",
+                  static_cast<unsigned int>(GetBundleSemanticFamily(bundle)),
+                  static_cast<unsigned int>(bundle.header.family_id));
+        return false;
+    }
+
+    const auto& payload = std::get<SpendPathRecoveryPayload>(bundle.payload);
+    if (!context.IsValid(payload.spends.size(), payload.outputs.size())) {
+        LogPrintf("VerifySpendPathRecoveryProof invalid context spends=%u outputs=%u witness_spends=%u\n",
+                  static_cast<unsigned int>(payload.spends.size()),
+                  static_cast<unsigned int>(payload.outputs.size()),
+                  static_cast<unsigned int>(context.witness.spends.size()));
+        return false;
+    }
+
+    const ProofKind proof_kind = context.material.statement.envelope.proof_kind;
+
+    if (proof_kind == ProofKind::NONE) {
+        return false;
+    }
+
+    if (IsDirectSmileLikeProofKind(proof_kind)) {
+        return false;
+    }
+
+    std::vector<Nullifier> input_nullifiers;
+    input_nullifiers.reserve(payload.spends.size());
+    for (size_t i = 0; i < payload.spends.size(); ++i) {
+        const auto& spend = payload.spends[i];
+        if (!spend.value_commitment.IsNull() &&
+            CommitmentHash(context.witness.native_proof.input_commitments[i]) != spend.value_commitment) {
+            LogPrintf("VerifySpendPathRecoveryProof input commitment mismatch spend=%u expected=%s actual=%s statement=%s\n",
+                      static_cast<unsigned int>(i),
+                      spend.value_commitment.ToString(),
+                      CommitmentHash(context.witness.native_proof.input_commitments[i]).ToString(),
+                      context.material.statement.envelope.statement_digest.ToString());
+            return false;
+        }
+        input_nullifiers.push_back(spend.nullifier);
+    }
+
+    std::vector<uint256> output_note_commitments;
+    output_note_commitments.reserve(payload.outputs.size());
+    for (size_t i = 0; i < payload.outputs.size(); ++i) {
+        const auto& output = payload.outputs[i];
+        if (CommitmentHash(context.witness.native_proof.output_commitments[i]) != output.value_commitment) {
+            LogPrintf("VerifySpendPathRecoveryProof output commitment mismatch output=%u expected=%s actual=%s statement=%s\n",
+                      static_cast<unsigned int>(i),
+                      output.value_commitment.ToString(),
+                      CommitmentHash(context.witness.native_proof.output_commitments[i]).ToString(),
+                      context.material.statement.envelope.statement_digest.ToString());
+            return false;
+        }
+        output_note_commitments.push_back(output.note_commitment);
+    }
+
+    const bool verified = shielded::ringct::VerifyMatRiCTProof(context.witness.native_proof,
+                                                               ring_members,
+                                                               input_nullifiers,
+                                                               output_note_commitments,
+                                                               payload.fee,
+                                                               context.material.statement.envelope.statement_digest);
+    if (!verified) {
+        LogPrintf("VerifySpendPathRecoveryProof MatRiCT verification failed statement=%s fee=%lld inputs=%u outputs=%u rings=%u ring_hash=%s\n",
+                  context.material.statement.envelope.statement_digest.ToString(),
+                  static_cast<long long>(payload.fee),
+                  static_cast<unsigned int>(input_nullifiers.size()),
+                  static_cast<unsigned int>(output_note_commitments.size()),
+                  static_cast<unsigned int>(ring_members.size()),
+                  HashRingMembers(ring_members).ToString());
+    }
+    return verified;
+}
+
+bool VerifySpendPathRecoveryProof(
+    const shielded::v2::TransactionBundle& bundle,
+    const SpendPathRecoveryContext& context,
+    const std::vector<std::vector<smile2::wallet::SmileRingMember>>& ring_members,
+    bool reject_rice_codec,
+    bool bind_anonset_context)
+{
+    if (!BundleHasSemanticFamily(bundle, V2_SPEND_PATH_RECOVERY) ||
+        !std::holds_alternative<SpendPathRecoveryPayload>(bundle.payload)) {
+        return false;
+    }
+
+    const auto& payload = std::get<SpendPathRecoveryPayload>(bundle.payload);
+    if (!context.IsValid(payload.spends.size(), payload.outputs.size()) ||
+        !IsDirectSmileLikeProofKind(context.material.statement.envelope.proof_kind) ||
+        !context.witness.use_smile ||
+        ring_members.size() != payload.spends.size()) {
+        return false;
+    }
+
+    std::string reject_reason;
+    auto bound_nullifiers = ExtractBoundNullifiers(context,
+                                                   payload.spends.size(),
+                                                   payload.outputs.size(),
+                                                   reject_reason,
+                                                   reject_rice_codec);
+    if (!bound_nullifiers.has_value()) {
+        return false;
+    }
+    for (size_t i = 0; i < payload.spends.size(); ++i) {
+        if ((*bound_nullifiers)[i] != payload.spends[i].nullifier) {
+            return false;
+        }
+    }
+
+    const auto output_coins = CollectSmileOutputCoins(context.witness, payload.outputs.size());
+    if (!output_coins.has_value()) {
+        return false;
+    }
+    if (!ReconstructSmileOutputAccounts(payload, *output_coins).has_value()) {
+        return false;
+    }
+
+    if (ring_members.empty() || ring_members.front().empty()) {
+        return false;
+    }
+
+    const auto& reference_ring = ring_members.front();
+    std::vector<smile2::BDLOPCommitment> shared_coin_ring;
+    shared_coin_ring.reserve(reference_ring.size());
+    for (const auto& member : reference_ring) {
+        if (!member.IsValid()) return false;
+        shared_coin_ring.push_back(member.public_coin);
+    }
+    for (size_t spend_index = 1; spend_index < ring_members.size(); ++spend_index) {
+        if (ring_members[spend_index].size() != reference_ring.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < reference_ring.size(); ++i) {
+            const auto& lhs = ring_members[spend_index][i];
+            const auto& rhs = reference_ring[i];
+            if (lhs.note_commitment != rhs.note_commitment ||
+                lhs.account_leaf_commitment != rhs.account_leaf_commitment ||
+                lhs.public_key.pk != rhs.public_key.pk ||
+                lhs.public_key.A != rhs.public_key.A ||
+                lhs.public_coin.t0 != rhs.public_coin.t0 ||
+                lhs.public_coin.t_msg != rhs.public_coin.t_msg) {
+                return false;
+            }
+        }
+    }
+    for (size_t i = 0; i < payload.spends.size(); ++i) {
+        const uint256 expected_input_binding =
+            smile2::ComputeSmileDirectInputBindingHash(
+                Span<const smile2::wallet::SmileRingMember>{reference_ring.data(), reference_ring.size()},
+                payload.spends[i].merkle_anchor,
+                static_cast<uint32_t>(i),
+                payload.spends[i].nullifier);
+        if (!payload.spends[i].value_commitment.IsNull() &&
+            payload.spends[i].value_commitment != expected_input_binding) {
+            return false;
+        }
+    }
+
+    smile2::CTPublicData pub;
+    pub.anon_set = smile2::wallet::BuildAnonymitySet(
+        Span<const smile2::wallet::SmileRingMember>{reference_ring.data(), reference_ring.size()});
+    pub.coin_rings.assign(payload.spends.size(), shared_coin_ring);
+    pub.account_rings.reserve(payload.spends.size());
+    for (const auto& spend : payload.spends) {
+        std::vector<smile2::CTPublicAccount> account_ring;
+        account_ring.reserve(reference_ring.size());
+        for (const auto& member : reference_ring) {
+            account_ring.push_back(smile2::CTPublicAccount{
+                member.note_commitment,
+                member.public_key,
+                member.public_coin,
+                spend.account_leaf_commitment,
+            });
+        }
+        pub.account_rings.push_back(std::move(account_ring));
+    }
+
+    return !smile2::VerifySmile2CTFromBytes(context.witness.smile_proof_bytes,
+                                            payload.spends.size(),
+                                            payload.outputs.size(),
+                                            *output_coins,
+                                            pub,
+                                            payload.fee,
                                             reject_rice_codec,
                                             bind_anonset_context)
                 .has_value();

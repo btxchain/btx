@@ -37,6 +37,58 @@ using namespace shielded::ringct;
     return "bad-shielded-spend-auth-proof";
 }
 
+} // namespace
+
+const char* ShieldedV2FamilyName(shielded::v2::TransactionFamily family)
+{
+    if (family == shielded::v2::V2_SPEND_PATH_RECOVERY) {
+        return "spend-path-recovery";
+    }
+
+    switch (family) {
+    case shielded::v2::TransactionFamily::V2_SEND:
+        return "send";
+    case shielded::v2::TransactionFamily::V2_LIFECYCLE:
+        return "lifecycle";
+    case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
+        return "ingress-batch";
+    case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
+        return "egress-batch";
+    case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
+        return "settlement-anchor";
+    case shielded::v2::TransactionFamily::V2_REBALANCE:
+        return "rebalance";
+    case shielded::v2::TransactionFamily::V2_GENERIC:
+        return "generic";
+    }
+    return "unknown";
+}
+
+std::string DescribeShieldedV2Context(const CShieldedBundle& bundle)
+{
+    if (!bundle.HasV2Bundle()) return "legacy-bundle";
+
+    const auto family = bundle.GetTransactionFamily();
+    if (!family.has_value()) return "v2-family-unavailable";
+
+    return strprintf("v2-family-%s", ShieldedV2FamilyName(*family));
+}
+
+void LogShieldedV2ContextReject(std::string_view gate, const CShieldedBundle& bundle)
+{
+    const std::string gate_str{gate};
+    const std::string context_str{DescribeShieldedV2Context(bundle)};
+    LogDebug(BCLog::VALIDATION,
+             "shielded v2 contextual reject: gate=%s context=%s inputs=%u outputs=%u proof_size=%u\n",
+             gate_str.c_str(),
+             context_str.c_str(),
+             static_cast<unsigned int>(bundle.GetShieldedInputCount()),
+             static_cast<unsigned int>(bundle.GetShieldedOutputCount()),
+             static_cast<unsigned int>(bundle.GetProofSize()));
+}
+
+namespace {
+
 [[nodiscard]] bool RejectRetiredMatRiCTEnvelopeAfterDisable(const CShieldedBundle& bundle,
                                                             const Consensus::Params& consensus,
                                                             int32_t validation_height,
@@ -48,6 +100,7 @@ using namespace shielded::ringct;
 
     const auto* v2_bundle = bundle.GetV2Bundle();
     if (v2_bundle == nullptr) {
+        LogShieldedV2ContextReject("retired-matrict-v2-bundle-null", bundle);
         reject_reason = "bad-shielded-v2-contextual";
         return false;
     }
@@ -79,6 +132,9 @@ using namespace shielded::ringct;
     switch (family_id) {
     case shielded::v2::TransactionFamily::V2_SEND:
         reject_reason = "bad-shielded-v2-send-fee-bucket";
+        return false;
+    case shielded::v2::V2_SPEND_PATH_RECOVERY:
+        reject_reason = "bad-shielded-v2-spend-path-recovery-fee-bucket";
         return false;
     case shielded::v2::TransactionFamily::V2_LIFECYCLE:
         reject_reason = "bad-shielded-v2-lifecycle-fee-bucket";
@@ -251,6 +307,7 @@ using namespace shielded::ringct;
     const auto binding_kind = bundle.header.proof_envelope.settlement_binding_kind;
     switch (semantic_family) {
     case shielded::v2::TransactionFamily::V2_SEND:
+    case shielded::v2::V2_SPEND_PATH_RECOVERY:
     case shielded::v2::TransactionFamily::V2_LIFECYCLE:
     case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
     case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
@@ -1137,6 +1194,137 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
             return proof_reject;
         }
         switch (semantic_family) {
+        case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+            if (m_consensus == nullptr ||
+                !m_consensus->IsShieldedSpendPathRecoveryActive(m_validation_height)) {
+                LogShieldedV2ContextReject("proof-check-v2-spend-path-recovery-disabled", bundle);
+                return std::string{"bad-shielded-v2-spend-path-recovery-disabled"};
+            }
+
+            const auto& payload = std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
+            if (!bundle.HasShieldedInputs()) return std::string{"bad-shielded-proof-missing"};
+            if (!m_tree_snapshot) return std::string{"bad-shielded-ring-tree-unavailable"};
+            if (!m_tx->vin.empty() || !m_tx->vout.empty()) {
+                return std::string{"bad-shielded-v2-spend-path-recovery-transparent"};
+            }
+            if (!RejectShieldedCanonicalFeeBucket(semantic_family,
+                                                  payload.fee,
+                                                  m_consensus,
+                                                  m_validation_height,
+                                                  proof_reject)) {
+                return proof_reject;
+            }
+
+            const shielded::v2::proof::ProofStatement statement =
+                shielded::v2::proof::DescribeSpendPathRecoveryStatement(*m_tx);
+            auto context = shielded::v2::proof::ParseSpendPathRecoveryProof(*v2_bundle, statement, proof_reject);
+            if (!context.has_value()) {
+                LogPrintf("CShieldedProofCheck spend_path_recovery parse failed txid=%s reject=%s statement=%s tree_root=%s tree_size=%u\n",
+                          m_tx->GetHash().ToString(),
+                          proof_reject,
+                          statement.envelope.statement_digest.ToString(),
+                          m_tree_snapshot->Root().ToString(),
+                          static_cast<unsigned int>(m_tree_snapshot->Size()));
+                return proof_reject;
+            }
+            const size_t ring_size = context->witness.spends.empty()
+                ? 0
+                : context->witness.spends.front().ring_positions.size();
+            if (!RejectShieldedMinimumPrivacyPool(ring_size,
+                                                  m_tree_snapshot->Size(),
+                                                  m_consensus,
+                                                  m_validation_height,
+                                                  proof_reject)) {
+                return proof_reject;
+            }
+            if (!context->IsValid(payload.spends.size(), payload.outputs.size())) {
+                LogPrintf("CShieldedProofCheck spend_path_recovery invalid context txid=%s spends=%u outputs=%u witness_spends=%u tree_root=%s tree_size=%u\n",
+                          m_tx->GetHash().ToString(),
+                          static_cast<unsigned int>(payload.spends.size()),
+                          static_cast<unsigned int>(payload.outputs.size()),
+                          static_cast<unsigned int>(context->witness.spends.size()),
+                          m_tree_snapshot->Root().ToString(),
+                          static_cast<unsigned int>(m_tree_snapshot->Size()));
+                return std::string{"bad-shielded-proof"};
+            }
+
+            if (context->witness.use_smile) {
+                if (!m_smile_public_accounts || !m_account_leaf_commitments) {
+                    return std::string{"bad-smile2-ring-member-account"};
+                }
+                if (reject_rice_codec) {
+                    smile2::SmileCTProof proof;
+                    if (auto parse_err = smile2::ParseSmile2Proof(context->witness.smile_proof_bytes,
+                                                                  payload.spends.size(),
+                                                                  payload.outputs.size(),
+                                                                  proof,
+                                                                  /*reject_rice_codec=*/true);
+                        parse_err.has_value()) {
+                        return *parse_err;
+                    }
+                }
+                std::string ring_member_error;
+                auto smile_ring_members =
+                    shielded::v2::proof::BuildSpendPathRecoverySmileRingMembers(*v2_bundle,
+                                                                                *context,
+                                                                                *m_tree_snapshot,
+                                                                                *m_smile_public_accounts,
+                                                                                *m_account_leaf_commitments,
+                                                                                ring_member_error);
+                if (!smile_ring_members.has_value()) {
+                    LogPrintf("CShieldedProofCheck spend_path_recovery SMILE ring reconstruction failed txid=%s reject=%s statement=%s tree_root=%s tree_size=%u smile_accounts=%u\n",
+                              m_tx->GetHash().ToString(),
+                              ring_member_error,
+                              statement.envelope.statement_digest.ToString(),
+                              m_tree_snapshot->Root().ToString(),
+                              static_cast<unsigned int>(m_tree_snapshot->Size()),
+                              static_cast<unsigned int>(m_smile_public_accounts->size()));
+                    return ring_member_error;
+                }
+                if (!shielded::v2::proof::VerifySpendPathRecoveryProof(*v2_bundle,
+                                                                       *context,
+                                                                       *smile_ring_members,
+                                                                       reject_rice_codec,
+                                                                       bind_smile_anonset_context)) {
+                    LogPrintf("CShieldedProofCheck spend_path_recovery SMILE verify failed txid=%s statement=%s anchor=%s fee=%lld tree_root=%s tree_size=%u\n",
+                              m_tx->GetHash().ToString(),
+                              statement.envelope.statement_digest.ToString(),
+                              payload.spend_anchor.ToString(),
+                              static_cast<long long>(payload.fee),
+                              m_tree_snapshot->Root().ToString(),
+                              static_cast<unsigned int>(m_tree_snapshot->Size()));
+                    return std::string{"bad-shielded-proof"};
+                }
+            } else {
+                std::string ring_member_error;
+                auto ring_members = shielded::v2::proof::BuildSpendPathRecoveryRingMembers(*v2_bundle,
+                                                                                            *context,
+                                                                                            *m_tree_snapshot,
+                                                                                            ring_member_error);
+                if (!ring_members.has_value()) {
+                    LogPrintf("CShieldedProofCheck spend_path_recovery ring reconstruction failed txid=%s reject=%s statement=%s tree_root=%s tree_size=%u\n",
+                              m_tx->GetHash().ToString(),
+                              ring_member_error,
+                              statement.envelope.statement_digest.ToString(),
+                              m_tree_snapshot->Root().ToString(),
+                              static_cast<unsigned int>(m_tree_snapshot->Size()));
+                    return ring_member_error;
+                }
+                if (!shielded::v2::proof::VerifySpendPathRecoveryProof(*v2_bundle,
+                                                                       *context,
+                                                                       *ring_members)) {
+                    LogPrintf("CShieldedProofCheck spend_path_recovery verify failed txid=%s statement=%s anchor=%s fee=%lld tree_root=%s tree_size=%u\n",
+                              m_tx->GetHash().ToString(),
+                              statement.envelope.statement_digest.ToString(),
+                              payload.spend_anchor.ToString(),
+                              static_cast<long long>(payload.fee),
+                              m_tree_snapshot->Root().ToString(),
+                              static_cast<unsigned int>(m_tree_snapshot->Size()));
+                    return std::string{"bad-shielded-proof"};
+                }
+            }
+            return std::nullopt;
+        }
         case shielded::v2::TransactionFamily::V2_LIFECYCLE: {
             if (m_consensus == nullptr ||
                 !m_consensus->IsShieldedMatRiCTDisabled(m_validation_height)) {
@@ -1463,8 +1651,10 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
             return std::nullopt;
         }
         case shielded::v2::TransactionFamily::V2_GENERIC:
+            LogShieldedV2ContextReject("proof-check-v2-generic-family", bundle);
             return std::string{"bad-shielded-v2-contextual"};
         default:
+            LogShieldedV2ContextReject("proof-check-v2-unsupported-family", bundle);
             return std::string{"bad-shielded-v2-contextual"};
         }
     }

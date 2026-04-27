@@ -86,6 +86,14 @@ def _shielded_relay_fixture_binary(test):
     )
 
 
+def _spend_path_recovery_fixture_binary(test):
+    return (
+        Path(test.config["environment"]["BUILDDIR"])
+        / "bin"
+        / f"gen_shielded_spend_path_recovery_fixture{test.config['environment']['EXEEXT']}"
+    )
+
+
 def build_signed_shielded_relay_fixture_tx(
     test,
     node,
@@ -137,6 +145,31 @@ def build_unsigned_shielded_relay_fixture_tx(test, node, family, *, require_memp
         accept = node.testmempoolaccept(rawtxs=[fixture["tx_hex"]], maxfeerate=0)[0]
         assert_equal(accept["allowed"], True)
     return fixture
+
+
+def build_spend_path_recovery_fixture(
+    test,
+    funding_utxos,
+    *,
+    validation_height,
+    matrict_disable_height,
+    legacy_fee_sats=1_000,
+    recovery_fee_sats=1_000,
+):
+    args = [
+        str(_spend_path_recovery_fixture_binary(test)),
+        f"--validation-height={validation_height}",
+        f"--matrict-disable-height={matrict_disable_height}",
+        f"--legacy-fee-sats={legacy_fee_sats}",
+        f"--recovery-fee-sats={recovery_fee_sats}",
+    ]
+    for utxo in funding_utxos:
+        args.append(
+            "--legacy-input="
+            f"{utxo['txid']}:{utxo['vout']}:"
+            f"{int(Decimal(str(utxo['amount'])) * 100_000_000)}"
+        )
+    return json.loads(subprocess.check_output(args, text=True))
 
 
 def planin(wallet, amount, refund_lock_height, *, bridge_id, operation_id, recipient=None,

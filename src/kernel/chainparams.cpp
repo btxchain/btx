@@ -933,6 +933,8 @@ public:
         consensus.nShieldedSmileRiceCodecDisableHeight = 0;  // Activate at genesis for instant regtest
         consensus.nShieldedMatRiCTDisableHeight =
             opts.shielded_matrict_disable_height.value_or(0);  // Activate at genesis for instant regtest
+        consensus.nShieldedSpendPathRecoveryActivationHeight =
+            opts.shielded_spend_path_recovery_activation_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedPQ128UpgradeHeight =
             opts.shielded_pq128_upgrade_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedSettlementAnchorMaturity = 6;
@@ -988,6 +990,7 @@ public:
             opts.matmul_asert_half_life.has_value() ||
             opts.matmul_asert_half_life_upgrade_height.has_value() ||
             opts.shielded_matrict_disable_height.has_value() ||
+            opts.shielded_spend_path_recovery_activation_height.has_value() ||
             opts.shielded_pq128_upgrade_height.has_value() ||
             opts.mldsa_disable_height.has_value();
 

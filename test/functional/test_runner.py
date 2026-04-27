@@ -183,6 +183,8 @@ BASE_SCRIPTS = [
     'wallet_shielded_transfer_builder_locks.py --descriptors',
     'wallet_smile_v2_benchmark.py',
     'wallet_smile_v2_full_lifecycle.py',
+    'feature_spend_path_recovery_activation_compat.py',
+    'feature_spend_path_recovery_reorg.py',
     'rpc_pq_multisig.py',
     'feature_p2mr_end_to_end.py',
     'p2mr_end_to_end.py',

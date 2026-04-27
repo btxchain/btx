@@ -36,6 +36,12 @@ enum class TransactionFamily : uint8_t {
     V2_LIFECYCLE = 7,
 };
 
+// Reserved scaffolding id for a future spend-path recovery semantic family.
+// Payload and consensus acceptance are intentionally not implemented in this
+// step; this constant only reserves the identifier and lets tests cover the
+// current rejected behavior.
+static constexpr TransactionFamily V2_SPEND_PATH_RECOVERY{static_cast<TransactionFamily>(8)};
+
 enum class NoteClass : uint8_t {
     USER = 1,
     RESERVE = 2,

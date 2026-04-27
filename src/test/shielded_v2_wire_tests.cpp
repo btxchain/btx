@@ -143,9 +143,13 @@ BOOST_AUTO_TEST_CASE(family_id_inventory_is_stable)
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(TransactionFamily::V2_REBALANCE), 4);
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(TransactionFamily::V2_SETTLEMENT_ANCHOR), 5);
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(TransactionFamily::V2_GENERIC), 6);
+    BOOST_CHECK_EQUAL(static_cast<uint8_t>(TransactionFamily::V2_LIFECYCLE), 7);
+    BOOST_CHECK_EQUAL(static_cast<uint8_t>(V2_SPEND_PATH_RECOVERY), 8);
 
     BOOST_CHECK_EQUAL(GetTransactionFamilyName(TransactionFamily::V2_EGRESS_BATCH), "v2_egress_batch");
     BOOST_CHECK_EQUAL(GetTransactionFamilyName(TransactionFamily::V2_GENERIC), "shielded_v2");
+    BOOST_CHECK_EQUAL(GetTransactionFamilyName(V2_SPEND_PATH_RECOVERY), "v2_spend_path_recovery");
+    BOOST_CHECK(IsValidTransactionFamily(V2_SPEND_PATH_RECOVERY));
 }
 
 BOOST_AUTO_TEST_CASE(proof_kind_inventory_is_stable)
@@ -197,6 +201,16 @@ BOOST_AUTO_TEST_CASE(generic_wire_family_activates_at_disable_height)
         TransactionFamily::V2_GENERIC);
     BOOST_CHECK_EQUAL(
         GetWireTransactionFamilyForValidationHeight(TransactionFamily::V2_SETTLEMENT_ANCHOR,
+                                                    &consensus,
+                                                    activation_height),
+        TransactionFamily::V2_GENERIC);
+    BOOST_CHECK_EQUAL(
+        GetWireTransactionFamilyForValidationHeight(V2_SPEND_PATH_RECOVERY,
+                                                    &consensus,
+                                                    activation_height - 1),
+        V2_SPEND_PATH_RECOVERY);
+    BOOST_CHECK_EQUAL(
+        GetWireTransactionFamilyForValidationHeight(V2_SPEND_PATH_RECOVERY,
                                                     &consensus,
                                                     activation_height),
         TransactionFamily::V2_GENERIC);

@@ -152,6 +152,25 @@ BOOST_AUTO_TEST_CASE(regtest_shielded_matrict_disable_height_rejects_negative)
     BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
 }
 
+BOOST_AUTO_TEST_CASE(regtest_shielded_spend_path_recovery_activation_height_override)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedspendpathrecoveryactivationheight", "245");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedSpendPathRecoveryActivationHeight, 245);
+    BOOST_CHECK(!params->GetConsensus().IsShieldedSpendPathRecoveryActive(244));
+    BOOST_CHECK(params->GetConsensus().IsShieldedSpendPathRecoveryActive(245));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_spend_path_recovery_activation_height_rejects_negative)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedspendpathrecoveryactivationheight", "-1");
+    BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+}
+
 BOOST_AUTO_TEST_CASE(regtest_shielded_pq128_upgrade_height_override)
 {
     ArgsManager args;

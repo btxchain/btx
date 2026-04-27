@@ -102,6 +102,10 @@ uint256 ComputeLegacyPayloadEphemeralKey(Span<const uint8_t> ciphertext)
 
 bool IsValidTransactionFamily(TransactionFamily family)
 {
+    if (family == V2_SPEND_PATH_RECOVERY) {
+        return true;
+    }
+
     switch (family) {
     case TransactionFamily::V2_SEND:
     case TransactionFamily::V2_INGRESS_BATCH:
@@ -192,6 +196,10 @@ bool IsValidSettlementBindingKind(SettlementBindingKind kind)
 
 const char* GetTransactionFamilyName(TransactionFamily family)
 {
+    if (family == V2_SPEND_PATH_RECOVERY) {
+        return "v2_spend_path_recovery";
+    }
+
     switch (family) {
     case TransactionFamily::V2_SEND:
         return "v2_send";
