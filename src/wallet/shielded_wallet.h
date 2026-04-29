@@ -186,8 +186,10 @@ struct ShieldedSpendSelectionEstimate
 struct ShieldedBalanceSummary
 {
     CAmount spendable{0};
+    CAmount recovery_only{0};
     CAmount watchonly{0};
     int64_t spendable_note_count{0};
+    int64_t recovery_only_note_count{0};
     int64_t watchonly_note_count{0};
 };
 
@@ -306,6 +308,10 @@ public:
     [[nodiscard]] std::vector<ShieldedCoin> GetSpendableNotes(int min_depth = 1) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
 
+    /** Return stranded wallet-owned notes eligible for spend-path recovery. */
+    [[nodiscard]] std::vector<ShieldedCoin> GetRecoverableNotes(int min_depth = 1) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
     /** Return unspent notes (including view-only). */
     [[nodiscard]] std::vector<ShieldedCoin> GetUnspentNotes(int min_depth = 0) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
@@ -327,6 +333,14 @@ public:
         bool allow_transparent_fallback = true,
         std::string* error = nullptr,
         const std::vector<ShieldedCoin>* selected_override = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
+    /** Recover one stranded shielded note into a fresh ordinary shielded note. */
+    [[nodiscard]] std::optional<CMutableTransaction> CreateSpendPathRecovery(
+        const uint256& note_commitment,
+        std::optional<ShieldedAddress> destination,
+        CAmount fee,
+        std::string* error = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
 
     /** Build transparent->shielded transaction using selected transparent UTXOs.
@@ -552,6 +566,8 @@ private:
     [[nodiscard]] bool RepairOwnedNoteSpendMetadata(
         const std::vector<unsigned char>& master_seed) EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
     void PruneStalePendingSpends() const EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    [[nodiscard]] std::vector<ShieldedCoin> GetOrdinarySpendableNotes(int min_depth) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
     [[nodiscard]] std::optional<CMutableTransaction> CreateV2Send(
         const std::vector<std::pair<ShieldedAddress, CAmount>>& shielded_recipients,
         const std::vector<std::pair<CTxDestination, CAmount>>& transparent_recipients,

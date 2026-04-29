@@ -546,7 +546,7 @@ JSON
     ;;
   getpeerinfo)
     cat <<JSON
-[{"inbound":false,"addr":"cached-a.example:19335"},{"inbound":false,"addr":"cached-b.example:19335"}]
+[{"inbound":false,"addr":"100.85.221.75:19335","connection_type":"manual","minping":0.001,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"node.btx.tools:19335","connection_type":"manual","minping":0.050,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"221.240.90.124:19335","connection_type":"outbound-full-relay","minping":0.003,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"147.182.192.221:19335","connection_type":"outbound-full-relay","minping":0.108,"synced_headers":100,"synced_blocks":100}]
 JSON
     ;;
   generatetoaddress)
@@ -581,10 +581,79 @@ BTX_MINING_MAX_LOOPS=5 \
   --address-file="${TMPDIR}/address.txt" \
   --sleep=0 >/dev/null 2>&1
 
-grep -qx -- "cached-a.example:19335" "${RESULTS_DIR}/live-peer-cache.txt"
-grep -q "peer-bootstrap-refresh reason=insufficient_peer_consensus attempted=2 succeeded=2 failed=0" "${RESULTS_DIR}/live-mining-health.log"
-grep -q "addnode cached-a.example:19335 onetry" "${STATE_DIR}/addnode.log"
-grep -q "addnode cached-b.example:19335 onetry" "${STATE_DIR}/addnode.log"
+test "$(sed -n '1p' "${RESULTS_DIR}/live-peer-cache.txt")" = "221.240.90.124:19335"
+test "$(sed -n '2p' "${RESULTS_DIR}/live-peer-cache.txt")" = "147.182.192.221:19335"
+grep -q "peer-bootstrap-refresh reason=insufficient_peer_consensus attempted=4 succeeded=4 failed=0" "${RESULTS_DIR}/live-mining-health.log"
+test "$(sed -n '1p' "${STATE_DIR}/addnode.log")" = "addnode 221.240.90.124:19335 onetry"
+test "$(sed -n '2p' "${STATE_DIR}/addnode.log")" = "addnode 147.182.192.221:19335 onetry"
+grep -q "addnode node.btx.tools:19335 onetry" "${STATE_DIR}/addnode.log"
+grep -q "addnode 100.85.221.75:19335 onetry" "${STATE_DIR}/addnode.log"
+
+STATE_DIR="${TMPDIR}/state-peer-topoff"
+RESULTS_DIR="${TMPDIR}/results-peer-topoff"
+mkdir -p "${STATE_DIR}" "${RESULTS_DIR}"
+
+cat > "${TMPDIR}/fake-cli-peer-topoff" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="${STATE_DIR:?}"
+cmd=""
+for arg in "$@"; do
+  case "${arg}" in
+    getblockcount|getmininginfo|getpeerinfo|generatetoaddress|addnode|setnetworkactive)
+      cmd="${arg}"
+      ;;
+  esac
+done
+
+case "${cmd}" in
+  getblockcount)
+    echo 100
+    ;;
+  getmininginfo)
+    cat <<JSON
+{"chain_guard":{"healthy":true,"should_pause_mining":false,"reason":"ok","local_tip":100,"median_peer_tip":100,"peer_count":4,"near_tip_peers":4}}
+JSON
+    ;;
+  getpeerinfo)
+    cat <<JSON
+[{"inbound":false,"addr":"100.85.221.75:19335","connection_type":"manual","minping":0.001,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"100.115.222.45:19335","connection_type":"manual","minping":0.002,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"100.123.243.104:19335","connection_type":"manual","minping":0.003,"synced_headers":100,"synced_blocks":100},{"inbound":false,"addr":"100.127.0.10:19335","connection_type":"manual","minping":0.004,"synced_headers":100,"synced_blocks":100}]
+JSON
+    ;;
+  generatetoaddress)
+    echo '["deadbeef"]'
+    ;;
+  addnode)
+    printf '%s\n' "$*" >> "${STATE_DIR}/addnode.log"
+    echo null
+    ;;
+  setnetworkactive)
+    printf '%s\n' "$*" >> "${STATE_DIR}/setnetworkactive.log"
+    echo true
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "${TMPDIR}/fake-cli-peer-topoff"
+
+STATE_DIR="${STATE_DIR}" \
+BTX_MINING_CLI="${TMPDIR}/fake-cli-peer-topoff" \
+BTX_MINING_BOOTSTRAP_ADDNODES="node-a.example:19335,node-b.example:19335" \
+BTX_MINING_PEER_REMEDIATION_COOLDOWN_SECS=999 \
+BTX_MINING_PEER_REFRESH_LIMIT=2 \
+BTX_MINING_MAX_LOOPS=3 \
+"${SCRIPT_DIR}/live-mining-loop.sh" \
+  --results-dir="${RESULTS_DIR}" \
+  --address-file="${TMPDIR}/address.txt" \
+  --sleep=0 >/dev/null 2>&1
+
+grep -q "peer-topology-low public_outbound=0 synced_public_outbound=0 full_relay_outbound=0 private_outbound=4 manual_private_outbound=4" "${RESULTS_DIR}/live-mining-health.log"
+grep -q "peer-bootstrap-refresh reason=healthy_topoff attempted=2 succeeded=2 failed=0" "${RESULTS_DIR}/live-mining-health.log"
+grep -q "addnode node-a.example:19335 onetry" "${STATE_DIR}/addnode.log"
+grep -q "setnetworkactive true" "${STATE_DIR}/setnetworkactive.log"
 
 STATE_DIR="${TMPDIR}/state-peer-stall"
 RESULTS_DIR="${TMPDIR}/results-peer-stall"

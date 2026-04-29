@@ -34,7 +34,11 @@ enum class TransactionFamily : uint8_t {
     V2_SETTLEMENT_ANCHOR = 5,
     V2_GENERIC = 6,
     V2_LIFECYCLE = 7,
+    V2_SPEND_PATH_RECOVERY = 8,
 };
+
+// Compatibility alias for existing unqualified family references.
+static constexpr TransactionFamily V2_SPEND_PATH_RECOVERY{TransactionFamily::V2_SPEND_PATH_RECOVERY};
 
 enum class NoteClass : uint8_t {
     USER = 1,

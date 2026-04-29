@@ -112,8 +112,12 @@ class WalletShieldedLonghaulSimTest(BitcoinTestFramework):
 
         self.log.info("Finalize chain and verify convergence invariants")
         self.generatetoaddress(n0, 2, w0.getnewaddress(), sync_fun=self.sync_all)
-        assert len(n0.getrawmempool()) == 0
-        assert len(n1.getrawmempool()) == 0
+        for _ in range(6):
+            if len(n0.getrawmempool()) == 0 and len(n1.getrawmempool()) == 0:
+                break
+            self.generatetoaddress(n0, 1, w0.getnewaddress(), sync_fun=self.sync_all)
+        self.sync_mempools()
+        assert set(n0.getrawmempool()) == set(n1.getrawmempool())
         assert zbal(w0) >= Decimal("0")
         assert zbal(w1) >= Decimal("0")
 

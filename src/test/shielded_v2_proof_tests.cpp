@@ -17,6 +17,7 @@
 #include <shielded/v2_proof.h>
 #include <serialize.h>
 #include <streams.h>
+#include <test/shielded_spend_path_recovery_fixture_builder.h>
 #include <test/util/shielded_account_registry_test_util.h>
 #include <test/util/setup_common.h>
 
@@ -161,6 +162,12 @@ struct SmileV2SendFixture {
     std::map<uint256, uint256> account_leaf_commitments;
     std::vector<uint256> serial_hashes;
     size_t real_index{0};
+};
+
+struct SpendPathRecoveryFixture {
+    CMutableTransaction tx;
+    shielded::ShieldedMerkleTree tree;
+    uint256 input_note_commitment;
 };
 
 [[maybe_unused]] V2SendFixture BuildV2SendFixture(CAmount fee = 0)
@@ -534,6 +541,38 @@ shielded::v2::TransactionBundle BuildPostforkGenericSmileSendBundle()
     return *bundle;
 }
 
+SpendPathRecoveryFixture BuildPostforkSpendPathRecoveryFixture(unsigned char seed_base = 0x61)
+{
+    const auto& consensus = Params().GetConsensus();
+    const int32_t postfork_height = consensus.nShieldedMatRiCTDisableHeight;
+    BOOST_REQUIRE(postfork_height >= 0);
+
+    btx::test::shielded::SpendPathRecoveryFixtureBuildInput input;
+    input.validation_height = postfork_height;
+    input.matrict_disable_height = postfork_height;
+    input.seed_base = seed_base;
+    input.legacy_shield_fee = 1'000;
+    input.recovery_fee = 1'000;
+    input.legacy_funding_inputs.resize(3);
+    for (size_t i = 0; i < input.legacy_funding_inputs.size(); ++i) {
+        input.legacy_funding_inputs[i].funding_outpoint =
+            COutPoint{Txid::FromUint256(uint256{static_cast<unsigned char>(0x20 + i)}), 0};
+        input.legacy_funding_inputs[i].funding_value = 50'000 + static_cast<CAmount>(i) * 1'000;
+    }
+
+    std::string reject_reason;
+    const auto built = btx::test::shielded::BuildSpendPathRecoveryFixture(input, reject_reason);
+    BOOST_REQUIRE_MESSAGE(built.has_value(), reject_reason);
+
+    SpendPathRecoveryFixture fixture;
+    fixture.tx = built->recovery_tx;
+    fixture.input_note_commitment = built->recovery_input_note_commitment;
+    for (const auto& commitment : built->legacy_note_commitments) {
+        fixture.tree.Append(commitment);
+    }
+    return fixture;
+}
+
 DataStream SerializeBundleWithExplicitProofPayload(
     const shielded::v2::TransactionBundle& bundle,
     Span<const uint8_t> proof_payload_bytes)
@@ -786,6 +825,28 @@ BOOST_AUTO_TEST_CASE(v2_send_statement_tracks_stripped_tx_digest)
                 statement.envelope.statement_digest);
 }
 
+BOOST_AUTO_TEST_CASE(spend_path_recovery_statement_tracks_stripped_tx_digest)
+{
+    auto fixture = BuildPostforkSpendPathRecoveryFixture();
+    const CTransaction tx{fixture.tx};
+
+    const v2proof::ProofStatement statement = v2proof::DescribeSpendPathRecoveryStatement(tx);
+    BOOST_CHECK(statement.IsValid());
+    BOOST_CHECK(statement.domain == v2proof::VerificationDomain::SPEND_PATH_RECOVERY);
+    BOOST_CHECK(statement.envelope.statement_digest ==
+                v2proof::ComputeSpendPathRecoveryStatementDigest(tx));
+
+    CMutableTransaction proof_mutated = fixture.tx;
+    proof_mutated.shielded_bundle.v2_bundle->proof_payload.push_back(0xff);
+    BOOST_CHECK(v2proof::ComputeSpendPathRecoveryStatementDigest(CTransaction{proof_mutated}) ==
+                statement.envelope.statement_digest);
+
+    CMutableTransaction tx_context_mutated = fixture.tx;
+    tx_context_mutated.nLockTime ^= 1;
+    BOOST_CHECK(v2proof::ComputeSpendPathRecoveryStatementDigest(
+                    CTransaction{tx_context_mutated}) != statement.envelope.statement_digest);
+}
+
 BOOST_AUTO_TEST_CASE(v2_send_statement_digest_binds_genesis_after_disable_height)
 {
     auto fixture = BuildSmileV2SendFixture();
@@ -850,6 +911,104 @@ BOOST_AUTO_TEST_CASE(v2_send_context_parses_and_verifies)
                                                              reject_reason);
     BOOST_REQUIRE(ring_members.has_value());
     BOOST_CHECK(v2proof::VerifyV2SendProof(bundle, *context, *ring_members));
+}
+
+BOOST_AUTO_TEST_CASE(spend_path_recovery_context_parses_under_disabled_scaffold)
+{
+    auto fixture = BuildPostforkSpendPathRecoveryFixture();
+    const CTransaction tx{fixture.tx};
+    const auto& bundle = *fixture.tx.shielded_bundle.v2_bundle;
+
+    const v2proof::ProofStatement statement =
+        v2proof::DescribeSpendPathRecoveryStatement(tx);
+    std::string reject_reason;
+    auto context = v2proof::ParseSpendPathRecoveryProof(bundle, statement, reject_reason);
+    BOOST_REQUIRE_MESSAGE(context.has_value(), reject_reason);
+    BOOST_CHECK(context->IsValid(/*expected_input_count=*/1, /*expected_output_count=*/1));
+    BOOST_CHECK(context->material.statement.domain ==
+                v2proof::VerificationDomain::SPEND_PATH_RECOVERY);
+    BOOST_CHECK(context->material.payload_location == v2proof::PayloadLocation::INLINE_WITNESS);
+    BOOST_REQUIRE_EQUAL(context->material.proof_shards.size(), 1U);
+    BOOST_CHECK_EQUAL(context->material.proof_shards[0].leaf_count, 1U);
+    BOOST_CHECK_EQUAL(context->material.proof_shards[0].proof_payload_size,
+                      bundle.proof_payload.size());
+
+    auto nullifiers = v2proof::ExtractBoundNullifiers(*context,
+                                                      /*expected_input_count=*/1,
+                                                      /*expected_output_count=*/1,
+                                                      reject_reason);
+    BOOST_REQUIRE(nullifiers.has_value());
+    BOOST_CHECK_EQUAL(nullifiers->size(), 1U);
+    BOOST_CHECK((*nullifiers)[0] ==
+                std::get<shielded::v2::SpendPathRecoveryPayload>(bundle.payload).spends[0].nullifier);
+}
+
+BOOST_AUTO_TEST_CASE(spend_path_recovery_context_rejects_wrong_statement_digest)
+{
+    auto fixture = BuildPostforkSpendPathRecoveryFixture();
+    CMutableTransaction mutated = fixture.tx;
+    mutated.nLockTime ^= 1;
+
+    std::string reject_reason;
+    auto context = v2proof::ParseSpendPathRecoveryProof(
+        *mutated.shielded_bundle.v2_bundle,
+        v2proof::DescribeSpendPathRecoveryStatement(CTransaction{mutated}),
+        reject_reason);
+    BOOST_CHECK(!context.has_value());
+    BOOST_CHECK_EQUAL(reject_reason, "bad-shielded-proof");
+}
+
+BOOST_AUTO_TEST_CASE(spend_path_recovery_context_rejects_missing_proof_payload)
+{
+    auto fixture = BuildPostforkSpendPathRecoveryFixture();
+    fixture.tx.shielded_bundle.v2_bundle->proof_payload.clear();
+
+    std::string reject_reason;
+    auto context = v2proof::ParseSpendPathRecoveryProof(
+        *fixture.tx.shielded_bundle.v2_bundle,
+        v2proof::DescribeSpendPathRecoveryStatement(CTransaction{fixture.tx}),
+        reject_reason);
+    BOOST_CHECK(!context.has_value());
+    BOOST_CHECK_EQUAL(reject_reason, "bad-shielded-proof-missing");
+}
+
+BOOST_AUTO_TEST_CASE(spend_path_recovery_context_rejects_malformed_witness_encoding)
+{
+    auto fixture = BuildPostforkSpendPathRecoveryFixture();
+    fixture.tx.shielded_bundle.v2_bundle->proof_payload = {0x80};
+
+    std::string reject_reason;
+    auto context = v2proof::ParseSpendPathRecoveryProof(
+        *fixture.tx.shielded_bundle.v2_bundle,
+        v2proof::DescribeSpendPathRecoveryStatement(CTransaction{fixture.tx}),
+        reject_reason);
+    BOOST_CHECK(!context.has_value());
+    BOOST_CHECK_EQUAL(reject_reason, "bad-shielded-proof-encoding");
+}
+
+BOOST_AUTO_TEST_CASE(spend_path_recovery_matrict_proof_verifies_against_recovery_context)
+{
+    auto fixture = BuildPostforkSpendPathRecoveryFixture();
+    const auto& bundle = *fixture.tx.shielded_bundle.v2_bundle;
+    const auto statement =
+        v2proof::DescribeSpendPathRecoveryStatement(CTransaction{fixture.tx});
+
+    std::string reject_reason;
+    auto context = v2proof::ParseSpendPathRecoveryProof(bundle, statement, reject_reason);
+    BOOST_REQUIRE_MESSAGE(context.has_value(), reject_reason);
+
+    auto ring_members = v2proof::BuildSpendPathRecoveryRingMembers(bundle,
+                                                                   *context,
+                                                                   fixture.tree,
+                                                                   reject_reason);
+    BOOST_REQUIRE_MESSAGE(ring_members.has_value(), reject_reason);
+    BOOST_REQUIRE_EQUAL(ring_members->size(), 1U);
+    BOOST_REQUIRE_EQUAL(ring_members->front().size(), 1U);
+    BOOST_CHECK_EQUAL(ring_members->front().front(), fixture.input_note_commitment);
+
+    BOOST_CHECK(v2proof::VerifySpendPathRecoveryProof(bundle,
+                                                      *context,
+                                                      *ring_members));
 }
 
 BOOST_AUTO_TEST_CASE(v2_send_context_rejects_wrong_statement_digest)

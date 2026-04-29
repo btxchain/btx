@@ -59,6 +59,8 @@ NODE_COMPACT_FILTERS = (1 << 6)
 NODE_NETWORK_LIMITED = (1 << 10)
 NODE_P2P_V2 = (1 << 11)
 NODE_REPLACE_BY_FEE = (1 << 26)
+NODE_MATMUL_CONSENSUS = (1 << 27)
+NODE_DANDELION = (1 << 30)
 
 MSG_TX = 1
 MSG_BLOCK = 2
@@ -1349,6 +1351,23 @@ class msg_verack:
 
     def __repr__(self):
         return "msg_verack()"
+
+
+class msg_dandelionacc:
+    __slots__ = ()
+    msgtype = b"dandelionacc"
+
+    def __init__(self):
+        pass
+
+    def deserialize(self, f):
+        pass
+
+    def serialize(self):
+        return b""
+
+    def __repr__(self):
+        return "msg_dandelionacc()"
 
 
 class msg_addr:

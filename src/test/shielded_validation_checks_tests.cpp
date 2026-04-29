@@ -21,6 +21,7 @@
 #include <script/script.h>
 #include <serialize.h>
 #include <streams.h>
+#include <test/shielded_spend_path_recovery_fixture_builder.h>
 #include <test/util/shielded_account_registry_test_util.h>
 #include <test/util/setup_common.h>
 #include <test/util/shielded_v2_egress_fixture.h>
@@ -884,6 +885,35 @@ V2SendFixture BuildV2SendFixture(CAmount fee = 0,
 
 BOOST_FIXTURE_TEST_SUITE(shielded_validation_checks_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(describe_shielded_v2_context_reports_expected_family_names)
+{
+    CShieldedBundle legacy_bundle;
+    BOOST_CHECK_EQUAL(DescribeShieldedV2Context(legacy_bundle), "legacy-bundle");
+
+    auto send_tx = BuildLegacyLifecycleSendTx(Params().GetConsensus(),
+                                              Params().GetConsensus().nShieldedMatRiCTDisableHeight - 1);
+    BOOST_REQUIRE(send_tx.HasShieldedBundle());
+    BOOST_CHECK_EQUAL(DescribeShieldedV2Context(send_tx.GetShieldedBundle()), "v2-family-send");
+
+    auto lifecycle_tx = BuildLifecycleControlTx();
+    BOOST_REQUIRE(lifecycle_tx.HasShieldedBundle());
+    BOOST_CHECK_EQUAL(DescribeShieldedV2Context(lifecycle_tx.GetShieldedBundle()),
+                      "v2-family-lifecycle");
+
+    auto generic_tx = BuildPostforkGenericSendLifecycleControlTx(
+        Params().GetConsensus(),
+        Params().GetConsensus().nShieldedMatRiCTDisableHeight);
+    BOOST_REQUIRE(generic_tx.HasShieldedBundle());
+    BOOST_CHECK_EQUAL(DescribeShieldedV2Context(generic_tx.GetShieldedBundle()), "v2-family-send");
+
+    BOOST_CHECK_EQUAL(ShieldedV2FamilyName(shielded::v2::TransactionFamily::V2_INGRESS_BATCH),
+                      "ingress-batch");
+    BOOST_CHECK_EQUAL(ShieldedV2FamilyName(shielded::v2::TransactionFamily::V2_GENERIC),
+                      "generic");
+    BOOST_CHECK_EQUAL(ShieldedV2FamilyName(shielded::v2::V2_SPEND_PATH_RECOVERY),
+                      "spend-path-recovery");
+}
+
 BOOST_AUTO_TEST_CASE(proof_check_accepts_valid_bundle)
 {
     CMutableTransaction mtx;
@@ -1045,6 +1075,225 @@ BOOST_AUTO_TEST_CASE(proof_check_rejects_postfork_legacy_v2_send_wire_family)
     const auto res = check();
     BOOST_REQUIRE(res.has_value());
     BOOST_CHECK_EQUAL(*res, "bad-shielded-v2-family-wire");
+}
+
+struct SpendPathRecoveryFixture {
+    CMutableTransaction tx;
+    shielded::ShieldedMerkleTree tree;
+    const Consensus::Params* consensus{nullptr};
+    int32_t validation_height{0};
+    uint256 input_note_commitment;
+    uint256 input_account_leaf_commitment;
+};
+
+SpendPathRecoveryFixture BuildSpendPathRecoveryFixture(
+    const Consensus::Params* consensus = nullptr,
+    int32_t validation_height = std::numeric_limits<int32_t>::max())
+{
+    SpendPathRecoveryFixture fixture;
+    fixture.consensus = consensus != nullptr ? consensus : &Params().GetConsensus();
+    if (validation_height == std::numeric_limits<int32_t>::max()) {
+        validation_height = fixture.consensus->nShieldedMatRiCTDisableHeight;
+    }
+    fixture.validation_height = validation_height;
+
+    btx::test::shielded::SpendPathRecoveryFixtureBuildInput input;
+    input.validation_height = validation_height;
+    input.matrict_disable_height = fixture.consensus->nShieldedMatRiCTDisableHeight;
+    input.legacy_shield_fee = 1'000;
+    input.recovery_fee = shielded::SHIELDED_PRIVACY_FEE_QUANTUM;
+    input.legacy_funding_inputs.resize(3);
+    for (size_t i = 0; i < input.legacy_funding_inputs.size(); ++i) {
+        input.legacy_funding_inputs[i].funding_outpoint =
+            COutPoint{Txid::FromUint256(uint256{static_cast<unsigned char>(0x30 + i)}), 0};
+        input.legacy_funding_inputs[i].funding_value = 60'000 + static_cast<CAmount>(i) * 1'000;
+    }
+
+    std::string reject_reason;
+    const auto built = btx::test::shielded::BuildSpendPathRecoveryFixture(input, reject_reason);
+    BOOST_REQUIRE_MESSAGE(built.has_value(), reject_reason);
+
+    fixture.tx = built->recovery_tx;
+    fixture.input_note_commitment = built->recovery_input_note_commitment;
+    for (const auto& commitment : built->legacy_note_commitments) {
+        fixture.tree.Append(commitment);
+    }
+    const auto& payload =
+        std::get<shielded::v2::SpendPathRecoveryPayload>(fixture.tx.shielded_bundle.v2_bundle->payload);
+    BOOST_REQUIRE_EQUAL(payload.spends.size(), 1U);
+    fixture.input_account_leaf_commitment = payload.spends.front().account_leaf_commitment;
+    return fixture;
+}
+
+void RefreshSpendPathRecoveryFixturePayload(SpendPathRecoveryFixture& fixture)
+{
+    auto& bundle = *fixture.tx.shielded_bundle.v2_bundle;
+    const auto& payload = std::get<shielded::v2::SpendPathRecoveryPayload>(bundle.payload);
+    bundle.header.payload_digest = shielded::v2::ComputeSpendPathRecoveryPayloadDigest(payload);
+    RefreshFixtureWireOutputChunks(bundle);
+    bundle.header.proof_envelope.statement_digest =
+        shielded::v2::proof::ComputeSpendPathRecoveryStatementDigest(CTransaction{fixture.tx});
+    BOOST_REQUIRE(bundle.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(postfork_spend_path_recovery_bundle_is_serializable)
+{
+    auto fixture = BuildSpendPathRecoveryFixture();
+    auto* bundle = fixture.tx.shielded_bundle.v2_bundle ? &*fixture.tx.shielded_bundle.v2_bundle : nullptr;
+    BOOST_REQUIRE(bundle != nullptr);
+
+    DataStream ss{};
+    BOOST_CHECK_NO_THROW(ss << *bundle);
+
+    shielded::v2::TransactionBundle decoded;
+    BOOST_CHECK_NO_THROW(ss >> decoded);
+    BOOST_REQUIRE(decoded.IsValid());
+    BOOST_CHECK(shielded::v2::BundleHasSemanticFamily(decoded, shielded::v2::V2_SPEND_PATH_RECOVERY));
+    BOOST_CHECK(std::holds_alternative<shielded::v2::SpendPathRecoveryPayload>(decoded.payload));
+}
+
+BOOST_AUTO_TEST_CASE(proof_check_rejects_postfork_spend_path_recovery_when_feature_is_disabled)
+{
+    auto fixture = BuildSpendPathRecoveryFixture();
+
+    const CTransaction tx{fixture.tx};
+    CShieldedProofCheck check(
+        tx,
+        *fixture.consensus,
+        fixture.validation_height,
+        std::make_shared<shielded::ShieldedMerkleTree>(fixture.tree),
+        nullptr,
+        std::make_shared<const std::map<uint256, uint256>>());
+    const auto res = check();
+    BOOST_REQUIRE(res.has_value());
+    BOOST_CHECK_EQUAL(*res, "bad-shielded-matrict-disabled");
+}
+
+BOOST_AUTO_TEST_CASE(proof_check_accepts_postfork_spend_path_recovery_when_activated)
+{
+    auto consensus = Params().GetConsensus();
+    const int32_t activation_height = consensus.nShieldedMatRiCTDisableHeight;
+    BOOST_REQUIRE(activation_height >= 0);
+    consensus.nShieldedSpendPathRecoveryActivationHeight = activation_height;
+
+    auto fixture = BuildSpendPathRecoveryFixture(&consensus, activation_height);
+    const CTransaction tx{fixture.tx};
+    CShieldedProofCheck check(
+        tx,
+        consensus,
+        activation_height,
+        std::make_shared<shielded::ShieldedMerkleTree>(fixture.tree),
+        nullptr,
+        std::make_shared<const std::map<uint256, uint256>>());
+    const auto res = check();
+    BOOST_CHECK_MESSAGE(!res.has_value(), res.value_or("unexpected spend-path recovery failure"));
+}
+
+BOOST_AUTO_TEST_CASE(proof_check_rejects_prefork_validation_of_postfork_recovery_wire)
+{
+    auto consensus = Params().GetConsensus();
+    const int32_t postfork_height = consensus.nShieldedMatRiCTDisableHeight;
+    const int32_t prefork_height = postfork_height - 1;
+    BOOST_REQUIRE(prefork_height > 0);
+    consensus.nShieldedSpendPathRecoveryActivationHeight = prefork_height;
+
+    auto fixture = BuildSpendPathRecoveryFixture(&consensus, postfork_height);
+    const CTransaction tx{fixture.tx};
+    CShieldedProofCheck check(
+        tx,
+        consensus,
+        prefork_height,
+        std::make_shared<shielded::ShieldedMerkleTree>(fixture.tree),
+        nullptr,
+        std::make_shared<const std::map<uint256, uint256>>());
+    const auto res = check();
+    BOOST_REQUIRE(res.has_value());
+    BOOST_CHECK_EQUAL(*res, "bad-shielded-v2-family-wire");
+}
+
+BOOST_AUTO_TEST_CASE(proof_check_postfork_spend_path_recovery_enforces_activation_boundary)
+{
+    auto consensus = Params().GetConsensus();
+    const int32_t activation_height = consensus.nShieldedMatRiCTDisableHeight + 1;
+    consensus.nShieldedSpendPathRecoveryActivationHeight = activation_height;
+
+    auto fixture = BuildSpendPathRecoveryFixture(&consensus, activation_height);
+    const auto tree = std::make_shared<shielded::ShieldedMerkleTree>(fixture.tree);
+    const auto empty_leaves = std::make_shared<const std::map<uint256, uint256>>();
+    const CTransaction tx{fixture.tx};
+
+    CShieldedProofCheck pre_activation_check(
+        tx,
+        consensus,
+        activation_height - 1,
+        tree,
+        nullptr,
+        empty_leaves);
+    const auto pre_activation_result = pre_activation_check();
+    BOOST_REQUIRE(pre_activation_result.has_value());
+    BOOST_CHECK_EQUAL(*pre_activation_result, "bad-shielded-matrict-disabled");
+
+    CShieldedProofCheck at_activation_check(
+        tx,
+        consensus,
+        activation_height,
+        tree,
+        nullptr,
+        empty_leaves);
+    const auto at_activation_result = at_activation_check();
+    BOOST_CHECK_MESSAGE(!at_activation_result.has_value(),
+                        at_activation_result.value_or("unexpected postfork activation-boundary failure"));
+}
+
+BOOST_AUTO_TEST_CASE(proof_check_rejects_postfork_activated_spend_path_recovery_for_non_stranded_note)
+{
+    auto consensus = Params().GetConsensus();
+    const int32_t activation_height = consensus.nShieldedMatRiCTDisableHeight;
+    consensus.nShieldedSpendPathRecoveryActivationHeight = activation_height;
+
+    auto fixture = BuildSpendPathRecoveryFixture(&consensus, activation_height);
+    std::map<uint256, uint256> account_leaf_commitments{
+        {fixture.input_note_commitment, fixture.input_account_leaf_commitment},
+    };
+
+    const CTransaction tx{fixture.tx};
+    CShieldedProofCheck check(
+        tx,
+        consensus,
+        activation_height,
+        std::make_shared<shielded::ShieldedMerkleTree>(fixture.tree),
+        nullptr,
+        std::make_shared<const std::map<uint256, uint256>>(account_leaf_commitments));
+    const auto res = check();
+    BOOST_REQUIRE(res.has_value());
+    BOOST_CHECK_EQUAL(*res, "bad-shielded-v2-spend-path-recovery-not-stranded");
+}
+
+BOOST_AUTO_TEST_CASE(proof_check_rejects_postfork_activated_spend_path_recovery_with_tampered_nullifier)
+{
+    auto consensus = Params().GetConsensus();
+    const int32_t activation_height = consensus.nShieldedMatRiCTDisableHeight;
+    BOOST_REQUIRE(activation_height >= 0);
+    consensus.nShieldedSpendPathRecoveryActivationHeight = activation_height;
+
+    auto fixture = BuildSpendPathRecoveryFixture(&consensus, activation_height);
+    auto* bundle = fixture.tx.shielded_bundle.v2_bundle ? &*fixture.tx.shielded_bundle.v2_bundle : nullptr;
+    BOOST_REQUIRE(bundle != nullptr);
+    auto& payload = std::get<shielded::v2::SpendPathRecoveryPayload>(bundle->payload);
+    payload.spends[0].nullifier = uint256{0x54};
+    RefreshSpendPathRecoveryFixturePayload(fixture);
+
+    const CTransaction tx{fixture.tx};
+    CShieldedProofCheck check(
+        tx,
+        consensus,
+        activation_height,
+        std::make_shared<shielded::ShieldedMerkleTree>(fixture.tree),
+        nullptr,
+        std::make_shared<const std::map<uint256, uint256>>());
+    const auto res = check();
+    BOOST_REQUIRE_MESSAGE(res.has_value(), "expected reject for tampered postfork spend-path recovery nullifier");
+    BOOST_CHECK_EQUAL(*res, "bad-shielded-proof");
 }
 
 BOOST_AUTO_TEST_CASE(proof_check_rejects_prefork_generic_v2_send_proof_wire)

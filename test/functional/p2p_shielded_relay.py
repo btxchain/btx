@@ -174,7 +174,11 @@ class P2PShieldedRelayTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [["-autoshieldcoinbase=0", "-dandelion=0"]]
+        self.extra_args = [[
+            "-autoshieldcoinbase=0",
+            "-dandelion=0",
+            "-regtestshieldedmatrictdisableheight=500",
+        ]]
         self.rpc_timeout = 600
 
     def skip_test_if_missing_module(self):

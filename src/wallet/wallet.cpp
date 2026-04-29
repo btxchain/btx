@@ -100,6 +100,8 @@ using util::ToString;
 namespace wallet {
 
 namespace {
+constexpr CAmount MAX_SHIELDED_AUTO_SHIELD_OUTPUT_VALUE{static_cast<CAmount>(smile2::Q) - 1};
+
 int SaturatingIntFromInt64(const int64_t value)
 {
     if (value > std::numeric_limits<int>::max()) return std::numeric_limits<int>::max();
@@ -141,6 +143,339 @@ bool PSBTHasExistingSignatures(const PartiallySignedTransaction& psbtx)
         required += MIN_SHIELDED_RELAY_FEE_PREMIUM;
     }
     return required;
+}
+
+enum class PendingBridgeSpendKind {
+    NONE,
+    SETTLEMENT,
+    REFUND,
+};
+
+struct PendingBridgeWalletTxStatus
+{
+    bool known{false};
+    bool in_mempool{false};
+    bool confirmed{false};
+    int confirmations{0};
+};
+
+struct PendingBridgeWalletSpend
+{
+    bool found{false};
+    PendingBridgeSpendKind kind{PendingBridgeSpendKind::NONE};
+    uint256 txid;
+    bool in_mempool{false};
+    bool confirmed{false};
+    int confirmations{0};
+};
+
+struct PendingBridgeCommitResult
+{
+    bool committed{false};
+    bool mempool_rejected{false};
+    bool stale_anchor{false};
+    std::string error;
+};
+
+[[nodiscard]] bool IsBadShieldedAnchorReject(const std::string& error)
+{
+    return error.find("bad-shielded-anchor") != std::string::npos;
+}
+
+[[nodiscard]] int32_t PendingBridgeBuildHeight(const int32_t current_height)
+{
+    if (current_height >= std::numeric_limits<int32_t>::max() - 1) {
+        return std::numeric_limits<int32_t>::max();
+    }
+    return current_height + 1;
+}
+
+[[nodiscard]] bool PendingBridgeHasValidRefundDestination(const BridgePendingOperation& operation)
+{
+    if (operation.refund_destination.empty()) return false;
+    return IsValidDestination(DecodeDestination(operation.refund_destination));
+}
+
+[[nodiscard]] PendingBridgeWalletTxStatus GetPendingBridgeWalletTxStatus(const CWallet& wallet,
+                                                                        const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    AssertLockHeld(wallet.cs_wallet);
+
+    PendingBridgeWalletTxStatus status;
+    const CWalletTx* wtx = wallet.GetWalletTx(txid);
+    if (wtx == nullptr) return status;
+
+    status.known = true;
+    const int depth = wallet.GetTxDepthInMainChain(*wtx);
+    status.confirmations = std::max(depth, 0);
+    status.confirmed = status.confirmations > 0;
+    status.in_mempool = !status.confirmed && wallet.chain().isInMempool(txid);
+    return status;
+}
+
+[[nodiscard]] PendingBridgeWalletSpend FindPendingBridgeWalletSpend(const CWallet& wallet,
+                                                                    const BridgePendingOperation& operation) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    AssertLockHeld(wallet.cs_wallet);
+
+    PendingBridgeWalletSpend best;
+    std::pair<int, int> best_score{0, 0};
+    for (const auto& [txid, wtx] : wallet.mapWallet) {
+        const bool spends_outpoint = std::any_of(wtx.tx->vin.begin(), wtx.tx->vin.end(), [&](const CTxIn& txin) {
+            return txin.prevout == operation.funding_outpoint;
+        });
+        if (!spends_outpoint || wtx.isAbandoned() || wtx.isBlockConflicted() || wtx.isMempoolConflicted()) {
+            continue;
+        }
+
+        const int depth = wallet.GetTxDepthInMainChain(wtx);
+        const int confirmations = std::max(depth, 0);
+        const bool confirmed = confirmations > 0;
+        const bool in_mempool = !confirmed && wallet.chain().isInMempool(txid);
+        if (!confirmed && !in_mempool) continue;
+
+        const std::pair<int, int> score{confirmed ? 2 : 1, confirmations};
+        if (score < best_score) continue;
+
+        best_score = score;
+        best.found = true;
+        best.txid = txid;
+        best.confirmed = confirmed;
+        best.in_mempool = in_mempool;
+        best.confirmations = confirmations;
+        best.kind = (wtx.tx->nLockTime == operation.plan.refund_lock_height)
+            ? PendingBridgeSpendKind::REFUND
+            : PendingBridgeSpendKind::SETTLEMENT;
+    }
+
+    return best;
+}
+
+[[nodiscard]] bool FinalizeBridgePsbtWithWallet(CWallet& wallet,
+                                                PartiallySignedTransaction psbt,
+                                                CTransactionRef& tx,
+                                                std::string& error)
+{
+    bool complete{false};
+    if (const auto update_err = wallet.FillPSBT(psbt,
+                                                complete,
+                                                SIGHASH_DEFAULT,
+                                                /*sign=*/false,
+                                                /*bip32derivs=*/true)) {
+        error = PSBTErrorString(*update_err).original;
+        return false;
+    }
+
+    if (const auto sign_err = wallet.FillPSBT(psbt,
+                                              complete,
+                                              SIGHASH_DEFAULT,
+                                              /*sign=*/true,
+                                              /*bip32derivs=*/false)) {
+        error = PSBTErrorString(*sign_err).original;
+        return false;
+    }
+
+    if (!complete) {
+        error = "Failed to sign bridge PSBT with wallet keys";
+        return false;
+    }
+
+    CMutableTransaction mtx;
+    if (!FinalizeAndExtractPSBT(psbt, mtx)) {
+        error = "Failed to finalize bridge PSBT";
+        return false;
+    }
+
+    tx = MakeTransactionRef(std::move(mtx));
+    return true;
+}
+
+[[nodiscard]] PendingBridgeCommitResult CommitPendingBridgeTransaction(CWallet& wallet,
+                                                                       const CTransactionRef& tx,
+                                                                       const bool shielded)
+{
+    PendingBridgeCommitResult result;
+
+    std::string broadcast_error;
+    {
+        LOCK(wallet.cs_wallet);
+        try {
+            wallet.CommitTransaction(tx,
+                                     /*mapValue=*/{},
+                                     /*orderForm=*/{},
+                                     /*bypass_maxtxfee=*/false,
+                                     &broadcast_error);
+        } catch (const std::exception& e) {
+            result.error = e.what();
+        }
+
+        if (!result.error.empty()) {
+            if (wallet.GetWalletTx(tx->GetHash()) != nullptr) {
+                wallet.AbandonTransaction(tx->GetHash());
+            }
+            return result;
+        }
+
+        if (!wallet.GetBroadcastTransactions()) {
+            result.committed = true;
+            return result;
+        }
+
+        const CWalletTx* wtx = wallet.GetWalletTx(tx->GetHash());
+        if (wtx == nullptr) {
+            result.error = shielded
+                ? "Committed shielded bridge transaction was not found in wallet state"
+                : "Committed bridge transaction was not found in wallet state";
+            return result;
+        }
+
+        if (!wallet.chain().isInMempool(tx->GetHash()) && wallet.GetTxDepthInMainChain(*wtx) <= 0) {
+            wallet.AbandonTransaction(tx->GetHash());
+            result.mempool_rejected = true;
+            result.error = broadcast_error.empty()
+                ? "Bridge transaction created but rejected from mempool (policy or consensus)"
+                : broadcast_error;
+            result.stale_anchor = shielded && IsBadShieldedAnchorReject(result.error);
+            return result;
+        }
+    }
+
+    result.committed = true;
+    return result;
+}
+} // namespace
+
+bool BridgePendingOperation::IsValid() const
+{
+    if (version != 1 || !plan.IsValid() || funding_outpoint.IsNull()) return false;
+    if (!MoneyRange(funding_amount) || funding_amount <= 0) return false;
+    if (!MoneyRange(refund_fee) || refund_fee < 0) return false;
+    if (!refund_destination.empty() && !PendingBridgeHasValidRefundDestination(*this)) return false;
+    return true;
+}
+
+bool BridgeArchivedOperation::IsValid() const
+{
+    if (version != 1 || !operation.IsValid() || completion_txid.IsNull()) return false;
+    if (completion_height < 0 || archive_height < 0 || archive_time < 0) return false;
+
+    const auto kind = static_cast<BridgeArchivedCompletionKind>(completion_kind);
+    if (kind == BridgeArchivedCompletionKind::SETTLEMENT) {
+        return operation.has_settlement_txid && operation.settlement_txid == completion_txid;
+    }
+    if (kind == BridgeArchivedCompletionKind::REFUND) {
+        return operation.has_refund_txid && operation.refund_txid == completion_txid;
+    }
+    return false;
+}
+
+namespace {
+[[nodiscard]] bool PendingBridgeFundingUnspent(CWallet& wallet, const COutPoint& outpoint)
+{
+    std::map<COutPoint, Coin> coins;
+    coins.emplace(outpoint, Coin{});
+    wallet.chain().findCoins(coins);
+    return !coins.at(outpoint).IsSpent();
+}
+
+[[nodiscard]] bool PendingBridgeNeedsManualAction(const BridgePendingOperation& operation)
+{
+    const std::string& error = operation.last_error;
+    return error.find("Failed to sign") != std::string::npos ||
+           error.find("wallet keys") != std::string::npos ||
+           error.find("finalize") != std::string::npos ||
+           error.find("refund destination") != std::string::npos;
+}
+
+[[nodiscard]] std::string PendingBridgeStatusString(const BridgePendingStatusSnapshot& snapshot)
+{
+    if (snapshot.refund_confirmed) return "refunded";
+    if (snapshot.settlement_confirmed) return "settled";
+    if (snapshot.refund_confirmations > 0) return "refund_confirming";
+    if (snapshot.settlement_confirmations > 0) return "settlement_confirming";
+    if (snapshot.refund_in_mempool) return "refund_in_mempool";
+    if (snapshot.settlement_in_mempool) return "settlement_in_mempool";
+    if (!snapshot.funding_unspent) return "spent_elsewhere";
+    if (snapshot.refund_eligible) {
+        return snapshot.has_valid_refund_destination ? "awaiting_refund" : "manual_action_required";
+    }
+    if (PendingBridgeNeedsManualAction(snapshot.operation)) return "manual_action_required";
+    return "pending_settlement";
+}
+
+[[nodiscard]] BridgePendingStatusSnapshot BuildPendingBridgeStatusSnapshot(CWallet& wallet,
+                                                                          const BridgePendingOperation& operation)
+{
+    BridgePendingStatusSnapshot snapshot;
+    snapshot.operation = operation;
+
+    {
+        LOCK(wallet.cs_wallet);
+        snapshot.current_height = wallet.GetLastBlockHeight();
+        snapshot.required_confirmations = wallet.GetBridgePendingConfirmDepth();
+
+        if (operation.has_settlement_txid) {
+            const auto status = GetPendingBridgeWalletTxStatus(wallet, operation.settlement_txid);
+            snapshot.settlement_confirmations = status.confirmations;
+            snapshot.settlement_confirmed =
+                static_cast<int64_t>(status.confirmations) >= snapshot.required_confirmations;
+            snapshot.settlement_in_mempool = status.in_mempool;
+        }
+        if (operation.has_refund_txid) {
+            const auto status = GetPendingBridgeWalletTxStatus(wallet, operation.refund_txid);
+            snapshot.refund_confirmations = status.confirmations;
+            snapshot.refund_confirmed =
+                static_cast<int64_t>(status.confirmations) >= snapshot.required_confirmations;
+            snapshot.refund_in_mempool = status.in_mempool;
+        }
+        if ((!snapshot.settlement_confirmed && !snapshot.settlement_in_mempool) ||
+            (!snapshot.refund_confirmed && !snapshot.refund_in_mempool)) {
+            const auto spend = FindPendingBridgeWalletSpend(wallet, operation);
+            if (spend.found) {
+                if (spend.kind == PendingBridgeSpendKind::REFUND) {
+                    snapshot.refund_confirmations = spend.confirmations;
+                    snapshot.refund_confirmed =
+                        static_cast<int64_t>(spend.confirmations) >= snapshot.required_confirmations;
+                    snapshot.refund_in_mempool = spend.in_mempool;
+                } else {
+                    snapshot.settlement_confirmations = spend.confirmations;
+                    snapshot.settlement_confirmed =
+                        static_cast<int64_t>(spend.confirmations) >= snapshot.required_confirmations;
+                    snapshot.settlement_in_mempool = spend.in_mempool;
+                }
+            }
+        }
+    }
+
+    snapshot.funding_unspent = PendingBridgeFundingUnspent(wallet, operation.funding_outpoint);
+    snapshot.refund_eligible = snapshot.current_height >= static_cast<int32_t>(operation.plan.refund_lock_height);
+    snapshot.has_valid_refund_destination = PendingBridgeHasValidRefundDestination(operation);
+    snapshot.status = PendingBridgeStatusString(snapshot);
+    return snapshot;
+}
+
+[[nodiscard]] std::optional<BridgeArchivedOperation> BuildArchivedBridgeOperation(const BridgePendingOperation& operation,
+                                                                                  const BridgePendingStatusSnapshot& snapshot)
+{
+    BridgeArchivedOperation archived;
+    archived.operation = operation;
+    archived.archive_height = snapshot.current_height;
+    archived.archive_time = GetTime();
+
+    if (snapshot.refund_confirmed && operation.has_refund_txid) {
+        archived.completion_kind = static_cast<uint8_t>(BridgeArchivedCompletionKind::REFUND);
+        archived.completion_txid = operation.refund_txid;
+        archived.completion_height = snapshot.current_height - snapshot.refund_confirmations + 1;
+    } else if (snapshot.settlement_confirmed && operation.has_settlement_txid) {
+        archived.completion_kind = static_cast<uint8_t>(BridgeArchivedCompletionKind::SETTLEMENT);
+        archived.completion_txid = operation.settlement_txid;
+        archived.completion_height = snapshot.current_height - snapshot.settlement_confirmations + 1;
+    } else {
+        return std::nullopt;
+    }
+
+    if (!archived.IsValid()) return std::nullopt;
+    return archived;
 }
 } // namespace
 
@@ -1233,12 +1568,12 @@ CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const TxState& state, const 
 
     if (!fInsertedNew)
     {
-        if (state.index() != wtx.m_state.index()) {
+        const bool serialized_state_changed =
+            TxStateSerializedIndex(wtx.m_state) != TxStateSerializedIndex(state) ||
+            TxStateSerializedBlockHash(wtx.m_state) != TxStateSerializedBlockHash(state);
+        if (state.index() != wtx.m_state.index() || serialized_state_changed) {
             wtx.m_state = state;
             fUpdated = true;
-        } else {
-            assert(TxStateSerializedIndex(wtx.m_state) == TxStateSerializedIndex(state));
-            assert(TxStateSerializedBlockHash(wtx.m_state) == TxStateSerializedBlockHash(state));
         }
         // If we have a witness-stripped version of this transaction, and we
         // see a new version with a witness, then we must be upgrading a pre-segwit
@@ -1670,43 +2005,48 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
 void CWallet::blockConnected(ChainstateRole role, const interfaces::BlockInfo& block)
 {
     assert(block.data);
-    LOCK(cs_wallet);
+    {
+        LOCK(cs_wallet);
 
-    switch (role) {
-        case ChainstateRole::BACKGROUND:
-            m_background_validation_height = block.height;
-            return;
-        case ChainstateRole::ASSUMEDVALID:
-            if (m_background_validation_height == -1) {
-                m_background_validation_height = 0;
+        switch (role) {
+            case ChainstateRole::BACKGROUND:
+                m_background_validation_height = block.height;
+                return;
+            case ChainstateRole::ASSUMEDVALID:
+                if (m_background_validation_height == -1) {
+                    m_background_validation_height = 0;
+                }
+                break;
+            case ChainstateRole::NORMAL:
+                m_background_validation_height = -1;
+                break;
+        } // no default case, so the compiler can warn about missing cases
+
+        m_last_block_processed_height = block.height;
+        m_last_block_processed = block.hash;
+
+        // No need to scan block if it was created before the wallet birthday.
+        // Uses chain max time and twice the grace period to adjust time for block time variability.
+        if (block.chain_time_max >= m_birth_time.load() - (TIMESTAMP_WINDOW * 2)) {
+            // Scan block
+            for (size_t index = 0; index < block.data->vtx.size(); index++) {
+                SyncTransaction(block.data->vtx[index], TxStateConfirmed{block.hash, block.height, static_cast<int>(index)});
+                transactionRemovedFromMempool(block.data->vtx[index], MemPoolRemovalReason::BLOCK);
             }
-            break;
-        case ChainstateRole::NORMAL:
-            m_background_validation_height = -1;
-            break;
-    } // no default case, so the compiler can warn about missing cases
+            if (m_shielded_wallet) {
+                LOCK(m_shielded_wallet->cs_shielded);
+                m_shielded_wallet->ScanBlock(*block.data, block.height);
+            }
 
-    m_last_block_processed_height = block.height;
-    m_last_block_processed = block.hash;
-
-    // No need to scan block if it was created before the wallet birthday.
-    // Uses chain max time and twice the grace period to adjust time for block time variability.
-    if (block.chain_time_max < m_birth_time.load() - (TIMESTAMP_WINDOW * 2)) return;
-
-    // Scan block
-    for (size_t index = 0; index < block.data->vtx.size(); index++) {
-        SyncTransaction(block.data->vtx[index], TxStateConfirmed{block.hash, block.height, static_cast<int>(index)});
-        transactionRemovedFromMempool(block.data->vtx[index], MemPoolRemovalReason::BLOCK);
-    }
-    if (m_shielded_wallet) {
-        LOCK(m_shielded_wallet->cs_shielded);
-        m_shielded_wallet->ScanBlock(*block.data, block.height);
+            // Auto-shield mature coinbase outputs into the shielded pool.
+            if (m_shielded_wallet && gArgs.GetBoolArg("-autoshieldcoinbase", true)) {
+                MaybeAutoShieldCoinbase();
+            }
+        }
     }
 
-    // Auto-shield mature coinbase outputs into the shielded pool.
-    if (m_shielded_wallet && gArgs.GetBoolArg("-autoshieldcoinbase", true)) {
-        MaybeAutoShieldCoinbase();
-    }
+    MaybeReconcileArchivedBridgeOperations();
+    MaybeRecoverPendingBridgeOperations();
 }
 
 void CWallet::AbandonStuckShieldingTransactions()
@@ -1810,6 +2150,7 @@ void CWallet::MaybeAutoShieldCoinbase()
                 if (IsLockedCoin(outpoint)) continue;
                 const auto next = CheckedAdd(total_in, wtx.tx->vout[n].nValue);
                 if (!next || !MoneyRange(*next)) break;
+                if (*next - 10000 > MAX_SHIELDED_AUTO_SHIELD_OUTPUT_VALUE) break;
                 mature_coinbase_utxos.push_back(outpoint);
                 total_in = *next;
                 if (static_cast<int>(mature_coinbase_utxos.size()) >= AUTO_SHIELD_BATCH_LIMIT) break;
@@ -1907,53 +2248,57 @@ void CWallet::MaybeAutoShieldCoinbase()
 void CWallet::blockDisconnected(const interfaces::BlockInfo& block)
 {
     assert(block.data);
-    LOCK(cs_wallet);
+    {
+        LOCK(cs_wallet);
 
-    // At block disconnection, this will change an abandoned transaction to
-    // be unconfirmed, whether or not the transaction is added back to the mempool.
-    // User may have to call abandontransaction again. It may be addressed in the
-    // future with a stickier abandoned state or even removing abandontransaction call.
-    m_last_block_processed_height = block.height - 1;
-    m_last_block_processed = *Assert(block.prev_hash);
+        // At block disconnection, this will change an abandoned transaction to
+        // be unconfirmed, whether or not the transaction is added back to the mempool.
+        // User may have to call abandontransaction again. It may be addressed in the
+        // future with a stickier abandoned state or even removing abandontransaction call.
+        m_last_block_processed_height = block.height - 1;
+        m_last_block_processed = *Assert(block.prev_hash);
 
-    int disconnect_height = block.height;
+        int disconnect_height = block.height;
 
-    for (size_t index = 0; index < block.data->vtx.size(); index++) {
-        const CTransactionRef& ptx = Assert(block.data)->vtx[index];
-        // Coinbase transactions are not only inactive but also abandoned,
-        // meaning they should never be relayed standalone via the p2p protocol.
-        SyncTransaction(ptx, TxStateInactive{/*abandoned=*/index == 0});
+        for (size_t index = 0; index < block.data->vtx.size(); index++) {
+            const CTransactionRef& ptx = Assert(block.data)->vtx[index];
+            // Coinbase transactions are not only inactive but also abandoned,
+            // meaning they should never be relayed standalone via the p2p protocol.
+            SyncTransaction(ptx, TxStateInactive{/*abandoned=*/index == 0});
 
-        for (const CTxIn& tx_in : ptx->vin) {
-            // No other wallet transactions conflicted with this transaction
-            if (mapTxSpends.count(tx_in.prevout) < 1) continue;
+            for (const CTxIn& tx_in : ptx->vin) {
+                // No other wallet transactions conflicted with this transaction
+                if (mapTxSpends.count(tx_in.prevout) < 1) continue;
 
-            std::pair<TxSpends::const_iterator, TxSpends::const_iterator> range = mapTxSpends.equal_range(tx_in.prevout);
+                std::pair<TxSpends::const_iterator, TxSpends::const_iterator> range = mapTxSpends.equal_range(tx_in.prevout);
 
-            // For all of the spends that conflict with this transaction
-            for (TxSpends::const_iterator _it = range.first; _it != range.second; ++_it) {
-                CWalletTx& wtx = mapWallet.find(_it->second)->second;
+                // For all of the spends that conflict with this transaction
+                for (TxSpends::const_iterator _it = range.first; _it != range.second; ++_it) {
+                    CWalletTx& wtx = mapWallet.find(_it->second)->second;
 
-                if (!wtx.isBlockConflicted()) continue;
+                    if (!wtx.isBlockConflicted()) continue;
 
-                auto try_updating_state = [&](CWalletTx& tx) {
-                    if (!tx.isBlockConflicted()) return TxUpdate::UNCHANGED;
-                    if (tx.state<TxStateBlockConflicted>()->conflicting_block_height >= disconnect_height) {
-                        tx.m_state = TxStateInactive{};
-                        return TxUpdate::CHANGED;
-                    }
-                    return TxUpdate::UNCHANGED;
-                };
+                    auto try_updating_state = [&](CWalletTx& tx) {
+                        if (!tx.isBlockConflicted()) return TxUpdate::UNCHANGED;
+                        if (tx.state<TxStateBlockConflicted>()->conflicting_block_height >= disconnect_height) {
+                            tx.m_state = TxStateInactive{};
+                            return TxUpdate::CHANGED;
+                        }
+                        return TxUpdate::UNCHANGED;
+                    };
 
-                RecursiveUpdateTxState(wtx.tx->GetHash(), try_updating_state);
+                    RecursiveUpdateTxState(wtx.tx->GetHash(), try_updating_state);
+                }
             }
+        }
+
+        if (m_shielded_wallet) {
+            LOCK(m_shielded_wallet->cs_shielded);
+            m_shielded_wallet->UndoBlock(*block.data, block.height);
         }
     }
 
-    if (m_shielded_wallet) {
-        LOCK(m_shielded_wallet->cs_shielded);
-        m_shielded_wallet->UndoBlock(*block.data, block.height);
-    }
+    MaybeReconcileArchivedBridgeOperations();
 }
 
 void CWallet::updatedBlockTip()
@@ -2871,9 +3216,15 @@ void CWallet::CommitTransaction(CTransactionRef tx,
         throw std::runtime_error(std::string(__func__) + ": Wallet db error, transaction commit failed");
     }
 
-    // Notify that old coins are spent
+    // Notify that old wallet-owned coins are spent. Some valid transactions
+    // signed by this wallet, such as bridge settlements on externally funded
+    // outpoints, can spend inputs whose parents are not in mapWallet.
     for (const CTxIn& txin : tx->vin) {
-        CWalletTx &coin = mapWallet.at(txin.prevout.hash);
+        auto it = mapWallet.find(txin.prevout.hash);
+        if (it == mapWallet.end()) {
+            continue;
+        }
+        CWalletTx& coin = it->second;
         coin.MarkDirty();
         NotifyTransactionChanged(coin.GetHash(), CT_UPDATED);
     }
@@ -3062,6 +3413,493 @@ bool CWallet::DelAddressBookWithDB(WalletBatch& batch, const CTxDestination& add
     // All good, signal changes
     NotifyAddressBookChanged(address, "", /*is_mine=*/false, AddressPurpose::SEND, CT_DELETED);
     return true;
+}
+
+bool CWallet::LoadPendingBridgeOperation(const BridgePendingOperation& operation)
+{
+    AssertLockHeld(cs_wallet);
+    if (!operation.IsValid()) return false;
+    return m_pending_bridge_operations.emplace(operation.funding_outpoint, operation).second;
+}
+
+bool CWallet::LoadArchivedBridgeOperation(const BridgeArchivedOperation& operation)
+{
+    AssertLockHeld(cs_wallet);
+    if (!operation.IsValid()) return false;
+    return m_archived_bridge_operations.emplace(operation.operation.funding_outpoint, operation).second;
+}
+
+std::optional<BridgePendingOperation> CWallet::GetPendingBridgeOperation(const COutPoint& outpoint) const
+{
+    LOCK(cs_wallet);
+    const auto it = m_pending_bridge_operations.find(outpoint);
+    if (it == m_pending_bridge_operations.end()) return std::nullopt;
+    return it->second;
+}
+
+std::optional<BridgeArchivedOperation> CWallet::GetArchivedBridgeOperation(const COutPoint& outpoint) const
+{
+    LOCK(cs_wallet);
+    const auto it = m_archived_bridge_operations.find(outpoint);
+    if (it == m_archived_bridge_operations.end()) return std::nullopt;
+    return it->second;
+}
+
+std::optional<BridgePendingStatusSnapshot> CWallet::GetPendingBridgeOperationStatus(const COutPoint& outpoint) const
+{
+    const auto operation = GetPendingBridgeOperation(outpoint);
+    if (!operation.has_value()) return std::nullopt;
+    return BuildPendingBridgeStatusSnapshot(const_cast<CWallet&>(*this), *operation);
+}
+
+std::vector<BridgePendingOperation> CWallet::ListPendingBridgeOperations() const
+{
+    LOCK(cs_wallet);
+    std::vector<BridgePendingOperation> operations;
+    operations.reserve(m_pending_bridge_operations.size());
+    for (const auto& [outpoint, operation] : m_pending_bridge_operations) {
+        operations.push_back(operation);
+    }
+    return operations;
+}
+
+std::vector<BridgeArchivedOperation> CWallet::ListArchivedBridgeOperations() const
+{
+    LOCK(cs_wallet);
+    std::vector<BridgeArchivedOperation> operations;
+    operations.reserve(m_archived_bridge_operations.size());
+    for (const auto& [outpoint, operation] : m_archived_bridge_operations) {
+        operations.push_back(operation);
+    }
+    return operations;
+}
+
+std::vector<BridgePendingStatusSnapshot> CWallet::ListPendingBridgeOperationStatus() const
+{
+    std::vector<BridgePendingStatusSnapshot> snapshots;
+    for (const auto& operation : ListPendingBridgeOperations()) {
+        BridgePendingStatusSnapshot snapshot =
+            BuildPendingBridgeStatusSnapshot(const_cast<CWallet&>(*this), operation);
+        if (snapshot.status == "settled" || snapshot.status == "refunded") continue;
+        snapshots.push_back(std::move(snapshot));
+    }
+    return snapshots;
+}
+
+bool CWallet::SavePendingBridgeOperation(const BridgePendingOperation& operation)
+{
+    if (!operation.IsValid()) return false;
+
+    LOCK(cs_wallet);
+    const auto it = m_pending_bridge_operations.find(operation.funding_outpoint);
+    const auto original = it == m_pending_bridge_operations.end()
+        ? std::optional<BridgePendingOperation>{}
+        : std::optional<BridgePendingOperation>{it->second};
+
+    m_pending_bridge_operations[operation.funding_outpoint] = operation;
+
+    WalletBatch batch(GetDatabase());
+    if (batch.WritePendingBridgeOperation(operation)) {
+        return true;
+    }
+
+    if (original.has_value()) {
+        m_pending_bridge_operations[operation.funding_outpoint] = *original;
+    } else {
+        m_pending_bridge_operations.erase(operation.funding_outpoint);
+    }
+    return false;
+}
+
+bool CWallet::ErasePendingBridgeOperation(const COutPoint& outpoint)
+{
+    LOCK(cs_wallet);
+    const auto it = m_pending_bridge_operations.find(outpoint);
+    if (it == m_pending_bridge_operations.end()) return true;
+
+    const BridgePendingOperation original = it->second;
+    m_pending_bridge_operations.erase(it);
+
+    WalletBatch batch(GetDatabase());
+    if (batch.ErasePendingBridgeOperation(outpoint)) {
+        return true;
+    }
+
+    m_pending_bridge_operations[outpoint] = original;
+    return false;
+}
+
+bool CWallet::SaveArchivedBridgeOperation(const BridgeArchivedOperation& operation)
+{
+    if (!operation.IsValid()) return false;
+
+    LOCK(cs_wallet);
+    const auto it = m_archived_bridge_operations.find(operation.operation.funding_outpoint);
+    const auto original = it == m_archived_bridge_operations.end()
+        ? std::optional<BridgeArchivedOperation>{}
+        : std::optional<BridgeArchivedOperation>{it->second};
+
+    m_archived_bridge_operations[operation.operation.funding_outpoint] = operation;
+
+    WalletBatch batch(GetDatabase());
+    if (batch.WriteArchivedBridgeOperation(operation)) {
+        return true;
+    }
+
+    if (original.has_value()) {
+        m_archived_bridge_operations[operation.operation.funding_outpoint] = *original;
+    } else {
+        m_archived_bridge_operations.erase(operation.operation.funding_outpoint);
+    }
+    return false;
+}
+
+bool CWallet::EraseArchivedBridgeOperation(const COutPoint& outpoint)
+{
+    LOCK(cs_wallet);
+    const auto it = m_archived_bridge_operations.find(outpoint);
+    if (it == m_archived_bridge_operations.end()) return true;
+
+    const BridgeArchivedOperation original = it->second;
+    m_archived_bridge_operations.erase(it);
+
+    WalletBatch batch(GetDatabase());
+    if (batch.EraseArchivedBridgeOperation(outpoint)) {
+        return true;
+    }
+
+    m_archived_bridge_operations[outpoint] = original;
+    return false;
+}
+
+bool CWallet::ArchivePendingBridgeOperation(const BridgeArchivedOperation& operation)
+{
+    if (!operation.IsValid()) return false;
+
+    LOCK(cs_wallet);
+    const auto pending_it = m_pending_bridge_operations.find(operation.operation.funding_outpoint);
+    if (pending_it == m_pending_bridge_operations.end()) return false;
+    if (!RunWithinTxn(GetDatabase(), "archiving pending bridge operation", [&](WalletBatch& batch) {
+            return batch.WriteArchivedBridgeOperation(operation) &&
+                   batch.ErasePendingBridgeOperation(operation.operation.funding_outpoint);
+        })) {
+        return false;
+    }
+
+    m_archived_bridge_operations[operation.operation.funding_outpoint] = operation;
+    m_pending_bridge_operations.erase(pending_it);
+    return true;
+}
+
+bool CWallet::ReactivateArchivedBridgeOperation(const COutPoint& outpoint)
+{
+    LOCK(cs_wallet);
+    const auto archived_it = m_archived_bridge_operations.find(outpoint);
+    if (archived_it == m_archived_bridge_operations.end()) return false;
+    if (m_pending_bridge_operations.count(outpoint) != 0) return false;
+
+    const BridgeArchivedOperation archived_original = archived_it->second;
+    if (!RunWithinTxn(GetDatabase(), "reactivating archived bridge operation", [&](WalletBatch& batch) {
+            return batch.WritePendingBridgeOperation(archived_original.operation) &&
+                   batch.EraseArchivedBridgeOperation(outpoint);
+        })) {
+        return false;
+    }
+
+    m_pending_bridge_operations[outpoint] = archived_original.operation;
+    m_archived_bridge_operations.erase(archived_it);
+    return true;
+}
+
+std::vector<BridgePendingRecoveryResult> CWallet::RecoverPendingBridgeOperations(std::optional<COutPoint> only_outpoint,
+                                                                                 bool force)
+{
+    std::vector<BridgePendingRecoveryResult> results;
+    if (chain().shutdownRequested()) return results;
+
+    for (auto operation : ListPendingBridgeOperations()) {
+        if (only_outpoint.has_value() && operation.funding_outpoint != *only_outpoint) continue;
+
+        BridgePendingRecoveryResult result;
+
+        bool updated_tracking{false};
+        {
+            LOCK(cs_wallet);
+
+            if (operation.has_settlement_txid) {
+                const auto status = GetPendingBridgeWalletTxStatus(*this, operation.settlement_txid);
+                if (!status.confirmed && !status.in_mempool) {
+                    operation.has_settlement_txid = false;
+                    operation.settlement_txid.SetNull();
+                    updated_tracking = true;
+                }
+            }
+
+            if (operation.has_refund_txid) {
+                const auto status = GetPendingBridgeWalletTxStatus(*this, operation.refund_txid);
+                if (!status.confirmed && !status.in_mempool) {
+                    operation.has_refund_txid = false;
+                    operation.refund_txid.SetNull();
+                    updated_tracking = true;
+                }
+            }
+
+            const auto spend = FindPendingBridgeWalletSpend(*this, operation);
+            if (spend.found) {
+                if (spend.kind == PendingBridgeSpendKind::REFUND) {
+                    if (!operation.has_refund_txid || operation.refund_txid != spend.txid) {
+                        operation.has_refund_txid = true;
+                        operation.refund_txid = spend.txid;
+                        updated_tracking = true;
+                    }
+                    if (operation.has_settlement_txid && operation.settlement_txid != spend.txid) {
+                        operation.has_settlement_txid = false;
+                        operation.settlement_txid.SetNull();
+                        updated_tracking = true;
+                    }
+                } else if (spend.kind == PendingBridgeSpendKind::SETTLEMENT) {
+                    if (!operation.has_settlement_txid || operation.settlement_txid != spend.txid) {
+                        operation.has_settlement_txid = true;
+                        operation.settlement_txid = spend.txid;
+                        updated_tracking = true;
+                    }
+                    if (operation.has_refund_txid && operation.refund_txid != spend.txid) {
+                        operation.has_refund_txid = false;
+                        operation.refund_txid.SetNull();
+                        updated_tracking = true;
+                    }
+                }
+            }
+        }
+
+        if (updated_tracking) {
+            SavePendingBridgeOperation(operation);
+        }
+
+        BridgePendingStatusSnapshot snapshot = BuildPendingBridgeStatusSnapshot(*this, operation);
+        result.operation = operation;
+        result.status_before = snapshot.status;
+
+        if (snapshot.settlement_confirmed || snapshot.refund_confirmed) {
+            const auto archived = BuildArchivedBridgeOperation(operation, snapshot);
+            result.action = snapshot.refund_confirmed ? "archived_refund" : "archived_settlement";
+            result.removed = archived.has_value() && ArchivePendingBridgeOperation(*archived);
+            result.status_after = result.removed
+                ? (snapshot.refund_confirmed ? "archived_refund" : "archived_settlement")
+                : snapshot.status;
+            results.push_back(std::move(result));
+            continue;
+        }
+
+        if (snapshot.settlement_confirmations > 0 || snapshot.refund_confirmations > 0) {
+            result.action = "waiting_confirmation_depth";
+            result.status_after = snapshot.status;
+            results.push_back(std::move(result));
+            continue;
+        }
+
+        if (snapshot.settlement_in_mempool || snapshot.refund_in_mempool) {
+            result.action = "waiting_mempool";
+            result.status_after = snapshot.status;
+            results.push_back(std::move(result));
+            continue;
+        }
+
+        if (!snapshot.funding_unspent) {
+            if (operation.last_error.empty()) {
+                operation.last_error = "Funding outpoint is no longer available on the active chain";
+                SavePendingBridgeOperation(operation);
+            }
+            result.operation = operation;
+            result.action = "spent_elsewhere";
+            result.error = operation.last_error;
+            result.status_after = "spent_elsewhere";
+            results.push_back(std::move(result));
+            continue;
+        }
+
+        if (!force && operation.last_attempt_height == snapshot.current_height) {
+            result.action = "already_attempted_this_height";
+            result.status_after = snapshot.status;
+            results.push_back(std::move(result));
+            continue;
+        }
+
+        if (IsLocked()) {
+            result.action = "wallet_locked";
+            result.status_after = snapshot.status;
+            results.push_back(std::move(result));
+            continue;
+        }
+
+        const bool refund_path = snapshot.refund_eligible;
+        if (refund_path && !snapshot.has_valid_refund_destination) {
+            operation.last_error = "Refund path eligible but no valid refund destination is recorded";
+            SavePendingBridgeOperation(operation);
+            result.operation = operation;
+            result.action = "manual_action_required";
+            result.error = operation.last_error;
+            result.status_after = "manual_action_required";
+            results.push_back(std::move(result));
+            continue;
+        }
+
+        const int32_t build_height = PendingBridgeBuildHeight(snapshot.current_height);
+        std::optional<PartiallySignedTransaction> psbt;
+        if (refund_path) {
+            const CTxDestination destination = DecodeDestination(operation.refund_destination);
+            psbt = CreateBridgeRefundTransaction(operation.plan,
+                                                operation.funding_outpoint,
+                                                operation.funding_amount,
+                                                destination,
+                                                operation.refund_fee,
+                                                &Params().GetConsensus(),
+                                                build_height);
+            if (!psbt.has_value()) {
+                operation.last_error = "Failed to construct bridge refund PSBT";
+            }
+        } else if (operation.plan.kind == shielded::BridgeTemplateKind::SHIELD) {
+            psbt = CreateBridgeShieldSettlementTransaction(operation.plan,
+                                                           operation.funding_outpoint,
+                                                           operation.funding_amount,
+                                                           &Params().GetConsensus(),
+                                                           build_height);
+            if (!psbt.has_value()) {
+                operation.last_error = "Failed to construct bridge shield settlement PSBT";
+            }
+        } else {
+            psbt = CreateBridgeUnshieldSettlementTransaction(operation.plan,
+                                                             operation.funding_outpoint,
+                                                             operation.funding_amount,
+                                                             &Params().GetConsensus(),
+                                                             build_height);
+            if (!psbt.has_value()) {
+                operation.last_error = "Failed to construct bridge unshield settlement PSBT";
+            }
+        }
+
+        if (!psbt.has_value()) {
+            operation.last_attempt_height = snapshot.current_height;
+            ++operation.retry_count;
+            SavePendingBridgeOperation(operation);
+            result.operation = operation;
+            result.action = refund_path ? "refund_build_failed" : "settlement_build_failed";
+            result.error = operation.last_error;
+            result.status_after = BuildPendingBridgeStatusSnapshot(*this, operation).status;
+            results.push_back(std::move(result));
+            continue;
+        }
+
+        CTransactionRef tx;
+        std::string finalize_error;
+        if (!FinalizeBridgePsbtWithWallet(*this, *psbt, tx, finalize_error)) {
+            operation.last_error = finalize_error;
+            operation.last_attempt_height = snapshot.current_height;
+            ++operation.retry_count;
+            SavePendingBridgeOperation(operation);
+            result.operation = operation;
+            result.action = refund_path ? "refund_finalize_failed" : "settlement_finalize_failed";
+            result.error = operation.last_error;
+            result.status_after = BuildPendingBridgeStatusSnapshot(*this, operation).status;
+            results.push_back(std::move(result));
+            continue;
+        }
+
+        const auto commit = CommitPendingBridgeTransaction(*this,
+                                                           tx,
+                                                           operation.plan.kind == shielded::BridgeTemplateKind::SHIELD);
+        operation.last_attempt_height = snapshot.current_height;
+        ++operation.retry_count;
+        if (commit.committed) {
+            operation.last_error.clear();
+            if (refund_path) {
+                operation.has_refund_txid = true;
+                operation.refund_txid = tx->GetHash();
+            } else {
+                operation.has_settlement_txid = true;
+                operation.settlement_txid = tx->GetHash();
+            }
+            SavePendingBridgeOperation(operation);
+            result.operation = operation;
+            result.action = refund_path ? "submitted_refund" : "submitted_settlement";
+            result.has_txid = true;
+            result.txid = tx->GetHash();
+            result.status_after = BuildPendingBridgeStatusSnapshot(*this, operation).status;
+        } else {
+            operation.last_error = commit.error.empty() ? "Bridge transaction commit failed" : commit.error;
+            SavePendingBridgeOperation(operation);
+            result.operation = operation;
+            result.action = commit.stale_anchor
+                ? "stale_anchor_retry_pending"
+                : (refund_path ? "refund_submit_failed" : "settlement_submit_failed");
+            result.error = operation.last_error;
+            result.status_after = BuildPendingBridgeStatusSnapshot(*this, operation).status;
+        }
+
+        results.push_back(std::move(result));
+    }
+
+    return results;
+}
+
+void CWallet::MaybeReconcileArchivedBridgeOperations()
+{
+    bool has_archived{false};
+    {
+        LOCK(cs_wallet);
+        has_archived = !m_archived_bridge_operations.empty();
+    }
+    if (!has_archived || chain().shutdownRequested()) return;
+
+    for (const auto& archived : ListArchivedBridgeOperations()) {
+        if (GetPendingBridgeOperation(archived.operation.funding_outpoint).has_value()) continue;
+
+        bool needs_reactivation{false};
+        {
+            LOCK(cs_wallet);
+            const auto status = GetPendingBridgeWalletTxStatus(*this, archived.completion_txid);
+            needs_reactivation = static_cast<int64_t>(status.confirmations) < GetBridgePendingConfirmDepth();
+        }
+
+        if (!needs_reactivation) continue;
+
+        if (ReactivateArchivedBridgeOperation(archived.operation.funding_outpoint)) {
+            WalletLogPrintf("MaybeReconcileArchivedBridgeOperations: reactivated outpoint=%s:%u completion_txid=%s\n",
+                            archived.operation.funding_outpoint.hash.GetHex(),
+                            archived.operation.funding_outpoint.n,
+                            archived.completion_txid.GetHex());
+        }
+    }
+}
+
+void CWallet::MaybeRecoverPendingBridgeOperations()
+{
+    bool has_pending{false};
+    {
+        LOCK(cs_wallet);
+        has_pending = !m_pending_bridge_operations.empty();
+    }
+    if (!has_pending || chain().shutdownRequested()) return;
+
+    for (const auto& result : RecoverPendingBridgeOperations(/*only_outpoint=*/std::nullopt, /*force=*/false)) {
+        if (result.action == "submitted_settlement" || result.action == "submitted_refund") {
+            WalletLogPrintf("MaybeRecoverPendingBridgeOperations: %s outpoint=%s:%u txid=%s\n",
+                            result.action,
+                            result.operation.funding_outpoint.hash.GetHex(),
+                            result.operation.funding_outpoint.n,
+                            result.txid.GetHex());
+        } else if (!result.error.empty() &&
+                   result.action != "wallet_locked" &&
+                   result.action != "already_attempted_this_height" &&
+                   result.action != "waiting_mempool" &&
+                   result.action != "spent_elsewhere") {
+            WalletLogPrintf("MaybeRecoverPendingBridgeOperations: action=%s outpoint=%s:%u error=%s\n",
+                            result.action,
+                            result.operation.funding_outpoint.hash.GetHex(),
+                            result.operation.funding_outpoint.n,
+                            result.error);
+        }
+    }
 }
 
 size_t CWallet::KeypoolCountExternalKeys() const
@@ -3763,7 +4601,16 @@ std::shared_ptr<CWallet> CWallet::Create(WalletContext& context, const std::stri
                            _("The wallet will avoid paying less than the minimum relay fee."));
     }
 
+    const int64_t bridge_pending_confirm_depth = args.GetIntArg("-bridgependingconfirmdepth", DEFAULT_BRIDGE_PENDING_CONFIRM_DEPTH);
+    if (bridge_pending_confirm_depth < 1 || bridge_pending_confirm_depth > std::numeric_limits<int>::max()) {
+        error = strprintf(_("Invalid -bridgependingconfirmdepth value %s (must be between 1 and %d)"),
+                          args.GetArg("-bridgependingconfirmdepth", ""),
+                          std::numeric_limits<int>::max());
+        return nullptr;
+    }
+
     walletInstance->m_confirm_target = args.GetIntArg("-txconfirmtarget", DEFAULT_TX_CONFIRM_TARGET);
+    walletInstance->m_bridge_pending_confirm_depth = static_cast<unsigned int>(bridge_pending_confirm_depth);
     walletInstance->m_spend_zero_conf_change = args.GetBoolArg("-spendzeroconfchange", DEFAULT_SPEND_ZEROCONF_CHANGE);
     walletInstance->m_signal_rbf = args.GetBoolArg("-walletrbf", DEFAULT_WALLET_RBF);
 
@@ -3980,6 +4827,9 @@ void CWallet::postInitProcess()
 
     // Update wallet transactions with current mempool transactions.
     WITH_LOCK(cs_wallet, chain().requestMempoolTransactions(*this));
+
+    MaybeReconcileArchivedBridgeOperations();
+    MaybeRecoverPendingBridgeOperations();
 }
 
 bool CWallet::BackupWallet(const std::string& strDest) const

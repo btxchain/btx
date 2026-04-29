@@ -22,6 +22,11 @@
 namespace shielded::ringct {
 namespace {
 
+[[nodiscard]] bool IsSupportedSignatureRingSize(size_t ring_size)
+{
+    return ring_size == 1 || lattice::IsSupportedRingSize(ring_size);
+}
+
 using ChallengeType = lattice::Poly256;
 
 struct DerivedRingMember {
@@ -434,7 +439,7 @@ void RunRingSignaturePaddingIterations(const ChallengeContext& challenge_context
                                        const uint256& message_hash)
 {
     if (accepted_attempt < 0 || accepted_attempt >= (MAX_REJECTION_ATTEMPTS - 1)) return;
-    if (!lattice::IsSupportedRingSize(ring_size) ||
+    if (!IsSupportedSignatureRingSize(ring_size) ||
         derived_input_ring.size() != ring_size ||
         member_offsets.size() != ring_size) {
         return;
@@ -486,7 +491,7 @@ void RunRingSignaturePaddingIterations(const ChallengeContext& challenge_context
                                              bool prevalidated_responses)
 {
     const size_t ring_size = ring_members.size();
-    if (!lattice::IsSupportedRingSize(ring_size)) return false;
+    if (!IsSupportedSignatureRingSize(ring_size)) return false;
     if (derived_members.size() != ring_size) return false;
     if (input_proof.responses.size() != ring_size) return false;
     if (input_proof.challenges.size() != ring_size) return false;
@@ -542,7 +547,7 @@ void WriteTranscriptChunk(DataStream& chunk,
     if (ring_members.empty() || ring_members.size() != signature.input_proofs.size()) return uint256{};
 
     const size_t ring_size = ring_members.front().size();
-    if (!lattice::IsSupportedRingSize(ring_size)) return uint256{};
+    if (!IsSupportedSignatureRingSize(ring_size)) return uint256{};
     for (const auto& ring : ring_members) {
         if (ring.size() != ring_size) return uint256{};
     }
@@ -580,7 +585,7 @@ void WriteTranscriptChunk(DataStream& chunk,
                                               bool prevalidated_responses)
 {
     const size_t ring_size = derived_members.size();
-    if (!lattice::IsSupportedRingSize(ring_size)) return false;
+    if (!IsSupportedSignatureRingSize(ring_size)) return false;
     if (input_proof.responses.size() != ring_size) return false;
     if (input_proof.challenges.size() != ring_size) return false;
     if (member_public_key_offsets.size() != ring_size) return false;
@@ -614,7 +619,7 @@ void WriteTranscriptChunk(DataStream& chunk,
 
 bool RingInputProof::IsValid(size_t expected_ring_size) const
 {
-    if (!lattice::IsSupportedRingSize(expected_ring_size)) return false;
+    if (!IsSupportedSignatureRingSize(expected_ring_size)) return false;
     if (responses.size() != expected_ring_size) return false;
     if (challenges.size() != expected_ring_size) return false;
 
@@ -770,14 +775,18 @@ bool CreateRingSignature(RingSignature& signature,
                          const std::vector<lattice::PolyVec>& input_secrets,
                          const uint256& message_hash,
                          Span<const unsigned char> rng_entropy,
-                         bool allow_duplicate_ring_members)
+                         bool allow_duplicate_ring_members,
+                         bool allow_singleton_ring)
 {
     const size_t input_count = ring_members.size();
     if (input_count == 0 || real_indices.size() != input_count || input_secrets.size() != input_count) return false;
     if (input_count > MAX_RING_SIGNATURE_INPUTS) return false;
 
     const size_t ring_size = ring_members.front().size();
-    if (!lattice::IsSupportedRingSize(ring_size)) return false;
+    if ((!allow_singleton_ring || ring_size != 1) &&
+        !lattice::IsSupportedRingSize(ring_size)) {
+        return false;
+    }
 
     std::set<uint256> seen_input_secret_fingerprints;
     for (size_t i = 0; i < input_count; ++i) {
@@ -1018,20 +1027,24 @@ bool CreateRingSignature(RingSignature& signature,
                                                                     message_hash);
     if (signature.challenge_seed.IsNull()) return false;
     if (!signature.IsValid(input_count, ring_size)) return false;
-    if (!VerifyRingSignature(signature, ring_members, message_hash)) return false;
+    if (!VerifyRingSignature(signature, ring_members, message_hash, allow_singleton_ring)) return false;
     return true;
 }
 
 bool VerifyRingSignature(const RingSignature& signature,
                          const std::vector<std::vector<uint256>>& ring_members,
-                         const uint256& message_hash)
+                         const uint256& message_hash,
+                         bool allow_singleton_ring)
 {
     const size_t input_count = ring_members.size();
     if (input_count == 0) return false;
     if (input_count > MAX_RING_SIGNATURE_INPUTS) return false;
 
     const size_t ring_size = ring_members.front().size();
-    if (!lattice::IsSupportedRingSize(ring_size)) return false;
+    if ((!allow_singleton_ring || ring_size != 1) &&
+        !lattice::IsSupportedRingSize(ring_size)) {
+        return false;
+    }
 
     for (const auto& ring : ring_members) {
         if (ring.size() != ring_size) return false;
@@ -1089,7 +1102,7 @@ bool ExportRingSignatureTranscriptChunks(
     if (input_count > MAX_RING_SIGNATURE_INPUTS) return false;
 
     const size_t ring_size = ring_members.front().size();
-    if (!lattice::IsSupportedRingSize(ring_size)) return false;
+    if (!IsSupportedSignatureRingSize(ring_size)) return false;
 
     for (const auto& ring : ring_members) {
         if (ring.size() != ring_size) return false;

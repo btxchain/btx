@@ -88,10 +88,12 @@ with open(sys.argv[1], encoding="utf-8") as fh:
 
 assert data["chain"] == "main"
 assert data["tip_height"] == 50042
+assert data["selected_height"] == 50042
 assert data["anchor_height"] == 50040
 assert data["genesis_hash"] == "a" * 64
 assert data["anchor_hash"] == "b" * 64
 assert data["bestblockhash"] == "c" * 64
+assert data["live_bestblockhash"] == "c" * 64
 assert data["nMinimumChainWork"] == "0000000000000000000000000000000000000000000000000000000000abc123"
 assert data["defaultAssumeValid"] == "b" * 64
 assert data["chainTxData"]["nTime"] == 1739999999
@@ -215,10 +217,113 @@ with open(sys.argv[1], encoding="utf-8") as fh:
     data = json.load(fh)
 
 assert data["tip_height"] == 1
+assert data["selected_height"] == 1
 assert data["anchor_height"] == 0
 assert data["chainTxData"]["tx_count"] == 1
 assert data["nMinimumChainWork"] == "0" * 63 + "1"
 PY
+
+# Historical target-height mode: use the selected height for both hardening and txstats.
+FAKE_CLI_TARGET="${TMP_DIR}/fake-btx-cli-target.sh"
+TARGET_LOG="${TMP_DIR}/target-cli.log"
+cat > "${FAKE_CLI_TARGET}" <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+
+log_path="${BTX_TEST_LOG_PATH:?}"
+printf '%s\n' "$*" >> "${log_path}"
+
+command_name=""
+command_args=()
+for arg in "$@"; do
+  case "${arg}" in
+    -chain=*|-rpc*|-datadir=*|-conf=*|-debug=*|-stdinrpcpass)
+      continue
+      ;;
+    *)
+      if [[ -z "${command_name}" ]]; then
+        command_name="${arg}"
+      else
+        command_args+=("${arg}")
+      fi
+      ;;
+  esac
+done
+
+case "${command_name}" in
+  getblockcount)
+    echo "50042"
+    ;;
+  getbestblockhash)
+    echo "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ;;
+  getblockhash)
+    case "${command_args[0]:-}" in
+      0)
+        echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ;;
+      50040)
+        echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ;;
+      *)
+        echo "unexpected getblockhash height: ${command_args[*]-}" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  getblockheader)
+    cat <<'JSON'
+{"hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","height":50040,"chainwork":"abc123"}
+JSON
+    ;;
+  getchaintxstats)
+    if [[ "${command_args[0]:-}" != "4096" || "${command_args[1]:-}" != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ]]; then
+      echo "unexpected getchaintxstats args: ${command_args[*]-}" >&2
+      exit 2
+    fi
+    cat <<'JSON'
+{"time":1740001111,"txcount":6543210,"txrate":6.5}
+JSON
+    ;;
+  *)
+    echo "unexpected command: ${command_name}" >&2
+    exit 2
+    ;;
+esac
+EOS
+chmod +x "${FAKE_CLI_TARGET}"
+
+OUT_JSON_TARGET="${TMP_DIR}/manifest-target.json"
+BTX_TEST_LOG_PATH="${TARGET_LOG}" python3 "${SCRIPT}" \
+  --btx-cli "${FAKE_CLI_TARGET}" \
+  --chain main \
+  --target-height 50040 \
+  --output "${OUT_JSON_TARGET}" \
+  --window-blocks 4096
+
+python3 - <<'PY' "${OUT_JSON_TARGET}"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+
+assert data["tip_height"] == 50042
+assert data["selected_height"] == 50040
+assert data["anchor_height"] == 50040
+assert data["bestblockhash"] == "b" * 64
+assert data["live_bestblockhash"] == "c" * 64
+assert data["chainTxData"]["nTime"] == 1740001111
+assert data["chainTxData"]["tx_count"] == 6543210
+assert abs(data["chainTxData"]["dTxRate"] - 6.5) < 1e-12
+assert "{50040, uint256{\"" + "b" * 64 + "\"}}" in data["cpp_snippet"]
+PY
+
+if ! rg -q "getchaintxstats 4096 b{64}" "${TARGET_LOG}"; then
+  echo "error: expected getchaintxstats to use the selected target-height hash" >&2
+  cat "${TARGET_LOG}" >&2
+  exit 1
+fi
 
 # Legacy alias compatibility: --bitcoin-cli should still work.
 python3 "${SCRIPT}" \

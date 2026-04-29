@@ -169,23 +169,6 @@ class SigData:
             "SigData(%r, %r, trusted=%s, status=%r)" %
             (self.key, self.name, self.trusted, self.status))
 
-    def to_report_dict(self):
-        return {
-            "fingerprint": self.key,
-            "signer": self.name,
-            "trusted": self.trusted,
-            "status": self.status,
-        }
-
-
-def emit_json_report(payload) -> None:
-    json.dump(payload, sys.stdout, indent=2)
-    sys.stdout.write("\n")
-
-
-def sigs_to_report_entries(sig_entries: list[SigData]) -> list[dict[str, t.Any]]:
-    return [sig.to_report_dict() for sig in sig_entries]
-
 
 def parse_gpg_result(
     output: list[str]
@@ -566,13 +549,13 @@ def verify_published_handler(args: argparse.Namespace) -> ReturnCode:
 
     if args.json:
         output = {
-            'good_trusted_sigs': sigs_to_report_entries(good_trusted),
-            'good_untrusted_sigs': sigs_to_report_entries(good_untrusted),
-            'unknown_sigs': sigs_to_report_entries(unknown),
-            'bad_sigs': sigs_to_report_entries(bad),
+            'good_trusted_sigs': [str(s) for s in good_trusted],
+            'good_untrusted_sigs': [str(s) for s in good_untrusted],
+            'unknown_sigs': [str(s) for s in unknown],
+            'bad_sigs': [str(s) for s in bad],
             'verified_binaries': files_to_hashes,
         }
-        emit_json_report(output)
+        print(json.dumps(output, indent=2))
     else:
         for filename in files_to_hashes:
             print(f"VERIFIED: {filename}")
@@ -630,14 +613,14 @@ def verify_binaries_handler(args: argparse.Namespace) -> ReturnCode:
 
     if args.json:
         output = {
-            'good_trusted_sigs': sigs_to_report_entries(good_trusted),
-            'good_untrusted_sigs': sigs_to_report_entries(good_untrusted),
-            'unknown_sigs': sigs_to_report_entries(unknown),
-            'bad_sigs': sigs_to_report_entries(bad),
+            'good_trusted_sigs': [str(s) for s in good_trusted],
+            'good_untrusted_sigs': [str(s) for s in good_untrusted],
+            'unknown_sigs': [str(s) for s in unknown],
+            'bad_sigs': [str(s) for s in bad],
             'verified_binaries': files_to_hashes,
             "missing_binaries": missing_files,
         }
-        emit_json_report(output)
+        print(json.dumps(output, indent=2))
     else:
         for filename in files_to_hashes:
             print(f"VERIFIED: {filename}")

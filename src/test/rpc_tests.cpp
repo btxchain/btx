@@ -522,6 +522,83 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_btx_mining_methods)
     BOOST_CHECK_EQUAL(result[1].get_bool(), false);
 }
 
+BOOST_AUTO_TEST_CASE(rpc_convert_values_bridge_methods)
+{
+    UniValue result;
+
+    const std::string recovery_options{R"({"track_pending":false,"refund_fee":0.00010000})"};
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues(
+        "bridge_submitunshieldtx",
+        {"deadbeef", "0123", "1", "2.50000000", recovery_options}));
+    BOOST_REQUIRE_EQUAL(result.size(), 5U);
+    BOOST_CHECK_EQUAL(result[2].getInt<int>(), 1);
+    BOOST_CHECK_CLOSE(result[3].get_real(), 2.5, 0.0001);
+    BOOST_CHECK(result[4].isObject());
+    BOOST_CHECK_EQUAL(result[4]["track_pending"].get_bool(), false);
+    BOOST_CHECK_CLOSE(result[4]["refund_fee"].get_real(), 0.0001, 0.0001);
+
+    const std::string import_options{R"({"recover_now":false,"refund_fee":0.00010000})"};
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues(
+        "bridge_importpending",
+        {"deadbeef", "0123", "2", "5.00000000", import_options}));
+    BOOST_REQUIRE_EQUAL(result.size(), 5U);
+    BOOST_CHECK_EQUAL(result[2].getInt<int>(), 2);
+    BOOST_CHECK_CLOSE(result[3].get_real(), 5.0, 0.0001);
+    BOOST_CHECK(result[4].isObject());
+    BOOST_CHECK_EQUAL(result[4]["recover_now"].get_bool(), false);
+
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("bridge_recoverpending", {"0123", "7", "true"}));
+    BOOST_REQUIRE_EQUAL(result.size(), 3U);
+    BOOST_CHECK_EQUAL(result[1].getInt<int>(), 7);
+    BOOST_CHECK_EQUAL(result[2].get_bool(), true);
+
+    const std::string archive_list_options{R"({"max_archive_height":250,"completion_txid":"0123"})"};
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("bridge_listarchive", {archive_list_options}));
+    BOOST_REQUIRE_EQUAL(result.size(), 1U);
+    BOOST_CHECK(result[0].isObject());
+    BOOST_CHECK_EQUAL(result[0]["max_archive_height"].getInt<int>(), 250);
+    BOOST_CHECK_EQUAL(result[0]["completion_txid"].get_str(), "0123");
+
+    const std::string archive_prune_options{
+        R"({"funding_txid":"abcd","funding_vout":3,"dry_run":true,"force":false})"};
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues("bridge_prunearchive", {archive_prune_options}));
+    BOOST_REQUIRE_EQUAL(result.size(), 1U);
+    BOOST_CHECK(result[0].isObject());
+    BOOST_CHECK_EQUAL(result[0]["funding_txid"].get_str(), "abcd");
+    BOOST_CHECK_EQUAL(result[0]["funding_vout"].getInt<int>(), 3);
+    BOOST_CHECK_EQUAL(result[0]["dry_run"].get_bool(), true);
+    BOOST_CHECK_EQUAL(result[0]["force"].get_bool(), false);
+
+    const std::string reserve_deltas{
+        R"([{"l2_id":"01","reserve_delta":7},{"l2_id":"02","reserve_delta":-7}])"};
+    const std::string reserve_outputs{
+        R"([{"address":"btxs1example","amount":3.5}])"};
+    const std::string rebalance_options{R"({"settlement_window":288,"fee":0.00020000})"};
+    BOOST_CHECK_NO_THROW(result = RPCConvertValues(
+        "bridge_submitrebalancetx",
+        {reserve_deltas, reserve_outputs, rebalance_options}));
+    BOOST_REQUIRE_EQUAL(result.size(), 3U);
+    BOOST_CHECK(result[0].isArray());
+    BOOST_CHECK(result[1].isArray());
+    BOOST_CHECK(result[2].isObject());
+    BOOST_CHECK_EQUAL(result[2]["settlement_window"].getInt<int>(), 288);
+
+    UniValue named_result;
+    BOOST_CHECK_NO_THROW(named_result = RPCConvertNamedValues(
+        "bridge_listarchive",
+        {R"(options={"max_archive_height":251,"completion_txid":"abcd"})"}));
+    BOOST_CHECK(named_result.isObject());
+    BOOST_CHECK_EQUAL(named_result["options"]["max_archive_height"].getInt<int>(), 251);
+    BOOST_CHECK_EQUAL(named_result["options"]["completion_txid"].get_str(), "abcd");
+
+    BOOST_CHECK_NO_THROW(named_result = RPCConvertNamedValues(
+        "bridge_prunearchive",
+        {R"(options={"all":true,"force":true})"}));
+    BOOST_CHECK(named_result.isObject());
+    BOOST_CHECK_EQUAL(named_result["options"]["all"].get_bool(), true);
+    BOOST_CHECK_EQUAL(named_result["options"]["force"].get_bool(), true);
+}
+
 BOOST_AUTO_TEST_CASE(rpc_getblockstats_calculate_percentiles_by_weight)
 {
     int64_t total_weight = 200;

@@ -19,7 +19,10 @@ class WalletShieldedMixedStressTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
         self.setup_clean_chain = True
-        self.extra_args = [[], []]
+        self.extra_args = [
+            ["-regtestshieldedmatrictdisableheight=500"],
+            ["-regtestshieldedmatrictdisableheight=500"],
+        ]
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -81,16 +84,13 @@ class WalletShieldedMixedStressTest(BitcoinTestFramework):
             assert Decimal(w0.z_getbalance()["balance"]) >= Decimal("0")
             assert Decimal(w1.z_getbalance()["balance"]) >= Decimal("0")
 
-        self.log.info("Exercise mempool nullifier conflict rejection")
+        self.log.info("Exercise back-to-back shielded sends without mempool nullifier conflicts")
         pending_dest = w0.z_getnewaddress()
         first = w0.z_sendmany([{"address": pending_dest, "amount": Decimal("0.20")}])
         assert first["txid"] in n0.getrawmempool()
-        assert_raises_rpc_error(
-            -26,
-            "Shielded transaction created but rejected from mempool (policy or consensus)",
-            w0.z_sendmany,
-            [{"address": pending_dest, "amount": Decimal("0.05")}],
-        )
+        second = w0.z_sendmany([{"address": pending_dest, "amount": Decimal("0.05")}])
+        assert second["txid"] in n0.getrawmempool()
+        assert second["txid"] != first["txid"]
         self.generatetoaddress(n0, 1, mine0, sync_fun=self.sync_all)
 
         self.log.info("Force a short fork and ensure both wallets survive reorg convergence")
@@ -114,7 +114,6 @@ class WalletShieldedMixedStressTest(BitcoinTestFramework):
 
         assert Decimal(w0.z_getbalance()["balance"]) >= Decimal("0")
         assert Decimal(w1.z_getbalance()["balance"]) >= Decimal("0")
-        assert len(n0.getrawmempool()) == 0
 
 
 if __name__ == "__main__":

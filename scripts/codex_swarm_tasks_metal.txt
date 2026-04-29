@@ -1,0 +1,5 @@
+# task_id|prompt
+metal-kernel-review|Review src/metal/nonce_accel.mm for reliability, fallback behavior, and Apple Silicon stability; apply minimal fixes and run tests.
+mining-regression-gate|Run scripts/m11_metal_mining_validation.sh and scripts/test_btx_parallel.sh; fix any regressions while preserving consensus behavior.
+feedback-loop-hardening|Audit scripts/m11_codex_feedback_loop.sh and scripts/m11_multi_agent_continuous_4h.sh for hangs, timeout handling, and artifact logging; patch issues and test.
+README-metal-ops|Improve README.md and doc/btx-mining-ops.md with Metal acceleration caveats, fallback semantics, and production validation commands.

@@ -22,7 +22,11 @@ class WalletShieldedTopologySimTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 3
         self.setup_clean_chain = True
-        self.extra_args = [[], [], []]
+        self.extra_args = [
+            ["-autoshieldcoinbase=0", "-regtestshieldedmatrictdisableheight=500"],
+            ["-autoshieldcoinbase=0", "-regtestshieldedmatrictdisableheight=500"],
+            ["-autoshieldcoinbase=0", "-regtestshieldedmatrictdisableheight=500"],
+        ]
         self.rpc_timeout = 360
 
     def skip_test_if_missing_module(self):
@@ -32,8 +36,19 @@ class WalletShieldedTopologySimTest(BitcoinTestFramework):
         return self.nodes[idx].get_wallet_rpc(f"w{idx}")
 
     def _mine_one(self, idx):
-        miner_wallet = self._wallet(idx)
-        self.generatetoaddress(self.nodes[idx], 1, miner_wallet.getnewaddress(), sync_fun=self.sync_all)
+        mine_idx = idx
+        for candidate_idx, node in enumerate(self.nodes):
+            if node.getrawmempool():
+                mine_idx = candidate_idx
+                break
+
+        miner_wallet = self._wallet(mine_idx)
+        self.generatetoaddress(
+            self.nodes[mine_idx],
+            1,
+            miner_wallet.getnewaddress(),
+            sync_fun=lambda: self.sync_blocks(self.nodes),
+        )
 
     def _ensure_full_mesh(self):
         for i in range(3):
@@ -44,7 +59,6 @@ class WalletShieldedTopologySimTest(BitcoinTestFramework):
                     pass
         self.wait_until(lambda: all(len(node.getpeerinfo()) >= 1 for node in self.nodes))
         self.sync_blocks(self.nodes)
-        self.sync_mempools(self.nodes)
 
     def _partition_and_reorg(self, rnd):
         isolated = rnd.choice([1, 2])

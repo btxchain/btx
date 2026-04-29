@@ -4,13 +4,11 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test share/rpcauth/rpcauth.py
 """
+import re
 import configparser
 import hmac
 import importlib
-import json
 import os
-import re
-import subprocess
 import sys
 import unittest
 
@@ -22,8 +20,7 @@ class TestRPCAuth(unittest.TestCase):
             "../config.ini"))
         with open(config_path, encoding="utf8") as config_file:
             config.read_file(config_file)
-        self.rpcauth_path = config['environment']['RPCAUTH']
-        sys.path.insert(0, os.path.dirname(self.rpcauth_path))
+        sys.path.insert(0, os.path.dirname(config['environment']['RPCAUTH']))
         self.rpcauth = importlib.import_module('rpcauth')
 
     def test_generate_salt(self):
@@ -33,32 +30,18 @@ class TestRPCAuth(unittest.TestCase):
     def test_generate_password(self):
         """Test that generated passwords only consist of urlsafe characters."""
         r = re.compile(r"[0-9a-zA-Z_-]*")
-        generated_secret = self.rpcauth.generate_password()
-        self.assertTrue(r.fullmatch(generated_secret))
+        password = self.rpcauth.generate_password()
+        self.assertTrue(r.fullmatch(password))
 
     def test_check_password_hmac(self):
         salt = self.rpcauth.generate_salt(16)
-        auth_secret = self.rpcauth.generate_password()
-        computed_hmac = self.rpcauth.password_to_hmac(salt, auth_secret)
+        password = self.rpcauth.generate_password()
+        password_hmac = self.rpcauth.password_to_hmac(salt, password)
 
-        m = hmac.new(salt.encode('utf-8'), auth_secret.encode('utf-8'), 'SHA256')
-        expected_hmac = m.hexdigest()
+        m = hmac.new(salt.encode('utf-8'), password.encode('utf-8'), 'SHA256')
+        expected_password_hmac = m.hexdigest()
 
-        self.assertEqual(expected_hmac, computed_hmac)
-
-    def test_json_output_preserves_password_key(self):
-        result = subprocess.run(
-            [sys.executable, self.rpcauth_path, 'user', '-j'],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        payload = json.loads(result.stdout)
-        self.assertIn('password', payload)
-        self.assertIn('credential', payload)
-        self.assertEqual(payload['password'], payload['credential'])
-        self.assertEqual(payload['username'], 'user')
-        self.assertIn('rpcauth', payload)
+        self.assertEqual(expected_password_hmac, password_hmac)
 
 if __name__ == '__main__':
     unittest.main()

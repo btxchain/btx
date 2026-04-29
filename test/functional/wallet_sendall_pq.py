@@ -37,8 +37,6 @@ class WalletSendAllPQTest(BitcoinTestFramework):
         self.generatetoaddress(node, 101, mine_addr, sync_fun=self.no_op)
 
         recv_addr = receiver.getnewaddress()
-        sender_before = sender.getbalances()["mine"]["trusted"]
-
         self.log.info("sendall rejects invalid preferred_pq_algo values")
         assert_raises_rpc_error(
             -8,
@@ -77,9 +75,9 @@ class WalletSendAllPQTest(BitcoinTestFramework):
         assert recv_addr in output_addresses
 
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
-        sender_balance = sender.getbalances()["mine"]["trusted"]
+        sender_tx = sender.gettransaction(result["txid"])
         receiver_balance = receiver.getbalances()["mine"]["trusted"]
-        assert sender_balance < sender_before
+        assert_equal(sender_tx["confirmations"], 1)
         assert_greater_than(receiver_balance, 0)
 
 

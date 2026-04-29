@@ -31,19 +31,19 @@ payload = {
             "command": [
                 "scp",
                 "-i",
-                "/home/example/.ssh/id_ed25519",
-                "/tmp/btx-m22-old/source.tar.gz",
+                "/Users/admin/.ssh/id_ed25519",
+                "/private/tmp/btx-m22-old/source.tar.gz",
                 "root@198.51.100.8:/root/upload.tar.gz",
             ],
-            "cwd": "/home/example/btxchain/btx-node",
-            "log": "/tmp/btx-m22-old/logs/source_upload.log",
+            "cwd": "/Users/admin/Documents/btxchain/btx-node",
+            "log": "/private/tmp/btx-m22-old/logs/source_upload.log",
         }
     ],
     "artifacts": {
         "source_archive": {
-            "path": "/tmp/btx-m22-old/source.tar.gz",
+            "path": "/private/tmp/btx-m22-old/source.tar.gz",
         },
-        "remote_extract_dir": "/tmp/btx-m22-old/artifacts/remote_artifacts",
+        "remote_extract_dir": "/private/tmp/btx-m22-old/artifacts/remote_artifacts",
     },
 }
 for target in sys.argv[1:]:
@@ -111,7 +111,7 @@ if not any("pending external input" in blocker for blocker in summary["blockers"
     raise SystemExit("expected placeholder blockers in packet-local m25 output")
 
 rendered_manifest = json.dumps(manifest)
-if "/home/example" in rendered_manifest or "/tmp/" in rendered_manifest:
+if "/Users/admin" in rendered_manifest or "/private/tmp/" in rendered_manifest:
     raise SystemExit("intake manifest still leaks creator-machine local paths")
 
 packet_entry = next(
@@ -140,7 +140,7 @@ for hosted_manifest in [source_packet_hosted, direct_hosted]:
     if hosted_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
         raise SystemExit("hosted manifest remote_extract_dir was not sanitized")
     rendered = json.dumps(hosted_manifest)
-    if "/home/example" in rendered or "/tmp/btx-m22-old" in rendered:
+    if "/Users/admin" in rendered or "/private/tmp/btx-m22-old" in rendered:
         raise SystemExit("hosted manifest still leaks creator-machine local paths")
 
 for hosted_manifest in [source_packet_validation, direct_validation]:
@@ -152,7 +152,7 @@ for hosted_manifest in [source_packet_validation, direct_validation]:
     if hosted_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
         raise SystemExit("hosted validation manifest remote_extract_dir was not sanitized")
     rendered = json.dumps(hosted_manifest)
-    if "/home/example" in rendered or "/tmp/btx-m22-old" in rendered:
+    if "/Users/admin" in rendered or "/private/tmp/btx-m22-old" in rendered:
         raise SystemExit("hosted validation manifest still leaks creator-machine local paths")
 PY
 

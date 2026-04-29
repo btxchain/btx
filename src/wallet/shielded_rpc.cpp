@@ -33,6 +33,8 @@
 #include <wallet/shielded_wallet.h>
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
+#include <shielded/bundle.h>
+#include <shielded/smile2/params.h>
 #include <shielded/v2_egress.h>
 #include <shielded/v2_ingress.h>
 
@@ -58,8 +60,14 @@ static constexpr uint64_t DEFAULT_BRIDGE_PROVER_BLOCK_INTERVAL_MILLIS{90'000};
 static constexpr uint32_t DEFAULT_V2_REBALANCE_SETTLEMENT_WINDOW{144};
 static constexpr int64_t BRIDGE_FEE_HEADROOM_SCALE{1000};
 static constexpr int64_t DEFAULT_BRIDGE_FEE_HEADROOM_MULTIPLIER_MILLI{2000};
+static constexpr CAmount DEFAULT_BRIDGE_PENDING_REFUND_FEE{10000};
 static constexpr const char* TAG_REBALANCE_MANIFEST_GROSS_FLOW{"BTX_RPC_Rebalance_Manifest_Gross_Flow_V1"};
 static constexpr const char* TAG_REBALANCE_MANIFEST_AUTH{"BTX_RPC_Rebalance_Manifest_Authorization_V1"};
+
+[[nodiscard]] constexpr CAmount GetShieldingChunkSmileValueLimit()
+{
+    return static_cast<CAmount>(smile2::Q) - 1;
+}
 
 [[nodiscard]] CAmount RequiredMempoolFee(const CWallet& wallet, size_t relay_vsize, bool has_shielded_bundle);
 [[nodiscard]] CAmount RequiredMempoolFee(const CWallet& wallet, const CTransaction& tx);
@@ -109,6 +117,33 @@ static constexpr const char* TAG_REBALANCE_MANIFEST_AUTH{"BTX_RPC_Rebalance_Mani
         fee,
         Params().GetConsensus(),
         NextShieldingRpcBuildHeight(wallet));
+}
+
+[[nodiscard]] CAmount MaxShieldedWalletBroadcastFee(const CWallet& wallet)
+{
+    CAmount max_fee = wallet.m_default_max_tx_fee;
+    if (max_fee <= 0) return max_fee;
+
+    if (!shielded::UseShieldedCanonicalFeeBuckets(
+            Params().GetConsensus(),
+            NextShieldingRpcBuildHeight(wallet))) {
+        return max_fee;
+    }
+
+    return max_fee - (max_fee % shielded::SHIELDED_PRIVACY_FEE_QUANTUM);
+}
+
+[[nodiscard]] CAmount ClampShieldedAutoFeeToWalletLimit(const CWallet& wallet, CAmount fee)
+{
+    const CAmount max_fee = MaxShieldedWalletBroadcastFee(wallet);
+    if (max_fee <= 0) {
+        throw JSONRPCError(
+            RPC_WALLET_ERROR,
+            strprintf("Configured -maxtxfee %s is too low for canonical shielded fees",
+                      FormatMoney(wallet.m_default_max_tx_fee)));
+    }
+
+    return std::min(CanonicalizeShieldingFee(wallet, fee), max_fee);
 }
 
 [[nodiscard]] bool RedactSensitiveShieldedRpcFields(const CWallet& wallet, bool include_sensitive)
@@ -378,6 +413,8 @@ void EnsureShieldedViewingKeyWalletOrThrow(const CWallet& wallet)
         switch (*family) {
         case shielded::v2::TransactionFamily::V2_SEND:
             return "v2_send";
+        case shielded::v2::V2_SPEND_PATH_RECOVERY:
+            return "v2_spend_path_recovery";
         case shielded::v2::TransactionFamily::V2_LIFECYCLE:
             return "v2_lifecycle";
         case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
@@ -2159,6 +2196,98 @@ void SetShieldedFeeEstimateMode(const CWallet& wallet,
     out.pushKV("selected_path", selected_path);
     out.pushKV("bridge_root", plan.script_tree.merkle_root.GetHex());
     out.pushKV("ctv_hash", plan.ctv_hash.GetHex());
+    return out;
+}
+
+[[nodiscard]] const char* BridgeArchivedCompletionKindToString(BridgeArchivedCompletionKind kind)
+{
+    switch (kind) {
+    case BridgeArchivedCompletionKind::SETTLEMENT:
+        return "settlement";
+    case BridgeArchivedCompletionKind::REFUND:
+        return "refund";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] UniValue BridgePendingOperationToUniValue(const BridgePendingOperation& operation)
+{
+    UniValue out(UniValue::VOBJ);
+    out.pushKV("kind", BridgeTemplateKindToString(operation.plan.kind));
+    out.pushKV("plan_hex", EncodeBridgePlanHex(operation.plan));
+    out.pushKV("ids", BridgePlanIdsToUniValue(operation.plan.ids));
+    out.pushKV("funding_txid", operation.funding_outpoint.hash.GetHex());
+    out.pushKV("funding_vout", static_cast<int64_t>(operation.funding_outpoint.n));
+    out.pushKV("funding_amount", ValueFromAmount(operation.funding_amount));
+    out.pushKV("refund_lock_height", static_cast<int64_t>(operation.plan.refund_lock_height));
+    out.pushKV("imported", operation.imported);
+    out.pushKV("bridge_root", operation.plan.script_tree.merkle_root.GetHex());
+    out.pushKV("ctv_hash", operation.plan.ctv_hash.GetHex());
+    if (!operation.refund_destination.empty()) {
+        out.pushKV("refund_destination", operation.refund_destination);
+    }
+    out.pushKV("refund_fee", ValueFromAmount(operation.refund_fee));
+    out.pushKV("created_height", operation.created_height);
+    out.pushKV("last_attempt_height", operation.last_attempt_height);
+    out.pushKV("retry_count", static_cast<int64_t>(operation.retry_count));
+    if (operation.has_settlement_txid) {
+        out.pushKV("settlement_txid", operation.settlement_txid.GetHex());
+    }
+    if (operation.has_refund_txid) {
+        out.pushKV("refund_txid", operation.refund_txid.GetHex());
+    }
+    if (!operation.last_error.empty()) {
+        out.pushKV("last_error", operation.last_error);
+    }
+    return out;
+}
+
+[[nodiscard]] UniValue BridgePendingStatusToUniValue(const BridgePendingStatusSnapshot& snapshot)
+{
+    UniValue out = BridgePendingOperationToUniValue(snapshot.operation);
+    out.pushKV("status", snapshot.status);
+    out.pushKV("current_height", snapshot.current_height);
+    out.pushKV("required_confirmations", static_cast<int64_t>(snapshot.required_confirmations));
+    out.pushKV("refund_eligible", snapshot.refund_eligible);
+    out.pushKV("funding_unspent", snapshot.funding_unspent);
+    out.pushKV("has_valid_refund_destination", snapshot.has_valid_refund_destination);
+    out.pushKV("settlement_confirmed", snapshot.settlement_confirmed);
+    out.pushKV("settlement_in_mempool", snapshot.settlement_in_mempool);
+    out.pushKV("settlement_confirmations", snapshot.settlement_confirmations);
+    out.pushKV("refund_confirmed", snapshot.refund_confirmed);
+    out.pushKV("refund_in_mempool", snapshot.refund_in_mempool);
+    out.pushKV("refund_confirmations", snapshot.refund_confirmations);
+    return out;
+}
+
+[[nodiscard]] UniValue BridgeArchivedOperationToUniValue(const BridgeArchivedOperation& archived)
+{
+    UniValue out = BridgePendingOperationToUniValue(archived.operation);
+    const auto kind = static_cast<BridgeArchivedCompletionKind>(archived.completion_kind);
+    out.pushKV("status", kind == BridgeArchivedCompletionKind::REFUND ? "archived_refund" : "archived_settlement");
+    out.pushKV("completion_kind", BridgeArchivedCompletionKindToString(kind));
+    out.pushKV("completion_txid", archived.completion_txid.GetHex());
+    out.pushKV("completion_height", archived.completion_height);
+    out.pushKV("archive_height", archived.archive_height);
+    out.pushKV("archive_time", archived.archive_time);
+    return out;
+}
+
+[[nodiscard]] UniValue BridgePendingRecoveryResultToUniValue(const BridgePendingRecoveryResult& result)
+{
+    UniValue out(UniValue::VOBJ);
+    out.pushKV("funding_txid", result.operation.funding_outpoint.hash.GetHex());
+    out.pushKV("funding_vout", static_cast<int64_t>(result.operation.funding_outpoint.n));
+    out.pushKV("status_before", result.status_before);
+    out.pushKV("action", result.action);
+    out.pushKV("status_after", result.status_after);
+    out.pushKV("removed", result.removed);
+    if (result.has_txid) {
+        out.pushKV("txid", result.txid.GetHex());
+    }
+    if (!result.error.empty()) {
+        out.pushKV("error", result.error);
+    }
     return out;
 }
 
@@ -5829,6 +5958,266 @@ constexpr std::array<BridgeProverTemplate, 8> BRIDGE_PROVER_TEMPLATES{{
     return value.isNull() ? true : value.get_bool();
 }
 
+struct BridgePendingRpcConfig
+{
+    bool track_pending{true};
+    bool recover_now{true};
+    std::string refund_destination;
+    CAmount refund_fee{DEFAULT_BRIDGE_PENDING_REFUND_FEE};
+};
+
+struct BridgeArchiveFilter
+{
+    std::optional<COutPoint> funding_outpoint;
+    std::optional<uint256> completion_txid;
+    std::optional<int32_t> max_archive_height;
+};
+
+struct BridgeArchivePruneConfig
+{
+    BridgeArchiveFilter filter;
+    bool all{false};
+    bool dry_run{false};
+    bool force{false};
+};
+
+[[nodiscard]] int32_t CurrentBridgeWalletHeight(const CWallet& wallet)
+{
+    LOCK(wallet.cs_wallet);
+    return wallet.GetLastBlockHeight();
+}
+
+[[nodiscard]] std::string ExtractRpcErrorMessage(const UniValue& obj_error)
+{
+    const UniValue& message = obj_error.find_value("message");
+    return message.isStr() ? message.get_str() : obj_error.write();
+}
+
+[[nodiscard]] BridgePendingRpcConfig ParseBridgePendingRpcConfigOrThrow(const std::shared_ptr<CWallet>& pwallet,
+                                                                       const UniValue& options,
+                                                                       bool default_track_pending,
+                                                                       bool default_recover_now)
+{
+    if (!options.isNull() && !options.isObject()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "options must be an object");
+    }
+
+    BridgePendingRpcConfig config;
+    config.track_pending = default_track_pending;
+    config.recover_now = default_recover_now;
+
+    const UniValue& track_pending_value = FindValue(options, "track_pending");
+    if (!track_pending_value.isNull()) {
+        config.track_pending = track_pending_value.get_bool();
+    }
+
+    const UniValue& recover_now_value = FindValue(options, "recover_now");
+    if (!recover_now_value.isNull()) {
+        config.recover_now = recover_now_value.get_bool();
+    }
+
+    if (!config.track_pending && !config.recover_now) {
+        return config;
+    }
+
+    const UniValue& refund_fee_value = FindValue(options, "refund_fee");
+    if (!refund_fee_value.isNull()) {
+        config.refund_fee = AmountFromValue(refund_fee_value);
+    }
+    if (!MoneyRange(config.refund_fee) || config.refund_fee < 0) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "options.refund_fee must be a non-negative amount");
+    }
+
+    const UniValue& refund_destination_value = FindValue(options, "refund_destination");
+    if (!refund_destination_value.isNull()) {
+        config.refund_destination =
+            EncodeDestination(ParseDestinationOrThrow(refund_destination_value, "options.refund_destination"));
+        return config;
+    }
+
+    const auto destination = pwallet->GetNewDestination(OutputType::P2MR, "bridge refund");
+    if (!destination) {
+        throw JSONRPCError(RPC_WALLET_ERROR, util::ErrorString(destination).original);
+    }
+    pwallet->SetAddressBook(*destination, "bridge refund", AddressPurpose::REFUND);
+    config.refund_destination = EncodeDestination(*destination);
+    return config;
+}
+
+[[nodiscard]] uint32_t ParseBridgeArchiveVoutOrThrow(const UniValue& value, std::string_view field_name)
+{
+    if (!value.isNum()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a number", field_name));
+    }
+
+    const int64_t vout = value.getInt<int64_t>();
+    if (vout < 0 || vout > std::numeric_limits<uint32_t>::max()) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            strprintf("%s must be between 0 and %u", field_name, std::numeric_limits<uint32_t>::max()));
+    }
+    return static_cast<uint32_t>(vout);
+}
+
+[[nodiscard]] int32_t ParseBridgeArchiveHeightOrThrow(const UniValue& value, std::string_view field_name)
+{
+    if (!value.isNum()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a number", field_name));
+    }
+
+    const int64_t height = value.getInt<int64_t>();
+    if (height < 0 || height > std::numeric_limits<int32_t>::max()) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            strprintf("%s must be between 0 and %d", field_name, std::numeric_limits<int32_t>::max()));
+    }
+    return static_cast<int32_t>(height);
+}
+
+[[nodiscard]] BridgeArchiveFilter ParseBridgeArchiveFilterOrThrow(const UniValue& options, std::string_view field_prefix)
+{
+    if (!options.isNull() && !options.isObject()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be an object", field_prefix));
+    }
+
+    BridgeArchiveFilter filter;
+
+    const std::string txid_name = strprintf("%s.funding_txid", field_prefix);
+    const std::string vout_name = strprintf("%s.funding_vout", field_prefix);
+    const UniValue& funding_txid_value = FindValue(options, "funding_txid");
+    const UniValue& funding_vout_value = FindValue(options, "funding_vout");
+    if (funding_txid_value.isNull() != funding_vout_value.isNull()) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            strprintf("%s and %s must be provided together", txid_name, vout_name));
+    }
+    if (!funding_txid_value.isNull()) {
+        const uint256 funding_txid = ParseHashV(funding_txid_value, txid_name);
+        const uint32_t funding_vout = ParseBridgeArchiveVoutOrThrow(funding_vout_value, vout_name);
+        filter.funding_outpoint = COutPoint{Txid::FromUint256(funding_txid), funding_vout};
+    }
+
+    const UniValue& completion_txid_value = FindValue(options, "completion_txid");
+    if (!completion_txid_value.isNull()) {
+        filter.completion_txid = ParseHashV(completion_txid_value, strprintf("%s.completion_txid", field_prefix));
+    }
+
+    const UniValue& max_archive_height_value = FindValue(options, "max_archive_height");
+    if (!max_archive_height_value.isNull()) {
+        filter.max_archive_height = ParseBridgeArchiveHeightOrThrow(
+            max_archive_height_value, strprintf("%s.max_archive_height", field_prefix));
+    }
+
+    return filter;
+}
+
+[[nodiscard]] bool BridgeArchivedOperationMatchesFilter(const BridgeArchivedOperation& archived,
+                                                        const BridgeArchiveFilter& filter)
+{
+    if (filter.funding_outpoint.has_value() && archived.operation.funding_outpoint != *filter.funding_outpoint) {
+        return false;
+    }
+    if (filter.completion_txid.has_value() && archived.completion_txid != *filter.completion_txid) {
+        return false;
+    }
+    if (filter.max_archive_height.has_value() && archived.archive_height > *filter.max_archive_height) {
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] BridgeArchivePruneConfig ParseBridgeArchivePruneConfigOrThrow(const UniValue& options)
+{
+    if (!options.isObject()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "options must be an object");
+    }
+
+    BridgeArchivePruneConfig config;
+    config.filter = ParseBridgeArchiveFilterOrThrow(options, "options");
+
+    const UniValue& all_value = FindValue(options, "all");
+    if (!all_value.isNull()) {
+        config.all = all_value.get_bool();
+    }
+
+    const UniValue& dry_run_value = FindValue(options, "dry_run");
+    if (!dry_run_value.isNull()) {
+        config.dry_run = dry_run_value.get_bool();
+    }
+
+    const UniValue& force_value = FindValue(options, "force");
+    if (!force_value.isNull()) {
+        config.force = force_value.get_bool();
+    }
+
+    int selector_count{0};
+    if (config.all) ++selector_count;
+    if (config.filter.funding_outpoint.has_value()) ++selector_count;
+    if (config.filter.completion_txid.has_value()) ++selector_count;
+    if (config.filter.max_archive_height.has_value()) ++selector_count;
+
+    if (selector_count != 1) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "options must specify exactly one prune selector: all, max_archive_height, funding_txid+funding_vout, or completion_txid");
+    }
+
+    if (!config.dry_run &&
+        !config.force &&
+        (config.all || config.filter.max_archive_height.has_value())) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "options.force=true is required when pruning all archived records or pruning by max_archive_height");
+    }
+
+    return config;
+}
+
+[[nodiscard]] BridgePendingOperation BuildBridgePendingOperation(const std::shared_ptr<CWallet>& pwallet,
+                                                                const BridgePlan& plan,
+                                                                const COutPoint& funding_outpoint,
+                                                                const CAmount funding_amount,
+                                                                const BridgePendingRpcConfig& config,
+                                                                const bool imported)
+{
+    BridgePendingOperation operation;
+    if (const auto existing = pwallet->GetPendingBridgeOperation(funding_outpoint)) {
+        operation = *existing;
+    }
+
+    operation.version = 1;
+    operation.plan = plan;
+    operation.funding_outpoint = funding_outpoint;
+    operation.funding_amount = funding_amount;
+    operation.imported = imported || operation.imported;
+    if (!config.refund_destination.empty()) {
+        operation.refund_destination = config.refund_destination;
+    }
+    operation.refund_fee = config.refund_fee;
+    if (operation.created_height < 0) {
+        operation.created_height = CurrentBridgeWalletHeight(*pwallet);
+    }
+    return operation;
+}
+
+void SaveBridgePendingOperationOrThrow(const std::shared_ptr<CWallet>& pwallet,
+                                       const BridgePendingOperation& operation)
+{
+    if (pwallet->SavePendingBridgeOperation(operation)) return;
+    throw JSONRPCError(RPC_WALLET_ERROR, "Failed to persist bridge recovery record");
+}
+
+void SaveBridgePendingOperationOrLog(const std::shared_ptr<CWallet>& pwallet,
+                                     const BridgePendingOperation& operation,
+                                     std::string_view context)
+{
+    if (pwallet->SavePendingBridgeOperation(operation)) return;
+    pwallet->WalletLogPrintf("%s: failed to persist bridge recovery record for outpoint %s:%u\n",
+                             context,
+                             operation.funding_outpoint.hash.GetHex(),
+                             operation.funding_outpoint.n);
+}
+
 [[nodiscard]] BridgeFeeHeadroomPolicy ParseBridgeFeeHeadroomPolicy(const UniValue& value, bool default_enforce)
 {
     BridgeFeeHeadroomPolicy policy;
@@ -6780,7 +7169,7 @@ void AppendBridgePsbtRelayFeeAnalysis(UniValue& out,
     }
 
     input_limit = std::max(policy.min_inputs_per_chunk, input_limit);
-    const CAmount chunk_requested = remaining_requested;
+    const CAmount chunk_requested = std::min(remaining_requested, GetShieldingChunkSmileValueLimit());
     for (int rebuild = 0; rebuild < MAX_SHIELD_SWEEP_REBUILD_ATTEMPTS; ++rebuild) {
         std::vector<TransparentShieldingUTXO> selected;
         selected.reserve(std::min(input_limit, available_coins.size()));
@@ -7010,11 +7399,13 @@ RPCHelpMan z_getbalance()
         RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
-                {RPCResult::Type::STR_AMOUNT, "balance", "Spendable shielded balance"},
-                {RPCResult::Type::NUM, "note_count", "Spendable unspent shielded note count"},
+                {RPCResult::Type::STR_AMOUNT, "balance", "Ordinary spendable shielded balance"},
+                {RPCResult::Type::NUM, "note_count", "Ordinary spendable unspent shielded note count"},
+                {RPCResult::Type::STR_AMOUNT, "recovery_only_balance", /*optional=*/true, "Shielded balance that requires z_recoverstrandednote before ordinary sends"},
+                {RPCResult::Type::NUM, "recovery_only_note_count", /*optional=*/true, "Unspent shielded note count that requires z_recoverstrandednote before ordinary sends"},
                 {RPCResult::Type::STR_AMOUNT, "watchonly_balance", /*optional=*/true, "Watch-only shielded balance"},
                 {RPCResult::Type::NUM, "watchonly_note_count", /*optional=*/true, "Watch-only unspent shielded note count"},
-                {RPCResult::Type::STR_AMOUNT, "total_balance", "Spendable plus watch-only shielded balance"},
+                {RPCResult::Type::STR_AMOUNT, "total_balance", "Ordinary spendable plus recovery-only plus watch-only shielded balance"},
                 {RPCResult::Type::NUM, "total_note_count", "Total unspent shielded note count"},
                 {RPCResult::Type::BOOL, "scan_incomplete", /*optional=*/true, "True if the shielded scan could not complete (e.g. pruned blocks). Balance may be underreported."},
                 {RPCResult::Type::BOOL, "locked_state_incomplete", /*optional=*/true, "True if the wallet was loaded locked from tree-only fallback state and full shielded accounting requires an unlock refresh."},
@@ -7038,16 +7429,26 @@ RPCHelpMan z_getbalance()
             const ShieldedBalanceSummary summary = pwallet->m_shielded_wallet->GetShieldedBalanceSummary(minconf);
             out.pushKV("balance", ValueFromAmount(summary.spendable));
             out.pushKV("note_count", summary.spendable_note_count);
+            if (summary.recovery_only_note_count > 0 || summary.recovery_only != 0) {
+                out.pushKV("recovery_only_balance", ValueFromAmount(summary.recovery_only));
+                out.pushKV("recovery_only_note_count", summary.recovery_only_note_count);
+            }
             if (summary.watchonly_note_count > 0 || summary.watchonly != 0) {
                 out.pushKV("watchonly_balance", ValueFromAmount(summary.watchonly));
                 out.pushKV("watchonly_note_count", summary.watchonly_note_count);
             }
-            const auto total_balance = CheckedAdd(summary.spendable, summary.watchonly);
+            const auto spendable_plus_recovery = CheckedAdd(summary.spendable, summary.recovery_only);
+            const auto total_balance = spendable_plus_recovery
+                ? CheckedAdd(*spendable_plus_recovery, summary.watchonly)
+                : std::nullopt;
             if (!total_balance || !MoneyRange(*total_balance)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Balance overflow");
             }
             out.pushKV("total_balance", ValueFromAmount(*total_balance));
-            out.pushKV("total_note_count", summary.spendable_note_count + summary.watchonly_note_count);
+            out.pushKV("total_note_count",
+                       summary.spendable_note_count +
+                           summary.recovery_only_note_count +
+                           summary.watchonly_note_count);
             if (pwallet->m_shielded_wallet->IsScanIncomplete()) {
                 out.pushKV("scan_incomplete", true);
             }
@@ -7814,6 +8215,10 @@ RPCHelpMan z_shieldcoinbase()
                         const auto next = CheckedAdd(total_in, wtx.tx->vout[n].nValue);
                         if (!next || !MoneyRange(*next)) {
                             throw JSONRPCError(RPC_WALLET_ERROR, "Input value overflow");
+                        }
+                        const CAmount fee_floor = explicit_fee ? fee : CAmount{10000};
+                        if (*next - fee_floor > GetShieldingChunkSmileValueLimit()) {
+                            break;
                         }
                         utxos.push_back(outpoint);
                         total_in = *next;
@@ -8604,6 +9009,198 @@ RPCHelpMan z_mergenotes()
         }};
 }
 
+RPCHelpMan z_recoverstrandednote()
+{
+    return RPCHelpMan{
+        "z_recoverstrandednote",
+        "\nRecover one stranded shielded note into a fresh ordinary shielded note.\n"
+        "This uses the post-disable spend-path recovery family and intentionally reveals\n"
+        "the specific recovered input note on-chain. If no destination is provided,\n"
+        "the wallet creates a fresh local shielded address and self-transfers the value.\n",
+        {
+            {"commitment", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Recovered note commitment"},
+            {"destination", RPCArg::Type::STR, RPCArg::Default{""}, "Optional shielded destination address"},
+            {"fee", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"wallet shielded fee estimation"}, "Fee"},
+            {"verbose", RPCArg::Type::BOOL, RPCArg::Default{true}, "Return structured result"},
+            {"conf_target", RPCArg::Type::NUM, RPCArg::DefaultHint{"wallet -txconfirmtarget"}, "Confirmation target in blocks for automatic fee estimation"},
+            {"estimate_mode", RPCArg::Type::STR, RPCArg::Default{"unset"}, "The fee estimate mode, must be one of (case insensitive):\n"
+                + common::FeeModesDetail(std::string("conservative mode is used by default for shielded recovery"))},
+        },
+        {
+            RPCResult{"if verbose is not set or set to false",
+                RPCResult::Type::STR_HEX, "txid", "The transaction id."},
+            RPCResult{"if verbose is set to true",
+                RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::STR_HEX, "txid", "The transaction id."},
+                    {RPCResult::Type::STR, "family", "The shielded transaction family."},
+                    {RPCResult::Type::STR_HEX, "input_commitment", "The recovered stranded note commitment."},
+                    {RPCResult::Type::STR, "destination", "The shielded destination address receiving the recovered value."},
+                    {RPCResult::Type::STR_AMOUNT, "fee", "Applied fee"},
+                }},
+        },
+        RPCExamples{
+            HelpExampleCli("z_recoverstrandednote", "\"<commitment>\"") +
+            HelpExampleCli("z_recoverstrandednote", "\"<commitment>\" \"btxs1...\" 0.0002 true 6 economical")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            auto pwallet = EnsureWalletForShielded(request);
+            pwallet->BlockUntilSyncedToCurrentChain();
+            EnsureWalletIsUnlocked(*pwallet);
+
+            const uint256 note_commitment = ParseHashV(request.params[0], "commitment");
+            if (note_commitment.IsNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "commitment must be non-null");
+            }
+
+            std::optional<ShieldedAddress> destination;
+            if (!request.params[1].isNull()) {
+                const std::string dest_str = request.params[1].get_str();
+                if (!dest_str.empty()) {
+                    destination = ParseShieldedAddr(dest_str);
+                    if (!destination.has_value()) {
+                        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid shielded destination");
+                    }
+                }
+            }
+
+            bool explicit_fee{false};
+            CAmount fee{0};
+            if (!request.params[2].isNull()) {
+                explicit_fee = true;
+                fee = AmountFromValue(request.params[2]);
+                if (fee <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Fee must be positive");
+            }
+
+            const bool verbose = request.params[3].isNull() || request.params[3].get_bool();
+            if (explicit_fee && (!request.params[4].isNull() || !request.params[5].isNull())) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "Cannot specify conf_target or estimate_mode together with an explicit fee");
+            }
+
+            CCoinControl coin_control;
+            SetShieldedFeeEstimateMode(*pwallet, coin_control, request.params[4], request.params[5]);
+
+            const CAmount max_auto_fee = explicit_fee ? 0 : MaxShieldedWalletBroadcastFee(*pwallet);
+            if (!explicit_fee) {
+                fee = ClampShieldedAutoFeeToWalletLimit(
+                    *pwallet,
+                    ComputeShieldedAutoFee(
+                        *pwallet,
+                        coin_control,
+                        EstimateDirectShieldedSendVirtualSize(/*spend_count=*/1, /*shielded_output_count=*/1),
+                        /*has_shielded_bundle=*/true));
+            }
+
+            std::vector<Nullifier> reserved_nullifiers;
+            const auto release_reservations = [&]() {
+                if (reserved_nullifiers.empty()) return;
+                LOCK(pwallet->m_shielded_wallet->cs_shielded);
+                pwallet->m_shielded_wallet->ReleasePendingSpends(reserved_nullifiers);
+                reserved_nullifiers.clear();
+            };
+
+            ShieldedAddress effective_destination;
+            if (destination.has_value()) {
+                effective_destination = *destination;
+            } else {
+                LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                effective_destination = pwallet->m_shielded_wallet->GenerateNewAddress();
+            }
+            const auto tx = BuildAndCommitShieldedTransactionWithAnchorRetry(
+                pwallet,
+                "z_recoverstrandednote",
+                /*map_value=*/{},
+                [&]() -> CTransactionRef {
+                    CTransactionRef built_tx;
+                    try {
+                        for (int attempt = 0; attempt < MAX_SHIELDED_FEE_CONVERGENCE_ATTEMPTS; ++attempt) {
+                            release_reservations();
+
+                            std::optional<CMutableTransaction> mtx;
+                            std::string create_error;
+                            {
+                                LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                                mtx = pwallet->m_shielded_wallet->CreateSpendPathRecovery(
+                                    note_commitment,
+                                    effective_destination,
+                                    fee,
+                                    &create_error);
+                                if (mtx.has_value()) {
+                                    reserved_nullifiers = CollectShieldedNullifiers(mtx->shielded_bundle);
+                                    pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
+                                }
+                            }
+                            if (!mtx.has_value()) {
+                                throw JSONRPCError(
+                                    RPC_WALLET_ERROR,
+                                    create_error.empty() ? "Failed to create spend-path recovery transaction" : create_error);
+                            }
+
+                            CTransactionRef candidate = MakeTransactionRef(std::move(*mtx));
+                            const CAmount required_fee = RequiredMempoolFee(*pwallet, *candidate);
+                            if (explicit_fee) {
+                                if (fee >= required_fee) {
+                                    built_tx = std::move(candidate);
+                                    break;
+                                }
+                                throw JSONRPCError(
+                                    RPC_WALLET_ERROR,
+                                    strprintf("Fee too low for transaction size. Required at least %s", FormatMoney(required_fee)));
+                            }
+
+                            const CAmount required_auto_fee = CanonicalizeShieldingFee(*pwallet, required_fee);
+                            if (required_auto_fee > max_auto_fee) {
+                                throw JSONRPCError(
+                                    RPC_WALLET_ERROR,
+                                    strprintf(
+                                        "Required shielded fee %s exceeds configured -maxtxfee %s for this recovery transaction",
+                                        FormatMoney(required_auto_fee),
+                                        FormatMoney(pwallet->m_default_max_tx_fee)));
+                            }
+
+                            const CAmount desired_fee = ComputeShieldedAutoFee(
+                                *pwallet,
+                                coin_control,
+                                ShieldedRelayVirtualSize(*candidate),
+                                candidate->HasShieldedBundle());
+                            const CAmount next_fee = ClampShieldedAutoFeeToWalletLimit(
+                                *pwallet,
+                                std::max(required_fee, desired_fee));
+                            if (fee >= next_fee) {
+                                built_tx = std::move(candidate);
+                                break;
+                            }
+                            fee = next_fee;
+                        }
+                    } catch (...) {
+                        release_reservations();
+                        throw;
+                    }
+                    if (!built_tx) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to create fee-compliant recovery transaction");
+                    }
+                    return built_tx;
+                },
+                [&]() {
+                    release_reservations();
+                });
+
+            UniValue result(UniValue::VOBJ);
+            result.pushKV("txid", tx->GetHash().GetHex());
+            result.pushKV("family", "v2_spend_path_recovery");
+            result.pushKV("input_commitment", note_commitment.GetHex());
+            result.pushKV("destination", effective_destination.Encode());
+            result.pushKV("fee", ValueFromAmount(fee));
+            if (!verbose) {
+                UniValue txid_value(UniValue::VSTR);
+                txid_value.setStr(tx->GetHash().GetHex());
+                return txid_value;
+            }
+            return result;
+        }};
+}
+
 RPCHelpMan z_viewtransaction()
 {
     return RPCHelpMan{
@@ -8700,6 +9297,17 @@ RPCHelpMan z_viewtransaction()
                         switch (shielded::v2::GetBundleSemanticFamily(*v2_bundle)) {
                         case shielded::v2::TransactionFamily::V2_SEND: {
                             const auto& payload = std::get<shielded::v2::SendPayload>(v2_bundle->payload);
+                            for (const auto& output : payload.outputs) {
+                                AppendShieldedOutputView(pwallet,
+                                                         output.note_commitment,
+                                                         output.encrypted_note,
+                                                         output_views);
+                            }
+                            break;
+                        }
+                        case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY: {
+                            const auto& payload =
+                                std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
                             for (const auto& output : payload.outputs) {
                                 AppendShieldedOutputView(pwallet,
                                                          output.note_commitment,
@@ -9321,12 +9929,14 @@ RPCHelpMan z_gettotalbalance()
             RPCResult::Type::OBJ, "", "",
             {
                 {RPCResult::Type::STR_AMOUNT, "transparent", "Spendable transparent balance"},
-                {RPCResult::Type::STR_AMOUNT, "shielded", "Spendable shielded balance"},
-                {RPCResult::Type::STR_AMOUNT, "total", "Combined spendable balance"},
+                {RPCResult::Type::STR_AMOUNT, "shielded", "Ordinary spendable shielded balance"},
+                {RPCResult::Type::STR_AMOUNT, "shielded_recovery_only", /*optional=*/true, "Shielded balance that requires z_recoverstrandednote before ordinary sends"},
+                {RPCResult::Type::STR_AMOUNT, "total", "Combined transparent plus ordinary spendable shielded balance"},
+                {RPCResult::Type::STR_AMOUNT, "total_including_recovery_only", /*optional=*/true, "Combined transparent plus ordinary spendable plus recovery-only shielded balance"},
                 {RPCResult::Type::STR_AMOUNT, "transparent_watchonly", /*optional=*/true, "Watch-only transparent balance"},
                 {RPCResult::Type::STR_AMOUNT, "shielded_watchonly", /*optional=*/true, "Watch-only shielded balance"},
                 {RPCResult::Type::STR_AMOUNT, "watchonly_total", /*optional=*/true, "Combined watch-only balance"},
-                {RPCResult::Type::STR_AMOUNT, "total_including_watchonly", /*optional=*/true, "Combined spendable plus watch-only balance"},
+                {RPCResult::Type::STR_AMOUNT, "total_including_watchonly", /*optional=*/true, "Combined transparent, ordinary spendable shielded, recovery-only shielded, and watch-only balance"},
                 {RPCResult::Type::BOOL, "scan_incomplete", /*optional=*/true, "True if shielded scan could not complete due to pruned blocks"},
                 {RPCResult::Type::BOOL, "locked_state_incomplete", /*optional=*/true, "True if the wallet was loaded locked from tree-only fallback state and full shielded accounting requires an unlock refresh."},
             }},
@@ -9361,18 +9971,26 @@ RPCHelpMan z_gettotalbalance()
             if (!total || !MoneyRange(*total)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Balance overflow");
             }
+            const auto total_with_recovery = CheckedAdd(*total, shielded_summary.recovery_only);
+            if (!total_with_recovery || !MoneyRange(*total_with_recovery)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Balance overflow");
+            }
 
             UniValue out(UniValue::VOBJ);
             out.pushKV("transparent", ValueFromAmount(transparent));
             out.pushKV("shielded", ValueFromAmount(shielded_summary.spendable));
             out.pushKV("total", ValueFromAmount(*total));
+            if (shielded_summary.recovery_only != 0 || shielded_summary.recovery_only_note_count > 0) {
+                out.pushKV("shielded_recovery_only", ValueFromAmount(shielded_summary.recovery_only));
+                out.pushKV("total_including_recovery_only", ValueFromAmount(*total_with_recovery));
+            }
             const CAmount transparent_watchonly = transparent_bal.m_watchonly_trusted;
-            if (transparent_watchonly != 0 || shielded_summary.watchonly != 0) {
+            if (transparent_watchonly != 0 || shielded_summary.watchonly != 0 || shielded_summary.recovery_only != 0) {
                 const auto watchonly_total = CheckedAdd(transparent_watchonly, shielded_summary.watchonly);
                 if (!watchonly_total || !MoneyRange(*watchonly_total)) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "Balance overflow");
                 }
-                const auto total_with_watchonly = CheckedAdd(*total, *watchonly_total);
+                const auto total_with_watchonly = CheckedAdd(*total_with_recovery, *watchonly_total);
                 if (!total_with_watchonly || !MoneyRange(*total_with_watchonly)) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "Balance overflow");
                 }
@@ -13476,6 +14094,12 @@ RPCHelpMan bridge_buildunshieldtx()
             {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding txid"},
             {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Funding output index"},
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Funding output amount"},
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional recovery policy",
+                {
+                    {"track_pending", RPCArg::Type::BOOL, RPCArg::Default{true}, "Persist a pending-bridge recovery record for this funding outpoint"},
+                    {"refund_destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Optional refund destination; omitted values auto-generate a wallet refund address when track_pending=true"},
+                    {"refund_fee", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(DEFAULT_BRIDGE_PENDING_REFUND_FEE)}, "Refund fee to use if timeout recovery falls back to the refund path"},
+                }},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "PSBT plus selected bridge metadata",
@@ -13554,13 +14178,15 @@ RPCHelpMan bridge_submitrebalancetx()
             {
                 {RPCResult::Type::STR_HEX, "txid", "Submitted transaction id"},
                 {RPCResult::Type::STR, "family", "The shielded transaction family"},
+                {RPCResult::Type::BOOL, "family_redacted", /*optional=*/true, "True when only the generic post-fork shielded family class is exposed"},
                 {RPCResult::Type::STR_AMOUNT, "fee", "Applied fee"},
-                {RPCResult::Type::NUM, "reserve_domain_count", "Committed reserve-domain count"},
-                {RPCResult::Type::NUM, "reserve_output_count", "Committed reserve-output count"},
-                {RPCResult::Type::NUM, "output_chunk_count", "Committed reserve-output chunk count"},
-                {RPCResult::Type::STR_HEX, "netting_manifest_id", "Canonical netting-manifest id"},
-                {RPCResult::Type::STR_HEX, "settlement_binding_digest", "Committed settlement binding digest"},
-                {RPCResult::Type::STR_HEX, "batch_statement_digest", "Committed deterministic batch statement digest"},
+                {RPCResult::Type::NUM, "reserve_domain_count", /*optional=*/true, "Committed reserve-domain count when bundle metadata is not redacted"},
+                {RPCResult::Type::NUM, "reserve_output_count", /*optional=*/true, "Committed reserve-output count when bundle metadata is not redacted"},
+                {RPCResult::Type::NUM, "output_chunk_count", /*optional=*/true, "Committed reserve-output chunk count when bundle metadata is not redacted"},
+                {RPCResult::Type::STR_HEX, "netting_manifest_id", /*optional=*/true, "Canonical netting-manifest id when bundle metadata is not redacted"},
+                {RPCResult::Type::STR_HEX, "settlement_binding_digest", /*optional=*/true, "Committed settlement binding digest when bundle metadata is not redacted"},
+                {RPCResult::Type::STR_HEX, "batch_statement_digest", /*optional=*/true, "Committed deterministic batch statement digest when bundle metadata is not redacted"},
+                {RPCResult::Type::BOOL, "bundle_metadata_redacted", /*optional=*/true, "True when reserve and manifest metadata is redacted after the post-fork privacy redesign"},
             }},
         RPCExamples{
             HelpExampleCli("bridge_submitrebalancetx",
@@ -13655,10 +14281,13 @@ RPCHelpMan bridge_submitshieldtx()
             {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding txid"},
             {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Funding output index"},
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Funding output amount"},
-            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional fee-headroom policy",
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional fee-headroom and recovery policy",
                 {
                     {"min_fee_headroom_multiplier", RPCArg::Type::NUM, RPCArg::Default{2.0}, "Require at least this multiple of the current local mempool floor before broadcast"},
                     {"enforce_fee_headroom", RPCArg::Type::BOOL, RPCArg::Default{true}, "Reject broadcast if the settlement does not meet min_fee_headroom_multiplier"},
+                    {"track_pending", RPCArg::Type::BOOL, RPCArg::Default{true}, "Persist a pending-bridge recovery record for this funding outpoint"},
+                    {"refund_destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Optional refund destination; omitted values auto-generate a wallet refund address when track_pending=true"},
+                    {"refund_fee", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(DEFAULT_BRIDGE_PENDING_REFUND_FEE)}, "Refund fee to use if timeout recovery falls back to the refund path"},
                 }},
         },
         RPCResult{
@@ -13682,11 +14311,28 @@ RPCHelpMan bridge_submitshieldtx()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "vout must be non-negative");
             }
             const CAmount amount = AmountFromValue(request.params[3]);
+            const UniValue options = request.params[4].isNull() ? UniValue(UniValue::VOBJ) : request.params[4];
             const BridgeFeeHeadroomPolicy headroom_policy =
-                ParseBridgeFeeHeadroomPolicy(request.params[4], /*default_enforce=*/true);
+                ParseBridgeFeeHeadroomPolicy(options, /*default_enforce=*/true);
+            const BridgePendingRpcConfig pending_config =
+                ParseBridgePendingRpcConfigOrThrow(pwallet, options, /*default_track_pending=*/true, /*default_recover_now=*/false);
+            const COutPoint funding_outpoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
+            const int32_t current_height = CurrentBridgeWalletHeight(*pwallet);
+            std::optional<BridgePendingOperation> pending_operation;
+            if (pending_config.track_pending) {
+                pending_operation = BuildBridgePendingOperation(pwallet,
+                                                               plan,
+                                                               funding_outpoint,
+                                                               amount,
+                                                               pending_config,
+                                                               /*imported=*/false);
+                SaveBridgePendingOperationOrThrow(pwallet, *pending_operation);
+            }
+
+            try {
             const int32_t build_height = NextBridgeLeafBuildHeight(*pwallet);
             const auto psbt = CreateBridgeShieldSettlementTransaction(plan,
-                                                                      COutPoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)},
+                                                                      funding_outpoint,
                                                                       amount,
                                                                       &Params().GetConsensus(),
                                                                       build_height);
@@ -13702,9 +14348,40 @@ RPCHelpMan bridge_submitshieldtx()
                                                                 *psbt,
                                                                 "bridge shield settlement PSBT");
             CommitShieldedTransactionOrThrow(pwallet, tx);
+            if (pending_operation.has_value()) {
+                pending_operation->has_settlement_txid = true;
+                pending_operation->settlement_txid = tx->GetHash();
+                pending_operation->has_refund_txid = false;
+                pending_operation->refund_txid.SetNull();
+                pending_operation->last_attempt_height = current_height;
+                pending_operation->last_error.clear();
+                ++pending_operation->retry_count;
+                SaveBridgePendingOperationOrLog(pwallet, *pending_operation, "bridge_submitshieldtx");
+            }
             UniValue out = BridgeSubmittedResultToUniValue(tx, plan, "normal");
             AppendBridgePsbtRelayFeeAnalysis(out, analysis, build_height, headroom_policy);
+            if (pending_operation.has_value()) {
+                out.pushKV("refund_destination", pending_operation->refund_destination);
+                out.pushKV("refund_fee", ValueFromAmount(pending_operation->refund_fee));
+            }
             return out;
+            } catch (const UniValue& obj_error) {
+                if (pending_operation.has_value()) {
+                    pending_operation->last_attempt_height = current_height;
+                    pending_operation->last_error = ExtractRpcErrorMessage(obj_error);
+                    ++pending_operation->retry_count;
+                    SaveBridgePendingOperationOrLog(pwallet, *pending_operation, "bridge_submitshieldtx");
+                }
+                throw;
+            } catch (const std::exception& e) {
+                if (pending_operation.has_value()) {
+                    pending_operation->last_attempt_height = current_height;
+                    pending_operation->last_error = e.what();
+                    ++pending_operation->retry_count;
+                    SaveBridgePendingOperationOrLog(pwallet, *pending_operation, "bridge_submitshieldtx");
+                }
+                throw;
+            }
         }};
 }
 
@@ -13719,15 +14396,17 @@ RPCHelpMan bridge_submitunshieldtx()
             {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding txid"},
             {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Funding output index"},
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Funding output amount"},
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional recovery policy",
+                {
+                    {"track_pending", RPCArg::Type::BOOL, RPCArg::Default{true}, "Persist a pending-bridge recovery record for this funding outpoint"},
+                    {"refund_destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Optional refund destination; omitted values auto-generate a wallet refund address when track_pending=true"},
+                    {"refund_fee", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(DEFAULT_BRIDGE_PENDING_REFUND_FEE)}, "Refund fee to use if timeout recovery falls back to the refund path"},
+                }},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "Submitted bridge settlement metadata",
             {
-                {RPCResult::Type::STR_HEX, "txid", "Submitted transaction id"},
-                {RPCResult::Type::NUM, "locktime", "Transaction locktime"},
-                {RPCResult::Type::STR, "selected_path", "Bridge settlement path"},
-                {RPCResult::Type::STR_HEX, "bridge_root", "Bridge P2MR merkle root"},
-                {RPCResult::Type::STR_HEX, "ctv_hash", "Bridge template hash"},
+                {RPCResult::Type::ELISION, "", ""},
             }},
         RPCExamples{HelpExampleCli("bridge_submitunshieldtx", "\"<plan_hex>\" \"<txid>\" 0 5")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
@@ -13745,20 +14424,313 @@ RPCHelpMan bridge_submitunshieldtx()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "vout must be non-negative");
             }
             const CAmount amount = AmountFromValue(request.params[3]);
-            const auto psbt = CreateBridgeUnshieldSettlementTransaction(plan,
-                                                                        COutPoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)},
-                                                                        amount,
-                                                                        &Params().GetConsensus(),
-                                                                        NextBridgeLeafBuildHeight(*pwallet));
-            if (!psbt.has_value()) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "Failed to construct bridge unshield settlement PSBT");
+            const UniValue options = request.params[4].isNull() ? UniValue(UniValue::VOBJ) : request.params[4];
+            const BridgePendingRpcConfig pending_config =
+                ParseBridgePendingRpcConfigOrThrow(pwallet, options, /*default_track_pending=*/true, /*default_recover_now=*/false);
+            const COutPoint funding_outpoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
+            const int32_t current_height = CurrentBridgeWalletHeight(*pwallet);
+            std::optional<BridgePendingOperation> pending_operation;
+            if (pending_config.track_pending) {
+                pending_operation = BuildBridgePendingOperation(pwallet,
+                                                               plan,
+                                                               funding_outpoint,
+                                                               amount,
+                                                               pending_config,
+                                                               /*imported=*/false);
+                SaveBridgePendingOperationOrThrow(pwallet, *pending_operation);
             }
 
-            const auto tx = FinalizeBridgePsbtWithWalletOrThrow(pwallet,
-                                                                *psbt,
-                                                                "bridge unshield settlement PSBT");
-            CommitBridgeTransactionOrThrow(pwallet, tx);
-            return BridgeSubmittedResultToUniValue(tx, plan, "normal");
+            try {
+                const auto psbt = CreateBridgeUnshieldSettlementTransaction(plan,
+                                                                            funding_outpoint,
+                                                                            amount,
+                                                                            &Params().GetConsensus(),
+                                                                            NextBridgeLeafBuildHeight(*pwallet));
+                if (!psbt.has_value()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Failed to construct bridge unshield settlement PSBT");
+                }
+
+                const auto tx = FinalizeBridgePsbtWithWalletOrThrow(pwallet,
+                                                                    *psbt,
+                                                                    "bridge unshield settlement PSBT");
+                CommitBridgeTransactionOrThrow(pwallet, tx);
+                if (pending_operation.has_value()) {
+                    pending_operation->has_settlement_txid = true;
+                    pending_operation->settlement_txid = tx->GetHash();
+                    pending_operation->has_refund_txid = false;
+                    pending_operation->refund_txid.SetNull();
+                    pending_operation->last_attempt_height = current_height;
+                    pending_operation->last_error.clear();
+                    ++pending_operation->retry_count;
+                    SaveBridgePendingOperationOrLog(pwallet, *pending_operation, "bridge_submitunshieldtx");
+                }
+                UniValue out = BridgeSubmittedResultToUniValue(tx, plan, "normal");
+                if (pending_operation.has_value()) {
+                    out.pushKV("refund_destination", pending_operation->refund_destination);
+                    out.pushKV("refund_fee", ValueFromAmount(pending_operation->refund_fee));
+                }
+                return out;
+            } catch (const UniValue& obj_error) {
+                if (pending_operation.has_value()) {
+                    pending_operation->last_attempt_height = current_height;
+                    pending_operation->last_error = ExtractRpcErrorMessage(obj_error);
+                    ++pending_operation->retry_count;
+                    SaveBridgePendingOperationOrLog(pwallet, *pending_operation, "bridge_submitunshieldtx");
+                }
+                throw;
+            } catch (const std::exception& e) {
+                if (pending_operation.has_value()) {
+                    pending_operation->last_attempt_height = current_height;
+                    pending_operation->last_error = e.what();
+                    ++pending_operation->retry_count;
+                    SaveBridgePendingOperationOrLog(pwallet, *pending_operation, "bridge_submitunshieldtx");
+                }
+                throw;
+            }
+        }};
+}
+
+RPCHelpMan bridge_importpending()
+{
+    return RPCHelpMan{
+        "bridge_importpending",
+        "\nPersist a pending bridge batch for wallet-managed recovery, optionally attempting recovery immediately.\n",
+        {
+            {"plan_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Hex-encoded bridge plan"},
+            {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding txid"},
+            {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Funding output index"},
+            {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Funding output amount"},
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Recovery metadata",
+                {
+                    {"refund_destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Optional refund destination; omitted values auto-generate a wallet refund address"},
+                    {"refund_fee", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(DEFAULT_BRIDGE_PENDING_REFUND_FEE)}, "Refund fee to use if timeout recovery falls back to the refund path"},
+                    {"recover_now", RPCArg::Type::BOOL, RPCArg::Default{true}, "Attempt recovery immediately after import"},
+                }},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "Imported pending bridge metadata",
+            {
+                {RPCResult::Type::ELISION, "", ""},
+            }},
+        RPCExamples{HelpExampleCli("bridge_importpending", "\"<plan_hex>\" \"<txid>\" 0 5")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            auto pwallet = EnsureWalletForBridge(request);
+            pwallet->BlockUntilSyncedToCurrentChain();
+
+            const BridgePlan plan = DecodeBridgePlanOrThrow(request.params[0]);
+            const uint256 txid = ParseHashV(request.params[1], "txid");
+            const int vout = request.params[2].getInt<int>();
+            if (vout < 0) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "vout must be non-negative");
+            }
+            const CAmount amount = AmountFromValue(request.params[3]);
+            const UniValue options = request.params[4].isNull() ? UniValue(UniValue::VOBJ) : request.params[4];
+            const BridgePendingRpcConfig config =
+                ParseBridgePendingRpcConfigOrThrow(pwallet, options, /*default_track_pending=*/true, /*default_recover_now=*/true);
+            const COutPoint funding_outpoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
+
+            BridgePendingOperation operation = BuildBridgePendingOperation(pwallet,
+                                                                          plan,
+                                                                          funding_outpoint,
+                                                                          amount,
+                                                                          config,
+                                                                          /*imported=*/true);
+            SaveBridgePendingOperationOrThrow(pwallet, operation);
+
+            UniValue out = BridgePendingStatusToUniValue(*pwallet->GetPendingBridgeOperationStatus(funding_outpoint));
+            if (config.recover_now) {
+                UniValue recovery(UniValue::VARR);
+                for (const auto& result : pwallet->RecoverPendingBridgeOperations(funding_outpoint, /*force=*/true)) {
+                    recovery.push_back(BridgePendingRecoveryResultToUniValue(result));
+                }
+                out.pushKV("recovery", std::move(recovery));
+                if (const auto current = pwallet->GetPendingBridgeOperationStatus(funding_outpoint)) {
+                    out.pushKV("current", BridgePendingStatusToUniValue(*current));
+                } else if (const auto archived = pwallet->GetArchivedBridgeOperation(funding_outpoint)) {
+                    out.pushKV("current", BridgeArchivedOperationToUniValue(*archived));
+                } else {
+                    out.pushKV("current_status", "cleared");
+                }
+            }
+            return out;
+        }};
+}
+
+RPCHelpMan bridge_listpending()
+{
+    return RPCHelpMan{
+        "bridge_listpending",
+        "\nList bridge batches currently tracked by the wallet recovery journal.\n",
+        {},
+        RPCResult{
+            RPCResult::Type::ARR, "", "Pending bridge batches",
+            {
+                {RPCResult::Type::ELISION, "", ""},
+            }},
+        RPCExamples{HelpExampleCli("bridge_listpending", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            auto pwallet = EnsureWalletForBridge(request);
+            pwallet->BlockUntilSyncedToCurrentChain();
+
+            UniValue out(UniValue::VARR);
+            for (const auto& snapshot : pwallet->ListPendingBridgeOperationStatus()) {
+                out.push_back(BridgePendingStatusToUniValue(snapshot));
+            }
+            return out;
+        }};
+}
+
+RPCHelpMan bridge_listarchive()
+{
+    return RPCHelpMan{
+        "bridge_listarchive",
+        "\nList archived bridge recovery records retained after settlement/refund reaches the configured confirmation depth.\n",
+        {
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional archive filters",
+                {
+                    {"funding_txid", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Filter by bridge funding txid; requires funding_vout"},
+                    {"funding_vout", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Filter by bridge funding vout; requires funding_txid"},
+                    {"completion_txid", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Filter by archived settlement/refund txid"},
+                    {"max_archive_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Only include records archived at or below this chain height"},
+                }},
+        },
+        RPCResult{
+            RPCResult::Type::ARR, "", "Archived bridge recovery records",
+            {
+                {RPCResult::Type::ELISION, "", ""},
+            }},
+        RPCExamples{
+            HelpExampleCli("bridge_listarchive", "") +
+            HelpExampleCli("bridge_listarchive", R"('{"max_archive_height":123456}')") +
+            HelpExampleCli("bridge_listarchive", R"('{"completion_txid":"<txid>"}')")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            auto pwallet = EnsureWalletForBridge(request);
+            pwallet->BlockUntilSyncedToCurrentChain();
+
+            const UniValue options = request.params[0].isNull() ? UniValue(UniValue::VOBJ) : request.params[0];
+            const BridgeArchiveFilter filter = ParseBridgeArchiveFilterOrThrow(options, "options");
+
+            UniValue out(UniValue::VARR);
+            for (const auto& archived : pwallet->ListArchivedBridgeOperations()) {
+                if (!BridgeArchivedOperationMatchesFilter(archived, filter)) continue;
+                out.push_back(BridgeArchivedOperationToUniValue(archived));
+            }
+            return out;
+        }};
+}
+
+RPCHelpMan bridge_recoverpending()
+{
+    return RPCHelpMan{
+        "bridge_recoverpending",
+        "\nRun bridge recovery for one pending outpoint or for the full pending journal.\n",
+        {
+            {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Optional funding txid to recover; omit to recover every pending batch"},
+            {"vout", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Funding output index. Required if txid is provided"},
+            {"force", RPCArg::Type::BOOL, RPCArg::Default{true}, "Ignore same-height retry guards and attempt recovery immediately"},
+        },
+        RPCResult{
+            RPCResult::Type::ARR, "", "Recovery actions",
+            {
+                {RPCResult::Type::ELISION, "", ""},
+            }},
+        RPCExamples{HelpExampleCli("bridge_recoverpending", "") +
+                    HelpExampleCli("bridge_recoverpending", "\"<txid>\" 0 true")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            auto pwallet = EnsureWalletForBridge(request);
+            pwallet->BlockUntilSyncedToCurrentChain();
+
+            std::optional<COutPoint> funding_outpoint;
+            if (!request.params[0].isNull()) {
+                const uint256 txid = ParseHashV(request.params[0], "txid");
+                if (request.params[1].isNull()) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "vout is required when txid is provided");
+                }
+                const int vout = request.params[1].getInt<int>();
+                if (vout < 0) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "vout must be non-negative");
+                }
+                funding_outpoint = COutPoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
+            } else if (!request.params[1].isNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "txid is required when vout is provided");
+            }
+
+            const bool force = request.params[2].isNull() ? true : request.params[2].get_bool();
+
+            UniValue out(UniValue::VARR);
+            for (const auto& result : pwallet->RecoverPendingBridgeOperations(funding_outpoint, force)) {
+                out.push_back(BridgePendingRecoveryResultToUniValue(result));
+            }
+            return out;
+        }};
+}
+
+RPCHelpMan bridge_prunearchive()
+{
+    return RPCHelpMan{
+        "bridge_prunearchive",
+        "\nPrune archived bridge recovery records after review or export.\n",
+        {
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Prune selector and controls",
+                {
+                    {"all", RPCArg::Type::BOOL, RPCArg::Default{false}, "Prune all archived bridge records. Mutually exclusive with the other selectors"},
+                    {"max_archive_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Prune records archived at or below this height. Mutually exclusive with the other selectors"},
+                    {"funding_txid", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Prune one specific bridge operation by funding txid; requires funding_vout"},
+                    {"funding_vout", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Funding vout paired with funding_txid"},
+                    {"completion_txid", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Prune one specific archived settlement/refund by completion txid"},
+                    {"dry_run", RPCArg::Type::BOOL, RPCArg::Default{false}, "Report matches without deleting any archive records"},
+                    {"force", RPCArg::Type::BOOL, RPCArg::Default{false}, "Required for all-record and max_archive_height pruning when dry_run is false"},
+                }},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "Archive prune summary",
+            {
+                {RPCResult::Type::BOOL, "dry_run", "Whether deletion was skipped"},
+                {RPCResult::Type::NUM, "matched_count", "Number of archived records matching the selector"},
+                {RPCResult::Type::NUM, "pruned_count", "Number of archived records successfully removed"},
+                {RPCResult::Type::ARR, "records", "Matched archive records", {
+                    {RPCResult::Type::ELISION, "", ""},
+                }},
+            }},
+        RPCExamples{
+            HelpExampleCli("bridge_prunearchive", R"('{"completion_txid":"<txid>","dry_run":true}')") +
+            HelpExampleCli("bridge_prunearchive", R"('{"max_archive_height":123456,"force":true}')") +
+            HelpExampleCli("bridge_prunearchive", R"('{"all":true,"force":true}')")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            auto pwallet = EnsureWalletForBridge(request);
+            pwallet->BlockUntilSyncedToCurrentChain();
+
+            const BridgeArchivePruneConfig config = ParseBridgeArchivePruneConfigOrThrow(request.params[0]);
+
+            std::vector<BridgeArchivedOperation> matches;
+            for (const auto& archived : pwallet->ListArchivedBridgeOperations()) {
+                if (config.all || BridgeArchivedOperationMatchesFilter(archived, config.filter)) {
+                    matches.push_back(archived);
+                }
+            }
+
+            UniValue records(UniValue::VARR);
+            size_t pruned_count{0};
+            for (const auto& archived : matches) {
+                UniValue entry = BridgeArchivedOperationToUniValue(archived);
+                if (!config.dry_run) {
+                    const bool pruned = pwallet->EraseArchivedBridgeOperation(archived.operation.funding_outpoint);
+                    entry.pushKV("pruned", pruned);
+                    if (!pruned) {
+                        entry.pushKV("error", "Failed to erase archived bridge operation");
+                    } else {
+                        ++pruned_count;
+                    }
+                }
+                records.push_back(std::move(entry));
+            }
+
+            UniValue out(UniValue::VOBJ);
+            out.pushKV("dry_run", config.dry_run);
+            out.pushKV("matched_count", static_cast<int64_t>(matches.size()));
+            out.pushKV("pruned_count", static_cast<int64_t>(pruned_count));
+            out.pushKV("records", std::move(records));
+            return out;
         }};
 }
 

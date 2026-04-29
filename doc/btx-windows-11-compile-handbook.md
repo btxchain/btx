@@ -112,7 +112,7 @@ Set-Location C:\src\btx
 If you already cloned the repo somewhere else, just change into that folder:
 
 ```powershell
-Set-Location C:\path\to\btx-node
+Set-Location C:\path\to\btx
 ```
 
 ## Step 3: Run the Windows Build Wrapper

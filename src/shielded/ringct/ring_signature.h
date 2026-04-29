@@ -217,12 +217,14 @@ struct RingSignature {
                                        const std::vector<lattice::PolyVec>& input_secrets,
                                        const uint256& message_hash,
                                        Span<const unsigned char> rng_entropy = {},
-                                       bool allow_duplicate_ring_members = false);
+                                       bool allow_duplicate_ring_members = false,
+                                       bool allow_singleton_ring = false);
 
 /** Verify a ring signature. Stateless and thread-safe. */
 [[nodiscard]] bool VerifyRingSignature(const RingSignature& signature,
                                        const std::vector<std::vector<uint256>>& ring_members,
-                                       const uint256& message_hash);
+                                       const uint256& message_hash,
+                                       bool allow_singleton_ring = false);
 
 /** Export the finalized Fiat-Shamir transcript chunks used to derive the
  *  ring-signature challenge seed. This supports independent transcript

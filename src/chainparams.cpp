@@ -177,9 +177,25 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         }
         options.mldsa_disable_height = height;
     }
+    if (args.IsArgSet("-regtestshieldedtxbindingactivationheight")) {
+        options.shielded_tx_binding_activation_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedtxbindingactivationheight");
+    }
+    if (args.IsArgSet("-regtestshieldedbridgetagactivationheight")) {
+        options.shielded_bridge_tag_activation_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedbridgetagactivationheight");
+    }
+    if (args.IsArgSet("-regtestshieldedsmilericecodecdisableheight")) {
+        options.shielded_smile_rice_codec_disable_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedsmilericecodecdisableheight");
+    }
     if (args.IsArgSet("-regtestshieldedmatrictdisableheight")) {
         options.shielded_matrict_disable_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedmatrictdisableheight");
+    }
+    if (args.IsArgSet("-regtestshieldedspendpathrecoveryactivationheight")) {
+        options.shielded_spend_path_recovery_activation_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedspendpathrecoveryactivationheight");
     }
     if (args.IsArgSet("-regtestshieldedpq128upgradeheight")) {
         options.shielded_pq128_upgrade_height =

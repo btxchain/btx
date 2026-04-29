@@ -35,7 +35,9 @@
 const TranslateFn G_TRANSLATION_FUN{nullptr};
 
 namespace {
-constexpr uint32_t MAINNET_LIVE_LIKE_NBITS{0x1f00a598U};
+constexpr uint32_t MAINNET_POST_PRODUCT_HEIGHT{61'000U};
+constexpr uint32_t MAINNET_LIVE_LIKE_EPSILON_BITS{18U};
+constexpr uint32_t MAINNET_LIVE_LIKE_NBITS{0x1e063c74U};
 
 struct Options {
     uint32_t iterations{8};
@@ -44,8 +46,8 @@ struct Options {
     uint32_t b{16};
     uint32_t r{8};
     uint32_t nbits{MAINNET_LIVE_LIKE_NBITS};
-    uint32_t epsilon_bits{10};
-    int32_t block_height{-1};
+    uint32_t epsilon_bits{MAINNET_LIVE_LIKE_EPSILON_BITS};
+    int32_t block_height{static_cast<int32_t>(MAINNET_POST_PRODUCT_HEIGHT)};
     uint32_t parallel{1};
     std::optional<std::string> backend_override;
     std::optional<std::string> async_override;
@@ -62,7 +64,14 @@ std::optional<uint64_t> ParseUintArg(std::string_view text)
 {
     try {
         size_t consumed{0};
-        const uint64_t value = std::stoull(std::string{text}, &consumed, 10);
+        std::string value_text{text};
+        int base{10};
+        if (value_text.size() > 2 &&
+            value_text[0] == '0' &&
+            (value_text[1] == 'x' || value_text[1] == 'X')) {
+            base = 16;
+        }
+        const uint64_t value = std::stoull(value_text, &consumed, base);
         if (consumed != text.size()) {
             return std::nullopt;
         }

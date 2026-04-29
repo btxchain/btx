@@ -73,8 +73,11 @@ def fill_mempool(test_framework, node, *, tx_sync_fun=None):
     assert_equal(len(confirmed_utxos), num_of_batches * tx_batch_size + 1)
 
     test_framework.log.debug("Create a mempool tx that will be evicted")
+    # BTX fee rounding can reject an exact minrelay-fee self-transfer, so keep
+    # the seed transaction just above the floor while still well below the rest
+    # of the fill batch.
     tx_to_be_evicted_id = ephemeral_miniwallet.send_self_transfer(
-        from_node=node, utxo_to_spend=confirmed_utxos.pop(0), fee_rate=minrelayfee)["txid"]
+        from_node=node, utxo_to_spend=confirmed_utxos.pop(0), fee_rate=minrelayfee * 2)["txid"]
 
     def send_batch(fee):
         utxos = confirmed_utxos[:tx_batch_size]

@@ -180,6 +180,30 @@ UniValue ShieldedV2PayloadToUniv(const shielded::v2::TransactionBundle& bundle)
         out.pushKV("outputs", std::move(outputs));
         break;
     }
+    case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+        const auto& payload = std::get<shielded::v2::SpendPathRecoveryPayload>(bundle.payload);
+        out.pushKV("spend_anchor", payload.spend_anchor.GetHex());
+        out.pushKV("fee", ValueFromAmount(payload.fee));
+
+        UniValue spends(UniValue::VARR);
+        for (const auto& spend : payload.spends) {
+            UniValue entry(UniValue::VOBJ);
+            entry.pushKV("nullifier", spend.nullifier.GetHex());
+            entry.pushKV("merkle_anchor", spend.merkle_anchor.GetHex());
+            entry.pushKV("account_leaf_commitment", spend.account_leaf_commitment.GetHex());
+            entry.pushKV("note_commitment", spend.note_commitment.GetHex());
+            entry.pushKV("value_commitment", spend.value_commitment.GetHex());
+            spends.push_back(std::move(entry));
+        }
+        out.pushKV("spends", std::move(spends));
+
+        UniValue outputs(UniValue::VARR);
+        for (const auto& output : payload.outputs) {
+            outputs.push_back(ShieldedV2OutputDescriptionToUniv(output));
+        }
+        out.pushKV("outputs", std::move(outputs));
+        break;
+    }
     case shielded::v2::TransactionFamily::V2_LIFECYCLE: {
         const auto& payload = std::get<shielded::v2::LifecyclePayload>(bundle.payload);
         out.pushKV("transparent_binding_digest", payload.transparent_binding_digest.GetHex());

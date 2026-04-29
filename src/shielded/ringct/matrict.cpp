@@ -166,7 +166,8 @@ bool CreateMatRiCTProof(MatRiCTProof& proof,
                         Span<const unsigned char> spending_key,
                         CAmount fee,
                         const uint256& tx_binding_hash,
-                        Span<const unsigned char> rng_entropy)
+                        Span<const unsigned char> rng_entropy,
+                        bool allow_singleton_ring)
 {
     if (!output_note_commitments.empty() &&
         output_note_commitments.size() != output_notes.size()) {
@@ -235,7 +236,8 @@ bool CreateMatRiCTProof(MatRiCTProof& proof,
         return false;
     }
     const size_t ring_size = ring_members.front().size();
-    if (!lattice::IsSupportedRingSize(ring_size)) {
+    if ((!allow_singleton_ring || ring_size != 1) &&
+        !lattice::IsSupportedRingSize(ring_size)) {
         LogPrintf("CreateMatRiCTProof failed: unsupported ring size %u\n",
                   static_cast<unsigned int>(ring_size));
         return false;
@@ -361,7 +363,8 @@ bool CreateMatRiCTProof(MatRiCTProof& proof,
                              input_secrets,
                              message_hash,
                              rng_entropy,
-                             allow_duplicate_ring_members)) {
+                             allow_duplicate_ring_members,
+                             allow_singleton_ring)) {
         LogPrintf("CreateMatRiCTProof failed: ring signature creation failed\n");
         CleanseInputSecrets(input_secrets);
         return false;
@@ -381,7 +384,8 @@ bool CreateMatRiCTProof(MatRiCTProof& proof,
                         Span<const unsigned char> spending_key,
                         CAmount fee,
                         const uint256& tx_binding_hash,
-                        Span<const unsigned char> rng_entropy)
+                        Span<const unsigned char> rng_entropy,
+                        bool allow_singleton_ring)
 {
     std::vector<uint256> derived_output_note_commitments;
     derived_output_note_commitments.reserve(output_notes.size());
@@ -400,7 +404,8 @@ bool CreateMatRiCTProof(MatRiCTProof& proof,
                               spending_key,
                               fee,
                               tx_binding_hash,
-                              rng_entropy);
+                              rng_entropy,
+                              allow_singleton_ring);
 }
 
 bool VerifyMatRiCTProof(const MatRiCTProof& proof,
@@ -408,7 +413,8 @@ bool VerifyMatRiCTProof(const MatRiCTProof& proof,
                         const std::vector<Nullifier>& input_nullifiers,
                         const std::vector<uint256>& output_commitments,
                         CAmount fee,
-                        const uint256& tx_binding_hash)
+                        const uint256& tx_binding_hash,
+                        bool allow_singleton_ring)
 {
     if (!proof.IsValid()) return false;
     if (ring_member_commitments.empty()) return false;
@@ -416,7 +422,10 @@ bool VerifyMatRiCTProof(const MatRiCTProof& proof,
     if (proof.output_note_commitments != output_commitments) return false;
     if (proof.input_commitments.size() != ring_member_commitments.size()) return false;
     const size_t ring_size = ring_member_commitments.front().size();
-    if (!lattice::IsSupportedRingSize(ring_size)) return false;
+    if ((!allow_singleton_ring || ring_size != 1) &&
+        !lattice::IsSupportedRingSize(ring_size)) {
+        return false;
+    }
     for (const auto& ring : ring_member_commitments) {
         if (ring.size() != ring_size) return false;
     }
@@ -428,7 +437,10 @@ bool VerifyMatRiCTProof(const MatRiCTProof& proof,
                                                           input_nullifiers,
                                                           tx_binding_hash);
 
-    if (!VerifyRingSignature(proof.ring_signature, ring_member_commitments, message_hash)) {
+    if (!VerifyRingSignature(proof.ring_signature,
+                             ring_member_commitments,
+                             message_hash,
+                             allow_singleton_ring)) {
         return false;
     }
 

@@ -3,7 +3,9 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <addresstype.h>
+#include <chainparams.h>
 #include <script/solver.h>
+#include <shielded/v2_bundle.h>
 #include <test/shielded_relay_fixture_builder.h>
 #include <test/util/setup_common.h>
 
@@ -118,6 +120,50 @@ BOOST_AUTO_TEST_CASE(relay_fixture_builder_rejects_missing_fee_headroom)
 
     BOOST_CHECK(!built.has_value());
     BOOST_CHECK_EQUAL(reject_reason, "funding amount does not cover fee");
+}
+
+BOOST_AUTO_TEST_CASE(relay_fixture_builder_respects_validation_height_for_wire_family)
+{
+    const int32_t activation_height = Params().GetConsensus().nShieldedMatRiCTDisableHeight;
+    BOOST_REQUIRE_GT(activation_height, 0);
+
+    std::string reject_reason;
+    const auto prefork = btx::test::shielded::BuildRelayFixtureTransaction(
+        btx::test::shielded::RelayFixtureFamily::REBALANCE,
+        {
+            .funding_outpoint = COutPoint{Txid::FromUint256(uint256{0x54}), 2},
+            .funding_value = 10 * COIN,
+            .change_script = BuildChangeScript(),
+            .fee = 40'000,
+        },
+        reject_reason,
+        activation_height - 1);
+    BOOST_REQUIRE_MESSAGE(prefork.has_value(), reject_reason);
+
+    reject_reason.clear();
+    const auto postfork = btx::test::shielded::BuildRelayFixtureTransaction(
+        btx::test::shielded::RelayFixtureFamily::REBALANCE,
+        {
+            .funding_outpoint = COutPoint{Txid::FromUint256(uint256{0x55}), 2},
+            .funding_value = 10 * COIN,
+            .change_script = BuildChangeScript(),
+            .fee = 40'000,
+        },
+        reject_reason,
+        activation_height);
+    BOOST_REQUIRE_MESSAGE(postfork.has_value(), reject_reason);
+
+    const auto* prefork_bundle = prefork->tx.shielded_bundle.GetV2Bundle();
+    const auto* postfork_bundle = postfork->tx.shielded_bundle.GetV2Bundle();
+    BOOST_REQUIRE(prefork_bundle != nullptr);
+    BOOST_REQUIRE(postfork_bundle != nullptr);
+    BOOST_CHECK_NE(prefork_bundle->header.family_id, postfork_bundle->header.family_id);
+    BOOST_CHECK_EQUAL(
+        postfork_bundle->header.family_id,
+        shielded::v2::GetWireTransactionFamilyForValidationHeight(
+            shielded::v2::TransactionFamily::V2_REBALANCE,
+            &Params().GetConsensus(),
+            activation_height));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

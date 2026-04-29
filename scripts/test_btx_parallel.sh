@@ -315,10 +315,13 @@ else
   fi
   run_job "m5_genesis_freeze_script_tests" "${ROOT_DIR}/test/util/m5_verify_genesis_freeze_test.sh"
   run_job "m11_metal_validation_tests" "${ROOT_DIR}/test/util/m11_metal_mining_validation_test.sh"
+  run_job "m11_feedback_loop_tests" "${ROOT_DIR}/test/util/m11_codex_feedback_loop_test.sh"
+  run_job "m11_multi_agent_tests" "${ROOT_DIR}/test/util/m11_multi_agent_continuous_4h_test.sh"
   run_job "launch_blocker_runner_tests" "${ROOT_DIR}/test/util/verify_btx_launch_blockers_test.sh"
   run_job "m8_pow_scaling_suite" "${ROOT_DIR}/scripts/m8_pow_scaling_suite.sh" --build-dir "${BUILD_DIR}" --artifact "${LOG_DIR}/pow-scaling-suite.json" --log-dir "${LOG_DIR}/pow-scaling-suite-logs"
   run_job "m5_swarm_tests" "${ROOT_DIR}/test/util/m5_genesis_search_swarm_test.sh"
   run_job "m7_parallel_readiness_tests" "${ROOT_DIR}/test/util/m7_parallel_readiness_test.sh"
+  run_job "swarm_timeout_tests" "${ROOT_DIR}/test/util/codex_swarm_timeout_test.sh"
   run_job "parallel_timeout_guard_tests" bash "${ROOT_DIR}/test/util/test_btx_parallel_timeout_guard_test.sh"
   run_job "production_readiness_parallel_lock_isolation_tests" "${ROOT_DIR}/test/util/verify_btx_production_readiness_parallel_lock_isolation_test.sh"
   if [[ "${SKIP_RECURSIVE_JOBS}" -eq 0 ]]; then

@@ -14,7 +14,7 @@ can hand external reviewers a consistent packet and a bounded execution model.
 - `scripts/m24_shielded_external_findings_intake.py`
 - `scripts/m25_shielded_external_closeout_check.py`
 - `doc/btx-shielded-external-review-closeout.md`
-- `infra/btx-seed-server-spec.md`
+- `../infra/btx-seed-server-spec.md`
 
 ## Recommended Window Shape
 - Use short-lived disposable infrastructure, not a shared permanent testnet.

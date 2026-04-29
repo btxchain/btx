@@ -82,7 +82,7 @@ jobs:
             .btx-parallel-test-logs
             .btx-production-readiness/logs
             .btx-validation
-            .btx-production-readiness/production-readiness-report.json
+            .codex-swarm/production-readiness-report.json
 
   ci-matrix:
     name: ${{ matrix.name }}
@@ -194,4 +194,4 @@ jobs:
             .btx-parallel-test-logs
             .btx-production-readiness/logs
             .btx-validation
-            .btx-production-readiness/production-readiness-report.json
+            .codex-swarm/production-readiness-report.json

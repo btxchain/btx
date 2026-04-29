@@ -21,7 +21,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.29.6 \
+  --release-tag v0.29.7 \
   --preset miner \
   --datadir="$HOME/.btx"
 ```
@@ -45,7 +45,7 @@ progress on stderr and prints a clean JSON summary on stdout:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.29.6 \
+  --release-tag v0.29.7 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"

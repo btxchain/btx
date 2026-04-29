@@ -280,12 +280,24 @@ settlement layer that external L2 operators can target:
   output, bridge address, CTV hash, and canonical CSFS attestation payload.
 - `bridge_buildshieldtx` builds the bridge-in settlement PSBT that moves a
   funded bridge output into the shielded pool.
+- `bridge_submitshieldtx` signs, broadcasts, and now tracks bridge-in
+  settlement by default so the wallet can retry or refund later if needed.
 - `bridge_buildunshieldtx` builds the attested bridge-out settlement PSBT that
   pays a transparent recipient.
+- `bridge_submitunshieldtx` signs, broadcasts, and now tracks bridge-out
+  settlement by default for the same pending-batch recovery flow.
 - `bridge_buildrefund` builds the timeout refund PSBT for either bridge plan
   kind once the refund lock height is eligible.
+- `bridge_importpending`, `bridge_listpending`, `bridge_listarchive`,
+  `bridge_recoverpending`, and `bridge_prunearchive` manage the wallet-side
+  pending and archived bridge journals for restart recovery, re-org
+  resilience, audit, and manual operator retry/pruning.
 - `bridge_decodeattestation` decodes canonical bridge attestation bytes and
   returns the network/domain-bound message fields plus the CSFS hash.
+
+For the full pending-batch recovery model and the operator runbook for
+unsticking historical batches, see
+[BTX Bridge Pending Recovery](btx-bridge-pending-recovery.md).
 
 Example flow:
 

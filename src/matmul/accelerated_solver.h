@@ -116,7 +116,8 @@ PreparedDigestInputs PrepareMatMulDigestInputs(const CBlockHeader& block,
 PreparedDigestInputs PrepareMatMulDigestInputsForBackend(const CBlockHeader& block,
                                                          uint32_t transcript_block_size,
                                                          uint32_t noise_rank,
-                                                         backend::Kind preferred_backend);
+                                                         backend::Kind preferred_backend,
+                                                         DigestScheme digest_scheme = DigestScheme::TRANSCRIPT);
 
 DigestResult ComputeMatMulDigestPrepared(const CBlockHeader& block,
                                          const Matrix& A,

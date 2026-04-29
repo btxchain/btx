@@ -73,6 +73,8 @@ parallel validation jobs do not block each other.
 - `btx-genesis --metal` remains available as an optional nonce prefilter layer
   on top of backend-selected digest solving.
 - Non-Apple or Metal-unavailable hosts transparently fall back to CPU.
+- Current operator-facing Metal defaults, tuning policy, and override examples
+  are documented in [BTX Metal Mining Tuning](btx-metal-mining-tuning.md).
 
 Validation entrypoint:
 

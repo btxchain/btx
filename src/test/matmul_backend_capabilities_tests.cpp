@@ -424,6 +424,135 @@ BOOST_AUTO_TEST_CASE(cuda_digest_buffer_pool_probe_reports_reuse_after_successfu
     BOOST_CHECK_EQUAL(pool_after_second.inflight_submissions, 0U);
 }
 
+BOOST_AUTO_TEST_CASE(cuda_base_matrix_cache_requires_matching_content_keys)
+{
+    constexpr uint32_t kN = 8;
+    constexpr uint32_t kB = 4;
+    constexpr uint32_t kR = 2;
+
+    const auto probe = btx::cuda::ProbeMatMulDigestAcceleration();
+    if (!probe.available) {
+        BOOST_TEST_MESSAGE("Skipping CUDA base-matrix cache key test because CUDA is unavailable: " + probe.reason);
+        return;
+    }
+
+    matmul::Matrix matrix_a = matmul::FromSeed(
+        ParseUint256("1111111111111111111111111111111111111111111111111111111111111111"),
+        kN);
+    matmul::Matrix matrix_b = matmul::FromSeed(
+        ParseUint256("2222222222222222222222222222222222222222222222222222222222222222"),
+        kN);
+    const uint256 sigma = ParseUint256("3333333333333333333333333333333333333333333333333333333333333333");
+    const auto noise = matmul::noise::Generate(sigma, kN, kR);
+    const auto compress = matmul::transcript::DeriveCompressionVector(sigma, kB);
+    const matmul::field::Element* noise_e_l[] = {noise.E_L.data()};
+    const matmul::field::Element* noise_e_r[] = {noise.E_R.data()};
+    const matmul::field::Element* noise_f_l[] = {noise.F_L.data()};
+    const matmul::field::Element* noise_f_r[] = {noise.F_R.data()};
+    const matmul::field::Element* compress_vec[] = {compress.data()};
+
+    const uint256 cache_a0 = matrix_a.ContentHash();
+    const uint256 cache_b0 = matrix_b.ContentHash();
+    const auto first = btx::cuda::ComputeCompressedWordsLowRankBatch(
+        {
+            .n = kN,
+            .b = kB,
+            .r = kR,
+            .batch_size = 1,
+            .matrix_a = matrix_a.data(),
+            .matrix_b = matrix_b.data(),
+            .matrix_a_cache_key = &cache_a0,
+            .matrix_b_cache_key = &cache_b0,
+            .noise_e_l = noise_e_l,
+            .noise_e_r = noise_e_r,
+            .noise_f_l = noise_f_l,
+            .noise_f_r = noise_f_r,
+            .compress_vec = compress_vec,
+        },
+        btx::cuda::MatMulCompressedWordsMode::TRANSCRIPT_PREFIXES);
+    BOOST_REQUIRE(first.success);
+
+    matrix_a.at(0, 0) = matmul::field::add(matrix_a.at(0, 0), 7);
+    matrix_a.at(3, 5) = matmul::field::add(matrix_a.at(3, 5), 11);
+    matrix_b.at(1, 2) = matmul::field::add(matrix_b.at(1, 2), 13);
+    matrix_b.at(6, 7) = matmul::field::add(matrix_b.at(6, 7), 17);
+
+    const uint256 cache_a1 = matrix_a.ContentHash();
+    const uint256 cache_b1 = matrix_b.ContentHash();
+    const auto second = btx::cuda::ComputeCompressedWordsLowRankBatch(
+        {
+            .n = kN,
+            .b = kB,
+            .r = kR,
+            .batch_size = 1,
+            .matrix_a = matrix_a.data(),
+            .matrix_b = matrix_b.data(),
+            .matrix_a_cache_key = &cache_a1,
+            .matrix_b_cache_key = &cache_b1,
+            .noise_e_l = noise_e_l,
+            .noise_e_r = noise_e_r,
+            .noise_f_l = noise_f_l,
+            .noise_f_r = noise_f_r,
+            .compress_vec = compress_vec,
+        },
+        btx::cuda::MatMulCompressedWordsMode::TRANSCRIPT_PREFIXES);
+    BOOST_REQUIRE(second.success);
+
+    const auto after_second = btx::cuda::ProbeMatMulProfilingStats();
+    BOOST_CHECK(!after_second.last_base_matrix_cache_hit);
+
+    const auto uncached = btx::cuda::ComputeCompressedWordsLowRankBatch(
+        {
+            .n = kN,
+            .b = kB,
+            .r = kR,
+            .batch_size = 1,
+            .matrix_a = matrix_a.data(),
+            .matrix_b = matrix_b.data(),
+            .noise_e_l = noise_e_l,
+            .noise_e_r = noise_e_r,
+            .noise_f_l = noise_f_l,
+            .noise_f_r = noise_f_r,
+            .compress_vec = compress_vec,
+        },
+        btx::cuda::MatMulCompressedWordsMode::TRANSCRIPT_PREFIXES);
+    BOOST_REQUIRE(uncached.success);
+
+    BOOST_CHECK(second.words == uncached.words);
+    BOOST_CHECK(first.words != second.words);
+
+    const uint32_t repeat_attempts = std::max<uint32_t>(1U, btx::cuda::ProbeMatMulBufferPool().slot_count);
+    bool observed_cache_hit{false};
+    for (uint32_t attempt = 0; attempt < repeat_attempts; ++attempt) {
+        const auto repeat = btx::cuda::ComputeCompressedWordsLowRankBatch(
+            {
+                .n = kN,
+                .b = kB,
+                .r = kR,
+                .batch_size = 1,
+                .matrix_a = matrix_a.data(),
+                .matrix_b = matrix_b.data(),
+                .matrix_a_cache_key = &cache_a1,
+                .matrix_b_cache_key = &cache_b1,
+                .noise_e_l = noise_e_l,
+                .noise_e_r = noise_e_r,
+                .noise_f_l = noise_f_l,
+                .noise_f_r = noise_f_r,
+                .compress_vec = compress_vec,
+            },
+            btx::cuda::MatMulCompressedWordsMode::TRANSCRIPT_PREFIXES);
+        BOOST_REQUIRE(repeat.success);
+        BOOST_CHECK(repeat.words == second.words);
+
+        const auto after_repeat = btx::cuda::ProbeMatMulProfilingStats();
+        if (after_repeat.last_base_matrix_cache_hit) {
+            observed_cache_hit = true;
+            break;
+        }
+    }
+    BOOST_CHECK(observed_cache_hit);
+}
+
 BOOST_AUTO_TEST_CASE(cuda_dispatch_probe_matches_runtime_availability)
 {
     const auto probe = btx::cuda::ProbeMatMulDigestAcceleration();
@@ -472,7 +601,7 @@ BOOST_AUTO_TEST_CASE(cuda_kernel_profile_reports_streamed_fused_pipeline)
     BOOST_CHECK_EQUAL(profile.device_prepared_inputs_enabled, env_enabled);
     BOOST_CHECK_EQUAL(profile.execution_model, "nonblocking_stream_per_pool_slot");
     BOOST_CHECK_EQUAL(profile.staging_strategy, "pinned_host_with_pageable_fallback");
-    BOOST_CHECK_EQUAL(profile.device_prepared_inputs_policy, "opt_in_env");
+    BOOST_CHECK_EQUAL(profile.device_prepared_inputs_policy, "auto_product_digest_shape_plus_env");
     BOOST_CHECK_EQUAL(profile.reason, "ready");
 }
 
@@ -529,6 +658,66 @@ BOOST_AUTO_TEST_CASE(cuda_profiling_probe_tracks_samples_after_successful_reques
     BOOST_CHECK(!after.last_used_device_prepared_inputs);
     BOOST_CHECK_GE(after.last_host_stage_us, 0.0);
     BOOST_CHECK_GT(after.last_submit_h2d_us, 0.0);
+    BOOST_CHECK_GT(after.last_launch_build_perturbed_us, 0.0);
+    BOOST_CHECK_GT(after.last_launch_finalize_us, 0.0);
+    BOOST_CHECK_GT(after.last_submit_d2h_us, 0.0);
+    BOOST_CHECK_GT(after.last_stream_sync_us, 0.0);
+    BOOST_CHECK_GT(after.last_total_wall_ms, 0.0);
+    BOOST_CHECK_EQUAL(after.reason, "samples_recorded");
+}
+
+BOOST_AUTO_TEST_CASE(cuda_profiling_probe_tracks_device_prepared_requests_without_d2d_repack)
+{
+    constexpr uint32_t kN = 8;
+    constexpr uint32_t kB = 4;
+    constexpr uint32_t kR = 2;
+
+    const auto probe = btx::cuda::ProbeMatMulDigestAcceleration();
+    const auto before = btx::cuda::ProbeMatMulProfilingStats();
+    BOOST_CHECK_EQUAL(before.available, probe.available);
+    if (!probe.available) {
+        BOOST_CHECK(!before.reason.empty());
+        return;
+    }
+
+    const uint256 sigma = ParseUint256("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    const auto generated = btx::cuda::GenerateMatMulInputsGPUDevice({
+        .n = kN,
+        .b = kB,
+        .r = kR,
+        .sigma = sigma,
+    });
+    BOOST_REQUIRE(generated.available);
+    BOOST_REQUIRE(generated.success);
+    BOOST_REQUIRE(generated.inputs != nullptr);
+
+    const matmul::Matrix matrix_a(kN, kN);
+    const matmul::Matrix matrix_b(kN, kN);
+    const btx::cuda::MatMulGeneratedInputsDevice* generated_inputs[] = {generated.inputs.get()};
+
+    const auto result = btx::cuda::ComputeCompressedWordsLowRankDeviceBatch(
+        {
+            .n = kN,
+            .b = kB,
+            .r = kR,
+            .batch_size = 1,
+            .matrix_a = matrix_a.data(),
+            .matrix_b = matrix_b.data(),
+            .generated_inputs = generated_inputs,
+        },
+        btx::cuda::MatMulCompressedWordsMode::TRANSCRIPT_PREFIXES);
+    BOOST_REQUIRE(result.success);
+
+    const auto after = btx::cuda::ProbeMatMulProfilingStats();
+    BOOST_CHECK_GT(after.samples, before.samples);
+    BOOST_CHECK_EQUAL(after.last_n, kN);
+    BOOST_CHECK_EQUAL(after.last_b, kB);
+    BOOST_CHECK_EQUAL(after.last_r, kR);
+    BOOST_CHECK_EQUAL(after.last_batch_size, 1U);
+    BOOST_CHECK_EQUAL(after.last_mode, "transcript_prefixes");
+    BOOST_CHECK(after.last_used_low_rank_path);
+    BOOST_CHECK(after.last_used_device_prepared_inputs);
+    BOOST_CHECK_EQUAL(after.last_submit_d2d_us, 0.0);
     BOOST_CHECK_GT(after.last_launch_build_perturbed_us, 0.0);
     BOOST_CHECK_GT(after.last_launch_finalize_us, 0.0);
     BOOST_CHECK_GT(after.last_submit_d2h_us, 0.0);

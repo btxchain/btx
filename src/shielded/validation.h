@@ -16,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -48,6 +49,12 @@ struct ProofAuditArchive
 };
 
 } // namespace shielded::audit
+
+[[nodiscard]] const char* ShieldedV2FamilyName(shielded::v2::TransactionFamily family);
+
+[[nodiscard]] std::string DescribeShieldedV2Context(const CShieldedBundle& bundle);
+
+void LogShieldedV2ContextReject(std::string_view gate, const CShieldedBundle& bundle);
 
 /**
  * Extract deterministic nullifiers bound to ring key images encoded in a

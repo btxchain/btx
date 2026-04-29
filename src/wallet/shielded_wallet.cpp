@@ -158,6 +158,41 @@ struct ResolvedV2ShieldedRecipient
     return value > 0 && MoneyRange(value);
 }
 
+[[nodiscard]] bool HasValidAccountLeafHint(const ShieldedCoin& coin)
+{
+    return coin.account_leaf_hint.has_value() &&
+           coin.account_leaf_hint->IsValid();
+}
+
+[[nodiscard]] bool IsOrdinarySpendableCoin(const ShieldedCoin& coin)
+{
+    return HasValidAccountLeafHint(coin);
+}
+
+[[nodiscard]] bool IsRecoverableSpendPathRecoveryCoin(const ShieldedCoin& coin)
+{
+    return !HasValidAccountLeafHint(coin);
+}
+
+[[nodiscard]] uint256 HashRecoveryPlaceholder(std::string_view tag,
+                                              uint32_t index,
+                                              const uint256& object_hash)
+{
+    HashWriter hw;
+    hw << std::string{tag} << index << object_hash;
+    return hw.GetSHA256();
+}
+
+[[nodiscard]] std::vector<uint8_t> SerializeSpendPathRecoveryWitness(
+    const shielded::v2::proof::SpendPathRecoveryWitness& witness)
+{
+    DataStream witness_stream;
+    witness_stream << witness;
+    if (witness_stream.empty()) return {};
+    const auto* begin = reinterpret_cast<const uint8_t*>(witness_stream.data());
+    return {begin, begin + witness_stream.size()};
+}
+
 [[nodiscard]] uint256 ViewOnlyNullifier(const uint256& commitment)
 {
     HashWriter hw;
@@ -883,6 +918,8 @@ void RegisterAccountLeafCommitment(std::map<uint256, uint256>& account_leaf_comm
         switch (*family) {
         case shielded::v2::TransactionFamily::V2_SEND:
             return "v2_send";
+        case shielded::v2::V2_SPEND_PATH_RECOVERY:
+            return "v2_spend_path_recovery";
         case shielded::v2::TransactionFamily::V2_LIFECYCLE:
             return "v2_lifecycle";
         case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
@@ -2170,6 +2207,23 @@ void CShieldedWallet::ScanBlock(const CBlock& block, int height)
                     }
                     break;
                 }
+                case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+                    const auto& payload =
+                        std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
+                    const shielded::registry::AccountLeafHint account_leaf_hint =
+                        shielded::registry::MakeDirectSendAccountLeafHint();
+                    for (const auto& output : payload.outputs) {
+                        RecordScannedOutput(block,
+                                            height,
+                                            output,
+                                            account_leaf_hint,
+                                            master_seed,
+                                            block_commitments_seen,
+                                            tx_view,
+                                            tx_has_local_visibility);
+                    }
+                    break;
+                }
                 case shielded::v2::TransactionFamily::V2_LIFECYCLE:
                     break;
                 case shielded::v2::TransactionFamily::V2_INGRESS_BATCH: {
@@ -2451,6 +2505,21 @@ void CShieldedWallet::TransactionAddedToMempool(const CTransaction& tx)
                 }
                 break;
             }
+            case shielded::v2::V2_SPEND_PATH_RECOVERY: {
+                const auto& payload =
+                    std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
+                const shielded::registry::AccountLeafHint account_leaf_hint =
+                    shielded::registry::MakeDirectSendAccountLeafHint();
+                for (const auto& output : payload.outputs) {
+                    RecordMempoolOutput(txid,
+                                        output,
+                                        account_leaf_hint,
+                                        master_seed,
+                                        tx_view,
+                                        tx_has_local_visibility);
+                }
+                break;
+            }
             case shielded::v2::TransactionFamily::V2_LIFECYCLE:
                 break;
             case shielded::v2::TransactionFamily::V2_INGRESS_BATCH: {
@@ -2620,15 +2689,25 @@ ShieldedBalanceSummary CShieldedWallet::GetShieldedBalanceSummary(int min_depth)
     ShieldedBalanceSummary summary;
     const auto notes = GetUnspentNotes(min_depth);
     for (const auto& coin : notes) {
-        CAmount& bucket_amount = coin.is_mine_spend ? summary.spendable : summary.watchonly;
-        int64_t& bucket_count = coin.is_mine_spend ? summary.spendable_note_count : summary.watchonly_note_count;
-        const auto sum = CheckedAdd(bucket_amount, coin.note.value);
-            if (!sum) {
+        CAmount* bucket_amount{nullptr};
+        int64_t* bucket_count{nullptr};
+        if (!coin.is_mine_spend) {
+            bucket_amount = &summary.watchonly;
+            bucket_count = &summary.watchonly_note_count;
+        } else if (IsOrdinarySpendableCoin(coin)) {
+            bucket_amount = &summary.spendable;
+            bucket_count = &summary.spendable_note_count;
+        } else {
+            bucket_amount = &summary.recovery_only;
+            bucket_count = &summary.recovery_only_note_count;
+        }
+        const auto sum = CheckedAdd(*bucket_amount, coin.note.value);
+        if (!sum) {
             LogPrintf("CShieldedWallet::GetShieldedBalanceSummary: overflow detected, returning partial balance\n");
             return summary;
-            }
-        bucket_amount = *sum;
-        ++bucket_count;
+        }
+        *bucket_amount = *sum;
+        ++*bucket_count;
     }
     return summary;
 }
@@ -2665,6 +2744,33 @@ std::vector<ShieldedCoin> CShieldedWallet::GetSpendableNotes(int min_depth) cons
         }
     }
     return out;
+}
+
+std::vector<ShieldedCoin> CShieldedWallet::GetOrdinarySpendableNotes(int min_depth) const
+{
+    AssertLockHeld(cs_shielded);
+    auto spendable = GetSpendableNotes(min_depth);
+    spendable.erase(std::remove_if(spendable.begin(),
+                                   spendable.end(),
+                                   [](const ShieldedCoin& coin) {
+                                       return !IsOrdinarySpendableCoin(coin);
+                                   }),
+                    spendable.end());
+    return spendable;
+}
+
+std::vector<ShieldedCoin> CShieldedWallet::GetRecoverableNotes(int min_depth) const
+{
+    AssertLockHeld(cs_shielded);
+    const auto spendable = GetSpendableNotes(min_depth);
+    std::vector<ShieldedCoin> recoverable;
+    recoverable.reserve(spendable.size());
+    for (const auto& coin : spendable) {
+        if (!IsRecoverableSpendPathRecoveryCoin(coin)) continue;
+        if (m_account_leaf_commitments.count(coin.commitment) != 0) continue;
+        recoverable.push_back(coin);
+    }
+    return recoverable;
 }
 
 std::vector<ShieldedCoin> CShieldedWallet::GetUnspentNotes(int min_depth) const
@@ -3459,6 +3565,7 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2EgressBatch(
         Span<const shielded::v2::V2EgressRecipient>{recipients.data(), recipients.size()},
         reject_reason);
     if (!outputs.has_value()) {
+        if (error != nullptr) *error = reject_reason;
         LogDebug(BCLog::WALLETDB, "CShieldedWallet::CreateV2EgressBatch failed: %s\n", reject_reason);
         return std::nullopt;
     }
@@ -3469,6 +3576,7 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2EgressBatch(
         if (!decrypted.has_value() ||
             decrypted->value != resolved_recipients[i].recipient.amount ||
             decrypted->recipient_pk_hash != resolved_recipients[i].recipient.recipient_pk_hash) {
+            if (error != nullptr) *error = "self-decrypt failed";
             LogDebug(BCLog::WALLETDB,
                      "CShieldedWallet::CreateV2EgressBatch self-decrypt failed index=%u amount=%lld\n",
                      static_cast<unsigned int>(i),
@@ -3496,10 +3604,12 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2EgressBatch(
                                                              &Params().GetConsensus(),
                                                              validation_height);
     if (!built.has_value()) {
+        if (error != nullptr) *error = reject_reason;
         LogDebug(BCLog::WALLETDB, "CShieldedWallet::CreateV2EgressBatch failed: %s\n", reject_reason);
         return std::nullopt;
     }
     if (!built->IsValid()) {
+        if (error != nullptr) *error = "builder returned invalid result";
         LogDebug(BCLog::WALLETDB, "CShieldedWallet::CreateV2EgressBatch failed: builder returned invalid result\n");
         return std::nullopt;
     }
@@ -3509,12 +3619,14 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2EgressBatch(
     if (immutable_bundle == nullptr ||
         !shielded::v2::BundleHasSemanticFamily(*immutable_bundle,
                                                shielded::v2::TransactionFamily::V2_EGRESS_BATCH)) {
+        if (error != nullptr) *error = "immutable bundle missing or wrong family";
         LogDebug(BCLog::WALLETDB, "CShieldedWallet::CreateV2EgressBatch immutable bundle missing or wrong family\n");
         return std::nullopt;
     }
     auto immutable_witness =
         shielded::v2::proof::ParseSettlementWitness(immutable_bundle->proof_payload, reject_reason);
     if (!immutable_witness.has_value()) {
+        if (error != nullptr) *error = reject_reason;
         LogDebug(BCLog::WALLETDB, "CShieldedWallet::CreateV2EgressBatch failed: %s\n", reject_reason);
         return std::nullopt;
     }
@@ -3526,6 +3638,7 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2EgressBatch(
         immutable_bundle->proof_shards.front(),
         reject_reason);
     if (!immutable_receipt.has_value()) {
+        if (error != nullptr) *error = reject_reason;
         LogDebug(BCLog::WALLETDB, "CShieldedWallet::CreateV2EgressBatch failed: %s\n", reject_reason);
         return std::nullopt;
     }
@@ -3537,6 +3650,7 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2EgressBatch(
                                                                validation_height,
                                                                imported_descriptor);
     if (!shielded::v2::proof::VerifySettlementContext(immutable_context, *immutable_witness, reject_reason)) {
+        if (error != nullptr) *error = reject_reason;
         LogDebug(BCLog::WALLETDB, "CShieldedWallet::CreateV2EgressBatch failed: %s\n", reject_reason);
         return std::nullopt;
     }
@@ -3622,7 +3736,7 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2IngressBatch(
         return fail("ingress total overflow");
     }
 
-    const auto spendable_notes = GetSpendableNotes(/*min_depth=*/1);
+    const auto spendable_notes = GetOrdinarySpendableNotes(/*min_depth=*/1);
     if (spendable_notes.empty()) return fail("no spendable notes available");
 
     auto selected = SelectNotes(*total_needed, /*fee=*/0);
@@ -4549,7 +4663,7 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateShieldedSpend(
         if (!total_needed || !MoneyRange(*total_needed)) return fail("recipient total overflow");
 
         CAmount spendable_shielded{0};
-        for (const auto& coin : GetSpendableNotes(/*min_depth=*/1)) {
+        for (const auto& coin : GetOrdinarySpendableNotes(/*min_depth=*/1)) {
             const auto next = CheckedAdd(spendable_shielded, coin.note.value);
             if (!next || !MoneyRange(*next)) return fail("spendable shielded total overflow");
             spendable_shielded = *next;
@@ -4564,6 +4678,349 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateShieldedSpend(
     }
 
     return CreateV2Send(shielded_recipients, transparent_recipients, fee, error);
+}
+
+std::optional<CMutableTransaction> CShieldedWallet::CreateSpendPathRecovery(
+    const uint256& note_commitment,
+    std::optional<ShieldedAddress> destination,
+    CAmount fee,
+    std::string* error)
+{
+    AssertLockHeld(cs_shielded);
+    MaybeRehydrateSpendingKeys();
+    CatchUpToChainTip();
+    auto fail = [&](const std::string& reason) -> std::optional<CMutableTransaction> {
+        if (error != nullptr) *error = reason;
+        LogDebug(BCLog::WALLETDB, "CShieldedWallet::CreateSpendPathRecovery failed: %s\n", reason);
+        return std::nullopt;
+    };
+
+    if (!RequireEncryptedShieldedWallet(m_parent_wallet, "CShieldedWallet::CreateSpendPathRecovery", error)) {
+        return std::nullopt;
+    }
+
+    const int32_t validation_height = NextShieldedBuildValidationHeight(m_parent_wallet.chain());
+    const auto& consensus = Params().GetConsensus();
+    if (!consensus.IsShieldedSpendPathRecoveryActive(validation_height)) {
+        return fail("spend-path recovery is not active");
+    }
+    if (!consensus.IsShieldedMatRiCTDisabled(validation_height)) {
+        return fail("spend-path recovery is only available after MatRiCT disable");
+    }
+    if (fee < 0 || !MoneyRange(fee)) {
+        return fail("invalid fee");
+    }
+    fee = shielded::RoundShieldedFeeToCanonicalBucket(fee, consensus, validation_height);
+    if (fee <= 0 || !MoneyRange(fee)) {
+        return fail("invalid fee");
+    }
+
+    const auto recoverable_notes = GetRecoverableNotes(/*min_depth=*/1);
+    const auto selected_it = std::find_if(
+        recoverable_notes.begin(),
+        recoverable_notes.end(),
+        [&](const ShieldedCoin& coin) {
+            return coin.commitment == note_commitment;
+        });
+    if (selected_it == recoverable_notes.end()) {
+        return fail("recoverable note not found");
+    }
+    const ShieldedCoin& coin = *selected_it;
+    if (coin.note.value <= fee) {
+        return fail("recoverable note value does not cover fee");
+    }
+    if (coin.tree_position >= m_tree.Size()) {
+        return fail("recoverable note tree position out of range");
+    }
+    const auto tree_commitment = m_tree.CommitmentAt(coin.tree_position);
+    if (!tree_commitment.has_value() || *tree_commitment != coin.commitment) {
+        return fail("recoverable note commitment does not match tree position");
+    }
+    if (m_account_leaf_commitments.count(coin.commitment) != 0) {
+        return fail("note is not stranded");
+    }
+
+    ShieldedAddress recovery_destination;
+    if (destination.has_value()) {
+        recovery_destination = *destination;
+    } else {
+        recovery_destination = GenerateNewAddress();
+    }
+    if (!recovery_destination.IsValid()) {
+        return fail("invalid recovery destination");
+    }
+
+    const auto key_it = m_key_sets.find(recovery_destination);
+    mlkem::PublicKey recipient_kem_pk{};
+    const mlkem::SecretKey* local_recipient_kem_sk{nullptr};
+    if (key_it != m_key_sets.end()) {
+        recipient_kem_pk = key_it->second.kem_key.pk;
+        local_recipient_kem_sk = &key_it->second.kem_key.sk;
+    } else if (recovery_destination.HasKEMPublicKey()) {
+        recipient_kem_pk = recovery_destination.kem_pk;
+    } else {
+        return fail("destination KEM public key unavailable");
+    }
+    const uint256 recipient_kem_pk_hash = HashBytes(
+        Span<const unsigned char>{recipient_kem_pk.data(), recipient_kem_pk.size()});
+    if (recipient_kem_pk_hash != recovery_destination.kem_pk_hash) {
+        return fail("destination KEM hash mismatch");
+    }
+
+    std::vector<unsigned char> master_seed = GetMasterSeed();
+    ScopedByteVectorCleanse master_seed_cleanse(master_seed);
+    if (master_seed.empty()) {
+        return fail("missing unlocked master seed");
+    }
+
+    const ShieldedKeySet* signing_keyset{nullptr};
+    for (const auto& [_, keyset] : m_key_sets) {
+        if (!keyset.has_spending_key || !keyset.spending_key_loaded || !keyset.spending_key.IsValid()) continue;
+        if (keyset.spending_pk_hash == coin.note.recipient_pk_hash) {
+            signing_keyset = &keyset;
+            break;
+        }
+    }
+    if (signing_keyset == nullptr) {
+        return fail("missing spending key for recoverable note");
+    }
+
+    std::vector<unsigned char> spend_key_material =
+        DeriveShieldedSpendSecretMaterial(master_seed, *signing_keyset);
+    ScopedByteVectorCleanse spend_key_material_cleanse(spend_key_material);
+    if (spend_key_material.empty()) {
+        return fail("failed to derive spend secret for recoverable note");
+    }
+
+    const CAmount recovered_value = coin.note.value - fee;
+    const CAmount shielded_dust_threshold = GetShieldedDustThresholdForHeight(
+        m_parent_wallet.chain().relayDustFee(),
+        validation_height);
+    if (shielded_dust_threshold > 0 && recovered_value < shielded_dust_threshold) {
+        return fail("recovered output would fall below dust threshold");
+    }
+
+    ShieldedNote recovered_note;
+    recovered_note.value = recovered_value;
+    recovered_note.recipient_pk_hash = recovery_destination.pk_hash;
+    if (!IsShieldedAmountCompatible(recovered_note.value) ||
+        recovered_note.recipient_pk_hash.IsNull()) {
+        return fail("invalid recovered output note");
+    }
+
+    const auto bound_note = shielded::NoteEncryption::EncryptBoundNote(recovered_note, recipient_kem_pk);
+    recovered_note = bound_note.note;
+    const shielded::EncryptedNote encrypted_note = bound_note.encrypted_note;
+    if (local_recipient_kem_sk != nullptr &&
+        !shielded::NoteEncryption::TryDecrypt(encrypted_note,
+                                              recipient_kem_pk,
+                                              *local_recipient_kem_sk).has_value()) {
+        return fail("recovery output self-decrypt failed");
+    }
+
+    auto output_payload = shielded::v2::EncodeLegacyEncryptedNotePayload(
+        encrypted_note,
+        recipient_kem_pk,
+        shielded::v2::ScanDomain::OPAQUE);
+    if (!output_payload.has_value()) {
+        return fail("unable to encode recovery output payload");
+    }
+
+    shielded::v2::OutputDescription output;
+    output.note_class = shielded::v2::NoteClass::USER;
+    output.smile_account = smile2::wallet::BuildCompactPublicAccountFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        recovered_note);
+    if (!output.smile_account.has_value()) {
+        return fail("failed to build recovery output account");
+    }
+    output.note_commitment = smile2::ComputeCompactPublicAccountHash(*output.smile_account);
+    output.value_commitment = HashRecoveryPlaceholder(
+        "BTX_ShieldedV2_SpendPathRecovery_Output_Value_Placeholder_V1",
+        0,
+        output.note_commitment);
+    output.encrypted_note = *output_payload;
+    if (!output.IsValid()) {
+        return fail("invalid recovery output");
+    }
+
+    shielded::v2::SpendDescription spend;
+    if (!shielded::ringct::DeriveInputNullifierForNote(spend.nullifier,
+                                                       Span<const unsigned char>{spend_key_material.data(),
+                                                                                 spend_key_material.size()},
+                                                       coin.note,
+                                                       coin.commitment)) {
+        return fail("failed to derive recovery nullifier");
+    }
+    spend.note_commitment = coin.commitment;
+    spend.merkle_anchor = m_tree.Root();
+    spend.value_commitment = HashRecoveryPlaceholder(
+        "BTX_ShieldedV2_SpendPathRecovery_Input_Value_Placeholder_V1",
+        0,
+        coin.commitment);
+
+    const auto input_account = smile2::wallet::BuildCompactPublicAccountFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        coin.note);
+    if (!input_account.has_value()) {
+        return fail("failed to build recovery input account");
+    }
+    auto account_leaf = shielded::registry::BuildShieldedAccountLeaf(
+        *input_account,
+        coin.commitment,
+        shielded::registry::AccountDomain::DIRECT_SEND);
+    if (!account_leaf.has_value()) {
+        return fail("failed to build recovery input account leaf");
+    }
+    shielded::registry::ShieldedAccountRegistryState placeholder_registry;
+    if (!placeholder_registry.Append(Span<const shielded::registry::ShieldedAccountLeaf>{&*account_leaf, 1})) {
+        return fail("failed to build recovery placeholder registry");
+    }
+    auto placeholder_witness = placeholder_registry.BuildSpendWitness(/*leaf_index=*/0);
+    if (!placeholder_witness.has_value()) {
+        return fail("failed to build recovery placeholder witness");
+    }
+    spend.account_leaf_commitment = placeholder_witness->account_leaf_commitment;
+    spend.account_registry_proof = *placeholder_witness;
+
+    shielded::v2::SpendPathRecoveryPayload payload;
+    payload.spend_anchor = spend.merkle_anchor;
+    payload.spends = {spend};
+    payload.outputs = {output};
+    payload.fee = fee;
+
+    auto finalize_bundle = [&](shielded::v2::TransactionBundle& bundle,
+                               const shielded::v2::SpendPathRecoveryPayload& current_payload,
+                               const uint256& statement_digest,
+                               const std::vector<uint8_t>& proof_payload_bytes) -> bool {
+        bundle.header.family_id = shielded::v2::GetWireTransactionFamilyForValidationHeight(
+            shielded::v2::V2_SPEND_PATH_RECOVERY,
+            &consensus,
+            validation_height);
+        bundle.header.proof_envelope.proof_kind = shielded::v2::GetWireProofKindForValidationHeight(
+            shielded::v2::V2_SPEND_PATH_RECOVERY,
+            shielded::v2::ProofKind::DIRECT_MATRICT,
+            &consensus,
+            validation_height);
+        // Recovery keeps the legacy MatRiCT component kinds so the post-disable
+        // retired-MatRiCT exception can distinguish it from ordinary legacy sends.
+        bundle.header.proof_envelope.membership_proof_kind =
+            shielded::v2::ProofComponentKind::MATRICT;
+        bundle.header.proof_envelope.amount_proof_kind =
+            shielded::v2::ProofComponentKind::RANGE;
+        bundle.header.proof_envelope.balance_proof_kind =
+            shielded::v2::ProofComponentKind::BALANCE;
+        bundle.header.proof_envelope.settlement_binding_kind =
+            shielded::v2::GetWireSettlementBindingKindForValidationHeight(
+                shielded::v2::V2_SPEND_PATH_RECOVERY,
+                shielded::v2::SettlementBindingKind::NONE,
+                &consensus,
+                validation_height);
+        bundle.header.proof_envelope.statement_digest = statement_digest;
+        bundle.header.proof_envelope.extension_digest = uint256::ZERO;
+        bundle.header.proof_shard_root = uint256::ZERO;
+        bundle.header.proof_shard_count = 0;
+        bundle.proof_shards.clear();
+        bundle.payload = current_payload;
+        bundle.header.payload_digest = shielded::v2::ComputeSpendPathRecoveryPayloadDigest(current_payload);
+        bundle.proof_payload = proof_payload_bytes;
+        bundle.output_chunks.clear();
+        bundle.header.output_chunk_root = uint256::ZERO;
+        bundle.header.output_chunk_count = 0;
+        if (shielded::v2::UseDerivedGenericOutputChunkWire(bundle.header, bundle.payload)) {
+            auto output_chunks = shielded::v2::BuildDerivedGenericOutputChunks(bundle.payload);
+            if (!output_chunks.has_value()) {
+                return false;
+            }
+            bundle.output_chunks = std::move(*output_chunks);
+            bundle.header.output_chunk_root = bundle.output_chunks.empty()
+                ? uint256::ZERO
+                : shielded::v2::ComputeOutputChunkRoot(
+                      Span<const shielded::v2::OutputChunkDescriptor>{bundle.output_chunks.data(),
+                                                                      bundle.output_chunks.size()});
+            bundle.header.output_chunk_count = bundle.output_chunks.size();
+        }
+        return true;
+    };
+
+    CMutableTransaction tx;
+    tx.version = CTransaction::CURRENT_VERSION;
+    tx.nLockTime = FastRandomContext{}.rand32();
+
+    shielded::v2::TransactionBundle bundle;
+    if (!finalize_bundle(bundle, payload, uint256::ZERO, {})) {
+        return fail("failed to initialize recovery bundle");
+    }
+    tx.shielded_bundle.v2_bundle = bundle;
+
+    const std::vector<std::vector<uint256>> ring_members{{coin.commitment}};
+    const std::vector<size_t> real_indices{0};
+    const std::vector<Nullifier> input_nullifiers{spend.nullifier};
+    const std::vector<uint256> output_note_commitments{output.note_commitment};
+
+    const uint256 provisional_statement_digest =
+        shielded::v2::proof::ComputeSpendPathRecoveryStatementDigest(CTransaction{tx});
+    shielded::ringct::MatRiCTProof provisional_proof;
+    if (!shielded::ringct::CreateMatRiCTProof(provisional_proof,
+                                              {coin.note},
+                                              {recovered_note},
+                                              Span<const uint256>{output_note_commitments.data(),
+                                                                  output_note_commitments.size()},
+                                              input_nullifiers,
+                                              ring_members,
+                                              real_indices,
+                                              Span<const unsigned char>{spend_key_material.data(),
+                                                                        spend_key_material.size()},
+                                              fee,
+                                              provisional_statement_digest,
+                                              {},
+                                              /*allow_singleton_ring=*/true)) {
+        return fail("failed to build provisional recovery proof");
+    }
+
+    payload.spends[0].value_commitment =
+        shielded::ringct::CommitmentHash(provisional_proof.input_commitments[0]);
+    payload.outputs[0].value_commitment =
+        shielded::ringct::CommitmentHash(provisional_proof.output_commitments[0]);
+    if (!finalize_bundle(bundle, payload, uint256::ZERO, {})) {
+        return fail("failed to refresh recovery bundle");
+    }
+    tx.shielded_bundle.v2_bundle = bundle;
+
+    const uint256 statement_digest =
+        shielded::v2::proof::ComputeSpendPathRecoveryStatementDigest(CTransaction{tx});
+    shielded::ringct::MatRiCTProof proof;
+    if (!shielded::ringct::CreateMatRiCTProof(proof,
+                                              {coin.note},
+                                              {recovered_note},
+                                              Span<const uint256>{output_note_commitments.data(),
+                                                                  output_note_commitments.size()},
+                                              input_nullifiers,
+                                              ring_members,
+                                              real_indices,
+                                              Span<const unsigned char>{spend_key_material.data(),
+                                                                        spend_key_material.size()},
+                                              fee,
+                                              statement_digest,
+                                              {},
+                                              /*allow_singleton_ring=*/true)) {
+        return fail("failed to build recovery proof");
+    }
+
+    shielded::v2::proof::SpendPathRecoveryWitness witness;
+    shielded::v2::proof::SpendPathRecoverySpendWitness spend_witness;
+    spend_witness.ring_positions = {coin.tree_position};
+    witness.spends = {spend_witness};
+    witness.native_proof = proof;
+
+    if (!finalize_bundle(bundle, payload, statement_digest, SerializeSpendPathRecoveryWitness(witness))) {
+        return fail("failed to finalize recovery bundle");
+    }
+    if (!bundle.IsValid()) {
+        return fail("invalid recovery bundle");
+    }
+    tx.shielded_bundle.v2_bundle = std::move(bundle);
+    return tx;
 }
 
 std::optional<CMutableTransaction> CShieldedWallet::ShieldFunds(const std::vector<COutPoint>& utxos,
@@ -5050,7 +5507,7 @@ std::optional<CMutableTransaction> CShieldedWallet::MergeNotes(size_t max_notes,
         return std::nullopt;
     }
 
-    auto spendable = GetSpendableNotes(/*min_depth=*/1);
+    auto spendable = GetOrdinarySpendableNotes(/*min_depth=*/1);
     if (spendable.size() <= 1) {
         if (error != nullptr) *error = "Need at least two spendable notes";
         return std::nullopt;
@@ -5533,7 +5990,7 @@ std::vector<ShieldedCoin> CShieldedWallet::SelectNotes(CAmount target,
                                                        bool prefer_minimal_inputs) const
 {
     AssertLockHeld(cs_shielded);
-    auto spendable = GetSpendableNotes(/*min_depth=*/1);
+    auto spendable = GetOrdinarySpendableNotes(/*min_depth=*/1);
     if (spendable.empty()) return {};
 
     // `fee` is an absolute transaction fee (in satoshis), not a feerate.

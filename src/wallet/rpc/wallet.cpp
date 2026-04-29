@@ -1147,6 +1147,7 @@ RPCHelpMan z_getbalance();
 RPCHelpMan z_listunspent();
 RPCHelpMan z_sendtoaddress();
 RPCHelpMan z_sendmany();
+RPCHelpMan z_recoverstrandednote();
 RPCHelpMan z_shieldcoinbase();
 RPCHelpMan z_shieldfunds();
 RPCHelpMan z_planshieldfunds();
@@ -1221,6 +1222,11 @@ RPCHelpMan bridge_submitrebalancetx();
 RPCHelpMan bridge_submitshieldtx();
 RPCHelpMan bridge_buildunshieldtx();
 RPCHelpMan bridge_submitunshieldtx();
+RPCHelpMan bridge_importpending();
+RPCHelpMan bridge_listpending();
+RPCHelpMan bridge_listarchive();
+RPCHelpMan bridge_recoverpending();
+RPCHelpMan bridge_prunearchive();
 RPCHelpMan bridge_buildrefund();
 RPCHelpMan bridge_decodeattestation();
 
@@ -1312,6 +1318,7 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"shielded", &z_listunspent},
         {"shielded", &z_sendtoaddress},
         {"shielded", &z_sendmany},
+        {"shielded", &z_recoverstrandednote},
         {"shielded", &z_shieldcoinbase},
         {"shielded", &z_shieldfunds},
         {"shielded", &z_fundpsbt},
@@ -1386,6 +1393,11 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"bridge", &bridge_submitshieldtx},
         {"bridge", &bridge_buildunshieldtx},
         {"bridge", &bridge_submitunshieldtx},
+        {"bridge", &bridge_importpending},
+        {"bridge", &bridge_listpending},
+        {"bridge", &bridge_listarchive},
+        {"bridge", &bridge_recoverpending},
+        {"bridge", &bridge_prunearchive},
         {"bridge", &bridge_buildrefund},
         {"bridge", &bridge_decodeattestation},
     };

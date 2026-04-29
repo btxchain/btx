@@ -28,6 +28,7 @@ key-management operating model:
 - [Managing Wallets](managing-wallets.md)
 - [BTX PQ Multisig Tutorial](btx-pq-multisig-tutorial.md)
 - [BTX Shielded Pool Guide](btx-shielded-pool-guide.md)
+- [BTX Bridge Pending Recovery](btx-bridge-pending-recovery.md)
 - [Support for signing transactions outside of BTX](external-signer.md)
 
 Operator bootstrap and release docs
@@ -39,6 +40,7 @@ service-profile, or release-publication workflow:
 - [Assumeutxo Usage](assumeutxo.md)
 - [BTX GitHub Release Automation](btx-github-release-automation.md)
 - [Release Process](release-process.md)
+- [BTX Metal Mining Tuning](btx-metal-mining-tuning.md)
 - [Mining Operator Helpers](../contrib/mining/README.md)
 - [Fast-Start Validating Node Helpers](../contrib/faststart/README.md)
 

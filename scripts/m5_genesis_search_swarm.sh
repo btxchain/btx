@@ -146,11 +146,11 @@ if [[ -z "${GENESIS_BIN}" ]]; then
 fi
 
 if [[ -z "${STATE_FILE:-}" ]]; then
-  STATE_FILE="${ROOT_DIR}/.btx-swarm/m5-genesis-${NETWORK}.state"
+  STATE_FILE="${ROOT_DIR}/.codex-swarm/m5-genesis-${NETWORK}.state"
 fi
 
 if [[ -z "${ARTIFACT_PATH:-}" ]]; then
-  ARTIFACT_PATH="${ROOT_DIR}/.btx-swarm/m5-genesis-${NETWORK}-found.txt"
+  ARTIFACT_PATH="${ROOT_DIR}/.codex-swarm/m5-genesis-${NETWORK}-found.txt"
 fi
 
 if ! [[ "${WORKERS}" =~ ^[0-9]+$ ]] || (( WORKERS < 1 )); then
@@ -179,7 +179,7 @@ if [[ "${DRY_RUN}" -eq 0 ]] && [[ ! -x "${GENESIS_BIN}" ]]; then
 fi
 
 mkdir -p "$(dirname "${STATE_FILE}")" "$(dirname "${ARTIFACT_PATH}")"
-LOG_ROOT="${ROOT_DIR}/.btx-swarm/logs/m5-genesis-${NETWORK}"
+LOG_ROOT="${ROOT_DIR}/.codex-swarm/logs/m5-genesis-${NETWORK}"
 mkdir -p "${LOG_ROOT}"
 
 next_nonce64="${START_NONCE64}"

@@ -28,6 +28,7 @@ namespace shielded::v2::proof {
 enum class VerificationDomain : uint8_t {
     DIRECT_SPEND = 1,
     BATCH_SETTLEMENT = 2,
+    SPEND_PATH_RECOVERY = 3,
 };
 
 enum class PayloadLocation : uint8_t {
@@ -184,10 +185,101 @@ struct V2SendWitness
     }
 };
 
+struct SpendPathRecoverySpendWitness
+{
+    uint8_t version{WIRE_VERSION};
+    std::vector<uint64_t> ring_positions;
+
+    [[nodiscard]] bool IsValid() const;
+
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        detail::SerializeVersion(s,
+                                 version,
+                                 "SpendPathRecoverySpendWitness::Serialize invalid version");
+        detail::SerializeBoundedCompactSize(
+            s,
+            ring_positions.size(),
+            1,
+            "SpendPathRecoverySpendWitness::Serialize oversized ring_positions");
+        for (const uint64_t position : ring_positions) {
+            ::Serialize(s, position);
+        }
+    }
+
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        detail::UnserializeVersion(s,
+                                   version,
+                                   "SpendPathRecoverySpendWitness::Unserialize invalid version");
+        const uint64_t ring_position_count = detail::UnserializeBoundedCompactSize(
+            s,
+            1,
+            "SpendPathRecoverySpendWitness::Unserialize oversized ring_positions");
+        ring_positions.assign(ring_position_count, 0);
+        for (uint64_t& position : ring_positions) {
+            ::Unserialize(s, position);
+        }
+    }
+};
+
+struct SpendPathRecoveryWitness
+{
+    uint8_t version{WIRE_VERSION};
+    std::vector<SpendPathRecoverySpendWitness> spends;
+    shielded::ringct::MatRiCTProof native_proof;
+
+    [[nodiscard]] bool IsValid(size_t expected_input_count, size_t expected_output_count) const;
+
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        detail::SerializeVersion(s,
+                                 version,
+                                 "SpendPathRecoveryWitness::Serialize invalid version");
+        detail::SerializeBoundedCompactSize(
+            s,
+            spends.size(),
+            MAX_DIRECT_SPENDS,
+            "SpendPathRecoveryWitness::Serialize oversized spends");
+        for (const SpendPathRecoverySpendWitness& spend : spends) {
+            ::Serialize(s, spend);
+        }
+        ::Serialize(s, native_proof);
+    }
+
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        detail::UnserializeVersion(s,
+                                   version,
+                                   "SpendPathRecoveryWitness::Unserialize invalid version");
+        const uint64_t spend_count = detail::UnserializeBoundedCompactSize(
+            s,
+            MAX_DIRECT_SPENDS,
+            "SpendPathRecoveryWitness::Unserialize oversized spends");
+        spends.assign(spend_count, {});
+        for (SpendPathRecoverySpendWitness& spend : spends) {
+            ::Unserialize(s, spend);
+        }
+        ::Unserialize(s, native_proof);
+    }
+};
+
 struct V2SendContext
 {
     ProofMaterial material;
     V2SendWitness witness;
+
+    [[nodiscard]] bool IsValid(size_t expected_input_count, size_t expected_output_count) const;
+};
+
+struct SpendPathRecoveryContext
+{
+    ProofMaterial material;
+    SpendPathRecoveryWitness witness;
 
     [[nodiscard]] bool IsValid(size_t expected_input_count, size_t expected_output_count) const;
 };
@@ -303,6 +395,7 @@ struct SettlementWitness
                                                    const Consensus::Params& consensus,
                                                    int32_t validation_height);
 [[nodiscard]] uint256 ComputeV2SendExtensionDigest(const CTransaction& tx);
+[[nodiscard]] uint256 ComputeSpendPathRecoveryStatementDigest(const CTransaction& tx);
 [[nodiscard]] ProofStatement DescribeV2SendStatement(
     const CTransaction& tx,
     std::optional<uint256> extension_digest_override = std::nullopt);
@@ -310,6 +403,9 @@ struct SettlementWitness
     const CTransaction& tx,
     const Consensus::Params& consensus,
     int32_t validation_height,
+    std::optional<uint256> extension_digest_override = std::nullopt);
+[[nodiscard]] ProofStatement DescribeSpendPathRecoveryStatement(
+    const CTransaction& tx,
     std::optional<uint256> extension_digest_override = std::nullopt);
 [[nodiscard]] NativeBatchBackend DescribeSmileNativeBatchBackend();
 [[nodiscard]] NativeBatchBackend DescribeMatRiCTPlusNativeBatchBackend();
@@ -333,6 +429,9 @@ struct SettlementWitness
     std::string& reject_reason);
 [[nodiscard]] std::optional<V2SendWitness> ParseV2SendWitness(const shielded::v2::TransactionBundle& bundle,
                                                               std::string& reject_reason);
+[[nodiscard]] std::optional<SpendPathRecoveryWitness> ParseSpendPathRecoveryWitness(
+    const shielded::v2::TransactionBundle& bundle,
+    std::string& reject_reason);
 [[nodiscard]] std::optional<std::shared_ptr<const shielded::ringct::MatRiCTProof>> ParseV2SendNativeProof(
     const shielded::v2::TransactionBundle& bundle,
     std::string& reject_reason);
@@ -360,6 +459,14 @@ struct SettlementWitness
 [[nodiscard]] std::optional<V2SendContext> ParseV2SendProof(const shielded::v2::TransactionBundle& bundle,
                                                             const ProofStatement& statement,
                                                             std::string& reject_reason);
+[[nodiscard]] SpendPathRecoveryContext BindSpendPathRecoveryProof(
+    const shielded::v2::TransactionBundle& bundle,
+    const ProofStatement& statement,
+    SpendPathRecoveryWitness witness);
+[[nodiscard]] std::optional<SpendPathRecoveryContext> ParseSpendPathRecoveryProof(
+    const shielded::v2::TransactionBundle& bundle,
+    const ProofStatement& statement,
+    std::string& reject_reason);
 
 [[nodiscard]] std::optional<std::vector<Nullifier>> ExtractBoundNullifiers(
     const shielded::ringct::MatRiCTProof& proof,
@@ -376,6 +483,12 @@ struct SettlementWitness
     size_t expected_output_count,
     std::string& reject_reason,
     bool reject_rice_codec = false);
+[[nodiscard]] std::optional<std::vector<Nullifier>> ExtractBoundNullifiers(
+    const SpendPathRecoveryContext& context,
+    size_t expected_input_count,
+    size_t expected_output_count,
+    std::string& reject_reason,
+    bool reject_rice_codec = false);
 
 [[nodiscard]] std::optional<std::vector<std::vector<uint256>>> BuildLegacyDirectSpendRingMembers(
     const CShieldedBundle& bundle,
@@ -386,9 +499,21 @@ struct SettlementWitness
     const V2SendContext& context,
     const shielded::ShieldedMerkleTree& tree,
     std::string& reject_reason);
+[[nodiscard]] std::optional<std::vector<std::vector<uint256>>> BuildSpendPathRecoveryRingMembers(
+    const shielded::v2::TransactionBundle& bundle,
+    const SpendPathRecoveryContext& context,
+    const shielded::ShieldedMerkleTree& tree,
+    std::string& reject_reason);
 [[nodiscard]] std::optional<std::vector<std::vector<smile2::wallet::SmileRingMember>>> BuildV2SendSmileRingMembers(
     const shielded::v2::TransactionBundle& bundle,
     const V2SendContext& context,
+    const shielded::ShieldedMerkleTree& tree,
+    const std::map<uint256, smile2::CompactPublicAccount>& public_accounts,
+    const std::map<uint256, uint256>& account_leaf_commitments,
+    std::string& reject_reason);
+[[nodiscard]] std::optional<std::vector<std::vector<smile2::wallet::SmileRingMember>>> BuildSpendPathRecoverySmileRingMembers(
+    const shielded::v2::TransactionBundle& bundle,
+    const SpendPathRecoveryContext& context,
     const shielded::ShieldedMerkleTree& tree,
     const std::map<uint256, smile2::CompactPublicAccount>& public_accounts,
     const std::map<uint256, uint256>& account_leaf_commitments,
@@ -406,6 +531,16 @@ struct SettlementWitness
 [[nodiscard]] bool VerifyV2SendProof(
     const shielded::v2::TransactionBundle& bundle,
     const V2SendContext& context,
+    const std::vector<std::vector<smile2::wallet::SmileRingMember>>& ring_members,
+    bool reject_rice_codec = false,
+    bool bind_anonset_context = false);
+[[nodiscard]] bool VerifySpendPathRecoveryProof(
+    const shielded::v2::TransactionBundle& bundle,
+    const SpendPathRecoveryContext& context,
+    const std::vector<std::vector<uint256>>& ring_members);
+[[nodiscard]] bool VerifySpendPathRecoveryProof(
+    const shielded::v2::TransactionBundle& bundle,
+    const SpendPathRecoveryContext& context,
     const std::vector<std::vector<smile2::wallet::SmileRingMember>>& ring_members,
     bool reject_rice_codec = false,
     bool bind_anonset_context = false);

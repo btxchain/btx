@@ -31,6 +31,8 @@ constexpr std::string_view TAG_RESERVE_DELTA{"BTX_ShieldedV2_Reserve_Delta_V1"};
 constexpr std::string_view TAG_RESERVE_DELTA_LEAF{"BTX_ShieldedV2_Reserve_Delta_Leaf_V1"};
 constexpr std::string_view TAG_RESERVE_DELTA_NODE{"BTX_ShieldedV2_Reserve_Delta_Node_V1"};
 constexpr std::string_view TAG_SEND_PAYLOAD{"BTX_ShieldedV2_Send_Payload_V1"};
+constexpr std::string_view TAG_SPEND_PATH_RECOVERY_PAYLOAD{
+    "BTX_ShieldedV2_Spend_Path_Recovery_Payload_V1"};
 constexpr std::string_view TAG_INGRESS_PAYLOAD{"BTX_ShieldedV2_Ingress_Payload_V1"};
 constexpr std::string_view TAG_EGRESS_PAYLOAD{"BTX_ShieldedV2_Egress_Payload_V1"};
 constexpr std::string_view TAG_REBALANCE_PAYLOAD{"BTX_ShieldedV2_Rebalance_Payload_V1"};
@@ -275,10 +277,22 @@ template <typename T>
 [[nodiscard]] bool ProofEnvelopeMatchesFamily(TransactionFamily family, const ProofEnvelope& envelope)
 {
     proof::ProofStatement statement;
-    statement.domain = (family == TransactionFamily::V2_SEND ||
-                        family == TransactionFamily::V2_LIFECYCLE)
-        ? proof::VerificationDomain::DIRECT_SPEND
-        : proof::VerificationDomain::BATCH_SETTLEMENT;
+    switch (family) {
+    case TransactionFamily::V2_SEND:
+    case TransactionFamily::V2_LIFECYCLE:
+        statement.domain = proof::VerificationDomain::DIRECT_SPEND;
+        break;
+    case V2_SPEND_PATH_RECOVERY:
+        statement.domain = proof::VerificationDomain::SPEND_PATH_RECOVERY;
+        break;
+    case TransactionFamily::V2_INGRESS_BATCH:
+    case TransactionFamily::V2_EGRESS_BATCH:
+    case TransactionFamily::V2_REBALANCE:
+    case TransactionFamily::V2_SETTLEMENT_ANCHOR:
+    case TransactionFamily::V2_GENERIC:
+        statement.domain = proof::VerificationDomain::BATCH_SETTLEMENT;
+        break;
+    }
     statement.envelope = envelope;
     if (!statement.IsValid()) {
         return false;
@@ -293,6 +307,14 @@ template <typename T>
                 envelope.proof_kind == ProofKind::GENERIC_OPAQUE) &&
                (envelope.settlement_binding_kind == SettlementBindingKind::NONE ||
                 IsGenericShieldedSettlementBindingKind(envelope.settlement_binding_kind));
+    case V2_SPEND_PATH_RECOVERY:
+        return (envelope.proof_kind == ProofKind::NONE ||
+                envelope.proof_kind == ProofKind::DIRECT_MATRICT ||
+                envelope.proof_kind == ProofKind::DIRECT_SMILE ||
+                envelope.proof_kind == ProofKind::GENERIC_SMILE ||
+                envelope.proof_kind == ProofKind::GENERIC_OPAQUE) &&
+               (envelope.settlement_binding_kind == SettlementBindingKind::NONE ||
+                IsGenericPostforkSettlementBindingKind(envelope.settlement_binding_kind));
     case TransactionFamily::V2_LIFECYCLE:
         return envelope.proof_kind == ProofKind::NONE &&
                (envelope.settlement_binding_kind == SettlementBindingKind::NONE ||
@@ -778,6 +800,40 @@ bool SendPayload::IsValid() const
     return IsNonNullAndUnique(MakeSpan(note_commitments));
 }
 
+bool SpendPathRecoveryPayload::IsValid() const
+{
+    const Span<const OutputDescription> output_span = MakeSpan(outputs);
+    if (version != WIRE_VERSION ||
+        spend_anchor.IsNull() ||
+        spends.empty() || spends.size() > MAX_DIRECT_SPENDS ||
+        outputs.empty() || outputs.size() > MAX_DIRECT_OUTPUTS ||
+        !AllValid(output_span) ||
+        !MoneyRange(fee) || fee < 0) {
+        return false;
+    }
+
+    std::vector<uint256> nullifiers;
+    nullifiers.reserve(spends.size());
+    for (const SpendDescription& spend : spends) {
+        if (!spend.IsValid() ||
+            spend.note_commitment.IsNull() ||
+            spend.merkle_anchor != spend_anchor) {
+            return false;
+        }
+        nullifiers.push_back(spend.nullifier);
+    }
+    if (!IsNonNullAndUnique(MakeSpan(nullifiers))) {
+        return false;
+    }
+
+    std::vector<uint256> note_commitments;
+    note_commitments.reserve(outputs.size());
+    for (const OutputDescription& output : outputs) {
+        note_commitments.push_back(output.note_commitment);
+    }
+    return IsNonNullAndUnique(MakeSpan(note_commitments));
+}
+
 bool LifecyclePayload::IsValid() const
 {
     if (version != WIRE_VERSION ||
@@ -993,42 +1049,102 @@ bool GenericOpaqueOutputRecord::IsValid() const
             (has_smile_public_key && smile_public_key.IsValid()));
 }
 
-bool GenericOpaquePayloadEnvelope::IsValid() const
+[[nodiscard]] std::optional<std::string> ExplainGenericOpaquePayloadEnvelopeInvalidity(
+    const GenericOpaquePayloadEnvelope& envelope)
 {
     const auto ids_valid = [](Span<const uint256> ids) {
         if (ids.size() > MAX_SETTLEMENT_REFS) return false;
         return IsNonNullAndUnique(ids);
     };
-    return version == WIRE_VERSION &&
-           IsValidSendOutputEncoding(output_encoding) &&
-           IsValidNoteClass(output_note_class) &&
-           IsValidScanDomain(output_scan_domain) &&
-           IsValidReserveOutputEncoding(reserve_output_encoding) &&
-           spends.size() <= MAX_GENERIC_SPENDS &&
-           outputs.size() <= MAX_GENERIC_OUTPUTS &&
-           lifecycle_controls.size() <= MAX_ADDRESS_LIFECYCLE_CONTROLS &&
-           ingress_leaves.size() <= MAX_BATCH_LEAVES &&
-           reserve_deltas.size() <= MAX_REBALANCE_DOMAINS &&
-           AllValid(MakeSpan(spends)) &&
-           AllValid(MakeSpan(outputs)) &&
-           AllValid(MakeSpan(ingress_leaves)) &&
-           std::all_of(lifecycle_controls.begin(), lifecycle_controls.end(), [](const auto& control) {
-               return control.IsValid();
-           }) &&
-           OpaqueReserveDeltasAreValid(MakeSpan(reserve_deltas)) &&
-           (!has_netting_manifest || netting_manifest.IsValid()) &&
-           MoneyRangeSigned(value_balance) &&
-           MoneyRange(fee) &&
-           fee >= 0 &&
-           ids_valid(MakeSpan(imported_claim_ids)) &&
-           ids_valid(MakeSpan(imported_adapter_ids)) &&
-           ids_valid(MakeSpan(proof_receipt_ids)) &&
-           ids_valid(MakeSpan(batch_statement_digests));
+
+    if (envelope.version != WIRE_VERSION) {
+        return "invalid version";
+    }
+    if (!IsValidSendOutputEncoding(envelope.output_encoding)) {
+        return "invalid output_encoding";
+    }
+    if (!IsValidNoteClass(envelope.output_note_class)) {
+        return "invalid output_note_class";
+    }
+    if (!IsValidScanDomain(envelope.output_scan_domain)) {
+        return "invalid output_scan_domain";
+    }
+    if (!IsValidReserveOutputEncoding(envelope.reserve_output_encoding)) {
+        return "invalid reserve_output_encoding";
+    }
+    if (envelope.spends.size() > MAX_GENERIC_SPENDS) {
+        return "oversized spends";
+    }
+    if (envelope.outputs.size() > MAX_GENERIC_OUTPUTS) {
+        return "oversized outputs";
+    }
+    if (envelope.lifecycle_controls.size() > MAX_ADDRESS_LIFECYCLE_CONTROLS) {
+        return "oversized lifecycle_controls";
+    }
+    if (envelope.ingress_leaves.size() > MAX_BATCH_LEAVES) {
+        return "oversized ingress_leaves";
+    }
+    if (envelope.reserve_deltas.size() > MAX_REBALANCE_DOMAINS) {
+        return "oversized reserve_deltas";
+    }
+    for (size_t i = 0; i < envelope.spends.size(); ++i) {
+        if (!envelope.spends[i].IsValid()) {
+            return "invalid spend at index " + std::to_string(i);
+        }
+    }
+    for (size_t i = 0; i < envelope.outputs.size(); ++i) {
+        if (!envelope.outputs[i].IsValid()) {
+            return "invalid output at index " + std::to_string(i);
+        }
+    }
+    for (size_t i = 0; i < envelope.ingress_leaves.size(); ++i) {
+        if (!envelope.ingress_leaves[i].IsValid()) {
+            return "invalid ingress_leaf at index " + std::to_string(i);
+        }
+    }
+    for (size_t i = 0; i < envelope.lifecycle_controls.size(); ++i) {
+        if (!envelope.lifecycle_controls[i].IsValid()) {
+            return "invalid lifecycle_control at index " + std::to_string(i);
+        }
+    }
+    if (!(envelope.reserve_deltas.empty() ||
+          ReserveDeltaSetIsCanonical(MakeSpan(envelope.reserve_deltas)) ||
+          OpaqueReserveDeltasAreValid(MakeSpan(envelope.reserve_deltas)))) {
+        return "invalid reserve_deltas";
+    }
+    if (envelope.has_netting_manifest && !envelope.netting_manifest.IsValid()) {
+        return "invalid netting_manifest";
+    }
+    if (!MoneyRangeSigned(envelope.value_balance)) {
+        return "invalid value_balance";
+    }
+    if (!MoneyRange(envelope.fee) || envelope.fee < 0) {
+        return "invalid fee";
+    }
+    if (!ids_valid(MakeSpan(envelope.imported_claim_ids))) {
+        return "invalid imported_claim_ids";
+    }
+    if (!ids_valid(MakeSpan(envelope.imported_adapter_ids))) {
+        return "invalid imported_adapter_ids";
+    }
+    if (!ids_valid(MakeSpan(envelope.proof_receipt_ids))) {
+        return "invalid proof_receipt_ids";
+    }
+    if (!ids_valid(MakeSpan(envelope.batch_statement_digests))) {
+        return "invalid batch_statement_digests";
+    }
+    return std::nullopt;
+}
+
+bool GenericOpaquePayloadEnvelope::IsValid() const
+{
+    return !ExplainGenericOpaquePayloadEnvelopeInvalidity(*this).has_value();
 }
 
 TransactionFamily GetPayloadFamily(const FamilyPayload& payload)
 {
     if (std::holds_alternative<SendPayload>(payload)) return TransactionFamily::V2_SEND;
+    if (std::holds_alternative<SpendPathRecoveryPayload>(payload)) return V2_SPEND_PATH_RECOVERY;
     if (std::holds_alternative<LifecyclePayload>(payload)) return TransactionFamily::V2_LIFECYCLE;
     if (std::holds_alternative<IngressBatchPayload>(payload)) return TransactionFamily::V2_INGRESS_BATCH;
     if (std::holds_alternative<EgressBatchPayload>(payload)) return TransactionFamily::V2_EGRESS_BATCH;
@@ -1171,6 +1287,7 @@ SettlementBindingKind GetWireSettlementBindingKindForValidationHeight(
 
     switch (semantic_family) {
     case TransactionFamily::V2_SEND:
+    case V2_SPEND_PATH_RECOVERY:
     case TransactionFamily::V2_LIFECYCLE:
     case TransactionFamily::V2_INGRESS_BATCH:
     case TransactionFamily::V2_EGRESS_BATCH:
@@ -1850,8 +1967,12 @@ void UnserializeOpaqueWireVector(Stream& s,
     const GenericOpaquePayloadEnvelope& padded_envelope)
 {
     GenericOpaquePayloadEnvelope envelope = padded_envelope;
-    if (!StripCanonicalOpaquePayloadPadding(envelope) || !envelope.IsValid()) {
-        throw std::ios_base::failure("GenericOpaquePayloadEnvelope::Serialize invalid compact envelope");
+    if (!StripCanonicalOpaquePayloadPadding(envelope)) {
+        throw std::ios_base::failure("GenericOpaquePayloadEnvelope::Serialize invalid compact envelope: canonical padding strip failed");
+    }
+    if (const auto reason = ExplainGenericOpaquePayloadEnvelopeInvalidity(envelope); reason.has_value()) {
+        throw std::ios_base::failure(
+            "GenericOpaquePayloadEnvelope::Serialize invalid compact envelope: " + *reason);
     }
 
     DataStream ds;
@@ -2253,6 +2374,20 @@ void ApplyCanonicalOpaquePayloadPadding(GenericOpaquePayloadEnvelope& envelope)
         }
         break;
     }
+    case V2_SPEND_PATH_RECOVERY: {
+        const auto& recovery = std::get<SpendPathRecoveryPayload>(payload);
+        envelope.spend_anchor = recovery.spend_anchor;
+        envelope.fee = recovery.fee;
+        envelope.spends.reserve(recovery.spends.size());
+        for (const auto& spend : recovery.spends) {
+            envelope.spends.push_back(MakeGenericSpendRecord(spend));
+        }
+        envelope.outputs.reserve(recovery.outputs.size());
+        for (const auto& output : recovery.outputs) {
+            envelope.outputs.push_back(MakeGenericOutputRecord(output));
+        }
+        break;
+    }
     case TransactionFamily::V2_LIFECYCLE: {
         const auto& lifecycle = std::get<LifecyclePayload>(payload);
         envelope.transparent_binding_digest = lifecycle.transparent_binding_digest;
@@ -2347,6 +2482,33 @@ void ApplyCanonicalOpaquePayloadPadding(GenericOpaquePayloadEnvelope& envelope)
            envelope.imported_adapter_ids.empty() &&
            envelope.proof_receipt_ids.empty() &&
            envelope.batch_statement_digests.empty();
+}
+
+[[nodiscard]] bool EnvelopeUsesOnlySpendPathRecoverySections(
+    const GenericOpaquePayloadEnvelope& envelope)
+{
+    return envelope.account_registry_anchor.IsNull() &&
+           envelope.settlement_anchor.IsNull() &&
+           envelope.ingress_root.IsNull() &&
+           envelope.l2_credit_root.IsNull() &&
+           envelope.aggregate_reserve_commitment.IsNull() &&
+           envelope.aggregate_fee_commitment.IsNull() &&
+           envelope.output_binding_digest.IsNull() &&
+           envelope.egress_root.IsNull() &&
+           envelope.settlement_binding_digest.IsNull() &&
+           envelope.batch_statement_digest.IsNull() &&
+           envelope.anchored_netting_manifest_id.IsNull() &&
+           envelope.transparent_binding_digest.IsNull() &&
+           envelope.lifecycle_controls.empty() &&
+           envelope.ingress_leaves.empty() &&
+           envelope.reserve_deltas.empty() &&
+           !envelope.allow_transparent_unwrap &&
+           !envelope.has_netting_manifest &&
+           envelope.imported_claim_ids.empty() &&
+           envelope.imported_adapter_ids.empty() &&
+           envelope.proof_receipt_ids.empty() &&
+           envelope.batch_statement_digests.empty() &&
+           envelope.value_balance == 0;
 }
 
 [[nodiscard]] bool EnvelopeUsesOnlyLifecycleSections(const GenericOpaquePayloadEnvelope& envelope)
@@ -2507,6 +2669,35 @@ void ApplyCanonicalOpaquePayloadPadding(GenericOpaquePayloadEnvelope& envelope)
         payload.output_note_class = *note_class;
         payload.output_scan_domain = *scan_domain;
         payload.output_encoding = DeriveGenericSendOutputEncoding(payload);
+        if (!payload.IsValid()) {
+            return std::nullopt;
+        }
+        return payload;
+    }
+    case V2_SPEND_PATH_RECOVERY: {
+        if (!EnvelopeUsesOnlySpendPathRecoverySections(envelope)) {
+            return std::nullopt;
+        }
+        SpendPathRecoveryPayload payload;
+        payload.spend_anchor = envelope.spend_anchor;
+        payload.fee = envelope.fee;
+        payload.spends.reserve(envelope.spends.size());
+        for (const auto& spend_record : envelope.spends) {
+            SpendDescription spend;
+            spend.nullifier = spend_record.nullifier;
+            spend.merkle_anchor = envelope.spend_anchor;
+            spend.account_leaf_commitment = spend_record.account_leaf_commitment;
+            spend.account_registry_proof = spend_record.account_registry_proof;
+            spend.note_commitment = spend_record.note_commitment;
+            spend.value_commitment = spend_record.value_commitment;
+            payload.spends.push_back(std::move(spend));
+        }
+        payload.outputs.reserve(envelope.outputs.size());
+        for (const auto& output_record : envelope.outputs) {
+            auto output = MaterializeOutputDescription(output_record);
+            if (!output.has_value()) return std::nullopt;
+            payload.outputs.push_back(std::move(*output));
+        }
         if (!payload.IsValid()) {
             return std::nullopt;
         }
@@ -2734,6 +2925,8 @@ namespace {
     switch (GetPayloadFamily(payload)) {
     case TransactionFamily::V2_SEND:
         return std::get<SendPayload>(payload).IsValid();
+    case V2_SPEND_PATH_RECOVERY:
+        return std::get<SpendPathRecoveryPayload>(payload).IsValid();
     case TransactionFamily::V2_LIFECYCLE:
         return std::get<LifecyclePayload>(payload).IsValid();
     case TransactionFamily::V2_INGRESS_BATCH:
@@ -2759,7 +2952,9 @@ namespace {
             return {TransactionFamily::V2_SEND, TransactionFamily::V2_LIFECYCLE};
         }
         if (envelope.settlement_binding_kind == SettlementBindingKind::GENERIC_POSTFORK) {
-            return {TransactionFamily::V2_SEND, TransactionFamily::V2_LIFECYCLE};
+            return {TransactionFamily::V2_SEND,
+                    TransactionFamily::V2_LIFECYCLE,
+                    V2_SPEND_PATH_RECOVERY};
         }
         if (envelope.settlement_binding_kind == SettlementBindingKind::GENERIC_SHIELDED) {
             return {TransactionFamily::V2_SEND};
@@ -2772,7 +2967,8 @@ namespace {
             return {TransactionFamily::V2_SEND};
         }
         if (envelope.settlement_binding_kind == SettlementBindingKind::GENERIC_POSTFORK) {
-            return {TransactionFamily::V2_SEND};
+            return {TransactionFamily::V2_SEND,
+                    V2_SPEND_PATH_RECOVERY};
         }
         if (envelope.settlement_binding_kind == SettlementBindingKind::GENERIC_SHIELDED) {
             if (envelope.proof_kind == ProofKind::GENERIC_SMILE) {
@@ -2938,6 +3134,35 @@ namespace {
     return consumed_size;
 }
 
+[[nodiscard]] std::optional<size_t> ParseSpendPathRecoveryWitnessPayloadSize(
+    Span<const uint8_t> bytes,
+    const TransactionHeader& header,
+    const FamilyPayload& payload)
+{
+    DataStream ds{std::vector<uint8_t>{bytes.begin(), bytes.end()}};
+    proof::SpendPathRecoveryWitness witness;
+    try {
+        ds >> witness;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    if (!RemainingBytesAreZero(ds)) {
+        return std::nullopt;
+    }
+
+    TransactionBundle bundle;
+    bundle.header = header;
+    bundle.payload = payload;
+    const size_t consumed_size = bytes.size() - ds.size();
+    bundle.proof_payload.assign(bytes.begin(), bytes.begin() + static_cast<ptrdiff_t>(consumed_size));
+
+    std::string reject_reason;
+    if (!proof::ParseSpendPathRecoveryWitness(bundle, reject_reason).has_value()) {
+        return std::nullopt;
+    }
+    return consumed_size;
+}
+
 [[nodiscard]] std::optional<size_t> ParseSettlementWitnessPayloadSize(Span<const uint8_t> bytes)
 {
     DataStream ds{std::vector<uint8_t>{bytes.begin(), bytes.end()}};
@@ -2989,7 +3214,8 @@ TransactionBundleWireView BuildTransactionBundleWireView(const TransactionBundle
     uint32_t proof_padding_offset_base = bundle.proof_shards.empty()
         ? 0
         : bundle.proof_shards.front().proof_payload_offset;
-    if (GetPayloadFamily(bundle.payload) == TransactionFamily::V2_SEND &&
+    if ((GetPayloadFamily(bundle.payload) == TransactionFamily::V2_SEND ||
+         GetPayloadFamily(bundle.payload) == V2_SPEND_PATH_RECOVERY) &&
         bundle.proof_shards.empty()) {
         proof_padding_offset_base = static_cast<uint32_t>(bundle.proof_payload.size());
     }
@@ -3037,6 +3263,22 @@ bool NormalizeGenericWireTransactionBundle(TransactionBundle& bundle,
             proof_padding_offset_base = 0;
         } else {
             const auto parsed_size = ParseDirectWitnessPayloadSize(
+                Span<const uint8_t>{raw_proof_payload.data(), raw_proof_payload.size()},
+                wire_header,
+                bundle.payload);
+            if (!parsed_size.has_value()) {
+                return false;
+            }
+            proof_padding_offset_base = static_cast<uint32_t>(*parsed_size);
+        }
+        break;
+    case V2_SPEND_PATH_RECOVERY:
+        if (wire_header.proof_envelope.proof_kind == ProofKind::NONE) {
+            proof_padding_offset_base = 0;
+            break;
+        }
+        {
+            const auto parsed_size = ParseSpendPathRecoveryWitnessPayloadSize(
                 Span<const uint8_t>{raw_proof_payload.data(), raw_proof_payload.size()},
                 wire_header,
                 bundle.payload);
@@ -3160,6 +3402,22 @@ std::vector<uint8_t> DeserializeProofPayloadBytes(Span<const uint8_t> bytes,
             used_size = *parsed_size;
         }
         break;
+    case V2_SPEND_PATH_RECOVERY:
+        if (header.proof_envelope.proof_kind == ProofKind::NONE) {
+            used_size = 0;
+            if (!TrailingBytesAreZero(bytes, used_size)) {
+                throw std::ios_base::failure("TransactionBundle::Unserialize invalid opaque proof_payload");
+            }
+            break;
+        }
+        {
+            const auto parsed_size = ParseSpendPathRecoveryWitnessPayloadSize(bytes, header, payload);
+            if (!parsed_size.has_value()) {
+                throw std::ios_base::failure("TransactionBundle::Unserialize invalid opaque proof_payload");
+            }
+            used_size = *parsed_size;
+        }
+        break;
     case TransactionFamily::V2_LIFECYCLE:
         used_size = 0;
         if (!TrailingBytesAreZero(bytes, used_size)) {
@@ -3257,6 +3515,26 @@ bool TransactionBundleOutputChunksAreCanonical(const TransactionBundle& bundle)
 
     switch (semantic_family) {
     case TransactionFamily::V2_SEND: {
+        if (UseDerivedGenericOutputChunkWire(bundle.header, bundle.payload)) {
+            auto derived_output_chunks = BuildDerivedGenericOutputChunks(bundle.payload);
+            return derived_output_chunks.has_value() &&
+                   derived_output_chunks->size() == bundle.output_chunks.size() &&
+                   std::equal(bundle.output_chunks.begin(),
+                              bundle.output_chunks.end(),
+                              derived_output_chunks->begin(),
+                              [](const OutputChunkDescriptor& lhs, const OutputChunkDescriptor& rhs) {
+                                  return lhs.version == rhs.version &&
+                                         lhs.scan_domain == rhs.scan_domain &&
+                                         lhs.first_output_index == rhs.first_output_index &&
+                                         lhs.output_count == rhs.output_count &&
+                                         lhs.ciphertext_bytes == rhs.ciphertext_bytes &&
+                                         lhs.scan_hint_commitment == rhs.scan_hint_commitment &&
+                                         lhs.ciphertext_commitment == rhs.ciphertext_commitment;
+                              });
+        }
+        return bundle.output_chunks.empty();
+    }
+    case V2_SPEND_PATH_RECOVERY: {
         if (UseDerivedGenericOutputChunkWire(bundle.header, bundle.payload)) {
             auto derived_output_chunks = BuildDerivedGenericOutputChunks(bundle.payload);
             return derived_output_chunks.has_value() &&
@@ -3411,6 +3689,7 @@ bool UseDerivedGenericOutputChunkWire(const TransactionHeader& header, const Fam
 
     switch (GetPayloadFamily(payload)) {
     case TransactionFamily::V2_SEND:
+    case V2_SPEND_PATH_RECOVERY:
     case TransactionFamily::V2_INGRESS_BATCH:
     case TransactionFamily::V2_EGRESS_BATCH:
     case TransactionFamily::V2_REBALANCE:
@@ -3429,6 +3708,18 @@ std::optional<std::vector<OutputChunkDescriptor>> BuildDerivedGenericOutputChunk
     switch (GetPayloadFamily(payload)) {
     case TransactionFamily::V2_SEND: {
         const auto& outputs = std::get<SendPayload>(payload).outputs;
+        if (outputs.empty()) {
+            return output_chunks;
+        }
+        auto chunk = BuildOutputChunkDescriptor({outputs.data(), outputs.size()}, /*first_output_index=*/0);
+        if (!chunk.has_value()) {
+            return std::nullopt;
+        }
+        output_chunks.push_back(std::move(*chunk));
+        return output_chunks;
+    }
+    case V2_SPEND_PATH_RECOVERY: {
+        const auto& outputs = std::get<SpendPathRecoveryPayload>(payload).outputs;
         if (outputs.empty()) {
             return output_chunks;
         }
@@ -3725,6 +4016,23 @@ bool TransactionBundle::IsValid() const
         }
         break;
     }
+    case V2_SPEND_PATH_RECOVERY: {
+        const SpendPathRecoveryPayload& recovery = std::get<SpendPathRecoveryPayload>(payload);
+        if (!recovery.IsValid() ||
+            !OutputsBindCanonicalSmileAccounts(MakeSpan(recovery.outputs)) ||
+            !proof_shards.empty() ||
+            header.netting_manifest_version != 0) {
+            return false;
+        }
+        if (header.proof_envelope.proof_kind == ProofKind::NONE) {
+            if (!proof_payload.empty()) {
+                return false;
+            }
+        } else if (proof_payload.empty()) {
+            return false;
+        }
+        break;
+    }
     case TransactionFamily::V2_LIFECYCLE: {
         const LifecyclePayload& lifecycle = std::get<LifecyclePayload>(payload);
         if (!lifecycle.IsValid() ||
@@ -3843,6 +4151,11 @@ uint256 ComputeSendPayloadDigest(const SendPayload& payload)
     return HashTaggedObject(TAG_SEND_PAYLOAD, payload);
 }
 
+uint256 ComputeSpendPathRecoveryPayloadDigest(const SpendPathRecoveryPayload& payload)
+{
+    return HashTaggedObject(TAG_SPEND_PATH_RECOVERY_PAYLOAD, payload);
+}
+
 uint256 ComputeLifecyclePayloadDigest(const LifecyclePayload& payload)
 {
     return HashTaggedObject(TAG_LIFECYCLE_PAYLOAD, payload);
@@ -3873,6 +4186,8 @@ uint256 ComputePayloadDigest(const FamilyPayload& payload)
     switch (GetPayloadFamily(payload)) {
     case TransactionFamily::V2_SEND:
         return ComputeSendPayloadDigest(std::get<SendPayload>(payload));
+    case V2_SPEND_PATH_RECOVERY:
+        return ComputeSpendPathRecoveryPayloadDigest(std::get<SpendPathRecoveryPayload>(payload));
     case TransactionFamily::V2_LIFECYCLE:
         return ComputeLifecyclePayloadDigest(std::get<LifecyclePayload>(payload));
     case TransactionFamily::V2_INGRESS_BATCH:

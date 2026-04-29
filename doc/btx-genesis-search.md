@@ -18,8 +18,8 @@ scripts/m5_genesis_search_swarm.sh \
   --network main \
   --workers 8 \
   --chunk-tries 500000 \
-  --state-file .btx-swarm/m5-main.state \
-  --artifact .btx-swarm/m5-main-found.txt
+  --state-file .codex-swarm/m5-main.state \
+  --artifact .codex-swarm/m5-main-found.txt
 ```
 
 ## Key Behaviors

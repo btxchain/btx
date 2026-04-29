@@ -166,7 +166,8 @@ struct MatRiCTProof {
                                       Span<const unsigned char> spending_key,
                                       CAmount fee,
                                       const uint256& tx_binding_hash = uint256{},
-                                      Span<const unsigned char> rng_entropy = {});
+                                      Span<const unsigned char> rng_entropy = {},
+                                      bool allow_singleton_ring = false);
 [[nodiscard]] bool CreateMatRiCTProof(MatRiCTProof& proof,
                                       const std::vector<ShieldedNote>& input_notes,
                                       const std::vector<ShieldedNote>& output_notes,
@@ -176,7 +177,8 @@ struct MatRiCTProof {
                                       Span<const unsigned char> spending_key,
                                       CAmount fee,
                                       const uint256& tx_binding_hash = uint256{},
-                                      Span<const unsigned char> rng_entropy = {});
+                                      Span<const unsigned char> rng_entropy = {},
+                                      bool allow_singleton_ring = false);
 
 /** Verify a MatRiCT+ proof. Thread-safe and stateless. */
 [[nodiscard]] bool VerifyMatRiCTProof(const MatRiCTProof& proof,
@@ -184,7 +186,8 @@ struct MatRiCTProof {
                                       const std::vector<Nullifier>& input_nullifiers,
                                       const std::vector<uint256>& output_commitments,
                                       CAmount fee,
-                                      const uint256& tx_binding_hash = uint256{});
+                                      const uint256& tx_binding_hash = uint256{},
+                                      bool allow_singleton_ring = false);
 
 } // namespace shielded::ringct
 

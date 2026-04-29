@@ -70,7 +70,7 @@ Quick start:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.29.6 \
+  --release-tag v0.29.7 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"
@@ -111,9 +111,12 @@ to a comma-separated host list such as
 node still does not make tip progress for `BTX_MINING_SYNC_STALL_RESTART_SECS`,
 the supervisor escalates to a daemon restart so startup recovery can rebuild
 local state instead of sitting paused indefinitely. Once the node has been healthy,
-the loop also caches its last healthy outbound peers in
-`$RESULTS_DIR/live-peer-cache.txt` and retries those first during later
-peer-consensus recovery.
+the loop caches its last healthy outbound peers in
+`$RESULTS_DIR/live-peer-cache.txt`, ranks public/full-relay low-latency peers
+ahead of private/manual ones, and retries those first during later
+peer-consensus recovery. Healthy runs also re-top-off the peer set when the
+public/full-relay mix drops too low, so a temporary private/manual peer island
+does not quietly become the miner's steady-state topology.
 
 For a first-run bootstrap before mining or service bring-up, see
 [`contrib/faststart`](../faststart). Those entry points fetch the matching
