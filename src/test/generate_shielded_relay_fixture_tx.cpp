@@ -4,10 +4,13 @@
 
 #include <test/shielded_relay_fixture_builder.h>
 
+#include <chainparams.h>
+#include <common/args.h>
 #include <core_io.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <univalue.h>
+#include <util/chaintype.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
 
@@ -15,6 +18,7 @@
 #include <exception>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -30,6 +34,8 @@ struct ParsedArgs
     CAmount funding_value{0};
     CScript change_script;
     CAmount fee{40'000};
+    int32_t validation_height{std::numeric_limits<int32_t>::max()};
+    std::optional<int32_t> regtest_matrict_disable_height;
 };
 
 btx::test::shielded::RelayFixtureFamily ParseFamily(std::string_view value)
@@ -60,6 +66,24 @@ CAmount ParseAmount(std::string_view value, std::string_view option_name)
     return parsed;
 }
 
+int32_t ParseValidationHeight(std::string_view value)
+{
+    const long long parsed = std::stoll(std::string{value});
+    if (parsed < 0 || parsed > std::numeric_limits<int32_t>::max()) {
+        throw std::runtime_error("invalid --validation-height");
+    }
+    return static_cast<int32_t>(parsed);
+}
+
+int32_t ParseNonNegativeInt32(std::string_view value, std::string_view option_name)
+{
+    const long long parsed = std::stoll(std::string{value});
+    if (parsed < 0 || parsed > std::numeric_limits<int32_t>::max()) {
+        throw std::runtime_error(std::string{option_name} + " must be a non-negative int32");
+    }
+    return static_cast<int32_t>(parsed);
+}
+
 ParsedArgs ParseArgs(int argc, char** argv, fs::path& output_path)
 {
     ParsedArgs parsed;
@@ -73,7 +97,9 @@ ParsedArgs ParseArgs(int argc, char** argv, fs::path& output_path)
             std::cout << "Usage: gen_shielded_relay_fixture_tx "
                          "--family=rebalance|settlement_anchor_receipt|egress_receipt "
                          "--input-txid=<hex> --input-vout=<n> --input-value-sats=<sats> "
-                         "--change-script=<hex> [--fee-sats=<sats>] [--output=/path/report.json]\n";
+                         "--change-script=<hex> [--fee-sats=<sats>] [--validation-height=<n>] "
+                         "[--regtestshieldedmatrictdisableheight=<n>] "
+                         "[--output=/path/report.json]\n";
             std::exit(0);
         }
         if (arg.starts_with("--family=")) {
@@ -112,6 +138,15 @@ ParsedArgs ParseArgs(int argc, char** argv, fs::path& output_path)
             parsed.fee = ParseAmount(arg.substr(11), "--fee-sats");
             continue;
         }
+        if (arg.starts_with("--validation-height=")) {
+            parsed.validation_height = ParseValidationHeight(arg.substr(20));
+            continue;
+        }
+        if (arg.starts_with("--regtestshieldedmatrictdisableheight=")) {
+            parsed.regtest_matrict_disable_height =
+                ParseNonNegativeInt32(arg.substr(38), "--regtestshieldedmatrictdisableheight");
+            continue;
+        }
         if (arg.starts_with("--output=")) {
             output_path = fs::PathFromString(std::string{arg.substr(9)});
             continue;
@@ -130,8 +165,19 @@ ParsedArgs ParseArgs(int argc, char** argv, fs::path& output_path)
 int main(int argc, char** argv)
 {
     try {
+        SelectParams(ChainType::REGTEST);
         fs::path output_path;
         const ParsedArgs args = ParseArgs(argc, argv, output_path);
+        std::unique_ptr<const CChainParams> custom_chain_params;
+        const Consensus::Params* effective_consensus = nullptr;
+        if (args.regtest_matrict_disable_height.has_value()) {
+            ArgsManager chain_args;
+            chain_args.ForceSetArg(
+                "-regtestshieldedmatrictdisableheight",
+                std::to_string(*args.regtest_matrict_disable_height));
+            custom_chain_params = CreateChainParams(chain_args, ChainType::REGTEST);
+            effective_consensus = &custom_chain_params->GetConsensus();
+        }
 
         std::string reject_reason;
         const auto built = btx::test::shielded::BuildRelayFixtureTransaction(
@@ -142,7 +188,9 @@ int main(int argc, char** argv)
                 .change_script = args.change_script,
                 .fee = args.fee,
             },
-            reject_reason);
+            reject_reason,
+            args.validation_height,
+            effective_consensus);
         if (!built.has_value()) {
             throw std::runtime_error(
                 reject_reason.empty() ? "failed to build relay fixture transaction" : reject_reason);

@@ -10,8 +10,13 @@
 #include <script/script.h>
 #include <uint256.h>
 
+#include <limits>
 #include <optional>
 #include <string>
+
+namespace Consensus {
+struct Params;
+} // namespace Consensus
 
 namespace btx::test::shielded {
 
@@ -42,7 +47,9 @@ struct RelayFixtureBuildResult
 [[nodiscard]] std::optional<RelayFixtureBuildResult> BuildRelayFixtureTransaction(
     RelayFixtureFamily family,
     const RelayFixtureBuildInput& input,
-    std::string& reject_reason);
+    std::string& reject_reason,
+    int32_t validation_height = std::numeric_limits<int32_t>::max(),
+    const Consensus::Params* consensus = nullptr);
 
 } // namespace btx::test::shielded
 

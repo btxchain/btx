@@ -135,6 +135,63 @@ BOOST_AUTO_TEST_CASE(regtest_mldsa_disable_height_rejects_negative)
     BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
 }
 
+BOOST_AUTO_TEST_CASE(regtest_shielded_tx_binding_activation_height_override)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedtxbindingactivationheight", "132");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedTxBindingActivationHeight, 132);
+    BOOST_CHECK(!params->GetConsensus().IsShieldedTxBindingActive(131));
+    BOOST_CHECK(params->GetConsensus().IsShieldedTxBindingActive(132));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_tx_binding_activation_height_rejects_negative)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedtxbindingactivationheight", "-1");
+    BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_bridge_tag_activation_height_override)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedbridgetagactivationheight", "132");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedBridgeTagActivationHeight, 132);
+    BOOST_CHECK(!params->GetConsensus().IsShieldedBridgeTagUpgradeActive(131));
+    BOOST_CHECK(params->GetConsensus().IsShieldedBridgeTagUpgradeActive(132));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_bridge_tag_activation_height_rejects_negative)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedbridgetagactivationheight", "-1");
+    BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_smile_rice_codec_disable_height_override)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedsmilericecodecdisableheight", "132");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedSmileRiceCodecDisableHeight, 132);
+    BOOST_CHECK(!params->GetConsensus().IsShieldedSmileRiceCodecDisabled(131));
+    BOOST_CHECK(params->GetConsensus().IsShieldedSmileRiceCodecDisabled(132));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_smile_rice_codec_disable_height_rejects_negative)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedsmilericecodecdisableheight", "-1");
+    BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+}
+
 BOOST_AUTO_TEST_CASE(regtest_shielded_matrict_disable_height_override)
 {
     ArgsManager args;
@@ -149,6 +206,35 @@ BOOST_AUTO_TEST_CASE(regtest_shielded_matrict_disable_height_rejects_negative)
 {
     ArgsManager args;
     args.ForceSetArg("-regtestshieldedmatrictdisableheight", "-1");
+    BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_spend_path_recovery_activation_height_default)
+{
+    ArgsManager args;
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedSpendPathRecoveryActivationHeight, 0);
+    BOOST_CHECK(params->GetConsensus().IsShieldedSpendPathRecoveryActive(0));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_spend_path_recovery_activation_height_override)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedspendpathrecoveryactivationheight", "245");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedSpendPathRecoveryActivationHeight, 245);
+    BOOST_CHECK(!params->GetConsensus().IsShieldedSpendPathRecoveryActive(244));
+    BOOST_CHECK(params->GetConsensus().IsShieldedSpendPathRecoveryActive(245));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_spend_path_recovery_activation_height_rejects_negative)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedspendpathrecoveryactivationheight", "-1");
     BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
 }
 
@@ -309,7 +395,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     // few positive/negative lookups.
     const auto params = CreateChainParams(*m_node.args, ChainType::MAIN);
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    const std::vector<int> expected_snapshot_heights{55'000, 60'760, 64'900, 71'260, 71'435};
+    const std::vector<int> expected_snapshot_heights{55'000, 60'760, 64'900, 71'260, 71'435, 85'850};
 
     BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
     BOOST_CHECK_EQUAL_COLLECTIONS(snapshot_heights.begin(),
@@ -322,6 +408,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     BOOST_CHECK(params->AssumeutxoForHeight(64'900));
     BOOST_CHECK(params->AssumeutxoForHeight(71'260));
     BOOST_CHECK(params->AssumeutxoForHeight(71'435));
+    BOOST_CHECK(params->AssumeutxoForHeight(85'850));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
     BOOST_CHECK(!params->AssumeutxoForHeight(0));
 }

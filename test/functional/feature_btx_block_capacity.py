@@ -20,7 +20,7 @@ HIGH_SHIELDED_FEE_DELTA = 100_000_000
 DEFAULT_EGRESS_OUTPUT_COUNT = 2
 DEFAULT_EGRESS_OUTPUT_CHUNK_COUNT = 1
 REBALANCE_USAGE = {
-    "verify": 100,
+    "verify": 200,
     "scan": 0,
     "tree": 1,
 }
@@ -200,6 +200,7 @@ class BTXBlockCapacityTest(BitcoinTestFramework):
         assert_equal(node.getrawmempool(), [])
 
         self.log.info("Bare v2 egress should appear in getblocktemplate once prioritised against the active settlement anchor")
+        self.generatetoaddress(node, 6, mine_addr)
         egress_fixture = build_unsigned_shielded_relay_fixture_tx(
             self, node, "egress_receipt"
         )

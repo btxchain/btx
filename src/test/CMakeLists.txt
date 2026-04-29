@@ -180,6 +180,8 @@ add_executable(test_btx
   shielded_scan_hint_runtime_report_tests.cpp
   shielded_relay_fixture_builder.cpp
   shielded_relay_fixture_builder_tests.cpp
+  shielded_spend_path_recovery_fixture_builder.cpp
+  shielded_spend_path_recovery_fixture_builder_tests.cpp
   btx_launch_readiness_tests.cpp
   nullifier_set_tests.cpp
   ringct_commitment_tests.cpp
@@ -457,6 +459,17 @@ set_target_properties(generate_shielded_relay_fixture_tx PROPERTIES
 )
 add_test_translation_stub(generate_shielded_relay_fixture_tx)
 link_shielded_report_target(generate_shielded_relay_fixture_tx)
+
+add_executable(generate_shielded_spend_path_recovery_fixture
+  generate_shielded_spend_path_recovery_fixture.cpp
+  shielded_spend_path_recovery_fixture_builder.cpp
+)
+set_target_properties(generate_shielded_spend_path_recovery_fixture PROPERTIES
+  OUTPUT_NAME gen_shielded_spend_path_recovery_fixture
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+add_test_translation_stub(generate_shielded_spend_path_recovery_fixture)
+link_shielded_report_target(generate_shielded_spend_path_recovery_fixture)
 
 add_executable(generate_shielded_v2_adversarial_proof_corpus
   generate_shielded_v2_adversarial_proof_corpus.cpp

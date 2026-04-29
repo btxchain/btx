@@ -781,6 +781,69 @@ struct SendPayload
     }
 };
 
+struct SpendPathRecoveryPayload
+{
+    uint8_t version{WIRE_VERSION};
+    uint256 spend_anchor;
+    std::vector<SpendDescription> spends;
+    std::vector<OutputDescription> outputs;
+    CAmount fee{0};
+
+    [[nodiscard]] bool IsValid() const;
+
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        detail::SerializeVersion(s,
+                                 version,
+                                 "SpendPathRecoveryPayload::Serialize invalid version");
+        ::Serialize(s, spend_anchor);
+        detail::SerializeBoundedCompactSize(
+            s,
+            spends.size(),
+            MAX_DIRECT_SPENDS,
+            "SpendPathRecoveryPayload::Serialize oversized spends");
+        for (const SpendDescription& spend : spends) {
+            ::Serialize(s, spend);
+        }
+        detail::SerializeBoundedCompactSize(
+            s,
+            outputs.size(),
+            MAX_DIRECT_OUTPUTS,
+            "SpendPathRecoveryPayload::Serialize oversized outputs");
+        for (const OutputDescription& output : outputs) {
+            ::Serialize(s, output);
+        }
+        ::Serialize(s, fee);
+    }
+
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        detail::UnserializeVersion(s,
+                                   version,
+                                   "SpendPathRecoveryPayload::Unserialize invalid version");
+        ::Unserialize(s, spend_anchor);
+        const uint64_t spend_count = detail::UnserializeBoundedCompactSize(
+            s,
+            MAX_DIRECT_SPENDS,
+            "SpendPathRecoveryPayload::Unserialize oversized spends");
+        spends.assign(spend_count, {});
+        for (SpendDescription& spend : spends) {
+            ::Unserialize(s, spend);
+        }
+        const uint64_t output_count = detail::UnserializeBoundedCompactSize(
+            s,
+            MAX_DIRECT_OUTPUTS,
+            "SpendPathRecoveryPayload::Unserialize oversized outputs");
+        outputs.assign(output_count, {});
+        for (OutputDescription& output : outputs) {
+            ::Unserialize(s, output);
+        }
+        ::Unserialize(s, fee);
+    }
+};
+
 struct LifecyclePayload
 {
     uint8_t version{WIRE_VERSION};
@@ -1393,6 +1456,7 @@ struct GenericOpaquePayloadEnvelope
 struct TransactionBundle;
 using FamilyPayload =
     std::variant<SendPayload,
+                 SpendPathRecoveryPayload,
                  LifecyclePayload,
                  IngressBatchPayload,
                  EgressBatchPayload,
@@ -1597,6 +1661,9 @@ void SerializePayload(Stream& s, const FamilyPayload& payload, TransactionFamily
     case TransactionFamily::V2_SEND:
         ::Serialize(s, std::get<SendPayload>(payload));
         break;
+    case V2_SPEND_PATH_RECOVERY:
+        ::Serialize(s, std::get<SpendPathRecoveryPayload>(payload));
+        break;
     case TransactionFamily::V2_LIFECYCLE:
         ::Serialize(s, std::get<LifecyclePayload>(payload));
         break;
@@ -1623,6 +1690,11 @@ FamilyPayload DeserializePayload(Stream& s, TransactionFamily family)
     switch (family) {
     case TransactionFamily::V2_SEND: {
         SendPayload payload_obj;
+        ::Unserialize(s, payload_obj);
+        return payload_obj;
+    }
+    case V2_SPEND_PATH_RECOVERY: {
+        SpendPathRecoveryPayload payload_obj;
         ::Unserialize(s, payload_obj);
         return payload_obj;
     }
@@ -1665,6 +1737,7 @@ FamilyPayload DeserializePayload(Stream& s, TransactionFamily family)
 [[nodiscard]] bool ReserveDeltaSetIsCanonical(Span<const ReserveDelta> deltas);
 
 [[nodiscard]] uint256 ComputeSendPayloadDigest(const SendPayload& payload);
+[[nodiscard]] uint256 ComputeSpendPathRecoveryPayloadDigest(const SpendPathRecoveryPayload& payload);
 [[nodiscard]] uint256 ComputeLifecyclePayloadDigest(const LifecyclePayload& payload);
 [[nodiscard]] uint256 ComputeIngressBatchPayloadDigest(const IngressBatchPayload& payload);
 [[nodiscard]] uint256 ComputeEgressBatchPayloadDigest(const EgressBatchPayload& payload);

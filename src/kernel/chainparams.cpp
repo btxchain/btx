@@ -213,6 +213,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
@@ -229,12 +230,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0;
 
-        // Mainnet anchor refreshed on 2026-04-14 at height 71'433 from a
+        // Mainnet anchor refreshed on 2026-04-29 at height 85'850 from a
         // synced canonical node so stale history below the current public
         // release floor is rejected quickly.
-        consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000000000000000278daaa26"};
+        consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000000000000000ba5df2617"};
         // Assume signatures valid up to the same anchored block to speed sync.
-        consensus.defaultAssumeValid = uint256{"d58f6755e52467ed624dfcd0be4e8ee0731b8e7525e8dc4cf9482879d0dfe3f8"};
+        consensus.defaultAssumeValid = uint256{"bbb36b59df48e364dcf32e8ca13f3e5a89fdc16c483fa26779c43da5feb4d40c"};
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -288,7 +289,7 @@ public:
         checkpointData = {
             {
                 {0, uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"}},
-                {71433, uint256{"d58f6755e52467ed624dfcd0be4e8ee0731b8e7525e8dc4cf9482879d0dfe3f8"}},
+                {85850, uint256{"bbb36b59df48e364dcf32e8ca13f3e5a89fdc16c483fa26779c43da5feb4d40c"}},
             }
         };
         m_assumeutxo_data = {
@@ -327,11 +328,18 @@ public:
                 .m_chain_tx_count = 83'851,
                 .blockhash = consteval_ctor(uint256{"46f81957ac0d40c57eef01810f4da3abb8e8a2c67ebb9fd88f36b1cc5a8e7be0"}),
             },
+            {
+                // main assumeutxo snapshot at height 85'850
+                .height = 85'850,
+                .hash_serialized = AssumeutxoHash{uint256{"c0dc455137b4e30554ec91570e198d9c80b1e934f41bece43040e133c8ba9328"}},
+                .m_chain_tx_count = 101'463,
+                .blockhash = consteval_ctor(uint256{"bbb36b59df48e364dcf32e8ca13f3e5a89fdc16c483fa26779c43da5feb4d40c"}),
+            },
         };
         chainTxData = ChainTxData{
-            .nTime = 1776151754,
-            .tx_count = 83851,
-            .dTxRate = 0.018807452734,
+            .nTime = 1777448307,
+            .tx_count = 101463,
+            .dTxRate = 0.012830143651,
         };
     }
 };
@@ -420,6 +428,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
@@ -582,6 +591,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
@@ -774,6 +784,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
@@ -928,11 +939,16 @@ public:
         consensus.nMaxShieldedRingSize = 32;
         consensus.nShieldedMerkleTreeDepth = 32;
         consensus.nShieldedPoolActivationHeight = 0;
-        consensus.nShieldedTxBindingActivationHeight = 0;  // Activate at genesis for instant regtest
-        consensus.nShieldedBridgeTagActivationHeight = 0;  // Activate at genesis for instant regtest
-        consensus.nShieldedSmileRiceCodecDisableHeight = 0;  // Activate at genesis for instant regtest
+        consensus.nShieldedTxBindingActivationHeight =
+            opts.shielded_tx_binding_activation_height.value_or(0);  // Activate at genesis for instant regtest
+        consensus.nShieldedBridgeTagActivationHeight =
+            opts.shielded_bridge_tag_activation_height.value_or(0);  // Activate at genesis for instant regtest
+        consensus.nShieldedSmileRiceCodecDisableHeight =
+            opts.shielded_smile_rice_codec_disable_height.value_or(0);  // Activate at genesis for instant regtest
         consensus.nShieldedMatRiCTDisableHeight =
             opts.shielded_matrict_disable_height.value_or(0);  // Activate at genesis for instant regtest
+        consensus.nShieldedSpendPathRecoveryActivationHeight =
+            opts.shielded_spend_path_recovery_activation_height.value_or(0);  // Activate at genesis for instant regtest
         consensus.nShieldedPQ128UpgradeHeight =
             opts.shielded_pq128_upgrade_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedSettlementAnchorMaturity = 6;
@@ -987,7 +1003,11 @@ public:
             opts.matmul_require_product_payload.has_value() ||
             opts.matmul_asert_half_life.has_value() ||
             opts.matmul_asert_half_life_upgrade_height.has_value() ||
+            opts.shielded_tx_binding_activation_height.has_value() ||
+            opts.shielded_bridge_tag_activation_height.has_value() ||
+            opts.shielded_smile_rice_codec_disable_height.has_value() ||
             opts.shielded_matrict_disable_height.has_value() ||
+            opts.shielded_spend_path_recovery_activation_height.has_value() ||
             opts.shielded_pq128_upgrade_height.has_value() ||
             opts.mldsa_disable_height.has_value();
 
@@ -1165,6 +1185,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();

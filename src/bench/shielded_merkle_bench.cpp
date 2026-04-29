@@ -34,7 +34,7 @@ uint256 BenchCommitment(uint32_t n)
 // ---------------------------------------------------------------------------
 static void ShieldedMerkleAppend(benchmark::Bench& bench)
 {
-    ShieldedMerkleTree tree;
+    ShieldedMerkleTree tree{ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     uint32_t counter = 0;
 
     bench.run([&] {
@@ -47,7 +47,7 @@ static void ShieldedMerkleAppend(benchmark::Bench& bench)
 // ---------------------------------------------------------------------------
 static void ShieldedMerkleRoot(benchmark::Bench& bench)
 {
-    ShieldedMerkleTree tree;
+    ShieldedMerkleTree tree{ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     // Pre-populate with 10,000 leaves so the frontier is non-trivial.
     for (uint32_t i = 0; i < 10000; ++i) {
         tree.Append(BenchCommitment(i));
@@ -63,7 +63,7 @@ static void ShieldedMerkleRoot(benchmark::Bench& bench)
 // ---------------------------------------------------------------------------
 static void ShieldedMerkleWitnessCreate(benchmark::Bench& bench)
 {
-    ShieldedMerkleTree tree;
+    ShieldedMerkleTree tree{ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     for (uint32_t i = 0; i < 10000; ++i) {
         tree.Append(BenchCommitment(i));
     }
@@ -78,7 +78,7 @@ static void ShieldedMerkleWitnessCreate(benchmark::Bench& bench)
 // ---------------------------------------------------------------------------
 static void ShieldedMerkleWitnessVerify(benchmark::Bench& bench)
 {
-    ShieldedMerkleTree tree;
+    ShieldedMerkleTree tree{ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     for (uint32_t i = 0; i < 10000; ++i) {
         tree.Append(BenchCommitment(i));
     }
@@ -97,7 +97,7 @@ static void ShieldedMerkleWitnessVerify(benchmark::Bench& bench)
 static void ShieldedMerkleAppend10k(benchmark::Bench& bench)
 {
     bench.run([&] {
-        ShieldedMerkleTree tree;
+        ShieldedMerkleTree tree{ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
         for (uint32_t i = 0; i < 10000; ++i) {
             tree.Append(BenchCommitment(i));
         }
@@ -110,7 +110,7 @@ static void ShieldedMerkleAppend10k(benchmark::Bench& bench)
 // ---------------------------------------------------------------------------
 static void ShieldedMerkleWitnessUpdate(benchmark::Bench& bench)
 {
-    ShieldedMerkleTree tree;
+    ShieldedMerkleTree tree{ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     for (uint32_t i = 0; i < 10000; ++i) {
         tree.Append(BenchCommitment(i));
     }
@@ -131,7 +131,7 @@ static void ShieldedMerkleWitnessUpdate(benchmark::Bench& bench)
 // ---------------------------------------------------------------------------
 static void ShieldedMerkleSerialize(benchmark::Bench& bench)
 {
-    ShieldedMerkleTree tree;
+    ShieldedMerkleTree tree{ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     for (uint32_t i = 0; i < 10000; ++i) {
         tree.Append(BenchCommitment(i));
     }
@@ -139,7 +139,7 @@ static void ShieldedMerkleSerialize(benchmark::Bench& bench)
     bench.run([&] {
         DataStream ss{};
         ss << tree;
-        ShieldedMerkleTree tree2;
+        ShieldedMerkleTree tree2{ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
         ss >> tree2;
         ankerl::nanobench::doNotOptimizeAway(tree2.Size());
     });

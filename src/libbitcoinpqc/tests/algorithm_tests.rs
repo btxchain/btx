@@ -127,6 +127,7 @@ fn test_ml_dsa_44_keygen_sign_verify() {
         keypair.secret_key.bytes.len(),
         secret_key_size(Algorithm::ML_DSA_44)
     );
+    println!("Secret key size: {}", keypair.secret_key.bytes.len());
 
     // Test signing and verification
     let message = b"ML-DSA-44 Test Message";
@@ -185,6 +186,7 @@ fn test_slh_dsa_128s_keygen_sign_verify() {
         keypair.secret_key.bytes.len(),
         secret_key_size(Algorithm::SLH_DSA_128S)
     );
+    println!("Secret key size: {}", keypair.secret_key.bytes.len());
 
     // Test signing and verification
     let message = b"SLH-DSA-128S Test Message";

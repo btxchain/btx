@@ -110,6 +110,7 @@ bool IsValidTransactionFamily(TransactionFamily family)
     case TransactionFamily::V2_SETTLEMENT_ANCHOR:
     case TransactionFamily::V2_GENERIC:
     case TransactionFamily::V2_LIFECYCLE:
+    case TransactionFamily::V2_SPEND_PATH_RECOVERY:
         return true;
     }
     return false;
@@ -207,6 +208,8 @@ const char* GetTransactionFamilyName(TransactionFamily family)
         return "shielded_v2";
     case TransactionFamily::V2_LIFECYCLE:
         return "v2_lifecycle";
+    case TransactionFamily::V2_SPEND_PATH_RECOVERY:
+        return "v2_spend_path_recovery";
     }
     return "unknown";
 }

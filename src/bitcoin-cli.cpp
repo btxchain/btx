@@ -792,7 +792,7 @@ public:
         "           peer selection (only displayed if the -asmap config option is set)\n"
         "  id       Peer index, in increasing order of peer connections since node startup\n"
         "  address  IP address and port of the peer\n"
-        "  version  Peer version and subversion concatenated, e.g. \"70016/BTX:0.29.5/\"\n\n"
+        "  version  Peer version and subversion concatenated, e.g. \"70016" + FormatSubVersion(CLIENT_NAME, CLIENT_VERSION, std::vector<std::string>{}) + "\"\n\n"
         "* The peer counts table displays the number of peers for each reachable network as well as\n"
         "  the number of block relay peers and manual peers.\n\n"
         "* The local addresses table lists each local address broadcast by the node, the port, and the score.\n\n"

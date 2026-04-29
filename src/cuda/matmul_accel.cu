@@ -92,9 +92,10 @@ struct DigestWorkspace {
     int device_index{-1};
     cudaStream_t stream{nullptr};
 
-    const Element* cached_matrix_a_ptr{nullptr};
-    const Element* cached_matrix_b_ptr{nullptr};
+    uint256 cached_matrix_a_key;
+    uint256 cached_matrix_b_key;
     uint32_t cached_matrix_elements{0};
+    bool cached_matrix_keys_valid{false};
 
     Element* device_base_a{nullptr};
     Element* device_base_b{nullptr};
@@ -114,8 +115,8 @@ struct DigestWorkspace {
     size_t noise_e_r_capacity{0};
     size_t noise_f_l_capacity{0};
     size_t noise_f_r_capacity{0};
-    Element* device_prepared_inputs{nullptr};
-    size_t prepared_inputs_capacity{0};
+    const Element** device_prepared_input_ptrs{nullptr};
+    size_t prepared_input_ptr_capacity{0};
 
     Element* device_compress{nullptr};
     size_t compress_capacity{0};
@@ -132,25 +133,65 @@ struct DigestWorkspace {
     HostStageBuffer host_compress;
     HostStageBuffer host_output;
 
-    ~DigestWorkspace()
+    void ReleaseDeviceBuffers()
     {
-        if (device_index >= 0) {
-            cudaSetDevice(device_index);
-        }
-        if (stream != nullptr) {
-            cudaStreamDestroy(stream);
-        }
         cudaFree(device_output);
         cudaFree(device_compress);
         cudaFree(device_noise_f_r);
         cudaFree(device_noise_f_l);
         cudaFree(device_noise_e_r);
         cudaFree(device_noise_e_l);
-        cudaFree(device_prepared_inputs);
+        cudaFree(device_prepared_input_ptrs);
         cudaFree(device_matrix_b);
         cudaFree(device_matrix_a);
         cudaFree(device_base_b);
         cudaFree(device_base_a);
+
+        device_output = nullptr;
+        device_compress = nullptr;
+        device_noise_f_r = nullptr;
+        device_noise_f_l = nullptr;
+        device_noise_e_r = nullptr;
+        device_noise_e_l = nullptr;
+        device_prepared_input_ptrs = nullptr;
+        device_matrix_b = nullptr;
+        device_matrix_a = nullptr;
+        device_base_b = nullptr;
+        device_base_a = nullptr;
+
+        output_capacity = 0;
+        compress_capacity = 0;
+        noise_f_r_capacity = 0;
+        noise_f_l_capacity = 0;
+        noise_e_r_capacity = 0;
+        noise_e_l_capacity = 0;
+        prepared_input_ptr_capacity = 0;
+        matrix_b_capacity = 0;
+        matrix_a_capacity = 0;
+        base_b_capacity = 0;
+        base_a_capacity = 0;
+
+        cached_matrix_a_key.SetNull();
+        cached_matrix_b_key.SetNull();
+        cached_matrix_elements = 0;
+        cached_matrix_keys_valid = false;
+    }
+
+    void ReleaseStream()
+    {
+        if (stream != nullptr) {
+            cudaStreamDestroy(stream);
+            stream = nullptr;
+        }
+    }
+
+    ~DigestWorkspace()
+    {
+        if (device_index >= 0) {
+            cudaSetDevice(device_index);
+        }
+        ReleaseStream();
+        ReleaseDeviceBuffers();
     }
 };
 
@@ -250,13 +291,16 @@ uint32_t ResolveCudaPoolSlotCount()
 
     const uint32_t hw = std::thread::hardware_concurrency();
     const uint32_t cpu_limit =
+        hw >= 24 ? 8U :
         hw >= 16 ? 6U :
         hw >= 12 ? 4U :
         hw >= 8 ? 3U :
         hw >= 4 ? 2U : 1U;
     const uint32_t gpu_limit =
-        runtime.multiprocessor_count >= 96 ? 6U :
-        runtime.multiprocessor_count >= 64 ? 5U :
+        runtime.multiprocessor_count >= 128 ? 8U :
+        runtime.multiprocessor_count >= 96 ? 7U :
+        runtime.multiprocessor_count >= 64 ? 6U :
+        runtime.multiprocessor_count >= 48 ? 5U :
         runtime.multiprocessor_count >= 24 ? 4U :
         runtime.multiprocessor_count >= 12 ? 2U : 1U;
     return std::clamp<uint32_t>(std::min(cpu_limit, gpu_limit), 1U, MAX_SLOTS);
@@ -305,12 +349,15 @@ std::string ModeToString(MatMulCompressedWordsMode mode)
 }
 
 bool IsBaseMatrixCacheHit(const DigestWorkspace& workspace,
-                          const Element* matrix_a,
-                          const Element* matrix_b,
+                          const uint256* matrix_a_cache_key,
+                          const uint256* matrix_b_cache_key,
                           uint32_t matrix_elements)
 {
-    return workspace.cached_matrix_a_ptr == matrix_a &&
-        workspace.cached_matrix_b_ptr == matrix_b &&
+    return matrix_a_cache_key != nullptr &&
+        matrix_b_cache_key != nullptr &&
+        workspace.cached_matrix_keys_valid &&
+        workspace.cached_matrix_a_key == *matrix_a_cache_key &&
+        workspace.cached_matrix_b_key == *matrix_b_cache_key &&
         workspace.cached_matrix_elements == matrix_elements &&
         workspace.device_base_a != nullptr &&
         workspace.device_base_b != nullptr;
@@ -435,14 +482,13 @@ std::optional<BufferPoolLease> AcquireBufferPoolSlot(std::string& error)
 
                 const bool has_reusable_buffers =
                     slot->workspace.stream != nullptr ||
-                    slot->workspace.cached_matrix_a_ptr != nullptr ||
                     slot->workspace.base_a_capacity > 0 ||
                     slot->workspace.base_b_capacity > 0 ||
                     slot->workspace.matrix_a_capacity > 0 ||
                     slot->workspace.matrix_b_capacity > 0 ||
                     slot->workspace.output_capacity > 0 ||
                     slot->workspace.compress_capacity > 0 ||
-                    slot->workspace.prepared_inputs_capacity > 0;
+                    slot->workspace.prepared_input_ptr_capacity > 0;
                 if (prefer_reused_buffers && !has_reusable_buffers) {
                     continue;
                 }
@@ -504,12 +550,43 @@ __host__ __device__ __forceinline__ Element FieldMul(Element a, Element b)
 
 __device__ __forceinline__ void ReducePartialsInPlace(Element* partials, uint32_t tid)
 {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+    for (uint32_t stride = blockDim.x / 2; stride > 32; stride >>= 1) {
+        if (tid < stride) {
+            partials[tid] = FieldAdd(partials[tid], partials[tid + stride]);
+        }
+        __syncthreads();
+    }
+
+    if (tid < 32) {
+        const uint32_t warp_lanes = blockDim.x < 32 ? blockDim.x : 32U;
+        const uint32_t lane = tid & 31U;
+        Element value = partials[tid];
+
+        if (blockDim.x >= 64) {
+            value = FieldAdd(value, partials[tid + 32]);
+        }
+
+        const unsigned warp_mask = __activemask();
+        for (uint32_t offset = warp_lanes / 2; offset > 0; offset >>= 1) {
+            const Element other = __shfl_down_sync(warp_mask, value, offset);
+            if (lane + offset < warp_lanes) {
+                value = FieldAdd(value, other);
+            }
+        }
+
+        if (tid == 0) {
+            partials[0] = value;
+        }
+    }
+#else
     for (uint32_t stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
             partials[tid] = FieldAdd(partials[tid], partials[tid + stride]);
         }
         __syncthreads();
     }
+#endif
 }
 
 __global__ void BuildPerturbedMatrixKernel(const Element* base_matrix,
@@ -548,18 +625,15 @@ __global__ void BuildPerturbedMatrixKernel(const Element* base_matrix,
     output_batch[gid] = FieldAdd(base_matrix[local_index], Reduce64(acc));
 }
 
-__global__ void BuildPerturbedMatrixPackedKernel(const Element* base_matrix,
-                                                 const Element* packed_inputs_batch,
-                                                 uint32_t packed_words_per_request,
-                                                 uint32_t noise_left_offset_words,
-                                                 uint32_t noise_right_offset_words,
-                                                 uint32_t n,
-                                                 uint32_t r,
-                                                 size_t total_matrix_elements,
-                                                 uint32_t matrix_elements,
-                                                 uint32_t noise_left_elements,
-                                                 uint32_t noise_right_elements,
-                                                 Element* output_batch)
+__global__ void BuildPerturbedMatrixPackedPointersKernel(const Element* base_matrix,
+                                                         const Element* const* packed_input_ptrs,
+                                                         uint32_t noise_left_offset_words,
+                                                         uint32_t noise_right_offset_words,
+                                                         uint32_t n,
+                                                         uint32_t r,
+                                                         size_t total_matrix_elements,
+                                                         uint32_t matrix_elements,
+                                                         Element* output_batch)
 {
     const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (gid >= total_matrix_elements) {
@@ -570,7 +644,7 @@ __global__ void BuildPerturbedMatrixPackedKernel(const Element* base_matrix,
     const uint32_t local_index = static_cast<uint32_t>(gid % matrix_elements);
     const uint32_t row = local_index / n;
     const uint32_t col = local_index % n;
-    const Element* packed_inputs = packed_inputs_batch + static_cast<size_t>(batch_index) * packed_words_per_request;
+    const Element* packed_inputs = packed_input_ptrs[batch_index];
     const Element* noise_left = packed_inputs + noise_left_offset_words;
     const Element* noise_right = packed_inputs + noise_right_offset_words;
 
@@ -584,15 +658,13 @@ __global__ void BuildPerturbedMatrixPackedKernel(const Element* base_matrix,
         }
     }
 
-    (void)noise_left_elements;
-    (void)noise_right_elements;
     output_batch[gid] = FieldAdd(base_matrix[local_index], Reduce64(acc));
 }
 
-template <bool PrefixMode, bool PackedCompress>
+template <bool PrefixMode>
 __global__ void ComputeCompressedWordsFusedKernel(const Element* __restrict__ matrix_a_batch,
                                                   const Element* __restrict__ matrix_b_batch,
-                                                  const Element* __restrict__ compress_input_batch,
+                                                  const Element* __restrict__ compress_batch,
                                                   uint32_t n,
                                                   uint32_t block_size,
                                                   uint32_t blocks_per_axis,
@@ -600,8 +672,6 @@ __global__ void ComputeCompressedWordsFusedKernel(const Element* __restrict__ ma
                                                   uint32_t words_per_request,
                                                   uint32_t matrix_elements,
                                                   uint32_t compress_elements,
-                                                  uint32_t packed_words_per_request,
-                                                  uint32_t compress_offset_words,
                                                   Element* __restrict__ output)
 {
     __shared__ Element partials[MAX_BLOCK_THREADS];
@@ -615,9 +685,84 @@ __global__ void ComputeCompressedWordsFusedKernel(const Element* __restrict__ ma
     const uint32_t active_threads = block_size * block_size;
     const Element* matrix_a = matrix_a_batch + static_cast<size_t>(batch_index) * matrix_elements;
     const Element* matrix_b = matrix_b_batch + static_cast<size_t>(batch_index) * matrix_elements;
-    const Element* compress_vec = PackedCompress
-        ? compress_input_batch + static_cast<size_t>(batch_index) * packed_words_per_request + compress_offset_words
-        : compress_input_batch + static_cast<size_t>(batch_index) * compress_elements;
+    const Element* compress_vec = compress_batch + static_cast<size_t>(batch_index) * compress_elements;
+    const uint32_t output_offset = batch_index * words_per_request +
+        (PrefixMode ? local_pair_index * blocks_per_axis : local_pair_index);
+    const bool active = tid < active_threads;
+    const uint32_t x = active ? (tid / block_size) : 0;
+    const uint32_t y = active ? (tid % block_size) : 0;
+    const uint32_t row = i * block_size + x;
+    const uint32_t col = j * block_size + y;
+    const size_t row_offset = static_cast<size_t>(row) * n;
+    const Element compress_coeff = active ? compress_vec[tid] : 0;
+
+    Element running_total{0};
+    for (uint32_t ell = 0; ell < blocks_per_axis; ++ell) {
+        Element partial{0};
+        if (active) {
+            const uint32_t middle_base = ell * block_size;
+
+            uint64_t acc{0};
+            uint32_t pending{0};
+            for (uint32_t k = 0; k < block_size; ++k) {
+                acc += static_cast<uint64_t>(matrix_a[row_offset + (middle_base + k)]) *
+                    matrix_b[static_cast<size_t>(middle_base + k) * n + col];
+                if (++pending == REDUCE_INTERVAL) {
+                    acc = Reduce64(acc);
+                    pending = 0;
+                }
+            }
+
+            partial = FieldMul(Reduce64(acc), compress_coeff);
+        }
+
+        partials[tid] = partial;
+        __syncthreads();
+
+        ReducePartialsInPlace(partials, tid);
+
+        if (tid == 0) {
+            running_total = FieldAdd(running_total, partials[0]);
+            if constexpr (PrefixMode) {
+                output[output_offset + ell] = running_total;
+            }
+        }
+        __syncthreads();
+    }
+
+    if constexpr (!PrefixMode) {
+        if (tid == 0) {
+            output[output_offset] = running_total;
+        }
+    }
+}
+
+template <bool PrefixMode>
+__global__ void ComputeCompressedWordsFusedPackedPointersKernel(
+    const Element* __restrict__ matrix_a_batch,
+    const Element* __restrict__ matrix_b_batch,
+    const Element* const* __restrict__ packed_input_ptrs,
+    uint32_t n,
+    uint32_t block_size,
+    uint32_t blocks_per_axis,
+    uint32_t pair_count_per_request,
+    uint32_t words_per_request,
+    uint32_t matrix_elements,
+    uint32_t compress_offset_words,
+    Element* __restrict__ output)
+{
+    __shared__ Element partials[MAX_BLOCK_THREADS];
+
+    const uint32_t pair_index = blockIdx.x;
+    const uint32_t batch_index = pair_index / pair_count_per_request;
+    const uint32_t local_pair_index = pair_index % pair_count_per_request;
+    const uint32_t j = local_pair_index % blocks_per_axis;
+    const uint32_t i = local_pair_index / blocks_per_axis;
+    const uint32_t tid = threadIdx.x;
+    const uint32_t active_threads = block_size * block_size;
+    const Element* matrix_a = matrix_a_batch + static_cast<size_t>(batch_index) * matrix_elements;
+    const Element* matrix_b = matrix_b_batch + static_cast<size_t>(batch_index) * matrix_elements;
+    const Element* compress_vec = packed_input_ptrs[batch_index] + compress_offset_words;
     const uint32_t output_offset = batch_index * words_per_request +
         (PrefixMode ? local_pair_index * blocks_per_axis : local_pair_index);
     const bool active = tid < active_threads;
@@ -693,46 +838,8 @@ void ResetWorkspaceForDevice(DigestWorkspace& workspace, int device_index)
     if (workspace.device_index >= 0) {
         cudaSetDevice(workspace.device_index);
     }
-    cudaFree(workspace.device_output);
-    cudaFree(workspace.device_compress);
-    cudaFree(workspace.device_noise_f_r);
-    cudaFree(workspace.device_noise_f_l);
-    cudaFree(workspace.device_noise_e_r);
-    cudaFree(workspace.device_noise_e_l);
-    cudaFree(workspace.device_prepared_inputs);
-    cudaFree(workspace.device_matrix_b);
-    cudaFree(workspace.device_matrix_a);
-    cudaFree(workspace.device_base_b);
-    cudaFree(workspace.device_base_a);
-    workspace.device_output = nullptr;
-    workspace.device_compress = nullptr;
-    workspace.device_noise_f_r = nullptr;
-    workspace.device_noise_f_l = nullptr;
-    workspace.device_noise_e_r = nullptr;
-    workspace.device_noise_e_l = nullptr;
-    workspace.device_prepared_inputs = nullptr;
-    workspace.device_matrix_b = nullptr;
-    workspace.device_matrix_a = nullptr;
-    workspace.device_base_b = nullptr;
-    workspace.device_base_a = nullptr;
-    workspace.output_capacity = 0;
-    workspace.compress_capacity = 0;
-    workspace.noise_f_r_capacity = 0;
-    workspace.noise_f_l_capacity = 0;
-    workspace.noise_e_r_capacity = 0;
-    workspace.noise_e_l_capacity = 0;
-    workspace.prepared_inputs_capacity = 0;
-    workspace.matrix_b_capacity = 0;
-    workspace.matrix_a_capacity = 0;
-    workspace.base_b_capacity = 0;
-    workspace.base_a_capacity = 0;
-    if (workspace.stream != nullptr) {
-        cudaStreamDestroy(workspace.stream);
-        workspace.stream = nullptr;
-    }
-    workspace.cached_matrix_a_ptr = nullptr;
-    workspace.cached_matrix_b_ptr = nullptr;
-    workspace.cached_matrix_elements = 0;
+    workspace.ReleaseStream();
+    workspace.ReleaseDeviceBuffers();
     workspace.device_index = device_index;
 }
 
@@ -751,7 +858,8 @@ bool EnsureWorkspaceStream(DigestWorkspace& workspace, std::string& error)
     return true;
 }
 
-bool EnsureDeviceBuffer(Element*& buffer, size_t& capacity, size_t required, std::string& error, bool& allocated)
+template <typename T>
+bool EnsureDeviceBuffer(T*& buffer, size_t& capacity, size_t required, std::string& error, bool& allocated)
 {
     if (capacity >= required && buffer != nullptr) {
         return true;
@@ -765,7 +873,7 @@ bool EnsureDeviceBuffer(Element*& buffer, size_t& capacity, size_t required, std
         return true;
     }
 
-    const cudaError_t alloc_error = cudaMalloc(&buffer, required * sizeof(Element));
+    const cudaError_t alloc_error = cudaMalloc(reinterpret_cast<void**>(&buffer), required * sizeof(T));
     if (alloc_error != cudaSuccess) {
         error = "cudaMalloc failed:" + CudaErrorString(alloc_error);
         return false;
@@ -780,15 +888,13 @@ bool EnsureCachedBaseMatrices(DigestWorkspace& workspace,
                               const CudaRuntimeProbe& runtime,
                               const Element* matrix_a,
                               const Element* matrix_b,
+                              const uint256* matrix_a_cache_key,
+                              const uint256* matrix_b_cache_key,
                               uint32_t matrix_elements,
                               std::string& error,
                               bool& allocated)
 {
-    if (workspace.cached_matrix_a_ptr == matrix_a &&
-        workspace.cached_matrix_b_ptr == matrix_b &&
-        workspace.cached_matrix_elements == matrix_elements &&
-        workspace.device_base_a != nullptr &&
-        workspace.device_base_b != nullptr) {
+    if (IsBaseMatrixCacheHit(workspace, matrix_a_cache_key, matrix_b_cache_key, matrix_elements)) {
         return true;
     }
 
@@ -817,8 +923,15 @@ bool EnsureCachedBaseMatrices(DigestWorkspace& workspace,
         return false;
     }
 
-    workspace.cached_matrix_a_ptr = matrix_a;
-    workspace.cached_matrix_b_ptr = matrix_b;
+    if (matrix_a_cache_key != nullptr && matrix_b_cache_key != nullptr) {
+        workspace.cached_matrix_a_key = *matrix_a_cache_key;
+        workspace.cached_matrix_b_key = *matrix_b_cache_key;
+        workspace.cached_matrix_keys_valid = true;
+    } else {
+        workspace.cached_matrix_a_key.SetNull();
+        workspace.cached_matrix_b_key.SetNull();
+        workspace.cached_matrix_keys_valid = false;
+    }
     workspace.cached_matrix_elements = matrix_elements;
     return true;
 }
@@ -938,8 +1051,7 @@ bool ValidateLowRankDeviceBatchRequest(const MatMulLowRankCompressedWordsDeviceB
     return true;
 }
 
-bool FinalizeCompressedWordsBatch(const CudaRuntimeProbe& runtime,
-                                  const BufferPoolLease& lease,
+bool FinalizeCompressedWordsBatch(const BufferPoolLease& lease,
                                   DigestWorkspace& workspace,
                                   uint32_t n,
                                   uint32_t b,
@@ -973,7 +1085,7 @@ bool FinalizeCompressedWordsBatch(const CudaRuntimeProbe& runtime,
     const uint32_t total_pair_count = batch_size * pair_count_per_request;
     const auto finalize_start = SteadyClock::now();
     if (mode == MatMulCompressedWordsMode::TRANSCRIPT_PREFIXES) {
-        ComputeCompressedWordsFusedKernel<true, false><<<total_pair_count, thread_count, 0, workspace.stream>>>(
+        ComputeCompressedWordsFusedKernel<true><<<total_pair_count, thread_count, 0, workspace.stream>>>(
             workspace.device_matrix_a,
             workspace.device_matrix_b,
             workspace.device_compress,
@@ -984,11 +1096,9 @@ bool FinalizeCompressedWordsBatch(const CudaRuntimeProbe& runtime,
             words_per_request,
             matrix_elements,
             compress_elements,
-            /*packed_words_per_request=*/0,
-            /*compress_offset_words=*/0,
             workspace.device_output);
     } else {
-        ComputeCompressedWordsFusedKernel<false, false><<<total_pair_count, thread_count, 0, workspace.stream>>>(
+        ComputeCompressedWordsFusedKernel<false><<<total_pair_count, thread_count, 0, workspace.stream>>>(
             workspace.device_matrix_a,
             workspace.device_matrix_b,
             workspace.device_compress,
@@ -999,8 +1109,6 @@ bool FinalizeCompressedWordsBatch(const CudaRuntimeProbe& runtime,
             words_per_request,
             matrix_elements,
             compress_elements,
-            /*packed_words_per_request=*/0,
-            /*compress_offset_words=*/0,
             workspace.device_output);
     }
     cudaError_t error = cudaGetLastError();
@@ -1037,29 +1145,24 @@ bool FinalizeCompressedWordsBatch(const CudaRuntimeProbe& runtime,
     }
 
     result.words.assign(workspace.host_output.data(), workspace.host_output.data() + total_output_count);
-
-    (void)runtime;
     result.success = true;
     return true;
 }
 
-bool FinalizeCompressedWordsPackedBatch(const CudaRuntimeProbe& runtime,
-                                        const BufferPoolLease& lease,
-                                        DigestWorkspace& workspace,
-                                        uint32_t n,
-                                        uint32_t b,
-                                        uint32_t r,
-                                        uint32_t batch_size,
-                                        uint32_t packed_words_per_request,
-                                        uint32_t compress_offset_words,
-                                        MatMulCompressedWordsMode mode,
-                                        MatMulCompressedWordsBatchResult& result,
-                                        DigestProfilingSample& sample,
-                                        bool& allocated_buffers)
+bool FinalizeCompressedWordsPackedPointerBatch(const BufferPoolLease& lease,
+                                               DigestWorkspace& workspace,
+                                               uint32_t n,
+                                               uint32_t b,
+                                               uint32_t r,
+                                               uint32_t batch_size,
+                                               uint32_t compress_offset_words,
+                                               MatMulCompressedWordsMode mode,
+                                               MatMulCompressedWordsBatchResult& result,
+                                               DigestProfilingSample& sample,
+                                               bool& allocated_buffers)
 {
     const uint32_t blocks_per_axis = n / b;
     const uint32_t matrix_elements = n * n;
-    const uint32_t compress_elements = b * b;
     const uint32_t pair_count_per_request = blocks_per_axis * blocks_per_axis;
     const uint32_t words_per_request = mode == MatMulCompressedWordsMode::TRANSCRIPT_PREFIXES
         ? pair_count_per_request * blocks_per_axis
@@ -1080,33 +1183,29 @@ bool FinalizeCompressedWordsPackedBatch(const CudaRuntimeProbe& runtime,
     const uint32_t total_pair_count = batch_size * pair_count_per_request;
     const auto finalize_start = SteadyClock::now();
     if (mode == MatMulCompressedWordsMode::TRANSCRIPT_PREFIXES) {
-        ComputeCompressedWordsFusedKernel<true, true><<<total_pair_count, thread_count, 0, workspace.stream>>>(
+        ComputeCompressedWordsFusedPackedPointersKernel<true><<<total_pair_count, thread_count, 0, workspace.stream>>>(
             workspace.device_matrix_a,
             workspace.device_matrix_b,
-            workspace.device_prepared_inputs,
+            workspace.device_prepared_input_ptrs,
             n,
             b,
             blocks_per_axis,
             pair_count_per_request,
             words_per_request,
             matrix_elements,
-            compress_elements,
-            packed_words_per_request,
             compress_offset_words,
             workspace.device_output);
     } else {
-        ComputeCompressedWordsFusedKernel<false, true><<<total_pair_count, thread_count, 0, workspace.stream>>>(
+        ComputeCompressedWordsFusedPackedPointersKernel<false><<<total_pair_count, thread_count, 0, workspace.stream>>>(
             workspace.device_matrix_a,
             workspace.device_matrix_b,
-            workspace.device_prepared_inputs,
+            workspace.device_prepared_input_ptrs,
             n,
             b,
             blocks_per_axis,
             pair_count_per_request,
             words_per_request,
             matrix_elements,
-            compress_elements,
-            packed_words_per_request,
             compress_offset_words,
             workspace.device_output);
     }
@@ -1144,8 +1243,6 @@ bool FinalizeCompressedWordsPackedBatch(const CudaRuntimeProbe& runtime,
     }
 
     result.words.assign(workspace.host_output.data(), workspace.host_output.data() + total_output_count);
-
-    (void)runtime;
     result.success = true;
     return true;
 }
@@ -1250,7 +1347,7 @@ MatMulKernelProfile ProbeMatMulKernelProfile()
         device_prepared_env[0] != '0';
     profile.execution_model = "nonblocking_stream_per_pool_slot";
     profile.staging_strategy = "pinned_host_with_pageable_fallback";
-    profile.device_prepared_inputs_policy = "opt_in_env";
+    profile.device_prepared_inputs_policy = "auto_product_digest_shape_plus_env";
     profile.reason = "ready";
     return profile;
 }
@@ -1417,7 +1514,6 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsBatch(const MatMulCompres
     }
 
     if (!FinalizeCompressedWordsBatch(
-            runtime,
             *lease,
             workspace,
             request.n,
@@ -1485,13 +1581,19 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatch(
     const size_t total_noise_right_elements = static_cast<size_t>(request.batch_size) * noise_right_elements;
     const size_t total_compress_elements = static_cast<size_t>(request.batch_size) * compress_elements;
     bool allocated_buffers{false};
-    sample.base_matrix_cache_hit = IsBaseMatrixCacheHit(workspace, request.matrix_a, request.matrix_b, matrix_elements);
+    sample.base_matrix_cache_hit = IsBaseMatrixCacheHit(
+        workspace,
+        request.matrix_a_cache_key,
+        request.matrix_b_cache_key,
+        matrix_elements);
 
     if (!EnsureCachedBaseMatrices(
             workspace,
             runtime,
             request.matrix_a,
             request.matrix_b,
+            request.matrix_a_cache_key,
+            request.matrix_b_cache_key,
             matrix_elements,
             result.error,
             allocated_buffers)) {
@@ -1617,7 +1719,6 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankBatch(
     }
 
     if (!FinalizeCompressedWordsBatch(
-            runtime,
             *lease,
             workspace,
             request.n,
@@ -1682,26 +1783,25 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatch(
     const uint32_t noise_right_elements = request.r * request.n;
     const uint32_t compress_elements = request.b * request.b;
     const size_t total_matrix_elements = static_cast<size_t>(request.batch_size) * matrix_elements;
-    const uint32_t packed_words_per_request =
-        noise_left_elements +
-        noise_right_elements +
-        noise_left_elements +
-        noise_right_elements +
-        compress_elements;
     const uint32_t noise_e_l_offset_words = 0;
     const uint32_t noise_e_r_offset_words = noise_e_l_offset_words + noise_left_elements;
     const uint32_t noise_f_l_offset_words = noise_e_r_offset_words + noise_right_elements;
     const uint32_t noise_f_r_offset_words = noise_f_l_offset_words + noise_left_elements;
     const uint32_t compress_offset_words = noise_f_r_offset_words + noise_right_elements;
-    const size_t total_packed_input_words = static_cast<size_t>(request.batch_size) * packed_words_per_request;
     bool allocated_buffers{false};
-    sample.base_matrix_cache_hit = IsBaseMatrixCacheHit(workspace, request.matrix_a, request.matrix_b, matrix_elements);
+    sample.base_matrix_cache_hit = IsBaseMatrixCacheHit(
+        workspace,
+        request.matrix_a_cache_key,
+        request.matrix_b_cache_key,
+        matrix_elements);
 
     if (!EnsureCachedBaseMatrices(
             workspace,
             runtime,
             request.matrix_a,
             request.matrix_b,
+            request.matrix_a_cache_key,
+            request.matrix_b_cache_key,
             matrix_elements,
             result.error,
             allocated_buffers)) {
@@ -1709,15 +1809,17 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatch(
     }
     if (!EnsureDeviceBuffer(workspace.device_matrix_a, workspace.matrix_a_capacity, total_matrix_elements, result.error, allocated_buffers) ||
         !EnsureDeviceBuffer(workspace.device_matrix_b, workspace.matrix_b_capacity, total_matrix_elements, result.error, allocated_buffers) ||
-        !EnsureDeviceBuffer(workspace.device_prepared_inputs,
-                            workspace.prepared_inputs_capacity,
-                            total_packed_input_words,
+        !EnsureDeviceBuffer(workspace.device_prepared_input_ptrs,
+                            workspace.prepared_input_ptr_capacity,
+                            request.batch_size,
                             result.error,
                             allocated_buffers)) {
         return result;
     }
 
     const auto total_start = SteadyClock::now();
+    std::vector<const Element*> prepared_input_ptrs;
+    prepared_input_ptrs.reserve(request.batch_size);
     const auto wait_start = SteadyClock::now();
     for (uint32_t i = 0; i < request.batch_size; ++i) {
         const auto* generated = request.generated_inputs[i];
@@ -1746,55 +1848,46 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatch(
                 return result;
             }
         }
+
+        prepared_input_ptrs.push_back(generated->storage);
     }
     sample.stream_wait_event_us = DurationMicros(wait_start, SteadyClock::now());
 
-    const auto d2d_start = SteadyClock::now();
-    for (uint32_t i = 0; i < request.batch_size; ++i) {
-        const auto* generated = request.generated_inputs[i];
-        const size_t packed_offset = static_cast<size_t>(i) * packed_words_per_request;
-
-        error = cudaMemcpyAsync(workspace.device_prepared_inputs + packed_offset,
-                                generated->storage,
-                                packed_words_per_request * sizeof(Element),
-                                cudaMemcpyDeviceToDevice,
-                                workspace.stream);
-        if (error != cudaSuccess) {
-            result.error = "cudaMemcpy device_to_device failed:" + CudaErrorString(error);
-            return result;
-        }
+    const auto pointer_copy_start = SteadyClock::now();
+    error = cudaMemcpyAsync(workspace.device_prepared_input_ptrs,
+                            prepared_input_ptrs.data(),
+                            request.batch_size * sizeof(const Element*),
+                            cudaMemcpyHostToDevice,
+                            workspace.stream);
+    sample.submit_h2d_us = DurationMicros(pointer_copy_start, SteadyClock::now());
+    if (error != cudaSuccess) {
+        result.error = "cudaMemcpy prepared_input_ptrs failed:" + CudaErrorString(error);
+        return result;
     }
-    sample.submit_d2d_us = DurationMicros(d2d_start, SteadyClock::now());
 
     const uint32_t build_blocks = static_cast<uint32_t>((total_matrix_elements + WORKSPACE_THREADS - 1) / WORKSPACE_THREADS);
     const auto build_start = SteadyClock::now();
-    BuildPerturbedMatrixPackedKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+    BuildPerturbedMatrixPackedPointersKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
         workspace.device_base_a,
-        workspace.device_prepared_inputs,
-        packed_words_per_request,
+        workspace.device_prepared_input_ptrs,
         noise_e_l_offset_words,
         noise_e_r_offset_words,
         request.n,
         request.r,
         total_matrix_elements,
         matrix_elements,
-        noise_left_elements,
-        noise_right_elements,
         workspace.device_matrix_a);
     error = cudaGetLastError();
     if (error == cudaSuccess) {
-        BuildPerturbedMatrixPackedKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+        BuildPerturbedMatrixPackedPointersKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
             workspace.device_base_b,
-            workspace.device_prepared_inputs,
-            packed_words_per_request,
+            workspace.device_prepared_input_ptrs,
             noise_f_l_offset_words,
             noise_f_r_offset_words,
             request.n,
             request.r,
             total_matrix_elements,
             matrix_elements,
-            noise_left_elements,
-            noise_right_elements,
             workspace.device_matrix_b);
         error = cudaGetLastError();
     }
@@ -1804,15 +1897,13 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatch(
         return result;
     }
 
-    if (!FinalizeCompressedWordsPackedBatch(
-            runtime,
+    if (!FinalizeCompressedWordsPackedPointerBatch(
             *lease,
             workspace,
             request.n,
             request.b,
             request.r,
             request.batch_size,
-            packed_words_per_request,
             compress_offset_words,
             mode,
             result,

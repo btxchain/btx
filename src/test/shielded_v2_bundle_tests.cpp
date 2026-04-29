@@ -662,6 +662,134 @@ BOOST_AUTO_TEST_CASE(send_bundle_roundtrip_and_bundle_id_commits_to_proof_payloa
     BOOST_CHECK(ComputeTransactionBundleId(different_proof) != ComputeTransactionBundleId(bundle));
 }
 
+BOOST_AUTO_TEST_CASE(spend_path_recovery_bundle_roundtrip_and_payload_digest_are_stable)
+{
+    SpendPathRecoveryPayload payload;
+    payload.spend_anchor = uint256{0x11};
+    payload.spends = {MakeSpend(0x12), MakeSpend(0x22)};
+    for (auto& spend : payload.spends) {
+        spend.merkle_anchor = payload.spend_anchor;
+    }
+    payload.outputs = {MakeOutput(NoteClass::USER, ScanDomain::USER, 0x32),
+                       MakeOutput(NoteClass::USER, ScanDomain::USER, 0x42)};
+    payload.fee = COIN;
+
+    TransactionBundle bundle;
+    bundle.header = MakeBaseHeader(V2_SPEND_PATH_RECOVERY,
+                                   ProofKind::NONE,
+                                   SettlementBindingKind::NONE,
+                                   uint256::ZERO);
+    bundle.payload = payload;
+    bundle.header.payload_digest = ComputeSpendPathRecoveryPayloadDigest(payload);
+
+    BOOST_REQUIRE(bundle.IsValid());
+
+    DataStream ss{};
+    ss << bundle;
+
+    TransactionBundle decoded;
+    ss >> decoded;
+    BOOST_REQUIRE(decoded.IsValid());
+    BOOST_CHECK(BundleHasSemanticFamily(decoded, V2_SPEND_PATH_RECOVERY));
+    BOOST_CHECK(std::holds_alternative<SpendPathRecoveryPayload>(decoded.payload));
+    BOOST_CHECK(ComputePayloadDigest(decoded.payload) == bundle.header.payload_digest);
+    BOOST_CHECK(ComputeTransactionBundleId(decoded) == ComputeTransactionBundleId(bundle));
+}
+
+BOOST_AUTO_TEST_CASE(postfork_generic_spend_path_recovery_bundle_roundtrip_uses_opaque_payload_encoding)
+{
+    SpendPathRecoveryPayload payload;
+    payload.spend_anchor = uint256{0x51};
+    payload.spends = {MakeSpend(0x52)};
+    payload.spends.front().merkle_anchor = payload.spend_anchor;
+    payload.outputs = {MakeOutput(NoteClass::USER, ScanDomain::USER, 0x62)};
+
+    TransactionBundle generic_bundle;
+    generic_bundle.header = MakeBaseHeader(TransactionFamily::V2_GENERIC,
+                                           ProofKind::NONE,
+                                           SettlementBindingKind::GENERIC_POSTFORK,
+                                           uint256::ZERO);
+    generic_bundle.payload = payload;
+    generic_bundle.header.payload_digest = ComputeSpendPathRecoveryPayloadDigest(payload);
+    ApplyDerivedGenericOutputChunks(generic_bundle);
+
+    BOOST_REQUIRE(generic_bundle.IsValid());
+
+    const auto opaque_bytes = SerializePayloadBytes(payload, V2_SPEND_PATH_RECOVERY);
+    BOOST_REQUIRE(!opaque_bytes.empty());
+    BOOST_CHECK_EQUAL(opaque_bytes.size() % OPAQUE_FAMILY_PAYLOAD_PAD_QUANTUM, 0U);
+
+    DataStream ss{};
+    ss << generic_bundle;
+
+    TransactionBundle decoded;
+    ss >> decoded;
+    BOOST_REQUIRE(decoded.IsValid());
+    BOOST_CHECK_EQUAL(decoded.header.family_id, TransactionFamily::V2_GENERIC);
+    BOOST_CHECK(BundleHasSemanticFamily(decoded, V2_SPEND_PATH_RECOVERY));
+    BOOST_CHECK(std::holds_alternative<SpendPathRecoveryPayload>(decoded.payload));
+    BOOST_CHECK(ComputeTransactionBundleId(decoded) == ComputeTransactionBundleId(generic_bundle));
+}
+
+BOOST_AUTO_TEST_CASE(spend_path_recovery_bundle_roundtrip_accepts_proof_payload_scaffold)
+{
+    SpendPathRecoveryPayload payload;
+    payload.spend_anchor = uint256{0x71};
+    payload.spends = {MakeSpend(0x72)};
+    payload.spends.front().merkle_anchor = payload.spend_anchor;
+    payload.outputs = {MakeOutput(NoteClass::USER, ScanDomain::OPAQUE, 0x82)};
+    payload.fee = COIN / 10;
+
+    TransactionBundle bundle;
+    bundle.header = MakeBaseHeader(V2_SPEND_PATH_RECOVERY,
+                                   ProofKind::GENERIC_OPAQUE,
+                                   SettlementBindingKind::NONE,
+                                   uint256{0x73});
+    bundle.payload = payload;
+    bundle.proof_payload = {0xaa, 0xbb, 0xcc, 0xdd};
+    bundle.header.payload_digest = ComputeSpendPathRecoveryPayloadDigest(payload);
+
+    BOOST_REQUIRE(bundle.IsValid());
+
+    DataStream ss{};
+    ss << bundle;
+
+    TransactionBundle decoded;
+    ss >> decoded;
+    BOOST_REQUIRE(decoded.IsValid());
+    BOOST_CHECK(BundleHasSemanticFamily(decoded, V2_SPEND_PATH_RECOVERY));
+    BOOST_CHECK(decoded.proof_payload == bundle.proof_payload);
+    BOOST_CHECK(ComputeTransactionBundleId(decoded) == ComputeTransactionBundleId(bundle));
+}
+
+BOOST_AUTO_TEST_CASE(spend_path_recovery_bundle_uses_fee_as_state_value_balance)
+{
+    SpendPathRecoveryPayload payload;
+    payload.spend_anchor = uint256{0x91};
+    payload.spends = {MakeSpend(0x92)};
+    payload.spends.front().merkle_anchor = payload.spend_anchor;
+    payload.outputs = {MakeOutput(NoteClass::USER, ScanDomain::OPAQUE, 0x93)};
+    payload.fee = COIN / 20;
+
+    TransactionBundle bundle;
+    bundle.header = MakeBaseHeader(V2_SPEND_PATH_RECOVERY,
+                                   ProofKind::NONE,
+                                   SettlementBindingKind::NONE,
+                                   uint256::ZERO);
+    bundle.payload = payload;
+    bundle.header.payload_digest = ComputeSpendPathRecoveryPayloadDigest(payload);
+    BOOST_REQUIRE(bundle.IsValid());
+
+    CShieldedBundle shielded_bundle;
+    shielded_bundle.v2_bundle = bundle;
+
+    std::string reject_reason;
+    const auto state_value_balance = TryGetShieldedStateValueBalance(shielded_bundle, reject_reason);
+    BOOST_REQUIRE_MESSAGE(state_value_balance.has_value(), reject_reason);
+    BOOST_CHECK_EQUAL(*state_value_balance, payload.fee);
+    BOOST_CHECK_EQUAL(GetShieldedTxValueBalance(shielded_bundle), payload.fee);
+}
+
 BOOST_AUTO_TEST_CASE(postfork_generic_send_bundle_roundtrip_uses_opaque_payload_encoding)
 {
     SendPayload payload;

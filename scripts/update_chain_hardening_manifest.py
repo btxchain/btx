@@ -34,11 +34,13 @@ class CliError(RuntimeError):
 class ChainSnapshot:
     chain: str
     tip_height: int
+    selected_height: int
     anchor_height: int
     txstats_window_blocks: int
     genesis_hash: str
     anchor_hash: str
     bestblockhash: str
+    live_bestblockhash: str
     min_chain_work: str
     chain_tx_time: int
     chain_tx_count: int
@@ -63,10 +65,22 @@ def parse_args() -> argparse.Namespace:
         help="Chain context passed as -chain=<value> (default: main).",
     )
     parser.add_argument(
+        "--target-height",
+        type=int,
+        default=None,
+        help=(
+            "Historical height to use as the chainTxData final block and, by default, "
+            "the checkpoint anchor. Defaults to the live tip."
+        ),
+    )
+    parser.add_argument(
         "--anchor-height",
         type=int,
         default=None,
-        help="Checkpoint anchor height. Defaults to tip-2.",
+        help=(
+            "Checkpoint anchor height. Defaults to --target-height when set, "
+            "otherwise tip-2."
+        ),
     )
     parser.add_argument(
         "--window-blocks",
@@ -137,9 +151,19 @@ def collect_snapshot(args: argparse.Namespace) -> ChainSnapshot:
     if tip_height < 0:
         raise CliError(f"tip height must be non-negative, got {tip_height}")
 
-    anchor_height = args.anchor_height if args.anchor_height is not None else max(0, tip_height - 2)
-    if anchor_height < 0 or anchor_height > tip_height:
-        raise CliError(f"anchor height {anchor_height} is outside [0,{tip_height}]")
+    selected_height = args.target_height if args.target_height is not None else tip_height
+    if selected_height < 0 or selected_height > tip_height:
+        raise CliError(f"target height {selected_height} is outside [0,{tip_height}]")
+
+    if args.anchor_height is not None:
+        anchor_height = args.anchor_height
+    elif args.target_height is not None:
+        anchor_height = selected_height
+    else:
+        anchor_height = max(0, selected_height - 2)
+
+    if anchor_height < 0 or anchor_height > selected_height:
+        raise CliError(f"anchor height {anchor_height} is outside [0,{selected_height}]")
 
     if (
         args.chain == "main"
@@ -159,17 +183,24 @@ def collect_snapshot(args: argparse.Namespace) -> ChainSnapshot:
         run_cli(args.btx_cli, args.chain, args.rpc_arg, "getblockhash", str(anchor_height)),
         "anchor hash",
     )
-    best_hash = parse_hash(
+    live_best_hash = parse_hash(
         run_cli(args.btx_cli, args.chain, args.rpc_arg, "getbestblockhash"),
-        "best block hash",
+        "live best block hash",
     )
+    if selected_height == tip_height:
+        best_hash = live_best_hash
+    else:
+        best_hash = parse_hash(
+            run_cli(args.btx_cli, args.chain, args.rpc_arg, "getblockhash", str(selected_height)),
+            "selected best block hash",
+        )
 
     header_raw = run_cli(args.btx_cli, args.chain, args.rpc_arg, "getblockheader", anchor_hash, "true")
     header = json.loads(header_raw)
     chainwork = parse_chainwork(str(header["chainwork"]))
 
-    if tip_height >= 1:
-        txstats_window_blocks = min(args.window_blocks, tip_height - 1)
+    if selected_height >= 1:
+        txstats_window_blocks = min(args.window_blocks, selected_height - 1)
         txstats_raw = run_cli(
             args.btx_cli,
             args.chain,
@@ -200,11 +231,13 @@ def collect_snapshot(args: argparse.Namespace) -> ChainSnapshot:
     return ChainSnapshot(
         chain=args.chain,
         tip_height=tip_height,
+        selected_height=selected_height,
         anchor_height=anchor_height,
         txstats_window_blocks=txstats_window_blocks,
         genesis_hash=genesis_hash,
         anchor_hash=anchor_hash,
         bestblockhash=best_hash,
+        live_bestblockhash=live_best_hash,
         min_chain_work=chainwork,
         chain_tx_time=chain_tx_time,
         chain_tx_count=chain_tx_count,
@@ -235,11 +268,13 @@ def build_manifest(snapshot: ChainSnapshot) -> dict[str, Any]:
         "generated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "chain": snapshot.chain,
         "tip_height": snapshot.tip_height,
+        "selected_height": snapshot.selected_height,
         "anchor_height": snapshot.anchor_height,
         "txstats_window_blocks": snapshot.txstats_window_blocks,
         "genesis_hash": snapshot.genesis_hash,
         "anchor_hash": snapshot.anchor_hash,
         "bestblockhash": snapshot.bestblockhash,
+        "live_bestblockhash": snapshot.live_bestblockhash,
         "nMinimumChainWork": snapshot.min_chain_work,
         "defaultAssumeValid": snapshot.anchor_hash,
         "checkpoint": {

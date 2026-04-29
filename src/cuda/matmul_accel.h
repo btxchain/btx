@@ -7,6 +7,7 @@
 
 #include <cuda/cuda_context.h>
 #include <matmul/field.h>
+#include <uint256.h>
 
 #include <cstdint>
 #include <string>
@@ -143,6 +144,8 @@ struct MatMulLowRankCompressedWordsBatchRequest {
     uint32_t batch_size{0};
     const matmul::field::Element* matrix_a{nullptr};
     const matmul::field::Element* matrix_b{nullptr};
+    const uint256* matrix_a_cache_key{nullptr};
+    const uint256* matrix_b_cache_key{nullptr};
     const matmul::field::Element* const* noise_e_l{nullptr};
     const matmul::field::Element* const* noise_e_r{nullptr};
     const matmul::field::Element* const* noise_f_l{nullptr};
@@ -157,6 +160,8 @@ struct MatMulLowRankCompressedWordsDeviceBatchRequest {
     uint32_t batch_size{0};
     const matmul::field::Element* matrix_a{nullptr};
     const matmul::field::Element* matrix_b{nullptr};
+    const uint256* matrix_a_cache_key{nullptr};
+    const uint256* matrix_b_cache_key{nullptr};
     const MatMulGeneratedInputsDevice* const* generated_inputs{nullptr};
 };
 

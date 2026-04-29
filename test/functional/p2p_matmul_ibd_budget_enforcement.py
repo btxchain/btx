@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The BTX developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/license/mit/.
-"""Ensure MatMul peer verification budgets are enforced during IBD."""
+"""Ensure MatMul header sync continues during IBD."""
 
 from test_framework.messages import CBlockHeader, from_hex, msg_headers
 from test_framework.p2p import P2PInterface
@@ -35,13 +35,26 @@ class BTXMatMulIBDBudgetEnforcementTest(BitcoinTestFramework):
             headers.append(from_hex(CBlockHeader(), node0.getblockheader(block_hash, False)))
 
         attacker = node1.add_p2p_connection(P2PInterface())
-        with node1.assert_debug_log(expected_msgs=["MatMul per-peer verification budget exhausted"]):
-            attacker.send_message(msg_headers(headers=headers[:2000]))
-            attacker.sync_with_ping(timeout=20)
-            attacker.send_message(msg_headers(headers=headers[2000:]))
-            attacker.wait_for_disconnect(timeout=20)
+        attacker.send_message(msg_headers(headers=headers[:2000]))
+        attacker.sync_with_ping(timeout=20)
+        attacker.send_message(msg_headers(headers=headers[2000:]))
+        attacker.sync_with_ping(timeout=20)
+        attacker.wait_until(
+            lambda: node1.getblockchaininfo()["headers"] == 2105,
+            timeout=20,
+            check_connected=False,
+        )
+        attacker.wait_until(
+            lambda: attacker.last_message.get("getheaders") is not None,
+            timeout=20,
+        )
+        assert attacker.is_connected
 
-        # Headers were dropped before acceptance; node1 remains at genesis tip.
+        headers_only_tip = next(tip for tip in node1.getchaintips() if tip["hash"] == node0.getblockhash(2105))
+        assert_equal(headers_only_tip["height"], 2105)
+        assert_equal(headers_only_tip["status"], "headers-only")
+
+        # The peer only supplied headers, so node1 stays at genesis tip.
         assert_equal(node1.getblockcount(), 0)
 
 

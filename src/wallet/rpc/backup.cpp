@@ -401,18 +401,26 @@ static UniValue BuildShieldedTotalBalanceResult(CWallet& wallet, const int minco
     if (!total || !MoneyRange(*total)) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Balance overflow");
     }
+    const auto total_with_recovery = CheckedAdd(*total, shielded_summary.recovery_only);
+    if (!total_with_recovery || !MoneyRange(*total_with_recovery)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Balance overflow");
+    }
 
     UniValue out(UniValue::VOBJ);
     out.pushKV("transparent", ValueFromAmount(transparent));
     out.pushKV("shielded", ValueFromAmount(shielded_summary.spendable));
     out.pushKV("total", ValueFromAmount(*total));
+    if (shielded_summary.recovery_only != 0 || shielded_summary.recovery_only_note_count > 0) {
+        out.pushKV("shielded_recovery_only", ValueFromAmount(shielded_summary.recovery_only));
+        out.pushKV("total_including_recovery_only", ValueFromAmount(*total_with_recovery));
+    }
     const CAmount transparent_watchonly = transparent_bal.m_watchonly_trusted;
-    if (transparent_watchonly != 0 || shielded_summary.watchonly != 0) {
+    if (transparent_watchonly != 0 || shielded_summary.watchonly != 0 || shielded_summary.recovery_only != 0) {
         const auto watchonly_total = CheckedAdd(transparent_watchonly, shielded_summary.watchonly);
         if (!watchonly_total || !MoneyRange(*watchonly_total)) {
             throw JSONRPCError(RPC_WALLET_ERROR, "Balance overflow");
         }
-        const auto total_with_watchonly = CheckedAdd(*total, *watchonly_total);
+        const auto total_with_watchonly = CheckedAdd(*total_with_recovery, *watchonly_total);
         if (!total_with_watchonly || !MoneyRange(*total_with_watchonly)) {
             throw JSONRPCError(RPC_WALLET_ERROR, "Balance overflow");
         }

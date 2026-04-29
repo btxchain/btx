@@ -38,10 +38,7 @@ class LoadblockTest(BitcoinTestFramework):
         self.generate(self.nodes[0], COINBASE_MATURITY, sync_fun=self.no_op)
 
         # Parsing the url of our node to get settings for config file
-        # linearize-hashes.py reads the RPC cookie from "<datadir>/.cookie", so
-        # point it at the chain-specific datadir rather than writing test RPC
-        # credentials into the temporary config file.
-        data_dir = self.nodes[0].chain_path
+        data_dir = self.nodes[0].datadir_path
         node_url = urllib.parse.urlparse(self.nodes[0].url)
         cfg_file = data_dir / "linearize.cfg"
         bootstrap_file = Path(self.options.tmpdir) / "bootstrap.dat"
@@ -56,6 +53,8 @@ class LoadblockTest(BitcoinTestFramework):
         self.log.info("Create linearization config file")
         with open(cfg_file, "a", encoding="utf-8") as cfg:
             cfg.write(f"datadir={data_dir}\n")
+            cfg.write(f"rpcuser={node_url.username}\n")
+            cfg.write(f"rpcpassword={node_url.password}\n")
             cfg.write(f"port={node_url.port}\n")
             cfg.write(f"host={node_url.hostname}\n")
             cfg.write(f"output_file={bootstrap_file}\n")

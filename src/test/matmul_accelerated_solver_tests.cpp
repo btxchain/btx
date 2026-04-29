@@ -698,6 +698,52 @@ BOOST_AUTO_TEST_CASE(cuda_backend_prepared_inputs_gpu_generation_auto_mode_recor
     BOOST_CHECK(!prepared.compress_vec.empty());
 }
 
+BOOST_AUTO_TEST_CASE(cuda_backend_prepared_inputs_auto_mode_uses_device_inputs_for_product_digest_mainnet_shape)
+{
+    ScopedGpuInputEnv gpu_env(nullptr);
+    ScopedCudaDevicePreparedInputsEnv device_inputs_env(nullptr);
+    constexpr uint32_t kTranscriptBlockSize = 16;
+    constexpr uint32_t kNoiseRank = 8;
+
+    const CBlockHeader header = MakeCandidateHeaderWithDim(512);
+    const auto cuda_capability = matmul::backend::CapabilityFor(matmul::backend::Kind::CUDA);
+    const auto prepared = matmul::accelerated::PrepareMatMulDigestInputsForBackend(
+        header,
+        kTranscriptBlockSize,
+        kNoiseRank,
+        matmul::backend::Kind::CUDA,
+        matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
+
+    if (cuda_capability.available) {
+        BOOST_CHECK(prepared.cuda_generated_inputs != nullptr);
+        BOOST_CHECK(!prepared.noise.has_value());
+        BOOST_CHECK(prepared.compress_vec.empty());
+    } else {
+        BOOST_CHECK(prepared.noise.has_value());
+        BOOST_CHECK(!prepared.compress_vec.empty());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(cuda_backend_prepared_inputs_auto_mode_keeps_transcript_digest_on_host_inputs)
+{
+    ScopedGpuInputEnv gpu_env(nullptr);
+    ScopedCudaDevicePreparedInputsEnv device_inputs_env(nullptr);
+    constexpr uint32_t kTranscriptBlockSize = 16;
+    constexpr uint32_t kNoiseRank = 8;
+
+    const CBlockHeader header = MakeCandidateHeaderWithDim(512);
+    const auto prepared = matmul::accelerated::PrepareMatMulDigestInputsForBackend(
+        header,
+        kTranscriptBlockSize,
+        kNoiseRank,
+        matmul::backend::Kind::CUDA,
+        matmul::accelerated::DigestScheme::TRANSCRIPT);
+
+    BOOST_CHECK(prepared.noise.has_value());
+    BOOST_CHECK(!prepared.compress_vec.empty());
+    BOOST_CHECK(prepared.cuda_generated_inputs == nullptr);
+}
+
 BOOST_AUTO_TEST_CASE(backend_runtime_stats_track_cpu_digest_requests)
 {
     matmul::accelerated::ResetMatMulBackendRuntimeStats();

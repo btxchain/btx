@@ -38,6 +38,8 @@ const std::string ACTIVEEXTERNALSPK{"activeexternalspk"};
 const std::string ACTIVEINTERNALSPK{"activeinternalspk"};
 const std::string BESTBLOCK_NOMERKLE{"bestblock_nomerkle"};
 const std::string BESTBLOCK{"bestblock"};
+const std::string BRIDGEARCHIVE{"bridgearchive"};
+const std::string BRIDGEPENDING{"bridgepending"};
 const std::string CRYPTED_KEY{"ckey"};
 const std::string CSCRIPT{"cscript"};
 const std::string DEFAULTKEY{"defaultkey"};
@@ -109,6 +111,26 @@ bool WalletBatch::WriteTx(const CWalletTx& wtx)
 bool WalletBatch::EraseTx(uint256 hash)
 {
     return EraseIC(std::make_pair(DBKeys::TX, hash));
+}
+
+bool WalletBatch::WriteArchivedBridgeOperation(const BridgeArchivedOperation& operation)
+{
+    return WriteIC(std::make_pair(DBKeys::BRIDGEARCHIVE, operation.operation.funding_outpoint), operation);
+}
+
+bool WalletBatch::EraseArchivedBridgeOperation(const COutPoint& outpoint)
+{
+    return EraseIC(std::make_pair(DBKeys::BRIDGEARCHIVE, outpoint));
+}
+
+bool WalletBatch::WritePendingBridgeOperation(const BridgePendingOperation& operation)
+{
+    return WriteIC(std::make_pair(DBKeys::BRIDGEPENDING, operation.funding_outpoint), operation);
+}
+
+bool WalletBatch::ErasePendingBridgeOperation(const COutPoint& outpoint)
+{
+    return EraseIC(std::make_pair(DBKeys::BRIDGEPENDING, outpoint));
 }
 
 bool WalletBatch::WriteKeyMetadata(const CKeyMetadata& meta, const CPubKey& pubkey, const bool overwrite)
@@ -1310,6 +1332,52 @@ static DBErrors LoadTxRecords(CWallet* pwallet, DatabaseBatch& batch, std::vecto
     return result;
 }
 
+static DBErrors LoadPendingBridgeRecords(CWallet* pwallet, DatabaseBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet)
+{
+    AssertLockHeld(pwallet->cs_wallet);
+    LoadResult pending_res = LoadRecords(pwallet, batch, DBKeys::BRIDGEPENDING,
+        [] (CWallet* pwallet, DataStream& key, DataStream& value, std::string& err) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet) {
+        COutPoint outpoint;
+        key >> outpoint;
+
+        BridgePendingOperation operation;
+        value >> operation;
+        if (operation.funding_outpoint != outpoint) {
+            err = "Bridge pending record outpoint mismatch";
+            return DBErrors::NONCRITICAL_ERROR;
+        }
+        if (!pwallet->LoadPendingBridgeOperation(operation)) {
+            err = "Bridge pending record is invalid or duplicated";
+            return DBErrors::NONCRITICAL_ERROR;
+        }
+        return DBErrors::LOAD_OK;
+    });
+    return pending_res.m_result;
+}
+
+static DBErrors LoadArchivedBridgeRecords(CWallet* pwallet, DatabaseBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet)
+{
+    AssertLockHeld(pwallet->cs_wallet);
+    LoadResult archived_res = LoadRecords(pwallet, batch, DBKeys::BRIDGEARCHIVE,
+        [] (CWallet* pwallet, DataStream& key, DataStream& value, std::string& err) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet) {
+        COutPoint outpoint;
+        key >> outpoint;
+
+        BridgeArchivedOperation operation;
+        value >> operation;
+        if (operation.operation.funding_outpoint != outpoint) {
+            err = "Bridge archive record outpoint mismatch";
+            return DBErrors::NONCRITICAL_ERROR;
+        }
+        if (!pwallet->LoadArchivedBridgeOperation(operation)) {
+            err = "Bridge archive record is invalid or duplicated";
+            return DBErrors::NONCRITICAL_ERROR;
+        }
+        return DBErrors::LOAD_OK;
+    });
+    return archived_res.m_result;
+}
+
 static DBErrors LoadActiveSPKMs(CWallet* pwallet, DatabaseBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet)
 {
     AssertLockHeld(pwallet->cs_wallet);
@@ -1396,6 +1464,10 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
 
         // Load tx records
         result = std::max(LoadTxRecords(pwallet, *m_batch, upgraded_txs, any_unordered), result);
+
+        // Load pending bridge recovery journal
+        result = std::max(LoadPendingBridgeRecords(pwallet, *m_batch), result);
+        result = std::max(LoadArchivedBridgeRecords(pwallet, *m_batch), result);
 
         // Load SPKMs
         result = std::max(LoadActiveSPKMs(pwallet, *m_batch), result);

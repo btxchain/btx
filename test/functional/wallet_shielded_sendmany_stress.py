@@ -22,7 +22,7 @@ class WalletShieldedSendmanyStressTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [[]]
+        self.extra_args = [["-regtestshieldedmatrictdisableheight=500"]]
         # Repeated direct SMILE proving can legitimately exceed the framework's
         # default per-call HTTP timeout on slower CI/dev machines.
         self.rpc_timeout = 180

@@ -41,6 +41,7 @@ from test_framework.messages import (
     msg_cfheaders,
     msg_cfilter,
     msg_cmpctblock,
+    msg_dandelionacc,
     msg_feefilter,
     msg_filteradd,
     msg_filterclear,
@@ -71,6 +72,7 @@ from test_framework.messages import (
     msg_version,
     MSG_WTX,
     msg_wtxidrelay,
+    NODE_MATMUL_CONSENSUS,
     NODE_NETWORK,
     NODE_WITNESS,
     MAGIC_BYTES,
@@ -94,8 +96,9 @@ MIN_P2P_VERSION_SUPPORTED = 60001
 # The P2P version that this test framework implements and sends in its `version` message.
 # BTX currently enforces MIN_PEER_PROTO_VERSION=800001 on regtest/testnet/mainnet.
 P2P_VERSION = 800001
-# The services that this test framework offers in its `version` message
-P2P_SERVICES = NODE_NETWORK | NODE_WITNESS
+# The services that this test framework offers in its `version` message.
+# BTX peers in consensus-validation mode expect NODE_MATMUL_CONSENSUS.
+P2P_SERVICES = NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS
 # The P2P user agent string that this test framework sends in its `version` message
 P2P_SUBVERSION = "/python-p2p-tester:0.0.3/"
 # Value for relay that this test framework sends in its `version` message
@@ -118,6 +121,7 @@ MESSAGEMAP = {
     b"cfheaders": msg_cfheaders,
     b"cfilter": msg_cfilter,
     b"cmpctblock": msg_cmpctblock,
+    b"dandelionacc": msg_dandelionacc,
     b"feefilter": msg_feefilter,
     b"filteradd": msg_filteradd,
     b"filterclear": msg_filterclear,
@@ -531,6 +535,7 @@ class P2PInterface(P2PConnection):
     def on_cfheaders(self, message): pass
     def on_cfilter(self, message): pass
     def on_cmpctblock(self, message): pass
+    def on_dandelionacc(self, message): pass
     def on_feefilter(self, message): pass
     def on_filteradd(self, message): pass
     def on_filterclear(self, message): pass

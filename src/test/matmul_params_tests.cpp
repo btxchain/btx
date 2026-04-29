@@ -130,6 +130,7 @@ BOOST_AUTO_TEST_CASE(matmul_params_shieldedv2dev)
     BOOST_CHECK(c.fSkipMatMulValidation);
     BOOST_CHECK_EQUAL(c.nMatMulDimension, 64U);
     BOOST_CHECK_EQUAL(c.nFastMineHeight, 0);
+    BOOST_CHECK_EQUAL(c.nShieldedSpendPathRecoveryActivationHeight, 88'000);
     BOOST_CHECK_EQUAL(params->GetDefaultPort(), 19444);
     BOOST_CHECK_EQUAL(params->Bech32HRP(), "btxv2");
     BOOST_CHECK_EQUAL(params->GenesisBlock().GetHash().GetHex(), "4ed72f2a7db044ff555197cddde63b1f50b74d750674316f75c3571ade9c80a3");

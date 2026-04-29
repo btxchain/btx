@@ -25,6 +25,8 @@ class CKeyPool;
 class CMasterKey;
 class CWallet;
 class CWalletTx;
+struct BridgeArchivedOperation;
+struct BridgePendingOperation;
 struct WalletContext;
 
 /**
@@ -63,6 +65,8 @@ extern const std::string ACENTRY;
 extern const std::string ACTIVEEXTERNALSPK;
 extern const std::string ACTIVEINTERNALSPK;
 extern const std::string BESTBLOCK;
+extern const std::string BRIDGEARCHIVE;
+extern const std::string BRIDGEPENDING;
 extern const std::string BESTBLOCK_NOMERKLE;
 extern const std::string CRYPTED_KEY;
 extern const std::string CSCRIPT;
@@ -248,6 +252,10 @@ public:
 
     bool WriteTx(const CWalletTx& wtx);
     bool EraseTx(uint256 hash);
+    bool WriteArchivedBridgeOperation(const BridgeArchivedOperation& operation);
+    bool EraseArchivedBridgeOperation(const COutPoint& outpoint);
+    bool WritePendingBridgeOperation(const BridgePendingOperation& operation);
+    bool ErasePendingBridgeOperation(const COutPoint& outpoint);
 
     bool WriteKeyMetadata(const CKeyMetadata& meta, const CPubKey& pubkey, const bool overwrite);
     bool WriteKey(const CPubKey& vchPubKey, const CPrivKey& vchPrivKey, const CKeyMetadata &keyMeta);

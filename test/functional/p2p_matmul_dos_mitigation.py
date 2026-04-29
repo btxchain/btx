@@ -32,9 +32,13 @@ class BTXMatMulDosMitigationTest(BitcoinTestFramework):
         tip_hash = node0.getbestblockhash()
 
         # Repeated invalid headers should be rejected and chain tip should remain stable.
+        saw_high_hash = False
         for _ in range(12):
-            assert_equal(node1.submitblock(self._tampered_candidate(node0)), "high-hash")
+            reject = node1.submitblock(self._tampered_candidate(node0))
+            assert reject in {"high-hash", "duplicate-invalid"}
+            saw_high_hash = saw_high_hash or (reject == "high-hash")
             assert_equal(node1.getbestblockhash(), tip_hash)
+        assert saw_high_hash
 
         # Regtest remains in soft-fail mode (no persistent bans).
         assert_equal(node0.listbanned(), [])

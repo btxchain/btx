@@ -56,11 +56,19 @@ by external L2 / bridge operators:
 - `bridge_submitshieldtx`
 - `bridge_buildunshieldtx`
 - `bridge_submitunshieldtx`
+- `bridge_importpending`
+- `bridge_listpending`
+- `bridge_listarchive`
+- `bridge_recoverpending`
+- `bridge_prunearchive`
 - `bridge_buildrefund`
 - `bridge_decodeattestation`
 
 These commands are wallet-scoped because they depend on local PQ key material,
 shielded recipients, optional view-grant recipients, and PSBT signing context.
+
+For the wallet-managed pending-batch recovery and archive-retention model, see
+[BTX Bridge Pending Recovery](btx-bridge-pending-recovery.md).
 
 ```sh
 # Build a bridge-out plan on the wallet endpoint

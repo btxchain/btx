@@ -10,6 +10,7 @@ import time
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.messages import (
+    NODE_MATMUL_CONSENSUS,
     NODE_NETWORK,
     NODE_NETWORK_LIMITED,
     NODE_NONE,
@@ -31,6 +32,12 @@ DESIRABLE_SERVICE_FLAGS_PRUNED = NODE_NETWORK_LIMITED | NODE_WITNESS
 class P2PHandshakeTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
+
+    def desirable_service_flags(self, node, base_flags):
+        local_services = int(node.getnetworkinfo()["localservices"], 16)
+        if local_services & NODE_MATMUL_CONSENSUS:
+            return base_flags | NODE_MATMUL_CONSENSUS
+        return base_flags
 
     def add_outbound_connection(self, node, connection_type, services, wait_for_disconnect):
         peer = node.add_outbound_p2p_connection(
@@ -71,21 +78,23 @@ class P2PHandshakeTest(BitcoinTestFramework):
 
     def run_test(self):
         node = self.nodes[0]
+        desirable_full = self.desirable_service_flags(node, DESIRABLE_SERVICE_FLAGS_FULL)
+        desirable_pruned = self.desirable_service_flags(node, DESIRABLE_SERVICE_FLAGS_PRUNED)
         self.log.info("Check that lacking desired service flags leads to disconnect (non-pruned peers)")
         self.test_desirable_service_flags(node, [NODE_NONE, NODE_NETWORK, NODE_WITNESS],
-                                          DESIRABLE_SERVICE_FLAGS_FULL, expect_disconnect=True)
-        self.test_desirable_service_flags(node, [NODE_NETWORK | NODE_WITNESS],
-                                          DESIRABLE_SERVICE_FLAGS_FULL, expect_disconnect=False)
+                                          desirable_full, expect_disconnect=True)
+        self.test_desirable_service_flags(node, [NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS],
+                                          desirable_full, expect_disconnect=False)
 
         self.log.info("Check that limited peers are only desired when the local chain is close to the tip")
         # Use a large gap to guarantee we're outside the policy threshold.
         self.generate_at_mocktime(int(time.time()) - 7 * 24 * 3600)
         self.test_desirable_service_flags(node, [NODE_NETWORK_LIMITED | NODE_WITNESS],
-                                          DESIRABLE_SERVICE_FLAGS_FULL, expect_disconnect=True)
+                                          desirable_full, expect_disconnect=True)
         # Use current time to guarantee we are within the policy threshold.
         self.generate_at_mocktime(int(time.time()))
-        self.test_desirable_service_flags(node, [NODE_NETWORK_LIMITED | NODE_WITNESS],
-                                          DESIRABLE_SERVICE_FLAGS_PRUNED, expect_disconnect=False)
+        self.test_desirable_service_flags(node, [NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_MATMUL_CONSENSUS],
+                                          desirable_pruned, expect_disconnect=False)
 
         self.log.info("Check that feeler connections get disconnected immediately")
         with node.assert_debug_log(["feeler connection completed"]):

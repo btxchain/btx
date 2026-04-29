@@ -191,6 +191,32 @@ public:
     }
 };
 
+class ScopedPrepareWorkersEnv
+{
+public:
+    explicit ScopedPrepareWorkersEnv(const char* value)
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_PREPARE_WORKERS", value != nullptr ? value : "");
+#else
+        if (value != nullptr) {
+            setenv("BTX_MATMUL_PREPARE_WORKERS", value, 1);
+        } else {
+            unsetenv("BTX_MATMUL_PREPARE_WORKERS");
+        }
+#endif
+    }
+
+    ~ScopedPrepareWorkersEnv()
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_PREPARE_WORKERS", "");
+#else
+        unsetenv("BTX_MATMUL_PREPARE_WORKERS");
+#endif
+    }
+};
+
 class ScopedHeaderTimeRefreshEnv
 {
 public:
@@ -291,6 +317,32 @@ public:
         _putenv_s("BTX_MATMUL_SOLVER_THREADS", "");
 #else
         unsetenv("BTX_MATMUL_SOLVER_THREADS");
+#endif
+    }
+};
+
+class ScopedApplePerfLogicalCpuOverrideEnv
+{
+public:
+    explicit ScopedApplePerfLogicalCpuOverrideEnv(const char* value)
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_APPLE_PERFLEVEL0_LOGICALCPU_OVERRIDE", value != nullptr ? value : "");
+#else
+        if (value != nullptr) {
+            setenv("BTX_MATMUL_APPLE_PERFLEVEL0_LOGICALCPU_OVERRIDE", value, 1);
+        } else {
+            unsetenv("BTX_MATMUL_APPLE_PERFLEVEL0_LOGICALCPU_OVERRIDE");
+        }
+#endif
+    }
+
+    ~ScopedApplePerfLogicalCpuOverrideEnv()
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_APPLE_PERFLEVEL0_LOGICALCPU_OVERRIDE", "");
+#else
+        unsetenv("BTX_MATMUL_APPLE_PERFLEVEL0_LOGICALCPU_OVERRIDE");
 #endif
     }
 };
@@ -658,6 +710,7 @@ BOOST_AUTO_TEST_CASE(ChainParams_TESTNET_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.BIP66Height, 0);
     BOOST_CHECK_EQUAL(consensus.CSVHeight, 0);
     BOOST_CHECK_EQUAL(consensus.SegwitHeight, 0);
+    BOOST_CHECK_EQUAL(consensus.nShieldedSpendPathRecoveryActivationHeight, 88'000);
     BOOST_CHECK_EQUAL(
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nStartTime,
         Consensus::BIP9Deployment::ALWAYS_ACTIVE);
@@ -701,6 +754,7 @@ BOOST_AUTO_TEST_CASE(ChainParams_TESTNET4_btx_network_identity)
     BOOST_CHECK(params->FixedSeeds().empty());
     BOOST_CHECK(params->GetAvailableSnapshotHeights().empty());
     BOOST_CHECK(!params->AssumeutxoForHeight(110));
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedSpendPathRecoveryActivationHeight, 88'000);
 }
 
 BOOST_AUTO_TEST_CASE(ChainParams_TESTNET4_sanity)
@@ -711,6 +765,12 @@ BOOST_AUTO_TEST_CASE(ChainParams_TESTNET4_sanity)
 BOOST_AUTO_TEST_CASE(ChainParams_SIGNET_sanity)
 {
     sanity_check_chainparams(*m_node.args, ChainType::SIGNET);
+}
+
+BOOST_AUTO_TEST_CASE(ChainParams_SIGNET_shielded_activation_heights)
+{
+    const auto params = CreateChainParams(*m_node.args, ChainType::SIGNET);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedSpendPathRecoveryActivationHeight, 88'000);
 }
 
 BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
@@ -763,6 +823,7 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nShieldedTxBindingActivationHeight, 61'000);
     BOOST_CHECK_EQUAL(consensus.nShieldedBridgeTagActivationHeight, 61'000);
     BOOST_CHECK_EQUAL(consensus.nShieldedSmileRiceCodecDisableHeight, 61'000);
+    BOOST_CHECK_EQUAL(consensus.nShieldedSpendPathRecoveryActivationHeight, 88'000);
 }
 
 BOOST_AUTO_TEST_CASE(ChainParams_MAIN_genesis_reduced_data_compliant)
@@ -853,6 +914,8 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nShieldedBridgeTagActivationHeight, 0);
     BOOST_CHECK_EQUAL(consensus.nShieldedSmileRiceCodecDisableHeight, 0);
     BOOST_CHECK_EQUAL(consensus.nShieldedMatRiCTDisableHeight, 0);
+    BOOST_CHECK_EQUAL(consensus.nShieldedSpendPathRecoveryActivationHeight, 0);
+    BOOST_CHECK(consensus.IsShieldedSpendPathRecoveryActive(0));
     BOOST_CHECK_EQUAL_COLLECTIONS(snapshot_heights.begin(),
                                   snapshot_heights.end(),
                                   expected_snapshot_heights.begin(),
@@ -1134,10 +1197,10 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
 
     BOOST_CHECK_EQUAL(
         consensus.nMinimumChainWork.GetHex(),
-        "0000000000000000000000000000000000000000000000000000000278daaa26");
+        "0000000000000000000000000000000000000000000000000000000ba5df2617");
     BOOST_CHECK_EQUAL(
         consensus.defaultAssumeValid.GetHex(),
-        "d58f6755e52467ed624dfcd0be4e8ee0731b8e7525e8dc4cf9482879d0dfe3f8");
+        "bbb36b59df48e364dcf32e8ca13f3e5a89fdc16c483fa26779c43da5feb4d40c");
     BOOST_CHECK_EQUAL(params->AssumedBlockchainSize(), 16U);
     BOOST_CHECK_EQUAL(params->AssumedChainStateSize(), 1U);
 
@@ -1148,11 +1211,11 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
     BOOST_CHECK_EQUAL(
         it_0->second.GetHex(),
         "75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601");
-    const auto it_anchor = checkpoints.find(71433);
+    const auto it_anchor = checkpoints.find(85850);
     BOOST_REQUIRE(it_anchor != checkpoints.end());
     BOOST_CHECK_EQUAL(
         it_anchor->second.GetHex(),
-        "d58f6755e52467ed624dfcd0be4e8ee0731b8e7525e8dc4cf9482879d0dfe3f8");
+        "bbb36b59df48e364dcf32e8ca13f3e5a89fdc16c483fa26779c43da5feb4d40c");
 
     const auto assumeutxo_55000 = params->AssumeutxoForHeight(55000);
     BOOST_REQUIRE(assumeutxo_55000.has_value());
@@ -1209,11 +1272,22 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_71435->blockhash.GetHex(),
         "46f81957ac0d40c57eef01810f4da3abb8e8a2c67ebb9fd88f36b1cc5a8e7be0");
 
+    const auto assumeutxo_85850 = params->AssumeutxoForHeight(85850);
+    BOOST_REQUIRE(assumeutxo_85850.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_85850->height, 85850);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_85850->hash_serialized.ToString(),
+        "c0dc455137b4e30554ec91570e198d9c80b1e934f41bece43040e133c8ba9328");
+    BOOST_CHECK_EQUAL(assumeutxo_85850->m_chain_tx_count, 101463U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_85850->blockhash.GetHex(),
+        "bbb36b59df48e364dcf32e8ca13f3e5a89fdc16c483fa26779c43da5feb4d40c");
+
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 5U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 6U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 71435);
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 85850);
     BOOST_CHECK_GE(snapshot_heights.back(), std::prev(checkpoints.end())->first);
 }
 
@@ -1789,6 +1863,48 @@ BOOST_AUTO_TEST_CASE(matmul_solve_extends_prefetch_queue_for_tuned_multi_nonce_b
     BOOST_CHECK_GE(stats.prefetched_inputs, 4U);
 }
 
+BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batches_for_metal_product_mining_auto_policy)
+{
+    ScopedBackendEnv backend_env("metal");
+    ScopedSolverThreadsEnv solver_threads_env(nullptr);
+    ScopedApplePerfLogicalCpuOverrideEnv perf_override_env("10");
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulDimension = 512;
+    consensus.nMatMulTranscriptBlockSize = 16;
+    consensus.nMatMulNoiseRank = 8;
+    consensus.nMatMulPreHashEpsilonBits = 0;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    CBlockHeader candidate{};
+    candidate.nVersion = 4;
+    candidate.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000031"};
+    candidate.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000032"};
+    candidate.nTime = 1'700'000'121U;
+    candidate.nBits = arith_uint256{1}.GetCompact();
+    candidate.nNonce64 = 0;
+    candidate.nNonce = 0;
+    candidate.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+    candidate.seed_a = DeterministicMatMulSeed(candidate.hashPrevBlock, /*height=*/0, /*which=*/0);
+    candidate.seed_b = DeterministicMatMulSeed(candidate.hashPrevBlock, /*height=*/0, /*which=*/1);
+    candidate.matmul_digest.SetNull();
+
+    uint64_t max_tries{4096};
+    ResetMatMulSolvePipelineStats();
+    const bool solved = SolveMatMul(candidate, consensus, max_tries, /*block_height=*/61'000);
+    BOOST_CHECK(!solved);
+
+    const auto stats = ProbeMatMulSolvePipelineStats();
+    const auto metal_capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
+    if (metal_capability.available) {
+        BOOST_CHECK_EQUAL(stats.batch_size, 2U);
+        BOOST_CHECK(stats.parallel_solver_enabled);
+    } else {
+        BOOST_CHECK_EQUAL(stats.batch_size, 1U);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(matmul_solve_processes_nonce_attempts_in_deterministic_batches_when_enabled)
 {
     ScopedBatchSizeEnv batch_size_env("3");
@@ -2014,7 +2130,7 @@ BOOST_AUTO_TEST_CASE(matmul_solve_defaults_to_single_nonce_batch_for_mainnet_sha
     BOOST_CHECK_EQUAL(stats.prefetched_inputs, 0U);
 }
 
-BOOST_AUTO_TEST_CASE(matmul_solve_uses_multi_nonce_batch_for_post_activation_mainnet_shape)
+BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batch_for_post_activation_mainnet_shape)
 {
     ScopedBatchSizeEnv batch_size_env(nullptr);
     ScopedBackendEnv backend_env("metal");
@@ -2049,11 +2165,101 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_multi_nonce_batch_for_post_activation_mai
     BOOST_CHECK(!solved);
 
     const auto stats = ProbeMatMulSolvePipelineStats();
-    BOOST_CHECK_EQUAL(stats.batch_size, 1U);
+    BOOST_CHECK_EQUAL(stats.batch_size, 2U);
     BOOST_CHECK_EQUAL(
         stats.async_prepare_enabled,
         matmul::accelerated::ResolveMiningBackendFromEnvironment().active == matmul::backend::Kind::METAL ||
             matmul::accelerated::ResolveMiningBackendFromEnvironment().active == matmul::backend::Kind::CUDA);
+}
+
+BOOST_AUTO_TEST_CASE(matmul_solve_uses_high_perf_apple_metal_defaults_when_perf_override_is_large)
+{
+    ScopedBatchSizeEnv batch_size_env(nullptr);
+    ScopedPrefetchDepthEnv prefetch_depth_env(nullptr);
+    ScopedPrepareWorkersEnv prepare_workers_env(nullptr);
+    ScopedBackendEnv backend_env("metal");
+    ScopedSolverThreadsEnv solver_threads_env(nullptr);
+    ScopedApplePerfLogicalCpuOverrideEnv perf_override_env("10");
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.fMatMulFreivaldsEnabled = true;
+    consensus.fMatMulRequireProductPayload = false;
+    consensus.nMatMulFreivaldsBindingHeight = 61'000;
+    consensus.nMatMulDimension = 512;
+    consensus.nMatMulTranscriptBlockSize = 16;
+    consensus.nMatMulNoiseRank = 8;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    CBlockHeader candidate{};
+    candidate.nVersion = 4;
+    candidate.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000019"};
+    candidate.hashMerkleRoot = uint256{"000000000000000000000000000000000000000000000000000000000000001a"};
+    candidate.nTime = 1'700'000'347U;
+    candidate.nBits = arith_uint256{1}.GetCompact();
+    candidate.nNonce64 = 0;
+    candidate.nNonce = 0;
+    candidate.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+    candidate.seed_a = DeterministicMatMulSeed(candidate.hashPrevBlock, /*height=*/0, /*which=*/0);
+    candidate.seed_b = DeterministicMatMulSeed(candidate.hashPrevBlock, /*height=*/0, /*which=*/1);
+    candidate.matmul_digest.SetNull();
+
+    uint64_t max_tries{4};
+    ResetMatMulSolvePipelineStats();
+    const bool solved = SolveMatMul(candidate, consensus, max_tries, /*block_height_override=*/61'000);
+    BOOST_CHECK(!solved);
+
+    const auto stats = ProbeMatMulSolvePipelineStats();
+    BOOST_CHECK(stats.parallel_solver_enabled);
+    BOOST_CHECK_EQUAL(stats.parallel_solver_threads, 6U);
+    BOOST_CHECK_EQUAL(stats.async_prepare_worker_threads, 5U);
+    BOOST_CHECK_EQUAL(stats.batch_size, 2U);
+    BOOST_CHECK_EQUAL(stats.prefetch_depth, 1U);
+}
+
+BOOST_AUTO_TEST_CASE(matmul_solve_uses_conservative_generic_apple_metal_prefetch_default)
+{
+    ScopedBatchSizeEnv batch_size_env(nullptr);
+    ScopedPrefetchDepthEnv prefetch_depth_env(nullptr);
+    ScopedPrepareWorkersEnv prepare_workers_env(nullptr);
+    ScopedBackendEnv backend_env("metal");
+    ScopedSolverThreadsEnv solver_threads_env(nullptr);
+    ScopedApplePerfLogicalCpuOverrideEnv perf_override_env("4");
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.fMatMulFreivaldsEnabled = true;
+    consensus.fMatMulRequireProductPayload = false;
+    consensus.nMatMulFreivaldsBindingHeight = 61'000;
+    consensus.nMatMulDimension = 512;
+    consensus.nMatMulTranscriptBlockSize = 16;
+    consensus.nMatMulNoiseRank = 8;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    CBlockHeader candidate{};
+    candidate.nVersion = 4;
+    candidate.hashPrevBlock = uint256{"000000000000000000000000000000000000000000000000000000000000001b"};
+    candidate.hashMerkleRoot = uint256{"000000000000000000000000000000000000000000000000000000000000001c"};
+    candidate.nTime = 1'700'000'359U;
+    candidate.nBits = arith_uint256{1}.GetCompact();
+    candidate.nNonce64 = 0;
+    candidate.nNonce = 0;
+    candidate.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+    candidate.seed_a = DeterministicMatMulSeed(candidate.hashPrevBlock, /*height=*/0, /*which=*/0);
+    candidate.seed_b = DeterministicMatMulSeed(candidate.hashPrevBlock, /*height=*/0, /*which=*/1);
+    candidate.matmul_digest.SetNull();
+
+    uint64_t max_tries{4};
+    ResetMatMulSolvePipelineStats();
+    const bool solved = SolveMatMul(candidate, consensus, max_tries, /*block_height_override=*/61'000);
+    BOOST_CHECK(!solved);
+
+    const auto stats = ProbeMatMulSolvePipelineStats();
+    BOOST_CHECK(!stats.parallel_solver_enabled);
+    BOOST_CHECK_EQUAL(stats.parallel_solver_threads, 1U);
+    BOOST_CHECK_GE(stats.async_prepare_worker_threads, 1U);
+    BOOST_CHECK_EQUAL(stats.batch_size, 2U);
+    BOOST_CHECK_EQUAL(stats.prefetch_depth, 1U);
 }
 
 BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batch_on_tuned_mainnet_shape)

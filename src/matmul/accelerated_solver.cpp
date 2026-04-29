@@ -140,6 +140,12 @@ enum class GpuInputGenerationPolicy {
     AUTO,
 };
 
+enum class CudaDevicePreparedInputsPolicy {
+    FORCED_OFF,
+    FORCED_ON,
+    AUTO,
+};
+
 GpuInputGenerationPolicy ResolveGpuInputGenerationPolicy()
 {
     const char* env = std::getenv("BTX_MATMUL_GPU_INPUTS");
@@ -150,6 +156,18 @@ GpuInputGenerationPolicy ResolveGpuInputGenerationPolicy()
         return GpuInputGenerationPolicy::FORCED_OFF;
     }
     return GpuInputGenerationPolicy::FORCED_ON;
+}
+
+CudaDevicePreparedInputsPolicy ResolveCudaDevicePreparedInputsPolicy()
+{
+    const char* env = std::getenv("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS");
+    if (env == nullptr || env[0] == '\0') {
+        return CudaDevicePreparedInputsPolicy::AUTO;
+    }
+    if (env[0] == '0') {
+        return CudaDevicePreparedInputsPolicy::FORCED_OFF;
+    }
+    return CudaDevicePreparedInputsPolicy::FORCED_ON;
 }
 
 Matrix MatrixFromRowMajorWords(uint32_t rows,
@@ -231,10 +249,36 @@ bool ShouldAutoUseCudaGpuGeneratedInputs(uint32_t n,
         (n >= 256 && transcript_block_size >= 8 && noise_rank >= 4);
 }
 
-bool ShouldUseCudaDevicePreparedInputsFastPath()
+bool ShouldAutoUseCudaDevicePreparedInputsFastPath(uint32_t n,
+                                                   uint32_t transcript_block_size,
+                                                   uint32_t noise_rank,
+                                                   DigestScheme digest_scheme)
 {
-    const char* policy_env = std::getenv("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS");
-    return policy_env != nullptr && policy_env[0] != '\0' && policy_env[0] != '0';
+    return digest_scheme == DigestScheme::PRODUCT_COMMITTED &&
+        n >= 512 &&
+        transcript_block_size >= 16 &&
+        noise_rank >= 8;
+}
+
+bool ShouldUseCudaDevicePreparedInputsFastPath(uint32_t n,
+                                               uint32_t transcript_block_size,
+                                               uint32_t noise_rank,
+                                               DigestScheme digest_scheme)
+{
+    switch (ResolveCudaDevicePreparedInputsPolicy()) {
+    case CudaDevicePreparedInputsPolicy::FORCED_OFF:
+        return false;
+    case CudaDevicePreparedInputsPolicy::FORCED_ON:
+        return true;
+    case CudaDevicePreparedInputsPolicy::AUTO:
+        return ShouldAutoUseCudaDevicePreparedInputsFastPath(
+            n,
+            transcript_block_size,
+            noise_rank,
+            digest_scheme);
+    }
+
+    return false;
 }
 
 void SetLastMetalFallbackError(const std::string& error)
@@ -363,6 +407,8 @@ std::vector<DigestResult> ComputeCudaDigestsPreparedBatch(const std::vector<CBlo
                     .batch_size = static_cast<uint32_t>(prepared_batch.size()),
                     .matrix_a = A.data(),
                     .matrix_b = B.data(),
+                    .matrix_a_cache_key = &blocks.front().seed_a,
+                    .matrix_b_cache_key = &blocks.front().seed_b,
                     .generated_inputs = generated_inputs.data(),
                 },
                 ToCudaCompressedWordsMode(digest_scheme));
@@ -393,6 +439,8 @@ std::vector<DigestResult> ComputeCudaDigestsPreparedBatch(const std::vector<CBlo
                     .batch_size = static_cast<uint32_t>(prepared_batch.size()),
                     .matrix_a = A.data(),
                     .matrix_b = B.data(),
+                    .matrix_a_cache_key = &blocks.front().seed_a,
+                    .matrix_b_cache_key = &blocks.front().seed_b,
                     .noise_e_l = noise_e_l_ptrs.data(),
                     .noise_e_r = noise_e_r_ptrs.data(),
                     .noise_f_l = noise_f_l_ptrs.data(),
@@ -512,6 +560,9 @@ uint32_t ResolveMetalDigestSliceSize(uint32_t batch_size)
     }
 
     if (batch_size <= 2) {
+        // The current threaded Metal mining profile benefits from batch-size 2
+        // while still preferring single-digest slices. Wider slicing only pays
+        // off once batches are already larger than the new default.
         return 1;
     }
     return 2;
@@ -721,7 +772,8 @@ PreparedDigestInputs PrepareMatMulDigestInputs(const CBlockHeader& block,
 PreparedDigestInputs PrepareMatMulDigestInputsForBackend(const CBlockHeader& block,
                                                          uint32_t transcript_block_size,
                                                          uint32_t noise_rank,
-                                                         backend::Kind preferred_backend)
+                                                         backend::Kind preferred_backend,
+                                                         DigestScheme digest_scheme)
 {
     const uint32_t n = block.matmul_dim;
     const uint256 sigma = DeriveSigma(block);
@@ -769,7 +821,11 @@ PreparedDigestInputs PrepareMatMulDigestInputsForBackend(const CBlockHeader& blo
                         generated.error);
                 }
             } else if (preferred_backend == backend::Kind::CUDA) {
-                if (ShouldUseCudaDevicePreparedInputsFastPath()) {
+                if (ShouldUseCudaDevicePreparedInputsFastPath(
+                        n,
+                        transcript_block_size,
+                        noise_rank,
+                        digest_scheme)) {
                     const auto generated = btx::cuda::GenerateMatMulInputsGPUDevice({
                         .n = n,
                         .b = transcript_block_size,
@@ -936,6 +992,8 @@ DigestResult ComputeMatMulDigestPrepared(const CBlockHeader& block,
                         .batch_size = 1,
                         .matrix_a = A.data(),
                         .matrix_b = B.data(),
+                        .matrix_a_cache_key = &block.seed_a,
+                        .matrix_b_cache_key = &block.seed_b,
                         .generated_inputs = generated_inputs,
                     },
                     ToCudaCompressedWordsMode(digest_scheme));
@@ -954,6 +1012,8 @@ DigestResult ComputeMatMulDigestPrepared(const CBlockHeader& block,
                         .batch_size = 1,
                         .matrix_a = A.data(),
                         .matrix_b = B.data(),
+                        .matrix_a_cache_key = &block.seed_a,
+                        .matrix_b_cache_key = &block.seed_b,
                         .noise_e_l = noise_e_l_ptrs,
                         .noise_e_r = noise_e_r_ptrs,
                         .noise_f_l = noise_f_l_ptrs,
@@ -1361,7 +1421,10 @@ DigestBatchSubmission SubmitMatMulDigestPreparedBatchForMining(const std::vector
         sigmas.push_back(prepared.sigma);
     }
 
-    const uint32_t slice_size = ResolveMetalDigestSliceSize(static_cast<uint32_t>(blocks.size()));
+    const uint32_t slice_size =
+        digest_scheme == DigestScheme::PRODUCT_COMMITTED
+            ? 1
+            : ResolveMetalDigestSliceSize(static_cast<uint32_t>(blocks.size()));
     std::vector<DigestBatchSubmissionState::MetalSubmissionSlice> metal_submissions;
     metal_submissions.reserve((blocks.size() + slice_size - 1) / slice_size);
     for (size_t start = 0; start < blocks.size(); start += slice_size) {
@@ -1707,7 +1770,8 @@ DigestResult ComputeMatMulDigest(const CBlockHeader& block,
         block,
         transcript_block_size,
         noise_rank,
-        preferred_backend);
+        preferred_backend,
+        digest_scheme);
     return ComputeMatMulDigestPrepared(
         block,
         A,

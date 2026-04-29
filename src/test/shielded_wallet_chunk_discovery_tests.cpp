@@ -12,8 +12,10 @@
 #include <noui.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
+#include <shielded/bundle.h>
 #include <shielded/note.h>
 #include <shielded/note_encryption.h>
+#include <script/sign.h>
 #include <streams.h>
 #include <shielded/smile2/wallet_bridge.h>
 #include <shielded/v2_ingress.h>
@@ -27,6 +29,7 @@
 #include <wallet/shielded_wallet.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
+#include <validation.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -76,26 +79,6 @@ uint256 DeriveUint256(std::string_view tag, uint32_t index)
         value.begin()[0] = 1;
     }
     return value;
-}
-
-test::shielded::V2EgressReceiptFixture BuildChunkedEgressFixture(
-    std::vector<OutputDescription> outputs,
-    std::vector<uint32_t> output_chunk_sizes,
-    CAmount total_amount)
-{
-    auto consensus = Params().GetConsensus();
-    int32_t validation_height = consensus.nShieldedMatRiCTDisableHeight - 1;
-    if (consensus.nShieldedMatRiCTDisableHeight <= 0) {
-        consensus.nShieldedMatRiCTDisableHeight = 1;
-        validation_height = 0;
-    }
-    return test::shielded::BuildV2EgressReceiptFixture(std::move(outputs),
-                                                       std::move(output_chunk_sizes),
-                                                       total_amount,
-                                                       /*proof_receipt_count=*/1,
-                                                       /*required_receipts=*/1,
-                                                       &consensus,
-                                                       validation_height);
 }
 
 ShieldedNote MakeNote(const uint256& recipient_pk_hash, CAmount value, uint32_t seed)
@@ -258,6 +241,29 @@ std::vector<smile2::wallet::SmileRingMember> BuildIngressSpendSmileRingMembers(
     return members;
 }
 
+std::vector<smile2::wallet::SmileRingMember> BuildDirectSpendSmileRingMembers(
+    const std::vector<uint256>& ring_members,
+    const ShieldedNote& real_note,
+    const uint256& real_note_commitment,
+    size_t real_index)
+{
+    std::vector<smile2::wallet::SmileRingMember> members;
+    members.reserve(ring_members.size());
+    for (const uint256& commitment : ring_members) {
+        members.push_back(
+            smile2::wallet::BuildPlaceholderRingMember(smile2::wallet::SMILE_GLOBAL_SEED, commitment));
+    }
+
+    auto real_member = smile2::wallet::BuildRingMemberFromNote(smile2::wallet::SMILE_GLOBAL_SEED,
+                                                               real_note,
+                                                               real_note_commitment);
+    if (!real_member.has_value()) {
+        throw std::runtime_error("failed to encode real direct smile ring member fixture");
+    }
+    members[real_index] = *real_member;
+    return members;
+}
+
 shielded::v2::V2IngressLeafInput BuildIngressLeafInput(unsigned char seed, CAmount amount, CAmount fee)
 {
     shielded::v2::V2IngressLeafInput leaf;
@@ -311,10 +317,41 @@ struct ShieldedWalletChunkDiscoverySetup : public TestChain100Setup
     SecureString passphrase{"test-passphrase"};
 
     ShieldedWalletChunkDiscoverySetup()
-        : TestChain100Setup{ChainType::REGTEST},
+        : TestChain100Setup{ChainType::REGTEST,
+                            {.extra_args = {
+                                 "-regtestshieldedspendpathrecoveryactivationheight=2147483647",
+                             }}},
           wallet(m_node.chain.get(), "", wallet::CreateMockableWalletDatabase())
     {
         BOOST_REQUIRE(wallet.LoadWallet() == wallet::DBErrors::LOAD_OK);
+        BOOST_REQUIRE(wallet.EncryptWallet(passphrase));
+        BOOST_REQUIRE(wallet.Unlock(passphrase));
+        wallet.m_shielded_wallet = std::make_shared<wallet::CShieldedWallet>(wallet);
+        shielded_wallet = wallet.m_shielded_wallet;
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        owned_addr = shielded_wallet->GenerateNewAddress();
+        BOOST_REQUIRE(shielded_wallet->GetKEMPublicKey(owned_addr, owned_kem_pk));
+    }
+};
+
+struct ShieldedWalletRecoveryActivationSetup : public TestChain100Setup
+{
+    wallet::CWallet wallet;
+    std::shared_ptr<wallet::CShieldedWallet> shielded_wallet;
+    wallet::ShieldedAddress owned_addr;
+    mlkem::PublicKey owned_kem_pk{};
+    SecureString passphrase{"test-passphrase"};
+
+    ShieldedWalletRecoveryActivationSetup()
+        : TestChain100Setup{ChainType::REGTEST,
+                            {.extra_args = {
+                                 "-regtestshieldedmatrictdisableheight=132",
+                                 "-regtestshieldedspendpathrecoveryactivationheight=1",
+                             }}},
+          wallet(m_node.chain.get(), "", wallet::CreateMockableWalletDatabase())
+    {
+        BOOST_REQUIRE(wallet.LoadWallet() == wallet::DBErrors::LOAD_OK);
+        wallet.SetBroadcastTransactions(true);
         BOOST_REQUIRE(wallet.EncryptWallet(passphrase));
         BOOST_REQUIRE(wallet.Unlock(passphrase));
         wallet.m_shielded_wallet = std::make_shared<wallet::CShieldedWallet>(wallet);
@@ -421,9 +458,9 @@ BOOST_AUTO_TEST_CASE(block_scan_discovers_owned_egress_output_only_when_chunks_a
         BuildOutput(foreign_note_b, foreign_recipient_b.pk, ScanDomain::BATCH, 0xa2),
         BuildOutput(owned_note, owned_kem_pk, ScanDomain::BATCH, 0xa3),
     };
-    const auto fixture = BuildChunkedEgressFixture(
+    const auto fixture = test::shielded::BuildV2EgressReceiptFixture(
         outputs,
-        {2, 1},
+        {},
         foreign_note_a.value + foreign_note_b.value + owned_note.value);
     const CTransaction tx{fixture.tx};
 
@@ -446,23 +483,18 @@ BOOST_AUTO_TEST_CASE(block_scan_discovers_owned_egress_output_only_when_chunks_a
     BOOST_REQUIRE(cached_view.has_value());
     BOOST_REQUIRE_EQUAL(cached_view->family, "v2_egress_batch");
     BOOST_REQUIRE_EQUAL(cached_view->outputs.size(), outputs.size());
-    BOOST_REQUIRE_EQUAL(cached_view->output_chunks.size(), 2U);
+    BOOST_REQUIRE_EQUAL(cached_view->output_chunks.size(), 1U);
     BOOST_CHECK(!cached_view->outputs[0].is_ours);
     BOOST_CHECK(!cached_view->outputs[1].is_ours);
     BOOST_CHECK(cached_view->outputs[2].is_ours);
     BOOST_CHECK_EQUAL(cached_view->outputs[2].amount, owned_note.value);
     BOOST_CHECK_EQUAL(cached_view->output_chunks[0].scan_domain, "opaque");
     BOOST_CHECK_EQUAL(cached_view->output_chunks[0].first_output_index, 0U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].output_count, 2U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_output_count, 0U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_amount, 0);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].scan_domain, "opaque");
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].first_output_index, 2U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].output_count, 1U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].owned_output_count, 1U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].owned_amount, owned_note.value);
-    BOOST_CHECK(!cached_view->output_chunks[1].scan_hint_commitment.IsNull());
-    BOOST_CHECK(!cached_view->output_chunks[1].ciphertext_commitment.IsNull());
+    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].output_count, 3U);
+    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_output_count, 1U);
+    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_amount, owned_note.value);
+    BOOST_CHECK(!cached_view->output_chunks[0].scan_hint_commitment.IsNull());
+    BOOST_CHECK(!cached_view->output_chunks[0].ciphertext_commitment.IsNull());
 }
 
 BOOST_AUTO_TEST_CASE(mempool_scan_skips_egress_outputs_when_chunk_commitment_is_tampered)
@@ -481,9 +513,9 @@ BOOST_AUTO_TEST_CASE(mempool_scan_skips_egress_outputs_when_chunk_commitment_is_
                     ScanDomain::BATCH,
                     0xb6),
     };
-    auto fixture = BuildChunkedEgressFixture(
+    auto fixture = test::shielded::BuildV2EgressReceiptFixture(
         outputs,
-        {2, 1},
+        {},
         owned_note.value + 6 * COIN + 7 * COIN);
     fixture.tx.shielded_bundle.v2_bundle->output_chunks[0].scan_hint_commitment = uint256{0xcc};
     const CTransaction tx{fixture.tx};
@@ -509,9 +541,9 @@ BOOST_AUTO_TEST_CASE(mempool_scan_caches_egress_chunk_summaries_for_canonical_bu
         BuildOutput(foreign_note_b, foreign_recipient_b.pk, ScanDomain::BATCH, 0xc7),
         BuildOutput(owned_note_b, owned_kem_pk, ScanDomain::BATCH, 0xc8),
     };
-    const auto fixture = BuildChunkedEgressFixture(
+    const auto fixture = test::shielded::BuildV2EgressReceiptFixture(
         outputs,
-        {2, 2},
+        {},
         foreign_note_a.value + owned_note_a.value + foreign_note_b.value + owned_note_b.value);
     const CTransaction tx{fixture.tx};
 
@@ -521,15 +553,11 @@ BOOST_AUTO_TEST_CASE(mempool_scan_caches_egress_chunk_summaries_for_canonical_bu
     const auto cached_view = shielded_wallet->GetCachedTransactionView(tx.GetHash());
     BOOST_REQUIRE(cached_view.has_value());
     BOOST_REQUIRE_EQUAL(cached_view->family, "v2_egress_batch");
-    BOOST_REQUIRE_EQUAL(cached_view->output_chunks.size(), 2U);
+    BOOST_REQUIRE_EQUAL(cached_view->output_chunks.size(), 1U);
     BOOST_CHECK_EQUAL(cached_view->output_chunks[0].first_output_index, 0U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].output_count, 2U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_output_count, 1U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_amount, owned_note_a.value);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].first_output_index, 2U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].output_count, 2U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].owned_output_count, 1U);
-    BOOST_CHECK_EQUAL(cached_view->output_chunks[1].owned_amount, owned_note_b.value);
+    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].output_count, 4U);
+    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_output_count, 2U);
+    BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_amount, owned_note_a.value + owned_note_b.value);
 }
 
 CTransaction BuildMinimalV2SendTransaction(const uint256& recipient_pk_hash,
@@ -588,6 +616,83 @@ CTransaction BuildMinimalV2SendTransaction(const uint256& recipient_pk_hash,
     tx.nLockTime = seed;
     tx.shielded_bundle.v2_bundle = tx_bundle;
     return CTransaction{tx};
+}
+
+CMutableTransaction BuildLegacyShieldOnlyTransaction(TestChain100Setup& setup,
+                                                     const CTransactionRef& funding_tx,
+                                                     const uint256& merkle_anchor,
+                                                     const ShieldedNote& note,
+                                                     const mlkem::PublicKey& recipient_kem_pk,
+                                                     uint32_t seed,
+                                                     CAmount fee = shielded::SHIELDED_PRIVACY_FEE_QUANTUM)
+{
+    BOOST_REQUIRE_GT(funding_tx->vout.size(), 0U);
+    BOOST_REQUIRE_GT(funding_tx->vout[0].nValue, fee);
+    BOOST_REQUIRE(!merkle_anchor.IsNull());
+
+    CMutableTransaction tx;
+    tx.vin = {CTxIn{COutPoint{funding_tx->GetHash(), 0}}};
+    tx.version = CTransaction::CURRENT_VERSION;
+    tx.nLockTime = seed;
+
+    CShieldedOutput output;
+    output.note_commitment = note.GetCommitment();
+    output.encrypted_note = EncryptNote(note, recipient_kem_pk, seed + 1);
+    output.merkle_anchor = merkle_anchor;
+    tx.shielded_bundle.shielded_outputs.push_back(std::move(output));
+    tx.shielded_bundle.value_balance = -(funding_tx->vout[0].nValue - fee);
+
+    FillableSigningProvider keystore;
+    BOOST_REQUIRE(keystore.AddKey(setup.coinbaseKey));
+    std::map<COutPoint, Coin> input_coins;
+    input_coins.emplace(COutPoint{funding_tx->GetHash(), 0},
+                        Coin{funding_tx->vout[0], /*nHeight=*/0, /*coinbase=*/true});
+    std::map<int, bilingual_str> input_errors;
+    BOOST_REQUIRE(SignTransaction(tx, &keystore, input_coins, SIGHASH_ALL, input_errors));
+    return tx;
+}
+
+void ConvertBuiltV2SendToSpendPathRecovery(CMutableTransaction& tx,
+                                          Span<const uint256> spend_note_commitments)
+{
+    auto* bundle = tx.shielded_bundle.v2_bundle ? &*tx.shielded_bundle.v2_bundle : nullptr;
+    BOOST_REQUIRE(bundle != nullptr);
+    BOOST_REQUIRE(
+        shielded::v2::BundleHasSemanticFamily(*bundle, shielded::v2::TransactionFamily::V2_SEND));
+
+    const auto send = std::get<shielded::v2::SendPayload>(bundle->payload);
+
+    shielded::v2::SpendPathRecoveryPayload payload;
+    payload.spend_anchor = send.spend_anchor;
+    payload.spends = send.spends;
+    BOOST_REQUIRE_EQUAL(payload.spends.size(), spend_note_commitments.size());
+    for (auto& spend : payload.spends) {
+        spend.merkle_anchor = payload.spend_anchor;
+        if (spend.note_commitment.IsNull()) {
+            const size_t spend_index = static_cast<size_t>(&spend - payload.spends.data());
+            spend.note_commitment = spend_note_commitments[spend_index];
+        }
+    }
+    payload.outputs = send.outputs;
+    payload.fee = send.fee;
+
+    bundle->payload = payload;
+    bundle->proof_shards.clear();
+    bundle->proof_payload.clear();
+    bundle->header.family_id = shielded::v2::V2_SPEND_PATH_RECOVERY;
+    bundle->header.proof_shard_count = 0;
+    bundle->header.proof_shard_root = uint256::ZERO;
+    bundle->header.proof_envelope = {};
+    bundle->header.proof_envelope.proof_kind = shielded::v2::ProofKind::NONE;
+    bundle->header.proof_envelope.membership_proof_kind = shielded::v2::ProofComponentKind::NONE;
+    bundle->header.proof_envelope.amount_proof_kind = shielded::v2::ProofComponentKind::NONE;
+    bundle->header.proof_envelope.balance_proof_kind = shielded::v2::ProofComponentKind::NONE;
+    bundle->header.proof_envelope.settlement_binding_kind =
+        shielded::v2::SettlementBindingKind::NONE;
+    bundle->header.proof_envelope.statement_digest = uint256::ZERO;
+    bundle->header.proof_envelope.extension_digest = uint256::ZERO;
+    bundle->header.payload_digest = shielded::v2::ComputeSpendPathRecoveryPayloadDigest(payload);
+    BOOST_REQUIRE(bundle->IsValid());
 }
 
 BOOST_AUTO_TEST_CASE(unencrypted_wallet_runtime_paths_skip_master_seed_noise)
@@ -676,6 +781,7 @@ BOOST_AUTO_TEST_CASE(wallet_builds_receipt_backed_egress_batch_and_caches_chunk_
     BOOST_REQUIRE(imported_receipt.IsValid());
 
     std::optional<CMutableTransaction> built_tx;
+    std::string create_error;
     {
         LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
         built_tx = shielded_wallet->CreateV2EgressBatch(*statement,
@@ -684,8 +790,9 @@ BOOST_AUTO_TEST_CASE(wallet_builds_receipt_backed_egress_batch_and_caches_chunk_
                                                         {imported_receipt},
                                                         imported_receipt,
                                                         wallet_recipients,
-                                                        {});
-        BOOST_REQUIRE(built_tx.has_value());
+                                                        {},
+                                                        &create_error);
+        BOOST_REQUIRE_MESSAGE(built_tx.has_value(), create_error);
         const CTransaction tx{*built_tx};
         shielded_wallet->TransactionAddedToMempool(tx);
         const auto cached_view = shielded_wallet->GetCachedTransactionView(tx.GetHash());
@@ -697,6 +804,8 @@ BOOST_AUTO_TEST_CASE(wallet_builds_receipt_backed_egress_batch_and_caches_chunk_
         BOOST_CHECK(cached_view->outputs[1].is_ours);
         BOOST_CHECK_EQUAL(cached_view->outputs[0].amount, 8 * COIN);
         BOOST_CHECK_EQUAL(cached_view->outputs[1].amount, 9 * COIN);
+        BOOST_CHECK_EQUAL(cached_view->output_chunks[0].first_output_index, 0U);
+        BOOST_CHECK_EQUAL(cached_view->output_chunks[0].output_count, 2U);
         BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_output_count, 2U);
         BOOST_CHECK_EQUAL(cached_view->output_chunks[0].owned_amount, 17 * COIN);
     }
@@ -839,6 +948,284 @@ BOOST_AUTO_TEST_CASE(locked_scan_owned_note_rehydrates_to_spendable_on_unlock)
         BOOST_CHECK_EQUAL(shielded_wallet->GetShieldedBalance(/*min_depth=*/0), value);
         BOOST_REQUIRE_EQUAL(shielded_wallet->GetSpendableNotes(/*min_depth=*/0).size(), 1U);
     }
+}
+
+BOOST_AUTO_TEST_CASE(owned_legacy_note_is_counted_as_spendable_but_cannot_build_ordinary_v2_send)
+{
+    constexpr size_t tree_size = 16;
+    mineBlocks(COINBASE_MATURITY);
+    const ShieldedNote owned_note = MakeNote(owned_addr.pk_hash, 21 * COIN, 0x130);
+    uint256 legacy_anchor;
+    {
+        LOCK(cs_main);
+        legacy_anchor = Assert(m_node.chainman)->GetShieldedMerkleTree().Root();
+    }
+    BOOST_REQUIRE(!legacy_anchor.IsNull());
+
+    std::vector<CMutableTransaction> legacy_txs;
+    legacy_txs.reserve(tree_size);
+    legacy_txs.push_back(shielded_wallet_chunk_discovery_tests::BuildLegacyShieldOnlyTransaction(*this,
+                                                          m_coinbase_txns[1],
+                                                          legacy_anchor,
+                                                          owned_note,
+                                                          owned_kem_pk,
+                                                          0x140));
+    for (size_t i = 1; i < tree_size; ++i) {
+        const auto foreign_key =
+            BuildKeyPair("BTX_ShieldedV2_ChunkScan_LegacyForeign", static_cast<uint32_t>(i));
+        const uint256 foreign_pk_hash =
+            DeriveUint256("BTX_ShieldedV2_ChunkScan_LegacyForeignPkHash", static_cast<uint32_t>(i));
+        legacy_txs.push_back(shielded_wallet_chunk_discovery_tests::BuildLegacyShieldOnlyTransaction(
+            *this,
+            m_coinbase_txns[i + 1],
+            legacy_anchor,
+            MakeNote(foreign_pk_hash,
+                     5 * COIN + static_cast<CAmount>(i) * COIN / 10,
+                     0x130 + static_cast<uint32_t>(i)),
+            foreign_key.pk,
+            0x140 + static_cast<uint32_t>(i)));
+    }
+
+    const auto account_leaf_commitments =
+        CollectShieldedOutputAccountLeafCommitments(legacy_txs.front().shielded_bundle);
+    BOOST_REQUIRE(account_leaf_commitments.has_value());
+    BOOST_CHECK(account_leaf_commitments->empty());
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock accepted_block = CreateAndProcessBlock(legacy_txs, script_pub_key);
+    BOOST_REQUIRE_EQUAL(accepted_block.vtx.size(), tree_size + 1U);
+
+    LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+    const int block_height = m_node.chain->getHeight().value_or(0);
+    BOOST_REQUIRE_GT(block_height, 0);
+    shielded_wallet->ScanBlock(accepted_block, block_height);
+
+    const auto unspent = shielded_wallet->GetUnspentNotes(/*min_depth=*/1);
+    BOOST_REQUIRE_EQUAL(unspent.size(), 1U);
+    BOOST_CHECK(unspent.front().is_mine_spend);
+    BOOST_CHECK(!unspent.front().account_leaf_hint.has_value());
+    BOOST_CHECK_EQUAL(unspent.front().note.value, owned_note.value);
+
+    const auto spendable = shielded_wallet->GetSpendableNotes(/*min_depth=*/1);
+    BOOST_REQUIRE_EQUAL(spendable.size(), 1U);
+    BOOST_CHECK_EQUAL(spendable.front().commitment, unspent.front().commitment);
+    BOOST_CHECK(!spendable.front().account_leaf_hint.has_value());
+
+    const auto summary = shielded_wallet->GetShieldedBalanceSummary(/*min_depth=*/1);
+    BOOST_CHECK_EQUAL(summary.spendable, 0);
+    BOOST_CHECK_EQUAL(summary.watchonly, 0);
+    BOOST_CHECK_EQUAL(summary.spendable_note_count, 0);
+    BOOST_CHECK_EQUAL(summary.recovery_only, owned_note.value);
+    BOOST_CHECK_EQUAL(summary.recovery_only_note_count, 1);
+
+    const auto cached_view = shielded_wallet->GetCachedTransactionView(legacy_txs.front().GetHash());
+    BOOST_REQUIRE(cached_view.has_value());
+    BOOST_CHECK_EQUAL(cached_view->family, "legacy_shield");
+    BOOST_REQUIRE_EQUAL(cached_view->outputs.size(), 1U);
+    BOOST_CHECK(cached_view->output_chunks.empty());
+
+    const size_t real_index = 3;
+    const auto tree = BuildSpendTree(spendable.front().commitment, real_index);
+    const auto ring_positions = BuildRingPositions();
+    const auto ring_members = BuildRingMembers(tree, ring_positions);
+    auto smile_ring_members = BuildIngressSpendSmileRingMembers(ring_members,
+                                                                spendable.front().note,
+                                                                spendable.front().commitment,
+                                                                real_index);
+    BOOST_REQUIRE_EQUAL(smile_ring_members.size(), ring_members.size());
+
+    shielded::v2::V2SendSpendInput spend_input;
+    spend_input.note = spendable.front().note;
+    spend_input.note_commitment = spendable.front().commitment;
+    spend_input.ring_positions = ring_positions;
+    spend_input.ring_members = ring_members;
+    spend_input.smile_ring_members = std::move(smile_ring_members);
+    spend_input.real_index = real_index;
+
+    const auto destination = shielded_wallet->GenerateNewAddress();
+    mlkem::PublicKey destination_kem_pk{};
+    BOOST_REQUIRE(shielded_wallet->GetKEMPublicKey(destination, destination_kem_pk));
+    const ShieldedNote destination_note = MakeNote(destination.pk_hash, 5 * COIN, 0x1f0);
+    const auto destination_payload = EncodeLegacyEncryptedNotePayload(
+        EncryptNote(destination_note, destination_kem_pk, 0x1f1),
+        destination_kem_pk,
+        ScanDomain::USER);
+    BOOST_REQUIRE(destination_payload.has_value());
+
+    shielded::v2::V2SendOutputInput output_input;
+    output_input.note_class = NoteClass::USER;
+    output_input.note = destination_note;
+    output_input.encrypted_note = *destination_payload;
+
+    std::string reject_reason;
+    const auto built = shielded::v2::BuildV2SendTransaction(CMutableTransaction{},
+                                                            tree.Root(),
+                                                            {spend_input},
+                                                            {output_input},
+                                                            /*fee=*/COIN / 10,
+                                                            std::vector<unsigned char>(32, 0x42),
+                                                            reject_reason);
+    BOOST_CHECK(!built.has_value());
+    BOOST_CHECK_EQUAL(reject_reason, "bad-shielded-v2-builder-input");
+}
+
+BOOST_AUTO_TEST_CASE(scanned_spend_path_recovery_output_rehydrates_to_ordinary_spend_shape)
+{
+    const CAmount first_fee = COIN / 20;
+    const std::vector<unsigned char> first_spending_key(32, 0x23);
+    std::array<unsigned char, 32> first_rng_entropy{};
+    first_rng_entropy.fill(0x24);
+    const ShieldedNote spend_input_note = MakeNote(owned_addr.pk_hash, 17 * COIN, 0x220);
+    const uint256 spend_note_commitment = spend_input_note.GetCommitment();
+    const size_t spend_real_index = 5;
+    const auto spend_tree = BuildSpendTree(spend_note_commitment, spend_real_index);
+    const auto ring_positions = BuildRingPositions();
+    const auto ring_members = BuildRingMembers(spend_tree, ring_positions);
+    auto smile_ring_members = BuildIngressSpendSmileRingMembers(ring_members,
+                                                                spend_input_note,
+                                                                spend_note_commitment,
+                                                                spend_real_index);
+    BOOST_REQUIRE_EQUAL(smile_ring_members.size(), ring_members.size());
+
+    shielded::v2::V2SendSpendInput spend_input;
+    spend_input.note = spend_input_note;
+    spend_input.note_commitment = spend_note_commitment;
+    spend_input.account_leaf_hint = shielded::registry::MakeDirectSendAccountLeafHint();
+    spend_input.ring_positions = ring_positions;
+    spend_input.ring_members = ring_members;
+    spend_input.smile_ring_members = smile_ring_members;
+    spend_input.real_index = spend_real_index;
+    BOOST_REQUIRE(test::shielded::AttachAccountRegistryWitness(spend_input));
+
+    const ShieldedNote migrated_note =
+        MakeNote(owned_addr.pk_hash, spend_input_note.value - first_fee, 0x221);
+    auto migrated_payload = EncodeLegacyEncryptedNotePayload(
+        EncryptNote(migrated_note, owned_kem_pk, 0x222),
+        owned_kem_pk,
+        ScanDomain::USER);
+    BOOST_REQUIRE(migrated_payload.has_value());
+
+    shielded::v2::V2SendOutputInput migrated_output;
+    migrated_output.note_class = NoteClass::USER;
+    migrated_output.note = migrated_note;
+    migrated_output.encrypted_note = *migrated_payload;
+
+    std::string reject_reason;
+    auto built = shielded::v2::BuildV2SendTransaction(CMutableTransaction{},
+                                                      spend_tree.Root(),
+                                                      {spend_input},
+                                                      {migrated_output},
+                                                      first_fee,
+                                                      first_spending_key,
+                                                      reject_reason,
+                                                      Span<const unsigned char>{first_rng_entropy.data(),
+                                                                               first_rng_entropy.size()});
+    BOOST_REQUIRE_MESSAGE(built.has_value(), reject_reason);
+    const std::array<uint256, 1> recovery_spend_commitments{spend_note_commitment};
+    ConvertBuiltV2SendToSpendPathRecovery(
+        built->tx,
+        Span<const uint256>{recovery_spend_commitments.data(), recovery_spend_commitments.size()});
+
+    const CTransaction recovery_tx{built->tx};
+    BOOST_REQUIRE(recovery_tx.HasShieldedBundle());
+    const auto recovery_family = recovery_tx.GetShieldedBundle().GetTransactionFamily();
+    BOOST_REQUIRE(recovery_family.has_value());
+    BOOST_CHECK_EQUAL(*recovery_family, shielded::v2::V2_SPEND_PATH_RECOVERY);
+
+    const auto recovery_leaves =
+        CollectShieldedOutputAccountLeafCommitments(recovery_tx.GetShieldedBundle());
+    BOOST_REQUIRE(recovery_leaves.has_value());
+    BOOST_REQUIRE_EQUAL(recovery_leaves->size(), 1U);
+
+    CBlock block;
+    block.vtx.push_back(MakeTransactionRef(recovery_tx));
+
+    LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+    shielded_wallet->ScanBlock(block, /*height=*/1);
+
+    const auto notes = shielded_wallet->GetUnspentNotes(/*min_depth=*/0);
+    BOOST_REQUIRE_EQUAL(notes.size(), 1U);
+    BOOST_CHECK(notes.front().is_mine_spend);
+    BOOST_REQUIRE(notes.front().account_leaf_hint.has_value());
+    BOOST_CHECK(notes.front().account_leaf_hint->domain ==
+                shielded::registry::AccountDomain::DIRECT_SEND);
+    BOOST_CHECK_EQUAL(notes.front().note.value, migrated_note.value);
+
+    const auto summary = shielded_wallet->GetShieldedBalanceSummary(/*min_depth=*/0);
+    BOOST_CHECK_EQUAL(summary.spendable, migrated_note.value);
+    BOOST_CHECK_EQUAL(summary.watchonly, 0);
+    BOOST_CHECK_EQUAL(summary.spendable_note_count, 1);
+
+    const auto cached_view = shielded_wallet->GetCachedTransactionView(recovery_tx.GetHash());
+    BOOST_REQUIRE(cached_view.has_value());
+    BOOST_CHECK_EQUAL(cached_view->family, "v2_spend_path_recovery");
+    BOOST_REQUIRE_EQUAL(cached_view->outputs.size(), 1U);
+    BOOST_CHECK(cached_view->outputs[0].is_ours);
+    BOOST_CHECK_EQUAL(cached_view->outputs[0].amount, migrated_note.value);
+
+    const auto spendable = shielded_wallet->GetSpendableNotes(/*min_depth=*/0);
+    BOOST_REQUIRE_EQUAL(spendable.size(), 1U);
+    BOOST_REQUIRE(spendable.front().account_leaf_hint.has_value());
+    BOOST_CHECK(spendable.front().account_leaf_hint->domain ==
+                shielded::registry::AccountDomain::DIRECT_SEND);
+
+    const size_t next_real_index = 3;
+    const auto next_tree = BuildSpendTree(spendable.front().commitment, next_real_index);
+    const auto next_ring_positions = BuildRingPositions();
+    const auto next_ring_members = BuildRingMembers(next_tree, next_ring_positions);
+    auto next_smile_ring_members = BuildDirectSpendSmileRingMembers(next_ring_members,
+                                                                    spendable.front().note,
+                                                                    spendable.front().commitment,
+                                                                    next_real_index);
+    BOOST_REQUIRE_EQUAL(next_smile_ring_members.size(), next_ring_members.size());
+
+    shielded::v2::V2SendSpendInput ordinary_spend_input;
+    ordinary_spend_input.note = spendable.front().note;
+    ordinary_spend_input.note_commitment = spendable.front().commitment;
+    ordinary_spend_input.account_leaf_hint = spendable.front().account_leaf_hint;
+    ordinary_spend_input.ring_positions = next_ring_positions;
+    ordinary_spend_input.ring_members = next_ring_members;
+    ordinary_spend_input.smile_ring_members = std::move(next_smile_ring_members);
+    ordinary_spend_input.real_index = next_real_index;
+    BOOST_REQUIRE(test::shielded::AttachAccountRegistryWitness(ordinary_spend_input));
+    BOOST_REQUIRE(ordinary_spend_input.account_leaf_hint.has_value());
+    BOOST_REQUIRE(ordinary_spend_input.account_registry_proof.has_value());
+    BOOST_CHECK_EQUAL(ordinary_spend_input.ring_members[next_real_index],
+                      ordinary_spend_input.note_commitment);
+    BOOST_CHECK_EQUAL(ordinary_spend_input.smile_ring_members[next_real_index].note_commitment,
+                      ordinary_spend_input.note_commitment);
+    BOOST_REQUIRE(ordinary_spend_input.IsValid());
+
+    const auto destination = shielded_wallet->GenerateNewAddress();
+    mlkem::PublicKey destination_kem_pk{};
+    BOOST_REQUIRE(shielded_wallet->GetKEMPublicKey(destination, destination_kem_pk));
+    const CAmount second_fee = COIN / 20;
+    const std::vector<unsigned char> second_spending_key(32, 0x25);
+    std::array<unsigned char, 32> second_rng_entropy{};
+    second_rng_entropy.fill(0x26);
+    const ShieldedNote ordinary_note =
+        MakeNote(destination.pk_hash, migrated_note.value - second_fee, 0x223);
+    auto ordinary_payload = EncodeLegacyEncryptedNotePayload(
+        EncryptNote(ordinary_note, destination_kem_pk, 0x224),
+        destination_kem_pk,
+        ScanDomain::USER);
+    BOOST_REQUIRE(ordinary_payload.has_value());
+
+    shielded::v2::V2SendOutputInput ordinary_output;
+    ordinary_output.note_class = NoteClass::USER;
+    ordinary_output.note = ordinary_note;
+    ordinary_output.encrypted_note = *ordinary_payload;
+
+    auto ordinary_built = shielded::v2::BuildV2SendTransaction(CMutableTransaction{},
+                                                               next_tree.Root(),
+                                                               {ordinary_spend_input},
+                                                               {ordinary_output},
+                                                               second_fee,
+                                                               second_spending_key,
+                                                               reject_reason,
+                                                               Span<const unsigned char>{second_rng_entropy.data(),
+                                                                                        second_rng_entropy.size()});
+    BOOST_REQUIRE_MESSAGE(ordinary_built.has_value(), reject_reason);
 }
 
 BOOST_AUTO_TEST_CASE(block_scan_deduplicates_v2_send_commitments_across_transactions)
@@ -1101,3 +1488,126 @@ BOOST_AUTO_TEST_CASE(shielded_coin_serialization_roundtrip_preserves_optional_ac
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_FIXTURE_TEST_CASE(wallet_built_spend_path_recovery_tx_is_mempool_valid,
+                        ShieldedWalletRecoveryActivationSetup)
+{
+    constexpr size_t legacy_tx_count = 3;
+    constexpr int32_t matrict_disable_height = 132;
+
+    mineBlocks(COINBASE_MATURITY);
+
+    const ShieldedNote owned_note = MakeNote(owned_addr.pk_hash, 21 * COIN, 0x330);
+    uint256 legacy_anchor;
+    {
+        LOCK(cs_main);
+        legacy_anchor = Assert(m_node.chainman)->GetShieldedMerkleTree().Root();
+    }
+    BOOST_REQUIRE(!legacy_anchor.IsNull());
+
+    std::vector<CMutableTransaction> legacy_txs;
+    legacy_txs.reserve(legacy_tx_count);
+    legacy_txs.push_back(shielded_wallet_chunk_discovery_tests::BuildLegacyShieldOnlyTransaction(*this,
+                                                          m_coinbase_txns[1],
+                                                          legacy_anchor,
+                                                          owned_note,
+                                                          owned_kem_pk,
+                                                          0x340));
+    for (size_t i = 1; i < legacy_tx_count; ++i) {
+        const auto foreign_key =
+            BuildKeyPair("BTX_ShieldedV2_ChunkScan_RecoveryForeign", static_cast<uint32_t>(i));
+        const uint256 foreign_pk_hash =
+            DeriveUint256("BTX_ShieldedV2_ChunkScan_RecoveryForeignPkHash", static_cast<uint32_t>(i));
+        legacy_txs.push_back(shielded_wallet_chunk_discovery_tests::BuildLegacyShieldOnlyTransaction(
+            *this,
+            m_coinbase_txns[i + 1],
+            legacy_anchor,
+            MakeNote(foreign_pk_hash,
+                     5 * COIN + static_cast<CAmount>(i) * COIN / 10,
+                     0x330 + static_cast<uint32_t>(i)),
+            foreign_key.pk,
+            0x340 + static_cast<uint32_t>(i)));
+    }
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock accepted_block = CreateAndProcessBlock(legacy_txs, script_pub_key);
+    BOOST_REQUIRE_EQUAL(accepted_block.vtx.size(), legacy_tx_count + 1U);
+
+    uint256 recoverable_commitment;
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        const int block_height = m_node.chain->getHeight().value_or(0);
+        BOOST_REQUIRE_GT(block_height, 0);
+        shielded_wallet->ScanBlock(accepted_block, block_height);
+
+        const auto recoverable_notes = shielded_wallet->GetRecoverableNotes(/*min_depth=*/1);
+        BOOST_REQUIRE_EQUAL(recoverable_notes.size(), 1U);
+        BOOST_CHECK(!recoverable_notes.front().account_leaf_hint.has_value());
+        recoverable_commitment = recoverable_notes.front().commitment;
+
+        const auto summary = shielded_wallet->GetShieldedBalanceSummary(/*min_depth=*/1);
+        BOOST_CHECK_EQUAL(summary.spendable, 0);
+        BOOST_CHECK_EQUAL(summary.spendable_note_count, 0);
+        BOOST_CHECK_EQUAL(summary.recovery_only, owned_note.value);
+        BOOST_CHECK_EQUAL(summary.recovery_only_note_count, 1);
+        BOOST_CHECK_EQUAL(summary.watchonly, 0);
+        BOOST_CHECK_EQUAL(summary.watchonly_note_count, 0);
+        BOOST_CHECK_EQUAL(shielded_wallet->GetShieldedBalance(/*min_depth=*/1), 0);
+    }
+
+    const int current_height = m_node.chain->getHeight().value_or(0);
+    if (current_height < matrict_disable_height) {
+        mineBlocks(matrict_disable_height - current_height);
+    }
+    BOOST_REQUIRE_GE(m_node.chain->getHeight().value_or(0), matrict_disable_height);
+
+    std::string create_error;
+    CTransactionRef recovery_tx;
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        const auto built = shielded_wallet->CreateSpendPathRecovery(
+            recoverable_commitment,
+            std::nullopt,
+            /*fee=*/COIN / 10,
+            &create_error);
+        BOOST_REQUIRE_MESSAGE(built.has_value(), create_error);
+        recovery_tx = MakeTransactionRef(std::move(*built));
+    }
+
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const auto consensus_accept = WITH_LOCK(
+        ::cs_main,
+        return AcceptToMemoryPool(
+            chainman.ActiveChainstate(),
+            recovery_tx,
+            GetTime(),
+            /*bypass_limits=*/true,
+            /*test_accept=*/true));
+    BOOST_CHECK_MESSAGE(
+        consensus_accept.m_result_type == MempoolAcceptResult::ResultType::VALID,
+        consensus_accept.m_state.GetRejectReason() + " | " +
+            consensus_accept.m_state.GetDebugMessage());
+
+    const auto relay_accept = WITH_LOCK(
+        ::cs_main,
+        return AcceptToMemoryPool(
+            chainman.ActiveChainstate(),
+            recovery_tx,
+            GetTime(),
+            /*bypass_limits=*/false,
+            /*test_accept=*/true));
+    BOOST_CHECK_MESSAGE(
+        relay_accept.m_result_type == MempoolAcceptResult::ResultType::VALID,
+        relay_accept.m_state.GetRejectReason() + " | " + relay_accept.m_state.GetDebugMessage());
+
+    {
+        LOCK(wallet.cs_wallet);
+        std::string broadcast_error;
+        wallet.CommitTransaction(recovery_tx, {}, {}, /*bypass_maxtxfee=*/false, &broadcast_error);
+        BOOST_CHECK_MESSAGE(broadcast_error.empty(), broadcast_error);
+
+        const wallet::CWalletTx* wtx = wallet.GetWalletTx(recovery_tx->GetHash());
+        BOOST_REQUIRE(wtx != nullptr);
+        BOOST_CHECK(wtx->InMempool());
+    }
+}

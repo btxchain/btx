@@ -22,6 +22,10 @@ Utility to generate the pnSeed[] array that is compiled into the client.
 Optional operator tooling for health-aware solo mining loops and repeatable
 wallet backups.
 
+### [Bridge](/contrib/bridge) ###
+Optional operator helper for attaching and recovering historical stuck bridge
+batches through the wallet-managed pending journal.
+
 Build Tools and Keys
 ---------------------
 

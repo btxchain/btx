@@ -353,6 +353,47 @@ BOOST_AUTO_TEST_CASE(metal_mainnet_shape_digest_matches_cpu_under_auto_policy)
     }
 }
 
+BOOST_AUTO_TEST_CASE(metal_mainnet_shape_product_digest_matches_cpu_under_auto_policy)
+{
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
+    if (!capability.available) {
+        return;
+    }
+
+    ScopedEnvVar pipeline_env("BTX_MATMUL_METAL_PIPELINE", "auto");
+    ScopedEnvVar specialization_env("BTX_MATMUL_METAL_FUNCTION_CONSTANTS", "auto");
+
+    constexpr uint32_t kN = 512;
+    constexpr uint32_t kB = 16;
+    constexpr uint32_t kR = 8;
+
+    for (uint64_t nonce64 = 20'000; nonce64 < 20'004; ++nonce64) {
+        const CBlockHeader header = BuildHeader(kN, nonce64);
+        const matmul::Matrix matrix_a = matmul::FromSeed(header.seed_a, kN);
+        const matmul::Matrix matrix_b = matmul::FromSeed(header.seed_b, kN);
+
+        const uint256 cpu_digest = matmul::accelerated::ComputeMatMulDigestCPU(
+            header,
+            matrix_a,
+            matrix_b,
+            kB,
+            kR,
+            matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
+
+        const auto digest_result = matmul::accelerated::ComputeMatMulDigest(
+            header,
+            matrix_a,
+            matrix_b,
+            kB,
+            kR,
+            matmul::backend::Kind::METAL,
+            matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
+
+        BOOST_REQUIRE(digest_result.ok);
+        BOOST_CHECK_EQUAL(digest_result.digest, cpu_digest);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(metal_batch_digest_matches_single_digest_sequence)
 {
     const auto probe = btx::metal::ProbeMatMulDigestAcceleration();
@@ -500,6 +541,65 @@ BOOST_AUTO_TEST_CASE(metal_product_digest_batch_matches_single_digest_sequence)
     for (uint32_t i = 0; i < kBatchSize; ++i) {
         BOOST_REQUIRE(batch[i].ok);
         BOOST_CHECK_EQUAL(batch[i].digest, single_digests[i]);
+        BOOST_CHECK_EQUAL(batch[i].backend, matmul::backend::Kind::METAL);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(metal_mainnet_shape_product_digest_batch_matches_cpu_under_auto_policy)
+{
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
+    if (!capability.available) {
+        BOOST_TEST_MESSAGE("Skipping mainnet-shape Metal product digest batch test: Metal backend unavailable ("
+            << capability.reason << ")");
+        return;
+    }
+
+    ScopedEnvVar pipeline_env("BTX_MATMUL_METAL_PIPELINE", "auto");
+    ScopedEnvVar specialization_env("BTX_MATMUL_METAL_FUNCTION_CONSTANTS", "auto");
+
+    constexpr uint32_t kN = 512;
+    constexpr uint32_t kB = 16;
+    constexpr uint32_t kR = 8;
+    constexpr uint32_t kBatchSize = 4;
+
+    const matmul::Matrix matrix_a = matmul::FromSeed(
+        ParseUint256("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+        kN);
+    const matmul::Matrix matrix_b = matmul::FromSeed(
+        ParseUint256("ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"),
+        kN);
+
+    std::vector<CBlockHeader> headers;
+    std::vector<matmul::accelerated::PreparedDigestInputs> prepared_inputs;
+    std::vector<uint256> cpu_digests;
+    headers.reserve(kBatchSize);
+    prepared_inputs.reserve(kBatchSize);
+    cpu_digests.reserve(kBatchSize);
+
+    for (uint32_t i = 0; i < kBatchSize; ++i) {
+        const CBlockHeader header = BuildHeader(kN, 40'000 + i);
+        headers.push_back(header);
+        prepared_inputs.push_back(matmul::accelerated::PrepareMatMulDigestInputs(
+            header,
+            kB,
+            kR));
+        cpu_digests.push_back(ComputeReferenceProductDigest(header, matrix_a, matrix_b, kB, kR));
+    }
+
+    const auto batch = matmul::accelerated::ComputeMatMulDigestPreparedBatch(
+        headers,
+        matrix_a,
+        matrix_b,
+        kB,
+        kR,
+        prepared_inputs,
+        matmul::backend::Kind::METAL,
+        matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
+    BOOST_REQUIRE_EQUAL(batch.size(), kBatchSize);
+
+    for (uint32_t i = 0; i < kBatchSize; ++i) {
+        BOOST_REQUIRE(batch[i].ok);
+        BOOST_CHECK_EQUAL(batch[i].digest, cpu_digests[i]);
         BOOST_CHECK_EQUAL(batch[i].backend, matmul::backend::Kind::METAL);
     }
 }

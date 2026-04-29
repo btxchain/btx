@@ -27,6 +27,7 @@
 #include <util/string.h>
 #include <util/time.h>
 #include <util/ui_change_type.h>
+#include <wallet/bridge_wallet.h>
 #include <wallet/crypter.h>
 #include <wallet/db.h>
 #include <wallet/scriptpubkeyman.h>
@@ -132,6 +133,8 @@ static const bool DEFAULT_SPEND_ZEROCONF_CHANGE = true;
 static const bool DEFAULT_WALLET_REJECT_LONG_CHAINS{true};
 //! -txconfirmtarget default
 static const unsigned int DEFAULT_TX_CONFIRM_TARGET = 144;
+//! -bridgependingconfirmdepth default
+static const unsigned int DEFAULT_BRIDGE_PENDING_CONFIRM_DEPTH = 20;
 //! -walletrbf default
 static const bool DEFAULT_WALLET_RBF = true;
 static const bool DEFAULT_WALLETBROADCAST = true;
@@ -304,6 +307,108 @@ struct CRecipient
     bool fSubtractFeeFromAmount;
 };
 
+struct BridgePendingOperation
+{
+    uint8_t version{1};
+    BridgePlan plan;
+    COutPoint funding_outpoint;
+    CAmount funding_amount{0};
+    std::string refund_destination;
+    CAmount refund_fee{10000};
+    bool imported{false};
+    bool has_settlement_txid{false};
+    uint256 settlement_txid;
+    bool has_refund_txid{false};
+    uint256 refund_txid;
+    int32_t created_height{-1};
+    int32_t last_attempt_height{-1};
+    uint32_t retry_count{0};
+    std::string last_error;
+
+    [[nodiscard]] bool IsValid() const;
+
+    SERIALIZE_METHODS(BridgePendingOperation, obj)
+    {
+        READWRITE(obj.version,
+                  obj.plan,
+                  obj.funding_outpoint,
+                  obj.funding_amount,
+                  obj.refund_destination,
+                  obj.refund_fee,
+                  obj.imported,
+                  obj.has_settlement_txid);
+        if (obj.has_settlement_txid) {
+            READWRITE(obj.settlement_txid);
+        }
+        READWRITE(obj.has_refund_txid);
+        if (obj.has_refund_txid) {
+            READWRITE(obj.refund_txid);
+        }
+        READWRITE(obj.created_height,
+                  obj.last_attempt_height,
+                  obj.retry_count,
+                  obj.last_error);
+    }
+};
+
+enum class BridgeArchivedCompletionKind : uint8_t {
+    SETTLEMENT = 0,
+    REFUND = 1,
+};
+
+struct BridgeArchivedOperation
+{
+    uint8_t version{1};
+    BridgePendingOperation operation;
+    uint8_t completion_kind{static_cast<uint8_t>(BridgeArchivedCompletionKind::SETTLEMENT)};
+    uint256 completion_txid;
+    int32_t completion_height{-1};
+    int32_t archive_height{-1};
+    int64_t archive_time{0};
+
+    [[nodiscard]] bool IsValid() const;
+
+    SERIALIZE_METHODS(BridgeArchivedOperation, obj)
+    {
+        READWRITE(obj.version,
+                  obj.operation,
+                  obj.completion_kind,
+                  obj.completion_txid,
+                  obj.completion_height,
+                  obj.archive_height,
+                  obj.archive_time);
+    }
+};
+
+struct BridgePendingStatusSnapshot
+{
+    BridgePendingOperation operation;
+    std::string status;
+    int32_t current_height{-1};
+    uint32_t required_confirmations{0};
+    bool funding_unspent{false};
+    bool refund_eligible{false};
+    bool has_valid_refund_destination{false};
+    bool settlement_confirmed{false};
+    bool settlement_in_mempool{false};
+    int settlement_confirmations{0};
+    bool refund_confirmed{false};
+    bool refund_in_mempool{false};
+    int refund_confirmations{0};
+};
+
+struct BridgePendingRecoveryResult
+{
+    BridgePendingOperation operation;
+    std::string status_before;
+    std::string action;
+    std::string status_after;
+    bool removed{false};
+    bool has_txid{false};
+    uint256 txid;
+    std::string error;
+};
+
 class WalletRescanReserver; //forward declarations for ScanForWalletTransactions/RescanFromTime
 /**
  * A CWallet maintains a set of transactions and balances, and provides the ability to create new transactions.
@@ -425,6 +530,9 @@ private:
 
     /** Next height at which auto-shield will retry after a failed attempt. */
     int m_autoshield_retry_after_height GUARDED_BY(cs_wallet) = 0;
+
+    std::map<COutPoint, BridgePendingOperation> m_pending_bridge_operations GUARDED_BY(cs_wallet);
+    std::map<COutPoint, BridgeArchivedOperation> m_archived_bridge_operations GUARDED_BY(cs_wallet);
 
     /**
      * The following is used to track whether a confirmed transaction is in
@@ -567,6 +675,8 @@ public:
 
     /** Automatically shield mature coinbase outputs into the shielded pool. */
     void MaybeAutoShieldCoinbase() EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool LoadPendingBridgeOperation(const BridgePendingOperation& operation) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    void MaybeRecoverPendingBridgeOperations();
 
     //! check whether we support the named feature
     bool CanSupportFeature(enum WalletFeature wf) const override EXCLUSIVE_LOCKS_REQUIRED(cs_wallet) { AssertLockHeld(cs_wallet); return IsFeatureSupported(nWalletVersion, wf); }
@@ -743,6 +853,7 @@ public:
 
     CFeeRate m_pay_tx_fee{DEFAULT_PAY_TX_FEE};
     unsigned int m_confirm_target{DEFAULT_TX_CONFIRM_TARGET};
+    unsigned int m_bridge_pending_confirm_depth{DEFAULT_BRIDGE_PENDING_CONFIRM_DEPTH};
     /** Allow Coin Selection to pick unconfirmed UTXOs that were sent from our own wallet if it
      * cannot fund the transaction otherwise. */
     bool m_spend_zero_conf_change{DEFAULT_SPEND_ZEROCONF_CHANGE};
@@ -855,6 +966,23 @@ public:
 
     bool DelAddressBook(const CTxDestination& address);
     bool DelAddressBookWithDB(WalletBatch& batch, const CTxDestination& address);
+
+    std::optional<BridgePendingOperation> GetPendingBridgeOperation(const COutPoint& outpoint) const;
+    std::optional<BridgePendingStatusSnapshot> GetPendingBridgeOperationStatus(const COutPoint& outpoint) const;
+    std::vector<BridgePendingOperation> ListPendingBridgeOperations() const;
+    std::vector<BridgePendingStatusSnapshot> ListPendingBridgeOperationStatus() const;
+    bool SavePendingBridgeOperation(const BridgePendingOperation& operation);
+    bool ErasePendingBridgeOperation(const COutPoint& outpoint);
+    bool LoadArchivedBridgeOperation(const BridgeArchivedOperation& operation) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    std::optional<BridgeArchivedOperation> GetArchivedBridgeOperation(const COutPoint& outpoint) const;
+    std::vector<BridgeArchivedOperation> ListArchivedBridgeOperations() const;
+    bool SaveArchivedBridgeOperation(const BridgeArchivedOperation& operation);
+    bool EraseArchivedBridgeOperation(const COutPoint& outpoint);
+    bool ArchivePendingBridgeOperation(const BridgeArchivedOperation& operation);
+    bool ReactivateArchivedBridgeOperation(const COutPoint& outpoint);
+    std::vector<BridgePendingRecoveryResult> RecoverPendingBridgeOperations(std::optional<COutPoint> only_outpoint = std::nullopt,
+                                                                           bool force = false);
+    void MaybeReconcileArchivedBridgeOperations();
 
     bool IsAddressPreviouslySpent(const CTxDestination& dest) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     bool SetAddressPreviouslySpent(WalletBatch& batch, const CTxDestination& dest, bool used) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
@@ -1041,6 +1169,11 @@ public:
         assert(m_last_block_processed_height >= 0);
         return m_last_block_processed_height;
     };
+    unsigned int GetBridgePendingConfirmDepth() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return m_bridge_pending_confirm_depth;
+    }
     uint256 GetLastBlockHash() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
     {
         AssertLockHeld(cs_wallet);

@@ -27,6 +27,10 @@ STARTUP_GRACE_SECS="${BTX_MINING_STARTUP_GRACE_SECS:-120}"
 STOP_WAIT_SECS="${BTX_MINING_STOP_WAIT_SECS:-30}"
 PEER_REMEDIATION_THRESHOLD="${BTX_MINING_PEER_REMEDIATION_THRESHOLD:-3}"
 PEER_REMEDIATION_COOLDOWN_SECS="${BTX_MINING_PEER_REMEDIATION_COOLDOWN_SECS:-30}"
+PEER_CACHE_LIMIT="${BTX_MINING_PEER_CACHE_LIMIT:-24}"
+PEER_REFRESH_LIMIT="${BTX_MINING_PEER_REFRESH_LIMIT:-12}"
+HEALTHY_PUBLIC_PEER_TARGET="${BTX_MINING_HEALTHY_PUBLIC_PEER_TARGET:-4}"
+HEALTHY_FULL_RELAY_PEER_TARGET="${BTX_MINING_HEALTHY_FULL_RELAY_PEER_TARGET:-4}"
 SYNC_STALL_RESTART_SECS="${BTX_MINING_SYNC_STALL_RESTART_SECS:-300}"
 BOOTSTRAP_ADDNODES="${BTX_MINING_BOOTSTRAP_ADDNODES:-${BTX_MINING_BOOTSTRAP_PEERS:-}}"
 MAX_LOOPS="${BTX_MINING_MAX_LOOPS:-0}"
@@ -438,28 +442,186 @@ update_reason_streak() {
   fi
 }
 
-refresh_live_peer_cache() {
-  local tmp_err
+refresh_live_peer_cache_from_json() {
+  local local_tip="${1:-0}"
   local tmp_cache
+
+  tmp_cache="$(mktemp)"
+  if jq -r --argjson local_tip "${local_tip}" --argjson cache_limit "${PEER_CACHE_LIMIT}" '
+    def is_private_peer:
+      (.addr // "") | test("^10\\.|^192\\.168\\.|^172\\.(1[6-9]|2[0-9]|3[0-1])\\.|^100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.|^127\\.|^169\\.254\\.|^localhost($|:)|^\\[?::1\\]?|^\\[?(fc|fd|fe80):"; "i");
+    [
+      .[]
+      | select((.inbound // false) | not)
+      | {
+          addr: (.addr // ""),
+          private: is_private_peer,
+          synced: (((.synced_blocks // -1000000) >= ($local_tip - 1)) or ((.synced_headers // -1000000) >= ($local_tip - 1))),
+          full_relay: ((.connection_type // "") == "outbound-full-relay"),
+          manual: ((.connection_type // "") == "manual"),
+          minping: (.minping // 999999),
+          addr_sort: (.addr // "")
+        }
+      | select(.addr != "")
+    ]
+    | sort_by([.private, (.synced | not), (.full_relay | not), .manual, .minping, .addr_sort])
+    | .[:$cache_limit]
+    | .[].addr
+  ' | awk 'NF && !seen[$0]++' > "${tmp_cache}"; then
+    if [[ -s "${tmp_cache}" ]]; then
+      mv "${tmp_cache}" "${PEER_CACHE_FILE}"
+      return 0
+    fi
+  fi
+
+  rm -f "${tmp_cache}"
+  return 1
+}
+
+summarize_outbound_peer_mix_from_json() {
+  local local_tip="${1:-0}"
+
+  jq -c --argjson local_tip "${local_tip}" '
+    def is_private_peer:
+      (.addr // "") | test("^10\\.|^192\\.168\\.|^172\\.(1[6-9]|2[0-9]|3[0-1])\\.|^100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.|^127\\.|^169\\.254\\.|^localhost($|:)|^\\[?::1\\]?|^\\[?(fc|fd|fe80):"; "i");
+    [
+      .[]
+      | select((.inbound // false) | not)
+      | {
+          private: is_private_peer,
+          manual: ((.connection_type // "") == "manual"),
+          full_relay: ((.connection_type // "") == "outbound-full-relay"),
+          synced: (((.synced_blocks // -1000000) >= ($local_tip - 1)) or ((.synced_headers // -1000000) >= ($local_tip - 1)))
+        }
+    ] as $outbound
+    | {
+        outbound: ($outbound | length),
+        public_outbound: ($outbound | map(select(.private | not)) | length),
+        private_outbound: ($outbound | map(select(.private)) | length),
+        full_relay_outbound: ($outbound | map(select(.full_relay)) | length),
+        synced_public_outbound: ($outbound | map(select((.private | not) and .synced)) | length),
+        manual_private_outbound: ($outbound | map(select(.manual and .private)) | length)
+      }
+  '
+}
+
+refresh_live_peer_cache() {
+  local local_tip="${1:-${last_local_tip:-0}}"
+  local tmp_err
   local peer_json
 
   tmp_err="$(mktemp)"
-  tmp_cache="$(mktemp)"
   if peer_json="$(rpc_cli getpeerinfo 2>"${tmp_err}")"; then
-    jq -r '.[] | select((.inbound // false) | not) | .addr // empty' <<<"${peer_json}" \
-      | awk 'NF && !seen[$0]++ { print; if (++count >= 16) exit }' > "${tmp_cache}"
-    if [[ -s "${tmp_cache}" ]]; then
-      mv "${tmp_cache}" "${PEER_CACHE_FILE}"
-    else
-      rm -f "${tmp_cache}"
-    fi
     rm -f "${tmp_err}"
-    return 0
+    refresh_live_peer_cache_from_json "${local_tip}" <<<"${peer_json}"
+    return $?
   fi
 
   append_file_if_present "${tmp_err}" "${ERR}"
-  rm -f "${tmp_err}" "${tmp_cache}"
+  rm -f "${tmp_err}"
   return 1
+}
+
+is_private_peer_addr() {
+  local node="${1:-}"
+
+  [[ "${node}" =~ ^10\. ]] || \
+  [[ "${node}" =~ ^192\.168\. ]] || \
+  [[ "${node}" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] || \
+  [[ "${node}" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]] || \
+  [[ "${node}" =~ ^127\. ]] || \
+  [[ "${node}" =~ ^169\.254\. ]] || \
+  [[ "${node}" =~ ^localhost(:|$) ]] || \
+  [[ "${node}" =~ ^\[?::1\]? ]] || \
+  [[ "${node}" =~ ^\[?(fc|fd|fe80): ]]
+}
+
+collect_bootstrap_nodes() {
+  local node
+  local bootstrap_nodes=()
+  local public_cached=()
+  local private_cached=()
+
+  if [[ -f "${PEER_CACHE_FILE}" ]]; then
+    while IFS= read -r node; do
+      [[ -n "${node}" ]] || continue
+      if is_private_peer_addr "${node}"; then
+        private_cached+=("${node}")
+      else
+        public_cached+=("${node}")
+      fi
+    done < "${PEER_CACHE_FILE}"
+  fi
+
+  if [[ -n "${BOOTSTRAP_ADDNODES}" ]]; then
+    IFS=',' read -r -a bootstrap_nodes <<< "${BOOTSTRAP_ADDNODES}"
+  fi
+
+  {
+    if (( ${#public_cached[@]} > 0 )); then
+      for node in "${public_cached[@]}"; do
+        printf '%s\n' "${node}"
+      done
+    fi
+    if (( ${#bootstrap_nodes[@]} > 0 )); then
+      for node in "${bootstrap_nodes[@]}"; do
+        printf '%s\n' "${node}"
+      done
+    fi
+    if (( ${#private_cached[@]} > 0 )); then
+      for node in "${private_cached[@]}"; do
+        printf '%s\n' "${node}"
+      done
+    fi
+  } | awk -v limit="${PEER_REFRESH_LIMIT}" '
+    NF && !seen[$0]++ {
+      print
+      if (limit > 0 && ++count >= limit) {
+        exit
+      }
+    }
+  '
+}
+
+maybe_refresh_healthy_peer_topology() {
+  local local_tip="${1:-${last_local_tip:-0}}"
+  local tmp_err
+  local peer_json
+  local summary_json
+  local public_outbound=0
+  local private_outbound=0
+  local full_relay_outbound=0
+  local synced_public_outbound=0
+  local manual_private_outbound=0
+
+  tmp_err="$(mktemp)"
+  if ! peer_json="$(rpc_cli getpeerinfo 2>"${tmp_err}")"; then
+    append_file_if_present "${tmp_err}" "${ERR}"
+    rm -f "${tmp_err}"
+    return 1
+  fi
+  rm -f "${tmp_err}"
+
+  refresh_live_peer_cache_from_json "${local_tip}" <<<"${peer_json}" || true
+  if ! summary_json="$(summarize_outbound_peer_mix_from_json "${local_tip}" <<<"${peer_json}")"; then
+    return 1
+  fi
+
+  public_outbound="$(jq -r '.public_outbound // 0' <<<"${summary_json}")"
+  private_outbound="$(jq -r '.private_outbound // 0' <<<"${summary_json}")"
+  full_relay_outbound="$(jq -r '.full_relay_outbound // 0' <<<"${summary_json}")"
+  synced_public_outbound="$(jq -r '.synced_public_outbound // 0' <<<"${summary_json}")"
+  manual_private_outbound="$(jq -r '.manual_private_outbound // 0' <<<"${summary_json}")"
+
+  if (( public_outbound < HEALTHY_PUBLIC_PEER_TARGET )) || \
+     (( synced_public_outbound < HEALTHY_PUBLIC_PEER_TARGET )) || \
+     (( full_relay_outbound < HEALTHY_FULL_RELAY_PEER_TARGET )) || \
+     (( public_outbound == 0 && manual_private_outbound > 0 )); then
+    log_health "peer-topology-low public_outbound=${public_outbound} synced_public_outbound=${synced_public_outbound} full_relay_outbound=${full_relay_outbound} private_outbound=${private_outbound} manual_private_outbound=${manual_private_outbound}"
+    refresh_peer_bootstrap "healthy_topoff" || true
+  fi
+
+  return 0
 }
 
 disconnect_stale_outbound_peers() {
@@ -527,16 +689,7 @@ refresh_peer_bootstrap() {
   while IFS= read -r node; do
     [[ -n "${node}" ]] || continue
     bootstrap_nodes+=("${node}")
-  done < <(
-    {
-      if [[ -f "${PEER_CACHE_FILE}" ]]; then
-        cat "${PEER_CACHE_FILE}"
-      fi
-      if [[ -n "${BOOTSTRAP_ADDNODES}" ]]; then
-        printf '%s\n' "${BOOTSTRAP_ADDNODES}" | tr ',' '\n'
-      fi
-    } | awk 'NF && !seen[$0]++'
-  )
+  done < <(collect_bootstrap_nodes)
   for node in "${bootstrap_nodes[@]}"; do
     [[ -n "${node}" ]] || continue
     ((attempted += 1))
@@ -768,7 +921,7 @@ check_runtime_health() {
     health_failure_streak=0
     last_health_reason="ok"
     same_reason_streak=0
-    refresh_live_peer_cache || true
+    maybe_refresh_healthy_peer_topology "${local_tip}" || true
     return 0
   fi
 
@@ -812,7 +965,7 @@ last_peer_refresh_epoch=0
 printf '%s\n' "$$" > "${PIDFILE}"
 trap 'rm -f "${PIDFILE}"' EXIT
 
-log_health "loop-start datadir=${DATADIR:-default} wallet=${WALLET} rpc_restart_threshold=${RPC_RESTART_THRESHOLD} health_restart_threshold=${HEALTH_RESTART_THRESHOLD} peer_remediation_threshold=${PEER_REMEDIATION_THRESHOLD} sync_stall_restart_secs=${SYNC_STALL_RESTART_SECS} maxconnections=${MAXCONNECTIONS} startup_grace=${STARTUP_GRACE_SECS} node_pidfile=${NODE_PIDFILE}"
+log_health "loop-start datadir=${DATADIR:-default} wallet=${WALLET} rpc_restart_threshold=${RPC_RESTART_THRESHOLD} health_restart_threshold=${HEALTH_RESTART_THRESHOLD} peer_remediation_threshold=${PEER_REMEDIATION_THRESHOLD} peer_cache_limit=${PEER_CACHE_LIMIT} peer_refresh_limit=${PEER_REFRESH_LIMIT} healthy_public_peer_target=${HEALTHY_PUBLIC_PEER_TARGET} healthy_full_relay_peer_target=${HEALTHY_FULL_RELAY_PEER_TARGET} sync_stall_restart_secs=${SYNC_STALL_RESTART_SECS} maxconnections=${MAXCONNECTIONS} startup_grace=${STARTUP_GRACE_SECS} node_pidfile=${NODE_PIDFILE}"
 
 while true; do
   ((loop_count += 1))

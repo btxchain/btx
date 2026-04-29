@@ -24,6 +24,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 namespace {
@@ -665,6 +666,7 @@ kernel void fused_prefix_compress_specialized(
     device const uint* compress_vec [[buffer(3)]],
     device uint* compressed [[buffer(4)]],
     uint tid [[thread_index_in_threadgroup]],
+    uint simd_size [[threads_per_simdgroup]],
     uint2 tgid [[threadgroup_position_in_grid]])
 {
     const uint n = FC_SPEC_N;
@@ -708,21 +710,21 @@ kernel void fused_prefix_compress_specialized(
         weighted_terms[tid] = mul_mod(c_acc, weight);
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        uint active = block_elements;
-        while (active > 1u) {
-            const uint reduce_count = active >> 1u;
-            if (tid < reduce_count) {
-                weighted_terms[tid] = add_mod(weighted_terms[tid], weighted_terms[tid + reduce_count]);
-            }
-            if ((active & 1u) != 0u && tid == 0u) {
-                weighted_terms[0] = add_mod(weighted_terms[0], weighted_terms[active - 1u]);
-            }
-            active = (active + 1u) >> 1u;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        const uint simd_lane = tid % simd_size;
+        const uint simd_group = tid / simd_size;
+        uint reduced = reduce_simdgroup_add_mod(weighted_terms[tid], simd_size);
+        if (simd_lane == 0u) {
+            weighted_terms[simd_group] = reduced;
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        if (tid == 0u) {
-            compressed[(tile_i * N + tile_j) * N + ell] = weighted_terms[0];
+        const uint group_count = (block_elements + simd_size - 1u) / simd_size;
+        if (simd_group == 0u) {
+            reduced = tid < group_count ? weighted_terms[tid] : 0u;
+            reduced = reduce_simdgroup_add_mod(reduced, simd_size);
+            if (tid == 0u) {
+                compressed[(tile_i * N + tile_j) * N + ell] = reduced;
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -811,6 +813,7 @@ kernel void fused_prefix_compress(
     device const uint* compress_vec [[buffer(3)]],
     device uint* compressed [[buffer(4)]],
     uint tid [[thread_index_in_threadgroup]],
+    uint simd_size [[threads_per_simdgroup]],
     uint2 tgid [[threadgroup_position_in_grid]])
 {
     const uint block_elements = p.b * p.b;
@@ -847,21 +850,21 @@ kernel void fused_prefix_compress(
         weighted_terms[tid] = mul_mod(c_acc, weight);
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        uint active = block_elements;
-        while (active > 1u) {
-            const uint reduce_count = active >> 1u;
-            if (tid < reduce_count) {
-                weighted_terms[tid] = add_mod(weighted_terms[tid], weighted_terms[tid + reduce_count]);
-            }
-            if ((active & 1u) != 0u && tid == 0u) {
-                weighted_terms[0] = add_mod(weighted_terms[0], weighted_terms[active - 1u]);
-            }
-            active = (active + 1u) >> 1u;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        const uint simd_lane = tid % simd_size;
+        const uint simd_group = tid / simd_size;
+        uint reduced = reduce_simdgroup_add_mod(weighted_terms[tid], simd_size);
+        if (simd_lane == 0u) {
+            weighted_terms[simd_group] = reduced;
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        if (tid == 0u) {
-            compressed[(tile_i * p.N + tile_j) * p.N + ell] = weighted_terms[0];
+        const uint group_count = (block_elements + simd_size - 1u) / simd_size;
+        if (simd_group == 0u) {
+            reduced = tid < group_count ? weighted_terms[tid] : 0u;
+            reduced = reduce_simdgroup_add_mod(reduced, simd_size);
+            if (tid == 0u) {
+                compressed[(tile_i * p.N + tile_j) * p.N + ell] = reduced;
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -939,9 +942,9 @@ constexpr std::array<SpecializedKernelShape, 3> SPECIALIZED_KERNEL_SHAPES{{
     {64, 4, 2, 16, "regtest_64_4_2"},
 }};
 
-// Default to one slot because local miner-style benchmarks regress when multi-slot
-// queueing is enabled by default on this Apple GPU. Extra slots remain available
-// behind BTX_MATMUL_METAL_POOL_SLOTS for experimentation.
+// Keep the default auto pool conservative enough for Apple Silicon mining while
+// still matching the solver fanout policy on hosts that benefit from multiple
+// in-flight Metal solves. Explicit env overrides still take precedence.
 constexpr uint32_t DEFAULT_METAL_POOL_SLOT_COUNT{1};
 constexpr uint32_t MAX_METAL_POOL_SLOT_COUNT{8};
 
@@ -955,11 +958,81 @@ struct SpecializedKernelPipelines {
     bool available{false};
 };
 
+int32_t ResolveApplePerformanceLogicalCpuCount()
+{
+    const char* override_env = std::getenv("BTX_MATMUL_APPLE_PERFLEVEL0_LOGICALCPU_OVERRIDE");
+    if (override_env != nullptr && override_env[0] != '\0') {
+        char* override_end{nullptr};
+        const long parsed_override = std::strtol(override_env, &override_end, 10);
+        if (override_end != override_env && *override_end == '\0') {
+            return static_cast<int32_t>(parsed_override);
+        }
+    }
+
+    int32_t perf_level0_logicalcpu{0};
+    size_t perf_level0_size{sizeof(perf_level0_logicalcpu)};
+    if (sysctlbyname("hw.perflevel0.logicalcpu",
+                     &perf_level0_logicalcpu,
+                     &perf_level0_size,
+                     nullptr,
+                     0) == 0 &&
+        perf_level0_size == sizeof(perf_level0_logicalcpu) &&
+        perf_level0_logicalcpu > 0) {
+        return perf_level0_logicalcpu;
+    }
+    return 0;
+}
+
+bool IsHighPerfAppleMetalHost(int32_t perf_level0_logicalcpu)
+{
+    return perf_level0_logicalcpu >= 10;
+}
+
+bool IsConservativeAppleMetalHost(int32_t perf_level0_logicalcpu)
+{
+    return perf_level0_logicalcpu > 0 && perf_level0_logicalcpu <= 4;
+}
+
+uint32_t ResolveMetalAutoPoolSlotCount()
+{
+    const char* solver_threads_env = std::getenv("BTX_MATMUL_SOLVER_THREADS");
+    if (solver_threads_env != nullptr && solver_threads_env[0] != '\0') {
+        char* solver_threads_end{nullptr};
+        const long parsed_solver_threads = std::strtol(solver_threads_env, &solver_threads_end, 10);
+        if (solver_threads_end != solver_threads_env &&
+            *solver_threads_end == '\0' &&
+            parsed_solver_threads > 0) {
+            return static_cast<uint32_t>(std::clamp<long>(
+                parsed_solver_threads,
+                1,
+                MAX_METAL_POOL_SLOT_COUNT));
+        }
+    }
+
+    const int32_t perf_level0_logicalcpu = ResolveApplePerformanceLogicalCpuCount();
+    if (perf_level0_logicalcpu > 0) {
+        if (IsHighPerfAppleMetalHost(perf_level0_logicalcpu)) {
+            return 5;
+        }
+
+        if (IsConservativeAppleMetalHost(perf_level0_logicalcpu)) {
+            return 1;
+        }
+
+        return static_cast<uint32_t>(std::clamp<int32_t>(
+            perf_level0_logicalcpu - 1,
+            1,
+            4));
+    }
+
+    return DEFAULT_METAL_POOL_SLOT_COUNT;
+}
+
 uint32_t ResolveMetalPoolSlotCount()
 {
     const char* env = std::getenv("BTX_MATMUL_METAL_POOL_SLOTS");
     if (env == nullptr || env[0] == '\0') {
-        return DEFAULT_METAL_POOL_SLOT_COUNT;
+        return ResolveMetalAutoPoolSlotCount();
     }
 
     char* end{nullptr};
@@ -1620,7 +1693,9 @@ struct AsyncBatchDigestState final : public AsyncDigestSubmissionState<btx::meta
     uint32_t n{0};
     uint32_t b{0};
     uint32_t N{0};
+    uint64_t compressed_words{0};
     std::vector<uint256> sigmas;
+    id<MTLBuffer> compressed_buffer{nil};
     id<MTLBuffer> transcript_hash_buffer{nil};
 };
 
@@ -1639,27 +1714,43 @@ void RetainTemporaryInputBuffer(CFMutableArrayRef array, id<MTLBuffer> buffer)
 
 id<MTLBuffer> WrapSharedNoCopyBuffer(id<MTLDevice> device, const void* bytes, size_t length);
 
-bool FinalizeProductCommittedDigestFromHashBuffer(id<MTLBuffer> hash_buffer,
-                                                  size_t hash_offset_bytes,
-                                                  uint32_t n,
-                                                  uint32_t b,
-                                                  const uint256& sigma,
-                                                  uint256& out_digest,
-                                                  std::string& error)
+bool FinalizeProductCommittedDigestFromFinalSliceBuffer(id<MTLBuffer> compressed_buffer,
+                                                        size_t word_offset,
+                                                        uint32_t blocks_per_axis,
+                                                        uint32_t n,
+                                                        uint32_t b,
+                                                        const uint256& sigma,
+                                                        uint256& out_digest,
+                                                        std::string& error)
 {
-    if (hash_buffer == nil) {
-        error = "product digest finalize missing Metal hash buffer";
+    if (compressed_buffer == nil) {
+        error = "product digest finalize missing Metal compressed buffer";
         return false;
     }
-    const auto* const hash_bytes = static_cast<const unsigned char*>(hash_buffer.contents);
-    if (hash_bytes == nullptr) {
-        error = "product digest finalize missing Metal hash buffer contents";
+    const auto* const compressed_words = static_cast<const matmul::field::Element*>(compressed_buffer.contents);
+    if (compressed_words == nullptr) {
+        error = "product digest finalize missing Metal compressed buffer contents";
         return false;
     }
 
     try {
-        const uint256 c_prime_hash{Span<const unsigned char>{hash_bytes + hash_offset_bytes, size_t{32}}};
-        out_digest = matmul::transcript::FinalizeProductCommittedDigestFromHash(c_prime_hash, sigma, n, b);
+        if (blocks_per_axis == 0) {
+            error = "product digest finalize requires non-zero blocks_per_axis";
+            return false;
+        }
+        const size_t final_word_count = static_cast<size_t>(blocks_per_axis) * blocks_per_axis;
+        const size_t final_ell = static_cast<size_t>(blocks_per_axis - 1);
+        std::vector<matmul::field::Element> final_words;
+        final_words.reserve(final_word_count);
+        for (size_t word_index = 0; word_index < final_word_count; ++word_index) {
+            final_words.push_back(
+                compressed_words[word_offset + (word_index * static_cast<size_t>(blocks_per_axis)) + final_ell]);
+        }
+        out_digest = matmul::transcript::ComputeProductCommittedDigestFromWords(
+            Span<const matmul::field::Element>{final_words.data(), final_words.size()},
+            sigma,
+            n,
+            b);
         return true;
     } catch (const std::exception& e) {
         error = e.what();
@@ -1822,8 +1913,7 @@ bool BuildKernelParams(const btx::metal::MatMulDigestRequest& request,
 
     const uint64_t matrix_words = n * n;
     const uint64_t noise_words = n * request.r;
-    const bool product_digest = request.digest_mode == btx::metal::MatMulDigestMode::PRODUCT_COMMITTED;
-    const uint64_t prefix_words = product_digest ? 0 : (N * matrix_words);
+    const uint64_t prefix_words = N * matrix_words;
     const uint64_t compressed_words = N * N * N;
 
     if (matrix_words > std::numeric_limits<uint32_t>::max() ||
@@ -2329,7 +2419,7 @@ MatMulDigestSubmission SubmitCanonicalTranscriptDigest(const MatMulDigestRequest
         uint32_t compressed_words;
     } hash_params{static_cast<uint32_t>(compressed_words)};
     const bool use_product_digest = request.digest_mode == MatMulDigestMode::PRODUCT_COMMITTED;
-    const bool use_legacy_pipeline = ShouldUseLegacyTranscriptPipeline(request, context);
+    const bool use_legacy_pipeline = use_product_digest || ShouldUseLegacyTranscriptPipeline(request, context);
     const SpecializedKernelPipelines* specialized = nullptr;
     if (ShouldUseFunctionConstantSpecialization(request.n, use_legacy_pipeline || use_product_digest)) {
         specialized = FindSpecializedPipelines(context, request.n, request.b, request.r, N);
@@ -2350,7 +2440,6 @@ MatMulDigestSubmission SubmitCanonicalTranscriptDigest(const MatMulDigestRequest
         (specialized != nullptr && specialized->fused_prefix_compress_pipeline != nil)
             ? specialized->fused_prefix_compress_pipeline
             : context.fused_prefix_compress_pipeline;
-    id<MTLComputePipelineState> product_compressed_sha256_pipeline = context.product_compressed_sha256_pipeline;
 
     auto state = std::make_shared<AsyncSingleDigestState>();
     state->result.available = true;
@@ -2478,49 +2567,7 @@ MatMulDigestSubmission SubmitCanonicalTranscriptDigest(const MatMulDigestRequest
                                                std::chrono::steady_clock::now() - encode_build_start)
                                                .count();
 
-        if (use_product_digest) {
-            const NSUInteger block_elements = static_cast<NSUInteger>(request.b) * request.b;
-            const std::array<BufferBinding, 5> buffers_2{{
-                {params_buffer, 0},
-                {a_prime_buffer, 0},
-                {b_prime_buffer, 0},
-                {compress_input_buffer, 0},
-                {compressed_buffer, 0},
-            }};
-            const auto encode_product_start = std::chrono::steady_clock::now();
-            if (!EncodeComputeThreadgroupsBindings(command,
-                                       fused_prefix_compress_pipeline,
-                                       static_cast<NSUInteger>(N),
-                                       static_cast<NSUInteger>(N),
-                                       block_elements,
-                                       buffers_2,
-                                       encode_error)) {
-                submission.error = encode_error;
-                return submission;
-            }
-            state->encode_fused_prefix_compress_us = std::chrono::duration<double, std::micro>(
-                                                         std::chrono::steady_clock::now() - encode_product_start)
-                                                         .count();
-
-            const std::array<BufferBinding, 3> buffers_3{{
-                {compressed_buffer, 0},
-                {params_buffer, 0},
-                {transcript_hash_buffer, 0},
-            }};
-            const auto encode_hash_start = std::chrono::steady_clock::now();
-            if (!EncodeComputeBindings(command,
-                                       product_compressed_sha256_pipeline,
-                                       1,
-                                       1,
-                                       buffers_3,
-                                       encode_error)) {
-                submission.error = encode_error;
-                return submission;
-            }
-            state->encode_transcript_sha256_us = std::chrono::duration<double, std::micro>(
-                                                     std::chrono::steady_clock::now() - encode_hash_start)
-                                                     .count();
-        } else if (use_legacy_pipeline) {
+        if (use_legacy_pipeline) {
             const std::array<BufferBinding, 4> buffers_2{{
                 {params_buffer, 0},
                 {a_prime_buffer, 0},
@@ -2635,9 +2682,10 @@ MatMulDigestSubmission SubmitCanonicalTranscriptDigest(const MatMulDigestRequest
 
                 const auto finalize_start = std::chrono::steady_clock::now();
                 if (state->use_product_digest) {
-                    if (!FinalizeProductCommittedDigestFromHashBuffer(
-                            state->transcript_hash_buffer,
-                            /*hash_offset_bytes=*/0,
+                    if (!FinalizeProductCommittedDigestFromFinalSliceBuffer(
+                            state->compressed_buffer,
+                            /*word_offset=*/0,
+                            state->N,
                             state->n,
                             state->b,
                             state->sigma,
@@ -2791,7 +2839,6 @@ MatMulDigestBatchSubmission SubmitCanonicalTranscriptDigestBatch(const MatMulDig
         (specialized != nullptr && specialized->fused_prefix_compress_pipeline != nil)
             ? specialized->fused_prefix_compress_pipeline
             : context.fused_prefix_compress_pipeline;
-    id<MTLComputePipelineState> product_compressed_sha256_pipeline = context.product_compressed_sha256_pipeline;
 
     auto state = std::make_shared<AsyncBatchDigestState>();
     state->result.available = true;
@@ -2959,29 +3006,6 @@ MatMulDigestBatchSubmission SubmitCanonicalTranscriptDigestBatch(const MatMulDig
                 state->encode_fused_prefix_compress_us += std::chrono::duration<double, std::micro>(
                                                              std::chrono::steady_clock::now() - encode_product_start)
                                                              .count();
-
-                id<MTLComputeCommandEncoder> hash_encoder = [command computeCommandEncoder];
-                if (hash_encoder == nil) {
-                    submission.error = "Failed to create Metal compute encoder";
-                    return submission;
-                }
-                const std::array<BufferBinding, 3> hash_bindings{{
-                    {compressed_buffer, static_cast<NSUInteger>(compressed_offset)},
-                    {params_buffer, 0},
-                    {transcript_hash_buffer, static_cast<NSUInteger>(i) * kHashBytesPerDigest},
-                }};
-                SetEncoderBindings(hash_encoder, hash_bindings);
-
-                const NSUInteger hash_group_size = SelectThreadGroupSize(product_compressed_sha256_pipeline, 1);
-                const MTLSize hash_grid = MTLSizeMake(1, 1, 1);
-                const MTLSize hash_group = MTLSizeMake(hash_group_size, 1, 1);
-                const auto encode_hash_start = std::chrono::steady_clock::now();
-                [hash_encoder setComputePipelineState:product_compressed_sha256_pipeline];
-                [hash_encoder dispatchThreads:hash_grid threadsPerThreadgroup:hash_group];
-                [hash_encoder endEncoding];
-                state->encode_transcript_sha256_us += std::chrono::duration<double, std::micro>(
-                                                          std::chrono::steady_clock::now() - encode_hash_start)
-                                                          .count();
             } else {
                 const std::array<BufferBinding, 5> buffers_2{{
                     {params_buffer, 0},
@@ -3034,9 +3058,11 @@ MatMulDigestBatchSubmission SubmitCanonicalTranscriptDigestBatch(const MatMulDig
         state->n = request.n;
         state->b = request.b;
         state->N = N;
+        state->compressed_words = compressed_words;
         if (use_product_digest) {
             state->sigmas.assign(request.sigmas, request.sigmas + request.batch_size);
         }
+        state->compressed_buffer = compressed_buffer;
         state->transcript_hash_buffer = transcript_hash_buffer;
 
         RecordAsyncSubmissionStart(context, state);
@@ -3063,9 +3089,10 @@ MatMulDigestBatchSubmission SubmitCanonicalTranscriptDigestBatch(const MatMulDig
                     for (uint32_t i = 0; i < state->batch_size; ++i) {
                         uint256 digest;
                         std::string finalize_error;
-                        if (!FinalizeProductCommittedDigestFromHashBuffer(
-                                state->transcript_hash_buffer,
-                                static_cast<size_t>(i) * kHashBytesPerDigest,
+                        if (!FinalizeProductCommittedDigestFromFinalSliceBuffer(
+                                state->compressed_buffer,
+                                static_cast<size_t>(i) * state->compressed_words,
+                                state->N,
                                 state->n,
                                 state->b,
                                 state->sigmas[i],

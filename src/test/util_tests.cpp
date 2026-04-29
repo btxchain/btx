@@ -1160,6 +1160,12 @@ BOOST_AUTO_TEST_CASE(test_FormatSubVersion)
     BOOST_CHECK_EQUAL(FormatSubVersion("Test", 99900, std::vector<std::string>(), true),std::string("/Test:9.99.0/"));
     BOOST_CHECK_EQUAL(FormatSubVersion("Test", 99900, comments, true),std::string("/Test:9.99.0(comment1)/"));
     BOOST_CHECK_EQUAL(FormatSubVersion("Test", 99900, comments2, true),std::string("/Test:9.99.0(comment1; Comment2; .,_?@-; )/"));
+    BOOST_CHECK_EQUAL(FormatSubVersion(CLIENT_NAME, CLIENT_VERSION, std::vector<std::string>(), true),
+                      strprintf("/%s:%d.%d.%d/",
+                                CLIENT_NAME,
+                                CLIENT_VERSION_MAJOR,
+                                CLIENT_VERSION_MINOR,
+                                CLIENT_VERSION_BUILD));
 }
 
 BOOST_AUTO_TEST_CASE(test_ParseFixedPoint)

@@ -9,6 +9,7 @@
 #include <threadsafety.h>
 #include <chain.h>
 #include <crypto/kawpow.h>
+#include <cuda/matmul_accel.h>
 #include <hash.h>
 #include <logging.h>
 #include <matmul/accelerated_solver.h>
@@ -197,14 +198,33 @@ void RegisterMatMulValidationRuntimeSample(
     }
 }
 
-int32_t ResolveMatMulPrepareWorkerCount()
+uint32_t ResolveCudaMultiprocessorCountForHeuristics()
 {
-    const char* env = std::getenv("BTX_MATMUL_PREPARE_WORKERS");
-    if (env != nullptr && env[0] != '\0') {
-        int32_t parsed{0};
-        if (ParseInt32(env, &parsed) && parsed > 0) {
-            return std::min<int32_t>(parsed, 16);
-        }
+    static const uint32_t sm_count = [] {
+        const auto probe = btx::cuda::ProbeMatMulDigestAcceleration();
+        return probe.available ? probe.multiprocessor_count : 0U;
+    }();
+    return sm_count;
+}
+
+std::optional<int32_t> ResolveEnvInt32Override(const char* name)
+{
+    const char* env = std::getenv(name);
+    if (env == nullptr || env[0] == '\0') {
+        return std::nullopt;
+    }
+
+    int32_t parsed{0};
+    if (!ParseInt32(env, &parsed)) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+int32_t ResolveApplePerformanceLogicalCpuCount()
+{
+    if (const auto override = ResolveEnvInt32Override("BTX_MATMUL_APPLE_PERFLEVEL0_LOGICALCPU_OVERRIDE")) {
+        return *override;
     }
 
 #if defined(__APPLE__)
@@ -217,6 +237,35 @@ int32_t ResolveMatMulPrepareWorkerCount()
                      0) == 0 &&
         perf_level0_size == sizeof(perf_level0_logicalcpu) &&
         perf_level0_logicalcpu > 0) {
+        return perf_level0_logicalcpu;
+    }
+#endif
+    return 0;
+}
+
+bool IsHighPerfAppleMetalHost(int32_t perf_level0_logicalcpu)
+{
+    return perf_level0_logicalcpu >= 10;
+}
+
+bool IsConservativeAppleMetalHost(int32_t perf_level0_logicalcpu)
+{
+    return perf_level0_logicalcpu > 0 && perf_level0_logicalcpu <= 4;
+}
+
+int32_t ResolveDefaultMatMulPrepareWorkerCount()
+{
+#if defined(__APPLE__)
+    const int32_t perf_level0_logicalcpu = ResolveApplePerformanceLogicalCpuCount();
+    if (perf_level0_logicalcpu > 0) {
+        // High-end Apple Silicon desktops still benefit from leaving some
+        // performance cores for the foreground solve threads and Metal command
+        // submission rather than consuming the whole perf cluster with prepare
+        // workers.
+        if (IsHighPerfAppleMetalHost(perf_level0_logicalcpu)) {
+            return 5;
+        }
+
         // Keep one performance core free for the foreground solve loop and
         // let the async prepare pool consume only the remaining performance
         // cores. Local Apple Silicon mining benchmarks consistently beat the
@@ -226,9 +275,77 @@ int32_t ResolveMatMulPrepareWorkerCount()
 #endif
 
     const uint32_t hw = std::thread::hardware_concurrency();
+    const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
+    if (backend_selection.active == matmul::backend::Kind::CUDA) {
+        const uint32_t cuda_sm_count = ResolveCudaMultiprocessorCountForHeuristics();
+        if (cuda_sm_count >= 96 && hw >= 16) {
+            return std::clamp<int32_t>(static_cast<int32_t>(hw / 2), 2, 8);
+        }
+        if (cuda_sm_count >= 64 && hw >= 12) {
+            return std::clamp<int32_t>(static_cast<int32_t>((hw + 1) / 3), 2, 6);
+        }
+        if (cuda_sm_count >= 48 && hw >= 8) {
+            return std::clamp<int32_t>(static_cast<int32_t>((hw + 1) / 4), 2, 5);
+        }
+    }
     if (hw <= 1) return 1;
     if (hw == 2) return 2;
     return std::min<uint32_t>(hw - 1, 4);
+}
+
+int32_t ResolveMetalAutoSolverThreadCount()
+{
+#if defined(__APPLE__)
+    const int32_t perf_level0_logicalcpu = ResolveApplePerformanceLogicalCpuCount();
+    if (perf_level0_logicalcpu > 0) {
+        if (IsHighPerfAppleMetalHost(perf_level0_logicalcpu)) {
+            return 6;
+        }
+
+        if (IsConservativeAppleMetalHost(perf_level0_logicalcpu)) {
+            return 1;
+        }
+
+        // Mirror the Apple prepare-worker split so the default Metal policy
+        // keeps solver fanout and host-side preparation in the same range.
+        return std::clamp<int32_t>(perf_level0_logicalcpu - 1, 1, 4);
+    }
+#endif
+
+    const uint32_t hw = std::thread::hardware_concurrency();
+    if (hw >= 12) {
+        return 4;
+    }
+    if (hw >= 8) {
+        return 3;
+    }
+    if (hw >= 4) {
+        return 2;
+    }
+    return 1;
+}
+
+int32_t ResolveMatMulSolverThreadCount();
+
+int32_t ResolveMatMulPrepareWorkerCount()
+{
+    const char* env = std::getenv("BTX_MATMUL_PREPARE_WORKERS");
+    if (env != nullptr && env[0] != '\0') {
+        int32_t parsed{0};
+        if (ParseInt32(env, &parsed) && parsed > 0) {
+            return std::min<int32_t>(parsed, 16);
+        }
+    }
+
+    const int32_t default_workers = ResolveDefaultMatMulPrepareWorkerCount();
+    const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
+    if (backend_selection.active == matmul::backend::Kind::METAL) {
+        const int32_t solver_threads = ResolveMatMulSolverThreadCount();
+        if (solver_threads > 1) {
+            return std::min(default_workers, solver_threads);
+        }
+    }
+    return default_workers;
 }
 
 int32_t ResolveMatMulSolverThreadCount()
@@ -243,8 +360,45 @@ int32_t ResolveMatMulSolverThreadCount()
     }
 
     const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
+    if (backend_selection.active == matmul::backend::Kind::METAL) {
+        return ResolveMetalAutoSolverThreadCount();
+    }
     if (backend_selection.active == matmul::backend::Kind::CUDA) {
+        const uint32_t cuda_sm_count = ResolveCudaMultiprocessorCountForHeuristics();
         const uint32_t hw = std::thread::hardware_concurrency();
+        if (cuda_sm_count >= 96) {
+            if (hw >= 24) {
+                return 8;
+            }
+            if (hw >= 16) {
+                return 6;
+            }
+            if (hw >= 12) {
+                return 5;
+            }
+        }
+        if (cuda_sm_count >= 64) {
+            if (hw >= 16) {
+                return 6;
+            }
+            if (hw >= 12) {
+                return 5;
+            }
+            if (hw >= 8) {
+                return 4;
+            }
+        }
+        if (cuda_sm_count >= 48) {
+            if (hw >= 16) {
+                return 5;
+            }
+            if (hw >= 12) {
+                return 4;
+            }
+            if (hw >= 8) {
+                return 3;
+            }
+        }
         if (hw >= 16) {
             return 4;
         }
@@ -260,18 +414,52 @@ int32_t ResolveMatMulSolverThreadCount()
     return 1;
 }
 
+bool HasExplicitMatMulSolverThreadOverride()
+{
+    const char* env = std::getenv("BTX_MATMUL_SOLVER_THREADS");
+    return env != nullptr && env[0] != '\0';
+}
+
+bool ShouldAutoEnableMetalParallelSolver(uint32_t n,
+                                         uint32_t transcript_block_size,
+                                         uint32_t noise_rank,
+                                         bool product_digest_active)
+{
+    return product_digest_active &&
+        n >= 512 &&
+        transcript_block_size >= 16 &&
+        noise_rank >= 8;
+}
+
+bool ShouldEnableParallelMatMulSolve(matmul::backend::Kind backend,
+                                     uint32_t solver_threads,
+                                     uint32_t n,
+                                     uint32_t transcript_block_size,
+                                     uint32_t noise_rank,
+                                     bool product_digest_active)
+{
+    if (solver_threads <= 1) {
+        return false;
+    }
+    if (backend != matmul::backend::Kind::METAL) {
+        return true;
+    }
+    if (HasExplicitMatMulSolverThreadOverride()) {
+        return true;
+    }
+    return ShouldAutoEnableMetalParallelSolver(
+        n,
+        transcript_block_size,
+        noise_rank,
+        product_digest_active);
+}
+
 class MatMulPrepareExecutor
 {
 public:
     explicit MatMulPrepareExecutor(size_t worker_count)
     {
-        m_workers.reserve(worker_count);
-        for (size_t i = 0; i < worker_count; ++i) {
-            m_workers.emplace_back([this] { WorkerLoop(); });
-        }
-        g_matmul_async_prepare_worker_threads.store(
-            static_cast<uint32_t>(m_workers.size()),
-            std::memory_order_relaxed);
+        EnsureWorkerCount(worker_count);
     }
 
     ~MatMulPrepareExecutor()
@@ -305,6 +493,28 @@ public:
         g_matmul_async_prepare_submissions.fetch_add(1, std::memory_order_relaxed);
         m_cv.notify_one();
         return future;
+    }
+
+    void EnsureWorkerCount(size_t worker_count)
+    {
+        worker_count = std::max<size_t>(worker_count, 1);
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_stopping) {
+            throw std::runtime_error("MatMulPrepareExecutor is stopping");
+        }
+        if (worker_count <= m_workers.size()) {
+            g_matmul_async_prepare_worker_threads.store(
+                static_cast<uint32_t>(m_workers.size()),
+                std::memory_order_relaxed);
+            return;
+        }
+        m_workers.reserve(worker_count);
+        while (m_workers.size() < worker_count) {
+            m_workers.emplace_back([this] { WorkerLoop(); });
+        }
+        g_matmul_async_prepare_worker_threads.store(
+            static_cast<uint32_t>(m_workers.size()),
+            std::memory_order_relaxed);
     }
 
 private:
@@ -344,6 +554,7 @@ private:
 MatMulPrepareExecutor& GetMatMulPrepareExecutor()
 {
     static MatMulPrepareExecutor executor{static_cast<size_t>(ResolveMatMulPrepareWorkerCount())};
+    executor.EnsureWorkerCount(static_cast<size_t>(ResolveMatMulPrepareWorkerCount()));
     return executor;
 }
 
@@ -649,8 +860,18 @@ uint32_t ResolvePreparePrefetchDepth(matmul::backend::Kind backend, uint32_t con
     }
 
     if (backend == matmul::backend::Kind::CUDA) {
+        const uint32_t cuda_sm_count = ResolveCudaMultiprocessorCountForHeuristics();
         if (configured_batch_size <= 1) {
             return 1;
+        }
+        if (cuda_sm_count >= 96) {
+            return configured_batch_size >= 6 ? 5 : 4;
+        }
+        if (cuda_sm_count >= 64) {
+            return configured_batch_size >= 4 ? 4 : 3;
+        }
+        if (cuda_sm_count >= 48) {
+            return 3;
         }
         return ResolveMatMulSolverThreadCount() >= 5 ? 3 : 2;
     }
@@ -660,8 +881,11 @@ uint32_t ResolvePreparePrefetchDepth(matmul::backend::Kind backend, uint32_t con
     if (configured_batch_size <= 1) {
         return 1;
     }
-
-    return 2;
+    // Keep only one outstanding prefetched batch on Metal. High-tier Apple
+    // hosts already benchmark best with the shallower queue, and generic Apple
+    // hosts can trigger repeated command-buffer hang/recovery fallbacks when a
+    // deeper queue keeps the digest path continuously saturated.
+    return 1;
 }
 
 uint32_t ResolveSolveBatchSize(matmul::backend::Kind backend,
@@ -680,12 +904,29 @@ uint32_t ResolveSolveBatchSize(matmul::backend::Kind backend,
     }
 
     if (backend == matmul::backend::Kind::CUDA) {
-        (void)product_digest_active;
+        const uint32_t cuda_sm_count = ResolveCudaMultiprocessorCountForHeuristics();
         const int32_t solver_threads = ResolveMatMulSolverThreadCount();
         if (n >= 512 && transcript_block_size >= 16 && noise_rank >= 8) {
+            if (product_digest_active) {
+                if (cuda_sm_count >= 96) {
+                    return solver_threads >= 6 ? 8 : 4;
+                }
+                if (cuda_sm_count >= 64) {
+                    return solver_threads >= 5 ? 6 : 4;
+                }
+                if (cuda_sm_count >= 48) {
+                    return solver_threads >= 5 ? 4 : 2;
+                }
+            }
             return solver_threads >= 5 ? 4 : 2;
         }
         if (n >= 256 && transcript_block_size >= 8 && noise_rank >= 4) {
+            if (product_digest_active && cuda_sm_count >= 64) {
+                return solver_threads >= 5 ? 6 : 4;
+            }
+            if (product_digest_active && cuda_sm_count >= 48) {
+                return solver_threads >= 4 ? 4 : 2;
+            }
             return solver_threads >= 4 ? 4 : 2;
         }
         return 1;
@@ -694,12 +935,17 @@ uint32_t ResolveSolveBatchSize(matmul::backend::Kind backend,
         return 1;
     }
     const bool has_parallel_solver_support = ResolveMatMulSolverThreadCount() > 1;
+    const bool conservative_apple_metal_host = IsConservativeAppleMetalHost(
+        ResolveApplePerformanceLogicalCpuCount());
     if (n >= 512 && transcript_block_size >= 16 && noise_rank >= 8) {
-        // Production mainnet shape: keep the stock node on the conservative
-        // single-window path by default. The widened queueing path is exact
-        // and opt-in ready, but it still needs host-specific tuning to beat
-        // the best single-batch profile consistently on Apple Silicon.
-        return 1;
+        // Mainnet/product mining benefits from a small bounded batch window
+        // once the threaded Metal solve path is active. On conservative Apple
+        // hosts, keep the two-nonce batch even after reducing auto solver
+        // fanout to a single lane; long-run validation shows that pairing the
+        // batch with single-lane solve and shallow prefetch avoids recurring
+        // Metal hang/recovery fallbacks.
+        return (product_digest_active &&
+                (has_parallel_solver_support || conservative_apple_metal_host)) ? 2 : 1;
     }
     if (n >= 256 && transcript_block_size >= 8 && noise_rank >= 4) {
         return has_parallel_solver_support ? 2 : 1;
@@ -2438,24 +2684,6 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
         freivalds_payload_out->clear();
     }
     if (max_tries == 0) return false;
-    const uint32_t solver_threads = static_cast<uint32_t>(ResolveMatMulSolverThreadCount());
-    const bool parallel_solver_enabled = !g_matmul_parallel_worker_context &&
-                                         solver_threads > 1 &&
-                                         max_tries > 1;
-    if (!g_matmul_parallel_worker_context) {
-        g_matmul_parallel_solver_enabled.store(parallel_solver_enabled, std::memory_order_relaxed);
-        g_matmul_parallel_solver_threads.store(parallel_solver_enabled ? solver_threads : 1U, std::memory_order_relaxed);
-    }
-    if (parallel_solver_enabled) {
-        return SolveMatMulParallel(
-            block,
-            params,
-            max_tries,
-            block_height,
-            abort_flag,
-            freivalds_payload_out,
-            solver_threads);
-    }
     if (block.matmul_dim == 0) {
         if (params.nMatMulDimension > std::numeric_limits<uint16_t>::max()) {
             LogWarning("SolveMatMul: nMatMulDimension=%u exceeds uint16_t range\n", params.nMatMulDimension);
@@ -2470,6 +2698,37 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
 
     auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
     if (!bnTarget) return false;
+
+    const uint32_t n = block.matmul_dim;
+    const uint32_t transcript_block_size = params.nMatMulTranscriptBlockSize;
+    const uint32_t noise_rank = params.nMatMulNoiseRank;
+    const bool product_digest_active = params.IsMatMulProductDigestActive(block_height);
+    const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
+    const auto active_backend = backend_selection.active;
+    const uint32_t solver_threads = static_cast<uint32_t>(ResolveMatMulSolverThreadCount());
+    const bool parallel_solver_enabled = !g_matmul_parallel_worker_context &&
+                                         max_tries > 1 &&
+                                         ShouldEnableParallelMatMulSolve(
+                                             active_backend,
+                                             solver_threads,
+                                             n,
+                                             transcript_block_size,
+                                             noise_rank,
+                                             product_digest_active);
+    if (!g_matmul_parallel_worker_context) {
+        g_matmul_parallel_solver_enabled.store(parallel_solver_enabled, std::memory_order_relaxed);
+        g_matmul_parallel_solver_threads.store(parallel_solver_enabled ? solver_threads : 1U, std::memory_order_relaxed);
+    }
+    if (parallel_solver_enabled) {
+        return SolveMatMulParallel(
+            block,
+            params,
+            max_tries,
+            block_height,
+            abort_flag,
+            freivalds_payload_out,
+            solver_threads);
+    }
 
     const bool mem_diag_enabled = []() {
         const char* env = std::getenv("BTX_MATMUL_MEM_DIAG");
@@ -2520,15 +2779,9 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
     try {
     const bool solved = [&]() -> bool {
 
-    const uint32_t n = block.matmul_dim;
     const auto A = matmul::SharedFromSeed(block.seed_a, n);
     const auto B = matmul::SharedFromSeed(block.seed_b, n);
-    const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
-    const auto active_backend = backend_selection.active;
     const std::string active_backend_label = matmul::backend::ToString(active_backend);
-    const uint32_t transcript_block_size = params.nMatMulTranscriptBlockSize;
-    const uint32_t noise_rank = params.nMatMulNoiseRank;
-    const bool product_digest_active = params.IsMatMulProductDigestActive(block_height);
     const bool use_gpu_generated_inputs = matmul::accelerated::ShouldUseGpuGeneratedInputsForShape(
         active_backend,
         n,
@@ -2556,19 +2809,24 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
     g_matmul_prefetch_depth.store(prefetch_depth, std::memory_order_relaxed);
     g_matmul_batch_size.store(configured_batch_size, std::memory_order_relaxed);
     g_matmul_digest_compare_enabled.store(cpu_vs_metal_compare, std::memory_order_relaxed);
+    if (async_prepare_enabled) {
+        GetMatMulPrepareExecutor();
+    }
 
     // Async prepare tasks can outlive this SolveMatMul() frame on abort, so
     // capture the shape/backend configuration by value.
     auto prepare_inputs = [use_gpu_generated_inputs,
                            transcript_block_size,
                            noise_rank,
-                           active_backend](const CBlockHeader& header) {
+                           active_backend,
+                           digest_scheme](const CBlockHeader& header) {
         if (use_gpu_generated_inputs) {
             return matmul::accelerated::PrepareMatMulDigestInputsForBackend(
                 header,
                 transcript_block_size,
                 noise_rank,
-                active_backend);
+                active_backend,
+                digest_scheme);
         }
         return matmul::accelerated::PrepareMatMulDigestInputs(
             header,

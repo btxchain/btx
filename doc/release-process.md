@@ -36,6 +36,7 @@ Release Process
       - `python3 scripts/update_chain_hardening_manifest.py --btx-cli build-btx/bin/btx-cli --chain main --rpc-arg=-datadir=<canonical-node-datadir> --rpc-arg=-rpcuser=<user> --rpc-arg=-rpcpassword=<pass> --output /tmp/mainnet-hardening.json`
     - The manifest contains a ready-to-apply `cpp_snippet` for `nMinimumChainWork`, `defaultAssumeValid`, `checkpointData`, and `chainTxData`.
     - Mainnet guardrail: by default the script refuses anchors below height `50000` unless `--allow-low-anchor-height` is explicitly provided.
+    - If you are also generating a rollback snapshot for a specific height, pass `--target-height <same-height>` so the hardening manifest and snapshot are derived from the same block by default.
   - Apply and verify the generated manifest with `/scripts/apply_chain_hardening_manifest.py`:
     - Apply:
       - `python3 scripts/apply_chain_hardening_manifest.py --manifest /tmp/mainnet-hardening.json --chainparams src/kernel/chainparams.cpp --chain main`
@@ -47,7 +48,7 @@ Release Process
   - The following updates should be reviewed with `reindex-chainstate` and `assumevalid=0` to catch any defect
     that causes rejection of blocks in the past history.
   - `chainTxData` with statistics about the transaction count and rate. Use the output of the `getchaintxstats` RPC with an
-    `nBlocks` of 4096 (28 days) and a `bestblockhash` of RPC `getbestblockhash`; see
+    `nBlocks` of 4096 (28 days) and a `bestblockhash` of the selected final block hash; by default that is RPC `getbestblockhash`, but when generating release hardening for a historical rollback snapshot height use `scripts/update_chain_hardening_manifest.py --target-height <height>` so `bestblockhash` resolves to that same height; see
     [this pull request](https://github.com/bitcoin/bitcoin/pull/28591) for an example. Reviewers can verify the results by running
     `getchaintxstats <window_block_count> <window_final_block_hash>` with the `window_block_count` and `window_final_block_hash` from your output.
   - `defaultAssumeValid` with the output of RPC `getblockhash` using the `height` of `window_final_block_height` above

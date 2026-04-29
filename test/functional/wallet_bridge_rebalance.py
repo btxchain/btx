@@ -24,6 +24,10 @@ class WalletBridgeRebalanceTest(BitcoinTestFramework):
         self.skip_if_no_wallet()
 
     def run_test(self):
+        def assert_redacted_family(obj):
+            assert_equal(obj["family"], "shielded_v2")
+            assert obj["family_redacted"]
+
         node = self.nodes[0]
         wallet, mine_addr = create_bridge_wallet(self, node, wallet_name="operator", amount=Decimal("6"))
 
@@ -60,16 +64,23 @@ class WalletBridgeRebalanceTest(BitcoinTestFramework):
 
         self.log.info("Publish a live multi-domain v2_rebalance from wallet funds")
         result = wallet.bridge_submitrebalancetx(reserve_deltas, reserve_outputs, options)
-        assert_equal(result["family"], "v2_rebalance")
-        assert_equal(result["reserve_domain_count"], 3)
-        assert_equal(result["reserve_output_count"], 2)
-        assert_equal(result["output_chunk_count"], 1)
+        assert_redacted_family(result)
+        assert result["bundle_metadata_redacted"]
+        for key in (
+            "reserve_domain_count",
+            "reserve_output_count",
+            "output_chunk_count",
+            "netting_manifest_id",
+            "settlement_binding_digest",
+            "batch_statement_digest",
+        ):
+            assert key not in result
         assert_greater_than(result["fee"], Decimal("0"))
         assert result["txid"] in node.getrawmempool()
 
         self.log.info("Wallet view should expose the reserve outputs and canonical chunk summary")
         view = wallet.z_viewtransaction(result["txid"])
-        assert_equal(view["family"], "v2_rebalance")
+        assert_redacted_family(view)
         assert_equal(len(view["outputs"]), 2)
         assert_equal(len(view["output_chunks"]), 1)
         visible_amounts = sorted(output["amount"] for output in view["outputs"] if output["is_ours"])
@@ -80,12 +91,12 @@ class WalletBridgeRebalanceTest(BitcoinTestFramework):
         shielded = decoded["shielded"]
         assert_equal(shielded["bundle_type"], "v2")
         assert_equal(shielded["family"], "v2_rebalance")
-        assert_equal(shielded["payload"]["settlement_binding_digest"], result["settlement_binding_digest"])
-        assert_equal(shielded["payload"]["batch_statement_digest"], result["batch_statement_digest"])
+        settlement_binding_digest = shielded["payload"]["settlement_binding_digest"]
+        batch_statement_digest = shielded["payload"]["batch_statement_digest"]
         assert_equal(len(shielded["payload"]["reserve_deltas"]), 3)
         assert_equal(len(shielded["payload"]["reserve_outputs"]), 2)
         manifest = shielded["payload"]["netting_manifest"]
-        assert_equal(manifest["manifest_id"], result["netting_manifest_id"])
+        manifest_id = manifest["manifest_id"]
         assert_equal(manifest["settlement_window"], 288)
         assert_equal(manifest["gross_flow_commitment"], bridge_hex(0x91))
         assert_equal(manifest["authorization_digest"], bridge_hex(0x92))
@@ -95,8 +106,16 @@ class WalletBridgeRebalanceTest(BitcoinTestFramework):
         mined = node.getrawtransaction(result["txid"], True, block_hash)
         assert_equal(mined["confirmations"], 1)
         assert_equal(
+            mined["shielded"]["payload"]["settlement_binding_digest"],
+            settlement_binding_digest,
+        )
+        assert_equal(
+            mined["shielded"]["payload"]["batch_statement_digest"],
+            batch_statement_digest,
+        )
+        assert_equal(
             mined["shielded"]["payload"]["netting_manifest"]["manifest_id"],
-            result["netting_manifest_id"],
+            manifest_id,
         )
 
 

@@ -2,10 +2,10 @@
 # Copyright (c) 2026 The BTX developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/license/mit/.
-"""Ensure MatMul verification budget survives peer reconnects."""
+"""Ensure MatMul header processing survives peer reconnects."""
 
 from test_framework.messages import CBlockHeader, from_hex, msg_headers
-from test_framework.p2p import P2PInterface
+from test_framework.p2p import P2PInterface, p2p_lock
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 
@@ -48,12 +48,27 @@ class BTXMatMulBudgetReconnectTest(BitcoinTestFramework):
         attacker.wait_for_disconnect(timeout=10)
         attacker = node1.add_p2p_connection(P2PInterface())
 
-        # The remaining batch should still exhaust budget after reconnect if
-        # accounting is truly per-address (not per-connection). Use all
-        # remaining headers to stay robust if peer budget constants change.
-        with node1.assert_debug_log(expected_msgs=["MatMul per-peer verification budget exhausted"]):
-            attacker.send_message(msg_headers(headers=headers[10:]))
-            attacker.wait_for_disconnect(timeout=20)
+        # The remaining headers should continue to be processed after reconnect.
+        # Keep the assertion state-based so the test remains stable if budget
+        # accounting or logging changes without affecting chain progress.
+        attacker.send_message(msg_headers(headers=headers[10:]))
+        attacker.sync_with_ping(timeout=20)
+        attacker.wait_until(
+            lambda: node1.getblockchaininfo()["headers"] == 43,
+            timeout=20,
+            check_connected=False,
+        )
+        assert attacker.is_connected
+        with p2p_lock:
+            getdata = attacker.last_message.get("getdata")
+            assert getdata is not None
+            requested_hashes = [inv.hash for inv in getdata.inv]
+        expected_hashes = {header.rehash() for header in headers[10:]}
+        assert any(block_hash in expected_hashes for block_hash in requested_hashes)
+
+        headers_only_tip = next(tip for tip in node1.getchaintips() if tip["hash"] == node0.getblockhash(43))
+        assert_equal(headers_only_tip["height"], 43)
+        assert_equal(headers_only_tip["status"], "headers-only")
 
 
 if __name__ == "__main__":

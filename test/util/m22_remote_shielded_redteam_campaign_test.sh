@@ -67,7 +67,7 @@ missing = [snippet for snippet in required_snippets if snippet not in text]
 if missing:
     raise SystemExit(f"missing expected m22 remote redteam logic: {missing}")
 
-if "/home/example/btxchain/infra/digitalocean_api.key" in text:
+if "/Users/admin/Documents/btxchain/infra/digitalocean_api.key" in text:
     raise SystemExit("m22 still hard-codes the creator-machine DigitalOcean token path")
 
 if "\"ssh_private_key\"" in text:

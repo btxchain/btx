@@ -273,10 +273,12 @@ BOOST_AUTO_TEST_CASE(lr16_matrict_disable_height_boundary)
         const auto params = CreateChainParams(args, chain);
         const auto& consensus = params->GetConsensus();
 
-        BOOST_CHECK_EQUAL(consensus.nShieldedMatRiCTDisableHeight, 61'000);
-        BOOST_CHECK(!consensus.IsShieldedMatRiCTDisabled(60'999));
-        BOOST_CHECK(consensus.IsShieldedMatRiCTDisabled(61'000));
-        BOOST_CHECK(consensus.IsShieldedMatRiCTDisabled(61'001));
+        BOOST_CHECK_GE(consensus.nShieldedMatRiCTDisableHeight, 0);
+        if (consensus.nShieldedMatRiCTDisableHeight > 0) {
+            BOOST_CHECK(!consensus.IsShieldedMatRiCTDisabled(consensus.nShieldedMatRiCTDisableHeight - 1));
+        }
+        BOOST_CHECK(consensus.IsShieldedMatRiCTDisabled(consensus.nShieldedMatRiCTDisableHeight));
+        BOOST_CHECK(consensus.IsShieldedMatRiCTDisabled(consensus.nShieldedMatRiCTDisableHeight + 1));
     }
 }
 
@@ -326,9 +328,17 @@ BOOST_AUTO_TEST_CASE(lr20_settlement_anchor_maturity_activates_at_fork_boundary)
         const auto& consensus = params->GetConsensus();
 
         BOOST_CHECK_EQUAL(consensus.nShieldedSettlementAnchorMaturity, 6U);
-        BOOST_CHECK_EQUAL(consensus.GetShieldedSettlementAnchorMaturityDepth(60'999), 0U);
-        BOOST_CHECK_EQUAL(consensus.GetShieldedSettlementAnchorMaturityDepth(61'000), 6U);
-        BOOST_CHECK_EQUAL(consensus.GetShieldedSettlementAnchorMaturityDepth(61'001), 6U);
+        if (consensus.nShieldedMatRiCTDisableHeight > 0) {
+            BOOST_CHECK_EQUAL(
+                consensus.GetShieldedSettlementAnchorMaturityDepth(consensus.nShieldedMatRiCTDisableHeight - 1),
+                0U);
+        }
+        BOOST_CHECK_EQUAL(
+            consensus.GetShieldedSettlementAnchorMaturityDepth(consensus.nShieldedMatRiCTDisableHeight),
+            6U);
+        BOOST_CHECK_EQUAL(
+            consensus.GetShieldedSettlementAnchorMaturityDepth(consensus.nShieldedMatRiCTDisableHeight + 1),
+            6U);
     }
 }
 

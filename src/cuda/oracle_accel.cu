@@ -115,19 +115,38 @@ struct OracleWorkspace {
     HostStageBuffer host_f_r;
     HostStageBuffer host_cv;
 
-    ~OracleWorkspace()
+    void ReleaseOutputs()
     {
-        if (device_index >= 0) {
-            cudaSetDevice(device_index);
-        }
-        if (stream != nullptr) {
-            cudaStreamDestroy(stream);
-        }
         cudaFree(out_cv);
         cudaFree(out_f_r);
         cudaFree(out_f_l);
         cudaFree(out_e_r);
         cudaFree(out_e_l);
+
+        out_cv = nullptr;
+        out_f_r = nullptr;
+        out_f_l = nullptr;
+        out_e_r = nullptr;
+        out_e_l = nullptr;
+        noise_capacity = 0;
+        compress_capacity = 0;
+    }
+
+    void ReleaseStream()
+    {
+        if (stream != nullptr) {
+            cudaStreamDestroy(stream);
+            stream = nullptr;
+        }
+    }
+
+    ~OracleWorkspace()
+    {
+        if (device_index >= 0) {
+            cudaSetDevice(device_index);
+        }
+        ReleaseStream();
+        ReleaseOutputs();
     }
 };
 
@@ -199,22 +218,8 @@ void ResetWorkspaceForDevice(OracleWorkspace& workspace, int device_index)
     if (workspace.device_index >= 0) {
         cudaSetDevice(workspace.device_index);
     }
-    cudaFree(workspace.out_cv);
-    cudaFree(workspace.out_f_r);
-    cudaFree(workspace.out_f_l);
-    cudaFree(workspace.out_e_r);
-    cudaFree(workspace.out_e_l);
-    workspace.out_e_l = nullptr;
-    workspace.out_e_r = nullptr;
-    workspace.out_f_l = nullptr;
-    workspace.out_f_r = nullptr;
-    workspace.out_cv = nullptr;
-    workspace.noise_capacity = 0;
-    workspace.compress_capacity = 0;
-    if (workspace.stream != nullptr) {
-        cudaStreamDestroy(workspace.stream);
-        workspace.stream = nullptr;
-    }
+    workspace.ReleaseStream();
+    workspace.ReleaseOutputs();
     workspace.device_index = device_index;
 }
 

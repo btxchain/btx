@@ -123,6 +123,17 @@ class MiningMainnetTest(BitcoinTestFramework):
             candidate.rehash()
             assert_equal(node.submitblock(candidate.serialize(with_witness=False).hex()), 'high-hash')
             return
+        if probe_result == "paused-chain-guard-catch_up":
+            self.log.info("Run BTX mainnet chain-guard checks")
+            assert_equal(node.getbestblockhash(), prev_hash)
+            assert_equal(node.getblockcount(), 0)
+            mining_info = node.getmininginfo()
+            assert_equal(mining_info['next']['height'], 1)
+            assert mining_info['difficulty'] > 0
+            assert mining_info['next']['difficulty'] > 0
+            assert len(mining_info['next']['bits']) == 8
+            assert len(mining_info['next']['target']) == 64
+            return
         assert_equal(probe_result, None)
         prev_hash = node.getbestblockhash()
         assert_equal(prev_hash, probe.hash)

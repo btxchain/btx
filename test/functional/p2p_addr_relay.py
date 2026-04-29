@@ -52,9 +52,9 @@ class AddrReceiver(P2PInterface):
             if self.test_addr_contents:
                 # relay_tests checks the content of the addr messages match
                 # expectations based on the message creation in setup_addr_msg
-                assert_equal(addr.nServices, 9)
-                if not 8333 <= addr.port < 8343:
-                    raise AssertionError("Invalid addr.port of {} (8333-8342 expected)".format(addr.port))
+                assert_equal(addr.nServices, P2P_SERVICES)
+                if not 19336 <= addr.port < 19346:
+                    raise AssertionError("Invalid addr.port of {} (19336-19345 expected)".format(addr.port))
                 assert addr.ip.startswith('123.123.')
 
     def on_getaddr(self, message):
@@ -118,7 +118,7 @@ class AddrTest(BitcoinTestFramework):
                 self.counter += 1
             else:
                 addr.ip = f"{random.randrange(128,169)}.{random.randrange(1,255)}.{random.randrange(1,255)}.{random.randrange(1,255)}"
-            addr.port = 8333 + i
+            addr.port = 19336 + i
             addrs.append(addr)
 
         msg = msg_addr()

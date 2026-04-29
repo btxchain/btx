@@ -1,11 +1,11 @@
-BTX version 0.29.6 is now available from:
+BTX version 0.29.7 is now available from:
 
-  <https://github.com/btxchain/btx/releases/tag/v0.29.6>
+  <https://github.com/btxchain/btx/releases/tag/v0.29.7>
 
-This patch release brings the public `btx` repository up to date with the
-current BTX node mainline, restores `rpcauth` JSON compatibility for external
-operator tooling, and aligns the public GitHub release automation with the
-`btxchain/btx` repository.
+This patch release covers changes merged into `btx-node` after BTX 0.29.6 was
+prepared in the public `btx` repository on April 19, 2026. It focuses on
+shielded recovery safety, bridge operator recovery tooling, and Apple Silicon
+live-mining stability.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -20,7 +20,7 @@ How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down, then install the new binaries or replace the existing `btxd`,
-`btx-cli`, and GUI binaries with the 0.29.6 release artifacts.
+`btx-cli`, and GUI binaries with the 0.29.7 release artifacts.
 
 Compatibility
 =============
@@ -30,21 +30,27 @@ BTX is supported on Linux, macOS 13+, and Windows 10+.
 Notable changes
 ===============
 
-- The public `btx` repository is now synced with the current `btx-node` mainline
-  snapshot that was prepared for PR12, including the latest node, wallet,
-  mining, and operator-surface updates already validated in the BTX node repo.
+- Spend-path recovery for stranded shielded notes is now available behind an
+  explicit activation height of 88,000. This adds the
+  `z_recoverstrandednote` RPC, recovery-only shielded balance reporting, and
+  activation/reorg coverage for mixed-version and post-activation recovery
+  paths.
 
-- `rpcauth` JSON compatibility has been restored so generated authentication
-  metadata remains interoperable with existing external tooling and operational
-  scripts.
+- Bridge recovery is now more durable for operators. Pending bridge batches can
+  be persisted and recovered across restarts, archive/prune RPCs are available
+  for bridge recovery records, and follow-up fixes harden externally funded
+  unshield submit, `btx-cli` bridge argument handling, rebalance-submit
+  redaction, and pending journal recovery.
 
-- The release/readiness workflow has been corrected to keep publishing artifacts
-  from the public `btxchain/btx` repository, including the readiness artifact
-  path fix that was merged in the sync branch.
+- Apple Silicon mining defaults have been tuned for recent hosts, including M4
+  Max and 4-perf-core systems, live mining peer-topology recovery has been
+  improved, and the Metal product-digest divergence seen on mainnet-shaped
+  workloads has been fixed.
 
-- Operator-facing release examples have been updated so fast-start, mining,
-  release automation, and Windows build documentation all point at the public
-  `btx` repository instead of the older `btx-node` path.
+- Test and operator tooling were refreshed to support these changes, including
+  regtest shielded activation-height overrides, shielded topology/relay fixture
+  updates, block-capacity expectation refreshes, and full-suite regression
+  cleanup.
 
 Credits
 =======

@@ -105,6 +105,66 @@ CMutableTransaction BuildShieldedV2SendTx(const Nullifier& nf,
     return mtx;
 }
 
+CMutableTransaction BuildShieldedV2SpendPathRecoveryTx(
+    const Nullifier& nf,
+    const uint256& spend_anchor)
+{
+    using namespace shielded::v2;
+
+    const auto spend_account = MakeSmileAccount(0x70);
+    const uint256 spend_note_commitment = uint256{0x71};
+    const auto registry_witness =
+        test::shielded::MakeSingleLeafRegistryWitness(spend_note_commitment, spend_account);
+    BOOST_REQUIRE(registry_witness.has_value());
+
+    EncryptedNotePayload encrypted_note;
+    encrypted_note.scan_domain = ScanDomain::OPAQUE;
+    encrypted_note.scan_hint.fill(0x41);
+    encrypted_note.ciphertext = {0x61, 0x62};
+    encrypted_note.ephemeral_key = ComputeLegacyPayloadEphemeralKey(
+        Span<const uint8_t>{encrypted_note.ciphertext.data(), encrypted_note.ciphertext.size()});
+
+    SpendDescription spend;
+    spend.nullifier = nf;
+    spend.merkle_anchor = spend_anchor;
+    spend.account_leaf_commitment = registry_witness->second.account_leaf_commitment;
+    spend.account_registry_proof = registry_witness->second;
+    spend.note_commitment = spend_note_commitment;
+    spend.value_commitment = uint256{0x72};
+
+    OutputDescription output;
+    output.note_class = NoteClass::USER;
+    output.smile_account = MakeSmileAccount(0x73);
+    output.note_commitment = smile2::ComputeCompactPublicAccountHash(*output.smile_account);
+    output.value_commitment = uint256{0x74};
+    output.encrypted_note = encrypted_note;
+
+    SpendPathRecoveryPayload payload;
+    payload.spend_anchor = spend_anchor;
+    payload.spends = {spend};
+    payload.outputs = {output};
+    payload.fee = 1;
+
+    ProofEnvelope envelope;
+    envelope.proof_kind = ProofKind::DIRECT_SMILE;
+    envelope.membership_proof_kind = ProofComponentKind::SMILE_MEMBERSHIP;
+    envelope.amount_proof_kind = ProofComponentKind::SMILE_BALANCE;
+    envelope.balance_proof_kind = ProofComponentKind::SMILE_BALANCE;
+    envelope.settlement_binding_kind = SettlementBindingKind::NONE;
+    envelope.statement_digest = uint256{0x75};
+
+    TransactionBundle tx_bundle;
+    tx_bundle.header.family_id = V2_SPEND_PATH_RECOVERY;
+    tx_bundle.header.proof_envelope = envelope;
+    tx_bundle.header.payload_digest = ComputeSpendPathRecoveryPayloadDigest(payload);
+    tx_bundle.payload = payload;
+    tx_bundle.proof_payload = {0x81, 0x82};
+
+    CMutableTransaction mtx;
+    mtx.shielded_bundle.v2_bundle = tx_bundle;
+    return mtx;
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(shielded_mempool_tests, BasicTestingSetup)
@@ -148,6 +208,20 @@ BOOST_AUTO_TEST_CASE(shielded_v2_nullifier_conflict_detected)
     BOOST_CHECK(pool.HasShieldedNullifierConflict(tx));
 }
 
+BOOST_AUTO_TEST_CASE(shielded_v2_spend_path_recovery_nullifier_conflict_detected)
+{
+    bilingual_str error;
+    CTxMemPool pool{MemPoolOptionsForTest(m_node), error};
+    BOOST_REQUIRE(error.empty());
+
+    const Nullifier nf = GetRandHash();
+    const CTransaction tx{BuildShieldedV2SpendPathRecoveryTx(nf, GetRandHash())};
+
+    LOCK(pool.cs);
+    pool.m_shielded_nullifiers.emplace(nf, Txid::FromUint256(GetRandHash()));
+    BOOST_CHECK(pool.HasShieldedNullifierConflict(tx));
+}
+
 BOOST_AUTO_TEST_CASE(shielded_nullifier_conflict_reports_direct_conflict_txid)
 {
     bilingual_str error;
@@ -176,6 +250,25 @@ BOOST_AUTO_TEST_CASE(shielded_nullifier_duplicate_within_tx_detected)
     CMutableTransaction mtx = BuildShieldedTx(nf);
     CShieldedInput dup = mtx.shielded_bundle.shielded_inputs.front();
     mtx.shielded_bundle.shielded_inputs.push_back(dup);
+
+    LOCK(pool.cs);
+    BOOST_CHECK(pool.HasShieldedNullifierConflict(CTransaction{mtx}));
+}
+
+BOOST_AUTO_TEST_CASE(shielded_v2_spend_path_recovery_duplicate_within_tx_detected)
+{
+    bilingual_str error;
+    CTxMemPool pool{MemPoolOptionsForTest(m_node), error};
+    BOOST_REQUIRE(error.empty());
+
+    const Nullifier nf = GetRandHash();
+    CMutableTransaction mtx = BuildShieldedV2SpendPathRecoveryTx(nf, GetRandHash());
+    auto& payload = std::get<shielded::v2::SpendPathRecoveryPayload>(
+        mtx.shielded_bundle.v2_bundle->payload);
+    auto dup = payload.spends.front();
+    payload.spends.push_back(dup);
+    mtx.shielded_bundle.v2_bundle->header.payload_digest =
+        shielded::v2::ComputeSpendPathRecoveryPayloadDigest(payload);
 
     LOCK(pool.cs);
     BOOST_CHECK(pool.HasShieldedNullifierConflict(CTransaction{mtx}));

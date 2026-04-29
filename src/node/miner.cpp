@@ -96,6 +96,7 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
         return true;
     }
     case shielded::v2::TransactionFamily::V2_SEND:
+    case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY:
     case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
     case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
     case shielded::v2::TransactionFamily::V2_LIFECYCLE:

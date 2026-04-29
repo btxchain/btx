@@ -36,10 +36,10 @@ class ShieldedV2MultinodeValidationTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.rpc_timeout = 600
         self.extra_args = [
-            ["-autoshieldcoinbase=0", "-dandelion=0"],
-            ["-autoshieldcoinbase=0", "-dandelion=0"],
-            ["-autoshieldcoinbase=0", "-dandelion=0"],
-            ["-autoshieldcoinbase=0", "-dandelion=0"],
+            ["-autoshieldcoinbase=0", "-dandelion=0", "-regtestshieldedmatrictdisableheight=500"],
+            ["-autoshieldcoinbase=0", "-dandelion=0", "-regtestshieldedmatrictdisableheight=500"],
+            ["-autoshieldcoinbase=0", "-dandelion=0", "-regtestshieldedmatrictdisableheight=500"],
+            ["-autoshieldcoinbase=0", "-dandelion=0", "-regtestshieldedmatrictdisableheight=500"],
         ]
 
     def skip_test_if_missing_module(self):

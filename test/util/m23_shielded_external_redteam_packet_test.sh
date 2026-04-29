@@ -31,19 +31,19 @@ payload = {
             "command": [
                 "scp",
                 "-i",
-                "/home/example/.ssh/id_ed25519",
-                "/tmp/btx-m22-old/source.tar.gz",
+                "/Users/admin/.ssh/id_ed25519",
+                "/private/tmp/btx-m22-old/source.tar.gz",
                 "root@198.51.100.8:/root/upload.tar.gz",
             ],
-            "cwd": "/home/example/btxchain/btx-node",
-            "log": "/tmp/btx-m22-old/logs/source_upload.log",
+            "cwd": "/Users/admin/Documents/btxchain/btx-node",
+            "log": "/private/tmp/btx-m22-old/logs/source_upload.log",
         }
     ],
     "artifacts": {
         "source_archive": {
-            "path": "/tmp/btx-m22-old/source.tar.gz",
+            "path": "/private/tmp/btx-m22-old/source.tar.gz",
         },
-        "remote_extract_dir": "/tmp/btx-m22-old/artifacts/remote_artifacts",
+        "remote_extract_dir": "/private/tmp/btx-m22-old/artifacts/remote_artifacts",
     },
 }
 for target in sys.argv[1:]:
@@ -134,7 +134,7 @@ if summary["overall_status"] != "fail":
     raise SystemExit("expected placeholder derived intake summary to fail")
 
 rendered_packet_manifest = json.dumps(packet_manifest)
-if "/home/example" in rendered_packet_manifest or tmp_root in rendered_packet_manifest:
+if "/Users/admin" in rendered_packet_manifest or tmp_root in rendered_packet_manifest:
     raise SystemExit("packet manifest still leaks creator-machine local paths")
 
 packet_entry = next(
@@ -159,7 +159,7 @@ for ref in required_refs:
         raise SystemExit(f"missing expected relative packet reference: {ref}")
 
 for text in [participant_brief, operator_checklist, window_guide]:
-    if tmp_root in text or "/home/example/btxchain/infra/" in text:
+    if tmp_root in text or "/Users/admin/Documents/btxchain/infra/" in text:
         raise SystemExit("creator-machine absolute path leaked into packet docs")
 
 if "infra/btx-seed-server-spec.md" not in window_guide:
@@ -178,7 +178,7 @@ if hosted_manifest["artifacts"]["source_archive"]["path"] != "source.tar.gz":
     raise SystemExit("hosted manifest source_archive path was not sanitized")
 if hosted_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
     raise SystemExit("hosted manifest remote_extract_dir was not sanitized")
-if "/home/example" in json.dumps(hosted_manifest) or "/tmp/btx-m22-old" in json.dumps(hosted_manifest):
+if "/Users/admin" in json.dumps(hosted_manifest) or "/private/tmp/btx-m22-old" in json.dumps(hosted_manifest):
     raise SystemExit("hosted manifest still leaks creator-machine local paths")
 
 validation_step = hosted_validation_manifest["steps"][0]
@@ -188,7 +188,7 @@ if hosted_validation_manifest["artifacts"]["source_archive"]["path"] != "source.
     raise SystemExit("hosted validation manifest source_archive path was not sanitized")
 if hosted_validation_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
     raise SystemExit("hosted validation manifest remote_extract_dir was not sanitized")
-if "/home/example" in json.dumps(hosted_validation_manifest) or "/tmp/btx-m22-old" in json.dumps(hosted_validation_manifest):
+if "/Users/admin" in json.dumps(hosted_validation_manifest) or "/private/tmp/btx-m22-old" in json.dumps(hosted_validation_manifest):
     raise SystemExit("hosted validation manifest still leaks creator-machine local paths")
 PY
 

@@ -23,9 +23,9 @@ import sys
 from typing import Optional
 
 
-def call_with_auth(node, user, credential, *, uripath='/', method='getbestblockhash'):
+def call_with_auth(node, user, password, *, uripath='/', method='getbestblockhash'):
     url = urllib.parse.urlparse(node.url)
-    headers = {"Authorization": "Basic " + str_to_b64str(f"{user}:{credential}")}
+    headers = {"Authorization": "Basic " + str_to_b64str('{}:{}'.format(user, password))}
 
     conn = http.client.HTTPConnection(url.hostname, url.port)
     conn.connect()
@@ -48,19 +48,19 @@ class HTTPBasicsTest(BitcoinTestFramework):
         self.authinfo = []
 
         #Append rpcauth to bitcoin.conf before initialization
-        self.rtcredential = "cA773lm788buwYe4g4WT+05pKyNruVKjQ25x3n0DQcM="
+        self.rtpassword = "cA773lm788buwYe4g4WT+05pKyNruVKjQ25x3n0DQcM="
         rpcauth = "rpcauth=rt:93648e835a54c573682c2eb19f882535$7681e9c5b74bdd85e78166031d2058e1069b3ed7ed967c93fc63abba06f31144"
 
-        self.legacy_rpc_user = "rpcuser💻"
-        self.legacy_rpc_credential = "rpcpassword🔑"
+        self.rpcuser = "rpcuser💻"
+        self.rpcpassword = "rpcpassword🔑"
 
         config = configparser.ConfigParser()
         config.read_file(open(self.options.configfile))
         gen_rpcauth = config['environment']['RPCAUTH']
 
         # Generate RPCAUTH with specified password
-        self.rt2credential = "8/F3uMDw4KSEbw96U3CA1C4X05dkHDN2BPFjTgZW4KI="
-        p = subprocess.Popen([sys.executable, gen_rpcauth, 'rt2', self.rt2credential], stdout=subprocess.PIPE, text=True)
+        self.rt2password = "8/F3uMDw4KSEbw96U3CA1C4X05dkHDN2BPFjTgZW4KI="
+        p = subprocess.Popen([sys.executable, gen_rpcauth, 'rt2', self.rt2password], stdout=subprocess.PIPE, text=True)
         lines = p.stdout.read().splitlines()
         rpcauth2 = lines[1]
 
@@ -69,7 +69,7 @@ class HTTPBasicsTest(BitcoinTestFramework):
         p = subprocess.Popen([sys.executable, gen_rpcauth, self.user], stdout=subprocess.PIPE, text=True)
         lines = p.stdout.read().splitlines()
         rpcauth3 = lines[1]
-        self.generated_credential = lines[3]
+        self.password = lines[3]
 
         # Generate rpcauthfile with one entry
         username = 'rpcauth_single_' + ''.join(SystemRandom().choice(string.ascii_letters + string.digits) for _ in range(10))
@@ -138,29 +138,29 @@ class HTTPBasicsTest(BitcoinTestFramework):
                 f.write(gen_userpass('rpcauth_walletrestricted2_allow_one', 'limitedwallet2') + "\n")
                 f.write(gen_userpass('rpcauth_walletrestricted2_allow_one', '-') + "\n")
         with open(self.nodes[1].datadir_path / "bitcoin.conf", "a", encoding="utf8") as f:
-            f.write("rpcuser={}\n".format(self.legacy_rpc_user))
-            f.write("rpcpassword={}\n".format(self.legacy_rpc_credential))
+            f.write("rpcuser={}\n".format(self.rpcuser))
+            f.write("rpcpassword={}\n".format(self.rpcpassword))
         self.restart_node(0)
         self.restart_node(1)
 
-    def test_auth(self, node, user, credential, wallet_restrictions=None):
+    def test_auth(self, node, user, password, wallet_restrictions=None):
         self.log.info('Correct... %s (wallet_restrictions=%s)' % (user, wallet_restrictions))
-        assert_equal(200, call_with_auth(node, user, credential).status)
+        assert_equal(200, call_with_auth(node, user, password).status)
 
         self.log.info('Wrong...')
-        assert_equal(401, call_with_auth(node, user, credential + 'wrong').status)
+        assert_equal(401, call_with_auth(node, user, password + 'wrong').status)
 
         self.log.info('Wrong...')
-        assert_equal(401, call_with_auth(node, user + 'wrong', credential).status)
+        assert_equal(401, call_with_auth(node, user + 'wrong', password).status)
 
         self.log.info('Wrong...')
-        assert_equal(401, call_with_auth(node, user + 'wrong', credential + 'wrong').status)
+        assert_equal(401, call_with_auth(node, user + 'wrong', password + 'wrong').status)
 
         if not (wallet_restrictions is None):
             for n in range(1, 3):
                 wallet_name = f'limitedwallet{n}'
                 self.log.info(f'{wallet_name}...')
-                resp = call_with_auth(node, user, credential, uripath=f'/wallet/{wallet_name}', method='getwalletinfo')
+                resp = call_with_auth(node, user, password, uripath=f'/wallet/{wallet_name}', method='getwalletinfo')
                 if wallet_restrictions in ('', f'{wallet_name}'):
                     assert_equal(200, resp.status)
                 else:
@@ -241,12 +241,12 @@ class HTTPBasicsTest(BitcoinTestFramework):
         assert not node0_cookie_path.exists()
 
         self.log.info('Testing user/password authentication still works without cookie file')
-        assert_equal(200, call_with_auth(self.nodes[0], "rt", self.rtcredential).status)
+        assert_equal(200, call_with_auth(self.nodes[0], "rt", self.rtpassword).status)
         # After confirming that we could log in, check that cookie file does not exist.
         assert not node0_cookie_path.exists()
 
         # Need to shut down in slightly unorthodox way since cookie auth can't be used
-        assert_equal(200, call_with_auth(self.nodes[0], "rt", self.rtcredential, method="stop").status)
+        assert_equal(200, call_with_auth(self.nodes[0], "rt", self.rtpassword, method="stop").status)
         self.nodes[0].wait_until_stopped()
 
     def run_test(self):
@@ -259,16 +259,16 @@ class HTTPBasicsTest(BitcoinTestFramework):
             self.nodes[0].createwallet('limitedwallet2')
 
         self.test_auth(self.nodes[0], url.username, url.password)
-        self.test_auth(self.nodes[0], 'rt', self.rtcredential)
-        self.test_auth(self.nodes[0], 'rt2', self.rt2credential)
-        self.test_auth(self.nodes[0], self.user, self.generated_credential)
+        self.test_auth(self.nodes[0], 'rt', self.rtpassword)
+        self.test_auth(self.nodes[0], 'rt2', self.rt2password)
+        self.test_auth(self.nodes[0], self.user, self.password)
         for info in self.authinfo:
             self.test_auth(self.nodes[0], *info)
 
         self.log.info('Check correctness of the rpcuser/rpcpassword config options')
         url = urllib.parse.urlparse(self.nodes[1].url)
 
-        self.test_auth(self.nodes[1], self.legacy_rpc_user, self.legacy_rpc_credential)
+        self.test_auth(self.nodes[1], self.rpcuser, self.rpcpassword)
 
         init_error = 'Error: Unable to start HTTP server. See debug log for details.'
 
@@ -280,33 +280,33 @@ class HTTPBasicsTest(BitcoinTestFramework):
         self.restart_node(0, extra_args=[rpcauth_def, '-rpcauth='])
         # ...without disrupting usage of other -rpcauth tokens
         assert_equal(200, call_with_auth(self.nodes[0], 'def', 'abc').status)
-        assert_equal(200, call_with_auth(self.nodes[0], 'rt', self.rtcredential).status)
+        assert_equal(200, call_with_auth(self.nodes[0], 'rt', self.rtpassword).status)
         for info in self.authinfo:
             assert_equal(200, call_with_auth(self.nodes[0], *info[:2]).status)
 
         self.log.info('Check -norpcauth disables all previous -rpcauth* params')
         self.restart_node(0, extra_args=[rpcauth_def, '-norpcauth'])
         assert_equal(401, call_with_auth(self.nodes[0], 'def', 'abc').status)
-        assert_equal(401, call_with_auth(self.nodes[0], 'rt', self.rtcredential).status)
+        assert_equal(401, call_with_auth(self.nodes[0], 'rt', self.rtpassword).status)
         for info in self.authinfo:
             assert_equal(401, call_with_auth(self.nodes[0], *info[:2]).status)
 
         self.log.info('Check -norpcauth can be reversed with -rpcauth')
         self.restart_node(0, extra_args=[rpcauth_def, '-norpcauth', '-rpcauth'])
         # NOTE: assert_equal(200, call_with_auth(self.nodes[0], 'def', 'abc').status)
-        assert_equal(200, call_with_auth(self.nodes[0], 'rt', self.rtcredential).status)
+        assert_equal(200, call_with_auth(self.nodes[0], 'rt', self.rtpassword).status)
         for info in self.authinfo:
             assert_equal(200, call_with_auth(self.nodes[0], *info[:2]).status)
 
         self.log.info('Check -norpcauth followed by a specific -rpcauth=* restores config file -rpcauth=* values too')
         self.restart_node(0, extra_args=[rpcauth_def, '-norpcauth', rpcauth_abc])
         assert_equal(401, call_with_auth(self.nodes[0], 'def', 'abc').status)
-        assert_equal(200, call_with_auth(self.nodes[0], 'rt', self.rtcredential).status)
+        assert_equal(200, call_with_auth(self.nodes[0], 'rt', self.rtpassword).status)
         for info in self.authinfo:
             assert_equal(200, call_with_auth(self.nodes[0], *info[:2]).status)
         self.restart_node(0, extra_args=[rpcauth_def, '-norpcauth', '-rpcauth='])
         assert_equal(401, call_with_auth(self.nodes[0], 'def', 'abc').status)
-        assert_equal(200, call_with_auth(self.nodes[0], 'rt', self.rtcredential).status)
+        assert_equal(200, call_with_auth(self.nodes[0], 'rt', self.rtpassword).status)
         for info in self.authinfo:
             assert_equal(200, call_with_auth(self.nodes[0], *info[:2]).status)
 
@@ -326,7 +326,7 @@ class HTTPBasicsTest(BitcoinTestFramework):
         self.log.info('Check -norpcauth disables previous -rpcauth params')
         self.restart_node(0, extra_args=[rpcauth_user1, rpcauth_user2, '-norpcauth'])
         assert_equal(401, call_with_auth(self.nodes[0], 'user1', 'bitcoin').status)
-        assert_equal(401, call_with_auth(self.nodes[0], 'rt', self.rtcredential).status)
+        assert_equal(401, call_with_auth(self.nodes[0], 'rt', self.rtpassword).status)
         self.stop_node(0)
 
         self.log.info('Check that failure to write cookie file will abort the node gracefully')

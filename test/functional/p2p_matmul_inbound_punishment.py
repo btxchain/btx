@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The BTX developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/license/mit/.
-"""Ensure inbound peers are disconnected for MatMul Phase1-pass/Phase2-fail blocks."""
+"""Ensure Phase1-pass/Phase2-fail MatMul blocks are rejected without banning the peer."""
 
 from test_framework.messages import CBlock, from_hex, msg_block
 from test_framework.p2p import P2PInterface
@@ -33,10 +33,13 @@ class BTXMatMulInboundPunishmentTest(BitcoinTestFramework):
         attacker = node.add_p2p_connection(P2PInterface())
         assert_equal(node.getconnectioncount(), 1)
 
+        tip_hash = node.getbestblockhash()
         bad_block = self._phase1_pass_phase2_fail_block(node)
         attacker.send_message(msg_block(bad_block))
-        attacker.wait_for_disconnect(timeout=10)
-        self.wait_until(lambda: node.getconnectioncount() == 0, timeout=10)
+        attacker.sync_with_ping(timeout=10)
+        assert_equal(node.getbestblockhash(), tip_hash)
+        assert_equal(node.getconnectioncount(), 1)
+        assert_equal(node.listbanned(), [])
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ class WalletShieldedSendFlowTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [["-autoshieldcoinbase=0"]]
+        self.extra_args = [["-autoshieldcoinbase=0", "-regtestshieldedmatrictdisableheight=500"]]
         # The functional framework halves this value when creating the live RPC
         # connection, so use a larger headroom for the slowest debug-build
         # 8-input shielded send/unshield proofs.

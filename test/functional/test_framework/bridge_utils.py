@@ -78,11 +78,41 @@ def mine_block(test, node, mine_addr, blocks=1):
     test.generatetoaddress(node, blocks, mine_addr, sync_fun=test.no_op)
 
 
+def _fixture_binary(test, binary_name, cmake_target):
+    builddir = Path(test.config["environment"]["BUILDDIR"]).resolve()
+    binary_path = builddir / "bin" / f"{binary_name}{test.config['environment']['EXEEXT']}"
+    if binary_path.is_file():
+        return binary_path
+    test.log.info(f"Building missing fixture helper {binary_name} via target {cmake_target}")
+    subprocess.check_call(
+        ["cmake", "--build", str(builddir), "--target", cmake_target],
+        cwd=builddir,
+    )
+    if not binary_path.is_file():
+        raise FileNotFoundError(f"fixture helper not found after build: {binary_path}")
+    return binary_path
+
+
 def _shielded_relay_fixture_binary(test):
-    return (
-        Path(test.config["environment"]["BUILDDIR"])
-        / "bin"
-        / f"gen_shielded_relay_fixture_tx{test.config['environment']['EXEEXT']}"
+    return _fixture_binary(
+        test,
+        "gen_shielded_relay_fixture_tx",
+        "generate_shielded_relay_fixture_tx",
+    )
+
+
+def _regtest_matrict_disable_height(node):
+    for arg in getattr(node, "extra_args", []):
+        if arg.startswith("-regtestshieldedmatrictdisableheight="):
+            return int(arg.split("=", 1)[1])
+    return None
+
+
+def _spend_path_recovery_fixture_binary(test):
+    return _fixture_binary(
+        test,
+        "gen_shielded_spend_path_recovery_fixture",
+        "generate_shielded_spend_path_recovery_fixture",
     )
 
 
@@ -98,17 +128,25 @@ def build_signed_shielded_relay_fixture_tx(
 ):
     change_addr = wallet.getnewaddress(address_type="p2mr")
     change_script = wallet.getaddressinfo(change_addr)["scriptPubKey"]
+    validation_height = node.getblockcount() + 1
+    matrict_disable_height = _regtest_matrict_disable_height(node)
+    fixture_cmd = [
+        str(_shielded_relay_fixture_binary(test)),
+        f"--family={family}",
+        f"--input-txid={utxo['txid']}",
+        f"--input-vout={utxo['vout']}",
+        f"--input-value-sats={int(Decimal(str(utxo['amount'])) * 100_000_000)}",
+        f"--change-script={change_script}",
+        f"--fee-sats={fee_sats}",
+        f"--validation-height={validation_height}",
+    ]
+    if matrict_disable_height is not None:
+        fixture_cmd.append(
+            f"--regtestshieldedmatrictdisableheight={matrict_disable_height}"
+        )
     fixture = json.loads(
         subprocess.check_output(
-            [
-                str(_shielded_relay_fixture_binary(test)),
-                f"--family={family}",
-                f"--input-txid={utxo['txid']}",
-                f"--input-vout={utxo['vout']}",
-                f"--input-value-sats={int(Decimal(str(utxo['amount'])) * 100_000_000)}",
-                f"--change-script={change_script}",
-                f"--fee-sats={fee_sats}",
-            ],
+            fixture_cmd,
             text=True,
         )
     )
@@ -123,12 +161,20 @@ def build_signed_shielded_relay_fixture_tx(
 
 
 def build_unsigned_shielded_relay_fixture_tx(test, node, family, *, require_mempool_accept=False):
+    validation_height = node.getblockcount() + 1
+    matrict_disable_height = _regtest_matrict_disable_height(node)
+    fixture_cmd = [
+        str(_shielded_relay_fixture_binary(test)),
+        f"--family={family}",
+        f"--validation-height={validation_height}",
+    ]
+    if matrict_disable_height is not None:
+        fixture_cmd.append(
+            f"--regtestshieldedmatrictdisableheight={matrict_disable_height}"
+        )
     fixture = json.loads(
         subprocess.check_output(
-            [
-                str(_shielded_relay_fixture_binary(test)),
-                f"--family={family}",
-            ],
+            fixture_cmd,
             text=True,
         )
     )
@@ -137,6 +183,38 @@ def build_unsigned_shielded_relay_fixture_tx(test, node, family, *, require_memp
         accept = node.testmempoolaccept(rawtxs=[fixture["tx_hex"]], maxfeerate=0)[0]
         assert_equal(accept["allowed"], True)
     return fixture
+
+
+def build_spend_path_recovery_fixture(
+    test,
+    funding_utxos,
+    *,
+    validation_height,
+    matrict_disable_height,
+    legacy_fee_sats=1_000,
+    recovery_fee_sats=1_000,
+    recovery_recipient=None,
+):
+    args = [
+        str(_spend_path_recovery_fixture_binary(test)),
+        f"--validation-height={validation_height}",
+        f"--matrict-disable-height={matrict_disable_height}",
+        f"--legacy-fee-sats={legacy_fee_sats}",
+        f"--recovery-fee-sats={recovery_fee_sats}",
+    ]
+    if recovery_recipient is not None:
+        args.append(f"--recovery-recipient-pk-hash={recovery_recipient['pk_hash']}")
+        args.append(
+            "--recovery-recipient-kem-public-key="
+            f"{recovery_recipient['kem_public_key']}"
+        )
+    for utxo in funding_utxos:
+        args.append(
+            "--legacy-input="
+            f"{utxo['txid']}:{utxo['vout']}:"
+            f"{int(Decimal(str(utxo['amount'])) * 100_000_000)}"
+        )
+    return json.loads(subprocess.check_output(args, text=True))
 
 
 def planin(wallet, amount, refund_lock_height, *, bridge_id, operation_id, recipient=None,

@@ -70,18 +70,33 @@ std::string RelayFixtureFamilyName(RelayFixtureFamily family)
 std::optional<RelayFixtureBuildResult> BuildRelayFixtureTransaction(
     RelayFixtureFamily family,
     const RelayFixtureBuildInput& input,
-    std::string& reject_reason)
+    std::string& reject_reason,
+    int32_t validation_height,
+    const Consensus::Params* consensus)
 {
     RelayFixtureBuildResult result;
     result.family_name = RelayFixtureFamilyName(family);
 
     if (family == RelayFixtureFamily::REBALANCE) {
-        const auto fixture = ::test::shielded::BuildV2RebalanceFixture();
+        const auto fixture = ::test::shielded::BuildV2RebalanceFixture(
+            /*reserve_output_count=*/1,
+            /*settlement_window=*/144,
+            consensus,
+            validation_height);
         result.tx = fixture.tx;
         result.netting_manifest_id = fixture.manifest_id;
     } else if (family == RelayFixtureFamily::RESERVE_BOUND_SETTLEMENT_ANCHOR_RECEIPT) {
-        const auto rebalance_fixture = ::test::shielded::BuildV2RebalanceFixture();
-        auto fixture = ::test::shielded::BuildV2SettlementAnchorReceiptFixture();
+        const auto rebalance_fixture = ::test::shielded::BuildV2RebalanceFixture(
+            /*reserve_output_count=*/1,
+            /*settlement_window=*/144,
+            consensus,
+            validation_height);
+        auto fixture = ::test::shielded::BuildV2SettlementAnchorReceiptFixture(
+            /*output_count=*/2,
+            /*proof_receipt_count=*/1,
+            /*required_receipts=*/1,
+            consensus,
+            validation_height);
         ::test::shielded::AttachSettlementAnchorReserveBinding(fixture.tx,
                                                                ::test::shielded::MakeSettlementAnchorReserveDeltas(),
                                                                rebalance_fixture.manifest_id);
@@ -89,7 +104,10 @@ std::optional<RelayFixtureBuildResult> BuildRelayFixtureTransaction(
         result.netting_manifest_id = rebalance_fixture.manifest_id;
         result.settlement_anchor_digest = fixture.settlement_anchor_digest;
     } else if (family == RelayFixtureFamily::EGRESS_RECEIPT) {
-        const auto fixture = ::test::shielded::BuildV2EgressReceiptFixture();
+        const auto fixture = ::test::shielded::BuildV2EgressReceiptFixture(
+            /*output_count=*/2,
+            consensus,
+            validation_height);
         result.tx = fixture.tx;
         const auto* bundle = result.tx.shielded_bundle.GetV2Bundle();
         if (bundle == nullptr ||
