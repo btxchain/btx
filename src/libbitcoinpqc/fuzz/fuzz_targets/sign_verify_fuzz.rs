@@ -1,77 +1,80 @@
 #![no_main]
 
-use bitcoinpqc::{algorithm_from_index, generate_keypair, sign, verify};
+use bitcoinpqc::{generate_keypair, sign, verify, Algorithm};
 use libfuzzer_sys::fuzz_target;
 
+const NUM_ALGORITHMS: u8 = 3;
+
+/// Map a fuzz-supplied byte to one of the supported algorithms.
+fn algorithm_from_index(b: u8) -> Algorithm {
+    match b % NUM_ALGORITHMS {
+        0 => Algorithm::SECP256K1_SCHNORR,
+        1 => Algorithm::ML_DSA_44,
+        _ => Algorithm::SLH_DSA_128S,
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
-    // Need sufficient bytes for all operations:
-    // 1 byte for algorithm + 128 bytes for key generation + 32 bytes for message (Secp256k1 requires 32)
+    // Need sufficient bytes: 1 byte for algorithm + 128 bytes for key
+    // generation seed + 32 bytes for the message (Secp256k1 signs a 32-byte
+    // hash).
     if data.len() < 1 + 128 + 32 {
         return;
     }
 
-    // Use first byte to select an algorithm
-    let alg_byte = data[0];
-    let algorithm = algorithm_from_index(alg_byte);
-
-    // Use 128 bytes for key generation
+    let algorithm = algorithm_from_index(data[0]);
     let key_data = &data[1..129];
-
-    // Try to generate a keypair
-    let keypair_result = generate_keypair(algorithm, key_data);
-    if let Err(err) = &keypair_result {
-        panic!(
-            "Key generation failed for algorithm: {}, error: {:?}",
-            algorithm.debug_name(),
-            err
-        );
-    }
-    let keypair = keypair_result.unwrap();
-
-    // Use remaining bytes as message to sign
-    // We've already checked above that we have at least 32 bytes left
     let message = &data[129..];
 
-    // Try to sign the message
-    let signature_result = sign(&keypair.secret_key, message);
-    if let Err(err) = &signature_result {
+    // Key generation can legitimately fail for cryptographically-bad seeds
+    // (e.g., SECP256K1 rejects out-of-range secret keys). Treat that as an
+    // uninteresting input and exit without raising.
+    let keypair = match generate_keypair(algorithm, key_data) {
+        Ok(kp) => kp,
+        Err(_) => return,
+    };
+
+    // Sign the message. With a valid keypair this must succeed.
+    let signature = match sign(&keypair.secret_key, message) {
+        Ok(sig) => sig,
+        Err(err) => panic!(
+            "Signing a {}-byte message with a freshly generated {} keypair returned {:?}",
+            message.len(),
+            algorithm.debug_name(),
+            err
+        ),
+    };
+
+    // The signature must report the algorithm we asked for.
+    assert_eq!(
+        signature.algorithm, algorithm,
+        "Signature algorithm mismatch! Signed with {}, signature reports {}",
+        algorithm.debug_name(),
+        signature.algorithm.debug_name(),
+    );
+
+    // Verification of a signature we just produced must succeed.
+    if let Err(err) = verify(&keypair.public_key, message, &signature) {
         panic!(
-            "Signing failed for algorithm: {}, error: {:?}",
+            "Verification of a freshly produced {} signature failed: {:?}",
             algorithm.debug_name(),
             err
         );
     }
-    let signature = signature_result.unwrap();
 
-    // Try to verify the signature with the correct public key
-    let verify_result = verify(&keypair.public_key, message, &signature);
-    if let Err(err) = &verify_result {
-        panic!("Verification failed for a signature generated with the corresponding private key! Algorithm: {}, error: {:?}",
-               algorithm.debug_name(), err);
-    }
+    let mut modified_msg = message.to_vec();
+    modified_msg[0] ^= 0xFF;
+    assert!(
+        verify(&keypair.public_key, &modified_msg, &signature).is_err(),
+        "Verification should fail with modified message for {}",
+        algorithm.debug_name(),
+    );
 
-    // Also try some invalid cases (if we have a valid signature)
-    if message.len() > 1 {
-        // Try with modified message
-        let mut modified_msg = message.to_vec();
-        modified_msg[0] ^= 0xFF; // Flip bits in first byte
-        let verify_result_bad_msg = verify(&keypair.public_key, &modified_msg, &signature);
-        assert!(
-            verify_result_bad_msg.is_err(),
-            "Verification should fail with modified message! Algorithm: {}",
-            algorithm.debug_name()
-        );
-    }
-
-    if signature.bytes.len() > 1 {
-        // Try with modified signature
-        let mut modified_sig = signature.clone();
-        modified_sig.bytes[0] ^= 0xFF; // Flip bits in first byte
-        let verify_result_bad_sig = verify(&keypair.public_key, message, &modified_sig);
-        assert!(
-            verify_result_bad_sig.is_err(),
-            "Verification should fail with modified signature! Algorithm: {}",
-            algorithm.debug_name()
-        );
-    }
+    let mut modified_sig = signature.clone();
+    modified_sig.bytes[0] ^= 0xFF;
+    assert!(
+        verify(&keypair.public_key, message, &modified_sig).is_err(),
+        "Verification should fail with modified signature for {}",
+        algorithm.debug_name(),
+    );
 });

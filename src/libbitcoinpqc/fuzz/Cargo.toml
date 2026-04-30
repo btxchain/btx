@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
 
 [dependencies.bitcoinpqc]
 path = ".."
@@ -49,6 +50,46 @@ bench = false
 [[bin]]
 name = "signature_parsing"
 path = "fuzz_targets/signature_parsing_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# Determinism cross-check: same seed produces byte-identical keypair across
+# repeated keygen invocations, for every supported algorithm. Catches
+# RNG/seed-routing regressions that would silently weaken keys.
+[[bin]]
+name = "determinism"
+path = "fuzz_targets/determinism_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# Verification robustness: verify() must never panic on garbage inputs
+# (random signature against valid pk, valid signature against random pk,
+# both random) for any of the supported algorithms.
+[[bin]]
+name = "verify_robustness"
+path = "fuzz_targets/verify_robustness_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# Algorithm-confusion resistance: a signature serialized with a wrong
+# algorithm tag must be rejected cleanly by verify(), regardless of how
+# the bytes were produced.
+[[bin]]
+name = "sig_substitution"
+path = "fuzz_targets/sig_substitution_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# Structured parsing: arbitrary-driven multi-mode harness that exercises
+# distinct PublicKey / SecretKey / Signature parsing code paths in a way
+# raw byte fuzzing cannot.
+[[bin]]
+name = "structured_parsing"
+path = "fuzz_targets/structured_parsing_fuzz.rs"
 test = false
 doc = false
 bench = false

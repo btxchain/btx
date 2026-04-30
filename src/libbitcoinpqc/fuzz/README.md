@@ -1,83 +1,72 @@
 # Fuzz Testing for libbitcoinpqc
 
-This directory contains fuzz testing for the libbitcoinpqc library using [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz).
+This directory contains fuzz testing for the libbitcoinpqc library using
+[cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz).
 
 ## Prerequisites
 
-You need to have cargo-fuzz installed:
+You need a nightly Rust toolchain (cargo-fuzz uses unstable compiler
+flags for libFuzzer integration) and the `cargo-fuzz` subcommand:
 
 ```
+rustup toolchain install nightly
 cargo install cargo-fuzz
 ```
 
 ## Available Fuzz Targets
 
-1. **`keypair_generation`** - Tests key pair generation with different algorithms using fuzzed randomness.
-2. **`sign_verify`** - Tests signature creation and verification using generated keys and fuzzed messages.
-3. **`cross_algorithm`** - Tests verification with mismatched keys and signatures from different algorithms.
-4. **`key_parsing`** - Tests parsing of arbitrary byte sequences into `PublicKey` and `SecretKey` structs across algorithms.
-5. **`signature_parsing`** - Tests parsing of arbitrary byte sequences into `Signature` structs across algorithms.
+The harnesses are split by invariant under test. Each one is a separate
+`cargo-fuzz` binary so it can be tracked, corpused, and crashed
+independently.
+
+| Target | What it asserts |
+|---|---|
+| `keypair_generation`      | `generate_keypair` does not panic on arbitrary input; on success the returned keypair reports the algorithm we asked for. (`Err` is allowed — some algorithms legitimately reject cryptographically-bad seeds.) |
+| `key_parsing`             | `SecretKey::try_from_slice` rejects all wrong-length input cleanly; on success the returned key carries the requested algorithm tag. |
+| `signature_parsing`       | `Signature::try_from_slice` does not panic on arbitrary bytes for any algorithm. |
+| `sign_verify`             | A signature produced by `sign` always verifies under the matching public key, and the resulting signature carries the algorithm we signed under. |
+| `cross_algorithm`         | Signatures from one algorithm do not verify under public keys from another, including when the algorithm tag is mismatched against the byte payload. |
+| `determinism`             | `generate_keypair` is deterministic in its seed: calling it twice with byte-identical seeds produces byte-identical public-key and secret-key bytes, and the algorithm tag round-trips on the returned keypair. Catches RNG/seed-routing regressions where keygen would silently mix in non-deterministic state. |
+| `verify_robustness`       | `verify` rejects arbitrary correct-length garbage wrapper payloads without panicking: a real public key paired with random signature bytes, a random public key paired with a real signature, or both random. |
+| `sig_substitution`        | A signature whose payload was produced under algorithm A but whose tag claims algorithm B is rejected by `verify`, regardless of which public key it is paired with. This primarily hardens the Rust wrapper API surface against algorithm-tag confusion. |
+| `structured_parsing`      | Parses `PublicKey`, `SecretKey`, and `Signature` under both length-correct and length-mismatched scenarios across all algorithms; algorithm tag round-trips through any successful parse. Driven by an `arbitrary`-derived enum so the fuzzer hits each parse path on purpose rather than by chance. |
 
 ## Running the Fuzz Tests
 
 To run a specific fuzz target:
 
 ```bash
-cargo fuzz run keypair_generation
-cargo fuzz run sign_verify
-cargo fuzz run cross_algorithm
-cargo fuzz run key_parsing
-cargo fuzz run signature_parsing
+cargo +nightly fuzz run keypair_generation
+cargo +nightly fuzz run key_parsing
+cargo +nightly fuzz run signature_parsing
+cargo +nightly fuzz run sign_verify
+cargo +nightly fuzz run cross_algorithm
+cargo +nightly fuzz run determinism
+cargo +nightly fuzz run verify_robustness
+cargo +nightly fuzz run sig_substitution
+cargo +nightly fuzz run structured_parsing
 ```
 
-To run a fuzz target for a specific amount of time:
+Or run all of them in parallel (one job per CPU core) with `run_all_fuzzers.sh`. The script requires GNU `parallel` and invokes `cargo +nightly fuzz run` for each target.
+
+To stop a fuzz run early use `-max_total_time=N` (seconds):
 
 ```bash
-cargo fuzz run keypair_generation -- -max_total_time=60
+cargo +nightly fuzz run determinism -- -max_total_time=60
 ```
 
-To run a fuzz target with a specific number of iterations:
+Crashes are persisted under `artifacts/<target>/`. To reproduce a saved
+crash:
 
 ```bash
-cargo fuzz run keypair_generation -- -runs=1000000
+cargo +nightly fuzz run <target> artifacts/<target>/<crash-file>
 ```
 
-To run **all** fuzz targets sequentially, use the provided script (make sure it's executable: `chmod +x fuzz/run_all_fuzzers.sh`):
+## CI
 
-```bash
-./fuzz/run_all_fuzzers.sh
-```
-
-This script will iterate through all defined targets **in parallel** using **GNU Parallel**.
-If you don't have GNU Parallel installed, the script will output an error. You can install it using your system's package manager:
-
-- **Debian/Ubuntu:** `sudo apt update && sudo apt install parallel`
-- **Fedora:** `sudo dnf install parallel`
-- **Arch Linux:** `sudo pacman -S parallel`
-- **macOS (Homebrew):** `brew install parallel`
-
-## Corpus Management
-
-Cargo-fuzz automatically manages a corpus of interesting inputs. You can find them in the `fuzz/corpus` directory once you've run the fuzz tests.
-
-## Finding and Reporting Issues
-
-If a fuzz test finds a crash, it will save the crashing input to `fuzz/artifacts`. You can reproduce the crash with:
-
-```
-cargo fuzz run target_name fuzz/artifacts/target_name/crash-*
-```
-
-When reporting an issue found by fuzzing, please include:
-
-1. The exact command used to run the fuzzer
-2. The crash input file
-3. The full output of the crash
-
-## Adding New Fuzz Targets
-
-To add a new fuzz target:
-
-1. Create a new Rust file in the `fuzz_targets` directory
-2. Add the target to `fuzz/Cargo.toml`
-3. Run the new target with `cargo fuzz run target_name`
+These harnesses are not currently exercised by any of the repository's
+`workflow_dispatch`-only CI workflows. A future improvement is to add a
+fuzz-build job that runs `cargo +nightly fuzz build` on every PR touching
+`src/libbitcoinpqc/`, so future API drift cannot bit-rot the harnesses
+silently. Until that lands, run the build manually before merging changes
+to the `bitcoinpqc` crate API.

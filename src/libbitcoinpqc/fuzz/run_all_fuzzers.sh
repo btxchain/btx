@@ -4,7 +4,7 @@
 set -e
 
 # Define the fuzz targets to run (names must match Cargo.toml)
-TARGETS="keypair_generation sign_verify cross_algorithm key_parsing signature_parsing"
+TARGETS="keypair_generation sign_verify cross_algorithm key_parsing signature_parsing determinism verify_robustness sig_substitution structured_parsing"
 
 echo "Running all fuzz targets in parallel: $TARGETS"
 
@@ -22,8 +22,8 @@ fi
 # {}: Placeholder for each target name.
 
 printf "%s\n" $TARGETS | parallel -j 0 --line-buffer \
-  'echo "--- Starting fuzzer: {} ---"; cargo fuzz run "{}"; echo "--- Finished fuzzer: {} ---"'
+  'echo "--- Starting fuzzer: {} ---"; cargo +nightly fuzz run "{}"; echo "--- Finished fuzzer: {} ---"'
 
 
 echo "-------------------------------------"
-echo "All parallel fuzz jobs launched (may still be running)."
+echo "All parallel fuzz jobs completed."
