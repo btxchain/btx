@@ -1,9 +1,18 @@
 #![no_main]
 
-use bitcoinpqc::{algorithm_from_index, Signature};
+use bitcoinpqc::{Algorithm, Signature};
 use libfuzzer_sys::fuzz_target;
 
-const NUM_ALGORITHMS: u8 = 3; // SECP256K1_SCHNORR, ML_DSA_44, SLH_DSA_128S
+const NUM_ALGORITHMS: u8 = 3;
+
+/// Map a fuzz-supplied byte to one of the supported algorithms.
+fn algorithm_from_index(b: u8) -> Algorithm {
+    match b % NUM_ALGORITHMS {
+        0 => Algorithm::SECP256K1_SCHNORR,
+        1 => Algorithm::ML_DSA_44,
+        _ => Algorithm::SLH_DSA_128S,
+    }
+}
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {
@@ -11,8 +20,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Use first byte to select an algorithm
-    let alg_byte = data[0];
-    let algorithm = algorithm_from_index(alg_byte);
+    let algorithm = algorithm_from_index(data[0]);
 
     // Use remaining bytes as potential signature data
     let sig_data = &data[1..];
