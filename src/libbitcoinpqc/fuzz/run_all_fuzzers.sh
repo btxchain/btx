@@ -4,7 +4,7 @@
 set -e
 
 # Define the fuzz targets to run (names must match Cargo.toml)
-TARGETS="keypair_generation sign_verify cross_algorithm key_parsing signature_parsing"
+TARGETS="keypair_generation sign_verify cross_algorithm key_parsing signature_parsing determinism verify_robustness sig_substitution structured_parsing"
 
 echo "Running all fuzz targets in parallel: $TARGETS"
 
