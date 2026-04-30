@@ -61,4 +61,20 @@ fuzz_target!(|data: &[u8]| {
             err
         );
     }
+
+    let mut modified_msg = message.to_vec();
+    modified_msg[0] ^= 0xFF;
+    assert!(
+        verify(&keypair.public_key, &modified_msg, &signature).is_err(),
+        "Verification should fail with modified message for {}",
+        algorithm.debug_name(),
+    );
+
+    let mut modified_sig = signature.clone();
+    modified_sig.bytes[0] ^= 0xFF;
+    assert!(
+        verify(&keypair.public_key, message, &modified_sig).is_err(),
+        "Verification should fail with modified signature for {}",
+        algorithm.debug_name(),
+    );
 });

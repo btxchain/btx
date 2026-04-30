@@ -1,22 +1,22 @@
 #![no_main]
 
-//! Verification robustness — `verify` must never panic on malformed input.
+//! Verification robustness for the Rust wrapper API.
 //!
-//! `verify(pk, msg, sig)` sits on the deserialization hot path: it is the
-//! first thing called when a peer-supplied transaction reaches consensus.
-//! If a malicious peer can cause it to panic — even on cryptographically
-//! impossible inputs — that's a denial-of-service vector at the very least
-//! and potentially worse. This harness exercises three garbage-flavored
-//! verification scenarios for every supported algorithm:
+//! This target exercises `verify(pk, msg, sig)` through typed `PublicKey`
+//! and `Signature` wrapper values. External Rust callers can construct those
+//! wrappers from arbitrary byte buffers, so the invariant here is: malformed
+//! wrapper payloads must be rejected cleanly and must never panic.
+//!
+//! The harness exercises three garbage-flavored verification scenarios for
+//! every supported algorithm:
 //!
 //!   * `verify(real_pk, msg, random_sig_bytes)`
 //!   * `verify(random_pk_bytes, msg, real_sig)`
 //!   * `verify(random_pk_bytes, msg, random_sig_bytes)`
 //!
 //! Each must return `Err`, never panic, regardless of the byte values.
-//! `try_from_slice` filters out any byte sequence whose length doesn't
-//! match the algorithm's expected size — those inputs we silently skip,
-//! they're well-defined parse failures, not the case under test.
+//! We use correct-length slices so we exercise `verify` itself rather than
+//! trivial wrapper-length rejections.
 
 use bitcoinpqc::{generate_keypair, sign, verify, Algorithm, PublicKey, Signature};
 use libfuzzer_sys::fuzz_target;
@@ -28,6 +28,12 @@ fn algorithm_from_index(b: u8) -> Algorithm {
         0 => Algorithm::SECP256K1_SCHNORR,
         1 => Algorithm::ML_DSA_44,
         _ => Algorithm::SLH_DSA_128S,
+    }
+}
+
+fn perturb_bytes(bytes: &mut [u8]) {
+    if let Some(first) = bytes.first_mut() {
+        *first ^= 0x01;
     }
 }
 
@@ -55,30 +61,61 @@ fuzz_target!(|data: &[u8]| {
     // -- Scenario 1: real pk, garbage sig bytes ------------------------
     let sig_size = bitcoinpqc::signature_size(algorithm);
     if garbage.len() >= sig_size {
-        if let Ok(sig) = Signature::try_from_slice(algorithm, &garbage[..sig_size]) {
-            // Must return Err (signature is unrelated to keypair) and
-            // must not panic.
-            let _ = verify(&keypair.public_key, message, &sig);
+        let mut sig = Signature {
+            algorithm,
+            bytes: garbage[..sig_size].to_vec(),
+        };
+        // Avoid false positives if the fuzz bytes happen to recreate the
+        // exact valid signature for this key/message pair.
+        if sig.bytes == real_sig.bytes {
+            perturb_bytes(&mut sig.bytes);
         }
+        assert!(
+            verify(&keypair.public_key, message, &sig).is_err(),
+            "Garbage signature unexpectedly verified for {}",
+            algorithm.debug_name(),
+        );
     }
 
     // -- Scenario 2: garbage pk bytes, real sig ------------------------
     let pk_size = bitcoinpqc::public_key_size(algorithm);
     if garbage.len() >= pk_size {
-        if let Ok(garbage_pk) = PublicKey::try_from_slice(algorithm, &garbage[..pk_size]) {
-            let _ = verify(&garbage_pk, message, &real_sig);
+        let mut garbage_pk = PublicKey {
+            algorithm,
+            bytes: garbage[..pk_size].to_vec(),
+        };
+        if garbage_pk.bytes == keypair.public_key.bytes {
+            perturb_bytes(&mut garbage_pk.bytes);
         }
+        assert!(
+            verify(&garbage_pk, message, &real_sig).is_err(),
+            "Garbage public key unexpectedly verified {} signature",
+            algorithm.debug_name(),
+        );
     }
 
     // -- Scenario 3: garbage pk and garbage sig ------------------------
     if garbage.len() >= pk_size + sig_size {
         let pk_slice = &garbage[..pk_size];
         let sig_slice = &garbage[pk_size..pk_size + sig_size];
-        if let (Ok(garbage_pk), Ok(garbage_sig)) = (
-            PublicKey::try_from_slice(algorithm, pk_slice),
-            Signature::try_from_slice(algorithm, sig_slice),
-        ) {
-            let _ = verify(&garbage_pk, message, &garbage_sig);
+        let mut garbage_pk = PublicKey {
+            algorithm,
+            bytes: pk_slice.to_vec(),
+        };
+        let mut garbage_sig = Signature {
+            algorithm,
+            bytes: sig_slice.to_vec(),
+        };
+        if garbage_pk.bytes == keypair.public_key.bytes {
+            perturb_bytes(&mut garbage_pk.bytes);
         }
+        if garbage_sig.bytes == real_sig.bytes {
+            perturb_bytes(&mut garbage_sig.bytes);
+        }
+        assert!(
+            verify(&garbage_pk, message, &garbage_sig).is_err(),
+            "Garbage key/signature pair unexpectedly verified for {}",
+            algorithm.debug_name(),
+        );
     }
 });

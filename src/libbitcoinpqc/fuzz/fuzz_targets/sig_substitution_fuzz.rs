@@ -2,9 +2,8 @@
 
 //! Algorithm-confusion resistance.
 //!
-//! When a transaction carries a post-quantum signature, the signature is
-//! tagged with the algorithm it was produced under. An attacker could
-//! attempt to confuse the verifier by submitting a signature whose payload
+//! The Rust `Signature` wrapper carries both an algorithm tag and raw
+//! signature bytes. External callers could construct a wrapper whose payload
 //! bytes were produced by algorithm A but whose tag claims algorithm B.
 //! `verify` must reject all such mismatches cleanly:
 //!
@@ -14,7 +13,8 @@
 //!     produced under a different algorithm must not pass verification.
 //!
 //! This harness exercises both confusion vectors with every cross-algorithm
-//! pairing across the three supported algorithms.
+//! pairing across the three supported algorithms on the Rust wrapper API
+//! surface.
 
 use bitcoinpqc::{generate_keypair, sign, verify, Algorithm, Signature};
 use libfuzzer_sys::fuzz_target;

@@ -46,18 +46,37 @@ struct FuzzInput {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    if input.seed.len() < 128 {
+    let algorithm = algorithm_from_index(input.algorithm_byte);
+    let min_seed_len = match algorithm {
+        Algorithm::SECP256K1_SCHNORR => 32,
+        Algorithm::ML_DSA_44 | Algorithm::SLH_DSA_128S => 128,
+        _ => unreachable!("algorithm_from_index only returns supported algorithms"),
+    };
+    if input.seed.len() < min_seed_len {
         return;
     }
-    let algorithm = algorithm_from_index(input.algorithm_byte);
 
-    let kp1 = match generate_keypair(algorithm, &input.seed) {
-        Ok(k) => k,
-        Err(_) => return,
-    };
-    let kp2 = match generate_keypair(algorithm, &input.seed) {
-        Ok(k) => k,
-        Err(_) => return,
+    let kp1 = generate_keypair(algorithm, &input.seed);
+    let kp2 = generate_keypair(algorithm, &input.seed);
+
+    assert_eq!(
+        kp1.is_ok(),
+        kp2.is_ok(),
+        "Non-deterministic success/error outcome for algorithm {} with identical seed",
+        algorithm.debug_name(),
+    );
+
+    let (kp1, kp2) = match (kp1, kp2) {
+        (Ok(kp1), Ok(kp2)) => (kp1, kp2),
+        (Err(err1), Err(err2)) => {
+            assert_eq!(
+                err1, err2,
+                "Non-deterministic error outcome for algorithm {} with identical seed",
+                algorithm.debug_name(),
+            );
+            return;
+        }
+        _ => unreachable!("assert_eq! above guarantees matched result kinds"),
     };
 
     assert_eq!(

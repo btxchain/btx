@@ -27,8 +27,8 @@ independently.
 | `sign_verify`             | A signature produced by `sign` always verifies under the matching public key, and the resulting signature carries the algorithm we signed under. |
 | `cross_algorithm`         | Signatures from one algorithm do not verify under public keys from another, including when the algorithm tag is mismatched against the byte payload. |
 | `determinism`             | `generate_keypair` is deterministic in its seed: calling it twice with byte-identical seeds produces byte-identical public-key and secret-key bytes, and the algorithm tag round-trips on the returned keypair. Catches RNG/seed-routing regressions where keygen would silently mix in non-deterministic state. |
-| `verify_robustness`       | `verify` does not panic on garbage input — neither on a real public key paired with random signature bytes, nor on a random public key paired with a real signature, nor on both random. |
-| `sig_substitution`        | A signature whose payload was produced under algorithm A but whose tag claims algorithm B is rejected by `verify`, regardless of which public key it is paired with. Closes the algorithm-confusion class. |
+| `verify_robustness`       | `verify` rejects arbitrary correct-length garbage wrapper payloads without panicking: a real public key paired with random signature bytes, a random public key paired with a real signature, or both random. |
+| `sig_substitution`        | A signature whose payload was produced under algorithm A but whose tag claims algorithm B is rejected by `verify`, regardless of which public key it is paired with. This primarily hardens the Rust wrapper API surface against algorithm-tag confusion. |
 | `structured_parsing`      | Parses `PublicKey`, `SecretKey`, and `Signature` under both length-correct and length-mismatched scenarios across all algorithms; algorithm tag round-trips through any successful parse. Driven by an `arbitrary`-derived enum so the fuzzer hits each parse path on purpose rather than by chance. |
 
 ## Running the Fuzz Tests
@@ -47,7 +47,7 @@ cargo +nightly fuzz run sig_substitution
 cargo +nightly fuzz run structured_parsing
 ```
 
-Or run all of them in parallel (one job per CPU core) with `run_all_fuzzers.sh`. The script requires GNU `parallel`.
+Or run all of them in parallel (one job per CPU core) with `run_all_fuzzers.sh`. The script requires GNU `parallel` and invokes `cargo +nightly fuzz run` for each target.
 
 To stop a fuzz run early use `-max_total_time=N` (seconds):
 

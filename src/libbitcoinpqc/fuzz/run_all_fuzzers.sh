@@ -22,8 +22,8 @@ fi
 # {}: Placeholder for each target name.
 
 printf "%s\n" $TARGETS | parallel -j 0 --line-buffer \
-  'echo "--- Starting fuzzer: {} ---"; cargo fuzz run "{}"; echo "--- Finished fuzzer: {} ---"'
+  'echo "--- Starting fuzzer: {} ---"; cargo +nightly fuzz run "{}"; echo "--- Finished fuzzer: {} ---"'
 
 
 echo "-------------------------------------"
-echo "All parallel fuzz jobs launched (may still be running)."
+echo "All parallel fuzz jobs completed."
