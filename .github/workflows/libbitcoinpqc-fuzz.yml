@@ -1,0 +1,124 @@
+# Copyright (c) 2023-present The Bitcoin Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://opensource.org/license/mit/.
+
+name: libbitcoinpqc fuzz build
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/libbitcoinpqc-fuzz.yml
+      - src/libbitcoinpqc/**
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/libbitcoinpqc-fuzz.yml
+      - src/libbitcoinpqc/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_NIGHTLY: nightly-2026-05-01
+  CARGO_FUZZ_VERSION: 0.13.1
+
+jobs:
+  build:
+    name: cargo +nightly fuzz build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install Linux build deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            cmake \
+            libclang-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Toolchain info
+        run: |
+          set -euo pipefail
+          uname -a
+          if command -v lsb_release >/dev/null 2>&1; then lsb_release -a; fi
+          cmake --version || true
+
+      - name: Install Rust nightly + cargo-fuzz
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal
+          # shellcheck disable=SC1091
+          . "$HOME/.cargo/env"
+          rustup toolchain install "$RUST_NIGHTLY" --profile minimal
+          rustc +"$RUST_NIGHTLY" --version
+          cargo +"$RUST_NIGHTLY" install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION"
+
+      - name: Build libbitcoinpqc Rust fuzz harnesses
+        working-directory: src/libbitcoinpqc/fuzz
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . "$HOME/.cargo/env"
+          cargo +"$RUST_NIGHTLY" fuzz build
+
+      - name: Prepare deterministic smoke inputs
+        working-directory: src/libbitcoinpqc/fuzz
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          corpus_dir = Path("corpus/verify_robustness")
+          corpus_dir.mkdir(parents=True, exist_ok=True)
+
+          # Algorithm 0 => SECP256K1_SCHNORR. The first 32 seed bytes are the
+          # secret key material, so keep them non-zero and provide enough
+          # garbage to hit all three verify_robustness scenarios deterministically.
+          seed = (
+              bytes([0]) +
+              (b"\x01" * 32) +
+              (b"\x00" * 96) +
+              (b"\x00" * 32) +
+              (b"\x02" * 96)
+          )
+          (corpus_dir / "secp_smoke").write_bytes(seed)
+          PY
+
+      - name: Smoke verify_robustness seeded invariant
+        working-directory: src/libbitcoinpqc/fuzz
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . "$HOME/.cargo/env"
+          cargo +"$RUST_NIGHTLY" fuzz run verify_robustness corpus/verify_robustness/secp_smoke
+
+      - name: Smoke each target (1 second per target)
+        working-directory: src/libbitcoinpqc/fuzz
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . "$HOME/.cargo/env"
+          for tgt in keypair_generation key_parsing signature_parsing sign_verify \
+                     cross_algorithm determinism sig_substitution \
+                     structured_parsing; do
+            echo "::group::smoke $tgt"
+            cargo +"$RUST_NIGHTLY" fuzz run "$tgt" -- -max_total_time=1
+            echo "::endgroup::"
+          done

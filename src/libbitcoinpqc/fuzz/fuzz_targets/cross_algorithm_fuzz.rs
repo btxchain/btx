@@ -40,9 +40,15 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return, // Skip if signing fails
     };
 
-    // Try to verify with correct key-signature pairs (should succeed)
-    let _ = verify(&keypair1.public_key, message, &signature1);
-    let _ = verify(&keypair2.public_key, message, &signature2);
+    // Try to verify with correct key-signature pairs (should succeed).
+    assert!(
+        verify(&keypair1.public_key, message, &signature1).is_ok(),
+        "SECP256K1 signature failed under the matching public key",
+    );
+    assert!(
+        verify(&keypair2.public_key, message, &signature2).is_ok(),
+        "ML-DSA-44 signature failed under the matching public key",
+    );
 
     // Now try incorrect combinations (should fail)
 
@@ -51,16 +57,28 @@ fuzz_target!(|data: &[u8]| {
         algorithm: keypair2.public_key.algorithm,
         bytes: signature1.bytes.clone(),
     };
-    let _ = verify(&keypair2.public_key, message, &sig1_with_wrong_alg);
+    assert!(
+        verify(&keypair2.public_key, message, &sig1_with_wrong_alg).is_err(),
+        "SECP256K1 signature bytes unexpectedly verified as ML-DSA-44",
+    );
 
     // Case 2: Use signature2 with public key1
     let sig2_with_wrong_alg = Signature {
         algorithm: keypair1.public_key.algorithm,
         bytes: signature2.bytes.clone(),
     };
-    let _ = verify(&keypair1.public_key, message, &sig2_with_wrong_alg);
+    assert!(
+        verify(&keypair1.public_key, message, &sig2_with_wrong_alg).is_err(),
+        "ML-DSA-44 signature bytes unexpectedly verified as SECP256K1",
+    );
 
     // Case 3: Use original signatures but with the wrong public key
-    let _ = verify(&keypair1.public_key, message, &signature2);
-    let _ = verify(&keypair2.public_key, message, &signature1);
+    assert!(
+        verify(&keypair1.public_key, message, &signature2).is_err(),
+        "ML-DSA-44 signature unexpectedly verified under the SECP256K1 public key",
+    );
+    assert!(
+        verify(&keypair2.public_key, message, &signature1).is_err(),
+        "SECP256K1 signature unexpectedly verified under the ML-DSA-44 public key",
+    );
 });
