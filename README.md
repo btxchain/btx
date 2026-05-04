@@ -1016,6 +1016,14 @@ scripts/m15_single_node_wallet_lifecycle.sh \
 scripts/ci/run_local_mac_matrix.sh all
 ```
 
+For changes touching `src/libbitcoinpqc/**`, also run the local fuzz
+smoke recipe before merge:
+
+```bash
+cd src/libbitcoinpqc/fuzz
+make fuzz-smoke
+```
+
 ---
 
 ## RPC Interface

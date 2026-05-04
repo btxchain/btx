@@ -9,6 +9,11 @@ Knots even while it's waiting on Core.
 
 -->
 
+## Validation
+
+- [ ] I listed the tests that cover this change.
+- [ ] If this PR touches `src/libbitcoinpqc/**`, I ran `cd src/libbitcoinpqc/fuzz && make fuzz-smoke` and summarized the result below or in a follow-up comment.
+
 <!--
 Please provide clear motivation for your patch and explain how it improves
 Bitcoin Knots user experience or Bitcoin Knots developer experience
