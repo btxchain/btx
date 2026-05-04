@@ -213,7 +213,10 @@ impl PublicKey {
 
         // Additional validation for Secp256k1 keys
         if algorithm == Algorithm::SECP256K1_SCHNORR {
-            XOnlyPublicKey::from_slice(bytes).map_err(|_| PqcError::BadKey)?;
+            let array: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| PqcError::BadKey)?;
+            XOnlyPublicKey::from_byte_array(array).map_err(|_| PqcError::BadKey)?;
         }
 
         Ok(PublicKey {
@@ -231,8 +234,13 @@ impl PublicKey {
     /// Returns the underlying secp256k1 XOnlyPublicKey if applicable.
     pub fn secp256k1_key(&self) -> Result<XOnlyPublicKey, PqcError> {
         if self.algorithm == Algorithm::SECP256K1_SCHNORR {
-            XOnlyPublicKey::from_slice(&self.bytes).map_err(|_| PqcError::BadKey)
-        // Should be valid if constructed correctly
+            // Should be valid if constructed correctly.
+            let array: [u8; 32] = self
+                .bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| PqcError::BadKey)?;
+            XOnlyPublicKey::from_byte_array(array).map_err(|_| PqcError::BadKey)
         } else {
             Err(PqcError::AlgorithmMismatch)
         }
@@ -270,8 +278,11 @@ impl SecretKey {
 
         // Additional validation for Secp256k1 keys
         if algorithm == Algorithm::SECP256K1_SCHNORR {
-            // SecpSecretKey::from_slice does verification, checking if the key is valid (non-zero)
-            SecpSecretKey::from_slice(bytes).map_err(|_| PqcError::BadKey)?;
+            // SecpSecretKey::from_byte_array does verification, checking if the key is valid (non-zero).
+            let array: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| PqcError::BadKey)?;
+            SecpSecretKey::from_byte_array(array).map_err(|_| PqcError::BadKey)?;
         }
 
         Ok(SecretKey {
@@ -283,8 +294,13 @@ impl SecretKey {
     /// Returns the underlying secp256k1 SecretKey if applicable.
     pub fn secp256k1_key(&self) -> Result<SecpSecretKey, PqcError> {
         if self.algorithm == Algorithm::SECP256K1_SCHNORR {
-            SecpSecretKey::from_slice(&self.bytes).map_err(|_| PqcError::BadKey)
-        // Should be valid if constructed correctly
+            // Should be valid if constructed correctly.
+            let array: [u8; 32] = self
+                .bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| PqcError::BadKey)?;
+            SecpSecretKey::from_byte_array(array).map_err(|_| PqcError::BadKey)
         } else {
             Err(PqcError::AlgorithmMismatch)
         }
@@ -324,11 +340,15 @@ impl Signature {
             return Err(PqcError::BadSignature);
         }
 
-        // Additional validation for Secp256k1 signatures
+        // Schnorr signatures don't have a cheap per-byte validity check like
+        // keys; length is already validated above, and the layered
+        // schnorr::Signature::from_byte_array constructor is a no-op wrapper.
+        // We still confirm the slice converts cleanly to a 64-byte array,
+        // so length-mismatch bugs introduced above would surface here.
         if algorithm == Algorithm::SECP256K1_SCHNORR {
-            // Schnorr signatures don't have a cheap validity check like keys,
-            // but from_slice checks the length (already done above).
-            schnorr::Signature::from_slice(bytes).map_err(|_| PqcError::BadSignature)?;
+            let _array: [u8; 64] = bytes
+                .try_into()
+                .map_err(|_| PqcError::BadSignature)?;
         }
 
         Ok(Signature {
@@ -346,8 +366,13 @@ impl Signature {
     /// Returns the underlying secp256k1 Schnorr Signature if applicable.
     pub fn secp256k1_signature(&self) -> Result<schnorr::Signature, PqcError> {
         if self.algorithm == Algorithm::SECP256K1_SCHNORR {
-            schnorr::Signature::from_slice(&self.bytes).map_err(|_| PqcError::BadSignature)
-        // Should be valid if constructed correctly
+            // Should be valid if constructed correctly.
+            let array: [u8; 64] = self
+                .bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| PqcError::BadSignature)?;
+            Ok(schnorr::Signature::from_byte_array(array))
         } else {
             Err(PqcError::AlgorithmMismatch)
         }
@@ -393,8 +418,10 @@ pub fn generate_keypair(algorithm: Algorithm, random_data: &[u8]) -> Result<KeyP
         let secp = Secp256k1::<All>::new(); // Context needed for key derivation
 
         // Attempt to create secret key from the provided data
-        let sk_result = SecpSecretKey::from_slice(key_data);
-        let sk = sk_result.map_err(|_| PqcError::BadKey)?;
+        let key_array: [u8; 32] = key_data
+            .try_into()
+            .map_err(|_| PqcError::BadKey)?;
+        let sk = SecpSecretKey::from_byte_array(key_array).map_err(|_| PqcError::BadKey)?;
 
         // Create KeyPair from secret key
         let keypair = SecpKeypair::from_secret_key(&secp, &sk);
