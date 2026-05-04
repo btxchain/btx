@@ -6,11 +6,25 @@ This directory contains fuzz testing for the libbitcoinpqc library using
 ## Prerequisites
 
 You need a nightly Rust toolchain (cargo-fuzz uses unstable compiler
-flags for libFuzzer integration) and the `cargo-fuzz` subcommand:
+flags for libFuzzer integration) and the `cargo-fuzz` subcommand. The
+repository pins specific versions of both so local results match CI:
 
 ```
-rustup toolchain install nightly
-cargo install cargo-fuzz
+rustup toolchain install nightly-2026-05-01
+cargo +nightly-2026-05-01 install cargo-fuzz --locked --version 0.13.1
+```
+
+Or, equivalently, from this directory:
+
+```
+make fuzz-toolchain
+```
+
+Linux developers can install the system build deps that the workflow
+installs with:
+
+```
+make fuzz-deps-linux
 ```
 
 ## Available Fuzz Targets
@@ -62,11 +76,39 @@ crash:
 cargo +nightly fuzz run <target> artifacts/<target>/<crash-file>
 ```
 
+## Pre-merge smoke check (`make fuzz-smoke`)
+
+The `Makefile` in this directory wraps the same recipe as
+`.github/workflows/libbitcoinpqc-fuzz.yml`, so the workflow's checks
+can be run locally with one command:
+
+```
+cd src/libbitcoinpqc/fuzz
+make fuzz-smoke
+```
+
+This runs:
+
+1. `cargo +nightly-2026-05-01 fuzz build`
+2. Generates the deterministic `verify_robustness/secp_smoke` seed
+3. `cargo +nightly fuzz run verify_robustness corpus/verify_robustness/secp_smoke`
+4. `cargo +nightly fuzz run <target> -- -max_total_time=1` for each of the
+   eight other targets in turn
+
+It's the same byte-for-byte recipe the workflow encodes — pinned
+nightly, pinned `cargo-fuzz`, same target order, same seed, same smoke
+time — so a green local run is equivalent to a green CI run.
+
+**For PRs touching `src/libbitcoinpqc/**`** — please include a pasted
+`make fuzz-smoke` log in the PR description. The workflow YAML is the
+versioned recipe; the local invocation is the enforcement.
+
 ## CI
 
-These harnesses are not currently exercised by any of the repository's
-`workflow_dispatch`-only CI workflows. A future improvement is to add a
-fuzz-build job that runs `cargo +nightly fuzz build` on every PR touching
-`src/libbitcoinpqc/`, so future API drift cannot bit-rot the harnesses
-silently. Until that lands, run the build manually before merging changes
-to the `bitcoinpqc` crate API.
+`.github/workflows/libbitcoinpqc-fuzz.yml` defines a workflow that runs
+the same `make fuzz-smoke` recipe on Linux runners. It is path-filtered
+to trigger on PRs and pushes touching `.github/workflows/libbitcoinpqc-fuzz.yml`
+or `src/libbitcoinpqc/**`. Whether or not GitHub-hosted runners are
+active on this repository at any given time, the workflow YAML stays
+in-tree as a versioned, executable recipe — `make fuzz-smoke` is the
+local equivalent.
