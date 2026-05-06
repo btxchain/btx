@@ -787,6 +787,25 @@ if(BUILD_UTIL)
   add_legacy_binary_alias(bitcoin-util bitcoin-util)
   add_btx_target_alias(btx-util bitcoin-util)
 
+  add_executable(btx-genesis btx-genesis.cpp)
+  target_link_libraries(btx-genesis
+    core_interface
+  )
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(btx-genesis ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(btx-genesis
+      bitcoin_shielded
+    )
+  endif()
+  install_binary_component(btx-genesis)
+endif()
+
+
+# BTX MatMul bench/info tools — gated on BUILD_MATMUL_TOOLS rather than
+# BUILD_UTIL because miners commonly disable BUILD_UTIL but still need the
+# bench/info binaries to validate their CUDA setup.
+if(BUILD_MATMUL_TOOLS)
   add_executable(btx-matmul-backend-info btx-matmul-backend-info.cpp)
   target_link_libraries(btx-matmul-backend-info
     core_interface
@@ -824,19 +843,6 @@ if(BUILD_UTIL)
     )
   endif()
   install_binary_component(btx-matmul-solve-bench)
-
-  add_executable(btx-genesis btx-genesis.cpp)
-  target_link_libraries(btx-genesis
-    core_interface
-  )
-  if(UNIX AND NOT APPLE)
-    target_link_btx_linux_archive_group(btx-genesis ${BTX_BASE_ARCHIVES})
-  else()
-    target_link_libraries(btx-genesis
-      bitcoin_shielded
-    )
-  endif()
-  install_binary_component(btx-genesis)
 endif()
 
 
