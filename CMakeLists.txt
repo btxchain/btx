@@ -106,6 +106,7 @@ option(BUILD_BITCOINCONSENSUS_LIB "Build libbitcoinconsensus library." OFF)
 option(BUILD_TESTS "Build test_btx executable (legacy build target: test_bitcoin)." ON)
 option(BUILD_TX "Build btx-tx executable (legacy alias: bitcoin-tx)." ${BUILD_TESTS})
 option(BUILD_UTIL "Build btx-util executable (legacy alias: bitcoin-util)." ${BUILD_TESTS})
+option(BUILD_MATMUL_TOOLS "Build BTX MatMul tools (btx-matmul-backend-info, btx-matmul-metal-bench, btx-matmul-solve-bench)." ON)
 
 option(BUILD_UTIL_CHAINSTATE "Build experimental bitcoin-chainstate executable." OFF)
 option(BUILD_KERNEL_LIB "Build experimental bitcoinkernel library." ${BUILD_UTIL_CHAINSTATE})
