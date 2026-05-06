@@ -7,12 +7,10 @@ security updates: https://btx.dev/
 
 ## Reporting a Vulnerability
 
-To report security issues send an email to luke+security+knots@dashjr.org (not for support).
+Please report security vulnerabilities privately via GitHub Security Advisories:
 
-The following OpenPGP key should be used to communicate sensitive information:
+**[Open a security advisory →](https://github.com/btxchain/btx/security/advisories/new)**
 
-| Name | Fingerprint |
-|------|-------------|
-| Luke Dashjr | FAC0 98FE 8DF9 975F 9024  1881 3666 E2B1 782A 18E1 |
+This creates a private discussion visible only to the BTX maintainers. Do not file a public GitHub issue for security-impacting bugs.
 
-You can import a key by running the following command with that individual’s fingerprint: `gpg --keyserver hkps://keys.openpgp.org --recv-keys "<fingerprint>"` Ensure that you put quotes around fingerprints containing spaces.
+If you would prefer to communicate by encrypted email, contact the maintainers at the address listed in the latest release notes and request a PGP key for further correspondence.
