@@ -1,10 +1,14 @@
-Contributing to Bitcoin Knots
-=============================
+Contributing to BTX
+===================
 
-The Bitcoin Knots project operates an open contributor model where anyone is
+The BTX project operates an open contributor model where anyone is
 welcome to contribute towards development in the form of peer review, testing
 and patches. This document explains the practical process and guidelines for
 contributing.
+
+BTX is derived from Bitcoin Knots / Bitcoin Core. Many of the conventions
+below — atomic commits, peer-review semantics, squash and rebase workflow —
+apply identically and are preserved verbatim from upstream.
 
 First, in terms of structure, there is no particular concept of "core
 developers" in the sense of privileged people. Open source often naturally
@@ -24,19 +28,16 @@ as a new contributor. It also will teach you much more about the code and
 process than opening pull requests. Please refer to the [peer review](#peer-review)
 section below.
 
-Before you start contributing, familiarize yourself with the Bitcoin Core build
-system and tests. Refer to the documentation in the repository on how to build
-Bitcoin Core and how to run the unit tests, functional tests, and fuzz tests.
+Before you start contributing, familiarize yourself with the BTX build
+system and tests (Bitcoin Core derived; see `doc/build-*.md`). Refer to the
+documentation in the repository on how to build BTX and how to run the unit
+tests, functional tests, and fuzz tests.
 
 There are many open issues of varying difficulty waiting to be fixed.
 If you're looking for somewhere to start contributing, check out the
-[good first issue](https://github.com/bitcoin/bitcoin/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22)
-list or changes that are
-[up for grabs](https://github.com/bitcoin/bitcoin/issues?utf8=%E2%9C%93&q=label%3A%22Up+for+grabs%22).
-Some of them might no longer be applicable. So if you are interested, but
-unsure, you might want to leave a comment on the issue first.
-
-You may also participate in the [Bitcoin Core PR Review Club](https://bitcoincore.reviews/).
+[good first issue](https://github.com/btxchain/btx/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22)
+list. Some of them might no longer be applicable, so if you are interested
+but unsure, you might want to leave a comment on the issue first.
 
 ### Good First Issue Label
 
@@ -54,21 +55,14 @@ and is also an effective way to request assistance if and when you need it.
 Communication Channels
 ----------------------
 
-Most communication about Bitcoin development happens on IRC, in the
-`#bitcoin-core-dev` channel on Libera Chat. The easiest way to participate on IRC is
-with the web client, [web.libera.chat](https://web.libera.chat/#bitcoin-core-dev). Chat
-history logs can be found
-on [https://www.erisian.com.au/bitcoin-core-dev/](https://www.erisian.com.au/bitcoin-core-dev/)
-and [https://gnusha.org/bitcoin-core-dev/](https://gnusha.org/bitcoin-core-dev/).
-
 Discussion about codebase improvements happens in GitHub issues and pull
-requests.
+requests on https://github.com/btxchain/btx. Watch the repository for release
+announcements.
 
-The developer
-[mailing list](https://groups.google.com/g/bitcoindev)
-should be used to discuss complicated or controversial consensus or P2P protocol changes before working on
-a patch set.
-Archives can be found on [https://gnusha.org/pi/bitcoindev/](https://gnusha.org/pi/bitcoindev/).
+For complicated or controversial consensus or P2P protocol changes, please
+open a GitHub issue or draft pull request describing the proposed change
+before working on a full patch set, so the BTX maintainers can weigh in
+early on direction.
 
 
 Contributor Workflow
@@ -84,25 +78,9 @@ To contribute a patch, the workflow is as follows:
   1. Create topic branch
   1. Commit patches
 
-For GUI-related issues or pull requests, the https://github.com/bitcoin-core/gui repository should be used.
-For all other issues and pull requests, the https://github.com/bitcoin/bitcoin node repository should be used.
-
-The master branch for all monotree repositories is identical.
-
-As a rule of thumb, everything that only modifies `src/qt` is a GUI-only pull
-request. However:
-
-* For global refactoring or other transversal changes the node repository
-  should be used.
-* For GUI-related build system changes, the node repository should be used
-  because the change needs review by the build systems reviewers.
-* Changes in `src/interfaces` need to go to the node repository because they
-  might affect other components like the wallet.
-
-For large GUI changes that include build system and interface changes, it is
-recommended to first open a pull request against the GUI repository. When there
-is agreement to proceed with the changes, a pull request with the build system
-and interfaces changes can be submitted to the node repository.
+All issues and pull requests — GUI and otherwise — go to the single BTX
+repository at https://github.com/btxchain/btx. As a rule of thumb,
+everything that only modifies `src/qt` is a GUI-only pull request.
 
 The project coding conventions in the [developer notes](doc/developer-notes.md)
 must be followed.
@@ -142,7 +120,7 @@ the pull request affects. Valid areas as:
 
   - `consensus` for changes to consensus critical code
   - `doc` for changes to the documentation
-  - `qt` or `gui` for changes to bitcoin-qt
+  - `qt` or `gui` for changes to btx-qt
   - `log` for changes to log messages
   - `mining` for changes to the mining code
   - `net` or `p2p` for changes to the peer-to-peer network code
@@ -170,14 +148,8 @@ mailing list discussions).
 The description for a new pull request should not contain any `@` mentions. The
 PR description will be included in the commit message when the PR is merged and
 any users mentioned in the description will be annoyingly notified each time a
-fork of Bitcoin Core copies the merge. Instead, make any username mentions in a
+fork of BTX copies the merge. Instead, make any username mentions in a
 subsequent comment to the PR.
-
-### Translation changes
-
-Note that translations should not be submitted as pull requests. Please see
-[Translation Process](https://github.com/bitcoin/bitcoin/blob/master/doc/translation_process.md)
-for more information on helping with translations.
 
 ### Work in Progress Changes and Requests for Comments
 
@@ -232,7 +204,7 @@ pull request to pull request.
 
 When a pull request conflicts with the target branch, you may be asked to rebase it on top of the current target branch.
 
-    git fetch https://github.com/bitcoin/bitcoin  # Fetch the latest upstream commit
+    git fetch https://github.com/btxchain/btx  # Fetch the latest upstream commit
     git rebase FETCH_HEAD  # Rebuild commits on top of the new base
 
 This project aims to have a clean git history, where code changes are only made in non-merge commits. This simplifies
@@ -289,11 +261,12 @@ workload on reviewing.
 "Decision Making" Process
 -------------------------
 
-The following applies to code changes to the Bitcoin Knots project (and related
-projects such as libsecp256k1), and is not to be confused with overall Bitcoin
-Network Protocol consensus changes.
+The following applies to code changes to the BTX project (and the
+consensus-critical components inherited from Bitcoin Knots / Bitcoin Core),
+and is not to be confused with overall Bitcoin Network Protocol consensus
+changes.
 
-Whether a pull request is merged into Bitcoin Knots rests with the project merge
+Whether a pull request is merged into BTX rests with the project merge
 maintainers and ultimately the project lead.
 
 Maintainers will take into consideration if a patch is in line with the general
@@ -312,12 +285,13 @@ In general, all pull requests must:
     demonstrating the bug and also proving the fix. This helps prevent regression.
   - Change relevant comments and documentation when behaviour of code changes.
 
-Patches that change Bitcoin consensus rules are considerably more involved than
-normal because they affect the entire ecosystem and so must be preceded by
-extensive mailing list discussions and have a numbered BIP. While each case will
-be different, one should be prepared to expend more time and effort than for
-other kinds of patches because of increased peer review and consensus building
-requirements.
+Patches that change BTX consensus rules (MatMul PoW, post-quantum
+signatures, the shielded pool) are considerably more involved than normal
+because they affect the entire BTX network and so must be preceded by
+extensive discussion in GitHub issues / pull requests with a clear written
+proposal. While each case will be different, one should be prepared to
+expend more time and effort than for other kinds of patches because of
+increased peer review and consensus building requirements.
 
 
 ### Peer Review
@@ -373,9 +347,9 @@ higher in terms of discussion and peer review requirements, keeping in mind that
 mistakes could be very costly to the wider community. This includes refactoring
 of consensus-critical code.
 
-Where a patch set proposes to change the Bitcoin consensus, it must have been
-discussed extensively on the mailing list and IRC, be accompanied by a widely
-discussed BIP and have a generally widely perceived technical consensus of being
+Where a patch set proposes to change the BTX consensus, it must have been
+discussed extensively in GitHub issues / pull requests with a written
+proposal, and have a generally widely perceived technical consensus of being
 a worthwhile change based on the judgement of the maintainers.
 
 ### Finding Reviewers
@@ -396,16 +370,16 @@ about:
     that personally, though! Instead, take another critical look at what you are suggesting
     and see if it: changes too much, is too broad, doesn't adhere to the
     [developer notes](doc/developer-notes.md), is dangerous or insecure, is messily written, etc.
-    Identify and address any of the issues you find. Then ask e.g. on IRC if someone could give
-    their opinion on the concept itself.
+    Identify and address any of the issues you find. Then ask in a GitHub issue if someone
+    could give their opinion on the concept itself.
   - It may be because your code is too complex for all but a few people, and those people
     may not have realized your pull request even exists. A great way to find people who
     are qualified and care about the code you are touching is the
     [Git Blame feature](https://docs.github.com/en/github/managing-files-in-a-repository/managing-files-on-github/tracking-changes-in-a-file). Simply
     look up who last modified the code you are changing and see if you can find
     them and give them a nudge. Don't be incessant about the nudging, though.
-  - Finally, if all else fails, ask on IRC or elsewhere for someone to give your pull request
-    a look. If you think you've been waiting for an unreasonably long time (say,
+  - Finally, if all else fails, comment on the PR or open a discussion to ask for
+    a review. If you think you've been waiting for an unreasonably long time (say,
     more than a month) for no particular reason (a few lines changed, etc.),
     this is totally fine. Try to return the favor when someone else is asking
     for feedback on their code, and the universe balances out.
@@ -427,12 +401,6 @@ A backport should contain the following metadata in the commit body:
 Github-Pull: #<PR number>
 Rebased-From: <commit hash of the original commit>
 ```
-
-Have a look at [an example backport PR](
-https://github.com/bitcoin/bitcoin/pull/16189).
-
-Also see the [backport.py script](
-https://github.com/bitcoin-core/bitcoin-maintainer-tools#backport).
 
 Copyright
 ---------
