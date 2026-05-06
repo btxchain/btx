@@ -64,6 +64,57 @@ If CUDA runtime probing succeeds, the output will report:
 For current CUDA runtime defaults, pool behavior, and optimization notes, see
 `btx-cuda-matmul-optimization-notes-2026-04-13.md`.
 
+### Host CPU Requirements (Recommended)
+
+The BTX MatMul miner is launch-rate-driven: per-nonce CPU work (preparing the
+rank-`r` perturbation matrices, posting the CUDA dispatch, processing the
+SHA-256 transcript hash) is on the host pipeline's critical path. As a
+result, the host CPU's single-thread performance and memory bandwidth
+substantially affect throughput on a fast GPU. The same GPU on a modern
+CPU will deliver several times the throughput it does on an older
+datacenter Xeon.
+
+For full GPU saturation on Blackwell-class cards, **AMD Zen 4 / Intel
+Alder Lake or newer** is recommended. Older datacenter Xeons (Haswell /
+Broadwell-era) can run BTX correctly but will significantly underutilize a
+modern GPU and produce throughput well below the kernel's capability.
+
+Reference measurements (single RTX 5060 Ti, BTX 0.29.7 source build,
+mainnet `n=512 b=16 r=8`, optimal pipeline flags):
+
+| Host CPU                        | nonces/sec (mean) | GPU peak util |
+|---------------------------------|------------------:|--------------:|
+| Intel Xeon E5-2676 v3 (Haswell) |             4,020 |           24% |
+| AMD EPYC 9334 (Zen 4)           |            27,554 |          ~99% |
+
+If you observe a single-card throughput much lower than the modern-host
+number, suspect the host CPU before suspecting the kernel.
+
+### Multi-GPU Mining
+
+For multiple GPUs on a single host, the working pattern is **one miner
+process per GPU**, scoped via `CUDA_VISIBLE_DEVICES`:
+
+```bash
+for i in $(seq 0 $(( $(nvidia-smi -L | wc -l) - 1 ))); do
+  CUDA_VISIBLE_DEVICES=$i ./build/bin/btx-matmul-solve-bench \
+    --backend cuda --tries 4000 --batch-size 4096 --gpu-inputs 1 --async 1 \
+    --pool-slots 16 --prefetch-depth 16 --prepare-workers 16 \
+    --solver-threads 16 --parallel 8 \
+    > /tmp/btx-bench-gpu$i.out 2>&1 &
+done
+wait
+```
+
+Each process owns its own CUDA context and pipeline; cards do not contend.
+Verify both GPUs reach full utilization with `nvidia-smi` while running.
+Combined throughput scales near-linearly with GPU count, subject to host
+CPU and memory bandwidth headroom.
+
+For long-running mining via `btxd`, use the same pattern with separate
+`-datadir` arguments per process so the node instances don't share chain
+state on disk.
+
 ## Memory Requirements
 
 C++ compilers are memory-hungry. It is recommended to have at least 1.5 GB of
