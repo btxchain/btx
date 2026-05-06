@@ -64,6 +64,66 @@ If CUDA runtime probing succeeds, the output will report:
 For current CUDA runtime defaults, pool behavior, and optimization notes, see
 `btx-cuda-matmul-optimization-notes-2026-04-13.md`.
 
+## Initial Block Download
+
+A new BTX node syncs the chain from peers via standard initial block download
+(IBD). On a healthy connection with 8+ peers, IBD currently runs at roughly
+100–200 blocks/min (varies with disk speed, CPU, and peer reachability), so a
+fresh node reaches the current tip in a few hours.
+
+### Snapshot loading (`loadtxoutset`)
+
+The release publishes `snapshot.dat` (≈229 MB) alongside each binary release,
+intended as a faster alternative to IBD via the `loadtxoutset` RPC.
+
+> **Known issue with the v0.29.7 loader:** as of release v0.29.7,
+> `loadtxoutset` fails on a fresh / partially-synced node with:
+>
+> ```
+> error code: -32603
+> error message:
+> Unable to load UTXO snapshot: could not load BTX shielded snapshot section.
+> ```
+>
+> **Root cause:** the failure is in the v0.29.7 *loader*, not in the snapshot
+> file. The same error reproduces with the v0.29.5 release `snapshot.dat`
+> (different file, different SHA256, different base height — same error), which
+> rules out file corruption. `debug.log` reveals the actual failure point:
+>
+> ```
+> [error] CollectShieldedAccountRegistryHistoryFromState:
+>         failed to read block <snapshot base blockhash>
+> ```
+>
+> `LoadShieldedSnapshotSection` (`src/validation.cpp`) tries to read the block
+> at the snapshot's base height from local storage in order to rebuild
+> derived shielded state. On a fresh node that hasn't yet IBD'd to the
+> snapshot's base height, that block isn't on disk, the read fails, and the
+> loader bails out. This makes the snapshot unloadable in exactly the case it
+> was designed for: bootstrapping a node that *doesn't yet* have the chain.
+>
+> **Workaround:** run plain IBD (no special flag — just start `btxd` and let
+> it sync from peers). With 8+ peers, a fresh node reaches the current tip in
+> a few hours.
+>
+> **Fix direction (for upstream):** `LoadShieldedSnapshotSection` either needs
+> to skip the rebuild path when the referenced block isn't local, or the
+> snapshot serializer needs to embed the derived shielded state directly so
+> the loader doesn't have to back-reference the local chain. Reproduced on
+> three independent hosts (one Zen 4 EPYC, two Zen 3 EPYC) on Ubuntu 24.04
+> with v0.29.7 binaries built from source (CUDA backend enabled).
+
+When the snapshot is fixed, the canonical loader call (per the release manifest)
+is:
+
+```bash
+btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat
+```
+
+The `-rpcclienttimeout=0` flag prevents the CLI from giving up while the daemon
+deserializes the snapshot (the load can take several minutes on large
+chainstates).
+
 ## Memory Requirements
 
 C++ compilers are memory-hungry. It is recommended to have at least 1.5 GB of
