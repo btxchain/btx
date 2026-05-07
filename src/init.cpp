@@ -41,6 +41,8 @@
 #include <key.h>
 #include <logging.h>
 #include <mapport.h>
+#include <matmul/accelerated_solver.h>
+#include <matmul/backend_capabilities.h>
 #include <net.h>
 #include <net_permissions.h>
 #include <net_processing.h>
@@ -1185,6 +1187,24 @@ bool AppInitParameterInteraction(const ArgsManager& args)
             return InitError(strprintf(_("Invalid -matmulvalidation value (%s). Valid values: consensus, economic, spv"), matmul_validation_mode));
         }
         g_local_services = static_cast<ServiceFlags>(services);
+    }
+
+    // Log the resolved MatMul accelerator backend at startup so operators
+    // can see at a glance which backend the node will use for SolveMatMul()
+    // / verifier work without having to query getmininginfo or run
+    // btx-matmul-backend-info separately. This makes silent backend
+    // mis-selection (e.g. accidentally falling back to CPU on a host that
+    // should have Metal/CUDA available) visible in debug.log on every
+    // start-up.
+    if (chainparams.GetConsensus().fMatMulPOW) {
+        const auto matmul_backend = matmul::accelerated::ResolveMiningBackendFromEnvironment();
+        const std::string requested_label = matmul_backend.requested_input.empty()
+            ? std::string{"<default>"}
+            : matmul_backend.requested_input;
+        LogPrintf("MatMul accelerator: requested=%s active=%s reason=%s\n",
+                  requested_label,
+                  matmul::backend::ToString(matmul_backend.active),
+                  matmul_backend.reason.empty() ? "unknown" : matmul_backend.reason);
     }
 
     if (matmul_validation_mode == "spv") {
