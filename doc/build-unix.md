@@ -64,6 +64,82 @@ If CUDA runtime probing succeeds, the output will report:
 For current CUDA runtime defaults, pool behavior, and optimization notes, see
 `btx-cuda-matmul-optimization-notes-2026-04-13.md`.
 
+## Tuning the CUDA MatMul accelerator (`BTX_MATMUL_*` environment variables)
+
+On Linux with the CUDA backend, the MatMul mining and verification backend is
+tuned by environment variables rather than `btxd` command-line flags. They
+are read directly inside `src/matmul/`, `src/cuda/`, and `src/pow.cpp`; none
+appear in `btxd -?`. Defaults work for most operators, but in practice a
+fresh install on a capable NVIDIA workstation can sit at 1 solver thread
+(the default) and look puzzlingly slow until one of these variables is set.
+This section lists the operationally relevant ones for the CUDA backend;
+for the complete inventory, search the source tree for
+`getenv("BTX_MATMUL_`. Metal-specific tuning knobs (Apple Silicon) are
+documented separately.
+
+After setting any variable, restart `btxd`. The startup log line
+
+```
+MatMul accelerator: requested=<input> active=<backend> reason=<...>
+```
+
+confirms the resolved backend on each start.
+
+### Backend selection
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `BTX_MATMUL_BACKEND` | Select accelerator backend: `cpu`, `metal`, or `cuda`. | Platform default: `cpu` on Linux. Set to `cuda` to opt in. |
+
+### Mining throughput (`SolveMatMul`)
+
+These govern how many in-flight matmul solves the daemon runs in parallel
+during `generatetoaddress` / `getblocktemplate` mining. **The default of 1
+solver thread is conservative.** Operators with capable hardware should
+raise it to take advantage of available CPU and GPU resources.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `BTX_MATMUL_SOLVER_THREADS` | Number of parallel solver threads inside a single `SolveMatMul` call. Triggers the `SolveMatMulParallel` path in `src/pow.cpp` when `> 1`. | `1` (single-threaded). |
+| `BTX_MATMUL_PREPARE_WORKERS` | Number of workers that prepare next-window inputs ahead of the solve. | Auto-derived from `SOLVER_THREADS`. |
+| `BTX_MATMUL_PREPARE_PREFETCH_DEPTH` | How many windows ahead the prepare workers stage. Trades memory for steady-state throughput. | Backend-specific; usually small single digits. |
+| `BTX_MATMUL_SOLVE_BATCH_SIZE` | Batch size submitted to the accelerated solver per call. | Backend-specific. |
+| `BTX_MATMUL_PIPELINE_ASYNC` | Set to `1` to enable asynchronous pipelining of prepare and solve stages. | Off. |
+
+A reasonable starting point on a Linux workstation with the CUDA backend
+active:
+
+```bash
+export BTX_MATMUL_BACKEND=cuda
+export BTX_MATMUL_SOLVER_THREADS=8
+export BTX_MATMUL_PIPELINE_ASYNC=1
+btxd -daemon
+```
+
+### CUDA-specific knobs (Linux)
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS` | Policy for generating prepared inputs directly on the CUDA device. Saves a CPU↔GPU copy at the cost of additional GPU compute. | Backend-default. |
+| `BTX_MATMUL_CUDA_POOL_SLOTS` | Number of CUDA stream slots in the in-flight pool. Increase to overlap more solves on the GPU; decrease to cap GPU memory pressure. | Backend-default. |
+
+For current CUDA runtime defaults, pool behaviour, and optimisation notes,
+see `btx-cuda-matmul-optimization-notes-2026-04-13.md`.
+
+### Diagnostic / experimental (off by default)
+
+Safe to leave unset. Useful when investigating a regression or comparing
+backends.
+
+| Variable | Purpose |
+|---|---|
+| `BTX_MATMUL_MEM_DIAG` | Logs per-solve memory and backend stats to `debug.log`. Verbose. |
+| `BTX_MATMUL_CPU_CONFIRM` | Confirms an accelerated solve with a CPU recompute. Useful for backend-correctness investigation. |
+| `BTX_MATMUL_BLOCKED_MULTIPLY_THREADS` | Threads for the blocked CPU matmul fallback. |
+| `BTX_MATMUL_NOISE_PARALLEL` | Parallelism in the noise-generation stage. |
+| `BTX_MATMUL_DIGEST_SLICE_SIZE` | Slice size for digest construction. |
+| `BTX_MATMUL_TIP_WATCHER` | Tip-watcher behaviour during long solves. |
+
 ## Memory Requirements
 
 C++ compilers are memory-hungry. It is recommended to have at least 1.5 GB of
