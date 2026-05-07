@@ -2,9 +2,23 @@
 // available in the IDE but required for builds.
 // The build script always generates bindings.rs in the OUT_DIR.
 
-// When compiling for real, include the real bindings
+// When compiling for real, include the real bindings.
+//
+// The bindings are wrapped in a private sub-module so that
+// `#[allow(dead_code)]` is scoped to the auto-generated FFI surface
+// only. Bindgen exposes every C function in the allowlist regex
+// (`bitcoin_pqc_.*`), some of which are intentionally not yet called
+// from Rust (e.g. `bitcoin_pqc_sign_with_randomness`); their
+// dead-code warnings are noise on every build of this crate. The
+// outer `pub use` keeps the existing call sites unchanged.
 #[cfg(all(not(feature = "ide"), not(doc)))]
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+#[allow(dead_code)]
+mod real_bindings {
+    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+}
+
+#[cfg(all(not(feature = "ide"), not(doc)))]
+pub use real_bindings::*;
 
 // For documentation, we need stubs to make doctests work
 #[cfg(doc)]
