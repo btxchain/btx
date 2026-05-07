@@ -357,6 +357,68 @@ def extract_archive(archive_path: Path, install_dir: Path) -> None:
     raise ValueError(f"unsupported archive format: {archive_path.name}")
 
 
+def adhoc_codesign_macos_binaries(install_dir: Path) -> None:
+    """On macOS, ad-hoc sign extracted binaries to prevent SIGKILL on launch.
+
+    The published BTX release archives for darwin contain unsigned Mach-O
+    binaries. Modern macOS (Gatekeeper / amfid) rejects unsigned third-party
+    executables with SIGKILL on launch — typically with no useful error
+    surfaced to the caller, just an exit code 137 (signal 9).
+
+    Ad-hoc signing (``codesign --sign -``) attaches a self-signed signature
+    that satisfies macOS's "must have *some* signature" check without needing
+    a Developer ID certificate. This is a workaround until the release pipeline
+    signs the binaries with a real Developer ID certificate (and ideally
+    notarizes the bundle).
+
+    Only runs on darwin; no-op on other platforms. If ``codesign`` is not on
+    PATH, prints a warning and continues so the rest of the install still
+    proceeds; the binaries may then need manual signing before they will run.
+    """
+    if sys.platform != "darwin":
+        return
+
+    codesign = shutil.which("codesign")
+    if not codesign:
+        print(
+            "warning: codesign not found on PATH; macOS may SIGKILL the "
+            "extracted unsigned binaries on launch. Install Xcode Command "
+            "Line Tools (`xcode-select --install`) and re-run, or sign "
+            "manually with `codesign --force --deep --sign - <binary>`.",
+            file=sys.stderr,
+        )
+        return
+
+    bin_dirs = [path for path in install_dir.rglob("bin") if path.is_dir()]
+    signed_count = 0
+    failed: list[str] = []
+    for bin_dir in bin_dirs:
+        for entry in sorted(bin_dir.iterdir()):
+            if not entry.is_file() or not os.access(entry, os.X_OK):
+                continue
+            try:
+                subprocess.run(
+                    [codesign, "--force", "--deep", "--sign", "-", str(entry)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                signed_count += 1
+            except subprocess.CalledProcessError as exc:
+                failed.append(
+                    f"{entry.name}: {(exc.stderr or '').strip() or exc}"
+                )
+
+    if signed_count:
+        suffix = f" ({len(failed)} failures)" if failed else ""
+        print(
+            f"darwin: ad-hoc signed {signed_count} extracted binaries{suffix}",
+            file=sys.stderr,
+        )
+    for failure in failed:
+        print(f"warning: codesign failed for {failure}", file=sys.stderr)
+
+
 def install_archive(archive_path: Path, install_dir: Path, *, force: bool) -> None:
     parent_dir = install_dir.parent
     parent_dir.mkdir(parents=True, exist_ok=True)
@@ -561,6 +623,7 @@ def main(argv: list[str]) -> int:
         headers=github_asset_headers,
     )
     install_archive(archive_path, install_dir, force=args.force)
+    adhoc_codesign_macos_binaries(install_dir)
 
     btxd_path = find_binary(install_dir, ("btxd", "btxd.exe"))
     btx_cli_path = find_binary(install_dir, ("btx-cli", "btx-cli.exe"))
