@@ -1189,22 +1189,22 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         g_local_services = static_cast<ServiceFlags>(services);
     }
 
-    // Log the resolved MatMul accelerator backend at startup so operators
-    // can see at a glance which backend the node will use for SolveMatMul()
-    // / verifier work without having to query getmininginfo or run
-    // btx-matmul-backend-info separately. This makes silent backend
-    // mis-selection (e.g. accidentally falling back to CPU on a host that
-    // should have Metal/CUDA available) visible in debug.log on every
-    // start-up.
+    // Log the configured MatMul accelerator request at startup without
+    // forcing a backend capability probe during early init.
     if (chainparams.GetConsensus().fMatMulPOW) {
-        const auto matmul_backend = matmul::accelerated::ResolveMiningBackendFromEnvironment();
-        const std::string requested_label = matmul_backend.requested_input.empty()
-            ? std::string{"<default>"}
-            : matmul_backend.requested_input;
-        LogPrintf("MatMul accelerator: requested=%s active=%s reason=%s\n",
+        const char* const env_backend = std::getenv("BTX_MATMUL_BACKEND");
+        const bool explicit_override = env_backend != nullptr && env_backend[0] != '\0';
+        const std::string requested_label = explicit_override
+            ? std::string{env_backend}
+            :
+#if defined(__APPLE__)
+                std::string{"metal"};
+#else
+                std::string{"cpu"};
+#endif
+        LogPrintf("MatMul accelerator request: %s%s\n",
                   requested_label,
-                  matmul::backend::ToString(matmul_backend.active),
-                  matmul_backend.reason.empty() ? "unknown" : matmul_backend.reason);
+                  explicit_override ? "" : " (default)");
     }
 
     if (matmul_validation_mode == "spv") {
