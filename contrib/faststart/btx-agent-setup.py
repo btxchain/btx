@@ -389,11 +389,15 @@ def adhoc_codesign_macos_binaries(install_dir: Path) -> None:
         )
         return
 
-    bin_dirs = [path for path in install_dir.rglob("bin") if path.is_dir()]
+    candidate_dirs = [
+        path
+        for path in install_dir.rglob("*")
+        if path.is_dir() and path.name in {"bin", "libexec"}
+    ]
     signed_count = 0
     failed: list[str] = []
-    for bin_dir in bin_dirs:
-        for entry in sorted(bin_dir.iterdir()):
+    for candidate_dir in sorted(candidate_dirs):
+        for entry in sorted(candidate_dir.iterdir()):
             if not entry.is_file() or not os.access(entry, os.X_OK):
                 continue
             try:
