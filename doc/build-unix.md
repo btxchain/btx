@@ -69,42 +69,40 @@ For current CUDA runtime defaults, pool behavior, and optimization notes, see
 On Linux with the CUDA backend, the MatMul mining and verification backend is
 tuned by environment variables rather than `btxd` command-line flags. They
 are read directly inside `src/matmul/`, `src/cuda/`, and `src/pow.cpp`; none
-appear in `btxd -?`. Defaults work for most operators, but in practice a
-fresh install on a capable NVIDIA workstation can sit at 1 solver thread
-(the default) and look puzzlingly slow until one of these variables is set.
-This section lists the operationally relevant ones for the CUDA backend;
-for the complete inventory, search the source tree for
-`getenv("BTX_MATMUL_`. Metal-specific tuning knobs (Apple Silicon) are
-documented separately.
+appear in `btxd -?`. Defaults work for most operators, but on current `main`
+they are mostly auto-tuned from the active backend, host CPU, and GPU
+heuristics rather than fixed constants. This section lists the operationally
+relevant ones for the CUDA backend; for the complete inventory, search the
+source tree for `getenv("BTX_MATMUL_`. Metal-specific tuning knobs (Apple
+Silicon) are documented separately.
 
-After setting any variable, restart `btxd`. The startup log line
+After setting any variable, restart `btxd`. To inspect how the current tree
+would resolve a backend request, use:
 
+```bash
+btx-matmul-backend-info --backend cuda
 ```
-MatMul accelerator: requested=<input> active=<backend> reason=<...>
-```
-
-confirms the resolved backend on each start.
 
 ### Backend selection
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `BTX_MATMUL_BACKEND` | Select accelerator backend: `cpu`, `metal`, or `cuda`. | Platform default: `cpu` on Linux. Set to `cuda` to opt in. |
+| `BTX_MATMUL_BACKEND` | Select accelerator backend: `cpu`, `metal`, `mlx`, or `cuda`. (`mlx` is an alias for `metal`.) | Platform default: `cpu` on Linux. Set to `cuda` to opt in. |
 
 ### Mining throughput (`SolveMatMul`)
 
 These govern how many in-flight matmul solves the daemon runs in parallel
-during `generatetoaddress` / `getblocktemplate` mining. **The default of 1
-solver thread is conservative.** Operators with capable hardware should
-raise it to take advantage of available CPU and GPU resources.
+during `generatetoaddress` / `getblocktemplate` mining. On current `main`,
+the active CUDA policy auto-tunes several of these when unset instead of
+using fixed constants.
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `BTX_MATMUL_SOLVER_THREADS` | Number of parallel solver threads inside a single `SolveMatMul` call. Triggers the `SolveMatMulParallel` path in `src/pow.cpp` when `> 1`. | `1` (single-threaded). |
-| `BTX_MATMUL_PREPARE_WORKERS` | Number of workers that prepare next-window inputs ahead of the solve. | Auto-derived from `SOLVER_THREADS`. |
+| `BTX_MATMUL_SOLVER_THREADS` | Number of parallel solver threads inside a single `SolveMatMul` call. Triggers the `SolveMatMulParallel` path in `src/pow.cpp` when `> 1`. | Auto-tuned by backend/host/GPU heuristics when unset. |
+| `BTX_MATMUL_PREPARE_WORKERS` | Number of workers that prepare next-window inputs ahead of the solve. | Auto-tuned from host/backend heuristics when unset. |
 | `BTX_MATMUL_PREPARE_PREFETCH_DEPTH` | How many windows ahead the prepare workers stage. Trades memory for steady-state throughput. | Backend-specific; usually small single digits. |
 | `BTX_MATMUL_SOLVE_BATCH_SIZE` | Batch size submitted to the accelerated solver per call. | Backend-specific. |
-| `BTX_MATMUL_PIPELINE_ASYNC` | Set to `1` to enable asynchronous pipelining of prepare and solve stages. | Off. |
+| `BTX_MATMUL_PIPELINE_ASYNC` | Set to `1` to enable asynchronous pipelining of prepare and solve stages. | On for CUDA when unset. |
 
 A reasonable starting point on a Linux workstation with the CUDA backend
 active:
