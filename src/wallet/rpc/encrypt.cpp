@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <common/args.h>
 #include <rpc/util.h>
 #include <wallet/rpc/util.h>
 #include <wallet/shielded_wallet.h>
@@ -105,7 +106,16 @@ RPCHelpMan walletpassphrase()
         // Unlock should be side-effect free when we just rehydrated historical
         // shielded state. Defer coinbase auto-shield until the next block or
         // an explicit z_shieldcoinbase call in that case.
-        if (!shielded_state_rehydrated) {
+        //
+        // Honor the operator-facing -autoshieldcoinbase flag here. Without
+        // this guard, every walletpassphrase call would shield mature
+        // coinbase outputs even when the operator has explicitly set
+        // -autoshieldcoinbase=0, which is surprising and burns relay-floor
+        // fees on every unlock. The block-connect call site
+        // (CWallet::blockConnected -> MaybeAutoShieldCoinbase) already
+        // checks the same flag with the same default; this brings the two
+        // entry points back into agreement.
+        if (!shielded_state_rehydrated && gArgs.GetBoolArg("-autoshieldcoinbase", true)) {
             pwallet->MaybeAutoShieldCoinbase();
         }
 
