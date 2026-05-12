@@ -41,6 +41,8 @@
 #include <key.h>
 #include <logging.h>
 #include <mapport.h>
+#include <matmul/accelerated_solver.h>
+#include <matmul/backend_capabilities.h>
 #include <net.h>
 #include <net_permissions.h>
 #include <net_processing.h>
@@ -1185,6 +1187,24 @@ bool AppInitParameterInteraction(const ArgsManager& args)
             return InitError(strprintf(_("Invalid -matmulvalidation value (%s). Valid values: consensus, economic, spv"), matmul_validation_mode));
         }
         g_local_services = static_cast<ServiceFlags>(services);
+    }
+
+    // Log the configured MatMul accelerator request at startup without
+    // forcing a backend capability probe during early init.
+    if (chainparams.GetConsensus().fMatMulPOW) {
+        const char* const env_backend = std::getenv("BTX_MATMUL_BACKEND");
+        const bool explicit_override = env_backend != nullptr && env_backend[0] != '\0';
+        const std::string requested_label = explicit_override
+            ? std::string{env_backend}
+            :
+#if defined(__APPLE__)
+                std::string{"metal"};
+#else
+                std::string{"cpu"};
+#endif
+        LogPrintf("MatMul accelerator request: %s%s\n",
+                  requested_label,
+                  explicit_override ? "" : " (default)");
     }
 
     if (matmul_validation_mode == "spv") {
