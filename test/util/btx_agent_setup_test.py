@@ -8,6 +8,7 @@ import http.client
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import sys
 import tarfile
@@ -57,6 +58,40 @@ class BTXAgentSetupTest(unittest.TestCase):
             clear=False,
         ):
             self.assertEqual(self.module.github_token_from_env(), "btx-token")
+
+    def test_adhoc_codesign_targets_wrappers_and_real_payloads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            install_dir = pathlib.Path(tmpdir) / "BTX"
+            bin_dir = install_dir / "bin"
+            libexec_dir = install_dir / "libexec"
+            bin_dir.mkdir(parents=True)
+            libexec_dir.mkdir(parents=True)
+
+            wrapper = bin_dir / "btxd"
+            real_binary = libexec_dir / "btxd.real"
+            wrapper.write_text("#!/bin/sh\nexec ../libexec/btxd.real\n", encoding="utf-8")
+            real_binary.write_bytes(b"\x7fELF")
+            os.chmod(wrapper, 0o755)
+            os.chmod(real_binary, 0o755)
+
+            calls = []
+
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                return mock.Mock(returncode=0)
+
+            original_platform = self.module.sys.platform
+            try:
+                with mock.patch.object(self.module.shutil, "which", return_value="/usr/bin/codesign"), \
+                     mock.patch.object(self.module.subprocess, "run", side_effect=fake_run):
+                    self.module.sys.platform = "darwin"
+                    self.module.adhoc_codesign_macos_binaries(install_dir)
+            finally:
+                self.module.sys.platform = original_platform
+
+            signed_paths = [pathlib.Path(cmd[-1]) for cmd in calls]
+            self.assertIn(wrapper, signed_paths)
+            self.assertIn(real_binary, signed_paths)
 
     def _build_fake_archive(self, root: pathlib.Path) -> pathlib.Path:
         package_root = root / "package"
