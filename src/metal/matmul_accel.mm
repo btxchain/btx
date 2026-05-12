@@ -3,6 +3,7 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <metal/matmul_accel.h>
+#include <metal/matmul_accel_env.h>
 
 #include <crypto/common.h>
 #include <hash.h>
@@ -1030,34 +1031,19 @@ uint32_t ResolveMetalAutoPoolSlotCount()
 
 uint32_t ResolveMetalPoolSlotCount()
 {
-    const char* env = std::getenv("BTX_MATMUL_METAL_POOL_SLOTS");
-    if (env == nullptr || env[0] == '\0') {
-        return ResolveMetalAutoPoolSlotCount();
+    const auto parsed = btx::metal::detail::ParsePoolSlotsEnv(
+        std::getenv("BTX_MATMUL_METAL_POOL_SLOTS"),
+        MAX_METAL_POOL_SLOT_COUNT,
+        DEFAULT_METAL_POOL_SLOT_COUNT);
+    if (parsed.has_value()) {
+        return *parsed;
     }
-
-    char* end{nullptr};
-    const long parsed = std::strtol(env, &end, 10);
-    if (end == env || *end != '\0' || parsed <= 0) {
-        return DEFAULT_METAL_POOL_SLOT_COUNT;
-    }
-    return static_cast<uint32_t>(std::clamp<long>(parsed, 1, MAX_METAL_POOL_SLOT_COUNT));
+    return ResolveMetalAutoPoolSlotCount();
 }
 
 bool ParseTruthyEnv(const char* name, bool default_value)
 {
-    const char* env = std::getenv(name);
-    if (env == nullptr || env[0] == '\0') {
-        return default_value;
-    }
-
-    if (std::strcmp(env, "0") == 0 ||
-        std::strcmp(env, "false") == 0 ||
-        std::strcmp(env, "FALSE") == 0 ||
-        std::strcmp(env, "off") == 0 ||
-        std::strcmp(env, "OFF") == 0) {
-        return false;
-    }
-    return true;
+    return btx::metal::detail::ParseTruthyEnv(std::getenv(name), default_value);
 }
 
 bool ShouldPrewarmMetalPoolSlots()
@@ -2064,25 +2050,12 @@ id<MTLCommandBuffer> CreatePerformanceCommandBuffer(id<MTLCommandQueue> queue)
     return [queue commandBufferWithUnretainedReferences];
 }
 
-enum class MetalTranscriptPipelineMode {
-    AUTO,
-    FUSED,
-    LEGACY,
-};
+using MetalTranscriptPipelineMode = btx::metal::detail::TranscriptPipelineMode;
 
 MetalTranscriptPipelineMode ResolveMetalTranscriptPipelineMode()
 {
-    const char* env = std::getenv("BTX_MATMUL_METAL_PIPELINE");
-    if (env == nullptr || env[0] == '\0' || std::strcmp(env, "auto") == 0) {
-        return MetalTranscriptPipelineMode::AUTO;
-    }
-    if (std::strcmp(env, "legacy") == 0) {
-        return MetalTranscriptPipelineMode::LEGACY;
-    }
-    if (std::strcmp(env, "fused") == 0) {
-        return MetalTranscriptPipelineMode::FUSED;
-    }
-    return MetalTranscriptPipelineMode::AUTO;
+    return btx::metal::detail::ParseTranscriptPipelineEnv(
+        std::getenv("BTX_MATMUL_METAL_PIPELINE"));
 }
 
 bool ShouldUseLegacyTranscriptPipeline(const btx::metal::MatMulDigestRequest& request, const MetalContext& context)
@@ -2109,25 +2082,12 @@ bool ShouldUseLegacyTranscriptPipeline(const btx::metal::MatMulDigestRequest& re
     return false;
 }
 
-enum class FunctionConstantSpecializationMode {
-    AUTO,
-    ENABLED,
-    DISABLED,
-};
+using FunctionConstantSpecializationMode = btx::metal::detail::FunctionConstantMode;
 
 FunctionConstantSpecializationMode ResolveFunctionConstantSpecializationMode()
 {
-    const char* env = std::getenv("BTX_MATMUL_METAL_FUNCTION_CONSTANTS");
-    if (env == nullptr || env[0] == '\0' || std::strcmp(env, "auto") == 0) {
-        return FunctionConstantSpecializationMode::AUTO;
-    }
-    if (std::strcmp(env, "1") == 0 || std::strcmp(env, "on") == 0 || std::strcmp(env, "true") == 0) {
-        return FunctionConstantSpecializationMode::ENABLED;
-    }
-    if (std::strcmp(env, "0") == 0 || std::strcmp(env, "off") == 0 || std::strcmp(env, "false") == 0) {
-        return FunctionConstantSpecializationMode::DISABLED;
-    }
-    return FunctionConstantSpecializationMode::AUTO;
+    return btx::metal::detail::ParseFunctionConstantEnv(
+        std::getenv("BTX_MATMUL_METAL_FUNCTION_CONSTANTS"));
 }
 
 bool ShouldUseFunctionConstantSpecialization(uint32_t n, bool use_legacy_pipeline)

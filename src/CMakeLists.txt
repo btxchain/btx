@@ -327,6 +327,7 @@ set_source_files_properties(matmul/matmul_pow.cpp PROPERTIES
 
 add_library(btx_matmul_backend STATIC EXCLUDE_FROM_ALL
   matmul/backend_capabilities.cpp
+  metal/matmul_accel_env.cpp
 )
 if(APPLE AND BTX_ENABLE_METAL)
   enable_language(OBJCXX)

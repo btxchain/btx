@@ -8,6 +8,7 @@
 #include <matmul/noise.h>
 #include <matmul/transcript.h>
 #include <metal/matmul_accel.h>
+#include <metal/matmul_accel_env.h>
 #include <metal/nonce_accel.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
@@ -832,6 +833,202 @@ BOOST_AUTO_TEST_CASE(metal_nonce_threshold_tuner_handles_zero_candidates_without
 
     BOOST_CHECK(tuned.adjusted);
     BOOST_CHECK_GT(tuned.threshold, 0U);
+}
+
+// -- Property tests for the BTX_MATMUL_METAL_* env-var parsers --------------
+//
+// These cover the parsing rules for BTX_MATMUL_METAL_PIPELINE,
+// BTX_MATMUL_METAL_FUNCTION_CONSTANTS, BTX_MATMUL_METAL_POOL_SLOTS, and the
+// generic truthy/falsy helper used by BTX_MATMUL_METAL_POOL_PREWARM. They run
+// unconditionally (no Metal device required) because the parsers are pure
+// functions in btx::metal::detail; they do not touch process-global env
+// state, so they are safe to interleave with other tests.
+
+BOOST_AUTO_TEST_CASE(metal_env_parse_transcript_pipeline_known_tokens)
+{
+    using btx::metal::detail::ParseTranscriptPipelineEnv;
+    using btx::metal::detail::TranscriptPipelineMode;
+
+    BOOST_CHECK(ParseTranscriptPipelineEnv(nullptr) == TranscriptPipelineMode::AUTO);
+    BOOST_CHECK(ParseTranscriptPipelineEnv("") == TranscriptPipelineMode::AUTO);
+    BOOST_CHECK(ParseTranscriptPipelineEnv("auto") == TranscriptPipelineMode::AUTO);
+    BOOST_CHECK(ParseTranscriptPipelineEnv("fused") == TranscriptPipelineMode::FUSED);
+    BOOST_CHECK(ParseTranscriptPipelineEnv("legacy") == TranscriptPipelineMode::LEGACY);
+}
+
+BOOST_AUTO_TEST_CASE(metal_env_parse_transcript_pipeline_unknown_tokens_fall_back_to_auto)
+{
+    using btx::metal::detail::ParseTranscriptPipelineEnv;
+    using btx::metal::detail::TranscriptPipelineMode;
+
+    // Token recognition is case-sensitive and exact. Anything else is AUTO.
+    BOOST_CHECK(ParseTranscriptPipelineEnv("AUTO") == TranscriptPipelineMode::AUTO);
+    BOOST_CHECK(ParseTranscriptPipelineEnv("Auto") == TranscriptPipelineMode::AUTO);
+    BOOST_CHECK(ParseTranscriptPipelineEnv("FUSED") == TranscriptPipelineMode::AUTO);
+    BOOST_CHECK(ParseTranscriptPipelineEnv("Legacy") == TranscriptPipelineMode::AUTO);
+    BOOST_CHECK(ParseTranscriptPipelineEnv(" auto") == TranscriptPipelineMode::AUTO);
+    BOOST_CHECK(ParseTranscriptPipelineEnv("auto ") == TranscriptPipelineMode::AUTO);
+    BOOST_CHECK(ParseTranscriptPipelineEnv("fused;legacy") == TranscriptPipelineMode::AUTO);
+    BOOST_CHECK(ParseTranscriptPipelineEnv("garbage") == TranscriptPipelineMode::AUTO);
+    BOOST_CHECK(ParseTranscriptPipelineEnv("1") == TranscriptPipelineMode::AUTO);
+}
+
+BOOST_AUTO_TEST_CASE(metal_env_parse_function_constant_known_tokens)
+{
+    using btx::metal::detail::FunctionConstantMode;
+    using btx::metal::detail::ParseFunctionConstantEnv;
+
+    BOOST_CHECK(ParseFunctionConstantEnv(nullptr) == FunctionConstantMode::AUTO);
+    BOOST_CHECK(ParseFunctionConstantEnv("") == FunctionConstantMode::AUTO);
+    BOOST_CHECK(ParseFunctionConstantEnv("auto") == FunctionConstantMode::AUTO);
+
+    // Truthy enable tokens.
+    BOOST_CHECK(ParseFunctionConstantEnv("1") == FunctionConstantMode::ENABLED);
+    BOOST_CHECK(ParseFunctionConstantEnv("on") == FunctionConstantMode::ENABLED);
+    BOOST_CHECK(ParseFunctionConstantEnv("true") == FunctionConstantMode::ENABLED);
+
+    // Falsy disable tokens.
+    BOOST_CHECK(ParseFunctionConstantEnv("0") == FunctionConstantMode::DISABLED);
+    BOOST_CHECK(ParseFunctionConstantEnv("off") == FunctionConstantMode::DISABLED);
+    BOOST_CHECK(ParseFunctionConstantEnv("false") == FunctionConstantMode::DISABLED);
+}
+
+BOOST_AUTO_TEST_CASE(metal_env_parse_function_constant_unknown_tokens_fall_back_to_auto)
+{
+    using btx::metal::detail::FunctionConstantMode;
+    using btx::metal::detail::ParseFunctionConstantEnv;
+
+    // Recognition is case-sensitive: uppercase variants are NOT recognised
+    // (matches the original inline parser's behaviour); they fall back to AUTO.
+    BOOST_CHECK(ParseFunctionConstantEnv("TRUE") == FunctionConstantMode::AUTO);
+    BOOST_CHECK(ParseFunctionConstantEnv("FALSE") == FunctionConstantMode::AUTO);
+    BOOST_CHECK(ParseFunctionConstantEnv("ON") == FunctionConstantMode::AUTO);
+    BOOST_CHECK(ParseFunctionConstantEnv("OFF") == FunctionConstantMode::AUTO);
+    BOOST_CHECK(ParseFunctionConstantEnv("yes") == FunctionConstantMode::AUTO);
+    BOOST_CHECK(ParseFunctionConstantEnv("no") == FunctionConstantMode::AUTO);
+    BOOST_CHECK(ParseFunctionConstantEnv("2") == FunctionConstantMode::AUTO);
+    BOOST_CHECK(ParseFunctionConstantEnv(" 1") == FunctionConstantMode::AUTO);
+    BOOST_CHECK(ParseFunctionConstantEnv("1 ") == FunctionConstantMode::AUTO);
+}
+
+BOOST_AUTO_TEST_CASE(metal_env_parse_truthy_recognises_falsy_tokens)
+{
+    using btx::metal::detail::ParseTruthyEnv;
+
+    // Null and empty fall back to default_value (both polarities verified).
+    BOOST_CHECK(ParseTruthyEnv(nullptr, true) == true);
+    BOOST_CHECK(ParseTruthyEnv(nullptr, false) == false);
+    BOOST_CHECK(ParseTruthyEnv("", true) == true);
+    BOOST_CHECK(ParseTruthyEnv("", false) == false);
+
+    // Recognised falsy tokens override default_value.
+    BOOST_CHECK(ParseTruthyEnv("0", true) == false);
+    BOOST_CHECK(ParseTruthyEnv("false", true) == false);
+    BOOST_CHECK(ParseTruthyEnv("FALSE", true) == false);
+    BOOST_CHECK(ParseTruthyEnv("off", true) == false);
+    BOOST_CHECK(ParseTruthyEnv("OFF", true) == false);
+
+    // Anything non-empty and not a recognised falsy token is truthy.
+    // This is intentional — see the helper's docstring — so set values
+    // such as "1", "yes", "on", "True", "FaLSe" all enable the feature
+    // even though they are not all idiomatic. Capturing this in tests
+    // pins the behaviour against accidental tightening.
+    BOOST_CHECK(ParseTruthyEnv("1", false) == true);
+    BOOST_CHECK(ParseTruthyEnv("on", false) == true);
+    BOOST_CHECK(ParseTruthyEnv("true", false) == true);
+    BOOST_CHECK(ParseTruthyEnv("yes", false) == true);
+    BOOST_CHECK(ParseTruthyEnv("True", false) == true);
+    BOOST_CHECK(ParseTruthyEnv("FaLSe", false) == true);
+    BOOST_CHECK(ParseTruthyEnv("anything-not-recognised", false) == true);
+    BOOST_CHECK(ParseTruthyEnv(" 0", false) == true); // leading space → not '0' literal
+    BOOST_CHECK(ParseTruthyEnv("0 ", false) == true); // trailing space → not '0' literal
+}
+
+BOOST_AUTO_TEST_CASE(metal_env_parse_pool_slots_unset_returns_nullopt)
+{
+    using btx::metal::detail::ParsePoolSlotsEnv;
+
+    // Null and empty mean "variable unset" — caller should auto-detect.
+    BOOST_CHECK(!ParsePoolSlotsEnv(nullptr, /*max_slots=*/16, /*default_fallback=*/4).has_value());
+    BOOST_CHECK(!ParsePoolSlotsEnv("", 16, 4).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(metal_env_parse_pool_slots_valid_inputs_clamp_to_range)
+{
+    using btx::metal::detail::ParsePoolSlotsEnv;
+    constexpr uint32_t kMax = 16;
+    constexpr uint32_t kDefault = 5;
+
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("1", kMax, kDefault).value(), 1U);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("5", kMax, kDefault).value(), 5U);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("16", kMax, kDefault).value(), 16U);
+
+    // Above max → clamped to max.
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("17", kMax, kDefault).value(), 16U);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("1000", kMax, kDefault).value(), 16U);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("2147483647", kMax, kDefault).value(), 16U);
+}
+
+BOOST_AUTO_TEST_CASE(metal_env_parse_pool_slots_non_positive_falls_back_to_default)
+{
+    using btx::metal::detail::ParsePoolSlotsEnv;
+    constexpr uint32_t kMax = 16;
+    constexpr uint32_t kDefault = 5;
+
+    // Zero and negatives are treated as malformed — fall back to default.
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("0", kMax, kDefault).value(), kDefault);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("-1", kMax, kDefault).value(), kDefault);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("-1000000", kMax, kDefault).value(), kDefault);
+}
+
+BOOST_AUTO_TEST_CASE(metal_env_parse_pool_slots_malformed_inputs_fall_back_to_default)
+{
+    using btx::metal::detail::ParsePoolSlotsEnv;
+    constexpr uint32_t kMax = 16;
+    constexpr uint32_t kDefault = 5;
+
+    // Pure non-digits.
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("abc", kMax, kDefault).value(), kDefault);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("!@#", kMax, kDefault).value(), kDefault);
+
+    // Trailing garbage after a digit run is rejected (matches std::strtol
+    // strict-tail check in the original parser).
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("4x", kMax, kDefault).value(), kDefault);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("4 ", kMax, kDefault).value(), kDefault);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("4\n", kMax, kDefault).value(), kDefault);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("4.0", kMax, kDefault).value(), kDefault);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("4,000", kMax, kDefault).value(), kDefault);
+
+    // Hex and octal-looking inputs: strtol with base 10 accepts a leading 0
+    // (parsing as decimal 4) and rejects 0x... at the strict-tail check.
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("0x4", kMax, kDefault).value(), kDefault);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("04", kMax, kDefault).value(), 4U);
+}
+
+BOOST_AUTO_TEST_CASE(metal_env_parse_pool_slots_overflow_clamps_to_max)
+{
+    using btx::metal::detail::ParsePoolSlotsEnv;
+    constexpr uint32_t kMax = 16;
+    constexpr uint32_t kDefault = 5;
+
+    // Beyond LONG_MAX, std::strtol saturates at LONG_MAX. The original inline
+    // parser then clamped that oversized positive value down to max_slots.
+    BOOST_CHECK_EQUAL(
+        ParsePoolSlotsEnv("999999999999999999999999999999", kMax, kDefault).value(),
+        kMax);
+}
+
+BOOST_AUTO_TEST_CASE(metal_env_parse_pool_slots_clamps_default_fallback_into_range)
+{
+    using btx::metal::detail::ParsePoolSlotsEnv;
+
+    // If the malformed-input path is taken, the default_fallback itself is
+    // clamped to [1, max_slots] before it is returned. This protects against
+    // an obviously-invalid default_fallback value coming from a future
+    // refactor.
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("bad", /*max=*/8, /*default=*/0).value(), 1U);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("bad", /*max=*/8, /*default=*/100).value(), 8U);
+    BOOST_CHECK_EQUAL(ParsePoolSlotsEnv("bad", /*max=*/8, /*default=*/4).value(), 4U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
