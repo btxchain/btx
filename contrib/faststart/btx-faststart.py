@@ -352,12 +352,44 @@ def snapshot_from_args(args: argparse.Namespace) -> tuple[str, str | None, str, 
         raise
     entry = resolve_manifest_entry(manifest, args.chain)
     snapshot_url = entry.get("url") or entry.get("asset_url")
+    snapshot_filename = entry.get("filename") or entry.get("published_name")
+
+    # If the manifest entry has a filename but no explicit url, derive the
+    # url from the manifest's own source location + the filename. This
+    # supports the published per-release flat manifest schema:
+    #
+    #     {"chain": "main", "filename": "snapshot.dat",
+    #      "published_name": "snapshot.dat", "sha256": "...", ...}
+    #
+    # which is what btx-release-manifest.json siblings publish today and
+    # what btx-agent-setup.py downloads to its cache. Without this fallback,
+    # such a manifest crashes with 'Snapshot manifest entry for <chain> is
+    # missing url' even though the snapshot file is sitting right next to
+    # the manifest file.
+    if not snapshot_url and snapshot_filename:
+        if is_url(manifest_source):
+            # Manifest fetched from a URL. The snapshot lives at the same
+            # base. Strip the manifest filename, append the snapshot filename.
+            manifest_base = manifest_source.rsplit("/", 1)[0]
+            snapshot_url = f"{manifest_base}/{snapshot_filename}"
+        else:
+            # Local manifest file. Look for the snapshot in the same dir.
+            manifest_path = Path(resolved_manifest_source)
+            local_snapshot = manifest_path.parent / snapshot_filename
+            if local_snapshot.exists():
+                snapshot_url = local_snapshot.resolve().as_uri()
+
     if not snapshot_url:
-        raise KeyError(f"Snapshot manifest entry for '{args.chain}' is missing url")
+        raise KeyError(
+            f"Snapshot manifest entry for '{args.chain}' is missing url "
+            f"(and no sibling '{snapshot_filename}' was found alongside the manifest "
+            f"at {resolved_manifest_source})"
+            if snapshot_filename
+            else f"Snapshot manifest entry for '{args.chain}' is missing url"
+        )
     snapshot_sha256 = entry.get("sha256") or entry.get("snapshot_sha256")
     snapshot_name = (
-        entry.get("filename")
-        or entry.get("published_name")
+        snapshot_filename
         or Path(urllib.parse.urlparse(snapshot_url).path).name
         or "snapshot.dat"
     )

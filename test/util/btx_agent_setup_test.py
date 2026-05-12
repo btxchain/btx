@@ -329,6 +329,86 @@ class BTXAgentSetupTest(unittest.TestCase):
             self.assertEqual(summary["faststart_conf"], str(datadir / "faststart" / "faststart.conf"))
             self.assertEqual(errors.getvalue(), "boot progress\nbootstrap warning\n")
 
+    def test_preset_uses_release_snapshot_manifest_url_for_remote_release(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            archive_path = self._build_fake_archive(root)
+            manifest_path = self._write_manifest(root, archive_path)
+            checksum_path = root / "SHA256SUMS"
+            snapshot_manifest_path = root / "snapshot.manifest.json"
+            api_prefix = "https://api.github.com/repos/btxchain/btx-node"
+            manifest_url = (
+                "https://github.com/btxchain/btx-node/releases/download/v29.2/"
+                f"{manifest_path.name}"
+            )
+            release_url = f"{api_prefix}/releases/tags/v29.2"
+            asset_urls = {
+                manifest_path.name: f"{api_prefix}/releases/assets/11",
+                checksum_path.name: f"{api_prefix}/releases/assets/12",
+                archive_path.name: f"{api_prefix}/releases/assets/13",
+                snapshot_manifest_path.name: f"{api_prefix}/releases/assets/14",
+            }
+            payloads = {
+                release_url: json.dumps(
+                    {
+                        "assets": [
+                            {"name": asset_name, "url": asset_url}
+                            for asset_name, asset_url in asset_urls.items()
+                        ]
+                    }
+                ).encode("utf-8"),
+                asset_urls[manifest_path.name]: manifest_path.read_bytes(),
+                asset_urls[checksum_path.name]: checksum_path.read_bytes(),
+                asset_urls[archive_path.name]: archive_path.read_bytes(),
+                asset_urls[snapshot_manifest_path.name]: snapshot_manifest_path.read_bytes(),
+            }
+            recorded_requests: list[tuple[str, dict[str, str]]] = []
+            recorded_runs: list[list[str]] = []
+            original_urlopen = self.module.urllib.request.urlopen
+            original_run = self.module.subprocess.run
+
+            try:
+                self.module.urllib.request.urlopen = self._fake_urlopen(payloads, recorded_requests)
+
+                def fake_run(cmd, check, **kwargs):
+                    recorded_runs.append(list(cmd))
+                    class Result:
+                        returncode = 0
+                        stdout = ""
+                        stderr = ""
+                    return Result()
+
+                self.module.subprocess.run = fake_run
+                with mock.patch.dict(self.module.os.environ, {"GITHUB_TOKEN": "test-token"}, clear=False):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        exit_code = self.module.main(
+                            [
+                                "--release-manifest",
+                                manifest_url,
+                                "--platform",
+                                "linux-x86_64",
+                                "--install-dir",
+                                str(root / "install"),
+                                "--preset",
+                                "service",
+                                "--datadir",
+                                str(root / "datadir"),
+                                "--allow-unsigned-release",
+                                "--json",
+                            ]
+                        )
+            finally:
+                self.module.urllib.request.urlopen = original_urlopen
+                self.module.subprocess.run = original_run
+
+            self.assertEqual(exit_code, 0)
+            command = recorded_runs[0]
+            self.assertIn(
+                "--snapshot-manifest=https://github.com/btxchain/btx-node/releases/download/v29.2/snapshot.manifest.json",
+                command,
+            )
+
     def test_miner_json_summary_includes_direct_helper_commands(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)

@@ -425,6 +425,40 @@ class BTXFaststartTest(unittest.TestCase):
         self.assertEqual(recorded[0][2]["Accept"], self.module.GITHUB_BINARY_ACCEPT)
         self.assertEqual(recorded[0][2]["Authorization"], "Bearer test-token")
 
+    def test_snapshot_from_args_uses_logical_release_download_url_for_filename_only_manifest(self):
+        manifest_url = "https://github.com/btxchain/btx-node/releases/download/v29.2/snapshot.manifest.json"
+        original_github_release_headers = self.module.github_release_headers
+        original_load_json_source = self.module.load_json_source
+        try:
+            self.module.github_release_headers = lambda source: (
+                "https://api.github.com/repos/btxchain/btx-node/releases/assets/1",
+                self.module.github_api_headers("test-token", accept=self.module.GITHUB_BINARY_ACCEPT),
+            )
+            self.module.load_json_source = lambda source, headers=None: {
+                "chain": "main",
+                "filename": "snapshot.dat",
+                "sha256": "ab" * 32,
+            }
+            args = argparse.Namespace(
+                snapshot_url=None,
+                snapshot_sha256=None,
+                snapshot_name=None,
+                snapshot_manifest=manifest_url,
+                chain="main",
+            )
+            snapshot_url, snapshot_sha256, snapshot_name, snapshot_entry = self.module.snapshot_from_args(args)
+        finally:
+            self.module.github_release_headers = original_github_release_headers
+            self.module.load_json_source = original_load_json_source
+
+        self.assertEqual(
+            snapshot_url,
+            "https://github.com/btxchain/btx-node/releases/download/v29.2/snapshot.dat",
+        )
+        self.assertEqual(snapshot_sha256, "ab" * 32)
+        self.assertEqual(snapshot_name, "snapshot.dat")
+        self.assertEqual(snapshot_entry["filename"], "snapshot.dat")
+
     def test_main_skips_loadtxoutset_when_snapshot_is_already_superseded(self):
         original_run = self.module.subprocess.run
         original_snapshot_from_args = self.module.snapshot_from_args

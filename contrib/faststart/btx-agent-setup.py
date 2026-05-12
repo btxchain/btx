@@ -633,7 +633,9 @@ def main(argv: list[str]) -> int:
     btx_cli_path = find_binary(install_dir, ("btx-cli", "btx-cli.exe"))
 
     snapshot_manifest_path: Path | None = None
+    snapshot_manifest_source: str | None = None
     if snapshot_manifest_name:
+        snapshot_manifest_source = resolve_asset_source(asset_base, snapshot_manifest_name)
         snapshot_manifest_asset = assets.get(snapshot_manifest_name, {})
         snapshot_manifest_path = download_and_verify_asset(
             resolved_asset_source(snapshot_manifest_name),
@@ -667,7 +669,7 @@ def main(argv: list[str]) -> int:
             f"--datadir={datadir}",
             f"--btxd={btxd_path}",
             f"--btx-cli={btx_cli_path}",
-            f"--snapshot-manifest={snapshot_manifest_path}",
+            f"--snapshot-manifest={snapshot_manifest_source or snapshot_manifest_path}",
         ]
         if args.matmul_service_challenge_file:
             faststart_cmd.append(
