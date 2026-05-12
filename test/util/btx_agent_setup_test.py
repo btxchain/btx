@@ -80,9 +80,14 @@ class BTXAgentSetupTest(unittest.TestCase):
                 calls.append(cmd)
                 return mock.Mock(returncode=0)
 
-            with mock.patch.object(self.module.shutil, "which", return_value="/usr/bin/codesign"), \
-                 mock.patch.object(self.module.subprocess, "run", side_effect=fake_run):
-                self.module.adhoc_codesign_macos_binaries(install_dir)
+            original_platform = self.module.sys.platform
+            try:
+                with mock.patch.object(self.module.shutil, "which", return_value="/usr/bin/codesign"), \
+                     mock.patch.object(self.module.subprocess, "run", side_effect=fake_run):
+                    self.module.sys.platform = "darwin"
+                    self.module.adhoc_codesign_macos_binaries(install_dir)
+            finally:
+                self.module.sys.platform = original_platform
 
             signed_paths = [pathlib.Path(cmd[-1]) for cmd in calls]
             self.assertIn(wrapper, signed_paths)
