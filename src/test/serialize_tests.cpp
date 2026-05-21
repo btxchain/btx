@@ -6,6 +6,7 @@
 #include <serialize.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
+#include <undo.h>
 #include <util/strencodings.h>
 
 #include <stdint.h>
@@ -424,6 +425,48 @@ BOOST_AUTO_TEST_CASE(with_params_move)
     Base base2;
     pstream >> base2;
     BOOST_CHECK_EQUAL(base2.m_base_data, 0x20);
+}
+
+BOOST_AUTO_TEST_CASE(block_undo_settlement_anchor_extension_roundtrip)
+{
+    const uint256 anchor_a{uint256::ONE};
+    const uint256 anchor_b{0x02};
+
+    CBlockUndo undo;
+    undo.vtxundo.resize(1);
+    undo.consumed_settlement_anchor_states = {
+        ConfirmedSettlementAnchorState{anchor_a, 123},
+        ConfirmedSettlementAnchorState{anchor_b, 456},
+    };
+    const ConfirmedSettlementAnchorState expected_a{anchor_a, 123};
+    const ConfirmedSettlementAnchorState expected_b{anchor_b, 456};
+
+    DataStream stream;
+    stream << undo;
+
+    CBlockUndo decoded;
+    stream >> decoded;
+
+    BOOST_CHECK(stream.empty());
+    BOOST_CHECK_EQUAL(decoded.vtxundo.size(), 1U);
+    BOOST_REQUIRE_EQUAL(decoded.consumed_settlement_anchor_states.size(), 2U);
+    BOOST_CHECK(decoded.consumed_settlement_anchor_states[0] == expected_a);
+    BOOST_CHECK(decoded.consumed_settlement_anchor_states[1] == expected_b);
+}
+
+BOOST_AUTO_TEST_CASE(block_undo_legacy_payload_has_no_settlement_anchor_metadata)
+{
+    std::vector<CTxUndo> legacy_tx_undo(1);
+
+    DataStream stream;
+    stream << legacy_tx_undo;
+
+    CBlockUndo decoded;
+    stream >> decoded;
+
+    BOOST_CHECK(stream.empty());
+    BOOST_CHECK_EQUAL(decoded.vtxundo.size(), 1U);
+    BOOST_CHECK(decoded.consumed_settlement_anchor_states.empty());
 }
 
 BOOST_AUTO_TEST_CASE(with_params_base)

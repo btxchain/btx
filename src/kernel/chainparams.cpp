@@ -230,12 +230,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0;
 
-        // Mainnet anchor refreshed on 2026-05-19 at height 105'550 from a
+        // Mainnet anchor refreshed on 2026-05-21 at height 106'875 from a
         // synced canonical node so stale history below the current public
         // release floor is rejected quickly.
-        consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000000000000004492ba231e"};
+        consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000000000000005649edfed5"};
         // Assume signatures valid up to the same anchored block to speed sync.
-        consensus.defaultAssumeValid = uint256{"3245a5e7debf69da9589fb0bc7bfd88fec32575c6f9a3a5d687dc38251a88fc7"};
+        consensus.defaultAssumeValid = uint256{"88a7b534ff66a863d45813668d9e53010a257af18b2d73154ec31a873bd36534"};
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -289,7 +289,7 @@ public:
         checkpointData = {
             {
                 {0, uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"}},
-                {105550, uint256{"3245a5e7debf69da9589fb0bc7bfd88fec32575c6f9a3a5d687dc38251a88fc7"}},
+                {106875, uint256{"88a7b534ff66a863d45813668d9e53010a257af18b2d73154ec31a873bd36534"}},
             }
         };
         m_assumeutxo_data = {
@@ -342,11 +342,18 @@ public:
                 .m_chain_tx_count = 126'978,
                 .blockhash = consteval_ctor(uint256{"3245a5e7debf69da9589fb0bc7bfd88fec32575c6f9a3a5d687dc38251a88fc7"}),
             },
+            {
+                // main assumeutxo snapshot at height 106'875
+                .height = 106'875,
+                .hash_serialized = AssumeutxoHash{uint256{"662b8b2a2d17654002b0532658ac560f1aa59e35e21738b986eb78212871250b"}},
+                .m_chain_tx_count = 128'730,
+                .blockhash = consteval_ctor(uint256{"88a7b534ff66a863d45813668d9e53010a257af18b2d73154ec31a873bd36534"}),
+            },
         };
         chainTxData = ChainTxData{
-            .nTime = 1779206883,
-            .tx_count = 126980,
-            .dTxRate = 0.014292711894,
+            .nTime = 1779323209,
+            .tx_count = 128732,
+            .dTxRate = 0.015144787163,
         };
     }
 };

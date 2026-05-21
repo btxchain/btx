@@ -822,29 +822,64 @@ CBlockFileInfo* BlockManager::GetBlockFileInfo(size_t n)
 bool BlockManager::ReadBlockUndo(CBlockUndo& blockundo, const CBlockIndex& index) const
 {
     const FlatFilePos pos{WITH_LOCK(::cs_main, return index.GetUndoPos())};
+    if (pos.IsNull() || pos.nPos < BLOCK_SERIALIZATION_HEADER_SIZE) {
+        LogError("%s: invalid undo position %s\n", __func__, pos.ToString());
+        return false;
+    }
 
     // Open history file to read
-    AutoFile file{OpenUndoFile(pos, true)};
+    const FlatFilePos header_pos{pos.nFile, pos.nPos - BLOCK_SERIALIZATION_HEADER_SIZE};
+    AutoFile file{OpenUndoFile(header_pos, true)};
     if (file.IsNull()) {
-        LogError("OpenUndoFile failed for %s while reading block undo", pos.ToString());
+        LogError("OpenUndoFile failed for %s while reading block undo", header_pos.ToString());
         return false;
     }
     BufferedReader filein{std::move(file)};
 
     try {
-    // Read block
-    uint256 hashChecksum;
-        HashVerifier verifier{filein}; // Use HashVerifier as reserializing may lose data, c.f. commit d342424301013ec47dc146a4beb49d5c9319d80a
-        const uint256 prev_block_hash{index.pprev ? index.pprev->GetBlockHash() : uint256{}};
-        verifier << prev_block_hash;
-        verifier >> blockundo;
+        MessageStartChars undo_start;
+        unsigned int undo_size;
+        filein >> undo_start >> undo_size;
+
+        if (undo_start != GetParams().MessageStart()) {
+            LogError("%s: Undo magic mismatch for %s: %s versus expected %s\n",
+                     __func__,
+                     pos.ToString(),
+                     HexStr(undo_start),
+                     HexStr(GetParams().MessageStart()));
+            return false;
+        }
+
+        if (undo_size > MAX_SIZE) {
+            LogError("%s: Undo data is larger than maximum deserialization size for %s: %s versus %s\n",
+                     __func__,
+                     pos.ToString(),
+                     undo_size,
+                     MAX_SIZE);
+            return false;
+        }
+
+        std::vector<uint8_t> undo_data(undo_size);
+        filein.read(MakeWritableByteSpan(undo_data));
+
+        uint256 hashChecksum;
         filein >> hashChecksum;
 
-    // Verify checksum
-    if (hashChecksum != verifier.GetHash()) {
-        LogError("%s: Checksum mismatch at %s\n", __func__, pos.ToString());
-        return false;
-    }
+        const uint256 prev_block_hash{index.pprev ? index.pprev->GetBlockHash() : uint256{}};
+        HashWriter hasher{};
+        hasher << prev_block_hash;
+        hasher.write(MakeByteSpan(undo_data));
+        if (hashChecksum != hasher.GetHash()) {
+            LogError("%s: Checksum mismatch at %s\n", __func__, pos.ToString());
+            return false;
+        }
+
+        DataStream undo_stream{MakeByteSpan(undo_data)};
+        undo_stream >> blockundo;
+        if (!undo_stream.empty()) {
+            LogError("%s: trailing bytes at %s while reading block undo\n", __func__, pos.ToString());
+            return false;
+        }
     } catch (const std::exception& e) {
         LogError("Deserialize or I/O error - %s at %s while reading block undo", e.what(), pos.ToString());
         return false;

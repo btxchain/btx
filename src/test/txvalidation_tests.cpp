@@ -3099,6 +3099,67 @@ BOOST_FIXTURE_TEST_CASE(block_rejects_v2_egress_when_settlement_anchor_is_immatu
     BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height()), tip_height + 1);
 }
 
+BOOST_FIXTURE_TEST_CASE(block_disconnect_restores_consumed_v2_settlement_anchor_metadata, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t active_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
+    const ScopedConsensusHeightOverride restore_height{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusU32Override restore_maturity{
+        consensus.nShieldedSettlementAnchorMaturity,
+        consensus.nShieldedSettlementAnchorMaturity};
+    consensus.nShieldedMatRiCTDisableHeight = active_height + 2;
+    consensus.nShieldedSettlementAnchorMaturity = 2;
+
+    const auto settlement_anchor_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture(
+        /*output_count=*/2,
+        /*proof_receipt_count=*/1,
+        /*required_receipts=*/1,
+        &consensus,
+        active_height + 1);
+    const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture(
+        /*output_count=*/2,
+        &consensus,
+        consensus.nShieldedMatRiCTDisableHeight);
+    BOOST_REQUIRE_EQUAL(settlement_anchor_fixture.settlement_anchor_digest,
+                        std::get<shielded::v2::EgressBatchPayload>(
+                            egress_fixture.tx.shielded_bundle.v2_bundle->payload)
+                            .settlement_anchor);
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({settlement_anchor_fixture.tx}, script_pub_key);
+    const int32_t settlement_anchor_height =
+        WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
+    const auto confirmed_anchor_state =
+        WITH_LOCK(cs_main,
+                  return m_node.chainman->GetShieldedSettlementAnchorState(
+                      settlement_anchor_fixture.settlement_anchor_digest));
+    BOOST_REQUIRE(confirmed_anchor_state.has_value());
+    BOOST_CHECK(confirmed_anchor_state->IsValid());
+    BOOST_CHECK_EQUAL(confirmed_anchor_state->created_height, settlement_anchor_height);
+
+    CreateAndProcessBlock({}, script_pub_key);
+    CreateAndProcessBlock({egress_fixture.tx}, script_pub_key);
+    BOOST_CHECK(WITH_LOCK(cs_main,
+                          return !m_node.chainman->IsShieldedSettlementAnchorValid(
+                              settlement_anchor_fixture.settlement_anchor_digest)));
+
+    BlockValidationState invalidate_state;
+    BOOST_REQUIRE(
+        m_node.chainman->ActiveChainstate().InvalidateBlock(
+            invalidate_state, WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip())));
+    BOOST_CHECK(invalidate_state.IsValid());
+
+    const auto restored_anchor_state =
+        WITH_LOCK(cs_main,
+                  return m_node.chainman->GetShieldedSettlementAnchorState(
+                      settlement_anchor_fixture.settlement_anchor_digest));
+    BOOST_REQUIRE(restored_anchor_state.has_value());
+    BOOST_CHECK(restored_anchor_state->IsValid());
+    BOOST_CHECK_EQUAL(restored_anchor_state->created_height, settlement_anchor_height);
+}
+
 BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_reused_v2_egress_settlement_anchor_after_single_use_activation, TestChain100Setup)
 {
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());

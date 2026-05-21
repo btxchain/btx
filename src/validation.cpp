@@ -5463,15 +5463,47 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
                 consumed_preexisting_settlement_anchors.push_back(anchor);
             }
         }
-        if (!consumed_preexisting_settlement_anchors.empty() &&
-            !m_chainman.m_shielded_nullifiers->InsertSettlementAnchors(consumed_preexisting_settlement_anchors)) {
+        std::map<uint256, ConfirmedSettlementAnchorState> settlement_anchor_undo_metadata;
+        for (const auto& anchor_state : blockUndo.consumed_settlement_anchor_states) {
+            if (!anchor_state.IsValid()) {
+                LogError("DisconnectBlock(): invalid settlement-anchor undo metadata for block %s anchor %s\n",
+                         pindex->GetBlockHash().ToString(),
+                         anchor_state.anchor.ToString());
+                return DISCONNECT_FAILED;
+            }
+            if (!settlement_anchor_undo_metadata.emplace(anchor_state.anchor, anchor_state).second) {
+                LogError("DisconnectBlock(): duplicate settlement-anchor undo metadata for block %s anchor %s\n",
+                         pindex->GetBlockHash().ToString(),
+                         anchor_state.anchor.ToString());
+                return DISCONNECT_FAILED;
+            }
+        }
+        if (settlement_anchor_undo_metadata.size() != consumed_preexisting_settlement_anchors.size()) {
+            LogError("DisconnectBlock(): settlement-anchor undo metadata count mismatch for block %s "
+                     "(expected %u, got %u); cannot prune-safely restore consumed anchors. Run -reindex "
+                     "or reload a patched snapshot from an archival node\n",
+                     pindex->GetBlockHash().ToString(),
+                     static_cast<unsigned>(consumed_preexisting_settlement_anchors.size()),
+                     static_cast<unsigned>(settlement_anchor_undo_metadata.size()));
             return DISCONNECT_FAILED;
         }
-        const int32_t post_disconnect_height = pindex->pprev != nullptr ? pindex->pprev->nHeight : -1;
-        if (UseSettlementAnchorMaturityRule(m_chainman.GetConsensus(), post_disconnect_height) &&
-            !SyncShieldedSettlementAnchorState(m_blockman,
-                                              pindex->pprev,
-                                              *m_chainman.m_shielded_nullifiers)) {
+        std::vector<ConfirmedSettlementAnchorState> consumed_preexisting_settlement_anchor_states;
+        consumed_preexisting_settlement_anchor_states.reserve(consumed_preexisting_settlement_anchors.size());
+        for (const auto& anchor : consumed_preexisting_settlement_anchors) {
+            const auto undo_it = settlement_anchor_undo_metadata.find(anchor);
+            if (undo_it == settlement_anchor_undo_metadata.end()) {
+                LogError("DisconnectBlock(): missing settlement-anchor undo metadata for block %s anchor %s; "
+                         "cannot prune-safely restore consumed anchors. Run -reindex or reload a patched "
+                         "snapshot from an archival node\n",
+                         pindex->GetBlockHash().ToString(),
+                         anchor.ToString());
+                return DISCONNECT_FAILED;
+            }
+            consumed_preexisting_settlement_anchor_states.push_back(undo_it->second);
+        }
+        if (!consumed_preexisting_settlement_anchors.empty() &&
+            !m_chainman.m_shielded_nullifiers->InsertSettlementAnchors(
+                consumed_preexisting_settlement_anchor_states)) {
             return DISCONNECT_FAILED;
         }
         if (!block_netting_manifests.empty() &&
@@ -5858,6 +5890,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     std::vector<ConfirmedSettlementAnchorState> block_settlement_anchor_states;
     std::set<uint256> block_consumed_settlement_anchors;
     std::vector<uint256> block_consumed_settlement_anchor_vec;
+    std::vector<ConfirmedSettlementAnchorState> block_consumed_settlement_anchor_states;
     std::set<uint256> block_netting_manifests;
     std::vector<uint256> block_netting_manifest_vec;
     // Finding 10 fix: track output commitments across all transactions in the
@@ -6219,6 +6252,18 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                         state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-shielded-v2-egress-unanchored");
                         break;
                     }
+                    if (!anchor_created_in_block &&
+                        anchor_state.has_value() &&
+                        !anchor_state->IsValid() &&
+                        (UseSettlementAnchorMaturityRule(params.GetConsensus(), pindex->nHeight) ||
+                         UseSingleUseSettlementAnchors(params.GetConsensus(), pindex->nHeight))) {
+                        state.Error(strprintf("ConnectBlock(): missing settlement-anchor metadata for anchor %s "
+                                              "in block %s; run -reindex or reload a patched snapshot from an "
+                                              "archival node",
+                                              payload.settlement_anchor.ToString(),
+                                              pindex->GetBlockHash().ToString()));
+                        break;
+                    }
                     if (UseSettlementAnchorMaturityRule(params.GetConsensus(), pindex->nHeight)) {
                         if (anchor_created_in_block ||
                             !anchor_state.has_value() ||
@@ -6237,6 +6282,17 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                             break;
                         }
                         block_consumed_settlement_anchor_vec.push_back(payload.settlement_anchor);
+                        if (!anchor_created_in_block) {
+                            if (!anchor_state.has_value() || !anchor_state->IsValid()) {
+                                state.Error(strprintf("ConnectBlock(): missing settlement-anchor metadata for anchor %s "
+                                                      "in block %s; run -reindex or reload a patched snapshot from an "
+                                                      "archival node",
+                                                      payload.settlement_anchor.ToString(),
+                                                      pindex->GetBlockHash().ToString()));
+                                break;
+                            }
+                            block_consumed_settlement_anchor_states.push_back(*anchor_state);
+                        }
                     }
                     break;
                 }
@@ -6588,6 +6644,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         return true;
     }
 
+    blockundo.consumed_settlement_anchor_states = std::move(block_consumed_settlement_anchor_states);
     if (!m_blockman.WriteBlockUndo(blockundo, state, *pindex)) {
         return false;
     }

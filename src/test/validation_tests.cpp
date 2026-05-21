@@ -395,7 +395,16 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     // few positive/negative lookups.
     const auto params = CreateChainParams(*m_node.args, ChainType::MAIN);
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    const std::vector<int> expected_snapshot_heights{55'000, 60'760, 64'900, 71'260, 71'435, 85'850};
+    const std::vector<int> expected_snapshot_heights{
+        55'000,
+        60'760,
+        64'900,
+        71'260,
+        71'435,
+        85'850,
+        105'550,
+        106'875,
+    };
 
     BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
     BOOST_CHECK_EQUAL_COLLECTIONS(snapshot_heights.begin(),
@@ -409,6 +418,8 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     BOOST_CHECK(params->AssumeutxoForHeight(71'260));
     BOOST_CHECK(params->AssumeutxoForHeight(71'435));
     BOOST_CHECK(params->AssumeutxoForHeight(85'850));
+    BOOST_CHECK(params->AssumeutxoForHeight(105'550));
+    BOOST_CHECK(params->AssumeutxoForHeight(106'875));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
     BOOST_CHECK(!params->AssumeutxoForHeight(0));
 }

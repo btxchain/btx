@@ -11,6 +11,12 @@
 #include <consensus/consensus.h>
 #include <primitives/transaction.h>
 #include <serialize.h>
+#include <shielded/nullifier.h>
+
+#include <ios>
+#include <set>
+#include <stdint.h>
+#include <vector>
 
 /** Formatter for undo information for a CTxIn
  *
@@ -62,9 +68,52 @@ public:
 class CBlockUndo
 {
 public:
-    std::vector<CTxUndo> vtxundo; // for all but the coinbase
+    static constexpr uint32_t SHIELDED_SETTLEMENT_ANCHOR_UNDO_MAGIC{0x42545855}; // "BTXU"
+    static constexpr uint8_t SHIELDED_SETTLEMENT_ANCHOR_UNDO_VERSION{1};
 
-    SERIALIZE_METHODS(CBlockUndo, obj) { READWRITE(obj.vtxundo); }
+    std::vector<CTxUndo> vtxundo; // for all but the coinbase
+    std::vector<ConfirmedSettlementAnchorState> consumed_settlement_anchor_states;
+
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        ::Serialize(s, vtxundo);
+        if (!consumed_settlement_anchor_states.empty()) {
+            ::Serialize(s, SHIELDED_SETTLEMENT_ANCHOR_UNDO_MAGIC);
+            ::Serialize(s, SHIELDED_SETTLEMENT_ANCHOR_UNDO_VERSION);
+            ::Serialize(s, consumed_settlement_anchor_states);
+        }
+    }
+
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        ::Unserialize(s, vtxundo);
+        consumed_settlement_anchor_states.clear();
+        if (s.empty()) {
+            return;
+        }
+
+        uint32_t magic{0};
+        uint8_t version{0};
+        ::Unserialize(s, magic);
+        ::Unserialize(s, version);
+        if (magic != SHIELDED_SETTLEMENT_ANCHOR_UNDO_MAGIC ||
+            version != SHIELDED_SETTLEMENT_ANCHOR_UNDO_VERSION) {
+            throw std::ios_base::failure("CBlockUndo unsupported shielded undo extension");
+        }
+
+        ::Unserialize(s, consumed_settlement_anchor_states);
+        std::set<uint256> seen_anchors;
+        for (const auto& anchor_state : consumed_settlement_anchor_states) {
+            if (!anchor_state.IsValid() || !seen_anchors.insert(anchor_state.anchor).second) {
+                throw std::ios_base::failure("CBlockUndo invalid consumed settlement-anchor metadata");
+            }
+        }
+        if (!s.empty()) {
+            throw std::ios_base::failure("CBlockUndo trailing bytes");
+        }
+    }
 };
 
 #endif // BITCOIN_UNDO_H

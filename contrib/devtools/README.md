@@ -204,8 +204,8 @@ python3 scripts/release/collect_release_assets.py \
   --source /tmp/guix-build/output/arm64-apple-darwin \
   --snapshot /tmp/snapshot.dat \
   --snapshot-manifest /tmp/snapshot.manifest.json \
-  --release-tag v0.30.0 \
-  --release-name "BTX 0.30.0" \
+  --release-tag v0.30.1 \
+  --release-name "BTX 0.30.1" \
   --sign-with release-signing-key
 ```
 
@@ -221,7 +221,7 @@ bundle directory using the token stored in `github.key`:
 ```bash
 python3 scripts/release/publish_github_release.py \
   --repo btxchain/btx \
-  --tag v0.30.0 \
+  --tag v0.30.1 \
   --bundle-dir /tmp/btx-release-bundle \
   --body-file /tmp/release-notes.md \
   --token-file /path/to/github.key \
