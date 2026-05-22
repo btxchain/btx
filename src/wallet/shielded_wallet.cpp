@@ -558,7 +558,11 @@ BuildAddressLifecycleControlTransactionImpl(
     size_t best_count{std::numeric_limits<size_t>::max()};
     size_t search_states{0};
 
-    for (auto& [_, group_notes] : grouped) {
+    // AppleClang 15 rejects structured-binding captures in lambdas under strict C++20;
+    // alias to a regular variable so the lambda (`search` below) can capture by reference.
+    // (Diligence patch 2026-05-21.)
+    for (auto& grouped_entry : grouped) {
+        auto& group_notes = grouped_entry.second;
         std::sort(group_notes.begin(), group_notes.end(), [](const ShieldedCoin& a, const ShieldedCoin& b) {
             return std::tie(a.note.value, a.tree_position, a.nullifier) >
                    std::tie(b.note.value, b.tree_position, b.nullifier);
