@@ -92,9 +92,15 @@ template <typename T>
     return kind == shielded::BridgeTemplateKind::SHIELD || kind == shielded::BridgeTemplateKind::UNSHIELD;
 }
 
+[[nodiscard]] bool IsSupportedBridgePlanVersion(uint8_t version)
+{
+    return version == BridgePlan::LEGACY_VERSION ||
+           version == BridgePlan::VIEW_GRANT_POLICY_VERSION;
+}
+
 [[nodiscard]] bool HasValidCommonFields(const BridgePlan& plan)
 {
-    return plan.version == 1 &&
+    return IsSupportedBridgePlanVersion(plan.version) &&
            IsValidPlanKind(plan.kind) &&
            plan.ids.IsValid() &&
            shielded::IsValidRefundLockHeight(plan.refund_lock_height) &&
@@ -173,6 +179,16 @@ template <typename T>
     return lhs.format == rhs.format && SamePubkey(lhs.recipient_pubkey, rhs.recipient_pubkey);
 }
 
+[[nodiscard]] bool BridgeViewGrantSatisfiesRequirement(const BridgeViewGrantRequest& candidate,
+                                                       const BridgeViewGrantRequest& required)
+{
+    if (!SameGrantIdentity(candidate, required)) return false;
+    if (required.format == BridgeViewGrantFormat::STRUCTURED_DISCLOSURE) {
+        return (candidate.disclosure_flags & required.disclosure_flags) == required.disclosure_flags;
+    }
+    return true;
+}
+
 [[nodiscard]] shielded::viewgrants::StructuredDisclosurePayload BuildStructuredBridgeDisclosurePayload(
     const BridgeInPlanRequest& request,
     const ShieldedNote& note)
@@ -199,6 +215,140 @@ void MergeBridgeViewGrantRequest(std::vector<BridgeViewGrantRequest>& merged, co
     if (next.format == BridgeViewGrantFormat::STRUCTURED_DISCLOSURE) {
         it->disclosure_flags |= next.disclosure_flags;
     }
+}
+
+[[nodiscard]] bool BridgeViewGrantRequestLess(const BridgeViewGrantRequest& lhs,
+                                              const BridgeViewGrantRequest& rhs)
+{
+    if (lhs.format != rhs.format) {
+        return static_cast<uint8_t>(lhs.format) < static_cast<uint8_t>(rhs.format);
+    }
+    if (!std::equal(lhs.recipient_pubkey.begin(), lhs.recipient_pubkey.end(), rhs.recipient_pubkey.begin())) {
+        return std::lexicographical_compare(lhs.recipient_pubkey.begin(),
+                                            lhs.recipient_pubkey.end(),
+                                            rhs.recipient_pubkey.begin(),
+                                            rhs.recipient_pubkey.end());
+    }
+    return lhs.disclosure_flags < rhs.disclosure_flags;
+}
+
+[[nodiscard]] bool HasLegacyAuditViewGrantMetadata(const BridgePlan& plan)
+{
+    return std::any_of(plan.view_grant_metadata.begin(), plan.view_grant_metadata.end(), [](const auto& grant) {
+        return grant.format == BridgeViewGrantFormat::LEGACY_AUDIT;
+    });
+}
+
+[[nodiscard]] bool HasCanonicalBridgePlanViewGrantMetadata(const BridgePlan& plan)
+{
+    for (size_t i = 0; i < plan.view_grant_metadata.size(); ++i) {
+        if (!plan.view_grant_metadata[i].IsValid()) return false;
+        if (i == 0) continue;
+
+        const auto& previous = plan.view_grant_metadata[i - 1];
+        const auto& current = plan.view_grant_metadata[i];
+        if (SameGrantIdentity(previous, current)) return false;
+        if (BridgeViewGrantRequestLess(current, previous)) return false;
+    }
+    return true;
+}
+
+[[nodiscard]] shielded::viewgrants::StructuredDisclosurePayload
+BuildStructuredBridgeDisclosurePayloadForSize(const BridgeViewGrantRequest& request, size_t memo_size)
+{
+    shielded::viewgrants::StructuredDisclosurePayload payload;
+    payload.disclosure_flags = request.disclosure_flags;
+    if (shielded::viewgrants::HasDisclosureField(payload.disclosure_flags,
+                                                 shielded::viewgrants::DISCLOSE_AMOUNT)) {
+        payload.amount = COIN;
+    }
+    if (shielded::viewgrants::HasDisclosureField(payload.disclosure_flags,
+                                                 shielded::viewgrants::DISCLOSE_RECIPIENT)) {
+        payload.recipient_pk_hash = uint256{1};
+    }
+    if (shielded::viewgrants::HasDisclosureField(payload.disclosure_flags,
+                                                 shielded::viewgrants::DISCLOSE_MEMO)) {
+        payload.memo.assign(memo_size, 0);
+    }
+    if (shielded::viewgrants::HasDisclosureField(payload.disclosure_flags,
+                                                 shielded::viewgrants::DISCLOSE_SENDER)) {
+        payload.sender.bridge_id = uint256{2};
+        payload.sender.operation_id = uint256{3};
+    }
+    return payload;
+}
+
+[[nodiscard]] size_t BridgeLegacyAuditEncryptedDataSize()
+{
+    return ::GetSerializeSize(BridgeAuditPayloadV1{}) + AEADChaCha20Poly1305::EXPANSION;
+}
+
+[[nodiscard]] std::optional<std::pair<size_t, size_t>> BridgeViewGrantEncryptedDataSizeRange(
+    const BridgeViewGrantRequest& request)
+{
+    if (!request.IsValid()) return std::nullopt;
+
+    if (request.format == BridgeViewGrantFormat::LEGACY_AUDIT) {
+        const size_t size = BridgeLegacyAuditEncryptedDataSize();
+        return std::make_pair(size, size);
+    }
+
+    if (request.format == BridgeViewGrantFormat::STRUCTURED_DISCLOSURE) {
+        const bool discloses_memo = shielded::viewgrants::HasDisclosureField(
+            request.disclosure_flags,
+            shielded::viewgrants::DISCLOSE_MEMO);
+        const auto min_payload = BuildStructuredBridgeDisclosurePayloadForSize(request, 0);
+        const size_t min_size = ::GetSerializeSize(min_payload) + AEADChaCha20Poly1305::EXPANSION;
+        if (!discloses_memo) return std::make_pair(min_size, min_size);
+
+        const auto max_payload = BuildStructuredBridgeDisclosurePayloadForSize(request, MAX_SHIELDED_MEMO_SIZE);
+        const size_t max_size = ::GetSerializeSize(max_payload) + AEADChaCha20Poly1305::EXPANSION;
+        return std::make_pair(min_size, max_size);
+    }
+
+    return std::nullopt;
+}
+
+[[nodiscard]] bool HasConsistentBridgePlanViewGrantCiphertextSizes(const BridgePlan& plan)
+{
+    if (plan.view_grant_metadata.size() != plan.shielded_bundle.view_grants.size()) return false;
+
+    for (size_t i = 0; i < plan.view_grant_metadata.size(); ++i) {
+        const auto range = BridgeViewGrantEncryptedDataSizeRange(plan.view_grant_metadata[i]);
+        if (!range.has_value()) return false;
+        const size_t encrypted_size = plan.shielded_bundle.view_grants[i].encrypted_data.size();
+        if (encrypted_size < range->first || encrypted_size > range->second) return false;
+        if (plan.view_grant_metadata[i].format == BridgeViewGrantFormat::STRUCTURED_DISCLOSURE &&
+            shielded::viewgrants::HasDisclosureField(plan.view_grant_metadata[i].disclosure_flags,
+                                                     shielded::viewgrants::DISCLOSE_MEMO) &&
+            encrypted_size == BridgeLegacyAuditEncryptedDataSize()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool HasValidBridgePlanViewGrantMetadata(const BridgePlan& plan)
+{
+    if (plan.kind != shielded::BridgeTemplateKind::SHIELD) {
+        return plan.view_grant_metadata.empty() &&
+               !plan.allow_legacy_audit_view_grants &&
+               !plan.disclosure_policy.has_value();
+    }
+
+    if (plan.version == BridgePlan::LEGACY_VERSION) {
+        return plan.view_grant_metadata.empty() &&
+               !plan.allow_legacy_audit_view_grants &&
+               !plan.disclosure_policy.has_value();
+    }
+
+    if (plan.view_grant_metadata.size() != plan.shielded_bundle.view_grants.size()) {
+        return false;
+    }
+
+    if (!HasCanonicalBridgePlanViewGrantMetadata(plan)) return false;
+    if (!HasConsistentBridgePlanViewGrantCiphertextSizes(plan)) return false;
+    return !plan.disclosure_policy.has_value() || plan.disclosure_policy->IsValid();
 }
 
 [[nodiscard]] std::optional<CShieldedBundle> BuildBridgeShieldBundle(const BridgeInPlanRequest& request)
@@ -292,13 +442,12 @@ void MergeBridgeViewGrantRequest(std::vector<BridgeViewGrantRequest>& merged, co
                 MAX_VIEW_GRANT_ENCRYPTED_DATA_SIZE - AEADChaCha20Poly1305::EXPANSION) {
                 return std::nullopt;
             }
-            const auto grant_seed = DeriveBridgeSeed32(request.ids, "view-grant-seed", i, payload_span);
-            const auto grant_nonce = DeriveBridgeNonce12(request.ids, "view-grant-nonce", i, payload_span);
-            if (!grant_seed.has_value() || !grant_nonce.has_value()) return std::nullopt;
-            bundle.view_grants.push_back(CViewGrant::CreateDeterministic(payload_span,
-                                                                         grant_request.recipient_pubkey,
-                                                                         *grant_seed,
-                                                                         *grant_nonce));
+            const std::vector<uint8_t> metadata_aad = SerializeBridgeViewGrantMetadataAad(grant_request);
+            if (metadata_aad.empty()) return std::nullopt;
+            bundle.view_grants.push_back(CViewGrant::CreateWithAad(
+                payload_span,
+                grant_request.recipient_pubkey,
+                Span<const uint8_t>{metadata_aad.data(), metadata_aad.size()}));
         }
     }
 
@@ -465,16 +614,84 @@ std::optional<std::string> ValidateAndApplyBridgeDisclosurePolicy(BridgeInPlanRe
     if (normalized.size() > MAX_VIEW_GRANTS_PER_TX) {
         return strprintf("resolved operator view grants exceed %u entries", MAX_VIEW_GRANTS_PER_TX);
     }
+    std::sort(normalized.begin(), normalized.end(), BridgeViewGrantRequestLess);
     request.operator_view_grants = std::move(normalized);
     return std::nullopt;
 }
 
+std::optional<std::string> ValidateBridgePlanViewGrantPolicy(const BridgePlan& plan,
+                                                             int32_t validation_height,
+                                                             bool allow_legacy_audit_view_grants)
+{
+    if (plan.kind != shielded::BridgeTemplateKind::SHIELD ||
+        plan.shielded_bundle.view_grants.empty() ||
+        !UseShieldedPrivacyRedesignAtHeight(validation_height)) {
+        return std::nullopt;
+    }
+
+    if (plan.version < BridgePlan::VIEW_GRANT_POLICY_VERSION) {
+        return "plan_hex contains view grants without serialized view-grant policy metadata; rebuild the plan before post-redesign settlement";
+    }
+    if (plan.view_grant_metadata.size() != plan.shielded_bundle.view_grants.size()) {
+        return "plan_hex view-grant policy metadata does not match the serialized view grants";
+    }
+    if (!std::all_of(plan.view_grant_metadata.begin(), plan.view_grant_metadata.end(), [](const auto& grant) {
+            return grant.IsValid();
+        })) {
+        return "plan_hex view-grant policy metadata is invalid";
+    }
+    if (HasLegacyAuditViewGrantMetadata(plan) && !allow_legacy_audit_view_grants) {
+        return "plan_hex legacy_audit view grant requires allow_legacy_audit_view_grants=true after shielded privacy redesign";
+    }
+    if (plan.disclosure_policy.has_value()) {
+        if (!plan.disclosure_policy->IsValid()) {
+            return "plan_hex disclosure_policy is invalid";
+        }
+        if (plan.shielded_bundle.value_balance >= 0 ||
+            plan.shielded_bundle.value_balance == std::numeric_limits<CAmount>::min()) {
+            return "plan_hex shielded bundle amount is invalid for disclosure_policy";
+        }
+        const CAmount amount = -plan.shielded_bundle.value_balance;
+        if (!MoneyRange(amount)) {
+            return "plan_hex shielded bundle amount is invalid for disclosure_policy";
+        }
+        if (plan.disclosure_policy->RequiresDisclosure(amount)) {
+            for (const auto& required : plan.disclosure_policy->required_grants) {
+                const auto match = std::find_if(
+                    plan.view_grant_metadata.begin(),
+                    plan.view_grant_metadata.end(),
+                    [&](const auto& candidate) {
+                        return BridgeViewGrantSatisfiesRequirement(candidate, required);
+                    });
+                if (match == plan.view_grant_metadata.end()) {
+                    return "plan_hex disclosure_policy required grant is missing from view-grant policy metadata";
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::vector<uint8_t> SerializeBridgeViewGrantMetadataAad(const BridgeViewGrantRequest& request)
+{
+    if (!request.IsValid()) return {};
+
+    DataStream ss{};
+    ss << std::string{"BTX-Bridge-ViewGrant-Metadata-V1"};
+    ss << static_cast<uint8_t>(request.format);
+    ss << request.recipient_pubkey;
+    ss << request.disclosure_flags;
+    const auto bytes = MakeUCharSpan(ss);
+    return std::vector<uint8_t>{bytes.begin(), bytes.end()};
+}
+
 bool BridgePlan::IsValid() const
 {
-    if (version != 1 || !IsValidPlanKind(kind) || !ids.IsValid()) return false;
+    if (!IsSupportedBridgePlanVersion(version) || !IsValidPlanKind(kind) || !ids.IsValid()) return false;
     if (!shielded::IsValidRefundLockHeight(refund_lock_height)) return false;
     if (ctv_hash.IsNull() || !script_tree.IsValid()) return false;
     if (script_tree.refund_lock_height != refund_lock_height || script_tree.kind != kind) return false;
+    if (!HasValidBridgePlanViewGrantMetadata(*this)) return false;
     if (kind == shielded::BridgeTemplateKind::SHIELD) {
         if (!transparent_outputs.empty()) return false;
         if (!shielded_bundle.CheckStructure()) return false;
@@ -525,6 +742,9 @@ std::optional<BridgePlan> BuildBridgeInPlan(const BridgeInPlanRequest& request)
     plan.ctv_hash = *ctv_hash;
     plan.script_tree = *tree;
     plan.shielded_bundle = *bundle;
+    plan.view_grant_metadata = effective_request.operator_view_grants;
+    plan.allow_legacy_audit_view_grants = effective_request.allow_legacy_audit_view_grants;
+    plan.disclosure_policy = effective_request.disclosure_policy;
     return plan.IsValid() ? std::optional<BridgePlan>{std::move(plan)} : std::nullopt;
 }
 
@@ -594,10 +814,14 @@ std::optional<PartiallySignedTransaction> CreateBridgeShieldSettlementTransactio
                                                                                   const COutPoint& prevout,
                                                                                   CAmount prev_value,
                                                                                   const Consensus::Params* consensus,
-                                                                                  int32_t validation_height)
+                                                                                  int32_t validation_height,
+                                                                                  bool allow_legacy_audit_view_grants)
 {
     if (!plan.IsValid() || plan.kind != shielded::BridgeTemplateKind::SHIELD) return std::nullopt;
     if (prev_value < -plan.shielded_bundle.value_balance) return std::nullopt;
+    if (ValidateBridgePlanViewGrantPolicy(plan, validation_height, allow_legacy_audit_view_grants).has_value()) {
+        return std::nullopt;
+    }
     if (!EnforceCanonicalBridgeSettlementFee(plan, prev_value, consensus, validation_height)) {
         return std::nullopt;
     }

@@ -65,13 +65,24 @@ struct CViewGrant {
 
     [[nodiscard]] static CViewGrant Create(Span<const uint8_t> view_key,
                                            const mlkem::PublicKey& operator_pk);
+    [[nodiscard]] static CViewGrant CreateWithAad(Span<const uint8_t> view_key,
+                                                  const mlkem::PublicKey& operator_pk,
+                                                  Span<const uint8_t> metadata_aad);
     [[nodiscard]] static CViewGrant CreateDeterministic(Span<const uint8_t> view_key,
                                                         const mlkem::PublicKey& operator_pk,
                                                         Span<const uint8_t> kem_seed,
                                                         Span<const uint8_t> nonce);
+    [[nodiscard]] static CViewGrant CreateDeterministicWithAad(Span<const uint8_t> view_key,
+                                                               const mlkem::PublicKey& operator_pk,
+                                                               Span<const uint8_t> kem_seed,
+                                                               Span<const uint8_t> nonce,
+                                                               Span<const uint8_t> metadata_aad);
 
     [[nodiscard]] std::optional<SecureBytes> Decrypt(
         const mlkem::SecretKey& operator_sk) const;
+    [[nodiscard]] std::optional<SecureBytes> DecryptWithAad(
+        const mlkem::SecretKey& operator_sk,
+        Span<const uint8_t> metadata_aad) const;
 
     SERIALIZE_METHODS(CViewGrant, obj)
     {

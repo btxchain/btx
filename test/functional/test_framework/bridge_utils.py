@@ -219,7 +219,8 @@ def build_spend_path_recovery_fixture(
 
 def planin(wallet, amount, refund_lock_height, *, bridge_id, operation_id, recipient=None,
            shielded_anchor=None, memo=None, memo_hex=None, operator_view_pubkeys=None,
-           operator_view_grants=None, disclosure_policy=None, operator_key=None, refund_key=None):
+           operator_view_grants=None, disclosure_policy=None, operator_key=None, refund_key=None,
+           allow_legacy_audit_view_grants=None):
     if operator_key is None:
         operator_key = get_pq_pubkey(wallet)
     if refund_key is None:
@@ -243,12 +244,15 @@ def planin(wallet, amount, refund_lock_height, *, bridge_id, operation_id, recip
         options["operator_view_grants"] = operator_view_grants
     if disclosure_policy is not None:
         options["disclosure_policy"] = disclosure_policy
+    if allow_legacy_audit_view_grants is not None:
+        options["allow_legacy_audit_view_grants"] = allow_legacy_audit_view_grants
     return wallet.bridge_planin(operator_key, refund_key, amount, options), operator_key, refund_key
 
 
 def planbatchin(wallet, leaves, refund_lock_height, *, bridge_id, operation_id, recipient=None,
                 shielded_anchor=None, operator_view_pubkeys=None, operator_view_grants=None,
-                disclosure_policy=None, external_anchor=None, operator_key=None, refund_key=None):
+                disclosure_policy=None, external_anchor=None, operator_key=None, refund_key=None,
+                allow_legacy_audit_view_grants=None):
     if operator_key is None:
         operator_key = get_pq_pubkey(wallet)
     if refund_key is None:
@@ -270,6 +274,8 @@ def planbatchin(wallet, leaves, refund_lock_height, *, bridge_id, operation_id, 
         options["operator_view_grants"] = operator_view_grants
     if disclosure_policy is not None:
         options["disclosure_policy"] = disclosure_policy
+    if allow_legacy_audit_view_grants is not None:
+        options["allow_legacy_audit_view_grants"] = allow_legacy_audit_view_grants
     return wallet.bridge_planbatchin(operator_key, refund_key, leaves, options), operator_key, refund_key
 
 

@@ -2026,6 +2026,17 @@ bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::P
     return true;
 }
 
+bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height)
+{
+    const uint32_t pre_hash_epsilon_bits = GetMatMulPreHashEpsilonBitsForHeight(params, block_height);
+    if (pre_hash_epsilon_bits == 0) return true;
+
+    auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
+    if (!bnTarget) return false;
+    const arith_uint256 pre_hash_target = SaturatingLeftShift256(*bnTarget, pre_hash_epsilon_bits);
+    return UintToArith256(matmul::DeriveSigma(block)) <= pre_hash_target;
+}
+
 bool CheckMatMulProofOfWork_Phase2(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height)
 {
     const auto start = std::chrono::steady_clock::now();
@@ -2043,14 +2054,7 @@ bool CheckMatMulProofOfWork_Phase2(const CBlockHeader& block, const Consensus::P
 
     // Pre-hash lottery verification: reject blocks whose sigma doesn't pass the
     // cheap pre-filter, ensuring miners actually ran the pre-hash step.
-    const uint32_t pre_hash_epsilon_bits = GetMatMulPreHashEpsilonBitsForHeight(params, block_height);
-    if (pre_hash_epsilon_bits > 0) {
-        const uint256 sigma = matmul::DeriveSigma(block);
-        auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
-        if (!bnTarget) return finish(false);
-        arith_uint256 pre_hash_target = SaturatingLeftShift256(*bnTarget, pre_hash_epsilon_bits);
-        if (UintToArith256(sigma) > pre_hash_target) return finish(false);
-    }
+    if (!CheckMatMulPreHashGate(block, params, block_height)) return finish(false);
 
     const uint32_t n = block.matmul_dim;
     const auto A = matmul::SharedFromSeed(block.seed_a, n);
@@ -2108,14 +2112,7 @@ bool CheckMatMulProofOfWork_Phase2WithPayload(const CBlock& block, const Consens
     if (params.nMatMulTranscriptBlockSize == 0 || block.matmul_dim % params.nMatMulTranscriptBlockSize != 0) return false;
 
     // Pre-hash lottery verification (same as Phase2)
-    const uint32_t pre_hash_epsilon_bits = GetMatMulPreHashEpsilonBitsForHeight(params, block_height);
-    if (pre_hash_epsilon_bits > 0) {
-        const uint256 sigma = matmul::DeriveSigma(block);
-        auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
-        if (!bnTarget) return false;
-        arith_uint256 pre_hash_target = SaturatingLeftShift256(*bnTarget, pre_hash_epsilon_bits);
-        if (UintToArith256(sigma) > pre_hash_target) return false;
-    }
+    if (!CheckMatMulPreHashGate(block, params, block_height)) return false;
 
     const uint32_t n = block.matmul_dim;
     matmul::Matrix A(n, n);
@@ -2190,14 +2187,7 @@ bool CheckMatMulProofOfWork_Freivalds(const CBlock& block, const Consensus::Para
     if (params.nMatMulNoiseRank == 0 || params.nMatMulNoiseRank > block.matmul_dim) return finish(false);
 
     // Pre-hash lottery verification (same as Phase2)
-    const uint32_t pre_hash_epsilon_bits = GetMatMulPreHashEpsilonBitsForHeight(params, block_height);
-    if (pre_hash_epsilon_bits > 0) {
-        const uint256 sigma = matmul::DeriveSigma(block);
-        auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
-        if (!bnTarget) return finish(false);
-        arith_uint256 pre_hash_target = SaturatingLeftShift256(*bnTarget, pre_hash_epsilon_bits);
-        if (UintToArith256(sigma) > pre_hash_target) return finish(false);
-    }
+    if (!CheckMatMulPreHashGate(block, params, block_height)) return finish(false);
 
     const uint32_t n = block.matmul_dim;
 
@@ -2279,14 +2269,7 @@ bool CheckMatMulProofOfWork_ProductCommitted(const CBlock& block, const Consensu
     if (params.nMatMulNoiseRank == 0 || params.nMatMulNoiseRank > block.matmul_dim) return finish(false);
 
     // Pre-hash lottery verification
-    const uint32_t pre_hash_epsilon_bits = GetMatMulPreHashEpsilonBitsForHeight(params, block_height);
-    if (pre_hash_epsilon_bits > 0) {
-        const uint256 sigma = matmul::DeriveSigma(block);
-        auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
-        if (!bnTarget) return finish(false);
-        arith_uint256 pre_hash_target = SaturatingLeftShift256(*bnTarget, pre_hash_epsilon_bits);
-        if (UintToArith256(sigma) > pre_hash_target) return finish(false);
-    }
+    if (!CheckMatMulPreHashGate(block, params, block_height)) return finish(false);
 
     const uint32_t n = block.matmul_dim;
 

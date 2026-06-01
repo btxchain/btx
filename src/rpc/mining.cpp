@@ -74,12 +74,14 @@
 #include <thread>
 #include <algorithm>
 #include <array>
+#include <string_view>
 #include <vector>
 
 using interfaces::BlockRef;
 using interfaces::BlockTemplate;
 using interfaces::Mining;
 using node::BlockAssembler;
+using node::GetMaximumTime;
 using node::GetMinimumTime;
 using node::NodeContext;
 using node::RegenerateCommitments;
@@ -352,6 +354,56 @@ static bool TryGetNextBlockHeight(const CBlockIndex* pindex_prev, int& next_heig
     if (pindex_prev->nHeight == std::numeric_limits<int>::max()) return false;
     next_height = pindex_prev->nHeight + 1;
     return true;
+}
+
+static UniValue MiningTimePolicyToJSON(const Consensus::Params& consensus,
+                                       const CBlockIndex* pindex_prev,
+                                       int next_height,
+                                       int64_t curtime)
+{
+    CHECK_NONFATAL(pindex_prev);
+    const int64_t min_time{GetMinimumTime(pindex_prev, consensus)};
+    const auto max_time{GetMaximumTime(pindex_prev, consensus)};
+    const auto consensus_max_time{consensus.MaxMatMulFutureBlockTime(next_height, pindex_prev->GetMedianTimePast())};
+    const int64_t node_time{TicksSinceEpoch<std::chrono::seconds>(NodeClock::now())};
+
+    UniValue policy(UniValue::VOBJ);
+    policy.pushKV("height", next_height);
+    policy.pushKV("tip_time", pindex_prev->GetBlockTime());
+    policy.pushKV("tip_mediantime", pindex_prev->GetMedianTimePast());
+    policy.pushKV("node_time", node_time);
+    policy.pushKV("mintime", min_time);
+    policy.pushKV("curtime", curtime);
+    policy.pushKV("future_mtp_limit_active", max_time.has_value());
+    policy.pushKV("future_mtp_consensus_active", consensus_max_time.has_value());
+    policy.pushKV("future_mtp_mining_policy_active", max_time.has_value());
+    policy.pushKV("future_mtp_limit_height", consensus.nMatMulMaxFutureMtpDriftHeight);
+    policy.pushKV("future_mtp_limit_seconds", consensus.nMatMulMaxFutureMtpDrift);
+    if (max_time.has_value()) {
+        policy.pushKV("maxtime", *max_time);
+    }
+    policy.pushKV("curtime_clamped", max_time.has_value() && node_time > *max_time && curtime <= *max_time);
+    policy.pushKV("recommended_action", max_time.has_value() && node_time > *max_time ? "clamp_time" : "continue");
+    return policy;
+}
+
+static UniValue MiningChainGuardToJSON(const node::MiningChainGuardStatus& status);
+
+static void EnforceBlockHexSizeLimit(std::string_view hexdata, std::string_view field_name)
+{
+    if (hexdata.size() % 2 != 0) {
+        throw JSONRPCError(
+            RPC_DESERIALIZATION_ERROR,
+            strprintf("%s must be even-length hex", std::string{field_name}));
+    }
+    constexpr size_t max_hex_chars = static_cast<size_t>(MAX_BLOCK_SERIALIZED_SIZE) * 2;
+    if (hexdata.size() > max_hex_chars) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            strprintf("%s exceeds maximum serialized block size of %u bytes",
+                      std::string{field_name},
+                      static_cast<unsigned>(MAX_BLOCK_SERIALIZED_SIZE)));
+    }
 }
 
 struct IntervalHealthStats {
@@ -1477,6 +1529,7 @@ static UniValue BuildMatMulChallengeResponse(
     const CBlockIndex* pindex_prev{nullptr};
     int next_height{0};
     int64_t mintime{0};
+    UniValue time_policy(UniValue::VOBJ);
     {
         LOCK(cs_main);
         pindex_prev = chainman.m_blockman.LookupBlockIndex(challenge_header.hashPrevBlock);
@@ -1486,6 +1539,7 @@ static UniValue BuildMatMulChallengeResponse(
         }
         UpdateTime(&challenge_header, consensus, pindex_prev);
         mintime = GetMinimumTime(pindex_prev, consensus);
+        time_policy = MiningTimePolicyToJSON(consensus, pindex_prev, next_height, challenge_header.GetBlockTime());
     }
     challenge_header.nNonce64 = 0;
     challenge_header.nNonce = 0;
@@ -1532,6 +1586,11 @@ static UniValue BuildMatMulChallengeResponse(
     obj.pushKV("height", profiled_index.nHeight);
     obj.pushKV("previousblockhash", challenge_header.hashPrevBlock.GetHex());
     obj.pushKV("mintime", mintime);
+    if (const UniValue maxtime = time_policy.find_value("maxtime"); !maxtime.isNull()) {
+        obj.pushKV("maxtime", maxtime);
+    }
+    obj.pushKV("time_policy", std::move(time_policy));
+    obj.pushKV("chain_guard", MiningChainGuardToJSON(node::GetMiningChainGuardStatus(node)));
     obj.pushKV("bits", strprintf("%08x", profiled_index.nBits));
     obj.pushKV("difficulty", GetDifficulty(profiled_index));
     obj.pushKV("target", GetTarget(profiled_index, consensus.powLimit).GetHex());
@@ -4871,6 +4930,23 @@ static RPCHelpMan getmininginfo()
                             {RPCResult::Type::NUM, "best_peer_tip", "Highest tip height advertised by considered outbound peers, or -1 if unavailable"},
                             {RPCResult::Type::NUM, "near_tip_peers", "Considered outbound peers within the near-tip window of the local tip"},
                         }},
+                        {RPCResult::Type::OBJ, "time_policy", "Timestamp policy for the next block",
+                        {
+                            {RPCResult::Type::NUM, "height", "The next block height"},
+                            {RPCResult::Type::NUM_TIME, "tip_time", "The current tip timestamp"},
+                            {RPCResult::Type::NUM_TIME, "tip_mediantime", "The current tip median-time-past"},
+                            {RPCResult::Type::NUM_TIME, "node_time", "The local node wall-clock timestamp"},
+                            {RPCResult::Type::NUM_TIME, "mintime", "The minimum allowed next block timestamp"},
+                            {RPCResult::Type::NUM_TIME, "curtime", "The timestamp selected for a local block template"},
+                            {RPCResult::Type::BOOL, "future_mtp_limit_active", "Whether the MTP future-drift limit is active as local mining policy"},
+                            {RPCResult::Type::BOOL, "future_mtp_consensus_active", "Whether consensus rejection is active for this height"},
+                            {RPCResult::Type::BOOL, "future_mtp_mining_policy_active", "Whether local mining should clamp to the MTP future-drift limit"},
+                            {RPCResult::Type::NUM, "future_mtp_limit_height", "The activation height for the MTP future-drift limit"},
+                            {RPCResult::Type::NUM, "future_mtp_limit_seconds", "The permitted drift above previous median-time-past"},
+                            {RPCResult::Type::NUM_TIME, "maxtime", /*optional=*/true, "The maximum allowed next block timestamp"},
+                            {RPCResult::Type::BOOL, "curtime_clamped", "Whether the selected timestamp was clamped to the policy maximum"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue or clamp_time"},
+                        }},
                         {RPCResult::Type::STR_HEX, "signet_challenge", /*optional=*/true, "The block challenge (aka. block script), in hexadecimal (only present if the current network is a signet)"},
                         {RPCResult::Type::OBJ, "next", "The next block",
                         {
@@ -4938,6 +5014,14 @@ static RPCHelpMan getmininginfo()
         obj.pushKV("matmul_r", static_cast<int64_t>(chainman.GetConsensus().nMatMulNoiseRank));
     }
     obj.pushKV("chain_guard", MiningChainGuardToJSON(chain_guard_status));
+    int next_height_for_policy{0};
+    if (!TryGetNextBlockHeight(&tip, next_height_for_policy)) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "next block height overflow");
+    }
+    CBlockHeader next_header{};
+    next_header.nTime = tip.GetBlockTime();
+    UpdateTime(&next_header, chainman.GetConsensus(), &tip);
+    obj.pushKV("time_policy", MiningTimePolicyToJSON(chainman.GetConsensus(), &tip, next_height_for_policy, next_header.GetBlockTime()));
 
     UniValue next(UniValue::VOBJ);
     CBlockIndex next_index;
@@ -5445,6 +5529,7 @@ static RPCHelpMan getmatmulchallenge()
     if (!chainman.GetConsensus().fMatMulPOW) {
         throw JSONRPCError(RPC_MISC_ERROR, "MatMul proof-of-work is not active on this chain");
     }
+    EnsureMiningChainGuardOrThrow(node);
     return BuildMatMulChallengeResponse(
         chainman,
         node,
@@ -5720,6 +5805,7 @@ static RPCHelpMan getmatmulchallengeprofile()
     if (!chainman.GetConsensus().fMatMulPOW) {
         throw JSONRPCError(RPC_MISC_ERROR, "MatMul proof-of-work is not active on this chain");
     }
+    EnsureMiningChainGuardOrThrow(node);
     return BuildMatMulChallengeResponse(
         chainman,
         node,
@@ -6838,6 +6924,24 @@ static RPCHelpMan getblocktemplate()
                 {RPCResult::Type::STR, "longpollid", "an id to include with a request to longpoll on an update to this template"},
                 {RPCResult::Type::STR, "target", "The hash target"},
                 {RPCResult::Type::NUM_TIME, "mintime", "The minimum timestamp appropriate for the next block time, expressed in " + UNIX_EPOCH_TIME + ". Adjusted for the proposed BIP94 timewarp rule."},
+                {RPCResult::Type::NUM_TIME, "maxtime", /*optional=*/true, "The maximum timestamp accepted by the active MTP future-drift policy, expressed in " + UNIX_EPOCH_TIME + "."},
+                {RPCResult::Type::OBJ, "time_policy", "Timestamp policy for the next block template",
+                {
+                    {RPCResult::Type::NUM, "height", "The next block height"},
+                    {RPCResult::Type::NUM_TIME, "tip_time", "The current tip timestamp"},
+                    {RPCResult::Type::NUM_TIME, "tip_mediantime", "The current tip median-time-past"},
+                    {RPCResult::Type::NUM_TIME, "node_time", "The local node wall-clock timestamp"},
+                    {RPCResult::Type::NUM_TIME, "mintime", "The minimum allowed next block timestamp"},
+                    {RPCResult::Type::NUM_TIME, "curtime", "The timestamp selected for this template"},
+                    {RPCResult::Type::BOOL, "future_mtp_limit_active", "Whether the MTP future-drift limit is active as local mining policy"},
+                    {RPCResult::Type::BOOL, "future_mtp_consensus_active", "Whether consensus rejection is active for this height"},
+                    {RPCResult::Type::BOOL, "future_mtp_mining_policy_active", "Whether local mining should clamp to the MTP future-drift limit"},
+                    {RPCResult::Type::NUM, "future_mtp_limit_height", "The activation height for the MTP future-drift limit"},
+                    {RPCResult::Type::NUM, "future_mtp_limit_seconds", "The permitted drift above previous median-time-past"},
+                    {RPCResult::Type::NUM_TIME, "maxtime", /*optional=*/true, "The maximum allowed next block timestamp"},
+                    {RPCResult::Type::BOOL, "curtime_clamped", "Whether the template timestamp was clamped to the policy maximum"},
+                    {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue or clamp_time"},
+                }},
                 {RPCResult::Type::ARR, "mutable", "list of ways the block template may be changed",
                 {
                     {RPCResult::Type::STR, "value", "A way the block template may be changed, e.g. 'time', 'transactions', 'prevblock'"},
@@ -6952,9 +7056,11 @@ static RPCHelpMan getblocktemplate()
             const UniValue& dataval = oparam.find_value("data");
             if (!dataval.isStr())
                 throw JSONRPCError(RPC_TYPE_ERROR, "Missing data String key for proposal");
+            const std::string& proposal_hex = dataval.get_str();
+            EnforceBlockHexSizeLimit(proposal_hex, "data");
 
             CBlock block;
-            if (!DecodeHexBlk(block, dataval.get_str()))
+            if (!DecodeHexBlk(block, proposal_hex))
                 throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
 
             uint256 hash = block.GetHash();
@@ -7132,7 +7238,11 @@ static RPCHelpMan getblocktemplate()
     }
     const auto chain_guard_status = node::GetMiningChainGuardStatus(node);
     const bool pause_external_mining = node::ShouldPauseMiningByChainGuard(chain_guard_status);
-    bypass_cache |= pause_external_mining;
+    if (pause_external_mining) {
+        throw JSONRPCError(
+            MiningChainGuardRpcCode(chain_guard_status),
+            "mining paused by chain guard: " + node::DescribeMiningChainGuardStatus(chain_guard_status));
+    }
 
     // Update block
     static uint256 pindexPrevHash;
@@ -7275,12 +7385,16 @@ static UniValue TemplateToJSON(
     UniValue aMutable(UniValue::VARR);
     aMutable.push_back("time");
     aMutable.push_back("transactions");
-    aMutable.push_back("prevblock");
     if (matmul_active) {
         aMutable.push_back("nonce64");
         // Seeds are NOT mutable: they are deterministically derived from
         // hashPrevBlock and height. Marking them mutable would signal to pool
         // software (via BIP22) that seeds can be freely modified.
+        //
+        // For the same reason, prevblock is not advertised as mutable on MatMul
+        // templates: changing it requires regenerating the seeds and full work.
+    } else {
+        aMutable.push_back("prevblock");
     }
 
     UniValue result(UniValue::VOBJ);
@@ -7348,7 +7462,13 @@ static UniValue TemplateToJSON(
     result.pushKV("coinbasevalue", (int64_t)block.vtx[0]->vout[0].nValue);
     result.pushKV("longpollid", pindexPrev->GetBlockHash().GetHex() + ToString(nTransactionsUpdatedLast));
     result.pushKV("target", hashTarget.GetHex());
-    result.pushKV("mintime", GetMinimumTime(pindexPrev, consensusParams));
+    const int64_t min_time{GetMinimumTime(pindexPrev, consensusParams)};
+    const auto max_time{GetMaximumTime(pindexPrev, consensusParams)};
+    result.pushKV("mintime", min_time);
+    if (max_time.has_value()) {
+        result.pushKV("maxtime", *max_time);
+    }
+    result.pushKV("time_policy", MiningTimePolicyToJSON(consensusParams, pindexPrev, next_height, block_header.GetBlockTime()));
     result.pushKV("mutable", std::move(aMutable));
     result.pushKV("noncerange", (kawpow_active || matmul_active) ? "0000000000000000ffffffffffffffff" : "00000000ffffffff");
     const uint64_t template_shielded_verify_units = block_template->getShieldedVerifyUnits();
@@ -7466,16 +7586,19 @@ static RPCHelpMan submitblock()
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    std::shared_ptr<CBlock> blockptr = std::make_shared<CBlock>();
-    CBlock& block = *blockptr;
-    if (!DecodeHexBlk(block, request.params[0].get_str())) {
-        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
-    }
+    const std::string& block_hex = request.params[0].get_str();
+    EnforceBlockHexSizeLimit(block_hex, "hexdata");
 
     NodeContext& node = EnsureAnyNodeContext(request.context);
     const auto chain_guard_status = node::GetMiningChainGuardStatus(node);
     if (node::ShouldPauseMiningByChainGuard(chain_guard_status)) {
         return strprintf("paused-chain-guard-%s", node::GetMiningChainGuardRecommendedAction(chain_guard_status));
+    }
+
+    std::shared_ptr<CBlock> blockptr = std::make_shared<CBlock>();
+    CBlock& block = *blockptr;
+    if (!DecodeHexBlk(block, block_hex)) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
     }
 
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
@@ -7519,11 +7642,17 @@ static RPCHelpMan submitheader()
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    if (chainman.GetConsensus().fMatMulPOW) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "submitheader is not supported on MatMul proof-of-work chains; submit full blocks with submitblock");
+    }
+
     CBlockHeader h;
     if (!DecodeHexBlockHeader(h, request.params[0].get_str())) {
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block header decode failed");
     }
-    ChainstateManager& chainman = EnsureAnyChainman(request.context);
     {
         LOCK(cs_main);
         if (!chainman.m_blockman.LookupBlockIndex(h.hashPrevBlock)) {

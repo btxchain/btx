@@ -476,6 +476,48 @@ BOOST_AUTO_TEST_CASE(view_grant_roundtrip_encrypt_decrypt)
     BOOST_CHECK_EQUAL_COLLECTIONS(decrypted->begin(), decrypted->end(), view_key.begin(), view_key.end());
 }
 
+BOOST_AUTO_TEST_CASE(view_grant_metadata_aad_authenticates_context)
+{
+    const auto keypair = mlkem::KeyGen();
+    std::vector<uint8_t> view_key(32);
+    for (size_t i = 0; i < view_key.size(); ++i) {
+        view_key[i] = static_cast<uint8_t>(0x50 + i);
+    }
+    const std::vector<uint8_t> metadata_aad{'m', 'e', 't', 'a', '-', 'v', '1'};
+    const std::vector<uint8_t> wrong_metadata_aad{'m', 'e', 't', 'a', '-', 'v', '2'};
+
+    const CViewGrant grant = CViewGrant::CreateWithAad(
+        view_key,
+        keypair.pk,
+        Span<const uint8_t>{metadata_aad.data(), metadata_aad.size()});
+
+    BOOST_CHECK(!grant.Decrypt(keypair.sk).has_value());
+    BOOST_CHECK(!grant.DecryptWithAad(
+        keypair.sk,
+        Span<const uint8_t>{wrong_metadata_aad.data(), wrong_metadata_aad.size()}).has_value());
+
+    const auto decrypted = grant.DecryptWithAad(
+        keypair.sk,
+        Span<const uint8_t>{metadata_aad.data(), metadata_aad.size()});
+    BOOST_REQUIRE(decrypted.has_value());
+    BOOST_CHECK_EQUAL_COLLECTIONS(decrypted->begin(), decrypted->end(), view_key.begin(), view_key.end());
+}
+
+BOOST_AUTO_TEST_CASE(view_grant_legacy_decrypt_rejects_metadata_aad)
+{
+    const auto keypair = mlkem::KeyGen();
+    std::vector<uint8_t> view_key(32, 0x5c);
+    const std::vector<uint8_t> metadata_aad{'m', 'e', 't', 'a'};
+
+    const CViewGrant grant = CViewGrant::Create(view_key, keypair.pk);
+    BOOST_CHECK(!grant.DecryptWithAad(
+        keypair.sk,
+        Span<const uint8_t>{metadata_aad.data(), metadata_aad.size()}).has_value());
+    const auto decrypted = grant.Decrypt(keypair.sk);
+    BOOST_REQUIRE(decrypted.has_value());
+    BOOST_CHECK_EQUAL_COLLECTIONS(decrypted->begin(), decrypted->end(), view_key.begin(), view_key.end());
+}
+
 BOOST_AUTO_TEST_CASE(view_grant_create_rejects_oversized_view_key)
 {
     const auto keypair = mlkem::KeyGen();

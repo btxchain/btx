@@ -1166,6 +1166,7 @@ RPCHelpMan z_fundpsbt();
 RPCHelpMan z_finalizepsbt();
 RPCHelpMan bridge_planin();
 RPCHelpMan bridge_planbatchin();
+RPCHelpMan bridge_decryptviewgrant();
 RPCHelpMan bridge_planout();
 RPCHelpMan bridge_planbatchout();
 RPCHelpMan bridge_buildverifierset();
@@ -1337,6 +1338,7 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"shielded", &z_verifywalletintegrity},
         {"bridge", &bridge_planin},
         {"bridge", &bridge_planbatchin},
+        {"bridge", &bridge_decryptviewgrant},
         {"bridge", &bridge_planout},
         {"bridge", &bridge_planbatchout},
         {"bridge", &bridge_buildverifierset},

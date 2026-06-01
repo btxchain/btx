@@ -8395,6 +8395,12 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
                                  "bad-matmul-seeds",
                                  "matmul seeds do not match deterministic derivation from hashPrevBlock and height");
         }
+
+        if (!CheckMatMulPreHashGate(block, consensusParams, nHeight)) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                 "high-hash",
+                                 "matmul pre-hash proof failed");
+        }
     }
 
     // MatMul phase2/Freivalds checks require full block payload and run in
@@ -8435,6 +8441,11 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     if (EnforceTimewarpProtectionAtHeight(consensusParams, nHeight) &&
         block.GetBlockTime() < pindexPrev->GetBlockTime() - MAX_TIMEWARP) {
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "time-timewarp-attack", "block's timestamp is too early for BIP94 timewarp protection");
+    }
+
+    if (const auto max_time{consensusParams.MaxMatMulFutureBlockTime(nHeight, pindexPrev->GetMedianTimePast())};
+        max_time.has_value() && block.GetBlockTime() > *max_time) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "time-mtp-too-new", "block timestamp too far ahead of median time past");
     }
 
     // Check timestamp
@@ -8554,13 +8565,18 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
             if (!matmul_verified && payload_required &&
                 consensusParams.fMatMulFreivaldsEnabled &&
                 !has_product_payload) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "missing-product-payload",
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "missing-product-payload",
                     "block missing required Freivalds product matrix payload");
             }
 
             if (!matmul_verified && has_product_payload && !payload_size_valid) {
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "invalid-product-payload",
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "invalid-product-payload",
                     "block carries malformed Freivalds product matrix payload");
+            }
+
+            if (!matmul_verified && consensusParams.IsMatMulProductDigestActive(nHeight) && has_product_payload) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "invalid-product-payload",
+                    "block carries non-canonical Freivalds product matrix payload");
             }
 
             // Fallback: full O(n^3) transcript verification for blocks

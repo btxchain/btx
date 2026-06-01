@@ -8,6 +8,7 @@
 #include <common/messages.h>
 #include <consensus/amount.h>
 #include <consensus/validation.h>
+#include <crypto/chacha20poly1305.h>
 #include <hash.h>
 #include <key_io.h>
 #include <node/context.h>
@@ -61,6 +62,10 @@ static constexpr uint32_t DEFAULT_V2_REBALANCE_SETTLEMENT_WINDOW{144};
 static constexpr int64_t BRIDGE_FEE_HEADROOM_SCALE{1000};
 static constexpr int64_t DEFAULT_BRIDGE_FEE_HEADROOM_MULTIPLIER_MILLI{2000};
 static constexpr CAmount DEFAULT_BRIDGE_PENDING_REFUND_FEE{10000};
+static constexpr uint8_t DEFAULT_STRUCTURED_VIEW_GRANT_FLAGS{
+    shielded::viewgrants::DISCLOSE_AMOUNT |
+    shielded::viewgrants::DISCLOSE_RECIPIENT |
+    shielded::viewgrants::DISCLOSE_SENDER};
 static constexpr const char* TAG_REBALANCE_MANIFEST_GROSS_FLOW{"BTX_RPC_Rebalance_Manifest_Gross_Flow_V1"};
 static constexpr const char* TAG_REBALANCE_MANIFEST_AUTH{"BTX_RPC_Rebalance_Manifest_Authorization_V1"};
 
@@ -1683,6 +1688,9 @@ void SetShieldedFeeEstimateMode(const CWallet& wallet,
 [[nodiscard]] UniValue BridgeViewGrantToUniValue(const CViewGrant& grant, const BridgeViewGrantRequest* request = nullptr)
 {
     UniValue out(UniValue::VOBJ);
+    DataStream ss{};
+    ss << grant;
+    out.pushKV("view_grant_hex", HexStr(ss.str()));
     out.pushKV("kem_ciphertext", HexStr(grant.kem_ct));
     out.pushKV("nonce", HexStr(grant.nonce));
     out.pushKV("encrypted_data", HexStr(grant.encrypted_data));
@@ -1697,6 +1705,105 @@ void SetShieldedFeeEstimateMode(const CWallet& wallet,
             out.pushKV("disclosure_fields", std::move(fields));
         }
     }
+    return out;
+}
+
+[[nodiscard]] std::optional<std::string> TryAsciiMemoString(Span<const unsigned char> memo)
+{
+    std::string out;
+    out.reserve(memo.size());
+    for (const unsigned char ch : memo) {
+        if ((ch < 0x20 && ch != '\t') || ch > 0x7e) return std::nullopt;
+        out.push_back(static_cast<char>(ch));
+    }
+    return out;
+}
+
+[[nodiscard]] UniValue BridgeStructuredDisclosurePayloadToUniValue(
+    const shielded::viewgrants::StructuredDisclosurePayload& payload)
+{
+    UniValue out(UniValue::VOBJ);
+    out.pushKV("version", payload.version);
+    UniValue fields(UniValue::VARR);
+    for (const auto& field_name : shielded::viewgrants::GetDisclosureFieldNames(payload.disclosure_flags)) {
+        fields.push_back(field_name);
+    }
+    out.pushKV("disclosure_fields", std::move(fields));
+    if (shielded::viewgrants::HasDisclosureField(payload.disclosure_flags,
+                                                 shielded::viewgrants::DISCLOSE_AMOUNT)) {
+        out.pushKV("amount", ValueFromAmount(payload.amount));
+    }
+    if (shielded::viewgrants::HasDisclosureField(payload.disclosure_flags,
+                                                 shielded::viewgrants::DISCLOSE_RECIPIENT)) {
+        out.pushKV("recipient_pk_hash", payload.recipient_pk_hash.GetHex());
+    }
+    if (shielded::viewgrants::HasDisclosureField(payload.disclosure_flags,
+                                                 shielded::viewgrants::DISCLOSE_MEMO)) {
+        out.pushKV("memo_hex", HexStr(payload.memo));
+        if (const auto memo = TryAsciiMemoString(
+                Span<const unsigned char>{payload.memo.data(), payload.memo.size()})) {
+            out.pushKV("memo", *memo);
+        }
+    }
+    if (shielded::viewgrants::HasDisclosureField(payload.disclosure_flags,
+                                                 shielded::viewgrants::DISCLOSE_SENDER)) {
+        UniValue sender(UniValue::VOBJ);
+        sender.pushKV("bridge_id", payload.sender.bridge_id.GetHex());
+        sender.pushKV("operation_id", payload.sender.operation_id.GetHex());
+        out.pushKV("sender", std::move(sender));
+    }
+    return out;
+}
+
+struct BridgeAuditPayloadV1
+{
+    uint8_t version{1};
+    uint256 note_commitment;
+    uint256 recipient_pk_hash;
+    CAmount value{0};
+    uint256 rho;
+    uint256 rcm;
+
+    [[nodiscard]] bool IsValid() const
+    {
+        return version == 1 &&
+               !note_commitment.IsNull() &&
+               !recipient_pk_hash.IsNull() &&
+               MoneyRange(value) &&
+               value > 0 &&
+               !rho.IsNull() &&
+               !rcm.IsNull();
+    }
+
+    SERIALIZE_METHODS(BridgeAuditPayloadV1, obj)
+    {
+        READWRITE(obj.version, obj.note_commitment, obj.recipient_pk_hash, obj.value, obj.rho, obj.rcm);
+    }
+};
+
+[[nodiscard]] std::optional<BridgeAuditPayloadV1> DecodeBridgeAuditPayloadV1(Span<const uint8_t> bytes)
+{
+    if (bytes.empty()) return std::nullopt;
+    DataStream ds{bytes};
+    BridgeAuditPayloadV1 payload;
+    try {
+        ds >> payload;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    if (!ds.empty() || !payload.IsValid()) return std::nullopt;
+    return payload;
+}
+
+[[nodiscard]] UniValue BridgeAuditPayloadV1ToUniValue(const BridgeAuditPayloadV1& payload)
+{
+    UniValue out(UniValue::VOBJ);
+    out.pushKV("version", payload.version);
+    out.pushKV("note_commitment", payload.note_commitment.GetHex());
+    out.pushKV("recipient_pk_hash", payload.recipient_pk_hash.GetHex());
+    out.pushKV("amount", ValueFromAmount(payload.value));
+    out.pushKV("rho", payload.rho.GetHex());
+    out.pushKV("rcm", payload.rcm.GetHex());
     return out;
 }
 
@@ -2091,6 +2198,163 @@ void SetShieldedFeeEstimateMode(const CWallet& wallet,
     return plan;
 }
 
+[[nodiscard]] bool ParseBooleanRpcOptionOrThrow(const UniValue& options, std::string_view option_name)
+{
+    if (!options.isNull() && !options.isObject()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "options must be an object");
+    }
+    const UniValue& value = FindValue(options, option_name);
+    if (value.isNull()) return false;
+    if (!value.isBool()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a boolean", std::string{option_name}));
+    }
+    return value.get_bool();
+}
+
+[[nodiscard]] bool ParseAllowLegacyAuditViewGrantsOrThrow(const UniValue& options)
+{
+    return ParseBooleanRpcOptionOrThrow(options, "allow_legacy_audit_view_grants");
+}
+
+[[nodiscard]] bool ParseAcceptPlanViewGrantsOrThrow(const UniValue& options)
+{
+    return ParseBooleanRpcOptionOrThrow(options, "accept_plan_view_grants");
+}
+
+[[nodiscard]] bool HasDecodedBridgePlanViewGrants(const BridgePlan& plan)
+{
+    return plan.kind == shielded::BridgeTemplateKind::SHIELD &&
+           !plan.shielded_bundle.view_grants.empty();
+}
+
+[[nodiscard]] bool RequiresAcceptedBridgePlanViewGrants(const BridgePlan& plan, int32_t validation_height)
+{
+    return wallet::UseShieldedPrivacyRedesignAtHeight(validation_height) &&
+           HasDecodedBridgePlanViewGrants(plan);
+}
+
+[[nodiscard]] bool HasLegacyAuditBridgePlanViewGrantMetadata(const BridgePlan& plan)
+{
+    return std::any_of(plan.view_grant_metadata.begin(), plan.view_grant_metadata.end(), [](const auto& grant) {
+        return grant.format == BridgeViewGrantFormat::LEGACY_AUDIT;
+    });
+}
+
+[[nodiscard]] BridgePlan AuthorizeBridgePlanViewGrantPolicyOrThrow(const BridgePlan& plan,
+                                                                   int32_t validation_height,
+                                                                   const char* rpc_method,
+                                                                   const UniValue& options)
+{
+    BridgePlan authorized_plan = plan;
+    if (RequiresAcceptedBridgePlanViewGrants(plan, validation_height)) {
+        if (!ParseAcceptPlanViewGrantsOrThrow(options)) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                strprintf("%s: plan_hex contains view grants after shielded privacy redesign; set accept_plan_view_grants=true to acknowledge decoded plan view grants", rpc_method));
+        }
+
+        const bool allow_legacy_audit_view_grants = ParseAllowLegacyAuditViewGrantsOrThrow(options);
+        if (HasLegacyAuditBridgePlanViewGrantMetadata(plan) && !allow_legacy_audit_view_grants) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                strprintf("%s: plan_hex legacy_audit view grant requires allow_legacy_audit_view_grants=true after shielded privacy redesign", rpc_method));
+        }
+        if (allow_legacy_audit_view_grants) {
+            authorized_plan.allow_legacy_audit_view_grants = true;
+        }
+    }
+
+    if (auto error = ValidateBridgePlanViewGrantPolicy(authorized_plan,
+                                                       validation_height,
+                                                       authorized_plan.allow_legacy_audit_view_grants);
+        error.has_value()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s: %s", rpc_method, *error));
+    }
+    return authorized_plan;
+}
+
+[[nodiscard]] bool IsBridgeViewGrantStructurallyValid(const CViewGrant& grant)
+{
+    return grant.encrypted_data.size() >= AEADChaCha20Poly1305::EXPANSION &&
+           grant.encrypted_data.size() <= MAX_VIEW_GRANT_ENCRYPTED_DATA_SIZE;
+}
+
+[[nodiscard]] CViewGrant DecodeBridgeViewGrantHexOrThrow(const UniValue& value,
+                                                         std::string_view field_name)
+{
+    const auto bytes = ParseHexV(value, std::string{field_name});
+    DataStream ss{Span<const uint8_t>{bytes.data(), bytes.size()}};
+    CViewGrant grant;
+    try {
+        ss >> grant;
+    } catch (const std::exception&) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s is not a valid bridge view grant", field_name));
+    }
+    if (!ss.empty() || !IsBridgeViewGrantStructurallyValid(grant)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s is not a valid bridge view grant", field_name));
+    }
+    return grant;
+}
+
+void CheckBridgeViewGrantComponentMatches(const UniValue& value,
+                                          std::string_view field_name,
+                                          Span<const unsigned char> expected)
+{
+    if (value.isNull()) return;
+    const auto bytes = ParseHexV(value, std::string{field_name});
+    if (!std::equal(bytes.begin(), bytes.end(), expected.begin(), expected.end())) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           strprintf("%s does not match view_grant.view_grant_hex", field_name));
+    }
+}
+
+[[nodiscard]] CViewGrant DecodeBridgeViewGrantOrThrow(const UniValue& value)
+{
+    if (value.isStr()) {
+        return DecodeBridgeViewGrantHexOrThrow(value, "view_grant");
+    }
+    if (!value.isObject()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "view_grant must be an object or hex string");
+    }
+
+    const UniValue& grant_hex = FindValue(value, "view_grant_hex");
+    if (!grant_hex.isNull()) {
+        CViewGrant grant = DecodeBridgeViewGrantHexOrThrow(grant_hex, "view_grant.view_grant_hex");
+        CheckBridgeViewGrantComponentMatches(
+            FindValue(value, "kem_ciphertext"),
+            "view_grant.kem_ciphertext",
+            Span<const unsigned char>{grant.kem_ct.data(), grant.kem_ct.size()});
+        CheckBridgeViewGrantComponentMatches(
+            FindValue(value, "nonce"),
+            "view_grant.nonce",
+            Span<const unsigned char>{grant.nonce.data(), grant.nonce.size()});
+        CheckBridgeViewGrantComponentMatches(
+            FindValue(value, "encrypted_data"),
+            "view_grant.encrypted_data",
+            Span<const unsigned char>{grant.encrypted_data.data(), grant.encrypted_data.size()});
+        return grant;
+    }
+
+    CViewGrant grant;
+    const auto kem_ct = ParseHexV(FindValue(value, "kem_ciphertext"), "view_grant.kem_ciphertext");
+    if (kem_ct.size() != grant.kem_ct.size()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "view_grant.kem_ciphertext must be an ML-KEM ciphertext");
+    }
+    std::copy(kem_ct.begin(), kem_ct.end(), grant.kem_ct.begin());
+
+    const auto nonce = ParseHexV(FindValue(value, "nonce"), "view_grant.nonce");
+    if (nonce.size() != grant.nonce.size()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "view_grant.nonce must be 12 bytes");
+    }
+    std::copy(nonce.begin(), nonce.end(), grant.nonce.begin());
+
+    grant.encrypted_data = ParseHexV(FindValue(value, "encrypted_data"), "view_grant.encrypted_data");
+    if (!IsBridgeViewGrantStructurallyValid(grant)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "view_grant.encrypted_data has invalid size");
+    }
+    return grant;
+}
+
 [[nodiscard]] std::string EncodePSBTBase64(const PartiallySignedTransaction& psbt)
 {
     DataStream ss{};
@@ -2221,6 +2485,7 @@ void SetShieldedFeeEstimateMode(const CWallet& wallet,
     out.pushKV("funding_amount", ValueFromAmount(operation.funding_amount));
     out.pushKV("refund_lock_height", static_cast<int64_t>(operation.plan.refund_lock_height));
     out.pushKV("imported", operation.imported);
+    out.pushKV("accepted_plan_view_grants", operation.accepted_plan_view_grants);
     out.pushKV("bridge_root", operation.plan.script_tree.merkle_root.GetHex());
     out.pushKV("ctv_hash", operation.plan.ctv_hash.GetHex());
     if (!operation.refund_destination.empty()) {
@@ -2307,16 +2572,23 @@ void SetShieldedFeeEstimateMode(const CWallet& wallet,
     out.pushKV("script_tree", BridgeScriptTreeToUniValue(plan.script_tree));
 
     if (plan.kind == shielded::BridgeTemplateKind::SHIELD) {
-        out.pushKV("bundle", BridgeBundleToUniValue(plan.shielded_bundle, grant_requests));
-        if (!grant_requests.empty()) {
+        const Span<const BridgeViewGrantRequest> effective_grant_requests = grant_requests.empty()
+            ? Span<const BridgeViewGrantRequest>{plan.view_grant_metadata.data(), plan.view_grant_metadata.size()}
+            : grant_requests;
+        out.pushKV("bundle", BridgeBundleToUniValue(plan.shielded_bundle, effective_grant_requests));
+        out.pushKV("allow_legacy_audit_view_grants", plan.allow_legacy_audit_view_grants);
+        if (!effective_grant_requests.empty()) {
             UniValue grants(UniValue::VARR);
-            for (const auto& grant : grant_requests) {
+            for (const auto& grant : effective_grant_requests) {
                 grants.push_back(BridgeViewGrantRequestToUniValue(grant));
             }
             out.pushKV("operator_view_grants", std::move(grants));
         }
-        if (disclosure_policy != nullptr) {
-            out.pushKV("disclosure_policy", BridgeDisclosurePolicyToUniValue(*disclosure_policy));
+        const BridgeDisclosurePolicy* effective_disclosure_policy = disclosure_policy != nullptr
+            ? disclosure_policy
+            : (plan.disclosure_policy.has_value() ? &*plan.disclosure_policy : nullptr);
+        if (effective_disclosure_policy != nullptr) {
+            out.pushKV("disclosure_policy", BridgeDisclosurePolicyToUniValue(*effective_disclosure_policy));
         }
     } else {
         out.pushKV("outputs", BridgeOutputsToUniValue(plan.transparent_outputs));
@@ -5713,6 +5985,279 @@ constexpr std::array<BridgeProverTemplate, 8> BRIDGE_PROVER_TEMPLATES{{
         strprintf("%s must be legacy_audit or structured_disclosure", field_name));
 }
 
+[[nodiscard]] std::optional<BridgeViewGrantFormat> GetBridgeViewGrantFormatHintOrThrow(const UniValue& value)
+{
+    if (!value.isObject()) return std::nullopt;
+    const UniValue& format_value = FindValue(value, "format");
+    if (format_value.isNull()) return std::nullopt;
+    return ParseBridgeViewGrantFormatOrThrow(format_value, "view_grant.format");
+}
+
+[[nodiscard]] uint8_t ParseBridgeDisclosureFlagsOrThrow(const UniValue& value, std::string_view field_name);
+
+struct BridgeViewGrantMetadataHint
+{
+    std::optional<BridgeViewGrantFormat> format;
+    std::optional<mlkem::PublicKey> recipient_pubkey;
+    std::optional<uint8_t> disclosure_flags;
+
+    [[nodiscard]] bool HasAny() const
+    {
+        return format.has_value() || recipient_pubkey.has_value() || disclosure_flags.has_value();
+    }
+};
+
+[[nodiscard]] std::optional<BridgeViewGrantMetadataHint> GetBridgeViewGrantMetadataHintOrThrow(const UniValue& value)
+{
+    if (!value.isObject()) return std::nullopt;
+
+    BridgeViewGrantMetadataHint hint;
+    hint.format = GetBridgeViewGrantFormatHintOrThrow(value);
+
+    const UniValue& recipient_pubkey_value = FindValue(value, "recipient_pubkey");
+    if (!recipient_pubkey_value.isNull()) {
+        hint.recipient_pubkey = ParseBridgeViewGrantPubkeyOrThrow(
+            recipient_pubkey_value,
+            "view_grant.recipient_pubkey");
+    }
+
+    const UniValue& disclosure_fields_value = FindValue(value, "disclosure_fields");
+    if (!disclosure_fields_value.isNull()) {
+        if (hint.format.has_value() && *hint.format != BridgeViewGrantFormat::STRUCTURED_DISCLOSURE) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "view_grant.disclosure_fields is only valid for structured_disclosure");
+        }
+        hint.disclosure_flags = ParseBridgeDisclosureFlagsOrThrow(
+            disclosure_fields_value,
+            "view_grant.disclosure_fields");
+    }
+
+    if (!hint.HasAny()) return std::nullopt;
+    return hint;
+}
+
+[[nodiscard]] std::optional<std::vector<uint8_t>> BuildBridgeViewGrantMetadataAadOrThrow(
+    const std::optional<BridgeViewGrantMetadataHint>& hint)
+{
+    if (!hint.has_value()) return std::nullopt;
+    if (!hint->format.has_value() || !hint->recipient_pubkey.has_value()) return std::nullopt;
+
+    BridgeViewGrantRequest request;
+    request.format = *hint->format;
+    request.recipient_pubkey = *hint->recipient_pubkey;
+    if (request.format == BridgeViewGrantFormat::STRUCTURED_DISCLOSURE) {
+        if (!hint->disclosure_flags.has_value()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "view_grant.disclosure_fields is required to authenticate structured_disclosure metadata");
+        }
+        request.disclosure_flags = *hint->disclosure_flags;
+    } else {
+        request.disclosure_flags = 0;
+    }
+
+    const std::vector<uint8_t> aad = SerializeBridgeViewGrantMetadataAad(request);
+    if (aad.empty()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "view_grant metadata is invalid");
+    }
+    return aad;
+}
+
+struct BridgeViewGrantPlaintextExpectation
+{
+    std::optional<CAmount> amount;
+    std::optional<uint256> recipient_pk_hash;
+    std::optional<std::vector<unsigned char>> memo;
+    std::optional<uint256> bridge_id;
+    std::optional<uint256> operation_id;
+
+    [[nodiscard]] bool HasAny() const
+    {
+        return amount.has_value() ||
+               recipient_pk_hash.has_value() ||
+               memo.has_value() ||
+               bridge_id.has_value() ||
+               operation_id.has_value();
+    }
+};
+
+[[nodiscard]] std::optional<BridgeViewGrantPlaintextExpectation>
+ParseBridgeViewGrantPlaintextExpectationOrThrow(const UniValue& value)
+{
+    if (value.isNull()) return std::nullopt;
+    if (!value.isObject()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "expected must be an object");
+    }
+
+    BridgeViewGrantPlaintextExpectation expected;
+    const UniValue& amount_value = FindValue(value, "amount");
+    if (!amount_value.isNull()) {
+        expected.amount = AmountFromValue(amount_value);
+    }
+
+    const UniValue& recipient_value = FindValue(value, "recipient_pk_hash");
+    if (!recipient_value.isNull()) {
+        expected.recipient_pk_hash = ParseHashV(recipient_value, "expected.recipient_pk_hash");
+    }
+
+    const UniValue& memo_value = FindValue(value, "memo");
+    const UniValue& memo_hex_value = FindValue(value, "memo_hex");
+    if (!memo_value.isNull() && !memo_hex_value.isNull()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "expected must not specify both memo and memo_hex");
+    }
+    if (!memo_value.isNull()) {
+        if (!memo_value.isStr()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "expected.memo must be a string");
+        }
+        const std::string memo = memo_value.get_str();
+        expected.memo = std::vector<unsigned char>(memo.begin(), memo.end());
+    } else if (!memo_hex_value.isNull()) {
+        expected.memo = ParseHexV(memo_hex_value, "expected.memo_hex");
+    }
+
+    const UniValue& sender_value = FindValue(value, "sender");
+    if (!sender_value.isNull()) {
+        if (!sender_value.isObject()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "expected.sender must be an object");
+        }
+        const UniValue& bridge_id_value = FindValue(sender_value, "bridge_id");
+        if (!bridge_id_value.isNull()) {
+            expected.bridge_id = ParseHashV(bridge_id_value, "expected.sender.bridge_id");
+        }
+        const UniValue& operation_id_value = FindValue(sender_value, "operation_id");
+        if (!operation_id_value.isNull()) {
+            expected.operation_id = ParseHashV(operation_id_value, "expected.sender.operation_id");
+        }
+    }
+
+    const UniValue& bridge_id_value = FindValue(value, "bridge_id");
+    if (!bridge_id_value.isNull()) {
+        if (expected.bridge_id.has_value()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "expected must not specify bridge_id both top-level and inside sender");
+        }
+        expected.bridge_id = ParseHashV(bridge_id_value, "expected.bridge_id");
+    }
+    const UniValue& operation_id_value = FindValue(value, "operation_id");
+    if (!operation_id_value.isNull()) {
+        if (expected.operation_id.has_value()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "expected must not specify operation_id both top-level and inside sender");
+        }
+        expected.operation_id = ParseHashV(operation_id_value, "expected.operation_id");
+    }
+
+    if (!expected.HasAny()) return std::nullopt;
+    return expected;
+}
+
+void VerifyBridgeViewGrantMetadataHintOrThrow(const BridgeViewGrantMetadataHint& hint,
+                                              const ShieldedViewGrantDecryption& decrypted,
+                                              BridgeViewGrantFormat decoded_format,
+                                              const shielded::viewgrants::StructuredDisclosurePayload* structured)
+{
+    if (hint.format.has_value() && *hint.format != decoded_format) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "view_grant.format does not match decrypted payload");
+    }
+
+    if (hint.recipient_pubkey.has_value()) {
+        if (!decrypted.address.HasKEMPublicKey() ||
+            !std::equal(hint.recipient_pubkey->begin(),
+                        hint.recipient_pubkey->end(),
+                        decrypted.address.kem_pk.begin())) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "view_grant.recipient_pubkey does not match the local key that decrypted the grant");
+        }
+    }
+
+    if (hint.disclosure_flags.has_value()) {
+        if (decoded_format != BridgeViewGrantFormat::STRUCTURED_DISCLOSURE || structured == nullptr) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "view_grant.disclosure_fields do not match decrypted payload");
+        }
+        if (structured->disclosure_flags != *hint.disclosure_flags) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "view_grant.disclosure_fields do not match decrypted payload");
+        }
+    }
+}
+
+void VerifyStructuredBridgeViewGrantPlaintextOrThrow(
+    const shielded::viewgrants::StructuredDisclosurePayload& payload,
+    const BridgeViewGrantPlaintextExpectation& expected)
+{
+    if (expected.amount.has_value()) {
+        if (!shielded::viewgrants::HasDisclosureField(payload.disclosure_flags,
+                                                      shielded::viewgrants::DISCLOSE_AMOUNT)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "Decrypted view grant payload does not disclose expected amount");
+        }
+        if (payload.amount != *expected.amount) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "Decrypted view grant payload amount does not match expected amount");
+        }
+    }
+
+    if (expected.recipient_pk_hash.has_value()) {
+        if (!shielded::viewgrants::HasDisclosureField(payload.disclosure_flags,
+                                                      shielded::viewgrants::DISCLOSE_RECIPIENT)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "Decrypted view grant payload does not disclose expected recipient_pk_hash");
+        }
+        if (payload.recipient_pk_hash != *expected.recipient_pk_hash) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "Decrypted view grant payload recipient_pk_hash does not match expected recipient_pk_hash");
+        }
+    }
+
+    if (expected.memo.has_value()) {
+        if (!shielded::viewgrants::HasDisclosureField(payload.disclosure_flags,
+                                                      shielded::viewgrants::DISCLOSE_MEMO)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "Decrypted view grant payload does not disclose expected memo");
+        }
+        if (payload.memo != *expected.memo) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "Decrypted view grant payload memo does not match expected memo");
+        }
+    }
+
+    if (expected.bridge_id.has_value() || expected.operation_id.has_value()) {
+        if (!shielded::viewgrants::HasDisclosureField(payload.disclosure_flags,
+                                                      shielded::viewgrants::DISCLOSE_SENDER)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "Decrypted view grant payload does not disclose expected sender");
+        }
+        if (expected.bridge_id.has_value() && payload.sender.bridge_id != *expected.bridge_id) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "Decrypted view grant payload bridge_id does not match expected bridge_id");
+        }
+        if (expected.operation_id.has_value() && payload.sender.operation_id != *expected.operation_id) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               "Decrypted view grant payload operation_id does not match expected operation_id");
+        }
+    }
+}
+
+void VerifyLegacyBridgeViewGrantPlaintextOrThrow(const BridgeAuditPayloadV1& payload,
+                                                 const BridgeViewGrantPlaintextExpectation& expected)
+{
+    if (expected.amount.has_value() && payload.value != *expected.amount) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "Decrypted view grant payload amount does not match expected amount");
+    }
+    if (expected.recipient_pk_hash.has_value() && payload.recipient_pk_hash != *expected.recipient_pk_hash) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "Decrypted view grant payload recipient_pk_hash does not match expected recipient_pk_hash");
+    }
+    if (expected.memo.has_value()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "legacy_audit view grant payload cannot verify expected memo");
+    }
+    if (expected.bridge_id.has_value() || expected.operation_id.has_value()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "legacy_audit view grant payload cannot verify expected sender");
+    }
+}
+
 [[nodiscard]] uint8_t ParseBridgeDisclosureFlagsOrThrow(const UniValue& value, std::string_view field_name)
 {
     if (!value.isArray()) {
@@ -5745,7 +6290,8 @@ constexpr std::array<BridgeProverTemplate, 8> BRIDGE_PROVER_TEMPLATES{{
 }
 
 [[nodiscard]] BridgeViewGrantRequest ParseBridgeViewGrantRequestOrThrow(const UniValue& value,
-                                                                        std::string_view field_name)
+                                                                        std::string_view field_name,
+                                                                        bool postfork)
 {
     if (!value.isObject()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be an object", field_name));
@@ -5767,19 +6313,25 @@ constexpr std::array<BridgeProverTemplate, 8> BRIDGE_PROVER_TEMPLATES{{
     }
     const UniValue& fields_value = disclosure_fields_value.isNull() ? legacy_fields_value : disclosure_fields_value;
     request.format = format_value.isNull()
-        ? (fields_value.isNull() ? BridgeViewGrantFormat::LEGACY_AUDIT
+        ? (fields_value.isNull() ? (postfork ? BridgeViewGrantFormat::STRUCTURED_DISCLOSURE
+                                             : BridgeViewGrantFormat::LEGACY_AUDIT)
                                  : BridgeViewGrantFormat::STRUCTURED_DISCLOSURE)
         : ParseBridgeViewGrantFormatOrThrow(format_value, strprintf("%s.format", field_name));
 
     if (request.format == BridgeViewGrantFormat::STRUCTURED_DISCLOSURE) {
         if (fields_value.isNull()) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER,
-                               strprintf("%s.disclosure_fields is required for structured_disclosure", field_name));
+            if (format_value.isNull() && postfork) {
+                request.disclosure_flags = DEFAULT_STRUCTURED_VIEW_GRANT_FLAGS;
+            } else {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   strprintf("%s.disclosure_fields is required for structured_disclosure", field_name));
+            }
+        } else {
+            const std::string fields_name = disclosure_fields_value.isNull()
+                ? strprintf("%s.fields", field_name)
+                : strprintf("%s.disclosure_fields", field_name);
+            request.disclosure_flags = ParseBridgeDisclosureFlagsOrThrow(fields_value, fields_name);
         }
-        const std::string fields_name = disclosure_fields_value.isNull()
-            ? strprintf("%s.fields", field_name)
-            : strprintf("%s.disclosure_fields", field_name);
-        request.disclosure_flags = ParseBridgeDisclosureFlagsOrThrow(fields_value, fields_name);
     } else if (!fields_value.isNull()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER,
                            strprintf("%s.disclosure_fields is only valid for structured_disclosure", field_name));
@@ -5795,13 +6347,14 @@ constexpr std::array<BridgeProverTemplate, 8> BRIDGE_PROVER_TEMPLATES{{
                                                                                int32_t build_height)
 {
     std::vector<BridgeViewGrantRequest> result;
+    const bool postfork = wallet::UseShieldedPrivacyRedesignAtHeight(build_height);
+    const bool allow_legacy_audit_view_grants = ParseAllowLegacyAuditViewGrantsOrThrow(options);
 
     const UniValue& legacy_value = FindValue(options, "operator_view_pubkeys");
     if (!legacy_value.isNull()) {
         if (!legacy_value.isArray()) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "operator_view_pubkeys must be an array");
         }
-        const bool postfork = wallet::UseShieldedPrivacyRedesignAtHeight(build_height);
         for (size_t i = 0; i < legacy_value.size(); ++i) {
             BridgeViewGrantRequest request;
             request.format = postfork
@@ -5810,10 +6363,7 @@ constexpr std::array<BridgeProverTemplate, 8> BRIDGE_PROVER_TEMPLATES{{
             request.recipient_pubkey = ParseBridgeViewGrantPubkeyOrThrow(
                 legacy_value[i], strprintf("operator_view_pubkeys[%u]", i));
             if (request.format == BridgeViewGrantFormat::STRUCTURED_DISCLOSURE) {
-                request.disclosure_flags = static_cast<uint8_t>(
-                    shielded::viewgrants::DISCLOSE_AMOUNT |
-                    shielded::viewgrants::DISCLOSE_RECIPIENT |
-                    shielded::viewgrants::DISCLOSE_SENDER);
+                request.disclosure_flags = DEFAULT_STRUCTURED_VIEW_GRANT_FLAGS;
             }
             result.push_back(std::move(request));
         }
@@ -5825,8 +6375,16 @@ constexpr std::array<BridgeProverTemplate, 8> BRIDGE_PROVER_TEMPLATES{{
             throw JSONRPCError(RPC_INVALID_PARAMETER, "operator_view_grants must be an array");
         }
         for (size_t i = 0; i < grants_value.size(); ++i) {
-            result.push_back(ParseBridgeViewGrantRequestOrThrow(
-                grants_value[i], strprintf("operator_view_grants[%u]", i)));
+            BridgeViewGrantRequest request = ParseBridgeViewGrantRequestOrThrow(
+                grants_value[i], strprintf("operator_view_grants[%u]", i), postfork);
+            if (postfork &&
+                request.format == BridgeViewGrantFormat::LEGACY_AUDIT &&
+                !allow_legacy_audit_view_grants) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    strprintf("operator_view_grants[%u].format legacy_audit requires allow_legacy_audit_view_grants=true after shielded privacy redesign", i));
+            }
+            result.push_back(std::move(request));
         }
     }
 
@@ -5838,7 +6396,8 @@ constexpr std::array<BridgeProverTemplate, 8> BRIDGE_PROVER_TEMPLATES{{
     return result;
 }
 
-[[nodiscard]] std::optional<BridgeDisclosurePolicy> ParseBridgeDisclosurePolicyOrThrow(const UniValue& options)
+[[nodiscard]] std::optional<BridgeDisclosurePolicy> ParseBridgeDisclosurePolicyOrThrow(const UniValue& options,
+                                                                                       int32_t build_height)
 {
     const UniValue& value = FindValue(options, "disclosure_policy");
     if (value.isNull()) return std::nullopt;
@@ -5847,6 +6406,8 @@ constexpr std::array<BridgeProverTemplate, 8> BRIDGE_PROVER_TEMPLATES{{
     }
 
     BridgeDisclosurePolicy policy;
+    const bool postfork = wallet::UseShieldedPrivacyRedesignAtHeight(build_height);
+    const bool allow_legacy_audit_view_grants = ParseAllowLegacyAuditViewGrantsOrThrow(options);
     const UniValue& version_value = FindValue(value, "version");
     if (!version_value.isNull()) {
         const int version = version_value.getInt<int>();
@@ -5870,8 +6431,16 @@ constexpr std::array<BridgeProverTemplate, 8> BRIDGE_PROVER_TEMPLATES{{
         throw JSONRPCError(RPC_INVALID_PARAMETER, "disclosure_policy.required_grants must be an array");
     }
     for (size_t i = 0; i < grants_value.size(); ++i) {
-        policy.required_grants.push_back(ParseBridgeViewGrantRequestOrThrow(
-            grants_value[i], strprintf("disclosure_policy.required_grants[%u]", i)));
+        BridgeViewGrantRequest request = ParseBridgeViewGrantRequestOrThrow(
+            grants_value[i], strprintf("disclosure_policy.required_grants[%u]", i), postfork);
+        if (postfork &&
+            request.format == BridgeViewGrantFormat::LEGACY_AUDIT &&
+            !allow_legacy_audit_view_grants) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                strprintf("disclosure_policy.required_grants[%u].format legacy_audit requires allow_legacy_audit_view_grants=true after shielded privacy redesign", i));
+        }
+        policy.required_grants.push_back(std::move(request));
     }
 
     if (!policy.IsValid()) {
@@ -6178,18 +6747,20 @@ struct BridgeArchivePruneConfig
                                                                 const COutPoint& funding_outpoint,
                                                                 const CAmount funding_amount,
                                                                 const BridgePendingRpcConfig& config,
-                                                                const bool imported)
+                                                                const bool imported,
+                                                                const bool accepted_plan_view_grants = false)
 {
     BridgePendingOperation operation;
     if (const auto existing = pwallet->GetPendingBridgeOperation(funding_outpoint)) {
         operation = *existing;
     }
 
-    operation.version = 1;
+    operation.version = BridgePendingOperation::CURRENT_VERSION;
     operation.plan = plan;
     operation.funding_outpoint = funding_outpoint;
     operation.funding_amount = funding_amount;
     operation.imported = imported || operation.imported;
+    operation.accepted_plan_view_grants = operation.accepted_plan_view_grants || accepted_plan_view_grants;
     if (!config.refund_destination.empty()) {
         operation.refund_destination = config.refund_destination;
     }
@@ -10226,7 +10797,7 @@ RPCHelpMan bridge_planin()
 {
     return RPCHelpMan{
         "bridge_planin",
-        "\nBuild a deterministic bridge-in plan for funding a P2MR bridge output and settling it into the shielded pool.\n",
+        "\nBuild a bridge-in plan for funding a P2MR bridge output and settling it into the shielded pool. Plans without operator view grants are deterministic; grant-enabled plans use fresh grant-encryption randomness.\n",
         {
             {"operator_key", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Operator PQ pubkey hex (ML-DSA-44 or SLH-DSA-128s)"},
             {"refund_key", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Refund PQ pubkey hex (ML-DSA-44 or SLH-DSA-128s)"},
@@ -10245,7 +10816,7 @@ RPCHelpMan bridge_planin()
                         {
                             {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "ML-KEM public key"},
                         }},
-                    {"operator_view_grants", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Optional structured or legacy view grants to include in the bridge settlement",
+                    {"operator_view_grants", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Optional structured or legacy view grants to include in the bridge settlement; post-fork omitted formats default to structured minimal disclosure",
                         {
                             {"grant", RPCArg::Type::OBJ, RPCArg::Optional::NO, "One grant request",
                                 {
@@ -10257,6 +10828,7 @@ RPCHelpMan bridge_planin()
                                         }},
                                 }},
                         }},
+                    {"allow_legacy_audit_view_grants", RPCArg::Type::BOOL, RPCArg::Default{false}, "Permit legacy_audit grants after the shielded privacy redesign; legacy audit payloads disclose note-opening material"},
                     {"disclosure_policy", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional bridge-side policy that auto-adds required grants when amount crosses a threshold",
                         {
                             {"version", RPCArg::Type::NUM, RPCArg::Default{1}, "Policy version"},
@@ -10310,8 +10882,9 @@ RPCHelpMan bridge_planin()
             if (plan_request.batch_commitment.has_value() && !plan_request.memo.empty()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "batch_commitment_hex cannot be combined with memo or memo_hex");
             }
+            plan_request.allow_legacy_audit_view_grants = ParseAllowLegacyAuditViewGrantsOrThrow(options);
             plan_request.operator_view_grants = ParseBridgeViewGrantsOrThrow(options, plan_request.build_height);
-            plan_request.disclosure_policy = ParseBridgeDisclosurePolicyOrThrow(options);
+            plan_request.disclosure_policy = ParseBridgeDisclosurePolicyOrThrow(options, plan_request.build_height);
             if (auto error = ValidateAndApplyBridgeDisclosurePolicy(plan_request); error.has_value()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, *error);
             }
@@ -10342,7 +10915,7 @@ RPCHelpMan bridge_planbatchin()
 {
     return RPCHelpMan{
         "bridge_planbatchin",
-        "\nBuild a deterministic bridge-in plan that aggregates many off-chain credits into one shielded settlement note.\n",
+        "\nBuild a bridge-in plan that aggregates many off-chain credits into one shielded settlement note. Plans without operator view grants are deterministic; grant-enabled plans use fresh grant-encryption randomness.\n",
         {
             {"operator_key", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Operator PQ pubkey hex (ML-DSA-44 or SLH-DSA-128s)"},
             {"refund_key", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Refund PQ pubkey hex (ML-DSA-44 or SLH-DSA-128s)"},
@@ -10376,7 +10949,7 @@ RPCHelpMan bridge_planbatchin()
                         {
                             {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "ML-KEM public key"},
                         }},
-                    {"operator_view_grants", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Optional structured or legacy view grants to include in the bridge settlement",
+                    {"operator_view_grants", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Optional structured or legacy view grants to include in the bridge settlement; post-fork omitted formats default to structured minimal disclosure",
                         {
                             {"grant", RPCArg::Type::OBJ, RPCArg::Optional::NO, "One grant request",
                                 {
@@ -10388,6 +10961,7 @@ RPCHelpMan bridge_planbatchin()
                                         }},
                                 }},
                         }},
+                    {"allow_legacy_audit_view_grants", RPCArg::Type::BOOL, RPCArg::Default{false}, "Permit legacy_audit grants after the shielded privacy redesign; legacy audit payloads disclose note-opening material"},
                     {"disclosure_policy", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional bridge-side policy that auto-adds required grants when amount crosses a threshold",
                         {
                             {"version", RPCArg::Type::NUM, RPCArg::Default{1}, "Policy version"},
@@ -10444,8 +11018,9 @@ RPCHelpMan bridge_planbatchin()
             plan_request.recipient = ResolveBridgeRecipientOrThrow(pwallet, options, generated_recipient);
             plan_request.shielded_anchor = ResolveBridgeAnchorOrThrow(pwallet, options);
             plan_request.batch_commitment = commitment;
+            plan_request.allow_legacy_audit_view_grants = ParseAllowLegacyAuditViewGrantsOrThrow(options);
             plan_request.operator_view_grants = ParseBridgeViewGrantsOrThrow(options, plan_request.build_height);
-            plan_request.disclosure_policy = ParseBridgeDisclosurePolicyOrThrow(options);
+            plan_request.disclosure_policy = ParseBridgeDisclosurePolicyOrThrow(options, plan_request.build_height);
             if (auto error = ValidateAndApplyBridgeDisclosurePolicy(plan_request); error.has_value()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, *error);
             }
@@ -10483,6 +11058,183 @@ RPCHelpMan bridge_planbatchin()
                 }
                 out.pushKV("authorizations", std::move(authorization_array));
             }
+            return out;
+        }};
+}
+
+RPCHelpMan bridge_decryptviewgrant()
+{
+    return RPCHelpMan{
+        "bridge_decryptviewgrant",
+        "\nDecrypt a bridge view grant with a local shielded viewing key and decode its payload.\n",
+        {
+            {"view_grant", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Full view grant object as returned by bridge_planin/bridge_planbatchin. Decoded transaction JSON supplies ciphertext fields only; metadata-bound grants also require format, recipient_pubkey, and disclosure_fields from the saved plan. A hex-encoded serialized grant is accepted for legacy or unbound grants",
+                {
+                    {"view_grant_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Serialized CViewGrant hex"},
+                    {"kem_ciphertext", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "ML-KEM ciphertext"},
+                    {"nonce", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "12-byte AEAD nonce"},
+                    {"encrypted_data", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "AEAD ciphertext plus tag"},
+                    {"format", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Grant metadata format: structured_disclosure or legacy_audit"},
+                    {"recipient_pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Operator ML-KEM public key from the planned grant metadata"},
+                    {"disclosure_fields", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Structured disclosure fields from the planned grant metadata",
+                        {
+                            {"field", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "One of amount, recipient, memo, sender"},
+                        }},
+                },
+                RPCArgOptions{
+                    .skip_type_check = true,
+                    .type_str = {"", "object or hex string"},
+                }},
+            {"format", RPCArg::Type::STR, RPCArg::Default{"auto"}, "Payload format: auto, structured_disclosure, or legacy_audit"},
+            {"expected", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional plaintext expectations to verify after local decryption",
+                {
+                    {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Expected disclosed amount"},
+                    {"recipient_pk_hash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Expected disclosed shielded recipient pk hash"},
+                    {"memo", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Expected disclosed UTF-8 memo"},
+                    {"memo_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Expected disclosed raw memo bytes"},
+                    {"bridge_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Expected disclosed sender bridge id"},
+                    {"operation_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Expected disclosed sender operation id"},
+                    {"sender", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Expected disclosed sender context; equivalent to top-level bridge_id/operation_id",
+                        {
+                            {"bridge_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Expected disclosed sender bridge id"},
+                            {"operation_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Expected disclosed sender operation id"},
+                        }},
+                }},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "Decrypted bridge view grant",
+            {
+                {RPCResult::Type::BOOL, "decrypted", "True when a local key decrypted the grant"},
+                {RPCResult::Type::STR, "address", "Local shielded address whose viewing key opened the grant"},
+                {RPCResult::Type::STR, "format", "Decoded payload format"},
+                {RPCResult::Type::BOOL, "metadata_authenticated", "True when public view_grant metadata authenticated as AEAD AAD"},
+                {RPCResult::Type::BOOL, "metadata_verified", "True when public view_grant metadata was present and matched the decrypted plaintext/key"},
+                {RPCResult::Type::BOOL, "expected_verified", "True when explicit expected plaintext fields were provided and matched"},
+                {RPCResult::Type::OBJ, "payload", "Decoded payload fields",
+                    {
+                        {RPCResult::Type::ELISION, "", ""},
+                    }},
+                {RPCResult::Type::STR_HEX, "payload_hex", "Raw decrypted payload bytes"},
+                {RPCResult::Type::OBJ, "view_grant", "Canonical grant object",
+                    {
+                        {RPCResult::Type::ELISION, "", ""},
+                    }},
+            }},
+        RPCExamples{
+            HelpExampleCli("bridge_decryptviewgrant",
+                           "'{\"view_grant_hex\":\"<hex>\",\"kem_ciphertext\":\"<hex>\",\"nonce\":\"<hex>\",\"encrypted_data\":\"<hex>\",\"format\":\"structured_disclosure\",\"recipient_pubkey\":\"<operator-kem-pubkey>\",\"disclosure_fields\":[\"amount\",\"recipient\",\"sender\"]}' structured_disclosure")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            auto pwallet = EnsureWalletForShielded(request);
+            pwallet->BlockUntilSyncedToCurrentChain();
+            EnsureWalletIsUnlocked(*pwallet);
+
+            const CViewGrant grant = DecodeBridgeViewGrantOrThrow(request.params[0]);
+            const std::optional<BridgeViewGrantMetadataHint> metadata_hint =
+                GetBridgeViewGrantMetadataHintOrThrow(request.params[0]);
+            const std::optional<std::vector<uint8_t>> metadata_aad =
+                BuildBridgeViewGrantMetadataAadOrThrow(metadata_hint);
+            const std::optional<BridgeViewGrantPlaintextExpectation> expected =
+                ParseBridgeViewGrantPlaintextExpectationOrThrow(request.params[2]);
+            std::optional<BridgeViewGrantFormat> requested_format;
+            if (!request.params[1].isNull()) {
+                const std::string format = request.params[1].get_str();
+                if (format != "auto") {
+                    requested_format = ParseBridgeViewGrantFormatOrThrow(request.params[1], "format");
+                }
+            }
+            if (!requested_format.has_value() && metadata_hint.has_value()) {
+                requested_format = metadata_hint->format;
+            }
+
+            std::optional<ShieldedViewGrantDecryption> decrypted;
+            {
+                LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                pwallet->m_shielded_wallet->MaybeRehydrateSpendingKeys();
+                if (metadata_aad.has_value()) {
+                    decrypted = pwallet->m_shielded_wallet->TryDecryptViewGrant(
+                        grant,
+                        Span<const uint8_t>{metadata_aad->data(), metadata_aad->size()});
+                } else {
+                    decrypted = pwallet->m_shielded_wallet->TryDecryptViewGrant(grant);
+                }
+            }
+            if (!decrypted.has_value()) {
+                throw JSONRPCError(
+                    RPC_WALLET_ERROR,
+                    metadata_aad.has_value()
+                        ? "No local shielded viewing key could decrypt view grant with the supplied metadata"
+                        : "No local shielded viewing key could decrypt view grant; metadata-bound grants require view_grant metadata");
+            }
+
+            const Span<const uint8_t> plaintext{
+                decrypted->plaintext.data(),
+                decrypted->plaintext.size()};
+            UniValue out(UniValue::VOBJ);
+            out.pushKV("decrypted", true);
+            out.pushKV("address", decrypted->address.Encode());
+            out.pushKV("metadata_authenticated", decrypted->metadata_authenticated);
+            out.pushKV("payload_hex", HexStr(plaintext));
+            out.pushKV("view_grant", BridgeViewGrantToUniValue(grant));
+            out.pushKV("metadata_verified", metadata_hint.has_value());
+            out.pushKV("expected_verified", expected.has_value());
+
+            if (!requested_format.has_value() ||
+                *requested_format == BridgeViewGrantFormat::STRUCTURED_DISCLOSURE) {
+                const auto structured = shielded::viewgrants::DecodeStructuredDisclosurePayload(plaintext);
+                if (structured.has_value()) {
+                    if (metadata_hint.has_value()) {
+                        VerifyBridgeViewGrantMetadataHintOrThrow(
+                            *metadata_hint,
+                            *decrypted,
+                            BridgeViewGrantFormat::STRUCTURED_DISCLOSURE,
+                            &*structured);
+                    }
+                    if (expected.has_value()) {
+                        VerifyStructuredBridgeViewGrantPlaintextOrThrow(*structured, *expected);
+                    }
+                    out.pushKV("format", BridgeViewGrantFormatToString(BridgeViewGrantFormat::STRUCTURED_DISCLOSURE));
+                    out.pushKV("payload", BridgeStructuredDisclosurePayloadToUniValue(*structured));
+                    return out;
+                }
+                if (requested_format == BridgeViewGrantFormat::STRUCTURED_DISCLOSURE) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                       "Decrypted view grant payload is not structured_disclosure");
+                }
+            }
+
+            if (!requested_format.has_value() ||
+                *requested_format == BridgeViewGrantFormat::LEGACY_AUDIT) {
+                const auto legacy = DecodeBridgeAuditPayloadV1(plaintext);
+                if (legacy.has_value()) {
+                    if (metadata_hint.has_value()) {
+                        VerifyBridgeViewGrantMetadataHintOrThrow(
+                            *metadata_hint,
+                            *decrypted,
+                            BridgeViewGrantFormat::LEGACY_AUDIT,
+                            nullptr);
+                    }
+                    if (expected.has_value()) {
+                        VerifyLegacyBridgeViewGrantPlaintextOrThrow(*legacy, *expected);
+                    }
+                    out.pushKV("format", BridgeViewGrantFormatToString(BridgeViewGrantFormat::LEGACY_AUDIT));
+                    out.pushKV("payload", BridgeAuditPayloadV1ToUniValue(*legacy));
+                    return out;
+                }
+                if (requested_format == BridgeViewGrantFormat::LEGACY_AUDIT) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                       "Decrypted view grant payload is not legacy_audit");
+                }
+            }
+
+            if (metadata_hint.has_value() || expected.has_value()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "Decrypted view grant payload could not be verified against expected metadata");
+            }
+
+            out.pushKV("format", "raw");
+            UniValue payload(UniValue::VOBJ);
+            payload.pushKV("bytes", static_cast<int64_t>(decrypted->plaintext.size()));
+            out.pushKV("payload", std::move(payload));
             return out;
         }};
 }
@@ -14032,10 +14784,12 @@ RPCHelpMan bridge_buildshieldtx()
             {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding txid"},
             {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Funding output index"},
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Funding output amount"},
-            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional fee-headroom policy",
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional fee-headroom and view-grant policy",
                 {
                     {"min_fee_headroom_multiplier", RPCArg::Type::NUM, RPCArg::Default{2.0}, "Require or report at least this multiple of the current local mempool floor"},
                     {"enforce_fee_headroom", RPCArg::Type::BOOL, RPCArg::Default{false}, "Reject the PSBT if it does not meet min_fee_headroom_multiplier"},
+                    {"accept_plan_view_grants", RPCArg::Type::BOOL, RPCArg::Default{false}, "Acknowledge decoded plan_hex view grants after the shielded privacy redesign; encrypted grant payloads cannot be locally verified before settlement"},
+                    {"allow_legacy_audit_view_grants", RPCArg::Type::BOOL, RPCArg::Default{false}, "Permit legacy_audit grants from decoded plan_hex after the shielded privacy redesign; legacy audit payloads disclose note-opening material"},
                 }},
         },
         RPCResult{
@@ -14048,7 +14802,7 @@ RPCHelpMan bridge_buildshieldtx()
             auto pwallet = EnsureWalletForBridge(request);
             pwallet->BlockUntilSyncedToCurrentChain();
 
-            const BridgePlan plan = DecodeBridgePlanOrThrow(request.params[0]);
+            BridgePlan plan = DecodeBridgePlanOrThrow(request.params[0]);
             if (plan.kind != shielded::BridgeTemplateKind::SHIELD) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "plan_hex is not a bridge-in shield plan");
             }
@@ -14059,14 +14813,17 @@ RPCHelpMan bridge_buildshieldtx()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "vout must be non-negative");
             }
             const CAmount amount = AmountFromValue(request.params[3]);
+            const UniValue options = request.params[4].isNull() ? UniValue(UniValue::VOBJ) : request.params[4];
             const int32_t build_height = NextBridgeLeafBuildHeight(*pwallet);
+            plan = AuthorizeBridgePlanViewGrantPolicyOrThrow(plan, build_height, "bridge_buildshieldtx", options);
             const BridgeFeeHeadroomPolicy headroom_policy =
-                ParseBridgeFeeHeadroomPolicy(request.params[4], /*default_enforce=*/false);
+                ParseBridgeFeeHeadroomPolicy(options, /*default_enforce=*/false);
             const auto psbt = CreateBridgeShieldSettlementTransaction(plan,
                                                                       COutPoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)},
                                                                       amount,
                                                                       &Params().GetConsensus(),
-                                                                      build_height);
+                                                                      build_height,
+                                                                      plan.allow_legacy_audit_view_grants);
             if (!psbt.has_value()) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Failed to construct bridge shield settlement PSBT");
             }
@@ -14281,13 +15038,15 @@ RPCHelpMan bridge_submitshieldtx()
             {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding txid"},
             {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Funding output index"},
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Funding output amount"},
-            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional fee-headroom and recovery policy",
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional fee-headroom, recovery, and view-grant policy",
                 {
                     {"min_fee_headroom_multiplier", RPCArg::Type::NUM, RPCArg::Default{2.0}, "Require at least this multiple of the current local mempool floor before broadcast"},
                     {"enforce_fee_headroom", RPCArg::Type::BOOL, RPCArg::Default{true}, "Reject broadcast if the settlement does not meet min_fee_headroom_multiplier"},
                     {"track_pending", RPCArg::Type::BOOL, RPCArg::Default{true}, "Persist a pending-bridge recovery record for this funding outpoint"},
                     {"refund_destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Optional refund destination; omitted values auto-generate a wallet refund address when track_pending=true"},
                     {"refund_fee", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(DEFAULT_BRIDGE_PENDING_REFUND_FEE)}, "Refund fee to use if timeout recovery falls back to the refund path"},
+                    {"accept_plan_view_grants", RPCArg::Type::BOOL, RPCArg::Default{false}, "Acknowledge decoded plan_hex view grants after the shielded privacy redesign; encrypted grant payloads cannot be locally verified before settlement"},
+                    {"allow_legacy_audit_view_grants", RPCArg::Type::BOOL, RPCArg::Default{false}, "Permit legacy_audit grants from decoded plan_hex after the shielded privacy redesign; legacy audit payloads disclose note-opening material"},
                 }},
         },
         RPCResult{
@@ -14300,7 +15059,7 @@ RPCHelpMan bridge_submitshieldtx()
             auto pwallet = EnsureWalletForBridge(request);
             pwallet->BlockUntilSyncedToCurrentChain();
 
-            const BridgePlan plan = DecodeBridgePlanOrThrow(request.params[0]);
+            BridgePlan plan = DecodeBridgePlanOrThrow(request.params[0]);
             if (plan.kind != shielded::BridgeTemplateKind::SHIELD) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "plan_hex is not a bridge-in shield plan");
             }
@@ -14314,9 +15073,13 @@ RPCHelpMan bridge_submitshieldtx()
             const UniValue options = request.params[4].isNull() ? UniValue(UniValue::VOBJ) : request.params[4];
             const BridgeFeeHeadroomPolicy headroom_policy =
                 ParseBridgeFeeHeadroomPolicy(options, /*default_enforce=*/true);
+            const COutPoint funding_outpoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
+            const int32_t build_height = NextBridgeLeafBuildHeight(*pwallet);
+            const bool accepted_plan_view_grants = HasDecodedBridgePlanViewGrants(plan) &&
+                                                   ParseAcceptPlanViewGrantsOrThrow(options);
+            plan = AuthorizeBridgePlanViewGrantPolicyOrThrow(plan, build_height, "bridge_submitshieldtx", options);
             const BridgePendingRpcConfig pending_config =
                 ParseBridgePendingRpcConfigOrThrow(pwallet, options, /*default_track_pending=*/true, /*default_recover_now=*/false);
-            const COutPoint funding_outpoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
             const int32_t current_height = CurrentBridgeWalletHeight(*pwallet);
             std::optional<BridgePendingOperation> pending_operation;
             if (pending_config.track_pending) {
@@ -14325,46 +15088,47 @@ RPCHelpMan bridge_submitshieldtx()
                                                                funding_outpoint,
                                                                amount,
                                                                pending_config,
-                                                               /*imported=*/false);
+                                                               /*imported=*/false,
+                                                               accepted_plan_view_grants);
                 SaveBridgePendingOperationOrThrow(pwallet, *pending_operation);
             }
 
             try {
-            const int32_t build_height = NextBridgeLeafBuildHeight(*pwallet);
-            const auto psbt = CreateBridgeShieldSettlementTransaction(plan,
-                                                                      funding_outpoint,
-                                                                      amount,
-                                                                      &Params().GetConsensus(),
-                                                                      build_height);
-            if (!psbt.has_value()) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "Failed to construct bridge shield settlement PSBT");
-            }
+                const auto psbt = CreateBridgeShieldSettlementTransaction(plan,
+                                                                          funding_outpoint,
+                                                                          amount,
+                                                                          &Params().GetConsensus(),
+                                                                          build_height,
+                                                                          plan.allow_legacy_audit_view_grants);
+                if (!psbt.has_value()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Failed to construct bridge shield settlement PSBT");
+                }
 
-            const BridgePsbtRelayFeeAnalysis analysis = AnalyzeBridgePsbtRelayFee(*pwallet, *psbt);
-            const BridgeFeeHeadroomAssessment headroom = EvaluateBridgeFeeHeadroom(analysis, headroom_policy);
-            EnsureBridgeFeeHeadroomOrThrow(headroom, headroom_policy, "bridge_submitshieldtx");
+                const BridgePsbtRelayFeeAnalysis analysis = AnalyzeBridgePsbtRelayFee(*pwallet, *psbt);
+                const BridgeFeeHeadroomAssessment headroom = EvaluateBridgeFeeHeadroom(analysis, headroom_policy);
+                EnsureBridgeFeeHeadroomOrThrow(headroom, headroom_policy, "bridge_submitshieldtx");
 
-            const auto tx = FinalizeBridgePsbtWithWalletOrThrow(pwallet,
-                                                                *psbt,
-                                                                "bridge shield settlement PSBT");
-            CommitShieldedTransactionOrThrow(pwallet, tx);
-            if (pending_operation.has_value()) {
-                pending_operation->has_settlement_txid = true;
-                pending_operation->settlement_txid = tx->GetHash();
-                pending_operation->has_refund_txid = false;
-                pending_operation->refund_txid.SetNull();
-                pending_operation->last_attempt_height = current_height;
-                pending_operation->last_error.clear();
-                ++pending_operation->retry_count;
-                SaveBridgePendingOperationOrLog(pwallet, *pending_operation, "bridge_submitshieldtx");
-            }
-            UniValue out = BridgeSubmittedResultToUniValue(tx, plan, "normal");
-            AppendBridgePsbtRelayFeeAnalysis(out, analysis, build_height, headroom_policy);
-            if (pending_operation.has_value()) {
-                out.pushKV("refund_destination", pending_operation->refund_destination);
-                out.pushKV("refund_fee", ValueFromAmount(pending_operation->refund_fee));
-            }
-            return out;
+                const auto tx = FinalizeBridgePsbtWithWalletOrThrow(pwallet,
+                                                                    *psbt,
+                                                                    "bridge shield settlement PSBT");
+                CommitShieldedTransactionOrThrow(pwallet, tx);
+                if (pending_operation.has_value()) {
+                    pending_operation->has_settlement_txid = true;
+                    pending_operation->settlement_txid = tx->GetHash();
+                    pending_operation->has_refund_txid = false;
+                    pending_operation->refund_txid.SetNull();
+                    pending_operation->last_attempt_height = current_height;
+                    pending_operation->last_error.clear();
+                    ++pending_operation->retry_count;
+                    SaveBridgePendingOperationOrLog(pwallet, *pending_operation, "bridge_submitshieldtx");
+                }
+                UniValue out = BridgeSubmittedResultToUniValue(tx, plan, "normal");
+                AppendBridgePsbtRelayFeeAnalysis(out, analysis, build_height, headroom_policy);
+                if (pending_operation.has_value()) {
+                    out.pushKV("refund_destination", pending_operation->refund_destination);
+                    out.pushKV("refund_fee", ValueFromAmount(pending_operation->refund_fee));
+                }
+                return out;
             } catch (const UniValue& obj_error) {
                 if (pending_operation.has_value()) {
                     pending_operation->last_attempt_height = current_height;
@@ -14500,11 +15264,13 @@ RPCHelpMan bridge_importpending()
             {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding txid"},
             {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Funding output index"},
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "Funding output amount"},
-            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Recovery metadata",
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Recovery metadata and view-grant policy",
                 {
                     {"refund_destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Optional refund destination; omitted values auto-generate a wallet refund address"},
                     {"refund_fee", RPCArg::Type::AMOUNT, RPCArg::Default{FormatMoney(DEFAULT_BRIDGE_PENDING_REFUND_FEE)}, "Refund fee to use if timeout recovery falls back to the refund path"},
                     {"recover_now", RPCArg::Type::BOOL, RPCArg::Default{true}, "Attempt recovery immediately after import"},
+                    {"accept_plan_view_grants", RPCArg::Type::BOOL, RPCArg::Default{false}, "Acknowledge decoded plan_hex view grants after the shielded privacy redesign; encrypted grant payloads cannot be locally verified before recovery"},
+                    {"allow_legacy_audit_view_grants", RPCArg::Type::BOOL, RPCArg::Default{false}, "Permit legacy_audit grants from decoded plan_hex after the shielded privacy redesign; legacy audit payloads disclose note-opening material"},
                 }},
         },
         RPCResult{
@@ -14517,7 +15283,7 @@ RPCHelpMan bridge_importpending()
             auto pwallet = EnsureWalletForBridge(request);
             pwallet->BlockUntilSyncedToCurrentChain();
 
-            const BridgePlan plan = DecodeBridgePlanOrThrow(request.params[0]);
+            BridgePlan plan = DecodeBridgePlanOrThrow(request.params[0]);
             const uint256 txid = ParseHashV(request.params[1], "txid");
             const int vout = request.params[2].getInt<int>();
             if (vout < 0) {
@@ -14525,16 +15291,24 @@ RPCHelpMan bridge_importpending()
             }
             const CAmount amount = AmountFromValue(request.params[3]);
             const UniValue options = request.params[4].isNull() ? UniValue(UniValue::VOBJ) : request.params[4];
+            const COutPoint funding_outpoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
+            const int32_t build_height = NextBridgeLeafBuildHeight(*pwallet);
+            const bool accepted_plan_view_grants = HasDecodedBridgePlanViewGrants(plan) &&
+                                                   ParseAcceptPlanViewGrantsOrThrow(options);
+            plan = AuthorizeBridgePlanViewGrantPolicyOrThrow(plan,
+                                                             build_height,
+                                                             "bridge_importpending",
+                                                             options);
             const BridgePendingRpcConfig config =
                 ParseBridgePendingRpcConfigOrThrow(pwallet, options, /*default_track_pending=*/true, /*default_recover_now=*/true);
-            const COutPoint funding_outpoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
 
             BridgePendingOperation operation = BuildBridgePendingOperation(pwallet,
                                                                           plan,
                                                                           funding_outpoint,
                                                                           amount,
                                                                           config,
-                                                                          /*imported=*/true);
+                                                                          /*imported=*/true,
+                                                                          accepted_plan_view_grants);
             SaveBridgePendingOperationOrThrow(pwallet, operation);
 
             UniValue out = BridgePendingStatusToUniValue(*pwallet->GetPendingBridgeOperationStatus(funding_outpoint));

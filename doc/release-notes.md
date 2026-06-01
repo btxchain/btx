@@ -1,10 +1,9 @@
-BTX version 0.30.1 is now available from:
+BTX version 0.30.2 is now available from:
 
-  <https://github.com/btxchain/btx/releases/tag/v0.30.1>
+  <https://github.com/btxchain/btx/releases/tag/v0.30.2>
 
-This patch release covers changes merged after BTX 0.30.0 was prepared on May
-20, 2026. It focuses on prune-safe fast-mining reorg handling and refreshed
-snapshot fast-start metadata.
+This patch release covers changes merged after BTX 0.30.1 was prepared on May
+20, 2026. It focuses on production-ready bridge view grant handling.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -19,7 +18,7 @@ How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down, then install the new binaries or replace the existing `btxd`,
-`btx-cli`, and GUI binaries with the 0.30.1 release artifacts.
+`btx-cli`, and GUI binaries with the 0.30.2 release artifacts.
 
 Compatibility
 =============
@@ -29,25 +28,30 @@ BTX is supported on Linux, macOS 13+, and Windows 10+.
 Notable changes
 ===============
 
-- Pruned and assumeutxo fast-start mining nodes now restore consumed shielded
-  settlement-anchor metadata from block undo during disconnect. Normal shallow
-  reorg handling no longer falls back to a full historical
-  `SyncShieldedSettlementAnchorState()` rebuild that can fail when old block
-  files have been pruned.
+- Bridge view grant decrypt handling now accepts canonical objects or bare hex,
+  verifies serialized hex and component fields match, rehydrates encrypted
+  shielded keys before decrypt, and respects object format hints during
+  automatic decoding.
 
-- Block undo serialization now carries an optional versioned settlement-anchor
-  extension while preserving compatibility with legacy undo payloads.
-  Disconnect will fail with an explicit repair/reindex message if older undo
-  data lacks the metadata needed for prune-safe restoration.
+- Operator view grants default to structured minimal disclosure after the
+  shielded privacy redesign. Legacy audit grants now require explicit
+  `allow_legacy_audit_view_grants=true`, including disclosure policies and
+  batch planning.
 
-- Mainnet snapshot, checkpoint, `minimumchainwork`, and `assumevalid` metadata
-  have been refreshed to height 106,875 for the 0.30.1 fast-start release.
+- View grant encryption now uses fresh ML-KEM encapsulation and AEAD nonce
+  randomness for every grant. Grant-enabled plans may differ in
+  `view_grant_hex`, `ctv_hash`, and `plan_hex`, while decrypted payloads remain
+  stable for equivalent requests.
 
-- Regression coverage now exercises the undo extension, legacy undo
-  compatibility, and a shallow reorg that consumes and restores a matured
-  settlement anchor with its original creation height.
+- Equivalent operator view grant requests now canonicalize to the same
+  normalized order after shorthand expansion, policy grants, and duplicate
+  merging.
+
+- Bridge view grant readiness coverage now includes focused unit, functional,
+  Docker regtest, documentation, and CI-path-filter gates for the shielded
+  bridge surfaces.
 
 ## Credits
 
 Thanks to everyone who contributed code, testing, operational validation, and
-fast-mining reorg reports to this release.
+bridge view grant review to this release.

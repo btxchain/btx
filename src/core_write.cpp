@@ -394,6 +394,19 @@ UniValue ShieldedBundleToUniv(const CShieldedBundle& bundle)
         outputs.push_back(std::move(entry));
     }
     out.pushKV("outputs", std::move(outputs));
+
+    UniValue view_grants(UniValue::VARR);
+    for (const auto& grant : bundle.view_grants) {
+        UniValue entry(UniValue::VOBJ);
+        DataStream ss{};
+        ss << grant;
+        entry.pushKV("view_grant_hex", HexStr(ss.str()));
+        entry.pushKV("kem_ciphertext", HexStr(grant.kem_ct));
+        entry.pushKV("nonce", HexStr(grant.nonce));
+        entry.pushKV("encrypted_data", HexStr(grant.encrypted_data));
+        view_grants.push_back(std::move(entry));
+    }
+    out.pushKV("view_grants", std::move(view_grants));
     out.pushKV("proof_bytes", static_cast<uint64_t>(bundle.proof.size()));
     return out;
 }

@@ -446,7 +446,9 @@ compliance or audit workflows without compromising privacy for other
 participants. Up to 8 view grants per transaction.
 
 For detailed setup and operations, see
-[doc/btx-shielded-pool-guide.md](doc/btx-shielded-pool-guide.md).
+[doc/btx-shielded-pool-guide.md](doc/btx-shielded-pool-guide.md). For the
+focused bridge view-grant production gate, see
+[doc/btx-bridge-view-grants-readiness.md](doc/btx-bridge-view-grants-readiness.md).
 
 ---
 
@@ -612,7 +614,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.30.1 \
+  --release-tag v0.30.2 \
   --preset service \
   --datadir="$HOME/.btx"
 ```

@@ -12,6 +12,7 @@
 #include <chrono>
 #include <limits>
 #include <map>
+#include <optional>
 #include <vector>
 
 namespace Consensus {
@@ -231,6 +232,12 @@ struct Params {
     // and uses nMatMulAsertHalfLifeUpgrade for subsequent retargeting.
     int32_t nMatMulAsertHalfLifeUpgradeHeight{std::numeric_limits<int32_t>::max()};
     int64_t nMatMulAsertHalfLifeUpgrade{14'400};
+    // Optional MatMul timestamp hardening. At and above this height, blocks
+    // may not be more than nMatMulMaxFutureMtpDrift seconds ahead of the
+    // previous block's median-time-past. This bounds ASERT's response to a
+    // single future-dated block without changing the ASERT formula itself.
+    int32_t nMatMulMaxFutureMtpDriftHeight{std::numeric_limits<int32_t>::max()};
+    int64_t nMatMulMaxFutureMtpDrift{3'600};
 
     // Block capacity.
     uint32_t nMaxBlockWeight{24'000'000};
@@ -307,6 +314,31 @@ struct Params {
         return height >= 0 &&
             nMatMulPreHashEpsilonBitsUpgradeHeight != std::numeric_limits<int32_t>::max() &&
             height >= nMatMulPreHashEpsilonBitsUpgradeHeight;
+    }
+    bool IsMatMulMaxFutureMtpDriftActive(int32_t height) const
+    {
+        return fMatMulPOW &&
+            height >= 0 &&
+            nMatMulMaxFutureMtpDriftHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nMatMulMaxFutureMtpDriftHeight &&
+            nMatMulMaxFutureMtpDrift > 0;
+    }
+    std::optional<int64_t> MaxMatMulFutureBlockTime(int32_t height, int64_t prev_median_time_past) const
+    {
+        if (!IsMatMulMaxFutureMtpDriftActive(height)) return std::nullopt;
+        return MatMulFutureBlockTimeLimit(prev_median_time_past);
+    }
+    std::optional<int64_t> MatMulFutureBlockTimeLimit(int64_t prev_median_time_past) const
+    {
+        if (!fMatMulPOW ||
+            nMatMulMaxFutureMtpDriftHeight == std::numeric_limits<int32_t>::max() ||
+            nMatMulMaxFutureMtpDrift <= 0) {
+            return std::nullopt;
+        }
+        if (prev_median_time_past > std::numeric_limits<int64_t>::max() - nMatMulMaxFutureMtpDrift) {
+            return std::numeric_limits<int64_t>::max();
+        }
+        return prev_median_time_past + nMatMulMaxFutureMtpDrift;
     }
     bool IsShieldedTxBindingActive(int32_t height) const
     {

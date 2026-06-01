@@ -803,6 +803,12 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetDen, 1U);
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgradeHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgrade, 3'600);
+    BOOST_CHECK_EQUAL(consensus.nMatMulMaxFutureMtpDriftHeight, 118'482);
+    BOOST_CHECK_EQUAL(consensus.nMatMulMaxFutureMtpDrift, 3'600);
+    BOOST_CHECK(!consensus.IsMatMulMaxFutureMtpDriftActive(118'481));
+    BOOST_CHECK(consensus.IsMatMulMaxFutureMtpDriftActive(118'482));
+    BOOST_REQUIRE(consensus.MaxMatMulFutureBlockTime(118'482, 1'700'000'000).has_value());
+    BOOST_CHECK_EQUAL(*consensus.MaxMatMulFutureBlockTime(118'482, 1'700'000'000), 1'700'003'600);
     BOOST_CHECK_EQUAL(consensus.nMatMulPreHashEpsilonBits, 10U);
     BOOST_CHECK_EQUAL(consensus.nMatMulPreHashEpsilonBitsUpgradeHeight, 50'000);
     BOOST_CHECK_EQUAL(consensus.nMatMulPreHashEpsilonBitsUpgrade, 18U);

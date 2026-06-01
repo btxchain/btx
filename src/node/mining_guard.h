@@ -5,6 +5,7 @@
 #ifndef BITCOIN_NODE_MINING_GUARD_H
 #define BITCOIN_NODE_MINING_GUARD_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 

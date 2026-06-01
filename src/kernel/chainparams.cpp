@@ -196,6 +196,11 @@ public:
         consensus.nMatMulAsertRetune2TargetDen = 1;
         consensus.nMatMulAsertHalfLifeUpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertHalfLifeUpgrade = 3'600;
+        // Height 118,482 is approximately six hours from the observed public
+        // tip near 118,242 at the 90-second target spacing, while bounding
+        // future-dated timestamp shocks to one ASERT half-life.
+        consensus.nMatMulMaxFutureMtpDriftHeight = 118'482;
+        consensus.nMatMulMaxFutureMtpDrift = 3'600;
         // Hardened pre-hash epsilon (18 bits) has been active on mainnet since
         // the historical ASERT transition at 50,000.
         consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = 50'000;

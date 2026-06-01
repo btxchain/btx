@@ -4,9 +4,12 @@
 .vscode
 .idea
 .DS_Store
+.btx-validation
+.codex-test-runs
 
 build
 build-*
+build_*
 build-btx
 build-btx*
 build-fuzz*
@@ -26,8 +29,11 @@ depends/sources
 
 test/cache
 test/tmp
+__pycache__
+*.pyc
 .ruff_cache
 
 *.tar.gz
 *.zip
 *.log
+contrib/docker/Dockerfile

@@ -127,7 +127,15 @@ class WalletBridgeBatchInTest(BitcoinTestFramework):
         assert_equal(submitted["bridge_root"], batch_plan["bridge_root"])
         assert_equal(submitted["ctv_hash"], batch_plan["ctv_hash"])
         mine_block(self, node, mine_addr)
-        assert_equal(Decimal(recipient_wallet.z_getbalance()["balance"]), total_amount)
+        node.syncwithvalidationinterfacequeue()
+        self.wait_until(
+            lambda: Decimal(recipient_wallet.z_getbalance()["total_balance"]) == total_amount,
+            timeout=10,
+        )
+        recipient_balance = recipient_wallet.z_getbalance()
+        assert_equal(Decimal(recipient_balance["balance"]), Decimal("0"))
+        assert_equal(Decimal(recipient_balance["recovery_only_balance"]), total_amount)
+        assert_equal(Decimal(recipient_balance["total_balance"]), total_amount)
 
         self.log.info(
             "Batch bridge-in compression observed: plan %d -> %d bytes, psbt %d -> %d bytes",

@@ -309,13 +309,18 @@ struct CRecipient
 
 struct BridgePendingOperation
 {
-    uint8_t version{1};
+    static constexpr uint8_t LEGACY_VERSION{1};
+    static constexpr uint8_t ACCEPTED_PLAN_VIEW_GRANTS_VERSION{2};
+    static constexpr uint8_t CURRENT_VERSION{ACCEPTED_PLAN_VIEW_GRANTS_VERSION};
+
+    uint8_t version{CURRENT_VERSION};
     BridgePlan plan;
     COutPoint funding_outpoint;
     CAmount funding_amount{0};
     std::string refund_destination;
     CAmount refund_fee{10000};
     bool imported{false};
+    bool accepted_plan_view_grants{false};
     bool has_settlement_txid{false};
     uint256 settlement_txid;
     bool has_refund_txid{false};
@@ -335,8 +340,13 @@ struct BridgePendingOperation
                   obj.funding_amount,
                   obj.refund_destination,
                   obj.refund_fee,
-                  obj.imported,
-                  obj.has_settlement_txid);
+                  obj.imported);
+        if (obj.version >= ACCEPTED_PLAN_VIEW_GRANTS_VERSION) {
+            READWRITE(obj.accepted_plan_view_grants);
+        } else if constexpr (ser_action.ForRead()) {
+            obj.accepted_plan_view_grants = false;
+        }
+        READWRITE(obj.has_settlement_txid);
         if (obj.has_settlement_txid) {
             READWRITE(obj.settlement_txid);
         }

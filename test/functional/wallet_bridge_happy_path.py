@@ -59,11 +59,15 @@ class WalletBridgeHappyPathTest(BitcoinTestFramework):
         built = wallet.bridge_buildshieldtx(plan["plan_hex"], funding_txid, vout, value)
         assert_equal(built["relay_fee_analysis_available"], True)
         assert_equal(built["relay_fee_sufficient"], True)
-        assert built["relay_fee_analysis"]["estimated_fee"] >= built["relay_fee_analysis"]["required_total_fee"]
+        assert built["relay_fee_analysis"]["estimated_fee_bucket"] >= built["relay_fee_analysis"]["required_total_fee_bucket"]
         settlement_txid, _ = sign_finalize_and_send(wallet, node, built["psbt"])
         mine_block(self, node, mine_addr)
+        node.syncwithvalidationinterfacequeue()
 
-        assert_equal(Decimal(recipient_wallet.z_getbalance()["balance"]), Decimal("3.5"))
+        recipient_balance = recipient_wallet.z_getbalance()
+        assert_equal(Decimal(recipient_balance["balance"]), Decimal("0"))
+        assert_equal(Decimal(recipient_balance["recovery_only_balance"]), Decimal("3.5"))
+        assert_equal(Decimal(recipient_balance["total_balance"]), Decimal("3.5"))
 
 
 if __name__ == "__main__":

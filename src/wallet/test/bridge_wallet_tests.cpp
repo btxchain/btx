@@ -12,6 +12,11 @@
 #include <streams.h>
 #include <test/util/setup_common.h>
 #include <wallet/bridge_wallet.h>
+#include <wallet/shielded_privacy.h>
+
+#include <algorithm>
+#include <string>
+#include <utility>
 
 #include <boost/test/unit_test.hpp>
 
@@ -150,6 +155,30 @@ shielded::BridgeBatchCommitment MakeFutureProofedBatchCommitment(shielded::Bridg
     return commitment;
 }
 
+BridgePlan RoundTripBridgePlan(const BridgePlan& plan)
+{
+    DataStream ss{};
+    ss << plan;
+    BridgePlan decoded;
+    ss >> decoded;
+    BOOST_REQUIRE(ss.empty());
+    return decoded;
+}
+
+std::optional<CViewGrant::SecureBytes> DecryptBridgePlanViewGrant(const BridgePlan& plan,
+                                                                  size_t grant_index,
+                                                                  const mlkem::SecretKey& operator_sk)
+{
+    BOOST_REQUIRE_LT(grant_index, plan.view_grant_metadata.size());
+    BOOST_REQUIRE_LT(grant_index, plan.shielded_bundle.view_grants.size());
+    const std::vector<uint8_t> metadata_aad = SerializeBridgeViewGrantMetadataAad(
+        plan.view_grant_metadata[grant_index]);
+    BOOST_REQUIRE(!metadata_aad.empty());
+    return plan.shielded_bundle.view_grants[grant_index].DecryptWithAad(
+        operator_sk,
+        Span<const uint8_t>{metadata_aad.data(), metadata_aad.size()});
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(bridge_wallet_tests, BasicTestingSetup)
@@ -184,7 +213,7 @@ BOOST_AUTO_TEST_CASE(bridge_in_plan_inserts_operator_view_grants_when_operator_k
     BOOST_REQUIRE(plan.has_value());
     BOOST_REQUIRE_EQUAL(plan->shielded_bundle.view_grants.size(), 1U);
 
-    const auto decrypted = plan->shielded_bundle.view_grants[0].Decrypt(operator_kem.sk);
+    const auto decrypted = DecryptBridgePlanViewGrant(*plan, 0, operator_kem.sk);
     BOOST_REQUIRE(decrypted.has_value());
     DataStream ds{Span<const uint8_t>{decrypted->data(), decrypted->size()}};
     BridgeAuditPayloadV1 payload;
@@ -207,7 +236,7 @@ BOOST_AUTO_TEST_CASE(bridge_in_plan_supports_structured_operator_view_grants)
     BOOST_REQUIRE(plan.has_value());
     BOOST_REQUIRE_EQUAL(plan->shielded_bundle.view_grants.size(), 1U);
 
-    const auto decrypted = plan->shielded_bundle.view_grants[0].Decrypt(operator_kem.sk);
+    const auto decrypted = DecryptBridgePlanViewGrant(*plan, 0, operator_kem.sk);
     BOOST_REQUIRE(decrypted.has_value());
     const auto payload = shielded::viewgrants::DecodeStructuredDisclosurePayload(
         Span<const uint8_t>{decrypted->data(), decrypted->size()});
@@ -221,6 +250,355 @@ BOOST_AUTO_TEST_CASE(bridge_in_plan_supports_structured_operator_view_grants)
     BOOST_CHECK(payload->memo.empty());
     BOOST_CHECK(payload->sender.bridge_id == request.ids.bridge_id);
     BOOST_CHECK(payload->sender.operation_id == request.ids.operation_id);
+}
+
+BOOST_AUTO_TEST_CASE(bridge_plan_serializes_view_grant_policy_metadata)
+{
+    auto request = MakeBridgeInRequest();
+    const auto operator_kem = MakeKEMKey(0xa2);
+    request.operator_view_grants.push_back({BridgeViewGrantFormat::STRUCTURED_DISCLOSURE,
+                                            operator_kem.pk,
+                                            static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT |
+                                                                 shielded::viewgrants::DISCLOSE_SENDER)});
+    request.disclosure_policy = BridgeDisclosurePolicy{
+        1,
+        10 * COIN,
+        {{BridgeViewGrantFormat::STRUCTURED_DISCLOSURE,
+          operator_kem.pk,
+          shielded::viewgrants::DISCLOSE_RECIPIENT}}};
+
+    const auto plan = BuildBridgeInPlan(request);
+    BOOST_REQUIRE(plan.has_value());
+    BOOST_CHECK_EQUAL(plan->version, BridgePlan::VIEW_GRANT_POLICY_VERSION);
+    BOOST_REQUIRE_EQUAL(plan->view_grant_metadata.size(), 1U);
+    BOOST_CHECK_EQUAL(plan->view_grant_metadata[0].format, BridgeViewGrantFormat::STRUCTURED_DISCLOSURE);
+    BOOST_CHECK_EQUAL(plan->view_grant_metadata[0].disclosure_flags,
+                      static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT |
+                                           shielded::viewgrants::DISCLOSE_SENDER));
+    BOOST_REQUIRE(plan->disclosure_policy.has_value());
+
+    const BridgePlan decoded = RoundTripBridgePlan(*plan);
+    BOOST_CHECK(decoded.IsValid());
+    BOOST_CHECK_EQUAL(decoded.version, BridgePlan::VIEW_GRANT_POLICY_VERSION);
+    BOOST_REQUIRE_EQUAL(decoded.view_grant_metadata.size(), 1U);
+    BOOST_CHECK(decoded.view_grant_metadata[0].recipient_pubkey == operator_kem.pk);
+    BOOST_CHECK_EQUAL(decoded.view_grant_metadata[0].format, BridgeViewGrantFormat::STRUCTURED_DISCLOSURE);
+    BOOST_CHECK_EQUAL(decoded.view_grant_metadata[0].disclosure_flags,
+                      static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT |
+                                           shielded::viewgrants::DISCLOSE_SENDER));
+    BOOST_REQUIRE(decoded.disclosure_policy.has_value());
+    BOOST_CHECK_EQUAL(decoded.disclosure_policy->threshold_amount, 10 * COIN);
+}
+
+BOOST_AUTO_TEST_CASE(bridge_in_plan_supports_max_structured_view_grants)
+{
+    auto request = MakeBridgeInRequest();
+    std::vector<mlkem::KeyPair> operators;
+    operators.reserve(MAX_VIEW_GRANTS_PER_TX);
+    for (size_t i = 0; i < MAX_VIEW_GRANTS_PER_TX; ++i) {
+        operators.push_back(MakeKEMKey(static_cast<unsigned char>(0xb0 + i)));
+        request.operator_view_grants.push_back({
+            BridgeViewGrantFormat::STRUCTURED_DISCLOSURE,
+            operators.back().pk,
+            static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT |
+                                 shielded::viewgrants::DISCLOSE_RECIPIENT |
+                                 shielded::viewgrants::DISCLOSE_SENDER)});
+    }
+
+    const auto plan = BuildBridgeInPlan(request);
+    BOOST_REQUIRE(plan.has_value());
+    BOOST_REQUIRE_EQUAL(plan->shielded_bundle.view_grants.size(), MAX_VIEW_GRANTS_PER_TX);
+    BOOST_REQUIRE_EQUAL(plan->view_grant_metadata.size(), MAX_VIEW_GRANTS_PER_TX);
+
+    for (size_t i = 0; i < plan->shielded_bundle.view_grants.size(); ++i) {
+        bool decrypted_by_expected_operator{false};
+        for (const auto& op : operators) {
+            const auto decrypted = DecryptBridgePlanViewGrant(*plan, i, op.sk);
+            if (!decrypted.has_value()) continue;
+            const auto payload = shielded::viewgrants::DecodeStructuredDisclosurePayload(
+                Span<const uint8_t>{decrypted->data(), decrypted->size()});
+            BOOST_REQUIRE(payload.has_value());
+            BOOST_CHECK_EQUAL(payload->amount, request.amount);
+            BOOST_CHECK(payload->recipient_pk_hash == request.recipient.pk_hash);
+            decrypted_by_expected_operator = true;
+            break;
+        }
+        BOOST_CHECK(decrypted_by_expected_operator);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(bridge_plan_rejects_noncanonical_view_grant_metadata)
+{
+    auto request = MakeBridgeInRequest();
+    const auto first_operator_kem = MakeKEMKey(0xb1);
+    const auto second_operator_kem = MakeKEMKey(0xb2);
+    request.operator_view_grants = {
+        {BridgeViewGrantFormat::STRUCTURED_DISCLOSURE, second_operator_kem.pk, shielded::viewgrants::DISCLOSE_SENDER},
+        {BridgeViewGrantFormat::STRUCTURED_DISCLOSURE, first_operator_kem.pk, shielded::viewgrants::DISCLOSE_AMOUNT},
+    };
+
+    const auto plan = BuildBridgeInPlan(request);
+    BOOST_REQUIRE(plan.has_value());
+    BOOST_REQUIRE_EQUAL(plan->view_grant_metadata.size(), 2U);
+    BOOST_REQUIRE(plan->IsValid());
+
+    BridgePlan reordered = *plan;
+    std::swap(reordered.view_grant_metadata[0], reordered.view_grant_metadata[1]);
+    BOOST_CHECK(!reordered.IsValid());
+    BOOST_CHECK(!CreateBridgeShieldSettlementTransaction(
+        reordered,
+        COutPoint{Txid::FromUint256(uint256{static_cast<unsigned char>(0xb1)}), 0},
+        -reordered.shielded_bundle.value_balance + 2000,
+        &Params().GetConsensus(),
+        Params().GetConsensus().nShieldedMatRiCTDisableHeight).has_value());
+
+    BridgePlan duplicate = *plan;
+    duplicate.view_grant_metadata[1] = duplicate.view_grant_metadata[0];
+    BOOST_CHECK(!duplicate.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(bridge_plan_rejects_view_grant_format_ciphertext_size_mismatch)
+{
+    auto structured_request = MakeBridgeInRequest();
+    const auto structured_operator_kem = MakeKEMKey(0xb3);
+    structured_request.operator_view_grants.push_back(
+        {BridgeViewGrantFormat::STRUCTURED_DISCLOSURE,
+         structured_operator_kem.pk,
+         static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT |
+                              shielded::viewgrants::DISCLOSE_RECIPIENT |
+                              shielded::viewgrants::DISCLOSE_SENDER)});
+
+    const auto structured_plan = BuildBridgeInPlan(structured_request);
+    BOOST_REQUIRE(structured_plan.has_value());
+    BridgePlan forged_legacy = *structured_plan;
+    forged_legacy.view_grant_metadata[0].format = BridgeViewGrantFormat::LEGACY_AUDIT;
+    forged_legacy.view_grant_metadata[0].disclosure_flags = 0;
+    BOOST_CHECK(!forged_legacy.IsValid());
+
+    auto legacy_request = MakeBridgeInRequest();
+    const auto legacy_operator_kem = MakeKEMKey(0xb4);
+    legacy_request.operator_view_grants.push_back({BridgeViewGrantFormat::LEGACY_AUDIT, legacy_operator_kem.pk, 0});
+    legacy_request.allow_legacy_audit_view_grants = true;
+
+    const auto legacy_plan = BuildBridgeInPlan(legacy_request);
+    BOOST_REQUIRE(legacy_plan.has_value());
+    BridgePlan forged_structured = *legacy_plan;
+    forged_structured.view_grant_metadata[0].format = BridgeViewGrantFormat::STRUCTURED_DISCLOSURE;
+    forged_structured.view_grant_metadata[0].disclosure_flags =
+        static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT |
+                             shielded::viewgrants::DISCLOSE_RECIPIENT |
+                             shielded::viewgrants::DISCLOSE_SENDER);
+    BOOST_CHECK(!forged_structured.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(bridge_plan_rejects_structured_memo_grant_with_legacy_audit_ciphertext_size)
+{
+    auto legacy_request = MakeBridgeInRequest();
+    const auto operator_kem = MakeKEMKey(0xb5);
+    legacy_request.operator_view_grants.push_back({BridgeViewGrantFormat::LEGACY_AUDIT, operator_kem.pk, 0});
+    legacy_request.allow_legacy_audit_view_grants = true;
+
+    const auto legacy_plan = BuildBridgeInPlan(legacy_request);
+    BOOST_REQUIRE(legacy_plan.has_value());
+    BOOST_REQUIRE_EQUAL(legacy_plan->view_grant_metadata.size(), 1U);
+
+    BridgePlan forged_structured_memo = *legacy_plan;
+    forged_structured_memo.allow_legacy_audit_view_grants = false;
+    forged_structured_memo.view_grant_metadata[0].format = BridgeViewGrantFormat::STRUCTURED_DISCLOSURE;
+    forged_structured_memo.view_grant_metadata[0].disclosure_flags =
+        static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT |
+                             shielded::viewgrants::DISCLOSE_RECIPIENT |
+                             shielded::viewgrants::DISCLOSE_MEMO |
+                             shielded::viewgrants::DISCLOSE_SENDER);
+    BOOST_CHECK(!forged_structured_memo.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(bridge_shield_settlement_rejects_unclassified_v1_view_grants_postfork)
+{
+    auto request = MakeBridgeInRequest();
+    const auto operator_kem = MakeKEMKey(0xa3);
+    request.operator_view_grants.push_back({BridgeViewGrantFormat::LEGACY_AUDIT, operator_kem.pk, 0});
+
+    auto plan = BuildBridgeInPlan(request);
+    BOOST_REQUIRE(plan.has_value());
+    plan->version = BridgePlan::LEGACY_VERSION;
+    plan->view_grant_metadata.clear();
+    plan->allow_legacy_audit_view_grants = false;
+    plan->disclosure_policy.reset();
+    BOOST_REQUIRE(plan->IsValid());
+
+    const int32_t postfork_height = Params().GetConsensus().nShieldedMatRiCTDisableHeight;
+    BOOST_REQUIRE(UseShieldedPrivacyRedesignAtHeight(postfork_height));
+    const auto error = ValidateBridgePlanViewGrantPolicy(*plan, postfork_height);
+    BOOST_REQUIRE(error.has_value());
+    BOOST_CHECK(error->find("without serialized view-grant policy metadata") != std::string::npos);
+
+    const auto psbt = CreateBridgeShieldSettlementTransaction(
+        *plan,
+        COutPoint{Txid::FromUint256(uint256{static_cast<unsigned char>(0xa4)}), 0},
+        -plan->shielded_bundle.value_balance + 2000,
+        &Params().GetConsensus(),
+        postfork_height);
+    BOOST_CHECK(!psbt.has_value());
+}
+
+BOOST_AUTO_TEST_CASE(bridge_shield_settlement_requires_legacy_view_grant_opt_in_postfork)
+{
+    auto request = MakeBridgeInRequest();
+    const auto operator_kem = MakeKEMKey(0xa5);
+    request.operator_view_grants.push_back({BridgeViewGrantFormat::LEGACY_AUDIT, operator_kem.pk, 0});
+
+    auto rejected_plan = BuildBridgeInPlan(request);
+    BOOST_REQUIRE(rejected_plan.has_value());
+    BOOST_REQUIRE_EQUAL(rejected_plan->view_grant_metadata.size(), 1U);
+    BOOST_CHECK_EQUAL(rejected_plan->view_grant_metadata[0].format, BridgeViewGrantFormat::LEGACY_AUDIT);
+    BOOST_CHECK(!rejected_plan->allow_legacy_audit_view_grants);
+
+    const int32_t postfork_height = Params().GetConsensus().nShieldedMatRiCTDisableHeight;
+    BOOST_REQUIRE(UseShieldedPrivacyRedesignAtHeight(postfork_height));
+    const auto error = ValidateBridgePlanViewGrantPolicy(*rejected_plan, postfork_height);
+    BOOST_REQUIRE(error.has_value());
+    BOOST_CHECK(error->find("allow_legacy_audit_view_grants=true") != std::string::npos);
+    BOOST_CHECK(!CreateBridgeShieldSettlementTransaction(
+        *rejected_plan,
+        COutPoint{Txid::FromUint256(uint256{static_cast<unsigned char>(0xa6)}), 0},
+        -rejected_plan->shielded_bundle.value_balance + 2000,
+        &Params().GetConsensus(),
+        postfork_height).has_value());
+
+    request.allow_legacy_audit_view_grants = true;
+    const auto accepted_plan = BuildBridgeInPlan(request);
+    BOOST_REQUIRE(accepted_plan.has_value());
+    BOOST_CHECK(accepted_plan->allow_legacy_audit_view_grants);
+    BOOST_CHECK(ValidateBridgePlanViewGrantPolicy(*accepted_plan, postfork_height).has_value());
+    BOOST_CHECK(!ValidateBridgePlanViewGrantPolicy(
+        *accepted_plan,
+        postfork_height,
+        /*allow_legacy_audit_view_grants=*/true).has_value());
+    BOOST_CHECK(!CreateBridgeShieldSettlementTransaction(
+        *accepted_plan,
+        COutPoint{Txid::FromUint256(uint256{static_cast<unsigned char>(0xa7)}), 0},
+        -accepted_plan->shielded_bundle.value_balance + 2000,
+        &Params().GetConsensus(),
+        postfork_height).has_value());
+    BOOST_CHECK(CreateBridgeShieldSettlementTransaction(
+        *accepted_plan,
+        COutPoint{Txid::FromUint256(uint256{static_cast<unsigned char>(0xa7)}), 0},
+        -accepted_plan->shielded_bundle.value_balance + 2000,
+        &Params().GetConsensus(),
+        postfork_height,
+        /*allow_legacy_audit_view_grants=*/true).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(bridge_in_plan_structured_operator_view_grant_rejects_wrong_operator_key)
+{
+    auto request = MakeBridgeInRequest();
+    const auto operator_kem = MakeKEMKey(0x9e);
+    const auto wrong_operator_kem = MakeKEMKey(0x9f);
+    request.operator_view_grants.push_back({BridgeViewGrantFormat::STRUCTURED_DISCLOSURE,
+                                            operator_kem.pk,
+                                            static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT |
+                                                                 shielded::viewgrants::DISCLOSE_RECIPIENT |
+                                                                 shielded::viewgrants::DISCLOSE_SENDER)});
+
+    const auto plan = BuildBridgeInPlan(request);
+    BOOST_REQUIRE(plan.has_value());
+    BOOST_REQUIRE_EQUAL(plan->shielded_bundle.view_grants.size(), 1U);
+
+    BOOST_CHECK(!DecryptBridgePlanViewGrant(*plan, 0, wrong_operator_kem.sk).has_value());
+
+    const auto decrypted = DecryptBridgePlanViewGrant(*plan, 0, operator_kem.sk);
+    BOOST_REQUIRE(decrypted.has_value());
+    const auto payload = shielded::viewgrants::DecodeStructuredDisclosurePayload(
+        Span<const uint8_t>{decrypted->data(), decrypted->size()});
+    BOOST_REQUIRE(payload.has_value());
+    BOOST_CHECK_EQUAL(payload->amount, request.amount);
+}
+
+BOOST_AUTO_TEST_CASE(bridge_in_plan_operator_view_grants_use_fresh_encryption_randomness)
+{
+    auto request = MakeBridgeInRequest();
+    const auto operator_kem = MakeKEMKey(0xa1);
+    request.operator_view_grants.push_back({BridgeViewGrantFormat::STRUCTURED_DISCLOSURE,
+                                            operator_kem.pk,
+                                            static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT |
+                                                                 shielded::viewgrants::DISCLOSE_RECIPIENT |
+                                                                 shielded::viewgrants::DISCLOSE_SENDER)});
+
+    const auto first = BuildBridgeInPlan(request);
+    const auto second = BuildBridgeInPlan(request);
+    BOOST_REQUIRE(first.has_value());
+    BOOST_REQUIRE(second.has_value());
+    BOOST_REQUIRE_EQUAL(first->shielded_bundle.view_grants.size(), 1U);
+    BOOST_REQUIRE_EQUAL(second->shielded_bundle.view_grants.size(), 1U);
+
+    const auto& first_grant = first->shielded_bundle.view_grants[0];
+    const auto& second_grant = second->shielded_bundle.view_grants[0];
+    BOOST_CHECK(first_grant.kem_ct != second_grant.kem_ct ||
+                first_grant.nonce != second_grant.nonce ||
+                first_grant.encrypted_data != second_grant.encrypted_data);
+
+    const auto first_decrypted = DecryptBridgePlanViewGrant(*first, 0, operator_kem.sk);
+    const auto second_decrypted = DecryptBridgePlanViewGrant(*second, 0, operator_kem.sk);
+    BOOST_REQUIRE(first_decrypted.has_value());
+    BOOST_REQUIRE(second_decrypted.has_value());
+    BOOST_CHECK(*first_decrypted == *second_decrypted);
+}
+
+BOOST_AUTO_TEST_CASE(bridge_in_plan_structured_operator_view_grant_rejects_tampering)
+{
+    auto request = MakeBridgeInRequest();
+    const auto operator_kem = MakeKEMKey(0xa0);
+    request.operator_view_grants.push_back({BridgeViewGrantFormat::STRUCTURED_DISCLOSURE,
+                                            operator_kem.pk,
+                                            static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT |
+                                                                 shielded::viewgrants::DISCLOSE_RECIPIENT |
+                                                                 shielded::viewgrants::DISCLOSE_SENDER)});
+
+    const auto plan = BuildBridgeInPlan(request);
+    BOOST_REQUIRE(plan.has_value());
+    BOOST_REQUIRE_EQUAL(plan->shielded_bundle.view_grants.size(), 1U);
+    const auto& grant = plan->shielded_bundle.view_grants[0];
+
+    const std::vector<uint8_t> metadata_aad = SerializeBridgeViewGrantMetadataAad(plan->view_grant_metadata[0]);
+    BOOST_REQUIRE(!metadata_aad.empty());
+    BOOST_CHECK(!grant.Decrypt(operator_kem.sk).has_value());
+
+    auto wrong_metadata = plan->view_grant_metadata[0];
+    wrong_metadata.disclosure_flags = shielded::viewgrants::DISCLOSE_AMOUNT;
+    const std::vector<uint8_t> wrong_metadata_aad = SerializeBridgeViewGrantMetadataAad(wrong_metadata);
+    BOOST_REQUIRE(!wrong_metadata_aad.empty());
+    BOOST_CHECK(!grant.DecryptWithAad(
+        operator_kem.sk,
+        Span<const uint8_t>{wrong_metadata_aad.data(), wrong_metadata_aad.size()}).has_value());
+
+    const auto decrypted = grant.DecryptWithAad(
+        operator_kem.sk,
+        Span<const uint8_t>{metadata_aad.data(), metadata_aad.size()});
+    BOOST_REQUIRE(decrypted.has_value());
+    const auto payload = shielded::viewgrants::DecodeStructuredDisclosurePayload(
+        Span<const uint8_t>{decrypted->data(), decrypted->size()});
+    BOOST_REQUIRE(payload.has_value());
+    BOOST_CHECK_EQUAL(payload->amount, request.amount);
+
+    CViewGrant tampered_encrypted_data{grant};
+    BOOST_REQUIRE(!tampered_encrypted_data.encrypted_data.empty());
+    tampered_encrypted_data.encrypted_data[0] ^= 0x01;
+    BOOST_CHECK(!tampered_encrypted_data.DecryptWithAad(
+        operator_kem.sk,
+        Span<const uint8_t>{metadata_aad.data(), metadata_aad.size()}).has_value());
+
+    CViewGrant tampered_nonce{grant};
+    tampered_nonce.nonce[0] ^= 0x01;
+    BOOST_CHECK(!tampered_nonce.DecryptWithAad(
+        operator_kem.sk,
+        Span<const uint8_t>{metadata_aad.data(), metadata_aad.size()}).has_value());
+
+    CViewGrant tampered_kem_ciphertext{grant};
+    tampered_kem_ciphertext.kem_ct[0] ^= 0x01;
+    BOOST_CHECK(!tampered_kem_ciphertext.DecryptWithAad(
+        operator_kem.sk,
+        Span<const uint8_t>{metadata_aad.data(), metadata_aad.size()}).has_value());
 }
 
 BOOST_AUTO_TEST_CASE(bridge_in_plan_omits_view_grants_when_not_requested)
@@ -252,6 +630,40 @@ BOOST_AUTO_TEST_CASE(bridge_disclosure_policy_adds_required_grants_when_threshol
     const auto plan = BuildBridgeInPlan(request);
     BOOST_REQUIRE(plan.has_value());
     BOOST_CHECK_EQUAL(plan->shielded_bundle.view_grants.size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(bridge_shield_settlement_reenforces_serialized_disclosure_policy_metadata)
+{
+    auto request = MakeBridgeInRequest();
+    const auto operator_kem = MakeKEMKey(0x9a);
+    request.disclosure_policy = BridgeDisclosurePolicy{
+        1,
+        3 * COIN,
+        {{BridgeViewGrantFormat::STRUCTURED_DISCLOSURE,
+          operator_kem.pk,
+          static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT | shielded::viewgrants::DISCLOSE_RECIPIENT)}}};
+
+    auto plan = BuildBridgeInPlan(request);
+    BOOST_REQUIRE(plan.has_value());
+    BOOST_REQUIRE_EQUAL(plan->view_grant_metadata.size(), 1U);
+
+    const int32_t postfork_height = Params().GetConsensus().nShieldedMatRiCTDisableHeight;
+    BOOST_CHECK(!ValidateBridgePlanViewGrantPolicy(*plan, postfork_height).has_value());
+
+    plan->disclosure_policy->required_grants[0].disclosure_flags =
+        static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT |
+                             shielded::viewgrants::DISCLOSE_RECIPIENT |
+                             shielded::viewgrants::DISCLOSE_SENDER);
+    BOOST_REQUIRE(plan->IsValid());
+    const auto error = ValidateBridgePlanViewGrantPolicy(*plan, postfork_height);
+    BOOST_REQUIRE(error.has_value());
+    BOOST_CHECK(error->find("disclosure_policy required grant is missing") != std::string::npos);
+    BOOST_CHECK(!CreateBridgeShieldSettlementTransaction(
+        *plan,
+        COutPoint{Txid::FromUint256(uint256{static_cast<unsigned char>(0x9a)}), 0},
+        -plan->shielded_bundle.value_balance + 2000,
+        &Params().GetConsensus(),
+        postfork_height).has_value());
 }
 
 BOOST_AUTO_TEST_CASE(bridge_disclosure_policy_is_ignored_below_threshold)
@@ -290,6 +702,39 @@ BOOST_AUTO_TEST_CASE(bridge_disclosure_policy_merges_duplicate_structured_grants
     BOOST_CHECK_EQUAL(request.operator_view_grants[0].disclosure_flags,
                       static_cast<uint8_t>(shielded::viewgrants::DISCLOSE_AMOUNT |
                                            shielded::viewgrants::DISCLOSE_RECIPIENT));
+}
+
+BOOST_AUTO_TEST_CASE(bridge_disclosure_policy_canonicalizes_resolved_grant_order)
+{
+    auto request = MakeBridgeInRequest();
+    const auto first_operator_kem = MakeKEMKey(0x9e);
+    const auto second_operator_kem = MakeKEMKey(0x9f);
+    request.operator_view_grants = {
+        {BridgeViewGrantFormat::STRUCTURED_DISCLOSURE, second_operator_kem.pk, shielded::viewgrants::DISCLOSE_SENDER},
+        {BridgeViewGrantFormat::STRUCTURED_DISCLOSURE, first_operator_kem.pk, shielded::viewgrants::DISCLOSE_AMOUNT},
+    };
+    auto expected = request.operator_view_grants;
+    std::sort(expected.begin(), expected.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.format != rhs.format) {
+            return static_cast<uint8_t>(lhs.format) < static_cast<uint8_t>(rhs.format);
+        }
+        if (!std::equal(lhs.recipient_pubkey.begin(), lhs.recipient_pubkey.end(), rhs.recipient_pubkey.begin())) {
+            return std::lexicographical_compare(lhs.recipient_pubkey.begin(),
+                                                lhs.recipient_pubkey.end(),
+                                                rhs.recipient_pubkey.begin(),
+                                                rhs.recipient_pubkey.end());
+        }
+        return lhs.disclosure_flags < rhs.disclosure_flags;
+    });
+
+    const auto error = ValidateAndApplyBridgeDisclosurePolicy(request);
+    BOOST_CHECK(!error.has_value());
+    BOOST_REQUIRE_EQUAL(request.operator_view_grants.size(), expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        BOOST_CHECK_EQUAL(request.operator_view_grants[i].format, expected[i].format);
+        BOOST_CHECK(request.operator_view_grants[i].recipient_pubkey == expected[i].recipient_pubkey);
+        BOOST_CHECK_EQUAL(request.operator_view_grants[i].disclosure_flags, expected[i].disclosure_flags);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(bridge_disclosure_policy_rejects_invalid_entries)

@@ -17,6 +17,7 @@
 #include <shielded/smile2/public_account.h>
 #include <shielded/v2_ingress.h>
 #include <sync.h>
+#include <support/allocators/secure.h>
 #include <uint256.h>
 #include <wallet/shielded_coins.h>
 
@@ -30,6 +31,7 @@
 
 class CBlock;
 class CTransaction;
+struct CViewGrant;
 
 namespace wallet {
 
@@ -191,6 +193,13 @@ struct ShieldedBalanceSummary
     int64_t spendable_note_count{0};
     int64_t recovery_only_note_count{0};
     int64_t watchonly_note_count{0};
+};
+
+struct ShieldedViewGrantDecryption
+{
+    ShieldedAddress address;
+    std::vector<unsigned char, secure_allocator<unsigned char>> plaintext;
+    bool metadata_authenticated{false};
 };
 
 /** Shielded wallet state manager layered over CWallet. */
@@ -430,6 +439,15 @@ public:
     /** Try decrypting a shielded_v2 output payload with local viewing keys. */
     [[nodiscard]] std::optional<ShieldedNote> TryDecryptNote(
         const shielded::v2::EncryptedNotePayload& enc_note) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
+    /** Try decrypting a bridge view grant with local viewing keys. */
+    [[nodiscard]] std::optional<ShieldedViewGrantDecryption> TryDecryptViewGrant(
+        const CViewGrant& grant) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    [[nodiscard]] std::optional<ShieldedViewGrantDecryption> TryDecryptViewGrant(
+        const CViewGrant& grant,
+        Span<const uint8_t> metadata_aad) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
 
     /** Lookup local note record by nullifier. */

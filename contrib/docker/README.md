@@ -61,6 +61,28 @@ docker logs btxd
 
 ---
 
+## Regtest Cluster Validation
+
+To stage two containerized regtest nodes on an isolated Docker network and run
+bidirectional relay/confirmation checks plus bridge view-grant planning,
+operator decrypt, settlement submission, mined-transaction grant retrieval, and
+recipient shielded-balance verification:
+
+```bash
+scripts/m12_docker_regtest_cluster.sh --build-image
+```
+
+The harness emits `.btx-validation/m12-docker-regtest-cluster.json` and removes
+only the temporary containers/network/datadirs it creates.
+
+The same gate is available through the focused CI target:
+
+```bash
+scripts/ci/run_ci_target.sh bridge-viewgrants
+```
+
+---
+
 ## Stop the Node
 
 ```bash

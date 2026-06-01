@@ -244,6 +244,8 @@ private:
  */
 int64_t GetMinimumTime(const CBlockIndex* pindexPrev, const Consensus::Params& consensus_params);
 
+std::optional<int64_t> GetMaximumTime(const CBlockIndex* pindexPrev, const Consensus::Params& consensus_params);
+
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev);
 
 /** Update an old GenerateCoinbaseCommitment from CreateNewBlock after the block txs have changed */

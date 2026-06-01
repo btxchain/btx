@@ -19,6 +19,7 @@
 #include <logging.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
+#include <shielded/bundle.h>
 #include <random.h>
 #include <shielded/ringct/matrict.h>
 #include <shielded/smile2/wallet_bridge.h>
@@ -6077,6 +6078,53 @@ std::optional<std::pair<ShieldedNote, const ShieldedKeySet*>> CShieldedWallet::T
         return std::make_pair(std::move(*first_match), first_keyset);
     }
     return std::nullopt;
+}
+
+std::optional<ShieldedViewGrantDecryption> CShieldedWallet::TryDecryptViewGrant(
+    const CViewGrant& grant) const
+{
+    AssertLockHeld(cs_shielded);
+    std::optional<ShieldedViewGrantDecryption> first_match;
+    for (const auto& [addr, keyset] : m_key_sets) {
+        auto plaintext = grant.Decrypt(keyset.kem_key.sk);
+        if (plaintext.has_value() && !first_match.has_value()) {
+            ShieldedViewGrantDecryption match;
+            match.address = addr;
+            match.plaintext.assign(plaintext->begin(), plaintext->end());
+            first_match = std::move(match);
+        }
+    }
+    return first_match;
+}
+
+std::optional<ShieldedViewGrantDecryption> CShieldedWallet::TryDecryptViewGrant(
+    const CViewGrant& grant,
+    Span<const uint8_t> metadata_aad) const
+{
+    AssertLockHeld(cs_shielded);
+    if (metadata_aad.empty()) return TryDecryptViewGrant(grant);
+
+    std::optional<ShieldedViewGrantDecryption> first_legacy_match;
+    for (const auto& [addr, keyset] : m_key_sets) {
+        auto plaintext = grant.DecryptWithAad(keyset.kem_key.sk, metadata_aad);
+        if (plaintext.has_value()) {
+            ShieldedViewGrantDecryption match;
+            match.address = addr;
+            match.plaintext.assign(plaintext->begin(), plaintext->end());
+            match.metadata_authenticated = true;
+            return match;
+        }
+
+        plaintext = grant.Decrypt(keyset.kem_key.sk);
+        if (plaintext.has_value() && !first_legacy_match.has_value()) {
+            ShieldedViewGrantDecryption match;
+            match.address = addr;
+            match.plaintext.assign(plaintext->begin(), plaintext->end());
+            match.metadata_authenticated = false;
+            first_legacy_match = std::move(match);
+        }
+    }
+    return first_legacy_match;
 }
 
 std::optional<std::pair<ShieldedNote, const ShieldedKeySet*>> CShieldedWallet::TryDecryptNoteFull(

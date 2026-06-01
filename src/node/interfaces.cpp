@@ -1028,8 +1028,24 @@ public:
 	            {
 	                LOCK(::cs_main);
 	                const CBlockIndex* const prev_index = chainman().m_blockman.LookupBlockIndex(block.hashPrevBlock);
-	                if (prev_index != nullptr && prev_index->nHeight < std::numeric_limits<int>::max()) {
-	                    next_height = prev_index->nHeight + 1;
+	                const CBlockIndex* const active_tip = chainman().ActiveChain().Tip();
+	                if (prev_index == nullptr || active_tip == nullptr || prev_index != active_tip) {
+	                    LogWarning("submitSolution: rejecting stale MatMul template before solve\n");
+	                    return false;
+	                }
+	                if (prev_index->nHeight == std::numeric_limits<int>::max()) {
+	                    LogWarning("submitSolution: rejecting MatMul template at height overflow boundary\n");
+	                    return false;
+	                }
+	                next_height = prev_index->nHeight + 1;
+	                if (block.GetBlockTime() < node::GetMinimumTime(prev_index, consensus)) {
+	                    LogWarning("submitSolution: rejecting MatMul solution with timestamp below minimum\n");
+	                    return false;
+	                }
+	                if (const auto max_time = node::GetMaximumTime(prev_index, consensus);
+	                    max_time.has_value() && block.GetBlockTime() > *max_time) {
+	                    LogWarning("submitSolution: rejecting MatMul solution with timestamp above maximum\n");
+	                    return false;
 	                }
 	            }
 	            // submitSolution callers currently cannot provide MatMul phase2 data.

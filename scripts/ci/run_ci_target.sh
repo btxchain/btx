@@ -9,7 +9,7 @@ target="${1:-}"
 
 if [[ -z "${target}" ]]; then
   echo "usage: scripts/ci/run_ci_target.sh <target>" >&2
-  echo "targets: lint tidy ctest fuzz functional-matmul sanitizer-smoke launch-blockers production-readiness platform-*" >&2
+  echo "targets: lint tidy ctest fuzz functional-matmul bridge-viewgrants sanitizer-smoke launch-blockers production-readiness platform-*" >&2
   exit 1
 fi
 
@@ -352,6 +352,18 @@ run_production_readiness() {
   scripts/matmul_pow_benchmark.sh
 }
 
+run_bridge_viewgrants() {
+  ensure_core_build "build-btx"
+  cmake --build build-btx --target btxd btx-cli test_btx -j"$(nproc_detect)"
+  ulimit -n 10240 >/dev/null 2>&1 || true
+  build-btx/bin/test_btx --run_test=bridge_wallet_tests
+  test/functional/test_runner.py --configfile=build-btx/test/config.ini wallet_bridge_planin.py --descriptors
+  test/functional/test_runner.py --configfile=build-btx/test/config.ini wallet_bridge_viewgrant.py --descriptors
+  test/functional/test_runner.py --configfile=build-btx/test/config.ini --jobs=2 wallet_bridge_happy_path.py wallet_bridge_batch_in.py --descriptors
+  ensure_docker
+  scripts/m12_docker_regtest_cluster.sh --build-image --timeout-seconds "${BTX_BRIDGE_VIEWGRANTS_DOCKER_TIMEOUT_SECONDS:-300}"
+}
+
 run_platform_macos_native() {
   run_platform_ci_env "./ci/test/00_setup_env_mac_native.sh" "true"
 }
@@ -423,6 +435,9 @@ case "${target}" in
     ;;
   functional-matmul)
     run_functional_matmul
+    ;;
+  bridge-viewgrants)
+    run_bridge_viewgrants
     ;;
   sanitizer-smoke)
     run_sanitizer_smoke

@@ -376,6 +376,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "bridge_planin", 3, "options" },
     { "bridge_planbatchin", 2, "leaves" },
     { "bridge_planbatchin", 3, "options" },
+    { "bridge_decryptviewgrant", 0, "view_grant", true },
+    { "bridge_decryptviewgrant", 2, "expected" },
     { "bridge_planout", 3, "amount" },
     { "bridge_planout", 4, "options" },
     { "bridge_planbatchout", 2, "payouts" },

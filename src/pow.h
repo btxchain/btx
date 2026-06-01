@@ -132,6 +132,7 @@ bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params&
 bool CheckProofOfWorkImpl(uint256 hash, unsigned int nBits, const Consensus::Params&);
 int64_t ExpectedDgwTimespan(int32_t height, const Consensus::Params& params);
 bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::Params& params);
+bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height);
 bool CheckMatMulProofOfWork_Phase2(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height = -1);
 bool CheckMatMulProofOfWork_Phase2WithPayload(const CBlock& block, const Consensus::Params& params, int32_t block_height = -1);
 /** Freivalds' O(n^2) probabilistic verification of MatMul PoW using the

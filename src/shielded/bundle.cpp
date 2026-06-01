@@ -26,6 +26,7 @@
 namespace {
 constexpr const char* VIEW_GRANT_SALT{"BTX-Shielded-ViewGrant"};
 constexpr const char* VIEW_GRANT_INFO{"BTX-ViewGrant-V1"};
+constexpr const char* VIEW_GRANT_AAD_V2_DOMAIN{"BTX-ViewGrant-AAD-V2"};
 constexpr const char* CTV_V2_BUNDLE_TAG{"BTX-CTV-Shielded-Bundle-V2"};
 // Verify cost units calibrated for SMILE v2 lattice proofs.
 // SMILE amortizes membership + balance + range across all inputs in a single
@@ -160,25 +161,28 @@ constexpr uint64_t SHIELDED_VERIFY_UNITS_PER_SETTLEMENT_PROOF{100};
     return (SHIELDED_VERIFY_UNITS_PER_DIRECT_SPEND * static_cast<uint64_t>(ring_size)) /
            static_cast<uint64_t>(shielded::lattice::DEFAULT_RING_SIZE);
 }
-} // namespace
 
-CViewGrant CViewGrant::Create(Span<const uint8_t> view_key, const mlkem::PublicKey& operator_pk)
+[[nodiscard]] std::vector<uint8_t> BuildViewGrantMetadataAad(const mlkem::Ciphertext& kem_ct,
+                                                             Span<const uint8_t> metadata_aad)
 {
-    std::array<uint8_t, mlkem::ENCAPS_SEEDBYTES> kem_seed;
-    std::array<uint8_t, 12> nonce;
-    GetStrongRandBytes(Span<unsigned char>{kem_seed.data(), kem_seed.size()});
-    GetStrongRandBytes(Span<unsigned char>{nonce.data(), nonce.size()});
+    HashWriter hw;
+    hw << std::string{VIEW_GRANT_AAD_V2_DOMAIN};
+    hw.write(AsBytes(metadata_aad));
+    const uint256 metadata_hash = hw.GetSHA256();
 
-    auto result = CreateDeterministic(view_key, operator_pk, kem_seed, nonce);
-    memory_cleanse(kem_seed.data(), kem_seed.size());
-    memory_cleanse(nonce.data(), nonce.size());
-    return result;
+    std::vector<uint8_t> aad;
+    aad.reserve(kem_ct.size() + metadata_hash.size());
+    aad.insert(aad.end(), kem_ct.begin(), kem_ct.end());
+    aad.insert(aad.end(), metadata_hash.begin(), metadata_hash.end());
+    return aad;
 }
 
-CViewGrant CViewGrant::CreateDeterministic(Span<const uint8_t> view_key,
-                                           const mlkem::PublicKey& operator_pk,
-                                           Span<const uint8_t> kem_seed,
-                                           Span<const uint8_t> nonce)
+[[nodiscard]] CViewGrant CreateDeterministicViewGrant(Span<const uint8_t> view_key,
+                                                      const mlkem::PublicKey& operator_pk,
+                                                      Span<const uint8_t> kem_seed,
+                                                      Span<const uint8_t> nonce,
+                                                      Span<const uint8_t> metadata_aad,
+                                                      bool bind_metadata_aad)
 {
     const size_t max_view_key_size = MAX_VIEW_GRANT_ENCRYPTED_DATA_SIZE - AEADChaCha20Poly1305::EXPANSION;
     if (view_key.size() > max_view_key_size) {
@@ -189,6 +193,9 @@ CViewGrant CViewGrant::CreateDeterministic(Span<const uint8_t> view_key,
     }
     if (nonce.size() != 12) {
         throw std::invalid_argument("CViewGrant::CreateDeterministic nonce must be 12 bytes");
+    }
+    if (bind_metadata_aad && metadata_aad.empty()) {
+        throw std::invalid_argument("CViewGrant::CreateDeterministic metadata_aad must not be empty");
     }
 
     auto kem = mlkem::EncapsDerand(operator_pk, kem_seed);
@@ -207,8 +214,11 @@ CViewGrant CViewGrant::CreateDeterministic(Span<const uint8_t> view_key,
         const uint32_t nonce_prefix = ReadLE32(out.nonce.data());
         const uint64_t nonce_suffix = ReadLE64(out.nonce.data() + 4);
         const AEADChaCha20Poly1305::Nonce96 nonce96{nonce_prefix, nonce_suffix};
+        const std::vector<uint8_t> aad = bind_metadata_aad
+            ? BuildViewGrantMetadataAad(out.kem_ct, metadata_aad)
+            : std::vector<uint8_t>{};
         aead.Encrypt(AsBytes(view_key),
-                     MakeByteSpan(out.kem_ct),
+                     bind_metadata_aad ? MakeByteSpan(aad) : MakeByteSpan(out.kem_ct),
                      nonce96,
                      MakeWritableByteSpan(out.encrypted_data));
     }
@@ -218,31 +228,41 @@ CViewGrant CViewGrant::CreateDeterministic(Span<const uint8_t> view_key,
     return out;
 }
 
-std::optional<CViewGrant::SecureBytes> CViewGrant::Decrypt(const mlkem::SecretKey& operator_sk) const
+[[nodiscard]] std::optional<CViewGrant::SecureBytes> DecryptViewGrant(const CViewGrant& grant,
+                                                                      const mlkem::SecretKey& operator_sk,
+                                                                      Span<const uint8_t> metadata_aad,
+                                                                      bool bind_metadata_aad)
 {
-    if (encrypted_data.size() > MAX_VIEW_GRANT_ENCRYPTED_DATA_SIZE) {
+    if (grant.encrypted_data.size() > MAX_VIEW_GRANT_ENCRYPTED_DATA_SIZE) {
         return std::nullopt;
     }
-    if (encrypted_data.size() < AEADChaCha20Poly1305::EXPANSION) {
+    if (grant.encrypted_data.size() < AEADChaCha20Poly1305::EXPANSION) {
+        return std::nullopt;
+    }
+    if (bind_metadata_aad && metadata_aad.empty()) {
         return std::nullopt;
     }
 
-    auto ss = mlkem::Decaps(kem_ct, operator_sk);
+    auto ss = mlkem::Decaps(grant.kem_ct, operator_sk);
 
     std::vector<uint8_t, secure_allocator<uint8_t>> aead_key(32, 0);
     CHKDF_HMAC_SHA256_L32 hkdf(ss.data(), ss.size(), VIEW_GRANT_SALT);
     hkdf.Expand32(VIEW_GRANT_INFO, aead_key.data());
 
     // R5-212: Use secure_allocator to prevent plaintext from being paged to swap.
-    std::vector<uint8_t, secure_allocator<uint8_t>> plaintext_secure(encrypted_data.size() - AEADChaCha20Poly1305::EXPANSION);
+    std::vector<uint8_t, secure_allocator<uint8_t>> plaintext_secure(
+        grant.encrypted_data.size() - AEADChaCha20Poly1305::EXPANSION);
     bool ok{false};
     {
         AEADChaCha20Poly1305 aead(MakeByteSpan(aead_key));
-        const uint32_t nonce_prefix = ReadLE32(nonce.data());
-        const uint64_t nonce_suffix = ReadLE64(nonce.data() + 4);
+        const uint32_t nonce_prefix = ReadLE32(grant.nonce.data());
+        const uint64_t nonce_suffix = ReadLE64(grant.nonce.data() + 4);
         const AEADChaCha20Poly1305::Nonce96 nonce96{nonce_prefix, nonce_suffix};
-        ok = aead.Decrypt(MakeByteSpan(encrypted_data),
-                          MakeByteSpan(kem_ct),
+        const std::vector<uint8_t> aad = bind_metadata_aad
+            ? BuildViewGrantMetadataAad(grant.kem_ct, metadata_aad)
+            : std::vector<uint8_t>{};
+        ok = aead.Decrypt(MakeByteSpan(grant.encrypted_data),
+                          bind_metadata_aad ? MakeByteSpan(aad) : MakeByteSpan(grant.kem_ct),
                           nonce96,
                           MakeWritableByteSpan(plaintext_secure));
     }
@@ -257,6 +277,75 @@ std::optional<CViewGrant::SecureBytes> CViewGrant::Decrypt(const mlkem::SecretKe
     CViewGrant::SecureBytes result(plaintext_secure.begin(), plaintext_secure.end());
     memory_cleanse(plaintext_secure.data(), plaintext_secure.size());
     return result;
+}
+} // namespace
+
+CViewGrant CViewGrant::Create(Span<const uint8_t> view_key, const mlkem::PublicKey& operator_pk)
+{
+    std::array<uint8_t, mlkem::ENCAPS_SEEDBYTES> kem_seed;
+    std::array<uint8_t, 12> nonce;
+    GetStrongRandBytes(Span<unsigned char>{kem_seed.data(), kem_seed.size()});
+    GetStrongRandBytes(Span<unsigned char>{nonce.data(), nonce.size()});
+
+    auto result = CreateDeterministic(view_key, operator_pk, kem_seed, nonce);
+    memory_cleanse(kem_seed.data(), kem_seed.size());
+    memory_cleanse(nonce.data(), nonce.size());
+    return result;
+}
+
+CViewGrant CViewGrant::CreateWithAad(Span<const uint8_t> view_key,
+                                     const mlkem::PublicKey& operator_pk,
+                                     Span<const uint8_t> metadata_aad)
+{
+    std::array<uint8_t, mlkem::ENCAPS_SEEDBYTES> kem_seed;
+    std::array<uint8_t, 12> nonce;
+    GetStrongRandBytes(Span<unsigned char>{kem_seed.data(), kem_seed.size()});
+    GetStrongRandBytes(Span<unsigned char>{nonce.data(), nonce.size()});
+
+    auto result = CreateDeterministicWithAad(view_key, operator_pk, kem_seed, nonce, metadata_aad);
+    memory_cleanse(kem_seed.data(), kem_seed.size());
+    memory_cleanse(nonce.data(), nonce.size());
+    return result;
+}
+
+CViewGrant CViewGrant::CreateDeterministic(Span<const uint8_t> view_key,
+                                           const mlkem::PublicKey& operator_pk,
+                                           Span<const uint8_t> kem_seed,
+                                           Span<const uint8_t> nonce)
+{
+    return CreateDeterministicViewGrant(
+        view_key,
+        operator_pk,
+        kem_seed,
+        nonce,
+        {},
+        /*bind_metadata_aad=*/false);
+}
+
+CViewGrant CViewGrant::CreateDeterministicWithAad(Span<const uint8_t> view_key,
+                                                  const mlkem::PublicKey& operator_pk,
+                                                  Span<const uint8_t> kem_seed,
+                                                  Span<const uint8_t> nonce,
+                                                  Span<const uint8_t> metadata_aad)
+{
+    return CreateDeterministicViewGrant(
+        view_key,
+        operator_pk,
+        kem_seed,
+        nonce,
+        metadata_aad,
+        /*bind_metadata_aad=*/true);
+}
+
+std::optional<CViewGrant::SecureBytes> CViewGrant::Decrypt(const mlkem::SecretKey& operator_sk) const
+{
+    return DecryptViewGrant(*this, operator_sk, {}, /*bind_metadata_aad=*/false);
+}
+
+std::optional<CViewGrant::SecureBytes> CViewGrant::DecryptWithAad(const mlkem::SecretKey& operator_sk,
+                                                                  Span<const uint8_t> metadata_aad) const
+{
+    return DecryptViewGrant(*this, operator_sk, metadata_aad, /*bind_metadata_aad=*/true);
 }
 
 bool CShieldedBundle::IsEmpty() const

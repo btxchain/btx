@@ -70,6 +70,7 @@
 #include <wallet/db.h>
 #include <wallet/external_signer_scriptpubkeyman.h>
 #include <wallet/scriptpubkeyman.h>
+#include <wallet/shielded_privacy.h>
 #include <wallet/shielded_wallet.h>
 #include <wallet/transaction.h>
 #include <wallet/types.h>
@@ -194,6 +195,14 @@ struct PendingBridgeCommitResult
 {
     if (operation.refund_destination.empty()) return false;
     return IsValidDestination(DecodeDestination(operation.refund_destination));
+}
+
+[[nodiscard]] bool PendingBridgeRequiresAcceptedPlanViewGrants(const BridgePendingOperation& operation,
+                                                               int32_t build_height)
+{
+    return operation.plan.kind == shielded::BridgeTemplateKind::SHIELD &&
+           !operation.plan.shielded_bundle.view_grants.empty() &&
+           UseShieldedPrivacyRedesignAtHeight(build_height);
 }
 
 [[nodiscard]] PendingBridgeWalletTxStatus GetPendingBridgeWalletTxStatus(const CWallet& wallet,
@@ -347,7 +356,12 @@ struct PendingBridgeCommitResult
 
 bool BridgePendingOperation::IsValid() const
 {
-    if (version != 1 || !plan.IsValid() || funding_outpoint.IsNull()) return false;
+    if (version < BridgePendingOperation::LEGACY_VERSION ||
+        version > BridgePendingOperation::CURRENT_VERSION ||
+        !plan.IsValid() ||
+        funding_outpoint.IsNull()) {
+        return false;
+    }
     if (!MoneyRange(funding_amount) || funding_amount <= 0) return false;
     if (!MoneyRange(refund_fee) || refund_fee < 0) return false;
     if (!refund_destination.empty() && !PendingBridgeHasValidRefundDestination(*this)) return false;
@@ -3759,13 +3773,20 @@ std::vector<BridgePendingRecoveryResult> CWallet::RecoverPendingBridgeOperations
                 operation.last_error = "Failed to construct bridge refund PSBT";
             }
         } else if (operation.plan.kind == shielded::BridgeTemplateKind::SHIELD) {
-            psbt = CreateBridgeShieldSettlementTransaction(operation.plan,
-                                                           operation.funding_outpoint,
-                                                           operation.funding_amount,
-                                                           &Params().GetConsensus(),
-                                                           build_height);
-            if (!psbt.has_value()) {
-                operation.last_error = "Failed to construct bridge shield settlement PSBT";
+            if (PendingBridgeRequiresAcceptedPlanViewGrants(operation, build_height) &&
+                !operation.accepted_plan_view_grants) {
+                operation.last_error =
+                    "Pending bridge shield plan contains view grants after shielded privacy redesign; re-import with accept_plan_view_grants=true";
+            } else {
+                psbt = CreateBridgeShieldSettlementTransaction(operation.plan,
+                                                               operation.funding_outpoint,
+                                                               operation.funding_amount,
+                                                               &Params().GetConsensus(),
+                                                               build_height,
+                                                               operation.plan.allow_legacy_audit_view_grants);
+                if (!psbt.has_value()) {
+                    operation.last_error = "Failed to construct bridge shield settlement PSBT";
+                }
             }
         } else {
             psbt = CreateBridgeUnshieldSettlementTransaction(operation.plan,

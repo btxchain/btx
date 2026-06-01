@@ -372,6 +372,11 @@ struct ResetMockTimeGuard {
     }
 };
 
+bool RuntimeErrorContains(const std::exception& e, const std::string& needle)
+{
+    return std::string{e.what()}.find(needle) != std::string::npos;
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(matmul_mining_tests, MatMulMiningTestingSetup)
@@ -402,6 +407,12 @@ BOOST_AUTO_TEST_CASE(getblocktemplate_includes_matmul_params)
     BOOST_CHECK_EQUAL(capacity.find_value("remaining_shielded_scan_units").getInt<int64_t>(), static_cast<int64_t>(consensus.nMaxBlockShieldedScanUnits));
     BOOST_CHECK_EQUAL(capacity.find_value("remaining_shielded_tree_update_units").getInt<int64_t>(), static_cast<int64_t>(consensus.nMaxBlockShieldedTreeUpdateUnits));
 
+    const auto time_policy = tmpl.find_value("time_policy").get_obj();
+    BOOST_CHECK_EQUAL(time_policy.find_value("height").getInt<int>(), ActiveHeight() + 1);
+    BOOST_CHECK_EQUAL(time_policy.find_value("mintime").getInt<int64_t>(), tmpl.find_value("mintime").getInt<int64_t>());
+    BOOST_CHECK_EQUAL(time_policy.find_value("curtime").getInt<int64_t>(), tmpl.find_value("curtime").getInt<int64_t>());
+    BOOST_CHECK(time_policy.find_value("recommended_action").isStr());
+
     const auto matmul = tmpl.find_value("matmul").get_obj();
     BOOST_CHECK_EQUAL(matmul.find_value("n").getInt<int>(), static_cast<int>(consensus.nMatMulDimension));
     BOOST_CHECK_EQUAL(matmul.find_value("b").getInt<int>(), static_cast<int>(consensus.nMatMulTranscriptBlockSize));
@@ -418,20 +429,28 @@ BOOST_AUTO_TEST_CASE(getblocktemplate_includes_matmul_params)
     BOOST_CHECK_EQUAL(seed_b.size(), 64U);
     BOOST_CHECK(seed_a != std::string(64, '0'));
     BOOST_CHECK(seed_b != std::string(64, '0'));
+
+    const auto mutable_fields = tmpl.find_value("mutable").get_array();
+    bool saw_nonce64{false};
+    bool saw_prevblock{false};
+    for (unsigned int i = 0; i < mutable_fields.size(); ++i) {
+        saw_nonce64 |= mutable_fields[i].get_str() == "nonce64";
+        saw_prevblock |= mutable_fields[i].get_str() == "prevblock";
+    }
+    BOOST_CHECK(saw_nonce64);
+    BOOST_CHECK(!saw_prevblock);
 }
 
 BOOST_AUTO_TEST_CASE(getblocktemplate_reports_chain_guard_pause_for_external_miners)
 {
     SetMiningChainGuard(true);
 
-    const auto tmpl = CallRPC("getblocktemplate", GBTParams()).get_obj();
-    const auto chain_guard = tmpl.find_value("chain_guard").get_obj();
-
-    BOOST_CHECK(chain_guard.find_value("enabled").get_bool());
-    BOOST_CHECK(!chain_guard.find_value("healthy").get_bool());
-    BOOST_CHECK(chain_guard.find_value("should_pause_mining").get_bool());
-    BOOST_CHECK_EQUAL(chain_guard.find_value("recommended_action").get_str(), "catch_up");
-    BOOST_CHECK(tmpl.exists("previousblockhash"));
+    BOOST_CHECK_EXCEPTION(
+        CallRPC("getblocktemplate", GBTParams()),
+        std::runtime_error,
+        [](const std::runtime_error& e) {
+            return RuntimeErrorContains(e, "mining paused by chain guard");
+        });
 }
 
 // TEST: rpc_getmininginfo_algorithm
@@ -455,6 +474,44 @@ BOOST_AUTO_TEST_CASE(getmininginfo_reports_matmul_algorithm)
     BOOST_CHECK_EQUAL(info.find_value("matmul_n").getInt<int>(), static_cast<int>(consensus.nMatMulDimension));
     BOOST_CHECK_EQUAL(info.find_value("matmul_b").getInt<int>(), static_cast<int>(consensus.nMatMulTranscriptBlockSize));
     BOOST_CHECK_EQUAL(info.find_value("matmul_r").getInt<int>(), static_cast<int>(consensus.nMatMulNoiseRank));
+
+    const auto time_policy = info.find_value("time_policy").get_obj();
+    BOOST_CHECK_EQUAL(time_policy.find_value("height").getInt<int>(), ActiveHeight() + 1);
+    BOOST_CHECK(time_policy.find_value("future_mtp_limit_active").isBool());
+    BOOST_CHECK(time_policy.find_value("recommended_action").isStr());
+}
+
+BOOST_AUTO_TEST_CASE(getmatmulchallenge_reports_chain_guard_and_time_policy)
+{
+    SetMiningChainGuard(false);
+    const auto challenge = CallRPC("getmatmulchallenge").get_obj();
+
+    BOOST_CHECK_EQUAL(challenge.find_value("algorithm").get_str(), "matmul");
+    BOOST_CHECK_EQUAL(challenge.find_value("height").getInt<int>(), ActiveHeight() + 1);
+
+    const auto chain_guard = challenge.find_value("chain_guard").get_obj();
+    BOOST_CHECK(!chain_guard.find_value("should_pause_mining").get_bool());
+
+    const auto time_policy = challenge.find_value("time_policy").get_obj();
+    const auto header_context = challenge.find_value("header_context").get_obj();
+    BOOST_CHECK_EQUAL(time_policy.find_value("height").getInt<int>(), challenge.find_value("height").getInt<int>());
+    BOOST_CHECK_EQUAL(time_policy.find_value("mintime").getInt<int64_t>(), challenge.find_value("mintime").getInt<int64_t>());
+    BOOST_CHECK_EQUAL(time_policy.find_value("curtime").getInt<int64_t>(), header_context.find_value("time").getInt<int64_t>());
+    if (challenge.exists("maxtime")) {
+        BOOST_CHECK_EQUAL(time_policy.find_value("maxtime").getInt<int64_t>(), challenge.find_value("maxtime").getInt<int64_t>());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(getmatmulchallenge_pauses_when_chain_guard_requests_stop)
+{
+    SetMiningChainGuard(true);
+
+    BOOST_CHECK_EXCEPTION(
+        CallRPC("getmatmulchallenge"),
+        std::runtime_error,
+        [](const std::runtime_error& e) {
+            return RuntimeErrorContains(e, "mining paused by chain guard");
+        });
 }
 
 // TEST: mining_generate_block
@@ -511,18 +568,43 @@ BOOST_AUTO_TEST_CASE(submitblock_pauses_when_chain_guard_requests_stop)
 {
     SetMiningChainGuard(false);
     const int old_height = ActiveHeight();
-    const auto generated = CallRPC("generateblock", GenerateBlockParams(/*submit=*/false)).get_obj();
-    const std::string block_hex = generated.find_value("hex").get_str();
 
     SetMiningChainGuard(true);
 
     UniValue submit_params{UniValue::VARR};
-    submit_params.push_back(block_hex);
+    submit_params.push_back("00");
     const UniValue submit_result = CallRPC("submitblock", std::move(submit_params));
 
     BOOST_CHECK(submit_result.isStr());
     BOOST_CHECK_EQUAL(submit_result.get_str(), "paused-chain-guard-catch_up");
     BOOST_CHECK_EQUAL(ActiveHeight(), old_height);
+}
+
+BOOST_AUTO_TEST_CASE(submitblock_rejects_oversized_hex_before_decode)
+{
+    SetMiningChainGuard(false);
+    const std::string oversized_hex(static_cast<size_t>(MAX_BLOCK_SERIALIZED_SIZE) * 2 + 2, '0');
+
+    UniValue submit_params{UniValue::VARR};
+    submit_params.push_back(oversized_hex);
+    BOOST_CHECK_EXCEPTION(
+        CallRPC("submitblock", std::move(submit_params)),
+        std::runtime_error,
+        [](const std::runtime_error& e) {
+            return RuntimeErrorContains(e, "exceeds maximum serialized block size");
+        });
+
+    UniValue proposal{UniValue::VOBJ};
+    proposal.pushKV("mode", "proposal");
+    proposal.pushKV("data", oversized_hex);
+    UniValue proposal_params{UniValue::VARR};
+    proposal_params.push_back(std::move(proposal));
+    BOOST_CHECK_EXCEPTION(
+        CallRPC("getblocktemplate", std::move(proposal_params)),
+        std::runtime_error,
+        [](const std::runtime_error& e) {
+            return RuntimeErrorContains(e, "exceeds maximum serialized block size");
+        });
 }
 
 // TEST: mining_reject_tampered
@@ -576,6 +658,34 @@ BOOST_AUTO_TEST_CASE(submitblock_requires_freivalds_payload_when_consensus_deman
     BOOST_CHECK(submit_result.isStr());
     BOOST_CHECK_EQUAL(submit_result.get_str(), "missing-product-payload");
     BOOST_CHECK_EQUAL(ActiveHeight(), old_height);
+
+    UniValue retry_params{UniValue::VARR};
+    retry_params.push_back(generated.find_value("hex").get_str());
+    const UniValue retry_result = CallRPC("submitblock", std::move(retry_params));
+
+    BOOST_CHECK(retry_result.isNull());
+    BOOST_CHECK_EQUAL(ActiveHeight(), old_height + 1);
+    BOOST_CHECK_EQUAL(generated.find_value("hash").get_str(), ActiveTipHash().GetHex());
+}
+
+BOOST_AUTO_TEST_CASE(submitheader_rejects_matmul_header_only_work)
+{
+    SetMiningChainGuard(false);
+    const auto generated = CallRPC("generateblock", GenerateBlockParams(/*submit=*/false)).get_obj();
+    CBlock block;
+    BOOST_REQUIRE(DecodeHexBlkCompat(block, generated.find_value("hex").get_str()));
+
+    DataStream header_stream{};
+    header_stream << block.GetBlockHeader();
+
+    UniValue params{UniValue::VARR};
+    params.push_back(HexStr(header_stream));
+    BOOST_CHECK_EXCEPTION(
+        CallRPC("submitheader", std::move(params)),
+        std::runtime_error,
+        [](const std::runtime_error& e) {
+            return RuntimeErrorContains(e, "submitheader is not supported on MatMul");
+        });
 }
 
 // TEST: rpc_matmul_service_profile_runtime_observability

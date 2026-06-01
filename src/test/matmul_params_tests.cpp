@@ -12,6 +12,7 @@
 
 #include <boost/test/unit_test.hpp>
 #include <cstdint>
+#include <limits>
 
 namespace {
 
@@ -45,6 +46,8 @@ BOOST_AUTO_TEST_CASE(matmul_params_defaults_mainnet)
     BOOST_CHECK_EQUAL(c.nMatMulNoiseRank, 8U);
     BOOST_CHECK_EQUAL(c.nMatMulFieldModulus, 0x7FFFFFFFU);
     BOOST_CHECK_EQUAL(c.nMatMulValidationWindow, 1000U);
+    BOOST_CHECK_EQUAL(c.nMatMulMaxFutureMtpDriftHeight, 118'482);
+    BOOST_CHECK_EQUAL(c.nMatMulMaxFutureMtpDrift, 3'600);
 }
 
 BOOST_AUTO_TEST_CASE(matmul_product_payload_requirement_matches_live_network_policy)
@@ -112,6 +115,7 @@ BOOST_AUTO_TEST_CASE(matmul_params_regtest)
     BOOST_CHECK_EQUAL(c.nMatMulDimension, 64U);
     BOOST_CHECK_EQUAL(c.nMatMulTranscriptBlockSize, 8U);
     BOOST_CHECK_EQUAL(c.nMatMulNoiseRank, 4U);
+    BOOST_CHECK_EQUAL(c.nMatMulMaxFutureMtpDriftHeight, std::numeric_limits<int32_t>::max());
 }
 
 BOOST_AUTO_TEST_CASE(matmul_params_shieldedv2dev)

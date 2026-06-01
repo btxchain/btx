@@ -483,13 +483,23 @@ int64_t GetMinimumTime(const CBlockIndex* pindexPrev, const Consensus::Params& c
     return min_time;
 }
 
+std::optional<int64_t> GetMaximumTime(const CBlockIndex* pindexPrev, const Consensus::Params& consensus_params)
+{
+    return consensus_params.MatMulFutureBlockTimeLimit(pindexPrev->GetMedianTimePast());
+}
+
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev)
 {
     int64_t nOldTime = pblock->nTime;
-    int64_t nNewTime{std::max<int64_t>(GetMinimumTime(pindexPrev, consensusParams),
+    const int64_t min_time{GetMinimumTime(pindexPrev, consensusParams)};
+    int64_t nNewTime{std::max<int64_t>(min_time,
                                        TicksSinceEpoch<std::chrono::seconds>(NodeClock::now()))};
+    const auto max_time{GetMaximumTime(pindexPrev, consensusParams)};
+    if (max_time.has_value() && nNewTime > *max_time) {
+        nNewTime = std::max(min_time, *max_time);
+    }
 
-    if (nOldTime < nNewTime) {
+    if (nOldTime < nNewTime || (max_time.has_value() && nOldTime > *max_time)) {
         pblock->nTime = nNewTime;
     }
 

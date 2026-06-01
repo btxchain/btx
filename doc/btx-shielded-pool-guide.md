@@ -487,6 +487,21 @@ revealing the transaction to the public.
 
 Up to 8 view grants per transaction.
 
+Bridge operators can decrypt grants addressed to a shielded key in their local
+wallet without exporting raw viewing keys. For current bridge grants, pass the
+full grant object returned by `bridge_planin` or `bridge_planbatchin`; the public
+metadata fields are authenticated as AEAD AAD and are required for decryption.
+
+```bash
+btx-cli -rpcwallet=operator bridge_decryptviewgrant \
+  '{"view_grant_hex":"<hex>","kem_ciphertext":"<hex>","nonce":"<hex>","encrypted_data":"<hex>","format":"structured_disclosure","recipient_pubkey":"<operator-kem-pubkey>","disclosure_fields":["amount","recipient","sender"]}' \
+  structured_disclosure
+```
+
+When retrieving a grant from decoded transaction JSON, combine the mined grant's
+ciphertext fields with the saved plan metadata (`format`, `recipient_pubkey`,
+and `disclosure_fields`) before calling `bridge_decryptviewgrant`.
+
 ### Exporting and Importing Viewing Keys
 
 ```bash

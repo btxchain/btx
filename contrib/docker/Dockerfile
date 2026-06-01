@@ -54,12 +54,14 @@ COPY --from=builder /usr/local/bin/btxd     /usr/local/bin/btxd
 COPY --from=builder /usr/local/bin/btx-cli  /usr/local/bin/btx-cli
 
 RUN addgroup -S btx && \
-    adduser -S -G btx -H -s /bin/false btx
+    adduser -S -G btx -H -s /bin/false btx && \
+    mkdir -p /etc/btx /var/lib/btxd && \
+    chown -R btx:btx /etc/btx /var/lib/btxd
 
 WORKDIR /var/lib/btxd
 EXPOSE 19335 19334
 USER btx
-VOLUME ["/var/lib/btxd", "/etc/btx/btx.conf"]
+VOLUME ["/var/lib/btxd"]
 
 ENTRYPOINT ["btxd", "-conf=/etc/btx/btx.conf", "-datadir=/var/lib/btxd"]
 
