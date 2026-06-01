@@ -51,6 +51,9 @@ Notable changes
   Docker regtest, documentation, and CI-path-filter gates for the shielded
   bridge surfaces.
 
+- Mainnet snapshot, checkpoint, `minimumchainwork`, and `assumevalid` metadata
+  have been refreshed to height 118,225 for the 0.30.2 fast-start release.
+
 ## Credits
 
 Thanks to everyone who contributed code, testing, operational validation, and
