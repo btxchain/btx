@@ -2073,10 +2073,11 @@ bool ShouldUseLegacyTranscriptPipeline(const btx::metal::MatMulDigestRequest& re
     case MetalTranscriptPipelineMode::FUSED:
         return !fused_available && legacy_available;
     case MetalTranscriptPipelineMode::AUTO:
-        if (!legacy_available) return false;
-        if (!fused_available) return true;
-        // Large production dimensions regress on fused+GPU hash on M1 class devices.
-        return request.n >= 128;
+        // Prefer the legacy GPU-compute + CPU-finalize path for consensus safety.
+        // The fused GPU-hash transcript path is retained behind the explicit
+        // BTX_MATMUL_METAL_PIPELINE=fused override, but it is not byte-exact on
+        // this Apple Silicon host for small transcript fixtures.
+        return legacy_available;
     }
 
     return false;
