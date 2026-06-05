@@ -153,6 +153,21 @@ enum : uint32_t {
     // Disable ML-DSA script paths (OP_CHECKSIG_MLDSA / OP_CHECKSIGADD_MLDSA).
     SCRIPT_VERIFY_DISALLOW_MLDSA = (1U << 23),
 
+    // Verify SLH-DSA signatures as finalized FIPS-205 (pure mode, empty context:
+    // message preconditioned to 0x00||0x00||sighash) instead of the legacy
+    // round-3.x SPHINCS+ reference (bare sighash). Activated at the C-002 height.
+    SCRIPT_VERIFY_SLHDSA_FIPS205 = (1U << 24),
+
+    // Reject legacy non-post-quantum signature operations (secp256k1 ECDSA via
+    // OP_CHECKSIG in BASE/WITNESS_V0, and Schnorr in TAPSCRIPT). BTX is PQ-only:
+    // consensus already forbids non-witness-v2-P2MR outputs from genesis
+    // (fReducedDataLimits + fEnforceP2MROnlyOutputs), so the EC/Schnorr CHECKSIG
+    // paths are unreachable dead code; this flag enforces that invariant at the
+    // signature-verification layer too (defense in depth). Set wherever the
+    // P2MR-only output rule is enforced. PQ CHECKSIG (OP_CHECKSIG_MLDSA/SLHDSA in
+    // P2MR) is unaffected.
+    SCRIPT_VERIFY_REJECT_LEGACY_SIGS = (1U << 25),
+
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
     SCRIPT_VERIFY_END_MARKER
@@ -294,7 +309,7 @@ public:
         return false;
     }
 
-    virtual bool CheckPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, uint8_t hash_type, SigVersion sigversion, ScriptExecutionData& execdata) const
+    virtual bool CheckPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, uint8_t hash_type, SigVersion sigversion, ScriptExecutionData& execdata, bool slhdsa_fips205 = false) const
     {
         return false;
     }
@@ -343,14 +358,14 @@ private:
 protected:
     virtual bool VerifyECDSASignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
     virtual bool VerifySchnorrSignature(Span<const unsigned char> sig, const XOnlyPubKey& pubkey, const uint256& sighash) const;
-    virtual bool VerifyPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, const uint256& sighash) const;
+    virtual bool VerifyPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, const uint256& sighash, bool slhdsa_fips205 = false) const;
 
 public:
     GenericTransactionSignatureChecker(const T* txToIn, unsigned int nInIn, const CAmount& amountIn, MissingDataBehavior mdb) : txTo(txToIn), m_mdb(mdb), nIn(nInIn), amount(amountIn), txdata(nullptr) {}
     GenericTransactionSignatureChecker(const T* txToIn, unsigned int nInIn, const CAmount& amountIn, const PrecomputedTransactionData& txdataIn, MissingDataBehavior mdb) : txTo(txToIn), m_mdb(mdb), nIn(nInIn), amount(amountIn), txdata(&txdataIn) {}
     bool CheckECDSASignature(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const override;
     bool CheckSchnorrSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override;
-    bool CheckPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, uint8_t hash_type, SigVersion sigversion, ScriptExecutionData& execdata) const override;
+    bool CheckPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, uint8_t hash_type, SigVersion sigversion, ScriptExecutionData& execdata, bool slhdsa_fips205 = false) const override;
     bool CheckCTVHash(Span<const unsigned char> hash_from_stack) const override;
     bool CheckLockTime(const CScriptNum& nLockTime) const override;
     bool CheckSequence(const CScriptNum& nSequence) const override;
@@ -379,9 +394,9 @@ public:
         return m_checker.CheckSchnorrSignature(sig, pubkey, sigversion, execdata, serror);
     }
 
-    bool CheckPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, uint8_t hash_type, SigVersion sigversion, ScriptExecutionData& execdata) const override
+    bool CheckPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, uint8_t hash_type, SigVersion sigversion, ScriptExecutionData& execdata, bool slhdsa_fips205 = false) const override
     {
-        return m_checker.CheckPQSignature(sig, pubkey, algo, hash_type, sigversion, execdata);
+        return m_checker.CheckPQSignature(sig, pubkey, algo, hash_type, sigversion, execdata, slhdsa_fips205);
     }
 
     bool CheckCTVHash(Span<const unsigned char> hash_from_stack) const override

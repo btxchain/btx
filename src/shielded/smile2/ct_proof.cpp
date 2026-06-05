@@ -5,6 +5,7 @@
 #include <shielded/smile2/ct_proof.h>
 #include <shielded/smile2/domain_separation.h>
 #include <shielded/smile2/serialize.h>
+#include <consensus/amount.h>
 
 #include <crypto/common.h>
 #include <crypto/sha256.h>
@@ -758,14 +759,24 @@ std::vector<SmilePoly> DeriveOpeningChallenges(
 //   full per-input w_0 rows (all KEY_ROWS rows for every input)
 //   full recursive x_j rows (all KEY_ROWS rows for every input / level)
 //   selector decompositions v_{i,j}
-size_t ComputeNumAuxMsg(size_t num_inputs, size_t num_outputs, size_t rec_levels) {
+// C-002 R5 high-slot ceiling: base-4 amounts use NUM_NTT_SLOTS=32 digits (up to
+// 4^32=2^64). MAX_MONEY = 21e6*COIN ≈ 2^50.9 fits in 26 base-4 digits (4^25 <
+// MAX_MONEY < 4^26). The range proof forces digit slots [AMOUNT_DIGIT_CEILING,32)
+// to zero so an amount cannot exceed 4^26 (no high-slot / 2^64 wraparound value).
+// The exact <= MAX_MONEY bound is still enforced where amounts become public.
+constexpr size_t AMOUNT_DIGIT_CEILING = 26;
+
+size_t ComputeNumAuxMsg(size_t num_inputs, size_t num_outputs, size_t rec_levels,
+                        bool with_range_slots = true) {
     if (rec_levels == 1) {
         const size_t selectors = num_inputs;
         const size_t amounts = num_inputs + num_outputs;
+        // C-002 R5: B0,B1 per amount — present only in v3 proofs.
+        const size_t range_bits = with_range_slots ? 2 * (num_inputs + num_outputs) : 0;
         const size_t w_rows = num_inputs * GetCtPublicRowCount();
         const size_t x_slots = num_inputs;
         const size_t tail = 2; // g, psi
-        return selectors + amounts + w_rows + x_slots + tail;
+        return selectors + amounts + range_bits + w_rows + x_slots + tail;
     }
 
     const size_t base = 7; // legacy prototype slots (t'_1..t'_7)
@@ -781,6 +792,11 @@ struct CtAuxLayout
     size_t num_inputs;
     size_t num_outputs;
     size_t rec_levels;
+    // C-002 staged activation: v3 proofs carry the R5 amount-range bit-helper
+    // slots; v2 (pre-activation / legacy) proofs do NOT. The aux layout, slot
+    // offsets, and message count all depend on this so the two wire formats
+    // decode and verify against the correct slot indices.
+    bool with_range_slots{true};
 
     [[nodiscard]] bool UsesLiveM1Layout() const { return rec_levels == 1; }
 
@@ -799,9 +815,42 @@ struct CtAuxLayout
         return InputAmountOffset() + num_inputs;
     }
 
-    [[nodiscard]] size_t W0Offset() const
+    // C-002 R5 range proof: per-amount base-4 digit bit-decomposition helpers.
+    // Each of the (num_inputs + num_outputs) amounts gets two helper message polys
+    // B0 (low bits) and B1 (high bits), laid out as two contiguous blocks right
+    // after the output amounts (in the RETAINED [0, W0Offset) region so they are
+    // serialized and bound). amount_index: inputs 0..num_in-1, then outputs.
+    [[nodiscard]] size_t NumRangeAmounts() const
+    {
+        return (UsesLiveM1Layout() && with_range_slots) ? (num_inputs + num_outputs) : 0;
+    }
+
+    [[nodiscard]] size_t RangeBitOffset() const
     {
         return OutputAmountOffset() + num_outputs;
+    }
+
+    [[nodiscard]] size_t RangeBit0Slot(size_t amount_index) const
+    {
+        return RangeBitOffset() + amount_index;
+    }
+
+    [[nodiscard]] size_t RangeBit1Slot(size_t amount_index) const
+    {
+        return RangeBitOffset() + NumRangeAmounts() + amount_index;
+    }
+
+    // Map an amount_index (inputs first, then outputs) to its committed digit slot.
+    [[nodiscard]] size_t AmountSlotForRangeIndex(size_t amount_index) const
+    {
+        return amount_index < num_inputs
+                   ? InputAmountSlot(amount_index)
+                   : OutputAmountSlot(amount_index - num_inputs);
+    }
+
+    [[nodiscard]] size_t W0Offset() const
+    {
+        return RangeBitOffset() + (UsesLiveM1Layout() ? 2 * NumRangeAmounts() : 0);
     }
 
     [[nodiscard]] size_t XOffset() const
@@ -1015,21 +1064,6 @@ SmilePoly ComputeCtWeakOpeningAccumulator(
     return accumulator;
 }
 
-size_t InferLiveCtOutputCountFromProof(const SmileCTProof& proof)
-{
-    const size_t num_inputs = proof.z0.size();
-    const size_t fixed_slots =
-        num_inputs +                    // selectors
-        num_inputs +                    // input amounts
-        num_inputs * GetCtPublicRowCount() +
-        num_inputs +                    // X slots
-        2;                              // G and Psi
-    if (proof.aux_commitment.t_msg.size() < fixed_slots) {
-        return 0;
-    }
-    return proof.aux_commitment.t_msg.size() - fixed_slots;
-}
-
 bool IsLiveCtOmittedAuxSlot(const CtAuxLayout& aux_layout, size_t slot)
 {
     return aux_layout.UsesLiveM1Layout() && slot >= aux_layout.W0Offset();
@@ -1075,32 +1109,6 @@ SmilePoly ComputeCompressedW0ResponseAccumulator(
             ComputeOpeningInnerProduct(aux_ck.b[aux_layout.W0Slot(input_index, row)], z));
     }
     return SumWeightedRows(responses, gamma_rows);
-}
-
-std::vector<SmilePoly> CollectSerializedOmittedAuxSelectorAmountResidues(
-    const CtAuxLayout& aux_layout,
-    const std::vector<SmilePoly>& aux_residues)
-{
-    std::vector<SmilePoly> serialized;
-    const size_t retained_count = ComputeLiveCtRetainedAuxMsgCount(aux_layout);
-    for (size_t slot = retained_count;
-         slot < aux_residues.size() && slot < aux_layout.W0Offset();
-         ++slot) {
-        serialized.push_back(aux_residues[slot]);
-    }
-    return serialized;
-}
-
-std::vector<SmilePoly> CollectSerializedOmittedAuxTailResidues(
-    const CtAuxLayout& aux_layout,
-    const std::vector<SmilePoly>& aux_residues)
-{
-    std::vector<SmilePoly> serialized;
-    const size_t tail_offset = aux_layout.W0Offset() + aux_layout.num_inputs * GetCtPublicRowCount();
-    for (size_t slot = tail_offset; slot < aux_residues.size(); ++slot) {
-        serialized.push_back(aux_residues[slot]);
-    }
-    return serialized;
 }
 
 std::array<uint8_t, 32> ComputeCtBindingDigest(std::string_view tag,
@@ -1709,20 +1717,6 @@ void AppendCtRound1Commitment(std::vector<uint8_t>& transcript,
     AppendAuxCommitment(transcript, proof.aux_commitment);
 }
 
-size_t EstimateGaussianVecSerializedSize(const SmilePolyVec& z)
-{
-    std::vector<uint8_t> encoded;
-    SerializeGaussianVecFixed(z, encoded);
-    return encoded.size();
-}
-
-size_t EstimateAdaptiveWitnessPolyVecSerializedSize(const SmilePolyVec& z)
-{
-    std::vector<uint8_t> encoded;
-    SerializeAdaptiveWitnessPolyVec(z, encoded);
-    return encoded.size();
-}
-
 void AppendCtBindingSurface(std::vector<uint8_t>& transcript,
                             const SmileCTProof& proof,
                             const CtAuxLayout& aux_layout,
@@ -1748,42 +1742,6 @@ void AppendCtBindingSurface(std::vector<uint8_t>& transcript,
         }
         AppendPoly(transcript, aux_tmsg[slot]);
     }
-}
-
-size_t EstimateCenteredPolySerializedSize(const SmilePoly& p)
-{
-    int64_t max_abs = 0;
-    for (size_t i = 0; i < POLY_DEGREE; ++i) {
-        int64_t centered = mod_q(p.coeffs[i]);
-        if (centered > Q / 2) centered -= Q;
-        const int64_t abs_val = centered < 0 ? -centered : centered;
-        if (abs_val > max_abs) max_abs = abs_val;
-    }
-    uint64_t range = static_cast<uint64_t>(2 * max_abs + 1);
-    uint8_t bits_needed = 1;
-    while ((1ULL << bits_needed) < range) bits_needed++;
-    return 4 + 1 + (POLY_DEGREE * bits_needed + 7) / 8;
-}
-
-size_t EstimateCenteredPolyVecFixedSerializedSize(const SmilePolyVec& v)
-{
-    if (v.empty()) {
-        return 0;
-    }
-
-    int64_t max_abs = 0;
-    for (const auto& p : v) {
-        for (size_t i = 0; i < POLY_DEGREE; ++i) {
-            int64_t centered = mod_q(p.coeffs[i]);
-            if (centered > Q / 2) centered -= Q;
-            const int64_t abs_val = centered < 0 ? -centered : centered;
-            if (abs_val > max_abs) max_abs = abs_val;
-        }
-    }
-    uint64_t range = static_cast<uint64_t>(2 * max_abs + 1);
-    uint8_t bits_needed = 1;
-    while ((1ULL << bits_needed) < range) bits_needed++;
-    return 4 + 1 + (v.size() * POLY_DEGREE * bits_needed + 7) / 8;
 }
 
 bool SeedIsPresent(const std::array<uint8_t, 32>& seed)
@@ -2113,84 +2071,10 @@ SmilePoly ComputeSerialNumber(
 
 size_t SmileCTProof::SerializedSize() const
 {
-    // Size estimation matching the SMILE paper's proof format (Section E.1).
-    // The transmitted proof consists of:
-    //   1. Auxiliary commitment t' (compressed t'_0 + message polynomials)
-    //   2. Masked opening z (entropy-coded bimodal Gaussian)
-    //   3. z_0 per input (entropy-coded)
-    //   4. Selected input tuple-opening witnesses
-    //   5. Coin opening proofs
-    //   6. Serial numbers
-    //   7. Weak-opening accumulator omega
-    //   8. h_2 polynomial (first d/l coefficients zero, not transmitted)
-    //   9. Fiat-Shamir seeds / binding digests
-    //
-    // NOT included (recomputable or separate transaction data):
-    //   - Output coins (on-chain transaction data)
-    size_t size = 0;
-    const auto estimate_fixed_gaussian = [](const SmilePolyVec& vec) {
-        return EstimateGaussianVecSerializedSize(vec);
-    };
-
-    // Auxiliary commitment t':
-    // t'_0 carries the full exact first-round B0 row surface.
-    size += EstimateCenteredPolyVecFixedSerializedSize(aux_commitment.t0);
-
-    const CtAuxLayout aux_layout{z0.size(), InferLiveCtOutputCountFromProof(*this), /*rec_levels=*/1};
-    const SmilePolyVec omitted_selector_amount_residues =
-        CollectSerializedOmittedAuxSelectorAmountResidues(aux_layout, aux_residues);
-    const SmilePolyVec omitted_tail_residues =
-        CollectSerializedOmittedAuxTailResidues(aux_layout, aux_residues);
-    size += EstimateAdaptiveWitnessPolyVecSerializedSize(omitted_selector_amount_residues);
-    size += EstimateGaussianVecSerializedSize(omitted_tail_residues);
-    size += EstimateGaussianVecSerializedSize(w0_residue_accs);
-    size += 32; // round-1 aux binding digest
-    size += 32; // pre-h2 binding digest
-    size += 32; // post-h2 binding digest
-
-    size += estimate_fixed_gaussian(z);
-
-    for (const auto& z0i : z0) {
-        size += estimate_fixed_gaussian(z0i);
-    }
-
-    for (const auto& tuple : input_tuples) {
-        size += estimate_fixed_gaussian(tuple.z_coin);
-    }
-    if (!input_tuples.empty()) {
-        SmilePolyVec z_amounts;
-        SmilePolyVec z_leafs;
-        z_amounts.reserve(input_tuples.size());
-        z_leafs.reserve(input_tuples.size());
-        for (const auto& tuple : input_tuples) {
-            z_amounts.push_back(tuple.z_amount);
-            z_leafs.push_back(tuple.z_leaf);
-        }
-        size += EstimateAdaptiveWitnessPolyVecSerializedSize(z_amounts);
-        size += EstimateAdaptiveWitnessPolyVecSerializedSize(z_leafs);
-    }
-    size += 1 + std::min(EstimateCenteredPolySerializedSize(tuple_opening_acc),
-                         EstimateGaussianVecSerializedSize(SmilePolyVec{tuple_opening_acc}));
-
-    // Serial numbers: num_inputs × d × log(q) bits
-    size += EstimateCenteredPolyVecFixedSerializedSize(serial_numbers);
-
-    // Combined input/output coin opening proof
-    size += estimate_fixed_gaussian(coin_opening.z);
-    size += 32;
-
-    // h_2: d coefficients × log(q) bits (first d/l=4 are zero, not transmitted)
-    size += (POLY_DEGREE - SLOT_DEGREE) * 4;
-
-    // The live verifier still needs seed_c before seed_c0 is finalized in the
-    // m=1 transcript order, so it remains part of the hard-fork wire format.
-    size += 32;
-
-    if (wire_version >= WIRE_VERSION_M4_HARDENED) {
-        size += 5;
-    }
-
-    return size;
+    // Keep this exact rather than maintaining a parallel hand estimate. The v3
+    // proof layout is security-sensitive: C-002/R5 range slots, seed_z, and
+    // w_sn must move together with serialization, parsing, and size accounting.
+    return SerializeCTProof(*this, SmileProofCodecPolicy::CANONICAL_NO_RICE).size();
 }
 
 // --- Prove CT ---
@@ -2204,6 +2088,11 @@ size_t SmileCTProof::SerializedSize() const
 // golden-ratio constant, chosen to spread retry seeds across the uint64
 // space. This is a known constant, not a secret.
 
+// NOTE: red-team forge hooks (g_forge_*) are intentionally ABSENT from this
+// consensus file. They live only in the offline forge-test harness. Production
+// prover behaviour is fixed: refuse unbalanced statements, always compute the
+// true balance carry, never inject non-canonical outputs.
+
 std::optional<SmileCTProof> TryProveCT(
     const std::vector<CTInput>& inputs,
     const std::vector<CTOutput>& outputs,
@@ -2211,7 +2100,8 @@ std::optional<SmileCTProof> TryProveCT(
     uint64_t rng_seed,
     int64_t public_fee,
     bool bind_anonset_context,
-    std::string* error)
+    std::string* error,
+    int64_t validation_height)
 {
     size_t m_in = inputs.size();
     size_t n_out = outputs.size();
@@ -2221,6 +2111,11 @@ std::optional<SmileCTProof> TryProveCT(
     size_t k = KEY_ROWS;
     const bool use_live_m1_layout = (rec_levels == 1);
     const bool use_postfork_tuple_hardening = UsePostforkTupleHardening(bind_anonset_context);
+    // C-002 staged activation: anonset-bound spends are v3 (full C-002/R5) only
+    // at/after the activation height; before it they are v2 (legacy format, no
+    // balance_w/Γ/w_sn/range slots). is_v3 keys every C-002/R5 prover addition.
+    const bool is_v3 = use_postfork_tuple_hardening &&
+                       (validation_height >= SmileCTProof::C002_ACTIVATION_HEIGHT);
     const auto coin_ck = GetPublicCoinCommitmentKey();
     int64_t sum_in = 0;
     int64_t sum_out = 0;
@@ -2306,6 +2201,7 @@ std::optional<SmileCTProof> TryProveCT(
         }
         output_coins[i] = Commit(coin_ck, {output_amount_polys[i]}, outputs[i].coin_r);
     }
+
 
     std::vector<uint8_t> public_transcript;
     AppendAnonSetTranscript(public_transcript, pub.anon_set, bind_anonset_context);
@@ -2420,8 +2316,8 @@ std::optional<SmileCTProof> TryProveCT(
         }
     }
 
-    const CtAuxLayout aux_layout{m_in, n_out, rec_levels};
-    size_t n_aux_msg = ComputeNumAuxMsg(m_in, n_out, rec_levels);
+    const CtAuxLayout aux_layout{m_in, n_out, rec_levels, is_v3};
+    size_t n_aux_msg = ComputeNumAuxMsg(m_in, n_out, rec_levels, is_v3);
     assert(n_aux_msg == aux_layout.TotalSlots());
     auto aux_ck_seed = TranscriptHash(public_transcript);
     auto aux_ck = BDLOPCommitmentKey::Generate(aux_ck_seed, n_aux_msg);
@@ -2436,9 +2332,13 @@ std::optional<SmileCTProof> TryProveCT(
         const uint64_t attempt_seed = rng_seed + (PROVE_CT_RETRY_STRIDE * rejection_retry);
         DetRng rng(attempt_seed);
         SmileCTProof proof;
-        proof.wire_version = use_postfork_tuple_hardening
-            ? SmileCTProof::WIRE_VERSION_M4_HARDENED
-            : SmileCTProof::WIRE_VERSION_LEGACY;
+        // C-002 staged activation: v3 (balance/range/w_sn/seed_z) only at/after the
+        // activation height; v2 (M4 hardened, legacy format) in the pre-activation
+        // window so v0.31 stays wire-compatible with v0.30 until the cutover.
+        proof.wire_version = is_v3
+            ? SmileCTProof::WIRE_VERSION_C002_HARDENED
+            : (use_postfork_tuple_hardening ? SmileCTProof::WIRE_VERSION_M4_HARDENED
+                                            : SmileCTProof::WIRE_VERSION_LEGACY);
         proof.output_coins = output_coins;
         proof.fs_seed = public_fs_seed;
         proof.serial_numbers = serial_numbers;
@@ -2504,10 +2404,21 @@ std::optional<SmileCTProof> TryProveCT(
     std::vector<SmilePolyVec> tuple_w0_coin(m_in);
     std::vector<SmilePoly> tuple_w0_amount(m_in);
     const int64_t tuple_coin_sigma = ComputeTupleFirstRoundSigma();
+    // C-002 w3-1 serial<->key binding masks — v3 only (v2 leaves w_sn empty).
+    if (is_v3) proof.w_sn.assign(m_in, SmilePoly{});
     for (size_t inp = 0; inp < m_in; ++inp) {
         y0_masks[inp].resize(KEY_COLS);
         for (auto& yi : y0_masks[inp]) {
             yi = rng.GaussianPoly(SIGMA_KEY);
+        }
+        // C-002 w3-1: w_sn[inp] = <sn_ck.b[0], y0_inp> (the serial mask; mirrors bsn_z0 with y0 not z0).
+        if (is_v3) {
+            SmilePoly wsn;
+            for (size_t j = 0; j < KEY_COLS && j < sn_ck.b[0].size(); ++j) {
+                wsn += NttMul(sn_ck.b[0][j], y0_masks[inp][j]);
+            }
+            wsn.Reduce();
+            proof.w_sn[inp] = wsn;
         }
         SmilePolyVec key_w0(k);
         for (size_t r = 0; r < k; ++r) {
@@ -2590,6 +2501,31 @@ std::optional<SmileCTProof> TryProveCT(
         aux_messages[aux_layout.OutputAmountSlot(i)] = output_amount_polys[i];
     }
 
+    // C-002 R5 range proof: commit the per-amount base-4 digit bit decomposition.
+    // For each amount (inputs then outputs), B0 holds the low bit and B1 the high
+    // bit of every base-4 digit (NTT slot coeff[0]). Honest canonical digits
+    // d∈{0,1,2,3} satisfy d = b0 + 2*b1 with b0,b1∈{0,1}. The verifier's R5
+    // constraints enforce exactly this on the SAME committed amount poly (the
+    // compose check ties f[AmountSlot] = f[B0] + 2*f[B1]).
+    // v2 (pre-activation) has no range slots in its layout — skip entirely.
+    if (aux_layout.UsesLiveM1Layout() && is_v3) {
+        const size_t num_amounts = m_in + n_out;
+        for (size_t k = 0; k < num_amounts; ++k) {
+            const SmilePoly& amt =
+                (k < m_in) ? input_amount_polys[k] : output_amount_polys[k - m_in];
+            const NttForm e = NttForward(amt);
+            NttForm b0_ntt{};
+            NttForm b1_ntt{};
+            for (size_t j = 0; j < NUM_NTT_SLOTS; ++j) {
+                const int64_t d = mod_q(e.slots[j].coeffs[0]);
+                b0_ntt.slots[j].coeffs[0] = d & 1;
+                b1_ntt.slots[j].coeffs[0] = (d >> 1) & 1;
+            }
+            aux_messages[aux_layout.RangeBit0Slot(k)] = NttInverse(b0_ntt);
+            aux_messages[aux_layout.RangeBit1Slot(k)] = NttInverse(b1_ntt);
+        }
+    }
+
     // Carry the full per-input key masking rows instead of only the first row.
     for (size_t inp = 0; inp < m_in; ++inp) {
         for (size_t row = 0; row < GetCtPublicRowCount(); ++row) {
@@ -2648,6 +2584,7 @@ std::optional<SmileCTProof> TryProveCT(
     // 12. Add commitment to transcript for Fiat-Shamir
     AppendCtRound1Commitment(transcript, proof, aux_layout);
     for (const auto& sn : proof.serial_numbers) AppendPoly(transcript, sn);
+    for (const auto& w : proof.w_sn) AppendPoly(transcript, w);  // C-002 w3-1: FS-bind serial masks before c0
     const auto tuple_coin_row_challenges = DeriveTupleCoinRowChallenges(transcript);
     const SmilePoly tuple_opening_challenge = DeriveTupleOpeningCompressionChallenge(transcript);
     const auto input_coin_challenges =
@@ -2758,6 +2695,54 @@ std::optional<SmileCTProof> TryProveCT(
             NttMul(output_coin_challenges[i], ComputeOpeningInnerProduct(aux_ck.b_ntt[amount_slot], y_mask_ntt));
     }
     proof.coin_opening.f.Reduce();
+
+    // ===== C-002: value-conservation binding (mask aggregate w_bal + base-4 carry corrector Γ) =====
+    // w_bal = Σ_i⟨b_{InSlot(i)},y_mask⟩ − Σ_j⟨b_{OutSlot(j)},y_mask⟩ (UNWEIGHTED — matches the verifier's
+    // per-slot residue f[slot]=⟨b_slot,y_mask⟩−c·enc(a)). Fixed public linear functional of y_mask.
+    // v3 only — v2 (pre-activation) leaves balance_w/balance_carry as zero polys and
+    // relies on the legacy STEP-1 h2 balance check, matching the v0.30 wire format.
+    if (is_v3) {
+        proof.balance_w = SmilePoly{};
+        for (size_t i = 0; i < m_in; ++i) {
+            proof.balance_w = proof.balance_w +
+                ComputeOpeningInnerProduct(aux_ck.b_ntt[aux_layout.InputAmountSlot(i)], y_mask_ntt);
+        }
+        for (size_t i = 0; i < n_out; ++i) {
+            proof.balance_w = proof.balance_w -
+                ComputeOpeningInnerProduct(aux_ck.b_ntt[aux_layout.OutputAmountSlot(i)], y_mask_ntt);
+        }
+        proof.balance_w.Reduce();
+
+        // Γ: base-4 carry corrector. Per slot j (NTT slot-0 coeff = base-4 digit):
+        //   r_j = Σ digit_j(a_in) − Σ digit_j(a_out) − digit_j(public_fee)
+        //   carry chain c_0=0: t=r_j+c_j; c_{j+1}=floor(t/4); Γ_j = c_j − 4·c_{j+1}
+        // Honest balance ⇒ effective digit (t−4c_{j+1}) == 0 ∀j and c_32==0 ⇒ Eval(Γ)=0 (telescoping).
+        std::array<int64_t, NUM_NTT_SLOTS> r{};
+        for (size_t i = 0; i < m_in; ++i) {
+            const NttForm e = NttForward(input_amount_polys[i]);
+            for (size_t j = 0; j < NUM_NTT_SLOTS; ++j) r[j] += static_cast<int64_t>(mod_q(e.slots[j].coeffs[0]));
+        }
+        for (size_t i = 0; i < n_out; ++i) {
+            const NttForm e = NttForward(output_amount_polys[i]);
+            for (size_t j = 0; j < NUM_NTT_SLOTS; ++j) r[j] -= static_cast<int64_t>(mod_q(e.slots[j].coeffs[0]));
+        }
+        for (size_t j = 0; j < NUM_NTT_SLOTS; ++j) {
+            r[j] -= static_cast<int64_t>((static_cast<uint64_t>(public_fee) >> (2 * j)) & 3ULL);
+        }
+        NttForm gamma_ntt{};
+        int64_t carry = 0;  // c_0
+        for (size_t j = 0; j < NUM_NTT_SLOTS; ++j) {
+            const int64_t t = r[j] + carry;
+            const int64_t next = (t >= 0) ? (t / 4) : -(((-t) + 3) / 4);  // floor toward −∞
+            gamma_ntt.slots[j].coeffs[0] = mod_q(carry - 4 * next);       // Γ_j = c_j − 4 c_{j+1}
+            for (size_t k = 1; k < SLOT_DEGREE; ++k) gamma_ntt.slots[j].coeffs[k] = 0;
+            carry = next;
+        }
+        // honest balanced statement ⇒ carry (c_32) == 0 (defensive; the prover only runs on balance)
+        proof.balance_carry = NttInverse(gamma_ntt);
+        proof.balance_carry.Reduce();
+    }
+
     proof.coin_opening.binding_digest =
         ComputeCoinOpeningBindingDigest(
             ComputeTupleOpeningAccumulator(
@@ -2866,9 +2851,27 @@ std::optional<SmileCTProof> TryProveCT(
         AppendHash32(transcript, proof.pre_h2_binding_digest);
     }
     AppendPoly(transcript, proof.h2);
+    // C-002 (v3 only): bind w_bal and Γ into the FS transcript BEFORE seed_c so they
+    // cannot be adapted to the challenge c. v2 omits these to match v0.30's transcript.
+    if (is_v3) {
+        AppendPoly(transcript, proof.balance_w);
+        AppendPoly(transcript, proof.balance_carry);
+    }
     if (aux_layout.UsesLiveM1Layout()) {
-        const auto alpha_chals = DeriveRhoChallenges(transcript, m_in + 1);
+        // C-002 R5: challenge layout = [0]=alpha0, [1..m_in]=selector binders,
+        // then (v3 only) 4 per amount (B0 bit, B1 bit, compose, high-slot-zero) at
+        // [m_in+1 + 4k + {0,1,2,3}]. v2 derives only the selector challenges.
+        const size_t num_amounts = m_in + n_out;
+        const size_t range_chal_count = is_v3 ? 4 * num_amounts : 0;
+        const auto alpha_chals =
+            DeriveRhoChallenges(transcript, m_in + 1 + range_chal_count);
         live_alpha_chals = alpha_chals;
+        // High-slot mask: 1 in NTT slots [AMOUNT_DIGIT_CEILING,32), else 0.
+        NttForm high_mask_ntt{};
+        for (size_t j = AMOUNT_DIGIT_CEILING; j < NUM_NTT_SLOTS; ++j) {
+            high_mask_ntt.slots[j].coeffs[0] = 1;
+        }
+        const SmilePoly high_mask_poly = NttInverse(high_mask_ntt);
         const auto by = ComputeMaskResponses(aux_ck, y_mask);
         const SmilePoly one_poly = BuildConstantPoly(1);
 
@@ -2908,6 +2911,37 @@ std::optional<SmileCTProof> TryProveCT(
             psi_bin_i = NttMul(alpha_chals[inp + 1], psi_bin_i);
             psi_bin_i.Reduce();
             psi_bin += psi_bin_i;
+        }
+
+        // C-002 R5 range proof garbage (v3 only). For each amount k (inputs then outputs):
+        //   bit-check B0,B1 ∈ {0,1}:   rho·(f[h]² + c·f[h])   — c⁰=rho·by[h]² → omega_bin,
+        //                              c¹=rho·by[h]·(1−2·m[h]) → psi_bin (cancels via f[Psi]).
+        //   compose d = B0 + 2·B1:     rho·(f[s] − f[h0] − 2·f[h1]) — c⁰=rho·(by-combo) → omega_bin
+        //                              (c¹ is m[s]−m[h0]−2m[h1]=0 for honest; nonzero ⇒ reject).
+        for (size_t k = 0; is_v3 && k < num_amounts; ++k) {
+            const size_t s  = aux_layout.AmountSlotForRangeIndex(k);
+            const size_t h0 = aux_layout.RangeBit0Slot(k);
+            const size_t h1 = aux_layout.RangeBit1Slot(k);
+            const SmilePoly& rho_b0 = alpha_chals[m_in + 1 + 4 * k + 0];
+            const SmilePoly& rho_b1 = alpha_chals[m_in + 1 + 4 * k + 1];
+            const SmilePoly& rho_cp = alpha_chals[m_in + 1 + 4 * k + 2];
+            const SmilePoly& rho_hi = alpha_chals[m_in + 1 + 4 * k + 3];
+
+            omega_bin += NttMul(rho_b0, NttMul(by[h0], by[h0]));
+            omega_bin += NttMul(rho_b1, NttMul(by[h1], by[h1]));
+
+            SmilePoly t0 = one_poly; t0 -= aux_messages[h0]; t0 -= aux_messages[h0]; t0.Reduce();
+            psi_bin += NttMul(rho_b0, NttMul(by[h0], t0));
+            SmilePoly t1 = one_poly; t1 -= aux_messages[h1]; t1 -= aux_messages[h1]; t1.Reduce();
+            psi_bin += NttMul(rho_b1, NttMul(by[h1], t1));
+
+            SmilePoly comp = by[s]; comp -= by[h0]; comp -= by[h1]; comp -= by[h1]; comp.Reduce();
+            omega_bin += NttMul(rho_cp, comp);
+
+            // high-slot-zero: digit slots [CEILING,32) of the amount must be 0.
+            // c⁰ = rho·high_mask·by[s] → omega_bin; honest m[s] high slots = 0 so
+            // the c¹ term (rho·high_mask·m[s]) vanishes; nonzero high digit ⇒ reject.
+            omega_bin += NttMul(rho_hi, NttMul(high_mask_poly, by[s]));
         }
 
         psi_sm -= by[aux_layout.GSlot()];
@@ -3062,9 +3096,11 @@ SmileCTProof ProveCT(
     const CTPublicData& pub,
     uint64_t rng_seed,
     int64_t public_fee,
-    bool bind_anonset_context)
+    bool bind_anonset_context,
+    int64_t validation_height)
 {
-    auto proof = TryProveCT(inputs, outputs, pub, rng_seed, public_fee, bind_anonset_context);
+    auto proof = TryProveCT(inputs, outputs, pub, rng_seed, public_fee,
+                            bind_anonset_context, /*error=*/nullptr, validation_height);
     return proof.value_or(SmileCTProof{});
 }
 
@@ -3091,6 +3127,11 @@ bool VerifyCT(
     if (public_fee < 0) {
         return false;
     }
+    // C-002 staged activation: the proof's own wire version selects the format.
+    // v3 carries the balance/range/w_sn relations + slots; v2 is the legacy format.
+    // The height gate (which version is REQUIRED) lives in verify_dispatch; here we
+    // verify whatever version the proof declares.
+    const bool is_v3 = proof.wire_version >= SmileCTProof::WIRE_VERSION_C002_HARDENED;
     size_t N = pub.anon_set.size();
     if (N == 0 || N > NUM_NTT_SLOTS) {
         LogDebug(BCLog::VALIDATION, "VerifyCT FAIL [step 0]: unsupported reset-chain CT surface anon_set=%u\n",
@@ -3136,6 +3177,30 @@ bool VerifyCT(
     if (proof.serial_numbers.size() != num_inputs) {
         LogDebug(BCLog::VALIDATION, "VerifyCT FAIL [step 2a]: serial_numbers.size()=%u != num_inputs=%u\n",
                   (unsigned)proof.serial_numbers.size(), (unsigned)num_inputs);
+        return false;
+    }
+    // C-002: reject in-proof duplicate serials/nullifiers. Two equal serials in one
+    // proof would spend the same note twice (double-spend) yet pass per-input w3-1
+    // binding. Compare in canonical (reduced) form.
+    for (size_t i = 0; i < proof.serial_numbers.size(); ++i) {
+        SmilePoly si = proof.serial_numbers[i];
+        si.Reduce();
+        for (size_t j = i + 1; j < proof.serial_numbers.size(); ++j) {
+            SmilePoly sj = proof.serial_numbers[j];
+            sj.Reduce();
+            if (si == sj) {
+                LogDebug(BCLog::VALIDATION,
+                         "VerifyCT FAIL [step 2a-dup]: duplicate serial i=%u j=%u\n",
+                         (unsigned)i, (unsigned)j);
+                return false;
+            }
+        }
+    }
+    // C-002 w3-1 (v3 only): the per-input serial<->key binding mask must exist for
+    // every input. v2 (legacy) has no w_sn.
+    if (is_v3 && proof.w_sn.size() != num_inputs) {
+        LogDebug(BCLog::VALIDATION, "VerifyCT FAIL [step 2a-wsn]: w_sn.size()=%u != num_inputs=%u\n",
+                  (unsigned)proof.w_sn.size(), (unsigned)num_inputs);
         return false;
     }
     if (proof.z0.size() != num_inputs) {
@@ -3237,8 +3302,8 @@ bool VerifyCT(
     auto sn_ck = BDLOPCommitmentKey::Generate(sn_ck_seed, 1);
 
     // 5. Reconstruct auxiliary commitment key
-    const CtAuxLayout aux_layout{num_inputs, num_outputs, rec_levels};
-    size_t n_aux_msg = ComputeNumAuxMsg(num_inputs, num_outputs, rec_levels);
+    const CtAuxLayout aux_layout{num_inputs, num_outputs, rec_levels, is_v3};
+    size_t n_aux_msg = ComputeNumAuxMsg(num_inputs, num_outputs, rec_levels, is_v3);
     assert(n_aux_msg == aux_layout.TotalSlots());
     auto aux_ck_seed = TranscriptHash(transcript);
     auto aux_ck = BDLOPCommitmentKey::Generate(aux_ck_seed, n_aux_msg);
@@ -3265,6 +3330,7 @@ bool VerifyCT(
 
     AppendCtRound1Commitment(transcript, proof, aux_layout);
     for (const auto& sn : proof.serial_numbers) AppendPoly(transcript, sn);
+    for (const auto& w : proof.w_sn) AppendPoly(transcript, w);  // C-002 w3-1: FS-bind serial masks before c0
     const auto tuple_coin_row_challenges = DeriveTupleCoinRowChallenges(transcript);
     const SmilePoly tuple_opening_challenge = DeriveTupleOpeningCompressionChallenge(transcript);
     const auto input_coin_challenges =
@@ -3427,6 +3493,21 @@ bool VerifyCT(
             bsn_z0 += NttMul(sn_ck.b[0][j], proof.z0[inp][j]);
         }
         bsn_z0.Reduce();
+        // ===== C-002 w3-1 (v3 only): serial<->key binding =====
+        // ⟨b_sn,z0⟩ = ⟨b_sn,y0⟩ + c0·⟨b_sn,s⟩ = w_sn[inp] + c0·serial[inp]. Enforce it so the revealed
+        // nullifier is pinned to the SAME spend key opened by z0 (no decoupled/double-spend serial).
+        if (is_v3) {
+            if (inp >= proof.w_sn.size()) {
+                return false;
+            }
+            SmilePoly expect = proof.w_sn[inp] + NttMul(c0_chal, proof.serial_numbers[inp]);
+            expect.Reduce();
+            SmilePoly got = bsn_z0;
+            got.Reduce();
+            if (!(got == expect)) {
+                return false;
+            }
+        }
         AppendPoly(transcript, bsn_z0);
     }
     AppendCoinOpeningBinding(transcript, proof.coin_opening);
@@ -3438,6 +3519,13 @@ bool VerifyCT(
         AppendHash32(transcript, proof.pre_h2_binding_digest);
     }
     AppendPoly(transcript, proof.h2);
+    // C-002 (v3 only): mirror the prover's FS binding of w_bal/Γ (appended right after
+    // h2, before the framework snapshot and seed_c) so the recomputed challenges match.
+    // v2 omits these to match the legacy transcript.
+    if (is_v3) {
+        AppendPoly(transcript, proof.balance_w);
+        AppendPoly(transcript, proof.balance_carry);
+    }
     std::vector<uint8_t> ct_framework_transcript = transcript;
     if (aux_layout.UsesLiveM1Layout()) {
         AppendHash32(transcript, proof.post_h2_binding_digest);
@@ -3544,7 +3632,14 @@ bool VerifyCT(
         BuildFullAuxResidues(aux_ck, proof, aux_layout, recovered_aux_tmsg, c_chal);
     // L2 audit fix: explicit cap on z vector size to prevent DoS via
     // oversized z vectors that pass the dimension check but waste memory.
-    static constexpr size_t MAX_Z_SIZE = BDLOP_RAND_DIM_BASE + MAX_CT_INPUTS * 8 + MAX_CT_OUTPUTS * 4;
+    // Derive the cap from the actual aux-message layout for the maximum shape so
+    // it matches the prover. The previous closed-form (8*in + 4*out) predated the
+    // C-002 R5 range slots and undercounted: a max-shape v3 proof (16-in/16-out)
+    // has z.size() = BDLOP_RAND_DIM_BASE + 242 = 262, which exceeded the stale cap
+    // (212) and was wrongly rejected even though the exact dimension check below
+    // (z.size() == aux_ck.rand_dim()) is the real constraint.
+    const size_t MAX_Z_SIZE = BDLOP_RAND_DIM_BASE +
+        ComputeNumAuxMsg(MAX_CT_INPUTS, MAX_CT_OUTPUTS, /*rec_levels=*/1, /*with_range_slots=*/true);
     if (proof.z.size() > MAX_Z_SIZE) {
         LogDebug(BCLog::VALIDATION, "VerifyCT FAIL [step 9-cap]: z.size()=%u exceeds hard cap %u\n",
                   (unsigned)proof.z.size(), (unsigned)MAX_Z_SIZE);
@@ -3593,7 +3688,17 @@ bool VerifyCT(
     // If unbalanced, h2's first coefficients are non-zero → step 1 rejects.
 
     if (aux_layout.UsesLiveM1Layout()) {
-        const auto alpha_chals = DeriveRhoChallenges(ct_framework_transcript, num_inputs + 1);
+        // C-002 R5: derive the same extended challenge vector as the prover
+        // (counter-mode, so the first num_inputs+1 are unchanged). v3: 4 per amount.
+        const size_t num_amounts = num_inputs + num_outputs;
+        const size_t range_chal_count = is_v3 ? 4 * num_amounts : 0;
+        const auto alpha_chals =
+            DeriveRhoChallenges(ct_framework_transcript, num_inputs + 1 + range_chal_count);
+        NttForm high_mask_ntt{};
+        for (size_t j = AMOUNT_DIGIT_CEILING; j < NUM_NTT_SLOTS; ++j) {
+            high_mask_ntt.slots[j].coeffs[0] = 1;
+        }
+        const SmilePoly high_mask_poly = NttInverse(high_mask_ntt);
         SmilePoly framework_sum;
         SmilePoly bin_check;
 
@@ -3653,6 +3758,35 @@ bool VerifyCT(
             bin_check.Reduce();
         }
 
+        // C-002 R5 range proof (v3 only). For each amount k, enforce on the SAME
+        // committed amount residue f[s]: B0,B1 ∈ {0,1} and d = B0 + 2·B1, so every
+        // base-4 digit ∈ {0,1,2,3}. A non-canonical amount (the rtx1_11 inflation
+        // forge) breaks one of these and fails lhs == framework_omega.
+        for (size_t k = 0; is_v3 && k < num_amounts; ++k) {
+            const size_t s  = aux_layout.AmountSlotForRangeIndex(k);
+            const size_t h0 = aux_layout.RangeBit0Slot(k);
+            const size_t h1 = aux_layout.RangeBit1Slot(k);
+            const SmilePoly& rho_b0 = alpha_chals[num_inputs + 1 + 4 * k + 0];
+            const SmilePoly& rho_b1 = alpha_chals[num_inputs + 1 + 4 * k + 1];
+            const SmilePoly& rho_cp = alpha_chals[num_inputs + 1 + 4 * k + 2];
+            const SmilePoly& rho_hi = alpha_chals[num_inputs + 1 + 4 * k + 3];
+
+            SmilePoly b0_chk = NttMul(f[h0], f[h0]);
+            b0_chk += NttMul(c_chal, f[h0]);
+            bin_check += NttMul(rho_b0, b0_chk);
+
+            SmilePoly b1_chk = NttMul(f[h1], f[h1]);
+            b1_chk += NttMul(c_chal, f[h1]);
+            bin_check += NttMul(rho_b1, b1_chk);
+
+            SmilePoly comp = f[s]; comp -= f[h0]; comp -= f[h1]; comp -= f[h1]; comp.Reduce();
+            bin_check += NttMul(rho_cp, comp);
+
+            // high-slot-zero: amount digit slots [CEILING,32) must be 0.
+            bin_check += NttMul(rho_hi, NttMul(high_mask_poly, f[s]));
+            bin_check.Reduce();
+        }
+
         SmilePoly c_fg = NttMul(c_chal, f[aux_layout.GSlot()]);
         c_fg.Reduce();
         SmilePoly c_sq = NttMul(c_chal, c_chal);
@@ -3701,6 +3835,60 @@ bool VerifyCT(
     }
     LogDebug(BCLog::VALIDATION, "VerifyCT: step 11d PASSED (combined coin opening check)\n");
 
+    // ===== C-002 STEP 11e: value conservation (public_fee-bound balance relation) =====
+    // f[s] = ⟨b_s,y_mask⟩ − c·enc(a_s) (residue, coin-bound by step 11d above). With
+    //   balance_lhs = Σ f[InSlot] − Σ f[OutSlot] + c·enc(fee) − c·Γ
+    //              = w_bal − c·( Σenc(a_in) − Σenc(a_out) − enc(fee) + Γ ),
+    // requiring balance_lhs == w_bal forces (c is a unit) R+Γ==0 where R=Σenc(in)−Σenc(out)−enc(fee).
+    // PLUS Γ must be a valid carry corrector (coeffs[1..3]==0, |digit|≤bound, Eval(Γ)==0); together with
+    // R+Γ==0 this gives Eval(R)=0 ⟺ Σa_in = Σa_out + public_fee over Z. (R4 spec + the MANDATORY
+    // Γ-validity check: without it a forger sets Γ=enc(fee) to absorb the claimed fee.)
+    // v3 only — v2 (legacy) relies on the STEP-1 h2 balance check.
+    if (aux_layout.UsesLiveM1Layout() && is_v3) {
+        const auto enc_fee = EncodeAmountToSmileAmountPoly(public_fee);
+        if (!enc_fee) {
+            LogDebug(BCLog::VALIDATION, "VerifyCT FAIL [11e]: public_fee not base-4 encodable\n");
+            return false;
+        }
+        SmilePoly balance_lhs{};
+        for (size_t i = 0; i < num_inputs;  ++i)  balance_lhs = balance_lhs + f[aux_layout.InputAmountSlot(i)];
+        for (size_t j = 0; j < num_outputs; ++j)  balance_lhs = balance_lhs - f[aux_layout.OutputAmountSlot(j)];
+        balance_lhs = balance_lhs + NttMul(c_chal, *enc_fee);
+        balance_lhs = balance_lhs - NttMul(c_chal, proof.balance_carry);
+        balance_lhs.Reduce();
+        SmilePoly w_bal_chk = proof.balance_w;
+        w_bal_chk.Reduce();
+        if (!(balance_lhs == w_bal_chk)) {
+            // diag: also report the reversed-sign hypothesis (+c·Γ instead of −c·Γ) and lhs/w_bal heads
+            SmilePoly alt = balance_lhs; alt = alt + NttMul(c_chal, proof.balance_carry) + NttMul(c_chal, proof.balance_carry); alt.Reduce();
+            LogDebug(BCLog::VALIDATION, "VerifyCT FAIL [11e]: balance relation mismatch (shielded inflation)\n");
+            return false;
+        }
+        // Γ-validity (MANDATORY): valid base-4 carry corrector with Eval(Γ)==0 over Z.
+        const NttForm gamma_ntt = NttForward(proof.balance_carry);
+        const int64_t CARRY_BOUND =
+            4 * (static_cast<int64_t>(num_inputs) + static_cast<int64_t>(num_outputs) + 1);
+        __int128 gamma_eval = 0;
+        for (size_t j = 0; j < NUM_NTT_SLOTS; ++j) {
+            for (size_t k = 1; k < SLOT_DEGREE; ++k) {
+                if (mod_q(gamma_ntt.slots[j].coeffs[k]) != 0) {
+                    return false;
+                }
+            }
+            int64_t d = static_cast<int64_t>(mod_q(gamma_ntt.slots[j].coeffs[0]));
+            if (d > (Q / 2)) d -= Q;  // center to (−Q/2, Q/2]
+            if (d < -CARRY_BOUND || d > CARRY_BOUND) {
+                return false;
+            }
+            // 4^j via multiply (NOT signed-left-shift: d can be negative — e.g. honest {2,2}->{4} has
+            // Gamma_0=-4 — and a signed left shift of a negative value is undefined behavior / consensus split).
+            gamma_eval += static_cast<__int128>(d) * (static_cast<__int128>(1) << (2 * j));
+        }
+        if (gamma_eval != 0) {
+            return false;
+        }
+    }
+
     // 12. Verify proof binding hash over the retained aux commitment surface,
     // the recovered compressed omitted W0 commitment accumulators, and the
     // remaining recoverable omitted X/G/Psi commitment rows.
@@ -3716,6 +3904,15 @@ bool VerifyCT(
                                Span<const SmilePoly>{recovered_w0_commitment_accs.data(),
                                                      recovered_w0_commitment_accs.size()});
         auto seed_z_check = TranscriptHash(bind_transcript);
+        // C-002 (audit #1): for v3 the binding is MANDATORY. seed_z is carried
+        // on-wire, so a missing/zeroed seed_z must fail rather than skip the
+        // check. Pre-v3 retains the legacy "check-if-present" behaviour.
+        const bool seed_z_binding_required =
+            proof.wire_version >= SmileCTProof::WIRE_VERSION_C002_HARDENED;
+        if (seed_z_binding_required && seed_z_check != proof.seed_z) {
+            LogDebug(BCLog::VALIDATION, "VerifyCT FAIL [step 12]: v3 seed_z binding mismatch/absent\n");
+            return false;
+        }
         if (SeedIsPresent(proof.seed_z) && seed_z_check != proof.seed_z) {
             LogDebug(BCLog::VALIDATION, "VerifyCT FAIL [step 12]: seed_z binding hash mismatch. "
                       "bind_transcript_size=%u z.size=%u aux_t0.size=%u aux_tmsg.size=%u\n",
@@ -3728,6 +3925,8 @@ bool VerifyCT(
     LogDebug(BCLog::VALIDATION, "VerifyCT: step 12 PASSED (binding hash)\n");
 
     LogDebug(BCLog::VALIDATION, "VerifyCT: ALL CHECKS PASSED\n");
+    // (Removed the dead g1 "step 8d-value" decode graft — it decoded randomized commitments and rejected
+    //  honest proofs. C-002 STEP 11e above is the real, confidentiality-preserving value-conservation check.)
     return true;
 }
 

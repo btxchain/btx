@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-Compatibility
-==============
+# Compatibility
 
 Microsoft ended support for Windows XP on [April 8th, 2014](https://www.microsoft.com/en-us/WindowsForBusiness/end-of-xp-support),
 an OS initially released in 2001. This means that not even critical security
@@ -39,11 +38,9 @@ From 0.13.1 onwards OS X 10.7 is no longer supported. 0.13.0 was intended to wor
 but severe issues with the libc++ version on 10.7.x keep it from running reliably. 
 0.13.1 now requires 10.8+, and will communicate that to 10.7 users, rather than crashing unexpectedly.
 
-Notable changes
-===============
+# Notable changes
 
-Change to wallet handling of mempool rejection
------------------------------------------------
+## Change to wallet handling of mempool rejection
 
 When a newly created transaction failed to enter the mempool due to
 the limits on chains of unconfirmed transactions the sending RPC
@@ -60,8 +57,7 @@ can be abandoned with the previously existing abandontransaction RPC
 (or in the GUI via a context menu on the transaction).
 
 
-0.13.2 Change log
-=================
+# 0.13.2 Change log
 
 Detailed release notes follow. This overview includes changes that affect
 behavior, not code moves, refactors and string updates. For convenience in locating
@@ -141,8 +137,7 @@ git merge commit are mentioned.
 - #9340 `fb987b3` [0.13] Update secp256k1 subtree (MarcoFalke)
 - #9229 `b172377` Remove calls to getaddrinfo_a (TheBlueMatt)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

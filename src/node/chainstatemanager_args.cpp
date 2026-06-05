@@ -66,6 +66,14 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
         opts.retain_shielded_commitment_index = *value;
     }
 
+    if (auto value{args.GetBoolArg("-shieldedstartupaudit")}) {
+        opts.shielded_startup_audit = *value;
+    }
+
+    if (auto value{args.GetBoolArg("-fastshieldedstartup")}) {
+        opts.fast_shielded_startup = *value;
+    }
+
     ReadDatabaseArgs(args, opts.coins_db);
     ReadCoinsViewArgs(args, opts.coins_view);
 

@@ -2939,6 +2939,99 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_full_shielded_state_from_chai
     }
 }
 
+// Issue #35 regression: a stale in-flight mutation marker that would force a full shielded rebuild
+// from chain must NOT crash-loop when a block needed for that rebuild has been pruned. Instead the
+// node clears the stale marker, retains its persisted shielded state, and comes up.
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_recovers_when_marker_rebuild_needs_pruned_block,
+                        PersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    auto simulate_node_restart = [&]() -> ChainstateManager& {
+        ChainstateManager& current_chainman = *Assert(m_node.chainman);
+        for (Chainstate* cs : current_chainman.GetAll()) {
+            LOCK(::cs_main);
+            cs->ForceFlushStateToDisk();
+        }
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            current_chainman.ResetChainstates();
+            BOOST_CHECK_EQUAL(current_chainman.GetAll().size(), 0);
+            m_node.notifications = std::make_unique<KernelNotifications>(
+                Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+            const ChainstateManager::Options chainman_opts{
+                .chainparams = ::Params(),
+                .datadir = current_chainman.m_options.datadir,
+                .notifications = *m_node.notifications,
+                .signals = m_node.validation_signals.get(),
+            };
+            const BlockManager::Options blockman_opts{
+                .chainparams = chainman_opts.chainparams,
+                .blocks_dir = m_args.GetBlocksDirPath(),
+                .notifications = chainman_opts.notifications,
+                .block_tree_db_params = DBParams{
+                    .path = current_chainman.m_options.datadir / "blocks" / "index",
+                    .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                    .memory_only = m_block_tree_db_in_memory,
+                },
+            };
+            m_node.chainman.reset();
+            m_node.chainman = std::make_unique<ChainstateManager>(
+                *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        }
+        return *Assert(m_node.chainman);
+    };
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({}, script_pub_key);
+
+    uint256 expected_tip_hash;
+    int32_t expected_tip_height{-1};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        expected_tip_hash = chainman.ActiveTip()->GetBlockHash();
+        expected_tip_height = chainman.ActiveTip()->nHeight;
+
+        // EnsureShieldedStateInitialized() above persisted a complete shielded snapshot (frontier,
+        // anchor roots, account-registry root window, etc). Plant a stale LEGACY mutation marker on
+        // top of it -- a LEGACY marker is not a prepared-transition journal, so on restart it forces
+        // the full rebuild_from_chain path that the pruned block would break.
+        ShieldedStateMutationMarker marker;
+        marker.version = ShieldedStateMutationMarker::LEGACY_VERSION;
+        marker.target_tip_hash = expected_tip_hash;
+        marker.target_tip_height = expected_tip_height;
+        BOOST_REQUIRE(chainman.WriteShieldedMutationMarker(marker));
+        BOOST_REQUIRE(chainman.ReadShieldedMutationMarker().has_value());
+    }
+
+    ChainstateManager& chainman_restarted = simulate_node_restart();
+    this->LoadVerifyActivateChainstate();
+
+    {
+        LOCK(::cs_main);
+        // Simulate pruning: mark an ancestor block's data as unavailable so a full shielded rebuild
+        // from chain (which the stale marker would trigger) cannot read it.
+        CBlockIndex* pruned = chainman_restarted.ActiveChain()[10];
+        BOOST_REQUIRE(pruned != nullptr);
+        pruned->nStatus &= ~BLOCK_HAVE_DATA;
+        pruned->nDataPos = 0;
+        pruned->nFile = -1;
+
+        // Pre-issue-#35 the stale marker forced rebuild_from_chain() -> ReadBlock() on the pruned
+        // block, which failed identically on every restart -> deterministic crash-loop. With the
+        // full hardening (clear stale marker + retain persisted commitment index / anchor / registry
+        // / settlement state + skip the cross-chain audit when blocks are pruned), a node with a
+        // valid persisted snapshot now RECOVERS under pruning: it comes up on its validated frontier
+        // and clears the stale marker so no restart re-enters the rebuild loop.
+        BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
+        BOOST_CHECK(chainman_restarted.ActiveTip()->GetBlockHash() == expected_tip_hash);
+        BOOST_CHECK(!chainman_restarted.ReadShieldedMutationMarker().has_value());
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_prepared_shielded_transition_from_journal,
                         PersistedTestChain100Setup)
 {
@@ -3394,6 +3487,18 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_CHECK_EQUAL(get_valid_opts({"-retainshieldedcommitmentindex"}).retain_shielded_commitment_index, true);
     BOOST_CHECK_EQUAL(get_valid_opts({"-retainshieldedcommitmentindex=1"}).retain_shielded_commitment_index, true);
     BOOST_CHECK_EQUAL(get_valid_opts({"-retainshieldedcommitmentindex=0"}).retain_shielded_commitment_index, false);
+
+    // Zero-downtime fast restart is the default; -fastshieldedstartup=0 is the thorough opt-out.
+    BOOST_CHECK_EQUAL(get_valid_opts({}).fast_shielded_startup, true);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-fastshieldedstartup"}).fast_shielded_startup, true);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-fastshieldedstartup=1"}).fast_shielded_startup, true);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-fastshieldedstartup=0"}).fast_shielded_startup, false);
+
+    // The cross-chain startup audit is on by default (applies on the non-fast path).
+    BOOST_CHECK_EQUAL(get_valid_opts({}).shielded_startup_audit, true);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-shieldedstartupaudit"}).shielded_startup_audit, true);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-shieldedstartupaudit=1"}).shielded_startup_audit, true);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-shieldedstartupaudit=0"}).shielded_startup_audit, false);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

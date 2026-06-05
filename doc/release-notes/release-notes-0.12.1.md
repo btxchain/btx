@@ -9,19 +9,16 @@ Please report bugs using the issue tracker at github:
 
   <https://github.com/bitcoin/bitcoin/issues>
 
-Upgrading and downgrading
-=========================
+# Upgrading and downgrading
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
 installer (on Windows) or just copy over /Applications/Bitcoin-Qt (on Mac) or
 bitcoind/bitcoin-qt (on Linux).
 
-Downgrade warning
------------------
+## Downgrade warning
 
 ### Downgrade to a version < 0.12.0
 
@@ -33,11 +30,9 @@ If you want to downgrade after you have done a reindex with 0.12.0 or later,
 you will need to reindex when you first start Bitcoin Core version 0.11 or
 earlier.
 
-Notable changes
-===============
+# Notable changes
 
-First version bits BIP9 softfork deployment
--------------------------------------------
+## First version bits BIP9 softfork deployment
 
 This release includes a soft fork deployment to enforce [BIP68][],
 [BIP112][] and [BIP113][] using the [BIP9][] deployment mechanism.
@@ -59,8 +54,7 @@ This specific backport pull-request can be viewed at
 [BIP112]: https://github.com/bitcoin/bips/blob/master/bip-0112.mediawiki
 [BIP113]: https://github.com/bitcoin/bips/blob/master/bip-0113.mediawiki
 
-BIP68 soft fork to enforce sequence locks for relative locktime
----------------------------------------------------------------
+## BIP68 soft fork to enforce sequence locks for relative locktime
 
 [BIP68][] introduces relative lock-time consensus-enforced semantics of
 the sequence number field to enable a signed transaction input to remain
@@ -70,8 +64,7 @@ outpoint.
 For more information about the implementation, see
 <https://github.com/bitcoin/bitcoin/pull/7184>
 
-BIP112 soft fork to enforce OP_CHECKSEQUENCEVERIFY
---------------------------------------------------
+## BIP112 soft fork to enforce OP_CHECKSEQUENCEVERIFY
 
 [BIP112][] redefines the existing OP_NOP3 as OP_CHECKSEQUENCEVERIFY (CSV)
 for a new opcode in the Bitcoin scripting system that in combination with
@@ -81,8 +74,7 @@ on the age of the output being spent.
 For more information about the implementation, see
 <https://github.com/bitcoin/bitcoin/pull/7524>
 
-BIP113 locktime enforcement soft fork
--------------------------------------
+## BIP113 locktime enforcement soft fork
 
 Bitcoin Core 0.11.2 previously introduced mempool-only locktime
 enforcement using GetMedianTimePast(). This release seeks to
@@ -134,14 +126,12 @@ approximately the expected time.
 For more information about the implementation, see
 <https://github.com/bitcoin/bitcoin/pull/6566>
 
-Miscellaneous
--------------
+## Miscellaneous
 
 The p2p alert system is off by default. To turn on, use `-alert` with
 startup configuration.
 
-0.12.1 Change log
-=================
+# 0.12.1 Change log
 
 Detailed release notes follow. This overview includes changes that affect
 behavior, not code moves, refactors and string updates. For convenience in locating
@@ -177,8 +167,7 @@ git merge commit are mentioned.
 - #7741 `a0cea89` Mark p2p alert system as deprecated (btcdrak)
 - #7780 `c5f94f6` Disable bad-chain alert (btcdrak)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

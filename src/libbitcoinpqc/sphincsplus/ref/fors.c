@@ -48,8 +48,28 @@ static void fors_gen_leafx1(unsigned char *leaf,
  * Assumes m contains at least SPX_FORS_HEIGHT * SPX_FORS_TREES bits.
  * Assumes indices has space for SPX_FORS_TREES integers.
  */
-static void message_to_indices(uint32_t *indices, const unsigned char *m)
+static void message_to_indices(uint32_t *indices, const unsigned char *m, int fips205)
 {
+    if (fips205) {
+        /* FIPS-205 base_2b (Algorithm 4): big-endian / MSB-first extraction of
+         * SPX_FORS_TREES values of SPX_FORS_HEIGHT bits each from the digest. */
+        unsigned int i;
+        unsigned int in = 0;
+        uint64_t bits = 0;
+        uint64_t total = 0;
+        for (i = 0; i < SPX_FORS_TREES; i++) {
+            while (bits < SPX_FORS_HEIGHT) {
+                total = (total << 8) | (uint64_t)m[in];
+                in++;
+                bits += 8;
+            }
+            bits -= SPX_FORS_HEIGHT;
+            indices[i] = (uint32_t)((total >> bits) & (((uint32_t)1 << SPX_FORS_HEIGHT) - 1));
+        }
+        return;
+    }
+
+    /* Legacy round-3.x SPHINCS+ (little-endian) index derivation. */
     unsigned int i, j;
     unsigned int offset = 0;
 
@@ -86,7 +106,7 @@ void fors_sign(unsigned char *sig, unsigned char *pk,
     copy_keypair_addr(fors_pk_addr, fors_addr);
     set_type(fors_pk_addr, SPX_ADDR_TYPE_FORSPK);
 
-    message_to_indices(indices, m);
+    message_to_indices(indices, m, ctx->fips205);
 
     for (i = 0; i < SPX_FORS_TREES; i++) {
         idx_offset = i * (1 << SPX_FORS_HEIGHT);
@@ -138,7 +158,7 @@ void fors_pk_from_sig(unsigned char *pk,
     set_type(fors_tree_addr, SPX_ADDR_TYPE_FORSTREE);
     set_type(fors_pk_addr, SPX_ADDR_TYPE_FORSPK);
 
-    message_to_indices(indices, m);
+    message_to_indices(indices, m, ctx->fips205);
 
     for (i = 0; i < SPX_FORS_TREES; i++) {
         idx_offset = i * (1 << SPX_FORS_HEIGHT);

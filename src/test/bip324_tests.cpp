@@ -326,4 +326,65 @@ BOOST_AUTO_TEST_CASE(packet_test_vectors) {
         "7c4b9e1e6c1ce69da7b01513cdc4588fd93b04dafefaf87f31561763d906c672bac3dfceb751ebd126728ac017d4d580e931b8e5c7d5dfe0123be4dc9b2d2238b655c8a7fadaf8082c31e310909b5b731efc12f0a56e849eae6bfeedcc86dd27ef9b91d159256aa8e8d2b71a311f73350863d70f18d0d7302cf551e4303c7733");
 }
 
+// BTX post-quantum hybrid rekey: after the X25519 handshake, both peers mix in an
+// ML-KEM shared secret and re-derive the ciphers. Verifies that two peers that rekey
+// with the SAME ml-kem secret keep a working channel, and that a mismatch (only one
+// rekeys, or different secrets) breaks it -- i.e. the new keys genuinely depend on
+// both the X25519 ECDH and the ML-KEM secret.
+BOOST_FIXTURE_TEST_CASE(hybrid_pq_rekey_roundtrip, BIP324Test)
+{
+    auto roundtrip_ok = [](BIP324Cipher& enc, BIP324Cipher& dec) -> bool {
+        const std::vector<std::byte> contents(64, std::byte{0xAB});
+        std::vector<std::byte> ct(contents.size() + BIP324Cipher::EXPANSION);
+        enc.Encrypt(contents, {}, /*ignore=*/false, ct);
+        const uint32_t len = dec.DecryptLength(Span{ct}.first(BIP324Cipher::LENGTH_LEN));
+        if (len != contents.size()) return false;
+        std::vector<std::byte> out(len);
+        bool ignore{false};
+        if (!dec.Decrypt(Span{ct}.subspan(BIP324Cipher::LENGTH_LEN), {}, ignore, out)) return false;
+        return std::equal(out.begin(), out.end(), contents.begin());
+    };
+
+    auto make_pair = [&](BIP324Cipher& a, BIP324Cipher& b) {
+        // a = initiator, b = responder, real two-sided handshake.
+        a.Initialize(b.GetOurPubKey(), /*initiator=*/true);
+        b.Initialize(a.GetOurPubKey(), /*initiator=*/false);
+    };
+
+    std::array<std::byte, 32> e1{}, e2{};
+    for (auto& x : e1) x = std::byte(m_rng.randbits(8));
+    for (auto& x : e2) x = std::byte(m_rng.randbits(8));
+
+    // (1) Both rekey with the same ML-KEM secret -> channel still works.
+    {
+        BIP324Cipher a(GenerateRandomKey(), e1), b(GenerateRandomKey(), e2);
+        make_pair(a, b);
+        BOOST_CHECK(roundtrip_ok(a, b)); // works pre-rekey
+        const std::vector<std::byte> ss(32, std::byte{0x42});
+        a.RekeyHybridPQ(ss);
+        b.RekeyHybridPQ(ss);
+        BOOST_CHECK(a.IsHybridActive() && b.IsHybridActive());
+        BOOST_CHECK(roundtrip_ok(a, b)); // still works post-rekey
+        BOOST_CHECK(roundtrip_ok(b, a)); // both directions
+    }
+
+    // (2) Only one side rekeys -> channel breaks (keys diverge).
+    {
+        BIP324Cipher a(GenerateRandomKey(), e1), b(GenerateRandomKey(), e2);
+        make_pair(a, b);
+        const std::vector<std::byte> ss(32, std::byte{0x42});
+        a.RekeyHybridPQ(ss);
+        BOOST_CHECK(!roundtrip_ok(a, b));
+    }
+
+    // (3) Different ML-KEM secrets -> channel breaks.
+    {
+        BIP324Cipher a(GenerateRandomKey(), e1), b(GenerateRandomKey(), e2);
+        make_pair(a, b);
+        a.RekeyHybridPQ(std::vector<std::byte>(32, std::byte{0x01}));
+        b.RekeyHybridPQ(std::vector<std::byte>(32, std::byte{0x02}));
+        BOOST_CHECK(!roundtrip_ok(a, b));
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

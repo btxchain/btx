@@ -115,7 +115,7 @@ bool MutableTransactionSignatureCreator::CreatePQSig(const SigningProvider& prov
 
     uint256 sighash;
     if (!SignatureHashSchnorr(sighash, execdata, m_txto, nIn, nHashType, sigversion, *m_txdata, MissingDataBehavior::FAIL)) return false;
-    if (!key->Sign(sighash, sig)) return false;
+    if (!key->Sign(sighash, sig, m_slhdsa_fips205)) return false;
     if (nHashType != SIGHASH_DEFAULT) sig.push_back(static_cast<unsigned char>(nHashType));
     return true;
 }
@@ -244,7 +244,7 @@ static bool CreateP2MRScriptSig(const BaseSignatureCreator& creator,
             execdata.m_codeseparator_pos = 0xFFFFFFFF;
             execdata.m_tapleaf_hash_init = true;
             execdata.m_tapleaf_hash = leaf_hash;
-            if (creator.Checker().CheckPQSignature(sig_to_check, pubkey, algo, hash_type, sigversion, execdata)) {
+            if (creator.Checker().CheckPQSignature(sig_to_check, pubkey, algo, hash_type, sigversion, execdata, creator.SlhdsaFips205())) {
                 sig_out = it->second;
                 return true;
             }
@@ -266,7 +266,8 @@ static bool CreateP2MRCSFSSig(SignatureData& sigdata,
                               Span<const unsigned char> pubkey,
                               PQAlgorithm algo,
                               const uint256& leaf_hash,
-                              Span<const unsigned char> msg)
+                              Span<const unsigned char> msg,
+                              bool slhdsa_fips205)
 {
     const size_t expected_sig_size = GetPQSignatureSize(algo);
     const auto lookup_key = std::make_pair(leaf_hash, std::vector<unsigned char>(pubkey.begin(), pubkey.end()));
@@ -288,7 +289,7 @@ static bool CreateP2MRCSFSSig(SignatureData& sigdata,
     if (key == nullptr || !key->IsValid() || key->GetAlgorithm() != algo) return false;
     HashWriter hasher = HASHER_CSFS;
     hasher.write(AsBytes(msg));
-    if (!key->Sign(hasher.GetSHA256(), sig_out)) return false;
+    if (!key->Sign(hasher.GetSHA256(), sig_out, slhdsa_fips205)) return false;
     sigdata.p2mr_csfs_sigs.emplace(lookup_key, sig_out);
     return true;
 }
@@ -521,6 +522,7 @@ enum class P2MRLeafType {
     CTV_MULTISIG,
     CSFS_ONLY,
     CSFS_VERIFY_CHECKSIG,
+    HTLC,
 };
 
 struct P2MRLeafInfo {
@@ -532,6 +534,7 @@ struct P2MRLeafInfo {
     PQAlgorithm csfs_algo{PQAlgorithm::ML_DSA_44};
     Span<const unsigned char> csfs_pubkey{};
     uint256 ctv_hash{};
+    std::vector<unsigned char> htlc_hash160{}; // HTLC leaf: the 20-byte preimage hashlock
 };
 
 static bool ParseP2MRChecksigLeaf(Span<const unsigned char> script, size_t offset, P2MRLeafInfo& info, size_t& consumed)
@@ -675,8 +678,34 @@ static bool ParseP2MRMultisigLeaf(Span<const unsigned char> script, P2MRLeafInfo
     return true;
 }
 
+static bool ParseP2MRHTLCLeaf(Span<const unsigned char> script, P2MRLeafInfo& info)
+{
+    // BuildP2MRHTLCLeaf layout (src/script/pqm.cpp):
+    //   <20-byte preimage-hash160 push> OP_OVER OP_HASH160 OP_EQUALVERIFY
+    //   <csfs pubkey push> OP_CHECKSIGFROMSTACK
+    if (script.size() < 25) return false;
+    if (script[0] != 0x14) return false;                                    // push of 20 bytes
+    if (script[21] != OP_OVER || script[22] != OP_HASH160 || script[23] != OP_EQUALVERIFY) return false;
+    Span<const unsigned char> pubkey;
+    PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+    size_t push_consumed{0};
+    if (!ParseP2MRAnyPubkeyPush(script, /*offset=*/24, algo, pubkey, push_consumed)) return false;
+    const size_t tail = 24 + push_consumed;
+    if (script.size() != tail + 1) return false;
+    if (script[tail] != OP_CHECKSIGFROMSTACK) return false;
+    info.type = P2MRLeafType::HTLC;
+    info.htlc_hash160.assign(script.begin() + 1, script.begin() + 21);
+    info.csfs_algo = algo;
+    info.csfs_pubkey = pubkey;
+    return true;
+}
+
 static bool ExtractP2MRLeafInfo(Span<const unsigned char> script, P2MRLeafInfo& info)
 {
+    if (ParseP2MRHTLCLeaf(script, info)) {
+        return true;
+    }
+
     if (script.size() == 34 && script[0] == 32 && script[33] == OP_CHECKTEMPLATEVERIFY) {
         info.type = P2MRLeafType::CTV_ONLY;
         info.ctv_hash = uint256{script.subspan(1, uint256::size())};
@@ -927,7 +956,7 @@ static bool SignP2MR(const SigningProvider& provider,
             const auto it_msg = sigdata.p2mr_csfs_msgs.find(key);
             if (it_msg == sigdata.p2mr_csfs_msgs.end()) continue;
             std::vector<unsigned char> sig_csfs;
-            if (!CreateP2MRCSFSSig(sigdata, provider, sig_csfs, leaf_info.csfs_pubkey, leaf_info.csfs_algo, leaf_hash, it_msg->second)) continue;
+            if (!CreateP2MRCSFSSig(sigdata, provider, sig_csfs, leaf_info.csfs_pubkey, leaf_info.csfs_algo, leaf_hash, it_msg->second, creator.SlhdsaFips205())) continue;
             std::vector<valtype> candidate = Vector(sig_csfs, it_msg->second, script_bytes, *control);
             const int priority = P2MRPriority(leaf_info.csfs_algo, preferred_algo, /*preferred_priority=*/20, /*non_preferred_priority=*/30);
             commit_candidate(priority, std::move(candidate), script_bytes, *control);
@@ -943,7 +972,7 @@ static bool SignP2MR(const SigningProvider& provider,
                 continue;
             }
             std::vector<unsigned char> sig_csfs;
-            if (!CreateP2MRCSFSSig(sigdata, provider, sig_csfs, leaf_info.csfs_pubkey, leaf_info.csfs_algo, leaf_hash, it_msg_csfs->second)) {
+            if (!CreateP2MRCSFSSig(sigdata, provider, sig_csfs, leaf_info.csfs_pubkey, leaf_info.csfs_algo, leaf_hash, it_msg_csfs->second, creator.SlhdsaFips205())) {
                 continue;
             }
             std::vector<valtype> candidate = Vector(sig_checksig, sig_csfs, it_msg_csfs->second, script_bytes, *control);
@@ -954,6 +983,21 @@ static bool SignP2MR(const SigningProvider& provider,
                 result = std::move(candidate);
                 return true;
             }
+            commit_candidate(priority, std::move(candidate), script_bytes, *control);
+            continue;
+        }
+        case P2MRLeafType::HTLC: {
+            // HTLC claim path: requires the preimage (whose HASH160 equals the leaf hashlock) AND the
+            // recipient's CSFS signature over that preimage.
+            const auto it_pre = sigdata.hash160_preimages.find(leaf_info.htlc_hash160);
+            if (it_pre == sigdata.hash160_preimages.end()) continue;
+            const std::vector<unsigned char>& preimage = it_pre->second;
+            std::vector<unsigned char> sig_csfs;
+            if (!CreateP2MRCSFSSig(sigdata, provider, sig_csfs, leaf_info.csfs_pubkey, leaf_info.csfs_algo, leaf_hash, preimage, creator.SlhdsaFips205())) continue;
+            // Witness (bottom->top), then leaf+control: <csfs_sig> <preimage>. The CSFS boolean result
+            // is the single truthy stack element required by cleanstack.
+            std::vector<valtype> candidate = Vector(sig_csfs, preimage, script_bytes, *control);
+            const int priority = P2MRPriority(leaf_info.csfs_algo, preferred_algo, /*preferred_priority=*/20, /*non_preferred_priority=*/30);
             commit_candidate(priority, std::move(candidate), script_bytes, *control);
             continue;
         }
@@ -1545,7 +1589,7 @@ bool IsSegWitOutput(const SigningProvider& provider, const CScript& script)
     return false;
 }
 
-bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, const std::map<COutPoint, Coin>& coins, int nHashType, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum, std::optional<PQAlgorithm> preferred_pq_signing_algo)
+bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, const std::map<COutPoint, Coin>& coins, int nHashType, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum, std::optional<PQAlgorithm> preferred_pq_signing_algo, bool slhdsa_fips205)
 {
     bool fHashSingle = ((nHashType & ~SIGHASH_ANYONECANPAY) == SIGHASH_SINGLE);
 
@@ -1624,7 +1668,9 @@ bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, 
         sigdata.preferred_pq_signing_algo = preferred_pq_signing_algo;
         // Only sign SIGHASH_SINGLE if there's a corresponding output:
         if (!fHashSingle || (i < mtx.vout.size())) {
-            ProduceSignature(*keystore, MutableTransactionSignatureCreator(mtx, i, amount, &txdata, nHashType), prevPubKey, sigdata);
+            MutableTransactionSignatureCreator creator(mtx, i, amount, &txdata, nHashType);
+            creator.SetSlhdsaFips205(slhdsa_fips205);
+            ProduceSignature(*keystore, creator, prevPubKey, sigdata);
             if ((!sigdata.witness) && inputs_amount_sum && *inputs_amount_sum) {
                 inputs_amount_sum->reset();
                 inputs_amount_sum = nullptr;

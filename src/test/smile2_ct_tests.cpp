@@ -578,12 +578,18 @@ BOOST_AUTO_TEST_CASE(p1_m4_postfork_tuple_opening_hardening_roundtrips_and_binds
 {
     auto setup = CTTestSetup::Create(/*N=*/32, /*num_inputs=*/1, /*num_outputs=*/1, {100}, {100}, static_cast<uint8_t>(0xF9));
 
+    // This test exercises the PRE-activation M4 (v2) postfork tuple-opening path, which v0.31 must
+    // keep producing in the pre-C-002 window for v0.30 wire-compatibility. ProveCT/ValidateSmile2Proof
+    // both default validation_height to C002_ACTIVATION_HEIGHT (which yields v3), so the M4 regime must
+    // be requested explicitly with a pre-activation height.
+    const int64_t kPreActivationHeight = SmileCTProof::C002_ACTIVATION_HEIGHT - 1;
     auto proof = ProveCT(setup.inputs,
                          setup.outputs,
                          setup.pub,
                          0xABC0046,
                          /*public_fee=*/0,
-                         /*bind_anonset_context=*/true);
+                         /*bind_anonset_context=*/true,
+                         kPreActivationHeight);
     BOOST_REQUIRE_EQUAL(proof.wire_version, SmileCTProof::WIRE_VERSION_M4_HARDENED);
     BOOST_REQUIRE(VerifyCT(proof, 1, 1, setup.pub, /*public_fee=*/0, /*bind_anonset_context=*/true));
     BOOST_REQUIRE_EQUAL(proof.input_tuples.size(), 1U);
@@ -611,7 +617,8 @@ BOOST_AUTO_TEST_CASE(p1_m4_postfork_tuple_opening_hardening_roundtrips_and_binds
                              proof.output_coins,
                              setup.pub,
                              /*public_fee=*/0,
-                             /*bind_anonset_context=*/true)
+                             /*bind_anonset_context=*/true,
+                             kPreActivationHeight)
              .has_value(),
         "postfork hardened proof should validate under bound transcript mode");
     BOOST_CHECK_EQUAL(

@@ -89,6 +89,7 @@ void LogShieldedV2ContextReject(std::string_view gate, const CShieldedBundle& bu
  */
 [[nodiscard]] std::optional<std::vector<uint256>> ExtractCreatedShieldedSettlementAnchors(
     const CTransaction& tx,
+    int64_t validation_height,
     std::string& reject_reason);
 
 /**

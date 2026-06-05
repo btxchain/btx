@@ -20,7 +20,7 @@ class P2MRTemplateChecker final : public BaseSignatureChecker
 public:
     explicit P2MRTemplateChecker(bool locktime_ok) : m_locktime_ok(locktime_ok) {}
 
-    bool CheckPQSignature(Span<const unsigned char>, Span<const unsigned char>, PQAlgorithm, uint8_t, SigVersion, ScriptExecutionData&) const override
+    bool CheckPQSignature(Span<const unsigned char>, Span<const unsigned char>, PQAlgorithm, uint8_t, SigVersion, ScriptExecutionData&, bool) const override
     {
         return true;
     }
@@ -59,7 +59,7 @@ BOOST_AUTO_TEST_CASE(htlc_leaf_valid_build)
 
     CScript expected;
     expected << preimage_hash << OP_OVER << OP_HASH160 << OP_EQUALVERIFY
-             << oracle_pubkey << OP_CHECKSIGFROMSTACK << OP_VERIFY << OP_DROP;
+             << oracle_pubkey << OP_CHECKSIGFROMSTACK;
     BOOST_CHECK_EQUAL_COLLECTIONS(script.begin(), script.end(), expected.begin(), expected.end());
 }
 
@@ -108,8 +108,8 @@ BOOST_AUTO_TEST_CASE(htlc_correct_preimage_succeeds)
     std::vector<unsigned char> oracle_sig;
     BOOST_REQUIRE(oracle_key.Sign(msg_hash, oracle_sig));
 
+    // Claim witness (bottom->top): <oracle_sig> <preimage>.
     std::vector<std::vector<unsigned char>> stack;
-    stack.push_back(std::vector<unsigned char>{0x01});
     stack.push_back(oracle_sig);
     stack.push_back(preimage);
 
@@ -120,7 +120,10 @@ BOOST_AUTO_TEST_CASE(htlc_correct_preimage_succeeds)
     const P2MRTemplateChecker checker{/*locktime_ok=*/true};
     BOOST_REQUIRE(EvalP2MRScript(script, stack, checker, execdata, serror));
     BOOST_CHECK_EQUAL(serror, SCRIPT_ERR_OK);
-    BOOST_CHECK(stack.empty());
+    // Consensus (ExecuteWitnessScript) requires EXACTLY ONE truthy element left (cleanstack). The
+    // CSFS result must be that element — proving the leaf is actually spendable, not just logically OK.
+    BOOST_REQUIRE_EQUAL(stack.size(), 1U);
+    BOOST_CHECK_EQUAL(CScriptNum(stack.back(), /*fRequireMinimal=*/true).GetInt64(), 1);
 }
 
 BOOST_AUTO_TEST_CASE(htlc_wrong_preimage_fails)
@@ -143,7 +146,6 @@ BOOST_AUTO_TEST_CASE(htlc_wrong_preimage_fails)
     BOOST_REQUIRE(oracle_key.Sign(msg_hash, oracle_sig));
 
     std::vector<std::vector<unsigned char>> stack;
-    stack.push_back(std::vector<unsigned char>{0x01});
     stack.push_back(oracle_sig);
     stack.push_back(wrong_preimage);
 

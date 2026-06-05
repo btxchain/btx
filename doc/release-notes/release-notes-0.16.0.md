@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
@@ -30,15 +29,13 @@ automatic upgrade code from before version 0.8 to version 0.15.0 or higher. Upgr
 directly from 0.7.x and earlier without re-downloading the blockchain is not supported.
 However, as usual, old wallet versions are still supported.
 
-Downgrading warning
--------------------
+## Downgrading warning
 
 Wallets created in 0.16 and later are not compatible with versions prior to 0.16
 and will not work if you try to use newly created wallets in older versions. Existing
 wallets that were created with older versions are not affected by this.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is extensively tested on multiple operating systems using
 the Linux kernel, macOS 10.8+, and Windows Vista and later. Windows XP is not supported.
@@ -46,11 +43,9 @@ the Linux kernel, macOS 10.8+, and Windows Vista and later. Windows XP is not su
 Bitcoin Core should also work on most other Unix-like systems but is not
 frequently tested on them.
 
-Notable changes
-===============
+# Notable changes
 
-Wallet changes
----------------
+## Wallet changes
 
 ### Segwit Wallet
 
@@ -110,31 +105,26 @@ bitcoin data directory. The behavior is now:
 Care should be taken when choosing the wallets directory location, as if it
 becomes unavailable during operation, funds may be lost.
 
-Build: Minimum GCC bumped to 4.8.x
-------------------------------------
+## Build: Minimum GCC bumped to 4.8.x
 The minimum version of the GCC compiler required to compile Bitcoin Core is now 4.8. No effort will be
 made to support older versions of GCC. See discussion in issue #11732 for more information.
 The minimum version for the Clang compiler is still 3.3. Other minimum dependency versions can be found in `doc/dependencies.md` in the repository.
 
-Support for signalling pruned nodes (BIP159)
----------------------------------------------
+## Support for signalling pruned nodes (BIP159)
 Pruned nodes can now signal BIP159's NODE_NETWORK_LIMITED using service bits, in preparation for
 full BIP159 support in later versions. This would allow pruned nodes to serve the most recent blocks. However, the current change does not yet include support for connecting to these pruned peers.
 
-Performance: SHA256 assembly enabled by default
--------------------------------------------------
+## Performance: SHA256 assembly enabled by default
 The SHA256 hashing optimizations for architectures supporting SSE4, which lead to ~50% speedups in SHA256 on supported hardware (~5% faster synchronization and block validation), have now been enabled by default. In previous versions they were enabled using the `--enable-experimental-asm` flag when building, but are now the default and no longer deemed experimental.
 
-GUI changes
------------
+## GUI changes
 - Uses of "µBTC" in the GUI now also show the more colloquial term "bits", specified in BIP176.
 - The option to reuse a previous address has now been removed. This was justified by the need to "resend" an invoice, but now that we have the request history, that need should be gone.
 - Support for searching by TXID has been added, rather than just address and label.
 - A "Use available balance" option has been added to the send coins dialog, to add the remaining available wallet balance to a transaction output.
 - A toggle for unblinding the password fields on the password dialog has been added.
 
-RPC changes
-------------
+## RPC changes
 
 ### New `rescanblockchain` RPC
 
@@ -188,20 +178,17 @@ The `validateaddress` RPC output has been extended with a few new fields, and su
 - An `initialblockdownload` boolean has been added to the `getblockchaininfo` RPC to indicate whether the node is currently in IBD or not.
 - `minrelaytxfee` is now included in the output of `getmempoolinfo`
 
-Other changed command-line options
-----------------------------------
+## Other changed command-line options
 - `-debuglogfile=<file>` can be used to specify an alternative debug logging file.
 - bitcoin-cli now has an `-stdinrpcpass` option to allow the RPC password to be read from standard input.
 - The `-usehd` option has been removed.
 - bitcoin-cli now supports a new `-getinfo` flag which returns an output like that of the now-removed `getinfo` RPC.
 
-Testing changes
-----------------
+## Testing changes
 - The default regtest JSON-RPC port has been changed to 18443 to avoid conflict with testnet's default of 18332.
 - Segwit is now always active in regtest mode by default. Thus, if you upgrade a regtest node you will need to either -reindex or use the old rules by adding `vbparams=segwit:0:999999999999` to your regtest bitcoin.conf. Failure to do this will result in a CheckBlockIndex() assertion failure that will look like: Assertion `(pindexFirstNeverProcessed != nullptr) == (pindex->nChainTx == 0)' failed.
 
-0.16.0 change log
-------------------
+## 0.16.0 change log
 
 ### Block and transaction handling
 - #10953 `aeed345` Combine scriptPubKey and amount as CTxOut in CScriptCheck (jl2012)
@@ -610,8 +597,7 @@ Testing changes
 - #12367 `09fc859` Fix two fast-shutdown bugs (TheBlueMatt)
 - #12422 `4d54e7a` util: Make LockDirectory thread-safe, consistent, and fix OpenBSD 6.2 build (laanwj)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

@@ -8,8 +8,7 @@ Please report bugs using the issue tracker at github:
 
   https://github.com/bitcoin/bitcoin/issues
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you already downloaded 0.8.6rc1 you do not need to re-download. This release is exactly the same.
 
@@ -23,8 +22,7 @@ run 0.8.6 your blockchain files will be re-indexed, which will take
 anywhere from 30 minutes to several hours, depending on the speed of
 your machine.
 
-0.8.6 Release notes
-===================
+# 0.8.6 Release notes
 
 - Default block size increase for miners.
   (see https://gist.github.com/gavinandresen/7670433#086-accept-into-block)
@@ -55,8 +53,7 @@ your machine.
 
 - Various small GUI, documentation and build fixes
 
-Warning
--------
+## Warning
 
 - There have been frequent reports of users running out of virtual memory on 32-bit systems
   during the initial sync.

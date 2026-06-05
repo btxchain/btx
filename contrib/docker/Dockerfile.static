@@ -1,0 +1,22 @@
+FROM alpine:3.22 AS builder
+RUN apk add --no-cache build-base cmake coreutils binutils linux-headers \
+    boost-dev boost-static libevent-dev libevent-static sqlite-dev sqlite-static \
+    zlib-static
+# Force static resolution of sqlite (CMake's FindSQLite3 grabs the .so by abspath).
+# cmake itself does not link libsqlite3, so removing only this .so is safe.
+RUN rm -f /usr/lib/libsqlite3.so* /usr/lib/libevent*.so*
+WORKDIR /opt/btx
+COPY . .
+WORKDIR /opt/btx/build
+RUN cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++" \
+    -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
+    -DCMAKE_CXX_STANDARD_LIBRARIES="-levent_core -levent_extra -levent_pthreads -levent -lsqlite3 -lz" \
+    -DBUILD_DAEMON="ON" -DBUILD_CLI="ON" -DENABLE_WALLET="ON" -DWITH_SQLITE="ON" \
+    -DBUILD_TESTS="OFF" -DBUILD_GUI="OFF" -DBUILD_TX="OFF" -DBUILD_UTIL="OFF" \
+    -DBUILD_WALLET_TOOL="OFF" -DBUILD_BENCH="OFF" -DBUILD_FUZZ_BINARY="OFF" \
+    -DBUILD_UTIL_CHAINSTATE="OFF" -DWITH_BDB="OFF" -DWITH_USDT="OFF" \
+    -DINSTALL_MAN="OFF" -DWITH_CCACHE="OFF" -DWITH_ZMQ="OFF"
+RUN cmake --build . --target btxd btx-cli -j$(nproc)
+RUN strip bin/btxd bin/btx-cli && file bin/btxd

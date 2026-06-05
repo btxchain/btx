@@ -8,8 +8,7 @@ Please report bugs using the issue tracker at github:
   https://github.com/bitcoin/bitcoin/issues
 
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait
 until it has completely shut down (which might take a few minutes for older

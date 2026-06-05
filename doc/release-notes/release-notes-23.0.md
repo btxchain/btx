@@ -1,5 +1,4 @@
-23.0 Release Notes
-==================
+# 23.0 Release Notes
 
 Bitcoin Core version 23.0 is now available from:
 
@@ -16,8 +15,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes in some cases), then run the
@@ -28,8 +26,7 @@ Upgrading directly from a version of Bitcoin Core that has reached its EOL is
 possible, but it might take some time if the data directory needs to be migrated. Old
 wallet versions of Bitcoin Core are generally supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems
 using the Linux kernel, macOS 10.15+, and Windows 7 and newer.  Bitcoin
@@ -37,11 +34,9 @@ Core should also work on most other Unix-like systems but is not as
 frequently tested on them.  It is not recommended to use Bitcoin Core on
 unsupported systems.
 
-Notable changes
-===============
+# Notable changes
 
-P2P and network changes
------------------------
+## P2P and network changes
 
 - A bitcoind node will no longer rumour addresses to inbound peers by default.
   They will become eligible for address gossip after sending an ADDR, ADDRV2,
@@ -51,21 +46,18 @@ P2P and network changes
 
 - Full support has been added for the CJDNS network. See the new option `-cjdnsreachable` and [doc/cjdns.md](https://github.com/bitcoin/bitcoin/tree/23.x/doc/cjdns.md) (#23077)
 
-Fee estimation changes
-----------------------
+## Fee estimation changes
 
 - Fee estimation now takes the feerate of replacement (RBF) transactions into
   account. (#22539)
 
-Rescan startup parameter removed
---------------------------------
+## Rescan startup parameter removed
 
 The `-rescan` startup parameter has been removed. Wallets which require
 rescanning due to corruption will still be rescanned on startup.
 Otherwise, please use the `rescanblockchain` RPC to trigger a rescan. (#23123)
 
-Tracepoints and Userspace, Statically Defined Tracing support
--------------------------------------------------------------
+## Tracepoints and Userspace, Statically Defined Tracing support
 
 Bitcoin Core release binaries for Linux now include experimental tracepoints which
 act as an interface for process-internal events. These can be used for review,
@@ -75,8 +67,7 @@ tracepoints. Information about the existing tracepoints can be found under
 [doc/tracing.md](https://github.com/bitcoin/bitcoin/blob/23.x/doc/tracing.md) and
 usage examples are provided in [contrib/tracing/](https://github.com/bitcoin/bitcoin/tree/23.x/contrib/tracing).
 
-Updated RPCs
-------------
+## Updated RPCs
 
 - The `validateaddress` RPC now returns an `error_locations` array for invalid
   addresses, with the indices of invalid character locations in the address (if
@@ -115,8 +106,7 @@ Updated RPCs
 
 Changes to wallet related RPCs can be found in the Wallet section below.
 
-New RPCs
---------
+## New RPCs
 
 - Information on soft fork status has been moved from `getblockchaininfo`
   to the new `getdeploymentinfo` RPC which allows querying soft fork status at any
@@ -127,8 +117,7 @@ New RPCs
   now reflects the status of the current block rather than the next
   block. (#23508)
 
-Files
------
+## Files
 
 * On startup, the list of banned hosts and networks (via `setban` RPC) in
   `banlist.dat` is ignored and only `banlist.json` is considered. Bitcoin Core
@@ -137,8 +126,7 @@ Files
   try to translate the `banlist.dat` into json. After an upgrade, `listbanned`
   can be used to double check the parsed entries. (#22570)
 
-Updated settings
-----------------
+## Updated settings
 
 - In previous releases, the meaning of the command line option
   `-persistmempool` (without a value provided) incorrectly disabled mempool
@@ -156,8 +144,7 @@ Updated settings
   `addnode` RPC. To mimic the old behavior use `-proxy=` together with
   `-onlynet=` listing all relevant networks except `onion`. (#22834)
 
-Tools and Utilities
--------------------
+## Tools and Utilities
 
 - Update `-getinfo` to return data in a user-friendly format that also reduces vertical space. (#21832)
 
@@ -165,8 +152,7 @@ Tools and Utilities
   known to the node instead of separate `torv2` and `torv3` fields, as support
   for Tor V2 addresses was removed from Bitcoin Core in 22.0. (#22544)
 
-Wallet
-------
+## Wallet
 
 - Descriptor wallets are now the default wallet type. Newly created wallets
   will use descriptors unless `descriptors=false` is set during `createwallet`, or
@@ -208,31 +194,26 @@ Wallet
   transactions. Immature coinbase transactions are coinbase transactions that
   have 100 or fewer confirmations, and are not spendable. (#14707)
 
-GUI changes
------------
+## GUI changes
 
 - UTXOs which are locked via the GUI are now stored persistently in the
   wallet database, so are not lost on node shutdown or crash. (#23065)
 
 - The Bech32 checkbox has been replaced with a dropdown for all address types, including the new Bech32m (BIP-350) standard for Taproot enabled wallets.
 
-Low-level changes
-=================
+# Low-level changes
 
-RPC
----
+## RPC
 
 - `getblockchaininfo` now returns a new `time` field, that provides the chain tip time. (#22407)
 
-Tests
------
+## Tests
 
 - For the `regtest` network the activation heights of several softforks were
   set to block height 1. They can be changed by the runtime setting
   `-testactivationheight=name@height`. (#22818)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

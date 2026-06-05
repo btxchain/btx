@@ -440,7 +440,7 @@ RepresentativeArtifacts BuildRepresentativeArtifacts(const RuntimeReportConfig& 
     artifacts.settlement_anchor_validation_ns = MeasureNanoseconds([&] {
         const CTransaction tx{artifacts.settlement_anchor_tx};
         std::string reject_reason;
-        auto anchors = ExtractCreatedShieldedSettlementAnchors(tx, reject_reason);
+        auto anchors = ExtractCreatedShieldedSettlementAnchors(tx, std::numeric_limits<int32_t>::max(), reject_reason);
         if (!anchors.has_value() || anchors->empty()) {
             throw std::runtime_error("representative settlement-anchor validation failed: " + reject_reason);
         }

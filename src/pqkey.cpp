@@ -194,12 +194,22 @@ bool CPQKey::MakeDeterministicKey(PQAlgorithm algo, Span<const unsigned char> se
     return m_valid;
 }
 
-bool CPQKey::Sign(const uint256& hash, std::vector<unsigned char>& sig) const
+bool CPQKey::Sign(const uint256& hash, std::vector<unsigned char>& sig,
+                  bool slhdsa_fips205) const
 {
     if (!IsValid()) {
         sig.clear();
         return false;
     }
+
+    // FIPS-205 (SLH-DSA only): precondition the message with the pure-mode
+    // empty-context wrapper before handing it to the SPHINCS+ core. ML-DSA is
+    // unaffected.
+    const bool wrap = slhdsa_fips205 && m_algo == PQAlgorithm::SLH_DSA_128S;
+    const std::vector<unsigned char> wrapped =
+        wrap ? Fips205PureContextMessage(hash) : std::vector<unsigned char>{};
+    const unsigned char* msg = wrap ? wrapped.data() : hash.data();
+    const size_t msg_len = wrap ? wrapped.size() : hash.size();
 
     // Hedged signing entropy mixed by libbitcoinpqc with (secret key || message).
     std::array<unsigned char, 128> entropy{};
@@ -213,11 +223,12 @@ bool CPQKey::Sign(const uint256& hash, std::vector<unsigned char>& sig) const
         ToCAlgo(m_algo),
         m_secret_key->data(),
         m_secret_key->size(),
-        hash.data(),
-        hash.size(),
+        msg,
+        msg_len,
         entropy.data(),
         entropy.size(),
-        &signature);
+        &signature,
+        wrap ? 1 : 0);
     secure_memzero(entropy.data(), entropy.size());
     if (result != BITCOIN_PQC_OK) {
         sig.clear();
@@ -271,19 +282,38 @@ size_t CPQKey::GetSigSize() const
 
 CPQPubKey::CPQPubKey(PQAlgorithm algo, Span<const unsigned char> data) : m_algo(algo), m_data(data.begin(), data.end()) {}
 
-bool CPQPubKey::Verify(const uint256& hash, Span<const unsigned char> sig) const
+bool CPQPubKey::Verify(const uint256& hash, Span<const unsigned char> sig,
+                       bool slhdsa_fips205) const
 {
     if (m_data.size() != GetPQPubKeySize(m_algo) || sig.size() != GetPQSignatureSize(m_algo)) {
         return false;
     }
+    const bool wrap = slhdsa_fips205 && m_algo == PQAlgorithm::SLH_DSA_128S;
+    const std::vector<unsigned char> wrapped =
+        wrap ? Fips205PureContextMessage(hash) : std::vector<unsigned char>{};
+    const unsigned char* msg = wrap ? wrapped.data() : hash.data();
+    const size_t msg_len = wrap ? wrapped.size() : hash.size();
     return bitcoin_pqc_verify(
                ToCAlgo(m_algo),
                m_data.data(),
                m_data.size(),
-               hash.data(),
-               hash.size(),
+               msg,
+               msg_len,
                sig.data(),
-               sig.size()) == BITCOIN_PQC_OK;
+               sig.size(),
+               wrap ? 1 : 0) == BITCOIN_PQC_OK;
+}
+
+std::vector<unsigned char> Fips205PureContextMessage(const uint256& hash)
+{
+    // FIPS-205 algorithm 22/24 (slh_sign / slh_verify), pure variant, empty
+    // context string: M' = toByte(0,1) || toByte(0,1) || M.
+    std::vector<unsigned char> message;
+    message.reserve(2 + hash.size());
+    message.push_back(0x00); // domain separator: 0 = pure (no pre-hash)
+    message.push_back(0x00); // |ctx| = 0 (empty context)
+    message.insert(message.end(), hash.begin(), hash.end());
+    return message;
 }
 
 PQAlgorithm CPQPubKey::GetAlgorithm() const

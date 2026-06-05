@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is extensively tested on multiple operating systems using
 the Linux kernel, macOS 10.8+, and Windows Vista and later.
@@ -27,11 +26,9 @@ Please do not report issues about Windows XP to the issue tracker.
 Bitcoin Core should also work on most other Unix-like systems but is not
 frequently tested on them.
 
-Notable changes
-===============
+# Notable changes
 
-miniupnp CVE-2017-8798
-----------------------------
+## miniupnp CVE-2017-8798
 
 Bundled miniupnpc was updated to 2.0.20170509. This fixes an integer signedness error
 (present in MiniUPnPc v1.4.20101221 through v2.0) that allows remote attackers
@@ -45,8 +42,7 @@ setting or through the `-upnp` option, as since the last UPnP vulnerability
 If you use this option, it is recommended to upgrade to this version as soon as
 possible.
 
-Known Bugs
-==========
+# Known Bugs
 
 Since 0.14.0 the approximate transaction fee shown in Bitcoin-Qt when using coin
 control and smart fee estimation does not reflect any change in target from the
@@ -54,8 +50,7 @@ smart fee slider. It will only present an approximate fee calculated using the
 default target. The fee calculated using the correct target is still applied to
 the transaction and shown in the final send confirmation dialog.
 
-0.14.2 Change log
-=================
+# 0.14.2 Change log
 
 Detailed release notes follow. This overview includes changes that affect
 behavior, not code moves, refactors and string updates. For convenience in locating
@@ -83,8 +78,7 @@ git merge commit are mentioned.
 ### Wallet
 - #10294 `1847642` Unset change position when there is no change (instagibbs)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

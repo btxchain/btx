@@ -1,5 +1,4 @@
-0.20.0 Release Notes
-====================
+# 0.20.0 Release Notes
 
 Bitcoin Core version 0.20.0 is now available from:
 
@@ -16,8 +15,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes in some cases), then run the
@@ -28,8 +26,7 @@ Upgrading directly from a version of Bitcoin Core that has reached its EOL is
 possible, but it might take some time if the data directory needs to be migrated. Old
 wallet versions of Bitcoin Core are generally supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems
 using the Linux kernel, macOS 10.12+, and Windows 7 and newer.  Bitcoin
@@ -41,8 +38,7 @@ From Bitcoin Core 0.20.0 onwards, macOS versions earlier than 10.12 are no
 longer supported. Additionally, Bitcoin Core does not yet change appearance
 when macOS "dark mode" is activated.
 
-Known Bugs
-==========
+# Known Bugs
 
 The process for generating the source code release ("tarball") has changed in an
 effort to make it more complete, however, there are a few regressions in
@@ -55,11 +51,9 @@ this release:
 - Instead of running `make` simply, you should instead run
   `BITCOIN_GENBUILD_NO_GIT=1 make`.
 
-Notable changes
-===============
+# Notable changes
 
-P2P and network changes
------------------------
+## P2P and network changes
 
 #### Removal of BIP61 reject network messages from Bitcoin Core
 
@@ -110,8 +104,7 @@ and logging implications:
   not accepted to the mempool now no longer report the reject code. The reason
   for rejection is still reported.
 
-Updated RPCs
-------------
+## Updated RPCs
 
 - The RPCs which accept descriptors now accept the new `sortedmulti(...)` descriptor
   type which supports multisig scripts where the public keys are sorted
@@ -135,8 +128,7 @@ Updated RPCs
 - The `createmultisig` and `addmultisigaddress` RPCs now return an
   output script descriptor for the newly created address.  (#18032)
 
-Build System
-------------
+## Build System
 
 - OpenSSL is no longer used by Bitcoin Core.  (#17265)
 
@@ -153,8 +145,7 @@ Build System
   This implies that `autotools` and other required packages are installed on the
   user's system. (#18331)
 
-New settings
-------------
+## New settings
 
 - New `rpcwhitelist` and `rpcwhitelistdefault` configuration parameters
   allow giving certain RPC users permissions to only some RPC calls.
@@ -169,8 +160,7 @@ New settings
   subject to removal or breaking changes in future releases, so the
   legacy /16 prefix mapping of IP addresses remains the default.  (#16702)
 
-Updated settings
-----------------
+## Updated settings
 
 - All custom settings configured when Bitcoin Core starts are now
   written to the `debug.log` file to assist troubleshooting.  (#16115)
@@ -188,15 +178,13 @@ Updated settings
   in its argument with the name of the wallet generating the
   notification.  This is not supported on Windows. (#13339)
 
-Removed settings
-----------------
+## Removed settings
 
 - The `-whitelistforcerelay` configuration parameter has been removed after
   it was discovered that it was rendered ineffective in version 0.13 and
   hasn't actually been supported for almost four years.  (#17985)
 
-GUI changes
------------
+## GUI changes
 
 - The "Start Bitcoin Core on system login" option has been removed on macOS.
   (#17567)
@@ -221,8 +209,7 @@ GUI changes
   may be used with the `finalizepsbt` and `sendrawtransaction` RPCs.
   (#16944, #17492)
 
-Wallet
-------
+## Wallet
 
 - The wallet now by default uses bech32 addresses when using RPC, and
   creates native segwit change outputs.  (#16884)
@@ -243,17 +230,14 @@ Wallet
   deprecated configuration parameters is expected to be dropped in the
   0.21 release.  (#17585, #17578)
 
-Documentation changes
----------------------
+## Documentation changes
 
 - Bitcoin Core's automatically-generated source code documentation is
   now available at https://doxygen.bitcoincore.org.  (#17596)
 
-Low-level changes
-=================
+# Low-level changes
 
-Utilities
----------
+## Utilities
 
 - The `bitcoin-cli` utility used with the `-getinfo` parameter now
   returns a `headers` field with the number of downloaded block headers
@@ -270,15 +254,13 @@ Utilities
   anyone who can look at your screen.  The existing `-stdinrpcpass`
   parameter is also updated to not echo the passphrase. (#13716)
 
-Command line
-------------
+## Command line
 
 - Command line options prefixed with main/test/regtest network names like
   `-main.port=8333` `-test.server=1` previously were allowed but ignored. Now
   they trigger "Invalid parameter" errors on startup. (#17482)
 
-New RPCs
---------
+## New RPCs
 
 - The `dumptxoutset` RPC outputs a serialized snapshot of the current
   UTXO set.  A script is provided in the `contrib/devtools` directory
@@ -289,8 +271,7 @@ New RPCs
   generate blocks that pay an arbitrary output script descriptor.
   (#16943)
 
-Updated RPCs
-------------
+## Updated RPCs
 
 - The `verifychain` RPC default values are now static instead of
   depending on the command line options or configuration file
@@ -302,8 +283,7 @@ Updated RPCs
   longer report values higher than 1.  Previously it would occasionally
   report the chain was more than 100% verified.  (#17328)
 
-Tests
------
+## Tests
 
 - It is now an error to use an unqualified `walletdir=path` setting in
   the config file if running on testnet or regtest networks. The setting
@@ -316,14 +296,12 @@ Tests
   `fallbackfee=0.0002` to their configuration if they weren't setting it
   and they want it to keep working like before. (#16524)
 
-Build system
-------------
+## Build system
 
 - Support is provided for building with the Android Native Development
   Kit (NDK).  (#16110)
 
-0.20.0 change log
-=================
+# 0.20.0 change log
 
 ### Mining
 - #18742 miner: Avoid stack-use-after-return in validationinterface (MarcoFalke)
@@ -860,8 +838,7 @@ Build system
 - #18553 Avoid non-trivial global constants in SHA-NI code (sipa)
 - #18665 Do not expose and consider `-logthreadnames` when it does not work (hebasto)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

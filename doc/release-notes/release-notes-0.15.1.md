@@ -17,8 +17,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the 
@@ -38,8 +37,7 @@ automatic upgrade code from before version 0.8 to version 0.15.0. Upgrading
 directly from 0.7.x and earlier without redownloading the blockchain is not supported.
 However, as usual, old wallet versions are still supported.
 
-Downgrading warning
--------------------
+## Downgrading warning
 
 The chainstate database for this release is not compatible with previous
 releases, so if you run 0.15 and then decide to switch back to any
@@ -49,8 +47,7 @@ option to rebuild the chainstate data structures in the old format.
 If your node has pruning enabled, this will entail re-downloading and
 processing the entire blockchain.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is extensively tested on multiple operating systems using
 the Linux kernel, macOS 10.8+, and Windows Vista and later. Windows XP is not supported.
@@ -59,11 +56,9 @@ Bitcoin Core should also work on most other Unix-like systems but is not
 frequently tested on them.
 
 
-Notable changes
-===============
+# Notable changes
 
-Network fork safety enhancements
---------------------------------
+## Network fork safety enhancements
 
 A number of changes to the way Bitcoin Core deals with peer connections and invalid blocks
 have been made, as a safety precaution against blockchain forks and misbehaving peers.
@@ -94,8 +89,7 @@ invalid) are now tracked and used to check if new headers build on an invalid ch
 descends from an invalid block is marked as such.
 
 
-Miner block size limiting deprecated
-------------------------------------
+## Miner block size limiting deprecated
 
 Though blockmaxweight has been preferred for limiting the size of blocks returned by
 getblocktemplate since 0.13.0, blockmaxsize remained as an option for those who wished
@@ -107,30 +101,26 @@ to limit their blocks by size, instead of by weight, will have to do so manually
 removing transactions from their block template directly.
 
 
-GUI settings backed up on reset
--------------------------------
+## GUI settings backed up on reset
 
 The GUI settings will now be written to `guisettings.ini.bak` in the data directory before wiping them when
 the `-resetguisettings` argument is used. This can be used to retroactively troubleshoot issues due to the
 GUI settings.
 
 
-Duplicate wallets disallowed
-----------------------------
+## Duplicate wallets disallowed
 
 Previously, it was possible to open the same wallet twice by manually copying the wallet file, causing
 issues when both were opened simultaneously. It is no longer possible to open copies of the same wallet.
 
 
-Debug `-minimumchainwork` argument added
-----------------------------------------
+## Debug `-minimumchainwork` argument added
 
 A hidden debug argument `-minimumchainwork` has been added to allow a custom minimum work value to be used
 when validating a chain.
 
 
-Low-level RPC changes
-----------------------
+## Low-level RPC changes
 
 - The "currentblocksize" value in getmininginfo has been removed.
 
@@ -144,8 +134,7 @@ Low-level RPC changes
   value is passed, instead of returning a list of all wallet transactions since
   the genesis block. The behaviour is unchanged when an empty string is provided.
 
-0.15.1 Change log
-=================
+# 0.15.1 Change log
 
 ### Mining
 - #11100 `7871a7d` Fix confusing blockmax{size,weight} options, dont default to throwing away money (TheBlueMatt)
@@ -240,8 +229,7 @@ Low-level RPC changes
 - #11539 `01223a0` [verify-commits] Allow revoked keys to expire (TheBlueMatt)
 
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

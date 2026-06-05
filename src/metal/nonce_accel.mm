@@ -55,11 +55,15 @@ struct MetalContext {
     MetalContext()
     {
         @autoreleasepool {
-            device = MTLCreateSystemDefaultDevice();
-            if (device == nil) {
+            // MTLCreateSystemDefaultDevice() is restricted to interactive apps on macOS 14+; it
+            // returns nil from CLI/daemon contexts. MTLCopyAllDevices() works in any context --
+            // Apple's documented replacement for non-interactive apps.
+            NSArray<id<MTLDevice>>* allDevices = MTLCopyAllDevices();
+            if (allDevices == nil || allDevices.count == 0) {
                 error = "No Metal-compatible GPU device found";
                 return;
             }
+            device = allDevices[0];
 
             queue = [device newCommandQueue];
             if (queue == nil) {

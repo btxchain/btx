@@ -7,6 +7,7 @@
 
 #include <consensus/amount.h>
 #include <crypto/common.h>
+#include <crypto/muhash.h>
 #include <crypto/siphash.h>
 #include <dbwrapper.h>
 #include <serialize.h>
@@ -277,6 +278,16 @@ public:
     /** Persist whether restart should preserve snapshot-seeded bridge metadata extras. */
     [[nodiscard]] bool WriteSnapshotBridgeMetadataHint(bool preserve_snapshot_extras);
 
+    /** Digest of the current nullifier set (MuHash), order-independent. Rebuilds from disk on first
+     *  use, then tracks Insert()/Remove() incrementally. Used to verify persisted-set integrity. */
+    [[nodiscard]] uint256 NullifierAccumulatorDigest();
+
+    /** Persist the current nullifier accumulator digest to disk (called at each state-persist tip). */
+    [[nodiscard]] bool PersistNullifierAccumulator();
+
+    /** Read the last persisted nullifier accumulator digest, or nullopt if none was ever written. */
+    [[nodiscard]] std::optional<uint256> ReadPersistedNullifierAccumulator() const;
+
     /** Read the persisted active shielded frontier state for the current tip. */
     [[nodiscard]] bool ReadPersistedState(shielded::ShieldedMerkleTree& tree,
                                           std::vector<uint256>& anchor_roots,
@@ -426,6 +437,15 @@ private:
     static constexpr uint8_t DB_POOL_BALANCE{'B'};
     static constexpr uint8_t DB_PERSISTED_STATE{'S'};
     static constexpr uint8_t DB_SNAPSHOT_BRIDGE_METADATA_HINT{'G'};
+    static constexpr uint8_t DB_NULLIFIER_ACCUMULATOR{'U'};
+
+    //! Order-independent, incrementally maintained MuHash of the nullifier set, used to cheaply
+    //! verify on restart that the persisted nullifier set has not drifted. Maintained under m_rwlock
+    //! by Insert()/Remove(); lazily (re)built from the DB on first use after construction.
+    MuHash3072 m_nullifier_accumulator;
+    bool m_accumulator_loaded{false};
+    //! Rebuild m_nullifier_accumulator from the on-disk nullifier set (caller holds m_rwlock).
+    void EnsureNullifierAccumulatorLoaded();
 };
 
 #endif // BTX_SHIELDED_NULLIFIER_H

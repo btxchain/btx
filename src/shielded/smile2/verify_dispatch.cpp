@@ -114,12 +114,20 @@ std::optional<std::string> ValidateSmile2Proof(
     const std::vector<BDLOPCommitment>& output_coins,
     const CTPublicData& pub,
     int64_t public_fee,
-    bool bind_anonset_context)
+    bool bind_anonset_context,
+    int64_t validation_height)
 {
+    // C-002 activation gate. At/after the activation height, every anonset-bound
+    // SMILE spend (V2_SEND, V2_INGRESS_BATCH, verifier-set) MUST be wire v3
+    // (WIRE_VERSION_C002_HARDENED), which carries seed_z and is verified with the
+    // MANDATORY step-12 binding + balance/range relations. v2 (M4_HARDENED) is
+    // historical/pre-activation only — accepting it post-H would let a prover
+    // dodge the seed_z binding. Non-anonset (legacy) proofs are unaffected.
+    const bool require_c002 = validation_height >= SmileCTProof::C002_ACTIVATION_HEIGHT;
     const uint8_t expected_wire_version =
-        bind_anonset_context
-            ? SmileCTProof::WIRE_VERSION_M4_HARDENED
-            : SmileCTProof::WIRE_VERSION_LEGACY;
+        !bind_anonset_context ? SmileCTProof::WIRE_VERSION_LEGACY
+        : require_c002        ? SmileCTProof::WIRE_VERSION_C002_HARDENED
+                              : SmileCTProof::WIRE_VERSION_M4_HARDENED;
     if (proof.wire_version != expected_wire_version) {
         return std::string{"bad-smile2-proof-wire-version"};
     }
@@ -157,7 +165,8 @@ std::optional<std::string> VerifySmile2CTFromBytes(
     const CTPublicData& pub,
     int64_t public_fee,
     bool reject_rice_codec,
-    bool bind_anonset_context)
+    bool bind_anonset_context,
+    int64_t validation_height)
 {
     SmileCTProof proof;
     auto parse_err = ParseSmile2Proof(proof_bytes,
@@ -173,7 +182,8 @@ std::optional<std::string> VerifySmile2CTFromBytes(
                                output_coins,
                                pub,
                                public_fee,
-                               bind_anonset_context);
+                               bind_anonset_context,
+                               validation_height);
 }
 
 std::optional<std::string> ExtractSmile2SerialNumbers(

@@ -54,6 +54,14 @@ enum class SendOutputEncoding : uint8_t {
     LEGACY = 0,
     SMILE_COMPACT = 1,
     SMILE_COMPACT_POSTFORK = 2,
+    // C-002 self-serve z->t unshield: identical to SMILE_COMPACT_POSTFORK but
+    // does NOT elide value_balance. SMILE_COMPACT_POSTFORK assumes a shielded-only
+    // send (value_balance == fee) and drops value_balance from the wire; a z->t
+    // unshield carries a public transparent outflow so value_balance ==
+    // transparent_out + fee != fee and must be serialized explicitly. Soundly
+    // bound by the v3 C-002/R5 proof (public value == value_balance) and consensus
+    // money-conservation (tx_verify) against the actual tx vout.
+    SMILE_COMPACT_POSTFORK_UNSHIELD = 3,
 };
 
 [[nodiscard]] inline bool IsValidSendOutputEncoding(SendOutputEncoding encoding)
@@ -62,6 +70,7 @@ enum class SendOutputEncoding : uint8_t {
     case SendOutputEncoding::LEGACY:
     case SendOutputEncoding::SMILE_COMPACT:
     case SendOutputEncoding::SMILE_COMPACT_POSTFORK:
+    case SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD:
         return true;
     }
     return false;
@@ -72,6 +81,7 @@ enum class SendOutputEncoding : uint8_t {
     switch (encoding) {
     case SendOutputEncoding::SMILE_COMPACT:
     case SendOutputEncoding::SMILE_COMPACT_POSTFORK:
+    case SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD:
         return true;
     case SendOutputEncoding::LEGACY:
         return false;
@@ -79,8 +89,20 @@ enum class SendOutputEncoding : uint8_t {
     return false;
 }
 
+// True for compact post-fork send encodings (the shielded-only eliding variant
+// and the z->t unshield non-eliding variant), which share the post-fork compact
+// output/proof-kind handling and differ only in value_balance elision.
+[[nodiscard]] inline bool IsPostforkCompactSendOutputEncoding(SendOutputEncoding encoding)
+{
+    return encoding == SendOutputEncoding::SMILE_COMPACT_POSTFORK ||
+           encoding == SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD;
+}
+
 [[nodiscard]] inline bool SendOutputEncodingElidesValueBalance(SendOutputEncoding encoding)
 {
+    // Only the shielded-only post-fork variant elides value_balance (== fee). The
+    // unshield variant carries it because the public transparent outflow makes
+    // value_balance != fee.
     return encoding == SendOutputEncoding::SMILE_COMPACT_POSTFORK;
 }
 

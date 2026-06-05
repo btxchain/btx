@@ -15,20 +15,17 @@ To receive security and update notifications, please subscribe to:
 
   <https://btx.dev/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down, then install the new binaries or replace the existing `btxd`,
 `btx-cli`, and GUI binaries with the 0.29.7 release artifacts.
 
-Compatibility
-=============
+# Compatibility
 
 BTX is supported on Linux, macOS 13+, and Windows 10+.
 
-Notable changes
-===============
+# Notable changes
 
 - Spend-path recovery for stranded shielded notes is now available behind an
   explicit activation height of 88,000. This adds the
@@ -52,7 +49,7 @@ Notable changes
   updates, block-capacity expectation refreshes, and full-suite regression
   cleanup.
 
-## Credits
+# Credits
 
 Thanks to everyone who contributed code, testing, and operational validation to
 this release.

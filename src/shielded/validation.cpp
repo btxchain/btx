@@ -15,6 +15,7 @@
 #include <shielded/smile2/verify_dispatch.h>
 #include <shielded/v2_ingress.h>
 #include <shielded/v2_proof.h>
+#include <streams.h>
 
 #include <algorithm>
 #include <memory>
@@ -24,6 +25,17 @@
 
 namespace {
 using namespace shielded::ringct;
+
+template <typename T>
+[[nodiscard]] bool ObjectsEqualBySerialization(const T& lhs, const T& rhs)
+{
+    DataStream lhs_stream;
+    ::Serialize(lhs_stream, lhs);
+    DataStream rhs_stream;
+    ::Serialize(rhs_stream, rhs);
+    return lhs_stream.size() == rhs_stream.size() &&
+           std::equal(lhs_stream.begin(), lhs_stream.end(), rhs_stream.begin());
+}
 
 [[nodiscard]] std::string MapSpendAuthReject(const std::string& generic_reject)
 {
@@ -35,6 +47,50 @@ using namespace shielded::ringct;
         return "bad-shielded-spend-auth-proof-noncanonical-codec";
     }
     return "bad-shielded-spend-auth-proof";
+}
+
+[[nodiscard]] bool VerifyDeterministicV2RebalanceBundle(
+    const shielded::v2::TransactionBundle& bundle,
+    const Consensus::Params& consensus,
+    int32_t validation_height,
+    std::string& reject_reason)
+{
+    if (!std::holds_alternative<shielded::v2::RebalancePayload>(bundle.payload)) {
+        reject_reason = "bad-shielded-v2-rebalance-deterministic";
+        return false;
+    }
+
+    const auto& payload = std::get<shielded::v2::RebalancePayload>(bundle.payload);
+    shielded::v2::V2RebalanceBuildInput input;
+    input.reserve_deltas = payload.reserve_deltas;
+    input.reserve_outputs = payload.reserve_outputs;
+    input.netting_manifest = payload.netting_manifest;
+
+    std::string build_reject;
+    auto expected = shielded::v2::BuildDeterministicV2RebalanceBundle(input,
+                                                                      build_reject,
+                                                                      &consensus,
+                                                                      validation_height);
+    if (!expected.has_value()) {
+        reject_reason = build_reject.empty()
+            ? "bad-shielded-v2-rebalance-deterministic"
+            : build_reject;
+        return false;
+    }
+
+    const shielded::v2::TransactionBundle& expected_bundle = expected->bundle;
+    const auto& expected_payload =
+        std::get<shielded::v2::RebalancePayload>(expected_bundle.payload);
+    if (!ObjectsEqualBySerialization(bundle.header, expected_bundle.header) ||
+        !ObjectsEqualBySerialization(payload, expected_payload) ||
+        !ObjectsEqualBySerialization(bundle.proof_shards, expected_bundle.proof_shards) ||
+        !ObjectsEqualBySerialization(bundle.output_chunks, expected_bundle.output_chunks) ||
+        bundle.proof_payload != expected_bundle.proof_payload) {
+        reject_reason = "bad-shielded-v2-rebalance-deterministic";
+        return false;
+    }
+
+    return true;
 }
 
 } // namespace
@@ -219,10 +275,20 @@ namespace {
 
     const bool postfork = consensus->IsShieldedMatRiCTDisabled(validation_height);
     if (postfork) {
-        if (!payload.spends.empty() &&
-            payload.output_encoding != shielded::v2::SendOutputEncoding::SMILE_COMPACT_POSTFORK) {
-            reject_reason = "bad-shielded-v2-send-encoding";
-            return false;
+        if (!payload.spends.empty()) {
+            // Post-fork SMILE spends use the compact post-fork encoding. The
+            // non-eliding z->t unshield variant (which carries value_balance for
+            // a public transparent outflow) is additionally permitted only at/
+            // after C-002, where the v3 proof soundly binds the public amount.
+            const bool is_shielded_only =
+                payload.output_encoding == shielded::v2::SendOutputEncoding::SMILE_COMPACT_POSTFORK;
+            const bool is_self_serve_unshield =
+                payload.output_encoding == shielded::v2::SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD &&
+                validation_height >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
+            if (!is_shielded_only && !is_self_serve_unshield) {
+                reject_reason = "bad-shielded-v2-send-encoding";
+                return false;
+            }
         }
         if (!payload.lifecycle_controls.empty()) {
             reject_reason = "bad-shielded-v2-send-lifecycle-control";
@@ -231,7 +297,9 @@ namespace {
         return true;
     }
 
-    if (payload.output_encoding == shielded::v2::SendOutputEncoding::SMILE_COMPACT_POSTFORK) {
+    // The compact post-fork encodings (shielded-only and unshield) are post-fork
+    // only; reject them before the fork.
+    if (shielded::v2::IsPostforkCompactSendOutputEncoding(payload.output_encoding)) {
         reject_reason = "bad-shielded-v2-send-encoding";
         return false;
     }
@@ -395,6 +463,7 @@ namespace {
 [[nodiscard]] bool VerifyV2EgressImportedReceiptBundle(const shielded::v2::TransactionBundle& bundle,
                                                        const shielded::v2::proof::SettlementContext& context,
                                                        const shielded::v2::proof::SettlementWitness& witness,
+                                                       int64_t validation_height,
                                                        std::string& reject_reason)
 {
     const auto& payload = std::get<shielded::v2::EgressBatchPayload>(bundle.payload);
@@ -427,6 +496,15 @@ namespace {
 
     std::optional<shielded::BridgeExternalAnchor> anchor;
     if (context.verification_bundle.has_value()) {
+        // Height-exact attestor-signature enforcement: the anchor builders accept either SLH-DSA
+        // scheme (VerifyBridgeBatchReceiptAnyMode), so the consensus path must additionally require
+        // the receipts to verify under the scheme fixed by the height, matching bridge-IN.
+        if (!shielded::VerifyBridgeBatchReceiptsModeExact(
+                Span<const shielded::BridgeBatchReceipt>{witness.signed_receipts.data(), witness.signed_receipts.size()},
+                validation_height)) {
+            reject_reason = "bad-shielded-v2-egress-signed-receipt-mode";
+            return false;
+        }
         anchor = shielded::BuildBridgeExternalAnchorFromHybridWitness(
             witness.statement,
             Span<const shielded::BridgeBatchReceipt>{witness.signed_receipts.data(), witness.signed_receipts.size()},
@@ -635,6 +713,7 @@ namespace {
     const shielded::v2::TransactionBundle& bundle,
     const shielded::v2::proof::SettlementContext& context,
     const shielded::v2::proof::SettlementWitness& witness,
+    int64_t validation_height,
     uint256& settlement_anchor_digest,
     std::string& reject_reason)
 {
@@ -678,6 +757,13 @@ namespace {
 
     std::optional<shielded::BridgeExternalAnchor> anchor;
     if (context.verification_bundle.has_value()) {
+        // Height-exact attestor-signature enforcement (see VerifyV2EgressImportedReceiptBundle).
+        if (!shielded::VerifyBridgeBatchReceiptsModeExact(
+                Span<const shielded::BridgeBatchReceipt>{witness.signed_receipts.data(), witness.signed_receipts.size()},
+                validation_height)) {
+            reject_reason = "bad-shielded-v2-settlement-anchor-signed-receipt-mode";
+            return false;
+        }
         anchor = shielded::BuildBridgeExternalAnchorFromHybridWitness(
             witness.statement,
             Span<const shielded::BridgeBatchReceipt>{witness.signed_receipts.data(), witness.signed_receipts.size()},
@@ -963,6 +1049,7 @@ std::optional<std::vector<Nullifier>> ExtractShieldedProofBoundNullifiers(
 
 std::optional<std::vector<uint256>> ExtractCreatedShieldedSettlementAnchors(
     const CTransaction& tx,
+    int64_t validation_height,
     std::string& reject_reason)
 {
     if (!tx.HasShieldedBundle()) return std::vector<uint256>{};
@@ -1008,6 +1095,7 @@ std::optional<std::vector<uint256>> ExtractCreatedShieldedSettlementAnchors(
             if (!VerifyV2SettlementAnchorImportedReceiptBundle(*v2_bundle,
                                                                *context,
                                                                *witness,
+                                                               validation_height,
                                                                settlement_anchor_digest,
                                                                reject_reason)) {
                 return std::nullopt;
@@ -1427,7 +1515,8 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
                                                             *context,
                                                             *smile_ring_members,
                                                             reject_rice_codec,
-                                                            bind_smile_anonset_context)) {
+                                                            bind_smile_anonset_context,
+                                                            m_validation_height)) {
                     LogPrintf("CShieldedProofCheck v2_send SMILE verify failed txid=%s statement=%s anchor=%s fee=%lld tree_root=%s tree_size=%u\n",
                               m_tx->GetHash().ToString(),
                               statement.envelope.statement_digest.ToString(),
@@ -1524,7 +1613,8 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
                                                         *ring_members,
                                                         proof_reject,
                                                         reject_rice_codec,
-                                                        bind_smile_anonset_context)) {
+                                                        bind_smile_anonset_context,
+                                                        m_validation_height)) {
                     return proof_reject;
                 }
             } else {
@@ -1534,7 +1624,7 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
                 if (!ring_members.has_value()) {
                     return proof_reject;
                 }
-                if (!shielded::v2::VerifyV2IngressProof(*v2_bundle, *context, *ring_members, proof_reject)) {
+                if (!shielded::v2::VerifyV2IngressProof(*v2_bundle, *context, *ring_members, proof_reject, m_validation_height)) {
                     return proof_reject;
                 }
             }
@@ -1569,7 +1659,7 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
             if (!shielded::v2::proof::VerifySettlementContext(*context, *witness, proof_reject)) {
                 return proof_reject;
             }
-            if (!VerifyV2EgressImportedReceiptBundle(*v2_bundle, *context, *witness, proof_reject)) {
+            if (!VerifyV2EgressImportedReceiptBundle(*v2_bundle, *context, *witness, m_validation_height, proof_reject)) {
                 return proof_reject;
             }
             return std::nullopt;
@@ -1592,7 +1682,7 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
                     return proof_reject;
                 }
             }
-            auto settlement_anchors = ExtractCreatedShieldedSettlementAnchors(*m_tx, proof_reject);
+            auto settlement_anchors = ExtractCreatedShieldedSettlementAnchors(*m_tx, m_validation_height, proof_reject);
             if (!settlement_anchors.has_value()) {
                 return proof_reject;
             }
@@ -1607,6 +1697,13 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
                                                                               m_validation_height,
                                                                               proof_reject);
             if (!manifest_states.has_value()) {
+                return proof_reject;
+            }
+            if (m_consensus != nullptr &&
+                !VerifyDeterministicV2RebalanceBundle(*v2_bundle,
+                                                       *m_consensus,
+                                                       m_validation_height,
+                                                       proof_reject)) {
                 return proof_reject;
             }
             return std::nullopt;

@@ -142,7 +142,8 @@ bitcoin_pqc_error_t bitcoin_pqc_sign_with_randomness(
     size_t message_size,
     const uint8_t *random_data,
     size_t random_data_size,
-    bitcoin_pqc_signature_t *signature
+    bitcoin_pqc_signature_t *signature,
+    int slhdsa_fips205
 );
 
 /**
@@ -171,7 +172,8 @@ bitcoin_pqc_error_t bitcoin_pqc_verify(
     const uint8_t *message,
     size_t message_size,
     const uint8_t *signature,
-    size_t signature_size
+    size_t signature_size,
+    int slhdsa_fips205
 );
 
 /* Algorithm-specific header includes */

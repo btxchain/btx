@@ -153,6 +153,19 @@ static void ValidateCheckInputsForAllFlags(const CTransaction &tx, uint32_t fail
         // Randomly selects flag combinations
         uint32_t test_flags = (uint32_t) insecure_rand.randrange((SCRIPT_VERIFY_END_MARKER - 1) << 1);
 
+        // BTX is post-quantum only. SCRIPT_VERIFY_REJECT_LEGACY_SIGS makes the
+        // interpreter reject legacy secp256k1 ECDSA OP_CHECKSIG (SigVersion::BASE/
+        // WITNESS_V0) outright with SCRIPT_ERR_BAD_OPCODE. The fixtures in this test
+        // (checkinputs_test) are all inherited upstream classical P2PK/P2PKH/CSV/CLTV
+        // scripts. Per the design intent of the PQ-only hardening (commit "reject legacy
+        // secp256k1 ECDSA/Schnorr at consensus"), this flag is kept OFF for the inherited
+        // unit-test vectors so they continue to exercise ECDSA; the live consensus path
+        // sets it via GetBlockScriptFlags. Without masking it here, randomly selecting
+        // bit 25 would spuriously fail every classical script even though that bit is not
+        // in the test's failing_flags set. All other (classical-relevant) flags remain
+        // exercised.
+        test_flags &= ~(uint32_t)SCRIPT_VERIFY_REJECT_LEGACY_SIGS;
+
         // Filter out incompatible flag choices
         if ((test_flags & SCRIPT_VERIFY_CLEANSTACK)) {
             // CLEANSTACK requires P2SH and WITNESS, see VerifyScript() in

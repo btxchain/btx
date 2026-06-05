@@ -1,5 +1,4 @@
-22.0 Release Notes
-==================
+# 22.0 Release Notes
 
 Bitcoin Core version 22.0 is now available from:
 
@@ -16,8 +15,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes in some cases), then run the
@@ -28,8 +26,7 @@ Upgrading directly from a version of Bitcoin Core that has reached its EOL is
 possible, but it might take some time if the data directory needs to be migrated. Old
 wallet versions of Bitcoin Core are generally supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems
 using the Linux kernel, macOS 10.14+, and Windows 7 and newer.  Bitcoin
@@ -39,11 +36,9 @@ unsupported systems.
 
 From Bitcoin Core 22.0 onwards, macOS versions earlier than 10.14 are no longer supported.
 
-Notable changes
-===============
+# Notable changes
 
-P2P and network changes
------------------------
+## P2P and network changes
 - Added support for running Bitcoin Core as an
   [I2P (Invisible Internet Project)](https://en.wikipedia.org/wiki/I2P) service
   and connect to such services. See [i2p.md](https://github.com/bitcoin/bitcoin/blob/22.x/doc/i2p.md) for details. (#20685)
@@ -57,8 +52,7 @@ P2P and network changes
 - Added NAT-PMP port mapping support via
   [`libnatpmp`](https://miniupnp.tuxfamily.org/libnatpmp.html). (#18077)
 
-New and Updated RPCs
---------------------
+## New and Updated RPCs
 
 - Due to [BIP 350](https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki)
   being implemented, behavior for all RPCs that accept addresses is changed when
@@ -125,14 +119,12 @@ New and Updated RPCs
 
 Changes to Wallet or GUI related RPCs can be found in the GUI or Wallet section below.
 
-Build System
-------------
+## Build System
 
 - Release binaries are now produced using the new `guix`-based build system.
   The [/doc/release-process.md](/doc/release-process.md) document has been updated accordingly.
 
-Files
------
+## Files
 
 - The list of banned hosts and networks (via `setban` RPC) is now saved on disk
   in JSON format in `banlist.json` instead of `banlist.dat`. `banlist.dat` is
@@ -140,22 +132,19 @@ Files
   `banlist.json`. A future version of Bitcoin Core may completely ignore
   `banlist.dat`. (#20966)
 
-New settings
-------------
+## New settings
 
 - The `-natpmp` option has been added to use NAT-PMP to map the listening port.
   If both UPnP and NAT-PMP are enabled, a successful allocation from UPnP
   prevails over one from NAT-PMP. (#18077)
 
-Updated settings
-----------------
+## Updated settings
 
 Changes to Wallet or GUI related settings can be found in the GUI or Wallet section below.
 
 - Passing an invalid `-rpcauth` argument now cause bitcoind to fail to start.  (#20461)
 
-Tools and Utilities
--------------------
+## Tools and Utilities
 
 - A new CLI `-addrinfo` command returns the number of addresses known to the
   node per network type (including Tor v2 versus v3) and total. This can be
@@ -167,8 +156,7 @@ Tools and Utilities
   in seconds to use with `-rpcwait`. If the timeout expires,
   `bitcoin-cli` will report a failure. (#21056)
 
-Wallet
-------
+## Wallet
 
 - External signers such as hardware wallets can now be used through the new RPC methods `enumeratesigners` and `displayaddress`. Support is also added to the `send` RPC call. This feature is experimental. See [external-signer.md](https://github.com/bitcoin/bitcoin/blob/22.x/doc/external-signer.md) for details. (#16546)
 
@@ -189,16 +177,13 @@ Wallet
 
 - Taproot descriptors can be imported into the wallet only after activation has occurred on the network (e.g. mainnet, testnet, signet) in use. See [descriptors.md](https://github.com/bitcoin/bitcoin/blob/22.x/doc/descriptors.md) for supported descriptors.
 
-GUI changes
------------
+## GUI changes
 
 - External signers such as hardware wallets can now be used. These require an external tool such as [HWI](https://github.com/bitcoin-core/HWI) to be installed and configured under Options -> Wallet. When creating a new wallet a new option "External signer" will appear in the dialog. If the device is detected, its name is suggested as the wallet name. The watch-only keys are then automatically imported. Receive addresses can be verified on the device. The send dialog will automatically use the connected device. This feature is experimental and the UI may freeze for a few seconds when performing these actions.
 
-Low-level changes
-=================
+# Low-level changes
 
-RPC
----
+## RPC
 
 - The RPC server can process a limited number of simultaneous RPC requests.
   Previously, if this limit was exceeded, the RPC server would respond with
@@ -213,11 +198,9 @@ RPC
   - `verifymessage` now returns RPC_TYPE_ERROR (-3) if the passed signature
     is malformed. Previously returned RPC_INVALID_ADDRESS_OR_KEY (-5).
 
-Tests
------
+## Tests
 
-22.0 change log
-===============
+# 22.0 change log
 
 A detailed list of changes in this version follows. To keep the list to a manageable length, small refactors and typo fixes are not included, and similar changes are sometimes condensed into one line.
 
@@ -1025,8 +1008,7 @@ A detailed list of changes in this version follows. To keep the list to a manage
 - bitcoin/bitcoin#22432 Fix incorrect `testmempoolaccept` doc (glozow)
 - bitcoin/bitcoin#22648 doc, test: improve i2p/tor docs and i2p reachable unit tests (jonatack)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

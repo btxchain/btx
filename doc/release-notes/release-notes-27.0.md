@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes in some cases), then run the
@@ -25,8 +24,7 @@ Upgrading directly from a version of Bitcoin Core that has reached its EOL is
 possible, but it might take some time if the data directory needs to be migrated. Old
 wallet versions of Bitcoin Core are generally supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems
 using the Linux Kernel 3.17+, macOS 11.0+, and Windows 7 and newer. Bitcoin
@@ -34,11 +32,9 @@ Core should also work on most other Unix-like systems but is not as
 frequently tested on them. It is not recommended to use Bitcoin Core on
 unsupported systems.
 
-Notable changes
-===============
+# Notable changes
 
-libbitcoinconsensus
--------------------
+## libbitcoinconsensus
 
 - libbitcoinconsensus is deprecated and will be removed for v28. This library has
   existed for nearly 10 years with very little known uptake or impact. It has
@@ -52,8 +48,7 @@ libbitcoinconsensus
   aware of the UTXO set, and therefore be able to fully validate transactions and
   blocks. (#29189)
 
-mempool.dat compatibility
--------------------------
+## mempool.dat compatibility
 
 - The `mempool.dat` file created by -persistmempool or the savemempool RPC will
   be written in a new format. This new format includes the XOR'ing of transaction
@@ -64,8 +59,7 @@ mempool.dat compatibility
   downgrade, a temporary setting `-persistmempoolv1` has been added to fall back
   to the legacy format. (#28207)
 
-P2P and network changes
------------------------
+## P2P and network changes
 
 - BIP324 v2 transport is now enabled by default. It remains possible to disable v2
   by running with `-v2transport=0`. (#29347)
@@ -80,8 +74,7 @@ P2P and network changes
   of the node operator ensuring their system time is (and stays) correct to not
   fall out of consensus with the network. (#28956)
 
-Mempool Policy Changes
-----------------------
+## Mempool Policy Changes
 
 - Opt-in Topologically Restricted Until Confirmation (TRUC) Transactions policy
   (aka v3 transaction policy) is available for use on test networks when
@@ -93,27 +86,23 @@ Mempool Policy Changes
   nonstandard and can only be used on test networks where the standardness rules are
   relaxed or disabled (e.g. with `-acceptnonstdtxn=1`). (#28948)
 
-External Signing
-----------------
+## External Signing
 
 - Support for external signing on Windows has been disabled. It will be re-enabled
   once the underlying dependency (Boost Process), has been replaced with a different
   library. (#28967)
 
-Updated RPCs
-------------
+## Updated RPCs
 
 - The addnode RPC now follows the `-v2transport` option (now on by default, see above) for making connections.
   It remains possible to specify the transport type manually with the v2transport argument of addnode. (#29239)
 
-Build System
-------------
+## Build System
 
 - A C++20 capable compiler is now required to build Bitcoin Core. (#28349)
 - MacOS releases are configured to use the hardened runtime libraries (#29127)
 
-Wallet
-------
+## Wallet
 
 - The CoinGrinder coin selection algorithm has been introduced to mitigate unnecessary
   large input sets and lower transaction costs at high feerates. CoinGrinder
@@ -125,24 +114,20 @@ Wallet
 - If the birth time of a descriptor is detected to be later than the first transaction
   involving that descriptor, the birth time will be reset to the earlier time. (#28920)
 
-Low-level changes
-=================
+# Low-level changes
 
-Pruning
--------
+## Pruning
 
 - When pruning during initial block download, more blocks will be pruned at each
   flush in order to speed up the syncing of such nodes. (#20827)
 
-Init
-----
+## Init
 
 - Various fixes to prevent issues where subsequent instances of Bitcoin Core would
   result in deletion of files in use by an existing instance. (#28784, #28946)
 - Improved handling of empty `settings.json` files. (#29144)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

@@ -69,6 +69,27 @@ def shell_quote(value: str | Path) -> str:
     return shlex.quote(str(value))
 
 
+def ensure_safe_extract_path(destination_root: Path, member_name: str) -> None:
+    member_path = Path(member_name)
+    if member_path.is_absolute() or ".." in member_path.parts:
+        raise ValueError(f"archive contains unsafe path: {member_name}")
+    resolved_root = destination_root.resolve()
+    resolved_target = (destination_root / member_path).resolve()
+    if resolved_target != resolved_root and resolved_root not in resolved_target.parents:
+        raise ValueError(f"archive contains unsafe path: {member_name}")
+
+
+def extract_remote_artifact_bundle(archive_path: Path, extract_dir: Path) -> None:
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            ensure_safe_extract_path(extract_dir, member.name)
+            if member.issym() or member.islnk():
+                raise ValueError(f"archive contains unsupported link entry: {member.name}")
+            if not (member.isfile() or member.isdir()):
+                raise ValueError(f"archive contains unsupported entry type: {member.name}")
+        archive.extractall(extract_dir)
+
+
 def load_json_if_present(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
@@ -739,8 +760,7 @@ def main() -> int:
             if extract_dir.exists():
                 subprocess.run(["rm", "-rf", str(extract_dir)], check=True)
             extract_dir.mkdir(parents=True, exist_ok=True)
-            with tarfile.open(local_bundle, "r:gz") as archive:
-                archive.extractall(extract_dir)
+            extract_remote_artifact_bundle(local_bundle, extract_dir)
             manifest["artifacts"]["remote_bundle"] = artifact_entry(local_bundle)
             manifest["artifacts"]["remote_extract_dir"] = {"path": str(extract_dir)}
         elif not artifact_collection_errors:

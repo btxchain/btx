@@ -14,6 +14,7 @@
 #include <wallet/receive.h>
 #include <wallet/rpc/wallet.h>
 #include <wallet/rpc/util.h>
+#include <wallet/shielded_wallet.h>
 #include <wallet/wallet.h>
 #include <wallet/walletutil.h>
 
@@ -60,6 +61,7 @@ static RPCHelpMan getwalletinfo()
                         {RPCResult::Type::STR_AMOUNT, "balance", "DEPRECATED. Identical to getbalances().mine.trusted"},
                         {RPCResult::Type::STR_AMOUNT, "unconfirmed_balance", "DEPRECATED. Identical to getbalances().mine.untrusted_pending"},
                         {RPCResult::Type::STR_AMOUNT, "immature_balance", "DEPRECATED. Identical to getbalances().mine.immature"},
+                        {RPCResult::Type::STR_AMOUNT, "shielded_balance", /*optional=*/true, "the confirmed spendable shielded-pool balance (present only for shielded-capable wallets). See z_gettotalbalance for the recovery-only/watch-only breakdown."},
                         {RPCResult::Type::NUM, "txcount", "the total number of transactions in the wallet"},
                         {RPCResult::Type::NUM_TIME, "keypoololdest", /*optional=*/true, "the " + UNIX_EPOCH_TIME + " of the oldest pre-generated key in the key pool. Legacy wallets only."},
                         {RPCResult::Type::NUM, "keypoolsize", "how many new keys are pre-generated (only counts external keys)"},
@@ -107,6 +109,12 @@ static RPCHelpMan getwalletinfo()
     obj.pushKV("balance", ValueFromAmount(bal.m_mine_trusted));
     obj.pushKV("unconfirmed_balance", ValueFromAmount(bal.m_mine_untrusted_pending));
     obj.pushKV("immature_balance", ValueFromAmount(bal.m_mine_immature));
+    // Surface the confirmed spendable shielded-pool balance for shielded-capable wallets so a solo
+    // operator with shielded funds can see them here (issue #42), matching z_gettotalbalance.shielded.
+    if (pwallet->m_shielded_wallet) {
+        LOCK(pwallet->m_shielded_wallet->cs_shielded);
+        obj.pushKV("shielded_balance", ValueFromAmount(pwallet->m_shielded_wallet->GetShieldedBalance(/*min_depth=*/1)));
+    }
     obj.pushKV("txcount",       (int)pwallet->mapWallet.size());
     const auto kp_oldest = pwallet->GetOldestKeyPoolTime();
     if (kp_oldest.has_value()) {
@@ -1230,6 +1238,8 @@ RPCHelpMan bridge_recoverpending();
 RPCHelpMan bridge_prunearchive();
 RPCHelpMan bridge_buildrefund();
 RPCHelpMan bridge_decodeattestation();
+RPCHelpMan buildhtlcclaim();
+RPCHelpMan buildhtlcrefund();
 
 Span<const CRPCCommand> GetWalletRPCCommands()
 {
@@ -1402,6 +1412,8 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"bridge", &bridge_prunearchive},
         {"bridge", &bridge_buildrefund},
         {"bridge", &bridge_decodeattestation},
+        {"wallet", &buildhtlcclaim},
+        {"wallet", &buildhtlcrefund},
     };
     return commands;
 }

@@ -8,8 +8,7 @@ Please report bugs using the issue tracker at github:
   https://github.com/bitcoin/bitcoin/issues
 
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait
 until it has completely shut down (which might take a few minutes for older
@@ -21,11 +20,9 @@ run 0.8.4 your blockchain files will be re-indexed, which will take
 anywhere from 30 minutes to several hours, depending on the speed of
 your machine.
 
-0.8.4 Release notes
-===================
+# 0.8.4 Release notes
 
-Security issues
----------------
+## Security issues
 
 An attacker could send a series of messages that resulted in
 an integer division-by-zero error in the Bloom Filter handling
@@ -43,8 +40,7 @@ https://bitslog.wordpress.com/2013/07/18/buggy-cve-2013-4627-patch-open-new-vect
 for a description of the weaknesses of the previous fix.
 (CVE-2013-4627)
 
-Bugs fixed
-----------
+## Bugs fixed
 
 Fix multi-block reorg transaction resurrection.
 
@@ -61,15 +57,13 @@ a Gnome-based desktop.
 Fix a hang-at-shutdown bug that only affects users that compile
 their own version of Bitcoin against Boost versions 1.50-1.52.
 
-Other changes
--------------
+## Other changes
 
 Checkpoint at block 250,000 to speed up initial block downloads
 and make the progress indicator when downloading more accurate.
 
 
-Thanks to everybody who contributed to the 0.8.4 releases!
-----------------------------------------------------------
+## Thanks to everybody who contributed to the 0.8.4 releases!
 
 Pieter Wuille
 Warren Togami

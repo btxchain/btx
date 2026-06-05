@@ -9,6 +9,7 @@
 #include <hash.h>
 #include <random.h>
 #include <shielded/ringct/ring_selection.h>
+#include <shielded/smile2/ct_proof.h>
 #include <shielded/v2_send.h>
 #include <util/strencodings.h>
 #include <wallet/shielded_coins.h>
@@ -61,6 +62,22 @@ bool RequireSensitiveShieldedRpcOptInAtHeight(int32_t height)
 bool AllowMixedTransparentShieldedSendAtHeight(int32_t height)
 {
     return !UseShieldedPrivacyRedesignAtHeight(height);
+}
+
+bool AllowSelfServeUnshieldAtHeight(int32_t height)
+{
+    // A self-serve z->t unshield is a v2_send spend that carries transparent
+    // outputs. It is sound only once the v3 C-002/R5 proof is in force: there
+    // the SMILE proof's public value == payload.value_balance ==
+    // (transparent_out + fee) (v2_send.cpp) and R5 range-bounds every committed
+    // amount, so the public transparent outflow is cryptographically bound to
+    // the consumed shielded value and consensus money-conservation
+    // (tx_verify.cpp) ties the same value_balance to the actual tx vout. Before
+    // C-002 the v2 proof did not bind the public amount, so permitting z->t
+    // there would reopen the x1c exit-inflation surface. The boundary is the
+    // C-002 activation height (same constant the prover/verifier branch on),
+    // independent of the privacy-redesign height.
+    return height >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
 }
 
 bool AllowTransparentShieldingInDirectSendAtHeight(int32_t height)

@@ -24,6 +24,7 @@
 #include <key_io.h>
 #include <logging.h>
 #include <matmul/accelerated_solver.h>
+#include <matmul/backend_capabilities.h>
 #include <matmul/field.h>
 #include <matmul/matmul_pow.h>
 #include <net.h>
@@ -1254,6 +1255,15 @@ static UniValue BuildBackendRuntimeProfile()
 {
     const auto stats = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
     UniValue obj(UniValue::VOBJ);
+    // Surface the daemon's OWN resolved mining backend + reason so a silent fallback to CPU is
+    // visible here (issue #43): when active_backend != requested_backend (e.g. requested=metal but
+    // active=cpu), backend_selection_reason explains why -- previously this was only observable via
+    // the separate btx-matmul-backend-info process, which resolves Metal in a different context and
+    // can disagree with the mining daemon.
+    const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
+    obj.pushKV("requested_backend", matmul::backend::ToString(backend_selection.requested));
+    obj.pushKV("active_backend", matmul::backend::ToString(backend_selection.active));
+    obj.pushKV("backend_selection_reason", backend_selection.reason);
     obj.pushKV("digest_requests", stats.digest_requests);
     obj.pushKV("requested_cpu", stats.requested_cpu);
     obj.pushKV("requested_metal", stats.requested_metal);
@@ -5303,6 +5313,37 @@ static RPCHelpMan getmatmulchallenge()
                         {RPCResult::Type::NUM, "height", "Next height"},
                         {RPCResult::Type::STR_HEX, "previousblockhash", "Current tip hash"},
                         {RPCResult::Type::NUM, "mintime", "Minimum block time for the next block"},
+                        {RPCResult::Type::NUM_TIME, "maxtime", /*optional=*/true, "Maximum allowed next block time, when bounded by the active future-drift policy"},
+                        {RPCResult::Type::OBJ, "time_policy", "Timestamp policy for the next block",
+                        {
+                            {RPCResult::Type::NUM, "height", "The next block height"},
+                            {RPCResult::Type::NUM_TIME, "tip_time", "The current tip timestamp"},
+                            {RPCResult::Type::NUM_TIME, "tip_mediantime", "The current tip median-time-past"},
+                            {RPCResult::Type::NUM_TIME, "node_time", "The local node wall-clock timestamp"},
+                            {RPCResult::Type::NUM_TIME, "mintime", "The minimum allowed next block timestamp"},
+                            {RPCResult::Type::NUM_TIME, "curtime", "The timestamp selected for a local block template"},
+                            {RPCResult::Type::BOOL, "future_mtp_limit_active", "Whether the MTP future-drift limit is active as local mining policy"},
+                            {RPCResult::Type::BOOL, "future_mtp_consensus_active", "Whether consensus rejection is active for this height"},
+                            {RPCResult::Type::BOOL, "future_mtp_mining_policy_active", "Whether local mining should clamp to the MTP future-drift limit"},
+                            {RPCResult::Type::NUM, "future_mtp_limit_height", "The activation height for the MTP future-drift limit"},
+                            {RPCResult::Type::NUM, "future_mtp_limit_seconds", "The permitted drift above previous median-time-past"},
+                            {RPCResult::Type::NUM_TIME, "maxtime", /*optional=*/true, "The maximum allowed next block timestamp"},
+                            {RPCResult::Type::BOOL, "curtime_clamped", "Whether the selected timestamp was clamped to the policy maximum"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue or clamp_time"},
+                        }},
+                        {RPCResult::Type::OBJ, "chain_guard", "Local mining chain-alignment guard status",
+                        {
+                            {RPCResult::Type::BOOL, "enabled", "Whether the guard is enabled on this node"},
+                            {RPCResult::Type::BOOL, "healthy", "Whether local mining is currently allowed to continue"},
+                            {RPCResult::Type::BOOL, "should_pause_mining", "Whether miners should currently stop submitting new work to this node"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, catch_up, or pause"},
+                            {RPCResult::Type::STR, "reason", "Current guard decision reason"},
+                            {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
+                            {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
+                            {RPCResult::Type::NUM, "median_peer_tip", "Median tip height advertised by considered outbound peers, or -1 if unavailable"},
+                            {RPCResult::Type::NUM, "best_peer_tip", "Highest tip height advertised by considered outbound peers, or -1 if unavailable"},
+                            {RPCResult::Type::NUM, "near_tip_peers", "Considered outbound peers within the near-tip window of the local tip"},
+                        }},
                         {RPCResult::Type::STR_HEX, "bits", "Compact target"},
                         {RPCResult::Type::NUM, "difficulty", "Difficulty"},
                         {RPCResult::Type::STR_HEX, "target", "Target"},
@@ -5495,6 +5536,9 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent rejected reorg"},
                                 }},
                                 {RPCResult::Type::OBJ, "backend_runtime", "", {
+                                    {RPCResult::Type::STR, "requested_backend", "Mining backend requested by the daemon (cpu/metal/cuda)"},
+                                    {RPCResult::Type::STR, "active_backend", "Mining backend the daemon actually resolved to; differs from requested_backend on a silent fallback"},
+                                    {RPCResult::Type::STR, "backend_selection_reason", "Why the active backend was selected (e.g. why a requested GPU backend fell back to CPU)"},
                                     {RPCResult::Type::NUM, "digest_requests", "Digest requests served"},
                                     {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU"},
                                     {RPCResult::Type::NUM, "requested_metal", "Digest requests targeting Metal"},
@@ -5559,6 +5603,37 @@ static RPCHelpMan getmatmulchallengeprofile()
                         {RPCResult::Type::NUM, "height", "Next height"},
                         {RPCResult::Type::STR_HEX, "previousblockhash", "Current tip hash"},
                         {RPCResult::Type::NUM, "mintime", "Minimum block time for the next block"},
+                        {RPCResult::Type::NUM_TIME, "maxtime", /*optional=*/true, "Maximum allowed next block time, when bounded by the active future-drift policy"},
+                        {RPCResult::Type::OBJ, "time_policy", "Timestamp policy for the next block",
+                        {
+                            {RPCResult::Type::NUM, "height", "The next block height"},
+                            {RPCResult::Type::NUM_TIME, "tip_time", "The current tip timestamp"},
+                            {RPCResult::Type::NUM_TIME, "tip_mediantime", "The current tip median-time-past"},
+                            {RPCResult::Type::NUM_TIME, "node_time", "The local node wall-clock timestamp"},
+                            {RPCResult::Type::NUM_TIME, "mintime", "The minimum allowed next block timestamp"},
+                            {RPCResult::Type::NUM_TIME, "curtime", "The timestamp selected for a local block template"},
+                            {RPCResult::Type::BOOL, "future_mtp_limit_active", "Whether the MTP future-drift limit is active as local mining policy"},
+                            {RPCResult::Type::BOOL, "future_mtp_consensus_active", "Whether consensus rejection is active for this height"},
+                            {RPCResult::Type::BOOL, "future_mtp_mining_policy_active", "Whether local mining should clamp to the MTP future-drift limit"},
+                            {RPCResult::Type::NUM, "future_mtp_limit_height", "The activation height for the MTP future-drift limit"},
+                            {RPCResult::Type::NUM, "future_mtp_limit_seconds", "The permitted drift above previous median-time-past"},
+                            {RPCResult::Type::NUM_TIME, "maxtime", /*optional=*/true, "The maximum allowed next block timestamp"},
+                            {RPCResult::Type::BOOL, "curtime_clamped", "Whether the selected timestamp was clamped to the policy maximum"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue or clamp_time"},
+                        }},
+                        {RPCResult::Type::OBJ, "chain_guard", "Local mining chain-alignment guard status",
+                        {
+                            {RPCResult::Type::BOOL, "enabled", "Whether the guard is enabled on this node"},
+                            {RPCResult::Type::BOOL, "healthy", "Whether local mining is currently allowed to continue"},
+                            {RPCResult::Type::BOOL, "should_pause_mining", "Whether miners should currently stop submitting new work to this node"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, catch_up, or pause"},
+                            {RPCResult::Type::STR, "reason", "Current guard decision reason"},
+                            {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
+                            {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
+                            {RPCResult::Type::NUM, "median_peer_tip", "Median tip height advertised by considered outbound peers, or -1 if unavailable"},
+                            {RPCResult::Type::NUM, "best_peer_tip", "Highest tip height advertised by considered outbound peers, or -1 if unavailable"},
+                            {RPCResult::Type::NUM, "near_tip_peers", "Considered outbound peers within the near-tip window of the local tip"},
+                        }},
                         {RPCResult::Type::STR_HEX, "bits", "Compact target"},
                         {RPCResult::Type::NUM, "difficulty", "Difficulty"},
                         {RPCResult::Type::STR_HEX, "target", "Target"},
@@ -5751,6 +5826,9 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent rejected reorg"},
                                 }},
                                 {RPCResult::Type::OBJ, "backend_runtime", "", {
+                                    {RPCResult::Type::STR, "requested_backend", "Mining backend requested by the daemon (cpu/metal/cuda)"},
+                                    {RPCResult::Type::STR, "active_backend", "Mining backend the daemon actually resolved to; differs from requested_backend on a silent fallback"},
+                                    {RPCResult::Type::STR, "backend_selection_reason", "Why the active backend was selected (e.g. why a requested GPU backend fell back to CPU)"},
                                     {RPCResult::Type::NUM, "digest_requests", "Digest requests served"},
                                     {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU"},
                                     {RPCResult::Type::NUM, "requested_metal", "Digest requests targeting Metal"},

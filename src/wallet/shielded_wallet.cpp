@@ -559,7 +559,11 @@ BuildAddressLifecycleControlTransactionImpl(
     size_t best_count{std::numeric_limits<size_t>::max()};
     size_t search_states{0};
 
-    for (auto& [_, group_notes] : grouped) {
+    // AppleClang 15 rejects capturing a structured binding by reference in a lambda under strict
+    // C++20 (the `search` lambda below captures group_notes); alias it to a regular variable, which
+    // is unambiguously capturable across all compilers.
+    for (auto& grouped_entry : grouped) {
+        auto& group_notes = grouped_entry.second;
         std::sort(group_notes.begin(), group_notes.end(), [](const ShieldedCoin& a, const ShieldedCoin& b) {
             return std::tie(a.note.value, a.tree_position, a.nullifier) >
                    std::tie(b.note.value, b.tree_position, b.nullifier);
@@ -2986,9 +2990,16 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
     const uint64_t minimum_privacy_tree_size =
         GetShieldedMinimumPrivacyTreeSizeForHeight(ring_size, validation_height);
     if (!transparent_recipients.empty() &&
-        !AllowMixedTransparentShieldedSendAtHeight(validation_height)) {
+        !AllowMixedTransparentShieldedSendAtHeight(validation_height) &&
+        !AllowSelfServeUnshieldAtHeight(validation_height)) {
+        // Pre-C-002 the public transparent amount is not bound to the consumed
+        // shielded value, so a direct z->t send is unsound there; the bridge
+        // egress path (verifier-set attested) is the only z->t exit until C-002.
         return fail("post-fork mixed shielded-to-transparent direct sends are disabled; use bridge unshield");
     }
+    // At/after C-002, a self-serve z->t unshield is sound (v3 proof binds the
+    // public outflow via value_balance == transparent_out + fee; R5 range-bounds
+    // amounts), so transparent recipients are permitted in a direct SMILE spend.
 
     if (minimum_privacy_tree_size > 0 && m_tree.Size() < minimum_privacy_tree_size) {
         LogPrintf("CShieldedWallet::CreateV2Send failed: anonymity pool below post-fork minimum "
@@ -4081,7 +4092,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2IngressBatch(
                                                                  *immutable_ring_members,
                                                                  immutable_reject,
                                                                  /*reject_rice_codec=*/false,
-                                                                 bind_smile_anonset_context);
+                                                                 bind_smile_anonset_context,
+                                                                 validation_height);
     if (!immutable_ok) {
         LogPrintf("CShieldedWallet::CreateV2IngressBatch immutable self-check failed txid=%s reject=%s proof_bytes=%u\n",
                   immutable_tx.GetHash().ToString(),

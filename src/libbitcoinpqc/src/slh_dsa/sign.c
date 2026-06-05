@@ -85,7 +85,8 @@ int slh_dsa_shake_128s_sign_with_randomness(
     size_t mlen,
     const uint8_t *sk,
     const uint8_t *random_data,
-    size_t random_data_size
+    size_t random_data_size,
+    int fips205
 ) {
     if (!sig || !siglen || !m || !sk) {
         return -1;
@@ -103,7 +104,7 @@ int slh_dsa_shake_128s_sign_with_randomness(
     /* The reference implementation prepends the message to the signature
      * but we want just the signature, so we need to use the detached API
      */
-    int result = crypto_sign_signature(sig, siglen, m, mlen, sk);
+    int result = crypto_sign_signature(sig, siglen, m, mlen, sk, fips205);
     DEBUG_PRINT("SLH-DSA sign: signature result = %d, length = %zu\n", result, *siglen);
 
     /* Restore original random bytes function */
@@ -118,7 +119,8 @@ int slh_dsa_shake_128s_sign(
     size_t *siglen,
     const uint8_t *m,
     size_t mlen,
-    const uint8_t *sk
+    const uint8_t *sk,
+    int fips205
 ) {
-    return slh_dsa_shake_128s_sign_with_randomness(sig, siglen, m, mlen, sk, NULL, 0);
+    return slh_dsa_shake_128s_sign_with_randomness(sig, siglen, m, mlen, sk, NULL, 0, fips205);
 }

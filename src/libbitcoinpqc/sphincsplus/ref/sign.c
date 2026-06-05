@@ -93,7 +93,8 @@ int crypto_sign_keypair(unsigned char *pk, unsigned char *sk)
  * Returns an array containing a detached signature.
  */
 int crypto_sign_signature(uint8_t *sig, size_t *siglen,
-                          const uint8_t *m, size_t mlen, const uint8_t *sk)
+                          const uint8_t *m, size_t mlen, const uint8_t *sk,
+                          int fips205)
 {
     spx_ctx ctx;
 
@@ -111,6 +112,7 @@ int crypto_sign_signature(uint8_t *sig, size_t *siglen,
 
     memcpy(ctx.sk_seed, sk, SPX_N);
     memcpy(ctx.pub_seed, pk, SPX_N);
+    ctx.fips205 = (uint8_t)(fips205 ? 1 : 0);
 
     /* This hook allows the hash function instantiation to do whatever
        preparation or computation it needs, based on the public seed. */
@@ -161,7 +163,8 @@ int crypto_sign_signature(uint8_t *sig, size_t *siglen,
  * Verifies a detached signature and message under a given public key.
  */
 int crypto_sign_verify(const uint8_t *sig, size_t siglen,
-                       const uint8_t *m, size_t mlen, const uint8_t *pk)
+                       const uint8_t *m, size_t mlen, const uint8_t *pk,
+                       int fips205)
 {
     spx_ctx ctx;
     const unsigned char *pub_root = pk + SPX_N;
@@ -180,6 +183,7 @@ int crypto_sign_verify(const uint8_t *sig, size_t siglen,
         return -1;
     }
 
+    ctx.fips205 = (uint8_t)(fips205 ? 1 : 0);
     memcpy(ctx.pub_seed, pk, SPX_N);
 
     /* This hook allows the hash function instantiation to do whatever
@@ -249,7 +253,7 @@ int crypto_sign(unsigned char *sm, unsigned long long *smlen,
 {
     size_t siglen;
 
-    crypto_sign_signature(sm, &siglen, m, (size_t)mlen, sk);
+    crypto_sign_signature(sm, &siglen, m, (size_t)mlen, sk, 0);
 
     memmove(sm + SPX_BYTES, m, mlen);
     *smlen = siglen + mlen;
@@ -274,7 +278,7 @@ int crypto_sign_open(unsigned char *m, unsigned long long *mlen,
 
     *mlen = smlen - SPX_BYTES;
 
-    if (crypto_sign_verify(sm, SPX_BYTES, sm + SPX_BYTES, (size_t)*mlen, pk)) {
+    if (crypto_sign_verify(sm, SPX_BYTES, sm + SPX_BYTES, (size_t)*mlen, pk, 0)) {
         memset(m, 0, smlen);
         *mlen = 0;
         return -1;

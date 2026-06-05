@@ -2414,6 +2414,53 @@ uint32_t CountMatMulPhase2Checks(
     return checks;
 }
 
+bool ShouldRunMatMulExpensiveVerification(
+    int32_t block_height,
+    int32_t best_known_height,
+    const Consensus::Params& params,
+    bool phase2_enabled,
+    bool is_ibd)
+{
+    if (!params.fMatMulPOW || params.fSkipMatMulValidation) return false;
+    // Mirror ContextualCheckBlock's should_run_matmul_validation: the legacy phase2 path OR the
+    // post-activation product-committed digest path. The product-committed verification runs
+    // unconditionally at/after activation (it is not gated on phase2_enabled), so charge it too.
+    return ShouldRunMatMulPhase2Validation(block_height, best_known_height, params, phase2_enabled, is_ibd) ||
+           params.IsMatMulProductDigestActive(block_height);
+}
+
+uint32_t CountMatMulExpensiveVerifyChecks(
+    int64_t first_height,
+    size_t header_count,
+    int32_t best_known_height,
+    const Consensus::Params& params,
+    bool phase2_enabled,
+    bool is_ibd)
+{
+    if (!params.fMatMulPOW || params.fSkipMatMulValidation) {
+        return 0;
+    }
+    if (header_count == 0) return 0;
+    if (first_height < 0) return std::numeric_limits<uint32_t>::max();
+
+    uint32_t checks{0};
+    for (size_t i = 0; i < header_count; ++i) {
+        const int64_t offset = static_cast<int64_t>(i);
+        if (first_height > std::numeric_limits<int64_t>::max() - offset) {
+            return std::numeric_limits<uint32_t>::max();
+        }
+        const int64_t height64 = first_height + offset;
+        if (height64 > std::numeric_limits<int32_t>::max()) {
+            return std::numeric_limits<uint32_t>::max();
+        }
+        const int32_t height = static_cast<int32_t>(height64);
+        if (ShouldRunMatMulExpensiveVerification(height, best_known_height, params, phase2_enabled, is_ibd)) {
+            ++checks;
+        }
+    }
+    return checks;
+}
+
 uint32_t EffectivePhase2BanThreshold(const Consensus::Params& params)
 {
     const uint32_t never_ban = std::numeric_limits<uint32_t>::max();
@@ -2767,6 +2814,10 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
     };
 
     try {
+    // Track the closest digest seen this call so the "exhausted" diagnostic can quantify how far the
+    // hardware fell short of the target (issue #44): a healthy GPU computing millions of digests with
+    // zero solves is usually under-powered for the current difficulty, not miscomparing the target.
+    arith_uint256 best_digest_seen = ~arith_uint256(0);
     const bool solved = [&]() -> bool {
 
     const auto A = matmul::SharedFromSeed(block.seed_a, n);
@@ -3041,6 +3092,9 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
             }
 
             --max_tries;
+            if (const arith_uint256 digest_value = UintToArith256(digest_result.digest); digest_value < best_digest_seen) {
+                best_digest_seen = digest_value;
+            }
             if (UintToArith256(digest_result.digest) <= *bnTarget) {
                 uint256 accepted_digest = digest_result.digest;
                 if (cpu_confirm_candidates || needs_freivalds_payload) {
@@ -3130,6 +3184,13 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
     return false;
     }(); // end of inner lambda
     RegisterMatMulSolveRuntimeSample(solved, std::chrono::steady_clock::now() - solve_start);
+    if (!solved && bnTarget && best_digest_seen != ~arith_uint256(0)) {
+        // Report how close we got. best_target_bits_short ~= log2(best_digest / target): roughly the
+        // extra factor of digests needed to expect a solve at the current difficulty (issue #44).
+        const int bits_short = std::max(0, static_cast<int>(best_digest_seen.bits()) - static_cast<int>(bnTarget->bits()));
+        LogDebug(BCLog::MINING, "SolveMatMul: exhausted, best_digest=%s target=%s ~%d_bits_short\n",
+                 best_digest_seen.GetHex(), bnTarget->GetHex(), bits_short);
+    }
     log_mem_diag(solved ? "solved" : "exhausted");
     return solved;
     } catch (const std::exception& e) {

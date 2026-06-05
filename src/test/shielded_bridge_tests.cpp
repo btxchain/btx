@@ -7,6 +7,7 @@
 #include <pqkey.h>
 #include <script/interpreter.h>
 #include <shielded/bridge.h>
+#include <shielded/smile2/ct_proof.h>  // SmileCTProof::C002_ACTIVATION_HEIGHT
 #include <span.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
@@ -1102,6 +1103,54 @@ BOOST_AUTO_TEST_CASE(bridge_batch_statement_v4_roundtrips_with_verifier_set_and_
     BOOST_CHECK_EQUAL(decoded->version, 4U);
     BOOST_CHECK(decoded->verifier_set.attestor_root == verifier_set.attestor_root);
     BOOST_CHECK(decoded->proof_policy.descriptor_root == proof_policy->descriptor_root);
+}
+
+BOOST_AUTO_TEST_CASE(bridge_attestor_slhdsa_fips205_height_gate)
+{
+    // C-002 migrates the bridge attestor SLH-DSA-SHAKE-128s scheme from legacy round-3.x SPHINCS+
+    // to FIPS-205. Verification is height-gated (round-3 below C-002, FIPS-205 at/after), so blocks
+    // remain re-validatable across the boundary.
+    const auto statement = MakeBatchStatement(shielded::BridgeDirection::BRIDGE_OUT, 7 * COIN);
+
+    std::array<unsigned char, 32> material{};
+    material.fill(0xb5);
+    CPQKey key;
+    BOOST_REQUIRE(key.MakeDeterministicKey(PQAlgorithm::SLH_DSA_128S, material));
+
+    auto make_receipt = [&](bool fips205) {
+        shielded::BridgeBatchReceipt r;
+        r.statement = statement;
+        r.attestor = {PQAlgorithm::SLH_DSA_128S, key.GetPubKey()};
+        const uint256 h = shielded::ComputeBridgeBatchReceiptHash(r);
+        BOOST_REQUIRE(!h.IsNull());
+        BOOST_REQUIRE(key.Sign(h, r.signature, fips205));
+        return r;
+    };
+    const auto legacy = make_receipt(/*fips205=*/false);
+    const auto fips = make_receipt(/*fips205=*/true);
+
+    // Mode-exact verification: each receipt verifies only under the scheme it was signed with.
+    BOOST_CHECK(shielded::VerifyBridgeBatchReceipt(legacy, /*slhdsa_fips205=*/false));
+    BOOST_CHECK(!shielded::VerifyBridgeBatchReceipt(legacy, /*slhdsa_fips205=*/true));
+    BOOST_CHECK(shielded::VerifyBridgeBatchReceipt(fips, /*slhdsa_fips205=*/true));
+    BOOST_CHECK(!shielded::VerifyBridgeBatchReceipt(fips, /*slhdsa_fips205=*/false));
+
+    // AnyMode (structural / IsValid) accepts either scheme.
+    BOOST_CHECK(shielded::VerifyBridgeBatchReceiptAnyMode(legacy));
+    BOOST_CHECK(shielded::VerifyBridgeBatchReceiptAnyMode(fips));
+    BOOST_CHECK(legacy.IsValid());
+    BOOST_CHECK(fips.IsValid());
+
+    // Height gate boundary.
+    const int64_t c002 = smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
+    BOOST_CHECK(!shielded::BridgeAttestorUsesFips205AtHeight(c002 - 1));
+    BOOST_CHECK(shielded::BridgeAttestorUsesFips205AtHeight(c002));
+    BOOST_CHECK(shielded::BridgeAttestorUsesFips205AtHeight(c002 + 1));
+
+    // End-to-end: the height fixes the scheme a receipt must satisfy.
+    BOOST_CHECK(shielded::VerifyBridgeBatchReceipt(legacy, shielded::BridgeAttestorUsesFips205AtHeight(c002 - 1)));
+    BOOST_CHECK(!shielded::VerifyBridgeBatchReceipt(legacy, shielded::BridgeAttestorUsesFips205AtHeight(c002)));
+    BOOST_CHECK(shielded::VerifyBridgeBatchReceipt(fips, shielded::BridgeAttestorUsesFips205AtHeight(c002)));
 }
 
 BOOST_AUTO_TEST_CASE(bridge_batch_receipt_roundtrips_and_builds_external_anchor)

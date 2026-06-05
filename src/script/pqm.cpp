@@ -353,7 +353,13 @@ std::vector<unsigned char> BuildP2MRHTLCLeaf(
     const std::vector<unsigned char> oracle_push = BuildP2MRPubkeyPush(oracle_algo, oracle_pubkey);
     if (oracle_push.empty()) return {};
     script.insert(script.end(), oracle_push.begin(), oracle_push.end());
-    script << OP_CHECKSIGFROMSTACK << OP_VERIFY << OP_DROP;
+    // End at OP_CHECKSIGFROMSTACK so the CSFS boolean result (1 on a valid oracle/recipient signature
+    // over the revealed preimage) is the SINGLE element left on the stack. Witness-script execution
+    // requires exactly one truthy element (cleanstack; see ExecuteWitnessScript), so this leaf is
+    // consensus-spendable with witness <oracle_sig> <preimage>. (A trailing OP_VERIFY OP_DROP would
+    // leave an empty stack and make the leaf unspendable — a wrong-preimage spend still aborts at
+    // OP_EQUALVERIFY, and a bad signature yields result 0 which fails the final CastToBool check.)
+    script << OP_CHECKSIGFROMSTACK;
     return std::vector<unsigned char>(script.begin(), script.end());
 }
 

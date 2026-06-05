@@ -20,12 +20,13 @@ int slh_dsa_shake_128s_verify(
     size_t siglen,
     const uint8_t *m,
     size_t mlen,
-    const uint8_t *pk
+    const uint8_t *pk,
+    int fips205
 ) {
     if (!sig || !m || !pk) {
         return -1;
     }
 
     /* Call the reference implementation's verification function */
-    return crypto_sign_verify(sig, siglen, m, mlen, pk);
+    return crypto_sign_verify(sig, siglen, m, mlen, pk, fips205);
 }

@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
@@ -30,15 +29,13 @@ automatic upgrade code from before version 0.8 to version 0.15.0 or higher. Upgr
 directly from 0.7.x and earlier without re-downloading the blockchain is not supported.
 However, as usual, old wallet versions are still supported.
 
-Downgrading warning
--------------------
+## Downgrading warning
 
 Wallets created in 0.16 and later are not compatible with versions prior to 0.16
 and will not work if you try to use newly created wallets in older versions. Existing
 wallets that were created with older versions are not affected by this.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is extensively tested on multiple operating systems using
 the Linux kernel, macOS 10.8+, and Windows Vista and later. Windows XP is not supported.
@@ -46,19 +43,16 @@ the Linux kernel, macOS 10.8+, and Windows Vista and later. Windows XP is not su
 Bitcoin Core should also work on most other Unix-like systems but is not
 frequently tested on them.
 
-Notable changes
-===============
+# Notable changes
 
-Miner block size removed
-------------------------
+## Miner block size removed
 
 The `-blockmaxsize` option for miners to limit their blocks' sizes was
 deprecated in version 0.15.1, and has now been removed. Miners should use the
 `-blockmaxweight` option if they want to limit the weight of their blocks'
 weights.
 
-0.16.1 change log
-------------------
+## 0.16.1 change log
 
 ### Policy
 - #11423 `d353dd1` [Policy] Several transaction standardness rules (jl2012)
@@ -117,8 +111,7 @@ weights.
 - #13246 `6de7543` Bump to Ubuntu Bionic 18.04 in build-windows.md (ken2812221)
 - #12556 `e730b82` Fix version typo in getpeerinfo RPC call help (tamasblummer)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

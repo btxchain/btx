@@ -14,8 +14,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-Compatibility
-==============
+# Compatibility
 
 Microsoft ended support for Windows XP on [April 8th, 2014](https://www.microsoft.com/en-us/WindowsForBusiness/end-of-xp-support),
 an OS initially released in 2001. This means that not even critical security
@@ -40,11 +39,9 @@ From 0.13.1 onwards OS X 10.7 is no longer supported. 0.13.0 was intended to wor
 but severe issues with the libc++ version on 10.7.x keep it from running reliably. 
 0.13.1 now requires 10.8+, and will communicate that to 10.7 users, rather than crashing unexpectedly.
 
-Notable changes
-===============
+# Notable changes
 
-Segregated witness soft fork
-----------------------------
+## Segregated witness soft fork
 
 Segregated witness (segwit) is a soft fork that, if activated, will
 allow transaction-producing software to separate (segregate) transaction
@@ -168,8 +165,7 @@ signaling support for a soft fork.
 [versionbits FAQ]: https://bitcoincore.org/en/2016/06/08/version-bits-miners-faq/
 
 
-Null dummy soft fork
--------------------
+## Null dummy soft fork
 
 Combined with the segwit soft fork is an additional change that turns a
 long-existing network relay policy into a consensus rule. The
@@ -198,16 +194,14 @@ For more information, please see [BIP147][].
 
 [BIP147]: https://github.com/bitcoin/bips/blob/master/bip-0147.mediawiki
 
-Low-level RPC changes
----------------------
+## Low-level RPC changes
 
 - `importprunedfunds` only accepts two required arguments. Some versions accept
   an optional third arg, which was always ignored. Make sure to never pass more
   than two arguments.
 
 
-Linux ARM builds
-----------------
+## Linux ARM builds
 
 With the 0.13.0 release, pre-built Linux ARM binaries were added to the set of
 uploaded executables. Additional detail on the ARM architecture targeted by each
@@ -233,8 +227,7 @@ Note that Android is not considered ARM Linux in this context. The executables
 are not expected to work out of the box on Android.
 
 
-0.13.1 Change log
-=================
+# 0.13.1 Change log
 
 Detailed release notes follow. This overview includes changes that affect
 behavior, not code moves, refactors and string updates. For convenience in locating
@@ -358,8 +351,7 @@ git merge commit are mentioned.
 - #8548 `305d8ac` Use `__func__` to get function name for output printing (MarcoFalke)
 - #8291 `a987431` [util] CopyrightHolders: Check for untranslated substitution (MarcoFalke)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

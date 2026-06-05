@@ -7,6 +7,7 @@
 #include <common/args.h>
 #include <compat/compat.h>
 #include <cstdint>
+#include <crypto/ml_kem.h>
 #include <net.h>
 #include <net_processing.h>
 #include <netaddress.h>
@@ -1246,10 +1247,18 @@ public:
     void ReceiveVersion()
     {
         auto contents = ReceivePacket(/*aad=*/MakeByteSpan(m_recv_garbage));
-        // Version packets from real BIP324 peers are expected to be empty, despite the fact that
-        // this class supports *sending* non-empty version packets (to test that BIP324 peers
-        // correctly ignore version packet contents).
-        BOOST_CHECK(contents.empty());
+        // BTX: our V2Transport advertises the post-quantum hybrid upgrade in its version packet.
+        // A responder offers a 1-byte flag (0x01) followed by its 1184-byte ML-KEM-768 public key;
+        // an initiator sends the flag byte alone. (Stock BIP324 peers would send empty contents and
+        // ignore ours; this tester models such a legacy peer, so the transport falls back to
+        // X25519-only — but it still *sends* the PQ advertisement, which we accept here.)
+        if (contents.empty()) return; // stock BIP324 / PQ disabled
+        BOOST_CHECK(contents[0] == 0x01);
+        if (m_test_initiator) {
+            BOOST_CHECK_EQUAL(contents.size(), 1U); // initiator: flag only
+        } else {
+            BOOST_CHECK_EQUAL(contents.size(), 1U + mlkem::PUBLICKEYBYTES); // responder: flag + pubkey
+        }
     }
 
     /** Expect application packet to have been received, with specified short id and payload.
@@ -1404,6 +1413,10 @@ BOOST_AUTO_TEST_CASE(v2transport_test)
         unsigned num_ignore_version = m_rng.randrange(10);
         /** What data to send in the version packet (ignored by BIP324 peers, but reserved for future extensions). */
         auto ver_data = m_rng.randbytes<uint8_t>(m_rng.randbool() ? 0 : m_rng.randrange(1000));
+        // BTX: a non-empty version packet whose first byte is the PQ flag (0x01) is interpreted by
+        // our transport as a post-quantum advertisement rather than opaque ignored data. This tester
+        // models a legacy (non-PQ) peer, so ensure the random version data is not misread as one.
+        if (!ver_data.empty()) ver_data[0] = 0x00;
         /** Whether to immediately send key and garbage out (required for responders, optional otherwise). */
         bool send_immediately = !initiator || m_rng.randbool();
         /** How many decoy packets to send before the first and second real message. */
@@ -1537,6 +1550,159 @@ BOOST_AUTO_TEST_CASE(v2transport_test)
         auto ret = tester.Interact();
         BOOST_CHECK(!ret);
     }
+}
+
+BOOST_AUTO_TEST_CASE(v2transport_pq_hybrid_test)
+{
+    // Two real, PQ-capable V2Transports connected back-to-back must complete the BTX hybrid
+    // X25519 + ML-KEM-768 handshake (version-packet pubkey exchange + ciphertext packet),
+    // RekeyHybridPQ() both directions at the same boundary, and then exchange application messages.
+    // If only one side rekeyed (or they rekeyed to different secrets) the app packets would fail to
+    // decrypt, so a successful bidirectional exchange is itself proof the rekey was consistent.
+    V2Transport init{/*nodeid=*/0, /*initiating=*/true};
+    V2Transport resp{/*nodeid=*/1, /*initiating=*/false};
+
+    auto mk = [](std::string type, std::vector<uint8_t> data) {
+        CSerializedNetMsg m;
+        m.m_type = std::move(type);
+        m.data = std::move(data);
+        return m;
+    };
+    std::deque<CSerializedNetMsg> init_q, resp_q;
+    init_q.push_back(mk("ping", {0x11, 0x22, 0x33, 0x44}));
+    resp_q.push_back(mk("pong", {0x55, 0x66, 0x77, 0x88}));
+
+    std::vector<CNetMessage> init_recv, resp_recv;
+    auto drain = [](V2Transport& t, std::vector<CNetMessage>& out) {
+        while (t.ReceivedMessageComplete()) {
+            bool reject{false};
+            auto m = t.GetReceivedMessage({}, reject);
+            if (!reject) out.push_back(std::move(m));
+        }
+    };
+    // Move all currently-available bytes from src to dst (copying before MarkBytesSent, which may
+    // free the underlying buffer), queueing one of src's pending messages first if accepted.
+    auto pump = [](V2Transport& src, std::deque<CSerializedNetMsg>& src_q, V2Transport& dst) {
+        bool progress = false;
+        if (!src_q.empty() && src.SetMessageToSend(src_q.front())) {
+            src_q.pop_front();
+            progress = true;
+        }
+        const auto& [data, _more, _mtype] = src.GetBytesToSend(!src_q.empty());
+        if (!data.empty()) {
+            std::vector<uint8_t> bytes(UCharCast(data.data()), UCharCast(data.data()) + data.size());
+            src.MarkBytesSent(bytes.size());
+            Span<const uint8_t> span{bytes};
+            BOOST_REQUIRE(dst.ReceivedBytes(span));
+            BOOST_REQUIRE(span.empty());
+            progress = true;
+        }
+        return progress;
+    };
+
+    for (int i = 0; i < 256; ++i) {
+        bool progress = false;
+        progress |= pump(init, init_q, resp);
+        drain(resp, resp_recv);
+        progress |= pump(resp, resp_q, init);
+        drain(init, init_recv);
+        if (!progress) break;
+    }
+
+    // Both sides applied the hybrid PQ rekey.
+    BOOST_CHECK(init.IsHybridActiveForTest());
+    BOOST_CHECK(resp.IsHybridActiveForTest());
+    // Both negotiated the same session id (X25519 layer) and report V2.
+    BOOST_CHECK(init.GetInfo().session_id.has_value());
+    BOOST_CHECK(init.GetInfo().session_id == resp.GetInfo().session_id);
+    // Application messages crossed the rekey boundary intact, in both directions.
+    BOOST_REQUIRE_EQUAL(resp_recv.size(), 1U);
+    BOOST_CHECK_EQUAL(resp_recv[0].m_type, "ping");
+    BOOST_REQUIRE_EQUAL(init_recv.size(), 1U);
+    BOOST_CHECK_EQUAL(init_recv[0].m_type, "pong");
+    BOOST_CHECK(std::ranges::equal(resp_recv[0].m_recv, std::vector<std::byte>{
+        std::byte{0x11}, std::byte{0x22}, std::byte{0x33}, std::byte{0x44}}));
+    BOOST_CHECK(std::ranges::equal(init_recv[0].m_recv, std::vector<std::byte>{
+        std::byte{0x55}, std::byte{0x66}, std::byte{0x77}, std::byte{0x88}}));
+}
+
+BOOST_AUTO_TEST_CASE(v2transport_pqonly_enforcement_test)
+{
+    // -v2pqonly REQUIRES the X25519 + ML-KEM hybrid on every connection: peers that do not complete
+    // it (legacy v2 sending an empty version packet) must be disconnected, while two PQ-capable
+    // peers still connect normally (the key derivation is unchanged).
+    gArgs.ForceSetArg("-v2pqonly", "1");
+
+    // (1) A PQ-only responder rejects a legacy (non-PQ) initiator peer at the version stage.
+    {
+        V2TransportTester tester(m_rng, /*test_initiator=*/false);
+        tester.SendKey();
+        tester.SendGarbage();
+        auto ret = tester.Interact();
+        BOOST_REQUIRE(ret && ret->empty());
+        tester.ReceiveKey();
+        tester.SendGarbageTerm();
+        tester.SendVersion(); // empty version contents == no PQ support
+        ret = tester.Interact();
+        BOOST_CHECK(!ret); // transport must reject (no graceful X25519 fallback)
+    }
+
+    // (2) A PQ-only initiator rejects a legacy (non-PQ) responder peer.
+    {
+        V2TransportTester tester(m_rng, /*test_initiator=*/true);
+        auto ret = tester.Interact();
+        BOOST_REQUIRE(ret && ret->empty());
+        tester.SendKey();
+        tester.SendGarbage();
+        tester.ReceiveKey();
+        tester.SendGarbageTerm();
+        tester.SendVersion(); // empty version contents == no PQ support
+        ret = tester.Interact();
+        BOOST_CHECK(!ret);
+    }
+
+    // (3) Happy path under -v2pqonly: two PQ-capable transports still complete the hybrid handshake
+    //     and exchange application messages.
+    {
+        V2Transport init{/*nodeid=*/0, /*initiating=*/true};
+        V2Transport resp{/*nodeid=*/1, /*initiating=*/false};
+        std::deque<CSerializedNetMsg> init_q, resp_q;
+        CSerializedNetMsg ping;
+        ping.m_type = "ping";
+        ping.data = {0x01};
+        init_q.push_back(std::move(ping));
+        auto pump = [](V2Transport& src, std::deque<CSerializedNetMsg>& src_q, V2Transport& dst) {
+            bool progress = false;
+            if (!src_q.empty() && src.SetMessageToSend(src_q.front())) { src_q.pop_front(); progress = true; }
+            const auto& [data, _more, _mtype] = src.GetBytesToSend(!src_q.empty());
+            if (!data.empty()) {
+                std::vector<uint8_t> bytes(UCharCast(data.data()), UCharCast(data.data()) + data.size());
+                src.MarkBytesSent(bytes.size());
+                Span<const uint8_t> span{bytes};
+                BOOST_REQUIRE(dst.ReceivedBytes(span));
+                progress = true;
+            }
+            return progress;
+        };
+        std::vector<CNetMessage> resp_recv;
+        for (int i = 0; i < 256; ++i) {
+            bool progress = false;
+            progress |= pump(init, init_q, resp);
+            while (resp.ReceivedMessageComplete()) {
+                bool reject{false};
+                auto m = resp.GetReceivedMessage({}, reject);
+                if (!reject) resp_recv.push_back(std::move(m));
+            }
+            progress |= pump(resp, resp_q, init);
+            if (!progress) break;
+        }
+        BOOST_CHECK(init.IsHybridActiveForTest());
+        BOOST_CHECK(resp.IsHybridActiveForTest());
+        BOOST_REQUIRE_EQUAL(resp_recv.size(), 1U);
+        BOOST_CHECK_EQUAL(resp_recv[0].m_type, "ping");
+    }
+
+    gArgs.ForceSetArg("-v2pqonly", "0"); // restore default for subsequent tests
 }
 
 BOOST_AUTO_TEST_SUITE_END()

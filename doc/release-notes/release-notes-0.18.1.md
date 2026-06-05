@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has
 completely shut down (which might take a few minutes for older
@@ -32,8 +31,7 @@ there is no automatic upgrade code from before version 0.8 to version
 redownloading the blockchain is not supported.  However, as usual, old
 wallet versions are still supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems
 using the Linux kernel, macOS 10.10+, and Windows 7 and newer. It is not
@@ -47,11 +45,9 @@ built using Qt 5.9.x, which doesn't support versions of macOS older than
 10.10. Additionally, Bitcoin Core does not yet change appearance when
 macOS "dark mode" is activated.
 
-Known issues
-============
+# Known issues
 
-Wallet GUI
-----------
+## Wallet GUI
 
 For advanced users who have both (1) enabled coin control features, and
 (2) are using multiple wallets loaded at the same time: The coin control
@@ -59,8 +55,7 @@ input selection dialog can erroneously retain wrong-wallet state when
 switching wallets using the dropdown menu. For now, it is recommended
 not to use coin control features with multiple wallets loaded.
 
-0.18.1 change log
-=================
+# 0.18.1 change log
 
 ### P2P protocol and network code
 - #15990 Add tests and documentation for blocksonly (MarcoFalke)
@@ -107,8 +102,7 @@ not to use coin control features with multiple wallets loaded.
 - #16095 Catch by reference not value in wallettool (kristapsk)
 - #16205 Replace fprintf with tfm::format (MarcoFalke)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

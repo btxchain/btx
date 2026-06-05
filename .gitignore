@@ -62,3 +62,4 @@ github.key
 *.swp
 *~
 .cache/*
+btx-release-key/

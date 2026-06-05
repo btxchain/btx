@@ -612,7 +612,8 @@ void AssertV2SendFixtureVerifies(const V2SendFixture& fixture,
                                              *context,
                                              *ring_members,
                                              reject_rice_codec,
-                                             FixtureUsesBoundSmileAnonsetContext(fixture)));
+                                             FixtureUsesBoundSmileAnonsetContext(fixture),
+                                             fixture.validation_height));
 }
 
 V2SendFixture BuildV2SendFixture(CAmount fee = 0,
@@ -713,7 +714,9 @@ V2SendFixture BuildV2SendFixture(CAmount fee = 0,
         serial_hashes,
         fee,
         codec_policy,
-        FixtureUsesBoundSmileAnonsetContext(fixture));
+        FixtureUsesBoundSmileAnonsetContext(fixture),
+        /*error=*/nullptr,
+        fixture.validation_height);
     BOOST_REQUIRE(smile_result.has_value());
     BOOST_REQUIRE_EQUAL(serial_hashes.size(), 1U);
 
@@ -2321,6 +2324,26 @@ BOOST_AUTO_TEST_CASE(proof_check_rejects_postfork_legacy_v2_rebalance_proof_wire
     const auto res = check();
     BOOST_REQUIRE(res.has_value());
     BOOST_CHECK_EQUAL(*res, "bad-shielded-v2-proof-wire");
+}
+
+BOOST_AUTO_TEST_CASE(proof_check_rejects_postfork_v2_rebalance_tampered_deterministic_proof)
+{
+    const auto& consensus = Params().GetConsensus();
+    const int32_t activation_height = consensus.nShieldedMatRiCTDisableHeight;
+    auto fixture = test::shielded::BuildV2RebalanceFixture(/*reserve_output_count=*/1,
+                                                           /*settlement_window=*/144,
+                                                           &consensus,
+                                                           activation_height);
+    auto* bundle = fixture.tx.shielded_bundle.v2_bundle ? &*fixture.tx.shielded_bundle.v2_bundle : nullptr;
+    BOOST_REQUIRE(bundle != nullptr);
+    BOOST_REQUIRE(!bundle->proof_payload.empty());
+    bundle->proof_payload.front() ^= 0x01;
+
+    const CTransaction tx{fixture.tx};
+    CShieldedProofCheck check(tx, consensus, activation_height, nullptr);
+    const auto res = check();
+    BOOST_REQUIRE(res.has_value());
+    BOOST_CHECK_EQUAL(*res, "bad-shielded-v2-rebalance-deterministic");
 }
 
 BOOST_AUTO_TEST_CASE(proof_check_accepts_fee_bearing_v2_settlement_anchor_bundle)

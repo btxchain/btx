@@ -5552,7 +5552,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (!is_ibd && m_chainman.ActiveHeight() + 10 < best_known_height) {
             is_ibd = true;
         }
-        requires_matmul_phase2 = CountMatMulPhase2Checks(
+        requires_matmul_phase2 = CountMatMulExpensiveVerifyChecks(
             static_cast<int64_t>(prev_block->nHeight) + 1,
             /*header_count=*/1,
             best_known_height,
@@ -5961,7 +5961,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 if (!is_ibd && m_chainman.ActiveHeight() + 10 < best_known_height) {
                     is_ibd = true;
                 }
-                requires_matmul_phase2 = CountMatMulPhase2Checks(
+                requires_matmul_phase2 = CountMatMulExpensiveVerifyChecks(
                     static_cast<int64_t>(prev_block->nHeight) + 1,
                     /*header_count=*/1,
                     best_known_height,

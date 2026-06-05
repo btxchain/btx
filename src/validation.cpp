@@ -1174,6 +1174,40 @@ template <typename Spend>
     return true;
 }
 
+//! Pin a prune-retention lock so the fast-path shielded disconnect of any reorg up to nMaxReorgDepth
+//! never needs a pruned block (issue #35 defense-in-depth). No-op unless this is the active
+//! chainstate, pruning is enabled, AND shielded state is live. Pruning POLICY ONLY -- it can only
+//! prevent pruning of in-window block files, never change validation/consensus and never cause extra
+//! pruning. The deeper genesis-walk full-rebuild fallback is handled separately by the
+//! ShieldedFullRebuildBlocksAvailable retain guards; this lock makes the common fast path robust and
+//! is load-bearing on chains where nMaxReorgDepth + SHIELDED_ANCHOR_DEPTH exceeds MIN_BLOCKS_TO_KEEP.
+static void UpdateShieldedPruneRetentionLock(Chainstate& chainstate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    AssertLockHeld(::cs_main);
+    ChainstateManager& chainman = chainstate.m_chainman;
+    if (&chainstate != &chainman.ActiveChainstate()) return;   // active chain only
+    if (!chainstate.m_blockman.IsPruneMode()) return;          // no-op when not pruning
+    if (!chainman.HasShieldedState()) return;                  // no-op on non-shielded chains
+    const CBlockIndex* tip = chainstate.m_chain.Tip();
+    if (tip == nullptr) return;
+
+    const uint32_t max_reorg = chainman.GetConsensus().nMaxReorgDepth;
+    const uint64_t reorg_window = (max_reorg == std::numeric_limits<uint32_t>::max())
+        ? MIN_BLOCKS_TO_KEEP
+        : static_cast<uint64_t>(max_reorg) + static_cast<uint64_t>(SHIELDED_ANCHOR_DEPTH);
+    const uint64_t window = std::max<uint64_t>(MIN_BLOCKS_TO_KEEP, reorg_window);
+    const uint64_t tip_height = static_cast<uint64_t>(tip->nHeight);
+    const uint64_t height_first = (tip_height > window) ? (tip_height - window) : 1;
+
+    node::PruneLockInfo lock_info;
+    lock_info.desc = "shielded anchor retention (issue #35)";
+    lock_info.height_first = height_first;
+    // height_last left default (max): we only pin a lower bound. temporary (default): recomputed each
+    // ConnectTip from the tip height, so it never persists a stale height and always allows pruning of
+    // block files older than the window.
+    chainstate.m_blockman.UpdatePruneLock("shielded", lock_info);
+}
+
 [[nodiscard]] static bool CollectShieldedAnchorHistoryFromTree(
     const Chainstate& chainstate,
     const CBlockIndex* tip,
@@ -1234,6 +1268,16 @@ template <typename Spend>
              bundle.GetTransactionFamily() == shielded::v2::TransactionFamily::V2_EGRESS_BATCH ||
              bundle.GetTransactionFamily() == shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR ||
              bundle.GetTransactionFamily() == shielded::v2::TransactionFamily::V2_LIFECYCLE));
+}
+
+[[nodiscard]] static bool NeedsShieldedProofCheck(const CShieldedBundle& bundle,
+                                                  const Consensus::Params& consensus,
+                                                  int32_t validation_height)
+{
+    if (NeedsShieldedProofCheck(bundle)) return true;
+    return bundle.HasV2Bundle() &&
+           bundle.GetTransactionFamily() == shielded::v2::TransactionFamily::V2_REBALANCE &&
+           consensus.IsShieldedMatRiCTDisabled(validation_height);
 }
 
 static void RefreshShieldedValidationSnapshots(
@@ -1334,7 +1378,7 @@ static void RefreshShieldedValidationSnapshots(
         const CTransaction& tx = *tx_ref;
         if (!tx.HasShieldedBundle()) continue;
         const CShieldedBundle& bundle = tx.GetShieldedBundle();
-        if (!NeedsShieldedProofCheck(bundle)) continue;
+        if (!NeedsShieldedProofCheck(bundle, consensus, height)) continue;
 
         std::shared_ptr<const shielded::ringct::MatRiCTProof> parsed_spend_auth_proof;
         if (bundle.HasShieldedInputs() && UsesShieldedSpendAuthChecks(bundle)) {
@@ -1736,7 +1780,7 @@ static void RefreshShieldedValidationSnapshots(
         }
         for (const auto& txref : block.vtx) {
             std::string reject_reason;
-            auto created = ExtractCreatedShieldedSettlementAnchors(*txref, reject_reason);
+            auto created = ExtractCreatedShieldedSettlementAnchors(*txref, pindex->nHeight, reject_reason);
             if (!created.has_value()) {
                 LogError("RebuildShieldedSettlementAnchorState: failed to rebuild settlement anchors for tx %s in block %s: %s\n",
                          txref->GetHash().ToString(),
@@ -3710,7 +3754,8 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             }
         }
 
-        const bool needs_shielded_proof_check = NeedsShieldedProofCheck(bundle);
+        const bool needs_shielded_proof_check =
+            NeedsShieldedProofCheck(bundle, consensus, next_block_height);
         std::string public_flow_reject;
         if (!RejectPostForkTransparentFundingV2SendContext(tx,
                                                            m_view,
@@ -3758,7 +3803,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             switch (*bundle.GetTransactionFamily()) {
             case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR: {
                 std::string reject_reason;
-                auto created_anchors = ExtractCreatedShieldedSettlementAnchors(tx, reject_reason);
+                auto created_anchors = ExtractCreatedShieldedSettlementAnchors(tx, next_block_height, reject_reason);
                 if (!created_anchors.has_value()) {
                     return state.Invalid(TxValidationResult::TX_CONSENSUS, reject_reason);
                 }
@@ -5334,7 +5379,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
             const auto nullifiers = CollectShieldedNullifiers(bundle);
             block_nullifiers.insert(block_nullifiers.end(), nullifiers.begin(), nullifiers.end());
             std::string reject_reason;
-            auto created_anchors = ExtractCreatedShieldedSettlementAnchors(*txref, reject_reason);
+            auto created_anchors = ExtractCreatedShieldedSettlementAnchors(*txref, pindex->nHeight, reject_reason);
             if (!created_anchors.has_value()) {
                 return DISCONNECT_FAILED;
             }
@@ -5398,7 +5443,21 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
                 next_registry_size,
                 shielded::registry::ShieldedAccountRegistryState::PayloadPruneMode::KEEP)) {
             // Fallback for older/incomplete in-memory state where position
-            // indexes are unavailable.
+            // indexes are unavailable. This rebuilds shielded state by walking
+            // ancestor blocks from disk; on a pruned node that walk can require a
+            // block below the prune horizon (issue #35). Fail fast with an
+            // actionable message instead of attempting the read and surfacing the
+            // opaque "ReadRawBlock: FlatFilePos(nFile=-1)" error -- the node
+            // recovers its persisted shielded state on the next restart.
+            if (!ShieldedFullRebuildBlocksAvailable(*this, pindex->pprev)) {
+                LogError("DisconnectBlock(): shielded undo for block %s needs a full rebuild from "
+                         "ancestor blocks below the prune horizon (a reorg disconnected a block whose "
+                         "shielded anchor was pruned). Refusing the prune-unsafe rebuild; restart to "
+                         "recover persisted shielded state, or -reindex on an un-pruned node to reorg "
+                         "past this point.\n",
+                         pindex->GetBlockHash().ToString());
+                return DISCONNECT_FAILED;
+            }
             shielded::ShieldedMerkleTree rebuilt_tree{
                 shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
             ShieldedPoolBalance rebuilt_pool;
@@ -5627,6 +5686,23 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
     if (consensusparams.nMLDSADisableHeight != std::numeric_limits<int32_t>::max() &&
         block_index.nHeight >= consensusparams.nMLDSADisableHeight) {
         flags |= SCRIPT_VERIFY_DISALLOW_MLDSA;
+    }
+
+    // FIPS-205 SLH-DSA activation (bundled with the C-002 v0.31 fork): at/after
+    // the activation height, SLH-DSA signatures are verified as finalized
+    // FIPS-205 (pure mode) rather than the legacy round-3.x SPHINCS+ reference.
+    // Keyed off the same height the C-002 prover/verifier branch on so the whole
+    // v0.31 upgrade activates atomically.
+    if (block_index.nHeight >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT) {
+        flags |= SCRIPT_VERIFY_SLHDSA_FIPS205;
+    }
+
+    // Post-quantum only: where consensus forbids non-P2MR outputs (PQ-only chain),
+    // also reject legacy secp256k1 ECDSA / Schnorr signature operations at the
+    // verification layer (defense in depth; the paths are already unreachable
+    // because no non-P2MR output can exist).
+    if (consensusparams.fEnforceP2MROnlyOutputs) {
+        flags |= SCRIPT_VERIFY_REJECT_LEGACY_SIGS;
     }
 
     return flags;
@@ -6163,7 +6239,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 }
             }
 
-            const bool needs_shielded_proof_check = NeedsShieldedProofCheck(bundle);
+            const bool needs_shielded_proof_check =
+                NeedsShieldedProofCheck(bundle, params.GetConsensus(), pindex->nHeight);
             std::string public_flow_reject;
             if (!RejectPostForkTransparentFundingV2SendContext(tx,
                                                                view,
@@ -6308,7 +6385,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                         break;
                     }
                     std::string reject_reason;
-                    auto created_anchors = ExtractCreatedShieldedSettlementAnchors(tx, reject_reason);
+                    auto created_anchors = ExtractCreatedShieldedSettlementAnchors(tx, pindex->nHeight, reject_reason);
                     if (!created_anchors.has_value()) {
                         state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
                         break;
@@ -7223,6 +7300,8 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     // Update m_chain & related variables.
     m_chain.SetTip(*pindexNew);
     UpdateTip(pindexNew);
+    // Keep the shielded prune-retention window pinned to the new tip (no-op unless pruning + shielded).
+    UpdateShieldedPruneRetentionLock(*this);
     if (m_mempool) {
         RemoveStaleShieldedAnchorMempoolTransactions(*m_mempool, m_chain, m_chainman);
     }
@@ -11349,6 +11428,13 @@ bool ChainstateManager::PersistShieldedState(const CBlockIndex* tip)
         account_registry_roots)) {
         return false;
     }
+    // Persist the nullifier-set MuHash accumulator digest at this tip so a restart can cheaply
+    // verify the loaded nullifier set has not drifted (without re-deriving it from chain). Written
+    // only here -- direct test/diagnostic nullifier insertions that bypass PersistShieldedState
+    // leave the persisted digest unchanged, so the restart drift check still catches them.
+    if (!m_shielded_nullifiers->PersistNullifierAccumulator()) {
+        return false;
+    }
     return m_shielded_nullifiers->ClearMutationMarker();
 }
 
@@ -11769,6 +11855,9 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         if (startup_shielded_repair_performed) {
             AutoReconsiderShieldedInvalidBlocksAfterStartupRepair();
         }
+        // Register the shielded prune-retention lock at startup, before any FindFilesToPrune can run,
+        // even if no new block has connected yet (no-op unless pruning + shielded).
+        UpdateShieldedPruneRetentionLock(*m_active_chainstate);
         return true;
     };
     const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
@@ -11969,13 +12058,39 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         if (try_restore_prepared_transition(*persisted_mutation_marker)) {
             return finish_success();
         }
-        LogPrintf("EnsureShieldedStateInitialized: found in-flight mutation marker target_height=%d target_hash=%s; rebuilding full shielded state from chain\n",
-                  persisted_mutation_marker->target_tip_height,
-                  persisted_mutation_marker->target_tip_hash.ToString());
-        if (!rebuild_from_chain()) {
-            return false;
+        // A stale in-flight mutation marker normally forces a full rebuild from chain. But if any
+        // block needed for that rebuild has been pruned -- e.g. a reorg disconnected a block
+        // referencing a shielded anchor below the prune horizon (issue #35) -- the unconditional
+        // rebuild re-reads the missing block via RebuildShieldedState() -> ReadBlock() and fails
+        // identically on every restart, producing a deterministic, unrecoverable crash-loop. Mirror
+        // the persisted-snapshot recovery path below (which already guards on block availability):
+        // only force the destructive full rebuild when every required block is present; otherwise
+        // clear the stale marker, keep the persisted shielded state, and bring the node up.
+        if (!ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+            LogPrintf("EnsureShieldedStateInitialized: in-flight mutation marker target_height=%d "
+                      "target_hash=%s needs a full shielded rebuild, but blocks required for it are "
+                      "pruned at tip height=%d hash=%s. Refusing the destructive rebuild to avoid an "
+                      "unrecoverable restart-loop; clearing the stale marker and retaining persisted "
+                      "shielded state. Reconcile with -reindex on an un-pruned node or by loading an "
+                      "archival shielded snapshot.\n",
+                      persisted_mutation_marker->target_tip_height,
+                      persisted_mutation_marker->target_tip_hash.ToString(),
+                      tip ? tip->nHeight : -1,
+                      tip ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+            if (!m_shielded_nullifiers->ClearMutationMarker()) {
+                return false;
+            }
+            // Fall through to the persisted-snapshot recovery below, which degrades gracefully under
+            // pruning.
+        } else {
+            LogPrintf("EnsureShieldedStateInitialized: found in-flight mutation marker target_height=%d target_hash=%s; rebuilding full shielded state from chain\n",
+                      persisted_mutation_marker->target_tip_height,
+                      persisted_mutation_marker->target_tip_hash.ToString());
+            if (!rebuild_from_chain()) {
+                return false;
+            }
+            return finish_success();
         }
-        return finish_success();
     }
 
     LogPrintf("EnsureShieldedStateInitialized: rebuilding from tip height=%d hash=%s retention=%s\n",
@@ -12054,6 +12169,16 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             actual_commitment_index_digest.has_value() &&
             *persisted_commitment_index_digest == *actual_commitment_index_digest) {
             restored_index = true;
+        } else if (!ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+            // The commitment index would normally be rebuilt from chain here, but blocks required
+            // for that rebuild are pruned (issue #35). Rebuilding would fail and crash-loop the
+            // node. Retain the persisted commitment index instead -- the same retain-under-pruning
+            // trust model already used for persisted anchor roots below. This is fail-closed: a
+            // stale index surfaces as a proof-verification failure, never silent acceptance.
+            LogPrintf("EnsureShieldedStateInitialized: commitment index rebuild needs pruned blocks at height=%d hash=%s; retaining persisted commitment index rather than crash-looping\n",
+                      persisted_tip_height,
+                      persisted_tip_hash.ToString());
+            restored_index = true;
         } else {
             if (!persisted_commitment_index_digest.has_value()) {
                 LogPrintf("EnsureShieldedStateInitialized: persisted state missing commitment index digest at height=%d hash=%s tree_size=%u root=%s; rebuilding commitment index from chain\n",
@@ -12073,7 +12198,20 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             restored_index = restore_rebuilt_commitment_index();
         }
 
-        if (restored_index && m_shielded_merkle_tree.HasCommitmentIndex()) {
+        // issue #35: under the default externalized profile (retain_shielded_commitment_index=false)
+        // a tree loaded from its persisted frontier has no in-memory commitment index, and the index
+        // cannot be reconstructed without reading (pruned) blocks. Still enter the recovery block in
+        // that case so the node comes up on its validated persisted frontier. This is consensus-safe:
+        // a frontier-only node is a correct VALIDATOR -- every shielded-spend verification that needs
+        // a leaf-position lookup fails closed (CommitmentAt -> nullopt -> bad-shielded-ring-member-
+        // position) when the index is absent; it simply cannot itself PRODUCE witnesses until it can
+        // rebuild the index from un-pruned blocks.
+        const bool commitment_index_present = m_shielded_merkle_tree.HasCommitmentIndex();
+        const bool commitment_index_unrebuildable_under_pruning =
+            !commitment_index_present &&
+            !ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip);
+        if (restored_index &&
+            (commitment_index_present || commitment_index_unrebuildable_under_pruning)) {
             const auto loaded_anchor_roots = m_shielded_anchor_roots;
             const auto loaded_account_registry_roots = persisted_account_registry_roots;
             bool anchor_history_rebuilt{false};
@@ -12260,17 +12398,70 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                           tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
             }
             m_shielded_state_initialized = true;
-            std::string audit_error;
-            if (!AuditShieldedStateAgainstChain(*m_active_chainstate,
-                                               audit_error,
-                                               /*include_proof_audit=*/false)) {
-                LogPrintf("EnsureShieldedStateInitialized: persisted shielded state audit failed (%s); rebuilding full state from chain\n",
-                          audit_error);
-                reset_shielded_state();
-                if (!rebuild_from_chain()) {
-                    return false;
+
+            // Zero-downtime restart: skip ONLY the expensive cross-chain audit (the genesis
+            // re-derivation in RebuildShieldedState) when the persisted nullifier set is proven
+            // intact by the incrementally-maintained MuHash accumulator. The cheap settlement/
+            // netting drift syncs above always run. The note-commitment frontier (root/size) and
+            // commitment-index digest were already matched to the active tip; the accumulator closes
+            // the one gap the frontier root does not cover -- the nullifier set -- so a drifted,
+            // tampered, or stale set fails this check and falls through to the audit, which rebuilds.
+            // Gated off any startup repair (never trust-skip state we just rebuilt). The accumulator
+            // needs only the nullifier DB, so this drift check works even under pruning, where the
+            // audit itself cannot run.
+            const bool fast_audit_skip_eligible =
+                m_options.fast_shielded_startup &&
+                !startup_shielded_repair_performed;
+            bool nullifier_accumulator_verified = false;
+            if (fast_audit_skip_eligible) {
+                const auto persisted_accumulator =
+                    m_shielded_nullifiers->ReadPersistedNullifierAccumulator();
+                const uint256 current_accumulator =
+                    m_shielded_nullifiers->NullifierAccumulatorDigest();
+                nullifier_accumulator_verified =
+                    persisted_accumulator.has_value() &&
+                    *persisted_accumulator == current_accumulator;
+                if (!nullifier_accumulator_verified) {
+                    LogPrintf("EnsureShieldedStateInitialized: nullifier accumulator %s at height=%d hash=%s; not taking fast path, running full audit\n",
+                              persisted_accumulator.has_value() ? "mismatch (persisted nullifier set drifted)" : "absent (legacy persisted state)",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
                 }
-                return finish_success();
+            }
+            std::string audit_error;
+            if (fast_audit_skip_eligible && nullifier_accumulator_verified) {
+                LogPrintf("EnsureShieldedStateInitialized: -fastshieldedstartup verified persisted nullifier accumulator at height=%d hash=%s; skipping cross-chain audit for zero-downtime restart\n",
+                          tip != nullptr ? tip->nHeight : -1,
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+            } else if (!m_options.shielded_startup_audit) {
+                LogPrintf("EnsureShieldedStateInitialized: skipped persisted shielded state startup audit at height=%d hash=%s because -shieldedstartupaudit=0\n",
+                          tip != nullptr ? tip->nHeight : -1,
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+            } else if (ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+                if (!AuditShieldedStateAgainstChain(*m_active_chainstate,
+                                                   audit_error,
+                                                   /*include_proof_audit=*/false)) {
+                    LogPrintf("EnsureShieldedStateInitialized: persisted shielded state audit failed (%s); rebuilding full state from chain\n",
+                              audit_error);
+                    reset_shielded_state();
+                    if (!rebuild_from_chain()) {
+                        return false;
+                    }
+                    return finish_success();
+                }
+            } else {
+                // issue #35: the cross-check audit re-derives the full shielded state from genesis
+                // (RebuildShieldedState) plus recent-history reads. Under pruning those blocks are
+                // gone, so the audit would spuriously fail and force the destructive rebuild below
+                // into the same pruned-block read, crash-looping the node. The persisted snapshot
+                // reaching this point already had its frontier root/size matched to the active tip,
+                // its commitment index digest-verified or retained-under-pruning, and its
+                // anchor/registry root windows validated. Skipping a verification that cannot run is
+                // fail-closed: the audit can only reject, never accept, so any retained structure
+                // still surfaces later as a proof-verification rejection -- never silent acceptance.
+                LogPrintf("EnsureShieldedStateInitialized: full shielded rebuild blocks unavailable at height=%d hash=%s; skipping cross-chain audit and retaining validated persisted state\n",
+                          tip != nullptr ? tip->nHeight : -1,
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
             }
             LogPrintf("EnsureShieldedStateInitialized: restored persisted state at height=%d hash=%s tree_size=%u root=%s\n",
                       persisted_tip_height,

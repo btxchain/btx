@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has
 completely shut down (which might take a few minutes for older
@@ -32,8 +31,7 @@ there is no automatic upgrade code from before version 0.8 to version
 redownloading the blockchain is not supported.  However, as usual, old
 wallet versions are still supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems
 using the Linux kernel, macOS 10.10+, and Windows 7 and newer. It is not
@@ -60,11 +58,9 @@ exist has enough space (check using `df -h /var/lib/bitcoind`), and
 optionally copy over your existing data directory. See the [systemd init
 file section](#systemd-init-file) for more details.
 
-Known issues
-============
+# Known issues
 
-Wallet GUI
-----------
+## Wallet GUI
 
 For advanced users who have both (1) enabled coin control features, and
 (2) are using multiple wallets loaded at the same time: The coin control
@@ -72,11 +68,9 @@ input selection dialog can erroneously retain wrong-wallet state when
 switching wallets using the dropdown menu. For now, it is recommended
 not to use coin control features with multiple wallets loaded.
 
-Notable changes
-===============
+# Notable changes
 
-Mining
-------
+## Mining
 
 - Calls to `getblocktemplate` will fail if the segwit rule is not
   specified.  Calling `getblocktemplate` without segwit specified is
@@ -84,8 +78,7 @@ Mining
   rewards for the miner.  Failed calls will produce an error message
   describing how to enable the segwit rule.
 
-Configuration option changes
-----------------------------
+## Configuration option changes
 
 - A warning is printed if an unrecognized section name is used in the
   configuration file.  Recognized sections are `[test]`, `[main]`, and
@@ -123,8 +116,7 @@ Configuration option changes
   project to let us know about their use-case, as this feature could be
   deprecated in the future).
 
-systemd init file
------------------
+## systemd init file
 
 The systemd init file (`contrib/init/bitcoind.service`) has been changed
 to use `/var/lib/bitcoind` as the data directory instead of
@@ -144,8 +136,7 @@ take precedence over the options specified in
 `/etc/bitcoin/bitcoin.conf`.
 
 
-Documentation
--------------
+## Documentation
 
 - A new short [document](https://github.com/bitcoin/bitcoin/blob/master/doc/JSON-RPC-interface.md)
   about the JSON-RPC interface describes cases where the results of an
@@ -181,8 +172,7 @@ Documentation
   release notes and is expected to be adapted to other RPCs and to the
   underlying wallet structure.
 
-Build system changes
---------------------
+## Build system changes
 
 - A new `--disable-bip70` option may be passed to `./configure` to
   prevent Bitcoin-Qt from being built with support for the BIP70 payment
@@ -196,8 +186,7 @@ Build system changes
   system](https://github.com/bitcoin/bitcoin/blob/master/depends/README.md)
   provides 5.9.7)
 
-New RPCs
---------
+## New RPCs
 
 - `getnodeaddresses` returns peer addresses known to this node. It may
   be used to find nodes to connect to without using a DNS seeder.
@@ -245,8 +234,7 @@ New RPCs
   transactions, `utxoupdatepsbt` will only add the UTXO for segwit
   inputs.
 
-Updated RPCs
-------------
+## Updated RPCs
 
 Note: some low-level RPC changes mainly useful for testing are described
 in the Low-level Changes section below.
@@ -334,8 +322,7 @@ in the Low-level Changes section below.
   the wallet is no longer blank and can be opened in 0.17.x. Encrypting
   a blank wallet will also set a HD seed for it.
 
-Deprecated or removed RPCs
---------------------------
+## Deprecated or removed RPCs
 
 - `signrawtransaction` is removed after being deprecated and hidden
   behind a special configuration option in version 0.17.0.
@@ -374,15 +361,13 @@ Deprecated or removed RPCs
   should use the `embedded.address` field for P2SH or P2WSH wrapped
   addresses, and `pubkeys` for inspecting multisig participants.
 
-REST changes
-------------
+## REST changes
 
 - A new `/rest/blockhashbyheight/` endpoint is added for fetching the
   hash of the block in the current best blockchain based on its height
   (how many blocks it is after the Genesis Block).
 
-Graphical User Interface (GUI)
-------------------------------
+## Graphical User Interface (GUI)
 
 - A new Window menu is added alongside the existing File, Settings, and
   Help menus.  Several items from the other menus that opened new
@@ -403,8 +388,7 @@ Graphical User Interface (GUI)
   CFLAGS="-mmacosx-version-min=10.11" for setting the deployment sdk
   version)
 
-Tools
------
+## Tools
 
 - A new `bitcoin-wallet` tool is now distributed alongside Bitcoin
   Core's other executables.  Without needing to use any RPCs, this tool
@@ -413,8 +397,7 @@ Tools
   encrypted, whether it uses an HD seed, how many transactions it
   contains, and how many address book entries it has.
 
-Planned changes
-===============
+# Planned changes
 
 This section describes planned changes to Bitcoin Core that may affect
 other Bitcoin software and services.
@@ -436,8 +419,7 @@ other Bitcoin software and services.
   set the `addresstype=bech32` configuration option in any Bitcoin Core
   release from 0.16.0 up.)
 
-Deprecated P2P messages
------------------------
+## Deprecated P2P messages
 
 - BIP 61 reject messages are now deprecated. Reject messages have no use
   case on the P2P network and are only logged for debugging by most
@@ -447,14 +429,12 @@ Deprecated P2P messages
   will be disabled by default in a future version, before being removed
   entirely.
 
-Low-level changes
-=================
+# Low-level changes
 
 This section describes RPC changes mainly useful for testing, mostly not
 relevant in production. The changes are mentioned for completeness.
 
-RPC
----
+## RPC
 
 - The `submitblock` RPC previously returned the reason a rejected block
   was invalid the first time it processed that block, but returned a
@@ -478,16 +458,14 @@ RPC
   derivation path as if it were just an independent key (i.e. no
   derivation path and its master fingerprint is itself).
 
-Configuration
--------------
+## Configuration
 
 - The `-usehd` configuration option was removed in version 0.16. From
   that version onwards, all new wallets created are hierarchical
   deterministic wallets. This release makes specifying `-usehd` an
   invalid configuration option.
 
-Network
--------
+## Network
 
 - This release allows peers that your node automatically disconnected
   for misbehavior (e.g. sending invalid data) to reconnect to your node
@@ -502,8 +480,7 @@ Network
   the `setban` RPC, all connections from that peer will still be
   rejected.
 
-Wallet
--------
+## Wallet
 
 - The key metadata will need to be upgraded the first time that the HD
   seed is available.  For unencrypted wallets this will occur on wallet
@@ -519,8 +496,7 @@ Wallet
   hardware key management devices with Bitcoin Core.  See their [project
   page](https://github.com/bitcoin-core/HWI#readme) for details.
 
-Security
---------
+## Security
 
 - This release changes the Random Number Generator (RNG) used from
   OpenSSL to Bitcoin Core's own implementation, although entropy
@@ -531,8 +507,7 @@ Security
   gathers entropy from multiple sources, including from hardware
   supporting the rdseed CPU instruction.
 
-Changes for particular platforms
---------------------------------
+## Changes for particular platforms
 
 - On macOS, Bitcoin Core now opts out of application CPU throttling
   ("app nap") during initial blockchain download, when catching up from
@@ -541,8 +516,7 @@ Changes for particular platforms
   long time because the operating system is attempting to conserve
   power.
 
-0.18.0 change log
-=================
+# 0.18.0 change log
 
 ### Consensus
 - #14247 Fix crash bug with duplicate inputs within a transaction (TheBlueMatt)
@@ -1096,8 +1070,7 @@ Changes for particular platforms
 - #15802 mention creating application support bitcoin folder on OSX (JimmyMow)
 - #15799 Clarify RPC versioning (MarcoFalke)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

@@ -47,7 +47,8 @@ int slh_dsa_shake_128s_sign(
     size_t *siglen,
     const uint8_t *m,
     size_t mlen,
-    const uint8_t *sk
+    const uint8_t *sk,
+    int fips205
 );
 
 /**
@@ -69,7 +70,8 @@ int slh_dsa_shake_128s_sign_with_randomness(
     size_t mlen,
     const uint8_t *sk,
     const uint8_t *random_data,
-    size_t random_data_size
+    size_t random_data_size,
+    int fips205
 );
 
 /**
@@ -87,7 +89,8 @@ int slh_dsa_shake_128s_verify(
     size_t siglen,
     const uint8_t *m,
     size_t mlen,
-    const uint8_t *pk
+    const uint8_t *pk,
+    int fips205
 );
 
 /**

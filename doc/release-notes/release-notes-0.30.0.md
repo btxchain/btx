@@ -14,20 +14,17 @@ To receive security and update notifications, please subscribe to:
 
   <https://btx.dev/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down, then install the new binaries or replace the existing `btxd`,
 `btx-cli`, and GUI binaries with the 0.30.0 release artifacts.
 
-Compatibility
-=============
+# Compatibility
 
 BTX is supported on Linux, macOS 13+, and Windows 10+.
 
-Notable changes
-===============
+# Notable changes
 
 - Snapshot fast-start is more reliable for shielded nodes. Mainnet snapshot
   metadata has been refreshed to height 105,550, shielded snapshot state can be
@@ -71,7 +68,7 @@ Notable changes
   JSON-RPC keepalive variant for hosts where repeatedly spawning `btx-cli` has
   measurable overhead.
 
-## Credits
+# Credits
 
 Thanks to everyone who contributed code, testing, audit feedback, packaging
 validation, and operational validation to this release.

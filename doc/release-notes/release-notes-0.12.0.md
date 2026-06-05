@@ -8,19 +8,16 @@ Please report bugs using the issue tracker at github:
 
   <https://github.com/bitcoin/bitcoin/issues>
 
-Upgrading and downgrading
-=========================
+# Upgrading and downgrading
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
 installer (on Windows) or just copy over /Applications/Bitcoin-Qt (on Mac) or
 bitcoind/bitcoin-qt (on Linux).
 
-Downgrade warning
------------------
+## Downgrade warning
 
 ### Downgrade to a version < 0.10.0
 
@@ -54,11 +51,9 @@ If you want to downgrade after you have done a reindex with 0.12.0 or later,
 you will need to reindex when you first start Bitcoin Core version 0.11 or
 earlier.
 
-Notable changes
-===============
+# Notable changes
 
-Signature validation using libsecp256k1
----------------------------------------
+## Signature validation using libsecp256k1
 
 ECDSA signatures inside Bitcoin transactions now use validation using
 [libsecp256k1](https://github.com/bitcoin-core/secp256k1) instead of OpenSSL.
@@ -72,8 +67,7 @@ Libsecp256k1 has undergone very extensive testing and validation.
 
 A side effect of this change is that libconsensus no longer depends on OpenSSL.
 
-Reduce upload traffic
----------------------
+## Reduce upload traffic
 
 A major part of the outbound traffic is caused by serving historic blocks to
 other nodes in initial block download state.
@@ -94,8 +88,7 @@ calculating the target.
 A more detailed documentation about keeping traffic low can be found in
 [/doc/reduce-traffic.md](/doc/reduce-traffic.md).
 
-Direct headers announcement (BIP 130)
--------------------------------------
+## Direct headers announcement (BIP 130)
 
 Between compatible peers, [BIP 130]
 (https://github.com/bitcoin/bips/blob/master/bip-0130.mediawiki)
@@ -104,8 +97,7 @@ announcing their headers directly, instead of just announcing the hash. In a
 reorganization, all new headers are sent, instead of just the new tip. This
 can often prevent an extra roundtrip before the actual block is downloaded.
 
-Memory pool limiting
---------------------
+## Memory pool limiting
 
 Previous versions of Bitcoin Core had their mempool limited by checking
 a transaction's fees against the node's minimum relay fee. There was no
@@ -130,8 +122,7 @@ size of unconfirmed transaction chains that are allowed in the mempool
 total size of 101 KB).  These limits can be overridden using command line
 arguments; see the extended help (`--help -help-debug`) for more information.
 
-Opt-in Replace-by-fee transactions
-----------------------------------
+## Opt-in Replace-by-fee transactions
 
 It is now possible to replace transactions in the transaction memory pool of
 Bitcoin Core 0.12 nodes. Bitcoin Core will only allow replacement of
@@ -160,8 +151,7 @@ Note that the wallet in Bitcoin Core 0.12 does not yet have support for
 creating transactions that would be replaceable under BIP 125.
 
 
-RPC: Random-cookie RPC authentication
--------------------------------------
+## RPC: Random-cookie RPC authentication
 
 When no `-rpcpassword` is specified, the daemon now uses a special 'cookie'
 file for authentication. This file is generated with random content when the
@@ -175,8 +165,7 @@ https://www.torproject.org/docs/tor-manual.html.en
 
 This allows running bitcoind without having to do any manual configuration.
 
-Relay: Any sequence of pushdatas in OP_RETURN outputs now allowed
------------------------------------------------------------------
+## Relay: Any sequence of pushdatas in OP_RETURN outputs now allowed
 
 Previously OP_RETURN outputs with a payload were only relayed and mined if they
 had a single pushdata. This restriction has been lifted to allow any
@@ -185,16 +174,14 @@ the OP_RETURN. The limit on OP_RETURN output size is now applied to the entire
 serialized scriptPubKey, 83 bytes by default. (the previous 80 byte default plus
 three bytes overhead)
 
-Relay: New and only new blocks relayed when pruning
----------------------------------------------------
+## Relay: New and only new blocks relayed when pruning
 
 When running in pruned mode, the client will now relay new blocks. When
 responding to the `getblocks` message, only hashes of blocks that are on disk
 and are likely to remain there for some reasonable time window (1 hour) will be
 returned (previously all relevant hashes were returned).
 
-Relay and Mining: Priority transactions
----------------------------------------
+## Relay and Mining: Priority transactions
 
 Bitcoin Core has a heuristic 'priority' based on coin value and age. This
 calculation is used for relaying of transactions which do not pay the
@@ -229,8 +216,7 @@ more accurate priority calculation for chained unconfirmed transactions will be
 restored. Community direction on this topic is particularly requested to help
 set project priorities.
 
-Automatically use Tor hidden services
--------------------------------------
+## Automatically use Tor hidden services
 
 Starting with Tor version 0.2.7.1 it is possible, through Tor's control socket
 API, to create and destroy 'ephemeral' hidden services programmatically.
@@ -247,8 +233,7 @@ a connection to Tor can be made. It can be configured with the `-listenonion`,
 `-torcontrol` and `-torpassword` settings. To show verbose debugging
 information, pass `-debug=tor`.
 
-Notifications through ZMQ
--------------------------
+## Notifications through ZMQ
 
 Bitcoind can now (optionally) asynchronously notify clients through a
 ZMQ-based PUB socket of the arrival of new transactions and blocks.
@@ -256,8 +241,7 @@ This feature requires installation of the ZMQ C API library 4.x and
 configuring its use through the command line or configuration file.
 Please see [docs/zmq.md](/doc/zmq.md) for details of operation.
 
-Wallet: Transaction fees
-------------------------
+## Wallet: Transaction fees
 
 Various improvements have been made to how the wallet calculates
 transaction fees.
@@ -282,8 +266,7 @@ the current minimum relay fee.
 Finally, a user can set the minimum fee rate for all transactions with
 `-mintxfee=<i>`, which defaults to 1000 satoshis per kB.
 
-Wallet: Negative confirmations and conflict detection
------------------------------------------------------
+## Wallet: Negative confirmations and conflict detection
 
 The wallet will now report a negative number for confirmations that indicates
 how deep in the block chain the conflict is found. For example, if a transaction
@@ -300,8 +283,7 @@ however. The new "trusted" field in the `listtransactions` RPC output
 indicates whether outputs of an unconfirmed transaction are considered
 spendable.
 
-Wallet: Merkle branches removed
--------------------------------
+## Wallet: Merkle branches removed
 
 Previously, every wallet transaction stored a Merkle branch to prove its
 presence in blocks. This wasn't being used for more than an expensive
@@ -309,8 +291,7 @@ sanity check. Since 0.12, these are no longer stored. When loading a
 0.12 wallet into an older version, it will automatically rescan to avoid
 failed checks.
 
-Wallet: Pruning
----------------
+## Wallet: Pruning
 
 With 0.12 it is possible to use wallet functionality in pruned mode.
 This can reduce the disk usage from currently around 60 GB to
@@ -333,8 +314,7 @@ as a whole: stored blocks could be served to other nodes.
 For further information about pruning, you may also consult the [release
 notes of v0.11.0](https://github.com/bitcoin/bitcoin/blob/v0.11.0/doc/release-notes.md#block-file-pruning).
 
-`NODE_BLOOM` service bit
-------------------------
+## `NODE_BLOOM` service bit
 
 Support for the `NODE_BLOOM` service bit, as described in [BIP
 111](https://github.com/bitcoin/bips/blob/master/bip-0111.mediawiki), has been
@@ -350,16 +330,14 @@ In this version, it is only enforced for peers that send protocol versions
 removed. It is recommended to update SPV clients to check for the `NODE_BLOOM`
 service bit for nodes that report versions newer than 70011.
 
-Option parsing behavior
------------------------
+## Option parsing behavior
 
 Command line options are now parsed strictly in the order in which they are
 specified. It used to be the case that `-X -noX` ends up, unintuitively, with X
 set, as `-X` had precedence over `-noX`. This is no longer the case. Like for
 other software, the last specified value for an option will hold.
 
-RPC: Low-level API changes
---------------------------
+## RPC: Low-level API changes
 
 - Monetary amounts can be provided as strings. This means that for example the
   argument to sendtoaddress can be "0.0001" instead of 0.0001. This can be an
@@ -393,8 +371,7 @@ now shows as:
 Note that the output of the RPC `decodescript` did not change because it is
 configured specifically to process scriptPubKey and not scriptSig scripts.
 
-RPC: SSL support dropped
-------------------------
+## RPC: SSL support dropped
 
 SSL support for RPC, previously enabled by the option `rpcssl` has been dropped
 from both the client and the server. This was done in preparation for removing
@@ -446,8 +423,7 @@ caching. A sample config for apache2 could look like:
 
     </VirtualHost>
 
-Mining Code Changes
--------------------
+## Mining Code Changes
 
 The mining code in 0.12 has been optimized to be significantly faster and use less
 memory. As part of these changes, consensus critical calculations are cached on a
@@ -455,16 +431,14 @@ transaction's acceptance into the mempool and the mining code now relies on the
 consistency of the mempool to assemble blocks. However all blocks are still tested
 for validity after assembly.
 
-Other P2P Changes
------------------
+## Other P2P Changes
 
 The list of banned peers is now stored on disk rather than in memory.
 Restarting bitcoind will no longer clear out the list of banned peers; instead
 a new RPC call (`clearbanned`) can be used to manually clear the list.  The new
 `setban` RPC call can also be used to manually ban or unban a peer.
 
-0.12.0 Change log
-=================
+# 0.12.0 Change log
 
 Detailed release notes follow. This overview includes changes that affect
 behavior, not code moves, refactors and string updates. For convenience in locating
@@ -791,8 +765,7 @@ git merge commit are mentioned.
 - #7078 `93e0514` uint256::GetCheapHash bigendian compatibility (arowser)
 - #7094 `34e02e0` Assert now > 0 in GetTime GetTimeMillis GetTimeMicros (Patrick Strateman)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

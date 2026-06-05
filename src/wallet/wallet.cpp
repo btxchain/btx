@@ -46,6 +46,7 @@
 #include <serialize.h>
 #include <shielded/bundle.h>
 #include <shielded/ringct/matrict.h>
+#include <shielded/smile2/ct_proof.h>
 #include <span.h>
 #include <streams.h>
 #include <support/allocators/secure.h>
@@ -2957,11 +2958,21 @@ bool CWallet::SignTransaction(CMutableTransaction& tx, std::optional<PQAlgorithm
 
 bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum, std::optional<PQAlgorithm> preferred_pq_signing_algo) const
 {
+    // C-002 / FIPS-205: the transaction we are signing will be validated no
+    // earlier than the next block. At/after the C-002 activation height, SLH-DSA
+    // signatures must be produced as finalized FIPS-205 (pure mode); before it,
+    // as the legacy round-3.x SPHINCS+ reference. Both gate off the same height
+    // the verifier (GetBlockScriptFlags) uses, so the whole v0.31 upgrade is
+    // atomic. (Spends authored within one block of the boundary should be mined
+    // promptly; a tx signed in one regime is rejected once the other activates.)
+    const int next_height = chain().getHeight().value_or(-1) + 1;
+    const bool slhdsa_fips205 = next_height >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
+
     // Try to sign with all ScriptPubKeyMans
     for (ScriptPubKeyMan* spk_man : GetAllScriptPubKeyMans()) {
         // spk_man->SignTransaction will return true if the transaction is complete,
         // so we can exit early and return true if that happens
-        if (spk_man->SignTransaction(tx, coins, sighash, input_errors, inputs_amount_sum, preferred_pq_signing_algo)) {
+        if (spk_man->SignTransaction(tx, coins, sighash, input_errors, inputs_amount_sum, preferred_pq_signing_algo, slhdsa_fips205)) {
             return true;
         }
     }
@@ -3018,7 +3029,7 @@ bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint,
             }
             if (!merged.pq_keys.empty()) {
                 input_errors.clear();
-                if (::SignTransaction(tx, &merged, coins, sighash, input_errors, inputs_amount_sum, preferred_pq_signing_algo)) {
+                if (::SignTransaction(tx, &merged, coins, sighash, input_errors, inputs_amount_sum, preferred_pq_signing_algo, slhdsa_fips205)) {
                     return true;
                 }
             }

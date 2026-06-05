@@ -423,6 +423,18 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
         consensus->IsShieldedMatRiCTDisabled(validation_height);
     const bool use_postfork_compact_send_encoding =
         postfork && has_shielded_spends;
+    // C-002 self-serve z->t unshield: a SMILE spend that also pays transparent
+    // outputs has value_balance == transparent_out + fee != fee, which the
+    // value_balance-eliding SMILE_COMPACT_POSTFORK encoding cannot represent. Use
+    // the non-eliding unshield variant for it. Only sound at/after C-002 (the v3
+    // proof binds the public outflow); the consensus fork gate enforces the same
+    // boundary so this never produces an unverifiable tx.
+    const bool has_transparent_outflow =
+        std::any_of(tx_template.vout.begin(), tx_template.vout.end(),
+                    [](const CTxOut& txout) { return txout.nValue > 0; });
+    const bool use_unshield_send_encoding =
+        use_postfork_compact_send_encoding && has_transparent_outflow &&
+        validation_height >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
     if (has_lifecycle_controls) {
         if (postfork || has_shielded_spends || output_inputs.size() != 1) {
             reject_reason = "bad-shielded-v2-builder-lifecycle-control";
@@ -433,9 +445,11 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
         ? (use_postfork_compact_send_encoding
                ? SendOutputEncoding::SMILE_COMPACT_POSTFORK
                : SendOutputEncoding::LEGACY)
-        : use_postfork_compact_send_encoding
-            ? SendOutputEncoding::SMILE_COMPACT_POSTFORK
-            : SendOutputEncoding::SMILE_COMPACT;
+        : use_unshield_send_encoding
+            ? SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD
+            : use_postfork_compact_send_encoding
+                ? SendOutputEncoding::SMILE_COMPACT_POSTFORK
+                : SendOutputEncoding::SMILE_COMPACT;
     for (size_t i = 0; i < output_inputs.size(); ++i) {
         const V2SendOutputInput& output_input = output_inputs[i];
         if (!output_input.IsValid()) {
@@ -567,7 +581,8 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
             payload.value_balance,
             smile2::SmileProofCodecPolicy::CANONICAL_NO_RICE,
             bind_smile_anonset_context,
-            &smile_error);
+            &smile_error,
+            validation_height);
         if (!smile_result.has_value()) {
             reject_reason = smile_error.empty()
                 ? "bad-shielded-v2-builder-proof-create"
@@ -658,7 +673,8 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
                                                               pub,
                                                               payload.value_balance,
                                                               /*reject_rice_codec=*/false,
-                                                              bind_smile_anonset_context);
+                                                              bind_smile_anonset_context,
+                                                              validation_height);
             verify_err.has_value()) {
             reject_reason = "bad-shielded-v2-builder-proof-verify";
             return std::nullopt;

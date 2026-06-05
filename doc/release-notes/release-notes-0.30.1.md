@@ -14,20 +14,17 @@ To receive security and update notifications, please subscribe to:
 
   <https://btx.dev/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down, then install the new binaries or replace the existing `btxd`,
 `btx-cli`, and GUI binaries with the 0.30.1 release artifacts.
 
-Compatibility
-=============
+# Compatibility
 
 BTX is supported on Linux, macOS 13+, and Windows 10+.
 
-Notable changes
-===============
+# Notable changes
 
 - Pruned and assumeutxo fast-start mining nodes now restore consumed shielded
   settlement-anchor metadata from block undo during disconnect. Normal shallow
@@ -47,7 +44,7 @@ Notable changes
   compatibility, and a shallow reorg that consumes and restores a matured
   settlement anchor with its original creation height.
 
-## Credits
+# Credits
 
 Thanks to everyone who contributed code, testing, operational validation, and
 fast-mining reorg reports to this release.

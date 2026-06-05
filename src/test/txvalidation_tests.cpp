@@ -2631,6 +2631,89 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_fee_bearing_v2_rebalance_and_rewinds_
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_postfork_rebalance_legacy_wire_family, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t validation_height = NextShieldedValidationHeight(*this);
+    const ScopedConsensusHeightOverride restore{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+
+    auto fixture = test::shielded::BuildV2RebalanceFixture(/*reserve_output_count=*/1,
+                                                           /*settlement_window=*/144,
+                                                           &consensus,
+                                                           validation_height);
+    auto* bundle = fixture.tx.shielded_bundle.v2_bundle ? &*fixture.tx.shielded_bundle.v2_bundle : nullptr;
+    BOOST_REQUIRE(bundle != nullptr);
+    BOOST_REQUIRE_EQUAL(bundle->header.family_id, shielded::v2::TransactionFamily::V2_GENERIC);
+    bundle->header.family_id = shielded::v2::TransactionFamily::V2_REBALANCE;
+    AttachCoinbaseFeeCarrier(*this, fixture.tx, m_coinbase_txns[0]);
+
+    const auto tx = MakeTransactionRef(fixture.tx);
+    const MempoolAcceptResult result =
+        WITH_LOCK(cs_main, return m_node.chainman->ProcessTransaction(tx, /*test_accept=*/true));
+    BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+    BOOST_CHECK(result.m_state.IsInvalid());
+    BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "bad-shielded-v2-family-wire");
+    BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
+}
+
+BOOST_FIXTURE_TEST_CASE(block_rejects_postfork_rebalance_legacy_proof_wire, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t validation_height = NextShieldedValidationHeight(*this);
+    const ScopedConsensusHeightOverride restore{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+
+    auto fixture = test::shielded::BuildV2RebalanceFixture(/*reserve_output_count=*/1,
+                                                           /*settlement_window=*/144,
+                                                           &consensus,
+                                                           validation_height);
+    auto* bundle = fixture.tx.shielded_bundle.v2_bundle ? &*fixture.tx.shielded_bundle.v2_bundle : nullptr;
+    BOOST_REQUIRE(bundle != nullptr);
+    BOOST_REQUIRE_EQUAL(bundle->header.proof_envelope.proof_kind, shielded::v2::ProofKind::GENERIC_OPAQUE);
+    bundle->header.proof_envelope.proof_kind = shielded::v2::ProofKind::BATCH_SMILE;
+    AttachCoinbaseFeeCarrier(*this, fixture.tx, m_coinbase_txns[0]);
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock block = CreateBlock({fixture.tx},
+                                     script_pub_key,
+                                     m_node.chainman->ActiveChainstate());
+    ExpectBlockRejected(*this, block, "bad-shielded-v2-proof-wire");
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height()), validation_height - 1);
+}
+
+BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_postfork_rebalance_tampered_deterministic_proof, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t validation_height = NextShieldedValidationHeight(*this);
+    const ScopedConsensusHeightOverride restore{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+
+    auto fixture = test::shielded::BuildV2RebalanceFixture(/*reserve_output_count=*/1,
+                                                           /*settlement_window=*/144,
+                                                           &consensus,
+                                                           validation_height);
+    auto* bundle = fixture.tx.shielded_bundle.v2_bundle ? &*fixture.tx.shielded_bundle.v2_bundle : nullptr;
+    BOOST_REQUIRE(bundle != nullptr);
+    BOOST_REQUIRE(!bundle->proof_payload.empty());
+    bundle->proof_payload.front() ^= 0x01;
+    AttachCoinbaseFeeCarrier(*this, fixture.tx, m_coinbase_txns[0]);
+
+    const auto tx = MakeTransactionRef(fixture.tx);
+    const MempoolAcceptResult result =
+        WITH_LOCK(cs_main, return m_node.chainman->ProcessTransaction(tx, /*test_accept=*/true));
+    BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+    BOOST_CHECK(result.m_state.IsInvalid());
+    BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "bad-shielded-v2-rebalance-deterministic");
+    BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
+}
+
 BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_fee_bearing_reserve_bound_v2_settlement_anchor_and_rewinds_state_after_reorg, TestChain100Setup)
 {
     const auto& consensus = Params().GetConsensus();

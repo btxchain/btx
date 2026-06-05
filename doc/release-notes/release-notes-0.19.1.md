@@ -1,5 +1,4 @@
-0.19.1 Release Notes
-===============================
+# 0.19.1 Release Notes
 
 Bitcoin Core version 0.19.1 is now available from:
 
@@ -16,8 +15,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
@@ -28,8 +26,7 @@ Upgrading directly from a version of Bitcoin Core that has reached its EOL is
 possible, but it might take some time if the datadir needs to be migrated. Old
 wallet versions of Bitcoin Core are generally supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems using
 the Linux kernel, macOS 10.10+, and Windows 7 and newer. It is not recommended
@@ -46,8 +43,7 @@ macOS "dark mode" is activated.
 In addition to previously supported CPU platforms, this release's pre-compiled
 distribution provides binaries for the RISC-V platform.
 
-0.19.1 change log
-=================
+# 0.19.1 change log
 
 ### Wallet
 - #17643 Fix origfee return for bumpfee with feerate arg (instagibbs)
@@ -88,8 +84,7 @@ distribution provides binaries for the RISC-V platform.
 - #17762 Log to net category for exceptions in ProcessMessages (laanwj)
 - #18100 Update univalue subtree (MarcoFalke)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

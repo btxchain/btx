@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cerrno>
 #include <climits>
+#include <csetjmp>
+#include <csignal>
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -126,6 +128,24 @@ CudaTopologyProbe ProbeCudaHardwareTopology()
     CudaTopologyProbe probe;
     probe.compiled = true;
 
+    // Make CUDA module/PTX resolution eager and deterministic before the first runtime call. CUDA's
+    // default lazy loading defers PTX JIT to the first API call; on some driver/toolkit combinations
+    // (e.g. Blackwell sm_120 + CUDA 13.x + WSL2) that JIT runs inside libcuda during this very probe
+    // and can crash in libnvidia-ptxjitcompiler BELOW the cudaError_t boundary, segfaulting the whole
+    // process (issue #46). Eager loading surfaces incompatibilities as ordinary error codes we handle
+    // below. Do not override an explicit operator choice.
+    static const bool cuda_module_loading_pinned = [] {
+#if defined(_WIN32)
+        if (std::getenv("CUDA_MODULE_LOADING") == nullptr) {
+            _putenv_s("CUDA_MODULE_LOADING", "EAGER");
+        }
+#else
+        setenv("CUDA_MODULE_LOADING", "EAGER", /*overwrite=*/0);
+#endif
+        return true;
+    }();
+    (void)cuda_module_loading_pinned;
+
     int runtime_version{0};
     const cudaError_t runtime_version_error = cudaRuntimeGetVersion(&runtime_version);
     if (runtime_version_error != cudaSuccess) {
@@ -195,7 +215,34 @@ const CudaTopologyProbe& CachedCudaHardwareTopology()
     static std::once_flag once;
     static CudaTopologyProbe probe;
     std::call_once(once, [] {
+#if !defined(_WIN32)
+        // A backend *probe* must never crash the binary. If the CUDA driver faults internally (e.g.
+        // a ptxjitcompiler SIGSEGV on an unsupported arch, issue #46) despite eager module loading,
+        // catch it and report the backend unavailable so callers fall back to CPU. Last-resort
+        // backstop; the eager-loading change in ProbeCudaHardwareTopology() prevents the fault in the
+        // first place on the reported configuration.
+        static sigjmp_buf cuda_probe_jmp;
+        struct sigaction old_segv{};
+        struct sigaction old_ill{};
+        struct sigaction guard{};
+        guard.sa_flags = 0;
+        sigemptyset(&guard.sa_mask);
+        guard.sa_handler = [](int) { siglongjmp(cuda_probe_jmp, 1); };
+        sigaction(SIGSEGV, &guard, &old_segv);
+        sigaction(SIGILL, &guard, &old_ill);
+        if (sigsetjmp(cuda_probe_jmp, 1) == 0) {
+            probe = ProbeCudaHardwareTopology();
+        } else {
+            probe = CudaTopologyProbe{};
+            probe.compiled = true;
+            probe.available = false;
+            probe.reason = "cuda_driver_probe_faulted";
+        }
+        sigaction(SIGSEGV, &old_segv, nullptr);
+        sigaction(SIGILL, &old_ill, nullptr);
+#else
         probe = ProbeCudaHardwareTopology();
+#endif
     });
     return probe;
 }

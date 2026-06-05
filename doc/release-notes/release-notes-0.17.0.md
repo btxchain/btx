@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
@@ -32,8 +31,7 @@ automatic upgrade code from before version 0.8 to version 0.15.0. Upgrading
 directly from 0.7.x and earlier without redownloading the blockchain is not supported.
 However, as usual, old wallet versions are still supported.
 
-Downgrading warning
--------------------
+## Downgrading warning
 
 The chainstate database for this release is not compatible with previous
 releases, so if you run 0.15 and then decide to switch back to any
@@ -43,8 +41,7 @@ option to rebuild the chainstate data structures in the old format.
 If your node has pruning enabled, this will entail re-downloading and
 processing the entire blockchain.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is extensively tested on multiple operating systems using
 the Linux kernel, macOS 10.10+, and Windows 7 and newer (Windows XP is not supported).
@@ -55,18 +52,15 @@ frequently tested on them.
 From 0.17.0 onwards macOS <10.10 is no longer supported. 0.17.0 is built using Qt 5.9.x, which doesn't
 support versions of macOS older than 10.10.
 
-Known issues
-============
+# Known issues
 
 - Upgrading from 0.13.0 or older currently results in memory blow-up during the roll-back of blocks to the SegWit activation point. In these cases, a full `-reindex` is necessary.
 
 - The GUI suffers from visual glitches in the new MacOS dark mode. This has to do with our Qt theme handling and is not a new problem in 0.17.0, but is expected to be resolved in 0.17.1.
 
-Notable changes
-===============
+# Notable changes
 
-Changed configuration options
------------------------------
+## Changed configuration options
 
 - `-includeconf=<file>` can be used to include additional configuration files.
   Only works inside the `bitcoin.conf` file, not inside included files or from
@@ -80,19 +74,16 @@ Changed configuration options
 
   as bitcoin.conf will still include `relative.conf`.
 
-GUI changes
------------
+## GUI changes
 
 - Block storage can be limited under Preferences, in the Main tab. Undoing this setting requires downloading the full blockchain again. This mode is incompatible with -txindex and -rescan.
 
-External wallet files
----------------------
+## External wallet files
 
 The `-wallet=<path>` option now accepts full paths instead of requiring wallets
 to be located in the -walletdir directory.
 
-Newly created wallet format
----------------------------
+## Newly created wallet format
 
 If `-wallet=<path>` is specified with a path that does not exist, it will now
 create a wallet directory at the specified location (containing a wallet.dat
@@ -106,8 +97,7 @@ For backwards compatibility, wallet paths that are names of existing data files
 in the `-walletdir` directory will continue to be accepted and interpreted the
 same as before.
 
-Dynamic loading and creation of wallets
----------------------------------------
+## Dynamic loading and creation of wallets
 
 Previously, wallets could only be loaded or created at startup, by specifying `-wallet` parameters on the command line or in the bitcoin.conf file. It is now possible to load, create and unload wallets dynamically at runtime:
 
@@ -117,15 +107,13 @@ Previously, wallets could only be loaded or created at startup, by specifying `-
 
 This feature is currently only available through the RPC interface.
 
-Coin selection
---------------
+## Coin selection
 
 ### Partial spend avoidance
 
 When an address is paid multiple times the coins from those separate payments can be spent separately which hurts privacy due to linking otherwise separate addresses. A new `-avoidpartialspends` flag has been added (default=false). If enabled, the wallet will always spend existing UTXO to the same address together even if it results in higher fees. If someone were to send coins to an address after it was used, those coins will still be included in future coin selections.
 
-Configuration sections for testnet and regtest
-----------------------------------------------
+## Configuration sections for testnet and regtest
 
 It is now possible for a single configuration file to set different
 options for different networks. This is done by using sections or by
@@ -146,8 +134,7 @@ If the following options are not in a section, they will only apply to mainnet:
 The options to choose a network (`regtest=` and `testnet=`) must be specified
 outside of sections.
 
-'label' and 'account' APIs for wallet
--------------------------------------
+## 'label' and 'account' APIs for wallet
 
 A new 'label' API has been introduced for the wallet. This is intended as a
 replacement for the deprecated 'account' API. The 'account' can continue to
@@ -184,8 +171,7 @@ Here are the changes to RPC methods:
 | `listtransactions`     | The `account` named parameter has been renamed to `dummy`. If provided, the `dummy` parameter must be set to the string `*`, unless running with the `-deprecatedrpc=accounts` argument (in which case functionality is unchanged). |
 | `getbalance`           | `account`, `minconf` and `include_watchonly` parameters are deprecated, and can only be used if running with '-deprecatedrpc=accounts' |
 
-BIP 174 Partially Signed Bitcoin Transactions support
------------------------------------------------------
+## BIP 174 Partially Signed Bitcoin Transactions support
 
 [BIP 174 PSBT](https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki) is an interchange format for Bitcoin transactions that are not fully signed
 yet, together with relevant metadata to help entities work towards signing it.
@@ -253,20 +239,17 @@ hardware implementations will typically implement multiple roles simultaneously.
 - **`decodepsbt`** is a diagnostic utility RPC which will show all information in
   a PSBT in human-readable form, as well as compute its eventual fee if known.
 
-Upgrading non-HD wallets to HD wallets
---------------------------------------
+## Upgrading non-HD wallets to HD wallets
 
 Since Bitcoin Core 0.13.0, creating new BIP 32 Hierarchical Deterministic wallets has been supported by Bitcoin Core but old non-HD wallets could not be upgraded to HD. Now non-HD wallets can be upgraded to HD using the `-upgradewallet` command line option. This upgrade will result in the all keys in the keypool being marked as used and a new keypool generated. **A new backup must be made when this upgrade is performed.**
 
 Additionally, `-upgradewallet` can be used to upgraded from a non-split HD chain (all keys generated with `m/0'/0'/i'`) to a split HD chain (receiving keys generated with `'m/0'/0'/i'` and change keys generated with `m'/0'/1'/i'`). When this upgrade occurs, all keys already in the keypool will remain in the keypool to be used until all keys from before the upgrade are exhausted. This is to avoid issues with backups and downgrades when some keys may come from the change key keypool. Users can begin using the new split HD chain keypools by using the `newkeypool` RPC to mark all keys in the keypool as used and begin using a new keypool generated from the split HD chain.
 
-HD Master key rotation
-----------------------
+## HD Master key rotation
 
 A new RPC, `sethdseed`, has been introduced which allows users to set a new HD seed or set their own HD seed. This allows for a new HD seed to be used. **A new backup must be made when a new HD seed is set.**
 
-Low-level RPC changes
----------------------
+## Low-level RPC changes
 
 - The new RPC `scantxoutset` can be used to scan the UTXO set for entries
   that match certain output descriptors. Refer to the [output descriptors
@@ -327,8 +310,7 @@ Low-level RPC changes
   `signrawtransactionwithkey` and `signrawtransactionwithwallet` before
   upgrading to v0.18.
 
-Other API changes
------------------
+## Other API changes
 
 - The `inactivehdmaster` property in the `dumpwallet` output has been corrected to `inactivehdseed`
 
@@ -341,8 +323,7 @@ Other API changes
   disables logging to debug.log. Instead, logging to file can be explicitly disabled
   by setting `-debuglogfile=0`.
 
-Transaction index changes
--------------------------
+## Transaction index changes
 
 The transaction index is now built separately from the main node procedure,
 meaning the `-txindex` flag can be toggled without a full reindex. If bitcoind
@@ -353,20 +334,17 @@ without the flag, the transaction index database will *not* be deleted
 automatically, meaning it could be turned back on at a later time without a full
 resync.
 
-Miner block size removed
-------------------------
+## Miner block size removed
 
 The `-blockmaxsize` option for miners to limit their blocks' sizes was
 deprecated in V0.15.1, and has now been removed. Miners should use the
 `-blockmaxweight` option if they want to limit the weight of their blocks.
 
-Python Support
---------------
+## Python Support
 
 Support for Python 2 has been discontinued for all test files and tools.
 
-0.17.0 change log
-=================
+# 0.17.0 change log
 
 ### Consensus
 - #12204 `3fa24bb` Fix overly eager BIP30 bypass (morcos)
@@ -954,8 +932,7 @@ Support for Python 2 has been discontinued for all test files and tools.
 - #12757 `0c5f67b` Clarify include guard naming convention (practicalswift)
 - #13844 `d3325b0` Correct the help output for `-prune` (hebasto)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

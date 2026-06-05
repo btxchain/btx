@@ -96,6 +96,7 @@ namespace BCLog {
         TXPACKAGES  = (CategoryMask{1} << 28),
         MINING      = (CategoryMask{1} << 29),
         DANDELION    = (CategoryMask{1} << 30),
+        AUTOUPDATE   = (CategoryMask{1} << 31),
         ALL         = ~NONE,
     };
     enum class Level {

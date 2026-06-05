@@ -19,13 +19,11 @@ up-to-date.  Just type:
 in your terminal, then install the bitcoin-qt package:
   sudo apt-get install bitcoin-qt
 
-KNOWN ISSUES
-------------
+## KNOWN ISSUES
 
 Mac OSX 10.5 is no longer supported.
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait
 until it has completely shut down (which might take a few minutes for older
@@ -51,8 +49,7 @@ shutdown much slower. Note that the "wallet.dat" file is always
 detached, and versions prior to 0.6.0 detached all databases
 at shutdown.
 
-New features
-------------
+## New features
 
 * Added a boolean argument to the RPC 'stop' command, if true sets
   -detachdb to create standalone database .dat files before shutting down.
@@ -65,15 +62,13 @@ New features
 
 * Import $DataDir/bootstrap.dat automatically, if it exists.
 
-Dependency changes
-------------------
+## Dependency changes
 
 * Qt 4.8.2 for Windows builds
 
 * openssl 1.0.1c
 
-Bug fixes
----------
+## Bug fixes
 
 * Clicking on a bitcoin: URI on Windows should now launch Bitcoin-Qt properly.
 
@@ -92,7 +87,8 @@ Bug fixes
 * Warn the user that they need to create fresh wallet backups after they
   encrypt their wallet.
 
-----------------------------------------------------
+## Credits
+
 Thanks to everybody who contributed to this release:
 
 Gavin Andresen

@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is extensively tested on multiple operating systems using
 the Linux kernel, macOS 10.8+, and Windows Vista and later.
@@ -27,8 +26,7 @@ Please do not report issues about Windows XP to the issue tracker.
 Bitcoin Core should also work on most other Unix-like systems but is not
 frequently tested on them.
 
-Notable changes
-===============
+# Notable changes
 
 Denial-of-Service vulnerability CVE-2018-17144
  -------------------------------
@@ -37,8 +35,7 @@ A denial-of-service vulnerability exploitable by miners has been discovered in
 Bitcoin Core versions 0.14.0 up to 0.16.2. It is recommended to upgrade any of
 the vulnerable versions to 0.14.3, 0.15.2 or 0.16.3 as soon as possible.
 
-Known Bugs
-==========
+# Known Bugs
 
 Since 0.14.0 the approximate transaction fee shown in Bitcoin-Qt when using coin
 control and smart fee estimation does not reflect any change in target from the
@@ -46,8 +43,7 @@ smart fee slider. It will only present an approximate fee calculated using the
 default target. The fee calculated using the correct target is still applied to
 the transaction and shown in the final send confirmation dialog.
 
-0.14.3 Change log
-=================
+# 0.14.3 Change log
 
 Detailed release notes follow. This overview includes changes that affect
 behavior, not code moves, refactors and string updates. For convenience in locating
@@ -88,8 +84,7 @@ git merge commit are mentioned.
 - #10308 `28b8b8b` Securely erase potentially sensitive keys/values (tjps)
 - #10265 `ff13f59` Make sure pindex is non-null before possibly referencing in LogPrintf call. (Karl-Johan Alm)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

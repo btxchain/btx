@@ -14,8 +14,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://btx.dev/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes in some cases), then run the
@@ -26,15 +25,13 @@ Upgrading directly from very old versions of Bitcoin Core or Knots is possible,
 but it might take some time if the data directory needs to be migrated. Old
 wallet versions derived from the BTX lineage are generally supported.
 
-Compatibility
-==============
+# Compatibility
 
 BTX is supported on operating systems using the Linux kernel, macOS
 13+, and Windows 10+. It is not recommended to use BTX on
 unsupported systems.
 
-Known Bugs
-==========
+# Known Bugs
 
 In various locations, including the GUI's transaction details dialog and the
 `"vsize"` result in many RPC results, transaction virtual sizes may not account
@@ -47,8 +44,7 @@ Due to disruption of the shared Bitcoin Transifex repository, this release
 still does not include updated translations, and BTX may be unable
 to do so until/unless that is resolved.
 
-Notable changes
-===============
+# Notable changes
 
 - Launch hardening now includes deterministic chain hardening manifest tooling:
   `scripts/update_chain_hardening_manifest.py` and
@@ -125,8 +121,7 @@ Notable changes
 
 - #33639 ci: Only write docker build images to Cirrus cache
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

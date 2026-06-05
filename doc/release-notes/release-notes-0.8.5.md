@@ -8,8 +8,7 @@ Please report bugs using the issue tracker at github:
   https://github.com/bitcoin/bitcoin/issues
 
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait
 until it has completely shut down (which might take a few minutes for older
@@ -21,11 +20,9 @@ run 0.8.5 your blockchain files will be re-indexed, which will take
 anywhere from 30 minutes to several hours, depending on the speed of
 your machine.
 
-0.8.5 Release notes
-===================
+# 0.8.5 Release notes
 
-Bugs fixed
-----------
+## Bugs fixed
 
 Transactions with version numbers larger than 0x7fffffff were
 incorrectly being relayed and included in blocks.
@@ -38,7 +35,7 @@ corruption and suggest that you reindex your database.
 This release also contains a non-critical fix to the code that
 enforces BIP 34 (block height in the coinbase transaction).
 
---
+## Credits
 
 Thanks to Gregory Maxwell and Pieter Wuille for quickly
 identifying and fixing the transaction version number bug.

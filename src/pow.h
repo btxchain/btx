@@ -166,6 +166,24 @@ uint32_t CountMatMulPhase2Checks(
     const Consensus::Params& params,
     bool phase2_enabled,
     bool is_ibd);
+/** True when consensus will run ANY expensive MatMul verification at this height: either the legacy
+ *  phase2/Freivalds path or the post-activation product-committed digest path. Mirrors the disjunction
+ *  in ContextualCheckBlock (should_run_phase2 || IsMatMulProductDigestActive). The P2P expensive-
+ *  verification budget must be charged for all of these — counting only phase2 (CountMatMulPhase2Checks)
+ *  lets post-product-digest blocks bypass the per-peer/global DoS budget. */
+bool ShouldRunMatMulExpensiveVerification(
+    int32_t block_height,
+    int32_t best_known_height,
+    const Consensus::Params& params,
+    bool phase2_enabled,
+    bool is_ibd);
+uint32_t CountMatMulExpensiveVerifyChecks(
+    int64_t first_height,
+    size_t header_count,
+    int32_t best_known_height,
+    const Consensus::Params& params,
+    bool phase2_enabled,
+    bool is_ibd);
 uint32_t EffectivePhase2BanThreshold(const Consensus::Params& params);
 void MaybeResetMatMulPhase2Window(MatMulPeerVerificationBudget& budget, std::chrono::steady_clock::time_point now);
 MatMulPhase2Punishment RegisterMatMulPhase2Failure(

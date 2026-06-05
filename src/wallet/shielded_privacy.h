@@ -22,6 +22,15 @@ namespace wallet {
                                                             bool include_sensitive);
 [[nodiscard]] bool RequireSensitiveShieldedRpcOptInAtHeight(int32_t height);
 [[nodiscard]] bool AllowMixedTransparentShieldedSendAtHeight(int32_t height);
+// Self-serve shielded->transparent (z->t) unshield. Unlike the pre-redesign
+// "mixed transparent" send (which was unsound before C-002 because the public
+// transparent amount was not bound to the consumed shielded value), a self-serve
+// unshield is only permitted once the v3 C-002/R5 spend proof is in force: the
+// proof's public value == value_balance == (transparent_out + fee) and R5 range-
+// bounds every committed amount, so the transparent outflow is cryptographically
+// bound to the shielded inputs and cannot inflate. Gated on the C-002 activation
+// height (the soundness boundary), independent of the privacy-redesign height.
+[[nodiscard]] bool AllowSelfServeUnshieldAtHeight(int32_t height);
 [[nodiscard]] bool AllowTransparentShieldingInDirectSendAtHeight(int32_t height);
 [[nodiscard]] const char* GetPostForkCoinbaseShieldingCompatibilityMessage();
 

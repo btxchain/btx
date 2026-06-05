@@ -1,5 +1,4 @@
-25.0 Release Notes
-==================
+# 25.0 Release Notes
 
 Bitcoin Core version 25.0 is now available from:
 
@@ -16,8 +15,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes in some cases), then run the
@@ -28,8 +26,7 @@ Upgrading directly from a version of Bitcoin Core that has reached its EOL is
 possible, but it might take some time if the data directory needs to be migrated. Old
 wallet versions of Bitcoin Core are generally supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems
 using the Linux kernel, macOS 10.15+, and Windows 7 and newer.  Bitcoin
@@ -37,18 +34,15 @@ Core should also work on most other Unix-like systems but is not as
 frequently tested on them.  It is not recommended to use Bitcoin Core on
 unsupported systems.
 
-Notable changes
-===============
+# Notable changes
 
-P2P and network changes
------------------------
+## P2P and network changes
 
 - Transactions of non-witness size 65 bytes and above are now allowed by mempool
   and relay policy. This is to better reflect the actual afforded protections
   against CVE-2017-12842 and open up additional use-cases of smaller transaction sizes. (#26265)
 
-New RPCs
---------
+## New RPCs
 
 - The scanblocks RPC returns the relevant blockhashes from a set of descriptors by
   scanning all blockfilters in the given range. It can be used in combination with
@@ -56,8 +50,7 @@ New RPCs
   that this functionality can only be used if a compact block filter index
   (-blockfilterindex=1) has been constructed by the node. (#23549)
 
-Updated RPCs
-------------
+## Updated RPCs
 
 - All JSON-RPC methods accept a new [named
   parameter](https://github.com/bitcoin/bitcoin/blob/master/doc/JSON-RPC-interface.md#parameter-passing) called `args` that can
@@ -101,16 +94,14 @@ bitcoin-cli -named createwallet mywallet load_on_startup=1
 
 Changes to wallet related RPCs can be found in the Wallet section below.
 
-Build System
-------------
+## Build System
 
 - The `--enable-upnp-default` and `--enable-natpmp-default` options
   have been removed. If you want to use port mapping, you can
   configure it using a .conf file, or by passing the relevant
   options at runtime. (#26896)
 
-Updated settings
-----------------
+## Updated settings
 
 - If the `-checkblocks` or `-checklevel` options are explicitly provided by the
 user, but the verification checks cannot be completed due to an insufficient
@@ -133,15 +124,13 @@ dbcache, Bitcoin Core will now return an error at startup. (#25574)
 
 Changes to GUI or wallet related settings can be found in the GUI or Wallet section below.
 
-New settings
-------------
+## New settings
 
 - The `shutdownnotify` option is used to specify a command to execute synchronously
 before Bitcoin Core has begun its shutdown sequence. (#23395)
 
 
-Wallet
-------
+## Wallet
 
 - The `minconf` option, which allows a user to specify the minimum number
 of confirmations a UTXO being spent has, and the `maxconf` option,
@@ -187,21 +176,18 @@ added to the following RPCs in #25375:
 
 - Descriptor wallets can now spend coins sent to P2WSH Miniscript descriptors. (#24149)
 
-GUI changes
------------
+## GUI changes
 
 - The "Mask values" is a persistent option now. (gui#701)
 - The "Mask values" option affects the "Transaction" view now, in addition to the
   "Overview" one. (gui#708)
 
-REST
-----
+## REST
 
 - A new `/rest/deploymentinfo` endpoint has been added for fetching various
   state info regarding deployments of consensus changes. (#25412)
 
-Binary verification
-----
+## Binary verification
 
 - The binary verification script has been updated. In previous releases it
   would verify that the binaries had been signed with a single "release key".
@@ -211,11 +197,9 @@ Binary verification
   https://github.com/bitcoin/bitcoin/blob/master/contrib/verify-binaries/README.md
   (#27358)
 
-Low-level changes
-=================
+# Low-level changes
 
-RPC
----
+## RPC
 
 - The JSON-RPC server now rejects requests where a parameter is specified multiple
   times with the same name, instead of silently overwriting earlier parameter values
@@ -228,8 +212,7 @@ RPC
   as false. After this change, passing any value except `true`, `false`, or
   `null` now triggers a JSON value is not of expected type error. (#26213)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

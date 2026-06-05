@@ -37,6 +37,10 @@ public:
     virtual bool CreateSig(const SigningProvider& provider, std::vector<unsigned char>& vchSig, const CKeyID& keyid, const CScript& scriptCode, SigVersion sigversion) const =0;
     virtual bool CreateSchnorrSig(const SigningProvider& provider, std::vector<unsigned char>& sig, const XOnlyPubKey& pubkey, const uint256* leaf_hash, const uint256* merkle_root, SigVersion sigversion) const =0;
     virtual bool CreatePQSig(const SigningProvider& provider, std::vector<unsigned char>& sig, Span<const unsigned char> pubkey, PQAlgorithm algo, const uint256& leaf_hash, SigVersion sigversion) const =0;
+    /** Whether SLH-DSA signatures should be produced/checked as finalized FIPS-205
+     *  (pure mode) rather than legacy round-3.x SPHINCS+. Set by the wallet from
+     *  the target validation height at/after the C-002 activation. */
+    virtual bool SlhdsaFips205() const { return false; }
 };
 
 /** A signature creator for transactions. */
@@ -48,6 +52,7 @@ class MutableTransactionSignatureCreator : public BaseSignatureCreator
     CAmount amount;
     const MutableTransactionSignatureChecker checker;
     const PrecomputedTransactionData* m_txdata;
+    bool m_slhdsa_fips205{false};
 
 public:
     MutableTransactionSignatureCreator(const CMutableTransaction& tx LIFETIMEBOUND, unsigned int input_idx, const CAmount& amount, int hash_type);
@@ -56,6 +61,10 @@ public:
     bool CreateSig(const SigningProvider& provider, std::vector<unsigned char>& vchSig, const CKeyID& keyid, const CScript& scriptCode, SigVersion sigversion) const override;
     bool CreateSchnorrSig(const SigningProvider& provider, std::vector<unsigned char>& sig, const XOnlyPubKey& pubkey, const uint256* leaf_hash, const uint256* merkle_root, SigVersion sigversion) const override;
     bool CreatePQSig(const SigningProvider& provider, std::vector<unsigned char>& sig, Span<const unsigned char> pubkey, PQAlgorithm algo, const uint256& leaf_hash, SigVersion sigversion) const override;
+    bool SlhdsaFips205() const override { return m_slhdsa_fips205; }
+    /** Enable FIPS-205 SLH-DSA signing for this creator (set from the target
+     *  validation height at/after the C-002 activation). */
+    void SetSlhdsaFips205(bool enabled) { m_slhdsa_fips205 = enabled; }
 };
 
 /** A signature checker that accepts all signatures */
@@ -126,6 +135,6 @@ bool CheckP2MRTimelockedTransaction(const CTransaction& tx, Span<const P2MRTimel
 bool PrepareP2MRTimelockedTransaction(CMutableTransaction& tx, Span<const P2MRTimelockedInput> inputs, bilingual_str& error);
 
 /** Sign the CMutableTransaction */
-bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* provider, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum = nullptr, std::optional<PQAlgorithm> preferred_pq_signing_algo = std::nullopt);
+bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* provider, const std::map<COutPoint, Coin>& coins, int sighash, std::map<int, bilingual_str>& input_errors, std::optional<CAmount>* inputs_amount_sum = nullptr, std::optional<PQAlgorithm> preferred_pq_signing_algo = std::nullopt, bool slhdsa_fips205 = false);
 
 #endif // BITCOIN_SCRIPT_SIGN_H

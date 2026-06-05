@@ -4,6 +4,8 @@
 
 #include <shielded/bridge.h>
 
+#include <shielded/smile2/ct_proof.h>  // SmileCTProof::C002_ACTIVATION_HEIGHT (attestor SLH-DSA gate)
+
 #include <addresstype.h>
 #include <chainparams.h>
 #include <hash.h>
@@ -775,7 +777,9 @@ bool BridgeBatchReceipt::HasSignature() const
 
 bool BridgeBatchReceipt::IsValid() const
 {
-    return VerifyBridgeBatchReceipt(*this);
+    // Structural validity (incl. a signature valid under either SLH-DSA scheme). The height-exact
+    // scheme is enforced separately in the consensus verification path.
+    return VerifyBridgeBatchReceiptAnyMode(*this);
 }
 
 bool BridgeProofReceipt::IsValid() const
@@ -809,7 +813,7 @@ bool BridgeBatchAuthorization::HasSignature() const
 
 bool BridgeBatchAuthorization::IsValid() const
 {
-    return VerifyBridgeBatchAuthorization(*this);
+    return VerifyBridgeBatchAuthorizationAnyMode(*this);
 }
 
 bool BridgeScriptTree::IsValid() const
@@ -3047,12 +3051,37 @@ uint256 ComputeBridgeBatchReceiptHash(const BridgeBatchReceipt& receipt)
     return hw.GetSHA256();
 }
 
-bool VerifyBridgeBatchReceipt(const BridgeBatchReceipt& receipt)
+bool BridgeAttestorUsesFips205AtHeight(int64_t validation_height)
+{
+    // Same activation boundary as the rest of the v0.31 SLH-DSA / shielded migration.
+    return validation_height >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
+}
+
+bool VerifyBridgeBatchReceipt(const BridgeBatchReceipt& receipt, bool slhdsa_fips205)
 {
     if (!receipt.IsMessageValid() || !receipt.HasSignature()) return false;
     const uint256 hash = ComputeBridgeBatchReceiptHash(receipt);
     if (hash.IsNull()) return false;
-    return CPQPubKey{receipt.attestor.algo, receipt.attestor.pubkey}.Verify(hash, receipt.signature);
+    return CPQPubKey{receipt.attestor.algo, receipt.attestor.pubkey}.Verify(hash, receipt.signature, slhdsa_fips205);
+}
+
+bool VerifyBridgeBatchReceiptAnyMode(const BridgeBatchReceipt& receipt)
+{
+    // Non-authoritative structural acceptance: the receipt's signature must verify under EITHER the
+    // legacy round-3 or the FIPS-205 SLH-DSA scheme. The consensus path additionally enforces the
+    // height-exact scheme (VerifyBridgeBatchReceiptsModeExact on bridge-IN and bridge-OUT), so
+    // leniency here cannot make a wrong-scheme receipt consensus-valid.
+    return VerifyBridgeBatchReceipt(receipt, /*slhdsa_fips205=*/false) ||
+           VerifyBridgeBatchReceipt(receipt, /*slhdsa_fips205=*/true);
+}
+
+bool VerifyBridgeBatchReceiptsModeExact(Span<const BridgeBatchReceipt> receipts, int64_t validation_height)
+{
+    const bool slhdsa_fips205 = BridgeAttestorUsesFips205AtHeight(validation_height);
+    for (const auto& receipt : receipts) {
+        if (!VerifyBridgeBatchReceipt(receipt, slhdsa_fips205)) return false;
+    }
+    return true;
 }
 
 uint256 ComputeBridgeBatchReceiptLeafHash(const BridgeBatchReceipt& receipt)
@@ -3112,7 +3141,7 @@ std::optional<BridgeExternalAnchor> BuildBridgeExternalAnchorFromStatement(const
     if (statement_hash.IsNull()) return std::nullopt;
 
     for (const auto& receipt : receipts) {
-        if (!VerifyBridgeBatchReceipt(receipt)) return std::nullopt;
+        if (!VerifyBridgeBatchReceiptAnyMode(receipt)) return std::nullopt;
         if (ComputeBridgeBatchStatementHash(receipt.statement) != statement_hash) return std::nullopt;
     }
     if (CountDistinctBridgeBatchReceiptAttestors(receipts) != receipts.size()) return std::nullopt;
@@ -3357,7 +3386,7 @@ std::optional<BridgeVerificationBundle> BuildBridgeVerificationBundle(Span<const
 {
     if (receipts.empty() || proof_receipts.empty()) return std::nullopt;
     if (!std::all_of(receipts.begin(), receipts.end(), [](const BridgeBatchReceipt& receipt) {
-            return VerifyBridgeBatchReceipt(receipt);
+            return VerifyBridgeBatchReceiptAnyMode(receipt);
         })) {
         return std::nullopt;
     }
@@ -3430,7 +3459,7 @@ std::optional<BridgeExternalAnchor> BuildBridgeExternalAnchorFromHybridWitness(c
     if (statement_hash.IsNull()) return std::nullopt;
 
     for (const auto& receipt : receipts) {
-        if (!VerifyBridgeBatchReceipt(receipt)) return std::nullopt;
+        if (!VerifyBridgeBatchReceiptAnyMode(receipt)) return std::nullopt;
         if (ComputeBridgeBatchStatementHash(receipt.statement) != statement_hash) return std::nullopt;
     }
     if (CountDistinctBridgeBatchReceiptAttestors(receipts) != receipts.size()) return std::nullopt;
@@ -3503,12 +3532,18 @@ uint256 ComputeBridgeBatchAuthorizationHash(const BridgeBatchAuthorization& auth
     return hw.GetSHA256();
 }
 
-bool VerifyBridgeBatchAuthorization(const BridgeBatchAuthorization& authorization)
+bool VerifyBridgeBatchAuthorization(const BridgeBatchAuthorization& authorization, bool slhdsa_fips205)
 {
     if (!authorization.IsMessageValid() || !authorization.HasSignature()) return false;
     const uint256 hash = ComputeBridgeBatchAuthorizationHash(authorization);
     if (hash.IsNull()) return false;
-    return CPQPubKey{authorization.authorizer.algo, authorization.authorizer.pubkey}.Verify(hash, authorization.signature);
+    return CPQPubKey{authorization.authorizer.algo, authorization.authorizer.pubkey}.Verify(hash, authorization.signature, slhdsa_fips205);
+}
+
+bool VerifyBridgeBatchAuthorizationAnyMode(const BridgeBatchAuthorization& authorization)
+{
+    return VerifyBridgeBatchAuthorization(authorization, /*slhdsa_fips205=*/false) ||
+           VerifyBridgeBatchAuthorization(authorization, /*slhdsa_fips205=*/true);
 }
 
 bool UseBridgeBatchLeafTaggingAtHeight(int32_t height)
@@ -3553,7 +3588,7 @@ uint256 ComputeBridgeBatchLeafDestinationTag(const BridgeBatchAuthorization& aut
 std::optional<BridgeBatchLeaf> BuildBridgeBatchLeafFromAuthorization(const BridgeBatchAuthorization& authorization,
                                                                      int32_t height)
 {
-    if (!VerifyBridgeBatchAuthorization(authorization)) return std::nullopt;
+    if (!VerifyBridgeBatchAuthorization(authorization, BridgeAttestorUsesFips205AtHeight(height))) return std::nullopt;
     const uint256 authorization_hash = ComputeBridgeBatchAuthorizationHash(authorization);
     if (authorization_hash.IsNull()) return std::nullopt;
     BridgeBatchLeaf leaf;

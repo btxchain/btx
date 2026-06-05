@@ -1653,7 +1653,22 @@ struct BridgeAttestationMessage
 [[nodiscard]] std::vector<uint8_t> SerializeBridgeBatchReceipt(const BridgeBatchReceipt& receipt);
 [[nodiscard]] std::optional<BridgeBatchReceipt> DeserializeBridgeBatchReceipt(Span<const uint8_t> bytes);
 [[nodiscard]] uint256 ComputeBridgeBatchReceiptHash(const BridgeBatchReceipt& receipt);
-[[nodiscard]] bool VerifyBridgeBatchReceipt(const BridgeBatchReceipt& receipt);
+// Bridge attestor / authorizer signatures are SLH-DSA-SHAKE-128s. As of the C-002 activation
+// height the SLH-DSA core is FIPS-205 conformant; before it, it is the legacy round-3.x SPHINCS+
+// scheme. Consensus verification is therefore height-gated: pass slhdsa_fips205 = (validation
+// height >= C-002). The "...AnyMode" helpers accept a signature valid under EITHER scheme and are
+// used only for non-authoritative structural checks (IsValid()/deserialize/operator tooling), where
+// the block height that fixes the scheme is not available; the authoritative, height-exact check is
+// performed in the consensus verification path.
+[[nodiscard]] bool BridgeAttestorUsesFips205AtHeight(int64_t validation_height);
+[[nodiscard]] bool VerifyBridgeBatchReceipt(const BridgeBatchReceipt& receipt, bool slhdsa_fips205 = false);
+[[nodiscard]] bool VerifyBridgeBatchReceiptAnyMode(const BridgeBatchReceipt& receipt);
+// Authoritative, height-exact verification of a set of attestor batch receipts: every receipt's
+// SLH-DSA signature must verify under the scheme fixed by `validation_height` (FIPS-205 at/after
+// C-002, round-3 before). Use on consensus bridge-OUT paths so a wrong-scheme (e.g. downgraded
+// round-3) receipt cannot be accepted post-activation the way VerifyBridgeBatchReceiptAnyMode allows.
+[[nodiscard]] bool VerifyBridgeBatchReceiptsModeExact(Span<const BridgeBatchReceipt> receipts,
+                                                      int64_t validation_height);
 [[nodiscard]] uint256 ComputeBridgeBatchReceiptLeafHash(const BridgeBatchReceipt& receipt);
 [[nodiscard]] size_t CountDistinctBridgeBatchReceiptAttestors(Span<const BridgeBatchReceipt> receipts);
 [[nodiscard]] uint256 ComputeBridgeBatchReceiptRoot(Span<const BridgeBatchReceipt> receipts);
@@ -1694,7 +1709,8 @@ struct BridgeAttestationMessage
 [[nodiscard]] std::vector<uint8_t> SerializeBridgeBatchAuthorization(const BridgeBatchAuthorization& authorization);
 [[nodiscard]] std::optional<BridgeBatchAuthorization> DeserializeBridgeBatchAuthorization(Span<const uint8_t> bytes);
 [[nodiscard]] uint256 ComputeBridgeBatchAuthorizationHash(const BridgeBatchAuthorization& authorization);
-[[nodiscard]] bool VerifyBridgeBatchAuthorization(const BridgeBatchAuthorization& authorization);
+[[nodiscard]] bool VerifyBridgeBatchAuthorization(const BridgeBatchAuthorization& authorization, bool slhdsa_fips205 = false);
+[[nodiscard]] bool VerifyBridgeBatchAuthorizationAnyMode(const BridgeBatchAuthorization& authorization);
 [[nodiscard]] bool UseBridgeBatchLeafTaggingAtHeight(int32_t height);
 [[nodiscard]] uint256 ComputeBridgeBatchLeafWalletTag(const BridgeBatchAuthorization& authorization,
                                                       int32_t height);

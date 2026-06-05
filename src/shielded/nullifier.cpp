@@ -383,13 +383,20 @@ bool NullifierSet::Insert(const std::vector<Nullifier>& nullifiers)
     size_t actually_new{0};
     {
         std::unique_lock lock(m_rwlock);
+        EnsureNullifierAccumulatorLoaded();
 
         // Performance fix: count only truly new nullifiers for the atomic counter.
+        // Separately feed each genuinely-new nullifier (deduped within this call) into the MuHash
+        // accumulator so it tracks the on-disk set in O(1) per element.
+        std::set<Nullifier> accumulator_new;
         for (const auto& nf : nullifiers) {
             bool in_current = m_cache_current && m_cache_current->count(nf);
             bool in_previous = m_cache_previous && m_cache_previous->count(nf);
             if (!in_current && !in_previous && !ExistsInDB(nf)) {
                 ++actually_new;
+                if (accumulator_new.insert(nf).second) {
+                    m_nullifier_accumulator.Insert(Span<const unsigned char>{nf.data(), nf.size()});
+                }
             }
         }
 
@@ -430,6 +437,7 @@ bool NullifierSet::Remove(const std::vector<Nullifier>& nullifiers)
     }
 
     std::unique_lock lock(m_rwlock);
+    EnsureNullifierAccumulatorLoaded();
     std::shared_ptr<NullifierCache> old_miss_generation_release;
     uint64_t actually_removed{0};
     std::set<Nullifier> unique_nullifiers;
@@ -440,6 +448,8 @@ bool NullifierSet::Remove(const std::vector<Nullifier>& nullifiers)
             (m_cache_previous && m_cache_previous->find(nf) != m_cache_previous->end());
         if (cached || ExistsInDB(nf)) {
             ++actually_removed;
+            // Mirror the removal in the MuHash accumulator (deduped via unique_nullifiers).
+            m_nullifier_accumulator.Remove(Span<const unsigned char>{nf.data(), nf.size()});
         }
     }
 
@@ -951,6 +961,57 @@ bool NullifierSet::WriteSnapshotBridgeMetadataHint(bool preserve_snapshot_extras
     return m_db->Write(std::make_pair(DB_SNAPSHOT_BRIDGE_METADATA_HINT, uint8_t{0}),
                        static_cast<uint8_t>(preserve_snapshot_extras ? 1 : 0),
                        /*fSync=*/true);
+}
+
+void NullifierSet::EnsureNullifierAccumulatorLoaded()
+{
+    // Caller holds m_rwlock. Rebuild the MuHash from the authoritative on-disk nullifier set once;
+    // thereafter Insert()/Remove() keep it current. Recomputing here (rather than trusting a
+    // persisted digest) is what makes the restart drift check authoritative -- it reflects exactly
+    // what is on disk, so a tampered/drifted set cannot match a stale persisted digest.
+    if (m_accumulator_loaded) return;
+    MuHash3072 acc;
+    std::unique_ptr<CDBIterator> cursor{m_db->NewIterator()};
+    cursor->Seek(std::make_pair(DB_NULLIFIER, uint256{}));
+    while (cursor->Valid()) {
+        std::pair<uint8_t, Nullifier> key;
+        if (!cursor->GetKey(key) || key.first != DB_NULLIFIER) break;
+        acc.Insert(Span<const unsigned char>{key.second.data(), key.second.size()});
+        cursor->Next();
+    }
+    m_nullifier_accumulator = acc;
+    m_accumulator_loaded = true;
+}
+
+uint256 NullifierSet::NullifierAccumulatorDigest()
+{
+    std::unique_lock lock(m_rwlock);
+    EnsureNullifierAccumulatorLoaded();
+    uint256 out;
+    m_nullifier_accumulator.Finalize(out);
+    return out;
+}
+
+bool NullifierSet::PersistNullifierAccumulator()
+{
+    std::unique_lock lock(m_rwlock);
+    EnsureNullifierAccumulatorLoaded();
+    uint256 digest;
+    m_nullifier_accumulator.Finalize(digest);
+    // fSync=false: this digest is a restart fast-path hint, not consensus state. If a crash loses it,
+    // the restart simply sees a missing/stale digest, fails the cheap verify, and runs the full audit
+    // (fail-safe). Avoiding a second per-block fsync keeps ConnectTip cost close to the prior path.
+    return m_db->Write(std::make_pair(DB_NULLIFIER_ACCUMULATOR, uint8_t{0}), digest, /*fSync=*/false);
+}
+
+std::optional<uint256> NullifierSet::ReadPersistedNullifierAccumulator() const
+{
+    std::shared_lock lock(m_rwlock);
+    uint256 digest;
+    if (!m_db->Read(std::make_pair(DB_NULLIFIER_ACCUMULATOR, uint8_t{0}), digest)) {
+        return std::nullopt;
+    }
+    return digest;
 }
 
 bool NullifierSet::ReadPersistedState(shielded::ShieldedMerkleTree& tree,

@@ -1,0 +1,5 @@
+# Foundry deps & build artifacts (not vendored)
+lib/
+out/
+cache/
+broadcast/

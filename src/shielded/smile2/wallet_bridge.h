@@ -136,7 +136,11 @@ std::optional<SmileProofResult> CreateSmileProof(
     int64_t public_fee = 0,
     SmileProofCodecPolicy codec_policy = SmileProofCodecPolicy::CANONICAL_NO_RICE,
     bool bind_anonset_context = false,
-    std::string* error = nullptr);
+    std::string* error = nullptr,
+    // C-002 staged activation: target block height selects v2 (pre-H, legacy) vs
+    // v3 (post-H). Default = activation height ⇒ v3. WALLET/builder callers MUST
+    // pass the real next-block height so legacy notes spend in the correct format.
+    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
 
 /** Well-known global seed for the SMILE A matrix.
  *  Derived from SHA256("BTX-SMILE-V2-GLOBAL-MATRIX-SEED-V1"). */

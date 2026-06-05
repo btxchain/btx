@@ -1,5 +1,4 @@
-0.20.2 Release Notes
-====================
+# 0.20.2 Release Notes
 
 Bitcoin Core version 0.20.2 is now available from:
 
@@ -16,8 +15,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes in some cases), then run the
@@ -28,8 +26,7 @@ Upgrading directly from a version of Bitcoin Core that has reached its EOL is
 possible, but it might take some time if the data directory needs to be migrated. Old
 wallet versions of Bitcoin Core are generally supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems
 using the Linux kernel, macOS 10.12+, and Windows 7 and newer.  Bitcoin
@@ -41,8 +38,7 @@ From Bitcoin Core 0.20.0 onwards, macOS versions earlier than 10.12 are no
 longer supported. Additionally, Bitcoin Core does not yet change appearance
 when macOS "dark mode" is activated.
 
-Known Bugs
-==========
+# Known Bugs
 
 The process for generating the source code release ("tarball") has changed in an
 effort to make it more complete, however, there are a few regressions in
@@ -55,11 +51,9 @@ this release:
 - Instead of running `make` simply, you should instead run
   `BITCOIN_GENBUILD_NO_GIT=1 make`.
 
-Notable changes
-===============
+# Notable changes
 
-Changes regarding misbehaving peers
------------------------------------
+## Changes regarding misbehaving peers
 
 Peers that misbehave (e.g. send us invalid blocks) are now referred to as
 discouraged nodes in log output, as they're not (and weren't) strictly banned:
@@ -83,8 +77,7 @@ addresses are treated:
   If you need to remove a discouragement, you can remove all discouragements by
   stop-starting your node.
 
-Notification changes
---------------------
+## Notification changes
 
 `-walletnotify` notifications are now sent for wallet transactions that are
 removed from the mempool because they conflict with a new block. These
@@ -92,8 +85,7 @@ notifications were sent previously before the v0.19 release, but had been
 broken since that release (bug
 [#18325](https://github.com/bitcoin/bitcoin/issues/18325)).
 
-PSBT changes
-------------
+## PSBT changes
 
 PSBTs will contain both the non-witness utxo and the witness utxo for segwit
 inputs in order to restore compatibility with wallet software that are now
@@ -101,8 +93,7 @@ requiring the full previous transaction for segwit inputs. The witness utxo
 is still provided to maintain compatibility with software which relied on its
 existence to determine whether an input was segwit.
 
-0.20.2 change log
-=================
+# 0.20.2 change log
 
 ### P2P protocol and network code
 
@@ -144,8 +135,7 @@ existence to determine whether an input was segwit.
 - #21471 fix bech32_encode calls in gen_key_io_test_vectors.py (sipa)
 - #22837 mention bech32m/BIP350 in doc/descriptors.md (sipa)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

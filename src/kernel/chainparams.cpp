@@ -158,9 +158,16 @@ public:
         // Freivalds' O(n^2) probabilistic verification (k=2 rounds, error < 2^-62).
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
-        // Mainnet peers currently mine and relay payload-less MatMul blocks.
-        // Keep Freivalds payloads optional on mainnet until an explicit upgrade
-        // activates the stricter serialization rule across the full network.
+        // The static "require payload" flag stays false, but the Freivalds product
+        // payload is already CONSENSUS-REQUIRED at and above nMatMulProductDigestHeight
+        // (61'000) via IsMatMulProductPayloadRequired(); the flag is only a legacy
+        // global override for networks that require it from genesis. Because the C'
+        // product payload is a trailing CBlock appendage that BIP152 compact blocks
+        // cannot carry, compact-block serving is intentionally disabled for blocks at
+        // these heights (a reconstructed payload-less block would fail validation) --
+        // see ProcessGetBlockData in net_processing.cpp. There is no scheduled upgrade
+        // that re-enables compact serving; that would require a payload-carrying P2P
+        // extension (getmatmulproof/matmulproof, btx-matmul-pow-spec.md S13.3).
         consensus.fMatMulRequireProductPayload = false;
         consensus.nMatMulFreivaldsBindingHeight = 61'000;
         consensus.nMatMulProductDigestHeight = 61'000;
@@ -235,12 +242,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0;
 
-        // Mainnet anchor refreshed on 2026-06-01 at height 118'225 from a
+        // Mainnet anchor refreshed on 2026-06-04 at height 120'900 from a
         // synced canonical node so stale history below the current public
         // release floor is rejected quickly.
-        consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000000299d53aaf7d"};
+        consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000000372df7a85a3"};
         // Assume signatures valid up to the same anchored block to speed sync.
-        consensus.defaultAssumeValid = uint256{"f4dfb86209f2f4f2c9ccfb960368cc334afea065916a82f38698f6391118cd8e"};
+        consensus.defaultAssumeValid = uint256{"24744e8793137d0a6639a90c066b78e7edb6722ad7007cdac0911ae171ead611"};
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -294,7 +301,7 @@ public:
         checkpointData = {
             {
                 {0, uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"}},
-                {118225, uint256{"f4dfb86209f2f4f2c9ccfb960368cc334afea065916a82f38698f6391118cd8e"}},
+                {120900, uint256{"24744e8793137d0a6639a90c066b78e7edb6722ad7007cdac0911ae171ead611"}},
             }
         };
         m_assumeutxo_data = {
@@ -361,11 +368,18 @@ public:
                 .m_chain_tx_count = 144'179,
                 .blockhash = consteval_ctor(uint256{"f4dfb86209f2f4f2c9ccfb960368cc334afea065916a82f38698f6391118cd8e"}),
             },
+            {
+                // main assumeutxo snapshot at height 120'900
+                .height = 120'900,
+                .hash_serialized = AssumeutxoHash{uint256{"73c62a680afefae9a861131938947831becc774513bd788cc4f93cc42aa06f55"}},
+                .m_chain_tx_count = 147'449,
+                .blockhash = consteval_ctor(uint256{"24744e8793137d0a6639a90c066b78e7edb6722ad7007cdac0911ae171ead611"}),
+            },
         };
         chainTxData = ChainTxData{
-            .nTime = 1780339110,
-            .tx_count = 144191,
-            .dTxRate = 0.017135588551,
+            .nTime = 1780576913,
+            .tx_count = 147451,
+            .dTxRate = 0.015995381654,
         };
     }
 };

@@ -1,5 +1,4 @@
-0.21.2 Release Notes
-====================
+# 0.21.2 Release Notes
 
 Bitcoin Core version 0.21.2 is now available from:
 
@@ -16,8 +15,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes in some cases), then run the
@@ -28,8 +26,7 @@ Upgrading directly from a version of Bitcoin Core that has reached its EOL is
 possible, but it might take some time if the data directory needs to be migrated. Old
 wallet versions of Bitcoin Core are generally supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems
 using the Linux kernel, macOS 10.12+, and Windows 7 and newer.  Bitcoin
@@ -42,8 +39,7 @@ longer supported. Additionally, Bitcoin Core does not yet change appearance
 when macOS "dark mode" is activated.
 
 
-0.21.2 change log
-=================
+# 0.21.2 change log
 
 ### P2P protocol and network code
 
@@ -85,8 +81,7 @@ when macOS "dark mode" is activated.
 - #22137 util: Properly handle -noincludeconf on command line (take 2) (MarcoFalke)
 
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

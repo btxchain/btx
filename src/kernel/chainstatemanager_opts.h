@@ -51,6 +51,15 @@ struct ChainstateManagerOpts {
     MatMulValidationMode matmul_validation_mode{MatMulValidationMode::CONSENSUS};
     //! Default operator profile: keep the shielded commitment-position index on disk for fast restart and snapshot recovery.
     bool retain_shielded_commitment_index{true};
+    //! Audit restored shielded state against historical block data during startup. When the
+    //! fast-startup path below is not taken, this controls whether the cross-chain audit runs.
+    bool shielded_startup_audit{true};
+    //! Zero-downtime restart: when matching persisted shielded state is available, trust it and
+    //! skip the full-chain settlement/netting drift sync and the cross-chain audit. Default on;
+    //! the persisted snapshot reaching the restore path already had its frontier root/size matched
+    //! to the active tip and its commitment index/anchor windows validated, so the skipped audit is
+    //! fail-closed (it can only reject, never accept). Set to 0 to force the thorough sync + audit.
+    bool fast_shielded_startup{true};
     DBOptions coins_db{};
     CoinsViewOptions coins_view{};
     Notifications& notifications;

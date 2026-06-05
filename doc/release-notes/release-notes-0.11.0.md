@@ -9,19 +9,16 @@ Please report bugs using the issue tracker at github:
 
   <https://github.com/bitcoin/bitcoin/issues>
 
-Upgrading and downgrading
-=========================
+# Upgrading and downgrading
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
 installer (on Windows) or just copy over /Applications/Bitcoin-Qt (on Mac) or
 bitcoind/bitcoin-qt (on Linux).
 
-Downgrade warning
-------------------
+## Downgrade warning
 
 Because release 0.10.0 and later makes use of headers-first synchronization and
 parallel block download (see further), the block files and databases are not
@@ -44,11 +41,9 @@ supported and may break as soon as the older version attempts to reindex.
 This does not affect wallet forward or backward compatibility. There are no
 known problems when downgrading from 0.11.x to 0.10.x.
 
-Important information
-======================
+# Important information
 
-Transaction flooding
----------------------
+## Transaction flooding
 
 At the time of this release, the P2P network is being flooded with low-fee
 transactions. This causes a ballooning of the mempool size.
@@ -74,11 +69,9 @@ For example, add the following to `bitcoin.conf`:
 
 More robust solutions are being worked on for a follow-up release.
 
-Notable changes
-===============
+# Notable changes
 
-Block file pruning
-----------------------
+## Block file pruning
 
 This release supports running a fully validating node without maintaining a copy 
 of the raw block and undo data on disk. To recap, there are four types of data 
@@ -140,16 +133,14 @@ UTXO but where its block file has been pruned.
 
 Pruning is disabled by default.
 
-Big endian support
---------------------
+## Big endian support
 
 Experimental support for big-endian CPU architectures was added in this
 release. All little-endian specific code was replaced with endian-neutral
 constructs. This has been tested on at least MIPS and PPC hosts. The build
 system will automatically detect the endianness of the target.
 
-Memory usage optimization
---------------------------
+## Memory usage optimization
 
 There have been many changes in this release to reduce the default memory usage
 of a node, among which:
@@ -161,8 +152,7 @@ of a node, among which:
 - Reduce the number of threads (#5964, #5679); lowers the amount of (esp.
   virtual) memory needed
 
-Fee estimation changes
-----------------------
+## Fee estimation changes
 
 This release improves the algorithm used for fee estimation.  Previously, -1
 was returned when there was insufficient data to give an estimate.  Now, -1
@@ -172,8 +162,7 @@ for a higher target number of blocks. It is not uncommon for there to be no
 fee or priority high enough to be reliably (85%) included in the next block and
 for this reason, the default for `-txconfirmtarget=n` has changed from 1 to 2.
 
-Privacy: Disable wallet transaction broadcast
-----------------------------------------------
+## Privacy: Disable wallet transaction broadcast
 
 This release adds an option `-walletbroadcast=0` to prevent automatic
 transaction broadcast and rebroadcast (#5951). This option allows separating
@@ -194,8 +183,7 @@ internet but transactions are broadcasted over Tor.
 
 For an example script see [bitcoin-submittx](https://github.com/laanwj/bitcoin-submittx).
 
-Privacy: Stream isolation for Tor
-----------------------------------
+## Privacy: Stream isolation for Tor
 
 This release adds functionality to create a new circuit for every peer
 connection, when the software is used with Tor. The new option,
@@ -213,8 +201,7 @@ connections. A user and password is sent where they weren't before. This setup
 is exceedingly rare, but in this case `-proxyrandomize=0` can be passed to
 disable the behavior.
 
-0.11.0 Change log
-=================
+# 0.11.0 Change log
 
 Detailed release notes follow. This overview includes changes that affect
 behavior, not code moves, refactors and string updates. For convenience in locating
@@ -415,8 +402,7 @@ git merge commit are mentioned.
 - #6286 `3902c15` Remove berkeley-db4 workaround in MacOSX build docs
 - #6319 `3f8fcc9` doc: update mailing list address
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

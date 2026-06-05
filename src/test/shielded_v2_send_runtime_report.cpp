@@ -706,7 +706,8 @@ void VerifyBuiltTransaction(const ScenarioFixture& fixture,
                                                           pub,
                                                           payload.fee,
                                                           /*reject_rice_codec=*/false,
-                                                          bind_anonset_context);
+                                                          bind_anonset_context,
+                                                          fixture.validation_height);
         verify_err.has_value()) {
         throw std::runtime_error("direct-send SMILE proof verification failed: " + *verify_err);
     }

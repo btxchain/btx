@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
@@ -25,8 +24,7 @@ Upgrading directly from a version of Bitcoin Core that has reached its EOL is
 possible, but might take some time if the datadir needs to be migrated.  Old
 wallet versions of Bitcoin Core are generally supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems using
 the Linux kernel, macOS 10.10+, and Windows 7 and newer. It is not recommended
@@ -44,18 +42,15 @@ Users running macOS Catalina may need to "right-click" and then choose "Open"
 to open the Bitcoin Core .dmg. This is due to new signing requirements
 imposed by Apple, which the Bitcoin Core project does not yet adhere too.
 
-Notable changes
-===============
+# Notable changes
 
-New user documentation
-----------------------
+## New user documentation
 
 - [Reduce memory](https://github.com/bitcoin/bitcoin/blob/master/doc/reduce-memory.md)
   suggests configuration tweaks for running Bitcoin Core on systems with
   limited memory. (#16339)
 
-New RPCs
---------
+## New RPCs
 
 - `getbalances` returns an object with all balances (`mine`,
   `untrusted_pending` and `immature`). Please refer to the RPC help of
@@ -73,8 +68,7 @@ New RPCs
   RPC is only enabled if block filters have been created using the
   `-blockfilterindex` configuration option. (#14121)
 
-New settings
-------------
+## New settings
 
 - `-blockfilterindex` enables the creation of BIP158 block filters for
   the entire blockchain.  Filters will be created in the background and
@@ -83,8 +77,7 @@ New settings
   local user may obtain block filters using the `getblockfilter` RPC.
   (#14121)
 
-Updated settings
-----------------
+## Updated settings
 
 - `whitebind` and `whitelist` now accept a list of permissions to
   provide peers connecting using the indicated interfaces or IP
@@ -100,8 +93,7 @@ Updated settings
   may now set a value of "500" to use about the same real amount of memory. (#16957)
 
 
-Updated RPCs
-------------
+## Updated RPCs
 
 Note: some low-level RPC changes mainly useful for testing are described in the
 Low-level Changes section below.
@@ -189,8 +181,7 @@ Low-level Changes section below.
 - `walletcreatefundedpsbt` now signals BIP125 Replace-by-Fee if the
   `-walletrbf` configuration option is set to true. (#15911)
 
-GUI changes
------------
+## GUI changes
 
 - The GUI wallet now provides bech32 addresses by default.  The user may change the address type
   during invoice generation using a GUI toggle, or the default address
@@ -199,8 +190,7 @@ GUI changes
 
 - In 0.18.0, a `./configure` flag was introduced to allow disabling BIP70 support in the GUI (support was enabled by default). In 0.19.0, this flag is now __disabled__ by default. If you want to compile Bitcoin Core with BIP70 support in the GUI, you can pass `--enable-bip70` to `./configure`. (#15584)
 
-Deprecated or removed configuration options
--------------------------------------------
+## Deprecated or removed configuration options
 
 - `-mempoolreplacement` is removed, although default node behavior
   remains the same.  This option previously allowed the user to prevent
@@ -208,8 +198,7 @@ Deprecated or removed configuration options
   This is different from the remaining configuration option
   `-walletrbf`. (#16171)
 
-Deprecated or removed RPCs
---------------------------
+## Deprecated or removed RPCs
 
 - `bumpfee` no longer accepts a `totalFee` option unless the
   configuration parameter `deprecatedrpc=totalFee` is specified.  This
@@ -220,8 +209,7 @@ Deprecated or removed RPCs
 - `generate` is now removed after being deprecated in Bitcoin Core 0.18.
   Use the `generatetoaddress` RPC instead. (#15492)
 
-P2P changes
------------
+## P2P changes
 
 - BIP 61 reject messages were deprecated in v0.18. They are now disabled
   by default, but can be enabled by setting the `-enablebip61` command
@@ -247,18 +235,15 @@ P2P changes
 
 - By default, Bitcoin Core will now make two additional outbound connections that are exclusively used for block-relay.  No transactions or addr messages will be processed on these connections. These connections are designed to add little additional memory or bandwidth resource requirements but should make some partitioning attacks more difficult to carry out. (#15759)
 
-Miscellaneous CLI Changes
--------------------------
+## Miscellaneous CLI Changes
 
 - The `testnet` field in `bitcoin-cli -getinfo` has been renamed to
   `chain` and now returns the current network name as defined in BIP70
   (main, test, regtest). (#15566)
 
-Low-level changes
-=================
+# Low-level changes
 
-RPC
----
+## RPC
 
 - `getblockchaininfo` no longer returns a `bip9_softforks` object.
   Instead, information has been moved into the `softforks` object and
@@ -273,8 +258,7 @@ RPC
 - `getrpcinfo` now returns a `logpath` field with the path to
   `debug.log`. (#15483)
 
-Tests
------
+## Tests
 
 - The regression test chain enabled by the `-regtest` command line flag
   now requires transactions to not violate standard policy by default.
@@ -284,8 +268,7 @@ Tests
   adjusted with the `-acceptnonstdtxn` command line flag for both test
   chains. (#15891)
 
-Configuration
-------------
+## Configuration
 
 - A setting specified in the default section but not also specified in a
   network-specific section (e.g. testnet) will now produce an error
@@ -297,8 +280,7 @@ Configuration
   the name of the thread that caused the log. To enable this behavior,
   use `-logthreadnames=1`. (#15849)
 
-Network
--------
+## Network
 
 - When fetching a transaction announced by multiple peers, previous versions of
   Bitcoin Core would sequentially attempt to download the transaction from each
@@ -314,8 +296,7 @@ Network
   clearnet connections.  This prevents leaking node identity through use
   of identical non-default port numbers. (#15651)
 
-Mempool and transaction relay
------------------------------
+## Mempool and transaction relay
 
 - Allows one extra single-ancestor transaction per package.  Previously,
   if a transaction in the mempool had 25 descendants, or it and all of
@@ -341,8 +322,7 @@ Mempool and transaction relay
   sent using the legacy encoding format, enforcing the rule specified in
   BIP144.  (#14039)
 
-Wallet
-------
+## Wallet
 
 - When in pruned mode, a rescan that was triggered by an `importwallet`,
   `importpubkey`, `importaddress`, or `importprivkey` RPC will only fail
@@ -367,8 +347,7 @@ Wallet
   sending small payments to a previously-paid address that would then
   be included with unrelated inputs in future payments. (#13756)
 
-Build system changes
---------------------
+## Build system changes
 
 - Python >=3.5 is now required by all aspects of the project. This
   includes the build systems, test framework and linters. The previously
@@ -382,8 +361,7 @@ Build system changes
   [CVE-2017-1000494](https://security-tracker.debian.org/tracker/CVE-2017-1000494)
   (both in jessie and in stretch). (#15993)
 
-0.19.0 change log
-=================
+# 0.19.0 change log
 
 ### Consensus
 - #16128 Delete error-prone CScript constructor only used with FindAndDelete (instagibbs)
@@ -957,8 +935,7 @@ Build system changes
 - #17014 Consolidate release notes before 0.19.0 (move-only) (MarcoFalke)
 - #17111 update bips.md with buried BIP9 deployments (MarcoFalke)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

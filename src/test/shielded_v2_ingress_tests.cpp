@@ -181,7 +181,8 @@ struct IngressSettlementContext
 
 [[nodiscard]] shielded::BridgeBatchReceipt MakeIngressSignedReceipt(unsigned char seed,
                                                                     const BridgeBatchStatement& statement,
-                                                                    PQAlgorithm algo = PQAlgorithm::ML_DSA_44)
+                                                                    PQAlgorithm algo = PQAlgorithm::ML_DSA_44,
+                                                                    int32_t validation_height = 0)
 {
     std::array<unsigned char, 32> material{};
     material.fill(seed);
@@ -195,14 +196,17 @@ struct IngressSettlementContext
 
     const uint256 receipt_hash = shielded::ComputeBridgeBatchReceiptHash(receipt);
     BOOST_REQUIRE(!receipt_hash.IsNull());
-    BOOST_REQUIRE(key.Sign(receipt_hash, receipt.signature));
+    // C-002: SLH-DSA receipts are FIPS-205 at/after activation, matching consensus verification.
+    BOOST_REQUIRE(key.Sign(receipt_hash, receipt.signature,
+                           shielded::BridgeAttestorUsesFips205AtHeight(validation_height)));
     BOOST_REQUIRE(receipt.IsValid());
     return receipt;
 }
 
 [[nodiscard]] IngressSettlementContext BuildIngressSettlementContext(
     const std::vector<V2IngressLeafInput>& ingress_leaves,
-    IngressSettlementWitnessKind settlement_kind)
+    IngressSettlementWitnessKind settlement_kind,
+    int32_t validation_height = 0)
 {
     struct AttestorSpec {
         unsigned char seed;
@@ -267,7 +271,7 @@ struct IngressSettlementContext
         witness.signed_receipt_proofs.reserve(attestors.size());
         for (size_t idx = 0; idx < attestor_specs.size(); ++idx) {
             const auto& spec = attestor_specs[idx];
-            const auto receipt = MakeIngressSignedReceipt(spec.seed, *statement, spec.algo);
+            const auto receipt = MakeIngressSignedReceipt(spec.seed, *statement, spec.algo, validation_height);
             auto proof = shielded::BuildBridgeVerifierSetProof(
                 Span<const shielded::BridgeKeySpec>{attestors.data(), attestors.size()},
                 receipt.attestor);
@@ -497,7 +501,7 @@ BuildContextualIngressRingMembers(const V2IngressContext& context,
     }));
 
     fixture.input.ingress_leaves = std::move(ingress_leaves);
-    const auto settlement = BuildIngressSettlementContext(fixture.input.ingress_leaves, settlement_kind);
+    const auto settlement = BuildIngressSettlementContext(fixture.input.ingress_leaves, settlement_kind, validation_height);
     fixture.input.statement = settlement.statement;
     fixture.input.settlement_witness = settlement.witness;
 
@@ -752,7 +756,7 @@ BOOST_AUTO_TEST_CASE(build_v2_ingress_transaction_matches_contextual_verifier)
                                      *ring_members,
                                      reject_reason,
                                      /*reject_rice_codec=*/false,
-                                     FixtureUsesBoundSmileAnonsetContext(fixture)));
+                                     FixtureUsesBoundSmileAnonsetContext(fixture), fixture.validation_height));
 
     const CTransaction tx{fixture.built.tx};
     CShieldedProofCheck proof_check(tx,
@@ -1032,7 +1036,7 @@ BOOST_AUTO_TEST_CASE(build_v2_signed_ingress_transaction_matches_contextual_veri
                                      *ring_members,
                                      reject_reason,
                                      /*reject_rice_codec=*/false,
-                                     FixtureUsesBoundSmileAnonsetContext(fixture)));
+                                     FixtureUsesBoundSmileAnonsetContext(fixture), fixture.validation_height));
 }
 
 BOOST_AUTO_TEST_CASE(build_v2_hybrid_ingress_transaction_matches_contextual_verifier)
@@ -1060,7 +1064,7 @@ BOOST_AUTO_TEST_CASE(build_v2_hybrid_ingress_transaction_matches_contextual_veri
                                      *ring_members,
                                      reject_reason,
                                      /*reject_rice_codec=*/false,
-                                     FixtureUsesBoundSmileAnonsetContext(fixture)));
+                                     FixtureUsesBoundSmileAnonsetContext(fixture), fixture.validation_height));
 }
 
 BOOST_AUTO_TEST_CASE(build_large_v2_ingress_transaction_matches_contextual_verifier)
@@ -1097,7 +1101,7 @@ BOOST_AUTO_TEST_CASE(build_large_v2_ingress_transaction_matches_contextual_verif
                                      *ring_members,
                                      reject_reason,
                                      /*reject_rice_codec=*/false,
-                                     FixtureUsesBoundSmileAnonsetContext(fixture)));
+                                     FixtureUsesBoundSmileAnonsetContext(fixture), fixture.validation_height));
 
     const CTransaction tx{fixture.built.tx};
     CShieldedProofCheck proof_check(tx,
@@ -1158,7 +1162,7 @@ BOOST_AUTO_TEST_CASE(build_multishard_v2_ingress_transaction_matches_contextual_
                                      *ring_members,
                                      reject_reason,
                                      /*reject_rice_codec=*/false,
-                                     FixtureUsesBoundSmileAnonsetContext(fixture)));
+                                     FixtureUsesBoundSmileAnonsetContext(fixture), fixture.validation_height));
 
     const CTransaction tx{fixture.built.tx};
     CShieldedProofCheck proof_check(tx,
@@ -1239,7 +1243,7 @@ BOOST_AUTO_TEST_CASE(proof_check_rejects_v2_ingress_proof_descriptor_membership_
                                       *ring_members,
                                       reject_reason,
                                       /*reject_rice_codec=*/false,
-                                      FixtureUsesBoundSmileAnonsetContext(fixture)));
+                                      FixtureUsesBoundSmileAnonsetContext(fixture), fixture.validation_height));
     BOOST_CHECK_EQUAL(reject_reason, "bad-shielded-v2-ingress-proof-descriptor");
 }
 
@@ -1264,7 +1268,7 @@ BOOST_AUTO_TEST_CASE(proof_check_rejects_v2_ingress_signed_receipt_membership_mi
                                       *ring_members,
                                       reject_reason,
                                       /*reject_rice_codec=*/false,
-                                      FixtureUsesBoundSmileAnonsetContext(fixture)));
+                                      FixtureUsesBoundSmileAnonsetContext(fixture), fixture.validation_height));
     BOOST_CHECK_EQUAL(reject_reason, "bad-shielded-v2-ingress-signed-membership");
 }
 
@@ -1295,7 +1299,7 @@ BOOST_AUTO_TEST_CASE(smile_ingress_account_leaf_substitution_requires_reproof)
                                       *ring_members,
                                       reject_reason,
                                       /*reject_rice_codec=*/false,
-                                      FixtureUsesBoundSmileAnonsetContext(fixture)));
+                                      FixtureUsesBoundSmileAnonsetContext(fixture), fixture.validation_height));
     BOOST_CHECK_EQUAL(reject_reason, "bad-smile2-proof-invalid");
 
     const CTransaction tx{fixture.built.tx};

@@ -261,7 +261,10 @@ DeserializeProofReceiptMetadata(Span<const uint8_t> bytes)
     return accounts;
 }
 
-[[nodiscard]] std::optional<std::vector<smile2::CompactPublicAccount>> ReconstructSmileOutputAccounts(
+// SpendPathRecovery variant of the Send-payload overload above; retained for symmetry with the
+// recovery proof path but not yet wired to a caller, so mark it maybe_unused to keep clang's
+// -Wunused-function clean without deleting the intentional helper.
+[[maybe_unused]] [[nodiscard]] std::optional<std::vector<smile2::CompactPublicAccount>> ReconstructSmileOutputAccounts(
     const SpendPathRecoveryPayload& payload,
     Span<const smile2::BDLOPCommitment> output_coins)
 {
@@ -414,7 +417,10 @@ DeserializeProofReceiptMetadata(Span<const uint8_t> bytes)
     return descriptor;
 }
 
-[[nodiscard]] ProofShardDescriptor BuildSmileDirectProofShard(const std::vector<uint8_t>& smile_bytes,
+// SpendPathRecovery variant of the Send-payload BuildSmileDirectProofShard overload above; retained
+// for symmetry with the recovery proof path but not yet wired to a caller, so mark it maybe_unused
+// to keep clang's -Wunused-function clean without deleting the intentional helper.
+[[maybe_unused]] [[nodiscard]] ProofShardDescriptor BuildSmileDirectProofShard(const std::vector<uint8_t>& smile_bytes,
                                                               const SpendPathRecoveryPayload& payload,
                                                               Span<const uint256> smile_output_coin_hashes,
                                                               const ProofStatement& statement,
@@ -2409,7 +2415,8 @@ bool VerifyV2SendProof(
     const V2SendContext& context,
     const std::vector<std::vector<smile2::wallet::SmileRingMember>>& ring_members,
     bool reject_rice_codec,
-    bool bind_anonset_context)
+    bool bind_anonset_context,
+    int64_t validation_height)
 {
     if (!BundleHasSemanticFamily(bundle, TransactionFamily::V2_SEND) ||
         !std::holds_alternative<SendPayload>(bundle.payload)) {
@@ -2514,7 +2521,8 @@ bool VerifyV2SendProof(
                                             pub,
                                             payload.value_balance,
                                             reject_rice_codec,
-                                            bind_anonset_context)
+                                            bind_anonset_context,
+                                            validation_height)
                 .has_value();
 }
 

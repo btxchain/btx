@@ -56,7 +56,7 @@ public:
 
     void ComputeEntrySchnorr(uint256& entry, const uint256 &hash, Span<const unsigned char> sig, const XOnlyPubKey& pubkey) const;
 
-    void ComputeEntryPQ(uint256& entry, const uint256& hash, Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo) const;
+    void ComputeEntryPQ(uint256& entry, const uint256& hash, Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, bool slhdsa_fips205 = false) const;
 
     bool Get(const uint256& entry, const bool erase);
 
@@ -74,7 +74,7 @@ public:
 
     bool VerifyECDSASignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const override;
     bool VerifySchnorrSignature(Span<const unsigned char> sig, const XOnlyPubKey& pubkey, const uint256& sighash) const override;
-    bool VerifyPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, const uint256& sighash) const override;
+    bool VerifyPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, const uint256& sighash, bool slhdsa_fips205 = false) const override;
 };
 
 #endif // BITCOIN_SCRIPT_SIGCACHE_H

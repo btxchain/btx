@@ -51,14 +51,16 @@ int64_t CenterCoeff(int64_t c) {
 
 constexpr size_t kCtPublicRowCount = KEY_ROWS + 2;
 
-size_t ComputeLiveCtAuxMsgCount(size_t num_inputs, size_t num_outputs)
+size_t ComputeLiveCtAuxMsgCount(size_t num_inputs, size_t num_outputs, bool with_range = true)
 {
     const size_t selectors = num_inputs;
     const size_t amounts = num_inputs + num_outputs;
+    // C-002 R5 B0,B1 per amount — v3 only.
+    const size_t range_bits = with_range ? 2 * (num_inputs + num_outputs) : 0;
     const size_t w_rows = num_inputs * kCtPublicRowCount;
     const size_t x_slots = num_inputs;
     const size_t tail = 2; // g, psi
-    return selectors + amounts + w_rows + x_slots + tail;
+    return selectors + amounts + range_bits + w_rows + x_slots + tail;
 }
 
 size_t ComputeLiveCtRetainedAuxMsgCount(size_t num_inputs, size_t num_outputs)
@@ -68,29 +70,44 @@ size_t ComputeLiveCtRetainedAuxMsgCount(size_t num_inputs, size_t num_outputs)
     return 0;
 }
 
-size_t ComputeLiveCtW0Offset(size_t num_inputs, size_t num_outputs)
+size_t ComputeLiveCtW0Offset(size_t num_inputs, size_t num_outputs, bool with_range = true)
 {
-    return num_inputs + num_inputs + num_outputs;
+    // selectors + input amounts + output amounts + (v3) R5 range bit helpers (B0,B1 per amount)
+    const size_t range_bits = with_range ? 2 * (num_inputs + num_outputs) : 0;
+    return num_inputs + num_inputs + num_outputs + range_bits;
+}
+
+// C-002 staged activation: the proof's wire version selects whether range slots exist.
+inline bool LiveCtProofHasRangeSlots(const SmileCTProof& proof)
+{
+    return proof.wire_version >= SmileCTProof::WIRE_VERSION_C002_HARDENED;
 }
 
 size_t InferLiveCtOutputCount(const SmileCTProof& proof)
 {
     const size_t num_inputs = proof.z0.size();
-    const size_t fixed_slots =
-        num_inputs +                    // selectors
-        num_inputs +                    // input amounts
-        num_inputs * kCtPublicRowCount +// W0 tuple-account rows
-        num_inputs +                    // X slots
-        2;                              // G and Psi
-    if (proof.aux_commitment.t_msg.size() < fixed_slots) {
-        return 0;
+    const size_t total = proof.aux_commitment.t_msg.size();
+    if (LiveCtProofHasRangeSlots(proof)) {
+        // v3: total = 5*num_in + 3*num_out + num_in*rows + 2. The 3*num_out =
+        // output amount (1) + its bit helpers (2); 5*num_in includes input bit helpers.
+        const size_t input_only_slots =
+            num_inputs + num_inputs + 2 * num_inputs +
+            num_inputs * kCtPublicRowCount + num_inputs + 2;
+        if (total < input_only_slots) return 0;
+        const size_t variable = total - input_only_slots; // == 3*num_out
+        if (variable % 3 != 0) return 0;
+        return variable / 3;
     }
-    return proof.aux_commitment.t_msg.size() - fixed_slots;
+    // v2/legacy: no range bit helpers. total = 3*num_in + num_out + num_in*rows + 2.
+    const size_t input_only_slots =
+        num_inputs + num_inputs + num_inputs * kCtPublicRowCount + num_inputs + 2;
+    if (total < input_only_slots) return 0;
+    return total - input_only_slots; // == num_out
 }
 
-bool IsLiveCtW0Slot(size_t num_inputs, size_t num_outputs, size_t slot)
+bool IsLiveCtW0Slot(size_t num_inputs, size_t num_outputs, size_t slot, bool with_range = true)
 {
-    const size_t w0_offset = ComputeLiveCtW0Offset(num_inputs, num_outputs);
+    const size_t w0_offset = ComputeLiveCtW0Offset(num_inputs, num_outputs, with_range);
     const size_t w0_count = num_inputs * kCtPublicRowCount;
     return slot >= w0_offset && slot < w0_offset + w0_count;
 }
@@ -101,7 +118,8 @@ SmilePolyVec CollectSerializedOmittedAuxSelectorAmountResidues(const SmileCTProo
 {
     SmilePolyVec serialized;
     const size_t retained_count = ComputeLiveCtRetainedAuxMsgCount(num_inputs, num_outputs);
-    const size_t split_slot = ComputeLiveCtW0Offset(num_inputs, num_outputs);
+    const size_t split_slot =
+        ComputeLiveCtW0Offset(num_inputs, num_outputs, LiveCtProofHasRangeSlots(proof));
     for (size_t slot = retained_count;
          slot < proof.aux_residues.size() && slot < split_slot;
          ++slot) {
@@ -116,7 +134,8 @@ SmilePolyVec CollectSerializedOmittedAuxTailResidues(const SmileCTProof& proof,
 {
     SmilePolyVec serialized;
     const size_t tail_offset =
-        ComputeLiveCtW0Offset(num_inputs, num_outputs) + num_inputs * kCtPublicRowCount;
+        ComputeLiveCtW0Offset(num_inputs, num_outputs, LiveCtProofHasRangeSlots(proof)) +
+        num_inputs * kCtPublicRowCount;
     for (size_t slot = tail_offset; slot < proof.aux_residues.size(); ++slot) {
         serialized.push_back(proof.aux_residues[slot]);
     }
@@ -910,6 +929,13 @@ std::vector<uint8_t> SerializeCTProof(const SmileCTProof& proof, SmileProofCodec
     // Serial numbers
     SerializeCenteredPolyVecFixed(proof.serial_numbers, out);
 
+    // C-002 w3-1: per-input serial<->key masks w_sn (full 128 coeffs each; count == num_inputs).
+    for (const auto& w : proof.w_sn) {
+        for (size_t c = 0; c < POLY_DEGREE; ++c) {
+            WriteU32(out, static_cast<uint32_t>(mod_q(w.coeffs[c])));
+        }
+    }
+
     // weak-opening omega and exact framework omega are reconstructed by the
     // verifier on the reset-chain hard-fork surface. Only the transcript-bound
     // post-h2 digest remains on-wire.
@@ -920,10 +946,29 @@ std::vector<uint8_t> SerializeCTProof(const SmileCTProof& proof, SmileProofCodec
         WriteU32(out, static_cast<uint32_t>(mod_q(proof.h2.coeffs[c])));
     }
 
+    // C-002 (v3 only): value-conservation binding fields (full 128 coefficients
+    // each). v2 (legacy / pre-activation) omits these to match the v0.30 wire format.
+    if (proof.wire_version >= SmileCTProof::WIRE_VERSION_C002_HARDENED) {
+        for (size_t c = 0; c < POLY_DEGREE; ++c) {
+            WriteU32(out, static_cast<uint32_t>(mod_q(proof.balance_w.coeffs[c])));
+        }
+        for (size_t c = 0; c < POLY_DEGREE; ++c) {
+            WriteU32(out, static_cast<uint32_t>(mod_q(proof.balance_carry.coeffs[c])));
+        }
+    }
+
     // seed_c must stay on-wire on the launch surface because the live verifier
     // still uses it to recover the exact round-1 B0*y rows before seed_c0 is
     // recomputed.
     WriteBytes(out, proof.seed_c.data(), 32);
+
+    // C-002 (audit #1): seed_z carries the step-12 transcript-binding hash. On
+    // pre-v3 wire formats it was zeroed on decode, so the verifier silently
+    // skipped the binding check (SeedIsPresent==false). v3 puts it on-wire and
+    // the verifier requires it to match unconditionally.
+    if (proof.wire_version >= SmileCTProof::WIRE_VERSION_C002_HARDENED) {
+        WriteBytes(out, proof.seed_z.data(), 32);
+    }
 
     // Output coins and prover public keys are NO LONGER serialized inside the
     // proof bytes.  They are transmitted alongside the proof in the
@@ -940,7 +985,8 @@ SmileCTDecodeStatus DecodeCTProof(const std::vector<uint8_t>& data,
     size_t body_offset{0};
     uint8_t wire_version{SmileCTProof::WIRE_VERSION_LEGACY};
     if (ReadWireHeader(data, body_offset, wire_version)) {
-        if (wire_version != SmileCTProof::WIRE_VERSION_M4_HARDENED) {
+        if (wire_version != SmileCTProof::WIRE_VERSION_M4_HARDENED &&
+            wire_version != SmileCTProof::WIRE_VERSION_C002_HARDENED) {
             return SmileCTDecodeStatus::MALFORMED;
         }
     }
@@ -953,12 +999,23 @@ SmileCTDecodeStatus DecodeCTProof(const std::vector<uint8_t>& data,
     if (num_inputs == 0 || num_inputs > MAX_CT_INPUTS) return SmileCTDecodeStatus::MALFORMED;
     if (num_outputs == 0 || num_outputs > MAX_CT_OUTPUTS) return SmileCTDecodeStatus::MALFORMED;
 
-    const size_t n_aux_msg = ComputeLiveCtAuxMsgCount(num_inputs, num_outputs);
+    // C-002 staged activation: v3 proofs carry R5 range slots; v2 do not.
+    const bool with_range = wire_version >= SmileCTProof::WIRE_VERSION_C002_HARDENED;
+    const size_t n_aux_msg = ComputeLiveCtAuxMsgCount(num_inputs, num_outputs, with_range);
     const size_t z_size = BDLOP_RAND_DIM_BASE + n_aux_msg;
     const auto coin_ck = GetCtPublicCoinCommitmentKey();
     const size_t coin_z_count = coin_ck.rand_dim();
 
-    if (z_size > 256) return SmileCTDecodeStatus::MALFORMED;
+    // DoS sanity bound on the response-vector size. z_size is fully determined by
+    // num_inputs/num_outputs (already bounded to MAX_CT_INPUTS/MAX_CT_OUTPUTS
+    // above), so derive the cap from the actual layout rather than a stale literal.
+    // The old hard literal (256) undercounted the C-002 R5 range slots: a max-shape
+    // v3 proof (16-in/16-out) has z_size = 262 > 256 and was wrongly rejected as
+    // MALFORMED even though it is honestly constructible. Using the layout max keeps
+    // the guard while accepting every valid shape for this wire version.
+    const size_t max_z_size =
+        BDLOP_RAND_DIM_BASE + ComputeLiveCtAuxMsgCount(MAX_CT_INPUTS, MAX_CT_OUTPUTS, with_range);
+    if (z_size > max_z_size) return SmileCTDecodeStatus::MALFORMED;
 
     // Auxiliary commitment t0
     if (!DeserializeCenteredPolyVecFixed(ptr, end, BDLOP_RAND_DIM_BASE, proof.aux_commitment.t0)) {
@@ -980,7 +1037,7 @@ SmileCTDecodeStatus DecodeCTProof(const std::vector<uint8_t>& data,
 
     proof.aux_residues.assign(n_aux_msg, {});
     const size_t omitted_selector_amount_count =
-        ComputeLiveCtW0Offset(num_inputs, num_outputs) - retained_aux_msg;
+        ComputeLiveCtW0Offset(num_inputs, num_outputs, with_range) - retained_aux_msg;
     const size_t omitted_tail_count = omitted_aux_msg - omitted_selector_amount_count;
 
     SmilePolyVec omitted_selector_amount_residues;
@@ -1004,11 +1061,11 @@ SmileCTDecodeStatus DecodeCTProof(const std::vector<uint8_t>& data,
     size_t omitted_selector_amount_index = 0;
     size_t omitted_tail_index = 0;
     for (size_t slot = retained_aux_msg; slot < n_aux_msg; ++slot) {
-        if (IsLiveCtW0Slot(num_inputs, num_outputs, slot)) {
+        if (IsLiveCtW0Slot(num_inputs, num_outputs, slot, with_range)) {
             proof.aux_residues[slot] = SmilePoly{};
             continue;
         }
-        if (slot < ComputeLiveCtW0Offset(num_inputs, num_outputs)) {
+        if (slot < ComputeLiveCtW0Offset(num_inputs, num_outputs, with_range)) {
             if (omitted_selector_amount_index >= omitted_selector_amount_residues.size()) {
                 return SmileCTDecodeStatus::MALFORMED;
             }
@@ -1122,6 +1179,22 @@ SmileCTDecodeStatus DecodeCTProof(const std::vector<uint8_t>& data,
         return SmileCTDecodeStatus::MALFORMED;
     }
 
+    // C-002 w3-1 (v3 only): per-input serial<->key masks w_sn (num_inputs polys,
+    // full 128 coeffs, canonical [0,Q)). v2 (legacy) has none — leave w_sn empty.
+    if (proof.wire_version >= SmileCTProof::WIRE_VERSION_C002_HARDENED) {
+        proof.w_sn.assign(num_inputs, SmilePoly{});
+        for (size_t i = 0; i < num_inputs; ++i) {
+            for (size_t c = 0; c < POLY_DEGREE; ++c) {
+                uint32_t val;
+                if (!ReadU32(ptr, end, val)) return SmileCTDecodeStatus::MALFORMED;
+                if (val >= static_cast<uint32_t>(Q)) return SmileCTDecodeStatus::MALFORMED;
+                proof.w_sn[i].coeffs[c] = static_cast<int64_t>(val);
+            }
+        }
+    } else {
+        proof.w_sn.clear();
+    }
+
     proof.omega = SmilePoly{};
     proof.framework_omega = SmilePoly{};
     if (!ReadBytes(ptr, end, proof.post_h2_binding_digest.data(), proof.post_h2_binding_digest.size())) {
@@ -1141,10 +1214,35 @@ SmileCTDecodeStatus DecodeCTProof(const std::vector<uint8_t>& data,
         proof.h2.coeffs[c] = static_cast<int64_t>(val);
     }
 
+    // C-002 (v3 only): value-conservation binding fields (full 128 coefficients
+    // each, canonical [0,Q)). v2 (legacy) omits these — leave them zero.
+    proof.balance_w.coeffs.fill(0);
+    proof.balance_carry.coeffs.fill(0);
+    if (proof.wire_version >= SmileCTProof::WIRE_VERSION_C002_HARDENED) {
+        for (size_t c = 0; c < POLY_DEGREE; ++c) {
+            uint32_t val;
+            if (!ReadU32(ptr, end, val)) return SmileCTDecodeStatus::MALFORMED;
+            if (val >= static_cast<uint32_t>(Q)) return SmileCTDecodeStatus::MALFORMED;
+            proof.balance_w.coeffs[c] = static_cast<int64_t>(val);
+        }
+        for (size_t c = 0; c < POLY_DEGREE; ++c) {
+            uint32_t val;
+            if (!ReadU32(ptr, end, val)) return SmileCTDecodeStatus::MALFORMED;
+            if (val >= static_cast<uint32_t>(Q)) return SmileCTDecodeStatus::MALFORMED;
+            proof.balance_carry.coeffs[c] = static_cast<int64_t>(val);
+        }
+    }
+
     proof.fs_seed.fill(0);
     proof.seed_c0.fill(0);
     proof.seed_z.fill(0);
     if (!ReadBytes(ptr, end, proof.seed_c.data(), 32)) return SmileCTDecodeStatus::MALFORMED;
+
+    // C-002 (audit #1): v3 carries seed_z on-wire so the step-12 binding check
+    // is enforced. Pre-v3 leaves it zeroed (historical/pre-fork proofs only).
+    if (proof.wire_version >= SmileCTProof::WIRE_VERSION_C002_HARDENED) {
+        if (!ReadBytes(ptr, end, proof.seed_z.data(), 32)) return SmileCTDecodeStatus::MALFORMED;
+    }
 
     // Output coins and prover public keys are NO LONGER deserialized from the
     // proof bytes. They are read from the V2SendWitness structure instead.

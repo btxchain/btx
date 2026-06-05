@@ -164,7 +164,8 @@ bitcoin_pqc_error_t bitcoin_pqc_sign_with_randomness(
     size_t message_size,
     const uint8_t *random_data,
     size_t random_data_size,
-    bitcoin_pqc_signature_t *signature
+    bitcoin_pqc_signature_t *signature,
+    int slhdsa_fips205
 ) {
     if (!secret_key || !message || !signature) {
         return BITCOIN_PQC_ERROR_BAD_ARG;
@@ -211,7 +212,8 @@ bitcoin_pqc_error_t bitcoin_pqc_sign_with_randomness(
         case BITCOIN_PQC_SLH_DSA_SHAKE_128S:
             DEBUG_PRINT("bitcoin_pqc_sign: Calling slh_dsa_shake_128s_sign\n");
             result = slh_dsa_shake_128s_sign_with_randomness(sig, &actual_sig_len, message, message_size,
-                                                             secret_key, random_data, random_data_size);
+                                                             secret_key, random_data, random_data_size,
+                                                             slhdsa_fips205);
             break;
         default:
             free(sig);
@@ -254,7 +256,8 @@ bitcoin_pqc_error_t bitcoin_pqc_sign(
         message_size,
         NULL,
         0,
-        signature);
+        signature,
+        /*slhdsa_fips205=*/0);
 }
 
 void bitcoin_pqc_signature_free(bitcoin_pqc_signature_t *signature) {
@@ -279,7 +282,8 @@ bitcoin_pqc_error_t bitcoin_pqc_verify(
     const uint8_t *message,
     size_t message_size,
     const uint8_t *signature,
-    size_t signature_size
+    size_t signature_size,
+    int slhdsa_fips205
 ) {
     if (!public_key || !message || !signature) {
         DEBUG_PRINT("bitcoin_pqc_verify: Invalid arguments\n");
@@ -317,7 +321,7 @@ bitcoin_pqc_error_t bitcoin_pqc_verify(
             break;
         case BITCOIN_PQC_SLH_DSA_SHAKE_128S:
             DEBUG_PRINT("bitcoin_pqc_verify: Calling slh_dsa_shake_128s_verify\n");
-            result = slh_dsa_shake_128s_verify(signature, signature_size, message, message_size, public_key);
+            result = slh_dsa_shake_128s_verify(signature, signature_size, message, message_size, public_key, slhdsa_fips205);
             break;
         default:
             DEBUG_PRINT("bitcoin_pqc_verify: Unsupported algorithm %d\n", algorithm);

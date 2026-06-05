@@ -413,7 +413,8 @@ template <typename T>
 
 [[nodiscard]] bool VerifyIngressSignedReceiptSet(const BridgeBatchStatement& statement,
                                                  const V2IngressSettlementWitness& witness,
-                                                 std::string& reject_reason)
+                                                 std::string& reject_reason,
+                                                 bool slhdsa_fips205)
 {
     if (!statement.verifier_set.IsValid()) {
         if (!witness.signed_receipts.empty() || !witness.signed_receipt_proofs.empty()) {
@@ -440,7 +441,7 @@ template <typename T>
 
     for (size_t i = 0; i < witness.signed_receipts.size(); ++i) {
         const auto& receipt = witness.signed_receipts[i];
-        if (!VerifyBridgeBatchReceipt(receipt) ||
+        if (!VerifyBridgeBatchReceipt(receipt, slhdsa_fips205) ||
             ComputeBridgeBatchStatementHash(receipt.statement) != statement_hash) {
             reject_reason = "bad-shielded-v2-ingress-signed-receipts";
             return false;
@@ -503,13 +504,14 @@ template <typename T>
 
 [[nodiscard]] bool VerifyIngressSettlementWitness(const BridgeBatchStatement& statement,
                                                   const V2IngressSettlementWitness& witness,
-                                                  std::string& reject_reason)
+                                                  std::string& reject_reason,
+                                                  bool slhdsa_fips205)
 {
     if (!witness.IsValid()) {
         reject_reason = "bad-shielded-v2-ingress-settlement-witness";
         return false;
     }
-    if (!VerifyIngressSignedReceiptSet(statement, witness, reject_reason)) {
+    if (!VerifyIngressSignedReceiptSet(statement, witness, reject_reason, slhdsa_fips205)) {
         return false;
     }
     if (!VerifyIngressProofReceiptSet(statement, witness, reject_reason)) {
@@ -783,7 +785,8 @@ template <typename T>
     CAmount fee,
     std::string& reject_reason,
     bool reject_rice_codec,
-    bool bind_anonset_context)
+    bool bind_anonset_context,
+    int64_t validation_height)
 {
     if (!NativeBatchBackendMatchesSmile(backend) ||
         shared_ring_members.empty() ||
@@ -816,7 +819,8 @@ template <typename T>
             pub,
             fee,
             reject_rice_codec,
-            bind_anonset_context);
+            bind_anonset_context,
+            validation_height);
         verify_err.has_value()) {
         reject_reason = *verify_err;
         return false;
@@ -2068,8 +2072,10 @@ BuildV2IngressSmileRingMembers(
 bool VerifyV2IngressProof(const TransactionBundle& bundle,
                           const V2IngressContext& context,
                           const std::vector<std::vector<std::vector<uint256>>>& ring_members,
-                          std::string& reject_reason)
+                          std::string& reject_reason,
+                          int64_t validation_height)
 {
+    const bool slhdsa_fips205 = BridgeAttestorUsesFips205AtHeight(validation_height);
     if (NativeBatchBackendMatchesSmile(context.backend)) {
         reject_reason = "bad-shielded-v2-ingress-backend";
         return false;
@@ -2109,7 +2115,7 @@ bool VerifyV2IngressProof(const TransactionBundle& bundle,
         return false;
     }
     if (header.settlement_witness.has_value() &&
-        !VerifyIngressSettlementWitness(header.statement, *header.settlement_witness, reject_reason)) {
+        !VerifyIngressSettlementWitness(header.statement, *header.settlement_witness, reject_reason, slhdsa_fips205)) {
         return false;
     }
     if (header.statement.entry_count != header.ingress_leaves.size() ||
@@ -2407,8 +2413,10 @@ bool VerifyV2IngressProof(
     const std::vector<std::vector<std::vector<smile2::wallet::SmileRingMember>>>& ring_members,
     std::string& reject_reason,
     bool reject_rice_codec,
-    bool bind_anonset_context)
+    bool bind_anonset_context,
+    int64_t validation_height)
 {
+    const bool slhdsa_fips205 = BridgeAttestorUsesFips205AtHeight(validation_height);
     if (!NativeBatchBackendMatchesSmile(context.backend)) {
         reject_reason = "bad-shielded-v2-ingress-backend";
         return false;
@@ -2447,7 +2455,7 @@ bool VerifyV2IngressProof(
         return false;
     }
     if (header.settlement_witness.has_value() &&
-        !VerifyIngressSettlementWitness(header.statement, *header.settlement_witness, reject_reason)) {
+        !VerifyIngressSettlementWitness(header.statement, *header.settlement_witness, reject_reason, slhdsa_fips205)) {
         return false;
     }
     if (header.statement.entry_count != header.ingress_leaves.size() ||
@@ -2676,7 +2684,8 @@ bool VerifyV2IngressProof(
                 *shard_fee,
                 reject_reason,
                 reject_rice_codec,
-                bind_anonset_context)) {
+                bind_anonset_context,
+                validation_height)) {
             return false;
         }
 
@@ -2987,7 +2996,9 @@ std::optional<V2IngressBuildResult> BuildV2IngressBatchTransaction(const CMutabl
             serial_hashes,
             *shard_fee,
             smile2::SmileProofCodecPolicy::CANONICAL_NO_RICE,
-            bind_smile_anonset_context);
+            bind_smile_anonset_context,
+            /*error=*/nullptr,
+            validation_height);
         if (!smile_result.has_value()) {
             reject_reason = "bad-shielded-v2-ingress-smile-proof";
             return std::nullopt;

@@ -125,6 +125,21 @@ bool CheckTxScripts(const CTransaction& tx, const std::map<COutPoint, CScript>& 
     const std::map<COutPoint, int64_t>& map_prevout_values, unsigned int flags,
     const PrecomputedTransactionData& txdata, const std::string& strTest, bool expect_valid)
 {
+    // BTX is post-quantum only. SCRIPT_VERIFY_REJECT_LEGACY_SIGS makes the interpreter
+    // reject legacy secp256k1 ECDSA OP_CHECKSIG (SigVersion::BASE/WITNESS_V0) with
+    // SCRIPT_ERR_BAD_OPCODE. The tx_valid/tx_invalid JSON vectors are inherited upstream
+    // classical ECDSA P2PKH/P2SH/multisig transactions. The tx_valid runner applies the
+    // bitwise complement (~verify_flags) of the JSON-listed flags, which unintentionally
+    // turns on bit 25 (REJECT_LEGACY_SIGS) because that fork-added flag has no name in
+    // mapFlagNames and so is never excluded. Per the PQ-only hardening design intent
+    // ("the flag is off in the inherited unit tests so they still exercise ECDSA";
+    // commit "reject legacy secp256k1 ECDSA/Schnorr at consensus"), we mask it off here
+    // so the inherited vectors keep exercising classical signature semantics. The live
+    // consensus path still sets the flag via GetBlockScriptFlags; that behavior is
+    // unchanged. No JSON vector can legitimately request this flag (it is unnamed), so
+    // masking it does not weaken any assertion on the remaining flags.
+    flags &= ~(unsigned int)SCRIPT_VERIFY_REJECT_LEGACY_SIGS;
+
     bool tx_valid = true;
     ScriptError err = expect_valid ? SCRIPT_ERR_UNKNOWN_ERROR : SCRIPT_ERR_OK;
     for (unsigned int i = 0; i < tx.vin.size() && tx_valid; ++i) {
@@ -662,6 +677,12 @@ BOOST_AUTO_TEST_CASE(test_witness)
     CheckWithFlag(output1, input1, SCRIPT_VERIFY_P2SH, true);
     CheckWithFlag(output1, input1, SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_P2SH, true);
     CheckWithFlag(output1, input1, STANDARD_SCRIPT_VERIFY_FLAGS, true);
+    // BTX is post-quantum only: a legacy secp256k1 ECDSA OP_CHECKSIG spend that is
+    // otherwise valid must be REJECTED when the PQ-only signature rule is enforced
+    // (SCRIPT_VERIFY_REJECT_LEGACY_SIGS, set by consensus wherever non-P2MR outputs
+    // are forbidden). PQ CHECKSIG (OP_CHECKSIG_MLDSA/SLHDSA) is unaffected.
+    CheckWithFlag(output1, input1, SCRIPT_VERIFY_REJECT_LEGACY_SIGS, false);
+    CheckWithFlag(output1, input1, STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_REJECT_LEGACY_SIGS, false);
     CheckWithFlag(output1, input2, SCRIPT_VERIFY_NONE, false);
     CheckWithFlag(output1, input2, SCRIPT_VERIFY_P2SH, false);
     CheckWithFlag(output1, input2, SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_P2SH, false);

@@ -7,8 +7,7 @@ increasing volume of transactions on the network.
 Please report bugs using the issue tracker at github:
   https://github.com/bitcoin/bitcoin/issues
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait
 until it has completely shut down (which might take a few minutes for older
@@ -19,8 +18,7 @@ The first time you run after the upgrade a re-indexing process will be
 started that will take anywhere from 30 minutes to several hours,
 depending on the speed of your machine.
 
-Incompatible Changes
---------------------
+## Incompatible Changes
 
 This release no longer maintains a full index of historical transaction ids
 by default, so looking up an arbitrary transaction using the getrawtransaction
@@ -28,8 +26,7 @@ RPC call will not work. If you need that functionality, you must run once
 with -txindex=1 -reindex=1 to rebuild block-chain indices (see below for more
 details).
 
-Improvements
-------------
+## Improvements
 
 Mac and Windows binaries are signed with certificates owned by the Bitcoin
 Foundation, to be compatible with the new security features in OSX 10.8 and
@@ -46,8 +43,7 @@ verified, so a running, synchronized node uses less working memory and does
 much less I/O. He also implemented parallel signature checking, so if you
 have a multi-CPU machine all CPUs will be used to verify transactions.
 
-New Features
-------------
+## New Features
 
 "Bloom filter" support in the network protocol for sending only relevant transactions to
 lightweight clients.
@@ -61,8 +57,7 @@ contrib/spendfrom is a python-language command-line utility that demonstrates
 how to use the "raw transactions" JSON-RPC api to send coins received from particular
 addresses (also known as "coin control").
 
-New/changed settings (command-line or bitcoin.conf file)
---------------------------------------------------------
+## New/changed settings (command-line or bitcoin.conf file)
 
 dbcache : controls LevelDB memory usage.
 
@@ -74,8 +69,7 @@ by the getrawtransaction JSON-RPC method.
 
 reindex : rebuild block and transaction indices from the downloaded block data.
 
-New JSON-RPC API Features
--------------------------
+## New JSON-RPC API Features
 
 lockunspent / listlockunspent allow locking transaction outputs for a period of time so
 they will not be spent by other processes that might be accessing the same wallet.
@@ -85,8 +79,7 @@ addnode / getaddednodeinfo methods, to connect to specific peers without restart
 importprivkey now takes an optional boolean parameter (default true) to control whether
 or not to rescan the blockchain for transactions after importing a new private key.
 
-Important Bug Fixes
--------------------
+## Important Bug Fixes
 
 Privacy leak: the position of the "change" output in most transactions was not being
 properly randomized, making network analysis of the transaction graph to identify
@@ -99,14 +92,12 @@ double-spend zero-confirmation transactions. However, this release includes a bu
 fix that makes it a little bit more difficult for attackers to double-spend a
 certain type ("lockTime in the future") of zero-confirmation transaction.
 
-Dependency Changes
-------------------
+## Dependency Changes
 
 Qt 4.8.3 (compiling against older versions of Qt 4 should continue to work)
 
 
-Thanks to everybody who contributed to this release:
-----------------------------------------------------
+## Thanks to everybody who contributed to this release:
 
 Alexander Kjeldaas
 Andrey Alekseenko

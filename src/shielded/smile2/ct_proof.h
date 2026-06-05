@@ -159,9 +159,20 @@ struct SmileInputTupleProof {
 struct SmileCTProof {
     static constexpr uint8_t WIRE_VERSION_LEGACY{1};
     static constexpr uint8_t WIRE_VERSION_M4_HARDENED{2};
+    // C-002 value-conservation hardening. Carries balance_w/balance_carry, the
+    // w_sn serial<->key masks, and seed_z on-wire (mandatory transcript binding).
+    // Post-activation spends MUST be v3; v2 is historical/pre-fork only.
+    static constexpr uint8_t WIRE_VERSION_C002_HARDENED{3};
+    // C-002 staged activation height. Anonset-bound spends are v2 (legacy) before
+    // this height and v3 (C-002/R5 hardened) at/after it. Single source of truth
+    // shared by prover, verifier (verify_dispatch), serialization, the SLH-DSA
+    // FIPS-205 script flags, the bridge attestor verification, and the self-serve
+    // z->t unshield gate. (regtest builds may lower this for cross-activation tests.)
+    static constexpr int64_t C002_ACTIVATION_HEIGHT{123000};
 
     // Legacy proofs are versionless on the wire. Post-61000 hardened proofs
-    // carry an explicit wire header and set this to WIRE_VERSION_M4_HARDENED.
+    // carry an explicit wire header and set this to WIRE_VERSION_M4_HARDENED
+    // (or WIRE_VERSION_C002_HARDENED after the C-002 activation height).
     uint8_t wire_version{WIRE_VERSION_LEGACY};
 
     // Output coin commitments (minted in protocol)
@@ -255,6 +266,23 @@ struct SmileCTProof {
     // Framework proof polynomial h2 (first d/l=4 coefficients must be 0)
     SmilePoly h2;
 
+    // C-002 value-conservation binding (fork height C002_ACTIVATION_HEIGHT, live m=1 only).
+    // balance_w  = Σ_i⟨b_{InSlot(i)},y_mask⟩ − Σ_j⟨b_{OutSlot(j)},y_mask⟩  (mask aggregate,
+    //              a fixed public linear functional of the existing y_mask; FS-bound before seed_c).
+    // balance_carry = Γ, the base-4 carry corrector (digits c_j−4c_{j+1} in NTT-slot-0), with
+    //              Eval(Γ)=0 by telescoping (c_0=c_32=0). The verifier checks the public-fee-bound
+    //              relation  Σf[InSlot] − Σf[OutSlot] + c·enc(fee) − c·Γ == balance_w  AND that Γ is a
+    //              valid carry (slot coeffs[1..3]==0, |digit|≤bound, Eval(Γ)==0). Together ⇒
+    //              Σa_in = Σa_out + public_fee over Z. (R4 spec; the Γ-validity check is MANDATORY —
+    //              without it a forger sets Γ=enc(fee) to absorb the fee.)
+    SmilePoly balance_w;
+    SmilePoly balance_carry;
+
+    // C-002 w3-1: per-input serial↔key binding mask  w_sn[i] = ⟨b_sn, y0_i⟩  (FS-bound before c0).
+    // Verifier enforces ⟨b_sn, z0_i⟩ − c0·serial_i == w_sn[i], pinning the revealed nullifier to the
+    // same spend key opened by z0_i (which is itself coin/key-bound) — prevents decoupled/double-spend serials.
+    std::vector<SmilePoly> w_sn;
+
     // Fiat-Shamir seeds
     std::array<uint8_t, 32> fs_seed;
     std::array<uint8_t, 32> seed_c0;
@@ -293,7 +321,10 @@ std::optional<SmileCTProof> TryProveCT(
     uint64_t rng_seed,
     int64_t public_fee = 0,
     bool bind_anonset_context = false,
-    std::string* error = nullptr);
+    std::string* error = nullptr,
+    // Default = activation height ⇒ existing callers produce v3. Consensus/wallet
+    // callers MUST pass the real target block height (see C002_ACTIVATION_SAFETY).
+    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
 
 // Legacy wrapper used by existing tests and helper call sites that still
 // treat failure as an empty/default proof object.
@@ -303,10 +334,14 @@ SmileCTProof ProveCT(
     const CTPublicData& pub,
     uint64_t rng_seed,
     int64_t public_fee = 0,
-    bool bind_anonset_context = false);
+    bool bind_anonset_context = false,
+    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
 
 [[nodiscard]] size_t GetCtRejectionRetryBudget();
 [[nodiscard]] size_t GetCtTimingPaddingAttemptLimit();
+
+// NOTE: red-team forge hooks are intentionally not declared in the consensus
+// library. They exist only in the offline forge-test harness.
 
 // Verify a confidential transaction proof
 bool VerifyCT(

@@ -51,6 +51,7 @@
 #include <node/blockmanager_args.h>
 #include <node/blockstorage.h>
 #include <node/caches.h>
+#include <node/autoupdate.h>
 #include <node/chainstate.h>
 #include <node/chainstatemanager_args.h>
 #include <node/context.h>
@@ -299,6 +300,7 @@ void Interrupt(NodeContext& node)
 #if HAVE_SYSTEM
     ShutdownNotify(*node.args);
 #endif
+    if (node.autoupdate) node.autoupdate->Interrupt();
     // Wake any threads that may be waiting for the tip to change.
     if (node.notifications) WITH_LOCK(node.notifications->m_tip_block_mutex, node.notifications->m_tip_block_cv.notify_all());
     InterruptHTTPServer();
@@ -346,6 +348,7 @@ void Shutdown(NodeContext& node)
     StopTorControl();
 
     if (node.background_init_thread.joinable()) node.background_init_thread.join();
+    if (node.autoupdate) node.autoupdate->Stop();
     // After everything has been shut down, but before things get flushed, stop the
     // the scheduler. After this point, SyncWithValidationInterfaceQueue() should not be called anymore
     // as this would prevent the shutdown from completing.
@@ -368,6 +371,7 @@ void Shutdown(NodeContext& node)
 
     // Drop transactions we were still watching, record fee estimations and unregister
     // fee estimator from validation interface.
+    node.autoupdate.reset();
     if (node.fee_estimator) {
         node.fee_estimator->Flush();
         if (node.validation_signals) {
@@ -515,6 +519,8 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-matmulvalidation=<mode>", "Select MatMul transcript verification mode: consensus (default), economic, or spv. consensus runs Phase 2 checks within the validation window (full-node tier). economic runs Phase 1-only header checks and trusts full-node majority; it is not a full node. spv is header-only Phase 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulservicechallengefile=<file>", "Path to the persistent MatMul service challenge registry. Relative paths are resolved under the network datadir. Point multiple service nodes at the same shared file to let getmatmulservicechallenge issuance and redeemmatmulserviceproof redemption work across the cluster. (default: <netdir>/matmul_service_challenges.dat)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     argsman.AddArg("-retainshieldedcommitmentindex", "Keep the shielded commitment-position index in the local LevelDB store across restart and snapshot recovery (default: 1). Set this to 0 only if you explicitly want the slower externalized-retention posture that rebuilds the index in memory after restart in exchange for lower retained shielded-state growth.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-fastshieldedstartup", "Zero-downtime restart: when matching persisted shielded state is available at startup, trust it and skip the full-chain shielded settlement/netting drift sync and the cross-chain audit (default: 1). The persisted state reaching the restore path already had its frontier root/size matched to the tip and its commitment index/anchor windows validated, and per-block consensus still runs on newly connected blocks, so this only affects restart latency. Set to 0 to force the thorough full-chain drift sync + audit on every restart.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-shieldedstartupaudit", "Audit restored shielded state against historical block data during startup (default: 1). Applies when -fastshieldedstartup is disabled or cannot be taken: set to 0 to keep the persisted-state drift sync but skip the cross-chain audit. Consensus checks still run for newly connected blocks.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blocksdir=<dir>", "Specify directory to hold blocks subdirectory for *.dat files (default: <datadir>)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blocksxor",
                    strprintf("Whether an XOR-key applies to blocksdir *.dat files. "
@@ -572,6 +578,18 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-reindex-chainstate", "If enabled, wipe chain state, and rebuild it from blk*.dat files on disk. If an assumeutxo snapshot was loaded, its chainstate will be wiped as well. The snapshot can then be reloaded via RPC. Note: this does not rerun all contextual block checks; use -reindex for full historical re-validation after changing MatMul validation mode.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-settings=<file>", strprintf("Specify path to dynamic settings data file. Can be disabled with -nosettings. File is written at runtime and not meant to be edited by users (use %s instead for custom settings). Relative paths will be prefixed by datadir location. (default: %s)", BITCOIN_CONF_FILENAME, BITCOIN_SETTINGS_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-softwareexpiry", strprintf("Stop working after this POSIX timestamp (default: %s)", DEFAULT_SOFTWARE_EXPIRY), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdate", "Enable signed source auto-update polling (default: 1 on mainnet, 0 on test chains). The updater silently no-ops unless the manifest signature and installer script hash verify.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdatemanifesturl=<url>", strprintf("Signed auto-update manifest URL (default: %s)", node::DEFAULT_AUTOUPDATE_MANIFEST_URL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdatetrustedorigin=<origin>", strprintf("Trusted auto-update origin. Manifest, signature, and installer URLs must all stay on this origin (default: %s)", node::DEFAULT_AUTOUPDATE_TRUSTED_ORIGIN), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdatepubkey=<hex>", "Release public key (hex) for version.txt signatures, in the scheme set by -autoupdatepubkeyalgo. Set to 0 to make auto-update inert.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdatepubkeyalgo=<scheme>", strprintf("Release signature scheme: ml-dsa-44, slh-dsa-128s, or secp256k1. The post-quantum schemes keep the update channel quantum-safe (default: %s).", node::DEFAULT_AUTOUPDATE_RELEASE_PUBKEY_ALGO), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdateinterval=<n>", strprintf("Seconds between auto-update checks (default: %d)", node::DEFAULT_AUTOUPDATE_INTERVAL_SECONDS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdateinitialdelay=<n>", strprintf("Seconds to wait after startup before the first auto-update check (default: %d)", node::DEFAULT_AUTOUPDATE_INITIAL_DELAY_SECONDS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdatecohort=<n>", "Pin this node's staged-rollout cohort to n in [0,99] (e.g. 0 for an early canary). A signed release with rollout_percent P is applied only when the cohort is < P. Default: derived stably from the datadir.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdateseamless", "If enabled, launch the verified installer script for a newer signed release (default: 1). If disabled, only log that a verified update exists.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdaterequirescripthash", "Require the signed manifest to include script_sha256/install_sha256 matching the downloaded installer before execution (default: 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdatepython=<path>", "Python interpreter used only for HTTPS manifest/signature/script fetching (default: python3).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdatedevorigin", "Allow non-HTTPS auto-update origins for local testing only.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
 #if HAVE_SYSTEM
     argsman.AddArg("-startupnotify=<cmd>", "Execute command on startup.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-shutdownnotify=<cmd>", "Execute command immediately before beginning shutdown. The need for shutdown may be urgent, so be careful not to delay it long (if the command doesn't require interaction with the server, consider having it fork into the background).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -613,6 +631,8 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-onlynet=<net>", "Make automatic outbound connections only to network <net> (" + Join(GetNetworkNames(), ", ") + "). Inbound and manual connections are not affected by this option. It can be specified multiple times to allow multiple networks.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-v2transport", strprintf("Support v2 transport (default: %u)", DEFAULT_V2_TRANSPORT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-v2onlyclearnet", strprintf("Disallow outbound v1 connections on IPV4/IPV6 (default: %u). Enable this option only if you really need it. Use -listen=0 to disable inbound connections since they can be unencrypted.", false), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-v2pqhybrid", strprintf("On v2 (BIP324) connections, advertise and use the post-quantum hybrid X25519+ML-KEM-768 key upgrade with peers that also support it (default: %u). Disabling makes this node behave as a stock-BIP324 v2 peer; peers that do support it still fall back gracefully.", true), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-v2pqonly", strprintf("Require the post-quantum hybrid X25519+ML-KEM-768 upgrade on every connection (default: %u). Peers that do not complete the hybrid handshake (legacy v2, or v1) are disconnected instead of served over an X25519-only/unencrypted link. The key derivation is unchanged (still hybrid); enable only once your peers support it, as it can partition you from non-upgraded nodes. Implies -v2pqhybrid.", false), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerbloomfilters", strprintf("Support filtering of blocks and transactions with bloom filters (default: %s)", DEFAULT_PEERBLOOMFILTERS ? "1" : "localhost only"), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerblockfilters", strprintf("Serve compact block filters to peers per BIP 157 (default: %u)", DEFAULT_PEERBLOCKFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-minsmilev2version=<n>", strprintf("Minimum peer protocol version required for SMILE v2 shielded transactions. "
@@ -1119,6 +1139,42 @@ bool AppInitParameterInteraction(const ArgsManager& args)
 
     if (!warnings.empty()) {
         InitWarning(warnings);
+    }
+
+    const bool auto_update_enabled = args.IsArgSet("-autoupdate") ? args.GetBoolArg("-autoupdate", true) : chain == ChainType::MAIN;
+    if (auto_update_enabled) {
+        const int64_t interval = args.GetIntArg("-autoupdateinterval", node::DEFAULT_AUTOUPDATE_INTERVAL_SECONDS);
+        if (interval < 1 || interval > 24 * 60 * 60) {
+            return InitError(_("-autoupdateinterval must be between 1 and 86400 seconds."));
+        }
+        const int64_t initial_delay = args.GetIntArg("-autoupdateinitialdelay", node::DEFAULT_AUTOUPDATE_INITIAL_DELAY_SECONDS);
+        if (initial_delay < 0 || initial_delay > 24 * 60 * 60) {
+            return InitError(_("-autoupdateinitialdelay must be between 0 and 86400 seconds."));
+        }
+        if (args.IsArgSet("-autoupdatecohort")) {
+            const int64_t cohort = args.GetIntArg("-autoupdatecohort", 0);
+            if (cohort < 0 || cohort > 99) {
+                return InitError(_("-autoupdatecohort must be between 0 and 99."));
+            }
+        }
+        const bool dev_origin = args.GetBoolArg("-autoupdatedevorigin", false);
+        const std::string manifest_url = args.GetArg("-autoupdatemanifesturl", std::string{node::DEFAULT_AUTOUPDATE_MANIFEST_URL});
+        const std::string trusted_origin = args.GetArg("-autoupdatetrustedorigin", std::string{node::DEFAULT_AUTOUPDATE_TRUSTED_ORIGIN});
+        if (!node::AutoUpdateUrlMatchesTrustedOrigin(manifest_url, trusted_origin, dev_origin)) {
+            return InitError(_("-autoupdatemanifesturl must be on -autoupdatetrustedorigin, and must use HTTPS unless -autoupdatedevorigin is set."));
+        }
+        const std::string release_pubkey = args.GetArg("-autoupdatepubkey", std::string{node::DEFAULT_AUTOUPDATE_RELEASE_PUBKEY});
+        const std::string release_pubkey_algo = args.GetArg("-autoupdatepubkeyalgo", std::string{node::DEFAULT_AUTOUPDATE_RELEASE_PUBKEY_ALGO});
+        const auto release_pubkey_hex_len = node::AutoUpdateReleasePubkeyHexLength(release_pubkey_algo);
+        if (!release_pubkey_hex_len) {
+            return InitError(_("-autoupdatepubkeyalgo must be one of ml-dsa-44, slh-dsa-128s, or secp256k1."));
+        }
+        if (!release_pubkey.empty() && release_pubkey != "0" && (release_pubkey.size() != *release_pubkey_hex_len || !IsHex(release_pubkey))) {
+            return InitError(strprintf(_("-autoupdatepubkey must be a %s public key hex string (%d hex characters), or 0 to make auto-update inert."), release_pubkey_algo, *release_pubkey_hex_len));
+        }
+        if (args.GetArg("-autoupdatepython", "python3").empty()) {
+            return InitError(_("-autoupdatepython must not be empty."));
+        }
     }
 
     if (!fs::is_directory(args.GetBlocksDirPath())) {
@@ -2663,6 +2719,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }, DUMP_BANS_INTERVAL);
 
     if (node.peerman) node.peerman->StartScheduledTasks(scheduler);
+
+    node.autoupdate = node::MakeAutoUpdateManager(args, chainparams.GetChainType());
+    if (node.autoupdate) node.autoupdate->Start();
 
 #if HAVE_SYSTEM
     StartupNotify(args);

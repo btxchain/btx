@@ -11,6 +11,7 @@ add_executable(test_btx
   amount_tests.cpp
   argsman_tests.cpp
   arith_uint256_tests.cpp
+  autoupdate_tests.cpp
   banman_tests.cpp
   base32_tests.cpp
   base58_tests.cpp
@@ -155,6 +156,7 @@ add_executable(test_btx
   shielded_hardening_tests.cpp
   shielded_audit_regression_tests.cpp
   shielded_bridge_tests.cpp
+  shielded_bridge_mode_exact_tests.cpp
   shielded_account_registry_tests.cpp
   shielded_v2_bundle_tests.cpp
   shielded_v2_egress_tests.cpp
@@ -257,6 +259,10 @@ target_raw_data_sources(test_btx NAMESPACE test::data
 )
 target_include_directories(test_btx PRIVATE
   $<TARGET_PROPERTY:secp256k1,INTERFACE_INCLUDE_DIRECTORIES>
+  # bitcoinpqc exposes <libbitcoinpqc/bitcoinpqc.h> via PUBLIC includes; on the Linux
+  # archive-group link it propagates transitively, but the Apple link path does not pull
+  # it in. Add it explicitly so pq_crypto_tests.cpp compiles on every platform.
+  $<TARGET_PROPERTY:bitcoinpqc,INTERFACE_INCLUDE_DIRECTORIES>
 )
 target_compile_definitions(test_btx PRIVATE
   BTX_REFERENCE_TEST_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/test/reference/shielded_test_vectors.json\"

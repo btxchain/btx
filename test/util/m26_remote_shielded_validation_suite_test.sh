@@ -102,14 +102,58 @@ PY
 
 python3 - "${SCRIPT_PATH}" <<'PY'
 import importlib.util
+import io
 import pathlib
 import sys
+import tarfile
+import tempfile
 
 path = pathlib.Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location("m26_suite", path)
 module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(module)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    safe_tar = root / "safe.tar.gz"
+    safe_src = root / "safe.txt"
+    safe_src.write_text("ok", encoding="utf-8")
+    safe_extract = root / "safe_extract"
+    safe_extract.mkdir()
+    with tarfile.open(safe_tar, "w:gz") as archive:
+        archive.add(safe_src, arcname="reports/safe.txt")
+    module.extract_remote_artifact_bundle(safe_tar, safe_extract)
+    if (safe_extract / "reports" / "safe.txt").read_text(encoding="utf-8") != "ok":
+        raise SystemExit("safe remote artifact bundle did not extract expected file")
+
+    traversal_tar = root / "traversal.tar.gz"
+    with tarfile.open(traversal_tar, "w:gz") as archive:
+        info = tarfile.TarInfo("../escape.txt")
+        payload = b"bad"
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    try:
+        module.extract_remote_artifact_bundle(traversal_tar, root / "traversal_extract")
+    except ValueError as exc:
+        if "unsafe path" not in str(exc):
+            raise
+    else:
+        raise SystemExit("unsafe traversal member was not rejected")
+
+    link_tar = root / "link.tar.gz"
+    with tarfile.open(link_tar, "w:gz") as archive:
+        info = tarfile.TarInfo("linked")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/tmp/linked"
+        archive.addfile(info)
+    try:
+        module.extract_remote_artifact_bundle(link_tar, root / "link_extract")
+    except ValueError as exc:
+        if "unsupported link" not in str(exc):
+            raise
+    else:
+        raise SystemExit("symlink member was not rejected")
 
 summary = module.summarize_suite(
     {

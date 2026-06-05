@@ -28,6 +28,7 @@
 #include <protocol.h>
 #include <random.h>
 #include <scheduler.h>
+#include <support/cleanse.h>
 #include <util/fs.h>
 #include <util/sock.h>
 #include <util/strencodings.h>
@@ -1021,14 +1022,44 @@ void V2Transport::StartSendingHandshake() noexcept
     // We cannot wipe m_send_garbage as it will still be used as AAD later in the handshake.
 }
 
+namespace {
+/** (BTX PQ) Whether this node advertises and uses the hybrid X25519 + ML-KEM-768 upgrade on v2
+ *  connections. Hidden debug option, default on; disabling makes the transport behave as a stock
+ *  BIP324 v2 peer (empty version packet, no ML-KEM material). Read once per transport construction. */
+bool V2TransportPQEnabled() noexcept
+{
+    return gArgs.GetBoolArg("-v2pqhybrid", true);
+}
+/** (BTX PQ) Whether this node REQUIRES the hybrid upgrade and refuses non-PQ peers (-v2pqonly,
+ *  default off). Implies PQ capability. */
+bool V2TransportPQOnly() noexcept
+{
+    return gArgs.GetBoolArg("-v2pqonly", false);
+}
+} // namespace
+
 V2Transport::V2Transport(NodeId nodeid, bool initiating, const CKey& key, Span<const std::byte> ent32, std::vector<uint8_t> garbage) noexcept
     : m_cipher{key, ent32}, m_initiating{initiating}, m_nodeid{nodeid},
       m_v1_fallback{nodeid},
+      m_pq_capable{V2TransportPQEnabled() || V2TransportPQOnly()},
+      m_pq_only{V2TransportPQOnly()},
       m_recv_state{initiating ? RecvState::KEY : RecvState::KEY_MAYBE_V1},
       m_send_garbage{std::move(garbage)},
       m_send_state{initiating ? SendState::AWAITING_KEY : SendState::MAYBE_V1}
 {
     Assume(m_send_garbage.size() <= MAX_GARBAGE_LEN);
+    if (m_pq_capable) {
+        // BTX post-quantum hybrid upgrade. Responders generate an ephemeral ML-KEM-768 key pair to
+        // offer in their version packet; initiators encapsulate to the responder's key. Until the
+        // negotiation resolves we hold back application packets (see m_pq_send_gated) so that no app
+        // packet is emitted under a cipher that is about to be replaced by the hybrid rekey.
+        if (!m_initiating) {
+            LOCK(m_recv_mutex);
+            m_pq_keypair = mlkem::KeyGen();
+        }
+        LOCK(m_send_mutex);
+        m_pq_send_gated = true;
+    }
     // Start sending immediately if we're the initiator of the connection.
     if (initiating) {
         LOCK(m_send_mutex);
@@ -1055,6 +1086,9 @@ void V2Transport::SetReceiveState(RecvState recv_state) noexcept
         Assume(recv_state == RecvState::VERSION);
         break;
     case RecvState::VERSION:
+        Assume(recv_state == RecvState::APP || recv_state == RecvState::PQ_CT);
+        break;
+    case RecvState::PQ_CT:
         Assume(recv_state == RecvState::APP);
         break;
     case RecvState::APP:
@@ -1184,18 +1218,69 @@ bool V2Transport::ProcessReceivedKeyBytes() noexcept
                   MakeWritableByteSpan(m_send_buffer).last(BIP324Cipher::GARBAGE_TERMINATOR_LEN).begin());
 
         // Construct version packet in the send buffer, with the sent garbage data as AAD.
-        m_send_buffer.resize(m_send_buffer.size() + BIP324Cipher::EXPANSION + VERSION_CONTENTS.size());
+        // BTX: the version contents carry the post-quantum negotiation (PQ flag, plus the ML-KEM
+        // public key for responders). A legacy/non-PQ transport sends empty contents, identical to
+        // stock BIP324. See ProcessReceivedPacketBytes() for how the peer interprets this.
+        const std::vector<std::byte> version_contents = BuildVersionContents();
+        m_send_buffer.resize(m_send_buffer.size() + BIP324Cipher::EXPANSION + version_contents.size());
         m_cipher.Encrypt(
-            /*contents=*/VERSION_CONTENTS,
+            /*contents=*/version_contents,
             /*aad=*/MakeByteSpan(m_send_garbage),
             /*ignore=*/false,
-            /*output=*/MakeWritableByteSpan(m_send_buffer).last(BIP324Cipher::EXPANSION + VERSION_CONTENTS.size()));
+            /*output=*/MakeWritableByteSpan(m_send_buffer).last(BIP324Cipher::EXPANSION + version_contents.size()));
         // We no longer need the garbage.
         ClearShrink(m_send_garbage);
     } else {
         // We still have to receive more key bytes.
     }
     return true;
+}
+
+std::vector<std::byte> V2Transport::BuildVersionContents() const noexcept
+{
+    AssertLockHeld(m_recv_mutex);
+    std::vector<std::byte> contents;
+    if (!m_pq_capable) return contents; // empty: no post-quantum support advertised
+    if (m_initiating) {
+        // Initiator advertises PQ support with a single flag byte; it will encapsulate to the
+        // responder's key once that key arrives in the responder's version packet.
+        contents.push_back(std::byte{PQ_VERSION_FLAG});
+    } else {
+        // Responder advertises PQ support and offers its ephemeral ML-KEM-768 public key.
+        contents.reserve(1 + mlkem::PUBLICKEYBYTES);
+        contents.push_back(std::byte{PQ_VERSION_FLAG});
+        for (uint8_t b : m_pq_keypair.pk) contents.push_back(std::byte{b});
+    }
+    return contents;
+}
+
+void V2Transport::SendPQCiphertextAndRekey(const mlkem::PublicKey& their_pubkey) noexcept
+{
+    AssertLockHeld(m_recv_mutex);
+    AssertLockNotHeld(m_send_mutex);
+    // Encapsulation is a pure function of the peer's public key; do it before taking the send lock.
+    const mlkem::EncapsResult enc = mlkem::Encaps(their_pubkey);
+
+    LOCK(m_send_mutex);
+    // Append the ML-KEM ciphertext as a packet encrypted under the CURRENT (X25519) send cipher,
+    // before rekeying. It is the initiator's second packet (after the version packet), so it carries
+    // no AAD. Appending preserves any partially-sent handshake bytes already in the buffer; no
+    // application packet can be present yet because m_pq_send_gated has held them back.
+    std::vector<std::byte> ct_contents(mlkem::CIPHERTEXTBYTES);
+    for (size_t i = 0; i < mlkem::CIPHERTEXTBYTES; ++i) ct_contents[i] = std::byte{enc.ct[i]};
+    const size_t add = BIP324Cipher::EXPANSION + mlkem::CIPHERTEXTBYTES;
+    m_send_buffer.resize(m_send_buffer.size() + add);
+    m_cipher.Encrypt(
+        /*contents=*/ct_contents,
+        /*aad=*/{},
+        /*ignore=*/false,
+        /*output=*/MakeWritableByteSpan(m_send_buffer).last(add));
+
+    // Now rekey all four ciphers to the hybrid (X25519 + ML-KEM) keys; every subsequent packet in
+    // both directions uses them. Release held-back application packets.
+    m_cipher.RekeyHybridPQ(MakeByteSpan(enc.ss));
+    m_pq_send_gated = false;
+    LogDebug(BCLog::NET, "v2 transport: post-quantum hybrid rekey complete, peer=%d\n", m_nodeid);
 }
 
 bool V2Transport::ProcessReceivedGarbageBytes() noexcept
@@ -1228,7 +1313,8 @@ bool V2Transport::ProcessReceivedGarbageBytes() noexcept
 bool V2Transport::ProcessReceivedPacketBytes() noexcept
 {
     AssertLockHeld(m_recv_mutex);
-    Assume(m_recv_state == RecvState::VERSION || m_recv_state == RecvState::APP);
+    Assume(m_recv_state == RecvState::VERSION || m_recv_state == RecvState::PQ_CT ||
+           m_recv_state == RecvState::APP);
 
     // The maximum permitted contents length for a packet, consisting of:
     // - 0x00 byte: indicating long message type encoding
@@ -1269,11 +1355,62 @@ bool V2Transport::ProcessReceivedPacketBytes() noexcept
         // decoy, which we simply ignore, use the current state to decide what to do with it.
         if (!ignore) {
             switch (m_recv_state) {
-            case RecvState::VERSION:
-                // Version message received; transition to application phase. The contents is
-                // ignored, but can be used for future extensions.
+            case RecvState::VERSION: {
+                // Version message received. BTX interprets its contents as the post-quantum
+                // negotiation: empty == legacy peer (no PQ); a leading PQ_VERSION_FLAG byte ==
+                // hybrid support, optionally followed (responder side) by an ML-KEM public key.
+                const bool peer_pq = m_pq_capable && !m_recv_decode_buffer.empty() &&
+                                     m_recv_decode_buffer[0] == PQ_VERSION_FLAG;
+                if (peer_pq && m_initiating &&
+                    m_recv_decode_buffer.size() == 1 + mlkem::PUBLICKEYBYTES) {
+                    // Initiator: the responder offered its ML-KEM public key. Encapsulate to it,
+                    // send the ciphertext under the current X25519 cipher, and rekey both directions
+                    // to the hybrid keys. This also releases held-back application packets.
+                    mlkem::PublicKey their_pk;
+                    std::copy(m_recv_decode_buffer.begin() + 1, m_recv_decode_buffer.end(),
+                              their_pk.begin());
+                    SendPQCiphertextAndRekey(their_pk);
+                    SetReceiveState(RecvState::APP);
+                } else if (peer_pq && !m_initiating && m_recv_decode_buffer.size() == 1) {
+                    // Responder: the initiator advertised PQ support. Await its ciphertext packet
+                    // (still holding back our application packets) before entering the app phase.
+                    SetReceiveState(RecvState::PQ_CT);
+                } else if (m_pq_only) {
+                    // -v2pqonly: refuse to fall back to an X25519-only session with a non-PQ peer.
+                    LogDebug(BCLog::NET, "v2 transport: rejecting non-post-quantum peer under -v2pqonly, peer=%d\n", m_nodeid);
+                    return false;
+                } else {
+                    // No mutual PQ support (legacy peer, or shapes did not match): behave exactly
+                    // like stock BIP324. Release held-back application packets; channel stays
+                    // X25519-only.
+                    LOCK(m_send_mutex);
+                    m_pq_send_gated = false;
+                    SetReceiveState(RecvState::APP);
+                }
+                break;
+            }
+            case RecvState::PQ_CT: {
+                // Responder: the ML-KEM ciphertext has arrived. Decapsulate against our secret key,
+                // rekey to the hybrid keys, release held-back application packets, and proceed.
+                if (m_recv_decode_buffer.size() != mlkem::CIPHERTEXTBYTES) {
+                    LogDebug(BCLog::NET, "V2 transport error: bad PQ ciphertext size (%u bytes), peer=%d\n",
+                             (unsigned)m_recv_decode_buffer.size(), m_nodeid);
+                    return false;
+                }
+                mlkem::Ciphertext ct;
+                std::copy(m_recv_decode_buffer.begin(), m_recv_decode_buffer.end(), ct.begin());
+                const mlkem::SharedSecret ss = mlkem::Decaps(ct, m_pq_keypair.sk);
+                {
+                    LOCK(m_send_mutex);
+                    m_cipher.RekeyHybridPQ(MakeByteSpan(ss));
+                    m_pq_send_gated = false;
+                }
+                // The ML-KEM secret key is no longer needed; wipe it.
+                memory_cleanse(m_pq_keypair.sk.data(), m_pq_keypair.sk.size());
+                LogDebug(BCLog::NET, "v2 transport: post-quantum hybrid rekey complete, peer=%d\n", m_nodeid);
                 SetReceiveState(RecvState::APP);
                 break;
+            }
             case RecvState::APP:
                 // Application message decrypted correctly. It can be extracted using GetMessage().
                 SetReceiveState(RecvState::APP_READY);
@@ -1318,8 +1455,9 @@ size_t V2Transport::GetMaxBytesToProcess() noexcept
         // Process garbage bytes one by one (because terminator may appear anywhere).
         return 1;
     case RecvState::VERSION:
+    case RecvState::PQ_CT:
     case RecvState::APP:
-        // These three states all involve decoding a packet. Process the length descriptor first,
+        // These states all involve decoding a packet. Process the length descriptor first,
         // so that we know where the current packet ends (and we don't process bytes from the next
         // packet or decoy yet). Then, process the ciphertext bytes of the current packet.
         if (m_recv_buffer.size() < BIP324Cipher::LENGTH_LEN) {
@@ -1371,6 +1509,7 @@ bool V2Transport::ReceivedBytes(Span<const uint8_t>& msg_bytes) noexcept
                 m_recv_buffer.reserve(MAX_GARBAGE_LEN + BIP324Cipher::GARBAGE_TERMINATOR_LEN);
                 break;
             case RecvState::VERSION:
+            case RecvState::PQ_CT:
             case RecvState::APP: {
                 // During states where a packet is being received, as much as is expected but never
                 // more than MAX_RESERVE_AHEAD bytes in addition to what is received so far.
@@ -1402,7 +1541,14 @@ bool V2Transport::ReceivedBytes(Span<const uint8_t>& msg_bytes) noexcept
         switch (m_recv_state) {
         case RecvState::KEY_MAYBE_V1:
             ProcessReceivedMaybeV1Bytes();
-            if (m_recv_state == RecvState::V1) return true;
+            if (m_recv_state == RecvState::V1) {
+                if (m_pq_only) {
+                    // -v2pqonly: never downgrade to the unencrypted v1 transport.
+                    LogDebug(BCLog::NET, "v2 transport: rejecting v1 peer under -v2pqonly, peer=%d\n", m_nodeid);
+                    return false;
+                }
+                return true;
+            }
             break;
 
         case RecvState::KEY:
@@ -1414,6 +1560,7 @@ bool V2Transport::ReceivedBytes(Span<const uint8_t>& msg_bytes) noexcept
             break;
 
         case RecvState::VERSION:
+        case RecvState::PQ_CT:
         case RecvState::APP:
             if (!ProcessReceivedPacketBytes()) return false;
             break;
@@ -1507,6 +1654,10 @@ bool V2Transport::SetMessageToSend(CSerializedNetMsg& msg) noexcept
     AssertLockNotHeld(m_send_mutex);
     LOCK(m_send_mutex);
     if (m_send_state == SendState::V1) return m_v1_fallback.SetMessageToSend(msg);
+    // (BTX PQ) Hold back application packets until the post-quantum negotiation resolves, so that no
+    // app packet is composed under a cipher that is about to be replaced by the hybrid rekey. The
+    // message stays queued in the caller and is retried once the gate clears.
+    if (m_pq_send_gated) return false;
     // We only allow adding a new message to be sent when in the READY state (so the packet cipher
     // is available) and the send buffer is empty. This limits the number of messages in the send
     // buffer to just one, and leaves the responsibility for queueing them up to the caller.
@@ -1545,8 +1696,10 @@ Transport::BytesToSend V2Transport::GetBytesToSend(bool have_next_message) const
     return {
         Span{m_send_buffer}.subspan(m_send_pos),
         // We only have more to send after the current m_send_buffer if there is a (next)
-        // message to be sent, and we're capable of sending packets. */
-        have_next_message && m_send_state == SendState::READY,
+        // message to be sent, and we're capable of sending packets. The PQ gate (m_pq_send_gated)
+        // must be reflected here too: while it holds, SetMessageToSend refuses, so reporting "more"
+        // would make the caller's MSG_MORE sanity check (expected_more) trip on the empty buffer. */
+        have_next_message && m_send_state == SendState::READY && !m_pq_send_gated,
         m_send_type
     };
 }
@@ -1579,6 +1732,8 @@ bool V2Transport::ShouldReconnectV1() const noexcept
     AssertLockNotHeld(m_recv_mutex);
     // Only outgoing connections need reconnection.
     if (!m_initiating) return false;
+    // -v2pqonly: never reconnect as the unencrypted v1 transport; let the connection fail instead.
+    if (m_pq_only) return false;
 
     LOCK(m_recv_mutex);
     // We only reconnect in the very first state and when the receive buffer is empty. Together
@@ -1618,6 +1773,13 @@ Transport::Info V2Transport::GetInfo() const noexcept
     }
 
     return info;
+}
+
+bool V2Transport::IsHybridActiveForTest() const noexcept
+{
+    AssertLockNotHeld(m_send_mutex);
+    LOCK(m_send_mutex);
+    return m_cipher.IsHybridActive();
 }
 
 std::pair<size_t, bool> CConnman::SocketSendData(CNode& node) const

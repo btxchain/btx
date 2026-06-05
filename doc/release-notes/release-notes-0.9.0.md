@@ -9,8 +9,7 @@ Please report bugs using the issue tracker at github:
 
   https://github.com/bitcoin/bitcoin/issues
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), uninstall all
@@ -24,8 +23,7 @@ If you are upgrading from version 0.7.2 or earlier, the first time you run
 On Windows, do not forget to uninstall all earlier versions of the Bitcoin
 client first, especially if you are switching to the 64-bit version.
 
-Windows 64-bit installer
--------------------------
+## Windows 64-bit installer
 
 New in 0.9.0 is the Windows 64-bit version of the client. There have been
 frequent reports of users running out of virtual memory on 32-bit systems
@@ -36,15 +34,13 @@ NOTE: Release candidate 2 Windows binaries are not code-signed; use PGP
 and the SHA256SUMS.asc file to make sure your binaries are correct.
 In the final 0.9.0 release, Windows setup.exe binaries will be code-signed.
 
-OSX 10.5 / 32-bit no longer supported
--------------------------------------
+## OSX 10.5 / 32-bit no longer supported
 
 0.9.0 drops support for older Macs. The minimum requirements are now:
 * A 64-bit-capable CPU (see http://support.apple.com/kb/ht3696);
 * Mac OS 10.6 or later (see https://support.apple.com/kb/ht1633).
 
-Downgrading warnings
---------------------
+## Downgrading warnings
 
 The 'chainstate' for this release is not always compatible with previous
 releases, so if you run 0.9 and then decide to switch back to a
@@ -59,15 +55,13 @@ Also, the first time you run a 0.8.x release on a 0.9 wallet it will rescan
 the blockchain for missing spent coins, which will take a long time (tens
 of minutes on a typical machine).
 
-Rebranding to Bitcoin Core
----------------------------
+## Rebranding to Bitcoin Core
 
 To reduce confusion between Bitcoin-the-network and Bitcoin-the-software we
 have renamed the reference client to Bitcoin Core.
 
 
-OP_RETURN and data in the block chain
--------------------------------------
+## OP_RETURN and data in the block chain
 On OP_RETURN:  There was been some confusion and misunderstanding in
 the community, regarding the OP_RETURN feature in 0.9 and data in the
 blockchain.  This change is not an endorsement of storing data in the
@@ -79,8 +73,7 @@ TX outputs, bloating bitcoin's UTXO database.
 Storing arbitrary data in the blockchain is still a bad idea; it is less
 costly and far more efficient to store non-currency data elsewhere.
 
-Autotools build system
------------------------
+## Autotools build system
 
 For 0.9.0 we switched to an autotools-based build system instead of individual
 (q)makefiles.
@@ -91,8 +84,7 @@ to the project.
 
 Be sure to check doc/build-*.md for your platform before building from source.
 
-Bitcoin-cli
--------------
+## Bitcoin-cli
 
 Another change in the 0.9 release is moving away from the bitcoind executable
 functioning both as a server and as a RPC client. The RPC client functionality
@@ -100,8 +92,7 @@ functioning both as a server and as a RPC client. The RPC client functionality
 executable, 'bitcoin-cli'. The RPC client code will eventually be removed from
 bitcoind, but will be kept for backwards compatibility for a release or two.
 
-`walletpassphrase` RPC
------------------------
+## `walletpassphrase` RPC
 
 The behavior of the `walletpassphrase` RPC when the wallet is already unlocked
 has changed between 0.8 and 0.9.
@@ -121,8 +112,7 @@ the old one:
     > walletpassphrase 10
     walletunlocktime = now + 10 (overriding the old unlock time)
 
-Transaction malleability-related fixes
---------------------------------------
+## Transaction malleability-related fixes
 
 This release contains a few fixes for transaction ID (TXID) malleability 
 issues:
@@ -138,8 +128,7 @@ issues:
   incorrect balances for double-spent (or mutated) transactions.
 - New option: -zapwallettxes to rebuild the wallet's transaction information
 
-Transaction Fees
-----------------
+## Transaction Fees
 
 This release drops the default fee required to relay transactions across the
 network and for miners to consider the transaction in their blocks to
@@ -160,8 +149,7 @@ The wallet code still uses a default fee for low-priority transactions of
 fee may not be enough to get transactions confirmed quickly; the mintxfee
 option may be used to override the default.
 
-0.9.0 Release notes
-=======================
+# 0.9.0 Release notes
 
 RPC:
 
@@ -316,8 +304,7 @@ Miscellaneous:
 - Add 'linearize.py' script to contrib, for creating bootstrap.dat
 - Add separate bitcoin-cli client
 
-Credits
---------
+## Credits
 
 Thanks to everyone who contributed to this release:
 

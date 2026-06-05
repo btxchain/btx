@@ -6,8 +6,7 @@ This is a bug-fix minor release.
 Please report bugs using the issue tracker at github:
   https://github.com/bitcoin/bitcoin/issues
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait
 until it has completely shut down (which might take a few minutes for older
@@ -33,8 +32,7 @@ shutdown much slower. Note that the "wallet.dat" file is always
 detached, and versions prior to 0.6.0 detached all databases
 at shutdown.
 
-Bug fixes
----------
+## Bug fixes
 
 * Prevent RPC 'move' from deadlocking. This was caused by trying to lock the
   database twice.
@@ -53,7 +51,8 @@ Bug fixes
 
 * OSX 10.5 supported again
 
-----------------------------------------------------
+## Credits
+
 Thanks to everybody who contributed to this release:
 
 Alex

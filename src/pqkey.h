@@ -62,7 +62,14 @@ public:
 
     void MakeNewKey(PQAlgorithm algo);
     bool MakeDeterministicKey(PQAlgorithm algo, Span<const unsigned char> seed_material);
-    bool Sign(const uint256& hash, std::vector<unsigned char>& sig) const;
+    // slhdsa_fips205: when true and the algorithm is SLH-DSA, the message is
+    // preconditioned with the FIPS-205 pure-mode empty-context wrapper
+    // (M' = 0x00 || 0x00 || hash) before signing, instead of signing the bare
+    // hash (round-3.x SPHINCS+ reference behaviour). No effect for ML-DSA
+    // (FIPS-204, which has no SLH-DSA-style context wrapper here). Gated at the
+    // consensus activation height by callers; default false = legacy round-3.
+    bool Sign(const uint256& hash, std::vector<unsigned char>& sig,
+              bool slhdsa_fips205 = false) const;
     std::vector<unsigned char> GetPubKey() const;
     PQAlgorithm GetAlgorithm() const;
     bool IsValid() const;
@@ -80,10 +87,24 @@ private:
 public:
     CPQPubKey(PQAlgorithm algo, Span<const unsigned char> data);
 
-    bool Verify(const uint256& hash, Span<const unsigned char> sig) const;
+    // slhdsa_fips205: see CPQKey::Sign. When true and the algorithm is SLH-DSA,
+    // verifies against the FIPS-205 pure-mode wrapped message; default false =
+    // legacy round-3 (bare hash).
+    bool Verify(const uint256& hash, Span<const unsigned char> sig,
+                bool slhdsa_fips205 = false) const;
     PQAlgorithm GetAlgorithm() const;
     Span<const unsigned char> GetData() const;
     size_t size() const;
 };
+
+/**
+ * FIPS-205 pure-mode message preconditioning for SLH-DSA with an empty context:
+ *   M' = toByte(0,1) || toByte(|ctx|=0,1) || M  =  0x00 || 0x00 || M
+ * BTX's SLH-DSA core is the SPHINCS+ round-3.x reference, which signs the bare
+ * message; applying this wrapper at the call boundary turns it into FIPS-205
+ * SLH-DSA (the SHAKE tweakable-hash chains are identical, so only the message
+ * preconditioning differs). Exposed for cross-implementation/KAT tests.
+ */
+[[nodiscard]] std::vector<unsigned char> Fips205PureContextMessage(const uint256& hash);
 
 #endif // BITCOIN_PQKEY_H

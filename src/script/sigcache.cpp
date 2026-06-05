@@ -52,11 +52,16 @@ void SignatureCache::ComputeEntrySchnorr(uint256& entry, const uint256& hash, Sp
     hasher.Write(hash.begin(), 32).Write(pubkey.data(), pubkey.size()).Write(sig.data(), sig.size()).Finalize(entry.begin());
 }
 
-void SignatureCache::ComputeEntryPQ(uint256& entry, const uint256& hash, Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo) const
+void SignatureCache::ComputeEntryPQ(uint256& entry, const uint256& hash, Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, bool slhdsa_fips205) const
 {
     CSHA256 hasher = m_salted_hasher_pq;
     const uint8_t algo_byte = static_cast<uint8_t>(algo);
-    hasher.Write(hash.begin(), 32).Write(&algo_byte, 1).Write(pubkey.data(), pubkey.size()).Write(sig.data(), sig.size()).Finalize(entry.begin());
+    // Mix the SLH-DSA verification mode (FIPS-205 vs legacy round-3) into the
+    // cache key: the same (hash, pubkey, sig) is valid in at most one mode, so the
+    // modes must never share a cache entry (else a result cached in one mode could
+    // be falsely returned for the other across the activation boundary).
+    const uint8_t fips_byte = slhdsa_fips205 ? 1 : 0;
+    hasher.Write(hash.begin(), 32).Write(&algo_byte, 1).Write(&fips_byte, 1).Write(pubkey.data(), pubkey.size()).Write(sig.data(), sig.size()).Finalize(entry.begin());
 }
 
 bool SignatureCache::Get(const uint256& entry, const bool erase)
@@ -94,12 +99,12 @@ bool CachingTransactionSignatureChecker::VerifySchnorrSignature(Span<const unsig
     return true;
 }
 
-bool CachingTransactionSignatureChecker::VerifyPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, const uint256& sighash) const
+bool CachingTransactionSignatureChecker::VerifyPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, const uint256& sighash, bool slhdsa_fips205) const
 {
     uint256 entry;
-    m_signature_cache.ComputeEntryPQ(entry, sighash, sig, pubkey, algo);
+    m_signature_cache.ComputeEntryPQ(entry, sighash, sig, pubkey, algo, slhdsa_fips205);
     if (m_signature_cache.Get(entry, !store)) return true;
-    if (!TransactionSignatureChecker::VerifyPQSignature(sig, pubkey, algo, sighash)) return false;
+    if (!TransactionSignatureChecker::VerifyPQSignature(sig, pubkey, algo, sighash, slhdsa_fips205)) return false;
     if (store) m_signature_cache.Set(entry);
     return true;
 }

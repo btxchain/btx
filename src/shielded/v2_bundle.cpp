@@ -2326,6 +2326,15 @@ void ApplyCanonicalOpaquePayloadPadding(GenericOpaquePayloadEnvelope& envelope)
     if (!payload.lifecycle_controls.empty() || payload.spends.empty()) {
         return SendOutputEncoding::LEGACY;
     }
+    // C-002 self-serve z->t unshield: a SMILE spend whose value_balance exceeds
+    // the fee carries a public transparent outflow (value_balance ==
+    // transparent_out + fee). The eliding SMILE_COMPACT_POSTFORK encoding asserts
+    // value_balance == fee, so use the non-eliding unshield variant; otherwise the
+    // re-derived encoding would fail SendPayload::IsValid on decode. The generic
+    // envelope always carries value_balance, so the distinction round-trips.
+    if (payload.value_balance != payload.fee) {
+        return SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD;
+    }
     return SendOutputEncoding::SMILE_COMPACT_POSTFORK;
 }
 

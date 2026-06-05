@@ -17,7 +17,9 @@
 #include <policy/settings.h>
 #include <rpc/util.h>
 #include <addresstype.h>
+#include <script/descriptor.h>
 #include <script/pqm.h>
+#include <script/signingprovider.h>
 #include <univalue.h>
 #include <util/moneystr.h>
 #include <util/overflow.h>
@@ -13481,7 +13483,10 @@ RPCHelpMan bridge_signbatchreceipt()
             if (receipt_hash.IsNull()) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Failed to compute bridge batch receipt hash");
             }
-            if (!signing_key.key.Sign(receipt_hash, receipt.signature) || !receipt.IsValid()) {
+            // C-002: sign SLH-DSA receipts under FIPS-205 once the activation height is reached, so
+            // the signature matches what consensus verification expects at that height (no-op for ML-DSA).
+            const bool receipt_fips205 = shielded::BridgeAttestorUsesFips205AtHeight(NextBridgeLeafBuildHeight(*pwallet));
+            if (!signing_key.key.Sign(receipt_hash, receipt.signature, receipt_fips205) || !receipt.IsValid()) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Failed to sign bridge batch receipt");
             }
 
@@ -14609,7 +14614,10 @@ RPCHelpMan bridge_signbatchauthorization()
             if (authorization_hash.IsNull()) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Failed to compute bridge batch authorization hash");
             }
-            if (!signing_key.key.Sign(authorization_hash, authorization.signature) || !authorization.IsValid()) {
+            // C-002: sign SLH-DSA authorizations under FIPS-205 at/after activation, matching the
+            // height the resulting leaf is built/verified for below (no-op for ML-DSA).
+            const bool authorization_fips205 = shielded::BridgeAttestorUsesFips205AtHeight(NextBridgeLeafBuildHeight(*pwallet));
+            if (!signing_key.key.Sign(authorization_hash, authorization.signature, authorization_fips205) || !authorization.IsValid()) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Failed to sign bridge batch authorization");
             }
             const auto leaf = shielded::BuildBridgeBatchLeafFromAuthorization(
@@ -15576,6 +15584,400 @@ RPCHelpMan bridge_buildrefund()
             out.pushKV("ctv_hash", plan.ctv_hash.GetHex());
             out.pushKV("refund_lock_height", static_cast<int64_t>(plan.refund_lock_height));
             out.pushKV("current_height", current_height);
+            return out;
+        }};
+}
+
+namespace {
+
+// Classification of the leaves found in an mr(internal, {htlc(...), refund(...)}) descriptor.
+struct HtlcDescriptorLeaves {
+    uint256 merkle_root;
+    CScript script_pub_key;
+    // HTLC (claim) leaf: <20-byte H160> OP_OVER OP_HASH160 OP_EQUALVERIFY <csfs pubkey> OP_CHECKSIGFROMSTACK
+    bool has_htlc{false};
+    std::vector<unsigned char> htlc_leaf_script;
+    std::vector<unsigned char> htlc_control_block;
+    std::vector<unsigned char> htlc_hash160; // 20-byte preimage hashlock
+    std::vector<unsigned char> htlc_pubkey;  // the CSFS (claimer) pubkey the wallet must sign with
+    // Refund leaf: <locktime> OP_CHECKLOCKTIMEVERIFY OP_DROP <pubkey> OP_CHECKSIG
+    bool has_refund{false};
+    std::vector<unsigned char> refund_leaf_script;
+    std::vector<unsigned char> refund_control_block;
+    std::vector<unsigned char> refund_pubkey;  // the CHECKSIG (sender) pubkey the wallet must sign with
+};
+
+// Walk `leaf` with CScript::GetOp and return the data pushed at zero-based opcode position `push_index`
+// (counting every opcode/push). Returns false if that position is not a data push.
+[[nodiscard]] bool ExtractLeafPush(const std::vector<unsigned char>& leaf, size_t push_index,
+                                   std::vector<unsigned char>& data_out)
+{
+    const CScript script(leaf.begin(), leaf.end());
+    CScript::const_iterator it = script.begin();
+    opcodetype op;
+    std::vector<unsigned char> data;
+    for (size_t pos = 0; it != script.end(); ++pos) {
+        data.clear();
+        if (!script.GetOp(it, op, data)) return false;
+        if (pos == push_index) {
+            if (data.empty()) return false;
+            data_out = std::move(data);
+            return true;
+        }
+    }
+    return false;
+}
+
+// True if `script` matches the BuildP2MRHTLCLeaf layout; also extracts the 20-byte hashlock.
+[[nodiscard]] bool IsHtlcLeafScript(const std::vector<unsigned char>& script, std::vector<unsigned char>& hash160_out)
+{
+    if (script.size() < 25) return false;
+    if (script[0] != 0x14) return false; // push 20 bytes
+    if (script[21] != OP_OVER || script[22] != OP_HASH160 || script[23] != OP_EQUALVERIFY) return false;
+    if (script.back() != OP_CHECKSIGFROMSTACK) return false;
+    hash160_out.assign(script.begin() + 1, script.begin() + 21);
+    return true;
+}
+
+// True if `script` begins with a CLTV guard (<locktime> OP_CHECKLOCKTIMEVERIFY OP_DROP) and ends in OP_CHECKSIG.
+[[nodiscard]] bool IsRefundLeafScript(const std::vector<unsigned char>& script)
+{
+    if (script.size() < 4) return false;
+    // Leading minimal-push of the locktime, then CLTV/DROP. The push opcode is < OP_PUSHDATA1 (0x4c)
+    // for a direct data push, or OP_1..OP_16 for small numbers.
+    size_t i = 0;
+    if (script[0] >= 0x01 && script[0] <= 0x4b) {
+        i = 1 + script[0];
+    } else if (script[0] >= OP_1 && script[0] <= OP_16) {
+        i = 1;
+    } else if (script[0] == OP_1NEGATE) {
+        i = 1;
+    } else {
+        return false;
+    }
+    if (i + 2 > script.size()) return false;
+    if (script[i] != OP_CHECKLOCKTIMEVERIFY || script[i + 1] != OP_DROP) return false;
+    // The CLTV-guarded leaf ends in a PQ CHECKSIG (ML-DSA or SLH-DSA), not legacy OP_CHECKSIG.
+    return script.back() == OP_CHECKSIG_MLDSA || script.back() == OP_CHECKSIG_SLHDSA;
+}
+
+// Parse the descriptor, expand it at position 0, and classify the HTLC/refund leaves with their
+// control blocks. Throws JSONRPCError on any failure.
+[[nodiscard]] HtlcDescriptorLeaves ParseHtlcDescriptorOrThrow(const std::string& descriptor)
+{
+    FlatSigningProvider keys;
+    std::string error;
+    const auto parsed = Parse(descriptor, keys, error, /*require_checksum=*/false);
+    if (parsed.empty() || parsed[0] == nullptr) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Invalid descriptor: %s", error));
+    }
+    const Descriptor& desc = *parsed[0];
+    if (desc.GetOutputType() != OutputType::P2MR) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Descriptor is not a P2MR (mr(...)) descriptor");
+    }
+
+    std::vector<CScript> scripts;
+    FlatSigningProvider expand_out;
+    if (!desc.Expand(/*pos=*/0, keys, scripts, expand_out) || scripts.empty()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Failed to expand descriptor (ranged descriptors are not supported here)");
+    }
+
+    HtlcDescriptorLeaves out;
+    out.script_pub_key = scripts[0];
+
+    int witness_version{-1};
+    std::vector<unsigned char> witness_program;
+    if (!out.script_pub_key.IsWitnessProgram(witness_version, witness_program) ||
+        witness_version != 2 || witness_program.size() != uint256::size()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Descriptor did not expand to a P2MR output");
+    }
+    out.merkle_root = uint256{witness_program};
+
+    P2MRSpendData spenddata;
+    if (!expand_out.GetP2MRSpendData(WitnessV2P2MR{out.merkle_root}, spenddata) || spenddata.scripts.empty()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Descriptor produced no P2MR spend data");
+    }
+
+    for (const auto& [leaf_script, controls] : spenddata.scripts) {
+        if (controls.empty()) continue;
+        const std::vector<unsigned char>& control = *controls.begin();
+        std::vector<unsigned char> hash160;
+        if (IsHtlcLeafScript(leaf_script, hash160)) {
+            if (out.has_htlc) throw JSONRPCError(RPC_INVALID_PARAMETER, "Descriptor has more than one HTLC leaf");
+            out.has_htlc = true;
+            out.htlc_leaf_script = leaf_script;
+            out.htlc_control_block = control;
+            out.htlc_hash160 = std::move(hash160);
+            // <H160>(0) OP_OVER(1) OP_HASH160(2) OP_EQUALVERIFY(3) <csfs pubkey>(4) OP_CHECKSIGFROMSTACK(5)
+            if (!ExtractLeafPush(leaf_script, 4, out.htlc_pubkey)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Could not extract the claimer pubkey from the HTLC leaf");
+            }
+        } else if (IsRefundLeafScript(leaf_script)) {
+            if (out.has_refund) throw JSONRPCError(RPC_INVALID_PARAMETER, "Descriptor has more than one refund leaf");
+            out.has_refund = true;
+            out.refund_leaf_script = leaf_script;
+            out.refund_control_block = control;
+            // <locktime>(0) OP_CHECKLOCKTIMEVERIFY(1) OP_DROP(2) <pubkey>(3) OP_CHECKSIG(4)
+            if (!ExtractLeafPush(leaf_script, 3, out.refund_pubkey)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Could not extract the sender pubkey from the refund leaf");
+            }
+        }
+    }
+    return out;
+}
+
+// Look up the value + scriptPubKey of a confirmed/mempool outpoint via the chain UTXO view.
+[[nodiscard]] CTxOut GetOutpointTxOutOrThrow(CWallet& wallet, const COutPoint& outpoint)
+{
+    std::map<COutPoint, Coin> coins;
+    coins[outpoint]; // request this outpoint
+    wallet.chain().findCoins(coins);
+    const auto it = coins.find(outpoint);
+    if (it == coins.end() || it->second.IsSpent()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Outpoint not found in the UTXO set (unconfirmed, spent, or unknown)");
+    }
+    return it->second.out;
+}
+
+// Collect the wallet's PQ private key for `leaf_pubkey` from whichever descriptor manager holds it.
+// The mr(htlc,refund) output is generally imported watch-only (or not at all), so the standard
+// wallet FillPSBT path cannot route to a signer — we locate the single leaf key directly instead.
+[[nodiscard]] FlatSigningProvider LeafKeyProviderOrThrow(CWallet& wallet,
+                                                         const std::vector<unsigned char>& leaf_pubkey,
+                                                         const std::string& role)
+{
+    FlatSigningProvider provider;
+    for (ScriptPubKeyMan* spk_man : wallet.GetAllScriptPubKeyMans()) {
+        auto* desc_man = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man);
+        if (desc_man == nullptr) continue;
+        std::unique_ptr<FlatSigningProvider> keys = desc_man->GetSigningProvider(Span<const unsigned char>{leaf_pubkey});
+        if (keys && keys->GetPQKey(leaf_pubkey) != nullptr) {
+            provider.Merge(std::move(*keys));
+            return provider;
+        }
+    }
+    throw JSONRPCError(RPC_WALLET_ERROR,
+                       strprintf("The wallet does not hold the %s private key required to sign this spend", role));
+}
+
+// Sign + finalize a single-input P2MR HTLC PSBT directly with the leaf's PQ key, and return the
+// extracted tx. The script tree (leaf script + control block) and, for the claim, the preimage are
+// carried by the PSBT input itself (PSBTInput::FillSignatureData), so the only thing the provider
+// must supply is the leaf signing key.
+[[nodiscard]] CTransactionRef SignFinalizeHtlcPsbtOrThrow(const std::shared_ptr<CWallet>& pwallet,
+                                                          PartiallySignedTransaction psbt,
+                                                          const std::vector<unsigned char>& leaf_pubkey,
+                                                          const std::string& role,
+                                                          bool& complete_out,
+                                                          const std::string& context)
+{
+    EnsureWalletIsUnlocked(*pwallet);
+
+    const FlatSigningProvider provider = LeafKeyProviderOrThrow(*pwallet, leaf_pubkey, role);
+
+    const PrecomputedTransactionData txdata = PrecomputePSBTData(psbt);
+    const bool complete = SignPSBTInput(provider, psbt, /*index=*/0, &txdata, SIGHASH_DEFAULT,
+                                        /*out_sigdata=*/nullptr, /*finalize=*/true);
+    complete_out = complete;
+    if (!complete) {
+        throw JSONRPCError(RPC_WALLET_ERROR,
+                           strprintf("Failed to sign/finalize %s; check the descriptor, preimage/locktime, and that the wallet owns the required key", context));
+    }
+
+    CMutableTransaction mtx;
+    if (!FinalizeAndExtractPSBT(psbt, mtx)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to extract finalized transaction for %s", context));
+    }
+    return MakeTransactionRef(std::move(mtx));
+}
+
+} // namespace
+
+RPCHelpMan buildhtlcclaim()
+{
+    return RPCHelpMan{
+        "buildhtlcclaim",
+        "\nBuild, sign, and finalize a transaction that claims a P2MR HTLC output by revealing the preimage.\n"
+        "The descriptor must be of the form mr(<internal>, {htlc(<H160>,<claimerPubkey>), refund(<locktime>,<senderPubkey>)}).\n"
+        "The wallet must hold the claimer's ML-DSA private key (to produce the CSFS signature over the preimage).\n",
+        {
+            {"descriptor", RPCArg::Type::STR, RPCArg::Optional::NO, "The mr(...) HTLC descriptor (with or without #checksum)"},
+            {"prevout", RPCArg::Type::OBJ, RPCArg::Optional::NO, "The HTLC funding outpoint to spend",
+                {
+                    {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding txid"},
+                    {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Funding output index"},
+                }},
+            {"preimage", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The HTLC preimage (HASH160 must equal the descriptor hashlock)"},
+            {"destination", RPCArg::Type::STR, RPCArg::Optional::NO, "Address that receives the claimed funds"},
+            {"fee", RPCArg::Type::NUM, RPCArg::Optional::NO, "Absolute fee in satoshis"},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR_HEX, "hex", "The fully signed and finalized raw transaction"},
+                {RPCResult::Type::BOOL, "complete", "Whether the input is fully signed"},
+                {RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+                {RPCResult::Type::STR, "selected_path", "Always \"claim\""},
+                {RPCResult::Type::STR_HEX, "leaf_script", "The HTLC leaf script used"},
+                {RPCResult::Type::STR_HEX, "merkle_root", "The P2MR merkle root"},
+            }},
+        RPCExamples{HelpExampleCli("buildhtlcclaim", "\"mr(...)#cksum\" \"{\\\"txid\\\":\\\"..\\\",\\\"vout\\\":0}\" \"deadbeef\" \"btxrt1...\" 1000")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            auto pwallet = EnsureWalletForBridge(request);
+            pwallet->BlockUntilSyncedToCurrentChain();
+
+            const std::string descriptor = request.params[0].get_str();
+            const UniValue& prevout_obj = request.params[1].get_obj();
+            RPCTypeCheckObj(prevout_obj, {{"txid", UniValue::VSTR}, {"vout", UniValue::VNUM}});
+            const uint256 txid = ParseHashV(prevout_obj["txid"], "txid");
+            const int vout = prevout_obj["vout"].getInt<int>();
+            if (vout < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "vout must be non-negative");
+            const std::vector<unsigned char> preimage = ParseHexV(request.params[2], "preimage");
+            const CTxDestination destination = ParseDestinationOrThrow(request.params[3], "destination");
+            const CAmount fee = request.params[4].getInt<int64_t>();
+            if (fee < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "fee must be non-negative");
+
+            const HtlcDescriptorLeaves leaves = ParseHtlcDescriptorOrThrow(descriptor);
+            if (!leaves.has_htlc) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Descriptor does not contain an htlc(...) claim leaf");
+            }
+
+            // Verify the supplied preimage matches the hashlock before building anything.
+            const uint160 preimage_h160 = Hash160(preimage);
+            if (!std::equal(preimage_h160.begin(), preimage_h160.end(), leaves.htlc_hash160.begin())) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "HASH160(preimage) does not match the descriptor hashlock");
+            }
+
+            const COutPoint outpoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
+            const CTxOut prev_txout = GetOutpointTxOutOrThrow(*pwallet, outpoint);
+            if (prev_txout.scriptPubKey != leaves.script_pub_key) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Outpoint scriptPubKey does not match the descriptor");
+            }
+            const CAmount out_value = prev_txout.nValue - fee;
+            if (out_value <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "fee exceeds the funding amount");
+
+            CMutableTransaction mtx;
+            mtx.version = CTransaction::CURRENT_VERSION;
+            mtx.nLockTime = 0;
+            constexpr uint32_t sequence_final{0xffffffff};
+            mtx.vin.emplace_back(outpoint, CScript(), sequence_final);
+            mtx.vout.emplace_back(out_value, GetScriptForDestination(destination));
+
+            PartiallySignedTransaction psbt(mtx);
+            PSBTInput& input = psbt.inputs[0];
+            input.witness_utxo = prev_txout;
+            input.m_p2mr_merkle_root = leaves.merkle_root;
+            input.m_p2mr_leaf_script = leaves.htlc_leaf_script;
+            input.m_p2mr_control_block = leaves.htlc_control_block;
+            // Inject the preimage keyed by its HASH160 so the HTLC satisfier can find it.
+            input.hash160_preimages[uint160{leaves.htlc_hash160}] = preimage;
+
+            bool complete{false};
+            const CTransactionRef tx = SignFinalizeHtlcPsbtOrThrow(pwallet, std::move(psbt), leaves.htlc_pubkey, "claimer", complete, "HTLC claim");
+
+            DataStream ss;
+            ss << TX_WITH_WITNESS(*tx);
+            UniValue out(UniValue::VOBJ);
+            out.pushKV("hex", HexStr(ss));
+            out.pushKV("complete", complete);
+            out.pushKV("txid", tx->GetHash().GetHex());
+            out.pushKV("selected_path", "claim");
+            out.pushKV("leaf_script", HexStr(leaves.htlc_leaf_script));
+            out.pushKV("merkle_root", leaves.merkle_root.GetHex());
+            return out;
+        }};
+}
+
+RPCHelpMan buildhtlcrefund()
+{
+    return RPCHelpMan{
+        "buildhtlcrefund",
+        "\nBuild, sign, and finalize a transaction that refunds a P2MR HTLC output via the timeout (CLTV) path.\n"
+        "The descriptor must be of the form mr(<internal>, {htlc(<H160>,<claimerPubkey>), refund(<locktime>,<senderPubkey>)}).\n"
+        "The wallet must hold the sender's ML-DSA private key. The spend is only valid once the active chain\n"
+        "height/MTP is at or beyond <locktime>.\n",
+        {
+            {"descriptor", RPCArg::Type::STR, RPCArg::Optional::NO, "The mr(...) HTLC descriptor (with or without #checksum)"},
+            {"prevout", RPCArg::Type::OBJ, RPCArg::Optional::NO, "The HTLC funding outpoint to spend",
+                {
+                    {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding txid"},
+                    {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Funding output index"},
+                }},
+            {"destination", RPCArg::Type::STR, RPCArg::Optional::NO, "Address that receives the refunded funds"},
+            {"locktime", RPCArg::Type::NUM, RPCArg::Optional::NO, "The nLockTime to set (must match/satisfy the refund leaf CLTV)"},
+            {"fee", RPCArg::Type::NUM, RPCArg::Optional::NO, "Absolute fee in satoshis"},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR_HEX, "hex", "The fully signed and finalized raw transaction"},
+                {RPCResult::Type::BOOL, "complete", "Whether the input is fully signed"},
+                {RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+                {RPCResult::Type::STR, "selected_path", "Always \"refund\""},
+                {RPCResult::Type::STR_HEX, "leaf_script", "The refund leaf script used"},
+                {RPCResult::Type::NUM, "locktime", "The nLockTime set on the transaction"},
+                {RPCResult::Type::STR_HEX, "merkle_root", "The P2MR merkle root"},
+            }},
+        RPCExamples{HelpExampleCli("buildhtlcrefund", "\"mr(...)#cksum\" \"{\\\"txid\\\":\\\"..\\\",\\\"vout\\\":0}\" \"btxrt1...\" 200 1000")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            auto pwallet = EnsureWalletForBridge(request);
+            pwallet->BlockUntilSyncedToCurrentChain();
+
+            const std::string descriptor = request.params[0].get_str();
+            const UniValue& prevout_obj = request.params[1].get_obj();
+            RPCTypeCheckObj(prevout_obj, {{"txid", UniValue::VSTR}, {"vout", UniValue::VNUM}});
+            const uint256 txid = ParseHashV(prevout_obj["txid"], "txid");
+            const int vout = prevout_obj["vout"].getInt<int>();
+            if (vout < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "vout must be non-negative");
+            const CTxDestination destination = ParseDestinationOrThrow(request.params[2], "destination");
+            const int64_t locktime = request.params[3].getInt<int64_t>();
+            if (locktime < 0 || locktime > std::numeric_limits<uint32_t>::max()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "locktime out of range");
+            }
+            const CAmount fee = request.params[4].getInt<int64_t>();
+            if (fee < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "fee must be non-negative");
+
+            const HtlcDescriptorLeaves leaves = ParseHtlcDescriptorOrThrow(descriptor);
+            if (!leaves.has_refund) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Descriptor does not contain a refund(...) leaf");
+            }
+
+            const COutPoint outpoint{Txid::FromUint256(txid), static_cast<uint32_t>(vout)};
+            const CTxOut prev_txout = GetOutpointTxOutOrThrow(*pwallet, outpoint);
+            if (prev_txout.scriptPubKey != leaves.script_pub_key) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Outpoint scriptPubKey does not match the descriptor");
+            }
+            const CAmount out_value = prev_txout.nValue - fee;
+            if (out_value <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "fee exceeds the funding amount");
+
+            CMutableTransaction mtx;
+            mtx.version = CTransaction::CURRENT_VERSION;
+            mtx.nLockTime = static_cast<uint32_t>(locktime);
+            // A non-final sequence is required for nLockTime to be enforced (and thus for CLTV to pass).
+            constexpr uint32_t max_sequence_nonfinal{0xfffffffe};
+            mtx.vin.emplace_back(outpoint, CScript(), max_sequence_nonfinal);
+            mtx.vout.emplace_back(out_value, GetScriptForDestination(destination));
+
+            PartiallySignedTransaction psbt(mtx);
+            PSBTInput& input = psbt.inputs[0];
+            input.witness_utxo = prev_txout;
+            input.m_p2mr_merkle_root = leaves.merkle_root;
+            input.m_p2mr_leaf_script = leaves.refund_leaf_script;
+            input.m_p2mr_control_block = leaves.refund_control_block;
+
+            bool complete{false};
+            const CTransactionRef tx = SignFinalizeHtlcPsbtOrThrow(pwallet, std::move(psbt), leaves.refund_pubkey, "sender", complete, "HTLC refund");
+
+            DataStream ss;
+            ss << TX_WITH_WITNESS(*tx);
+            UniValue out(UniValue::VOBJ);
+            out.pushKV("hex", HexStr(ss));
+            out.pushKV("complete", complete);
+            out.pushKV("txid", tx->GetHash().GetHex());
+            out.pushKV("selected_path", "refund");
+            out.pushKV("leaf_script", HexStr(leaves.refund_leaf_script));
+            out.pushKV("locktime", static_cast<int64_t>(mtx.nLockTime));
+            out.pushKV("merkle_root", leaves.merkle_root.GetHex());
             return out;
         }};
 }

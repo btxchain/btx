@@ -71,7 +71,7 @@ Quick start:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.30.2 \
+  --release-tag v0.31.0 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"

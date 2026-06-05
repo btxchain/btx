@@ -88,7 +88,14 @@ static constexpr size_t MIN_SMILE2_PROOF_BYTES{8 * 1024};
     const std::vector<BDLOPCommitment>& output_coins,
     const CTPublicData& pub,
     int64_t public_fee = 0,
-    bool bind_anonset_context = false);
+    bool bind_anonset_context = false,
+    // C-002: connect-block / mempool validation height. At/after the C-002
+    // activation height, anonset-bound spends MUST be wire v3
+    // (WIRE_VERSION_C002_HARDENED). CONSENSUS callers MUST pass the real height.
+    // The default is FAIL-CLOSED (require v3) and matches ProveCT's default, so
+    // non-consensus/test callers that produce v3 validate consistently. NOT a
+    // bypass: the default requires the hardened format, never disables the gate.
+    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
 
 /**
  * Combined parse + validate in one call (convenience for consensus).
@@ -108,7 +115,10 @@ static constexpr size_t MIN_SMILE2_PROOF_BYTES{8 * 1024};
     const CTPublicData& pub,
     int64_t public_fee = 0,
     bool reject_rice_codec = false,
-    bool bind_anonset_context = false);
+    bool bind_anonset_context = false,
+    // C-002: see ValidateSmile2Proof. CONSENSUS callers MUST pass real height.
+    // Default is fail-closed (require v3), matching ProveCT.
+    int64_t validation_height = SmileCTProof::C002_ACTIVATION_HEIGHT);
 
 /**
  * Extract serial numbers from a parsed SMILE v2 proof.

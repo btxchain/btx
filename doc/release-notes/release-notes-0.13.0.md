@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-Compatibility
-==============
+# Compatibility
 
 Microsoft ended support for Windows XP on [April 8th, 2014](https://www.microsoft.com/en-us/WindowsForBusiness/end-of-xp-support),
 an OS initially released in 2001. This means that not even critical security
@@ -35,11 +34,9 @@ No attempt is made to prevent installing or running the software on Windows XP,
 you can still do so at your own risk, but do not expect it to work: do not
 report issues about Windows XP to the issue tracker.
 
-Notable changes
-===============
+# Notable changes
 
-Database cache memory increased
---------------------------------
+## Database cache memory increased
 
 As a result of growth of the UTXO set, performance with the prior default
 database cache of 100 MiB has suffered.
@@ -55,8 +52,7 @@ Note that the database cache setting has the most performance impact
 during initial sync of a node, and when catching up after downtime.
 
 
-bitcoin-cli: arguments privacy
-------------------------------
+## bitcoin-cli: arguments privacy
 
 The RPC command line client gained a new argument, `-stdin`
 to read extra arguments from standard input, one per line until EOF/Ctrl-D.
@@ -73,8 +69,7 @@ passphrases, as command-line arguments can usually be read from the process
 table by any user on the system.
 
 
-C++11 and Python 3
-------------------
+## C++11 and Python 3
 
 Various code modernizations have been done. The Bitcoin Core code base has
 started using C++11. This means that a C++11-capable compiler is now needed for
@@ -87,8 +82,7 @@ For running the functional tests in `qa/rpc-tests`, Python3.4 or higher is now
 required.
 
 
-Linux ARM builds
-----------------
+## Linux ARM builds
 
 Due to popular request, Linux ARM builds have been added to the uploaded
 executables.
@@ -113,8 +107,7 @@ Note that Android is not considered ARM Linux in this context. The executables
 are not expected to work out of the box on Android.
 
 
-Compact Block support (BIP 152)
--------------------------------
+## Compact Block support (BIP 152)
 
 Support for block relay using the Compact Blocks protocol has been implemented
 in PR 8068.
@@ -134,8 +127,7 @@ discouraged transactions losing a stale block race, and therefore miners may
 wish to configure their node to take common relay policies into consideration.
 
 
-Hierarchical Deterministic Key Generation
------------------------------------------
+## Hierarchical Deterministic Key Generation
 Newly created wallets will use hierarchical deterministic key generation
 according to BIP32 (keypath m/0'/0'/k').
 Existing wallets will still use traditional key generation.
@@ -161,8 +153,7 @@ HD wallets are incompatible with older versions of Bitcoin Core.
 [Pull request](https://github.com/bitcoin/bitcoin/pull/8035/files), [BIP 32](https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki)
 
 
-Segregated Witness
-------------------
+## Segregated Witness
 
 The code preparations for Segregated Witness ("segwit"), as described in [BIP
 141](https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki), [BIP
@@ -184,8 +175,7 @@ segwit blocks to other segwit nodes, and use segwit transactions in the
 wallet, etc).
 
 
-Mining transaction selection ("Child Pays For Parent")
-------------------------------------------------------
+## Mining transaction selection ("Child Pays For Parent")
 
 The mining transaction selection algorithm has been replaced with an algorithm
 that selects transactions based on their feerate inclusive of unconfirmed
@@ -224,8 +214,7 @@ no longer optimized for this metric.  Feedback is requested on whether to
 deprecate or keep this command line option in future releases.
 
 
-Reindexing changes
-------------------
+## Reindexing changes
 
 In earlier versions, reindexing did validation while reading through the block
 files on disk. These two have now been split up, so that all blocks are known
@@ -243,8 +232,7 @@ are assumed to be fine, but the chainstate is still corrupted. It is also
 useful for benchmarks.
 
 
-Removal of internal miner
---------------------------
+## Removal of internal miner
 
 As CPU mining has been useless for a long time, the internal miner has been
 removed in this release, and replaced with a simpler implementation for the
@@ -258,8 +246,7 @@ RPC call `generatetoaddress` has been added to mine to a specific address. This
 works with wallet disabled.
 
 
-New bytespersigop implementation
---------------------------------
+## New bytespersigop implementation
 
 The former implementation of the bytespersigop filter accidentally broke bare
 multisig (which is meant to be controlled by the `permitbaremultisig` option),
@@ -271,8 +258,7 @@ instead treats them (for fee purposes only) as if they were in fact the size
 of a transaction actually using all 20 sigops.
 
 
-Low-level P2P changes
-----------------------
+## Low-level P2P changes
 
 - The optional new p2p message "feefilter" is implemented and the protocol
   version is bumped to 70013. Upon receiving a feefilter message from a peer,
@@ -307,8 +293,7 @@ Low-level P2P changes
   new block or transaction are protected from disconnections since PR #8084.
 
 
-Low-level RPC changes
-----------------------
+## Low-level RPC changes
 
 - RPC calls have been added to output detailed statistics for individual mempool
   entries, as well as to calculate the in-mempool ancestors or descendants of a
@@ -351,8 +336,7 @@ Low-level RPC changes
 - New options were added to `fundrawtransaction`: `includeWatching`, `changeAddress`, `changePosition` and `feeRate`.
 
 
-Low-level ZMQ changes
-----------------------
+## Low-level ZMQ changes
 
 - Each ZMQ notification now contains an up-counting sequence number that allows
   listeners to detect lost notifications.
@@ -361,8 +345,7 @@ Low-level ZMQ changes
   PR [#7762](https://github.com/bitcoin/bitcoin/pull/7762).
 
 
-0.13.0 Change log
-=================
+# 0.13.0 Change log
 
 Detailed release notes follow. This overview includes changes that affect
 behavior, not code moves, refactors and string updates. For convenience in locating
@@ -758,8 +741,7 @@ git merge commit are mentioned.
 - #7713 `f6598df` Fixes for verify-commits script (petertodd)
 - #8412 `8360d5b` libconsensus: Expose a flag for BIP112 (jtimon)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

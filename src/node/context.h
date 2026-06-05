@@ -44,6 +44,7 @@ class DandelionManager;
 } // namespace Dandelion
 
 namespace node {
+class AutoUpdateManager;
 class KernelNotifications;
 class Warnings;
 
@@ -95,6 +96,8 @@ struct NodeContext {
     std::unique_ptr<node::Warnings> warnings;
     //! Dandelion++ privacy relay manager
     std::unique_ptr<Dandelion::DandelionManager> dandelion;
+    //! Source-based release auto-update manager.
+    std::unique_ptr<node::AutoUpdateManager> autoupdate;
     std::thread background_init_thread;
 
     //! Declare default constructor and destructor that are not inline, so code

@@ -10,8 +10,7 @@ Please report bugs using the issue tracker at github:
 
   https://github.com/bitcoin/bitcoin/issues
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
@@ -22,8 +21,7 @@ If you are upgrading from version 0.7.2 or earlier, the first time you run
 0.9.2.1 your blockchain files will be re-indexed, which will take anywhere from 
 30 minutes to several hours, depending on the speed of your machine.
 
-Downgrading warnings
---------------------
+## Downgrading warnings
 
 The 'chainstate' for this release is not always compatible with previous
 releases, so if you run 0.9.x and then decide to switch back to a
@@ -38,19 +36,16 @@ Also, the first time you run a 0.8.x release on a 0.9 wallet it will rescan
 the blockchain for missing spent coins, which will take a long time (tens
 of minutes on a typical machine).
 
-Important changes
-==================
+# Important changes
 
-Gitian OSX build
------------------
+## Gitian OSX build
 
 The deterministic build system that was already used for Windows and Linux
 builds is now used for OSX as well. Although the resulting executables have
 been tested quite a bit, there could be possible regressions. Be sure to report
 these on the Github bug tracker mentioned above.
 
-Compatibility of Linux build
------------------------------
+## Compatibility of Linux build
 
 For Linux we now build against Qt 4.6, and filter the symbols for libstdc++ and glibc.
 This brings back compatibility with
@@ -59,8 +54,7 @@ This brings back compatibility with
 - Ubuntu 10.04
 - CentOS 6.5
 
-0.9.2 - 0.9.2.1 Release notes
-=======================
+# 0.9.2 - 0.9.2.1 Release notes
 
 The OpenSSL dependency in the gitian builds has been upgraded to 1.0.1h because of CVE-2014-0224.
 
@@ -140,8 +134,7 @@ Miscellaneous:
 - Changed bitrpc.py's raw_input to getpass for passwords to conceal characters during command line input
 - devtools: add a script to fetch and postprocess translations
 
-Credits
---------
+## Credits
 
 Thanks to everyone who contributed to this release:
 

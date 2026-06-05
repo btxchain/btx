@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is extensively tested on multiple operating systems using
 the Linux kernel, macOS 10.8+, and Windows Vista and later.
@@ -27,11 +26,9 @@ Please do not report issues about Windows XP to the issue tracker.
 Bitcoin Core should also work on most other Unix-like systems but is not
 frequently tested on them.
 
-Notable changes
-===============
+# Notable changes
 
-Performance Improvements
---------------
+## Performance Improvements
 
 Validation speed and network propagation performance have been greatly
 improved, leading to much shorter sync and initial block download times.
@@ -52,8 +49,7 @@ improved, leading to much shorter sync and initial block download times.
   the mempool at that stage.
 
 
-Manual Pruning
---------------
+## Manual Pruning
 
 Bitcoin Core has supported automatically pruning the blockchain since 0.11. Pruning
 the blockchain allows for significant storage space savings as the vast majority of
@@ -64,8 +60,7 @@ Manual block pruning can now be enabled by setting `-prune=1`. Once that is set,
 the RPC command `pruneblockchain` can be used to prune the blockchain up to the
 specified height or timestamp.
 
-`getinfo` Deprecated
---------------------
+## `getinfo` Deprecated
 
 The `getinfo` RPC command has been deprecated. Each field in the RPC call
 has been moved to another command's output with that command also giving
@@ -91,16 +86,14 @@ shows where each field has been moved to:
 `"relayfee"`	   | `getnetworkinfo()["relayfee"]`
 `"errors"`	   | `getnetworkinfo()["warnings"]`
 
-ZMQ On Windows
---------------
+## ZMQ On Windows
 
 Previously the ZeroMQ notification system was unavailable on Windows
 due to various issues with ZMQ. These have been fixed upstream and
 now ZMQ can be used on Windows. Please see [this document](https://github.com/bitcoin/bitcoin/blob/master/doc/zmq.md) for
 help with using ZMQ in general.
 
-Nested RPC Commands in Debug Console
-------------------------------------
+## Nested RPC Commands in Debug Console
 
 The ability to nest RPC commands has been added to the debug console. This
 allows users to have the output of a command become the input to another
@@ -113,8 +106,7 @@ array index or a non-quoted string (i.e. `listunspent()[0][txid]`). Both
 commas and spaces can be used to separate parameters in both the bracket syntax
 and normal RPC command syntax.
 
-Network Activity Toggle
------------------------
+## Network Activity Toggle
 
 A RPC command and GUI toggle have been added to enable or disable all p2p
 network activity. The network status icon in the bottom right hand corner 
@@ -126,8 +118,7 @@ Additionally the `setnetworkactive` RPC command has been added which does
 the same thing as the GUI icon. The command takes one boolean parameter,
 `true` enables networking and `false` disables it.
 
-Out-of-sync Modal Info Layer
-----------------------------
+## Out-of-sync Modal Info Layer
 
 When Bitcoin Core is out-of-sync on startup, a semi-transparent information
 layer will be shown over top of the normal display. This layer contains
@@ -135,8 +126,7 @@ details about the current sync progress and estimates the amount of time
 remaining to finish syncing. This layer can also be hidden and subsequently
 unhidden by clicking on the progress bar at the bottom of the window.
 
-Support for JSON-RPC Named Arguments
-------------------------------------
+## Support for JSON-RPC Named Arguments
 
 Commands sent over the JSON-RPC interface and through the `bitcoin-cli` binary
 can now use named arguments. This follows the [JSON-RPC specification](http://www.jsonrpc.org/specification)
@@ -160,16 +150,14 @@ expected to land in a later release.
 
 The RPC server remains fully backwards compatible with positional arguments.
 
-Opt into RBF When Sending
--------------------------
+## Opt into RBF When Sending
 
 A new startup option, `-walletrbf`, has been added to allow users to have all
 transactions sent opt into RBF support. The default value for this option is
 currently `false`, so transactions will not opt into RBF by default. The new
 `bumpfee` RPC can be used to replace transactions that opt into RBF.
 
-Sensitive Data Is No Longer Stored In Debug Console History
------------------------------------------------------------
+## Sensitive Data Is No Longer Stored In Debug Console History
 
 The debug console maintains a history of previously entered commands that can be
 accessed by pressing the Up-arrow key so that users can easily reuse previously
@@ -177,8 +165,7 @@ entered commands. Commands which have sensitive information such as passphrases 
 private keys will now have a `(...)` in place of the parameters when accessed through
 the history.
 
-Retaining the Mempool Across Restarts
--------------------------------------
+## Retaining the Mempool Across Restarts
 
 The mempool will be saved to the data directory prior to shutdown
 to a `mempool.dat` file. This file preserves the mempool so that when the node
@@ -186,8 +173,7 @@ restarts the mempool can be filled with transactions without waiting for new tra
 to be created. This will also preserve any changes made to a transaction through
 commands such as `prioritisetransaction` so that those changes will not be lost.
 
-Final Alert
------------
+## Final Alert
 
 The Alert System was [disabled and deprecated](https://bitcoin.org/en/alert/2016-11-01-alert-retirement) in Bitcoin Core 0.12.1 and removed in 0.13.0. 
 The Alert System was retired with a maximum sequence final alert which causes any nodes
@@ -195,8 +181,7 @@ supporting the Alert System to display a static hard-coded "Alert Key Compromise
 prevents any other alerts from overriding it. This final alert is hard-coded into this release
 so that all old nodes receive the final alert.
 
-GUI Changes
------------
+## GUI Changes
 
  - After resetting the options by clicking the `Reset Options` button 
    in the options dialog or with the `-resetguioptions` startup option, 
@@ -214,8 +199,7 @@ GUI Changes
    icon will be grayed out with an X on top of it if the wallet is not a
    HD wallet.
 
-Low-level RPC changes
-----------------------
+## Low-level RPC changes
 
  - `importprunedfunds` only accepts two required arguments. Some versions accept
    an optional third arg, which was always ignored. Make sure to never pass more
@@ -250,16 +234,14 @@ Low-level RPC changes
    startup option above) with a new transaction that pays a higher fee, and
    should be more likely to get confirmed quickly.
 
-HTTP REST Changes
------------------
+## HTTP REST Changes
 
  - UTXO set query (`GET /rest/getutxos/<checkmempool>/<txid>-<n>/<txid>-<n>
    /.../<txid>-<n>.<bin|hex|json>`) responses were changed to return status 
    code `HTTP_BAD_REQUEST` (400) instead of `HTTP_INTERNAL_SERVER_ERROR` (500)
    when requests contain invalid parameters.
 
-Minimum Fee Rate Policies
--------------------------
+## Minimum Fee Rate Policies
 
 Since the changes in 0.12 to automatically limit the size of the mempool and improve the performance of block creation in mining code it has not been important for relay nodes or miners to set `-minrelaytxfee`. With this release the following concepts that were tied to this option have been separated out:
 - incremental relay fee used for calculating BIP 125 replacement and mempool limiting. (1000 satoshis/kB)
@@ -268,8 +250,7 @@ Since the changes in 0.12 to automatically limit the size of the mempool and imp
 
 The `-minrelaytxfee` option continues to exist but is recommended to be left unset.
 
-Fee Estimation Changes
-----------------------
+## Fee Estimation Changes
 
 - Since 0.13.2 fee estimation for a confirmation target of 1 block has been
   disabled. The fee slider will no longer be able to choose a target of 1 block.
@@ -280,8 +261,7 @@ Fee Estimation Changes
 - The default target for fee estimation is changed to 6 blocks in both the GUI
   (previously 25) and for RPC calls (previously 2).
 
-Removal of Priority Estimation
-------------------------------
+## Removal of Priority Estimation
 
 - Estimation of "priority" needed for a transaction to be included within a target
   number of blocks has been removed.  The RPC calls are deprecated and will either
@@ -295,8 +275,7 @@ Removal of Priority Estimation
   This is not to be confused with the `prioritisetransaction` RPC which will remain
   supported by Core for adding fee deltas to transactions.
 
-P2P connection management
---------------------------
+## P2P connection management
 
 - Peers manually added through the `-addnode` option or `addnode` RPC now have their own
   limit of eight connections which does not compete with other inbound or outbound
@@ -305,8 +284,7 @@ P2P connection management
 
 - New connections to manually added peers are performed more quickly.
 
-Introduction of assumed-valid blocks
--------------------------------------
+## Introduction of assumed-valid blocks
 
 - A significant portion of the initial block download time is spent verifying
   scripts/signatures.  Although the verification must pass to ensure the security
@@ -327,8 +305,7 @@ Introduction of assumed-valid blocks
   value adjusted to match the current chain shortly before release.  The use
   of this default value can be disabled by setting -assumevalid=0
 
-Fundrawtransaction change address reuse
-----------------------------------------
+## Fundrawtransaction change address reuse
 
 - Before 0.14, `fundrawtransaction` was by default wallet stateless. In
   almost all cases `fundrawtransaction` does add a change-output to the
@@ -345,8 +322,7 @@ Fundrawtransaction change address reuse
 - Users should also consider using `getrawchangeaddress()` in conjunction
   with `fundrawtransaction`'s `changeAddress` option.
 
-Unused mempool memory used by coincache
-----------------------------------------
+## Unused mempool memory used by coincache
 
 - Before 0.14, memory reserved for mempool (using the `-maxmempool` option)
   went unused during initial block download, or IBD. In 0.14, the UTXO DB cache
@@ -355,8 +331,7 @@ Unused mempool memory used by coincache
   memory usage during IBD for those previously relying on only the `-dbcache`
   option to limit memory during that time.
 
-0.14.0 Change log
-=================
+# 0.14.0 Change log
 
 Detailed release notes follow. This overview includes changes that affect
 behavior, not code moves, minor refactors and string updates. For convenience
@@ -763,8 +738,7 @@ and git merge commit are mentioned.
 - #9798 `e22c067` Fix Issue #9775 (Check returned value of fopen) (kirit93)
 - #9856 `69832aa` Terminate immediately when allocation fails (theuni)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

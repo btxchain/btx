@@ -117,6 +117,8 @@ enum class P2MRLeafType {
     CSFS_SLHDSA,
     CSFS_VERIFY_CHECKSIG_MLDSA,
     CSFS_VERIFY_CHECKSIG_SLHDSA,
+    HTLC_MLDSA,
+    HTLC_SLHDSA,
 };
 
 P2MRLeafType ChecksigLeafTypeForAlgo(PQAlgorithm algo)
@@ -174,6 +176,17 @@ P2MRLeafType CSFSLeafTypeForAlgo(PQAlgorithm algo)
     return P2MRLeafType::UNKNOWN;
 }
 
+P2MRLeafType HtlcLeafTypeForAlgo(PQAlgorithm algo)
+{
+    switch (algo) {
+    case PQAlgorithm::ML_DSA_44:
+        return P2MRLeafType::HTLC_MLDSA;
+    case PQAlgorithm::SLH_DSA_128S:
+        return P2MRLeafType::HTLC_SLHDSA;
+    }
+    return P2MRLeafType::UNKNOWN;
+}
+
 std::optional<PQAlgorithm> ChecksigAlgoForLeafType(P2MRLeafType leaf_type)
 {
     switch (leaf_type) {
@@ -197,9 +210,11 @@ std::optional<PQAlgorithm> CSFSAlgoForLeafType(P2MRLeafType leaf_type)
     switch (leaf_type) {
     case P2MRLeafType::CSFS_MLDSA:
     case P2MRLeafType::CTV_CSFS_MLDSA:
+    case P2MRLeafType::HTLC_MLDSA:
         return PQAlgorithm::ML_DSA_44;
     case P2MRLeafType::CSFS_SLHDSA:
     case P2MRLeafType::CTV_CSFS_SLHDSA:
+    case P2MRLeafType::HTLC_SLHDSA:
         return PQAlgorithm::SLH_DSA_128S;
     default:
         return std::nullopt;
@@ -348,6 +363,25 @@ P2MRLeafType ParsePolicyP2MRLeafScript(Span<const unsigned char> leaf_script)
         P2MRMultisigPolicyInfo multisig_info;
         if (ParsePolicyP2MRMultisigLeafScript(tail, multisig_info)) {
             return P2MRLeafType::CSV_MULTISIG;
+        }
+    }
+
+    // HTLC leaf: <20-byte H160 push> OP_OVER OP_HASH160 OP_EQUALVERIFY <csfs pubkey> OP_CHECKSIGFROMSTACK
+    // (hashlock + delegated CSFS signature; spent with witness <csfs_sig> <preimage> <leaf> <control>).
+    if (leaf_script.size() > 24 &&
+        leaf_script[0] == 0x14 &&
+        leaf_script[21] == static_cast<unsigned char>(OP_OVER) &&
+        leaf_script[22] == static_cast<unsigned char>(OP_HASH160) &&
+        leaf_script[23] == static_cast<unsigned char>(OP_EQUALVERIFY)) {
+        const Span<const unsigned char> tail = leaf_script.subspan(24);
+        for (const PQAlgorithm algo : GetSupportedPQAlgorithms()) {
+            Span<const unsigned char> pubkey;
+            size_t pk_len{0};
+            if (ParseP2MRPubkeyPush(tail, 0, algo, pubkey, pk_len) &&
+                tail.size() == pk_len + 1 &&
+                tail[pk_len] == static_cast<unsigned char>(OP_CHECKSIGFROMSTACK)) {
+                return HtlcLeafTypeForAlgo(algo);
+            }
         }
     }
 
@@ -948,7 +982,10 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
                 break;
             }
             case P2MRLeafType::CSFS_MLDSA:
-            case P2MRLeafType::CSFS_SLHDSA: {
+            case P2MRLeafType::CSFS_SLHDSA:
+            case P2MRLeafType::HTLC_MLDSA:
+            case P2MRLeafType::HTLC_SLHDSA: {
+                // Witness: <csfs_sig> <message-or-preimage> <leaf_script> <control_block>.
                 if (stack.size() != 4) {
                     out_reason = reason_prefix + "p2mr-stack-size";
                     return false;

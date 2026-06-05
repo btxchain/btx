@@ -18,7 +18,7 @@ namespace {
 class AlwaysTruePQChecker final : public BaseSignatureChecker
 {
 public:
-    bool CheckPQSignature(Span<const unsigned char>, Span<const unsigned char>, PQAlgorithm, uint8_t, SigVersion, ScriptExecutionData&) const override
+    bool CheckPQSignature(Span<const unsigned char>, Span<const unsigned char>, PQAlgorithm, uint8_t, SigVersion, ScriptExecutionData&, bool) const override
     {
         return true;
     }

@@ -74,6 +74,7 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
 }
 
 [[nodiscard]] bool AddCreatedShieldedRefs(const CTransaction& tx,
+                                          int64_t validation_height,
                                           std::set<uint256>& settlement_anchors,
                                           std::set<uint256>& netting_manifests)
 {
@@ -84,7 +85,7 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
     std::string reject_reason;
     switch (*family) {
     case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR: {
-        auto created = ExtractCreatedShieldedSettlementAnchors(tx, reject_reason);
+        auto created = ExtractCreatedShieldedSettlementAnchors(tx, validation_height, reject_reason);
         if (!created.has_value()) return false;
         settlement_anchors.insert(created->begin(), created->end());
         return true;
@@ -148,8 +149,11 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
 {
     std::set<uint256> settlement_anchors;
     std::set<uint256> netting_manifests;
+    // The package is being assembled for the next block; bridge-OUT attestor receipts must verify
+    // under the scheme fixed by that height (FIPS-205 at/after C-002).
+    const int64_t validation_height = chainman.ActiveChain().Height() + 1;
     for (const auto& entry : in_block) {
-        if (!AddCreatedShieldedRefs(entry->GetTx(), settlement_anchors, netting_manifests)) {
+        if (!AddCreatedShieldedRefs(entry->GetTx(), validation_height, settlement_anchors, netting_manifests)) {
             return false;
         }
     }
@@ -158,7 +162,7 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
         if (!AreShieldedRefsReadyForBlock(entry->GetTx(), chainman, settlement_anchors, netting_manifests)) {
             return false;
         }
-        if (!AddCreatedShieldedRefs(entry->GetTx(), settlement_anchors, netting_manifests)) {
+        if (!AddCreatedShieldedRefs(entry->GetTx(), validation_height, settlement_anchors, netting_manifests)) {
             return false;
         }
     }

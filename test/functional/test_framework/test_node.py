@@ -47,7 +47,11 @@ from .util import (
     tor_port,
 )
 
-BITCOIND_PROC_WAIT_TIMEOUT = 60
+# PQ/SMILE proof generation can keep the node busy for 90+ seconds, so a node
+# may be slow to respond to a clean shutdown while mid-proof. Raise the base
+# process-wait timeout from the upstream 60s to 120s. This is still scaled
+# further by timeout_factor wherever it is consumed (e.g. wait_until_stopped).
+BITCOIND_PROC_WAIT_TIMEOUT = 120
 # The size of the blocks xor key
 # from InitBlocksdirXorKey::xor_key.size()
 NUM_XOR_BYTES = 8

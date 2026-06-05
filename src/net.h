@@ -11,6 +11,7 @@
 #include <common/bloom.h>
 #include <compat/compat.h>
 #include <consensus/amount.h>
+#include <crypto/ml_kem.h>
 #include <crypto/siphash.h>
 #include <hash.h>
 #include <i2p.h>
@@ -459,6 +460,11 @@ private:
      *  an empty version packet contents is interpreted as no extensions supported. */
     static constexpr std::array<std::byte, 0> VERSION_CONTENTS = {};
 
+    /** (BTX PQ) First byte of a non-empty version packet, advertising support for the hybrid
+     *  X25519 + ML-KEM-768 upgrade. A responder follows it with its 1184-byte ML-KEM public key; an
+     *  initiator sends the flag byte alone. An empty version packet means "no PQ" (legacy peer). */
+    static constexpr uint8_t PQ_VERSION_FLAG{0x01};
+
     /** The length of the V1 prefix to match bytes initially received by responders with to
      *  determine if their peer is speaking V1 or V2. */
     static constexpr size_t V1_PREFIX_LEN = 16;
@@ -479,6 +485,8 @@ private:
      *        |          |                                  |         |
      *        v          v                                  v         |
      *  KEY_MAYBE_V1 -> KEY -> GARB_GARBTERM -> VERSION -> APP -> APP_READY
+     *        |                                    |        ^
+     *        |                       (BTX PQ) PQ_CT -------/
      *        |
      *        \-------> V1
      */
@@ -511,9 +519,21 @@ private:
          * first received packet in this state (whether it's a decoy or not) is expected to
          * authenticate the garbage received during the GARB_GARBTERM state as associated
          * authenticated data (AAD). The first non-decoy packet in this state is interpreted as
-         * version negotiation (currently, that means ignoring the contents, but it can be used for
-         * negotiating future extensions), and afterwards the state becomes APP. */
+         * version negotiation. The contents carry BTX's post-quantum negotiation: a responder that
+         * supports the hybrid upgrade puts a 1-byte flag + its ML-KEM-768 public key there, and a
+         * supporting initiator puts a 1-byte flag. When both sides support it, the state becomes
+         * PQ_CT (responder, awaiting the ML-KEM ciphertext) or APP (initiator, after it has sent the
+         * ciphertext and rekeyed). Otherwise (legacy/non-PQ peer, empty contents) the state becomes
+         * APP directly, preserving standard BIP324 behaviour. */
         VERSION,
+
+        /** (BTX post-quantum, responder only) ML-KEM ciphertext packet.
+         *
+         * Entered from VERSION when both peers advertised the hybrid PQ upgrade. A single packet is
+         * received whose contents is the ML-KEM-768 ciphertext; it is decapsulated against our
+         * ML-KEM secret key, both sides RekeyHybridPQ() to mix the resulting shared secret into all
+         * four ciphers, and the state becomes APP. */
+        PQ_CT,
 
         /** Application packet.
          *
@@ -586,6 +606,20 @@ private:
     /** Encapsulate a V1Transport to fall back to. */
     V1Transport m_v1_fallback;
 
+    // BTX post-quantum (hybrid X25519 + ML-KEM-768) negotiation state.
+    /** Whether this build advertises the PQ hybrid upgrade (default true; kept as a field so the
+     *  behaviour is easy to disable for tests/fuzzing without touching the wire logic). */
+    const bool m_pq_capable;
+    /** (-v2pqonly) Whether to REQUIRE the post-quantum hybrid on every connection: peers that do
+     *  not complete the X25519 + ML-KEM hybrid handshake (legacy v2, or v1) are disconnected rather
+     *  than served over an X25519-only / unencrypted link. Implies m_pq_capable. The key derivation
+     *  is unchanged (still hybrid); this only refuses non-PQ peers. */
+    const bool m_pq_only;
+    /** (Responder only) our ephemeral ML-KEM-768 key pair, offered in the version packet and used
+     *  to decapsulate the initiator's ciphertext. Generated at construction for responders; the
+     *  secret key is wiped after decapsulation. Only meaningful while m_pq_capable. */
+    mlkem::KeyPair m_pq_keypair GUARDED_BY(m_recv_mutex);
+
     /** Lock for receiver-side fields. */
     mutable Mutex m_recv_mutex ACQUIRED_BEFORE(m_send_mutex);
     /** In {VERSION, APP}, the decrypted packet length, if m_recv_buffer.size() >=
@@ -615,6 +649,13 @@ private:
     SendState m_send_state GUARDED_BY(m_send_mutex);
     /** Whether we've sent at least 24 bytes (which would trigger disconnect for V1 peers). */
     bool m_sent_v1_header_worth GUARDED_BY(m_send_mutex) {false};
+    /** (BTX PQ) While true, application packets may not be composed/sent yet: we are still resolving
+     *  the post-quantum negotiation and must not emit any app-cipher packet until the (possible)
+     *  hybrid rekey has happened, so that no packet crosses the rekey boundary under the wrong key.
+     *  Initialised true for PQ-capable transports; cleared once the negotiation resolves (either a
+     *  rekey completed, or the peer turned out not to support PQ). Handshake bytes (key/garbage/
+     *  version/ciphertext) live directly in m_send_buffer and are unaffected by this gate. */
+    bool m_pq_send_gated GUARDED_BY(m_send_mutex) {false};
 
     /** Change the receive state. */
     void SetReceiveState(RecvState recv_state) noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex);
@@ -632,8 +673,17 @@ private:
     bool ProcessReceivedKeyBytes() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex, !m_send_mutex);
     /** Process bytes in m_recv_buffer, while in GARB_GARBTERM state. */
     bool ProcessReceivedGarbageBytes() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex);
-    /** Process bytes in m_recv_buffer, while in VERSION/APP state. */
-    bool ProcessReceivedPacketBytes() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex);
+    /** Process bytes in m_recv_buffer, while in VERSION/PQ_CT/APP state. */
+    bool ProcessReceivedPacketBytes() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex, !m_send_mutex);
+    /** (BTX PQ) Build the contents of the version packet we send: empty for a non-PQ transport, the
+     *  PQ flag byte for a PQ-capable initiator, or the PQ flag byte + our ML-KEM public key for a
+     *  PQ-capable responder. */
+    std::vector<std::byte> BuildVersionContents() const noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex);
+    /** (BTX PQ, initiator) Encapsulate to the responder's ML-KEM public key, append the resulting
+     *  ciphertext as a packet (under the current X25519 cipher), then RekeyHybridPQ() both
+     *  directions and release held-back application packets. */
+    void SendPQCiphertextAndRekey(const mlkem::PublicKey& their_pubkey) noexcept
+        EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex, !m_send_mutex);
 
 public:
     static constexpr uint32_t MAX_GARBAGE_LEN = 4095;
@@ -662,6 +712,9 @@ public:
     // Miscellaneous functions.
     bool ShouldReconnectV1() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex, !m_send_mutex);
     Info GetInfo() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex);
+
+    /** (Test only) Whether the post-quantum hybrid rekey has been applied to the cipher. */
+    bool IsHybridActiveForTest() const noexcept EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
 };
 
 struct CNodeOptions

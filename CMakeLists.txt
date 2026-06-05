@@ -28,8 +28,8 @@ get_directory_property(precious_variables CACHE_VARIABLES)
 #=============================
 set(CLIENT_NAME "BTX")
 set(CLIENT_VERSION_MAJOR 0)
-set(CLIENT_VERSION_MINOR 30)
-set(CLIENT_VERSION_BUILD 2)
+set(CLIENT_VERSION_MINOR 31)
+set(CLIENT_VERSION_BUILD 0)
 set(CLIENT_VERSION_RC 0)
 set(CLIENT_VERSION_IS_RELEASE "true")
 set(COPYRIGHT_YEAR "2026")
@@ -329,6 +329,26 @@ include(TryAppendCXXFlags)
 include(TryAppendLinkerFlag)
 
 try_append_linker_flag("-Wl,--no-undefined" TARGET external_lib_interface)
+
+# Default thread-stack size.
+#
+# The shielded SMILE2/MatRiCT confidential-transaction prover and verifier
+# (smile2::TryProveCT / smile2::VerifyCT) legitimately use very large stack
+# frames (~110-140 KB) because they hold many full-degree ring polynomials and
+# NTT temporaries as value locals. glibc gives every thread an 8 MB stack by
+# default, so this is invisible there. musl, however, derives the default
+# pthread stack size from the executable's PT_GNU_STACK program header and
+# otherwise falls back to only 128 KB. With the default empty PT_GNU_STACK a
+# musl build (e.g. the Alpine release/docker images, contrib/docker/Dockerfile)
+# hands HTTP-worker and block-validation threads a 128 KB stack, so the very
+# first v3 CT spend overflows the guard page and crashes the node — for the
+# verifier that means every musl node halts when it connects a block containing
+# a valid v3 spend. Set PT_GNU_STACK to 8 MB so musl matches glibc. This is a
+# virtual reservation only (pages fault in lazily) and is a no-op on glibc,
+# which ignores PT_GNU_STACK for the thread default and uses RLIMIT_STACK.
+if(NOT WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+  try_append_linker_flag("-Wl,-z,stack-size=8388608" TARGET core_interface)
+endif()
 
 # Redefine/adjust per-configuration flags.
 target_compile_definitions(core_interface_debug INTERFACE

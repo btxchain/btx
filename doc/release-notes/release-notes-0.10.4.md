@@ -10,19 +10,16 @@ Please report bugs using the issue tracker at github:
 
   <https://github.com/bitcoin/bitcoin/issues>
 
-Upgrading and downgrading
-=========================
+# Upgrading and downgrading
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
 installer (on Windows) or just copy over /Applications/Bitcoin-Qt (on Mac) or
 bitcoind/bitcoin-qt (on Linux).
 
-Downgrade warning
-------------------
+## Downgrade warning
 
 Because release 0.10.0 and later makes use of headers-first synchronization and
 parallel block download (see further), the block files and databases are not
@@ -45,11 +42,9 @@ supported and may break as soon as the older version attempts to reindex.
 This does not affect wallet forward or backward compatibility. There are no
 known problems when downgrading from 0.11.x to 0.10.x.
 
-Notable changes since 0.10.3
-============================
+# Notable changes since 0.10.3
 
-BIP65 soft fork to enforce OP_CHECKLOCKTIMEVERIFY opcode
---------------------------------------------------------
+## BIP65 soft fork to enforce OP_CHECKLOCKTIMEVERIFY opcode
 
 This release includes several changes related to the [BIP65][] soft fork
 which redefines the existing OP_NOP2 opcode as OP_CHECKLOCKTIMEVERIFY
@@ -97,8 +92,7 @@ version FIXME or any version from FIXME onward.
 
 [BIP65]: https://github.com/bitcoin/bips/blob/master/bip-0065.mediawiki
 
-Windows bug fix for corrupted UTXO database on unclean shutdowns
-----------------------------------------------------------------
+## Windows bug fix for corrupted UTXO database on unclean shutdowns
 
 Several Windows users reported that they often need to reindex the
 entire blockchain after an unclean shutdown of Bitcoin Core on Windows
@@ -112,8 +106,7 @@ For more information, see: <https://github.com/bitcoin/bitcoin/pull/6917>
 Other fixes for database corruption on Windows are expected in the
 next major release.
 
-0.10.4 Change log
-=================
+# 0.10.4 Change log
 
 Detailed release notes follow. This overview includes changes that affect
 behavior, not code moves, refactors and string updates. For convenience in locating
@@ -146,8 +139,7 @@ git merge commit are mentioned.
 - #6836 `fb818b6` Bring historical release notes up to date
 - #6852 `0b3fd07` build: make sure OpenSSL heeds noexecstack
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

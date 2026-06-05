@@ -100,7 +100,13 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         self.nodes: list[TestNode] = []
         self.extra_args = None
         self.network_thread = None
-        self.rpc_timeout = 60  # Wait for up to 60 seconds for the RPC server to respond
+        # PQ/SMILE proof generation is genuinely slow: a single shielded/P2MR
+        # sendtoaddress can take 90+ seconds. The upstream Bitcoin Core default
+        # of 60s causes spurious -344 "RPC took longer than N seconds" failures.
+        # Raise the base per-RPC timeout to 600s so a plain `test_runner.py <test>`
+        # works without requiring --timeout-factor. --timeout-factor still
+        # multiplies on top of this (see line below where it is applied).
+        self.rpc_timeout = 600  # Wait for up to 600 seconds for the RPC server to respond (PQ proof-gen is slow)
         self.supports_cli = True
         self.bind_to_localhost_only = True
         self.parse_args(test_file)
@@ -202,7 +208,13 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         self.options = parser.parse_args()
         if self.options.timeout_factor == 0:
             self.options.timeout_factor = 99999
-        self.options.timeout_factor = self.options.timeout_factor or (4 if self.options.valgrind else 1)
+        # PQ/SMILE proof generation is slow, so the various wait_until / node
+        # start-stop / p2p helpers (which scale their own base timeouts by
+        # timeout_factor) need extra headroom by default, especially on slower
+        # CI runners. Default to 6x (matching the factor that feature_p2mr_end_to_end
+        # needs) when no --timeout-factor is passed. An explicit --timeout-factor
+        # still overrides this and scales further on top.
+        self.options.timeout_factor = self.options.timeout_factor or (24 if self.options.valgrind else 6)
         self.options.previous_releases_path = previous_releases_path
 
         config = configparser.ConfigParser()

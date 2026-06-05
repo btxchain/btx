@@ -10,19 +10,16 @@ Please report bugs using the issue tracker at github:
 
   https://github.com/bitcoin/bitcoin/issues
 
-How to Upgrade
-===============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
 installer (on Windows) or just copy over /Applications/Bitcoin-Qt (on Mac) or
 bitcoind/bitcoin-qt (on Linux).
 
-Notable changes
-================
+# Notable changes
 
-Mining and relay policy enhancements
-------------------------------------
+## Mining and relay policy enhancements
 
 Bitcoin Core's block templates are now for version 3 blocks only, and any mining
 software relying on its `getblocktemplate` must be updated in parallel to use
@@ -34,8 +31,7 @@ If you are mining with the getblocktemplate protocol to a pool: this will affect
 you at the pool operator's discretion, which must be no later than BIP66
 achieving its 951/1001 status.
 
-0.9.5 changelog
-================
+# 0.9.5 changelog
 
 - `74f29c2` Check pindexBestForkBase for null
 - `9cd1dd9` Fix priority calculation in CreateTransaction
@@ -45,8 +41,7 @@ achieving its 951/1001 status.
 - `ab03660` Implement BIP 66 validation rules and switchover logic
 - `8438074` build: fix dynamic boost check when --with-boost= is used
 
-Credits
---------
+## Credits
 
 Thanks to who contributed to this release, at least:
 

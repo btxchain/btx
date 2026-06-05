@@ -1204,10 +1204,10 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
 
     BOOST_CHECK_EQUAL(
         consensus.nMinimumChainWork.GetHex(),
-        "00000000000000000000000000000000000000000000000000000299d53aaf7d");
+        "00000000000000000000000000000000000000000000000000000372df7a85a3");
     BOOST_CHECK_EQUAL(
         consensus.defaultAssumeValid.GetHex(),
-        "f4dfb86209f2f4f2c9ccfb960368cc334afea065916a82f38698f6391118cd8e");
+        "24744e8793137d0a6639a90c066b78e7edb6722ad7007cdac0911ae171ead611");
     BOOST_CHECK_EQUAL(params->AssumedBlockchainSize(), 16U);
     BOOST_CHECK_EQUAL(params->AssumedChainStateSize(), 1U);
 
@@ -1218,11 +1218,11 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
     BOOST_CHECK_EQUAL(
         it_0->second.GetHex(),
         "75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601");
-    const auto it_anchor = checkpoints.find(118225);
+    const auto it_anchor = checkpoints.find(120900);
     BOOST_REQUIRE(it_anchor != checkpoints.end());
     BOOST_CHECK_EQUAL(
         it_anchor->second.GetHex(),
-        "f4dfb86209f2f4f2c9ccfb960368cc334afea065916a82f38698f6391118cd8e");
+        "24744e8793137d0a6639a90c066b78e7edb6722ad7007cdac0911ae171ead611");
 
     const auto assumeutxo_55000 = params->AssumeutxoForHeight(55000);
     BOOST_REQUIRE(assumeutxo_55000.has_value());
@@ -1323,11 +1323,22 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_118225->blockhash.GetHex(),
         "f4dfb86209f2f4f2c9ccfb960368cc334afea065916a82f38698f6391118cd8e");
 
+    const auto assumeutxo_120900 = params->AssumeutxoForHeight(120900);
+    BOOST_REQUIRE(assumeutxo_120900.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_120900->height, 120900);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_120900->hash_serialized.ToString(),
+        "73c62a680afefae9a861131938947831becc774513bd788cc4f93cc42aa06f55");
+    BOOST_CHECK_EQUAL(assumeutxo_120900->m_chain_tx_count, 147449U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_120900->blockhash.GetHex(),
+        "24744e8793137d0a6639a90c066b78e7edb6722ad7007cdac0911ae171ead611");
+
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 9U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 10U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 118225);
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 120900);
     BOOST_CHECK_GE(snapshot_heights.back(), std::prev(checkpoints.end())->first);
 }
 
@@ -2774,7 +2785,7 @@ BOOST_AUTO_TEST_CASE(matmul_digest_compare_probe_ignores_matching_digests)
     ResetMatMulDigestCompareStats();
 
     const CBlockHeader header = MakeDigestProbeHeader();
-    const uint256 digest{"1111111111111111111111111111111111111111111111111111111111111111"};
+    static constexpr uint256 digest{"1111111111111111111111111111111111111111111111111111111111111111"};
     RegisterMatMulDigestCompareAttempt(header, digest, digest);
 
     const auto stats = ProbeMatMulDigestCompareStats();
@@ -2790,8 +2801,8 @@ BOOST_AUTO_TEST_CASE(matmul_digest_compare_probe_captures_first_divergence_once)
     ResetMatMulDigestCompareStats();
 
     const CBlockHeader first = MakeDigestProbeHeader();
-    const uint256 first_backend{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"};
-    const uint256 first_cpu{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"};
+    static constexpr uint256 first_backend{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"};
+    static constexpr uint256 first_cpu{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"};
     RegisterMatMulDigestCompareAttempt(first, first_backend, first_cpu);
 
     auto stats = ProbeMatMulDigestCompareStats();
@@ -2806,8 +2817,8 @@ BOOST_AUTO_TEST_CASE(matmul_digest_compare_probe_captures_first_divergence_once)
     CBlockHeader second = first;
     ++second.nNonce64;
     second.nNonce = static_cast<uint32_t>(second.nNonce64);
-    const uint256 second_backend{"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"};
-    const uint256 second_cpu{"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"};
+    static constexpr uint256 second_backend{"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"};
+    static constexpr uint256 second_cpu{"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"};
     RegisterMatMulDigestCompareAttempt(second, second_backend, second_cpu);
 
     stats = ProbeMatMulDigestCompareStats();

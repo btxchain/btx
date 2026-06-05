@@ -40,6 +40,17 @@ private:
     std::array<std::byte, GARBAGE_TERMINATOR_LEN> m_send_garbage_terminator;
     std::array<std::byte, GARBAGE_TERMINATOR_LEN> m_recv_garbage_terminator;
 
+    // BTX post-quantum hybrid upgrade state. After the X25519 handshake, peers that
+    // both support it negotiate an ML-KEM-768 shared secret (in the version-packet
+    // exchange) and call RekeyHybridPQ() to re-derive all four ciphers from a secret
+    // that depends on BOTH the X25519 ECDH and the ML-KEM secret. m_hybrid_rekey_secret
+    // is an X25519-derived key retained from Initialize() for exactly that purpose
+    // (so the rekey is hybrid, not ML-KEM-only); it is wiped on rekey. m_side records
+    // the initiator/self_decrypt cipher mapping so the rekey preserves it.
+    std::array<std::byte, 32> m_hybrid_rekey_secret;
+    bool m_side{false};
+    bool m_hybrid_active{false};
+
 public:
     /** No default constructor; keys must be provided to create a BIP324Cipher. */
     BIP324Cipher() = delete;
@@ -63,6 +74,18 @@ public:
 
     /** Determine whether this cipher is fully initialized. */
     explicit operator bool() const noexcept { return m_send_l_cipher.has_value(); }
+
+    /** BTX post-quantum hybrid upgrade. Re-derive all four ciphers from a secret that
+     *  mixes the retained X25519-derived rekey secret with an ML-KEM-768 shared secret,
+     *  yielding hybrid (X25519 AND ML-KEM) confidentiality for all subsequent packets.
+     *  Both peers must call this with the SAME mlkem_secret at the SAME packet boundary
+     *  (immediately after the version-packet PQ exchange, before any application packet).
+     *  Session id and garbage terminators are unchanged. Only valid after Initialize(),
+     *  and only once. */
+    void RekeyHybridPQ(Span<const std::byte> mlkem_secret) noexcept;
+
+    /** Whether a post-quantum hybrid rekey has been applied. */
+    bool IsHybridActive() const noexcept { return m_hybrid_active; }
 
     /** Encrypt a packet. Only after Initialize().
      *

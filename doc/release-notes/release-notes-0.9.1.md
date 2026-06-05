@@ -15,8 +15,7 @@ Please report bugs using the issue tracker at github:
 
   https://github.com/bitcoin/bitcoin/issues
 
-How to Upgrade
---------------
+## How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
@@ -27,8 +26,7 @@ If you are upgrading from version 0.7.2 or earlier, the first time you run
 0.9.1 your blockchain files will be re-indexed, which will take anywhere from 
 30 minutes to several hours, depending on the speed of your machine.
 
-0.9.1 Release notes
-=======================
+# 0.9.1 Release notes
 
 No code changes were made between 0.9.0 and 0.9.1. Only the dependencies were changed.
 
@@ -47,7 +45,6 @@ No code changes were made between 0.9.0 and 0.9.1. Only the dependencies were ch
 
 - Add statically built executables to Linux build
 
-Credits
---------
+## Credits
 
 Credits go to the OpenSSL team for fixing the vulnerabilities quickly.

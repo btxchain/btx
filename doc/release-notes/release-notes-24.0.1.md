@@ -1,5 +1,4 @@
-24.0.1 Release Notes
-====================
+# 24.0.1 Release Notes
 
 Due to last-minute issues (#26616), 24.0, although tagged, was never fully
 announced or released.
@@ -19,8 +18,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes in some cases), then run the
@@ -31,8 +29,7 @@ Upgrading directly from a version of Bitcoin Core that has reached its EOL is
 possible, but it might take some time if the data directory needs to be migrated. Old
 wallet versions of Bitcoin Core are generally supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems
 using the Linux kernel, macOS 10.15+, and Windows 7 and newer.  Bitcoin
@@ -40,8 +37,7 @@ Core should also work on most other Unix-like systems but is not as
 frequently tested on them.  It is not recommended to use Bitcoin Core on
 unsupported systems.
 
-Notice of new option for transaction replacement policies
-=========================================================
+# Notice of new option for transaction replacement policies
 
 This version of Bitcoin Core adds a new `mempoolfullrbf` configuration
 option which allows users to change the policy their individual node
@@ -94,11 +90,9 @@ when their assumptions do not hold.
 [Bitcoin Core 0.12.0]: https://bitcoincore.org/en/releases/0.12.0/#opt-in-replace-by-fee-transactions
 [bip125]: https://github.com/bitcoin/bips/blob/master/bip-0125.mediawiki
 
-Notable changes
-===============
+# Notable changes
 
-P2P and network changes
------------------------
+## P2P and network changes
 
 - To address a potential denial-of-service, the logic to download headers from peers
   has been reworked.  This is particularly relevant for nodes starting up for the
@@ -120,8 +114,7 @@ P2P and network changes
 - With I2P connections, a new, transient address is used for each outbound
   connection if `-i2pacceptincoming=0`. (#25355)
 
-Updated RPCs
-------------
+## Updated RPCs
 
 - The `-deprecatedrpc=softforks` configuration option has been removed.  The
   RPC `getblockchaininfo` no longer returns the `softforks` field, which was
@@ -148,8 +141,7 @@ Updated RPCs
 
 Changes to wallet related RPCs can be found in the Wallet section below.
 
-New RPCs
---------
+## New RPCs
 
 - The `sendall` RPC spends specific UTXOs to one or more recipients
   without creating change. By default, the `sendall` RPC will spend
@@ -167,8 +159,7 @@ New RPCs
   useful e.g. when verifying that a coin join like transaction doesn't contain unexpected
   inputs that the wallet will then sign for unintentionally. (#22751)
 
-Updated REST APIs
------------------
+## Updated REST APIs
 
 - The `/headers/` and `/blockfilterheaders/` endpoints have been updated to use
   a query parameter instead of path parameter to specify the result count. The
@@ -187,20 +178,17 @@ Updated REST APIs
 
   (#24098)
 
-Build System
-------------
+## Build System
 
 - Guix builds are now reproducible across architectures (x86_64 & aarch64). (#21194)
 
-New settings
-------------
+## New settings
 
 - A new `mempoolfullrbf` option has been added, which enables the mempool to
   accept transaction replacement without enforcing BIP125 replaceability
   signaling. (#25353)
 
-Wallet
-------
+## Wallet
 
 - The `-walletrbf` startup option will now default to `true`. The
   wallet will now default to opt-in RBF on transactions that it creates. (#25610)
@@ -232,15 +220,13 @@ Wallet
 - RPC `getreceivedbylabel` now returns an error, "Label not found
   in wallet" (-4), if the label is not in the address book. (#25122)
 
-Migrating Legacy Wallets to Descriptor Wallets
----------------------------------------------
+## Migrating Legacy Wallets to Descriptor Wallets
 
 An experimental RPC `migratewallet` has been added to migrate Legacy (non-descriptor) wallets to
 Descriptor wallets. More information about the migration process is available in the
 [documentation](https://github.com/bitcoin/bitcoin/blob/master/doc/managing-wallets.md#migrating-legacy-wallets-to-descriptor-wallets).
 
-GUI changes
------------
+## GUI changes
 
 - A new menu item to restore a wallet from a backup file has been added (gui#471).
 
@@ -257,11 +243,9 @@ dialog are overridden by the configuration file: -setting=value"). And these
 settings can now be edited because `settings.json` values take precedence over
 `bitcoin.conf` values. (#15936)
 
-Low-level changes
-=================
+# Low-level changes
 
-RPC
----
+## RPC
 
 - The `deriveaddresses`, `getdescriptorinfo`, `importdescriptors` and `scantxoutset` commands now
   accept Miniscript expression within a `wsh()` descriptor. (#24148)
@@ -269,8 +253,7 @@ RPC
 - The `getaddressinfo`, `decodescript`, `listdescriptors` and `listunspent` commands may now output
   a Miniscript descriptor inside a `wsh()` where a `wsh(raw())` descriptor was previously returned. (#24148)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

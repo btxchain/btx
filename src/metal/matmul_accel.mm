@@ -1122,11 +1122,15 @@ struct MetalContext {
     MetalContext()
     {
         @autoreleasepool {
-            device = MTLCreateSystemDefaultDevice();
-            if (device == nil) {
+            // MTLCreateSystemDefaultDevice() is restricted to interactive apps on macOS 14+; it
+            // returns nil from CLI/daemon contexts (btxd, btx-genesis, btx-matmul-*). MTLCopyAllDevices()
+            // works in any context -- Apple's documented replacement for non-interactive apps.
+            NSArray<id<MTLDevice>>* allDevices = MTLCopyAllDevices();
+            if (allDevices == nil || allDevices.count == 0) {
                 error = "No Metal-compatible GPU device found";
                 return;
             }
+            device = allDevices[0];
             capture_supported = [MTLCaptureManager sharedCaptureManager] != nil;
             pool_slots.resize(ResolveMetalPoolSlotCount());
             for (auto& slot : pool_slots) {
@@ -2073,10 +2077,12 @@ bool ShouldUseLegacyTranscriptPipeline(const btx::metal::MatMulDigestRequest& re
     case MetalTranscriptPipelineMode::FUSED:
         return !fused_available && legacy_available;
     case MetalTranscriptPipelineMode::AUTO:
-        if (!legacy_available) return false;
-        if (!fused_available) return true;
-        // Large production dimensions regress on fused+GPU hash on M1 class devices.
-        return request.n >= 128;
+        // Prefer the legacy GPU-compute + CPU-finalize path for consensus safety: it produces the
+        // same bytes as the canonical CPU MatMul transcript that block validation checks. The fused
+        // GPU-hash transcript path is not byte-exact for small transcript fixtures, so a miner using
+        // it could stamp a digest the network's CPU validators reject. It is retained only behind
+        // the explicit BTX_MATMUL_METAL_PIPELINE=fused override.
+        return legacy_available;
     }
 
     return false;

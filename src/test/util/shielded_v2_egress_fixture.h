@@ -450,7 +450,9 @@ inline V2RebalanceFixture BuildV2RebalanceFixture(
     return fixture;
 }
 
-inline std::vector<::shielded::BridgeKeySpec> MakeV2EgressAttestors(unsigned char seed_base, size_t count)
+inline std::vector<::shielded::BridgeKeySpec> MakeV2EgressAttestors(unsigned char seed_base,
+                                                                   size_t count,
+                                                                   PQAlgorithm algo = PQAlgorithm::ML_DSA_44)
 {
     std::vector<::shielded::BridgeKeySpec> attestors;
     attestors.reserve(count);
@@ -459,31 +461,37 @@ inline std::vector<::shielded::BridgeKeySpec> MakeV2EgressAttestors(unsigned cha
         material.fill(static_cast<unsigned char>(seed_base + i));
 
         CPQKey key;
-        if (!key.MakeDeterministicKey(PQAlgorithm::ML_DSA_44, material)) {
+        if (!key.MakeDeterministicKey(algo, material)) {
             throw std::runtime_error("failed to build v2 egress attestor fixture");
         }
-        attestors.push_back({PQAlgorithm::ML_DSA_44, key.GetPubKey()});
+        attestors.push_back({algo, key.GetPubKey()});
     }
     return attestors;
 }
 
+// Build a single attestor batch receipt over `statement`, signed with `algo` in the
+// chosen SLH-DSA mode. `slhdsa_fips205` only changes the signature for SLH-DSA-128S
+// (round-3 vs FIPS-205); ML-DSA-44 is mode-invariant. The deterministic key is keyed
+// on (seed, algo) so the resulting attestor matches MakeV2EgressAttestors(seed, _, algo).
 inline ::shielded::BridgeBatchReceipt MakeV2SignedBatchReceipt(unsigned char seed,
-                                                               const ::shielded::BridgeBatchStatement& statement)
+                                                               const ::shielded::BridgeBatchStatement& statement,
+                                                               PQAlgorithm algo = PQAlgorithm::ML_DSA_44,
+                                                               bool slhdsa_fips205 = false)
 {
     std::array<unsigned char, 32> material{};
     material.fill(seed);
 
     CPQKey key;
-    if (!key.MakeDeterministicKey(PQAlgorithm::ML_DSA_44, material)) {
+    if (!key.MakeDeterministicKey(algo, material)) {
         throw std::runtime_error("failed to build v2 signed batch receipt fixture");
     }
 
     ::shielded::BridgeBatchReceipt receipt;
     receipt.statement = statement;
-    receipt.attestor = {PQAlgorithm::ML_DSA_44, key.GetPubKey()};
+    receipt.attestor = {algo, key.GetPubKey()};
 
     const uint256 receipt_hash = ::shielded::ComputeBridgeBatchReceiptHash(receipt);
-    if (receipt_hash.IsNull() || !key.Sign(receipt_hash, receipt.signature) || !receipt.IsValid()) {
+    if (receipt_hash.IsNull() || !key.Sign(receipt_hash, receipt.signature, slhdsa_fips205) || !receipt.IsValid()) {
         throw std::runtime_error("invalid v2 signed batch receipt fixture");
     }
     return receipt;
@@ -726,6 +734,115 @@ inline V2EgressReceiptFixture BuildV2EgressHybridReceiptFixture(size_t output_co
                                                                validation_height);
     if (!built.has_value()) {
         throw std::runtime_error(reject_reason.empty() ? "failed to build v2 hybrid egress transaction bundle fixture"
+                                                       : reject_reason);
+    }
+
+    fixture.tx = built->tx;
+    fixture.witness = built->witness;
+    return fixture;
+}
+
+// Mode-aware variant of BuildV2EgressHybridReceiptFixture: the two attestors use
+// `attestor_algo` and their batch receipts are signed in the chosen SLH-DSA mode
+// (`slhdsa_fips205`). This is the seam a mode-exactness regression test needs: with
+// SLH-DSA-128S attestors, the embedded signed receipts differ by mode, while the rest
+// of the bundle (statement, verifier set, committed settlement-anchor digest) is
+// derived consistently from whichever signature was produced. With the ML-DSA-44
+// default this reproduces BuildV2EgressHybridReceiptFixture's signed receipts exactly.
+inline V2EgressReceiptFixture BuildV2EgressModeExactHybridReceiptFixture(
+    PQAlgorithm attestor_algo = PQAlgorithm::ML_DSA_44,
+    bool slhdsa_fips205 = false,
+    const Consensus::Params* consensus = nullptr,
+    int32_t validation_height = std::numeric_limits<int32_t>::max())
+{
+    const Consensus::Params* effective_consensus = consensus != nullptr ? consensus : &Params().GetConsensus();
+
+    std::vector<::shielded::v2::OutputDescription> outputs;
+    outputs.reserve(2);
+    for (size_t i = 0; i < 2; ++i) {
+        outputs.push_back(MakeV2EgressOutput(static_cast<unsigned char>(0x70 + i * 8)));
+    }
+
+    V2EgressReceiptFixture fixture;
+
+    fixture.descriptor = MakeV2EgressDescriptor(0xa1);
+    const std::vector<::shielded::BridgeProofDescriptor> descriptors{fixture.descriptor};
+
+    fixture.attestors = MakeV2EgressAttestors(0xb0, 3, attestor_algo);
+    const auto verifier_set =
+        ::shielded::BuildBridgeVerifierSetCommitment(
+            Span<const ::shielded::BridgeKeySpec>{fixture.attestors.data(), fixture.attestors.size()},
+            /*required_signers=*/2);
+    if (!verifier_set.has_value()) {
+        throw std::runtime_error("failed to build v2 egress mode-exact verifier set");
+    }
+
+    const auto proof_policy =
+        ::shielded::BuildBridgeProofPolicyCommitment(descriptors, /*required_receipts=*/1);
+    if (!proof_policy.has_value()) {
+        throw std::runtime_error("failed to build v2 egress mode-exact proof policy");
+    }
+
+    fixture.statement.version = 4;
+    fixture.statement.direction = ::shielded::BridgeDirection::BRIDGE_OUT;
+    fixture.statement.ids.bridge_id = uint256{0xa2};
+    fixture.statement.ids.operation_id = uint256{0xa3};
+    fixture.statement.entry_count = static_cast<uint32_t>(outputs.size());
+    fixture.statement.total_amount = static_cast<CAmount>(outputs.size()) * COIN;
+    fixture.statement.domain_id = uint256{0xa4};
+    fixture.statement.source_epoch = 13;
+    fixture.statement.data_root = uint256{0xa5};
+    fixture.statement.verifier_set = *verifier_set;
+    fixture.statement.proof_policy = *proof_policy;
+    CanonicalizeV2EgressOutputs(outputs, fixture.statement);
+    if (!fixture.statement.IsValid()) {
+        throw std::runtime_error("invalid v2 egress mode-exact batch statement fixture");
+    }
+
+    std::vector<::shielded::BridgeProofReceipt> proof_receipts{
+        MakeV2ProofReceipt(fixture.statement, fixture.descriptor, 0xa6),
+    };
+    fixture.receipt = proof_receipts.front();
+
+    fixture.signed_receipts = {
+        MakeV2SignedBatchReceipt(0xb0, fixture.statement, attestor_algo, slhdsa_fips205),
+        MakeV2SignedBatchReceipt(0xb1, fixture.statement, attestor_algo, slhdsa_fips205),
+    };
+    auto proof_a = ::shielded::BuildBridgeVerifierSetProof(
+        Span<const ::shielded::BridgeKeySpec>{fixture.attestors.data(), fixture.attestors.size()},
+        fixture.attestors[0]);
+    auto proof_b = ::shielded::BuildBridgeVerifierSetProof(
+        Span<const ::shielded::BridgeKeySpec>{fixture.attestors.data(), fixture.attestors.size()},
+        fixture.attestors[1]);
+    if (!proof_a.has_value() || !proof_b.has_value()) {
+        throw std::runtime_error("failed to build v2 egress mode-exact verifier proofs");
+    }
+    fixture.signed_receipt_proofs = {*proof_a, *proof_b};
+    fixture.verification_bundle = ::shielded::BuildBridgeVerificationBundle(
+        Span<const ::shielded::BridgeBatchReceipt>{fixture.signed_receipts.data(), fixture.signed_receipts.size()},
+        Span<const ::shielded::BridgeProofReceipt>{proof_receipts.data(), proof_receipts.size()});
+    if (!fixture.verification_bundle.has_value()) {
+        throw std::runtime_error("failed to build v2 egress mode-exact verification bundle");
+    }
+
+    ::shielded::v2::V2EgressBuildInput input;
+    input.statement = fixture.statement;
+    input.proof_descriptors = descriptors;
+    input.imported_descriptor = fixture.descriptor;
+    input.signed_receipts = fixture.signed_receipts;
+    input.signed_receipt_proofs = fixture.signed_receipt_proofs;
+    input.proof_receipts = proof_receipts;
+    input.imported_receipt = fixture.receipt;
+    input.outputs = std::move(outputs);
+
+    std::string reject_reason;
+    auto built = ::shielded::v2::BuildV2EgressBatchTransaction(CMutableTransaction{},
+                                                               input,
+                                                               reject_reason,
+                                                               effective_consensus,
+                                                               validation_height);
+    if (!built.has_value()) {
+        throw std::runtime_error(reject_reason.empty() ? "failed to build v2 mode-exact egress transaction bundle fixture"
                                                        : reject_reason);
     }
 

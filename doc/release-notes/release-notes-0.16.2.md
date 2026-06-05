@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes for older versions), then run the
@@ -30,15 +29,13 @@ automatic upgrade code from before version 0.8 to version 0.15.0 or higher. Upgr
 directly from 0.7.x and earlier without re-downloading the blockchain is not supported.
 However, as usual, old wallet versions are still supported.
 
-Downgrading warning
--------------------
+## Downgrading warning
 
 Wallets created in 0.16 and later are not compatible with versions prior to 0.16
 and will not work if you try to use newly created wallets in older versions. Existing
 wallets that were created with older versions are not affected by this.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is extensively tested on multiple operating systems using
 the Linux kernel, macOS 10.8+, and Windows Vista and later. Windows XP is not supported.
@@ -46,8 +43,7 @@ the Linux kernel, macOS 10.8+, and Windows Vista and later. Windows XP is not su
 Bitcoin Core should also work on most other Unix-like systems but is not
 frequently tested on them.
 
-0.16.2 change log
-------------------
+## 0.16.2 change log
 
 ### Wallet
 - #13622 `c04a4a5` Remove mapRequest tracking that just effects Qt display. (TheBlueMatt)
@@ -83,8 +79,7 @@ frequently tested on them.
 - #13131 `ce8aa54` Add Windows shutdown handler (ken2812221)
 - #13652 `20461fc` rpc: Fix that CWallet::AbandonTransaction would leave the grandchildren, etc. active (Empact)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

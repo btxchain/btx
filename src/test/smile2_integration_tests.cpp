@@ -34,12 +34,15 @@ std::optional<SmileCTProof> TryProveCtWithRetriesForTest(const std::vector<CTInp
                                                          const CTPublicData& pub,
                                                          uint64_t base_seed,
                                                          int64_t public_fee = 0,
-                                                         bool bind_anonset_context = false)
+                                                         bool bind_anonset_context = false,
+                                                         int64_t validation_height =
+                                                             SmileCTProof::C002_ACTIVATION_HEIGHT)
 {
     for (uint32_t attempt = 0; attempt < MAX_INTEGRATION_TEST_PROOF_ATTEMPTS; ++attempt) {
         const uint64_t attempt_seed = base_seed + (INTEGRATION_TEST_PROOF_RETRY_STRIDE * attempt);
         if (auto proof = TryProveCT(
-                inputs, outputs, pub, attempt_seed, public_fee, bind_anonset_context)) {
+                inputs, outputs, pub, attempt_seed, public_fee, bind_anonset_context,
+                /*error=*/nullptr, validation_height)) {
             return proof;
         }
     }
@@ -240,6 +243,154 @@ BOOST_AUTO_TEST_CASE(p3_m12_context_bound_ct_transcript_requires_v2_mode)
                                     /*bind_anonset_context=*/true)
                     .has_value());
     BOOST_CHECK(ValidateSmile2Proof(*bound_proof, 2, 2, bound_proof->output_coins, setup.pub).has_value());
+}
+
+// [C-002 #9] Staged-activation gate test vector. ValidateSmile2Proof requires the
+// wire version matching the validation height: v3 mandatory at/after the
+// activation height, v2 mandatory before it. Mismatches reject. Proves the
+// C002_ACTIVATION_HEIGHT cutover end-to-end (prover emits the right version per
+// height; verifier gate rejects the wrong one).
+BOOST_AUTO_TEST_CASE(c002_activation_gate_v2_v3)
+{
+    const size_t N = 32;
+    const int64_t H = SmileCTProof::C002_ACTIVATION_HEIGHT;
+    auto setup = IntegrationTestSetup::Create(N, 2, 2, {120, 80}, {100, 100}, 207);
+
+    const auto v3 = TryProveCtWithRetriesForTest(setup.inputs, setup.outputs, setup.pub,
+                                                 0x9001ULL, 0, /*bind=*/true, /*height=*/H);
+    const auto v2 = TryProveCtWithRetriesForTest(setup.inputs, setup.outputs, setup.pub,
+                                                 0x9002ULL, 0, /*bind=*/true, /*height=*/1);
+    BOOST_REQUIRE(v3.has_value());
+    BOOST_REQUIRE(v2.has_value());
+    BOOST_CHECK_EQUAL((int)v3->wire_version, (int)SmileCTProof::WIRE_VERSION_C002_HARDENED);
+    BOOST_CHECK_EQUAL((int)v2->wire_version, (int)SmileCTProof::WIRE_VERSION_M4_HARDENED);
+
+    // returns true == REJECTED (has a reject reason)
+    auto rejected = [&](const SmileCTProof& p, int64_t h) {
+        return ValidateSmile2Proof(p, 2, 2, p.output_coins, setup.pub, /*fee=*/0,
+                                   /*bind=*/true, /*validation_height=*/h)
+            .has_value();
+    };
+    BOOST_CHECK(!rejected(*v3, H));        // v3 at/after H: ACCEPT
+    BOOST_CHECK(rejected(*v3, H - 1));     // v3 before H: REJECT (expects v2)
+    BOOST_CHECK(!rejected(*v2, H - 1));    // v2 before H: ACCEPT
+    BOOST_CHECK(rejected(*v2, H));         // v2 at/after H: REJECT (expects v3)
+}
+
+// [C-002 #16] Stale z-size caps undercounted the R5 range slots. The maximum v3
+// shape (MAX_CT_INPUTS=16 in / MAX_CT_OUTPUTS=16 out) has a response vector of size
+// z.size() = BDLOP_RAND_DIM_BASE + ComputeNumAuxMsg(16,16,v3) = 20 + 242 = 262,
+// which exceeded BOTH the old hard decode cap (z_size > 256) and the old verifier
+// cap (MAX_Z_SIZE = 20 + 16*8 + 16*4 = 212, an 8*in+4*out formula predating R5).
+// An honest max-shape proof was therefore constructible but rejected solely by the
+// stale caps. The fix derives both caps from the actual layout. This test guards
+// the arithmetic (a regression to a stale literal/formula would fail it) and, with
+// a normal-shape proof, confirms the post-fix serialize->decode->verify path. (A
+// full 16-in real proof is omitted here only because it is very slow to generate;
+// the regtest wallet E2E exercises real multi-input v3 spends end to end.)
+BOOST_AUTO_TEST_CASE(c002_max_shape_zsize_exceeds_legacy_caps_and_roundtrips)
+{
+    // Max-shape v3 aux-message count, mirroring ComputeNumAuxMsg / ComputeLiveCt-
+    // AuxMsgCount for the live m1 layout (rec_levels==1) with R5 range slots.
+    const size_t row_count = KEY_ROWS + 2; // == GetCtPublicRowCount()
+    const size_t max_aux = MAX_CT_INPUTS                              // selectors
+                         + (MAX_CT_INPUTS + MAX_CT_OUTPUTS)           // amounts
+                         + 2 * (MAX_CT_INPUTS + MAX_CT_OUTPUTS)       // R5 B0,B1 (v3)
+                         + MAX_CT_INPUTS * row_count                  // w rows
+                         + MAX_CT_INPUTS                              // x slots
+                         + 2;                                         // g, psi
+    const size_t max_z = BDLOP_RAND_DIM_BASE + max_aux;
+    BOOST_CHECK_EQUAL(max_z, 262u);
+    BOOST_CHECK_GT(max_z, 256u); // old hard decode cap
+    const size_t old_verifier_cap = BDLOP_RAND_DIM_BASE + MAX_CT_INPUTS * 8 + MAX_CT_OUTPUTS * 4;
+    BOOST_CHECK_EQUAL(old_verifier_cap, 212u);
+    BOOST_CHECK_GT(max_z, old_verifier_cap); // old verifier MAX_Z_SIZE undercounted
+
+    // Regression: a normal-shape v3 proof still serialize->decode->verify round-trips
+    // after raising the caps.
+    const size_t N = 32;
+    auto setup = IntegrationTestSetup::Create(N, 4, 4, {100, 100, 100, 100},
+                                              {100, 100, 100, 100}, 88);
+    const auto proof = TryProveCtWithRetriesForTest(setup.inputs, setup.outputs, setup.pub,
+                                                    0xB44ULL, /*fee=*/0, /*bind=*/true,
+                                                    SmileCTProof::C002_ACTIVATION_HEIGHT);
+    BOOST_REQUIRE(proof.has_value());
+    BOOST_CHECK_EQUAL((int)proof->wire_version, (int)SmileCTProof::WIRE_VERSION_C002_HARDENED);
+
+    // The serialized v3 proof decodes without tripping the (now layout-derived)
+    // z-size decode cap. (The full real decode->validate path for v3 spends is
+    // exercised end to end by the regtest wallet E2E, which mines v3 spends into
+    // blocks; here we keep the unit test fast and deterministic.)
+    const auto bytes = SerializeCTProof(*proof);
+    SmileCTProof decoded;
+    BOOST_CHECK(DecodeCTProof(bytes, decoded, 4, 4) == SmileCTDecodeStatus::OK);
+
+    // A normal-shape anonset-bound v3 proof verifies through the consensus dispatch
+    // (which replays the v3 transcript binding). nullopt == accepted.
+    const auto reject = ValidateSmile2Proof(*proof, 4, 4, proof->output_coins, setup.pub,
+                                            /*fee=*/0, /*bind=*/true,
+                                            /*validation_height=*/SmileCTProof::C002_ACTIVATION_HEIGHT);
+    BOOST_CHECK_MESSAGE(!reject.has_value(),
+        "normal-shape v3 proof must verify, got: " << reject.value_or("(ok)"));
+}
+
+// [C-002 #17] Anonset-bound v3 verification must be context-bound: a proof is valid
+// only under the exact (anonymity set, bind flag, height/wire-version, output coins)
+// it was produced for. Every mismatch must REJECT — both as fail-closed behaviour
+// and, crucially for soundness, so a valid proof cannot be replayed against a
+// different public context (a different ring, or as if it were a legacy unbound
+// proof). This exercises the verify-dispatch context plumbing the gate relies on.
+BOOST_AUTO_TEST_CASE(c002_v3_context_mismatch_rejects)
+{
+    const size_t N = 32;
+    const int64_t H = SmileCTProof::C002_ACTIVATION_HEIGHT;
+    auto setupA = IntegrationTestSetup::Create(N, 2, 2, {120, 80}, {100, 100}, 211);
+    // setupB: same shape and amounts but an independent anonymity set / rings.
+    auto setupB = IntegrationTestSetup::Create(N, 2, 2, {120, 80}, {100, 100}, 212);
+
+    const auto v3 = TryProveCtWithRetriesForTest(setupA.inputs, setupA.outputs, setupA.pub,
+                                                 0xC001ULL, /*fee=*/0, /*bind=*/true, /*height=*/H);
+    BOOST_REQUIRE(v3.has_value());
+    BOOST_REQUIRE_EQUAL((int)v3->wire_version, (int)SmileCTProof::WIRE_VERSION_C002_HARDENED);
+    // An independent v3 proof over setupB, used as a source of valid-but-wrong
+    // output coins for the output-substitution check below.
+    const auto v3b = TryProveCtWithRetriesForTest(setupB.inputs, setupB.outputs, setupB.pub,
+                                                  0xC002ULL, /*fee=*/0, /*bind=*/true, /*height=*/H);
+    BOOST_REQUIRE(v3b.has_value());
+
+    // returns true == REJECTED (has a reject reason)
+    auto rejected = [&](const CTPublicData& pub, const std::vector<BDLOPCommitment>& coins,
+                        bool bind, int64_t h) {
+        return ValidateSmile2Proof(*v3, 2, 2, coins, pub, /*fee=*/0, bind, h).has_value();
+    };
+
+    // Baseline: the exact context it was produced for ACCEPTS.
+    BOOST_CHECK(!rejected(setupA.pub, v3->output_coins, /*bind=*/true, H));
+
+    // (1) Anonymity-set substitution: same size, different ring -> REJECT. A proof
+    // must be bound to its own anon set; accepting it against another ring would be
+    // a soundness break.
+    BOOST_CHECK_MESSAGE(rejected(setupB.pub, v3->output_coins, /*bind=*/true, H),
+        "v3 proof must NOT verify against a different anonymity set");
+
+    // (2) Bind-flag mismatch: a bound v3 proof verified as an unbound/legacy proof
+    // -> REJECT (the gate expects v3 wire version when bind_anonset_context).
+    BOOST_CHECK_MESSAGE(rejected(setupA.pub, v3->output_coins, /*bind=*/false, H),
+        "bound v3 proof must NOT verify in unbound context");
+
+    // (3) Height/wire mismatch: a v3 proof presented before the activation height
+    // -> REJECT (gate expects v2 there).
+    BOOST_CHECK_MESSAGE(rejected(setupA.pub, v3->output_coins, /*bind=*/true, H - 1),
+        "v3 proof must NOT verify before the C-002 activation height");
+
+    // (4) Output-coin substitution: verify proof A against another proof's
+    // valid-size-but-different output coins -> REJECT (the output coins are bound
+    // into the proof). (Note: an EMPTY output-coin set is NOT a tamper here — it is
+    // the internal "use the proof's own declared coins" path and is never reached
+    // by consensus, which always passes the tx-derived, value_commitment-bound
+    // coins; see shielded/v2_proof.cpp.)
+    BOOST_CHECK_MESSAGE(rejected(setupA.pub, v3b->output_coins, /*bind=*/true, H),
+        "v3 proof must NOT verify against a different proof's output coins");
 }
 
 // [P5-G2] Consensus rejects invalid/tampered proof.

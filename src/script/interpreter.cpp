@@ -399,6 +399,17 @@ static bool EvalChecksigTapscript(const valtype& sig, const valtype& pubkey, Scr
  */
 static bool EvalChecksig(const valtype& sig, const valtype& pubkey, CScript::const_iterator pbegincodehash, CScript::const_iterator pend, ScriptExecutionData& execdata, unsigned int flags, const BaseSignatureChecker& checker, SigVersion sigversion, ScriptError* serror, bool& success)
 {
+    // BTX is post-quantum only. Legacy non-PQ signature operations -- secp256k1
+    // ECDSA (BASE/WITNESS_V0) and Schnorr (TAPSCRIPT) -- are unreachable on a
+    // PQ-only chain (no non-P2MR outputs exist), and are rejected outright at
+    // consensus when the PQ-only invariant is enforced. PQ CHECKSIG uses the
+    // dedicated OP_CHECKSIG_MLDSA/SLHDSA opcodes under SigVersion::P2MR and is not
+    // routed through here.
+    if ((flags & SCRIPT_VERIFY_REJECT_LEGACY_SIGS) &&
+        (sigversion == SigVersion::BASE || sigversion == SigVersion::WITNESS_V0 ||
+         sigversion == SigVersion::TAPSCRIPT)) {
+        return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
+    }
     switch (sigversion) {
     case SigVersion::BASE:
     case SigVersion::WITNESS_V0:
@@ -1204,7 +1215,7 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                         if (execdata.m_validation_weight_left < 0) {
                             return set_error(serror, SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT);
                         }
-                        success = checker.CheckPQSignature(sig, pubkey, algo, hash_type, sigversion, execdata);
+                        success = checker.CheckPQSignature(sig, pubkey, algo, hash_type, sigversion, execdata, (flags & SCRIPT_VERIFY_SLHDSA_FIPS205) != 0);
                     }
                     if (!success && (flags & SCRIPT_VERIFY_NULLFAIL) && !sig.empty()) {
                         return set_error(serror, sig_err);
@@ -1259,7 +1270,7 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                         if (execdata.m_validation_weight_left < 0) {
                             return set_error(serror, SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT);
                         }
-                        success = checker.CheckPQSignature(sig, pubkey, algo, hash_type, sigversion, execdata);
+                        success = checker.CheckPQSignature(sig, pubkey, algo, hash_type, sigversion, execdata, (flags & SCRIPT_VERIFY_SLHDSA_FIPS205) != 0);
                     }
                     if (!success && (flags & SCRIPT_VERIFY_NULLFAIL) && !sig.empty()) {
                         return set_error(serror, sig_err);
@@ -1308,7 +1319,7 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                         HashWriter hasher = HASHER_CSFS;
                         hasher.write(MakeByteSpan(msg));
                         const uint256 hash = hasher.GetSHA256();
-                        success = CPQPubKey{*algo, pubkey}.Verify(hash, sig);
+                        success = CPQPubKey{*algo, pubkey}.Verify(hash, sig, (flags & SCRIPT_VERIFY_SLHDSA_FIPS205) != 0);
                     }
 
                     if (!success && (flags & SCRIPT_VERIFY_NULLFAIL) && !sig.empty()) {
@@ -2033,7 +2044,7 @@ bool GenericTransactionSignatureChecker<T>::CheckSchnorrSignature(Span<const uns
 }
 
 template <class T>
-bool GenericTransactionSignatureChecker<T>::CheckPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, uint8_t hash_type, SigVersion sigversion, ScriptExecutionData& execdata) const
+bool GenericTransactionSignatureChecker<T>::CheckPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, uint8_t hash_type, SigVersion sigversion, ScriptExecutionData& execdata, bool slhdsa_fips205) const
 {
     assert(sigversion == SigVersion::P2MR);
     if (m_require_sighash_all && hash_type != SIGHASH_ALL && hash_type != SIGHASH_DEFAULT) {
@@ -2045,14 +2056,14 @@ bool GenericTransactionSignatureChecker<T>::CheckPQSignature(Span<const unsigned
     if (!SignatureHashSchnorr(sighash, execdata, *txTo, nIn, hash_type, sigversion, *this->txdata, m_mdb)) {
         return false;
     }
-    return VerifyPQSignature(sig, pubkey, algo, sighash);
+    return VerifyPQSignature(sig, pubkey, algo, sighash, slhdsa_fips205);
 }
 
 template <class T>
-bool GenericTransactionSignatureChecker<T>::VerifyPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, const uint256& sighash) const
+bool GenericTransactionSignatureChecker<T>::VerifyPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, const uint256& sighash, bool slhdsa_fips205) const
 {
     const CPQPubKey pq_pubkey{algo, pubkey};
-    return pq_pubkey.Verify(sighash, sig);
+    return pq_pubkey.Verify(sighash, sig, slhdsa_fips205);
 }
 
 template <class T>

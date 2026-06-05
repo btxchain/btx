@@ -1,5 +1,4 @@
-0.21.0 Release Notes
-====================
+# 0.21.0 Release Notes
 
 Bitcoin Core version 0.21.0 is now available from:
 
@@ -16,8 +15,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes in some cases), then run the
@@ -28,8 +26,7 @@ Upgrading directly from a version of Bitcoin Core that has reached its EOL is
 possible, but it might take some time if the data directory needs to be migrated. Old
 wallet versions of Bitcoin Core are generally supported.
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems
 using the Linux kernel, macOS 10.12+, and Windows 7 and newer.  Bitcoin
@@ -49,11 +46,9 @@ read it. Those old versions, in the event of a downgrade, will log an error
 message "Incorrect keysize in addrman deserialization" and will continue normal
 operation as if the file was missing, creating a new empty one. (#19954, #20284)
 
-Notable changes
-===============
+# Notable changes
 
-P2P and network changes
------------------------
+## P2P and network changes
 
 - The mempool now tracks whether transactions submitted via the wallet or RPCs
   have been successfully broadcast. Every 10-15 minutes, the node will try to
@@ -121,8 +116,7 @@ P2P and network changes
   without activation on mainnet. Experimentation with Taproot can be done on
   signet, where its rules are already active. (#19553)
 
-Updated RPCs
-------------
+## Updated RPCs
 
 - The `getpeerinfo` RPC has a new `network` field that provides the type of
   network ("ipv4", "ipv6", or "onion") that the peer connected through. (#20002)
@@ -188,18 +182,15 @@ Updated RPCs
 
 Changes to Wallet or GUI related RPCs can be found in the GUI or Wallet section below.
 
-New RPCs
---------
+## New RPCs
 
 - The `getindexinfo` RPC returns the actively running indices of the node,
   including their current sync status and height. It also accepts an `index_name`
   to specify returning the status of that index only. (#19550)
 
-Build System
-------------
+## Build System
 
-Updated settings
-----------------
+## Updated settings
 
 - The same ZeroMQ notification (e.g. `-zmqpubhashtx=address`) can now be
   specified multiple times to publish the same notification to different ZeroMQ
@@ -228,8 +219,7 @@ Updated settings
 
 Changes to Wallet or GUI related settings can be found in the GUI or Wallet section below.
 
-Tools and Utilities
--------------------
+## Tools and Utilities
 
 - A new `bitcoin-cli -netinfo` command provides a network peer connections
   dashboard that displays data from the `getpeerinfo` and `getnetworkinfo` RPCs
@@ -249,15 +239,13 @@ Tools and Utilities
   object with `in`, `out` and `total` numbers of peer connections. It previously
   returned a single integer value for the total number of peer connections. (#19405)
 
-New settings
-------------
+## New settings
 
 - The `startupnotify` option is used to specify a command to
   execute when Bitcoin Core has finished with its startup
   sequence. (#15367)
 
-Wallet
-------
+## Wallet
 
 - Backwards compatibility has been dropped for two `getaddressinfo` RPC
   deprecations, as notified in the 0.20 release notes. The deprecated `label`
@@ -488,8 +476,7 @@ was already being broken by the move to descriptors.
   by default when an explicit fee rate is used, the transaction fee can be
   bumped. (#20305)
 
-GUI changes
------------
+## GUI changes
 
 - Wallets created or loaded in the GUI will now be automatically loaded on
   startup, so they don't need to be manually reloaded next time Bitcoin Core is
@@ -504,11 +491,9 @@ GUI changes
   peers. Refer to "Changes regarding misbehaving peers" in the 0.20.1 release
   notes for details. (#19512)
 
-Low-level changes
-=================
+# Low-level changes
 
-RPC
----
+## RPC
 
 - To make RPC `sendtoaddress` more consistent with `sendmany` the following error
     `sendtoaddress` codes were changed from `-4` to `-6`:
@@ -526,8 +511,7 @@ RPC
   exceeding maximum feerate has been changed to "Fee exceeds maximum configured by user
   (e.g. -maxtxfee, maxfeerate)." (#19339)
 
-Tests
------
+## Tests
 
 - The BIP 325 default signet can be enabled by the `-chain=signet` or `-signet`
   setting. The settings `-signetchallenge` and `-signetseednode` allow
@@ -536,8 +520,7 @@ Tests
 - The `generateblock` RPC allows testers using regtest mode to
   generate blocks that consist of a custom set of transactions. (#17693)
 
-0.21.0 change log
-=================
+# 0.21.0 change log
 
 ### Consensus
 - #18267 BIP-325: Signet (kallewoof)
@@ -1187,8 +1170,7 @@ Tests
 - #19390 doc/REST-interface: Remove stale info (luke-jr)
 - #19344 docs: update testgen usage example (Bushstar)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 

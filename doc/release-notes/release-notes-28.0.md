@@ -13,8 +13,7 @@ To receive security and update notifications, please subscribe to:
 
   <https://bitcoincore.org/en/list/announcements/join/>
 
-How to Upgrade
-==============
+# How to Upgrade
 
 If you are running an older version, shut it down. Wait until it has completely
 shut down (which might take a few minutes in some cases), then run the
@@ -32,8 +31,7 @@ xattr -d com.apple.quarantine bitcoin-cli bitcoin-qt bitcoin-tx bitcoin-util bit
 codesign -s - bitcoin-cli bitcoin-qt bitcoin-tx bitcoin-util bitcoin-wallet bitcoind test_bitcoin
 ```
 
-Compatibility
-==============
+# Compatibility
 
 Bitcoin Core is supported and extensively tested on operating systems
 using the Linux Kernel 3.17+, macOS 11.0+, and Windows 7 and newer. Bitcoin
@@ -41,11 +39,9 @@ Core should also work on most other UNIX-like systems but is not as
 frequently tested on them. It is not recommended to use Bitcoin Core on
 unsupported systems.
 
-Notable changes
-===============
+# Notable changes
 
-Testnet4/BIP94 support
------
+## Testnet4/BIP94 support
 
 Support for Testnet4 as specified in [BIP94](https://github.com/bitcoin/bips/blob/master/bip-0094.mediawiki)
 has been added. The network can be selected with the `-testnet4` option and
@@ -55,16 +51,14 @@ While the intention is to phase out support for Testnet3 in an upcoming
 version, support for it is still available via the known options in this
 release. (#29775)
 
-Windows Data Directory
-----------------------
+## Windows Data Directory
 
 The default data directory on Windows has been moved from `C:\Users\Username\AppData\Roaming\Bitcoin`
 to `C:\Users\Username\AppData\Local\Bitcoin`. Bitcoin Core will check the existence
 of the old directory first and continue to use that directory for backwards
 compatibility if it is present. (#27064)
 
-JSON-RPC 2.0 Support
---------------------
+## JSON-RPC 2.0 Support
 
 The JSON-RPC server now recognizes JSON-RPC 2.0 requests and responds with
 strict adherence to the [specification](https://www.jsonrpc.org/specification).
@@ -73,13 +67,11 @@ See [JSON-RPC-interface.md](https://github.com/bitcoin/bitcoin/blob/master/doc/J
 JSON-RPC clients may need to be updated to be compatible with the JSON-RPC server.
 Please open an issue on GitHub if any compatibility issues are found.
 
-libbitcoinconsensus Removal
----------------------------
+## libbitcoinconsensus Removal
 
 The libbitcoin-consensus library was deprecated in 27.0 and is now completely removed. (#29648)
 
-P2P and Network Changes
------------------------
+## P2P and Network Changes
 
 - Previously if Bitcoin Core was listening for P2P connections, either using
   default settings or via `bind=addr:port` it would always also bind to
@@ -117,8 +109,7 @@ P2P and Network Changes
   feature is limited (unlike the `submitpackage` interface, a child with multiple unconfirmed
   parents is not supported) and not yet reliable under adversarial conditions. (#28970)
 
-Mempool Policy Changes
-----------------------
+## Mempool Policy Changes
 
 - Transactions with version number set to 3 are now treated as standard on all networks (#29496),
   subject to opt-in Topologically Restricted Until Confirmation (TRUC) transaction policy as
@@ -144,8 +135,7 @@ Mempool Policy Changes
 - The default value of the `-mempoolfullrbf` configuration option has been changed from 0 to 1,
   i.e. `mempoolfullrbf=1`. (#30493)
 
-Updated RPCs
-------------
+## Updated RPCs
 
 - The `dumptxoutset` RPC now returns the UTXO set dump in a new and
   improved format. Correspondingly, the `loadtxoutset` RPC now expects
@@ -182,15 +172,13 @@ Updated RPCs
 
 Changes to wallet-related RPCs can be found in the Wallet section below.
 
-Updated REST APIs
------------------
+## Updated REST APIs
 - Parameter validation for `/rest/getutxos` has been improved by rejecting
   truncated or overly large txids and malformed outpoint indices via raising
   an HTTP_BAD_REQUEST "Parse error". These requests were previously handled
   silently. (#30482, #30444)
 
-Build System
-------------
+## Build System
 
 - GCC 11.1 or later, or Clang 16.0 or later,
 are now required to compile Bitcoin Core. (#29091, #30263)
@@ -203,8 +191,7 @@ are no-longer supported. (#29987)
 incompatibilities between lcov version 1 & 2. `LCOV_OPTS`
 should be used to set any options instead. (#30192)
 
-Updated Settings
-----------------
+## Updated Settings
 
 - When running with `-alertnotify`, an alert can now be raised multiple
 times instead of just once. Previously, it was only raised when unknown
@@ -215,8 +202,7 @@ Additional warnings may be added in the future. (#30058)
 
 Changes to GUI or wallet related settings can be found in the GUI or Wallet section below.
 
-Wallet
-------
+## Wallet
 
 - The wallet now detects when wallet transactions conflict with the mempool. Mempool-conflicting
   transactions can be seen in the `"mempoolconflicts"` field of `gettransaction`. The inputs
@@ -243,8 +229,7 @@ The default value is 4,000,000 WU. (#29523)
   to following the wallet's incremental feerate of 5 sat/vb. The feerate must still be
   at least the sum of the original fee and the mempool's incremental feerate. (#27969)
 
-GUI Changes
------------
+## GUI Changes
 
 - The "Migrate Wallet" menu allows users to migrate any legacy wallet in their wallet
 directory, regardless of the wallets loaded. (gui#824)
@@ -252,39 +237,33 @@ directory, regardless of the wallets loaded. (gui#824)
 - The "Information" window now displays the maximum mempool size along with the
 mempool usage. (gui#825)
 
-Low-level Changes
-=================
+# Low-level Changes
 
-Tests
------
+## Tests
 
 - The BIP94 timewarp attack mitigation is now active on the `regtest` network. (#30681)
 
 - A new `-testdatadir` option has been added to `test_bitcoin` to allow specifying the
   location of unit test data directories. (#26564)
 
-Blockstorage
-------------
+## Blockstorage
 
 - Block files are now XOR'd by default with a key stored in the blocksdir.
 Previous releases of Bitcoin Core or previous external software will not be able to read the blocksdir with a non-zero XOR-key.
 Refer to the `-blocksxor` help for more details. (#28052)
 
-Chainstate
-----------
+## Chainstate
 
 - The chainstate database flushes that occur when blocks are pruned will no longer
 empty the database cache. The cache will remain populated longer, which significantly
 reduces the time for initial block download to complete. (#28280)
 
-Dependencies
-------------
+## Dependencies
 
 - The dependency on Boost.Process has been replaced with cpp-subprocess, which is contained in source.
 Builders will no longer need Boost.Process to build with external signer support. (#28981)
 
-Credits
-=======
+# Credits
 
 Thanks to everyone who directly contributed to this release:
 - 0xb10c
