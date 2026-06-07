@@ -1,4 +1,4 @@
-# Shielded unshield velocity cap (v0.31.1)
+# Shielded unshield velocity cap (v0.32.0)
 
 Defense-in-depth consensus rule that bounds the **rate** at which value can leave the shielded pool
 (shielded→transparent / "unshield"), so a stolen spend key or a future inner-proof soundness
@@ -21,15 +21,16 @@ post-activation).
 ## Parameters (consensus)
 
 `src/consensus/params.h`:
-- `nShieldedUnshieldVelocityActivationHeight` — mainnet **130,000** (`chainparams.cpp`); INT_MAX (inert)
-  on networks that don't set it. Fast-follow after the v0.31.0 C-002 fork (123,000) so the network has
-  time to upgrade to v0.31.1; self-serve unshield does not exist before 123,000 anyway.
+- `nShieldedUnshieldVelocityActivationHeight` — **125,000** (`BTX_SHIELDED_SUNSET_HEIGHT`, all networks);
+  INT_MAX (inert) on regtest unless overridden. Aligned to the 125,000 sunset so the cap is active from
+  the first block where a transparent-outflow exit is the only permitted shielded operation (no uncapped
+  window). Self-serve unshield does not exist before the C-002 fork (123,000) anyway.
 - `nShieldedUnshieldVelocityWindowBlocks` — **960** (~1 day at 90 s).
-- `nShieldedUnshieldVelocityCapBps` — **1000** (10% of the pool may be unshielded per window).
+- `nShieldedUnshieldVelocityCapBps` — **5000** (50% of the pool may be unshielded per window).
 
-%-of-pool means the cap auto-scales with the live pool and never needs retuning. 10%/day implies a
-full drain takes ≥10 days even with a stolen key — ample time to detect and respond, while a normal
-withdrawal stays far under.
+%-of-pool means the cap auto-scales with the live pool and never needs retuning. 50%/day lets a
+legitimate large legacy holder fully exit in ~1 week, while still throttling a stolen-key/residual drain
+to half the pool per day — observable, multi-day, and bounded rather than instantaneous.
 
 ## Mechanism (`src/shielded/unshield_velocity.{h,cpp}` — implemented + unit-tested)
 
@@ -65,8 +66,8 @@ leaky bucket precisely because it is a pure function of recent egress, hence tri
 4. **Persistence** (`NullifierSet`, `DB_UNSHIELD_VELOCITY` key): the log is persisted (not recomputed
    from blocks a pruned node lacks), so every node — pruned or full — evaluates the rule identically.
    Loaded at `EnsureShieldedStateInitialized` (`finish_success`).
-5. **Activation:** mainnet 130,000; networks default INT_MAX (inert); regtest overridable via
-   `-regtestshieldedunshieldvelocityactivationheight`.
+5. **Activation:** 125,000 (`BTX_SHIELDED_SUNSET_HEIGHT`, all networks, aligned to the sunset); regtest
+   defaults INT_MAX (inert), overridable via `-regtestshieldedunshieldvelocityactivationheight`.
 
 ### Tests (green)
 - `shielded_unshield_velocity_tests` (C++): window-cap %-of-pool + auto-scale, window sum + cap

@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The BTX developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/license/mit/.
-"""v0.31.1 unshield velocity cap — consensus wiring under shield ops, restart, and reorg.
+"""v0.32.0 unshield velocity cap — consensus wiring under shield ops, restart, and reorg.
 
 Activates the velocity cap from genesis on regtest and drives normal shielded activity. Because
 self-serve z->t unshield is gated to the C-002 height (unreachable in regtest), this cannot produce

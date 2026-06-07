@@ -352,6 +352,21 @@ public:
         std::string* error = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
 
+    /** Assemble a V2_RECOVERY_EXIT shielded transaction that claims a stranded
+     *  shielded note directly to a transparent destination (post-125,000 exit).
+     *
+     *  The single transparent output pays (note value - fee) to @p transparent_dest;
+     *  the bundle reveals the note (value, recipient_pk_hash, rho, rcm) plus the
+     *  note's spending pubkey, a PQ ownership signature over the recovery binding
+     *  hash, and a serialized merkle witness proving the note's commitment was in
+     *  the frozen commitment tree. No shielded outputs are produced. */
+    [[nodiscard]] std::optional<CMutableTransaction> BuildRecoveryExitTransaction(
+        const ShieldedCoin& stranded_coin,
+        const CTxDestination& transparent_dest,
+        CAmount fee,
+        std::string* error = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
     /** Build transparent->shielded transaction using selected transparent UTXOs.
      *  @param requested_amount  If positive, shield only this amount and return
      *         the remainder (total_in - fee - requested_amount) as a transparent

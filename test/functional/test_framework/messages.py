@@ -213,6 +213,32 @@ def deterministic_matmul_seed(prev_hash, height, which):
     return uint256_from_str(sha256(payload))
 
 
+def deterministic_matmul_seed_v2(header, height, which):
+    payload = b""
+    payload += ser_string(b"BTX_MATMUL_SEED_V2")
+    payload += ser_uint256(header.hashPrevBlock)
+    payload += int(height).to_bytes(4, "little")
+    payload += int(header.nVersion).to_bytes(4, "little", signed=True)
+    payload += ser_uint256(header.hashMerkleRoot)
+    payload += int(header.nTime).to_bytes(4, "little")
+    payload += int(header.nBits).to_bytes(4, "little")
+    payload += int(header._effective_nonce64()).to_bytes(8, "little")
+    payload += int(header.matmul_dim).to_bytes(2, "little")
+    payload += bytes([which & 0xFF])
+    return uint256_from_str(sha256(payload))
+
+
+def _matmul_nonce_seed_height():
+    raw = os.getenv("BTX_PY_MATMUL_NONCE_SEED_HEIGHT", "")
+    if raw == "":
+        return None
+    try:
+        height = int(raw)
+    except ValueError:
+        return None
+    return height if height >= 0 else None
+
+
 def _default_matmul_dim():
     try:
         dim = int(os.getenv("BTX_PY_MATMUL_DIM", str(DEFAULT_REGTEST_MATMUL_DIM)))
@@ -961,12 +987,24 @@ class CBlock(CBlockHeader):
             if self.matmul_dim == 0:
                 self.matmul_dim = _default_matmul_dim()
             next_height = _next_header_height(self.hashPrevBlock)
-            if self.seed_a == 0:
+            nonce_seed_height = _matmul_nonce_seed_height()
+            nonce_seed_active = (
+                nonce_seed_height is not None
+                and next_height is not None
+                and next_height >= nonce_seed_height
+            )
+            if nonce_seed_active:
+                self.seed_a = deterministic_matmul_seed_v2(self, next_height, 0)
+                self.seed_b = deterministic_matmul_seed_v2(self, next_height, 1)
+            elif self.seed_a == 0:
                 self.seed_a = deterministic_matmul_seed(self.hashPrevBlock, next_height, 0)
-            if self.seed_b == 0:
+            if not nonce_seed_active and self.seed_b == 0:
                 self.seed_b = deterministic_matmul_seed(self.hashPrevBlock, next_height, 1)
             self.matmul_digest = 0
             self.mixHash = self.matmul_digest
+        else:
+            next_height = None
+            nonce_seed_active = False
 
         self.rehash()
         target = uint256_from_compact(self.nBits)
@@ -975,6 +1013,9 @@ class CBlock(CBlockHeader):
             self.nNonce64 = (self._effective_nonce64() + 1) & 0xFFFFFFFFFFFFFFFF
             self.nNonce = self.nNonce64 & 0xFFFFFFFF
             if self.hashPrevBlock != 0:
+                if nonce_seed_active:
+                    self.seed_a = deterministic_matmul_seed_v2(self, next_height, 0)
+                    self.seed_b = deterministic_matmul_seed_v2(self, next_height, 1)
                 self.matmul_digest = 0
                 self.mixHash = self.matmul_digest
             self.rehash()

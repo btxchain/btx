@@ -5281,6 +5281,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (!m_dandelion || !m_dandelion->IsActive(m_best_height)) return;
         if (m_chainman.IsInitialBlockDownload()) return;
 
+        const size_t tx_payload_size = vRecv.size();
         CTransactionRef ptx;
         vRecv >> TX_WITH_WITNESS(ptx);
         if (!vRecv.empty()) {
@@ -5295,6 +5296,26 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (tx.HasShieldedBundle() && !PeerSupportsShieldedRelay(*peer, pfrom)) {
             Misbehaving(*peer, "shielded dltx from non-shielded peer");
             return;
+        }
+        if (tx.HasShieldedBundle()) {
+            if (tx_payload_size > m_chainparams.GetConsensus().nMaxShieldedTxSize) {
+                Misbehaving(*peer,
+                            strprintf("oversized shielded payload over %s = %u",
+                                      NetMsgType::DLTX,
+                                      static_cast<unsigned int>(tx_payload_size)));
+                return;
+            }
+            // Dandelion stems can carry full shielded transactions. Apply the same inbound shielded
+            // bandwidth guard before mempool test-accept so DLTX cannot bypass the shielded proof
+            // verification budget used by TX/SHIELDEDTX relay.
+            if (!ConsumeShieldedRelayBudget(*peer, tx_payload_size, GetTime<std::chrono::microseconds>())) {
+                LogDebug(BCLog::NET,
+                         "Rate-limited inbound shielded payload over %s (%u bytes), peer=%d\n",
+                         NetMsgType::DLTX,
+                         static_cast<unsigned int>(tx_payload_size),
+                         pfrom.GetId());
+                return;
+            }
         }
 
         if (m_mempool.exists(GenTxid::Txid(txid))) return;

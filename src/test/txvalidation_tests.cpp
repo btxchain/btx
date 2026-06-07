@@ -19,9 +19,11 @@
 #include <shielded/account_registry.h>
 #include <shielded/note_encryption.h>
 #include <shielded/ringct/ring_selection.h>
+#include <shielded/smile2/ct_proof.h>
 #include <shielded/smile2/serialize.h>
 #include <shielded/smile2/verify_dispatch.h>
 #include <shielded/smile2/wallet_bridge.h>
+#include <shielded/validation.h>
 #include <shielded/v2_ingress.h>
 #include <shielded/v2_proof.h>
 #include <shielded/v2_send.h>
@@ -76,6 +78,8 @@ constexpr CAmount V2_DIRECT_SEND_RING_NOTE_VALUE{180'000};
 constexpr CAmount V2_DIRECT_SEND_SEED_FEE{15'000};
 constexpr CAmount V2_DIRECT_SEND_FEE{70'000};
 constexpr CAmount SHIELDED_FEE_CARRIER_FEE{40'000};
+constexpr int32_t POST_C002_AUDIT_HEIGHT{
+    static_cast<int32_t>(smile2::SmileCTProof::C002_ACTIVATION_HEIGHT)};
 
 struct ScopedShieldedResourceLimits
 {
@@ -237,6 +241,20 @@ void ExpectBlockAccepted(TestChain100Setup& setup, const CBlock& block)
 [[nodiscard]] int32_t NextShieldedValidationHeight(TestChain100Setup& setup)
 {
     return WITH_LOCK(cs_main, return Assert(setup.m_node.chainman)->ActiveChain().Height() + 1);
+}
+
+void ExpectPostC002ShieldedProofAccepted(const CMutableTransaction& tx,
+                                         const Consensus::Params& consensus)
+{
+    BOOST_REQUIRE_GE(POST_C002_AUDIT_HEIGHT, 123'000);
+    const CTransaction immutable_tx{tx};
+    const auto reject_reason =
+        CShieldedProofCheck{immutable_tx,
+                            consensus,
+                            POST_C002_AUDIT_HEIGHT,
+                            /*tree_snapshot=*/nullptr}();
+    BOOST_REQUIRE_MESSAGE(!reject_reason.has_value(),
+                          "post-C002 shielded proof rejected: " << *reject_reason);
 }
 
 [[nodiscard]] test::shielded::V2SettlementAnchorReceiptFixture BuildSettlementAnchorFromEgressFixture(
@@ -2787,6 +2805,317 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_fee_bearing_reserve_bound_v2_settleme
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(block_rejects_post_c002_repeated_fresh_v2_rebalance_pool_credits_without_transparent_burn, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t active_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const ScopedConsensusHeightOverride restore_pool_credit_disable{
+        consensus.nShieldedPoolCreditDisableHeight,
+        consensus.nShieldedPoolCreditDisableHeight};
+    const ScopedConsensusHeightOverride restore_sunset{
+        consensus.nShieldedSunsetHeight,
+        consensus.nShieldedSunsetHeight};
+    consensus.nShieldedPoolCreditDisableHeight = active_height;
+    consensus.nShieldedSunsetHeight = std::numeric_limits<int32_t>::max();
+
+    const int32_t validation_height = POST_C002_AUDIT_HEIGHT;
+    BOOST_REQUIRE_GE(validation_height, 123'000);
+    BOOST_REQUIRE(consensus.IsShieldedMatRiCTDisabled(validation_height));
+
+    auto first = test::shielded::BuildV2RebalanceFixture(
+        /*reserve_output_count=*/1,
+        /*settlement_window=*/144,
+        &consensus,
+        validation_height);
+
+    test::shielded::V2RebalanceFixture second;
+    second.reserve_deltas = {
+        test::shielded::MakeV2ReserveDelta(0xf3, 7 * COIN),
+        test::shielded::MakeV2ReserveDelta(0xf4, -7 * COIN),
+    };
+    second.reserve_outputs = {test::shielded::MakeV2ReserveOutput(0xf5)};
+    test::shielded::CanonicalizeV2RebalanceOutputs(second.reserve_outputs);
+    second.manifest = test::shielded::MakeV2NettingManifest(second.reserve_deltas,
+                                                           /*settlement_window=*/145);
+    test::shielded::RefreshV2RebalanceFixture(second, &consensus, validation_height + 1);
+
+    BOOST_REQUIRE(first.manifest_id != second.manifest_id);
+
+    AttachCoinbaseFeeCarrier(*this, first.tx, m_coinbase_txns[0]);
+    AttachCoinbaseFeeCarrier(*this, second.tx, m_coinbase_txns[1]);
+
+    BOOST_CHECK_EQUAL(GetShieldedTxValueBalance(first.tx.shielded_bundle), 0);
+    BOOST_CHECK_EQUAL(GetShieldedTxValueBalance(second.tx.shielded_bundle), 0);
+
+    std::string reject_reason;
+    const auto first_state_value = TryGetShieldedStateValueBalance(first.tx.shielded_bundle, reject_reason);
+    BOOST_REQUIRE_MESSAGE(first_state_value.has_value(), reject_reason);
+    reject_reason.clear();
+    const auto second_state_value = TryGetShieldedStateValueBalance(second.tx.shielded_bundle, reject_reason);
+    BOOST_REQUIRE_MESSAGE(second_state_value.has_value(), reject_reason);
+    // DS-5 fix: the rebalance state value_balance is now the NET of all deltas (0), so it is no longer
+    // a pool credit. The height gate still rejects the family STRUCTURALLY (rebalance is rollover
+    // machinery), so the block is rejected with bad-shielded-v2-rebalance-disabled and the pool is
+    // unchanged -- repeated fresh rebalances cannot mint.
+    BOOST_CHECK_EQUAL(*first_state_value, 0);
+    BOOST_CHECK_EQUAL(*second_state_value, 0);
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CAmount initial_pool_balance =
+        WITH_LOCK(cs_main, return m_node.chainman->GetShieldedPoolBalance());
+
+    const CBlock first_block = CreateBlock({first.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockRejected(*this, first_block, "bad-shielded-v2-rebalance-disabled");
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->GetShieldedPoolBalance()),
+                      initial_pool_balance);
+    BOOST_CHECK(WITH_LOCK(cs_main,
+                          return !m_node.chainman->IsShieldedNettingManifestValid(first.manifest_id)));
+
+    const CBlock second_block = CreateBlock({second.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockRejected(*this, second_block, "bad-shielded-v2-rebalance-disabled");
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->GetShieldedPoolBalance()),
+                      initial_pool_balance);
+    BOOST_CHECK(WITH_LOCK(cs_main,
+                          return !m_node.chainman->IsShieldedNettingManifestValid(second.manifest_id)));
+}
+
+BOOST_FIXTURE_TEST_CASE(block_rejects_post_c002_rebalance_to_reserve_bound_settlement_anchor_to_matured_egress_chain, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t active_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const ScopedConsensusHeightOverride restore_pool_credit_disable{
+        consensus.nShieldedPoolCreditDisableHeight,
+        consensus.nShieldedPoolCreditDisableHeight};
+    const ScopedConsensusHeightOverride restore_sunset{
+        consensus.nShieldedSunsetHeight,
+        consensus.nShieldedSunsetHeight};
+    consensus.nShieldedPoolCreditDisableHeight = active_height;
+    consensus.nShieldedSunsetHeight = std::numeric_limits<int32_t>::max();
+
+    const int32_t validation_height = POST_C002_AUDIT_HEIGHT;
+    BOOST_REQUIRE_GE(validation_height, 123'000);
+    BOOST_REQUIRE(consensus.IsShieldedMatRiCTDisabled(validation_height));
+
+    auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture(
+        /*reserve_output_count=*/1,
+        /*settlement_window=*/144,
+        &consensus,
+        validation_height);
+    AttachCoinbaseFeeCarrier(*this, rebalance_fixture.tx, m_coinbase_txns[0]);
+
+    const auto egress_fixture = test::shielded::BuildV2EgressReceiptFixture(
+        /*output_count=*/2,
+        /*proof_receipt_count=*/1,
+        /*required_receipts=*/1,
+        &consensus,
+        validation_height);
+    auto settlement_anchor_fixture = BuildSettlementAnchorFromEgressFixture(
+        egress_fixture,
+        &consensus,
+        validation_height);
+    test::shielded::AttachSettlementAnchorReserveBinding(
+        settlement_anchor_fixture.tx,
+        rebalance_fixture.reserve_deltas,
+        rebalance_fixture.manifest_id);
+    AttachCoinbaseFeeCarrier(*this, settlement_anchor_fixture.tx, m_coinbase_txns[1]);
+
+    BOOST_REQUIRE_EQUAL(settlement_anchor_fixture.settlement_anchor_digest,
+                        std::get<shielded::v2::EgressBatchPayload>(
+                            egress_fixture.tx.shielded_bundle.v2_bundle->payload)
+                            .settlement_anchor);
+
+    ExpectPostC002ShieldedProofAccepted(rebalance_fixture.tx, consensus);
+    ExpectPostC002ShieldedProofAccepted(settlement_anchor_fixture.tx, consensus);
+    ExpectPostC002ShieldedProofAccepted(egress_fixture.tx, consensus);
+
+    BOOST_CHECK_EQUAL(GetShieldedTxValueBalance(rebalance_fixture.tx.shielded_bundle), 0);
+    BOOST_CHECK_EQUAL(GetShieldedTxValueBalance(settlement_anchor_fixture.tx.shielded_bundle), 0);
+    BOOST_CHECK_EQUAL(GetShieldedTxValueBalance(egress_fixture.tx.shielded_bundle), 0);
+
+    std::string reject_reason;
+    const auto rebalance_state_value =
+        TryGetShieldedStateValueBalance(rebalance_fixture.tx.shielded_bundle, reject_reason);
+    BOOST_REQUIRE_MESSAGE(rebalance_state_value.has_value(), reject_reason);
+    reject_reason.clear();
+    const auto settlement_anchor_state_value =
+        TryGetShieldedStateValueBalance(settlement_anchor_fixture.tx.shielded_bundle, reject_reason);
+    BOOST_REQUIRE_MESSAGE(settlement_anchor_state_value.has_value(), reject_reason);
+    reject_reason.clear();
+    const auto egress_state_value =
+        TryGetShieldedStateValueBalance(egress_fixture.tx.shielded_bundle, reject_reason);
+    BOOST_REQUIRE_MESSAGE(egress_state_value.has_value(), reject_reason);
+    BOOST_CHECK_EQUAL(*rebalance_state_value, 0);  // DS-5 fix: pool-neutral
+    BOOST_CHECK_EQUAL(*settlement_anchor_state_value, 0);
+    BOOST_CHECK_EQUAL(*egress_state_value, -(2 * COIN));
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CAmount initial_pool_balance =
+        WITH_LOCK(cs_main, return m_node.chainman->GetShieldedPoolBalance());
+
+    const CBlock rebalance_block =
+        CreateBlock({rebalance_fixture.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    // DS-5 fix: rebalance VB is now 0, so it is rejected structurally (rollover machinery), not as a credit.
+    ExpectBlockRejected(*this, rebalance_block, "bad-shielded-v2-rebalance-disabled");
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->GetShieldedPoolBalance()),
+                      initial_pool_balance);
+    BOOST_CHECK(WITH_LOCK(cs_main,
+                          return !m_node.chainman->IsShieldedNettingManifestValid(
+                              rebalance_fixture.manifest_id)));
+
+    const CBlock settlement_anchor_block =
+        CreateBlock({settlement_anchor_fixture.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockRejected(*this, settlement_anchor_block, "bad-shielded-v2-settlement-disabled");
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->GetShieldedPoolBalance()),
+                      initial_pool_balance);
+    BOOST_CHECK(WITH_LOCK(cs_main,
+                          return !m_node.chainman->IsShieldedSettlementAnchorValid(
+                              settlement_anchor_fixture.settlement_anchor_digest)));
+
+    const CBlock egress_block =
+        CreateBlock({egress_fixture.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockRejected(*this, egress_block, "bad-shielded-pool-credit-disabled");
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->GetShieldedPoolBalance()),
+                      initial_pool_balance);
+}
+
+// NOTE on the outflow exit ACCEPTANCE path (value_balance > fee): a real z->t unshield only becomes
+// buildable/sound at/after C002_ACTIVATION_HEIGHT (123000) -- the SMILE_COMPACT_POSTFORK unshield
+// encoding binds the public outflow only there (see shielded/v2_send.cpp). C002_ACTIVATION_HEIGHT is a
+// hard constant with no regtest override, so a genuine unshield cannot be constructed at the low heights
+// of TestChain100Setup. The acceptance of value_balance > fee V2_SEND exits at the sunset height
+// (>= 125000 > 123000) is therefore exercised on mainnet/by the builder's own C-002 boundary, while the
+// regtest suite covers every REJECTION case below (z->z private transfer, lifecycle, recovery, credits).
+
+BOOST_FIXTURE_TEST_CASE(block_rejects_v2_send_private_transfer_at_sunset_height, TestChain100Setup)
+{
+    // The outflow-only gate must reject a shielded-only "transfer" that pays only a fee and keeps value
+    // shielded: value_balance == fee (> 0) with NO transparent output. A naive value_balance > 0 check
+    // would wrongly admit it (the original bug). Default transparent_output_value = 0 => z->z transfer.
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const ScopedConsensusHeightOverride restore_sunset{
+        consensus.nShieldedSunsetHeight, consensus.nShieldedSunsetHeight};
+    consensus.nShieldedSunsetHeight = std::numeric_limits<int32_t>::max();
+    const auto fixture = BuildV2DirectSendChainFixture(*this, &consensus);  // no transparent output
+    BOOST_REQUIRE(fixture.built.tx.vout.empty());  // value stays shielded; only the fee leaves
+
+    std::string reject_reason;
+    const auto vb = TryGetShieldedStateValueBalance(fixture.built.tx.shielded_bundle, reject_reason);
+    BOOST_REQUIRE_MESSAGE(vb.has_value(), reject_reason);
+    BOOST_CHECK_GT(*vb, 0);  // positive (== fee), yet NOT an exit -- must still be rejected
+
+    consensus.nShieldedSunsetHeight = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock block =
+        CreateBlock({fixture.built.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockRejected(*this, block, "bad-shielded-sunset-non-exit");
+}
+
+BOOST_FIXTURE_TEST_CASE(block_rejects_v2_send_unshield_with_shielded_change_at_sunset_height, TestChain100Setup)
+{
+    // The post-sunset tree must be frozen, not merely pool-decreasing. A mixed V2_SEND with a real
+    // transparent outflow but a shielded change/recipient output would append a new commitment, so it is
+    // rejected even though value_balance > fee. Genuine mixed z->t+z change is not buildable in this
+    // low-height fixture before C-002, so mutate a valid z->z bundle to exercise the sunset gate before
+    // proof verification.
+    constexpr CAmount transparent_output_value{10'000};
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const ScopedConsensusHeightOverride restore_sunset{
+        consensus.nShieldedSunsetHeight, consensus.nShieldedSunsetHeight};
+    consensus.nShieldedSunsetHeight = std::numeric_limits<int32_t>::max();
+    const auto fixture = BuildV2DirectSendChainFixture(*this, &consensus);
+    CMutableTransaction mutated_tx{fixture.built.tx};
+    mutated_tx.vout = {CTxOut{transparent_output_value,
+                              GetScriptForDestination(WitnessV2P2MR(uint256::ONE))}};
+    BOOST_REQUIRE(mutated_tx.shielded_bundle.v2_bundle.has_value());
+    auto& payload = std::get<shielded::v2::SendPayload>(
+        mutated_tx.shielded_bundle.v2_bundle->payload);
+    payload.output_encoding = shielded::v2::SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD;
+    payload.value_balance = payload.fee + transparent_output_value;
+    mutated_tx.shielded_bundle.v2_bundle->header.payload_digest =
+        shielded::v2::ComputePayloadDigest(mutated_tx.shielded_bundle.v2_bundle->payload);
+
+    std::string reject_reason;
+    const auto vb = TryGetShieldedStateValueBalance(mutated_tx.shielded_bundle, reject_reason);
+    BOOST_REQUIRE_MESSAGE(vb.has_value(), reject_reason);
+    BOOST_CHECK_GT(*vb, payload.fee);
+    BOOST_REQUIRE_EQUAL(mutated_tx.shielded_bundle.GetShieldedOutputCount(), 1U);
+    BOOST_REQUIRE(!mutated_tx.vout.empty());
+
+    consensus.nShieldedSunsetHeight = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock block =
+        CreateBlock({mutated_tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockRejected(*this, block, "bad-shielded-sunset-shielded-output");
+}
+
+BOOST_FIXTURE_TEST_CASE(block_rejects_non_credit_v2_lifecycle_at_sunset_height, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t tip_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
+    const ScopedConsensusHeightOverride restore_matrict{
+        consensus.nShieldedMatRiCTDisableHeight,
+        consensus.nShieldedMatRiCTDisableHeight};
+    const ScopedConsensusHeightOverride restore_sunset{
+        consensus.nShieldedSunsetHeight,
+        consensus.nShieldedSunsetHeight};
+    consensus.nShieldedMatRiCTDisableHeight = tip_height + 1;
+    consensus.nShieldedSunsetHeight = tip_height + 1;
+
+    auto lifecycle_tx = BuildLifecycleControlTx(*this,
+                                                /*change_value=*/49'000,
+                                                /*fee=*/V2_DIRECT_SEND_FEE,
+                                                &consensus,
+                                                consensus.nShieldedMatRiCTDisableHeight);
+    BOOST_REQUIRE(lifecycle_tx.shielded_bundle.v2_bundle);
+    BOOST_CHECK_EQUAL(lifecycle_tx.shielded_bundle.GetShieldedOutputCount(), 0U);
+
+    std::string reject_reason;
+    const auto state_value_balance =
+        TryGetShieldedStateValueBalance(lifecycle_tx.shielded_bundle, reject_reason);
+    BOOST_REQUIRE_MESSAGE(state_value_balance.has_value(), reject_reason);
+    BOOST_CHECK_EQUAL(*state_value_balance, 0);
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock block =
+        CreateBlock({lifecycle_tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    // Outflow-only sunset: a pool-neutral (state value_balance == 0) lifecycle/control op is not an
+    // exit, so it is rejected as a non-exit (distinct from the value-leaving exits that are preserved).
+    ExpectBlockRejected(*this, block, "bad-shielded-sunset-non-exit");
+}
+
+BOOST_FIXTURE_TEST_CASE(mempool_evicts_non_exit_shielded_transaction_when_sunset_height_becomes_next_block, TestChain100Setup)
+{
+    // A non-exit shielded tx (here a z->z private transfer: value_balance == fee, no transparent
+    // outflow) is valid before the sunset but becomes invalid AT the sunset height, so it is evicted
+    // when the next block crosses the sunset boundary. (Real outflow unshields, value_balance > fee, are
+    // only buildable at C-002 height >= 123000 -- see the note above -- so they cannot be constructed at
+    // these regtest heights; this test exercises the eviction path with the buildable non-exit case.)
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const ScopedConsensusHeightOverride restore_sunset{
+        consensus.nShieldedSunsetHeight,
+        consensus.nShieldedSunsetHeight};
+
+    consensus.nShieldedSunsetHeight = std::numeric_limits<int32_t>::max();
+    const auto fixture = BuildV2DirectSendChainFixture(*this, &consensus);  // z->z (no transparent output)
+    BOOST_REQUIRE(fixture.built.tx.vout.empty());
+    const Txid txid = fixture.built.tx.GetHash();
+    consensus.nShieldedSunsetHeight = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 2);
+
+    m_node.mempool->PrioritiseTransaction(txid, COIN);
+    const auto accepted = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/false));
+    BOOST_REQUIRE_MESSAGE(accepted.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                          accepted.m_state.GetRejectReason());
+    BOOST_CHECK(WITH_LOCK(m_node.mempool->cs, return m_node.mempool->exists(GenTxid::Txid(txid))));
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({}, script_pub_key);  // next block is now the sunset height
+
+    // The non-exit tx is invalid at the sunset height -> evicted from the mempool.
+    BOOST_CHECK(WITH_LOCK(m_node.mempool->cs, return !m_node.mempool->exists(GenTxid::Txid(txid))));
+}
+
 BOOST_FIXTURE_TEST_CASE(tx_mempool_activation_gates_stale_v2_settlement_anchor_netting_manifest, TestChain100Setup)
 {
     auto rebalance_fixture = test::shielded::BuildV2RebalanceFixture(/*reserve_output_count=*/1,
@@ -3954,7 +4283,7 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_v2_send_subminimum_ring_witness_with_
     BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
 }
 
-BOOST_FIXTURE_TEST_CASE(tx_mempool_auto_recovers_v2_send_missing_smile_public_account_snapshot_entry, TestChain100Setup)
+BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_v2_send_missing_smile_public_account_without_auto_rebuild, TestChain100Setup)
 {
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
     const int32_t tip_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height());
@@ -3979,26 +4308,34 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_auto_recovers_v2_send_missing_smile_public_ac
         cs_main,
         return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
 
-    BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::VALID);
-    BOOST_CHECK(result.m_state.IsValid());
+    BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+    BOOST_CHECK(result.m_state.IsInvalid());
+    BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "bad-smile2-ring-member-public-account");
+    BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
     BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
                                 return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
                                     ShieldedAutoRepairKind::STATE_REBUILD)),
-                      1U);
+                      0U);
     BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
                                 return m_node.chainman->GetShieldedSmilePublicAccounts().count(
                                     *missing_commitment)),
-                      1U);
+                      0U);
 
     const MempoolAcceptResult retried_result = WITH_LOCK(
         cs_main,
         return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
-    BOOST_CHECK(retried_result.m_result_type == MempoolAcceptResult::ResultType::VALID);
-    BOOST_CHECK(retried_result.m_state.IsValid());
+    BOOST_CHECK(retried_result.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+    BOOST_CHECK(retried_result.m_state.IsInvalid());
+    BOOST_CHECK_EQUAL(retried_result.m_state.GetRejectReason(), "bad-smile2-ring-member-public-account");
+    BOOST_CHECK(retried_result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
     BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
                                 return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
                                     ShieldedAutoRepairKind::STATE_REBUILD)),
-                      1U);
+                      0U);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedSmilePublicAccounts().count(
+                                    *missing_commitment)),
+                      0U);
 }
 
 BOOST_FIXTURE_TEST_CASE(block_auto_recovers_v2_send_missing_account_leaf_snapshot_entry, TestChain100Setup)
@@ -4048,7 +4385,7 @@ BOOST_FIXTURE_TEST_CASE(block_auto_recovers_v2_send_missing_account_leaf_snapsho
         WITH_LOCK(cs_main, return m_node.chainman->m_failed_blocks.count(accepted_index)), 0U);
 }
 
-BOOST_FIXTURE_TEST_CASE(tx_mempool_auto_recovery_serializes_concurrent_inbound_v2_send_requests,
+BOOST_FIXTURE_TEST_CASE(tx_mempool_stale_shielded_state_rejects_without_auto_rebuild,
                         TestChain100Setup)
 {
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
@@ -4065,71 +4402,27 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_auto_recovery_serializes_concurrent_inbound_v
     BOOST_REQUIRE(WITH_LOCK(cs_main,
                             return RemoveShieldedSmilePublicAccountForTest(*m_node.chainman,
                                                                            *missing_commitment)));
-
-    std::mutex hook_mutex;
-    std::condition_variable hook_cv;
-    bool hook_entered{false};
-    bool release_hook{false};
-
-    WITH_LOCK(cs_main,
-              m_node.chainman->SetShieldedAutoRepairHookForTest(
-                  [&](ShieldedAutoRepairKind kind) {
-                      if (kind != ShieldedAutoRepairKind::STATE_REBUILD) return;
-                      std::unique_lock<std::mutex> lock{hook_mutex};
-                      hook_entered = true;
-                      hook_cv.notify_all();
-                      hook_cv.wait(lock, [&] { return release_hook; });
-                  }));
-
-    std::promise<MempoolAcceptResult> first_promise;
-    auto first_future = first_promise.get_future();
-    std::thread first_thread([&] {
-        first_promise.set_value(WITH_LOCK(
-            cs_main,
-            return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx),
-                                                       /*test_accept=*/true)));
-    });
-
-    {
-        std::unique_lock<std::mutex> lock{hook_mutex};
-        BOOST_REQUIRE(hook_cv.wait_for(lock, std::chrono::seconds{5}, [&] { return hook_entered; }));
-    }
-
-    std::promise<MempoolAcceptResult> second_promise;
-    auto second_future = second_promise.get_future();
-    std::thread second_thread([&] {
-        second_promise.set_value(WITH_LOCK(
-            cs_main,
-            return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx),
-                                                       /*test_accept=*/true)));
-    });
-
-    BOOST_CHECK(second_future.wait_for(std::chrono::milliseconds{100}) == std::future_status::timeout);
-
-    {
-        std::lock_guard<std::mutex> lock{hook_mutex};
-        release_hook = true;
-    }
-    hook_cv.notify_all();
-
-    first_thread.join();
-    second_thread.join();
-    WITH_LOCK(cs_main, m_node.chainman->SetShieldedAutoRepairHookForTest({}));
-
-    const MempoolAcceptResult first_result = first_future.get();
-    const MempoolAcceptResult second_result = second_future.get();
-    BOOST_CHECK(first_result.m_result_type == MempoolAcceptResult::ResultType::VALID);
-    BOOST_CHECK(first_result.m_state.IsValid());
-    BOOST_CHECK(second_result.m_result_type == MempoolAcceptResult::ResultType::VALID);
-    BOOST_CHECK(second_result.m_state.IsValid());
-    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
-                                return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
-                                    ShieldedAutoRepairKind::STATE_REBUILD)),
-                      1U);
     BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
                                 return m_node.chainman->GetShieldedSmilePublicAccounts().count(
                                     *missing_commitment)),
-                      1U);
+                      0U);
+
+    const MempoolAcceptResult result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx),
+                                                   /*test_accept=*/true));
+    BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+    BOOST_CHECK(result.m_state.IsInvalid());
+    BOOST_CHECK_EQUAL(result.m_state.GetRejectReason(), "bad-smile2-ring-member-public-account");
+    BOOST_CHECK(result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
+                                    ShieldedAutoRepairKind::STATE_REBUILD)),
+                      0U);
+    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
+                                return m_node.chainman->GetShieldedSmilePublicAccounts().count(
+                                    *missing_commitment)),
+                      0U);
 }
 
 BOOST_FIXTURE_TEST_CASE(tx_mempool_activation_gates_noncanonical_smile_v2_send, TestChain100Setup)
@@ -4519,7 +4812,7 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_postfork_mixed_direct_v2_send, TestCh
 }
 
 BOOST_FIXTURE_TEST_CASE(
-    tx_mempool_rejects_postfork_mixed_direct_v2_send_after_single_auto_rebuild_retry,
+    tx_mempool_rejects_postfork_mixed_direct_v2_send_without_auto_rebuild_retry,
     TestChain100Setup)
 {
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
@@ -4547,7 +4840,7 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
                                 return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
                                     ShieldedAutoRepairKind::STATE_REBUILD)),
-                      1U);
+                      0U);
 
     const auto retried_result = WITH_LOCK(
         cs_main,
@@ -4561,7 +4854,7 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK_EQUAL(WITH_LOCK(cs_main,
                                 return m_node.chainman->GetShieldedAutoRepairAttemptCountForTest(
                                     ShieldedAutoRepairKind::STATE_REBUILD)),
-                      1U);
+                      0U);
 }
 
 BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_postfork_legacy_compact_direct_send_encoding, TestChain100Setup)

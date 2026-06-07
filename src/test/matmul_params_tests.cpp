@@ -48,6 +48,12 @@ BOOST_AUTO_TEST_CASE(matmul_params_defaults_mainnet)
     BOOST_CHECK_EQUAL(c.nMatMulValidationWindow, 1000U);
     BOOST_CHECK_EQUAL(c.nMatMulMaxFutureMtpDriftHeight, 118'482);
     BOOST_CHECK_EQUAL(c.nMatMulMaxFutureMtpDrift, 3'600);
+    BOOST_CHECK_EQUAL(c.nMatMulTimewarpReconcileHeight, 125'000);
+    BOOST_CHECK(!c.IsMatMulTimewarpReconcileActive(124'999));
+    BOOST_CHECK(c.IsMatMulTimewarpReconcileActive(125'000));
+    BOOST_CHECK_EQUAL(c.nMatMulNonceSeedHeight, 125'000);
+    BOOST_CHECK(!c.IsMatMulNonceSeedActive(124'999));
+    BOOST_CHECK(c.IsMatMulNonceSeedActive(125'000));
 }
 
 BOOST_AUTO_TEST_CASE(matmul_product_payload_requirement_matches_live_network_policy)

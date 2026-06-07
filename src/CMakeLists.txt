@@ -364,6 +364,7 @@ add_library(bitcoin_shielded STATIC EXCLUDE_FROM_ALL
   shielded/smile2/serialize.cpp
   shielded/smile2/verify_dispatch.cpp
   shielded/smile2/wallet_bridge.cpp
+  shielded/recovery_exit.cpp
   shielded/turnstile.cpp
   shielded/unshield_velocity.cpp
   shielded/validation.cpp

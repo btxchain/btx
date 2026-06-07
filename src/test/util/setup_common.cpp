@@ -245,6 +245,10 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
             .datadir = m_args.GetDataDirNet(),
             .check_block_index = 1,
             .checkpoints_enabled = false,
+            // Test snapshots are generated in-process at unpinned regtest heights; the snapshot tests
+            // exercise load mechanics, not the production DS-3 pin policy (which defaults fail-closed,
+            // guarded by validation_tests::ds3_unpinned_shielded_snapshot_fails_closed_by_default).
+            .allow_unpinned_shielded_snapshot = true,
             .notifications = *m_node.notifications,
             .signals = m_node.validation_signals.get(),
             .worker_threads_num = 2,

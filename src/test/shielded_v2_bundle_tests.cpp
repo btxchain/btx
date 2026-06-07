@@ -11,6 +11,7 @@
 #include <primitives/transaction.h>
 #include <shielded/account_registry.h>
 #include <shielded/bundle.h>
+#include <shielded/turnstile.h>
 #include <shielded/v2_bundle.h>
 #include <shielded/v2_ingress.h>
 #include <shielded/v2_send.h>
@@ -2078,7 +2079,10 @@ BOOST_AUTO_TEST_CASE(value_balance_helpers_distinguish_pool_and_tx_accounting)
     const auto rebalance_state_value =
         TryGetShieldedStateValueBalance(rebalance_fixture.tx.shielded_bundle, reject_reason);
     BOOST_REQUIRE_MESSAGE(rebalance_state_value.has_value(), reject_reason);
-    BOOST_CHECK_EQUAL(*rebalance_state_value, -(7 * COIN));
+    // DS-5 fix: a rebalance is POOL-NEUTRAL. Its state value_balance is the NET of all reserve deltas
+    // (= 0 by the conservation rule), not -sum(positive). The previous -(7*COIN) encoded the inflation
+    // bug (the positive leg credited the pool while the negative leg never debited it).
+    BOOST_CHECK_EQUAL(*rebalance_state_value, 0);
     BOOST_CHECK_EQUAL(GetShieldedTxValueBalance(rebalance_fixture.tx.shielded_bundle), 0);
 
     const auto settlement_fixture = test::shielded::BuildV2SettlementAnchorReceiptFixture();
@@ -2220,6 +2224,137 @@ BOOST_AUTO_TEST_CASE(postfork_rebalance_builder_uses_generic_wire_family)
     BOOST_REQUIRE_EQUAL(decoded.output_chunks.size(), 1U);
     BOOST_CHECK_EQUAL(decoded.output_chunks.front().output_count,
                       std::get<RebalancePayload>(decoded.payload).reserve_outputs.size());
+}
+
+// =====================================================================================
+// POST-123000 unbacked pool-inflation PoC (red-team finding ds#5): V2_REBALANCE credits the pool
+// without any burn, nullifier, or attestation.
+//
+// Accounting bug: the turnstile credit for a rebalance is value_balance = -sum(POSITIVE reserve_deltas)
+// (bundle.cpp:1073-1081, via CheckedSumPositiveReserveDeltas), and a negative value_balance CREDITS the
+// pool (turnstile: new = balance - value_balance). But canonical validity only requires conservation
+// over ALL deltas: ReserveDeltaSetIsCanonical -> ValueConservationHolds -> sum(all)==0
+// (v2_bundle.cpp:689,171). So a net-zero set [+V, -V] is fully canonical yet credits the pool +V; the
+// negative leg is free bookkeeping that never debits the pool. V2_REBALANCE consumes NO nullifiers and
+// its sole authenticator VerifyDeterministicV2RebalanceBundle (validation.cpp:52) is a self-rebuild --
+// no transparent burn, no attestation, no proof. A FRESH netting_manifest each time has a fresh id, so
+// the permanent HasShieldedNettingManifest replay guard never fires. => mint V per rebalance, unbounded.
+// Gated at nShieldedMatRiCTDisableHeight (61000), i.e. LIVE after the 123000 C-002 hardening.
+// DS-5 REGRESSION GUARD (fix landed): a net-zero rebalance must be POOL-NEUTRAL. The fix makes the
+// rebalance state value_balance the NET of all reserve deltas (= 0 by conservation) instead of
+// -sum(positive). This test builds the same net-zero [+V,-V] rebalances that previously minted +V each
+// and asserts the pool credit is now exactly 0. If anyone reintroduces the -sum(positive) bug, this fails.
+BOOST_AUTO_TEST_CASE(v2_rebalance_is_pool_neutral_ds5_regression)
+{
+    const CAmount V = 1'000'000 * COIN;
+
+    auto credit_of_fresh_rebalance = [](unsigned char l2_seed_a, unsigned char l2_seed_b,
+                                        CAmount amount) -> CAmount {
+        std::vector<ReserveDelta> deltas{
+            MakeReserveDelta(l2_seed_a, amount),
+            MakeReserveDelta(l2_seed_b, -amount),
+        };
+        BOOST_CHECK(ReserveDeltaSetIsCanonical(
+            Span<const ReserveDelta>{deltas.data(), deltas.size()}));
+        std::vector<OutputDescription> reserve_outputs{
+            MakeOutput(NoteClass::RESERVE, ScanDomain::RESERVE, l2_seed_a),
+            MakeOutput(NoteClass::RESERVE, ScanDomain::RESERVE, l2_seed_b),
+        };
+        V2RebalanceBuildInput input;
+        input.reserve_deltas = deltas;
+        input.reserve_outputs = reserve_outputs;
+        input.netting_manifest = MakeNettingManifest(deltas);
+        std::string reject_reason;
+        auto built = BuildDeterministicV2RebalanceBundle(input, reject_reason);
+        BOOST_REQUIRE_MESSAGE(built.has_value(), reject_reason);
+        BOOST_REQUIRE(built->bundle.IsValid());
+        CShieldedBundle shielded_bundle;
+        shielded_bundle.v2_bundle = built->bundle;
+        const auto vb = TryGetShieldedStateValueBalance(shielded_bundle, reject_reason);
+        BOOST_REQUIRE_MESSAGE(vb.has_value(), reject_reason);
+        return -*vb;  // pool credit (= -value_balance); must be 0 after the DS-5 fix
+    };
+
+    BOOST_CHECK_EQUAL(credit_of_fresh_rebalance(0xA0, 0xA1, V), 0);  // no mint -- pool-neutral
+    BOOST_CHECK_EQUAL(credit_of_fresh_rebalance(0xB0, 0xB1, V), 0);  // fresh manifest, still 0
+}
+
+// DS-5 END-TO-END REGRESSION through the REAL turnstile (the exact ConnectBlock hook,
+// ShieldedPoolBalance::ApplyValueBalance, validation.cpp:1082). The same two fresh rebalances that
+// previously inflated a 100-BTX pool to 2,000,100 BTX now leave it UNCHANGED, because their value_balance
+// is 0 after the fix. This is the consensus-accounting proof that the DS-5 mint is dead.
+BOOST_AUTO_TEST_CASE(v2_rebalance_no_longer_mints_through_turnstile_ds5_regression)
+{
+    const CAmount V = 1'000'000 * COIN;
+
+    auto rebalance_value_balance = [](unsigned char a, unsigned char b, CAmount amount) -> CAmount {
+        std::vector<ReserveDelta> deltas{MakeReserveDelta(a, amount), MakeReserveDelta(b, -amount)};
+        std::vector<OutputDescription> outs{MakeOutput(NoteClass::RESERVE, ScanDomain::RESERVE, a),
+                                            MakeOutput(NoteClass::RESERVE, ScanDomain::RESERVE, b)};
+        V2RebalanceBuildInput input;
+        input.reserve_deltas = deltas;
+        input.reserve_outputs = outs;
+        input.netting_manifest = MakeNettingManifest(deltas);
+        std::string rr;
+        auto built = BuildDeterministicV2RebalanceBundle(input, rr);
+        BOOST_REQUIRE_MESSAGE(built.has_value(), rr);
+        CShieldedBundle sb; sb.v2_bundle = built->bundle;
+        auto vb = TryGetShieldedStateValueBalance(sb, rr);
+        BOOST_REQUIRE_MESSAGE(vb.has_value(), rr);
+        return *vb;  // == 0 after the DS-5 fix
+    };
+
+    ShieldedPoolBalance pool;
+    BOOST_REQUIRE(pool.SetBalance(100 * COIN));
+    const CAmount start = pool.GetBalance();
+
+    BOOST_REQUIRE(pool.ApplyValueBalance(rebalance_value_balance(0xC0, 0xC1, V)));
+    BOOST_CHECK_EQUAL(pool.GetBalance(), start);   // no mint -- pool unchanged
+    BOOST_REQUIRE(pool.ApplyValueBalance(rebalance_value_balance(0xC2, 0xC3, V)));
+    BOOST_CHECK_EQUAL(pool.GetBalance(), start);   // still unchanged after a second fresh rebalance
+}
+
+// CONSTRAINED-BLAST-RADIUS: model the sunset-aware monotone turnstile (reject any net pool CREDIT at
+// height >= sunset). With DS-5 fixed, rebalances are already neutral (no credit); the clamp additionally
+// refuses the DS-1/DS-2 egress-style credit (-N), so the pool can only drain. Combined: pool is monotone
+// non-increasing and never exceeds the frozen ceiling -- blast radius = the frozen 125000 balance.
+BOOST_AUTO_TEST_CASE(sunset_patched_turnstile_bounds_blast_radius)
+{
+    const int32_t SUNSET = 125000;
+
+    // Simplified turnstile-level model of the post-sunset invariant: at the sunset height the pool may
+    // only STRICTLY DECREASE, so any value_balance <= 0 (a credit OR a pool-neutral tx such as a
+    // DS-5-fixed rebalance / a z->z transfer whose value_balance == fee nets to ~0 of real outflow) is
+    // refused. (Production additionally gates on family + value_balance > fee in RejectShieldedSunset
+    // Violation; that fuller check is exercised by txvalidation_tests. This test only asserts the
+    // monotone-decrease blast-radius bound.)
+    auto sunset_apply = [&](ShieldedPoolBalance& pool, CAmount value_balance, int32_t height) -> bool {
+        if (height >= SUNSET && value_balance <= 0) return false;  // no credit, no pool-neutral op
+        return pool.ApplyValueBalance(value_balance);
+    };
+
+    ShieldedPoolBalance pool;
+    BOOST_REQUIRE(pool.SetBalance(100 * COIN));
+    const CAmount ceiling = pool.GetBalance();
+    const int32_t h = SUNSET + 10;
+
+    // DS-5-fixed rebalance / any pool-neutral op (value_balance 0): REJECTED post-sunset, pool unchanged.
+    BOOST_CHECK(!sunset_apply(pool, 0, h));
+    BOOST_CHECK_EQUAL(pool.GetBalance(), ceiling);
+
+    // DS-1/DS-2 egress-style credit (-N): REJECTED -> pool unchanged.
+    BOOST_CHECK(!sunset_apply(pool, -(50'000 * COIN), h));
+    BOOST_CHECK_EQUAL(pool.GetBalance(), ceiling);
+
+    // A real unshield-out (strictly positive value_balance) is still allowed: pool drains (exit works).
+    BOOST_CHECK(sunset_apply(pool, 30 * COIN, h));
+    BOOST_CHECK_EQUAL(pool.GetBalance(), ceiling - 30 * COIN);
+
+    // INVARIANT: post-sunset the pool is monotone STRICTLY non-increasing; 100 credit attempts refused.
+    for (int i = 0; i < 100; ++i) {
+        BOOST_CHECK(!sunset_apply(pool, -(1'000'000 * COIN), h));
+        BOOST_CHECK_LE(pool.GetBalance(), ceiling);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

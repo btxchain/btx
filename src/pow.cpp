@@ -44,11 +44,53 @@
 #include <sys/sysctl.h>
 #endif
 
-uint256 DeterministicMatMulSeed(const uint256& prev_block_hash, uint32_t height, uint8_t which)
+uint256 DeterministicMatMulSeed(const uint256& prev_block_hash, uint32_t height, uint8_t which,
+                                std::optional<uint64_t> nonce)
 {
     HashWriter hw;
     hw << prev_block_hash << height << which;
+    // e1 fix (nonce-fold, flag-day gated): when a nonce is supplied, fold it into the seed so the
+    // dense A*B product is nonce-DEPENDENT and cannot be precomputed once per tip and reused across
+    // the whole nonce range (the ~12.8x amortization). The nonce is APPENDED so that the legacy
+    // (no-nonce) derivation is byte-identical to before -- pre-activation blocks and genesis keep
+    // their exact historical seeds. Callers pass the nonce only when IsMatMulNonceSeedActive(height).
+    if (nonce.has_value()) {
+        hw << *nonce;
+    }
     return hw.GetSHA256();
+}
+
+uint256 DeterministicMatMulSeedV2(const CBlockHeader& block, uint32_t height, uint8_t which)
+{
+    HashWriter hw;
+    hw << std::string{"BTX_MATMUL_SEED_V2"}
+       << block.hashPrevBlock
+       << height
+       << block.nVersion
+       << block.hashMerkleRoot
+       << block.nTime
+       << block.nBits
+       << block.nNonce64
+       << block.matmul_dim
+       << which;
+    return hw.GetSHA256();
+}
+
+void SetDeterministicMatMulSeeds(CBlockHeader& block, const Consensus::Params& params, int32_t block_height)
+{
+    if (block_height < 0) {
+        block.seed_a.SetNull();
+        block.seed_b.SetNull();
+        return;
+    }
+    if (params.IsMatMulNonceSeedActive(block_height)) {
+        block.seed_a = DeterministicMatMulSeedV2(block, static_cast<uint32_t>(block_height), 0);
+        block.seed_b = DeterministicMatMulSeedV2(block, static_cast<uint32_t>(block_height), 1);
+        return;
+    }
+
+    block.seed_a = DeterministicMatMulSeed(block.hashPrevBlock, static_cast<uint32_t>(block_height), 0);
+    block.seed_b = DeterministicMatMulSeed(block.hashPrevBlock, static_cast<uint32_t>(block_height), 1);
 }
 
 namespace {
@@ -2579,6 +2621,228 @@ bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus:
     return pending_verifications < params.nMatMulMaxPendingVerifications;
 }
 
+bool SolveMatMulNonceSeeded(CBlockHeader& block,
+                            const Consensus::Params& params,
+                            uint64_t& max_tries,
+                            int32_t block_height,
+                            const std::atomic<bool>* abort_flag,
+                            std::vector<uint32_t>* freivalds_payload_out)
+{
+    if (freivalds_payload_out != nullptr) {
+        freivalds_payload_out->clear();
+    }
+
+    auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
+    if (!bnTarget) return false;
+
+    const auto solve_start = std::chrono::steady_clock::now();
+    // Pipeline diagnostic stats are set by the top-level SolveMatMul dispatch (which knows whether
+    // this run is parallel). A worker chunk must NOT overwrite them, so they are not touched here.
+
+    try {
+        arith_uint256 best_digest_seen = ~arith_uint256(0);
+        const uint32_t n = block.matmul_dim;
+        const uint32_t transcript_block_size = params.nMatMulTranscriptBlockSize;
+        const uint32_t noise_rank = params.nMatMulNoiseRank;
+        const bool product_digest_active = params.IsMatMulProductDigestActive(block_height);
+        const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
+        const auto active_backend = backend_selection.active;
+        const std::string active_backend_label = matmul::backend::ToString(active_backend);
+        const bool use_gpu_generated_inputs = matmul::accelerated::ShouldUseGpuGeneratedInputsForShape(
+            active_backend,
+            n,
+            transcript_block_size,
+            noise_rank);
+        const bool cpu_confirm_candidates = ShouldCpuConfirmSolvedMatMulCandidates(active_backend, params);
+        const bool needs_freivalds_payload =
+            params.fMatMulFreivaldsEnabled && freivalds_payload_out != nullptr;
+        const matmul::accelerated::DigestScheme digest_scheme = product_digest_active
+            ? matmul::accelerated::DigestScheme::PRODUCT_COMMITTED
+            : matmul::accelerated::DigestScheme::TRANSCRIPT;
+        const uint32_t header_time_refresh_interval = ResolveMinerHeaderTimeRefreshAttempts();
+        const uint32_t pre_hash_epsilon_bits = GetMatMulPreHashEpsilonBitsForHeight(params, block_height);
+        const bool cpu_vs_metal_compare = ShouldEnableCpuVsMetalDigestCompare(active_backend);
+        uint32_t attempts_since_time_refresh{0};
+        g_matmul_cpu_confirm_candidates.store(cpu_confirm_candidates, std::memory_order_relaxed);
+        g_matmul_digest_compare_enabled.store(cpu_vs_metal_compare, std::memory_order_relaxed);
+
+        auto prepare_inputs = [&](const CBlockHeader& header) {
+            if (use_gpu_generated_inputs) {
+                return matmul::accelerated::PrepareMatMulDigestInputsForBackend(
+                    header,
+                    transcript_block_size,
+                    noise_rank,
+                    active_backend,
+                    digest_scheme);
+            }
+            return matmul::accelerated::PrepareMatMulDigestInputs(
+                header,
+                transcript_block_size,
+                noise_rank);
+        };
+
+        auto advance_nonce = [&]() -> bool {
+            if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) {
+                const std::string seed_a_prefix = block.seed_a.GetHex().substr(0, 16);
+                const std::string seed_b_prefix = block.seed_b.GetHex().substr(0, 16);
+                LogPrintf("MatMul mining: nonce64 exhausted (seed_a=%s seed_b=%s)\n", seed_a_prefix, seed_b_prefix);
+                return false;
+            }
+            ++block.nNonce64;
+            block.nNonce = static_cast<uint32_t>(block.nNonce64);
+            if (attempts_since_time_refresh != std::numeric_limits<uint32_t>::max()) {
+                ++attempts_since_time_refresh;
+            }
+            MaybeRefreshMinerHeaderTime(
+                block,
+                attempts_since_time_refresh,
+                header_time_refresh_interval,
+                params.fPowAllowMinDifficultyBlocks);
+            return true;
+        };
+
+        while (max_tries > 0) {
+            if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+                LogDebug(BCLog::MINING, "SolveMatMulNonceSeeded: abort flag set, stopping with %lu tries remaining\n",
+                         static_cast<unsigned long>(max_tries));
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+                return false;
+            }
+
+            CBlockHeader header{block};
+            SetDeterministicMatMulSeeds(header, params, block_height);
+            header.matmul_digest.SetNull();
+            --max_tries;
+
+            if (pre_hash_epsilon_bits > 0 && !CheckMatMulPreHashGate(header, params, block_height)) {
+                if (!advance_nonce()) break;
+                continue;
+            }
+
+            const auto A = matmul::SharedFromSeed(header.seed_a, n);
+            const auto B = matmul::SharedFromSeed(header.seed_b, n);
+            auto prepared = prepare_inputs(header);
+            g_matmul_prepared_inputs.fetch_add(1, std::memory_order_relaxed);
+
+            std::vector<CBlockHeader> headers{header};
+            std::vector<matmul::accelerated::PreparedDigestInputs> prepared_batch;
+            prepared_batch.push_back(std::move(prepared));
+            auto digest_submission = matmul::accelerated::SubmitMatMulDigestPreparedBatchForMining(
+                headers,
+                *A,
+                *B,
+                transcript_block_size,
+                noise_rank,
+                prepared_batch,
+                active_backend,
+                digest_scheme);
+            std::vector<matmul::accelerated::DigestResult> digest_batch =
+                matmul::accelerated::WaitForSubmittedMatMulDigestBatch(std::move(digest_submission));
+            if (digest_batch.size() != 1 || !digest_batch[0].ok) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+                return false;
+            }
+
+            const auto& digest_result = digest_batch[0];
+            std::optional<uint256> compared_cpu_digest;
+            if (cpu_vs_metal_compare && active_backend == matmul::backend::Kind::METAL) {
+                compared_cpu_digest = matmul::accelerated::ComputeDigestCpuFromPreparedInputs(
+                    *A,
+                    *B,
+                    prepared_batch[0],
+                    transcript_block_size,
+                    digest_scheme);
+                RegisterMatMulDigestCompareAttempt(
+                    header,
+                    digest_result.digest,
+                    *compared_cpu_digest,
+                    active_backend_label.c_str());
+            }
+
+            if (const arith_uint256 digest_value = UintToArith256(digest_result.digest); digest_value < best_digest_seen) {
+                best_digest_seen = digest_value;
+            }
+            if (UintToArith256(digest_result.digest) <= *bnTarget) {
+                uint256 accepted_digest = digest_result.digest;
+                if (cpu_confirm_candidates || needs_freivalds_payload) {
+                    std::optional<matmul::transcript::CanonicalResult> canonical_cpu_result;
+                    uint256 cpu_digest;
+                    if (needs_freivalds_payload) {
+                        const auto resolved_noise = matmul::accelerated::ResolvePreparedNoiseForCpu(
+                            prepared_batch[0],
+                            header.matmul_dim,
+                            noise_rank);
+                        const auto A_prime =
+                            *A + (resolved_noise.E_L * resolved_noise.E_R);
+                        const auto B_prime =
+                            *B + (resolved_noise.F_L * resolved_noise.F_R);
+                        canonical_cpu_result = matmul::transcript::CanonicalMatMul(
+                            A_prime,
+                            B_prime,
+                            transcript_block_size,
+                            prepared_batch[0].sigma);
+                        cpu_digest = digest_scheme == matmul::accelerated::DigestScheme::PRODUCT_COMMITTED
+                            ? matmul::transcript::ComputeProductCommittedDigest(
+                                canonical_cpu_result->C_prime,
+                                transcript_block_size,
+                                prepared_batch[0].sigma)
+                            : canonical_cpu_result->transcript_hash;
+                    } else {
+                        cpu_digest = compared_cpu_digest.has_value()
+                            ? *compared_cpu_digest
+                            : matmul::accelerated::ComputeDigestCpuFromPreparedInputs(
+                                *A,
+                                *B,
+                                prepared_batch[0],
+                                transcript_block_size,
+                                digest_scheme);
+                    }
+
+                    if (!cpu_vs_metal_compare && cpu_digest != digest_result.digest) {
+                        RegisterMatMulDigestCompareAttempt(
+                            header,
+                            digest_result.digest,
+                            cpu_digest,
+                            active_backend_label.c_str());
+                    }
+
+                    if (UintToArith256(cpu_digest) > *bnTarget) {
+                        if (!advance_nonce()) break;
+                        continue;
+                    }
+                    accepted_digest = cpu_digest;
+                    if (canonical_cpu_result.has_value()) {
+                        SetFreivaldsPayloadFromProduct(*freivalds_payload_out, canonical_cpu_result->C_prime);
+                    }
+                }
+
+                block = header;
+                block.matmul_digest = accepted_digest;
+                RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - solve_start);
+                return true;
+            }
+
+            if (!advance_nonce()) break;
+        }
+
+        if (best_digest_seen != ~arith_uint256(0)) {
+            const int bits_short = std::max(0, static_cast<int>(best_digest_seen.bits()) - static_cast<int>(bnTarget->bits()));
+            LogDebug(BCLog::MINING, "SolveMatMulNonceSeeded: exhausted, best_digest=%s target=%s ~%d_bits_short\n",
+                     best_digest_seen.GetHex(), bnTarget->GetHex(), bits_short);
+        }
+        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+        return false;
+    } catch (const std::exception& e) {
+        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+        LogWarning("SolveMatMulNonceSeeded: exception during mining: %s\n", e.what());
+        return false;
+    } catch (...) {
+        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+        LogWarning("SolveMatMulNonceSeeded: unknown exception during mining\n");
+        return false;
+    }
+}
+
 bool SolveMatMulParallel(CBlockHeader& block,
                          const Consensus::Params& params,
                          uint64_t& max_tries,
@@ -2728,6 +2992,9 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
         }
         block.matmul_dim = static_cast<uint16_t>(params.nMatMulDimension);
     }
+    if (params.IsMatMulNonceSeedActive(block_height)) {
+        SetDeterministicMatMulSeeds(block, params, block_height);
+    }
     if (block.seed_a.IsNull() || block.seed_b.IsNull()) return false;
     if (params.nMatMulTranscriptBlockSize == 0) return false;
     if (block.matmul_dim % params.nMatMulTranscriptBlockSize != 0) return false;
@@ -2735,6 +3002,47 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
 
     auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
     if (!bnTarget) return false;
+    if (params.IsMatMulNonceSeedActive(block_height)) {
+        // V2 nonce-seeded solving parallelizes across cores exactly like the legacy solver. When
+        // warranted (and not already inside a parallel worker), fan the nonce range out via
+        // SolveMatMulParallel: each worker chunk recursively re-enters SolveMatMul in a worker
+        // context and runs the single-threaded SolveMatMulNonceSeeded on its OWN disjoint nonce
+        // sub-range, deriving its own per-nonce seeds and A,B. There is no shared matrix state and
+        // the consensus seed binding is unchanged, so this is a pure throughput win (restores the
+        // multi-core mining the legacy path had, which the single-threaded V2 reference dropped).
+        if (!g_matmul_parallel_worker_context) {
+            const uint32_t solver_threads = static_cast<uint32_t>(ResolveMatMulSolverThreadCount());
+            const auto active_backend =
+                matmul::accelerated::ResolveMiningBackendFromEnvironment().active;
+            const bool parallel_solver_enabled =
+                max_tries > 1 &&
+                ShouldEnableParallelMatMulSolve(
+                    active_backend, solver_threads, block.matmul_dim,
+                    params.nMatMulTranscriptBlockSize, params.nMatMulNoiseRank,
+                    params.IsMatMulProductDigestActive(block_height));
+            // The top-level call owns the pipeline diagnostic stats; workers (worker-context true)
+            // never touch them, so the parallel state reported here is the one that sticks.
+            g_matmul_parallel_solver_enabled.store(parallel_solver_enabled, std::memory_order_relaxed);
+            g_matmul_parallel_solver_threads.store(
+                parallel_solver_enabled ? solver_threads : 1U, std::memory_order_relaxed);
+            g_matmul_async_prepare_enabled.store(false, std::memory_order_relaxed);
+            g_matmul_cpu_confirm_candidates.store(false, std::memory_order_relaxed);
+            g_matmul_prefetch_depth.store(1U, std::memory_order_relaxed);
+            g_matmul_batch_size.store(1U, std::memory_order_relaxed);
+            if (parallel_solver_enabled) {
+                return SolveMatMulParallel(
+                    block, params, max_tries, block_height, abort_flag,
+                    freivalds_payload_out, solver_threads);
+            }
+        }
+        return SolveMatMulNonceSeeded(
+            block,
+            params,
+            max_tries,
+            block_height,
+            abort_flag,
+            freivalds_payload_out);
+    }
 
     const uint32_t n = block.matmul_dim;
     const uint32_t transcript_block_size = params.nMatMulTranscriptBlockSize;

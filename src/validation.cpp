@@ -59,7 +59,6 @@
 #include <util/mempressure.h>
 #include <util/moneystr.h>
 #include <util/overflow.h>
-#include <util/overflow.h>
 #include <util/rbf.h>
 #include <util/result.h>
 #include <util/signalinterrupt.h>
@@ -72,6 +71,7 @@
 
 #include <shielded/smile2/verify_dispatch.h>
 #include <shielded/ringct/ring_selection.h>
+#include <shielded/recovery_exit.h>
 #include <shielded/v2_ingress.h>
 #include <shielded/v2_proof.h>
 #include <shielded/v2_types.h>
@@ -178,6 +178,258 @@ std::atomic<int64_t> g_reorg_protection_last_rejected_unix{0};
 {
     return current_entries > consensus.nMaxShieldedAccountRegistryEntries ||
            new_entries > consensus.nMaxShieldedAccountRegistryEntries - current_entries;
+}
+
+[[nodiscard]] bool RejectDisabledShieldedPoolCredit(const CShieldedBundle& bundle,
+                                                    const Consensus::Params& consensus,
+                                                    int32_t validation_height,
+                                                    std::string& reject_reason)
+{
+    if (!consensus.IsShieldedPoolCreditDisabled(validation_height)) {
+        return true;
+    }
+
+    std::string value_balance_reject;
+    const auto value_balance = TryGetShieldedStateValueBalance(bundle, value_balance_reject);
+    if (!value_balance.has_value()) {
+        reject_reason = value_balance_reject;
+        return false;
+    }
+    if (*value_balance < 0) {
+        reject_reason = "bad-shielded-pool-credit-disabled";
+        return false;
+    }
+
+    if (!bundle.HasV2Bundle()) {
+        return true;
+    }
+    const auto* v2_bundle = bundle.GetV2Bundle();
+    if (v2_bundle == nullptr) {
+        reject_reason = "bad-shielded-v2-bundle";
+        return false;
+    }
+
+    switch (shielded::v2::GetBundleSemanticFamily(*v2_bundle)) {
+    case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR: {
+        const auto& payload = std::get<shielded::v2::SettlementAnchorPayload>(v2_bundle->payload);
+        if (!payload.reserve_deltas.empty() || !payload.anchored_netting_manifest_id.IsNull()) {
+            reject_reason = "bad-shielded-v2-settlement-disabled";
+            return false;
+        }
+        return true;
+    }
+    case shielded::v2::TransactionFamily::V2_REBALANCE:
+        // DS-5 fix makes a rebalance pool-neutral (state value_balance == 0), so the negative-credit
+        // predicate above no longer catches it. But a rebalance is reserve/netting rollover machinery
+        // that mints new shielded reserve notes and manifests, so the height gate disables the family
+        // structurally (matching this gate's no-new-shielded-control-plane intent).
+        reject_reason = "bad-shielded-v2-rebalance-disabled";
+        return false;
+    case shielded::v2::TransactionFamily::V2_SEND:
+    case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
+    case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
+    case shielded::v2::TransactionFamily::V2_GENERIC:
+    case shielded::v2::TransactionFamily::V2_LIFECYCLE:
+    case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY:
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
+        return true;
+    }
+
+    reject_reason = "bad-shielded-v2-contextual";
+    return false;
+}
+
+// Derive the (commitment, nullifier) a V2_RECOVERY_EXIT bundle retires, deterministically from its
+// revealed payload. Used identically by ConnectBlock (validate + collect) and DisconnectBlock (undo), so
+// the same note retires the same two identifiers on connect and disconnect. Returns false if the bundle
+// is not a well-formed recovery-exit claim (the caller treats that as a consensus error in ConnectBlock).
+[[nodiscard]] bool GetRecoveryExitIdentifiersFromBundle(const CShieldedBundle& bundle,
+                                                        shielded::recovery::RecoveryExitClaim& out_claim,
+                                                        shielded::recovery::RecoveryExitIdentifiers& out_ids)
+{
+    if (!bundle.HasV2Bundle()) return false;
+    const auto* v2b = bundle.GetV2Bundle();
+    if (v2b == nullptr) return false;
+    if (shielded::v2::GetBundleSemanticFamily(*v2b) != shielded::v2::TransactionFamily::V2_RECOVERY_EXIT) return false;
+    if (!std::holds_alternative<shielded::v2::RecoveryExitPayload>(v2b->payload)) return false;
+    const auto& p = std::get<shielded::v2::RecoveryExitPayload>(v2b->payload);
+    out_claim.value = p.value;
+    out_claim.recipient_pk_hash = p.recipient_pk_hash;
+    out_claim.rho = p.rho;
+    out_claim.rcm = p.rcm;
+    out_claim.spend_pubkey = p.spend_pubkey;
+    out_claim.ownership_sig = p.ownership_sig;
+    out_claim.membership_proof = p.membership_proof;
+    std::string rr;
+    return shielded::recovery::DeriveRecoveryExitIdentifiers(out_claim, out_ids, rr);
+}
+
+[[nodiscard]] bool IsRecoveryExitBundle(const CShieldedBundle& bundle)
+{
+    if (!bundle.HasV2Bundle()) return false;
+    const auto* v2b = bundle.GetV2Bundle();
+    return v2b != nullptr &&
+        shielded::v2::GetBundleSemanticFamily(*v2b) == shielded::v2::TransactionFamily::V2_RECOVERY_EXIT;
+}
+
+[[nodiscard]] uint256 RecoveryExitMembershipRoot(const Consensus::Params& consensus,
+                                                 int32_t validation_height,
+                                                 const shielded::ShieldedMerkleTree& current_tree)
+{
+    if (!consensus.IsShieldedRecoveryExitActive(validation_height)) return uint256{};
+    if (!consensus.nShieldedRecoveryExitFrozenRoot.IsNull()) {
+        return consensus.nShieldedRecoveryExitFrozenRoot;
+    }
+    if (!consensus.IsShieldedSunsetActive(validation_height)) return uint256{};
+    return current_tree.Root();
+}
+
+[[nodiscard]] bool TrySumTransparentOutputs(const std::vector<CTxOut>& vout,
+                                            CAmount& out,
+                                            std::string& reject_reason)
+{
+    CAmount total{0};
+    for (const CTxOut& txout : vout) {
+        if (!MoneyRange(txout.nValue) || txout.nValue > MAX_MONEY - total) {
+            reject_reason = "bad-txns-vout-toolarge";
+            return false;
+        }
+        total += txout.nValue;
+    }
+    out = total;
+    return true;
+}
+
+[[nodiscard]] bool TryComputeRecoveryExitFee(CAmount claim_value,
+                                             CAmount transparent_out,
+                                             CAmount& fee,
+                                             std::string& reject_reason)
+{
+    if (!MoneyRange(claim_value)) {
+        reject_reason = "bad-recovery-exit-value";
+        return false;
+    }
+    if (!MoneyRange(transparent_out)) {
+        reject_reason = "bad-txns-vout-toolarge";
+        return false;
+    }
+    const auto computed_fee = CheckedAdd(claim_value, -transparent_out);
+    if (!computed_fee.has_value()) {
+        reject_reason = "bad-recovery-exit-fee";
+        return false;
+    }
+    fee = *computed_fee;
+    return true;
+}
+
+[[nodiscard]] bool RejectShieldedSunsetViolation(const CTransaction& tx,
+                                                 const Consensus::Params& consensus,
+                                                 int32_t validation_height,
+                                                 std::string& reject_reason)
+{
+    if (!consensus.IsShieldedSunsetActive(validation_height)) {
+        return true;
+    }
+    const CShieldedBundle& bundle = tx.GetShieldedBundle();
+
+    // Outflow-only sunset (legacy-balance preservation). At/after the sunset height the ONLY permitted
+    // shielded transaction is a strict OUTFLOW exit of existing legacy value: a V2_SEND/recovery spend
+    // whose net pool effect is value LEAVING the pool (state value_balance > 0), that actually delivers
+    // value to TRANSPARENT outputs (a real unshield), and that appends NO new shielded outputs. This lets
+    // legacy holders unshield out while rejecting every value-IN credit, rollover, bridge, control op,
+    // pool-neutral/private transfer, and shielded change/recipient append.
+    // NOTE: value_balance > 0 alone is INSUFFICIENT -- a private z->z transfer has value_balance == fee
+    // (> 0) yet no transparent output, so we additionally require positive transparent output value. The
+    // pool is therefore strictly monotone-decreasing after sunset and can never be re-credited. The zero
+    // shielded-output rule also makes the live commitment tree root immutable after the sunset, which lets
+    // RECOVERY_EXIT verify against the frozen live root even before a later release hardcodes that root.
+    std::string value_balance_reject;
+    const auto value_balance = TryGetShieldedStateValueBalance(bundle, value_balance_reject);
+    if (!value_balance.has_value()) {
+        reject_reason = value_balance_reject;
+        return false;
+    }
+    if (*value_balance <= 0) {
+        // Pool credit (< 0) or pool-neutral private transfer / control op (== 0): not an exit.
+        reject_reason = "bad-shielded-sunset-non-exit";
+        return false;
+    }
+    CAmount transparent_out{0};
+    if (!TrySumTransparentOutputs(tx.vout, transparent_out, reject_reason)) {
+        return false;
+    }
+    if (transparent_out <= 0) {
+        // A fee-only private spend can still have positive state value_balance.
+        // Require an actual transparent payout so the post-sunset allow-list is
+        // strictly z->t/recovery-exit, never z->z.
+        reject_reason = "bad-shielded-sunset-non-exit";
+        return false;
+    }
+    if (!bundle.HasV2Bundle()) {
+        reject_reason = "bad-shielded-sunset-non-exit";
+        return false;
+    }
+    const auto* v2_bundle = bundle.GetV2Bundle();
+    if (v2_bundle == nullptr) {
+        reject_reason = "bad-shielded-v2-bundle";
+        return false;
+    }
+    const auto family = shielded::v2::GetBundleSemanticFamily(*v2_bundle);
+    // V2_RECOVERY_EXIT is the second permitted post-sunset operation: a transparent claim of a stranded
+    // pre-snapshot note (reveals the note, retires both its commitment AND its canonical SMILE2
+    // nullifier, pays out transparent). It is gated by its OWN activation height
+    // (nShieldedRecoveryExitActivationHeight >= sunset). The full claim validation + atomic dual
+    // retirement runs in ConnectBlock / mempool (CheckRecoveryExitClaim); here we only admit it to the
+    // post-sunset allow-list when its fork is on.
+    if (family == shielded::v2::TransactionFamily::V2_RECOVERY_EXIT) {
+        if (!consensus.IsShieldedRecoveryExitActive(validation_height)) {
+            reject_reason = "bad-shielded-v2-recovery-exit-disabled";
+            return false;
+        }
+        if (bundle.GetShieldedOutputCount() != 0) {
+            reject_reason = "bad-shielded-sunset-shielded-output";
+            return false;
+        }
+        return true;
+    }
+    // Only a V2_SEND real unshield is a true outflow exit. V2_SPEND_PATH_RECOVERY has
+    // value_balance == fee (it re-shields stranded value rather than sending it transparent) and its
+    // DS-4 nullifier binding is not yet implemented, so it is rejected here until that binding lands
+    // (stranded notes are recoverable before the sunset height); re-enable it once bound.
+    if (family != shielded::v2::TransactionFamily::V2_SEND ||
+        !std::holds_alternative<shielded::v2::SendPayload>(v2_bundle->payload)) {
+        reject_reason = "bad-shielded-sunset-non-exit";
+        return false;
+    }
+    // The spend must deliver real value to transparent, not merely pay a fee while keeping value
+    // shielded. A V2_SEND's state value_balance == transparent_out + fee, so a real unshield has
+    // value_balance > fee while a pool-neutral z->z private transfer has value_balance == fee. (The
+    // builder only emits a transparent outflow at/after C-002 height 123000, <= the sunset height, so a
+    // value_balance > fee V2_SEND at the sunset is genuinely a public unshield.)
+    const auto& send_payload = std::get<shielded::v2::SendPayload>(v2_bundle->payload);
+    if (*value_balance <= send_payload.fee) {
+        reject_reason = "bad-shielded-sunset-non-exit";
+        return false;
+    }
+    if (bundle.GetShieldedOutputCount() != 0) {
+        reject_reason = "bad-shielded-sunset-shielded-output";
+        return false;
+    }
+    return true;  // strict outflow unshield of legacy value: allowed for the life of the wind-down
+}
+
+[[nodiscard]] bool RejectShieldedHeightGateViolation(const CTransaction& tx,
+                                                     const Consensus::Params& consensus,
+                                                     int32_t validation_height,
+                                                     std::string& reject_reason)
+{
+    if (!RejectShieldedSunsetViolation(tx, consensus, validation_height, reject_reason)) {
+        return false;
+    }
+    if (!RejectDisabledShieldedPoolCredit(tx.GetShieldedBundle(), consensus, validation_height, reject_reason)) {
+        return false;
+    }
+    return true;
 }
 
 [[nodiscard]] bool RejectPostForkTransparentFundingV2SendContext(const CTransaction& tx,
@@ -967,6 +1219,7 @@ template <typename Spend>
             reject_reason);
     }
     case shielded::v2::V2_SPEND_PATH_RECOVERY:
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
     case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
     case shielded::v2::TransactionFamily::V2_REBALANCE:
     case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
@@ -1014,6 +1267,16 @@ template <typename Spend>
             const CTransaction& tx = *txref;
             if (!tx.HasShieldedBundle()) continue;
             const CShieldedBundle& bundle = tx.GetShieldedBundle();
+            std::string height_gate_reject;
+            if (!RejectShieldedHeightGateViolation(tx,
+                                                   chainstate.m_chainman.GetConsensus(),
+                                                   pindex->nHeight,
+                                                   height_gate_reject)) {
+                LogError("RebuildShieldedState: shielded height-gate violation at %d: %s\n",
+                         pindex->nHeight,
+                         height_gate_reject);
+                return false;
+            }
 
             if (!ApplyShieldedStateEffects(bundle,
                                            use_nonced_bridge_tag,
@@ -2294,6 +2557,17 @@ bool BuildShieldedProofAuditArchive(const Chainstate& chainstate,
             archive.verified_count += 1;
             archive.entries.push_back(std::move(entry));
 
+            std::string height_gate_reject;
+            if (!RejectShieldedHeightGateViolation(*txref,
+                                                   chainstate.m_chainman.GetConsensus(),
+                                                   pindex->nHeight,
+                                                   height_gate_reject)) {
+                error = strprintf("shielded height-gate audit failed txid=%s height=%d reject=%s",
+                                  txref->GetHash().ToString(),
+                                  pindex->nHeight,
+                                  height_gate_reject);
+                return false;
+            }
             if (!ApplyShieldedStateEffects(bundle,
                                            use_nonced_bridge_tag,
                                            pindex->GetBlockHash(),
@@ -2588,6 +2862,14 @@ void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool, CChain& chai
     const auto stale_anchor_filter = [&](CTxMemPool::txiter it) EXCLUSIVE_LOCKS_REQUIRED(pool.cs, ::cs_main) {
         const CTransaction& tx = it->GetTx();
         if (!tx.HasShieldedBundle()) return false;
+        std::string height_gate_reject;
+        const int32_t validation_height = chainman.ActiveChain().Height() + 1;
+        if (!RejectShieldedHeightGateViolation(tx,
+                                               chainman.GetConsensus(),
+                                               validation_height,
+                                               height_gate_reject)) {
+            return true;
+        }
         if (!shielded_state_ready) return true;
         return HasInvalidShieldedAnchors(tx, chainman);
     };
@@ -3086,6 +3368,8 @@ private:
          * nullifiers are not yet reflected in the mempool index.
          */
         std::set<Nullifier> m_package_shielded_nullifiers;
+        /** Recovery commitments already claimed in this staged subpackage. */
+        std::set<uint256> m_package_recovery_exit_commitments;
         /** Settlement anchors already referenced in this staged subpackage. */
         std::set<uint256> m_package_settlement_anchor_refs;
         /** Account-registry appends already staged in this subpackage. */
@@ -3200,9 +3484,6 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             return true;
         };
 
-    bool shielded_anchor_repair_attempted{false};
-    bool shielded_state_repair_attempted{false};
-
     if (tx.HasShieldedBundle()) {
         const Consensus::Params& consensus = m_active_chainstate.m_chainman.GetConsensus();
         const int next_block_height = m_active_chainstate.m_chain.Height() + 1;
@@ -3237,6 +3518,10 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                                  "bad-shielded-v2-egress-anchor-mempool-conflict");
         }
         const CShieldedBundle& bundle = tx.GetShieldedBundle();
+        std::string height_gate_reject;
+        if (!RejectShieldedHeightGateViolation(tx, consensus, next_block_height, height_gate_reject)) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, height_gate_reject);
+        }
         for (const auto& nullifier : CollectShieldedNullifiers(bundle)) {
             if (!m_subpackage.m_package_shielded_nullifiers.insert(nullifier).second) {
                 return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bad-shielded-nullifier-package-conflict");
@@ -3289,15 +3574,12 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         // carried by the bundle before mempool admission.
         for (const auto& anchor : CollectShieldedAnchors(bundle)) {
             if (!m_active_chainstate.m_chainman.IsShieldedAnchorValid(anchor)) {
-                if (!shielded_anchor_repair_attempted) {
-                    shielded_anchor_repair_attempted = true;
-                    if (TryAutoRepairShieldedAnchorHistory(m_active_chainstate.m_chainman,
-                                                          "MemPoolAccept",
-                                                          tx.GetHash()) &&
-                        m_active_chainstate.m_chainman.IsShieldedAnchorValid(anchor)) {
-                        continue;
-                    }
-                }
+                // d3 fix (completes the rebuild removal): do NOT trigger the O(chain)
+                // anchor-history rebuild from the mempool path either. A mempool tx
+                // referencing an anchor the chain never created is peer misbehavior, not
+                // local-state corruption -- repairing here let one cheap unconfirmed tx
+                // force a genesis->tip replay, re-armable per shielded block. Anchor-history
+                // self-repair remains on the PoW-gated ConnectBlock path and at startup.
                 LogDebug(BCLog::MEMPOOL, "bad-shielded-anchor (mempool): provided=%s txid=%s\n",
                          anchor.ToString(),
                          tx.GetHash().ToString());
@@ -3315,6 +3597,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         if (bundle.HasV2Bundle() &&
             bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_SEND &&
             bundle.GetTransactionFamily() != shielded::v2::V2_SPEND_PATH_RECOVERY &&
+            bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_RECOVERY_EXIT &&
             bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_INGRESS_BATCH &&
             bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_EGRESS_BATCH &&
             bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR &&
@@ -3345,6 +3628,60 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         if (!projected_pool.SetBalance(m_active_chainstate.m_chainman.GetShieldedPoolBalance()) ||
             !projected_pool.ApplyValueBalance(*state_value_balance)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "shielded-pool-balance-negative");
+        }
+        if (IsRecoveryExitBundle(bundle)) {
+            shielded::recovery::RecoveryExitClaim re_claim;
+            shielded::recovery::RecoveryExitIdentifiers re_ids;
+            if (!GetRecoveryExitIdentifiersFromBundle(bundle, re_claim, re_ids)) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-shielded-recovery-exit-malformed");
+            }
+            CAmount re_transparent_out{0};
+            std::string re_sum_reject;
+            if (!TrySumTransparentOutputs(tx.vout, re_transparent_out, re_sum_reject)) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, re_sum_reject);
+            }
+            CAmount re_fee{0};
+            std::string re_fee_reject;
+            if (!TryComputeRecoveryExitFee(re_claim.value, re_transparent_out, re_fee, re_fee_reject)) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, re_fee_reject);
+            }
+            const uint256 re_tx_binding = shielded::recovery::ComputeRecoveryExitTransparentBinding(tx.vout);
+            const uint256 re_binding_hash = shielded::recovery::ComputeRecoveryExitBindingHash(
+                re_ids.commitment, re_ids.nullifier, re_claim.value, re_tx_binding);
+            const uint256 re_membership_root = RecoveryExitMembershipRoot(
+                consensus,
+                next_block_height,
+                m_active_chainstate.m_chainman.GetShieldedMerkleTree());
+            std::string re_membership_reject;
+            shielded::recovery::RecoveryExitConstraints re_c;
+            re_c.value_balance = re_claim.value;
+            re_c.fee = re_fee;
+            re_c.transparent_out = re_transparent_out;
+            re_c.shielded_output_count = bundle.GetShieldedOutputCount();
+            re_c.pool_balance = m_active_chainstate.m_chainman.GetShieldedPoolBalance();
+            re_c.validation_height = next_block_height;
+            re_c.activation_height = consensus.nShieldedRecoveryExitActivationHeight;
+            re_c.expiry_height = 0;
+            re_c.ownership_verified = shielded::recovery::VerifyRecoveryExitOwnership(re_claim, re_binding_hash);
+            re_c.membership_verified = shielded::recovery::VerifyRecoveryExitMembership(
+                re_claim, re_ids.commitment, re_membership_root, re_membership_reject);
+            re_c.nullifier_already_spent =
+                m_subpackage.m_package_shielded_nullifiers.count(re_ids.nullifier) > 0 ||
+                m_active_chainstate.m_chainman.IsShieldedNullifierSpent(re_ids.nullifier);
+            re_c.commitment_already_claimed =
+                m_subpackage.m_package_recovery_exit_commitments.count(re_ids.commitment) > 0 ||
+                m_active_chainstate.m_chainman.IsShieldedRecoveryExitCommitmentRetired(re_ids.commitment);
+            shielded::recovery::RecoveryExitIdentifiers re_checked;
+            std::string re_reject;
+            if (!shielded::recovery::CheckRecoveryExitClaim(re_claim, re_c, re_checked, re_reject)) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, re_reject);
+            }
+            if (!m_subpackage.m_package_shielded_nullifiers.insert(re_ids.nullifier).second) {
+                return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bad-shielded-nullifier-package-conflict");
+            }
+            if (!m_subpackage.m_package_recovery_exit_commitments.insert(re_ids.commitment).second) {
+                return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bad-shielded-recovery-exit-package-conflict");
+            }
         }
         if (bundle.HasShieldedInputs()) {
             std::string ring_reject;
@@ -3408,6 +3745,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             case shielded::v2::TransactionFamily::V2_REBALANCE:
             case shielded::v2::TransactionFamily::V2_SEND:
             case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY:
+            case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
             case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
             case shielded::v2::TransactionFamily::V2_LIFECYCLE:
                 break;
@@ -3773,27 +4111,6 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                                             shielded_account_leaf_commitments_snapshot,
                                             parsed_spend_auth_proof);
             auto err = proof_check();
-            if (err.has_value() &&
-                !shielded_state_repair_attempted &&
-                IsRecoverableShieldedProofReject(*err)) {
-                shielded_state_repair_attempted = true;
-                if (TryAutoRebuildShieldedState(m_active_chainstate.m_chainman,
-                                                "MemPoolAccept",
-                                                tx.GetHash())) {
-                    RefreshShieldedValidationSnapshots(m_active_chainstate.m_chainman,
-                                                      shielded_tree_snapshot,
-                                                      shielded_smile_public_accounts_snapshot,
-                                                      shielded_account_leaf_commitments_snapshot);
-                    CShieldedProofCheck retry_check(tx,
-                                                    consensus,
-                                                    next_block_height,
-                                                    shielded_tree_snapshot,
-                                                    shielded_smile_public_accounts_snapshot,
-                                                    shielded_account_leaf_commitments_snapshot,
-                                                    parsed_spend_auth_proof);
-                    err = retry_check();
-                }
-            }
             if (err.has_value()) {
                 return state.Invalid(TxValidationResult::TX_CONSENSUS, *err);
             }
@@ -3832,6 +4149,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
             case shielded::v2::TransactionFamily::V2_SEND:
             case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY:
+            case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
             case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
             case shielded::v2::TransactionFamily::V2_LIFECYCLE:
                 break;
@@ -5362,6 +5680,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         }
 
         std::vector<Nullifier> block_nullifiers;
+        std::vector<uint256> block_recovery_exit_commitments;
         std::vector<uint256> block_settlement_anchors;
         std::set<uint256> block_created_settlement_anchor_set;
         std::set<uint256> block_consumed_settlement_anchor_set;
@@ -5378,6 +5697,17 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
             const CShieldedBundle& bundle = txref->GetShieldedBundle();
             const auto nullifiers = CollectShieldedNullifiers(bundle);
             block_nullifiers.insert(block_nullifiers.end(), nullifiers.begin(), nullifiers.end());
+            // V2_RECOVERY_EXIT: its (cm, nf) are DERIVED, not carried as bundle spend descriptors, so
+            // re-derive them here to undo the retirement (nf via block_nullifiers' Remove below, cm via
+            // the spent-commitment set Remove). Deterministic and identical to the ConnectBlock derivation.
+            if (IsRecoveryExitBundle(bundle)) {
+                shielded::recovery::RecoveryExitClaim re_claim;
+                shielded::recovery::RecoveryExitIdentifiers re_ids;
+                if (GetRecoveryExitIdentifiersFromBundle(bundle, re_claim, re_ids)) {
+                    block_nullifiers.push_back(re_ids.nullifier);
+                    block_recovery_exit_commitments.push_back(re_ids.commitment);
+                }
+            }
             std::string reject_reason;
             auto created_anchors = ExtractCreatedShieldedSettlementAnchors(*txref, pindex->nHeight, reject_reason);
             if (!created_anchors.has_value()) {
@@ -5504,6 +5834,10 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         if (!block_nullifiers.empty() && !m_chainman.m_shielded_nullifiers->Remove(block_nullifiers)) {
             return DISCONNECT_FAILED;
         }
+        if (!block_recovery_exit_commitments.empty() &&
+            !m_chainman.m_shielded_nullifiers->RemoveRecoveryExitCommitments(block_recovery_exit_commitments)) {
+            return DISCONNECT_FAILED;
+        }
         std::vector<uint256> created_unconsumed_settlement_anchors;
         created_unconsumed_settlement_anchors.reserve(block_settlement_anchors.size());
         for (const auto& anchor : block_settlement_anchors) {
@@ -5583,7 +5917,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         m_chainman.InvalidateShieldedAccountStateSnapshotCaches();
         m_chainman.m_shielded_pool_balance = projected_pool;
 
-        // v0.31.1 unshield velocity cap: erase this block's net-egress entry from the trailing window
+        // v0.32.0 unshield velocity cap: erase this block's net-egress entry from the trailing window
         // (exact reorg undo). Only the entry recorded at connect time (height >= activation) exists.
         if (m_chainman.GetConsensus().IsShieldedUnshieldVelocityCapActive(pindex->nHeight)) {
             ShieldedUnshieldVelocity rolled_back_velocity = m_chainman.m_shielded_unshield_velocity;
@@ -5699,11 +6033,11 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
         flags |= SCRIPT_VERIFY_DISALLOW_MLDSA;
     }
 
-    // FIPS-205 SLH-DSA activation (bundled with the C-002 v0.31 fork): at/after
+    // FIPS-205 SLH-DSA activation (bundled with the C-002 fork): at/after
     // the activation height, SLH-DSA signatures are verified as finalized
     // FIPS-205 (pure mode) rather than the legacy round-3.x SPHINCS+ reference.
     // Keyed off the same height the C-002 prover/verifier branch on so the whole
-    // v0.31 upgrade activates atomically.
+    // C-002 upgrade activates atomically.
     if (block_index.nHeight >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT) {
         flags |= SCRIPT_VERIFY_SLHDSA_FIPS205;
     }
@@ -5973,6 +6307,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     int64_t nSigOpsCost = 0;
     std::unordered_set<Nullifier, NullifierHasher> block_nullifiers;
     std::vector<Nullifier> block_nullifier_vec;
+    std::vector<uint256> block_recovery_exit_commitments;
     std::set<uint256> block_settlement_anchors;
     std::vector<ConfirmedSettlementAnchorState> block_settlement_anchor_states;
     std::set<uint256> block_consumed_settlement_anchors;
@@ -6009,6 +6344,17 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             UseNoncedShieldedBridgeTags(params.GetConsensus(), pindex->nHeight);
 
         nInputs += tx.vin.size();
+
+        if (tx.HasShieldedBundle()) {
+            std::string height_gate_reject;
+            if (!RejectShieldedHeightGateViolation(tx,
+                                                   params.GetConsensus(),
+                                                   pindex->nHeight,
+                                                   height_gate_reject)) {
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, height_gate_reject);
+                break;
+            }
+        }
 
         if (enforce_shielded_consensus && tx.HasShieldedBundle()) {
             if (pindex->nHeight < params.GetConsensus().nShieldedPoolActivationHeight) {
@@ -6071,6 +6417,84 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 }
             }
             if (!state.IsValid()) break;
+
+            // V2_RECOVERY_EXIT (fork-gated). A transparent claim of a stranded
+            // pre-snapshot note: derive (cm, nf) from the revealed payload, verify the PQ ownership
+            // signature and the membership proof, run the consensus predicate,
+            // and collect BOTH identifiers for atomic retirement (nf into the SHARED nullifier set below,
+            // cm into the spent-commitment set). No shielded outputs / no tree append; the pool debit flows
+            // through the standard value_balance turnstile (TryGetShieldedStateValueBalance == +value).
+            // Production activation must replace the live-root regtest stand-in below with a hard
+            // consensus-pinned 125,000 commitment root.
+            if (IsRecoveryExitBundle(bundle)) {
+                if (!params.GetConsensus().IsShieldedRecoveryExitActive(pindex->nHeight)) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-shielded-v2-recovery-exit-disabled");
+                    break;
+                }
+                shielded::recovery::RecoveryExitClaim re_claim;
+                shielded::recovery::RecoveryExitIdentifiers re_ids;
+                if (!GetRecoveryExitIdentifiersFromBundle(bundle, re_claim, re_ids)) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-shielded-recovery-exit-malformed");
+                    break;
+                }
+                const uint256 re_tx_binding = shielded::recovery::ComputeRecoveryExitTransparentBinding(tx.vout);
+                const uint256 re_binding_hash = shielded::recovery::ComputeRecoveryExitBindingHash(
+                    re_ids.commitment, re_ids.nullifier, re_claim.value, re_tx_binding);
+                CAmount re_transparent_out{0};
+                std::string re_sum_reject;
+                if (!TrySumTransparentOutputs(tx.vout, re_transparent_out, re_sum_reject)) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, re_sum_reject);
+                    break;
+                }
+                CAmount re_fee{0};
+                std::string re_fee_reject;
+                if (!TryComputeRecoveryExitFee(re_claim.value, re_transparent_out, re_fee, re_fee_reject)) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, re_fee_reject);
+                    break;
+                }
+                const shielded::ShieldedMerkleTree& recovery_membership_tree =
+                    shielded_tree_snapshot != nullptr ? *shielded_tree_snapshot : next_shielded_tree;
+                const uint256 re_membership_root = RecoveryExitMembershipRoot(
+                    params.GetConsensus(),
+                    pindex->nHeight,
+                    recovery_membership_tree);
+                std::string re_membership_reject;
+                shielded::recovery::RecoveryExitConstraints re_c;
+                re_c.value_balance = re_claim.value;
+                re_c.fee = re_fee;
+                re_c.transparent_out = re_transparent_out;
+                re_c.shielded_output_count = bundle_output_commitments.size();
+                re_c.pool_balance = next_pool_balance.GetBalance();
+                re_c.validation_height = pindex->nHeight;
+                re_c.activation_height = params.GetConsensus().nShieldedRecoveryExitActivationHeight;
+                re_c.expiry_height = 0;
+                re_c.ownership_verified = shielded::recovery::VerifyRecoveryExitOwnership(re_claim, re_binding_hash);
+                // Membership is checked against a consensus-pinned frozen root when supplied. If the root
+                // is not known at release time, the post-sunset zero-output rule freezes the live tree, so
+                // the current root at/after activation is the deterministic frozen membership root.
+                re_c.membership_verified = shielded::recovery::VerifyRecoveryExitMembership(
+                    re_claim, re_ids.commitment,
+                    re_membership_root, re_membership_reject);
+                re_c.nullifier_already_spent = block_nullifiers.count(re_ids.nullifier) > 0 ||
+                    m_chainman.IsShieldedNullifierSpent(re_ids.nullifier);
+                re_c.commitment_already_claimed =
+                    std::find(block_recovery_exit_commitments.begin(), block_recovery_exit_commitments.end(),
+                              re_ids.commitment) != block_recovery_exit_commitments.end() ||
+                    m_chainman.m_shielded_nullifiers->ContainsRecoveryExitCommitment(re_ids.commitment);
+                shielded::recovery::RecoveryExitIdentifiers re_checked;
+                std::string re_reject;
+                if (!shielded::recovery::CheckRecoveryExitClaim(re_claim, re_c, re_checked, re_reject)) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, re_reject);
+                    break;
+                }
+                if (!block_nullifiers.insert(re_ids.nullifier).second) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-shielded-nullifier-duplicate");
+                    break;
+                }
+                block_nullifier_vec.push_back(re_ids.nullifier);
+                block_recovery_exit_commitments.push_back(re_ids.commitment);
+            }
+
             const auto bundle_output_smile_accounts = CollectShieldedOutputSmileAccounts(bundle);
             block_smile_public_accounts.insert(block_smile_public_accounts.end(),
                                               bundle_output_smile_accounts.begin(),
@@ -6183,6 +6607,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             if (bundle.HasV2Bundle() &&
                 bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_SEND &&
                 bundle.GetTransactionFamily() != shielded::v2::V2_SPEND_PATH_RECOVERY &&
+                bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_RECOVERY_EXIT &&
                 bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_INGRESS_BATCH &&
                 bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_EGRESS_BATCH &&
                 bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR &&
@@ -6433,6 +6858,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 }
                 case shielded::v2::TransactionFamily::V2_SEND:
                 case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY:
+                case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
                 case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
                 case shielded::v2::TransactionFamily::V2_LIFECYCLE:
                     break;
@@ -6666,6 +7092,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             if (!block_nullifier_vec.empty() && !m_chainman.m_shielded_nullifiers->Insert(block_nullifier_vec)) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "shielded-nullifier-db-write-failed");
             }
+            // V2_RECOVERY_EXIT: permanently retire the claimed commitments (reorg-safe; removed in
+            // DisconnectBlock). The derived nullifiers were already retired via block_nullifier_vec above.
+            if (!block_recovery_exit_commitments.empty() &&
+                !m_chainman.m_shielded_nullifiers->InsertRecoveryExitCommitments(block_recovery_exit_commitments)) {
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "shielded-recovery-exit-db-write-failed");
+            }
             if (!block_settlement_anchor_states.empty() &&
                 UseSingleUseSettlementAnchors(params.GetConsensus(), pindex->nHeight)) {
                 std::vector<ConfirmedSettlementAnchorState> unconsumed_settlement_anchors;
@@ -6710,7 +7142,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                                      "shielded-netting-manifest-db-write-failed");
             }
 
-            // v0.31.1 unshield velocity cap (gated). The block's net z->t egress is the pool's net
+            // v0.32.0 unshield velocity cap (gated). The block's net z->t egress is the pool's net
             // decrease this block (value that left the pool); a trailing-window sum of net egress must
             // stay within cap_bps/10000 of the pool balance at block start. Computed, checked, and
             // persisted before the pool-balance commit so a violation rejects the block cleanly.
@@ -8496,23 +8928,17 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect proof of work");
 
-    // Deterministic seed enforcement: verify matmul seeds match the derivation
-    // from hashPrevBlock and height. This is done contextually (not in Phase 1)
+    // Deterministic seed enforcement: verify MatMul seeds match the active
+    // height-gated derivation. This is done contextually (not in Phase 1)
     // because Phase 1 operates on header-only data without block index access.
     // Skip when fSkipMatMulValidation is true (default regtest without -test=matmulstrict).
     if (consensusParams.fMatMulPOW && !consensusParams.fSkipMatMulValidation && !block.hashPrevBlock.IsNull()) {
-        const uint256 expected_seed_a = DeterministicMatMulSeed(
-            block.hashPrevBlock,
-            static_cast<uint32_t>(nHeight),
-            /*which=*/0);
-        const uint256 expected_seed_b = DeterministicMatMulSeed(
-            block.hashPrevBlock,
-            static_cast<uint32_t>(nHeight),
-            /*which=*/1);
-        if (block.seed_a != expected_seed_a || block.seed_b != expected_seed_b) {
+        CBlockHeader expected_header{block};
+        SetDeterministicMatMulSeeds(expected_header, consensusParams, nHeight);
+        if (block.seed_a != expected_header.seed_a || block.seed_b != expected_header.seed_b) {
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
                                  "bad-matmul-seeds",
-                                 "matmul seeds do not match deterministic derivation from hashPrevBlock and height");
+                                 "matmul seeds do not match deterministic derivation for this height");
         }
 
         if (!CheckMatMulPreHashGate(block, consensusParams, nHeight)) {
@@ -8562,9 +8988,18 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "time-timewarp-attack", "block's timestamp is too early for BIP94 timewarp protection");
     }
 
-    if (const auto max_time{consensusParams.MaxMatMulFutureBlockTime(nHeight, pindexPrev->GetMedianTimePast())};
-        max_time.has_value() && block.GetBlockTime() > *max_time) {
-        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "time-mtp-too-new", "block timestamp too far ahead of median time past");
+    if (auto max_time{consensusParams.MaxMatMulFutureBlockTime(nHeight, pindexPrev->GetMedianTimePast())};
+        max_time.has_value()) {
+        // a5 fix: never enforce a future-time cap below the BIP94 timewarp floor, or the legal
+        // timestamp window can invert at the drift-cap activation boundary and wedge the chain.
+        // Reconciliation only RAISES the cap and is flag-day gated.
+        if (consensusParams.IsMatMulTimewarpReconcileActive(nHeight) &&
+            EnforceTimewarpProtectionAtHeight(consensusParams, nHeight)) {
+            max_time = std::max<int64_t>(*max_time, pindexPrev->GetBlockTime() - MAX_TIMEWARP);
+        }
+        if (block.GetBlockTime() > *max_time) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "time-mtp-too-new", "block timestamp too far ahead of median time past");
+        }
     }
 
     // Check timestamp
@@ -9407,6 +9842,13 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
         // Apply shielded state effects to keep in sync with UTXO set.
         if (tx->HasShieldedBundle()) {
             const CShieldedBundle& bundle = tx->GetShieldedBundle();
+            std::string height_gate_reject;
+            if (!RejectShieldedHeightGateViolation(*tx, consensus, pindex->nHeight, height_gate_reject)) {
+                LogError("RollforwardBlock(): shielded height-gate violation at %d: %s\n",
+                         pindex->nHeight,
+                         height_gate_reject);
+                return false;
+            }
             const bool use_nonced_bridge_tag =
                 UseNoncedShieldedBridgeTags(m_chainman.GetConsensus(), pindex->nHeight);
             for (const auto& nullifier : CollectShieldedNullifiers(bundle)) {
@@ -10530,6 +10972,39 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         return cleanup_bad_snapshot(Untranslated("could not load BTX shielded snapshot section"));
     }
 
+    // DS-3 fix: the shielded snapshot section (pool balance + nullifier set + commitment tree) is
+    // attacker-supplied and is otherwise never validated against consensus. Without this check a
+    // malicious snapshot could set an arbitrary pool balance and OMIT spent nullifiers, enabling a
+    // double-spend on the bootstrapped node. Reject loading unless the loaded shielded state hashes to
+    // the consensus-pinned commitment for this snapshot's base height. (Null pin == not yet computed
+    // == legacy behavior, so existing snapshots are unaffected until their pin is filled in.)
+    if (shielded_snapshot_section) {
+        const auto& shielded_au = GetParams().AssumeutxoForHeight(snapshot_start_block->nHeight);
+        const bool pinned = shielded_au && !shielded_au->shielded_state_commitment.IsNull();
+        if (pinned) {
+            const auto pin = ComputeShieldedSnapshotStatePin();  // shared with the dump side; cannot drift
+            if (!pin.has_value()) {
+                release_partial_shielded_snapshot_state();
+                return cleanup_bad_snapshot(Untranslated("BTX shielded snapshot state commitment unavailable for pin check"));
+            }
+            if (*pin != shielded_au->shielded_state_commitment) {
+                release_partial_shielded_snapshot_state();
+                return cleanup_bad_snapshot(Untranslated("BTX shielded snapshot state does not match the consensus-pinned commitment"));
+            }
+        } else if (!m_options.allow_unpinned_shielded_snapshot) {
+            // DS-3 fail-closed: an unpinned shielded section is attacker-supplied and otherwise never
+            // validated against consensus, so loading it can seed a double-spend (omitted nullifiers) or
+            // a forged pool balance. Refuse unless the operator explicitly opts in to trusting it.
+            release_partial_shielded_snapshot_state();
+            return cleanup_bad_snapshot(Untranslated("BTX shielded snapshot section has no consensus pin for this height; refusing to load (set -allowunpinnedshieldedsnapshot to override)"));
+        } else {
+            LogPrintf("[snapshot] WARNING: loading an UNPINNED shielded snapshot section at height %d "
+                      "(-allowunpinnedshieldedsnapshot); the shielded pool balance and nullifier set are "
+                      "trusted from the snapshot and not validated against consensus\n",
+                      snapshot_start_block->nHeight);
+        }
+    }
+
     // Transfer possession of the mempool to the snapshot chainstate.
     // Mempool is empty at this point because we're still in IBD.
     Assert(m_active_chainstate->m_mempool->size() == 0);
@@ -11425,6 +11900,21 @@ std::optional<shielded::registry::ShieldedStateCommitment> ChainstateManager::Ge
     return commitment;
 }
 
+std::optional<uint256> ChainstateManager::ComputeShieldedSnapshotStatePin() const
+{
+    AssertLockHeld(::cs_main);
+    const auto commitment = GetShieldedStateCommitment();
+    if (!commitment.has_value()) return std::nullopt;
+    HashWriter pin;
+    pin << std::string{"BTX_ShieldedSnapshotStatePin_V1"}
+        << commitment->note_commitment_root
+        << commitment->account_registry_root
+        << commitment->nullifier_root
+        << commitment->bridge_settlement_root
+        << GetShieldedPoolBalance();
+    return pin.GetSHA256();
+}
+
 bool ChainstateManager::PersistShieldedState(const CBlockIndex* tip)
 {
     AssertLockHeld(::cs_main);
@@ -11895,7 +12385,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         if (startup_shielded_repair_performed) {
             AutoReconsiderShieldedInvalidBlocksAfterStartupRepair();
         }
-        // v0.31.1 unshield velocity cap: load the persisted trailing-window egress log so the rule is
+        // v0.32.0 unshield velocity cap: load the persisted trailing-window egress log so the rule is
         // evaluated identically on every node (incl. pruned ones, which cannot replay the window).
         if (m_shielded_nullifiers &&
             !m_shielded_nullifiers->ReadUnshieldVelocity(m_shielded_unshield_velocity)) {
@@ -12716,6 +13206,21 @@ bool ChainstateManager::WriteShieldedPoolBalanceForTest(CAmount balance)
     AssertLockHeld(::cs_main);
     if (!m_shielded_nullifiers) return false;
     return m_shielded_nullifiers->WritePoolBalance(balance);
+}
+
+bool ChainstateManager::SetShieldedPoolBalanceForTest(CAmount balance)
+{
+    AssertLockHeld(::cs_main);
+    if (!m_shielded_nullifiers) return false;
+    if (!m_shielded_pool_balance.SetBalance(balance)) return false;
+    return m_shielded_nullifiers->WritePoolBalance(balance);
+}
+
+bool ChainstateManager::IsShieldedRecoveryExitCommitmentRetired(const uint256& commitment) const
+{
+    AssertLockHeld(::cs_main);
+    if (!m_shielded_nullifiers) return false;
+    return m_shielded_nullifiers->ContainsRecoveryExitCommitment(commitment);
 }
 
 bool ChainstateManager::WriteSnapshotBridgeMetadataHintForTest(bool preserve_snapshot_extras)

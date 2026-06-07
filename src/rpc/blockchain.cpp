@@ -3969,6 +3969,7 @@ UniValue WriteUTXOSnapshot(
 
     CHECK_NONFATAL(written_coins_count == maybe_stats->coins_count);
 
+    std::optional<uint256> shielded_state_pin;
     if (!is_human_readable) {
         CHECK_NONFATAL(shielded_section.has_value());
         afile << *shielded_section;
@@ -4011,6 +4012,10 @@ UniValue WriteUTXOSnapshot(
         for (const auto& entry : account_registry_snapshot->entries) {
             afile << entry;
         }
+        // DS-3: compute the consensus shielded-state pin from the same live shielded state that produced
+        // this section (still under cs_main), using the exact helper ActivateSnapshot verifies against,
+        // so an operator can copy it verbatim into AssumeutxoData.shielded_state_commitment without drift.
+        shielded_state_pin = chainstate.m_chainman.ComputeShieldedSnapshotStatePin();
     }
 
     if (afile.fclose() != 0) {
@@ -4030,6 +4035,13 @@ UniValue WriteUTXOSnapshot(
                                                                         : "externalized");
     result.pushKV("retain_shielded_commitment_index",
                   chainstate.m_chainman.RetainShieldedCommitmentIndex());
+    if (shielded_state_pin.has_value()) {
+        // DS-3: hardcode this into AssumeutxoData.shielded_state_commitment for this snapshot height to
+        // enforce shielded-state validation on loadtxoutset (null/absent == not pinned == legacy skip).
+        result.pushKV("shielded_state_pin", shielded_state_pin->GetHex());
+        LogPrintf("[snapshot] BTX shielded_state_pin at height %d = %s\n",
+                  tip->nHeight, shielded_state_pin->GetHex());
+    }
     return result;
 }
 

@@ -66,6 +66,13 @@ struct AssumeutxoData {
     //! The hash of the base block for this snapshot. Used to refer to assumeutxo data
     //! prior to having a loaded blockindex.
     uint256 blockhash;
+
+    //! DS-3 fix: consensus-pinned commitment to the BTX shielded state (note-commitment root,
+    //! nullifier-set root, and pool balance) at the snapshot base height. The shielded snapshot section
+    //! is otherwise attacker-supplied and unvalidated; loading is rejected unless the loaded shielded
+    //! state hashes to this value. Null (default) means "not pinned" -- the legacy behavior, retained
+    //! for snapshots whose shielded pin has not yet been computed at snapshot-generation time.
+    uint256 shielded_state_commitment{};
 };
 
 /**
@@ -181,6 +188,10 @@ public:
         std::optional<int32_t> shielded_spend_path_recovery_activation_height{};
         std::optional<int32_t> shielded_unshield_velocity_activation_height{};
         std::optional<int32_t> shielded_pq128_upgrade_height{};
+        std::optional<int32_t> shielded_pool_credit_disable_height{};
+        std::optional<int32_t> shielded_sunset_height{};
+        std::optional<int32_t> shielded_recovery_exit_activation_height{};
+        std::optional<uint256> shielded_recovery_exit_frozen_root{};
         std::optional<int32_t> matmul_binding_height{};
         std::optional<int32_t> matmul_product_digest_height{};
         std::optional<bool> matmul_require_product_payload{};
@@ -189,6 +200,7 @@ public:
         std::optional<int64_t> matmul_asert_half_life_upgrade{};
         std::optional<int32_t> matmul_pre_hash_epsilon_bits_upgrade_height{};
         std::optional<uint32_t> matmul_pre_hash_epsilon_bits_upgrade{};
+        std::optional<int32_t> matmul_nonce_seed_height{};
         bool fastprune{false};
         bool enforce_bip94{false};
         bool matmul_strict{false};

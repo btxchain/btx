@@ -92,6 +92,12 @@ btx-matmul-backend-info --backend metal
 |---|---|---|
 | `BTX_MATMUL_BACKEND` | Select accelerator backend: `cpu`, `metal`, `mlx`, or `cuda`. (`mlx` is an alias for `metal`.) | Platform default: `metal` on Apple, `cpu` elsewhere. |
 
+On macOS source builds, MatMul and oracle Metal kernels are precompiled into build-tree `.metallib`
+artifacts by default (`BTX_MATMUL_METAL_PRECOMPILE_KERNELS=ON`). The runtime loads those libraries first
+and falls back to embedded source compilation only if the precompiled files are unavailable or the option
+is disabled. This preserves the v0.30 developer path and avoids making normal local builds depend on
+`MTLCompilerService` runtime source compilation.
+
 ### Mining throughput (`SolveMatMul`)
 
 These govern how many in-flight matmul solves the daemon runs in parallel

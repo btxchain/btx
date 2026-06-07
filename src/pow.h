@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstddef>
 #include <limits>
+#include <optional>
 #include <stdint.h>
 #include <string>
 #include <vector>
@@ -131,6 +132,12 @@ bool EnforceTimewarpProtectionAtHeight(const Consensus::Params& params, int32_t 
 bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params&);
 bool CheckProofOfWorkImpl(uint256 hash, unsigned int nBits, const Consensus::Params&);
 int64_t ExpectedDgwTimespan(int32_t height, const Consensus::Params& params);
+uint256 DeterministicMatMulSeed(const uint256& prev_block_hash,
+                                uint32_t height,
+                                uint8_t which,
+                                std::optional<uint64_t> nonce = std::nullopt);
+uint256 DeterministicMatMulSeedV2(const CBlockHeader& block, uint32_t height, uint8_t which);
+void SetDeterministicMatMulSeeds(CBlockHeader& block, const Consensus::Params& params, int32_t block_height);
 bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::Params& params);
 bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height);
 bool CheckMatMulProofOfWork_Phase2(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height = -1);
@@ -200,12 +207,6 @@ bool ConsumeMatMulPeerVerifyBudget(
     int32_t reference_height = std::numeric_limits<int32_t>::max());
 bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus::Params& params);
 bool ConsumeGlobalMatMulPhase2Budget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
-/** Deterministically derive MatMul matrix seeds from chain context.
- *
- * This is used to keep regtest/unit tests reproducible without requiring a
- * fixed RANDOM_CTX_SEED environment variable.
- */
-uint256 DeterministicMatMulSeed(const uint256& prev_block_hash, uint32_t height, uint8_t which);
 MatMulSolvePipelineStats ProbeMatMulSolvePipelineStats();
 void ResetMatMulSolvePipelineStats();
 MatMulDigestCompareStats ProbeMatMulDigestCompareStats();

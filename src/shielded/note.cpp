@@ -7,13 +7,20 @@
 #include <consensus/amount.h>
 #include <crypto/common.h>
 #include <crypto/sha256.h>
+#include <shielded/lattice/polyvec.h>
+#include <shielded/ringct/proof_encoding.h>
+#include <streams.h>
 #include <support/cleanse.h>
 
 #include <algorithm>
+#include <ios>
+
+namespace lattice = shielded::lattice;
 
 namespace {
 constexpr const char* NOTE_TAG_INNER{"BTX_Note_Inner_V1"};
 constexpr const char* NOTE_TAG_COMMIT{"BTX_Note_Commit_V1"};
+constexpr const char* NOTE_TAG_COMMIT_V2{"BTX_Note_Commit_V2"};
 constexpr const char* NOTE_TAG_NULLIFIER{"BTX_Note_Nullifier_V1"};
 constexpr std::array<unsigned char, 8> NOTE_MODERN_RHO_MARKER{{'S', 'M', '2', 'R', 'H', 'O', 'V', '2'}};
 constexpr std::array<unsigned char, 8> NOTE_MODERN_RCM_MARKER{{'S', 'M', '2', 'R', 'C', 'M', 'V', '2'}};
@@ -32,15 +39,36 @@ uint256 ShieldedNote::GetCommitment() const
         .Write(recipient_pk_hash.begin(), uint256::size())
         .Finalize(inner.begin());
 
-    // cm = SHA256("BTX_Note_Commit_V1" || inner || rho || rcm)
+    if (spend_anchor.empty()) {
+        // Legacy v1: cm = SHA256("BTX_Note_Commit_V1" || inner || rho || rcm).
+        // This path is byte-identical to the original commitment.
+        uint256 cm;
+        CSHA256()
+            .Write(reinterpret_cast<const unsigned char*>(NOTE_TAG_COMMIT), sizeof("BTX_Note_Commit_V1") - 1)
+            .Write(inner.begin(), uint256::size())
+            .Write(rho.begin(), uint256::size())
+            .Write(rcm.begin(), uint256::size())
+            .Finalize(cm.begin());
+        return cm;
+    }
+
+    // v2: bind the spend anchor into the commitment so the ring-member anchor a
+    // spender presents is consensus-fixed by the note (closes the anchor-swap gap).
+    //   anchor_hash = SHA256(spend_anchor)
+    //   cm = SHA256("BTX_Note_Commit_V2" || inner || rho || rcm || anchor_hash)
+    uint256 anchor_hash;
+    CSHA256()
+        .Write(spend_anchor.data(), spend_anchor.size())
+        .Finalize(anchor_hash.begin());
+
     uint256 cm;
     CSHA256()
-        .Write(reinterpret_cast<const unsigned char*>(NOTE_TAG_COMMIT), sizeof("BTX_Note_Commit_V1") - 1)
+        .Write(reinterpret_cast<const unsigned char*>(NOTE_TAG_COMMIT_V2), sizeof("BTX_Note_Commit_V2") - 1)
         .Write(inner.begin(), uint256::size())
         .Write(rho.begin(), uint256::size())
         .Write(rcm.begin(), uint256::size())
+        .Write(anchor_hash.begin(), uint256::size())
         .Finalize(cm.begin());
-
     return cm;
 }
 
@@ -81,4 +109,27 @@ void MarkShieldedNoteForModernDerivation(ShieldedNote& note)
 {
     std::copy(NOTE_MODERN_RHO_MARKER.begin(), NOTE_MODERN_RHO_MARKER.end(), note.rho.begin());
     std::copy(NOTE_MODERN_RCM_MARKER.begin(), NOTE_MODERN_RCM_MARKER.end(), note.rcm.begin());
+}
+
+void SetNoteSpendAnchor(ShieldedNote& note, const lattice::PolyVec& anchor)
+{
+    // Serialize the anchor with the same fixed mod-q encoding used for anchors /
+    // key-images on the ring-signature path, so the bytes are canonical.
+    DataStream ss;
+    shielded::ringct::SerializePolyVecModQ23(ss, anchor, "SetNoteSpendAnchor");
+    const auto bytes = MakeUCharSpan(ss);
+    note.spend_anchor.assign(bytes.begin(), bytes.end());
+}
+
+bool GetNoteSpendAnchor(const ShieldedNote& note, lattice::PolyVec& out_anchor)
+{
+    if (note.spend_anchor.empty()) return false; // legacy / no anchor
+    try {
+        DataStream ss{note.spend_anchor};
+        shielded::ringct::UnserializePolyVecModQ23(ss, out_anchor, "GetNoteSpendAnchor");
+        if (!ss.empty()) return false; // trailing garbage => malformed
+    } catch (const std::ios_base::failure&) {
+        return false;
+    }
+    return lattice::IsValidPolyVec(out_anchor) && out_anchor.size() == lattice::MODULE_RANK;
 }

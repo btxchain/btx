@@ -25,7 +25,7 @@ namespace node {
 
 static constexpr std::string_view DEFAULT_AUTOUPDATE_MANIFEST_URL{"https://btx.dev/version.txt"};
 static constexpr std::string_view DEFAULT_AUTOUPDATE_TRUSTED_ORIGIN{"https://btx.dev"};
-// Compiled-in v0.31.0 release public key (post-quantum ML-DSA-44, 2624 hex chars) for the default
+// Compiled-in release public key (post-quantum ML-DSA-44, 2624 hex chars) for the default
 // scheme below, so auto-update works out of the box (default-on on mainnet, opt-out). The matching
 // PRIVATE key is offline; a btx.dev/DNS/TLS compromise cannot push code without it. Operators may
 // override with -autoupdatepubkey (+ -autoupdatepubkeyalgo); set it to "0"/empty to make auto-update

@@ -102,6 +102,8 @@ const char* ShieldedV2FamilyName(shielded::v2::TransactionFamily family)
         return "send";
     case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY:
         return "spend-path-recovery";
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
+        return "v2_recovery_exit";
     case shielded::v2::TransactionFamily::V2_LIFECYCLE:
         return "lifecycle";
     case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
@@ -395,6 +397,7 @@ namespace {
             return false;
         }
         return true;
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
     case shielded::v2::TransactionFamily::V2_GENERIC:
         return true;
     }
@@ -1708,6 +1711,11 @@ std::optional<std::string> CShieldedProofCheck::operator()() const
             }
             return std::nullopt;
         }
+        case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
+            // RECOVERY_EXIT carries no shielded proof payload. Bundle structure enforces the NONE envelope;
+            // ConnectBlock validates the transparent claim by checking ownership, snapshot membership, and
+            // atomic retirement of both the revealed commitment and canonical normal-path nullifier.
+            return std::nullopt;
         case shielded::v2::TransactionFamily::V2_GENERIC:
             LogShieldedV2ContextReject("proof-check-v2-generic-family", bundle);
             return std::string{"bad-shielded-v2-contextual"};

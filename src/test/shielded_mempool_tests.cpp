@@ -3,10 +3,16 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <addresstype.h>
+#include <consensus/amount.h>
+#include <hash.h>
 #include <random.h>
 #include <kernel/mempool_entry.h>
 #include <shielded/lattice/params.h>
+#include <shielded/note.h>
+#include <shielded/recovery_exit.h>
+#include <shielded/smile2/wallet_bridge.h>
 #include <shielded/v2_bundle.h>
+#include <span.h>
 #include <test/util/shielded_fee_carrier.h>
 #include <test/util/shielded_account_registry_test_util.h>
 #include <test/util/setup_common.h>
@@ -166,6 +172,57 @@ CMutableTransaction BuildShieldedV2SpendPathRecoveryTx(
     return mtx;
 }
 
+// A SMILE2-eligible note whose pubkey hash binds (so the mempool's DeriveRecoveryExitIdentifiers succeeds).
+ShieldedNote MakeRecoverableNote(std::vector<unsigned char>& out_pubkey)
+{
+    const uint256 pk = GetRandHash();
+    out_pubkey.assign(pk.begin(), pk.end());
+    HashWriter hw;
+    hw.write(AsBytes(Span<const unsigned char>{out_pubkey.data(), out_pubkey.size()}));
+    ShieldedNote note;
+    note.value = 50 * COIN;
+    note.recipient_pk_hash = hw.GetSHA256();
+    for (int i = 0; i < 8; ++i) {
+        note.rho = GetRandHash();
+        note.rcm = GetRandHash();
+        if (smile2::wallet::ComputeSmileNullifierFromNote(smile2::wallet::SMILE_GLOBAL_SEED, note).has_value()) break;
+    }
+    return note;
+}
+
+// Build a V2_RECOVERY_EXIT tx for `note`; sig_variant only changes the txid (mempool does not verify it).
+CMutableTransaction BuildShieldedRecoveryExitTx(const ShieldedNote& note,
+                                                const std::vector<unsigned char>& pubkey,
+                                                unsigned char sig_variant,
+                                                uint256& out_cm,
+                                                Nullifier& out_nf)
+{
+    using namespace shielded::v2;
+    RecoveryExitPayload payload;
+    payload.value = note.value;
+    payload.recipient_pk_hash = note.recipient_pk_hash;
+    payload.rho = note.rho;
+    payload.rcm = note.rcm;
+    payload.spend_pubkey = pubkey;
+    payload.ownership_sig = {sig_variant};
+    payload.membership_proof = {0x02};
+    const auto nf = smile2::wallet::ComputeSmileNullifierFromNote(smile2::wallet::SMILE_GLOBAL_SEED, note);
+    out_nf = nf.value_or(uint256{});
+    out_cm = note.GetCommitment();
+
+    TransactionBundle bundle;
+    bundle.header.family_id = TransactionFamily::V2_RECOVERY_EXIT;
+    bundle.header.proof_envelope.proof_kind = ProofKind::NONE;
+    bundle.header.proof_envelope.settlement_binding_kind = SettlementBindingKind::NONE;
+    bundle.header.proof_envelope.statement_digest = uint256::ZERO;
+    bundle.header.payload_digest = ComputeRecoveryExitPayloadDigest(payload);
+    bundle.payload = payload;
+
+    CMutableTransaction mtx;
+    mtx.shielded_bundle.v2_bundle = bundle;
+    return mtx;
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(shielded_mempool_tests, BasicTestingSetup)
@@ -292,6 +349,49 @@ BOOST_AUTO_TEST_CASE(shielded_entry_allows_negative_value_balance_fee_accounting
 
     BOOST_CHECK_EQUAL(entry.GetFee(), fee);
     BOOST_CHECK_EQUAL(entry.GetInternalCoinAgeCache().in_chain_input_value, 10 * COIN);
+}
+
+// V2_RECOVERY_EXIT mempool reservation: a pending recovery reserves BOTH its revealed commitment and its
+// derived canonical nullifier, so (a) a normal spend of the same note and (b) a second recovery of the
+// same note both conflict; releasing the recovery clears both reservations.
+BOOST_AUTO_TEST_CASE(recovery_exit_reserves_commitment_and_nullifier)
+{
+    bilingual_str error;
+    CTxMemPool pool{MemPoolOptionsForTest(m_node), error};
+    BOOST_REQUIRE(error.empty());
+    LOCK(pool.cs);
+
+    std::vector<unsigned char> pubkey;
+    const ShieldedNote note = MakeRecoverableNote(pubkey);
+    uint256 cm; Nullifier nf;
+    const CTransaction r1{BuildShieldedRecoveryExitTx(note, pubkey, 0x01, cm, nf)};
+    BOOST_REQUIRE(!nf.IsNull());
+    const Txid txid1 = r1.GetHash();
+
+    // Before reservation, no conflict.
+    BOOST_CHECK(!pool.HasShieldedNullifierConflict(r1));
+    // Reserve R1's BOTH identifiers (the effect of AddShieldedNullifiers on a recovery tx).
+    pool.m_shielded_nullifiers.emplace(nf, txid1);
+    pool.m_shielded_recovery_commitments.emplace(cm, txid1);
+
+    // (a) a normal V2_SEND spending the same note (same derived nullifier) conflicts (cross-path).
+    const CTransaction normal{BuildShieldedV2SendTx(nf, GetRandHash())};
+    BOOST_CHECK(pool.HasShieldedNullifierConflict(normal));
+
+    // (b) a second recovery of the same note (same cm + nf, different sig => different txid) conflicts; the
+    // conflict-checker re-derives R2's (cm, nf) and finds R1's reservation in BOTH maps.
+    uint256 cm2; Nullifier nf2;
+    const CTransaction r2{BuildShieldedRecoveryExitTx(note, pubkey, 0x02, cm2, nf2)};
+    BOOST_CHECK(cm2 == cm);
+    BOOST_CHECK(nf2 == nf);
+    BOOST_CHECK(r2.GetHash() != txid1);
+    BOOST_CHECK(pool.HasShieldedNullifierConflict(r2));
+
+    // Releasing R1's reservations clears both conflicts.
+    pool.m_shielded_nullifiers.erase(nf);
+    pool.m_shielded_recovery_commitments.erase(cm);
+    BOOST_CHECK(!pool.HasShieldedNullifierConflict(normal));
+    BOOST_CHECK(!pool.HasShieldedNullifierConflict(r2));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

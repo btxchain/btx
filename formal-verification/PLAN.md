@@ -1,6 +1,6 @@
 # BTX shielded pool — formal verification plan & spec
 
-Acting cryptographer, v0.31.1+. This is the **context anchor** for a tiered formal-verification effort
+Acting cryptographer, v0.32.0+. This is the **context anchor** for a tiered formal-verification effort
 on the BTX shielded value-soundness stack. It defines the properties to verify, the trusted base, the
 tools, and a status tracker. It is a *living* document: each tier updates §6.
 

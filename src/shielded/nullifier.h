@@ -243,6 +243,15 @@ public:
     /** Remove netting-manifest ids on block disconnect. */
     [[nodiscard]] bool RemoveNettingManifests(const std::vector<uint256>& manifest_ids);
 
+    /** Check if a recovery-exit spent-commitment exists in the confirmed chain. Null cm is always false. */
+    [[nodiscard]] bool ContainsRecoveryExitCommitment(const uint256& cm) const;
+
+    /** Insert recovery-exit spent-commitments from a connected block. Reorg-safe (mirror of Insert). */
+    [[nodiscard]] bool InsertRecoveryExitCommitments(const std::vector<uint256>& cms);
+
+    /** Remove recovery-exit spent-commitments on block disconnect. Reorg-safe undo (mirror of Remove). */
+    [[nodiscard]] bool RemoveRecoveryExitCommitments(const std::vector<uint256>& cms);
+
     /** In-memory cache size (diagnostic). */
     [[nodiscard]] size_t CacheSize() const;
 
@@ -412,13 +421,32 @@ public:
         return true;
     }
 
+    /** Iterate over persisted recovery-exit spent-commitments in on-disk order. */
+    template <typename Fn>
+    bool ForEachPersistedRecoveryExitCommitment(Fn&& fn) const
+    {
+        std::shared_lock lock(m_rwlock);
+        std::unique_ptr<CDBIterator> cursor{m_db->NewIterator()};
+        cursor->Seek(std::make_pair(DB_RECOVERY_EXIT_COMMITMENT, uint256{}));
+
+        while (cursor->Valid()) {
+            std::pair<uint8_t, uint256> key;
+            if (!cursor->GetKey(key) || key.first != DB_RECOVERY_EXIT_COMMITMENT) break;
+            if (!fn(key.second)) return false;
+            cursor->Next();
+        }
+        return true;
+    }
+
 private:
     [[nodiscard]] bool ExistsInDB(const Nullifier& nf) const;
     [[nodiscard]] bool SettlementAnchorExistsInDB(const uint256& anchor) const;
     [[nodiscard]] bool NettingManifestExistsInDB(const uint256& manifest_id) const;
+    [[nodiscard]] bool RecoveryExitCommitmentExistsInDB(const uint256& cm) const;
     using NullifierCache = std::unordered_set<Nullifier, NullifierHasher>;
     using SettlementAnchorCache = std::unordered_set<uint256, NullifierHasher>;
     using NettingManifestCache = std::unordered_set<uint256, NullifierHasher>;
+    using RecoveryExitCommitmentCache = std::unordered_set<uint256, NullifierHasher>;
 
     std::unique_ptr<CDBWrapper> m_db;
     std::shared_ptr<NullifierCache> m_cache_current;
@@ -433,6 +461,10 @@ private:
     std::shared_ptr<NettingManifestCache> m_netting_manifest_cache_previous;
     mutable std::shared_ptr<NettingManifestCache> m_netting_manifest_miss_cache_current;
     mutable std::shared_ptr<NettingManifestCache> m_netting_manifest_miss_cache_previous;
+    std::shared_ptr<RecoveryExitCommitmentCache> m_recovery_exit_commitment_cache_current;
+    std::shared_ptr<RecoveryExitCommitmentCache> m_recovery_exit_commitment_cache_previous;
+    mutable std::shared_ptr<RecoveryExitCommitmentCache> m_recovery_exit_commitment_miss_cache_current;
+    mutable std::shared_ptr<RecoveryExitCommitmentCache> m_recovery_exit_commitment_miss_cache_previous;
     mutable std::shared_mutex m_rwlock;
     std::atomic<uint64_t> m_count{0};  //!< Maintained count to avoid O(n) DB scans.
 
@@ -446,6 +478,7 @@ private:
     static constexpr uint8_t DB_SNAPSHOT_BRIDGE_METADATA_HINT{'G'};
     static constexpr uint8_t DB_NULLIFIER_ACCUMULATOR{'U'};
     static constexpr uint8_t DB_UNSHIELD_VELOCITY{'V'};
+    static constexpr uint8_t DB_RECOVERY_EXIT_COMMITMENT{'R'};
 
     //! Order-independent, incrementally maintained MuHash of the nullifier set, used to cheaply
     //! verify on restart that the persisted nullifier set has not drifted. Maintained under m_rwlock

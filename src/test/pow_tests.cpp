@@ -807,6 +807,9 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nMatMulMaxFutureMtpDrift, 3'600);
     BOOST_CHECK(!consensus.IsMatMulMaxFutureMtpDriftActive(118'481));
     BOOST_CHECK(consensus.IsMatMulMaxFutureMtpDriftActive(118'482));
+    BOOST_CHECK_EQUAL(consensus.nMatMulTimewarpReconcileHeight, 125'000);
+    BOOST_CHECK(!consensus.IsMatMulTimewarpReconcileActive(124'999));
+    BOOST_CHECK(consensus.IsMatMulTimewarpReconcileActive(125'000));
     BOOST_REQUIRE(consensus.MaxMatMulFutureBlockTime(118'482, 1'700'000'000).has_value());
     BOOST_CHECK_EQUAL(*consensus.MaxMatMulFutureBlockTime(118'482, 1'700'000'000), 1'700'003'600);
     BOOST_CHECK_EQUAL(consensus.nMatMulPreHashEpsilonBits, 10U);
@@ -815,6 +818,9 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
     BOOST_CHECK_EQUAL(GetMatMulPreHashEpsilonBitsForHeight(consensus, 49'999), 10U);
     BOOST_CHECK_EQUAL(GetMatMulPreHashEpsilonBitsForHeight(consensus, 50'000), 18U);
     BOOST_CHECK_EQUAL(GetMatMulPreHashEpsilonBitsForHeight(consensus, 50'001), 18U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulNonceSeedHeight, 125'000);
+    BOOST_CHECK(!consensus.IsMatMulNonceSeedActive(124'999));
+    BOOST_CHECK(consensus.IsMatMulNonceSeedActive(125'000));
     BOOST_CHECK_EQUAL(UintToArith256(consensus.powLimit).GetCompact(), 0x2066c154U);
     // Guard: powLimit must retain compact headroom above genesis bits, otherwise
     // fast-phase difficulty scaling is silently clamped out.
@@ -1059,6 +1065,11 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_invalid_custom_overrides_rejected)
         args.ForceSetArg("-regtestmatmulprehashepsilonbitsupgrade", "6");
         BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
     }
+    {
+        ArgsManager args;
+        args.ForceSetArg("-regtestmatmulnonceseedheight", "-1");
+        BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_strict_option)
@@ -1097,6 +1108,7 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation_override_options)
     options.matmul_asert_half_life_upgrade = 3'600;
     options.matmul_pre_hash_epsilon_bits_upgrade_height = 12;
     options.matmul_pre_hash_epsilon_bits_upgrade = 6;
+    options.matmul_nonce_seed_height = 9;
 
     const auto consensus = CChainParams::RegTest(options)->GetConsensus();
     BOOST_CHECK_EQUAL(consensus.nMatMulFreivaldsBindingHeight, 5);
@@ -1110,6 +1122,9 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation_override_options)
     BOOST_CHECK_EQUAL(consensus.nMatMulPreHashEpsilonBits, 0U);
     BOOST_CHECK_EQUAL(consensus.nMatMulPreHashEpsilonBitsUpgradeHeight, 12);
     BOOST_CHECK_EQUAL(consensus.nMatMulPreHashEpsilonBitsUpgrade, 6U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulNonceSeedHeight, 9);
+    BOOST_CHECK(!consensus.IsMatMulNonceSeedActive(8));
+    BOOST_CHECK(consensus.IsMatMulNonceSeedActive(9));
 }
 
 BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation_override_args)
@@ -1124,6 +1139,7 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation_override_args)
     args.ForceSetArg("-regtestmatmulaserthalflifeupgrade", "3600");
     args.ForceSetArg("-regtestmatmulprehashepsilonbitsupgradeheight", "12");
     args.ForceSetArg("-regtestmatmulprehashepsilonbitsupgrade", "6");
+    args.ForceSetArg("-regtestmatmulnonceseedheight", "9");
 
     const auto consensus = CreateChainParams(args, ChainType::REGTEST)->GetConsensus();
     BOOST_CHECK_EQUAL(consensus.nMatMulFreivaldsBindingHeight, 5);
@@ -1137,6 +1153,9 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation_override_args)
     BOOST_CHECK_EQUAL(consensus.nMatMulPreHashEpsilonBits, 0U);
     BOOST_CHECK_EQUAL(consensus.nMatMulPreHashEpsilonBitsUpgradeHeight, 12);
     BOOST_CHECK_EQUAL(consensus.nMatMulPreHashEpsilonBitsUpgrade, 6U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulNonceSeedHeight, 9);
+    BOOST_CHECK(!consensus.IsMatMulNonceSeedActive(8));
+    BOOST_CHECK(consensus.IsMatMulNonceSeedActive(9));
 }
 
 BOOST_AUTO_TEST_CASE(MatMulPreHashEpsilonBits_resolve_upgrade_at_boundary)
@@ -1149,6 +1168,141 @@ BOOST_AUTO_TEST_CASE(MatMulPreHashEpsilonBits_resolve_upgrade_at_boundary)
     BOOST_CHECK_EQUAL(GetMatMulPreHashEpsilonBitsForHeight(params, 11), 10U);
     BOOST_CHECK_EQUAL(GetMatMulPreHashEpsilonBitsForHeight(params, 12), 14U);
     BOOST_CHECK_EQUAL(GetMatMulPreHashEpsilonBitsForHeight(params, 13), 14U);
+}
+
+BOOST_AUTO_TEST_CASE(MatMulNonceSeedV2_binds_mutable_header_fields)
+{
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000001"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000002"};
+    header.nTime = 1'780'000'000U;
+    header.nBits = 0x1d00ffff;
+    header.nNonce64 = 7;
+    header.matmul_dim = 64;
+
+    const uint256 legacy = DeterministicMatMulSeed(header.hashPrevBlock, 125'000, 0);
+    const uint256 v2 = DeterministicMatMulSeedV2(header, 125'000, 0);
+    BOOST_CHECK_NE(legacy, v2);
+
+    CBlockHeader mutated{header};
+    mutated.nNonce64 += 1;
+    BOOST_CHECK_NE(v2, DeterministicMatMulSeedV2(mutated, 125'000, 0));
+
+    mutated = header;
+    mutated.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000003"};
+    BOOST_CHECK_NE(v2, DeterministicMatMulSeedV2(mutated, 125'000, 0));
+
+    mutated = header;
+    mutated.nTime += 1;
+    BOOST_CHECK_NE(v2, DeterministicMatMulSeedV2(mutated, 125'000, 0));
+
+    mutated = header;
+    mutated.nBits += 1;
+    BOOST_CHECK_NE(v2, DeterministicMatMulSeedV2(mutated, 125'000, 0));
+}
+
+BOOST_AUTO_TEST_CASE(MatMulNonceSeed_activation_boundary_selects_legacy_then_v2)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus();
+    BOOST_REQUIRE_EQUAL(consensus.nMatMulNonceSeedHeight, 125'000);
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000004"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000005"};
+    header.nTime = 1'780'000'001U;
+    header.nBits = 0x1d00ffff;
+    header.nNonce64 = 11;
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+
+    CBlockHeader before{header};
+    SetDeterministicMatMulSeeds(before, consensus, 124'999);
+    BOOST_CHECK_EQUAL(before.seed_a, DeterministicMatMulSeed(header.hashPrevBlock, 124'999, 0));
+    BOOST_CHECK_EQUAL(before.seed_b, DeterministicMatMulSeed(header.hashPrevBlock, 124'999, 1));
+
+    CBlockHeader at_activation{header};
+    SetDeterministicMatMulSeeds(at_activation, consensus, 125'000);
+    BOOST_CHECK_EQUAL(at_activation.seed_a, DeterministicMatMulSeedV2(header, 125'000, 0));
+    BOOST_CHECK_EQUAL(at_activation.seed_b, DeterministicMatMulSeedV2(header, 125'000, 1));
+
+    CBlockHeader next_nonce{header};
+    next_nonce.nNonce64 += 1;
+    SetDeterministicMatMulSeeds(next_nonce, consensus, 125'000);
+    BOOST_CHECK_NE(at_activation.seed_a, next_nonce.seed_a);
+    BOOST_CHECK_NE(at_activation.seed_b, next_nonce.seed_b);
+}
+
+BOOST_AUTO_TEST_CASE(MatMulNonceSeed_solver_mines_and_verifies_at_activation_boundary)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fSkipMatMulValidation = false;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulMinDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.nMatMulPreHashEpsilonBits = 0;
+    consensus.nMatMulNonceSeedHeight = 2;
+    consensus.nMatMulProductDigestHeight = 2;
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000006"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000007"};
+    header.nTime = 1'780'000'002U;
+    header.nBits = UintToArith256(consensus.powLimit).GetCompact();
+    header.nNonce64 = 0;
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+    SetDeterministicMatMulSeeds(header, consensus, 2);
+
+    std::vector<uint32_t> payload;
+    uint64_t max_tries{1};
+    BOOST_REQUIRE(SolveMatMul(header, consensus, max_tries, 2, nullptr, &payload));
+    BOOST_CHECK(!payload.empty());
+    BOOST_CHECK_EQUAL(header.seed_a, DeterministicMatMulSeedV2(header, 2, 0));
+    BOOST_CHECK_EQUAL(header.seed_b, DeterministicMatMulSeedV2(header, 2, 1));
+
+    CBlock block{header};
+    block.matrix_c_data = payload;
+    BOOST_CHECK(CheckMatMulProofOfWork_ProductCommitted(block, consensus, 2));
+}
+
+BOOST_AUTO_TEST_CASE(MatMulNonceSeed_solver_disables_shared_base_matrix_batching)
+{
+    ScopedBatchSizeEnv batch_size_env("8");
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fSkipMatMulValidation = false;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulMinDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.nMatMulPreHashEpsilonBits = 0;
+    consensus.nMatMulNonceSeedHeight = 2;
+    consensus.nMatMulProductDigestHeight = 2;
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000008"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000009"};
+    header.nTime = 1'780'000'003U;
+    header.nBits = UintToArith256(consensus.powLimit).GetCompact();
+    header.nNonce64 = 0;
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+
+    ResetMatMulSolvePipelineStats();
+    std::vector<uint32_t> payload;
+    uint64_t max_tries{2};
+    BOOST_REQUIRE(SolveMatMul(header, consensus, max_tries, 2, nullptr, &payload));
+
+    const auto stats = ProbeMatMulSolvePipelineStats();
+    BOOST_CHECK_EQUAL(stats.batch_size, 1U);
+    BOOST_CHECK_EQUAL(stats.batched_digest_requests, 0U);
+    BOOST_CHECK_EQUAL(header.seed_a, DeterministicMatMulSeedV2(header, 2, 0));
+    BOOST_CHECK_EQUAL(header.seed_b, DeterministicMatMulSeedV2(header, 2, 1));
+
+    CBlock block{header};
+    block.matrix_c_data = payload;
+    BOOST_CHECK(CheckMatMulProofOfWork_ProductCommitted(block, consensus, 2));
 }
 
 BOOST_AUTO_TEST_CASE(EffectiveTargetSpacingForHeight_uses_fast_phase_schedule)
@@ -1204,10 +1358,10 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
 
     BOOST_CHECK_EQUAL(
         consensus.nMinimumChainWork.GetHex(),
-        "00000000000000000000000000000000000000000000000000000372df7a85a3");
+        "000000000000000000000000000000000000000000000000000004339ce2b047");
     BOOST_CHECK_EQUAL(
         consensus.defaultAssumeValid.GetHex(),
-        "24744e8793137d0a6639a90c066b78e7edb6722ad7007cdac0911ae171ead611");
+        "bee000e92d6b64ceb6ad9a3759fb38c1d6752713240e76bde3617f073b9cbe74");
     BOOST_CHECK_EQUAL(params->AssumedBlockchainSize(), 16U);
     BOOST_CHECK_EQUAL(params->AssumedChainStateSize(), 1U);
 
@@ -1218,11 +1372,11 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
     BOOST_CHECK_EQUAL(
         it_0->second.GetHex(),
         "75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601");
-    const auto it_anchor = checkpoints.find(120900);
+    const auto it_anchor = checkpoints.find(123225);
     BOOST_REQUIRE(it_anchor != checkpoints.end());
     BOOST_CHECK_EQUAL(
         it_anchor->second.GetHex(),
-        "24744e8793137d0a6639a90c066b78e7edb6722ad7007cdac0911ae171ead611");
+        "bee000e92d6b64ceb6ad9a3759fb38c1d6752713240e76bde3617f073b9cbe74");
 
     const auto assumeutxo_55000 = params->AssumeutxoForHeight(55000);
     BOOST_REQUIRE(assumeutxo_55000.has_value());
@@ -1334,11 +1488,22 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_120900->blockhash.GetHex(),
         "24744e8793137d0a6639a90c066b78e7edb6722ad7007cdac0911ae171ead611");
 
+    const auto assumeutxo_123225 = params->AssumeutxoForHeight(123225);
+    BOOST_REQUIRE(assumeutxo_123225.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_123225->height, 123225);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_123225->hash_serialized.ToString(),
+        "153ed4ddf0957251bd450f25f8b10956c3cb47d382ecbc7692e04da1a878b2b8");
+    BOOST_CHECK_EQUAL(assumeutxo_123225->m_chain_tx_count, 150104U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_123225->blockhash.GetHex(),
+        "bee000e92d6b64ceb6ad9a3759fb38c1d6752713240e76bde3617f073b9cbe74");
+
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 10U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 11U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 120900);
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 123225);
     BOOST_CHECK_GE(snapshot_heights.back(), std::prev(checkpoints.end())->first);
 }
 
@@ -3035,6 +3200,172 @@ BOOST_AUTO_TEST_CASE(product_committed_digest_rejects_wrong_product)
     // the payload, so the validator must reject.
     block.matrix_c_data[0] = (block.matrix_c_data[0] + 1) % matmul::field::MODULUS;
     BOOST_CHECK(!CheckMatMulProofOfWork_ProductCommitted(block, consensus, /*block_height=*/1));
+}
+
+BOOST_AUTO_TEST_CASE(e1_nonce_seed_fold_is_gated_and_backward_compatible)
+{
+    const uint256 prev = uint256::ONE;
+    const uint32_t height = 200'000;
+
+    // Backward compatibility: the legacy 3-arg derivation is byte-identical to the 4-arg call with
+    // no nonce, so pre-activation blocks and genesis keep their exact historical seeds (no fork below
+    // the flag day, genesis unaffected).
+    BOOST_CHECK_EQUAL(DeterministicMatMulSeed(prev, height, 0),
+                      DeterministicMatMulSeed(prev, height, 0, std::nullopt));
+    BOOST_CHECK_EQUAL(DeterministicMatMulSeed(prev, height, 1),
+                      DeterministicMatMulSeed(prev, height, 1, std::nullopt));
+
+    // e1: folding a nonce changes the seed, so the dense A*B product becomes nonce-dependent...
+    const uint256 legacy_a = DeterministicMatMulSeed(prev, height, 0);
+    BOOST_CHECK(DeterministicMatMulSeed(prev, height, 0, /*nonce=*/uint64_t{0}) != legacy_a);
+    // ...and DIFFERENT nonces yield DIFFERENT seeds, so A*B cannot be precomputed once and reused
+    // across the nonce range -- this is exactly what defeats the ~12.8x amortization.
+    const uint256 s0 = DeterministicMatMulSeed(prev, height, 0, /*nonce=*/uint64_t{0});
+    const uint256 s1 = DeterministicMatMulSeed(prev, height, 0, /*nonce=*/uint64_t{1});
+    const uint256 s2 = DeterministicMatMulSeed(prev, height, 0, /*nonce=*/uint64_t{123456789});
+    BOOST_CHECK(s0 != s1);
+    BOOST_CHECK(s1 != s2);
+    BOOST_CHECK(s0 != s2);
+    // 'which' still separates A from B under nonce folding.
+    BOOST_CHECK(DeterministicMatMulSeed(prev, height, 0, uint64_t{7}) !=
+                DeterministicMatMulSeed(prev, height, 1, uint64_t{7}));
+
+    // Gate: disabled by default (INT32_MAX); active only at/after the configured flag-day height.
+    Consensus::Params consensus{};
+    consensus.fMatMulPOW = true;
+    BOOST_CHECK(!consensus.IsMatMulNonceSeedActive(height));  // default INT32_MAX -> dormant
+    consensus.nMatMulNonceSeedHeight = 250'000;
+    BOOST_CHECK(!consensus.IsMatMulNonceSeedActive(249'999));
+    BOOST_CHECK(consensus.IsMatMulNonceSeedActive(250'000));
+    BOOST_CHECK(consensus.IsMatMulNonceSeedActive(300'000));
+    // Inert on non-MatMul chains.
+    consensus.fMatMulPOW = false;
+    BOOST_CHECK(!consensus.IsMatMulNonceSeedActive(300'000));
+}
+
+BOOST_AUTO_TEST_CASE(e1_v2_miner_produces_consensus_valid_nonce_bound_seeds_across_boundary)
+{
+    // End-to-end safety proof for the 125,000 PoW fork: drive the REAL consensus miner
+    // (SolveMatMul -> SolveMatMulNonceSeeded, the path every backend funnels through) across the
+    // nonce-seed activation boundary and verify miner<->consensus seed agreement:
+    //   (1) post-activation the miner emits seeds bound to the WINNING nonce that exactly match the
+    //       consensus derivation SetDeterministicMatMulSeeds (what ContextualCheckBlockHeader enforces);
+    //   (2) pre-activation it emits legacy nonce-independent seeds (no fork below the flag day);
+    //   (3) a legacy-seeded block is rejected by the consensus seed rule post-activation.
+    // This is what guarantees no mining halt at the fork: whatever the miner produces validates.
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.nMatMulPreHashEpsilonBits = 0;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    constexpr int32_t kActivation = 125'000;
+    consensus.nMatMulNonceSeedHeight = kActivation;
+
+    auto make_candidate = [&]() {
+        CBlockHeader c{};
+        c.nVersion = 4;
+        c.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000a1"};
+        c.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000a2"};
+        c.nTime = 1'700'000'123U;
+        c.nBits = UintToArith256(consensus.powLimit).GetCompact();  // easiest target -> solves immediately
+        c.nNonce64 = 1;
+        c.nNonce = 1;
+        c.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+        c.matmul_digest.SetNull();
+        return c;
+    };
+
+    // (1) POST-activation: the mined block's seeds are nonce-bound and consensus-valid.
+    {
+        CBlockHeader candidate = make_candidate();
+        SetDeterministicMatMulSeeds(candidate, consensus, kActivation);
+        uint64_t max_tries{64};
+        const bool solved = SolveMatMul(candidate, consensus, max_tries, /*block_height=*/kActivation);
+        BOOST_REQUIRE(solved);
+        // Seeds are bound to the winning nonce...
+        BOOST_CHECK_EQUAL(candidate.seed_a, DeterministicMatMulSeedV2(candidate, kActivation, 0));
+        BOOST_CHECK_EQUAL(candidate.seed_b, DeterministicMatMulSeedV2(candidate, kActivation, 1));
+        // ...and differ from the legacy nonce-independent derivation (the property that defeats e1).
+        BOOST_CHECK(candidate.seed_a != DeterministicMatMulSeed(candidate.hashPrevBlock, kActivation, 0));
+        // Consensus agreement: ContextualCheckBlockHeader recomputes via SetDeterministicMatMulSeeds.
+        CBlockHeader expected = candidate;
+        SetDeterministicMatMulSeeds(expected, consensus, kActivation);
+        BOOST_CHECK_EQUAL(expected.seed_a, candidate.seed_a);
+        BOOST_CHECK_EQUAL(expected.seed_b, candidate.seed_b);
+        // (3) A legacy-seeded block at this height would be rejected (seeds != expected V2).
+        CBlockHeader tampered = candidate;
+        tampered.seed_a = DeterministicMatMulSeed(candidate.hashPrevBlock, kActivation, 0);
+        tampered.seed_b = DeterministicMatMulSeed(candidate.hashPrevBlock, kActivation, 1);
+        CBlockHeader expected_tampered = tampered;
+        SetDeterministicMatMulSeeds(expected_tampered, consensus, kActivation);
+        BOOST_CHECK(expected_tampered.seed_a != tampered.seed_a);  // -> bad-matmul-seeds
+    }
+
+    // (2) PRE-activation: the mined block carries legacy nonce-independent seeds, also consensus-valid.
+    {
+        CBlockHeader candidate = make_candidate();
+        const int32_t pre = kActivation - 1;
+        SetDeterministicMatMulSeeds(candidate, consensus, pre);
+        uint64_t max_tries{64};
+        const bool solved = SolveMatMul(candidate, consensus, max_tries, /*block_height=*/pre);
+        BOOST_REQUIRE(solved);
+        BOOST_CHECK_EQUAL(candidate.seed_a, DeterministicMatMulSeed(candidate.hashPrevBlock, pre, 0));
+        BOOST_CHECK_EQUAL(candidate.seed_b, DeterministicMatMulSeed(candidate.hashPrevBlock, pre, 1));
+        CBlockHeader expected = candidate;
+        SetDeterministicMatMulSeeds(expected, consensus, pre);
+        BOOST_CHECK_EQUAL(expected.seed_a, candidate.seed_a);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(e1_v2_parallel_solver_engages_and_stays_consensus_valid)
+{
+    // Optimization (1): the V2 nonce-seeded solver now fans the nonce range out across cores
+    // (via SolveMatMulParallel) instead of running the single-threaded reference. Force 4 solver
+    // threads, confirm the parallel path engaged, and verify the parallel-produced block's seeds
+    // still match the consensus per-nonce derivation (each worker derives its OWN per-nonce seeds).
+    ScopedSolverThreadsEnv solver_threads_env("4");
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.nMatMulPreHashEpsilonBits = 0;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    constexpr int32_t kActivation = 125'000;
+    consensus.nMatMulNonceSeedHeight = kActivation;
+
+    CBlockHeader candidate{};
+    candidate.nVersion = 4;
+    candidate.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000b1"};
+    candidate.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000b2"};
+    candidate.nTime = 1'700'000'222U;
+    candidate.nBits = UintToArith256(consensus.powLimit).GetCompact();
+    candidate.nNonce64 = 1;
+    candidate.nNonce = 1;
+    candidate.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+    candidate.matmul_digest.SetNull();
+    SetDeterministicMatMulSeeds(candidate, consensus, kActivation);
+
+    uint64_t max_tries{4096};
+    ResetMatMulSolvePipelineStats();
+    const bool solved = SolveMatMul(candidate, consensus, max_tries, /*block_height=*/kActivation);
+    BOOST_REQUIRE(solved);
+
+    // The parallel path was taken -- the single-threaded V2 reference would report threads == 1.
+    const auto stats = ProbeMatMulSolvePipelineStats();
+    BOOST_CHECK(stats.parallel_solver_enabled);
+    BOOST_CHECK_GT(stats.parallel_solver_threads, 1U);
+
+    // ...and the block produced by the parallel solver is consensus-valid (nonce-bound seeds match).
+    BOOST_CHECK_EQUAL(candidate.seed_a, DeterministicMatMulSeedV2(candidate, kActivation, 0));
+    BOOST_CHECK_EQUAL(candidate.seed_b, DeterministicMatMulSeedV2(candidate, kActivation, 1));
+    CBlockHeader expected = candidate;
+    SetDeterministicMatMulSeeds(expected, consensus, kActivation);
+    BOOST_CHECK_EQUAL(expected.seed_a, candidate.seed_a);
+    BOOST_CHECK_EQUAL(expected.seed_b, candidate.seed_b);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -36,26 +36,28 @@ constexpr uint64_t SHIELDED_VERIFY_UNITS_PER_DIRECT_SPEND{100};
 constexpr uint64_t SHIELDED_VERIFY_UNITS_PER_DIRECT_OUTPUT{15};
 constexpr uint64_t SHIELDED_VERIFY_UNITS_PER_SETTLEMENT_PROOF{100};
 
-[[nodiscard]] std::optional<CAmount> CheckedSumPositiveReserveDeltas(
+// DS-5 fix: the pool effect of a rebalance is the NET of ALL reserve deltas, not just the positive leg.
+// Canonical validity already forces sum(all)==0 (ReserveDeltaSetIsCanonical -> ValueConservationHolds,
+// v2_bundle.cpp), so for a valid rebalance this is 0 (pool-neutral). Returning -sum(positive) was the
+// inflation bug: a net-zero [+V,-V] credited the pool +V while the -V leg never debited it.
+[[nodiscard]] std::optional<CAmount> CheckedSumAllReserveDeltas(
     Span<const shielded::v2::ReserveDelta> deltas,
     std::string& reject_reason)
 {
-    CAmount total_positive{0};
+    CAmount net{0};
     for (const auto& delta : deltas) {
         if (!MoneyRangeSigned(delta.reserve_delta)) {
             reject_reason = "bad-shielded-v2-rebalance-deltas";
             return std::nullopt;
         }
-        if (delta.reserve_delta <= 0) continue;
-
-        const auto next_total = CheckedAdd(total_positive, delta.reserve_delta);
-        if (!next_total || !MoneyRange(*next_total)) {
+        const auto next = CheckedAdd(net, delta.reserve_delta);
+        if (!next || !MoneyRangeSigned(*next)) {
             reject_reason = "bad-shielded-v2-rebalance-deltas";
             return std::nullopt;
         }
-        total_positive = *next_total;
+        net = *next;
     }
-    return total_positive;
+    return net;
 }
 
 [[nodiscard]] size_t GetV2ShieldedInputCount(const shielded::v2::TransactionBundle& bundle)
@@ -69,6 +71,7 @@ constexpr uint64_t SHIELDED_VERIFY_UNITS_PER_SETTLEMENT_PROOF{100};
         return 0;
     case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
         return std::get<shielded::v2::IngressBatchPayload>(bundle.payload).consumed_spends.size();
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
     case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
     case shielded::v2::TransactionFamily::V2_REBALANCE:
     case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
@@ -93,6 +96,7 @@ constexpr uint64_t SHIELDED_VERIFY_UNITS_PER_SETTLEMENT_PROOF{100};
         return std::get<shielded::v2::EgressBatchPayload>(bundle.payload).outputs.size();
     case shielded::v2::TransactionFamily::V2_REBALANCE:
         return std::get<shielded::v2::RebalancePayload>(bundle.payload).reserve_outputs.size();
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
     case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
     case shielded::v2::TransactionFamily::V2_GENERIC:
         return 0;
@@ -528,6 +532,7 @@ std::vector<Nullifier> CollectShieldedNullifiers(const CShieldedBundle& bundle)
             }
             break;
         }
+        case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
         case shielded::v2::TransactionFamily::V2_LIFECYCLE:
         case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
         case shielded::v2::TransactionFamily::V2_REBALANCE:
@@ -588,6 +593,7 @@ std::vector<uint256> CollectShieldedOutputCommitments(const CShieldedBundle& bun
             }
             break;
         }
+        case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
         case shielded::v2::TransactionFamily::V2_LIFECYCLE:
         case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
         case shielded::v2::TransactionFamily::V2_GENERIC:
@@ -637,6 +643,7 @@ std::vector<std::pair<uint256, smile2::CompactPublicAccount>> CollectShieldedOut
         case shielded::v2::TransactionFamily::V2_REBALANCE:
             append_outputs(std::get<shielded::v2::RebalancePayload>(v2_bundle->payload).reserve_outputs);
             break;
+        case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
         case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
         case shielded::v2::TransactionFamily::V2_GENERIC:
             break;
@@ -724,6 +731,7 @@ std::optional<std::vector<uint256>> CollectShieldedOutputAccountLeafCommitments(
             }
             break;
         }
+        case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
         case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
         case shielded::v2::TransactionFamily::V2_GENERIC:
             break;
@@ -809,6 +817,7 @@ shielded::registry::CollectShieldedOutputAccountLeaves(const CShieldedBundle& bu
             }
             break;
         }
+        case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
         case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
         case shielded::v2::TransactionFamily::V2_GENERIC:
             break;
@@ -905,6 +914,7 @@ std::optional<std::vector<std::pair<uint256, uint256>>> CollectShieldedOutputAcc
         }
         case shielded::v2::TransactionFamily::V2_GENERIC:
             return std::nullopt;
+        case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
         case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
             break;
         }
@@ -951,6 +961,7 @@ std::vector<uint256> CollectShieldedAnchors(const CShieldedBundle& bundle)
             out.push_back(payload.spend_anchor);
             break;
         }
+        case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
         case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
         case shielded::v2::TransactionFamily::V2_REBALANCE:
         case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
@@ -991,6 +1002,7 @@ std::vector<uint256> CollectShieldedAccountRegistryRefs(const CShieldedBundle& b
         break;
     }
     case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY:
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
     case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
     case shielded::v2::TransactionFamily::V2_REBALANCE:
     case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
@@ -1014,6 +1026,7 @@ std::vector<uint256> CollectShieldedSettlementAnchorRefs(const CShieldedBundle& 
         out.push_back(std::get<shielded::v2::EgressBatchPayload>(v2_bundle->payload).settlement_anchor);
         break;
     case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY:
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
     case shielded::v2::TransactionFamily::V2_LIFECYCLE:
     case shielded::v2::TransactionFamily::V2_SEND:
     case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
@@ -1050,6 +1063,9 @@ std::optional<CAmount> TryGetShieldedStateValueBalance(const CShieldedBundle& bu
         return std::get<shielded::v2::SendPayload>(v2_bundle->payload).value_balance;
     case shielded::v2::V2_SPEND_PATH_RECOVERY:
         return std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload).fee;
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
+        // Positive value = outflow leaving the shielded pool.
+        return std::get<shielded::v2::RecoveryExitPayload>(v2_bundle->payload).value;
     case shielded::v2::TransactionFamily::V2_LIFECYCLE:
         return CAmount{0};
     case shielded::v2::TransactionFamily::V2_INGRESS_BATCH: {
@@ -1072,12 +1088,14 @@ std::optional<CAmount> TryGetShieldedStateValueBalance(const CShieldedBundle& bu
     }
     case shielded::v2::TransactionFamily::V2_REBALANCE: {
         const auto& payload = std::get<shielded::v2::RebalancePayload>(v2_bundle->payload);
-        auto total_positive = CheckedSumPositiveReserveDeltas(
+        // DS-5 fix: pool effect = -(net of ALL deltas). Conservation forces sum(all)==0, so a valid
+        // rebalance is pool-neutral; the old -sum(positive) minted the positive leg with no debit.
+        auto net = CheckedSumAllReserveDeltas(
             Span<const shielded::v2::ReserveDelta>{payload.reserve_deltas.data(),
                                                    payload.reserve_deltas.size()},
             reject_reason);
-        if (!total_positive.has_value()) return std::nullopt;
-        return -*total_positive;
+        if (!net.has_value()) return std::nullopt;
+        return -*net;
     }
     case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
     case shielded::v2::TransactionFamily::V2_GENERIC:
@@ -1102,6 +1120,8 @@ CAmount GetShieldedTxValueBalance(const CShieldedBundle& bundle)
         return std::get<shielded::v2::SendPayload>(v2_bundle->payload).value_balance;
     case shielded::v2::V2_SPEND_PATH_RECOVERY:
         return std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload).fee;
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
+        return std::get<shielded::v2::RecoveryExitPayload>(v2_bundle->payload).value;
     case shielded::v2::TransactionFamily::V2_LIFECYCLE:
         return 0;
     case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
@@ -1217,6 +1237,7 @@ ShieldedResourceUsage GetShieldedResourceUsage(const CShieldedBundle& bundle)
         usage.tree_update_units = payload.reserve_outputs.size();
         break;
     }
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
     case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
     case shielded::v2::TransactionFamily::V2_GENERIC:
         usage.verify_units = GetProofEnvelopeVerifyUnits(v2_bundle.header.proof_envelope,

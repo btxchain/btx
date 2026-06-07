@@ -8,6 +8,7 @@
 #include <consensus/merkle.h>
 #include <core_io.h>
 #include <hash.h>
+#include <kernel/chainstatemanager_opts.h>
 #include <net.h>
 #include <signet.h>
 #include <uint256.h>
@@ -257,6 +258,91 @@ BOOST_AUTO_TEST_CASE(regtest_shielded_pq128_upgrade_height_rejects_negative)
     BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
 }
 
+BOOST_AUTO_TEST_CASE(regtest_shielded_pool_credit_disable_height_override)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedpoolcreditdisableheight", "123");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedPoolCreditDisableHeight, 123);
+    BOOST_CHECK(!params->GetConsensus().IsShieldedPoolCreditDisabled(122));
+    BOOST_CHECK(params->GetConsensus().IsShieldedPoolCreditDisabled(123));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_pool_credit_disable_height_rejects_negative)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedpoolcreditdisableheight", "-1");
+    BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_sunset_height_override)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedsunsetheight", "126");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedSunsetHeight, 126);
+    BOOST_CHECK(!params->GetConsensus().IsShieldedSunsetActive(125));
+    BOOST_CHECK(params->GetConsensus().IsShieldedSunsetActive(126));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_sunset_height_rejects_negative)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedsunsetheight", "-1");
+    BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(ds3_unpinned_shielded_snapshot_fails_closed_by_default)
+{
+    // DS-3: a production node must REFUSE an assumeutxo snapshot whose shielded section has no consensus
+    // pin (mainnet pins ship null because they hash the real shielded state at each height and cannot be
+    // precomputed offline). The default is fail-closed; only -allowunpinnedshieldedsnapshot opts in.
+    BOOST_CHECK_EQUAL(DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT, false);
+}
+
+BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_no_gap)
+{
+    // DS-4 hardening: the unshield velocity cap must activate no later than the sunset height, so the
+    // transparent-outflow exit (the ONLY permitted shielded operation at/after the sunset) is rate
+    // -limited from its first block. This guards against regressing the velocity activation back above
+    // the sunset, which would reopen the previously-uncapped window between them.
+    ArgsManager args;
+    const auto params = CreateChainParams(args, ChainType::MAIN);
+    BOOST_REQUIRE(params);
+    const auto& consensus = params->GetConsensus();
+    BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityActivationHeight,
+                      consensus.nShieldedSunsetHeight);
+    // At the sunset block the sunset gate and the velocity cap are simultaneously in force.
+    BOOST_CHECK(consensus.IsShieldedSunsetActive(consensus.nShieldedSunsetHeight));
+    BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(consensus.nShieldedSunsetHeight));
+    // No exit can outrun the cap anywhere in the sunset regime.
+    BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(consensus.nShieldedSunsetHeight + 4'000));
+    // Cap loosened to 50%/day so a large legitimate holder can fully exit in ~1 week while a residual
+    // drain is still throttled to half the pool per day. Locks the policy against silent regression.
+    BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityCapBps, 5'000u);
+    BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityWindowBlocks, 960u);
+}
+
+BOOST_AUTO_TEST_CASE(recovery_exit_activates_with_shielded_sunset_on_production_networks)
+{
+    // RECOVERY_EXIT is part of the 125,000 shielded sunset hardening on production-like networks. The
+    // frozen-root field may remain null at release time; validation then uses the immutable live tree
+    // root after the zero-output sunset rule freezes the commitment tree.
+    ArgsManager args;
+    for (const ChainType net : {ChainType::MAIN, ChainType::TESTNET, ChainType::TESTNET4, ChainType::SIGNET}) {
+        const auto params = CreateChainParams(args, net);
+        BOOST_REQUIRE(params);
+        const auto& consensus = params->GetConsensus();
+        BOOST_CHECK_EQUAL(consensus.nShieldedRecoveryExitActivationHeight, consensus.nShieldedSunsetHeight);
+        BOOST_CHECK(!consensus.IsShieldedRecoveryExitActive(consensus.nShieldedSunsetHeight - 1));
+        BOOST_CHECK(consensus.IsShieldedRecoveryExitActive(consensus.nShieldedSunsetHeight));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(signet_parse_tests)
 {
     ArgsManager signet_argsman;
@@ -406,6 +492,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
         106'875,
         118'225,
         120'900,
+        123'225,
     };
 
     BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
@@ -424,6 +511,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     BOOST_CHECK(params->AssumeutxoForHeight(106'875));
     BOOST_CHECK(params->AssumeutxoForHeight(118'225));
     BOOST_CHECK(params->AssumeutxoForHeight(120'900));
+    BOOST_CHECK(params->AssumeutxoForHeight(123'225));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
     BOOST_CHECK(!params->AssumeutxoForHeight(0));
 }

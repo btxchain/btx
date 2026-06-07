@@ -1090,6 +1090,337 @@ bool VerifyRingSignature(const RingSignature& signature,
     return TimingSafeEqual(expected, signature.challenge_seed);
 }
 
+// ===========================================================================
+// DS-4 key-image binding — bound mode (fork-gated, off by default).
+//
+// Closes the legacy double-spend by representing each ring member with an
+// explicit lattice anchor T = A*s (consensus-fixed), forbidding the per-member
+// offset (effective_pk == T directly), and using a single ring-independent link
+// generator G (KI = G*s). With the offset gone, the shared one-out-of-many
+// response forces a unique s and hence a unique key-image: one note -> one
+// nullifier. Reuses the exact legacy proof machinery (ComputeW/ComputeU/transcript)
+// so the soundness of the underlying argument is unchanged; only the public key
+// and link generator inputs differ. The legacy path is untouched.
+// ===========================================================================
+
+lattice::Poly256 GlobalLinkGenerator()
+{
+    HashWriter hw;
+    hw << std::string{"BTX_MatRiCT_RingSig_GlobalLinkBase_V1"};
+    const uint256 seed = hw.GetSHA256();
+    return lattice::ExpandUniformPoly(
+        Span<const unsigned char>{seed.begin(), uint256::size()},
+        28672);
+}
+
+lattice::PolyVec ComputeBoundKeyImage(const lattice::PolyVec& input_secret)
+{
+    if (!lattice::IsValidPolyVec(input_secret) || input_secret.size() != lattice::MODULE_RANK) return {};
+    return PolyVecMulPoly(input_secret, GlobalLinkGenerator());
+}
+
+lattice::PolyVec ComputeBoundAnchor(const lattice::PolyVec& input_secret)
+{
+    if (!lattice::IsValidPolyVec(input_secret) || input_secret.size() != lattice::MODULE_RANK) return {};
+    const lattice::PolyVec secret_ntt = PreparePolyVecNTT(input_secret);
+    return MatVecMulPreparedNTT(secret_ntt);
+}
+
+namespace {
+
+// Build per-input DerivedRingMember storage from explicit anchors + the global link generator.
+// Returns false on any malformed anchor. `out_ids[i][j] = HashPolyVec(anchor)` are the transcript
+// identifiers (replacing the uint256 ring-member commitments in the legacy path).
+[[nodiscard]] bool BuildBoundDerivedMembers(
+    const std::vector<std::vector<lattice::PolyVec>>& ring_anchors,
+    std::vector<std::vector<DerivedRingMember>>& out_storage,
+    std::vector<DerivedRingMemberRefs>& out_refs,
+    std::vector<std::vector<uint256>>& out_ids)
+{
+    const lattice::Poly256 global_link = GlobalLinkGenerator();
+    lattice::Poly256 global_link_ntt = global_link;
+    global_link_ntt.NTT();
+
+    const size_t input_count = ring_anchors.size();
+    out_storage.assign(input_count, {});
+    out_refs.assign(input_count, {});
+    out_ids.assign(input_count, {});
+    for (size_t i = 0; i < input_count; ++i) {
+        const size_t ring_size = ring_anchors[i].size();
+        if (ring_size == 0) return false;
+        out_storage[i].resize(ring_size);
+        out_refs[i].resize(ring_size);
+        out_ids[i].resize(ring_size);
+        std::set<uint256> seen_ids;
+        for (size_t j = 0; j < ring_size; ++j) {
+            const lattice::PolyVec& anchor = ring_anchors[i][j];
+            if (!lattice::IsValidPolyVec(anchor) || anchor.size() != lattice::MODULE_RANK) return false;
+            const uint256 id = HashPolyVec(anchor);
+            if (id.IsNull() || !seen_ids.insert(id).second) return false; // distinct ring members
+            DerivedRingMember& m = out_storage[i][j];
+            m.public_key = anchor;
+            m.link_generator = global_link;
+            m.link_generator_ntt = global_link_ntt;
+            out_refs[i][j] = &out_storage[i][j];
+            out_ids[i][j] = id;
+        }
+    }
+    return true;
+}
+
+// Zero offsets (one PolyVec(MODULE_RANK) of zeros per member) — bound mode forbids non-trivial offsets,
+// so effective_pk == anchor. Structurally required by RingSignature::IsValid / serialization.
+[[nodiscard]] std::vector<lattice::PolyVec> ZeroOffsets(size_t ring_size)
+{
+    return std::vector<lattice::PolyVec>(ring_size, lattice::PolyVec(lattice::MODULE_RANK));
+}
+
+[[nodiscard]] bool AllOffsetsZero(const std::vector<lattice::PolyVec>& offsets)
+{
+    for (const auto& off : offsets) {
+        if (off.size() != lattice::MODULE_RANK) return false;
+        if (lattice::PolyVecInfNorm(off) != 0) return false;
+    }
+    return true;
+}
+
+// DS-4 soundness residual #1: explicitly bind the global link generator G into the Fiat-Shamir
+// transcript. In bound mode G enters the verifier only implicitly (via u = G*z - c*KI); hashing
+// HashPolyVec(G) into the message that seeds every per-member challenge makes the transcript commit to
+// the exact generator, removes any reliance on G being the unique implicit generator, and
+// domain-separates bound-mode signatures from legacy ones (so neither can be replayed as the other).
+// Used by BOTH CreateBoundRingSignature and VerifyBoundRingSignature, so the transcript stays identical.
+[[nodiscard]] uint256 BoundModeTranscriptMessage(const uint256& message_hash)
+{
+    HashWriter hw;
+    hw << std::string{"BTX_MatRiCT_BoundRingSig_Transcript_V1"};
+    hw << message_hash;
+    hw << GlobalLinkGenerator();  // Poly256: bind the exact global link generator into the transcript
+    return hw.GetSHA256();
+}
+
+} // namespace
+
+bool VerifyBoundRingSignature(const RingSignature& signature,
+                              const std::vector<std::vector<lattice::PolyVec>>& ring_anchors,
+                              const uint256& message_hash,
+                              bool allow_singleton_ring)
+{
+    const size_t input_count = ring_anchors.size();
+    if (input_count == 0 || input_count > MAX_RING_SIGNATURE_INPUTS) return false;
+
+    const size_t ring_size = ring_anchors.front().size();
+    if ((!allow_singleton_ring || ring_size != 1) && !lattice::IsSupportedRingSize(ring_size)) return false;
+    for (const auto& ring : ring_anchors) {
+        if (ring.size() != ring_size) return false;
+    }
+
+    std::vector<std::vector<DerivedRingMember>> bound_storage;
+    std::vector<DerivedRingMemberRefs> derived_ring_members;
+    std::vector<std::vector<uint256>> ring_ids;
+    if (!BuildBoundDerivedMembers(ring_anchors, bound_storage, derived_ring_members, ring_ids)) return false;
+
+    if (!signature.IsValid(input_count, ring_size)) return false;
+
+    // Soundness residual #1: bind the global link generator G into the FS transcript.
+    const uint256 tx_msg = BoundModeTranscriptMessage(message_hash);
+
+    // DS-4 anti-forge rule: bound mode admits NO public-key offset. With effective_pk pinned to the
+    // consensus anchor, a second secret cannot satisfy the ring equation.
+    for (const auto& offsets : signature.member_public_key_offsets) {
+        if (offsets.size() != ring_size || !AllOffsetsZero(offsets)) return false;
+    }
+
+    TranscriptChunks transcript_chunks(input_count);
+    for (size_t input_idx = 0; input_idx < input_count; ++input_idx) {
+        const RingInputProof& input_proof = signature.input_proofs[input_idx];
+        const ChallengeContext challenge_context = BuildChallengeContext(ring_ids[input_idx],
+                                                                         signature.key_images[input_idx],
+                                                                         signature.member_public_key_offsets[input_idx],
+                                                                         input_idx,
+                                                                         tx_msg);
+        if (!BuildInputTranscriptChunks(input_proof,
+                                        derived_ring_members[input_idx],
+                                        signature.key_images[input_idx],
+                                        signature.member_public_key_offsets[input_idx],
+                                        challenge_context,
+                                        input_idx,
+                                        transcript_chunks[input_idx],
+                                        /*prevalidated_responses=*/true)) {
+            return false;
+        }
+    }
+
+    const uint256 expected = ComputeTranscriptChallengeFromChunks(signature,
+                                                                  ring_ids,
+                                                                  transcript_chunks,
+                                                                  tx_msg);
+    if (expected.IsNull()) return false;
+    return TimingSafeEqual(expected, signature.challenge_seed);
+}
+
+bool CreateBoundRingSignature(RingSignature& signature,
+                              const std::vector<std::vector<lattice::PolyVec>>& ring_anchors,
+                              const std::vector<size_t>& real_indices,
+                              const std::vector<lattice::PolyVec>& input_secrets,
+                              const uint256& message_hash,
+                              Span<const unsigned char> rng_entropy,
+                              bool allow_singleton_ring)
+{
+    const size_t input_count = ring_anchors.size();
+    if (input_count == 0 || real_indices.size() != input_count || input_secrets.size() != input_count) return false;
+    if (input_count > MAX_RING_SIGNATURE_INPUTS) return false;
+
+    const size_t ring_size = ring_anchors.front().size();
+    if ((!allow_singleton_ring || ring_size != 1) && !lattice::IsSupportedRingSize(ring_size)) return false;
+
+    for (size_t i = 0; i < input_count; ++i) {
+        if (ring_anchors[i].size() != ring_size) return false;
+        if (real_indices[i] >= ring_size) return false;
+        if (!lattice::IsValidPolyVec(input_secrets[i]) || input_secrets[i].size() != lattice::MODULE_RANK) return false;
+        if (lattice::PolyVecInfNorm(input_secrets[i]) > lattice::SECRET_SMALL_ETA) return false;
+        if (lattice::PolyVecInfNorm(input_secrets[i]) == 0) return false;
+    }
+
+    std::vector<std::vector<DerivedRingMember>> bound_storage;
+    std::vector<DerivedRingMemberRefs> derived_ring_members;
+    std::vector<std::vector<uint256>> ring_ids;
+    if (!BuildBoundDerivedMembers(ring_anchors, bound_storage, derived_ring_members, ring_ids)) return false;
+
+    // Soundness residual #1: bind the global link generator G into the FS transcript (see Verify).
+    const uint256 tx_msg = BoundModeTranscriptMessage(message_hash);
+
+    FastRandomContext rng(ComputeSigningRngSeed(ring_ids, real_indices, input_secrets, tx_msg, rng_entropy));
+
+    signature.input_proofs.assign(input_count, RingInputProof{});
+    signature.key_images.assign(input_count, lattice::PolyVec{});
+    signature.member_public_key_offsets.assign(input_count, {});
+    signature.challenge_seed = uint256{};
+    TranscriptChunks transcript_chunks(input_count, std::vector<DataStream>(ring_size));
+    std::set<uint256> seen_key_images;
+
+    for (size_t input_idx = 0; input_idx < input_count; ++input_idx) {
+        RingInputProof& input_proof = signature.input_proofs[input_idx];
+        const auto& derived_input_ring = derived_ring_members[input_idx];
+        const size_t real_index = real_indices[input_idx];
+        lattice::PolyVec secret = input_secrets[input_idx];
+
+        // Bound mode: effective_pk == anchor (zero offsets); KI = G*s.
+        const std::vector<lattice::PolyVec> member_offsets = ZeroOffsets(ring_size);
+        signature.member_public_key_offsets[input_idx] = member_offsets;
+
+        const lattice::Poly256& link_generator_real = derived_input_ring[real_index]->link_generator;
+        const lattice::Poly256& link_generator_real_ntt = derived_input_ring[real_index]->link_generator_ntt;
+        signature.key_images[input_idx] = PolyVecMulPoly(secret, link_generator_real);
+        if (!lattice::IsValidPolyVec(signature.key_images[input_idx])) {
+            CleansePolyVec(secret);
+            return false;
+        }
+        const uint256 key_image_hash = CommitmentHash(Commit(/*value=*/0, signature.key_images[input_idx]));
+        if (key_image_hash.IsNull() || !seen_key_images.insert(key_image_hash).second) {
+            CleansePolyVec(secret);
+            return false;
+        }
+        const ChallengeContext challenge_context = BuildChallengeContext(ring_ids[input_idx],
+                                                                         signature.key_images[input_idx],
+                                                                         member_offsets,
+                                                                         input_idx,
+                                                                         tx_msg);
+        RingInputProof candidate;
+        candidate.responses.assign(ring_size, lattice::PolyVec{});
+        candidate.challenges.assign(ring_size, uint256{});
+
+        bool accepted{false};
+        int accepted_attempt{-1};
+        const auto reset_candidate = [&candidate]() {
+            CleanseResponses(candidate.responses);
+            std::fill(candidate.challenges.begin(), candidate.challenges.end(), uint256{});
+        };
+        for (int attempts = 0; attempts < MAX_REJECTION_ATTEMPTS; ++attempts) {
+            reset_candidate();
+            lattice::PolyVec alpha = SampleMaskingVec(rng);
+            if (!lattice::IsValidPolyVec(alpha)) { CleansePolyVec(alpha); continue; }
+            const lattice::PolyVec alpha_ntt = PreparePolyVecNTT(alpha);
+            const lattice::PolyVec w_real = MatVecMulPreparedNTT(alpha_ntt);
+            const lattice::PolyVec u_real = PolyVecMulPolyPreparedNTT(alpha_ntt, link_generator_real_ntt);
+            uint256 next_challenge = ComputeNextChallengeDigest(challenge_context, real_index, w_real, u_real);
+            if (next_challenge.IsNull()) { CleansePolyVec(alpha); continue; }
+
+            bool chain_ok{true};
+            size_t member_idx = (real_index + 1) % ring_size;
+            while (member_idx != real_index) {
+                candidate.challenges[member_idx] = next_challenge;
+                const ChallengeType challenge_poly = ChallengeFromDigest(next_challenge);
+                candidate.responses[member_idx] = SampleSimulatedResponse(rng);
+                if (!lattice::IsValidPolyVec(candidate.responses[member_idx])) { chain_ok = false; break; }
+                const lattice::PolyVec response_ntt = PreparePolyVecNTT(candidate.responses[member_idx]);
+                const lattice::PolyVec effective_public_key = ComputeEffectivePublicKey(
+                    derived_input_ring[member_idx]->public_key, member_offsets[member_idx]);
+                if (effective_public_key.empty()) { chain_ok = false; break; }
+                const lattice::PolyVec w = ComputeW(response_ntt, challenge_poly, effective_public_key);
+                const lattice::PolyVec u = ComputeU(response_ntt, challenge_poly,
+                                                    signature.key_images[input_idx],
+                                                    derived_input_ring[member_idx]->link_generator_ntt);
+                next_challenge = ComputeNextChallengeDigest(challenge_context, member_idx, w, u);
+                if (next_challenge.IsNull()) { chain_ok = false; break; }
+                member_idx = (member_idx + 1) % ring_size;
+            }
+            if (!chain_ok) { CleansePolyVec(alpha); continue; }
+
+            candidate.challenges[real_index] = next_challenge;
+            const ChallengeType challenge_real = ChallengeFromDigest(next_challenge);
+            lattice::PolyVec cs_product = PolyVecMulPolyCentered(secret, challenge_real);
+            lattice::PolyVec z_real = PolyVecAddCentered(alpha, cs_product);
+            CleansePolyVec(cs_product);
+            if (!lattice::IsValidPolyVec(z_real)) { CleansePolyVec(z_real); CleansePolyVec(alpha); continue; }
+            if (lattice::PolyVecInfNorm(z_real) > RESPONSE_NORM_BOUND) { CleansePolyVec(z_real); CleansePolyVec(alpha); continue; }
+            const lattice::PolyVec z_real_ntt = PreparePolyVecNTT(z_real);
+            const lattice::PolyVec effective_public_key_real = ComputeEffectivePublicKey(
+                derived_input_ring[real_index]->public_key, member_offsets[real_index]);
+            if (effective_public_key_real.empty()) { CleansePolyVec(z_real); CleansePolyVec(alpha); continue; }
+            const lattice::PolyVec w_real_final = ComputeW(z_real_ntt, challenge_real, effective_public_key_real);
+            const lattice::PolyVec u_real_final = ComputeU(z_real_ntt, challenge_real,
+                                                           signature.key_images[input_idx], link_generator_real_ntt);
+            const size_t next_real_idx = (real_index + 1) % ring_size;
+            const uint256 expected_next_real = ComputeNextChallengeDigest(challenge_context, real_index,
+                                                                          w_real_final, u_real_final);
+            if (expected_next_real != candidate.challenges[next_real_idx]) {
+                CleansePolyVec(z_real); CleansePolyVec(alpha); continue;
+            }
+            candidate.responses[real_index] = std::move(z_real);
+            CleansePolyVec(alpha);
+
+            if (!VerifyInputChallengeChain(candidate, ring_ids[input_idx], derived_input_ring,
+                                           signature.key_images[input_idx], member_offsets,
+                                           challenge_context, /*prevalidated_responses=*/false)) {
+                continue;
+            }
+            if (!candidate.IsValid(ring_size)) continue;
+            if (!BuildInputTranscriptChunks(candidate, derived_input_ring, signature.key_images[input_idx],
+                                            member_offsets, challenge_context, input_idx,
+                                            transcript_chunks[input_idx], /*prevalidated_responses=*/true)) {
+                continue;
+            }
+            input_proof = std::move(candidate);
+            accepted = true;
+            accepted_attempt = attempts;
+            break;
+        }
+        RunRingSignaturePaddingIterations(challenge_context, derived_input_ring, member_offsets,
+                                          signature.key_images[input_idx], ring_size, accepted_attempt, tx_msg);
+        CleansePolyVec(secret);
+        if (!accepted) { CleanseResponses(candidate.responses); return false; }
+    }
+
+    signature.challenge_seed = ComputeTranscriptChallengeFromChunks(signature, ring_ids, transcript_chunks, tx_msg);
+    if (signature.challenge_seed.IsNull()) return false;
+    if (!signature.IsValid(input_count, ring_size)) return false;
+    // Self-verify with the ORIGINAL message_hash; VerifyBoundRingSignature re-derives the G-bound
+    // transcript itself. A forged secret (anchor_real != A*s) cannot close the proof, so Create FAILS.
+    if (!VerifyBoundRingSignature(signature, ring_anchors, message_hash, allow_singleton_ring)) return false;
+    return true;
+}
+
 bool ExportRingSignatureTranscriptChunks(
     std::vector<std::vector<std::vector<unsigned char>>>& out_chunks,
     const RingSignature& signature,

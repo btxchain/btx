@@ -305,7 +305,9 @@ NullifierSet::NullifierSet(const fs::path& db_path, size_t cache_bytes, bool mem
       m_settlement_anchor_cache_current(std::make_shared<SettlementAnchorCache>()),
       m_settlement_anchor_miss_cache_current(std::make_shared<SettlementAnchorCache>()),
       m_netting_manifest_cache_current(std::make_shared<NettingManifestCache>()),
-      m_netting_manifest_miss_cache_current(std::make_shared<NettingManifestCache>())
+      m_netting_manifest_miss_cache_current(std::make_shared<NettingManifestCache>()),
+      m_recovery_exit_commitment_cache_current(std::make_shared<RecoveryExitCommitmentCache>()),
+      m_recovery_exit_commitment_miss_cache_current(std::make_shared<RecoveryExitCommitmentCache>())
 {
     uint64_t persisted_count{0};
     if (!m_db->Read(std::make_pair(DB_NULLIFIER_COUNT, uint8_t{0}), persisted_count)) {
@@ -819,6 +821,127 @@ bool NullifierSet::RemoveNettingManifests(const std::vector<uint256>& manifest_i
     return true;
 }
 
+bool NullifierSet::ContainsRecoveryExitCommitment(const uint256& cm) const
+{
+    if (cm.IsNull()) return false;
+
+    {
+        std::shared_lock lock(m_rwlock);
+        if (CacheContains(m_recovery_exit_commitment_cache_current,
+                          m_recovery_exit_commitment_cache_previous,
+                          cm)) {
+            return true;
+        }
+        if (CacheContains(m_recovery_exit_commitment_miss_cache_current,
+                          m_recovery_exit_commitment_miss_cache_previous,
+                          cm)) {
+            return false;
+        }
+    }
+    if (RecoveryExitCommitmentExistsInDB(cm)) return true;
+
+    std::shared_ptr<RecoveryExitCommitmentCache> old_generation_release;
+    {
+        std::unique_lock lock(m_rwlock);
+        if (CacheContains(m_recovery_exit_commitment_cache_current,
+                          m_recovery_exit_commitment_cache_previous,
+                          cm)) {
+            return true;
+        }
+        if (!CacheContains(m_recovery_exit_commitment_miss_cache_current,
+                           m_recovery_exit_commitment_miss_cache_previous,
+                           cm)) {
+            RememberMissInCache(m_recovery_exit_commitment_miss_cache_current,
+                                m_recovery_exit_commitment_miss_cache_previous,
+                                old_generation_release,
+                                cm);
+        }
+    }
+    old_generation_release.reset();
+    return false;
+}
+
+bool NullifierSet::InsertRecoveryExitCommitments(const std::vector<uint256>& cms)
+{
+    if (cms.empty()) {
+        LogPrintf("NullifierSet::InsertRecoveryExitCommitments rejected empty commitment set\n");
+        return false;
+    }
+    for (const auto& cm : cms) {
+        if (cm.IsNull()) {
+            LogPrintf("NullifierSet::InsertRecoveryExitCommitments rejected null commitment\n");
+            return false;
+        }
+    }
+
+    std::shared_ptr<RecoveryExitCommitmentCache> old_generation_release;
+    {
+        std::unique_lock lock(m_rwlock);
+
+        CDBBatch batch(*m_db);
+        for (const auto& cm : cms) {
+            batch.Write(std::make_pair(DB_RECOVERY_EXIT_COMMITMENT, cm), uint8_t{1});
+        }
+        if (!m_db->WriteBatch(batch, /*fSync=*/true)) {
+            LogPrintf("NullifierSet::InsertRecoveryExitCommitments failed DB batch write\n");
+            return false;
+        }
+
+        RotateCacheGeneration(m_recovery_exit_commitment_cache_current,
+                              m_recovery_exit_commitment_cache_previous,
+                              old_generation_release,
+                              cms.size());
+        for (const auto& cm : cms) {
+            m_recovery_exit_commitment_cache_current->insert(cm);
+            if (m_recovery_exit_commitment_miss_cache_current) {
+                m_recovery_exit_commitment_miss_cache_current->erase(cm);
+            }
+            if (m_recovery_exit_commitment_miss_cache_previous) {
+                m_recovery_exit_commitment_miss_cache_previous->erase(cm);
+            }
+        }
+    }
+
+    old_generation_release.reset();
+    return true;
+}
+
+bool NullifierSet::RemoveRecoveryExitCommitments(const std::vector<uint256>& cms)
+{
+    for (const auto& cm : cms) {
+        if (cm.IsNull()) {
+            LogPrintf("NullifierSet::RemoveRecoveryExitCommitments rejected null commitment\n");
+            return false;
+        }
+    }
+
+    std::unique_lock lock(m_rwlock);
+    std::shared_ptr<RecoveryExitCommitmentCache> old_miss_generation_release;
+    CDBBatch batch(*m_db);
+    for (const auto& cm : cms) {
+        batch.Erase(std::make_pair(DB_RECOVERY_EXIT_COMMITMENT, cm));
+    }
+    if (!m_db->WriteBatch(batch, /*fSync=*/true)) {
+        LogPrintf("NullifierSet::RemoveRecoveryExitCommitments failed DB batch erase\n");
+        return false;
+    }
+
+    for (const auto& cm : cms) {
+        if (m_recovery_exit_commitment_cache_current) m_recovery_exit_commitment_cache_current->erase(cm);
+        if (m_recovery_exit_commitment_cache_previous) m_recovery_exit_commitment_cache_previous->erase(cm);
+        if (!CacheContains(m_recovery_exit_commitment_miss_cache_current,
+                           m_recovery_exit_commitment_miss_cache_previous,
+                           cm)) {
+            RememberMissInCache(m_recovery_exit_commitment_miss_cache_current,
+                                m_recovery_exit_commitment_miss_cache_previous,
+                                old_miss_generation_release,
+                                cm);
+        }
+    }
+    old_miss_generation_release.reset();
+    return true;
+}
+
 size_t NullifierSet::CacheSize() const
 {
     std::shared_lock lock(m_rwlock);
@@ -847,10 +970,16 @@ size_t NullifierSet::DynamicMemoryUsage() const
     if (m_netting_manifest_cache_previous) netting_manifest_cache_entries += m_netting_manifest_cache_previous->size();
     if (m_netting_manifest_miss_cache_current) netting_manifest_cache_entries += m_netting_manifest_miss_cache_current->size();
     if (m_netting_manifest_miss_cache_previous) netting_manifest_cache_entries += m_netting_manifest_miss_cache_previous->size();
+    size_t recovery_exit_commitment_cache_entries{0};
+    if (m_recovery_exit_commitment_cache_current) recovery_exit_commitment_cache_entries += m_recovery_exit_commitment_cache_current->size();
+    if (m_recovery_exit_commitment_cache_previous) recovery_exit_commitment_cache_entries += m_recovery_exit_commitment_cache_previous->size();
+    if (m_recovery_exit_commitment_miss_cache_current) recovery_exit_commitment_cache_entries += m_recovery_exit_commitment_miss_cache_current->size();
+    if (m_recovery_exit_commitment_miss_cache_previous) recovery_exit_commitment_cache_entries += m_recovery_exit_commitment_miss_cache_previous->size();
     return m_db->DynamicMemoryUsage() +
            (cache_entries * (sizeof(Nullifier) + per_entry_overhead)) +
            (settlement_anchor_cache_entries * (sizeof(uint256) + per_entry_overhead)) +
-           (netting_manifest_cache_entries * (sizeof(uint256) + per_entry_overhead));
+           (netting_manifest_cache_entries * (sizeof(uint256) + per_entry_overhead)) +
+           (recovery_exit_commitment_cache_entries * (sizeof(uint256) + per_entry_overhead));
 }
 
 uint64_t NullifierSet::CountNullifiers() const
@@ -1108,4 +1237,9 @@ bool NullifierSet::SettlementAnchorExistsInDB(const uint256& anchor) const
 bool NullifierSet::NettingManifestExistsInDB(const uint256& manifest_id) const
 {
     return m_db->Exists(std::make_pair(DB_NETTING_MANIFEST, manifest_id));
+}
+
+bool NullifierSet::RecoveryExitCommitmentExistsInDB(const uint256& cm) const
+{
+    return m_db->Exists(std::make_pair(DB_RECOVERY_EXIT_COMMITMENT, cm));
 }

@@ -12,7 +12,7 @@
 #include <map>
 
 /**
- * Shielded-pool unshield (z->t egress) velocity cap — v0.31.1 defense-in-depth.
+ * Shielded-pool unshield (z->t egress) velocity cap — v0.32.0 defense-in-depth.
  *
  * Sits ALONGSIDE the turnstile (ShieldedPoolBalance, the net-supply firewall) and the C-002 per-tx
  * value/serial bindings (soundness). Those make forgery non-constructible and bound total loss; this

@@ -106,8 +106,8 @@ when none matches or verification fails.
 "git_commit": "<full 40-hex commit the binaries were built from>",
 "prebuilt": {
   "linux-x86_64-glibc": {
-    "url":    "https://btx.dev/bin/btx-0.31.1-linux-x86_64-glibc.tar.gz",
-    "sig_url":"https://btx.dev/bin/btx-0.31.1-linux-x86_64-glibc.tar.gz.sig",
+    "url":    "https://btx.dev/bin/btx-0.32.0-linux-x86_64-glibc.tar.gz",
+    "sig_url":"https://btx.dev/bin/btx-0.32.0-linux-x86_64-glibc.tar.gz.sig",
     "sha256": "<hex>"                       // optional, defense-in-depth
   },
   "linux-aarch64-glibc": { "url": "…", "sig_url": "…" },

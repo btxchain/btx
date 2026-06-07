@@ -49,6 +49,9 @@ static constexpr uint64_t MAX_GENERIC_OUTPUTS{MAX_EGRESS_OUTPUTS};
 static constexpr uint64_t MAX_ADDRESS_LIFECYCLE_CONTROLS{1};
 static constexpr uint64_t MAX_ADDRESS_LIFECYCLE_PUBKEY_BYTES{MLDSA44_PUBKEY_SIZE};
 static constexpr uint64_t MAX_ADDRESS_LIFECYCLE_SIGNATURE_BYTES{MLDSA44_SIGNATURE_SIZE};
+static constexpr uint64_t MAX_RECOVERY_EXIT_PUBKEY_BYTES{8192};
+static constexpr uint64_t MAX_RECOVERY_EXIT_SIGNATURE_BYTES{8192};
+static constexpr uint64_t MAX_RECOVERY_EXIT_MEMBERSHIP_PROOF_BYTES{16384};
 
 enum class SendOutputEncoding : uint8_t {
     LEGACY = 0,
@@ -866,6 +869,68 @@ struct SpendPathRecoveryPayload
     }
 };
 
+struct RecoveryExitPayload
+{
+    uint8_t version{WIRE_VERSION};
+    CAmount value{0};
+    uint256 recipient_pk_hash;
+    uint256 rho;
+    uint256 rcm;
+    std::vector<unsigned char> spend_pubkey;
+    std::vector<unsigned char> ownership_sig;
+    std::vector<unsigned char> membership_proof;
+
+    [[nodiscard]] bool IsValid() const;
+
+    template <typename Stream>
+    void Serialize(Stream& s) const
+    {
+        detail::SerializeVersion(s,
+                                 version,
+                                 "RecoveryExitPayload::Serialize invalid version");
+        ::Serialize(s, value);
+        ::Serialize(s, recipient_pk_hash);
+        ::Serialize(s, rho);
+        ::Serialize(s, rcm);
+        detail::SerializeBytes(s,
+                               spend_pubkey,
+                               MAX_RECOVERY_EXIT_PUBKEY_BYTES,
+                               "RecoveryExitPayload::Serialize oversized spend_pubkey");
+        detail::SerializeBytes(s,
+                               ownership_sig,
+                               MAX_RECOVERY_EXIT_SIGNATURE_BYTES,
+                               "RecoveryExitPayload::Serialize oversized ownership_sig");
+        detail::SerializeBytes(s,
+                               membership_proof,
+                               MAX_RECOVERY_EXIT_MEMBERSHIP_PROOF_BYTES,
+                               "RecoveryExitPayload::Serialize oversized membership_proof");
+    }
+
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        detail::UnserializeVersion(s,
+                                   version,
+                                   "RecoveryExitPayload::Unserialize invalid version");
+        ::Unserialize(s, value);
+        ::Unserialize(s, recipient_pk_hash);
+        ::Unserialize(s, rho);
+        ::Unserialize(s, rcm);
+        detail::UnserializeBytes(s,
+                                 spend_pubkey,
+                                 MAX_RECOVERY_EXIT_PUBKEY_BYTES,
+                                 "RecoveryExitPayload::Unserialize oversized spend_pubkey");
+        detail::UnserializeBytes(s,
+                                 ownership_sig,
+                                 MAX_RECOVERY_EXIT_SIGNATURE_BYTES,
+                                 "RecoveryExitPayload::Unserialize oversized ownership_sig");
+        detail::UnserializeBytes(s,
+                                 membership_proof,
+                                 MAX_RECOVERY_EXIT_MEMBERSHIP_PROOF_BYTES,
+                                 "RecoveryExitPayload::Unserialize oversized membership_proof");
+    }
+};
+
 struct LifecyclePayload
 {
     uint8_t version{WIRE_VERSION};
@@ -1479,6 +1544,7 @@ struct TransactionBundle;
 using FamilyPayload =
     std::variant<SendPayload,
                  SpendPathRecoveryPayload,
+                 RecoveryExitPayload,
                  LifecyclePayload,
                  IngressBatchPayload,
                  EgressBatchPayload,
@@ -1686,6 +1752,9 @@ void SerializePayload(Stream& s, const FamilyPayload& payload, TransactionFamily
     case V2_SPEND_PATH_RECOVERY:
         ::Serialize(s, std::get<SpendPathRecoveryPayload>(payload));
         break;
+    case TransactionFamily::V2_RECOVERY_EXIT:
+        ::Serialize(s, std::get<RecoveryExitPayload>(payload));
+        break;
     case TransactionFamily::V2_LIFECYCLE:
         ::Serialize(s, std::get<LifecyclePayload>(payload));
         break;
@@ -1717,6 +1786,11 @@ FamilyPayload DeserializePayload(Stream& s, TransactionFamily family)
     }
     case V2_SPEND_PATH_RECOVERY: {
         SpendPathRecoveryPayload payload_obj;
+        ::Unserialize(s, payload_obj);
+        return payload_obj;
+    }
+    case TransactionFamily::V2_RECOVERY_EXIT: {
+        RecoveryExitPayload payload_obj;
         ::Unserialize(s, payload_obj);
         return payload_obj;
     }
@@ -1760,6 +1834,7 @@ FamilyPayload DeserializePayload(Stream& s, TransactionFamily family)
 
 [[nodiscard]] uint256 ComputeSendPayloadDigest(const SendPayload& payload);
 [[nodiscard]] uint256 ComputeSpendPathRecoveryPayloadDigest(const SpendPathRecoveryPayload& payload);
+[[nodiscard]] uint256 ComputeRecoveryExitPayloadDigest(const RecoveryExitPayload& payload);
 [[nodiscard]] uint256 ComputeLifecyclePayloadDigest(const LifecyclePayload& payload);
 [[nodiscard]] uint256 ComputeIngressBatchPayloadDigest(const IngressBatchPayload& payload);
 [[nodiscard]] uint256 ComputeEgressBatchPayloadDigest(const EgressBatchPayload& payload);

@@ -304,7 +304,7 @@ For the full PQ specification and tutorials, see:
 
 BTX includes a **shielded transaction pool** active from genesis on all
 networks. Shielded transactions hide sender, receiver, and amount using
-lattice-based zero-knowledge proofs. As of v0.31.1, coinbase auto-shielding is
+lattice-based zero-knowledge proofs. As of v0.32.0, coinbase auto-shielding is
 opt-in (default off; `-autoshieldcoinbase=1`) so mined rewards stay as
 post-quantum transparent outputs unless an operator chooses to shield.
 
@@ -623,7 +623,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.31.1 \
+  --release-tag v0.32.0 \
   --preset service \
   --datadir="$HOME/.btx"
 ```

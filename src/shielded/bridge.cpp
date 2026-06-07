@@ -3053,7 +3053,7 @@ uint256 ComputeBridgeBatchReceiptHash(const BridgeBatchReceipt& receipt)
 
 bool BridgeAttestorUsesFips205AtHeight(int64_t validation_height)
 {
-    // Same activation boundary as the rest of the v0.31 SLH-DSA / shielded migration.
+    // Same activation boundary as the rest of the C-002 SLH-DSA / shielded migration.
     return validation_height >= smile2::SmileCTProof::C002_ACTIVATION_HEIGHT;
 }
 

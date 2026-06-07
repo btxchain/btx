@@ -74,6 +74,10 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
         opts.fast_shielded_startup = *value;
     }
 
+    if (auto value{args.GetBoolArg("-allowunpinnedshieldedsnapshot")}) {
+        opts.allow_unpinned_shielded_snapshot = *value;
+    }
+
     ReadDatabaseArgs(args, opts.coins_db);
     ReadCoinsViewArgs(args, opts.coins_view);
 

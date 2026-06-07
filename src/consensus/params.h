@@ -159,6 +159,12 @@ struct Params {
      *  nMatMulPreHashEpsilonBits value. */
     int32_t nMatMulPreHashEpsilonBitsUpgradeHeight{std::numeric_limits<int32_t>::max()};
     uint32_t nMatMulPreHashEpsilonBitsUpgrade{10};
+    /** Height at which MatMul matrix seeds become nonce/header-bound. Legacy
+     *  blocks use H(prev || height || which), allowing A/B reuse across nonce
+     *  attempts. At and above this height, seeds commit to nonce, time, merkle,
+     *  nBits, dimension, and version so every attempted header has a distinct
+     *  matrix instance. */
+    int32_t nMatMulNonceSeedHeight{std::numeric_limits<int32_t>::max()};
     /** Maximum Phase 2 verifications per minute across ALL peers combined.
      *  With n=512 each costs ~5ms, so 512/min ≈ 2.56s CPU/min. */
     uint32_t nMatMulGlobalVerifyBudgetPerMin{512};
@@ -238,7 +244,14 @@ struct Params {
     // single future-dated block without changing the ASERT formula itself.
     int32_t nMatMulMaxFutureMtpDriftHeight{std::numeric_limits<int32_t>::max()};
     int64_t nMatMulMaxFutureMtpDrift{3'600};
-
+    // a5 fix: at/above this height the future-MTP-drift upper bound is reconciled with the
+    // BIP94 timewarp lower bound -- the upper bound is never allowed below
+    // (prev_block_time - MAX_TIMEWARP). Without this, at a drift-cap activation boundary an
+    // unprotected predecessor's high timestamp can push the lower bound above the upper bound,
+    // leaving NO legal timestamp and wedging the chain (liveness halt). The reconciliation only
+    // ever RAISES the upper bound (a relaxation confined to otherwise-unmineable blocks), so it
+    // is flag-day gated to keep upgraded/non-upgraded nodes in agreement until activation.
+    int32_t nMatMulTimewarpReconcileHeight{std::numeric_limits<int32_t>::max()};
     // Block capacity.
     uint32_t nMaxBlockWeight{24'000'000};
     uint32_t nMaxBlockSerializedSize{24'000'000};
@@ -257,6 +270,21 @@ struct Params {
     int32_t nShieldedMatRiCTDisableHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedSpendPathRecoveryActivationHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedPQ128UpgradeHeight{std::numeric_limits<int32_t>::max()};
+    int32_t nShieldedPoolCreditDisableHeight{std::numeric_limits<int32_t>::max()};
+    int32_t nShieldedSunsetHeight{std::numeric_limits<int32_t>::max()};
+    /** RECOVERY_EXIT activation (transparent-claim stranded-note recovery). DISABLED by default
+     *  (int32 max) for regtest unless explicitly overridden. Production networks activate it at the
+     *  125,000 sunset only after strict zero-output sunset gating, mempool commitment/nullifier
+     *  reservation, and block-level atomic dual retirement are present. Must be >= nShieldedSunsetHeight
+     *  when set.
+     *  See doc/recovery_exit_125000_spec.md. */
+    int32_t nShieldedRecoveryExitActivationHeight{std::numeric_limits<int32_t>::max()};
+    /** RECOVERY_EXIT membership anchor: the consensus-PINNED shielded note-commitment tree root of the
+     *  frozen 125,000 ceiling when known at release time. A recovery claim's Merkle witness must
+     *  authenticate the spent commitment against this root, or against the immutable live tree root after
+     *  the sunset zero-output rule has frozen the tree. Null therefore means "use the live frozen root"
+     *  only once the sunset is active; before then it fails closed. Regtest may set it via override. */
+    uint256 nShieldedRecoveryExitFrozenRoot{};
     uint32_t nShieldedSettlementAnchorMaturity{6};
     int32_t nMLDSADisableHeight{std::numeric_limits<int32_t>::max()};
     /** Maximum shielded verification cost units per block (consensus rule).
@@ -286,8 +314,11 @@ struct Params {
     int32_t nShieldedUnshieldVelocityActivationHeight{std::numeric_limits<int32_t>::max()};
     /** Trailing window length in blocks over which net unshield value is summed. */
     uint32_t nShieldedUnshieldVelocityWindowBlocks{960}; // ~1 day at 90s spacing
-    /** Cap as basis points (1/10000) of the pool balance at window start. 1000 bps = 10%. */
-    uint32_t nShieldedUnshieldVelocityCapBps{1000};
+    /** Cap as basis points (1/10000) of the pool balance at window start. 5000 bps = 50% per ~1-day
+     *  window: aligned to the 125,000 sunset (active from the first exit-only block) but loosened from
+     *  the original 10% so a legitimate large legacy holder can fully exit in ~1 week rather than ~3+
+     *  weeks, while still throttling any residual drain to half the pool per day. */
+    uint32_t nShieldedUnshieldVelocityCapBps{5000};
     bool IsShieldedUnshieldVelocityCapActive(int32_t height) const
     {
         return nShieldedUnshieldVelocityActivationHeight != std::numeric_limits<int32_t>::max() &&
@@ -333,6 +364,13 @@ struct Params {
             nMatMulPreHashEpsilonBitsUpgradeHeight != std::numeric_limits<int32_t>::max() &&
             height >= nMatMulPreHashEpsilonBitsUpgradeHeight;
     }
+    bool IsMatMulNonceSeedActive(int32_t height) const
+    {
+        return fMatMulPOW &&
+            height >= 0 &&
+            nMatMulNonceSeedHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nMatMulNonceSeedHeight;
+    }
     bool IsMatMulMaxFutureMtpDriftActive(int32_t height) const
     {
         return fMatMulPOW &&
@@ -340,6 +378,14 @@ struct Params {
             nMatMulMaxFutureMtpDriftHeight != std::numeric_limits<int32_t>::max() &&
             height >= nMatMulMaxFutureMtpDriftHeight &&
             nMatMulMaxFutureMtpDrift > 0;
+    }
+    // a5 fix: whether the timewarp/drift bound reconciliation is active at this height.
+    bool IsMatMulTimewarpReconcileActive(int32_t height) const
+    {
+        return fMatMulPOW &&
+            height >= 0 &&
+            nMatMulTimewarpReconcileHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nMatMulTimewarpReconcileHeight;
     }
     std::optional<int64_t> MaxMatMulFutureBlockTime(int32_t height, int64_t prev_median_time_past) const
     {
@@ -393,6 +439,24 @@ struct Params {
         return height >= 0 &&
             nShieldedPQ128UpgradeHeight != std::numeric_limits<int32_t>::max() &&
             height >= nShieldedPQ128UpgradeHeight;
+    }
+    bool IsShieldedPoolCreditDisabled(int32_t height) const
+    {
+        return height >= 0 &&
+            nShieldedPoolCreditDisableHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nShieldedPoolCreditDisableHeight;
+    }
+    bool IsShieldedSunsetActive(int32_t height) const
+    {
+        return height >= 0 &&
+            nShieldedSunsetHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nShieldedSunsetHeight;
+    }
+    bool IsShieldedRecoveryExitActive(int32_t height) const
+    {
+        return height >= 0 &&
+            nShieldedRecoveryExitActivationHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nShieldedRecoveryExitActivationHeight;
     }
     uint32_t GetShieldedSettlementAnchorMaturityDepth(int32_t height) const
     {

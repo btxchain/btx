@@ -98,6 +98,7 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
     }
     case shielded::v2::TransactionFamily::V2_SEND:
     case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY:
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
     case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
     case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
     case shielded::v2::TransactionFamily::V2_LIFECYCLE:
@@ -489,7 +490,19 @@ int64_t GetMinimumTime(const CBlockIndex* pindexPrev, const Consensus::Params& c
 
 std::optional<int64_t> GetMaximumTime(const CBlockIndex* pindexPrev, const Consensus::Params& consensus_params)
 {
-    return consensus_params.MatMulFutureBlockTimeLimit(pindexPrev->GetMedianTimePast());
+    auto max_time{consensus_params.MatMulFutureBlockTimeLimit(pindexPrev->GetMedianTimePast())};
+    if (!max_time.has_value()) return max_time;
+    // a5 fix: keep the miner's upper bound consistent with the reconciled consensus rule -- never
+    // below the BIP94 timewarp floor -- so an honest miner can always produce a valid timestamp at
+    // a drift-cap activation boundary instead of self-rejecting (UpdateTime would otherwise emit a
+    // min_time above the raw cap). Mirrors the gated reconciliation in ContextualCheckBlockHeader.
+    int height{0};
+    if (TryGetNextBlockHeight(pindexPrev->nHeight, height) &&
+        consensus_params.IsMatMulTimewarpReconcileActive(height) &&
+        EnforceTimewarpProtectionAtHeight(consensus_params, height)) {
+        max_time = std::max<int64_t>(*max_time, pindexPrev->GetBlockTime() - MAX_TIMEWARP);
+    }
+    return max_time;
 }
 
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev)
@@ -694,8 +707,7 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     pblock->mix_hash.SetNull();
     if (chainparams.GetConsensus().fMatMulPOW) {
         pblock->matmul_dim = static_cast<uint16_t>(chainparams.GetConsensus().nMatMulDimension);
-        pblock->seed_a = DeterministicMatMulSeed(pblock->hashPrevBlock, nHeight, 0);
-        pblock->seed_b = DeterministicMatMulSeed(pblock->hashPrevBlock, nHeight, 1);
+        SetDeterministicMatMulSeeds(*pblock, chainparams.GetConsensus(), nHeight);
         pblock->matmul_digest.SetNull();
         // v1 uses seed-derived matrices; do not store full matrices in block body.
         // Validators regenerate A and B from seed_a/seed_b on demand.

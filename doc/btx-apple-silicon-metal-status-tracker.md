@@ -1,5 +1,9 @@
 # BTX Apple Silicon + BTX Unit Migration Status Tracker
 
+Current note: this file is a historical tracker. The active audit branch has removed the precompiled
+MatMul/oracle `.metallib` loading path and uses embedded runtime source compilation instead. See
+`doc/btx-metal-mining-tuning.md` for current operator guidance.
+
 Last updated: 2026-02-20
 Branch: codex/apple-metal-strict-readiness-fix-20260220
 Plan source: `doc/btx-apple-silicon-metal-optimization-plan.md`

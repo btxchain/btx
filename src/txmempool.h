@@ -461,6 +461,11 @@ public:
     indirectmap<COutPoint, const CTransaction*> mapNextTx GUARDED_BY(cs);
     std::map<uint256, std::pair<double, CAmount> > mapDeltas GUARDED_BY(cs);
     std::unordered_map<Nullifier, Txid, NullifierHasher> m_shielded_nullifiers GUARDED_BY(cs);
+    //! V2_RECOVERY_EXIT mempool reservation: a recovery claim reserves BOTH its derived nullifier (in
+    //! m_shielded_nullifiers above, so it conflicts with a normal spend of the same note) AND its revealed
+    //! commitment here (so a second recovery of the same note conflicts). Derived identifiers, not bundle
+    //! spend descriptors, so reserved/released explicitly in Add/RemoveShieldedNullifiers.
+    std::unordered_map<uint256, Txid, NullifierHasher> m_shielded_recovery_commitments GUARDED_BY(cs);
     std::set<uint256> m_shielded_settlement_anchor_refs GUARDED_BY(cs);
 
     struct ShieldedNullifierConflictInfo {

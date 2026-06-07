@@ -226,6 +226,56 @@ struct RingSignature {
                                        const uint256& message_hash,
                                        bool allow_singleton_ring = false);
 
+// ---------------------------------------------------------------------------
+// DS-4 key-image binding (bound mode) — fork-gated, off by default.
+//
+// The legacy ring signature lets a signer forge a second key-image for the same
+// note (double-spend) because the per-member `member_public_key_offset` lets the
+// signer set the real member's effective public key to A*s for ANY chosen secret
+// s, so the note never pins a unique s (and thus a unique key-image). See
+// redteam/findings/DS4-keyimage-binding-design.md.
+//
+// Bound mode closes this by representing each ring member by an explicit lattice
+// anchor T = A*s (a real Module-SIS public key fixed at note creation) instead of
+// a NUMS-derived placeholder, FORBIDDING offsets (effective_pk == T directly), and
+// deriving the key-image from a single ring-independent generator (KI = G*s). With
+// the offset gone and T consensus-fixed, the shared one-out-of-many response forces
+// a unique s, hence a unique key-image: one note -> one nullifier. A second secret
+// s' != s can no longer produce a verifying signature over the same anchors.
+//
+// This is the cryptographic core of the fix; wiring T into the note commitment and
+// activating it behind a fork height + external audit are the remaining productionization
+// steps. The functions below are not yet on any consensus path.
+
+/** The single ring-independent ("global") linkable generator used for bound-mode key images. */
+[[nodiscard]] lattice::Poly256 GlobalLinkGenerator();
+
+/** Bound-mode key image for a note authorising secret s: KI = G*s with G = GlobalLinkGenerator(). */
+[[nodiscard]] lattice::PolyVec ComputeBoundKeyImage(const lattice::PolyVec& input_secret);
+
+/** The bound-mode lattice anchor (Module-SIS public key) for a note authorising secret s: T = A*s.
+ *  This is what a note must commit to so its ring member is a consensus-fixed key the signer cannot
+ *  forge an offset around. Returns empty on an invalid secret. */
+[[nodiscard]] lattice::PolyVec ComputeBoundAnchor(const lattice::PolyVec& input_secret);
+
+/** Create a bound-mode ring signature. `ring_anchors[i][j]` is member j's lattice public key
+ *  T = A*s_j for input i; the real member's anchor MUST equal A*input_secrets[i]. Offsets are not
+ *  used (effective_pk == anchor). Returns false if a real anchor does not open to its secret. */
+[[nodiscard]] bool CreateBoundRingSignature(RingSignature& signature,
+                                            const std::vector<std::vector<lattice::PolyVec>>& ring_anchors,
+                                            const std::vector<size_t>& real_indices,
+                                            const std::vector<lattice::PolyVec>& input_secrets,
+                                            const uint256& message_hash,
+                                            Span<const unsigned char> rng_entropy = {},
+                                            bool allow_singleton_ring = false);
+
+/** Verify a bound-mode ring signature against the explicit anchors. Rejects any signature carrying
+ *  non-zero member_public_key_offsets (the forge surface) and any key-image not built from G. */
+[[nodiscard]] bool VerifyBoundRingSignature(const RingSignature& signature,
+                                            const std::vector<std::vector<lattice::PolyVec>>& ring_anchors,
+                                            const uint256& message_hash,
+                                            bool allow_singleton_ring = false);
+
 /** Export the finalized Fiat-Shamir transcript chunks used to derive the
  *  ring-signature challenge seed. This supports independent transcript
  *  checking without exposing verifier internals in the caller. */

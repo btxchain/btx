@@ -2976,7 +2976,7 @@ bool CWallet::SignTransaction(CMutableTransaction& tx, const std::map<COutPoint,
     // earlier than the next block. At/after the C-002 activation height, SLH-DSA
     // signatures must be produced as finalized FIPS-205 (pure mode); before it,
     // as the legacy round-3.x SPHINCS+ reference. Both gate off the same height
-    // the verifier (GetBlockScriptFlags) uses, so the whole v0.31 upgrade is
+    // the verifier (GetBlockScriptFlags) uses, so the whole C-002 upgrade is
     // atomic. (Spends authored within one block of the boundary should be mined
     // promptly; a tx signed in one regime is rejected once the other activates.)
     const int next_height = chain().getHeight().value_or(-1) + 1;

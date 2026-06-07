@@ -42,8 +42,7 @@ bool MineHeaderForConsensus(CBlockHeader& header,
         if (header.matmul_dim == 0) {
             header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
         }
-        if (header.seed_a.IsNull()) header.seed_a = DeterministicMatMulSeed(header.hashPrevBlock, block_height, 0);
-        if (header.seed_b.IsNull()) header.seed_b = DeterministicMatMulSeed(header.hashPrevBlock, block_height, 1);
+        SetDeterministicMatMulSeeds(header, consensus, static_cast<int32_t>(block_height));
         header.mix_hash.SetNull();
         return SolveMatMul(header, consensus, max_tries, static_cast<int32_t>(block_height));
     }

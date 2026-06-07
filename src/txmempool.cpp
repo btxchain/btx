@@ -12,6 +12,9 @@
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <crypto/ripemd160.h>
+#include <shielded/recovery_exit.h>
+#include <shielded/v2_bundle.h>
+#include <shielded/v2_types.h>
 #include <logging.h>
 #include <policy/coin_age_priority.h>
 #include <policy/fees.h>
@@ -616,6 +619,29 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
     nTransactionsUpdated++;
 }
 
+namespace {
+// For a V2_RECOVERY_EXIT tx, derive the (commitment, nullifier) it reserves, identically to the consensus
+// derivation, so mempool reservations match block validation. Returns false for any other tx.
+[[nodiscard]] bool GetMempoolRecoveryExitReservation(const CTransaction& tx, uint256& out_cm, uint256& out_nf)
+{
+    if (!tx.HasShieldedBundle()) return false;
+    const CShieldedBundle& bundle = tx.GetShieldedBundle();
+    if (!bundle.HasV2Bundle()) return false;
+    const auto* v2b = bundle.GetV2Bundle();
+    if (v2b == nullptr) return false;
+    if (shielded::v2::GetBundleSemanticFamily(*v2b) != shielded::v2::TransactionFamily::V2_RECOVERY_EXIT) return false;
+    if (!std::holds_alternative<shielded::v2::RecoveryExitPayload>(v2b->payload)) return false;
+    const auto& p = std::get<shielded::v2::RecoveryExitPayload>(v2b->payload);
+    shielded::recovery::RecoveryExitClaim claim;
+    claim.value = p.value; claim.recipient_pk_hash = p.recipient_pk_hash; claim.rho = p.rho; claim.rcm = p.rcm;
+    claim.spend_pubkey = p.spend_pubkey; claim.ownership_sig = p.ownership_sig; claim.membership_proof = p.membership_proof;
+    shielded::recovery::RecoveryExitIdentifiers ids; std::string rr;
+    if (!shielded::recovery::DeriveRecoveryExitIdentifiers(claim, ids, rr)) return false;
+    out_cm = ids.commitment; out_nf = ids.nullifier;
+    return true;
+}
+} // namespace
+
 void CTxMemPool::AddShieldedNullifiers(const CTransaction& tx)
 {
     if (!tx.HasShieldedBundle()) return;
@@ -624,6 +650,11 @@ void CTxMemPool::AddShieldedNullifiers(const CTransaction& tx)
         if (!nullifier.IsNull()) {
             m_shielded_nullifiers[nullifier] = txid;
         }
+    }
+    uint256 re_cm, re_nf;
+    if (GetMempoolRecoveryExitReservation(tx, re_cm, re_nf)) {
+        if (!re_nf.IsNull()) m_shielded_nullifiers[re_nf] = txid;   // conflicts with a normal spend of this note
+        if (!re_cm.IsNull()) m_shielded_recovery_commitments[re_cm] = txid; // conflicts with a 2nd recovery
     }
 }
 
@@ -637,6 +668,17 @@ void CTxMemPool::RemoveShieldedNullifiers(const CTransaction& tx)
             if (it != m_shielded_nullifiers.end() && it->second == txid) {
                 m_shielded_nullifiers.erase(it);
             }
+        }
+    }
+    uint256 re_cm, re_nf;
+    if (GetMempoolRecoveryExitReservation(tx, re_cm, re_nf)) {
+        if (!re_nf.IsNull()) {
+            const auto it = m_shielded_nullifiers.find(re_nf);
+            if (it != m_shielded_nullifiers.end() && it->second == txid) m_shielded_nullifiers.erase(it);
+        }
+        if (!re_cm.IsNull()) {
+            const auto it = m_shielded_recovery_commitments.find(re_cm);
+            if (it != m_shielded_recovery_commitments.end() && it->second == txid) m_shielded_recovery_commitments.erase(it);
         }
     }
 }
@@ -689,6 +731,16 @@ CTxMemPool::ShieldedNullifierConflictInfo CTxMemPool::GetShieldedNullifierConfli
         if (it != m_shielded_nullifiers.end() && it->second != txid) {
             result.txids.insert(it->second);
         }
+    }
+    // V2_RECOVERY_EXIT: its (cm, nf) are derived, so check both reservation maps. nf conflicts with a
+    // normal spend of the same note OR another recovery; cm conflicts with another recovery of the note.
+    uint256 re_cm, re_nf;
+    if (GetMempoolRecoveryExitReservation(tx, re_cm, re_nf)) {
+        if (re_nf.IsNull() || re_cm.IsNull()) { result.invalid_in_tx = true; return result; }
+        const auto nf_it = m_shielded_nullifiers.find(re_nf);
+        if (nf_it != m_shielded_nullifiers.end() && nf_it->second != txid) result.txids.insert(nf_it->second);
+        const auto cm_it = m_shielded_recovery_commitments.find(re_cm);
+        if (cm_it != m_shielded_recovery_commitments.end() && cm_it->second != txid) result.txids.insert(cm_it->second);
     }
     return result;
 }

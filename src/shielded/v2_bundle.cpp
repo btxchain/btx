@@ -33,6 +33,8 @@ constexpr std::string_view TAG_RESERVE_DELTA_NODE{"BTX_ShieldedV2_Reserve_Delta_
 constexpr std::string_view TAG_SEND_PAYLOAD{"BTX_ShieldedV2_Send_Payload_V1"};
 constexpr std::string_view TAG_SPEND_PATH_RECOVERY_PAYLOAD{
     "BTX_ShieldedV2_Spend_Path_Recovery_Payload_V1"};
+constexpr std::string_view TAG_RECOVERY_EXIT_PAYLOAD{
+    "BTX_ShieldedV2_Recovery_Exit_Payload_V1"};
 constexpr std::string_view TAG_INGRESS_PAYLOAD{"BTX_ShieldedV2_Ingress_Payload_V1"};
 constexpr std::string_view TAG_EGRESS_PAYLOAD{"BTX_ShieldedV2_Egress_Payload_V1"};
 constexpr std::string_view TAG_REBALANCE_PAYLOAD{"BTX_ShieldedV2_Rebalance_Payload_V1"};
@@ -279,6 +281,7 @@ template <typename T>
     proof::ProofStatement statement;
     switch (family) {
     case TransactionFamily::V2_SEND:
+    case TransactionFamily::V2_RECOVERY_EXIT:
     case TransactionFamily::V2_LIFECYCLE:
         statement.domain = proof::VerificationDomain::DIRECT_SPEND;
         break;
@@ -307,6 +310,18 @@ template <typename T>
                 envelope.proof_kind == ProofKind::GENERIC_OPAQUE) &&
                (envelope.settlement_binding_kind == SettlementBindingKind::NONE ||
                 IsGenericShieldedSettlementBindingKind(envelope.settlement_binding_kind));
+    case TransactionFamily::V2_RECOVERY_EXIT:
+        // A transparent claim carries NO zero-knowledge proof (ownership is a PQ signature in the
+        // payload, membership is a Merkle witness in the payload), so it must be a fully no-proof
+        // envelope: every proof-component kind NONE, no settlement binding, and null digests. This forbids
+        // smuggling a SMILE/MatRiCT/opaque proof through the recovery family.
+        return envelope.proof_kind == ProofKind::NONE &&
+               envelope.membership_proof_kind == ProofComponentKind::NONE &&
+               envelope.amount_proof_kind == ProofComponentKind::NONE &&
+               envelope.balance_proof_kind == ProofComponentKind::NONE &&
+               envelope.settlement_binding_kind == SettlementBindingKind::NONE &&
+               envelope.statement_digest.IsNull() &&
+               envelope.extension_digest.IsNull();
     case V2_SPEND_PATH_RECOVERY:
         return (envelope.proof_kind == ProofKind::NONE ||
                 envelope.proof_kind == ProofKind::DIRECT_MATRICT ||
@@ -834,6 +849,18 @@ bool SpendPathRecoveryPayload::IsValid() const
     return IsNonNullAndUnique(MakeSpan(note_commitments));
 }
 
+bool RecoveryExitPayload::IsValid() const
+{
+    return version == WIRE_VERSION &&
+           MoneyRange(value) && value > 0 &&
+           !recipient_pk_hash.IsNull() &&
+           !rho.IsNull() &&
+           !rcm.IsNull() &&
+           !spend_pubkey.empty() && spend_pubkey.size() <= MAX_RECOVERY_EXIT_PUBKEY_BYTES &&
+           !ownership_sig.empty() && ownership_sig.size() <= MAX_RECOVERY_EXIT_SIGNATURE_BYTES &&
+           membership_proof.size() <= MAX_RECOVERY_EXIT_MEMBERSHIP_PROOF_BYTES;
+}
+
 bool LifecyclePayload::IsValid() const
 {
     if (version != WIRE_VERSION ||
@@ -1145,6 +1172,7 @@ TransactionFamily GetPayloadFamily(const FamilyPayload& payload)
 {
     if (std::holds_alternative<SendPayload>(payload)) return TransactionFamily::V2_SEND;
     if (std::holds_alternative<SpendPathRecoveryPayload>(payload)) return V2_SPEND_PATH_RECOVERY;
+    if (std::holds_alternative<RecoveryExitPayload>(payload)) return TransactionFamily::V2_RECOVERY_EXIT;
     if (std::holds_alternative<LifecyclePayload>(payload)) return TransactionFamily::V2_LIFECYCLE;
     if (std::holds_alternative<IngressBatchPayload>(payload)) return TransactionFamily::V2_INGRESS_BATCH;
     if (std::holds_alternative<EgressBatchPayload>(payload)) return TransactionFamily::V2_EGRESS_BATCH;
@@ -1288,6 +1316,7 @@ SettlementBindingKind GetWireSettlementBindingKindForValidationHeight(
     switch (semantic_family) {
     case TransactionFamily::V2_SEND:
     case V2_SPEND_PATH_RECOVERY:
+    case TransactionFamily::V2_RECOVERY_EXIT:
     case TransactionFamily::V2_LIFECYCLE:
     case TransactionFamily::V2_INGRESS_BATCH:
     case TransactionFamily::V2_EGRESS_BATCH:
@@ -2463,6 +2492,10 @@ void ApplyCanonicalOpaquePayloadPadding(GenericOpaquePayloadEnvelope& envelope)
         envelope.anchored_netting_manifest_id = anchor.anchored_netting_manifest_id;
         break;
     }
+    case TransactionFamily::V2_RECOVERY_EXIT:
+        // V2_RECOVERY_EXIT is not a generic-wire family and is never re-encoded
+        // through the opaque envelope; no generic sections apply.
+        break;
     case TransactionFamily::V2_GENERIC:
         break;
     }
@@ -2818,6 +2851,9 @@ void ApplyCanonicalOpaquePayloadPadding(GenericOpaquePayloadEnvelope& envelope)
         }
         return payload;
     }
+    case TransactionFamily::V2_RECOVERY_EXIT:
+        // Not a generic-wire family; never reconstructed from an opaque envelope.
+        return std::nullopt;
     case TransactionFamily::V2_GENERIC:
         return std::nullopt;
     }
@@ -2936,6 +2972,8 @@ namespace {
         return std::get<SendPayload>(payload).IsValid();
     case V2_SPEND_PATH_RECOVERY:
         return std::get<SpendPathRecoveryPayload>(payload).IsValid();
+    case TransactionFamily::V2_RECOVERY_EXIT:
+        return std::get<RecoveryExitPayload>(payload).IsValid();
     case TransactionFamily::V2_LIFECYCLE:
         return std::get<LifecyclePayload>(payload).IsValid();
     case TransactionFamily::V2_INGRESS_BATCH:
@@ -3305,6 +3343,7 @@ bool NormalizeGenericWireTransactionBundle(TransactionBundle& bundle,
             ? 0
             : wire_proof_shards.front().proof_payload_offset;
         break;
+    case TransactionFamily::V2_RECOVERY_EXIT:
     case TransactionFamily::V2_EGRESS_BATCH:
     case TransactionFamily::V2_SETTLEMENT_ANCHOR:
     case TransactionFamily::V2_REBALANCE:
@@ -3449,6 +3488,7 @@ std::vector<uint8_t> DeserializeProofPayloadBytes(Span<const uint8_t> bytes,
             throw std::ios_base::failure("TransactionBundle::Unserialize invalid opaque proof_payload");
         }
         break;
+    case TransactionFamily::V2_RECOVERY_EXIT:
     case TransactionFamily::V2_GENERIC:
         throw std::ios_base::failure("TransactionBundle::Unserialize invalid opaque proof_payload");
     }
@@ -3636,6 +3676,9 @@ bool TransactionBundleOutputChunksAreCanonical(const TransactionBundle& bundle)
         return OutputChunkCoverageIsCanonical(MakeSpan(bundle.output_chunks), outputs.size()) &&
                OutputChunksMatchOutputs(MakeSpan(bundle.output_chunks), output_span);
     }
+    case TransactionFamily::V2_RECOVERY_EXIT:
+        // RecoveryExitPayload carries no shielded outputs; output chunks must be empty.
+        return bundle.output_chunks.empty();
     case TransactionFamily::V2_GENERIC:
         return false;
     }
@@ -3703,6 +3746,7 @@ bool UseDerivedGenericOutputChunkWire(const TransactionHeader& header, const Fam
     case TransactionFamily::V2_EGRESS_BATCH:
     case TransactionFamily::V2_REBALANCE:
         return true;
+    case TransactionFamily::V2_RECOVERY_EXIT:
     case TransactionFamily::V2_LIFECYCLE:
     case TransactionFamily::V2_SETTLEMENT_ANCHOR:
     case TransactionFamily::V2_GENERIC:
@@ -3774,6 +3818,7 @@ std::optional<std::vector<OutputChunkDescriptor>> BuildDerivedGenericOutputChunk
         output_chunks.push_back(std::move(*chunk));
         return output_chunks;
     }
+    case TransactionFamily::V2_RECOVERY_EXIT:
     case TransactionFamily::V2_SETTLEMENT_ANCHOR:
     case TransactionFamily::V2_GENERIC:
         return output_chunks;
@@ -4109,6 +4154,17 @@ bool TransactionBundle::IsValid() const
             return false;
         }
         break;
+    case TransactionFamily::V2_RECOVERY_EXIT: {
+        const RecoveryExitPayload& recovery_exit = std::get<RecoveryExitPayload>(payload);
+        if (!recovery_exit.IsValid() ||
+            !proof_shards.empty() ||
+            !output_chunks.empty() ||
+            !proof_payload.empty() ||
+            header.netting_manifest_version != 0) {
+            return false;
+        }
+        break;
+    }
     case TransactionFamily::V2_GENERIC:
         return false;
     }
@@ -4165,6 +4221,11 @@ uint256 ComputeSpendPathRecoveryPayloadDigest(const SpendPathRecoveryPayload& pa
     return HashTaggedObject(TAG_SPEND_PATH_RECOVERY_PAYLOAD, payload);
 }
 
+uint256 ComputeRecoveryExitPayloadDigest(const RecoveryExitPayload& payload)
+{
+    return HashTaggedObject(TAG_RECOVERY_EXIT_PAYLOAD, payload);
+}
+
 uint256 ComputeLifecyclePayloadDigest(const LifecyclePayload& payload)
 {
     return HashTaggedObject(TAG_LIFECYCLE_PAYLOAD, payload);
@@ -4197,6 +4258,8 @@ uint256 ComputePayloadDigest(const FamilyPayload& payload)
         return ComputeSendPayloadDigest(std::get<SendPayload>(payload));
     case V2_SPEND_PATH_RECOVERY:
         return ComputeSpendPathRecoveryPayloadDigest(std::get<SpendPathRecoveryPayload>(payload));
+    case TransactionFamily::V2_RECOVERY_EXIT:
+        return ComputeRecoveryExitPayloadDigest(std::get<RecoveryExitPayload>(payload));
     case TransactionFamily::V2_LIFECYCLE:
         return ComputeLifecyclePayloadDigest(std::get<LifecyclePayload>(payload));
     case TransactionFamily::V2_INGRESS_BATCH:

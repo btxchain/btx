@@ -42,6 +42,24 @@ mining path:
 current production product-digest path rather than the older transcript-only
 path.
 
+## Kernel Loading On macOS
+
+Current macOS source builds compile the MatMul and oracle Metal kernels from embedded runtime source with
+`newLibraryWithSource`. The audit branch no longer builds, installs, embeds, or loads build-tree
+`.metallib` files for those backends.
+
+Operational implications:
+
+- `btx-matmul-backend-info --backend metal` should report `library_source=precompiled_metallib`
+  on a normal macOS source build, or `inline_source_fallback` if metallib precompilation/loading is
+  unavailable.
+- No `BTX_MATMUL_METALLIB_PATH` or `BTX_ORACLE_METALLIB_PATH` string should appear in a freshly built
+  `btxd`.
+- If you previously configured a build directory that generated `.metallib` artifacts, regenerate the
+  CMake build directory so stale compile definitions are removed.
+- Precompiled `.metallib` support should only return as a release-packaged, signed-resource flow. Do not
+  load absolute build-tree paths from production binaries.
+
 ## Current Auto Policy
 
 The current Metal policy is intentionally narrow. It is designed around the

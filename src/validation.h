@@ -1051,7 +1051,7 @@ private:
     std::deque<uint256> m_shielded_anchor_roots GUARDED_BY(::cs_main);
     std::deque<uint256> m_shielded_account_registry_roots GUARDED_BY(::cs_main);
     ShieldedPoolBalance m_shielded_pool_balance GUARDED_BY(::cs_main);
-    //! v0.31.1 defense-in-depth: trailing-window net-unshield log enforcing the egress velocity cap.
+    //! v0.32.0 defense-in-depth: trailing-window net-unshield log enforcing the egress velocity cap.
     ShieldedUnshieldVelocity m_shielded_unshield_velocity GUARDED_BY(::cs_main);
     bool m_shielded_state_initialized GUARDED_BY(::cs_main){false};
     std::optional<ShieldedAutoRepairGeneration> m_last_shielded_anchor_auto_repair_generation GUARDED_BY(::cs_main);
@@ -1458,6 +1458,9 @@ public:
     /** Return true if a nullifier has already been spent in the confirmed chain. */
     [[nodiscard]] bool IsShieldedNullifierSpent(const Nullifier& nullifier) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Return true if a RECOVERY_EXIT commitment has been retired (claimed) on the confirmed chain. */
+    [[nodiscard]] bool IsShieldedRecoveryExitCommitmentRetired(const uint256& commitment) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Return true if a settlement-anchor digest has been confirmed on-chain. */
     [[nodiscard]] bool IsShieldedSettlementAnchorValid(const uint256& anchor) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
@@ -1503,6 +1506,15 @@ public:
     [[nodiscard]] std::optional<shielded::registry::ShieldedStateCommitment> GetShieldedStateCommitment() const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /**
+     * DS-3: compute the consensus shielded-state pin for the live shielded state. Single source of
+     * truth used by BOTH snapshot generation (dumptxoutset / WriteUTXOSnapshot) and snapshot activation
+     * (ActivateSnapshot), so the emitted and verified pins cannot drift. Returns nullopt iff the
+     * shielded state commitment is unavailable.
+     */
+    [[nodiscard]] std::optional<uint256> ComputeShieldedSnapshotStatePin() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Return persisted nullifier count for diagnostics/auditing. */
     [[nodiscard]] uint64_t GetShieldedNullifierCount() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
@@ -1535,6 +1547,9 @@ public:
 
     /** Test/diagnostic hook to overwrite the persisted shielded pool balance. */
     [[nodiscard]] bool WriteShieldedPoolBalanceForTest(CAmount balance) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Test hook to overwrite BOTH the in-memory and persisted shielded pool balance. */
+    [[nodiscard]] bool SetShieldedPoolBalanceForTest(CAmount balance) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Test/diagnostic hook to mark persisted bridge metadata as snapshot-seeded. */
     [[nodiscard]] bool WriteSnapshotBridgeMetadataHintForTest(bool preserve_snapshot_extras)

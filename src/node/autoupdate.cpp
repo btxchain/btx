@@ -276,7 +276,7 @@ url = sys.argv[1]
 max_bytes = int(sys.argv[2])
 timeout = float(sys.argv[3])
 try:
-    request = urllib.request.Request(url, headers={"User-Agent": "BTX-AutoUpdate/0.31"})
+    request = urllib.request.Request(url, headers={"User-Agent": "BTX-AutoUpdate/0.32"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         body = response.read(max_bytes + 1)
         if len(body) > max_bytes:

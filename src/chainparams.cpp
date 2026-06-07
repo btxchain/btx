@@ -205,6 +205,25 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.shielded_pq128_upgrade_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedpq128upgradeheight");
     }
+    if (args.IsArgSet("-regtestshieldedpoolcreditdisableheight")) {
+        options.shielded_pool_credit_disable_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedpoolcreditdisableheight");
+    }
+    if (args.IsArgSet("-regtestshieldedsunsetheight")) {
+        options.shielded_sunset_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedsunsetheight");
+    }
+    if (args.IsArgSet("-regtestshieldedrecoveryexitactivationheight")) {
+        options.shielded_recovery_exit_activation_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedrecoveryexitactivationheight");
+    }
+    if (args.IsArgSet("-regtestshieldedrecoveryexitfrozenroot")) {
+        const auto parsed = uint256::FromHex(args.GetArg("-regtestshieldedrecoveryexitfrozenroot", ""));
+        if (!parsed.has_value()) {
+            throw std::runtime_error("Invalid -regtestshieldedrecoveryexitfrozenroot (expected 32-byte hex)");
+        }
+        options.shielded_recovery_exit_frozen_root = *parsed;
+    }
     if (args.IsArgSet("-regtestmatmulbindingheight")) {
         options.matmul_binding_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestmatmulbindingheight");
@@ -248,6 +267,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         throw std::runtime_error(
             "Both -regtestmatmulprehashepsilonbitsupgradeheight and "
             "-regtestmatmulprehashepsilonbitsupgrade must be set together.");
+    }
+    if (args.IsArgSet("-regtestmatmulnonceseedheight")) {
+        options.matmul_nonce_seed_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestmatmulnonceseedheight");
     }
 
     for (const std::string& arg : args.GetArgs("-testactivationheight")) {

@@ -330,6 +330,17 @@ UniValue ShieldedV2PayloadToUniv(const shielded::v2::TransactionBundle& bundle)
         out.pushKV("reserve_deltas", std::move(deltas));
         break;
     }
+    case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT: {
+        const auto& payload = std::get<shielded::v2::RecoveryExitPayload>(bundle.payload);
+        out.pushKV("value", ValueFromAmount(payload.value));
+        out.pushKV("recipient_pk_hash", payload.recipient_pk_hash.GetHex());
+        out.pushKV("rho", payload.rho.GetHex());
+        out.pushKV("rcm", payload.rcm.GetHex());
+        out.pushKV("spend_pubkey", HexStr(payload.spend_pubkey));
+        out.pushKV("ownership_sig_bytes", static_cast<uint64_t>(payload.ownership_sig.size()));
+        out.pushKV("membership_proof_bytes", static_cast<uint64_t>(payload.membership_proof.size()));
+        break;
+    }
     case shielded::v2::TransactionFamily::V2_GENERIC:
         break;
     }

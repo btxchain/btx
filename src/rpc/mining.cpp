@@ -1356,6 +1356,8 @@ struct MatMulWorkProfileOptions {
     bool publicly_precomputable_before_parent_seen{false};
     uint64_t public_precompute_horizon_blocks{0};
     std::vector<std::string> template_mutations_preserve_seed{"merkle_root", "nonce", "time"};
+    bool fixed_instance_reuse_possible{true};
+    bool reflect_consensus_nonce_seed_upgrade{true};
     bool sigma_gate_applied{true};
     std::string sigma_rule{"sigma <= target << epsilon_bits"};
     std::string digest_rule{"matmul_digest <= target"};
@@ -1366,8 +1368,18 @@ static UniValue BuildMatMulWorkProfile(
     const CBlockHeader& challenge_header,
     const Consensus::Params& consensus,
     int32_t block_height,
-    const MatMulWorkProfileOptions& options = {})
+    MatMulWorkProfileOptions options = {})
 {
+    if (options.reflect_consensus_nonce_seed_upgrade &&
+        consensus.IsMatMulNonceSeedActive(block_height)) {
+        options.seed_derivation_scope = "per_nonce_header";
+        options.seed_derivation_rule =
+            "sha256(\"BTX_MATMUL_SEED_V2\" || prev_block_hash || height || version || merkle_root || time || bits || nonce64 || matmul_dim || which)";
+        options.winner_knows_next_seeds_first = false;
+        options.template_mutations_preserve_seed.clear();
+        options.fixed_instance_reuse_possible = false;
+    }
+
     const uint64_t n = static_cast<uint64_t>(challenge_header.matmul_dim);
     const uint64_t b = static_cast<uint64_t>(consensus.nMatMulTranscriptBlockSize);
     const uint64_t r = static_cast<uint64_t>(consensus.nMatMulNoiseRank);
@@ -1389,10 +1401,13 @@ static UniValue BuildMatMulWorkProfile(
         transcript_field_muladds + compression_field_muladds + noise_low_rank_muladds;
     const double oracle_rejection_probability_per_element =
         1.0 / static_cast<double>(static_cast<uint64_t>(matmul::field::MODULUS) + 1);
-    const uint64_t fixed_matrix_generation_elements_upper_bound = 2 * matrix_generation_elements_per_seed;
-    const uint64_t fixed_clean_product_field_muladds_upper_bound = transcript_field_muladds;
-    const uint64_t dynamic_per_nonce_field_muladds_lower_bound =
-        compression_field_muladds + noise_low_rank_muladds;
+    const uint64_t fixed_matrix_generation_elements_upper_bound =
+        options.fixed_instance_reuse_possible ? 2 * matrix_generation_elements_per_seed : 0;
+    const uint64_t fixed_clean_product_field_muladds_upper_bound =
+        options.fixed_instance_reuse_possible ? transcript_field_muladds : 0;
+    const uint64_t dynamic_per_nonce_field_muladds_lower_bound = options.fixed_instance_reuse_possible
+        ? compression_field_muladds + noise_low_rank_muladds
+        : per_nonce_total_field_muladds_estimate;
     const double dynamic_per_nonce_share_lower_bound = per_nonce_total_field_muladds_estimate > 0
         ? static_cast<double>(dynamic_per_nonce_field_muladds_lower_bound) /
             static_cast<double>(per_nonce_total_field_muladds_estimate)
@@ -1467,9 +1482,9 @@ static UniValue BuildMatMulWorkProfile(
         static_cast<double>(noise_elements) * oracle_rejection_probability_per_element);
     profile.pushKV("pre_hash_epsilon_bits", pre_hash_epsilon_bits);
     UniValue cross_nonce_reuse(UniValue::VOBJ);
-    cross_nonce_reuse.pushKV("seed_scope", "per_block_template");
+    cross_nonce_reuse.pushKV("seed_scope", options.fixed_instance_reuse_possible ? "per_block_template" : "per_nonce_header");
     cross_nonce_reuse.pushKV("sigma_scope", "per_nonce");
-    cross_nonce_reuse.pushKV("fixed_instance_reuse_possible", true);
+    cross_nonce_reuse.pushKV("fixed_instance_reuse_possible", options.fixed_instance_reuse_possible);
     cross_nonce_reuse.pushKV("fixed_matrix_generation_elements_upper_bound", fixed_matrix_generation_elements_upper_bound);
     cross_nonce_reuse.pushKV("fixed_clean_product_field_muladds_upper_bound", fixed_clean_product_field_muladds_upper_bound);
     cross_nonce_reuse.pushKV("dynamic_per_nonce_field_muladds_lower_bound", dynamic_per_nonce_field_muladds_lower_bound);
@@ -1558,12 +1573,7 @@ static UniValue BuildMatMulChallengeResponse(
     if (challenge_header.matmul_dim == 0) {
         challenge_header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
     }
-    if (challenge_header.seed_a.IsNull()) {
-        challenge_header.seed_a = DeterministicMatMulSeed(challenge_header.hashPrevBlock, static_cast<uint32_t>(next_height), 0);
-    }
-    if (challenge_header.seed_b.IsNull()) {
-        challenge_header.seed_b = DeterministicMatMulSeed(challenge_header.hashPrevBlock, static_cast<uint32_t>(next_height), 1);
-    }
+    SetDeterministicMatMulSeeds(challenge_header, consensus, next_height);
 
     CBlockIndex next_index;
     next_index.pprev = const_cast<CBlockIndex*>(pindex_prev);
@@ -1589,6 +1599,7 @@ static UniValue BuildMatMulChallengeResponse(
     profiled_index.nTime = challenge_header.nTime;
     profiled_index.nBits = profiled_bits;
     challenge_header.nBits = profiled_bits;
+    SetDeterministicMatMulSeeds(challenge_header, consensus, next_height);
 
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("chain", chain_name);
@@ -3172,6 +3183,7 @@ static UniValue BuildMatMulServiceChallengeResponse(
     work_profile_options.publicly_precomputable_before_parent_seen = false;
     work_profile_options.public_precompute_horizon_blocks = 0;
     work_profile_options.template_mutations_preserve_seed = {"nonce"};
+    work_profile_options.reflect_consensus_nonce_seed_upgrade = false;
     work_profile_options.sigma_gate_applied = false;
     work_profile_options.sigma_rule = "not_applied_to_service_proofs";
     work_profile_options.digest_rule = MATMUL_SERVICE_VERIFICATION_RULE;
@@ -4491,8 +4503,7 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
         if (block.matmul_dim == 0) {
             block.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
         }
-        if (block.seed_a.IsNull()) block.seed_a = DeterministicMatMulSeed(block.hashPrevBlock, static_cast<uint32_t>(next_height), 0);
-        if (block.seed_b.IsNull()) block.seed_b = DeterministicMatMulSeed(block.hashPrevBlock, static_cast<uint32_t>(next_height), 1);
+        SetDeterministicMatMulSeeds(block, consensus, next_height);
         block.mix_hash.SetNull();
 
         const bool include_freivalds_payload =
@@ -7449,6 +7460,10 @@ static UniValue TemplateToJSON(
     block_header.nNonce64 = 0;
     block_header.mix_hash.SetNull();
     if (consensusParams.fMatMulPOW) {
+        if (block_header.matmul_dim == 0) {
+            block_header.matmul_dim = static_cast<uint16_t>(consensusParams.nMatMulDimension);
+        }
+        SetDeterministicMatMulSeeds(block_header, consensusParams, next_height);
         block_header.matmul_digest.SetNull();
     }
 

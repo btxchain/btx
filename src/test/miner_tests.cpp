@@ -1317,6 +1317,61 @@ BOOST_AUTO_TEST_CASE(update_time_clamps_to_future_mtp_policy)
     SetMockTime(0);
 }
 
+BOOST_AUTO_TEST_CASE(a5_timewarp_drift_reconciliation_prevents_boundary_halt)
+{
+    // a5 fix: at a drift-cap activation boundary an unprotected predecessor can carry a blocktime
+    // so far above its MTP that the BIP94 timewarp floor (prev_blocktime - MAX_TIMEWARP) exceeds
+    // the raw future-drift cap (prev_mtp + drift), leaving NO legal timestamp -> the chain wedges.
+    // The gated reconciliation raises the effective upper bound up to the floor so a valid
+    // timestamp window always exists; it is inert in normal operation and below activation.
+    auto consensus{m_node.chainman->GetConsensus()};
+    consensus.fMatMulPOW = true;
+    consensus.enforce_BIP94 = true;
+    consensus.fPowNoRetargeting = false;
+    consensus.nMatMulMaxFutureMtpDriftHeight = 1;   // drift cap active at the mined height
+    consensus.nMatMulMaxFutureMtpDrift = 3'600;
+
+    auto chain{MakeIndexChain(/*count=*/11, /*start_time=*/1'700'000'000, /*spacing=*/90)};
+    const int64_t mtp{chain.back().GetMedianTimePast()};
+    // Predecessor blocktime 5000s above its MTP: floor = mtp+5000-600 = mtp+4400 > raw cap mtp+3600.
+    // Bumping only the max element leaves the median (hence MTP) unchanged.
+    chain.back().nTime = mtp + 5'000;
+    const CBlockIndex* tip{&chain.back()};
+    BOOST_REQUIRE_EQUAL(tip->GetMedianTimePast(), mtp);
+    const int32_t mined_height{static_cast<int32_t>(tip->nHeight) + 1};
+    BOOST_REQUIRE(EnforceTimewarpProtectionAtHeight(consensus, mined_height));
+
+    const int64_t raw_cap{mtp + 3'600};
+    const int64_t floor{(mtp + 5'000) - MAX_TIMEWARP};
+    BOOST_REQUIRE_GT(floor, raw_cap);  // the inversion: timewarp floor above the raw drift cap
+
+    // Reconciliation INACTIVE -> raw cap stays below the floor: no legal timestamp window.
+    auto unfixed{consensus};
+    unfixed.nMatMulTimewarpReconcileHeight = std::numeric_limits<int32_t>::max();
+    const auto unfixed_max{node::GetMaximumTime(tip, unfixed)};
+    BOOST_REQUIRE(unfixed_max.has_value());
+    BOOST_CHECK_EQUAL(*unfixed_max, raw_cap);
+    BOOST_CHECK_LT(*unfixed_max, node::GetMinimumTime(tip, unfixed));  // window inverted (empty)
+
+    // Reconciliation ACTIVE -> effective cap clamped up to the floor; window is non-empty.
+    auto fixed{consensus};
+    fixed.nMatMulTimewarpReconcileHeight = mined_height;
+    const auto fixed_max{node::GetMaximumTime(tip, fixed)};
+    BOOST_REQUIRE(fixed_max.has_value());
+    BOOST_CHECK_EQUAL(*fixed_max, floor);
+    const int64_t min_time{node::GetMinimumTime(tip, fixed)};
+    BOOST_CHECK_GE(*fixed_max, min_time);  // a valid timestamp now exists
+
+    // UpdateTime yields a timestamp inside [min_time, effective_max] instead of self-rejecting.
+    CBlockHeader header{};
+    header.nTime = 0;
+    SetMockTime(*fixed_max + 10'000);
+    node::UpdateTime(&header, fixed, tip);
+    BOOST_CHECK_GE(header.GetBlockTime(), min_time);
+    BOOST_CHECK_LE(header.GetBlockTime(), *fixed_max);
+    SetMockTime(0);
+}
+
 BOOST_AUTO_TEST_CASE(test_block_validity_rejects_future_mtp_drift)
 {
     auto mining{MakeMining()};

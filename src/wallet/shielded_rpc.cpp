@@ -422,6 +422,8 @@ void EnsureShieldedViewingKeyWalletOrThrow(const CWallet& wallet)
             return "v2_send";
         case shielded::v2::V2_SPEND_PATH_RECOVERY:
             return "v2_spend_path_recovery";
+        case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
+            return "v2_recovery_exit";
         case shielded::v2::TransactionFamily::V2_LIFECYCLE:
             return "v2_lifecycle";
         case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
@@ -9932,6 +9934,7 @@ RPCHelpMan z_viewtransaction()
                             }
                             break;
                         }
+                        case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
                         case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
                         case shielded::v2::TransactionFamily::V2_GENERIC:
                             break;

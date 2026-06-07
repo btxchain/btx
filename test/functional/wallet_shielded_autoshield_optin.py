@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The BTX developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/license/mit/.
-"""v0.31.1 fund-preservation: coinbase auto-shielding is opt-in (default off).
+"""v0.32.0 fund-preservation: coinbase auto-shielding is opt-in (default off).
 
 By default, mined rewards stay as post-quantum transparent (P2MR) outputs with no shielded-pool
 exposure; only when the operator sets -autoshieldcoinbase=1 are mature coinbases swept into the
@@ -50,7 +50,7 @@ class WalletShieldedAutoshieldOptInTest(BitcoinTestFramework):
         assert_equal(int(balance["note_count"]), 0)
         # Mature coinbase value is present in the wallet, just transparent (not swept into the pool).
         assert_greater_than(wallet.getbalance(), Decimal("0"))
-        self.log.info("Confirmed: with the v0.31.1 default, mined coinbase stays transparent (no auto-shield)")
+        self.log.info("Confirmed: with the v0.32.0 default, mined coinbase stays transparent (no auto-shield)")
         # The opt-in path (-autoshieldcoinbase=1 -> coinbase swept into the pool) is covered by
         # wallet_shielded_postfork_coinbase_autoshield.py.
 

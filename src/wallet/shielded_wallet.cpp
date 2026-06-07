@@ -21,6 +21,7 @@
 #include <primitives/block.h>
 #include <shielded/bundle.h>
 #include <random.h>
+#include <shielded/recovery_exit.h>
 #include <shielded/ringct/matrict.h>
 #include <shielded/smile2/wallet_bridge.h>
 #include <shielded/v2_bundle.h>
@@ -925,6 +926,8 @@ void RegisterAccountLeafCommitment(std::map<uint256, uint256>& account_leaf_comm
             return "v2_send";
         case shielded::v2::V2_SPEND_PATH_RECOVERY:
             return "v2_spend_path_recovery";
+        case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
+            return "v2_recovery_exit";
         case shielded::v2::TransactionFamily::V2_LIFECYCLE:
             return "v2_lifecycle";
         case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
@@ -2311,6 +2314,7 @@ void CShieldedWallet::ScanBlock(const CBlock& block, int height)
                     }
                     break;
                 }
+                case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
                 case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
                 case shielded::v2::TransactionFamily::V2_GENERIC:
                     break;
@@ -2599,6 +2603,7 @@ void CShieldedWallet::TransactionAddedToMempool(const CTransaction& tx)
                 }
                 break;
             }
+            case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
             case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
             case shielded::v2::TransactionFamily::V2_GENERIC:
                 break;
@@ -5032,6 +5037,179 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateSpendPathRecovery(
     if (!bundle.IsValid()) {
         return fail("invalid recovery bundle");
     }
+    tx.shielded_bundle.v2_bundle = std::move(bundle);
+    return tx;
+}
+
+std::optional<CMutableTransaction> CShieldedWallet::BuildRecoveryExitTransaction(
+    const ShieldedCoin& stranded_coin,
+    const CTxDestination& transparent_dest,
+    CAmount fee,
+    std::string* error)
+{
+    AssertLockHeld(cs_shielded);
+    MaybeRehydrateSpendingKeys();
+    auto fail = [&](const std::string& reason) -> std::optional<CMutableTransaction> {
+        if (error != nullptr) *error = reason;
+        LogDebug(BCLog::WALLETDB, "CShieldedWallet::BuildRecoveryExitTransaction failed: %s\n", reason);
+        return std::nullopt;
+    };
+
+    if (!RequireEncryptedShieldedWallet(m_parent_wallet, "CShieldedWallet::BuildRecoveryExitTransaction", error)) {
+        return std::nullopt;
+    }
+
+    if (fee < 0 || !MoneyRange(fee)) {
+        return fail("invalid fee");
+    }
+    if (!IsValidDestination(transparent_dest)) {
+        return fail("invalid transparent destination");
+    }
+
+    // 1. Pull the note material from the stranded coin.
+    const ShieldedNote& note = stranded_coin.note;
+    const CAmount value = note.value;
+    if (value <= 0 || !MoneyRange(value)) {
+        return fail("stranded note has invalid value");
+    }
+    if (value <= fee) {
+        return fail("stranded note value does not cover fee");
+    }
+    const CAmount transparent_value = value - fee;
+    if (transparent_value <= 0 || !MoneyRange(transparent_value)) {
+        return fail("recovered transparent value out of range");
+    }
+
+    // Locate the spending keyset for the note's account. recipient_pk_hash must equal
+    // HashBytes(spend_pubkey); the keyset's spending_pk_hash already enforces that
+    // invariant (spending_pk_hash == HashBytes(spending_key.GetPubKey())), so matching
+    // on it binds the revealed pubkey to the note.
+    const ShieldedKeySet* signing_keyset{nullptr};
+    for (const auto& [_, keyset] : m_key_sets) {
+        if (!keyset.has_spending_key || !keyset.spending_key_loaded || !keyset.spending_key.IsValid()) continue;
+        if (keyset.spending_pk_hash == note.recipient_pk_hash) {
+            signing_keyset = &keyset;
+            break;
+        }
+    }
+    if (signing_keyset == nullptr) {
+        return fail("missing spending key for stranded note");
+    }
+    std::vector<unsigned char> spend_pubkey = signing_keyset->spending_key.GetPubKey();
+    if (spend_pubkey.empty() ||
+        spend_pubkey.size() > shielded::v2::MAX_RECOVERY_EXIT_PUBKEY_BYTES) {
+        return fail("invalid spending pubkey for stranded note");
+    }
+    if (HashBytes(Span<const unsigned char>{spend_pubkey.data(), spend_pubkey.size()}) !=
+        note.recipient_pk_hash) {
+        return fail("spending pubkey does not match note recipient hash");
+    }
+
+    // 2. Build the claim and derive the canonical commitment + SMILE2 nullifier.
+    shielded::recovery::RecoveryExitClaim claim;
+    claim.value = value;
+    claim.recipient_pk_hash = note.recipient_pk_hash;
+    claim.rho = note.rho;
+    claim.rcm = note.rcm;
+    claim.spend_pubkey = spend_pubkey;
+
+    shielded::recovery::RecoveryExitIdentifiers ids;
+    std::string derive_error;
+    if (!shielded::recovery::DeriveRecoveryExitIdentifiers(claim, ids, derive_error)) {
+        return fail(derive_error.empty() ? "failed to derive recovery exit identifiers" : derive_error);
+    }
+    // Sanity: the derived commitment must match the coin's recorded commitment.
+    if (ids.commitment != stranded_coin.commitment) {
+        return fail("derived commitment does not match stranded coin commitment");
+    }
+
+    // 3. Build the single transparent output and compute the transparent binding.
+    CMutableTransaction tx;
+    tx.version = CTransaction::CURRENT_VERSION;
+    tx.nLockTime = FastRandomContext{}.rand32();
+    tx.vout.emplace_back(transparent_value, GetScriptForDestination(transparent_dest));
+    const uint256 tx_transparent_binding = shielded::recovery::ComputeRecoveryExitTransparentBinding(tx.vout);
+
+    // 4. Compute the binding hash and sign it with the note's PQ spending key.
+    const uint256 binding_hash = shielded::recovery::ComputeRecoveryExitBindingHash(
+        ids.commitment,
+        ids.nullifier,
+        value,
+        tx_transparent_binding);
+    std::vector<unsigned char> ownership_sig;
+    if (!signing_keyset->spending_key.Sign(binding_hash, ownership_sig) || ownership_sig.empty()) {
+        return fail("failed to sign recovery exit ownership");
+    }
+    if (ownership_sig.size() > shielded::v2::MAX_RECOVERY_EXIT_SIGNATURE_BYTES) {
+        return fail("recovery exit ownership signature oversized");
+    }
+    // Local self-check: confirm the signature verifies under the revealed pubkey.
+    claim.ownership_sig = ownership_sig;
+    if (!shielded::recovery::VerifyRecoveryExitOwnership(claim, binding_hash)) {
+        return fail("recovery exit ownership signature failed self-verification");
+    }
+
+    // 5. Obtain the note's merkle witness and serialize it as the membership proof.
+    const auto witness_it = m_witnesses.find(stranded_coin.commitment);
+    if (witness_it == m_witnesses.end()) {
+        return fail("missing merkle witness for stranded note commitment");
+    }
+    std::vector<unsigned char> membership_proof;
+    try {
+        DataStream ss;
+        ss << witness_it->second;
+        const auto* begin = reinterpret_cast<const unsigned char*>(ss.data());
+        membership_proof.assign(begin, begin + ss.size());
+    } catch (const std::exception& e) {
+        return fail(std::string{"failed to serialize membership witness: "} + e.what());
+    }
+    if (membership_proof.empty() ||
+        membership_proof.size() > shielded::v2::MAX_RECOVERY_EXIT_MEMBERSHIP_PROOF_BYTES) {
+        return fail("membership witness serialization out of range");
+    }
+
+    // 6. Assemble the RecoveryExitPayload and wrap it in a V2_RECOVERY_EXIT bundle.
+    shielded::v2::RecoveryExitPayload payload;
+    payload.value = value;
+    payload.recipient_pk_hash = note.recipient_pk_hash;
+    payload.rho = note.rho;
+    payload.rcm = note.rcm;
+    payload.spend_pubkey = std::move(spend_pubkey);
+    payload.ownership_sig = std::move(ownership_sig);
+    payload.membership_proof = std::move(membership_proof);
+    if (!payload.IsValid()) {
+        return fail("constructed recovery exit payload is invalid");
+    }
+
+    shielded::v2::TransactionBundle bundle;
+    bundle.payload = payload;
+    bundle.header.family_id = shielded::v2::TransactionFamily::V2_RECOVERY_EXIT;
+    // RECOVERY_EXIT carries no SNARK/MatRiCT proof at the OFF data layer; the claim is
+    // validated by the PQ ownership signature + merkle membership proof. ProofKind::NONE
+    // is accepted by ProofEnvelopeMatchesFamily for V2_RECOVERY_EXIT and requires an
+    // empty proof_payload (see CheckTransactionBundleContextual).
+    bundle.header.proof_envelope.proof_kind = shielded::v2::ProofKind::NONE;
+    bundle.header.proof_envelope.membership_proof_kind = shielded::v2::ProofComponentKind::NONE;
+    bundle.header.proof_envelope.amount_proof_kind = shielded::v2::ProofComponentKind::NONE;
+    bundle.header.proof_envelope.balance_proof_kind = shielded::v2::ProofComponentKind::NONE;
+    bundle.header.proof_envelope.settlement_binding_kind = shielded::v2::SettlementBindingKind::NONE;
+    bundle.header.proof_envelope.statement_digest = uint256::ZERO;
+    bundle.header.proof_envelope.extension_digest = uint256::ZERO;
+    bundle.header.payload_digest = shielded::v2::ComputeRecoveryExitPayloadDigest(payload);
+    bundle.header.proof_shard_root = uint256::ZERO;
+    bundle.header.proof_shard_count = 0;
+    bundle.header.output_chunk_root = uint256::ZERO;
+    bundle.header.output_chunk_count = 0;
+    bundle.proof_shards.clear();
+    bundle.output_chunks.clear();
+    bundle.proof_payload.clear();
+    if (!bundle.IsValid()) {
+        return fail("invalid recovery exit bundle");
+    }
+
+    // value_balance for a v2 bundle is derived from the payload (TryGetShieldedStateValueBalance
+    // returns payload.value for V2_RECOVERY_EXIT), so the CShieldedBundle.value_balance member is
+    // left at its default and never consulted for v2 bundles.
     tx.shielded_bundle.v2_bundle = std::move(bundle);
     return tx;
 }

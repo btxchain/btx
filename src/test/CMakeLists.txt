@@ -210,6 +210,12 @@ add_executable(test_btx
   smile2_comprehensive_gap_tests.cpp
   smile2_realworld_attack_tests.cpp
   matrict_adversarial_tests.cpp
+  ds4_keyimage_forge_tests.cpp
+  ds4_note_anchor_binding_tests.cpp
+  recovery_exit_tests.cpp
+  recovery_exit_wire_tests.cpp
+  recovery_exit_spentset_tests.cpp
+  recovery_exit_chain_tests.cpp
   sighash_tests.cpp
   sigopcount_tests.cpp
   skiplist_tests.cpp

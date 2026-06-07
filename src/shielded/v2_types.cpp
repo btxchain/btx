@@ -111,6 +111,7 @@ bool IsValidTransactionFamily(TransactionFamily family)
     case TransactionFamily::V2_GENERIC:
     case TransactionFamily::V2_LIFECYCLE:
     case TransactionFamily::V2_SPEND_PATH_RECOVERY:
+    case TransactionFamily::V2_RECOVERY_EXIT:
         return true;
     }
     return false;
@@ -210,6 +211,8 @@ const char* GetTransactionFamilyName(TransactionFamily family)
         return "v2_lifecycle";
     case TransactionFamily::V2_SPEND_PATH_RECOVERY:
         return "v2_spend_path_recovery";
+    case TransactionFamily::V2_RECOVERY_EXIT:
+        return "v2_recovery_exit";
     }
     return "unknown";
 }

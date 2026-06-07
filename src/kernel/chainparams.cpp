@@ -39,6 +39,9 @@ auto consteval_ctor(auto&& input) { return input; }
 #define consteval_ctor(input) (input)
 #endif
 
+static constexpr int32_t BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT{123'000};
+static constexpr int32_t BTX_SHIELDED_SUNSET_HEIGHT{125'000};
+
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
                                  const CScript& genesisOutputScript,
                                  uint32_t nTime,
@@ -208,10 +211,20 @@ public:
         // future-dated timestamp shocks to one ASERT half-life.
         consensus.nMatMulMaxFutureMtpDriftHeight = 118'482;
         consensus.nMatMulMaxFutureMtpDrift = 3'600;
+        // a5 fix: flag-day activation of the timewarp/drift bound reconciliation. Mainnet is
+        // already past the only drift-cap activation boundary (118,482), so no inversion can
+        // occur here and the reconciliation is behaviorally inert -- it is scheduled at the
+        // shared height-125,000 hardening flag day for rollout consistency and to protect any future
+        // network that activates the drift cap at a non-genesis height.
+        consensus.nMatMulTimewarpReconcileHeight = 125'000;
         // Hardened pre-hash epsilon (18 bits) has been active on mainnet since
         // the historical ASERT transition at 50,000.
         consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = 50'000;
         consensus.nMatMulPreHashEpsilonBitsUpgrade = 18;
+        // E1 hardening: after the shielded sunset boundary, MatMul seeds are
+        // bound to the mutable header so miners cannot reuse one fixed A/B
+        // instance across nonce attempts.
+        consensus.nMatMulNonceSeedHeight = 125'000;
         consensus.nMaxBlockWeight = 24'000'000;
         consensus.nMaxBlockSerializedSize = 24'000'000;
         consensus.nMaxBlockSigOpsCost = 480'000;
@@ -227,10 +240,16 @@ public:
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
-        // v0.31.1: shielded unshield (z->t) velocity cap. Fast-follow after the v0.31.0 C-002 fork
+        consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
+        consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
         // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
-        // post-fork regime. Set well clear of 123,000 to give the network time to upgrade to v0.31.1.
-        consensus.nShieldedUnshieldVelocityActivationHeight = 130'000;
+        // post-fork regime. Aligned to the 125,000 sunset (DS-4 hardening): the cap activates at the
+        // same block the outflow-only rule engages, so there is no uncapped window between the sunset and
+        // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
+        // before it bites.
+        consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 1815; // 90% of 2016
@@ -246,12 +265,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0;
 
-        // Mainnet anchor refreshed on 2026-06-04 at height 120'900 from a
+        // Mainnet anchor refreshed on 2026-06-07 at height 123'225 from a
         // synced canonical node so stale history below the current public
         // release floor is rejected quickly.
-        consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000000372df7a85a3"};
+        consensus.nMinimumChainWork = uint256{"000000000000000000000000000000000000000000000000000004339ce2b047"};
         // Assume signatures valid up to the same anchored block to speed sync.
-        consensus.defaultAssumeValid = uint256{"24744e8793137d0a6639a90c066b78e7edb6722ad7007cdac0911ae171ead611"};
+        consensus.defaultAssumeValid = uint256{"bee000e92d6b64ceb6ad9a3759fb38c1d6752713240e76bde3617f073b9cbe74"};
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -305,7 +324,7 @@ public:
         checkpointData = {
             {
                 {0, uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"}},
-                {120900, uint256{"24744e8793137d0a6639a90c066b78e7edb6722ad7007cdac0911ae171ead611"}},
+                {123225, uint256{"bee000e92d6b64ceb6ad9a3759fb38c1d6752713240e76bde3617f073b9cbe74"}},
             }
         };
         m_assumeutxo_data = {
@@ -379,11 +398,18 @@ public:
                 .m_chain_tx_count = 147'449,
                 .blockhash = consteval_ctor(uint256{"24744e8793137d0a6639a90c066b78e7edb6722ad7007cdac0911ae171ead611"}),
             },
+            {
+                // main assumeutxo snapshot at height 123'225
+                .height = 123'225,
+                .hash_serialized = AssumeutxoHash{uint256{"153ed4ddf0957251bd450f25f8b10956c3cb47d382ecbc7692e04da1a878b2b8"}},
+                .m_chain_tx_count = 150'104,
+                .blockhash = consteval_ctor(uint256{"bee000e92d6b64ceb6ad9a3759fb38c1d6752713240e76bde3617f073b9cbe74"}),
+            },
         };
         chainTxData = ChainTxData{
-            .nTime = 1780576913,
-            .tx_count = 147451,
-            .dTxRate = 0.015995381654,
+            .nTime = 1780788592,
+            .tx_count = 150106,
+            .dTxRate = 0.012676037284,
         };
     }
 };
@@ -459,6 +485,7 @@ public:
         // Hardened pre-hash epsilon (18 bits) active from ASERT activation.
         consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = 61'000;
         consensus.nMatMulPreHashEpsilonBitsUpgrade = 18;
+        consensus.nMatMulNonceSeedHeight = 125'000;
         consensus.nMaxBlockWeight = 24'000'000;
         consensus.nMaxBlockSerializedSize = 24'000'000;
         consensus.nMaxBlockSigOpsCost = 480'000;
@@ -474,10 +501,16 @@ public:
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
-        // v0.31.1: shielded unshield (z->t) velocity cap. Fast-follow after the v0.31.0 C-002 fork
+        consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
+        consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
         // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
-        // post-fork regime. Set well clear of 123,000 to give the network time to upgrade to v0.31.1.
-        consensus.nShieldedUnshieldVelocityActivationHeight = 130'000;
+        // post-fork regime. Aligned to the 125,000 sunset (DS-4 hardening): the cap activates at the
+        // same block the outflow-only rule engages, so there is no uncapped window between the sunset and
+        // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
+        // before it bites.
+        consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
@@ -626,6 +659,7 @@ public:
         // Hardened pre-hash epsilon (18 bits) active from ASERT activation.
         consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = 61'000;
         consensus.nMatMulPreHashEpsilonBitsUpgrade = 18;
+        consensus.nMatMulNonceSeedHeight = 125'000;
         consensus.nMaxBlockWeight = 24'000'000;
         consensus.nMaxBlockSerializedSize = 24'000'000;
         consensus.nMaxBlockSigOpsCost = 480'000;
@@ -641,10 +675,16 @@ public:
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
-        // v0.31.1: shielded unshield (z->t) velocity cap. Fast-follow after the v0.31.0 C-002 fork
+        consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
+        consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
         // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
-        // post-fork regime. Set well clear of 123,000 to give the network time to upgrade to v0.31.1.
-        consensus.nShieldedUnshieldVelocityActivationHeight = 130'000;
+        // post-fork regime. Aligned to the 125,000 sunset (DS-4 hardening): the cap activates at the
+        // same block the outflow-only rule engages, so there is no uncapped window between the sunset and
+        // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
+        // before it bites.
+        consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
@@ -823,6 +863,7 @@ public:
         // Hardened pre-hash epsilon (18 bits) active from ASERT activation.
         consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = 61'000;
         consensus.nMatMulPreHashEpsilonBitsUpgrade = 18;
+        consensus.nMatMulNonceSeedHeight = 125'000;
         consensus.nMaxBlockWeight = 24'000'000;
         consensus.nMaxBlockSerializedSize = 24'000'000;
         consensus.nMaxBlockSigOpsCost = 480'000;
@@ -838,10 +879,16 @@ public:
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
-        // v0.31.1: shielded unshield (z->t) velocity cap. Fast-follow after the v0.31.0 C-002 fork
+        consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
+        consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
         // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
-        // post-fork regime. Set well clear of 123,000 to give the network time to upgrade to v0.31.1.
-        consensus.nShieldedUnshieldVelocityActivationHeight = 130'000;
+        // post-fork regime. Aligned to the 125,000 sunset (DS-4 hardening): the cap activates at the
+        // same block the outflow-only rule engages, so there is no uncapped window between the sunset and
+        // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
+        // before it bites.
+        consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
@@ -986,6 +1033,9 @@ public:
             consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = *opts.matmul_pre_hash_epsilon_bits_upgrade_height;
             consensus.nMatMulPreHashEpsilonBitsUpgrade = *opts.matmul_pre_hash_epsilon_bits_upgrade;
         }
+        if (opts.matmul_nonce_seed_height.has_value()) {
+            consensus.nMatMulNonceSeedHeight = *opts.matmul_nonce_seed_height;
+        }
         consensus.nMaxBlockWeight = 24'000'000;
         consensus.nMaxBlockSerializedSize = 24'000'000;
         consensus.nMaxBlockSigOpsCost = 480'000;
@@ -1005,12 +1055,20 @@ public:
             opts.shielded_matrict_disable_height.value_or(0);  // Activate at genesis for instant regtest
         consensus.nShieldedSpendPathRecoveryActivationHeight =
             opts.shielded_spend_path_recovery_activation_height.value_or(0);  // Activate at genesis for instant regtest
-        // v0.31.1 velocity cap: inert on regtest by default (so existing shielded tests are unaffected);
+        // v0.32.0 velocity cap: inert on regtest by default (so existing shielded tests are unaffected);
         // a functional test lowers it via -regtestshieldedunshieldvelocityactivationheight to exercise it.
         consensus.nShieldedUnshieldVelocityActivationHeight =
             opts.shielded_unshield_velocity_activation_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedPQ128UpgradeHeight =
             opts.shielded_pq128_upgrade_height.value_or(std::numeric_limits<int32_t>::max());
+        consensus.nShieldedPoolCreditDisableHeight =
+            opts.shielded_pool_credit_disable_height.value_or(std::numeric_limits<int32_t>::max());
+        consensus.nShieldedSunsetHeight =
+            opts.shielded_sunset_height.value_or(std::numeric_limits<int32_t>::max());
+        consensus.nShieldedRecoveryExitActivationHeight =
+            opts.shielded_recovery_exit_activation_height.value_or(std::numeric_limits<int32_t>::max());
+        consensus.nShieldedRecoveryExitFrozenRoot =
+            opts.shielded_recovery_exit_frozen_root.value_or(uint256{});
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = opts.mldsa_disable_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nRuleChangeActivationThreshold = 108; // 75% for testchains
@@ -1063,12 +1121,15 @@ public:
             opts.matmul_require_product_payload.has_value() ||
             opts.matmul_asert_half_life.has_value() ||
             opts.matmul_asert_half_life_upgrade_height.has_value() ||
+            opts.matmul_nonce_seed_height.has_value() ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||
             opts.shielded_smile_rice_codec_disable_height.has_value() ||
             opts.shielded_matrict_disable_height.has_value() ||
             opts.shielded_spend_path_recovery_activation_height.has_value() ||
             opts.shielded_pq128_upgrade_height.has_value() ||
+            opts.shielded_pool_credit_disable_height.has_value() ||
+            opts.shielded_sunset_height.has_value() ||
             opts.mldsa_disable_height.has_value();
 
         for (const auto& [dep, height] : opts.activation_heights) {
@@ -1247,10 +1308,16 @@ public:
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
-        // v0.31.1: shielded unshield (z->t) velocity cap. Fast-follow after the v0.31.0 C-002 fork
+        consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
+        consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        // v0.32.0: shielded unshield (z->t) velocity cap. Fast-follow after the 123,000 C-002 fork
         // (123,000); self-serve unshield does not exist before C-002, so this only ever governs the
-        // post-fork regime. Set well clear of 123,000 to give the network time to upgrade to v0.31.1.
-        consensus.nShieldedUnshieldVelocityActivationHeight = 130'000;
+        // post-fork regime. Aligned to the 125,000 sunset (DS-4 hardening): the cap activates at the
+        // same block the outflow-only rule engages, so there is no uncapped window between the sunset and
+        // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
+        // before it bites.
+        consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 108;

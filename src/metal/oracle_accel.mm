@@ -259,7 +259,6 @@ kernel void generate_oracle_vector(constant OracleParams& p [[buffer(0)]],
 
 struct MetalContext {
     bool ready{false};
-    bool using_precompiled_library{false};
     std::string error;
     id<MTLDevice> device{nil};
     id<MTLCommandQueue> queue{nil};
@@ -277,6 +276,7 @@ struct MetalContext {
     uint64_t pool_reuse_events{0};
     std::mutex profiling_mutex;
     btx::metal::MatMulInputGenerationProfile profile;
+    bool using_precompiled_library{false};
 
     MetalContext()
     {
@@ -450,7 +450,7 @@ MatMulInputGenerationProfile ProbeMatMulInputGenerationProfile()
     if (!context.ready) {
         profile.available = false;
         profile.pool_initialized = false;
-        profile.library_source = context.using_precompiled_library ? "precompiled_metallib" : "unavailable";
+        profile.library_source = "unavailable";
         profile.reason = context.error.empty() ? "Metal context initialization failed" : context.error;
         return profile;
     }
@@ -646,7 +646,8 @@ MatMulInputGenerationResult GenerateMatMulInputsGPU(const MatMulInputGenerationR
             context.profile.last_encode_compress_us = encode_compress_us;
             context.profile.last_submit_wait_us = submit_wait_us;
             context.profile.last_gpu_generation_ms = gpu_generation_ms;
-            context.profile.library_source = context.using_precompiled_library ? "precompiled_metallib" : "inline_source_fallback";
+            context.profile.library_source =
+                context.using_precompiled_library ? "precompiled_metallib" : "inline_source_fallback";
             context.profile.reason = "oracle_noise4_plus_compress";
         }
 
