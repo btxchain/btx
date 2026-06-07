@@ -25,10 +25,12 @@
 #include <test/util/shielded_account_registry_test_util.h>
 #include <test/util/smile2_placeholder_utils.h>
 #include <test/util/shielded_v2_egress_fixture.h>
+#include <wallet/crypter.h>
 #include <wallet/shielded_coins.h>
 #include <wallet/shielded_wallet.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
+#include <wallet/walletdb.h>
 #include <validation.h>
 
 #include <boost/test/unit_test.hpp>
@@ -947,6 +949,148 @@ BOOST_AUTO_TEST_CASE(locked_scan_owned_note_rehydrates_to_spendable_on_unlock)
         BOOST_CHECK_EQUAL(summary.watchonly, 0);
         BOOST_CHECK_EQUAL(shielded_wallet->GetShieldedBalance(/*min_depth=*/0), value);
         BOOST_REQUIRE_EQUAL(shielded_wallet->GetSpendableNotes(/*min_depth=*/0).size(), 1U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(unreadable_encrypted_shielded_state_cache_is_rebuilt_on_unlock)
+{
+    const std::vector<unsigned char> truncated_state{0x04};
+    wallet::CKeyingMaterial plaintext(truncated_state.begin(), truncated_state.end());
+    uint256 iv;
+    iv.begin()[0] = 0x42;
+
+    std::vector<unsigned char> legacy_ciphertext;
+    BOOST_REQUIRE(wallet.WithEncryptionKey([&](const wallet::CKeyingMaterial& master_key) {
+        return wallet::EncryptSecret(master_key, plaintext, iv, legacy_ciphertext);
+    }));
+
+    {
+        wallet::WalletBatch batch(wallet.GetDatabase());
+        BOOST_REQUIRE(batch.WriteCryptedShieldedState(iv, legacy_ciphertext));
+        BOOST_REQUIRE(batch.WriteShieldedState(truncated_state));
+    }
+
+    std::shared_ptr<wallet::CShieldedWallet> recovered_wallet;
+    BOOST_CHECK_NO_THROW(recovered_wallet = std::make_shared<wallet::CShieldedWallet>(wallet));
+    BOOST_REQUIRE(recovered_wallet);
+    wallet.m_shielded_wallet = recovered_wallet;
+    shielded_wallet = recovered_wallet;
+
+    {
+        wallet::WalletBatch batch(wallet.GetDatabase());
+        uint256 stored_iv;
+        std::vector<unsigned char> stored_state;
+        BOOST_CHECK(!batch.ReadCryptedShieldedState(stored_iv, stored_state));
+        BOOST_CHECK(!batch.ReadShieldedState(stored_state));
+    }
+
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        BOOST_CHECK(shielded_wallet->MaybeRehydrateSpendingKeys());
+    }
+
+    {
+        wallet::WalletBatch batch(wallet.GetDatabase());
+        uint256 stored_iv;
+        std::vector<unsigned char> stored_state;
+        BOOST_CHECK(batch.ReadCryptedShieldedState(stored_iv, stored_state));
+        BOOST_CHECK(!stored_state.empty());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(unreadable_encrypted_shielded_state_salvages_generated_address)
+{
+    const CAmount value = 23 * COIN / 100;
+    const CTransaction tx =
+        BuildMinimalV2SendTransaction(owned_addr.pk_hash, owned_kem_pk, value, 0xfa);
+
+    CBlock block;
+    block.vtx.push_back(MakeTransactionRef(tx));
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        shielded_wallet->ScanBlock(block, /*height=*/1);
+        const auto notes = shielded_wallet->GetUnspentNotes(/*min_depth=*/0);
+        BOOST_REQUIRE_EQUAL(notes.size(), 1U);
+        BOOST_REQUIRE(notes.front().account_leaf_hint.has_value());
+    }
+
+    uint256 state_iv;
+    std::vector<unsigned char> encrypted_state;
+    {
+        wallet::WalletBatch batch(wallet.GetDatabase());
+        BOOST_REQUIRE(batch.ReadCryptedShieldedState(state_iv, encrypted_state));
+        BOOST_REQUIRE(!encrypted_state.empty());
+    }
+
+    std::vector<unsigned char> plaintext_state;
+    BOOST_REQUIRE(wallet.WithEncryptionKey([&](const wallet::CKeyingMaterial& master_key) {
+        bool was_authenticated{false};
+        return wallet::DecryptAuthenticatedSecret(master_key,
+                                                  encrypted_state,
+                                                  state_iv,
+                                                  plaintext_state,
+                                                  "shieldedstate",
+                                                  &was_authenticated) &&
+               was_authenticated;
+    }));
+
+    std::vector<unsigned char> direct_send_hint_pattern(1 + 1 + 1 + 64, 0);
+    direct_send_hint_pattern[0] = 1; // ShieldedCoin::account_leaf_hint has_value flag.
+    direct_send_hint_pattern[1] = shielded::registry::REGISTRY_WIRE_VERSION;
+    direct_send_hint_pattern[2] = static_cast<uint8_t>(shielded::registry::AccountDomain::DIRECT_SEND);
+    auto hint_it = plaintext_state.end();
+    for (auto it = std::search(plaintext_state.begin(),
+                               plaintext_state.end(),
+                               direct_send_hint_pattern.begin(),
+                               direct_send_hint_pattern.end());
+         it != plaintext_state.end();
+         it = std::search(std::next(it),
+                          plaintext_state.end(),
+                          direct_send_hint_pattern.begin(),
+                          direct_send_hint_pattern.end())) {
+        hint_it = it;
+    }
+    BOOST_REQUIRE(hint_it != plaintext_state.end());
+    *(hint_it + 1) = 0x7f;
+
+    uint256 corrupt_iv;
+    corrupt_iv.begin()[0] = 0x51;
+    wallet::CKeyingMaterial corrupt_plaintext(plaintext_state.begin(), plaintext_state.end());
+    std::vector<unsigned char> corrupt_ciphertext;
+    BOOST_REQUIRE(wallet.WithEncryptionKey([&](const wallet::CKeyingMaterial& master_key) {
+        return wallet::EncryptAuthenticatedSecret(master_key,
+                                                  corrupt_plaintext,
+                                                  corrupt_iv,
+                                                  corrupt_ciphertext,
+                                                  "shieldedstate");
+    }));
+
+    {
+        wallet::WalletBatch batch(wallet.GetDatabase());
+        BOOST_REQUIRE(batch.WriteCryptedShieldedState(corrupt_iv, corrupt_ciphertext));
+    }
+
+    std::shared_ptr<wallet::CShieldedWallet> recovered_wallet;
+    BOOST_CHECK_NO_THROW(recovered_wallet = std::make_shared<wallet::CShieldedWallet>(wallet));
+    BOOST_REQUIRE(recovered_wallet);
+    wallet.m_shielded_wallet = recovered_wallet;
+    shielded_wallet = recovered_wallet;
+
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        mlkem::PublicKey rehydrated_pk{};
+        BOOST_REQUIRE(shielded_wallet->GetKEMPublicKey(owned_addr, rehydrated_pk));
+        BOOST_CHECK_EQUAL_COLLECTIONS(rehydrated_pk.begin(), rehydrated_pk.end(),
+                                      owned_kem_pk.begin(), owned_kem_pk.end());
+    }
+
+    {
+        wallet::WalletBatch batch(wallet.GetDatabase());
+        uint256 stored_iv;
+        std::vector<unsigned char> stored_state;
+        BOOST_CHECK(batch.ReadCryptedShieldedState(stored_iv, stored_state));
+        BOOST_CHECK(!stored_state.empty());
+        BOOST_CHECK(!batch.ReadShieldedState(stored_state));
     }
 }
 

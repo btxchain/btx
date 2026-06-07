@@ -1132,6 +1132,20 @@ bool AppendOutputChunkViews(ShieldedTxView& tx_view,
     return ok;
 }
 
+[[nodiscard]] bool ErasePersistedShieldedStateCache(WalletBatch& batch, const char* context)
+{
+    bool ok{true};
+    if (!batch.EraseCryptedShieldedState()) {
+        LogPrintf("%s: failed to erase encrypted shielded state cache\n", context);
+        ok = false;
+    }
+    if (!batch.EraseShieldedState()) {
+        LogPrintf("%s: failed to erase plaintext shielded state cache\n", context);
+        ok = false;
+    }
+    return ok;
+}
+
 [[nodiscard]] bool DecryptWithWalletKey(const CWallet& wallet,
                                         Span<const unsigned char> ciphertext,
                                         const uint256& iv,
@@ -1275,6 +1289,112 @@ struct PersistedShieldedState
         }
     }
 };
+
+struct TolerantShieldedCoinSkip
+{
+    SERIALIZE_METHODS(TolerantShieldedCoinSkip, obj)
+    {
+        ShieldedNote note;
+        uint256 commitment;
+        Nullifier nullifier;
+        uint64_t tree_position{0};
+        int confirmation_height{-1};
+        int spent_height{-1};
+        bool is_spent{false};
+        bool is_mine_spend{false};
+        uint256 block_hash;
+        READWRITE(note,
+                  commitment,
+                  nullifier,
+                  tree_position,
+                  confirmation_height,
+                  spent_height,
+                  is_spent,
+                  is_mine_spend,
+                  block_hash);
+        bool has_account_leaf_hint{false};
+        READWRITE(has_account_leaf_hint);
+        if (has_account_leaf_hint) {
+            uint8_t hint_version{0};
+            uint8_t hint_domain{0};
+            uint256 settlement_binding_digest;
+            uint256 output_binding_digest;
+            READWRITE(hint_version,
+                      hint_domain,
+                      settlement_binding_digest,
+                      output_binding_digest);
+        }
+    }
+};
+
+void DropPersistedShieldedScanCache(PersistedShieldedState& state)
+{
+    state.last_scanned_height = -1;
+    state.last_scanned_hash.SetNull();
+    state.tree = shielded::ShieldedMerkleTree{shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+    state.notes.clear();
+    state.note_classes.clear();
+    state.witnesses.clear();
+    state.recent_ring_exclusions.clear();
+}
+
+void LogPersistedShieldedIdentitySalvage(const PersistedShieldedState& state,
+                                         const char* trigger,
+                                         const std::string& reason)
+{
+    LogPrintf("CShieldedWallet::LoadPersistedState: shielded_state_recovery=salvaged_identity "
+              "trigger=%s reason=\"%s\" keysets=%u lifecycles=%u next_spend_idx=%u next_kem_idx=%u; "
+              "discarded scan cache will be rebuilt from active chain\n",
+              trigger,
+              reason,
+              static_cast<unsigned int>(state.key_sets.size()),
+              static_cast<unsigned int>(state.address_lifecycles.size()),
+              state.next_spending_index,
+              state.next_kem_index);
+}
+
+[[nodiscard]] std::optional<PersistedShieldedState> TrySalvagePersistedShieldedIdentity(
+    const std::vector<unsigned char>& blob,
+    std::string& diagnostic)
+{
+    PersistedShieldedState salvaged;
+    try {
+        DataStream ss{blob};
+        shielded::ShieldedMerkleTree ignored_tree{shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+        ss >> salvaged.version
+           >> salvaged.next_spending_index
+           >> salvaged.next_kem_index
+           >> salvaged.last_scanned_height
+           >> salvaged.last_scanned_hash
+           >> ignored_tree
+           >> salvaged.key_sets;
+        if (salvaged.version == 0 || salvaged.version > SHIELDED_STATE_VERSION) {
+            diagnostic = strprintf("unsupported salvaged state version %u", salvaged.version);
+            return std::nullopt;
+        }
+        DropPersistedShieldedScanCache(salvaged);
+
+        try {
+            std::vector<TolerantShieldedCoinSkip> ignored_notes;
+            std::vector<std::pair<uint256, shielded::ShieldedMerkleWitness>> ignored_witnesses;
+            ss >> ignored_notes >> ignored_witnesses;
+            if (salvaged.version >= 2) {
+                std::vector<uint64_t> ignored_recent_ring_exclusions;
+                ss >> ignored_recent_ring_exclusions;
+            }
+            if (salvaged.version >= 3) {
+                ss >> salvaged.address_lifecycles;
+            }
+        } catch (const std::exception& e) {
+            diagnostic = strprintf("salvaged key metadata only; failed to skip scan cache: %s", e.what());
+            salvaged.address_lifecycles.clear();
+        }
+        return salvaged;
+    } catch (const std::exception& e) {
+        diagnostic = strprintf("failed to salvage shielded wallet identity: %s", e.what());
+        return std::nullopt;
+    }
+}
 
 } // namespace
 
@@ -6613,25 +6733,58 @@ void CShieldedWallet::LoadPersistedState()
 
     PersistedShieldedState state;
     bool rewrite_unencrypted_tree_only{false};
+    bool salvaged_unreadable_encrypted_state{false};
     try {
         DataStream ss{blob};
         ss >> state;
         if (!ss.empty()) {
             if (have_encrypted_state && !using_locked_plaintext_fallback) {
-                throw std::runtime_error("Persisted encrypted shielded state has trailing bytes");
+                const std::string error{"Persisted encrypted shielded state has trailing bytes"};
+                if (!ErasePersistedShieldedStateCache(batch, "CShieldedWallet::LoadPersistedState")) {
+                    throw std::runtime_error(strprintf("%s; failed to erase shielded state cache", error));
+                }
+                DropPersistedShieldedScanCache(state);
+                LogPersistedShieldedIdentitySalvage(state, "trailing-bytes", error);
+                salvaged_unreadable_encrypted_state = true;
+                m_locked_state_incomplete = false;
             }
-            LogPrintf("CShieldedWallet: persisted state decode had trailing bytes; ignoring persisted state\n");
-            return;
+            if (!salvaged_unreadable_encrypted_state) {
+                LogPrintf("CShieldedWallet: persisted state decode had trailing bytes; ignoring persisted state\n");
+                return;
+            }
         }
     } catch (const std::exception& e) {
         if (have_encrypted_state && !using_locked_plaintext_fallback) {
-            throw std::runtime_error(strprintf("Persisted encrypted shielded state is unreadable: %s", e.what()));
+            const std::string error = strprintf("Persisted encrypted shielded state is unreadable: %s", e.what());
+            std::string salvage_diagnostic;
+            auto salvaged_state = TrySalvagePersistedShieldedIdentity(blob, salvage_diagnostic);
+            if (!ErasePersistedShieldedStateCache(batch, "CShieldedWallet::LoadPersistedState")) {
+                throw std::runtime_error(strprintf("%s; failed to erase shielded state cache", error));
+            }
+            if (!salvaged_state.has_value()) {
+                LogPrintf("CShieldedWallet::LoadPersistedState: shielded_state_recovery=cache_cleared_seed_rederive "
+                          "reason=\"%s\" salvage=\"%s\"; generated shielded addresses will be rederived from master seed when possible\n",
+                          error,
+                          salvage_diagnostic.empty() ? "no salvage details" : salvage_diagnostic);
+                m_locked_state_incomplete = false;
+                return;
+            }
+            state = std::move(*salvaged_state);
+            LogPersistedShieldedIdentitySalvage(state, "decode-error", error);
+            if (!salvage_diagnostic.empty()) {
+                LogPrintf("CShieldedWallet::LoadPersistedState: shielded_state_recovery_detail=%s\n",
+                          salvage_diagnostic);
+            }
+            salvaged_unreadable_encrypted_state = true;
+            m_locked_state_incomplete = false;
+        } else {
+            LogPrintf("CShieldedWallet: failed to decode persisted state: %s\n", e.what());
+            return;
         }
-        LogPrintf("CShieldedWallet: failed to decode persisted state: %s\n", e.what());
-        return;
     }
 
-    if (have_encrypted_state && !using_locked_plaintext_fallback && !encrypted_state_was_authenticated &&
+    if (have_encrypted_state && !using_locked_plaintext_fallback && !salvaged_unreadable_encrypted_state &&
+        !encrypted_state_was_authenticated &&
         m_parent_wallet.IsCrypted() && !m_parent_wallet.IsLocked()) {
         uint256 migrated_iv;
         std::vector<unsigned char> migrated_blob;
