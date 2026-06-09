@@ -152,6 +152,14 @@ std::vector<DigestResult> ComputeMatMulDigestPreparedBatch(const std::vector<CBl
                                                            backend::Kind preferred_backend,
                                                            DigestScheme digest_scheme = DigestScheme::TRANSCRIPT);
 
+std::vector<DigestResult> ComputeMatMulDigestPreparedVariableBaseBatchForMining(
+    const std::vector<CBlockHeader>& blocks,
+    uint32_t transcript_block_size,
+    uint32_t noise_rank,
+    const std::vector<PreparedDigestInputs>& prepared_batch,
+    backend::Kind preferred_backend,
+    DigestScheme digest_scheme = DigestScheme::TRANSCRIPT);
+
 DigestResult ComputeMatMulDigest(const CBlockHeader& block,
                                  const Matrix& A,
                                  const Matrix& B,

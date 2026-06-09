@@ -74,6 +74,10 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
         opts.fast_shielded_startup = *value;
     }
 
+    if (auto value{args.GetBoolArg("-resetshieldedstate")}) {
+        opts.reset_shielded_state = *value;
+    }
+
     if (auto value{args.GetBoolArg("-allowunpinnedshieldedsnapshot")}) {
         opts.allow_unpinned_shielded_snapshot = *value;
     }

@@ -5,6 +5,7 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <common/args.h>
+#include <cuda/oracle_accel.h>
 #include <cuda/cuda_scheduler.h>
 #include <matmul/accelerated_solver.h>
 #include <matmul/freivalds.h>
@@ -12,6 +13,7 @@
 #include <matmul/matrix.h>
 #include <matmul/noise.h>
 #include <matmul/transcript.h>
+#include <metal/oracle_accel.h>
 #include <pow.h>
 #include <test/util/mining.h>
 #include <test/util/random.h>
@@ -162,6 +164,32 @@ public:
         _putenv_s("BTX_MATMUL_SOLVE_BATCH_SIZE", "");
 #else
         unsetenv("BTX_MATMUL_SOLVE_BATCH_SIZE");
+#endif
+    }
+};
+
+class ScopedNonceSeedBatchSizeEnv
+{
+public:
+    explicit ScopedNonceSeedBatchSizeEnv(const char* value)
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_NONCE_SEED_BATCH_SIZE", value != nullptr ? value : "");
+#else
+        if (value != nullptr) {
+            setenv("BTX_MATMUL_NONCE_SEED_BATCH_SIZE", value, 1);
+        } else {
+            unsetenv("BTX_MATMUL_NONCE_SEED_BATCH_SIZE");
+        }
+#endif
+    }
+
+    ~ScopedNonceSeedBatchSizeEnv()
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_NONCE_SEED_BATCH_SIZE", "");
+#else
+        unsetenv("BTX_MATMUL_NONCE_SEED_BATCH_SIZE");
 #endif
     }
 };
@@ -344,6 +372,32 @@ public:
         _putenv_s("BTX_MATMUL_APPLE_PERFLEVEL0_LOGICALCPU_OVERRIDE", "");
 #else
         unsetenv("BTX_MATMUL_APPLE_PERFLEVEL0_LOGICALCPU_OVERRIDE");
+#endif
+    }
+};
+
+class ScopedMetalGpuCoresOverrideEnv
+{
+public:
+    explicit ScopedMetalGpuCoresOverrideEnv(const char* value)
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_METAL_GPU_CORES_OVERRIDE", value != nullptr ? value : "");
+#else
+        if (value != nullptr) {
+            setenv("BTX_MATMUL_METAL_GPU_CORES_OVERRIDE", value, 1);
+        } else {
+            unsetenv("BTX_MATMUL_METAL_GPU_CORES_OVERRIDE");
+        }
+#endif
+    }
+
+    ~ScopedMetalGpuCoresOverrideEnv()
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_METAL_GPU_CORES_OVERRIDE", "");
+#else
+        unsetenv("BTX_MATMUL_METAL_GPU_CORES_OVERRIDE");
 #endif
     }
 };
@@ -1305,6 +1359,290 @@ BOOST_AUTO_TEST_CASE(MatMulNonceSeed_solver_disables_shared_base_matrix_batching
     BOOST_CHECK(CheckMatMulProofOfWork_ProductCommitted(block, consensus, 2));
 }
 
+BOOST_AUTO_TEST_CASE(MatMulNonceSeed_cuda_prehash_scan_matches_cpu_gate)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulMinDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.nMatMulPreHashEpsilonBits = 4;
+    consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulNonceSeedHeight = 2;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    arith_uint256 block_target{1};
+    block_target <<= 250;
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000c1"};
+    header.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000c2"};
+    header.nTime = 1'780'000'004U;
+    header.nBits = block_target.GetCompact();
+    header.nNonce64 = 17;
+    header.nNonce = static_cast<uint32_t>(header.nNonce64);
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+
+    arith_uint256 pre_hash_target = DecodeTarget(header.nBits);
+    pre_hash_target <<= consensus.nMatMulPreHashEpsilonBits;
+    constexpr uint32_t kScanCount{96};
+    const auto scan = btx::cuda::ScanMatMulNonceSeedPreHashGPU({
+        .version = header.nVersion,
+        .previous_block_hash = header.hashPrevBlock,
+        .merkle_root = header.hashMerkleRoot,
+        .time = header.nTime,
+        .bits = header.nBits,
+        .start_nonce = header.nNonce64,
+        .matmul_dim = header.matmul_dim,
+        .block_height = 2,
+        .scan_count = kScanCount,
+        .pre_hash_target = ArithToUint256(pre_hash_target),
+    });
+    if (!scan.available) {
+        return;
+    }
+
+    BOOST_REQUIRE_MESSAGE(scan.success, scan.error);
+    BOOST_REQUIRE_EQUAL(scan.scanned_count, kScanCount);
+    BOOST_REQUIRE_EQUAL(scan.pass_flags.size(), kScanCount);
+    for (uint32_t i = 0; i < kScanCount; ++i) {
+        CBlockHeader candidate{header};
+        candidate.nNonce64 = header.nNonce64 + i;
+        candidate.nNonce = static_cast<uint32_t>(candidate.nNonce64);
+        SetDeterministicMatMulSeeds(candidate, consensus, 2);
+        const bool expected = CheckMatMulPreHashGate(candidate, consensus, 2);
+        BOOST_CHECK_EQUAL(scan.pass_flags[i] != 0, expected);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(MatMulNonceSeed_metal_prehash_scan_matches_cpu_gate)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulMinDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.nMatMulPreHashEpsilonBits = 4;
+    consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulNonceSeedHeight = 2;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    arith_uint256 block_target{1};
+    block_target <<= 250;
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000d1"};
+    header.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000d2"};
+    header.nTime = 1'780'000'005U;
+    header.nBits = block_target.GetCompact();
+    header.nNonce64 = 23;
+    header.nNonce = static_cast<uint32_t>(header.nNonce64);
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+
+    arith_uint256 pre_hash_target = DecodeTarget(header.nBits);
+    pre_hash_target <<= consensus.nMatMulPreHashEpsilonBits;
+    constexpr uint32_t kScanCount{96};
+    const auto scan = btx::metal::ScanMatMulNonceSeedPreHashGPU({
+        .version = header.nVersion,
+        .previous_block_hash = header.hashPrevBlock,
+        .merkle_root = header.hashMerkleRoot,
+        .time = header.nTime,
+        .bits = header.nBits,
+        .start_nonce = header.nNonce64,
+        .matmul_dim = header.matmul_dim,
+        .block_height = 2,
+        .scan_count = kScanCount,
+        .pre_hash_target = ArithToUint256(pre_hash_target),
+    });
+    if (!scan.available) {
+        return;
+    }
+
+    BOOST_REQUIRE_MESSAGE(scan.success, scan.error);
+    BOOST_REQUIRE_EQUAL(scan.scanned_count, kScanCount);
+    BOOST_REQUIRE_EQUAL(scan.pass_flags.size(), kScanCount);
+    for (uint32_t i = 0; i < kScanCount; ++i) {
+        CBlockHeader candidate{header};
+        candidate.nNonce64 = header.nNonce64 + i;
+        candidate.nNonce = static_cast<uint32_t>(candidate.nNonce64);
+        SetDeterministicMatMulSeeds(candidate, consensus, 2);
+        const bool expected = CheckMatMulPreHashGate(candidate, consensus, 2);
+        BOOST_CHECK_EQUAL(scan.pass_flags[i] != 0, expected);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(MatMulNonceSeed_metal_solver_uses_gpu_scan_and_variable_base_batch)
+{
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
+    if (!capability.available) {
+        BOOST_TEST_MESSAGE("Skipping Metal nonce-seed solver integration test: Metal backend unavailable ("
+            << capability.reason << ")");
+        return;
+    }
+
+    ScopedBackendEnv backend_env("metal");
+    ScopedBatchSizeEnv solve_batch_env(nullptr);
+    ScopedNonceSeedBatchSizeEnv nonce_seed_batch_env("3");
+    ScopedCpuConfirmEnv cpu_confirm_env("1");
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fSkipMatMulValidation = false;
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulMinDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.nMatMulPreHashEpsilonBits = 4;
+    consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulNonceSeedHeight = 2;
+    consensus.nMatMulProductDigestHeight = 2;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000e1"};
+    header.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000e2"};
+    header.nTime = 1'780'000'006U;
+    header.nBits = UintToArith256(consensus.powLimit).GetCompact();
+    header.nNonce64 = 0;
+    header.nNonce = 0;
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+    header.matmul_digest.SetNull();
+
+    ResetMatMulSolvePipelineStats();
+    matmul::accelerated::ResetMatMulBackendRuntimeStats();
+    std::vector<uint32_t> payload;
+    uint64_t max_tries{3};
+    BOOST_REQUIRE(SolveMatMul(header, consensus, max_tries, 2, nullptr, &payload));
+
+    const auto solve_stats = ProbeMatMulSolvePipelineStats();
+    BOOST_CHECK_EQUAL(solve_stats.batch_size, 3U);
+    BOOST_CHECK_EQUAL(solve_stats.batched_digest_requests, 1U);
+    BOOST_CHECK_EQUAL(solve_stats.batched_nonce_attempts, 3U);
+
+    const auto backend_stats = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
+    BOOST_CHECK_EQUAL(backend_stats.requested_metal, 3U);
+    BOOST_CHECK_EQUAL(backend_stats.metal_successes, 3U);
+    BOOST_CHECK(!payload.empty());
+    BOOST_CHECK_EQUAL(header.seed_a, DeterministicMatMulSeedV2(header, 2, 0));
+    BOOST_CHECK_EQUAL(header.seed_b, DeterministicMatMulSeedV2(header, 2, 1));
+
+    CBlock block{header};
+    block.matrix_c_data = payload;
+    BOOST_CHECK(CheckMatMulProofOfWork_ProductCommitted(block, consensus, 2));
+}
+
+BOOST_AUTO_TEST_CASE(MatMulNonceSeed_metal_batch_default_scales_with_gpu_core_count)
+{
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
+    if (!capability.available) {
+        BOOST_TEST_MESSAGE("Skipping Metal nonce-seed batch default scaling test: Metal backend unavailable ("
+            << capability.reason << ")");
+        return;
+    }
+
+    ScopedBackendEnv backend_env("metal");
+    ScopedBatchSizeEnv solve_batch_env(nullptr);
+    ScopedNonceSeedBatchSizeEnv nonce_seed_batch_env(nullptr);
+    ScopedSolverThreadsEnv solver_threads_env("1");
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.fMatMulFreivaldsEnabled = true;
+    consensus.fMatMulRequireProductPayload = false;
+    consensus.nMatMulFreivaldsBindingHeight = 2;
+    consensus.nMatMulDimension = 512;
+    consensus.nMatMulMinDimension = 512;
+    consensus.nMatMulTranscriptBlockSize = 16;
+    consensus.nMatMulNoiseRank = 8;
+    consensus.nMatMulPreHashEpsilonBits = 18;
+    consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulNonceSeedHeight = 2;
+    consensus.nMatMulProductDigestHeight = 2;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    auto check_default_for_gpu_cores = [&](const char* gpu_cores, uint32_t expected_batch_size) {
+        ScopedMetalGpuCoresOverrideEnv gpu_cores_env(gpu_cores);
+
+        CBlockHeader candidate{};
+        candidate.nVersion = 4;
+        candidate.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000f1"};
+        candidate.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000f2"};
+        candidate.nTime = 1'780'000'007U;
+        candidate.nBits = arith_uint256{1}.GetCompact();
+        candidate.nNonce64 = expected_batch_size;
+        candidate.nNonce = static_cast<uint32_t>(candidate.nNonce64);
+        candidate.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+        candidate.matmul_digest.SetNull();
+
+        uint64_t max_tries{1};
+        ResetMatMulSolvePipelineStats();
+        const bool solved = SolveMatMul(candidate, consensus, max_tries, 2);
+        BOOST_CHECK(!solved);
+
+        const auto stats = ProbeMatMulSolvePipelineStats();
+        BOOST_CHECK_EQUAL(stats.batch_size, expected_batch_size);
+        BOOST_CHECK(!stats.parallel_solver_enabled);
+        BOOST_CHECK_EQUAL(stats.parallel_solver_threads, 1U);
+    };
+
+    check_default_for_gpu_cores("10", 64);
+    check_default_for_gpu_cores("20", 128);
+    check_default_for_gpu_cores("40", 192);
+    check_default_for_gpu_cores("76", 256);
+}
+
+BOOST_AUTO_TEST_CASE(MatMulNonceSeed_cuda_batch_override_accepts_large_batch)
+{
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::CUDA);
+    if (!capability.available) {
+        BOOST_TEST_MESSAGE("Skipping CUDA nonce-seed batch override test: CUDA backend unavailable ("
+            << capability.reason << ")");
+        return;
+    }
+
+    ScopedBackendEnv backend_env("cuda");
+    ScopedBatchSizeEnv solve_batch_env(nullptr);
+    ScopedNonceSeedBatchSizeEnv nonce_seed_batch_env("512");
+    ScopedSolverThreadsEnv solver_threads_env("1");
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.fMatMulFreivaldsEnabled = true;
+    consensus.fMatMulRequireProductPayload = false;
+    consensus.nMatMulFreivaldsBindingHeight = 2;
+    consensus.nMatMulDimension = 512;
+    consensus.nMatMulMinDimension = 512;
+    consensus.nMatMulTranscriptBlockSize = 16;
+    consensus.nMatMulNoiseRank = 8;
+    consensus.nMatMulPreHashEpsilonBits = 18;
+    consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulNonceSeedHeight = 2;
+    consensus.nMatMulProductDigestHeight = 2;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    CBlockHeader candidate{};
+    candidate.nVersion = 4;
+    candidate.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000f3"};
+    candidate.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000f4"};
+    candidate.nTime = 1'780'000'008U;
+    candidate.nBits = arith_uint256{1}.GetCompact();
+    candidate.nNonce64 = 0;
+    candidate.nNonce = 0;
+    candidate.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+    candidate.matmul_digest.SetNull();
+
+    uint64_t max_tries{1};
+    ResetMatMulSolvePipelineStats();
+    const bool solved = SolveMatMul(candidate, consensus, max_tries, 2);
+    BOOST_CHECK(!solved);
+
+    const auto stats = ProbeMatMulSolvePipelineStats();
+    BOOST_CHECK_EQUAL(stats.batch_size, 512U);
+}
+
 BOOST_AUTO_TEST_CASE(EffectiveTargetSpacingForHeight_uses_fast_phase_schedule)
 {
     const auto main_consensus = CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus();
@@ -1989,6 +2327,96 @@ BOOST_AUTO_TEST_CASE(matmul_solve_pipelines_next_nonce_preparation_when_async_en
     BOOST_CHECK_GE(stats.overlapped_prepares, 2U);
     BOOST_CHECK_GE(stats.batched_digest_requests, 1U);
     BOOST_CHECK_GE(stats.batched_nonce_attempts, 3U);
+}
+
+// Pool/share mining: a non-null share_target_override lets the solver return on an EASIER target while
+// the consensus block target (pre-hash gate + miner pre-hash window) is unchanged. Exercised across both
+// the legacy pre-activation path and the V2 nonce-seeded path, so every backend funnel is covered.
+BOOST_AUTO_TEST_CASE(matmul_share_target_override_relaxes_only_digest_exit)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.nMatMulPreHashEpsilonBits = 0;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    // Block target == 1 (set via nBits below) is effectively unsolvable in a handful of tries, while the
+    // maximal share target accepts the first scanned nonce. The two together prove the override changed
+    // only the digest acceptance decision, not which nonces were scanned.
+    const uint256 easy_share_target{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    // Cover both solver dispatch paths by reading the activation height from the params themselves.
+    const int32_t nonce_seed_height = static_cast<int32_t>(consensus.nMatMulNonceSeedHeight);
+    const std::vector<int32_t> heights{
+        nonce_seed_height > 0 ? nonce_seed_height - 1 : -1,  // legacy (pre-activation)
+        nonce_seed_height,                                   // V2 nonce-seeded
+    };
+
+    auto make_candidate = [&]() {
+        CBlockHeader c{};
+        c.nVersion = 4;
+        c.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000031"};
+        c.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000032"};
+        c.nTime = 1'700'000'777U;
+        c.nBits = arith_uint256{1}.GetCompact();  // block target == 1
+        c.nNonce64 = 1;
+        c.nNonce = 1;
+        c.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+        c.seed_a = DeterministicMatMulSeed(c.hashPrevBlock, /*height=*/0, /*which=*/0);
+        c.seed_b = DeterministicMatMulSeed(c.hashPrevBlock, /*height=*/0, /*which=*/1);
+        c.matmul_digest.SetNull();
+        return c;
+    };
+
+    for (const int32_t height : heights) {
+        // 1) Mining against the (tiny) block target finds nothing in a few tries.
+        {
+            CBlockHeader candidate = make_candidate();
+            uint64_t max_tries{8};
+            BOOST_CHECK_MESSAGE(!SolveMatMul(candidate, consensus, max_tries, height),
+                                "block-target solve unexpectedly succeeded at height " << height);
+        }
+
+        // 2) The easy share target accepts the first scanned nonce as a share.
+        {
+            CBlockHeader candidate = make_candidate();
+            uint64_t max_tries{8};
+            const bool solved = SolveMatMul(candidate, consensus, max_tries, height,
+                                            /*abort_flag=*/nullptr, /*freivalds_payload_out=*/nullptr,
+                                            &easy_share_target);
+            BOOST_CHECK_MESSAGE(solved, "share-target solve failed at height " << height);
+            BOOST_CHECK(!candidate.matmul_digest.IsNull());
+            BOOST_CHECK_LE(UintToArith256(candidate.matmul_digest), UintToArith256(easy_share_target));
+            // The accepted digest does NOT meet the block target, so it is a share and not a consensus
+            // block: this is the whole point of the override — the digest early-exit relaxed, nothing else.
+            const auto block_target = DeriveTarget(candidate.nBits, consensus.powLimit);
+            BOOST_REQUIRE(block_target.has_value());
+            BOOST_CHECK_GT(UintToArith256(candidate.matmul_digest), *block_target);
+        }
+
+        // 3) A zero share target is rejected.
+        {
+            CBlockHeader candidate = make_candidate();
+            uint64_t max_tries{8};
+            const uint256 zero_target{};
+            BOOST_CHECK(!SolveMatMul(candidate, consensus, max_tries, height,
+                                     nullptr, nullptr, &zero_target));
+        }
+
+        // 4) A share target equal to the block target behaves exactly like no override.
+        {
+            const auto block_target = DeriveTarget(arith_uint256{1}.GetCompact(), consensus.powLimit);
+            BOOST_REQUIRE(block_target.has_value());
+            const uint256 block_target_u = ArithToUint256(*block_target);
+            CBlockHeader candidate = make_candidate();
+            uint64_t max_tries{8};
+            BOOST_CHECK_MESSAGE(!SolveMatMul(candidate, consensus, max_tries, height,
+                                             nullptr, nullptr, &block_target_u),
+                                "block-target override unexpectedly solved at height " << height);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(matmul_solve_prefetches_following_single_nonce_batches_when_async_enabled)

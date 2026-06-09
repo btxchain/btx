@@ -63,6 +63,27 @@ struct MatMulInputGenerationDeviceResult {
     std::string error;
 };
 
+struct MatMulNonceSeedPreHashScanRequest {
+    int32_t version{0};
+    uint256 previous_block_hash;
+    uint256 merkle_root;
+    uint32_t time{0};
+    uint32_t bits{0};
+    uint64_t start_nonce{0};
+    uint16_t matmul_dim{0};
+    uint32_t block_height{0};
+    uint32_t scan_count{0};
+    uint256 pre_hash_target;
+};
+
+struct MatMulNonceSeedPreHashScanResult {
+    bool available{false};
+    bool success{false};
+    uint32_t scanned_count{0};
+    std::vector<uint8_t> pass_flags;
+    std::string error;
+};
+
 struct MatMulInputGenerationProfile {
     bool available{false};
     bool pool_initialized{false};
@@ -80,6 +101,8 @@ struct MatMulInputGenerationProfile {
 MatMulInputGenerationProfile ProbeMatMulInputGenerationProfile();
 MatMulInputGenerationResult GenerateMatMulInputsGPU(const MatMulInputGenerationRequest& request);
 MatMulInputGenerationDeviceResult GenerateMatMulInputsGPUDevice(const MatMulInputGenerationRequest& request);
+MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(
+    const MatMulNonceSeedPreHashScanRequest& request);
 
 } // namespace btx::cuda
 

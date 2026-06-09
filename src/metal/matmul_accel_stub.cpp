@@ -14,6 +14,14 @@ MatMulAccelerationProbe ProbeMatMulDigestAcceleration()
     };
 }
 
+MatMulDeviceInfo ProbeMatMulDeviceInfo()
+{
+    MatMulDeviceInfo info;
+    info.available = false;
+    info.reason = "Metal MatMul acceleration is unavailable on this build";
+    return info;
+}
+
 MatMulBaseMatricesResult UploadBaseMatrices(const MatMulBaseMatricesRequest&)
 {
     MatMulBaseMatricesResult result;
@@ -126,6 +134,15 @@ MatMulDigestBatchResult ComputeCanonicalTranscriptDigestBatch(const MatMulDigest
     result.available = false;
     result.success = false;
     result.error = "Metal MatMul acceleration is unavailable on this build";
+    return result;
+}
+
+MatMulDigestBatchResult ComputeCanonicalTranscriptDigestVariableBaseBatch(const MatMulVariableBaseDigestBatchRequest&)
+{
+    MatMulDigestBatchResult result;
+    result.available = false;
+    result.success = false;
+    result.error = "Metal variable-base MatMul acceleration is unavailable on this build";
     return result;
 }
 

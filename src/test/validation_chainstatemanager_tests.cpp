@@ -3641,6 +3641,12 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_CHECK_EQUAL(get_valid_opts({"-fastshieldedstartup=1"}).fast_shielded_startup, true);
     BOOST_CHECK_EQUAL(get_valid_opts({"-fastshieldedstartup=0"}).fast_shielded_startup, false);
 
+    // -resetshieldedstate is a one-shot repair flag, off by default, opt-in to force a clean rebuild.
+    BOOST_CHECK_EQUAL(get_valid_opts({}).reset_shielded_state, false);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-resetshieldedstate"}).reset_shielded_state, true);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-resetshieldedstate=1"}).reset_shielded_state, true);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-resetshieldedstate=0"}).reset_shielded_state, false);
+
     // The cross-chain startup audit is on by default (applies on the non-fast path).
     BOOST_CHECK_EQUAL(get_valid_opts({}).shielded_startup_audit, true);
     BOOST_CHECK_EQUAL(get_valid_opts({"-shieldedstartupaudit"}).shielded_startup_audit, true);

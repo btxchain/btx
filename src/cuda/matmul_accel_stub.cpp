@@ -132,4 +132,32 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatchMultiDe
     return result;
 }
 
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDeviceBatch(
+    const MatMulLowRankVariableBaseDeviceBatchRequest&,
+    MatMulCompressedWordsMode)
+{
+    MatMulCompressedWordsBatchResult result;
+    result.error = "disabled_by_build";
+    return result;
+}
+
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDeviceBatchOnDevice(
+    const MatMulLowRankVariableBaseDeviceBatchRequest&,
+    MatMulCompressedWordsMode,
+    int)
+{
+    MatMulCompressedWordsBatchResult result;
+    result.error = "disabled_by_build";
+    return result;
+}
+
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDeviceBatchMultiDevice(
+    const MatMulLowRankVariableBaseDeviceBatchRequest&,
+    MatMulCompressedWordsMode)
+{
+    MatMulCompressedWordsBatchResult result;
+    result.error = "disabled_by_build";
+    return result;
+}
+
 } // namespace btx::cuda

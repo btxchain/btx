@@ -547,6 +547,7 @@ BTX_BASE_SCRIPTS = [
     'feature_p2mr_end_to_end.py',
     'p2mr_end_to_end.py',
     'rpc_pq_wallet.py',
+    'rpc_getshieldedstateinfo.py',
     'wallet_shielded_encrypted_persistence.py',
     'wallet_shielded_restart_persistence.py',
     'wallet_shielded_reorg_recovery.py',

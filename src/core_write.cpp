@@ -14,6 +14,7 @@
 #include <script/script.h>
 #include <script/solver.h>
 #include <serialize.h>
+#include <shielded/bundle.h>
 #include <streams.h>
 #include <undo.h>
 #include <univalue.h>
@@ -662,7 +663,15 @@ void TxToUniv(const CTransaction& tx, const uint256& block_hash, UniValue& entry
     entry.pushKV("vout", std::move(vout));
 
     if (have_undo) {
-        const CAmount fee = amt_total_in - amt_total_out;
+        // For a shielded transaction the transparent vin/vout values alone are not the fee: value can
+        // flow into the shielded pool (shield) or out of it (unshield), so transparent_in - transparent_out
+        // can legitimately be negative and trip the MoneyRange(fee) check. Mirror consensus
+        // (CheckTxInputs / GetShieldedTxValueBalance), which adds the shielded value balance to the input
+        // side, so the displayed fee is correct and stays within MoneyRange for the same shielded txes that
+        // `getblock <hash> 2` previously failed on with "Internal bug detected: MoneyRange(fee)".
+        const CAmount shielded_value_balance =
+            tx.HasShieldedBundle() ? GetShieldedTxValueBalance(tx.GetShieldedBundle()) : CAmount{0};
+        const CAmount fee = amt_total_in + shielded_value_balance - amt_total_out;
         CHECK_NONFATAL(MoneyRange(fee));
         entry.pushKV("fee", ValueFromAmount(fee));
     }

@@ -6,7 +6,10 @@
 
 #include <cuda_runtime_api.h>
 
+#include <logging.h>
+
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <climits>
 #include <csetjmp>
@@ -20,7 +23,12 @@
 namespace btx::cuda {
 namespace {
 
-constexpr int MIN_SUPPORTED_COMPUTE_CAPABILITY_MAJOR{8};
+// Default minimum compute capability the bundled CUDA kernels are built and
+// validated for (sm_80 / Ampere). A pool independently validated GPU-vs-CPU
+// digest equivalence on Pascal (sm_6x), so operators can opt in to running on
+// older GPUs via BTX_CUDA_ALLOW_OLDER_GPUS, which lowers the floor to 6.
+constexpr int DEFAULT_MIN_SUPPORTED_COMPUTE_CAPABILITY_MAJOR{8};
+constexpr int OPT_IN_MIN_SUPPORTED_COMPUTE_CAPABILITY_MAJOR{6};
 
 std::string ComputeCapabilityString(int major, int minor)
 {
@@ -40,6 +48,39 @@ std::string TrimAscii(const std::string& value)
     }
 
     return value.substr(begin, end - begin);
+}
+
+bool AllowOlderGpusRequested()
+{
+    const char* env = std::getenv("BTX_CUDA_ALLOW_OLDER_GPUS");
+    if (env == nullptr || env[0] == '\0') {
+        return false;
+    }
+    // Treat "0"/"false"/"no"/"off" (any case) as disabled; anything else enables.
+    std::string value = TrimAscii(env);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (value == "0" || value == "false" || value == "no" || value == "off") {
+        return false;
+    }
+    return true;
+}
+
+int MinSupportedComputeCapabilityMajor()
+{
+    static const int resolved = [] {
+        if (AllowOlderGpusRequested()) {
+            LogPrintf("MATMUL NOTE: BTX_CUDA_ALLOW_OLDER_GPUS is set; lowering minimum CUDA "
+                      "compute capability gate from sm_%d0 to sm_%d0 (opt-in; GPU-vs-CPU digest "
+                      "equivalence must be validated for your hardware)\n",
+                      DEFAULT_MIN_SUPPORTED_COMPUTE_CAPABILITY_MAJOR,
+                      OPT_IN_MIN_SUPPORTED_COMPUTE_CAPABILITY_MAJOR);
+            return OPT_IN_MIN_SUPPORTED_COMPUTE_CAPABILITY_MAJOR;
+        }
+        return DEFAULT_MIN_SUPPORTED_COMPUTE_CAPABILITY_MAJOR;
+    }();
+    return resolved;
 }
 
 bool ParseNonNegativeInt(const std::string& value, int& parsed)
@@ -187,7 +228,7 @@ CudaTopologyProbe ProbeCudaHardwareTopology()
 
         CudaDeviceInfo device;
         device.device_index = device_index;
-        device.supported = properties.major >= MIN_SUPPORTED_COMPUTE_CAPABILITY_MAJOR;
+        device.supported = properties.major >= MinSupportedComputeCapabilityMajor();
         device.reason = device.supported
             ? "ready"
             : "device_compute_capability_too_old:" + ComputeCapabilityString(properties.major, properties.minor);

@@ -44,6 +44,7 @@ PRESET_CONF = {
         "prune=4096",
         "blockfilterindex=1",
         "coinstatsindex=1",
+        "# keep shielded commitment index on disk (faster restart; default).",
         "retainshieldedcommitmentindex=1",
         "miningminoutboundpeers=2",
         "miningminsyncedoutboundpeers=1",
@@ -58,6 +59,7 @@ PRESET_CONF = {
         "txindex=1",
         "blockfilterindex=1",
         "coinstatsindex=1",
+        "# keep shielded commitment index on disk (faster restart; default).",
         "retainshieldedcommitmentindex=1",
     ],
 }

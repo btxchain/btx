@@ -68,6 +68,7 @@ addnode=node.btx.tools:19335
 prune=4096
 blockfilterindex=1
 coinstatsindex=1
+# keep shielded commitment index on disk (faster restart; default).
 retainshieldedcommitmentindex=1
 miningminoutboundpeers=2
 miningminsyncedoutboundpeers=1
@@ -125,7 +126,7 @@ One-shot install + bootstrap
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.32.2 \
+  --release-tag v0.32.3 \
   --preset service \
   --datadir="$HOME/.btx-service"
 ```
@@ -149,7 +150,7 @@ handing off to mining or service automation:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.32.2 \
+  --release-tag v0.32.3 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"

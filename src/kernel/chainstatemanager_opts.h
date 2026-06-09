@@ -64,6 +64,10 @@ struct ChainstateManagerOpts {
     //! to the active tip and its commitment index/anchor windows validated, so the skipped audit is
     //! fail-closed (it can only reject, never accept). Set to 0 to force the thorough sync + audit.
     bool fast_shielded_startup{true};
+    //! One-shot repair: when set, wipe the on-disk shielded_state directory at startup and force a single
+    //! clean full rebuild from local block data. Supported replacement for the manual "move shielded_state
+    //! aside" recovery; intended to be passed once (e.g. -resetshieldedstate) then removed.
+    bool reset_shielded_state{false};
     //! DS-3 compatibility gate: optionally refuse to load an assumeutxo snapshot whose shielded section has no
     //! consensus pin (AssumeutxoData.shielded_state_commitment) for its height. The shielded section
     //! (pool balance + nullifier set + commitment tree) is attacker-supplied and otherwise unvalidated,

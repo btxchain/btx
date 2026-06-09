@@ -40,6 +40,10 @@ constexpr uint32_t WORKSPACE_THREADS{256};
 
 std::string CudaErrorString(cudaError_t error);
 
+struct DeviceSeedBytes {
+    uint8_t data[32];
+};
+
 struct DigestWorkspace {
     struct HostStageBuffer {
         Element* pinned{nullptr};
@@ -111,6 +115,10 @@ struct DigestWorkspace {
     Element* device_matrix_b{nullptr};
     size_t matrix_a_capacity{0};
     size_t matrix_b_capacity{0};
+    DeviceSeedBytes* device_seed_a{nullptr};
+    DeviceSeedBytes* device_seed_b{nullptr};
+    size_t seed_a_capacity{0};
+    size_t seed_b_capacity{0};
 
     Element* device_noise_e_l{nullptr};
     Element* device_noise_e_r{nullptr};
@@ -147,6 +155,8 @@ struct DigestWorkspace {
         cudaFree(device_noise_e_r);
         cudaFree(device_noise_e_l);
         cudaFree(device_prepared_input_ptrs);
+        cudaFree(device_seed_b);
+        cudaFree(device_seed_a);
         cudaFree(device_matrix_b);
         cudaFree(device_matrix_a);
         cudaFree(device_base_b);
@@ -159,6 +169,8 @@ struct DigestWorkspace {
         device_noise_e_r = nullptr;
         device_noise_e_l = nullptr;
         device_prepared_input_ptrs = nullptr;
+        device_seed_b = nullptr;
+        device_seed_a = nullptr;
         device_matrix_b = nullptr;
         device_matrix_a = nullptr;
         device_base_b = nullptr;
@@ -171,6 +183,8 @@ struct DigestWorkspace {
         noise_e_r_capacity = 0;
         noise_e_l_capacity = 0;
         prepared_input_ptr_capacity = 0;
+        seed_b_capacity = 0;
+        seed_a_capacity = 0;
         matrix_b_capacity = 0;
         matrix_a_capacity = 0;
         base_b_capacity = 0;
@@ -656,6 +670,191 @@ __host__ __device__ __forceinline__ Element FieldMul(Element a, Element b)
     return Reduce64(static_cast<uint64_t>(a) * static_cast<uint64_t>(b));
 }
 
+__device__ __forceinline__ uint32_t RotR(uint32_t x, uint32_t n)
+{
+    return (x >> n) | (x << (32U - n));
+}
+
+__device__ __forceinline__ uint32_t ShaCh(uint32_t x, uint32_t y, uint32_t z)
+{
+    return (x & y) ^ ((~x) & z);
+}
+
+__device__ __forceinline__ uint32_t ShaMaj(uint32_t x, uint32_t y, uint32_t z)
+{
+    return (x & y) ^ (x & z) ^ (y & z);
+}
+
+__device__ __forceinline__ uint32_t ShaBSig0(uint32_t x)
+{
+    return RotR(x, 2U) ^ RotR(x, 13U) ^ RotR(x, 22U);
+}
+
+__device__ __forceinline__ uint32_t ShaBSig1(uint32_t x)
+{
+    return RotR(x, 6U) ^ RotR(x, 11U) ^ RotR(x, 25U);
+}
+
+__device__ __forceinline__ uint32_t ShaSSig0(uint32_t x)
+{
+    return RotR(x, 7U) ^ RotR(x, 18U) ^ (x >> 3U);
+}
+
+__device__ __forceinline__ uint32_t ShaSSig1(uint32_t x)
+{
+    return RotR(x, 17U) ^ RotR(x, 19U) ^ (x >> 10U);
+}
+
+__device__ __constant__ uint32_t SHA256_K[64] = {
+    0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U,
+    0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U, 0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U, 0xc19bf174U,
+    0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU, 0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU,
+    0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U, 0xc6e00bf3U, 0xd5a79147U, 0x06ca6351U, 0x14292967U,
+    0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU, 0x53380d13U, 0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U,
+    0xa2bfe8a1U, 0xa81a664bU, 0xc24b8b70U, 0xc76c51a3U, 0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U,
+    0x19a4c116U, 0x1e376c08U, 0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU, 0x682e6ff3U,
+    0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U, 0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U,
+};
+
+__device__ __forceinline__ void SetShaByte(uint32_t w[64], uint32_t offset, uint32_t byte)
+{
+    const uint32_t word_index = offset >> 2U;
+    const uint32_t shift = (3U - (offset & 3U)) * 8U;
+    w[word_index] |= (byte & 0xffU) << shift;
+}
+
+__device__ __forceinline__ uint32_t Bswap32(uint32_t x)
+{
+    return ((x & 0x000000ffU) << 24U) |
+        ((x & 0x0000ff00U) << 8U) |
+        ((x & 0x00ff0000U) >> 8U) |
+        ((x & 0xff000000U) >> 24U);
+}
+
+__device__ inline void Sha256Init(uint32_t state[8])
+{
+    state[0] = 0x6a09e667U;
+    state[1] = 0xbb67ae85U;
+    state[2] = 0x3c6ef372U;
+    state[3] = 0xa54ff53aU;
+    state[4] = 0x510e527fU;
+    state[5] = 0x9b05688cU;
+    state[6] = 0x1f83d9abU;
+    state[7] = 0x5be0cd19U;
+}
+
+__device__ inline void Sha256Compress(uint32_t state[8], uint32_t w[64])
+{
+    for (uint32_t t = 16; t < 64; ++t) {
+        w[t] = ShaSSig1(w[t - 2]) + w[t - 7] + ShaSSig0(w[t - 15]) + w[t - 16];
+    }
+
+    uint32_t a = state[0];
+    uint32_t b = state[1];
+    uint32_t c = state[2];
+    uint32_t d = state[3];
+    uint32_t e = state[4];
+    uint32_t f = state[5];
+    uint32_t g = state[6];
+    uint32_t h = state[7];
+
+    for (uint32_t t = 0; t < 64; ++t) {
+        const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[t] + w[t];
+        const uint32_t t2 = ShaBSig0(a) + ShaMaj(a, b, c);
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+    state[4] += e;
+    state[5] += f;
+    state[6] += g;
+    state[7] += h;
+}
+
+__device__ inline uint32_t CandidateFromSeedAndIndex(const DeviceSeedBytes& seed,
+                                                     uint32_t index,
+                                                     bool with_retry,
+                                                     uint32_t retry)
+{
+    uint32_t w[64] = {};
+    for (uint32_t i = 0; i < 32; ++i) {
+        SetShaByte(w, i, seed.data[31U - i]);
+    }
+
+    SetShaByte(w, 32U, index & 0xffU);
+    SetShaByte(w, 33U, (index >> 8U) & 0xffU);
+    SetShaByte(w, 34U, (index >> 16U) & 0xffU);
+    SetShaByte(w, 35U, (index >> 24U) & 0xffU);
+
+    uint32_t message_len = 36U;
+    if (with_retry) {
+        SetShaByte(w, 36U, retry & 0xffU);
+        SetShaByte(w, 37U, (retry >> 8U) & 0xffU);
+        SetShaByte(w, 38U, (retry >> 16U) & 0xffU);
+        SetShaByte(w, 39U, (retry >> 24U) & 0xffU);
+        message_len = 40U;
+    }
+
+    SetShaByte(w, message_len, 0x80U);
+    w[15] = message_len * 8U;
+
+    uint32_t state[8];
+    Sha256Init(state);
+    Sha256Compress(state, w);
+    return Bswap32(state[0]) & MODULUS;
+}
+
+__device__ inline uint32_t FallbackCandidate(const DeviceSeedBytes& seed, uint32_t index)
+{
+    uint32_t w[64] = {};
+    for (uint32_t i = 0; i < 32; ++i) {
+        SetShaByte(w, i, seed.data[31U - i]);
+    }
+
+    SetShaByte(w, 32U, index & 0xffU);
+    SetShaByte(w, 33U, (index >> 8U) & 0xffU);
+    SetShaByte(w, 34U, (index >> 16U) & 0xffU);
+    SetShaByte(w, 35U, (index >> 24U) & 0xffU);
+
+    constexpr uint8_t fallback_tag[15] = {
+        'o', 'r', 'a', 'c', 'l', 'e', '-', 'f', 'a', 'l', 'l', 'b', 'a', 'c', 'k'
+    };
+    for (uint32_t i = 0; i < 15; ++i) {
+        SetShaByte(w, 36U + i, fallback_tag[i]);
+    }
+
+    SetShaByte(w, 51U, 0x80U);
+    w[15] = 51U * 8U;
+
+    uint32_t state[8];
+    Sha256Init(state);
+    Sha256Compress(state, w);
+    return Bswap32(state[0]) % MODULUS;
+}
+
+__device__ inline uint32_t FromOracle(const DeviceSeedBytes& seed, uint32_t index)
+{
+    for (uint32_t retry = 0; retry < 256; ++retry) {
+        const uint32_t candidate = retry == 0
+            ? CandidateFromSeedAndIndex(seed, index, false, 0U)
+            : CandidateFromSeedAndIndex(seed, index, true, retry);
+        if (candidate < MODULUS) {
+            return candidate;
+        }
+    }
+    return FallbackCandidate(seed, index);
+}
+
 __device__ __forceinline__ void ReducePartialsInPlace(Element* partials, uint32_t tid)
 {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
@@ -767,6 +966,59 @@ __global__ void BuildPerturbedMatrixPackedPointersKernel(const Element* base_mat
     }
 
     output_batch[gid] = FieldAdd(base_matrix[local_index], Reduce64(acc));
+}
+
+__global__ void GenerateBaseMatrixFromSeedBatchKernel(const DeviceSeedBytes* seeds,
+                                                      uint32_t n,
+                                                      size_t total_matrix_elements,
+                                                      uint32_t matrix_elements,
+                                                      Element* output_batch)
+{
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total_matrix_elements) {
+        return;
+    }
+
+    const uint32_t batch_index = static_cast<uint32_t>(gid / matrix_elements);
+    const uint32_t local_index = static_cast<uint32_t>(gid % matrix_elements);
+    (void)n;
+    output_batch[gid] = FromOracle(seeds[batch_index], local_index);
+}
+
+__global__ void ApplyPerturbationPackedPointersVariableBaseKernel(
+    const Element* const* packed_input_ptrs,
+    uint32_t noise_left_offset_words,
+    uint32_t noise_right_offset_words,
+    uint32_t n,
+    uint32_t r,
+    size_t total_matrix_elements,
+    uint32_t matrix_elements,
+    Element* matrix_batch)
+{
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total_matrix_elements) {
+        return;
+    }
+
+    const uint32_t batch_index = static_cast<uint32_t>(gid / matrix_elements);
+    const uint32_t local_index = static_cast<uint32_t>(gid % matrix_elements);
+    const uint32_t row = local_index / n;
+    const uint32_t col = local_index % n;
+    const Element* packed_inputs = packed_input_ptrs[batch_index];
+    const Element* noise_left = packed_inputs + noise_left_offset_words;
+    const Element* noise_right = packed_inputs + noise_right_offset_words;
+
+    uint64_t acc{0};
+    uint32_t pending{0};
+    for (uint32_t k = 0; k < r; ++k) {
+        acc += static_cast<uint64_t>(noise_left[row * r + k]) * noise_right[k * n + col];
+        if (++pending == REDUCE_INTERVAL) {
+            acc = Reduce64(acc);
+            pending = 0;
+        }
+    }
+
+    matrix_batch[gid] = FieldAdd(matrix_batch[gid], Reduce64(acc));
 }
 
 template <bool PrefixMode>
@@ -1153,6 +1405,43 @@ bool ValidateLowRankDeviceBatchRequest(const MatMulLowRankCompressedWordsDeviceB
     for (uint32_t i = 0; i < request.batch_size; ++i) {
         if (request.generated_inputs[i] == nullptr) {
             error = "CUDA digest batch request contains null device-generated input handles";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ValidateLowRankVariableBaseDeviceBatchRequest(const MatMulLowRankVariableBaseDeviceBatchRequest& request, std::string& error)
+{
+    if (request.batch_size == 0) {
+        error = "CUDA variable-base digest batch request requires at least one entry";
+        return false;
+    }
+    if (request.n == 0 || request.b == 0 || request.r == 0) {
+        error = "matrix dimension, transcript block size, and noise rank must be non-zero";
+        return false;
+    }
+    if (request.r > request.n) {
+        error = "noise rank exceeds matrix dimension";
+        return false;
+    }
+    if ((request.n % request.b) != 0) {
+        error = "matrix dimension must be divisible by transcript block size";
+        return false;
+    }
+    if (request.b * request.b > MAX_BLOCK_THREADS) {
+        error = "CUDA digest request block size exceeds supported thread budget";
+        return false;
+    }
+    if (request.matrix_a_seeds == nullptr ||
+        request.matrix_b_seeds == nullptr ||
+        request.generated_inputs == nullptr) {
+        error = "CUDA variable-base digest batch request requires matrix seeds and device-generated inputs";
+        return false;
+    }
+    for (uint32_t i = 0; i < request.batch_size; ++i) {
+        if (request.generated_inputs[i] == nullptr) {
+            error = "CUDA variable-base digest batch request contains null device-generated input handles";
             return false;
         }
     }
@@ -2146,6 +2435,223 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatchOnDevic
     return result;
 }
 
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDeviceBatchOnDevice(
+    const MatMulLowRankVariableBaseDeviceBatchRequest& request,
+    MatMulCompressedWordsMode mode,
+    int device_index)
+{
+    MatMulCompressedWordsBatchResult result;
+    DigestProfilingSample sample;
+    const auto runtime_probe = ResolveCudaRuntimeForSelectedDevice(device_index, result.error);
+    result.available = runtime_probe.has_value();
+    if (!runtime_probe.has_value()) {
+        return result;
+    }
+    const auto runtime = *runtime_probe;
+
+    if (!ValidateLowRankVariableBaseDeviceBatchRequest(request, result.error)) {
+        return result;
+    }
+
+    auto lease = AcquireBufferPoolSlot(runtime.device_index, result.error);
+    if (!lease.has_value()) {
+        return result;
+    }
+
+    auto& workspace = lease->workspace();
+    ResetWorkspaceForDevice(workspace, runtime.device_index);
+
+    cudaError_t error = cudaSetDevice(runtime.device_index);
+    if (error != cudaSuccess) {
+        result.error = "cudaSetDevice failed:" + CudaErrorString(error);
+        return result;
+    }
+    if (!EnsureWorkspaceStream(workspace, result.error)) {
+        return result;
+    }
+
+    sample.n = request.n;
+    sample.b = request.b;
+    sample.r = request.r;
+    sample.batch_size = request.batch_size;
+    sample.mode = ModeToString(mode);
+    sample.used_low_rank_path = true;
+    sample.used_device_prepared_inputs = true;
+    const uint32_t matrix_elements = request.n * request.n;
+    const uint32_t noise_left_elements = request.n * request.r;
+    const uint32_t noise_right_elements = request.r * request.n;
+    const uint32_t compress_elements = request.b * request.b;
+    const size_t total_matrix_elements = static_cast<size_t>(request.batch_size) * matrix_elements;
+    const uint32_t noise_e_l_offset_words = 0;
+    const uint32_t noise_e_r_offset_words = noise_e_l_offset_words + noise_left_elements;
+    const uint32_t noise_f_l_offset_words = noise_e_r_offset_words + noise_right_elements;
+    const uint32_t noise_f_r_offset_words = noise_f_l_offset_words + noise_left_elements;
+    const uint32_t compress_offset_words = noise_f_r_offset_words + noise_right_elements;
+    bool allocated_buffers{false};
+
+    if (!EnsureDeviceBuffer(workspace.device_seed_a,
+                            workspace.seed_a_capacity,
+                            request.batch_size,
+                            result.error,
+                            allocated_buffers) ||
+        !EnsureDeviceBuffer(workspace.device_seed_b,
+                            workspace.seed_b_capacity,
+                            request.batch_size,
+                            result.error,
+                            allocated_buffers) ||
+        !EnsureDeviceBuffer(workspace.device_matrix_a,
+                            workspace.matrix_a_capacity,
+                            total_matrix_elements,
+                            result.error,
+                            allocated_buffers) ||
+        !EnsureDeviceBuffer(workspace.device_matrix_b,
+                            workspace.matrix_b_capacity,
+                            total_matrix_elements,
+                            result.error,
+                            allocated_buffers) ||
+        !EnsureDeviceBuffer(workspace.device_prepared_input_ptrs,
+                            workspace.prepared_input_ptr_capacity,
+                            request.batch_size,
+                            result.error,
+                            allocated_buffers)) {
+        return result;
+    }
+
+    const auto total_start = SteadyClock::now();
+    std::vector<DeviceSeedBytes> seed_a_batch(request.batch_size);
+    std::vector<DeviceSeedBytes> seed_b_batch(request.batch_size);
+    std::vector<const Element*> prepared_input_ptrs;
+    prepared_input_ptrs.reserve(request.batch_size);
+    const auto wait_start = SteadyClock::now();
+    for (uint32_t i = 0; i < request.batch_size; ++i) {
+        std::memcpy(seed_a_batch[i].data, request.matrix_a_seeds[i].data(), sizeof(seed_a_batch[i].data));
+        std::memcpy(seed_b_batch[i].data, request.matrix_b_seeds[i].data(), sizeof(seed_b_batch[i].data));
+
+        const auto* generated = request.generated_inputs[i];
+        if (generated->device_index != runtime.device_index ||
+            generated->n != request.n ||
+            generated->b != request.b ||
+            generated->r != request.r ||
+            generated->noise_words != noise_left_elements ||
+            generated->compress_words != compress_elements ||
+            generated->noise_e_l == nullptr ||
+            generated->noise_e_r == nullptr ||
+            generated->noise_f_l == nullptr ||
+            generated->noise_f_r == nullptr ||
+            generated->compress_vec == nullptr) {
+            result.error = "CUDA variable-base digest batch request contains incompatible device-generated inputs";
+            return result;
+        }
+
+        if (generated->ready_event != nullptr) {
+            error = cudaStreamWaitEvent(
+                workspace.stream,
+                reinterpret_cast<cudaEvent_t>(generated->ready_event),
+                0);
+            if (error != cudaSuccess) {
+                result.error = "cudaStreamWaitEvent failed:" + CudaErrorString(error);
+                return result;
+            }
+        }
+
+        prepared_input_ptrs.push_back(generated->storage);
+    }
+    sample.stream_wait_event_us = DurationMicros(wait_start, SteadyClock::now());
+
+    const auto h2d_start = SteadyClock::now();
+    error = cudaMemcpyAsync(workspace.device_seed_a,
+                            seed_a_batch.data(),
+                            request.batch_size * sizeof(DeviceSeedBytes),
+                            cudaMemcpyHostToDevice,
+                            workspace.stream);
+    if (error == cudaSuccess) {
+        error = cudaMemcpyAsync(workspace.device_seed_b,
+                                seed_b_batch.data(),
+                                request.batch_size * sizeof(DeviceSeedBytes),
+                                cudaMemcpyHostToDevice,
+                                workspace.stream);
+    }
+    if (error == cudaSuccess) {
+        error = cudaMemcpyAsync(workspace.device_prepared_input_ptrs,
+                                prepared_input_ptrs.data(),
+                                request.batch_size * sizeof(const Element*),
+                                cudaMemcpyHostToDevice,
+                                workspace.stream);
+    }
+    sample.submit_h2d_us = DurationMicros(h2d_start, SteadyClock::now());
+    if (error != cudaSuccess) {
+        result.error = "cudaMemcpy variable-base request data failed:" + CudaErrorString(error);
+        return result;
+    }
+
+    const uint32_t build_blocks = static_cast<uint32_t>((total_matrix_elements + WORKSPACE_THREADS - 1) / WORKSPACE_THREADS);
+    const auto build_start = SteadyClock::now();
+    GenerateBaseMatrixFromSeedBatchKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+        workspace.device_seed_a,
+        request.n,
+        total_matrix_elements,
+        matrix_elements,
+        workspace.device_matrix_a);
+    error = cudaGetLastError();
+    if (error == cudaSuccess) {
+        GenerateBaseMatrixFromSeedBatchKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+            workspace.device_seed_b,
+            request.n,
+            total_matrix_elements,
+            matrix_elements,
+            workspace.device_matrix_b);
+        error = cudaGetLastError();
+    }
+    if (error == cudaSuccess) {
+        ApplyPerturbationPackedPointersVariableBaseKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+            workspace.device_prepared_input_ptrs,
+            noise_e_l_offset_words,
+            noise_e_r_offset_words,
+            request.n,
+            request.r,
+            total_matrix_elements,
+            matrix_elements,
+            workspace.device_matrix_a);
+        error = cudaGetLastError();
+    }
+    if (error == cudaSuccess) {
+        ApplyPerturbationPackedPointersVariableBaseKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+            workspace.device_prepared_input_ptrs,
+            noise_f_l_offset_words,
+            noise_f_r_offset_words,
+            request.n,
+            request.r,
+            total_matrix_elements,
+            matrix_elements,
+            workspace.device_matrix_b);
+        error = cudaGetLastError();
+    }
+    sample.launch_build_perturbed_us = DurationMicros(build_start, SteadyClock::now());
+    if (error != cudaSuccess) {
+        result.error = "CUDA variable-base matrix kernel failed:" + CudaErrorString(error);
+        return result;
+    }
+
+    if (!FinalizeCompressedWordsPackedPointerBatch(
+            *lease,
+            workspace,
+            request.n,
+            request.b,
+            request.r,
+            request.batch_size,
+            compress_offset_words,
+            mode,
+            result,
+            sample,
+            allocated_buffers)) {
+        return result;
+    }
+
+    sample.total_wall_ms = DurationMillis(total_start, SteadyClock::now());
+    RecordProfilingSample(sample);
+    return result;
+}
+
 MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatch(
     const MatMulLowRankCompressedWordsDeviceBatchRequest& request,
     MatMulCompressedWordsMode mode)
@@ -2255,6 +2761,139 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatchMultiDe
             shard_result.shard.indices.size() != shard_result.shard.inputs.size()) {
             result.success = false;
             result.error = "cuda_multi_device_prepared_batch_result_size_mismatch";
+            result.words.clear();
+            result.words_per_request = 0;
+            return result;
+        }
+        for (size_t i = 0; i < shard_result.shard.indices.size(); ++i) {
+            std::copy(
+                shard_result.result.words.begin() + i * result.words_per_request,
+                shard_result.result.words.begin() + (i + 1) * result.words_per_request,
+                result.words.begin() + shard_result.shard.indices[i] * result.words_per_request);
+        }
+    }
+
+    result.success = true;
+    return result;
+}
+
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDeviceBatch(
+    const MatMulLowRankVariableBaseDeviceBatchRequest& request,
+    MatMulCompressedWordsMode mode)
+{
+    return ComputeCompressedWordsLowRankVariableBaseDeviceBatchMultiDevice(request, mode);
+}
+
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDeviceBatchMultiDevice(
+    const MatMulLowRankVariableBaseDeviceBatchRequest& request,
+    MatMulCompressedWordsMode mode)
+{
+    MatMulCompressedWordsBatchResult result;
+
+    const auto topology = ProbeCudaTopology();
+    result.available = topology.available;
+    if (!topology.available) {
+        result.error = topology.reason;
+        return result;
+    }
+
+    if (!ValidateLowRankVariableBaseDeviceBatchRequest(request, result.error)) {
+        return result;
+    }
+
+    struct DeviceShard {
+        int device_index{-1};
+        std::vector<size_t> indices;
+        std::vector<uint256> seed_a;
+        std::vector<uint256> seed_b;
+        std::vector<const MatMulGeneratedInputsDevice*> inputs;
+    };
+
+    std::map<int, DeviceShard> shard_map;
+    for (uint32_t i = 0; i < request.batch_size; ++i) {
+        const auto* generated = request.generated_inputs[i];
+        auto& shard = shard_map[generated->device_index];
+        shard.device_index = generated->device_index;
+        shard.indices.push_back(i);
+        shard.seed_a.push_back(request.matrix_a_seeds[i]);
+        shard.seed_b.push_back(request.matrix_b_seeds[i]);
+        shard.inputs.push_back(generated);
+    }
+
+    if (shard_map.size() == 1) {
+        return ComputeCompressedWordsLowRankVariableBaseDeviceBatchOnDevice(
+            request,
+            mode,
+            shard_map.begin()->first);
+    }
+
+    struct ShardResult {
+        DeviceShard shard;
+        MatMulCompressedWordsBatchResult result;
+    };
+
+    std::vector<std::future<ShardResult>> futures;
+    futures.reserve(shard_map.size());
+    for (const auto& entry : shard_map) {
+        const auto& shard = entry.second;
+        futures.push_back(std::async(std::launch::async, [request, mode, shard]() {
+            const MatMulLowRankVariableBaseDeviceBatchRequest shard_request{
+                .n = request.n,
+                .b = request.b,
+                .r = request.r,
+                .batch_size = static_cast<uint32_t>(shard.inputs.size()),
+                .matrix_a_seeds = shard.seed_a.data(),
+                .matrix_b_seeds = shard.seed_b.data(),
+                .generated_inputs = shard.inputs.data(),
+            };
+            return ShardResult{
+                .shard = shard,
+                .result = ComputeCompressedWordsLowRankVariableBaseDeviceBatchOnDevice(
+                    shard_request,
+                    mode,
+                    shard.device_index),
+            };
+        }));
+    }
+
+    std::vector<ShardResult> shard_results;
+    shard_results.reserve(futures.size());
+    try {
+        for (auto& future : futures) {
+            shard_results.push_back(future.get());
+        }
+    } catch (const std::exception& e) {
+        result.error = std::string{"cuda_multi_device_variable_base_batch_exception:"} + e.what();
+        return result;
+    }
+
+    for (const auto& shard_result : shard_results) {
+        if (!shard_result.result.success) {
+            result.available = shard_result.result.available;
+            result.error = "cuda_device_" + std::to_string(shard_result.shard.device_index) + "_variable_base_batch_failed:" +
+                (shard_result.result.error.empty() ? "unknown_error" : shard_result.result.error);
+            return result;
+        }
+        if (result.words_per_request == 0) {
+            result.words_per_request = shard_result.result.words_per_request;
+        } else if (result.words_per_request != shard_result.result.words_per_request) {
+            result.error = "cuda_multi_device_variable_base_batch_words_per_request_mismatch";
+            return result;
+        }
+    }
+
+    if (result.words_per_request == 0) {
+        result.error = "cuda_multi_device_variable_base_batch_empty_result";
+        return result;
+    }
+
+    result.words.assign(static_cast<size_t>(request.batch_size) * result.words_per_request, Element{0});
+    for (const auto& shard_result : shard_results) {
+        const size_t expected_words = shard_result.shard.inputs.size() * result.words_per_request;
+        if (shard_result.result.words.size() != expected_words ||
+            shard_result.shard.indices.size() != shard_result.shard.inputs.size()) {
+            result.success = false;
+            result.error = "cuda_multi_device_variable_base_batch_result_size_mismatch";
             result.words.clear();
             result.words_per_request = 0;
             return result;

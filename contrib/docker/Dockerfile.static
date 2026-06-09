@@ -1,10 +1,30 @@
 FROM alpine:3.22 AS builder
-RUN apk add --no-cache build-base cmake coreutils binutils linux-headers \
+RUN apk add --no-cache build-base cmake coreutils binutils linux-headers curl \
     boost-dev boost-static libevent-dev libevent-static sqlite-dev sqlite-static \
     zlib-static
 # Force static resolution of sqlite (CMake's FindSQLite3 grabs the .so by abspath).
 # cmake itself does not link libsqlite3, so removing only this .so is safe.
 RUN rm -f /usr/lib/libsqlite3.so* /usr/lib/libevent*.so*
+
+# Build a static libzmq.a from source. Alpine ships no static libzmq, so the fully-static
+# release historically had to drop ZMQ entirely (-DWITH_ZMQ=OFF), which silently disabled every
+# zmqpub* publisher in the shipped binary (explorers/pools/kill-switches got no notifications and
+# no error). depends/ has no musl host, so rather than the depends/ toolchain we build libzmq the
+# same way depends/packages/zeromq.mk does (zeromq 4.3.5, no libsodium / no CURVE, static only),
+# sha256-verified, and link it into the otherwise-Alpine-static build below.
+ARG ZMQ_VERSION=4.3.5
+ARG ZMQ_SHA256=6653ef5910f17954861fe72332e68b03ca6e4d9c7160eb3a8de5a5a913bfab43
+RUN curl -fsSL -o /tmp/zeromq.tar.gz \
+        "https://github.com/zeromq/libzmq/releases/download/v${ZMQ_VERSION}/zeromq-${ZMQ_VERSION}.tar.gz" && \
+    echo "${ZMQ_SHA256}  /tmp/zeromq.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/zeromq.tar.gz -C /tmp && \
+    cmake -S "/tmp/zeromq-${ZMQ_VERSION}" -B /tmp/zeromq-build -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED=OFF -DWITH_LIBSODIUM=OFF -DWITH_LIBBSD=OFF -DENABLE_CURVE=OFF \
+        -DBUILD_TESTS=OFF -DENABLE_DRAFTS=OFF -DWITH_DOCS=OFF && \
+    cmake --build /tmp/zeromq-build -j"$(nproc)" && \
+    cmake --install /tmp/zeromq-build --prefix /usr && \
+    rm -rf /tmp/zeromq*
+
 WORKDIR /opt/btx
 COPY . .
 WORKDIR /opt/btx/build
@@ -12,11 +32,11 @@ RUN cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++" \
     -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
-    -DCMAKE_CXX_STANDARD_LIBRARIES="-levent_core -levent_extra -levent_pthreads -levent -lsqlite3 -lz" \
-    -DBUILD_DAEMON="ON" -DBUILD_CLI="ON" -DENABLE_WALLET="ON" -DWITH_SQLITE="ON" \
+    -DCMAKE_CXX_STANDARD_LIBRARIES="-levent_core -levent_extra -levent_pthreads -levent -lsqlite3 -lzmq -lz" \
+    -DBUILD_DAEMON="ON" -DBUILD_CLI="ON" -DENABLE_WALLET="ON" -DWITH_SQLITE="ON" -DWITH_ZMQ="ON" \
     -DBUILD_TESTS="OFF" -DBUILD_GUI="OFF" -DBUILD_TX="OFF" -DBUILD_UTIL="OFF" \
     -DBUILD_WALLET_TOOL="OFF" -DBUILD_BENCH="OFF" -DBUILD_FUZZ_BINARY="OFF" \
     -DBUILD_UTIL_CHAINSTATE="OFF" -DWITH_BDB="OFF" -DWITH_USDT="OFF" \
-    -DINSTALL_MAN="OFF" -DWITH_CCACHE="OFF" -DWITH_ZMQ="OFF"
+    -DINSTALL_MAN="OFF" -DWITH_CCACHE="OFF"
 RUN cmake --build . --target btxd btx-cli -j$(nproc)
 RUN strip bin/btxd bin/btx-cli && file bin/btxd

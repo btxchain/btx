@@ -521,6 +521,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-retainshieldedcommitmentindex", "Keep the shielded commitment-position index in the local LevelDB store across restart and snapshot recovery (default: 1). Set this to 0 only if you explicitly want the slower externalized-retention posture that rebuilds the index in memory after restart in exchange for lower retained shielded-state growth.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-fastshieldedstartup", "Zero-downtime restart: when matching persisted shielded state is available at startup, restore it without forcing the full cross-chain shielded audit (default: 1). The persisted state reaching the restore path already had its frontier root/size matched to the tip and its commitment index/anchor windows validated; settlement/netting metadata may still be synchronized from available blocks, and per-block consensus still runs on newly connected blocks. Set to 0 to force the thorough full-chain drift sync + audit on every restart.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-shieldedstartupaudit", "Audit restored shielded state against historical block data during startup (default: 1). Applies when -fastshieldedstartup is disabled or cannot be taken: set to 0 to keep the persisted-state drift sync but skip the cross-chain audit. Consensus checks still run for newly connected blocks.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-resetshieldedstate", "One-shot repair: wipe the on-disk shielded_state directory at startup and force a single clean rebuild of shielded validation state from local block data (default: 0). Supported replacement for manually moving shielded_state aside when a prior shielded rebuild was interrupted/corrupted; block files and wallets are untouched. Pass once, let the rebuild finish (watch the 'RebuildShieldedState: replaying ...' progress lines), then remove it. Requires intact local block data; if blocks are pruned/corrupt use a snapshot or -reindex instead.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowunpinnedshieldedsnapshot", "Allow loadtxoutset to load an assumeutxo snapshot whose shielded section (pool balance + nullifier set + commitment tree) has no consensus pin for its height (default: 1 until pinned snapshots ship). An unpinned shielded section is trusted from the snapshot source and not validated against a consensus pin; set to 0 for strict fail-closed loading.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blocksdir=<dir>", "Specify directory to hold blocks subdirectory for *.dat files (default: <datadir>)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blocksxor",
@@ -2165,6 +2166,22 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     if (g_zmq_notification_interface) {
         validation_signals.RegisterValidationInterface(g_zmq_notification_interface.get());
+    }
+#else
+    // This btxd was built without ZMQ support. Any zmqpub* settings would otherwise be silently inert --
+    // no publisher binds and downstream subscribers (explorers, pools, kill-switches) go dark with no
+    // error at all, which is very hard to diagnose. Warn loudly for each one that is configured so the
+    // mismatch between the config and the binary is obvious. (To actually publish, rebuild with
+    // -DWITH_ZMQ=ON.)
+    for (const std::string zmq_arg : {"-zmqpubhashblock", "-zmqpubhashtx", "-zmqpubhashwallettx",
+                                      "-zmqpubrawblock", "-zmqpubrawtx", "-zmqpubrawwallettx",
+                                      "-zmqpubsequence"}) {
+        if (args.IsArgSet(zmq_arg)) {
+            InitWarning(strprintf(_("%s is set but this btxd was built without ZMQ support; the setting "
+                                    "is ignored and no notifications will be published (rebuild with "
+                                    "-DWITH_ZMQ=ON to enable)."),
+                                  zmq_arg));
+        }
     }
 #endif
 

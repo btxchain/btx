@@ -1970,6 +1970,91 @@ RPCHelpMan getblockchaininfo()
     };
 }
 
+RPCHelpMan getshieldedstateinfo()
+{
+    return RPCHelpMan{
+        "getshieldedstateinfo",
+        "\nReturns diagnostic shielded pool and unshield velocity-cap state for the next block.\n",
+        {},
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "height", "The current active-chain tip height"},
+                {RPCResult::Type::STR_HEX, "bestblockhash", "The current active-chain tip hash"},
+                {RPCResult::Type::BOOL, "shielded_state_initialized", "Whether live shielded state is initialized"},
+                {RPCResult::Type::STR_AMOUNT, "pool_balance", "Current global shielded pool balance"},
+                {RPCResult::Type::NUM, "pool_balance_sat", "Current global shielded pool balance in satoshis"},
+                {RPCResult::Type::NUM, "next_block_height", "The next block height used for velocity-window capacity"},
+                {RPCResult::Type::BOOL, "velocity_cap_active", "Whether the unshield velocity cap is active for next_block_height"},
+                {RPCResult::Type::NUM, "velocity_activation_height", "Consensus activation height for the unshield velocity cap"},
+                {RPCResult::Type::NUM, "velocity_window_blocks", "Trailing velocity window length in blocks"},
+                {RPCResult::Type::NUM, "velocity_window_lower_exclusive", "Lower exclusive block height of the next-block velocity window"},
+                {RPCResult::Type::NUM, "velocity_window_upper_inclusive", "Upper inclusive block height of the next-block velocity window"},
+                {RPCResult::Type::NUM, "velocity_cap_bps", "Velocity cap in basis points of pool_balance"},
+                {RPCResult::Type::STR_AMOUNT, "velocity_cap_amount", "Maximum shielded-pool egress allowed in the next-block velocity window"},
+                {RPCResult::Type::NUM, "velocity_cap_amount_sat", "Maximum shielded-pool egress allowed in satoshis"},
+                {RPCResult::Type::STR_AMOUNT, "velocity_window_egress", "Recorded shielded-pool egress already in the next-block velocity window"},
+                {RPCResult::Type::NUM, "velocity_window_egress_sat", "Recorded shielded-pool egress already in the next-block velocity window in satoshis"},
+                {RPCResult::Type::STR_AMOUNT, "remaining_window_capacity", "Additional shielded-pool egress currently available for the next block"},
+                {RPCResult::Type::NUM, "remaining_window_capacity_sat", "Additional shielded-pool egress currently available in satoshis"},
+                {RPCResult::Type::BOOL, "velocity_window_exceeds_cap", "Whether the recorded window egress already exceeds the current cap"},
+            }},
+        RPCExamples{
+            HelpExampleCli("getshieldedstateinfo", "") +
+            HelpExampleRpc("getshieldedstateinfo", "")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        {
+            ChainstateManager& chainman = EnsureAnyChainman(request.context);
+            LOCK(cs_main);
+            Chainstate& active_chainstate = chainman.ActiveChainstate();
+            const bool shielded_state_initialized{chainman.EnsureShieldedStateInitialized()};
+            if (!shielded_state_initialized) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to initialize shielded state");
+            }
+
+            const CBlockIndex& tip{*CHECK_NONFATAL(active_chainstate.m_chain.Tip())};
+            const int32_t current_height{tip.nHeight};
+            const int32_t next_block_height{
+                current_height == std::numeric_limits<int32_t>::max() ? current_height : current_height + 1};
+
+            const auto& consensus = chainman.GetConsensus();
+            const uint32_t window_blocks{consensus.nShieldedUnshieldVelocityWindowBlocks};
+            const uint32_t cap_bps{consensus.nShieldedUnshieldVelocityCapBps};
+            const CAmount pool_balance{chainman.GetShieldedPoolBalance()};
+            const CAmount window_egress{
+                chainman.GetShieldedUnshieldVelocityWindowTotal(next_block_height, window_blocks)};
+            const CAmount cap_amount{ShieldedUnshieldVelocity::WindowCap(pool_balance, cap_bps)};
+            const CAmount remaining_capacity{cap_amount > window_egress ? cap_amount - window_egress : 0};
+            const int64_t window_lower_exclusive{
+                static_cast<int64_t>(next_block_height) - static_cast<int64_t>(window_blocks)};
+
+            UniValue obj(UniValue::VOBJ);
+            obj.pushKV("height", current_height);
+            obj.pushKV("bestblockhash", tip.GetBlockHash().GetHex());
+            obj.pushKV("shielded_state_initialized", shielded_state_initialized);
+            obj.pushKV("pool_balance", ValueFromAmount(pool_balance));
+            obj.pushKV("pool_balance_sat", pool_balance);
+            obj.pushKV("next_block_height", next_block_height);
+            obj.pushKV("velocity_cap_active",
+                       consensus.IsShieldedUnshieldVelocityCapActive(next_block_height));
+            obj.pushKV("velocity_activation_height", consensus.nShieldedUnshieldVelocityActivationHeight);
+            obj.pushKV("velocity_window_blocks", window_blocks);
+            obj.pushKV("velocity_window_lower_exclusive", window_lower_exclusive);
+            obj.pushKV("velocity_window_upper_inclusive", next_block_height);
+            obj.pushKV("velocity_cap_bps", cap_bps);
+            obj.pushKV("velocity_cap_amount", ValueFromAmount(cap_amount));
+            obj.pushKV("velocity_cap_amount_sat", cap_amount);
+            obj.pushKV("velocity_window_egress", ValueFromAmount(window_egress));
+            obj.pushKV("velocity_window_egress_sat", window_egress);
+            obj.pushKV("remaining_window_capacity", ValueFromAmount(remaining_capacity));
+            obj.pushKV("remaining_window_capacity_sat", remaining_capacity);
+            obj.pushKV("velocity_window_exceeds_cap", window_egress > cap_amount);
+            return obj;
+        },
+    };
+}
+
 namespace {
 const std::vector<RPCResult> RPCHelpForDeployment{
     {RPCResult::Type::STR, "type", "one of \"buried\", \"bip9\""},
@@ -4343,6 +4428,7 @@ void RegisterBlockchainRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
         {"blockchain", &getblockchaininfo},
+        {"blockchain", &getshieldedstateinfo},
         {"blockchain", &getchaintxstats},
         {"blockchain", &getblockstats},
         {"blockchain", &getbestblockhash},

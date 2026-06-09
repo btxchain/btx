@@ -253,3 +253,4 @@ class FeatureShieldedPruneReorgTest(BitcoinTestFramework):
 
 if __name__ == "__main__":
     FeatureShieldedPruneReorgTest(__file__).main()
+

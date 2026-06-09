@@ -1256,6 +1256,18 @@ template <typename Spend>
     }
     std::reverse(chain.begin(), chain.end());
 
+    // Replaying the whole chain to rebuild shielded state is O(chain) and can take minutes-to-hours
+    // on large chains or slow disks, during which RPC stays at -28. Log periodic progress so a long
+    // (or stalled) rebuild is observable rather than looking dead -- if the height stops advancing
+    // with no disk/CPU, the last line shows exactly where it got stuck.
+    const size_t total_blocks = chain.size();
+    const auto rebuild_start = std::chrono::steady_clock::now();
+    auto last_progress_log = rebuild_start;
+    size_t blocks_processed = 0;
+    LogPrintf("RebuildShieldedState: replaying %u blocks (genesis -> height %d) to rebuild shielded state...\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight);
+
     for (const CBlockIndex* pindex : chain) {
         const bool use_nonced_bridge_tag =
             UseNoncedShieldedBridgeTags(chainstate.m_chainman.GetConsensus(), pindex->nHeight);
@@ -1290,7 +1302,28 @@ template <typename Spend>
                 return false;
             }
         }
+
+        ++blocks_processed;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_progress_log >= std::chrono::seconds{15}) {
+            last_progress_log = now;
+            const double pct = total_blocks > 0
+                                   ? 100.0 * static_cast<double>(blocks_processed) / static_cast<double>(total_blocks)
+                                   : 100.0;
+            LogPrintf("RebuildShieldedState: replaying shielded state %u/%u (height=%d, %.1f%%)\n",
+                      static_cast<unsigned int>(blocks_processed),
+                      static_cast<unsigned int>(total_blocks),
+                      pindex->nHeight,
+                      pct);
+        }
     }
+    const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - rebuild_start)
+                               .count();
+    LogPrintf("RebuildShieldedState: replayed %u blocks to height %d in %llds\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight,
+              static_cast<long long>(elapsed_s));
     return true;
 }
 
@@ -12449,6 +12482,23 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
     if (m_active_chainstate == nullptr) {
         LogPrintf("EnsureShieldedStateInitialized: no active chainstate\n");
         return false;
+    }
+
+    // -resetshieldedstate: supported one-shot repair. Wipe the whole shielded_state directory before
+    // any DB is opened so a stale in-flight mutation marker or a partially-rebuilt/corrupt store cannot
+    // wedge startup; the normal path below then opens fresh stores and does one clean full rebuild from
+    // local block data. Block files and wallets are untouched.
+    if (m_options.reset_shielded_state) {
+        const fs::path shielded_state_dir = m_options.datadir / "shielded_state";
+        LogPrintf("EnsureShieldedStateInitialized: -resetshieldedstate set; wiping %s to force a clean rebuild\n",
+                  fs::PathToString(shielded_state_dir));
+        std::error_code ec;
+        fs::remove_all(shielded_state_dir, ec);
+        if (ec) {
+            LogPrintf("EnsureShieldedStateInitialized: failed to wipe shielded_state for -resetshieldedstate (%s)\n",
+                      ec.message());
+            return false;
+        }
     }
 
     const fs::path shielded_db_path = m_options.datadir / "shielded_state" / "nullifiers";

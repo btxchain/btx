@@ -121,6 +121,33 @@ On a single-GPU host, `visible_device_count` and `selected_device_count` should
 normally both be `1`. On a multi-GPU host, `selected_device_count` should match
 the number of supported devices you intend to mine with.
 
+## Nonce-Seed Mining Device Selection
+
+The post-`nMatMulNonceSeedHeight` CUDA nonce-seed mining path is intentionally
+single-device today. It uses the first selected visible CUDA ordinal for
+nonce-seed pre-hash scan, device-prepared input generation, and variable-base
+digest batching.
+
+To choose that device explicitly:
+
+```bash
+BTX_MATMUL_BACKEND=cuda \
+BTX_MATMUL_CUDA_DEVICES=1 \
+./build-cuda/bin/btxd -server=1
+```
+
+If more than one device is listed, the nonce-seed path uses the first entry:
+
+```bash
+BTX_MATMUL_BACKEND=cuda \
+BTX_MATMUL_CUDA_DEVICES=1,0 \
+./build-cuda/bin/btxd -server=1
+```
+
+This keeps nonce-seed batching compatible with the current device-prepared
+input model while leaving multi-GPU nonce-seed sharding as a later
+optimization.
+
 ## Work Sharding
 
 For host-prepared CUDA digest batches, BTX plans one or more device shards per

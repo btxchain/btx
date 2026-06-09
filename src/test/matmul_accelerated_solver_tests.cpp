@@ -724,6 +724,65 @@ BOOST_AUTO_TEST_CASE(cuda_backend_prepared_inputs_auto_mode_uses_device_inputs_f
     }
 }
 
+BOOST_AUTO_TEST_CASE(cuda_variable_base_device_batch_matches_cpu_product_digest)
+{
+    ScopedGpuInputEnv gpu_env("1");
+    ScopedCudaDevicePreparedInputsEnv device_inputs_env("1");
+    constexpr uint32_t kTranscriptBlockSize = 4;
+    constexpr uint32_t kNoiseRank = 2;
+
+    std::vector<CBlockHeader> headers;
+    headers.push_back(MakeCandidateHeaderWithDim(32));
+    headers.push_back(MakeCandidateHeaderWithDim(32));
+    headers[1].nNonce64 = 43;
+    headers[1].nNonce = static_cast<uint32_t>(headers[1].nNonce64);
+    headers[1].hashMerkleRoot = ParseUint256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    headers[1].seed_a = ParseUint256("1111111111111111111111111111111111111111111111111111111111111111");
+    headers[1].seed_b = ParseUint256("2222222222222222222222222222222222222222222222222222222222222222");
+
+    std::vector<matmul::accelerated::PreparedDigestInputs> prepared_batch;
+    prepared_batch.reserve(headers.size());
+    for (const auto& header : headers) {
+        prepared_batch.push_back(matmul::accelerated::PrepareMatMulDigestInputsForBackend(
+            header,
+            kTranscriptBlockSize,
+            kNoiseRank,
+            matmul::backend::Kind::CUDA,
+            matmul::accelerated::DigestScheme::PRODUCT_COMMITTED));
+    }
+
+    const auto cuda_capability = matmul::backend::CapabilityFor(matmul::backend::Kind::CUDA);
+    if (!cuda_capability.available) {
+        return;
+    }
+    for (const auto& prepared : prepared_batch) {
+        BOOST_REQUIRE(prepared.cuda_generated_inputs != nullptr);
+    }
+
+    const auto batch_results = matmul::accelerated::ComputeMatMulDigestPreparedVariableBaseBatchForMining(
+        headers,
+        kTranscriptBlockSize,
+        kNoiseRank,
+        prepared_batch,
+        matmul::backend::Kind::CUDA,
+        matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
+
+    BOOST_REQUIRE_EQUAL(batch_results.size(), headers.size());
+    for (size_t i = 0; i < headers.size(); ++i) {
+        BOOST_REQUIRE_MESSAGE(batch_results[i].ok, batch_results[i].error);
+        BOOST_CHECK_EQUAL(batch_results[i].backend, matmul::backend::Kind::CUDA);
+        const auto A = matmul::SharedFromSeed(headers[i].seed_a, headers[i].matmul_dim);
+        const auto B = matmul::SharedFromSeed(headers[i].seed_b, headers[i].matmul_dim);
+        const uint256 cpu_digest = matmul::accelerated::ComputeDigestCpuFromPreparedInputs(
+            *A,
+            *B,
+            prepared_batch[i],
+            kTranscriptBlockSize,
+            matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
+        BOOST_CHECK_EQUAL(batch_results[i].digest, cpu_digest);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(cuda_backend_prepared_inputs_auto_mode_keeps_transcript_digest_on_host_inputs)
 {
     ScopedGpuInputEnv gpu_env(nullptr);

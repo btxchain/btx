@@ -25,4 +25,13 @@ MatMulInputGenerationResult GenerateMatMulInputsGPU(const MatMulInputGenerationR
     return result;
 }
 
+MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(const MatMulNonceSeedPreHashScanRequest&)
+{
+    MatMulNonceSeedPreHashScanResult result;
+    result.available = false;
+    result.success = false;
+    result.error = "Metal nonce-seed pre-hash scan is unavailable on this build";
+    return result;
+}
+
 } // namespace btx::metal

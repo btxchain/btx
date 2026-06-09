@@ -10,7 +10,9 @@
 #include <matmul/transcript.h>
 #include <span.h>
 
+#import <CoreFoundation/CoreFoundation.h>
 #import <Foundation/Foundation.h>
+#import <IOKit/IOKitLib.h>
 #import <Metal/Metal.h>
 
 #include <algorithm>
@@ -27,6 +29,10 @@
 #include <string>
 #include <sys/sysctl.h>
 #include <unistd.h>
+
+#ifndef kIOMainPortDefault
+#define kIOMainPortDefault MACH_PORT_NULL
+#endif
 
 namespace {
 
@@ -299,6 +305,130 @@ inline void sha256_double_digest(thread uint first_state[8], thread uint out_sta
     }
     w[15] = 256u;
     sha256_compress(out_state, w);
+}
+
+inline void set_oracle_byte(thread uint w[64], uint offset, uint byte)
+{
+    const uint word_index = offset >> 2u;
+    const uint shift = (3u - (offset & 3u)) * 8u;
+    w[word_index] |= (byte & 0xffu) << shift;
+}
+
+inline uint oracle_bswap32(uint x)
+{
+    return ((x & 0x000000ffu) << 24u) |
+           ((x & 0x0000ff00u) << 8u) |
+           ((x & 0x00ff0000u) >> 8u) |
+           ((x & 0xff000000u) >> 24u);
+}
+
+inline uint oracle_candidate_from_seed_and_index(constant uchar* seed_internal,
+                                                 uint index,
+                                                 bool with_retry,
+                                                 uint retry)
+{
+    thread uint w[64];
+    for (uint i = 0; i < 64; ++i) {
+        w[i] = 0u;
+    }
+
+    for (uint i = 0; i < 32; ++i) {
+        set_oracle_byte(w, i, seed_internal[31u - i]);
+    }
+
+    set_oracle_byte(w, 32u, index & 0xffu);
+    set_oracle_byte(w, 33u, (index >> 8u) & 0xffu);
+    set_oracle_byte(w, 34u, (index >> 16u) & 0xffu);
+    set_oracle_byte(w, 35u, (index >> 24u) & 0xffu);
+
+    uint message_len = 36u;
+    if (with_retry) {
+        set_oracle_byte(w, 36u, retry & 0xffu);
+        set_oracle_byte(w, 37u, (retry >> 8u) & 0xffu);
+        set_oracle_byte(w, 38u, (retry >> 16u) & 0xffu);
+        set_oracle_byte(w, 39u, (retry >> 24u) & 0xffu);
+        message_len = 40u;
+    }
+
+    set_oracle_byte(w, message_len, 0x80u);
+    w[15] = message_len * 8u;
+
+    thread uint state[8];
+    state[0] = 0x6a09e667u;
+    state[1] = 0xbb67ae85u;
+    state[2] = 0x3c6ef372u;
+    state[3] = 0xa54ff53au;
+    state[4] = 0x510e527fu;
+    state[5] = 0x9b05688cu;
+    state[6] = 0x1f83d9abu;
+    state[7] = 0x5be0cd19u;
+    sha256_compress(state, w);
+    return oracle_bswap32(state[0]) & MODULUS;
+}
+
+inline uint oracle_fallback_candidate(constant uchar* seed_internal, uint index)
+{
+    thread uint w[64];
+    for (uint i = 0; i < 64; ++i) {
+        w[i] = 0u;
+    }
+
+    for (uint i = 0; i < 32; ++i) {
+        set_oracle_byte(w, i, seed_internal[31u - i]);
+    }
+
+    set_oracle_byte(w, 32u, index & 0xffu);
+    set_oracle_byte(w, 33u, (index >> 8u) & 0xffu);
+    set_oracle_byte(w, 34u, (index >> 16u) & 0xffu);
+    set_oracle_byte(w, 35u, (index >> 24u) & 0xffu);
+
+    const uchar fallback_tag[15] = {
+        'o', 'r', 'a', 'c', 'l', 'e', '-', 'f', 'a', 'l', 'l', 'b', 'a', 'c', 'k'
+    };
+    for (uint i = 0; i < 15; ++i) {
+        set_oracle_byte(w, 36u + i, fallback_tag[i]);
+    }
+
+    set_oracle_byte(w, 51u, 0x80u);
+    w[15] = 51u * 8u;
+
+    thread uint state[8];
+    state[0] = 0x6a09e667u;
+    state[1] = 0xbb67ae85u;
+    state[2] = 0x3c6ef372u;
+    state[3] = 0xa54ff53au;
+    state[4] = 0x510e527fu;
+    state[5] = 0x9b05688cu;
+    state[6] = 0x1f83d9abu;
+    state[7] = 0x5be0cd19u;
+    sha256_compress(state, w);
+    return oracle_bswap32(state[0]) % MODULUS;
+}
+
+inline uint oracle_from_seed(constant uchar* seed_internal, uint index)
+{
+    for (uint retry = 0; retry < 256; ++retry) {
+        const uint candidate = retry == 0
+            ? oracle_candidate_from_seed_and_index(seed_internal, index, false, 0u)
+            : oracle_candidate_from_seed_and_index(seed_internal, index, true, retry);
+        if (candidate < MODULUS) {
+            return candidate;
+        }
+    }
+    return oracle_fallback_candidate(seed_internal, index);
+}
+
+kernel void generate_base_matrix_from_seed(
+    constant KernelParams& p [[buffer(0)]],
+    constant uchar* seed_internal [[buffer(1)]],
+    device uint* output [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    const uint nn = p.n * p.n;
+    if (gid >= nn) {
+        return;
+    }
+    output[gid] = oracle_from_seed(seed_internal, gid);
 }
 
 kernel void build_perturbed(
@@ -994,6 +1124,128 @@ bool IsConservativeAppleMetalHost(int32_t perf_level0_logicalcpu)
     return perf_level0_logicalcpu > 0 && perf_level0_logicalcpu <= 4;
 }
 
+struct MetalGpuCoreCountProbe {
+    uint32_t core_count{0};
+    std::string source;
+};
+
+uint32_t UInt32FromCFNumber(CFTypeRef value)
+{
+    if (value == nullptr || CFGetTypeID(value) != CFNumberGetTypeID()) {
+        return 0;
+    }
+
+    int64_t signed_value{0};
+    if (!CFNumberGetValue(
+            static_cast<CFNumberRef>(value),
+            kCFNumberSInt64Type,
+            &signed_value) ||
+        signed_value <= 0 ||
+        signed_value > std::numeric_limits<uint32_t>::max()) {
+        return 0;
+    }
+    return static_cast<uint32_t>(signed_value);
+}
+
+MetalGpuCoreCountProbe ReadGpuCoreCountFromRegistryEntry(io_registry_entry_t entry)
+{
+    CFTypeRef direct_core_count = IORegistryEntryCreateCFProperty(
+        entry,
+        CFSTR("gpu-core-count"),
+        kCFAllocatorDefault,
+        0);
+    if (direct_core_count != nullptr) {
+        const uint32_t core_count = UInt32FromCFNumber(direct_core_count);
+        CFRelease(direct_core_count);
+        if (core_count > 0) {
+            return MetalGpuCoreCountProbe{
+                .core_count = core_count,
+                .source = "io_registry_gpu_core_count",
+            };
+        }
+    }
+
+    CFTypeRef gpu_config = IORegistryEntryCreateCFProperty(
+        entry,
+        CFSTR("GPUConfigurationVariable"),
+        kCFAllocatorDefault,
+        0);
+    if (gpu_config != nullptr) {
+        MetalGpuCoreCountProbe result;
+        if (CFGetTypeID(gpu_config) == CFDictionaryGetTypeID()) {
+            const void* num_cores_value = CFDictionaryGetValue(
+                static_cast<CFDictionaryRef>(gpu_config),
+                CFSTR("num_cores"));
+            const uint32_t core_count = UInt32FromCFNumber(
+                static_cast<CFTypeRef>(num_cores_value));
+            if (core_count > 0) {
+                result = MetalGpuCoreCountProbe{
+                    .core_count = core_count,
+                    .source = "io_registry_gpu_configuration_num_cores",
+                };
+            }
+        }
+        CFRelease(gpu_config);
+        if (result.core_count > 0) {
+            return result;
+        }
+    }
+
+    return {};
+}
+
+MetalGpuCoreCountProbe ResolveGpuCoreCountFromIterator(io_iterator_t iterator)
+{
+    io_registry_entry_t entry = IO_OBJECT_NULL;
+    while ((entry = IOIteratorNext(iterator)) != IO_OBJECT_NULL) {
+        const MetalGpuCoreCountProbe result = ReadGpuCoreCountFromRegistryEntry(entry);
+        IOObjectRelease(entry);
+        if (result.core_count > 0) {
+            return result;
+        }
+    }
+    return {};
+}
+
+MetalGpuCoreCountProbe ResolveAppleMetalGpuCoreCountFromIORegistry()
+{
+    static const MetalGpuCoreCountProbe cached = [] {
+        io_iterator_t iterator = IO_OBJECT_NULL;
+        if (IOServiceGetMatchingServices(
+                kIOMainPortDefault,
+                IOServiceMatching("AGXAccelerator"),
+                &iterator) == KERN_SUCCESS &&
+            iterator != IO_OBJECT_NULL) {
+            const MetalGpuCoreCountProbe result = ResolveGpuCoreCountFromIterator(iterator);
+            IOObjectRelease(iterator);
+            if (result.core_count > 0) {
+                return result;
+            }
+        }
+
+        iterator = IO_OBJECT_NULL;
+        if (IORegistryCreateIterator(
+                kIOMainPortDefault,
+                kIOServicePlane,
+                kIORegistryIterateRecursively,
+                &iterator) == KERN_SUCCESS &&
+            iterator != IO_OBJECT_NULL) {
+            MetalGpuCoreCountProbe result = ResolveGpuCoreCountFromIterator(iterator);
+            IOObjectRelease(iterator);
+            if (result.core_count > 0) {
+                result.source += "_recursive";
+                return result;
+            }
+        }
+
+        return MetalGpuCoreCountProbe{
+            .core_count = 0,
+            .source = "unavailable",
+        };
+    }();
+    return cached;
+}
+
 uint32_t ResolveMetalAutoPoolSlotCount()
 {
     const char* solver_threads_env = std::getenv("BTX_MATMUL_SOLVER_THREADS");
@@ -1083,6 +1335,7 @@ struct MetalContext {
     bool ready{false};
     std::string error;
     id<MTLDevice> device{nil};
+    id<MTLComputePipelineState> generate_base_matrix_pipeline{nil};
     id<MTLComputePipelineState> build_perturbed_pipeline{nil};
     id<MTLComputePipelineState> build_prefix_pipeline{nil};
     id<MTLComputePipelineState> fused_final_compress_pipeline{nil};
@@ -1165,13 +1418,26 @@ struct MetalContext {
                 return;
             }
 
+            id<MTLFunction> generate_base_matrix_function = [library newFunctionWithName:@"generate_base_matrix_from_seed"];
+            if (generate_base_matrix_function == nil) {
+                error = "Failed to load Metal kernel function: generate_base_matrix_from_seed";
+                return;
+            }
+
+            NSError* pipeline_error = nil;
+            generate_base_matrix_pipeline = [device newComputePipelineStateWithFunction:generate_base_matrix_function error:&pipeline_error];
+            if (generate_base_matrix_pipeline == nil) {
+                error = pipeline_error != nil ? [[pipeline_error localizedDescription] UTF8String]
+                                              : "Failed to create generate_base_matrix_from_seed pipeline";
+                return;
+            }
+
             id<MTLFunction> build_perturbed_function = [library newFunctionWithName:@"build_perturbed"];
             if (build_perturbed_function == nil) {
                 error = "Failed to load Metal kernel function: build_perturbed";
                 return;
             }
 
-            NSError* pipeline_error = nil;
             build_perturbed_pipeline = [device newComputePipelineStateWithFunction:build_perturbed_function error:&pipeline_error];
             if (build_perturbed_pipeline == nil) {
                 error = pipeline_error != nil ? [[pipeline_error localizedDescription] UTF8String]
@@ -1867,33 +2133,35 @@ std::optional<BufferPoolLease> AcquireBufferPoolLease(MetalContext& context,
     }
 }
 
-bool BuildKernelParams(const btx::metal::MatMulDigestRequest& request,
-                       uint32_t& out_N,
-                       uint64_t& out_matrix_words,
-                       uint64_t& out_noise_words,
-                       uint64_t& out_prefix_words,
-                       uint64_t& out_compressed_words,
-                       std::string& error)
+bool BuildKernelParamsForShape(uint32_t n_in,
+                               uint32_t b_in,
+                               uint32_t r_in,
+                               uint32_t& out_N,
+                               uint64_t& out_matrix_words,
+                               uint64_t& out_noise_words,
+                               uint64_t& out_prefix_words,
+                               uint64_t& out_compressed_words,
+                               std::string& error)
 {
-    if (request.n == 0 || request.b == 0 || request.r == 0) {
+    if (n_in == 0 || b_in == 0 || r_in == 0) {
         error = "invalid MatMul request dimensions";
         return false;
     }
-    if (request.r > request.n) {
+    if (r_in > n_in) {
         error = "noise rank exceeds matrix dimension";
         return false;
     }
-    if ((request.n % request.b) != 0) {
+    if ((n_in % b_in) != 0) {
         error = "matrix dimension must be divisible by transcript block size";
         return false;
     }
-    if ((static_cast<uint64_t>(request.b) * request.b) > 256) {
+    if ((static_cast<uint64_t>(b_in) * b_in) > 256) {
         error = "transcript block size exceeds fused kernel threadgroup capacity";
         return false;
     }
 
-    const uint64_t n = request.n;
-    const uint64_t b = request.b;
+    const uint64_t n = n_in;
+    const uint64_t b = b_in;
     const uint64_t N = n / b;
 
     if (N > std::numeric_limits<uint32_t>::max()) {
@@ -1902,7 +2170,7 @@ bool BuildKernelParams(const btx::metal::MatMulDigestRequest& request,
     }
 
     const uint64_t matrix_words = n * n;
-    const uint64_t noise_words = n * request.r;
+    const uint64_t noise_words = n * r_in;
     const uint64_t prefix_words = N * matrix_words;
     const uint64_t compressed_words = N * N * N;
 
@@ -1910,6 +2178,35 @@ bool BuildKernelParams(const btx::metal::MatMulDigestRequest& request,
         prefix_words > std::numeric_limits<uint32_t>::max() ||
         compressed_words > std::numeric_limits<uint32_t>::max()) {
         error = "matrix dimensions exceed supported Metal launch bounds";
+        return false;
+    }
+
+    out_N = static_cast<uint32_t>(N);
+    out_matrix_words = matrix_words;
+    out_noise_words = noise_words;
+    out_prefix_words = prefix_words;
+    out_compressed_words = compressed_words;
+    return true;
+}
+
+bool BuildKernelParams(const btx::metal::MatMulDigestRequest& request,
+                       uint32_t& out_N,
+                       uint64_t& out_matrix_words,
+                       uint64_t& out_noise_words,
+                       uint64_t& out_prefix_words,
+                       uint64_t& out_compressed_words,
+                       std::string& error)
+{
+    if (!BuildKernelParamsForShape(
+            request.n,
+            request.b,
+            request.r,
+            out_N,
+            out_matrix_words,
+            out_noise_words,
+            out_prefix_words,
+            out_compressed_words,
+            error)) {
         return false;
     }
 
@@ -1930,11 +2227,6 @@ bool BuildKernelParams(const btx::metal::MatMulDigestRequest& request,
         return false;
     }
 
-    out_N = static_cast<uint32_t>(N);
-    out_matrix_words = matrix_words;
-    out_noise_words = noise_words;
-    out_prefix_words = prefix_words;
-    out_compressed_words = compressed_words;
     return true;
 }
 
@@ -2135,6 +2427,30 @@ MatMulAccelerationProbe ProbeMatMulDigestAcceleration()
     probe.reason = context.ready ? "runtime_probe_ok"
                                  : (context.error.empty() ? "runtime_probe_failed" : context.error);
     return probe;
+}
+
+MatMulDeviceInfo ProbeMatMulDeviceInfo()
+{
+    MatMulDeviceInfo info;
+    const MetalContext& context = GetContext();
+    info.available = context.ready;
+    info.reason = context.ready ? "runtime_probe_ok"
+                                : (context.error.empty() ? "runtime_probe_failed" : context.error);
+    if (!context.ready) {
+        return info;
+    }
+
+    if (context.device != nil) {
+        NSString* device_name = [context.device name];
+        if (device_name != nil) {
+            info.device_name = [device_name UTF8String];
+        }
+    }
+
+    const MetalGpuCoreCountProbe gpu_core_count = ResolveAppleMetalGpuCoreCountFromIORegistry();
+    info.gpu_core_count = gpu_core_count.core_count;
+    info.gpu_core_count_source = gpu_core_count.source;
+    return info;
 }
 
 // Compute a lightweight data fingerprint for safe cache invalidation.
@@ -3125,6 +3441,373 @@ MatMulDigestBatchResult ComputeCanonicalTranscriptDigestBatch(const MatMulDigest
 {
     auto submission = SubmitCanonicalTranscriptDigestBatch(request);
     return WaitForCanonicalTranscriptDigestBatchSubmission(std::move(submission));
+}
+
+MatMulDigestBatchResult ComputeCanonicalTranscriptDigestVariableBaseBatch(
+    const MatMulVariableBaseDigestBatchRequest& request)
+{
+    MatMulDigestBatchResult result;
+
+    MetalContext& context = GetContext();
+    if (!context.ready) {
+        result.available = false;
+        result.success = false;
+        result.error = context.error.empty() ? "Metal context initialization failed" : context.error;
+        return result;
+    }
+    result.available = true;
+
+    if (request.batch_size == 0) {
+        result.error = "invalid Metal variable-base batch request: batch_size must be non-zero";
+        return result;
+    }
+    const bool use_product_digest = request.digest_mode == MatMulDigestMode::PRODUCT_COMMITTED;
+    if (use_product_digest && request.sigmas == nullptr) {
+        result.error = "invalid Metal variable-base batch request: missing per-batch sigma values";
+        return result;
+    }
+    if (request.matrix_a_seeds == nullptr || request.matrix_b_seeds == nullptr) {
+        result.error = "invalid Metal variable-base batch request: missing matrix seeds";
+        return result;
+    }
+    if (request.noise_e_l == nullptr || request.noise_e_r == nullptr ||
+        request.noise_f_l == nullptr || request.noise_f_r == nullptr ||
+        request.compress_vec == nullptr) {
+        result.error = "invalid Metal variable-base batch request: missing batch input pointers";
+        return result;
+    }
+    for (uint32_t i = 0; i < request.batch_size; ++i) {
+        if (request.noise_e_l[i] == nullptr || request.noise_e_r[i] == nullptr ||
+            request.noise_f_l[i] == nullptr || request.noise_f_r[i] == nullptr ||
+            request.compress_vec[i] == nullptr) {
+            result.error = "invalid Metal variable-base batch request: null per-batch input pointer";
+            return result;
+        }
+    }
+
+    uint32_t N{0};
+    uint64_t matrix_words{0};
+    uint64_t noise_words{0};
+    uint64_t prefix_words{0};
+    uint64_t compressed_words{0};
+    if (!BuildKernelParamsForShape(
+            request.n,
+            request.b,
+            request.r,
+            N,
+            matrix_words,
+            noise_words,
+            prefix_words,
+            compressed_words,
+            result.error)) {
+        return result;
+    }
+    (void)prefix_words;
+
+    struct KernelParams {
+        uint32_t n;
+        uint32_t b;
+        uint32_t r;
+        uint32_t N;
+    } params{request.n, request.b, request.r, N};
+    struct HashParams {
+        uint32_t compressed_words;
+    } hash_params{static_cast<uint32_t>(compressed_words)};
+
+    const SpecializedKernelPipelines* specialized = nullptr;
+    if (ShouldUseFunctionConstantSpecialization(request.n, /*use_legacy_pipeline=*/use_product_digest)) {
+        specialized = FindSpecializedPipelines(context, request.n, request.b, request.r, N);
+    }
+    id<MTLComputePipelineState> build_perturbed_pipeline =
+        (specialized != nullptr && specialized->build_perturbed_pipeline != nil)
+            ? specialized->build_perturbed_pipeline
+            : context.build_perturbed_pipeline;
+    id<MTLComputePipelineState> fused_prefix_compress_pipeline =
+        (specialized != nullptr && specialized->fused_prefix_compress_pipeline != nil)
+            ? specialized->fused_prefix_compress_pipeline
+            : context.fused_prefix_compress_pipeline;
+
+    struct ScopedPoolSubmissionAccounting {
+        MetalContext& context;
+        explicit ScopedPoolSubmissionAccounting(MetalContext& context_in) : context(context_in)
+        {
+            std::lock_guard<std::mutex> lock(context.pool_mutex);
+            ++context.pool_inflight_submissions;
+            context.pool_peak_inflight_submissions =
+                std::max(context.pool_peak_inflight_submissions, context.pool_inflight_submissions);
+        }
+        ~ScopedPoolSubmissionAccounting()
+        {
+            std::lock_guard<std::mutex> lock(context.pool_mutex);
+            if (context.pool_inflight_submissions > 0) {
+                --context.pool_inflight_submissions;
+            }
+            ++context.pool_completed_submissions;
+        }
+    };
+
+    @autoreleasepool {
+        const size_t matrix_bytes = matrix_words * sizeof(uint32_t);
+        const size_t noise_bytes = noise_words * sizeof(uint32_t);
+        const size_t compress_bytes = static_cast<size_t>(request.b) * request.b * sizeof(uint32_t);
+        constexpr size_t kHashBytesPerDigest = 32;
+        const size_t staged_matrix_bytes = static_cast<size_t>(request.batch_size) * matrix_bytes;
+        const size_t staged_noise_bytes = static_cast<size_t>(request.batch_size) * noise_bytes;
+        const size_t staged_compress_bytes = static_cast<size_t>(request.batch_size) * compress_bytes;
+        const size_t staged_compressed_bytes = use_product_digest
+            ? static_cast<size_t>(request.batch_size) * compressed_words * sizeof(uint32_t)
+            : compressed_words * sizeof(uint32_t);
+        const size_t hash_bytes = static_cast<size_t>(request.batch_size) * kHashBytesPerDigest;
+
+        matmul::field::Element dummy_word{0};
+        MatMulDigestRequest pool_request{
+            .n = request.n,
+            .b = request.b,
+            .r = request.r,
+            .digest_mode = request.digest_mode,
+            .sigma = use_product_digest ? request.sigmas[0] : uint256{},
+            .matrix_a = &dummy_word,
+            .matrix_b = &dummy_word,
+            .use_uploaded_base_matrices = false,
+            .noise_e_l = request.noise_e_l[0],
+            .noise_e_r = request.noise_e_r[0],
+            .noise_f_l = request.noise_f_l[0],
+            .noise_f_r = request.noise_f_r[0],
+            .compress_vec = request.compress_vec[0],
+        };
+
+        auto pool_lease = AcquireBufferPoolLease(context,
+                                                 pool_request,
+                                                 staged_matrix_bytes,
+                                                 staged_noise_bytes,
+                                                 staged_compress_bytes,
+                                                 /*prefix_bytes=*/0,
+                                                 staged_compressed_bytes,
+                                                 hash_bytes,
+                                                 /*require_prefix_buffer=*/false,
+                                                 result.error);
+        if (!pool_lease.has_value()) {
+            return result;
+        }
+        ScopedPoolSubmissionAccounting accounting{context};
+
+        MetalPoolSlot& pool_slot = *pool_lease->slot;
+        id<MTLBuffer> params_buffer = pool_slot.params_buffer;
+        id<MTLBuffer> hash_params_buffer = pool_slot.hash_params_buffer;
+        id<MTLBuffer> matrix_a_buffer = pool_slot.matrix_a_stage_buffer;
+        id<MTLBuffer> matrix_b_buffer = pool_slot.matrix_b_stage_buffer;
+        id<MTLBuffer> e_l_stage_buffer = pool_slot.e_l_buffer;
+        id<MTLBuffer> e_r_stage_buffer = pool_slot.e_r_buffer;
+        id<MTLBuffer> f_l_stage_buffer = pool_slot.f_l_buffer;
+        id<MTLBuffer> f_r_stage_buffer = pool_slot.f_r_buffer;
+        id<MTLBuffer> compress_stage_buffer = pool_slot.compress_buffer;
+        id<MTLBuffer> a_prime_buffer = pool_slot.a_prime_buffer;
+        id<MTLBuffer> b_prime_buffer = pool_slot.b_prime_buffer;
+        id<MTLBuffer> compressed_buffer = pool_slot.compressed_buffer;
+        id<MTLBuffer> transcript_hash_buffer = pool_slot.transcript_hash_buffer;
+
+        std::memcpy(params_buffer.contents, &params, sizeof(params));
+        std::memcpy(hash_params_buffer.contents, &hash_params, sizeof(hash_params));
+        id<MTLCommandBuffer> command = CreatePerformanceCommandBuffer(pool_slot.queue);
+        if (command == nil) {
+            result.error = "Failed to create Metal variable-base command buffer";
+            return result;
+        }
+
+        std::string encode_error;
+        double encode_generate_base_us{0.0};
+        double encode_build_perturbed_us{0.0};
+        double encode_fused_prefix_compress_us{0.0};
+        double encode_transcript_sha256_us{0.0};
+        const NSUInteger block_elements = static_cast<NSUInteger>(request.b) * request.b;
+
+        auto encode_generate_base = [&](const uint256& seed,
+                                        id<MTLBuffer> output_buffer,
+                                        size_t output_offset) -> bool {
+            id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+            if (encoder == nil) {
+                encode_error = "Failed to create Metal variable-base matrix generation encoder";
+                return false;
+            }
+            [encoder setComputePipelineState:context.generate_base_matrix_pipeline];
+            [encoder setBuffer:params_buffer offset:0 atIndex:0];
+            [encoder setBytes:seed.data() length:uint256::size() atIndex:1];
+            [encoder setBuffer:output_buffer offset:static_cast<NSUInteger>(output_offset) atIndex:2];
+            const NSUInteger group_size = SelectThreadGroupSize(context.generate_base_matrix_pipeline, 256);
+            [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(matrix_words), 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(group_size, 1, 1)];
+            [encoder endEncoding];
+            return true;
+        };
+
+        for (uint32_t i = 0; i < request.batch_size; ++i) {
+            const size_t matrix_offset = static_cast<size_t>(i) * matrix_bytes;
+            const size_t noise_offset = static_cast<size_t>(i) * noise_bytes;
+            const size_t compress_offset = static_cast<size_t>(i) * compress_bytes;
+            const size_t compressed_offset = use_product_digest
+                ? static_cast<size_t>(i) * compressed_words * sizeof(uint32_t)
+                : 0;
+
+            const auto encode_base_start = std::chrono::steady_clock::now();
+            if (!encode_generate_base(request.matrix_a_seeds[i], matrix_a_buffer, matrix_offset) ||
+                !encode_generate_base(request.matrix_b_seeds[i], matrix_b_buffer, matrix_offset)) {
+                result.error = encode_error;
+                return result;
+            }
+            encode_generate_base_us += std::chrono::duration<double, std::micro>(
+                                           std::chrono::steady_clock::now() - encode_base_start)
+                                           .count();
+
+            std::memcpy(static_cast<unsigned char*>(e_l_stage_buffer.contents) + noise_offset, request.noise_e_l[i], noise_bytes);
+            std::memcpy(static_cast<unsigned char*>(e_r_stage_buffer.contents) + noise_offset, request.noise_e_r[i], noise_bytes);
+            std::memcpy(static_cast<unsigned char*>(f_l_stage_buffer.contents) + noise_offset, request.noise_f_l[i], noise_bytes);
+            std::memcpy(static_cast<unsigned char*>(f_r_stage_buffer.contents) + noise_offset, request.noise_f_r[i], noise_bytes);
+            std::memcpy(static_cast<unsigned char*>(compress_stage_buffer.contents) + compress_offset, request.compress_vec[i], compress_bytes);
+
+            const std::array<BufferBinding, 9> build_bindings{{
+                {params_buffer, 0},
+                {matrix_a_buffer, static_cast<NSUInteger>(matrix_offset)},
+                {matrix_b_buffer, static_cast<NSUInteger>(matrix_offset)},
+                {e_l_stage_buffer, static_cast<NSUInteger>(noise_offset)},
+                {e_r_stage_buffer, static_cast<NSUInteger>(noise_offset)},
+                {f_l_stage_buffer, static_cast<NSUInteger>(noise_offset)},
+                {f_r_stage_buffer, static_cast<NSUInteger>(noise_offset)},
+                {a_prime_buffer, static_cast<NSUInteger>(matrix_offset)},
+                {b_prime_buffer, static_cast<NSUInteger>(matrix_offset)},
+            }};
+            const auto encode_build_start = std::chrono::steady_clock::now();
+            if (!EncodeComputeBindings(command,
+                                       build_perturbed_pipeline,
+                                       static_cast<NSUInteger>(matrix_words),
+                                       256,
+                                       build_bindings,
+                                       encode_error)) {
+                result.error = encode_error;
+                return result;
+            }
+            encode_build_perturbed_us += std::chrono::duration<double, std::micro>(
+                                             std::chrono::steady_clock::now() - encode_build_start)
+                                             .count();
+
+            const std::array<BufferBinding, 5> compress_bindings{{
+                {params_buffer, 0},
+                {a_prime_buffer, static_cast<NSUInteger>(matrix_offset)},
+                {b_prime_buffer, static_cast<NSUInteger>(matrix_offset)},
+                {compress_stage_buffer, static_cast<NSUInteger>(compress_offset)},
+                {compressed_buffer, static_cast<NSUInteger>(compressed_offset)},
+            }};
+            const auto encode_compress_start = std::chrono::steady_clock::now();
+            if (!EncodeComputeThreadgroupsBindings(command,
+                                                   fused_prefix_compress_pipeline,
+                                                   static_cast<NSUInteger>(N),
+                                                   static_cast<NSUInteger>(N),
+                                                   block_elements,
+                                                   compress_bindings,
+                                                   encode_error)) {
+                result.error = encode_error;
+                return result;
+            }
+            encode_fused_prefix_compress_us += std::chrono::duration<double, std::micro>(
+                                                   std::chrono::steady_clock::now() - encode_compress_start)
+                                                   .count();
+
+            if (!use_product_digest) {
+                id<MTLComputeCommandEncoder> hash_encoder = [command computeCommandEncoder];
+                if (hash_encoder == nil) {
+                    result.error = "Failed to create Metal variable-base hash encoder";
+                    return result;
+                }
+                [hash_encoder setComputePipelineState:context.transcript_sha256_pipeline];
+                const std::array<BufferBinding, 3> hash_bindings{{
+                    {compressed_buffer, 0},
+                    {hash_params_buffer, 0},
+                    {transcript_hash_buffer, static_cast<NSUInteger>(i) * kHashBytesPerDigest},
+                }};
+                SetEncoderBindings(hash_encoder, hash_bindings);
+                const NSUInteger hash_group_size = SelectThreadGroupSize(context.transcript_sha256_pipeline, 1);
+                const auto encode_hash_start = std::chrono::steady_clock::now();
+                [hash_encoder dispatchThreads:MTLSizeMake(1, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(hash_group_size, 1, 1)];
+                [hash_encoder endEncoding];
+                encode_transcript_sha256_us += std::chrono::duration<double, std::micro>(
+                                                   std::chrono::steady_clock::now() - encode_hash_start)
+                                                   .count();
+            }
+        }
+
+        const auto submit_wait_start = std::chrono::steady_clock::now();
+        [command commit];
+        [command waitUntilCompleted];
+        const double submit_wait_us = std::chrono::duration<double, std::micro>(
+                                          std::chrono::steady_clock::now() - submit_wait_start)
+                                          .count();
+
+        if (command.status != MTLCommandBufferStatusCompleted) {
+            NSString* description = command.error != nil ? [command.error localizedDescription] : @"unknown Metal command failure";
+            result.success = false;
+            result.error = [description UTF8String];
+            return result;
+        }
+
+        const auto finalize_start = std::chrono::steady_clock::now();
+        result.digests.reserve(request.batch_size);
+        if (use_product_digest) {
+            for (uint32_t i = 0; i < request.batch_size; ++i) {
+                uint256 digest;
+                std::string finalize_error;
+                if (!FinalizeProductCommittedDigestFromFinalSliceBuffer(
+                        compressed_buffer,
+                        static_cast<size_t>(i) * compressed_words,
+                        N,
+                        request.n,
+                        request.b,
+                        request.sigmas[i],
+                        digest,
+                        finalize_error)) {
+                    result.success = false;
+                    result.error = finalize_error;
+                    return result;
+                }
+                result.digests.push_back(digest);
+            }
+        } else {
+            const auto* hash_ptr = static_cast<const unsigned char*>(transcript_hash_buffer.contents);
+            if (hash_ptr == nullptr) {
+                result.success = false;
+                result.error = "Metal variable-base digest missing hash output contents";
+                return result;
+            }
+            for (uint32_t i = 0; i < request.batch_size; ++i) {
+                result.digests.emplace_back(Span<const unsigned char>{
+                    hash_ptr + (static_cast<size_t>(i) * kHashBytesPerDigest),
+                    kHashBytesPerDigest,
+                });
+            }
+        }
+        const double cpu_finalize_us = std::chrono::duration<double, std::micro>(
+                                           std::chrono::steady_clock::now() - finalize_start)
+                                           .count();
+
+        {
+            std::lock_guard<std::mutex> lock(context.profiling_mutex);
+            context.profiling_stats.available = true;
+            context.profiling_stats.capture_supported = context.capture_supported;
+            ++context.profiling_stats.samples;
+            context.profiling_stats.last_encode_build_perturbed_us =
+                encode_generate_base_us + encode_build_perturbed_us;
+            context.profiling_stats.last_encode_fused_prefix_compress_us = encode_fused_prefix_compress_us;
+            context.profiling_stats.last_encode_transcript_sha256_us = encode_transcript_sha256_us;
+            context.profiling_stats.last_submit_wait_us = submit_wait_us;
+            context.profiling_stats.last_gpu_execution_ms = submit_wait_us / 1000.0;
+            context.profiling_stats.last_cpu_finalize_us = cpu_finalize_us;
+            context.profiling_stats.last_zero_copy_inputs = false;
+            context.profiling_stats.last_async_submission = false;
+            context.profiling_stats.reason = "profiling_samples_ready_variable_base_batch";
+        }
+
+        result.success = true;
+        return result;
+    }
 }
 
 } // namespace btx::metal

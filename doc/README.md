@@ -28,6 +28,7 @@ key-management operating model:
 - [Managing Wallets](managing-wallets.md)
 - [BTX PQ Multisig Tutorial](btx-pq-multisig-tutorial.md)
 - [BTX Shielded Pool Guide](btx-shielded-pool-guide.md)
+- [BTX Shielded-State Startup and Recovery](btx-shielded-state-recovery.md)
 - [BTX Bridge Pending Recovery](btx-bridge-pending-recovery.md)
 - [Support for signing transactions outside of BTX](external-signer.md)
 

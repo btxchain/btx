@@ -48,6 +48,8 @@ struct Options {
     uint32_t nbits{MAINNET_LIVE_LIKE_NBITS};
     uint32_t epsilon_bits{MAINNET_LIVE_LIKE_EPSILON_BITS};
     int32_t block_height{static_cast<int32_t>(MAINNET_POST_PRODUCT_HEIGHT)};
+    std::optional<int32_t> nonce_seed_height_override;
+    std::optional<int32_t> product_digest_height_override;
     uint32_t parallel{1};
     std::optional<std::string> backend_override;
     std::optional<std::string> async_override;
@@ -96,7 +98,7 @@ void PrintUsage(std::ostream& out)
         << " [--iterations <count>] [--tries <count>]"
         << " [--n <dim>] [--b <block>] [--r <rank>]"
         << " [--nbits <compact>] [--epsilon-bits <count>]"
-        << " [--block-height <height>]"
+        << " [--block-height <height>] [--nonce-seed-height <height>] [--product-digest-height <height>]"
         << " [--parallel <count>]"
         << " [--backend <cpu|metal|cuda|mlx>]"
         << " [--async <0|1>] [--gpu-inputs <0|1>]"
@@ -191,6 +193,30 @@ bool ParseArgs(int argc, char* argv[], Options& options)
         } else if (arg == "--block-height" || arg.rfind("--block-height=", 0) == 0) {
             consumed = true;
             if (!parse_kv("--block-height", [&](std::string_view value) { return parse_int32("--block-height", value, options.block_height); })) return false;
+        } else if (arg == "--nonce-seed-height" || arg.rfind("--nonce-seed-height=", 0) == 0) {
+            consumed = true;
+            if (!parse_kv("--nonce-seed-height", [&](std::string_view value) {
+                    int32_t parsed{0};
+                    if (!parse_int32("--nonce-seed-height", value, parsed)) return false;
+                    if (parsed < 0) {
+                        std::cerr << "error: invalid value for --nonce-seed-height: " << value << std::endl;
+                        return false;
+                    }
+                    options.nonce_seed_height_override = parsed;
+                    return true;
+                })) return false;
+        } else if (arg == "--product-digest-height" || arg.rfind("--product-digest-height=", 0) == 0) {
+            consumed = true;
+            if (!parse_kv("--product-digest-height", [&](std::string_view value) {
+                    int32_t parsed{0};
+                    if (!parse_int32("--product-digest-height", value, parsed)) return false;
+                    if (parsed < 0) {
+                        std::cerr << "error: invalid value for --product-digest-height: " << value << std::endl;
+                        return false;
+                    }
+                    options.product_digest_height_override = parsed;
+                    return true;
+                })) return false;
         } else if (arg == "--parallel" || arg.rfind("--parallel=", 0) == 0) {
             consumed = true;
             if (!parse_kv("--parallel", [&](std::string_view value) { return parse_uint32("--parallel", value, options.parallel); })) return false;
@@ -453,6 +479,12 @@ int main(int argc, char* argv[])
     consensus.nMatMulTranscriptBlockSize = options.b;
     consensus.nMatMulNoiseRank = options.r;
     consensus.nMatMulPreHashEpsilonBits = options.epsilon_bits;
+    if (options.nonce_seed_height_override.has_value()) {
+        consensus.nMatMulNonceSeedHeight = *options.nonce_seed_height_override;
+    }
+    if (options.product_digest_height_override.has_value()) {
+        consensus.nMatMulProductDigestHeight = *options.product_digest_height_override;
+    }
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
     std::vector<double> elapsed_s_values;
@@ -485,6 +517,10 @@ int main(int argc, char* argv[])
     options_obj.pushKV("nbits", options.nbits);
     options_obj.pushKV("epsilon_bits", options.epsilon_bits);
     options_obj.pushKV("block_height", options.block_height);
+    options_obj.pushKV("nonce_seed_height", options.nonce_seed_height_override.has_value() ? UniValue(*options.nonce_seed_height_override) : UniValue());
+    options_obj.pushKV("nonce_seed_active", consensus.IsMatMulNonceSeedActive(options.block_height));
+    options_obj.pushKV("product_digest_height", options.product_digest_height_override.has_value() ? UniValue(*options.product_digest_height_override) : UniValue());
+    options_obj.pushKV("product_digest_active", consensus.IsMatMulProductDigestActive(options.block_height));
     options_obj.pushKV("parallel", options.parallel);
     options_obj.pushKV("backend_override", options.backend_override.has_value() ? UniValue(*options.backend_override) : UniValue());
     options_obj.pushKV("async_override", options.async_override.has_value() ? UniValue(*options.async_override) : UniValue());
@@ -512,6 +548,18 @@ int main(int argc, char* argv[])
     output.pushKV("requested_backend", matmul::backend::ToString(backend_selection.requested));
     output.pushKV("active_backend", matmul::backend::ToString(backend_selection.active));
     output.pushKV("backend_selection_reason", backend_selection.reason);
+
+    if (backend_selection.requested == matmul::backend::Kind::METAL ||
+        backend_selection.active == matmul::backend::Kind::METAL) {
+        const auto device_info = btx::metal::ProbeMatMulDeviceInfo();
+        UniValue metal_device_obj(UniValue::VOBJ);
+        metal_device_obj.pushKV("available", device_info.available);
+        metal_device_obj.pushKV("device_name", device_info.device_name);
+        metal_device_obj.pushKV("gpu_core_count", device_info.gpu_core_count);
+        metal_device_obj.pushKV("gpu_core_count_source", device_info.gpu_core_count_source);
+        metal_device_obj.pushKV("reason", device_info.reason);
+        output.pushKV("metal_device", std::move(metal_device_obj));
+    }
 
     UniValue pipeline_obj(UniValue::VOBJ);
     pipeline_obj.pushKV("parallel_solver_enabled", last_pipeline.parallel_solver_enabled);

@@ -20,6 +20,14 @@ struct MatMulAccelerationProbe {
     std::string reason;
 };
 
+struct MatMulDeviceInfo {
+    bool available{false};
+    std::string device_name;
+    uint32_t gpu_core_count{0};
+    std::string gpu_core_count_source;
+    std::string reason;
+};
+
 struct MatMulBaseMatricesRequest {
     uint32_t n{0};
     const matmul::field::Element* matrix_a{nullptr};
@@ -164,7 +172,26 @@ struct MatMulDigestBatchSubmission {
     std::shared_ptr<void> opaque;
 };
 
+struct MatMulVariableBaseDigestBatchRequest {
+    uint32_t n{0};
+    uint32_t b{0};
+    uint32_t r{0};
+    uint32_t batch_size{0};
+    MatMulDigestMode digest_mode{MatMulDigestMode::TRANSCRIPT};
+    const uint256* sigmas{nullptr};
+    const uint256* matrix_a_seeds{nullptr};
+    const uint256* matrix_b_seeds{nullptr};
+
+    const matmul::field::Element* const* noise_e_l{nullptr};
+    const matmul::field::Element* const* noise_e_r{nullptr};
+    const matmul::field::Element* const* noise_f_l{nullptr};
+    const matmul::field::Element* const* noise_f_r{nullptr};
+
+    const matmul::field::Element* const* compress_vec{nullptr};
+};
+
 MatMulAccelerationProbe ProbeMatMulDigestAcceleration();
+MatMulDeviceInfo ProbeMatMulDeviceInfo();
 MatMulBaseMatricesResult UploadBaseMatrices(const MatMulBaseMatricesRequest& request);
 MatMulBufferPoolStats ProbeMatMulBufferPool();
 MatMulDispatchConfig ProbeMatMulDispatchConfig();
@@ -179,6 +206,8 @@ MatMulDigestBatchSubmission SubmitCanonicalTranscriptDigestBatch(const MatMulDig
 bool IsCanonicalTranscriptDigestBatchSubmissionReady(const MatMulDigestBatchSubmission& submission);
 MatMulDigestBatchResult WaitForCanonicalTranscriptDigestBatchSubmission(MatMulDigestBatchSubmission&& submission);
 MatMulDigestBatchResult ComputeCanonicalTranscriptDigestBatch(const MatMulDigestBatchRequest& request);
+MatMulDigestBatchResult ComputeCanonicalTranscriptDigestVariableBaseBatch(
+    const MatMulVariableBaseDigestBatchRequest& request);
 
 } // namespace btx::metal
 

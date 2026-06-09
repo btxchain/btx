@@ -15,6 +15,7 @@
 #include <logging.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <future>
@@ -81,8 +82,42 @@ void LogBackendFallbackOnce(std::atomic_bool& once_flag, const char* backend, co
     }
 }
 
+// Re-log a sustained backend->CPU fallback so it stays visible in the log even
+// though the once-only gate above suppresses the per-error spam. The first call
+// is logged immediately; subsequent calls are throttled to at most one line per
+// kRelogInterval so a node that is silently mining on CPU keeps reminding the
+// operator (with the most recent concrete reason) rather than going quiet after
+// a single transient line at startup.
+void LogBackendFallbackSustained(std::atomic<int64_t>& last_relog_ms,
+                                 const char* backend,
+                                 uint64_t total_fallbacks,
+                                 const std::string& reason)
+{
+    using namespace std::chrono;
+    constexpr int64_t kRelogIntervalMs{5 * 60 * 1000}; // 5 minutes
+    const int64_t now_ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+    int64_t previous = last_relog_ms.load(std::memory_order_relaxed);
+    // previous == 0 means "never logged the sustained line"; fire immediately in
+    // that case, otherwise wait for the throttle interval to elapse.
+    if (previous != 0 && (now_ms - previous) < kRelogIntervalMs) {
+        return;
+    }
+    if (!last_relog_ms.compare_exchange_strong(previous, now_ms, std::memory_order_relaxed)) {
+        return; // Another thread won the race; it will emit the line.
+    }
+    LogPrintf("MATMUL WARNING: %s backend still falling back to CPU (%llu total fallbacks; last reason: %s)\n",
+              backend,
+              static_cast<unsigned long long>(total_fallbacks),
+              reason);
+}
+
 std::atomic_bool g_logged_cuda_fallback{false};
 std::atomic_bool g_logged_metal_fallback{false};
+// steady_clock millisecond timestamp of the last "still falling back" re-log,
+// 0 = never. Drives LogBackendFallbackSustained() so a persistent CPU-fallback
+// state is re-surfaced periodically instead of only once at first failure.
+std::atomic<int64_t> g_cuda_fallback_last_relog_ms{0};
+std::atomic<int64_t> g_metal_fallback_last_relog_ms{0};
 std::atomic_bool g_logged_metal_gpu_input_generation_fallback{false};
 std::atomic_bool g_logged_cuda_gpu_input_generation_fallback{false};
 // g_logged_gpu_input_generation_auto_mode removed: AUTO mode no longer
@@ -271,17 +306,14 @@ bool ShouldUseCudaDevicePreparedInputsFastPath(uint32_t n,
     case CudaDevicePreparedInputsPolicy::FORCED_ON:
         return true;
     case CudaDevicePreparedInputsPolicy::AUTO:
-    {
-        const auto topology = btx::cuda::ProbeCudaTopology();
-        if (topology.available && topology.selected_devices.size() > 1) {
-            return false;
-        }
+        // Device input generation routes through ProbeCudaRuntime(), which
+        // selects topology.selected_devices.front(). AUTO therefore stays a
+        // single-device path even when multiple CUDA devices are visible.
         return ShouldAutoUseCudaDevicePreparedInputsFastPath(
             n,
             transcript_block_size,
             noise_rank,
             digest_scheme);
-    }
     }
 
     return false;
@@ -307,14 +339,16 @@ void SetLastGpuInputError(const std::string& error)
 
 void RecordMetalFallback(const std::string& error, uint64_t count = 1)
 {
-    g_metal_fallbacks_to_cpu.fetch_add(count, std::memory_order_relaxed);
+    const uint64_t total = g_metal_fallbacks_to_cpu.fetch_add(count, std::memory_order_relaxed) + count;
     SetLastMetalFallbackError(error);
+    LogBackendFallbackSustained(g_metal_fallback_last_relog_ms, "METAL", total, error);
 }
 
 void RecordCudaFallback(const std::string& error, uint64_t count = 1)
 {
-    g_cuda_fallbacks_to_cpu.fetch_add(count, std::memory_order_relaxed);
+    const uint64_t total = g_cuda_fallbacks_to_cpu.fetch_add(count, std::memory_order_relaxed) + count;
     SetLastCudaFallbackError(error);
+    LogBackendFallbackSustained(g_cuda_fallback_last_relog_ms, "CUDA", total, error);
 }
 
 std::vector<DigestResult> ComputeCudaDigestBatchFallbackResults(const std::vector<CBlockHeader>& blocks,
@@ -542,6 +576,382 @@ std::vector<DigestResult> ComputeCudaDigestsPreparedBatch(const std::vector<CBlo
     }
 }
 
+std::vector<DigestResult> ComputeVariableBaseDigestBatchFallbackResults(
+    const std::vector<CBlockHeader>& blocks,
+    uint32_t transcript_block_size,
+    uint32_t noise_rank,
+    const std::vector<PreparedDigestInputs>& prepared_batch,
+    DigestScheme digest_scheme,
+    backend::Kind backend_kind,
+    std::string error,
+    std::string_view error_prefix)
+{
+    if (!error.empty()) {
+        if (backend_kind == backend::Kind::METAL) {
+            LogBackendFallbackOnce(g_logged_metal_fallback, "METAL", error);
+            RecordMetalFallback(error, blocks.size());
+        } else {
+            LogBackendFallbackOnce(g_logged_cuda_fallback, "CUDA", error);
+            RecordCudaFallback(error, blocks.size());
+        }
+    }
+
+    std::vector<DigestResult> results;
+    results.reserve(blocks.size());
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        const auto A = SharedFromSeed(blocks[i].seed_a, blocks[i].matmul_dim);
+        const auto B = SharedFromSeed(blocks[i].seed_b, blocks[i].matmul_dim);
+        DigestResult result;
+        result.digest = ComputeDigestCpuFromPreparedInputs(
+            *A,
+            *B,
+            prepared_batch[i],
+            transcript_block_size,
+            digest_scheme);
+        result.backend = backend::Kind::CPU;
+        result.accelerated = false;
+        result.ok = true;
+        result.error = std::string(error_prefix) + error;
+        results.push_back(std::move(result));
+    }
+    return results;
+}
+
+std::vector<DigestResult> ComputeCudaVariableBaseDigestsPreparedBatch(
+    const std::vector<CBlockHeader>& blocks,
+    uint32_t transcript_block_size,
+    uint32_t noise_rank,
+    const std::vector<PreparedDigestInputs>& prepared_batch,
+    DigestScheme digest_scheme)
+{
+    if (blocks.empty()) {
+        return {};
+    }
+
+    const auto capability = backend::CapabilityFor(backend::Kind::CUDA);
+    if (!capability.available) {
+        return ComputeVariableBaseDigestBatchFallbackResults(
+            blocks,
+            transcript_block_size,
+            noise_rank,
+            prepared_batch,
+            digest_scheme,
+            backend::Kind::CUDA,
+            capability.reason,
+            "cuda_variable_base_batch_backend_fallback_to_cpu:");
+    }
+
+    try {
+        const uint32_t n = blocks.front().matmul_dim;
+        std::vector<uint256> seed_a;
+        std::vector<uint256> seed_b;
+        std::vector<const btx::cuda::MatMulGeneratedInputsDevice*> generated_inputs;
+        seed_a.reserve(blocks.size());
+        seed_b.reserve(blocks.size());
+        generated_inputs.reserve(prepared_batch.size());
+
+        for (size_t i = 0; i < prepared_batch.size(); ++i) {
+            const auto& block = blocks[i];
+            const auto& prepared = prepared_batch[i];
+            if (block.matmul_dim != n ||
+                !PreparedInputsMatchShape(prepared, n, transcript_block_size, noise_rank)) {
+                return ComputeVariableBaseDigestBatchFallbackResults(
+                    blocks,
+                    transcript_block_size,
+                    noise_rank,
+                    prepared_batch,
+                    digest_scheme,
+                    backend::Kind::CUDA,
+                    "cuda_variable_base_prepared_inputs_shape_mismatch",
+                    "cuda_variable_base_batch_backend_fallback_to_cpu:");
+            }
+            if (prepared.cuda_generated_inputs == nullptr) {
+                return ComputeVariableBaseDigestBatchFallbackResults(
+                    blocks,
+                    transcript_block_size,
+                    noise_rank,
+                    prepared_batch,
+                    digest_scheme,
+                    backend::Kind::CUDA,
+                    "cuda_variable_base_requires_device_generated_inputs",
+                    "cuda_variable_base_batch_backend_fallback_to_cpu:");
+            }
+            seed_a.push_back(block.seed_a);
+            seed_b.push_back(block.seed_b);
+            generated_inputs.push_back(prepared.cuda_generated_inputs.get());
+        }
+
+        auto cuda_result = btx::cuda::ComputeCompressedWordsLowRankVariableBaseDeviceBatchMultiDevice(
+            {
+                .n = n,
+                .b = transcript_block_size,
+                .r = noise_rank,
+                .batch_size = static_cast<uint32_t>(prepared_batch.size()),
+                .matrix_a_seeds = seed_a.data(),
+                .matrix_b_seeds = seed_b.data(),
+                .generated_inputs = generated_inputs.data(),
+            },
+            ToCudaCompressedWordsMode(digest_scheme));
+
+        if (!cuda_result.success) {
+            const std::string cuda_error = cuda_result.error.empty() ? "cuda_variable_base_batch_digest_failed" : cuda_result.error;
+            return ComputeVariableBaseDigestBatchFallbackResults(
+                blocks,
+                transcript_block_size,
+                noise_rank,
+                prepared_batch,
+                digest_scheme,
+                backend::Kind::CUDA,
+                cuda_error,
+                "cuda_variable_base_batch_backend_fallback_to_cpu:");
+        }
+
+        const uint32_t blocks_per_axis = n / transcript_block_size;
+        const uint32_t expected_words_per_request =
+            digest_scheme == DigestScheme::PRODUCT_COMMITTED
+                ? blocks_per_axis * blocks_per_axis
+                : blocks_per_axis * blocks_per_axis * blocks_per_axis;
+        if (cuda_result.words_per_request != expected_words_per_request ||
+            cuda_result.words.size() != static_cast<size_t>(prepared_batch.size()) * expected_words_per_request) {
+            return ComputeVariableBaseDigestBatchFallbackResults(
+                blocks,
+                transcript_block_size,
+                noise_rank,
+                prepared_batch,
+                digest_scheme,
+                backend::Kind::CUDA,
+                "cuda_variable_base_batch_digest_size_mismatch",
+                "cuda_variable_base_batch_backend_fallback_to_cpu:");
+        }
+
+        std::vector<DigestResult> results;
+        results.reserve(prepared_batch.size());
+        for (size_t i = 0; i < prepared_batch.size(); ++i) {
+            const auto words = Span<const field::Element>{
+                cuda_result.words.data() + i * expected_words_per_request,
+                expected_words_per_request,
+            };
+            DigestResult result;
+            result.digest = digest_scheme == DigestScheme::PRODUCT_COMMITTED
+                ? transcript::ComputeProductCommittedDigestFromWords(
+                      words,
+                      prepared_batch[i].sigma,
+                      blocks[i].matmul_dim,
+                      transcript_block_size)
+                : transcript::FinalizeTranscriptDigestFromWords(words);
+            result.backend = backend::Kind::CUDA;
+            result.accelerated = true;
+            result.ok = true;
+            results.push_back(std::move(result));
+        }
+        g_cuda_successes.fetch_add(results.size(), std::memory_order_relaxed);
+        return results;
+    } catch (const std::exception& e) {
+        return ComputeVariableBaseDigestBatchFallbackResults(
+            blocks,
+            transcript_block_size,
+            noise_rank,
+            prepared_batch,
+            digest_scheme,
+            backend::Kind::CUDA,
+            std::string("cuda_variable_base_batch_backend_exception:") + e.what(),
+            "cuda_variable_base_batch_backend_fallback_to_cpu:");
+    } catch (...) {
+        return ComputeVariableBaseDigestBatchFallbackResults(
+            blocks,
+            transcript_block_size,
+            noise_rank,
+            prepared_batch,
+            digest_scheme,
+            backend::Kind::CUDA,
+            "cuda_variable_base_batch_backend_unknown_exception",
+            "cuda_variable_base_batch_backend_fallback_to_cpu:");
+    }
+}
+
+std::vector<DigestResult> ComputeMetalVariableBaseDigestsPreparedBatch(
+    const std::vector<CBlockHeader>& blocks,
+    uint32_t transcript_block_size,
+    uint32_t noise_rank,
+    const std::vector<PreparedDigestInputs>& prepared_batch,
+    DigestScheme digest_scheme)
+{
+    if (blocks.empty()) {
+        return {};
+    }
+
+    const auto capability = backend::CapabilityFor(backend::Kind::METAL);
+    if (!capability.available) {
+        return ComputeVariableBaseDigestBatchFallbackResults(
+            blocks,
+            transcript_block_size,
+            noise_rank,
+            prepared_batch,
+            digest_scheme,
+            backend::Kind::METAL,
+            capability.reason,
+            "metal_variable_base_batch_backend_fallback_to_cpu:");
+    }
+
+    try {
+        const uint32_t n = blocks.front().matmul_dim;
+        const size_t expected_compress_words = static_cast<size_t>(transcript_block_size) * transcript_block_size;
+        std::vector<uint256> seed_a;
+        std::vector<uint256> seed_b;
+        std::vector<uint256> sigmas;
+        std::vector<const field::Element*> noise_e_l_ptrs;
+        std::vector<const field::Element*> noise_e_r_ptrs;
+        std::vector<const field::Element*> noise_f_l_ptrs;
+        std::vector<const field::Element*> noise_f_r_ptrs;
+        std::vector<const field::Element*> compress_ptrs;
+        seed_a.reserve(blocks.size());
+        seed_b.reserve(blocks.size());
+        sigmas.reserve(blocks.size());
+        noise_e_l_ptrs.reserve(prepared_batch.size());
+        noise_e_r_ptrs.reserve(prepared_batch.size());
+        noise_f_l_ptrs.reserve(prepared_batch.size());
+        noise_f_r_ptrs.reserve(prepared_batch.size());
+        compress_ptrs.reserve(prepared_batch.size());
+
+        for (size_t i = 0; i < prepared_batch.size(); ++i) {
+            const auto& block = blocks[i];
+            const auto& prepared = prepared_batch[i];
+            if (block.matmul_dim != n ||
+                !PreparedInputsMatchShape(prepared, n, transcript_block_size, noise_rank)) {
+                return ComputeVariableBaseDigestBatchFallbackResults(
+                    blocks,
+                    transcript_block_size,
+                    noise_rank,
+                    prepared_batch,
+                    digest_scheme,
+                    backend::Kind::METAL,
+                    "metal_variable_base_prepared_inputs_shape_mismatch",
+                    "metal_variable_base_batch_backend_fallback_to_cpu:");
+            }
+            if (!prepared.noise.has_value() ||
+                prepared.compress_vec.size() != expected_compress_words) {
+                return ComputeVariableBaseDigestBatchFallbackResults(
+                    blocks,
+                    transcript_block_size,
+                    noise_rank,
+                    prepared_batch,
+                    digest_scheme,
+                    backend::Kind::METAL,
+                    "metal_variable_base_requires_host_prepared_inputs",
+                    "metal_variable_base_batch_backend_fallback_to_cpu:");
+            }
+
+            seed_a.push_back(block.seed_a);
+            seed_b.push_back(block.seed_b);
+            sigmas.push_back(prepared.sigma);
+            noise_e_l_ptrs.push_back(prepared.noise->E_L.data());
+            noise_e_r_ptrs.push_back(prepared.noise->E_R.data());
+            noise_f_l_ptrs.push_back(prepared.noise->F_L.data());
+            noise_f_r_ptrs.push_back(prepared.noise->F_R.data());
+            compress_ptrs.push_back(prepared.compress_vec.data());
+        }
+
+        auto metal_result = btx::metal::ComputeCanonicalTranscriptDigestVariableBaseBatch({
+            .n = n,
+            .b = transcript_block_size,
+            .r = noise_rank,
+            .batch_size = static_cast<uint32_t>(prepared_batch.size()),
+            .digest_mode = ToMetalDigestMode(digest_scheme),
+            .sigmas = sigmas.data(),
+            .matrix_a_seeds = seed_a.data(),
+            .matrix_b_seeds = seed_b.data(),
+            .noise_e_l = noise_e_l_ptrs.data(),
+            .noise_e_r = noise_e_r_ptrs.data(),
+            .noise_f_l = noise_f_l_ptrs.data(),
+            .noise_f_r = noise_f_r_ptrs.data(),
+            .compress_vec = compress_ptrs.data(),
+        });
+
+        if (!metal_result.success) {
+            const std::string metal_error = metal_result.error.empty() ? "metal_variable_base_batch_digest_failed" : metal_result.error;
+            return ComputeVariableBaseDigestBatchFallbackResults(
+                blocks,
+                transcript_block_size,
+                noise_rank,
+                prepared_batch,
+                digest_scheme,
+                backend::Kind::METAL,
+                metal_error,
+                "metal_variable_base_batch_backend_fallback_to_cpu:");
+        }
+        if (metal_result.digests.size() != prepared_batch.size()) {
+            return ComputeVariableBaseDigestBatchFallbackResults(
+                blocks,
+                transcript_block_size,
+                noise_rank,
+                prepared_batch,
+                digest_scheme,
+                backend::Kind::METAL,
+                "metal_variable_base_batch_digest_size_mismatch",
+                "metal_variable_base_batch_backend_fallback_to_cpu:");
+        }
+
+        std::vector<DigestResult> results;
+        results.reserve(prepared_batch.size());
+        uint64_t metal_successes{0};
+        for (size_t i = 0; i < prepared_batch.size(); ++i) {
+            DigestResult result;
+            result.digest = metal_result.digests[i];
+            result.backend = backend::Kind::METAL;
+            result.accelerated = true;
+            result.ok = true;
+#ifdef DEBUG
+            const auto A = SharedFromSeed(blocks[i].seed_a, blocks[i].matmul_dim);
+            const auto B = SharedFromSeed(blocks[i].seed_b, blocks[i].matmul_dim);
+            const auto cpu_digest = ComputeDigestCpuFromPreparedInputs(
+                *A,
+                *B,
+                prepared_batch[i],
+                transcript_block_size,
+                digest_scheme);
+            if (cpu_digest != result.digest) {
+                g_metal_digest_mismatches.fetch_add(1, std::memory_order_relaxed);
+                RecordMetalFallback("digest mismatch");
+                LogBackendFallbackOnce(g_logged_metal_mismatch, "METAL", "digest mismatch");
+                result.digest = cpu_digest;
+                result.backend = backend::Kind::CPU;
+                result.accelerated = false;
+                result.error = "metal_variable_base_digest_mismatch_fallback_to_cpu";
+            } else {
+                ++metal_successes;
+            }
+#else
+            ++metal_successes;
+#endif
+            results.push_back(std::move(result));
+        }
+        if (metal_successes > 0) {
+            g_metal_successes.fetch_add(metal_successes, std::memory_order_relaxed);
+        }
+        return results;
+    } catch (const std::exception& e) {
+        return ComputeVariableBaseDigestBatchFallbackResults(
+            blocks,
+            transcript_block_size,
+            noise_rank,
+            prepared_batch,
+            digest_scheme,
+            backend::Kind::METAL,
+            std::string("metal_variable_base_batch_backend_exception:") + e.what(),
+            "metal_variable_base_batch_backend_fallback_to_cpu:");
+    } catch (...) {
+        return ComputeVariableBaseDigestBatchFallbackResults(
+            blocks,
+            transcript_block_size,
+            noise_rank,
+            prepared_batch,
+            digest_scheme,
+            backend::Kind::METAL,
+            "metal_variable_base_batch_backend_unknown_exception",
+            "metal_variable_base_batch_backend_fallback_to_cpu:");
+    }
+}
+
 void DisableGpuInputAutoMode(const std::string& reason)
 {
     bool expected{false};
@@ -582,7 +992,36 @@ backend::Selection ResolveMiningBackendFromEnvironment()
     const std::string requested = (env_backend != nullptr && env_backend[0] != '\0')
         ? std::string{env_backend}
         : DefaultBackendRequest();
-    return backend::ResolveRequestedBackend(requested);
+    const backend::Selection selection = backend::ResolveRequestedBackend(requested);
+
+    // Emit one clear, unmissable line describing the RESOLVED mining backend the
+    // first time the backend is resolved (this runs on every mining entry path,
+    // so it fires at startup / first solve). If a GPU backend was requested or
+    // implied but is unavailable, log WHY at WARNING level with the concrete
+    // probe reason (e.g. device_compute_capability_too_old:sm_86, a cudaError
+    // string, or cuda_driver_probe_faulted) so a silent CPU fallback can never
+    // hide. selection.reason carries the probed reason verbatim.
+    static std::atomic_bool logged_resolved_backend{false};
+    bool expected{false};
+    if (logged_resolved_backend.compare_exchange_strong(expected, true)) {
+        const std::string active_label = backend::ToString(selection.active);
+        const std::string requested_label = selection.requested_known
+            ? backend::ToString(selection.requested)
+            : (selection.requested_input.empty() ? std::string{"<empty>"} : selection.requested_input);
+
+        if (selection.active == selection.requested && selection.requested_known) {
+            LogPrintf("MatMul mining backend: %s (requested=%s, %s)\n",
+                      active_label, requested_label, selection.reason);
+        } else {
+            // Requested a backend we did not end up using (or an unknown one):
+            // this is the silent-fallback case the miner report is about.
+            LogPrintf("MatMul mining backend: %s [WARNING: requested %s but it is "
+                      "unavailable -> %s]\n",
+                      active_label, requested_label, selection.reason);
+        }
+    }
+
+    return selection;
 }
 
 bool ShouldUseGpuGeneratedInputsForBackend(backend::Kind backend_kind)
@@ -696,6 +1135,8 @@ void ResetMatMulBackendRuntimeStats()
     g_metal_retry_without_uploaded_base_successes.store(0, std::memory_order_relaxed);
     g_cuda_successes.store(0, std::memory_order_relaxed);
     g_cuda_fallbacks_to_cpu.store(0, std::memory_order_relaxed);
+    g_cuda_fallback_last_relog_ms.store(0, std::memory_order_relaxed);
+    g_metal_fallback_last_relog_ms.store(0, std::memory_order_relaxed);
     g_gpu_input_generation_attempts.store(0, std::memory_order_relaxed);
     g_gpu_input_generation_successes.store(0, std::memory_order_relaxed);
     g_gpu_input_generation_failures.store(0, std::memory_order_relaxed);
@@ -1762,6 +2203,69 @@ std::vector<DigestResult> ComputeMatMulDigestPreparedBatch(const std::vector<CBl
         preferred_backend,
         digest_scheme);
     return WaitForSubmittedMatMulDigestBatch(std::move(submission));
+}
+
+std::vector<DigestResult> ComputeMatMulDigestPreparedVariableBaseBatchForMining(
+    const std::vector<CBlockHeader>& blocks,
+    uint32_t transcript_block_size,
+    uint32_t noise_rank,
+    const std::vector<PreparedDigestInputs>& prepared_batch,
+    backend::Kind preferred_backend,
+    DigestScheme digest_scheme)
+{
+    if (blocks.empty()) {
+        return {};
+    }
+
+    if (blocks.size() != prepared_batch.size()) {
+        std::vector<DigestResult> results(blocks.size());
+        for (auto& result : results) {
+            result.backend = backend::Kind::CPU;
+            result.accelerated = false;
+            result.ok = false;
+            result.error = "prepared_batch_size_mismatch";
+        }
+        return results;
+    }
+
+    if (preferred_backend == backend::Kind::CUDA) {
+        g_digest_requests.fetch_add(blocks.size(), std::memory_order_relaxed);
+        g_requested_cuda.fetch_add(blocks.size(), std::memory_order_relaxed);
+        return ComputeCudaVariableBaseDigestsPreparedBatch(
+            blocks,
+            transcript_block_size,
+            noise_rank,
+            prepared_batch,
+            digest_scheme);
+    }
+
+    if (preferred_backend == backend::Kind::METAL) {
+        g_digest_requests.fetch_add(blocks.size(), std::memory_order_relaxed);
+        g_requested_metal.fetch_add(blocks.size(), std::memory_order_relaxed);
+        return ComputeMetalVariableBaseDigestsPreparedBatch(
+            blocks,
+            transcript_block_size,
+            noise_rank,
+            prepared_batch,
+            digest_scheme);
+    }
+
+    std::vector<DigestResult> results;
+    results.reserve(blocks.size());
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        const auto A = SharedFromSeed(blocks[i].seed_a, blocks[i].matmul_dim);
+        const auto B = SharedFromSeed(blocks[i].seed_b, blocks[i].matmul_dim);
+        results.push_back(ComputeMatMulDigestPrepared(
+            blocks[i],
+            *A,
+            *B,
+            transcript_block_size,
+            noise_rank,
+            prepared_batch[i],
+            preferred_backend,
+            digest_scheme));
+    }
+    return results;
 }
 
 DigestResult ComputeMatMulDigest(const CBlockHeader& block,

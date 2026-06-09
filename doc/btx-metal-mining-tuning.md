@@ -30,7 +30,7 @@ Recommended readiness check:
 ```
 
 Recommended throughput benchmark for the current production product-digest
-mining path:
+mining path before nonce-bound seed activation:
 
 ```bash
 ./build-btx/bin/btx-matmul-solve-bench \
@@ -39,8 +39,21 @@ mining path:
 ```
 
 `block_height=61000` is important for benchmarking because it exercises the
-current production product-digest path rather than the older transcript-only
-path.
+product-digest path rather than the older transcript-only path.
+
+Recommended throughput benchmark for the post-`nMatMulNonceSeedHeight` path:
+
+```bash
+./build-btx/bin/btx-matmul-solve-bench \
+  --backend metal \
+  --block-height 125000 \
+  --nonce-seed-height 125000
+```
+
+The nonce-seed path has separate batching defaults because A/B matrices are
+bound to each nonce candidate and cannot reuse the legacy shared-base batch.
+See [Metal Nonce-Seed Mining Optimization Notes](btx-metal-nonce-seed-mining-optimization-2026-06-08.md)
+for the activation-boundary benchmark details.
 
 ## Kernel Loading On macOS
 
@@ -73,6 +86,7 @@ current production path, not every possible MatMul shape.
 | Prepare workers | `BTX_MATMUL_PREPARE_WORKERS` uses the same Apple perf-core split by default, then clamps to the selected solver-thread count when Metal fanout is active. High-tier Apple hosts now auto-resolve to `5`. |
 | Metal pool slots | If `BTX_MATMUL_METAL_POOL_SLOTS` is unset and `BTX_MATMUL_SOLVER_THREADS` is explicitly set, pool slots mirror that value. Otherwise they follow the same Apple host-class policy as solver auto-tuning: `5` on high-tier hosts, `1` on conservative 4-perf-core hosts, and the perf-core split elsewhere. |
 | Batch size | `BTX_MATMUL_SOLVE_BATCH_SIZE` auto-resolves to `2` on the current production Metal product-digest path when parallel solve support is active. Otherwise it stays at `1`. |
+| Nonce-seed batch size | After `nMatMulNonceSeedHeight`, Metal uses `BTX_MATMUL_NONCE_SEED_BATCH_SIZE` / GPU-core-scaled defaults instead of the legacy shared-base batch resolver. On the mainnet 512x16x8 product-digest shape, 10-core Apple GPUs default to `64`; larger GPUs scale upward. |
 | Digest slice size | `BTX_MATMUL_DIGEST_SLICE_SIZE` stays at `1` for batch sizes `1` and `2`. It only widens automatically for larger forced batches. |
 | GPU-generated inputs | `BTX_MATMUL_GPU_INPUTS` stays auto-off on Metal. |
 | Async prepare | `BTX_MATMUL_PIPELINE_ASYNC` defaults to on for Metal. |
@@ -162,6 +176,7 @@ These are the overrides most operators and benchmark users should care about.
 | `BTX_MATMUL_PREPARE_WORKERS` | Auto uses the Apple perf-core split, then clamps to solver threads when Metal fanout is active | Lower host CPU usage or benchmark a specific prepare/solve ratio | `BTX_MATMUL_PREPARE_WORKERS=2` |
 | `BTX_MATMUL_METAL_POOL_SLOTS` | Auto mirrors explicit solver threads or uses the same perf-core split | Keep pool depth aligned with a manual solver-thread override | `BTX_MATMUL_METAL_POOL_SLOTS=5` |
 | `BTX_MATMUL_SOLVE_BATCH_SIZE` | Auto is `2` on the current production Metal product path, otherwise `1` | Compare the current default against `1`, or force larger experimental windows | `BTX_MATMUL_SOLVE_BATCH_SIZE=1` |
+| `BTX_MATMUL_NONCE_SEED_BATCH_SIZE` | Auto scales from detected Metal GPU core count after `nMatMulNonceSeedHeight`; mainnet 512x16x8 product shape defaults to `64` on 10-core GPUs, `128` at 18+ cores, `192` at 30+ cores, and `256` at 60+ cores | Tune the post-activation nonce-bound seed path independently from the legacy shared-base path | `BTX_MATMUL_NONCE_SEED_BATCH_SIZE=64` |
 | `BTX_MATMUL_DIGEST_SLICE_SIZE` | Auto is `1` for batch sizes `1-2` | Only for controlled batching experiments | `BTX_MATMUL_DIGEST_SLICE_SIZE=2` |
 | `BTX_MATMUL_GPU_INPUTS` | Auto-off on Metal | Force GPU-generated inputs on or off for host-specific testing | `BTX_MATMUL_GPU_INPUTS=1` |
 | `BTX_MATMUL_PIPELINE_ASYNC` | Auto-on on Metal | Disable only to isolate overlap/pipelining effects | `BTX_MATMUL_PIPELINE_ASYNC=0` |
@@ -177,6 +192,7 @@ These exist, but they are not the normal production mining knobs.
 | `BTX_MATMUL_METAL_FUNCTION_CONSTANTS=auto|0|1` | Metal kernel specialization policy | Relevant to Metal kernel microbenchmarks and transcript-path tuning. Not a normal product-mining tuning knob. |
 | `BTX_MATMUL_METAL_PIPELINE=auto|legacy|fused` | Transcript-only Metal pipeline choice | Useful for transcript microbenchmarks and non-product paths. The current production mining path is product digest, not transcript digest. |
 | `BTX_MATMUL_METAL_POOL_PREWARM=0|1` | Metal pool startup behavior | Defaults to on. Usually only touched for startup-latency experiments. |
+| `BTX_MATMUL_METAL_GPU_CORES_OVERRIDE=<n>` | Metal nonce-seed batch tier override | Debug/field override when IORegistry does not expose the GPU core count expected by the auto policy. |
 | `BTX_MATMUL_DIAG_COMPARE_CPU_METAL=0|1` | CPU vs Metal digest comparison | Diagnostic only. Increases work. |
 
 ## Benchmark CLI Flags
@@ -193,6 +209,7 @@ overrides:
 - `--prepare-workers`
 - `--pool-slots`
 - `--solver-threads`
+- `--nonce-seed-height`
 
 Useful examples:
 
@@ -215,6 +232,11 @@ Useful examples:
   --prepare-workers 3 \
   --pool-slots 3 \
   --batch-size 2
+
+./build-btx/bin/btx-matmul-solve-bench \
+  --backend metal \
+  --block-height 125000 \
+  --nonce-seed-height 125000
 ```
 
 For lower-level digest microbenchmarks, use `btx-matmul-metal-bench`. That tool

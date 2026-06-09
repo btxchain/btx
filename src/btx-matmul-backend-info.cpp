@@ -112,11 +112,19 @@ int main(int argc, char* argv[])
     output.pushKV("capabilities", std::move(capability_obj));
 
     UniValue metal_runtime(UniValue::VOBJ);
+    const auto device_info = btx::metal::ProbeMatMulDeviceInfo();
     const auto pool_stats = btx::metal::ProbeMatMulBufferPool();
     const auto dispatch_config = btx::metal::ProbeMatMulDispatchConfig();
     const auto kernel_profile = btx::metal::ProbeMatMulKernelProfile();
     const auto profiling_stats = btx::metal::ProbeMatMulProfilingStats();
     const auto oracle_profile = btx::metal::ProbeMatMulInputGenerationProfile();
+
+    UniValue device_obj(UniValue::VOBJ);
+    device_obj.pushKV("available", device_info.available);
+    device_obj.pushKV("device_name", device_info.device_name);
+    device_obj.pushKV("gpu_core_count", device_info.gpu_core_count);
+    device_obj.pushKV("gpu_core_count_source", device_info.gpu_core_count_source);
+    device_obj.pushKV("reason", device_info.reason);
 
     UniValue pool_obj(UniValue::VOBJ);
     pool_obj.pushKV("available", pool_stats.available);
@@ -182,6 +190,7 @@ int main(int argc, char* argv[])
     oracle_obj.pushKV("library_source", oracle_profile.library_source);
     oracle_obj.pushKV("reason", oracle_profile.reason);
 
+    metal_runtime.pushKV("device", std::move(device_obj));
     metal_runtime.pushKV("buffer_pool", std::move(pool_obj));
     metal_runtime.pushKV("dispatch", std::move(dispatch_obj));
     metal_runtime.pushKV("kernel_profile", std::move(kernel_obj));

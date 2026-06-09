@@ -268,6 +268,130 @@ inline void sha256_double_digest(thread uint first_state[8], thread uint out_sta
     sha256_compress(out_state, w);
 }
 
+inline void set_oracle_byte(thread uint w[64], uint offset, uint byte)
+{
+    const uint word_index = offset >> 2u;
+    const uint shift = (3u - (offset & 3u)) * 8u;
+    w[word_index] |= (byte & 0xffu) << shift;
+}
+
+inline uint oracle_bswap32(uint x)
+{
+    return ((x & 0x000000ffu) << 24u) |
+           ((x & 0x0000ff00u) << 8u) |
+           ((x & 0x00ff0000u) >> 8u) |
+           ((x & 0xff000000u) >> 24u);
+}
+
+inline uint oracle_candidate_from_seed_and_index(constant uchar* seed_internal,
+                                                 uint index,
+                                                 bool with_retry,
+                                                 uint retry)
+{
+    thread uint w[64];
+    for (uint i = 0; i < 64; ++i) {
+        w[i] = 0u;
+    }
+
+    for (uint i = 0; i < 32; ++i) {
+        set_oracle_byte(w, i, seed_internal[31u - i]);
+    }
+
+    set_oracle_byte(w, 32u, index & 0xffu);
+    set_oracle_byte(w, 33u, (index >> 8u) & 0xffu);
+    set_oracle_byte(w, 34u, (index >> 16u) & 0xffu);
+    set_oracle_byte(w, 35u, (index >> 24u) & 0xffu);
+
+    uint message_len = 36u;
+    if (with_retry) {
+        set_oracle_byte(w, 36u, retry & 0xffu);
+        set_oracle_byte(w, 37u, (retry >> 8u) & 0xffu);
+        set_oracle_byte(w, 38u, (retry >> 16u) & 0xffu);
+        set_oracle_byte(w, 39u, (retry >> 24u) & 0xffu);
+        message_len = 40u;
+    }
+
+    set_oracle_byte(w, message_len, 0x80u);
+    w[15] = message_len * 8u;
+
+    thread uint state[8];
+    state[0] = 0x6a09e667u;
+    state[1] = 0xbb67ae85u;
+    state[2] = 0x3c6ef372u;
+    state[3] = 0xa54ff53au;
+    state[4] = 0x510e527fu;
+    state[5] = 0x9b05688cu;
+    state[6] = 0x1f83d9abu;
+    state[7] = 0x5be0cd19u;
+    sha256_compress(state, w);
+    return oracle_bswap32(state[0]) & MODULUS;
+}
+
+inline uint oracle_fallback_candidate(constant uchar* seed_internal, uint index)
+{
+    thread uint w[64];
+    for (uint i = 0; i < 64; ++i) {
+        w[i] = 0u;
+    }
+
+    for (uint i = 0; i < 32; ++i) {
+        set_oracle_byte(w, i, seed_internal[31u - i]);
+    }
+
+    set_oracle_byte(w, 32u, index & 0xffu);
+    set_oracle_byte(w, 33u, (index >> 8u) & 0xffu);
+    set_oracle_byte(w, 34u, (index >> 16u) & 0xffu);
+    set_oracle_byte(w, 35u, (index >> 24u) & 0xffu);
+
+    const uchar fallback_tag[15] = {
+        'o', 'r', 'a', 'c', 'l', 'e', '-', 'f', 'a', 'l', 'l', 'b', 'a', 'c', 'k'
+    };
+    for (uint i = 0; i < 15; ++i) {
+        set_oracle_byte(w, 36u + i, fallback_tag[i]);
+    }
+
+    set_oracle_byte(w, 51u, 0x80u);
+    w[15] = 51u * 8u;
+
+    thread uint state[8];
+    state[0] = 0x6a09e667u;
+    state[1] = 0xbb67ae85u;
+    state[2] = 0x3c6ef372u;
+    state[3] = 0xa54ff53au;
+    state[4] = 0x510e527fu;
+    state[5] = 0x9b05688cu;
+    state[6] = 0x1f83d9abu;
+    state[7] = 0x5be0cd19u;
+    sha256_compress(state, w);
+    return oracle_bswap32(state[0]) % MODULUS;
+}
+
+inline uint oracle_from_seed(constant uchar* seed_internal, uint index)
+{
+    for (uint retry = 0; retry < 256; ++retry) {
+        const uint candidate = retry == 0
+            ? oracle_candidate_from_seed_and_index(seed_internal, index, false, 0u)
+            : oracle_candidate_from_seed_and_index(seed_internal, index, true, retry);
+        if (candidate < MODULUS) {
+            return candidate;
+        }
+    }
+    return oracle_fallback_candidate(seed_internal, index);
+}
+
+kernel void generate_base_matrix_from_seed(
+    constant KernelParams& p [[buffer(0)]],
+    constant uchar* seed_internal [[buffer(1)]],
+    device uint* output [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    const uint nn = p.n * p.n;
+    if (gid >= nn) {
+        return;
+    }
+    output[gid] = oracle_from_seed(seed_internal, gid);
+}
+
 kernel void build_perturbed(
     constant KernelParams& p [[buffer(0)]],
     device const uint* matrix_a [[buffer(1)]],

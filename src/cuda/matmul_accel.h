@@ -165,6 +165,16 @@ struct MatMulLowRankCompressedWordsDeviceBatchRequest {
     const MatMulGeneratedInputsDevice* const* generated_inputs{nullptr};
 };
 
+struct MatMulLowRankVariableBaseDeviceBatchRequest {
+    uint32_t n{0};
+    uint32_t b{0};
+    uint32_t r{0};
+    uint32_t batch_size{0};
+    const uint256* matrix_a_seeds{nullptr};
+    const uint256* matrix_b_seeds{nullptr};
+    const MatMulGeneratedInputsDevice* const* generated_inputs{nullptr};
+};
+
 MatMulAccelerationProbe ProbeMatMulDigestAcceleration();
 MatMulBufferPoolStats ProbeMatMulBufferPool();
 MatMulDispatchConfig ProbeMatMulDispatchConfig();
@@ -193,6 +203,16 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatchOnDevic
     int device_index);
 MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankDeviceBatchMultiDevice(
     const MatMulLowRankCompressedWordsDeviceBatchRequest& request,
+    MatMulCompressedWordsMode mode);
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDeviceBatch(
+    const MatMulLowRankVariableBaseDeviceBatchRequest& request,
+    MatMulCompressedWordsMode mode);
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDeviceBatchOnDevice(
+    const MatMulLowRankVariableBaseDeviceBatchRequest& request,
+    MatMulCompressedWordsMode mode,
+    int device_index);
+MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDeviceBatchMultiDevice(
+    const MatMulLowRankVariableBaseDeviceBatchRequest& request,
     MatMulCompressedWordsMode mode);
 
 } // namespace btx::cuda

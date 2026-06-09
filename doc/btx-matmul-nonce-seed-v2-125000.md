@@ -43,13 +43,14 @@ timestamp, merkle root, target bits, version, or dimension changes A/B.
   rejects mismatches as `bad-matmul-seeds`.
 - The post-activation solver uses a nonce-by-nonce path. It derives fresh seeds, A/B, sigma,
   digest input, and optional Freivalds payload for every attempted nonce.
-- Metal and CUDA remain digest/matrix acceleration backends, not consensus seed-derivation engines. After
-  activation the host solver submits prepared work with freshly derived `seed_a`, `seed_b`, A, and B, so
-  backend base-matrix caches cannot reuse a stale fixed instance across nonce attempts.
-- The post-activation safety rule forbids shared-A/B nonce windows. It does not forbid future GPU
-  optimization that batches multiple nonce attempts while carrying distinct A/B for every attempt
-  (for example a future batched-GEMM API). The current implementation uses a conservative batch-of-1
-  submission after activation to preserve correctness with the existing shared-A/B batch API.
+- Metal and CUDA remain digest/matrix acceleration backends, not consensus seed-derivation engines.
+  After activation, accelerated backends must carry candidate-specific `seed_a` and `seed_b` through
+  the batch path so backend base-matrix caches cannot reuse a stale fixed instance across nonce
+  attempts.
+- The post-activation safety rule forbids shared-A/B nonce windows. It does not forbid GPU
+  optimization that batches multiple nonce attempts while carrying distinct A/B for every attempt.
+  CUDA and Metal now have nonce-seed-specific GPU scan and variable-base digest batch paths for this
+  case; CPU and unsupported/fallback backends remain on the conservative nonce-by-nonce path.
 - On Apple builds the Metal backend still builds by default, and macOS source builds again precompile
   MatMul/oracle kernels into `.metallib` files first with embedded source compilation only as fallback.
 - RPC mining/work-profile reporting now marks fixed-instance reuse as unavailable when the

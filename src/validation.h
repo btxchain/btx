@@ -1504,6 +1504,14 @@ public:
         return m_shielded_pool_balance.GetBalance();
     }
 
+    /** Return net shielded-pool egress recorded over the velocity window ending at the given height. */
+    [[nodiscard]] CAmount GetShieldedUnshieldVelocityWindowTotal(int32_t tip_height,
+                                                                 uint32_t window_blocks) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return m_shielded_unshield_velocity.WindowTotal(tip_height, window_blocks);
+    }
+
     /** Return true when the secondary full-retention commitment index profile is enabled. */
     [[nodiscard]] bool RetainShieldedCommitmentIndex() const
     {

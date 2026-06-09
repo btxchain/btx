@@ -546,6 +546,68 @@ BOOST_AUTO_TEST_CASE(metal_product_digest_batch_matches_single_digest_sequence)
     }
 }
 
+BOOST_AUTO_TEST_CASE(metal_variable_base_product_digest_batch_matches_cpu)
+{
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
+    if (!capability.available) {
+        BOOST_TEST_MESSAGE("Skipping variable-base Metal product digest batch test: Metal backend unavailable ("
+            << capability.reason << ")");
+        return;
+    }
+
+    constexpr uint32_t kN = 16;
+    constexpr uint32_t kB = 8;
+    constexpr uint32_t kR = 4;
+    constexpr uint32_t kBatchSize = 3;
+    const std::array<uint256, kBatchSize> seed_a{{
+        ParseUint256("0101010101010101010101010101010101010101010101010101010101010101"),
+        ParseUint256("0202020202020202020202020202020202020202020202020202020202020202"),
+        ParseUint256("0303030303030303030303030303030303030303030303030303030303030303"),
+    }};
+    const std::array<uint256, kBatchSize> seed_b{{
+        ParseUint256("1111111111111111111111111111111111111111111111111111111111111111"),
+        ParseUint256("1212121212121212121212121212121212121212121212121212121212121212"),
+        ParseUint256("1313131313131313131313131313131313131313131313131313131313131313"),
+    }};
+
+    std::vector<CBlockHeader> headers;
+    std::vector<matmul::accelerated::PreparedDigestInputs> prepared_inputs;
+    std::vector<uint256> cpu_digests;
+    headers.reserve(kBatchSize);
+    prepared_inputs.reserve(kBatchSize);
+    cpu_digests.reserve(kBatchSize);
+
+    for (uint32_t i = 0; i < kBatchSize; ++i) {
+        CBlockHeader header = BuildHeader(kN, 30'000 + i);
+        header.seed_a = seed_a[i];
+        header.seed_b = seed_b[i];
+        headers.push_back(header);
+        prepared_inputs.push_back(matmul::accelerated::PrepareMatMulDigestInputs(
+            header,
+            kB,
+            kR));
+
+        const matmul::Matrix matrix_a = matmul::FromSeed(header.seed_a, kN);
+        const matmul::Matrix matrix_b = matmul::FromSeed(header.seed_b, kN);
+        cpu_digests.push_back(ComputeReferenceProductDigest(header, matrix_a, matrix_b, kB, kR));
+    }
+
+    const auto batch = matmul::accelerated::ComputeMatMulDigestPreparedVariableBaseBatchForMining(
+        headers,
+        kB,
+        kR,
+        prepared_inputs,
+        matmul::backend::Kind::METAL,
+        matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
+    BOOST_REQUIRE_EQUAL(batch.size(), kBatchSize);
+
+    for (uint32_t i = 0; i < kBatchSize; ++i) {
+        BOOST_REQUIRE(batch[i].ok);
+        BOOST_CHECK_EQUAL(batch[i].digest, cpu_digests[i]);
+        BOOST_CHECK_EQUAL(batch[i].backend, matmul::backend::Kind::METAL);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(metal_mainnet_shape_product_digest_batch_matches_cpu_under_auto_policy)
 {
     const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);

@@ -224,7 +224,17 @@ MatMulPreHashEpsilonBitsInfo GetMatMulPreHashEpsilonBitsInfo(int32_t current_tip
 bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t& max_tries,
                  int32_t block_height = -1,
                  const std::atomic<bool>* abort_flag = nullptr,
-                 std::vector<uint32_t>* freivalds_payload_out = nullptr);
+                 std::vector<uint32_t>* freivalds_payload_out = nullptr,
+                 //! Optional pool/share mining target. When non-null, the solver returns as soon as it
+                 //! finds a nonce whose MatMul digest is <= *share_target_override (typically an EASIER,
+                 //! numerically larger target than the block target derived from nBits). This relaxes ONLY
+                 //! the digest early-exit comparison: the consensus pre-hash gate (CheckMatMulPreHashGate)
+                 //! and the miner-side pre-hash batch window always use the block target from nBits, so a
+                 //! returned candidate that also meets the block target is a fully consensus-valid block,
+                 //! and every share is a genuine block candidate. Pass nullptr (default) for solo/consensus
+                 //! mining — behaviour is then identical to mining against the block target. A zero target
+                 //! is rejected (returns false).
+                 const uint256* share_target_override = nullptr);
 bool CheckKAWPOWProofOfWork(const CBlockHeader& block, uint32_t block_height, const Consensus::Params&);
 bool SolveKAWPOW(CBlockHeader& block, uint32_t block_height, const Consensus::Params& params, uint64_t& max_tries);
 

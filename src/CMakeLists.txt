@@ -408,6 +408,7 @@ if(APPLE AND BTX_ENABLE_METAL)
     metal/oracle_accel.mm
   )
   find_btx_apple_framework(BTX_FOUNDATION_FRAMEWORK Foundation)
+  find_btx_apple_framework(BTX_IOKIT_FRAMEWORK IOKit)
   find_btx_apple_framework(BTX_METAL_FRAMEWORK Metal)
   option(BTX_MATMUL_METAL_PRECOMPILE_KERNELS "Precompile MatMul Metal kernels with xcrun metallib at build time" ON)
   find_program(BTX_XCRUN_EXECUTABLE xcrun)
@@ -451,6 +452,7 @@ if(APPLE AND BTX_ENABLE_METAL)
   target_compile_definitions(btx_matmul_backend PRIVATE BTX_ENABLE_METAL=1)
   target_link_libraries(btx_matmul_backend PRIVATE
     ${BTX_FOUNDATION_FRAMEWORK}
+    ${BTX_IOKIT_FRAMEWORK}
     ${BTX_METAL_FRAMEWORK}
   )
 else()

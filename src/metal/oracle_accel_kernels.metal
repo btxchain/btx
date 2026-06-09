@@ -199,6 +199,219 @@ inline uint from_oracle(constant uchar* seed_internal, uint index)
     return fallback_candidate(seed_internal, index);
 }
 
+inline void sha256_bytes(thread uchar* message, uint message_len, thread uchar out[32])
+{
+    thread uint state[8];
+    sha256_init(state);
+
+    const uint total_blocks = (message_len + 9u + 63u) / 64u;
+    const ulong bit_len = (ulong)message_len * 8u;
+    for (uint block = 0; block < total_blocks; ++block) {
+        thread uint w[64];
+        for (uint i = 0; i < 64; ++i) {
+            w[i] = 0u;
+        }
+        for (uint word = 0; word < 16; ++word) {
+            uint packed = 0u;
+            for (uint byte = 0; byte < 4; ++byte) {
+                const uint message_index = block * 64u + word * 4u + byte;
+                uchar value = 0u;
+                if (message_index < message_len) {
+                    value = message[message_index];
+                } else if (message_index == message_len) {
+                    value = 0x80u;
+                } else {
+                    const uint length_start = total_blocks * 64u - 8u;
+                    if (message_index >= length_start) {
+                        const uint shift = (7u - (message_index - length_start)) * 8u;
+                        value = (uchar)((bit_len >> shift) & 0xffu);
+                    }
+                }
+                packed = (packed << 8u) | value;
+            }
+            w[word] = packed;
+        }
+        sha256_compress(state, w);
+    }
+
+    for (uint i = 0; i < 8; ++i) {
+        const uint word = state[i];
+        out[i * 4u + 0u] = (uchar)((word >> 24u) & 0xffu);
+        out[i * 4u + 1u] = (uchar)((word >> 16u) & 0xffu);
+        out[i * 4u + 2u] = (uchar)((word >> 8u) & 0xffu);
+        out[i * 4u + 3u] = (uchar)(word & 0xffu);
+    }
+}
+
+inline void append_byte(thread uchar* message, thread uint& offset, uchar value)
+{
+    message[offset++] = value;
+}
+
+inline void append_constant_bytes(thread uchar* message, thread uint& offset, constant uchar* data, uint size)
+{
+    for (uint i = 0; i < size; ++i) {
+        message[offset++] = data[i];
+    }
+}
+
+inline void append_thread_bytes(thread uchar* message, thread uint& offset, thread uchar* data, uint size)
+{
+    for (uint i = 0; i < size; ++i) {
+        message[offset++] = data[i];
+    }
+}
+
+inline void append_le16(thread uchar* message, thread uint& offset, ushort value)
+{
+    append_byte(message, offset, (uchar)(value & 0xffu));
+    append_byte(message, offset, (uchar)((value >> 8u) & 0xffu));
+}
+
+inline void append_le32(thread uchar* message, thread uint& offset, uint value)
+{
+    append_byte(message, offset, (uchar)(value & 0xffu));
+    append_byte(message, offset, (uchar)((value >> 8u) & 0xffu));
+    append_byte(message, offset, (uchar)((value >> 16u) & 0xffu));
+    append_byte(message, offset, (uchar)((value >> 24u) & 0xffu));
+}
+
+inline void append_le64(thread uchar* message, thread uint& offset, ulong value)
+{
+    for (uint i = 0; i < 8; ++i) {
+        append_byte(message, offset, (uchar)((value >> (i * 8u)) & 0xffu));
+    }
+}
+
+inline void compute_matmul_seed_v2(constant uchar* previous_block_hash,
+                                   constant uchar* merkle_root,
+                                   uint height,
+                                   uint version,
+                                   uint time,
+                                   uint bits,
+                                   ulong nonce,
+                                   ushort matmul_dim,
+                                   uchar which,
+                                   thread uchar out[32])
+{
+    thread uchar message[110];
+    uint offset = 0u;
+    const uchar tag[18] = {
+        'B', 'T', 'X', '_', 'M', 'A', 'T', 'M', 'U', 'L', '_', 'S', 'E', 'E', 'D', '_', 'V', '2'
+    };
+    append_byte(message, offset, 18u);
+    for (uint i = 0; i < 18u; ++i) {
+        append_byte(message, offset, tag[i]);
+    }
+    append_constant_bytes(message, offset, previous_block_hash, 32u);
+    append_le32(message, offset, height);
+    append_le32(message, offset, version);
+    append_constant_bytes(message, offset, merkle_root, 32u);
+    append_le32(message, offset, time);
+    append_le32(message, offset, bits);
+    append_le64(message, offset, nonce);
+    append_le16(message, offset, matmul_dim);
+    append_byte(message, offset, which);
+    sha256_bytes(message, offset, out);
+}
+
+inline void compute_matmul_header_hash(uint version,
+                                       constant uchar* previous_block_hash,
+                                       constant uchar* merkle_root,
+                                       uint time,
+                                       uint bits,
+                                       ulong nonce,
+                                       ushort matmul_dim,
+                                       thread uchar seed_a[32],
+                                       thread uchar seed_b[32],
+                                       thread uchar out[32])
+{
+    thread uchar message[150];
+    uint offset = 0u;
+    append_le32(message, offset, version);
+    append_constant_bytes(message, offset, previous_block_hash, 32u);
+    append_constant_bytes(message, offset, merkle_root, 32u);
+    append_le32(message, offset, time);
+    append_le32(message, offset, bits);
+    append_le64(message, offset, nonce);
+    append_le16(message, offset, matmul_dim);
+    append_thread_bytes(message, offset, seed_a, 32u);
+    append_thread_bytes(message, offset, seed_b, 32u);
+    sha256_bytes(message, offset, out);
+}
+
+inline bool uint256_internal_bytes_less_or_equal(thread uchar lhs[32], constant uchar* rhs)
+{
+    for (int i = 31; i >= 0; --i) {
+        if (lhs[i] < rhs[i]) return true;
+        if (lhs[i] > rhs[i]) return false;
+    }
+    return true;
+}
+
+struct NonceSeedScanParams {
+    uint version;
+    uint height;
+    uint time;
+    uint bits;
+    ulong start_nonce;
+    uint matmul_dim;
+    uint scan_count;
+};
+
+kernel void scan_nonce_seed_pre_hash(constant NonceSeedScanParams& p [[buffer(0)]],
+                                     constant uchar* previous_block_hash [[buffer(1)]],
+                                     constant uchar* merkle_root [[buffer(2)]],
+                                     constant uchar* pre_hash_target [[buffer(3)]],
+                                     device uint* out_flags [[buffer(4)]],
+                                     uint gid [[thread_position_in_grid]])
+{
+    if (gid >= p.scan_count) {
+        return;
+    }
+
+    const ulong nonce = p.start_nonce + (ulong)gid;
+    thread uchar seed_a[32];
+    thread uchar seed_b[32];
+    thread uchar header_hash[32];
+    thread uchar sigma[32];
+    compute_matmul_seed_v2(
+        previous_block_hash,
+        merkle_root,
+        p.height,
+        p.version,
+        p.time,
+        p.bits,
+        nonce,
+        (ushort)p.matmul_dim,
+        0u,
+        seed_a);
+    compute_matmul_seed_v2(
+        previous_block_hash,
+        merkle_root,
+        p.height,
+        p.version,
+        p.time,
+        p.bits,
+        nonce,
+        (ushort)p.matmul_dim,
+        1u,
+        seed_b);
+    compute_matmul_header_hash(
+        p.version,
+        previous_block_hash,
+        merkle_root,
+        p.time,
+        p.bits,
+        nonce,
+        (ushort)p.matmul_dim,
+        seed_a,
+        seed_b,
+        header_hash);
+    sha256_bytes(header_hash, 32u, sigma);
+    out_flags[gid] = uint256_internal_bytes_less_or_equal(sigma, pre_hash_target) ? 1u : 0u;
+}
+
 kernel void generate_oracle_noise_vectors(constant OracleParams& p [[buffer(0)]],
                                           constant uchar* seed_el [[buffer(1)]],
                                           constant uchar* seed_er [[buffer(2)]],
