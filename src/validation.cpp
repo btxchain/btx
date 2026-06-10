@@ -1795,6 +1795,19 @@ static void RefreshShieldedValidationSnapshots(
     }
     std::reverse(chain.begin(), chain.end());
 
+    // This rebuild can be reached after an interrupted shielded-state mutation. Account-registry
+    // payloads are fully chain-derived and the startup mutation marker keeps partially rebuilt
+    // state from being trusted after a crash, so rebuild-time payload appends do not need to
+    // fsync every transaction. Normal block-connect appends keep their default synced writes.
+    const size_t total_blocks = chain.size();
+    const auto rebuild_start = std::chrono::steady_clock::now();
+    auto last_progress_log = rebuild_start;
+    size_t blocks_processed = 0;
+    size_t shielded_txs_processed = 0;
+    LogPrintf("RebuildShieldedAccountRegistryState: replaying %u blocks (genesis -> height %d) to rebuild account registry...\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight);
+
     for (const CBlockIndex* pindex : chain) {
         const bool use_nonced_bridge_tag =
             UseNoncedShieldedBridgeTags(chainstate.m_chainman.GetConsensus(), pindex->nHeight);
@@ -1819,12 +1832,15 @@ static void RefreshShieldedValidationSnapshots(
                 if (!account_registry.Append(
                         Span<const shielded::registry::ShieldedAccountLeaf>{
                             account_leaves->data(),
-                            account_leaves->size()})) {
+                            account_leaves->size()},
+                        /*inserted_indices=*/nullptr,
+                        /*sync_payload_store=*/false)) {
                     LogError("RebuildShieldedAccountRegistryState: failed to append account leaves for tx %s in block %s\n",
                              txref->GetHash().ToString(),
                              pindex->GetBlockHash().ToString());
                     return false;
                 }
+                ++shielded_txs_processed;
             } catch (const std::exception& e) {
                 LogError("RebuildShieldedAccountRegistryState: account-registry append exception for tx %s in block %s: %s\n",
                          txref->GetHash().ToString(),
@@ -1833,7 +1849,31 @@ static void RefreshShieldedValidationSnapshots(
                 return false;
             }
         }
+        ++blocks_processed;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_progress_log >= std::chrono::seconds{15}) {
+            last_progress_log = now;
+            const double pct = total_blocks > 0
+                                   ? 100.0 * static_cast<double>(blocks_processed) / static_cast<double>(total_blocks)
+                                   : 100.0;
+            LogPrintf("RebuildShieldedAccountRegistryState: replaying account registry %u/%u (height=%d, %.1f%%, shielded_txs=%u, entries=%u)\n",
+                      static_cast<unsigned int>(blocks_processed),
+                      static_cast<unsigned int>(total_blocks),
+                      pindex->nHeight,
+                      pct,
+                      static_cast<unsigned int>(shielded_txs_processed),
+                      static_cast<unsigned int>(account_registry.Size()));
+        }
     }
+    const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - rebuild_start)
+                               .count();
+    LogPrintf("RebuildShieldedAccountRegistryState: replayed %u blocks to height %d in %llds (shielded_txs=%u entries=%u)\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight,
+              static_cast<long long>(elapsed_s),
+              static_cast<unsigned int>(shielded_txs_processed),
+              static_cast<unsigned int>(account_registry.Size()));
     return true;
 }
 
@@ -7992,35 +8032,105 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
     const CBlockIndex* pindexFork = m_chain.FindFork(pindexMostWork);
     const Consensus::Params& consensus_params = m_chainman.GetConsensus();
 
+    // ---------------------------------------------------------------------
+    // Deep-reorg defense (issue: "no reorg-depth limit"). PER-NODE policy only.
+    //
+    // SAFETY DESIGN. Bitcoin/Nakamoto consensus deliberately has NO maximum
+    // reorg depth: the single rule "follow the most-work valid chain" is what
+    // lets every honest node, no matter how it was partitioned, deterministically
+    // reconverge on one chain. A naive hard cap that *refuses* reorgs deeper than
+    // N turns N blocks into a finality boundary and is, in the partition case,
+    // WORSE than the 51% attack it tries to stop:
+    //
+    //   SPLIT-RISK MEMO (why an unconditional reorg cap is dangerous)
+    //   - Suppose the network partitions (or an attacker withholds and then
+    //     releases a branch) so two sub-networks each extend their own tip past
+    //     the common fork by more than N blocks.
+    //   - When connectivity returns, neither side will adopt the other's chain:
+    //     each sees the other as a ">N reorg" and refuses it. The two chains can
+    //     NEVER reconverge -- a PERMANENT partition -- even though one is the
+    //     legitimate most-work chain. The cap manufactures the very split it was
+    //     meant to prevent, and an attacker can trigger it deliberately.
+    //   - It also does not stop a sustained >50% attacker: such an attacker can
+    //     keep a private chain within N of the public tip and still rewrite up to
+    //     N blocks at will, or simply out-pace honest nodes that have parked.
+    //   A hard cap is therefore only safe when paired with a real finality gadget
+    //   (e.g. a checkpoint/finalization protocol every side agrees on). BTX has no
+    //   such gadget, so we DO NOT impose a hard cap as default behavior.
+    //
+    // What we do instead, gated on operator policy (m_chainman.m_options):
+    //   WARN (default): follow the most-work chain as usual, but fire a loud
+    //     alarm (log + Warning notification + RPC stats) so operators/exchanges
+    //     can raise confirmations and investigate. No finality assumption => no
+    //     split risk. This is the only behavior that is always safe.
+    //   PARK (opt-in, -parkdeepreorg=1): refuse to auto-switch and stay on the
+    //     current tip pending operator action, still tracking the branch. This
+    //     buys a single node protection from a silent deep rewrite, but it is a
+    //     LOCAL finality assumption with exactly the split risk above. It is
+    //     OFF by default and intended for individual exchange/custody nodes whose
+    //     operators will manually reconcile (e.g. via invalidateblock /
+    //     reconsiderblock) -- never as a network-wide rule.
+    //
+    // Threshold source: operator override -maxreorgdepthwarn, else the chain's
+    // consensus nMaxReorgDepth (when configured). Only armed once the tip has
+    // reached nReorgProtectionStartHeight so early/regtest chains are unaffected.
+    // ---------------------------------------------------------------------
+    const auto& cm_opts = m_chainman.m_options;
+    uint32_t deep_reorg_threshold = std::numeric_limits<uint32_t>::max();
+    if (cm_opts.max_reorg_depth_warn.has_value()) {
+        deep_reorg_threshold = *cm_opts.max_reorg_depth_warn;
+    } else if (consensus_params.nMaxReorgDepth != std::numeric_limits<uint32_t>::max()) {
+        deep_reorg_threshold = consensus_params.nMaxReorgDepth;
+    }
+
     if (pindexOldTip != nullptr &&
         pindexFork != nullptr &&
-        consensus_params.nMaxReorgDepth != std::numeric_limits<uint32_t>::max() &&
+        deep_reorg_threshold != std::numeric_limits<uint32_t>::max() &&
         pindexOldTip->nHeight >= consensus_params.nReorgProtectionStartHeight) {
         const int reorg_depth = pindexOldTip->nHeight - pindexFork->nHeight;
-        if (reorg_depth > static_cast<int>(consensus_params.nMaxReorgDepth)) {
+        if (reorg_depth > static_cast<int>(deep_reorg_threshold)) {
             RecordRejectedReorgDepth(
                 static_cast<uint32_t>(reorg_depth),
-                consensus_params.nMaxReorgDepth,
+                deep_reorg_threshold,
                 pindexOldTip->nHeight,
                 pindexFork->nHeight,
                 pindexMostWork->nHeight);
-            LogWarning("Rejecting deep reorg: depth %d exceeds maximum %u (tip=%d, fork=%d, candidate=%d). "
-                       "Staying on current chain.\n",
-                       reorg_depth, consensus_params.nMaxReorgDepth,
-                       pindexOldTip->nHeight, pindexFork->nHeight, pindexMostWork->nHeight);
-            // Deep reorgs are a local policy rejection, not a consensus invalidity.
-            // Remove the rejected branch from best-chain selection so shallower
-            // extensions of the current tip can still make progress.
-            for (CBlockIndex* rejected = pindexMostWork;
-                 rejected != nullptr && rejected != pindexFork;
-                 rejected = rejected->pprev) {
-                setBlockIndexCandidates.erase(rejected);
+
+            const bool park = cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK;
+            const bilingual_str alarm = strprintf(
+                _("Deep reorg detected: a branch would reorganize %d blocks "
+                  "(threshold %u; tip=%d, fork=%d, candidate=%d). %s This may indicate "
+                  "a 51%% attack -- raise required confirmations and investigate."),
+                reorg_depth, deep_reorg_threshold,
+                pindexOldTip->nHeight, pindexFork->nHeight, pindexMostWork->nHeight,
+                park ? _("Parking the branch and staying on the current chain pending operator action.")
+                     : _("Following the most-work chain (warn-only)."));
+
+            // Loud alarm on every deep reorg, regardless of action.
+            LogWarning("%s\n", alarm.original);
+            m_chainman.GetNotifications().warningSet(kernel::Warning::DEEP_REORG_DETECTED, alarm);
+
+            if (park) {
+                // Opt-in local finality (see split-risk memo above). Deep reorgs
+                // are a local policy refusal, NOT a consensus invalidity. Remove
+                // the parked branch from best-chain selection so shallower
+                // extensions of the current tip can still make progress; the
+                // branch remains in the block index for operator inspection and
+                // for manual reconsideration.
+                for (CBlockIndex* rejected = pindexMostWork;
+                     rejected != nullptr && rejected != pindexFork;
+                     rejected = rejected->pprev) {
+                    setBlockIndexCandidates.erase(rejected);
+                }
+                if (m_chain.Tip() != nullptr) {
+                    setBlockIndexCandidates.insert(m_chain.Tip());
+                }
+                fInvalidFound = true;
+                return true;
             }
-            if (m_chain.Tip() != nullptr) {
-                setBlockIndexCandidates.insert(m_chain.Tip());
-            }
-            fInvalidFound = true;
-            return true;
+            // WARN (default): fall through and follow the most-work chain. No
+            // finality assumption is imposed, so the network cannot be split by
+            // this node's deep-reorg handling.
         }
     }
 
@@ -12897,6 +13007,24 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             const auto loaded_account_registry_roots = persisted_account_registry_roots;
             bool anchor_history_rebuilt{false};
             bool account_registry_rebuilt_from_chain{false};
+            bool fast_startup_nullifier_accumulator_checked{false};
+            bool fast_startup_nullifier_accumulator_verified{false};
+            auto verify_fast_startup_nullifier_accumulator =
+                [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
+                    AssertLockHeld(::cs_main);
+                    if (fast_startup_nullifier_accumulator_checked) {
+                        return fast_startup_nullifier_accumulator_verified;
+                    }
+                    fast_startup_nullifier_accumulator_checked = true;
+                    const auto persisted_accumulator =
+                        m_shielded_nullifiers->ReadPersistedNullifierAccumulator();
+                    const uint256 current_accumulator =
+                        m_shielded_nullifiers->NullifierAccumulatorDigest();
+                    fast_startup_nullifier_accumulator_verified =
+                        persisted_accumulator.has_value() &&
+                        *persisted_accumulator == current_accumulator;
+                    return fast_startup_nullifier_accumulator_verified;
+                };
             auto build_account_registry_views =
                 [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
                     AssertLockHeld(::cs_main);
@@ -13046,7 +13174,17 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                 !PersistShieldedState(tip)) {
                 return false;
             }
-            if (ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+            const bool preserve_persisted_bridge_metadata =
+                m_options.fast_shielded_startup &&
+                !m_options.shielded_startup_audit &&
+                !startup_shielded_repair_performed &&
+                !preserve_snapshot_bridge_metadata_extras &&
+                verify_fast_startup_nullifier_accumulator();
+            if (preserve_persisted_bridge_metadata) {
+                LogPrintf("EnsureShieldedStateInitialized: preserving persisted settlement-anchor and netting-manifest metadata at height=%d hash=%s because -fastshieldedstartup=1, -shieldedstartupaudit=0, and persisted nullifier accumulator verified\n",
+                          tip != nullptr ? tip->nHeight : -1,
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+            } else if (ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
                 if (preserve_snapshot_bridge_metadata_extras) {
                     LogPrintf("EnsureShieldedStateInitialized: full shielded rebuild blocks available at height=%d hash=%s; converging snapshot bridge metadata to chain state\n",
                               tip != nullptr ? tip->nHeight : -1,
@@ -13095,16 +13233,12 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                 !startup_shielded_repair_performed;
             bool nullifier_accumulator_verified = false;
             if (fast_audit_skip_eligible) {
-                const auto persisted_accumulator =
-                    m_shielded_nullifiers->ReadPersistedNullifierAccumulator();
-                const uint256 current_accumulator =
-                    m_shielded_nullifiers->NullifierAccumulatorDigest();
-                nullifier_accumulator_verified =
-                    persisted_accumulator.has_value() &&
-                    *persisted_accumulator == current_accumulator;
+                nullifier_accumulator_verified = verify_fast_startup_nullifier_accumulator();
                 if (!nullifier_accumulator_verified) {
+                    const bool persisted_accumulator_present =
+                        m_shielded_nullifiers->ReadPersistedNullifierAccumulator().has_value();
                     LogPrintf("EnsureShieldedStateInitialized: nullifier accumulator %s at height=%d hash=%s; not taking fast path, running full audit\n",
-                              persisted_accumulator.has_value() ? "mismatch (persisted nullifier set drifted)" : "absent (legacy persisted state)",
+                              persisted_accumulator_present ? "mismatch (persisted nullifier set drifted)" : "absent (legacy persisted state)",
                               tip != nullptr ? tip->nHeight : -1,
                               tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
                 }

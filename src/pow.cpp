@@ -28,6 +28,7 @@
 #include <uint256.h>
 #include <util/check.h>
 #include <util/strencodings.h>
+#include <util/string.h>
 #include <util/time.h>
 
 #include <algorithm>
@@ -150,8 +151,14 @@ std::atomic_bool g_matmul_cpu_confirm_candidates{false};
 std::atomic_bool g_matmul_digest_compare_enabled{false};
 std::atomic<uint64_t> g_matmul_digest_compare_attempts{0};
 std::atomic_bool g_matmul_digest_compare_first_divergence{false};
+std::atomic_bool g_logged_backend_requirement_failure{false};
 std::atomic_bool g_logged_cuda_nonce_seed_scan_fallback{false};
 std::atomic_bool g_logged_metal_nonce_seed_scan_fallback{false};
+std::atomic<uint64_t> g_matmul_gpu_prehash_scan_attempts{0};
+std::atomic<uint64_t> g_matmul_gpu_prehash_scan_successes{0};
+std::atomic<uint64_t> g_matmul_gpu_prehash_scan_failures{0};
+std::atomic<uint64_t> g_matmul_metal_nonce_seed_scan_fallbacks{0};
+std::atomic<uint64_t> g_matmul_cuda_nonce_seed_scan_fallbacks{0};
 std::atomic<uint64_t> g_matmul_solve_attempts{0};
 std::atomic<uint64_t> g_matmul_solve_successes{0};
 std::atomic<uint64_t> g_matmul_solve_failures{0};
@@ -178,6 +185,9 @@ uint32_t g_matmul_digest_compare_nonce32{0};
 std::string g_matmul_digest_compare_header_hash;
 std::string g_matmul_digest_compare_backend_digest;
 std::string g_matmul_digest_compare_cpu_digest;
+std::mutex g_matmul_gpu_prehash_scan_mutex;
+std::string g_matmul_gpu_prehash_scan_last_backend;
+std::string g_matmul_gpu_prehash_scan_last_error;
 GlobalMutex g_matmul_global_phase2_mutex;
 uint32_t g_matmul_global_phase2_this_minute GUARDED_BY(g_matmul_global_phase2_mutex){0};
 int64_t g_matmul_global_phase2_window_start_sec GUARDED_BY(g_matmul_global_phase2_mutex){0};
@@ -216,6 +226,59 @@ void RegisterMatMulSolveRuntimeSample(bool solved, std::chrono::steady_clock::du
     g_matmul_solve_total_elapsed_us.fetch_add(elapsed_us, std::memory_order_relaxed);
     g_matmul_solve_last_elapsed_us.store(elapsed_us, std::memory_order_relaxed);
     UpdateMaxAtomic(g_matmul_solve_max_elapsed_us, elapsed_us);
+}
+
+void LogMatMulBackendRequirementFailureOnce(const std::string& reason)
+{
+    bool expected{false};
+    if (g_logged_backend_requirement_failure.compare_exchange_strong(expected, true)) {
+        LogPrintf("MATMUL ERROR: required mining backend not satisfied (%s)\n", reason);
+    }
+}
+
+bool CheckRequiredMatMulBackend(const matmul::accelerated::BackendRequirement& requirement,
+                                const matmul::backend::Selection& selection,
+                                const char* context)
+{
+    if (matmul::accelerated::IsBackendRequirementSatisfied(requirement, selection)) {
+        return true;
+    }
+
+    const std::string requested_label = selection.requested_known
+        ? matmul::backend::ToString(selection.requested)
+        : selection.requested_input;
+    const std::string reason = strprintf(
+        "context=%s required=%s valid=%s requested=%s active=%s selection_reason=%s requirement_reason=%s",
+        context,
+        requirement.input,
+        requirement.valid ? "true" : "false",
+        requested_label,
+        matmul::backend::ToString(selection.active),
+        selection.reason,
+        requirement.reason);
+    LogMatMulBackendRequirementFailureOnce(reason);
+    return false;
+}
+
+bool CheckRequiredMatMulDigestBackend(const matmul::accelerated::BackendRequirement& requirement,
+                                      const matmul::accelerated::DigestResult& digest_result,
+                                      const char* context)
+{
+    if (!requirement.enabled || !requirement.valid) {
+        return true;
+    }
+    if (digest_result.backend == requirement.required) {
+        return true;
+    }
+
+    const std::string reason = strprintf(
+        "context=%s required=%s result_backend=%s digest_error=%s",
+        context,
+        matmul::backend::ToString(requirement.required),
+        matmul::backend::ToString(digest_result.backend),
+        digest_result.error);
+    LogMatMulBackendRequirementFailureOnce(reason);
+    return false;
 }
 
 void RegisterMatMulValidationRuntimeSample(
@@ -1387,6 +1450,20 @@ void LogGpuNonceSeedScanFallbackOnce(matmul::backend::Kind backend, const std::s
     }
 }
 
+void RegisterGpuNonceSeedPreHashScanFailure(matmul::backend::Kind backend, const std::string& reason)
+{
+    g_matmul_gpu_prehash_scan_failures.fetch_add(1, std::memory_order_relaxed);
+    if (backend == matmul::backend::Kind::METAL) {
+        g_matmul_metal_nonce_seed_scan_fallbacks.fetch_add(1, std::memory_order_relaxed);
+    } else if (backend == matmul::backend::Kind::CUDA) {
+        g_matmul_cuda_nonce_seed_scan_fallbacks.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    std::lock_guard<std::mutex> lock(g_matmul_gpu_prehash_scan_mutex);
+    g_matmul_gpu_prehash_scan_last_backend = matmul::backend::ToString(backend);
+    g_matmul_gpu_prehash_scan_last_error = reason;
+}
+
 std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindow(
     const CBlockHeader& block,
     const Consensus::Params& params,
@@ -1440,6 +1517,7 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
         std::string error;
     } scan;
 
+    g_matmul_gpu_prehash_scan_attempts.fetch_add(1, std::memory_order_relaxed);
     if (backend == matmul::backend::Kind::CUDA) {
         const auto cuda_scan = btx::cuda::ScanMatMulNonceSeedPreHashGPU({
             .version = block.nVersion,
@@ -1479,11 +1557,14 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
     }
 
     if (!scan.success || scan.pass_flags.size() != scan.scanned_count) {
+        const std::string reason = scan.error.empty() ? "scan_failed" : scan.error;
+        RegisterGpuNonceSeedPreHashScanFailure(backend, reason);
         LogGpuNonceSeedScanFallbackOnce(
             backend,
-            scan.error.empty() ? "scan_failed" : scan.error);
+            reason);
         return std::nullopt;
     }
+    g_matmul_gpu_prehash_scan_successes.fetch_add(1, std::memory_order_relaxed);
 
     window.headers.reserve(configured_batch_size);
     for (uint32_t i = 0; i < scan.scanned_count; ++i) {
@@ -2048,6 +2129,32 @@ void ResetMatMulSolvePipelineStats()
     g_matmul_async_prepare_completions.store(0, std::memory_order_relaxed);
     g_matmul_async_prepare_enabled.store(false, std::memory_order_relaxed);
     g_matmul_cpu_confirm_candidates.store(false, std::memory_order_relaxed);
+}
+
+MatMulGpuPreHashScanStats ProbeMatMulGpuPreHashScanStats()
+{
+    MatMulGpuPreHashScanStats stats;
+    stats.attempts = g_matmul_gpu_prehash_scan_attempts.load(std::memory_order_relaxed);
+    stats.successes = g_matmul_gpu_prehash_scan_successes.load(std::memory_order_relaxed);
+    stats.failures = g_matmul_gpu_prehash_scan_failures.load(std::memory_order_relaxed);
+    stats.metal_fallbacks_to_cpu = g_matmul_metal_nonce_seed_scan_fallbacks.load(std::memory_order_relaxed);
+    stats.cuda_fallbacks_to_cpu = g_matmul_cuda_nonce_seed_scan_fallbacks.load(std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_matmul_gpu_prehash_scan_mutex);
+    stats.last_backend = g_matmul_gpu_prehash_scan_last_backend;
+    stats.last_error = g_matmul_gpu_prehash_scan_last_error;
+    return stats;
+}
+
+void ResetMatMulGpuPreHashScanStats()
+{
+    g_matmul_gpu_prehash_scan_attempts.store(0, std::memory_order_relaxed);
+    g_matmul_gpu_prehash_scan_successes.store(0, std::memory_order_relaxed);
+    g_matmul_gpu_prehash_scan_failures.store(0, std::memory_order_relaxed);
+    g_matmul_metal_nonce_seed_scan_fallbacks.store(0, std::memory_order_relaxed);
+    g_matmul_cuda_nonce_seed_scan_fallbacks.store(0, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_matmul_gpu_prehash_scan_mutex);
+    g_matmul_gpu_prehash_scan_last_backend.clear();
+    g_matmul_gpu_prehash_scan_last_error.clear();
 }
 
 MatMulDigestCompareStats ProbeMatMulDigestCompareStats()
@@ -3037,6 +3144,11 @@ bool SolveMatMulNonceSeeded(CBlockHeader& block,
         const uint32_t noise_rank = params.nMatMulNoiseRank;
         const bool product_digest_active = params.IsMatMulProductDigestActive(block_height);
         const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
+        const auto backend_requirement = matmul::accelerated::ResolveBackendRequirementFromEnvironment();
+        if (!CheckRequiredMatMulBackend(backend_requirement, backend_selection, "nonce_seeded_resolve")) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+            return false;
+        }
         const auto active_backend = backend_selection.active;
         const std::string active_backend_label = matmul::backend::ToString(active_backend);
         const bool use_gpu_generated_inputs = matmul::accelerated::ShouldUseGpuGeneratedInputsForShape(
@@ -3150,6 +3262,9 @@ bool SolveMatMulNonceSeeded(CBlockHeader& block,
             }
 
             const auto& digest_result = digest_batch[0];
+            if (!CheckRequiredMatMulDigestBackend(backend_requirement, digest_result, "nonce_seeded_single_digest")) {
+                return DigestCandidateOutcome::ERROR;
+            }
             std::optional<uint256> compared_cpu_digest;
             if (cpu_vs_metal_compare && active_backend == matmul::backend::Kind::METAL) {
                 compared_cpu_digest = matmul::accelerated::ComputeDigestCpuFromPreparedInputs(
@@ -3233,6 +3348,9 @@ bool SolveMatMulNonceSeeded(CBlockHeader& block,
             const matmul::accelerated::DigestResult& digest_result,
             uint256& accepted_digest) -> DigestCandidateOutcome {
             if (!digest_result.ok) {
+                return DigestCandidateOutcome::ERROR;
+            }
+            if (!CheckRequiredMatMulDigestBackend(backend_requirement, digest_result, "nonce_seeded_batch_digest")) {
                 return DigestCandidateOutcome::ERROR;
             }
 
@@ -3405,6 +3523,15 @@ bool SolveMatMulNonceSeeded(CBlockHeader& block,
 
                     if (!advance_nonce_window(scanned_window->nonces_scanned)) break;
                     continue;
+                }
+                if (backend_requirement.enabled && backend_requirement.valid &&
+                    backend_requirement.required == active_backend) {
+                    LogMatMulBackendRequirementFailureOnce(strprintf(
+                        "context=nonce_seeded_gpu_prehash_scan required=%s active=%s reason=gpu_scan_fell_back_to_host",
+                        matmul::backend::ToString(backend_requirement.required),
+                        active_backend_label));
+                    RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+                    return false;
                 }
                 gpu_nonce_seed_scan_available = false;
             }
@@ -3627,6 +3754,12 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
         effective_target = UintToArith256(*share_target_override);
         if (effective_target == 0) return false;
     }
+    const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
+    const auto backend_requirement = matmul::accelerated::ResolveBackendRequirementFromEnvironment();
+    if (!CheckRequiredMatMulBackend(backend_requirement, backend_selection, "solve_resolve")) {
+        return false;
+    }
+    const auto active_backend = backend_selection.active;
     if (params.IsMatMulNonceSeedActive(block_height)) {
         // V2 nonce-seeded solving cannot reuse the legacy shared A/B matrix instance. CPU backends
         // still fan out disjoint nonce ranges across workers, while GPU backends with nonce-seed
@@ -3634,8 +3767,6 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
         // a GPU window before digesting only the candidates that passed the sigma gate.
         if (!g_matmul_parallel_worker_context) {
             const uint32_t solver_threads = static_cast<uint32_t>(ResolveMatMulSolverThreadCount());
-            const auto active_backend =
-                matmul::accelerated::ResolveMiningBackendFromEnvironment().active;
             const bool product_digest_active = params.IsMatMulProductDigestActive(block_height);
             const uint32_t pre_hash_epsilon_bits = GetMatMulPreHashEpsilonBitsForHeight(params, block_height);
             const bool gpu_nonce_seed_scan_enabled =
@@ -3686,8 +3817,6 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
     const uint32_t transcript_block_size = params.nMatMulTranscriptBlockSize;
     const uint32_t noise_rank = params.nMatMulNoiseRank;
     const bool product_digest_active = params.IsMatMulProductDigestActive(block_height);
-    const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
-    const auto active_backend = backend_selection.active;
     const uint32_t solver_threads = static_cast<uint32_t>(ResolveMatMulSolverThreadCount());
     const bool parallel_solver_enabled = !g_matmul_parallel_worker_context &&
                                          max_tries > 1 &&
@@ -4020,6 +4149,9 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
             const auto& header = current_window.headers[i];
             const auto& digest_result = digest_batch[i];
             if (!digest_result.ok) return false;
+            if (!CheckRequiredMatMulDigestBackend(backend_requirement, digest_result, "solve_batch_digest")) {
+                return false;
+            }
 
             std::optional<uint256> compared_cpu_digest;
             if (cpu_vs_metal_compare && active_backend == matmul::backend::Kind::METAL) {

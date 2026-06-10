@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -159,6 +160,21 @@ public:
     ShieldedMerkleWitness Witness() const;
 
     /**
+     * Reconstruct a witness for an arbitrary existing leaf using the commitment
+     * index. Returns std::nullopt when the position is out of range or the
+     * commitment index cannot provide the full prefix/suffix needed.
+     */
+    [[nodiscard]] std::optional<ShieldedMerkleWitness> WitnessAt(uint64_t position) const;
+
+    /**
+     * Reconstruct current-root membership witnesses for arbitrary existing
+     * leaves using one shared indexed-tree memoization context.
+     * Missing/out-of-range positions are omitted from the returned map.
+     */
+    [[nodiscard]] std::map<uint64_t, ShieldedMerkleWitness> WitnessesAt(
+        const std::vector<uint64_t>& positions) const;
+
+    /**
      * Return the most recently appended leaf hash.
      * @throws std::runtime_error if the tree is empty.
      */
@@ -272,6 +288,8 @@ public:
     }
 
 private:
+    friend class ShieldedMerkleWitness;
+
     struct CommitmentIndexStore;
     static std::mutex s_commitment_store_mutex;
     static std::shared_ptr<CommitmentIndexStore> s_commitment_store;
@@ -356,6 +374,12 @@ public:
 
     /** Construct from a tree snapshot (taken at the time the note was committed). */
     explicit ShieldedMerkleWitness(const ShieldedMerkleTree& tree);
+
+    /** Construct an existing-format witness from an authentication path. */
+    static ShieldedMerkleWitness FromAuthPath(
+        const uint256& leaf,
+        uint64_t position,
+        const std::array<uint256, MERKLE_DEPTH>& auth_path);
 
     /** Leaf position (0-based index). */
     uint64_t Position() const;

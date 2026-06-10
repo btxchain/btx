@@ -56,19 +56,18 @@ single node's value should not be trusted blindly.
 
 | Network | Heights | Pin status |
 |---|---|---|
-| main | 55'000 … 123'225 (11 entries) | **null — operator must fill** per above (safe legacy-skip until then) |
-| main | 125'000 (frozen-ceiling snapshot) | **no entry yet** — add it in a follow-up release once the chain mines 125'000, via the same emit |
+| main | 55'000 … 126'800 (12 entries) | **null — operator must fill** per above (safe legacy-skip until then) |
+| main | 125'000 (exact frozen-ceiling snapshot) | **no entry yet** — add it in a follow-up release if an exact-ceiling bootstrap asset is published |
 | testnet/signet/etc. | — | no assumeutxo entries |
 | regtest | 110, 299, 61'010 | null — filled on demand by test/dev tooling |
 
-All 11 existing mainnet snapshot heights predate the 125'000 pool-credit-disable/sunset boundary. The
-pin protects bootstrapping nodes from a forged shielded section regardless of which side of the
-pool-credit-disable gate the snapshot height is on.
+The first 11 existing mainnet snapshot heights predate the 125'000 pool-credit-disable/sunset boundary;
+the 126'800 entry is post-boundary. The pin protects bootstrapping nodes from a forged shielded section
+regardless of which side of the pool-credit-disable gate the snapshot height is on.
 
 **Frozen-ceiling pin at 125'000.** Sunset pillar 4 calls for pinning the 125'000 pool/nullifier/
-commitment roots — the consensus snapshot of the frozen ceiling. Those roots only exist once the chain
-reaches 125'000, so this is necessarily a post-mining step: after block 125'000, run `dumptxoutset
-rollback=125000` on a synced node, add a new `AssumeutxoData` entry at height 125'000 with the emitted
-`shielded_state_pin`, and ship it in a follow-up release. Until then the freeze is enforced by the
-consensus gates (pillars 2–3); the 125'000 pin only adds assumeutxo-bootstrap protection for that exact
-height.
+commitment roots — the consensus snapshot of the frozen ceiling. If an exact 125'000 bootstrap asset is
+published, run `dumptxoutset rollback=125000` on a synced node, add a new `AssumeutxoData` entry at
+height 125'000 with the emitted `shielded_state_pin`, and ship it in a follow-up release. Until then the
+freeze is enforced by the consensus gates (pillars 2–3); the 125'000 pin only adds
+assumeutxo-bootstrap protection for that exact height.

@@ -523,6 +523,8 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-shieldedstartupaudit", "Audit restored shielded state against historical block data during startup (default: 1). Applies when -fastshieldedstartup is disabled or cannot be taken: set to 0 to keep the persisted-state drift sync but skip the cross-chain audit. Consensus checks still run for newly connected blocks.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-resetshieldedstate", "One-shot repair: wipe the on-disk shielded_state directory at startup and force a single clean rebuild of shielded validation state from local block data (default: 0). Supported replacement for manually moving shielded_state aside when a prior shielded rebuild was interrupted/corrupted; block files and wallets are untouched. Pass once, let the rebuild finish (watch the 'RebuildShieldedState: replaying ...' progress lines), then remove it. Requires intact local block data; if blocks are pruned/corrupt use a snapshot or -reindex instead.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowunpinnedshieldedsnapshot", "Allow loadtxoutset to load an assumeutxo snapshot whose shielded section (pool balance + nullifier set + commitment tree) has no consensus pin for its height (default: 1 until pinned snapshots ship). An unpinned shielded section is trusted from the snapshot source and not validated against a consensus pin; set to 0 for strict fail-closed loading.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-parkdeepreorg", "Per-node deep-reorg defense (NON-CONSENSUS). When 0 (default) the node always follows the most-work chain and only raises a loud alarm if an incoming branch would reorg deeper than -maxreorgdepthwarn; this keeps pure Nakamoto consensus and cannot split the network. When 1, the node instead refuses to auto-switch to such a branch and stays on its current tip pending operator action (still tracking the branch for manual reconsideration). Parking is a LOCAL finality assumption: if the network partitions for longer than the threshold, parked nodes will not reconverge automatically, so use it only on individual exchange/custody nodes whose operators will reconcile manually. (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-maxreorgdepthwarn=<n>", "Deep-reorg alarm/park threshold in blocks for -parkdeepreorg (default: chain consensus nMaxReorgDepth, e.g. 144 on mainnet). A reorg deeper than this triggers a loud warning/RPC alarm and, if -parkdeepreorg=1, parks the branch. Must be >= 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blocksdir=<dir>", "Specify directory to hold blocks subdirectory for *.dat files (default: <datadir>)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blocksxor",
                    strprintf("Whether an XOR-key applies to blocksdir *.dat files. "
@@ -590,6 +592,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-autoupdatecohort=<n>", "Pin this node's staged-rollout cohort to n in [0,99] (e.g. 0 for an early canary). A signed release with rollout_percent P is applied only when the cohort is < P. Default: derived stably from the datadir.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdateseamless", "If enabled, launch the verified installer script for a newer signed release (default: 1). If disabled, only log that a verified update exists.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdaterequirescripthash", "Require the signed manifest to include script_sha256/install_sha256 matching the downloaded installer before execution (default: 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-autoupdatetelemetry", "Attach auto-update request metrics query parameters, including a persistent random client UUID stored under the datadir, client version, platform, and architecture (default: 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatepython=<path>", "Python interpreter used only for HTTPS manifest/signature/script fetching (default: python3).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-autoupdatedevorigin", "Allow non-HTTPS auto-update origins for local testing only.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
 #if HAVE_SYSTEM
@@ -748,6 +751,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
                              Ticks<std::chrono::seconds>(DEFAULT_MAX_TIP_AGE)),
                    ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-printpriority", strprintf("Log transaction priority and fee rate in %s/kvB when mining blocks (default: %u)", CURRENCY_UNIT, DEFAULT_PRINT_MODIFIED_FEE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-randomtiebreak", "Selfish-mining mitigation: when two blocks tie at equal total work, choose between them using a per-node random key (Hash(secret-seed || blockhash)) instead of first-seen-wins. Node-local policy on equal-work tips only; does not change consensus, needs no fork activation, and cannot stop a true >50%% attacker. (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-uaappend=<uafragment>", "Append literal string to the user agent string (should only be used for software embedding)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-uacomment=<cmt>", "Append comment to the user agent string", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-uaspoof=<ua>", strprintf("Replace entire user agent string with custom identifier (should be formatted '%s' as specified in BIP 14)", BIP14_EXAMPLE_UA), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
@@ -1694,6 +1698,16 @@ static ChainstateLoadResult InitAndLoadChainstate(
         },
     };
     Assert(ApplyArgsManOptions(args, blockman_opts)); // no error can happen, already checked in AppInitParameterInteraction
+
+    // Selfish-mining mitigation: configure randomized equal-work tie-breaking
+    // before the block index is populated. Node-local policy on equal-work tips
+    // only (see node/blockstorage.h); off by default. The seed is freshly random
+    // per node and never persisted, so an attacker cannot predict which of two
+    // equal-work tips this node will prefer.
+    if (args.GetBoolArg("-randomtiebreak", false)) {
+        node::SetRandomTiebreak(/*enabled=*/true);
+        LogPrintf("Selfish-mining mitigation: randomized equal-work tie-breaking ENABLED (node-local, non-consensus)\n");
+    }
 
     // Creating the chainstate manager internally creates a BlockManager, opens
     // the blocks tree db, and wipes existing block files in case of a reindex.

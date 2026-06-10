@@ -172,6 +172,15 @@ class WalletShieldedC002SunsetLifecycleTest(BitcoinTestFramework):
         assert_equal(node.getblockcount(), SUNSET_HEIGHT + 1)
         assert_equal(exit_post.gettransaction(post_exit_txid)["confirmations"], 1)
 
+        self.log.info("Non-exact post-sunset transparent exits fail before the ordinary V2_SEND fallback")
+        assert_raises_rpc_error(
+            -4,
+            "no exact shielded note available for transparent recovery exit",
+            wallet.z_sendmany,
+            [{"address": wallet.getnewaddress(), "amount": Decimal("0.12345678")}],
+            exact_fee,
+        )
+
         final_balance = wallet.z_getbalance()
         assert Decimal(str(final_balance["balance"])) >= Decimal("0")
         assert int(final_balance["note_count"]) >= 0

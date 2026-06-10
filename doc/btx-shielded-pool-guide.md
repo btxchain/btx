@@ -398,14 +398,19 @@ btx-cli -rpcwallet=mywallet z_sendmany \
 ```
 
 Before `61000`, `z_sendmany` can also construct mixed direct sends that pay a
-transparent address. After `61000`, transparent settlement moves to the
-explicit bridge / egress flow.
+transparent address. From `61000` until the C-002/R5 proof activation,
+transparent settlement uses the explicit bridge / egress flow. At and after
+C-002/R5 activation, direct self-serve shielded-to-transparent exits are
+permitted because the v3 proof binds the public outflow to the consumed
+shielded value.
 
 ### Unshielding Funds (Shielded → Transparent)
 
 Before `61000`, funds can move back to a transparent P2MR address by using
-`z_sendmany` with a transparent destination. After `61000`, use the bridge /
-egress settlement surface instead.
+`z_sendmany` with a transparent destination. Between `61000` and C-002/R5
+activation, use the bridge / egress settlement surface instead. At and after
+C-002/R5 activation, `z_sendmany` again supports direct transparent exits for
+self-serve unshielding.
 
 ```bash
 # Unshield 2 BTX to a transparent address

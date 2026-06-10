@@ -64,6 +64,7 @@
 #include <algorithm>
 #include <functional>
 #include <ios>
+#include <limits>
 #include <stdexcept>
 
 using namespace util::hex_literals;
@@ -256,6 +257,19 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
         if (opts.min_validation_cache) {
             chainman_opts.script_execution_cache_bytes = 0;
             chainman_opts.signature_cache_bytes = 0;
+        }
+        // Honor the deep-reorg defense options from extra_args so tests can
+        // exercise the WARN (default) and PARK paths via -parkdeepreorg /
+        // -maxreorgdepthwarn (see ApplyArgsManOptions / ActivateBestChainStep).
+        if (auto value{m_args.GetBoolArg("-parkdeepreorg")}) {
+            chainman_opts.deep_reorg_action = *value ? kernel::DeepReorgAction::PARK
+                                                     : kernel::DeepReorgAction::WARN;
+        }
+        if (auto value{m_args.GetIntArg("-maxreorgdepthwarn")}) {
+            if (*value >= 1) {
+                chainman_opts.max_reorg_depth_warn = static_cast<uint32_t>(
+                    std::min<int64_t>(*value, std::numeric_limits<uint32_t>::max()));
+            }
         }
         const BlockManager::Options blockman_opts{
             .chainparams = chainman_opts.chainparams,

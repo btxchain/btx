@@ -58,7 +58,7 @@ experimental backend.
 Recommended clone path:
 
 ```text
-C:\src\btx
+C:\src\btx-node
 ```
 
 Avoid very long or space-heavy paths if you can.
@@ -320,14 +320,14 @@ with the plain CPU-backed path first.
 Use the wrapper defaults. They are intentionally short:
 
 - `C:\btx-deps\vcpkg`
-- `C:\btx-deps\vcpkg_installed\btx`
+- `C:\btx-deps\vcpkg_installed\btx-node`
 - `C:\btx-deps\vcpkg-buildtrees`
 
 These paths are there to reduce the most common Windows path-length problems.
 
 ### My repo path contains spaces
 
-The wrapper helps, but a short path like `C:\src\btx` is still the best
+The wrapper helps, but a short path like `C:\src\btx-node` is still the best
 choice.
 
 ### `btxd.exe` starts but mining does not

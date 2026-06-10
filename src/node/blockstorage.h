@@ -92,6 +92,47 @@ static constexpr uint32_t UNDO_DATA_DISK_OVERHEAD{BLOCK_SERIALIZATION_HEADER_SIZ
 // containers), or make the key a `std::unique_ptr<CBlockIndex>`
 using BlockMap = std::unordered_map<uint256, CBlockIndex, BlockHasher>;
 
+/**
+ * Selfish-mining mitigation: randomized equal-work tie-breaking (Eyal & Sirer 2014).
+ *
+ * Stock Bitcoin Core breaks ties between two blocks of EQUAL nChainWork using
+ * nSequenceId (the order in which the node processed each block's transactions),
+ * i.e. "first-seen-wins". A selfish miner who pre-builds a private block and
+ * releases it the instant a competitor appears can win these races with high
+ * probability against well-connected victims, giving the attacker a high network
+ * advantage gamma (~1) and lowering the profitable-selfish-mining hashrate
+ * threshold toward 0. Eyal & Sirer's recommended countermeasure is to have honest
+ * nodes choose UNIFORMLY AT RANDOM between equal-work tips, driving gamma toward
+ * 0 and the threshold toward 25%.
+ *
+ * We implement this as a NODE-LOCAL policy keyed by a per-process random seed
+ * (g_tiebreak_seed): the preferred equal-work tip is the one with the smallest
+ * Hash(seed || blockhash). Properties:
+ *   - Deterministic & STABLE for the lifetime of the process (the seed never
+ *     changes), so it is a valid strict-weak-ordering for setBlockIndexCandidates
+ *     -- std::set invariants are preserved. This is the reason we key on a fixed
+ *     seed rather than on the live tip or wall-clock time.
+ *   - UNPREDICTABLE to an attacker: because the seed is secret and per-node, the
+ *     attacker cannot know which of two equal-work blocks any given victim will
+ *     prefer, so it cannot reliably win the race by timing its release.
+ *   - This is tie-breaking between EQUAL-work tips only. It NEVER overrides the
+ *     strictly-more-work rule, so it is not a consensus rule: nodes may transiently
+ *     prefer different equal-work tips, exactly as they already can under first-seen
+ *     (which itself depends on local network arrival order), and they reconverge on
+ *     the next block that extends one branch with strictly more work. No fork
+ *     activation height is required.
+ *
+ * Default OFF for bit-for-bit compatibility with upstream behavior; opt in with
+ * -randomtiebreak. When OFF, the legacy nSequenceId tie-break is used unchanged.
+ */
+extern bool g_random_tiebreak_enabled;
+extern uint256 g_tiebreak_seed;
+
+//! Enable/disable randomized equal-work tie-breaking and (re)seed it. Call once
+//! at startup before the block index is populated. A zero/absent seed argument
+//! draws a fresh random seed.
+void SetRandomTiebreak(bool enabled, const uint256* seed = nullptr);
+
 struct CBlockIndexWorkComparator {
     bool operator()(const CBlockIndex* pa, const CBlockIndex* pb) const;
 };

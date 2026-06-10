@@ -12,6 +12,11 @@ enum class Warning {
     UNKNOWN_NEW_RULES_SIGNAL_VBITS,
     UNKNOWN_NEW_RULES_SIGNAL_INTVER,
     SOFTWARE_EXPIRY,
+    //! A candidate branch would reorg the active chain by more than the
+    //! operator's configured deep-reorg warning threshold (-maxreorgdepthwarn).
+    //! This is a loud alarm only; it never changes consensus. See the deep-reorg
+    //! handling in Chainstate::ActivateBestChainStep.
+    DEEP_REORG_DETECTED,
 };
 } // namespace kernel
 #endif // BITCOIN_KERNEL_WARNING_H

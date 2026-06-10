@@ -19,6 +19,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <limits>
 #include <string>
 
 namespace node {
@@ -80,6 +82,26 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
 
     if (auto value{args.GetBoolArg("-allowunpinnedshieldedsnapshot")}) {
         opts.allow_unpinned_shielded_snapshot = *value;
+    }
+
+    // Deep-reorg defense (issue: no reorg-depth limit). These are PER-NODE,
+    // NON-CONSENSUS operator controls. The default (-parkdeepreorg=0) keeps pure
+    // Nakamoto consensus: the node always follows the most-work chain and merely
+    // emits a loud alarm on a deep reorg. -parkdeepreorg=1 opts the node into a
+    // local finality assumption (refuse to auto-switch on a deep reorg); see the
+    // split-risk memo in Chainstate::ActivateBestChainStep before enabling it.
+    if (auto value{args.GetBoolArg("-parkdeepreorg")}) {
+        opts.deep_reorg_action = *value ? kernel::DeepReorgAction::PARK
+                                        : kernel::DeepReorgAction::WARN;
+    }
+
+    if (auto value{args.GetIntArg("-maxreorgdepthwarn")}) {
+        if (*value < 1) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -maxreorgdepthwarn value (%d), must be at least 1", *value))};
+        }
+        opts.max_reorg_depth_warn = static_cast<uint32_t>(
+            std::min<int64_t>(*value, std::numeric_limits<uint32_t>::max()));
     }
 
     ReadDatabaseArgs(args, opts.coins_db);

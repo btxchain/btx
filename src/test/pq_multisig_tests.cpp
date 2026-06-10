@@ -166,4 +166,77 @@ BOOST_AUTO_TEST_CASE(build_p2mr_multisig_script_enforces_limits_and_mixed_algori
     BOOST_CHECK_EQUAL_COLLECTIONS(script.begin(), script.end(), expected.begin(), expected.end());
 }
 
+// ---------------------------------------------------------------------------
+// EVX Babylon-style covenant demonstration (issue #248 / doc/btx-op-check-multi-pq-plan.md).
+// These prove that a k-of-n ML-DSA/SLH-DSA covenant "quorum" is expressible TODAY with the existing
+// P2MR opcodes -- so BTX needs no new OP_CHECK_MULTI_PQ consensus opcode for committees that fit the
+// consensus leaf-size limit, and pins the exact boundary where it would.
+// ---------------------------------------------------------------------------
+namespace {
+// Build a k-of-n PQ multisig leaf in the same shape as BuildP2MRMultisigScript, but manually so we can
+// exercise committee sizes beyond the relay-policy cap (MAX_PQ_PUBKEYS_PER_MULTISIG) to observe the
+// consensus leaf-size boundary (MAX_P2MR_SCRIPT_SIZE).
+CScript BuildKofNLeaf(PQAlgorithm algo, unsigned n, unsigned k, size_t pubkey_size)
+{
+    CScript s;
+    for (unsigned i = 0; i < n; ++i) {
+        const std::vector<unsigned char> pk(pubkey_size, static_cast<unsigned char>(0x10 + i));
+        s << pk;
+        s << (i == 0 ? GetP2MRChecksigOpcode(algo) : GetP2MRChecksigAddOpcode(algo));
+    }
+    s << static_cast<int64_t>(k) << OP_NUMEQUAL;
+    return s;
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(covenant_kofn_committee_size_boundary)
+{
+    // ML-DSA committee of 8 fits the consensus leaf-size limit -> k-of-n covenant works TODAY.
+    const CScript mldsa8 = BuildKofNLeaf(PQAlgorithm::ML_DSA_44, 8, 5, MLDSA44_PUBKEY_SIZE);
+    BOOST_CHECK_LE(mldsa8.size(), MAX_P2MR_SCRIPT_SIZE);
+
+    // ML-DSA committee of 9 (e.g. Babylon-typical 6-of-9) EXCEEDS the consensus leaf-size limit.
+    // This is the ONLY case that would require a BTX consensus change (Path B in the plan) -- and it
+    // is avoidable by using SLH-DSA committee keys (below).
+    const CScript mldsa9 = BuildKofNLeaf(PQAlgorithm::ML_DSA_44, 9, 6, MLDSA44_PUBKEY_SIZE);
+    BOOST_CHECK_GT(mldsa9.size(), MAX_P2MR_SCRIPT_SIZE);
+
+    // SLH-DSA-128s committee of 16 (32-byte pubkeys) fits easily -> any realistic committee works
+    // TODAY with the small-pubkey algorithm, no BTX consensus change.
+    const CScript slhdsa16 = BuildKofNLeaf(PQAlgorithm::SLH_DSA_128S, 16, 6, SLHDSA128S_PUBKEY_SIZE);
+    BOOST_CHECK_LE(slhdsa16.size(), MAX_P2MR_SCRIPT_SIZE);
+}
+
+BOOST_AUTO_TEST_CASE(covenant_kofn_mldsa_threshold_logic)
+{
+    // 5-of-8 ML-DSA covenant quorum, built from the existing P2MR accumulator opcodes.
+    const CScript leaf = BuildKofNLeaf(PQAlgorithm::ML_DSA_44, 8, 5, MLDSA44_PUBKEY_SIZE);
+    BOOST_REQUIRE_LE(leaf.size(), MAX_P2MR_SCRIPT_SIZE);
+
+    // Evaluate with `num_sigs` correctly-sized signatures and (8 - num_sigs) empty (non-signer) slots.
+    // With the AlwaysTrue checker every non-empty sig verifies, so the accumulator counts num_sigs and
+    // the trailing `<5> OP_NUMEQUAL` returns true iff exactly the threshold signed.
+    auto satisfied = [&](unsigned num_sigs) {
+        std::vector<std::vector<unsigned char>> stack;
+        for (unsigned i = 0; i < 8; ++i) {
+            if (i < 8 - num_sigs) {
+                stack.push_back({}); // non-signer
+            } else {
+                stack.push_back(std::vector<unsigned char>(MLDSA44_SIGNATURE_SIZE, 0x33));
+            }
+        }
+        ScriptExecutionData execdata;
+        execdata.m_validation_weight_left_init = true;
+        execdata.m_validation_weight_left = 1'000'000;
+        ScriptError serror = SCRIPT_ERR_OK;
+        BOOST_REQUIRE(EvalP2MR(leaf, stack, execdata, serror));
+        BOOST_CHECK_EQUAL(serror, SCRIPT_ERR_OK);
+        BOOST_REQUIRE_EQUAL(stack.size(), 1U);
+        return !stack.back().empty(); // OP_NUMEQUAL pushes {0x01} for true, {} for false
+    };
+
+    BOOST_CHECK(satisfied(5));   // exactly the threshold -> covenant quorum satisfied
+    BOOST_CHECK(!satisfied(4));  // below threshold -> not satisfied
+}
+
 BOOST_AUTO_TEST_SUITE_END()

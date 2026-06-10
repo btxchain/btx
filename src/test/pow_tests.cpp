@@ -298,6 +298,32 @@ public:
     }
 };
 
+class ScopedRequireBackendEnv
+{
+public:
+    explicit ScopedRequireBackendEnv(const char* value)
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_REQUIRE_BACKEND", value != nullptr ? value : "");
+#else
+        if (value != nullptr) {
+            setenv("BTX_MATMUL_REQUIRE_BACKEND", value, 1);
+        } else {
+            unsetenv("BTX_MATMUL_REQUIRE_BACKEND");
+        }
+#endif
+    }
+
+    ~ScopedRequireBackendEnv()
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_REQUIRE_BACKEND", "");
+#else
+        unsetenv("BTX_MATMUL_REQUIRE_BACKEND");
+#endif
+    }
+};
+
 class ScopedCpuConfirmEnv
 {
 public:
@@ -1696,10 +1722,10 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
 
     BOOST_CHECK_EQUAL(
         consensus.nMinimumChainWork.GetHex(),
-        "000000000000000000000000000000000000000000000000000004339ce2b047");
+        "000000000000000000000000000000000000000000000000000004df8d0e5f66");
     BOOST_CHECK_EQUAL(
         consensus.defaultAssumeValid.GetHex(),
-        "bee000e92d6b64ceb6ad9a3759fb38c1d6752713240e76bde3617f073b9cbe74");
+        "fb6dcf553916244d09ea1cf1f0c0dfc714f232ac17c94f8d0a73d21a75de9e34");
     BOOST_CHECK_EQUAL(params->AssumedBlockchainSize(), 16U);
     BOOST_CHECK_EQUAL(params->AssumedChainStateSize(), 1U);
 
@@ -1710,11 +1736,11 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
     BOOST_CHECK_EQUAL(
         it_0->second.GetHex(),
         "75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601");
-    const auto it_anchor = checkpoints.find(123225);
+    const auto it_anchor = checkpoints.find(126800);
     BOOST_REQUIRE(it_anchor != checkpoints.end());
     BOOST_CHECK_EQUAL(
         it_anchor->second.GetHex(),
-        "bee000e92d6b64ceb6ad9a3759fb38c1d6752713240e76bde3617f073b9cbe74");
+        "fb6dcf553916244d09ea1cf1f0c0dfc714f232ac17c94f8d0a73d21a75de9e34");
 
     const auto assumeutxo_55000 = params->AssumeutxoForHeight(55000);
     BOOST_REQUIRE(assumeutxo_55000.has_value());
@@ -1837,11 +1863,22 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_123225->blockhash.GetHex(),
         "bee000e92d6b64ceb6ad9a3759fb38c1d6752713240e76bde3617f073b9cbe74");
 
+    const auto assumeutxo_126800 = params->AssumeutxoForHeight(126800);
+    BOOST_REQUIRE(assumeutxo_126800.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_126800->height, 126800);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_126800->hash_serialized.ToString(),
+        "240d2b278972ad96afa9c5e26f1f846b2a60a4a9aea4aa8f0a57baa0108db6ae");
+    BOOST_CHECK_EQUAL(assumeutxo_126800->m_chain_tx_count, 155621U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_126800->blockhash.GetHex(),
+        "fb6dcf553916244d09ea1cf1f0c0dfc714f232ac17c94f8d0a73d21a75de9e34");
+
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 11U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 12U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 123225);
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 126800);
     BOOST_CHECK_GE(snapshot_heights.back(), std::prev(checkpoints.end())->first);
 }
 
@@ -3193,6 +3230,7 @@ BOOST_AUTO_TEST_CASE(matmul_solve_enables_cpu_confirm_for_cuda_in_strict_mode)
 BOOST_AUTO_TEST_CASE(matmul_solve_uses_resolved_backend_in_strict_mode_without_explicit_override)
 {
     ScopedBackendEnv backend_env(nullptr);
+    ScopedRequireBackendEnv require_backend_env(nullptr);
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
@@ -3231,6 +3269,51 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_resolved_backend_in_strict_mode_without_e
     } else {
         BOOST_CHECK_EQUAL(stats.requested_cpu, 1U);
     }
+}
+
+BOOST_AUTO_TEST_CASE(matmul_solve_fails_closed_when_required_backend_is_not_active)
+{
+    ScopedBackendEnv backend_env("cpu");
+    ScopedRequireBackendEnv require_backend_env("metal");
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.fSkipMatMulValidation = false;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    CBlockHeader candidate{};
+    candidate.nVersion = 4;
+    candidate.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000091"};
+    candidate.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000092"};
+    candidate.nTime = 1'700'000'501U;
+    candidate.nBits = UintToArith256(consensus.powLimit).GetCompact();
+    candidate.nNonce64 = 0;
+    candidate.nNonce = 0;
+    candidate.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+    candidate.seed_a = DeterministicMatMulSeed(candidate.hashPrevBlock, /*height=*/0, /*which=*/0);
+    candidate.seed_b = DeterministicMatMulSeed(candidate.hashPrevBlock, /*height=*/0, /*which=*/1);
+    candidate.matmul_digest.SetNull();
+
+    matmul::accelerated::ResetMatMulBackendRuntimeStats();
+    uint64_t max_tries{4};
+    const bool solved = SolveMatMul(candidate, consensus, max_tries);
+    BOOST_CHECK(!solved);
+
+    const auto stats = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
+    BOOST_CHECK_EQUAL(stats.digest_requests, 0U);
+    BOOST_CHECK_EQUAL(stats.requested_cpu, 0U);
+    BOOST_CHECK_EQUAL(max_tries, 4U);
+
+    const auto selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
+    const auto requirement = matmul::accelerated::ResolveBackendRequirementFromEnvironment();
+    BOOST_CHECK_EQUAL(matmul::backend::ToString(selection.active), "cpu");
+    BOOST_CHECK(requirement.enabled);
+    BOOST_CHECK(requirement.valid);
+    BOOST_CHECK_EQUAL(matmul::backend::ToString(requirement.required), "metal");
+    BOOST_CHECK(!matmul::accelerated::IsBackendRequirementSatisfied(requirement, selection));
 }
 
 BOOST_AUTO_TEST_CASE(matmul_solve_crosses_60999_to_61000_with_product_digest_contract)

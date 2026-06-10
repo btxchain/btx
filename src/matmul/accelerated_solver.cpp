@@ -74,6 +74,37 @@ std::string DefaultBackendRequest()
 #endif
 }
 
+char ToLowerAscii(char c)
+{
+    if (c >= 'A' && c <= 'Z') {
+        return static_cast<char>(c + ('a' - 'A'));
+    }
+    return c;
+}
+
+std::string ToLowerAsciiString(std::string value)
+{
+    for (char& c : value) {
+        c = ToLowerAscii(c);
+    }
+    return value;
+}
+
+bool IsDisabledBackendRequirementToken(const std::string& value)
+{
+    const std::string normalized = ToLowerAsciiString(value);
+    return normalized == "0" || normalized == "false" ||
+        normalized == "no" || normalized == "off" ||
+        normalized == "none" || normalized == "disabled";
+}
+
+bool IsTruthyBackendRequirementToken(const std::string& value)
+{
+    const std::string normalized = ToLowerAsciiString(value);
+    return normalized == "1" || normalized == "true" ||
+        normalized == "yes" || normalized == "on";
+}
+
 void LogBackendFallbackOnce(std::atomic_bool& once_flag, const char* backend, const std::string& reason)
 {
     bool expected{false};
@@ -1024,6 +1055,52 @@ backend::Selection ResolveMiningBackendFromEnvironment()
     return selection;
 }
 
+BackendRequirement ResolveBackendRequirementFromEnvironment()
+{
+    const char* const env_required = std::getenv("BTX_MATMUL_REQUIRE_BACKEND");
+    if (env_required == nullptr || env_required[0] == '\0') {
+        return {};
+    }
+
+    BackendRequirement requirement;
+    requirement.enabled = true;
+    requirement.input = env_required;
+
+    if (IsDisabledBackendRequirementToken(requirement.input)) {
+        requirement.enabled = false;
+        requirement.reason = "disabled_by_environment";
+        return requirement;
+    }
+
+    std::string required_input = requirement.input;
+    if (IsTruthyBackendRequirementToken(required_input)) {
+        const char* const env_backend = std::getenv("BTX_MATMUL_BACKEND");
+        required_input = (env_backend != nullptr && env_backend[0] != '\0')
+            ? std::string{env_backend}
+            : DefaultBackendRequest();
+    }
+
+    const backend::Selection parsed = backend::ResolveRequestedBackend(required_input);
+    requirement.valid = parsed.requested_known;
+    requirement.required = parsed.requested;
+    requirement.reason = requirement.valid
+        ? "required_backend=" + backend::ToString(requirement.required)
+        : "unknown_required_backend:" + required_input;
+    return requirement;
+}
+
+bool IsBackendRequirementSatisfied(const BackendRequirement& requirement,
+                                   const backend::Selection& selection)
+{
+    if (!requirement.enabled) {
+        return true;
+    }
+    if (!requirement.valid) {
+        return false;
+    }
+    return selection.active == requirement.required;
+}
+
 bool ShouldUseGpuGeneratedInputsForBackend(backend::Kind backend_kind)
 {
     return ShouldUseGpuGeneratedInputsForShape(backend_kind, 0, 0, 0);
@@ -1057,16 +1134,12 @@ bool ShouldUseGpuGeneratedInputsForShape(backend::Kind backend_kind,
     }
 
 #if defined(__APPLE__)
-    // AUTO mode defaults to OFF. The GPU oracle path is deterministic and is
-    // covered by unit tests, but local mining benchmarks still show it losing
-    // to CPU input generation for mainnet-like shapes on this machine because
-    // the extra Metal dispatches cost more than the CPU oracle work they
-    // replace. Keep it available behind BTX_MATMUL_GPU_INPUTS for explicit
-    // experimentation, but do not spend mining throughput on it by default.
-    (void)n;
-    (void)transcript_block_size;
-    (void)noise_rank;
-    return false;
+    // Production Apple Metal mining is dominated by the 512x16x8 product/
+    // nonce-seed shape. Keep AUTO conservative for smaller validation/dev
+    // shapes, but default the production shape to the GPU oracle path so live
+    // miners do not need an extra environment override to stay on the fastest
+    // measured path.
+    return n >= 512 && transcript_block_size >= 16 && noise_rank >= 8;
 #else
     return false;
 #endif

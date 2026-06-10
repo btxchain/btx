@@ -71,8 +71,11 @@ class WalletBackupBundleTest(BitcoinTestFramework):
         bundle_dir = node.datadir_path / "shielded.bundle"
         bundle = node.cli("-rpcwallet=shielded", "-stdinwalletpassphrase", input="pass\n").backupwalletbundle(bundle_dir)
         assert_equal(bundle["unlocked_by_rpc"], True)
+        assert_equal(bundle["wallet_encrypted"], True)
+        assert_equal(bundle["wallet_passphrase_included"], False)
+        assert_equal(bundle["wallet_passphrase_required_to_spend"], True)
         assert_equal(bundle["integrity"]["integrity_ok"], True)
-        assert_equal(bundle["warnings"], [])
+        assert any("Wallet passphrase is not stored" in warning for warning in bundle["warnings"])
 
         bundle_path = Path(bundle["bundle_dir"])
         backup_path = Path(bundle["backup_file"])
@@ -86,6 +89,10 @@ class WalletBackupBundleTest(BitcoinTestFramework):
         manifest = json.loads((bundle_path / "manifest.json").read_text(encoding="utf-8"))
         assert_equal(manifest["integrity_ok"], True)
         assert_equal(manifest["integrity_warnings"], [])
+        assert_equal(manifest["wallet_encrypted"], True)
+        assert_equal(manifest["wallet_passphrase_included"], False)
+        assert_equal(manifest["wallet_passphrase_required_to_spend"], True)
+        assert any("Wallet passphrase is not stored" in warning for warning in manifest["warnings"])
 
         self.log.info("The source wallet should be relocked after the bundle export")
         assert_raises_rpc_error(

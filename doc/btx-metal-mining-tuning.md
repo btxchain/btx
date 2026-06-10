@@ -7,7 +7,9 @@ Metal benchmarking tools.
 Unless you are benchmarking or debugging a specific host, the recommended
 operator policy is simple:
 
-- set `BTX_MATMUL_BACKEND=metal` if you want to force the Metal backend
+- on Apple Silicon, the live mining helpers default to strict Metal:
+  `BTX_MATMUL_BACKEND=metal`, `BTX_MATMUL_REQUIRE_BACKEND=metal`,
+  `BTX_MATMUL_GPU_INPUTS=1`, `--daemonize=0`, and zero backend fallbacks
 - leave the rest of the Metal tuning variables unset
 - let the node use the validated auto-tuned policy
 
@@ -22,6 +24,22 @@ Recommended daemon launch on Apple Silicon:
 ```bash
 BTX_MATMUL_BACKEND=metal ./build-btx/bin/btxd -server=1
 ```
+
+Recommended Apple Silicon live helper launch:
+
+```bash
+contrib/mining/start-live-mining.sh \
+  --datadir="$HOME/.btx" \
+  --wallet=miner
+```
+
+Monitor `getmininginfo.backend_runtime.active_backend`,
+`required_backend_satisfied`, `metal_fallbacks_to_cpu`,
+`metal_nonce_seed_scan_fallbacks_to_cpu`, `gpu_prehash_scan_attempts`, and
+`gpu_prehash_scan_successes` while the miner is running. If
+`BTX_MATMUL_GPU_INPUTS=1` is enabled, also watch
+`gpu_input_generation_attempts`, `gpu_input_generation_successes`, and
+`gpu_input_generation_failures`.
 
 Recommended readiness check:
 
@@ -57,21 +75,26 @@ for the activation-boundary benchmark details.
 
 ## Kernel Loading On macOS
 
-Current macOS source builds compile the MatMul and oracle Metal kernels from embedded runtime source with
-`newLibraryWithSource`. The audit branch no longer builds, installs, embeds, or loads build-tree
-`.metallib` files for those backends.
+Current macOS source builds precompile the MatMul and oracle Metal kernels to
+build-tree `.metallib` files when `BTX_MATMUL_METAL_PRECOMPILE_KERNELS=ON`
+(the default for Apple Metal builds). The runtime loads those libraries first
+and uses inline source only as a fallback.
 
 Operational implications:
 
 - `btx-matmul-backend-info --backend metal` should report `library_source=precompiled_metallib`
   on a normal macOS source build, or `inline_source_fallback` if metallib precompilation/loading is
   unavailable.
-- No `BTX_MATMUL_METALLIB_PATH` or `BTX_ORACLE_METALLIB_PATH` string should appear in a freshly built
-  `btxd`.
-- If you previously configured a build directory that generated `.metallib` artifacts, regenerate the
-  CMake build directory so stale compile definitions are removed.
-- Precompiled `.metallib` support should only return as a release-packaged, signed-resource flow. Do not
-  load absolute build-tree paths from production binaries.
+- `btxd -daemon` can lose access to macOS Metal compiler services needed when
+  the nonce-seed pre-hash pipeline is first materialized. For strict Apple
+  Metal mining, run the node under a process supervisor without `-daemon`; the
+  live helper exposes this as `--daemonize=0`.
+- If the oracle Metal context sees a transient initialization failure, it now
+  retries instead of caching the failed context forever. Strict mining still
+  fails closed and reports the failure through
+  `getmininginfo.backend_runtime.metal_nonce_seed_scan_fallbacks_to_cpu`.
+- If you move or remove the build directory containing the generated
+  `.metallib` files, rebuild before starting a source-tree binary.
 
 ## Current Auto Policy
 
@@ -88,7 +111,7 @@ current production path, not every possible MatMul shape.
 | Batch size | `BTX_MATMUL_SOLVE_BATCH_SIZE` auto-resolves to `2` on the current production Metal product-digest path when parallel solve support is active. Otherwise it stays at `1`. |
 | Nonce-seed batch size | After `nMatMulNonceSeedHeight`, Metal uses `BTX_MATMUL_NONCE_SEED_BATCH_SIZE` / GPU-core-scaled defaults instead of the legacy shared-base batch resolver. On the mainnet 512x16x8 product-digest shape, 10-core Apple GPUs default to `64`; larger GPUs scale upward. |
 | Digest slice size | `BTX_MATMUL_DIGEST_SLICE_SIZE` stays at `1` for batch sizes `1` and `2`. It only widens automatically for larger forced batches. |
-| GPU-generated inputs | `BTX_MATMUL_GPU_INPUTS` stays auto-off on Metal. |
+| GPU-generated inputs | `BTX_MATMUL_GPU_INPUTS` auto-enables on Apple Metal for the production 512x16x8 product/nonce-seed mining shape; smaller validation/dev shapes remain auto-off. |
 | Async prepare | `BTX_MATMUL_PIPELINE_ASYNC` defaults to on for Metal. |
 | Prefetch depth | `BTX_MATMUL_PREPARE_PREFETCH_DEPTH` auto-resolves to `1` on Metal. Deeper queues remain available as explicit benchmarking overrides. |
 | CPU confirmation | Accelerated candidates are CPU-confirmed by default via `BTX_MATMUL_CPU_CONFIRM`. |
@@ -178,7 +201,7 @@ These are the overrides most operators and benchmark users should care about.
 | `BTX_MATMUL_SOLVE_BATCH_SIZE` | Auto is `2` on the current production Metal product path, otherwise `1` | Compare the current default against `1`, or force larger experimental windows | `BTX_MATMUL_SOLVE_BATCH_SIZE=1` |
 | `BTX_MATMUL_NONCE_SEED_BATCH_SIZE` | Auto scales from detected Metal GPU core count after `nMatMulNonceSeedHeight`; mainnet 512x16x8 product shape defaults to `64` on 10-core GPUs, `128` at 18+ cores, `192` at 30+ cores, and `256` at 60+ cores | Tune the post-activation nonce-bound seed path independently from the legacy shared-base path | `BTX_MATMUL_NONCE_SEED_BATCH_SIZE=64` |
 | `BTX_MATMUL_DIGEST_SLICE_SIZE` | Auto is `1` for batch sizes `1-2` | Only for controlled batching experiments | `BTX_MATMUL_DIGEST_SLICE_SIZE=2` |
-| `BTX_MATMUL_GPU_INPUTS` | Auto-off on Metal | Force GPU-generated inputs on or off for host-specific testing | `BTX_MATMUL_GPU_INPUTS=1` |
+| `BTX_MATMUL_GPU_INPUTS` | Auto-on on Apple Metal for the production 512x16x8 mining shape | Force GPU-generated inputs off for controlled benchmarking or host-specific rollback | `BTX_MATMUL_GPU_INPUTS=0` |
 | `BTX_MATMUL_PIPELINE_ASYNC` | Auto-on on Metal | Disable only to isolate overlap/pipelining effects | `BTX_MATMUL_PIPELINE_ASYNC=0` |
 | `BTX_MATMUL_PREPARE_PREFETCH_DEPTH` | Auto is `1` on Metal | Fine-tune overlap depth during benchmarking | `BTX_MATMUL_PREPARE_PREFETCH_DEPTH=1` |
 | `BTX_MATMUL_CPU_CONFIRM` | Auto-on for accelerated backends | Keep enabled in normal operation; disable only for controlled experiments | `BTX_MATMUL_CPU_CONFIRM=0` |
@@ -245,11 +268,10 @@ not the primary end-to-end mining-throughput benchmark.
 
 ## Practical Guidance
 
-- For production Apple Metal mining, prefer `BTX_MATMUL_BACKEND=metal` and
+- For production Apple Metal mining, prefer the live helper defaults and
   otherwise leave the tuning variables unset.
 - If you override `solver_threads`, usually override `pool_slots` to match.
-- Treat `BTX_MATMUL_GPU_INPUTS=1` as experimental until it wins on your actual
-  host.
+- Use `BTX_MATMUL_GPU_INPUTS=0` only for controlled rollback or benchmarking.
 - Treat `BTX_MATMUL_METAL_PIPELINE` and
   `BTX_MATMUL_METAL_FUNCTION_CONSTANTS` as transcript-path or microbenchmark
   knobs, not current product-mining defaults.
@@ -260,24 +282,22 @@ The current defaults already reflect one completed optimization round. Several
 other paths were benchmarked and intentionally not promoted into production
 defaults.
 
-### GPU-Generated Inputs Stayed Auto-Off
+### GPU-Generated Inputs Are Now Promoted For Production Metal Mining
 
-On the current M4 reference host, after the landed fanout and pair-batching
-changes:
-
-| Configuration | Median throughput |
-|---|---:|
-| current default | `~44.42k` nonces/s |
-| `BTX_MATMUL_GPU_INPUTS=1` | `~44.14k` nonces/s |
-| `BTX_MATMUL_GPU_INPUTS=1 BTX_MATMUL_PREPARE_WORKERS=1` | `~44.70k` nonces/s |
+Live validation on the Apple M4 Max reference host showed the production
+nonce-seed path performs materially better when GPU-generated inputs are part of
+the default Metal pipeline. The helper-supervised live node ran with
+`--gpu-inputs=1`, strict Metal, and zero fallback; AGX attributed GPU
+submissions to `btxd` with device utilization around `96-98%`.
 
 Conclusion:
 
-- forcing GPU-generated inputs was flat to slightly worse on this host
-- the best forced variant was only about `+0.6%`, which was too small and noisy
-  to justify changing the default
-- `BTX_MATMUL_GPU_INPUTS` remains a host-specific experiment, not a production
-  auto-on setting
+- production Apple Metal mining now auto-enables GPU-generated inputs for the
+  512x16x8 shape
+- smaller validation/dev shapes remain auto-off so functional tests and
+  non-production workloads keep the conservative path
+- `BTX_MATMUL_GPU_INPUTS=0` remains available as an explicit rollback or
+  benchmarking override
 
 ### Product Function-Constant Policy Stayed On Auto
 

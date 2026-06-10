@@ -34,6 +34,7 @@ BTX_ENSURE_RETAIN_INDEX="${BTX_ENSURE_RETAIN_INDEX:-1}"
 BTX_AUTOUPDATE="${BTX_AUTOUPDATE:-0}"
 BTX_AUTOUPDATE_PID="${BTX_AUTOUPDATE_PID:-}"
 BTX_AUTOUPDATE_DATADIR="${BTX_AUTOUPDATE_DATADIR:-}"
+BTX_AUTOUPDATE_TELEMETRY_QUERY="${BTX_AUTOUPDATE_TELEMETRY_QUERY:-}"
 # Release-signature scheme + key forwarded by the node. When the scheme is a post-quantum one
 # (ml-dsa-44 / slh-dsa-128s) the installer verifies signatures with `btx-util verifyupdatesig`
 # instead of openssl, so the source/commit trust is quantum-safe and matches the node.
@@ -201,12 +202,14 @@ for _, n in dirs[keep:]:
         print(n)
 PY
     )
-    for name in "${entries[@]}"; do
-      [[ -n "$name" ]] || continue
-      git -C "$cache_repo" worktree remove --force "$worktree_root/$name" >/dev/null 2>&1 || true
-      # ${var:?} guards: never let an empty root expand "rm -rf" toward "/" (SC2115).
-      rm -rf "${worktree_root:?}/$name" "${build_root:?}/$name" 2>/dev/null || true
-    done
+    if ((${#entries[@]})); then
+      for name in "${entries[@]}"; do
+        [[ -n "$name" ]] || continue
+        git -C "$cache_repo" worktree remove --force "$worktree_root/$name" >/dev/null 2>&1 || true
+        # ${var:?} guards: never let an empty root expand "rm -rf" toward "/" (SC2115).
+        rm -rf "${worktree_root:?}/$name" "${build_root:?}/$name" 2>/dev/null || true
+      done
+    fi
   fi
   git -C "$cache_repo" worktree prune >/dev/null 2>&1 || true
 }
@@ -255,6 +258,24 @@ default_conf_path() {
 
 manifest_sig_url_default() {
   printf '%s.sig\n' "$1"
+}
+
+with_telemetry_query() {
+  local url="$1"
+  local query="${BTX_AUTOUPDATE_TELEMETRY_QUERY:-}"
+  if [[ -z "$query" ]]; then
+    printf '%s\n' "$url"
+    return 0
+  fi
+  case "$url" in
+    http://*|https://*) ;;
+    *) printf '%s\n' "$url"; return 0 ;;
+  esac
+  case "$url" in
+    *\?|*\&) printf '%s%s\n' "$url" "$query" ;;
+    *\?*) printf '%s&%s\n' "$url" "$query" ;;
+    *) printf '%s?%s\n' "$url" "$query" ;;
+  esac
 }
 
 json_field() {
@@ -497,8 +518,8 @@ try_install_prebuilt() {
 
     tarball="$BTX_TMPDIR/prebuilt-${key}.tar.gz"
     sig="$BTX_TMPDIR/prebuilt-${key}.sig"
-    curl -fsSL "$url" -o "$tarball" || { warn "prebuilt download failed ($key); will try next/source"; continue; }
-    curl -fsSL "$sig_url" -o "$sig" || { warn "prebuilt signature download failed ($key)"; continue; }
+    curl -fsSL "$(with_telemetry_query "$url")" -o "$tarball" || { warn "prebuilt download failed ($key); will try next/source"; continue; }
+    curl -fsSL "$(with_telemetry_query "$sig_url")" -o "$sig" || { warn "prebuilt signature download failed ($key)"; continue; }
 
     if [[ -n "$sha256" && "$sha256" != "null" ]] && ! verify_sha256 "$tarball" "$sha256"; then
       warn "prebuilt sha256 mismatch ($key); ignoring this artifact"
@@ -515,7 +536,12 @@ try_install_prebuilt() {
       warn "prebuilt extract failed ($key)"; continue
     fi
     bindir="$(find_prebuilt_bindir "$extract")" || { warn "prebuilt archive missing btxd/btx-cli ($key)"; continue; }
-    verify_binaries "$bindir"
+    local verify_error
+    if ! verify_error="$(check_binaries "$bindir")"; then
+      warn "prebuilt binary verification failed ($key): ${verify_error}; will try next/source"
+      status_event "prebuilt" "rejected" "$key: ${verify_error}"
+      continue
+    fi
     install_prebuilt_release_tree "$bindir" "$version" "$release_dir" "$key" "$url" "$expected_commit"
     status_event "prebuilt" "installed" "$key"
     note "Installed verified prebuilt release for $key"
@@ -531,13 +557,13 @@ fetch_verified_manifest() {
   local pub_path="$4"
 
   require_trusted_url "$manifest_url" "manifest_url"
-  curl -fsSL "$manifest_url" -o "$manifest_path"
+  curl -fsSL "$(with_telemetry_query "$manifest_url")" -o "$manifest_path"
 
   local sig_url
   sig_url="${BTX_MANIFEST_SIG_URL:-$(json_file_field "$manifest_path" "sig_url" "$(manifest_sig_url_default "$manifest_url")")}"
   [[ -n "$sig_url" ]] || die "manifest signature URL could not be resolved"
   require_trusted_url "$sig_url" "sig_url"
-  curl -fsSL "$sig_url" -o "$sig_path"
+  curl -fsSL "$(with_telemetry_query "$sig_url")" -o "$sig_path"
 
   verify_detached_signature "$manifest_path" "$sig_path" "$pub_path"
 }
@@ -664,9 +690,11 @@ append_unique_pid() {
   local existing
   pid_is_numeric "$candidate" || return 0
   kill -0 "$candidate" >/dev/null 2>&1 || return 0
-  for existing in "${BTX_PID_CANDIDATES[@]}"; do
-    [[ "$existing" == "$candidate" ]] && return 0
-  done
+  if ((${#BTX_PID_CANDIDATES[@]})); then
+    for existing in "${BTX_PID_CANDIDATES[@]}"; do
+      [[ "$existing" == "$candidate" ]] && return 0
+    done
+  fi
   BTX_PID_CANDIDATES+=("$candidate")
 }
 
@@ -719,21 +747,25 @@ detect_running_btxd() {
   local -a filtered=()
   if [[ -n "$requested_datadir" ]]; then
     local runtime_datadir
-    for pid in "${BTX_PID_CANDIDATES[@]}"; do
-      runtime_datadir=""
-      while IFS='=' read -r key value; do
-        if [[ "$key" == "DATADIR" ]]; then
-          runtime_datadir="$value"
-          break
+    if ((${#BTX_PID_CANDIDATES[@]})); then
+      for pid in "${BTX_PID_CANDIDATES[@]}"; do
+        runtime_datadir=""
+        while IFS='=' read -r key value; do
+          if [[ "$key" == "DATADIR" ]]; then
+            runtime_datadir="$value"
+            break
+          fi
+        done < <(extract_runtime_flags "$pid" 2>/dev/null || true)
+        [[ -n "$runtime_datadir" ]] || runtime_datadir="$(default_datadir)"
+        if paths_equal "$requested_datadir" "$runtime_datadir"; then
+          filtered+=("$pid")
         fi
-      done < <(extract_runtime_flags "$pid" 2>/dev/null || true)
-      [[ -n "$runtime_datadir" ]] || runtime_datadir="$(default_datadir)"
-      if paths_equal "$requested_datadir" "$runtime_datadir"; then
-        filtered+=("$pid")
-      fi
-    done
+      done
+    fi
   else
-    filtered=("${BTX_PID_CANDIDATES[@]}")
+    if ((${#BTX_PID_CANDIDATES[@]})); then
+      filtered=("${BTX_PID_CANDIDATES[@]}")
+    fi
   fi
 
   case "${#filtered[@]}" in
@@ -966,16 +998,24 @@ build_btx() {
     -DBUILD_UTIL=ON \
     -DBUILD_DAEMON=ON \
     -DBUILD_CLI=ON \
-    "${cache_args[@]}"
+    ${cache_args[@]+"${cache_args[@]}"}
   cmake --build "$build_dir" -j"$jobs"
+}
+
+check_binaries() {
+  local bin_dir="$1"
+  [[ -x "$bin_dir/btxd" ]] || { printf 'built btxd not found in %s\n' "$bin_dir"; return 1; }
+  [[ -x "$bin_dir/btx-cli" ]] || { printf 'built btx-cli not found in %s\n' "$bin_dir"; return 1; }
+  "$bin_dir/btxd" --version >/dev/null 2>&1 || { printf 'built btxd failed version check\n'; return 1; }
+  "$bin_dir/btx-cli" --version >/dev/null 2>&1 || { printf 'built btx-cli failed version check\n'; return 1; }
 }
 
 verify_binaries() {
   local bin_dir="$1"
-  [[ -x "$bin_dir/btxd" ]] || die "built btxd not found in $bin_dir"
-  [[ -x "$bin_dir/btx-cli" ]] || die "built btx-cli not found in $bin_dir"
-  "$bin_dir/btxd" --version >/dev/null 2>&1 || die "built btxd failed version check"
-  "$bin_dir/btx-cli" --version >/dev/null 2>&1 || die "built btx-cli failed version check"
+  local verify_error
+  if ! verify_error="$(check_binaries "$bin_dir")"; then
+    die "$verify_error"
+  fi
 }
 
 release_tree_valid() {
@@ -1085,7 +1125,7 @@ stop_running_node() {
 
   note "Stopping running BTX node (pid $pid)"
   require_same_process "$pid" "$fingerprint" "RPC stop"
-  if ! "$cli_bin" "${cli_args[@]}" stop >/dev/null 2>&1; then
+  if ! "$cli_bin" ${cli_args[@]+"${cli_args[@]}"} stop >/dev/null 2>&1; then
     warn "RPC stop failed, sending TERM to pid $pid"
     require_same_process "$pid" "$fingerprint" "TERM fallback"
     kill "$pid" >/dev/null 2>&1 || true
@@ -1131,7 +1171,7 @@ restart_node() {
 
   mkdir -p "$log_dir"
   note "Restarting BTX node with preserved data directory"
-  nohup "$daemon_bin" "${args[@]}" >>"$log_dir/restart.log" 2>&1 &
+  nohup "$daemon_bin" ${args[@]+"${args[@]}"} >>"$log_dir/restart.log" 2>&1 &
   local restarted_pid=$!
   sleep 3
   if ! kill -0 "$restarted_pid" >/dev/null 2>&1; then
@@ -1150,7 +1190,7 @@ health_probe() {
   [[ -n "$conf" ]] && a+=("-conf=$conf")
   if (( $# > 0 )); then a+=("$@"); fi
   local timeout="${BTX_HEALTH_TIMEOUT_SECONDS:-60}"
-  "$cli" "${a[@]}" -rpcwait -rpcwaittimeout="$timeout" uptime >/dev/null 2>&1
+  "$cli" ${a[@]+"${a[@]}"} -rpcwait -rpcwaittimeout="$timeout" uptime >/dev/null 2>&1
 }
 
 # Re-activate and restart the previous release after a failed update, so a bad build/commit cannot
@@ -1416,18 +1456,18 @@ main() {
 
   if [[ -n "$detected_pid" && "$BTX_AUTO_RESTART" == "1" ]]; then
     stage "restart"
-    restart_node "$BTX_LINK_DIR/btxd" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "$BTX_INSTALL_ROOT/logs" "${wallet_args[@]}"
+    restart_node "$BTX_LINK_DIR/btxd" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "$BTX_INSTALL_ROOT/logs" ${wallet_args[@]+"${wallet_args[@]}"}
     # The node was running before; verify the new binary is actually healthy (RPC reachable) and
     # roll back to the previous release if it crash-loops, so a bad release cannot down the fleet.
     if [[ "${BTX_HEALTH_PROBE:-1}" == "1" ]]; then
       stage "health-probe"
       if ! health_probe "$BTX_LINK_DIR/btx-cli" "$datadir" "$conf_path" "$chain_flag"; then
-        rollback_release "$previous_current" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "${version}-${resolved_short_sha}" "${wallet_args[@]}"
+        rollback_release "$previous_current" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "${version}-${resolved_short_sha}" ${wallet_args[@]+"${wallet_args[@]}"}
       fi
       status_event "health-probe" "healthy"
     fi
   elif [[ -z "$detected_pid" && "$BTX_START_IF_STOPPED" == "1" ]]; then
-    restart_node "$BTX_LINK_DIR/btxd" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "$BTX_INSTALL_ROOT/logs" "${wallet_args[@]}"
+    restart_node "$BTX_LINK_DIR/btxd" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "$BTX_INSTALL_ROOT/logs" ${wallet_args[@]+"${wallet_args[@]}"}
   else
     note "No running BTX node needed a restart"
   fi

@@ -64,6 +64,7 @@ import http.client
 import json
 import os
 import pathlib
+import platform
 import sys
 import time
 from typing import Optional
@@ -177,6 +178,22 @@ def resolve_rpc_config(args: argparse.Namespace) -> RpcConfig:
     )
 
 
+def is_apple_silicon_host() -> bool:
+    host_os = os.environ.get("BTX_MINING_HOST_OS_FOR_TEST") or platform.system()
+    host_arch = os.environ.get("BTX_MINING_HOST_ARCH_FOR_TEST") or platform.machine()
+    return host_os == "Darwin" and host_arch == "arm64"
+
+
+def default_required_backend() -> str:
+    configured = os.environ.get(
+        "BTX_MINING_REQUIRE_BACKEND",
+        os.environ.get("BTX_MATMUL_REQUIRE_BACKEND", ""),
+    )
+    if configured:
+        return configured
+    return "metal" if is_apple_silicon_host() else ""
+
+
 def resolve_address(args: argparse.Namespace) -> str:
     if args.address:
         return args.address.strip()
@@ -187,6 +204,22 @@ def resolve_address(args: argparse.Namespace) -> str:
 
 def log(stream, msg: str) -> None:
     print(f"[{time.strftime('%Y-%m-%dT%H:%M:%S%z')}] {msg}", file=stream, flush=True)
+
+
+def normalize_backend(value: str) -> str:
+    return value.strip().lower()
+
+
+def resolved_required_backend(args: argparse.Namespace) -> str:
+    required = normalize_backend(args.require_backend or "")
+    if required in {"", "0", "false", "no", "off", "none", "disabled"}:
+        return ""
+    if required in {"1", "true", "yes", "on"}:
+        env_backend = os.environ.get("BTX_MATMUL_BACKEND", "").strip()
+        if env_backend:
+            return normalize_backend(env_backend)
+        return "metal" if platform.system() == "Darwin" else "cpu"
+    return required
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -229,6 +262,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=0,
         help="Stop after this many iterations (0 = unlimited). Used by tests.",
     )
+    p.add_argument(
+        "--require-backend",
+        default=default_required_backend(),
+        help="Fail closed unless getmininginfo.backend_runtime reports this backend active.",
+    )
+    p.add_argument(
+        "--max-backend-fallbacks",
+        type=int,
+        default=int(os.environ.get("BTX_MINING_MAX_BACKEND_FALLBACKS", "0")),
+        help="Maximum GPU-to-CPU fallbacks allowed when --require-backend is set (default: 0).",
+    )
     return p.parse_args(argv)
 
 
@@ -247,6 +291,85 @@ def open_log_streams(results_dir: Optional[str]):
     return out, err
 
 
+def rpc_post(conn: http.client.HTTPConnection, auth: str, req_id: int, method: str, params: list):
+    body = json.dumps({
+        "jsonrpc": "1.0",
+        "id": str(req_id),
+        "method": method,
+        "params": params,
+    })
+    headers = {"Content-Type": "application/json", "Authorization": auth}
+    conn.request("POST", "/", body, headers)
+    resp = conn.getresponse()
+    data = resp.read()
+    if resp.status != 200:
+        return resp.status, data, None
+    return resp.status, data, json.loads(data)
+
+
+def backend_fallback_count(info: dict, backend: str) -> int:
+    runtime = info.get("backend_runtime") or {}
+    if backend == "metal":
+        return int(runtime.get("metal_fallbacks_to_cpu") or 0) + int(
+            runtime.get("metal_nonce_seed_scan_fallbacks_to_cpu") or 0
+        )
+    if backend == "cuda":
+        return int(runtime.get("cuda_fallbacks_to_cpu") or 0) + int(
+            runtime.get("cuda_nonce_seed_scan_fallbacks_to_cpu") or 0
+        )
+    return 0
+
+
+def check_backend_requirement(
+    conn: http.client.HTTPConnection,
+    auth: str,
+    req_id: int,
+    args: argparse.Namespace,
+    err_stream,
+) -> Optional[bool]:
+    required = resolved_required_backend(args)
+    if not required:
+        return True
+
+    status, data, payload = rpc_post(conn, auth, req_id, "getmininginfo", [])
+    if status != 200:
+        if status == 401:
+            log(err_stream, "backend check auth failed (401), reloading rpc credentials")
+            return None
+        log(err_stream, f"backend check HTTP {status}: {data[:200]!r}")
+        return False
+    err_obj = payload.get("error")
+    if err_obj:
+        log(err_stream, f"backend check rpc error: {err_obj}")
+        return False
+
+    info = payload.get("result") or {}
+    runtime = info.get("backend_runtime") or {}
+    active = normalize_backend(str(runtime.get("active_backend") or ""))
+    requested = runtime.get("requested_backend") or "missing"
+    reason = runtime.get("backend_selection_reason") or "missing"
+    requirement_satisfied = bool(runtime.get("required_backend_satisfied", True))
+    if active != required or not requirement_satisfied:
+        log(
+            err_stream,
+            "backend requirement failed: "
+            f"required={required} active={active or 'missing'} "
+            f"requested={requested} reason={reason}",
+        )
+        return False
+
+    fallback_count = backend_fallback_count(info, required)
+    if fallback_count > args.max_backend_fallbacks:
+        log(
+            err_stream,
+            "backend requirement failed: "
+            f"required={required} fallbacks={fallback_count} "
+            f"max={args.max_backend_fallbacks}",
+        )
+        return False
+    return True
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     rpc = resolve_rpc_config(args)
@@ -257,7 +380,8 @@ def main(argv: list[str]) -> int:
         err_stream,
         f"started pid={os.getpid()} addr={address} "
         f"rpc={rpc.host}:{rpc.port} interval={args.sleep}s "
-        f"auth={'user' if rpc.user else 'cookie'}",
+        f"auth={'user' if rpc.user else 'cookie'} "
+        f"require_backend={resolved_required_backend(args) or 'none'}",
     )
 
     auth = rpc.auth_header()
@@ -277,29 +401,40 @@ def main(argv: list[str]) -> int:
         iterations += 1
         req_id += 1
 
-        body = json.dumps({
-            "jsonrpc": "1.0",
-            "id": str(req_id),
-            "method": "generatetoaddress",
-            "params": [1, address],
-        })
-        headers = {"Content-Type": "application/json", "Authorization": auth}
-
         try:
-            conn.request("POST", "/", body, headers)
-            resp = conn.getresponse()
-            data = resp.read()
+            if args.require_backend:
+                backend_ok = check_backend_requirement(conn, auth, req_id, args, err_stream)
+                if backend_ok is None:
+                    rpc = resolve_rpc_config(args)
+                    auth = rpc.auth_header()
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    conn = http.client.HTTPConnection(rpc.host, rpc.port, timeout=None)
+                    time.sleep(args.sleep)
+                    continue
+                if not backend_ok:
+                    return 1
+                req_id += 1
 
-            if resp.status == 401:
+            resp_status, data, payload = rpc_post(
+                conn,
+                auth,
+                req_id,
+                "generatetoaddress",
+                [1, address],
+            )
+
+            if resp_status == 401:
                 # Either rpcuser/rpcpassword changed in btx.conf, or btxd
                 # restarted and rotated its .cookie. Re-resolve from disk.
                 log(err_stream, "auth failed (401), reloading rpc credentials")
                 rpc = resolve_rpc_config(args)
                 auth = rpc.auth_header()
-            elif resp.status != 200:
-                log(err_stream, f"HTTP {resp.status}: {data[:200]!r}")
+            elif resp_status != 200:
+                log(err_stream, f"HTTP {resp_status}: {data[:200]!r}")
             else:
-                payload = json.loads(data)
                 err_obj = payload.get("error")
                 if err_obj:
                     # Match the .sh's behavior: log RPC-level errors but keep

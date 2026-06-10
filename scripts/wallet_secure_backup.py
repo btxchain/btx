@@ -186,7 +186,13 @@ def maybe_unlock_wallet(ctx: CLIContext, wallet: str, info: dict[str, Any], time
     for attempt in range(3):
         passphrase = getpass.getpass(f"Wallet passphrase for '{wallet}': ")
         try:
-            ctx.run_text("walletpassphrase", passphrase, str(timeout), wallet=wallet)
+            ctx.run_text(
+                "walletpassphrase",
+                str(timeout),
+                wallet=wallet,
+                input_text=passphrase + "\n",
+                extra_cli_args=["-stdinwalletpassphrase"],
+            )
             return True
         except BackupError as exc:
             if attempt == 2:

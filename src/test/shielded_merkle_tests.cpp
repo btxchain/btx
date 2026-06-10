@@ -502,6 +502,49 @@ BOOST_AUTO_TEST_CASE(witness_incremental_update_chain)
     }
 }
 
+BOOST_AUTO_TEST_CASE(witness_at_reconstructs_historical_leaf)
+{
+    ShieldedMerkleTree tree;
+    std::vector<uint256> leaves;
+    leaves.reserve(1537);
+    for (uint32_t i = 0; i < 1537; ++i) {
+        leaves.push_back(MakeCommitment(i));
+        tree.Append(leaves.back());
+    }
+
+    const uint256 root = tree.Root();
+    const std::vector<uint64_t> positions{
+        uint64_t{0}, uint64_t{1}, uint64_t{2}, uint64_t{17},
+        uint64_t{128}, uint64_t{256}, uint64_t{1024}, uint64_t{1536}};
+    for (const uint64_t position : positions) {
+        auto witness = tree.WitnessAt(position);
+        BOOST_REQUIRE_MESSAGE(witness.has_value(), "missing witness at position " + std::to_string(position));
+        BOOST_CHECK_EQUAL(witness->Position(), position);
+        BOOST_CHECK_MESSAGE(witness->Verify(leaves.at(position), root),
+                            "reconstructed witness failed at position " + std::to_string(position));
+
+        DataStream ss;
+        ss << *witness;
+        ShieldedMerkleWitness decoded;
+        ss >> decoded;
+        BOOST_CHECK_EQUAL(decoded.Position(), position);
+        BOOST_CHECK_MESSAGE(decoded.Verify(leaves.at(position), root),
+                            "serialized reconstructed witness failed at position " + std::to_string(position));
+    }
+
+    const auto witnesses = tree.WitnessesAt(positions);
+    BOOST_CHECK_EQUAL(witnesses.size(), positions.size());
+    for (const uint64_t position : positions) {
+        auto it = witnesses.find(position);
+        BOOST_REQUIRE_MESSAGE(it != witnesses.end(), "missing bulk witness at position " + std::to_string(position));
+        BOOST_CHECK_EQUAL(it->second.Position(), position);
+        BOOST_CHECK_MESSAGE(it->second.Verify(leaves.at(position), root),
+                            "bulk reconstructed witness failed at position " + std::to_string(position));
+    }
+
+    BOOST_CHECK(!tree.WitnessAt(tree.Size()).has_value());
+}
+
 BOOST_AUTO_TEST_CASE(witness_old_leaf_verifies_after_many_updates)
 {
     ShieldedMerkleTree tree;

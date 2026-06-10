@@ -7,6 +7,8 @@
 #include <chainparams.h>
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
+#include <hash.h>
+#include <node/blockstorage.h>
 #include <node/miner.h>
 #include <pow.h>
 #include <script/pqm.h>
@@ -381,5 +383,68 @@ BOOST_AUTO_TEST_CASE(witness_commitment_index)
     pblock.vtx[0] = MakeTransactionRef(std::move(txCoinbase));
 
     BOOST_CHECK_EQUAL(GetWitnessCommitmentIndex(pblock), 2);
+}
+
+/**
+ * Selfish-mining mitigation: randomized equal-work tie-breaking.
+ *
+ * Build two sibling blocks of EQUAL total work that both extend the genesis
+ * block (same height => same nChainWork). With -randomtiebreak enabled and a
+ * fixed seed, the active tip must be the sibling with the smaller per-node
+ * tie-break key Hash(seed || blockhash) -- regardless of which one arrived
+ * first. We deliberately submit the LARGER-key block first, so that if the node
+ * were still using legacy first-seen-wins the wrong block would win; the test
+ * therefore proves the tie-break is decided by the random key, not arrival order.
+ */
+BOOST_AUTO_TEST_CASE(random_tiebreak_equal_work)
+{
+    using node::g_random_tiebreak_enabled;
+    using node::g_tiebreak_seed;
+    using node::SetRandomTiebreak;
+
+    bool ignored;
+    auto ProcessBlock = [&](const std::shared_ptr<const CBlock>& block) -> bool {
+        return Assert(m_node.chainman)->ProcessNewBlock(block, /*force_processing=*/true, /*min_pow_checked=*/true, /*new_block=*/&ignored);
+    };
+    auto Tip = [&]() -> uint256 {
+        return WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain().Tip()->GetBlockHash());
+    };
+
+    // Enable the policy with a fixed, known seed for determinism in the test.
+    const uint256 seed{uint256::FromHex(std::string(63, '0') + "1").value()};
+    SetRandomTiebreak(/*enabled=*/true, &seed);
+    BOOST_REQUIRE(g_random_tiebreak_enabled);
+    BOOST_REQUIRE_EQUAL(g_tiebreak_seed, seed);
+
+    // Connect genesis.
+    BOOST_REQUIRE(ProcessBlock(std::make_shared<CBlock>(Params().GenesisBlock())));
+
+    // Two competing equal-work siblings extending genesis. GoodBlock embeds a
+    // unique coinbase counter, so the two blocks have distinct hashes.
+    const uint256 root{Params().GenesisBlock().GetHash()};
+    auto block_a = GoodBlock(root);
+    auto block_b = GoodBlock(root);
+    BOOST_REQUIRE_NE(block_a->GetHash(), block_b->GetHash());
+
+    // Compute the per-node tie-break keys the comparator will use and identify
+    // the expected winner (smaller key) and the order that defeats first-seen.
+    const uint256 key_a{Hash(seed, block_a->GetHash())};
+    const uint256 key_b{Hash(seed, block_b->GetHash())};
+    BOOST_REQUIRE_NE(key_a, key_b);
+    const auto& expected_winner = (key_a < key_b) ? block_a : block_b;
+    const auto& first_to_submit  = (key_a < key_b) ? block_b : block_a; // larger key first
+    const auto& second_to_submit = (key_a < key_b) ? block_a : block_b;
+
+    BOOST_REQUIRE(ProcessBlock(first_to_submit));
+    // After only the first (larger-key) block, it is the sole candidate and tip.
+    BOOST_CHECK_EQUAL(Tip(), first_to_submit->GetHash());
+
+    BOOST_REQUIRE(ProcessBlock(second_to_submit));
+    // The smaller-key block must now be preferred even though it arrived second,
+    // i.e. random tie-breaking overrode first-seen-wins for equal work.
+    BOOST_CHECK_EQUAL(Tip(), expected_winner->GetHash());
+
+    // Restore default (off) so we do not leak state into other test cases.
+    SetRandomTiebreak(/*enabled=*/false);
 }
 BOOST_AUTO_TEST_SUITE_END()

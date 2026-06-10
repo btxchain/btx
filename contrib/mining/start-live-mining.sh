@@ -17,9 +17,29 @@ SLEEP_SECS="${BTX_MINING_SLEEP_SECS:-1}"
 RESULTS_DIR="${BTX_MINING_RESULTS_DIR:-}"
 SHOULD_MINE_COMMAND="${BTX_MINING_SHOULD_MINE_COMMAND:-}"
 NODE_PIDFILE="${BTX_MINING_NODE_PIDFILE:-}"
+MINING_BACKEND="${BTX_MINING_BACKEND:-${BTX_MATMUL_BACKEND:-}}"
+REQUIRE_BACKEND="${BTX_MINING_REQUIRE_BACKEND:-${BTX_MATMUL_REQUIRE_BACKEND:-}}"
+MAX_BACKEND_FALLBACKS="${BTX_MINING_MAX_BACKEND_FALLBACKS:-0}"
+GPU_INPUTS="${BTX_MINING_GPU_INPUTS:-${BTX_MATMUL_GPU_INPUTS:-}}"
+HOST_OS="${BTX_MINING_HOST_OS_FOR_TEST:-$(uname -s 2>/dev/null || true)}"
+HOST_ARCH="${BTX_MINING_HOST_ARCH_FOR_TEST:-$(uname -m 2>/dev/null || true)}"
+APPLE_SILICON_MINING_DEFAULTS=0
+if [[ "${HOST_OS}" == "Darwin" && "${HOST_ARCH}" == "arm64" ]]; then
+  APPLE_SILICON_MINING_DEFAULTS=1
+  MINING_BACKEND="${MINING_BACKEND:-metal}"
+  REQUIRE_BACKEND="${REQUIRE_BACKEND:-metal}"
+  GPU_INPUTS="${GPU_INPUTS:-1}"
+fi
 CLI="${BTX_MINING_CLI:-btx-cli}"
 DAEMON="${BTX_MINING_DAEMON:-btxd}"
+if (( APPLE_SILICON_MINING_DEFAULTS )); then
+  DAEMONIZE="${BTX_MINING_DAEMONIZE:-0}"
+else
+  DAEMONIZE="${BTX_MINING_DAEMONIZE:-1}"
+fi
 START_VERIFY_SECS="${BTX_MINING_START_VERIFY_SECS:-1}"
+FOREGROUND="${BTX_MINING_FOREGROUND:-0}"
+LAUNCH_CWD="${BTX_MINING_LAUNCH_CWD:-}"
 
 print_usage() {
   cat <<EOF
@@ -44,8 +64,15 @@ Options:
   --results-dir=PATH        Directory for pid/log/address files
   --should-mine-command=CMD Idle gate command; mine only when it exits 0
   --node-pidfile=PATH       PID file for the supervised daemon
+  --backend=NAME            Set BTX_MATMUL_BACKEND for supervised daemon starts (Apple Silicon default: metal)
+  --require-backend=NAME    Fail closed unless getmininginfo reports this backend active (Apple Silicon default: metal)
+  --max-backend-fallbacks=N Maximum GPU-to-CPU fallbacks allowed when backend is required (default: 0)
+  --gpu-inputs=auto|0|1     Set BTX_MATMUL_GPU_INPUTS for host-tuned GPU input generation (Apple Silicon default: 1)
   --cli=PATH                Path to btx-cli (default: btx-cli)
   --daemon=PATH             Path to btxd (default: btxd)
+  --daemonize=0|1           Start btxd with -daemon (default: 1; Apple Silicon default: 0)
+  --foreground              Exec the supervisor instead of detaching it
+  --launch-cwd=PATH         Working directory for detached supervisor
   --help, -h                Show this help text
 EOF
 }
@@ -116,11 +143,32 @@ for arg in "$@"; do
     --node-pidfile=*)
       NODE_PIDFILE="${arg#*=}"
       ;;
+    --backend=*)
+      MINING_BACKEND="${arg#*=}"
+      ;;
+    --require-backend=*)
+      REQUIRE_BACKEND="${arg#*=}"
+      ;;
+    --max-backend-fallbacks=*)
+      MAX_BACKEND_FALLBACKS="${arg#*=}"
+      ;;
+    --gpu-inputs=*)
+      GPU_INPUTS="${arg#*=}"
+      ;;
     --cli=*)
       CLI="${arg#*=}"
       ;;
     --daemon=*)
       DAEMON="${arg#*=}"
+      ;;
+    --daemonize=*)
+      DAEMONIZE="${arg#*=}"
+      ;;
+    --foreground)
+      FOREGROUND="1"
+      ;;
+    --launch-cwd=*)
+      LAUNCH_CWD="${arg#*=}"
       ;;
     *)
       echo "Unknown argument: ${arg}" >&2
@@ -139,6 +187,67 @@ fi
 mkdir -p "${RESULTS_DIR}"
 
 require_command jq
+
+if [[ "${FOREGROUND}" != "0" && "${FOREGROUND}" != "1" ]]; then
+  echo "Invalid foreground flag: ${FOREGROUND}" >&2
+  exit 1
+fi
+REQUIRE_BACKEND_NORMALIZED="$(printf '%s' "${REQUIRE_BACKEND}" | tr 'A-Z' 'a-z')"
+if [[ -n "${REQUIRE_BACKEND}" && -z "${MINING_BACKEND}" ]]; then
+  case "${REQUIRE_BACKEND_NORMALIZED}" in
+    1|true|yes|on|0|false|no|off|none|disabled)
+      ;;
+    *)
+      MINING_BACKEND="${REQUIRE_BACKEND}"
+      ;;
+  esac
+fi
+if [[ -n "${MINING_BACKEND}" ]]; then
+  export BTX_MATMUL_BACKEND="${MINING_BACKEND}"
+fi
+if [[ -n "${REQUIRE_BACKEND}" ]]; then
+  export BTX_MATMUL_REQUIRE_BACKEND="${REQUIRE_BACKEND}"
+fi
+if [[ -n "${GPU_INPUTS}" ]]; then
+  export BTX_MATMUL_GPU_INPUTS="${GPU_INPUTS}"
+fi
+if ! [[ "${MAX_BACKEND_FALLBACKS}" =~ ^[0-9]+$ ]]; then
+  echo "Invalid --max-backend-fallbacks value: ${MAX_BACKEND_FALLBACKS}" >&2
+  exit 1
+fi
+if [[ -n "${GPU_INPUTS}" ]]; then
+  gpu_inputs_normalized="$(printf '%s' "${GPU_INPUTS}" | tr 'A-Z' 'a-z')"
+  case "${gpu_inputs_normalized}" in
+    auto|1|true|yes|on|0|false|no|off)
+      ;;
+    *)
+      echo "Invalid --gpu-inputs value: ${GPU_INPUTS}" >&2
+      exit 1
+      ;;
+  esac
+fi
+if [[ "${DAEMONIZE}" != "0" && "${DAEMONIZE}" != "1" ]]; then
+  echo "Invalid --daemonize value: ${DAEMONIZE}" >&2
+  exit 1
+fi
+
+resolve_launch_cwd() {
+  local candidate resolved
+  for candidate in "${LAUNCH_CWD}" "${RESULTS_DIR}" "${DATADIR}" "/tmp"; do
+    [[ -n "${candidate}" ]] || continue
+    resolved="$(
+      mkdir -p "${candidate}" >/dev/null 2>&1 &&
+        cd "${candidate}" >/dev/null 2>&1 &&
+        pwd -P
+    )" || resolved=""
+    if [[ -n "${resolved}" ]]; then
+      printf '%s\n' "${resolved}"
+      return 0
+    fi
+  done
+  echo "Unable to resolve a usable launch working directory" >&2
+  return 1
+}
 
 rpc_cli() {
   local cmd=("${CLI}")
@@ -281,12 +390,23 @@ fi
 if [[ -n "${NODE_PIDFILE}" ]]; then
   cmd+=("--node-pidfile=${NODE_PIDFILE}")
 fi
+if [[ -n "${MINING_BACKEND}" ]]; then
+  cmd+=("--backend=${MINING_BACKEND}")
+fi
+if [[ -n "${REQUIRE_BACKEND}" ]]; then
+  cmd+=("--require-backend=${REQUIRE_BACKEND}")
+fi
+cmd+=("--max-backend-fallbacks=${MAX_BACKEND_FALLBACKS}")
+if [[ -n "${GPU_INPUTS}" ]]; then
+  cmd+=("--gpu-inputs=${GPU_INPUTS}")
+fi
 if [[ -n "${CLI}" ]]; then
   cmd+=("--cli=${CLI}")
 fi
 if [[ -n "${DAEMON}" ]]; then
   cmd+=("--daemon=${DAEMON}")
 fi
+cmd+=("--daemonize=${DAEMONIZE}")
 if [[ -n "${ADDRESS}" ]]; then
   cmd+=("--address=${ADDRESS}")
 fi
@@ -294,9 +414,21 @@ if [[ -n "${ADDRESS_FILE}" ]]; then
   cmd+=("--address-file=${ADDRESS_FILE}")
 fi
 
-nohup "${cmd[@]}" >>"${OUT}" 2>>"${ERR}" </dev/null &
-loop_pid="$!"
-printf '%s\n' "${loop_pid}" > "${PIDFILE}"
+if [[ "${FOREGROUND}" == "1" ]]; then
+  exec "${cmd[@]}"
+fi
+
+LAUNCH_CWD="$(resolve_launch_cwd)"
+
+launch_detached() {
+  (
+    cd "${LAUNCH_CWD}"
+    nohup "${cmd[@]}" >>"${OUT}" 2>>"${ERR}" </dev/null &
+    printf '%s\n' "$!"
+  )
+}
+
+loop_pid="$(launch_detached)"
 
 report_start_failure() {
   echo "Live mining loop exited before startup verification completed" >&2
@@ -328,4 +460,4 @@ verify_loop_started() {
 }
 
 verify_loop_started "${loop_pid}" "${START_VERIFY_SECS}"
-printf 'Started live mining loop; pid file: %s\n' "${PIDFILE}"
+printf 'Started live mining loop; pid file: %s launch_cwd: %s\n' "${PIDFILE}" "${LAUNCH_CWD}"

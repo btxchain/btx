@@ -184,10 +184,41 @@ Element from_oracle(const uint256& seed, uint32_t index)
     return ReadLE32(fallback_hash) % MODULUS;
 }
 
+#if defined(__ARM_NEON)
+// Defense-in-depth (security audit F-4): the NEON dot kernel and the scalar reference
+// are two independent implementations of the same GF(2^31-1) reduction used in the
+// Freivalds verify path. A latent divergence between them (miscompile, edge case) would
+// be a CONSENSUS SPLIT between ARM and x86 validators -- some accept a block's matmul
+// proof, others reject it. Mirroring the Accelerate-BLAS spot-check guard in
+// matmul_pow.cpp, we verify NeonDot byte-matches ScalarDot once before trusting it, and
+// FAIL CLOSED to the scalar kernel on any mismatch. Runs once (thread-safe static init).
+static bool NeonDotSelfTest()
+{
+    constexpr uint32_t kLen = 37; // crosses the 16-wide NEON tail boundary (see NeonDot)
+    Element a[kLen];
+    Element b[kLen];
+    for (uint32_t i = 0; i < kLen; ++i) {
+        a[i] = static_cast<Element>((static_cast<uint64_t>(i) * 2654435761ull) % MODULUS);
+        b[i] = static_cast<Element>((MODULUS - 1 - ((static_cast<uint64_t>(i) * 40503ull) % MODULUS)) % MODULUS);
+    }
+    const Element neon = NeonDot(a, b, kLen);
+    const Element scalar = ScalarDot(a, b, kLen);
+    if (neon != scalar) {
+        LogPrintf("MATMUL ERROR: NEON dot kernel diverges from scalar reference "
+                  "(neon=%u scalar=%u); disabling NEON and using the scalar reduction "
+                  "(consensus-safety fail-closed)\n", neon, scalar);
+        return false;
+    }
+    return true;
+}
+#endif
+
 Element dot(const Element* a, const Element* b, uint32_t len)
 {
 #if defined(__ARM_NEON)
-    return NeonDot(a, b, len);
+    static const bool neon_trusted = NeonDotSelfTest();
+    if (neon_trusted) return NeonDot(a, b, len);
+    return ScalarDot(a, b, len);
 #else
     return ScalarDot(a, b, len);
 #endif

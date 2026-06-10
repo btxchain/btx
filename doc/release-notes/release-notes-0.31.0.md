@@ -65,7 +65,7 @@ BTX is supported on Linux, macOS 13+, and Windows 10+.
   shielded-state recovery.
 
 - Mainnet snapshot, checkpoint, `minimumchainwork`, and `assumevalid` metadata
-  have been refreshed to height 123,225 for the 0.31.0 fast-start release.
+  have been refreshed to height 120,900 for the 0.31.0 fast-start release.
 
 # Credits
 

@@ -71,6 +71,14 @@ struct BackendRuntimeStats {
     std::string last_gpu_input_error{};
 };
 
+struct BackendRequirement {
+    bool enabled{false};
+    bool valid{true};
+    backend::Kind required{backend::Kind::CPU};
+    std::string input{};
+    std::string reason{};
+};
+
 struct DigestBatchSubmission {
     bool submitted{false};
     backend::Kind backend{backend::Kind::CPU};
@@ -80,6 +88,9 @@ struct DigestBatchSubmission {
 };
 
 backend::Selection ResolveMiningBackendFromEnvironment();
+BackendRequirement ResolveBackendRequirementFromEnvironment();
+bool IsBackendRequirementSatisfied(const BackendRequirement& requirement,
+                                   const backend::Selection& selection);
 bool ShouldUseGpuGeneratedInputsForBackend(backend::Kind backend);
 bool ShouldUseGpuGeneratedInputsForShape(backend::Kind backend,
                                          uint32_t n,
