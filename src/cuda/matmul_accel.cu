@@ -716,7 +716,7 @@ __device__ __constant__ uint32_t SHA256_K[64] = {
     0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U, 0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U,
 };
 
-__device__ __forceinline__ void SetShaByte(uint32_t w[64], uint32_t offset, uint32_t byte)
+__device__ __forceinline__ void SetShaByte(uint32_t w[16], uint32_t offset, uint32_t byte)
 {
     const uint32_t word_index = offset >> 2U;
     const uint32_t shift = (3U - (offset & 3U)) * 8U;
@@ -743,12 +743,13 @@ __device__ inline void Sha256Init(uint32_t state[8])
     state[7] = 0x5be0cd19U;
 }
 
-__device__ inline void Sha256Compress(uint32_t state[8], uint32_t w[64])
+// WINDOWED SHA-256 compression: 16-word sliding schedule instead of a 64-word
+// array — the same transform as sha-windowed-scanner.patch (oracle_accel.cu),
+// applied to this file's duplicate of the SHA code. Hot via the per-candidate
+// GenerateBaseMatrixFromSeedBatchKernel (2 x n^2 = 524k compressions per
+// candidate at n=512), where the 64-word local array spills to local memory.
+__device__ inline void Sha256Compress(uint32_t state[8], uint32_t w[16])
 {
-    for (uint32_t t = 16; t < 64; ++t) {
-        w[t] = ShaSSig1(w[t - 2]) + w[t - 7] + ShaSSig0(w[t - 15]) + w[t - 16];
-    }
-
     uint32_t a = state[0];
     uint32_t b = state[1];
     uint32_t c = state[2];
@@ -758,8 +759,16 @@ __device__ inline void Sha256Compress(uint32_t state[8], uint32_t w[64])
     uint32_t g = state[6];
     uint32_t h = state[7];
 
+    #pragma unroll
     for (uint32_t t = 0; t < 64; ++t) {
-        const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[t] + w[t];
+        uint32_t wt;
+        if (t < 16) {
+            wt = w[t];
+        } else {
+            wt = ShaSSig1(w[(t - 2) & 15U]) + w[(t - 7) & 15U] + ShaSSig0(w[(t - 15) & 15U]) + w[(t - 16) & 15U];
+            w[t & 15U] = wt;
+        }
+        const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[t] + wt;
         const uint32_t t2 = ShaBSig0(a) + ShaMaj(a, b, c);
         h = g;
         g = f;
@@ -786,7 +795,7 @@ __device__ inline uint32_t CandidateFromSeedAndIndex(const DeviceSeedBytes& seed
                                                      bool with_retry,
                                                      uint32_t retry)
 {
-    uint32_t w[64] = {};
+    uint32_t w[16] = {};
     for (uint32_t i = 0; i < 32; ++i) {
         SetShaByte(w, i, seed.data[31U - i]);
     }
@@ -816,7 +825,7 @@ __device__ inline uint32_t CandidateFromSeedAndIndex(const DeviceSeedBytes& seed
 
 __device__ inline uint32_t FallbackCandidate(const DeviceSeedBytes& seed, uint32_t index)
 {
-    uint32_t w[64] = {};
+    uint32_t w[16] = {};
     for (uint32_t i = 0; i < 32; ++i) {
         SetShaByte(w, i, seed.data[31U - i]);
     }
