@@ -142,6 +142,11 @@ struct DigestWorkspace {
     Element* device_factored_rhs{nullptr};
     size_t factored_rhs_capacity{0};
 
+    // Per-seed SHA midstates for matrix generation: 16 words/seed (8 packed seed
+    // words + 8 post-round-7 state words). Tiny (batch_size * 64 B).
+    uint32_t* device_seed_midstates{nullptr};
+    size_t seed_midstates_capacity{0};
+
     HostStageBuffer host_matrix_a;
     HostStageBuffer host_matrix_b;
     HostStageBuffer host_noise_e_l;
@@ -153,6 +158,7 @@ struct DigestWorkspace {
 
     void ReleaseDeviceBuffers()
     {
+        cudaFree(device_seed_midstates);
         cudaFree(device_factored_rhs);
         cudaFree(device_output);
         cudaFree(device_compress);
@@ -168,6 +174,7 @@ struct DigestWorkspace {
         cudaFree(device_base_b);
         cudaFree(device_base_a);
 
+        device_seed_midstates = nullptr;
         device_factored_rhs = nullptr;
         device_output = nullptr;
         device_compress = nullptr;
@@ -183,6 +190,7 @@ struct DigestWorkspace {
         device_base_b = nullptr;
         device_base_a = nullptr;
 
+        seed_midstates_capacity = 0;
         factored_rhs_capacity = 0;
         output_capacity = 0;
         compress_capacity = 0;
@@ -870,6 +878,110 @@ __device__ inline uint32_t FromOracle(const DeviceSeedBytes& seed, uint32_t inde
         }
     }
     return FallbackCandidate(seed, index);
+}
+
+// --- Seed-midstate matrix generation (2-kernel form) ---
+// Every element of a base matrix hashes seed||index with the SAME 32-byte seed
+// in w[0..7]; SHA-256 rounds 0-7 consume only those words, so the post-round-7
+// state is identical across all 2^18 elements. PrecomputeSeedMidstatesKernel
+// computes it once per seed (one thread each) into a 16-word record (8 packed
+// seed words + 8 state words); the generation kernel loads those as scalars and
+// resumes each element's hash at round 8 — 8 of 64 rounds saved per element,
+// with no per-block barrier (which is why a precompute kernel beats a shared-
+// memory hoist here). Byte-identical to FromOracle's retry==0 result; the
+// ~2^-31 retry/fallback case defers to the full FromOracle path.
+
+__device__ inline void PackSeedWords(const DeviceSeedBytes& seed, uint32_t seed_w[8])
+{
+    #pragma unroll
+    for (uint32_t i = 0; i < 8; ++i) {
+        seed_w[i] = 0U;
+    }
+    for (uint32_t i = 0; i < 32; ++i) {
+        SetShaByte(seed_w, i, seed.data[31U - i]);
+    }
+}
+
+__global__ void PrecomputeSeedMidstatesKernel(const DeviceSeedBytes* seeds,
+                                              uint32_t seed_count,
+                                              uint32_t* midstates)
+{
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= seed_count) {
+        return;
+    }
+    uint32_t w[8];
+    PackSeedWords(seeds[i], w);
+    uint32_t a = 0x6a09e667U, b = 0xbb67ae85U, c = 0x3c6ef372U, d = 0xa54ff53aU;
+    uint32_t e = 0x510e527fU, f = 0x9b05688cU, g = 0x1f83d9abU, h = 0x5be0cd19U;
+    #pragma unroll
+    for (uint32_t t = 0; t < 8; ++t) {
+        const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[t] + w[t];
+        const uint32_t t2 = ShaBSig0(a) + ShaMaj(a, b, c);
+        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    uint32_t* o = midstates + static_cast<size_t>(i) * 16U;
+    o[0] = w[0]; o[1] = w[1]; o[2] = w[2]; o[3] = w[3];
+    o[4] = w[4]; o[5] = w[5]; o[6] = w[6]; o[7] = w[7];
+    o[8] = a; o[9] = b; o[10] = c; o[11] = d;
+    o[12] = e; o[13] = f; o[14] = g; o[15] = h;
+}
+
+// retry==0 candidate resuming from a precomputed midstate (loaded as scalars so
+// the window and state stay in registers — no local-memory array parameters).
+__device__ inline uint32_t CandidateFromMidstateScalars(const uint32_t* mb, uint32_t index)
+{
+    uint32_t w[16];
+    w[0] = mb[0]; w[1] = mb[1]; w[2] = mb[2]; w[3] = mb[3];
+    w[4] = mb[4]; w[5] = mb[5]; w[6] = mb[6]; w[7] = mb[7];
+    #pragma unroll
+    for (uint32_t i = 8; i < 16; ++i) {
+        w[i] = 0U;
+    }
+    SetShaByte(w, 32U, index & 0xffU);
+    SetShaByte(w, 33U, (index >> 8U) & 0xffU);
+    SetShaByte(w, 34U, (index >> 16U) & 0xffU);
+    SetShaByte(w, 35U, (index >> 24U) & 0xffU);
+    SetShaByte(w, 36U, 0x80U);
+    w[15] = 36U * 8U;
+
+    uint32_t a = mb[8], b = mb[9], c = mb[10], d = mb[11];
+    uint32_t e = mb[12], f = mb[13], g = mb[14], h = mb[15];
+    #pragma unroll
+    for (uint32_t t = 8; t < 64; ++t) {
+        uint32_t wt;
+        if (t < 16) {
+            wt = w[t];
+        } else {
+            wt = ShaSSig1(w[(t - 2) & 15U]) + w[(t - 7) & 15U] + ShaSSig0(w[(t - 15) & 15U]) + w[(t - 16) & 15U];
+            w[t & 15U] = wt;
+        }
+        const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[t] + wt;
+        const uint32_t t2 = ShaBSig0(a) + ShaMaj(a, b, c);
+        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    return Bswap32(0x6a09e667U + a) & MODULUS;
+}
+
+__global__ void GenerateBaseMatrixFromSeedMidstateKernel(const DeviceSeedBytes* seeds,
+                                                         const uint32_t* midstates,
+                                                         uint32_t n,
+                                                         size_t total_matrix_elements,
+                                                         uint32_t matrix_elements,
+                                                         Element* output_batch)
+{
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total_matrix_elements) {
+        return;
+    }
+    const uint32_t batch_index = static_cast<uint32_t>(gid / matrix_elements);
+    const uint32_t local_index = static_cast<uint32_t>(gid % matrix_elements);
+    (void)n;
+    const uint32_t* mb = midstates + static_cast<size_t>(batch_index) * 16U;
+    const uint32_t candidate = CandidateFromMidstateScalars(mb, local_index);
+    output_batch[gid] = candidate < MODULUS
+        ? candidate
+        : FromOracle(seeds[batch_index], local_index);
 }
 
 __device__ __forceinline__ void ReducePartialsInPlace(Element* partials, uint32_t tid)
@@ -2905,17 +3017,43 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
     }
 
     const uint32_t build_blocks = static_cast<uint32_t>((total_matrix_elements + WORKSPACE_THREADS - 1) / WORKSPACE_THREADS);
+    // Per-seed SHA midstate buffer (16 words/seed), reused for the A then B pass.
+    const uint32_t seed_midstate_words = request.batch_size * 16U;
+    if (!EnsureDeviceBuffer(workspace.device_seed_midstates,
+                            workspace.seed_midstates_capacity,
+                            seed_midstate_words,
+                            result.error,
+                            allocated_buffers)) {
+        return result;
+    }
+    const uint32_t midstate_blocks = (request.batch_size + WORKSPACE_THREADS - 1U) / WORKSPACE_THREADS;
     const auto build_start = SteadyClock::now();
-    GenerateBaseMatrixFromSeedBatchKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+    PrecomputeSeedMidstatesKernel<<<midstate_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
         workspace.device_seed_a,
-        request.n,
-        total_matrix_elements,
-        matrix_elements,
-        workspace.device_matrix_a);
+        request.batch_size,
+        workspace.device_seed_midstates);
     error = cudaGetLastError();
     if (error == cudaSuccess) {
-        GenerateBaseMatrixFromSeedBatchKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+        GenerateBaseMatrixFromSeedMidstateKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+            workspace.device_seed_a,
+            workspace.device_seed_midstates,
+            request.n,
+            total_matrix_elements,
+            matrix_elements,
+            workspace.device_matrix_a);
+        error = cudaGetLastError();
+    }
+    if (error == cudaSuccess) {
+        PrecomputeSeedMidstatesKernel<<<midstate_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
             workspace.device_seed_b,
+            request.batch_size,
+            workspace.device_seed_midstates);
+        error = cudaGetLastError();
+    }
+    if (error == cudaSuccess) {
+        GenerateBaseMatrixFromSeedMidstateKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+            workspace.device_seed_b,
+            workspace.device_seed_midstates,
             request.n,
             total_matrix_elements,
             matrix_elements,
