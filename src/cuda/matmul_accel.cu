@@ -1066,6 +1066,38 @@ __global__ void ComputeCompressedWordsFusedKernel(const Element* __restrict__ ma
     const Element compress_coeff = active ? compress_vec[tid] : 0;
 
     Element running_total{0};
+    if constexpr (!PrefixMode) {
+        // PRODUCT_FINAL_BLOCKS emits ONE word per block pair: the compress-
+        // weighted sum over the whole block product. Mod-field arithmetic is
+        // distributive, so fold the full length-n dot product per thread in
+        // registers and reduce across the block exactly once — instead of one
+        // shared-memory tree reduction (plus barriers) per ell iteration.
+        // Same memory-access order, same Reduce64 cadence, identical canonical
+        // mod-M31 output word.
+        if (active) {
+            uint64_t acc{0};
+            uint32_t pending{0};
+            for (uint32_t m = 0; m < n; ++m) {
+                acc += static_cast<uint64_t>(matrix_a[row_offset + m]) *
+                    matrix_b[static_cast<size_t>(m) * n + col];
+                if (++pending == REDUCE_INTERVAL) {
+                    acc = Reduce64(acc);
+                    pending = 0;
+                }
+            }
+            running_total = FieldMul(Reduce64(acc), compress_coeff);
+        }
+        partials[tid] = running_total;
+        __syncthreads();
+
+        ReducePartialsInPlace(partials, tid);
+
+        if (tid == 0) {
+            output[output_offset] = partials[0];
+        }
+        return;
+    }
+
     for (uint32_t ell = 0; ell < blocks_per_axis; ++ell) {
         Element partial{0};
         if (active) {
@@ -1143,6 +1175,38 @@ __global__ void ComputeCompressedWordsFusedPackedPointersKernel(
     const Element compress_coeff = active ? compress_vec[tid] : 0;
 
     Element running_total{0};
+    if constexpr (!PrefixMode) {
+        // PRODUCT_FINAL_BLOCKS emits ONE word per block pair: the compress-
+        // weighted sum over the whole block product. Mod-field arithmetic is
+        // distributive, so fold the full length-n dot product per thread in
+        // registers and reduce across the block exactly once — instead of one
+        // shared-memory tree reduction (plus barriers) per ell iteration.
+        // Same memory-access order, same Reduce64 cadence, identical canonical
+        // mod-M31 output word.
+        if (active) {
+            uint64_t acc{0};
+            uint32_t pending{0};
+            for (uint32_t m = 0; m < n; ++m) {
+                acc += static_cast<uint64_t>(matrix_a[row_offset + m]) *
+                    matrix_b[static_cast<size_t>(m) * n + col];
+                if (++pending == REDUCE_INTERVAL) {
+                    acc = Reduce64(acc);
+                    pending = 0;
+                }
+            }
+            running_total = FieldMul(Reduce64(acc), compress_coeff);
+        }
+        partials[tid] = running_total;
+        __syncthreads();
+
+        ReducePartialsInPlace(partials, tid);
+
+        if (tid == 0) {
+            output[output_offset] = partials[0];
+        }
+        return;
+    }
+
     for (uint32_t ell = 0; ell < blocks_per_axis; ++ell) {
         Element partial{0};
         if (active) {
