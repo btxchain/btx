@@ -36,11 +36,29 @@ BOOTSTRAP_ADDNODES="${BTX_MINING_BOOTSTRAP_ADDNODES:-${BTX_MINING_BOOTSTRAP_PEER
 MAX_LOOPS="${BTX_MINING_MAX_LOOPS:-0}"
 SHOULD_MINE_COMMAND="${BTX_MINING_SHOULD_MINE_COMMAND:-}"
 NODE_PIDFILE="${BTX_MINING_NODE_PIDFILE:-}"
+MINING_BACKEND="${BTX_MINING_BACKEND:-${BTX_MATMUL_BACKEND:-}}"
+REQUIRE_BACKEND="${BTX_MINING_REQUIRE_BACKEND:-${BTX_MATMUL_REQUIRE_BACKEND:-}}"
+MAX_BACKEND_FALLBACKS="${BTX_MINING_MAX_BACKEND_FALLBACKS:-0}"
+GPU_INPUTS="${BTX_MINING_GPU_INPUTS:-${BTX_MATMUL_GPU_INPUTS:-}}"
+HOST_OS="${BTX_MINING_HOST_OS_FOR_TEST:-$(uname -s 2>/dev/null || true)}"
+HOST_ARCH="${BTX_MINING_HOST_ARCH_FOR_TEST:-$(uname -m 2>/dev/null || true)}"
+APPLE_SILICON_MINING_DEFAULTS=0
+if [[ "${HOST_OS}" == "Darwin" && "${HOST_ARCH}" == "arm64" ]]; then
+  APPLE_SILICON_MINING_DEFAULTS=1
+  MINING_BACKEND="${MINING_BACKEND:-metal}"
+  REQUIRE_BACKEND="${REQUIRE_BACKEND:-metal}"
+  GPU_INPUTS="${GPU_INPUTS:-1}"
+fi
 
 CLI="${BTX_MINING_CLI:-btx-cli}"
 DAEMON="${BTX_MINING_DAEMON:-btxd}"
 START_CMD="${BTX_MINING_START_CMD:-}"
 DAEMON_ARGS="${BTX_MINING_DAEMON_ARGS:-}"
+if (( APPLE_SILICON_MINING_DEFAULTS )); then
+  DAEMONIZE="${BTX_MINING_DAEMONIZE:-0}"
+else
+  DAEMONIZE="${BTX_MINING_DAEMONIZE:-1}"
+fi
 
 print_usage() {
   cat <<EOF
@@ -65,8 +83,13 @@ Options:
   --results-dir=PATH        Directory for pid/log/health files
   --should-mine-command=CMD Idle gate command; mine only when it exits 0
   --node-pidfile=PATH       PID file for the supervised daemon
+  --backend=NAME            Set BTX_MATMUL_BACKEND for supervised daemon starts (Apple Silicon default: metal)
+  --require-backend=NAME    Fail closed unless getmininginfo reports this backend active (Apple Silicon default: metal)
+  --max-backend-fallbacks=N Maximum GPU-to-CPU fallbacks allowed when backend is required (default: 0)
+  --gpu-inputs=auto|0|1     Set BTX_MATMUL_GPU_INPUTS for host-tuned GPU input generation (Apple Silicon default: 1)
   --cli=PATH                Path to btx-cli (default: btx-cli)
   --daemon=PATH             Path to btxd (default: btxd)
+  --daemonize=0|1           Start btxd with -daemon (default: 1; Apple Silicon default: 0)
   --help, -h                Show this help text
 EOF
 }
@@ -122,8 +145,23 @@ for arg in "$@"; do
     --node-pidfile=*)
       NODE_PIDFILE="${arg#*=}"
       ;;
+    --backend=*)
+      MINING_BACKEND="${arg#*=}"
+      ;;
+    --require-backend=*)
+      REQUIRE_BACKEND="${arg#*=}"
+      ;;
+    --max-backend-fallbacks=*)
+      MAX_BACKEND_FALLBACKS="${arg#*=}"
+      ;;
+    --gpu-inputs=*)
+      GPU_INPUTS="${arg#*=}"
+      ;;
     --daemon=*)
       DAEMON="${arg#*=}"
+      ;;
+    --daemonize=*)
+      DAEMONIZE="${arg#*=}"
       ;;
     --cli=*)
       CLI="${arg#*=}"
@@ -152,6 +190,45 @@ PEER_CACHE_FILE="${RESULTS_DIR}/live-peer-cache.txt"
 
 if [[ -z "${NODE_PIDFILE}" ]]; then
   NODE_PIDFILE="${RESULTS_DIR}/btxd-supervised.pid"
+fi
+
+REQUIRE_BACKEND_NORMALIZED="$(printf '%s' "${REQUIRE_BACKEND}" | tr 'A-Z' 'a-z')"
+if [[ -n "${REQUIRE_BACKEND}" && -z "${MINING_BACKEND}" ]]; then
+  case "${REQUIRE_BACKEND_NORMALIZED}" in
+    1|true|yes|on|0|false|no|off|none|disabled)
+      ;;
+    *)
+      MINING_BACKEND="${REQUIRE_BACKEND}"
+      ;;
+  esac
+fi
+if [[ -n "${MINING_BACKEND}" ]]; then
+  export BTX_MATMUL_BACKEND="${MINING_BACKEND}"
+fi
+if [[ -n "${REQUIRE_BACKEND}" ]]; then
+  export BTX_MATMUL_REQUIRE_BACKEND="${REQUIRE_BACKEND}"
+fi
+if [[ -n "${GPU_INPUTS}" ]]; then
+  export BTX_MATMUL_GPU_INPUTS="${GPU_INPUTS}"
+fi
+if ! [[ "${MAX_BACKEND_FALLBACKS}" =~ ^[0-9]+$ ]]; then
+  echo "Invalid --max-backend-fallbacks value: ${MAX_BACKEND_FALLBACKS}" >&2
+  exit 1
+fi
+if [[ -n "${GPU_INPUTS}" ]]; then
+  gpu_inputs_normalized="$(printf '%s' "${GPU_INPUTS}" | tr 'A-Z' 'a-z')"
+  case "${gpu_inputs_normalized}" in
+    auto|1|true|yes|on|0|false|no|off)
+      ;;
+    *)
+      echo "Invalid --gpu-inputs value: ${GPU_INPUTS}" >&2
+      exit 1
+      ;;
+  esac
+fi
+if [[ "${DAEMONIZE}" != "0" && "${DAEMONIZE}" != "1" ]]; then
+  echo "Invalid --daemonize value: ${DAEMONIZE}" >&2
+  exit 1
 fi
 
 touch "${LOG}" "${ERR}" "${HEALTH_LOG}"
@@ -358,7 +435,10 @@ start_node() {
   fi
 
   require_command "${DAEMON}"
-  local cmd=("${DAEMON}" "-daemon" "-maxconnections=${MAXCONNECTIONS}" "-pid=${NODE_PIDFILE}")
+  local cmd=("${DAEMON}" "-maxconnections=${MAXCONNECTIONS}" "-pid=${NODE_PIDFILE}")
+  if [[ "${DAEMONIZE}" == "1" ]]; then
+    cmd+=("-daemon")
+  fi
   if [[ -n "${DATADIR}" ]]; then
     cmd+=("-datadir=${DATADIR}")
   fi
@@ -385,7 +465,13 @@ start_node() {
     local extra=( ${DAEMON_ARGS} )
     cmd+=("${extra[@]}")
   fi
-  "${cmd[@]}" >>"${LOG}" 2>>"${ERR}"
+  if [[ "${DAEMONIZE}" == "1" ]]; then
+    "${cmd[@]}" >>"${LOG}" 2>>"${ERR}"
+    return
+  fi
+
+  nohup "${cmd[@]}" >>"${LOG}" 2>>"${ERR}" </dev/null &
+  printf '%s\n' "$!" > "${NODE_PIDFILE}"
 }
 
 read_supervised_node_pid() {
@@ -871,6 +957,116 @@ refresh_mininginfo() {
   return 1
 }
 
+normalize_backend_label() {
+  printf '%s' "${1:-}" | tr 'A-Z' 'a-z'
+}
+
+resolved_required_backend_label() {
+  local required
+  required="$(normalize_backend_label "${REQUIRE_BACKEND}")"
+  case "${required}" in
+    1|true|yes|on)
+      if [[ -n "${MINING_BACKEND}" ]]; then
+        normalize_backend_label "${MINING_BACKEND}"
+      elif [[ "$(uname -s)" == "Darwin" ]]; then
+        printf 'metal\n'
+      else
+        printf 'cpu\n'
+      fi
+      ;;
+    0|false|no|off|none|disabled)
+      printf '\n'
+      ;;
+    *)
+      printf '%s\n' "${required}"
+      ;;
+  esac
+}
+
+backend_fallback_count_for() {
+  local backend="$1"
+  case "${backend}" in
+    metal)
+      jq -r '(.backend_runtime.metal_fallbacks_to_cpu // 0) + (.backend_runtime.metal_nonce_seed_scan_fallbacks_to_cpu // 0)' <<<"${LAST_MININGINFO_JSON}"
+      ;;
+    cuda)
+      jq -r '(.backend_runtime.cuda_fallbacks_to_cpu // 0) + (.backend_runtime.cuda_nonce_seed_scan_fallbacks_to_cpu // 0)' <<<"${LAST_MININGINFO_JSON}"
+      ;;
+    *)
+      printf '0\n'
+      ;;
+  esac
+}
+
+check_backend_runtime_health() {
+  local requested
+  local active
+  local reason
+  local requirement_satisfied
+  local required
+  local fallback_count
+  local state
+  local metal_fallbacks
+  local cuda_fallbacks
+  local metal_prehash_fallbacks
+  local cuda_prehash_fallbacks
+
+  requested="$(jq -r '.backend_runtime.requested_backend // empty' <<<"${LAST_MININGINFO_JSON}")"
+  active="$(jq -r '.backend_runtime.active_backend // empty' <<<"${LAST_MININGINFO_JSON}")"
+  reason="$(jq -r '.backend_runtime.backend_selection_reason // empty' <<<"${LAST_MININGINFO_JSON}")"
+  requirement_satisfied="$(jq -r '.backend_runtime.required_backend_satisfied // true' <<<"${LAST_MININGINFO_JSON}")"
+
+  state="requested=${requested:-missing} active=${active:-missing} reason=${reason:-missing}"
+  if [[ "${state}" != "${last_backend_state}" ]]; then
+    log_health "backend-runtime ${state}"
+    last_backend_state="${state}"
+  fi
+
+  metal_fallbacks="$(jq -r '.backend_runtime.metal_fallbacks_to_cpu // 0' <<<"${LAST_MININGINFO_JSON}")"
+  cuda_fallbacks="$(jq -r '.backend_runtime.cuda_fallbacks_to_cpu // 0' <<<"${LAST_MININGINFO_JSON}")"
+  metal_prehash_fallbacks="$(jq -r '.backend_runtime.metal_nonce_seed_scan_fallbacks_to_cpu // 0' <<<"${LAST_MININGINFO_JSON}")"
+  cuda_prehash_fallbacks="$(jq -r '.backend_runtime.cuda_nonce_seed_scan_fallbacks_to_cpu // 0' <<<"${LAST_MININGINFO_JSON}")"
+  if (( metal_fallbacks > last_metal_fallbacks )); then
+    log_health "backend-metal-fallbacks total=${metal_fallbacks} last_error=$(jq -r '.backend_runtime.last_metal_fallback_error // empty' <<<"${LAST_MININGINFO_JSON}")"
+    last_metal_fallbacks="${metal_fallbacks}"
+  fi
+  if (( cuda_fallbacks > last_cuda_fallbacks )); then
+    log_health "backend-cuda-fallbacks total=${cuda_fallbacks} last_error=$(jq -r '.backend_runtime.last_cuda_fallback_error // empty' <<<"${LAST_MININGINFO_JSON}")"
+    last_cuda_fallbacks="${cuda_fallbacks}"
+  fi
+  if (( metal_prehash_fallbacks > last_metal_prehash_fallbacks )); then
+    log_health "backend-metal-prehash-fallbacks total=${metal_prehash_fallbacks} last_error=$(jq -r '.backend_runtime.last_gpu_prehash_scan_error // empty' <<<"${LAST_MININGINFO_JSON}")"
+    last_metal_prehash_fallbacks="${metal_prehash_fallbacks}"
+  fi
+  if (( cuda_prehash_fallbacks > last_cuda_prehash_fallbacks )); then
+    log_health "backend-cuda-prehash-fallbacks total=${cuda_prehash_fallbacks} last_error=$(jq -r '.backend_runtime.last_gpu_prehash_scan_error // empty' <<<"${LAST_MININGINFO_JSON}")"
+    last_cuda_prehash_fallbacks="${cuda_prehash_fallbacks}"
+  fi
+
+  required="$(resolved_required_backend_label)"
+  if [[ -z "${required}" ]]; then
+    return 0
+  fi
+  if [[ -z "${active}" ]]; then
+    log_health "backend-requirement-failed required=${required} active=missing reason=backend_runtime_missing"
+    exit 1
+  fi
+  if [[ "${active}" != "${required}" ]]; then
+    log_health "backend-requirement-failed required=${required} active=${active} requested=${requested:-missing} reason=${reason:-missing}"
+    exit 1
+  fi
+  if [[ "${requirement_satisfied}" != "true" ]]; then
+    log_health "backend-requirement-failed required=${required} active=${active} reason=requirement_not_satisfied"
+    exit 1
+  fi
+
+  fallback_count="$(backend_fallback_count_for "${required}")"
+  if (( fallback_count > MAX_BACKEND_FALLBACKS )); then
+    log_health "backend-requirement-failed required=${required} fallbacks=${fallback_count} max=${MAX_BACKEND_FALLBACKS}"
+    exit 1
+  fi
+}
+
 check_runtime_health() {
   local healthy
   local pause
@@ -915,6 +1111,7 @@ check_runtime_health() {
   peer_count="$(jq -r '.chain_guard.peer_count // 0' <<<"${LAST_MININGINFO_JSON}")"
   near_tip_peers="$(jq -r '.chain_guard.near_tip_peers // 0' <<<"${LAST_MININGINFO_JSON}")"
   now="$(date +%s)"
+  check_backend_runtime_health
   update_chain_progress "${now}" "${local_tip}" "${peer_count}"
 
   if [[ "${healthy}" == "true" && "${pause}" == "false" ]]; then
@@ -956,6 +1153,11 @@ LAST_MININGINFO_JSON=''
 last_should_mine_state="unknown"
 last_rpc_fault_state="unknown"
 last_health_reason="unknown"
+last_backend_state="unknown"
+last_metal_fallbacks=0
+last_cuda_fallbacks=0
+last_metal_prehash_fallbacks=0
+last_cuda_prehash_fallbacks=0
 same_reason_streak=0
 last_local_tip=-1
 last_tip_progress_epoch="$(date +%s)"
@@ -963,9 +1165,16 @@ last_peer_seen_epoch="$(date +%s)"
 last_peer_refresh_epoch=0
 
 printf '%s\n' "$$" > "${PIDFILE}"
-trap 'rm -f "${PIDFILE}"' EXIT
+cleanup_loop() {
+  local status="$?"
+  log_health "loop-stop status=${status}"
+  rm -f "${PIDFILE}"
+}
+trap cleanup_loop EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
-log_health "loop-start datadir=${DATADIR:-default} wallet=${WALLET} rpc_restart_threshold=${RPC_RESTART_THRESHOLD} health_restart_threshold=${HEALTH_RESTART_THRESHOLD} peer_remediation_threshold=${PEER_REMEDIATION_THRESHOLD} peer_cache_limit=${PEER_CACHE_LIMIT} peer_refresh_limit=${PEER_REFRESH_LIMIT} healthy_public_peer_target=${HEALTHY_PUBLIC_PEER_TARGET} healthy_full_relay_peer_target=${HEALTHY_FULL_RELAY_PEER_TARGET} sync_stall_restart_secs=${SYNC_STALL_RESTART_SECS} maxconnections=${MAXCONNECTIONS} startup_grace=${STARTUP_GRACE_SECS} node_pidfile=${NODE_PIDFILE}"
+log_health "loop-start datadir=${DATADIR:-default} wallet=${WALLET} rpc_restart_threshold=${RPC_RESTART_THRESHOLD} health_restart_threshold=${HEALTH_RESTART_THRESHOLD} peer_remediation_threshold=${PEER_REMEDIATION_THRESHOLD} peer_cache_limit=${PEER_CACHE_LIMIT} peer_refresh_limit=${PEER_REFRESH_LIMIT} healthy_public_peer_target=${HEALTHY_PUBLIC_PEER_TARGET} healthy_full_relay_peer_target=${HEALTHY_FULL_RELAY_PEER_TARGET} sync_stall_restart_secs=${SYNC_STALL_RESTART_SECS} maxconnections=${MAXCONNECTIONS} startup_grace=${STARTUP_GRACE_SECS} node_pidfile=${NODE_PIDFILE} daemonize=${DAEMONIZE} backend=${MINING_BACKEND:-auto} require_backend=${REQUIRE_BACKEND:-none} max_backend_fallbacks=${MAX_BACKEND_FALLBACKS} gpu_inputs=${GPU_INPUTS:-auto} apple_silicon_defaults=${APPLE_SILICON_MINING_DEFAULTS}"
 
 while true; do
   ((loop_count += 1))

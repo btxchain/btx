@@ -1129,17 +1129,32 @@ static UniValue BuildReorgProtectionProfile(const ChainstateManager& chainman) E
     const Consensus::Params& consensus = chainman.GetConsensus();
     const CBlockIndex* const active_tip = chainman.ActiveChain().Tip();
     const int current_tip_height = active_tip != nullptr ? active_tip->nHeight : -1;
+    // Effective deep-reorg alarm threshold: operator override (-maxreorgdepthwarn)
+    // takes precedence over the chain's consensus nMaxReorgDepth.
+    const auto& cm_opts = chainman.m_options;
+    const uint32_t effective_threshold =
+        cm_opts.max_reorg_depth_warn.has_value()
+            ? *cm_opts.max_reorg_depth_warn
+            : consensus.nMaxReorgDepth;
     const bool enabled =
-        consensus.nMaxReorgDepth != std::numeric_limits<uint32_t>::max() &&
+        effective_threshold != std::numeric_limits<uint32_t>::max() &&
         consensus.nReorgProtectionStartHeight != std::numeric_limits<int32_t>::max();
+    const bool park = cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK;
     const auto stats = ProbeReorgProtectionRuntimeStats();
 
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("enabled", enabled);
     obj.pushKV("active", enabled && current_tip_height >= consensus.nReorgProtectionStartHeight);
+    // Per-node action: "warn" (default, Nakamoto-safe, follows most-work) or
+    // "park" (opt-in -parkdeepreorg, refuses deep auto-reorg; local finality).
+    obj.pushKV("action", park ? "park" : "warn");
     obj.pushKV("current_tip_height", current_tip_height);
     obj.pushKV("start_height", enabled ? consensus.nReorgProtectionStartHeight : -1);
-    obj.pushKV("max_reorg_depth", enabled ? static_cast<int64_t>(consensus.nMaxReorgDepth) : 0);
+    obj.pushKV("max_reorg_depth", enabled ? static_cast<int64_t>(effective_threshold) : 0);
+    obj.pushKV("consensus_max_reorg_depth",
+               consensus.nMaxReorgDepth != std::numeric_limits<uint32_t>::max()
+                   ? static_cast<int64_t>(consensus.nMaxReorgDepth)
+                   : 0);
     obj.pushKV("rejected_reorgs", stats.rejected_reorgs);
     obj.pushKV("deepest_rejected_reorg_depth", static_cast<int64_t>(stats.deepest_rejected_reorg_depth));
     obj.pushKV("last_rejected_reorg_depth", static_cast<int64_t>(stats.last_rejected_reorg_depth));
@@ -1254,6 +1269,7 @@ static UniValue ConsensusGuardAlerts(const CChain& active_chain, const Consensus
 static UniValue BuildBackendRuntimeProfile()
 {
     const auto stats = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
+    const auto prehash_stats = ProbeMatMulGpuPreHashScanStats();
     UniValue obj(UniValue::VOBJ);
     // Surface the daemon's OWN resolved mining backend + reason so a silent fallback to CPU is
     // visible here (issue #43): when active_backend != requested_backend (e.g. requested=metal but
@@ -1261,9 +1277,23 @@ static UniValue BuildBackendRuntimeProfile()
     // the separate btx-matmul-backend-info process, which resolves Metal in a different context and
     // can disagree with the mining daemon.
     const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
+    const auto backend_requirement = matmul::accelerated::ResolveBackendRequirementFromEnvironment();
     obj.pushKV("requested_backend", matmul::backend::ToString(backend_selection.requested));
     obj.pushKV("active_backend", matmul::backend::ToString(backend_selection.active));
     obj.pushKV("backend_selection_reason", backend_selection.reason);
+    obj.pushKV("required_backend_enabled", backend_requirement.enabled);
+    obj.pushKV(
+        "required_backend",
+        backend_requirement.enabled && backend_requirement.valid
+            ? matmul::backend::ToString(backend_requirement.required)
+            : std::string{});
+    obj.pushKV("required_backend_valid", backend_requirement.valid);
+    obj.pushKV(
+        "required_backend_satisfied",
+        matmul::accelerated::IsBackendRequirementSatisfied(
+            backend_requirement,
+            backend_selection));
+    obj.pushKV("backend_requirement_reason", backend_requirement.reason);
     obj.pushKV("digest_requests", stats.digest_requests);
     obj.pushKV("requested_cpu", stats.requested_cpu);
     obj.pushKV("requested_metal", stats.requested_metal);
@@ -1281,6 +1311,13 @@ static UniValue BuildBackendRuntimeProfile()
     obj.pushKV("gpu_input_generation_failures", stats.gpu_input_generation_failures);
     obj.pushKV("gpu_input_auto_disabled_skips", stats.gpu_input_auto_disabled_skips);
     obj.pushKV("gpu_input_auto_disabled", stats.gpu_input_auto_disabled);
+    obj.pushKV("gpu_prehash_scan_attempts", prehash_stats.attempts);
+    obj.pushKV("gpu_prehash_scan_successes", prehash_stats.successes);
+    obj.pushKV("gpu_prehash_scan_failures", prehash_stats.failures);
+    obj.pushKV("metal_nonce_seed_scan_fallbacks_to_cpu", prehash_stats.metal_fallbacks_to_cpu);
+    obj.pushKV("cuda_nonce_seed_scan_fallbacks_to_cpu", prehash_stats.cuda_fallbacks_to_cpu);
+    obj.pushKV("last_gpu_prehash_scan_backend", prehash_stats.last_backend);
+    obj.pushKV("last_gpu_prehash_scan_error", prehash_stats.last_error);
     obj.pushKV("last_metal_fallback_error", stats.last_metal_fallback_error);
     obj.pushKV("last_cuda_fallback_error", stats.last_cuda_fallback_error);
     obj.pushKV("last_gpu_input_error", stats.last_gpu_input_error);
@@ -4951,6 +4988,29 @@ static RPCHelpMan getmininginfo()
                             {RPCResult::Type::NUM, "best_peer_tip", "Highest tip height advertised by considered outbound peers, or -1 if unavailable"},
                             {RPCResult::Type::NUM, "near_tip_peers", "Considered outbound peers within the near-tip window of the local tip"},
                         }},
+                        {RPCResult::Type::OBJ, "backend_runtime", "MatMul mining backend resolution and fallback counters",
+                        {
+                            {RPCResult::Type::STR, "requested_backend", "Mining backend requested by the daemon (cpu/metal/cuda)"},
+                            {RPCResult::Type::STR, "active_backend", "Mining backend the daemon actually resolved to"},
+                            {RPCResult::Type::STR, "backend_selection_reason", "Why the active backend was selected"},
+                            {RPCResult::Type::BOOL, "required_backend_enabled", "Whether BTX_MATMUL_REQUIRE_BACKEND is active"},
+                            {RPCResult::Type::STR, "required_backend", "Required backend when enabled"},
+                            {RPCResult::Type::BOOL, "required_backend_valid", "Whether the required backend name is recognized"},
+                            {RPCResult::Type::BOOL, "required_backend_satisfied", "Whether the daemon's active backend satisfies the requirement"},
+                            {RPCResult::Type::STR, "backend_requirement_reason", "Requirement parsing or enforcement reason"},
+                            {RPCResult::Type::NUM, "digest_requests", "Digest requests served"},
+                            {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU"},
+                            {RPCResult::Type::NUM, "requested_metal", "Digest requests targeting Metal"},
+                            {RPCResult::Type::NUM, "requested_cuda", "Digest requests targeting CUDA"},
+                            {RPCResult::Type::NUM, "requested_unknown", "Digest requests targeting an unknown backend"},
+                            {RPCResult::Type::NUM, "metal_successes", "Successful Metal digest computations"},
+                            {RPCResult::Type::NUM, "metal_fallbacks_to_cpu", "Metal requests that fell back to CPU"},
+                            {RPCResult::Type::NUM, "metal_digest_mismatches", "Metal digest mismatches detected"},
+                            {RPCResult::Type::NUM, "cuda_successes", "Successful CUDA digest computations"},
+                            {RPCResult::Type::NUM, "cuda_fallbacks_to_cpu", "CUDA requests that fell back to CPU"},
+                            {RPCResult::Type::STR, "last_metal_fallback_error", "Most recent Metal fallback error"},
+                            {RPCResult::Type::STR, "last_cuda_fallback_error", "Most recent CUDA fallback error"},
+                        }},
                         {RPCResult::Type::OBJ, "time_policy", "Timestamp policy for the next block",
                         {
                             {RPCResult::Type::NUM, "height", "The next block height"},
@@ -5035,6 +5095,7 @@ static RPCHelpMan getmininginfo()
         obj.pushKV("matmul_r", static_cast<int64_t>(chainman.GetConsensus().nMatMulNoiseRank));
     }
     obj.pushKV("chain_guard", MiningChainGuardToJSON(chain_guard_status));
+    obj.pushKV("backend_runtime", BuildBackendRuntimeProfile());
     int next_height_for_policy{0};
     if (!TryGetNextBlockHeight(&tip, next_height_for_policy)) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, "next block height overflow");

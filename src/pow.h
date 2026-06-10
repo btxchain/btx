@@ -66,6 +66,16 @@ struct MatMulSolvePipelineStats {
     uint64_t batched_nonce_attempts{0};
 };
 
+struct MatMulGpuPreHashScanStats {
+    uint64_t attempts{0};
+    uint64_t successes{0};
+    uint64_t failures{0};
+    uint64_t metal_fallbacks_to_cpu{0};
+    uint64_t cuda_fallbacks_to_cpu{0};
+    std::string last_backend{};
+    std::string last_error{};
+};
+
 struct MatMulDigestCompareStats {
     bool enabled{false};
     uint64_t compared_attempts{0};
@@ -209,6 +219,8 @@ bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus:
 bool ConsumeGlobalMatMulPhase2Budget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
 MatMulSolvePipelineStats ProbeMatMulSolvePipelineStats();
 void ResetMatMulSolvePipelineStats();
+MatMulGpuPreHashScanStats ProbeMatMulGpuPreHashScanStats();
+void ResetMatMulGpuPreHashScanStats();
 MatMulDigestCompareStats ProbeMatMulDigestCompareStats();
 void ResetMatMulDigestCompareStats();
 MatMulSolveRuntimeStats ProbeMatMulSolveRuntimeStats();

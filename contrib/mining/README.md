@@ -12,7 +12,7 @@ helpers in this directory. Those docs cover the profile-based challenge catalog
 and the `issuematmulservicechallengeprofile` issuance path.
 
 Included scripts:
-- `start-live-mining.sh`: starts the health-aware local mining supervisor in the background after preflighting `jq`, and now auto-creates / loads the mining wallet plus address file when you do not pass `--address` or `--address-file`.
+- `start-live-mining.sh`: starts the health-aware local mining supervisor in the background after preflighting `jq`, and now auto-creates / loads the mining wallet plus address file when you do not pass `--address` or `--address-file`. Use `--foreground` when a service manager such as launchd, systemd, or tmux should supervise the loop process directly.
 - `live-mining-loop.sh`: continuously mines to a configured address while watching `getmininginfo.chain_guard` and an optional local idleness gate.
 - `live-mining-loop.py`: a leaner RPC-keepalive variant of `live-mining-loop.sh`. A single long-running Python process holds one HTTP connection to the JSON-RPC endpoint instead of forking `btx-cli` once per iteration. Use this when the per-spawn cost of the shell loop is the dominant operational concern — for example, on macOS hosts where every fork triggers `syspolicyd` and `XprotectService` malware checks, which at one-second cadence can keep those system services warm continuously and induce thermal throttling. It does not include the supervisor's chain-guard reaction, peer remediation, or daemon restart logic, so it expects a separately-monitored healthy node.
 - `stop-live-mining.sh`: stops the supervisor and any lingering `generatetoaddress` worker.
@@ -21,6 +21,13 @@ Included scripts:
 
 Best practices:
 - Mine only when the node is healthy and near tip. Watch `getmininginfo.chain_guard`.
+- On Apple Silicon mining hosts, the supervisor now defaults to the strict
+  optimized Metal posture: `BTX_MATMUL_BACKEND=metal`,
+  `BTX_MATMUL_REQUIRE_BACKEND=metal`, `BTX_MATMUL_GPU_INPUTS=1`,
+  `--daemonize=0`, and `--max-backend-fallbacks=0`. The loop fails closed if
+  `getmininginfo.backend_runtime.active_backend` is not `metal` or if Metal
+  records any digest or nonce-seed pre-hash GPU-to-CPU fallback. Override those
+  defaults only for controlled benchmarking or a host-specific workaround.
 - Avoid `connect=`-only islands for normal operation; prefer normal peer discovery plus optional `addnode=` hints.
 - Keep the mining reward wallet backed up with descriptors, not just the SQLite wallet file.
 - Prefer `btxd` / `btx-cli` in automation and service files.
@@ -45,6 +52,12 @@ Best practices:
 - `stop-live-mining.sh` now only stops the supervised loop PID recorded in the
   results directory, so shutting down one helper instance does not kill
   unrelated `btxd` or `btx-cli generatetoaddress` processes on the same host.
+- When a process supervisor starts mining at boot or login, run
+  `start-live-mining.sh --foreground` from a stable `WorkingDirectory` and let
+  the supervisor restart that process. Detached mode is intended for interactive
+  starts; it records its child PID and forces that child to start from
+  `--launch-cwd` or the results directory so it does not inherit an unusable
+  working directory from a stale terminal, mount, or macOS privacy boundary.
 - `live-mining-loop.sh` now treats chain-guard reasons differently: it still
   pauses mining when consensus is weak or the node is behind tip, but it no
   longer thrashes the daemon just because peer consensus is temporarily weak or
@@ -71,7 +84,7 @@ Quick start:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.32.3 \
+  --release-tag v0.32.4 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"

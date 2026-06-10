@@ -450,6 +450,12 @@ exit 0
 """
 
 
+PREBUILT_BAD_BTXD = """#!/bin/sh
+if [ "${1:-}" = "--version" ]; then exit 137; fi
+exit 1
+"""
+
+
 def host_platform_keys():
     """Mirror detect_platform_keys() in install.sh for this host."""
     sysname = platform.system()
@@ -472,11 +478,11 @@ def host_platform_keys():
     return keys
 
 
-def build_prebuilt_tarball(tmp, tar_path):
+def build_prebuilt_tarball(tmp, tar_path, *, bad_btxd=False):
     staging = tmp / "prebuilt-staging"
     bindir = staging / "bin"
     bindir.mkdir(parents=True)
-    write_executable(bindir / "btxd", PREBUILT_BTXD)
+    write_executable(bindir / "btxd", PREBUILT_BAD_BTXD if bad_btxd else PREBUILT_BTXD)
     write_executable(bindir / "btx-cli", PREBUILT_BTXCLI)
     with tarfile.open(tar_path, "w:gz") as tar:
         tar.add(bindir / "btxd", arcname="bin/btxd")
@@ -527,11 +533,11 @@ def test_unhealthy_restart_triggers_rollback_path():
             _kill_datadir_daemon(scenario.target_datadir)
 
 
-def _add_prebuilt_to_manifest(scenario):
+def _add_prebuilt_to_manifest(scenario, *, bad_btxd=False):
     """Augment the scenario's signed manifest with a prebuilt entry for this host, returning the
     platform key used."""
     tar_path = scenario.origin / "btx-prebuilt.tar.gz"
-    build_prebuilt_tarball(scenario.tmp, tar_path)
+    build_prebuilt_tarball(scenario.tmp, tar_path, bad_btxd=bad_btxd)
     (scenario.origin / "btx-prebuilt.tar.gz.sig").write_text("signature\n", encoding="utf8")
     key = host_platform_keys()[0]
     manifest = json.loads((scenario.origin / "version.txt").read_text(encoding="utf8"))
@@ -592,6 +598,28 @@ def test_prebuilt_falls_back_to_source_when_disabled():
             _kill_datadir_daemon(scenario.target_datadir)
 
 
+def test_unusable_prebuilt_falls_back_to_source_build():
+    with Scenario("prebuilt-unusable", {"BTX_AUTO_RESTART": "1"}) as scenario:
+        try:
+            _add_prebuilt_to_manifest(scenario, bad_btxd=True)
+            result = scenario.run_installer()
+            assert_success(result)
+
+            actions = scenario.action_log.read_text(encoding="utf8") if scenario.action_log.exists() else ""
+            if "--build" not in actions:
+                raise AssertionError(f"expected source build fallback after unusable prebuilt:\n{actions}")
+
+            release_manifest = json.loads((scenario.tmp / "install" / "current" / "manifest.json").read_text(encoding="utf8"))
+            if release_manifest.get("source") == "prebuilt":
+                raise AssertionError("installed unusable prebuilt instead of source build fallback")
+
+            status = (scenario.tmp / "install" / "status.jsonl").read_text(encoding="utf8")
+            if '"stage": "prebuilt", "state": "rejected"' not in status:
+                raise AssertionError(f"status log missing rejected prebuilt record:\n{status}")
+        finally:
+            _kill_datadir_daemon(scenario.target_datadir)
+
+
 def main():
     if not INSTALLER.exists():
         raise SystemExit(f"installer not found: {INSTALLER}")
@@ -605,6 +633,7 @@ def main():
         test_unhealthy_restart_triggers_rollback_path,
         test_prebuilt_binary_is_used_without_source_build,
         test_prebuilt_falls_back_to_source_when_disabled,
+        test_unusable_prebuilt_falls_back_to_source_build,
     ]
     for test in tests:
         test()

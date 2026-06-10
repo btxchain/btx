@@ -36,6 +36,27 @@ enum class MatMulValidationMode {
     SPV,
 };
 
+//! What a node does when an incoming branch would reorg the active chain deeper
+//! than the deep-reorg threshold (-maxreorgdepthwarn, default = consensus
+//! nMaxReorgDepth).
+//!
+//! WARN (default, Nakamoto-safe): emit a loud warning + RPC/notification and
+//!   still follow the most-work chain. This buys operators/exchanges response
+//!   time WITHOUT introducing any finality assumption, so it can never split the
+//!   network: every honest node, regardless of how it was partitioned, still
+//!   converges on the single most-work chain.
+//!
+//! PARK (opt-in, -parkdeepreorg=1): refuse to auto-switch to the deeper branch
+//!   and stay on the current tip pending operator action, while still tracking
+//!   the branch in the block index. This protects a single node from a silent
+//!   deep rewrite, but it is a LOCAL FINALITY assumption: see the split-risk
+//!   memo at the call site. It is per-node, non-consensus, and OFF by default so
+//!   the network's default behavior remains pure Nakamoto consensus.
+enum class DeepReorgAction {
+    WARN,
+    PARK,
+};
+
 /**
  * An options struct for `ChainstateManager`, more ergonomically referred to as
  * `ChainstateManager::Options` due to the using-declaration in
@@ -74,6 +95,15 @@ struct ChainstateManagerOpts {
     //! so an unpinned shielded snapshot can seed a double-spend. Default true preserves shipped snapshot
     //! bootstrap compatibility; set false (-allowunpinnedshieldedsnapshot=0) to require pinned snapshots.
     bool allow_unpinned_shielded_snapshot{DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT};
+    //! Action taken when a candidate branch would reorg deeper than the
+    //! deep-reorg threshold. Default WARN keeps pure Nakamoto consensus (no
+    //! split risk); PARK is an opt-in per-node finality assumption.
+    DeepReorgAction deep_reorg_action{DeepReorgAction::WARN};
+    //! Operator override for the deep-reorg threshold, in blocks. When unset the
+    //! consensus value nMaxReorgDepth is used (if configured for the chain).
+    //! Setting this lets an operator warn/park at a shallower depth than the
+    //! chain default without recompiling.
+    std::optional<uint32_t> max_reorg_depth_warn{};
     DBOptions coins_db{};
     CoinsViewOptions coins_view{};
     Notifications& notifications;

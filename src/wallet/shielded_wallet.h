@@ -321,6 +321,13 @@ public:
     [[nodiscard]] std::vector<ShieldedCoin> GetRecoverableNotes(int min_depth = 1) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
 
+    /** Return locally owned confirmed notes that can be attempted through
+     *  V2_RECOVERY_EXIT. This intentionally includes non-user note classes,
+     *  but is only for internal recovery-exit construction and not public
+     *  balance/listing or ordinary spend selection. */
+    [[nodiscard]] std::vector<ShieldedCoin> GetRecoveryExitCandidates(CAmount fee, int min_depth = 1) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
     /** Return unspent notes (including view-only). */
     [[nodiscard]] std::vector<ShieldedCoin> GetUnspentNotes(int min_depth = 0) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
@@ -549,11 +556,15 @@ public:
 private:
     CWallet& m_parent_wallet;
 
+    [[nodiscard]] size_t ReconstructMissingRecoveryExitWitnesses(CAmount fee, std::string* error)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
     std::map<ShieldedAddress, ShieldedKeySet> m_key_sets GUARDED_BY(cs_shielded);
     std::map<ShieldedAddress, ShieldedAddressLifecycle> m_address_lifecycles GUARDED_BY(cs_shielded);
     std::map<Nullifier, ShieldedCoin> m_notes GUARDED_BY(cs_shielded);
     std::set<Nullifier> m_spent_nullifiers GUARDED_BY(cs_shielded);
     std::map<uint256, shielded::ShieldedMerkleWitness> m_witnesses GUARDED_BY(cs_shielded);
+    std::map<uint256, shielded::ShieldedMerkleWitness> m_recovery_exit_witness_cache GUARDED_BY(cs_shielded);
     std::map<uint256, smile2::CompactPublicAccount> m_smile_public_accounts GUARDED_BY(cs_shielded);
     std::map<uint256, uint256> m_account_leaf_commitments GUARDED_BY(cs_shielded);
     shielded::ShieldedMerkleTree m_tree GUARDED_BY(cs_shielded){

@@ -5,6 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "${TMPDIR}"' EXIT
 
+# Keep tests deterministic on Apple Silicon developer machines; individual
+# cases opt back into Darwin/arm64 when they are testing those defaults.
+export BTX_MINING_HOST_OS_FOR_TEST=Linux
+export BTX_MINING_HOST_ARCH_FOR_TEST=x86_64
+
 cleanup_pidfile() {
   local pidfile="$1"
   if [[ ! -f "${pidfile}" ]]; then
@@ -879,6 +884,280 @@ grep -q "Live mining loop exited before startup verification completed" "${START
 grep -q "Missing required command: ${TMPDIR}/missing-cli" "${START_FAIL_STDERR}"
 [[ ! -f "${TMPDIR}/results-start-fail/live-mining-loop.pid" ]]
 
+STATE_DIR="${TMPDIR}/state-foreground"
+RESULTS_DIR="${TMPDIR}/results-foreground"
+mkdir -p "${STATE_DIR}" "${RESULTS_DIR}"
+
+cat > "${TMPDIR}/fake-cli-foreground" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="${STATE_DIR:?}"
+cmd=""
+for arg in "$@"; do
+  case "${arg}" in
+    getblockcount|getmininginfo|generatetoaddress)
+      cmd="${arg}"
+      ;;
+  esac
+done
+
+case "${cmd}" in
+  getblockcount)
+    echo 100
+    ;;
+  getmininginfo)
+    cat <<JSON
+{"chain_guard":{"healthy":true,"should_pause_mining":false,"reason":"ok","local_tip":100,"median_peer_tip":100,"peer_count":8,"near_tip_peers":8}}
+JSON
+    ;;
+  generatetoaddress)
+    echo '["deadbeef"]'
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "${TMPDIR}/fake-cli-foreground"
+
+STATE_DIR="${STATE_DIR}" \
+BTX_MINING_CLI="${TMPDIR}/fake-cli-foreground" \
+BTX_MINING_MAX_LOOPS=2 \
+/bin/bash "${SCRIPT_DIR}/start-live-mining.sh" \
+  --foreground \
+  --results-dir="${RESULTS_DIR}" \
+  --address-file="${TMPDIR}/address.txt" \
+  --sleep=0 >/dev/null 2>&1
+
+grep -q "loop-start datadir=default wallet=miner" "${RESULTS_DIR}/live-mining-health.log"
+grep -q '\["deadbeef"\]' "${RESULTS_DIR}/live-mining-loop.log"
+[[ ! -f "${RESULTS_DIR}/live-mining-loop.pid" ]]
+
+STATE_DIR="${TMPDIR}/state-launch-cwd"
+RESULTS_DIR="${TMPDIR}/results-launch-cwd"
+LAUNCH_CWD="${TMPDIR}/stable-launch-cwd"
+mkdir -p "${STATE_DIR}" "${RESULTS_DIR}" "${LAUNCH_CWD}"
+EXPECTED_LAUNCH_CWD="$(cd "${LAUNCH_CWD}" && pwd -P)"
+
+cat > "${TMPDIR}/fake-cli-launch-cwd" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="${STATE_DIR:?}"
+pwd -P > "${STATE_DIR}/cwd.txt"
+cmd=""
+for arg in "$@"; do
+  case "${arg}" in
+    getblockcount|getmininginfo|generatetoaddress)
+      cmd="${arg}"
+      ;;
+  esac
+done
+
+case "${cmd}" in
+  getblockcount)
+    echo 100
+    ;;
+  getmininginfo)
+    cat <<JSON
+{"chain_guard":{"healthy":true,"should_pause_mining":false,"reason":"ok","local_tip":100,"median_peer_tip":100,"peer_count":8,"near_tip_peers":8}}
+JSON
+    ;;
+  generatetoaddress)
+    echo '["deadbeef"]'
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "${TMPDIR}/fake-cli-launch-cwd"
+
+STATE_DIR="${STATE_DIR}" \
+BTX_MINING_CLI="${TMPDIR}/fake-cli-launch-cwd" \
+BTX_MINING_MAX_LOOPS=2 \
+BTX_MINING_START_VERIFY_SECS=0 \
+/bin/bash "${SCRIPT_DIR}/start-live-mining.sh" \
+  --results-dir="${RESULTS_DIR}" \
+  --address-file="${TMPDIR}/address.txt" \
+  --sleep=0 \
+  --launch-cwd="${LAUNCH_CWD}" >/dev/null
+
+for _ in 1 2 3 4 5; do
+  [[ -f "${STATE_DIR}/cwd.txt" ]] && break
+  sleep 1
+done
+grep -qx "${EXPECTED_LAUNCH_CWD}" "${STATE_DIR}/cwd.txt"
+
+STATE_DIR="${TMPDIR}/state-backend-requirement"
+RESULTS_DIR="${TMPDIR}/results-backend-requirement"
+mkdir -p "${STATE_DIR}" "${RESULTS_DIR}"
+
+cat > "${TMPDIR}/fake-cli-backend-requirement" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="${STATE_DIR:?}"
+cmd=""
+for arg in "$@"; do
+  case "${arg}" in
+    getblockcount|getmininginfo|generatetoaddress)
+      cmd="${arg}"
+      ;;
+  esac
+done
+
+case "${cmd}" in
+  getblockcount)
+    echo 100
+    ;;
+  getmininginfo)
+    cat <<JSON
+{"chain_guard":{"healthy":true,"should_pause_mining":false,"reason":"ok","local_tip":100,"median_peer_tip":100,"peer_count":8,"near_tip_peers":8},"backend_runtime":{"requested_backend":"metal","active_backend":"cpu","backend_selection_reason":"metal_unavailable_fallback_to_cpu:test","required_backend_enabled":true,"required_backend":"metal","required_backend_valid":true,"required_backend_satisfied":false,"metal_fallbacks_to_cpu":0,"cuda_fallbacks_to_cpu":0}}
+JSON
+    ;;
+  generatetoaddress)
+    echo generate >> "${STATE_DIR}/generate.log"
+    echo '["deadbeef"]'
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "${TMPDIR}/fake-cli-backend-requirement"
+
+set +e
+STATE_DIR="${STATE_DIR}" \
+BTX_MINING_CLI="${TMPDIR}/fake-cli-backend-requirement" \
+/bin/bash "${SCRIPT_DIR}/live-mining-loop.sh" \
+  --results-dir="${RESULTS_DIR}" \
+  --address-file="${TMPDIR}/address.txt" \
+  --sleep=0 \
+  --require-backend=metal >/dev/null 2>&1
+status=$?
+set -e
+
+[[ "${status}" -ne 0 ]]
+grep -q "backend-requirement-failed required=metal active=cpu" "${RESULTS_DIR}/live-mining-health.log"
+[[ ! -f "${STATE_DIR}/generate.log" ]]
+
+STATE_DIR="${TMPDIR}/state-start-backend-env"
+RESULTS_DIR="${TMPDIR}/results-start-backend-env"
+mkdir -p "${STATE_DIR}" "${RESULTS_DIR}"
+
+cat > "${TMPDIR}/fake-cli-start-backend-env" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="${STATE_DIR:?}"
+printf '%s\n' "${BTX_MATMUL_BACKEND:-}" > "${STATE_DIR}/backend.env"
+printf '%s\n' "${BTX_MATMUL_REQUIRE_BACKEND:-}" > "${STATE_DIR}/require.env"
+printf '%s\n' "${BTX_MATMUL_GPU_INPUTS:-}" > "${STATE_DIR}/gpu-inputs.env"
+cmd=""
+for arg in "$@"; do
+  case "${arg}" in
+    getblockcount|getmininginfo|generatetoaddress)
+      cmd="${arg}"
+      ;;
+  esac
+done
+
+case "${cmd}" in
+  getblockcount)
+    echo 100
+    ;;
+  getmininginfo)
+    cat <<JSON
+{"chain_guard":{"healthy":true,"should_pause_mining":false,"reason":"ok","local_tip":100,"median_peer_tip":100,"peer_count":8,"near_tip_peers":8},"backend_runtime":{"requested_backend":"metal","active_backend":"metal","backend_selection_reason":"requested_backend_available","required_backend_enabled":true,"required_backend":"metal","required_backend_valid":true,"required_backend_satisfied":true,"metal_fallbacks_to_cpu":0,"cuda_fallbacks_to_cpu":0}}
+JSON
+    ;;
+  generatetoaddress)
+    echo '["deadbeef"]'
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "${TMPDIR}/fake-cli-start-backend-env"
+
+STATE_DIR="${STATE_DIR}" \
+BTX_MINING_CLI="${TMPDIR}/fake-cli-start-backend-env" \
+BTX_MINING_MAX_LOOPS=2 \
+/bin/bash "${SCRIPT_DIR}/start-live-mining.sh" \
+  --foreground \
+  --results-dir="${RESULTS_DIR}" \
+  --address-file="${TMPDIR}/address.txt" \
+  --sleep=0 \
+  --backend=metal \
+  --require-backend=metal \
+  --gpu-inputs=1 >/dev/null 2>&1
+
+grep -qx "metal" "${STATE_DIR}/backend.env"
+grep -qx "metal" "${STATE_DIR}/require.env"
+grep -qx "1" "${STATE_DIR}/gpu-inputs.env"
+grep -q "backend=metal require_backend=metal" "${RESULTS_DIR}/live-mining-health.log"
+grep -q "gpu_inputs=1" "${RESULTS_DIR}/live-mining-health.log"
+
+STATE_DIR="${TMPDIR}/state-start-apple-defaults"
+RESULTS_DIR="${TMPDIR}/results-start-apple-defaults"
+mkdir -p "${STATE_DIR}" "${RESULTS_DIR}"
+
+cat > "${TMPDIR}/fake-cli-start-apple-defaults" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="${STATE_DIR:?}"
+printf '%s\n' "${BTX_MATMUL_BACKEND:-}" > "${STATE_DIR}/backend.env"
+printf '%s\n' "${BTX_MATMUL_REQUIRE_BACKEND:-}" > "${STATE_DIR}/require.env"
+printf '%s\n' "${BTX_MATMUL_GPU_INPUTS:-}" > "${STATE_DIR}/gpu-inputs.env"
+cmd=""
+for arg in "$@"; do
+  case "${arg}" in
+    getblockcount|getmininginfo|generatetoaddress)
+      cmd="${arg}"
+      ;;
+  esac
+done
+
+case "${cmd}" in
+  getblockcount)
+    echo 100
+    ;;
+  getmininginfo)
+    cat <<JSON
+{"chain_guard":{"healthy":true,"should_pause_mining":false,"reason":"ok","local_tip":100,"median_peer_tip":100,"peer_count":8,"near_tip_peers":8},"backend_runtime":{"requested_backend":"metal","active_backend":"metal","backend_selection_reason":"requested_backend_available","required_backend_enabled":true,"required_backend":"metal","required_backend_valid":true,"required_backend_satisfied":true,"metal_fallbacks_to_cpu":0,"metal_nonce_seed_scan_fallbacks_to_cpu":0,"cuda_fallbacks_to_cpu":0,"cuda_nonce_seed_scan_fallbacks_to_cpu":0}}
+JSON
+    ;;
+  generatetoaddress)
+    echo '["deadbeef"]'
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "${TMPDIR}/fake-cli-start-apple-defaults"
+
+STATE_DIR="${STATE_DIR}" \
+BTX_MINING_HOST_OS_FOR_TEST=Darwin \
+BTX_MINING_HOST_ARCH_FOR_TEST=arm64 \
+BTX_MINING_CLI="${TMPDIR}/fake-cli-start-apple-defaults" \
+BTX_MINING_MAX_LOOPS=2 \
+/bin/bash "${SCRIPT_DIR}/start-live-mining.sh" \
+  --foreground \
+  --results-dir="${RESULTS_DIR}" \
+  --address-file="${TMPDIR}/address.txt" \
+  --sleep=0 >/dev/null 2>&1
+
+grep -qx "metal" "${STATE_DIR}/backend.env"
+grep -qx "metal" "${STATE_DIR}/require.env"
+grep -qx "1" "${STATE_DIR}/gpu-inputs.env"
+grep -q "daemonize=0 backend=metal require_backend=metal" "${RESULTS_DIR}/live-mining-health.log"
+grep -q "gpu_inputs=1 apple_silicon_defaults=1" "${RESULTS_DIR}/live-mining-health.log"
+
 RESULTS_DIR="${TMPDIR}/results-stop"
 mkdir -p "${RESULTS_DIR}"
 
@@ -919,8 +1198,16 @@ stop_help="$("${SCRIPT_DIR}/stop-live-mining.sh" --help)"
 
 grep -q "Usage: start-live-mining.sh" <<< "${start_help}"
 grep -q -- "--cli=PATH" <<< "${start_help}"
+grep -q -- "--foreground" <<< "${start_help}"
+grep -q -- "--launch-cwd=PATH" <<< "${start_help}"
+grep -q -- "--require-backend=NAME" <<< "${start_help}"
+grep -q -- "--daemonize=0|1" <<< "${start_help}"
+grep -q -- "--gpu-inputs=auto|0|1" <<< "${start_help}"
 grep -q "Usage: live-mining-loop.sh" <<< "${live_help}"
 grep -q -- "--should-mine-command=CMD" <<< "${live_help}"
+grep -q -- "--require-backend=NAME" <<< "${live_help}"
+grep -q -- "--daemonize=0|1" <<< "${live_help}"
+grep -q -- "--gpu-inputs=auto|0|1" <<< "${live_help}"
 grep -q "Usage: stop-live-mining.sh" <<< "${stop_help}"
 grep -q -- "--results-dir=PATH" <<< "${stop_help}"
 

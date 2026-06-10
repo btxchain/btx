@@ -16,6 +16,7 @@
 #include <cassert>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -667,6 +668,120 @@ ShieldedMerkleWitness ShieldedMerkleTree::Witness() const
     return ShieldedMerkleWitness(*this);
 }
 
+std::optional<ShieldedMerkleWitness> ShieldedMerkleTree::WitnessAt(uint64_t position) const
+{
+    if (position >= size_ || !HasCommitmentIndex()) return std::nullopt;
+
+    ShieldedMerkleTree prefix{IndexStorageMode::MEMORY_ONLY};
+    try {
+        for (uint64_t i = 0; i <= position; ++i) {
+            const auto commitment = CommitmentAt(i);
+            if (!commitment.has_value()) return std::nullopt;
+            prefix.Append(*commitment);
+        }
+
+        ShieldedMerkleWitness witness{prefix};
+        for (uint64_t i = position + 1; i < size_; ++i) {
+            const auto commitment = CommitmentAt(i);
+            if (!commitment.has_value()) return std::nullopt;
+            witness.IncrementalUpdate(*commitment);
+        }
+        return witness;
+    } catch (const std::exception& e) {
+        LogPrintf("ShieldedMerkleTree::WitnessAt failed at position=%u size=%u: %s\n",
+                  static_cast<unsigned int>(position),
+                  static_cast<unsigned int>(size_),
+                  e.what());
+        return std::nullopt;
+    }
+}
+
+std::map<uint64_t, ShieldedMerkleWitness> ShieldedMerkleTree::WitnessesAt(
+    const std::vector<uint64_t>& positions) const
+{
+    std::map<uint64_t, ShieldedMerkleWitness> out;
+    if (positions.empty() || !HasCommitmentIndex()) return out;
+
+    std::vector<uint64_t> unique_positions;
+    unique_positions.reserve(positions.size());
+    for (const uint64_t position : positions) {
+        if (position < size_) unique_positions.push_back(position);
+    }
+    std::sort(unique_positions.begin(), unique_positions.end());
+    unique_positions.erase(std::unique(unique_positions.begin(), unique_positions.end()),
+                           unique_positions.end());
+    if (unique_positions.empty()) return out;
+
+    std::unordered_map<uint64_t, uint256> subtree_cache;
+    subtree_cache.reserve(unique_positions.size() * MERKLE_DEPTH);
+
+    auto cache_key = [](uint64_t start, size_t depth) -> uint64_t {
+        return (start << 6) | static_cast<uint64_t>(depth);
+    };
+
+    std::function<std::optional<uint256>(uint64_t, size_t)> subtree_root =
+        [&](uint64_t start, size_t depth) -> std::optional<uint256> {
+            if (depth > MERKLE_DEPTH) return std::nullopt;
+            if (start >= size_) return EmptyRoot(depth);
+            const uint64_t key = cache_key(start, depth);
+            if (auto it = subtree_cache.find(key); it != subtree_cache.end()) {
+                return it->second;
+            }
+            if (depth == 0) {
+                auto commitment = CommitmentAt(start);
+                if (!commitment.has_value()) return std::nullopt;
+                subtree_cache.emplace(key, *commitment);
+                return commitment;
+            }
+            const uint64_t half_width = uint64_t{1} << (depth - 1);
+            auto left = subtree_root(start, depth - 1);
+            if (!left.has_value()) return std::nullopt;
+            auto right = subtree_root(start + half_width, depth - 1);
+            if (!right.has_value()) return std::nullopt;
+            uint256 root = BranchHash(*left, *right);
+            subtree_cache.emplace(key, root);
+            return root;
+        };
+
+    const uint256 current_root = Root();
+    for (const uint64_t position : unique_positions) {
+        auto leaf = CommitmentAt(position);
+        if (!leaf.has_value()) continue;
+
+        std::array<uint256, MERKLE_DEPTH> auth_path;
+        bool complete{true};
+        for (size_t depth = 0; depth < MERKLE_DEPTH; ++depth) {
+            const uint64_t width = uint64_t{1} << depth;
+            const uint64_t sibling_start = (position ^ width) & ~(width - 1);
+            auto sibling = subtree_root(sibling_start, depth);
+            if (!sibling.has_value()) {
+                complete = false;
+                break;
+            }
+            auth_path[depth] = *sibling;
+        }
+        if (!complete) continue;
+
+        try {
+            ShieldedMerkleWitness witness =
+                ShieldedMerkleWitness::FromAuthPath(*leaf, position, auth_path);
+            if (!witness.Verify(*leaf, current_root)) {
+                LogPrintf("ShieldedMerkleTree::WitnessesAt reconstructed invalid witness at position=%u size=%u\n",
+                          static_cast<unsigned int>(position),
+                          static_cast<unsigned int>(size_));
+                continue;
+            }
+            out.emplace(position, std::move(witness));
+        } catch (const std::exception& e) {
+            LogPrintf("ShieldedMerkleTree::WitnessesAt failed at position=%u size=%u: %s\n",
+                      static_cast<unsigned int>(position),
+                      static_cast<unsigned int>(size_),
+                      e.what());
+        }
+    }
+    return out;
+}
+
 void ShieldedMerkleTree::EnsureCommitmentIndexWritable()
 {
     if (!commitment_index_mem_) return;
@@ -709,6 +824,43 @@ ShieldedMerkleWitness::ShieldedMerkleWitness(const ShieldedMerkleTree& tree)
     if (tree.IsEmpty()) {
         throw std::runtime_error("ShieldedMerkleWitness: cannot witness empty tree");
     }
+}
+
+ShieldedMerkleWitness ShieldedMerkleWitness::FromAuthPath(
+    const uint256& leaf,
+    uint64_t position,
+    const std::array<uint256, MERKLE_DEPTH>& auth_path)
+{
+    if (position >= MERKLE_MAX_LEAVES) {
+        throw std::runtime_error("ShieldedMerkleWitness::FromAuthPath: position overflow");
+    }
+
+    ShieldedMerkleWitness witness;
+    witness.tree_ = ShieldedMerkleTree{ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+    witness.tree_.size_ = position + 1;
+    witness.tree_.commitment_index_enabled_ = false;
+    witness.tree_.commitment_index_mem_.reset();
+    witness.tree_.commitment_index_store_.reset();
+    witness.tree_.frontier_checkpoints_.reset();
+
+    if (position & uint64_t{1}) {
+        witness.tree_.left_ = auth_path[0];
+        witness.tree_.right_ = leaf;
+    } else {
+        witness.tree_.left_ = leaf;
+        witness.tree_.right_ = std::nullopt;
+        witness.filled_.push_back(auth_path[0]);
+    }
+
+    witness.tree_.parents_.assign(MERKLE_DEPTH - 1, std::nullopt);
+    for (size_t depth = 1; depth < MERKLE_DEPTH; ++depth) {
+        if ((position >> depth) & uint64_t{1}) {
+            witness.tree_.parents_[depth - 1] = auth_path[depth];
+        } else {
+            witness.filled_.push_back(auth_path[depth]);
+        }
+    }
+    return witness;
 }
 
 uint64_t ShieldedMerkleWitness::Position() const

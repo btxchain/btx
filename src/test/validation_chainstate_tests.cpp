@@ -157,20 +157,29 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_rejection_prunes_candidate_branch,
     Chainstate& chainstate = chainman.ActiveChainstate();
 
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    // Opt this node into the PARK action (-parkdeepreorg=1) so a deep reorg is
+    // refused. The default action is WARN (follow most-work), covered by the
+    // companion test chainstate_deep_reorg_warn_follows_most_work below.
+    auto& deep_reorg_action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
     struct RestoreConsensusParams
     {
         Consensus::Params& consensus;
         uint32_t max_reorg_depth;
         int32_t reorg_start_height;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
         ~RestoreConsensusParams()
         {
             consensus.nMaxReorgDepth = max_reorg_depth;
             consensus.nReorgProtectionStartHeight = reorg_start_height;
+            action = saved_action;
         }
-    } restore{consensus, consensus.nMaxReorgDepth, consensus.nReorgProtectionStartHeight};
+    } restore{consensus, consensus.nMaxReorgDepth, consensus.nReorgProtectionStartHeight,
+              deep_reorg_action, deep_reorg_action};
 
     consensus.nMaxReorgDepth = 2;
     consensus.nReorgProtectionStartHeight = 10;
+    deep_reorg_action = kernel::DeepReorgAction::PARK;
 
     std::vector<std::unique_ptr<CBlockIndex>> rejected_branch;
     std::vector<uint256> rejected_hashes;
@@ -240,6 +249,110 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_rejection_prunes_candidate_branch,
         BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), active_tip_before->nHeight + 1);
         BOOST_CHECK(chainstate.m_chain.Tip()->pprev == active_tip_before);
     }
+}
+
+//! Default (WARN) deep-reorg handling must follow the most-work chain -- a deep
+//! reorg is NOT refused, so the node stays Nakamoto-consistent and cannot be
+//! split. The deep reorg must still be loudly recorded in the alarm stats.
+//!
+//! This drives a REAL reorg (real blocks, so disconnect/connect succeed): we
+//! invalidate a block a few back to fork the active chain, mine a strictly
+//! heavier competing branch across that fork, then reconsider the original
+//! branch. With the threshold lowered so the cross-fork switch counts as "deep",
+//! WARN must (a) record the alarm and (b) still adopt the most-work tip.
+BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_warn_follows_most_work, TestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& deep_reorg_action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
+    struct RestoreParams
+    {
+        Consensus::Params& consensus;
+        uint32_t max_reorg_depth;
+        int32_t reorg_start_height;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        ~RestoreParams()
+        {
+            consensus.nMaxReorgDepth = max_reorg_depth;
+            consensus.nReorgProtectionStartHeight = reorg_start_height;
+            action = saved_action;
+        }
+    } restore{consensus, consensus.nMaxReorgDepth, consensus.nReorgProtectionStartHeight,
+              deep_reorg_action, deep_reorg_action};
+
+    // Any cross-fork switch (depth >= 1) trips the alarm; tip is already >= 10.
+    consensus.nMaxReorgDepth = 0;
+    consensus.nReorgProtectionStartHeight = 10;
+    deep_reorg_action = kernel::DeepReorgAction::WARN; // default; set explicitly for clarity
+
+    // Fork point: two blocks below the current tip. The ORIGINAL branch
+    // (fork+1, fork+2) stays our reference heavier branch.
+    CBlockIndex* fork{nullptr};
+    CBlockIndex* original_tip{nullptr};
+    {
+        LOCK(::cs_main);
+        original_tip = chainstate.m_chain.Tip();
+        BOOST_REQUIRE(original_tip != nullptr);
+        fork = original_tip->pprev->pprev; // tip-2
+        BOOST_REQUIRE(fork != nullptr);
+    }
+    const uint256 original_tip_hash = original_tip->GetBlockHash();
+    const int original_height = original_tip->nHeight;
+
+    // Disconnect the original branch back to the fork by invalidating fork+1.
+    CBlockIndex* invalidate_at{nullptr};
+    {
+        LOCK(::cs_main);
+        invalidate_at = chainstate.m_chain[fork->nHeight + 1];
+        BOOST_REQUIRE(invalidate_at != nullptr);
+    }
+    BlockValidationState inval_state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(inval_state, invalidate_at));
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip(), fork);
+    }
+
+    // Mine a SHORTER competing branch (one block on the fork). Active tip becomes
+    // the competing block; the (invalidated) original branch is heavier (2 blocks).
+    const CBlock competing = CreateAndProcessBlock({}, script_pub_key);
+    CBlockIndex* competing_tip{nullptr};
+    {
+        LOCK(::cs_main);
+        competing_tip = chainstate.m_chain.Tip();
+        BOOST_REQUIRE(competing_tip != nullptr);
+        BOOST_REQUIRE_EQUAL(competing_tip->GetBlockHash(), competing.GetHash());
+        BOOST_REQUIRE_EQUAL(competing_tip->nHeight, fork->nHeight + 1);
+    }
+
+    // Re-enable the heavier original branch. The node must switch ACROSS the fork
+    // from the competing tip back to the original tip -- a real cross-fork reorg
+    // (disconnect competing, connect fork+1, fork+2). This trips the deep-reorg
+    // guard (depth 1 > threshold 0). In WARN mode it follows the most-work chain.
+    ResetReorgProtectionRuntimeStats();
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(invalidate_at);
+    }
+    BlockValidationState reactivate_state;
+    BOOST_CHECK(chainstate.ActivateBestChain(reactivate_state));
+
+    {
+        LOCK(::cs_main);
+        // WARN never parks: node adopts the heavier original branch across the
+        // fork rather than staying pinned to the shorter competing tip.
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_tip_hash);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height);
+    }
+
+    // The cross-fork switch must have fired the operator alarm.
+    const auto stats = ProbeReorgProtectionRuntimeStats();
+    BOOST_CHECK_GE(stats.rejected_reorgs, 1u);
+    BOOST_CHECK_GE(stats.deepest_rejected_reorg_depth, 1u);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

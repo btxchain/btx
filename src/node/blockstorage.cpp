@@ -203,11 +203,57 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
 
 namespace node {
 
+// Randomized equal-work tie-breaking state (see blockstorage.h). Default OFF.
+// These are set once at startup via SetRandomTiebreak() and then treated as
+// immutable for the life of the process, which is what makes the comparator a
+// stable strict-weak-ordering safe for use as a std::set comparator.
+bool g_random_tiebreak_enabled{false};
+uint256 g_tiebreak_seed{};
+
+void SetRandomTiebreak(bool enabled, const uint256* seed)
+{
+    g_random_tiebreak_enabled = enabled;
+    if (!enabled) return;
+    if (seed != nullptr && !seed->IsNull()) {
+        g_tiebreak_seed = *seed;
+    } else if (g_tiebreak_seed.IsNull()) {
+        // Fresh per-node secret; never persisted, never sent on the wire.
+        g_tiebreak_seed = GetRandHash();
+    }
+}
+
+//! Per-node, per-block tie-break key: Hash(seed || blockhash). Smaller key wins.
+//! Deterministic for a fixed seed (stable set ordering) but unpredictable to an
+//! attacker who does not know this node's seed.
+static uint256 TiebreakKey(const CBlockIndex* p)
+{
+    return Hash(g_tiebreak_seed, p->GetBlockHash());
+}
+
 bool CBlockIndexWorkComparator::operator()(const CBlockIndex* pa, const CBlockIndex* pb) const
 {
     // First sort by most total work, ...
     if (pa->nChainWork != pb->nChainWork) {
         return pa->nChainWork < pb->nChainWork;
+    }
+
+    // ... then, among EQUAL-work tips, break the tie. Selfish-mining mitigation:
+    // when -randomtiebreak is enabled, choose by a per-node random key instead of
+    // first-seen (nSequenceId). This is a node-local policy on equal-work tips only
+    // and never overrides the strictly-more-work rule above, so it is consensus
+    // compatible and needs no fork height. The block with the SMALLER key is
+    // preferred, i.e. compares "greater" in this set (rbegin() == best candidate).
+    if (g_random_tiebreak_enabled && pa->phashBlock != nullptr && pb->phashBlock != nullptr) {
+        const uint256 ka{TiebreakKey(pa)};
+        const uint256 kb{TiebreakKey(pb)};
+        const int cmp{ka.Compare(kb)};
+        if (cmp != 0) {
+            // pa is "less" (worse) when its key is larger, so the smaller-key
+            // block sorts greatest and is the preferred (rbegin) candidate.
+            return cmp > 0;
+        }
+        // Equal keys (astronomically unlikely): fall through to the deterministic
+        // tie-breakers below so the ordering remains strict and total.
     }
 
     // ... then by earliest activatable time, ...

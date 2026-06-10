@@ -418,7 +418,8 @@ public:
     [[nodiscard]] bool Empty() const { return m_entries.empty(); }
 
     [[nodiscard]] bool Append(Span<const ShieldedAccountLeaf> account_leaves,
-                              std::vector<uint64_t>* inserted_indices = nullptr);
+                              std::vector<uint64_t>* inserted_indices = nullptr,
+                              bool sync_payload_store = true);
     [[nodiscard]] bool Truncate(size_t size,
                                 PayloadPruneMode prune_mode = PayloadPruneMode::PRUNE);
     [[nodiscard]] std::optional<uint64_t> FindLeafIndexByCommitment(

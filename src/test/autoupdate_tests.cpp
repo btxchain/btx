@@ -104,6 +104,7 @@ node::AutoUpdateConfig TestConfig()
     config.manifest_url = "http://updates.test/version.txt";
     config.trusted_origin = "http://updates.test";
     config.release_pubkey = "test-pubkey";
+    config.telemetry = false;
     return config;
 }
 
@@ -181,8 +182,8 @@ BOOST_AUTO_TEST_CASE(url_origin_matching_is_strict)
 BOOST_AUTO_TEST_CASE(version_comparison_uses_client_version)
 {
     BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("99.0.0"), 1);
-    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("0.32.3"), 0);
-    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("v0.32.2"), -1);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("0.32.4"), 0);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("v0.32.3"), -1);
     BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("not-a-version"), 0);
 }
 
@@ -233,7 +234,7 @@ BOOST_AUTO_TEST_CASE(wrong_origin_script_rejected_after_signature)
 BOOST_AUTO_TEST_CASE(same_version_does_not_launch)
 {
     Harness h;
-    h.AddManifest("0.32.3");
+    h.AddManifest("0.32.4");
     h.AddSignature();
     h.AddScript();
     const auto result = h.Run();
@@ -277,6 +278,33 @@ BOOST_AUTO_TEST_CASE(valid_signed_newer_manifest_launches)
     BOOST_CHECK_EQUAL(h.runner.last_manifest.version, "99.0.0");
     BOOST_CHECK_EQUAL(h.runner.last_manifest.script_url, "http://updates.test/install.sh");
     BOOST_CHECK(h.runner.last_script == h.script);
+}
+
+BOOST_AUTO_TEST_CASE(telemetry_query_is_appended_to_update_fetches)
+{
+    Harness h;
+    h.config.telemetry = true;
+    h.config.telemetry_client_id = "123e4567-e89b-42d3-a456-426614174000";
+
+    const std::string sig_url = "http://updates.test/version.txt.sig?kind=manifest";
+    const std::string script_url = "http://updates.test/install.sh";
+    h.fetcher.replies[node::AutoUpdateTrackedUrl(h.config.manifest_url, h.config)] = {
+        .body = Bytes(Manifest("99.0.0", script_url, sig_url, h.script_hash)),
+    };
+    h.fetcher.replies[node::AutoUpdateTrackedUrl(sig_url, h.config)] = {.body = Bytes("signature")};
+    h.fetcher.replies[node::AutoUpdateTrackedUrl(script_url, h.config)] = {.body = h.script};
+
+    const auto result = h.Run();
+    BOOST_CHECK(result.status == node::AutoUpdateStatus::LAUNCHED);
+    BOOST_REQUIRE_EQUAL(h.fetcher.calls.size(), 3);
+    for (const auto& call : h.fetcher.calls) {
+        BOOST_CHECK(call.find("btx_au=1") != std::string::npos);
+        BOOST_CHECK(call.find("btx_version=") != std::string::npos);
+        BOOST_CHECK(call.find("btx_platform=") != std::string::npos);
+        BOOST_CHECK(call.find("btx_arch=") != std::string::npos);
+        BOOST_CHECK(call.find("btx_client_id=123e4567-e89b-42d3-a456-426614174000") != std::string::npos);
+    }
+    BOOST_CHECK(h.fetcher.calls[1].find("kind=manifest&btx_au=1") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(rollout_gate_defers_when_cohort_outside_percentage)

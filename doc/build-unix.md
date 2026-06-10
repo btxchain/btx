@@ -131,7 +131,7 @@ btxd -daemon
 | `BTX_MATMUL_METAL_POOL_SLOTS` | Number of Metal command-buffer slots in the in-flight pool. Increase to overlap more solves on the GPU; decrease to cap GPU memory pressure. | Auto-tuned from solver-thread / Apple perf-level heuristics when unset. |
 | `BTX_MATMUL_METAL_PIPELINE` | Select the Metal transcript pipeline mode (`auto`, `legacy`, `fused`). | Backend-default. |
 | `BTX_MATMUL_METAL_FUNCTION_CONSTANTS` | Override Metal function-constant specialization for transcript kernels. | Backend-default. |
-| `BTX_MATMUL_GPU_INPUTS` | Set to `1` to generate matmul inputs on the GPU instead of the CPU before the solve. Saves a CPU↔GPU copy at the cost of additional GPU compute. | Backend-decided. |
+| `BTX_MATMUL_GPU_INPUTS` | Generate matmul inputs on the GPU instead of the CPU before the solve. Apple Metal auto-enables this for the production 512x16x8 mining shape; set `0` to force it off. | Backend-decided. |
 | `BTX_MATMUL_APPLE_PERFLEVEL0_LOGICALCPU_OVERRIDE` | Override Apple Silicon perf-level-0 logical CPU count used in launch-rate tuning heuristics. Useful for benchmarking on machines whose reported perf-level partitions differ from the host's actual sustained-throughput core count. | Auto-detected. |
 
 ### Diagnostic / special-purpose knobs

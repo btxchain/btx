@@ -898,14 +898,15 @@ struct PayloadStore
     }
 
     [[nodiscard]] bool WritePayloadBatch(
-        const std::vector<std::pair<uint64_t, std::vector<uint8_t>>>& payloads)
+        const std::vector<std::pair<uint64_t, std::vector<uint8_t>>>& payloads,
+        bool sync)
     {
         std::lock_guard<std::mutex> lock(mutex);
         CDBBatch batch(*db);
         for (const auto& [leaf_index, payload] : payloads) {
             batch.Write(std::make_pair(DB_ACCOUNT_REGISTRY_PAYLOAD, leaf_index), payload);
         }
-        return db->WriteBatch(batch, /*fSync=*/true);
+        return db->WriteBatch(batch, /*fSync=*/sync);
     }
 
     [[nodiscard]] bool ErasePayloadRange(uint64_t start, uint64_t end)
@@ -1059,7 +1060,7 @@ bool ShieldedAccountRegistryState::LoadFromSnapshot(const ShieldedAccountRegistr
         });
     }
 
-    if (m_payload_store && !m_payload_store->WritePayloadBatch(payload_batch)) {
+    if (m_payload_store && !m_payload_store->WritePayloadBatch(payload_batch, /*sync=*/true)) {
         return false;
     }
     if (m_payload_store && !m_payload_store->PruneToSize(restored_entries.size())) {
@@ -1097,7 +1098,8 @@ bool ShieldedAccountRegistryState::LoadFromPersistedSnapshot(
 }
 
 bool ShieldedAccountRegistryState::Append(Span<const ShieldedAccountLeaf> account_leaves,
-                                          std::vector<uint64_t>* inserted_indices)
+                                          std::vector<uint64_t>* inserted_indices,
+                                          bool sync_payload_store)
 {
     if (account_leaves.empty()) return true;
     if (m_entries.size() + account_leaves.size() > MAX_REGISTRY_ENTRIES) {
@@ -1152,7 +1154,7 @@ bool ShieldedAccountRegistryState::Append(Span<const ShieldedAccountLeaf> accoun
         });
     }
 
-    if (m_payload_store && !m_payload_store->WritePayloadBatch(payload_batch)) {
+    if (m_payload_store && !m_payload_store->WritePayloadBatch(payload_batch, sync_payload_store)) {
         return false;
     }
 

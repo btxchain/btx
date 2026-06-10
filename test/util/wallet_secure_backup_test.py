@@ -9,6 +9,7 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "wallet_secure_backup.py"
@@ -43,6 +44,35 @@ class FakeCLIContext:
 
 
 class WalletSecureBackupTest(unittest.TestCase):
+    def test_wallet_unlock_uses_stdinwalletpassphrase(self):
+        class UnlockCLIContext:
+            def __init__(self):
+                self.calls = []
+
+            def run_text(self, method, *args, **kwargs):
+                self.calls.append((method, args, kwargs))
+                if method == "walletpassphrase":
+                    return ""
+                raise AssertionError(f"unexpected text RPC {method}")
+
+        ctx = UnlockCLIContext()
+        with mock.patch("getpass.getpass", return_value="wallet-pass"):
+            unlocked = wallet_secure_backup.maybe_unlock_wallet(
+                ctx,
+                "wallet",
+                {"private_keys_enabled": True, "unlocked_until": 0},
+                timeout=30,
+            )
+
+        self.assertTrue(unlocked)
+        self.assertEqual(len(ctx.calls), 1)
+        method, args, kwargs = ctx.calls[0]
+        self.assertEqual(method, "walletpassphrase")
+        self.assertEqual(args, ("30",))
+        self.assertEqual(kwargs["wallet"], "wallet")
+        self.assertEqual(kwargs["input_text"], "wallet-pass\n")
+        self.assertEqual(kwargs["extra_cli_args"], ["-stdinwalletpassphrase"])
+
     def test_plaintext_export_writes_wallet_balances_snapshot(self):
         class PlaintextFakeCLIContext:
             def __init__(self):

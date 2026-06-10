@@ -8487,9 +8487,11 @@ RPCHelpMan z_sendmany()
         "Before the post-61000 privacy fork, if only shielded recipients are specified and\n"
         "spendable shielded funds are insufficient, the wallet can fall back to a transparent-input\n"
         "direct deposit path.\n"
-        "After the post-61000 privacy fork, mixed direct sends to transparent recipients are disabled;\n"
-        "use the bridge unshield flow for transparent settlement instead. Transparent-input fallback\n"
-        "is also disabled on this RPC after the fork. After the v0.32 shielded sunset, shielded\n"
+        "From the post-61000 privacy fork until C-002/R5 activation, mixed direct sends to transparent\n"
+        "recipients are disabled; use the bridge unshield flow for transparent settlement instead.\n"
+        "At and after C-002/R5 activation, self-serve shielded-to-transparent exits are permitted because\n"
+        "the v3 proof binds the public outflow to the consumed shielded value. Transparent-input fallback\n"
+        "is still disabled on this RPC after the privacy fork. After the v0.32 shielded sunset, shielded\n"
         "recipients and shielded change are disabled; only strict transparent exits can be accepted.\n",
         {
             {"amounts", RPCArg::Type::ARR, RPCArg::Optional::NO, "Recipients",
@@ -8736,9 +8738,17 @@ RPCHelpMan z_sendmany()
                             {
                                 LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
                                 const int32_t build_height = NextShieldingRpcBuildHeight(*pwallet);
+                                const bool recovery_exit_active =
+                                    Params().GetConsensus().IsShieldedRecoveryExitActive(build_height);
+                                const bool sunset_active =
+                                    Params().GetConsensus().IsShieldedSunsetActive(build_height);
+                                const bool transparent_only_exit =
+                                    shielded_recipients.empty() && !transparent_recipients.empty();
+                                const bool must_use_recovery_exit =
+                                    sunset_active && transparent_only_exit;
                                 const bool try_recovery_exit =
-                                    Params().GetConsensus().IsShieldedRecoveryExitActive(build_height) &&
-                                    shielded_recipients.empty() &&
+                                    recovery_exit_active &&
+                                    transparent_only_exit &&
                                     transparent_recipients.size() == 1 &&
                                     !conflict_selection.has_value();
                                 if (try_recovery_exit) {
@@ -8746,29 +8756,65 @@ RPCHelpMan z_sendmany()
                                     if (!target_note_value || !MoneyRange(*target_note_value)) {
                                         create_error = "recovery exit target overflow";
                                     } else {
-                                        const auto spendable_notes = pwallet->m_shielded_wallet->GetSpendableNotes(/*min_depth=*/1);
-                                        const auto selected_it = std::find_if(
-                                            spendable_notes.begin(),
-                                            spendable_notes.end(),
-                                            [&](const ShieldedCoin& coin) {
-                                                return coin.is_mine_spend && coin.note.value == *target_note_value;
-                                            });
-                                        if (selected_it == spendable_notes.end()) {
-                                            create_error = "no exact shielded note available for transparent recovery exit";
-                                        } else {
+                                        const auto candidate_notes =
+                                            pwallet->m_shielded_wallet->GetRecoveryExitCandidates(fee, /*min_depth=*/1);
+                                        size_t exact_note_candidates{0};
+                                        std::optional<Nullifier> selected_wallet_nullifier;
+                                        std::string last_recovery_error;
+                                        for (const ShieldedCoin& coin : candidate_notes) {
+                                            if (!coin.is_mine_spend || coin.note.value != *target_note_value) continue;
+                                            ++exact_note_candidates;
+                                            std::string recovery_error;
                                             mtx = pwallet->m_shielded_wallet->BuildRecoveryExitTransaction(
-                                                *selected_it,
+                                                coin,
                                                 transparent_recipients.front().first,
                                                 fee,
-                                                &create_error);
+                                                &recovery_error);
                                             if (mtx.has_value()) {
-                                                reserved_nullifiers = {selected_it->nullifier};
-                                                pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
+                                                selected_wallet_nullifier = coin.nullifier;
+                                                break;
                                             }
+                                            if (!recovery_error.empty()) {
+                                                last_recovery_error = std::move(recovery_error);
+                                            }
+                                        }
+                                        if (!mtx.has_value() && exact_note_candidates == 0) {
+                                            create_error = "no exact shielded note available for transparent recovery exit";
+                                        } else if (!mtx.has_value()) {
+                                            create_error = strprintf(
+                                                "transparent recovery exit failed for %u exact shielded note candidate%s%s%s",
+                                                static_cast<unsigned int>(exact_note_candidates),
+                                                exact_note_candidates == 1 ? "" : "s",
+                                                last_recovery_error.empty() ? "" : ": ",
+                                                last_recovery_error);
+                                        } else if (selected_wallet_nullifier.has_value()) {
+                                            reserved_nullifiers = {*selected_wallet_nullifier};
+                                            if (const auto recovery_spend = TryBuildRecoveryExitSpendView(mtx->shielded_bundle);
+                                                recovery_spend.has_value() &&
+                                                recovery_spend->spend.nullifier != *selected_wallet_nullifier) {
+                                                reserved_nullifiers.push_back(recovery_spend->spend.nullifier);
+                                            }
+                                            pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
                                         }
                                     }
                                 }
                                 if (!mtx.has_value()) {
+                                    if (must_use_recovery_exit) {
+                                        if (!recovery_exit_active) {
+                                            create_error = strprintf(
+                                                "shielded recovery exits are not active at height %d",
+                                                build_height);
+                                        } else if (transparent_recipients.size() != 1) {
+                                            create_error =
+                                                "post-sunset transparent recovery exits require exactly one transparent recipient";
+                                        } else if (conflict_selection.has_value()) {
+                                            create_error =
+                                                "post-sunset transparent recovery exits do not support conflict_txid replacement";
+                                        } else if (create_error.empty()) {
+                                            create_error = "transparent recovery exit failed";
+                                        }
+                                        throw JSONRPCError(RPC_WALLET_ERROR, create_error);
+                                    }
                                     mtx = pwallet->m_shielded_wallet->CreateShieldedSpend(
                                         shielded_recipients,
                                         transparent_recipients,

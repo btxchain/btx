@@ -2103,6 +2103,7 @@ void CShieldedWallet::RecordScannedOutput(const CBlock& block,
     coin.nullifier = bound_nullifier ? spend_nullifier : ViewOnlyNullifier(note_commitment);
 
     m_notes[coin.nullifier] = coin;
+    m_recovery_exit_witness_cache.erase(coin.commitment);
     m_witnesses[coin.commitment] = m_tree.Witness();
 
     output_view.amount = note.value;
@@ -2189,6 +2190,7 @@ void CShieldedWallet::RecordScannedOutput(const CBlock& block,
     }
 
     m_notes[coin.nullifier] = coin;
+    m_recovery_exit_witness_cache.erase(coin.commitment);
     m_witnesses[coin.commitment] = m_tree.Witness();
 
     output_view.amount = note.value;
@@ -2634,6 +2636,7 @@ void CShieldedWallet::UndoBlock(const CBlock& block, int height)
         if (removed_by_block_output || now_out_of_tree) {
             m_spent_nullifiers.erase(it->first);
             m_witnesses.erase(coin.commitment);
+            m_recovery_exit_witness_cache.erase(coin.commitment);
             it = m_notes.erase(it);
         } else {
             ++it;
@@ -2648,6 +2651,7 @@ void CShieldedWallet::UndoBlock(const CBlock& block, int height)
     // Witnesses do not currently participate in spend construction, so clear
     // and rebuild lazily on future scans/rescans after rollback.
     m_witnesses.clear();
+    m_recovery_exit_witness_cache.clear();
     m_last_scanned_height = height - 1;
     m_last_scanned_hash = block.hashPrevBlock;
 
@@ -2890,6 +2894,7 @@ void CShieldedWallet::Rescan(int start_height)
     m_notes.clear();
     m_spent_nullifiers.clear();
     m_witnesses.clear();
+    m_recovery_exit_witness_cache.clear();
     m_smile_public_accounts.clear();
     m_account_leaf_commitments.clear();
     m_mempool_notes.clear();
@@ -3006,6 +3011,30 @@ std::vector<ShieldedCoin> CShieldedWallet::GetRecoverableNotes(int min_depth) co
         recoverable.push_back(coin);
     }
     return recoverable;
+}
+
+std::vector<ShieldedCoin> CShieldedWallet::GetRecoveryExitCandidates(CAmount fee, int min_depth) const
+{
+    AssertLockHeld(cs_shielded);
+    const int tip_height = GetChainTipHeight();
+    std::vector<ShieldedCoin> out;
+    out.reserve(m_notes.size());
+
+    PruneStalePendingSpends();
+
+    for (const auto& [nf, coin] : m_notes) {
+        if (coin.is_spent || !coin.is_mine_spend) continue;
+        if (!IsShieldedAmountCompatible(coin.note.value) || coin.note.value <= fee) continue;
+        // Local recovery-exit construction reserves the wallet note nullifier
+        // before releasing the wallet lock. Avoid deriving every recovery
+        // nullifier during candidate scans; consensus still checks it on the
+        // constructed transaction.
+        if (m_pending_spends.count(nf)) continue;
+        if (coin.GetDepth(tip_height) >= min_depth) {
+            out.push_back(coin);
+        }
+    }
+    return out;
 }
 
 std::vector<ShieldedCoin> CShieldedWallet::GetUnspentNotes(int min_depth) const
@@ -5278,6 +5307,62 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateSpendPathRecovery(
     return tx;
 }
 
+size_t CShieldedWallet::ReconstructMissingRecoveryExitWitnesses(CAmount fee, std::string* error)
+{
+    AssertLockHeld(cs_shielded);
+    PruneStalePendingSpends();
+
+    const int tip_height = GetChainTipHeight();
+    std::vector<uint64_t> positions;
+    std::map<uint64_t, uint256> commitment_by_position;
+    positions.reserve(m_notes.size());
+    size_t pruned_persisted{0};
+
+    for (const auto& [nf, coin] : m_notes) {
+        if (coin.is_spent || !coin.is_mine_spend) continue;
+        if (!IsShieldedAmountCompatible(coin.note.value) || coin.note.value <= fee) continue;
+        if (coin.GetDepth(tip_height) < 1) continue;
+        // See GetRecoveryExitCandidates(): the wallet note nullifier is the
+        // local pending-spend guard; the recovery nullifier is validated when
+        // the transaction is built/admitted.
+        if (m_pending_spends.count(nf)) continue;
+        pruned_persisted += m_witnesses.erase(coin.commitment);
+        if (m_recovery_exit_witness_cache.count(coin.commitment) != 0) continue;
+        if (coin.tree_position >= m_tree.Size()) continue;
+        if (commitment_by_position.emplace(coin.tree_position, coin.commitment).second) {
+            positions.push_back(coin.tree_position);
+        }
+    }
+
+    if (positions.empty()) {
+        if (pruned_persisted != 0) {
+            LogPrintf("CShieldedWallet::ReconstructMissingRecoveryExitWitnesses pruned_persisted=%u reconstructed=0 requested=0\n",
+                      static_cast<unsigned int>(pruned_persisted));
+        }
+        return 0;
+    }
+
+    const uint256 root = m_tree.Root();
+    const auto witnesses = m_tree.WitnessesAt(positions);
+    size_t reconstructed{0};
+    for (const auto& [position, witness] : witnesses) {
+        auto commitment_it = commitment_by_position.find(position);
+        if (commitment_it == commitment_by_position.end()) continue;
+        if (!witness.Verify(commitment_it->second, root)) continue;
+        m_recovery_exit_witness_cache.emplace(commitment_it->second, witness);
+        ++reconstructed;
+    }
+
+    if (reconstructed == 0 && error != nullptr) {
+        *error = "missing merkle witness for stranded note commitment";
+    }
+    LogPrintf("CShieldedWallet::ReconstructMissingRecoveryExitWitnesses reconstructed=%u requested=%u pruned_persisted=%u\n",
+              static_cast<unsigned int>(reconstructed),
+              static_cast<unsigned int>(positions.size()),
+              static_cast<unsigned int>(pruned_persisted));
+    return reconstructed;
+}
+
 std::optional<CMutableTransaction> CShieldedWallet::BuildRecoveryExitTransaction(
     const ShieldedCoin& stranded_coin,
     const CTxDestination& transparent_dest,
@@ -5388,14 +5473,49 @@ std::optional<CMutableTransaction> CShieldedWallet::BuildRecoveryExitTransaction
     }
 
     // 5. Obtain the note's merkle witness and serialize it as the membership proof.
-    const auto witness_it = m_witnesses.find(stranded_coin.commitment);
-    if (witness_it == m_witnesses.end()) {
-        return fail("missing merkle witness for stranded note commitment");
+    const shielded::ShieldedMerkleWitness* membership_witness{nullptr};
+    if (auto recovery_witness_it = m_recovery_exit_witness_cache.find(stranded_coin.commitment);
+        recovery_witness_it != m_recovery_exit_witness_cache.end()) {
+        membership_witness = &recovery_witness_it->second;
+    }
+    if (membership_witness == nullptr) {
+        std::string reconstruct_error;
+        const size_t reconstructed = ReconstructMissingRecoveryExitWitnesses(fee, &reconstruct_error);
+        (void)reconstructed;
+        if (auto recovery_witness_it = m_recovery_exit_witness_cache.find(stranded_coin.commitment);
+            recovery_witness_it != m_recovery_exit_witness_cache.end()) {
+            membership_witness = &recovery_witness_it->second;
+        }
+    }
+    if (membership_witness == nullptr) {
+        if (auto witness_it = m_witnesses.find(stranded_coin.commitment); witness_it != m_witnesses.end()) {
+            membership_witness = &witness_it->second;
+        }
+    }
+    if (membership_witness == nullptr) {
+        const auto indexed_commitment = m_tree.CommitmentAt(stranded_coin.tree_position);
+        if (!indexed_commitment.has_value()) {
+            return fail("missing indexed commitment for stranded note position");
+        }
+        if (*indexed_commitment != stranded_coin.commitment) {
+            return fail("stranded note position does not match indexed commitment");
+        }
+        auto reconstructed_witness = m_tree.WitnessAt(stranded_coin.tree_position);
+        if (!reconstructed_witness.has_value()) {
+            return fail("missing merkle witness for stranded note commitment");
+        }
+        if (!reconstructed_witness->Verify(stranded_coin.commitment, m_tree.Root())) {
+            return fail("reconstructed merkle witness failed self-verification");
+        }
+        auto inserted = m_recovery_exit_witness_cache.emplace(stranded_coin.commitment, std::move(*reconstructed_witness));
+        membership_witness = &inserted.first->second;
+        LogPrintf("CShieldedWallet::BuildRecoveryExitTransaction reconstructed missing recovery-exit witness at position=%u\n",
+                  static_cast<unsigned int>(stranded_coin.tree_position));
     }
     std::vector<unsigned char> membership_proof;
     try {
         DataStream ss;
-        ss << witness_it->second;
+        ss << *membership_witness;
         const auto* begin = reinterpret_cast<const unsigned char*>(ss.data());
         membership_proof.assign(begin, begin + ss.size());
     } catch (const std::exception& e) {
@@ -6654,6 +6774,7 @@ void CShieldedWallet::PruneSpentWitnesses()
     for (auto it = m_notes.begin(); it != m_notes.end(); ++it) {
         if (it->second.is_spent) {
             m_witnesses.erase(it->second.commitment);
+            m_recovery_exit_witness_cache.erase(it->second.commitment);
         }
     }
 }
@@ -6970,6 +7091,7 @@ void CShieldedWallet::LoadPersistedState()
     m_notes.clear();
     m_spent_nullifiers.clear();
     m_witnesses.clear();
+    m_recovery_exit_witness_cache.clear();
     m_smile_public_accounts.clear();
     m_account_leaf_commitments.clear();
     m_mempool_notes.clear();
@@ -7109,6 +7231,7 @@ void CShieldedWallet::LoadPersistedState()
         const bool repaired_owned_notes = RepairOwnedNoteSpendMetadata(master_seed);
         (void)repaired_owned_notes;
     }
+    m_recovery_exit_witness_cache.clear();
     for (const auto& [commitment, witness] : state.witnesses) {
         m_witnesses[commitment] = witness;
     }

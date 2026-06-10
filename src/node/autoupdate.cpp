@@ -256,6 +256,112 @@ std::string SanitizeFileComponent(std::string_view value)
     return out;
 }
 
+std::string UrlEncodeQueryValue(std::string_view value)
+{
+    static constexpr char HEX[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(value.size());
+    for (const unsigned char ch : value) {
+        if (std::isalnum(ch) || ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+            out.push_back(static_cast<char>(ch));
+        } else {
+            out.push_back('%');
+            out.push_back(HEX[ch >> 4]);
+            out.push_back(HEX[ch & 0x0f]);
+        }
+    }
+    return out;
+}
+
+std::string LocalClientVersion()
+{
+    return strprintf("%d.%d.%d", CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_BUILD);
+}
+
+std::string HostPlatform()
+{
+#if defined(WIN32)
+    return "windows";
+#elif defined(__APPLE__)
+    return "darwin";
+#elif defined(__linux__)
+    return "linux";
+#elif defined(__FreeBSD__)
+    return "freebsd";
+#elif defined(__DragonFly__)
+    return "dragonfly";
+#else
+    return "unknown";
+#endif
+}
+
+std::string HostArchitecture()
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    return "x86_64";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return "aarch64";
+#elif defined(__arm__) || defined(_M_ARM)
+    return "arm";
+#elif defined(__i386__) || defined(_M_IX86)
+    return "x86";
+#else
+    return "unknown";
+#endif
+}
+
+bool IsValidAutoUpdateClientId(std::string_view value)
+{
+    if (value.size() != 36) return false;
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (value[i] != '-') return false;
+        } else if (!std::isxdigit(static_cast<unsigned char>(value[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string GenerateAutoUpdateClientId()
+{
+    std::array<unsigned char, 16> bytes;
+    GetRandBytes(Span<unsigned char>{bytes.data(), bytes.size()});
+    bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0f) | 0x40);
+    bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3f) | 0x80);
+    const std::string hex = HexStr(Span<const unsigned char>{bytes.data(), bytes.size()});
+    return strprintf("%s-%s-%s-%s-%s",
+                     hex.substr(0, 8),
+                     hex.substr(8, 4),
+                     hex.substr(12, 4),
+                     hex.substr(16, 4),
+                     hex.substr(20, 12));
+}
+
+std::string GetOrCreateAutoUpdateClientId(const fs::path& datadir)
+{
+    const fs::path update_dir = datadir / "autoupdate";
+    const fs::path id_path = update_dir / "client-id";
+    try {
+        std::ifstream in{id_path};
+        std::string existing;
+        std::getline(in, existing);
+        existing = TrimAscii(existing);
+        if (IsValidAutoUpdateClientId(existing)) return ToLowerAscii(existing);
+    } catch (const std::exception&) {
+    }
+
+    const std::string generated = GenerateAutoUpdateClientId();
+    try {
+        fs::create_directories(update_dir);
+        std::ofstream out{id_path, std::ios::trunc};
+        if (out.is_open()) out << generated << '\n';
+    } catch (const std::exception& e) {
+        LogDebug(BCLog::AUTOUPDATE, "Unable to persist auto-update client id: %s\n", e.what());
+    }
+    return generated;
+}
+
 class PythonAutoUpdateFetcher final : public AutoUpdateFetcher
 {
 public:
@@ -509,6 +615,7 @@ private:
                                                          const AutoUpdateManifest& manifest,
                                                          const fs::path& script_path)
     {
+        const std::string telemetry_query = AutoUpdateTelemetryQuery(config);
         std::vector<std::pair<std::string, std::string>> ours{
             {"BTX_AUTOUPDATE", "1"},
             {"BTX_AUTOUPDATE_MANIFEST_URL", config.manifest_url},
@@ -516,12 +623,23 @@ private:
             {"BTX_AUTOUPDATE_SCRIPT_URL", manifest.script_url},
             {"BTX_AUTOUPDATE_SCRIPT_PATH", fs::PathToString(script_path)},
             {"BTX_AUTOUPDATE_DATADIR", fs::PathToString(config.datadir)},
+            {"BTX_MANIFEST_URL", config.manifest_url},
+            {"BTX_TRUSTED_ORIGIN", config.trusted_origin},
             // Same release-signature scheme + key the node used, so the installer verifies the
             // manifest and signed source/commit with the SAME (post-quantum) scheme -- e.g. via
             // `btx-util verifyupdatesig` -- instead of a classical-only openssl check.
             {"BTX_AUTOUPDATE_PUBKEY_ALGO", config.release_pubkey_algo},
             {"BTX_AUTOUPDATE_PUBKEY", config.release_pubkey},
         };
+        if (!telemetry_query.empty()) {
+            ours.emplace_back("BTX_AUTOUPDATE_TELEMETRY_QUERY", telemetry_query);
+            ours.emplace_back("BTX_AUTOUPDATE_CLIENT_VERSION", LocalClientVersion());
+            ours.emplace_back("BTX_AUTOUPDATE_PLATFORM", HostPlatform());
+            ours.emplace_back("BTX_AUTOUPDATE_ARCH", HostArchitecture());
+            if (!config.telemetry_client_id.empty()) {
+                ours.emplace_back("BTX_AUTOUPDATE_CLIENT_ID", config.telemetry_client_id);
+            }
+        }
         // Directory of the running node binary, so the installer can find the sibling btx-util
         // verifier portably (no /proc dependency on macOS/BSD).
         if (const std::string bin_dir = RunningExecutableDir(); !bin_dir.empty()) {
@@ -719,6 +837,48 @@ int AutoUpdateRolloutCohort(const AutoUpdateConfig& config)
     return static_cast<int>(v % 100u);
 }
 
+std::string AutoUpdateTelemetryQuery(const AutoUpdateConfig& config)
+{
+    if (!config.telemetry) return {};
+
+    std::vector<std::pair<std::string, std::string>> params{
+        {"btx_au", "1"},
+        {"btx_version", LocalClientVersion()},
+        {"btx_platform", HostPlatform()},
+        {"btx_arch", HostArchitecture()},
+    };
+    if (!config.telemetry_client_id.empty()) {
+        params.emplace_back("btx_client_id", config.telemetry_client_id);
+    }
+
+    std::string query;
+    for (const auto& [key, value] : params) {
+        if (!query.empty()) query.push_back('&');
+        query += key;
+        query.push_back('=');
+        query += UrlEncodeQueryValue(value);
+    }
+    return query;
+}
+
+std::string AutoUpdateTrackedUrl(std::string_view url, const AutoUpdateConfig& config)
+{
+    const std::string query = AutoUpdateTelemetryQuery(config);
+    if (query.empty()) return std::string{url};
+
+    std::string out{url};
+    const size_t fragment_pos = out.find('#');
+    const size_t insert_pos = fragment_pos == std::string::npos ? out.size() : fragment_pos;
+    if (insert_pos > 0 && (out[insert_pos - 1] == '?' || out[insert_pos - 1] == '&')) {
+        out.insert(insert_pos, query);
+    } else if (out.find('?', 0) < insert_pos) {
+        out.insert(insert_pos, "&" + query);
+    } else {
+        out.insert(insert_pos, "?" + query);
+    }
+    return out;
+}
+
 std::string AutoUpdateStatusString(AutoUpdateStatus status)
 {
     switch (status) {
@@ -762,7 +922,7 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
         return result;
     }
 
-    const auto manifest_fetch = fetcher.Fetch(config.manifest_url, MAX_MANIFEST_BYTES);
+    const auto manifest_fetch = fetcher.Fetch(AutoUpdateTrackedUrl(config.manifest_url, config), MAX_MANIFEST_BYTES);
     if (!manifest_fetch.ok || manifest_fetch.status != 200 ||
         !AutoUpdateUrlMatchesTrustedOrigin(manifest_fetch.final_url, config.trusted_origin, config.dev_origin)) {
         result.status = AutoUpdateStatus::FETCH_FAILED;
@@ -783,7 +943,7 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
         return result;
     }
 
-    const auto signature_fetch = fetcher.Fetch(manifest->sig_url, MAX_SIGNATURE_BYTES);
+    const auto signature_fetch = fetcher.Fetch(AutoUpdateTrackedUrl(manifest->sig_url, config), MAX_SIGNATURE_BYTES);
     if (!signature_fetch.ok || signature_fetch.status != 200 ||
         !AutoUpdateUrlMatchesTrustedOrigin(signature_fetch.final_url, config.trusted_origin, config.dev_origin)) {
         result.status = AutoUpdateStatus::UNSIGNED_MANIFEST;
@@ -825,7 +985,7 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
         return result;
     }
 
-    const auto script_fetch = fetcher.Fetch(manifest->script_url, MAX_INSTALL_SCRIPT_BYTES);
+    const auto script_fetch = fetcher.Fetch(AutoUpdateTrackedUrl(manifest->script_url, config), MAX_INSTALL_SCRIPT_BYTES);
     if (!script_fetch.ok || script_fetch.status != 200 ||
         !AutoUpdateUrlMatchesTrustedOrigin(script_fetch.final_url, config.trusted_origin, config.dev_origin)) {
         result.status = AutoUpdateStatus::SCRIPT_FETCH_FAILED;
@@ -937,6 +1097,7 @@ std::unique_ptr<AutoUpdateManager> MakeAutoUpdateManager(const ArgsManager& args
     config.seamless = args.GetBoolArg("-autoupdateseamless", true);
     config.dev_origin = args.GetBoolArg("-autoupdatedevorigin", false);
     config.require_script_hash = args.GetBoolArg("-autoupdaterequirescripthash", true);
+    config.telemetry = args.GetBoolArg("-autoupdatetelemetry", true);
     config.manifest_url = args.GetArg("-autoupdatemanifesturl", std::string{DEFAULT_AUTOUPDATE_MANIFEST_URL});
     config.trusted_origin = args.GetArg("-autoupdatetrustedorigin", std::string{DEFAULT_AUTOUPDATE_TRUSTED_ORIGIN});
     config.release_pubkey = args.GetArg("-autoupdatepubkey", std::string{DEFAULT_AUTOUPDATE_RELEASE_PUBKEY});
@@ -956,6 +1117,9 @@ std::unique_ptr<AutoUpdateManager> MakeAutoUpdateManager(const ArgsManager& args
         config.rollout_cohort = std::clamp<int>(args.GetIntArg("-autoupdatecohort", 0), 0, 99);
     }
     config.datadir = args.GetDataDirBase();
+    if (config.telemetry) {
+        config.telemetry_client_id = GetOrCreateAutoUpdateClientId(config.datadir);
+    }
 #ifndef WIN32
     config.daemon_pid = getpid();
 #endif

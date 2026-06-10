@@ -23,6 +23,14 @@
 
 namespace {
 
+constexpr int64_t METAL_CONTEXT_RETRY_MS{1'000};
+
+int64_t SteadyMilliseconds()
+{
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
 constexpr const char* KERNEL_SOURCE = R"METAL(
 #include <metal_stdlib>
 using namespace metal;
@@ -493,9 +501,59 @@ struct MetalContext {
     std::mutex profiling_mutex;
     btx::metal::MatMulInputGenerationProfile profile;
     bool using_precompiled_library{false};
+    std::mutex init_mutex;
+    int64_t last_init_attempt_ms{0};
+    uint64_t init_attempts{0};
 
     MetalContext()
     {
+        std::lock_guard<std::mutex> init_lock(init_mutex);
+        InitializeLocked();
+    }
+
+    bool EnsureReady()
+    {
+        if (ready) {
+            return true;
+        }
+
+        const int64_t now_ms = SteadyMilliseconds();
+        std::lock_guard<std::mutex> init_lock(init_mutex);
+        if (ready) {
+            return true;
+        }
+        if (last_init_attempt_ms != 0 && now_ms - last_init_attempt_ms < METAL_CONTEXT_RETRY_MS) {
+            return false;
+        }
+        InitializeLocked();
+        return ready;
+    }
+
+    void InitializeLocked()
+    {
+        last_init_attempt_ms = SteadyMilliseconds();
+        ++init_attempts;
+        ready = false;
+        error.clear();
+        device = nil;
+        queue = nil;
+        oracle_noise_pipeline = nil;
+        oracle_vector_pipeline = nil;
+        nonce_seed_scan_pipeline = nil;
+        pool_out_e_l = nil;
+        pool_out_e_r = nil;
+        pool_out_f_l = nil;
+        pool_out_f_r = nil;
+        pool_out_cv = nil;
+        pool_scan_flags = nil;
+        pool_noise_bytes = 0;
+        pool_compress_bytes = 0;
+        pool_scan_flags_bytes = 0;
+        pool_allocation_events = 0;
+        pool_reuse_events = 0;
+        profile = {};
+        using_precompiled_library = false;
+
         @autoreleasepool {
             // MTLCreateSystemDefaultDevice() is restricted to interactive apps on macOS 14+; it
             // returns nil from CLI/daemon contexts. MTLCopyAllDevices() works in any context --
@@ -515,6 +573,7 @@ struct MetalContext {
 
             NSError* library_error = nil;
             id<MTLLibrary> library = nil;
+            std::string precompiled_error;
 #if defined(BTX_ORACLE_METALLIB_PATH)
             NSString* precompiled_path = [NSString stringWithUTF8String:BTX_ORACLE_METALLIB_PATH];
             if ([[NSFileManager defaultManager] fileExistsAtPath:precompiled_path]) {
@@ -522,6 +581,9 @@ struct MetalContext {
                 NSURL* precompiled_url = [NSURL fileURLWithPath:precompiled_path];
                 library = [device newLibraryWithURL:precompiled_url error:&library_error];
                 using_precompiled_library = (library != nil);
+                if (library == nil && library_error != nil) {
+                    precompiled_error = [[library_error localizedDescription] UTF8String];
+                }
             }
 #endif
             if (library == nil) {
@@ -532,8 +594,12 @@ struct MetalContext {
                 using_precompiled_library = false;
             }
             if (library == nil) {
-                error = library_error != nil ? [[library_error localizedDescription] UTF8String]
-                                             : "Failed to compile Metal oracle kernel source";
+                const std::string inline_error = library_error != nil
+                    ? [[library_error localizedDescription] UTF8String]
+                    : "Failed to compile Metal oracle kernel source";
+                error = precompiled_error.empty()
+                    ? inline_error
+                    : "precompiled metallib failed: " + precompiled_error + "; inline source fallback failed: " + inline_error;
                 return;
             }
 
@@ -696,6 +762,7 @@ MatMulInputGenerationProfile ProbeMatMulInputGenerationProfile()
     MatMulInputGenerationProfile profile;
 
     MetalContext& context = GetContext();
+    context.EnsureReady();
     if (!context.ready) {
         profile.available = false;
         profile.pool_initialized = false;
@@ -726,6 +793,7 @@ MatMulInputGenerationResult GenerateMatMulInputsGPU(const MatMulInputGenerationR
     MatMulInputGenerationResult result;
 
     MetalContext& context = GetContext();
+    context.EnsureReady();
     if (!context.ready) {
         result.available = false;
         result.success = false;
@@ -910,6 +978,7 @@ MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(
     MatMulNonceSeedPreHashScanResult result;
 
     MetalContext& context = GetContext();
+    context.EnsureReady();
     if (!context.ready) {
         result.available = false;
         result.success = false;

@@ -2165,8 +2165,20 @@ static void HandleDoSPunishment(CConnman& connman, NodeId node_id, const int nDo
 
 static bool IsMatMulPhase1Failure(const BlockValidationState& state)
 {
-    return state.GetRejectReason() == "high-hash" &&
-        state.GetDebugMessage().find("matmul phase1 proof of work failed") != std::string::npos;
+    // Phase-1 / cheap-stage MatMul header failures, all routed to the dedicated MatMul
+    // DoS punishment ladder instead of the generic 100-point path (security audit F-3):
+    //   - "matmul phase1 proof of work failed": the Phase-1 digest <= target check.
+    //   - "matmul pre-hash proof failed": the contextual pre-hash lottery gate (sigma).
+    //   - "bad-matmul-seeds": header carries seeds that do not match the deterministic
+    //     per-height derivation (forged-parent / wrong-height header spam).
+    // Previously only the first matched, so pre-hash and seed-mismatch header spam fell
+    // through to generic punishment and bypassed the MatMul addr-budget accounting.
+    const std::string& reason = state.GetRejectReason();
+    if (reason == "bad-matmul-seeds") return true;
+    const std::string& msg = state.GetDebugMessage();
+    return reason == "high-hash" &&
+        (msg.find("matmul phase1 proof of work failed") != std::string::npos ||
+         msg.find("matmul pre-hash proof failed") != std::string::npos);
 }
 
 static bool IsMatMulPhase2Failure(const BlockValidationState& state)

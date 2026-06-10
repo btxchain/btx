@@ -55,10 +55,12 @@ struct AutoUpdateConfig {
     bool seamless{true};
     bool dev_origin{false};
     bool require_script_hash{true};
+    bool telemetry{true};
     std::string manifest_url{std::string{DEFAULT_AUTOUPDATE_MANIFEST_URL}};
     std::string trusted_origin{std::string{DEFAULT_AUTOUPDATE_TRUSTED_ORIGIN}};
     std::string release_pubkey{std::string{DEFAULT_AUTOUPDATE_RELEASE_PUBKEY}};
     std::string release_pubkey_algo{std::string{DEFAULT_AUTOUPDATE_RELEASE_PUBKEY_ALGO}};
+    std::string telemetry_client_id;
     std::string python_command{"python3"};
     int64_t interval_seconds{DEFAULT_AUTOUPDATE_INTERVAL_SECONDS};
     int64_t initial_delay_seconds{DEFAULT_AUTOUPDATE_INITIAL_DELAY_SECONDS};
@@ -172,6 +174,8 @@ std::optional<AutoUpdateUrl> ParseAutoUpdateUrl(std::string_view url);
 bool AutoUpdateUrlMatchesTrustedOrigin(std::string_view url, std::string_view trusted_origin, bool dev_origin);
 int CompareAutoUpdateVersion(std::string_view remote_version);
 std::string AutoUpdateStatusString(AutoUpdateStatus status);
+std::string AutoUpdateTelemetryQuery(const AutoUpdateConfig& config);
+std::string AutoUpdateTrackedUrl(std::string_view url, const AutoUpdateConfig& config);
 
 // This node's stable rollout cohort in [0, 100): config.rollout_cohort if set, else derived from a
 // hash of the datadir so it is stable across restarts but varies across the fleet. An update with

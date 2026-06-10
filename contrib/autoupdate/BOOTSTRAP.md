@@ -106,8 +106,8 @@ when none matches or verification fails.
 "git_commit": "<full 40-hex commit the binaries were built from>",
 "prebuilt": {
   "linux-x86_64-glibc": {
-    "url":    "https://btx.dev/bin/btx-0.32.3-linux-x86_64-glibc.tar.gz",
-    "sig_url":"https://btx.dev/bin/btx-0.32.3-linux-x86_64-glibc.tar.gz.sig",
+    "url":    "https://btx.dev/bin/btx-0.32.4-linux-x86_64-glibc.tar.gz",
+    "sig_url":"https://btx.dev/bin/btx-0.32.4-linux-x86_64-glibc.tar.gz.sig",
     "sha256": "<hex>"                       // optional, defense-in-depth
   },
   "linux-aarch64-glibc": { "url": "…", "sig_url": "…" },
@@ -150,6 +150,22 @@ Per release, for each supported `(os, arch, libc)`:
 
 The private key never touches CI runners that fetch untrusted input; signing runs
 on an isolated/offline host (`../btx-release-key/`).
+
+## Request metrics
+
+Auto-update requests append transport-only query parameters so release operators
+can see which client versions and platforms are polling/installing without
+changing signed manifest bytes:
+
+| parameter | meaning |
+| --- | --- |
+| `btx_au=1` | identifies the request as part of the auto-update flow |
+| `btx_client_id` | stable random UUID stored at `<datadir>/autoupdate/client-id` |
+| `btx_version` | running client version, e.g. `0.32.4` |
+| `btx_platform` | operating system family, e.g. `linux` or `darwin` |
+| `btx_arch` | client architecture, e.g. `x86_64` or `aarch64` |
+
+Operators may disable this request tagging with `-autoupdatetelemetry=0`.
 
 ## Staged / canary rollout
 

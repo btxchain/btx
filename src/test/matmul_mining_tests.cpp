@@ -475,6 +475,14 @@ BOOST_AUTO_TEST_CASE(getmininginfo_reports_matmul_algorithm)
     BOOST_CHECK_EQUAL(info.find_value("matmul_b").getInt<int>(), static_cast<int>(consensus.nMatMulTranscriptBlockSize));
     BOOST_CHECK_EQUAL(info.find_value("matmul_r").getInt<int>(), static_cast<int>(consensus.nMatMulNoiseRank));
 
+    const auto backend_runtime = info.find_value("backend_runtime").get_obj();
+    BOOST_CHECK(backend_runtime.find_value("requested_backend").isStr());
+    BOOST_CHECK(backend_runtime.find_value("active_backend").isStr());
+    BOOST_CHECK(backend_runtime.find_value("backend_selection_reason").isStr());
+    BOOST_CHECK(backend_runtime.find_value("required_backend_enabled").isBool());
+    BOOST_CHECK(backend_runtime.find_value("required_backend_satisfied").isBool());
+    BOOST_CHECK(backend_runtime.find_value("metal_fallbacks_to_cpu").isNum());
+
     const auto time_policy = info.find_value("time_policy").get_obj();
     BOOST_CHECK_EQUAL(time_policy.find_value("height").getInt<int>(), ActiveHeight() + 1);
     BOOST_CHECK(time_policy.find_value("future_mtp_limit_active").isBool());

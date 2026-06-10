@@ -74,8 +74,11 @@ class WalletBundleArchiveTest(BitcoinTestFramework):
             input="pass\narchive-pass\n",
         ).backupwalletbundlearchive(archive_path)
         assert_equal(archive["unlocked_by_rpc"], True)
+        assert_equal(archive["wallet_encrypted"], True)
+        assert_equal(archive["wallet_passphrase_included"], False)
+        assert_equal(archive["wallet_passphrase_required_to_spend"], True)
         assert_equal(archive["integrity"]["integrity_ok"], True)
-        assert_equal(archive["warnings"], [])
+        assert any("Wallet passphrase is not stored" in warning for warning in archive["warnings"])
 
         archive_file = Path(archive["archive_file"])
         assert archive_file.is_file()
@@ -111,7 +114,11 @@ class WalletBundleArchiveTest(BitcoinTestFramework):
         assert_equal(restore["bundle_name"], "shielded.bundle")
         assert_equal(restore["bundled_manifest"]["integrity_ok"], True)
         assert_equal(restore["bundled_manifest"]["integrity_warnings"], [])
+        assert_equal(restore["bundled_manifest"]["wallet_encrypted"], True)
+        assert_equal(restore["bundled_manifest"]["wallet_passphrase_included"], False)
+        assert_equal(restore["bundled_manifest"]["wallet_passphrase_required_to_spend"], True)
         assert_equal(restore["bundled_integrity"]["integrity_ok"], True)
+        assert any("archive passphrase only decrypted" in warning for warning in restore["warnings"])
 
         restored = node.get_wallet_rpc("restored")
         restored.walletpassphrase("pass", 120)

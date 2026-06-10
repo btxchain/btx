@@ -919,11 +919,19 @@ BOOST_AUTO_TEST_CASE(gpu_input_auto_policy_is_backend_specific)
 {
     ScopedGpuInputEnv gpu_env(nullptr);
 
+#if defined(__APPLE__)
+    BOOST_CHECK(matmul::accelerated::ShouldUseGpuGeneratedInputsForShape(
+        matmul::backend::Kind::METAL,
+        /*n=*/512,
+        /*b=*/16,
+        /*r=*/8));
+#else
     BOOST_CHECK(!matmul::accelerated::ShouldUseGpuGeneratedInputsForShape(
         matmul::backend::Kind::METAL,
         /*n=*/512,
         /*b=*/16,
         /*r=*/8));
+#endif
     BOOST_CHECK(!matmul::accelerated::ShouldUseGpuGeneratedInputsForShape(
         matmul::backend::Kind::METAL,
         /*n=*/256,
