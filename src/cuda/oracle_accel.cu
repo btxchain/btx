@@ -775,6 +775,72 @@ __device__ inline void Sha256Bytes(const uint8_t* message, uint32_t message_len,
     }
 }
 
+// Midstate after the FIRST 64-byte block of a >64-byte message. Both nonce-seed
+// scan messages (seed_v2: 110 B, header-hash: 150 B) keep every nonce-dependent
+// byte past offset 63 (nonce at 99 / 76, `which` at 109), so this midstate is
+// constant across a whole scan window and is computed once per CUDA block.
+__device__ inline void Sha256Block0Midstate(const uint8_t* message, uint32_t state[8])
+{
+    Sha256Init(state);
+    uint32_t w[16];
+    for (uint32_t word = 0; word < 16; ++word) {
+        uint32_t packed{0};
+        for (uint32_t byte = 0; byte < 4; ++byte) {
+            packed = (packed << 8U) | message[word * 4U + byte];
+        }
+        w[word] = packed;
+    }
+    Sha256Compress(state, w);
+}
+
+// Sha256Bytes, resumed after block 0 from a precomputed midstate. Byte-identical
+// to Sha256Bytes for any message longer than 64 bytes whose first block matches
+// the midstate's input.
+__device__ inline void Sha256BytesFromMidstate(const uint32_t midstate[8],
+                                               const uint8_t* message,
+                                               uint32_t message_len,
+                                               uint8_t out[32])
+{
+    uint32_t state[8];
+    for (uint32_t i = 0; i < 8; ++i) {
+        state[i] = midstate[i];
+    }
+
+    const uint32_t total_blocks = (message_len + 9U + 63U) / 64U;
+    const uint64_t bit_len = static_cast<uint64_t>(message_len) * 8U;
+    for (uint32_t block = 1; block < total_blocks; ++block) {
+        uint32_t w[16] = {};
+        for (uint32_t word = 0; word < 16; ++word) {
+            uint32_t packed{0};
+            for (uint32_t byte = 0; byte < 4; ++byte) {
+                const uint32_t message_index = block * 64U + word * 4U + byte;
+                uint8_t value{0};
+                if (message_index < message_len) {
+                    value = message[message_index];
+                } else if (message_index == message_len) {
+                    value = 0x80U;
+                } else {
+                    const uint32_t length_start = total_blocks * 64U - 8U;
+                    if (message_index >= length_start) {
+                        const uint32_t shift = (7U - (message_index - length_start)) * 8U;
+                        value = static_cast<uint8_t>((bit_len >> shift) & 0xffU);
+                    }
+                }
+                packed = (packed << 8U) | value;
+            }
+            w[word] = packed;
+        }
+        Sha256Compress(state, w);
+    }
+
+    for (uint32_t i = 0; i < 8; ++i) {
+        out[i * 4U] = static_cast<uint8_t>((state[i] >> 24U) & 0xffU);
+        out[i * 4U + 1U] = static_cast<uint8_t>((state[i] >> 16U) & 0xffU);
+        out[i * 4U + 2U] = static_cast<uint8_t>((state[i] >> 8U) & 0xffU);
+        out[i * 4U + 3U] = static_cast<uint8_t>(state[i] & 0xffU);
+    }
+}
+
 __device__ inline void AppendByte(uint8_t* message, uint32_t& offset, uint8_t value)
 {
     message[offset++] = value;
@@ -808,18 +874,19 @@ __device__ inline void AppendLE64(uint8_t* message, uint32_t& offset, uint64_t v
     }
 }
 
-__device__ inline void ComputeMatMulSeedV2Device(const OracleSeedBytes& previous_block_hash,
-                                                 const OracleSeedBytes& merkle_root,
-                                                 uint32_t height,
-                                                 uint32_t version,
-                                                 uint32_t time,
-                                                 uint32_t bits,
-                                                 uint64_t nonce,
-                                                 uint16_t matmul_dim,
-                                                 uint8_t which,
-                                                 uint8_t out[32])
+// Builds the seed_v2 message; the nonce lands at offset 99 and `which` at 109,
+// both inside the SECOND SHA-256 block. Returns the message length (110).
+__device__ inline uint32_t BuildMatMulSeedV2Message(const OracleSeedBytes& previous_block_hash,
+                                                    const OracleSeedBytes& merkle_root,
+                                                    uint32_t height,
+                                                    uint32_t version,
+                                                    uint32_t time,
+                                                    uint32_t bits,
+                                                    uint64_t nonce,
+                                                    uint16_t matmul_dim,
+                                                    uint8_t which,
+                                                    uint8_t message[110])
 {
-    uint8_t message[110];
     uint32_t offset{0};
     constexpr char TAG[] = "BTX_MATMUL_SEED_V2";
     AppendByte(message, offset, 18U);
@@ -835,21 +902,22 @@ __device__ inline void ComputeMatMulSeedV2Device(const OracleSeedBytes& previous
     AppendLE64(message, offset, nonce);
     AppendLE16(message, offset, matmul_dim);
     AppendByte(message, offset, which);
-    Sha256Bytes(message, offset, out);
+    return offset;
 }
 
-__device__ inline void ComputeMatMulHeaderHashDevice(uint32_t version,
-                                                     const OracleSeedBytes& previous_block_hash,
-                                                     const OracleSeedBytes& merkle_root,
-                                                     uint32_t time,
-                                                     uint32_t bits,
-                                                     uint64_t nonce,
-                                                     uint16_t matmul_dim,
-                                                     const uint8_t seed_a[32],
-                                                     const uint8_t seed_b[32],
-                                                     uint8_t out[32])
+// Builds the header-hash message; the nonce lands at offset 76 and the seeds at
+// 86/118, all inside the second and third SHA-256 blocks. Returns length (150).
+__device__ inline uint32_t BuildMatMulHeaderHashMessage(uint32_t version,
+                                                        const OracleSeedBytes& previous_block_hash,
+                                                        const OracleSeedBytes& merkle_root,
+                                                        uint32_t time,
+                                                        uint32_t bits,
+                                                        uint64_t nonce,
+                                                        uint16_t matmul_dim,
+                                                        const uint8_t seed_a[32],
+                                                        const uint8_t seed_b[32],
+                                                        uint8_t message[150])
 {
-    uint8_t message[150];
     uint32_t offset{0};
     AppendLE32(message, offset, version);
     AppendBytes(message, offset, previous_block_hash.data, 32U);
@@ -860,7 +928,7 @@ __device__ inline void ComputeMatMulHeaderHashDevice(uint32_t version,
     AppendLE16(message, offset, matmul_dim);
     AppendBytes(message, offset, seed_a, 32U);
     AppendBytes(message, offset, seed_b, 32U);
-    Sha256Bytes(message, offset, out);
+    return offset;
 }
 
 __device__ inline bool Uint256InternalBytesLessOrEqual(const uint8_t lhs[32], const OracleSeedBytes& rhs)
@@ -884,49 +952,48 @@ __global__ void ScanNonceSeedPreHashKernel(OracleSeedBytes previous_block_hash,
                                            Element* out_flags,
                                            uint32_t scan_count)
 {
+    // Block 0 of both messages is nonce-independent (see the Build* comments),
+    // so its compression is done ONCE per CUDA block and shared: 8 -> 5 SHA-256
+    // compressions per nonce. The midstates must be computed before the bounds
+    // guard so every thread reaches the barrier.
+    __shared__ uint32_t seed_midstate[8];
+    __shared__ uint32_t header_midstate[8];
+    if (threadIdx.x == 0) {
+        uint8_t prefix[150];
+        BuildMatMulSeedV2Message(
+            previous_block_hash, merkle_root, height, version, time, bits,
+            /*nonce=*/0U, matmul_dim, /*which=*/0U, prefix);
+        Sha256Block0Midstate(prefix, seed_midstate);
+        BuildMatMulHeaderHashMessage(
+            version, previous_block_hash, merkle_root, time, bits,
+            /*nonce=*/0U, matmul_dim,
+            /*seed_a=*/previous_block_hash.data, /*seed_b=*/previous_block_hash.data,
+            prefix);
+        Sha256Block0Midstate(prefix, header_midstate);
+    }
+    __syncthreads();
+
     const uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= scan_count) {
         return;
     }
 
     const uint64_t nonce = start_nonce + static_cast<uint64_t>(gid);
+    uint8_t message[150];
     uint8_t seed_a[32];
     uint8_t seed_b[32];
     uint8_t header_hash[32];
     uint8_t sigma[32];
-    ComputeMatMulSeedV2Device(
-        previous_block_hash,
-        merkle_root,
-        height,
-        version,
-        time,
-        bits,
-        nonce,
-        matmul_dim,
-        0U,
-        seed_a);
-    ComputeMatMulSeedV2Device(
-        previous_block_hash,
-        merkle_root,
-        height,
-        version,
-        time,
-        bits,
-        nonce,
-        matmul_dim,
-        1U,
-        seed_b);
-    ComputeMatMulHeaderHashDevice(
-        version,
-        previous_block_hash,
-        merkle_root,
-        time,
-        bits,
-        nonce,
-        matmul_dim,
-        seed_a,
-        seed_b,
-        header_hash);
+    const uint32_t seed_len = BuildMatMulSeedV2Message(
+        previous_block_hash, merkle_root, height, version, time, bits,
+        nonce, matmul_dim, 0U, message);
+    Sha256BytesFromMidstate(seed_midstate, message, seed_len, seed_a);
+    message[seed_len - 1U] = 1U; // `which` is the final byte; the rest is identical
+    Sha256BytesFromMidstate(seed_midstate, message, seed_len, seed_b);
+    const uint32_t header_len = BuildMatMulHeaderHashMessage(
+        version, previous_block_hash, merkle_root, time, bits,
+        nonce, matmul_dim, seed_a, seed_b, message);
+    Sha256BytesFromMidstate(header_midstate, message, header_len, header_hash);
     Sha256Bytes(header_hash, 32U, sigma);
     out_flags[gid] = Uint256InternalBytesLessOrEqual(sigma, pre_hash_target) ? 1U : 0U;
 }
