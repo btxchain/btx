@@ -9,6 +9,7 @@
 #include <matmul/noise.h>
 #include <matmul/transcript.h>
 #include <metal/oracle_accel.h>
+#include <pow.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -780,6 +781,69 @@ BOOST_AUTO_TEST_CASE(cuda_variable_base_device_batch_matches_cpu_product_digest)
             kTranscriptBlockSize,
             matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
         BOOST_CHECK_EQUAL(batch_results[i].digest, cpu_digest);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(cuda_nonce_seed_v2_mainnet_boundary_variable_base_product_digest_matches_cpu)
+{
+    ScopedGpuInputEnv gpu_env("1");
+    ScopedCudaDevicePreparedInputsEnv device_inputs_env("1");
+    constexpr uint32_t kN = 512;
+    constexpr uint32_t kTranscriptBlockSize = 16;
+    constexpr uint32_t kNoiseRank = 8;
+    constexpr uint32_t kActivationHeight = 125'000;
+    constexpr uint32_t kHeight125000NBits = 0x1d0b8746U;
+    constexpr uint32_t kBatchSize = 2;
+
+    const auto cuda_capability = matmul::backend::CapabilityFor(matmul::backend::Kind::CUDA);
+    if (!cuda_capability.available) {
+        return;
+    }
+
+    std::vector<CBlockHeader> headers;
+    std::vector<matmul::accelerated::PreparedDigestInputs> prepared_batch;
+    headers.reserve(kBatchSize);
+    prepared_batch.reserve(kBatchSize);
+
+    for (uint32_t i = 0; i < kBatchSize; ++i) {
+        CBlockHeader header = MakeCandidateHeaderWithDim(kN);
+        header.nVersion = 4;
+        header.nBits = kHeight125000NBits;
+        header.nTime = 1'773'277'390U + i;
+        header.nNonce64 = 125'000 + i;
+        header.nNonce = static_cast<uint32_t>(header.nNonce64);
+        header.seed_a = DeterministicMatMulSeedV2(header, kActivationHeight, 0);
+        header.seed_b = DeterministicMatMulSeedV2(header, kActivationHeight, 1);
+
+        headers.push_back(header);
+        prepared_batch.push_back(matmul::accelerated::PrepareMatMulDigestInputsForBackend(
+            header,
+            kTranscriptBlockSize,
+            kNoiseRank,
+            matmul::backend::Kind::CUDA,
+            matmul::accelerated::DigestScheme::PRODUCT_COMMITTED));
+        BOOST_REQUIRE(prepared_batch.back().cuda_generated_inputs != nullptr);
+    }
+
+    const auto batch_results = matmul::accelerated::ComputeMatMulDigestPreparedVariableBaseBatchForMining(
+        headers,
+        kTranscriptBlockSize,
+        kNoiseRank,
+        prepared_batch,
+        matmul::backend::Kind::CUDA,
+        matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
+
+    BOOST_REQUIRE_EQUAL(batch_results.size(), headers.size());
+    for (size_t i = 0; i < headers.size(); ++i) {
+        BOOST_REQUIRE_MESSAGE(batch_results[i].ok, batch_results[i].error);
+        BOOST_CHECK_EQUAL(batch_results[i].backend, matmul::backend::Kind::CUDA);
+        BOOST_CHECK(batch_results[i].accelerated);
+
+        const matmul::Matrix matrix_a = matmul::FromSeed(headers[i].seed_a, kN);
+        const matmul::Matrix matrix_b = matmul::FromSeed(headers[i].seed_b, kN);
+        BOOST_CHECK_EQUAL(
+            batch_results[i].digest,
+            ComputeReferenceProductDigest(headers[i], matrix_a, matrix_b, kTranscriptBlockSize, kNoiseRank));
     }
 }
 

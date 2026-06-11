@@ -40,6 +40,37 @@ struct MatMulBaseMatricesResult {
     std::string error;
 };
 
+struct MatMulGeneratedBaseMatrixResult {
+    bool available{false};
+    bool success{false};
+    std::vector<matmul::field::Element> matrix;
+    std::string error;
+};
+
+struct MatMulVariableBaseProductWordsRequest {
+    uint32_t n{0};
+    uint32_t b{0};
+    uint32_t r{0};
+    uint256 matrix_a_seed;
+    uint256 matrix_b_seed;
+    const matmul::field::Element* noise_e_l{nullptr};
+    const matmul::field::Element* noise_e_r{nullptr};
+    const matmul::field::Element* noise_f_l{nullptr};
+    const matmul::field::Element* noise_f_r{nullptr};
+    const matmul::field::Element* compress_vec{nullptr};
+};
+
+struct MatMulVariableBaseProductWordsResult {
+    bool available{false};
+    bool success{false};
+    std::vector<matmul::field::Element> matrix_a;
+    std::vector<matmul::field::Element> matrix_b;
+    std::vector<matmul::field::Element> a_prime;
+    std::vector<matmul::field::Element> b_prime;
+    std::vector<matmul::field::Element> product_words;
+    std::string error;
+};
+
 struct MatMulBufferPoolStats {
     bool available{false};
     bool initialized{false};
@@ -193,6 +224,9 @@ struct MatMulVariableBaseDigestBatchRequest {
 MatMulAccelerationProbe ProbeMatMulDigestAcceleration();
 MatMulDeviceInfo ProbeMatMulDeviceInfo();
 MatMulBaseMatricesResult UploadBaseMatrices(const MatMulBaseMatricesRequest& request);
+MatMulGeneratedBaseMatrixResult GenerateBaseMatrixFromSeedForTesting(uint32_t n, const uint256& seed);
+MatMulVariableBaseProductWordsResult GenerateVariableBaseProductWordsForTesting(
+    const MatMulVariableBaseProductWordsRequest& request);
 MatMulBufferPoolStats ProbeMatMulBufferPool();
 MatMulDispatchConfig ProbeMatMulDispatchConfig();
 MatMulKernelProfile ProbeMatMulKernelProfile();

@@ -10,12 +10,14 @@
 #include <metal/matmul_accel.h>
 #include <metal/matmul_accel_env.h>
 #include <metal/nonce_accel.h>
+#include <pow.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <array>
 #include <condition_variable>
 #include <cstdlib>
@@ -65,6 +67,46 @@ uint256 ComputeReferenceProductDigest(const CBlockHeader& header,
         b_prime,
         transcript_block_size,
         sigma);
+}
+
+std::vector<matmul::field::Element> ComputeReferenceProductWords(const matmul::Matrix& a_prime,
+                                                                 const matmul::Matrix& b_prime,
+                                                                 uint32_t transcript_block_size,
+                                                                 const std::vector<matmul::field::Element>& compress_vec)
+{
+    const uint32_t n = a_prime.rows();
+    const uint32_t blocks_per_axis = n / transcript_block_size;
+    std::vector<matmul::field::Element> words;
+    words.reserve(static_cast<size_t>(blocks_per_axis) * blocks_per_axis);
+    for (uint32_t i = 0; i < blocks_per_axis; ++i) {
+        for (uint32_t j = 0; j < blocks_per_axis; ++j) {
+            matmul::field::Element compressed_acc = 0;
+            for (uint32_t ell = 0; ell < blocks_per_axis; ++ell) {
+                const matmul::Matrix product =
+                    a_prime.block(i, ell, transcript_block_size) *
+                    b_prime.block(ell, j, transcript_block_size);
+                compressed_acc = matmul::field::add(
+                    compressed_acc,
+                    matmul::transcript::CompressBlock(product, compress_vec));
+            }
+            words.push_back(compressed_acc);
+        }
+    }
+    return words;
+}
+
+void CheckWordsEqual(std::string_view label,
+                     const std::vector<matmul::field::Element>& actual,
+                     const matmul::field::Element* expected,
+                     size_t expected_size)
+{
+    BOOST_REQUIRE_EQUAL(actual.size(), expected_size);
+    const auto mismatch = std::mismatch(actual.begin(), actual.end(), expected);
+    BOOST_REQUIRE_MESSAGE(
+        mismatch.first == actual.end(),
+        label << " mismatch at index " << std::distance(actual.begin(), mismatch.first)
+              << ": metal=" << *mismatch.first
+              << " cpu=" << *mismatch.second);
 }
 
 class ScopedEnvVar
@@ -606,6 +648,174 @@ BOOST_AUTO_TEST_CASE(metal_variable_base_product_digest_batch_matches_cpu)
         BOOST_CHECK_EQUAL(batch[i].digest, cpu_digests[i]);
         BOOST_CHECK_EQUAL(batch[i].backend, matmul::backend::Kind::METAL);
     }
+}
+
+BOOST_AUTO_TEST_CASE(metal_nonce_seed_v2_mainnet_boundary_variable_base_product_digest_matches_cpu)
+{
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
+    if (!capability.available) {
+        BOOST_TEST_MESSAGE("Skipping nonce-seed v2 Metal product digest batch test: Metal backend unavailable ("
+            << capability.reason << ")");
+        return;
+    }
+
+    ScopedEnvVar gpu_inputs_env("BTX_MATMUL_GPU_INPUTS", "1");
+    ScopedEnvVar pipeline_env("BTX_MATMUL_METAL_PIPELINE", "auto");
+    ScopedEnvVar specialization_env("BTX_MATMUL_METAL_FUNCTION_CONSTANTS", "auto");
+
+    constexpr uint32_t kN = 512;
+    constexpr uint32_t kB = 16;
+    constexpr uint32_t kR = 8;
+    constexpr uint32_t kActivationHeight = 125'000;
+    constexpr uint32_t kHeight125000NBits = 0x1d0b8746U;
+    constexpr uint32_t kBatchSize = 2;
+
+    std::vector<CBlockHeader> headers;
+    std::vector<matmul::accelerated::PreparedDigestInputs> prepared_inputs;
+    std::vector<uint256> cpu_digests;
+    headers.reserve(kBatchSize);
+    prepared_inputs.reserve(kBatchSize);
+    cpu_digests.reserve(kBatchSize);
+
+    for (uint32_t i = 0; i < kBatchSize; ++i) {
+        CBlockHeader header = BuildHeader(kN, 125'000 + i);
+        header.nVersion = 4;
+        header.nBits = kHeight125000NBits;
+        header.nTime = 1'773'277'390U + i;
+        header.seed_a = DeterministicMatMulSeedV2(header, kActivationHeight, 0);
+        header.seed_b = DeterministicMatMulSeedV2(header, kActivationHeight, 1);
+        headers.push_back(header);
+        prepared_inputs.push_back(matmul::accelerated::PrepareMatMulDigestInputsForBackend(
+            header,
+            kB,
+            kR,
+            matmul::backend::Kind::METAL,
+            matmul::accelerated::DigestScheme::PRODUCT_COMMITTED));
+
+        const matmul::Matrix matrix_a = matmul::FromSeed(header.seed_a, kN);
+        const matmul::Matrix matrix_b = matmul::FromSeed(header.seed_b, kN);
+        cpu_digests.push_back(ComputeReferenceProductDigest(header, matrix_a, matrix_b, kB, kR));
+    }
+
+    const auto batch = matmul::accelerated::ComputeMatMulDigestPreparedVariableBaseBatchForMining(
+        headers,
+        kB,
+        kR,
+        prepared_inputs,
+        matmul::backend::Kind::METAL,
+        matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
+    BOOST_REQUIRE_EQUAL(batch.size(), kBatchSize);
+
+    for (uint32_t i = 0; i < kBatchSize; ++i) {
+        BOOST_REQUIRE_MESSAGE(batch[i].ok, batch[i].error);
+        BOOST_CHECK_EQUAL(batch[i].digest, cpu_digests[i]);
+        BOOST_CHECK_EQUAL(batch[i].backend, matmul::backend::Kind::METAL);
+        BOOST_CHECK(batch[i].accelerated);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(metal_base_matrix_from_nonce_seed_v2_matches_cpu_for_mainnet_shape)
+{
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
+    if (!capability.available) {
+        BOOST_TEST_MESSAGE("Skipping nonce-seed v2 Metal base matrix generation test: Metal backend unavailable ("
+            << capability.reason << ")");
+        return;
+    }
+
+    constexpr uint32_t kN = 512;
+    constexpr uint32_t kActivationHeight = 125'000;
+    constexpr uint32_t kHeight125000NBits = 0x1d0b8746U;
+
+    CBlockHeader header = BuildHeader(kN, 125'000);
+    header.nVersion = 4;
+    header.nBits = kHeight125000NBits;
+    header.nTime = 1'773'277'390U;
+    header.seed_a = DeterministicMatMulSeedV2(header, kActivationHeight, 0);
+    header.seed_b = DeterministicMatMulSeedV2(header, kActivationHeight, 1);
+
+    const matmul::Matrix cpu_matrix_a = matmul::FromSeed(header.seed_a, kN);
+    const auto metal_matrix_a = btx::metal::GenerateBaseMatrixFromSeedForTesting(kN, header.seed_a);
+    BOOST_CHECK(metal_matrix_a.available);
+    BOOST_REQUIRE_MESSAGE(metal_matrix_a.success, metal_matrix_a.error);
+    BOOST_REQUIRE_EQUAL(metal_matrix_a.matrix.size(), static_cast<size_t>(kN) * kN);
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        metal_matrix_a.matrix.begin(), metal_matrix_a.matrix.end(),
+        cpu_matrix_a.data(), cpu_matrix_a.data() + metal_matrix_a.matrix.size());
+
+    const matmul::Matrix cpu_matrix_b = matmul::FromSeed(header.seed_b, kN);
+    const auto metal_matrix_b = btx::metal::GenerateBaseMatrixFromSeedForTesting(kN, header.seed_b);
+    BOOST_CHECK(metal_matrix_b.available);
+    BOOST_REQUIRE_MESSAGE(metal_matrix_b.success, metal_matrix_b.error);
+    BOOST_REQUIRE_EQUAL(metal_matrix_b.matrix.size(), static_cast<size_t>(kN) * kN);
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        metal_matrix_b.matrix.begin(), metal_matrix_b.matrix.end(),
+        cpu_matrix_b.data(), cpu_matrix_b.data() + metal_matrix_b.matrix.size());
+}
+
+BOOST_AUTO_TEST_CASE(metal_nonce_seed_v2_variable_base_intermediates_match_cpu)
+{
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
+    if (!capability.available) {
+        BOOST_TEST_MESSAGE("Skipping nonce-seed v2 Metal intermediate diagnostic: Metal backend unavailable ("
+            << capability.reason << ")");
+        return;
+    }
+
+    ScopedEnvVar gpu_inputs_env("BTX_MATMUL_GPU_INPUTS", "1");
+    ScopedEnvVar specialization_env("BTX_MATMUL_METAL_FUNCTION_CONSTANTS", "auto");
+
+    constexpr uint32_t kN = 512;
+    constexpr uint32_t kB = 16;
+    constexpr uint32_t kR = 8;
+    constexpr uint32_t kActivationHeight = 125'000;
+    constexpr uint32_t kHeight125000NBits = 0x1d0b8746U;
+
+    CBlockHeader header = BuildHeader(kN, 125'000);
+    header.nVersion = 4;
+    header.nBits = kHeight125000NBits;
+    header.nTime = 1'773'277'390U;
+    header.seed_a = DeterministicMatMulSeedV2(header, kActivationHeight, 0);
+    header.seed_b = DeterministicMatMulSeedV2(header, kActivationHeight, 1);
+
+    const auto prepared = matmul::accelerated::PrepareMatMulDigestInputsForBackend(
+        header,
+        kB,
+        kR,
+        matmul::backend::Kind::METAL,
+        matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
+    BOOST_REQUIRE(prepared.noise.has_value());
+
+    const matmul::Matrix cpu_matrix_a = matmul::FromSeed(header.seed_a, kN);
+    const matmul::Matrix cpu_matrix_b = matmul::FromSeed(header.seed_b, kN);
+    const matmul::Matrix cpu_a_prime = cpu_matrix_a + (prepared.noise->E_L * prepared.noise->E_R);
+    const matmul::Matrix cpu_b_prime = cpu_matrix_b + (prepared.noise->F_L * prepared.noise->F_R);
+    const auto cpu_product_words = ComputeReferenceProductWords(
+        cpu_a_prime,
+        cpu_b_prime,
+        kB,
+        prepared.compress_vec);
+
+    const auto metal = btx::metal::GenerateVariableBaseProductWordsForTesting({
+        .n = kN,
+        .b = kB,
+        .r = kR,
+        .matrix_a_seed = header.seed_a,
+        .matrix_b_seed = header.seed_b,
+        .noise_e_l = prepared.noise->E_L.data(),
+        .noise_e_r = prepared.noise->E_R.data(),
+        .noise_f_l = prepared.noise->F_L.data(),
+        .noise_f_r = prepared.noise->F_R.data(),
+        .compress_vec = prepared.compress_vec.data(),
+    });
+    BOOST_CHECK(metal.available);
+    BOOST_REQUIRE_MESSAGE(metal.success, metal.error);
+
+    CheckWordsEqual("matrix_a", metal.matrix_a, cpu_matrix_a.data(), static_cast<size_t>(kN) * kN);
+    CheckWordsEqual("matrix_b", metal.matrix_b, cpu_matrix_b.data(), static_cast<size_t>(kN) * kN);
+    CheckWordsEqual("a_prime", metal.a_prime, cpu_a_prime.data(), static_cast<size_t>(kN) * kN);
+    CheckWordsEqual("b_prime", metal.b_prime, cpu_b_prime.data(), static_cast<size_t>(kN) * kN);
+    CheckWordsEqual("product_words", metal.product_words, cpu_product_words.data(), cpu_product_words.size());
 }
 
 BOOST_AUTO_TEST_CASE(metal_mainnet_shape_product_digest_batch_matches_cpu_under_auto_policy)
