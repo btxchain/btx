@@ -56,6 +56,24 @@ inline uint reduce_simdgroup_add_mod(uint value, uint simd_size)
     return value;
 }
 
+inline uint reduce_threadgroup_add_mod(threadgroup uint* values, uint tid, uint count)
+{
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint active = count;
+    while (active > 1u) {
+        const uint half_count = active >> 1u;
+        if (tid < half_count) {
+            values[tid] = add_mod(values[tid], values[tid + half_count]);
+        }
+        if ((active & 1u) != 0u && tid == 0u) {
+            values[0] = add_mod(values[0], values[active - 1u]);
+        }
+        active = half_count;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    return values[0];
+}
+
 inline uint rotr(uint x, uint n)
 {
     return (x >> n) | (x << (32u - n));
@@ -502,23 +520,9 @@ kernel void fused_final_compress(
     }
 
     weighted_terms[tid] = mul_mod(c_acc, weight);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    const uint simd_lane = tid % simd_size;
-    const uint simd_group = tid / simd_size;
-    uint reduced = reduce_simdgroup_add_mod(weighted_terms[tid], simd_size);
-    if (simd_lane == 0u) {
-        weighted_terms[simd_group] = reduced;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    const uint group_count = (block_elements + simd_size - 1u) / simd_size;
-    if (simd_group == 0u) {
-        reduced = tid < group_count ? weighted_terms[tid] : 0u;
-        reduced = reduce_simdgroup_add_mod(reduced, simd_size);
-        if (tid == 0u) {
-            compressed[tile_i * p.N + tile_j] = reduced;
-        }
+    const uint reduced = reduce_threadgroup_add_mod(weighted_terms, tid, block_elements);
+    if (tid == 0u) {
+        compressed[tile_i * p.N + tile_j] = reduced;
     }
 }
 
@@ -688,23 +692,9 @@ kernel void fused_final_compress_specialized(
     }
 
     weighted_terms[tid] = mul_mod(c_acc, weight);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    const uint simd_lane = tid % simd_size;
-    const uint simd_group = tid / simd_size;
-    uint reduced = reduce_simdgroup_add_mod(weighted_terms[tid], simd_size);
-    if (simd_lane == 0u) {
-        weighted_terms[simd_group] = reduced;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    const uint group_count = (block_elements + simd_size - 1u) / simd_size;
-    if (simd_group == 0u) {
-        reduced = tid < group_count ? weighted_terms[tid] : 0u;
-        reduced = reduce_simdgroup_add_mod(reduced, simd_size);
-        if (tid == 0u) {
-            compressed[tile_i * N + tile_j] = reduced;
-        }
+    const uint reduced = reduce_threadgroup_add_mod(weighted_terms, tid, block_elements);
+    if (tid == 0u) {
+        compressed[tile_i * N + tile_j] = reduced;
     }
 }
 
@@ -800,23 +790,9 @@ kernel void fused_prefix_compress_specialized(
 
         c_acc = add_mod(c_acc, product);
         weighted_terms[tid] = mul_mod(c_acc, weight);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        const uint simd_lane = tid % simd_size;
-        const uint simd_group = tid / simd_size;
-        uint reduced = reduce_simdgroup_add_mod(weighted_terms[tid], simd_size);
-        if (simd_lane == 0u) {
-            weighted_terms[simd_group] = reduced;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        const uint group_count = (block_elements + simd_size - 1u) / simd_size;
-        if (simd_group == 0u) {
-            reduced = tid < group_count ? weighted_terms[tid] : 0u;
-            reduced = reduce_simdgroup_add_mod(reduced, simd_size);
-            if (tid == 0u) {
-                compressed[(tile_i * N + tile_j) * N + ell] = reduced;
-            }
+        const uint reduced = reduce_threadgroup_add_mod(weighted_terms, tid, block_elements);
+        if (tid == 0u) {
+            compressed[(tile_i * N + tile_j) * N + ell] = reduced;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -908,23 +884,9 @@ kernel void fused_prefix_compress(
 
         c_acc = add_mod(c_acc, product);
         weighted_terms[tid] = mul_mod(c_acc, weight);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        const uint simd_lane = tid % simd_size;
-        const uint simd_group = tid / simd_size;
-        uint reduced = reduce_simdgroup_add_mod(weighted_terms[tid], simd_size);
-        if (simd_lane == 0u) {
-            weighted_terms[simd_group] = reduced;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        const uint group_count = (block_elements + simd_size - 1u) / simd_size;
-        if (simd_group == 0u) {
-            reduced = tid < group_count ? weighted_terms[tid] : 0u;
-            reduced = reduce_simdgroup_add_mod(reduced, simd_size);
-            if (tid == 0u) {
-                compressed[(tile_i * p.N + tile_j) * p.N + ell] = reduced;
-            }
+        const uint reduced = reduce_threadgroup_add_mod(weighted_terms, tid, block_elements);
+        if (tid == 0u) {
+            compressed[(tile_i * p.N + tile_j) * p.N + ell] = reduced;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }

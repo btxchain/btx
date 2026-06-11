@@ -182,7 +182,7 @@ BOOST_AUTO_TEST_CASE(url_origin_matching_is_strict)
 BOOST_AUTO_TEST_CASE(version_comparison_uses_client_version)
 {
     BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("99.0.0"), 1);
-    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("0.32.4"), 0);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("0.32.5"), 0);
     BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("v0.32.3"), -1);
     BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("not-a-version"), 0);
 }
@@ -234,7 +234,7 @@ BOOST_AUTO_TEST_CASE(wrong_origin_script_rejected_after_signature)
 BOOST_AUTO_TEST_CASE(same_version_does_not_launch)
 {
     Harness h;
-    h.AddManifest("0.32.4");
+    h.AddManifest("0.32.5");
     h.AddSignature();
     h.AddScript();
     const auto result = h.Run();

@@ -31,6 +31,25 @@ MatMulBaseMatricesResult UploadBaseMatrices(const MatMulBaseMatricesRequest&)
     return result;
 }
 
+MatMulGeneratedBaseMatrixResult GenerateBaseMatrixFromSeedForTesting(uint32_t, const uint256&)
+{
+    MatMulGeneratedBaseMatrixResult result;
+    result.available = false;
+    result.success = false;
+    result.error = "Metal MatMul acceleration is unavailable on this build";
+    return result;
+}
+
+MatMulVariableBaseProductWordsResult GenerateVariableBaseProductWordsForTesting(
+    const MatMulVariableBaseProductWordsRequest&)
+{
+    MatMulVariableBaseProductWordsResult result;
+    result.available = false;
+    result.success = false;
+    result.error = "Metal MatMul acceleration is unavailable on this build";
+    return result;
+}
+
 MatMulBufferPoolStats ProbeMatMulBufferPool()
 {
     MatMulBufferPoolStats stats;
