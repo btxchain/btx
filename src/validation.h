@@ -340,6 +340,9 @@ MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTra
                                              const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 [[nodiscard]] bool HasInvalidShieldedRecoveryExitMempoolState(const CTransaction& tx,
                                                              const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+[[nodiscard]] bool CollectShieldedMempoolRetirementsForBlock(const CTransaction& tx,
+                                                            std::vector<Nullifier>& out_nullifiers,
+                                                            std::vector<uint256>& out_recovery_commitments);
 [[nodiscard]] bool CollectShieldedMempoolNullifiersForBlock(const CTransaction& tx,
                                                            std::vector<Nullifier>& out_nullifiers);
 void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool,
@@ -1692,7 +1695,7 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Load shielded state from a BTX assumeutxo snapshot section. */
-    [[nodiscard]] bool LoadShieldedSnapshotSection(
+    [[nodiscard]] util::Result<void> LoadShieldedSnapshotSection(
         AutoFile& file,
         const node::ShieldedSnapshotSectionHeader& header,
         const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

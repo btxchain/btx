@@ -1632,7 +1632,10 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_persisted_shielded_state_afte
         header.m_account_registry_entry_count = 1;
         AutoFile infile{fsbridge::fopen(invalid_section_path, "rb")};
         BOOST_REQUIRE(!infile.IsNull());
-        BOOST_CHECK(!chainman.LoadShieldedSnapshotSection(infile, header, tip));
+        auto result{chainman.LoadShieldedSnapshotSection(infile, header, tip)};
+        BOOST_CHECK(!result);
+        BOOST_CHECK_EQUAL(util::ErrorString(result).original,
+                          "truncated or malformed BTX shielded snapshot section");
         BOOST_CHECK(!chainman.HasShieldedState());
 
         BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
@@ -3521,6 +3524,99 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_fast_startup_rebuilds_stale_recovery_e
         BOOST_REQUIRE(rebuilt_state_commitment.has_value());
         BOOST_CHECK_EQUAL(shielded::registry::ComputeShieldedStateCommitmentHash(*rebuilt_state_commitment),
                           expected_state_commitment_hash);
+        BOOST_CHECK(!chainman_restarted.ReadShieldedMutationMarker().has_value());
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_fast_startup_skips_recovery_exit_audit_with_verified_state_pin,
+                        RecoveryExitFastStartupPersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    auto simulate_node_restart = [&]() -> ChainstateManager& {
+        ChainstateManager& current_chainman = *Assert(m_node.chainman);
+
+        for (Chainstate* cs : current_chainman.GetAll()) {
+            LOCK(::cs_main);
+            cs->ForceFlushStateToDisk();
+        }
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            current_chainman.ResetChainstates();
+            BOOST_CHECK_EQUAL(current_chainman.GetAll().size(), 0);
+            m_node.notifications = std::make_unique<KernelNotifications>(
+                Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+            const ChainstateManager::Options chainman_opts{
+                .chainparams = ::Params(),
+                .datadir = current_chainman.m_options.datadir,
+                .shielded_startup_audit = false,
+                .fast_shielded_startup = true,
+                .notifications = *m_node.notifications,
+                .signals = m_node.validation_signals.get(),
+            };
+            const BlockManager::Options blockman_opts{
+                .chainparams = chainman_opts.chainparams,
+                .blocks_dir = m_args.GetBlocksDirPath(),
+                .notifications = chainman_opts.notifications,
+                .block_tree_db_params = DBParams{
+                    .path = current_chainman.m_options.datadir / "blocks" / "index",
+                    .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                    .memory_only = m_block_tree_db_in_memory,
+                },
+            };
+            m_node.chainman.reset();
+            m_node.chainman = std::make_unique<ChainstateManager>(
+                *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        }
+        return *Assert(m_node.chainman);
+    };
+
+    uint256 expected_tip_hash;
+    int32_t expected_tip_height{-1};
+    size_t expected_tree_size{0};
+    uint256 expected_tree_root;
+    uint64_t expected_nullifier_count{0};
+    CAmount expected_pool_balance{0};
+    uint256 expected_registry_root;
+    size_t expected_registry_size{0};
+    uint256 expected_state_pin;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedRecoveryExitActive(chainman.ActiveTip()->nHeight));
+        expected_tip_hash = chainman.ActiveTip()->GetBlockHash();
+        expected_tip_height = chainman.ActiveTip()->nHeight;
+        expected_tree_size = chainman.GetShieldedMerkleTree().Size();
+        expected_tree_root = chainman.GetShieldedMerkleTree().Root();
+        expected_nullifier_count = chainman.GetShieldedNullifierCount();
+        expected_pool_balance = chainman.GetShieldedPoolBalance();
+        expected_registry_root = chainman.GetShieldedAccountRegistryRoot();
+        expected_registry_size = chainman.GetShieldedAccountRegistryEntryCount();
+        const auto state_pin = chainman.ComputeShieldedSnapshotStatePin();
+        BOOST_REQUIRE(state_pin.has_value());
+        expected_state_pin = *state_pin;
+    }
+
+    ChainstateManager& chainman_restarted = simulate_node_restart();
+    this->LoadVerifyActivateChainstate();
+
+    {
+        LOCK(::cs_main);
+        ASSERT_DEBUG_LOG("-fastshieldedstartup verified persisted full shielded state pin");
+        BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
+        BOOST_CHECK(chainman_restarted.ActiveTip()->GetBlockHash() == expected_tip_hash);
+        BOOST_CHECK_EQUAL(chainman_restarted.ActiveTip()->nHeight, expected_tip_height);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedMerkleTree().Size(), expected_tree_size);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedMerkleTree().Root(), expected_tree_root);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedNullifierCount(), expected_nullifier_count);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedPoolBalance(), expected_pool_balance);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(), expected_registry_root);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryEntryCount(), expected_registry_size);
+        const auto restored_state_pin = chainman_restarted.ComputeShieldedSnapshotStatePin();
+        BOOST_REQUIRE(restored_state_pin.has_value());
+        BOOST_CHECK_EQUAL(*restored_state_pin, expected_state_pin);
         BOOST_CHECK(!chainman_restarted.ReadShieldedMutationMarker().has_value());
     }
 }

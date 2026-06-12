@@ -2320,8 +2320,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     // ********************************************************* Step 10: data directory maintenance
 
+    {
+        LOCK(cs_main);
+        if (!chainman.EnsureShieldedStateInitialized()) {
+            return InitError(Untranslated("Failed to initialize shielded state database."));
+        }
+    }
+
     // if pruning, perform the initial blockstore prune
-    // after any wallet rescanning has taken place.
+    // after any wallet rescanning and shielded-state auditing has taken place.
     if (chainman.m_blockman.IsPruneMode()) {
         if (chainman.m_blockman.m_blockfiles_indexed) {
             LOCK(cs_main);
@@ -2337,13 +2344,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             g_local_services = ServiceFlags(g_local_services | NODE_NETWORK);
         } else {
             LogPrintf("Running node in NODE_NETWORK_LIMITED mode until snapshot background sync completes\n");
-        }
-    }
-
-    {
-        LOCK(cs_main);
-        if (!chainman.EnsureShieldedStateInitialized()) {
-            return InitError(Untranslated("Failed to initialize shielded state database."));
         }
     }
 

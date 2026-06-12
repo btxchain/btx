@@ -620,6 +620,14 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
 }
 
 namespace {
+[[nodiscard]] bool IsMempoolRecoveryExitBundle(const CShieldedBundle& bundle)
+{
+    if (!bundle.HasV2Bundle()) return false;
+    const auto* v2b = bundle.GetV2Bundle();
+    return v2b != nullptr &&
+        shielded::v2::GetBundleSemanticFamily(*v2b) == shielded::v2::TransactionFamily::V2_RECOVERY_EXIT;
+}
+
 // For a V2_RECOVERY_EXIT tx, derive the (commitment, nullifier) it reserves, identically to the consensus
 // derivation, so mempool reservations match block validation. Returns false for any other tx.
 [[nodiscard]] bool GetMempoolRecoveryExitReservation(const CTransaction& tx, uint256& out_cm, uint256& out_nf)
@@ -629,7 +637,7 @@ namespace {
     if (!bundle.HasV2Bundle()) return false;
     const auto* v2b = bundle.GetV2Bundle();
     if (v2b == nullptr) return false;
-    if (shielded::v2::GetBundleSemanticFamily(*v2b) != shielded::v2::TransactionFamily::V2_RECOVERY_EXIT) return false;
+    if (!IsMempoolRecoveryExitBundle(bundle)) return false;
     if (!std::holds_alternative<shielded::v2::RecoveryExitPayload>(v2b->payload)) return false;
     const auto& p = std::get<shielded::v2::RecoveryExitPayload>(v2b->payload);
     shielded::recovery::RecoveryExitClaim claim;
@@ -743,6 +751,40 @@ CTxMemPool::ShieldedNullifierConflictInfo CTxMemPool::GetShieldedNullifierConfli
         if (cm_it != m_shielded_recovery_commitments.end() && cm_it->second != txid) result.txids.insert(cm_it->second);
     }
     return result;
+}
+
+bool CTxMemPool::GetShieldedRetirementsForMempoolTx(const CTransaction& tx,
+                                                    std::vector<Nullifier>& out_nullifiers,
+                                                    std::vector<uint256>& out_recovery_commitments) const
+{
+    AssertLockHeld(cs);
+    out_nullifiers.clear();
+    out_recovery_commitments.clear();
+    if (!tx.HasShieldedBundle()) return true;
+
+    const Txid txid = tx.GetHash();
+    const CShieldedBundle& bundle = tx.GetShieldedBundle();
+    const auto normal_nullifiers = CollectShieldedNullifiers(bundle);
+    out_nullifiers.insert(out_nullifiers.end(), normal_nullifiers.begin(), normal_nullifiers.end());
+
+    if (!IsMempoolRecoveryExitBundle(bundle)) return true;
+
+    for (const auto& [nullifier, reserving_txid] : m_shielded_nullifiers) {
+        if (reserving_txid == txid &&
+            std::find(out_nullifiers.begin(), out_nullifiers.end(), nullifier) == out_nullifiers.end()) {
+            out_nullifiers.push_back(nullifier);
+        }
+    }
+    for (const auto& [commitment, reserving_txid] : m_shielded_recovery_commitments) {
+        if (reserving_txid == txid) {
+            out_recovery_commitments.push_back(commitment);
+        }
+    }
+
+    // A recovery-exit transaction admitted to the mempool must have both reservations already.
+    // If a loaded or manually-mutated mempool is missing them, leave the transaction out of block
+    // templates instead of re-running the expensive consensus derivation in getblocktemplate.
+    return !out_nullifiers.empty() && !out_recovery_commitments.empty();
 }
 
 bool CTxMemPool::HasShieldedSettlementAnchorConflict(const CTransaction& tx) const

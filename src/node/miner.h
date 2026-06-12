@@ -13,9 +13,12 @@
 #include <txmempool.h>
 #include <util/feefrac.h>
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdint.h>
+#include <set>
+#include <vector>
 
 #include <boost/multi_index/identity.hpp>
 #include <boost/multi_index/indexed_by.hpp>
@@ -170,6 +173,15 @@ private:
     ShieldedPoolBalance m_blockShieldedPoolBalance;
     /** Shielded account-registry entries at the template base tip. */
     uint64_t m_baseShieldedAccountRegistryEntries{0};
+    /** Shielded state already retired or created by transactions selected into the template. */
+    std::set<uint256> m_blockShieldedNullifiers;
+    std::set<uint256> m_blockShieldedRecoveryExitCommitments;
+    std::set<uint256> m_blockShieldedSettlementAnchors;
+    std::set<uint256> m_blockShieldedNettingManifests;
+    /** Per-template cache so package selection does not re-derive recovery-exit identifiers. */
+    std::set<Txid> m_templateShieldedRetirementCacheComplete;
+    std::map<Txid, std::vector<Nullifier>> m_templateShieldedNullifierCache;
+    std::map<Txid, std::vector<uint256>> m_templateShieldedRecoveryCommitmentCache;
     CAmount nFees;
     CTxMemPool::setEntries inBlock;
 
