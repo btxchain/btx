@@ -29,6 +29,7 @@ class AssumeutxoSnapshot:
     path: str
     snapshot_sha256: str
     snapshot_version: int
+    shielded_state_pin: str | None = None
 
 
 def format_int_with_ticks(value: int) -> str:
@@ -59,20 +60,33 @@ def read_snapshot_file_version(path: pathlib.Path) -> int:
     return struct.unpack("<H", header[len(SNAPSHOT_MAGIC_BYTES) :])[0]
 
 
+def normalize_optional_hex64(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    normalized = value.strip().lower()
+    if len(normalized) != 64 or any(c not in "0123456789abcdef" for c in normalized):
+        raise ValueError(f"{field} must be a 64-character hex string")
+    return normalized
+
+
 def build_chainparams_entry(snapshot: AssumeutxoSnapshot, comment: str | None = None) -> str:
     lines = []
     if comment:
         lines.append(f"    // {comment}")
-    lines.extend(
-        [
-            "    {",
-            f"        .height = {format_int_with_ticks(snapshot.height)},",
-            f"        .hash_serialized = AssumeutxoHash{{uint256{{\"{snapshot.txoutset_hash}\"}}}},",
-            f"        .m_chain_tx_count = {snapshot.nchaintx},",
-            f"        .blockhash = consteval_ctor(uint256{{\"{snapshot.blockhash}\"}}),",
-            "    },",
-        ]
-    )
+    lines.extend([
+        "    {",
+        f"        .height = {format_int_with_ticks(snapshot.height)},",
+        f"        .hash_serialized = AssumeutxoHash{{uint256{{\"{snapshot.txoutset_hash}\"}}}},",
+        f"        .m_chain_tx_count = {snapshot.nchaintx},",
+        f"        .blockhash = consteval_ctor(uint256{{\"{snapshot.blockhash}\"}}),",
+    ])
+    if snapshot.shielded_state_pin:
+        lines.append(f"        .shielded_state_commitment = uint256{{\"{snapshot.shielded_state_pin}\"}},")
+    lines.extend([
+        "    },",
+    ])
     return "\n".join(lines)
 
 
@@ -106,6 +120,8 @@ def build_release_manifest(
     if asset_url:
         manifest["asset_url"] = asset_url
         manifest["url"] = asset_url
+    if snapshot.shielded_state_pin:
+        manifest["shielded_state_pin"] = snapshot.shielded_state_pin
     return manifest
 
 
@@ -147,6 +163,8 @@ def build_report(
             "url": asset_url,
             "sha256": snapshot.snapshot_sha256,
         }
+    if snapshot.shielded_state_pin:
+        report["snapshot"]["shielded_state_pin"] = snapshot.shielded_state_pin
     return report
 
 
@@ -177,6 +195,7 @@ def parse_snapshot_metadata(result: dict[str, Any], snapshot_path: pathlib.Path)
         path=str(snapshot_path.resolve()),
         snapshot_sha256=sha256_file(snapshot_path),
         snapshot_version=read_snapshot_file_version(snapshot_path),
+        shielded_state_pin=normalize_optional_hex64(result.get("shielded_state_pin"), "shielded_state_pin"),
     )
 
 

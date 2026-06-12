@@ -42,6 +42,10 @@ ENTRY_RE = re.compile(
         \s*
         \.blockhash \s* = \s* consteval_ctor\(uint256\{"(?P<blockhash>[0-9a-f]{64})"\}\) \s* ,
         \s*
+        (?:
+            \.shielded_state_commitment \s* = \s* uint256\{"(?P<shielded_state_pin>[0-9a-f]{64})"\} \s* ,
+            \s*
+        )?
     \}
     """,
     re.VERBOSE | re.S,
@@ -59,6 +63,7 @@ class AssumeutxoSnapshot:
     txoutset_hash: str
     nchaintx: int
     blockhash: str
+    shielded_state_pin: str | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -110,6 +115,12 @@ def parse_hex64(value: Any, field: str) -> str:
     return normalized
 
 
+def parse_optional_hex64(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    return parse_hex64(value, field)
+
+
 def parse_report(path: Path) -> tuple[AssumeutxoSnapshot, str]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -129,6 +140,11 @@ def parse_report(path: Path) -> tuple[AssumeutxoSnapshot, str]:
     txoutset_hash = snapshot_data.get("txoutset_hash")
     nchaintx = snapshot_data.get("nchaintx")
     blockhash = snapshot_data.get("blockhash")
+    shielded_state_pin = snapshot_data.get("shielded_state_pin")
+    if shielded_state_pin is None:
+        release_manifest = data.get("release_asset_manifest")
+        if isinstance(release_manifest, dict):
+            shielded_state_pin = release_manifest.get("shielded_state_pin")
 
     if not isinstance(height, int) or height < 0:
         raise AssumeutxoApplyError("snapshot.height must be a non-negative integer")
@@ -141,6 +157,7 @@ def parse_report(path: Path) -> tuple[AssumeutxoSnapshot, str]:
         txoutset_hash=parse_hex64(txoutset_hash, "snapshot.txoutset_hash"),
         nchaintx=nchaintx,
         blockhash=parse_hex64(blockhash, "snapshot.blockhash"),
+        shielded_state_pin=parse_optional_hex64(shielded_state_pin, "snapshot.shielded_state_pin"),
     )
     return snapshot, chain
 
@@ -189,6 +206,7 @@ def parse_existing_assumeutxo_entries(assignment: str, chain: str) -> list[Assum
                 txoutset_hash=match.group("txoutset_hash"),
                 nchaintx=parse_int_with_ticks(match.group("nchaintx"), "existing m_chain_tx_count"),
                 blockhash=match.group("blockhash"),
+                shielded_state_pin=match.group("shielded_state_pin"),
             )
         )
 
@@ -203,17 +221,19 @@ def build_chainparams_assignment(chain: str, entries: list[AssumeutxoSnapshot]) 
 
     lines = ["m_assumeutxo_data = {"]
     for entry in sorted(entries, key=lambda item: item.height):
-        lines.extend(
-            [
-                "    {",
-                f"        // {chain} assumeutxo snapshot at height {format_int_with_ticks(entry.height)}",
-                f"        .height = {format_int_with_ticks(entry.height)},",
-                f"        .hash_serialized = AssumeutxoHash{{uint256{{\"{entry.txoutset_hash}\"}}}},",
-                f"        .m_chain_tx_count = {format_int_with_ticks(entry.nchaintx)},",
-                f"        .blockhash = consteval_ctor(uint256{{\"{entry.blockhash}\"}}),",
-                "    },",
-            ]
-        )
+        lines.extend([
+            "    {",
+            f"        // {chain} assumeutxo snapshot at height {format_int_with_ticks(entry.height)}",
+            f"        .height = {format_int_with_ticks(entry.height)},",
+            f"        .hash_serialized = AssumeutxoHash{{uint256{{\"{entry.txoutset_hash}\"}}}},",
+            f"        .m_chain_tx_count = {format_int_with_ticks(entry.nchaintx)},",
+            f"        .blockhash = consteval_ctor(uint256{{\"{entry.blockhash}\"}}),",
+        ])
+        if entry.shielded_state_pin:
+            lines.append(f"        .shielded_state_commitment = uint256{{\"{entry.shielded_state_pin}\"}},")
+        lines.extend([
+            "    },",
+        ])
     lines.append("};")
     return "\n".join(lines)
 

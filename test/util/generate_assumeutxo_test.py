@@ -30,6 +30,7 @@ class GenerateAssumeutxoTest(unittest.TestCase):
         self.module = load_module()
 
     def test_build_chainparams_entry_formats_cpp_snippet(self):
+        shielded_state_pin = "44" * 32
         metadata = self.module.AssumeutxoSnapshot(
             height=50000,
             txoutset_hash="0123456789abcdef" * 4,
@@ -38,6 +39,7 @@ class GenerateAssumeutxoTest(unittest.TestCase):
             path="/tmp/utxo.dat",
             snapshot_sha256="f0" * 32,
             snapshot_version=7,
+            shielded_state_pin=shielded_state_pin,
         )
 
         snippet = self.module.build_chainparams_entry(metadata, comment="mainnet snapshot")
@@ -46,12 +48,14 @@ class GenerateAssumeutxoTest(unittest.TestCase):
         self.assertIn(".hash_serialized = AssumeutxoHash{uint256{\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}", snippet)
         self.assertIn(".m_chain_tx_count = 777", snippet)
         self.assertIn(".blockhash = consteval_ctor(uint256{\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"})", snippet)
+        self.assertIn(f".shielded_state_commitment = uint256{{\"{shielded_state_pin}\"}}", snippet)
         self.assertIn("// mainnet snapshot", snippet)
 
     def test_build_report_includes_release_asset_hint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             snapshot_path = pathlib.Path(tmpdir) / "utxo.dat"
             snapshot_path.write_bytes(b"snapshot")
+            shielded_state_pin = "44" * 32
             metadata = self.module.AssumeutxoSnapshot(
                 height=50000,
                 txoutset_hash="11" * 32,
@@ -60,6 +64,7 @@ class GenerateAssumeutxoTest(unittest.TestCase):
                 path=str(snapshot_path),
                 snapshot_sha256="33" * 32,
                 snapshot_version=7,
+                shielded_state_pin=shielded_state_pin,
             )
 
             report = self.module.build_report(
@@ -75,10 +80,33 @@ class GenerateAssumeutxoTest(unittest.TestCase):
             self.assertEqual(report["snapshot"]["height"], 50000)
             self.assertEqual(report["snapshot"]["sha256"], "33" * 32)
             self.assertEqual(report["snapshot"]["file_version"], 7)
+            self.assertEqual(report["snapshot"]["shielded_state_pin"], shielded_state_pin)
             self.assertIn("m_assumeutxo_data", report["chainparams_snippet"])
+            self.assertIn(".shielded_state_commitment", report["chainparams_snippet"])
             self.assertEqual(report["asset"]["url"], "https://node.btxchain.org/releases/utxo.dat")
             self.assertEqual(report["asset"]["sha256"], "33" * 32)
             self.assertEqual(report["release_asset_manifest"]["snapshot_file_version"], 7)
+            self.assertEqual(report["release_asset_manifest"]["shielded_state_pin"], shielded_state_pin)
+
+    def test_parse_snapshot_metadata_preserves_rpc_shielded_state_pin(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = pathlib.Path(tmpdir) / "utxo.dat"
+            snapshot_path.write_bytes(b"utxo\xff" + struct.pack("<H", 8) + b"rest")
+            shielded_state_pin = "44" * 32
+
+            metadata = self.module.parse_snapshot_metadata(
+                {
+                    "base_height": 50000,
+                    "txoutset_hash": "11" * 32,
+                    "nchaintx": 888,
+                    "base_hash": "22" * 32,
+                    "shielded_state_pin": shielded_state_pin,
+                },
+                snapshot_path,
+            )
+
+            self.assertEqual(metadata.snapshot_version, 8)
+            self.assertEqual(metadata.shielded_state_pin, shielded_state_pin)
 
     def test_read_snapshot_file_version_reads_header(self):
         with tempfile.TemporaryDirectory() as tmpdir:

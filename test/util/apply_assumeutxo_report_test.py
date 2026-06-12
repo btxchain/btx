@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
+import tempfile
 import unittest
 
 
@@ -44,13 +46,21 @@ class ApplyAssumeutxoReportTest(unittest.TestCase):
     def setUp(self):
         self.module = load_module()
 
-    def snapshot(self, height: int, txoutset_hash: str, blockhash: str, nchaintx: int):
+    def snapshot(
+        self,
+        height: int,
+        txoutset_hash: str,
+        blockhash: str,
+        nchaintx: int,
+        shielded_state_pin: str | None = None,
+    ):
         return self.module.AssumeutxoSnapshot(
             chain="main",
             height=height,
             txoutset_hash=txoutset_hash,
             nchaintx=nchaintx,
             blockhash=blockhash,
+            shielded_state_pin=shielded_state_pin,
         )
 
     def test_replace_assumeutxo_block_appends_new_height(self):
@@ -69,6 +79,47 @@ class ApplyAssumeutxoReportTest(unittest.TestCase):
         self.assertIn(".height = 55'000,", updated)
         self.assertIn(".height = 60'760,", updated)
         self.assertLess(updated.index(".height = 55'000,"), updated.index(".height = 60'760,"))
+
+    def test_replace_assumeutxo_block_appends_shielded_state_pin(self):
+        shielded_state_pin = "44" * 32
+        updated = self.module.replace_assumeutxo_block(
+            BASE_SOURCE,
+            "main",
+            self.snapshot(
+                60760,
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                "2222222222222222222222222222222222222222222222222222222222222222",
+                66221,
+                shielded_state_pin,
+            ),
+            replace_existing=False,
+        )
+
+        self.assertIn(f".shielded_state_commitment = uint256{{\"{shielded_state_pin}\"}}", updated)
+
+    def test_parse_report_reads_shielded_state_pin(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = pathlib.Path(tmpdir) / "snapshot.report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "chain": "main",
+                        "snapshot": {
+                            "height": 60760,
+                            "txoutset_hash": "11" * 32,
+                            "nchaintx": 66221,
+                            "blockhash": "22" * 32,
+                            "shielded_state_pin": "44" * 32,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot, chain = self.module.parse_report(report_path)
+
+            self.assertEqual(chain, "main")
+            self.assertEqual(snapshot.shielded_state_pin, "44" * 32)
 
     def test_replace_assumeutxo_block_rejects_conflicting_height_without_replace(self):
         with self.assertRaises(self.module.AssumeutxoApplyError):

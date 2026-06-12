@@ -69,6 +69,17 @@ BTX is supported on Linux, macOS 13+, and Windows 10+.
   shielded snapshot appendix, currently version 8 or newer, or use a non-pruned
   datadir / full redownload when only older snapshot data is available.
 
+- Mainnet fast-start metadata has been refreshed to snapshot height 128,605
+  (`d95c8b565fefcda79efe47acad98648b0a24899f22facba9eedeb02c8bffd4d2`).
+  The published v8 snapshot has txoutset hash
+  `2cfa629907fbc18f3edc1dbb8b33fda651ad3655fb88a9dffe7a67ead580a102`,
+  SHA256
+  `28b49fc6b10fc1db69c39bfe78e1cccbb175c8e44055c3c95d6c814762f71335`,
+  and a compiled shielded-state pin
+  `827f8bf52ddf6de1e780a0917179dac715abeb428580744505dc30fbd6be5f9d`.
+  Clean fast-start nodes can load this snapshot in the default fail-closed
+  mode without `-allowunpinnedshieldedsnapshot`.
+
 - The operational lesson from this release is that recovery-exit safety checks
   also need explicit liveness controls: reuse admission-time mempool
   reservations, cache per-template state, track the in-progress block state, and
