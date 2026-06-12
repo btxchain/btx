@@ -281,9 +281,12 @@ contains the snapshot entry in `src/kernel/chainparams.cpp`.
 
 `Unable to load UTXO snapshot: could not load BTX shielded snapshot section`
 
-Use a current binary that supports restart-safe BTX shielded snapshot restore.
-The snapshot must include the BTX shielded-state appendix; a UTXO-only snapshot
-is not sufficient for fast-start mining.
+Use a current binary and a current BTX snapshot. Post-recovery-exit pruned
+nodes need a restart-safe shielded appendix that includes recovery-exit
+commitments, currently snapshot version 8 or newer. A UTXO-only snapshot or an
+older shielded appendix can only be repaired by replaying historical blocks,
+which `prune=600` nodes usually no longer have. In that case, use a current
+snapshot asset, a non-pruned datadir, or redownload/reindex from peers.
 
 Database lock errors
 

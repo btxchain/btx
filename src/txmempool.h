@@ -522,6 +522,11 @@ public:
     /** Return direct mempool conflicts caused by reused shielded nullifiers. */
     ShieldedNullifierConflictInfo GetShieldedNullifierConflicts(const CTransaction& tx) const
         EXCLUSIVE_LOCKS_REQUIRED(cs);
+    /** Return shielded identifiers already reserved for a transaction in this mempool. */
+    bool GetShieldedRetirementsForMempoolTx(const CTransaction& tx,
+                                            std::vector<Nullifier>& out_nullifiers,
+                                            std::vector<uint256>& out_recovery_commitments) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
     /**
      * Update all transactions in the mempool which depend on tx to recalculate their priority
      * and adjust the input value that will age to reflect that the inputs from this transaction have

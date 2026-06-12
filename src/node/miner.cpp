@@ -149,24 +149,49 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
     return depth >= maturity_depth;
 }
 
+[[nodiscard]] bool GetCachedShieldedRetirementsForTemplateTx(
+    const CTransaction& tx,
+    const CTxMemPool& pool,
+    std::set<Txid>& retirement_cache_complete,
+    std::map<Txid, std::vector<Nullifier>>& nullifier_cache,
+    std::map<Txid, std::vector<uint256>>& commitment_cache,
+    std::vector<Nullifier>& out_nullifiers,
+    std::vector<uint256>& out_recovery_commitments);
+
 [[nodiscard]] bool AreShieldedRefsReadyForBlock(const CTransaction& tx,
                                                 const ChainstateManager& chainman,
                                                 const std::set<uint256>& settlement_anchors,
-                                                const std::set<uint256>& netting_manifests)
-    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+                                                const std::set<uint256>& netting_manifests,
+                                                const std::set<uint256>& shielded_nullifiers,
+                                                const std::set<uint256>& recovery_exit_commitments,
+                                                const CTxMemPool& pool,
+                                                std::set<Txid>& retirement_cache_complete,
+                                                std::map<Txid, std::vector<Nullifier>>& nullifier_cache,
+                                                std::map<Txid, std::vector<uint256>>& commitment_cache)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main, pool.cs)
 {
     if (!tx.HasShieldedBundle()) return true;
 
-    if (HasInvalidShieldedRecoveryExitMempoolState(tx, chainman)) {
+    std::vector<Nullifier> tx_nullifiers;
+    std::vector<uint256> tx_recovery_exit_commitments;
+    if (!GetCachedShieldedRetirementsForTemplateTx(tx,
+                                                   pool,
+                                                   retirement_cache_complete,
+                                                   nullifier_cache,
+                                                   commitment_cache,
+                                                   tx_nullifiers,
+                                                   tx_recovery_exit_commitments)) {
         return false;
     }
-
-    std::vector<Nullifier> shielded_nullifiers;
-    if (!CollectShieldedMempoolNullifiersForBlock(tx, shielded_nullifiers)) {
-        return false;
+    for (const auto& nullifier : tx_nullifiers) {
+        if (chainman.IsShieldedNullifierSpent(nullifier) ||
+            shielded_nullifiers.count(nullifier) != 0) {
+            return false;
+        }
     }
-    for (const auto& nullifier : shielded_nullifiers) {
-        if (chainman.IsShieldedNullifierSpent(nullifier)) {
+    for (const auto& commitment : tx_recovery_exit_commitments) {
+        if (chainman.IsShieldedRecoveryExitCommitmentRetired(commitment) ||
+            recovery_exit_commitments.count(commitment) != 0) {
             return false;
         }
     }
@@ -220,11 +245,63 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
     return true;
 }
 
-[[nodiscard]] bool AddShieldedNullifiersForTemplateTx(const CTransaction& tx,
-                                                      std::set<uint256>& shielded_nullifiers)
+[[nodiscard]] bool GetCachedShieldedRetirementsForTemplateTx(
+    const CTransaction& tx,
+    const CTxMemPool& pool,
+    std::set<Txid>& retirement_cache_complete,
+    std::map<Txid, std::vector<Nullifier>>& nullifier_cache,
+    std::map<Txid, std::vector<uint256>>& commitment_cache,
+    std::vector<Nullifier>& out_nullifiers,
+    std::vector<uint256>& out_recovery_commitments)
+    EXCLUSIVE_LOCKS_REQUIRED(pool.cs)
+{
+    out_nullifiers.clear();
+    out_recovery_commitments.clear();
+    if (!tx.HasShieldedBundle()) return true;
+
+    const Txid txid = tx.GetHash();
+    if (retirement_cache_complete.count(txid) != 0) {
+        if (const auto it = nullifier_cache.find(txid); it != nullifier_cache.end()) {
+            out_nullifiers = it->second;
+        }
+        if (const auto it = commitment_cache.find(txid); it != commitment_cache.end()) {
+            out_recovery_commitments = it->second;
+        }
+        return true;
+    }
+
+    if (!pool.GetShieldedRetirementsForMempoolTx(tx, out_nullifiers, out_recovery_commitments)) {
+        return false;
+    }
+    if (!out_nullifiers.empty()) {
+        nullifier_cache.emplace(txid, out_nullifiers);
+    }
+    if (!out_recovery_commitments.empty()) {
+        commitment_cache.emplace(txid, out_recovery_commitments);
+    }
+    retirement_cache_complete.insert(txid);
+    return true;
+}
+
+[[nodiscard]] bool AddShieldedRetirementsForTemplateTx(
+    const CTransaction& tx,
+    const CTxMemPool& pool,
+    std::set<uint256>& shielded_nullifiers,
+    std::set<uint256>& recovery_exit_commitments,
+    std::set<Txid>& retirement_cache_complete,
+    std::map<Txid, std::vector<Nullifier>>& nullifier_cache,
+    std::map<Txid, std::vector<uint256>>& commitment_cache)
+    EXCLUSIVE_LOCKS_REQUIRED(pool.cs)
 {
     std::vector<Nullifier> tx_nullifiers;
-    if (!CollectShieldedMempoolNullifiersForBlock(tx, tx_nullifiers)) {
+    std::vector<uint256> tx_recovery_exit_commitments;
+    if (!GetCachedShieldedRetirementsForTemplateTx(tx,
+                                                   pool,
+                                                   retirement_cache_complete,
+                                                   nullifier_cache,
+                                                   commitment_cache,
+                                                   tx_nullifiers,
+                                                   tx_recovery_exit_commitments)) {
         return false;
     }
     for (const auto& nullifier : tx_nullifiers) {
@@ -232,34 +309,54 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
             return false;
         }
     }
+    for (const auto& commitment : tx_recovery_exit_commitments) {
+        if (!recovery_exit_commitments.insert(commitment).second) {
+            return false;
+        }
+    }
     return true;
 }
 
 [[nodiscard]] bool IsShieldedPackageReadyForBlock(const std::vector<CTxMemPool::txiter>& sorted_entries,
-                                                  const CTxMemPool::setEntries& in_block,
-                                                  const ChainstateManager& chainman)
-    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+                                                  const ChainstateManager& chainman,
+                                                  const CTxMemPool& pool,
+                                                  const std::set<uint256>& template_settlement_anchors,
+                                                  const std::set<uint256>& template_netting_manifests,
+                                                  const std::set<uint256>& template_shielded_nullifiers,
+                                                  const std::set<uint256>& template_recovery_exit_commitments,
+                                                  std::set<Txid>& retirement_cache_complete,
+                                                  std::map<Txid, std::vector<Nullifier>>& nullifier_cache,
+                                                  std::map<Txid, std::vector<uint256>>& commitment_cache)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main, pool.cs)
 {
-    std::set<uint256> settlement_anchors;
-    std::set<uint256> netting_manifests;
-    std::set<uint256> shielded_nullifiers;
+    std::set<uint256> settlement_anchors{template_settlement_anchors};
+    std::set<uint256> netting_manifests{template_netting_manifests};
+    std::set<uint256> shielded_nullifiers{template_shielded_nullifiers};
+    std::set<uint256> recovery_exit_commitments{template_recovery_exit_commitments};
     // The package is being assembled for the next block; bridge-OUT attestor receipts must verify
     // under the scheme fixed by that height (FIPS-205 at/after C-002).
     const int64_t validation_height = chainman.ActiveChain().Height() + 1;
-    for (const auto& entry : in_block) {
-        if (!AddShieldedNullifiersForTemplateTx(entry->GetTx(), shielded_nullifiers)) {
-            return false;
-        }
-        if (!AddCreatedShieldedRefs(entry->GetTx(), validation_height, settlement_anchors, netting_manifests)) {
-            return false;
-        }
-    }
 
     for (const auto& entry : sorted_entries) {
-        if (!AreShieldedRefsReadyForBlock(entry->GetTx(), chainman, settlement_anchors, netting_manifests)) {
+        if (!AreShieldedRefsReadyForBlock(entry->GetTx(),
+                                          chainman,
+                                          settlement_anchors,
+                                          netting_manifests,
+                                          shielded_nullifiers,
+                                          recovery_exit_commitments,
+                                          pool,
+                                          retirement_cache_complete,
+                                          nullifier_cache,
+                                          commitment_cache)) {
             return false;
         }
-        if (!AddShieldedNullifiersForTemplateTx(entry->GetTx(), shielded_nullifiers)) {
+        if (!AddShieldedRetirementsForTemplateTx(entry->GetTx(),
+                                                 pool,
+                                                 shielded_nullifiers,
+                                                 recovery_exit_commitments,
+                                                 retirement_cache_complete,
+                                                 nullifier_cache,
+                                                 commitment_cache)) {
             return false;
         }
         if (!AddCreatedShieldedRefs(entry->GetTx(), validation_height, settlement_anchors, netting_manifests)) {
@@ -708,6 +805,13 @@ void BlockAssembler::resetBlock()
     nBlockShieldedAccountRegistryAppends = 0;
     m_blockShieldedPoolBalance = ShieldedPoolBalance{};
     m_baseShieldedAccountRegistryEntries = 0;
+    m_blockShieldedNullifiers.clear();
+    m_blockShieldedRecoveryExitCommitments.clear();
+    m_blockShieldedSettlementAnchors.clear();
+    m_blockShieldedNettingManifests.clear();
+    m_templateShieldedRetirementCacheComplete.clear();
+    m_templateShieldedNullifierCache.clear();
+    m_templateShieldedRecoveryCommitmentCache.clear();
 
     lastFewTxs = 0;
     blockFinished = false;
@@ -1057,6 +1161,17 @@ void BlockAssembler::AddToBlock(const CTxMemPool& mempool, CTxMemPool::txiter it
         Assume(state_value_balance.has_value());
         Assume(m_blockShieldedPoolBalance.ApplyValueBalance(*state_value_balance));
     }
+    Assume(AddShieldedRetirementsForTemplateTx(iter->GetTx(),
+                                               mempool,
+                                               m_blockShieldedNullifiers,
+                                               m_blockShieldedRecoveryExitCommitments,
+                                               m_templateShieldedRetirementCacheComplete,
+                                               m_templateShieldedNullifierCache,
+                                               m_templateShieldedRecoveryCommitmentCache));
+    Assume(AddCreatedShieldedRefs(iter->GetTx(),
+                                  nHeight,
+                                  m_blockShieldedSettlementAnchors,
+                                  m_blockShieldedNettingManifests));
     inBlock.insert(iter);
 
     if (m_options.print_modified_fee) {
@@ -1230,9 +1345,21 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
             if (candidate.total_fees < m_options.blockMinFeeRate.GetFee(candidate.total_policy_size)) {
                 continue;
             }
+            if (!TestPackage(candidate.total_weight, candidate.total_sigops_cost)) {
+                continue;
+            }
             std::vector<CTxMemPool::txiter> sorted_entries;
             SortForBlock(candidate.entries, sorted_entries);
-            if (!IsShieldedPackageReadyForBlock(sorted_entries, inBlock, m_chainstate.m_chainman)) {
+            if (!IsShieldedPackageReadyForBlock(sorted_entries,
+                                                m_chainstate.m_chainman,
+                                                mempool,
+                                                m_blockShieldedSettlementAnchors,
+                                                m_blockShieldedNettingManifests,
+                                                m_blockShieldedNullifiers,
+                                                m_blockShieldedRecoveryExitCommitments,
+                                                m_templateShieldedRetirementCacheComplete,
+                                                m_templateShieldedNullifierCache,
+                                                m_templateShieldedRecoveryCommitmentCache)) {
                 continue;
             }
             if (!best_candidate_index.has_value() ||

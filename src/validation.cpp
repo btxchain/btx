@@ -3045,16 +3045,27 @@ bool HasInvalidShieldedRecoveryExitMempoolState(const CTransaction& tx, const Ch
            chainman.IsShieldedRecoveryExitCommitmentRetired(re_ids.commitment);
 }
 
-bool CollectShieldedMempoolNullifiersForBlock(const CTransaction& tx,
-                                              std::vector<Nullifier>& out_nullifiers)
+bool CollectShieldedMempoolRetirementsForBlock(const CTransaction& tx,
+                                               std::vector<Nullifier>& out_nullifiers,
+                                               std::vector<uint256>& out_recovery_commitments)
 {
     out_nullifiers.clear();
+    out_recovery_commitments.clear();
     if (!tx.HasShieldedBundle()) return true;
 
     const CShieldedBundle& bundle = tx.GetShieldedBundle();
     out_nullifiers = CollectShieldedNullifiers(bundle);
 
-    return CollectRecoveryExitRetirements(bundle, &out_nullifiers, /*commitments=*/nullptr);
+    return CollectRecoveryExitRetirements(bundle, &out_nullifiers, &out_recovery_commitments);
+}
+
+bool CollectShieldedMempoolNullifiersForBlock(const CTransaction& tx,
+                                              std::vector<Nullifier>& out_nullifiers)
+{
+    std::vector<uint256> recovery_exit_commitments;
+    return CollectShieldedMempoolRetirementsForBlock(tx,
+                                                     out_nullifiers,
+                                                     recovery_exit_commitments);
 }
 
 bool HasSpentShieldedMempoolNullifier(const CTransaction& tx, const ChainstateManager& chainman)
@@ -11349,10 +11360,15 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
     const bool chaintip_loaded = m_snapshot_chainstate->LoadChainTip();
     assert(chaintip_loaded);
 
-    if (shielded_snapshot_section &&
-        !LoadShieldedSnapshotSection(coins_file, *shielded_snapshot_section, snapshot_start_block)) {
-        release_partial_shielded_snapshot_state();
-        return cleanup_bad_snapshot(Untranslated("could not load BTX shielded snapshot section"));
+    if (shielded_snapshot_section) {
+        auto shielded_section_result{
+            LoadShieldedSnapshotSection(coins_file, *shielded_snapshot_section, snapshot_start_block)};
+        if (!shielded_section_result) {
+            release_partial_shielded_snapshot_state();
+            return cleanup_bad_snapshot(Untranslated(strprintf(
+                "could not load BTX shielded snapshot section: %s",
+                util::ErrorString(shielded_section_result).original)));
+        }
     }
 
     // DS-3 fix: the shielded snapshot section (pool balance + nullifier set + commitment tree) is
@@ -12464,12 +12480,45 @@ bool ChainstateManager::WritePersistedShieldedState(
                                                       std::move(account_registry_roots));
 }
 
-bool ChainstateManager::LoadShieldedSnapshotSection(
+util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
     AutoFile& file,
     const ShieldedSnapshotSectionHeader& header,
     const CBlockIndex* tip)
 {
     AssertLockHeld(::cs_main);
+
+    auto fail = [](const std::string& reason) -> util::Result<void> {
+        LogPrintf("LoadShieldedSnapshotSection: %s\n", reason);
+        return util::Error{Untranslated(reason)};
+    };
+    const Chainstate* rebuild_chainstate = m_snapshot_chainstate ? m_snapshot_chainstate.get()
+                                                                 : m_active_chainstate;
+    const auto require_full_rebuild_blocks =
+        [&](const std::string& reason) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> util::Result<void> {
+        if (rebuild_chainstate != nullptr &&
+            ShieldedFullRebuildBlocksAvailable(*rebuild_chainstate, tip)) {
+            return {};
+        }
+        return fail(reason);
+    };
+
+    if (header.m_snapshot_version < node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION) {
+        auto result{require_full_rebuild_blocks(strprintf(
+            "snapshot version %u lacks account-registry payload state and this node does not have the historical blocks needed to rebuild it; use a v%u+ BTX shielded snapshot, a non-pruned datadir, or reindex/redownload",
+            header.m_snapshot_version,
+            node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION))};
+        if (!result) return result;
+    }
+    if (header.m_snapshot_version < node::SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION &&
+        tip != nullptr &&
+        GetConsensus().IsShieldedRecoveryExitActive(tip->nHeight)) {
+        auto result{require_full_rebuild_blocks(strprintf(
+            "snapshot version %u does not contain recovery-exit commitments and this node does not have the historical blocks needed to rebuild them at height %d; use a v%u+ BTX shielded snapshot, a non-pruned datadir, or reindex/redownload",
+            header.m_snapshot_version,
+            tip->nHeight,
+            node::SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION))};
+        if (!result) return result;
+    }
 
     const fs::path shielded_db_path = m_options.datadir / "shielded_state" / "nullifiers";
     const fs::path commitment_index_db_path = m_options.datadir / "shielded_state" / "commitments";
@@ -12488,7 +12537,7 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
 
     auto backup = BackupShieldedStateDirectories(m_options.datadir);
     if (!backup.has_value()) {
-        return false;
+        return fail("failed to back up existing shielded_state directories before snapshot load");
     }
     auto release_partial_shielded_snapshot_state = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         m_shielded_nullifiers.reset();
@@ -12520,12 +12569,12 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
     if (!PrepareShieldedCommitmentIndex(commitment_index_db_path,
                                         m_options.retain_shielded_commitment_index,
                                         /*wipe_data=*/true)) {
-        return false;
+        return fail("failed to prepare shielded commitment index for snapshot load");
     }
     shielded::registry::ShieldedAccountRegistryState::ResetPayloadStore();
     m_shielded_account_registry = shielded::registry::ShieldedAccountRegistryState::WithConfiguredPayloadStore();
     if (!PrepareShieldedAccountRegistryPayloadStore(account_registry_db_path, /*wipe_data=*/true)) {
-        return false;
+        return fail("failed to prepare shielded account-registry payload store for snapshot load");
     }
 
     m_shielded_merkle_tree = shielded::ShieldedMerkleTree{};
@@ -12542,7 +12591,7 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
                                                            /*memory_only=*/false,
                                                            /*wipe_data=*/true);
     if (!m_shielded_nullifiers->WriteMutationMarker(MakeShieldedMutationMarker(tip))) {
-        return false;
+        return fail("failed to write shielded mutation marker before snapshot load");
     }
 
     try {
@@ -12559,12 +12608,14 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
             file >> nullifier;
             batch.push_back(nullifier);
             if (batch.size() == 8192) {
-                if (!m_shielded_nullifiers->Insert(batch)) return false;
+                if (!m_shielded_nullifiers->Insert(batch)) {
+                    return fail("failed to insert shielded nullifier batch from snapshot");
+                }
                 batch.clear();
             }
         }
         if (!batch.empty() && !m_shielded_nullifiers->Insert(batch)) {
-            return false;
+            return fail("failed to insert final shielded nullifier batch from snapshot");
         }
 
         if (header.m_snapshot_version >= node::SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION) {
@@ -12575,13 +12626,15 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
                 file >> commitment;
                 recovery_exit_commitments.push_back(commitment);
                 if (recovery_exit_commitments.size() == 8192) {
-                    if (!m_shielded_nullifiers->InsertRecoveryExitCommitments(recovery_exit_commitments)) return false;
+                    if (!m_shielded_nullifiers->InsertRecoveryExitCommitments(recovery_exit_commitments)) {
+                        return fail("failed to insert recovery-exit commitment batch from snapshot");
+                    }
                     recovery_exit_commitments.clear();
                 }
             }
             if (!recovery_exit_commitments.empty() &&
                 !m_shielded_nullifiers->InsertRecoveryExitCommitments(recovery_exit_commitments)) {
-                return false;
+                return fail("failed to insert final recovery-exit commitment batch from snapshot");
             }
         }
 
@@ -12593,13 +12646,15 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
                 file >> anchor;
                 settlement_anchors.push_back(anchor);
                 if (settlement_anchors.size() == 8192) {
-                    if (!m_shielded_nullifiers->InsertSettlementAnchors(settlement_anchors)) return false;
+                    if (!m_shielded_nullifiers->InsertSettlementAnchors(settlement_anchors)) {
+                        return fail("failed to insert settlement-anchor batch from snapshot");
+                    }
                     settlement_anchors.clear();
                 }
             }
             if (!settlement_anchors.empty() &&
                 !m_shielded_nullifiers->InsertSettlementAnchors(settlement_anchors)) {
-                return false;
+                return fail("failed to insert final settlement-anchor batch from snapshot");
             }
 
             std::vector<ConfirmedNettingManifestState> netting_manifests;
@@ -12610,7 +12665,9 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
                     file >> manifest_state;
                     netting_manifests.push_back(std::move(manifest_state));
                     if (netting_manifests.size() == 8192) {
-                        if (!m_shielded_nullifiers->InsertNettingManifests(netting_manifests)) return false;
+                        if (!m_shielded_nullifiers->InsertNettingManifests(netting_manifests)) {
+                            return fail("failed to insert netting-manifest batch from snapshot");
+                        }
                         netting_manifests.clear();
                     }
                 } else {
@@ -12621,7 +12678,7 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
             if (header.m_snapshot_version >= 6 &&
                 !netting_manifests.empty() &&
                 !m_shielded_nullifiers->InsertNettingManifests(netting_manifests)) {
-                return false;
+                return fail("failed to insert final netting-manifest batch from snapshot");
             }
         }
 
@@ -12636,26 +12693,17 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
             const auto restored_registry =
                 shielded::registry::ShieldedAccountRegistryState::Restore(snapshot);
             if (!restored_registry.has_value()) {
-                return false;
+                return fail("invalid shielded account-registry snapshot section");
             }
             m_shielded_account_registry = std::move(*restored_registry);
         }
     } catch (const std::ios_base::failure&) {
-        return false;
+        return fail("truncated or malformed BTX shielded snapshot section");
     }
 
     if (header.m_snapshot_version < node::SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION &&
         tip != nullptr &&
         GetConsensus().IsShieldedRecoveryExitActive(tip->nHeight)) {
-        const Chainstate* rebuild_chainstate = m_snapshot_chainstate ? m_snapshot_chainstate.get()
-                                                                     : m_active_chainstate;
-        if (rebuild_chainstate == nullptr ||
-            !ShieldedFullRebuildBlocksAvailable(*rebuild_chainstate, tip)) {
-            LogPrintf("LoadShieldedSnapshotSection: refusing post-recovery-exit legacy shielded snapshot without local blocks to rebuild recovery-exit commitments at height=%d hash=%s\n",
-                      tip->nHeight,
-                      tip->GetBlockHash().ToString());
-            return false;
-        }
         shielded::ShieldedMerkleTree rebuilt_tree{
             shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
         ShieldedPoolBalance rebuilt_pool;
@@ -12668,59 +12716,59 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
                                   /*public_accounts=*/nullptr,
                                   /*account_leaf_commitments=*/nullptr,
                                   &rebuilt_recovery_exit_commitments)) {
-            return false;
+            return fail("failed to rebuild recovery-exit commitments for legacy shielded snapshot");
         }
         if (!rebuilt_recovery_exit_commitments.empty() &&
             !m_shielded_nullifiers->InsertRecoveryExitCommitments(rebuilt_recovery_exit_commitments)) {
-            return false;
+            return fail("failed to persist rebuilt recovery-exit commitments for legacy shielded snapshot");
         }
     }
 
     if (!m_shielded_pool_balance.SetBalance(header.m_pool_balance)) {
-        return false;
+        return fail("invalid shielded pool balance in snapshot section");
     }
     if (header.m_snapshot_version < node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION) {
         if (m_active_chainstate != nullptr &&
             !RebuildShieldedSmilePublicAccountState(*m_active_chainstate,
                                                     tip,
                                                     m_shielded_smile_public_accounts)) {
-            return false;
+            return fail("failed to rebuild SMILE public-account state for legacy shielded snapshot");
         }
         if (m_active_chainstate != nullptr &&
             !RebuildShieldedAccountLeafCommitmentState(*m_active_chainstate,
                                                        tip,
                                                        m_shielded_account_leaf_commitments)) {
-            return false;
+            return fail("failed to rebuild account-leaf commitment state for legacy shielded snapshot");
         }
         if (m_active_chainstate == nullptr ||
             !RebuildShieldedAccountRegistryState(*m_active_chainstate,
                                                  tip,
                                                  m_shielded_account_registry)) {
-            return false;
+            return fail("failed to rebuild account-registry state for legacy shielded snapshot");
         }
     } else if (!shielded::registry::BuildRegistryAccountState(m_shielded_account_registry,
                                                               m_shielded_smile_public_accounts,
                                                               m_shielded_account_leaf_commitments)) {
-        return false;
+        return fail("failed to build account-registry lookup state from snapshot section");
     }
     if (tip != nullptr &&
         UseAccountRegistryEntryCountLimit(GetConsensus(), tip->nHeight) &&
         m_shielded_account_registry.Size() > GetConsensus().nMaxShieldedAccountRegistryEntries) {
-        return false;
+        return fail("shielded account-registry snapshot exceeds the active entry limit");
     }
     if (!m_shielded_nullifiers->WritePoolBalance(m_shielded_pool_balance.GetBalance())) {
-        return false;
+        return fail("failed to persist shielded pool balance from snapshot section");
     }
 
     m_shielded_anchor_roots.clear();
     RecordShieldedAnchorRoot(m_shielded_merkle_tree.Root());
     shielded::ShieldedMerkleTree cursor_tree = m_shielded_merkle_tree;
     if (!cursor_tree.DetachToMemoryOnly()) {
-        return false;
+        return fail("failed to detach shielded tree while reconstructing anchor history");
     }
     for (const uint64_t output_count : header.m_recent_output_counts) {
         if (output_count > 0 && !cursor_tree.RemoveLast(output_count)) {
-            return false;
+            return fail("shielded snapshot output-count history is inconsistent with the commitment tree");
         }
         RecordShieldedAnchorRoot(cursor_tree.Root());
     }
@@ -12734,7 +12782,10 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
                       static_cast<unsigned int>(expected_recent_history),
                       tip != nullptr ? tip->nHeight : -1,
                       tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
-            return false;
+            return fail(strprintf("shielded v7+ snapshot has %u recent output-count entries, expected %u at height %d",
+                                  static_cast<unsigned int>(header.m_recent_output_counts.size()),
+                                  static_cast<unsigned int>(expected_recent_history),
+                                  tip != nullptr ? tip->nHeight : -1));
         }
         if (!LoadShieldedAccountRegistryRootWindow(
                 header.m_account_registry_roots,
@@ -12742,12 +12793,12 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
                 expected_recent_history + 1U,
                 "LoadShieldedSnapshotSection",
                 m_shielded_account_registry_roots)) {
-            return false;
+            return fail("invalid shielded account-registry root history in snapshot section");
         }
     } else if (m_active_chainstate != nullptr &&
                ShieldedRebuildHistoryBlocksAvailable(*m_active_chainstate, tip)) {
         if (!RebuildShieldedAccountRegistryHistory(*m_active_chainstate, tip)) {
-            return false;
+            return fail("failed to rebuild shielded account-registry history from local blocks");
         }
     } else if (header.m_snapshot_version >= node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION) {
         const size_t expected_recent_history = ExpectedShieldedRecentHistoryCount(tip);
@@ -12757,7 +12808,10 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
                       static_cast<unsigned int>(expected_recent_history),
                       tip != nullptr ? tip->nHeight : -1,
                       tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
-            return false;
+            return fail(strprintf("shielded snapshot has %u recent output-count entries, expected %u at height %d",
+                                  static_cast<unsigned int>(header.m_recent_output_counts.size()),
+                                  static_cast<unsigned int>(expected_recent_history),
+                                  tip != nullptr ? tip->nHeight : -1));
         }
         std::deque<uint256> derived_roots;
         if (!DeriveShieldedAccountRegistryHistoryFromV6Snapshot(m_shielded_merkle_tree,
@@ -12767,20 +12821,20 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
             LogPrintf("LoadShieldedSnapshotSection: v6 account-registry snapshot lacks enough data to derive recent root history at height=%d hash=%s\n",
                       tip != nullptr ? tip->nHeight : -1,
                       tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
-            return false;
+            return fail("shielded v6 snapshot lacks enough data to derive recent account-registry root history");
         }
         m_shielded_account_registry_roots = std::move(derived_roots);
     } else {
-        return false;
+        return fail("legacy shielded snapshot lacks account-registry history and local blocks are unavailable to rebuild it");
     }
     if (header.m_snapshot_version < 4) {
         if (!SyncShieldedSettlementAnchorState(m_blockman, tip, *m_shielded_nullifiers)) {
-            return false;
+            return fail("failed to sync settlement-anchor state for legacy shielded snapshot");
         }
     }
     if (header.m_snapshot_version < 6) {
         if (!SyncShieldedNettingManifestState(m_blockman, tip, *m_shielded_nullifiers)) {
-            return false;
+            return fail("failed to sync netting-manifest state for legacy shielded snapshot");
         }
     }
     const bool preserve_snapshot_bridge_metadata_extras =
@@ -12788,12 +12842,12 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
         (header.m_settlement_anchor_count > 0 || header.m_netting_manifest_count > 0);
     if (!m_shielded_nullifiers->WriteSnapshotBridgeMetadataHint(
             preserve_snapshot_bridge_metadata_extras)) {
-        return false;
+        return fail("failed to persist snapshot bridge-metadata hint");
     }
 
     m_shielded_state_initialized = true;
     if (!PersistShieldedState(tip)) {
-        return false;
+        return fail("failed to persist loaded shielded snapshot state");
     }
     ShieldedStateDirectoryBackup* committed_backup = rollback_guard.release();
     if (!DiscardShieldedStateDirectoryBackup(*committed_backup)) {
@@ -12801,7 +12855,7 @@ bool ChainstateManager::LoadShieldedSnapshotSection(
                   fs::PathToString(committed_backup->backup_root));
     }
     delete committed_backup;
-    return true;
+    return {};
 }
 
 std::optional<shielded::registry::ShieldedAccountRegistrySnapshot>
@@ -13495,17 +13549,24 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             }
             const bool recovery_exit_active_at_tip =
                 tip != nullptr && GetConsensus().IsShieldedRecoveryExitActive(tip->nHeight);
+            const bool recovery_exit_state_pin_verified =
+                recovery_exit_active_at_tip && verify_fast_startup_state_pin();
             const bool preserve_persisted_bridge_metadata =
                 m_options.fast_shielded_startup &&
-                !m_options.shielded_startup_audit &&
-                !recovery_exit_active_at_tip &&
                 !startup_shielded_repair_performed &&
                 !preserve_snapshot_bridge_metadata_extras &&
-                nullifier_accumulator_verified;
+                nullifier_accumulator_verified &&
+                (!recovery_exit_active_at_tip || recovery_exit_state_pin_verified);
             if (preserve_persisted_bridge_metadata) {
-                LogPrintf("EnsureShieldedStateInitialized: preserving persisted settlement-anchor and netting-manifest metadata at height=%d hash=%s because -fastshieldedstartup=1, -shieldedstartupaudit=0, and persisted nullifier accumulator verified\n",
-                          tip != nullptr ? tip->nHeight : -1,
-                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                if (recovery_exit_active_at_tip) {
+                    LogPrintf("EnsureShieldedStateInitialized: preserving persisted settlement-anchor and netting-manifest metadata at height=%d hash=%s because -fastshieldedstartup=1, persisted nullifier accumulator verified, and full shielded state pin verified\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                } else {
+                    LogPrintf("EnsureShieldedStateInitialized: preserving persisted settlement-anchor and netting-manifest metadata at height=%d hash=%s because -fastshieldedstartup=1 and persisted nullifier accumulator verified\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                }
             } else if (ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
                 if (preserve_snapshot_bridge_metadata_extras) {
                     LogPrintf("EnsureShieldedStateInitialized: full shielded rebuild blocks available at height=%d hash=%s; converging snapshot bridge metadata to chain state\n",
@@ -13546,21 +13607,18 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             }
             m_shielded_state_initialized = true;
 
-            // Zero-downtime restart: skip ONLY the expensive cross-chain audit (the genesis
-            // re-derivation in RebuildShieldedState) when pre-recovery-exit persisted state has enough
-            // cheap restart evidence. After RECOVERY_EXIT activation, a local full-state pin is only
-            // diagnostic: it is computed from the restored shielded DB and is not independent evidence
-            // that recovery-exit commitments match the active chain. Therefore the recovery-exit-active
-            // path always runs the chain-derived exact audit when blocks are available, and fails closed
-            // under pruning instead of trusting a self-consistent local state/pin pair.
+            // Zero-downtime restart: skip the expensive cross-chain audit (the genesis re-derivation in
+            // RebuildShieldedState) when persisted state has enough cheap restart evidence. After
+            // RECOVERY_EXIT activation the nullifier accumulator alone is no longer enough, because the
+            // recovery-exit commitment/settlement/netting metadata also gates spend validity. The full
+            // shielded state pin covers that metadata plus the note root, account-registry root,
+            // nullifier root, and pool balance, so a matching pin is the fast-path evidence for clean
+            // recovery-exit restarts. Missing or mismatched pins still force the chain-derived audit or
+            // fail closed under pruning.
             const bool fast_audit_skip_eligible =
                 m_options.fast_shielded_startup &&
                 !startup_shielded_repair_performed;
-            const bool recovery_exit_state_pin_required =
-                recovery_exit_active_at_tip;
-            const bool shielded_state_pin_verified =
-                !recovery_exit_state_pin_required || verify_fast_startup_state_pin();
-            if (recovery_exit_state_pin_required && !shielded_state_pin_verified) {
+            if (recovery_exit_active_at_tip && !recovery_exit_state_pin_verified) {
                 LogPrintf("EnsureShieldedStateInitialized: full shielded state pin %s at height=%d hash=%s after recovery-exit activation; cross-chain audit is required\n",
                           !fast_startup_state_pin_present ? "absent" :
                           !fast_startup_state_pin_current_available ? "unavailable" : "mismatch",
@@ -13570,30 +13628,36 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             std::string audit_error;
             const bool full_rebuild_blocks_available =
                 ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip);
-            if (recovery_exit_state_pin_required) {
-                if (!full_rebuild_blocks_available) {
-                    LogPrintf("EnsureShieldedStateInitialized: refusing persisted shielded state at height=%d hash=%s because recovery-exit state requires chain-derived audit and full audit blocks are unavailable\n",
+            if (recovery_exit_active_at_tip) {
+                if (fast_audit_skip_eligible && recovery_exit_state_pin_verified) {
+                    LogPrintf("EnsureShieldedStateInitialized: -fastshieldedstartup verified persisted full shielded state pin at height=%d hash=%s after recovery-exit activation; skipping cross-chain audit\n",
                               tip != nullptr ? tip->nHeight : -1,
                               tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
-                    return false;
-                }
-                if (!AuditShieldedStateAgainstChain(*m_active_chainstate,
-                                                   audit_error,
-                                                   /*include_proof_audit=*/false)) {
-                    LogPrintf("EnsureShieldedStateInitialized: recovery-exit persisted shielded state audit failed (%s); rebuilding full state from chain\n",
-                              audit_error);
-                    reset_shielded_state();
-                    if (!rebuild_from_chain()) {
+                } else {
+                    if (!full_rebuild_blocks_available) {
+                        LogPrintf("EnsureShieldedStateInitialized: refusing persisted shielded state at height=%d hash=%s because recovery-exit state requires chain-derived audit and full audit blocks are unavailable\n",
+                                  tip != nullptr ? tip->nHeight : -1,
+                                  tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
                         return false;
                     }
-                    return finish_success();
-                }
-                if (!shielded_state_pin_verified || startup_shielded_repair_performed) {
-                    LogPrintf("EnsureShieldedStateInitialized: recovery-exit cross-chain audit verified persisted shielded state; refreshing full shielded state pin at height=%d hash=%s\n",
-                              tip != nullptr ? tip->nHeight : -1,
-                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
-                    if (!PersistShieldedState(tip)) {
-                        return false;
+                    if (!AuditShieldedStateAgainstChain(*m_active_chainstate,
+                                                       audit_error,
+                                                       /*include_proof_audit=*/false)) {
+                        LogPrintf("EnsureShieldedStateInitialized: recovery-exit persisted shielded state audit failed (%s); rebuilding full state from chain\n",
+                                  audit_error);
+                        reset_shielded_state();
+                        if (!rebuild_from_chain()) {
+                            return false;
+                        }
+                        return finish_success();
+                    }
+                    if (!recovery_exit_state_pin_verified || startup_shielded_repair_performed) {
+                        LogPrintf("EnsureShieldedStateInitialized: recovery-exit cross-chain audit verified persisted shielded state; refreshing full shielded state pin at height=%d hash=%s\n",
+                                  tip != nullptr ? tip->nHeight : -1,
+                                  tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                        if (!PersistShieldedState(tip)) {
+                            return false;
+                        }
                     }
                 }
             } else if (fast_audit_skip_eligible && nullifier_accumulator_verified) {
