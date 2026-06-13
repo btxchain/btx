@@ -965,7 +965,7 @@ last_peer_refresh_epoch=0
 printf '%s\n' "$$" > "${PIDFILE}"
 trap 'rm -f "${PIDFILE}"' EXIT
 
-log_health "loop-start datadir=${DATADIR:-default} wallet=${WALLET} rpc_restart_threshold=${RPC_RESTART_THRESHOLD} health_restart_threshold=${HEALTH_RESTART_THRESHOLD} peer_remediation_threshold=${PEER_REMEDIATION_THRESHOLD} peer_cache_limit=${PEER_CACHE_LIMIT} peer_refresh_limit=${PEER_REFRESH_LIMIT} healthy_public_peer_target=${HEALTHY_PUBLIC_PEER_TARGET} healthy_full_relay_peer_target=${HEALTHY_FULL_RELAY_PEER_TARGET} sync_stall_restart_secs=${SYNC_STALL_RESTART_SECS} maxconnections=${MAXCONNECTIONS} startup_grace=${STARTUP_GRACE_SECS} node_pidfile=${NODE_PIDFILE}"
+log_health "loop-start datadir=${DATADIR:-default} wallet=${WALLET} matmul_backend=${BTX_MATMUL_BACKEND:-cpu} rpc_restart_threshold=${RPC_RESTART_THRESHOLD} health_restart_threshold=${HEALTH_RESTART_THRESHOLD} peer_remediation_threshold=${PEER_REMEDIATION_THRESHOLD} peer_cache_limit=${PEER_CACHE_LIMIT} peer_refresh_limit=${PEER_REFRESH_LIMIT} healthy_public_peer_target=${HEALTHY_PUBLIC_PEER_TARGET} healthy_full_relay_peer_target=${HEALTHY_FULL_RELAY_PEER_TARGET} sync_stall_restart_secs=${SYNC_STALL_RESTART_SECS} maxconnections=${MAXCONNECTIONS} startup_grace=${STARTUP_GRACE_SECS} node_pidfile=${NODE_PIDFILE}"
 
 while true; do
   ((loop_count += 1))

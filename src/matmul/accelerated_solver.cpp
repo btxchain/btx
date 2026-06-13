@@ -22,6 +22,8 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace matmul::accelerated {
 namespace {
@@ -499,23 +501,43 @@ std::vector<DigestResult> ComputeCudaDigestsPreparedBatch(const std::vector<CBlo
 
         std::vector<DigestResult> results;
         results.reserve(prepared_batch.size());
-        for (size_t i = 0; i < prepared_batch.size(); ++i) {
+
+        const auto finalize_batch_entry = [&](size_t index) -> DigestResult {
             const auto words = Span<const field::Element>{
-                cuda_result.words.data() + i * expected_words_per_request,
+                cuda_result.words.data() + index * expected_words_per_request,
                 expected_words_per_request,
             };
-            DigestResult result;
-            result.digest = digest_scheme == DigestScheme::PRODUCT_COMMITTED
+            DigestResult entry;
+            entry.digest = digest_scheme == DigestScheme::PRODUCT_COMMITTED
                 ? transcript::ComputeProductCommittedDigestFromWords(
                       words,
-                      prepared_batch[i].sigma,
-                      blocks[i].matmul_dim,
+                      prepared_batch[index].sigma,
+                      blocks[index].matmul_dim,
                       transcript_block_size)
                 : transcript::FinalizeTranscriptDigestFromWords(words);
-            result.backend = backend::Kind::CUDA;
-            result.accelerated = true;
-            result.ok = true;
-            results.push_back(std::move(result));
+            entry.backend = backend::Kind::CUDA;
+            entry.accelerated = true;
+            entry.ok = true;
+            return entry;
+        };
+
+        const size_t batch_count = prepared_batch.size();
+        const bool parallel_host_finalize =
+            batch_count >= 4 &&
+            std::thread::hardware_concurrency() >= 8;
+        if (parallel_host_finalize) {
+            std::vector<std::future<DigestResult>> futures;
+            futures.reserve(batch_count);
+            for (size_t i = 0; i < batch_count; ++i) {
+                futures.push_back(std::async(std::launch::async, finalize_batch_entry, i));
+            }
+            for (auto& future : futures) {
+                results.push_back(future.get());
+            }
+        } else {
+            for (size_t i = 0; i < batch_count; ++i) {
+                results.push_back(finalize_batch_entry(i));
+            }
         }
         g_cuda_successes.fetch_add(results.size(), std::memory_order_relaxed);
         return results;

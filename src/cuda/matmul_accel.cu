@@ -395,14 +395,15 @@ uint32_t ResolveCudaPoolSlotCount(int device_index)
 
     const uint32_t hw = std::thread::hardware_concurrency();
     const uint32_t cpu_limit =
+        hw >= 32 ? 12U :
         hw >= 24 ? 8U :
         hw >= 16 ? 6U :
         hw >= 12 ? 4U :
         hw >= 8 ? 3U :
         hw >= 4 ? 2U : 1U;
     const uint32_t gpu_limit =
-        multiprocessor_count >= 128 ? 8U :
-        multiprocessor_count >= 96 ? 7U :
+        multiprocessor_count >= 128 ? 12U :
+        multiprocessor_count >= 96 ? 8U :
         multiprocessor_count >= 64 ? 6U :
         multiprocessor_count >= 48 ? 5U :
         multiprocessor_count >= 24 ? 4U :

@@ -285,6 +285,9 @@ int32_t ResolveDefaultMatMulPrepareWorkerCount()
     const auto backend_selection = matmul::accelerated::ResolveMiningBackendFromEnvironment();
     if (backend_selection.active == matmul::backend::Kind::CUDA) {
         const uint32_t cuda_sm_count = ResolveCudaMultiprocessorCountForHeuristics();
+        if (cuda_sm_count >= 128 && hw >= 16) {
+            return std::clamp<int32_t>(static_cast<int32_t>(hw / 2), 4, 12);
+        }
         if (cuda_sm_count >= 96 && hw >= 16) {
             return std::clamp<int32_t>(static_cast<int32_t>(hw / 2), 2, 8);
         }
@@ -373,6 +376,17 @@ int32_t ResolveMatMulSolverThreadCount()
     if (backend_selection.active == matmul::backend::Kind::CUDA) {
         const uint32_t cuda_sm_count = ResolveCudaMultiprocessorCountForHeuristics();
         const uint32_t hw = std::thread::hardware_concurrency();
+        if (cuda_sm_count >= 128) {
+            if (hw >= 16) {
+                return 8;
+            }
+            if (hw >= 12) {
+                return 6;
+            }
+            if (hw >= 8) {
+                return 5;
+            }
+        }
         if (cuda_sm_count >= 96) {
             if (hw >= 24) {
                 return 8;
@@ -871,6 +885,15 @@ uint32_t ResolvePreparePrefetchDepth(matmul::backend::Kind backend, uint32_t con
         if (configured_batch_size <= 1) {
             return 1;
         }
+        if (cuda_sm_count >= 128) {
+            if (configured_batch_size >= 8) {
+                return 6;
+            }
+            if (configured_batch_size >= 4) {
+                return 5;
+            }
+            return 3;
+        }
         if (cuda_sm_count >= 96) {
             return configured_batch_size >= 6 ? 5 : 4;
         }
@@ -916,7 +939,9 @@ uint32_t ResolveSolveBatchSize(matmul::backend::Kind backend,
         uint32_t batch_size{1};
         if (n >= 512 && transcript_block_size >= 16 && noise_rank >= 8) {
             if (product_digest_active) {
-                if (cuda_sm_count >= 96) {
+                if (cuda_sm_count >= 128) {
+                    batch_size = solver_threads >= 6 ? 12 : 6;
+                } else if (cuda_sm_count >= 96) {
                     batch_size = solver_threads >= 6 ? 8 : 4;
                 } else if (cuda_sm_count >= 64) {
                     batch_size = solver_threads >= 5 ? 6 : 4;
