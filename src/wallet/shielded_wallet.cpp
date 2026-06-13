@@ -52,6 +52,7 @@
 #include <cstddef>
 #include <limits>
 #include <map>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -821,6 +822,54 @@ void RegisterAccountLeafCommitment(std::map<uint256, uint256>& account_leaf_comm
     return members;
 }
 
+[[nodiscard]] bool RingPositionHasSmileMetadata(
+    const shielded::ShieldedMerkleTree& tree,
+    const std::map<uint64_t, ShieldedCoin>& fallback_coins,
+    const std::map<uint256, smile2::CompactPublicAccount>& public_accounts,
+    const std::map<uint256, uint256>& account_leaf_commitments,
+    uint64_t position)
+{
+    auto commitment = tree.CommitmentAt(position);
+    if (!commitment.has_value()) {
+        const auto fallback_it = fallback_coins.find(position);
+        if (fallback_it == fallback_coins.end()) return false;
+        commitment = fallback_it->second.commitment;
+    }
+    return commitment.has_value() &&
+           public_accounts.count(*commitment) != 0 &&
+           account_leaf_commitments.count(*commitment) != 0;
+}
+
+[[nodiscard]] bool RingSelectionHasSmileMetadata(
+    const shielded::ShieldedMerkleTree& tree,
+    const std::vector<ShieldedCoin>& selected,
+    const std::map<uint256, smile2::CompactPublicAccount>& public_accounts,
+    const std::map<uint256, uint256>& account_leaf_commitments,
+    const shielded::ringct::SharedRingSelection& selection)
+{
+    std::map<uint64_t, ShieldedCoin> fallback_coins;
+    for (const auto& coin : selected) {
+        fallback_coins.emplace(coin.tree_position, coin);
+    }
+    return std::all_of(selection.positions.begin(), selection.positions.end(), [&](uint64_t pos) {
+        return RingPositionHasSmileMetadata(tree, fallback_coins, public_accounts, account_leaf_commitments, pos);
+    });
+}
+
+[[nodiscard]] uint256 RankSmileEligibleDecoy(const uint256& seed, uint64_t position)
+{
+    HashWriter hw;
+    hw << std::string{"BTX_SmileEligibleRingDecoy_V1"} << seed << position;
+    return hw.GetSHA256();
+}
+
+[[nodiscard]] uint256 DeriveSmileEligibleShuffleSeed(const uint256& seed)
+{
+    HashWriter hw;
+    hw << std::string{"BTX_SmileEligibleRingShuffle_V1"} << seed;
+    return hw.GetSHA256();
+}
+
 [[nodiscard]] bool DecryptedNoteMatchesSmileAccount(const ShieldedNote& note,
                                                     const smile2::CompactPublicAccount& account)
 {
@@ -835,6 +884,8 @@ void RegisterAccountLeafCommitment(std::map<uint256, uint256>& account_leaf_comm
 [[nodiscard]] std::optional<shielded::ringct::SharedRingSelection> BuildSharedSmileRingSelection(
     const shielded::ShieldedMerkleTree& tree,
     const std::vector<ShieldedCoin>& selected,
+    const std::map<uint256, smile2::CompactPublicAccount>& public_accounts,
+    const std::map<uint256, uint256>& account_leaf_commitments,
     size_t ring_size,
     const uint256& shared_seed,
     uint64_t tip_exclusion_window,
@@ -849,8 +900,21 @@ void RegisterAccountLeafCommitment(std::map<uint256, uint256>& account_leaf_comm
     std::vector<uint64_t> real_positions;
     real_positions.reserve(selected.size());
     std::set<uint64_t> real_position_set;
+    std::map<uint64_t, ShieldedCoin> fallback_coins;
     for (const auto& coin : selected) {
         if (coin.tree_position >= tree.Size() || !real_position_set.insert(coin.tree_position).second) {
+            return std::nullopt;
+        }
+        fallback_coins.emplace(coin.tree_position, coin);
+        if (!RingPositionHasSmileMetadata(
+                tree,
+                fallback_coins,
+                public_accounts,
+                account_leaf_commitments,
+                coin.tree_position)) {
+            LogPrintf("BuildSharedSmileRingSelection failed: selected note lacks SMILE metadata commitment=%s pos=%u\n",
+                      coin.commitment.ToString(),
+                      static_cast<unsigned int>(coin.tree_position));
             return std::nullopt;
         }
         real_positions.push_back(coin.tree_position);
@@ -869,8 +933,21 @@ void RegisterAccountLeafCommitment(std::map<uint256, uint256>& account_leaf_comm
         }
     }
 
+    std::vector<uint64_t> metadata_exclusions = exclusions;
+    for (uint64_t pos = 0; pos < tree.Size(); ++pos) {
+        if (real_position_set.count(pos) != 0) continue;
+        if (!RingPositionHasSmileMetadata(
+                tree,
+                fallback_coins,
+                public_accounts,
+                account_leaf_commitments,
+                pos)) {
+            metadata_exclusions.push_back(pos);
+        }
+    }
+
     const auto combined_exclusions = wallet::BuildShieldedHistoricalRingExclusions(
-        Span<const uint64_t>{exclusions.data(), exclusions.size()},
+        Span<const uint64_t>{metadata_exclusions.data(), metadata_exclusions.size()},
         historical_exclusions,
         tree.Size());
 
@@ -880,11 +957,83 @@ void RegisterAccountLeafCommitment(std::map<uint256, uint256>& account_leaf_comm
         shared_seed,
         ring_size,
         Span<const uint64_t>{combined_exclusions.data(), combined_exclusions.size()});
-    if (selection.positions.size() != ring_size ||
-        selection.real_indices.size() != selected.size()) {
+    if (selection.positions.size() == ring_size &&
+        selection.real_indices.size() == selected.size() &&
+        RingSelectionHasSmileMetadata(tree, selected, public_accounts, account_leaf_commitments, selection)) {
+        return selection;
+    }
+
+    const auto policy_exclusions = wallet::BuildShieldedHistoricalRingExclusions(
+        Span<const uint64_t>{exclusions.data(), exclusions.size()},
+        historical_exclusions,
+        tree.Size());
+
+    std::set<uint64_t> policy_exclusion_set(policy_exclusions.begin(), policy_exclusions.end());
+    std::vector<uint64_t> preferred_decoys;
+    std::vector<uint64_t> fallback_decoys;
+    for (uint64_t pos = 0; pos < tree.Size(); ++pos) {
+        if (real_position_set.count(pos) != 0) continue;
+        if (!RingPositionHasSmileMetadata(
+                tree,
+                fallback_coins,
+                public_accounts,
+                account_leaf_commitments,
+                pos)) {
+            continue;
+        }
+        if (policy_exclusion_set.count(pos) == 0) {
+            preferred_decoys.push_back(pos);
+        } else {
+            fallback_decoys.push_back(pos);
+        }
+    }
+
+    auto rank_less = [&](uint64_t a, uint64_t b) {
+        const uint256 rank_a = RankSmileEligibleDecoy(shared_seed, a);
+        const uint256 rank_b = RankSmileEligibleDecoy(shared_seed, b);
+        if (rank_a != rank_b) return rank_a < rank_b;
+        return a < b;
+    };
+    std::sort(preferred_decoys.begin(), preferred_decoys.end(), rank_less);
+    std::sort(fallback_decoys.begin(), fallback_decoys.end(), rank_less);
+
+    const size_t decoys_needed = ring_size - real_positions.size();
+    std::vector<uint64_t> decoys;
+    decoys.reserve(decoys_needed);
+    for (uint64_t pos : preferred_decoys) {
+        if (decoys.size() == decoys_needed) break;
+        decoys.push_back(pos);
+    }
+    for (uint64_t pos : fallback_decoys) {
+        if (decoys.size() == decoys_needed) break;
+        decoys.push_back(pos);
+    }
+    if (decoys.size() != decoys_needed) {
+        LogPrintf("BuildSharedSmileRingSelection failed: insufficient eligible SMILE decoys need=%u have=%u tree_size=%u\n",
+                  static_cast<unsigned int>(decoys_needed),
+                  static_cast<unsigned int>(decoys.size()),
+                  static_cast<unsigned int>(tree.Size()));
         return std::nullopt;
     }
-    return selection;
+
+    shielded::ringct::SharedRingSelection eligible_selection;
+    eligible_selection.positions = real_positions;
+    eligible_selection.positions.insert(eligible_selection.positions.end(), decoys.begin(), decoys.end());
+
+    FastRandomContext prng(DeriveSmileEligibleShuffleSeed(shared_seed));
+    for (size_t i = eligible_selection.positions.size() - 1; i > 0; --i) {
+        std::uniform_int_distribution<size_t> dist{0, i};
+        const size_t j = dist(prng);
+        std::swap(eligible_selection.positions[i], eligible_selection.positions[j]);
+    }
+
+    eligible_selection.real_indices.reserve(real_positions.size());
+    for (const uint64_t real_pos : real_positions) {
+        const auto it = std::find(eligible_selection.positions.begin(), eligible_selection.positions.end(), real_pos);
+        if (it == eligible_selection.positions.end()) return std::nullopt;
+        eligible_selection.real_indices.push_back(static_cast<size_t>(it - eligible_selection.positions.begin()));
+    }
+    return eligible_selection;
 }
 
 [[nodiscard]] std::optional<ResolvedV2ShieldedRecipient> ResolveV2ShieldedRecipient(
@@ -3037,6 +3186,92 @@ std::vector<ShieldedCoin> CShieldedWallet::GetRecoveryExitCandidates(CAmount fee
     return out;
 }
 
+std::optional<std::vector<ShieldedCoin>> CShieldedWallet::SelectExactOrdinarySpend(
+    CAmount target,
+    size_t max_notes,
+    int min_depth,
+    std::string* error) const
+{
+    AssertLockHeld(cs_shielded);
+    auto fail = [&](const std::string& reason) -> std::optional<std::vector<ShieldedCoin>> {
+        if (error != nullptr) *error = reason;
+        return std::nullopt;
+    };
+
+    if (target <= 0 || !MoneyRange(target)) return fail("invalid exact shielded exit target");
+    if (max_notes == 0) return fail("exact shielded exit note limit is zero");
+    max_notes = std::min<size_t>(max_notes, shielded::v2::MAX_LIVE_DIRECT_SMILE_SPENDS);
+    max_notes = std::min<size_t>(max_notes, GetConfiguredShieldedRingSize());
+
+    std::map<uint256, std::vector<ShieldedCoin>> grouped;
+    for (auto coin : GetOrdinarySpendableNotes(min_depth)) {
+        if (coin.note.value <= 0 || coin.note.value > target) continue;
+        if (!coin.account_leaf_hint.has_value() || !coin.account_leaf_hint->IsValid()) continue;
+        if (m_smile_public_accounts.count(coin.commitment) == 0 ||
+            m_account_leaf_commitments.count(coin.commitment) == 0) {
+            continue;
+        }
+        grouped[coin.note.recipient_pk_hash].push_back(std::move(coin));
+    }
+
+    for (auto& [_, notes] : grouped) {
+        std::sort(notes.begin(), notes.end(), [](const ShieldedCoin& a, const ShieldedCoin& b) {
+            if (a.note.value != b.note.value) return a.note.value > b.note.value;
+            if (a.confirmation_height != b.confirmation_height) return a.confirmation_height < b.confirmation_height;
+            if (a.tree_position != b.tree_position) return a.tree_position < b.tree_position;
+            return a.commitment < b.commitment;
+        });
+
+        std::map<CAmount, std::vector<ShieldedCoin>> by_value;
+        for (const auto& coin : notes) {
+            auto& bucket = by_value[coin.note.value];
+            if (bucket.size() < max_notes) bucket.push_back(coin);
+        }
+
+        std::vector<std::map<CAmount, std::vector<std::pair<CAmount, size_t>>>> dp(max_notes + 1);
+        dp[0][0] = {};
+        for (const auto& [value, bucket] : by_value) {
+            std::vector<std::map<CAmount, std::vector<std::pair<CAmount, size_t>>>> next = dp;
+            const size_t max_use = std::min(bucket.size(), max_notes);
+            for (size_t used_before = 0; used_before <= max_notes; ++used_before) {
+                for (const auto& [sum_before, plan_before] : dp[used_before]) {
+                    for (size_t use = 1; use <= max_use && used_before + use <= max_notes; ++use) {
+                        if (value > std::numeric_limits<CAmount>::max() / static_cast<CAmount>(use)) break;
+                        const CAmount added = value * static_cast<CAmount>(use);
+                        if (!MoneyRange(added)) break;
+                        const auto sum_after = CheckedAdd(sum_before, added);
+                        if (!sum_after || !MoneyRange(*sum_after) || *sum_after > target) break;
+                        auto& slot = next[used_before + use];
+                        if (slot.count(*sum_after) != 0) continue;
+                        auto plan = plan_before;
+                        plan.emplace_back(value, use);
+                        slot.emplace(*sum_after, std::move(plan));
+                    }
+                }
+            }
+            dp = std::move(next);
+        }
+
+        for (size_t count = 1; count <= max_notes; ++count) {
+            const auto plan_it = dp[count].find(target);
+            if (plan_it == dp[count].end()) continue;
+
+            std::vector<ShieldedCoin> selected;
+            selected.reserve(count);
+            for (const auto& [value, use] : plan_it->second) {
+                auto bucket_it = by_value.find(value);
+                if (bucket_it == by_value.end() || bucket_it->second.size() < use) {
+                    return fail("exact shielded exit selection became inconsistent");
+                }
+                selected.insert(selected.end(), bucket_it->second.begin(), bucket_it->second.begin() + use);
+            }
+            return selected;
+        }
+    }
+
+    return fail("no exact ordinary shielded note set available for transparent exit");
+}
+
 std::vector<ShieldedCoin> CShieldedWallet::GetUnspentNotes(int min_depth) const
 {
     AssertLockHeld(cs_shielded);
@@ -3542,6 +3777,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2Send(
     auto shared_ring = BuildSharedSmileRingSelection(
         m_tree,
         selected,
+        m_smile_public_accounts,
+        m_account_leaf_commitments,
         ring_size,
         shared_ring_seed,
         GetShieldedDecoyTipExclusionWindowForHeight(validation_height),
@@ -4146,6 +4383,8 @@ std::optional<CMutableTransaction> CShieldedWallet::CreateV2IngressBatch(
     auto shared_ring = BuildSharedSmileRingSelection(
         m_tree,
         selected,
+        m_smile_public_accounts,
+        m_account_leaf_commitments,
         ring_size,
         shared_ring_seed,
         GetShieldedDecoyTipExclusionWindowForHeight(validation_height),

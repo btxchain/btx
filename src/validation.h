@@ -58,6 +58,7 @@
 #include <vector>
 
 class Chainstate;
+class CBlock;
 class CTxMemPool;
 class ChainstateManager;
 class AutoFile;
@@ -124,6 +125,13 @@ extern SpkReuseModes SpkReuseMode;
 extern const std::vector<std::string> CHECKLEVEL_DOC;
 
 struct ReorgProtectionRuntimeStats {
+    uint64_t observed_reorgs{0};
+    uint32_t deepest_observed_reorg_depth{0};
+    uint32_t last_observed_reorg_depth{0};
+    int32_t last_observed_tip_height{0};
+    int32_t last_observed_fork_height{0};
+    int32_t last_observed_candidate_height{0};
+    int64_t last_observed_unix{0};
     uint64_t rejected_reorgs{0};
     uint32_t deepest_rejected_reorg_depth{0};
     uint32_t last_rejected_reorg_depth{0};
@@ -136,6 +144,11 @@ struct ReorgProtectionRuntimeStats {
 
 ReorgProtectionRuntimeStats ProbeReorgProtectionRuntimeStats();
 void ResetReorgProtectionRuntimeStats();
+void RecordObservedReorgDepth(
+    uint32_t reorg_depth,
+    int32_t old_tip_height,
+    int32_t fork_height,
+    int32_t candidate_height);
 void RecordRejectedReorgDepth(
     uint32_t reorg_depth,
     uint32_t max_reorg_depth,
@@ -144,6 +157,7 @@ void RecordRejectedReorgDepth(
     int32_t candidate_height);
 
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams);
+CAmount GetBlockSubsidyForBlock(int nHeight, const CBlock& block, const CBlockIndex* pindexPrev, const Consensus::Params& consensusParams);
 
 /**
  * Policy-only ML-DSA cutoff check for mempool admission.

@@ -5,6 +5,7 @@
 #include <chainparams.h>
 #include <common/args.h>
 #include <consensus/amount.h>
+#include <primitives/block.h>
 #include <test/util/setup_common.h>
 #include <util/chaintype.h>
 #include <validation.h>
@@ -56,6 +57,40 @@ BOOST_AUTO_TEST_CASE(max_supply_never_exceeded)
     }
     BOOST_CHECK(total <= 21'000'000 * COIN);
     BOOST_CHECK(total > 20'999'999 * COIN);
+}
+
+BOOST_AUTO_TEST_CASE(empty_block_subsidy_caps_activate_at_130k)
+{
+    const auto params = CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
+    BOOST_CHECK_EQUAL(params.nEmptyBlockSubsidyPenaltyHeight, 130'000);
+    BOOST_CHECK_EQUAL(params.nEmptyBlockSubsidyMaxHalvings, 2);
+
+    CBlock empty_block;
+    empty_block.vtx.resize(1);
+    CBlock non_empty_block;
+    non_empty_block.vtx.resize(2);
+
+    CBlockIndex non_empty_prev;
+    non_empty_prev.nTx = 2;
+    BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(129'999, empty_block, &non_empty_prev, params), 20 * COIN);
+    BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(130'000, non_empty_block, &non_empty_prev, params), 20 * COIN);
+    BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(130'000, empty_block, &non_empty_prev, params), 10 * COIN);
+
+    CBlockIndex first_empty_prev;
+    first_empty_prev.nTx = 1;
+    first_empty_prev.pprev = &non_empty_prev;
+    BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(130'001, empty_block, &first_empty_prev, params), 5 * COIN);
+
+    CBlockIndex second_empty_prev;
+    second_empty_prev.nTx = 1;
+    second_empty_prev.pprev = &first_empty_prev;
+    BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(130'002, empty_block, &second_empty_prev, params), 5 * COIN);
+
+    CBlockIndex third_empty_prev;
+    third_empty_prev.nTx = 1;
+    third_empty_prev.pprev = &second_empty_prev;
+    BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(130'003, empty_block, &third_empty_prev, params), 5 * COIN);
+    BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(130'004, non_empty_block, &third_empty_prev, params), 20 * COIN);
 }
 
 BOOST_AUTO_TEST_CASE(money_range_enforces_cap)

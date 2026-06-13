@@ -191,10 +191,79 @@ CMutableTransaction BuildRecoveryExitTx(CAmount fee = kRecoverFee,
     return mtx;
 }
 
+CMutableTransaction BuildRecoveryExitTxForTemplatePolicyIndex(uint32_t index,
+                                                             CAmount fee = kRecoverFee,
+                                                             CScript script_pub_key = RecoveryExitDefaultScript())
+{
+    using namespace shielded::v2;
+    const ReVectors& v = Vectors();
+    BOOST_REQUIRE_GT(v.note.value, fee);
+
+    ShieldedNote note;
+    note.value = kRecoverValue;
+    note.recipient_pk_hash = Sha256Of(v.pubkey);
+    {
+        HashWriter seed_writer;
+        seed_writer << std::string{"BTX_RECOVERY_EXIT_TEMPLATE_POLICY_TEST"};
+        seed_writer << index;
+        FastRandomContext rng(seed_writer.GetSHA256());
+        for (int attempt = 0; attempt < 128; ++attempt) {
+            note.rho = rng.rand256();
+            note.rcm = rng.rand256();
+            const auto nf = smile2::wallet::ComputeSmileNullifierFromNote(
+                smile2::wallet::SMILE_GLOBAL_SEED, note);
+            const auto account = smile2::wallet::BuildCompactPublicAccountFromNote(
+                smile2::wallet::SMILE_GLOBAL_SEED, note);
+            if (nf.has_value() && !nf->IsNull() && account.has_value()) break;
+        }
+    }
+    const auto account = smile2::wallet::BuildCompactPublicAccountFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED, note);
+    BOOST_REQUIRE(account.has_value());
+    const uint256 cm = smile2::ComputeCompactPublicAccountHash(*account);
+    const auto nf = smile2::wallet::ComputeSmileNullifierFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED, note);
+    BOOST_REQUIRE(nf.has_value());
+    BOOST_REQUIRE(!nf->IsNull());
+
+    RecoveryExitPayload payload;
+    payload.value = note.value;
+    payload.note_commitment = cm;
+    payload.recipient_pk_hash = note.recipient_pk_hash;
+    payload.rho = note.rho;
+    payload.rcm = note.rcm;
+    payload.spend_pubkey = v.pubkey;
+    { DataStream ws; ws << v.witness; const auto sp = MakeUCharSpan(ws); payload.membership_proof.assign(sp.begin(), sp.end()); }
+
+    CMutableTransaction mtx;
+    mtx.vout.emplace_back(note.value - fee, script_pub_key);
+
+    const uint256 tx_binding = ComputeRecoveryExitTransparentBinding(Span<const CTxOut>{mtx.vout});
+    const uint256 binding = ComputeRecoveryExitBindingHash(cm, *nf, payload.value, tx_binding);
+    BOOST_REQUIRE(v.key.Sign(binding, payload.ownership_sig));
+
+    TransactionBundle bundle;
+    bundle.header.family_id = TransactionFamily::V2_RECOVERY_EXIT;
+    bundle.header.proof_envelope.proof_kind = ProofKind::NONE;
+    bundle.header.proof_envelope.settlement_binding_kind = SettlementBindingKind::NONE;
+    bundle.header.proof_envelope.statement_digest = uint256::ZERO;
+    bundle.header.payload_digest = ComputeRecoveryExitPayloadDigest(payload);
+    bundle.payload = payload;
+    mtx.shielded_bundle.v2_bundle = bundle;
+    return mtx;
+}
+
 void AddRecoveryExitToMempool(CTxMemPool& pool, const CTransactionRef& tx, CAmount fee = kRecoverFee)
 {
     TestMemPoolEntryHelper entry;
     AddToMempool(pool, entry.Fee(fee).Height(kSunsetHeight).FromTx(tx));
+}
+
+bool IsRecoveryExitTx(const CTransaction& tx)
+{
+    if (!tx.HasShieldedBundle()) return false;
+    const auto family = tx.GetShieldedBundle().GetTransactionFamily();
+    return family.has_value() && *family == shielded::v2::TransactionFamily::V2_RECOVERY_EXIT;
 }
 
 CMutableTransaction BuildLegacyShieldOnlyTx(TestChain100Setup& setup,
@@ -240,6 +309,7 @@ BOOST_AUTO_TEST_CASE(recovery_exit_charges_policy_verify_units)
     CTransaction tx{BuildRecoveryExitTx()};
 
     BOOST_CHECK_GT(GetShieldedPolicyWeight(tx), GetTransactionWeight(tx));
+    BOOST_CHECK_GE(GetShieldedRelayVirtualSize(tx), 1'600'000);
 }
 
 BOOST_FIXTURE_TEST_CASE(recovery_exit_mined_block_debits_pool_and_retires_identifiers, RecoveryExitChainSetup)
@@ -407,8 +477,8 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_same_note_replacement_under_optin_rbf, Rec
     pool.m_opts.rbf_policy = RBFPolicy::OptIn;
 
     const CScript script_pub_key = BuildP2MROutput(uint256::ONE);
-    const CAmount low_fee = 200'000;
-    const CAmount high_fee = 500'000;
+    const CAmount low_fee = 2'000'000;
+    const CAmount high_fee = 4'000'000;
     const auto low_tx = MakeTransactionRef(BuildRecoveryExitTx(low_fee, script_pub_key));
     const auto high_tx = MakeTransactionRef(BuildRecoveryExitTx(high_fee, script_pub_key));
     const auto low_txid = GenTxid::Txid(low_tx->GetHash());
@@ -488,6 +558,48 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_template_selection_excludes_retired_commit
         BOOST_CHECK(block_tx->GetHash() != tx->GetHash());
     }
     BOOST_CHECK(WITH_LOCK(pool.cs, return pool.exists(txid)));
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_template_selection_caps_recovery_exit_wave, RecoveryExitChainSetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    constexpr uint32_t tx_count{32};
+    constexpr CAmount wave_fee{2'000'000};
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.SetShieldedPoolBalanceForTest(tx_count * kRecoverValue));
+    }
+
+    for (uint32_t i = 0; i < tx_count; ++i) {
+        const auto tx = MakeTransactionRef(BuildRecoveryExitTxForTemplatePolicyIndex(i, wave_fee));
+        AddRecoveryExitToMempool(pool, tx, wave_fee);
+    }
+    BOOST_CHECK_EQUAL(WITH_LOCK(pool.cs, return pool.size()), tx_count);
+
+    node::BlockAssembler::Options options;
+    options.coinbase_output_script = CScript() << OP_TRUE;
+    options.test_block_validity = false;
+    const auto block = PrepareBlock(m_node, options);
+    BOOST_REQUIRE(block);
+
+    uint32_t recovery_exit_txs{0};
+    for (const auto& block_tx : block->vtx) {
+        if (IsRecoveryExitTx(*block_tx)) {
+            ++recovery_exit_txs;
+        }
+    }
+
+    BOOST_CHECK_EQUAL(recovery_exit_txs, 16U);
+    BOOST_REQUIRE(node::BlockAssembler::m_last_block_template_recovery_exit_txs.has_value());
+    BOOST_REQUIRE(node::BlockAssembler::m_last_block_template_policy_verify_units.has_value());
+    BOOST_REQUIRE(node::BlockAssembler::m_last_block_template_policy_skipped_txs.has_value());
+    BOOST_REQUIRE(node::BlockAssembler::m_last_block_template_policy_candidate_evaluations.has_value());
+    BOOST_CHECK_EQUAL(*node::BlockAssembler::m_last_block_template_recovery_exit_txs, 16);
+    BOOST_CHECK_EQUAL(*node::BlockAssembler::m_last_block_template_policy_verify_units, 1600);
+    BOOST_CHECK_GT(*node::BlockAssembler::m_last_block_template_policy_candidate_evaluations, 16);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

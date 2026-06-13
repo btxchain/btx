@@ -32,6 +32,74 @@ int NextWalletHeightOrLimit(const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wall
     if (last_block_height == std::numeric_limits<int>::max()) return std::numeric_limits<int>::max();
     return last_block_height + 1;
 }
+
+void WalletSettlementSafetyToJSON(const CWallet& wallet,
+                                  const CWalletTx& wtx,
+                                  int confirmations,
+                                  bool assumed_confirmations,
+                                  UniValue& entry)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    const unsigned int required_confirmations = wallet.GetReorgSafetyDepth();
+    const bool reorg_hold_active = wallet.IsReorgSettlementHoldActive();
+    const bool safe =
+        !reorg_hold_active &&
+        !assumed_confirmations &&
+        confirmations >= static_cast<int>(required_confirmations) &&
+        !(wtx.IsCoinBase() && wallet.IsTxImmatureCoinBase(wtx));
+
+    entry.pushKV("settlement_confirmations_required", static_cast<int64_t>(required_confirmations));
+    entry.pushKV("settlement_reorg_hold_active", reorg_hold_active);
+    entry.pushKV("settlement_reorg_hold_until_height", wallet.GetReorgHoldUntilHeight());
+    entry.pushKV("settlement_reorg_hold_remaining_blocks", wallet.GetReorgHoldRemainingBlocks());
+    entry.pushKV("settlement_reorg_hold_until_time", wallet.GetReorgHoldUntilTime());
+    entry.pushKV("settlement_reorg_hold_remaining_seconds", wallet.GetReorgHoldRemainingSeconds());
+    entry.pushKV("settlement_safe", safe);
+
+    if (safe) {
+        entry.pushKV("settlement_status", "safe");
+    } else if (assumed_confirmations) {
+        entry.pushKV("settlement_status", "assumed");
+    } else if (confirmations < 0) {
+        entry.pushKV("settlement_status", "conflicted");
+    } else if (confirmations == 0) {
+        entry.pushKV("settlement_status", "unconfirmed");
+    } else if (wtx.IsCoinBase() && wallet.IsTxImmatureCoinBase(wtx)) {
+        entry.pushKV("settlement_status", "immature");
+    } else if (reorg_hold_active) {
+        entry.pushKV("settlement_status", "reorg_hold");
+    } else {
+        entry.pushKV("settlement_status", "confirming");
+    }
+}
+
+void WalletTxStateToJSON(const CWalletTx& wtx, int confirmations, UniValue& entry)
+{
+    if (const auto* conflicted = wtx.state<TxStateBlockConflicted>()) {
+        entry.pushKV("wallet_tx_state", "block_conflicted");
+        entry.pushKV("conflicting_blockhash", conflicted->conflicting_block_hash.GetHex());
+        entry.pushKV("conflicting_blockheight", conflicted->conflicting_block_height);
+        entry.pushKV("conflicting_confirmations", confirmations < 0 ? -confirmations : 0);
+        return;
+    }
+    if (wtx.isMempoolConflicted()) {
+        entry.pushKV("wallet_tx_state", "mempool_conflicted");
+        return;
+    }
+    if (confirmations > 0) {
+        entry.pushKV("wallet_tx_state", "confirmed");
+        return;
+    }
+    if (wtx.InMempool()) {
+        entry.pushKV("wallet_tx_state", "in_mempool");
+        return;
+    }
+    if (wtx.isAbandoned()) {
+        entry.pushKV("wallet_tx_state", "abandoned");
+        return;
+    }
+    entry.pushKV("wallet_tx_state", "inactive");
+}
 } // namespace
 
 static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue& entry)
@@ -39,12 +107,15 @@ static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue
 {
     interfaces::Chain& chain = wallet.chain();
     int confirms = wallet.GetTxDepthInMainChain(wtx);
-    if (confirms > 0 && wallet.IsTxAssumed(wtx)) {
+    const bool assumed_confirmations = confirms > 0 && wallet.IsTxAssumed(wtx);
+    const int reported_confirmations = assumed_confirmations ? 0 : confirms;
+    if (assumed_confirmations) {
         entry.pushKV("confirmations", 0);
         entry.pushKV("confirmations_assumed", confirms);
     } else {
-    entry.pushKV("confirmations", confirms);
+        entry.pushKV("confirmations", confirms);
     }
+    WalletSettlementSafetyToJSON(wallet, wtx, reported_confirmations, assumed_confirmations, entry);
     if (wtx.IsCoinBase())
         entry.pushKV("generated", true);
     if (auto* conf = wtx.state<TxStateConfirmed>())
@@ -62,6 +133,7 @@ static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue
     uint256 hash = wtx.GetHash();
     entry.pushKV("txid", hash.GetHex());
     entry.pushKV("wtxid", wtx.GetWitnessHash().GetHex());
+    WalletTxStateToJSON(wtx, confirms, entry);
     UniValue conflicts(UniValue::VARR);
     for (const uint256& conflict : wallet.GetTxConflicts(wtx))
         conflicts.push_back(conflict.GetHex());
@@ -433,6 +505,18 @@ static std::vector<RPCResult> TransactionDescriptionString()
     return{{RPCResult::Type::NUM, "confirmations", "The number of confirmations for the transaction. Negative confirmations means the\n"
                "transaction conflicted that many blocks ago."},
            {RPCResult::Type::NUM, "confirmations_assumed", /*optional=*/true, "The number of unverified confirmations for the transaction (eg, in an assumed-valid UTXO set)."},
+           {RPCResult::Type::NUM, "settlement_confirmations_required", "The wallet policy confirmation depth required before this transaction is reported settlement_safe."},
+           {RPCResult::Type::BOOL, "settlement_reorg_hold_active", "Whether wallet settlement-safe reporting is currently held because this wallet observed a block disconnect/reorg."},
+           {RPCResult::Type::NUM, "settlement_reorg_hold_until_height", "Chain height at or above which the current reorg settlement hold expires, or -1 if no hold has been observed."},
+           {RPCResult::Type::NUM, "settlement_reorg_hold_remaining_blocks", "Blocks remaining before the current reorg settlement hold expires."},
+           {RPCResult::Type::NUM_TIME, "settlement_reorg_hold_until_time", "Unix timestamp at or after which the current reorg settlement hold expires, or -1 if no hold has been observed."},
+           {RPCResult::Type::NUM, "settlement_reorg_hold_remaining_seconds", "Seconds remaining before the current reorg settlement hold expires."},
+           {RPCResult::Type::BOOL, "settlement_safe", "Whether this transaction has enough verified confirmations for reorg-aware settlement under the wallet policy and no active reorg settlement hold."},
+           {RPCResult::Type::STR, "settlement_status", "One of safe, assumed, conflicted, unconfirmed, immature, reorg_hold, or confirming."},
+           {RPCResult::Type::STR, "wallet_tx_state", "One of confirmed, in_mempool, inactive, abandoned, mempool_conflicted, or block_conflicted."},
+           {RPCResult::Type::STR_HEX, "conflicting_blockhash", /*optional=*/true, "Block hash of the block that conflicts with this wallet transaction."},
+           {RPCResult::Type::NUM, "conflicting_blockheight", /*optional=*/true, "Block height of the block that conflicts with this wallet transaction."},
+           {RPCResult::Type::NUM, "conflicting_confirmations", /*optional=*/true, "Confirmations of the conflicting block."},
            {RPCResult::Type::BOOL, "generated", /*optional=*/true, "Only present if the transaction's only input is a coinbase one."},
            {RPCResult::Type::BOOL, "trusted", /*optional=*/true, "Whether we consider the transaction to be trusted and safe to spend from.\n"
                 "Only present when the transaction has 0 confirmations (or negative confirmations, if conflicted)."},
@@ -625,7 +709,34 @@ RPCHelpMan listsinceblock()
                         }},
                         {RPCResult::Type::ARR, "removed", /*optional=*/true, "<structure is the same as \"transactions\" above, only present if include_removed=true>\n"
                             "Note: transactions that were re-added in the active chain will appear as-is in this array, and may thus have a positive confirmation count."
-                        , {{RPCResult::Type::ELISION, "", ""},}},
+                        , {
+                            {RPCResult::Type::OBJ, "", "", Cat(Cat(Cat<std::vector<RPCResult>>(
+                            {
+                                {RPCResult::Type::BOOL, "involvesWatchonly", /*optional=*/true, "Only returns true if imported addresses were involved in transaction."},
+                                {RPCResult::Type::STR, "address",  /*optional=*/true, "The BTX address of the transaction (not returned if the output does not have an address, e.g. OP_RETURN null data)."},
+                                {RPCResult::Type::STR, "category", "The transaction category.\n"
+                                    "\"send\"                  Transactions sent.\n"
+                                    "\"receive\"               Non-coinbase transactions received.\n"
+                                    "\"generate\"              Coinbase transactions received with more than 100 confirmations.\n"
+                                    "\"immature\"              Coinbase transactions received with 100 or fewer confirmations.\n"
+                                    "\"orphan\"                Orphaned coinbase transactions received."},
+                                {RPCResult::Type::STR_AMOUNT, "amount", "The amount in " + CURRENCY_UNIT + ". This is negative for the 'send' category, and is positive\n"
+                                    "for all other categories"},
+                                {RPCResult::Type::NUM, "vout", "the vout value"},
+                                {RPCResult::Type::STR_AMOUNT, "fee", /*optional=*/true, "The amount of the fee in " + CURRENCY_UNIT + ". This is negative and only available for the\n"
+                                     "'send' category of transactions."},
+                            },
+                            TransactionDescriptionString()),
+                            {
+                                {RPCResult::Type::BOOL, "abandoned", "'true' if the transaction has been abandoned (inputs are respendable)."},
+                                {RPCResult::Type::STR, "label", /*optional=*/true, "A comment for the address/transaction, if any"},
+                            }),
+                            {
+                                {RPCResult::Type::STR_HEX, "removed_blockhash", "Hash of the stale block this wallet transaction was removed from."},
+                                {RPCResult::Type::NUM, "removed_blockheight", "Height of the stale block this wallet transaction was removed from."},
+                                {RPCResult::Type::NUM, "removed_blockindex", "Transaction index in the stale block."},
+                            })},
+                        }},
                         {RPCResult::Type::STR_HEX, "lastblock", "The hash of the block (target_confirmations-1) from the best block on the main chain, or the genesis hash if the referenced block does not exist yet. This is typically used to feed back into listsinceblock the next time you call it. So you would generally use a target_confirmations of say 6, so you will be continually re-notified of transactions until they've reached 6 confirmations plus any new ones"},
                     }
                 },
@@ -706,12 +817,20 @@ RPCHelpMan listsinceblock()
         if (!wallet.chain().findBlock(blockId, FoundBlock().data(block)) || block.IsNull()) {
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Can't read block from disk");
         }
-        for (const CTransactionRef& tx : block.vtx) {
+        for (size_t tx_index = 0; tx_index < block.vtx.size(); ++tx_index) {
+            const CTransactionRef& tx = block.vtx[tx_index];
             auto it = wallet.mapWallet.find(tx->GetHash());
             if (it != wallet.mapWallet.end()) {
                 // We want all transactions regardless of confirmation count to appear here,
                 // even negative confirmation ones, hence the big negative.
-                ListTransactions(wallet, it->second, -100000000, true, removed, filter, filter_label, include_change);
+                std::vector<UniValue> removed_entries;
+                ListTransactions(wallet, it->second, -100000000, true, removed_entries, filter, filter_label, include_change);
+                for (UniValue& entry : removed_entries) {
+                    entry.pushKV("removed_blockhash", block.GetHash().GetHex());
+                    entry.pushKV("removed_blockheight", *altheight);
+                    entry.pushKV("removed_blockindex", static_cast<int64_t>(tx_index));
+                    removed.push_back(std::move(entry));
+                }
             }
         }
         blockId = block.hashPrevBlock;

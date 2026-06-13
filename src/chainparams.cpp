@@ -232,6 +232,14 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         }
         options.shielded_recovery_exit_frozen_root = *parsed;
     }
+    if (args.IsArgSet("-regtestreorgprotectionstartheight")) {
+        options.reorg_protection_start_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestreorgprotectionstartheight");
+    }
+    if (args.IsArgSet("-regtestemptyblocksubsidypenaltyheight")) {
+        options.empty_block_subsidy_penalty_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestemptyblocksubsidypenaltyheight");
+    }
     if (args.IsArgSet("-regtestmatmulbindingheight")) {
         options.matmul_binding_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestmatmulbindingheight");

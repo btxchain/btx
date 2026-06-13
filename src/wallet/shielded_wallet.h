@@ -328,6 +328,17 @@ public:
     [[nodiscard]] std::vector<ShieldedCoin> GetRecoveryExitCandidates(CAmount fee, int min_depth = 1) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
 
+    /** Return an exact-sum ordinary spend set for strict post-sunset transparent
+     *  exits. Notes are selected from one spending keyset and bounded by the live
+     *  direct SMILE spend limit so the result can be passed to CreateV2Send as a
+     *  selected_override without creating shielded change. */
+    [[nodiscard]] std::optional<std::vector<ShieldedCoin>> SelectExactOrdinarySpend(
+        CAmount target,
+        size_t max_notes,
+        int min_depth = 1,
+        std::string* error = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
     /** Return unspent notes (including view-only). */
     [[nodiscard]] std::vector<ShieldedCoin> GetUnspentNotes(int min_depth = 0) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);

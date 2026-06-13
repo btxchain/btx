@@ -968,6 +968,31 @@ public:
         return m_block_template->nShieldedTreeUpdateUnits;
     }
 
+    bool isMempoolValidationFallback() const override
+    {
+        return m_block_template->m_mempool_validation_fallback;
+    }
+
+    uint64_t getTemplatePolicyVerifyUnits() const override
+    {
+        return m_block_template->nTemplatePolicyVerifyUnits;
+    }
+
+    uint64_t getTemplateRecoveryExitTxs() const override
+    {
+        return m_block_template->nTemplateRecoveryExitTxs;
+    }
+
+    uint64_t getTemplatePolicySkippedTxs() const override
+    {
+        return m_block_template->nTemplatePolicySkippedTxs;
+    }
+
+    uint64_t getTemplatePolicyCandidateEvaluations() const override
+    {
+        return m_block_template->nTemplatePolicyCandidateEvaluations;
+    }
+
     CTransactionRef getCoinbaseTx() const override
     {
         return m_block_template->block.vtx[0];

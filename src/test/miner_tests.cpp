@@ -61,6 +61,7 @@ struct MinerTestingSetup : public TestingSetup {
         : TestingSetup{ChainType::REGTEST, BuildOpts()} {}
 
     void TestPackageSelection(const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void TestFastTemplateCapSkipsUnusableTopCandidate(const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     void TestBasicMining(const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst, int baseheight) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     void TestConsensusSerializedSizeLimit(const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     void TestPrioritisedMining(const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -423,6 +424,7 @@ BlockAssembler::Options MakeSyntheticBlockAssemblerOptions()
     BlockAssembler::Options options;
     options.coinbase_output_script = CScript{} << OP_2 << std::vector<unsigned char>(32, 0x42);
     options.test_block_validity = false;
+    options.nBlockMaxTemplateTxs = 0;
     return options;
 }
 
@@ -1031,6 +1033,51 @@ void MinerTestingSetup::TestBasicMining(const CScript& scriptPubKey, const std::
     BOOST_CHECK_EQUAL(block.vtx.size(), 5U);
 }
 
+void MinerTestingSetup::TestFastTemplateCapSkipsUnusableTopCandidate(const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst)
+{
+    CTxMemPool& tx_mempool{MakeMempool()};
+    BlockAssembler::Options options;
+    options.coinbase_output_script = scriptPubKey;
+    options.nBlockMaxWeight = MAX_BLOCK_WEIGHT;
+    options.nBlockMaxSize = MAX_BLOCK_SERIALIZED_SIZE;
+    options.nBlockMaxTemplateTxs = 2;
+    const CAmount BLOCKSUBSIDY{GetBlockSubsidy(/*nHeight=*/1, Assert(m_node.chainman)->GetConsensus())};
+
+    LOCK(tx_mempool.cs);
+    TestMemPoolEntryHelper entry;
+    CMutableTransaction tx;
+    tx.vin.resize(1);
+    tx.vin[0].prevout.n = 0;
+    tx.vin[0].scriptSig = CScript() << OP_1;
+    tx.vout.resize(1);
+    tx.vout[0].scriptPubKey = CScript() << OP_1;
+
+    tx.vin[0].prevout.hash = txFirst[0]->GetHash();
+    tx.vin[0].scriptWitness.stack.emplace_back(MAX_BLOCK_SERIALIZED_SIZE + 1024, 0x42);
+    tx.vout[0].nValue = BLOCKSUBSIDY - 1'000'000;
+    const Txid oversized_txid = tx.GetHash();
+    AddToMempool(tx_mempool, entry.Fee(1'000'000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx));
+
+    tx.vin[0].scriptWitness.SetNull();
+    tx.vin[0].prevout.hash = txFirst[1]->GetHash();
+    tx.vout[0].nValue = BLOCKSUBSIDY - 10'000;
+    const Txid first_valid_txid = tx.GetHash();
+    AddToMempool(tx_mempool, entry.Fee(10'000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx));
+
+    tx.vin[0].prevout.hash = txFirst[2]->GetHash();
+    tx.vout[0].nValue = BLOCKSUBSIDY - 9'000;
+    const Txid second_valid_txid = tx.GetHash();
+    AddToMempool(tx_mempool, entry.Fee(9'000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx));
+
+    auto block_template = BlockAssembler{Assert(m_node.chainman)->ActiveChainstate(), &tx_mempool, options, m_node}.CreateNewBlock();
+    BOOST_REQUIRE(block_template);
+    const CBlock& block = block_template->block;
+    BOOST_CHECK_EQUAL(block.vtx.size(), 3U);
+    BOOST_CHECK_EQUAL(FindBlockTxIndex(block, oversized_txid), block.vtx.size());
+    BOOST_CHECK_NE(FindBlockTxIndex(block, first_valid_txid), block.vtx.size());
+    BOOST_CHECK_NE(FindBlockTxIndex(block, second_valid_txid), block.vtx.size());
+}
+
 void MinerTestingSetup::TestConsensusSerializedSizeLimit(const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst)
 {
     CTxMemPool& tx_mempool{MakeMempool()};
@@ -1318,6 +1365,7 @@ BOOST_AUTO_TEST_CASE(CreateNewBlock_validity)
 
     TestBasicMining(scriptPubKey, txFirst, baseheight);
     TestConsensusSerializedSizeLimit(scriptPubKey, txFirst);
+    TestFastTemplateCapSkipsUnusableTopCandidate(scriptPubKey, txFirst);
 
     m_node.chainman->ActiveChain().Tip()->nHeight--;
     SetMockTime(0);

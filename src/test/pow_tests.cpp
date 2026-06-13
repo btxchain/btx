@@ -909,8 +909,9 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nMatMulTranscriptBlockSize, 16U);
     BOOST_CHECK_EQUAL(consensus.nMatMulNoiseRank, 8U);
     BOOST_CHECK_EQUAL(consensus.nMatMulPhase2FailBanThreshold, 1U);
-    BOOST_CHECK_EQUAL(consensus.nMaxReorgDepth, 144U);
+    BOOST_CHECK_EQUAL(consensus.nMaxReorgDepth, 12U);
     BOOST_CHECK_EQUAL(consensus.nReorgProtectionStartHeight, 61'000);
+    BOOST_CHECK_EQUAL(consensus.nEmptyBlockSubsidyPenaltyHeight, 130'000);
     BOOST_CHECK_EQUAL(consensus.nMatMulFreivaldsBindingHeight, 61'000);
     BOOST_CHECK_EQUAL(consensus.nMatMulProductDigestHeight, 61'000);
     BOOST_CHECK_EQUAL(consensus.nShieldedTxBindingActivationHeight, 61'000);

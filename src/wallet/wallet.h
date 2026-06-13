@@ -35,6 +35,7 @@
 #include <wallet/types.h>
 #include <wallet/walletutil.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstddef>
@@ -135,6 +136,12 @@ static const bool DEFAULT_WALLET_REJECT_LONG_CHAINS{true};
 static const unsigned int DEFAULT_TX_CONFIRM_TARGET = 144;
 //! -bridgependingconfirmdepth default
 static const unsigned int DEFAULT_BRIDGE_PENDING_CONFIRM_DEPTH = 20;
+//! -walletreorgsafetydepth default
+static const unsigned int DEFAULT_WALLET_REORG_SAFETY_DEPTH = 12;
+//! -walletreorgholdblocks default
+static const unsigned int DEFAULT_WALLET_REORG_HOLD_BLOCKS = DEFAULT_WALLET_REORG_SAFETY_DEPTH;
+//! -walletreorgholdseconds default
+static const unsigned int DEFAULT_WALLET_REORG_HOLD_SECONDS = 60 * 60;
 //! -walletrbf default
 static const bool DEFAULT_WALLET_RBF = true;
 static const bool DEFAULT_WALLETBROADCAST = true;
@@ -770,6 +777,8 @@ public:
     CWalletTx* AddToWallet(CTransactionRef tx, const TxState& state, const UpdateWalletTxFn& update_wtx=nullptr, bool fFlushOnClose=true, bool rescanning_old_block = false);
     bool LoadToWallet(const uint256& hash, const UpdateWalletTxFn& fill_wtx) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     void transactionAddedToMempool(const CTransactionRef& tx) override;
+    void PersistReorgSettlementHold() EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    void ExtendReorgSettlementHold(int base_height, bool force_persist) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     void blockConnected(ChainstateRole role, const interfaces::BlockInfo& block) override;
     void blockDisconnected(const interfaces::BlockInfo& block) override;
     void updatedBlockTip() override;
@@ -864,6 +873,14 @@ public:
     CFeeRate m_pay_tx_fee{DEFAULT_PAY_TX_FEE};
     unsigned int m_confirm_target{DEFAULT_TX_CONFIRM_TARGET};
     unsigned int m_bridge_pending_confirm_depth{DEFAULT_BRIDGE_PENDING_CONFIRM_DEPTH};
+    unsigned int m_reorg_safety_depth{DEFAULT_WALLET_REORG_SAFETY_DEPTH};
+    unsigned int m_reorg_hold_blocks{DEFAULT_WALLET_REORG_HOLD_BLOCKS};
+    unsigned int m_reorg_hold_seconds{DEFAULT_WALLET_REORG_HOLD_SECONDS};
+    int m_reorg_hold_until_height{-1};
+    int64_t m_reorg_hold_until_time{-1};
+    int m_last_reorg_disconnected_height{-1};
+    uint256 m_last_reorg_disconnected_block{};
+    bool m_reorg_hold_pending_tip_update{false};
     /** Allow Coin Selection to pick unconfirmed UTXOs that were sent from our own wallet if it
      * cannot fund the transaction otherwise. */
     bool m_spend_zero_conf_change{DEFAULT_SPEND_ZEROCONF_CHANGE};
@@ -1185,6 +1202,57 @@ public:
     {
         AssertLockHeld(cs_wallet);
         return m_bridge_pending_confirm_depth;
+    }
+    unsigned int GetReorgSafetyDepth() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return m_reorg_safety_depth;
+    }
+    unsigned int GetReorgHoldBlocks() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return m_reorg_hold_blocks;
+    }
+    int GetReorgHoldUntilHeight() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return m_reorg_hold_until_height;
+    }
+    unsigned int GetReorgHoldSeconds() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return m_reorg_hold_seconds;
+    }
+    int64_t GetReorgHoldUntilTime() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return m_reorg_hold_until_time;
+    }
+    int GetLastReorgDisconnectedHeight() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return m_last_reorg_disconnected_height;
+    }
+    uint256 GetLastReorgDisconnectedBlock() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return m_last_reorg_disconnected_block;
+    }
+    int GetReorgHoldRemainingBlocks() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return std::max(0, m_reorg_hold_until_height - m_last_block_processed_height);
+    }
+    int64_t GetReorgHoldRemainingSeconds() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return std::max<int64_t>(0, m_reorg_hold_until_time - GetTime());
+    }
+    bool IsReorgSettlementHoldActive() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
+    {
+        AssertLockHeld(cs_wallet);
+        return (m_reorg_hold_blocks > 0 && GetReorgHoldRemainingBlocks() > 0) ||
+               (m_reorg_hold_seconds > 0 && GetReorgHoldRemainingSeconds() > 0);
     }
     uint256 GetLastBlockHash() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet)
     {

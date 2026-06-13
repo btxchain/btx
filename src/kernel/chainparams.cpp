@@ -42,6 +42,7 @@ auto consteval_ctor(auto&& input) { return input; }
 static constexpr int32_t BTX_SHIELDED_SUNSET_HEIGHT{125'000};
 static constexpr int32_t BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT{BTX_SHIELDED_SUNSET_HEIGHT};
 static constexpr int32_t BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT{128'000};
+static constexpr int32_t BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT{130'000};
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
                                  const CScript& genesisOutputScript,
@@ -175,8 +176,9 @@ public:
         consensus.fMatMulRequireProductPayload = false;
         consensus.nMatMulFreivaldsBindingHeight = 61'000;
         consensus.nMatMulProductDigestHeight = 61'000;
-        consensus.nMaxReorgDepth = 144;
+        consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
+        consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
         consensus.nPowTargetSpacingFastMs = 250;
         // Fast-phase bootstrap scale for heights [0, nFastMineHeight). Effective
         // ease is bounded by powLimit; keep this >1 so fast bootstrap can
@@ -475,8 +477,9 @@ public:
         consensus.fMatMulRequireProductPayload = true;
         consensus.nMatMulFreivaldsBindingHeight = 61'000;
         consensus.nMatMulProductDigestHeight = 61'000;
-        consensus.nMaxReorgDepth = 144;
+        consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
+        consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -650,8 +653,9 @@ public:
         consensus.fMatMulRequireProductPayload = true;
         consensus.nMatMulFreivaldsBindingHeight = 61'000;
         consensus.nMatMulProductDigestHeight = 61'000;
-        consensus.nMaxReorgDepth = 144;
+        consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
+        consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -855,8 +859,9 @@ public:
         consensus.fMatMulRequireProductPayload = true;
         consensus.nMatMulFreivaldsBindingHeight = 61'000;
         consensus.nMatMulProductDigestHeight = 61'000;
-        consensus.nMaxReorgDepth = 144;
+        consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
+        consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -1093,6 +1098,13 @@ public:
             opts.shielded_recovery_exit_activation_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedRecoveryExitFrozenRoot =
             opts.shielded_recovery_exit_frozen_root.value_or(uint256{});
+        if (opts.reorg_protection_start_height.has_value()) {
+            consensus.nReorgProtectionStartHeight = *opts.reorg_protection_start_height;
+            consensus.nMaxReorgDepth = 12;
+        }
+        if (opts.empty_block_subsidy_penalty_height.has_value()) {
+            consensus.nEmptyBlockSubsidyPenaltyHeight = *opts.empty_block_subsidy_penalty_height;
+        }
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = opts.mldsa_disable_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nRuleChangeActivationThreshold = 108; // 75% for testchains
@@ -1155,6 +1167,8 @@ public:
             opts.shielded_pool_credit_disable_height.has_value() ||
             opts.shielded_sunset_height.has_value() ||
             opts.shielded_direct_send_public_flow_disable_height.has_value() ||
+            opts.reorg_protection_start_height.has_value() ||
+            opts.empty_block_subsidy_penalty_height.has_value() ||
             opts.mldsa_disable_height.has_value();
 
         for (const auto& [dep, height] : opts.activation_heights) {

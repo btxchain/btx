@@ -63,6 +63,9 @@ static constexpr size_t MIN_SHIELD_SWEEP_MAX_INPUTS_PER_CHUNK{4};
 static constexpr int MAX_SHIELD_SWEEP_REBUILD_ATTEMPTS{8};
 static constexpr int MAX_SHIELDED_FEE_CONVERGENCE_ATTEMPTS{8};
 static constexpr int MAX_SHIELDED_STALE_ANCHOR_REBUILD_ATTEMPTS{3};
+static constexpr size_t DEFAULT_RECOVERY_EXIT_SWEEP_MAX_NOTES{25};
+static constexpr size_t MAX_RECOVERY_EXIT_SWEEP_MAX_NOTES{100};
+static constexpr CAmount DEFAULT_RECOVERY_EXIT_SWEEP_FEE{2'000'000};
 static constexpr uint64_t DEFAULT_BRIDGE_PROVER_BLOCK_INTERVAL_MILLIS{90'000};
 static constexpr uint32_t DEFAULT_V2_REBALANCE_SETTLEMENT_WINDOW{144};
 static constexpr int64_t BRIDGE_FEE_HEADROOM_SCALE{1000};
@@ -612,7 +615,7 @@ struct RecoveryExitRpcSpend
 
 [[nodiscard]] size_t ShieldedRelayVirtualSize(const CTransaction& tx)
 {
-    return GetVirtualTransactionSize(GetShieldedPolicyWeight(tx), 0, 0);
+    return GetShieldedRelayVirtualSize(tx);
 }
 
 void SetShieldedFeeEstimateMode(const CWallet& wallet,
@@ -7085,6 +7088,13 @@ struct ShieldedCommitResult
     throw JSONRPCError(code, result.error.empty() ? "Shielded transaction commit failed" : result.error);
 }
 
+[[nodiscard]] std::string GetRpcErrorMessage(const UniValue& error)
+{
+    const UniValue& message = FindValue(error, "message");
+    if (message.isStr()) return message.get_str();
+    return error.write();
+}
+
 template <typename BuildFunc, typename CleanupFunc>
 CTransactionRef BuildAndCommitShieldedTransactionWithAnchorRetry(const std::shared_ptr<CWallet>& pwallet,
                                                                  const char* rpc_name,
@@ -7520,10 +7530,13 @@ struct P2MRMultisigLeaf
     const CTransaction finalized_tx(mtx);
     const int64_t estimated_sigop_cost = GetTransactionSigOpCost(finalized_tx, view, STANDARD_SCRIPT_VERIFY_FLAGS);
     const int32_t extra_weight = CalculateExtraTxWeight(finalized_tx, view, ::g_weight_per_data_byte);
-    const size_t estimated_vsize = GetVirtualTransactionSize(
+    const size_t base_estimated_vsize = GetVirtualTransactionSize(
         GetTransactionWeight(finalized_tx) + extra_weight,
         estimated_sigop_cost,
         ::nBytesPerSigOp);
+    const size_t estimated_vsize = finalized_tx.HasShieldedBundle()
+        ? std::max<size_t>(base_estimated_vsize, GetShieldedRelayVirtualSize(finalized_tx))
+        : base_estimated_vsize;
     if (estimated_vsize == 0) {
         result.error = "Estimated virtual size is zero";
         return result;
@@ -8740,6 +8753,8 @@ RPCHelpMan z_sendmany()
                                 const int32_t build_height = NextShieldingRpcBuildHeight(*pwallet);
                                 const bool recovery_exit_active =
                                     Params().GetConsensus().IsShieldedRecoveryExitActive(build_height);
+                                const bool shielded_sunset_active =
+                                    Params().GetConsensus().IsShieldedSunsetActive(build_height);
                                 const bool transparent_only_exit =
                                     shielded_recipients.empty() && !transparent_recipients.empty();
                                 const bool try_recovery_exit =
@@ -8795,7 +8810,55 @@ RPCHelpMan z_sendmany()
                                         }
                                     }
                                 }
-                                if (!mtx.has_value()) {
+
+                                if (!mtx.has_value() && shielded_sunset_active && transparent_only_exit) {
+                                    CAmount exact_target{fee};
+                                    bool exact_target_valid{MoneyRange(exact_target)};
+                                    for (const auto& [_, amount] : transparent_recipients) {
+                                        if (!exact_target_valid) break;
+                                        const auto next = CheckedAdd(exact_target, amount);
+                                        if (!next || !MoneyRange(*next)) {
+                                            exact_target_valid = false;
+                                            break;
+                                        }
+                                        exact_target = *next;
+                                    }
+                                    if (!exact_target_valid) {
+                                        create_error = "transparent exit target overflow";
+                                    } else if (conflict_selection.has_value()) {
+                                        create_error = "conflict_txid replacement is not supported for post-sunset exact transparent exits";
+                                    } else {
+                                        std::string exact_selection_error;
+                                        const auto exact_selection =
+                                            pwallet->m_shielded_wallet->SelectExactOrdinarySpend(
+                                                exact_target,
+                                                static_cast<size_t>(shielded::v2::MAX_LIVE_DIRECT_SMILE_SPENDS),
+                                                /*min_depth=*/1,
+                                                &exact_selection_error);
+                                        if (exact_selection.has_value()) {
+                                            mtx = pwallet->m_shielded_wallet->CreateShieldedSpend(
+                                                shielded_recipients,
+                                                transparent_recipients,
+                                                fee,
+                                                /*allow_transparent_fallback=*/false,
+                                                &create_error,
+                                                &*exact_selection);
+                                            if (mtx.has_value() && mtx->GetShieldedBundle().GetShieldedOutputCount() != 0) {
+                                                mtx.reset();
+                                                create_error = "post-sunset exact transparent exit attempted to create shielded outputs";
+                                            }
+                                            if (mtx.has_value()) {
+                                                reserved_nullifiers = CollectShieldedNullifiers(mtx->shielded_bundle);
+                                                pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
+                                            }
+                                        } else if (!exact_selection_error.empty()) {
+                                            create_error = exact_selection_error;
+                                        } else if (create_error.empty()) {
+                                            create_error = "no exact ordinary shielded note set available for transparent exit";
+                                        }
+                                    }
+                                }
+                                if (!mtx.has_value() && !shielded_sunset_active) {
                                     mtx = pwallet->m_shielded_wallet->CreateShieldedSpend(
                                         shielded_recipients,
                                         transparent_recipients,
@@ -8867,7 +8930,7 @@ RPCHelpMan z_sendmany()
                 /*verbose=*/true,
                 RedactSensitiveShieldedRpcFields(*pwallet, /*include_sensitive=*/false));
         }};
-}
+    }
 
 RPCHelpMan z_shieldcoinbase()
 {
@@ -9924,6 +9987,297 @@ RPCHelpMan z_recoverstrandednote()
                 return txid_value;
             }
             return result;
+        }};
+}
+
+RPCHelpMan z_sweeptotransparent()
+{
+    return RPCHelpMan{
+        "z_sweeptotransparent",
+        "\nSweep recoverable shielded notes to one transparent address using independent V2_RECOVERY_EXIT transactions.\n"
+        "This is the post-sunset bulk drain path for legacy shielded notes. It intentionally creates one\n"
+        "recovery-exit transaction per note rather than a multi-note shielded_v2 send, avoiding shielded\n"
+        "change, SMILE proof generation, and shared-ring construction.\n",
+        {
+            {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "Transparent destination address"},
+            {"max_notes", RPCArg::Type::NUM, RPCArg::Default{static_cast<int64_t>(DEFAULT_RECOVERY_EXIT_SWEEP_MAX_NOTES)},
+                strprintf("Maximum notes to sweep in this call (1-%u)", static_cast<unsigned int>(MAX_RECOVERY_EXIT_SWEEP_MAX_NOTES))},
+            {"fee", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"wallet shielded fee estimation"},
+                "Fee per recovery-exit transaction"},
+            {"dry_run", RPCArg::Type::BOOL, RPCArg::Default{false}, "Preview selected notes without signing or broadcasting"},
+            {"minconf", RPCArg::Type::NUM, RPCArg::Default{1}, "Minimum confirmations for notes to sweep"},
+            {"conf_target", RPCArg::Type::NUM, RPCArg::DefaultHint{"wallet -txconfirmtarget"}, "Confirmation target in blocks for automatic fee estimation"},
+            {"estimate_mode", RPCArg::Type::STR, RPCArg::Default{"unset"}, "The fee estimate mode, must be one of (case insensitive):\n"
+                + common::FeeModesDetail(std::string("conservative mode is used by default for shielded recovery"))},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR, "destination", "Transparent destination address"},
+                {RPCResult::Type::STR, "family", "Shielded transaction family emitted by this RPC"},
+                {RPCResult::Type::BOOL, "dry_run", "True if no transactions were signed or committed"},
+                {RPCResult::Type::BOOL, "complete", "True if every selected note was swept"},
+                {RPCResult::Type::NUM, "selected_notes", "Number of notes selected for this call"},
+                {RPCResult::Type::NUM, "submitted_txs", "Number of recovery-exit transactions committed"},
+                {RPCResult::Type::NUM, "remaining_recovery_exit_candidates", "Remaining currently selectable recovery-exit notes"},
+                {RPCResult::Type::STR_AMOUNT, "total_input_amount", "Total shielded note value selected/submitted"},
+                {RPCResult::Type::STR_AMOUNT, "total_fee", "Total fee selected/submitted"},
+                {RPCResult::Type::STR_AMOUNT, "total_transparent_amount", "Total transparent value selected/submitted"},
+                {RPCResult::Type::STR, "error", /*optional=*/true, "Error if the sweep stopped after partial progress"},
+                {RPCResult::Type::ARR, "transactions", "",
+                    {
+                        {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR_HEX, "txid", /*optional=*/true, "Transaction id when committed"},
+                                {RPCResult::Type::STR_HEX, "input_commitment", "Recovered note commitment"},
+                                {RPCResult::Type::STR_AMOUNT, "input_amount", "Recovered note value"},
+                                {RPCResult::Type::STR_AMOUNT, "fee", "Fee for this recovery-exit transaction"},
+                                {RPCResult::Type::STR_AMOUNT, "transparent_amount", "Transparent output value"},
+                            }},
+                    }},
+            }},
+        RPCExamples{
+            HelpExampleCli("z_sweeptotransparent", "\"btx1...\"") +
+            HelpExampleCli("z_sweeptotransparent", "\"btx1...\" 25 0.0002 false 1")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            auto pwallet = EnsureWalletForShielded(request);
+            pwallet->BlockUntilSyncedToCurrentChain();
+
+            const int32_t build_height = NextShieldingRpcBuildHeight(*pwallet);
+            if (!Params().GetConsensus().IsShieldedRecoveryExitActive(build_height)) {
+                throw JSONRPCError(
+                    RPC_WALLET_ERROR,
+                    strprintf("z_sweeptotransparent is disabled at height %d because shielded recovery exit is not active", build_height));
+            }
+            EnsureWalletIsUnlocked(*pwallet);
+
+            const std::string dest_str = request.params[0].get_str();
+            const CTxDestination dest = DecodeDestination(dest_str);
+            if (!IsValidDestination(dest)) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Invalid transparent address: %s", dest_str));
+            }
+
+            size_t max_notes{DEFAULT_RECOVERY_EXIT_SWEEP_MAX_NOTES};
+            if (!request.params[1].isNull()) {
+                const int raw = request.params[1].getInt<int>();
+                if (raw < 1 || raw > static_cast<int>(MAX_RECOVERY_EXIT_SWEEP_MAX_NOTES)) {
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        strprintf("max_notes must be between 1 and %u", static_cast<unsigned int>(MAX_RECOVERY_EXIT_SWEEP_MAX_NOTES)));
+                }
+                max_notes = static_cast<size_t>(raw);
+            }
+
+            bool explicit_fee{false};
+            CAmount fee{DEFAULT_RECOVERY_EXIT_SWEEP_FEE};
+            if (!request.params[2].isNull()) {
+                explicit_fee = true;
+                fee = AmountFromValue(request.params[2]);
+                if (fee <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Fee must be positive");
+            }
+
+            const bool dry_run = !request.params[3].isNull() && request.params[3].get_bool();
+
+            int minconf{1};
+            if (!request.params[4].isNull()) {
+                minconf = request.params[4].getInt<int>();
+                if (minconf < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "minconf must be non-negative");
+            }
+
+            if (explicit_fee && (!request.params[5].isNull() || !request.params[6].isNull())) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "Cannot specify conf_target or estimate_mode together with an explicit fee");
+            }
+
+            CCoinControl coin_control;
+            SetShieldedFeeEstimateMode(*pwallet, coin_control, request.params[5], request.params[6]);
+
+            const CAmount max_auto_fee = explicit_fee ? 0 : MaxShieldedWalletBroadcastFee(*pwallet);
+            if (!explicit_fee) {
+                fee = ClampShieldedAutoFeeToWalletLimit(*pwallet, DEFAULT_RECOVERY_EXIT_SWEEP_FEE);
+            }
+
+            std::vector<ShieldedCoin> candidates = WITH_LOCK(
+                pwallet->m_shielded_wallet->cs_shielded,
+                return pwallet->m_shielded_wallet->GetRecoveryExitCandidates(fee, minconf));
+            if (candidates.size() > max_notes) {
+                candidates.resize(max_notes);
+            }
+
+            UniValue transactions(UniValue::VARR);
+            CAmount total_input{0};
+            CAmount total_fee{0};
+            CAmount total_transparent{0};
+            size_t submitted{0};
+            std::string sweep_error;
+
+            const auto add_amount_or_throw = [](CAmount& target, CAmount value, std::string_view field) {
+                const auto next = CheckedAdd(target, value);
+                if (!next || !MoneyRange(*next)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, strprintf("%s overflow", field));
+                }
+                target = *next;
+            };
+
+            for (const ShieldedCoin& coin : candidates) {
+                CAmount tx_fee = fee;
+                CAmount transparent_amount = coin.note.value - tx_fee;
+                if (coin.note.value <= tx_fee || !MoneyRange(transparent_amount)) {
+                    sweep_error = "candidate note value does not cover fee";
+                    break;
+                }
+
+                if (dry_run) {
+                    UniValue entry(UniValue::VOBJ);
+                    entry.pushKV("input_commitment", coin.commitment.GetHex());
+                    entry.pushKV("input_amount", ValueFromAmount(coin.note.value));
+                    entry.pushKV("fee", ValueFromAmount(tx_fee));
+                    entry.pushKV("transparent_amount", ValueFromAmount(transparent_amount));
+                    transactions.push_back(std::move(entry));
+
+                    add_amount_or_throw(total_input, coin.note.value, "total_input_amount");
+                    add_amount_or_throw(total_fee, tx_fee, "total_fee");
+                    add_amount_or_throw(total_transparent, transparent_amount, "total_transparent_amount");
+                    continue;
+                }
+
+                std::vector<Nullifier> reserved_nullifiers;
+                const auto release_reservations = [&]() {
+                    if (reserved_nullifiers.empty()) return;
+                    LOCK(pwallet->m_shielded_wallet->cs_shielded);
+                    pwallet->m_shielded_wallet->ReleasePendingSpends(reserved_nullifiers);
+                    reserved_nullifiers.clear();
+                };
+
+                CTransactionRef tx;
+                try {
+                    tx = BuildAndCommitShieldedTransactionWithAnchorRetry(
+                        pwallet,
+                        "z_sweeptotransparent",
+                        /*map_value=*/{},
+                        [&]() -> CTransactionRef {
+                            CTransactionRef built_tx;
+                            try {
+                                for (int attempt = 0; attempt < MAX_SHIELDED_FEE_CONVERGENCE_ATTEMPTS; ++attempt) {
+                                    release_reservations();
+
+                                    std::optional<CMutableTransaction> mtx;
+                                    std::string create_error;
+                                    {
+                                        LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                                        mtx = pwallet->m_shielded_wallet->BuildRecoveryExitTransaction(
+                                            coin,
+                                            dest,
+                                            tx_fee,
+                                            &create_error);
+                                        if (mtx.has_value()) {
+                                            reserved_nullifiers = {coin.nullifier};
+                                            if (const auto recovery_spend = TryBuildRecoveryExitSpendView(mtx->shielded_bundle);
+                                                recovery_spend.has_value() &&
+                                                recovery_spend->spend.nullifier != coin.nullifier) {
+                                                reserved_nullifiers.push_back(recovery_spend->spend.nullifier);
+                                            }
+                                            pwallet->m_shielded_wallet->ReservePendingSpends(reserved_nullifiers);
+                                        }
+                                    }
+                                    if (!mtx.has_value()) {
+                                        throw JSONRPCError(
+                                            RPC_WALLET_ERROR,
+                                            create_error.empty() ? "Failed to create recovery-exit transaction" : create_error);
+                                    }
+
+                                    CTransactionRef candidate = MakeTransactionRef(std::move(*mtx));
+                                    const CAmount required_fee = RequiredMempoolFee(*pwallet, *candidate);
+                                    if (explicit_fee) {
+                                        if (tx_fee >= required_fee) {
+                                            built_tx = std::move(candidate);
+                                            break;
+                                        }
+                                        throw JSONRPCError(
+                                            RPC_WALLET_ERROR,
+                                            strprintf("Fee too low for transaction size. Required at least %s", FormatMoney(required_fee)));
+                                    }
+
+                                    const CAmount required_auto_fee = CanonicalizeShieldingFee(*pwallet, required_fee);
+                                    if (required_auto_fee > max_auto_fee) {
+                                        throw JSONRPCError(
+                                            RPC_WALLET_ERROR,
+                                            strprintf(
+                                                "Required shielded fee %s exceeds configured -maxtxfee %s for this recovery-exit transaction",
+                                                FormatMoney(required_auto_fee),
+                                                FormatMoney(pwallet->m_default_max_tx_fee)));
+                                    }
+
+                                    const CAmount desired_fee = ComputeShieldedAutoFee(
+                                        *pwallet,
+                                        coin_control,
+                                        ShieldedRelayVirtualSize(*candidate),
+                                        candidate->HasShieldedBundle());
+                                    const CAmount next_fee = ClampShieldedAutoFeeToWalletLimit(
+                                        *pwallet,
+                                        std::max(required_fee, desired_fee));
+                                    if (tx_fee >= next_fee) {
+                                        built_tx = std::move(candidate);
+                                        break;
+                                    }
+                                    tx_fee = next_fee;
+                                }
+                            } catch (...) {
+                                release_reservations();
+                                throw;
+                            }
+                            if (!built_tx) {
+                                throw JSONRPCError(RPC_WALLET_ERROR, "Failed to create fee-compliant recovery-exit transaction");
+                            }
+                            return built_tx;
+                        },
+                        [&]() {
+                            release_reservations();
+                        });
+                } catch (const UniValue& e) {
+                    sweep_error = GetRpcErrorMessage(e);
+                    break;
+                } catch (const std::exception& e) {
+                    sweep_error = e.what();
+                    break;
+                }
+
+                transparent_amount = coin.note.value - tx_fee;
+                UniValue entry(UniValue::VOBJ);
+                entry.pushKV("txid", tx->GetHash().GetHex());
+                entry.pushKV("input_commitment", coin.commitment.GetHex());
+                entry.pushKV("input_amount", ValueFromAmount(coin.note.value));
+                entry.pushKV("fee", ValueFromAmount(tx_fee));
+                entry.pushKV("transparent_amount", ValueFromAmount(transparent_amount));
+                transactions.push_back(std::move(entry));
+
+                add_amount_or_throw(total_input, coin.note.value, "total_input_amount");
+                add_amount_or_throw(total_fee, tx_fee, "total_fee");
+                add_amount_or_throw(total_transparent, transparent_amount, "total_transparent_amount");
+                ++submitted;
+            }
+
+            const size_t remaining_candidates = WITH_LOCK(
+                pwallet->m_shielded_wallet->cs_shielded,
+                return pwallet->m_shielded_wallet->GetRecoveryExitCandidates(fee, minconf).size());
+
+            UniValue out(UniValue::VOBJ);
+            out.pushKV("destination", dest_str);
+            out.pushKV("family", "v2_recovery_exit");
+            out.pushKV("dry_run", dry_run);
+            out.pushKV("complete", sweep_error.empty() && transactions.size() == candidates.size());
+            out.pushKV("selected_notes", static_cast<int64_t>(candidates.size()));
+            out.pushKV("submitted_txs", static_cast<int64_t>(submitted));
+            out.pushKV("remaining_recovery_exit_candidates", static_cast<int64_t>(remaining_candidates));
+            out.pushKV("total_input_amount", ValueFromAmount(total_input));
+            out.pushKV("total_fee", ValueFromAmount(total_fee));
+            out.pushKV("total_transparent_amount", ValueFromAmount(total_transparent));
+            if (!sweep_error.empty()) {
+                out.pushKV("error", sweep_error);
+            }
+            out.pushKV("transactions", std::move(transactions));
+            return out;
         }};
 }
 

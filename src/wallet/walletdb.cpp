@@ -56,6 +56,7 @@ const std::string OLD_KEY{"wkey"};
 const std::string ORDERPOSNEXT{"orderposnext"};
 const std::string POOL{"pool"};
 const std::string PURPOSE{"purpose"};
+const std::string REORGSETTLEMENTHOLD{"reorgsettlementhold"};
 const std::string SETTINGS{"settings"};
 const std::string SHIELDEDCOMMITMENTS{"shieldedcommitments"};
 const std::string SHIELDEDSTATE{"shieldedstate"};
@@ -220,6 +221,16 @@ bool WalletBatch::ReadBestBlock(CBlockLocator& locator)
 {
     if (m_batch->Read(DBKeys::BESTBLOCK, locator) && !locator.vHave.empty()) return true;
     return m_batch->Read(DBKeys::BESTBLOCK_NOMERKLE, locator);
+}
+
+bool WalletBatch::WriteReorgSettlementHold(const WalletReorgSettlementHold& hold)
+{
+    return WriteIC(DBKeys::REORGSETTLEMENTHOLD, hold);
+}
+
+bool WalletBatch::ReadReorgSettlementHold(WalletReorgSettlementHold& hold)
+{
+    return m_batch->Read(DBKeys::REORGSETTLEMENTHOLD, hold);
 }
 
 bool WalletBatch::IsEncrypted()
@@ -1474,6 +1485,14 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
 
         // Load decryption keys
         result = std::max(LoadDecryptionKeys(pwallet, *m_batch), result);
+
+        WalletReorgSettlementHold reorg_hold;
+        if (ReadReorgSettlementHold(reorg_hold)) {
+            pwallet->m_reorg_hold_until_height = reorg_hold.hold_until_height;
+            pwallet->m_reorg_hold_until_time = reorg_hold.hold_until_time;
+            pwallet->m_last_reorg_disconnected_height = reorg_hold.last_disconnected_height;
+            pwallet->m_last_reorg_disconnected_block = reorg_hold.last_disconnected_block;
+        }
     } catch (const std::exception& e) {
         pwallet->WalletLogPrintf("Error loading wallet database: uncaught exception during load: %s\n", e.what());
         // Exceptions that can be ignored or treated as non-critical are handled by the individual loading functions.

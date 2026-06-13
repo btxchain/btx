@@ -59,6 +59,17 @@ static RPCHelpMan getwalletinfo()
                         {RPCResult::Type::NUM, "walletversion", "the wallet version"},
                         {RPCResult::Type::STR, "format", "the database format (bdb or sqlite)"},
                         {RPCResult::Type::STR_AMOUNT, "balance", "DEPRECATED. Identical to getbalances().mine.trusted"},
+                        {RPCResult::Type::STR_AMOUNT, "settlement_safe_balance", "Spendable wallet balance with at least wallet_reorg_safety_depth verified confirmations and no active reorg settlement hold."},
+                        {RPCResult::Type::NUM, "wallet_reorg_safety_depth", "Confirmations required before wallet RPCs report a transaction or balance as settlement-safe."},
+                        {RPCResult::Type::NUM, "wallet_reorg_hold_blocks", "Blocks after a reorg before wallet RPCs resume settlement-safe reporting."},
+                        {RPCResult::Type::NUM, "wallet_reorg_hold_seconds", "Seconds after a reorg before wallet RPCs resume settlement-safe reporting."},
+                        {RPCResult::Type::BOOL, "settlement_reorg_hold_active", "Whether settlement-safe reporting is currently held because this wallet observed a block disconnect/reorg."},
+                        {RPCResult::Type::NUM, "settlement_reorg_hold_until_height", "Chain height at or above which the current reorg settlement hold expires, or -1 if no hold has been observed."},
+                        {RPCResult::Type::NUM, "settlement_reorg_hold_remaining_blocks", "Blocks remaining before the current reorg settlement hold expires."},
+                        {RPCResult::Type::NUM_TIME, "settlement_reorg_hold_until_time", "Unix timestamp at or after which the current reorg settlement hold expires, or -1 if no hold has been observed."},
+                        {RPCResult::Type::NUM, "settlement_reorg_hold_remaining_seconds", "Seconds remaining before the current reorg settlement hold expires."},
+                        {RPCResult::Type::STR_HEX, "last_reorg_disconnected_block", /*optional=*/true, "Most recent disconnected block hash that activated the wallet reorg hold."},
+                        {RPCResult::Type::NUM, "last_reorg_disconnected_height", /*optional=*/true, "Height of the most recent disconnected block that activated the wallet reorg hold."},
                         {RPCResult::Type::STR_AMOUNT, "unconfirmed_balance", "DEPRECATED. Identical to getbalances().mine.untrusted_pending"},
                         {RPCResult::Type::STR_AMOUNT, "immature_balance", "DEPRECATED. Identical to getbalances().mine.immature"},
                         {RPCResult::Type::STR_AMOUNT, "shielded_balance", /*optional=*/true, "the confirmed spendable shielded-pool balance (present only for shielded-capable wallets). See z_gettotalbalance for the recovery-only/watch-only breakdown."},
@@ -103,10 +114,26 @@ static RPCHelpMan getwalletinfo()
 
     size_t kpExternalSize = pwallet->KeypoolCountExternalKeys();
     const auto bal = GetBalance(*pwallet);
+    const unsigned int reorg_safety_depth = pwallet->GetReorgSafetyDepth();
+    const auto settlement_bal = GetBalance(*pwallet, reorg_safety_depth);
+    const bool reorg_hold_active = pwallet->IsReorgSettlementHoldActive();
     obj.pushKV("walletname", pwallet->GetName());
     obj.pushKV("walletversion", pwallet->GetVersion());
     obj.pushKV("format", pwallet->GetDatabase().Format());
     obj.pushKV("balance", ValueFromAmount(bal.m_mine_trusted));
+    obj.pushKV("settlement_safe_balance", ValueFromAmount(reorg_hold_active ? 0 : settlement_bal.m_mine_trusted));
+    obj.pushKV("wallet_reorg_safety_depth", static_cast<int64_t>(reorg_safety_depth));
+    obj.pushKV("wallet_reorg_hold_blocks", static_cast<int64_t>(pwallet->GetReorgHoldBlocks()));
+    obj.pushKV("wallet_reorg_hold_seconds", static_cast<int64_t>(pwallet->GetReorgHoldSeconds()));
+    obj.pushKV("settlement_reorg_hold_active", reorg_hold_active);
+    obj.pushKV("settlement_reorg_hold_until_height", pwallet->GetReorgHoldUntilHeight());
+    obj.pushKV("settlement_reorg_hold_remaining_blocks", pwallet->GetReorgHoldRemainingBlocks());
+    obj.pushKV("settlement_reorg_hold_until_time", pwallet->GetReorgHoldUntilTime());
+    obj.pushKV("settlement_reorg_hold_remaining_seconds", pwallet->GetReorgHoldRemainingSeconds());
+    if (pwallet->GetLastReorgDisconnectedHeight() >= 0) {
+        obj.pushKV("last_reorg_disconnected_block", pwallet->GetLastReorgDisconnectedBlock().GetHex());
+        obj.pushKV("last_reorg_disconnected_height", pwallet->GetLastReorgDisconnectedHeight());
+    }
     obj.pushKV("unconfirmed_balance", ValueFromAmount(bal.m_mine_untrusted_pending));
     obj.pushKV("immature_balance", ValueFromAmount(bal.m_mine_immature));
     // Surface the confirmed spendable shielded-pool balance for shielded-capable wallets so a solo
@@ -1155,6 +1182,7 @@ RPCHelpMan z_getbalance();
 RPCHelpMan z_listunspent();
 RPCHelpMan z_sendtoaddress();
 RPCHelpMan z_sendmany();
+RPCHelpMan z_sweeptotransparent();
 RPCHelpMan z_recoverstrandednote();
 RPCHelpMan z_shieldcoinbase();
 RPCHelpMan z_shieldfunds();
@@ -1329,6 +1357,7 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"shielded", &z_listunspent},
         {"shielded", &z_sendtoaddress},
         {"shielded", &z_sendmany},
+        {"shielded", &z_sweeptotransparent},
         {"shielded", &z_recoverstrandednote},
         {"shielded", &z_shieldcoinbase},
         {"shielded", &z_shieldfunds},

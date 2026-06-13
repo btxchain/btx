@@ -424,6 +424,15 @@ bool CoinbaseOutputScriptSatisfiesReducedDataLimits(const Consensus::Params& con
 
 constexpr size_t PACKAGE_SELECTION_CANDIDATE_WINDOW{8};
 constexpr uint64_t SCARCITY_PPM_SCALE{1'000'000};
+// Recovery-exit bundles are consensus-valid without a shielded proof envelope,
+// so their consensus shielded verify usage is zero. They still trigger
+// expensive ownership/nullifier/commitment checks in TestBlockValidity. Bound
+// that policy-only CPU work so getblocktemplate cannot pack an entire recovery
+// wave and hold cs_main for tens of seconds per new block.
+constexpr uint64_t RECOVERY_EXIT_TEMPLATE_POLICY_VERIFY_UNITS{100};
+constexpr uint64_t MAX_TEMPLATE_POLICY_VERIFY_UNITS{1'600};
+constexpr uint64_t MAX_TEMPLATE_RECOVERY_EXIT_TXS{16};
+constexpr uint64_t MAX_TEMPLATE_POLICY_CANDIDATE_EVALUATIONS{128};
 
 enum class PackageResourceDimension : size_t {
     SERIALIZED_SIZE = 0,
@@ -457,6 +466,8 @@ struct PackageSelectionCandidate {
     uint64_t total_shielded_verify_units{0};
     uint64_t total_shielded_scan_units{0};
     uint64_t total_shielded_tree_update_units{0};
+    uint64_t total_template_policy_verify_units{0};
+    uint64_t total_recovery_exit_txs{0};
 };
 
 [[nodiscard]] bool UseAccountRegistryAppendRateLimit(const Consensus::Params& consensus, int32_t height)
@@ -564,6 +575,23 @@ void SetLegacySelectionScore(const T& source, PackageSelectionCandidate& candida
            below_threshold(remaining.tree_update_units, remaining.max_tree_update_units);
 }
 
+[[nodiscard]] bool IsRecoveryExitTemplateTransaction(const CTransaction& tx)
+{
+    if (!tx.HasShieldedBundle()) return false;
+    const auto family = tx.GetShieldedBundle().GetTransactionFamily();
+    return family.has_value() && *family == shielded::v2::TransactionFamily::V2_RECOVERY_EXIT;
+}
+
+[[nodiscard]] uint64_t GetTransactionTemplatePolicyVerifyUnits(const CTransaction& tx)
+{
+    if (!tx.HasShieldedBundle()) return 0;
+    uint64_t units = ::GetShieldedResourceUsage(tx.GetShieldedBundle()).verify_units;
+    if (IsRecoveryExitTemplateTransaction(tx)) {
+        units += RECOVERY_EXIT_TEMPLATE_POLICY_VERIFY_UNITS;
+    }
+    return units;
+}
+
 PackageSelectionCandidate BuildPackageSelectionCandidate(const CTxMemPool& mempool,
                                                          const CTxMemPool::setEntries& in_block,
                                                          CTxMemPool::txiter candidate_iter,
@@ -586,21 +614,59 @@ PackageSelectionCandidate BuildPackageSelectionCandidate(const CTxMemPool& mempo
     }
     candidate.entries.insert(candidate_iter);
 
+    bool has_shielded_entry{false};
     for (CTxMemPool::txiter entry : candidate.entries) {
         candidate.total_fees += entry->GetModifiedFee();
-        candidate.total_policy_size += entry->GetTxSize();
+        const bool entry_has_shielded_bundle = entry->GetTx().HasShieldedBundle();
+        has_shielded_entry = has_shielded_entry || entry_has_shielded_bundle;
+        candidate.total_policy_size += entry_has_shielded_bundle
+            ? static_cast<uint64_t>(GetShieldedRelayVirtualSize(entry->GetTx()))
+            : static_cast<uint64_t>(entry->GetTxSize());
         candidate.total_serialized_size += ::GetSerializeSize(TX_WITH_WITNESS(entry->GetTx()));
         candidate.total_weight += entry->GetTxWeight();
         candidate.total_sigops_cost += entry->GetSigOpCost();
-        const auto shielded_usage = entry->GetTx().HasShieldedBundle()
+        const auto shielded_usage = entry_has_shielded_bundle
             ? ::GetShieldedResourceUsage(entry->GetTx().GetShieldedBundle())
             : ShieldedResourceUsage{};
         candidate.total_shielded_verify_units += shielded_usage.verify_units;
         candidate.total_shielded_scan_units += shielded_usage.scan_units;
         candidate.total_shielded_tree_update_units += shielded_usage.tree_update_units;
+        candidate.total_template_policy_verify_units += GetTransactionTemplatePolicyVerifyUnits(entry->GetTx());
+        if (IsRecoveryExitTemplateTransaction(entry->GetTx())) {
+            ++candidate.total_recovery_exit_txs;
+        }
+    }
+    if (has_shielded_entry) {
+        candidate.selection_size = std::max(candidate.selection_size, candidate.total_policy_size);
     }
 
     return candidate;
+}
+
+[[nodiscard]] bool TemplatePolicyFits(uint64_t current_policy_verify_units,
+                                      uint64_t current_recovery_exit_txs,
+                                      uint64_t additional_policy_verify_units,
+                                      uint64_t additional_recovery_exit_txs)
+{
+    if (additional_policy_verify_units >
+        MAX_TEMPLATE_POLICY_VERIFY_UNITS - std::min(current_policy_verify_units, MAX_TEMPLATE_POLICY_VERIFY_UNITS)) {
+        return false;
+    }
+    if (additional_recovery_exit_txs >
+        MAX_TEMPLATE_RECOVERY_EXIT_TXS - std::min(current_recovery_exit_txs, MAX_TEMPLATE_RECOVERY_EXIT_TXS)) {
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool TemplatePolicyFits(uint64_t current_policy_verify_units,
+                                      uint64_t current_recovery_exit_txs,
+                                      const PackageSelectionCandidate& candidate)
+{
+    return TemplatePolicyFits(current_policy_verify_units,
+                              current_recovery_exit_txs,
+                              candidate.total_template_policy_verify_units,
+                              candidate.total_recovery_exit_txs);
 }
 
 [[nodiscard]] std::array<PackageResourceDimension, 4> GetScarcityPriority(const RemainingBlockResources& remaining)
@@ -780,6 +846,10 @@ void ApplyArgsManOptions(const ArgsManager& args, BlockAssembler::Options& optio
             options.nBlockMaxWeight = MAX_BLOCK_WEIGHT;
         }
     }
+    if (args.IsArgSet("-blockmaxtemplatetxs")) {
+        options.nBlockMaxTemplateTxs = static_cast<size_t>(
+            std::max<int64_t>(0, args.GetIntArg("-blockmaxtemplatetxs", DEFAULT_BLOCK_MAX_TEMPLATE_TXS)));
+    }
     if (const auto blockmintxfee{args.GetArg("-blockmintxfee")}) {
         if (const auto parsed{ParseMoney(*blockmintxfee)}) options.blockMinFeeRate = CFeeRate{*parsed};
     }
@@ -802,6 +872,10 @@ void BlockAssembler::resetBlock()
     nBlockShieldedVerifyCost = 0;
     nBlockShieldedScanUnits = 0;
     nBlockShieldedTreeUpdateUnits = 0;
+    nBlockTemplatePolicyVerifyCost = 0;
+    nBlockTemplateRecoveryExitTxs = 0;
+    nBlockTemplatePolicySkippedTxs = 0;
+    nBlockTemplatePolicyCandidateEvaluations = 0;
     nBlockShieldedAccountRegistryAppends = 0;
     m_blockShieldedPoolBalance = ShieldedPoolBalance{};
     m_baseShieldedAccountRegistryEntries = 0;
@@ -889,9 +963,17 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     m_last_block_shielded_verify_units = static_cast<int64_t>(nBlockShieldedVerifyCost);
     m_last_block_shielded_scan_units = static_cast<int64_t>(nBlockShieldedScanUnits);
     m_last_block_shielded_tree_update_units = static_cast<int64_t>(nBlockShieldedTreeUpdateUnits);
+    m_last_block_template_policy_verify_units = static_cast<int64_t>(nBlockTemplatePolicyVerifyCost);
+    m_last_block_template_recovery_exit_txs = static_cast<int64_t>(nBlockTemplateRecoveryExitTxs);
+    m_last_block_template_policy_skipped_txs = static_cast<int64_t>(nBlockTemplatePolicySkippedTxs);
+    m_last_block_template_policy_candidate_evaluations = static_cast<int64_t>(nBlockTemplatePolicyCandidateEvaluations);
     pblocktemplate->nShieldedVerifyUnits = nBlockShieldedVerifyCost;
     pblocktemplate->nShieldedScanUnits = nBlockShieldedScanUnits;
     pblocktemplate->nShieldedTreeUpdateUnits = nBlockShieldedTreeUpdateUnits;
+    pblocktemplate->nTemplatePolicyVerifyUnits = nBlockTemplatePolicyVerifyCost;
+    pblocktemplate->nTemplateRecoveryExitTxs = nBlockTemplateRecoveryExitTxs;
+    pblocktemplate->nTemplatePolicySkippedTxs = nBlockTemplatePolicySkippedTxs;
+    pblocktemplate->nTemplatePolicyCandidateEvaluations = nBlockTemplatePolicyCandidateEvaluations;
 
     // Create coinbase transaction.
     if (!CoinbaseOutputScriptSatisfiesReducedDataLimits(chainparams.GetConsensus(), m_options.coinbase_output_script)) {
@@ -902,7 +984,7 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     coinbaseTx.vin[0].prevout.SetNull();
     coinbaseTx.vout.resize(1);
     coinbaseTx.vout[0].scriptPubKey = m_options.coinbase_output_script;
-    coinbaseTx.vout[0].nValue = nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus());
+    coinbaseTx.vout[0].nValue = nFees + GetBlockSubsidyForBlock(nHeight, *pblock, pindexPrev, chainparams.GetConsensus());
     coinbaseTx.vin[0].scriptSig = CScript() << nHeight << OP_0;
     pblock->vtx[0] = MakeTransactionRef(std::move(coinbaseTx));
     pblocktemplate->vchCoinbaseCommitment = m_chainstate.m_chainman.GenerateCoinbaseCommitment(*pblock, pindexPrev);
@@ -949,7 +1031,9 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
                 LogWarning("CreateNewBlock(): retrying with an empty template after mempool-selected transactions failed block validation\n");
                 Options retry_options = m_options;
                 retry_options.use_mempool = false;
-                return BlockAssembler{m_chainstate, m_mempool, retry_options, m_node}.CreateNewBlock();
+                auto fallback_template = BlockAssembler{m_chainstate, m_mempool, retry_options, m_node}.CreateNewBlock();
+                fallback_template->m_mempool_validation_fallback = true;
+                return fallback_template;
             }
             throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s", __func__, state.ToString()));
         }
@@ -991,6 +1075,14 @@ bool BlockAssembler::TestPackage(uint64_t packageWeight, int64_t packageSigOpsCo
         return false;
     }
     return true;
+}
+
+bool BlockAssembler::TestTemplatePolicy(const CTransaction& tx) const
+{
+    return TemplatePolicyFits(nBlockTemplatePolicyVerifyCost,
+                              nBlockTemplateRecoveryExitTxs,
+                              GetTransactionTemplatePolicyVerifyUnits(tx),
+                              IsRecoveryExitTemplateTransaction(tx) ? 1 : 0);
 }
 
 static ShieldedResourceUsage GetTransactionShieldedResourceUsage(const CTransaction& tx)
@@ -1160,6 +1252,10 @@ void BlockAssembler::AddToBlock(const CTxMemPool& mempool, CTxMemPool::txiter it
     nBlockShieldedVerifyCost += shielded_usage.verify_units;
     nBlockShieldedScanUnits += shielded_usage.scan_units;
     nBlockShieldedTreeUpdateUnits += shielded_usage.tree_update_units;
+    nBlockTemplatePolicyVerifyCost += GetTransactionTemplatePolicyVerifyUnits(iter->GetTx());
+    if (IsRecoveryExitTemplateTransaction(iter->GetTx())) {
+        ++nBlockTemplateRecoveryExitTxs;
+    }
     nBlockShieldedAccountRegistryAppends += shielded_account_registry_appends;
     if (iter->GetTx().HasShieldedBundle()) {
         std::string pool_balance_reject;
@@ -1269,6 +1365,10 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
     int64_t nConsecutiveFailed = 0;
 
     while (mi != mempool.mapTx.get<ancestor_score>().end() || !mapModifiedTx.empty()) {
+        if (m_options.nBlockMaxTemplateTxs > 0 && nBlockTx >= m_options.nBlockMaxTemplateTxs) {
+            break;
+        }
+
         while (mi != mempool.mapTx.get<ancestor_score>().end()) {
             auto it = mempool.mapTx.project<0>(mi);
             assert(it != mempool.mapTx.end());
@@ -1328,6 +1428,19 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
         if (candidate_window.empty()) {
             return;
         }
+        nBlockTemplatePolicyCandidateEvaluations += candidate_window.size();
+        if (nBlockTemplatePolicyCandidateEvaluations > MAX_TEMPLATE_POLICY_CANDIDATE_EVALUATIONS) {
+            LogDebug(BCLog::MINING,
+                     "CreateNewBlock(): stopping package selection after %llu candidate evaluations "
+                     "(policy_verify_units=%llu/%llu recovery_exit_txs=%llu/%llu skipped=%llu)\n",
+                     static_cast<unsigned long long>(nBlockTemplatePolicyCandidateEvaluations),
+                     static_cast<unsigned long long>(nBlockTemplatePolicyVerifyCost),
+                     static_cast<unsigned long long>(MAX_TEMPLATE_POLICY_VERIFY_UNITS),
+                     static_cast<unsigned long long>(nBlockTemplateRecoveryExitTxs),
+                     static_cast<unsigned long long>(MAX_TEMPLATE_RECOVERY_EXIT_TXS),
+                     static_cast<unsigned long long>(nBlockTemplatePolicySkippedTxs));
+            break;
+        }
 
         RemainingBlockResources remaining_resources;
         remaining_resources.serialized_bytes =
@@ -1348,12 +1461,27 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
 
         std::optional<size_t> best_candidate_index;
         bool skipped_not_ready_shielded_candidate{false};
+        bool skipped_unusable_candidate{false};
+        bool skipped_template_policy_candidate{false};
         for (size_t i = 0; i < candidate_window.size(); ++i) {
             const auto& candidate = candidate_window[i];
             if (candidate.total_fees < m_options.blockMinFeeRate.GetFee(candidate.total_policy_size)) {
                 continue;
             }
             if (!TestPackage(candidate.total_weight, candidate.total_sigops_cost)) {
+                skipped_unusable_candidate = true;
+                continue;
+            }
+            if (m_options.nBlockMaxTemplateTxs > 0 &&
+                candidate.entries.size() > m_options.nBlockMaxTemplateTxs - nBlockTx) {
+                skipped_unusable_candidate = true;
+                continue;
+            }
+            if (!TemplatePolicyFits(nBlockTemplatePolicyVerifyCost,
+                                    nBlockTemplateRecoveryExitTxs,
+                                    candidate)) {
+                skipped_template_policy_candidate = true;
+                nBlockTemplatePolicySkippedTxs += static_cast<uint64_t>(candidate.entries.size());
                 continue;
             }
             std::vector<CTxMemPool::txiter> sorted_entries;
@@ -1378,7 +1506,7 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
         }
 
         if (!best_candidate_index.has_value()) {
-            if (skipped_not_ready_shielded_candidate) {
+            if (skipped_not_ready_shielded_candidate || skipped_unusable_candidate || skipped_template_policy_candidate) {
                 for (const auto& candidate : candidate_window) {
                     if (candidate.from_modified) {
                         mapModifiedTx.erase(candidate.iter);

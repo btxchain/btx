@@ -196,6 +196,12 @@ struct Params {
     // Monetary policy.
     CAmount nMaxMoney{21'000'000 * COIN};
     CAmount nInitialSubsidy{20 * COIN};
+    /** Height-gated empty-block economics. At and above this height,
+     * consecutive coinbase-only blocks claim a halved subsidy, up to the
+     * configured maximum number of halvings. This is deterministic from
+     * block/chain data and intentionally ignores mempool contents. */
+    int32_t nEmptyBlockSubsidyPenaltyHeight{std::numeric_limits<int32_t>::max()};
+    uint32_t nEmptyBlockSubsidyMaxHalvings{2};
 
     // Target spacing schedule.
     int64_t nPowTargetSpacingNormal{90};

@@ -38,27 +38,26 @@ enum class MatMulValidationMode {
 };
 
 //! What a node does when an incoming branch would reorg the active chain deeper
-//! than the deep-reorg threshold (-maxreorgdepthwarn, default = consensus
-//! nMaxReorgDepth).
+//! than the configured deep-reorg threshold.
 //!
-//! WARN (-parkdeepreorg=0, Nakamoto-safe opt-out): emit a loud warning +
+//! WARN (-parkdeepreorg=0, or a profile such as standard/archive): emit a loud warning +
 //!   RPC/notification and still follow the most-work chain. This buys
 //!   operators/exchanges response time WITHOUT introducing any finality
 //!   assumption, so every honest node, regardless of how it was partitioned,
 //!   still converges on the single most-work chain.
 //!
-//! PARK (default, -parkdeepreorg=1): refuse to auto-switch to the deeper branch
-//!   and stay on the current tip pending operator action, while still tracking
-//!   the branch in the block index. This protects ordinary nodes from silently
-//!   following a deep rewrite. It is still a LOCAL FINALITY assumption: see the
-//!   split-risk memo at the call site. Operators that need pure most-work
-//!   behavior during recovery can explicitly set -parkdeepreorg=0.
+//! PARK (default emergency profile, strict profile, or -parkdeepreorg=1): refuse to
+//!   auto-switch to the deeper branch and stay on the current tip pending
+//!   operator action, while still tracking the branch in the block index. This
+//!   protects ordinary nodes from silently following a deep rewrite, but it is
+//!   still a LOCAL FINALITY assumption: see the split-risk memo at the call site.
 enum class DeepReorgAction {
     WARN,
     PARK,
 };
 
 enum class ReorgProtectionProfile {
+    STANDARD,
     ARCHIVE,
     BALANCED,
     STRICT,
@@ -66,10 +65,10 @@ enum class ReorgProtectionProfile {
 };
 
 struct ReorgProtectionProfileSettings {
-    DeepReorgAction action{DeepReorgAction::PARK};
+    DeepReorgAction action{DeepReorgAction::WARN};
     uint32_t warn_depth{3};
-    uint32_t park_depth{24};
-    uint32_t finality_depth{24};
+    uint32_t park_depth{std::numeric_limits<uint32_t>::max()};
+    uint32_t finality_depth{12};
 };
 
 inline constexpr uint32_t REORG_PROTECTION_DEPTH_DISABLED{std::numeric_limits<uint32_t>::max()};
@@ -77,6 +76,13 @@ inline constexpr uint32_t REORG_PROTECTION_DEPTH_DISABLED{std::numeric_limits<ui
 inline ReorgProtectionProfileSettings GetReorgProtectionProfileSettings(ReorgProtectionProfile profile)
 {
     switch (profile) {
+    case ReorgProtectionProfile::STANDARD:
+        return {
+            .action = DeepReorgAction::WARN,
+            .warn_depth = 3,
+            .park_depth = 12,
+            .finality_depth = 12,
+        };
     case ReorgProtectionProfile::ARCHIVE:
         return {
             .action = DeepReorgAction::WARN,
@@ -112,6 +118,7 @@ inline ReorgProtectionProfileSettings GetReorgProtectionProfileSettings(ReorgPro
 inline const char* ReorgProtectionProfileName(ReorgProtectionProfile profile)
 {
     switch (profile) {
+    case ReorgProtectionProfile::STANDARD: return "standard";
     case ReorgProtectionProfile::ARCHIVE: return "archive";
     case ReorgProtectionProfile::BALANCED: return "balanced";
     case ReorgProtectionProfile::STRICT: return "strict";
@@ -159,12 +166,11 @@ struct ChainstateManagerOpts {
     //! (-allowunpinnedshieldedsnapshot=1) only for explicitly trusted repair/bootstrap material.
     bool allow_unpinned_shielded_snapshot{DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT};
     //! Action taken when a candidate branch would reorg deeper than the
-    //! deep-reorg threshold. Default PARK fails closed for ordinary nodes;
-    //! -parkdeepreorg=0 is the explicit pure-Nakamoto opt-out.
+    //! deep-reorg threshold. BTX's emergency default parks deep private releases
+    //! instead of silently following them.
     DeepReorgAction deep_reorg_action{DeepReorgAction::PARK};
-    //! Named reorg/finality policy. EMERGENCY is the default during recovery:
-    //! warn early, park before deep rewrites, and report a practical local
-    //! finality depth without pretending it is consensus finality.
+    //! Named reorg/finality policy. EMERGENCY is the default while the network
+    //! is fragmented: warn at shallow depth and park deeper private releases.
     ReorgProtectionProfile reorg_protection_profile{ReorgProtectionProfile::EMERGENCY};
     //! Operator override for the deep-reorg threshold, in blocks. When unset the
     //! active reorg protection profile controls the warning depth.

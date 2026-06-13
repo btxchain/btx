@@ -294,6 +294,7 @@ BASE_SCRIPTS = [
     'wallet_watchonly.py --usecli --legacy-wallet',
     'wallet_reindex.py --legacy-wallet',
     'wallet_reindex.py --descriptors',
+    'wallet_reorg_settlement.py --descriptors',
     'wallet_reorgsrestore.py',
     'interface_http.py',
     'interface_rpc.py',

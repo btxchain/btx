@@ -26,13 +26,20 @@ struct MemPoolOptions;
 
 /** Default for -blockmaxsize, which controls the maximum size of block the mining code will create **/
 static const unsigned int DEFAULT_BLOCK_MAX_SIZE = 24000000;
-/** Default for -blockprioritysize, maximum space for zero/low-fee transactions **/
-static const unsigned int DEFAULT_BLOCK_PRIORITY_SIZE = 100000;
+/** Default for -blockprioritysize, maximum space for zero/low-fee transactions.
+ * Priority mining scans the full mempool before fee/package selection, so keep
+ * it opt-in during the v0.32.9 emergency template-performance profile. **/
+static const unsigned int DEFAULT_BLOCK_PRIORITY_SIZE = 0;
 /** Minimum priority for transactions to be accepted into the priority area **/
 static const double MINIMUM_TX_PRIORITY = COIN * 144 / 250;
 /** Default for -blockmaxweight, which controls the range of block weights the mining code will create.
  * Raised to use the full consensus-allowed weight (24 MWU) for maximum throughput. **/
 static constexpr unsigned int DEFAULT_BLOCK_MAX_WEIGHT{MAX_BLOCK_WEIGHT};
+/** Default transaction-count cap for block templates created by mining code.
+ * BTX transactions can be CPU-expensive to validate; bounding template work
+ * gives miners a fast non-empty alternative to coinbase-only templates during
+ * mempool pressure. Set -blockmaxtemplatetxs=0 to restore unlimited selection. */
+static constexpr unsigned int DEFAULT_BLOCK_MAX_TEMPLATE_TXS{25};
 /** Default for BlockCreateOptions.block_reserved_size **/
 static constexpr unsigned int DEFAULT_BLOCK_RESERVED_SIZE{1000};
 /** Default for -blockreservedweight **/
@@ -119,6 +126,11 @@ static const std::string DEFAULT_SPKREUSE{"allow"};
 static constexpr unsigned int DEFAULT_MIN_RELAY_TX_FEE{1000};
 /** Additional absolute fee premium required for shielded transactions (sat). */
 static constexpr CAmount MIN_SHIELDED_RELAY_FEE_PREMIUM{5'000};
+/** Policy-only verification units charged to recovery-exit transactions for
+ * relay and wallet fee estimation. Recovery exits do not carry a shielded
+ * proof envelope, but their membership/ownership checks are CPU-expensive.
+ * This does not affect consensus block validity. */
+static constexpr uint64_t RECOVERY_EXIT_POLICY_VERIFY_UNITS{16'000};
 /** Default for -limitancestorcount, max number of in-mempool ancestors.
  * Raised from 25 to 100 to accommodate PQ multisig migration chains where
  * change outputs feed subsequent transactions before blocks are mined. */
@@ -262,6 +274,8 @@ std::pair<size_t, size_t> DatacarrierBytes(const CTransaction& tx, const CCoinsV
 /** Policy proxy weight for shielded transactions after dominant-resource normalization.
  * Does not include any view-dependent datacarrier surcharges. */
 int64_t GetShieldedPolicyWeight(const CTransaction& tx);
+/** Policy virtual size used for shielded relay/mining fee checks. */
+int64_t GetShieldedRelayVirtualSize(const CTransaction& tx);
 
 int32_t CalculateExtraTxWeight(const CTransaction& tx, const CCoinsViewCache& view, const unsigned int weight_per_data_byte);
 

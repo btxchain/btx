@@ -21,7 +21,12 @@ def get_coinbase_reward(node, height=1):
 
 
 def assert_transparent_balance_views(wallet, expected_trusted, *, expected_untrusted=Decimal("0"), expected_immature=Decimal("0"), expected_z_total=None):
-    mine_balances = wallet.getbalances()["mine"]
+    balances = wallet.getbalances()
+    assert_equal(balances["wallet_reorg_safety_depth"], 12)
+    assert_equal(balances["wallet_reorg_hold_blocks"], 12)
+    assert_equal(balances["wallet_reorg_hold_seconds"], 3600)
+    mine_balances = balances["mine"]
+    assert "settlement_safe" in mine_balances
     assert_equal(mine_balances["trusted"], expected_trusted)
     assert_equal(mine_balances["untrusted_pending"], expected_untrusted)
     assert_equal(mine_balances["immature"], expected_immature)
@@ -39,6 +44,24 @@ def assert_transparent_balance_views(wallet, expected_trusted, *, expected_untru
     assert_equal(Decimal(str(totals["transparent"])), expected_z_total)
     assert_equal(Decimal(str(totals["shielded"])), Decimal("0"))
     assert_equal(Decimal(str(totals["total"])), expected_z_total)
+
+
+def legacy_balance_shape(balances):
+    balances = dict(balances)
+    balances.pop("lastprocessedblock", None)
+    balances.pop("wallet_reorg_safety_depth", None)
+    balances.pop("wallet_reorg_hold_blocks", None)
+    balances.pop("wallet_reorg_hold_seconds", None)
+    balances.pop("settlement_reorg_hold_active", None)
+    balances.pop("settlement_reorg_hold_until_height", None)
+    balances.pop("settlement_reorg_hold_remaining_blocks", None)
+    balances.pop("settlement_reorg_hold_until_time", None)
+    balances.pop("settlement_reorg_hold_remaining_seconds", None)
+    for bucket in ("mine", "watchonly"):
+        if bucket in balances:
+            balances[bucket] = dict(balances[bucket])
+            balances[bucket].pop("settlement_safe", None)
+    return balances
 
 
 def create_transactions(node, address, amt, fees):
@@ -214,11 +237,8 @@ class WalletTest(BitcoinTestFramework):
                                                  'untrusted_pending': change_node1}}  # Doesn't include output of node 0's send since it was spent
             if self.options.descriptors:
                 del expected_balances_0["watchonly"]
-            balances_0 = self.nodes[0].getbalances()
-            balances_1 = self.nodes[1].getbalances()
-            # remove lastprocessedblock keys (they will be tested later)
-            del balances_0['lastprocessedblock']
-            del balances_1['lastprocessedblock']
+            balances_0 = legacy_balance_shape(self.nodes[0].getbalances())
+            balances_1 = legacy_balance_shape(self.nodes[1].getbalances())
             assert_equal(balances_0, expected_balances_0)
             assert_equal(balances_1, expected_balances_1)
             assert_transparent_balance_views(self.nodes[0], change_node0, expected_untrusted=send_amount_1, expected_z_total=Decimal("0"))

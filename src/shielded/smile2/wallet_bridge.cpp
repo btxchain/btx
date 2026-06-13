@@ -380,7 +380,9 @@ std::optional<SmileProofResult> CreateSmileProof(
     if (rng_entropy.size() < 32) return fail("insufficient rng entropy");
     if (ring_members.empty()) return fail("empty ring members");
     if (ring_members.size() > NUM_NTT_SLOTS) return fail("ring too large");
-    if (public_fee < 0 || public_fee >= Q) return fail("public fee out of range");
+    if (public_fee < 0 || !EncodeAmountToSmileAmountPoly(public_fee).has_value()) {
+        return fail("public fee out of range");
+    }
     if (!std::all_of(ring_members.begin(), ring_members.end(), [](const SmileRingMember& member) {
             return member.IsValid();
         })) {

@@ -159,9 +159,9 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_rejection_prunes_candidate_branch,
     ChainstateManager& chainman = *Assert(m_node.chainman);
     Chainstate& chainstate = chainman.ActiveChainstate();
 
-    // PARK is the default action (-parkdeepreorg=1), so a deep reorg is refused.
-    // The explicit WARN opt-out (follow most-work) is covered by the companion
-    // test chainstate_deep_reorg_warn_follows_most_work below.
+    // PARK is an explicit local-finality action, so a deep reorg is refused
+    // only when the operator opts into parking. The default WARN behavior is
+    // covered by the companion default/follow-most-work test below.
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
     auto& deep_reorg_action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
     auto& max_reorg_depth_park = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
@@ -273,16 +273,17 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_rejection_prunes_candidate_branch,
     }
 }
 
-//! Explicit WARN opt-out deep-reorg handling must follow the most-work chain --
-//! a deep reorg is NOT refused, so the node stays Nakamoto-consistent and cannot
-//! be split. The deep reorg must still be loudly surfaced as an operator warning.
+//! Explicit WARN deep-reorg handling must follow the most-work chain -- a deep
+//! reorg is NOT refused, so the node stays Nakamoto-consistent when an operator
+//! deliberately selects a warn-only profile. The deep reorg must still be loudly
+//! surfaced as an operator warning.
 //!
 //! This drives a REAL reorg (real blocks, so disconnect/connect succeed): we
 //! invalidate a block a few back to fork the active chain, mine a shorter
 //! competing branch across that fork, then reconsider the heavier original
 //! branch. With the threshold lowered so the cross-fork switch counts as "deep",
 //! WARN must raise the operator alarm and still adopt the most-work tip.
-BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_warn_follows_most_work, TestChain100Setup)
+BOOST_FIXTURE_TEST_CASE(chainstate_warn_profile_deep_reorg_follows_most_work, TestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
     Chainstate& chainstate = chainman.ActiveChainstate();
@@ -296,8 +297,8 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_warn_follows_most_work, TestChain1
     {
         Consensus::Params& consensus;
         int32_t reorg_start_height;
-        kernel::DeepReorgAction& action;
-        kernel::DeepReorgAction saved_action;
+        kernel::DeepReorgAction& deep_reorg_action;
+        kernel::DeepReorgAction saved_deep_reorg_action;
         std::optional<uint32_t>& warn_depth;
         std::optional<uint32_t> saved_warn_depth;
         std::optional<uint32_t>& park_depth;
@@ -305,7 +306,7 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_warn_follows_most_work, TestChain1
         ~RestoreParams()
         {
             consensus.nReorgProtectionStartHeight = reorg_start_height;
-            action = saved_action;
+            deep_reorg_action = saved_deep_reorg_action;
             warn_depth = saved_warn_depth;
             park_depth = saved_park_depth;
         }
@@ -313,10 +314,11 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_warn_follows_most_work, TestChain1
               deep_reorg_action, deep_reorg_action,
               max_reorg_depth_warn, max_reorg_depth_warn,
               max_reorg_depth_park, max_reorg_depth_park};
+    deep_reorg_action = kernel::DeepReorgAction::WARN;
+    BOOST_REQUIRE(chainman.m_options.deep_reorg_action == kernel::DeepReorgAction::WARN);
 
     // Any cross-fork switch deeper than one block trips the warning; tip is already >= 10.
     consensus.nReorgProtectionStartHeight = 10;
-    deep_reorg_action = kernel::DeepReorgAction::WARN; // explicit -parkdeepreorg=0 behavior
     max_reorg_depth_warn = 1;
     max_reorg_depth_park = 1;
 

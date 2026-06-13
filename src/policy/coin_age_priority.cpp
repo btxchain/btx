@@ -148,9 +148,13 @@ bool BlockAssembler::isStillDependent(const CTxMemPool& mempool, CTxMemPool::txi
 bool BlockAssembler::TestForBlock(const CTxMemPool& mempool, CTxMemPool::txiter iter)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
-    uint64_t packageSize = iter->GetSizeWithAncestors();
-    int64_t packageSigOps = iter->GetSigOpCostWithAncestors();
-    if (!TestPackage(packageSize, packageSigOps)) {
+    if (m_options.nBlockMaxTemplateTxs > 0 && nBlockTx >= m_options.nBlockMaxTemplateTxs) {
+        blockFinished = true;
+        return false;
+    }
+    uint64_t packageWeight = iter->GetTxWeight();
+    int64_t packageSigOps = iter->GetSigOpCost();
+    if (!TestPackage(packageWeight, packageSigOps)) {
         // If the block is so close to full that no more txs will fit
         // or if we've tried more than 50 times to fill remaining space
         // then flag that the block is finished
@@ -163,6 +167,10 @@ bool BlockAssembler::TestForBlock(const CTxMemPool& mempool, CTxMemPool::txiter 
         if (nBlockWeight > m_options.nBlockMaxWeight - 4000) {
             ++lastFewTxs;
         }
+        return false;
+    }
+    if (!TestTemplatePolicy(iter->GetTx())) {
+        ++nBlockTemplatePolicySkippedTxs;
         return false;
     }
 

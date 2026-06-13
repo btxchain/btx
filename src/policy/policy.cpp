@@ -36,12 +36,6 @@ unsigned int g_script_size_policy_limit{DEFAULT_SCRIPT_SIZE_POLICY_LIMIT};
 
 namespace {
 
-// Recovery-exit bundles have no shielded proof envelope, so their consensus
-// resource usage remains zero. Relay/mining policy still needs to account for
-// the expensive ownership and membership checks so recovery waves are not
-// treated as free mempool work.
-constexpr uint64_t RECOVERY_EXIT_POLICY_VERIFY_UNITS{100};
-
 [[nodiscard]] bool IsRecoveryExitPolicyTransaction(const CTransaction& tx)
 {
     if (!tx.HasShieldedBundle()) return false;
@@ -1258,4 +1252,9 @@ int64_t GetShieldedPolicyWeight(const CTransaction& tx)
         ScaleShieldedResourceToWeight(usage.tree_update_units, Consensus::DEFAULT_MAX_BLOCK_SHIELDED_TREE_UPDATE_UNITS);
 
     return std::max<int64_t>({1, serialized_weight, verify_weight, scan_weight, tree_weight});
+}
+
+int64_t GetShieldedRelayVirtualSize(const CTransaction& tx)
+{
+    return GetVirtualTransactionSize(GetShieldedPolicyWeight(tx), 0, 0);
 }

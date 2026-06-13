@@ -128,6 +128,13 @@ const std::vector<std::string> CHECKLEVEL_DOC {
 SpkReuseModes SpkReuseMode;
 
 namespace {
+std::atomic<uint64_t> g_reorg_protection_observed_reorgs{0};
+std::atomic<uint32_t> g_reorg_protection_deepest_observed_reorg_depth{0};
+std::atomic<uint32_t> g_reorg_protection_last_observed_reorg_depth{0};
+std::atomic<int32_t> g_reorg_protection_last_observed_tip_height{0};
+std::atomic<int32_t> g_reorg_protection_last_observed_fork_height{0};
+std::atomic<int32_t> g_reorg_protection_last_observed_candidate_height{0};
+std::atomic<int64_t> g_reorg_protection_last_observed_unix{0};
 std::atomic<uint64_t> g_reorg_protection_rejected_reorgs{0};
 std::atomic<uint32_t> g_reorg_protection_deepest_rejected_reorg_depth{0};
 std::atomic<uint32_t> g_reorg_protection_last_rejected_reorg_depth{0};
@@ -787,6 +794,13 @@ struct ShieldedStateDirectoryBackup {
 ReorgProtectionRuntimeStats ProbeReorgProtectionRuntimeStats()
 {
     return ReorgProtectionRuntimeStats{
+        .observed_reorgs = g_reorg_protection_observed_reorgs.load(std::memory_order_relaxed),
+        .deepest_observed_reorg_depth = g_reorg_protection_deepest_observed_reorg_depth.load(std::memory_order_relaxed),
+        .last_observed_reorg_depth = g_reorg_protection_last_observed_reorg_depth.load(std::memory_order_relaxed),
+        .last_observed_tip_height = g_reorg_protection_last_observed_tip_height.load(std::memory_order_relaxed),
+        .last_observed_fork_height = g_reorg_protection_last_observed_fork_height.load(std::memory_order_relaxed),
+        .last_observed_candidate_height = g_reorg_protection_last_observed_candidate_height.load(std::memory_order_relaxed),
+        .last_observed_unix = g_reorg_protection_last_observed_unix.load(std::memory_order_relaxed),
         .rejected_reorgs = g_reorg_protection_rejected_reorgs.load(std::memory_order_relaxed),
         .deepest_rejected_reorg_depth = g_reorg_protection_deepest_rejected_reorg_depth.load(std::memory_order_relaxed),
         .last_rejected_reorg_depth = g_reorg_protection_last_rejected_reorg_depth.load(std::memory_order_relaxed),
@@ -800,6 +814,13 @@ ReorgProtectionRuntimeStats ProbeReorgProtectionRuntimeStats()
 
 void ResetReorgProtectionRuntimeStats()
 {
+    g_reorg_protection_observed_reorgs.store(0, std::memory_order_relaxed);
+    g_reorg_protection_deepest_observed_reorg_depth.store(0, std::memory_order_relaxed);
+    g_reorg_protection_last_observed_reorg_depth.store(0, std::memory_order_relaxed);
+    g_reorg_protection_last_observed_tip_height.store(0, std::memory_order_relaxed);
+    g_reorg_protection_last_observed_fork_height.store(0, std::memory_order_relaxed);
+    g_reorg_protection_last_observed_candidate_height.store(0, std::memory_order_relaxed);
+    g_reorg_protection_last_observed_unix.store(0, std::memory_order_relaxed);
     g_reorg_protection_rejected_reorgs.store(0, std::memory_order_relaxed);
     g_reorg_protection_deepest_rejected_reorg_depth.store(0, std::memory_order_relaxed);
     g_reorg_protection_last_rejected_reorg_depth.store(0, std::memory_order_relaxed);
@@ -808,6 +829,30 @@ void ResetReorgProtectionRuntimeStats()
     g_reorg_protection_last_rejected_fork_height.store(0, std::memory_order_relaxed);
     g_reorg_protection_last_rejected_candidate_height.store(0, std::memory_order_relaxed);
     g_reorg_protection_last_rejected_unix.store(0, std::memory_order_relaxed);
+}
+
+void RecordObservedReorgDepth(
+    const uint32_t reorg_depth,
+    const int32_t old_tip_height,
+    const int32_t fork_height,
+    const int32_t candidate_height)
+{
+    g_reorg_protection_observed_reorgs.fetch_add(1, std::memory_order_relaxed);
+
+    uint32_t deepest_seen = g_reorg_protection_deepest_observed_reorg_depth.load(std::memory_order_relaxed);
+    while (reorg_depth > deepest_seen &&
+           !g_reorg_protection_deepest_observed_reorg_depth.compare_exchange_weak(
+               deepest_seen,
+               reorg_depth,
+               std::memory_order_relaxed,
+               std::memory_order_relaxed)) {
+    }
+
+    g_reorg_protection_last_observed_reorg_depth.store(reorg_depth, std::memory_order_relaxed);
+    g_reorg_protection_last_observed_tip_height.store(old_tip_height, std::memory_order_relaxed);
+    g_reorg_protection_last_observed_fork_height.store(fork_height, std::memory_order_relaxed);
+    g_reorg_protection_last_observed_candidate_height.store(candidate_height, std::memory_order_relaxed);
+    g_reorg_protection_last_observed_unix.store(GetTime(), std::memory_order_relaxed);
 }
 
 void RecordRejectedReorgDepth(
@@ -2797,6 +2842,30 @@ int NextBlockHeightOrLimit(int current_height)
         : std::numeric_limits<int>::max();
 }
 
+bool CrossesShieldedMempoolHeightGate(const Consensus::Params& consensus,
+                                      int32_t previous_next_block_height,
+                                      int32_t current_next_block_height)
+{
+    const auto crosses = [&](int32_t gate_height) {
+        return gate_height != std::numeric_limits<int32_t>::max() &&
+               previous_next_block_height < gate_height &&
+               current_next_block_height >= gate_height;
+    };
+
+    return crosses(consensus.nShieldedTxBindingActivationHeight) ||
+           crosses(consensus.nShieldedBridgeTagActivationHeight) ||
+           crosses(consensus.nShieldedSmileRiceCodecDisableHeight) ||
+           crosses(consensus.nShieldedMatRiCTDisableHeight) ||
+           crosses(consensus.nShieldedSpendPathRecoveryActivationHeight) ||
+           crosses(consensus.nShieldedC002ActivationHeight) ||
+           crosses(consensus.nShieldedPQ128UpgradeHeight) ||
+           crosses(consensus.nShieldedPoolCreditDisableHeight) ||
+           crosses(consensus.nShieldedSunsetHeight) ||
+           crosses(consensus.nShieldedDirectSendPublicFlowDisableHeight) ||
+           crosses(consensus.nShieldedRecoveryExitActivationHeight) ||
+           crosses(consensus.nShieldedUnshieldVelocityActivationHeight);
+}
+
 constexpr int32_t MLDSA_EMERGENCY_RELAY_WINDOW_BLOCKS{960};
 
 /**
@@ -4411,7 +4480,8 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // method of ensuring the tx remains bumped. For example, the fee-bumping child could disappear
     // due to a replacement.
     // The only exception is TRUC transactions.
-    const CAmount min_relay_fee = m_pool.m_opts.min_relay_feerate.GetFee(ws.m_vsize);
+    const int64_t relay_policy_vsize = tx.HasShieldedBundle() ? GetShieldedRelayVirtualSize(tx) : ws.m_vsize;
+    const CAmount min_relay_fee = m_pool.m_opts.min_relay_feerate.GetFee(relay_policy_vsize);
     if ((ws.m_ptx->version != TRUC_VERSION || m_pool.m_opts.truc_policy != TRUCPolicy::Enforce) && ws.m_modified_fees < min_relay_fee && !args.m_ignore_rejects.count(rejectmsg_lowfee_relay)) {
         // Even though this is a fee-related failure, this result is TX_MEMPOOL_POLICY, not
         // TX_RECONSIDERABLE, because it cannot be bypassed using package validation.
@@ -4434,7 +4504,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // No individual transactions are allowed below the mempool min feerate except from disconnected
     // blocks and transactions in a package. Package transactions will be checked using package
     // feerate later.
-    if (!args.m_package_feerates && !CheckFeeRate(ws.m_vsize, ws.m_modified_fees, state, args.m_ignore_rejects)) return false;
+    if (!args.m_package_feerates && !CheckFeeRate(relay_policy_vsize, ws.m_modified_fees, state, args.m_ignore_rejects)) return false;
 
     if (tx.HasShieldedBundle()) {
         const Consensus::Params& consensus = m_active_chainstate.m_chainman.GetConsensus();
@@ -5671,6 +5741,26 @@ CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
     CAmount nSubsidy = consensusParams.nInitialSubsidy;
     nSubsidy >>= halvings;
     return nSubsidy;
+}
+
+CAmount GetBlockSubsidyForBlock(int nHeight, const CBlock& block, const CBlockIndex* pindexPrev, const Consensus::Params& consensusParams)
+{
+    const CAmount base_subsidy{GetBlockSubsidy(nHeight, consensusParams)};
+    if (nHeight < consensusParams.nEmptyBlockSubsidyPenaltyHeight || block.vtx.size() != 1 ||
+        base_subsidy <= 0 || consensusParams.nEmptyBlockSubsidyMaxHalvings == 0) {
+        return base_subsidy;
+    }
+
+    uint32_t consecutive_empty_ancestors{0};
+    for (const CBlockIndex* cursor = pindexPrev;
+         cursor != nullptr && cursor->nTx == 1 &&
+         consecutive_empty_ancestors + 1 < consensusParams.nEmptyBlockSubsidyMaxHalvings;
+         cursor = cursor->pprev) {
+        ++consecutive_empty_ancestors;
+    }
+
+    const uint32_t penalty_halvings{std::min<uint32_t>(consecutive_empty_ancestors + 1, consensusParams.nEmptyBlockSubsidyMaxHalvings)};
+    return base_subsidy >> penalty_halvings;
 }
 
 CoinsViews::CoinsViews(DBParams db_params, CoinsViewOptions options)
@@ -7406,7 +7496,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
              Ticks<SecondsDouble>(m_chainman.time_connect),
              Ticks<MillisecondsDouble>(m_chainman.time_connect) / m_chainman.num_blocks_total);
 
-    CAmount blockReward = nFees + GetBlockSubsidy(pindex->nHeight, params.GetConsensus());
+    CAmount blockReward = nFees + GetBlockSubsidyForBlock(pindex->nHeight, block, pindex->pprev, params.GetConsensus());
     if (block.vtx[0]->GetValueOut() > blockReward && state.IsValid()) {
         state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-amount",
                       strprintf("coinbase pays too much (actual=%d vs limit=%d)", block.vtx[0]->GetValueOut(), blockReward));
@@ -8191,6 +8281,13 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                                                m_chainman,
                                                this,
                                                blockConnecting.vtx);
+        const int32_t previous_next_block_height{pindexNew->nHeight};
+        const int32_t current_next_block_height{NextBlockHeightOrLimit(pindexNew->nHeight)};
+        if (CrossesShieldedMempoolHeightGate(m_chainman.GetConsensus(),
+                                             previous_next_block_height,
+                                             current_next_block_height)) {
+            RemoveStaleShieldedAnchorMempoolTransactions(*m_mempool, m_chain, m_chainman, this);
+        }
     }
 
     if (m_mempool) {
@@ -8331,7 +8428,9 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
     const Consensus::Params& consensus_params = m_chainman.GetConsensus();
 
     // ---------------------------------------------------------------------
-    // Deep-reorg defense (issue: "no reorg-depth limit"). PER-NODE policy only.
+    // Deep-reorg defense (issue: "no reorg-depth limit"). PER-NODE fork-choice
+    // policy only; parking does not make the candidate block intrinsically
+    // invalid for nodes configured with a different finality profile.
     //
     // SAFETY DESIGN. Bitcoin/Nakamoto consensus deliberately has NO maximum
     // reorg depth: the single rule "follow the most-work valid chain" is what
@@ -8359,16 +8458,16 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
     // What we do instead, gated on operator policy (m_chainman.m_options):
     //   - Warn early when a branch would rewrite more than the profile warning
     //     depth. This gives operators and mining infrastructure fast visibility.
-    //   - Park deeper branches when the profile parking depth is crossed. This
-    //     is local finality, not consensus, but it prevents ordinary nodes from
-    //     silently following a large rewrite during recovery periods.
-    //   - Recovery/archive operators can use the archive profile or
-    //     -parkdeepreorg=0 to keep pure most-work behavior while retaining
-    //     alarms.
+    //   - In the current emergency profile, park deeper branches by default so
+    //     nodes stop silently following late private releases.
+    //   - Operators can still select standard/archive profiles to follow most
+    //     work after warning when liveness and automatic convergence are more
+    //     important than local finality.
     //
     // Profiles are explicit because one overloaded "max reorg" value is too
-    // crude for a fragmented network: mining needs early warning, wallets need
-    // practical local-finality depth, and archive nodes need convergence knobs.
+    // crude for a fragmented network: mining needs early warning, wallets and
+    // services need settlement confirmation depth, and archive nodes need
+    // convergence knobs.
     // The guard is armed only once the tip has reached
     // nReorgProtectionStartHeight so early/regtest chains are unaffected.
     // ---------------------------------------------------------------------
@@ -8434,6 +8533,13 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                 fInvalidFound = true;
                 return true;
             }
+        }
+        if (reorg_depth > 0) {
+            RecordObservedReorgDepth(
+                static_cast<uint32_t>(reorg_depth),
+                pindexOldTip->nHeight,
+                pindexFork->nHeight,
+                pindexMostWork->nHeight);
         }
     }
 

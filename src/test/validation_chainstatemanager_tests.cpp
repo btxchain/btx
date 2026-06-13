@@ -3826,10 +3826,17 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     const auto default_reorg_opts = get_valid_opts({});
     BOOST_CHECK(default_reorg_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::EMERGENCY);
     BOOST_CHECK(default_reorg_opts.deep_reorg_action == kernel::DeepReorgAction::PARK);
-    const auto emergency_profile = kernel::GetReorgProtectionProfileSettings(default_reorg_opts.reorg_protection_profile);
-    BOOST_CHECK_EQUAL(emergency_profile.warn_depth, 3U);
-    BOOST_CHECK_EQUAL(emergency_profile.park_depth, 12U);
-    BOOST_CHECK_EQUAL(emergency_profile.finality_depth, 12U);
+    const auto standard_profile = kernel::GetReorgProtectionProfileSettings(default_reorg_opts.reorg_protection_profile);
+    BOOST_CHECK_EQUAL(standard_profile.warn_depth, 3U);
+    BOOST_CHECK_EQUAL(standard_profile.park_depth, 12U);
+    BOOST_CHECK_EQUAL(standard_profile.finality_depth, 12U);
+
+    const auto standard_opts = get_valid_opts({"-reorgprotectionprofile=standard"});
+    BOOST_CHECK(standard_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::STANDARD);
+    BOOST_CHECK(standard_opts.deep_reorg_action == kernel::DeepReorgAction::WARN);
+    const auto miner_opts = get_valid_opts({"-reorgprotectionprofile=MINER"});
+    BOOST_CHECK(miner_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::STANDARD);
+    BOOST_CHECK(miner_opts.deep_reorg_action == kernel::DeepReorgAction::WARN);
 
     const auto archive_opts = get_valid_opts({"-reorgprotectionprofile=archive"});
     BOOST_CHECK(archive_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::ARCHIVE);
@@ -3854,6 +3861,14 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_CHECK_EQUAL(strict_profile.warn_depth, 3U);
     BOOST_CHECK_EQUAL(strict_profile.park_depth, 12U);
     BOOST_CHECK_EQUAL(strict_profile.finality_depth, 12U);
+
+    const auto emergency_opts = get_valid_opts({"-reorgprotectionprofile=emergency"});
+    BOOST_CHECK(emergency_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::EMERGENCY);
+    BOOST_CHECK(emergency_opts.deep_reorg_action == kernel::DeepReorgAction::PARK);
+    const auto emergency_profile = kernel::GetReorgProtectionProfileSettings(emergency_opts.reorg_protection_profile);
+    BOOST_CHECK_EQUAL(emergency_profile.warn_depth, 3U);
+    BOOST_CHECK_EQUAL(emergency_profile.park_depth, 12U);
+    BOOST_CHECK_EQUAL(emergency_profile.finality_depth, 12U);
 
     BOOST_CHECK(get_valid_opts({"-reorgprotectionprofile=archive", "-parkdeepreorg=1"}).deep_reorg_action == kernel::DeepReorgAction::PARK);
     BOOST_CHECK(get_valid_opts({"-parkdeepreorg=1"}).deep_reorg_action == kernel::DeepReorgAction::PARK);

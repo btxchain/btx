@@ -1139,6 +1139,7 @@ static UniValue BuildReorgProtectionProfile(const ChainstateManager& chainman) E
          park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED) &&
         consensus.nReorgProtectionStartHeight != std::numeric_limits<int32_t>::max();
     const bool park = cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK;
+    const bool parking_enabled = park && park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED;
     const auto stats = ProbeReorgProtectionRuntimeStats();
 
     UniValue obj(UniValue::VOBJ);
@@ -1146,6 +1147,8 @@ static UniValue BuildReorgProtectionProfile(const ChainstateManager& chainman) E
     obj.pushKV("active", enabled && current_tip_height >= consensus.nReorgProtectionStartHeight);
     obj.pushKV("profile", kernel::ReorgProtectionProfileName(cm_opts.reorg_protection_profile));
     obj.pushKV("action", park ? "park" : "warn");
+    obj.pushKV("parking_enabled", enabled && parking_enabled);
+    obj.pushKV("follows_most_work", !(enabled && parking_enabled));
     obj.pushKV("current_tip_height", current_tip_height);
     obj.pushKV("start_height", enabled ? consensus.nReorgProtectionStartHeight : -1);
     obj.pushKV("warn_depth",
@@ -1153,7 +1156,7 @@ static UniValue BuildReorgProtectionProfile(const ChainstateManager& chainman) E
                    ? static_cast<int64_t>(warn_depth)
                    : 0);
     obj.pushKV("park_depth",
-               enabled && park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED
+               enabled && parking_enabled
                    ? static_cast<int64_t>(park_depth)
                    : 0);
     obj.pushKV("local_finality_depth",
@@ -1172,6 +1175,14 @@ static UniValue BuildReorgProtectionProfile(const ChainstateManager& chainman) E
                consensus.nMaxReorgDepth != std::numeric_limits<uint32_t>::max()
                    ? static_cast<int64_t>(consensus.nMaxReorgDepth)
                    : 0);
+    obj.pushKV("observed_reorgs", stats.observed_reorgs);
+    obj.pushKV("deepest_observed_reorg_depth", static_cast<int64_t>(stats.deepest_observed_reorg_depth));
+    obj.pushKV("last_observed_reorg_depth", static_cast<int64_t>(stats.last_observed_reorg_depth));
+    obj.pushKV("last_observed_tip_height", stats.last_observed_tip_height);
+    obj.pushKV("last_observed_fork_height", stats.last_observed_fork_height);
+    obj.pushKV("last_observed_candidate_height", stats.last_observed_candidate_height);
+    obj.pushKV("last_observed_unix", stats.last_observed_unix);
+    obj.pushKV("deep_reorg_events", stats.rejected_reorgs);
     obj.pushKV("rejected_reorgs", stats.rejected_reorgs);
     obj.pushKV("deepest_rejected_reorg_depth", static_cast<int64_t>(stats.deepest_rejected_reorg_depth));
     obj.pushKV("last_rejected_reorg_depth", static_cast<int64_t>(stats.last_rejected_reorg_depth));
@@ -4983,6 +4994,10 @@ static RPCHelpMan getmininginfo()
                         {RPCResult::Type::NUM, "currentblockshieldedverifyunits", /*optional=*/true, "The shielded verification units in the last assembled block template (only present if a block was ever assembled)"},
                         {RPCResult::Type::NUM, "currentblockshieldedscanunits", /*optional=*/true, "The shielded scan units in the last assembled block template (only present if a block was ever assembled)"},
                         {RPCResult::Type::NUM, "currentblockshieldedtreeupdateunits", /*optional=*/true, "The shielded tree-update units in the last assembled block template (only present if a block was ever assembled)"},
+                        {RPCResult::Type::NUM, "currentblocktemplatepolicyverifyunits", /*optional=*/true, "The mining-policy CPU verify units in the last assembled block template (only present if a block was ever assembled)"},
+                        {RPCResult::Type::NUM, "currentblocktemplaterecoveryexittxs", /*optional=*/true, "The recovery-exit transactions selected into the last assembled block template (only present if a block was ever assembled)"},
+                        {RPCResult::Type::NUM, "currentblocktemplatepolicyskippedtxs", /*optional=*/true, "The candidate transactions skipped by mining-policy CPU limits in the last assembled block template (only present if a block was ever assembled)"},
+                        {RPCResult::Type::NUM, "currentblocktemplatepolicycandidateevaluations", /*optional=*/true, "The candidate packages evaluated while assembling the last block template (only present if a block was ever assembled)"},
                         {RPCResult::Type::STR_HEX, "bits", "The current nBits, compact representation of the block difficulty target"},
                         {RPCResult::Type::NUM, "difficulty", "The current difficulty"},
                         {RPCResult::Type::STR_HEX, "target", "The current target"},
@@ -4993,6 +5008,7 @@ static RPCHelpMan getmininginfo()
                         {RPCResult::Type::STR, "powalgorithm", "current proof-of-work algorithm"},
                         {RPCResult::Type::NUM, "max_block_weight", "consensus maximum block weight"},
                         {RPCResult::Type::NUM, "policy_block_max_weight", "effective local block template weight target"},
+                        {RPCResult::Type::NUM, "policy_block_max_template_txs", "effective local cap on mempool transactions selected into a block template; 0 means unlimited"},
                         {RPCResult::Type::NUM, "max_block_shielded_verify_units", "consensus maximum shielded verification units per block"},
                         {RPCResult::Type::NUM, "max_block_shielded_scan_units", "consensus maximum shielded scan units per block"},
                         {RPCResult::Type::NUM, "max_block_shielded_tree_update_units", "consensus maximum shielded tree-update units per block"},
@@ -5097,6 +5113,10 @@ static RPCHelpMan getmininginfo()
     if (BlockAssembler::m_last_block_shielded_verify_units) obj.pushKV("currentblockshieldedverifyunits", *BlockAssembler::m_last_block_shielded_verify_units);
     if (BlockAssembler::m_last_block_shielded_scan_units) obj.pushKV("currentblockshieldedscanunits", *BlockAssembler::m_last_block_shielded_scan_units);
     if (BlockAssembler::m_last_block_shielded_tree_update_units) obj.pushKV("currentblockshieldedtreeupdateunits", *BlockAssembler::m_last_block_shielded_tree_update_units);
+    if (BlockAssembler::m_last_block_template_policy_verify_units) obj.pushKV("currentblocktemplatepolicyverifyunits", *BlockAssembler::m_last_block_template_policy_verify_units);
+    if (BlockAssembler::m_last_block_template_recovery_exit_txs) obj.pushKV("currentblocktemplaterecoveryexittxs", *BlockAssembler::m_last_block_template_recovery_exit_txs);
+    if (BlockAssembler::m_last_block_template_policy_skipped_txs) obj.pushKV("currentblocktemplatepolicyskippedtxs", *BlockAssembler::m_last_block_template_policy_skipped_txs);
+    if (BlockAssembler::m_last_block_template_policy_candidate_evaluations) obj.pushKV("currentblocktemplatepolicycandidateevaluations", *BlockAssembler::m_last_block_template_policy_candidate_evaluations);
     obj.pushKV("bits", strprintf("%08x", tip.nBits));
     obj.pushKV("difficulty", GetDifficulty(tip));
     obj.pushKV("target", GetTarget(tip, chainman.GetConsensus().powLimit).GetHex());
@@ -5110,6 +5130,7 @@ static RPCHelpMan getmininginfo()
     obj.pushKV("powalgorithm", algorithm);
     obj.pushKV("max_block_weight", static_cast<int64_t>(MAX_BLOCK_WEIGHT));
     obj.pushKV("policy_block_max_weight", static_cast<int64_t>(block_options_clamped.nBlockMaxWeight));
+    obj.pushKV("policy_block_max_template_txs", static_cast<int64_t>(block_options_clamped.nBlockMaxTemplateTxs));
     obj.pushKV("max_block_shielded_verify_units", static_cast<int64_t>(chainman.GetConsensus().nMaxBlockShieldedVerifyCost));
     obj.pushKV("max_block_shielded_scan_units", static_cast<int64_t>(chainman.GetConsensus().nMaxBlockShieldedScanUnits));
     obj.pushKV("max_block_shielded_tree_update_units", static_cast<int64_t>(chainman.GetConsensus().nMaxBlockShieldedTreeUpdateUnits));
@@ -5229,6 +5250,8 @@ static RPCHelpMan getdifficultyhealth()
                             {RPCResult::Type::BOOL, "active", "Whether the chain tip is at or above the protection activation height"},
                             {RPCResult::Type::STR, "profile", "Active local reorg protection profile"},
                             {RPCResult::Type::STR, "action", "Deep reorg action: park or warn"},
+                            {RPCResult::Type::BOOL, "parking_enabled", "Whether local branch parking can stop most-work convergence under the active policy"},
+                            {RPCResult::Type::BOOL, "follows_most_work", "Whether the active policy follows the most-work valid chain automatically"},
                             {RPCResult::Type::NUM, "current_tip_height", "Current active tip height used for activation checks"},
                             {RPCResult::Type::NUM, "start_height", "Configured activation height for deep-reorg protection"},
                             {RPCResult::Type::NUM, "warn_depth", "Configured warning depth for candidate reorgs"},
@@ -5237,14 +5260,22 @@ static RPCHelpMan getdifficultyhealth()
                             {RPCResult::Type::NUM, "locally_finalized_height", "Highest height considered locally finalized by current policy"},
                             {RPCResult::Type::NUM, "max_reorg_depth", "Compatibility alias for park_depth"},
                             {RPCResult::Type::NUM, "consensus_max_reorg_depth", "Consensus parameter value used as legacy policy context"},
-                            {RPCResult::Type::NUM, "rejected_reorgs", "Rejected deep reorgs recorded since process start"},
-                            {RPCResult::Type::NUM, "deepest_rejected_reorg_depth", "Deepest rejected reorg observed since process start"},
-                            {RPCResult::Type::NUM, "last_rejected_reorg_depth", "Depth of the most recent rejected reorg"},
-                            {RPCResult::Type::NUM, "last_rejected_max_reorg_depth", "Configured max depth in effect for the most recent rejection"},
-                            {RPCResult::Type::NUM, "last_rejected_tip_height", "Active tip height when the most recent rejection occurred"},
-                            {RPCResult::Type::NUM, "last_rejected_fork_height", "Fork point height for the most recent rejection"},
-                            {RPCResult::Type::NUM, "last_rejected_candidate_height", "Candidate chain height for the most recent rejection"},
-                            {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent rejected reorg"},
+                            {RPCResult::Type::NUM, "observed_reorgs", "All active-chain reorgs observed since process start, including shallow 1-block reorgs"},
+                            {RPCResult::Type::NUM, "deepest_observed_reorg_depth", "Deepest active-chain reorg observed since process start"},
+                            {RPCResult::Type::NUM, "last_observed_reorg_depth", "Depth of the most recent active-chain reorg"},
+                            {RPCResult::Type::NUM, "last_observed_tip_height", "Active tip height before the most recent observed reorg"},
+                            {RPCResult::Type::NUM, "last_observed_fork_height", "Fork point height for the most recent observed reorg"},
+                            {RPCResult::Type::NUM, "last_observed_candidate_height", "Candidate chain height for the most recent observed reorg"},
+                            {RPCResult::Type::NUM, "last_observed_unix", "Unix timestamp of the most recent observed reorg"},
+                            {RPCResult::Type::NUM, "deep_reorg_events", "Deep-reorg warnings or parking events recorded since process start"},
+                            {RPCResult::Type::NUM, "rejected_reorgs", "Compatibility counter for deep-reorg warning or parking events since process start"},
+                            {RPCResult::Type::NUM, "deepest_rejected_reorg_depth", "Deepest deep-reorg warning or parking event observed since process start"},
+                            {RPCResult::Type::NUM, "last_rejected_reorg_depth", "Depth of the most recent deep-reorg warning or parking event"},
+                            {RPCResult::Type::NUM, "last_rejected_max_reorg_depth", "Configured warning or parking threshold in effect for the most recent event"},
+                            {RPCResult::Type::NUM, "last_rejected_tip_height", "Active tip height when the most recent event occurred"},
+                            {RPCResult::Type::NUM, "last_rejected_fork_height", "Fork point height for the most recent event"},
+                            {RPCResult::Type::NUM, "last_rejected_candidate_height", "Candidate chain height for the most recent event"},
+                            {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent deep-reorg warning or parking event"},
                             {RPCResult::Type::NUM, "parked_branch_count", "Number of locally parked branch roots"},
                             {RPCResult::Type::ARR, "parked_branch_roots", "Locally parked branch root hashes", {
                                 {RPCResult::Type::STR_HEX, "", "Parked branch root hash"},
@@ -5632,6 +5663,8 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::BOOL, "active", "Whether the chain tip is at or above the protection activation height"},
                                     {RPCResult::Type::STR, "profile", "Active local reorg protection profile"},
                                     {RPCResult::Type::STR, "action", "Deep reorg action: park or warn"},
+                                    {RPCResult::Type::BOOL, "parking_enabled", "Whether local branch parking can stop most-work convergence under the active policy"},
+                                    {RPCResult::Type::BOOL, "follows_most_work", "Whether the active policy follows the most-work valid chain automatically"},
                                     {RPCResult::Type::NUM, "current_tip_height", "Current active tip height used for activation checks"},
                                     {RPCResult::Type::NUM, "start_height", "Configured activation height for deep-reorg protection"},
                                     {RPCResult::Type::NUM, "warn_depth", "Configured warning depth for candidate reorgs"},
@@ -5640,14 +5673,22 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::NUM, "locally_finalized_height", "Highest height considered locally finalized by current policy"},
                                     {RPCResult::Type::NUM, "max_reorg_depth", "Compatibility alias for park_depth"},
                                     {RPCResult::Type::NUM, "consensus_max_reorg_depth", "Consensus parameter value used as legacy policy context"},
-                                    {RPCResult::Type::NUM, "rejected_reorgs", "Rejected deep reorgs recorded since process start"},
-                                    {RPCResult::Type::NUM, "deepest_rejected_reorg_depth", "Deepest rejected reorg observed since process start"},
-                                    {RPCResult::Type::NUM, "last_rejected_reorg_depth", "Depth of the most recent rejected reorg"},
-                                    {RPCResult::Type::NUM, "last_rejected_max_reorg_depth", "Configured max depth in effect for the most recent rejection"},
-                                    {RPCResult::Type::NUM, "last_rejected_tip_height", "Active tip height when the most recent rejection occurred"},
-                                    {RPCResult::Type::NUM, "last_rejected_fork_height", "Fork point height for the most recent rejection"},
-                                    {RPCResult::Type::NUM, "last_rejected_candidate_height", "Candidate chain height for the most recent rejection"},
-                                    {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent rejected reorg"},
+                                    {RPCResult::Type::NUM, "observed_reorgs", "All active-chain reorgs observed since process start, including shallow 1-block reorgs"},
+                                    {RPCResult::Type::NUM, "deepest_observed_reorg_depth", "Deepest active-chain reorg observed since process start"},
+                                    {RPCResult::Type::NUM, "last_observed_reorg_depth", "Depth of the most recent active-chain reorg"},
+                                    {RPCResult::Type::NUM, "last_observed_tip_height", "Active tip height before the most recent observed reorg"},
+                                    {RPCResult::Type::NUM, "last_observed_fork_height", "Fork point height for the most recent observed reorg"},
+                                    {RPCResult::Type::NUM, "last_observed_candidate_height", "Candidate chain height for the most recent observed reorg"},
+                                    {RPCResult::Type::NUM, "last_observed_unix", "Unix timestamp of the most recent observed reorg"},
+                                    {RPCResult::Type::NUM, "deep_reorg_events", "Deep-reorg warnings or parking events recorded since process start"},
+                                    {RPCResult::Type::NUM, "rejected_reorgs", "Compatibility counter for deep-reorg warning or parking events since process start"},
+                                    {RPCResult::Type::NUM, "deepest_rejected_reorg_depth", "Deepest deep-reorg warning or parking event observed since process start"},
+                                    {RPCResult::Type::NUM, "last_rejected_reorg_depth", "Depth of the most recent deep-reorg warning or parking event"},
+                                    {RPCResult::Type::NUM, "last_rejected_max_reorg_depth", "Configured warning or parking threshold in effect for the most recent event"},
+                                    {RPCResult::Type::NUM, "last_rejected_tip_height", "Active tip height when the most recent event occurred"},
+                                    {RPCResult::Type::NUM, "last_rejected_fork_height", "Fork point height for the most recent event"},
+                                    {RPCResult::Type::NUM, "last_rejected_candidate_height", "Candidate chain height for the most recent event"},
+                                    {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent deep-reorg warning or parking event"},
                                     {RPCResult::Type::NUM, "parked_branch_count", "Number of locally parked branch roots"},
                                     {RPCResult::Type::ARR, "parked_branch_roots", "Locally parked branch root hashes", {
                                         {RPCResult::Type::STR_HEX, "", "Parked branch root hash"},
@@ -5933,6 +5974,8 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::BOOL, "active", "Whether the chain tip is at or above the protection activation height"},
                                     {RPCResult::Type::STR, "profile", "Active local reorg protection profile"},
                                     {RPCResult::Type::STR, "action", "Deep reorg action: park or warn"},
+                                    {RPCResult::Type::BOOL, "parking_enabled", "Whether local branch parking can stop most-work convergence under the active policy"},
+                                    {RPCResult::Type::BOOL, "follows_most_work", "Whether the active policy follows the most-work valid chain automatically"},
                                     {RPCResult::Type::NUM, "current_tip_height", "Current active tip height used for activation checks"},
                                     {RPCResult::Type::NUM, "start_height", "Configured activation height for deep-reorg protection"},
                                     {RPCResult::Type::NUM, "warn_depth", "Configured warning depth for candidate reorgs"},
@@ -5941,14 +5984,22 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::NUM, "locally_finalized_height", "Highest height considered locally finalized by current policy"},
                                     {RPCResult::Type::NUM, "max_reorg_depth", "Compatibility alias for park_depth"},
                                     {RPCResult::Type::NUM, "consensus_max_reorg_depth", "Consensus parameter value used as legacy policy context"},
-                                    {RPCResult::Type::NUM, "rejected_reorgs", "Rejected deep reorgs recorded since process start"},
-                                    {RPCResult::Type::NUM, "deepest_rejected_reorg_depth", "Deepest rejected reorg observed since process start"},
-                                    {RPCResult::Type::NUM, "last_rejected_reorg_depth", "Depth of the most recent rejected reorg"},
-                                    {RPCResult::Type::NUM, "last_rejected_max_reorg_depth", "Configured max depth in effect for the most recent rejection"},
-                                    {RPCResult::Type::NUM, "last_rejected_tip_height", "Active tip height when the most recent rejection occurred"},
-                                    {RPCResult::Type::NUM, "last_rejected_fork_height", "Fork point height for the most recent rejection"},
-                                    {RPCResult::Type::NUM, "last_rejected_candidate_height", "Candidate chain height for the most recent rejection"},
-                                    {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent rejected reorg"},
+                                    {RPCResult::Type::NUM, "observed_reorgs", "All active-chain reorgs observed since process start, including shallow 1-block reorgs"},
+                                    {RPCResult::Type::NUM, "deepest_observed_reorg_depth", "Deepest active-chain reorg observed since process start"},
+                                    {RPCResult::Type::NUM, "last_observed_reorg_depth", "Depth of the most recent active-chain reorg"},
+                                    {RPCResult::Type::NUM, "last_observed_tip_height", "Active tip height before the most recent observed reorg"},
+                                    {RPCResult::Type::NUM, "last_observed_fork_height", "Fork point height for the most recent observed reorg"},
+                                    {RPCResult::Type::NUM, "last_observed_candidate_height", "Candidate chain height for the most recent observed reorg"},
+                                    {RPCResult::Type::NUM, "last_observed_unix", "Unix timestamp of the most recent observed reorg"},
+                                    {RPCResult::Type::NUM, "deep_reorg_events", "Deep-reorg warnings or parking events recorded since process start"},
+                                    {RPCResult::Type::NUM, "rejected_reorgs", "Compatibility counter for deep-reorg warning or parking events since process start"},
+                                    {RPCResult::Type::NUM, "deepest_rejected_reorg_depth", "Deepest deep-reorg warning or parking event observed since process start"},
+                                    {RPCResult::Type::NUM, "last_rejected_reorg_depth", "Depth of the most recent deep-reorg warning or parking event"},
+                                    {RPCResult::Type::NUM, "last_rejected_max_reorg_depth", "Configured warning or parking threshold in effect for the most recent event"},
+                                    {RPCResult::Type::NUM, "last_rejected_tip_height", "Active tip height when the most recent event occurred"},
+                                    {RPCResult::Type::NUM, "last_rejected_fork_height", "Fork point height for the most recent event"},
+                                    {RPCResult::Type::NUM, "last_rejected_candidate_height", "Candidate chain height for the most recent event"},
+                                    {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent deep-reorg warning or parking event"},
                                     {RPCResult::Type::NUM, "parked_branch_count", "Number of locally parked branch roots"},
                                     {RPCResult::Type::ARR, "parked_branch_roots", "Locally parked branch root hashes", {
                                         {RPCResult::Type::STR_HEX, "", "Parked branch root hash"},
@@ -7068,6 +7119,7 @@ static RPCHelpMan getblocktemplate()
                 {"mode", RPCArg::Type::STR, /* treat as named arg */ RPCArg::Optional::OMITTED, "This must be set to \"template\", \"proposal\" (see BIP 23), or omitted"},
                 {"blockmaxsize", RPCArg::Type::NUM, RPCArg::DefaultHint{"set by -blockmaxsize"}, "limit returned block to specified size (disables template cache)"},
                 {"blockmaxweight", RPCArg::Type::NUM, RPCArg::DefaultHint{"set by -blockmaxweight"}, "limit returned block to specified weight (disables template cache)"},
+                {"maxtemplatetxs", RPCArg::Type::NUM, RPCArg::DefaultHint{"set by -blockmaxtemplatetxs"}, "limit selected mempool transactions in the returned block template; 0 means unlimited (disables template cache)"},
                 {"blockreservedsigops", RPCArg::Type::NUM, RPCArg::Default{node::BlockCreateOptions{}.coinbase_output_max_additional_sigops}, "reserve specified number of sigops in returned block for generation transaction (disables template cache)"},
                 {"blockreservedsize", RPCArg::Type::NUM, RPCArg::Default{node::BlockCreateOptions{}.block_reserved_size}, "reserve specified size in returned block for generation transaction (disables template cache)"},
                 {"blockreservedweight", RPCArg::Type::NUM, RPCArg::Default{node::BlockCreateOptions{}.block_reserved_weight}, "reserve specified weight in returned block for generation transaction (disables template cache)"},
@@ -7106,6 +7158,8 @@ static RPCHelpMan getblocktemplate()
                 }},
                 {RPCResult::Type::NUM, "vbrequired", "bit mask of versionbits the server requires set in submissions"},
                 {RPCResult::Type::STR, "previousblockhash", "The hash of current highest block"},
+                {RPCResult::Type::BOOL, "mempool_validation_fallback", "Whether this template fell back to coinbase-only after mempool-selected transaction validation failed"},
+                {RPCResult::Type::NUM, "policy_block_max_template_txs", "Local cap on mempool transactions selected into this template; 0 means unlimited"},
                 {RPCResult::Type::ARR, "transactions", "contents of non-coinbase transactions that should be included in the next block",
                 {
                     {RPCResult::Type::OBJ, "", "",
@@ -7170,6 +7224,10 @@ static RPCHelpMan getblocktemplate()
                     {RPCResult::Type::NUM, "template_shielded_verify_units", "shielded verification units currently used by this block template"},
                     {RPCResult::Type::NUM, "template_shielded_scan_units", "shielded scan units currently used by this block template"},
                     {RPCResult::Type::NUM, "template_shielded_tree_update_units", "shielded tree-update units currently used by this block template"},
+                    {RPCResult::Type::NUM, "template_policy_verify_units", "mining-policy CPU verify units currently used by this block template"},
+                    {RPCResult::Type::NUM, "template_recovery_exit_txs", "recovery-exit transactions currently selected into this block template"},
+                    {RPCResult::Type::NUM, "template_policy_skipped_txs", "candidate transactions skipped by mining-policy CPU limits while building this block template"},
+                    {RPCResult::Type::NUM, "template_policy_candidate_evaluations", "candidate packages evaluated while building this block template"},
                     {RPCResult::Type::NUM, "remaining_shielded_verify_units", "remaining shielded verification units available to this block template"},
                     {RPCResult::Type::NUM, "remaining_shielded_scan_units", "remaining shielded scan units available to this block template"},
                     {RPCResult::Type::NUM, "remaining_shielded_tree_update_units", "remaining shielded tree-update units available to this block template"},
@@ -7306,6 +7364,9 @@ static RPCHelpMan getblocktemplate()
         }
         if (!oparam["blockmaxweight"].isNull()) {
             options.nBlockMaxWeight = oparam["blockmaxweight"].getInt<size_t>();
+        }
+        if (!oparam["maxtemplatetxs"].isNull()) {
+            options.nBlockMaxTemplateTxs = oparam["maxtemplatetxs"].getInt<size_t>();
         }
         if (!oparam["blockreservedsize"].isNull()) {
             options.block_reserved_size = oparam["blockreservedsize"].getInt<size_t>();
@@ -7490,8 +7551,15 @@ static RPCHelpMan getblocktemplate()
         CHECK_NONFATAL(block_template);
 
 
-        // Need to update only after we know createNewBlock succeeded.
-        pindexPrevHash = pindexPrevNew->GetBlockHash();
+        // Need to update only after we know createNewBlock succeeded. Empty
+        // mempool-validation fallbacks are one-shot safety valves, not normal
+        // cached work, because caching them encourages empty-block mining while
+        // fee-paying transactions remain in the mempool.
+        if (block_template->isMempoolValidationFallback()) {
+            LogWarning("getblocktemplate: returning one-shot empty mempool-validation fallback template without caching it\n");
+        } else {
+            pindexPrevHash = pindexPrevNew->GetBlockHash();
+        }
         cached_pindex_prev = pindexPrevNew;
     }
     CHECK_NONFATAL(cached_pindex_prev);
@@ -7667,6 +7735,8 @@ static UniValue TemplateToJSON(
     result.pushKV("vbrequired", int(0));
 
     result.pushKV("previousblockhash", block.hashPrevBlock.GetHex());
+    result.pushKV("mempool_validation_fallback", block_template->isMempoolValidationFallback());
+    result.pushKV("policy_block_max_template_txs", static_cast<int64_t>(block_options.nBlockMaxTemplateTxs));
     result.pushKV("transactions", std::move(transactions));
     result.pushKV("coinbaseaux", std::move(aux));
     CHECK_NONFATAL(!block.vtx[0]->vout.empty());
@@ -7685,18 +7755,29 @@ static UniValue TemplateToJSON(
     const uint64_t template_shielded_verify_units = block_template->getShieldedVerifyUnits();
     const uint64_t template_shielded_scan_units = block_template->getShieldedScanUnits();
     const uint64_t template_shielded_tree_update_units = block_template->getShieldedTreeUpdateUnits();
+    const uint64_t template_policy_verify_units = block_template->getTemplatePolicyVerifyUnits();
+    const uint64_t template_recovery_exit_txs = block_template->getTemplateRecoveryExitTxs();
+    const uint64_t template_policy_skipped_txs = block_template->getTemplatePolicySkippedTxs();
+    const uint64_t template_policy_candidate_evaluations = block_template->getTemplatePolicyCandidateEvaluations();
     UniValue block_capacity(UniValue::VOBJ);
     block_capacity.pushKV("max_block_weight", static_cast<int64_t>(MAX_BLOCK_WEIGHT));
     block_capacity.pushKV("max_block_serialized_size", static_cast<int64_t>(MAX_BLOCK_SERIALIZED_SIZE));
     block_capacity.pushKV("max_block_sigops_cost", static_cast<int64_t>(MAX_BLOCK_SIGOPS_COST));
     block_capacity.pushKV("default_block_max_weight", static_cast<int64_t>(BlockAssembler::Options{}.nBlockMaxWeight));
     block_capacity.pushKV("policy_block_max_weight", static_cast<int64_t>(block_options.nBlockMaxWeight));
+    block_capacity.pushKV("default_block_max_template_txs", static_cast<int64_t>(BlockAssembler::Options{}.nBlockMaxTemplateTxs));
+    block_capacity.pushKV("policy_block_max_template_txs", static_cast<int64_t>(block_options.nBlockMaxTemplateTxs));
+    block_capacity.pushKV("template_tx_count", static_cast<int64_t>(block.vtx.size() > 0 ? block.vtx.size() - 1 : 0));
     block_capacity.pushKV("max_block_shielded_verify_units", static_cast<int64_t>(consensusParams.nMaxBlockShieldedVerifyCost));
     block_capacity.pushKV("max_block_shielded_scan_units", static_cast<int64_t>(consensusParams.nMaxBlockShieldedScanUnits));
     block_capacity.pushKV("max_block_shielded_tree_update_units", static_cast<int64_t>(consensusParams.nMaxBlockShieldedTreeUpdateUnits));
     block_capacity.pushKV("template_shielded_verify_units", static_cast<int64_t>(template_shielded_verify_units));
     block_capacity.pushKV("template_shielded_scan_units", static_cast<int64_t>(template_shielded_scan_units));
     block_capacity.pushKV("template_shielded_tree_update_units", static_cast<int64_t>(template_shielded_tree_update_units));
+    block_capacity.pushKV("template_policy_verify_units", static_cast<int64_t>(template_policy_verify_units));
+    block_capacity.pushKV("template_recovery_exit_txs", static_cast<int64_t>(template_recovery_exit_txs));
+    block_capacity.pushKV("template_policy_skipped_txs", static_cast<int64_t>(template_policy_skipped_txs));
+    block_capacity.pushKV("template_policy_candidate_evaluations", static_cast<int64_t>(template_policy_candidate_evaluations));
     block_capacity.pushKV("remaining_shielded_verify_units", static_cast<int64_t>(template_shielded_verify_units <= consensusParams.nMaxBlockShieldedVerifyCost ? consensusParams.nMaxBlockShieldedVerifyCost - template_shielded_verify_units : 0));
     block_capacity.pushKV("remaining_shielded_scan_units", static_cast<int64_t>(template_shielded_scan_units <= consensusParams.nMaxBlockShieldedScanUnits ? consensusParams.nMaxBlockShieldedScanUnits - template_shielded_scan_units : 0));
     block_capacity.pushKV("remaining_shielded_tree_update_units", static_cast<int64_t>(template_shielded_tree_update_units <= consensusParams.nMaxBlockShieldedTreeUpdateUnits ? consensusParams.nMaxBlockShieldedTreeUpdateUnits - template_shielded_tree_update_units : 0));

@@ -48,6 +48,11 @@ struct CBlockTemplate
     uint64_t nShieldedVerifyUnits{0};
     uint64_t nShieldedScanUnits{0};
     uint64_t nShieldedTreeUpdateUnits{0};
+    bool m_mempool_validation_fallback{false};
+    uint64_t nTemplatePolicyVerifyUnits{0};
+    uint64_t nTemplateRecoveryExitTxs{0};
+    uint64_t nTemplatePolicySkippedTxs{0};
+    uint64_t nTemplatePolicyCandidateEvaluations{0};
     /* A vector of package fee rates, ordered by the sequence in which
      * packages are selected for inclusion in the block template.*/
     std::vector<FeeFrac> m_package_feerates;
@@ -167,6 +172,14 @@ private:
     uint64_t nBlockShieldedScanUnits{0};
     /** Accumulated shielded state-mutation budget (nullifiers + commitments). */
     uint64_t nBlockShieldedTreeUpdateUnits{0};
+    /** Accumulated mining-policy CPU budget for transactions that are expensive to recheck. */
+    uint64_t nBlockTemplatePolicyVerifyCost{0};
+    /** Recovery-exit transactions selected into this template. */
+    uint64_t nBlockTemplateRecoveryExitTxs{0};
+    /** Candidate transactions skipped by the mining-policy CPU budget. */
+    uint64_t nBlockTemplatePolicySkippedTxs{0};
+    /** Candidate packages evaluated while assembling this template. */
+    uint64_t nBlockTemplatePolicyCandidateEvaluations{0};
     /** Accumulated shielded account-registry append budget after fork activation. */
     uint64_t nBlockShieldedAccountRegistryAppends{0};
     /** Projected shielded pool balance after transactions selected for this block. */
@@ -214,6 +227,10 @@ public:
     inline static std::optional<int64_t> m_last_block_shielded_verify_units{};
     inline static std::optional<int64_t> m_last_block_shielded_scan_units{};
     inline static std::optional<int64_t> m_last_block_shielded_tree_update_units{};
+    inline static std::optional<int64_t> m_last_block_template_policy_verify_units{};
+    inline static std::optional<int64_t> m_last_block_template_recovery_exit_txs{};
+    inline static std::optional<int64_t> m_last_block_template_policy_skipped_txs{};
+    inline static std::optional<int64_t> m_last_block_template_policy_candidate_evaluations{};
 
 private:
     const Options m_options;
@@ -246,6 +263,8 @@ private:
     void onlyUnconfirmed(CTxMemPool::setEntries& testSet);
     /** Test if a new package would "fit" in the block */
     bool TestPackage(uint64_t packageWeight, int64_t packageSigOpsCost) const;
+    /** Test if a transaction still fits the template CPU policy budget */
+    bool TestTemplatePolicy(const CTransaction& tx) const;
     /** Perform checks on each transaction in a package:
       * locktime, premature-witness, serialized size (if necessary)
       * These checks should always succeed, and they're here

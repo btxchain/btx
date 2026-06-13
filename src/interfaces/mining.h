@@ -42,6 +42,11 @@ public:
     virtual uint64_t getShieldedVerifyUnits() const = 0;
     virtual uint64_t getShieldedScanUnits() const = 0;
     virtual uint64_t getShieldedTreeUpdateUnits() const = 0;
+    virtual bool isMempoolValidationFallback() const = 0;
+    virtual uint64_t getTemplatePolicyVerifyUnits() const = 0;
+    virtual uint64_t getTemplateRecoveryExitTxs() const = 0;
+    virtual uint64_t getTemplatePolicySkippedTxs() const = 0;
+    virtual uint64_t getTemplatePolicyCandidateEvaluations() const = 0;
 
     virtual CTransactionRef getCoinbaseTx() const = 0;
     virtual const std::vector<unsigned char>& getCoinbaseCommitment() const = 0;

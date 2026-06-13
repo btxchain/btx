@@ -75,6 +75,7 @@ struct BlockCreateOptions {
     // Configuration parameters for the block size
     size_t nBlockMaxWeight{DEFAULT_BLOCK_MAX_WEIGHT};
     size_t nBlockMaxSize{DEFAULT_BLOCK_MAX_SIZE};
+    size_t nBlockMaxTemplateTxs{DEFAULT_BLOCK_MAX_TEMPLATE_TXS};
     CFeeRate blockMinFeeRate{DEFAULT_BLOCK_MIN_TX_FEE};
     // Whether to call TestBlockValidity() at the end of CreateNewBlock().
     bool test_block_validity{true};

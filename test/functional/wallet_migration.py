@@ -35,6 +35,24 @@ from test_framework.wallet_util import (
 )
 
 
+def legacy_balance_shape(balances):
+    balances = dict(balances)
+    balances.pop("lastprocessedblock", None)
+    balances.pop("wallet_reorg_safety_depth", None)
+    balances.pop("wallet_reorg_hold_blocks", None)
+    balances.pop("wallet_reorg_hold_seconds", None)
+    balances.pop("settlement_reorg_hold_active", None)
+    balances.pop("settlement_reorg_hold_until_height", None)
+    balances.pop("settlement_reorg_hold_remaining_blocks", None)
+    balances.pop("settlement_reorg_hold_until_time", None)
+    balances.pop("settlement_reorg_hold_remaining_seconds", None)
+    for bucket in ("mine", "watchonly"):
+        if bucket in balances:
+            balances[bucket] = dict(balances[bucket])
+            balances[bucket].pop("settlement_safe", None)
+    return balances
+
+
 class WalletMigrationTest(BitcoinTestFramework):
     def add_options(self, parser):
         self.add_wallet_options(parser)
@@ -462,7 +480,7 @@ class WalletMigrationTest(BitcoinTestFramework):
 
         _, wallet = self.migrate_and_get_rpc("pkcb")
 
-        assert_equal(bals, wallet.getbalances())
+        assert_equal(legacy_balance_shape(bals), legacy_balance_shape(wallet.getbalances()))
 
     def test_encrypted(self):
         self.log.info("Test migration of an encrypted wallet")
@@ -491,7 +509,7 @@ class WalletMigrationTest(BitcoinTestFramework):
         assert_equal(info["unlocked_until"], 0)
         wallet.gettransaction(txid)
 
-        assert_equal(bals, wallet.getbalances())
+        assert_equal(legacy_balance_shape(bals), legacy_balance_shape(wallet.getbalances()))
 
     def test_nonexistent(self):
         self.log.info("Check migratewallet errors for nonexistent wallets")
@@ -523,7 +541,7 @@ class WalletMigrationTest(BitcoinTestFramework):
         assert_equal(info["format"], "sqlite")
         wallet.gettransaction(txid)
 
-        assert_equal(bals, wallet.getbalances())
+        assert_equal(legacy_balance_shape(bals), legacy_balance_shape(wallet.getbalances()))
 
     def test_default_wallet(self):
         self.log.info("Test migration of the wallet named as the empty string")
@@ -1308,14 +1326,14 @@ class WalletMigrationTest(BitcoinTestFramework):
         _, wallet = self.migrate_and_get_rpc("miniscript")
 
         # The miniscript with all keys should be in the migrated wallet
-        assert_equal(wallet.getbalances()["mine"], {"trusted": 0.75, "untrusted_pending": 0, "immature": 0})
+        assert_equal(legacy_balance_shape(wallet.getbalances())["mine"], {"trusted": 0.75, "untrusted_pending": 0, "immature": 0})
         assert_equal(wallet.getaddressinfo(all_keys_addr)["ismine"], True)
         assert_equal(wallet.getaddressinfo(some_keys_addr)["ismine"], False)
 
         # The miniscript with some keys should be in the watchonly wallet
         assert "miniscript_watchonly" in self.master_node.listwallets()
         watchonly = self.master_node.get_wallet_rpc("miniscript_watchonly")
-        assert_equal(watchonly.getbalances()["mine"], {"trusted": 1, "untrusted_pending": 0, "immature": 0})
+        assert_equal(legacy_balance_shape(watchonly.getbalances())["mine"], {"trusted": 1, "untrusted_pending": 0, "immature": 0})
         assert_equal(watchonly.getaddressinfo(some_keys_addr)["ismine"], True)
         assert_equal(watchonly.getaddressinfo(all_keys_addr)["ismine"], False)
 
@@ -1364,7 +1382,7 @@ class WalletMigrationTest(BitcoinTestFramework):
         res, wallet = self.migrate_and_get_rpc("taproot")
 
         # The rawtr should be migrated
-        assert_equal(wallet.getbalances()["mine"], {"trusted": 0.5, "untrusted_pending": 0, "immature": 0})
+        assert_equal(legacy_balance_shape(wallet.getbalances())["mine"], {"trusted": 0.5, "untrusted_pending": 0, "immature": 0})
         assert_equal(wallet.getaddressinfo(rawtr_addr)["ismine"], True)
         assert_equal(wallet.getaddressinfo(tr_addr)["ismine"], False)
         assert_equal(wallet.getaddressinfo(tr_script_addr)["ismine"], False)
@@ -1372,7 +1390,7 @@ class WalletMigrationTest(BitcoinTestFramework):
         # The tr() with some keys should be in the watchonly wallet
         assert "taproot_watchonly" in self.master_node.listwallets()
         watchonly = self.master_node.get_wallet_rpc("taproot_watchonly")
-        assert_equal(watchonly.getbalances()["mine"], {"trusted": 5, "untrusted_pending": 0, "immature": 0})
+        assert_equal(legacy_balance_shape(watchonly.getbalances())["mine"], {"trusted": 5, "untrusted_pending": 0, "immature": 0})
         assert_equal(watchonly.getaddressinfo(rawtr_addr)["ismine"], False)
         assert_equal(watchonly.getaddressinfo(tr_addr)["ismine"], True)
         assert_equal(watchonly.getaddressinfo(tr_script_addr)["ismine"], True)

@@ -132,13 +132,11 @@ bool PSBTHasExistingSignatures(const PartiallySignedTransaction& psbtx)
 
 [[nodiscard]] CAmount RequiredShieldedMempoolFee(const CWallet& wallet, const CTransaction& tx)
 {
-    const int64_t total_weight = GetShieldedPolicyWeight(tx);
-
     CFeeRate floor_rate = wallet.chain().relayMinFee();
     const CFeeRate mempool_floor = wallet.chain().mempoolMinFee();
     if (mempool_floor > floor_rate) floor_rate = mempool_floor;
 
-    CAmount required = floor_rate.GetFee(GetVirtualTransactionSize(total_weight, 0, 0));
+    CAmount required = floor_rate.GetFee(GetShieldedRelayVirtualSize(tx));
     if (tx.HasShieldedBundle()) {
         if (required >= std::numeric_limits<CAmount>::max() - MIN_SHIELDED_RELAY_FEE_PREMIUM) {
             return std::numeric_limits<CAmount>::max();
@@ -2028,6 +2026,38 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
     }
 }
 
+void CWallet::PersistReorgSettlementHold()
+{
+    AssertLockHeld(cs_wallet);
+    WalletReorgSettlementHold hold;
+    hold.hold_until_height = m_reorg_hold_until_height;
+    hold.hold_until_time = m_reorg_hold_until_time;
+    hold.last_disconnected_height = m_last_reorg_disconnected_height;
+    hold.last_disconnected_block = m_last_reorg_disconnected_block;
+    WalletBatch batch(GetDatabase());
+    if (!batch.WriteReorgSettlementHold(hold)) {
+        WalletLogPrintf("ReorgSettlementHold: failed to persist wallet hold state\n");
+    }
+}
+
+void CWallet::ExtendReorgSettlementHold(const int base_height, const bool force_persist)
+{
+    AssertLockHeld(cs_wallet);
+    bool changed{force_persist};
+
+    if (m_reorg_hold_blocks > 0 && base_height >= 0) {
+        const int64_t hold_until_height = std::min<int64_t>(
+            std::numeric_limits<int>::max(),
+            static_cast<int64_t>(base_height) + static_cast<int64_t>(m_reorg_hold_blocks));
+        if (hold_until_height > m_reorg_hold_until_height) {
+            m_reorg_hold_until_height = static_cast<int>(hold_until_height);
+            changed = true;
+        }
+    }
+
+    if (changed) PersistReorgSettlementHold();
+}
+
 void CWallet::blockConnected(ChainstateRole role, const interfaces::BlockInfo& block)
 {
     assert(block.data);
@@ -2050,6 +2080,9 @@ void CWallet::blockConnected(ChainstateRole role, const interfaces::BlockInfo& b
 
         m_last_block_processed_height = block.height;
         m_last_block_processed = block.hash;
+        if (m_reorg_hold_pending_tip_update) {
+            ExtendReorgSettlementHold(block.height, /*force_persist=*/false);
+        }
 
         // No need to scan block if it was created before the wallet birthday.
         // Uses chain max time and twice the grace period to adjust time for block time variability.
@@ -2305,6 +2338,46 @@ void CWallet::blockDisconnected(const interfaces::BlockInfo& block)
         m_last_block_processed_height = block.height - 1;
         m_last_block_processed = *Assert(block.prev_hash);
 
+        if (m_reorg_hold_blocks > 0 || m_reorg_hold_seconds > 0) {
+            const bool new_reorg_sequence = !m_reorg_hold_pending_tip_update;
+            m_reorg_hold_pending_tip_update = true;
+            bool metadata_changed{false};
+            if (new_reorg_sequence || block.height > m_last_reorg_disconnected_height) {
+                m_last_reorg_disconnected_height = block.height;
+                m_last_reorg_disconnected_block = block.hash;
+                metadata_changed = true;
+            }
+
+            bool time_changed{false};
+            if (m_reorg_hold_seconds > 0) {
+                const int64_t now = GetTime();
+                const int64_t hold_until_time =
+                    now > std::numeric_limits<int64_t>::max() - static_cast<int64_t>(m_reorg_hold_seconds)
+                        ? std::numeric_limits<int64_t>::max()
+                        : now + static_cast<int64_t>(m_reorg_hold_seconds);
+                if (hold_until_time > m_reorg_hold_until_time) {
+                    m_reorg_hold_until_time = hold_until_time;
+                    time_changed = true;
+                }
+            }
+
+            int hold_base_height = m_last_block_processed_height;
+            if (const std::optional<int> chain_height = chain().getHeight()) {
+                hold_base_height = std::max(hold_base_height, *chain_height);
+            }
+            const int prior_hold_until = m_reorg_hold_until_height;
+            ExtendReorgSettlementHold(hold_base_height, metadata_changed || time_changed);
+            if (m_reorg_hold_until_height > prior_hold_until || metadata_changed || time_changed) {
+                WalletLogPrintf("ReorgSettlementHold: disconnected block %s height=%d, holding settlement-safe wallet RPCs until height %d and time %d (%u block/%u second policy)\n",
+                                m_last_reorg_disconnected_block.GetHex(),
+                                m_last_reorg_disconnected_height,
+                                m_reorg_hold_until_height,
+                                m_reorg_hold_until_time,
+                                m_reorg_hold_blocks,
+                                m_reorg_hold_seconds);
+            }
+        }
+
         int disconnect_height = block.height;
 
         for (size_t index = 0; index < block.data->vtx.size(); index++) {
@@ -2351,6 +2424,17 @@ void CWallet::blockDisconnected(const interfaces::BlockInfo& block)
 void CWallet::updatedBlockTip()
 {
     m_best_block_time = GetTime();
+    LOCK(cs_wallet);
+    if (m_reorg_hold_pending_tip_update) {
+        int hold_base_height = m_last_block_processed_height;
+        if (const std::optional<int> chain_height = chain().getHeight()) {
+            hold_base_height = std::max(hold_base_height, *chain_height);
+        }
+        ExtendReorgSettlementHold(hold_base_height, /*force_persist=*/false);
+        if (m_last_reorg_disconnected_height < 0 || hold_base_height >= m_last_reorg_disconnected_height) {
+            m_reorg_hold_pending_tip_update = false;
+        }
+    }
 }
 
 void CWallet::BlockUntilSyncedToCurrentChain() const {
@@ -4689,9 +4773,33 @@ std::shared_ptr<CWallet> CWallet::Create(WalletContext& context, const std::stri
                           std::numeric_limits<int>::max());
         return nullptr;
     }
+    const int64_t wallet_reorg_safety_depth = args.GetIntArg("-walletreorgsafetydepth", DEFAULT_WALLET_REORG_SAFETY_DEPTH);
+    if (wallet_reorg_safety_depth < 1 || wallet_reorg_safety_depth > std::numeric_limits<int>::max()) {
+        error = strprintf(_("Invalid -walletreorgsafetydepth value %s (must be between 1 and %d)"),
+                          args.GetArg("-walletreorgsafetydepth", ""),
+                          std::numeric_limits<int>::max());
+        return nullptr;
+    }
+    const int64_t wallet_reorg_hold_blocks = args.GetIntArg("-walletreorgholdblocks", DEFAULT_WALLET_REORG_HOLD_BLOCKS);
+    if (wallet_reorg_hold_blocks < 0 || wallet_reorg_hold_blocks > std::numeric_limits<int>::max()) {
+        error = strprintf(_("Invalid -walletreorgholdblocks value %s (must be between 0 and %d)"),
+                          args.GetArg("-walletreorgholdblocks", ""),
+                          std::numeric_limits<int>::max());
+        return nullptr;
+    }
+    const int64_t wallet_reorg_hold_seconds = args.GetIntArg("-walletreorgholdseconds", DEFAULT_WALLET_REORG_HOLD_SECONDS);
+    if (wallet_reorg_hold_seconds < 0 || wallet_reorg_hold_seconds > std::numeric_limits<int>::max()) {
+        error = strprintf(_("Invalid -walletreorgholdseconds value %s (must be between 0 and %d)"),
+                          args.GetArg("-walletreorgholdseconds", ""),
+                          std::numeric_limits<int>::max());
+        return nullptr;
+    }
 
     walletInstance->m_confirm_target = args.GetIntArg("-txconfirmtarget", DEFAULT_TX_CONFIRM_TARGET);
     walletInstance->m_bridge_pending_confirm_depth = static_cast<unsigned int>(bridge_pending_confirm_depth);
+    walletInstance->m_reorg_safety_depth = static_cast<unsigned int>(wallet_reorg_safety_depth);
+    walletInstance->m_reorg_hold_blocks = static_cast<unsigned int>(wallet_reorg_hold_blocks);
+    walletInstance->m_reorg_hold_seconds = static_cast<unsigned int>(wallet_reorg_hold_seconds);
     walletInstance->m_spend_zero_conf_change = args.GetBoolArg("-spendzeroconfchange", DEFAULT_SPEND_ZEROCONF_CHANGE);
     walletInstance->m_signal_rbf = args.GetBoolArg("-walletrbf", DEFAULT_WALLET_RBF);
 
@@ -4763,11 +4871,23 @@ bool CWallet::AttachChain(const std::shared_ptr<CWallet>& walletInstance, interf
 
     // If rescan_required = true, rescan_height remains equal to 0
     int rescan_height = 0;
+    bool wallet_best_block_reorged{false};
+    int wallet_best_block_height{-1};
+    uint256 wallet_best_block_hash{};
     if (!rescan_required)
     {
         WalletBatch batch(walletInstance->GetDatabase());
         CBlockLocator locator;
         if (batch.ReadBestBlock(locator)) {
+            if (!locator.vHave.empty()) {
+                bool in_active_chain{false};
+                int block_height{-1};
+                if (chain.findBlock(locator.vHave.front(), FoundBlock().inActiveChain(in_active_chain).height(block_height))) {
+                    wallet_best_block_reorged = !in_active_chain;
+                    wallet_best_block_height = block_height;
+                    wallet_best_block_hash = locator.vHave.front();
+                }
+            }
             if (const std::optional<int> fork_height = chain.findLocatorFork(locator)) {
                 rescan_height = *fork_height;
             }
@@ -4781,6 +4901,33 @@ bool CWallet::AttachChain(const std::shared_ptr<CWallet>& walletInstance, interf
     } else {
         walletInstance->m_last_block_processed.SetNull();
         walletInstance->m_last_block_processed_height = -1;
+    }
+
+    if (wallet_best_block_reorged && tip_height && (walletInstance->m_reorg_hold_blocks > 0 || walletInstance->m_reorg_hold_seconds > 0)) {
+        walletInstance->m_last_reorg_disconnected_height = wallet_best_block_height;
+        walletInstance->m_last_reorg_disconnected_block = wallet_best_block_hash;
+        walletInstance->m_reorg_hold_pending_tip_update = false;
+
+        if (walletInstance->m_reorg_hold_seconds > 0) {
+            const int64_t now = GetTime();
+            const int64_t hold_until_time =
+                now > std::numeric_limits<int64_t>::max() - static_cast<int64_t>(walletInstance->m_reorg_hold_seconds)
+                    ? std::numeric_limits<int64_t>::max()
+                    : now + static_cast<int64_t>(walletInstance->m_reorg_hold_seconds);
+            if (hold_until_time > walletInstance->m_reorg_hold_until_time) {
+                walletInstance->m_reorg_hold_until_time = hold_until_time;
+            }
+        }
+
+        walletInstance->ExtendReorgSettlementHold(*tip_height, /*force_persist=*/true);
+        walletInstance->WalletLogPrintf(
+            "ReorgSettlementHold: wallet best block %s height=%d is no longer active; holding settlement-safe wallet RPCs until height %d and time %d (%u block/%u second policy)\n",
+            wallet_best_block_hash.GetHex(),
+            wallet_best_block_height,
+            walletInstance->m_reorg_hold_until_height,
+            walletInstance->m_reorg_hold_until_time,
+            walletInstance->m_reorg_hold_blocks,
+            walletInstance->m_reorg_hold_seconds);
     }
 
     if (tip_height && *tip_height != rescan_height)
@@ -5827,6 +5974,20 @@ util::Result<void> CWallet::ApplyMigrationData(WalletBatch& local_wallet_batch, 
         LOCK(data.watchonly_wallet->cs_wallet);
         data.watchonly_wallet->nOrderPosNext = nOrderPosNext;
         watchonly_batch->WriteOrderPosNext(data.watchonly_wallet->nOrderPosNext);
+        data.watchonly_wallet->m_reorg_hold_blocks = m_reorg_hold_blocks;
+        data.watchonly_wallet->m_reorg_hold_seconds = m_reorg_hold_seconds;
+        data.watchonly_wallet->m_reorg_hold_until_height = m_reorg_hold_until_height;
+        data.watchonly_wallet->m_reorg_hold_until_time = m_reorg_hold_until_time;
+        data.watchonly_wallet->m_last_reorg_disconnected_height = m_last_reorg_disconnected_height;
+        data.watchonly_wallet->m_last_reorg_disconnected_block = m_last_reorg_disconnected_block;
+        WalletReorgSettlementHold reorg_hold;
+        reorg_hold.hold_until_height = m_reorg_hold_until_height;
+        reorg_hold.hold_until_time = m_reorg_hold_until_time;
+        reorg_hold.last_disconnected_height = m_last_reorg_disconnected_height;
+        reorg_hold.last_disconnected_block = m_last_reorg_disconnected_block;
+        if (!watchonly_batch->WriteReorgSettlementHold(reorg_hold)) {
+            return util::Error{_("Error: Unable to write watchonly wallet reorg settlement hold record")};
+        }
         // Write the best block locator to avoid rescanning on reload
         if (!watchonly_batch->WriteBestBlock(best_block_locator)) {
             return util::Error{_("Error: Unable to write watchonly wallet best block locator record")};
@@ -5836,6 +5997,23 @@ util::Result<void> CWallet::ApplyMigrationData(WalletBatch& local_wallet_batch, 
     if (data.solvable_wallet) {
         solvables_batch = std::make_unique<WalletBatch>(data.solvable_wallet->GetDatabase());
         if (!solvables_batch->TxnBegin()) return util::Error{strprintf(_("Error: database transaction cannot be executed for wallet %s"), data.solvable_wallet->GetName())};
+        {
+            LOCK(data.solvable_wallet->cs_wallet);
+            data.solvable_wallet->m_reorg_hold_blocks = m_reorg_hold_blocks;
+            data.solvable_wallet->m_reorg_hold_seconds = m_reorg_hold_seconds;
+            data.solvable_wallet->m_reorg_hold_until_height = m_reorg_hold_until_height;
+            data.solvable_wallet->m_reorg_hold_until_time = m_reorg_hold_until_time;
+            data.solvable_wallet->m_last_reorg_disconnected_height = m_last_reorg_disconnected_height;
+            data.solvable_wallet->m_last_reorg_disconnected_block = m_last_reorg_disconnected_block;
+        }
+        WalletReorgSettlementHold reorg_hold;
+        reorg_hold.hold_until_height = m_reorg_hold_until_height;
+        reorg_hold.hold_until_time = m_reorg_hold_until_time;
+        reorg_hold.last_disconnected_height = m_last_reorg_disconnected_height;
+        reorg_hold.last_disconnected_block = m_last_reorg_disconnected_block;
+        if (!solvables_batch->WriteReorgSettlementHold(reorg_hold)) {
+            return util::Error{_("Error: Unable to write solvable wallet reorg settlement hold record")};
+        }
         // Write the best block locator to avoid rescanning on reload
         if (!solvables_batch->WriteBestBlock(best_block_locator)) {
             return util::Error{_("Error: Unable to write solvable wallet best block locator record")};

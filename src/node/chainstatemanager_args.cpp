@@ -33,6 +33,7 @@ std::optional<kernel::ReorgProtectionProfile> ParseReorgProtectionProfile(std::s
         return std::tolower(c);
     });
 
+    if (profile == "standard" || profile == "miner") return kernel::ReorgProtectionProfile::STANDARD;
     if (profile == "archive") return kernel::ReorgProtectionProfile::ARCHIVE;
     if (profile == "balanced") return kernel::ReorgProtectionProfile::BALANCED;
     if (profile == "strict") return kernel::ReorgProtectionProfile::STRICT;
@@ -117,7 +118,7 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
         const auto profile = ParseReorgProtectionProfile(*value);
         if (!profile) {
             return util::Error{Untranslated(strprintf(
-                "Invalid -reorgprotectionprofile value (%s), expected archive, balanced, strict, or emergency", *value))};
+                "Invalid -reorgprotectionprofile value (%s), expected standard, miner, archive, balanced, strict, or emergency", *value))};
         }
         opts.reorg_protection_profile = *profile;
         opts.deep_reorg_action = kernel::GetReorgProtectionProfileSettings(*profile).action;

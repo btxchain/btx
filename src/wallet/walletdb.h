@@ -7,6 +7,7 @@
 #define BITCOIN_WALLET_WALLETDB_H
 
 #include <script/sign.h>
+#include <uint256.h>
 #include <wallet/db.h>
 #include <wallet/walletutil.h>
 #include <key.h>
@@ -17,7 +18,6 @@
 
 class CScript;
 class uint160;
-class uint256;
 struct CBlockLocator;
 
 namespace wallet {
@@ -84,6 +84,7 @@ extern const std::string OLD_KEY;
 extern const std::string ORDERPOSNEXT;
 extern const std::string POOL;
 extern const std::string PURPOSE;
+extern const std::string REORGSETTLEMENTHOLD;
 extern const std::string SETTINGS;
 extern const std::string SHIELDEDSTATE;
 extern const std::string TX;
@@ -102,6 +103,20 @@ extern const std::string SHIELDEDSTATECRYPT;
 // Keys in this set pertain only to the legacy wallet (LegacyScriptPubKeyMan) and are removed during migration from legacy to descriptors.
 extern const std::unordered_set<std::string> LEGACY_TYPES;
 } // namespace DBKeys
+
+struct WalletReorgSettlementHold
+{
+    int version{2};
+    int hold_until_height{-1};
+    int64_t hold_until_time{-1};
+    int last_disconnected_height{-1};
+    uint256 last_disconnected_block{};
+
+    SERIALIZE_METHODS(WalletReorgSettlementHold, obj)
+    {
+        READWRITE(obj.version, obj.hold_until_height, obj.hold_until_time, obj.last_disconnected_height, obj.last_disconnected_block);
+    }
+};
 
 /* simple HD chain data model */
 class CHDChain
@@ -270,6 +285,8 @@ public:
 
     bool WriteBestBlock(const CBlockLocator& locator);
     bool ReadBestBlock(CBlockLocator& locator);
+    bool WriteReorgSettlementHold(const WalletReorgSettlementHold& hold);
+    bool ReadReorgSettlementHold(WalletReorgSettlementHold& hold);
 
     // Returns true if wallet stores encryption keys
     bool IsEncrypted();

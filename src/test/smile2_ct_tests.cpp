@@ -10,6 +10,7 @@
 #include <shielded/smile2/public_account.h>
 #include <shielded/smile2/serialize.h>
 #include <shielded/smile2/verify_dispatch.h>
+#include <shielded/smile2/wallet_bridge.h>
 #include <test/util/setup_common.h>
 #include <test/util/shielded_smile_test_util.h>
 
@@ -237,6 +238,27 @@ struct CTTestSetup {
     }
 };
 
+uint256 TaggedUint256(uint32_t tag)
+{
+    uint256 out;
+    out.begin()[0] = static_cast<unsigned char>(tag & 0xff);
+    out.begin()[1] = static_cast<unsigned char>((tag >> 8) & 0xff);
+    out.begin()[2] = static_cast<unsigned char>((tag >> 16) & 0xff);
+    out.begin()[3] = static_cast<unsigned char>((tag >> 24) & 0xff);
+    return out;
+}
+
+ShieldedNote MakeWalletBridgeTestNote(CAmount value, uint32_t tag)
+{
+    ShieldedNote note;
+    note.value = value;
+    note.recipient_pk_hash = TaggedUint256(tag);
+    note.rho = TaggedUint256(tag + 1);
+    note.rcm = TaggedUint256(tag + 2);
+    MarkShieldedNoteForModernDerivation(note);
+    return note;
+}
+
 } // anonymous namespace
 
 BOOST_FIXTURE_TEST_SUITE(smile2_ct_tests, BasicTestingSetup)
@@ -372,6 +394,64 @@ BOOST_AUTO_TEST_CASE(c002_zero_output_unshield_proof_requires_bound_public_outfl
                                           kActivationHeight)
                           .value_or(""),
                       "bad-smile2-proof-output-count");
+}
+
+BOOST_AUTO_TEST_CASE(c002_wallet_bridge_accepts_public_outflow_above_field_modulus)
+{
+    constexpr int64_t kActivationHeight = SmileCTProof::C002_ACTIVATION_HEIGHT;
+    const CAmount public_outflow = static_cast<CAmount>(Q) + 12345;
+    ShieldedNote input_note = MakeWalletBridgeTestNote(public_outflow, /*tag=*/0x3400);
+    const uint256 input_commitment = input_note.GetCommitment();
+
+    std::vector<smile2::wallet::SmileRingMember> ring_members;
+    ring_members.reserve(16);
+    const uint256 input_leaf = TaggedUint256(0x3500);
+    auto real_member = smile2::wallet::BuildRingMemberFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        input_note,
+        input_commitment,
+        input_leaf);
+    BOOST_REQUIRE(real_member.has_value());
+    ring_members.push_back(*real_member);
+    for (uint32_t i = 1; i < 16; ++i) {
+        ShieldedNote decoy_note = MakeWalletBridgeTestNote(1000 + i, 0x3400 + i * 4);
+        auto decoy_member = smile2::wallet::BuildRingMemberFromNote(
+            smile2::wallet::SMILE_GLOBAL_SEED,
+            decoy_note,
+            decoy_note.GetCommitment(),
+            TaggedUint256(0x3500 + i));
+        BOOST_REQUIRE(decoy_member.has_value());
+        ring_members.push_back(*decoy_member);
+    }
+
+    std::vector<smile2::wallet::SmileInputMaterial> inputs{
+        smile2::wallet::SmileInputMaterial{
+            input_note,
+            input_commitment,
+            input_leaf,
+            /*ring_index=*/0,
+        },
+    };
+    std::array<uint8_t, 32> entropy{};
+    entropy[0] = 0x42;
+    std::vector<uint256> serial_hashes;
+    std::string error;
+    const auto proof = smile2::wallet::CreateSmileProof(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        inputs,
+        /*outputs=*/{},
+        Span<const smile2::wallet::SmileRingMember>{ring_members.data(), ring_members.size()},
+        Span<const uint8_t>{entropy.data(), entropy.size()},
+        serial_hashes,
+        public_outflow,
+        SmileProofCodecPolicy::CANONICAL_NO_RICE,
+        /*bind_anonset_context=*/true,
+        &error,
+        kActivationHeight,
+        kActivationHeight);
+    BOOST_REQUIRE_MESSAGE(proof.has_value(), error);
+    BOOST_CHECK_EQUAL(serial_hashes.size(), 1U);
+    BOOST_CHECK(proof->output_coins.empty());
 }
 
 BOOST_AUTO_TEST_CASE(c002_zero_output_unshield_rejects_malicious_input_ring_mutation)
