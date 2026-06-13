@@ -345,6 +345,12 @@ MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTra
                                                             std::vector<uint256>& out_recovery_commitments);
 [[nodiscard]] bool CollectShieldedMempoolNullifiersForBlock(const CTransaction& tx,
                                                            std::vector<Nullifier>& out_nullifiers);
+void RemoveShieldedMempoolConflictsForBlock(CTxMemPool& pool,
+                                            CChain& chain,
+                                            ChainstateManager& chainman,
+                                            Chainstate* active_chainstate,
+                                            const std::vector<CTransactionRef>& block_vtx)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs);
 void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool,
                                                   CChain& chain,
                                                   ChainstateManager& chainman,
@@ -832,6 +838,8 @@ public:
     /** Remove invalidity status from a block and its descendants. */
     void ResetBlockFailureFlags(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    void EraseParkedBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks();
 
@@ -999,6 +1007,7 @@ private:
     Chainstate* m_active_chainstate GUARDED_BY(::cs_main) {nullptr};
 
     CBlockIndex* m_best_invalid GUARDED_BY(::cs_main){nullptr};
+    std::set<uint256> m_parked_reorg_branch_roots GUARDED_BY(::cs_main);
 
     /** The last header for which a headerTip notification was issued. */
     CBlockIndex* m_last_notified_header GUARDED_BY(GetMutex()){nullptr};
@@ -1285,6 +1294,13 @@ public:
 
     /** Guess verification progress (as a fraction between 0.0=genesis and 1.0=current tip). */
     double GuessVerificationProgress(const CBlockIndex* pindex) const;
+
+    const CBlockIndex* FindParkedReorgBranchRoot(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool IsOnParkedReorgBranch(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool ParkReorgBranch(CBlockIndex* branch_root) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool UnparkReorgBranchContainingBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::vector<uint256> GetParkedReorgBranchRoots() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool PersistParkedReorgBranches() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
      * Import blocks from an external file

@@ -34,6 +34,26 @@
 
 unsigned int g_script_size_policy_limit{DEFAULT_SCRIPT_SIZE_POLICY_LIMIT};
 
+namespace {
+
+// Recovery-exit bundles have no shielded proof envelope, so their consensus
+// resource usage remains zero. Relay/mining policy still needs to account for
+// the expensive ownership and membership checks so recovery waves are not
+// treated as free mempool work.
+constexpr uint64_t RECOVERY_EXIT_POLICY_VERIFY_UNITS{100};
+
+[[nodiscard]] bool IsRecoveryExitPolicyTransaction(const CTransaction& tx)
+{
+    if (!tx.HasShieldedBundle()) return false;
+    const CShieldedBundle& bundle = tx.GetShieldedBundle();
+    const auto* v2_bundle = bundle.GetV2Bundle();
+    return v2_bundle != nullptr &&
+           shielded::v2::GetBundleSemanticFamily(*v2_bundle) ==
+               shielded::v2::TransactionFamily::V2_RECOVERY_EXIT;
+}
+
+} // namespace
+
 CAmount GetDustThreshold(const CTxOut& txout, const CFeeRate& dustRelayFeeIn)
 {
     // "Dust" is defined in terms of dustRelayFee,
@@ -1224,7 +1244,10 @@ int64_t GetShieldedPolicyWeight(const CTransaction& tx)
     const int64_t base_weight = GetTransactionWeight(tx);
     if (!tx.HasShieldedBundle()) return base_weight;
 
-    const auto usage = GetShieldedResourceUsage(tx.GetShieldedBundle());
+    auto usage = GetShieldedResourceUsage(tx.GetShieldedBundle());
+    if (IsRecoveryExitPolicyTransaction(tx)) {
+        usage.verify_units += RECOVERY_EXIT_POLICY_VERIFY_UNITS;
+    }
     const int64_t serialized_weight =
         ScaleShieldedResourceToWeight(::GetSerializeSize(TX_WITH_WITNESS(tx)), MAX_BLOCK_SERIALIZED_SIZE);
     const int64_t verify_weight =

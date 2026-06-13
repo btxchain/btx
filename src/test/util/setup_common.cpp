@@ -259,7 +259,7 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
             chainman_opts.signature_cache_bytes = 0;
         }
         // Honor the deep-reorg defense options from extra_args so tests can
-        // exercise the WARN (default) and PARK paths via -parkdeepreorg /
+        // exercise the PARK (default) and WARN opt-out paths via -parkdeepreorg /
         // -maxreorgdepthwarn (see ApplyArgsManOptions / ActivateBestChainStep).
         if (auto value{m_args.GetBoolArg("-parkdeepreorg")}) {
             chainman_opts.deep_reorg_action = *value ? kernel::DeepReorgAction::PARK

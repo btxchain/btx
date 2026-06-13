@@ -867,11 +867,12 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     if (m_mempool) {
         CTxMemPool& mutable_mempool{*const_cast<CTxMemPool*>(m_mempool)};
         LOCK(mutable_mempool.cs);
-        RemoveStaleShieldedAnchorMempoolTransactions(
-            mutable_mempool,
-            m_chainstate.m_chain,
-            m_chainstate.m_chainman,
-            &m_chainstate);
+        // Do not run the full shielded stale-mempool scan from getblocktemplate.
+        // ConnectTip removes exact nullifier/commitment conflicts for connected
+        // blocks, reorg handling keeps the safety fallback, and package
+        // selection below checks each candidate against current shielded state.
+        // Running the full scan here lets a recovery-exit wave stall mining/RPC
+        // once per block while holding the mempool lock.
         addPriorityTxs(mutable_mempool, nPackagesSelected);
         addPackageTxs(mutable_mempool, nPackagesSelected, nDescendantsUpdated);
     }
@@ -944,6 +945,12 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         if (!TestBlockValidity(state, chainparams, m_chainstate, *pblock, pindexPrev,
                                /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/false)) {
             LogWarning("CreateNewBlock(): TestBlockValidity failed at height %d: %s\n", nHeight, state.ToString());
+            if (m_mempool != nullptr && nBlockTx > 0) {
+                LogWarning("CreateNewBlock(): retrying with an empty template after mempool-selected transactions failed block validation\n");
+                Options retry_options = m_options;
+                retry_options.use_mempool = false;
+                return BlockAssembler{m_chainstate, m_mempool, retry_options, m_node}.CreateNewBlock();
+            }
             throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s", __func__, state.ToString()));
         }
         LogDebug(BCLog::MINING, "CreateNewBlock(): TestBlockValidity passed for height %d\n", nHeight);
@@ -1340,6 +1347,7 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
         remaining_resources.max_tree_update_units = chainparams.GetConsensus().nMaxBlockShieldedTreeUpdateUnits;
 
         std::optional<size_t> best_candidate_index;
+        bool skipped_not_ready_shielded_candidate{false};
         for (size_t i = 0; i < candidate_window.size(); ++i) {
             const auto& candidate = candidate_window[i];
             if (candidate.total_fees < m_options.blockMinFeeRate.GetFee(candidate.total_policy_size)) {
@@ -1360,6 +1368,7 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
                                                 m_templateShieldedRetirementCacheComplete,
                                                 m_templateShieldedNullifierCache,
                                                 m_templateShieldedRecoveryCommitmentCache)) {
+                skipped_not_ready_shielded_candidate = true;
                 continue;
             }
             if (!best_candidate_index.has_value() ||
@@ -1369,6 +1378,21 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
         }
 
         if (!best_candidate_index.has_value()) {
+            if (skipped_not_ready_shielded_candidate) {
+                for (const auto& candidate : candidate_window) {
+                    if (candidate.from_modified) {
+                        mapModifiedTx.erase(candidate.iter);
+                    }
+                    failedTx.insert(candidate.iter);
+                }
+                nConsecutiveFailed += static_cast<int64_t>(candidate_window.size());
+                if (nConsecutiveFailed > MAX_CONSECUTIVE_FAILURES &&
+                    IsNearLimit(nBlockWeight, m_options.nBlockMaxWeight,
+                                static_cast<uint64_t>(BLOCK_FULL_ENOUGH_WEIGHT_DELTA))) {
+                    break;
+                }
+                continue;
+            }
             return;
         }
 

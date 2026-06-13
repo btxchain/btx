@@ -1722,10 +1722,10 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
 
     BOOST_CHECK_EQUAL(
         consensus.nMinimumChainWork.GetHex(),
-        "000000000000000000000000000000000000000000000000000004df8d0e5f66");
+        "000000000000000000000000000000000000000000000000000005323d5ff789");
     BOOST_CHECK_EQUAL(
         consensus.defaultAssumeValid.GetHex(),
-        "fb6dcf553916244d09ea1cf1f0c0dfc714f232ac17c94f8d0a73d21a75de9e34");
+        "d95c8b565fefcda79efe47acad98648b0a24899f22facba9eedeb02c8bffd4d2");
     BOOST_CHECK_EQUAL(params->AssumedBlockchainSize(), 16U);
     BOOST_CHECK_EQUAL(params->AssumedChainStateSize(), 1U);
 
@@ -1736,11 +1736,11 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
     BOOST_CHECK_EQUAL(
         it_0->second.GetHex(),
         "75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601");
-    const auto it_anchor = checkpoints.find(126800);
+    const auto it_anchor = checkpoints.find(128605);
     BOOST_REQUIRE(it_anchor != checkpoints.end());
     BOOST_CHECK_EQUAL(
         it_anchor->second.GetHex(),
-        "fb6dcf553916244d09ea1cf1f0c0dfc714f232ac17c94f8d0a73d21a75de9e34");
+        "d95c8b565fefcda79efe47acad98648b0a24899f22facba9eedeb02c8bffd4d2");
 
     const auto assumeutxo_55000 = params->AssumeutxoForHeight(55000);
     BOOST_REQUIRE(assumeutxo_55000.has_value());
@@ -1874,11 +1874,25 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_126800->blockhash.GetHex(),
         "fb6dcf553916244d09ea1cf1f0c0dfc714f232ac17c94f8d0a73d21a75de9e34");
 
+    const auto assumeutxo_128605 = params->AssumeutxoForHeight(128605);
+    BOOST_REQUIRE(assumeutxo_128605.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_128605->height, 128605);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_128605->hash_serialized.ToString(),
+        "2cfa629907fbc18f3edc1dbb8b33fda651ad3655fb88a9dffe7a67ead580a102");
+    BOOST_CHECK_EQUAL(assumeutxo_128605->m_chain_tx_count, 158299U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_128605->blockhash.GetHex(),
+        "d95c8b565fefcda79efe47acad98648b0a24899f22facba9eedeb02c8bffd4d2");
+    BOOST_CHECK_EQUAL(
+        assumeutxo_128605->shielded_state_commitment.GetHex(),
+        "827f8bf52ddf6de1e780a0917179dac715abeb428580744505dc30fbd6be5f9d");
+
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 12U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 13U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 126800);
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 128605);
     BOOST_CHECK_GE(snapshot_heights.back(), std::prev(checkpoints.end())->first);
 }
 

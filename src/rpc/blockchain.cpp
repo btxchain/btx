@@ -2345,6 +2345,7 @@ void ReconsiderBlock(ChainstateManager& chainman, uint256 block_hash) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
 
+        chainman.UnparkReorgBranchContainingBlock(pblockindex);
         chainman.ActiveChainstate().ResetBlockFailureFlags(pblockindex);
         chainman.RecalculateBestHeader();
     }

@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 
 class CChainParams;
@@ -40,22 +41,84 @@ enum class MatMulValidationMode {
 //! than the deep-reorg threshold (-maxreorgdepthwarn, default = consensus
 //! nMaxReorgDepth).
 //!
-//! WARN (default, Nakamoto-safe): emit a loud warning + RPC/notification and
-//!   still follow the most-work chain. This buys operators/exchanges response
-//!   time WITHOUT introducing any finality assumption, so it can never split the
-//!   network: every honest node, regardless of how it was partitioned, still
-//!   converges on the single most-work chain.
+//! WARN (-parkdeepreorg=0, Nakamoto-safe opt-out): emit a loud warning +
+//!   RPC/notification and still follow the most-work chain. This buys
+//!   operators/exchanges response time WITHOUT introducing any finality
+//!   assumption, so every honest node, regardless of how it was partitioned,
+//!   still converges on the single most-work chain.
 //!
-//! PARK (opt-in, -parkdeepreorg=1): refuse to auto-switch to the deeper branch
+//! PARK (default, -parkdeepreorg=1): refuse to auto-switch to the deeper branch
 //!   and stay on the current tip pending operator action, while still tracking
-//!   the branch in the block index. This protects a single node from a silent
-//!   deep rewrite, but it is a LOCAL FINALITY assumption: see the split-risk
-//!   memo at the call site. It is per-node, non-consensus, and OFF by default so
-//!   the network's default behavior remains pure Nakamoto consensus.
+//!   the branch in the block index. This protects ordinary nodes from silently
+//!   following a deep rewrite. It is still a LOCAL FINALITY assumption: see the
+//!   split-risk memo at the call site. Operators that need pure most-work
+//!   behavior during recovery can explicitly set -parkdeepreorg=0.
 enum class DeepReorgAction {
     WARN,
     PARK,
 };
+
+enum class ReorgProtectionProfile {
+    ARCHIVE,
+    BALANCED,
+    STRICT,
+    EMERGENCY,
+};
+
+struct ReorgProtectionProfileSettings {
+    DeepReorgAction action{DeepReorgAction::PARK};
+    uint32_t warn_depth{3};
+    uint32_t park_depth{24};
+    uint32_t finality_depth{24};
+};
+
+inline constexpr uint32_t REORG_PROTECTION_DEPTH_DISABLED{std::numeric_limits<uint32_t>::max()};
+
+inline ReorgProtectionProfileSettings GetReorgProtectionProfileSettings(ReorgProtectionProfile profile)
+{
+    switch (profile) {
+    case ReorgProtectionProfile::ARCHIVE:
+        return {
+            .action = DeepReorgAction::WARN,
+            .warn_depth = 72,
+            .park_depth = REORG_PROTECTION_DEPTH_DISABLED,
+            .finality_depth = 72,
+        };
+    case ReorgProtectionProfile::BALANCED:
+        return {
+            .action = DeepReorgAction::PARK,
+            .warn_depth = 12,
+            .park_depth = 48,
+            .finality_depth = 48,
+        };
+    case ReorgProtectionProfile::STRICT:
+        return {
+            .action = DeepReorgAction::PARK,
+            .warn_depth = 3,
+            .park_depth = 12,
+            .finality_depth = 12,
+        };
+    case ReorgProtectionProfile::EMERGENCY:
+        return {
+            .action = DeepReorgAction::PARK,
+            .warn_depth = 3,
+            .park_depth = 12,
+            .finality_depth = 12,
+        };
+    }
+    return {};
+}
+
+inline const char* ReorgProtectionProfileName(ReorgProtectionProfile profile)
+{
+    switch (profile) {
+    case ReorgProtectionProfile::ARCHIVE: return "archive";
+    case ReorgProtectionProfile::BALANCED: return "balanced";
+    case ReorgProtectionProfile::STRICT: return "strict";
+    case ReorgProtectionProfile::EMERGENCY: return "emergency";
+    }
+    return "unknown";
+}
 
 /**
  * An options struct for `ChainstateManager`, more ergonomically referred to as
@@ -96,14 +159,23 @@ struct ChainstateManagerOpts {
     //! (-allowunpinnedshieldedsnapshot=1) only for explicitly trusted repair/bootstrap material.
     bool allow_unpinned_shielded_snapshot{DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT};
     //! Action taken when a candidate branch would reorg deeper than the
-    //! deep-reorg threshold. Default WARN keeps pure Nakamoto consensus (no
-    //! split risk); PARK is an opt-in per-node finality assumption.
-    DeepReorgAction deep_reorg_action{DeepReorgAction::WARN};
+    //! deep-reorg threshold. Default PARK fails closed for ordinary nodes;
+    //! -parkdeepreorg=0 is the explicit pure-Nakamoto opt-out.
+    DeepReorgAction deep_reorg_action{DeepReorgAction::PARK};
+    //! Named reorg/finality policy. EMERGENCY is the default during recovery:
+    //! warn early, park before deep rewrites, and report a practical local
+    //! finality depth without pretending it is consensus finality.
+    ReorgProtectionProfile reorg_protection_profile{ReorgProtectionProfile::EMERGENCY};
     //! Operator override for the deep-reorg threshold, in blocks. When unset the
-    //! consensus value nMaxReorgDepth is used (if configured for the chain).
-    //! Setting this lets an operator warn/park at a shallower depth than the
-    //! chain default without recompiling.
+    //! active reorg protection profile controls the warning depth.
     std::optional<uint32_t> max_reorg_depth_warn{};
+    //! Operator override for the local parking threshold, in blocks. When unset
+    //! the active reorg protection profile controls the parking depth.
+    std::optional<uint32_t> max_reorg_depth_park{};
+    //! Operator override for the reported practical local-finality depth. This
+    //! is not consensus finality; it is an operator safety signal surfaced by
+    //! RPCs and release policy.
+    std::optional<uint32_t> local_finality_depth{};
     DBOptions coins_db{};
     CoinsViewOptions coins_view{};
     Notifications& notifications;

@@ -273,6 +273,11 @@ std::atomic<int64_t> g_reorg_protection_last_rejected_unix{0};
         shielded::v2::GetBundleSemanticFamily(*v2b) == shielded::v2::TransactionFamily::V2_RECOVERY_EXIT;
 }
 
+[[nodiscard]] bool IsRecoveryExitTransaction(const CTransaction& tx)
+{
+    return tx.HasShieldedBundle() && IsRecoveryExitBundle(tx.GetShieldedBundle());
+}
+
 [[nodiscard]] bool CollectRecoveryExitRetirements(const CShieldedBundle& bundle,
                                                   std::vector<Nullifier>* nullifiers,
                                                   std::vector<uint256>* commitments)
@@ -3082,6 +3087,77 @@ bool HasSpentShieldedMempoolNullifier(const CTransaction& tx, const ChainstateMa
     return false;
 }
 
+static bool CollectShieldedBlockRetirements(const std::vector<CTransactionRef>& block_vtx,
+                                            std::set<uint256>& out_nullifiers,
+                                            std::set<uint256>& out_recovery_commitments)
+{
+    out_nullifiers.clear();
+    out_recovery_commitments.clear();
+
+    for (const auto& tx : block_vtx) {
+        if (!tx) return false;
+
+        std::vector<Nullifier> tx_nullifiers;
+        std::vector<uint256> tx_recovery_commitments;
+        if (!CollectShieldedMempoolRetirementsForBlock(*tx,
+                                                       tx_nullifiers,
+                                                       tx_recovery_commitments)) {
+            return false;
+        }
+        out_nullifiers.insert(tx_nullifiers.begin(), tx_nullifiers.end());
+        out_recovery_commitments.insert(tx_recovery_commitments.begin(),
+                                        tx_recovery_commitments.end());
+    }
+    return true;
+}
+
+void RemoveShieldedMempoolConflictsForBlock(CTxMemPool& pool,
+                                            CChain& chain,
+                                            ChainstateManager& chainman,
+                                            Chainstate* active_chainstate,
+                                            const std::vector<CTransactionRef>& block_vtx)
+{
+    AssertLockHeld(::cs_main);
+    AssertLockHeld(pool.cs);
+
+    std::set<uint256> block_nullifiers;
+    std::set<uint256> block_recovery_commitments;
+    if (!CollectShieldedBlockRetirements(block_vtx, block_nullifiers, block_recovery_commitments)) {
+        LogWarning("RemoveShieldedMempoolConflictsForBlock: failed to collect connected-block shielded retirements; falling back to full shielded mempool cleanup\n");
+        RemoveStaleShieldedAnchorMempoolTransactions(pool, chain, chainman, active_chainstate);
+        return;
+    }
+
+    if (block_nullifiers.empty() && block_recovery_commitments.empty()) return;
+
+    std::set<Txid> txids_to_remove;
+    for (const auto& nullifier : block_nullifiers) {
+        const auto it = pool.m_shielded_nullifiers.find(nullifier);
+        if (it != pool.m_shielded_nullifiers.end()) {
+            txids_to_remove.insert(it->second);
+        }
+    }
+    for (const auto& commitment : block_recovery_commitments) {
+        const auto it = pool.m_shielded_recovery_commitments.find(commitment);
+        if (it != pool.m_shielded_recovery_commitments.end()) {
+            txids_to_remove.insert(it->second);
+        }
+    }
+    if (txids_to_remove.empty()) return;
+
+    std::vector<CTransactionRef> txs_to_remove;
+    for (const auto& it : pool.GetIterSet(txids_to_remove)) {
+        txs_to_remove.push_back(it->GetSharedTx());
+    }
+    for (const auto& tx : txs_to_remove) {
+        LogDebug(BCLog::MEMPOOL,
+                 "removing mempool tx %s: shielded retirement conflict with connected block at height %d\n",
+                 tx->GetHash().ToString(),
+                 chain.Height());
+        pool.removeRecursive(*tx, MemPoolRemovalReason::CONFLICT);
+    }
+}
+
 void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool,
                                                   CChain& chain,
                                                   ChainstateManager& chainman,
@@ -3103,21 +3179,34 @@ void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool,
                 return true;
             }
             if (!shielded_state_ready) return true;
-            if (HasSpentShieldedMempoolNullifier(tx, chainman)) {
+            std::vector<Nullifier> tx_nullifiers;
+            std::vector<uint256> tx_recovery_commitments;
+            if (!pool.GetShieldedRetirementsForMempoolTx(tx, tx_nullifiers, tx_recovery_commitments)) {
                 LogDebug(BCLog::MEMPOOL,
-                         "removing mempool tx %s: stale shielded nullifier at height %d\n",
+                         "removing mempool tx %s: missing cached shielded retirements at height %d\n",
                          tx.GetHash().ToString(),
                          validation_height);
                 return true;
+            }
+            for (const auto& nullifier : tx_nullifiers) {
+                if (chainman.IsShieldedNullifierSpent(nullifier)) {
+                    LogDebug(BCLog::MEMPOOL,
+                             "removing mempool tx %s: stale shielded nullifier at height %d\n",
+                             tx.GetHash().ToString(),
+                             validation_height);
+                    return true;
+                }
+            }
+            for (const auto& commitment : tx_recovery_commitments) {
+                if (chainman.IsShieldedRecoveryExitCommitmentRetired(commitment)) {
+                    LogDebug(BCLog::MEMPOOL,
+                             "removing mempool tx %s: stale recovery-exit shielded state at height %d\n",
+                             tx.GetHash().ToString(),
+                             validation_height);
+                    return true;
+                }
             }
             if (HasInvalidShieldedAnchors(tx, chainman)) return true;
-            if (HasInvalidShieldedRecoveryExitMempoolState(tx, chainman)) {
-                LogDebug(BCLog::MEMPOOL,
-                         "removing mempool tx %s: stale recovery-exit shielded state at height %d\n",
-                         tx.GetHash().ToString(),
-                         validation_height);
-                return true;
-            }
         }
 
         if (active_chainstate != nullptr && !tx.IsCoinBase()) {
@@ -3762,7 +3851,11 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             } else if (m_pool.m_opts.rbf_policy == RBFPolicy::Never) {
                 allow_rbf = false;
             } else {
-                allow_rbf = SignalsOptInRBF(conflicting_tx) || conflicting_tx.version == TRUC_VERSION;
+                const bool recovery_exit_family_replacement =
+                    IsRecoveryExitTransaction(tx) && IsRecoveryExitTransaction(conflicting_tx);
+                allow_rbf = SignalsOptInRBF(conflicting_tx) ||
+                            conflicting_tx.version == TRUC_VERSION ||
+                            recovery_exit_family_replacement;
             }
             if (!allow_rbf) {
                 return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
@@ -3933,6 +4026,18 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             if (!TryComputeRecoveryExitFee(re_claim.value, re_transparent_out, re_fee, re_fee_reject)) {
                 return state.Invalid(TxValidationResult::TX_CONSENSUS, re_fee_reject);
             }
+            const bool re_nullifier_already_spent =
+                m_subpackage.m_package_shielded_nullifiers.count(re_ids.nullifier) > 0 ||
+                m_active_chainstate.m_chainman.IsShieldedNullifierSpent(re_ids.nullifier);
+            if (re_nullifier_already_spent) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-recovery-exit-nullifier-spent");
+            }
+            const bool re_commitment_already_claimed =
+                m_subpackage.m_package_recovery_exit_commitments.count(re_ids.commitment) > 0 ||
+                m_active_chainstate.m_chainman.IsShieldedRecoveryExitCommitmentRetired(re_ids.commitment);
+            if (re_commitment_already_claimed) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-recovery-exit-commitment-claimed");
+            }
             const uint256 re_tx_binding = shielded::recovery::ComputeRecoveryExitTransparentBinding(tx.vout);
             const uint256 re_binding_hash = shielded::recovery::ComputeRecoveryExitBindingHash(
                 re_ids.commitment, re_ids.nullifier, re_claim.value, re_tx_binding);
@@ -3954,12 +4059,8 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             re_c.ownership_verified = shielded::recovery::VerifyRecoveryExitOwnership(re_claim, re_binding_hash);
             re_c.membership_verified = shielded::recovery::VerifyRecoveryExitMembership(
                 re_claim, re_ids.commitment, re_membership_root, re_membership_reject);
-            re_c.nullifier_already_spent =
-                m_subpackage.m_package_shielded_nullifiers.count(re_ids.nullifier) > 0 ||
-                m_active_chainstate.m_chainman.IsShieldedNullifierSpent(re_ids.nullifier);
-            re_c.commitment_already_claimed =
-                m_subpackage.m_package_recovery_exit_commitments.count(re_ids.commitment) > 0 ||
-                m_active_chainstate.m_chainman.IsShieldedRecoveryExitCommitmentRetired(re_ids.commitment);
+            re_c.nullifier_already_spent = re_nullifier_already_spent;
+            re_c.commitment_already_claimed = re_commitment_already_claimed;
             shielded::recovery::RecoveryExitIdentifiers re_checked;
             std::string re_reject;
             if (!shielded::recovery::CheckRecoveryExitClaim(re_claim, re_c, re_checked, re_reject)) {
@@ -6752,6 +6853,20 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                     state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, re_fee_reject);
                     break;
                 }
+                const bool re_nullifier_already_spent = block_nullifiers.count(re_ids.nullifier) > 0 ||
+                    m_chainman.IsShieldedNullifierSpent(re_ids.nullifier);
+                if (re_nullifier_already_spent) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-recovery-exit-nullifier-spent");
+                    break;
+                }
+                const bool re_commitment_already_claimed =
+                    std::find(block_recovery_exit_commitments.begin(), block_recovery_exit_commitments.end(),
+                              re_ids.commitment) != block_recovery_exit_commitments.end() ||
+                    m_chainman.m_shielded_nullifiers->ContainsRecoveryExitCommitment(re_ids.commitment);
+                if (re_commitment_already_claimed) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-recovery-exit-commitment-claimed");
+                    break;
+                }
                 const shielded::ShieldedMerkleTree& recovery_membership_tree =
                     shielded_tree_snapshot != nullptr ? *shielded_tree_snapshot : next_shielded_tree;
                 const uint256 re_membership_root = RecoveryExitMembershipRoot(
@@ -6776,12 +6891,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 re_c.membership_verified = shielded::recovery::VerifyRecoveryExitMembership(
                     re_claim, re_ids.commitment,
                     re_membership_root, re_membership_reject);
-                re_c.nullifier_already_spent = block_nullifiers.count(re_ids.nullifier) > 0 ||
-                    m_chainman.IsShieldedNullifierSpent(re_ids.nullifier);
-                re_c.commitment_already_claimed =
-                    std::find(block_recovery_exit_commitments.begin(), block_recovery_exit_commitments.end(),
-                              re_ids.commitment) != block_recovery_exit_commitments.end() ||
-                    m_chainman.m_shielded_nullifiers->ContainsRecoveryExitCommitment(re_ids.commitment);
+                re_c.nullifier_already_spent = re_nullifier_already_spent;
+                re_c.commitment_already_claimed = re_commitment_already_claimed;
                 shielded::recovery::RecoveryExitIdentifiers re_checked;
                 std::string re_reject;
                 if (!shielded::recovery::CheckRecoveryExitClaim(re_claim, re_c, re_checked, re_reject)) {
@@ -8075,7 +8186,11 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     // Keep the shielded prune-retention window pinned to the new tip (no-op unless pruning + shielded).
     UpdateShieldedPruneRetentionLock(*this);
     if (m_mempool) {
-        RemoveStaleShieldedAnchorMempoolTransactions(*m_mempool, m_chain, m_chainman, this);
+        RemoveShieldedMempoolConflictsForBlock(*m_mempool,
+                                               m_chain,
+                                               m_chainman,
+                                               this,
+                                               blockConnecting.vtx);
     }
 
     if (m_mempool) {
@@ -8126,6 +8241,11 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             pindexNew = *it;
         }
 
+        if (m_chainman.IsOnParkedReorgBranch(pindexNew)) {
+            setBlockIndexCandidates.erase(pindexNew);
+            continue;
+        }
+
         // Check whether all blocks on the path between the currently active chain and the candidate are valid.
         // Just going until the active chain is an optimization, as we know all blocks in it are valid already.
         CBlockIndex *pindexTest = pindexNew;
@@ -8169,6 +8289,18 @@ CBlockIndex* Chainstate::FindMostWorkChain()
         if (!fInvalidAncestor)
             return pindexNew;
     } while(true);
+}
+
+void Chainstate::EraseParkedBlockIndexCandidates()
+{
+    AssertLockHeld(::cs_main);
+    for (auto it = setBlockIndexCandidates.begin(); it != setBlockIndexCandidates.end();) {
+        if (m_chainman.IsOnParkedReorgBranch(*it)) {
+            it = setBlockIndexCandidates.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 /** Delete all entries in setBlockIndexCandidates that are worse than the current tip. */
@@ -8225,49 +8357,54 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
     //   such gadget, so we DO NOT impose a hard cap as default behavior.
     //
     // What we do instead, gated on operator policy (m_chainman.m_options):
-    //   WARN (default): follow the most-work chain as usual, but fire a loud
-    //     alarm (log + Warning notification + RPC stats) so operators/exchanges
-    //     can raise confirmations and investigate. No finality assumption => no
-    //     split risk. This is the only behavior that is always safe.
-    //   PARK (opt-in, -parkdeepreorg=1): refuse to auto-switch and stay on the
-    //     current tip pending operator action, still tracking the branch. This
-    //     buys a single node protection from a silent deep rewrite, but it is a
-    //     LOCAL finality assumption with exactly the split risk above. It is
-    //     OFF by default and intended for individual exchange/custody nodes whose
-    //     operators will manually reconcile (e.g. via invalidateblock /
-    //     reconsiderblock) -- never as a network-wide rule.
+    //   - Warn early when a branch would rewrite more than the profile warning
+    //     depth. This gives operators and mining infrastructure fast visibility.
+    //   - Park deeper branches when the profile parking depth is crossed. This
+    //     is local finality, not consensus, but it prevents ordinary nodes from
+    //     silently following a large rewrite during recovery periods.
+    //   - Recovery/archive operators can use the archive profile or
+    //     -parkdeepreorg=0 to keep pure most-work behavior while retaining
+    //     alarms.
     //
-    // Threshold source: operator override -maxreorgdepthwarn, else the chain's
-    // consensus nMaxReorgDepth (when configured). Only armed once the tip has
-    // reached nReorgProtectionStartHeight so early/regtest chains are unaffected.
+    // Profiles are explicit because one overloaded "max reorg" value is too
+    // crude for a fragmented network: mining needs early warning, wallets need
+    // practical local-finality depth, and archive nodes need convergence knobs.
+    // The guard is armed only once the tip has reached
+    // nReorgProtectionStartHeight so early/regtest chains are unaffected.
     // ---------------------------------------------------------------------
     const auto& cm_opts = m_chainman.m_options;
-    uint32_t deep_reorg_threshold = std::numeric_limits<uint32_t>::max();
-    if (cm_opts.max_reorg_depth_warn.has_value()) {
-        deep_reorg_threshold = *cm_opts.max_reorg_depth_warn;
-    } else if (consensus_params.nMaxReorgDepth != std::numeric_limits<uint32_t>::max()) {
-        deep_reorg_threshold = consensus_params.nMaxReorgDepth;
-    }
+    const auto profile_settings = kernel::GetReorgProtectionProfileSettings(cm_opts.reorg_protection_profile);
+    const uint32_t warn_depth = cm_opts.max_reorg_depth_warn.value_or(profile_settings.warn_depth);
+    const uint32_t park_depth = cm_opts.max_reorg_depth_park.value_or(profile_settings.park_depth);
 
     if (pindexOldTip != nullptr &&
         pindexFork != nullptr &&
-        deep_reorg_threshold != std::numeric_limits<uint32_t>::max() &&
         pindexOldTip->nHeight >= consensus_params.nReorgProtectionStartHeight) {
         const int reorg_depth = pindexOldTip->nHeight - pindexFork->nHeight;
-        if (reorg_depth > static_cast<int>(deep_reorg_threshold)) {
+        const bool warn =
+            warn_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
+            reorg_depth > static_cast<int>(warn_depth);
+        const bool park =
+            cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK &&
+            park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
+            reorg_depth > static_cast<int>(park_depth);
+
+        if (warn || park) {
             RecordRejectedReorgDepth(
                 static_cast<uint32_t>(reorg_depth),
-                deep_reorg_threshold,
+                park ? park_depth : warn_depth,
                 pindexOldTip->nHeight,
                 pindexFork->nHeight,
                 pindexMostWork->nHeight);
 
-            const bool park = cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK;
             const bilingual_str alarm = strprintf(
                 _("Deep reorg detected: a branch would reorganize %d blocks "
-                  "(threshold %u; tip=%d, fork=%d, candidate=%d). %s This may indicate "
+                  "(profile=%s; warn=%u; park=%u; tip=%d, fork=%d, candidate=%d). %s This may indicate "
                   "a 51%% attack -- raise required confirmations and investigate."),
-                reorg_depth, deep_reorg_threshold,
+                reorg_depth,
+                kernel::ReorgProtectionProfileName(cm_opts.reorg_protection_profile),
+                warn_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED ? warn_depth : 0,
+                park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED ? park_depth : 0,
                 pindexOldTip->nHeight, pindexFork->nHeight, pindexMostWork->nHeight,
                 park ? _("Parking the branch and staying on the current chain pending operator action.")
                      : _("Following the most-work chain (warn-only)."));
@@ -8277,26 +8414,26 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
             m_chainman.GetNotifications().warningSet(kernel::Warning::DEEP_REORG_DETECTED, alarm);
 
             if (park) {
+                CBlockIndex* branch_root = pindexMostWork;
+                while (branch_root != nullptr && branch_root->pprev != pindexFork) {
+                    branch_root = branch_root->pprev;
+                }
+                if (branch_root != nullptr) {
+                    if (!m_chainman.ParkReorgBranch(branch_root)) {
+                        return state.Error("failed to persist parked deep-reorg branch");
+                    }
+                }
                 // Opt-in local finality (see split-risk memo above). Deep reorgs
                 // are a local policy refusal, NOT a consensus invalidity. Remove
-                // the parked branch from best-chain selection so shallower
-                // extensions of the current tip can still make progress; the
-                // branch remains in the block index for operator inspection and
-                // for manual reconsideration.
-                for (CBlockIndex* rejected = pindexMostWork;
-                     rejected != nullptr && rejected != pindexFork;
-                     rejected = rejected->pprev) {
-                    setBlockIndexCandidates.erase(rejected);
-                }
+                // parked branches from best-chain selection so shallower extensions
+                // of the current tip can still make progress.
+                EraseParkedBlockIndexCandidates();
                 if (m_chain.Tip() != nullptr) {
                     setBlockIndexCandidates.insert(m_chain.Tip());
                 }
                 fInvalidFound = true;
                 return true;
             }
-            // WARN (default): fall through and follow the most-work chain. No
-            // finality assumption is imposed, so the network cannot be split by
-            // this node's deep-reorg handling.
         }
     }
 
@@ -8606,8 +8743,10 @@ bool Chainstate::PreciousBlock(BlockValidationState& state, CBlockIndex* pindex)
             // call preciousblock 2**31-1 times on the same set of tips...
             m_chainman.nBlockReverseSequenceId--;
         }
-        if (pindex->IsValid(BLOCK_VALID_TRANSACTIONS) && pindex->HaveNumChainTxs()) {
-            setBlockIndexCandidates.insert(pindex);
+        if (pindex->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+            pindex->HaveNumChainTxs() &&
+            !m_chainman.IsOnParkedReorgBranch(pindex)) {
+            TryAddBlockIndexCandidate(pindex);
             PruneBlockIndexCandidates();
         }
     }
@@ -8654,7 +8793,8 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
             if (!m_chain.Contains(candidate) &&
                     !CBlockIndexWorkComparator()(candidate, pindex->pprev) &&
                     candidate->IsValid(BLOCK_VALID_TRANSACTIONS) &&
-                    candidate->HaveNumChainTxs()) {
+                    candidate->HaveNumChainTxs() &&
+                    !m_chainman.IsOnParkedReorgBranch(candidate)) {
                 candidate_blocks_by_work.insert(std::make_pair(candidate->nChainWork, candidate));
             }
         }
@@ -8701,7 +8841,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
         invalid_walk_tip->nStatus |= BLOCK_FAILED_VALID;
         m_blockman.m_dirty_blockindex.insert(invalid_walk_tip);
         setBlockIndexCandidates.erase(invalid_walk_tip);
-        setBlockIndexCandidates.insert(invalid_walk_tip->pprev);
+        TryAddBlockIndexCandidate(invalid_walk_tip->pprev);
         if (invalid_walk_tip->pprev == to_mark_failed && (to_mark_failed->nStatus & BLOCK_FAILED_VALID)) {
             // We only want to mark the last disconnected block as BLOCK_FAILED_VALID; its children
             // need to be BLOCK_FAILED_CHILD instead.
@@ -8713,7 +8853,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
         auto candidate_it = candidate_blocks_by_work.lower_bound(invalid_walk_tip->pprev->nChainWork);
         while (candidate_it != candidate_blocks_by_work.end()) {
             if (!CBlockIndexWorkComparator()(candidate_it->second, invalid_walk_tip->pprev)) {
-                setBlockIndexCandidates.insert(candidate_it->second);
+                TryAddBlockIndexCandidate(candidate_it->second);
                 candidate_it = candidate_blocks_by_work.erase(candidate_it);
             } else {
                 ++candidate_it;
@@ -8748,8 +8888,11 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
         // Loop back over all block index entries and add any missing entries
         // to setBlockIndexCandidates.
         for (auto& [_, block_index] : m_blockman.m_block_index) {
-            if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) && block_index.HaveNumChainTxs() && !setBlockIndexCandidates.value_comp()(&block_index, m_chain.Tip())) {
-                setBlockIndexCandidates.insert(&block_index);
+            if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) &&
+                block_index.HaveNumChainTxs() &&
+                !setBlockIndexCandidates.value_comp()(&block_index, m_chain.Tip()) &&
+                !m_chainman.IsOnParkedReorgBranch(&block_index)) {
+                TryAddBlockIndexCandidate(&block_index);
             }
         }
 
@@ -8797,8 +8940,11 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
         if (!block_index.IsValid() && block_index.GetAncestor(nHeight) == pindex) {
             block_index.nStatus &= ~BLOCK_FAILED_MASK;
             m_blockman.m_dirty_blockindex.insert(&block_index);
-            if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) && block_index.HaveNumChainTxs() && setBlockIndexCandidates.value_comp()(m_chain.Tip(), &block_index)) {
-                setBlockIndexCandidates.insert(&block_index);
+            if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) &&
+                block_index.HaveNumChainTxs() &&
+                setBlockIndexCandidates.value_comp()(m_chain.Tip(), &block_index) &&
+                !m_chainman.IsOnParkedReorgBranch(&block_index)) {
+                TryAddBlockIndexCandidate(&block_index);
             }
             if (&block_index == m_chainman.m_best_invalid) {
                 // Reset invalid block marker if it was pointing to one of those.
@@ -8822,6 +8968,10 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
 void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
 {
     AssertLockHeld(cs_main);
+    if (m_chainman.IsOnParkedReorgBranch(pindex)) {
+        return;
+    }
+
     // The block only is a candidate for the most-work-chain if it has the same
     // or more work than our current tip.
     if (m_chain.Tip() != nullptr && setBlockIndexCandidates.value_comp()(pindex, m_chain.Tip())) {
@@ -8842,6 +8992,80 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
             setBlockIndexCandidates.insert(pindex);
         }
     }
+}
+
+const CBlockIndex* ChainstateManager::FindParkedReorgBranchRoot(const CBlockIndex* pindex) const
+{
+    AssertLockHeld(::cs_main);
+    if (pindex == nullptr) return nullptr;
+    for (const uint256& root_hash : m_parked_reorg_branch_roots) {
+        const CBlockIndex* root = m_blockman.LookupBlockIndex(root_hash);
+        if (root != nullptr &&
+            pindex->nHeight >= root->nHeight &&
+            pindex->GetAncestor(root->nHeight) == root) {
+            return root;
+        }
+    }
+    return nullptr;
+}
+
+bool ChainstateManager::IsOnParkedReorgBranch(const CBlockIndex* pindex) const
+{
+    AssertLockHeld(::cs_main);
+    if (m_options.deep_reorg_action != kernel::DeepReorgAction::PARK) return false;
+    return FindParkedReorgBranchRoot(pindex) != nullptr;
+}
+
+bool ChainstateManager::PersistParkedReorgBranches()
+{
+    AssertLockHeld(::cs_main);
+    if (!m_blockman.m_block_tree_db) return true;
+    return m_blockman.m_block_tree_db->WriteParkedReorgBranches(m_parked_reorg_branch_roots);
+}
+
+bool ChainstateManager::ParkReorgBranch(CBlockIndex* branch_root)
+{
+    AssertLockHeld(::cs_main);
+    if (branch_root == nullptr) return false;
+    const uint256 root_hash = branch_root->GetBlockHash();
+    if (!m_parked_reorg_branch_roots.insert(root_hash).second) return true;
+    if (!PersistParkedReorgBranches()) {
+        LogError("%s: failed to persist parked reorg branch root %s\n", __func__, root_hash.ToString());
+        m_parked_reorg_branch_roots.erase(root_hash);
+        return false;
+    }
+    LogWarning("%s: parked local reorg branch root hash=%s height=%d\n",
+               __func__, root_hash.ToString(), branch_root->nHeight);
+    return true;
+}
+
+bool ChainstateManager::UnparkReorgBranchContainingBlock(const CBlockIndex* pindex)
+{
+    AssertLockHeld(::cs_main);
+    const CBlockIndex* root = FindParkedReorgBranchRoot(pindex);
+    if (root == nullptr) return false;
+    const uint256 root_hash = root->GetBlockHash();
+    m_parked_reorg_branch_roots.erase(root_hash);
+    if (!PersistParkedReorgBranches()) {
+        LogError("%s: failed to persist removal of parked reorg branch root %s\n", __func__, root_hash.ToString());
+    }
+    for (Chainstate* chainstate : GetAll()) {
+        for (auto& [_, block_index] : m_blockman.m_block_index) {
+            if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) &&
+                block_index.HaveNumChainTxs()) {
+                chainstate->TryAddBlockIndexCandidate(&block_index);
+            }
+        }
+    }
+    LogWarning("%s: unparked local reorg branch root hash=%s height=%d\n",
+               __func__, root_hash.ToString(), root->nHeight);
+    return true;
+}
+
+std::vector<uint256> ChainstateManager::GetParkedReorgBranchRoots() const
+{
+    AssertLockHeld(::cs_main);
+    return {m_parked_reorg_branch_roots.begin(), m_parked_reorg_branch_roots.end()};
 }
 
 /** Mark a block as having its data received and checked (up to BLOCK_VALID_TRANSACTIONS). */
@@ -10468,6 +10692,14 @@ bool ChainstateManager::LoadBlockIndex()
     if (m_blockman.m_blockfiles_indexed) {
         bool ret{m_blockman.LoadBlockIndexDB(SnapshotBlockhash())};
         if (!ret) return false;
+        if (m_blockman.m_block_tree_db &&
+            !m_blockman.m_block_tree_db->ReadParkedReorgBranches(m_parked_reorg_branch_roots)) {
+            return false;
+        }
+        if (!m_parked_reorg_branch_roots.empty()) {
+            LogWarning("%s: loaded %u locally parked reorg branch root(s)\n",
+                       __func__, static_cast<unsigned>(m_parked_reorg_branch_roots.size()));
+        }
 
         m_blockman.ScanAndUnlinkAlreadyPrunedFiles();
 
@@ -10918,7 +11150,8 @@ void ChainstateManager::CheckBlockIndex()
                         // chainstate is a background validation chainstate, and
                         // pindex only needs to be added if it is an ancestor of
                         // the snapshot that is being validated.
-                        if (c == &ActiveChainstate() || snap_base->GetAncestor(pindex->nHeight) == pindex) {
+                        if (!c->m_chainman.IsOnParkedReorgBranch(pindex) &&
+                            (c == &ActiveChainstate() || snap_base->GetAncestor(pindex->nHeight) == pindex)) {
                             assert(c->setBlockIndexCandidates.count(pindex));
                         }
                     }
@@ -10960,7 +11193,9 @@ void ChainstateManager::CheckBlockIndex()
             // setBlockIndexCandidates, then it must be in m_blocks_unlinked.
             for (auto c : GetAll()) {
                 const bool is_active = c == &ActiveChainstate();
-                if (!CBlockIndexWorkComparator()(pindex, c->m_chain.Tip()) && c->setBlockIndexCandidates.count(pindex) == 0) {
+                if (!CBlockIndexWorkComparator()(pindex, c->m_chain.Tip()) &&
+                    c->setBlockIndexCandidates.count(pindex) == 0 &&
+                    !c->m_chainman.IsOnParkedReorgBranch(pindex)) {
                     if (pindexFirstInvalid == nullptr) {
                         if (is_active || snap_base->GetAncestor(pindex->nHeight) == pindex) {
                             assert(foundInUnlinked);

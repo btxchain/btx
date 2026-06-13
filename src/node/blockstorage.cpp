@@ -54,6 +54,7 @@ static constexpr uint8_t DB_FLAG{'F'};
 static constexpr uint8_t DB_REINDEX_FLAG{'R'};
 static constexpr uint8_t DB_LAST_BLOCK{'l'};
 static constexpr uint8_t DB_PRUNE_LOCK{'L'};
+static constexpr uint8_t DB_PARKED_REORG_BRANCHES{'g'};
 // Keys used in previous version that might still be found in the DB:
 // BlockTreeDB::DB_TXINDEX_BLOCK{'T'};
 // BlockTreeDB::DB_TXINDEX{'t'}
@@ -107,6 +108,25 @@ bool BlockTreeDB::WritePruneLock(const std::string& name, const node::PruneLockI
 
 bool BlockTreeDB::DeletePruneLock(const std::string& name) {
     return Erase(std::make_pair(DB_PRUNE_LOCK, name));
+}
+
+bool BlockTreeDB::WriteParkedReorgBranches(const std::set<uint256>& roots)
+{
+    if (roots.empty()) {
+        return Erase(DB_PARKED_REORG_BRANCHES);
+    }
+    return Write(DB_PARKED_REORG_BRANCHES, std::vector<uint256>{roots.begin(), roots.end()});
+}
+
+bool BlockTreeDB::ReadParkedReorgBranches(std::set<uint256>& roots)
+{
+    std::vector<uint256> persisted_roots;
+    if (!Read(DB_PARKED_REORG_BRANCHES, persisted_roots)) {
+        roots.clear();
+        return true;
+    }
+    roots = {persisted_roots.begin(), persisted_roots.end()};
+    return true;
 }
 
 bool BlockTreeDB::LoadPruneLocks(std::unordered_map<std::string, node::PruneLockInfo>& prune_locks, const util::SignalInterrupt& interrupt) {

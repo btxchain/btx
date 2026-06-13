@@ -137,6 +137,16 @@ struct DigestWorkspace {
     Element* device_output{nullptr};
     size_t output_capacity{0};
 
+    // Factored-compression staging (PRODUCT_FINAL_BLOCKS path): D[j][x][m]
+    // per request - block_size * n * blocks_per_axis words (1 MiB at n=512).
+    Element* device_factored_rhs{nullptr};
+    size_t factored_rhs_capacity{0};
+
+    // Per-seed SHA midstates for matrix generation: 16 words/seed (8 packed seed
+    // words + 8 post-round-7 state words). Tiny (batch_size * 64 B).
+    uint32_t* device_seed_midstates{nullptr};
+    size_t seed_midstates_capacity{0};
+
     HostStageBuffer host_matrix_a;
     HostStageBuffer host_matrix_b;
     HostStageBuffer host_noise_e_l;
@@ -148,6 +158,8 @@ struct DigestWorkspace {
 
     void ReleaseDeviceBuffers()
     {
+        cudaFree(device_seed_midstates);
+        cudaFree(device_factored_rhs);
         cudaFree(device_output);
         cudaFree(device_compress);
         cudaFree(device_noise_f_r);
@@ -162,6 +174,8 @@ struct DigestWorkspace {
         cudaFree(device_base_b);
         cudaFree(device_base_a);
 
+        device_seed_midstates = nullptr;
+        device_factored_rhs = nullptr;
         device_output = nullptr;
         device_compress = nullptr;
         device_noise_f_r = nullptr;
@@ -176,6 +190,8 @@ struct DigestWorkspace {
         device_base_b = nullptr;
         device_base_a = nullptr;
 
+        seed_midstates_capacity = 0;
+        factored_rhs_capacity = 0;
         output_capacity = 0;
         compress_capacity = 0;
         noise_f_r_capacity = 0;
@@ -716,7 +732,7 @@ __device__ __constant__ uint32_t SHA256_K[64] = {
     0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U, 0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U,
 };
 
-__device__ __forceinline__ void SetShaByte(uint32_t w[64], uint32_t offset, uint32_t byte)
+__device__ __forceinline__ void SetShaByte(uint32_t w[16], uint32_t offset, uint32_t byte)
 {
     const uint32_t word_index = offset >> 2U;
     const uint32_t shift = (3U - (offset & 3U)) * 8U;
@@ -743,12 +759,13 @@ __device__ inline void Sha256Init(uint32_t state[8])
     state[7] = 0x5be0cd19U;
 }
 
-__device__ inline void Sha256Compress(uint32_t state[8], uint32_t w[64])
+// WINDOWED SHA-256 compression: 16-word sliding schedule instead of a 64-word
+// array - the same transform as sha-windowed-scanner.patch (oracle_accel.cu),
+// applied to this file's duplicate of the SHA code. Hot via the per-candidate
+// GenerateBaseMatrixFromSeedBatchKernel (2 x n^2 = 524k compressions per
+// candidate at n=512), where the 64-word local array spills to local memory.
+__device__ inline void Sha256Compress(uint32_t state[8], uint32_t w[16])
 {
-    for (uint32_t t = 16; t < 64; ++t) {
-        w[t] = ShaSSig1(w[t - 2]) + w[t - 7] + ShaSSig0(w[t - 15]) + w[t - 16];
-    }
-
     uint32_t a = state[0];
     uint32_t b = state[1];
     uint32_t c = state[2];
@@ -758,8 +775,16 @@ __device__ inline void Sha256Compress(uint32_t state[8], uint32_t w[64])
     uint32_t g = state[6];
     uint32_t h = state[7];
 
+    #pragma unroll
     for (uint32_t t = 0; t < 64; ++t) {
-        const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[t] + w[t];
+        uint32_t wt;
+        if (t < 16) {
+            wt = w[t];
+        } else {
+            wt = ShaSSig1(w[(t - 2) & 15U]) + w[(t - 7) & 15U] + ShaSSig0(w[(t - 15) & 15U]) + w[(t - 16) & 15U];
+            w[t & 15U] = wt;
+        }
+        const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[t] + wt;
         const uint32_t t2 = ShaBSig0(a) + ShaMaj(a, b, c);
         h = g;
         g = f;
@@ -786,7 +811,7 @@ __device__ inline uint32_t CandidateFromSeedAndIndex(const DeviceSeedBytes& seed
                                                      bool with_retry,
                                                      uint32_t retry)
 {
-    uint32_t w[64] = {};
+    uint32_t w[16] = {};
     for (uint32_t i = 0; i < 32; ++i) {
         SetShaByte(w, i, seed.data[31U - i]);
     }
@@ -816,7 +841,7 @@ __device__ inline uint32_t CandidateFromSeedAndIndex(const DeviceSeedBytes& seed
 
 __device__ inline uint32_t FallbackCandidate(const DeviceSeedBytes& seed, uint32_t index)
 {
-    uint32_t w[64] = {};
+    uint32_t w[16] = {};
     for (uint32_t i = 0; i < 32; ++i) {
         SetShaByte(w, i, seed.data[31U - i]);
     }
@@ -853,6 +878,110 @@ __device__ inline uint32_t FromOracle(const DeviceSeedBytes& seed, uint32_t inde
         }
     }
     return FallbackCandidate(seed, index);
+}
+
+// --- Seed-midstate matrix generation (2-kernel form) ---
+// Every element of a base matrix hashes seed||index with the SAME 32-byte seed
+// in w[0..7]; SHA-256 rounds 0-7 consume only those words, so the post-round-7
+// state is identical across all 2^18 elements. PrecomputeSeedMidstatesKernel
+// computes it once per seed (one thread each) into a 16-word record (8 packed
+// seed words + 8 state words); the generation kernel loads those as scalars and
+// resumes each element's hash at round 8 - 8 of 64 rounds saved per element,
+// with no per-block barrier (which is why a precompute kernel beats a shared-
+// memory hoist here). Byte-identical to FromOracle's retry==0 result; the
+// ~2^-31 retry/fallback case defers to the full FromOracle path.
+
+__device__ inline void PackSeedWords(const DeviceSeedBytes& seed, uint32_t seed_w[8])
+{
+    #pragma unroll
+    for (uint32_t i = 0; i < 8; ++i) {
+        seed_w[i] = 0U;
+    }
+    for (uint32_t i = 0; i < 32; ++i) {
+        SetShaByte(seed_w, i, seed.data[31U - i]);
+    }
+}
+
+__global__ void PrecomputeSeedMidstatesKernel(const DeviceSeedBytes* seeds,
+                                              uint32_t seed_count,
+                                              uint32_t* midstates)
+{
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= seed_count) {
+        return;
+    }
+    uint32_t w[8];
+    PackSeedWords(seeds[i], w);
+    uint32_t a = 0x6a09e667U, b = 0xbb67ae85U, c = 0x3c6ef372U, d = 0xa54ff53aU;
+    uint32_t e = 0x510e527fU, f = 0x9b05688cU, g = 0x1f83d9abU, h = 0x5be0cd19U;
+    #pragma unroll
+    for (uint32_t t = 0; t < 8; ++t) {
+        const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[t] + w[t];
+        const uint32_t t2 = ShaBSig0(a) + ShaMaj(a, b, c);
+        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    uint32_t* o = midstates + static_cast<size_t>(i) * 16U;
+    o[0] = w[0]; o[1] = w[1]; o[2] = w[2]; o[3] = w[3];
+    o[4] = w[4]; o[5] = w[5]; o[6] = w[6]; o[7] = w[7];
+    o[8] = a; o[9] = b; o[10] = c; o[11] = d;
+    o[12] = e; o[13] = f; o[14] = g; o[15] = h;
+}
+
+// retry==0 candidate resuming from a precomputed midstate (loaded as scalars so
+// the window and state stay in registers - no local-memory array parameters).
+__device__ inline uint32_t CandidateFromMidstateScalars(const uint32_t* mb, uint32_t index)
+{
+    uint32_t w[16];
+    w[0] = mb[0]; w[1] = mb[1]; w[2] = mb[2]; w[3] = mb[3];
+    w[4] = mb[4]; w[5] = mb[5]; w[6] = mb[6]; w[7] = mb[7];
+    #pragma unroll
+    for (uint32_t i = 8; i < 16; ++i) {
+        w[i] = 0U;
+    }
+    SetShaByte(w, 32U, index & 0xffU);
+    SetShaByte(w, 33U, (index >> 8U) & 0xffU);
+    SetShaByte(w, 34U, (index >> 16U) & 0xffU);
+    SetShaByte(w, 35U, (index >> 24U) & 0xffU);
+    SetShaByte(w, 36U, 0x80U);
+    w[15] = 36U * 8U;
+
+    uint32_t a = mb[8], b = mb[9], c = mb[10], d = mb[11];
+    uint32_t e = mb[12], f = mb[13], g = mb[14], h = mb[15];
+    #pragma unroll
+    for (uint32_t t = 8; t < 64; ++t) {
+        uint32_t wt;
+        if (t < 16) {
+            wt = w[t];
+        } else {
+            wt = ShaSSig1(w[(t - 2) & 15U]) + w[(t - 7) & 15U] + ShaSSig0(w[(t - 15) & 15U]) + w[(t - 16) & 15U];
+            w[t & 15U] = wt;
+        }
+        const uint32_t t1 = h + ShaBSig1(e) + ShaCh(e, f, g) + SHA256_K[t] + wt;
+        const uint32_t t2 = ShaBSig0(a) + ShaMaj(a, b, c);
+        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    return Bswap32(0x6a09e667U + a) & MODULUS;
+}
+
+__global__ void GenerateBaseMatrixFromSeedMidstateKernel(const DeviceSeedBytes* seeds,
+                                                         const uint32_t* midstates,
+                                                         uint32_t n,
+                                                         size_t total_matrix_elements,
+                                                         uint32_t matrix_elements,
+                                                         Element* output_batch)
+{
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total_matrix_elements) {
+        return;
+    }
+    const uint32_t batch_index = static_cast<uint32_t>(gid / matrix_elements);
+    const uint32_t local_index = static_cast<uint32_t>(gid % matrix_elements);
+    (void)n;
+    const uint32_t* mb = midstates + static_cast<size_t>(batch_index) * 16U;
+    const uint32_t candidate = CandidateFromMidstateScalars(mb, local_index);
+    output_batch[gid] = candidate < MODULUS
+        ? candidate
+        : FromOracle(seeds[batch_index], local_index);
 }
 
 __device__ __forceinline__ void ReducePartialsInPlace(Element* partials, uint32_t tid)
@@ -1057,6 +1186,38 @@ __global__ void ComputeCompressedWordsFusedKernel(const Element* __restrict__ ma
     const Element compress_coeff = active ? compress_vec[tid] : 0;
 
     Element running_total{0};
+    if constexpr (!PrefixMode) {
+        // PRODUCT_FINAL_BLOCKS emits ONE word per block pair: the compress-
+        // weighted sum over the whole block product. Mod-field arithmetic is
+        // distributive, so fold the full length-n dot product per thread in
+        // registers and reduce across the block exactly once - instead of one
+        // shared-memory tree reduction (plus barriers) per ell iteration.
+        // Same memory-access order, same Reduce64 cadence, identical canonical
+        // mod-M31 output word.
+        if (active) {
+            uint64_t acc{0};
+            uint32_t pending{0};
+            for (uint32_t m = 0; m < n; ++m) {
+                acc += static_cast<uint64_t>(matrix_a[row_offset + m]) *
+                    matrix_b[static_cast<size_t>(m) * n + col];
+                if (++pending == REDUCE_INTERVAL) {
+                    acc = Reduce64(acc);
+                    pending = 0;
+                }
+            }
+            running_total = FieldMul(Reduce64(acc), compress_coeff);
+        }
+        partials[tid] = running_total;
+        __syncthreads();
+
+        ReducePartialsInPlace(partials, tid);
+
+        if (tid == 0) {
+            output[output_offset] = partials[0];
+        }
+        return;
+    }
+
     for (uint32_t ell = 0; ell < blocks_per_axis; ++ell) {
         Element partial{0};
         if (active) {
@@ -1134,6 +1295,38 @@ __global__ void ComputeCompressedWordsFusedPackedPointersKernel(
     const Element compress_coeff = active ? compress_vec[tid] : 0;
 
     Element running_total{0};
+    if constexpr (!PrefixMode) {
+        // PRODUCT_FINAL_BLOCKS emits ONE word per block pair: the compress-
+        // weighted sum over the whole block product. Mod-field arithmetic is
+        // distributive, so fold the full length-n dot product per thread in
+        // registers and reduce across the block exactly once - instead of one
+        // shared-memory tree reduction (plus barriers) per ell iteration.
+        // Same memory-access order, same Reduce64 cadence, identical canonical
+        // mod-M31 output word.
+        if (active) {
+            uint64_t acc{0};
+            uint32_t pending{0};
+            for (uint32_t m = 0; m < n; ++m) {
+                acc += static_cast<uint64_t>(matrix_a[row_offset + m]) *
+                    matrix_b[static_cast<size_t>(m) * n + col];
+                if (++pending == REDUCE_INTERVAL) {
+                    acc = Reduce64(acc);
+                    pending = 0;
+                }
+            }
+            running_total = FieldMul(Reduce64(acc), compress_coeff);
+        }
+        partials[tid] = running_total;
+        __syncthreads();
+
+        ReducePartialsInPlace(partials, tid);
+
+        if (tid == 0) {
+            output[output_offset] = partials[0];
+        }
+        return;
+    }
+
     for (uint32_t ell = 0; ell < blocks_per_axis; ++ell) {
         Element partial{0};
         if (active) {
@@ -1171,6 +1364,165 @@ __global__ void ComputeCompressedWordsFusedPackedPointersKernel(
         if (tid == 0) {
             output[output_offset] = running_total;
         }
+    }
+}
+
+// ---- Factored compression (PRODUCT_FINAL_BLOCKS only) ----
+// word(i,j) = sum_{x,y} W[x*bs+y] * (A'B')[i*bs+x][j*bs+y]. The compress
+// weights distribute over the block product (mod-field ring arithmetic is
+// exact, so the reassociation is byte-identical):
+//   D[j][x][m] = sum_y W[x*bs+y] * B'[m][j*bs+y]     (bs * n * bpa words, once)
+//   word(i,j)  = sum_x sum_m A'[i*bs+x][m] * D[j][x][m]
+// cutting per-request MACs from n^3 (full block product) to
+// bs^2*n*bpa + pair_count*bs*n - ~10.6x fewer at n=512, b=16.
+
+__global__ void BuildFactoredRhsKernel(const Element* __restrict__ matrix_b_batch,
+                                       const Element* __restrict__ compress_batch,
+                                       uint32_t n,
+                                       uint32_t block_size,
+                                       size_t total_rhs_elements,
+                                       uint32_t rhs_elements,
+                                       uint32_t matrix_elements,
+                                       uint32_t compress_elements,
+                                       Element* __restrict__ rhs_batch)
+{
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total_rhs_elements) {
+        return;
+    }
+    const uint32_t batch_index = static_cast<uint32_t>(gid / rhs_elements);
+    const uint32_t local_index = static_cast<uint32_t>(gid % rhs_elements);
+    // Layout [j][x][m], m fastest - keeps the consumer's A' and D reads coalesced.
+    const uint32_t m = local_index % n;
+    const uint32_t jx = local_index / n;
+    const uint32_t x = jx % block_size;
+    const uint32_t j = jx / block_size;
+    const Element* b_row = matrix_b_batch + static_cast<size_t>(batch_index) * matrix_elements +
+        static_cast<size_t>(m) * n + j * block_size;
+    const Element* w_row = compress_batch + static_cast<size_t>(batch_index) * compress_elements +
+        x * block_size;
+    uint64_t acc{0};
+    uint32_t pending{0};
+    for (uint32_t y = 0; y < block_size; ++y) {
+        acc += static_cast<uint64_t>(w_row[y]) * b_row[y];
+        if (++pending == REDUCE_INTERVAL) {
+            acc = Reduce64(acc);
+            pending = 0;
+        }
+    }
+    rhs_batch[gid] = Reduce64(acc);
+}
+
+__global__ void BuildFactoredRhsPackedPointersKernel(const Element* __restrict__ matrix_b_batch,
+                                                     const Element* const* __restrict__ packed_input_ptrs,
+                                                     uint32_t compress_offset_words,
+                                                     uint32_t n,
+                                                     uint32_t block_size,
+                                                     size_t total_rhs_elements,
+                                                     uint32_t rhs_elements,
+                                                     uint32_t matrix_elements,
+                                                     Element* __restrict__ rhs_batch)
+{
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total_rhs_elements) {
+        return;
+    }
+    const uint32_t batch_index = static_cast<uint32_t>(gid / rhs_elements);
+    const uint32_t local_index = static_cast<uint32_t>(gid % rhs_elements);
+    const uint32_t m = local_index % n;
+    const uint32_t jx = local_index / n;
+    const uint32_t x = jx % block_size;
+    const uint32_t j = jx / block_size;
+    const Element* b_row = matrix_b_batch + static_cast<size_t>(batch_index) * matrix_elements +
+        static_cast<size_t>(m) * n + j * block_size;
+    const Element* w_row = packed_input_ptrs[batch_index] + compress_offset_words + x * block_size;
+    uint64_t acc{0};
+    uint32_t pending{0};
+    for (uint32_t y = 0; y < block_size; ++y) {
+        acc += static_cast<uint64_t>(w_row[y]) * b_row[y];
+        if (++pending == REDUCE_INTERVAL) {
+            acc = Reduce64(acc);
+            pending = 0;
+        }
+    }
+    rhs_batch[gid] = Reduce64(acc);
+}
+
+__global__ void ComputeFactoredWordsKernel(const Element* __restrict__ matrix_a_batch,
+                                           const Element* __restrict__ rhs_batch,
+                                           uint32_t n,
+                                           uint32_t block_size,
+                                           uint32_t blocks_per_axis,
+                                           uint32_t pair_count_per_request,
+                                           uint32_t words_per_request,
+                                           uint32_t matrix_elements,
+                                           uint32_t rhs_elements,
+                                           uint32_t total_tile_count,
+                                           Element* __restrict__ output)
+{
+    // One warp per 2x2 tile of output words (i0..i0+1) x (j0..j0+1): the A rows
+    // feed both j-words and the D rows feed both i-words, so the 2x2 shape
+    // halves L2 traffic vs warp-per-word (4 MACs per 4 loads instead of 1 per 2).
+    // Lanes split the middle dimension m (stride 32; n % 32 == 0 and
+    // blocks_per_axis % 2 == 0 are guarded at dispatch), x loops serially, then
+    // four warp shuffle reductions. No shared memory, no block barriers.
+    const uint32_t lane = threadIdx.x & 31U;
+    const uint32_t tile_index = blockIdx.x * (blockDim.x >> 5U) + (threadIdx.x >> 5U);
+    if (tile_index >= total_tile_count) {
+        return;
+    }
+    const uint32_t tiles_per_axis = blocks_per_axis >> 1U;
+    const uint32_t tiles_per_request = tiles_per_axis * tiles_per_axis;
+    const uint32_t batch_index = tile_index / tiles_per_request;
+    const uint32_t local_tile_index = tile_index % tiles_per_request;
+    const uint32_t j0 = (local_tile_index % tiles_per_axis) * 2U;
+    const uint32_t i0 = (local_tile_index / tiles_per_axis) * 2U;
+    const Element* matrix_a = matrix_a_batch + static_cast<size_t>(batch_index) * matrix_elements;
+    const Element* rhs = rhs_batch + static_cast<size_t>(batch_index) * rhs_elements;
+    uint64_t acc00{0};
+    uint64_t acc01{0};
+    uint64_t acc10{0};
+    uint64_t acc11{0};
+    uint32_t pending{0};
+    for (uint32_t x = 0; x < block_size; ++x) {
+        const Element* a_row0 = matrix_a + static_cast<size_t>(i0 * block_size + x) * n;
+        const Element* a_row1 = a_row0 + static_cast<size_t>(block_size) * n;
+        const Element* d_row0 = rhs + static_cast<size_t>(j0 * block_size + x) * n;
+        const Element* d_row1 = d_row0 + static_cast<size_t>(block_size) * n;
+        for (uint32_t m = lane; m < n; m += 32U) {
+            const uint64_t a0 = a_row0[m];
+            const uint64_t a1 = a_row1[m];
+            const uint64_t d0 = d_row0[m];
+            const uint64_t d1 = d_row1[m];
+            acc00 += a0 * d0;
+            acc01 += a0 * d1;
+            acc10 += a1 * d0;
+            acc11 += a1 * d1;
+            if (++pending == REDUCE_INTERVAL) {
+                acc00 = Reduce64(acc00);
+                acc01 = Reduce64(acc01);
+                acc10 = Reduce64(acc10);
+                acc11 = Reduce64(acc11);
+                pending = 0;
+            }
+        }
+    }
+    Element value00 = Reduce64(acc00);
+    Element value01 = Reduce64(acc01);
+    Element value10 = Reduce64(acc10);
+    Element value11 = Reduce64(acc11);
+    for (uint32_t offset = 16U; offset > 0U; offset >>= 1U) {
+        value00 = FieldAdd(value00, __shfl_down_sync(0xffffffffU, value00, offset));
+        value01 = FieldAdd(value01, __shfl_down_sync(0xffffffffU, value01, offset));
+        value10 = FieldAdd(value10, __shfl_down_sync(0xffffffffU, value10, offset));
+        value11 = FieldAdd(value11, __shfl_down_sync(0xffffffffU, value11, offset));
+    }
+    if (lane == 0) {
+        const uint32_t base = batch_index * words_per_request;
+        output[base + i0 * blocks_per_axis + j0] = value00;
+        output[base + i0 * blocks_per_axis + j0 + 1U] = value01;
+        output[base + (i0 + 1U) * blocks_per_axis + j0] = value10;
+        output[base + (i0 + 1U) * blocks_per_axis + j0 + 1U] = value11;
     }
 }
 
@@ -1494,6 +1846,46 @@ bool FinalizeCompressedWordsBatch(const BufferPoolLease& lease,
             matrix_elements,
             compress_elements,
             workspace.device_output);
+    } else if (n % 32U == 0U && (blocks_per_axis & 1U) == 0U) {
+        // Factored compression: build D once per request, then warp-per-word.
+        // Byte-identical to the fused kernel (see kernel comment); ~10x fewer MACs.
+        const uint32_t rhs_elements = b * n * blocks_per_axis;
+        const size_t total_rhs_elements = static_cast<size_t>(batch_size) * rhs_elements;
+        if (!EnsureDeviceBuffer(workspace.device_factored_rhs,
+                                workspace.factored_rhs_capacity,
+                                total_rhs_elements,
+                                result.error,
+                                allocated_buffers)) {
+            return false;
+        }
+        const uint32_t rhs_blocks = static_cast<uint32_t>(
+            (total_rhs_elements + WORKSPACE_THREADS - 1) / WORKSPACE_THREADS);
+        BuildFactoredRhsKernel<<<rhs_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+            workspace.device_matrix_b,
+            workspace.device_compress,
+            n,
+            b,
+            total_rhs_elements,
+            rhs_elements,
+            matrix_elements,
+            compress_elements,
+            workspace.device_factored_rhs);
+        const uint32_t warps_per_block = WORKSPACE_THREADS / 32U;
+        const uint32_t tiles_per_request = (blocks_per_axis >> 1U) * (blocks_per_axis >> 1U);
+        const uint32_t total_tile_count = batch_size * tiles_per_request;
+        const uint32_t word_blocks = (total_tile_count + warps_per_block - 1U) / warps_per_block;
+        ComputeFactoredWordsKernel<<<word_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+            workspace.device_matrix_a,
+            workspace.device_factored_rhs,
+            n,
+            b,
+            blocks_per_axis,
+            pair_count_per_request,
+            words_per_request,
+            matrix_elements,
+            rhs_elements,
+            total_tile_count,
+            workspace.device_output);
     } else {
         ComputeCompressedWordsFusedKernel<false><<<total_pair_count, thread_count, 0, workspace.stream>>>(
             workspace.device_matrix_a,
@@ -1591,6 +1983,46 @@ bool FinalizeCompressedWordsPackedPointerBatch(const BufferPoolLease& lease,
             words_per_request,
             matrix_elements,
             compress_offset_words,
+            workspace.device_output);
+    } else if (n % 32U == 0U && (blocks_per_axis & 1U) == 0U) {
+        // Factored compression (see BuildFactoredRhsKernel): byte-identical
+        // to the fused kernel with ~10x fewer MACs.
+        const uint32_t rhs_elements = b * n * blocks_per_axis;
+        const size_t total_rhs_elements = static_cast<size_t>(batch_size) * rhs_elements;
+        if (!EnsureDeviceBuffer(workspace.device_factored_rhs,
+                                workspace.factored_rhs_capacity,
+                                total_rhs_elements,
+                                result.error,
+                                allocated_buffers)) {
+            return false;
+        }
+        const uint32_t rhs_blocks = static_cast<uint32_t>(
+            (total_rhs_elements + WORKSPACE_THREADS - 1) / WORKSPACE_THREADS);
+        BuildFactoredRhsPackedPointersKernel<<<rhs_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+            workspace.device_matrix_b,
+            workspace.device_prepared_input_ptrs,
+            compress_offset_words,
+            n,
+            b,
+            total_rhs_elements,
+            rhs_elements,
+            matrix_elements,
+            workspace.device_factored_rhs);
+        const uint32_t warps_per_block = WORKSPACE_THREADS / 32U;
+        const uint32_t tiles_per_request = (blocks_per_axis >> 1U) * (blocks_per_axis >> 1U);
+        const uint32_t total_tile_count = batch_size * tiles_per_request;
+        const uint32_t word_blocks = (total_tile_count + warps_per_block - 1U) / warps_per_block;
+        ComputeFactoredWordsKernel<<<word_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+            workspace.device_matrix_a,
+            workspace.device_factored_rhs,
+            n,
+            b,
+            blocks_per_axis,
+            pair_count_per_request,
+            words_per_request,
+            matrix_elements,
+            rhs_elements,
+            total_tile_count,
             workspace.device_output);
     } else {
         ComputeCompressedWordsFusedPackedPointersKernel<false><<<total_pair_count, thread_count, 0, workspace.stream>>>(
@@ -2585,17 +3017,43 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
     }
 
     const uint32_t build_blocks = static_cast<uint32_t>((total_matrix_elements + WORKSPACE_THREADS - 1) / WORKSPACE_THREADS);
+    // Per-seed SHA midstate buffer (16 words/seed), reused for the A then B pass.
+    const uint32_t seed_midstate_words = request.batch_size * 16U;
+    if (!EnsureDeviceBuffer(workspace.device_seed_midstates,
+                            workspace.seed_midstates_capacity,
+                            seed_midstate_words,
+                            result.error,
+                            allocated_buffers)) {
+        return result;
+    }
+    const uint32_t midstate_blocks = (request.batch_size + WORKSPACE_THREADS - 1U) / WORKSPACE_THREADS;
     const auto build_start = SteadyClock::now();
-    GenerateBaseMatrixFromSeedBatchKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+    PrecomputeSeedMidstatesKernel<<<midstate_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
         workspace.device_seed_a,
-        request.n,
-        total_matrix_elements,
-        matrix_elements,
-        workspace.device_matrix_a);
+        request.batch_size,
+        workspace.device_seed_midstates);
     error = cudaGetLastError();
     if (error == cudaSuccess) {
-        GenerateBaseMatrixFromSeedBatchKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+        GenerateBaseMatrixFromSeedMidstateKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+            workspace.device_seed_a,
+            workspace.device_seed_midstates,
+            request.n,
+            total_matrix_elements,
+            matrix_elements,
+            workspace.device_matrix_a);
+        error = cudaGetLastError();
+    }
+    if (error == cudaSuccess) {
+        PrecomputeSeedMidstatesKernel<<<midstate_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
             workspace.device_seed_b,
+            request.batch_size,
+            workspace.device_seed_midstates);
+        error = cudaGetLastError();
+    }
+    if (error == cudaSuccess) {
+        GenerateBaseMatrixFromSeedMidstateKernel<<<build_blocks, WORKSPACE_THREADS, 0, workspace.stream>>>(
+            workspace.device_seed_b,
+            workspace.device_seed_midstates,
             request.n,
             total_matrix_elements,
             matrix_elements,

@@ -6,6 +6,7 @@
 #include <chainparams.h>
 #include <consensus/validation.h>
 #include <node/kernel_notifications.h>
+#include <node/warnings.h>
 #include <random.h>
 #include <rpc/blockchain.h>
 #include <sync.h>
@@ -18,6 +19,8 @@
 #include <util/mempressure.h>
 #include <validation.h>
 
+#include <optional>
+#include <string>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -156,110 +159,129 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_rejection_prunes_candidate_branch,
     ChainstateManager& chainman = *Assert(m_node.chainman);
     Chainstate& chainstate = chainman.ActiveChainstate();
 
+    // PARK is the default action (-parkdeepreorg=1), so a deep reorg is refused.
+    // The explicit WARN opt-out (follow most-work) is covered by the companion
+    // test chainstate_deep_reorg_warn_follows_most_work below.
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
-    // Opt this node into the PARK action (-parkdeepreorg=1) so a deep reorg is
-    // refused. The default action is WARN (follow most-work), covered by the
-    // companion test chainstate_deep_reorg_warn_follows_most_work below.
     auto& deep_reorg_action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
-    struct RestoreConsensusParams
+    auto& max_reorg_depth_park = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
+    struct RestoreDeepReorgOptions
     {
         Consensus::Params& consensus;
-        uint32_t max_reorg_depth;
         int32_t reorg_start_height;
         kernel::DeepReorgAction& action;
         kernel::DeepReorgAction saved_action;
-        ~RestoreConsensusParams()
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
+        ~RestoreDeepReorgOptions()
         {
-            consensus.nMaxReorgDepth = max_reorg_depth;
             consensus.nReorgProtectionStartHeight = reorg_start_height;
             action = saved_action;
+            park_depth = saved_park_depth;
         }
-    } restore{consensus, consensus.nMaxReorgDepth, consensus.nReorgProtectionStartHeight,
-              deep_reorg_action, deep_reorg_action};
+    } restore{consensus, consensus.nReorgProtectionStartHeight,
+              deep_reorg_action, deep_reorg_action,
+              max_reorg_depth_park, max_reorg_depth_park};
 
-    consensus.nMaxReorgDepth = 2;
     consensus.nReorgProtectionStartHeight = 10;
     deep_reorg_action = kernel::DeepReorgAction::PARK;
+    max_reorg_depth_park = 2;
 
-    std::vector<std::unique_ptr<CBlockIndex>> rejected_branch;
-    std::vector<uint256> rejected_hashes;
-    rejected_branch.reserve(6);
-    rejected_hashes.reserve(6);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
 
-    CBlockIndex* rejected_tip{nullptr};
-    CBlockIndex* active_tip_before{nullptr};
+    CBlockIndex* fork{nullptr};
+    CBlockIndex* original_branch_first{nullptr};
+    CBlockIndex* original_tip{nullptr};
     {
         LOCK(::cs_main);
-        active_tip_before = chainstate.m_chain.Tip();
-        BOOST_REQUIRE(active_tip_before != nullptr);
-        BOOST_REQUIRE(active_tip_before->nHeight >= 100);
-
-        CBlockIndex* fork = chainstate.m_chain[95];
+        original_tip = chainstate.m_chain.Tip();
+        BOOST_REQUIRE(original_tip != nullptr);
+        BOOST_REQUIRE(original_tip->nHeight >= 100);
+        fork = chainstate.m_chain[95];
         BOOST_REQUIRE(fork != nullptr);
+        original_branch_first = chainstate.m_chain[fork->nHeight + 1];
+        BOOST_REQUIRE(original_branch_first != nullptr);
+    }
+    const uint256 original_tip_hash = original_tip->GetBlockHash();
+    const int original_height = original_tip->nHeight;
 
-        chainstate.setBlockIndexCandidates.clear();
-        chainstate.setBlockIndexCandidates.insert(active_tip_before);
-
-        CBlockIndex* prev = fork;
-        arith_uint256 next_work = active_tip_before->nChainWork;
-        for (int i = 0; i < 6; ++i) {
-            CBlockHeader header;
-            header.hashPrevBlock = prev->GetBlockHash();
-            header.nVersion = prev->nVersion;
-            header.nTime = prev->nTime + 1 + i;
-            header.nBits = prev->nBits;
-            header.nNonce64 = prev->nNonce64 + 1 + i;
-            rejected_branch.emplace_back(std::make_unique<CBlockIndex>(header));
-            rejected_hashes.push_back(m_rng.rand256());
-
-            CBlockIndex& idx = *rejected_branch.back();
-            idx.phashBlock = &rejected_hashes.back();
-            idx.pprev = prev;
-            idx.nHeight = prev->nHeight + 1;
-            idx.nStatus = BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
-            idx.nTx = 1;
-            idx.m_chain_tx_count = prev->m_chain_tx_count + 1;
-            idx.nSequenceId = prev->nSequenceId + 1 + i;
-            idx.nChainWork = ++next_work;
-            idx.nTimeMax = idx.nTime;
-            idx.BuildSkip();
-            prev = &idx;
-        }
-
-        rejected_tip = rejected_branch.back().get();
-        chainstate.setBlockIndexCandidates.insert(rejected_tip);
-        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(rejected_tip), 1);
+    BlockValidationState original_inval_state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(original_inval_state, original_branch_first));
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip(), fork);
     }
 
+    CBlockIndex* competing_root{nullptr};
+    CBlockIndex* competing_tip{nullptr};
+    for (int i = 0; i < 6; ++i) {
+        const CBlock competing_block = CreateAndProcessBlock({}, script_pub_key);
+        LOCK(::cs_main);
+        CBlockIndex* tip = chainstate.m_chain.Tip();
+        BOOST_REQUIRE(tip != nullptr);
+        BOOST_REQUIRE_EQUAL(tip->GetBlockHash(), competing_block.GetHash());
+        if (i == 0) competing_root = tip;
+        if (i == 5) competing_tip = tip;
+    }
+    BOOST_REQUIRE(competing_root != nullptr);
+    BOOST_REQUIRE(competing_tip != nullptr);
+    BOOST_REQUIRE_EQUAL(competing_tip->nHeight, fork->nHeight + 6);
+
+    BlockValidationState competing_inval_state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(competing_inval_state, competing_root));
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip(), fork);
+        chainstate.ResetBlockFailureFlags(original_branch_first);
+    }
+    BlockValidationState restore_original_state;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(restore_original_state));
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_tip_hash);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Height(), original_height);
+    }
+
+    ResetReorgProtectionRuntimeStats();
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(competing_root);
+        BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(competing_tip), 1);
+    }
     BlockValidationState state;
     BOOST_CHECK(chainstate.ActivateBestChain(state));
 
     {
         LOCK(::cs_main);
-        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), active_tip_before);
-        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(rejected_tip), 0);
-        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(active_tip_before), 1);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_tip_hash);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height);
+        BOOST_CHECK(chainman.IsOnParkedReorgBranch(competing_tip));
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(competing_tip), 0);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(original_tip), 1);
     }
 
-    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const auto stats = ProbeReorgProtectionRuntimeStats();
+    BOOST_CHECK_EQUAL(stats.rejected_reorgs, 1U);
+    BOOST_CHECK_EQUAL(stats.last_rejected_max_reorg_depth, 2U);
+
     CreateAndProcessBlock({}, script_pub_key);
 
     {
         LOCK(::cs_main);
-        BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), active_tip_before->nHeight + 1);
-        BOOST_CHECK(chainstate.m_chain.Tip()->pprev == active_tip_before);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height + 1);
+        BOOST_CHECK(chainstate.m_chain.Tip()->pprev == original_tip);
     }
 }
 
-//! Default (WARN) deep-reorg handling must follow the most-work chain -- a deep
-//! reorg is NOT refused, so the node stays Nakamoto-consistent and cannot be
-//! split. The deep reorg must still be loudly recorded in the alarm stats.
+//! Explicit WARN opt-out deep-reorg handling must follow the most-work chain --
+//! a deep reorg is NOT refused, so the node stays Nakamoto-consistent and cannot
+//! be split. The deep reorg must still be loudly surfaced as an operator warning.
 //!
 //! This drives a REAL reorg (real blocks, so disconnect/connect succeed): we
-//! invalidate a block a few back to fork the active chain, mine a strictly
-//! heavier competing branch across that fork, then reconsider the original
+//! invalidate a block a few back to fork the active chain, mine a shorter
+//! competing branch across that fork, then reconsider the heavier original
 //! branch. With the threshold lowered so the cross-fork switch counts as "deep",
-//! WARN must (a) record the alarm and (b) still adopt the most-work tip.
+//! WARN must raise the operator alarm and still adopt the most-work tip.
 BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_warn_follows_most_work, TestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -268,36 +290,45 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_warn_follows_most_work, TestChain1
 
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
     auto& deep_reorg_action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
+    auto& max_reorg_depth_warn = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_warn);
+    auto& max_reorg_depth_park = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
     struct RestoreParams
     {
         Consensus::Params& consensus;
-        uint32_t max_reorg_depth;
         int32_t reorg_start_height;
         kernel::DeepReorgAction& action;
         kernel::DeepReorgAction saved_action;
+        std::optional<uint32_t>& warn_depth;
+        std::optional<uint32_t> saved_warn_depth;
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
         ~RestoreParams()
         {
-            consensus.nMaxReorgDepth = max_reorg_depth;
             consensus.nReorgProtectionStartHeight = reorg_start_height;
             action = saved_action;
+            warn_depth = saved_warn_depth;
+            park_depth = saved_park_depth;
         }
-    } restore{consensus, consensus.nMaxReorgDepth, consensus.nReorgProtectionStartHeight,
-              deep_reorg_action, deep_reorg_action};
+    } restore{consensus, consensus.nReorgProtectionStartHeight,
+              deep_reorg_action, deep_reorg_action,
+              max_reorg_depth_warn, max_reorg_depth_warn,
+              max_reorg_depth_park, max_reorg_depth_park};
 
-    // Any cross-fork switch (depth >= 1) trips the alarm; tip is already >= 10.
-    consensus.nMaxReorgDepth = 0;
+    // Any cross-fork switch deeper than one block trips the warning; tip is already >= 10.
     consensus.nReorgProtectionStartHeight = 10;
-    deep_reorg_action = kernel::DeepReorgAction::WARN; // default; set explicitly for clarity
+    deep_reorg_action = kernel::DeepReorgAction::WARN; // explicit -parkdeepreorg=0 behavior
+    max_reorg_depth_warn = 1;
+    max_reorg_depth_park = 1;
 
-    // Fork point: two blocks below the current tip. The ORIGINAL branch
-    // (fork+1, fork+2) stays our reference heavier branch.
+    // Fork point: three blocks below the current tip. The ORIGINAL branch
+    // (fork+1, fork+2, fork+3) stays our reference heavier branch.
     CBlockIndex* fork{nullptr};
     CBlockIndex* original_tip{nullptr};
     {
         LOCK(::cs_main);
         original_tip = chainstate.m_chain.Tip();
         BOOST_REQUIRE(original_tip != nullptr);
-        fork = original_tip->pprev->pprev; // tip-2
+        fork = original_tip->pprev->pprev->pprev; // tip-3
         BOOST_REQUIRE(fork != nullptr);
     }
     const uint256 original_tip_hash = original_tip->GetBlockHash();
@@ -317,8 +348,9 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_warn_follows_most_work, TestChain1
         BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip(), fork);
     }
 
-    // Mine a SHORTER competing branch (one block on the fork). Active tip becomes
-    // the competing block; the (invalidated) original branch is heavier (2 blocks).
+    // Mine a SHORTER competing branch (two blocks on the fork). Active tip becomes
+    // the competing branch; the (invalidated) original branch is heavier (3 blocks).
+    CreateAndProcessBlock({}, script_pub_key);
     const CBlock competing = CreateAndProcessBlock({}, script_pub_key);
     CBlockIndex* competing_tip{nullptr};
     {
@@ -326,13 +358,14 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_warn_follows_most_work, TestChain1
         competing_tip = chainstate.m_chain.Tip();
         BOOST_REQUIRE(competing_tip != nullptr);
         BOOST_REQUIRE_EQUAL(competing_tip->GetBlockHash(), competing.GetHash());
-        BOOST_REQUIRE_EQUAL(competing_tip->nHeight, fork->nHeight + 1);
+        BOOST_REQUIRE_EQUAL(competing_tip->nHeight, fork->nHeight + 2);
     }
 
     // Re-enable the heavier original branch. The node must switch ACROSS the fork
     // from the competing tip back to the original tip -- a real cross-fork reorg
-    // (disconnect competing, connect fork+1, fork+2). This trips the deep-reorg
-    // guard (depth 1 > threshold 0). In WARN mode it follows the most-work chain.
+    // (disconnect competing, connect fork+1..fork+3). This trips the deep-reorg
+    // warning (depth 2 > warn threshold 1). In WARN mode it follows the
+    // most-work chain and records the operator alarm with the warning depth.
     ResetReorgProtectionRuntimeStats();
     {
         LOCK(::cs_main);
@@ -351,8 +384,16 @@ BOOST_FIXTURE_TEST_CASE(chainstate_deep_reorg_warn_follows_most_work, TestChain1
 
     // The cross-fork switch must have fired the operator alarm.
     const auto stats = ProbeReorgProtectionRuntimeStats();
-    BOOST_CHECK_GE(stats.rejected_reorgs, 1u);
-    BOOST_CHECK_GE(stats.deepest_rejected_reorg_depth, 1u);
+    BOOST_CHECK_EQUAL(stats.rejected_reorgs, 1U);
+    BOOST_CHECK_GE(stats.deepest_rejected_reorg_depth, 2U);
+    BOOST_CHECK_EQUAL(stats.last_rejected_max_reorg_depth, 1U);
+    bool saw_deep_reorg_warning{false};
+    for (const bilingual_str& warning : m_node.warnings->GetMessages()) {
+        saw_deep_reorg_warning |=
+            warning.original.find("Deep reorg detected") != std::string::npos &&
+            warning.original.find("Following the most-work chain") != std::string::npos;
+    }
+    BOOST_CHECK(saw_deep_reorg_warning);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

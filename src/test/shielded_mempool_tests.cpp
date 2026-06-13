@@ -4,6 +4,7 @@
 
 #include <addresstype.h>
 #include <consensus/amount.h>
+#include <consensus/params.h>
 #include <hash.h>
 #include <random.h>
 #include <kernel/mempool_entry.h>
@@ -25,6 +26,23 @@
 #include <boost/test/unit_test.hpp>
 
 namespace {
+
+struct ScopedShieldedSettlementMaturity
+{
+    Consensus::Params& consensus;
+    const uint32_t saved_maturity;
+
+    explicit ScopedShieldedSettlementMaturity(Consensus::Params& params)
+        : consensus{params},
+          saved_maturity{params.nShieldedSettlementAnchorMaturity}
+    {
+    }
+
+    ~ScopedShieldedSettlementMaturity()
+    {
+        consensus.nShieldedSettlementAnchorMaturity = saved_maturity;
+    }
+};
 
 smile2::CompactPublicAccount MakeSmileAccount(uint32_t seed)
 {
@@ -531,6 +549,9 @@ BOOST_FIXTURE_TEST_CASE(shielded_v2_egress_cleanup_preserves_valid_anchor_refs_a
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
     CTxMemPool& pool = *Assert(m_node.mempool);
+    auto& consensus = const_cast<Consensus::Params&>(chainman.GetConsensus());
+    const ScopedShieldedSettlementMaturity restore_maturity{consensus};
+    consensus.nShieldedSettlementAnchorMaturity = 0;
 
     const auto valid_egress_fixture = test::shielded::BuildV2EgressReceiptFixture(/*output_count=*/2);
     const auto valid_settlement_anchor_fixture =
@@ -545,6 +566,7 @@ BOOST_FIXTURE_TEST_CASE(shielded_v2_egress_cleanup_preserves_valid_anchor_refs_a
     const auto invalid_egress_txid = GenTxid::Txid(invalid_egress_tx->GetHash());
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
 
+    BOOST_REQUIRE(WITH_LOCK(cs_main, return chainman.EnsureShieldedStateInitialized()));
     CreateAndProcessBlock({valid_settlement_anchor_fixture.tx}, script_pub_key);
     BOOST_CHECK(WITH_LOCK(cs_main,
                           return chainman.IsShieldedSettlementAnchorValid(

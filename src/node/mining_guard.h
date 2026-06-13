@@ -12,8 +12,9 @@
 namespace node {
 struct NodeContext;
 
-static constexpr int DEFAULT_MINING_CHAIN_GUARD_MIN_PEERS{2};
-static constexpr int DEFAULT_MINING_CHAIN_GUARD_MAX_MEDIAN_GAP{6};
+static constexpr int DEFAULT_MINING_CHAIN_GUARD_MIN_PEERS{3};
+static constexpr int DEFAULT_MINING_CHAIN_GUARD_MIN_NEAR_TIP_PEERS{2};
+static constexpr int DEFAULT_MINING_CHAIN_GUARD_MAX_MEDIAN_GAP{4};
 static constexpr int DEFAULT_MINING_CHAIN_GUARD_NEAR_TIP_WINDOW{2};
 static constexpr int DEFAULT_MINING_CHAIN_GUARD_STALE_PEER_SECONDS{300};
 
@@ -21,6 +22,7 @@ struct MiningChainGuardOptions {
     bool enabled{false};
     bool explicit_setting{false};
     int min_peer_count{DEFAULT_MINING_CHAIN_GUARD_MIN_PEERS};
+    int min_near_tip_peers{DEFAULT_MINING_CHAIN_GUARD_MIN_NEAR_TIP_PEERS};
     int max_median_tip_gap{DEFAULT_MINING_CHAIN_GUARD_MAX_MEDIAN_GAP};
     int near_tip_window{DEFAULT_MINING_CHAIN_GUARD_NEAR_TIP_WINDOW};
     int stale_peer_seconds{DEFAULT_MINING_CHAIN_GUARD_STALE_PEER_SECONDS};
@@ -44,7 +46,9 @@ struct MiningChainGuardStatus {
     int worst_peer_tip{-1};
     int near_tip_peers{0};
     int min_peer_count{DEFAULT_MINING_CHAIN_GUARD_MIN_PEERS};
+    int min_near_tip_peers{DEFAULT_MINING_CHAIN_GUARD_MIN_NEAR_TIP_PEERS};
     int max_median_tip_gap{DEFAULT_MINING_CHAIN_GUARD_MAX_MEDIAN_GAP};
+    int near_tip_window{DEFAULT_MINING_CHAIN_GUARD_NEAR_TIP_WINDOW};
     std::string reason{"disabled"};
 };
 

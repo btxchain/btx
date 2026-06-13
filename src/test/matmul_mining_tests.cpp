@@ -7,6 +7,7 @@
 #include <common/system.h>
 #include <consensus/consensus.h>
 #include <interfaces/mining.h>
+#include <kernel/chainstatemanager_opts.h>
 #include <matmul/matmul_pow.h>
 #include <node/miner.h>
 #include <pow.h>
@@ -21,6 +22,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <charconv>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -699,6 +701,57 @@ BOOST_AUTO_TEST_CASE(submitheader_rejects_matmul_header_only_work)
 // TEST: rpc_matmul_service_profile_runtime_observability
 BOOST_AUTO_TEST_CASE(matmul_service_profile_reports_measured_runtime_and_network_proxy)
 {
+    auto& mutable_consensus = const_cast<Consensus::Params&>(m_node.chainman->GetConsensus());
+    auto& reorg_profile = const_cast<kernel::ReorgProtectionProfile&>(m_node.chainman->m_options.reorg_protection_profile);
+    auto& deep_reorg_action = const_cast<kernel::DeepReorgAction&>(m_node.chainman->m_options.deep_reorg_action);
+    auto& max_reorg_depth_warn = const_cast<std::optional<uint32_t>&>(m_node.chainman->m_options.max_reorg_depth_warn);
+    auto& max_reorg_depth_park = const_cast<std::optional<uint32_t>&>(m_node.chainman->m_options.max_reorg_depth_park);
+    auto& local_finality_depth = const_cast<std::optional<uint32_t>&>(m_node.chainman->m_options.local_finality_depth);
+    struct RestoreReorgProtectionOptions
+    {
+        Consensus::Params& consensus;
+        int32_t saved_reorg_start_height;
+        kernel::ReorgProtectionProfile& profile;
+        kernel::ReorgProtectionProfile saved_profile;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        std::optional<uint32_t>& warn_depth;
+        std::optional<uint32_t> saved_warn_depth;
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
+        std::optional<uint32_t>& finality_depth;
+        std::optional<uint32_t> saved_finality_depth;
+        ~RestoreReorgProtectionOptions()
+        {
+            consensus.nReorgProtectionStartHeight = saved_reorg_start_height;
+            profile = saved_profile;
+            action = saved_action;
+            warn_depth = saved_warn_depth;
+            park_depth = saved_park_depth;
+            finality_depth = saved_finality_depth;
+        }
+    } restore_reorg_options{
+        mutable_consensus,
+        mutable_consensus.nReorgProtectionStartHeight,
+        reorg_profile,
+        reorg_profile,
+        deep_reorg_action,
+        deep_reorg_action,
+        max_reorg_depth_warn,
+        max_reorg_depth_warn,
+        max_reorg_depth_park,
+        max_reorg_depth_park,
+        local_finality_depth,
+        local_finality_depth};
+
+    mutable_consensus.nReorgProtectionStartHeight = 0;
+    reorg_profile = kernel::ReorgProtectionProfile::EMERGENCY;
+    deep_reorg_action = kernel::DeepReorgAction::PARK;
+    max_reorg_depth_warn.reset();
+    max_reorg_depth_park.reset();
+    local_finality_depth.reset();
+    const auto emergency_profile = kernel::GetReorgProtectionProfileSettings(kernel::ReorgProtectionProfile::EMERGENCY);
+
     ResetMatMulSolvePipelineStats();
     ResetMatMulDigestCompareStats();
     ResetMatMulSolveRuntimeStats();
@@ -706,7 +759,7 @@ BOOST_AUTO_TEST_CASE(matmul_service_profile_reports_measured_runtime_and_network
     ResetReorgProtectionRuntimeStats();
     RecordRejectedReorgDepth(
         /*reorg_depth=*/248,
-        /*max_reorg_depth=*/144,
+        /*max_reorg_depth=*/emergency_profile.park_depth,
         /*old_tip_height=*/53'086,
         /*fork_height=*/52'838,
         /*candidate_height=*/53'347);
@@ -764,14 +817,26 @@ BOOST_AUTO_TEST_CASE(matmul_service_profile_reports_measured_runtime_and_network
     BOOST_CHECK_EQUAL(propagation_proxy.find_value("header_lag").getInt<int>(), 0);
 
     const auto reorg_protection = runtime.find_value("reorg_protection").get_obj();
-    BOOST_CHECK(!reorg_protection.find_value("enabled").get_bool());
-    BOOST_CHECK(!reorg_protection.find_value("active").get_bool());
-    BOOST_CHECK_EQUAL(reorg_protection.find_value("start_height").getInt<int>(), -1);
-    BOOST_CHECK_EQUAL(reorg_protection.find_value("max_reorg_depth").getInt<int>(), 0);
+    BOOST_CHECK(reorg_protection.find_value("enabled").get_bool());
+    BOOST_CHECK(reorg_protection.find_value("active").get_bool());
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("profile").get_str(), "emergency");
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("action").get_str(), "park");
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("current_tip_height").getInt<int>(), ActiveHeight());
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("start_height").getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("warn_depth").getInt<int>(), static_cast<int>(emergency_profile.warn_depth));
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("park_depth").getInt<int>(), static_cast<int>(emergency_profile.park_depth));
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("local_finality_depth").getInt<int>(), static_cast<int>(emergency_profile.finality_depth));
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("locally_finalized_height").getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("max_reorg_depth").getInt<int>(), static_cast<int>(emergency_profile.park_depth));
+    const int64_t expected_consensus_max_reorg_depth{
+        consensus.nMaxReorgDepth != std::numeric_limits<uint32_t>::max()
+            ? static_cast<int64_t>(consensus.nMaxReorgDepth)
+            : 0};
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("consensus_max_reorg_depth").getInt<int64_t>(), expected_consensus_max_reorg_depth);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("rejected_reorgs").getInt<uint64_t>(), 1U);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("deepest_rejected_reorg_depth").getInt<int>(), 248);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_reorg_depth").getInt<int>(), 248);
-    BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_max_reorg_depth").getInt<int>(), 144);
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_max_reorg_depth").getInt<int>(), static_cast<int>(emergency_profile.park_depth));
     BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_tip_height").getInt<int>(), 53'086);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_fork_height").getInt<int>(), 52'838);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_candidate_height").getInt<int>(), 53'347);

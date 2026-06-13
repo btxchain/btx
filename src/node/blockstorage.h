@@ -62,6 +62,8 @@ public:
     void ReadReindexing(bool& fReindexing);
     bool WritePruneLock(const std::string& name, const node::PruneLockInfo&);
     bool DeletePruneLock(const std::string& name);
+    bool WriteParkedReorgBranches(const std::set<uint256>& roots);
+    bool ReadParkedReorgBranches(std::set<uint256>& roots);
     bool WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
     bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)

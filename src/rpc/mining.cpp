@@ -1129,15 +1129,14 @@ static UniValue BuildReorgProtectionProfile(const ChainstateManager& chainman) E
     const Consensus::Params& consensus = chainman.GetConsensus();
     const CBlockIndex* const active_tip = chainman.ActiveChain().Tip();
     const int current_tip_height = active_tip != nullptr ? active_tip->nHeight : -1;
-    // Effective deep-reorg alarm threshold: operator override (-maxreorgdepthwarn)
-    // takes precedence over the chain's consensus nMaxReorgDepth.
     const auto& cm_opts = chainman.m_options;
-    const uint32_t effective_threshold =
-        cm_opts.max_reorg_depth_warn.has_value()
-            ? *cm_opts.max_reorg_depth_warn
-            : consensus.nMaxReorgDepth;
+    const auto profile_settings = kernel::GetReorgProtectionProfileSettings(cm_opts.reorg_protection_profile);
+    const uint32_t warn_depth = cm_opts.max_reorg_depth_warn.value_or(profile_settings.warn_depth);
+    const uint32_t park_depth = cm_opts.max_reorg_depth_park.value_or(profile_settings.park_depth);
+    const uint32_t finality_depth = cm_opts.local_finality_depth.value_or(profile_settings.finality_depth);
     const bool enabled =
-        effective_threshold != std::numeric_limits<uint32_t>::max() &&
+        (warn_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED ||
+         park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED) &&
         consensus.nReorgProtectionStartHeight != std::numeric_limits<int32_t>::max();
     const bool park = cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK;
     const auto stats = ProbeReorgProtectionRuntimeStats();
@@ -1145,12 +1144,30 @@ static UniValue BuildReorgProtectionProfile(const ChainstateManager& chainman) E
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("enabled", enabled);
     obj.pushKV("active", enabled && current_tip_height >= consensus.nReorgProtectionStartHeight);
-    // Per-node action: "warn" (default, Nakamoto-safe, follows most-work) or
-    // "park" (opt-in -parkdeepreorg, refuses deep auto-reorg; local finality).
+    obj.pushKV("profile", kernel::ReorgProtectionProfileName(cm_opts.reorg_protection_profile));
     obj.pushKV("action", park ? "park" : "warn");
     obj.pushKV("current_tip_height", current_tip_height);
     obj.pushKV("start_height", enabled ? consensus.nReorgProtectionStartHeight : -1);
-    obj.pushKV("max_reorg_depth", enabled ? static_cast<int64_t>(effective_threshold) : 0);
+    obj.pushKV("warn_depth",
+               enabled && warn_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED
+                   ? static_cast<int64_t>(warn_depth)
+                   : 0);
+    obj.pushKV("park_depth",
+               enabled && park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED
+                   ? static_cast<int64_t>(park_depth)
+                   : 0);
+    obj.pushKV("local_finality_depth",
+               enabled && finality_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED
+                   ? static_cast<int64_t>(finality_depth)
+                   : 0);
+    obj.pushKV("locally_finalized_height",
+               enabled && finality_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED && current_tip_height >= 0
+                   ? std::max<int64_t>(0, static_cast<int64_t>(current_tip_height) - finality_depth)
+                   : -1);
+    obj.pushKV("max_reorg_depth",
+               enabled && park && park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED
+                   ? static_cast<int64_t>(park_depth)
+                   : 0);
     obj.pushKV("consensus_max_reorg_depth",
                consensus.nMaxReorgDepth != std::numeric_limits<uint32_t>::max()
                    ? static_cast<int64_t>(consensus.nMaxReorgDepth)
@@ -1163,6 +1180,13 @@ static UniValue BuildReorgProtectionProfile(const ChainstateManager& chainman) E
     obj.pushKV("last_rejected_fork_height", stats.last_rejected_fork_height);
     obj.pushKV("last_rejected_candidate_height", stats.last_rejected_candidate_height);
     obj.pushKV("last_rejected_unix", stats.last_rejected_unix);
+    UniValue parked_roots(UniValue::VARR);
+    const auto roots = chainman.GetParkedReorgBranchRoots();
+    for (const uint256& root : roots) {
+        parked_roots.push_back(root.GetHex());
+    }
+    obj.pushKV("parked_branch_count", static_cast<int64_t>(roots.size()));
+    obj.pushKV("parked_branch_roots", std::move(parked_roots));
     return obj;
 }
 
@@ -5203,9 +5227,16 @@ static RPCHelpMan getdifficultyhealth()
                         {RPCResult::Type::OBJ, "reorg_protection", "", {
                             {RPCResult::Type::BOOL, "enabled", "Whether explicit deep-reorg protection is configured"},
                             {RPCResult::Type::BOOL, "active", "Whether the chain tip is at or above the protection activation height"},
+                            {RPCResult::Type::STR, "profile", "Active local reorg protection profile"},
+                            {RPCResult::Type::STR, "action", "Deep reorg action: park or warn"},
                             {RPCResult::Type::NUM, "current_tip_height", "Current active tip height used for activation checks"},
                             {RPCResult::Type::NUM, "start_height", "Configured activation height for deep-reorg protection"},
-                            {RPCResult::Type::NUM, "max_reorg_depth", "Configured maximum permitted reorganization depth"},
+                            {RPCResult::Type::NUM, "warn_depth", "Configured warning depth for candidate reorgs"},
+                            {RPCResult::Type::NUM, "park_depth", "Configured local parking depth for candidate reorgs"},
+                            {RPCResult::Type::NUM, "local_finality_depth", "Configured practical local-finality depth"},
+                            {RPCResult::Type::NUM, "locally_finalized_height", "Highest height considered locally finalized by current policy"},
+                            {RPCResult::Type::NUM, "max_reorg_depth", "Compatibility alias for park_depth"},
+                            {RPCResult::Type::NUM, "consensus_max_reorg_depth", "Consensus parameter value used as legacy policy context"},
                             {RPCResult::Type::NUM, "rejected_reorgs", "Rejected deep reorgs recorded since process start"},
                             {RPCResult::Type::NUM, "deepest_rejected_reorg_depth", "Deepest rejected reorg observed since process start"},
                             {RPCResult::Type::NUM, "last_rejected_reorg_depth", "Depth of the most recent rejected reorg"},
@@ -5214,6 +5245,10 @@ static RPCHelpMan getdifficultyhealth()
                             {RPCResult::Type::NUM, "last_rejected_fork_height", "Fork point height for the most recent rejection"},
                             {RPCResult::Type::NUM, "last_rejected_candidate_height", "Candidate chain height for the most recent rejection"},
                             {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent rejected reorg"},
+                            {RPCResult::Type::NUM, "parked_branch_count", "Number of locally parked branch roots"},
+                            {RPCResult::Type::ARR, "parked_branch_roots", "Locally parked branch root hashes", {
+                                {RPCResult::Type::STR_HEX, "", "Parked branch root hash"},
+                            }},
                         }},
                         {RPCResult::Type::OBJ, "consensus_guards", "", {
                             {RPCResult::Type::OBJ, "freivalds_transcript_binding", "", {
@@ -5595,9 +5630,16 @@ static RPCHelpMan getmatmulchallenge()
                                 {RPCResult::Type::OBJ, "reorg_protection", "", {
                                     {RPCResult::Type::BOOL, "enabled", "Whether explicit deep-reorg protection is configured"},
                                     {RPCResult::Type::BOOL, "active", "Whether the chain tip is at or above the protection activation height"},
+                                    {RPCResult::Type::STR, "profile", "Active local reorg protection profile"},
+                                    {RPCResult::Type::STR, "action", "Deep reorg action: park or warn"},
                                     {RPCResult::Type::NUM, "current_tip_height", "Current active tip height used for activation checks"},
                                     {RPCResult::Type::NUM, "start_height", "Configured activation height for deep-reorg protection"},
-                                    {RPCResult::Type::NUM, "max_reorg_depth", "Configured maximum permitted reorganization depth"},
+                                    {RPCResult::Type::NUM, "warn_depth", "Configured warning depth for candidate reorgs"},
+                                    {RPCResult::Type::NUM, "park_depth", "Configured local parking depth for candidate reorgs"},
+                                    {RPCResult::Type::NUM, "local_finality_depth", "Configured practical local-finality depth"},
+                                    {RPCResult::Type::NUM, "locally_finalized_height", "Highest height considered locally finalized by current policy"},
+                                    {RPCResult::Type::NUM, "max_reorg_depth", "Compatibility alias for park_depth"},
+                                    {RPCResult::Type::NUM, "consensus_max_reorg_depth", "Consensus parameter value used as legacy policy context"},
                                     {RPCResult::Type::NUM, "rejected_reorgs", "Rejected deep reorgs recorded since process start"},
                                     {RPCResult::Type::NUM, "deepest_rejected_reorg_depth", "Deepest rejected reorg observed since process start"},
                                     {RPCResult::Type::NUM, "last_rejected_reorg_depth", "Depth of the most recent rejected reorg"},
@@ -5606,6 +5648,10 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::NUM, "last_rejected_fork_height", "Fork point height for the most recent rejection"},
                                     {RPCResult::Type::NUM, "last_rejected_candidate_height", "Candidate chain height for the most recent rejection"},
                                     {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent rejected reorg"},
+                                    {RPCResult::Type::NUM, "parked_branch_count", "Number of locally parked branch roots"},
+                                    {RPCResult::Type::ARR, "parked_branch_roots", "Locally parked branch root hashes", {
+                                        {RPCResult::Type::STR_HEX, "", "Parked branch root hash"},
+                                    }},
                                 }},
                                 {RPCResult::Type::OBJ, "backend_runtime", "", {
                                     {RPCResult::Type::STR, "requested_backend", "Mining backend requested by the daemon (cpu/metal/cuda)"},
@@ -5885,9 +5931,16 @@ static RPCHelpMan getmatmulchallengeprofile()
                                 {RPCResult::Type::OBJ, "reorg_protection", "", {
                                     {RPCResult::Type::BOOL, "enabled", "Whether explicit deep-reorg protection is configured"},
                                     {RPCResult::Type::BOOL, "active", "Whether the chain tip is at or above the protection activation height"},
+                                    {RPCResult::Type::STR, "profile", "Active local reorg protection profile"},
+                                    {RPCResult::Type::STR, "action", "Deep reorg action: park or warn"},
                                     {RPCResult::Type::NUM, "current_tip_height", "Current active tip height used for activation checks"},
                                     {RPCResult::Type::NUM, "start_height", "Configured activation height for deep-reorg protection"},
-                                    {RPCResult::Type::NUM, "max_reorg_depth", "Configured maximum permitted reorganization depth"},
+                                    {RPCResult::Type::NUM, "warn_depth", "Configured warning depth for candidate reorgs"},
+                                    {RPCResult::Type::NUM, "park_depth", "Configured local parking depth for candidate reorgs"},
+                                    {RPCResult::Type::NUM, "local_finality_depth", "Configured practical local-finality depth"},
+                                    {RPCResult::Type::NUM, "locally_finalized_height", "Highest height considered locally finalized by current policy"},
+                                    {RPCResult::Type::NUM, "max_reorg_depth", "Compatibility alias for park_depth"},
+                                    {RPCResult::Type::NUM, "consensus_max_reorg_depth", "Consensus parameter value used as legacy policy context"},
                                     {RPCResult::Type::NUM, "rejected_reorgs", "Rejected deep reorgs recorded since process start"},
                                     {RPCResult::Type::NUM, "deepest_rejected_reorg_depth", "Deepest rejected reorg observed since process start"},
                                     {RPCResult::Type::NUM, "last_rejected_reorg_depth", "Depth of the most recent rejected reorg"},
@@ -5896,6 +5949,10 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::NUM, "last_rejected_fork_height", "Fork point height for the most recent rejection"},
                                     {RPCResult::Type::NUM, "last_rejected_candidate_height", "Candidate chain height for the most recent rejection"},
                                     {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent rejected reorg"},
+                                    {RPCResult::Type::NUM, "parked_branch_count", "Number of locally parked branch roots"},
+                                    {RPCResult::Type::ARR, "parked_branch_roots", "Locally parked branch root hashes", {
+                                        {RPCResult::Type::STR_HEX, "", "Parked branch root hash"},
+                                    }},
                                 }},
                                 {RPCResult::Type::OBJ, "backend_runtime", "", {
                                     {RPCResult::Type::STR, "requested_backend", "Mining backend requested by the daemon (cpu/metal/cuda)"},

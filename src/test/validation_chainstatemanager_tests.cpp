@@ -3822,6 +3822,61 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_CHECK(!get_opts({"-minimumchainwork=xyz"}));                                                               // invalid hex characters
     BOOST_CHECK(!get_opts({"-minimumchainwork=01234567890123456789012345678901234567890123456789012345678901234"})); // > 64 hex chars
 
+    // test deep-reorg defense profiles, defaults, and overrides
+    const auto default_reorg_opts = get_valid_opts({});
+    BOOST_CHECK(default_reorg_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::EMERGENCY);
+    BOOST_CHECK(default_reorg_opts.deep_reorg_action == kernel::DeepReorgAction::PARK);
+    const auto emergency_profile = kernel::GetReorgProtectionProfileSettings(default_reorg_opts.reorg_protection_profile);
+    BOOST_CHECK_EQUAL(emergency_profile.warn_depth, 3U);
+    BOOST_CHECK_EQUAL(emergency_profile.park_depth, 12U);
+    BOOST_CHECK_EQUAL(emergency_profile.finality_depth, 12U);
+
+    const auto archive_opts = get_valid_opts({"-reorgprotectionprofile=archive"});
+    BOOST_CHECK(archive_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::ARCHIVE);
+    BOOST_CHECK(archive_opts.deep_reorg_action == kernel::DeepReorgAction::WARN);
+    const auto archive_profile = kernel::GetReorgProtectionProfileSettings(archive_opts.reorg_protection_profile);
+    BOOST_CHECK_EQUAL(archive_profile.warn_depth, 72U);
+    BOOST_CHECK_EQUAL(archive_profile.park_depth, kernel::REORG_PROTECTION_DEPTH_DISABLED);
+    BOOST_CHECK_EQUAL(archive_profile.finality_depth, 72U);
+
+    const auto balanced_opts = get_valid_opts({"-reorgprotectionprofile=balanced"});
+    BOOST_CHECK(balanced_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::BALANCED);
+    BOOST_CHECK(balanced_opts.deep_reorg_action == kernel::DeepReorgAction::PARK);
+    const auto balanced_profile = kernel::GetReorgProtectionProfileSettings(balanced_opts.reorg_protection_profile);
+    BOOST_CHECK_EQUAL(balanced_profile.warn_depth, 12U);
+    BOOST_CHECK_EQUAL(balanced_profile.park_depth, 48U);
+    BOOST_CHECK_EQUAL(balanced_profile.finality_depth, 48U);
+
+    const auto strict_opts = get_valid_opts({"-reorgprotectionprofile=STRICT"});
+    BOOST_CHECK(strict_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::STRICT);
+    BOOST_CHECK(strict_opts.deep_reorg_action == kernel::DeepReorgAction::PARK);
+    const auto strict_profile = kernel::GetReorgProtectionProfileSettings(strict_opts.reorg_protection_profile);
+    BOOST_CHECK_EQUAL(strict_profile.warn_depth, 3U);
+    BOOST_CHECK_EQUAL(strict_profile.park_depth, 12U);
+    BOOST_CHECK_EQUAL(strict_profile.finality_depth, 12U);
+
+    BOOST_CHECK(get_valid_opts({"-reorgprotectionprofile=archive", "-parkdeepreorg=1"}).deep_reorg_action == kernel::DeepReorgAction::PARK);
+    BOOST_CHECK(get_valid_opts({"-parkdeepreorg=1"}).deep_reorg_action == kernel::DeepReorgAction::PARK);
+    BOOST_CHECK(get_valid_opts({"-parkdeepreorg=0"}).deep_reorg_action == kernel::DeepReorgAction::WARN);
+    BOOST_CHECK(get_valid_opts({"-noparkdeepreorg"}).deep_reorg_action == kernel::DeepReorgAction::WARN);
+    BOOST_CHECK(!default_reorg_opts.max_reorg_depth_warn.has_value());
+    BOOST_CHECK(!default_reorg_opts.max_reorg_depth_park.has_value());
+    BOOST_CHECK(!default_reorg_opts.local_finality_depth.has_value());
+    const auto max_reorg_opts = get_valid_opts({"-maxreorgdepthwarn=48", "-maxreorgdepthpark=96", "-localfinalitydepth=120"});
+    BOOST_REQUIRE(max_reorg_opts.max_reorg_depth_warn.has_value());
+    BOOST_REQUIRE(max_reorg_opts.max_reorg_depth_park.has_value());
+    BOOST_REQUIRE(max_reorg_opts.local_finality_depth.has_value());
+    BOOST_CHECK_EQUAL(*max_reorg_opts.max_reorg_depth_warn, 48U);
+    BOOST_CHECK_EQUAL(*max_reorg_opts.max_reorg_depth_park, 96U);
+    BOOST_CHECK_EQUAL(*max_reorg_opts.local_finality_depth, 120U);
+    BOOST_CHECK(!get_opts({"-reorgprotectionprofile=invalid"}));
+    BOOST_CHECK(!get_opts({"-maxreorgdepthwarn=0"}));
+    BOOST_CHECK(!get_opts({"-maxreorgdepthwarn=-1"}));
+    BOOST_CHECK(!get_opts({"-maxreorgdepthpark=0"}));
+    BOOST_CHECK(!get_opts({"-maxreorgdepthpark=-1"}));
+    BOOST_CHECK(!get_opts({"-localfinalitydepth=0"}));
+    BOOST_CHECK(!get_opts({"-localfinalitydepth=-1"}));
+
     // TEST: tier_config_flag_sets_behavior
     // TEST: mining_node_implicitly_tier0
     // test -matmulvalidation

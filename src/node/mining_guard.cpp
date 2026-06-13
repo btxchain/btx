@@ -52,10 +52,22 @@ MiningChainGuardOptions GetMiningChainGuardOptions(const NodeContext& node)
         1,
         static_cast<int>(node.args->GetIntArg(
             "-miningchainguardminpeers", DEFAULT_MINING_CHAIN_GUARD_MIN_PEERS)));
+    options.min_near_tip_peers = std::max<int>(
+        1,
+        static_cast<int>(node.args->GetIntArg(
+            "-miningchainguardminneartippeers", DEFAULT_MINING_CHAIN_GUARD_MIN_NEAR_TIP_PEERS)));
     options.max_median_tip_gap = std::max<int>(
         1,
         static_cast<int>(node.args->GetIntArg(
             "-miningchainguardmaxmediangap", DEFAULT_MINING_CHAIN_GUARD_MAX_MEDIAN_GAP)));
+    options.near_tip_window = std::max<int>(
+        0,
+        static_cast<int>(node.args->GetIntArg(
+            "-miningchainguardneartipwindow", DEFAULT_MINING_CHAIN_GUARD_NEAR_TIP_WINDOW)));
+    options.stale_peer_seconds = std::max<int>(
+        1,
+        static_cast<int>(node.args->GetIntArg(
+            "-miningchainguardstalepeerseconds", DEFAULT_MINING_CHAIN_GUARD_STALE_PEER_SECONDS)));
     return options;
 }
 
@@ -73,7 +85,9 @@ MiningChainGuardStatus EvaluateMiningChainGuard(
     status.local_tip_height = local_tip_height;
     status.peer_count = static_cast<int>(peer_heights.size());
     status.min_peer_count = options.min_peer_count;
+    status.min_near_tip_peers = options.min_near_tip_peers;
     status.max_median_tip_gap = options.max_median_tip_gap;
+    status.near_tip_window = options.near_tip_window;
 
     if (!options.enabled) {
         status.reason = "disabled";
@@ -117,6 +131,11 @@ MiningChainGuardStatus EvaluateMiningChainGuard(
 
     if (status.median_peer_tip > local_tip_height + options.max_median_tip_gap) {
         status.reason = "local_tip_behind_peer_median";
+        return status;
+    }
+
+    if (status.near_tip_peers < options.min_near_tip_peers) {
+        status.reason = "insufficient_near_tip_peers";
         return status;
     }
 
@@ -241,6 +260,8 @@ std::string DescribeMiningChainGuardStatus(const MiningChainGuardStatus& status)
     }
 
     description << " min_peers=" << status.min_peer_count
+                << " min_near_tip_peers=" << status.min_near_tip_peers
+                << " near_tip_window=" << status.near_tip_window
                 << " max_median_gap=" << status.max_median_tip_gap;
     return description.str();
 }

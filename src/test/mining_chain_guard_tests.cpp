@@ -59,6 +59,25 @@ BOOST_AUTO_TEST_CASE(insufficient_peer_consensus_pauses_mining)
     BOOST_CHECK_EQUAL(status.reason, "insufficient_peer_consensus");
 }
 
+BOOST_AUTO_TEST_CASE(default_guard_requires_three_peers)
+{
+    node::MiningChainGuardOptions options;
+    options.enabled = true;
+
+    BOOST_CHECK_EQUAL(options.min_peer_count, 3);
+
+    const auto status = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/100,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        std::vector<int>{100, 100},
+        options);
+
+    BOOST_CHECK(!status.healthy);
+    BOOST_CHECK_EQUAL(status.reason, "insufficient_peer_consensus");
+    BOOST_CHECK_EQUAL(status.min_peer_count, 3);
+}
+
 BOOST_AUTO_TEST_CASE(local_tip_ahead_of_peer_median_pauses_mining)
 {
     node::MiningChainGuardOptions options;
@@ -91,6 +110,27 @@ BOOST_AUTO_TEST_CASE(local_tip_behind_peer_median_pauses_mining)
 
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "local_tip_behind_peer_median");
+}
+
+BOOST_AUTO_TEST_CASE(near_tip_peer_quorum_pauses_mining)
+{
+    node::MiningChainGuardOptions options;
+    options.enabled = true;
+
+    BOOST_CHECK_EQUAL(options.min_near_tip_peers, 2);
+    BOOST_CHECK_EQUAL(options.near_tip_window, 2);
+
+    const auto status = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/100,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        std::vector<int>{100, 103, 103},
+        options);
+
+    BOOST_CHECK(!status.healthy);
+    BOOST_CHECK_EQUAL(status.reason, "insufficient_near_tip_peers");
+    BOOST_CHECK_EQUAL(status.near_tip_peers, 1);
+    BOOST_CHECK_EQUAL(status.min_near_tip_peers, 2);
 }
 
 BOOST_AUTO_TEST_CASE(median_majority_close_to_tip_keeps_mining_enabled)

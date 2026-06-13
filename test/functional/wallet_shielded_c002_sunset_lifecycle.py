@@ -102,9 +102,11 @@ class WalletShieldedC002SunsetLifecycleTest(BitcoinTestFramework):
         node.createwallet(wallet_name="shielded", descriptors=True)
         node.createwallet(wallet_name="exit_boundary", descriptors=True)
         node.createwallet(wallet_name="exit_post", descriptors=True)
+        node.createwallet(wallet_name="exit_replace", descriptors=True)
         wallet = encrypt_and_unlock_wallet(node, "shielded")
         exit_boundary = encrypt_and_unlock_wallet(node, "exit_boundary")
         exit_post = encrypt_and_unlock_wallet(node, "exit_post")
+        exit_replace = encrypt_and_unlock_wallet(node, "exit_replace")
 
         mine_addr = wallet.getnewaddress()
         self.log.info("Create pre-C-002 shielded notes and ring diversity")
@@ -151,11 +153,13 @@ class WalletShieldedC002SunsetLifecycleTest(BitcoinTestFramework):
         assert_equal(wallet.getreceivedbyaddress(transparent_dest), Decimal("0.10"))
         exact_fee = self._canonical_fee(max(Decimal(str(pre_sunset_unshield["fee"])), Decimal("0.00012")))
 
-        self.log.info("Seed two exact-exit wallets before the sunset")
+        self.log.info("Seed exact-exit wallets before the sunset")
         boundary_zaddr = exit_boundary.z_getnewaddress()
         post_zaddr = exit_post.z_getnewaddress()
+        replace_zaddr = exit_replace.z_getnewaddress()
         self._seed_exact_exit_wallet(node, wallet, exit_boundary, boundary_zaddr, mine_addr, exact_fee)
         self._seed_exact_exit_wallet(node, wallet, exit_post, post_zaddr, mine_addr, exact_fee)
+        self._seed_exact_exit_wallet(node, wallet, exit_replace, replace_zaddr, mine_addr, exact_fee)
         assert node.getblockcount() < SUNSET_HEIGHT - 1
 
         self.log.info("At next-block sunset, new shielded credits are blocked but exact transparent exit is accepted")
@@ -172,10 +176,36 @@ class WalletShieldedC002SunsetLifecycleTest(BitcoinTestFramework):
         assert_equal(node.getblockcount(), SUNSET_HEIGHT + 1)
         assert_equal(exit_post.gettransaction(post_exit_txid)["confirmations"], 1)
 
+        self.log.info("Replace a stuck recovery-exit with the same note and a higher fee")
+        low_fee = exact_fee
+        high_fee = exact_fee + FEE_QUANTUM
+        original_dest = exit_replace.getnewaddress()
+        replacement_dest = exit_replace.getnewaddress()
+        original_exit = exit_replace.z_sendmany(
+            [{"address": original_dest, "amount": EXACT_AMOUNT}],
+            low_fee,
+        )
+        assert original_exit["txid"] in node.getrawmempool()
+        assert_equal(exit_replace.z_viewtransaction(original_exit["txid"], True)["family"], "v2_recovery_exit")
+        replacement_amount = EXACT_AMOUNT - FEE_QUANTUM
+        replacement_exit = exit_replace.z_sendmany(
+            [{"address": replacement_dest, "amount": replacement_amount}],
+            high_fee,
+            [],
+            None,
+            None,
+            original_exit["txid"],
+        )
+        assert replacement_exit["txid"] in node.getrawmempool()
+        assert original_exit["txid"] not in node.getrawmempool()
+        assert_equal(exit_replace.z_viewtransaction(replacement_exit["txid"], True)["family"], "v2_recovery_exit")
+        self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
+        assert_equal(exit_replace.getreceivedbyaddress(replacement_dest), replacement_amount)
+
         self.log.info("Non-exact post-sunset transparent exits fail before the ordinary V2_SEND fallback")
         assert_raises_rpc_error(
             -4,
-            "no exact shielded note available for transparent recovery exit",
+            "after the shielded sunset",
             wallet.z_sendmany,
             [{"address": wallet.getnewaddress(), "amount": Decimal("0.12345678")}],
             exact_fee,

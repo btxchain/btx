@@ -8745,15 +8745,16 @@ RPCHelpMan z_sendmany()
                                 const bool try_recovery_exit =
                                     recovery_exit_active &&
                                     transparent_only_exit &&
-                                    transparent_recipients.size() == 1 &&
-                                    !conflict_selection.has_value();
+                                    transparent_recipients.size() == 1;
                                 if (try_recovery_exit) {
                                     const auto target_note_value = CheckedAdd(transparent_recipients.front().second, fee);
                                     if (!target_note_value || !MoneyRange(*target_note_value)) {
                                         create_error = "recovery exit target overflow";
                                     } else {
-                                        const auto candidate_notes =
-                                            pwallet->m_shielded_wallet->GetRecoveryExitCandidates(fee, /*min_depth=*/1);
+                                        const std::vector<ShieldedCoin> candidate_notes =
+                                            conflict_selection.has_value()
+                                                ? *conflict_selection
+                                                : pwallet->m_shielded_wallet->GetRecoveryExitCandidates(fee, /*min_depth=*/1);
                                         size_t exact_note_candidates{0};
                                         std::optional<Nullifier> selected_wallet_nullifier;
                                         std::string last_recovery_error;

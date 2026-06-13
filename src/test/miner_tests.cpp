@@ -1231,8 +1231,12 @@ void MinerTestingSetup::TestShieldedAnchorTemplateCleanup(const CScript& scriptP
 
     {
         LOCK(tx_mempool.cs);
-        BOOST_CHECK(!tx_mempool.exists(GenTxid::Txid(stale_txid)));
-        BOOST_CHECK(!tx_mempool.exists(GenTxid::Txid(stale_registry_txid)));
+        // CreateNewBlock no longer runs the full stale-shielded mempool scan,
+        // because that can stall mining/RPC during recovery-exit waves. Stale
+        // entries may remain in the mempool, but they must not poison the
+        // template.
+        BOOST_CHECK(tx_mempool.exists(GenTxid::Txid(stale_txid)));
+        BOOST_CHECK(tx_mempool.exists(GenTxid::Txid(stale_registry_txid)));
     }
     for (const auto& block_tx : block.vtx) {
         BOOST_CHECK(block_tx->GetHash() != stale_txid);
@@ -1784,6 +1788,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
         consensus.nShieldedSettlementAnchorMaturity};
     consensus.nShieldedSettlementAnchorMaturity = 0;
     const int32_t validation_height = GetCurrentSyntheticValidationHeight(*this);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Assert(m_node.chainman)->EnsureShieldedStateInitialized()));
     BOOST_REQUIRE(WITH_LOCK(::cs_main, return Assert(m_node.chainman)->SetShieldedPoolBalanceForTest(100 * COIN)));
 
     auto prerequisite_rebalance_fixture = test::shielded::BuildV2RebalanceFixture(

@@ -13,11 +13,13 @@
 #include <crypto/chacha20poly1305.h>
 #include <hash.h>
 #include <key_io.h>
+#include <policy/policy.h>
 #include <pqkey.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <script/sign.h>
 #include <script/signingprovider.h>
+#include <shielded/bundle.h>
 #include <shielded/merkle_tree.h>
 #include <shielded/note.h>
 #include <shielded/nullifier.h>
@@ -53,6 +55,18 @@ constexpr CAmount kRecoverFee = 1000;
 uint256 Sha256Of(const std::vector<unsigned char>& b)
 {
     HashWriter hw; hw.write(AsBytes(Span<const unsigned char>{b.data(), b.size()})); return hw.GetSHA256();
+}
+
+std::vector<unsigned char> ToBytes(const uint256& hash)
+{
+    return std::vector<unsigned char>(hash.begin(), hash.end());
+}
+
+CScript BuildP2MROutput(const uint256& merkle_root)
+{
+    CScript script;
+    script << OP_2 << ToBytes(merkle_root);
+    return script;
 }
 
 // Deterministic test vectors: same note/key/witness every run, so the frozen root passed as a regtest
@@ -137,11 +151,18 @@ struct RecoveryExitRebuildSetup : public TestChain100Setup {
     RecoveryExitRebuildSetup() : TestChain100Setup(ChainType::REGTEST, MakeRecoveryRebuildOpts()) {}
 };
 
+CScript RecoveryExitDefaultScript()
+{
+    return CScript() << OP_TRUE;
+}
+
 // Build a fully-valid V2_RECOVERY_EXIT transaction (empty vin; one transparent output = value - fee).
-CMutableTransaction BuildRecoveryExitTx()
+CMutableTransaction BuildRecoveryExitTx(CAmount fee = kRecoverFee,
+                                        CScript script_pub_key = RecoveryExitDefaultScript())
 {
     using namespace shielded::v2;
     const ReVectors& v = Vectors();
+    BOOST_REQUIRE_GT(v.note.value, fee);
 
     RecoveryExitPayload payload;
     payload.value = v.note.value;
@@ -153,7 +174,7 @@ CMutableTransaction BuildRecoveryExitTx()
     { DataStream ws; ws << v.witness; const auto sp = MakeUCharSpan(ws); payload.membership_proof.assign(sp.begin(), sp.end()); }
 
     CMutableTransaction mtx;
-    mtx.vout.emplace_back(v.note.value - kRecoverFee, CScript() << OP_TRUE);
+    mtx.vout.emplace_back(v.note.value - fee, script_pub_key);
 
     const uint256 tx_binding = ComputeRecoveryExitTransparentBinding(Span<const CTxOut>{mtx.vout});
     const uint256 binding = ComputeRecoveryExitBindingHash(v.cm, v.nullifier, payload.value, tx_binding);
@@ -170,10 +191,10 @@ CMutableTransaction BuildRecoveryExitTx()
     return mtx;
 }
 
-void AddRecoveryExitToMempool(CTxMemPool& pool, const CTransactionRef& tx)
+void AddRecoveryExitToMempool(CTxMemPool& pool, const CTransactionRef& tx, CAmount fee = kRecoverFee)
 {
     TestMemPoolEntryHelper entry;
-    AddToMempool(pool, entry.Fee(kRecoverFee).Height(kSunsetHeight).FromTx(tx));
+    AddToMempool(pool, entry.Fee(fee).Height(kSunsetHeight).FromTx(tx));
 }
 
 CMutableTransaction BuildLegacyShieldOnlyTx(TestChain100Setup& setup,
@@ -214,6 +235,13 @@ CMutableTransaction BuildLegacyShieldOnlyTx(TestChain100Setup& setup,
 
 BOOST_AUTO_TEST_SUITE(recovery_exit_chain_tests)
 
+BOOST_AUTO_TEST_CASE(recovery_exit_charges_policy_verify_units)
+{
+    CTransaction tx{BuildRecoveryExitTx()};
+
+    BOOST_CHECK_GT(GetShieldedPolicyWeight(tx), GetTransactionWeight(tx));
+}
+
 BOOST_FIXTURE_TEST_CASE(recovery_exit_mined_block_debits_pool_and_retires_identifiers, RecoveryExitChainSetup)
 {
     const ReVectors& v = Vectors();
@@ -223,6 +251,7 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_mined_block_debits_pool_and_retires_identi
     const CAmount initial_pool = 2 * v.note.value;
     {
         LOCK(cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
         BOOST_REQUIRE(chainman.SetShieldedPoolBalanceForTest(initial_pool));
         BOOST_CHECK(!chainman.IsShieldedNullifierSpent(v.nullifier));
         BOOST_CHECK(!chainman.IsShieldedRecoveryExitCommitmentRetired(v.cm));
@@ -320,7 +349,98 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_mempool_cleanup_evicts_retired_commitment,
     BOOST_CHECK(!pool.exists(txid));
 }
 
-BOOST_FIXTURE_TEST_CASE(recovery_exit_template_cleanup_excludes_spent_nullifier, RecoveryExitChainSetup)
+BOOST_FIXTURE_TEST_CASE(recovery_exit_mempool_cleanup_evicts_missing_cached_retirements, RecoveryExitChainSetup)
+{
+    const ReVectors& v = Vectors();
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    const auto tx = MakeTransactionRef(BuildRecoveryExitTx());
+    const auto txid = GenTxid::Txid(tx->GetHash());
+
+    AddRecoveryExitToMempool(pool, tx);
+    LOCK2(cs_main, pool.cs);
+    BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+    BOOST_REQUIRE(pool.exists(txid));
+    BOOST_REQUIRE(pool.m_shielded_nullifiers.erase(v.nullifier) == 1U);
+    BOOST_REQUIRE(pool.m_shielded_recovery_commitments.erase(v.cm) == 1U);
+
+    RemoveStaleShieldedAnchorMempoolTransactions(pool, chainman.ActiveChain(), chainman);
+    BOOST_CHECK(!pool.exists(txid));
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_targeted_block_cleanup_evicts_conflicting_entry, RecoveryExitChainSetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    const auto recovery_tx = MakeTransactionRef(BuildRecoveryExitTx());
+    const auto recovery_txid = GenTxid::Txid(recovery_tx->GetHash());
+
+    CMutableTransaction unrelated_mtx;
+    unrelated_mtx.vout.emplace_back(1 * COIN, CScript() << OP_TRUE);
+    const auto unrelated_tx = MakeTransactionRef(unrelated_mtx);
+    const auto unrelated_txid = GenTxid::Txid(unrelated_tx->GetHash());
+
+    AddRecoveryExitToMempool(pool, recovery_tx);
+    TestMemPoolEntryHelper entry;
+    AddToMempool(pool, entry.FromTx(unrelated_tx));
+
+    LOCK2(cs_main, pool.cs);
+    BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+    BOOST_REQUIRE(pool.exists(recovery_txid));
+    BOOST_REQUIRE(pool.exists(unrelated_txid));
+
+    RemoveShieldedMempoolConflictsForBlock(pool,
+                                           chainman.ActiveChain(),
+                                           chainman,
+                                           nullptr,
+                                           {recovery_tx});
+
+    BOOST_CHECK(!pool.exists(recovery_txid));
+    BOOST_CHECK(pool.exists(unrelated_txid));
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_same_note_replacement_under_optin_rbf, RecoveryExitChainSetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    const RBFPolicy saved_rbf_policy = pool.m_opts.rbf_policy;
+    pool.m_opts.rbf_policy = RBFPolicy::OptIn;
+
+    const CScript script_pub_key = BuildP2MROutput(uint256::ONE);
+    const CAmount low_fee = 200'000;
+    const CAmount high_fee = 500'000;
+    const auto low_tx = MakeTransactionRef(BuildRecoveryExitTx(low_fee, script_pub_key));
+    const auto high_tx = MakeTransactionRef(BuildRecoveryExitTx(high_fee, script_pub_key));
+    const auto low_txid = GenTxid::Txid(low_tx->GetHash());
+    const auto high_txid = GenTxid::Txid(high_tx->GetHash());
+    BOOST_REQUIRE(low_tx->GetHash() != high_tx->GetHash());
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.SetShieldedPoolBalanceForTest(2 * kRecoverValue));
+    }
+
+    const auto low_accept = WITH_LOCK(cs_main, return chainman.ProcessTransaction(low_tx));
+    if (low_accept.m_result_type != MempoolAcceptResult::ResultType::VALID) {
+        pool.m_opts.rbf_policy = saved_rbf_policy;
+        BOOST_FAIL(strprintf("low-fee recovery-exit rejected: reason=%s debug=%s",
+                             low_accept.m_state.GetRejectReason(),
+                             low_accept.m_state.GetDebugMessage()));
+    }
+    BOOST_CHECK(WITH_LOCK(pool.cs, return pool.exists(low_txid)));
+
+    const auto high_accept = WITH_LOCK(cs_main, return chainman.ProcessTransaction(high_tx));
+    pool.m_opts.rbf_policy = saved_rbf_policy;
+    BOOST_REQUIRE_MESSAGE(high_accept.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                          strprintf("replacement recovery-exit rejected: reason=%s debug=%s",
+                                    high_accept.m_state.GetRejectReason(),
+                                    high_accept.m_state.GetDebugMessage()));
+    BOOST_CHECK(WITH_LOCK(pool.cs, return !pool.exists(low_txid)));
+    BOOST_CHECK(WITH_LOCK(pool.cs, return pool.exists(high_txid)));
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_template_selection_excludes_spent_nullifier, RecoveryExitChainSetup)
 {
     const ReVectors& v = Vectors();
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -342,10 +462,10 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_template_cleanup_excludes_spent_nullifier,
     for (const auto& block_tx : block->vtx) {
         BOOST_CHECK(block_tx->GetHash() != tx->GetHash());
     }
-    BOOST_CHECK(WITH_LOCK(pool.cs, return !pool.exists(txid)));
+    BOOST_CHECK(WITH_LOCK(pool.cs, return pool.exists(txid)));
 }
 
-BOOST_FIXTURE_TEST_CASE(recovery_exit_template_cleanup_excludes_retired_commitment, RecoveryExitChainSetup)
+BOOST_FIXTURE_TEST_CASE(recovery_exit_template_selection_excludes_retired_commitment, RecoveryExitChainSetup)
 {
     const ReVectors& v = Vectors();
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -367,7 +487,7 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_template_cleanup_excludes_retired_commitme
     for (const auto& block_tx : block->vtx) {
         BOOST_CHECK(block_tx->GetHash() != tx->GetHash());
     }
-    BOOST_CHECK(WITH_LOCK(pool.cs, return !pool.exists(txid)));
+    BOOST_CHECK(WITH_LOCK(pool.cs, return pool.exists(txid)));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

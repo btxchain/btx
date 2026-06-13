@@ -19,11 +19,37 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 
 namespace node {
+namespace {
+std::optional<kernel::ReorgProtectionProfile> ParseReorgProtectionProfile(std::string profile)
+{
+    std::transform(profile.begin(), profile.end(), profile.begin(), [](unsigned char c) {
+        return std::tolower(c);
+    });
+
+    if (profile == "archive") return kernel::ReorgProtectionProfile::ARCHIVE;
+    if (profile == "balanced") return kernel::ReorgProtectionProfile::BALANCED;
+    if (profile == "strict") return kernel::ReorgProtectionProfile::STRICT;
+    if (profile == "emergency") return kernel::ReorgProtectionProfile::EMERGENCY;
+    return std::nullopt;
+}
+
+util::Result<uint32_t> ParsePositiveDepthArg(const char* arg_name, int64_t value)
+{
+    if (value < 1) {
+        return util::Error{Untranslated(strprintf(
+            "Invalid %s value (%d), must be at least 1", arg_name, value))};
+    }
+    return static_cast<uint32_t>(std::min<int64_t>(value, std::numeric_limits<uint32_t>::max()));
+}
+} // namespace
+
 util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManager::Options& opts)
 {
     if (auto value{args.GetIntArg("-checkblockindex")}) {
@@ -84,24 +110,42 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
         opts.allow_unpinned_shielded_snapshot = *value;
     }
 
-    // Deep-reorg defense (issue: no reorg-depth limit). These are PER-NODE,
-    // NON-CONSENSUS operator controls. The default (-parkdeepreorg=0) keeps pure
-    // Nakamoto consensus: the node always follows the most-work chain and merely
-    // emits a loud alarm on a deep reorg. -parkdeepreorg=1 opts the node into a
-    // local finality assumption (refuse to auto-switch on a deep reorg); see the
-    // split-risk memo in Chainstate::ActivateBestChainStep before enabling it.
+    // Deep-reorg defense. These are PER-NODE, NON-CONSENSUS operator controls.
+    // The named profile supplies warn/park/finality depths; individual knobs
+    // override those defaults when an operator has a better local risk model.
+    if (auto value{args.GetArg("-reorgprotectionprofile")}) {
+        const auto profile = ParseReorgProtectionProfile(*value);
+        if (!profile) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -reorgprotectionprofile value (%s), expected archive, balanced, strict, or emergency", *value))};
+        }
+        opts.reorg_protection_profile = *profile;
+        opts.deep_reorg_action = kernel::GetReorgProtectionProfileSettings(*profile).action;
+    } else {
+        opts.deep_reorg_action = kernel::GetReorgProtectionProfileSettings(opts.reorg_protection_profile).action;
+    }
+
     if (auto value{args.GetBoolArg("-parkdeepreorg")}) {
         opts.deep_reorg_action = *value ? kernel::DeepReorgAction::PARK
                                         : kernel::DeepReorgAction::WARN;
     }
 
     if (auto value{args.GetIntArg("-maxreorgdepthwarn")}) {
-        if (*value < 1) {
-            return util::Error{Untranslated(strprintf(
-                "Invalid -maxreorgdepthwarn value (%d), must be at least 1", *value))};
-        }
-        opts.max_reorg_depth_warn = static_cast<uint32_t>(
-            std::min<int64_t>(*value, std::numeric_limits<uint32_t>::max()));
+        auto parsed = ParsePositiveDepthArg("-maxreorgdepthwarn", *value);
+        if (!parsed) return util::Error{util::ErrorString(parsed)};
+        opts.max_reorg_depth_warn = *parsed;
+    }
+
+    if (auto value{args.GetIntArg("-maxreorgdepthpark")}) {
+        auto parsed = ParsePositiveDepthArg("-maxreorgdepthpark", *value);
+        if (!parsed) return util::Error{util::ErrorString(parsed)};
+        opts.max_reorg_depth_park = *parsed;
+    }
+
+    if (auto value{args.GetIntArg("-localfinalitydepth")}) {
+        auto parsed = ParsePositiveDepthArg("-localfinalitydepth", *value);
+        if (!parsed) return util::Error{util::ErrorString(parsed)};
+        opts.local_finality_depth = *parsed;
     }
 
     ReadDatabaseArgs(args, opts.coins_db);

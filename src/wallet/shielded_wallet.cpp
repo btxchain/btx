@@ -6230,9 +6230,12 @@ std::optional<std::vector<ShieldedCoin>> CShieldedWallet::GetConflictSpendSelect
     }
 
     const CShieldedBundle& bundle = wtx->tx->GetShieldedBundle();
+    const auto family = bundle.GetTransactionFamily();
     if (!bundle.HasV2Bundle() ||
-        bundle.GetTransactionFamily() != shielded::v2::TransactionFamily::V2_SEND) {
-        if (error != nullptr) *error = "conflict_txid must reference an in-mempool v2 shielded send";
+        !family.has_value() ||
+        (*family != shielded::v2::TransactionFamily::V2_SEND &&
+         *family != shielded::v2::TransactionFamily::V2_RECOVERY_EXIT)) {
+        if (error != nullptr) *error = "conflict_txid must reference an in-mempool v2 shielded send or recovery exit";
         return std::nullopt;
     }
 
