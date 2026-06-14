@@ -521,6 +521,49 @@ BOOST_AUTO_TEST_CASE(getmatmulchallenge_reports_chain_guard_and_time_policy)
     }
 }
 
+BOOST_AUTO_TEST_CASE(getmatmulchallenge_work_profile_reports_parent_mtp_seed_v3)
+{
+    SetMiningChainGuard(false);
+
+    auto& mutable_consensus = const_cast<Consensus::Params&>(m_node.chainman->GetConsensus());
+    struct RestoreMatMulSeedHeights
+    {
+        Consensus::Params& consensus;
+        int32_t saved_nonce_seed_height;
+        int32_t saved_parent_mtp_seed_height;
+        ~RestoreMatMulSeedHeights()
+        {
+            consensus.nMatMulNonceSeedHeight = saved_nonce_seed_height;
+            consensus.nMatMulParentMtpSeedHeight = saved_parent_mtp_seed_height;
+        }
+    } restore_seed_heights{
+        mutable_consensus,
+        mutable_consensus.nMatMulNonceSeedHeight,
+        mutable_consensus.nMatMulParentMtpSeedHeight};
+
+    const int32_t next_height = ActiveHeight() + 1;
+    mutable_consensus.nMatMulNonceSeedHeight = next_height;
+    mutable_consensus.nMatMulParentMtpSeedHeight = next_height;
+
+    const auto challenge = CallRPC("getmatmulchallenge").get_obj();
+    const auto work_profile = challenge.find_value("work_profile").get_obj();
+    const auto seed_access = work_profile.find_value("next_block_seed_access").get_obj();
+    const std::string seed_rule = seed_access.find_value("seed_derivation_rule").get_str();
+
+    BOOST_CHECK_EQUAL(seed_access.find_value("seed_derivation_scope").get_str(), "per_nonce_header_parent_mtp");
+    BOOST_CHECK(seed_rule.find("BTX_MATMUL_SEED_V3") != std::string::npos);
+    BOOST_CHECK(seed_rule.find("parent_median_time_past") != std::string::npos);
+    BOOST_CHECK(!seed_access.find_value("winner_knows_next_seeds_first").get_bool());
+    BOOST_CHECK(seed_access.find_value("private_parent_withholding_head_start_possible").get_bool());
+    BOOST_CHECK_EQUAL(
+        seed_access.find_value("private_parent_withholding_head_start_scope").get_str(),
+        "standard_pow_parent_withholding_only");
+    BOOST_CHECK_EQUAL(seed_access.find_value("template_mutations_preserve_seed").get_array().size(), 0U);
+
+    const auto cross_nonce_reuse = work_profile.find_value("cross_nonce_reuse").get_obj();
+    BOOST_CHECK(!cross_nonce_reuse.find_value("fixed_instance_reuse_possible").get_bool());
+}
+
 BOOST_AUTO_TEST_CASE(getmatmulchallenge_reports_chain_guard_advisory_without_pausing)
 {
     SetMiningChainGuard(true);

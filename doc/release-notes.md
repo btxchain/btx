@@ -3,10 +3,10 @@ BTX version 0.32.11 is now available from:
   <https://github.com/btxchain/btx/releases/tag/v0.32.11>
 
 This v0.32.11 point release rolls in the latest btx-node production hardening
-for shielded-exit velocity accounting, assumeutxo snapshot compatibility, and
-the block-130,000 empty-block subsidy transition. It is intended for nodes,
-miners, pools, exchanges, services, explorers, and wallet operators running the
-0.32.x block-125,000 shielded sunset series.
+for shielded-exit velocity accounting, assumeutxo snapshot compatibility,
+MatMul v3 seed handling, and the block-130,000 empty-block subsidy transition.
+It is intended for nodes, miners, pools, exchanges, services, explorers, and
+wallet operators running the 0.32.x block-125,000 shielded sunset series.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -38,6 +38,18 @@ nodes should use a v9+ snapshot or reindex/redownload from a non-pruned source.
 BTX is supported on Linux, macOS 13+, and Windows 10+.
 
 # Notable changes
+
+- MatMul v3 parent-MTP seed handling is hardened across CPU, Metal, and CUDA
+  paths. GPU nonce prehash scanning now carries the active seed version and
+  parent median-time-past context so accelerated miners verify the same seed
+  scope as consensus.
+
+- `getmatmulchallenge` work-profile metadata reports the active parent-MTP
+  seed-v3 scope when it is active, distinguishing public template
+  precomputation from ordinary private parent withholding.
+
+- MatMul v3 benchmark and CI helper scripts were added for CPU, Metal, and
+  CUDA validation of seed-v3 behavior and cost measurements.
 
 - Shielded unshield-velocity state is now part of the persisted shielded state
   and v9 assumeutxo snapshot section. This lets snapshot-started nodes evaluate

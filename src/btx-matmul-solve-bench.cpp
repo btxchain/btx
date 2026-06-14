@@ -49,6 +49,8 @@ struct Options {
     uint32_t epsilon_bits{MAINNET_LIVE_LIKE_EPSILON_BITS};
     int32_t block_height{static_cast<int32_t>(MAINNET_POST_PRODUCT_HEIGHT)};
     std::optional<int32_t> nonce_seed_height_override;
+    std::optional<int32_t> parent_mtp_seed_height_override;
+    std::optional<int64_t> parent_mtp_override;
     std::optional<int32_t> product_digest_height_override;
     uint32_t parallel{1};
     std::optional<std::string> backend_override;
@@ -98,7 +100,9 @@ void PrintUsage(std::ostream& out)
         << " [--iterations <count>] [--tries <count>]"
         << " [--n <dim>] [--b <block>] [--r <rank>]"
         << " [--nbits <compact>] [--epsilon-bits <count>]"
-        << " [--block-height <height>] [--nonce-seed-height <height>] [--product-digest-height <height>]"
+        << " [--block-height <height>] [--nonce-seed-height <height>]"
+        << " [--parent-mtp-seed-height <height>] [--parent-mtp <time>]"
+        << " [--product-digest-height <height>]"
         << " [--parallel <count>]"
         << " [--backend <cpu|metal|cuda|mlx>]"
         << " [--async <0|1>] [--gpu-inputs <0|1>]"
@@ -111,6 +115,15 @@ bool ParseArgs(int argc, char* argv[], Options& options)
     auto parse_uint32 = [&](std::string_view arg_name, std::string_view value, uint32_t& out) -> bool {
         const auto parsed = ParseUintArg(value);
         if (!parsed.has_value() || *parsed == 0 || *parsed > std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "error: invalid value for " << arg_name << ": " << value << std::endl;
+            return false;
+        }
+        out = static_cast<uint32_t>(*parsed);
+        return true;
+    };
+    auto parse_uint32_allow_zero = [&](std::string_view arg_name, std::string_view value, uint32_t& out) -> bool {
+        const auto parsed = ParseUintArg(value);
+        if (!parsed.has_value() || *parsed > std::numeric_limits<uint32_t>::max()) {
             std::cerr << "error: invalid value for " << arg_name << ": " << value << std::endl;
             return false;
         }
@@ -189,7 +202,7 @@ bool ParseArgs(int argc, char* argv[], Options& options)
             if (!parse_kv("--nbits", [&](std::string_view value) { return parse_uint32("--nbits", value, options.nbits); })) return false;
         } else if (arg == "--epsilon-bits" || arg.rfind("--epsilon-bits=", 0) == 0) {
             consumed = true;
-            if (!parse_kv("--epsilon-bits", [&](std::string_view value) { return parse_uint32("--epsilon-bits", value, options.epsilon_bits); })) return false;
+            if (!parse_kv("--epsilon-bits", [&](std::string_view value) { return parse_uint32_allow_zero("--epsilon-bits", value, options.epsilon_bits); })) return false;
         } else if (arg == "--block-height" || arg.rfind("--block-height=", 0) == 0) {
             consumed = true;
             if (!parse_kv("--block-height", [&](std::string_view value) { return parse_int32("--block-height", value, options.block_height); })) return false;
@@ -204,6 +217,35 @@ bool ParseArgs(int argc, char* argv[], Options& options)
                     }
                     options.nonce_seed_height_override = parsed;
                     return true;
+                })) return false;
+        } else if (arg == "--parent-mtp-seed-height" || arg.rfind("--parent-mtp-seed-height=", 0) == 0) {
+            consumed = true;
+            if (!parse_kv("--parent-mtp-seed-height", [&](std::string_view value) {
+                    int32_t parsed{0};
+                    if (!parse_int32("--parent-mtp-seed-height", value, parsed)) return false;
+                    if (parsed < 0) {
+                        std::cerr << "error: invalid value for --parent-mtp-seed-height: " << value << std::endl;
+                        return false;
+                    }
+                    options.parent_mtp_seed_height_override = parsed;
+                    return true;
+                })) return false;
+        } else if (arg == "--parent-mtp" || arg.rfind("--parent-mtp=", 0) == 0) {
+            consumed = true;
+            if (!parse_kv("--parent-mtp", [&](std::string_view value) {
+                    try {
+                        size_t consumed_chars{0};
+                        const long long parsed = std::stoll(std::string{value}, &consumed_chars, 10);
+                        if (consumed_chars != value.size()) {
+                            std::cerr << "error: invalid value for --parent-mtp: " << value << std::endl;
+                            return false;
+                        }
+                        options.parent_mtp_override = static_cast<int64_t>(parsed);
+                        return true;
+                    } catch (const std::exception&) {
+                        std::cerr << "error: invalid value for --parent-mtp: " << value << std::endl;
+                        return false;
+                    }
                 })) return false;
         } else if (arg == "--product-digest-height" || arg.rfind("--product-digest-height=", 0) == 0) {
             consumed = true;
@@ -403,7 +445,15 @@ IterationResult RunSolveIteration(const Options& options, const Consensus::Param
             options.nbits,
             static_cast<uint64_t>(iteration_index) * options.max_tries + 1U);
         uint64_t tries = options.max_tries;
-        if (SolveMatMul(candidate, consensus, tries, options.block_height)) {
+        if (SolveMatMul(
+                candidate,
+                consensus,
+                tries,
+                options.block_height,
+                nullptr,
+                nullptr,
+                nullptr,
+                options.parent_mtp_override)) {
             ++result.solved_count;
         }
         result.nonces_per_sec = static_cast<double>(options.max_tries - tries);
@@ -419,7 +469,15 @@ IterationResult RunSolveIteration(const Options& options, const Consensus::Param
                     ((static_cast<uint64_t>(iteration_index) * options.parallel + worker_index) * options.max_tries) + 1U;
                 CBlockHeader candidate = BuildCandidateHeader(options.n, options.nbits, nonce64);
                 uint64_t tries = options.max_tries;
-                if (SolveMatMul(candidate, consensus, tries, options.block_height)) {
+                if (SolveMatMul(
+                        candidate,
+                        consensus,
+                        tries,
+                        options.block_height,
+                        nullptr,
+                        nullptr,
+                        nullptr,
+                        options.parent_mtp_override)) {
                     solved_counts[worker_index] = 1;
                 }
                 attempts_used[worker_index] = options.max_tries - tries;
@@ -482,6 +540,9 @@ int main(int argc, char* argv[])
     if (options.nonce_seed_height_override.has_value()) {
         consensus.nMatMulNonceSeedHeight = *options.nonce_seed_height_override;
     }
+    if (options.parent_mtp_seed_height_override.has_value()) {
+        consensus.nMatMulParentMtpSeedHeight = *options.parent_mtp_seed_height_override;
+    }
     if (options.product_digest_height_override.has_value()) {
         consensus.nMatMulProductDigestHeight = *options.product_digest_height_override;
     }
@@ -519,6 +580,9 @@ int main(int argc, char* argv[])
     options_obj.pushKV("block_height", options.block_height);
     options_obj.pushKV("nonce_seed_height", options.nonce_seed_height_override.has_value() ? UniValue(*options.nonce_seed_height_override) : UniValue());
     options_obj.pushKV("nonce_seed_active", consensus.IsMatMulNonceSeedActive(options.block_height));
+    options_obj.pushKV("parent_mtp_seed_height", options.parent_mtp_seed_height_override.has_value() ? UniValue(*options.parent_mtp_seed_height_override) : UniValue());
+    options_obj.pushKV("parent_mtp_seed_active", consensus.IsMatMulParentMtpSeedActive(options.block_height));
+    options_obj.pushKV("parent_mtp", options.parent_mtp_override.has_value() ? UniValue(*options.parent_mtp_override) : UniValue());
     options_obj.pushKV("product_digest_height", options.product_digest_height_override.has_value() ? UniValue(*options.product_digest_height_override) : UniValue());
     options_obj.pushKV("product_digest_active", consensus.IsMatMulProductDigestActive(options.block_height));
     options_obj.pushKV("parallel", options.parallel);
