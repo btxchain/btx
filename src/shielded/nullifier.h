@@ -273,6 +273,9 @@ public:
     /** Persist the shielded pool balance. */
     [[nodiscard]] bool WritePoolBalance(CAmount balance);
 
+    /** Whether the persisted unshield-velocity window log exists. */
+    [[nodiscard]] bool HasUnshieldVelocity() const;
+
     /** Read the persisted unshield-velocity window log. Missing value leaves the object empty. */
     [[nodiscard]] bool ReadUnshieldVelocity(ShieldedUnshieldVelocity& velocity) const;
 

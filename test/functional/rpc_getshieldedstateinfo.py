@@ -28,6 +28,9 @@ class GetShieldedStateInfoTest(BitcoinTestFramework):
             "next_block_height",
             "velocity_cap_active",
             "velocity_activation_height",
+            "velocity_min_cap_height",
+            "velocity_min_cap",
+            "velocity_min_cap_sat",
             "velocity_window_blocks",
             "velocity_window_lower_exclusive",
             "velocity_window_upper_inclusive",
@@ -49,6 +52,7 @@ class GetShieldedStateInfoTest(BitcoinTestFramework):
             res["next_block_height"] - res["velocity_window_blocks"],
         )
         assert_equal(int(res["pool_balance"] * COIN), res["pool_balance_sat"])
+        assert_equal(int(res["velocity_min_cap"] * COIN), res["velocity_min_cap_sat"])
         assert_equal(int(res["velocity_cap_amount"] * COIN), res["velocity_cap_amount_sat"])
         assert_equal(int(res["velocity_window_egress"] * COIN), res["velocity_window_egress_sat"])
         assert_equal(int(res["remaining_window_capacity"] * COIN), res["remaining_window_capacity_sat"])

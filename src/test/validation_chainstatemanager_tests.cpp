@@ -946,6 +946,23 @@ struct RecoveryExitFastStartupPersistedTestChain100Setup : TestChain100Setup
     }
 };
 
+struct RecoveryExitVelocityFastStartupPersistedTestChain100Setup : TestChain100Setup
+{
+    RecoveryExitVelocityFastStartupPersistedTestChain100Setup()
+        : TestChain100Setup(
+              ChainType::REGTEST,
+              {.extra_args = {"-regtestshieldedsunsetheight=100",
+                              "-regtestshieldedpoolcreditdisableheight=100",
+                              "-regtestshieldedrecoveryexitactivationheight=100",
+                              "-regtestshieldedunshieldvelocityactivationheight=100",
+                              "-fastshieldedstartup=1",
+                              "-shieldedstartupaudit=0"},
+               .coins_db_in_memory = false,
+               .block_tree_db_in_memory = false})
+    {
+    }
+};
+
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_shielded_state_when_commitment_index_missing, PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -3618,6 +3635,187 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_fast_startup_skips_recovery_exit_audit
         BOOST_REQUIRE(restored_state_pin.has_value());
         BOOST_CHECK_EQUAL(*restored_state_pin, expected_state_pin);
         BOOST_CHECK(!chainman_restarted.ReadShieldedMutationMarker().has_value());
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_fast_startup_repairs_stale_unshield_velocity,
+                        RecoveryExitVelocityFastStartupPersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    auto simulate_node_restart = [&]() -> ChainstateManager& {
+        ChainstateManager& current_chainman = *Assert(m_node.chainman);
+
+        for (Chainstate* cs : current_chainman.GetAll()) {
+            LOCK(::cs_main);
+            cs->ForceFlushStateToDisk();
+        }
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            current_chainman.ResetChainstates();
+            BOOST_CHECK_EQUAL(current_chainman.GetAll().size(), 0);
+            m_node.notifications = std::make_unique<KernelNotifications>(
+                Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+            const ChainstateManager::Options chainman_opts{
+                .chainparams = ::Params(),
+                .datadir = current_chainman.m_options.datadir,
+                .shielded_startup_audit = false,
+                .fast_shielded_startup = true,
+                .notifications = *m_node.notifications,
+                .signals = m_node.validation_signals.get(),
+            };
+            const BlockManager::Options blockman_opts{
+                .chainparams = chainman_opts.chainparams,
+                .blocks_dir = m_args.GetBlocksDirPath(),
+                .notifications = chainman_opts.notifications,
+                .block_tree_db_params = DBParams{
+                    .path = current_chainman.m_options.datadir / "blocks" / "index",
+                    .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                    .memory_only = m_block_tree_db_in_memory,
+                },
+            };
+            m_node.chainman.reset();
+            m_node.chainman = std::make_unique<ChainstateManager>(
+                *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        }
+        return *Assert(m_node.chainman);
+    };
+
+    uint256 expected_tip_hash;
+    int32_t expected_tip_height{-1};
+    uint256 expected_state_pin;
+    uint32_t window_blocks{0};
+    int32_t next_block_height{-1};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedRecoveryExitActive(chainman.ActiveTip()->nHeight));
+        next_block_height = chainman.ActiveTip()->nHeight == std::numeric_limits<int32_t>::max()
+            ? chainman.ActiveTip()->nHeight
+            : chainman.ActiveTip()->nHeight + 1;
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedUnshieldVelocityCapActive(next_block_height));
+        expected_tip_hash = chainman.ActiveTip()->GetBlockHash();
+        expected_tip_height = chainman.ActiveTip()->nHeight;
+        window_blocks = chainman.GetConsensus().nShieldedUnshieldVelocityWindowBlocks;
+        const auto state_pin = chainman.ComputeShieldedSnapshotStatePin();
+        BOOST_REQUIRE(state_pin.has_value());
+        expected_state_pin = *state_pin;
+
+        ShieldedUnshieldVelocity bogus_velocity;
+        bogus_velocity.RecordBlock(chainman.ActiveTip()->nHeight, 123 * COIN);
+        BOOST_REQUIRE(chainman.WriteShieldedUnshieldVelocityForTest(bogus_velocity));
+        ShieldedUnshieldVelocity persisted_velocity;
+        BOOST_REQUIRE(chainman.ReadShieldedUnshieldVelocity(persisted_velocity));
+        BOOST_CHECK_EQUAL(persisted_velocity.WindowTotal(next_block_height, window_blocks), 123 * COIN);
+    }
+
+    ChainstateManager& chainman_restarted = simulate_node_restart();
+    this->LoadVerifyActivateChainstate();
+
+    {
+        LOCK(::cs_main);
+        ASSERT_DEBUG_LOG("repaired persisted unshield velocity");
+        BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
+        BOOST_CHECK(chainman_restarted.ActiveTip()->GetBlockHash() == expected_tip_hash);
+        BOOST_CHECK_EQUAL(chainman_restarted.ActiveTip()->nHeight, expected_tip_height);
+        ShieldedUnshieldVelocity restored_velocity;
+        BOOST_REQUIRE(chainman_restarted.ReadShieldedUnshieldVelocity(restored_velocity));
+        BOOST_CHECK_EQUAL(restored_velocity.WindowTotal(next_block_height, window_blocks), 0);
+        const auto restored_state_pin = chainman_restarted.ComputeShieldedSnapshotStatePin();
+        BOOST_REQUIRE(restored_state_pin.has_value());
+        BOOST_CHECK_EQUAL(*restored_state_pin, expected_state_pin);
+        BOOST_CHECK(!chainman_restarted.ReadShieldedMutationMarker().has_value());
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_loads_v9_snapshot_unshield_velocity,
+                        RecoveryExitVelocityFastStartupPersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const fs::path shielded_section_path = m_args.GetDataDirNet() / "shielded_v9_velocity.dat";
+
+    node::ShieldedSnapshotSectionHeader header;
+    int32_t next_block_height{-1};
+    uint32_t window_blocks{0};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        const CBlockIndex* const tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip != nullptr);
+        next_block_height = tip->nHeight == std::numeric_limits<int32_t>::max()
+            ? tip->nHeight
+            : tip->nHeight + 1;
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedUnshieldVelocityCapActive(next_block_height));
+        window_blocks = chainman.GetConsensus().nShieldedUnshieldVelocityWindowBlocks;
+        header = chainman.GetShieldedSnapshotSectionHeader(chainman.ActiveChainstate(), tip);
+        BOOST_CHECK_EQUAL(header.m_snapshot_version,
+                          node::SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION);
+        header.m_unshield_velocity.RecordBlock(tip->nHeight, 123 * COIN);
+    }
+
+    {
+        AutoFile outfile{fsbridge::fopen(shielded_section_path, "wb")};
+        BOOST_REQUIRE(!outfile.IsNull());
+        BOOST_REQUIRE_EQUAL(outfile.fclose(), 0);
+    }
+
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* const tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip != nullptr);
+        AutoFile infile{fsbridge::fopen(shielded_section_path, "rb")};
+        BOOST_REQUIRE(!infile.IsNull());
+        BOOST_REQUIRE(chainman.LoadShieldedSnapshotSection(infile, header, tip));
+
+        ShieldedUnshieldVelocity loaded_velocity;
+        BOOST_REQUIRE(chainman.ReadShieldedUnshieldVelocity(loaded_velocity));
+        BOOST_CHECK_EQUAL(loaded_velocity.WindowTotal(next_block_height, window_blocks), 123 * COIN);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_loads_legacy_snapshot_rebuilds_unshield_velocity,
+                        RecoveryExitVelocityFastStartupPersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const fs::path shielded_section_path = m_args.GetDataDirNet() / "shielded_v8_velocity.dat";
+
+    node::ShieldedSnapshotSectionHeader header;
+    int32_t next_block_height{-1};
+    uint32_t window_blocks{0};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        const CBlockIndex* const tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip != nullptr);
+        next_block_height = tip->nHeight == std::numeric_limits<int32_t>::max()
+            ? tip->nHeight
+            : tip->nHeight + 1;
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedUnshieldVelocityCapActive(next_block_height));
+        window_blocks = chainman.GetConsensus().nShieldedUnshieldVelocityWindowBlocks;
+        header = chainman.GetShieldedSnapshotSectionHeader(chainman.ActiveChainstate(), tip);
+        header.m_snapshot_version = node::SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION;
+        header.m_unshield_velocity.RecordBlock(tip->nHeight, 123 * COIN);
+    }
+
+    {
+        AutoFile outfile{fsbridge::fopen(shielded_section_path, "wb")};
+        BOOST_REQUIRE(!outfile.IsNull());
+        BOOST_REQUIRE_EQUAL(outfile.fclose(), 0);
+    }
+
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* const tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip != nullptr);
+        AutoFile infile{fsbridge::fopen(shielded_section_path, "rb")};
+        BOOST_REQUIRE(!infile.IsNull());
+        BOOST_REQUIRE(chainman.LoadShieldedSnapshotSection(infile, header, tip));
+
+        ShieldedUnshieldVelocity loaded_velocity;
+        BOOST_REQUIRE(chainman.ReadShieldedUnshieldVelocity(loaded_velocity));
+        BOOST_CHECK_EQUAL(loaded_velocity.WindowTotal(next_block_height, window_blocks), 0);
     }
 }
 

@@ -1987,6 +1987,9 @@ RPCHelpMan getshieldedstateinfo()
                 {RPCResult::Type::NUM, "next_block_height", "The next block height used for velocity-window capacity"},
                 {RPCResult::Type::BOOL, "velocity_cap_active", "Whether the unshield velocity cap is active for next_block_height"},
                 {RPCResult::Type::NUM, "velocity_activation_height", "Consensus activation height for the unshield velocity cap"},
+                {RPCResult::Type::NUM, "velocity_min_cap_height", "Consensus height at which the minimum velocity cap starts applying"},
+                {RPCResult::Type::STR_AMOUNT, "velocity_min_cap", "Minimum velocity cap amount once active"},
+                {RPCResult::Type::NUM, "velocity_min_cap_sat", "Minimum velocity cap amount in satoshis once active"},
                 {RPCResult::Type::NUM, "velocity_window_blocks", "Trailing velocity window length in blocks"},
                 {RPCResult::Type::NUM, "velocity_window_lower_exclusive", "Lower exclusive block height of the next-block velocity window"},
                 {RPCResult::Type::NUM, "velocity_window_upper_inclusive", "Upper inclusive block height of the next-block velocity window"},
@@ -2024,7 +2027,9 @@ RPCHelpMan getshieldedstateinfo()
             const CAmount pool_balance{chainman.GetShieldedPoolBalance()};
             const CAmount window_egress{
                 chainman.GetShieldedUnshieldVelocityWindowTotal(next_block_height, window_blocks)};
-            const CAmount cap_amount{ShieldedUnshieldVelocity::WindowCap(pool_balance, cap_bps)};
+            const CAmount min_cap{
+                consensus.ShieldedUnshieldVelocityMinCapForHeight(next_block_height)};
+            const CAmount cap_amount{ShieldedUnshieldVelocity::WindowCap(pool_balance, cap_bps, min_cap)};
             const CAmount remaining_capacity{cap_amount > window_egress ? cap_amount - window_egress : 0};
             const int64_t window_lower_exclusive{
                 static_cast<int64_t>(next_block_height) - static_cast<int64_t>(window_blocks)};
@@ -2039,6 +2044,9 @@ RPCHelpMan getshieldedstateinfo()
             obj.pushKV("velocity_cap_active",
                        consensus.IsShieldedUnshieldVelocityCapActive(next_block_height));
             obj.pushKV("velocity_activation_height", consensus.nShieldedUnshieldVelocityActivationHeight);
+            obj.pushKV("velocity_min_cap_height", consensus.nShieldedUnshieldVelocityMinCapHeight);
+            obj.pushKV("velocity_min_cap", ValueFromAmount(consensus.nShieldedUnshieldVelocityMinCap));
+            obj.pushKV("velocity_min_cap_sat", consensus.nShieldedUnshieldVelocityMinCap);
             obj.pushKV("velocity_window_blocks", window_blocks);
             obj.pushKV("velocity_window_lower_exclusive", window_lower_exclusive);
             obj.pushKV("velocity_window_upper_inclusive", next_block_height);

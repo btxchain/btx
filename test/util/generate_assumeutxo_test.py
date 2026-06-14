@@ -38,7 +38,7 @@ class GenerateAssumeutxoTest(unittest.TestCase):
             blockhash="abcdef0123456789" * 4,
             path="/tmp/utxo.dat",
             snapshot_sha256="f0" * 32,
-            snapshot_version=7,
+            snapshot_version=9,
             shielded_state_pin=shielded_state_pin,
         )
 
@@ -63,7 +63,7 @@ class GenerateAssumeutxoTest(unittest.TestCase):
                 blockhash="22" * 32,
                 path=str(snapshot_path),
                 snapshot_sha256="33" * 32,
-                snapshot_version=7,
+                snapshot_version=9,
                 shielded_state_pin=shielded_state_pin,
             )
 
@@ -79,14 +79,40 @@ class GenerateAssumeutxoTest(unittest.TestCase):
             self.assertEqual(report["chain"], "main")
             self.assertEqual(report["snapshot"]["height"], 50000)
             self.assertEqual(report["snapshot"]["sha256"], "33" * 32)
-            self.assertEqual(report["snapshot"]["file_version"], 7)
+            self.assertEqual(report["snapshot"]["file_version"], 9)
             self.assertEqual(report["snapshot"]["shielded_state_pin"], shielded_state_pin)
             self.assertIn("m_assumeutxo_data", report["chainparams_snippet"])
+            self.assertIn("snapshot v9", report["chainparams_snippet"])
             self.assertIn(".shielded_state_commitment", report["chainparams_snippet"])
             self.assertEqual(report["asset"]["url"], "https://node.btxchain.org/releases/utxo.dat")
             self.assertEqual(report["asset"]["sha256"], "33" * 32)
-            self.assertEqual(report["release_asset_manifest"]["snapshot_file_version"], 7)
+            self.assertEqual(report["release_asset_manifest"]["snapshot_file_version"], 9)
             self.assertEqual(report["release_asset_manifest"]["shielded_state_pin"], shielded_state_pin)
+
+    def test_build_report_rejects_shielded_snapshot_before_v9(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = pathlib.Path(tmpdir) / "utxo.dat"
+            snapshot_path.write_bytes(b"snapshot")
+            metadata = self.module.AssumeutxoSnapshot(
+                height=50000,
+                txoutset_hash="11" * 32,
+                nchaintx=888,
+                blockhash="22" * 32,
+                path=str(snapshot_path),
+                snapshot_sha256="33" * 32,
+                snapshot_version=8,
+                shielded_state_pin="44" * 32,
+            )
+
+            with self.assertRaisesRegex(ValueError, "unshield velocity state"):
+                self.module.build_report(
+                    metadata,
+                    chain="main",
+                    cli_path="/opt/btx/bin/btx-cli",
+                    rpc_args=[],
+                    snapshot_type="latest",
+                    asset_url=None,
+                )
 
     def test_parse_snapshot_metadata_preserves_rpc_shielded_state_pin(self):
         with tempfile.TemporaryDirectory() as tmpdir:

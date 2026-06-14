@@ -21,12 +21,14 @@ import json
 import re
 import sys
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION = 9
+MAX_SNAPSHOT_FILE_VERSION = 0xffff
 ENTRY_RE = re.compile(
     r"""
     \{
@@ -64,6 +66,7 @@ class AssumeutxoSnapshot:
     nchaintx: int
     blockhash: str
     shielded_state_pin: str | None = None
+    snapshot_file_version: int | None = field(default=None, compare=False)
 
 
 def parse_args() -> argparse.Namespace:
@@ -121,6 +124,30 @@ def parse_optional_hex64(value: Any, field: str) -> str | None:
     return parse_hex64(value, field)
 
 
+def parse_optional_snapshot_file_version(value: Any, field: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or value < 0 or value > MAX_SNAPSHOT_FILE_VERSION:
+        raise AssumeutxoApplyError(f"{field} must be a uint16 integer")
+    return value
+
+
+def validate_snapshot_file_version(snapshot: AssumeutxoSnapshot) -> None:
+    if not snapshot.shielded_state_pin:
+        return
+    if snapshot.snapshot_file_version is None:
+        raise AssumeutxoApplyError(
+            "shielded assumeutxo reports must include snapshot.file_version "
+            "or release_asset_manifest.snapshot_file_version"
+        )
+    if snapshot.snapshot_file_version < SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION:
+        raise AssumeutxoApplyError(
+            "shielded assumeutxo snapshots must be file version "
+            f"{SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION} or newer; "
+            f"v{snapshot.snapshot_file_version} does not include unshield velocity state"
+        )
+
+
 def parse_report(path: Path) -> tuple[AssumeutxoSnapshot, str]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -141,8 +168,11 @@ def parse_report(path: Path) -> tuple[AssumeutxoSnapshot, str]:
     nchaintx = snapshot_data.get("nchaintx")
     blockhash = snapshot_data.get("blockhash")
     shielded_state_pin = snapshot_data.get("shielded_state_pin")
+    snapshot_file_version = snapshot_data.get("file_version")
+    release_manifest = data.get("release_asset_manifest")
+    if snapshot_file_version is None and isinstance(release_manifest, dict):
+        snapshot_file_version = release_manifest.get("snapshot_file_version")
     if shielded_state_pin is None:
-        release_manifest = data.get("release_asset_manifest")
         if isinstance(release_manifest, dict):
             shielded_state_pin = release_manifest.get("shielded_state_pin")
 
@@ -158,7 +188,12 @@ def parse_report(path: Path) -> tuple[AssumeutxoSnapshot, str]:
         nchaintx=nchaintx,
         blockhash=parse_hex64(blockhash, "snapshot.blockhash"),
         shielded_state_pin=parse_optional_hex64(shielded_state_pin, "snapshot.shielded_state_pin"),
+        snapshot_file_version=parse_optional_snapshot_file_version(
+            snapshot_file_version,
+            "snapshot.file_version",
+        ),
     )
+    validate_snapshot_file_version(snapshot)
     return snapshot, chain
 
 
@@ -221,9 +256,14 @@ def build_chainparams_assignment(chain: str, entries: list[AssumeutxoSnapshot]) 
 
     lines = ["m_assumeutxo_data = {"]
     for entry in sorted(entries, key=lambda item: item.height):
+        version_suffix = (
+            f" (snapshot v{entry.snapshot_file_version})"
+            if entry.snapshot_file_version is not None
+            else ""
+        )
         lines.extend([
             "    {",
-            f"        // {chain} assumeutxo snapshot at height {format_int_with_ticks(entry.height)}",
+            f"        // {chain} assumeutxo snapshot at height {format_int_with_ticks(entry.height)}{version_suffix}",
             f"        .height = {format_int_with_ticks(entry.height)},",
             f"        .hash_serialized = AssumeutxoHash{{uint256{{\"{entry.txoutset_hash}\"}}}},",
             f"        .m_chain_tx_count = {format_int_with_ticks(entry.nchaintx)},",
@@ -264,6 +304,8 @@ def replace_assumeutxo_block(
     snapshot: AssumeutxoSnapshot,
     replace_existing: bool,
 ) -> str:
+    validate_snapshot_file_version(snapshot)
+
     class_name = class_name_for_chain(chain)
     class_pattern = rf"class {class_name} : public CChainParams \{{.*?\n\}};\n"
     class_match = re.search(class_pattern, source, flags=re.S)

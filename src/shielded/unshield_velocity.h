@@ -8,6 +8,7 @@
 #include <consensus/amount.h>
 #include <serialize.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 
@@ -33,8 +34,9 @@
 class ShieldedUnshieldVelocity
 {
 public:
-    /** Capacity (max net unshield per window) at the given pool balance: cap_bps/10000 of the pool. */
-    static CAmount WindowCap(CAmount pool_balance, uint32_t cap_bps);
+    /** Capacity (max net unshield per window) at the given pool balance: cap_bps/10000 of the pool,
+     *  optionally floored by a consensus minimum. */
+    static CAmount WindowCap(CAmount pool_balance, uint32_t cap_bps, CAmount min_cap = 0);
 
     /** Record block `height`'s net egress. Stores max(0, net_egress); 0 entries are kept so Undo and
      *  the window boundary stay exact. */
@@ -49,9 +51,10 @@ public:
 
     /** Whether connecting block `tip_height` (already recorded) keeps the window within the cap. */
     [[nodiscard]] bool WithinCap(int32_t tip_height, CAmount pool_balance,
-                                 uint32_t cap_bps, uint32_t window_blocks) const
+                                 uint32_t cap_bps, uint32_t window_blocks,
+                                 CAmount min_cap = 0) const
     {
-        return WindowTotal(tip_height, window_blocks) <= WindowCap(pool_balance, cap_bps);
+        return WindowTotal(tip_height, window_blocks) <= WindowCap(pool_balance, cap_bps, min_cap);
     }
 
     /** Drop entries strictly below `keep_from_height` (bounds the persisted log). Keep a buffer below
@@ -59,7 +62,17 @@ public:
     void Prune(int32_t keep_from_height);
 
     [[nodiscard]] bool Empty() const { return m_egress.empty(); }
+    [[nodiscard]] size_t Size() const { return m_egress.size(); }
     void Clear() { m_egress.clear(); }
+
+    [[nodiscard]] bool operator==(const ShieldedUnshieldVelocity& other) const
+    {
+        return m_egress == other.m_egress;
+    }
+    [[nodiscard]] bool operator!=(const ShieldedUnshieldVelocity& other) const
+    {
+        return !(*this == other);
+    }
 
     SERIALIZE_METHODS(ShieldedUnshieldVelocity, obj) { READWRITE(obj.m_egress); }
 

@@ -48,7 +48,8 @@ using namespace shielded::recovery;
 namespace {
 
 constexpr int kSunsetHeight = 101;          // chain is at 100 after TestChain100Setup; recovery mined at 101
-constexpr int kRebuildSunsetHeight = 104;   // leaves room for a real pre-sunset pool-credit block
+constexpr int kRebuildSunsetHeight = 108;   // leaves room for a larger pre-sunset pool-credit block
+constexpr int kRebuildFundingCount = 7;     // 7 * 20 BTX keeps a 50 BTX exit below the 50% velocity cap
 constexpr CAmount kRecoverValue = 50 * COIN;
 constexpr CAmount kRecoverFee = 1000;
 
@@ -137,9 +138,15 @@ TestOpts MakeRecoveryRebuildOpts()
     static const std::string sunset_arg = "-regtestshieldedsunsetheight=" + std::to_string(kRebuildSunsetHeight);
     static const std::string credit_arg = "-regtestshieldedpoolcreditdisableheight=" + std::to_string(kRebuildSunsetHeight);
     static const std::string activ_arg = "-regtestshieldedrecoveryexitactivationheight=" + std::to_string(kRebuildSunsetHeight);
+    static const std::string velocity_arg = "-regtestshieldedunshieldvelocityactivationheight=" + std::to_string(kRebuildSunsetHeight);
     static const std::string root_arg = "-regtestshieldedrecoveryexitfrozenroot=" + Vectors().frozen_root.GetHex();
     TestOpts opts;
-    opts.extra_args = {sunset_arg.c_str(), credit_arg.c_str(), activ_arg.c_str(), root_arg.c_str()};
+    opts.extra_args = {
+        sunset_arg.c_str(),
+        credit_arg.c_str(),
+        activ_arg.c_str(),
+        velocity_arg.c_str(),
+        root_arg.c_str()};
     return opts;
 }
 
@@ -346,12 +353,17 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_rebuild_preserves_retired_identifiers, Rec
     const ReVectors& v = Vectors();
     ChainstateManager& chainman = *Assert(m_node.chainman);
 
-    // Advance to height 102 so coinbases at heights 1, 2, and 3 are mature in the next block.
-    CreateAndProcessBlock({}, CScript() << OP_TRUE, /*chainstate=*/nullptr, /*use_mempool=*/false);
-    CreateAndProcessBlock({}, CScript() << OP_TRUE, /*chainstate=*/nullptr, /*use_mempool=*/false);
+    // Advance so coinbases at heights 1..kRebuildFundingCount are mature in the shield-in block.
+    while (WITH_LOCK(cs_main, return chainman.ActiveChain().Height()) < kRebuildSunsetHeight - 2) {
+        CreateAndProcessBlock({}, CScript() << OP_TRUE, /*chainstate=*/nullptr, /*use_mempool=*/false);
+    }
     BOOST_REQUIRE_EQUAL(WITH_LOCK(cs_main, return chainman.ActiveChain().Height()), kRebuildSunsetHeight - 2);
 
-    const std::vector<CTransactionRef> funding_txs{m_coinbase_txns[0], m_coinbase_txns[1], m_coinbase_txns[2]};
+    std::vector<CTransactionRef> funding_txs;
+    funding_txs.reserve(kRebuildFundingCount);
+    for (int i = 0; i < kRebuildFundingCount; ++i) {
+        funding_txs.push_back(m_coinbase_txns.at(i));
+    }
     CAmount seeded_pool{0};
     for (const auto& funding_tx : funding_txs) {
         seeded_pool += funding_tx->vout[0].nValue;
@@ -373,11 +385,19 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_rebuild_preserves_retired_identifiers, Rec
         BOOST_CHECK_EQUAL(chainman.GetShieldedPoolBalance(), seeded_pool - v.note.value);
         BOOST_REQUIRE(chainman.IsShieldedNullifierSpent(v.nullifier));
         BOOST_REQUIRE(chainman.IsShieldedRecoveryExitCommitmentRetired(v.cm));
+        BOOST_CHECK_EQUAL(chainman.GetShieldedUnshieldVelocityWindowTotal(
+                              chainman.ActiveChain().Height(),
+                              chainman.GetConsensus().nShieldedUnshieldVelocityWindowBlocks),
+                          v.note.value);
 
         BOOST_REQUIRE(chainman.RebuildShieldedStateFromActiveChain());
         BOOST_CHECK_EQUAL(chainman.GetShieldedPoolBalance(), seeded_pool - v.note.value);
         BOOST_CHECK(chainman.IsShieldedNullifierSpent(v.nullifier));
         BOOST_CHECK(chainman.IsShieldedRecoveryExitCommitmentRetired(v.cm));
+        BOOST_CHECK_EQUAL(chainman.GetShieldedUnshieldVelocityWindowTotal(
+                              chainman.ActiveChain().Height(),
+                              chainman.GetConsensus().nShieldedUnshieldVelocityWindowBlocks),
+                          v.note.value);
     }
 }
 

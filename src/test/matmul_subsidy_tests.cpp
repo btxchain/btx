@@ -59,11 +59,12 @@ BOOST_AUTO_TEST_CASE(max_supply_never_exceeded)
     BOOST_CHECK(total > 20'999'999 * COIN);
 }
 
-BOOST_AUTO_TEST_CASE(empty_block_subsidy_caps_activate_at_130k_and_strict_at_130500)
+BOOST_AUTO_TEST_CASE(empty_block_subsidy_caps_activate_at_130k_strict_at_130500_and_end_at_132k)
 {
     const auto params = CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
     BOOST_CHECK_EQUAL(params.nEmptyBlockSubsidyPenaltyHeight, 130'000);
     BOOST_CHECK_EQUAL(params.nEmptyBlockSubsidyStrictPenaltyHeight, 130'500);
+    BOOST_CHECK_EQUAL(params.nEmptyBlockSubsidyPenaltyEndHeight, 132'000);
     BOOST_CHECK_EQUAL(params.nEmptyBlockSubsidyMaxHalvings, 2);
 
     CBlock empty_block;
@@ -98,6 +99,10 @@ BOOST_AUTO_TEST_CASE(empty_block_subsidy_caps_activate_at_130k_and_strict_at_130
     BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(130'502, empty_block, &second_empty_prev, params), 5 * COIN);
     BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(130'503, empty_block, &third_empty_prev, params), 5 * COIN);
     BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(130'504, non_empty_block, &third_empty_prev, params), 20 * COIN);
+
+    BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(131'999, empty_block, &third_empty_prev, params), 5 * COIN);
+    BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(132'000, empty_block, &third_empty_prev, params), 20 * COIN);
+    BOOST_CHECK_EQUAL(GetBlockSubsidyForBlock(132'000, empty_block, &non_empty_prev, params), 20 * COIN);
 }
 
 BOOST_AUTO_TEST_CASE(money_range_enforces_cap)

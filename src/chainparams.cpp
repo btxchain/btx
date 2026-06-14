@@ -12,6 +12,7 @@
 #include <logging.h>
 #include <tinyformat.h>
 #include <util/chaintype.h>
+#include <util/moneystr.h>
 #include <util/strencodings.h>
 #include <util/string.h>
 
@@ -73,6 +74,16 @@ uint32_t ParseRegTestUInt32Arg(const ArgsManager& args, const std::string& arg_n
         throw std::runtime_error(strprintf("Invalid %s value (%s): expected uint32.", arg_name, raw));
     }
     return value;
+}
+
+CAmount ParseRegTestNonNegativeMoneyArg(const ArgsManager& args, const std::string& arg_name)
+{
+    const auto raw = args.GetArg(arg_name, "");
+    const auto value = ParseMoney(raw);
+    if (!value.has_value()) {
+        throw std::runtime_error(strprintf("Invalid %s value (%s): expected non-negative BTX amount.", arg_name, raw));
+    }
+    return *value;
 }
 
 bool ParseRegTestBoolArg(const ArgsManager& args, const std::string& arg_name)
@@ -205,6 +216,14 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.shielded_unshield_velocity_activation_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedunshieldvelocityactivationheight");
     }
+    if (args.IsArgSet("-regtestshieldedunshieldvelocitymincapheight")) {
+        options.shielded_unshield_velocity_min_cap_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedunshieldvelocitymincapheight");
+    }
+    if (args.IsArgSet("-regtestshieldedunshieldvelocitymincap")) {
+        options.shielded_unshield_velocity_min_cap =
+            ParseRegTestNonNegativeMoneyArg(args, "-regtestshieldedunshieldvelocitymincap");
+    }
     if (args.IsArgSet("-regtestshieldedpq128upgradeheight")) {
         options.shielded_pq128_upgrade_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedpq128upgradeheight");
@@ -239,6 +258,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     if (args.IsArgSet("-regtestemptyblocksubsidypenaltyheight")) {
         options.empty_block_subsidy_penalty_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestemptyblocksubsidypenaltyheight");
+    }
+    if (args.IsArgSet("-regtestemptyblocksubsidypenaltyendheight")) {
+        options.empty_block_subsidy_penalty_end_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestemptyblocksubsidypenaltyendheight");
     }
     if (args.IsArgSet("-regtestmatmulbindingheight")) {
         options.matmul_binding_height =

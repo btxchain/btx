@@ -23,6 +23,8 @@ BOOST_AUTO_TEST_CASE(window_cap_is_pct_of_pool)
     BOOST_CHECK_EQUAL(ShieldedUnshieldVelocity::WindowCap(POOL, 0), 0);
     BOOST_CHECK_EQUAL(ShieldedUnshieldVelocity::WindowCap(0, BPS), 0);
     BOOST_CHECK_EQUAL(ShieldedUnshieldVelocity::WindowCap(POOL * 2, BPS), 200 * COIN); // auto-scales
+    BOOST_CHECK_EQUAL(ShieldedUnshieldVelocity::WindowCap(POOL, BPS, 250 * COIN), 250 * COIN);
+    BOOST_CHECK_EQUAL(ShieldedUnshieldVelocity::WindowCap(0, BPS, 250 * COIN), 250 * COIN);
 }
 
 BOOST_AUTO_TEST_CASE(window_sum_and_cap_enforcement)
@@ -36,6 +38,7 @@ BOOST_AUTO_TEST_CASE(window_sum_and_cap_enforcement)
     // One more sat within the same window exceeds the 10% cap.
     v.RecordBlock(300, 1);
     BOOST_CHECK(!v.WithinCap(300, POOL, BPS, WIN));
+    BOOST_CHECK(v.WithinCap(300, POOL, BPS, WIN, 101 * COIN));
 }
 
 BOOST_AUTO_TEST_CASE(window_boundary_is_exclusive_lower)

@@ -400,11 +400,15 @@ BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_no_gap)
     BOOST_CHECK(consensus.IsShieldedPoolCreditDisabled(consensus.nShieldedSunsetHeight));
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityActivationHeight,
                       consensus.nShieldedSunsetHeight);
+    BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityMinCapHeight, 132'000);
+    BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityMinCap, 10'000 * COIN);
+    BOOST_CHECK_EQUAL(consensus.ShieldedUnshieldVelocityMinCapForHeight(131'999), 0);
+    BOOST_CHECK_EQUAL(consensus.ShieldedUnshieldVelocityMinCapForHeight(132'000), 10'000 * COIN);
     // At the sunset block the sunset gate and the velocity cap are simultaneously in force.
     BOOST_CHECK(consensus.IsShieldedSunsetActive(consensus.nShieldedSunsetHeight));
     BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(consensus.nShieldedSunsetHeight));
-    // No exit can outrun the cap anywhere in the sunset regime.
-    BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(consensus.nShieldedSunsetHeight + 4'000));
+    BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(131'999));
+    BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(132'000));
     // Cap loosened to 50%/day so a large legitimate holder can fully exit in ~1 week while a residual
     // drain is still throttled to half the pool per day. Locks the policy against silent regression.
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityCapBps, 5'000u);
@@ -593,6 +597,9 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
         120'900,
         123'225,
         126'800,
+        128'605,
+        130'089,
+        130'501,
     };
 
     BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
@@ -613,6 +620,9 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     BOOST_CHECK(params->AssumeutxoForHeight(120'900));
     BOOST_CHECK(params->AssumeutxoForHeight(123'225));
     BOOST_CHECK(params->AssumeutxoForHeight(126'800));
+    BOOST_CHECK(params->AssumeutxoForHeight(128'605));
+    BOOST_CHECK(params->AssumeutxoForHeight(130'089));
+    BOOST_CHECK(params->AssumeutxoForHeight(130'501));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
     BOOST_CHECK(!params->AssumeutxoForHeight(0));
 }

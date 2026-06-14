@@ -12,12 +12,14 @@
 #include <kernel/cs_main.h>
 #include <serialize.h>
 #include <shielded/bundle.h>
+#include <shielded/unshield_velocity.h>
 #include <sync.h>
 #include <uint256.h>
 #include <util/chaintype.h>
 #include <util/check.h>
 #include <util/fs.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -31,6 +33,8 @@ namespace node {
 static constexpr uint16_t SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION{6};
 static constexpr uint16_t SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION{7};
 static constexpr uint16_t SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION{8};
+static constexpr uint16_t SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION{9};
+static constexpr size_t MAX_SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_ENTRIES{4096};
 
 //! Metadata describing a serialized version of a UTXO set from which an
 //! assumeutxo Chainstate can be constructed.
@@ -39,7 +43,7 @@ static constexpr uint16_t SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION{8}
 class SnapshotMetadata
 {
 public:
-    inline static constexpr uint16_t CURRENT_VERSION{SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION};
+    inline static constexpr uint16_t CURRENT_VERSION{SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION};
 
 private:
     const std::set<uint16_t> m_supported_versions{
@@ -49,7 +53,8 @@ private:
         5,
         SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION,
         SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_HISTORY_VERSION,
-        SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION};
+        SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION,
+        SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION};
     const MessageStartChars m_network_magic;
     uint16_t m_version{CURRENT_VERSION};
 
@@ -138,6 +143,7 @@ public:
     std::vector<uint64_t> m_recent_output_counts;
     std::vector<uint256> m_account_registry_roots;
     CAmount m_pool_balance{0};
+    ShieldedUnshieldVelocity m_unshield_velocity;
 
     template <typename Stream>
     inline void Serialize(Stream& s) const
@@ -150,6 +156,9 @@ public:
         }
         s << m_recent_output_counts;
         s << m_pool_balance;
+        if (m_snapshot_version >= SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION) {
+            s << m_unshield_velocity;
+        }
         if (m_snapshot_version >= 4) {
             s << m_settlement_anchor_count;
             s << m_netting_manifest_count;
@@ -180,6 +189,11 @@ public:
         }
         s >> m_recent_output_counts;
         s >> m_pool_balance;
+        if (m_snapshot_version >= SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION) {
+            s >> m_unshield_velocity;
+        } else {
+            m_unshield_velocity.Clear();
+        }
         if (m_snapshot_version >= 4) {
             s >> m_settlement_anchor_count;
             s >> m_netting_manifest_count;
@@ -204,6 +218,9 @@ public:
         }
         if (m_account_registry_roots.size() > static_cast<size_t>(SHIELDED_ANCHOR_DEPTH) + 1U) {
             throw std::ios_base::failure("BTX shielded snapshot section has too many account-registry history entries.");
+        }
+        if (m_unshield_velocity.Size() > MAX_SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_ENTRIES) {
+            throw std::ios_base::failure("BTX shielded snapshot section has too many unshield velocity entries.");
         }
     }
 };

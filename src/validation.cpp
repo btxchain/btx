@@ -1355,15 +1355,18 @@ template <typename Spend>
                                         std::vector<Nullifier>* all_nullifiers = nullptr,
                                         std::map<uint256, smile2::CompactPublicAccount>* public_accounts = nullptr,
                                         std::map<uint256, uint256>* account_leaf_commitments = nullptr,
-                                        std::vector<uint256>* recovery_exit_commitments = nullptr)
+                                        std::vector<uint256>* recovery_exit_commitments = nullptr,
+                                        ShieldedUnshieldVelocity* unshield_velocity = nullptr)
 {
     const auto storage_mode = tree.GetIndexStorageMode();
+    const auto& consensus = chainstate.m_chainman.GetConsensus();
     tree = shielded::ShieldedMerkleTree{storage_mode};
     pool = ShieldedPoolBalance{};
     if (all_nullifiers) all_nullifiers->clear();
     if (public_accounts) public_accounts->clear();
     if (account_leaf_commitments) account_leaf_commitments->clear();
     if (recovery_exit_commitments) recovery_exit_commitments->clear();
+    if (unshield_velocity) unshield_velocity->Clear();
     if (tip == nullptr) return true;
 
     std::vector<const CBlockIndex*> chain;
@@ -1387,19 +1390,20 @@ template <typename Spend>
 
     for (const CBlockIndex* pindex : chain) {
         const bool use_nonced_bridge_tag =
-            UseNoncedShieldedBridgeTags(chainstate.m_chainman.GetConsensus(), pindex->nHeight);
+            UseNoncedShieldedBridgeTags(consensus, pindex->nHeight);
         CBlock block;
         if (!chainstate.m_blockman.ReadBlock(block, *pindex)) {
             LogError("RebuildShieldedState: failed to read block %s\n", pindex->GetBlockHash().ToString());
             return false;
         }
+        const CAmount pool_start = pool.GetBalance();
         for (const auto& txref : block.vtx) {
             const CTransaction& tx = *txref;
             if (!tx.HasShieldedBundle()) continue;
             const CShieldedBundle& bundle = tx.GetShieldedBundle();
             std::string height_gate_reject;
             if (!RejectShieldedHeightGateViolation(tx,
-                                                   chainstate.m_chainman.GetConsensus(),
+                                                   consensus,
                                                    pindex->nHeight,
                                                    height_gate_reject)) {
                 LogError("RebuildShieldedState: shielded height-gate violation at %d: %s\n",
@@ -1419,6 +1423,14 @@ template <typename Spend>
                                            recovery_exit_commitments)) {
                 return false;
             }
+        }
+        if (unshield_velocity &&
+            consensus.IsShieldedUnshieldVelocityCapActive(pindex->nHeight)) {
+            const CAmount pool_end = pool.GetBalance();
+            const CAmount block_net_egress = pool_start > pool_end ? pool_start - pool_end : 0;
+            unshield_velocity->RecordBlock(pindex->nHeight, block_net_egress);
+            unshield_velocity->Prune(pindex->nHeight -
+                2 * static_cast<int32_t>(consensus.nShieldedUnshieldVelocityWindowBlocks));
         }
 
         ++blocks_processed;
@@ -1593,6 +1605,92 @@ template <typename Spend>
         }
     }
     return true;
+}
+
+[[nodiscard]] static bool RebuildRecentShieldedUnshieldVelocity(const Chainstate& chainstate,
+                                                                const CBlockIndex* tip,
+                                                                const Consensus::Params& consensus,
+                                                                ShieldedUnshieldVelocity& velocity,
+                                                                std::string& error)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    AssertLockHeld(::cs_main);
+    velocity.Clear();
+    error.clear();
+    if (tip == nullptr) return true;
+
+    const int64_t keep_from_height =
+        static_cast<int64_t>(tip->nHeight) -
+        2 * static_cast<int64_t>(consensus.nShieldedUnshieldVelocityWindowBlocks);
+    const int64_t first_height = std::max<int64_t>(0, keep_from_height);
+    std::vector<const CBlockIndex*> chain;
+    for (const CBlockIndex* cursor = tip;
+         cursor != nullptr && cursor->nHeight >= first_height;
+         cursor = cursor->pprev) {
+        if (!ShieldedRebuildBlockAvailable(chainstate, *cursor)) {
+            error = strprintf("block unavailable at height=%d hash=%s",
+                              cursor->nHeight,
+                              cursor->GetBlockHash().ToString());
+            return false;
+        }
+        chain.push_back(cursor);
+    }
+    std::reverse(chain.begin(), chain.end());
+
+    for (const CBlockIndex* pindex : chain) {
+        if (!consensus.IsShieldedUnshieldVelocityCapActive(pindex->nHeight)) {
+            continue;
+        }
+        CBlock block;
+        if (!ReadShieldedRebuildBlock(chainstate, *pindex, block)) {
+            error = strprintf("failed to read block at height=%d hash=%s",
+                              pindex->nHeight,
+                              pindex->GetBlockHash().ToString());
+            return false;
+        }
+        bool block_had_shielded_bundle{false};
+        CAmount block_value_balance{0};
+        for (const auto& txref : block.vtx) {
+            if (!txref->HasShieldedBundle()) continue;
+            block_had_shielded_bundle = true;
+            std::string reject_reason;
+            const auto value_balance =
+                TryGetShieldedStateValueBalance(txref->GetShieldedBundle(), reject_reason);
+            if (!value_balance.has_value()) {
+                error = strprintf("failed to derive value balance at height=%d hash=%s: %s",
+                                  pindex->nHeight,
+                                  pindex->GetBlockHash().ToString(),
+                                  reject_reason);
+                return false;
+            }
+            const auto next_value_balance = CheckedAdd(block_value_balance, *value_balance);
+            if (!next_value_balance || !MoneyRangeSigned(*next_value_balance)) {
+                error = strprintf("value balance overflow at height=%d hash=%s",
+                                  pindex->nHeight,
+                                  pindex->GetBlockHash().ToString());
+                return false;
+            }
+            block_value_balance = *next_value_balance;
+        }
+        if (!block_had_shielded_bundle) continue;
+        velocity.RecordBlock(pindex->nHeight, block_value_balance > 0 ? block_value_balance : 0);
+        velocity.Prune(pindex->nHeight -
+            2 * static_cast<int32_t>(consensus.nShieldedUnshieldVelocityWindowBlocks));
+    }
+
+    velocity.Prune(tip->nHeight -
+        2 * static_cast<int32_t>(consensus.nShieldedUnshieldVelocityWindowBlocks));
+    return true;
+}
+
+[[nodiscard]] static bool ShieldedUnshieldVelocityStateRequiredAtTip(
+    const Consensus::Params& consensus,
+    int32_t tip_height)
+{
+    if (consensus.nShieldedUnshieldVelocityActivationHeight == std::numeric_limits<int32_t>::max()) {
+        return false;
+    }
+    return tip_height >= consensus.nShieldedUnshieldVelocityActivationHeight;
 }
 
 //! Pin a prune-retention lock so the fast-path shielded disconnect of any reorg up to nMaxReorgDepth
@@ -2514,6 +2612,7 @@ enum class PersistedShieldedMetadataSyncMode {
     ShieldedPoolBalance rebuilt_pool;
     std::vector<Nullifier> rebuilt_nullifiers;
     std::vector<uint256> rebuilt_recovery_exit_commitments;
+    ShieldedUnshieldVelocity rebuilt_velocity;
     if (!RebuildShieldedState(chainstate,
                               chainstate.m_chain.Tip(),
                               rebuilt_tree,
@@ -2521,7 +2620,8 @@ enum class PersistedShieldedMetadataSyncMode {
                               &rebuilt_nullifiers,
                               /*public_accounts=*/nullptr,
                               /*account_leaf_commitments=*/nullptr,
-                              &rebuilt_recovery_exit_commitments)) {
+                              &rebuilt_recovery_exit_commitments,
+                              &rebuilt_velocity)) {
         error = "failed to rebuild expected shielded state";
         return false;
     }
@@ -2547,6 +2647,30 @@ enum class PersistedShieldedMetadataSyncMode {
     if (rebuilt_pool.GetBalance() != chainstate.m_chainman.GetShieldedPoolBalance()) {
         error = "pool balance mismatch";
         return false;
+    }
+    const CBlockIndex* const tip = chainstate.m_chain.Tip();
+    if (tip != nullptr) {
+        const auto& consensus = chainstate.m_chainman.GetConsensus();
+        const int32_t next_block_height =
+            tip->nHeight == std::numeric_limits<int32_t>::max() ? tip->nHeight : tip->nHeight + 1;
+        if (consensus.IsShieldedUnshieldVelocityCapActive(next_block_height)) {
+            ShieldedUnshieldVelocity persisted_velocity;
+            if (!chainstate.m_chainman.ReadShieldedUnshieldVelocity(persisted_velocity)) {
+                error = "failed to read persisted unshield velocity";
+                return false;
+            }
+            const uint32_t window_blocks = consensus.nShieldedUnshieldVelocityWindowBlocks;
+            const CAmount expected_window_egress =
+                rebuilt_velocity.WindowTotal(next_block_height, window_blocks);
+            const CAmount persisted_window_egress =
+                persisted_velocity.WindowTotal(next_block_height, window_blocks);
+            if (expected_window_egress != persisted_window_egress) {
+                error = strprintf("unshield velocity window mismatch (db=%lld expected=%lld)",
+                                  static_cast<long long>(persisted_window_egress),
+                                  static_cast<long long>(expected_window_egress));
+                return false;
+            }
+        }
     }
 
     shielded::registry::ShieldedAccountRegistryState rebuilt_registry;
@@ -5802,7 +5926,9 @@ CAmount GetBlockSubsidyForBlock(int nHeight, const CBlock& block, const CBlockIn
     // non-coinbase transaction came from the public mempool rather than the
     // miner, so subsidy penalties deliberately avoid "real tx" heuristics that
     // would incentivize self-spam.
-    if (nHeight < consensusParams.nEmptyBlockSubsidyPenaltyHeight || block.vtx.size() != 1 ||
+    if (nHeight < consensusParams.nEmptyBlockSubsidyPenaltyHeight ||
+        nHeight >= consensusParams.nEmptyBlockSubsidyPenaltyEndHeight ||
+        block.vtx.size() != 1 ||
         base_subsidy <= 0 || consensusParams.nEmptyBlockSubsidyMaxHalvings == 0) {
         return base_subsidy;
     }
@@ -7717,9 +7843,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 const CAmount pool_end = next_pool_balance.GetBalance();
                 const CAmount block_net_egress = pool_start > pool_end ? pool_start - pool_end : 0;
                 next_velocity.RecordBlock(pindex->nHeight, block_net_egress);
+                const CAmount min_cap =
+                    vparams.ShieldedUnshieldVelocityMinCapForHeight(pindex->nHeight);
                 if (!next_velocity.WithinCap(pindex->nHeight, pool_start,
                                              vparams.nShieldedUnshieldVelocityCapBps,
-                                             vparams.nShieldedUnshieldVelocityWindowBlocks)) {
+                                             vparams.nShieldedUnshieldVelocityWindowBlocks,
+                                             min_cap)) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                                          "shielded-unshield-velocity-exceeded");
                 }
@@ -11786,6 +11915,7 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         m_shielded_anchor_roots.clear();
         m_shielded_account_registry_roots.clear();
         m_shielded_pool_balance = ShieldedPoolBalance{};
+        m_shielded_unshield_velocity.Clear();
         m_shielded_state_initialized = false;
     };
 
@@ -12332,6 +12462,7 @@ void ChainstateManager::ResetChainstates()
     m_shielded_anchor_roots.clear();
     m_shielded_account_registry_roots.clear();
     m_shielded_pool_balance = ShieldedPoolBalance{};
+    m_shielded_unshield_velocity.Clear();
     m_shielded_state_initialized = false;
 }
 
@@ -12558,6 +12689,7 @@ bool ChainstateManager::RebuildShieldedStateFromActiveChain()
     shielded::ShieldedMerkleTree rebuilt_tree{
         shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     ShieldedPoolBalance rebuilt_pool;
+    ShieldedUnshieldVelocity rebuilt_unshield_velocity;
     std::vector<Nullifier> rebuilt_nullifiers;
     std::vector<uint256> rebuilt_recovery_exit_commitments;
     std::map<uint256, smile2::CompactPublicAccount> rebuilt_public_accounts;
@@ -12570,7 +12702,8 @@ bool ChainstateManager::RebuildShieldedStateFromActiveChain()
                               &rebuilt_nullifiers,
                               &rebuilt_public_accounts,
                               &rebuilt_account_leaf_commitments,
-                              &rebuilt_recovery_exit_commitments)) {
+                              &rebuilt_recovery_exit_commitments,
+                              &rebuilt_unshield_velocity)) {
         return false;
     }
     if (!RebuildShieldedAccountRegistryState(*m_active_chainstate, tip, rebuilt_account_registry)) {
@@ -12651,6 +12784,13 @@ bool ChainstateManager::RebuildShieldedStateFromActiveChain()
                       tip != nullptr ? tip->nHeight : -1);
             return nullptr;
         }
+        if (!rebuilt_state->WriteUnshieldVelocity(rebuilt_unshield_velocity)) {
+            LogPrintf("RebuildShieldedStateFromActiveChain: failed to rebuild unshield-velocity log in %s state at tip=%s height=%d\n",
+                      memory_only ? "memory-only" : "persistent",
+                      tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
+                      tip != nullptr ? tip->nHeight : -1);
+            return nullptr;
+        }
         if (!rebuilt_state->WriteSnapshotBridgeMetadataHint(false)) {
             LogPrintf("RebuildShieldedStateFromActiveChain: failed to reset snapshot metadata hint in %s state at tip=%s height=%d\n",
                       memory_only ? "memory-only" : "persistent",
@@ -12682,6 +12822,7 @@ bool ChainstateManager::RebuildShieldedStateFromActiveChain()
     m_shielded_anchor_roots = std::move(rebuilt_anchor_roots);
     m_shielded_account_registry_roots = std::move(rebuilt_account_registry_roots);
     m_shielded_pool_balance = rebuilt_pool;
+    m_shielded_unshield_velocity = rebuilt_unshield_velocity;
     m_shielded_state_initialized = true;
 
     if (auto rebuilt_persistent_nullifiers = build_nullifier_state(/*memory_only=*/false)) {
@@ -12753,6 +12894,7 @@ ShieldedSnapshotSectionHeader ChainstateManager::GetShieldedSnapshotSectionHeade
     }
     header.m_account_registry_entry_count = m_shielded_account_registry.Size();
     header.m_pool_balance = m_shielded_pool_balance.GetBalance();
+    header.m_unshield_velocity = m_shielded_unshield_velocity;
     if (!CollectRecentShieldedOutputCounts(chainstate, tip, header.m_recent_output_counts)) {
         throw std::runtime_error("Failed to collect BTX shielded snapshot output counts");
     }
@@ -12829,12 +12971,45 @@ std::optional<uint256> ChainstateManager::ComputeShieldedSnapshotStatePin() cons
     const auto commitment = GetShieldedStateCommitment();
     if (!commitment.has_value()) return std::nullopt;
     HashWriter pin;
+    pin << std::string{"BTX_ShieldedSnapshotStatePin_V3"}
+        << commitment->note_commitment_root
+        << commitment->account_registry_root
+        << commitment->nullifier_root
+        << commitment->bridge_settlement_root
+        << GetShieldedPoolBalance()
+        << m_shielded_unshield_velocity;
+    return pin.GetSHA256();
+}
+
+std::optional<uint256> ChainstateManager::ComputeShieldedSnapshotStatePinV2ForMigration() const
+{
+    AssertLockHeld(::cs_main);
+    const auto commitment = GetShieldedStateCommitment();
+    if (!commitment.has_value()) return std::nullopt;
+    HashWriter pin;
     pin << std::string{"BTX_ShieldedSnapshotStatePin_V2"}
         << commitment->note_commitment_root
         << commitment->account_registry_root
         << commitment->nullifier_root
         << commitment->bridge_settlement_root
         << GetShieldedPoolBalance();
+    return pin.GetSHA256();
+}
+
+std::optional<uint256> ChainstateManager::ComputeShieldedSnapshotStatePinEmptyVelocityV3ForMigration() const
+{
+    AssertLockHeld(::cs_main);
+    const auto commitment = GetShieldedStateCommitment();
+    if (!commitment.has_value()) return std::nullopt;
+    ShieldedUnshieldVelocity empty_velocity;
+    HashWriter pin;
+    pin << std::string{"BTX_ShieldedSnapshotStatePin_V3"}
+        << commitment->note_commitment_root
+        << commitment->account_registry_root
+        << commitment->nullifier_root
+        << commitment->bridge_settlement_root
+        << GetShieldedPoolBalance()
+        << empty_velocity;
     return pin.GetSHA256();
 }
 
@@ -12986,6 +13161,8 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
             node::SHIELDED_SNAPSHOT_RECOVERY_EXIT_COMMITMENTS_VERSION))};
         if (!result) return result;
     }
+    const bool velocity_state_required_at_tip =
+        tip != nullptr && ShieldedUnshieldVelocityStateRequiredAtTip(GetConsensus(), tip->nHeight);
 
     const fs::path shielded_db_path = m_options.datadir / "shielded_state" / "nullifiers";
     const fs::path commitment_index_db_path = m_options.datadir / "shielded_state" / "commitments";
@@ -13019,6 +13196,7 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
         m_shielded_anchor_roots.clear();
         m_shielded_account_registry_roots.clear();
         m_shielded_pool_balance = ShieldedPoolBalance{};
+        m_shielded_unshield_velocity.Clear();
         m_shielded_state_initialized = false;
     };
     auto rollback_backup = [&](ShieldedStateDirectoryBackup* backup_to_restore) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
@@ -13052,6 +13230,7 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
     m_shielded_anchor_roots.clear();
     m_shielded_account_registry_roots.clear();
     m_shielded_pool_balance = ShieldedPoolBalance{};
+    m_shielded_unshield_velocity.Clear();
     m_shielded_state_initialized = false;
     m_shielded_nullifiers = std::make_unique<NullifierSet>(shielded_db_path,
                                                            8 << 20,
@@ -13194,6 +13373,27 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
     if (!m_shielded_pool_balance.SetBalance(header.m_pool_balance)) {
         return fail("invalid shielded pool balance in snapshot section");
     }
+    ShieldedUnshieldVelocity snapshot_unshield_velocity;
+    if (header.m_snapshot_version >= node::SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION) {
+        snapshot_unshield_velocity = header.m_unshield_velocity;
+    } else if (velocity_state_required_at_tip) {
+        if (rebuild_chainstate == nullptr) {
+            return fail("legacy shielded snapshot lacks unshield velocity and no chainstate is available to rebuild it");
+        }
+        std::string rebuild_error;
+        if (!RebuildRecentShieldedUnshieldVelocity(*rebuild_chainstate,
+                                                   tip,
+                                                   GetConsensus(),
+                                                   snapshot_unshield_velocity,
+                                                   rebuild_error)) {
+            return fail(strprintf(
+                "snapshot version %u lacks unshield velocity and local recent blocks are unavailable to rebuild it at height %d (%s); use a v%u+ BTX shielded snapshot, a non-pruned datadir, or reindex/redownload",
+                header.m_snapshot_version,
+                tip->nHeight,
+                rebuild_error,
+                node::SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION));
+        }
+    }
     if (header.m_snapshot_version < node::SHIELDED_SNAPSHOT_ACCOUNT_REGISTRY_VERSION) {
         if (m_active_chainstate != nullptr &&
             !RebuildShieldedSmilePublicAccountState(*m_active_chainstate,
@@ -13226,6 +13426,10 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
     if (!m_shielded_nullifiers->WritePoolBalance(m_shielded_pool_balance.GetBalance())) {
         return fail("failed to persist shielded pool balance from snapshot section");
     }
+    if (!m_shielded_nullifiers->WriteUnshieldVelocity(snapshot_unshield_velocity)) {
+        return fail("failed to persist unshield-velocity log from snapshot section");
+    }
+    m_shielded_unshield_velocity = snapshot_unshield_velocity;
 
     m_shielded_anchor_roots.clear();
     RecordShieldedAnchorRoot(m_shielded_merkle_tree.Root());
@@ -13417,25 +13621,94 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                                                             8 << 20,
                                                             /*memory_only=*/false,
                                                             /*wipe_data=*/false);
+    const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
     bool startup_shielded_repair_performed{false};
-    auto finish_success = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
+    bool startup_velocity_repair_performed{false};
+    auto load_persisted_unshield_velocity = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
         AssertLockHeld(::cs_main);
-        if (startup_shielded_repair_performed) {
-            AutoReconsiderShieldedInvalidBlocksAfterStartupRepair();
-        }
-        // v0.32.0 unshield velocity cap: load the persisted trailing-window egress log so the rule is
-        // evaluated identically on every node (incl. pruned ones, which cannot replay the window).
         if (m_shielded_nullifiers &&
             !m_shielded_nullifiers->ReadUnshieldVelocity(m_shielded_unshield_velocity)) {
             LogPrintf("EnsureShieldedStateInitialized: failed to load unshield-velocity window\n");
             return false;
+        }
+        return true;
+    };
+    bool startup_velocity_checked{false};
+    bool startup_velocity_verified_or_inactive{false};
+    auto verify_or_repair_startup_velocity = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
+        AssertLockHeld(::cs_main);
+        if (startup_velocity_checked) {
+            return startup_velocity_verified_or_inactive;
+        }
+        startup_velocity_checked = true;
+        startup_velocity_verified_or_inactive = true;
+        if (tip == nullptr) {
+            return true;
+        }
+        const auto& consensus = GetConsensus();
+        const int32_t next_block_height =
+            tip->nHeight == std::numeric_limits<int32_t>::max() ? tip->nHeight : tip->nHeight + 1;
+        const bool velocity_state_required_at_tip =
+            ShieldedUnshieldVelocityStateRequiredAtTip(consensus, tip->nHeight);
+        const bool velocity_log_present =
+            m_shielded_nullifiers && m_shielded_nullifiers->HasUnshieldVelocity();
+        if (!velocity_state_required_at_tip &&
+            !consensus.IsShieldedUnshieldVelocityCapActive(next_block_height)) {
+            return true;
+        }
+
+        ShieldedUnshieldVelocity rebuilt_velocity;
+        std::string rebuild_error;
+        if (!RebuildRecentShieldedUnshieldVelocity(*m_active_chainstate,
+                                                   tip,
+                                                   consensus,
+                                                   rebuilt_velocity,
+                                                   rebuild_error)) {
+            LogPrintf("EnsureShieldedStateInitialized: failed to verify persisted unshield velocity at height=%d hash=%s (%s)\n",
+                      tip->nHeight,
+                      tip->GetBlockHash().ToString(),
+                      rebuild_error);
+            startup_velocity_verified_or_inactive = false;
+            return false;
+        }
+        const uint32_t window_blocks = consensus.nShieldedUnshieldVelocityWindowBlocks;
+        const CAmount persisted_window =
+            m_shielded_unshield_velocity.WindowTotal(next_block_height, window_blocks);
+        const CAmount rebuilt_window =
+            rebuilt_velocity.WindowTotal(next_block_height, window_blocks);
+        if (!velocity_log_present || persisted_window != rebuilt_window) {
+            LogPrintf("EnsureShieldedStateInitialized: repaired persisted unshield velocity at height=%d hash=%s (present=%d db_window=%lld expected_window=%lld)\n",
+                      tip->nHeight,
+                      tip->GetBlockHash().ToString(),
+                      velocity_log_present ? 1 : 0,
+                      static_cast<long long>(persisted_window),
+                      static_cast<long long>(rebuilt_window));
+            if (!m_shielded_nullifiers ||
+                !m_shielded_nullifiers->WriteUnshieldVelocity(rebuilt_velocity)) {
+                startup_velocity_verified_or_inactive = false;
+                return false;
+            }
+            m_shielded_unshield_velocity = std::move(rebuilt_velocity);
+            startup_velocity_repair_performed = true;
+        }
+        return true;
+    };
+    auto finish_success = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
+        AssertLockHeld(::cs_main);
+        // v0.32.0 unshield velocity cap: load and verify the persisted trailing-window egress log so
+        // the rule is evaluated identically on every node (incl. pruned ones).
+        if (!load_persisted_unshield_velocity() ||
+            !verify_or_repair_startup_velocity()) {
+            return false;
+        }
+        if (startup_shielded_repair_performed || startup_velocity_repair_performed) {
+            AutoReconsiderShieldedInvalidBlocksAfterStartupRepair();
         }
         // Register the shielded prune-retention lock at startup, before any FindFilesToPrune can run,
         // even if no new block has connected yet (no-op unless pruning + shielded).
         UpdateShieldedPruneRetentionLock(*m_active_chainstate);
         return true;
     };
-    const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
     const auto persisted_mutation_marker = m_shielded_nullifiers->ReadMutationMarker();
     auto rebuild_from_chain = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
         AssertLockHeld(::cs_main);
@@ -13455,6 +13728,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
 
         shielded::ShieldedMerkleTree rebuilt_tree;
         ShieldedPoolBalance rebuilt_pool;
+        ShieldedUnshieldVelocity rebuilt_unshield_velocity;
         std::vector<Nullifier> rebuilt_nullifiers;
         std::vector<uint256> rebuilt_recovery_exit_commitments;
         std::map<uint256, smile2::CompactPublicAccount> rebuilt_public_accounts;
@@ -13468,7 +13742,8 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                                   &rebuilt_nullifiers,
                                   &rebuilt_public_accounts,
                                   &rebuilt_account_leaf_commitments,
-                                  &rebuilt_recovery_exit_commitments)) {
+                                  &rebuilt_recovery_exit_commitments,
+                                  &rebuilt_unshield_velocity)) {
             return false;
         }
         if (!RebuildShieldedAccountRegistryState(*m_active_chainstate, tip, rebuilt_account_registry)) {
@@ -13495,6 +13770,9 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         if (!m_shielded_nullifiers->WritePoolBalance(rebuilt_pool.GetBalance())) {
             return false;
         }
+        if (!m_shielded_nullifiers->WriteUnshieldVelocity(rebuilt_unshield_velocity)) {
+            return false;
+        }
 
         m_shielded_merkle_tree = std::move(rebuilt_tree);
         m_shielded_account_registry = std::move(rebuilt_account_registry);
@@ -13502,6 +13780,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         m_shielded_account_leaf_commitments = std::move(rebuilt_account_leaf_commitments);
         InvalidateShieldedAccountStateSnapshotCaches();
         m_shielded_pool_balance = rebuilt_pool;
+        m_shielded_unshield_velocity = rebuilt_unshield_velocity;
         m_shielded_state_initialized = true;
         if (!RebuildShieldedAnchorHistory(*m_active_chainstate, tip)) {
             m_shielded_state_initialized = false;
@@ -13515,6 +13794,8 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             m_shielded_state_initialized = false;
             return false;
         }
+        startup_velocity_checked = false;
+        startup_velocity_verified_or_inactive = false;
         startup_shielded_repair_performed = true;
         LogPrintf("EnsureShieldedStateInitialized: initialized tree_size=%u root=%s nullifiers=%u pool=%lld\n",
                   static_cast<unsigned int>(m_shielded_merkle_tree.Size()),
@@ -13534,6 +13815,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         m_shielded_anchor_roots.clear();
         m_shielded_account_registry_roots.clear();
         m_shielded_pool_balance = ShieldedPoolBalance{};
+        m_shielded_unshield_velocity.Clear();
         m_shielded_state_initialized = false;
     };
 
@@ -13610,6 +13892,11 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                 LogPrintf("EnsureShieldedStateInitialized: prepared mutation marker cannot restore account-registry root history without recent blocks at height=%d hash=%s\n",
                           tip != nullptr ? tip->nHeight : -1,
                           tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                m_shielded_state_initialized = false;
+                return false;
+            }
+            if (!load_persisted_unshield_velocity() ||
+                !verify_or_repair_startup_velocity()) {
                 m_shielded_state_initialized = false;
                 return false;
             }
@@ -13711,6 +13998,23 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         }
         if (m_shielded_anchor_roots.empty()) {
             m_shielded_anchor_roots.push_front(m_shielded_merkle_tree.Root());
+        }
+        if (!load_persisted_unshield_velocity()) {
+            return false;
+        }
+        if (!verify_or_repair_startup_velocity()) {
+            if (ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+                LogPrintf("EnsureShieldedStateInitialized: rebuilding full shielded state from chain after unshield velocity verification failed\n");
+                reset_shielded_state();
+                if (!rebuild_from_chain()) {
+                    return false;
+                }
+                return finish_success();
+            }
+            LogPrintf("EnsureShieldedStateInitialized: refusing persisted shielded state at height=%d hash=%s because unshield velocity verification failed and full rebuild blocks are unavailable\n",
+                      tip != nullptr ? tip->nHeight : -1,
+                      tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+            return false;
         }
         auto restore_rebuilt_commitment_index = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
             AssertLockHeld(::cs_main);
@@ -13843,6 +14147,30 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                         persisted_pin.has_value() &&
                         current_pin.has_value() &&
                         *persisted_pin == *current_pin;
+                    if (!fast_startup_state_pin_verified &&
+                        persisted_pin.has_value() &&
+                        current_pin.has_value() &&
+                        startup_velocity_checked &&
+                        startup_velocity_verified_or_inactive) {
+                        const auto legacy_v2_pin = ComputeShieldedSnapshotStatePinV2ForMigration();
+                        const auto empty_velocity_v3_pin =
+                            ComputeShieldedSnapshotStatePinEmptyVelocityV3ForMigration();
+                        const bool matched_legacy_v2 =
+                            legacy_v2_pin.has_value() && *persisted_pin == *legacy_v2_pin;
+                        const bool matched_empty_velocity_v3 =
+                            empty_velocity_v3_pin.has_value() &&
+                            *persisted_pin == *empty_velocity_v3_pin;
+                        if (matched_legacy_v2 || matched_empty_velocity_v3) {
+                            LogPrintf("EnsureShieldedStateInitialized: migrating persisted %s shielded state pin at height=%d hash=%s after verifying unshield velocity\n",
+                                      matched_legacy_v2 ? "legacy-v2" : "empty-velocity-v3",
+                                      tip != nullptr ? tip->nHeight : -1,
+                                      tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                            if (!PersistShieldedState(tip)) {
+                                return false;
+                            }
+                            fast_startup_state_pin_verified = true;
+                        }
+                    }
                     return fast_startup_state_pin_verified;
                 };
             auto build_account_registry_views =
@@ -14017,7 +14345,9 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             const bool recovery_exit_active_at_tip =
                 tip != nullptr && GetConsensus().IsShieldedRecoveryExitActive(tip->nHeight);
             const bool recovery_exit_state_pin_verified =
-                recovery_exit_active_at_tip && verify_fast_startup_state_pin();
+                recovery_exit_active_at_tip &&
+                startup_velocity_verified_or_inactive &&
+                verify_fast_startup_state_pin();
             const bool preserve_persisted_bridge_metadata =
                 m_options.fast_shielded_startup &&
                 !startup_shielded_repair_performed &&
@@ -14183,6 +14513,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         m_shielded_anchor_roots.clear();
         m_shielded_account_registry_roots.clear();
         m_shielded_pool_balance = ShieldedPoolBalance{};
+        m_shielded_unshield_velocity.Clear();
         m_shielded_state_initialized = false;
     }
 
@@ -14375,6 +14706,13 @@ bool ChainstateManager::WriteShieldedPoolBalanceForTest(CAmount balance)
     AssertLockHeld(::cs_main);
     if (!m_shielded_nullifiers) return false;
     return m_shielded_nullifiers->WritePoolBalance(balance);
+}
+
+bool ChainstateManager::WriteShieldedUnshieldVelocityForTest(const ShieldedUnshieldVelocity& velocity)
+{
+    AssertLockHeld(::cs_main);
+    if (!m_shielded_nullifiers) return false;
+    return m_shielded_nullifiers->WriteUnshieldVelocity(velocity);
 }
 
 bool ChainstateManager::SetShieldedPoolBalanceForTest(CAmount balance)

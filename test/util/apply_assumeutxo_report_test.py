@@ -53,6 +53,7 @@ class ApplyAssumeutxoReportTest(unittest.TestCase):
         blockhash: str,
         nchaintx: int,
         shielded_state_pin: str | None = None,
+        snapshot_file_version: int | None = None,
     ):
         return self.module.AssumeutxoSnapshot(
             chain="main",
@@ -61,6 +62,7 @@ class ApplyAssumeutxoReportTest(unittest.TestCase):
             nchaintx=nchaintx,
             blockhash=blockhash,
             shielded_state_pin=shielded_state_pin,
+            snapshot_file_version=snapshot_file_version,
         )
 
     def test_replace_assumeutxo_block_appends_new_height(self):
@@ -91,13 +93,90 @@ class ApplyAssumeutxoReportTest(unittest.TestCase):
                 "2222222222222222222222222222222222222222222222222222222222222222",
                 66221,
                 shielded_state_pin,
+                9,
             ),
             replace_existing=False,
         )
 
         self.assertIn(f".shielded_state_commitment = uint256{{\"{shielded_state_pin}\"}}", updated)
+        self.assertIn("snapshot v9", updated)
 
     def test_parse_report_reads_shielded_state_pin(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = pathlib.Path(tmpdir) / "snapshot.report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "chain": "main",
+                        "snapshot": {
+                            "height": 60760,
+                            "txoutset_hash": "11" * 32,
+                            "nchaintx": 66221,
+                            "blockhash": "22" * 32,
+                            "shielded_state_pin": "44" * 32,
+                            "file_version": 9,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot, chain = self.module.parse_report(report_path)
+
+            self.assertEqual(chain, "main")
+            self.assertEqual(snapshot.shielded_state_pin, "44" * 32)
+            self.assertEqual(snapshot.snapshot_file_version, 9)
+
+    def test_parse_report_reads_snapshot_file_version_from_manifest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = pathlib.Path(tmpdir) / "snapshot.report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "chain": "main",
+                        "snapshot": {
+                            "height": 60760,
+                            "txoutset_hash": "11" * 32,
+                            "nchaintx": 66221,
+                            "blockhash": "22" * 32,
+                            "shielded_state_pin": "44" * 32,
+                        },
+                        "release_asset_manifest": {
+                            "snapshot_file_version": 9,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot, _ = self.module.parse_report(report_path)
+
+            self.assertEqual(snapshot.snapshot_file_version, 9)
+
+    def test_parse_report_rejects_shielded_snapshot_before_v9(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = pathlib.Path(tmpdir) / "snapshot.report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "chain": "main",
+                        "snapshot": {
+                            "height": 60760,
+                            "txoutset_hash": "11" * 32,
+                            "nchaintx": 66221,
+                            "blockhash": "22" * 32,
+                            "shielded_state_pin": "44" * 32,
+                            "file_version": 8,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(self.module.AssumeutxoApplyError, "unshield velocity state"):
+                self.module.parse_report(report_path)
+
+    def test_parse_report_rejects_shielded_snapshot_without_file_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             report_path = pathlib.Path(tmpdir) / "snapshot.report.json"
             report_path.write_text(
@@ -116,10 +195,8 @@ class ApplyAssumeutxoReportTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            snapshot, chain = self.module.parse_report(report_path)
-
-            self.assertEqual(chain, "main")
-            self.assertEqual(snapshot.shielded_state_pin, "44" * 32)
+            with self.assertRaisesRegex(self.module.AssumeutxoApplyError, "snapshot.file_version"):
+                self.module.parse_report(report_path)
 
     def test_replace_assumeutxo_block_rejects_conflicting_height_without_replace(self):
         with self.assertRaises(self.module.AssumeutxoApplyError):
