@@ -18,6 +18,7 @@ from typing import Any
 
 
 SNAPSHOT_MAGIC_BYTES = b"utxo\xff"
+SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,18 @@ def normalize_optional_hex64(value: Any, field: str) -> str | None:
     return normalized
 
 
+def validate_release_snapshot_version(snapshot: AssumeutxoSnapshot) -> None:
+    if (
+        snapshot.shielded_state_pin
+        and snapshot.snapshot_version < SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION
+    ):
+        raise ValueError(
+            "shielded assumeutxo snapshots must be file version "
+            f"{SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION} or newer; "
+            f"v{snapshot.snapshot_version} does not include unshield velocity state"
+        )
+
+
 def build_chainparams_entry(snapshot: AssumeutxoSnapshot, comment: str | None = None) -> str:
     lines = []
     if comment:
@@ -97,6 +110,8 @@ def build_release_manifest(
     published_name: str | None = None,
     asset_url: str | None = None,
 ) -> dict[str, Any]:
+    validate_release_snapshot_version(snapshot)
+
     snapshot_path = pathlib.Path(snapshot.path)
     manifest: dict[str, Any] = {
         "format_version": 1,
@@ -133,6 +148,8 @@ def build_report(
     snapshot_type: str,
     asset_url: str | None,
 ) -> dict[str, Any]:
+    validate_release_snapshot_version(snapshot)
+
     release_manifest = build_release_manifest(snapshot, chain, snapshot_type, asset_url=asset_url)
     report: dict[str, Any] = {
         "chain": chain,
@@ -151,7 +168,14 @@ def build_report(
         "chainparams_snippet": "\n".join(
             [
                 "m_assumeutxo_data = {",
-                build_chainparams_entry(snapshot, comment=f"{chain} assumeutxo snapshot"),
+                build_chainparams_entry(
+                    snapshot,
+                    comment=(
+                        f"{chain} assumeutxo snapshot at height "
+                        f"{format_int_with_ticks(snapshot.height)} "
+                        f"(snapshot v{snapshot.snapshot_version})"
+                    ),
+                ),
                 "};",
             ]
         ),

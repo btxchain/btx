@@ -916,6 +916,9 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nReorgProtectionStartHeight, 61'000);
     BOOST_CHECK_EQUAL(consensus.nEmptyBlockSubsidyPenaltyHeight, 130'000);
     BOOST_CHECK_EQUAL(consensus.nEmptyBlockSubsidyStrictPenaltyHeight, 130'500);
+    BOOST_CHECK_EQUAL(consensus.nEmptyBlockSubsidyPenaltyEndHeight, 132'000);
+    BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityMinCapHeight, 132'000);
+    BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityMinCap, 10'000 * COIN);
     BOOST_CHECK_EQUAL(consensus.nMatMulFreivaldsBindingHeight, 61'000);
     BOOST_CHECK_EQUAL(consensus.nMatMulProductDigestHeight, 61'000);
     BOOST_CHECK_EQUAL(consensus.nShieldedTxBindingActivationHeight, 61'000);
@@ -1978,10 +1981,10 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         "827f8bf52ddf6de1e780a0917179dac715abeb428580744505dc30fbd6be5f9d");
 
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 13U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 15U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 128605);
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 130501);
     BOOST_CHECK_GE(snapshot_heights.back(), std::prev(checkpoints.end())->first);
 }
 

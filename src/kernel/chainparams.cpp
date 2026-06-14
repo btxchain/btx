@@ -44,6 +44,8 @@ static constexpr int32_t BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT{BTX_SHIELDED_SU
 static constexpr int32_t BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT{128'000};
 static constexpr int32_t BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT{130'000};
 static constexpr int32_t BTX_V03210_HARDENING_HEIGHT{130'500};
+static constexpr int32_t BTX_V03211_HARDENING_HEIGHT{132'000};
+static constexpr CAmount BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP{10'000 * COIN};
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
                                  const CScript& genesisOutputScript,
@@ -181,6 +183,7 @@ public:
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
         consensus.nEmptyBlockSubsidyStrictPenaltyHeight = BTX_V03210_HARDENING_HEIGHT;
+        consensus.nEmptyBlockSubsidyPenaltyEndHeight = BTX_V03211_HARDENING_HEIGHT;
         consensus.nPowTargetSpacingFastMs = 250;
         // Fast-phase bootstrap scale for heights [0, nFastMineHeight). Effective
         // ease is bounded by powLimit; keep this >1 so fast bootstrap can
@@ -260,6 +263,8 @@ public:
         // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
         // before it bites.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
+        consensus.nShieldedUnshieldVelocityMinCap = BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 1815; // 90% of 2016
@@ -438,6 +443,14 @@ public:
                 .blockhash = consteval_ctor(uint256{"e3820082934a2b239142896d9d1f72fd23cd8930105073d792048a04f95bf3ba"}),
                 .shielded_state_commitment = uint256{"7b9fce2384229984f916cdab106d6d29c2b38e206ff1045eb82b882d6adf28b2"},
             },
+            {
+                // main assumeutxo snapshot at height 130'501 (snapshot v9)
+                .height = 130'501,
+                .hash_serialized = AssumeutxoHash{uint256{"a86a235db93442efa1138b2756dac0ecbb3642965a72044af898bd3e4d3d417b"}},
+                .m_chain_tx_count = 162'361,
+                .blockhash = consteval_ctor(uint256{"1304900157e110b987ed7aab72d5d00d87046866a6fd80b3992721e3fd48f851"}),
+                .shielded_state_commitment = uint256{"be3840420a5081b209567c31124a291d43290e9f8842dd5f47dc306ae05a68a1"},
+            },
         };
         chainTxData = ChainTxData{
             .nTime = 1781271685,
@@ -495,6 +508,7 @@ public:
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
         consensus.nEmptyBlockSubsidyStrictPenaltyHeight = BTX_V03210_HARDENING_HEIGHT;
+        consensus.nEmptyBlockSubsidyPenaltyEndHeight = BTX_V03211_HARDENING_HEIGHT;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -548,6 +562,8 @@ public:
         // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
         // before it bites.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
+        consensus.nShieldedUnshieldVelocityMinCap = BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
@@ -673,6 +689,7 @@ public:
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
         consensus.nEmptyBlockSubsidyStrictPenaltyHeight = BTX_V03210_HARDENING_HEIGHT;
+        consensus.nEmptyBlockSubsidyPenaltyEndHeight = BTX_V03211_HARDENING_HEIGHT;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -726,6 +743,8 @@ public:
         // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
         // before it bites.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
+        consensus.nShieldedUnshieldVelocityMinCap = BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
@@ -881,6 +900,7 @@ public:
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
         consensus.nEmptyBlockSubsidyStrictPenaltyHeight = BTX_V03210_HARDENING_HEIGHT;
+        consensus.nEmptyBlockSubsidyPenaltyEndHeight = BTX_V03211_HARDENING_HEIGHT;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -934,6 +954,8 @@ public:
         // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
         // before it bites.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
+        consensus.nShieldedUnshieldVelocityMinCap = BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 1512; // 75% for testchains
@@ -1109,6 +1131,10 @@ public:
         // a functional test lowers it via -regtestshieldedunshieldvelocityactivationheight to exercise it.
         consensus.nShieldedUnshieldVelocityActivationHeight =
             opts.shielded_unshield_velocity_activation_height.value_or(std::numeric_limits<int32_t>::max());
+        consensus.nShieldedUnshieldVelocityMinCapHeight =
+            opts.shielded_unshield_velocity_min_cap_height.value_or(std::numeric_limits<int32_t>::max());
+        consensus.nShieldedUnshieldVelocityMinCap =
+            opts.shielded_unshield_velocity_min_cap.value_or(0);
         consensus.nShieldedPQ128UpgradeHeight =
             opts.shielded_pq128_upgrade_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedPoolCreditDisableHeight =
@@ -1127,6 +1153,9 @@ public:
         }
         if (opts.empty_block_subsidy_penalty_height.has_value()) {
             consensus.nEmptyBlockSubsidyPenaltyHeight = *opts.empty_block_subsidy_penalty_height;
+        }
+        if (opts.empty_block_subsidy_penalty_end_height.has_value()) {
+            consensus.nEmptyBlockSubsidyPenaltyEndHeight = *opts.empty_block_subsidy_penalty_end_height;
         }
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = opts.mldsa_disable_height.value_or(std::numeric_limits<int32_t>::max());
@@ -1382,6 +1411,8 @@ public:
         // the cap. Nodes upgrading to v0.32.0 before the 125,000 sunset deploy the velocity logic
         // before it bites.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
+        consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
+        consensus.nShieldedUnshieldVelocityMinCap = BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP;
         consensus.nShieldedSettlementAnchorMaturity = 6;
         consensus.nMLDSADisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nRuleChangeActivationThreshold = 108;

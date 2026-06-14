@@ -1040,6 +1040,12 @@ bool NullifierSet::WritePoolBalance(CAmount balance)
     return m_db->Write(std::make_pair(DB_POOL_BALANCE, uint8_t{0}), balance, /*fSync=*/true);
 }
 
+bool NullifierSet::HasUnshieldVelocity() const
+{
+    std::shared_lock lock(m_rwlock);
+    return m_db->Exists(std::make_pair(DB_UNSHIELD_VELOCITY, uint8_t{0}));
+}
+
 bool NullifierSet::ReadUnshieldVelocity(ShieldedUnshieldVelocity& velocity) const
 {
     std::shared_lock lock(m_rwlock);

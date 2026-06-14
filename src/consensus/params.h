@@ -209,6 +209,9 @@ struct Params {
      * coinbase-only blocks are capped at base/2 after a non-empty block and
      * base/4 after another empty block. */
     int32_t nEmptyBlockSubsidyStrictPenaltyHeight{std::numeric_limits<int32_t>::max()};
+    /** v0.32.11 forward-only rollback height. At and above this height,
+     * coinbase-only blocks receive the normal subsidy again. */
+    int32_t nEmptyBlockSubsidyPenaltyEndHeight{std::numeric_limits<int32_t>::max()};
     uint32_t nEmptyBlockSubsidyMaxHalvings{2};
 
     // Target spacing schedule.
@@ -344,10 +347,19 @@ struct Params {
      *  the original 10% so a legitimate large legacy holder can fully exit in ~1 week rather than ~3+
      *  weeks, while still throttling any residual drain to half the pool per day. */
     uint32_t nShieldedUnshieldVelocityCapBps{5000};
+    /** Height at which the v0.32.11 velocity-cap floor starts applying. */
+    int32_t nShieldedUnshieldVelocityMinCapHeight{std::numeric_limits<int32_t>::max()};
+    /** Minimum egress capacity per trailing window after nShieldedUnshieldVelocityMinCapHeight. */
+    CAmount nShieldedUnshieldVelocityMinCap{0};
     bool IsShieldedUnshieldVelocityCapActive(int32_t height) const
     {
         return nShieldedUnshieldVelocityActivationHeight != std::numeric_limits<int32_t>::max() &&
                height >= nShieldedUnshieldVelocityActivationHeight;
+    }
+    CAmount ShieldedUnshieldVelocityMinCapForHeight(int32_t height) const
+    {
+        if (height < nShieldedUnshieldVelocityMinCapHeight) return 0;
+        return nShieldedUnshieldVelocityMinCap;
     }
 
     int64_t nPowTargetSpacing;

@@ -4,20 +4,22 @@
 
 #include <shielded/unshield_velocity.h>
 
+#include <algorithm>
 #include <limits>
 
 // All amounts are money-range (|x| <= MAX_MONEY ~ 2^51); a window sum of <= ~2^16 blocks each <=
 // MAX_MONEY stays under 2^67 -> we saturate at MAX_MONEY rather than overflow int64.
 
-CAmount ShieldedUnshieldVelocity::WindowCap(CAmount pool_balance, uint32_t cap_bps)
+CAmount ShieldedUnshieldVelocity::WindowCap(CAmount pool_balance, uint32_t cap_bps, CAmount min_cap)
 {
-    if (pool_balance <= 0 || cap_bps == 0) return 0;
+    const CAmount floor = std::max<CAmount>(0, min_cap);
+    if (pool_balance <= 0 || cap_bps == 0) return floor;
     // cap_bps/10000 * pool, split into whole+fractional parts so intermediates stay <= MAX_MONEY.
     const CAmount whole = (pool_balance / 10000) * static_cast<CAmount>(cap_bps);
     const CAmount frac = ((pool_balance % 10000) * static_cast<CAmount>(cap_bps)) / 10000;
     CAmount cap = whole + frac;
     if (cap < 0 || cap > MAX_MONEY) cap = MAX_MONEY;
-    return cap;
+    return std::max(cap, floor);
 }
 
 void ShieldedUnshieldVelocity::RecordBlock(int32_t height, CAmount net_egress)

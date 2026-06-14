@@ -14,6 +14,7 @@ active -- i.e. that enabling the cap does not break normal shielded operation.
 
 from decimal import Decimal
 
+from test_framework.messages import COIN
 from test_framework.shielded_utils import encrypt_and_unlock_wallet
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_greater_than
@@ -33,6 +34,8 @@ class WalletShieldedVelocityCapTest(BitcoinTestFramework):
             f"-regtestshieldedmatrictdisableheight={DISABLE_HEIGHT}",
             # Activate the velocity cap from genesis so ConnectBlock/DisconnectBlock exercise it.
             "-regtestshieldedunshieldvelocityactivationheight=0",
+            "-regtestshieldedunshieldvelocitymincapheight=0",
+            "-regtestshieldedunshieldvelocitymincap=10000",
             "-autoshieldcoinbase=1",
             "-autoshieldcoinbaseminheight=0",
         ]]
@@ -57,6 +60,9 @@ class WalletShieldedVelocityCapTest(BitcoinTestFramework):
         self.wait_until(shielded_positive, timeout=300)
         balance = wallet.z_getbalance()
         assert_greater_than(Decimal(str(balance["balance"])), Decimal("0"))  # autoshield succeeded
+        shielded_state = node.getshieldedstateinfo()
+        assert_equal(shielded_state["velocity_min_cap_sat"], 10_000 * COIN)
+        assert_equal(shielded_state["velocity_cap_amount_sat"], 10_000 * COIN)
         height_before = node.getblockcount()
         shielded_before = balance["balance"]
 

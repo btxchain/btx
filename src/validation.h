@@ -1563,6 +1563,13 @@ public:
         return m_shielded_unshield_velocity.WindowTotal(tip_height, window_blocks);
     }
 
+    /** Load the persisted unshield velocity log for startup/audit checks. */
+    [[nodiscard]] bool ReadShieldedUnshieldVelocity(ShieldedUnshieldVelocity& velocity) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return m_shielded_nullifiers && m_shielded_nullifiers->ReadUnshieldVelocity(velocity);
+    }
+
     /** Return true when the secondary full-retention commitment index profile is enabled. */
     [[nodiscard]] bool RetainShieldedCommitmentIndex() const
     {
@@ -1585,6 +1592,12 @@ public:
      * shielded state commitment is unavailable.
      */
     [[nodiscard]] std::optional<uint256> ComputeShieldedSnapshotStatePin() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Compute legacy startup pins accepted only for one-time persisted-state migration. */
+    [[nodiscard]] std::optional<uint256> ComputeShieldedSnapshotStatePinV2ForMigration() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] std::optional<uint256> ComputeShieldedSnapshotStatePinEmptyVelocityV3ForMigration() const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Return persisted nullifier count for diagnostics/auditing. */
@@ -1623,6 +1636,10 @@ public:
 
     /** Test/diagnostic hook to overwrite the persisted shielded pool balance. */
     [[nodiscard]] bool WriteShieldedPoolBalanceForTest(CAmount balance) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Test/diagnostic hook to overwrite the persisted unshield velocity log. */
+    [[nodiscard]] bool WriteShieldedUnshieldVelocityForTest(const ShieldedUnshieldVelocity& velocity)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Test hook to overwrite BOTH the in-memory and persisted shielded pool balance. */
     [[nodiscard]] bool SetShieldedPoolBalanceForTest(CAmount balance) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
