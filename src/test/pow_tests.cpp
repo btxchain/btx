@@ -350,6 +350,32 @@ public:
     }
 };
 
+class ScopedGpuInputsEnv
+{
+public:
+    explicit ScopedGpuInputsEnv(const char* value)
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_GPU_INPUTS", value != nullptr ? value : "");
+#else
+        if (value != nullptr) {
+            setenv("BTX_MATMUL_GPU_INPUTS", value, 1);
+        } else {
+            unsetenv("BTX_MATMUL_GPU_INPUTS");
+        }
+#endif
+    }
+
+    ~ScopedGpuInputsEnv()
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_GPU_INPUTS", "");
+#else
+        unsetenv("BTX_MATMUL_GPU_INPUTS");
+#endif
+    }
+};
+
 class ScopedSolverThreadsEnv
 {
 public:
@@ -1591,6 +1617,128 @@ BOOST_AUTO_TEST_CASE(MatMulNonceSeed_metal_prehash_scan_matches_cpu_gate)
     }
 }
 
+BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_cuda_prehash_scan_matches_cpu_gate)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulMinDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.nMatMulPreHashEpsilonBits = 4;
+    consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulNonceSeedHeight = 2;
+    consensus.nMatMulParentMtpSeedHeight = 2;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int64_t parent_mtp{1'779'999'900};
+    arith_uint256 block_target{1};
+    block_target <<= 250;
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000c3"};
+    header.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000c4"};
+    header.nTime = 1'780'000'009U;
+    header.nBits = block_target.GetCompact();
+    header.nNonce64 = 29;
+    header.nNonce = static_cast<uint32_t>(header.nNonce64);
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+
+    arith_uint256 pre_hash_target = DecodeTarget(header.nBits);
+    pre_hash_target <<= consensus.nMatMulPreHashEpsilonBits;
+    constexpr uint32_t kScanCount{96};
+    const auto scan = btx::cuda::ScanMatMulNonceSeedPreHashGPU({
+        .version = header.nVersion,
+        .previous_block_hash = header.hashPrevBlock,
+        .merkle_root = header.hashMerkleRoot,
+        .time = header.nTime,
+        .bits = header.nBits,
+        .start_nonce = header.nNonce64,
+        .matmul_dim = header.matmul_dim,
+        .block_height = 2,
+        .scan_count = kScanCount,
+        .pre_hash_target = ArithToUint256(pre_hash_target),
+        .seed_version = 3,
+        .parent_median_time_past = parent_mtp,
+    });
+    if (!scan.available) {
+        return;
+    }
+
+    BOOST_REQUIRE_MESSAGE(scan.success, scan.error);
+    BOOST_REQUIRE_EQUAL(scan.scanned_count, kScanCount);
+    BOOST_REQUIRE_EQUAL(scan.pass_flags.size(), kScanCount);
+    for (uint32_t i = 0; i < kScanCount; ++i) {
+        CBlockHeader candidate{header};
+        candidate.nNonce64 = header.nNonce64 + i;
+        candidate.nNonce = static_cast<uint32_t>(candidate.nNonce64);
+        BOOST_REQUIRE(SetDeterministicMatMulSeeds(candidate, consensus, 2, parent_mtp));
+        const bool expected = CheckMatMulPreHashGate(candidate, consensus, 2);
+        BOOST_CHECK_EQUAL(scan.pass_flags[i] != 0, expected);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_metal_prehash_scan_matches_cpu_gate)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulMinDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.nMatMulPreHashEpsilonBits = 4;
+    consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulNonceSeedHeight = 2;
+    consensus.nMatMulParentMtpSeedHeight = 2;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int64_t parent_mtp{1'779'999'901};
+    arith_uint256 block_target{1};
+    block_target <<= 250;
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000d3"};
+    header.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000d4"};
+    header.nTime = 1'780'000'010U;
+    header.nBits = block_target.GetCompact();
+    header.nNonce64 = 31;
+    header.nNonce = static_cast<uint32_t>(header.nNonce64);
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+
+    arith_uint256 pre_hash_target = DecodeTarget(header.nBits);
+    pre_hash_target <<= consensus.nMatMulPreHashEpsilonBits;
+    constexpr uint32_t kScanCount{96};
+    const auto scan = btx::metal::ScanMatMulNonceSeedPreHashGPU({
+        .version = header.nVersion,
+        .previous_block_hash = header.hashPrevBlock,
+        .merkle_root = header.hashMerkleRoot,
+        .time = header.nTime,
+        .bits = header.nBits,
+        .start_nonce = header.nNonce64,
+        .matmul_dim = header.matmul_dim,
+        .block_height = 2,
+        .scan_count = kScanCount,
+        .pre_hash_target = ArithToUint256(pre_hash_target),
+        .seed_version = 3,
+        .parent_median_time_past = parent_mtp,
+    });
+    if (!scan.available) {
+        return;
+    }
+
+    BOOST_REQUIRE_MESSAGE(scan.success, scan.error);
+    BOOST_REQUIRE_EQUAL(scan.scanned_count, kScanCount);
+    BOOST_REQUIRE_EQUAL(scan.pass_flags.size(), kScanCount);
+    for (uint32_t i = 0; i < kScanCount; ++i) {
+        CBlockHeader candidate{header};
+        candidate.nNonce64 = header.nNonce64 + i;
+        candidate.nNonce = static_cast<uint32_t>(candidate.nNonce64);
+        BOOST_REQUIRE(SetDeterministicMatMulSeeds(candidate, consensus, 2, parent_mtp));
+        const bool expected = CheckMatMulPreHashGate(candidate, consensus, 2);
+        BOOST_CHECK_EQUAL(scan.pass_flags[i] != 0, expected);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(MatMulNonceSeed_metal_solver_uses_gpu_scan_and_variable_base_batch)
 {
     const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
@@ -1646,6 +1794,149 @@ BOOST_AUTO_TEST_CASE(MatMulNonceSeed_metal_solver_uses_gpu_scan_and_variable_bas
     BOOST_CHECK(!payload.empty());
     BOOST_CHECK_EQUAL(header.seed_a, DeterministicMatMulSeedV2(header, 2, 0));
     BOOST_CHECK_EQUAL(header.seed_b, DeterministicMatMulSeedV2(header, 2, 1));
+
+    CBlock block{header};
+    block.matrix_c_data = payload;
+    BOOST_CHECK(CheckMatMulProofOfWork_ProductCommitted(block, consensus, 2));
+}
+
+BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_metal_solver_uses_gpu_scan_and_variable_base_batch)
+{
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
+    if (!capability.available) {
+        BOOST_TEST_MESSAGE("Skipping Metal parent-MTP nonce-seed solver integration test: Metal backend unavailable ("
+            << capability.reason << ")");
+        return;
+    }
+
+    ScopedBackendEnv backend_env("metal");
+    ScopedBatchSizeEnv solve_batch_env(nullptr);
+    ScopedNonceSeedBatchSizeEnv nonce_seed_batch_env("3");
+    ScopedCpuConfirmEnv cpu_confirm_env("1");
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fSkipMatMulValidation = false;
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulMinDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.nMatMulPreHashEpsilonBits = 4;
+    consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulNonceSeedHeight = 2;
+    consensus.nMatMulParentMtpSeedHeight = 2;
+    consensus.nMatMulProductDigestHeight = 2;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int64_t parent_mtp{1'779'999'902};
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000e3"};
+    header.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000e4"};
+    header.nTime = 1'780'000'011U;
+    header.nBits = UintToArith256(consensus.powLimit).GetCompact();
+    header.nNonce64 = 0;
+    header.nNonce = 0;
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+    header.matmul_digest.SetNull();
+
+    ResetMatMulSolvePipelineStats();
+    ResetMatMulGpuPreHashScanStats();
+    matmul::accelerated::ResetMatMulBackendRuntimeStats();
+    std::vector<uint32_t> payload;
+    uint64_t max_tries{3};
+    BOOST_REQUIRE(SolveMatMul(header, consensus, max_tries, 2, nullptr, &payload, nullptr, parent_mtp));
+
+    const auto scan_stats = ProbeMatMulGpuPreHashScanStats();
+    BOOST_CHECK(scan_stats.attempts > 0);
+    BOOST_CHECK(scan_stats.successes > 0);
+    BOOST_CHECK_EQUAL(scan_stats.failures, 0U);
+
+    const auto solve_stats = ProbeMatMulSolvePipelineStats();
+    BOOST_CHECK_EQUAL(solve_stats.batch_size, 3U);
+    BOOST_CHECK_EQUAL(solve_stats.batched_digest_requests, 1U);
+    BOOST_CHECK_EQUAL(solve_stats.batched_nonce_attempts, 3U);
+    BOOST_CHECK(!solve_stats.parallel_solver_enabled);
+
+    const auto backend_stats = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
+    BOOST_CHECK_EQUAL(backend_stats.requested_metal, 3U);
+    BOOST_CHECK_EQUAL(backend_stats.metal_successes, 3U);
+    BOOST_CHECK(!payload.empty());
+    BOOST_CHECK_EQUAL(header.seed_a, DeterministicMatMulSeedV3(header, 2, parent_mtp, 0));
+    BOOST_CHECK_EQUAL(header.seed_b, DeterministicMatMulSeedV3(header, 2, parent_mtp, 1));
+
+    CBlock block{header};
+    block.matrix_c_data = payload;
+    BOOST_CHECK(CheckMatMulProofOfWork_ProductCommitted(block, consensus, 2));
+}
+
+BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_cuda_solver_uses_gpu_scan_and_variable_base_batch)
+{
+    const auto capability = matmul::backend::CapabilityFor(matmul::backend::Kind::CUDA);
+    if (!capability.available) {
+        BOOST_TEST_MESSAGE("Skipping CUDA parent-MTP nonce-seed solver integration test: CUDA backend unavailable ("
+            << capability.reason << ")");
+        return;
+    }
+
+    ScopedBackendEnv backend_env("cuda");
+    ScopedBatchSizeEnv solve_batch_env(nullptr);
+    ScopedNonceSeedBatchSizeEnv nonce_seed_batch_env("3");
+    ScopedCpuConfirmEnv cpu_confirm_env("1");
+    ScopedGpuInputsEnv gpu_inputs_env("1");
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fSkipMatMulValidation = false;
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulMinDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
+    consensus.nMatMulPreHashEpsilonBits = 4;
+    consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulNonceSeedHeight = 2;
+    consensus.nMatMulParentMtpSeedHeight = 2;
+    consensus.nMatMulProductDigestHeight = 2;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int64_t parent_mtp{1'779'999'903};
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000e5"};
+    header.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000e6"};
+    header.nTime = 1'780'000'012U;
+    header.nBits = UintToArith256(consensus.powLimit).GetCompact();
+    header.nNonce64 = 0;
+    header.nNonce = 0;
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+    header.matmul_digest.SetNull();
+
+    ResetMatMulSolvePipelineStats();
+    ResetMatMulGpuPreHashScanStats();
+    matmul::accelerated::ResetMatMulBackendRuntimeStats();
+    std::vector<uint32_t> payload;
+    uint64_t max_tries{3};
+    BOOST_REQUIRE(SolveMatMul(header, consensus, max_tries, 2, nullptr, &payload, nullptr, parent_mtp));
+
+    const auto scan_stats = ProbeMatMulGpuPreHashScanStats();
+    BOOST_CHECK(scan_stats.attempts > 0);
+    BOOST_CHECK(scan_stats.successes > 0);
+    BOOST_CHECK_EQUAL(scan_stats.failures, 0U);
+    BOOST_CHECK_EQUAL(scan_stats.cuda_fallbacks_to_cpu, 0U);
+
+    const auto solve_stats = ProbeMatMulSolvePipelineStats();
+    BOOST_CHECK_EQUAL(solve_stats.batch_size, 3U);
+    BOOST_CHECK_EQUAL(solve_stats.batched_digest_requests, 1U);
+    BOOST_CHECK_EQUAL(solve_stats.batched_nonce_attempts, 3U);
+    BOOST_CHECK(!solve_stats.parallel_solver_enabled);
+
+    const auto backend_stats = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
+    BOOST_CHECK_EQUAL(backend_stats.requested_cuda, 3U);
+    BOOST_CHECK_EQUAL(backend_stats.cuda_successes, 3U);
+    BOOST_CHECK_EQUAL(backend_stats.cuda_fallbacks_to_cpu, 0U);
+    BOOST_CHECK(!payload.empty());
+    BOOST_CHECK_EQUAL(header.seed_a, DeterministicMatMulSeedV3(header, 2, parent_mtp, 0));
+    BOOST_CHECK_EQUAL(header.seed_b, DeterministicMatMulSeedV3(header, 2, parent_mtp, 1));
 
     CBlock block{header};
     block.matrix_c_data = payload;

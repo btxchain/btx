@@ -903,6 +903,22 @@ if(BUILD_UTIL)
   endif()
   install_binary_component(btx-matmul-solve-bench)
 
+  add_executable(btx-matmul-cost-bench btx-matmul-cost-bench.cpp)
+  target_include_directories(btx-matmul-cost-bench PRIVATE
+    $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
+  )
+  target_link_libraries(btx-matmul-cost-bench
+    core_interface
+  )
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(btx-matmul-cost-bench ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(btx-matmul-cost-bench
+      bitcoin_shielded
+    )
+  endif()
+  install_binary_component(btx-matmul-cost-bench)
+
   add_executable(btx-genesis btx-genesis.cpp)
   target_link_libraries(btx-genesis
     core_interface

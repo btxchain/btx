@@ -315,6 +315,40 @@ inline void compute_matmul_seed_v2(constant uchar* previous_block_hash,
     sha256_bytes(message, offset, out);
 }
 
+inline void compute_matmul_seed_v3(constant uchar* previous_block_hash,
+                                   constant uchar* merkle_root,
+                                   ulong parent_median_time_past,
+                                   uint height,
+                                   uint version,
+                                   uint time,
+                                   uint bits,
+                                   ulong nonce,
+                                   ushort matmul_dim,
+                                   uchar which,
+                                   thread uchar out[32])
+{
+    thread uchar message[118];
+    uint offset = 0u;
+    const uchar tag[18] = {
+        'B', 'T', 'X', '_', 'M', 'A', 'T', 'M', 'U', 'L', '_', 'S', 'E', 'E', 'D', '_', 'V', '3'
+    };
+    append_byte(message, offset, 18u);
+    for (uint i = 0; i < 18u; ++i) {
+        append_byte(message, offset, tag[i]);
+    }
+    append_constant_bytes(message, offset, previous_block_hash, 32u);
+    append_le64(message, offset, parent_median_time_past);
+    append_le32(message, offset, height);
+    append_le32(message, offset, version);
+    append_constant_bytes(message, offset, merkle_root, 32u);
+    append_le32(message, offset, time);
+    append_le32(message, offset, bits);
+    append_le64(message, offset, nonce);
+    append_le16(message, offset, matmul_dim);
+    append_byte(message, offset, which);
+    sha256_bytes(message, offset, out);
+}
+
 inline void compute_matmul_header_hash(uint version,
                                        constant uchar* previous_block_hash,
                                        constant uchar* merkle_root,
@@ -350,13 +384,16 @@ inline bool uint256_internal_bytes_less_or_equal(thread uchar lhs[32], constant 
 }
 
 struct NonceSeedScanParams {
+    ulong start_nonce;
+    ulong parent_median_time_past;
     uint version;
     uint height;
     uint time;
     uint bits;
-    ulong start_nonce;
     uint matmul_dim;
     uint scan_count;
+    uint seed_version;
+    uint padding;
 };
 
 kernel void scan_nonce_seed_pre_hash(constant NonceSeedScanParams& p [[buffer(0)]],
@@ -375,28 +412,55 @@ kernel void scan_nonce_seed_pre_hash(constant NonceSeedScanParams& p [[buffer(0)
     thread uchar seed_b[32];
     thread uchar header_hash[32];
     thread uchar sigma[32];
-    compute_matmul_seed_v2(
-        previous_block_hash,
-        merkle_root,
-        p.height,
-        p.version,
-        p.time,
-        p.bits,
-        nonce,
-        (ushort)p.matmul_dim,
-        0u,
-        seed_a);
-    compute_matmul_seed_v2(
-        previous_block_hash,
-        merkle_root,
-        p.height,
-        p.version,
-        p.time,
-        p.bits,
-        nonce,
-        (ushort)p.matmul_dim,
-        1u,
-        seed_b);
+    if (p.seed_version == 3u) {
+        compute_matmul_seed_v3(
+            previous_block_hash,
+            merkle_root,
+            p.parent_median_time_past,
+            p.height,
+            p.version,
+            p.time,
+            p.bits,
+            nonce,
+            (ushort)p.matmul_dim,
+            0u,
+            seed_a);
+        compute_matmul_seed_v3(
+            previous_block_hash,
+            merkle_root,
+            p.parent_median_time_past,
+            p.height,
+            p.version,
+            p.time,
+            p.bits,
+            nonce,
+            (ushort)p.matmul_dim,
+            1u,
+            seed_b);
+    } else {
+        compute_matmul_seed_v2(
+            previous_block_hash,
+            merkle_root,
+            p.height,
+            p.version,
+            p.time,
+            p.bits,
+            nonce,
+            (ushort)p.matmul_dim,
+            0u,
+            seed_a);
+        compute_matmul_seed_v2(
+            previous_block_hash,
+            merkle_root,
+            p.height,
+            p.version,
+            p.time,
+            p.bits,
+            nonce,
+            (ushort)p.matmul_dim,
+            1u,
+            seed_b);
+    }
     compute_matmul_header_hash(
         p.version,
         previous_block_hash,

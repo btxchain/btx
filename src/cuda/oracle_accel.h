@@ -74,6 +74,8 @@ struct MatMulNonceSeedPreHashScanRequest {
     uint32_t block_height{0};
     uint32_t scan_count{0};
     uint256 pre_hash_target;
+    uint32_t seed_version{2};
+    int64_t parent_median_time_past{0};
 };
 
 struct MatMulNonceSeedPreHashScanResult {

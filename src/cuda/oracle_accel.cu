@@ -905,6 +905,39 @@ __device__ inline uint32_t BuildMatMulSeedV2Message(const OracleSeedBytes& previ
     return offset;
 }
 
+// Builds the seed_v3 message; the nonce lands at offset 107 and `which` at 117,
+// both inside the SECOND SHA-256 block. Returns the message length (118).
+__device__ inline uint32_t BuildMatMulSeedV3Message(const OracleSeedBytes& previous_block_hash,
+                                                    const OracleSeedBytes& merkle_root,
+                                                    uint64_t parent_median_time_past,
+                                                    uint32_t height,
+                                                    uint32_t version,
+                                                    uint32_t time,
+                                                    uint32_t bits,
+                                                    uint64_t nonce,
+                                                    uint16_t matmul_dim,
+                                                    uint8_t which,
+                                                    uint8_t message[118])
+{
+    uint32_t offset{0};
+    constexpr char TAG[] = "BTX_MATMUL_SEED_V3";
+    AppendByte(message, offset, 18U);
+    for (uint32_t i = 0; i < 18U; ++i) {
+        AppendByte(message, offset, static_cast<uint8_t>(TAG[i]));
+    }
+    AppendBytes(message, offset, previous_block_hash.data, 32U);
+    AppendLE64(message, offset, parent_median_time_past);
+    AppendLE32(message, offset, height);
+    AppendLE32(message, offset, version);
+    AppendBytes(message, offset, merkle_root.data, 32U);
+    AppendLE32(message, offset, time);
+    AppendLE32(message, offset, bits);
+    AppendLE64(message, offset, nonce);
+    AppendLE16(message, offset, matmul_dim);
+    AppendByte(message, offset, which);
+    return offset;
+}
+
 // Builds the header-hash message; the nonce lands at offset 76 and the seeds at
 // 86/118, all inside the second and third SHA-256 blocks. Returns length (150).
 __device__ inline uint32_t BuildMatMulHeaderHashMessage(uint32_t version,
@@ -949,10 +982,12 @@ __global__ void ScanNonceSeedPreHashKernel(OracleSeedBytes previous_block_hash,
                                            uint32_t bits,
                                            uint64_t start_nonce,
                                            uint16_t matmul_dim,
+                                           uint32_t seed_version,
+                                           uint64_t parent_median_time_past,
                                            Element* out_flags,
                                            uint32_t scan_count)
 {
-    // Block 0 of both messages is nonce-independent (see the Build* comments),
+    // Block 0 of the seed and header messages is nonce-independent,
     // so its compression is done ONCE per CUDA block and shared: 8 -> 5 SHA-256
     // compressions per nonce. The midstates must be computed before the bounds
     // guard so every thread reaches the barrier.
@@ -960,9 +995,16 @@ __global__ void ScanNonceSeedPreHashKernel(OracleSeedBytes previous_block_hash,
     __shared__ uint32_t header_midstate[8];
     if (threadIdx.x == 0) {
         uint8_t prefix[150];
-        BuildMatMulSeedV2Message(
-            previous_block_hash, merkle_root, height, version, time, bits,
-            /*nonce=*/0U, matmul_dim, /*which=*/0U, prefix);
+        if (seed_version == 3U) {
+            BuildMatMulSeedV3Message(
+                previous_block_hash, merkle_root, parent_median_time_past,
+                height, version, time, bits,
+                /*nonce=*/0U, matmul_dim, /*which=*/0U, prefix);
+        } else {
+            BuildMatMulSeedV2Message(
+                previous_block_hash, merkle_root, height, version, time, bits,
+                /*nonce=*/0U, matmul_dim, /*which=*/0U, prefix);
+        }
         Sha256Block0Midstate(prefix, seed_midstate);
         BuildMatMulHeaderHashMessage(
             version, previous_block_hash, merkle_root, time, bits,
@@ -984,9 +1026,14 @@ __global__ void ScanNonceSeedPreHashKernel(OracleSeedBytes previous_block_hash,
     uint8_t seed_b[32];
     uint8_t header_hash[32];
     uint8_t sigma[32];
-    const uint32_t seed_len = BuildMatMulSeedV2Message(
-        previous_block_hash, merkle_root, height, version, time, bits,
-        nonce, matmul_dim, 0U, message);
+    const uint32_t seed_len = seed_version == 3U
+        ? BuildMatMulSeedV3Message(
+            previous_block_hash, merkle_root, parent_median_time_past,
+            height, version, time, bits,
+            nonce, matmul_dim, 0U, message)
+        : BuildMatMulSeedV2Message(
+            previous_block_hash, merkle_root, height, version, time, bits,
+            nonce, matmul_dim, 0U, message);
     Sha256BytesFromMidstate(seed_midstate, message, seed_len, seed_a);
     message[seed_len - 1U] = 1U; // `which` is the final byte; the rest is identical
     Sha256BytesFromMidstate(seed_midstate, message, seed_len, seed_b);
@@ -1312,6 +1359,14 @@ MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(
         result.error = "CUDA nonce-seed pre-hash scan requires non-zero matmul_dim";
         return result;
     }
+    if (request.seed_version != 2U && request.seed_version != 3U) {
+        result.error = "CUDA nonce-seed pre-hash scan requires seed_version 2 or 3";
+        return result;
+    }
+    if (request.seed_version == 3U && request.parent_median_time_past < 0) {
+        result.error = "CUDA seed-v3 nonce-seed pre-hash scan requires non-negative parent median time past";
+        return result;
+    }
 
     auto& workspace = g_workspace;
     ResetWorkspaceForDevice(workspace, runtime.device_index);
@@ -1344,6 +1399,8 @@ MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(
         request.bits,
         request.start_nonce,
         request.matmul_dim,
+        request.seed_version,
+        static_cast<uint64_t>(request.parent_median_time_past),
         workspace.out_scan_flags,
         request.scan_count);
     error = cudaGetLastError();

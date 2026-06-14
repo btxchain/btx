@@ -1507,12 +1507,19 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
     const arith_uint256& target,
     uint32_t attempts_since_time_refresh,
     uint32_t header_time_refresh_interval,
+    std::optional<int64_t> parent_median_time_past,
     bool allow_min_difficulty)
 {
-    if (configured_batch_size == 0 || pre_hash_epsilon_bits == 0 || block_height < 0 ||
-        params.IsMatMulParentMtpSeedActive(block_height)) {
+    if (configured_batch_size == 0 || pre_hash_epsilon_bits == 0 || block_height < 0) {
         return std::nullopt;
     }
+    const bool use_parent_mtp_seed = params.IsMatMulParentMtpSeedActive(block_height);
+    if (use_parent_mtp_seed &&
+        (!parent_median_time_past.has_value() || *parent_median_time_past < 0)) {
+        return std::nullopt;
+    }
+    const uint32_t seed_version = use_parent_mtp_seed ? 3U : 2U;
+    const int64_t scan_parent_mtp = use_parent_mtp_seed ? *parent_median_time_past : 0;
 
     MatMulNonceBatchWindow window;
     arith_uint256 pre_hash_target = target;
@@ -1563,6 +1570,8 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
             .block_height = static_cast<uint32_t>(block_height),
             .scan_count = scan_limit,
             .pre_hash_target = ArithToUint256(pre_hash_target),
+            .seed_version = seed_version,
+            .parent_median_time_past = scan_parent_mtp,
         });
         scan.success = cuda_scan.success;
         scan.scanned_count = cuda_scan.scanned_count;
@@ -1580,6 +1589,8 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
             .block_height = static_cast<uint32_t>(block_height),
             .scan_count = scan_limit,
             .pre_hash_target = ArithToUint256(pre_hash_target),
+            .seed_version = seed_version,
+            .parent_median_time_past = scan_parent_mtp,
         });
         scan.success = metal_scan.success;
         scan.scanned_count = metal_scan.scanned_count;
@@ -1609,7 +1620,7 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
         CBlockHeader header{block};
         header.nNonce64 = block.nNonce64 + i;
         header.nNonce = static_cast<uint32_t>(header.nNonce64);
-        if (!SetDeterministicMatMulSeeds(header, params, block_height)) {
+        if (!SetDeterministicMatMulSeeds(header, params, block_height, parent_median_time_past)) {
             return std::nullopt;
         }
         header.matmul_digest.SetNull();
@@ -3487,6 +3498,7 @@ bool SolveMatMulNonceSeeded(CBlockHeader& block,
                     *bnTarget,
                     attempts_since_time_refresh,
                     header_time_refresh_interval,
+                    parent_median_time_past,
                     params.fPowAllowMinDifficultyBlocks);
                 if (scanned_window.has_value()) {
                     if (scanned_window->nonce_space_exhausted) {
@@ -3774,7 +3786,10 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
         }
         block.matmul_dim = static_cast<uint16_t>(params.nMatMulDimension);
     }
-    if (params.IsMatMulNonceSeedActive(block_height) || params.IsMatMulParentMtpSeedActive(block_height)) {
+    const bool nonce_seeded_solver_active =
+        params.IsMatMulNonceSeedActive(block_height) ||
+        params.IsMatMulParentMtpSeedActive(block_height);
+    if (nonce_seeded_solver_active) {
         if (!SetDeterministicMatMulSeeds(block, params, block_height, parent_median_time_past)) {
             return false;
         }
@@ -3804,10 +3819,10 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
         return false;
     }
     const auto active_backend = backend_selection.active;
-    if (params.IsMatMulNonceSeedActive(block_height)) {
-        // V2 nonce-seeded solving cannot reuse the legacy shared A/B matrix instance. CPU backends
+    if (nonce_seeded_solver_active) {
+        // Nonce-seeded solving cannot reuse the legacy shared A/B matrix instance. CPU backends
         // still fan out disjoint nonce ranges across workers, while GPU backends with nonce-seed
-        // scan support keep a single mining lane and move the expensive seed-v2 pre-hash scan into
+        // scan support keep a single mining lane and move the expensive nonce-seed pre-hash scan into
         // a GPU window before digesting only the candidates that passed the sigma gate.
         if (!g_matmul_parallel_worker_context) {
             const uint32_t solver_threads = static_cast<uint32_t>(ResolveMatMulSolverThreadCount());
@@ -3816,8 +3831,7 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
             const bool gpu_nonce_seed_scan_enabled =
                 (active_backend == matmul::backend::Kind::CUDA ||
                  active_backend == matmul::backend::Kind::METAL) &&
-                pre_hash_epsilon_bits > 0 &&
-                !params.IsMatMulParentMtpSeedActive(block_height);
+                pre_hash_epsilon_bits > 0;
             const uint32_t nonce_seed_batch_size = gpu_nonce_seed_scan_enabled
                 ? ResolveGpuNonceSeedBatchSize(
                     active_backend,

@@ -1520,6 +1520,9 @@ struct MatMulWorkProfileOptions {
     std::string seed_derivation_scope{"per_parent_block"};
     std::string seed_derivation_rule{"sha256(prev_block_hash || height || which)"};
     bool winner_knows_next_seeds_first{true};
+    bool private_parent_withholding_head_start_possible{true};
+    std::string private_parent_withholding_head_start_scope{
+        "standard_pow_parent_withholding_only"};
     bool publicly_precomputable_before_parent_seen{false};
     uint64_t public_precompute_horizon_blocks{0};
     std::vector<std::string> template_mutations_preserve_seed{"merkle_root", "nonce", "time"};
@@ -1538,7 +1541,15 @@ static UniValue BuildMatMulWorkProfile(
     MatMulWorkProfileOptions options = {})
 {
     if (options.reflect_consensus_nonce_seed_upgrade &&
-        consensus.IsMatMulNonceSeedActive(block_height)) {
+        consensus.IsMatMulParentMtpSeedActive(block_height)) {
+        options.seed_derivation_scope = "per_nonce_header_parent_mtp";
+        options.seed_derivation_rule =
+            "sha256(\"BTX_MATMUL_SEED_V3\" || prev_block_hash || parent_median_time_past || height || version || merkle_root || time || bits || nonce64 || matmul_dim || which)";
+        options.winner_knows_next_seeds_first = false;
+        options.template_mutations_preserve_seed.clear();
+        options.fixed_instance_reuse_possible = false;
+    } else if (options.reflect_consensus_nonce_seed_upgrade &&
+               consensus.IsMatMulNonceSeedActive(block_height)) {
         options.seed_derivation_scope = "per_nonce_header";
         options.seed_derivation_rule =
             "sha256(\"BTX_MATMUL_SEED_V2\" || prev_block_hash || height || version || merkle_root || time || bits || nonce64 || matmul_dim || which)";
@@ -1662,6 +1673,12 @@ static UniValue BuildMatMulWorkProfile(
     next_block_seed_access.pushKV("seed_derivation_scope", options.seed_derivation_scope);
     next_block_seed_access.pushKV("seed_derivation_rule", options.seed_derivation_rule);
     next_block_seed_access.pushKV("winner_knows_next_seeds_first", options.winner_knows_next_seeds_first);
+    next_block_seed_access.pushKV(
+        "private_parent_withholding_head_start_possible",
+        options.private_parent_withholding_head_start_possible);
+    next_block_seed_access.pushKV(
+        "private_parent_withholding_head_start_scope",
+        options.private_parent_withholding_head_start_scope);
     next_block_seed_access.pushKV("publicly_precomputable_before_parent_seen", options.publicly_precomputable_before_parent_seen);
     next_block_seed_access.pushKV("public_precompute_horizon_blocks", options.public_precompute_horizon_blocks);
     next_block_seed_access.pushKV(
@@ -3353,6 +3370,8 @@ static UniValue BuildMatMulServiceChallengeResponse(
     work_profile_options.seed_derivation_scope = "per_service_challenge";
     work_profile_options.seed_derivation_rule = MATMUL_SERVICE_SEED_DERIVATION_RULE;
     work_profile_options.winner_knows_next_seeds_first = false;
+    work_profile_options.private_parent_withholding_head_start_possible = false;
+    work_profile_options.private_parent_withholding_head_start_scope = "not_a_next_block_mining_seed";
     work_profile_options.publicly_precomputable_before_parent_seen = false;
     work_profile_options.public_precompute_horizon_blocks = 0;
     work_profile_options.template_mutations_preserve_seed = {"nonce"};
