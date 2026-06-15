@@ -13635,6 +13635,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
     };
     bool startup_velocity_checked{false};
     bool startup_velocity_verified_or_inactive{false};
+    bool startup_velocity_rebuild_deferred_to_state_pin{false};
     auto verify_or_repair_startup_velocity = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
         AssertLockHeld(::cs_main);
         if (startup_velocity_checked) {
@@ -13642,6 +13643,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         }
         startup_velocity_checked = true;
         startup_velocity_verified_or_inactive = true;
+        startup_velocity_rebuild_deferred_to_state_pin = false;
         if (tip == nullptr) {
             return true;
         }
@@ -13664,6 +13666,25 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                                                    consensus,
                                                    rebuilt_velocity,
                                                    rebuild_error)) {
+            if (velocity_log_present &&
+                consensus.IsShieldedRecoveryExitActive(tip->nHeight) &&
+                m_active_chainstate != nullptr &&
+                m_active_chainstate->m_from_snapshot_blockhash.has_value() &&
+                !ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+                // AssumeUTXO snapshot nodes do not necessarily have the snapshot base block on disk.
+                // After they catch up, the persisted velocity window can still reference that base
+                // height, so a by-block reconstruction may be impossible even though the v9 snapshot
+                // loaded and persisted the velocity log. Defer the velocity check to the full
+                // recovery-exit state pin below. That pin covers the velocity log, nullifier root,
+                // note root, account-registry root, bridge metadata, and pool balance; mismatches
+                // still fail closed when full audit blocks are unavailable.
+                LogPrintf("EnsureShieldedStateInitialized: recent unshield velocity rebuild unavailable at height=%d hash=%s (%s); deferring verification to persisted full shielded state pin for pruned assumeutxo snapshot\n",
+                          tip->nHeight,
+                          tip->GetBlockHash().ToString(),
+                          rebuild_error);
+                startup_velocity_rebuild_deferred_to_state_pin = true;
+                return true;
+            }
             LogPrintf("EnsureShieldedStateInitialized: failed to verify persisted unshield velocity at height=%d hash=%s (%s)\n",
                       tip->nHeight,
                       tip->GetBlockHash().ToString(),
@@ -13796,6 +13817,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         }
         startup_velocity_checked = false;
         startup_velocity_verified_or_inactive = false;
+        startup_velocity_rebuild_deferred_to_state_pin = false;
         startup_shielded_repair_performed = true;
         LogPrintf("EnsureShieldedStateInitialized: initialized tree_size=%u root=%s nullifiers=%u pool=%lld\n",
                   static_cast<unsigned int>(m_shielded_merkle_tree.Size()),
@@ -14151,7 +14173,8 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                         persisted_pin.has_value() &&
                         current_pin.has_value() &&
                         startup_velocity_checked &&
-                        startup_velocity_verified_or_inactive) {
+                        startup_velocity_verified_or_inactive &&
+                        !startup_velocity_rebuild_deferred_to_state_pin) {
                         const auto legacy_v2_pin = ComputeShieldedSnapshotStatePinV2ForMigration();
                         const auto empty_velocity_v3_pin =
                             ComputeShieldedSnapshotStatePinEmptyVelocityV3ForMigration();
