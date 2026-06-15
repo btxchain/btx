@@ -40,6 +40,7 @@
 #include <future>
 #include <limits>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -1023,6 +1024,33 @@ bool ShouldEnableAsyncPrepare(matmul::backend::Kind backend, uint32_t configured
     // Live-like mining benchmarks on this Apple Silicon machine show that
     // default-on async preparation still improves end-to-end throughput.
     return true;
+}
+
+// Pipeline overlap gate for the nonce-seeded (v2/v3) GPU-scan solver.
+//
+// The legacy serial nonce-seeded path forced the prepare/confirm overlap OFF.
+// We re-enable it as PURE SCHEDULING (next-window prepare and prior-window CPU
+// confirm overlap the in-flight GPU digest), but the consensus solver demands a
+// byte-exact A/B, so the default MUST stay serial: only an explicit
+// BTX_MATMUL_PIPELINE_ASYNC opt-in turns the overlap on. This deliberately does
+// NOT inherit ShouldEnableAsyncPrepare()'s CUDA-default-true, which would change
+// behaviour silently on every Blackwell box.
+bool ShouldEnableNonceSeededPipelineOverlap(matmul::backend::Kind backend, uint32_t configured_batch_size)
+{
+    (void)configured_batch_size;
+    const char* env = std::getenv("BTX_MATMUL_PIPELINE_ASYNC");
+    if (env == nullptr || env[0] == '\0') {
+        // Unset -> keep the proven serial behaviour (safe default for the
+        // consensus path and a clean A/B baseline).
+        return false;
+    }
+    if (env[0] == '0') {
+        return false;
+    }
+    // Overlap only makes sense for the GPU backends that run the single-lane
+    // window pipeline; CPU backends fan out disjoint nonce ranges instead.
+    return backend == matmul::backend::Kind::CUDA ||
+           backend == matmul::backend::Kind::METAL;
 }
 
 uint32_t ResolvePreparePrefetchDepth(matmul::backend::Kind backend, uint32_t configured_batch_size)
@@ -3478,6 +3506,281 @@ bool SolveMatMulNonceSeeded(CBlockHeader& block,
                 product_digest_active)
             : 1U;
 
+        // ----------------------------------------------------------------------
+        // v3/v2 PIPELINE OVERLAP (pure scheduling; PoW math, seed derivation and
+        // parent_mtp handling are untouched). It hides per-window CPU prepare and
+        // CPU confirm behind the in-flight GPU digest. Runs ONLY when
+        // BTX_MATMUL_PIPELINE_ASYNC opted the overlap on (g_matmul_async_prepare_
+        // enabled, set by the SolveMatMul dispatch) AND the GPU nonce-seed scan is
+        // available. Otherwise the verbatim serial loop below runs unchanged.
+        //
+        // This is the classic v2 prefetch shape applied to the v3 variable-base
+        // path: SUBMIT digest(N) non-blocking, BUILD+PREPARE window(N+1) while it
+        // runs, WAIT digest(N), CONFIRM in order. Exactly one GPU digest is in
+        // flight at a time (same as v2 SubmitMatMulDigestPreparedBatchForMining ->
+        // queue_prefetched_batches -> WaitForSubmittedMatMulDigestBatch), so the
+        // overlap adds no concurrent CUDA batch calls.
+        //
+        // Byte-exactness vs serial:
+        //  * Windows are built strictly sequentially from the SAME block cursor,
+        //    covering the identical nonce ranges.
+        //  * digest(N) is fully awaited and its candidates confirmed IN ORDER
+        //    before window N+1 is surfaced, so the FIRST solved (nonce,digest)
+        //    returned is the one serial would return.
+        //  * max_tries decrements identically: filtered_nonces per window, 1 per
+        //    confirmed candidate.
+        if (g_matmul_async_prepare_enabled.load(std::memory_order_relaxed) &&
+            gpu_nonce_seed_scan_available) {
+            // One prepared+submitted window. headers/prepared are heap-stable
+            // (unique_ptr) so the std::async digest can borrow them by pointer and
+            // they survive being moved between pipeline slots.
+            struct NonceSeededStage {
+                std::unique_ptr<MatMulNonceBatchWindow> window;
+                std::unique_ptr<std::vector<matmul::accelerated::PreparedDigestInputs>> prepared_batch;
+                std::future<std::vector<matmul::accelerated::DigestResult>> digest_future;
+                bool digest_submitted{false};
+                uint32_t filtered_nonces{0};
+                uint32_t nonces_scanned{0};
+                uint32_t attempts_after{0};
+                bool exhausted{false};
+                bool valid{false};
+            };
+
+            // Build window from a cursor, prepare inputs on the worker pool, and
+            // launch the GPU digest non-blocking. Pure read of `block`-like state
+            // via the passed cursor; advances nothing.
+            auto build_prepare_submit = [&](const CBlockHeader& cursor,
+                                            uint64_t tries_budget,
+                                            uint32_t attempts_since_refresh) -> NonceSeededStage {
+                NonceSeededStage stage;
+                if (tries_budget == 0) return stage;
+                if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) return stage;
+
+                auto scanned = BuildMatMulNonceSeededGpuPreHashBatchWindow(
+                    cursor,
+                    params,
+                    block_height,
+                    active_backend,
+                    tries_budget,
+                    configured_batch_size,
+                    pre_hash_epsilon_bits,
+                    *bnTarget,
+                    attempts_since_refresh,
+                    header_time_refresh_interval,
+                    parent_median_time_past,
+                    params.fPowAllowMinDifficultyBlocks);
+                if (!scanned.has_value()) {
+                    gpu_nonce_seed_scan_available = false;
+                    return stage; // valid=false
+                }
+                stage.valid = true;
+                stage.nonces_scanned = scanned->nonces_scanned;
+                stage.attempts_after = scanned->attempts_since_time_refresh_after;
+                stage.exhausted = scanned->nonce_space_exhausted || scanned->nonces_scanned == 0;
+                stage.filtered_nonces =
+                    scanned->nonces_scanned - static_cast<uint32_t>(scanned->headers.size());
+                stage.window = std::make_unique<MatMulNonceBatchWindow>(std::move(*scanned));
+
+                if (!stage.window->headers.empty()) {
+                    auto futures = SubmitPreparedBatch(stage.window->headers, prepare_inputs);
+                    g_matmul_prefetched_batches.fetch_add(1, std::memory_order_relaxed);
+                    g_matmul_prefetched_inputs.fetch_add(stage.window->headers.size(), std::memory_order_relaxed);
+                    stage.prepared_batch =
+                        std::make_unique<std::vector<matmul::accelerated::PreparedDigestInputs>>(
+                            CollectPreparedBatchFutures(futures));
+                    g_matmul_batched_digest_requests.fetch_add(1, std::memory_order_relaxed);
+                    g_matmul_batched_nonce_attempts.fetch_add(stage.window->headers.size(), std::memory_order_relaxed);
+
+                    auto* headers_ptr = &stage.window->headers;
+                    auto* prepared_ptr = stage.prepared_batch.get();
+                    const uint32_t tbs = transcript_block_size;
+                    const uint32_t nr = noise_rank;
+                    const auto backend_copy = active_backend;
+                    const auto scheme_copy = digest_scheme;
+                    stage.digest_future = std::async(std::launch::async,
+                        [headers_ptr, prepared_ptr, tbs, nr, backend_copy, scheme_copy]() {
+                            return matmul::accelerated::ComputeMatMulDigestPreparedVariableBaseBatchForMining(
+                                *headers_ptr,
+                                tbs,
+                                nr,
+                                *prepared_ptr,
+                                backend_copy,
+                                scheme_copy);
+                        });
+                    stage.digest_submitted = true;
+                }
+                return stage;
+            };
+
+            // Compute the cursor that follows a window (mirrors advance_nonce_window).
+            // ok=false on nonce64 overflow.
+            // Advance a header over a fully-scanned window EXACTLY like the serial
+            // advance_nonce_window: bump nonce64 past the scanned range, set the
+            // attempts-since-refresh counter to the window's *_after value, then
+            // apply MaybeRefreshMinerHeaderTime so the NEXT window's seed derivation
+            // sees the same (possibly refreshed) nTime serial would. ok=false on
+            // nonce64 overflow. attempts_after_io is read+written in lockstep.
+            auto cursor_after = [&](const CBlockHeader& from,
+                                    uint32_t nonces_scanned,
+                                    uint32_t window_attempts_after,
+                                    uint32_t& attempts_after_io,
+                                    bool& ok) -> CBlockHeader {
+                CBlockHeader next = from;
+                ok = true;
+                if (nonces_scanned == 0) return next;
+                const uint64_t advanced = from.nNonce64 + nonces_scanned - 1;
+                if (advanced < from.nNonce64 || advanced == std::numeric_limits<uint64_t>::max()) {
+                    ok = false;
+                    return next;
+                }
+                next.nNonce64 = advanced + 1;
+                next.nNonce = static_cast<uint32_t>(next.nNonce64);
+                attempts_after_io = window_attempts_after;
+                MaybeRefreshMinerHeaderTime(
+                    next,
+                    attempts_after_io,
+                    header_time_refresh_interval,
+                    params.fPowAllowMinDifficultyBlocks);
+                return next;
+            };
+
+            bool overlap_returned = false;
+            bool overlap_result = false;
+
+            // The pipeline cursor used to BUILD the next window runs ahead of the
+            // real `block`. The real `block` is only advanced when a window finishes
+            // without solving (so a fallthrough to the serial loop resumes correctly).
+            CBlockHeader build_cursor = block;
+            uint32_t build_attempts_since_refresh = attempts_since_time_refresh;
+            uint64_t build_budget = max_tries;
+
+            NonceSeededStage current = build_prepare_submit(build_cursor, build_budget, build_attempts_since_refresh);
+
+            while (current.valid && max_tries > 0) {
+                if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+                    if (current.digest_submitted && current.digest_future.valid()) current.digest_future.get();
+                    LogDebug(BCLog::MINING, "SolveMatMulNonceSeeded: abort flag set (overlap), stopping with %lu tries remaining\n",
+                             static_cast<unsigned long>(max_tries));
+                    RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+                    overlap_returned = true; overlap_result = false; break;
+                }
+
+                const uint32_t cur_filtered = current.filtered_nonces;
+                const uint32_t cur_scanned = current.nonces_scanned;
+                const uint32_t cur_attempts_after = current.attempts_after;
+                const bool cur_exhausted = current.exhausted;
+                const bool cur_has_headers = current.window && !current.window->headers.empty();
+
+                if (!cur_has_headers) {
+                    if (cur_exhausted) break; // post-loop handling
+                    max_tries -= cur_filtered;
+                    bool ok = true;
+                    uint32_t next_attempts = attempts_since_time_refresh;
+                    CBlockHeader nxt = cursor_after(block, cur_scanned, cur_attempts_after, next_attempts, ok);
+                    if (!ok) break;
+                    block = nxt;
+                    attempts_since_time_refresh = next_attempts;
+                    // Rebuild from the advanced real cursor (no candidates this window).
+                    build_cursor = block;
+                    build_attempts_since_refresh = attempts_since_time_refresh;
+                    build_budget = max_tries;
+                    current = build_prepare_submit(build_cursor, build_budget, build_attempts_since_refresh);
+                    continue;
+                }
+
+                max_tries -= cur_filtered;
+
+                // OVERLAP: digest(current) is running on its async thread. Compute the
+                // next build cursor and BUILD+PREPARE+SUBMIT window N+1 NOW, on this
+                // thread, so its GPU prehash scan and CPU prepare run concurrently with
+                // digest(current). Exactly one digest stays in flight because we have
+                // not yet awaited current; we await it right after kicking off N+1.
+                bool next_ok = true;
+                uint32_t next_build_attempts = build_attempts_since_refresh;
+                CBlockHeader next_cursor = cursor_after(build_cursor, cur_scanned, cur_attempts_after, next_build_attempts, next_ok);
+                NonceSeededStage next_stage;
+                const uint64_t remaining_after_current =
+                    max_tries > current.window->headers.size()
+                        ? max_tries - current.window->headers.size()
+                        : 0;
+                if (next_ok && remaining_after_current > 0 &&
+                    gpu_nonce_seed_scan_available &&
+                    !(abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed))) {
+                    next_stage = build_prepare_submit(next_cursor, remaining_after_current, next_build_attempts);
+                }
+
+                // Now await + confirm the current window.
+                std::vector<matmul::accelerated::DigestResult> digest_batch =
+                    current.digest_submitted ? current.digest_future.get()
+                                             : std::vector<matmul::accelerated::DigestResult>{};
+                if (digest_batch.size() != current.window->headers.size()) {
+                    if (next_stage.digest_submitted && next_stage.digest_future.valid()) next_stage.digest_future.get();
+                    RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+                    overlap_returned = true; overlap_result = false; break;
+                }
+
+                bool stop = false;
+                for (size_t i = 0; i < current.window->headers.size(); ++i) {
+                    if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+                        if (next_stage.digest_submitted && next_stage.digest_future.valid()) next_stage.digest_future.get();
+                        LogDebug(BCLog::MINING, "SolveMatMulNonceSeeded: abort flag set inside overlap window, stopping with %lu tries remaining\n",
+                                 static_cast<unsigned long>(max_tries));
+                        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+                        overlap_returned = true; overlap_result = false; stop = true; break;
+                    }
+                    uint256 accepted_digest;
+                    const DigestCandidateOutcome outcome = evaluate_batched_digest_result(
+                        current.window->headers[i],
+                        (*current.prepared_batch)[i],
+                        digest_batch[i],
+                        accepted_digest);
+                    if (outcome == DigestCandidateOutcome::ERROR) {
+                        if (next_stage.digest_submitted && next_stage.digest_future.valid()) next_stage.digest_future.get();
+                        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+                        overlap_returned = true; overlap_result = false; stop = true; break;
+                    }
+                    --max_tries;
+                    if (outcome == DigestCandidateOutcome::SOLVED) {
+                        // Earliest unprocessed window solved first -> serial-identical.
+                        if (next_stage.digest_submitted && next_stage.digest_future.valid()) next_stage.digest_future.get();
+                        block = current.window->headers[i];
+                        block.matmul_digest = accepted_digest;
+                        RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - solve_start);
+                        overlap_returned = true; overlap_result = true; stop = true; break;
+                    }
+                }
+                if (stop) break;
+
+                // No solve: advance the REAL block cursor over current (serial-identical),
+                // then hand the already-prepared next_stage to the next iteration.
+                bool ok = true;
+                uint32_t real_next_attempts = attempts_since_time_refresh;
+                CBlockHeader nxt = cursor_after(block, cur_scanned, cur_attempts_after, real_next_attempts, ok);
+                if (!ok) {
+                    if (next_stage.digest_submitted && next_stage.digest_future.valid()) next_stage.digest_future.get();
+                    break;
+                }
+                block = nxt;
+                attempts_since_time_refresh = real_next_attempts;
+
+                // build_cursor/next_cursor were advanced+refreshed in lockstep above,
+                // so they equal the freshly-advanced real block (same nonce + nTime).
+                build_cursor = next_cursor;
+                build_attempts_since_refresh = next_build_attempts;
+                build_budget = remaining_after_current;
+                current = std::move(next_stage);
+            }
+
+            if (current.digest_submitted && current.digest_future.valid()) {
+                current.digest_future.get();
+            }
+
+            if (overlap_returned) {
+                return overlap_result;
+            }
+            // Drained without solving: fall through to serial loop / exhaustion.
+        }
+
         while (max_tries > 0) {
             if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
                 LogDebug(BCLog::MINING, "SolveMatMulNonceSeeded: abort flag set, stopping with %lu tries remaining\n",
@@ -3852,10 +4155,25 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
             g_matmul_parallel_solver_enabled.store(parallel_solver_enabled, std::memory_order_relaxed);
             g_matmul_parallel_solver_threads.store(
                 parallel_solver_enabled ? solver_threads : 1U, std::memory_order_relaxed);
-            g_matmul_async_prepare_enabled.store(false, std::memory_order_relaxed);
+            // v3 pipeline overlap (pure scheduling; PoW math/seed/parent_mtp untouched).
+            // The legacy serial nonce-seeded path hard-disabled the prepare/confirm
+            // overlap. Resolve the same env knobs the v2 path honours so the GPU stops
+            // idling during CPU prepare/confirm, while defaulting to the OLD serial
+            // behaviour when BTX_MATMUL_PIPELINE_ASYNC is unset (safe A/B default).
+            const bool nonce_seed_async_overlap =
+                ShouldEnableNonceSeededPipelineOverlap(active_backend, nonce_seed_batch_size);
+            const uint32_t nonce_seed_prefetch_depth = nonce_seed_async_overlap
+                ? std::max<uint32_t>(1U, ResolvePreparePrefetchDepth(active_backend, nonce_seed_batch_size))
+                : 1U;
+            g_matmul_async_prepare_enabled.store(nonce_seed_async_overlap, std::memory_order_relaxed);
             g_matmul_cpu_confirm_candidates.store(false, std::memory_order_relaxed);
-            g_matmul_prefetch_depth.store(1U, std::memory_order_relaxed);
+            g_matmul_prefetch_depth.store(nonce_seed_prefetch_depth, std::memory_order_relaxed);
             g_matmul_batch_size.store(nonce_seed_batch_size, std::memory_order_relaxed);
+            if (nonce_seed_async_overlap) {
+                // Spin up the prepare worker pool ahead of the first window so the
+                // first overlap iteration does not pay thread-creation latency.
+                GetMatMulPrepareExecutor();
+            }
             if (parallel_solver_enabled) {
                 return SolveMatMulParallel(
                     block, params, max_tries, block_height, abort_flag,

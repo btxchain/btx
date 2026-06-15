@@ -1,0 +1,18 @@
+# Add to src/CMakeLists.txt immediately after the
+# install_binary_component(btx-matmul-solve-bench) line (inside the BUILD_UTIL block):
+
+  add_executable(btx-matmul-overlap-ab btx-matmul-overlap-ab.cpp)
+  target_include_directories(btx-matmul-overlap-ab PRIVATE
+    $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
+  )
+  target_link_libraries(btx-matmul-overlap-ab
+    core_interface
+  )
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(btx-matmul-overlap-ab ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(btx-matmul-overlap-ab
+      bitcoin_shielded
+    )
+  endif()
+  install_binary_component(btx-matmul-overlap-ab)

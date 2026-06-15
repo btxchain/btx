@@ -1,0 +1,7 @@
+Test project /out
+    Start 69: matmul_accelerated_solver_tests
+1/1 Test #69: matmul_accelerated_solver_tests ...   Passed    0.77 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.77 sec
