@@ -928,48 +928,76 @@ transaction the mining software may add to the block. (default:
 .HP
 \fB\-miningchainguard\fR
 .IP
-Pause local mining work when outbound peers indicate the active tip
-diverged too far from the majority peer view (default: 1 on
-mainnet, 0 on test chains)
+Report local mining stale\-tip and reorg\-hysteresis risk using outbound
+peer signals, and request peer recovery when unhealthy; this
+guard no longer blocks getblocktemplate or local block generation
+(default: 1 on mainnet, 0 on test chains)
+.HP
+\fB\-miningchainguarddefaultmesh\fR
+.IP
+When local mining chain_guard is unhealthy, periodically enroll the
+built\-in public mining peer mesh into the runtime addnode set so
+daemon\-only mining nodes converge without an external supervisor
+(default: 1 on mainnet when \fB\-miningchainguard\fR is enabled)
+.HP
+\fB\-miningchainguarddeferredreorgwatchseconds=\fR<n>
+.IP
+Seconds to keep local mining chain_guard in warning state after reorg
+hysteresis defers a competing branch and no later reorg/rejection
+has resolved it; 0 disables this warning (default: 900)
 .HP
 \fB\-miningchainguardmaxmediangap=<n>\fR
 .IP
 Maximum block gap between the local tip and the median outbound peer tip
-before local mining chain_guard reports local-behind or local-ahead
-warnings (default: 2)
+before local\-behind or local\-ahead warnings trigger (default: 2)
+.HP
+\fB\-miningchainguardmeshrefreshseconds=\fR<n>
+.IP
+Minimum seconds between automatic default mining peer mesh enrollment
+attempts while local mining chain_guard is unhealthy; 0 disables
+daemon\-side mesh refresh (default: 60)
+.HP
+\fB\-miningchainguardminneartippeers=\fR<n>
+.IP
+Outbound peers that should be within \fB\-miningchainguardneartipwindow\fR
+blocks of the local tip before local mining chain_guard reports
+healthy (default: 2)
 .HP
 \fB\-miningchainguardminpeers=<n>\fR
 .IP
-Minimum outbound peers with usable tip heights required before local
-mining continues when \-miningchainguard is enabled (default: 2)
+Outbound peers with usable tip heights expected before local mining
+chain_guard reports healthy (default: 3)
+.HP
+\fB\-miningchainguardneartipwindow=\fR<n>
+.IP
+Block window used to count near\-tip outbound peers for local mining
+chain\-alignment status (default: 2)
+.HP
+\fB\-miningchainguardstalepeerseconds=\fR<n>
+.IP
+Seconds after which lagging peers without fresh block signals are
+ignored by local mining chain\-alignment status (default: 120)
 .HP
 \fB\-miningmaxheaderlag=<n>\fR
 .IP
-Require validated tip to be within <n> blocks of best\-known header
-before serving getblocktemplate work. This helps reduce
-stale\-template orphan risk when headers outpace block validation.
-Defaults to 8 on mainnet and 0 on other chains. Set to 0 to
-disable.
+Best\-header lag advisory threshold reported in mining diagnostics;
+header lag no longer blocks getblocktemplate by itself (default:
+3 on mainnet and 0 on other chains).
 .HP
 \fB\-miningmaxpeersyncheightlag=<n>\fR
 .IP
-Maximum allowed sync\-height lag (in blocks) for peers counted by
-\-miningminsyncedoutboundpeers. Defaults to 2 on mainnet and 0 on
-other chains.
+Peer sync\-height lag advisory threshold reported in mining diagnostics
+(default: 2 on mainnet and 0 on other chains).
 .HP
 \fB\-miningminoutboundpeers=<n>\fR
 .IP
-Require at least <n> outbound peers before serving getblocktemplate
-work. This helps reduce orphan/stale risk from isolated mining
-topologies. Defaults to 2 on mainnet and 0 on other chains. Set
-to 0 to disable.
+Outbound peer count advisory threshold reported in mining diagnostics
+(default: 2 on mainnet and 0 on other chains).
 .HP
 \fB\-miningminsyncedoutboundpeers=<n>\fR
 .IP
-Require at least <n> outbound peers to report sync height near our
-active tip before serving getblocktemplate work. This helps
-reduce stale/forked mining when connected peers lag. Defaults to
-1 on mainnet and 0 on other chains. Set to 0 to disable.
+Synced outbound peer advisory threshold reported in mining diagnostics
+(default: 1 on mainnet and 0 on other chains).
 .PP
 RPC server options:
 .HP
