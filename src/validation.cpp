@@ -14817,6 +14817,18 @@ void ChainstateManager::SetShieldedAnchorRootsForTest(const std::vector<uint256>
     }
 }
 
+bool ChainstateManager::DropShieldedCommitmentIndexForTest()
+{
+    AssertLockHeld(::cs_main);
+    DataStream stream;
+    stream << m_shielded_merkle_tree;
+    shielded::ShieldedMerkleTree frontier_only{
+        shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+    stream >> frontier_only;
+    m_shielded_merkle_tree = std::move(frontier_only);
+    return m_shielded_merkle_tree.Size() == 0 || !m_shielded_merkle_tree.HasCommitmentIndex();
+}
+
 bool ChainstateManager::DetectSnapshotChainstate()
 {
     assert(!m_snapshot_chainstate);

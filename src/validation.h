@@ -1651,6 +1651,9 @@ public:
     /** Test/diagnostic hook to replace the in-memory recent anchor window. */
     void SetShieldedAnchorRootsForTest(const std::vector<uint256>& roots) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Test hook to force DisconnectBlock's shielded full-rebuild fallback. */
+    [[nodiscard]] bool DropShieldedCommitmentIndexForTest() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Iterate over persisted nullifiers in on-disk order. */
     template <typename Fn>
     bool ForEachShieldedNullifier(Fn&& fn) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)

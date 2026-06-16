@@ -588,6 +588,72 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_rebuild_preserves_retired_identifiers, Rec
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(recovery_exit_disconnect_rebuild_fallback_unwinds_retired_identifiers, RecoveryExitRebuildSetup)
+{
+    const ReVectors& v = Vectors();
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+
+    // Build a non-empty shielded tree before the recovery-exit block. Dropping
+    // its commitment index below forces DisconnectBlock away from fast truncate
+    // and into the full shielded-state rebuild fallback.
+    while (WITH_LOCK(cs_main, return chainman.ActiveChain().Height()) < kRebuildSunsetHeight - 2) {
+        CreateAndProcessBlock({}, CScript() << OP_TRUE, /*chainstate=*/nullptr, /*use_mempool=*/false);
+    }
+
+    std::vector<CTransactionRef> funding_txs;
+    funding_txs.reserve(kRebuildFundingCount);
+    for (int i = 0; i < kRebuildFundingCount; ++i) {
+        funding_txs.push_back(m_coinbase_txns.at(i));
+    }
+    CAmount seeded_pool{0};
+    for (const auto& funding_tx : funding_txs) {
+        seeded_pool += funding_tx->vout[0].nValue;
+    }
+    seeded_pool -= kRecoverFee;
+    BOOST_REQUIRE_GT(seeded_pool, v.note.value);
+
+    const CMutableTransaction shield_tx = BuildLegacyShieldOnlyTx(*this, funding_txs, kRecoverFee);
+    CreateAndProcessBlock({shield_tx}, CScript() << OP_TRUE, /*chainstate=*/nullptr, /*use_mempool=*/false);
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveChain().Height(), kRebuildSunsetHeight - 1);
+        BOOST_REQUIRE_EQUAL(chainman.GetShieldedMerkleTree().Size(), 1U);
+        BOOST_REQUIRE(chainman.GetShieldedMerkleTree().HasCommitmentIndex());
+        BOOST_REQUIRE_EQUAL(chainman.GetShieldedPoolBalance(), seeded_pool);
+    }
+
+    const CMutableTransaction rtx = BuildRecoveryExitTx();
+    const CBlock recovery_block = CreateAndProcessBlock({rtx},
+                                                        CScript() << OP_TRUE,
+                                                        /*chainstate=*/nullptr,
+                                                        /*use_mempool=*/false);
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveChain().Height(), kRebuildSunsetHeight);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveChain().Tip()->GetBlockHash(), recovery_block.GetHash());
+        BOOST_REQUIRE_EQUAL(chainman.GetShieldedPoolBalance(), seeded_pool - v.note.value);
+        BOOST_REQUIRE(chainman.IsShieldedNullifierSpent(v.nullifier));
+        BOOST_REQUIRE(chainman.IsShieldedRecoveryExitCommitmentRetired(v.cm));
+        BOOST_REQUIRE(chainman.DropShieldedCommitmentIndexForTest());
+        BOOST_REQUIRE(!chainman.GetShieldedMerkleTree().HasCommitmentIndex());
+    }
+
+    BlockValidationState invalidate_state;
+    CBlockIndex* recovery_index = WITH_LOCK(cs_main,
+        return chainman.m_blockman.LookupBlockIndex(recovery_block.GetHash()));
+    BOOST_REQUIRE(recovery_index != nullptr);
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(invalidate_state, recovery_index));
+    BOOST_REQUIRE(invalidate_state.IsValid());
+
+    LOCK(cs_main);
+    BOOST_CHECK_EQUAL(chainman.ActiveChain().Height(), kRebuildSunsetHeight - 1);
+    BOOST_CHECK_EQUAL(chainman.GetShieldedMerkleTree().Size(), 1U);
+    BOOST_CHECK(chainman.GetShieldedMerkleTree().HasCommitmentIndex());
+    BOOST_CHECK_EQUAL(chainman.GetShieldedPoolBalance(), seeded_pool);
+    BOOST_CHECK(!chainman.IsShieldedNullifierSpent(v.nullifier));
+    BOOST_CHECK(!chainman.IsShieldedRecoveryExitCommitmentRetired(v.cm));
+}
+
 BOOST_FIXTURE_TEST_CASE(recovery_exit_mempool_cleanup_evicts_spent_nullifier, RecoveryExitChainSetup)
 {
     const ReVectors& v = Vectors();
