@@ -76,7 +76,7 @@ BTX is supported on Linux, macOS 13+, and Windows 10+.
   recovery-exit or over-cap shielded branches are less likely to remain in the
   mining peer set.
 
-- The default emergency reorg-protection profile now reports practical local
+- The default reorg-protection profile now reports practical local
   finality at 72 confirmations. This is an operator safety signal, not a
   consensus finality rule. Explicit `-reorghysteresisdepth=0` now matches the
   documented behavior and protects every active-chain rewrite instead of
