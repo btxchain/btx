@@ -1174,10 +1174,7 @@ public:
         }
         if (!assemble_options.bypass_chain_guard) {
             const auto chain_guard_status = GetMiningChainGuardStatus(m_node);
-            if (ShouldPauseMiningByChainGuard(chain_guard_status)) {
-                throw std::runtime_error(
-                    "mining paused by chain guard: " + DescribeMiningChainGuardStatus(chain_guard_status));
-            }
+            MaybeRequestMiningChainGuardRecovery(chain_guard_status, m_node);
         }
         return std::make_unique<BlockTemplateImpl>(BlockAssembler{chainman().ActiveChainstate(), context()->mempool.get(), assemble_options, m_node}.CreateNewBlock(), m_node);
     }

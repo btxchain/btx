@@ -184,6 +184,12 @@ private:
     uint64_t nBlockShieldedAccountRegistryAppends{0};
     /** Projected shielded pool balance after transactions selected for this block. */
     ShieldedPoolBalance m_blockShieldedPoolBalance;
+    /** Mempool positive shielded-pool egress seen while assembling this template. */
+    CAmount m_pendingMempoolShieldedEgress{0};
+    /** Remaining shielded-pool egress capacity for this template height. */
+    CAmount m_remainingShieldedExitCapacity{0};
+    /** Whether positive shielded-pool egress txs should be skipped for this template. */
+    bool m_filterShieldedExitTxsForVelocity{false};
     /** Shielded account-registry entries at the template base tip. */
     uint64_t m_baseShieldedAccountRegistryEntries{0};
     /** Shielded state already retired or created by transactions selected into the template. */

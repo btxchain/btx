@@ -4027,7 +4027,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     const auto default_profile = kernel::GetReorgProtectionProfileSettings(default_reorg_opts.reorg_protection_profile);
     BOOST_CHECK_EQUAL(default_profile.warn_depth, 3U);
     BOOST_CHECK_EQUAL(default_profile.park_depth, kernel::REORG_PROTECTION_DEPTH_DISABLED);
-    BOOST_CHECK_EQUAL(default_profile.finality_depth, 12U);
+    BOOST_CHECK_EQUAL(default_profile.finality_depth, 72U);
     BOOST_CHECK_EQUAL(default_profile.hysteresis_depth, 0U);
     BOOST_CHECK_EQUAL(default_profile.hysteresis_work_margin, 2U);
 
@@ -4074,7 +4074,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     const auto emergency_profile = kernel::GetReorgProtectionProfileSettings(emergency_opts.reorg_protection_profile);
     BOOST_CHECK_EQUAL(emergency_profile.warn_depth, 3U);
     BOOST_CHECK_EQUAL(emergency_profile.park_depth, kernel::REORG_PROTECTION_DEPTH_DISABLED);
-    BOOST_CHECK_EQUAL(emergency_profile.finality_depth, 12U);
+    BOOST_CHECK_EQUAL(emergency_profile.finality_depth, 72U);
     BOOST_CHECK_EQUAL(emergency_profile.hysteresis_depth, 0U);
     BOOST_CHECK_EQUAL(emergency_profile.hysteresis_work_margin, 2U);
 
@@ -4114,7 +4114,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_REQUIRE(get_valid_opts({"-reorghysteresisdepth=0"}).reorg_hysteresis_depth.has_value());
     BOOST_CHECK_EQUAL(
         *get_valid_opts({"-reorghysteresisdepth=0"}).reorg_hysteresis_depth,
-        kernel::REORG_PROTECTION_DEPTH_DISABLED);
+        0U);
     BOOST_CHECK(!get_opts({"-reorghysteresisdepth=-1"}));
     BOOST_CHECK(get_valid_opts({"-reorghysteresisworkmargin=0"}).reorg_hysteresis_work_margin.has_value());
     BOOST_CHECK(!get_opts({"-reorghysteresisworkmargin=-1"}));

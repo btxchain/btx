@@ -9,6 +9,7 @@ trap 'rm -rf "${TMPDIR}"' EXIT
 # cases opt back into Darwin/arm64 when they are testing those defaults.
 export BTX_MINING_HOST_OS_FOR_TEST=Linux
 export BTX_MINING_HOST_ARCH_FOR_TEST=x86_64
+export BTX_MINING_USE_DEFAULT_BOOTSTRAP_PEERS=0
 
 cleanup_pidfile() {
   local pidfile="$1"
@@ -88,7 +89,7 @@ case "${cmd}" in
     printf '%s\n' "${count}" > "${STATE_DIR}/mininginfo-count"
     if (( count <= 2 )); then
       cat <<JSON
-{"chain_guard":{"healthy":false,"should_pause_mining":true,"reason":"local_tip_ahead_of_peer_median","local_tip":100,"median_peer_tip":95,"peer_count":4,"near_tip_peers":1}}
+{"chain_guard":{"healthy":false,"should_pause_mining":false,"reason":"local_tip_ahead_of_peer_median","local_tip":100,"median_peer_tip":95,"peer_count":4,"near_tip_peers":1}}
 JSON
     else
       cat <<JSON
@@ -140,10 +141,17 @@ BTX_MINING_MAX_LOOPS=6 \
   --address-file="${TMPDIR}/address.txt" \
   --sleep=0 >/dev/null 2>&1
 
-grep -q "restarting-node reason=chain_guard_stalled_local_tip_ahead_of_peer_median" "${RESULTS_DIR}/live-mining-health.log"
-grep -q -- '-maxconnections=32' "${STATE_DIR}/events.log"
-grep -q -- "-pid=${NODE_PIDFILE}" "${STATE_DIR}/events.log"
+grep -q "chain-guard-advisory reason=local_tip_ahead_of_peer_median" "${RESULTS_DIR}/live-mining-health.log"
 grep -q '\["deadbeef"\]' "${RESULTS_DIR}/live-mining-loop.log"
+if grep -q "restarting-node reason=chain_guard" "${RESULTS_DIR}/live-mining-health.log"; then
+  echo "chain guard advisory should not restart the node" >&2
+  exit 1
+fi
+if grep -q '^stop$' "${STATE_DIR}/events.log"; then
+  echo "chain guard advisory should not stop the supervised node" >&2
+  exit 1
+fi
+[[ "$(grep -c '^start ' "${STATE_DIR}/events.log")" -eq 2 ]]
 kill -0 "${unrelated_pid}" >/dev/null 2>&1
 
 cleanup_pidfile "${NODE_PIDFILE}"
@@ -178,7 +186,7 @@ case "${cmd}" in
     count=$((count + 1))
     printf '%s\n' "${count}" > "${STATE_DIR}/sync-count"
     cat <<JSON
-{"chain_guard":{"healthy":false,"should_pause_mining":true,"reason":"local_tip_behind_peer_median","local_tip":$((100 + count)),"median_peer_tip":120,"peer_count":2,"near_tip_peers":0}}
+{"chain_guard":{"healthy":false,"should_pause_mining":false,"reason":"local_tip_behind_peer_median","local_tip":$((100 + count)),"median_peer_tip":120,"peer_count":2,"near_tip_peers":0}}
 JSON
     ;;
   *)
@@ -473,7 +481,7 @@ case "${cmd}" in
     ;;
   getmininginfo)
     cat <<JSON
-{"chain_guard":{"healthy":false,"should_pause_mining":true,"reason":"insufficient_peer_consensus","local_tip":100,"median_peer_tip":-1,"peer_count":0,"near_tip_peers":0}}
+{"chain_guard":{"healthy":false,"should_pause_mining":false,"reason":"insufficient_peer_consensus","local_tip":100,"median_peer_tip":-1,"peer_count":0,"near_tip_peers":0}}
 JSON
     ;;
   addnode)
@@ -511,6 +519,55 @@ grep -q "addnode node-a.example:19335 onetry" "${STATE_DIR}/addnode.log"
 grep -q "addnode node-b.example:19335 onetry" "${STATE_DIR}/addnode.log"
 grep -q "setnetworkactive true" "${STATE_DIR}/setnetworkactive.log"
 
+STATE_DIR="${TMPDIR}/state-bootstrap-disabled"
+RESULTS_DIR="${TMPDIR}/results-bootstrap-disabled"
+mkdir -p "${STATE_DIR}" "${RESULTS_DIR}"
+printf '%s node-a.example:19335 previous_failure\n' "$(($(date +%s) + 3600))" > "${RESULTS_DIR}/disabled-peer-mesh.txt"
+
+STATE_DIR="${STATE_DIR}" \
+BTX_MINING_CLI="${TMPDIR}/fake-cli-bootstrap" \
+BTX_MINING_BOOTSTRAP_ADDNODES="node-a.example:19335,node-b.example:19335" \
+BTX_MINING_PEER_REMEDIATION_THRESHOLD=2 \
+BTX_MINING_PEER_REMEDIATION_COOLDOWN_SECS=0 \
+BTX_MINING_SYNC_STALL_RESTART_SECS=999 \
+BTX_MINING_HEALTH_RESTART_THRESHOLD=99 \
+BTX_MINING_STARTUP_GRACE_SECS=0 \
+BTX_MINING_MAX_LOOPS=4 \
+"${SCRIPT_DIR}/live-mining-loop.sh" \
+  --results-dir="${RESULTS_DIR}" \
+  --address-file="${TMPDIR}/address.txt" \
+  --sleep=0 >/dev/null 2>&1
+
+grep -q "peer-bootstrap-refresh reason=insufficient_peer_consensus attempted=1 succeeded=1 failed=0" "${RESULTS_DIR}/live-mining-health.log"
+if grep -q "addnode node-a.example:19335 onetry" "${STATE_DIR}/addnode.log"; then
+  echo "disabled mesh peer should not be retried during bootstrap refresh" >&2
+  exit 1
+fi
+grep -q "addnode node-b.example:19335 onetry" "${STATE_DIR}/addnode.log"
+
+STATE_DIR="${TMPDIR}/state-default-bootstrap"
+RESULTS_DIR="${TMPDIR}/results-default-bootstrap"
+mkdir -p "${STATE_DIR}" "${RESULTS_DIR}"
+
+STATE_DIR="${STATE_DIR}" \
+BTX_MINING_CLI="${TMPDIR}/fake-cli-bootstrap" \
+BTX_MINING_USE_DEFAULT_BOOTSTRAP_PEERS=1 \
+BTX_MINING_PEER_REMEDIATION_THRESHOLD=2 \
+BTX_MINING_PEER_REMEDIATION_COOLDOWN_SECS=0 \
+BTX_MINING_SYNC_STALL_RESTART_SECS=999 \
+BTX_MINING_HEALTH_RESTART_THRESHOLD=99 \
+BTX_MINING_STARTUP_GRACE_SECS=0 \
+BTX_MINING_MAX_LOOPS=4 \
+"${SCRIPT_DIR}/live-mining-loop.sh" \
+  --results-dir="${RESULTS_DIR}" \
+  --address-file="${TMPDIR}/address.txt" \
+  --sleep=0 >/dev/null 2>&1
+
+grep -q "peer-bootstrap-refresh reason=insufficient_peer_consensus attempted=3 succeeded=3 failed=0" "${RESULTS_DIR}/live-mining-health.log"
+grep -q "addnode node.btx.dev:19335 onetry" "${STATE_DIR}/addnode.log"
+grep -q "addnode node.btxchain.org:19335 onetry" "${STATE_DIR}/addnode.log"
+grep -q "addnode node.btx.tools:19335 onetry" "${STATE_DIR}/addnode.log"
+
 STATE_DIR="${TMPDIR}/state-cached-peers"
 RESULTS_DIR="${TMPDIR}/results-cached-peers"
 mkdir -p "${STATE_DIR}" "${RESULTS_DIR}"
@@ -545,7 +602,7 @@ case "${cmd}" in
 JSON
     else
       cat <<JSON
-{"chain_guard":{"healthy":false,"should_pause_mining":true,"reason":"insufficient_peer_consensus","local_tip":100,"median_peer_tip":-1,"peer_count":0,"near_tip_peers":0}}
+{"chain_guard":{"healthy":false,"should_pause_mining":false,"reason":"insufficient_peer_consensus","local_tip":100,"median_peer_tip":-1,"peer_count":0,"near_tip_peers":0}}
 JSON
     fi
     ;;
@@ -685,7 +742,7 @@ case "${cmd}" in
     ;;
   getmininginfo)
     cat <<JSON
-{"chain_guard":{"healthy":false,"should_pause_mining":true,"reason":"insufficient_peer_consensus","local_tip":100,"median_peer_tip":-1,"peer_count":0,"near_tip_peers":0}}
+{"chain_guard":{"healthy":false,"should_pause_mining":false,"reason":"insufficient_peer_consensus","local_tip":100,"median_peer_tip":-1,"peer_count":0,"near_tip_peers":0}}
 JSON
     ;;
   getpeerinfo)
@@ -769,8 +826,13 @@ BTX_MINING_MAX_LOOPS=5 \
   --sleep=0 >/dev/null 2>&1
 
 grep -q "peer-stale-disconnect reason=insufficient_peer_consensus attempted=1 disconnected=1 failed=0" "${RESULTS_DIR}/live-mining-health.log"
+grep -q "stale-a.example:19335 stale_manual_peer" "${RESULTS_DIR}/disabled-peer-mesh.txt"
 grep -q "peer-bootstrap-refresh reason=insufficient_peer_consensus attempted=2 succeeded=2 failed=0" "${RESULTS_DIR}/live-mining-health.log"
-grep -q "restarting-node reason=chain_guard_insufficient_peer_consensus" "${RESULTS_DIR}/live-mining-health.log"
+grep -q "chain-guard-advisory reason=insufficient_peer_consensus" "${RESULTS_DIR}/live-mining-health.log"
+if grep -q "restarting-node reason=chain_guard" "${RESULTS_DIR}/live-mining-health.log"; then
+  echo "peer remediation should not restart the node for chain guard advisory state" >&2
+  exit 1
+fi
 grep -q "disconnectnode stale-a.example:19335" "${STATE_DIR}/disconnect.log"
 grep -q "addnode node-a.example:19335 onetry" "${STATE_DIR}/addnode.log"
 grep -q "setnetworkactive true" "${STATE_DIR}/setnetworkactive.log"

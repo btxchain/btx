@@ -258,6 +258,36 @@ BOOST_AUTO_TEST_CASE(regtest_shielded_c002_activation_height_rejects_negative)
     BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
 }
 
+BOOST_AUTO_TEST_CASE(regtest_shielded_v2_send_zero_output_exit_activation_height_default)
+{
+    ArgsManager args;
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedV2SendZeroOutputExitActivationHeight,
+                      std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!params->GetConsensus().IsShieldedV2SendZeroOutputExitActive(0));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_v2_send_zero_output_exit_activation_height_override)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedv2sendzerooutputexitactivationheight", "142");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedV2SendZeroOutputExitActivationHeight, 142);
+    BOOST_CHECK(!params->GetConsensus().IsShieldedV2SendZeroOutputExitActive(141));
+    BOOST_CHECK(params->GetConsensus().IsShieldedV2SendZeroOutputExitActive(142));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_v2_send_zero_output_exit_activation_height_rejects_negative)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedv2sendzerooutputexitactivationheight", "-1");
+    BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+}
+
 BOOST_AUTO_TEST_CASE(slh_dsa_fips205_mempool_policy_uses_next_block_height)
 {
     ArgsManager args;
@@ -380,7 +410,7 @@ BOOST_AUTO_TEST_CASE(ds3_unpinned_shielded_snapshot_fails_closed_by_default)
     BOOST_CHECK_EQUAL(DEFAULT_ALLOW_UNPINNED_SHIELDED_SNAPSHOT, false);
 }
 
-BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_no_gap)
+BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_and_expires_at_v03212_height)
 {
     // DS-4 hardening: the unshield velocity cap must activate no later than the sunset height, so the
     // transparent-outflow exit (the ONLY permitted shielded operation at/after the sunset) is rate
@@ -400,15 +430,16 @@ BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_no_gap)
     BOOST_CHECK(consensus.IsShieldedPoolCreditDisabled(consensus.nShieldedSunsetHeight));
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityActivationHeight,
                       consensus.nShieldedSunsetHeight);
+    BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityEndHeight, 132'000);
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityMinCapHeight, 132'000);
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityMinCap, 10'000 * COIN);
     BOOST_CHECK_EQUAL(consensus.ShieldedUnshieldVelocityMinCapForHeight(131'999), 0);
-    BOOST_CHECK_EQUAL(consensus.ShieldedUnshieldVelocityMinCapForHeight(132'000), 10'000 * COIN);
+    BOOST_CHECK_EQUAL(consensus.ShieldedUnshieldVelocityMinCapForHeight(132'000), 0);
     // At the sunset block the sunset gate and the velocity cap are simultaneously in force.
     BOOST_CHECK(consensus.IsShieldedSunsetActive(consensus.nShieldedSunsetHeight));
     BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(consensus.nShieldedSunsetHeight));
     BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(131'999));
-    BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(132'000));
+    BOOST_CHECK(!consensus.IsShieldedUnshieldVelocityCapActive(132'000));
     // Cap loosened to 50%/day so a large legitimate holder can fully exit in ~1 week while a residual
     // drain is still throttled to half the pool per day. Locks the policy against silent regression.
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityCapBps, 5'000u);

@@ -47,6 +47,8 @@ prune=0
 minimumchainwork=0
 dnsseed=1
 fixedseeds=1
+addnode=node.btx.dev:19335
+addnode=node.btxchain.org:19335
 addnode=node.btx.tools:19335
 addnode=146.190.179.86:19335
 addnode=164.90.246.229:19335
@@ -57,8 +59,9 @@ Notes:
 - `19335` is the BTX mainnet P2P port.
 - `19334` is the BTX mainnet default RPC port.
 - `addnode=` seeds initial peers while preserving broader peer discovery.
-- the current public bootstrap set is `node.btx.tools`, `146.190.179.86`,
-  and `164.90.246.229`
+- the current public DNS bootstrap set is `node.btx.dev`,
+  `node.btxchain.org`, and `node.btx.tools`; direct IP addnodes are optional
+  archive-node hints for controlled troubleshooting
 - `getblocktemplate` enforces an outbound peer floor on mainnet by default
   (`-miningminoutboundpeers=2`) to reduce isolated-mining orphan risk.
   Set `-miningminoutboundpeers=0` only for intentional isolated lab mining.

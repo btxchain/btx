@@ -17,15 +17,20 @@ static constexpr int DEFAULT_MINING_CHAIN_GUARD_MIN_NEAR_TIP_PEERS{2};
 static constexpr int DEFAULT_MINING_CHAIN_GUARD_MAX_MEDIAN_GAP{2};
 static constexpr int DEFAULT_MINING_CHAIN_GUARD_NEAR_TIP_WINDOW{2};
 static constexpr int DEFAULT_MINING_CHAIN_GUARD_STALE_PEER_SECONDS{120};
+static constexpr int DEFAULT_MINING_CHAIN_GUARD_DEFERRED_REORG_WATCH_SECONDS{900};
+static constexpr int DEFAULT_MINING_CHAIN_GUARD_MESH_REFRESH_SECONDS{60};
 
 struct MiningChainGuardOptions {
     bool enabled{false};
     bool explicit_setting{false};
+    bool refresh_default_mesh{true};
     int min_peer_count{DEFAULT_MINING_CHAIN_GUARD_MIN_PEERS};
     int min_near_tip_peers{DEFAULT_MINING_CHAIN_GUARD_MIN_NEAR_TIP_PEERS};
     int max_median_tip_gap{DEFAULT_MINING_CHAIN_GUARD_MAX_MEDIAN_GAP};
     int near_tip_window{DEFAULT_MINING_CHAIN_GUARD_NEAR_TIP_WINDOW};
     int stale_peer_seconds{DEFAULT_MINING_CHAIN_GUARD_STALE_PEER_SECONDS};
+    int deferred_reorg_watch_seconds{DEFAULT_MINING_CHAIN_GUARD_DEFERRED_REORG_WATCH_SECONDS};
+    int mesh_refresh_seconds{DEFAULT_MINING_CHAIN_GUARD_MESH_REFRESH_SECONDS};
 };
 
 struct MiningChainGuardPeerSample {
@@ -49,8 +54,17 @@ struct MiningChainGuardStatus {
     int min_near_tip_peers{DEFAULT_MINING_CHAIN_GUARD_MIN_NEAR_TIP_PEERS};
     int max_median_tip_gap{DEFAULT_MINING_CHAIN_GUARD_MAX_MEDIAN_GAP};
     int near_tip_window{DEFAULT_MINING_CHAIN_GUARD_NEAR_TIP_WINDOW};
+    int deferred_reorg_watch_seconds{DEFAULT_MINING_CHAIN_GUARD_DEFERRED_REORG_WATCH_SECONDS};
+    uint32_t last_deferred_reorg_depth{0};
+    uint32_t last_deferred_required_work_margin{0};
+    int32_t last_deferred_tip_height{0};
+    int32_t last_deferred_fork_height{0};
+    int32_t last_deferred_candidate_height{0};
+    int64_t last_deferred_unix{0};
     std::string reason{"disabled"};
 };
+
+const std::vector<std::string>& DefaultMiningPeerMesh();
 
 MiningChainGuardOptions GetMiningChainGuardOptions(const NodeContext& node);
 
@@ -70,6 +84,7 @@ std::vector<int> FilterMiningChainGuardPeerHeights(
 MiningChainGuardStatus GetMiningChainGuardStatus(const NodeContext& node);
 
 std::string DescribeMiningChainGuardStatus(const MiningChainGuardStatus& status);
+void MaybeRequestMiningChainGuardRecovery(const MiningChainGuardStatus& status, const NodeContext& node);
 bool ShouldPauseMiningByChainGuard(const MiningChainGuardStatus& status);
 const char* GetMiningChainGuardRecommendedAction(const MiningChainGuardStatus& status);
 } // namespace node

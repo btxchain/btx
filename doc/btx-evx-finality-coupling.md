@@ -1,26 +1,28 @@
 # BTX as a credible settlement floor for EVX — finality coupling & reorg hardening
 
-Status: design + staged implementation. This document is the spec for the
-`feat/evx-finality-credibility` work. Consensus-relevant items are **fork-gated and
-default-inactive**; nothing here is hot-deployed to the live chain.
+Status: historical design note. The v0.32.10 btx-node hardening branch supersedes
+the reorg-policy assumptions in this document: default behavior is now shallow
+warning plus fork-choice hysteresis, randomized equal-work tie-breaking is
+default-on, and deep-reorg parking is explicit opt-in only.
 
 ## 1. Why this work exists
 
 EVX (the clearing layer in `../evx`) treats a BTX deposit as **economically final at 6
 confirmations** (`packages/contracts-bridge/.../BTXDepositVerifier.sol`,
-`MIN_CONFIRMATION_DEPTH = 6`) and anchors its own state roots into BTX blocks. But BTX
-consensus legally permits reorgs up to **`nMaxReorgDepth = 144`** deep. So a reorg of depth
-7–144 is consensus-legal on BTX yet would silently invalidate an EVX deposit that already
-minted at 6 confirmations. EVX only *reacts* to such a reorg (emergency accounting); it does
-not prevent it. **That gap — "EVX final at 6" vs "BTX reorgeable to 144" — is the credibility
-problem this work closes.**
+`MIN_CONFIRMATION_DEPTH = 6`) and anchors its own state roots into BTX blocks. The original
+design concern was that old BTX policy used a much deeper local reorg bound, so a reorg deeper
+than 6 confirmations could invalidate an EVX deposit that already minted. The v0.32.10 branch
+does not turn BTX into an EVX-finalized chain; it keeps BTX neutral and adds default-on local
+warning, hysteresis, randomized equal-work tie-breaking, and service-facing settlement-safety
+metadata. EVX and other services must still size confirmation policy to current BTX conditions.
 
 ### Grounding in the live chain (btxd v0.32.3, observed at height ~126,151)
 
 Measured read-only from the running archive node, not assumed:
 
-- **No attack in progress.** `getdifficultyhealth.reorg_protection`: cap **active** since
-  height 61,000, `max_reorg_depth=144`, **`rejected_reorgs=0`**, `deepest_rejected_reorg_depth=0`.
+- **No attack in progress.** Historical `getdifficultyhealth.reorg_protection` showed the
+  legacy local cap active since height 61,000, **`rejected_reorgs=0`**, and
+  `deepest_rejected_reorg_depth=0`.
   Deepest fork across all 306 known chain tips = **3 blocks**; 290/306 forks are single-block
   orphans. Zero `reorg`/`bad-fork` events in debug.log. `chain_guard` healthy. Health score 86/100.
 - **Block timing:** target 90 s; recent 120-block window mean 92 s, p50 68 s, **p90 193 s, p99 328 s**,
@@ -28,7 +30,8 @@ Measured read-only from the running archive node, not assumed:
 - **Hashrate is low: ~1.49 MH/s, difficulty 0.031.** This is the decisive fact: a low-hashrate
   chain is cheap to 51%-attack, so BTX **cannot lean on raw PoW depth for finality credibility**.
   The empirical "deepest fork = 3" is reassuring but is *not a guarantee* against a deliberate,
-  funded attacker who could legally reorg 7–144 deep and reverse a minted EVX deposit.
+  funded attacker who could deeply reorg beyond EVX's confirmation policy and reverse a
+  minted EVX deposit.
 
 **Implication:** there is no active attack, so the correct posture is deliberate, coordinated,
 neutral change — not emergency hot-deploys, and crucially **not** a BTX-side finality mechanism
@@ -43,7 +46,7 @@ with a stake-fallback beacon, so **BTX PoW is never a dependency of EVX safety/l
 feeds only a reward lane and an anti-MEV ordering beacon. Therefore every BTX change here must:
 
 - stay **node-local policy** (a `BlockValidationResult` non-`CONSENSUS` reject), never block on EVX;
-- fall back safely (to the 144 backstop) if any EVX-derived input is stale/absent;
+- fall back safely to BTX-native policy if any EVX-derived input is stale/absent;
 - never make BTX consensus *depend on* EVX state.
 
 ## 3. Live RPC surfaces (verified against the running node — use these exact fields)
@@ -52,7 +55,7 @@ feeds only a reward lane and an anti-MEV ordering beacon. Therefore every BTX ch
   (`enabled, active, max_reorg_depth, rejected_reorgs, deepest_rejected_reorg_depth,
   last_rejected_reorg_depth, last_rejected_*`). Backed by `g_reorg_protection_*` atomics in
   `src/validation.cpp:132-134`, profile built at `src/rpc/mining.cpp:1143`.
-- Peer-tip health: **`getmininginfo` → `chain_guard`** (`healthy, should_pause_mining,
+- Peer-tip health: **`getmininginfo` → `chain_guard`** (`healthy, reason,
   recommended_action, local_tip, median_peer_tip, best_peer_tip, near_tip_peers`),
   `src/node/mining_guard.cpp`, surfaced `src/rpc/mining.cpp:4376`.
 
@@ -62,7 +65,7 @@ The deep-reorg alarm reads these (NOT a new surface) and the host health monitor
 ## 4. The fix set (staged)
 
 ### PR-1 — safe, node-local / policy (no consensus change, no fork)
-1. **Random tie-breaking** (`-randomtiebreak`, default OFF): equal-work ties broken by
+1. **Random tie-breaking** (`-randomtiebreak`, default ON in v0.32.10): equal-work ties broken by
    `Hash(per-node-secret-seed || blockhash)` instead of first-seen `nSequenceId`. Eyal–Sirer
    selfish-mining mitigation (lowers γ toward the ~25% threshold). `nSequenceId` is in-memory
    only and never serialized, so this is **non-consensus** and deploy-safe without a fork.
@@ -87,11 +90,13 @@ The deep-reorg alarm reads these (NOT a new surface) and the host health monitor
    (`src/kernel/chainparams.cpp:177`). Any change to one silently breaks the EVX bridge gate.
 
 ### Architecture decision — BTX stays NEUTRAL; the gap is closed on the EVX side
-Worker #75 found the existing always-on `nMaxReorgDepth=144` refusal is itself the split-prone
-naive hard cap: a >144-block honest partition that both sides extend cannot reconverge (each sees
-the other as a >144 reorg and refuses), even though one is legitimate most-work. #75 converted it
-to **default WARN** (follow most-work + `DEEP_REORG_DETECTED` alarm), hard-refuse now opt-in via
-`-parkdeepreorg=1`. That part is shipped (PR-1) and is fully neutral.
+Worker #75 found that an always-on hard reorg refusal is itself split-prone:
+an honest partition that both sides extend past the local cap cannot reconverge
+(each side sees the other as too deep and refuses), even though one is the
+legitimate most-work chain. The v0.32.10 branch uses **default WARN plus
+hysteresis**: follow most-work only after the extra-work rule is satisfied,
+raise `DEEP_REORG_DETECTED`, and keep hard-refuse parking opt-in via
+`-parkdeepreorg=1`.
 
 An EVX-anchored finality floor — having BTX refuse reorgs below an EVX-BFT-finalized height fed
 in via a `setfinalityanchor` RPC — was prototyped (merged as #246) and then **REVERTED**, because
@@ -111,22 +116,24 @@ So BTX correctly has **no hard finality floor** beyond its existing, non-EVX mac
 
 ### How BTX is a credible finality base for EVX — with ZERO EVX-specific/permissioned input
 BTX provides credibility purely as a strong neutral PoW base. Nothing below is EVX-aware:
-- **Deep-reorg WARN + alarm** (PR-1): a deep reorg is loudly surfaced (`DEEP_REORG_DETECTED`,
-  `getdifficultyhealth.reorg_protection`, `chain_guard`) so any operator — not just EVX — can act.
+- **Deep-reorg WARN + hysteresis + alarm**: late branches beyond the configured
+  hysteresis depth need extra work before automatic activation, and deep reorgs
+  are loudly surfaced (`DEEP_REORG_DETECTED`, `getdifficultyhealth.reorg_protection`,
+  `chain_guard`) so any operator — not just EVX — can act.
 - **Economic finality via confirmations**: the standard Nakamoto property. Deeper confirmations =
   exponentially harder to reverse; this is what EVX (and everyone) already relies on.
 - **Existing, non-EVX trust-minimisation already in BTX**: `checkpointData`, `defaultAssumeValid`,
   `nMinimumChainWork` (`src/kernel/chainparams.cpp`) — release/social-consensus anchors that are
   part of stock Bitcoin practice and carry no per-operator authority and no EVX coupling.
-- **`-randomtiebreak`, F-3, F-4** (PR-1): neutral selfish-mining / DoS / correctness hardening.
+- **`-randomtiebreak`, MatMul parent-MTP seeding, F-3, F-4**: neutral selfish-mining,
+  template-precomputation, DoS, and correctness hardening.
 
-**The 6-vs-144 gap is closed on the EVX side, where it belongs.** EVX has its own HotStuff-2 BFT
-finality and is the layer that *reads* BTX. It already reacts to BTX reorgs (`BTXReorgManager`, the
-optimistic-mint 3-hour veto window, the Class-A/B confirmation gate). To make a deposit safe
-against a deep BTX reorg, EVX sizes its own confirmation requirement to BTX's reorg characteristics
-(e.g. raise `MIN_CONFIRMATION_DEPTH` toward the BTX reorg bound for high-value mints, or lean on its
-BFT finality + veto) — entirely within `../evx`, requiring **no change to BTX**. EVX reads BTX; BTX
-never reads EVX.
+**The service confirmation-depth gap is closed on the EVX side, where it belongs.** EVX has its own
+HotStuff-2 BFT finality and is the layer that *reads* BTX. It already reacts to BTX reorgs
+(`BTXReorgManager`, the optimistic-mint 3-hour veto window, the Class-A/B confirmation gate). To
+make a deposit safe against a deep BTX reorg, EVX sizes its own confirmation requirement to current
+BTX reorg characteristics and risk tier, or leans on its BFT finality + veto — entirely within
+`../evx`, requiring **no change to BTX**. EVX reads BTX; BTX never reads EVX.
 
 ## 5. Out of scope for btx-node (stays in `../evx`)
 
@@ -140,6 +147,7 @@ finality-provider tier is stubbed in EVX and imposes no btx-node requirement. **
 nothing permissioned, centralized, or EVX-specific.**
 
 ## 6. Confirmed no-ops
-Pre-computable templates (whitepaper issue #3): already closed — MatMul seeds are prevhash+nonce
-bound (`DeterministicMatMulSeedV2`, `src/pow.cpp:68-98`) and consensus re-derives/enforces them
-(`src/validation.cpp:9069-9076`). No change.
+Pre-computable templates (whitepaper issue #3): v0.32.10 extends the seed contract again.
+MatMul seeds are header/nonce-bound by `DeterministicMatMulSeedV2` and, from height 130,500,
+parent-hash/parent-MTP/header-bound by `DeterministicMatMulSeedV3`. Consensus re-derives and
+enforces the seed for the actual parent context.

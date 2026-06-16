@@ -37,11 +37,13 @@ static constexpr std::string_view DEFAULT_AUTOUPDATE_RELEASE_PUBKEY{
 // Release-signature scheme for the manifest. On a post-quantum chain the update
 // channel (which can ship code to every node) must itself be quantum-safe, so the
 // default is the PQ ML-DSA-44 scheme rather than classical secp256k1. Supported
-// values: "ml-dsa-44", "slh-dsa-128s", "secp256k1". Operators must configure a
-// release public key for the chosen scheme (-autoupdatepubkey / -autoupdatepubkeyalgo).
+// values: "ml-dsa-44", "slh-dsa-128s", "secp256k1". Operators may override the
+// baked release key/scheme with -autoupdatepubkey / -autoupdatepubkeyalgo.
 static constexpr std::string_view DEFAULT_AUTOUPDATE_RELEASE_PUBKEY_ALGO{"ml-dsa-44"};
 static constexpr int64_t DEFAULT_AUTOUPDATE_INTERVAL_SECONDS{30 * 60};
 static constexpr int64_t DEFAULT_AUTOUPDATE_INITIAL_DELAY_SECONDS{30};
+static constexpr int64_t DEFAULT_AUTOUPDATE_INITIAL_JITTER_SECONDS{60};
+static constexpr int64_t DEFAULT_AUTOUPDATE_RETRY_SECONDS{5 * 60};
 
 struct AutoUpdateUrl {
     std::string scheme;
@@ -56,6 +58,7 @@ struct AutoUpdateConfig {
     bool dev_origin{false};
     bool require_script_hash{true};
     bool telemetry{true};
+    bool telemetry_client_id_enabled{false};
     std::string manifest_url{std::string{DEFAULT_AUTOUPDATE_MANIFEST_URL}};
     std::string trusted_origin{std::string{DEFAULT_AUTOUPDATE_TRUSTED_ORIGIN}};
     std::string release_pubkey{std::string{DEFAULT_AUTOUPDATE_RELEASE_PUBKEY}};
@@ -64,6 +67,8 @@ struct AutoUpdateConfig {
     std::string python_command{"python3"};
     int64_t interval_seconds{DEFAULT_AUTOUPDATE_INTERVAL_SECONDS};
     int64_t initial_delay_seconds{DEFAULT_AUTOUPDATE_INITIAL_DELAY_SECONDS};
+    int64_t initial_jitter_seconds{DEFAULT_AUTOUPDATE_INITIAL_JITTER_SECONDS};
+    int64_t retry_seconds{DEFAULT_AUTOUPDATE_RETRY_SECONDS};
     int64_t daemon_pid{0};
     fs::path datadir;
     // Optional explicit rollout cohort in [0, 100). When unset the cohort is derived stably from the

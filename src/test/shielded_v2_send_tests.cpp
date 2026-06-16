@@ -3,6 +3,9 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <chainparams.h>
+#include <consensus/tx_check.h>
+#include <consensus/validation.h>
+#include <core_io.h>
 #include <crypto/sha256.h>
 #include <crypto/ml_kem.h>
 #include <hash.h>
@@ -694,6 +697,150 @@ BOOST_AUTO_TEST_CASE(build_v2_send_transaction_accepts_transparent_outputs)
     auto context = v2proof::ParseV2SendProof(*bundle, statement, reject_reason);
     BOOST_REQUIRE_MESSAGE(context.has_value(), reject_reason);
     BOOST_CHECK(v2proof::VerifyV2SendProof(*bundle, *context, {smile_ring_members}));
+}
+
+BOOST_AUTO_TEST_CASE(build_v2_send_zero_output_unshield_roundtrips_through_hex_decode)
+{
+    Consensus::Params consensus = Params().GetConsensus();
+    const int32_t validation_height =
+        static_cast<int32_t>(smile2::SmileCTProof::C002_ACTIVATION_HEIGHT);
+    consensus.nShieldedMatRiCTDisableHeight = validation_height;
+    consensus.nShieldedC002ActivationHeight = validation_height;
+    consensus.nShieldedSunsetHeight = validation_height;
+
+    constexpr size_t ring_size{16};
+    const std::vector<unsigned char> spending_key(32, 0x43);
+    const ShieldedNote input_note_a = MakeNote(/*value=*/2000, /*seed=*/0x63);
+    const ShieldedNote input_note_b = MakeNote(/*value=*/3000, /*seed=*/0x64);
+
+    const auto input_account_a = smile2::wallet::BuildCompactPublicAccountFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        input_note_a);
+    const auto input_account_b = smile2::wallet::BuildCompactPublicAccountFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        input_note_b);
+    BOOST_REQUIRE(input_account_a.has_value());
+    BOOST_REQUIRE(input_account_b.has_value());
+    const uint256 input_chain_commitment_a = smile2::ComputeCompactPublicAccountHash(*input_account_a);
+    const uint256 input_chain_commitment_b = smile2::ComputeCompactPublicAccountHash(*input_account_b);
+
+    const size_t real_index_a = 3;
+    const size_t real_index_b = 11;
+    const shielded::ShieldedMerkleTree tree = BuildTree({
+        {real_index_a, input_chain_commitment_a},
+        {real_index_b, input_chain_commitment_b},
+    }, ring_size);
+    const std::vector<uint64_t> ring_positions = BuildRingPositions(ring_size);
+    const std::vector<uint256> ring_members = BuildRingMembers(tree, ring_positions);
+
+    std::vector<smile2::wallet::SmileRingMember> shared_smile_ring_members;
+    shared_smile_ring_members.reserve(ring_members.size());
+    for (const auto& commitment : ring_members) {
+        shared_smile_ring_members.push_back(
+            smile2::wallet::BuildPlaceholderRingMember(smile2::wallet::SMILE_GLOBAL_SEED, commitment));
+    }
+    auto real_member_a = smile2::wallet::BuildRingMemberFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        input_note_a,
+        input_chain_commitment_a);
+    auto real_member_b = smile2::wallet::BuildRingMemberFromNote(
+        smile2::wallet::SMILE_GLOBAL_SEED,
+        input_note_b,
+        input_chain_commitment_b);
+    BOOST_REQUIRE(real_member_a.has_value());
+    BOOST_REQUIRE(real_member_b.has_value());
+    shared_smile_ring_members[real_index_a] = *real_member_a;
+    shared_smile_ring_members[real_index_b] = *real_member_b;
+
+    std::vector<shielded::v2::V2SendSpendInput> spend_inputs{
+        MakeDirectSpendInput(input_note_a,
+                             ring_positions,
+                             ring_members,
+                             real_index_a,
+                             input_chain_commitment_a,
+                             shared_smile_ring_members),
+        MakeDirectSpendInput(input_note_b,
+                             ring_positions,
+                             ring_members,
+                             real_index_b,
+                             input_chain_commitment_b,
+                             shared_smile_ring_members),
+    };
+    BOOST_REQUIRE(test::shielded::AttachAccountRegistryWitnesses(spend_inputs));
+
+    CMutableTransaction tx_template;
+    tx_template.version = CTransaction::CURRENT_VERSION;
+    tx_template.nLockTime = 21;
+    tx_template.vout.emplace_back(/*value=*/4900, CScript{} << OP_TRUE);
+
+    std::string reject_reason;
+    std::array<unsigned char, 32> rng_entropy{};
+    rng_entropy.fill(0xAC);
+    consensus.nShieldedV2SendZeroOutputExitActivationHeight = validation_height + 1;
+    auto gated_built = shielded::v2::BuildV2SendTransaction(tx_template,
+                                                            tree.Root(),
+                                                            spend_inputs,
+                                                            {},
+                                                            /*fee=*/100,
+                                                            spending_key,
+                                                            reject_reason,
+                                                            Span<const unsigned char>{rng_entropy.data(),
+                                                                                       rng_entropy.size()},
+                                                            &consensus,
+                                                            validation_height);
+    BOOST_CHECK(!gated_built.has_value());
+    BOOST_CHECK_EQUAL(reject_reason, "bad-shielded-v2-send-zero-output-exit-disabled");
+    reject_reason.clear();
+    consensus.nShieldedV2SendZeroOutputExitActivationHeight = validation_height;
+    auto built = shielded::v2::BuildV2SendTransaction(tx_template,
+                                                      tree.Root(),
+                                                      spend_inputs,
+                                                      {},
+                                                      /*fee=*/100,
+                                                      spending_key,
+                                                      reject_reason,
+                                                      Span<const unsigned char>{rng_entropy.data(),
+                                                                                 rng_entropy.size()},
+                                                      &consensus,
+                                                      validation_height);
+    BOOST_REQUIRE_MESSAGE(built.has_value(), reject_reason);
+    BOOST_REQUIRE(built->IsValid());
+
+    const auto* bundle = built->tx.shielded_bundle.GetV2Bundle();
+    BOOST_REQUIRE(bundle != nullptr);
+    BOOST_CHECK_EQUAL(bundle->header.family_id, shielded::v2::TransactionFamily::V2_GENERIC);
+    BOOST_CHECK(shielded::v2::BundleHasSemanticFamily(*bundle,
+                                                      shielded::v2::TransactionFamily::V2_SEND));
+
+    const auto& payload = std::get<shielded::v2::SendPayload>(bundle->payload);
+    BOOST_REQUIRE_EQUAL(payload.spends.size(), 2U);
+    BOOST_REQUIRE_EQUAL(payload.outputs.size(), 0U);
+    BOOST_CHECK(payload.output_encoding ==
+                shielded::v2::SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD);
+    BOOST_CHECK_EQUAL(payload.value_balance, 5000);
+    BOOST_CHECK_EQUAL(payload.fee, 100);
+
+    const CTransaction built_tx{built->tx};
+    CMutableTransaction decoded_mutable;
+    BOOST_REQUIRE(DecodeHexTx(decoded_mutable, EncodeHexTx(built_tx)));
+
+    CTransaction decoded_tx{decoded_mutable};
+    TxValidationState state;
+    BOOST_CHECK_MESSAGE(CheckTransaction(decoded_tx, state), state.GetRejectReason());
+    BOOST_REQUIRE(decoded_tx.HasShieldedBundle());
+    BOOST_REQUIRE(decoded_tx.GetShieldedBundle().HasV2Bundle());
+
+    const auto* decoded_bundle = decoded_tx.GetShieldedBundle().GetV2Bundle();
+    BOOST_REQUIRE(decoded_bundle != nullptr);
+    BOOST_CHECK(shielded::v2::BundleHasSemanticFamily(*decoded_bundle,
+                                                      shielded::v2::TransactionFamily::V2_SEND));
+
+    const auto& decoded_payload = std::get<shielded::v2::SendPayload>(decoded_bundle->payload);
+    BOOST_REQUIRE_EQUAL(decoded_payload.outputs.size(), 0U);
+    BOOST_CHECK(decoded_payload.output_encoding ==
+                shielded::v2::SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD);
+    BOOST_CHECK_EQUAL(decoded_payload.value_balance, 5000);
+    BOOST_CHECK_EQUAL(decoded_payload.fee, 100);
 }
 
 BOOST_AUTO_TEST_CASE(build_v2_send_transaction_supports_proofless_transparent_deposits)

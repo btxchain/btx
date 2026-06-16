@@ -4539,28 +4539,10 @@ static bool ShouldEnableMatMulTipWatcher()
     return enabled;
 }
 
-static RPCErrorCode MiningChainGuardRpcCode(const node::MiningChainGuardStatus& status)
-{
-    if (status.reason == "initial_block_download" ||
-        status.reason == "local_tip_behind_peer_median") {
-        return RPC_CLIENT_IN_INITIAL_DOWNLOAD;
-    }
-    if (status.reason == "network_inactive" ||
-        status.reason == "insufficient_peer_consensus" ||
-        status.reason == "peer_monitor_unavailable") {
-        return RPC_CLIENT_NOT_CONNECTED;
-    }
-    return RPC_MISC_ERROR;
-}
-
-static void EnsureMiningChainGuardOrThrow(NodeContext& node)
+static void ObserveMiningChainGuard(NodeContext& node)
 {
     const auto status = node::GetMiningChainGuardStatus(node);
-    if (!node::ShouldPauseMiningByChainGuard(status)) return;
-
-    throw JSONRPCError(
-        MiningChainGuardRpcCode(status),
-        "mining paused by chain guard: " + node::DescribeMiningChainGuardStatus(status));
+    node::MaybeRequestMiningChainGuardRecovery(status, node);
 }
 
 static UniValue MiningChainGuardToJSON(const node::MiningChainGuardStatus& status)
@@ -4576,6 +4558,17 @@ static UniValue MiningChainGuardToJSON(const node::MiningChainGuardStatus& statu
     chain_guard.pushKV("median_peer_tip", status.median_peer_tip);
     chain_guard.pushKV("best_peer_tip", status.best_peer_tip);
     chain_guard.pushKV("near_tip_peers", status.near_tip_peers);
+    chain_guard.pushKV("min_peers", status.min_peer_count);
+    chain_guard.pushKV("min_near_tip_peers", status.min_near_tip_peers);
+    chain_guard.pushKV("near_tip_window", status.near_tip_window);
+    chain_guard.pushKV("max_median_gap", status.max_median_tip_gap);
+    chain_guard.pushKV("deferred_reorg_watch_seconds", status.deferred_reorg_watch_seconds);
+    chain_guard.pushKV("last_deferred_reorg_depth", static_cast<int64_t>(status.last_deferred_reorg_depth));
+    chain_guard.pushKV("last_deferred_required_work_margin", static_cast<int64_t>(status.last_deferred_required_work_margin));
+    chain_guard.pushKV("last_deferred_tip_height", status.last_deferred_tip_height);
+    chain_guard.pushKV("last_deferred_fork_height", status.last_deferred_fork_height);
+    chain_guard.pushKV("last_deferred_candidate_height", status.last_deferred_candidate_height);
+    chain_guard.pushKV("last_deferred_unix", status.last_deferred_unix);
     return chain_guard;
 }
 
@@ -4639,8 +4632,6 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
 
     std::atomic<bool> abort_mining{false};
     std::thread tip_watcher;
-    bool aborted_by_chain_guard{false};
-    std::string chain_guard_reason;
     const bool watch_chain_guard =
         matmul_active &&
         process_new_block &&
@@ -4652,7 +4643,6 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
     if (matmul_active && process_new_block &&
         (ShouldEnableMatMulTipWatcher() || watch_chain_guard)) {
         tip_watcher = std::thread([&chainman, &abort_mining, &tip_hash_before_mining,
-                                   &aborted_by_chain_guard, &chain_guard_reason,
                                    watch_chain_guard, node_context]() {
             uint32_t chain_guard_poll_ticks{0};
             while (!abort_mining.load(std::memory_order_relaxed)) {
@@ -4675,14 +4665,7 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
                 if (watch_chain_guard && ++chain_guard_poll_ticks >= 5) {
                     chain_guard_poll_ticks = 0;
                     const auto status = node::GetMiningChainGuardStatus(*node_context);
-                    if (node::ShouldPauseMiningByChainGuard(status)) {
-                        chain_guard_reason = node::DescribeMiningChainGuardStatus(status);
-                        aborted_by_chain_guard = true;
-                        LogWarning("GenerateBlock: pausing local mining due to chain guard: %s\n",
-                                   chain_guard_reason);
-                        abort_mining.store(true, std::memory_order_relaxed);
-                        return;
-                    }
+                    node::MaybeRequestMiningChainGuardRecovery(status, *node_context);
                 }
             }
         });
@@ -4716,11 +4699,6 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
                 nullptr,
                 parent_median_time_past)) {
             cleanup_watcher();
-            if (aborted_by_chain_guard) {
-                throw JSONRPCError(
-                    MiningChainGuardRpcCode(node::GetMiningChainGuardStatus(*node_context)),
-                    "mining paused by chain guard: " + chain_guard_reason);
-            }
             if (max_tries == 0 || chainman.m_interrupt) return false;
             if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) return true;
             return false;
@@ -4828,7 +4806,7 @@ static UniValue generateBlocks(ChainstateManager& chainman, Mining& miner, const
 
     UniValue blockHashes(UniValue::VARR);
     while (nGenerate > 0 && !chainman.m_interrupt) {
-        if (node_context) EnsureMiningChainGuardOrThrow(*node_context);
+        if (node_context) ObserveMiningChainGuard(*node_context);
         std::unique_ptr<BlockTemplate> block_template(miner.createNewBlock({ .coinbase_output_script = coinbase_output_script }));
         CHECK_NONFATAL(block_template);
 
@@ -5010,7 +4988,7 @@ static RPCHelpMan generateblock()
     NodeContext& node = EnsureAnyNodeContext(request.context);
     Mining& miner = EnsureMining(node);
     const CTxMemPool& mempool = EnsureMemPool(node);
-    EnsureMiningChainGuardOrThrow(node);
+    ObserveMiningChainGuard(node);
 
     std::vector<CTransactionRef> txs;
     const auto raw_txs_or_txids = request.params[1].get_array();
@@ -5151,14 +5129,25 @@ static RPCHelpMan getmininginfo()
                         {
                             {RPCResult::Type::BOOL, "enabled", "Whether the guard is enabled on this node"},
                             {RPCResult::Type::BOOL, "healthy", "Whether peer-derived mining alignment checks currently look healthy"},
-                            {RPCResult::Type::BOOL, "should_pause_mining", "Whether local no-tip or disabled-network state requires miners to wait before requesting new work"},
-                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, catch_up, or enable_network"},
+                            {RPCResult::Type::BOOL, "should_pause_mining", "Compatibility field retained for older pool software; v0.32.12+ guard recovery keeps it false and reports risk through healthy/reason/recommended_action"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, wait_for_tip, mine_current_tip_and_catch_up, mine_current_tip_and_enable_network, add_outbound_peers, propagate_tip, or mine_current_tip"},
                             {RPCResult::Type::STR, "reason", "Current guard decision reason"},
                             {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
                             {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
                             {RPCResult::Type::NUM, "median_peer_tip", "Median tip height advertised by considered outbound peers, or -1 if unavailable"},
                             {RPCResult::Type::NUM, "best_peer_tip", "Highest tip height advertised by considered outbound peers, or -1 if unavailable"},
                             {RPCResult::Type::NUM, "near_tip_peers", "Considered outbound peers within the near-tip window of the local tip"},
+                            {RPCResult::Type::NUM, "min_peers", "Minimum peer count expected before the guard reports healthy"},
+                            {RPCResult::Type::NUM, "min_near_tip_peers", "Minimum near-tip peer count expected before the guard reports healthy"},
+                            {RPCResult::Type::NUM, "near_tip_window", "Allowed peer-tip distance from the local tip when counting near-tip peers"},
+                            {RPCResult::Type::NUM, "max_median_gap", "Allowed distance between local tip and peer median tip before the guard reports risk"},
+                            {RPCResult::Type::NUM, "deferred_reorg_watch_seconds", "Time window used to keep deferred reorg observations visible to mining monitors"},
+                            {RPCResult::Type::NUM, "last_deferred_reorg_depth", "Most recent reorg depth deferred by hysteresis within the watch window, or 0"},
+                            {RPCResult::Type::NUM, "last_deferred_required_work_margin", "Configured extra-work margin that deferred the most recent observed candidate"},
+                            {RPCResult::Type::NUM, "last_deferred_tip_height", "Active tip height when the most recent candidate was deferred, or -1"},
+                            {RPCResult::Type::NUM, "last_deferred_fork_height", "Fork height for the most recent deferred candidate, or -1"},
+                            {RPCResult::Type::NUM, "last_deferred_candidate_height", "Candidate tip height for the most recent deferred candidate, or -1"},
+                            {RPCResult::Type::NUM_TIME, "last_deferred_unix", "Unix timestamp when the most recent deferred candidate was observed, or 0"},
                         }},
                         {RPCResult::Type::OBJ, "fork_health", "Compact chain-tip pressure summary for mining monitors; advisory only and never a mining pause condition",
                         {
@@ -5630,14 +5619,25 @@ static RPCHelpMan getmatmulchallenge()
                         {
                             {RPCResult::Type::BOOL, "enabled", "Whether the guard is enabled on this node"},
                             {RPCResult::Type::BOOL, "healthy", "Whether peer-derived mining alignment checks currently look healthy"},
-                            {RPCResult::Type::BOOL, "should_pause_mining", "Whether local no-tip or disabled-network state requires miners to wait before requesting new work"},
-                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, catch_up, or enable_network"},
+                            {RPCResult::Type::BOOL, "should_pause_mining", "Compatibility field retained for older pool software; v0.32.12+ guard recovery keeps it false and reports risk through healthy/reason/recommended_action"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, wait_for_tip, mine_current_tip_and_catch_up, mine_current_tip_and_enable_network, add_outbound_peers, propagate_tip, or mine_current_tip"},
                             {RPCResult::Type::STR, "reason", "Current guard decision reason"},
                             {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
                             {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
                             {RPCResult::Type::NUM, "median_peer_tip", "Median tip height advertised by considered outbound peers, or -1 if unavailable"},
                             {RPCResult::Type::NUM, "best_peer_tip", "Highest tip height advertised by considered outbound peers, or -1 if unavailable"},
                             {RPCResult::Type::NUM, "near_tip_peers", "Considered outbound peers within the near-tip window of the local tip"},
+                            {RPCResult::Type::NUM, "min_peers", "Minimum peer count expected before the guard reports healthy"},
+                            {RPCResult::Type::NUM, "min_near_tip_peers", "Minimum near-tip peer count expected before the guard reports healthy"},
+                            {RPCResult::Type::NUM, "near_tip_window", "Allowed peer-tip distance from the local tip when counting near-tip peers"},
+                            {RPCResult::Type::NUM, "max_median_gap", "Allowed distance between local tip and peer median tip before the guard reports risk"},
+                            {RPCResult::Type::NUM, "deferred_reorg_watch_seconds", "Time window used to keep deferred reorg observations visible to mining monitors"},
+                            {RPCResult::Type::NUM, "last_deferred_reorg_depth", "Most recent reorg depth deferred by hysteresis within the watch window, or 0"},
+                            {RPCResult::Type::NUM, "last_deferred_required_work_margin", "Configured extra-work margin that deferred the most recent observed candidate"},
+                            {RPCResult::Type::NUM, "last_deferred_tip_height", "Active tip height when the most recent candidate was deferred, or -1"},
+                            {RPCResult::Type::NUM, "last_deferred_fork_height", "Fork height for the most recent deferred candidate, or -1"},
+                            {RPCResult::Type::NUM, "last_deferred_candidate_height", "Candidate tip height for the most recent deferred candidate, or -1"},
+                            {RPCResult::Type::NUM_TIME, "last_deferred_unix", "Unix timestamp when the most recent deferred candidate was observed, or 0"},
                         }},
                         {RPCResult::Type::STR_HEX, "bits", "Compact target"},
                         {RPCResult::Type::NUM, "difficulty", "Difficulty"},
@@ -5889,7 +5889,7 @@ static RPCHelpMan getmatmulchallenge()
     if (!chainman.GetConsensus().fMatMulPOW) {
         throw JSONRPCError(RPC_MISC_ERROR, "MatMul proof-of-work is not active on this chain");
     }
-    EnsureMiningChainGuardOrThrow(node);
+    ObserveMiningChainGuard(node);
     return BuildMatMulChallengeResponse(
         chainman,
         node,
@@ -5941,14 +5941,25 @@ static RPCHelpMan getmatmulchallengeprofile()
                         {
                             {RPCResult::Type::BOOL, "enabled", "Whether the guard is enabled on this node"},
                             {RPCResult::Type::BOOL, "healthy", "Whether peer-derived mining alignment checks currently look healthy"},
-                            {RPCResult::Type::BOOL, "should_pause_mining", "Whether local no-tip or disabled-network state requires miners to wait before requesting new work"},
-                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, catch_up, or enable_network"},
+                            {RPCResult::Type::BOOL, "should_pause_mining", "Compatibility field retained for older pool software; v0.32.12+ guard recovery keeps it false and reports risk through healthy/reason/recommended_action"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, wait_for_tip, mine_current_tip_and_catch_up, mine_current_tip_and_enable_network, add_outbound_peers, propagate_tip, or mine_current_tip"},
                             {RPCResult::Type::STR, "reason", "Current guard decision reason"},
                             {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
                             {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
                             {RPCResult::Type::NUM, "median_peer_tip", "Median tip height advertised by considered outbound peers, or -1 if unavailable"},
                             {RPCResult::Type::NUM, "best_peer_tip", "Highest tip height advertised by considered outbound peers, or -1 if unavailable"},
                             {RPCResult::Type::NUM, "near_tip_peers", "Considered outbound peers within the near-tip window of the local tip"},
+                            {RPCResult::Type::NUM, "min_peers", "Minimum peer count expected before the guard reports healthy"},
+                            {RPCResult::Type::NUM, "min_near_tip_peers", "Minimum near-tip peer count expected before the guard reports healthy"},
+                            {RPCResult::Type::NUM, "near_tip_window", "Allowed peer-tip distance from the local tip when counting near-tip peers"},
+                            {RPCResult::Type::NUM, "max_median_gap", "Allowed distance between local tip and peer median tip before the guard reports risk"},
+                            {RPCResult::Type::NUM, "deferred_reorg_watch_seconds", "Time window used to keep deferred reorg observations visible to mining monitors"},
+                            {RPCResult::Type::NUM, "last_deferred_reorg_depth", "Most recent reorg depth deferred by hysteresis within the watch window, or 0"},
+                            {RPCResult::Type::NUM, "last_deferred_required_work_margin", "Configured extra-work margin that deferred the most recent observed candidate"},
+                            {RPCResult::Type::NUM, "last_deferred_tip_height", "Active tip height when the most recent candidate was deferred, or -1"},
+                            {RPCResult::Type::NUM, "last_deferred_fork_height", "Fork height for the most recent deferred candidate, or -1"},
+                            {RPCResult::Type::NUM, "last_deferred_candidate_height", "Candidate tip height for the most recent deferred candidate, or -1"},
+                            {RPCResult::Type::NUM_TIME, "last_deferred_unix", "Unix timestamp when the most recent deferred candidate was observed, or 0"},
                         }},
                         {RPCResult::Type::STR_HEX, "bits", "Compact target"},
                         {RPCResult::Type::NUM, "difficulty", "Difficulty"},
@@ -6220,7 +6231,7 @@ static RPCHelpMan getmatmulchallengeprofile()
     if (!chainman.GetConsensus().fMatMulPOW) {
         throw JSONRPCError(RPC_MISC_ERROR, "MatMul proof-of-work is not active on this chain");
     }
-    EnsureMiningChainGuardOrThrow(node);
+    ObserveMiningChainGuard(node);
     return BuildMatMulChallengeResponse(
         chainman,
         node,
@@ -7378,6 +7389,9 @@ static RPCHelpMan getblocktemplate()
                     {RPCResult::Type::NUM, "max_block_shielded_verify_units", "consensus maximum shielded verification units per block"},
                     {RPCResult::Type::NUM, "max_block_shielded_scan_units", "consensus maximum shielded scan units per block"},
                     {RPCResult::Type::NUM, "max_block_shielded_tree_update_units", "consensus maximum shielded tree-update units per block"},
+                    {RPCResult::Type::NUM, "default_block_max_template_txs", "default local cap on mempool transactions selected into a block template; 0 means unlimited"},
+                    {RPCResult::Type::NUM, "policy_block_max_template_txs", "effective local cap on mempool transactions selected into this block template; 0 means unlimited"},
+                    {RPCResult::Type::NUM, "template_tx_count", "mempool transactions currently selected into this block template"},
                     {RPCResult::Type::NUM, "template_shielded_verify_units", "shielded verification units currently used by this block template"},
                     {RPCResult::Type::NUM, "template_shielded_scan_units", "shielded scan units currently used by this block template"},
                     {RPCResult::Type::NUM, "template_shielded_tree_update_units", "shielded tree-update units currently used by this block template"},
@@ -7423,14 +7437,25 @@ static RPCHelpMan getblocktemplate()
                 {
                     {RPCResult::Type::BOOL, "enabled", "Whether the guard is enabled on this node"},
                     {RPCResult::Type::BOOL, "healthy", "Whether the node currently considers its active tip aligned with peer observations"},
-                    {RPCResult::Type::BOOL, "should_pause_mining", "Whether local no-tip or disabled-network state requires external miners to wait before requesting new work"},
-                    {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, catch_up, or enable_network"},
+                    {RPCResult::Type::BOOL, "should_pause_mining", "Compatibility field retained for older pool software; v0.32.12+ guard recovery keeps it false and reports risk through healthy/reason/recommended_action"},
+                    {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, wait_for_tip, mine_current_tip_and_catch_up, mine_current_tip_and_enable_network, add_outbound_peers, propagate_tip, or mine_current_tip"},
                     {RPCResult::Type::STR, "reason", "Current guard decision reason"},
                     {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
                     {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
                     {RPCResult::Type::NUM, "median_peer_tip", "Median tip height advertised by considered outbound peers, or -1 if unavailable"},
                     {RPCResult::Type::NUM, "best_peer_tip", "Highest tip height advertised by considered outbound peers, or -1 if unavailable"},
                     {RPCResult::Type::NUM, "near_tip_peers", "Considered outbound peers within the near-tip window of the local tip"},
+                    {RPCResult::Type::NUM, "min_peers", "Minimum peer count expected before the guard reports healthy"},
+                    {RPCResult::Type::NUM, "min_near_tip_peers", "Minimum near-tip peer count expected before the guard reports healthy"},
+                    {RPCResult::Type::NUM, "near_tip_window", "Allowed peer-tip distance from the local tip when counting near-tip peers"},
+                    {RPCResult::Type::NUM, "max_median_gap", "Allowed distance between local tip and peer median tip before the guard reports risk"},
+                    {RPCResult::Type::NUM, "deferred_reorg_watch_seconds", "Time window used to keep deferred reorg observations visible to mining monitors"},
+                    {RPCResult::Type::NUM, "last_deferred_reorg_depth", "Most recent reorg depth deferred by hysteresis within the watch window, or 0"},
+                    {RPCResult::Type::NUM, "last_deferred_required_work_margin", "Configured extra-work margin that deferred the most recent observed candidate"},
+                    {RPCResult::Type::NUM, "last_deferred_tip_height", "Active tip height when the most recent candidate was deferred, or -1"},
+                    {RPCResult::Type::NUM, "last_deferred_fork_height", "Fork height for the most recent deferred candidate, or -1"},
+                    {RPCResult::Type::NUM, "last_deferred_candidate_height", "Candidate tip height for the most recent deferred candidate, or -1"},
+                    {RPCResult::Type::NUM_TIME, "last_deferred_unix", "Unix timestamp when the most recent deferred candidate was observed, or 0"},
                 }},
                 {RPCResult::Type::STR_HEX, "signet_challenge", /*optional=*/true, "Only on signet"},
                 {RPCResult::Type::STR_HEX, "default_witness_commitment", /*optional=*/true, "a valid witness commitment for the unmodified block template"},
@@ -7662,12 +7687,7 @@ static RPCHelpMan getblocktemplate()
         throw JSONRPCError(RPC_INVALID_PARAMETER, "getblocktemplate must be called with the segwit rule set (call with {\"rules\": [\"segwit\"]})");
     }
     const auto chain_guard_status = node::GetMiningChainGuardStatus(node);
-    const bool pause_external_mining = node::ShouldPauseMiningByChainGuard(chain_guard_status);
-    if (pause_external_mining) {
-        throw JSONRPCError(
-            MiningChainGuardRpcCode(chain_guard_status),
-            "mining paused by chain guard: " + node::DescribeMiningChainGuardStatus(chain_guard_status));
-    }
+    node::MaybeRequestMiningChainGuardRecovery(chain_guard_status, node);
 
     // Update block
     static uint256 pindexPrevHash;
@@ -7685,7 +7705,7 @@ static RPCHelpMan getblocktemplate()
             if (!local_pindexPrev) {
                 throw JSONRPCError(RPC_INTERNAL_ERROR, "tip block index not found for getblocktemplate");
             }
-            options.bypass_chain_guard = pause_external_mining;
+            options.bypass_chain_guard = false;
             auto tmpl = miner.createNewBlock2(options);
             CHECK_NONFATAL(tmpl);
             return TemplateToJSON(consensusParams, chainman, &*tmpl, local_pindexPrev, setClientRules, tx_update_counter, options, chain_guard_status);

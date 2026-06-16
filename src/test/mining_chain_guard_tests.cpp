@@ -28,7 +28,7 @@ BOOST_AUTO_TEST_CASE(disabled_guard_does_not_pause_mining)
     BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue");
 }
 
-BOOST_AUTO_TEST_CASE(initial_block_download_is_advisory)
+BOOST_AUTO_TEST_CASE(initial_block_download_keeps_mining_with_recovery_warning)
 {
     node::MiningChainGuardOptions options;
     options.enabled = true;
@@ -43,10 +43,10 @@ BOOST_AUTO_TEST_CASE(initial_block_download_is_advisory)
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "initial_block_download");
     BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
-    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "catch_up");
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "mine_current_tip_and_catch_up");
 }
 
-BOOST_AUTO_TEST_CASE(insufficient_peer_consensus_is_advisory)
+BOOST_AUTO_TEST_CASE(insufficient_peer_consensus_keeps_mining_with_recovery_warning)
 {
     node::MiningChainGuardOptions options;
     options.enabled = true;
@@ -62,7 +62,7 @@ BOOST_AUTO_TEST_CASE(insufficient_peer_consensus_is_advisory)
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "insufficient_peer_consensus");
     BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
-    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue_with_warning");
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "add_outbound_peers");
 }
 
 BOOST_AUTO_TEST_CASE(default_guard_requires_three_peers)
@@ -85,10 +85,10 @@ BOOST_AUTO_TEST_CASE(default_guard_requires_three_peers)
     BOOST_CHECK_EQUAL(status.reason, "insufficient_peer_consensus");
     BOOST_CHECK_EQUAL(status.min_peer_count, 3);
     BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
-    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue_with_warning");
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "add_outbound_peers");
 }
 
-BOOST_AUTO_TEST_CASE(local_tip_ahead_of_peer_median_is_advisory)
+BOOST_AUTO_TEST_CASE(local_tip_ahead_of_peer_median_keeps_mining_to_propagate_tip)
 {
     node::MiningChainGuardOptions options;
     options.enabled = true;
@@ -104,10 +104,10 @@ BOOST_AUTO_TEST_CASE(local_tip_ahead_of_peer_median_is_advisory)
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "local_tip_ahead_of_peer_median");
     BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
-    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue_with_warning");
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "propagate_tip");
 }
 
-BOOST_AUTO_TEST_CASE(local_tip_behind_peer_median_is_advisory)
+BOOST_AUTO_TEST_CASE(local_tip_behind_peer_median_keeps_mining_with_recovery_warning)
 {
     node::MiningChainGuardOptions options;
     options.enabled = true;
@@ -123,10 +123,10 @@ BOOST_AUTO_TEST_CASE(local_tip_behind_peer_median_is_advisory)
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "local_tip_behind_peer_median");
     BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
-    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue_with_warning");
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "mine_current_tip_and_catch_up");
 }
 
-BOOST_AUTO_TEST_CASE(near_tip_peer_quorum_is_advisory)
+BOOST_AUTO_TEST_CASE(near_tip_peer_quorum_keeps_mining_with_recovery_warning)
 {
     node::MiningChainGuardOptions options;
     options.enabled = true;
@@ -147,7 +147,7 @@ BOOST_AUTO_TEST_CASE(near_tip_peer_quorum_is_advisory)
     BOOST_CHECK_EQUAL(status.near_tip_peers, 1);
     BOOST_CHECK_EQUAL(status.min_near_tip_peers, 2);
     BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
-    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue_with_warning");
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "add_outbound_peers");
 }
 
 BOOST_AUTO_TEST_CASE(median_majority_close_to_tip_keeps_mining_enabled)
@@ -249,10 +249,10 @@ BOOST_AUTO_TEST_CASE(recently_active_lagging_peers_still_count_for_fork_safety)
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "local_tip_ahead_of_peer_median");
     BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
-    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "continue_with_warning");
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "propagate_tip");
 }
 
-BOOST_AUTO_TEST_CASE(network_inactive_pauses_only_for_local_state)
+BOOST_AUTO_TEST_CASE(network_inactive_keeps_mining_with_recovery_warning)
 {
     node::MiningChainGuardOptions options;
     options.enabled = true;
@@ -266,8 +266,8 @@ BOOST_AUTO_TEST_CASE(network_inactive_pauses_only_for_local_state)
 
     BOOST_CHECK(!status.healthy);
     BOOST_CHECK_EQUAL(status.reason, "network_inactive");
-    BOOST_CHECK(node::ShouldPauseMiningByChainGuard(status));
-    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "enable_network");
+    BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "mine_current_tip_and_enable_network");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

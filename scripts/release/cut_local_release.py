@@ -105,12 +105,13 @@ def run_checked(command: list[str], *, cwd: Path | None = None) -> None:
 
 def parse_platform_spec(raw_spec: str) -> dict[str, Path | str]:
     parts = raw_spec.split(PLATFORM_SEPARATOR)
-    if len(parts) != 3:
+    if len(parts) not in (3, 4):
         raise ValueError(
             f"Invalid --platform-spec {raw_spec!r}; expected "
-            f"'<platform-id>{PLATFORM_SEPARATOR}<path-to-btxd>{PLATFORM_SEPARATOR}<path-to-btx-cli>'"
+            f"'<platform-id>{PLATFORM_SEPARATOR}<path-to-btxd>{PLATFORM_SEPARATOR}<path-to-btx-cli>' "
+            f"or '<platform-id>{PLATFORM_SEPARATOR}<path-to-btxd>{PLATFORM_SEPARATOR}<path-to-btx-cli>{PLATFORM_SEPARATOR}<path-to-btx-util>'"
         )
-    platform_id, btxd_raw, btx_cli_raw = (part.strip() for part in parts)
+    platform_id, btxd_raw, btx_cli_raw = (part.strip() for part in parts[:3])
     if not platform_id or not btxd_raw or not btx_cli_raw:
         raise ValueError(f"Invalid --platform-spec {raw_spec!r}; no field may be empty")
     btxd = Path(btxd_raw).expanduser().resolve()
@@ -119,7 +120,16 @@ def parse_platform_spec(raw_spec: str) -> dict[str, Path | str]:
         raise FileNotFoundError(f"Missing btxd for platform {platform_id}: {btxd}")
     if not btx_cli.is_file():
         raise FileNotFoundError(f"Missing btx-cli for platform {platform_id}: {btx_cli}")
-    return {"platform_id": platform_id, "btxd": btxd, "btx_cli": btx_cli}
+    spec: dict[str, Path | str] = {"platform_id": platform_id, "btxd": btxd, "btx_cli": btx_cli}
+    if len(parts) == 4:
+        btx_util_raw = parts[3].strip()
+        if not btx_util_raw:
+            raise ValueError(f"Invalid --platform-spec {raw_spec!r}; btx-util field may not be empty")
+        btx_util = Path(btx_util_raw).expanduser().resolve()
+        if not btx_util.is_file():
+            raise FileNotFoundError(f"Missing btx-util for platform {platform_id}: {btx_util}")
+        spec["btx_util"] = btx_util
+    return spec
 
 
 def resolve_platform_specs(raw_specs: list[str]) -> list[dict[str, Path | str]]:
@@ -141,7 +151,7 @@ def build_package_command(
     source_root: Path,
     spec: dict[str, Path | str],
 ) -> list[str]:
-    return [
+    command = [
         sys.executable,
         str(repo_root / "scripts" / "release" / "package_release_archive.py"),
         "--output-dir",
@@ -157,6 +167,9 @@ def build_package_command(
         "--source-root",
         str(source_root),
     ]
+    if "btx_util" in spec:
+        command.extend(["--btx-util", str(spec["btx_util"])])
+    return command
 
 
 def build_collect_command(

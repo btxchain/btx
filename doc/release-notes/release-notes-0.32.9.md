@@ -2,12 +2,10 @@ BTX version 0.32.9 is now available from:
 
   <https://github.com/btxchain/btx/releases/tag/v0.32.9>
 
-This v0.32.9 point release rolls in the post-0.32.8 btx-node production fixes
-for recovery-exit batching, recovery-exit mempool liveness, mining health,
-local reorg protection, wallet settlement reporting, and block-template
-performance. It is intended for nodes, miners, pools, exchanges, services,
-explorers, and wallet operators running the 0.32.x block-125,000 shielded sunset
-series.
+This v0.32.9 point release is an emergency hardening release for the fragmented
+BTX network. It makes deep private-branch releases visible and locally parked by
+default, adds an objective empty-block subsidy haircut, and adds wallet/service
+RPC metadata for shallow-reorg settlement safety.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -23,12 +21,9 @@ If you are running an older version, shut it down. Wait until it has completely
 shut down, then install the new binaries or replace the existing `btxd`,
 `btx-cli`, and GUI binaries with the 0.32.9 release artifacts.
 
-BTX 0.32.9 keeps the block-125,000 shielded sunset posture and existing
-recovery-exit consensus rules. It introduces an empty-block subsidy consensus
-rule at height 130,000 and adds local mempool, mining, wallet, and reorg-policy
-hardening around the 0.32.x recovery-exit flow. It does not change MatMul
-consensus validation, seed derivation, product digest, or matrix verification
-code.
+BTX 0.32.9 introduces an empty-block subsidy consensus rule at height 130,000.
+It does not change MatMul consensus validation, seed derivation, product digest,
+or matrix verification code.
 
 # Compatibility
 
@@ -36,14 +31,14 @@ BTX is supported on Linux, macOS 13+, and Windows 10+.
 
 # Notable changes
 
-- The default reorg protection profile warns on candidate reorgs deeper than 3
-  blocks, parks candidate branches that would reorganize more than 12 blocks,
-  and reports a 12-confirmation settlement-safety depth. Parking is local policy,
-  not consensus finality.
+- The default reorg profile is now `emergency`: warn on candidate reorgs deeper
+  than 3 blocks, park candidate branches that would reorganize more than 12
+  blocks, and report a 12-confirmation settlement-safety depth. Parking is local
+  policy, not consensus finality.
 
 - Operators that need automatic most-work convergence can explicitly select
   `-reorgprotectionprofile=standard` or `archive`. This trades away the default
-  parking protection against late private releases.
+  emergency parking protection against late private releases.
 
 - Empty coinbase-only blocks after height 130,000 have an objective consecutive
   subsidy cap: the first empty block may claim at most 50% of the scheduled

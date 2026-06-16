@@ -300,6 +300,12 @@ struct Params {
      *  enforce the mempool/template hardening immediately from the 128,000 cleanup
      *  boundary without retroactively changing the 125,000..127,999 history. */
     int32_t nShieldedDirectSendPublicFlowDisableHeight{std::numeric_limits<int32_t>::max()};
+    /** Post-sunset zero-output V2_SEND z->t exit activation. Disabled by default
+     *  so the decode compatibility fix can ship before a later consensus
+     *  activation height permits these transactions once the sunset rules are
+     *  active. Pre-sunset V2_SEND unshields remain governed by the existing
+     *  C-002 rules. */
+    int32_t nShieldedV2SendZeroOutputExitActivationHeight{std::numeric_limits<int32_t>::max()};
     /** RECOVERY_EXIT activation (transparent-claim stranded-note recovery). DISABLED by default
      *  (int32 max) for regtest unless explicitly overridden. Production networks activate it at the
      *  125,000 sunset only after strict zero-output sunset gating, mempool commitment/nullifier
@@ -347,6 +353,8 @@ struct Params {
      *  the original 10% so a legitimate large legacy holder can fully exit in ~1 week rather than ~3+
      *  weeks, while still throttling any residual drain to half the pool per day. */
     uint32_t nShieldedUnshieldVelocityCapBps{5000};
+    /** Height at which the unshield velocity cap stops applying. */
+    int32_t nShieldedUnshieldVelocityEndHeight{std::numeric_limits<int32_t>::max()};
     /** Height at which the v0.32.11 velocity-cap floor starts applying. */
     int32_t nShieldedUnshieldVelocityMinCapHeight{std::numeric_limits<int32_t>::max()};
     /** Minimum egress capacity per trailing window after nShieldedUnshieldVelocityMinCapHeight. */
@@ -354,10 +362,12 @@ struct Params {
     bool IsShieldedUnshieldVelocityCapActive(int32_t height) const
     {
         return nShieldedUnshieldVelocityActivationHeight != std::numeric_limits<int32_t>::max() &&
-               height >= nShieldedUnshieldVelocityActivationHeight;
+               height >= nShieldedUnshieldVelocityActivationHeight &&
+               height < nShieldedUnshieldVelocityEndHeight;
     }
     CAmount ShieldedUnshieldVelocityMinCapForHeight(int32_t height) const
     {
+        if (!IsShieldedUnshieldVelocityCapActive(height)) return 0;
         if (height < nShieldedUnshieldVelocityMinCapHeight) return 0;
         return nShieldedUnshieldVelocityMinCap;
     }
@@ -507,6 +517,12 @@ struct Params {
         return height >= 0 &&
             nShieldedDirectSendPublicFlowDisableHeight != std::numeric_limits<int32_t>::max() &&
             height >= nShieldedDirectSendPublicFlowDisableHeight;
+    }
+    bool IsShieldedV2SendZeroOutputExitActive(int32_t height) const
+    {
+        return height >= 0 &&
+            nShieldedV2SendZeroOutputExitActivationHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nShieldedV2SendZeroOutputExitActivationHeight;
     }
     bool IsShieldedRecoveryExitActive(int32_t height) const
     {

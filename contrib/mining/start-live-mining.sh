@@ -13,6 +13,8 @@ RPC_COOKIEFILE="${BTX_MINING_RPCCOOKIEFILE:-}"
 WALLET="${BTX_MINING_WALLET:-miner}"
 ADDRESS=""
 ADDRESS_FILE="${BTX_MINING_ADDRESS_FILE:-}"
+BOOTSTRAP_ADDNODES="${BTX_MINING_BOOTSTRAP_ADDNODES:-${BTX_MINING_BOOTSTRAP_PEERS:-}}"
+NO_DEFAULT_BOOTSTRAP_PEERS=0
 SLEEP_SECS="${BTX_MINING_SLEEP_SECS:-1}"
 RESULTS_DIR="${BTX_MINING_RESULTS_DIR:-}"
 SHOULD_MINE_COMMAND="${BTX_MINING_SHOULD_MINE_COMMAND:-}"
@@ -60,6 +62,9 @@ Options:
   --wallet=NAME             Wallet used for mining rewards (default: miner)
   --address=ADDR            Explicit payout address
   --address-file=PATH       File containing the payout address
+  --bootstrap-peers=LIST    Comma-separated addnode host:port list for peer recovery
+  --no-default-bootstrap-peers
+                            Do not use the supervisor's built-in public BTX bootstrap mesh
   --sleep=SECS              Loop sleep interval passed to the supervisor
   --results-dir=PATH        Directory for pid/log/address files
   --should-mine-command=CMD Idle gate command; mine only when it exits 0
@@ -130,6 +135,12 @@ for arg in "$@"; do
       ;;
     --address-file=*)
       ADDRESS_FILE="${arg#*=}"
+      ;;
+    --bootstrap-peers=*)
+      BOOTSTRAP_ADDNODES="${arg#*=}"
+      ;;
+    --no-default-bootstrap-peers)
+      NO_DEFAULT_BOOTSTRAP_PEERS=1
       ;;
     --sleep=*)
       SLEEP_SECS="${arg#*=}"
@@ -384,6 +395,12 @@ if [[ -n "${RPC_COOKIEFILE}" ]]; then
   cmd+=("--rpccookiefile=${RPC_COOKIEFILE}")
 fi
 cmd+=("--wallet=${WALLET}" "--sleep=${SLEEP_SECS}" "--results-dir=${RESULTS_DIR}")
+if [[ -n "${BOOTSTRAP_ADDNODES}" ]]; then
+  cmd+=("--bootstrap-peers=${BOOTSTRAP_ADDNODES}")
+fi
+if (( NO_DEFAULT_BOOTSTRAP_PEERS )); then
+  cmd+=("--no-default-bootstrap-peers")
+fi
 if [[ -n "${SHOULD_MINE_COMMAND}" ]]; then
   cmd+=("--should-mine-command=${SHOULD_MINE_COMMAND}")
 fi

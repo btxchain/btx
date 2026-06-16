@@ -127,7 +127,9 @@ jobs:
 
           printf '#!/bin/sh\nexit 0\n' > "${workdir}/bin/btxd"
           printf '#!/bin/sh\nexit 0\n' > "${workdir}/bin/btx-cli"
-          chmod +x "${workdir}/bin/btxd" "${workdir}/bin/btx-cli"
+          printf '#!/bin/sh\nexit 0\n' > "${workdir}/bin/btx-util"
+          printf '#!/bin/sh\nexit 0\n' > "${workdir}/bin/btx-util.exe"
+          chmod +x "${workdir}/bin/btxd" "${workdir}/bin/btx-cli" "${workdir}/bin/btx-util" "${workdir}/bin/btx-util.exe"
           printf 'snapshot payload\n' > "${workdir}/snapshot.dat"
           printf 'dummy attestation\n' > "${attestations_root}/noncodesigned.SHA256SUMS"
 

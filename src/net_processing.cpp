@@ -2187,6 +2187,18 @@ static bool IsMatMulPhase2Failure(const BlockValidationState& state)
         state.GetDebugMessage().find("matmul phase2 proof of work failed") != std::string::npos;
 }
 
+static bool IsHighConfidenceInvalidShieldedBlock(const BlockValidationState& state)
+{
+    if (state.GetResult() != BlockValidationResult::BLOCK_CONSENSUS) return false;
+
+    const std::string& reason = state.GetRejectReason();
+    return reason.rfind("bad-recovery-exit-", 0) == 0 ||
+           reason == "shielded-unshield-velocity-exceeded" ||
+           reason == "shielded-pool-balance-negative" ||
+           reason == "bad-shielded-v2-send-zero-output-exit-disabled" ||
+           reason.rfind("bad-shielded-", 0) == 0;
+}
+
 static const char* MatMulPunishmentToString(MatMulPhase2Punishment punishment)
 {
     switch (punishment) {
@@ -2248,6 +2260,17 @@ void PeerManagerImpl::MaybePunishNodeForBlock(NodeId nodeid, const BlockValidati
             node->fDisconnect = true;
             return true;
         });
+        return;
+    }
+
+    if (!via_compact_block && IsHighConfidenceInvalidShieldedBlock(state)) {
+        if (PeerRef peer = GetPeerRef(nodeid)) {
+            Misbehaving(*peer, strprintf("invalid shielded block: %s", state.GetRejectReason()));
+        }
+        DisconnectNodeNow(m_connman, nodeid);
+        if (!message.empty()) {
+            LogDebug(BCLog::NET, "peer=%d: %s\n", nodeid, message);
+        }
         return;
     }
 

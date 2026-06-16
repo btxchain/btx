@@ -459,6 +459,33 @@ std::atomic<int64_t> g_reorg_protection_last_deferred_unix{0};
     return true;  // strict outflow unshield of legacy value: allowed for the life of the wind-down
 }
 
+[[nodiscard]] bool IsV2SendZeroOutputExitBundle(const CShieldedBundle& bundle)
+{
+    if (!bundle.HasV2Bundle()) return false;
+    const auto* v2_bundle = bundle.GetV2Bundle();
+    if (v2_bundle == nullptr ||
+        shielded::v2::GetBundleSemanticFamily(*v2_bundle) != shielded::v2::TransactionFamily::V2_SEND ||
+        !std::holds_alternative<shielded::v2::SendPayload>(v2_bundle->payload)) {
+        return false;
+    }
+    const auto& payload = std::get<shielded::v2::SendPayload>(v2_bundle->payload);
+    return payload.outputs.empty();
+}
+
+[[nodiscard]] bool RejectDisabledV2SendZeroOutputExit(const CShieldedBundle& bundle,
+                                                      const Consensus::Params& consensus,
+                                                      int32_t validation_height,
+                                                      std::string& reject_reason)
+{
+    if (!IsV2SendZeroOutputExitBundle(bundle) ||
+        !consensus.IsShieldedSunsetActive(validation_height) ||
+        consensus.IsShieldedV2SendZeroOutputExitActive(validation_height)) {
+        return true;
+    }
+    reject_reason = "bad-shielded-v2-send-zero-output-exit-disabled";
+    return false;
+}
+
 [[nodiscard]] bool RejectShieldedHeightGateViolation(const CTransaction& tx,
                                                      const Consensus::Params& consensus,
                                                      int32_t validation_height,
@@ -468,6 +495,9 @@ std::atomic<int64_t> g_reorg_protection_last_deferred_unix{0};
         return false;
     }
     if (!RejectDisabledShieldedPoolCredit(tx.GetShieldedBundle(), consensus, validation_height, reject_reason)) {
+        return false;
+    }
+    if (!RejectDisabledV2SendZeroOutputExit(tx.GetShieldedBundle(), consensus, validation_height, reject_reason)) {
         return false;
     }
     return true;
@@ -1690,7 +1720,22 @@ template <typename Spend>
     if (consensus.nShieldedUnshieldVelocityActivationHeight == std::numeric_limits<int32_t>::max()) {
         return false;
     }
-    return tip_height >= consensus.nShieldedUnshieldVelocityActivationHeight;
+    if (tip_height < consensus.nShieldedUnshieldVelocityActivationHeight) {
+        return false;
+    }
+    if (consensus.IsShieldedUnshieldVelocityCapActive(tip_height)) {
+        return true;
+    }
+    if (consensus.nShieldedUnshieldVelocityEndHeight == std::numeric_limits<int32_t>::max()) {
+        return true;
+    }
+    if (consensus.nMaxReorgDepth == std::numeric_limits<uint32_t>::max()) {
+        return true;
+    }
+    const int64_t retention_limit =
+        static_cast<int64_t>(consensus.nShieldedUnshieldVelocityEndHeight) +
+        static_cast<int64_t>(consensus.nMaxReorgDepth);
+    return static_cast<int64_t>(tip_height) < retention_limit;
 }
 
 //! Pin a prune-retention lock so the fast-path shielded disconnect of any reorg up to nMaxReorgDepth
@@ -2653,7 +2698,8 @@ enum class PersistedShieldedMetadataSyncMode {
         const auto& consensus = chainstate.m_chainman.GetConsensus();
         const int32_t next_block_height =
             tip->nHeight == std::numeric_limits<int32_t>::max() ? tip->nHeight : tip->nHeight + 1;
-        if (consensus.IsShieldedUnshieldVelocityCapActive(next_block_height)) {
+        if (consensus.IsShieldedUnshieldVelocityCapActive(next_block_height) ||
+            ShieldedUnshieldVelocityStateRequiredAtTip(consensus, tip->nHeight)) {
             ShieldedUnshieldVelocity persisted_velocity;
             if (!chainstate.m_chainman.ReadShieldedUnshieldVelocity(persisted_velocity)) {
                 error = "failed to read persisted unshield velocity";
@@ -3038,8 +3084,10 @@ bool CrossesShieldedMempoolHeightGate(const Consensus::Params& consensus,
            crosses(consensus.nShieldedPoolCreditDisableHeight) ||
            crosses(consensus.nShieldedSunsetHeight) ||
            crosses(consensus.nShieldedDirectSendPublicFlowDisableHeight) ||
+           crosses(consensus.nShieldedV2SendZeroOutputExitActivationHeight) ||
            crosses(consensus.nShieldedRecoveryExitActivationHeight) ||
-           crosses(consensus.nShieldedUnshieldVelocityActivationHeight);
+           crosses(consensus.nShieldedUnshieldVelocityActivationHeight) ||
+           crosses(consensus.nShieldedUnshieldVelocityEndHeight);
 }
 
 constexpr int32_t MLDSA_EMERGENCY_RELAY_WINDOW_BLOCKS{960};

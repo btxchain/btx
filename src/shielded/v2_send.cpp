@@ -426,14 +426,31 @@ std::optional<V2SendBuildResult> BuildV2SendTransaction(const CMutableTransactio
     // outputs has value_balance == transparent_out + fee != fee, which the
     // value_balance-eliding SMILE_COMPACT_POSTFORK encoding cannot represent. Use
     // the non-eliding unshield variant for it. Only sound at/after C-002 (the v3
-    // proof binds the public outflow); the consensus fork gate enforces the same
-    // boundary so this never produces an unverifiable tx.
+    // proof binds the public outflow) and after the explicit zero-output exit
+    // gate, so this never produces a transaction contextual validation rejects.
     const bool has_transparent_outflow =
         std::any_of(tx_template.vout.begin(), tx_template.vout.end(),
                     [](const CTxOut& txout) { return txout.nValue > 0; });
+    const bool c002_active =
+        consensus != nullptr && consensus->IsShieldedC002Active(validation_height);
+    const bool sunset_active =
+        consensus != nullptr && consensus->IsShieldedSunsetActive(validation_height);
+    const bool zero_output_exit_active =
+        consensus != nullptr && consensus->IsShieldedV2SendZeroOutputExitActive(validation_height);
+    const bool zero_output_exit_permitted =
+        !sunset_active || zero_output_exit_active;
     const bool use_unshield_send_encoding =
         use_postfork_compact_send_encoding && has_transparent_outflow &&
-        consensus != nullptr && consensus->IsShieldedC002Active(validation_height);
+        c002_active && zero_output_exit_permitted;
+    if (output_inputs.empty() &&
+        use_postfork_compact_send_encoding &&
+        has_transparent_outflow &&
+        c002_active &&
+        sunset_active &&
+        !zero_output_exit_active) {
+        reject_reason = "bad-shielded-v2-send-zero-output-exit-disabled";
+        return std::nullopt;
+    }
     if (output_inputs.empty() && !use_unshield_send_encoding) {
         reject_reason = "bad-shielded-v2-builder-output-count";
         return std::nullopt;

@@ -216,6 +216,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.shielded_unshield_velocity_activation_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedunshieldvelocityactivationheight");
     }
+    if (args.IsArgSet("-regtestshieldedunshieldvelocityendheight")) {
+        options.shielded_unshield_velocity_end_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedunshieldvelocityendheight");
+    }
     if (args.IsArgSet("-regtestshieldedunshieldvelocitymincapheight")) {
         options.shielded_unshield_velocity_min_cap_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedunshieldvelocitymincapheight");
@@ -239,6 +243,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     if (args.IsArgSet("-regtestshieldeddirectsendpublicflowdisableheight")) {
         options.shielded_direct_send_public_flow_disable_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldeddirectsendpublicflowdisableheight");
+    }
+    if (args.IsArgSet("-regtestshieldedv2sendzerooutputexitactivationheight")) {
+        options.shielded_v2_send_zero_output_exit_activation_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedv2sendzerooutputexitactivationheight");
     }
     if (args.IsArgSet("-regtestshieldedrecoveryexitactivationheight")) {
         options.shielded_recovery_exit_activation_height =

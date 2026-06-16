@@ -1,10 +1,16 @@
-# Shielded unshield velocity cap (v0.32.0)
+# Shielded unshield velocity cap (v0.32.0-v0.32.11)
 
 Defense-in-depth consensus rule that bounds the **rate** at which value can leave the shielded pool
 (shielded→transparent / "unshield"), so a stolen spend key or a future inner-proof soundness
 regression becomes a **slow, observable leak** rather than an instantaneous drain. Mirrors the
 velocity-limit recommendation from the Zcash Orchard disclosure; complements (does not replace) the
 turnstile and the C-002 per-tx bindings.
+
+As of v0.32.12, this quota fully exits at height **132,000**. Blocks 125,000 through 131,999 remain
+subject to the historical cap. Blocks 132,000 and later are no longer rate-limited; shielded exits
+are bounded by ordinary consensus validity, fees, and block resource limits. Nodes retain the
+persisted velocity log through the configured reorg horizon after 132,000 so rollback validation of
+historical capped blocks remains deterministic.
 
 ## Where it sits in the defense stack
 
@@ -25,12 +31,16 @@ post-activation).
   INT_MAX (inert) on regtest unless overridden. Aligned to the 125,000 sunset so the cap is active from
   the first block where a transparent-outflow exit is the only permitted shielded operation (no uncapped
   window). Self-serve unshield does not exist before the C-002 fork (123,000) anyway.
+- `nShieldedUnshieldVelocityEndHeight` — **132,000** (all production networks in v0.32.12). The end height
+  is exclusive: block 131,999 is capped, block 132,000 is uncapped. Regtest defaults INT_MAX unless
+  overridden with `-regtestshieldedunshieldvelocityendheight`.
 - `nShieldedUnshieldVelocityWindowBlocks` — **960** (~1 day at 90 s).
 - `nShieldedUnshieldVelocityCapBps` — **5000** (50% of the pool may be unshielded per window).
 
-%-of-pool means the cap auto-scales with the live pool and never needs retuning. 50%/day lets a
-legitimate large legacy holder fully exit in ~1 week, while still throttling a stolen-key/residual drain
-to half the pool per day — observable, multi-day, and bounded rather than instantaneous.
+%-of-pool means the cap auto-scales with the live pool while active. During the historical capped
+window, 50%/day let legitimate large legacy holders exit progressively while still throttling a
+stolen-key/residual drain to half the pool per day. After height 132,000 the quota is intentionally
+removed to let the remaining legacy exits clear without causing capacity-aware block template retries.
 
 ## Mechanism (`src/shielded/unshield_velocity.{h,cpp}` — implemented + unit-tested)
 
@@ -66,8 +76,10 @@ leaky bucket precisely because it is a pure function of recent egress, hence tri
 4. **Persistence** (`NullifierSet`, `DB_UNSHIELD_VELOCITY` key): the log is persisted (not recomputed
    from blocks a pruned node lacks), so every node — pruned or full — evaluates the rule identically.
    Loaded at `EnsureShieldedStateInitialized` (`finish_success`).
-5. **Activation:** 125,000 (`BTX_SHIELDED_SUNSET_HEIGHT`, all networks, aligned to the sunset); regtest
-   defaults INT_MAX (inert), overridable via `-regtestshieldedunshieldvelocityactivationheight`.
+5. **Activation/end:** active from 125,000 (`BTX_SHIELDED_SUNSET_HEIGHT`) through 131,999; inactive at
+   and after 132,000. Regtest defaults INT_MAX (inert), overridable via
+   `-regtestshieldedunshieldvelocityactivationheight` and
+   `-regtestshieldedunshieldvelocityendheight`.
 
 ### Tests (green)
 - `shielded_unshield_velocity_tests` (C++): window-cap %-of-pool + auto-scale, window sum + cap

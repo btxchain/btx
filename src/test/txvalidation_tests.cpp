@@ -4957,10 +4957,14 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_c002_zero_output_unshield_v2_send, Te
     const ScopedConsensusHeightOverride restore_public_flow{
         consensus.nShieldedDirectSendPublicFlowDisableHeight,
         consensus.nShieldedDirectSendPublicFlowDisableHeight};
+    const ScopedConsensusHeightOverride restore_zero_output_exit{
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight,
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight};
     consensus.nShieldedMatRiCTDisableHeight = validation_height;
     consensus.nShieldedC002ActivationHeight = validation_height;
     consensus.nShieldedSunsetHeight = std::numeric_limits<int32_t>::max();
     consensus.nShieldedDirectSendPublicFlowDisableHeight = std::numeric_limits<int32_t>::max();
+    consensus.nShieldedV2SendZeroOutputExitActivationHeight = validation_height;
 
     const CAmount input_value =
         V2_DIRECT_SEND_RING_NOTE_VALUE + static_cast<CAmount>(V2_DIRECT_SEND_REAL_INDEX) * 500;
@@ -4980,17 +4984,37 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_accepts_c002_zero_output_unshield_v2_send, Te
     BOOST_REQUIRE_EQUAL(fixture.built.tx.vout.size(), 1U);
     BOOST_CHECK(payload.output_encoding == shielded::v2::SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD);
     BOOST_CHECK_EQUAL(payload.value_balance, transparent_output_value + V2_DIRECT_SEND_FEE);
-    consensus.nShieldedSunsetHeight = validation_height;
-    consensus.nShieldedDirectSendPublicFlowDisableHeight = validation_height;
+    const int32_t contextual_height = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    consensus.nShieldedV2SendZeroOutputExitActivationHeight = contextual_height + 1;
+    const auto pre_sunset_result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
+    BOOST_CHECK_MESSAGE(pre_sunset_result.m_result_type == MempoolAcceptResult::ResultType::VALID,
+                        pre_sunset_result.m_state.GetRejectReason());
 
+    consensus.nShieldedSunsetHeight = contextual_height;
+    consensus.nShieldedDirectSendPublicFlowDisableHeight = contextual_height;
+    consensus.nShieldedV2SendZeroOutputExitActivationHeight = contextual_height + 1;
+
+    const auto pre_activation_result = WITH_LOCK(
+        cs_main,
+        return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
+    BOOST_CHECK_MESSAGE(pre_activation_result.m_result_type == MempoolAcceptResult::ResultType::INVALID,
+                        pre_activation_result.m_state.GetRejectReason());
+    BOOST_CHECK_EQUAL(pre_activation_result.m_state.GetRejectReason(),
+                      "bad-shielded-v2-send-zero-output-exit-disabled");
+    BOOST_CHECK(pre_activation_result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS);
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock block = CreateBlock({fixture.built.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockRejected(*this, block, "bad-shielded-v2-send-zero-output-exit-disabled");
+
+    consensus.nShieldedV2SendZeroOutputExitActivationHeight = contextual_height;
     const auto result = WITH_LOCK(
         cs_main,
         return m_node.chainman->ProcessTransaction(MakeTransactionRef(fixture.built.tx), /*test_accept=*/true));
     BOOST_CHECK_MESSAGE(result.m_result_type == MempoolAcceptResult::ResultType::VALID,
                         result.m_state.GetRejectReason());
-
-    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
-    const CBlock block = CreateBlock({fixture.built.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
     ExpectBlockAccepted(*this, block);
 }
 
@@ -5004,8 +5028,12 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_c002_zero_output_unshield_without_pro
     const ScopedConsensusHeightOverride restore_c002{
         consensus.nShieldedC002ActivationHeight,
         consensus.nShieldedC002ActivationHeight};
+    const ScopedConsensusHeightOverride restore_zero_output_exit{
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight,
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight};
     consensus.nShieldedMatRiCTDisableHeight = validation_height;
     consensus.nShieldedC002ActivationHeight = validation_height;
+    consensus.nShieldedV2SendZeroOutputExitActivationHeight = validation_height;
 
     const CAmount input_value =
         V2_DIRECT_SEND_RING_NOTE_VALUE + static_cast<CAmount>(V2_DIRECT_SEND_REAL_INDEX) * 500;
@@ -5043,8 +5071,12 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_c002_zero_output_unshield_malformed_c
     const ScopedConsensusHeightOverride restore_c002{
         consensus.nShieldedC002ActivationHeight,
         consensus.nShieldedC002ActivationHeight};
+    const ScopedConsensusHeightOverride restore_zero_output_exit{
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight,
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight};
     consensus.nShieldedMatRiCTDisableHeight = validation_height;
     consensus.nShieldedC002ActivationHeight = validation_height;
+    consensus.nShieldedV2SendZeroOutputExitActivationHeight = validation_height;
 
     const CAmount input_value =
         V2_DIRECT_SEND_RING_NOTE_VALUE + static_cast<CAmount>(V2_DIRECT_SEND_REAL_INDEX) * 500;
@@ -5125,8 +5157,12 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_rejects_c002_zero_output_unshield_tampered_tr
     const ScopedConsensusHeightOverride restore_c002{
         consensus.nShieldedC002ActivationHeight,
         consensus.nShieldedC002ActivationHeight};
+    const ScopedConsensusHeightOverride restore_zero_output_exit{
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight,
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight};
     consensus.nShieldedMatRiCTDisableHeight = validation_height;
     consensus.nShieldedC002ActivationHeight = validation_height;
+    consensus.nShieldedV2SendZeroOutputExitActivationHeight = validation_height;
 
     const CAmount input_value =
         V2_DIRECT_SEND_RING_NOTE_VALUE + static_cast<CAmount>(V2_DIRECT_SEND_REAL_INDEX) * 500;
@@ -5436,8 +5472,12 @@ BOOST_FIXTURE_TEST_CASE(block_rejects_c002_zero_output_unshield_tampered_transpa
     const ScopedConsensusHeightOverride restore_c002{
         consensus.nShieldedC002ActivationHeight,
         consensus.nShieldedC002ActivationHeight};
+    const ScopedConsensusHeightOverride restore_zero_output_exit{
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight,
+        consensus.nShieldedV2SendZeroOutputExitActivationHeight};
     consensus.nShieldedMatRiCTDisableHeight = validation_height;
     consensus.nShieldedC002ActivationHeight = validation_height;
+    consensus.nShieldedV2SendZeroOutputExitActivationHeight = validation_height;
 
     const CAmount input_value =
         V2_DIRECT_SEND_RING_NOTE_VALUE + static_cast<CAmount>(V2_DIRECT_SEND_REAL_INDEX) * 500;

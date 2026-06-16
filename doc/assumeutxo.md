@@ -110,9 +110,11 @@ listen=1
 rpcbind=127.0.0.1
 rpcallowip=127.0.0.1
 
-# Peer discovery plus a DNS-only public bootstrap hint.
+# Peer discovery plus DNS-only public bootstrap hints.
 dnsseed=1
 fixedseeds=1
+addnode=node.btx.dev:19335
+addnode=node.btxchain.org:19335
 addnode=node.btx.tools:19335
 
 # Compact mining fast-start posture.
@@ -125,13 +127,13 @@ miningminsyncedoutboundpeers=1
 miningmaxheaderlag=8
 ```
 
-Use DNS names rather than hard-coded peer IP addresses in operator
+Use all three DNS names rather than hard-coded peer IP addresses in operator
 documentation and templates. Bootstrap IPs can change or become unavailable,
 while DNS names can be updated without requiring miners to rewrite configs.
 Avoid `connect=`-only topologies for production mining because they reduce peer
-diversity and increase stale/orphan risk. The mining guard intentionally keeps
-`getblocktemplate` paused until the node is caught up and has enough useful
-outbound peer context.
+diversity and increase stale/orphan risk. The mining guard reports risk and
+requests peer recovery while continuing to serve current-tip work instead of
+turning unattended miners off.
 
 ### BTX shielded-state appendix
 

@@ -55,29 +55,30 @@ refused (fail-closed). We must not strand those nodes.
    `current/bin/btx-util` / link dir, the running btxd's sibling (Linux
    `/proc`), then `PATH`.
 
-2. **First hop is classical, by configuration, until `btx-util` is fleet-wide.**
-   For the transition window, operators run the *first* auto-update with
+2. **Legacy first hop is classical only for nodes that predate `btx-util`.**
+   If an old install has no local `btx-util`, operators can run one update with
    `-autoupdatepubkeyalgo=secp256k1` and the historical classical release key
    (documented in `node/autoupdate.h`). That hop only needs `openssl`, which is
-   already a hard dependency. It delivers v0.31 — and therefore `btx-util` — to
-   the node.
+   already a hard dependency. It delivers a modern release — and therefore
+   `btx-util` — to the node.
 
 3. **Switch to PQ for every subsequent hop.** Once v0.31+ is active (so
    `btx-util` exists), reconfigure the node to the PQ scheme
    (`-autoupdatepubkeyalgo=ml-dsa-44 -autoupdatepubkey=<2624-hex>`). From here
    the powerful update path is fully quantum-safe.
 
-New installs (v0.31+ from the start) skip step 2 entirely: they already have
-`btx-util`, so they can be PQ-only from the first hop.
+New installs and current release archives skip step 2 entirely: they already
+have `btx-util`, so they can be PQ-only from the first hop.
 
-### Why the default is "inert"
+### Why the default is active on mainnet
 
-`DEFAULT_AUTOUPDATE_RELEASE_PUBKEY` is intentionally **empty**. Auto-update does
-nothing until an operator sets `-autoupdatepubkey` (+ `-autoupdatepubkeyalgo`).
-This (a) keeps the remote-code channel opt-in rather than on-by-default, and
-(b) avoids a key/algo mismatch at startup — the default scheme is ML-DSA-44
-(2624-hex key), so shipping a 66-hex secp256k1 key as the default would fail
-mainnet startup validation. Operators choose the scheme and key explicitly.
+`DEFAULT_AUTOUPDATE_RELEASE_PUBKEY` is a compiled-in ML-DSA-44 release public
+key, and mainnet auto-update defaults to that PQ scheme. A btx.dev/DNS/TLS
+compromise is not enough to ship code: the manifest, optional pinned commit, and
+prebuilt artifacts still need signatures from the offline release key. Operators
+can opt out or override the trust root with `-autoupdate=0`,
+`-autoupdatepubkey=0`, or an explicit `-autoupdatepubkey` /
+`-autoupdatepubkeyalgo` pair.
 
 ## Manifest fields
 
@@ -128,10 +129,10 @@ when none matches or verification fails.
 - **Fallback:** a missing/mismatched/unverifiable artifact (or a platform with no
   entry) logs a warning and the installer builds from source — availability is
   preserved without weakening trust. `BTX_PREFER_PREBUILT=0` forces source builds.
-- The prebuilt tarball should contain `bin/btxd`, `bin/btx-cli`, and ideally
-  `bin/btx-wallet` + `bin/btx-util` (shipping `btx-util` keeps the next cycle's PQ
-  verifier present). Layout `bin/…`, `<name>/bin/…`, or binaries at the root all
-  work.
+- The prebuilt tarball must contain `bin/btxd`, `bin/btx-cli`, and
+  `bin/btx-util`; `bin/btx-wallet` is recommended when built. Shipping
+  `btx-util` keeps the next cycle's PQ verifier present. Layout `bin/…`,
+  `<name>/bin/…`, or binaries at the root all work.
 
 ### CI signing pipeline (release engineering)
 
@@ -154,18 +155,30 @@ on an isolated/offline host (`../btx-release-key/`).
 ## Request metrics
 
 Auto-update requests append transport-only query parameters so release operators
-can see which client versions and platforms are polling/installing without
-changing signed manifest bytes:
+can see which client versions, platforms, architectures, and rollout cohorts are
+polling/installing without changing signed manifest bytes. The default request
+metrics are intentionally aggregate-only: no wallet data, addresses, peer IPs,
+transaction IDs, hardware serials, or persistent client identifier are added.
 
 | parameter | meaning |
 | --- | --- |
 | `btx_au=1` | identifies the request as part of the auto-update flow |
-| `btx_client_id` | stable random UUID stored at `<datadir>/autoupdate/client-id` |
 | `btx_version` | running client version, e.g. `0.32.7` |
 | `btx_platform` | operating system family, e.g. `linux` or `darwin` |
 | `btx_arch` | client architecture, e.g. `x86_64` or `aarch64` |
+| `btx_cohort` | staged-rollout bucket in `[0,99]` |
 
 Operators may disable this request tagging with `-autoupdatetelemetry=0`.
+Operators running a controlled canary fleet may opt in to a persistent random
+UUID with `-autoupdatetelemetryclientid=1`; that sends `btx_client_id` and stores
+the UUID at `<datadir>/autoupdate/client-id`. Leave it off for normal public
+nodes.
+
+Startup checks run after `-autoupdateinitialdelay` plus at most
+`-autoupdateinitialjitter` seconds, so urgent releases are normally discovered
+within a short window after restart. Transient manifest/signature/script fetch
+failures retry from `-autoupdateretryinterval` with exponential backoff instead
+of waiting the full steady-state `-autoupdateinterval`.
 
 ## Staged / canary rollout
 

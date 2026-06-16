@@ -3,10 +3,11 @@
 Utility to generate the seeds.txt list that is compiled into the client
 (see [src/chainparamsseeds.h](/src/chainparamsseeds.h) and other utilities in [contrib/seeds](/contrib/seeds)).
 
-BTX mainnet currently bootstraps from the live DNS seed `node.btx.tools` and
-from the fixed public endpoints compiled from `nodes_main.txt`. Use this
-workflow when you intentionally want to regenerate the fixed seed table after
-verifying which public bootstrap nodes are still serving current BTX peers.
+BTX mainnet currently bootstraps from the live DNS seeds `node.btx.dev`,
+`node.btxchain.org`, and `node.btx.tools`, plus the fixed public endpoints
+compiled from `nodes_main.txt`. Use this workflow when you intentionally want
+to regenerate the fixed seed table after verifying which public bootstrap nodes
+are still serving current BTX peers.
 
 Update `PATTERN_AGENT` and `MIN_BLOCKS` in `makeseeds.py` as the BTX network
 version/height evolves.

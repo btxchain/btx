@@ -108,6 +108,8 @@ rpcallowip=127.0.0.1
 # Keep peer discovery enabled and use DNS-only bootstrap hints.
 dnsseed=1
 fixedseeds=1
+addnode=node.btx.dev:19335
+addnode=node.btxchain.org:19335
 addnode=node.btx.tools:19335
 
 # Miner fast-start posture.
@@ -120,9 +122,11 @@ miningminsyncedoutboundpeers=1
 miningmaxheaderlag=8
 ```
 
-Use DNS names rather than hard-coded peer IP addresses. Peer IPs can change or
-become unavailable, while DNS bootstrap names can be updated without requiring
-local config changes.
+Use all three DNS bootstrap names rather than hard-coded peer IP addresses.
+Peer IPs can change or become unavailable, while DNS bootstrap names can be
+updated without requiring local config changes. The three names are intended to
+resolve to distinct public bootstrap/archive nodes so honest miners can find
+each other quickly.
 
 Avoid `connect=`-only production mining topologies. Normal peer discovery plus
 DNS bootstrap hints gives the node better peer diversity and lowers stale block
@@ -227,7 +231,8 @@ The chain guard may report:
 - no near-tip synced outbound peers
 
 Those states are expected while the node catches up from the snapshot height to
-the current tip. Mining work should remain paused until the guard is healthy.
+the current tip. They are warnings and recovery triggers, not stop signals:
+keep miners requesting work while the node catches up.
 
 If using the bundled live-mining helper, point it at the same datadir, config,
 and binaries. Adjust the helper path to match the extracted release layout:
@@ -253,7 +258,10 @@ sudo -u btx /var/btx/bin/btx-cli \
     getblocktemplate '{"rules":["segwit"]}'
 ```
 
-Do not force mining while the guard says `should_pause_mining=true`.
+On current nodes, `chain_guard.should_pause_mining` is retained only for
+compatibility and should remain `false`. Use `chain_guard.healthy`, `reason`,
+and `recommended_action` to drive peer remediation and alerts without taking
+hashrate offline.
 
 ## 9. Cleanup
 
@@ -293,8 +301,9 @@ Database lock errors
 Another process is using the datadir. Stop it cleanly with `btx-cli stop`, then
 check `pgrep` and `lsof`. Do not start a second daemon against the same datadir.
 
-Mining remains paused after the snapshot loads
+Mining guard remains unhealthy after the snapshot loads
 
-This is normally correct until the node catches up and has enough useful
-outbound peers. Check `getmininginfo.chain_guard`, `getpeerinfo`,
-`getblockchaininfo.blocks`, and `getblockchaininfo.headers`.
+This is normally expected until the node catches up and has enough useful
+outbound peers. Keep miners running, then check `getmininginfo.chain_guard`,
+`getpeerinfo`, `getblockchaininfo.blocks`, and `getblockchaininfo.headers` to
+confirm the warnings clear.

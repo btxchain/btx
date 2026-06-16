@@ -34,6 +34,7 @@ class WalletShieldedVelocityCapTest(BitcoinTestFramework):
             f"-regtestshieldedmatrictdisableheight={DISABLE_HEIGHT}",
             # Activate the velocity cap from genesis so ConnectBlock/DisconnectBlock exercise it.
             "-regtestshieldedunshieldvelocityactivationheight=0",
+            "-regtestshieldedunshieldvelocityendheight=1000000",
             "-regtestshieldedunshieldvelocitymincapheight=0",
             "-regtestshieldedunshieldvelocitymincap=10000",
             "-autoshieldcoinbase=1",

@@ -224,13 +224,13 @@ your own secure storage process.
 
 ## Step 9: Wait for Full Sync Before Mining
 
-Do not start mining just because the node launches.
+Do not ignore node health just because the node launches.
 
 On BTX, the node should be:
 
 - out of initial block download
 - near tip
-- not paused by the mining chain guard
+- reporting healthy chain-guard status
 
 Check:
 
@@ -241,13 +241,14 @@ Check:
 Important fields:
 
 - `initialblockdownload`
-- `chain_guard.should_pause_mining`
+- `chain_guard.healthy`
+- `chain_guard.reason`
+- `chain_guard.recommended_action`
 - peer and tip-health related values in `chain_guard`
 
-Only begin mining when:
-
-- `initialblockdownload` is `false`
-- `chain_guard.should_pause_mining` is `false`
+Current nodes keep serving mining work while those fields warn, so unattended
+miners do not take nonce rate off the network. Use the fields for alerts and
+peer remediation rather than as an automatic stop condition.
 
 ## Step 10: Start a Basic Solo-Mining Loop
 
@@ -263,16 +264,17 @@ $Address = (& $Cli -rpcwallet=miningwallet getnewaddress).Trim()
 
 while ($true) {
     $info = & $Cli getmininginfo | ConvertFrom-Json
-    if (($info.initialblockdownload -eq $false) -and ($info.chain_guard.should_pause_mining -eq $false)) {
-        & $Cli -rpcwallet=miningwallet generatetoaddress 1 $Address | Out-Null
+    if ($info.chain_guard.healthy -eq $false) {
+        Write-Host ("chain guard warning: {0} action={1}" -f `
+            $info.chain_guard.reason, $info.chain_guard.recommended_action)
     } else {
-        Start-Sleep -Seconds 5
+        Write-Host "chain guard healthy"
     }
+    & $Cli -rpcwallet=miningwallet generatetoaddress 1 $Address | Out-Null
 }
 ```
 
-That loop is intentionally conservative. It avoids mining while the node says it
-should pause.
+That loop keeps mining and uses chain-guard output for operator visibility.
 
 ## Optional: Add Benchmarks or Tests to the Build
 

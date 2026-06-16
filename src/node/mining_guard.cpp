@@ -5,6 +5,7 @@
 #include <node/mining_guard.h>
 
 #include <common/args.h>
+#include <logging.h>
 #include <net.h>
 #include <net_processing.h>
 #include <node/context.h>
@@ -13,6 +14,7 @@
 #include <validation.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <sstream>
@@ -20,6 +22,8 @@
 
 namespace node {
 namespace {
+std::atomic<int64_t> g_last_default_mesh_refresh{0};
+
 int ComputeMedianTip(std::vector<int> peer_heights)
 {
     if (peer_heights.empty()) return -1;
@@ -32,6 +36,16 @@ int ComputeMedianTip(std::vector<int> peer_heights)
     return (peer_heights[middle - 1] + peer_heights[middle]) / 2;
 }
 } // namespace
+
+const std::vector<std::string>& DefaultMiningPeerMesh()
+{
+    static const std::vector<std::string> default_mesh{
+        "node.btx.dev:19335",
+        "node.btxchain.org:19335",
+        "node.btx.tools:19335",
+    };
+    return default_mesh;
+}
 
 MiningChainGuardOptions GetMiningChainGuardOptions(const NodeContext& node)
 {
@@ -48,6 +62,7 @@ MiningChainGuardOptions GetMiningChainGuardOptions(const NodeContext& node)
     options.explicit_setting =
         node.args->IsArgSet("-miningchainguard") || node.args->IsArgNegated("-miningchainguard");
     options.enabled = node.args->GetBoolArg("-miningchainguard", default_enabled);
+    options.refresh_default_mesh = node.args->GetBoolArg("-miningchainguarddefaultmesh", true);
     options.min_peer_count = std::max<int>(
         1,
         static_cast<int>(node.args->GetIntArg(
@@ -68,7 +83,51 @@ MiningChainGuardOptions GetMiningChainGuardOptions(const NodeContext& node)
         1,
         static_cast<int>(node.args->GetIntArg(
             "-miningchainguardstalepeerseconds", DEFAULT_MINING_CHAIN_GUARD_STALE_PEER_SECONDS)));
+    options.deferred_reorg_watch_seconds = std::max<int>(
+        0,
+        static_cast<int>(node.args->GetIntArg(
+            "-miningchainguarddeferredreorgwatchseconds",
+            DEFAULT_MINING_CHAIN_GUARD_DEFERRED_REORG_WATCH_SECONDS)));
+    options.mesh_refresh_seconds = std::max<int>(
+        0,
+        static_cast<int>(node.args->GetIntArg(
+            "-miningchainguardmeshrefreshseconds",
+            DEFAULT_MINING_CHAIN_GUARD_MESH_REFRESH_SECONDS)));
     return options;
+}
+
+static MiningChainGuardStatus ApplyDeferredReorgWarning(
+    MiningChainGuardStatus status,
+    const MiningChainGuardOptions& options,
+    int64_t now)
+{
+    status.deferred_reorg_watch_seconds = options.deferred_reorg_watch_seconds;
+
+    const auto stats = ProbeReorgProtectionRuntimeStats();
+    status.last_deferred_reorg_depth = stats.last_deferred_reorg_depth;
+    status.last_deferred_required_work_margin = stats.last_deferred_required_work_margin;
+    status.last_deferred_tip_height = stats.last_deferred_tip_height;
+    status.last_deferred_fork_height = stats.last_deferred_fork_height;
+    status.last_deferred_candidate_height = stats.last_deferred_candidate_height;
+    status.last_deferred_unix = stats.last_deferred_unix;
+
+    if (!status.enabled || !status.healthy || options.deferred_reorg_watch_seconds <= 0) {
+        return status;
+    }
+
+    if (stats.last_deferred_unix <= 0) return status;
+
+    const int64_t latest_resolution = std::max(stats.last_observed_unix, stats.last_rejected_unix);
+    if (stats.last_deferred_unix <= latest_resolution) return status;
+
+    const int64_t deferred_age = now - stats.last_deferred_unix;
+    if (deferred_age < 0 || deferred_age > options.deferred_reorg_watch_seconds) {
+        return status;
+    }
+
+    status.healthy = false;
+    status.reason = "deferred_reorg_candidate";
+    return status;
 }
 
 MiningChainGuardStatus EvaluateMiningChainGuard(
@@ -88,6 +147,7 @@ MiningChainGuardStatus EvaluateMiningChainGuard(
     status.min_near_tip_peers = options.min_near_tip_peers;
     status.max_median_tip_gap = options.max_median_tip_gap;
     status.near_tip_window = options.near_tip_window;
+    status.deferred_reorg_watch_seconds = options.deferred_reorg_watch_seconds;
 
     if (!options.enabled) {
         status.reason = "disabled";
@@ -242,8 +302,9 @@ MiningChainGuardStatus GetMiningChainGuardStatus(const NodeContext& node)
     const auto peer_heights =
         FilterMiningChainGuardPeerHeights(local_tip_height, now, peer_samples, options);
 
-    return EvaluateMiningChainGuard(
+    auto status = EvaluateMiningChainGuard(
         local_tip_height, initial_block_download, network_active, peer_heights, options);
+    return ApplyDeferredReorgWarning(std::move(status), options, now);
 }
 
 std::string DescribeMiningChainGuardStatus(const MiningChainGuardStatus& status)
@@ -263,30 +324,93 @@ std::string DescribeMiningChainGuardStatus(const MiningChainGuardStatus& status)
                 << " min_near_tip_peers=" << status.min_near_tip_peers
                 << " near_tip_window=" << status.near_tip_window
                 << " max_median_gap=" << status.max_median_tip_gap;
+    if (status.last_deferred_unix > 0) {
+        description << " last_deferred_reorg_depth=" << status.last_deferred_reorg_depth
+                    << " last_deferred_candidate_height=" << status.last_deferred_candidate_height
+                    << " deferred_reorg_watch_seconds=" << status.deferred_reorg_watch_seconds;
+    }
     return description.str();
+}
+
+void MaybeRequestMiningChainGuardRecovery(const MiningChainGuardStatus& status, const NodeContext& node)
+{
+    if (!status.enabled || status.healthy || !node.connman) return;
+
+    const MiningChainGuardOptions options = GetMiningChainGuardOptions(node);
+
+    if (status.reason == "tip_uninitialized" ||
+        status.reason == "initial_block_download" ||
+        status.reason == "network_inactive" ||
+        status.reason == "local_tip_behind_peer_median" ||
+        status.reason == "local_tip_ahead_of_peer_median" ||
+        status.reason == "insufficient_peer_consensus" ||
+        status.reason == "insufficient_near_tip_peers" ||
+        status.reason == "deferred_reorg_candidate" ||
+        status.reason == "peer_monitor_unavailable") {
+        node.connman->SetTryNewOutboundPeer(true);
+        node.connman->StartExtraBlockRelayPeers();
+
+        if (options.refresh_default_mesh &&
+            options.mesh_refresh_seconds > 0 &&
+            status.network_active) {
+            const int64_t now = GetTime<std::chrono::seconds>().count();
+            int64_t last = g_last_default_mesh_refresh.load();
+            while (now - last >= options.mesh_refresh_seconds &&
+                   !g_last_default_mesh_refresh.compare_exchange_weak(last, now)) {
+            }
+            if (now - last >= options.mesh_refresh_seconds) {
+                const bool use_v2transport = node.connman->GetLocalServices() & NODE_P2P_V2;
+                int added{0};
+                for (const auto& peer : DefaultMiningPeerMesh()) {
+                    if (node.connman->AddNode({peer, use_v2transport})) {
+                        ++added;
+                    }
+                }
+                LogPrintLevel(
+                    BCLog::NET,
+                    BCLog::Level::Info,
+                    "Mining chain guard refreshed default peer mesh (%u peers, %d newly added) after %s\n",
+                    static_cast<unsigned>(DefaultMiningPeerMesh().size()),
+                    added,
+                    DescribeMiningChainGuardStatus(status));
+            }
+        }
+    }
 }
 
 bool ShouldPauseMiningByChainGuard(const MiningChainGuardStatus& status)
 {
-    if (!status.enabled) return false;
-
-    // Peer-derived health and IBD are advisory only. A malicious peer set,
-    // partition, long header chain, or DDoS should not be able to make honest
-    // unattended miners stop producing valid work. Only "no active tip" and
-    // locally disabled networking pause mining.
-    return status.reason == "tip_uninitialized" ||
-           status.reason == "network_inactive";
+    (void)status;
+    return false;
 }
 
 const char* GetMiningChainGuardRecommendedAction(const MiningChainGuardStatus& status)
 {
-    if (status.reason == "tip_uninitialized" ||
-        status.reason == "initial_block_download") {
-        return "catch_up";
+    if (status.reason == "tip_uninitialized") {
+        return "wait_for_tip";
+    }
+
+    if (status.reason == "initial_block_download" ||
+        status.reason == "local_tip_behind_peer_median") {
+        return "mine_current_tip_and_catch_up";
     }
 
     if (status.reason == "network_inactive") {
-        return "enable_network";
+        return "mine_current_tip_and_enable_network";
+    }
+
+    if (status.reason == "deferred_reorg_candidate") {
+        return "mine_current_tip";
+    }
+
+    if (status.reason == "local_tip_ahead_of_peer_median") {
+        return "propagate_tip";
+    }
+
+    if (status.reason == "insufficient_peer_consensus" ||
+        status.reason == "insufficient_near_tip_peers" ||
+        status.reason == "peer_monitor_unavailable") {
+        return "add_outbound_peers";
     }
 
     if (!status.healthy) {

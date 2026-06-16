@@ -15,6 +15,7 @@
 #include <net_types.h> // For banmap_t
 #include <netbase.h>
 #include <node/context.h>
+#include <node/mining_guard.h>
 #include <node/protocol_version.h>
 #include <node/warnings.h>
 #include <policy/settings.h>
@@ -31,7 +32,10 @@
 #include <util/translation.h>
 #include <validation.h>
 
+#include <algorithm>
 #include <optional>
+#include <set>
+#include <utility>
 
 #include <univalue.h>
 
@@ -85,6 +89,29 @@ static std::string MatMulValidationModeToString(kernel::MatMulValidationMode mod
         return "spv";
     }
     return "unknown";
+}
+
+static UniValue AddedNodeInfoToJSON(const AddedNodeInfo& info)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("addednode", info.m_params.m_added_node);
+    obj.pushKV("connected", info.fConnected);
+    UniValue addresses(UniValue::VARR);
+    if (info.fConnected) {
+        UniValue address(UniValue::VOBJ);
+        address.pushKV("address", info.resolvedAddress.ToStringAddrPort());
+        address.pushKV("connected", info.fInbound ? "inbound" : "outbound");
+        addresses.push_back(std::move(address));
+    }
+    obj.pushKV("addresses", std::move(addresses));
+    return obj;
+}
+
+static bool IsAddedNode(const std::vector<AddedNodeInfo>& nodes, const std::string& node)
+{
+    return std::any_of(nodes.begin(), nodes.end(), [&](const AddedNodeInfo& info) {
+        return info.m_params.m_added_node == node;
+    });
 }
 
 static RPCHelpMan getconnectioncount()
@@ -610,20 +637,283 @@ static RPCHelpMan getaddednodeinfo()
     UniValue ret(UniValue::VARR);
 
     for (const AddedNodeInfo& info : vInfo) {
-        UniValue obj(UniValue::VOBJ);
-        obj.pushKV("addednode", info.m_params.m_added_node);
-        obj.pushKV("connected", info.fConnected);
-        UniValue addresses(UniValue::VARR);
-        if (info.fConnected) {
-            UniValue address(UniValue::VOBJ);
-            address.pushKV("address", info.resolvedAddress.ToStringAddrPort());
-            address.pushKV("connected", info.fInbound ? "inbound" : "outbound");
-            addresses.push_back(std::move(address));
-        }
-        obj.pushKV("addresses", std::move(addresses));
-        ret.push_back(std::move(obj));
+        ret.push_back(AddedNodeInfoToJSON(info));
     }
 
+    return ret;
+},
+    };
+}
+
+static RPCHelpMan getminingpeermesh()
+{
+    return RPCHelpMan{"getminingpeermesh",
+        "\nReturns the runtime peer mesh used by mining operators to keep a node connected to canonical peers.\n"
+        "This reports the built-in bootstrap mesh, current addnode entries, and active peer health.\n",
+        {
+            {"node", RPCArg::Type::STR, RPCArg::DefaultHint{"all nodes"}, "If provided, only report matching added/active peer entries."},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::ARR, "default_nodes", "Built-in public bootstrap nodes suitable for mining mesh refresh",
+                {
+                    {RPCResult::Type::STR, "node", "host:port"},
+                }},
+                {RPCResult::Type::ARR, "added_nodes", "Runtime addnode mesh entries",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR, "addednode", "Node as passed to addnode/addminingpeermeshnode"},
+                        {RPCResult::Type::BOOL, "connected", "Whether the added node is currently connected"},
+                        {RPCResult::Type::ARR, "addresses", "Resolved connected addresses",
+                        {
+                            {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR, "address", "Connected address"},
+                                {RPCResult::Type::STR, "connected", "inbound or outbound"},
+                            }},
+                        }},
+                    }},
+                }},
+                {RPCResult::Type::ARR, "active_peers", "Current connected peers with mining-relevant sync state",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::NUM, "id", "Peer id"},
+                        {RPCResult::Type::STR, "addr", "Peer address"},
+                        {RPCResult::Type::BOOL, "inbound", "Whether the peer is inbound"},
+                        {RPCResult::Type::STR, "connection_type", "Connection type"},
+                        {RPCResult::Type::STR, "subver", "Peer subversion"},
+                        {RPCResult::Type::NUM, "startingheight", "Peer starting height"},
+                        {RPCResult::Type::NUM, "synced_headers", "Best synced header height for this peer"},
+                        {RPCResult::Type::NUM, "synced_blocks", "Best synced block height for this peer"},
+                    }},
+                }},
+            }},
+        RPCExamples{
+            HelpExampleCli("getminingpeermesh", "")
+            + HelpExampleCli("getminingpeermesh", "\"node.btx.tools:19335\"")
+            + HelpExampleRpc("getminingpeermesh", "\"node.btx.tools:19335\"")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    const CConnman& connman = EnsureConnman(node);
+    const PeerManager& peerman = EnsurePeerman(node);
+
+    const std::optional<std::string> filter = request.params[0].isNull()
+        ? std::nullopt
+        : std::optional<std::string>{request.params[0].get_str()};
+    const auto matches_filter = [&](const std::string& value) {
+        return !filter.has_value() || value == *filter;
+    };
+
+    UniValue result(UniValue::VOBJ);
+    UniValue defaults(UniValue::VARR);
+    for (const auto& seed : node::DefaultMiningPeerMesh()) {
+        if (matches_filter(seed)) defaults.push_back(seed);
+    }
+    result.pushKV("default_nodes", std::move(defaults));
+
+    UniValue added_nodes(UniValue::VARR);
+    for (const AddedNodeInfo& info : connman.GetAddedNodeInfo(/*include_connected=*/true)) {
+        if (matches_filter(info.m_params.m_added_node)) {
+            added_nodes.push_back(AddedNodeInfoToJSON(info));
+        }
+    }
+    result.pushKV("added_nodes", std::move(added_nodes));
+
+    std::vector<CNodeStats> vstats;
+    connman.GetNodeStats(vstats);
+    UniValue active_peers(UniValue::VARR);
+    for (const CNodeStats& stats : vstats) {
+        if (filter.has_value() &&
+            stats.m_addr_name != *filter &&
+            stats.addr.ToStringAddrPort() != *filter) {
+            continue;
+        }
+        CNodeStateStats state_stats;
+        if (!peerman.GetNodeStateStats(stats.nodeid, state_stats)) {
+            continue;
+        }
+        UniValue peer(UniValue::VOBJ);
+        peer.pushKV("id", stats.nodeid);
+        peer.pushKV("addr", stats.m_addr_name);
+        peer.pushKV("inbound", stats.fInbound);
+        peer.pushKV("connection_type", ConnectionTypeAsString(stats.m_conn_type));
+        peer.pushKV("subver", stats.cleanSubVer);
+        peer.pushKV("startingheight", state_stats.m_starting_height);
+        peer.pushKV("synced_headers", state_stats.nSyncHeight);
+        peer.pushKV("synced_blocks", state_stats.nCommonHeight);
+        active_peers.push_back(std::move(peer));
+    }
+    result.pushKV("active_peers", std::move(active_peers));
+    return result;
+},
+    };
+}
+
+static RPCHelpMan addminingpeermeshnode()
+{
+    return RPCHelpMan{"addminingpeermeshnode",
+        "\nAdds a peer to the runtime mining peer mesh and optionally opens a connection immediately.\n"
+        "This is idempotent for automation. Use addnode in the config file for restart-persistent policy.\n",
+        {
+            {"node", RPCArg::Type::STR, RPCArg::Optional::NO, "The host:port peer address"},
+            {"persistent", RPCArg::Type::BOOL, RPCArg::Default{true}, "Add to the daemon's runtime addnode list until restart"},
+            {"try_now", RPCArg::Type::BOOL, RPCArg::Default{true}, "Open a manual connection immediately"},
+            {"v2transport", RPCArg::Type::BOOL, RPCArg::DefaultHint{"set by -v2transport"}, "Attempt BIP324 v2 transport"},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR, "node", "Peer address"},
+                {RPCResult::Type::BOOL, "persistent", "Whether it is in the runtime addnode list"},
+                {RPCResult::Type::BOOL, "already_added", "Whether it was already in the runtime addnode list"},
+                {RPCResult::Type::BOOL, "added", "Whether this call added it to the runtime addnode list"},
+                {RPCResult::Type::BOOL, "try_now", "Whether a connection attempt was queued"},
+            }},
+        RPCExamples{
+            HelpExampleCli("addminingpeermeshnode", "\"node.btx.tools:19335\"")
+            + HelpExampleRpc("addminingpeermeshnode", "\"node.btx.tools:19335\", true, true")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    CConnman& connman = EnsureConnman(node);
+
+    const std::string node_arg{self.Arg<std::string>("node")};
+    const bool persistent{self.MaybeArg<bool>("persistent").value_or(true)};
+    const bool try_now{self.MaybeArg<bool>("try_now").value_or(true)};
+    const bool node_v2transport = connman.GetLocalServices() & NODE_P2P_V2;
+    const bool use_v2transport{self.MaybeArg<bool>("v2transport").value_or(node_v2transport)};
+    if (use_v2transport && !node_v2transport) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Error: v2transport requested but not enabled (see -v2transport)");
+    }
+
+    const auto added_nodes = connman.GetAddedNodeInfo(/*include_connected=*/false);
+    const bool already_added = IsAddedNode(added_nodes, node_arg);
+    bool added{false};
+    if (persistent && !already_added) {
+        if (!connman.AddNode({node_arg, use_v2transport})) {
+            throw JSONRPCError(RPC_CLIENT_NODE_ALREADY_ADDED, "Error: Node already added");
+        }
+        added = true;
+    }
+    if (try_now) {
+        CAddress addr;
+        connman.OpenNetworkConnection(addr, /*fCountFailure=*/false, /*grant_outbound=*/{}, node_arg.c_str(), ConnectionType::MANUAL, use_v2transport);
+    }
+
+    UniValue ret(UniValue::VOBJ);
+    ret.pushKV("node", node_arg);
+    ret.pushKV("persistent", persistent);
+    ret.pushKV("already_added", already_added);
+    ret.pushKV("added", added);
+    ret.pushKV("try_now", try_now);
+    return ret;
+},
+    };
+}
+
+static RPCHelpMan removeminingpeermeshnode()
+{
+    return RPCHelpMan{"removeminingpeermeshnode",
+        "\nRemoves a peer from the runtime mining peer mesh and optionally disconnects it.\n",
+        {
+            {"node", RPCArg::Type::STR, RPCArg::Optional::NO, "The host:port peer address"},
+            {"disconnect", RPCArg::Type::BOOL, RPCArg::Default{true}, "Disconnect any current peer session for this address"},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR, "node", "Peer address"},
+                {RPCResult::Type::BOOL, "removed", "Whether it was removed from the runtime addnode list"},
+                {RPCResult::Type::BOOL, "disconnected", "Whether a current session was disconnected"},
+            }},
+        RPCExamples{
+            HelpExampleCli("removeminingpeermeshnode", "\"node.btx.tools:19335\"")
+            + HelpExampleRpc("removeminingpeermeshnode", "\"node.btx.tools:19335\", true")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    CConnman& connman = EnsureConnman(node);
+
+    const std::string node_arg{self.Arg<std::string>("node")};
+    const bool disconnect{self.MaybeArg<bool>("disconnect").value_or(true)};
+    const bool removed = connman.RemoveAddedNode(node_arg);
+    bool disconnected{false};
+    if (disconnect) {
+        disconnected = connman.DisconnectNode(node_arg);
+    }
+
+    UniValue ret(UniValue::VOBJ);
+    ret.pushKV("node", node_arg);
+    ret.pushKV("removed", removed);
+    ret.pushKV("disconnected", disconnected);
+    return ret;
+},
+    };
+}
+
+static RPCHelpMan refreshminingpeermesh()
+{
+    return RPCHelpMan{"refreshminingpeermesh",
+        "\nQueues connection attempts to the default mining mesh and/or current runtime addnode entries.\n",
+        {
+            {"include_defaults", RPCArg::Type::BOOL, RPCArg::Default{true}, "Try the built-in public mining mesh"},
+            {"include_added", RPCArg::Type::BOOL, RPCArg::Default{true}, "Try current runtime addnode entries"},
+            {"v2transport", RPCArg::Type::BOOL, RPCArg::DefaultHint{"set by -v2transport"}, "Attempt BIP324 v2 transport for default nodes"},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "attempted", "Number of deduplicated connection attempts queued"},
+                {RPCResult::Type::ARR, "nodes", "Nodes attempted",
+                {
+                    {RPCResult::Type::STR, "node", "host:port"},
+                }},
+            }},
+        RPCExamples{
+            HelpExampleCli("refreshminingpeermesh", "")
+            + HelpExampleRpc("refreshminingpeermesh", "true, true")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    CConnman& connman = EnsureConnman(node);
+
+    const bool include_defaults{self.MaybeArg<bool>("include_defaults").value_or(true)};
+    const bool include_added{self.MaybeArg<bool>("include_added").value_or(true)};
+    const bool node_v2transport = connman.GetLocalServices() & NODE_P2P_V2;
+    const bool use_v2transport{self.MaybeArg<bool>("v2transport").value_or(node_v2transport)};
+    if (use_v2transport && !node_v2transport) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Error: v2transport requested but not enabled (see -v2transport)");
+    }
+
+    std::set<std::string> nodes;
+    if (include_defaults) {
+        const auto& defaults = node::DefaultMiningPeerMesh();
+        nodes.insert(defaults.begin(), defaults.end());
+    }
+    if (include_added) {
+        for (const AddedNodeInfo& info : connman.GetAddedNodeInfo(/*include_connected=*/false)) {
+            nodes.insert(info.m_params.m_added_node);
+        }
+    }
+
+    UniValue attempted_nodes(UniValue::VARR);
+    for (const auto& peer : nodes) {
+        CAddress addr;
+        connman.OpenNetworkConnection(addr, /*fCountFailure=*/false, /*grant_outbound=*/{}, peer.c_str(), ConnectionType::MANUAL, use_v2transport);
+        attempted_nodes.push_back(peer);
+    }
+
+    UniValue ret(UniValue::VOBJ);
+    ret.pushKV("attempted", static_cast<int64_t>(nodes.size()));
+    ret.pushKV("nodes", std::move(attempted_nodes));
     return ret;
 },
     };
@@ -1279,6 +1569,10 @@ void RegisterNetRPCCommands(CRPCTable& t)
         {"network", &addnode},
         {"network", &disconnectnode},
         {"network", &getaddednodeinfo},
+        {"network", &getminingpeermesh},
+        {"network", &addminingpeermeshnode},
+        {"network", &removeminingpeermeshnode},
+        {"network", &refreshminingpeermesh},
         {"network", &getnettotals},
         {"network", &getnetworkinfo},
         {"network", &setban},

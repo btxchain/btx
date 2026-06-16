@@ -188,12 +188,14 @@ public:
         std::optional<int32_t> shielded_spend_path_recovery_activation_height{};
         std::optional<int32_t> shielded_c002_activation_height{};
         std::optional<int32_t> shielded_unshield_velocity_activation_height{};
+        std::optional<int32_t> shielded_unshield_velocity_end_height{};
         std::optional<int32_t> shielded_unshield_velocity_min_cap_height{};
         std::optional<CAmount> shielded_unshield_velocity_min_cap{};
         std::optional<int32_t> shielded_pq128_upgrade_height{};
         std::optional<int32_t> shielded_pool_credit_disable_height{};
         std::optional<int32_t> shielded_sunset_height{};
         std::optional<int32_t> shielded_direct_send_public_flow_disable_height{};
+        std::optional<int32_t> shielded_v2_send_zero_output_exit_activation_height{};
         std::optional<int32_t> shielded_recovery_exit_activation_height{};
         std::optional<uint256> shielded_recovery_exit_frozen_root{};
         std::optional<int32_t> reorg_protection_start_height{};

@@ -636,7 +636,7 @@ private:
             ours.emplace_back("BTX_AUTOUPDATE_CLIENT_VERSION", LocalClientVersion());
             ours.emplace_back("BTX_AUTOUPDATE_PLATFORM", HostPlatform());
             ours.emplace_back("BTX_AUTOUPDATE_ARCH", HostArchitecture());
-            if (!config.telemetry_client_id.empty()) {
+            if (config.telemetry_client_id_enabled && !config.telemetry_client_id.empty()) {
                 ours.emplace_back("BTX_AUTOUPDATE_CLIENT_ID", config.telemetry_client_id);
             }
         }
@@ -846,8 +846,9 @@ std::string AutoUpdateTelemetryQuery(const AutoUpdateConfig& config)
         {"btx_version", LocalClientVersion()},
         {"btx_platform", HostPlatform()},
         {"btx_arch", HostArchitecture()},
+        {"btx_cohort", std::to_string(AutoUpdateRolloutCohort(config))},
     };
-    if (!config.telemetry_client_id.empty()) {
+    if (config.telemetry_client_id_enabled && !config.telemetry_client_id.empty()) {
         params.emplace_back("btx_client_id", config.telemetry_client_id);
     }
 
@@ -899,6 +900,32 @@ std::string AutoUpdateStatusString(AutoUpdateStatus status)
     case AutoUpdateStatus::LAUNCHED: return "launched";
     }
     assert(false);
+    return "unknown";
+}
+
+bool AutoUpdateStatusIsTransient(AutoUpdateStatus status)
+{
+    switch (status) {
+    case AutoUpdateStatus::FETCH_FAILED:
+    case AutoUpdateStatus::UNSIGNED_MANIFEST:
+    case AutoUpdateStatus::SCRIPT_FETCH_FAILED:
+    case AutoUpdateStatus::LAUNCH_FAILED:
+        return true;
+    case AutoUpdateStatus::DISABLED:
+    case AutoUpdateStatus::INVALID_CONFIG:
+    case AutoUpdateStatus::BAD_MANIFEST:
+    case AutoUpdateStatus::BAD_SIGNATURE:
+    case AutoUpdateStatus::NOT_NEWER:
+    case AutoUpdateStatus::ROLLOUT_DEFERRED:
+    case AutoUpdateStatus::SCRIPT_ORIGIN_REJECTED:
+    case AutoUpdateStatus::SCRIPT_HASH_MISSING:
+    case AutoUpdateStatus::SCRIPT_HASH_MISMATCH:
+    case AutoUpdateStatus::UPDATE_AVAILABLE:
+    case AutoUpdateStatus::LAUNCHED:
+        return false;
+    }
+    assert(false);
+    return false;
 }
 
 AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
@@ -1045,12 +1072,14 @@ void AutoUpdateManager::Stop()
 void AutoUpdateManager::ThreadLoop()
 {
     util::TraceThread("btx-autoupdate", [this] {
-        // Add up to one poll interval of random jitter to the initial delay so a fleet that boots
-        // together does not stampede btx.dev / the source repo at the same instant.
+        // Add bounded random jitter to the initial delay so a fleet that boots
+        // together does not stampede btx.dev / the source repo at the same instant. Keep the jitter
+        // bounded separately from the steady-state poll interval so urgent releases are discovered
+        // within minutes after restart instead of up to one full interval later.
         int64_t initial_delay = m_config.initial_delay_seconds;
-        if (initial_delay > 0 && m_config.interval_seconds > 0) {
+        if (initial_delay > 0 && m_config.initial_jitter_seconds > 0) {
             initial_delay += static_cast<int64_t>(
-                FastRandomContext().randrange<uint64_t>(static_cast<uint64_t>(m_config.interval_seconds)));
+                FastRandomContext().randrange<uint64_t>(static_cast<uint64_t>(m_config.initial_jitter_seconds)));
         }
         // CThreadInterrupt::sleep_for() returns true when the full duration elapses and false when
         // interrupted, so bail out only on interruption (i.e. when it returns false) -- otherwise the
@@ -1060,30 +1089,32 @@ void AutoUpdateManager::ThreadLoop()
             return;
         }
 
-        int64_t failure_backoff{m_config.interval_seconds};
+        int64_t failure_backoff{std::max<int64_t>(1, m_config.retry_seconds)};
         while (!*m_interrupt) {
+            int64_t next_delay{m_config.interval_seconds};
             const auto result = CheckForAutoUpdate(m_config, *Assert(m_fetcher), *Assert(m_verifier), *Assert(m_runner));
             if (result.status == AutoUpdateStatus::LAUNCHED) {
                 LogInfo("Auto-update launched installer for BTX %s\n", result.remote_version);
-                failure_backoff = m_config.interval_seconds;
+                failure_backoff = std::max<int64_t>(1, m_config.retry_seconds);
             } else if (result.status == AutoUpdateStatus::UPDATE_AVAILABLE) {
                 LogInfo("Auto-update found BTX %s, but seamless mode is disabled\n", result.remote_version);
-                failure_backoff = m_config.interval_seconds;
+                failure_backoff = std::max<int64_t>(1, m_config.retry_seconds);
             } else {
                 LogDebug(BCLog::AUTOUPDATE, "Auto-update check skipped: %s%s%s\n",
                          AutoUpdateStatusString(result.status),
                          result.detail.empty() ? "" : " ",
                          result.detail);
-                if (result.status == AutoUpdateStatus::FETCH_FAILED || result.status == AutoUpdateStatus::SCRIPT_FETCH_FAILED) {
+                if (AutoUpdateStatusIsTransient(result.status)) {
+                    next_delay = failure_backoff;
                     failure_backoff = std::min<int64_t>(
-                        std::max<int64_t>(m_config.interval_seconds, failure_backoff * 2),
+                        std::max<int64_t>(std::max<int64_t>(1, m_config.retry_seconds), failure_backoff * 2),
                         MAX_AUTOUPDATE_BACKOFF_SECONDS);
                 } else {
-                    failure_backoff = m_config.interval_seconds;
+                    failure_backoff = std::max<int64_t>(1, m_config.retry_seconds);
                 }
             }
 
-            if (!m_interrupt->sleep_for(std::chrono::seconds{failure_backoff})) return;
+            if (!m_interrupt->sleep_for(std::chrono::seconds{next_delay})) return;
         }
     });
 }
@@ -1098,6 +1129,7 @@ std::unique_ptr<AutoUpdateManager> MakeAutoUpdateManager(const ArgsManager& args
     config.dev_origin = args.GetBoolArg("-autoupdatedevorigin", false);
     config.require_script_hash = args.GetBoolArg("-autoupdaterequirescripthash", true);
     config.telemetry = args.GetBoolArg("-autoupdatetelemetry", true);
+    config.telemetry_client_id_enabled = args.GetBoolArg("-autoupdatetelemetryclientid", false);
     config.manifest_url = args.GetArg("-autoupdatemanifesturl", std::string{DEFAULT_AUTOUPDATE_MANIFEST_URL});
     config.trusted_origin = args.GetArg("-autoupdatetrustedorigin", std::string{DEFAULT_AUTOUPDATE_TRUSTED_ORIGIN});
     config.release_pubkey = args.GetArg("-autoupdatepubkey", std::string{DEFAULT_AUTOUPDATE_RELEASE_PUBKEY});
@@ -1113,11 +1145,13 @@ std::unique_ptr<AutoUpdateManager> MakeAutoUpdateManager(const ArgsManager& args
     config.python_command = args.GetArg("-autoupdatepython", "python3");
     config.interval_seconds = args.GetIntArg("-autoupdateinterval", DEFAULT_AUTOUPDATE_INTERVAL_SECONDS);
     config.initial_delay_seconds = args.GetIntArg("-autoupdateinitialdelay", DEFAULT_AUTOUPDATE_INITIAL_DELAY_SECONDS);
+    config.initial_jitter_seconds = args.GetIntArg("-autoupdateinitialjitter", DEFAULT_AUTOUPDATE_INITIAL_JITTER_SECONDS);
+    config.retry_seconds = args.GetIntArg("-autoupdateretryinterval", DEFAULT_AUTOUPDATE_RETRY_SECONDS);
     if (args.IsArgSet("-autoupdatecohort")) {
         config.rollout_cohort = std::clamp<int>(args.GetIntArg("-autoupdatecohort", 0), 0, 99);
     }
     config.datadir = args.GetDataDirBase();
-    if (config.telemetry) {
+    if (config.telemetry && config.telemetry_client_id_enabled) {
         config.telemetry_client_id = GetOrCreateAutoUpdateClientId(config.datadir);
     }
 #ifndef WIN32

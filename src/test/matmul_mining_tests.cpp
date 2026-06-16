@@ -443,7 +443,7 @@ BOOST_AUTO_TEST_CASE(getblocktemplate_includes_matmul_params)
     BOOST_CHECK(!saw_prevblock);
 }
 
-BOOST_AUTO_TEST_CASE(getblocktemplate_reports_chain_guard_advisory_without_pausing_external_miners)
+BOOST_AUTO_TEST_CASE(getblocktemplate_keeps_serving_when_chain_guard_reports_local_catch_up)
 {
     SetMiningChainGuard(true);
 
@@ -451,7 +451,8 @@ BOOST_AUTO_TEST_CASE(getblocktemplate_reports_chain_guard_advisory_without_pausi
     const auto chain_guard = tmpl.find_value("chain_guard").get_obj();
     BOOST_CHECK(!chain_guard.find_value("healthy").get_bool());
     BOOST_CHECK(!chain_guard.find_value("should_pause_mining").get_bool());
-    BOOST_CHECK_EQUAL(chain_guard.find_value("recommended_action").get_str(), "catch_up");
+    BOOST_CHECK_EQUAL(chain_guard.find_value("reason").get_str(), "initial_block_download");
+    BOOST_CHECK_EQUAL(chain_guard.find_value("recommended_action").get_str(), "mine_current_tip_and_catch_up");
 }
 
 // TEST: rpc_getmininginfo_algorithm
@@ -564,7 +565,7 @@ BOOST_AUTO_TEST_CASE(getmatmulchallenge_work_profile_reports_parent_mtp_seed_v3)
     BOOST_CHECK(!cross_nonce_reuse.find_value("fixed_instance_reuse_possible").get_bool());
 }
 
-BOOST_AUTO_TEST_CASE(getmatmulchallenge_reports_chain_guard_advisory_without_pausing)
+BOOST_AUTO_TEST_CASE(getmatmulchallenge_keeps_serving_when_chain_guard_reports_local_catch_up)
 {
     SetMiningChainGuard(true);
 
@@ -572,7 +573,8 @@ BOOST_AUTO_TEST_CASE(getmatmulchallenge_reports_chain_guard_advisory_without_pau
     const auto chain_guard = challenge.find_value("chain_guard").get_obj();
     BOOST_CHECK(!chain_guard.find_value("healthy").get_bool());
     BOOST_CHECK(!chain_guard.find_value("should_pause_mining").get_bool());
-    BOOST_CHECK_EQUAL(chain_guard.find_value("recommended_action").get_str(), "catch_up");
+    BOOST_CHECK_EQUAL(chain_guard.find_value("reason").get_str(), "initial_block_download");
+    BOOST_CHECK_EQUAL(chain_guard.find_value("recommended_action").get_str(), "mine_current_tip_and_catch_up");
 }
 
 // TEST: mining_generate_block

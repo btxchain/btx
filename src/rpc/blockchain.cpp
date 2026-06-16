@@ -1986,10 +1986,12 @@ RPCHelpMan getshieldedstateinfo()
                 {RPCResult::Type::NUM, "pool_balance_sat", "Current global shielded pool balance in satoshis"},
                 {RPCResult::Type::NUM, "next_block_height", "The next block height used for velocity-window capacity"},
                 {RPCResult::Type::BOOL, "velocity_cap_active", "Whether the unshield velocity cap is active for next_block_height"},
+                {RPCResult::Type::BOOL, "velocity_capacity_unlimited", "Whether next_block_height has no velocity quota; remaining capacity is then limited only by the pool balance"},
                 {RPCResult::Type::NUM, "velocity_activation_height", "Consensus activation height for the unshield velocity cap"},
+                {RPCResult::Type::NUM, "velocity_end_height", "Consensus height at which the unshield velocity cap stops applying"},
                 {RPCResult::Type::NUM, "velocity_min_cap_height", "Consensus height at which the minimum velocity cap starts applying"},
-                {RPCResult::Type::STR_AMOUNT, "velocity_min_cap", "Minimum velocity cap amount once active"},
-                {RPCResult::Type::NUM, "velocity_min_cap_sat", "Minimum velocity cap amount in satoshis once active"},
+                {RPCResult::Type::STR_AMOUNT, "velocity_min_cap", "Effective minimum velocity cap amount at next_block_height"},
+                {RPCResult::Type::NUM, "velocity_min_cap_sat", "Effective minimum velocity cap amount in satoshis at next_block_height"},
                 {RPCResult::Type::NUM, "velocity_window_blocks", "Trailing velocity window length in blocks"},
                 {RPCResult::Type::NUM, "velocity_window_lower_exclusive", "Lower exclusive block height of the next-block velocity window"},
                 {RPCResult::Type::NUM, "velocity_window_upper_inclusive", "Upper inclusive block height of the next-block velocity window"},
@@ -2025,12 +2027,19 @@ RPCHelpMan getshieldedstateinfo()
             const uint32_t window_blocks{consensus.nShieldedUnshieldVelocityWindowBlocks};
             const uint32_t cap_bps{consensus.nShieldedUnshieldVelocityCapBps};
             const CAmount pool_balance{chainman.GetShieldedPoolBalance()};
-            const CAmount window_egress{
-                chainman.GetShieldedUnshieldVelocityWindowTotal(next_block_height, window_blocks)};
+            const bool velocity_cap_active{
+                consensus.IsShieldedUnshieldVelocityCapActive(next_block_height)};
+            const CAmount window_egress{velocity_cap_active
+                ? chainman.GetShieldedUnshieldVelocityWindowTotal(next_block_height, window_blocks)
+                : 0};
             const CAmount min_cap{
                 consensus.ShieldedUnshieldVelocityMinCapForHeight(next_block_height)};
-            const CAmount cap_amount{ShieldedUnshieldVelocity::WindowCap(pool_balance, cap_bps, min_cap)};
-            const CAmount remaining_capacity{cap_amount > window_egress ? cap_amount - window_egress : 0};
+            const CAmount cap_amount{velocity_cap_active
+                ? ShieldedUnshieldVelocity::WindowCap(pool_balance, cap_bps, min_cap)
+                : 0};
+            const CAmount remaining_capacity{velocity_cap_active
+                ? (cap_amount > window_egress ? cap_amount - window_egress : 0)
+                : pool_balance};
             const int64_t window_lower_exclusive{
                 static_cast<int64_t>(next_block_height) - static_cast<int64_t>(window_blocks)};
 
@@ -2041,12 +2050,13 @@ RPCHelpMan getshieldedstateinfo()
             obj.pushKV("pool_balance", ValueFromAmount(pool_balance));
             obj.pushKV("pool_balance_sat", pool_balance);
             obj.pushKV("next_block_height", next_block_height);
-            obj.pushKV("velocity_cap_active",
-                       consensus.IsShieldedUnshieldVelocityCapActive(next_block_height));
+            obj.pushKV("velocity_cap_active", velocity_cap_active);
+            obj.pushKV("velocity_capacity_unlimited", !velocity_cap_active);
             obj.pushKV("velocity_activation_height", consensus.nShieldedUnshieldVelocityActivationHeight);
+            obj.pushKV("velocity_end_height", consensus.nShieldedUnshieldVelocityEndHeight);
             obj.pushKV("velocity_min_cap_height", consensus.nShieldedUnshieldVelocityMinCapHeight);
-            obj.pushKV("velocity_min_cap", ValueFromAmount(consensus.nShieldedUnshieldVelocityMinCap));
-            obj.pushKV("velocity_min_cap_sat", consensus.nShieldedUnshieldVelocityMinCap);
+            obj.pushKV("velocity_min_cap", ValueFromAmount(min_cap));
+            obj.pushKV("velocity_min_cap_sat", min_cap);
             obj.pushKV("velocity_window_blocks", window_blocks);
             obj.pushKV("velocity_window_lower_exclusive", window_lower_exclusive);
             obj.pushKV("velocity_window_upper_inclusive", next_block_height);
@@ -2057,7 +2067,7 @@ RPCHelpMan getshieldedstateinfo()
             obj.pushKV("velocity_window_egress_sat", window_egress);
             obj.pushKV("remaining_window_capacity", ValueFromAmount(remaining_capacity));
             obj.pushKV("remaining_window_capacity_sat", remaining_capacity);
-            obj.pushKV("velocity_window_exceeds_cap", window_egress > cap_amount);
+            obj.pushKV("velocity_window_exceeds_cap", velocity_cap_active && window_egress > cap_amount);
             return obj;
         },
     };

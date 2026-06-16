@@ -88,6 +88,8 @@ rpcallowip=127.0.0.1
 # Keep peer discovery on and use DNS-only bootstrap hints.
 dnsseed=1
 fixedseeds=1
+addnode=node.btx.dev:19335
+addnode=node.btxchain.org:19335
 addnode=node.btx.tools:19335
 
 # Miner fast-start posture.
@@ -127,10 +129,10 @@ btx-cli getchainstates
 
 Once the snapshot chainstate is active, wallet and mining RPCs become usable
 without waiting for a full historical sync.
-Mining itself remains guarded: `getblocktemplate` will pause while the node is
-still in IBD, lacks sufficient outbound peers, or has peers that are too far
-behind the header tip. Keep DNS seed and fixed seed discovery enabled, and use
-DNS names rather than hard-coded peer IP addresses in any `addnode=` hints.
+Mining-chain guard now reports IBD, peer, and tip-risk warnings without
+blocking `getblocktemplate`. Keep DNS seed and fixed seed discovery enabled,
+use DNS names rather than hard-coded peer IP addresses in any `addnode=` hints,
+and monitor `getmininginfo.chain_guard` while miners keep requesting work.
 When checking readiness manually, pass a BIP 9 template-request object:
 
 ```bash

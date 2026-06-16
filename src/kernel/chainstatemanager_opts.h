@@ -117,7 +117,7 @@ inline ReorgProtectionProfileSettings GetReorgProtectionProfileSettings(ReorgPro
             .action = DeepReorgAction::WARN,
             .warn_depth = 3,
             .park_depth = REORG_PROTECTION_DEPTH_DISABLED,
-            .finality_depth = 12,
+            .finality_depth = 72,
             .hysteresis_depth = 0,
             .hysteresis_work_margin = 2,
         };

@@ -438,8 +438,9 @@ def main(argv: list[str]) -> int:
                 err_obj = payload.get("error")
                 if err_obj:
                     # Match the .sh's behavior: log RPC-level errors but keep
-                    # looping. ``mining paused by chain guard`` is a normal
-                    # transient — the supervisor would react; we just retry.
+                    # looping. Chain-guard warnings are now advisory telemetry
+                    # on current daemons, so RPC errors here indicate ordinary
+                    # warmup, auth, connectivity, or node failures.
                     log(err_stream, f"rpc error: {err_obj}")
                 else:
                     # Successful generation. Result is a list of block hashes.

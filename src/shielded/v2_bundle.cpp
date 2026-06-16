@@ -2726,13 +2726,18 @@ void ApplyCanonicalOpaquePayloadPadding(GenericOpaquePayloadEnvelope& envelope)
             if (!output.has_value()) return std::nullopt;
             payload.outputs.push_back(std::move(*output));
         }
-        auto note_class = DeriveSharedOutputNoteClass(MakeSpan(payload.outputs));
-        auto scan_domain = DeriveSharedOutputScanDomain(MakeSpan(payload.outputs));
-        if (!note_class.has_value() || !scan_domain.has_value()) {
-            return std::nullopt;
+        if (payload.outputs.empty()) {
+            payload.output_note_class = envelope.output_note_class;
+            payload.output_scan_domain = envelope.output_scan_domain;
+        } else {
+            auto note_class = DeriveSharedOutputNoteClass(MakeSpan(payload.outputs));
+            auto scan_domain = DeriveSharedOutputScanDomain(MakeSpan(payload.outputs));
+            if (!note_class.has_value() || !scan_domain.has_value()) {
+                return std::nullopt;
+            }
+            payload.output_note_class = *note_class;
+            payload.output_scan_domain = *scan_domain;
         }
-        payload.output_note_class = *note_class;
-        payload.output_scan_domain = *scan_domain;
         payload.output_encoding = DeriveGenericSendOutputEncoding(payload);
         if (!payload.IsValid()) {
             return std::nullopt;

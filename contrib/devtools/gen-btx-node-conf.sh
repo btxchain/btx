@@ -84,6 +84,8 @@ if [[ "${BOOTSTRAP_MODE}" == "discover" ]]; then
 # Scalable bootstrap (recommended): seed with public BTX nodes, keep peer discovery on.
 dnsseed=1
 fixedseeds=1
+addnode=node.btx.dev:19335
+addnode=node.btxchain.org:19335
 addnode=node.btx.tools:19335
 addnode=146.190.179.86:19335
 addnode=164.90.246.229:19335
@@ -95,6 +97,8 @@ elif [[ "${BOOTSTRAP_MODE}" == "strict-connect" ]]; then
 # pins outbound peers and disables automatic peer discovery.
 dnsseed=0
 fixedseeds=0
+connect=node.btx.dev:19335
+connect=node.btxchain.org:19335
 connect=node.btx.tools:19335
 connect=146.190.179.86:19335
 connect=164.90.246.229:19335

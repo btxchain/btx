@@ -8617,6 +8617,7 @@ RPCHelpMan z_sendmany()
                 explicit_fee = true;
                 fee = AmountFromValue(request.params[1]);
                 if (fee <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Fee must be positive");
+                fee = CanonicalizeShieldingFee(*pwallet, fee);
             }
 
             const std::set<int> subtract_fee_from_outputs = InterpretShieldedSubtractFeeInstructions(
@@ -8708,14 +8709,14 @@ RPCHelpMan z_sendmany()
                             conflict_selection.has_value() ? &*conflict_selection : nullptr));
                     if (!selection.has_value()) break;
 
-                    const CAmount next_fee = ComputeShieldedAutoFee(
+                    const CAmount next_fee = CanonicalizeShieldingFee(*pwallet, ComputeShieldedAutoFee(
                         *pwallet,
                         coin_control,
                         EstimateDirectShieldedSendVirtualSize(
                             selection->selected.size(),
                             selection->shielded_output_count,
                             selection->transparent_output_bytes),
-                        /*has_shielded_bundle=*/true);
+                        /*has_shielded_bundle=*/true));
                     if (next_fee == estimated_fee) break;
                     estimated_fee = next_fee;
                 }
@@ -8725,14 +8726,14 @@ RPCHelpMan z_sendmany()
                     shielded_recipient_count == 0 ? 1 : shielded_recipient_count + 1;
                 fee = estimated_fee > 0
                     ? estimated_fee
-                    : ComputeShieldedAutoFee(
+                    : CanonicalizeShieldingFee(*pwallet, ComputeShieldedAutoFee(
                         *pwallet,
                         coin_control,
                         EstimateDirectShieldedSendVirtualSize(
                             fallback_spend_count,
                             fallback_shielded_outputs,
                             transparent_output_bytes),
-                        /*has_shielded_bundle=*/true);
+                        /*has_shielded_bundle=*/true));
             }
 
             const auto tx = BuildAndCommitShieldedTransactionWithAnchorRetry(
@@ -8896,11 +8897,11 @@ RPCHelpMan z_sendmany()
                                     strprintf("Fee too low for transaction size. Required at least %s", FormatMoney(required_fee)));
                             }
 
-                            const CAmount desired_fee = ComputeShieldedAutoFee(
+                            const CAmount desired_fee = CanonicalizeShieldingFee(*pwallet, ComputeShieldedAutoFee(
                                 *pwallet,
                                 coin_control,
                                 ShieldedRelayVirtualSize(*candidate),
-                                candidate->HasShieldedBundle());
+                                candidate->HasShieldedBundle()));
                             if (fee >= desired_fee) {
                                 built_tx = std::move(candidate);
                                 break;
@@ -9163,6 +9164,7 @@ RPCHelpMan z_shieldfunds()
                 explicit_fee = true;
                 fee = AmountFromValue(request.params[2]);
                 if (fee <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Fee must be positive");
+                fee = CanonicalizeShieldingFee(*pwallet, fee);
             }
 
             std::optional<size_t> max_inputs_override;
@@ -10074,6 +10076,7 @@ RPCHelpMan z_sweeptotransparent()
                 explicit_fee = true;
                 fee = AmountFromValue(request.params[2]);
                 if (fee <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Fee must be positive");
+                fee = CanonicalizeShieldingFee(*pwallet, fee);
             }
 
             const bool dry_run = !request.params[3].isNull() && request.params[3].get_bool();

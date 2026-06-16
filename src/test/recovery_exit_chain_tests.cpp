@@ -8,6 +8,7 @@
 // canonical nullifier. Uses a DETERMINISTIC note + ML-DSA-44 key so the consensus-pinned frozen membership
 // root can be supplied as a regtest override that matches the note the transaction reveals.
 
+#include <addresstype.h>
 #include <consensus/amount.h>
 #include <coins.h>
 #include <crypto/chacha20poly1305.h>
@@ -31,6 +32,7 @@
 #include <sync.h>
 #include <test/util/mining.h>
 #include <test/util/setup_common.h>
+#include <test/util/shielded_account_registry_test_util.h>
 #include <test/util/txmempool.h>
 #include <uint256.h>
 #include <util/translation.h>
@@ -40,7 +42,9 @@
 
 #include <array>
 #include <map>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace shielded::recovery;
@@ -133,6 +137,23 @@ TestOpts MakeRecoveryOpts()
     return opts;
 }
 
+TestOpts MakeRecoveryVelocityOpts()
+{
+    static const std::string sunset_arg = "-regtestshieldedsunsetheight=" + std::to_string(kSunsetHeight);
+    static const std::string credit_arg = "-regtestshieldedpoolcreditdisableheight=" + std::to_string(kSunsetHeight);
+    static const std::string activ_arg = "-regtestshieldedrecoveryexitactivationheight=" + std::to_string(kSunsetHeight);
+    static const std::string velocity_arg = "-regtestshieldedunshieldvelocityactivationheight=" + std::to_string(kSunsetHeight);
+    static const std::string root_arg = "-regtestshieldedrecoveryexitfrozenroot=" + Vectors().frozen_root.GetHex();
+    TestOpts opts;
+    opts.extra_args = {
+        sunset_arg.c_str(),
+        credit_arg.c_str(),
+        activ_arg.c_str(),
+        velocity_arg.c_str(),
+        root_arg.c_str()};
+    return opts;
+}
+
 TestOpts MakeRecoveryRebuildOpts()
 {
     static const std::string sunset_arg = "-regtestshieldedsunsetheight=" + std::to_string(kRebuildSunsetHeight);
@@ -152,6 +173,10 @@ TestOpts MakeRecoveryRebuildOpts()
 
 struct RecoveryExitChainSetup : public TestChain100Setup {
     RecoveryExitChainSetup() : TestChain100Setup(ChainType::REGTEST, MakeRecoveryOpts()) {}
+};
+
+struct RecoveryExitVelocitySetup : public TestChain100Setup {
+    RecoveryExitVelocitySetup() : TestChain100Setup(ChainType::REGTEST, MakeRecoveryVelocityOpts()) {}
 };
 
 struct RecoveryExitRebuildSetup : public TestChain100Setup {
@@ -260,7 +285,113 @@ CMutableTransaction BuildRecoveryExitTxForTemplatePolicyIndex(uint32_t index,
     return mtx;
 }
 
+uint256 DeterministicTemplateHash(std::string tag, uint32_t index, uint32_t sub_index = 0)
+{
+    HashWriter writer;
+    writer << tag << index << sub_index;
+    return writer.GetSHA256();
+}
+
+CMutableTransaction BuildV2SendExitTxForTemplatePolicyIndex(uint32_t index,
+                                                            uint32_t spend_count,
+                                                            CAmount fee,
+                                                            CScript script_pub_key = RecoveryExitDefaultScript())
+{
+    using namespace shielded::v2;
+    const ReVectors& v = Vectors();
+    BOOST_REQUIRE_GT(spend_count, 1U);
+
+    std::vector<SpendDescription> spends;
+    spends.reserve(spend_count);
+    std::vector<shielded::registry::ShieldedAccountLeaf> account_leaves;
+    account_leaves.reserve(spend_count);
+
+    for (uint32_t spend_index = 0; spend_index < spend_count; ++spend_index) {
+        ShieldedNote note;
+        note.value = kRecoverValue;
+        note.recipient_pk_hash = Sha256Of(v.pubkey);
+
+        FastRandomContext rng{
+            DeterministicTemplateHash("BTX_V2_SEND_EXIT_TEMPLATE_POLICY_TEST", index, spend_index)};
+        std::optional<uint256> nullifier;
+        std::optional<smile2::CompactPublicAccount> account;
+        for (int attempt = 0; attempt < 128; ++attempt) {
+            note.rho = rng.rand256();
+            note.rcm = rng.rand256();
+            nullifier = smile2::wallet::ComputeSmileNullifierFromNote(
+                smile2::wallet::SMILE_GLOBAL_SEED, note);
+            account = smile2::wallet::BuildCompactPublicAccountFromNote(
+                smile2::wallet::SMILE_GLOBAL_SEED, note);
+            if (nullifier.has_value() && !nullifier->IsNull() && account.has_value()) break;
+        }
+        BOOST_REQUIRE(nullifier.has_value());
+        BOOST_REQUIRE(!nullifier->IsNull());
+        BOOST_REQUIRE(account.has_value());
+
+        const uint256 note_commitment = smile2::ComputeCompactPublicAccountHash(*account);
+        const auto account_leaf = test::shielded::BuildDirectAccountLeaf(note_commitment, *account);
+        BOOST_REQUIRE(account_leaf.has_value());
+        account_leaves.push_back(*account_leaf);
+
+        SpendDescription spend;
+        spend.nullifier = *nullifier;
+        spend.merkle_anchor = DeterministicTemplateHash("BTX_V2_SEND_EXIT_SPEND_ANCHOR", index);
+        spend.note_commitment = note_commitment;
+        spend.value_commitment = smile2::ComputeSmileOutputCoinHash(account->public_coin);
+        spends.push_back(spend);
+    }
+
+    shielded::registry::ShieldedAccountRegistryState registry;
+    BOOST_REQUIRE(registry.Append(Span<const shielded::registry::ShieldedAccountLeaf>{
+        account_leaves.data(), account_leaves.size()}));
+    for (uint32_t spend_index = 0; spend_index < spend_count; ++spend_index) {
+        auto witness = registry.BuildSpendWitness(spend_index);
+        BOOST_REQUIRE(witness.has_value());
+        spends[spend_index].account_leaf_commitment = witness->account_leaf_commitment;
+        spends[spend_index].account_registry_proof = std::move(*witness);
+    }
+
+    const CAmount exit_value = static_cast<CAmount>(spend_count) * kRecoverValue;
+    BOOST_REQUIRE_GT(exit_value, fee);
+
+    SendPayload payload;
+    payload.spend_anchor = spends.front().merkle_anchor;
+    payload.account_registry_anchor = registry.Root();
+    payload.output_encoding = SendOutputEncoding::SMILE_COMPACT_POSTFORK_UNSHIELD;
+    payload.output_note_class = NoteClass::USER;
+    payload.output_scan_domain = ScanDomain::OPAQUE;
+    payload.spends = std::move(spends);
+    payload.value_balance = exit_value;
+    payload.fee = fee;
+    BOOST_REQUIRE(payload.IsValid());
+
+    CMutableTransaction mtx;
+    mtx.vout.emplace_back(exit_value - fee, script_pub_key);
+
+    TransactionBundle bundle;
+    bundle.header.family_id = TransactionFamily::V2_SEND;
+    bundle.header.proof_envelope.proof_kind = ProofKind::DIRECT_SMILE;
+    bundle.header.proof_envelope.membership_proof_kind = ProofComponentKind::SMILE_MEMBERSHIP;
+    bundle.header.proof_envelope.amount_proof_kind = ProofComponentKind::SMILE_BALANCE;
+    bundle.header.proof_envelope.balance_proof_kind = ProofComponentKind::SMILE_BALANCE;
+    bundle.header.proof_envelope.settlement_binding_kind = SettlementBindingKind::NONE;
+    bundle.header.proof_envelope.statement_digest =
+        DeterministicTemplateHash("BTX_V2_SEND_EXIT_STATEMENT", index);
+    bundle.payload = payload;
+    bundle.header.payload_digest = ComputeSendPayloadDigest(payload);
+    bundle.proof_payload = {0x01};
+    mtx.shielded_bundle.v2_bundle = bundle;
+    BOOST_REQUIRE(bundle.IsValid());
+    return mtx;
+}
+
 void AddRecoveryExitToMempool(CTxMemPool& pool, const CTransactionRef& tx, CAmount fee = kRecoverFee)
+{
+    TestMemPoolEntryHelper entry;
+    AddToMempool(pool, entry.Fee(fee).Height(kSunsetHeight).FromTx(tx));
+}
+
+void AddV2SendExitToMempool(CTxMemPool& pool, const CTransactionRef& tx, CAmount fee)
 {
     TestMemPoolEntryHelper entry;
     AddToMempool(pool, entry.Fee(fee).Height(kSunsetHeight).FromTx(tx));
@@ -271,6 +402,19 @@ bool IsRecoveryExitTx(const CTransaction& tx)
     if (!tx.HasShieldedBundle()) return false;
     const auto family = tx.GetShieldedBundle().GetTransactionFamily();
     return family.has_value() && *family == shielded::v2::TransactionFamily::V2_RECOVERY_EXIT;
+}
+
+bool IsV2SendTx(const CTransaction& tx)
+{
+    if (!tx.HasShieldedBundle()) return false;
+    const auto family = tx.GetShieldedBundle().GetTransactionFamily();
+    return family.has_value() && *family == shielded::v2::TransactionFamily::V2_SEND;
+}
+
+void AddTransparentSpendToMempool(CTxMemPool& pool, const CTransactionRef& tx, CAmount fee)
+{
+    TestMemPoolEntryHelper entry;
+    AddToMempool(pool, entry.Fee(fee).Height(kSunsetHeight).SpendsCoinbase(true).FromTx(tx));
 }
 
 CMutableTransaction BuildLegacyShieldOnlyTx(TestChain100Setup& setup,
@@ -620,6 +764,206 @@ BOOST_FIXTURE_TEST_CASE(recovery_exit_template_selection_caps_recovery_exit_wave
     BOOST_CHECK_EQUAL(*node::BlockAssembler::m_last_block_template_recovery_exit_txs, 16);
     BOOST_CHECK_EQUAL(*node::BlockAssembler::m_last_block_template_policy_verify_units, 1600);
     BOOST_CHECK_GT(*node::BlockAssembler::m_last_block_template_policy_candidate_evaluations, 16);
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_validation_fallback_preserves_transparent_mempool, RecoveryExitChainSetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.SetShieldedPoolBalanceForTest(2 * kRecoverValue));
+    }
+
+    const CScript transparent_destination = GetScriptForDestination(WitnessV2P2MR{GetRandHash()});
+    const CAmount transparent_fee{10'000};
+    BOOST_REQUIRE_GT(m_coinbase_txns.at(0)->vout[0].nValue, transparent_fee);
+    const CMutableTransaction transparent_mtx = CreateValidMempoolTransaction(
+        m_coinbase_txns.at(0),
+        /*input_vout=*/0,
+        /*input_height=*/0,
+        coinbaseKey,
+        transparent_destination,
+        /*output_amount=*/m_coinbase_txns.at(0)->vout[0].nValue - transparent_fee,
+        /*submit=*/false);
+    {
+        LOCK(cs_main);
+        const MempoolAcceptResult transparent_result{
+            chainman.ProcessTransaction(MakeTransactionRef(transparent_mtx))};
+        BOOST_REQUIRE_MESSAGE(
+            transparent_result.m_result_type == MempoolAcceptResult::ResultType::VALID,
+            "transparent transaction rejected: " << transparent_result.m_state.ToString());
+    }
+    const uint256 transparent_txid = transparent_mtx.GetHash();
+
+    constexpr CAmount recovery_fee{2'000'000};
+    const auto recovery_tx = MakeTransactionRef(
+        BuildRecoveryExitTxForTemplatePolicyIndex(/*index=*/999, recovery_fee));
+    AddRecoveryExitToMempool(pool, recovery_tx, recovery_fee);
+
+    BOOST_CHECK_EQUAL(WITH_LOCK(pool.cs, return pool.size()), 2U);
+
+    node::BlockAssembler::Options options;
+    options.coinbase_output_script = CScript() << OP_TRUE;
+    const auto block = PrepareBlock(m_node, options);
+    BOOST_REQUIRE(block);
+
+    bool found_recovery_exit{false};
+    bool found_transparent{false};
+    for (const auto& block_tx : block->vtx) {
+        found_recovery_exit = found_recovery_exit || block_tx->GetHash() == recovery_tx->GetHash();
+        found_transparent = found_transparent || block_tx->GetHash() == transparent_txid;
+    }
+
+    BOOST_CHECK(!found_recovery_exit);
+    BOOST_CHECK(found_transparent);
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_template_filter_excludes_all_exits_when_pending_exceeds_velocity_capacity,
+                        RecoveryExitVelocitySetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    constexpr uint32_t recovery_tx_count{4};
+    constexpr CAmount recovery_fee{2'000'000};
+    constexpr CAmount transparent_fee{10'000};
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.SetShieldedPoolBalanceForTest(recovery_tx_count * kRecoverValue));
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedSunsetActive(kSunsetHeight));
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedUnshieldVelocityCapActive(kSunsetHeight));
+    }
+
+    for (uint32_t i = 0; i < recovery_tx_count; ++i) {
+        const auto tx = MakeTransactionRef(BuildRecoveryExitTxForTemplatePolicyIndex(i, recovery_fee));
+        AddRecoveryExitToMempool(pool, tx, recovery_fee);
+    }
+
+    const auto transparent_tx = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns.at(0),
+        /*input_vout=*/0,
+        /*input_height=*/1,
+        coinbaseKey,
+        CScript() << OP_TRUE,
+        m_coinbase_txns.at(0)->vout[0].nValue - transparent_fee,
+        /*submit=*/false));
+    AddTransparentSpendToMempool(pool, transparent_tx, transparent_fee);
+    BOOST_CHECK_EQUAL(WITH_LOCK(pool.cs, return pool.size()), recovery_tx_count + 1);
+
+    node::BlockAssembler::Options options;
+    options.coinbase_output_script = CScript() << OP_TRUE;
+    const auto block = PrepareBlock(m_node, options);
+    BOOST_REQUIRE(block);
+
+    uint32_t recovery_exit_txs{0};
+    bool found_transparent_tx{false};
+    for (const auto& block_tx : block->vtx) {
+        if (IsRecoveryExitTx(*block_tx)) {
+            ++recovery_exit_txs;
+        }
+        if (block_tx->GetHash() == transparent_tx->GetHash()) {
+            found_transparent_tx = true;
+        }
+    }
+
+    BOOST_CHECK_EQUAL(recovery_exit_txs, 0U);
+    BOOST_CHECK(found_transparent_tx);
+    BOOST_CHECK(WITH_LOCK(pool.cs, return pool.exists(GenTxid::Txid(transparent_tx->GetHash()))));
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_template_filter_excludes_multi_spend_v2_send_exits_when_pending_exceeds_velocity_capacity,
+                        RecoveryExitVelocitySetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    constexpr uint32_t spend_count{3};
+    constexpr CAmount send_fee{2'000'000};
+    constexpr CAmount transparent_fee{10'000};
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.SetShieldedPoolBalanceForTest(spend_count * kRecoverValue));
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedSunsetActive(kSunsetHeight));
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedUnshieldVelocityCapActive(kSunsetHeight));
+    }
+
+    const auto send_tx = MakeTransactionRef(
+        BuildV2SendExitTxForTemplatePolicyIndex(/*index=*/77, spend_count, send_fee));
+    AddV2SendExitToMempool(pool, send_tx, send_fee);
+
+    const auto transparent_tx = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns.at(0),
+        /*input_vout=*/0,
+        /*input_height=*/1,
+        coinbaseKey,
+        CScript() << OP_TRUE,
+        m_coinbase_txns.at(0)->vout[0].nValue - transparent_fee,
+        /*submit=*/false));
+    AddTransparentSpendToMempool(pool, transparent_tx, transparent_fee);
+    BOOST_CHECK_EQUAL(WITH_LOCK(pool.cs, return pool.size()), 2U);
+
+    node::BlockAssembler::Options options;
+    options.coinbase_output_script = CScript() << OP_TRUE;
+    const auto block = PrepareBlock(m_node, options);
+    BOOST_REQUIRE(block);
+
+    bool found_v2_send{false};
+    bool found_transparent_tx{false};
+    for (const auto& block_tx : block->vtx) {
+        if (IsV2SendTx(*block_tx)) {
+            found_v2_send = true;
+        }
+        if (block_tx->GetHash() == transparent_tx->GetHash()) {
+            found_transparent_tx = true;
+        }
+    }
+
+    BOOST_CHECK(!found_v2_send);
+    BOOST_CHECK(found_transparent_tx);
+    BOOST_CHECK(WITH_LOCK(pool.cs, return pool.exists(GenTxid::Txid(send_tx->GetHash()))));
+    BOOST_CHECK(WITH_LOCK(pool.cs, return pool.exists(GenTxid::Txid(transparent_tx->GetHash()))));
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_template_filter_allows_exits_when_pending_fits_velocity_capacity,
+                        RecoveryExitVelocitySetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    constexpr uint32_t recovery_tx_count{2};
+    constexpr CAmount recovery_fee{2'000'000};
+
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.SetShieldedPoolBalanceForTest(4 * kRecoverValue));
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedSunsetActive(kSunsetHeight));
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedUnshieldVelocityCapActive(kSunsetHeight));
+    }
+
+    for (uint32_t i = 0; i < recovery_tx_count; ++i) {
+        const auto tx = MakeTransactionRef(BuildRecoveryExitTxForTemplatePolicyIndex(i, recovery_fee));
+        AddRecoveryExitToMempool(pool, tx, recovery_fee);
+    }
+
+    node::BlockAssembler::Options options;
+    options.coinbase_output_script = CScript() << OP_TRUE;
+    options.test_block_validity = false;
+    const auto block = PrepareBlock(m_node, options);
+    BOOST_REQUIRE(block);
+
+    uint32_t recovery_exit_txs{0};
+    for (const auto& block_tx : block->vtx) {
+        if (IsRecoveryExitTx(*block_tx)) {
+            ++recovery_exit_txs;
+        }
+    }
+
+    BOOST_CHECK_EQUAL(recovery_exit_txs, recovery_tx_count);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

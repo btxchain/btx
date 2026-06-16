@@ -79,9 +79,16 @@ struct BlockCreateOptions {
     CFeeRate blockMinFeeRate{DEFAULT_BLOCK_MIN_TX_FEE};
     // Whether to call TestBlockValidity() at the end of CreateNewBlock().
     bool test_block_validity{true};
+    // Internal retry knob: keep normal mempool transaction selection but skip
+    // recovery-exit bundles when a cap/window-sensitive candidate failed the
+    // final block validity check.
+    bool include_recovery_exit_txs{true};
+    // Internal retry option: when the post-sunset velocity cap rejects a
+    // template, retry with positive shielded-pool egress excluded.
+    bool exclude_shielded_exit_txs_for_velocity{false};
     bool print_modified_fee{DEFAULT_PRINT_MODIFIED_FEE};
     // Allow RPC template providers to surface chain-guard status without
-    // disabling the local daemon's own mining pause.
+    // duplicating the same guard observation in lower-level template creation.
     bool bypass_chain_guard{false};
 
     BlockCreateOptions Clamped() const;

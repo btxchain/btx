@@ -155,6 +155,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--btxd", required=True, help="Path to the btxd binary for this platform.")
     parser.add_argument("--btx-cli", required=True, help="Path to the btx-cli binary for this platform.")
+    parser.add_argument(
+        "--btx-util",
+        help="Path to the btx-util binary for this platform. Defaults to a sibling of btx-cli or btxd.",
+    )
     parser.add_argument("--matmul-metallib", help="Optional precompiled MatMul Metal library for macOS archives.")
     parser.add_argument("--oracle-metallib", help="Optional precompiled oracle Metal library for macOS archives.")
     parser.add_argument(
@@ -175,6 +179,24 @@ def ensure_input_file(path: Path, label: str) -> Path:
     return path
 
 
+def resolve_btx_util_path(explicit_path: Path | None, btxd_path: Path, btx_cli_path: Path, exe_suffix: str) -> Path:
+    if explicit_path is not None:
+        return ensure_input_file(explicit_path, "btx-util binary")
+
+    util_name = f"btx-util{exe_suffix}"
+    candidates = [
+        btx_cli_path.parent / util_name,
+        btxd_path.parent / util_name,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Missing btx-util binary; release archives must ship btx-util so PQ-signed auto-updates can verify. "
+        "Pass --btx-util or place it next to btx-cli/btxd."
+    )
+
+
 def archive_filename(version: str, platform_id: str, override: str | None) -> str:
     if override:
         return override
@@ -189,6 +211,7 @@ def stage_release_tree(
     platform_id: str,
     btxd_path: Path,
     btx_cli_path: Path,
+    btx_util_path: Path | None,
     matmul_metallib_path: Path | None,
     oracle_metallib_path: Path | None,
     source_root: Path,
@@ -205,6 +228,10 @@ def stage_release_tree(
     binary_pairs = [
         (ensure_input_file(btxd_path, "btxd binary"), f"btxd{config['exe_suffix']}"),
         (ensure_input_file(btx_cli_path, "btx-cli binary"), f"btx-cli{config['exe_suffix']}"),
+        (
+            resolve_btx_util_path(btx_util_path, btxd_path, btx_cli_path, config["exe_suffix"]),
+            f"btx-util{config['exe_suffix']}",
+        ),
     ]
     for source, dest_name in binary_pairs:
         wrapper = wrapper_payload(dest_name.removesuffix(config["exe_suffix"]), platform_id)
@@ -311,6 +338,7 @@ def main(argv: list[str]) -> int:
             platform_id=args.platform_id,
             btxd_path=Path(args.btxd).expanduser().resolve(),
             btx_cli_path=Path(args.btx_cli).expanduser().resolve(),
+            btx_util_path=Path(args.btx_util).expanduser().resolve() if args.btx_util else None,
             matmul_metallib_path=Path(args.matmul_metallib).expanduser().resolve() if args.matmul_metallib else None,
             oracle_metallib_path=Path(args.oracle_metallib).expanduser().resolve() if args.oracle_metallib else None,
             source_root=source_root,

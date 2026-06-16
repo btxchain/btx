@@ -64,13 +64,15 @@ rpcbind=127.0.0.1
 rpcallowip=127.0.0.1
 dnsseed=1
 fixedseeds=1
+addnode=node.btx.dev:19335
+addnode=node.btxchain.org:19335
 addnode=node.btx.tools:19335
 prune=4096
 blockfilterindex=1
 coinstatsindex=1
 # keep shielded commitment index on disk (faster restart; default).
 retainshieldedcommitmentindex=1
-# chain guard peer checks are advisory; unattended miners should keep asking for work.
+# chain guard reports mining risk and self-heals peers; it does not stop work.
 miningchainguard=1
 miningminoutboundpeers=0
 miningminsyncedoutboundpeers=0
@@ -79,11 +81,14 @@ miningmaxheaderlag=8
 
 Use DNS names rather than hard-coded peer IP addresses in configs and runbooks.
 Peer IPs can change or disappear; DNS bootstrap names can be updated without
-requiring every miner to edit local config. Avoid `connect=`-only production
-mining topologies because they bypass normal peer diversity and can increase
-stale block risk. Mining-chain guard peer checks are advisory in v0.32.10:
-they surface bad peer context in RPCs, but they do not stop unattended miners
-from requesting work when the local node can build a template.
+requiring every miner to edit local config. Use all three public bootstrap DNS
+names so honest miners converge on the same peer fabric quickly. Avoid
+`connect=`-only production mining topologies because they bypass normal peer
+diversity and can increase stale block risk. Mining-chain guard keeps honest
+miners working through fork-risk warnings, IBD, network-disabled, no-tip, and
+local-behind-peer-median states. Those states are reported through mining RPCs
+and trigger peer recovery where possible instead of turning unattended miners
+off.
 
 For horizontally scaled service gateways, add
 `--matmul-service-challenge-file=/shared/path/matmul_service_challenges.dat`

@@ -29,10 +29,16 @@ PEER_REMEDIATION_THRESHOLD="${BTX_MINING_PEER_REMEDIATION_THRESHOLD:-3}"
 PEER_REMEDIATION_COOLDOWN_SECS="${BTX_MINING_PEER_REMEDIATION_COOLDOWN_SECS:-30}"
 PEER_CACHE_LIMIT="${BTX_MINING_PEER_CACHE_LIMIT:-24}"
 PEER_REFRESH_LIMIT="${BTX_MINING_PEER_REFRESH_LIMIT:-12}"
+PEER_MESH_DISABLE_SECS="${BTX_MINING_PEER_MESH_DISABLE_SECS:-600}"
 HEALTHY_PUBLIC_PEER_TARGET="${BTX_MINING_HEALTHY_PUBLIC_PEER_TARGET:-4}"
 HEALTHY_FULL_RELAY_PEER_TARGET="${BTX_MINING_HEALTHY_FULL_RELAY_PEER_TARGET:-4}"
 SYNC_STALL_RESTART_SECS="${BTX_MINING_SYNC_STALL_RESTART_SECS:-300}"
+DEFAULT_BOOTSTRAP_PEERS="${BTX_MINING_DEFAULT_BOOTSTRAP_PEERS:-node.btx.dev:19335,node.btxchain.org:19335,node.btx.tools:19335}"
+USE_DEFAULT_BOOTSTRAP_PEERS="${BTX_MINING_USE_DEFAULT_BOOTSTRAP_PEERS:-1}"
 BOOTSTRAP_ADDNODES="${BTX_MINING_BOOTSTRAP_ADDNODES:-${BTX_MINING_BOOTSTRAP_PEERS:-}}"
+if [[ -z "${BOOTSTRAP_ADDNODES}" && "${USE_DEFAULT_BOOTSTRAP_PEERS}" != "0" ]]; then
+  BOOTSTRAP_ADDNODES="${DEFAULT_BOOTSTRAP_PEERS}"
+fi
 MAX_LOOPS="${BTX_MINING_MAX_LOOPS:-0}"
 SHOULD_MINE_COMMAND="${BTX_MINING_SHOULD_MINE_COMMAND:-}"
 NODE_PIDFILE="${BTX_MINING_NODE_PIDFILE:-}"
@@ -79,6 +85,9 @@ Options:
   --wallet=NAME             Wallet used for mining RPCs (default: miner)
   --address=ADDR            Explicit payout address
   --address-file=PATH       File containing the payout address
+  --bootstrap-peers=LIST    Comma-separated addnode host:port list for peer recovery
+  --no-default-bootstrap-peers
+                            Do not use the built-in public BTX bootstrap mesh
   --sleep=SECS              Seconds between loop iterations
   --results-dir=PATH        Directory for pid/log/health files
   --should-mine-command=CMD Idle gate command; mine only when it exits 0
@@ -132,6 +141,16 @@ for arg in "$@"; do
       ;;
     --address-file=*)
       ADDRESS_FILE="${arg#*=}"
+      ;;
+    --bootstrap-peers=*)
+      BOOTSTRAP_ADDNODES="${arg#*=}"
+      USE_DEFAULT_BOOTSTRAP_PEERS=0
+      ;;
+    --no-default-bootstrap-peers)
+      if [[ "${BOOTSTRAP_ADDNODES}" == "${DEFAULT_BOOTSTRAP_PEERS}" ]]; then
+        BOOTSTRAP_ADDNODES=""
+      fi
+      USE_DEFAULT_BOOTSTRAP_PEERS=0
       ;;
     --sleep=*)
       SLEEP_SECS="${arg#*=}"
@@ -187,6 +206,7 @@ ERR="${RESULTS_DIR}/live-mining-loop.err"
 HEALTH_LOG="${RESULTS_DIR}/live-mining-health.log"
 PIDFILE="${RESULTS_DIR}/live-mining-loop.pid"
 PEER_CACHE_FILE="${RESULTS_DIR}/live-peer-cache.txt"
+PEER_MESH_DISABLED_FILE="${BTX_MINING_PEER_MESH_DISABLED_FILE:-${RESULTS_DIR}/disabled-peer-mesh.txt}"
 
 if [[ -z "${NODE_PIDFILE}" ]]; then
   NODE_PIDFILE="${RESULTS_DIR}/btxd-supervised.pid"
@@ -213,6 +233,10 @@ if [[ -n "${GPU_INPUTS}" ]]; then
 fi
 if ! [[ "${MAX_BACKEND_FALLBACKS}" =~ ^[0-9]+$ ]]; then
   echo "Invalid --max-backend-fallbacks value: ${MAX_BACKEND_FALLBACKS}" >&2
+  exit 1
+fi
+if ! [[ "${PEER_MESH_DISABLE_SECS}" =~ ^[0-9]+$ ]]; then
+  echo "Invalid BTX_MINING_PEER_MESH_DISABLE_SECS value: ${PEER_MESH_DISABLE_SECS}" >&2
   exit 1
 fi
 if [[ -n "${GPU_INPUTS}" ]]; then
@@ -294,11 +318,23 @@ derive_recommended_action() {
     disabled|healthy|ok)
       printf 'continue\n'
       ;;
-    initial_block_download|local_tip_ahead_of_peer_median|local_tip_behind_peer_median)
-      printf 'catch_up\n'
+    initial_block_download|local_tip_behind_peer_median)
+      printf 'mine_current_tip_and_catch_up\n'
+      ;;
+    network_inactive)
+      printf 'mine_current_tip_and_enable_network\n'
+      ;;
+    insufficient_peer_consensus|insufficient_near_tip_peers|peer_monitor_unavailable)
+      printf 'add_outbound_peers\n'
+      ;;
+    local_tip_ahead_of_peer_median)
+      printf 'propagate_tip\n'
+      ;;
+    deferred_reorg_candidate)
+      printf 'mine_current_tip\n'
       ;;
     *)
-      printf 'pause\n'
+      printf 'continue_with_warning\n'
       ;;
   esac
 }
@@ -622,6 +658,62 @@ is_private_peer_addr() {
   [[ "${node}" =~ ^\[?(fc|fd|fe80): ]]
 }
 
+prune_disabled_mesh_peers() {
+  local now
+  local tmp_file
+
+  [[ -f "${PEER_MESH_DISABLED_FILE}" ]] || return 0
+  now="$(date +%s)"
+  tmp_file="$(mktemp)"
+  awk -v now="${now}" 'NF >= 2 && $1 ~ /^[0-9]+$/ && $1 > now {print}' \
+    "${PEER_MESH_DISABLED_FILE}" > "${tmp_file}" || true
+  mv "${tmp_file}" "${PEER_MESH_DISABLED_FILE}"
+}
+
+disable_mesh_peer_temporarily() {
+  local node="$1"
+  local reason="$2"
+  local now
+  local disabled_until
+  local tmp_file
+
+  [[ -n "${node}" ]] || return 0
+  (( PEER_MESH_DISABLE_SECS > 0 )) || return 0
+  mkdir -p "$(dirname "${PEER_MESH_DISABLED_FILE}")"
+  prune_disabled_mesh_peers
+  now="$(date +%s)"
+  disabled_until=$((now + PEER_MESH_DISABLE_SECS))
+  tmp_file="$(mktemp)"
+  if [[ -f "${PEER_MESH_DISABLED_FILE}" ]]; then
+    awk -v node="${node}" '$2 != node {print}' "${PEER_MESH_DISABLED_FILE}" > "${tmp_file}" || true
+  fi
+  printf '%s %s %s\n' "${disabled_until}" "${node}" "${reason}" >> "${tmp_file}"
+  mv "${tmp_file}" "${PEER_MESH_DISABLED_FILE}"
+  log_health "peer-mesh-auto-disabled node=${node} reason=${reason} disabled_for=${PEER_MESH_DISABLE_SECS}"
+}
+
+mesh_peer_is_disabled() {
+  local node="$1"
+  local now
+
+  [[ -n "${node}" ]] || return 1
+  [[ -f "${PEER_MESH_DISABLED_FILE}" ]] || return 1
+  prune_disabled_mesh_peers
+  now="$(date +%s)"
+  awk -v now="${now}" -v node="${node}" 'NF >= 2 && $1 ~ /^[0-9]+$/ && $1 > now && $2 == node {found=1} END {exit found ? 0 : 1}' \
+    "${PEER_MESH_DISABLED_FILE}"
+}
+
+emit_bootstrap_node() {
+  local node="$1"
+
+  [[ -n "${node}" ]] || return 0
+  if mesh_peer_is_disabled "${node}"; then
+    return 0
+  fi
+  printf '%s\n' "${node}"
+}
+
 collect_bootstrap_nodes() {
   local node
   local bootstrap_nodes=()
@@ -646,17 +738,17 @@ collect_bootstrap_nodes() {
   {
     if (( ${#public_cached[@]} > 0 )); then
       for node in "${public_cached[@]}"; do
-        printf '%s\n' "${node}"
+        emit_bootstrap_node "${node}"
       done
     fi
     if (( ${#bootstrap_nodes[@]} > 0 )); then
       for node in "${bootstrap_nodes[@]}"; do
-        printf '%s\n' "${node}"
+        emit_bootstrap_node "${node}"
       done
     fi
     if (( ${#private_cached[@]} > 0 )); then
       for node in "${private_cached[@]}"; do
-        printf '%s\n' "${node}"
+        emit_bootstrap_node "${node}"
       done
     fi
   } | awk -v limit="${PEER_REFRESH_LIMIT}" '
@@ -731,6 +823,7 @@ disconnect_stale_outbound_peers() {
     ((attempted += 1))
     if rpc_cli disconnectnode "${node}" >>"${LOG}" 2>>"${ERR}"; then
       ((disconnected += 1))
+      disable_mesh_peer_temporarily "${node}" "stale_manual_peer"
     else
       ((failed += 1))
     fi
@@ -783,6 +876,7 @@ refresh_peer_bootstrap() {
       ((succeeded += 1))
     else
       ((failed += 1))
+      disable_mesh_peer_temporarily "${node}" "addnode_rpc_failed"
     fi
   done
 
@@ -809,7 +903,7 @@ should_defer_chain_guard_restart() {
       ;;
   esac
 
-  if [[ "${recommended_action}" == "catch_up" ]]; then
+  if [[ "${recommended_action}" == "mine_current_tip_and_catch_up" ]]; then
     if (( peer_count < 2 )) && (( same_reason_streak >= PEER_REMEDIATION_THRESHOLD )); then
       refresh_peer_bootstrap "${reason}" || true
     fi
@@ -819,6 +913,36 @@ should_defer_chain_guard_restart() {
   fi
 
   return 1
+}
+
+maybe_remediate_chain_guard_advisory() {
+  local reason="$1"
+  local recommended_action="$2"
+  local peer_count="$3"
+
+  if (( same_reason_streak < PEER_REMEDIATION_THRESHOLD )); then
+    return 0
+  fi
+
+  case "${reason}" in
+    insufficient_peer_consensus|insufficient_near_tip_peers|peer_monitor_unavailable|network_inactive)
+      disconnect_stale_outbound_peers "${reason}" || true
+      refresh_peer_bootstrap "${reason}" || true
+      ;;
+    initial_block_download|local_tip_behind_peer_median)
+      if (( peer_count < 2 )); then
+        refresh_peer_bootstrap "${reason}" || true
+      fi
+      ;;
+    local_tip_ahead_of_peer_median|deferred_reorg_candidate)
+      refresh_peer_bootstrap "${reason}" || true
+      ;;
+    *)
+      if [[ "${recommended_action}" == "add_outbound_peers" ]]; then
+        refresh_peer_bootstrap "${reason}" || true
+      fi
+      ;;
+  esac
 }
 
 maybe_start_node_for_rpc_failure() {
@@ -1118,35 +1242,32 @@ check_runtime_health() {
     health_failure_streak=0
     if [[ "${healthy}" == "true" ]]; then
       last_health_reason="ok"
+      same_reason_streak=0
     else
+      if [[ "${last_health_reason}" == "advisory:${reason}" ]]; then
+        ((same_reason_streak += 1))
+      else
+        same_reason_streak=1
+      fi
       last_health_reason="advisory:${reason}"
       log_health "chain-guard-advisory reason=${reason} action=${recommended_action} local_tip=${local_tip} peer_median=${median_peer_tip} peers=${peer_count} near_tip_peers=${near_tip_peers}"
+      maybe_remediate_chain_guard_advisory "${reason}" "${recommended_action}" "${peer_count}" || true
     fi
-    same_reason_streak=0
     maybe_refresh_healthy_peer_topology "${local_tip}" || true
     return 0
   fi
 
-  update_reason_streak "${reason}"
-  ((health_failure_streak += 1))
-  log_health "chain-guard-pause streak=${health_failure_streak}/${HEALTH_RESTART_THRESHOLD} reason=${reason} action=${recommended_action} reason_streak=${same_reason_streak} local_tip=${local_tip} peer_median=${median_peer_tip} peers=${peer_count} near_tip_peers=${near_tip_peers}"
-
-  if (( now < grace_until_epoch )); then
-    return 1
+  health_failure_streak=0
+  if [[ "${last_health_reason}" == "compat-advisory:${reason}" ]]; then
+    ((same_reason_streak += 1))
+  else
+    same_reason_streak=1
   fi
-
-  if should_defer_chain_guard_restart "${reason}" "${recommended_action}" "${peer_count}" "${now}"; then
-    return 1
-  fi
-
-  if (( health_failure_streak >= HEALTH_RESTART_THRESHOLD )); then
-    if [[ "${recommended_action}" == "catch_up" ]]; then
-      restart_node "chain_guard_stalled_${reason}" || true
-    else
-      restart_node "chain_guard_${reason}" || true
-    fi
-  fi
-  return 1
+  last_health_reason="compat-advisory:${reason}"
+  log_health "chain-guard-compat-advisory reason=${reason} action=${recommended_action} local_tip=${local_tip} peer_median=${median_peer_tip} peers=${peer_count} near_tip_peers=${near_tip_peers}"
+  maybe_remediate_chain_guard_advisory "${reason}" "${recommended_action}" "${peer_count}" || true
+  maybe_refresh_healthy_peer_topology "${local_tip}" || true
+  return 0
 }
 
 rpc_failure_streak=0
@@ -1179,7 +1300,7 @@ trap cleanup_loop EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 
-log_health "loop-start datadir=${DATADIR:-default} wallet=${WALLET} rpc_restart_threshold=${RPC_RESTART_THRESHOLD} health_restart_threshold=${HEALTH_RESTART_THRESHOLD} peer_remediation_threshold=${PEER_REMEDIATION_THRESHOLD} peer_cache_limit=${PEER_CACHE_LIMIT} peer_refresh_limit=${PEER_REFRESH_LIMIT} healthy_public_peer_target=${HEALTHY_PUBLIC_PEER_TARGET} healthy_full_relay_peer_target=${HEALTHY_FULL_RELAY_PEER_TARGET} sync_stall_restart_secs=${SYNC_STALL_RESTART_SECS} maxconnections=${MAXCONNECTIONS} startup_grace=${STARTUP_GRACE_SECS} node_pidfile=${NODE_PIDFILE} daemonize=${DAEMONIZE} backend=${MINING_BACKEND:-auto} require_backend=${REQUIRE_BACKEND:-none} max_backend_fallbacks=${MAX_BACKEND_FALLBACKS} gpu_inputs=${GPU_INPUTS:-auto} apple_silicon_defaults=${APPLE_SILICON_MINING_DEFAULTS}"
+log_health "loop-start datadir=${DATADIR:-default} wallet=${WALLET} rpc_restart_threshold=${RPC_RESTART_THRESHOLD} health_restart_threshold=${HEALTH_RESTART_THRESHOLD} peer_remediation_threshold=${PEER_REMEDIATION_THRESHOLD} peer_cache_limit=${PEER_CACHE_LIMIT} peer_refresh_limit=${PEER_REFRESH_LIMIT} peer_mesh_disable_secs=${PEER_MESH_DISABLE_SECS} healthy_public_peer_target=${HEALTHY_PUBLIC_PEER_TARGET} healthy_full_relay_peer_target=${HEALTHY_FULL_RELAY_PEER_TARGET} sync_stall_restart_secs=${SYNC_STALL_RESTART_SECS} maxconnections=${MAXCONNECTIONS} startup_grace=${STARTUP_GRACE_SECS} node_pidfile=${NODE_PIDFILE} daemonize=${DAEMONIZE} backend=${MINING_BACKEND:-auto} require_backend=${REQUIRE_BACKEND:-none} max_backend_fallbacks=${MAX_BACKEND_FALLBACKS} gpu_inputs=${GPU_INPUTS:-auto} apple_silicon_defaults=${APPLE_SILICON_MINING_DEFAULTS}"
 
 while true; do
   ((loop_count += 1))
@@ -1206,39 +1327,24 @@ while true; do
     append_file_if_present "${tmp_out}" "${LOG}"
     append_file_if_present "${tmp_err}" "${ERR}"
     if grep -q "mining paused by chain guard" "${tmp_err}"; then
-      ((health_failure_streak += 1))
-      log_health "generate-paused streak=${health_failure_streak}/${HEALTH_RESTART_THRESHOLD}"
+      log_health "generate-chain-guard-compat-advisory"
       if refresh_mininginfo; then
         reason="$(jq -r '.chain_guard.reason // "unknown"' <<<"${LAST_MININGINFO_JSON}")"
-        pause="$(jq -r '.chain_guard.should_pause_mining // true' <<<"${LAST_MININGINFO_JSON}")"
-        if [[ "${pause}" == "false" ]]; then
-          health_failure_streak=0
-          last_health_reason="advisory:${reason}"
-          same_reason_streak=0
-          log_health "generate-chain-guard-advisory reason=${reason}"
-          rm -f "${tmp_out}" "${tmp_err}"
-          sleep "${SLEEP_SECS}"
-          continue
-        fi
+        health_failure_streak=0
+        last_health_reason="compat-advisory:${reason}"
+        same_reason_streak=0
+        log_health "generate-chain-guard-advisory reason=${reason}"
         recommended_action="$(jq -r '.chain_guard.recommended_action // empty' <<<"${LAST_MININGINFO_JSON}")"
         if [[ -z "${recommended_action}" ]]; then
           recommended_action="$(derive_recommended_action "${reason}")"
         fi
         peer_count="$(jq -r '.chain_guard.peer_count // 0' <<<"${LAST_MININGINFO_JSON}")"
         now="$(date +%s)"
-        if should_defer_chain_guard_restart "${reason}" "${recommended_action}" "${peer_count}" "${now}"; then
-          :
-        elif (( health_failure_streak >= HEALTH_RESTART_THRESHOLD )); then
-          restart_node "generate_chain_guard_pause" || true
-        fi
-      else
-        refresh_status=$?
-        if (( refresh_status == 2 )); then
-          :
-        elif (( health_failure_streak >= HEALTH_RESTART_THRESHOLD )); then
-          restart_node "generate_chain_guard_pause" || true
-        fi
+        should_defer_chain_guard_restart "${reason}" "${recommended_action}" "${peer_count}" "${now}" || true
       fi
+      rm -f "${tmp_out}" "${tmp_err}"
+      sleep "${SLEEP_SECS}"
+      continue
     elif rpc_error_is_warmup_file "${tmp_err}"; then
       note_rpc_warmup "generatetoaddress"
     else

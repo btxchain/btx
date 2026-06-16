@@ -7,7 +7,8 @@
 Regtest lowers the C-002 and sunset gates to prove that shielded notes created
 before C-002 remain spendable through the C-002 proof transition, and that the
 v0.32.2 sunset blocks new shielded credits while exact transparent exits remain
-available at and beyond the sunset boundary.
+available at and beyond the sunset boundary, including the gated zero-output
+V2_SEND exact-exit path.
 """
 
 from decimal import Decimal, ROUND_CEILING
@@ -23,6 +24,7 @@ from test_framework.util import assert_equal, assert_raises_rpc_error
 
 C002_HEIGHT = 132
 SUNSET_HEIGHT = 145
+ZERO_OUTPUT_EXIT_HEIGHT = SUNSET_HEIGHT + 1
 EXACT_AMOUNT = Decimal("0.50000001")
 FEE_QUANTUM = Decimal("0.00001000")
 RBF_FEE_BUMP = Decimal("0.00300000")
@@ -47,6 +49,7 @@ class WalletShieldedC002SunsetLifecycleTest(BitcoinTestFramework):
             f"-regtestshieldedsunsetheight={SUNSET_HEIGHT}",
             f"-regtestshieldedrecoveryexitactivationheight={SUNSET_HEIGHT}",
             f"-regtestshieldedunshieldvelocityactivationheight={SUNSET_HEIGHT}",
+            f"-regtestshieldedv2sendzerooutputexitactivationheight={ZERO_OUTPUT_EXIT_HEIGHT}",
         ]]
         self.rpc_timeout = 1800
 
@@ -209,7 +212,9 @@ class WalletShieldedC002SunsetLifecycleTest(BitcoinTestFramework):
         assert_equal(node.getblockcount(), SUNSET_HEIGHT + 1)
         assert_equal(exit_post.gettransaction(post_exit_txid)["confirmations"], 1)
 
-        self.log.info("Combine three post-sunset shielded notes into one exact transparent exit")
+        assert_equal(node.getblockcount(), ZERO_OUTPUT_EXIT_HEIGHT)
+
+        self.log.info("Combine three shielded notes into one exact transparent exit after zero-output V2_SEND activation")
         multi_dest = exit_multi.getnewaddress()
         multi_exit = exit_multi.z_sendmany(
             [{"address": multi_dest, "amount": MULTI_NOTE_AMOUNT * MULTI_NOTE_COUNT}],

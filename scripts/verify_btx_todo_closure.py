@@ -73,11 +73,11 @@ def main() -> int:
         "missing required live mainnet DNS seed: node.btx.tools.",
         errors,
     )
-    for stale_seed in (
+    for required_seed in (
         "node.btxchain.org.",
         "node.btx.dev.",
     ):
-        require(stale_seed not in chainparams_text, f"stale mainnet DNS seed still present: {stale_seed}", errors)
+        require(required_seed in chainparams_text, f"missing required live mainnet DNS seed: {required_seed}", errors)
     require(
         "static const uint8_t chainparams_seed_main[] = {" in chainparamsseeds_text,
         "mainnet fixed seeds are still empty",

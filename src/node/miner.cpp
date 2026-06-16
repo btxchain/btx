@@ -25,6 +25,7 @@
 #include <primitives/transaction.h>
 #include <random.h>
 #include <shielded/bundle.h>
+#include <shielded/unshield_velocity.h>
 #include <shielded/validation.h>
 #include <util/check.h>
 #include <util/moneystr.h>
@@ -468,6 +469,9 @@ struct PackageSelectionCandidate {
     uint64_t total_shielded_tree_update_units{0};
     uint64_t total_template_policy_verify_units{0};
     uint64_t total_recovery_exit_txs{0};
+    CAmount total_positive_shielded_egress{0};
+    bool has_positive_shielded_egress{false};
+    bool has_unusable_shielded_egress{false};
 };
 
 [[nodiscard]] bool UseAccountRegistryAppendRateLimit(const Consensus::Params& consensus, int32_t height)
@@ -582,6 +586,56 @@ void SetLegacySelectionScore(const T& source, PackageSelectionCandidate& candida
     return family.has_value() && *family == shielded::v2::TransactionFamily::V2_RECOVERY_EXIT;
 }
 
+[[nodiscard]] bool IsPostSunsetShieldedExitVelocityFilterActive(const Consensus::Params& consensus,
+                                                                int32_t height)
+{
+    return consensus.IsShieldedSunsetActive(height) &&
+           consensus.IsShieldedUnshieldVelocityCapActive(height);
+}
+
+[[nodiscard]] std::optional<CAmount> GetPositiveShieldedEgressValue(const CTransaction& tx)
+{
+    if (!tx.HasShieldedBundle()) return CAmount{0};
+    std::string reject_reason;
+    const auto state_value_balance =
+        TryGetShieldedStateValueBalance(tx.GetShieldedBundle(), reject_reason);
+    if (!state_value_balance.has_value()) return std::nullopt;
+    return *state_value_balance > 0 ? *state_value_balance : CAmount{0};
+}
+
+[[nodiscard]] bool TryAddMoneyRange(CAmount& total, CAmount value)
+{
+    if (value < 0 || value > MAX_MONEY - total) return false;
+    total += value;
+    return true;
+}
+
+[[nodiscard]] std::optional<CAmount> ComputePendingMempoolShieldedEgress(const CTxMemPool& mempool)
+    EXCLUSIVE_LOCKS_REQUIRED(mempool.cs)
+{
+    CAmount pending{0};
+    for (auto it = mempool.mapTx.begin(); it != mempool.mapTx.end(); ++it) {
+        const auto egress = GetPositiveShieldedEgressValue(it->GetTx());
+        if (!egress.has_value()) return std::nullopt;
+        if (!TryAddMoneyRange(pending, *egress)) return std::nullopt;
+    }
+    return pending;
+}
+
+[[nodiscard]] CAmount ComputeRemainingShieldedExitCapacity(const ChainstateManager& chainman,
+                                                           const Consensus::Params& consensus,
+                                                           int32_t height,
+                                                           CAmount pool_balance)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    const CAmount window_egress = chainman.GetShieldedUnshieldVelocityWindowTotal(
+        height, consensus.nShieldedUnshieldVelocityWindowBlocks);
+    const CAmount min_cap = consensus.ShieldedUnshieldVelocityMinCapForHeight(height);
+    const CAmount cap_amount = ShieldedUnshieldVelocity::WindowCap(
+        pool_balance, consensus.nShieldedUnshieldVelocityCapBps, min_cap);
+    return cap_amount > window_egress ? cap_amount - window_egress : 0;
+}
+
 [[nodiscard]] uint64_t GetTransactionTemplatePolicyVerifyUnits(const CTransaction& tx)
 {
     if (!tx.HasShieldedBundle()) return 0;
@@ -632,6 +686,14 @@ PackageSelectionCandidate BuildPackageSelectionCandidate(const CTxMemPool& mempo
         candidate.total_shielded_scan_units += shielded_usage.scan_units;
         candidate.total_shielded_tree_update_units += shielded_usage.tree_update_units;
         candidate.total_template_policy_verify_units += GetTransactionTemplatePolicyVerifyUnits(entry->GetTx());
+        if (entry_has_shielded_bundle) {
+            const auto egress = GetPositiveShieldedEgressValue(entry->GetTx());
+            if (!egress.has_value() || !TryAddMoneyRange(candidate.total_positive_shielded_egress, *egress)) {
+                candidate.has_unusable_shielded_egress = true;
+            } else if (*egress > 0) {
+                candidate.has_positive_shielded_egress = true;
+            }
+        }
         if (IsRecoveryExitTemplateTransaction(entry->GetTx())) {
             ++candidate.total_recovery_exit_txs;
         }
@@ -878,6 +940,9 @@ void BlockAssembler::resetBlock()
     nBlockTemplatePolicyCandidateEvaluations = 0;
     nBlockShieldedAccountRegistryAppends = 0;
     m_blockShieldedPoolBalance = ShieldedPoolBalance{};
+    m_pendingMempoolShieldedEgress = 0;
+    m_remainingShieldedExitCapacity = 0;
+    m_filterShieldedExitTxsForVelocity = false;
     m_baseShieldedAccountRegistryEntries = 0;
     m_blockShieldedNullifiers.clear();
     m_blockShieldedRecoveryExitCommitments.clear();
@@ -918,7 +983,8 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         LogWarning("CreateNewBlock(): block height overflow at prev height %d\n", pindexPrev->nHeight);
         throw std::runtime_error("CreateNewBlock(): block height overflow");
     }
-    if (!m_blockShieldedPoolBalance.SetBalance(m_chainstate.m_chainman.GetShieldedPoolBalance())) {
+    const CAmount base_shielded_pool_balance{m_chainstate.m_chainman.GetShieldedPoolBalance()};
+    if (!m_blockShieldedPoolBalance.SetBalance(base_shielded_pool_balance)) {
         LogWarning("CreateNewBlock(): invalid shielded pool balance at tip height %d\n", pindexPrev->nHeight);
         throw std::runtime_error("CreateNewBlock(): invalid shielded pool balance");
     }
@@ -941,6 +1007,34 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     if (m_mempool) {
         CTxMemPool& mutable_mempool{*const_cast<CTxMemPool*>(m_mempool)};
         LOCK(mutable_mempool.cs);
+        if (IsPostSunsetShieldedExitVelocityFilterActive(chainparams.GetConsensus(), nHeight)) {
+            m_remainingShieldedExitCapacity = ComputeRemainingShieldedExitCapacity(
+                m_chainstate.m_chainman, chainparams.GetConsensus(), nHeight, base_shielded_pool_balance);
+            if (m_options.exclude_shielded_exit_txs_for_velocity) {
+                m_filterShieldedExitTxsForVelocity = true;
+            } else {
+                const auto pending = ComputePendingMempoolShieldedEgress(mutable_mempool);
+                if (pending.has_value()) {
+                    m_pendingMempoolShieldedEgress = *pending;
+                    m_filterShieldedExitTxsForVelocity =
+                        m_pendingMempoolShieldedEgress > m_remainingShieldedExitCapacity;
+                } else {
+                    m_pendingMempoolShieldedEgress = MAX_MONEY;
+                    m_filterShieldedExitTxsForVelocity = true;
+                    LogWarning("CreateNewBlock(): unable to compute pending mempool shielded egress; "
+                               "excluding shielded exit transactions from this template\n");
+                }
+            }
+            if (m_filterShieldedExitTxsForVelocity) {
+                LogDebug(BCLog::MINING,
+                         "CreateNewBlock(): excluding shielded exit transactions at height %d "
+                         "(pending_egress=%s remaining_capacity=%s forced=%d)\n",
+                         nHeight,
+                         FormatMoney(m_pendingMempoolShieldedEgress),
+                         FormatMoney(m_remainingShieldedExitCapacity),
+                         m_options.exclude_shielded_exit_txs_for_velocity);
+            }
+        }
         // Do not run the full shielded stale-mempool scan from getblocktemplate.
         // ConnectTip removes exact nullifier/commitment conflicts for connected
         // blocks, reorg handling keeps the safety fallback, and package
@@ -1034,6 +1128,25 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
                                /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/false)) {
             LogWarning("CreateNewBlock(): TestBlockValidity failed at height %d: %s\n", nHeight, state.ToString());
             if (m_mempool != nullptr && nBlockTx > 0) {
+                if (IsPostSunsetShieldedExitVelocityFilterActive(chainparams.GetConsensus(), nHeight) &&
+                    !m_options.exclude_shielded_exit_txs_for_velocity &&
+                    state.GetRejectReason() == "shielded-unshield-velocity-exceeded") {
+                    LogWarning("CreateNewBlock(): retrying template with shielded exit transactions excluded "
+                               "after unshield velocity cap validation failure\n");
+                    Options retry_options = m_options;
+                    retry_options.exclude_shielded_exit_txs_for_velocity = true;
+                    auto fallback_template = BlockAssembler{m_chainstate, m_mempool, retry_options, m_node}.CreateNewBlock();
+                    fallback_template->m_mempool_validation_fallback = true;
+                    return fallback_template;
+                }
+                if (m_options.include_recovery_exit_txs && nBlockTemplateRecoveryExitTxs > 0) {
+                    LogWarning("CreateNewBlock(): retrying without recovery-exit transactions after mempool-selected recovery exits failed block validation\n");
+                    Options retry_options = m_options;
+                    retry_options.include_recovery_exit_txs = false;
+                    auto fallback_template = BlockAssembler{m_chainstate, m_mempool, retry_options, m_node}.CreateNewBlock();
+                    fallback_template->m_mempool_validation_fallback = true;
+                    return fallback_template;
+                }
                 LogWarning("CreateNewBlock(): retrying with an empty template after mempool-selected transactions failed block validation\n");
                 Options retry_options = m_options;
                 retry_options.use_mempool = false;
@@ -1085,10 +1198,20 @@ bool BlockAssembler::TestPackage(uint64_t packageWeight, int64_t packageSigOpsCo
 
 bool BlockAssembler::TestTemplatePolicy(const CTransaction& tx) const
 {
+    const bool is_recovery_exit = IsRecoveryExitTemplateTransaction(tx);
+    if (!m_options.include_recovery_exit_txs && is_recovery_exit) {
+        return false;
+    }
+    if (m_filterShieldedExitTxsForVelocity) {
+        const auto positive_shielded_egress = GetPositiveShieldedEgressValue(tx);
+        if (!positive_shielded_egress.has_value() || *positive_shielded_egress > 0) {
+            return false;
+        }
+    }
     return TemplatePolicyFits(nBlockTemplatePolicyVerifyCost,
                               nBlockTemplateRecoveryExitTxs,
                               GetTransactionTemplatePolicyVerifyUnits(tx),
-                              IsRecoveryExitTemplateTransaction(tx) ? 1 : 0);
+                              is_recovery_exit ? 1 : 0);
 }
 
 static ShieldedResourceUsage GetTransactionShieldedResourceUsage(const CTransaction& tx)
@@ -1469,9 +1592,18 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
         bool skipped_not_ready_shielded_candidate{false};
         bool skipped_unusable_candidate{false};
         bool skipped_template_policy_candidate{false};
+        bool skipped_shielded_exit_velocity_candidate{false};
         for (size_t i = 0; i < candidate_window.size(); ++i) {
             const auto& candidate = candidate_window[i];
             if (candidate.total_fees < m_options.blockMinFeeRate.GetFee(candidate.total_policy_size)) {
+                continue;
+            }
+            if (candidate.has_unusable_shielded_egress) {
+                skipped_unusable_candidate = true;
+                continue;
+            }
+            if (m_filterShieldedExitTxsForVelocity && candidate.has_positive_shielded_egress) {
+                skipped_shielded_exit_velocity_candidate = true;
                 continue;
             }
             if (!TestPackage(candidate.total_weight, candidate.total_sigops_cost)) {
@@ -1486,6 +1618,11 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
             if (!TemplatePolicyFits(nBlockTemplatePolicyVerifyCost,
                                     nBlockTemplateRecoveryExitTxs,
                                     candidate)) {
+                skipped_template_policy_candidate = true;
+                nBlockTemplatePolicySkippedTxs += static_cast<uint64_t>(candidate.entries.size());
+                continue;
+            }
+            if (!m_options.include_recovery_exit_txs && candidate.total_recovery_exit_txs > 0) {
                 skipped_template_policy_candidate = true;
                 nBlockTemplatePolicySkippedTxs += static_cast<uint64_t>(candidate.entries.size());
                 continue;
@@ -1512,7 +1649,10 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
         }
 
         if (!best_candidate_index.has_value()) {
-            if (skipped_not_ready_shielded_candidate || skipped_unusable_candidate || skipped_template_policy_candidate) {
+            if (skipped_not_ready_shielded_candidate ||
+                skipped_unusable_candidate ||
+                skipped_template_policy_candidate ||
+                skipped_shielded_exit_velocity_candidate) {
                 for (const auto& candidate : candidate_window) {
                     if (candidate.from_modified) {
                         mapModifiedTx.erase(candidate.iter);

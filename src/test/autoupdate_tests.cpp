@@ -4,6 +4,7 @@
 
 #include <node/autoupdate.h>
 
+#include <clientversion.h>
 #include <crypto/hex_base.h>
 #include <crypto/sha256.h>
 #include <key.h>
@@ -182,7 +183,7 @@ BOOST_AUTO_TEST_CASE(url_origin_matching_is_strict)
 BOOST_AUTO_TEST_CASE(version_comparison_uses_client_version)
 {
     BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("99.0.0"), 1);
-    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("0.32.9"), 0);
+    BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion(strprintf("%d.%d.%d", CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_BUILD)), 0);
     BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("v0.32.8"), -1);
     BOOST_CHECK_EQUAL(node::CompareAutoUpdateVersion("not-a-version"), 0);
 }
@@ -284,6 +285,8 @@ BOOST_AUTO_TEST_CASE(telemetry_query_is_appended_to_update_fetches)
 {
     Harness h;
     h.config.telemetry = true;
+    h.config.rollout_cohort = 17;
+    h.config.telemetry_client_id_enabled = true;
     h.config.telemetry_client_id = "123e4567-e89b-42d3-a456-426614174000";
 
     const std::string sig_url = "http://updates.test/version.txt.sig?kind=manifest";
@@ -302,9 +305,26 @@ BOOST_AUTO_TEST_CASE(telemetry_query_is_appended_to_update_fetches)
         BOOST_CHECK(call.find("btx_version=") != std::string::npos);
         BOOST_CHECK(call.find("btx_platform=") != std::string::npos);
         BOOST_CHECK(call.find("btx_arch=") != std::string::npos);
+        BOOST_CHECK(call.find("btx_cohort=17") != std::string::npos);
         BOOST_CHECK(call.find("btx_client_id=123e4567-e89b-42d3-a456-426614174000") != std::string::npos);
     }
     BOOST_CHECK(h.fetcher.calls[1].find("kind=manifest&btx_au=1") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(telemetry_query_omits_persistent_client_id_by_default)
+{
+    node::AutoUpdateConfig config{TestConfig()};
+    config.telemetry = true;
+    config.rollout_cohort = 23;
+    config.telemetry_client_id = "123e4567-e89b-42d3-a456-426614174000";
+
+    const std::string query = node::AutoUpdateTelemetryQuery(config);
+    BOOST_CHECK(query.find("btx_au=1") != std::string::npos);
+    BOOST_CHECK(query.find("btx_version=") != std::string::npos);
+    BOOST_CHECK(query.find("btx_platform=") != std::string::npos);
+    BOOST_CHECK(query.find("btx_arch=") != std::string::npos);
+    BOOST_CHECK(query.find("btx_cohort=23") != std::string::npos);
+    BOOST_CHECK(query.find("btx_client_id=") == std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(rollout_gate_defers_when_cohort_outside_percentage)
