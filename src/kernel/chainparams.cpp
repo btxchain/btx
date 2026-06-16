@@ -51,7 +51,7 @@ static constexpr int32_t BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT
 static constexpr int32_t BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT{130'000};
 static constexpr int32_t BTX_V03210_HARDENING_HEIGHT{130'500};
 static constexpr int32_t BTX_V03211_HARDENING_HEIGHT{132'000};
-static constexpr int32_t BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT{BTX_V03211_HARDENING_HEIGHT};
+static constexpr int32_t BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT{135'000};
 static constexpr CAmount BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP{10'000 * COIN};
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
@@ -265,9 +265,10 @@ public:
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
-        // v0.32.0-v0.32.11: shielded unshield (z->t) velocity cap from the 125,000
-        // sunset through block 131,999. v0.32.12 ends the quota at 132,000 after the
-        // recovery window has matured, so remaining legacy exits are no longer rate-limited.
+        // v0.32.0-v0.32.12: shielded unshield (z->t) velocity cap from the 125,000
+        // sunset through block 134,999. The v0.32.11 minimum-cap floor still starts at
+        // 132,000, and v0.32.12 ends the quota at 135,000 after the recovery window has
+        // matured so remaining legacy exits are no longer rate-limited.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedUnshieldVelocityEndHeight = BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
@@ -576,9 +577,10 @@ public:
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
-        // v0.32.0-v0.32.11: shielded unshield (z->t) velocity cap from the 125,000
-        // sunset through block 131,999. v0.32.12 ends the quota at 132,000 after the
-        // recovery window has matured, so remaining legacy exits are no longer rate-limited.
+        // v0.32.0-v0.32.12: shielded unshield (z->t) velocity cap from the 125,000
+        // sunset through block 134,999. The v0.32.11 minimum-cap floor still starts at
+        // 132,000, and v0.32.12 ends the quota at 135,000 after the recovery window has
+        // matured so remaining legacy exits are no longer rate-limited.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedUnshieldVelocityEndHeight = BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
@@ -757,9 +759,10 @@ public:
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
-        // v0.32.0-v0.32.11: shielded unshield (z->t) velocity cap from the 125,000
-        // sunset through block 131,999. v0.32.12 ends the quota at 132,000 after the
-        // recovery window has matured, so remaining legacy exits are no longer rate-limited.
+        // v0.32.0-v0.32.12: shielded unshield (z->t) velocity cap from the 125,000
+        // sunset through block 134,999. The v0.32.11 minimum-cap floor still starts at
+        // 132,000, and v0.32.12 ends the quota at 135,000 after the recovery window has
+        // matured so remaining legacy exits are no longer rate-limited.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedUnshieldVelocityEndHeight = BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
@@ -968,9 +971,10 @@ public:
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
-        // v0.32.0-v0.32.11: shielded unshield (z->t) velocity cap from the 125,000
-        // sunset through block 131,999. v0.32.12 ends the quota at 132,000 after the
-        // recovery window has matured, so remaining legacy exits are no longer rate-limited.
+        // v0.32.0-v0.32.12: shielded unshield (z->t) velocity cap from the 125,000
+        // sunset through block 134,999. The v0.32.11 minimum-cap floor still starts at
+        // 132,000, and v0.32.12 ends the quota at 135,000 after the recovery window has
+        // matured so remaining legacy exits are no longer rate-limited.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedUnshieldVelocityEndHeight = BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;
@@ -1430,9 +1434,10 @@ public:
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
-        // v0.32.0-v0.32.11: shielded unshield (z->t) velocity cap from the 125,000
-        // sunset through block 131,999. v0.32.12 ends the quota at 132,000 after the
-        // recovery window has matured, so remaining legacy exits are no longer rate-limited.
+        // v0.32.0-v0.32.12: shielded unshield (z->t) velocity cap from the 125,000
+        // sunset through block 134,999. The v0.32.11 minimum-cap floor still starts at
+        // 132,000, and v0.32.12 ends the quota at 135,000 after the recovery window has
+        // matured so remaining legacy exits are no longer rate-limited.
         consensus.nShieldedUnshieldVelocityActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedUnshieldVelocityEndHeight = BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT;
         consensus.nShieldedUnshieldVelocityMinCapHeight = BTX_V03211_HARDENING_HEIGHT;

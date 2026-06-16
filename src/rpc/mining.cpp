@@ -4550,6 +4550,8 @@ static UniValue MiningChainGuardToJSON(const node::MiningChainGuardStatus& statu
     UniValue chain_guard(UniValue::VOBJ);
     chain_guard.pushKV("enabled", status.enabled);
     chain_guard.pushKV("healthy", status.healthy);
+    chain_guard.pushKV("initial_block_download", status.initial_block_download);
+    chain_guard.pushKV("network_active", status.network_active);
     chain_guard.pushKV("should_pause_mining", node::ShouldPauseMiningByChainGuard(status));
     chain_guard.pushKV("recommended_action", node::GetMiningChainGuardRecommendedAction(status));
     chain_guard.pushKV("reason", status.reason);
@@ -4557,11 +4559,15 @@ static UniValue MiningChainGuardToJSON(const node::MiningChainGuardStatus& statu
     chain_guard.pushKV("peer_count", status.peer_count);
     chain_guard.pushKV("median_peer_tip", status.median_peer_tip);
     chain_guard.pushKV("best_peer_tip", status.best_peer_tip);
+    chain_guard.pushKV("worst_peer_tip", status.worst_peer_tip);
     chain_guard.pushKV("near_tip_peers", status.near_tip_peers);
     chain_guard.pushKV("min_peers", status.min_peer_count);
     chain_guard.pushKV("min_near_tip_peers", status.min_near_tip_peers);
     chain_guard.pushKV("near_tip_window", status.near_tip_window);
     chain_guard.pushKV("max_median_gap", status.max_median_tip_gap);
+    chain_guard.pushKV("stale_peer_seconds", status.stale_peer_seconds);
+    chain_guard.pushKV("default_mesh_refresh_enabled", status.refresh_default_mesh);
+    chain_guard.pushKV("mesh_refresh_seconds", status.mesh_refresh_seconds);
     chain_guard.pushKV("deferred_reorg_watch_seconds", status.deferred_reorg_watch_seconds);
     chain_guard.pushKV("last_deferred_reorg_depth", static_cast<int64_t>(status.last_deferred_reorg_depth));
     chain_guard.pushKV("last_deferred_required_work_margin", static_cast<int64_t>(status.last_deferred_required_work_margin));

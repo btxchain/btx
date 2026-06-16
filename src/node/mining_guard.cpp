@@ -147,6 +147,9 @@ MiningChainGuardStatus EvaluateMiningChainGuard(
     status.min_near_tip_peers = options.min_near_tip_peers;
     status.max_median_tip_gap = options.max_median_tip_gap;
     status.near_tip_window = options.near_tip_window;
+    status.stale_peer_seconds = options.stale_peer_seconds;
+    status.refresh_default_mesh = options.refresh_default_mesh;
+    status.mesh_refresh_seconds = options.mesh_refresh_seconds;
     status.deferred_reorg_watch_seconds = options.deferred_reorg_watch_seconds;
 
     if (!options.enabled) {

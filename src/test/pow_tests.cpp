@@ -943,7 +943,7 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nEmptyBlockSubsidyPenaltyHeight, 130'000);
     BOOST_CHECK_EQUAL(consensus.nEmptyBlockSubsidyStrictPenaltyHeight, 130'500);
     BOOST_CHECK_EQUAL(consensus.nEmptyBlockSubsidyPenaltyEndHeight, 132'000);
-    BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityEndHeight, 132'000);
+    BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityEndHeight, 135'000);
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityMinCapHeight, 132'000);
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityMinCap, 10'000 * COIN);
     BOOST_CHECK_EQUAL(consensus.nMatMulFreivaldsBindingHeight, 61'000);

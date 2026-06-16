@@ -927,8 +927,8 @@ The template includes MatMul-specific fields (`matmul_dim`, `seed_a`,
 ### Mining Best Practices
 
 - Keep the node healthy and near tip before mining. `getmininginfo` exposes a
-  `chain_guard` section that reports peer count, near-tip peers, and whether
-  mining should be paused.
+  `chain_guard` section that reports peer count, near-tip peers, freshness
+  windows, mesh refresh settings, and a recommended action for operators.
 - The chain guard stays conservative around recently active lagging peers, but
   it discounts long-idle stale peers so a few dead outbound connections do not
   pause otherwise healthy mining sessions.
@@ -943,7 +943,7 @@ The template includes MatMul-specific fields (`matmul_dim`, `seed_a`,
 - Prefer `btxd` / `btx-cli` in scripts and service files.
 - If you intentionally drive local solo mining through `generatetoaddress`,
   use a health-aware supervisor instead of a blind shell loop so the miner can
-  react to repeated RPC failures or prolonged `chain_guard` pauses.
+  react to repeated RPC failures or prolonged `chain_guard` warnings.
 - For actual idle-time mining, give that supervisor an explicit local idleness
   probe via `--should-mine-command='...'` so chain health alone is not treated
   as permission to keep mining while the machine is busy.

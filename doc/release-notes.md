@@ -21,9 +21,9 @@ If you are running an older version, shut it down. Wait until it has completely
 shut down, then install the new binaries or replace the existing `btxd`,
 `btx-cli`, and GUI binaries with the 0.32.12 release artifacts.
 
-BTX 0.32.12 ends the shielded unshield velocity quota at height 132,000. This
+BTX 0.32.12 ends the shielded unshield velocity quota at height 135,000. This
 is a consensus-visible relaxation: miners and archive nodes should upgrade
-before height 132,000 so blocks containing uncapped post-132,000 shielded exits
+before height 135,000 so blocks containing uncapped post-135,000 shielded exits
 are accepted consistently.
 
 # Compatibility
@@ -32,11 +32,12 @@ BTX is supported on Linux, macOS 13+, and Windows 10+.
 
 # Notable changes
 
-- The shielded unshield velocity quota is active only from height 125,000
-  through 131,999. At height 132,000 and later, shielded exits are no longer
-  rate-limited by the velocity quota. Historical quota state remains persisted
-  through the configured reorg horizon so rollback validation of capped blocks
-  remains deterministic.
+- The shielded unshield velocity quota is active from height 125,000 through
+  134,999. The v0.32.11 10,000 BTX minimum-cap floor remains active from
+  132,000 while the quota is still in force, and at height 135,000 and later
+  shielded exits are no longer rate-limited by the velocity quota. Historical
+  quota state remains persisted through the configured reorg horizon so
+  rollback validation of capped blocks remains deterministic.
 
 - `getshieldedstateinfo` now reports `velocity_end_height` and
   `velocity_capacity_unlimited`, making it clear when the next block is outside
@@ -55,6 +56,10 @@ BTX is supported on Linux, macOS 13+, and Windows 10+.
   states through mining RPCs and automatically requests extra outbound and
   block-relay peers, but unattended miners keep receiving work so honest nonce
   rate stays on the public network.
+
+- Mining RPC `chain_guard` output now includes IBD/network state, worst peer
+  tip, stale-peer filtering, and default peer-mesh refresh settings so pool
+  operators can diagnose warnings without scraping raw peer logs.
 
 - Mainnet peer discovery now ships all three public bootstrap DNS seeds
   (`node.btx.dev`, `node.btxchain.org`, and `node.btx.tools`). The live-mining

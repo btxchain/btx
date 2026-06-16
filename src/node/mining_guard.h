@@ -54,6 +54,9 @@ struct MiningChainGuardStatus {
     int min_near_tip_peers{DEFAULT_MINING_CHAIN_GUARD_MIN_NEAR_TIP_PEERS};
     int max_median_tip_gap{DEFAULT_MINING_CHAIN_GUARD_MAX_MEDIAN_GAP};
     int near_tip_window{DEFAULT_MINING_CHAIN_GUARD_NEAR_TIP_WINDOW};
+    int stale_peer_seconds{DEFAULT_MINING_CHAIN_GUARD_STALE_PEER_SECONDS};
+    bool refresh_default_mesh{true};
+    int mesh_refresh_seconds{DEFAULT_MINING_CHAIN_GUARD_MESH_REFRESH_SECONDS};
     int deferred_reorg_watch_seconds{DEFAULT_MINING_CHAIN_GUARD_DEFERRED_REORG_WATCH_SECONDS};
     uint32_t last_deferred_reorg_depth{0};
     uint32_t last_deferred_required_work_margin{0};

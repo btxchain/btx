@@ -430,16 +430,20 @@ BOOST_AUTO_TEST_CASE(mainnet_velocity_cap_active_at_sunset_and_expires_at_v03212
     BOOST_CHECK(consensus.IsShieldedPoolCreditDisabled(consensus.nShieldedSunsetHeight));
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityActivationHeight,
                       consensus.nShieldedSunsetHeight);
-    BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityEndHeight, 132'000);
+    BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityEndHeight, 135'000);
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityMinCapHeight, 132'000);
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityMinCap, 10'000 * COIN);
     BOOST_CHECK_EQUAL(consensus.ShieldedUnshieldVelocityMinCapForHeight(131'999), 0);
-    BOOST_CHECK_EQUAL(consensus.ShieldedUnshieldVelocityMinCapForHeight(132'000), 0);
+    BOOST_CHECK_EQUAL(consensus.ShieldedUnshieldVelocityMinCapForHeight(132'000), 10'000 * COIN);
+    BOOST_CHECK_EQUAL(consensus.ShieldedUnshieldVelocityMinCapForHeight(134'999), 10'000 * COIN);
+    BOOST_CHECK_EQUAL(consensus.ShieldedUnshieldVelocityMinCapForHeight(135'000), 0);
     // At the sunset block the sunset gate and the velocity cap are simultaneously in force.
     BOOST_CHECK(consensus.IsShieldedSunsetActive(consensus.nShieldedSunsetHeight));
     BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(consensus.nShieldedSunsetHeight));
     BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(131'999));
-    BOOST_CHECK(!consensus.IsShieldedUnshieldVelocityCapActive(132'000));
+    BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(132'000));
+    BOOST_CHECK(consensus.IsShieldedUnshieldVelocityCapActive(134'999));
+    BOOST_CHECK(!consensus.IsShieldedUnshieldVelocityCapActive(135'000));
     // Cap loosened to 50%/day so a large legitimate holder can fully exit in ~1 week while a residual
     // drain is still throttled to half the pool per day. Locks the policy against silent regression.
     BOOST_CHECK_EQUAL(consensus.nShieldedUnshieldVelocityCapBps, 5'000u);
