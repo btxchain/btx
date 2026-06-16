@@ -637,6 +637,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
         130'501,
         132'142,
         132'173,
+        132'209,
     };
 
     BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
@@ -662,6 +663,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     BOOST_CHECK(params->AssumeutxoForHeight(130'501));
     BOOST_CHECK(params->AssumeutxoForHeight(132'142));
     BOOST_CHECK(params->AssumeutxoForHeight(132'173));
+    BOOST_CHECK(params->AssumeutxoForHeight(132'209));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
     BOOST_CHECK(!params->AssumeutxoForHeight(0));
 }
