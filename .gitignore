@@ -63,3 +63,21 @@ github.key
 *~
 .cache/*
 btx-release-key/
+
+# --- Local mining ops (added 2026-07-02): keys, state, logs, and big artifacts never commit ---
+/Wallet/
+/wallet-backup-*/
+*.log
+/btx-solo-stats.state.json
+/_dbg_out.txt
+/_dbg_err.txt
+/btx-*.tar.gz
+/snapshot.dat
+/snapshot.latest.manifest.json
+/bin/
+/btx-mining-mode.conf
+/btx-gui-actions.log
+/.claude/
+/my-wallet-backup/
+/temp/
+/v032.11-solver*/
