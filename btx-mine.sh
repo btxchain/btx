@@ -6,7 +6,8 @@
 set -u
 CLI=${CLI:-/home/eldian/btx-node/bin/btx-cli}
 DATADIR=${DATADIR:-/home/eldian/.btx}
-ADDR=${ADDR:-btx1zkht84nwz8mxk2ln20krjr4lcn5e65gsmssk8m48qtlsl5m97awds6d9m35}
+[ -f /mnt/d/BTX/btx-payout.conf ] && . /mnt/d/BTX/btx-payout.conf 2>/dev/null
+ADDR=${ADDR:-${BTX_PAYOUT_ADDR:-btx1zkht84nwz8mxk2ln20krjr4lcn5e65gsmssk8m48qtlsl5m97awds6d9m35}}
 
 echo "Waiting for sync to complete..."
 while true; do

@@ -6,7 +6,8 @@
 # cookie auth so scanning hundreds of blocks doesn't spawn hundreds of CLIs.
 set -u
 DATADIR=${DATADIR:-/home/eldian/.btx}
-ADDR=${ADDR:-btx1zkht84nwz8mxk2ln20krjr4lcn5e65gsmssk8m48qtlsl5m97awds6d9m35}
+[ -f /mnt/d/BTX/btx-payout.conf ] && . /mnt/d/BTX/btx-payout.conf 2>/dev/null
+ADDR=${ADDR:-${BTX_PAYOUT_ADDR:-btx1zkht84nwz8mxk2ln20krjr4lcn5e65gsmssk8m48qtlsl5m97awds6d9m35}}
 STATE=${STATE:-/mnt/d/BTX/btx-solo-stats.state.json}
 
 DATADIR="$DATADIR" ADDR="$ADDR" STATE="$STATE" python3 <<'PY'

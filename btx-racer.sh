@@ -3,7 +3,9 @@
 # or pool (PPLNS 1%). Call SYNCHRONOUSLY: it returns in ~2s, racer self-detaches.
 #   bash btx-racer.sh run solo|pool     bash btx-racer.sh stop     bash btx-racer.sh status
 set -u
-ADDR=${ADDR:-btx1zkht84nwz8mxk2ln20krjr4lcn5e65gsmssk8m48qtlsl5m97awds6d9m35}
+# Payout address: env ADDR > btx-payout.conf (set from the GUI) > built-in default.
+[ -f /mnt/d/BTX/btx-payout.conf ] && . /mnt/d/BTX/btx-payout.conf 2>/dev/null
+ADDR=${ADDR:-${BTX_PAYOUT_ADDR:-btx1zkht84nwz8mxk2ln20krjr4lcn5e65gsmssk8m48qtlsl5m97awds6d9m35}}
 WORKER=${WORKER:-$(hostname)}
 POOL=${POOL:-btx-eu.lproute.com:8660}
 BIN=${BIN:-/home/eldian/racer/racer/racer}

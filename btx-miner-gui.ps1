@@ -47,7 +47,8 @@ $LUCKY_BLOCKTIME = 82.0   # their measured avg; editable in the calculator
 $AUTOTUNE   = '/mnt/d/BTX/btx-autotune.sh'
 $AUTOTUNE_LOG = '/mnt/d/BTX/btx-autotune.log'
 $AUTOTUNE_STOP= '/tmp/btx-autotune.stop'
-$PAYOUT     = 'btx1zkht84nwz8mxk2ln20krjr4lcn5e65gsmssk8m48qtlsl5m97awds6d9m35'
+$PAYOUT     = 'btx1zkht84nwz8mxk2ln20krjr4lcn5e65gsmssk8m48qtlsl5m97awds6d9m35'   # default only
+$PAYOUT_CONF = 'D:\BTX\btx-payout.conf'   # BTX_PAYOUT_ADDR=... ; sourced by all mining scripts
 $EXPLORER   = 'https://explorer.minebtx.com/api/address/'
 $BLOCK_TIME = 90.0      # BTX target spacing (seconds) -> 960 blocks/day
 $NET_HS_DEFAULT = 156000000.0   # 156 MN/s fallback when node RPC is down (pool mode)
@@ -93,6 +94,20 @@ function Get-Mode {
 function Set-PoolTarget {
     param([string]$PoolHost, [int]$PoolPort, [string]$Tls = 'false')
     Invoke-Wsl ("sed -i -E 's|^pool_host:.*|pool_host: $PoolHost|; s|^pool_port:.*|pool_port: $PoolPort|; s|^pool_tls:.*|pool_tls: $Tls|' $CFG_PATH; grep -E '^pool_(host|port|tls):' $CFG_PATH") 10
+}
+# Current payout address: btx-payout.conf if present, else the built-in default.
+function Get-PayoutAddr {
+    if (Test-Path $PAYOUT_CONF) {
+        $line = (Get-Content $PAYOUT_CONF -First 5 -ErrorAction SilentlyContinue) -match 'BTX_PAYOUT_ADDR='
+        if ($line) { $v = ($line[0] -split '=',2)[1].Trim(); if ($v) { return $v } }
+    }
+    return $PAYOUT
+}
+function Set-PayoutAddr {
+    param([string]$Addr)
+    # Written via WSL printf so the file is LF (it is sourced by bash scripts).
+    Invoke-Wsl ("printf 'BTX_PAYOUT_ADDR=%s\n' '" + $Addr + "' > /mnt/d/BTX/btx-payout.conf") 10 | Out-Null
+    $script:PayoutAddr = $Addr
 }
 function Get-PoolHost {
     $r = Invoke-Wsl "grep -E '^pool_host:' $CFG_PATH 2>/dev/null | head -1" 6
@@ -152,8 +167,10 @@ function Invoke-StartMode {
     param([int]$Idx)
     Clean-NodeProcs   # kills dexbtx guards, racer, node, sync — one owner of the GPU
     Set-Content -Path $GUI_MODE_FILE -Value $Idx -ErrorAction SilentlyContinue
+    $addr = Get-PayoutAddr
     switch ($Idx) {
         0 { Set-PoolTarget 'pool.minebtx.com' 3333 | Out-Null
+            Invoke-Wsl ("sed -i -E 's|^payout_address:.*|payout_address: " + $addr + "|' $CFG_PATH") 10 | Out-Null
             $out = Start-Mining 'pool' }
         1 { $out = Invoke-Wsl "sed -i 's/\r$//' $RACER_SH; chmod +x $RACER_SH; bash $RACER_SH run pool 2>&1" 60 }
         2 { $out = Invoke-Wsl "sed -i 's/\r$//' $RACER_SH; chmod +x $RACER_SH; bash $RACER_SH run solo 2>&1" 60 }
@@ -651,7 +668,7 @@ function Show-AutoTune {
 # ============================================================================
 $form = New-Object System.Windows.Forms.Form
 $buildStamp = (Get-Item $PSCommandPath).LastWriteTime.ToString('MM-dd HH:mm')
-$form.Text="BTX Miner Control (admin) - build $buildStamp"; $form.ClientSize=New-Object System.Drawing.Size(470,474)
+$form.Text="BTX Miner Control (admin) - build $buildStamp"; $form.ClientSize=New-Object System.Drawing.Size(470,500)
 $form.StartPosition='CenterScreen'; $form.FormBorderStyle='FixedSingle'; $form.MaximizeBox=$false
 $form.BackColor=$cBg; $form.Font=$fUI
 
@@ -712,17 +729,27 @@ $cmbMode.Items.AddRange(@(
 $cmbMode.BackColor=$cPanel; $cmbMode.ForeColor=[System.Drawing.Color]::White
 $form.Controls.Add($cmbMode)
 
-$btnStart = New-FlatButton 'START'          26  290 205 56 $cAccent ([System.Drawing.Color]::Black)
-$btnStop  = New-FlatButton 'STOP + FREE GPU' 247 290 197 56 $cRed   ([System.Drawing.Color]::White)
+# payout address — editable so anyone can run this app with their own wallet
+$lblAddr = New-Object System.Windows.Forms.Label
+$lblAddr.SetBounds(20,290,64,22); $lblAddr.Text='Payout:'; $lblAddr.ForeColor=[System.Drawing.Color]::White
+$form.Controls.Add($lblAddr)
+$txtAddr = New-Object System.Windows.Forms.TextBox
+$txtAddr.SetBounds(86,288,358,22); $txtAddr.BackColor=$cPanel; $txtAddr.ForeColor=$cAccent
+$txtAddr.BorderStyle='FixedSingle'; $txtAddr.Font=New-Object System.Drawing.Font('Consolas',8)
+$txtAddr.Text = Get-PayoutAddr
+$form.Controls.Add($txtAddr)
+
+$btnStart = New-FlatButton 'START'          26  316 205 56 $cAccent ([System.Drawing.Color]::Black)
+$btnStop  = New-FlatButton 'STOP + FREE GPU' 247 316 197 56 $cRed   ([System.Drawing.Color]::White)
 $form.Controls.AddRange(@($btnStart,$btnStop))
 
-$btnTune  = New-FlatButton 'FINE-TUNE'   26  356 135 42 $cPurple ([System.Drawing.Color]::White)
-$btnAuto  = New-FlatButton 'AUTO-TUNE'   167 356 135 42 $cAccent ([System.Drawing.Color]::Black)
-$btnChance= New-FlatButton 'BLOCK CHANCE'308 356 136 42 $cBlue   ([System.Drawing.Color]::White)
+$btnTune  = New-FlatButton 'FINE-TUNE'   26  382 135 42 $cPurple ([System.Drawing.Color]::White)
+$btnAuto  = New-FlatButton 'AUTO-TUNE'   167 382 135 42 $cAccent ([System.Drawing.Color]::Black)
+$btnChance= New-FlatButton 'BLOCK CHANCE'308 382 136 42 $cBlue   ([System.Drawing.Color]::White)
 $form.Controls.AddRange(@($btnTune,$btnAuto,$btnChance))
 
 $lblAction = New-Object System.Windows.Forms.Label
-$lblAction.SetBounds(16,408,438,58); $lblAction.TextAlign='MiddleCenter'; $lblAction.ForeColor=$cGray
+$lblAction.SetBounds(16,434,438,58); $lblAction.TextAlign='MiddleCenter'; $lblAction.ForeColor=$cGray
 $form.Controls.Add($lblAction)
 
 $applyStatus = {
@@ -790,7 +817,8 @@ $slowBlock = {
     "$bal|||$blk|||$net"
 }
 $script:slowJob = $null
-$kickSlow = { if (-not $script:slowJob) { $script:slowJob = Start-Job -ScriptBlock $slowBlock -ArgumentList $EXPLORER,$PAYOUT,$WSL_DIST,$SOLO_STATS } }
+$script:PayoutAddr = Get-PayoutAddr
+$kickSlow = { if (-not $script:slowJob) { $script:slowJob = Start-Job -ScriptBlock $slowBlock -ArgumentList $EXPLORER,$script:PayoutAddr,$WSL_DIST,$SOLO_STATS } }
 $reapSlow = {
     if ($script:slowJob -and $script:slowJob.State -ne 'Running') {
         $res = Receive-Job $script:slowJob -ErrorAction SilentlyContinue
@@ -806,10 +834,17 @@ $reapSlow = {
 
 $btnStart.Add_Click({
     $idx = [math]::Max(0, $cmbMode.SelectedIndex)
+    $addr = $txtAddr.Text.Trim()
+    if ($addr -notmatch '^btx1[a-z0-9]{20,90}$') {
+        $lblAction.Text='Invalid payout address — must start with btx1 (bech32). Fix it, then START.'
+        $txtAddr.ForeColor=$cRed; return
+    }
+    $txtAddr.ForeColor=$cAccent
     $btnStart.Enabled=$false; $btnStop.Enabled=$false
     $lblStatus.Text='STARTING...'; $lblStatus.ForeColor=$cYellow
     $lblAction.Text='Booting WSL...'; $form.Refresh()
     if (Ensure-Wsl) {
+        Set-PayoutAddr $addr
         $lblAction.Text = @('Starting minebtx pool miner...',
                             'Starting racer on luckypool (PPLNS)...',
                             'Starting racer SOLO on luckypool - no node needed...',

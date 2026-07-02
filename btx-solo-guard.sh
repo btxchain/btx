@@ -7,7 +7,8 @@ CLI=${CLI:-/home/eldian/btx-node/bin/btx-cli}
 BTXD=${BTXD:-/home/eldian/btx-node/bin/btxd}
 DATADIR=${DATADIR:-/home/eldian/.btx}
 WALLET=${WALLET:-my-wallet}
-ADDR=${SOLO_ADDR:-btx1zkht84nwz8mxk2ln20krjr4lcn5e65gsmssk8m48qtlsl5m97awds6d9m35}
+[ -f /mnt/d/BTX/btx-payout.conf ] && . /mnt/d/BTX/btx-payout.conf 2>/dev/null
+ADDR=${SOLO_ADDR:-${BTX_PAYOUT_ADDR:-btx1zkht84nwz8mxk2ln20krjr4lcn5e65gsmssk8m48qtlsl5m97awds6d9m35}}
 LOG=${LOG:-/mnt/d/BTX/btx-solo-guard.log}
 SOLO_LOG=${SOLO_LOG:-/mnt/d/BTX/btx-solo-miner.log}
 SYNC_SCRIPT=${SYNC_SCRIPT:-/mnt/d/BTX/btx-sync-fast.sh}
