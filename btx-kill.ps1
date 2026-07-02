@@ -10,7 +10,7 @@ $dist = 'Ubuntu'
 # If WSL is up, set stop flags + graceful stop first so nothing respawns.
 $run = (& wsl.exe --list --running 2>$null | Out-String) -replace "`0",""
 if ($run -match [regex]::Escape($dist)) {
-    & wsl.exe -d $dist -e bash -lc 'chmod +x /mnt/d/BTX/btx-mining-mode.sh 2>/dev/null; bash /mnt/d/BTX/btx-mining-mode.sh stop >/dev/null 2>&1; touch /tmp/btx-pool-guard.stop /tmp/btx-solo-guard.stop 2>/dev/null; true' 2>$null | Out-Null
+    & wsl.exe -d $dist -e bash -lc 'chmod +x /mnt/d/BTX/btx-mining-mode.sh 2>/dev/null; bash /mnt/d/BTX/btx-mining-mode.sh stop >/dev/null 2>&1; touch /tmp/btx-pool-guard.stop /tmp/btx-solo-guard.stop 2>/dev/null; pkill -f "[r]acer -a btx" 2>/dev/null; true' 2>$null | Out-Null
 }
 
 # Nuke WSL: kills miner, guard, and node, and returns all WSL RAM to Windows.

@@ -47,8 +47,15 @@ case "${1:-run}" in
 esac
 
 if ! mkdir "$LOCKDIR" 2>/dev/null; then
-  log "Solo guard already running (lock: $LOCKDIR)."
-  exit 0
+  oldpid=$(cat "$PIDFILE" 2>/dev/null || true)
+  if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+    log "Solo guard already running (pid $oldpid)."
+    exit 0
+  fi
+  # Lock left behind by a hard-killed guard (traps don't run on kill -9): reclaim it.
+  log "Stale solo-guard lock (owner ${oldpid:-unknown} is dead); reclaiming."
+  rmdir "$LOCKDIR" 2>/dev/null || true
+  mkdir "$LOCKDIR" 2>/dev/null || { log "Lock reclaim lost a race; exiting."; exit 0; }
 fi
 trap 'rm -f "$PIDFILE"; rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 echo $$ > "$PIDFILE"
@@ -95,6 +102,11 @@ while [ ! -e "$STOP" ]; do
     else
       log "Fast sync is running; solo mining waits for local node sync. See /mnt/d/BTX/btx-sync-fast.log."
       kill_solo
+      # GPU must not idle during the header/snapshot phase either.
+      if ! pgrep -f "[d]exbtx-miner" >/dev/null 2>&1; then
+        log "GPU idle during fast-sync; starting pool mining meanwhile (auto-stops at tip)."
+        nohup bash /mnt/d/BTX/btx-pool-guard.sh run >>/mnt/d/BTX/btx-smart-pool-launch.log 2>&1 </dev/null &
+      fi
       sleep 30
       continue
     fi

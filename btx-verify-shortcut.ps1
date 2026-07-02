@@ -44,7 +44,7 @@ Check 'no Start-Process wsl launches (silent-failure API)' (-not ($src -match "S
 # [4] Every WSL script the GUI depends on: exists, LF-only, bash -n clean
 $deps = @('btx-smart-mine.sh','btx-mining-mode.sh','btx-sync-fast.sh','btx-solo-guard.sh',
           'btx-pool-guard.sh','btx-mine.sh','btx-hashrate.sh','btx-solo-hashrate.sh',
-          'btx-solo-stats.sh','btx-autotune.sh','btx-restore-snapshot.sh')
+          'btx-solo-stats.sh','btx-autotune.sh','btx-restore-snapshot.sh','btx-racer.sh','btx-status-probe.sh')
 $wslUp = ((& wsl.exe --list --running 2>$null | Out-String) -replace "`0","") -match 'Ubuntu'
 if (-not $wslUp) { & wsl.exe -d Ubuntu -e true 2>$null | Out-Null }
 foreach ($d in $deps) {

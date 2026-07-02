@@ -81,3 +81,5 @@ btx-release-key/
 /my-wallet-backup/
 /temp/
 /v032.11-solver*/
+/btx-gui-mode.txt
+/btx-racer.mode

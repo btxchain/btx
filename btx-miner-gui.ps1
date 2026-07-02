@@ -40,6 +40,10 @@ $CLI        = '/home/eldian/btx-node/bin/btx-cli'
 $DATADIR    = '/home/eldian/.btx'
 $SOLO_STATS = '/mnt/d/BTX/btx-solo-stats.sh'
 $RESTORE    = '/mnt/d/BTX/btx-restore-snapshot.sh'
+$RACER_SH   = '/mnt/d/BTX/btx-racer.sh'
+$GUI_MODE_FILE = 'D:\BTX\btx-gui-mode.txt'   # persists the 4-way mode dropdown choice
+$LUCKY_API  = 'https://btx.luckypool.io/api/stats'
+$LUCKY_BLOCKTIME = 82.0   # their measured avg; editable in the calculator
 $AUTOTUNE   = '/mnt/d/BTX/btx-autotune.sh'
 $AUTOTUNE_LOG = '/mnt/d/BTX/btx-autotune.log'
 $AUTOTUNE_STOP= '/tmp/btx-autotune.stop'
@@ -84,6 +88,18 @@ function Get-Mode {
     return 'pool'
 }
 
+# Point the pool miner's config.yaml at a stratum without touching other settings.
+# Takes effect on the NEXT miner (re)start — never disturbs a running miner.
+function Set-PoolTarget {
+    param([string]$PoolHost, [int]$PoolPort, [string]$Tls = 'false')
+    Invoke-Wsl ("sed -i -E 's|^pool_host:.*|pool_host: $PoolHost|; s|^pool_port:.*|pool_port: $PoolPort|; s|^pool_tls:.*|pool_tls: $Tls|' $CFG_PATH; grep -E '^pool_(host|port|tls):' $CFG_PATH") 10
+}
+function Get-PoolHost {
+    $r = Invoke-Wsl "grep -E '^pool_host:' $CFG_PATH 2>/dev/null | head -1" 6
+    if ($r -match 'pool_host:\s*(\S+)') { return $matches[1] }
+    return ''
+}
+
 # ---- actions (reuse the existing mode-switch script) ----
 # Boot WSL (Ubuntu) from a cold/stopped state and wait until it responds.
 function Ensure-Wsl {
@@ -106,6 +122,7 @@ function Kill-Mining {
         'bash /mnt/d/BTX/btx-smart-mine.sh stop >/dev/null 2>&1; ' +
         'bash ' + $MODE_SWITCH + ' stop >/dev/null 2>&1; ' +
         'touch /tmp/btx-pool-guard.stop /tmp/btx-solo-guard.stop /tmp/btx-smart-mine.stop 2>/dev/null; ' +
+        'pkill -f "[r]acer -a btx" 2>/dev/null; ' +
         $CLI + ' -datadir=' + $DATADIR + ' -rpcclienttimeout=10 stop >/dev/null 2>&1; ' +
         'for i in $(seq 1 30); do pgrep -f "[b]txd" >/dev/null 2>&1 || break; sleep 1; done; true'
     Invoke-Wsl $bash 60 | Out-Null
@@ -120,26 +137,30 @@ function Test-NodeCorrupt {
 # duplicate-fast-sync pileup at the source). Called at the start of every solo START.
 function Clean-NodeProcs {
     # [b]racketed patterns so pkill can never match (and kill) its own invoking shell.
-    Invoke-Wsl ("pkill -9 -f '[b]tx-solo-guard|[b]tx-pool-guard|[b]tx-sync-fast|[b]tx-restore-snapshot|[f]aststart|[b]txd|[b]tx-smart-mine|[b]tx-mine.sh|[d]exbtx-miner' 2>/dev/null; " +
+    Invoke-Wsl ("pkill -9 -f '[b]tx-solo-guard|[b]tx-pool-guard|[b]tx-sync-fast|[b]tx-restore-snapshot|[f]aststart|[b]txd|[b]tx-smart-mine|[b]tx-mine.sh|[d]exbtx-miner|[r]acer -a btx' 2>/dev/null; " +
         "rmdir /tmp/btx-sync-fast.lock /tmp/btx-smart-mine.lock /tmp/btx-solo-guard.lock /tmp/btx-pool-guard.lock 2>/dev/null; " +
         "rm -f /tmp/btx-solo-guard.stop /tmp/btx-pool-guard.stop /tmp/btx-smart-mine.stop /tmp/btx-sync-fast.pid 2>/dev/null; sleep 2; true") 25 | Out-Null
 }
-# The single source of truth for starting a mode: guarantees ONE instance, auto-syncs, auto-mines.
-# Solo uses btx-smart-mine.sh: pool-mines on the GPU while the node syncs (zero idle GPU),
-# then hands the GPU to solo automatically at the tip. If the node is already synced it goes
-# straight to solo, so a healthy datadir means instant solo starts.
+# The single source of truth for starting a mode: guarantees ONE instance per GPU.
+#   0 minebtx pool  -> dexbtx miner via pool guard
+#   1 luckypool pool-> racer (PPLNS 1%)
+#   2 luckypool SOLO-> racer with solo: prefix — NO local node at all
+#   3 own-node SOLO -> smart-mine (sync + pool-mine meanwhile + auto-handoff)
+# All launches are SYNCHRONOUS wsl calls (Start-Process proved silently unreliable);
+# the scripts return in seconds and their nohup children live on in the VM.
 function Invoke-StartMode {
-    param($Mode)
-    if ($Mode -eq 'solo') {
-        Clean-NodeProcs             # one instance only
-        # Synchronous launch — NOT Start-Process (which proved unreliable/silent here).
-        # The launcher exits in seconds; its nohup'd children (sync, guard, miners)
-        # live on inside the WSL VM. Output goes to a log so failures are visible.
-        $out = Invoke-Wsl 'chmod +x /mnt/d/BTX/btx-smart-mine.sh /mnt/d/BTX/btx-mining-mode.sh; bash /mnt/d/BTX/btx-smart-mine.sh run 2>&1' 60
-        Add-Content -Path 'D:\BTX\btx-gui-actions.log' -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] START solo -> $($out.Trim())" -ErrorAction SilentlyContinue
-    } else {
-        Start-Mining 'pool' | Out-Null
+    param([int]$Idx)
+    Clean-NodeProcs   # kills dexbtx guards, racer, node, sync — one owner of the GPU
+    Set-Content -Path $GUI_MODE_FILE -Value $Idx -ErrorAction SilentlyContinue
+    switch ($Idx) {
+        0 { Set-PoolTarget 'pool.minebtx.com' 3333 | Out-Null
+            $out = Start-Mining 'pool' }
+        1 { $out = Invoke-Wsl "sed -i 's/\r$//' $RACER_SH; chmod +x $RACER_SH; bash $RACER_SH run pool 2>&1" 60 }
+        2 { $out = Invoke-Wsl "sed -i 's/\r$//' $RACER_SH; chmod +x $RACER_SH; bash $RACER_SH run solo 2>&1" 60 }
+        3 { $out = Invoke-Wsl 'chmod +x /mnt/d/BTX/btx-smart-mine.sh /mnt/d/BTX/btx-mining-mode.sh; bash /mnt/d/BTX/btx-smart-mine.sh run 2>&1' 60 }
     }
+    Add-Content -Path 'D:\BTX\btx-gui-actions.log' -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] START idx=$Idx -> $(("$out").Trim())" -ErrorAction SilentlyContinue
+    return $out
 }
 
 # ---- balance (public minebtx explorer; works in pool mode with no local node) ----
@@ -169,30 +190,37 @@ function Get-BlocksFound {
 # ---- node/pipeline state: names the exact phase on the road to mining, with a
 # liveness heartbeat so a stall is visible. One combined WSL call per poll. ----
 $script:hbMetric = -1; $script:hbTick = [Environment]::TickCount64
+$script:lastRacerMode = 'none'; $script:lastRacerHs = 0.0
+$script:luckyNet = 180000000.0   # luckypool-reported network H/s; refreshed by the slow job
 function Get-SyncStatus {
     $r = @{ Text='node off (pool mode — not needed)'; Pct=-1; Phase='—'; Metric=-1 }
-    # [b]racket trick: the pattern must not match this probe shell's own command line.
-    $probe = 'echo P_NODE=$(pgrep -f "[b]txd" >/dev/null 2>&1 && echo 1 || echo 0); ' +
-        'echo P_SYNCF=$(pgrep -f "[b]tx-sync-fast.sh" >/dev/null 2>&1 && echo 1 || echo 0); ' +
-        'echo P_FASTS=$(pgrep -f "[f]aststart.py" >/dev/null 2>&1 && echo 1 || echo 0); ' +
-        'echo P_SGUARD=$(pgrep -f "[b]tx-solo-guard.sh" >/dev/null 2>&1 && echo 1 || echo 0); ' +
-        'echo P_PGUARD=$(pgrep -f "[b]tx-pool-guard.sh" >/dev/null 2>&1 && echo 1 || echo 0); ' +
-        'echo P_PMINER=$(pgrep -f "[d]exbtx-miner" >/dev/null 2>&1 && echo 1 || echo 0); ' +
-        'echo P_SMINER=$(pgrep -f "[b]tx-mine.sh" >/dev/null 2>&1 && echo 1 || echo 0); ' +
-        'echo LOCK=$([ -d /tmp/btx-sync-fast.lock ] && echo 1 || echo 0); ' +
-        'echo SNAPSZ=$(stat -c %s /home/eldian/.btx/faststart/snapshot.dat 2>/dev/null || echo 0); ' +
-        'DL=/mnt/d/BTX/btx-faststart-debug.log; [ /home/eldian/.btx/debug.log -nt $DL ] 2>/dev/null && DL=/home/eldian/.btx/debug.log; ' +
-        'echo TIPH=$(grep -oE "height=[0-9]+" $DL 2>/dev/null | tail -1 | cut -d= -f2); ' +
-        'echo TAGE=$(( $(date +%s) - $(stat -c %Y $DL 2>/dev/null || date +%s) )); ' +
-        "$CLI -datadir=$DATADIR -rpcclienttimeout=5 getblockchaininfo 2>/dev/null; " +
-        'echo ===LOG===; tail -n 25 /mnt/d/BTX/btx-sync-fast.log 2>/dev/null'
-    $out = Invoke-Wsl $probe 15
+    # The probe lives in a real .sh file — building shell code inside PowerShell strings
+    # breaks silently once quoting gets long/complex (observed: whole probe returned '').
+    $out = Invoke-Wsl 'bash /mnt/d/BTX/btx-status-probe.sh' 15
     $parts = $out -split '===LOG==='
     $head  = $parts[0]
     $slog  = if ($parts.Count -gt 1) { $parts[1] } else { '' }
     $f = Parse-KV $head
     $tiph = [int64]("0"+($f.TIPH -replace '\D',''))
     $tage = [int64]("0"+($f.TAGE -replace '\D',''))
+
+    # racer (luckypool) takes precedence: when it owns the GPU the node is irrelevant.
+    $r.Racer = 'none'; $r.RacerHs = 0.0
+    if ($f.P_RACER -eq '1') {
+        $rmode = if ($f.RMODE -match 'pool') {'pool'} else {'solo'}
+        $rage  = [int64]("0"+($f.RAGE -replace '\D',''))
+        try { $r.RacerHs = [double]$f.RHS } catch {}
+        $r.Racer = $rmode
+        $r.Text  = "luckypool $rmode (racer)"
+        $r.Pct   = -1
+        $r.Phase = if ($rmode -eq 'solo') {'⛏ MINING SOLO on luckypool — no node; a found block pays ~19.8 BTX'}
+                   else {'⛏ MINING pool on luckypool (PPLNS, 1%)'}
+        if ($rage -lt 180) { $r.Phase += '  ✓alive' }
+        elseif ($rage -gt 360) { $r.Phase += "  ⚠ miner log silent ${rage}s" }
+        $script:lastRacerMode = $rmode; $script:lastRacerHs = $r.RacerHs
+        return $r
+    }
+    $script:lastRacerMode = 'none'
 
     # 1) RPC answers — authoritative.
     $ji = $head.IndexOf('{')
@@ -282,6 +310,19 @@ function Get-Status {
     if (-not $s.Wsl) { return $s }
     $s.Mode = Get-Mode
 
+    # One combined probe first; if racer owns the GPU, skip the dexbtx status paths entirely.
+    $sync = Get-SyncStatus
+    $s.SyncText = $sync.Text; $s.SyncPct = $sync.Pct; $s.Phase = $sync.Phase
+    if ($sync.Racer -ne 'none') {
+        $s.Mode = "lucky-$($sync.Racer)"
+        $s.Mining = $true
+        $s.HsRaw = [double]$sync.RacerHs
+        $s.NetHs = $script:luckyNet
+        if ($s.HsRaw -gt 0) { $s.Hashrate = ('{0:N0} H/s (racer)' -f $s.HsRaw) } else { $s.Hashrate = 'racer warming up...' }
+        if ($s.HsRaw -gt 0 -and $s.NetHs -gt 0) { $s.EstDay = (86400.0/$LUCKY_BLOCKTIME) * $s.HsRaw / $s.NetHs }
+        return $s
+    }
+
     if ($s.Mode -eq 'pool') {
         $kv = Parse-KV (Invoke-Wsl "chmod +x $HASH_POOL; bash $HASH_POOL 2>&1" 20)
         if ($kv.hashrate)    { $s.Hashrate = $kv.hashrate }
@@ -296,11 +337,9 @@ function Get-Status {
         $r = Invoke-Wsl 'pgrep -f "[b]tx-mine\.sh" >/dev/null 2>&1 && echo UP || echo DOWN' 8
         $s.Mining = ($r -match 'UP')
     }
-    # Estimated blocks/day = 960 * yourHs / netHs  (netHs falls back to 156 MN/s in pool mode)
+    # Estimated blocks/day = 960 * yourHs / netHs  (dexbtx modes; racer handled above)
     $net = if ($s.NetHs -gt 0) { $s.NetHs } else { $NET_HS_DEFAULT }
     if ($s.HsRaw -gt 0 -and $net -gt 0) { $s.EstDay = 960.0 * $s.HsRaw / $net }
-    $sync = Get-SyncStatus
-    $s.SyncText = $sync.Text; $s.SyncPct = $sync.Pct; $s.Phase = $sync.Phase
     return $s
 }
 
@@ -310,8 +349,10 @@ function Get-Status {
 if ($cliMode) {
     switch ($args[0]) {
         'start' {
-            [void](Ensure-Wsl); $m = Get-Mode
-            Invoke-StartMode $m; "start issued (mode=$m; one instance, auto-sync, auto-mine)"
+            [void](Ensure-Wsl)
+            $idx = 0; if (Test-Path $GUI_MODE_FILE) { $idx = [int](Get-Content $GUI_MODE_FILE -ErrorAction SilentlyContinue | Select-Object -First 1) }
+            Invoke-StartMode $idx | Out-Null
+            "start issued (mode-index=${idx}; 0=minebtx 1=lucky-pool 2=lucky-SOLO 3=node-solo)"
         }
         'stop'  { Kill-Mining; 'stop issued (killed miner + node + WSL)' }
         default { $s = Get-Status; "Wsl=$($s.Wsl) Mode=$($s.Mode) Mining=$($s.Mining) | $($s.Hashrate) | $($s.Gpu)`nActivity: $($s.Phase)`nSync: $($s.SyncText) ($([math]::Round($s.SyncPct,1))%)" }
@@ -494,9 +535,12 @@ function Show-BlockChance {
 
     & $mkLabel 'Your hashrate (H/s)'      16 18 170 | Out-Null; $inYou = & $mkInput ([math]::Round($yourHs)) 200 16
     & $mkLabel 'Network hashrate (H/s)'   16 50 170 | Out-Null; $inNet = & $mkInput ([math]::Round($netHs))  200 48
-    & $mkLabel 'Block time (s)'           16 82 170 | Out-Null; $inBt  = & $mkInput $BLOCK_TIME               200 80
-    & $mkLabel 'Block reward (BTX)'       16 114 170| Out-Null; $inRw  = & $mkInput '' 200 112
-    & $mkLabel 'Pool fee (%)'             16 146 170| Out-Null; $inFee = & $mkInput '0' 200 144
+    # luckypool-solo mode prefills the full economics (20 BTX reward, 1% fee, ~82s blocks)
+    $isLucky = ($script:lastRacerMode -ne 'none')
+    $btDef = if ($isLucky) { $LUCKY_BLOCKTIME } else { $BLOCK_TIME }
+    & $mkLabel 'Block time (s)'           16 82 170 | Out-Null; $inBt  = & $mkInput $btDef 200 80
+    & $mkLabel 'Block reward (BTX)'       16 114 170| Out-Null; $inRw  = & $mkInput $(if ($isLucky) {'20'} else {''}) 200 112
+    & $mkLabel 'Pool fee (%)'             16 146 170| Out-Null; $inFee = & $mkInput $(if ($isLucky) {'1'} else {'0'}) 200 144
 
     $note = & $mkLabel 'Blank reward = probability only. Live values auto-filled from the miner; edit to model "what if".' 16 172 440
     $note.ForeColor=$cGray; $note.Font=New-Object System.Drawing.Font('Segoe UI',7.5); $note.Height=30
@@ -658,7 +702,13 @@ $lblMode.SetBounds(20,258,50,24); $lblMode.Text='Mode:'; $lblMode.ForeColor=[Sys
 $form.Controls.Add($lblMode)
 $cmbMode = New-Object System.Windows.Forms.ComboBox
 $cmbMode.SetBounds(72,256,180,24); $cmbMode.DropDownStyle='DropDownList'
-$cmbMode.Items.AddRange(@('pool (minebtx)','solo (own node)')) | Out-Null
+# luckypool modes use the racer miner (their stratum rejects dexbtx-miner); solo-on-pool
+# needs NO local node — the pool runs one, a found block pays the full reward minus 1%.
+$cmbMode.Items.AddRange(@(
+    'pool  - minebtx (dexbtx miner)',
+    'pool  - luckypool 1% (racer)',
+    'SOLO  - luckypool, no node (racer)',
+    'SOLO  - own node 0% (dexbtx)')) | Out-Null
 $cmbMode.BackColor=$cPanel; $cmbMode.ForeColor=[System.Drawing.Color]::White
 $form.Controls.Add($cmbMode)
 
@@ -699,7 +749,12 @@ $applyStatus = {
         $syncBar.Value = [int][math]::Round([math]::Max(0.0,[math]::Min(100.0,$s.SyncPct)))
         $lblPct.Text = ('{0:N1}%' -f $s.SyncPct)
     } else { $syncBar.Visible = $false; $lblPct.Text = '' }
-    if ($cmbMode.SelectedIndex -lt 0) { $cmbMode.SelectedIndex = if ($s.Mode -eq 'solo') {1} else {0} }
+    if ($cmbMode.SelectedIndex -lt 0) {
+        $idx = 0
+        if (Test-Path $GUI_MODE_FILE) { try { $idx = [int](Get-Content $GUI_MODE_FILE -First 1) } catch {} }
+        if ($idx -lt 0 -or $idx -gt 3) { $idx = 0 }
+        $cmbMode.SelectedIndex = $idx
+    }
 }
 $refresh = { & $applyStatus (Get-Status) }
 
@@ -727,7 +782,12 @@ $slowBlock = {
             }
         }
     } catch {}
-    "$bal|||$blk"
+    $net = ''
+    try {
+        $ls = Invoke-RestMethod -Uri 'https://btx.luckypool.io/api/stats' -TimeoutSec 8
+        if ($ls.network.hashrate) { $net = [string][double]$ls.network.hashrate }
+    } catch {}
+    "$bal|||$blk|||$net"
 }
 $script:slowJob = $null
 $kickSlow = { if (-not $script:slowJob) { $script:slowJob = Start-Job -ScriptBlock $slowBlock -ArgumentList $EXPLORER,$PAYOUT,$WSL_DIST,$SOLO_STATS } }
@@ -735,25 +795,31 @@ $reapSlow = {
     if ($script:slowJob -and $script:slowJob.State -ne 'Running') {
         $res = Receive-Job $script:slowJob -ErrorAction SilentlyContinue
         Remove-Job $script:slowJob -Force; $script:slowJob = $null
-        if ($res) { $pp = $res -split '\|\|\|',2; $valBal.Text=$pp[0]; if($pp.Count -gt 1){$valBlk.Text=$pp[1]} }
+        if ($res) {
+            $pp = $res -split '\|\|\|',3
+            $valBal.Text=$pp[0]
+            if ($pp.Count -gt 1) { $valBlk.Text=$pp[1] }
+            if ($pp.Count -gt 2 -and $pp[2]) { try { $script:luckyNet = [double]$pp[2] } catch {} }
+        }
     }
 }
 
 $btnStart.Add_Click({
-    $mode = if ($cmbMode.SelectedIndex -eq 1) {'solo'} else {'pool'}
+    $idx = [math]::Max(0, $cmbMode.SelectedIndex)
     $btnStart.Enabled=$false; $btnStop.Enabled=$false
     $lblStatus.Text='STARTING...'; $lblStatus.ForeColor=$cYellow
     $lblAction.Text='Booting WSL...'; $form.Refresh()
     if (Ensure-Wsl) {
-        if ($mode -eq 'solo') {
-            $lblAction.Text='Ensuring ONE instance + auto-sync (node repairs/syncs itself, then mines)...'; $form.Refresh()
-            Invoke-StartMode 'solo'
-            $lblAction.Text='Running (one instance). Watch the Sync bar — mining begins automatically at the tip.'
-        } else {
-            $lblAction.Text='WSL up. Starting pool miner...'; $form.Refresh()
-            Invoke-StartMode 'pool'
-            $lblAction.Text='Started. Pool miner warming up (~30-60s).'
-        }
+        $lblAction.Text = @('Starting minebtx pool miner...',
+                            'Starting racer on luckypool (PPLNS)...',
+                            'Starting racer SOLO on luckypool - no node needed...',
+                            'Starting own-node solo (auto-sync; GPU pool-mines meanwhile)...')[$idx]
+        $form.Refresh()
+        Invoke-StartMode $idx | Out-Null
+        $lblAction.Text = @('Started. dexbtx miner warming up (~30-60s).',
+                            'Started. racer connects in seconds; shares within a minute.',
+                            'SOLO live on luckypool. A found block pays ~19.8 BTX to your address. No node, no sync.',
+                            'Started. Watch the Sync bar; mining hands to solo at the tip automatically.')[$idx]
     } else {
         $lblAction.Text='WSL failed to boot. Check `wsl --status`, then try START again.'
     }
