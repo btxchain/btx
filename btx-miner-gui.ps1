@@ -399,7 +399,14 @@ Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'"
     Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*btx-miner-gui.ps1*' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 $script:guiMutex = New-Object System.Threading.Mutex($false, 'Global\BTXMinerGuiSingleton')
-for ($i=0; $i -lt 10 -and -not $script:guiMutex.WaitOne(200,$false); $i++) { Start-Sleep -Milliseconds 200 }
+# A force-killed predecessor (that's how newest-wins works) leaves the mutex ABANDONED,
+# and .NET signals that by THROWING on the next wait. Abandoned = ours; never abort on it.
+$acq = $false
+for ($i=0; $i -lt 10 -and -not $acq; $i++) {
+    try { $acq = $script:guiMutex.WaitOne(200,$false) }
+    catch [System.Threading.AbandonedMutexException] { $acq = $true }
+    if (-not $acq) { Start-Sleep -Milliseconds 200 }
+}
 
 # SELF-HEALING SHORTCUTS: recreate both desktop shortcuts on every launch, so they can
 # never point at the wrong thing, lose the admin bit, or go missing.
