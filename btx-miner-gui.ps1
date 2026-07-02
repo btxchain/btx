@@ -96,10 +96,14 @@ function Set-PoolTarget {
     Invoke-Wsl ("sed -i -E 's|^pool_host:.*|pool_host: $PoolHost|; s|^pool_port:.*|pool_port: $PoolPort|; s|^pool_tls:.*|pool_tls: $Tls|' $CFG_PATH; grep -E '^pool_(host|port|tls):' $CFG_PATH") 10
 }
 # Current payout address: btx-payout.conf if present, else the built-in default.
+# NOTE: Get-Content on a ONE-line file returns a string, not an array — never use
+# `-match` on its result expecting filtered lines (you get a boolean and then a
+# null-method crash). Iterate explicitly.
 function Get-PayoutAddr {
     if (Test-Path $PAYOUT_CONF) {
-        $line = (Get-Content $PAYOUT_CONF -First 5 -ErrorAction SilentlyContinue) -match 'BTX_PAYOUT_ADDR='
-        if ($line) { $v = ($line[0] -split '=',2)[1].Trim(); if ($v) { return $v } }
+        foreach ($ln in @(Get-Content $PAYOUT_CONF -ErrorAction SilentlyContinue)) {
+            if ($ln -match '^\s*BTX_PAYOUT_ADDR=(\S+)') { return $Matches[1] }
+        }
     }
     return $PAYOUT
 }
@@ -372,7 +376,7 @@ if ($cliMode) {
             "start issued (mode-index=${idx}; 0=minebtx 1=lucky-pool 2=lucky-SOLO 3=node-solo)"
         }
         'stop'  { Kill-Mining; 'stop issued (killed miner + node + WSL)' }
-        default { $s = Get-Status; "Wsl=$($s.Wsl) Mode=$($s.Mode) Mining=$($s.Mining) | $($s.Hashrate) | $($s.Gpu)`nActivity: $($s.Phase)`nSync: $($s.SyncText) ($([math]::Round($s.SyncPct,1))%)" }
+        default { $s = Get-Status; "Wsl=$($s.Wsl) Mode=$($s.Mode) Mining=$($s.Mining) | $($s.Hashrate) | $($s.Gpu)`nActivity: $($s.Phase)`nSync: $($s.SyncText) ($([math]::Round($s.SyncPct,1))%)`nPayout: $(Get-PayoutAddr)" }
     }
     exit 0
 }

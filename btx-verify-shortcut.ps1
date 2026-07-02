@@ -56,6 +56,7 @@ foreach ($d in $deps) {
 $status = & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $gui status 2>&1 | Out-String
 Check 'status runs under PS 5.1' ($status -match 'Wsl=')
 Check 'status reports Activity phase' ($status -match 'Activity:')
+Check 'status resolves payout address' ($status -match 'Payout:\s*btx1[a-z0-9]{20,}')
 Write-Host '--- live status ---'; Write-Host $status.Trim()
 
 if ($fails.Count) { Write-Host ("`nRESULT: FAIL ({0}): {1}" -f $fails.Count, ($fails -join ' | ')) -ForegroundColor Red; exit 1 }
