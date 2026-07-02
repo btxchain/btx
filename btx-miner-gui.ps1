@@ -210,7 +210,7 @@ function Get-BlocksFound {
 
 # ---- node/pipeline state: names the exact phase on the road to mining, with a
 # liveness heartbeat so a stall is visible. One combined WSL call per poll. ----
-$script:hbMetric = -1; $script:hbTick = [Environment]::TickCount64
+$script:hbMetric = -1; $script:hbTick = [long]([DateTime]::UtcNow.Ticks / 10000)
 $script:lastRacerMode = 'none'; $script:lastRacerHs = 0.0
 $script:luckyNet = 180000000.0   # luckypool-reported network H/s; refreshed by the slow job
 function Get-SyncStatus {
@@ -311,7 +311,7 @@ function Get-SyncStatus {
 # Heartbeat: if the progress metric hasn't moved and the node log is stale, say so loudly.
 function Add-Heartbeat {
     param([string]$Phase, [int64]$Metric, [int64]$LogAge)
-    $now = [Environment]::TickCount64
+    $now = [long]([DateTime]::UtcNow.Ticks / 10000)
     if ($Metric -ge 0 -and $Metric -ne $script:hbMetric) { $script:hbMetric=$Metric; $script:hbTick=$now; return "$Phase  ✓alive" }
     $stuckSec = [int](($now - $script:hbTick)/1000)
     if ($LogAge -lt 45) { return "$Phase  ✓alive" }   # log still being written = working
@@ -889,14 +889,25 @@ $btnAuto.Add_Click({
 $btnChance.Add_Click({ Show-BlockChance })
 
 $script:lastSlow = 0
+$script:tickN = 0
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 6000
 $timer.Add_Tick({
-    & $refresh
-    & $reapSlow    # pick up finished balance/blocks result (instant; no wait)
-    if (([Environment]::TickCount64 - $script:lastSlow) -gt 30000) {
-        $script:lastSlow = [Environment]::TickCount64
-        & $kickSlow
+    # Diagnose-don't-guess: every tick logs errors; every 5th logs a heartbeat with duration.
+    try {
+        $t0 = [long]([DateTime]::UtcNow.Ticks / 10000)
+        & $refresh
+        & $reapSlow    # pick up finished balance/blocks result (instant; no wait)
+        if (([long]([DateTime]::UtcNow.Ticks / 10000) - $script:lastSlow) -gt 30000) {
+            $script:lastSlow = [long]([DateTime]::UtcNow.Ticks / 10000)
+            & $kickSlow
+        }
+        $script:tickN++
+        if ($script:tickN % 5 -eq 1) {
+            Add-Content -Path 'D:\BTX\btx-gui-actions.log' -Value "[$(Get-Date -Format 'HH:mm:ss')] tick#$($script:tickN) ok $([long]([DateTime]::UtcNow.Ticks / 10000) - $t0)ms phase=$($valAct.Text)" -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Add-Content -Path 'D:\BTX\btx-gui-actions.log' -Value "[$(Get-Date -Format 'HH:mm:ss')] TICK ERROR: $($_.Exception.Message) :: $($_.InvocationInfo.PositionMessage -replace '\s+',' ')" -ErrorAction SilentlyContinue
     }
 })
 $timer.Start()
