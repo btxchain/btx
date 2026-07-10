@@ -57,7 +57,12 @@ PLATFORM_ALIASES = {
     "macos-x86_64": ("x86_64-apple-darwin",),
     "macos-arm64": ("arm64-apple-darwin", "aarch64-apple-darwin"),
 }
-DEFAULT_REQUIRED_PLATFORMS = tuple(PLATFORM_ALIASES.keys())
+DEFAULT_REQUIRED_PLATFORMS = (
+    "linux-x86_64",
+    "linux-x86_64-cuda12",
+    "linux-arm64",
+    "macos-arm64",
+)
 
 
 @dataclass(frozen=True)
@@ -290,7 +295,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help=(
             "Platform id that must be present in platform_assets. "
-            f"Defaults to all primary release platforms: {', '.join(DEFAULT_REQUIRED_PLATFORMS)}."
+            "Defaults to the production download matrix used by the stable "
+            f"0.32.x releases: {', '.join(DEFAULT_REQUIRED_PLATFORMS)}. "
+            "Additional supported platform archives are still included when "
+            "present."
         ),
     )
     args = parser.parse_args(argv)

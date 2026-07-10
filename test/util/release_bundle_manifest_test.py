@@ -134,7 +134,18 @@ class ReleaseBundleManifestTest(unittest.TestCase):
 
             self.assertEqual([path.name for _, path in staged], ["btx-29.2-x86_64-linux-gnu.tar.gz"])
 
-    def test_main_requires_complete_platform_matrix_by_default(self):
+    def test_default_required_platforms_match_stable_production_matrix(self):
+        self.assertEqual(
+            self.module.DEFAULT_REQUIRED_PLATFORMS,
+            (
+                "linux-x86_64",
+                "linux-x86_64-cuda12",
+                "linux-arm64",
+                "macos-arm64",
+            ),
+        )
+
+    def test_main_requires_stable_production_platform_matrix_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             source_dir = root / "source"
@@ -150,6 +161,46 @@ class ReleaseBundleManifestTest(unittest.TestCase):
                         str(source_dir),
                     ]
                 )
+
+    def test_main_accepts_stable_matrix_and_includes_optional_platforms(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            source_dir = root / "source"
+            source_dir.mkdir()
+            for name in (
+                "btx-29.2-x86_64-linux-gnu.tar.gz",
+                "btx-29.2-x86_64-linux-gnu-cuda12.tar.gz",
+                "btx-29.2-aarch64-linux-gnu.tar.gz",
+                "btx-29.2-arm64-apple-darwin.tar.gz",
+                "btx-29.2-x86_64-w64-mingw32.zip",
+            ):
+                (source_dir / name).write_bytes(name.encode())
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = self.module.main(
+                    [
+                        "--output-dir",
+                        str(root / "bundle"),
+                        "--source",
+                        str(source_dir),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            summary = json.loads(output.getvalue())
+            self.assertIn("btx-29.2-x86_64-w64-mingw32.zip", summary["assets"])
+            manifest = json.loads((root / "bundle" / "btx-release-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                set(manifest["platform_assets"]),
+                {
+                    "linux-x86_64",
+                    "linux-x86_64-cuda12",
+                    "linux-arm64",
+                    "macos-arm64",
+                    "windows-x86_64",
+                },
+            )
 
     def test_main_stages_snapshot_and_signature_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -70,10 +70,7 @@ python3 scripts/release/collect_release_assets.py \
   --output-dir /tmp/btx-release \
   --source /path/to/guix-build-29.2/output/x86_64-linux-gnu \
   --source /path/to/guix-build-29.2/output/x86_64-linux-gnu-cuda12 \
-  --source /path/to/guix-build-29.2/output/x86_64-linux-gnu-cuda13 \
   --source /path/to/guix-build-29.2/output/aarch64-linux-gnu \
-  --source /path/to/guix-build-29.2/output/x86_64-w64-mingw32 \
-  --source /path/to/guix-build-29.2/output/x86_64-apple-darwin \
   --source /path/to/guix-build-29.2/output/arm64-apple-darwin \
   --snapshot /tmp/snapshot.dat \
   --snapshot-manifest /tmp/snapshot.manifest.json \
@@ -89,12 +86,13 @@ snapshot assets under their published names, stages `SHA256SUMS.asc` when
 requested, emits `btx-release-manifest.json`, and writes `SHA256SUMS` over the
 final bundle. Use `--checksum-signature /path/to/SHA256SUMS.asc` if the
 signature is produced externally instead of by the collector itself. By
-default, the collector now also requires the full primary platform matrix
-(`linux-x86_64`, `linux-x86_64-cuda12`, `linux-x86_64-cuda13`,
-`linux-arm64`, `windows-x86_64`, `macos-x86_64`, `macos-arm64`) before it will
-stage a publishable bundle. See
-[`doc/linux-release-builds.md`](linux-release-builds.md) for the Linux CPU/CUDA
-hardware and driver matrix.
+default, the collector requires the same production download matrix used by the
+stable 0.32.x releases (`linux-x86_64`, `linux-x86_64-cuda12`,
+`linux-arm64`, `macos-arm64`) before it will stage a publishable bundle.
+Optional CUDA 13, Windows, and macOS x86_64 archives are included when present,
+or can be made mandatory for a specific release with additional
+`--required-platform` flags. See [`doc/linux-release-builds.md`](linux-release-builds.md)
+for the Linux CPU/CUDA hardware and driver matrix.
 
 If you also pass `--attestations-dir /path/to/guix.sigs/<version>`, the
 collector now stages matching per-signer Guix attestation files as
