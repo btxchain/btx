@@ -368,6 +368,8 @@ MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTra
                                              const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 [[nodiscard]] bool HasInvalidShieldedRecoveryExitMempoolState(const CTransaction& tx,
                                                              const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+[[nodiscard]] bool HasInvalidShieldedPoolBalanceMempoolState(const CTransaction& tx,
+                                                            const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 [[nodiscard]] bool CollectShieldedMempoolRetirementsForBlock(const CTransaction& tx,
                                                             std::vector<Nullifier>& out_nullifiers,
                                                             std::vector<uint256>& out_recovery_commitments);
@@ -383,6 +385,9 @@ void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool,
                                                   CChain& chain,
                                                   ChainstateManager& chainman,
                                                   Chainstate* active_chainstate = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs);
+void RemoveStaleShieldedPoolBalanceMempoolTransactions(CTxMemPool& pool,
+                                                       CChain& chain,
+                                                       ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs);
 
 static inline MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTransactionRef& tx, int64_t accept_time, bool bypass_limits, bool test_accept) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
     static const ignore_rejects_type ignore_rejects_legacy{

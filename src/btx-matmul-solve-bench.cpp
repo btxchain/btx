@@ -30,6 +30,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 const TranslateFn G_TRANSLATION_FUN{nullptr};
@@ -62,6 +63,7 @@ struct Options {
     std::optional<std::string> prepare_workers_override;
     std::optional<std::string> pool_slots_override;
     std::optional<std::string> solver_threads_override;
+    std::optional<bool> skip_matmul_validation_override;
 };
 
 std::optional<uint64_t> ParseUintArg(std::string_view text)
@@ -105,6 +107,7 @@ void PrintUsage(std::ostream& out)
         << " [--product-digest-height <height>]"
         << " [--parallel <count>]"
         << " [--backend <cpu|metal|cuda|mlx>]"
+        << " [--skip-matmul-validation <0|1>]"
         << " [--async <0|1>] [--gpu-inputs <0|1>]"
         << " [--batch-size <count>] [--digest-slice-size <count>] [--prefetch-depth <count>] [--prepare-workers <count>]"
         << " [--pool-slots <count>] [--solver-threads <count>]" << std::endl;
@@ -138,6 +141,16 @@ bool ParseArgs(int argc, char* argv[], Options& options)
             return false;
         }
         out = *parsed;
+        return true;
+    };
+
+    auto parse_bool = [&](std::string_view arg_name, std::string_view value, bool& out) -> bool {
+        const auto parsed = ParseUintArg(value);
+        if (!parsed.has_value() || *parsed > 1) {
+            std::cerr << "error: invalid value for " << arg_name << ": " << value << std::endl;
+            return false;
+        }
+        out = *parsed != 0;
         return true;
     };
 
@@ -266,6 +279,14 @@ bool ParseArgs(int argc, char* argv[], Options& options)
             consumed = true;
             if (!parse_kv("--backend", [&](std::string_view value) {
                     options.backend_override = std::string{value};
+                    return true;
+                })) return false;
+        } else if (arg == "--skip-matmul-validation" || arg.rfind("--skip-matmul-validation=", 0) == 0) {
+            consumed = true;
+            if (!parse_kv("--skip-matmul-validation", [&](std::string_view value) {
+                    bool parsed{false};
+                    if (!parse_bool("--skip-matmul-validation", value, parsed)) return false;
+                    options.skip_matmul_validation_override = parsed;
                     return true;
                 })) return false;
         } else if (arg == "--async" || arg.rfind("--async=", 0) == 0) {
@@ -533,6 +554,9 @@ int main(int argc, char* argv[])
     ArgsManager args;
     auto consensus = CreateChainParams(args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
+    if (options.skip_matmul_validation_override.has_value()) {
+        consensus.fSkipMatMulValidation = *options.skip_matmul_validation_override;
+    }
     consensus.nMatMulDimension = options.n;
     consensus.nMatMulTranscriptBlockSize = options.b;
     consensus.nMatMulNoiseRank = options.r;
@@ -585,6 +609,8 @@ int main(int argc, char* argv[])
     options_obj.pushKV("parent_mtp", options.parent_mtp_override.has_value() ? UniValue(*options.parent_mtp_override) : UniValue());
     options_obj.pushKV("product_digest_height", options.product_digest_height_override.has_value() ? UniValue(*options.product_digest_height_override) : UniValue());
     options_obj.pushKV("product_digest_active", consensus.IsMatMulProductDigestActive(options.block_height));
+    options_obj.pushKV("skip_matmul_validation_override", options.skip_matmul_validation_override.has_value() ? UniValue(*options.skip_matmul_validation_override) : UniValue());
+    options_obj.pushKV("matmul_validation_skipped", consensus.fSkipMatMulValidation);
     options_obj.pushKV("parallel", options.parallel);
     options_obj.pushKV("backend_override", options.backend_override.has_value() ? UniValue(*options.backend_override) : UniValue());
     options_obj.pushKV("async_override", options.async_override.has_value() ? UniValue(*options.async_override) : UniValue());
@@ -684,9 +710,23 @@ int main(int argc, char* argv[])
         pool_obj.pushKV("allocation_events", pool_stats.allocation_events);
         pool_obj.pushKV("reuse_events", pool_stats.reuse_events);
         pool_obj.pushKV("wait_events", pool_stats.wait_events);
+        if constexpr (std::is_same_v<std::decay_t<decltype(pool_stats)>, btx::cuda::MatMulBufferPoolStats>) {
+            pool_obj.pushKV("device_capacity_bytes", pool_stats.device_capacity_bytes);
+            pool_obj.pushKV("active_device_capacity_bytes", pool_stats.active_device_capacity_bytes);
+            pool_obj.pushKV("max_slot_device_capacity_bytes", pool_stats.max_slot_device_capacity_bytes);
+        } else {
+            pool_obj.pushKV("device_capacity_bytes", 0);
+            pool_obj.pushKV("active_device_capacity_bytes", 0);
+            pool_obj.pushKV("max_slot_device_capacity_bytes", 0);
+        }
         pool_obj.pushKV("slot_count", pool_stats.slot_count);
         pool_obj.pushKV("active_slots", pool_stats.active_slots);
         pool_obj.pushKV("high_water_slots", pool_stats.high_water_slots);
+        if constexpr (std::is_same_v<std::decay_t<decltype(pool_stats)>, btx::cuda::MatMulBufferPoolStats>) {
+            pool_obj.pushKV("slots_with_device_buffers", pool_stats.slots_with_device_buffers);
+        } else {
+            pool_obj.pushKV("slots_with_device_buffers", 0);
+        }
         pool_obj.pushKV("inflight_submissions", pool_stats.inflight_submissions);
         pool_obj.pushKV("peak_inflight_submissions", pool_stats.peak_inflight_submissions);
         pool_obj.pushKV("completed_submissions", pool_stats.completed_submissions);
@@ -713,9 +753,13 @@ int main(int argc, char* argv[])
         pool_obj.pushKV("allocation_events", 0);
         pool_obj.pushKV("reuse_events", 0);
         pool_obj.pushKV("wait_events", 0);
+        pool_obj.pushKV("device_capacity_bytes", 0);
+        pool_obj.pushKV("active_device_capacity_bytes", 0);
+        pool_obj.pushKV("max_slot_device_capacity_bytes", 0);
         pool_obj.pushKV("slot_count", 0);
         pool_obj.pushKV("active_slots", 0);
         pool_obj.pushKV("high_water_slots", 0);
+        pool_obj.pushKV("slots_with_device_buffers", 0);
         pool_obj.pushKV("inflight_submissions", 0);
         pool_obj.pushKV("peak_inflight_submissions", 0);
         pool_obj.pushKV("completed_submissions", 0);
@@ -727,6 +771,34 @@ int main(int argc, char* argv[])
         break;
     }
     output.pushKV("buffer_pool_stats", std::move(pool_obj));
+
+    if (backend_selection.requested == matmul::backend::Kind::CUDA ||
+        backend_selection.active == matmul::backend::Kind::CUDA) {
+        const auto cuda_profiling_stats = btx::cuda::ProbeMatMulProfilingStats();
+        UniValue cuda_profiling_obj(UniValue::VOBJ);
+        cuda_profiling_obj.pushKV("available", cuda_profiling_stats.available);
+        cuda_profiling_obj.pushKV("samples", cuda_profiling_stats.samples);
+        cuda_profiling_obj.pushKV("last_n", cuda_profiling_stats.last_n);
+        cuda_profiling_obj.pushKV("last_b", cuda_profiling_stats.last_b);
+        cuda_profiling_obj.pushKV("last_r", cuda_profiling_stats.last_r);
+        cuda_profiling_obj.pushKV("last_batch_size", cuda_profiling_stats.last_batch_size);
+        cuda_profiling_obj.pushKV("last_host_stage_us", cuda_profiling_stats.last_host_stage_us);
+        cuda_profiling_obj.pushKV("last_submit_h2d_us", cuda_profiling_stats.last_submit_h2d_us);
+        cuda_profiling_obj.pushKV("last_submit_d2d_us", cuda_profiling_stats.last_submit_d2d_us);
+        cuda_profiling_obj.pushKV("last_stream_wait_event_us", cuda_profiling_stats.last_stream_wait_event_us);
+        cuda_profiling_obj.pushKV("last_launch_build_perturbed_us", cuda_profiling_stats.last_launch_build_perturbed_us);
+        cuda_profiling_obj.pushKV("last_launch_finalize_us", cuda_profiling_stats.last_launch_finalize_us);
+        cuda_profiling_obj.pushKV("last_submit_d2h_us", cuda_profiling_stats.last_submit_d2h_us);
+        cuda_profiling_obj.pushKV("last_stream_sync_us", cuda_profiling_stats.last_stream_sync_us);
+        cuda_profiling_obj.pushKV("last_total_wall_ms", cuda_profiling_stats.last_total_wall_ms);
+        cuda_profiling_obj.pushKV("last_used_low_rank_path", cuda_profiling_stats.last_used_low_rank_path);
+        cuda_profiling_obj.pushKV("last_used_device_prepared_inputs", cuda_profiling_stats.last_used_device_prepared_inputs);
+        cuda_profiling_obj.pushKV("last_used_pinned_host_staging", cuda_profiling_stats.last_used_pinned_host_staging);
+        cuda_profiling_obj.pushKV("last_base_matrix_cache_hit", cuda_profiling_stats.last_base_matrix_cache_hit);
+        cuda_profiling_obj.pushKV("last_mode", cuda_profiling_stats.last_mode);
+        cuda_profiling_obj.pushKV("reason", cuda_profiling_stats.reason);
+        output.pushKV("cuda_profiling_stats", std::move(cuda_profiling_obj));
+    }
 
     std::cout << output.write(2) << std::endl;
     return 0;

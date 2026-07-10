@@ -431,11 +431,33 @@ verify_sha256() {
   [[ -n "$actual" && "$actual" == "$expected" ]]
 }
 
-# Candidate platform keys "<os>-<arch>[-<libc>]", most specific first, used to select a matching
-# prebuilt artifact from the manifest's `prebuilt` map. Linux distinguishes glibc vs musl; both the
-# aarch64 and arm64 spellings are offered so either release-naming convention matches.
+# Print the CUDA release flavors supported by the installed NVIDIA driver, most
+# specific first. `nvidia-smi` must successfully see a GPU; merely having nvcc
+# or a CUDA toolkit directory is not enough to select a GPU release archive.
+detect_cuda_release_flavors() {
+  local output major
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+  output="$(nvidia-smi 2>/dev/null)" || return 0
+  major="$(printf '%s\n' "$output" | sed -n 's/.*CUDA Version:[[:space:]]*\([0-9][0-9]*\)\([.][0-9][0-9]*\)\{0,1\}.*/\1/p' | head -n 1)"
+  [[ "$major" =~ ^[0-9]+$ ]] || return 0
+
+  # A CUDA 13-capable driver can also run the CUDA 12 release, so retain that
+  # as a fallback before the CPU-only archive. Drivers older than CUDA 12 do
+  # not match either of the release flavors currently published by BTX.
+  if (( major >= 13 )); then
+    printf '%s\n' "cuda13" "cuda12"
+  elif (( major == 12 )); then
+    printf '%s\n' "cuda12"
+  fi
+}
+
+# Candidate platform keys, most specific first, used to select a matching
+# prebuilt artifact from the manifest's `prebuilt` map. The canonical CUDA keys
+# match package_release_archive.py / btx-release-manifest.json. Linux CPU builds
+# distinguish glibc vs musl; both aarch64 and arm64 spellings are offered so
+# either release-naming convention matches.
 detect_platform_keys() {
-  local os arch libc
+  local os arch libc cuda_flavor
   case "$(uname -s)" in
     Linux) os="linux" ;;
     Darwin) os="darwin" ;;
@@ -451,6 +473,11 @@ detect_platform_keys() {
       libc="musl"
     else
       libc="glibc"
+    fi
+    if [[ "$arch" == "x86_64" && "$libc" == "glibc" ]]; then
+      while IFS= read -r cuda_flavor; do
+        [[ -n "$cuda_flavor" ]] && printf '%s-%s-%s\n' "$os" "$arch" "$cuda_flavor"
+      done < <(detect_cuda_release_flavors)
     fi
     printf '%s-%s-%s\n' "$os" "$arch" "$libc"
     [[ "$arch" == "aarch64" ]] && printf '%s-arm64-%s\n' "$os" "$libc"

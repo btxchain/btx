@@ -20,7 +20,7 @@ path, registry state committed full shielded account-leaf payloads, and
 consumed-leaf tx witnesses were lean on wire while full nodes recovered
 `CompactPublicAccount` state from authenticated consensus data.
 
-Current v0.32.7 production behavior: after block `125000`, consensus disables
+Current v0.33.0 behavior: after block `125000`, consensus disables
 new shielded credits, private shielded-output appends, bridge ingress/control
 rollover, and re-shielding. Retained production surfaces are balance/viewing,
 legacy recovery accounting, and permitted transparent exits of existing shielded
@@ -306,7 +306,7 @@ For the full PQ specification and tutorials, see:
 
 BTX includes a **shielded transaction pool** active from genesis on all
 networks. Shielded transactions hide sender, receiver, and amount using
-lattice-based zero-knowledge proofs. As of v0.32.7, coinbase auto-shielding is
+lattice-based zero-knowledge proofs. In v0.33.0, coinbase auto-shielding is
 opt-in (default off; `-autoshieldcoinbase=1`) so mined rewards stay as
 post-quantum transparent outputs unless an operator chooses to shield.
 
@@ -339,7 +339,7 @@ As of `2026-03-23`, the pre-sunset reset-chain launch architecture was:
 - legacy MatRiCT and receipt-backed ingress retained only as non-launch
   residual tooling.
 
-As of v0.32.7, current production nodes enforce the block-`125000` sunset:
+v0.33.0 retains the block-`125000` production sunset rules:
 new shielded credits, private shielded-output appends, bridge ingress/control
 transactions, rollover/rebalance, and re-shielding are disabled by consensus.
 Existing shielded balances remain visible/accounted, and strict transparent
@@ -637,7 +637,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.32.7 \
+  --release-tag v0.33.0 \
   --preset service \
   --datadir="$HOME/.btx"
 ```
@@ -762,6 +762,11 @@ btx-cli createwallet "mywallet"
 
 Descriptor wallets are required. Default address type is `p2mr`
 (`btx1z...`).
+
+For the separately deployed browser wallet, public gateway, and detached
+document-signing security boundary, see
+[doc/browser-wallet-backend.md](doc/browser-wallet-backend.md). Node JSON-RPC
+must remain private; browser code never receives RPC credentials.
 
 ### Receiving and Sending
 

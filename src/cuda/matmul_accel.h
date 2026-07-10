@@ -41,9 +41,13 @@ struct MatMulBufferPoolStats {
     uint64_t reuse_events{0};
     uint64_t wait_events{0};
     uint64_t completed_submissions{0};
+    uint64_t device_capacity_bytes{0};
+    uint64_t active_device_capacity_bytes{0};
+    uint64_t max_slot_device_capacity_bytes{0};
     uint32_t slot_count{0};
     uint32_t active_slots{0};
     uint32_t high_water_slots{0};
+    uint32_t slots_with_device_buffers{0};
     uint32_t inflight_submissions{0};
     uint32_t peak_inflight_submissions{0};
     uint32_t n{0};
@@ -137,6 +141,13 @@ struct MatMulCompressedWordsBatchResult {
     std::string error;
 };
 
+struct MatMulProductDigestBatchResult {
+    bool available{false};
+    bool success{false};
+    std::vector<uint256> digests;
+    std::string error;
+};
+
 struct MatMulLowRankCompressedWordsBatchRequest {
     uint32_t n{0};
     uint32_t b{0};
@@ -172,6 +183,17 @@ struct MatMulLowRankVariableBaseDeviceBatchRequest {
     uint32_t batch_size{0};
     const uint256* matrix_a_seeds{nullptr};
     const uint256* matrix_b_seeds{nullptr};
+    const MatMulGeneratedInputsDevice* const* generated_inputs{nullptr};
+};
+
+struct MatMulLowRankVariableBaseProductDigestDeviceBatchRequest {
+    uint32_t n{0};
+    uint32_t b{0};
+    uint32_t r{0};
+    uint32_t batch_size{0};
+    const uint256* matrix_a_seeds{nullptr};
+    const uint256* matrix_b_seeds{nullptr};
+    const uint256* sigmas{nullptr};
     const MatMulGeneratedInputsDevice* const* generated_inputs{nullptr};
 };
 
@@ -214,6 +236,13 @@ MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDevice
 MatMulCompressedWordsBatchResult ComputeCompressedWordsLowRankVariableBaseDeviceBatchMultiDevice(
     const MatMulLowRankVariableBaseDeviceBatchRequest& request,
     MatMulCompressedWordsMode mode);
+MatMulProductDigestBatchResult ComputeProductDigestsLowRankVariableBaseDeviceBatch(
+    const MatMulLowRankVariableBaseProductDigestDeviceBatchRequest& request);
+MatMulProductDigestBatchResult ComputeProductDigestsLowRankVariableBaseDeviceBatchOnDevice(
+    const MatMulLowRankVariableBaseProductDigestDeviceBatchRequest& request,
+    int device_index);
+MatMulProductDigestBatchResult ComputeProductDigestsLowRankVariableBaseDeviceBatchMultiDevice(
+    const MatMulLowRankVariableBaseProductDigestDeviceBatchRequest& request);
 
 } // namespace btx::cuda
 

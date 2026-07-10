@@ -228,9 +228,13 @@ int main(int argc, char* argv[])
     cuda_pool_obj.pushKV("reuse_events", cuda_pool_stats.reuse_events);
     cuda_pool_obj.pushKV("wait_events", cuda_pool_stats.wait_events);
     cuda_pool_obj.pushKV("completed_submissions", cuda_pool_stats.completed_submissions);
+    cuda_pool_obj.pushKV("device_capacity_bytes", cuda_pool_stats.device_capacity_bytes);
+    cuda_pool_obj.pushKV("active_device_capacity_bytes", cuda_pool_stats.active_device_capacity_bytes);
+    cuda_pool_obj.pushKV("max_slot_device_capacity_bytes", cuda_pool_stats.max_slot_device_capacity_bytes);
     cuda_pool_obj.pushKV("slot_count", cuda_pool_stats.slot_count);
     cuda_pool_obj.pushKV("active_slots", cuda_pool_stats.active_slots);
     cuda_pool_obj.pushKV("high_water_slots", cuda_pool_stats.high_water_slots);
+    cuda_pool_obj.pushKV("slots_with_device_buffers", cuda_pool_stats.slots_with_device_buffers);
     cuda_pool_obj.pushKV("inflight_submissions", cuda_pool_stats.inflight_submissions);
     cuda_pool_obj.pushKV("peak_inflight_submissions", cuda_pool_stats.peak_inflight_submissions);
     cuda_pool_obj.pushKV("n", cuda_pool_stats.n);

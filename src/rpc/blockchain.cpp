@@ -3743,6 +3743,7 @@ static RPCHelpMan dumptxoutset()
                     {RPCResult::Type::NUM, "nchaintx", "the number of transactions in the chain up to and including the base block"},
                     {RPCResult::Type::STR, "shielded_retention_profile", "the shielded retained-state profile active during snapshot creation (`externalized` by default, `full_commitment_index` for the secondary dev/audit mode)"},
                     {RPCResult::Type::BOOL, "retain_shielded_commitment_index", "whether the shielded commitment-position index is being retained on disk"},
+                    {RPCResult::Type::STR_HEX, "shielded_state_pin", /*optional=*/true, "the consensus commitment to the serialized shielded state, when the snapshot format includes a shielded section"},
                 }
         },
         RPCExamples{
@@ -3806,7 +3807,16 @@ static RPCHelpMan dumptxoutset()
     } else if (snapshot_type == "rollback") {
         auto snapshot_heights = node.chainman->GetParams().GetAvailableSnapshotHeights();
         CHECK_NONFATAL(snapshot_heights.size() > 0);
-        auto max_height = std::max_element(snapshot_heights.begin(), snapshot_heights.end());
+        snapshot_heights.erase(
+            std::remove_if(
+                snapshot_heights.begin(),
+                snapshot_heights.end(),
+                [tip](int height) { return tip == nullptr || height > tip->nHeight; }),
+            snapshot_heights.end());
+        if (snapshot_heights.empty()) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "No configured snapshot height exists at or before the current tip");
+        }
+        const auto max_height = std::max_element(snapshot_heights.begin(), snapshot_heights.end());
         target_index = ParseHashOrHeight(*max_height, *node.chainman);
     } else if (snapshot_type == "latest") {
         target_index = tip;

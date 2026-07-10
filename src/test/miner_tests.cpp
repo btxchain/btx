@@ -1717,6 +1717,56 @@ BOOST_AUTO_TEST_CASE(block_assembler_projects_shielded_pool_balance_when_validit
     BOOST_CHECK(!(included_first && included_second));
 }
 
+BOOST_AUTO_TEST_CASE(block_assembler_prefilters_stale_shielded_pool_candidates_before_budget_cap)
+{
+    BlockAssembler::Options options = MakeSyntheticBlockAssemblerOptions();
+    const uint256 spend_anchor = GetCurrentSyntheticSpendAnchor(*this);
+    const uint256 account_registry_anchor = GetCurrentSyntheticAccountRegistryAnchor(*this);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Assert(m_node.chainman)->SetShieldedPoolBalanceForTest(0)));
+
+    CTxMemPool& tx_mempool{MakeMempool()};
+    Txid transparent_txid;
+    {
+        LOCK(tx_mempool.cs);
+        uint64_t sequence{0};
+        constexpr size_t STALE_SHIELDED_CANDIDATE_COUNT{140};
+        for (size_t i = 0; i < STALE_SHIELDED_CANDIDATE_COUNT; ++i) {
+            AddSyntheticShieldedStateMinerTx(tx_mempool,
+                                             /*fee=*/1'000'000 - static_cast<CAmount>(i),
+                                             MakeSyntheticSendBundle(60'000 + static_cast<uint32_t>(i),
+                                                                     spend_anchor,
+                                                                     account_registry_anchor),
+                                             sequence++);
+        }
+
+        const auto& funding_tx = m_coinbase_txns.at(0);
+        CMutableTransaction transparent_tx;
+        transparent_tx.vin.resize(1);
+        transparent_tx.vin[0].prevout = COutPoint{funding_tx->GetHash(), 0};
+        transparent_tx.vin[0].scriptSig = CScript{} << OP_1;
+        transparent_tx.vout.resize(1);
+        transparent_tx.vout[0].nValue = funding_tx->vout.at(0).nValue - 50'000;
+        transparent_tx.vout[0].scriptPubKey = CScript{} << OP_TRUE;
+        const auto transparent_ref = MakeTransactionRef(transparent_tx);
+        transparent_txid = transparent_ref->GetHash();
+        TestMemPoolEntryHelper entry;
+        AddToMempool(tx_mempool,
+                     entry.Fee(50'000)
+                         .Time(Now<NodeSeconds>())
+                         .SpendsCoinbase(true)
+                         .Sequence(sequence)
+                         .FromTx(transparent_ref));
+    }
+
+    auto block_template =
+        BlockAssembler{Assert(m_node.chainman)->ActiveChainstate(), &tx_mempool, options, m_node}.CreateNewBlock();
+    BOOST_REQUIRE(block_template);
+
+    BOOST_CHECK_NE(FindBlockTxIndex(block_template->block, transparent_txid),
+                   block_template->block.vtx.size());
+    BOOST_CHECK_LT(block_template->nTemplatePolicyCandidateEvaluations, 128U);
+}
+
 BOOST_AUTO_TEST_CASE(mixed_family_mempool_trim_evicts_lowest_feerate_entry)
 {
     const uint256 spend_anchor = GetCurrentSyntheticSpendAnchor(*this);

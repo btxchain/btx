@@ -1557,7 +1557,41 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
         if (candidate_window.empty()) {
             return;
         }
-        nBlockTemplatePolicyCandidateEvaluations += candidate_window.size();
+
+        size_t package_invalid_candidates{0};
+        for (auto candidate_it = candidate_window.begin(); candidate_it != candidate_window.end();) {
+            if (!TestPackageTransactions(mempool, candidate_it->entries)) {
+                if (candidate_it->from_modified) {
+                    mapModifiedTx.erase(candidate_it->iter);
+                }
+                failedTx.insert(candidate_it->iter);
+                candidate_it = candidate_window.erase(candidate_it);
+                ++package_invalid_candidates;
+                continue;
+            }
+            ++candidate_it;
+        }
+
+        if (candidate_window.empty()) {
+            if (package_invalid_candidates > 0) {
+                if (fNeedSizeAccounting) {
+                    nConsecutiveFailed += static_cast<int64_t>(package_invalid_candidates);
+                    if (nConsecutiveFailed > MAX_CONSECUTIVE_FAILURES &&
+                        IsNearLimit(nBlockSize, m_options.nBlockMaxSize,
+                                    static_cast<uint64_t>(BLOCK_FULL_ENOUGH_SIZE_DELTA))) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            return;
+        }
+
+        const uint64_t policy_candidate_evaluations = std::count_if(
+            candidate_window.begin(), candidate_window.end(), [](const PackageSelectionCandidate& candidate) {
+                return candidate.total_template_policy_verify_units > 0;
+            });
+        nBlockTemplatePolicyCandidateEvaluations += policy_candidate_evaluations;
         if (nBlockTemplatePolicyCandidateEvaluations > MAX_TEMPLATE_POLICY_CANDIDATE_EVALUATIONS) {
             LogDebug(BCLog::MINING,
                      "CreateNewBlock(): stopping package selection after %llu candidate evaluations "

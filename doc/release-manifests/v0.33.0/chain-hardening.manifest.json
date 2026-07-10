@@ -1,0 +1,24 @@
+{
+  "anchor_hash": "b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d",
+  "anchor_height": 155700,
+  "bestblockhash": "b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d",
+  "chain": "main",
+  "chainTxData": {
+    "dTxRate": 0.02185666312456925,
+    "nTime": 1783686055,
+    "tx_count": 213654
+  },
+  "checkpoint": {
+    "hash": "b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d",
+    "height": 155700
+  },
+  "cpp_snippet": "consensus.nMinimumChainWork = uint256{\"0000000000000000000000000000000000000000000000000000d441262318ef\"};\nconsensus.defaultAssumeValid = uint256{\"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d\"};\ncheckpointData = {\n    {\n        {0, uint256{\"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601\"}},\n        {155700, uint256{\"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d\"}},\n    }\n};\nchainTxData = ChainTxData{\n    .nTime = 1783686055,\n    .tx_count = 213654,\n    .dTxRate = 0.021856663125,\n};",
+  "defaultAssumeValid": "b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d",
+  "generated_at_utc": "2026-07-10T16:50:00Z",
+  "genesis_hash": "75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601",
+  "live_bestblockhash": "ded7ded59fe6fabc3d2121f0f933e5b54c2bcdfdd90f67d9b542e8978b089471",
+  "nMinimumChainWork": "0000000000000000000000000000000000000000000000000000d441262318ef",
+  "selected_height": 155700,
+  "tip_height": 155872,
+  "txstats_window_blocks": 4096
+}

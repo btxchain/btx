@@ -22,27 +22,39 @@ Use `scripts/release/cut_release.py` when you want one operator command to:
 - validate the bundle against the GitHub publisher contract
 - optionally publish the bundle to GitHub Releases
 
+The staging repository is `btxchain/btx-node`, while public release assets are
+published from `btxchain/btx`. The manual workflow therefore exposes a
+`release_repository` input that defaults to `btxchain/btx`; keep `publish`
+disabled while validating a private staging branch. A public publish is
+deliberately impossible from the staging checkout: the exact source repository
+and commit recorded in the bundle must exist in and match `btxchain/btx`.
+
 Example:
 
 ```bash
 python3 scripts/release/cut_release.py \
   --repo btxchain/btx \
-  --tag v0.32.7 \
-  --release-name "BTX 0.32.7" \
+  --tag v0.33.0 \
+  --release-name "BTX 0.33.0" \
+  --source-repository btxchain/btx \
+  --source-commit "$(git rev-parse HEAD)" \
   --build-with-guix \
   --generate-snapshot \
   --rollback 60776 \
   --btx-cli ./build-btx/bin/btx-cli \
   --rpc-arg=-datadir=/srv/btx-main \
-  --rpc-arg=-rpcuser=release \
-  --rpc-arg=-rpcpassword=secret \
   --attestations-dir ../guix.sigs/29.2 \
   --sign-with release-signing-key \
+  --expected-signing-fingerprint <authorized-40-hex-fingerprint> \
   --body-file doc/release-notes.md \
   --token-file /path/to/github.key \
   --publish \
   --bundle-dir /tmp/btx-release-bundle
 ```
+
+The datadir example uses the node's protected RPC cookie. Do not put
+`rpcuser`, `rpcpassword`, or `rpcauth` values in workflow inputs or shell
+history.
 
 By default, the script looks for Guix outputs under
 `guix-build-<version>/output/` and for attestations under
@@ -65,8 +77,10 @@ python3 scripts/release/collect_release_assets.py \
   --source /path/to/guix-build-29.2/output/arm64-apple-darwin \
   --snapshot /tmp/snapshot.dat \
   --snapshot-manifest /tmp/snapshot.manifest.json \
-  --release-tag v0.32.7 \
-  --release-name "BTX 0.32.7" \
+  --release-tag v0.33.0 \
+  --release-name "BTX 0.33.0" \
+  --source-repository btxchain/btx \
+  --source-commit "$(git rev-parse HEAD)" \
   --sign-with release-signing-key
 ```
 
@@ -105,7 +119,9 @@ release:
 ```bash
 python3 scripts/release/publish_github_release.py \
   --repo btxchain/btx \
-  --tag v0.32.7 \
+  --tag v0.33.0 \
+  --target-commit "$(git rev-parse HEAD)" \
+  --expected-signing-fingerprint <authorized-40-hex-fingerprint> \
   --bundle-dir /tmp/btx-release \
   --token-file /path/to/github.key \
   --publish
@@ -117,8 +133,14 @@ if you want to verify the release payload without talking to GitHub. Under the
 hood it uses the GitHub REST API via `curl`, which keeps the same token flow
 usable in local ops automation. Before upload, it now verifies that every
 bundle asset matches `SHA256SUMS`, that no stray files are present outside the
-checksum contract, and that `SHA256SUMS.asc` verifies locally whenever the
-bundle manifest advertises a checksum signature.
+checksum contract, and that the public bundle's `SHA256SUMS.asc` verifies
+under the explicitly authorized fingerprint. For `btxchain/btx`, it also
+requires the manifest repository/tag/commit to match the command, confirms the
+exact commit exists in the target repository, resolves any existing tag to the
+same commit, and makes that commit the tag target. Public releases are staged
+as drafts, uploaded and re-listed for name/size completeness, and only then
+made visible. Already-public releases are immutable unless an operator invokes
+the explicit recovery mode.
 
 After publication, smoke-test the operator install path against the staged
 bundle contract:
@@ -126,7 +148,7 @@ bundle contract:
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.32.7 \
+  --release-tag v0.33.0 \
   --preset service \
   --datadir /tmp/btx-service-smoke \
   --json
@@ -160,6 +182,31 @@ Guix outputs, snapshot artifacts, and guix.sigs state, because those release
 inputs are too large or too sensitive to manufacture inside the workflow
 itself.
 
+Dispatch values are mapped into environment variables and passed as data,
+never interpolated into shell source. The job checks out only protected `main`,
+runs behind the protected `btx-release` GitHub Environment, pins third-party
+Actions by commit, does not print its assembled command, and rejects inline RPC
+credentials. Build/collect receives no release secrets; the GPG passphrase is
+available only to `sign_release_bundle.py`, and the release PAT only to the
+final publisher step. The authorized fingerprint comes from the protected
+environment variable `BTX_RELEASE_SIGNING_FINGERPRINT`, not from a dispatch
+input.
+
+When reproducing this separation locally, first collect the unsigned bundle,
+then run:
+
+```bash
+python3 scripts/release/sign_release_bundle.py \
+  --bundle-dir /tmp/btx-release \
+  --sign-with <release-key> \
+  --expected-signing-fingerprint <authorized-40-hex-fingerprint> \
+  --gpg-passphrase-env BTX_GPG_PASSPHRASE
+```
+
+The signer rewrites the manifest/checksum contract, produces the detached
+signature, verifies the exact fingerprint, and restores the unsigned bundle if
+signing or verification fails.
+
 ## Native-built CLI release path
 
 When you want to ship native-built CLI archives without Guix attestations, use
@@ -168,9 +215,11 @@ When you want to ship native-built CLI archives without Guix attestations, use
 
 ```bash
 python3 scripts/release/cut_local_release.py \
-  --repo btxchain/btx \
-  --tag v0.32.7 \
-  --release-name "BTX 0.32.7" \
+  --repo <staging-owner/repository> \
+  --tag v0.33.0 \
+  --release-name "BTX 0.33.0" \
+  --source-repository <staging-owner/repository> \
+  --source-commit "$(git rev-parse HEAD)" \
   --bundle-dir /tmp/btx-native-cli-bundle \
   --platform-spec "macos-arm64;/path/to/macos/btxd;/path/to/macos/btx-cli" \
   --platform-spec "linux-arm64;/path/to/linux/btxd;/path/to/linux/btx-cli" \
@@ -188,5 +237,6 @@ dry-runs the publisher, optionally smoke-installs the bundle with
 If you omit `--snapshot` / `--snapshot-manifest`, the release is intentionally a
 binary-only CLI track rather than a fast-start validating-node release.
 Likewise, if you omit `--sign-with` and `--checksum-signature`, the resulting
-release is unsigned and remote `btx-agent-setup.py` use will require
-`--allow-unsigned-release`.
+staging release is unsigned and remote `btx-agent-setup.py` use will require
+`--allow-unsigned-release`. The public `btxchain/btx` publisher never permits
+an unsigned release and always requires an explicitly pinned signer.

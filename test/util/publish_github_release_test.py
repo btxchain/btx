@@ -215,6 +215,29 @@ class PublishGitHubReleaseTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "SHA256SUMS mismatch"):
                 self.module.ensure_bundle(bundle_dir)
 
+    def test_ensure_bundle_rejects_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_dir = self._build_bundle(pathlib.Path(tmpdir))
+            (bundle_dir / "linked-manifest.json").symlink_to("btx-release-manifest.json")
+            with self.assertRaisesRegex(RuntimeError, "must not contain symbolic links"):
+                self.module.ensure_bundle(bundle_dir)
+
+    def test_signature_file_rejects_path_traversal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_dir = self._build_bundle(
+                pathlib.Path(tmpdir),
+                manifest_overrides={"signature_file": "../SHA256SUMS.asc"},
+            )
+            with self.assertRaisesRegex(ValueError, "must be exactly SHA256SUMS.asc"):
+                self.module.main(
+                    [
+                        "--repo", "btxchain/btx-node",
+                        "--tag", "v29.2",
+                        "--bundle-dir", str(bundle_dir),
+                        "--dry-run",
+                    ]
+                )
+
     def test_main_rejects_publish_and_draft_together(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bundle_dir = self._build_bundle(pathlib.Path(tmpdir))
@@ -364,10 +387,225 @@ class PublishGitHubReleaseTest(unittest.TestCase):
                     ]
                 )
 
+    def test_public_release_dry_run_requires_provenance_and_expected_signer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_dir = self._build_bundle(pathlib.Path(tmpdir))
+            with self.assertRaisesRegex(ValueError, "source repository mismatch"):
+                self.module.main(
+                    [
+                        "--repo",
+                        "btxchain/btx",
+                        "--tag",
+                        "v0.33.0",
+                        "--bundle-dir",
+                        str(bundle_dir),
+                        "--target-commit",
+                        "11" * 20,
+                        "--expected-signing-fingerprint",
+                        "22" * 20,
+                        "--validate-public-release",
+                        "--dry-run",
+                    ]
+                )
+
+    def test_public_release_dry_run_pins_source_commit_tag_and_signer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_commit = "11" * 20
+            signer = "22" * 20
+            bundle_dir = self._build_bundle(
+                pathlib.Path(tmpdir),
+                include_signature=True,
+                manifest_overrides={
+                    "release_tag": "v0.33.0",
+                    "source_repository": "btxchain/btx",
+                    "source_commit": source_commit,
+                },
+            )
+            self.module.verify_checksum_signature = (
+                lambda checksum_path, signature_path, gpg_bin: {signer.upper()}
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = self.module.main(
+                    [
+                        "--repo",
+                        "btxchain/btx",
+                        "--tag",
+                        "v0.33.0",
+                        "--bundle-dir",
+                        str(bundle_dir),
+                        "--target-commit",
+                        source_commit,
+                        "--expected-signing-fingerprint",
+                        signer,
+                        "--validate-public-release",
+                        "--dry-run",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["target_commit"], source_commit)
+            self.assertEqual(payload["verified_signing_fingerprints"], [signer.upper()])
+
+    def test_release_tag_mismatch_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_dir = self._build_bundle(
+                pathlib.Path(tmpdir),
+                manifest_overrides={"release_tag": "v0.32.12"},
+            )
+            with self.assertRaisesRegex(ValueError, "Release tag mismatch"):
+                self.module.main(
+                    [
+                        "--repo",
+                        "btxchain/btx-node",
+                        "--tag",
+                        "v0.33.0",
+                        "--bundle-dir",
+                        str(bundle_dir),
+                        "--dry-run",
+                    ]
+                )
+
+    def test_public_publish_requires_exact_commit_in_target_repository(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_commit = "11" * 20
+            signer = "22" * 20
+            bundle_dir = self._build_bundle(
+                pathlib.Path(tmpdir),
+                include_signature=True,
+                manifest_overrides={
+                    "release_tag": "v0.33.0",
+                    "source_repository": "btxchain/btx",
+                    "source_commit": source_commit,
+                },
+            )
+            checked: list[tuple[str, str, str]] = []
+            self.module.verify_checksum_signature = (
+                lambda checksum_path, signature_path, gpg_bin: {signer.upper()}
+            )
+            self.module.read_token = lambda args: "test-token"
+            self.module.require_repository_commit = (
+                lambda repo, commit, token: checked.append((repo, commit, token))
+            )
+            self.module.resolve_repository_commit = lambda repo, ref, token: None
+            get_release_calls = 0
+
+            def fake_get_release(repo, tag, token):
+                nonlocal get_release_calls
+                get_release_calls += 1
+                assets = []
+                if get_release_calls > 1:
+                    assets = [
+                        {"name": path.name, "size": path.stat().st_size}
+                        for path in sorted(bundle_dir.iterdir())
+                        if path.is_file()
+                    ]
+                return {
+                    "id": 41,
+                    "draft": True,
+                    "html_url": "https://github.example/releases/v0.33.0",
+                    "upload_url": "https://uploads.example/assets{?name,label}",
+                    "assets": assets,
+                }
+
+            self.module.get_release = fake_get_release
+            self.module.update_release = lambda repo, release_id, token, payload: {
+                "id": release_id,
+                "html_url": "https://github.example/releases/v0.33.0",
+                "upload_url": "https://uploads.example/assets{?name,label}",
+                "assets": [],
+            }
+            self.module.upload_asset = lambda repo, release, asset, token: None
+
+            self.module.main(
+                [
+                    "--repo",
+                    "btxchain/btx",
+                    "--tag",
+                    "v0.33.0",
+                    "--bundle-dir",
+                    str(bundle_dir),
+                    "--target-commit",
+                    source_commit,
+                    "--expected-signing-fingerprint",
+                    signer,
+                    "--publish",
+                ]
+            )
+            self.assertEqual(checked, [("btxchain/btx", source_commit, "test-token")])
+
+    def test_public_publish_rejects_existing_tag_on_different_commit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_commit = "11" * 20
+            signer = "22" * 20
+            bundle_dir = self._build_bundle(
+                pathlib.Path(tmpdir),
+                include_signature=True,
+                manifest_overrides={
+                    "release_tag": "v0.33.0",
+                    "source_repository": "btxchain/btx",
+                    "source_commit": source_commit,
+                },
+            )
+            self.module.verify_checksum_signature = lambda *args: {signer.upper()}
+            self.module.read_token = lambda args: "test-token"
+            self.module.require_repository_commit = lambda *args: None
+            self.module.resolve_repository_commit = lambda *args: "33" * 20
+
+            with self.assertRaisesRegex(RuntimeError, "Existing tag v0.33.0 resolves"):
+                self.module.main(
+                    [
+                        "--repo", "btxchain/btx",
+                        "--tag", "v0.33.0",
+                        "--bundle-dir", str(bundle_dir),
+                        "--target-commit", source_commit,
+                        "--expected-signing-fingerprint", signer,
+                        "--publish",
+                    ]
+                )
+
+    def test_public_publish_refuses_replacing_published_release_without_recovery(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_commit = "11" * 20
+            signer = "22" * 20
+            bundle_dir = self._build_bundle(
+                pathlib.Path(tmpdir),
+                include_signature=True,
+                manifest_overrides={
+                    "release_tag": "v0.33.0",
+                    "source_repository": "btxchain/btx",
+                    "source_commit": source_commit,
+                },
+            )
+            self.module.verify_checksum_signature = lambda *args: {signer.upper()}
+            self.module.read_token = lambda args: "test-token"
+            self.module.require_repository_commit = lambda *args: None
+            self.module.resolve_repository_commit = lambda *args: source_commit
+            self.module.get_release = lambda *args: {
+                "id": 41,
+                "draft": False,
+                "html_url": "https://github.example/releases/v0.33.0",
+                "upload_url": "https://uploads.example/assets{?name,label}",
+                "assets": [],
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "already-public release"):
+                self.module.main(
+                    [
+                        "--repo", "btxchain/btx",
+                        "--tag", "v0.33.0",
+                        "--bundle-dir", str(bundle_dir),
+                        "--target-commit", source_commit,
+                        "--expected-signing-fingerprint", signer,
+                        "--publish",
+                    ]
+                )
+
     def test_get_release_returns_none_for_404(self):
         original_run = self.module.subprocess.run
         try:
-            def fake_run(cmd, capture_output, text):
+            def fake_run(cmd, capture_output, text, **kwargs):
                 class Result:
                     returncode = 0
                     stdout = "{}\n404"
@@ -382,7 +620,7 @@ class PublishGitHubReleaseTest(unittest.TestCase):
     def test_get_release_raises_on_unexpected_http_status(self):
         original_run = self.module.subprocess.run
         try:
-            def fake_run(cmd, capture_output, text):
+            def fake_run(cmd, capture_output, text, **kwargs):
                 class Result:
                     returncode = 0
                     stdout = "{\"message\":\"boom\"}\n500"
@@ -398,7 +636,7 @@ class PublishGitHubReleaseTest(unittest.TestCase):
     def test_curl_json_raises_on_subprocess_failure(self):
         original_run = self.module.subprocess.run
         try:
-            def fake_run(cmd, capture_output, text):
+            def fake_run(cmd, capture_output, text, **kwargs):
                 class Result:
                     returncode = 1
                     stdout = ""
@@ -411,10 +649,30 @@ class PublishGitHubReleaseTest(unittest.TestCase):
         finally:
             self.module.subprocess.run = original_run
 
+    def test_run_curl_keeps_bearer_token_out_of_process_arguments(self):
+        captured: dict[str, object] = {}
+        original_run = self.module.subprocess.run
+        try:
+            def fake_run(cmd, capture_output, text, **kwargs):
+                captured["cmd"] = cmd
+                captured["input"] = kwargs.get("input")
+                class Result:
+                    returncode = 0
+                    stdout = "{}"
+                    stderr = ""
+                return Result()
+
+            self.module.subprocess.run = fake_run
+            self.module.run_curl(["curl", "https://api.github.com/example"], token="secret-token")
+            self.assertNotIn("secret-token", " ".join(captured["cmd"]))
+            self.assertIn("Authorization: Bearer secret-token", captured["input"])
+        finally:
+            self.module.subprocess.run = original_run
+
     def test_curl_binary_raises_on_subprocess_failure(self):
         original_run = self.module.subprocess.run
         try:
-            def fake_run(cmd, capture_output, text):
+            def fake_run(cmd, capture_output, text, **kwargs):
                 class Result:
                     returncode = 1
                     stdout = ""
@@ -439,7 +697,7 @@ class PublishGitHubReleaseTest(unittest.TestCase):
     def test_delete_asset_raises_on_subprocess_failure(self):
         original_run = self.module.subprocess.run
         try:
-            def fake_run(cmd, capture_output, text):
+            def fake_run(cmd, capture_output, text, **kwargs):
                 class Result:
                     returncode = 1
                     stdout = ""

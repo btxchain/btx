@@ -741,16 +741,14 @@ BOOST_AUTO_TEST_CASE(cuda_variable_base_device_batch_matches_cpu_product_digest)
     headers[1].seed_a = ParseUint256("1111111111111111111111111111111111111111111111111111111111111111");
     headers[1].seed_b = ParseUint256("2222222222222222222222222222222222222222222222222222222222222222");
 
-    std::vector<matmul::accelerated::PreparedDigestInputs> prepared_batch;
-    prepared_batch.reserve(headers.size());
-    for (const auto& header : headers) {
-        prepared_batch.push_back(matmul::accelerated::PrepareMatMulDigestInputsForBackend(
-            header,
+    std::vector<matmul::accelerated::PreparedDigestInputs> prepared_batch =
+        matmul::accelerated::PrepareMatMulDigestInputsBatchForBackend(
+            headers,
             kTranscriptBlockSize,
             kNoiseRank,
             matmul::backend::Kind::CUDA,
-            matmul::accelerated::DigestScheme::PRODUCT_COMMITTED));
-    }
+            matmul::accelerated::DigestScheme::PRODUCT_COMMITTED);
+    BOOST_REQUIRE_EQUAL(prepared_batch.size(), headers.size());
 
     const auto cuda_capability = matmul::backend::CapabilityFor(matmul::backend::Kind::CUDA);
     if (!cuda_capability.available) {

@@ -563,7 +563,7 @@ BOOST_AUTO_TEST_CASE(test_regtest_assumeutxo)
         },
         {
             299,
-            "0ffcf7afd7682a59057ad717784b70ca8fb86cf9209912ccca20261aafa5001a",
+            "2e5dcf9f04328141c721b5615a32dc265da783050ba7bd3e436a48b5a2013ae1",
             300,
             "78e6ea382d4d5466b1d8421c1b8789e9c7cde9de8b6da4042be00ca2948a4860",
         },
@@ -638,6 +638,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
         132'142,
         132'173,
         132'209,
+        155'700,
     };
 
     BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
@@ -664,6 +665,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     BOOST_CHECK(params->AssumeutxoForHeight(132'142));
     BOOST_CHECK(params->AssumeutxoForHeight(132'173));
     BOOST_CHECK(params->AssumeutxoForHeight(132'209));
+    BOOST_CHECK(params->AssumeutxoForHeight(155'700));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
     BOOST_CHECK(!params->AssumeutxoForHeight(0));
 }

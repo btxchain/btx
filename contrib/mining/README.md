@@ -75,7 +75,7 @@ Best practices:
   `-miningchainguardmeshrefreshseconds` to change the default 60-second
   throttle.
 - Reorg hysteresis is still the first line of defense against long-lived
-  competing branches. The default reorg-protection profile protects every active-chain
+  competing branches. The default emergency profile protects every active-chain
   rewrite (`reorghysteresisdepth=0`) and requires the candidate branch to exceed
   the old tip by the configured extra-work margin
   (`reorghysteresisworkmargin=2`) before automatic activation. Setting
@@ -106,7 +106,7 @@ Quick start:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.32.7 \
+  --release-tag v0.33.0 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"

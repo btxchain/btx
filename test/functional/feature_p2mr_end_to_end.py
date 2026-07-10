@@ -31,7 +31,10 @@ class P2MREndToEndTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
         self.setup_clean_chain = True
-        self.extra_args = [[], []]
+        # This test exercises the consensus block-capacity path. Opt out of the
+        # local template transaction-count policy limit so the high-load case
+        # can assert that all submitted transactions fit in one block.
+        self.extra_args = [["-blockmaxtemplatetxs=0"], []]
         # P2MR signing can exceed default 60s RPC timeouts under parallel
         # functional load on slower hosts.
         self.rpc_timeout = 180
@@ -351,7 +354,7 @@ class P2MREndToEndTest(BitcoinTestFramework):
         self.log.info("test_ctv_package_relay_cpfp")
 
         # Zero-fee parent package relay requires minrelay=0 in this harness.
-        self.restart_node(0, extra_args=["-minrelaytxfee=0"])
+        self.restart_node(0, extra_args=["-minrelaytxfee=0", "-blockmaxtemplatetxs=0"])
         self.restart_node(1, extra_args=["-minrelaytxfee=0"])
         self.connect_nodes(0, 1)
         self.sync_all()

@@ -76,6 +76,16 @@ uint32_t ParseRegTestUInt32Arg(const ArgsManager& args, const std::string& arg_n
     return value;
 }
 
+uint32_t ParseRegTestPositiveUInt32Arg(const ArgsManager& args, const std::string& arg_name)
+{
+    const auto raw = args.GetArg(arg_name, "");
+    uint32_t value{0};
+    if (!ParseUInt32(raw, &value) || value == 0) {
+        throw std::runtime_error(strprintf("Invalid %s value (%s): expected positive uint32.", arg_name, raw));
+    }
+    return value;
+}
+
 CAmount ParseRegTestNonNegativeMoneyArg(const ArgsManager& args, const std::string& arg_name)
 {
     const auto raw = args.GetArg(arg_name, "");
@@ -282,6 +292,18 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     if (args.IsArgSet("-regtestmatmulrequireproductpayload")) {
         options.matmul_require_product_payload =
             ParseRegTestBoolArg(args, "-regtestmatmulrequireproductpayload");
+    }
+    if (args.IsArgSet("-regtestmatmuldimension")) {
+        options.matmul_dimension =
+            ParseRegTestPositiveUInt32Arg(args, "-regtestmatmuldimension");
+    }
+    if (args.IsArgSet("-regtestmatmultranscriptblocksize")) {
+        options.matmul_transcript_block_size =
+            ParseRegTestPositiveUInt32Arg(args, "-regtestmatmultranscriptblocksize");
+    }
+    if (args.IsArgSet("-regtestmatmulnoiserank")) {
+        options.matmul_noise_rank =
+            ParseRegTestPositiveUInt32Arg(args, "-regtestmatmulnoiserank");
     }
     if (args.IsArgSet("-regtestmatmulaserthalflife")) {
         options.matmul_asert_half_life =

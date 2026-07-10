@@ -1233,9 +1233,17 @@ uint32_t ResolveCudaNonceSeedBatchSize(uint32_t n,
     }
 
     const auto& primary_device = topology.selected_devices.front();
-    const uint32_t sm_tier_batch_size = ResolveCudaNonceSeedSmTierBatchSize(
+    uint32_t sm_tier_batch_size = ResolveCudaNonceSeedSmTierBatchSize(
         primary_device.multiprocessor_count,
         base_batch_size);
+    if (product_digest_active &&
+        n >= 512 &&
+        transcript_block_size >= 16 &&
+        noise_rank >= 8 &&
+        primary_device.multiprocessor_count >= 24 &&
+        primary_device.multiprocessor_count < 64) {
+        sm_tier_batch_size = std::max<uint32_t>(sm_tier_batch_size, 512U);
+    }
     const uint32_t memory_cap = EstimateCudaNonceSeedBatchMemoryCap(
         primary_device,
         n,
@@ -1334,6 +1342,20 @@ uint32_t ResolveGpuNonceSeedBatchSize(matmul::backend::Kind backend,
         kMaxNonceSeedBatchSize);
 }
 
+uint32_t ResolveNonceSeedScanSafetyMultiplier()
+{
+    const char* env = std::getenv("BTX_MATMUL_NONCE_SEED_SCAN_MULTIPLIER");
+    if (env == nullptr || env[0] == '\0') {
+        return 1U;
+    }
+
+    int32_t parsed{0};
+    if (!ParseInt32(env, &parsed) || parsed <= 0) {
+        return 1U;
+    }
+    return static_cast<uint32_t>(std::clamp<int32_t>(parsed, 1, 8));
+}
+
 bool ShouldEnableCpuVsMetalDigestCompare(matmul::backend::Kind backend)
 {
     if (backend != matmul::backend::Kind::METAL) {
@@ -1391,6 +1413,7 @@ void MaybeRefreshMinerHeaderTime(
 
 struct MatMulNonceBatchWindow {
     std::vector<CBlockHeader> headers;
+    std::vector<uint256> sigmas;
     uint32_t nonces_scanned{0};
     uint32_t attempts_since_time_refresh_after{0};
     bool nonce_space_exhausted{false};
@@ -1525,14 +1548,14 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
     arith_uint256 pre_hash_target = target;
     pre_hash_target = SaturatingLeftShift256(pre_hash_target, pre_hash_epsilon_bits);
 
-    constexpr uint64_t kScanSafetyMultiplier{2};
+    const uint64_t scan_safety_multiplier = ResolveNonceSeedScanSafetyMultiplier();
     const uint64_t estimated_spacing = EstimatePreHashGateSpacing(pre_hash_target);
     uint64_t desired_scan_count = max_tries;
-    if (estimated_spacing <= std::numeric_limits<uint64_t>::max() / kScanSafetyMultiplier &&
-        configured_batch_size <= std::numeric_limits<uint64_t>::max() / (estimated_spacing * kScanSafetyMultiplier)) {
+    if (estimated_spacing <= std::numeric_limits<uint64_t>::max() / scan_safety_multiplier &&
+        configured_batch_size <= std::numeric_limits<uint64_t>::max() / (estimated_spacing * scan_safety_multiplier)) {
         desired_scan_count = static_cast<uint64_t>(configured_batch_size) *
             estimated_spacing *
-            kScanSafetyMultiplier;
+            scan_safety_multiplier;
     }
     uint32_t scan_limit = static_cast<uint32_t>(std::min<uint64_t>(
         std::min<uint64_t>(desired_scan_count, max_tries),
@@ -1553,7 +1576,10 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
     struct ScanResultView {
         bool success{false};
         uint32_t scanned_count{0};
+        bool compact_pass_offsets{false};
         std::vector<uint8_t> pass_flags;
+        std::vector<uint32_t> pass_offsets;
+        std::vector<btx::cuda::MatMulNonceSeedPreHashPassRecord> pass_records;
         std::string error;
     } scan;
 
@@ -1572,10 +1598,14 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
             .pre_hash_target = ArithToUint256(pre_hash_target),
             .seed_version = seed_version,
             .parent_median_time_past = scan_parent_mtp,
+            .compact_pass_offsets = true,
+            .compact_pass_records = true,
         });
         scan.success = cuda_scan.success;
         scan.scanned_count = cuda_scan.scanned_count;
-        scan.pass_flags = std::move(cuda_scan.pass_flags);
+        scan.compact_pass_offsets = true;
+        scan.pass_offsets = std::move(cuda_scan.pass_offsets);
+        scan.pass_records = std::move(cuda_scan.pass_records);
         scan.error = cuda_scan.error;
     } else if (backend == matmul::backend::Kind::METAL) {
         const auto metal_scan = btx::metal::ScanMatMulNonceSeedPreHashGPU({
@@ -1600,7 +1630,11 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
         return std::nullopt;
     }
 
-    if (!scan.success || scan.pass_flags.size() != scan.scanned_count) {
+    const bool scan_result_shape_valid = scan.compact_pass_offsets
+        ? scan.pass_offsets.size() <= scan.scanned_count &&
+            (scan.pass_records.empty() || scan.pass_records.size() == scan.pass_offsets.size())
+        : scan.pass_flags.size() == scan.scanned_count;
+    if (!scan.success || !scan_result_shape_valid) {
         const std::string reason = scan.error.empty() ? "scan_failed" : scan.error;
         RegisterGpuNonceSeedPreHashScanFailure(backend, reason);
         LogGpuNonceSeedScanFallbackOnce(
@@ -1611,26 +1645,74 @@ std::optional<MatMulNonceBatchWindow> BuildMatMulNonceSeededGpuPreHashBatchWindo
     g_matmul_gpu_prehash_scan_successes.fetch_add(1, std::memory_order_relaxed);
 
     window.headers.reserve(configured_batch_size);
-    for (uint32_t i = 0; i < scan.scanned_count; ++i) {
-        ++window.nonces_scanned;
-        if (scan.pass_flags[i] == 0) {
-            continue;
+    auto append_header_for_offset = [&](
+        uint32_t offset,
+        const btx::cuda::MatMulNonceSeedPreHashPassRecord* pass_record = nullptr) -> bool {
+        if (offset >= scan.scanned_count) {
+            return false;
         }
 
         CBlockHeader header{block};
-        header.nNonce64 = block.nNonce64 + i;
+        header.nNonce64 = block.nNonce64 + offset;
         header.nNonce = static_cast<uint32_t>(header.nNonce64);
-        if (!SetDeterministicMatMulSeeds(header, params, block_height, parent_median_time_past)) {
-            return std::nullopt;
+        if (pass_record != nullptr) {
+            header.seed_a = pass_record->seed_a;
+            header.seed_b = pass_record->seed_b;
+        } else {
+            if (!SetDeterministicMatMulSeeds(header, params, block_height, parent_median_time_past)) {
+                return false;
+            }
         }
         header.matmul_digest.SetNull();
-        if (!CheckMatMulPreHashGate(header, params, block_height)) {
-            continue;
-        }
 
         window.headers.push_back(std::move(header));
-        if (window.headers.size() >= configured_batch_size) {
-            break;
+        if (pass_record != nullptr) {
+            window.sigmas.push_back(pass_record->sigma);
+        }
+        return true;
+    };
+
+    if (scan.compact_pass_offsets) {
+        const bool use_pass_records = scan.pass_records.size() == scan.pass_offsets.size();
+        uint32_t previous_offset{0};
+        bool have_previous_offset{false};
+        for (size_t i = 0; i < scan.pass_offsets.size(); ++i) {
+            const uint32_t offset = scan.pass_offsets[i];
+            const auto* pass_record = use_pass_records ? &scan.pass_records[i] : nullptr;
+            if (offset >= scan.scanned_count ||
+                (have_previous_offset && offset <= previous_offset)) {
+                RegisterGpuNonceSeedPreHashScanFailure(backend, "compact_scan_offsets_out_of_order");
+                return std::nullopt;
+            }
+            if (pass_record != nullptr && pass_record->offset != offset) {
+                RegisterGpuNonceSeedPreHashScanFailure(backend, "compact_scan_records_offset_mismatch");
+                return std::nullopt;
+            }
+            window.nonces_scanned = offset + 1U;
+            if (!append_header_for_offset(offset, pass_record)) {
+                return std::nullopt;
+            }
+            previous_offset = offset;
+            have_previous_offset = true;
+            if (window.headers.size() >= configured_batch_size) {
+                break;
+            }
+        }
+        if (window.headers.size() < configured_batch_size) {
+            window.nonces_scanned = scan.scanned_count;
+        }
+    } else {
+        for (uint32_t i = 0; i < scan.scanned_count; ++i) {
+            ++window.nonces_scanned;
+            if (scan.pass_flags[i] == 0) {
+                continue;
+            }
+            if (!append_header_for_offset(i)) {
+                return std::nullopt;
+            }
+            if (window.headers.size() >= configured_batch_size) {
+                break;
+            }
         }
     }
 
@@ -3333,6 +3415,9 @@ bool SolveMatMulNonceSeeded(CBlockHeader& block,
             if (UintToArith256(digest_result.digest) > effective_target) {
                 return DigestCandidateOutcome::MISS;
             }
+            if (pre_hash_epsilon_bits > 0 && !CheckMatMulPreHashGate(header, params, block_height)) {
+                return DigestCandidateOutcome::MISS;
+            }
 
             accepted_digest = digest_result.digest;
             if (cpu_confirm_candidates || needs_freivalds_payload) {
@@ -3514,16 +3599,34 @@ bool SolveMatMulNonceSeeded(CBlockHeader& block,
                     max_tries -= filtered_nonces;
 
                     if (!scanned_window->headers.empty()) {
-                        std::vector<matmul::accelerated::PreparedDigestInputs> prepared_batch;
-                        prepared_batch.reserve(scanned_window->headers.size());
-                        for (const auto& header : scanned_window->headers) {
-                            if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
-                                LogDebug(BCLog::MINING, "SolveMatMulNonceSeeded: abort flag set while preparing GPU-scanned window, stopping with %lu tries remaining\n",
-                                         static_cast<unsigned long>(max_tries));
-                                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
-                                return false;
-                            }
-                            prepared_batch.push_back(prepare_inputs(header));
+                        if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+                            LogDebug(BCLog::MINING, "SolveMatMulNonceSeeded: abort flag set while preparing GPU-scanned window, stopping with %lu tries remaining\n",
+                                     static_cast<unsigned long>(max_tries));
+                            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+                            return false;
+                        }
+
+                        std::vector<matmul::accelerated::PreparedDigestInputs> prepared_batch =
+                            scanned_window->sigmas.size() == scanned_window->headers.size()
+                                ? matmul::accelerated::PrepareMatMulDigestInputsBatchForBackend(
+                                    scanned_window->headers,
+                                    scanned_window->sigmas,
+                                    transcript_block_size,
+                                    noise_rank,
+                                    active_backend,
+                                    digest_scheme)
+                                : matmul::accelerated::PrepareMatMulDigestInputsBatchForBackend(
+                                    scanned_window->headers,
+                                    transcript_block_size,
+                                    noise_rank,
+                                    active_backend,
+                                    digest_scheme);
+
+                        if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+                            LogDebug(BCLog::MINING, "SolveMatMulNonceSeeded: abort flag set after preparing GPU-scanned window, stopping with %lu tries remaining\n",
+                                     static_cast<unsigned long>(max_tries));
+                            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - solve_start);
+                            return false;
                         }
                         g_matmul_prepared_inputs.fetch_add(prepared_batch.size(), std::memory_order_relaxed);
                         g_matmul_batched_digest_requests.fetch_add(1, std::memory_order_relaxed);

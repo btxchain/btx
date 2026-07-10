@@ -1,0 +1,20 @@
+{
+  "format_version": 1,
+  "chain": "main",
+  "snapshot_type": "rollback",
+  "published_name": "snapshot.dat",
+  "filename": "snapshot.dat",
+  "height": 155700,
+  "txoutset_hash": "177c88216b700618cee432a3ca4f7c30c79fa3733666553484c5a22e283b777f",
+  "nchaintx": 213654,
+  "blockhash": "b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d",
+  "snapshot_file_version": 9,
+  "snapshot_sha256": "e0fb6d34852a7f0ac649dfaa9e4a50a1fa5bcde7ba97475ef3bf62f4175fc69e",
+  "sha256": "e0fb6d34852a7f0ac649dfaa9e4a50a1fa5bcde7ba97475ef3bf62f4175fc69e",
+  "snapshot_size_bytes": 448392435,
+  "verification": {
+    "loadtxoutset": "btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat",
+    "sha256sum": "e0fb6d34852a7f0ac649dfaa9e4a50a1fa5bcde7ba97475ef3bf62f4175fc69e  snapshot.dat"
+  },
+  "shielded_state_pin": "d8abf2d33319a2030c34c68dd50cfda10ececdd95f5a85bdbe05d44b334fbe9d"
+}

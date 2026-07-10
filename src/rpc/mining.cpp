@@ -17,6 +17,7 @@
 #include <consensus/params.h>
 #include <consensus/validation.h>
 #include <core_io.h>
+#include <cuda/matmul_accel.h>
 #include <deploymentinfo.h>
 #include <deploymentstatus.h>
 #include <hash.h>
@@ -1400,6 +1401,7 @@ static UniValue BuildBackendRuntimeProfile()
 {
     const auto stats = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
     const auto prehash_stats = ProbeMatMulGpuPreHashScanStats();
+    const auto cuda_pool_stats = btx::cuda::ProbeMatMulBufferPool();
     UniValue obj(UniValue::VOBJ);
     // Surface the daemon's OWN resolved mining backend + reason so a silent fallback to CPU is
     // visible here (issue #43): when active_backend != requested_backend (e.g. requested=metal but
@@ -1448,6 +1450,29 @@ static UniValue BuildBackendRuntimeProfile()
     obj.pushKV("cuda_nonce_seed_scan_fallbacks_to_cpu", prehash_stats.cuda_fallbacks_to_cpu);
     obj.pushKV("last_gpu_prehash_scan_backend", prehash_stats.last_backend);
     obj.pushKV("last_gpu_prehash_scan_error", prehash_stats.last_error);
+
+    UniValue cuda_pool(UniValue::VOBJ);
+    cuda_pool.pushKV("available", cuda_pool_stats.available);
+    cuda_pool.pushKV("initialized", cuda_pool_stats.initialized);
+    cuda_pool.pushKV("allocation_events", cuda_pool_stats.allocation_events);
+    cuda_pool.pushKV("reuse_events", cuda_pool_stats.reuse_events);
+    cuda_pool.pushKV("wait_events", cuda_pool_stats.wait_events);
+    cuda_pool.pushKV("completed_submissions", cuda_pool_stats.completed_submissions);
+    cuda_pool.pushKV("device_capacity_bytes", cuda_pool_stats.device_capacity_bytes);
+    cuda_pool.pushKV("active_device_capacity_bytes", cuda_pool_stats.active_device_capacity_bytes);
+    cuda_pool.pushKV("max_slot_device_capacity_bytes", cuda_pool_stats.max_slot_device_capacity_bytes);
+    cuda_pool.pushKV("slot_count", cuda_pool_stats.slot_count);
+    cuda_pool.pushKV("active_slots", cuda_pool_stats.active_slots);
+    cuda_pool.pushKV("high_water_slots", cuda_pool_stats.high_water_slots);
+    cuda_pool.pushKV("slots_with_device_buffers", cuda_pool_stats.slots_with_device_buffers);
+    cuda_pool.pushKV("inflight_submissions", cuda_pool_stats.inflight_submissions);
+    cuda_pool.pushKV("peak_inflight_submissions", cuda_pool_stats.peak_inflight_submissions);
+    cuda_pool.pushKV("n", cuda_pool_stats.n);
+    cuda_pool.pushKV("b", cuda_pool_stats.b);
+    cuda_pool.pushKV("r", cuda_pool_stats.r);
+    cuda_pool.pushKV("reason", cuda_pool_stats.reason);
+    obj.pushKV("cuda_buffer_pool", std::move(cuda_pool));
+
     obj.pushKV("last_metal_fallback_error", stats.last_metal_fallback_error);
     obj.pushKV("last_cuda_fallback_error", stats.last_cuda_fallback_error);
     obj.pushKV("last_gpu_input_error", stats.last_gpu_input_error);
@@ -5172,11 +5197,14 @@ static RPCHelpMan getmininginfo()
                             }},
                             {RPCResult::Type::OBJ_DYN, "status_detail", "Per-status high-water marks",
                             {
-                                {RPCResult::Type::NUM, "count", "Known tips with this status"},
-                                {RPCResult::Type::NUM, "highest_height", "Highest tip height with this status, or -1"},
-                                {RPCResult::Type::NUM, "max_branch_length", "Deepest branch length with this status"},
-                                {RPCResult::Type::NUM, "max_branch_tip_height", "Tip height for the deepest branch with this status, or -1"},
-                                {RPCResult::Type::STR_HEX, "max_branch_tip_hash", "Tip hash for the deepest branch with this status, or empty"},
+                                {RPCResult::Type::OBJ, "status", "High-water marks for this status",
+                                {
+                                    {RPCResult::Type::NUM, "count", "Known tips with this status"},
+                                    {RPCResult::Type::NUM, "highest_height", "Highest tip height with this status, or -1"},
+                                    {RPCResult::Type::NUM, "max_branch_length", "Deepest branch length with this status"},
+                                    {RPCResult::Type::NUM, "max_branch_tip_height", "Tip height for the deepest branch with this status, or -1"},
+                                    {RPCResult::Type::STR_HEX, "max_branch_tip_hash", "Tip hash for the deepest branch with this status, or empty"},
+                                }},
                             }},
                             {RPCResult::Type::NUM, "max_headers_only_branch_length", "Deepest headers-only branch length known locally"},
                             {RPCResult::Type::NUM, "max_invalid_branch_length", "Deepest invalid branch length known locally"},
@@ -5203,10 +5231,47 @@ static RPCHelpMan getmininginfo()
                             {RPCResult::Type::NUM, "metal_successes", "Successful Metal digest computations"},
                             {RPCResult::Type::NUM, "metal_fallbacks_to_cpu", "Metal requests that fell back to CPU"},
                             {RPCResult::Type::NUM, "metal_digest_mismatches", "Metal digest mismatches detected"},
+                            {RPCResult::Type::NUM, "metal_retry_without_uploaded_base_attempts", "Metal retries attempted without uploaded base matrices"},
+                            {RPCResult::Type::NUM, "metal_retry_without_uploaded_base_successes", "Successful retries without uploaded base matrices"},
                             {RPCResult::Type::NUM, "cuda_successes", "Successful CUDA digest computations"},
                             {RPCResult::Type::NUM, "cuda_fallbacks_to_cpu", "CUDA requests that fell back to CPU"},
+                            {RPCResult::Type::NUM, "gpu_input_generation_attempts", "GPU input-generation attempts"},
+                            {RPCResult::Type::NUM, "gpu_input_generation_successes", "Successful GPU input-generation attempts"},
+                            {RPCResult::Type::NUM, "gpu_input_generation_failures", "Failed GPU input-generation attempts"},
+                            {RPCResult::Type::NUM, "gpu_input_auto_disabled_skips", "AUTO-mode GPU input skips after disablement"},
+                            {RPCResult::Type::BOOL, "gpu_input_auto_disabled", "Whether GPU input AUTO mode is disabled"},
+                            {RPCResult::Type::NUM, "gpu_prehash_scan_attempts", "GPU prehash scan attempts"},
+                            {RPCResult::Type::NUM, "gpu_prehash_scan_successes", "Successful GPU prehash scans"},
+                            {RPCResult::Type::NUM, "gpu_prehash_scan_failures", "Failed GPU prehash scans"},
+                            {RPCResult::Type::NUM, "metal_nonce_seed_scan_fallbacks_to_cpu", "Metal nonce-seed scans that fell back to CPU"},
+                            {RPCResult::Type::NUM, "cuda_nonce_seed_scan_fallbacks_to_cpu", "CUDA nonce-seed scans that fell back to CPU"},
+                            {RPCResult::Type::STR, "last_gpu_prehash_scan_backend", "Most recent GPU prehash scan backend"},
+                            {RPCResult::Type::STR, "last_gpu_prehash_scan_error", "Most recent GPU prehash scan error"},
                             {RPCResult::Type::STR, "last_metal_fallback_error", "Most recent Metal fallback error"},
                             {RPCResult::Type::STR, "last_cuda_fallback_error", "Most recent CUDA fallback error"},
+                            {RPCResult::Type::OBJ, "cuda_buffer_pool", "Daemon-local CUDA digest buffer pool state and retained device capacity",
+                            {
+                                {RPCResult::Type::BOOL, "available", "Whether the CUDA buffer pool probe is available"},
+                                {RPCResult::Type::BOOL, "initialized", "Whether the daemon has initialized the CUDA buffer pool"},
+                                {RPCResult::Type::NUM, "allocation_events", "CUDA digest pool requests that allocated or resized device buffers"},
+                                {RPCResult::Type::NUM, "reuse_events", "CUDA digest pool requests that reused existing device buffers"},
+                                {RPCResult::Type::NUM, "wait_events", "CUDA digest pool acquisitions that waited for a slot"},
+                                {RPCResult::Type::NUM, "completed_submissions", "Completed CUDA digest pool submissions"},
+                                {RPCResult::Type::NUM, "device_capacity_bytes", "Estimated retained CUDA device-buffer capacity across all digest pool slots"},
+                                {RPCResult::Type::NUM, "active_device_capacity_bytes", "Estimated retained CUDA device-buffer capacity in currently active slots"},
+                                {RPCResult::Type::NUM, "max_slot_device_capacity_bytes", "Largest estimated retained CUDA device-buffer capacity of any one digest pool slot"},
+                                {RPCResult::Type::NUM, "slot_count", "Configured CUDA digest pool slot count"},
+                                {RPCResult::Type::NUM, "active_slots", "Currently active CUDA digest pool slots"},
+                                {RPCResult::Type::NUM, "high_water_slots", "Highest concurrently active CUDA digest pool slot count"},
+                                {RPCResult::Type::NUM, "slots_with_device_buffers", "CUDA digest pool slots with retained device buffers"},
+                                {RPCResult::Type::NUM, "inflight_submissions", "Currently inflight CUDA digest submissions"},
+                                {RPCResult::Type::NUM, "peak_inflight_submissions", "Highest observed inflight CUDA digest submissions"},
+                                {RPCResult::Type::NUM, "n", "Last CUDA digest pool MatMul n"},
+                                {RPCResult::Type::NUM, "b", "Last CUDA digest pool MatMul block size"},
+                                {RPCResult::Type::NUM, "r", "Last CUDA digest pool MatMul rank"},
+                                {RPCResult::Type::STR, "reason", "CUDA buffer pool probe status"},
+                            }},
+                            {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                         }},
                         {RPCResult::Type::OBJ, "time_policy", "Timestamp policy for the next block",
                         {
@@ -7283,6 +7348,56 @@ static std::string gbt_vb_name(const Consensus::DeploymentPos pos) {
     return s;
 }
 
+static std::string MatMulSeedDerivationScope(const Consensus::Params& consensus, int32_t height)
+{
+    if (consensus.IsMatMulParentMtpSeedActive(height)) {
+        return "per_nonce_header_parent_mtp";
+    }
+    if (consensus.IsMatMulNonceSeedActive(height)) {
+        return "per_nonce_header";
+    }
+    return "per_parent_block";
+}
+
+static std::string MatMulSeedDerivationRule(const Consensus::Params& consensus, int32_t height)
+{
+    if (consensus.IsMatMulParentMtpSeedActive(height)) {
+        return "sha256(\"BTX_MATMUL_SEED_V3\" || prev_block_hash || parent_median_time_past || height || version || merkle_root || time || bits || nonce64 || matmul_dim || which)";
+    }
+    if (consensus.IsMatMulNonceSeedActive(height)) {
+        return "sha256(\"BTX_MATMUL_SEED_V2\" || prev_block_hash || height || version || merkle_root || time || bits || nonce64 || matmul_dim || which)";
+    }
+    return "sha256(prev_block_hash || height || which)";
+}
+
+static CBlockIndex* ResolveTemplatePrevIndex(
+    ChainstateManager& chainman,
+    const BlockTemplate& block_template,
+    CBlockIndex* const expected_pindex_prev,
+    const char* const source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    const CBlock& block = block_template.getBlock();
+    if (expected_pindex_prev != nullptr && block.hashPrevBlock == expected_pindex_prev->GetBlockHash()) {
+        return expected_pindex_prev;
+    }
+
+    CBlockIndex* const template_pindex_prev = chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock);
+    if (template_pindex_prev == nullptr) {
+        throw JSONRPCError(
+            RPC_INTERNAL_ERROR,
+            strprintf("block template previous block index not found: prevhash=%s", block.hashPrevBlock.GetHex()));
+    }
+
+    LogWarning(
+        "getblocktemplate: %s template parent changed while building template; captured prevheight=%d prevhash=%s, template prevheight=%d prevhash=%s\n",
+        source,
+        expected_pindex_prev != nullptr ? expected_pindex_prev->nHeight : -1,
+        expected_pindex_prev != nullptr ? expected_pindex_prev->GetBlockHash().GetHex() : uint256{}.GetHex(),
+        template_pindex_prev->nHeight,
+        template_pindex_prev->GetBlockHash().GetHex());
+    return template_pindex_prev;
+}
+
 static UniValue TemplateToJSON(
     const Consensus::Params&,
     const ChainstateManager&,
@@ -7350,6 +7465,13 @@ static RPCHelpMan getblocktemplate()
                 }},
                 {RPCResult::Type::NUM, "vbrequired", "bit mask of versionbits the server requires set in submissions"},
                 {RPCResult::Type::STR, "previousblockhash", "The hash of current highest block"},
+                {RPCResult::Type::OBJ, "template_context", "Parent context used to derive template height, time policy, and deterministic mining fields",
+                {
+                    {RPCResult::Type::STR_HEX, "parent_hash", "Parent block hash used for contextual template derivation"},
+                    {RPCResult::Type::NUM, "parent_height", "Parent block height used for contextual template derivation"},
+                    {RPCResult::Type::NUM, "next_height", "Height of the candidate block"},
+                    {RPCResult::Type::BOOL, "matches_template_prev", "Whether this context parent matches previousblockhash"},
+                }},
                 {RPCResult::Type::BOOL, "mempool_validation_fallback", "Whether this template fell back to coinbase-only after mempool-selected transaction validation failed"},
                 {RPCResult::Type::NUM, "policy_block_max_template_txs", "Local cap on mempool transactions selected into this template; 0 means unlimited"},
                 {RPCResult::Type::ARR, "transactions", "contents of non-coinbase transactions that should be included in the next block",
@@ -7450,6 +7572,23 @@ static RPCHelpMan getblocktemplate()
                 {RPCResult::Type::NUM, "matmul_field_modulus", /*optional=*/true, "MatMul finite field modulus"},
                 {RPCResult::Type::NUM, "matmul_min_dimension", /*optional=*/true, "minimum allowed MatMul matrix dimension"},
                 {RPCResult::Type::NUM, "matmul_max_dimension", /*optional=*/true, "maximum allowed MatMul matrix dimension"},
+                {RPCResult::Type::OBJ, "matmul_seed_derivation", /*optional=*/true, "Diagnostic context used to derive MatMul seeds for this exact template header",
+                {
+                    {RPCResult::Type::STR, "scope", "Consensus seed derivation scope"},
+                    {RPCResult::Type::STR, "rule", "Consensus seed derivation rule"},
+                    {RPCResult::Type::STR_HEX, "parent_hash", "Parent block hash used by the seed derivation"},
+                    {RPCResult::Type::NUM, "parent_height", "Parent block height"},
+                    {RPCResult::Type::NUM_TIME, "parent_median_time_past", "Parent median-time-past used by the seed derivation"},
+                    {RPCResult::Type::NUM, "height", "Candidate block height"},
+                    {RPCResult::Type::NUM, "version", "Candidate header version"},
+                    {RPCResult::Type::STR_HEX, "merkleroot", "Candidate header merkle root"},
+                    {RPCResult::Type::NUM_TIME, "time", "Candidate header time"},
+                    {RPCResult::Type::STR_HEX, "bits", "Candidate header bits"},
+                    {RPCResult::Type::NUM, "nonce64", "Candidate header nonce64 used for template seeds"},
+                    {RPCResult::Type::NUM, "matmul_dim", "Candidate header MatMul dimension"},
+                    {RPCResult::Type::STR_HEX, "seed_a", "Derived seed A"},
+                    {RPCResult::Type::STR_HEX, "seed_b", "Derived seed B"},
+                }},
                 {RPCResult::Type::OBJ, "pq_info", /*optional=*/true, "Post-quantum signature profile",
                 {
                     {RPCResult::Type::STR, "pq_algorithm", "primary post-quantum signature algorithm"},
@@ -7738,7 +7877,8 @@ static RPCHelpMan getblocktemplate()
             options.bypass_chain_guard = false;
             auto tmpl = miner.createNewBlock2(options);
             CHECK_NONFATAL(tmpl);
-            return TemplateToJSON(consensusParams, chainman, &*tmpl, local_pindexPrev, setClientRules, tx_update_counter, options, chain_guard_status);
+            CBlockIndex* const template_pindex_prev = ResolveTemplatePrevIndex(chainman, *tmpl, local_pindexPrev, "one-shot");
+            return TemplateToJSON(consensusParams, chainman, &*tmpl, template_pindex_prev, setClientRules, tx_update_counter, options, chain_guard_status);
         }
         CHECK_NONFATAL(options == options_def);
 
@@ -7756,6 +7896,7 @@ static RPCHelpMan getblocktemplate()
         // Create new block
         block_template = miner.createNewBlock();
         CHECK_NONFATAL(block_template);
+        cached_pindex_prev = ResolveTemplatePrevIndex(chainman, *block_template, pindexPrevNew, "cached");
 
 
         // Need to update only after we know createNewBlock succeeded. Empty
@@ -7765,11 +7906,11 @@ static RPCHelpMan getblocktemplate()
         if (block_template->isMempoolValidationFallback()) {
             LogWarning("getblocktemplate: returning one-shot empty mempool-validation fallback template without caching it\n");
         } else {
-            pindexPrevHash = pindexPrevNew->GetBlockHash();
+            pindexPrevHash = cached_pindex_prev->GetBlockHash();
         }
-        cached_pindex_prev = pindexPrevNew;
     }
     CHECK_NONFATAL(cached_pindex_prev);
+    cached_pindex_prev = ResolveTemplatePrevIndex(chainman, *block_template, cached_pindex_prev, "cache-return");
 
     return TemplateToJSON(consensusParams, chainman, &*block_template, cached_pindex_prev, setClientRules, nTransactionsUpdatedLast, options_def, chain_guard_status);
 },
@@ -7789,6 +7930,15 @@ static UniValue TemplateToJSON(
     CHECK_NONFATAL(block_template);
     CHECK_NONFATAL(pindexPrev);
     const CBlock& block = block_template->getBlock();
+    const uint256 context_prev_hash{pindexPrev->GetBlockHash()};
+    if (block.hashPrevBlock != context_prev_hash) {
+        throw JSONRPCError(
+            RPC_INTERNAL_ERROR,
+            strprintf(
+                "block template parent mismatch: template prevhash=%s context prevhash=%s",
+                block.hashPrevBlock.GetHex(),
+                context_prev_hash.GetHex()));
+    }
 
     // NOTE: If at some point we support pre-segwit miners post-segwit-activation, this needs to take segwit support into consideration
     const bool fPreSegWit = !DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_SEGWIT);
@@ -7856,13 +8006,6 @@ static UniValue TemplateToJSON(
         if (block_header.matmul_dim == 0) {
             block_header.matmul_dim = static_cast<uint16_t>(consensusParams.nMatMulDimension);
         }
-        if (!SetDeterministicMatMulSeeds(
-                block_header,
-                consensusParams,
-                next_height,
-                pindexPrev->GetMedianTimePast())) {
-            throw JSONRPCError(RPC_INTERNAL_ERROR, "unable to derive deterministic MatMul seeds");
-        }
         block_header.matmul_digest.SetNull();
     }
 
@@ -7879,9 +8022,9 @@ static UniValue TemplateToJSON(
     aMutable.push_back("transactions");
     if (matmul_active) {
         aMutable.push_back("nonce64");
-        // Seeds are NOT mutable: they are deterministically derived from
-        // hashPrevBlock and height. Marking them mutable would signal to pool
-        // software (via BIP22) that seeds can be freely modified.
+        // Seeds are not freely mutable. Current consensus can bind them to the
+        // full header candidate, including prevhash, parent MTP, merkle root,
+        // time, bits, nonce64, and matmul_dim.
         //
         // For the same reason, prevblock is not advertised as mutable on MatMul
         // templates: changing it requires regenerating the seeds and full work.
@@ -7942,12 +8085,26 @@ static UniValue TemplateToJSON(
             }
         }
     }
+    if (matmul_active &&
+        !SetDeterministicMatMulSeeds(
+            block_header,
+            consensusParams,
+            next_height,
+            pindexPrev->GetMedianTimePast())) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "unable to derive deterministic MatMul seeds");
+    }
     result.pushKV("version", block_header.nVersion);
     result.pushKV("rules", std::move(aRules));
     result.pushKV("vbavailable", std::move(vbavailable));
     result.pushKV("vbrequired", int(0));
 
     result.pushKV("previousblockhash", block.hashPrevBlock.GetHex());
+    UniValue template_context(UniValue::VOBJ);
+    template_context.pushKV("parent_hash", context_prev_hash.GetHex());
+    template_context.pushKV("parent_height", pindexPrev->nHeight);
+    template_context.pushKV("next_height", next_height);
+    template_context.pushKV("matches_template_prev", block.hashPrevBlock == context_prev_hash);
+    result.pushKV("template_context", std::move(template_context));
     result.pushKV("mempool_validation_fallback", block_template->isMempoolValidationFallback());
     result.pushKV("policy_block_max_template_txs", static_cast<int64_t>(block_options.nBlockMaxTemplateTxs));
     result.pushKV("transactions", std::move(transactions));
@@ -8033,6 +8190,23 @@ static UniValue TemplateToJSON(
         result.pushKV("matmul_field_modulus", (uint64_t)consensusParams.nMatMulFieldModulus);
         result.pushKV("matmul_min_dimension", static_cast<uint64_t>(consensusParams.nMatMulMinDimension));
         result.pushKV("matmul_max_dimension", static_cast<uint64_t>(consensusParams.nMatMulMaxDimension));
+
+        UniValue seed_derivation(UniValue::VOBJ);
+        seed_derivation.pushKV("scope", MatMulSeedDerivationScope(consensusParams, next_height));
+        seed_derivation.pushKV("rule", MatMulSeedDerivationRule(consensusParams, next_height));
+        seed_derivation.pushKV("parent_hash", context_prev_hash.GetHex());
+        seed_derivation.pushKV("parent_height", pindexPrev->nHeight);
+        seed_derivation.pushKV("parent_median_time_past", pindexPrev->GetMedianTimePast());
+        seed_derivation.pushKV("height", next_height);
+        seed_derivation.pushKV("version", block_header.nVersion);
+        seed_derivation.pushKV("merkleroot", block_header.hashMerkleRoot.GetHex());
+        seed_derivation.pushKV("time", block_header.GetBlockTime());
+        seed_derivation.pushKV("bits", strprintf("%08x", block_header.nBits));
+        seed_derivation.pushKV("nonce64", static_cast<uint64_t>(block_header.nNonce64));
+        seed_derivation.pushKV("matmul_dim", block_header.matmul_dim);
+        seed_derivation.pushKV("seed_a", block_header.seed_a.GetHex());
+        seed_derivation.pushKV("seed_b", block_header.seed_b.GetHex());
+        result.pushKV("matmul_seed_derivation", std::move(seed_derivation));
 
         UniValue pq_info(UniValue::VOBJ);
         pq_info.pushKV("pq_algorithm", "ml-dsa-44");

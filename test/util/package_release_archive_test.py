@@ -44,8 +44,10 @@ class PackageReleaseArchiveTest(unittest.TestCase):
         suffix = ".exe" if windows else ""
         btxd = root / f"btxd{suffix}"
         btx_cli = root / f"btx-cli{suffix}"
+        btx_util = root / f"btx-util{suffix}"
         btxd.write_text("daemon\n", encoding="utf-8")
         btx_cli.write_text("cli\n", encoding="utf-8")
+        btx_util.write_text("util\n", encoding="utf-8")
         return btxd, btx_cli
 
     def test_linux_archive_includes_binaries_and_helpers(self):
@@ -88,6 +90,16 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                 wrapper = archive.extractfile("btx-29.2/bin/btxd")
                 assert wrapper is not None
                 self.assertIn("missing runtime libraries", wrapper.read().decode("utf-8"))
+
+    def test_cuda_archive_names_match_release_platform_ids(self):
+        self.assertEqual(
+            self.module.archive_filename("0.33.0", "linux-x86_64-cuda12", None),
+            "btx-0.33.0-x86_64-linux-gnu-cuda12.tar.gz",
+        )
+        self.assertEqual(
+            self.module.archive_filename("0.33.0", "linux-x86_64-cuda13", None),
+            "btx-0.33.0-x86_64-linux-gnu-cuda13.tar.gz",
+        )
 
     def test_windows_archive_uses_zip_and_exe_names(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -135,6 +147,9 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                     platform_id="linux-x86_64",
                     btxd_path=btxd,
                     btx_cli_path=btx_cli,
+                    btx_util_path=None,
+                    matmul_metallib_path=None,
+                    oracle_metallib_path=None,
                     source_root=source_root,
                     temp_root=root / "temp",
                 )

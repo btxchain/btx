@@ -274,6 +274,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Optional release name to embed in the generated manifest.",
     )
     parser.add_argument(
+        "--source-commit",
+        help=(
+            "Exact 40-character Git commit used to build the release assets. "
+            "Required by the publisher for a non-draft public release."
+        ),
+    )
+    parser.add_argument(
+        "--source-repository",
+        help="GitHub repository in owner/name form containing --source-commit.",
+    )
+    parser.add_argument(
         "--required-platform",
         action="append",
         default=None,
@@ -412,7 +423,7 @@ def build_manifest(
 ) -> dict[str, object]:
     manifest_assets = []
     platform_assets = collect_platform_assets(staged_assets)
-    for source, asset_path in staged_assets:
+    for _source, asset_path in staged_assets:
         if asset_path.name in {release_manifest_path.name, checksum_name}:
             continue
         if is_release_checksum_artifact(asset_path):
@@ -420,7 +431,6 @@ def build_manifest(
         manifest_assets.append(
             {
                 "name": asset_path.name,
-                "source": source,
                 "sha256": sha256_file(asset_path),
                 "size_bytes": asset_path.stat().st_size,
             }
@@ -431,6 +441,8 @@ def build_manifest(
         "generated_at_utc": generated_at_utc(),
         "release_tag": args.release_tag,
         "release_name": args.release_name,
+        "source_commit": args.source_commit,
+        "source_repository": args.source_repository,
         "checksum_file": checksum_name,
         "signature_file": "SHA256SUMS.asc" if (args.checksum_signature or args.sign_with) else None,
         "snapshot_manifest": "snapshot.manifest.json" if args.snapshot_manifest else None,

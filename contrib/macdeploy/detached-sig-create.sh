@@ -15,7 +15,7 @@ test -n "${UNSIGNED_BUNDLE}"
 BUNDLE_NAME="$(basename "${UNSIGNED_BUNDLE}")"
 UNSIGNED_BINARY="${UNSIGNED_BUNDLE}/Contents/MacOS/${BUNDLE_NAME%.app}"
 
-ARCH=$(${SIGNAPPLE} info ${UNSIGNED_BINARY} | head -n 1 | cut -d " " -f 1)
+ARCH=$(${SIGNAPPLE} info "${UNSIGNED_BINARY}" | head -n 1 | cut -d " " -f 1)
 
 OUTDIR="osx/${ARCH}-apple-darwin"
 OUTROOT="${TEMPDIR}/${OUTDIR}"

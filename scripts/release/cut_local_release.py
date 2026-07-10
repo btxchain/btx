@@ -38,8 +38,23 @@ def default_smoke_install_dir(bundle_dir: Path, platform_id: str) -> Path:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default="btxchain/btx", help="GitHub repository in owner/name form.")
-    parser.add_argument("--tag", required=True, help="Release tag to stage or publish, for example v0.32.7.")
+    parser.add_argument("--tag", required=True, help="Release tag to stage or publish, for example v0.33.0.")
     parser.add_argument("--release-name", help="Human-readable release title. Defaults to the tag name.")
+    parser.add_argument(
+        "--source-commit",
+        help="Exact 40-character Git commit used to build the release assets.",
+    )
+    parser.add_argument(
+        "--source-repository",
+        help="GitHub repository in owner/name form containing --source-commit.",
+    )
+    parser.add_argument(
+        "--expected-signing-fingerprint",
+        help=(
+            "Expected 40-character OpenPGP fingerprint for SHA256SUMS. "
+            "Required when publishing a non-draft release."
+        ),
+    )
     parser.add_argument(
         "--repo-root",
         default=str(repo_root_from_script()),
@@ -192,6 +207,10 @@ def build_collect_command(
         "--source",
         str(archive_dir),
     ]
+    if args.source_commit:
+        command.extend(["--source-commit", args.source_commit])
+    if args.source_repository:
+        command.extend(["--source-repository", args.source_repository])
     if args.snapshot:
         command.extend(["--snapshot", args.snapshot])
     if args.snapshot_manifest:
@@ -227,6 +246,10 @@ def build_publish_command(
         "--gpg",
         args.gpg,
     ]
+    if args.source_commit:
+        command.extend(["--target-commit", args.source_commit])
+    if args.expected_signing_fingerprint:
+        command.extend(["--expected-signing-fingerprint", args.expected_signing_fingerprint])
     if args.release_name:
         command.extend(["--release-name", args.release_name])
     if args.body_file:
@@ -243,6 +266,8 @@ def build_publish_command(
         command.append("--publish")
     if dry_run:
         command.append("--dry-run")
+        if args.publish:
+            command.append("--validate-public-release")
     return command
 
 

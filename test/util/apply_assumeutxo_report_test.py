@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -35,6 +36,23 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"3fdff3b95b68ae2d40ef949e41d9e39fe68591f7fcc4cbfbc46c04f58030dda5"}},
                 .m_chain_tx_count = 56'457,
                 .blockhash = consteval_ctor(uint256{"db5e6530e55606be66aa78fe3f711e9dc4406ee4b26dde2ed819103c37d97d63"}),
+            },
+        };
+    }
+};
+"""
+
+VERSIONED_SOURCE = """class CMainParams : public CChainParams {
+public:
+    CMainParams() {
+        m_assumeutxo_data = {
+            {
+                // main assumeutxo snapshot at height 155'700 (snapshot v9)
+                .height = 155'700,
+                .hash_serialized = AssumeutxoHash{uint256{"177c88216b700618cee432a3ca4f7c30c79fa3733666553484c5a22e283b777f"}},
+                .m_chain_tx_count = 213'654,
+                .blockhash = consteval_ctor(uint256{"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d"}),
+                .shielded_state_commitment = uint256{"d8abf2d33319a2030c34c68dd50cfda10ececdd95f5a85bdbe05d44b334fbe9d"},
             },
         };
     }
@@ -100,6 +118,89 @@ class ApplyAssumeutxoReportTest(unittest.TestCase):
 
         self.assertIn(f".shielded_state_commitment = uint256{{\"{shielded_state_pin}\"}}", updated)
         self.assertIn("snapshot v9", updated)
+
+    def test_versioned_existing_entry_round_trips_exactly(self):
+        snapshot = self.snapshot(
+            155700,
+            "177c88216b700618cee432a3ca4f7c30c79fa3733666553484c5a22e283b777f",
+            "b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d",
+            213654,
+            "d8abf2d33319a2030c34c68dd50cfda10ececdd95f5a85bdbe05d44b334fbe9d",
+            9,
+        )
+
+        updated = self.module.replace_assumeutxo_block(
+            VERSIONED_SOURCE,
+            "main",
+            snapshot,
+            replace_existing=True,
+        )
+
+        self.assertEqual(updated, VERSIONED_SOURCE)
+
+        parsed = self.module.parse_existing_assumeutxo_entries(
+            VERSIONED_SOURCE,
+            "main",
+        )
+        self.assertEqual(parsed[0].snapshot_file_version, 9)
+        with self.assertRaisesRegex(
+            self.module.AssumeutxoApplyError,
+            "already has assumeutxo metadata",
+        ):
+            self.module.merge_assumeutxo_entries(
+                "main",
+                parsed,
+                self.snapshot(
+                    155700,
+                    snapshot.txoutset_hash,
+                    snapshot.blockhash,
+                    snapshot.nchaintx,
+                    snapshot.shielded_state_pin,
+                    10,
+                ),
+                replace_existing=False,
+            )
+
+    def test_check_accepts_matching_versioned_entry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            chainparams_path = pathlib.Path(tmpdir) / "chainparams.cpp"
+            report_path = pathlib.Path(tmpdir) / "snapshot.report.json"
+            chainparams_path.write_text(VERSIONED_SOURCE, encoding="utf-8")
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "chain": "main",
+                        "snapshot": {
+                            "height": 155700,
+                            "txoutset_hash": "177c88216b700618cee432a3ca4f7c30c79fa3733666553484c5a22e283b777f",
+                            "nchaintx": 213654,
+                            "blockhash": "b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d",
+                            "shielded_state_pin": "d8abf2d33319a2030c34c68dd50cfda10ececdd95f5a85bdbe05d44b334fbe9d",
+                            "file_version": 9,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--report",
+                    str(report_path),
+                    "--chainparams",
+                    str(chainparams_path),
+                    "--check",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("assumeutxo apply check: PASS", result.stdout)
+            self.assertEqual(chainparams_path.read_text(encoding="utf-8"), VERSIONED_SOURCE)
 
     def test_parse_report_reads_shielded_state_pin(self):
         with tempfile.TemporaryDirectory() as tmpdir:
