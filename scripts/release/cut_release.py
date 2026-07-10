@@ -35,9 +35,10 @@ PRIMARY_HOST_PATTERNS = {
     "x86_64-apple-darwin": ("*-x86_64-apple-darwin.tar.gz", "*-x86_64-apple-darwin-unsigned.tar.gz"),
     "arm64-apple-darwin": ("*-arm64-apple-darwin.tar.gz", "*-arm64-apple-darwin-unsigned.tar.gz"),
 }
-# A single x86_64 Linux Guix host build emits CPU, CUDA 12, and CUDA 13 flavor
-# directories. Stage all three outputs; the final collector requires both CUDA
-# variants before a release can be published.
+# A single x86_64 Linux Guix host build may emit CPU, CUDA 12, and CUDA 13
+# flavor directories. Stage all three outputs when they exist; the final
+# collector requires the stable production matrix by default and includes
+# optional platform/flavor archives opportunistically.
 PRIMARY_GUIX_OUTPUTS = (
     "x86_64-linux-gnu",
     "x86_64-linux-gnu-cuda12",
