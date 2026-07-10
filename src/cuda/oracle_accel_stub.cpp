@@ -36,6 +36,16 @@ MatMulInputGenerationDeviceResult GenerateMatMulInputsGPUDevice(const MatMulInpu
     return result;
 }
 
+MatMulInputGenerationDeviceBatchResult GenerateMatMulInputsGPUDeviceBatch(
+    const MatMulInputGenerationDeviceBatchRequest&)
+{
+    MatMulInputGenerationDeviceBatchResult result;
+    result.available = false;
+    result.success = false;
+    result.error = "CUDA oracle acceleration is unavailable on this build";
+    return result;
+}
+
 MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(const MatMulNonceSeedPreHashScanRequest&)
 {
     MatMulNonceSeedPreHashScanResult result;

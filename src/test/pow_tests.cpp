@@ -376,6 +376,32 @@ public:
     }
 };
 
+class ScopedCudaDevicePreparedInputsEnv
+{
+public:
+    explicit ScopedCudaDevicePreparedInputsEnv(const char* value)
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS", value != nullptr ? value : "");
+#else
+        if (value != nullptr) {
+            setenv("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS", value, 1);
+        } else {
+            unsetenv("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS");
+        }
+#endif
+    }
+
+    ~ScopedCudaDevicePreparedInputsEnv()
+    {
+#if defined(WIN32)
+        _putenv_s("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS", "");
+#else
+        unsetenv("BTX_MATMUL_CUDA_DEVICE_PREPARED_INPUTS");
+#endif
+    }
+};
+
 class ScopedSolverThreadsEnv
 {
 public:
@@ -1157,6 +1183,27 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_invalid_custom_overrides_rejected)
     }
     {
         ArgsManager args;
+        args.ForceSetArg("-regtestmatmuldimension", "0");
+        BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+    }
+    {
+        ArgsManager args;
+        args.ForceSetArg("-regtestmatmultranscriptblocksize", "0");
+        BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+    }
+    {
+        ArgsManager args;
+        args.ForceSetArg("-regtestmatmulnoiserank", "0");
+        BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+    }
+    {
+        ArgsManager args;
+        args.ForceSetArg("-regtestmatmuldimension", "65");
+        args.ForceSetArg("-regtestmatmultranscriptblocksize", "8");
+        BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+    }
+    {
+        ArgsManager args;
         args.ForceSetArg("-regtestmatmulaserthalflife", "0");
         BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
     }
@@ -1218,6 +1265,9 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation_override_options)
     options.matmul_binding_height = 5;
     options.matmul_product_digest_height = 5;
     options.matmul_require_product_payload = false;
+    options.matmul_dimension = 512;
+    options.matmul_transcript_block_size = 16;
+    options.matmul_noise_rank = 8;
     options.matmul_asert_half_life = 14'400;
     options.matmul_asert_half_life_upgrade_height = 10;
     options.matmul_asert_half_life_upgrade = 3'600;
@@ -1229,6 +1279,9 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation_override_options)
     BOOST_CHECK_EQUAL(consensus.nMatMulFreivaldsBindingHeight, 5);
     BOOST_CHECK_EQUAL(consensus.nMatMulProductDigestHeight, 5);
     BOOST_CHECK(!consensus.fMatMulRequireProductPayload);
+    BOOST_CHECK_EQUAL(consensus.nMatMulDimension, 512U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulTranscriptBlockSize, 16U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulNoiseRank, 8U);
     BOOST_CHECK(!consensus.IsMatMulProductPayloadRequired(4));
     BOOST_CHECK(consensus.IsMatMulProductPayloadRequired(5));
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLife, 14'400);
@@ -1249,6 +1302,9 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation_override_args)
     args.ForceSetArg("-regtestmatmulbindingheight", "5");
     args.ForceSetArg("-regtestmatmulproductdigestheight", "5");
     args.ForceSetArg("-regtestmatmulrequireproductpayload", "0");
+    args.ForceSetArg("-regtestmatmuldimension", "512");
+    args.ForceSetArg("-regtestmatmultranscriptblocksize", "16");
+    args.ForceSetArg("-regtestmatmulnoiserank", "8");
     args.ForceSetArg("-regtestmatmulaserthalflife", "14400");
     args.ForceSetArg("-regtestmatmulaserthalflifeupgradeheight", "10");
     args.ForceSetArg("-regtestmatmulaserthalflifeupgrade", "3600");
@@ -1260,6 +1316,9 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation_override_args)
     BOOST_CHECK_EQUAL(consensus.nMatMulFreivaldsBindingHeight, 5);
     BOOST_CHECK_EQUAL(consensus.nMatMulProductDigestHeight, 5);
     BOOST_CHECK(!consensus.fMatMulRequireProductPayload);
+    BOOST_CHECK_EQUAL(consensus.nMatMulDimension, 512U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulTranscriptBlockSize, 16U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulNoiseRank, 8U);
     BOOST_CHECK(!consensus.IsMatMulProductPayloadRequired(4));
     BOOST_CHECK(consensus.IsMatMulProductPayloadRequired(5));
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLife, 14'400);
@@ -1551,6 +1610,10 @@ BOOST_AUTO_TEST_CASE(MatMulNonceSeed_cuda_prehash_scan_matches_cpu_gate)
     BOOST_REQUIRE_MESSAGE(scan.success, scan.error);
     BOOST_REQUIRE_EQUAL(scan.scanned_count, kScanCount);
     BOOST_REQUIRE_EQUAL(scan.pass_flags.size(), kScanCount);
+    std::vector<uint32_t> expected_offsets;
+    std::vector<uint256> expected_seed_a;
+    std::vector<uint256> expected_seed_b;
+    std::vector<uint256> expected_sigmas;
     for (uint32_t i = 0; i < kScanCount; ++i) {
         CBlockHeader candidate{header};
         candidate.nNonce64 = header.nNonce64 + i;
@@ -1558,6 +1621,40 @@ BOOST_AUTO_TEST_CASE(MatMulNonceSeed_cuda_prehash_scan_matches_cpu_gate)
         BOOST_REQUIRE(SetDeterministicMatMulSeeds(candidate, consensus, 2));
         const bool expected = CheckMatMulPreHashGate(candidate, consensus, 2);
         BOOST_CHECK_EQUAL(scan.pass_flags[i] != 0, expected);
+        if (expected) {
+            expected_offsets.push_back(i);
+            expected_seed_a.push_back(candidate.seed_a);
+            expected_seed_b.push_back(candidate.seed_b);
+            expected_sigmas.push_back(matmul::DeriveSigma(candidate));
+        }
+    }
+
+    const auto compact_scan = btx::cuda::ScanMatMulNonceSeedPreHashGPU({
+        .version = header.nVersion,
+        .previous_block_hash = header.hashPrevBlock,
+        .merkle_root = header.hashMerkleRoot,
+        .time = header.nTime,
+        .bits = header.nBits,
+        .start_nonce = header.nNonce64,
+        .matmul_dim = header.matmul_dim,
+        .block_height = 2,
+        .scan_count = kScanCount,
+        .pre_hash_target = ArithToUint256(pre_hash_target),
+        .compact_pass_offsets = true,
+        .compact_pass_records = true,
+    });
+    BOOST_REQUIRE_MESSAGE(compact_scan.success, compact_scan.error);
+    BOOST_REQUIRE_EQUAL(compact_scan.scanned_count, kScanCount);
+    BOOST_CHECK(compact_scan.pass_flags.empty());
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        compact_scan.pass_offsets.begin(), compact_scan.pass_offsets.end(),
+        expected_offsets.begin(), expected_offsets.end());
+    BOOST_REQUIRE_EQUAL(compact_scan.pass_records.size(), expected_offsets.size());
+    for (size_t i = 0; i < expected_offsets.size(); ++i) {
+        BOOST_CHECK_EQUAL(compact_scan.pass_records[i].offset, expected_offsets[i]);
+        BOOST_CHECK_EQUAL(compact_scan.pass_records[i].seed_a, expected_seed_a[i]);
+        BOOST_CHECK_EQUAL(compact_scan.pass_records[i].seed_b, expected_seed_b[i]);
+        BOOST_CHECK_EQUAL(compact_scan.pass_records[i].sigma, expected_sigmas[i]);
     }
 }
 
@@ -1669,6 +1766,10 @@ BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_cuda_prehash_scan_matches_cpu_gate)
     BOOST_REQUIRE_MESSAGE(scan.success, scan.error);
     BOOST_REQUIRE_EQUAL(scan.scanned_count, kScanCount);
     BOOST_REQUIRE_EQUAL(scan.pass_flags.size(), kScanCount);
+    std::vector<uint32_t> expected_offsets;
+    std::vector<uint256> expected_seed_a;
+    std::vector<uint256> expected_seed_b;
+    std::vector<uint256> expected_sigmas;
     for (uint32_t i = 0; i < kScanCount; ++i) {
         CBlockHeader candidate{header};
         candidate.nNonce64 = header.nNonce64 + i;
@@ -1676,6 +1777,42 @@ BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_cuda_prehash_scan_matches_cpu_gate)
         BOOST_REQUIRE(SetDeterministicMatMulSeeds(candidate, consensus, 2, parent_mtp));
         const bool expected = CheckMatMulPreHashGate(candidate, consensus, 2);
         BOOST_CHECK_EQUAL(scan.pass_flags[i] != 0, expected);
+        if (expected) {
+            expected_offsets.push_back(i);
+            expected_seed_a.push_back(candidate.seed_a);
+            expected_seed_b.push_back(candidate.seed_b);
+            expected_sigmas.push_back(matmul::DeriveSigma(candidate));
+        }
+    }
+
+    const auto compact_scan = btx::cuda::ScanMatMulNonceSeedPreHashGPU({
+        .version = header.nVersion,
+        .previous_block_hash = header.hashPrevBlock,
+        .merkle_root = header.hashMerkleRoot,
+        .time = header.nTime,
+        .bits = header.nBits,
+        .start_nonce = header.nNonce64,
+        .matmul_dim = header.matmul_dim,
+        .block_height = 2,
+        .scan_count = kScanCount,
+        .pre_hash_target = ArithToUint256(pre_hash_target),
+        .seed_version = 3,
+        .parent_median_time_past = parent_mtp,
+        .compact_pass_offsets = true,
+        .compact_pass_records = true,
+    });
+    BOOST_REQUIRE_MESSAGE(compact_scan.success, compact_scan.error);
+    BOOST_REQUIRE_EQUAL(compact_scan.scanned_count, kScanCount);
+    BOOST_CHECK(compact_scan.pass_flags.empty());
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        compact_scan.pass_offsets.begin(), compact_scan.pass_offsets.end(),
+        expected_offsets.begin(), expected_offsets.end());
+    BOOST_REQUIRE_EQUAL(compact_scan.pass_records.size(), expected_offsets.size());
+    for (size_t i = 0; i < expected_offsets.size(); ++i) {
+        BOOST_CHECK_EQUAL(compact_scan.pass_records[i].offset, expected_offsets[i]);
+        BOOST_CHECK_EQUAL(compact_scan.pass_records[i].seed_a, expected_seed_a[i]);
+        BOOST_CHECK_EQUAL(compact_scan.pass_records[i].seed_b, expected_seed_b[i]);
+        BOOST_CHECK_EQUAL(compact_scan.pass_records[i].sigma, expected_sigmas[i]);
     }
 }
 
@@ -1885,6 +2022,7 @@ BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_cuda_solver_uses_gpu_scan_and_variable_
     ScopedNonceSeedBatchSizeEnv nonce_seed_batch_env("3");
     ScopedCpuConfirmEnv cpu_confirm_env("1");
     ScopedGpuInputsEnv gpu_inputs_env("1");
+    ScopedCudaDevicePreparedInputsEnv cuda_device_inputs_env("1");
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fSkipMatMulValidation = false;
@@ -2106,12 +2244,15 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
 
     BOOST_CHECK_EQUAL(
         consensus.nMinimumChainWork.GetHex(),
-        "000000000000000000000000000000000000000000000000000005323d5ff789");
+        "0000000000000000000000000000000000000000000000000000d441262318ef");
     BOOST_CHECK_EQUAL(
         consensus.defaultAssumeValid.GetHex(),
-        "d95c8b565fefcda79efe47acad98648b0a24899f22facba9eedeb02c8bffd4d2");
-    BOOST_CHECK_EQUAL(params->AssumedBlockchainSize(), 16U);
+        "b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d");
+    BOOST_CHECK_EQUAL(params->AssumedBlockchainSize(), 106U);
     BOOST_CHECK_EQUAL(params->AssumedChainStateSize(), 1U);
+    BOOST_CHECK_EQUAL(params->TxData().nTime, 1783686055);
+    BOOST_CHECK_EQUAL(params->TxData().tx_count, 213654);
+    BOOST_CHECK_CLOSE(params->TxData().dTxRate, 0.021856663125, 0.000001);
 
     const auto& checkpoints = params->Checkpoints().mapCheckpoints;
     BOOST_REQUIRE_GE(checkpoints.size(), 2U);
@@ -2120,11 +2261,11 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
     BOOST_CHECK_EQUAL(
         it_0->second.GetHex(),
         "75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601");
-    const auto it_anchor = checkpoints.find(128605);
+    const auto it_anchor = checkpoints.find(155700);
     BOOST_REQUIRE(it_anchor != checkpoints.end());
     BOOST_CHECK_EQUAL(
         it_anchor->second.GetHex(),
-        "d95c8b565fefcda79efe47acad98648b0a24899f22facba9eedeb02c8bffd4d2");
+        "b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d");
 
     const auto assumeutxo_55000 = params->AssumeutxoForHeight(55000);
     BOOST_REQUIRE(assumeutxo_55000.has_value());
@@ -2300,11 +2441,25 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_132209->shielded_state_commitment.GetHex(),
         "5d215cf4ed8cb9fbaddd2321cc996e0b754da0cfbd6055514a3cca78f7aa2792");
 
+    const auto assumeutxo_155700 = params->AssumeutxoForHeight(155700);
+    BOOST_REQUIRE(assumeutxo_155700.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_155700->height, 155700);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_155700->hash_serialized.ToString(),
+        "177c88216b700618cee432a3ca4f7c30c79fa3733666553484c5a22e283b777f");
+    BOOST_CHECK_EQUAL(assumeutxo_155700->m_chain_tx_count, 213654U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_155700->blockhash.GetHex(),
+        "b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d");
+    BOOST_CHECK_EQUAL(
+        assumeutxo_155700->shielded_state_commitment.GetHex(),
+        "d8abf2d33319a2030c34c68dd50cfda10ececdd95f5a85bdbe05d44b334fbe9d");
+
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 18U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 19U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 132209);
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 155700);
     BOOST_CHECK_GE(snapshot_heights.back(), std::prev(checkpoints.end())->first);
 }
 
@@ -3243,6 +3398,11 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batch_for_post_activation_mainn
     ScopedBackendEnv backend_env("metal");
     ScopedSolverThreadsEnv solver_threads_env("8");
 
+    if (matmul::accelerated::ResolveMiningBackendFromEnvironment().active != matmul::backend::Kind::METAL) {
+        BOOST_TEST_MESSAGE("Skipping post-activation Metal batch-default test: Metal backend unavailable");
+        return;
+    }
+
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
     consensus.fMatMulFreivaldsEnabled = true;
@@ -3288,6 +3448,11 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_high_perf_apple_metal_defaults_when_perf_
     ScopedSolverThreadsEnv solver_threads_env(nullptr);
     ScopedApplePerfLogicalCpuOverrideEnv perf_override_env("10");
 
+    if (matmul::accelerated::ResolveMiningBackendFromEnvironment().active != matmul::backend::Kind::METAL) {
+        BOOST_TEST_MESSAGE("Skipping high-performance Apple Metal default test: Metal backend unavailable");
+        return;
+    }
+
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
     consensus.fMatMulFreivaldsEnabled = true;
@@ -3332,6 +3497,11 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_conservative_generic_apple_metal_prefetch
     ScopedBackendEnv backend_env("metal");
     ScopedSolverThreadsEnv solver_threads_env(nullptr);
     ScopedApplePerfLogicalCpuOverrideEnv perf_override_env("4");
+
+    if (matmul::accelerated::ResolveMiningBackendFromEnvironment().active != matmul::backend::Kind::METAL) {
+        BOOST_TEST_MESSAGE("Skipping generic Apple Metal default test: Metal backend unavailable");
+        return;
+    }
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;

@@ -21,21 +21,24 @@ import json
 import re
 import sys
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+SNAPSHOT_VERSION_COMMENT_RE = re.compile(r"\(snapshot\s+v(?P<version>[0-9]+)\)")
 SHIELDED_SNAPSHOT_UNSHIELD_VELOCITY_VERSION = 9
 MAX_SNAPSHOT_FILE_VERSION = 0xffff
 ENTRY_RE = re.compile(
     r"""
     \{
         \s*
-        (?:
-            // [^\n]* \n \s*
-        )*
+        (?P<comments>
+            (?:
+                // [^\n]* \n \s*
+            )*
+        )
         \.height \s* = \s* (?P<height>[0-9']+) \s* ,
         \s*
         \.hash_serialized \s* = \s* AssumeutxoHash\{uint256\{"(?P<txoutset_hash>[0-9a-f]{64})"\}\} \s* ,
@@ -66,7 +69,7 @@ class AssumeutxoSnapshot:
     nchaintx: int
     blockhash: str
     shielded_state_pin: str | None = None
-    snapshot_file_version: int | None = field(default=None, compare=False)
+    snapshot_file_version: int | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -228,6 +231,23 @@ def parse_int_with_ticks(value: str, field: str) -> int:
     return int(normalized)
 
 
+def parse_snapshot_file_version_comment(comments: str) -> int | None:
+    versions = {
+        int(match.group("version"))
+        for match in SNAPSHOT_VERSION_COMMENT_RE.finditer(comments)
+    }
+    if not versions:
+        return None
+    if len(versions) != 1:
+        raise AssumeutxoApplyError(
+            "existing assumeutxo entry has conflicting snapshot version comments"
+        )
+    return parse_optional_snapshot_file_version(
+        versions.pop(),
+        "existing snapshot file version comment",
+    )
+
+
 def parse_existing_assumeutxo_entries(assignment: str, chain: str) -> list[AssumeutxoSnapshot]:
     if re.fullmatch(r"(?ms)\s*m_assumeutxo_data\s*=\s*\{\s*\};\s*", assignment):
         return []
@@ -242,6 +262,9 @@ def parse_existing_assumeutxo_entries(assignment: str, chain: str) -> list[Assum
                 nchaintx=parse_int_with_ticks(match.group("nchaintx"), "existing m_chain_tx_count"),
                 blockhash=match.group("blockhash"),
                 shielded_state_pin=match.group("shielded_state_pin"),
+                snapshot_file_version=parse_snapshot_file_version_comment(
+                    match.group("comments")
+                ),
             )
         )
 

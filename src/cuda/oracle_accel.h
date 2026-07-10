@@ -63,6 +63,21 @@ struct MatMulInputGenerationDeviceResult {
     std::string error;
 };
 
+struct MatMulInputGenerationDeviceBatchRequest {
+    uint32_t n{0};
+    uint32_t b{0};
+    uint32_t r{0};
+    uint32_t batch_size{0};
+    const uint256* sigmas{nullptr};
+};
+
+struct MatMulInputGenerationDeviceBatchResult {
+    bool available{false};
+    bool success{false};
+    std::vector<std::shared_ptr<const MatMulGeneratedInputsDevice>> inputs;
+    std::string error;
+};
+
 struct MatMulNonceSeedPreHashScanRequest {
     int32_t version{0};
     uint256 previous_block_hash;
@@ -76,6 +91,15 @@ struct MatMulNonceSeedPreHashScanRequest {
     uint256 pre_hash_target;
     uint32_t seed_version{2};
     int64_t parent_median_time_past{0};
+    bool compact_pass_offsets{false};
+    bool compact_pass_records{false};
+};
+
+struct MatMulNonceSeedPreHashPassRecord {
+    uint32_t offset{0};
+    uint256 seed_a;
+    uint256 seed_b;
+    uint256 sigma;
 };
 
 struct MatMulNonceSeedPreHashScanResult {
@@ -83,6 +107,8 @@ struct MatMulNonceSeedPreHashScanResult {
     bool success{false};
     uint32_t scanned_count{0};
     std::vector<uint8_t> pass_flags;
+    std::vector<uint32_t> pass_offsets;
+    std::vector<MatMulNonceSeedPreHashPassRecord> pass_records;
     std::string error;
 };
 
@@ -103,6 +129,8 @@ struct MatMulInputGenerationProfile {
 MatMulInputGenerationProfile ProbeMatMulInputGenerationProfile();
 MatMulInputGenerationResult GenerateMatMulInputsGPU(const MatMulInputGenerationRequest& request);
 MatMulInputGenerationDeviceResult GenerateMatMulInputsGPUDevice(const MatMulInputGenerationRequest& request);
+MatMulInputGenerationDeviceBatchResult GenerateMatMulInputsGPUDeviceBatch(
+    const MatMulInputGenerationDeviceBatchRequest& request);
 MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(
     const MatMulNonceSeedPreHashScanRequest& request);
 

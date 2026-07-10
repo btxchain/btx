@@ -288,12 +288,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0;
 
-        // Mainnet anchor refreshed on 2026-06-12 at height 128'605 from a
+        // Mainnet anchor refreshed on 2026-07-10 at height 155'700 from a
         // synced canonical node so stale history below the current public
         // release floor is rejected quickly.
-        consensus.nMinimumChainWork = uint256{"000000000000000000000000000000000000000000000000000005323d5ff789"};
+        consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000000000000d441262318ef"};
         // Assume signatures valid up to the same anchored block to speed sync.
-        consensus.defaultAssumeValid = uint256{"d95c8b565fefcda79efe47acad98648b0a24899f22facba9eedeb02c8bffd4d2"};
+        consensus.defaultAssumeValid = uint256{"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d"};
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -306,10 +306,10 @@ public:
         pchMessageStart[3] = 0x01;
         nDefaultPort = 19335;
         nPruneAfterHeight = 100000;
-        // Measured from the 2026-04-14 mainnet canonical datadir at height
-        // 71'435: ~14.5 GiB blocks plus ~210 MiB chain/shielded state, rounded
-        // up so users see a conservative disk estimate before sync begins.
-        m_assumed_blockchain_size = 16;
+        // Measured from the 2026-07-10 mainnet archive datadirs near height
+        // 155'870: ~104 GB of blocks plus chain/shielded state, rounded up so
+        // users see a conservative disk estimate before sync begins.
+        m_assumed_blockchain_size = 106;
         m_assumed_chain_state_size = 1;
 
         genesis = CreateBTXGenesisBlock(
@@ -351,7 +351,7 @@ public:
         checkpointData = {
             {
                 {0, uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"}},
-                {128605, uint256{"d95c8b565fefcda79efe47acad98648b0a24899f22facba9eedeb02c8bffd4d2"}},
+                {155700, uint256{"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d"}},
             }
         };
         m_assumeutxo_data = {
@@ -487,11 +487,19 @@ public:
                 .blockhash = consteval_ctor(uint256{"9e6776ee8c5e8dceefcb108b429838be8bda3d66a6553d8b4c8cef613840c940"}),
                 .shielded_state_commitment = uint256{"5d215cf4ed8cb9fbaddd2321cc996e0b754da0cfbd6055514a3cca78f7aa2792"},
             },
+            {
+                // main assumeutxo snapshot at height 155'700 (snapshot v9)
+                .height = 155'700,
+                .hash_serialized = AssumeutxoHash{uint256{"177c88216b700618cee432a3ca4f7c30c79fa3733666553484c5a22e283b777f"}},
+                .m_chain_tx_count = 213'654,
+                .blockhash = consteval_ctor(uint256{"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d"}),
+                .shielded_state_commitment = uint256{"d8abf2d33319a2030c34c68dd50cfda10ececdd95f5a85bdbe05d44b334fbe9d"},
+            },
         };
         chainTxData = ChainTxData{
-            .nTime = 1781271685,
-            .tx_count = 158301,
-            .dTxRate = 0.017899035537,
+            .nTime = 1783686055,
+            .tx_count = 213654,
+            .dTxRate = 0.021856663125,
         };
     }
 };
@@ -1128,6 +1136,22 @@ public:
         if (opts.matmul_require_product_payload.has_value()) {
             consensus.fMatMulRequireProductPayload = *opts.matmul_require_product_payload;
         }
+        if (opts.matmul_dimension.has_value()) {
+            consensus.nMatMulDimension = *opts.matmul_dimension;
+        }
+        if (opts.matmul_transcript_block_size.has_value()) {
+            consensus.nMatMulTranscriptBlockSize = *opts.matmul_transcript_block_size;
+        }
+        if (opts.matmul_noise_rank.has_value()) {
+            consensus.nMatMulNoiseRank = *opts.matmul_noise_rank;
+        }
+        if (consensus.nMatMulTranscriptBlockSize == 0 ||
+            consensus.nMatMulDimension % consensus.nMatMulTranscriptBlockSize != 0) {
+            throw std::runtime_error(strprintf(
+                "Invalid regtest MatMul shape: dimension %u must be divisible by transcript block size %u.",
+                consensus.nMatMulDimension,
+                consensus.nMatMulTranscriptBlockSize));
+        }
         if (opts.matmul_asert_half_life.has_value()) {
             consensus.nMatMulAsertHalfLife = *opts.matmul_asert_half_life;
         }
@@ -1250,6 +1274,9 @@ public:
             opts.matmul_binding_height.has_value() ||
             opts.matmul_product_digest_height.has_value() ||
             opts.matmul_require_product_payload.has_value() ||
+            opts.matmul_dimension.has_value() ||
+            opts.matmul_transcript_block_size.has_value() ||
+            opts.matmul_noise_rank.has_value() ||
             opts.matmul_asert_half_life.has_value() ||
             opts.matmul_asert_half_life_upgrade_height.has_value() ||
             opts.matmul_nonce_seed_height.has_value() ||
@@ -1306,7 +1333,7 @@ public:
                 ? uint256{}
                 : uint256{"7ff451fb9e39ebaa8447435600978167d9cb8b9ee1d6933eb5e1ad84d05a2a37"});
         consensus.hashGenesisBlock = genesis.GetHash();
-        if (!custom_genesis) {
+        if (!custom_genesis && !opts.matmul_dimension.has_value()) {
             assert(consensus.hashGenesisBlock == uint256{"521ad0951ed299e9c56aeb7db8188972772067560351b8e55adf71dbed532360"});
         }
         assert(genesis.hashMerkleRoot == uint256{"94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a"});
@@ -1337,7 +1364,7 @@ public:
                     // Deterministic TestChain100Setup + BTX-compatible
                     // feature_assumeutxo extension using RAW_P2PKH wallet flows.
                     .height = 299,
-                    .hash_serialized = AssumeutxoHash{uint256{"0ffcf7afd7682a59057ad717784b70ca8fb86cf9209912ccca20261aafa5001a"}},
+                    .hash_serialized = AssumeutxoHash{uint256{"2e5dcf9f04328141c721b5615a32dc265da783050ba7bd3e436a48b5a2013ae1"}},
                     .m_chain_tx_count = 300,
                     .blockhash = consteval_ctor(uint256{"78e6ea382d4d5466b1d8421c1b8789e9c7cde9de8b6da4042be00ca2948a4860"}),
                 },

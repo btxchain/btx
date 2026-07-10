@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
 DATADIR="${BTX_MINING_DATADIR:-}"
 CONF="${BTX_MINING_CONF:-}"
 CHAIN="${BTX_MINING_CHAIN:-}"
@@ -212,7 +210,7 @@ if [[ -z "${NODE_PIDFILE}" ]]; then
   NODE_PIDFILE="${RESULTS_DIR}/btxd-supervised.pid"
 fi
 
-REQUIRE_BACKEND_NORMALIZED="$(printf '%s' "${REQUIRE_BACKEND}" | tr 'A-Z' 'a-z')"
+REQUIRE_BACKEND_NORMALIZED="$(printf '%s' "${REQUIRE_BACKEND}" | tr '[:upper:]' '[:lower:]')"
 if [[ -n "${REQUIRE_BACKEND}" && -z "${MINING_BACKEND}" ]]; then
   case "${REQUIRE_BACKEND_NORMALIZED}" in
     1|true|yes|on|0|false|no|off|none|disabled)
@@ -240,7 +238,7 @@ if ! [[ "${PEER_MESH_DISABLE_SECS}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 if [[ -n "${GPU_INPUTS}" ]]; then
-  gpu_inputs_normalized="$(printf '%s' "${GPU_INPUTS}" | tr 'A-Z' 'a-z')"
+  gpu_inputs_normalized="$(printf '%s' "${GPU_INPUTS}" | tr '[:upper:]' '[:lower:]')"
   case "${gpu_inputs_normalized}" in
     auto|1|true|yes|on|0|false|no|off)
       ;;
@@ -541,15 +539,10 @@ wait_for_supervised_pid_exit() {
 update_chain_progress() {
   local now="$1"
   local local_tip="$2"
-  local peer_count="$3"
 
   if (( last_local_tip < 0 || local_tip > last_local_tip )); then
     last_local_tip="${local_tip}"
     last_tip_progress_epoch="${now}"
-  fi
-
-  if (( peer_count > 0 )); then
-    last_peer_seen_epoch="${now}"
   fi
 }
 
@@ -1082,7 +1075,7 @@ refresh_mininginfo() {
 }
 
 normalize_backend_label() {
-  printf '%s' "${1:-}" | tr 'A-Z' 'a-z'
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
 }
 
 resolved_required_backend_label() {
@@ -1236,7 +1229,7 @@ check_runtime_health() {
   near_tip_peers="$(jq -r '.chain_guard.near_tip_peers // 0' <<<"${LAST_MININGINFO_JSON}")"
   now="$(date +%s)"
   check_backend_runtime_health
-  update_chain_progress "${now}" "${local_tip}" "${peer_count}"
+  update_chain_progress "${now}" "${local_tip}"
 
   if [[ "${pause}" == "false" ]]; then
     health_failure_streak=0
@@ -1287,7 +1280,6 @@ last_cuda_prehash_fallbacks=0
 same_reason_streak=0
 last_local_tip=-1
 last_tip_progress_epoch="$(date +%s)"
-last_peer_seen_epoch="$(date +%s)"
 last_peer_refresh_epoch=0
 
 printf '%s\n' "$$" > "${PIDFILE}"
@@ -1330,6 +1322,7 @@ while true; do
       log_health "generate-chain-guard-compat-advisory"
       if refresh_mininginfo; then
         reason="$(jq -r '.chain_guard.reason // "unknown"' <<<"${LAST_MININGINFO_JSON}")"
+        # shellcheck disable=SC2034
         health_failure_streak=0
         last_health_reason="compat-advisory:${reason}"
         same_reason_streak=0

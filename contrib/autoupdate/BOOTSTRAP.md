@@ -106,9 +106,19 @@ when none matches or verification fails.
 ```jsonc
 "git_commit": "<full 40-hex commit the binaries were built from>",
 "prebuilt": {
+  "linux-x86_64-cuda13": {
+    "url":    "https://btx.dev/bin/btx-0.33.0-x86_64-linux-gnu-cuda13.tar.gz",
+    "sig_url":"https://btx.dev/bin/btx-0.33.0-x86_64-linux-gnu-cuda13.tar.gz.sig",
+    "sha256": "<hex>"
+  },
+  "linux-x86_64-cuda12": {
+    "url":    "https://btx.dev/bin/btx-0.33.0-x86_64-linux-gnu-cuda12.tar.gz",
+    "sig_url":"https://btx.dev/bin/btx-0.33.0-x86_64-linux-gnu-cuda12.tar.gz.sig",
+    "sha256": "<hex>"
+  },
   "linux-x86_64-glibc": {
-    "url":    "https://btx.dev/bin/btx-0.32.7-linux-x86_64-glibc.tar.gz",
-    "sig_url":"https://btx.dev/bin/btx-0.32.7-linux-x86_64-glibc.tar.gz.sig",
+    "url":    "https://btx.dev/bin/btx-0.33.0-x86_64-linux-gnu.tar.gz",
+    "sig_url":"https://btx.dev/bin/btx-0.33.0-x86_64-linux-gnu.tar.gz.sig",
     "sha256": "<hex>"                       // optional, defense-in-depth
   },
   "linux-aarch64-glibc": { "url": "…", "sig_url": "…" },
@@ -117,10 +127,14 @@ when none matches or verification fails.
 }
 ```
 
-- **Platform key** is `<os>-<arch>[-<libc>]`. The installer (`detect_platform_keys`)
-  derives it from `uname` and, on Linux, distinguishes `glibc` vs `musl` (so an
-  Alpine node never installs a glibc build). Both `aarch64` and `arm64` spellings
-  are tried.
+- **Platform key** is `<os>-<arch>[-<flavor-or-libc>]`. On x86-64 glibc Linux,
+  the installer uses a successful `nvidia-smi` probe to try the canonical
+  `linux-x86_64-cuda13` / `linux-x86_64-cuda12` release keys before
+  `linux-x86_64-glibc`. A CUDA 13-capable driver tries CUDA 13, then the
+  compatible CUDA 12 build, then CPU; a CUDA 12-capable driver tries CUDA 12,
+  then CPU. A toolkit or `nvcc` alone does not select a GPU build. Other Linux
+  platforms distinguish `glibc` vs `musl` (so an Alpine node never installs a
+  glibc build), and both `aarch64` and `arm64` spellings are tried.
 - **Trust** is anchored exactly like the manifest: the tarball's detached
   signature is verified under the SAME scheme/key (`btx-util verifyupdatesig` for
   PQ, `openssl` for classical). The artifact URLs must also be under
@@ -163,7 +177,7 @@ transaction IDs, hardware serials, or persistent client identifier are added.
 | parameter | meaning |
 | --- | --- |
 | `btx_au=1` | identifies the request as part of the auto-update flow |
-| `btx_version` | running client version, e.g. `0.32.7` |
+| `btx_version` | running client version, e.g. `0.33.0` |
 | `btx_platform` | operating system family, e.g. `linux` or `darwin` |
 | `btx_arch` | client architecture, e.g. `x86_64` or `aarch64` |
 | `btx_cohort` | staged-rollout bucket in `[0,99]` |

@@ -66,7 +66,7 @@ cat > "${TMPDIR}/fake-cli-restart" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 STATE_DIR="${STATE_DIR:?}"
-NODE_PIDFILE="${NODE_PIDFILE:?}"
+NODE_PIDFILE="${BTX_MINING_NODE_PIDFILE:?}"
 cmd=""
 for arg in "$@"; do
   case "${arg}" in
@@ -124,7 +124,6 @@ STATE_DIR="${STATE_DIR}" "${TMPDIR}/fake-btxd-restart" -pid="${UNRELATED_PIDFILE
 unrelated_pid="$(tr -d '\n' < "${UNRELATED_PIDFILE}")"
 
 STATE_DIR="${STATE_DIR}" \
-NODE_PIDFILE="${NODE_PIDFILE}" \
 BTX_MINING_CLI="${TMPDIR}/fake-cli-restart" \
 BTX_MINING_DAEMON="${TMPDIR}/fake-btxd-restart" \
 BTX_MINING_NODE_PIDFILE="${NODE_PIDFILE}" \
@@ -726,7 +725,7 @@ cat > "${TMPDIR}/fake-cli-peer-stall" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 STATE_DIR="${STATE_DIR:?}"
-NODE_PIDFILE="${NODE_PIDFILE:?}"
+NODE_PIDFILE="${BTX_MINING_NODE_PIDFILE:?}"
 cmd=""
 for arg in "$@"; do
   case "${arg}" in
@@ -807,7 +806,6 @@ EOF
 chmod +x "${TMPDIR}/fake-btxd-peer-stall"
 
 STATE_DIR="${STATE_DIR}" \
-NODE_PIDFILE="${NODE_PIDFILE}" \
 BTX_MINING_CLI="${TMPDIR}/fake-cli-peer-stall" \
 BTX_MINING_DAEMON="${TMPDIR}/fake-btxd-peer-stall" \
 BTX_MINING_NODE_PIDFILE="${NODE_PIDFILE}" \
@@ -898,9 +896,10 @@ exit 0
 EOF
 chmod +x "${TMPDIR}/should-mine"
 
-STATE_DIR="${STATE_DIR}" \
+should_mine_state_dir="${STATE_DIR}"
 BTX_MINING_CLI="${TMPDIR}/fake-cli-idle" \
-BTX_MINING_SHOULD_MINE_COMMAND="STATE_DIR=${STATE_DIR} ${TMPDIR}/should-mine" \
+BTX_MINING_SHOULD_MINE_COMMAND="STATE_DIR=${should_mine_state_dir} ${TMPDIR}/should-mine" \
+STATE_DIR="${should_mine_state_dir}" \
 BTX_MINING_MAX_LOOPS=5 \
 "${SCRIPT_DIR}/live-mining-loop.sh" \
   --results-dir="${RESULTS_DIR}" \

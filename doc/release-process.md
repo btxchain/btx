@@ -7,7 +7,7 @@ Release Process
 
 * Update release candidate version in `CMakeLists.txt` (`CLIENT_VERSION_RC`).
 * Update manpages (after rebuilding the binaries), see [gen-manpages.py](/contrib/devtools/README.md#gen-manpagespy).
-* Update `btx.conf` template content and commit changes if they exist, see [gen-btx-node-conf.sh](/contrib/devtools/README.md#gen-btx-node-confsh).
+* Update `btx.conf` template content and commit changes if they exist, see [gen-bitcoin-conf.sh](/contrib/devtools/README.md#gen-bitcoin-confsh).
 
 ### Before every major and minor release
 
@@ -33,7 +33,8 @@ Release Process
 * Update the following variables in [`src/kernel/chainparams.cpp`](/src/kernel/chainparams.cpp) for mainnet, testnet, and signet:
   - Prefer generating the hardening tuple with `/scripts/update_chain_hardening_manifest.py`:
     - Example:
-      - `python3 scripts/update_chain_hardening_manifest.py --btx-cli build-btx/bin/btx-cli --chain main --rpc-arg=-datadir=<canonical-node-datadir> --rpc-arg=-rpcuser=<user> --rpc-arg=-rpcpassword=<pass> --output /tmp/mainnet-hardening.json`
+      - `python3 scripts/update_chain_hardening_manifest.py --btx-cli build-btx/bin/btx-cli --chain main --rpc-arg=-datadir=<canonical-node-datadir> --output /tmp/mainnet-hardening.json`
+      - use the protected RPC cookie in that datadir; do not put RPC credentials in shell history or workflow inputs
     - The manifest contains a ready-to-apply `cpp_snippet` for `nMinimumChainWork`, `defaultAssumeValid`, `checkpointData`, and `chainTxData`.
     - Mainnet guardrail: by default the script refuses anchors below height `50000` unless `--allow-low-anchor-height` is explicitly provided.
     - If you are also generating a rollback snapshot for a specific height, pass `--target-height <same-height>` so the hardening manifest and snapshot are derived from the same block by default.
@@ -57,7 +58,7 @@ Release Process
     - Testnet should be set with a height some tens of thousands back from the tip, due to reorgs there.
   - `nMinimumChainWork` with the "chainwork" value of RPC `getblockheader` using the same height as that selected for the previous step.
   - `m_assumeutxo_data` array should be appended to with the values returned by the BTX helper script:
-    - `python3 contrib/devtools/generate_assumeutxo.py --btx-cli ./build-btx/bin/btx-cli --chain main --snapshot /tmp/snapshot.dat --snapshot-type rollback --rollback <height or hash> --rpc-arg=-datadir=<canonical-node-datadir> --rpc-arg=-rpcuser=<user> --rpc-arg=-rpcpassword=<pass> --json-out /tmp/snapshot.report.json --manifest-out /tmp/snapshot.manifest.json`
+    - `python3 contrib/devtools/generate_assumeutxo.py --btx-cli ./build-btx/bin/btx-cli --chain main --snapshot /tmp/snapshot.dat --snapshot-type rollback --rollback <height or hash> --rpc-arg=-datadir=<canonical-node-datadir> --json-out /tmp/snapshot.report.json --manifest-out /tmp/snapshot.manifest.json`
     - the generated JSON contains a ready-to-paste `chainparams_snippet`; the compact manifest is the published snapshot receipt and includes `snapshot_file_version` for troubleshooting
     - publish `snapshot.dat` together with `snapshot.manifest.json`
     - include both files in `SHA256SUMS`, and sign that file as `SHA256SUMS.asc` using the same release-process expectations as the binary payloads
@@ -65,22 +66,22 @@ Release Process
   - Use the release-bundling helpers in [BTX GitHub Release Automation](/doc/btx-github-release-automation.md) to stage the final release directory and upload the bundle to GitHub Releases once the binaries, snapshot, and checksum artifacts are ready.
     The same height considerations for `defaultAssumeValid` apply.
   - Preferred operator path once the builder and canonical-node inputs are ready:
-    - `python3 scripts/release/cut_release.py --repo btxchain/btx --tag <tag> --release-name <title> --build-with-guix --generate-snapshot --rollback <height or hash> --btx-cli ./build-btx/bin/btx-cli --rpc-arg=-datadir=<canonical-node-datadir> --rpc-arg=-rpcuser=<user> --rpc-arg=-rpcpassword=<pass> --attestations-dir <path-to-guix.sigs>/<version> --sign-with <release-gpg-key> --body-file doc/release-notes.md --token-file <github.key> --publish --bundle-dir /tmp/btx-release-bundle`
+    - `python3 scripts/release/cut_release.py --repo btxchain/btx --tag <tag> --release-name <title> --source-repository btxchain/btx --source-commit "$(git rev-parse HEAD)" --build-with-guix --generate-snapshot --rollback <height or hash> --btx-cli ./build-btx/bin/btx-cli --rpc-arg=-datadir=<canonical-node-datadir> --attestations-dir <path-to-guix.sigs>/<version> --sign-with <release-gpg-key> --expected-signing-fingerprint <authorized-40-hex-fingerprint> --body-file doc/release-notes.md --token-file <github.key> --publish --bundle-dir /tmp/btx-release-bundle`
     - this command runs the same bundle collector and publisher used below, but it also stitches the Guix outputs, snapshot generation, attestation staging, and GitHub publish contract into one operator workflow
     - if you are staging from already-built outputs instead of building in place, pass `--guix-output-dir <guix-build-version/output>` and omit `--build-with-guix`
   - Native CLI preview path when you intentionally want a non-Guix release track:
-    - `python3 scripts/release/cut_local_release.py --repo btxchain/btx --tag <tag> --release-name <title> --platform-spec "macos-arm64;<path-to-btxd>;<path-to-btx-cli>" --platform-spec "linux-arm64;<path-to-btxd>;<path-to-btx-cli>" --platform-spec "linux-x86_64;<path-to-btxd>;<path-to-btx-cli>" --bundle-dir /tmp/btx-native-cli-release --token-file <github.key> --smoke-platform macos-arm64 --publish`
+    - `python3 scripts/release/cut_local_release.py --repo <staging-owner/repository> --tag <tag> --release-name <title> --source-repository <staging-owner/repository> --source-commit "$(git rev-parse HEAD)" --platform-spec "macos-arm64;<path-to-btxd>;<path-to-btx-cli>" --platform-spec "linux-arm64;<path-to-btxd>;<path-to-btx-cli>" --platform-spec "linux-x86_64;<path-to-btxd>;<path-to-btx-cli>" --bundle-dir /tmp/btx-native-cli-release --token-file <github.key> --smoke-platform macos-arm64 --publish`
     - use this only for clearly labeled native-built CLI releases; it does not claim Guix reproducibility or signer attestation coverage
     - if you do not also pass snapshot artifacts and a checksum signature, treat the output as a binary-install track rather than a full download-and-go release
   - Assemble the final fast-start bundle after the multi-architecture build finishes:
-    - `python3 scripts/release/collect_release_assets.py --output-dir /tmp/btx-release-bundle --source <guix-output-dir>/x86_64-linux-gnu --source <guix-output-dir>/x86_64-linux-gnu-cuda12 --source <guix-output-dir>/x86_64-linux-gnu-cuda13 --source <guix-output-dir>/aarch64-linux-gnu --source <guix-output-dir>/x86_64-w64-mingw32 --source <guix-output-dir>/x86_64-apple-darwin --source <guix-output-dir>/arm64-apple-darwin --snapshot /tmp/snapshot.dat --snapshot-manifest /tmp/snapshot.manifest.json --release-tag <tag> --release-name <title> --sign-with <release-gpg-key>`
+    - `python3 scripts/release/collect_release_assets.py --output-dir /tmp/btx-release-bundle --source <guix-output-dir>/x86_64-linux-gnu --source <guix-output-dir>/x86_64-linux-gnu-cuda12 --source <guix-output-dir>/x86_64-linux-gnu-cuda13 --source <guix-output-dir>/aarch64-linux-gnu --source <guix-output-dir>/x86_64-w64-mingw32 --source <guix-output-dir>/x86_64-apple-darwin --source <guix-output-dir>/arm64-apple-darwin --snapshot /tmp/snapshot.dat --snapshot-manifest /tmp/snapshot.manifest.json --release-tag <tag> --release-name <title> --source-repository btxchain/btx --source-commit "$(git rev-parse HEAD)" --sign-with <release-gpg-key>`
     - this step must target a fresh output directory and produces the single directory that should be uploaded to the GitHub release page: binaries, snapshot, manifests, `SHA256SUMS`, and `SHA256SUMS.asc`
     - the collector now fails the staging step if any supported primary archive is missing, so a successful run implies the generated `btx-release-manifest.json` contains one `platform_assets` entry for each supported primary archive
     - Linux publishes CPU-only, CUDA 12, and CUDA 13 x86_64 archives; see [`doc/linux-release-builds.md`](/doc/linux-release-builds.md) for the hardware and target-host driver matrix.
     - if a `guix.sigs/<version>` directory is available, pass `--attestations-dir <path-to-guix.sigs>/<version>` so the final bundle also publishes signer-qualified attestation assets and records them in `attestation_assets`
   - Publish the bundle to GitHub Releases:
-    - `python3 scripts/release/publish_github_release.py --repo btxchain/btx --tag <tag> --bundle-dir /tmp/btx-release-bundle --body-file <release-notes.md> --token-file <github.key> --publish`
-    - the publisher now refuses bundles whose on-disk assets drift from `SHA256SUMS`, and it verifies `SHA256SUMS.asc` locally whenever the bundle manifest advertises a checksum signature, so it acts as a second contract check before upload
+    - `python3 scripts/release/publish_github_release.py --repo btxchain/btx --tag <tag> --target-commit "$(git rev-parse HEAD)" --expected-signing-fingerprint <authorized-40-hex-fingerprint> --bundle-dir /tmp/btx-release-bundle --body-file <release-notes.md> --token-file <github.key> --publish`
+    - the public publisher requires the manifest source repository and exact commit to match the target repository/tag commit, confirms that commit exists remotely, pins the authorized checksum-signing fingerprint, and refuses bundles whose on-disk assets drift from `SHA256SUMS`
   - Smoke-test the published bundle contract before announcing the release:
     - `python3 contrib/faststart/btx-agent-setup.py --release-manifest /tmp/btx-release-bundle/btx-release-manifest.json --asset-base-url /tmp/btx-release-bundle --platform linux-x86_64 --install-dir /tmp/btx-faststart-smoke --json`
     - this verifies that the local bundle is consumable by the same agent-facing installer path used after publication; published remote URLs additionally require `SHA256SUMS.asc` unless an operator explicitly opts out with `--allow-unsigned-release`
@@ -90,6 +91,7 @@ Release Process
     - `python3 test/util/release_bundle_manifest_test.py`
     - `python3 test/util/btx_agent_setup_test.py`
     - `python3 test/util/publish_github_release_test.py`
+    - `python3 test/util/sign_release_bundle_test.py`
     - `python3 test/functional/feature_assumeutxo.py --configfile=<build>/test/config.ini --cachedir=<cache-dir>`
     - `python3 test/functional/rpc_btx_difficulty_health.py --configfile=<build>/test/config.ini`
     - targeted restart/snapshot coverage in `test_btx` such as `validation_tests` and `validation_chainstatemanager_tests`

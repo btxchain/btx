@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import importlib.util
 import io
 import json
@@ -70,6 +71,22 @@ class CutReleaseTest(unittest.TestCase):
         repo_root = pathlib.Path("/tmp/btx-node")
         output_dir = self.module.default_guix_output_dir(repo_root, "v29.2")
         self.assertEqual(output_dir, repo_root / "guix-build-29.2" / "output")
+
+    def test_primary_patterns_accept_canonical_packaged_archive_names(self):
+        canonical_names = {
+            "x86_64-linux-gnu": "btx-0.33.0-x86_64-linux-gnu.tar.gz",
+            "x86_64-linux-gnu-cuda12": "btx-0.33.0-x86_64-linux-gnu-cuda12.tar.gz",
+            "x86_64-linux-gnu-cuda13": "btx-0.33.0-x86_64-linux-gnu-cuda13.tar.gz",
+            "aarch64-linux-gnu": "btx-0.33.0-aarch64-linux-gnu.tar.gz",
+            "x86_64-w64-mingw32": "btx-0.33.0-x86_64-w64-mingw32.zip",
+            "x86_64-apple-darwin": "btx-0.33.0-x86_64-apple-darwin.tar.gz",
+            "arm64-apple-darwin": "btx-0.33.0-arm64-apple-darwin.tar.gz",
+        }
+        for host, archive_name in canonical_names.items():
+            with self.subTest(host=host):
+                self.assertTrue(
+                    any(fnmatch.fnmatch(archive_name, pattern) for pattern in self.module.PRIMARY_HOST_PATTERNS[host])
+                )
 
     def test_main_stages_existing_outputs_and_auto_discovers_attestations(self):
         with tempfile.TemporaryDirectory() as tmpdir:

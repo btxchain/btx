@@ -203,7 +203,7 @@ if [[ "${FOREGROUND}" != "0" && "${FOREGROUND}" != "1" ]]; then
   echo "Invalid foreground flag: ${FOREGROUND}" >&2
   exit 1
 fi
-REQUIRE_BACKEND_NORMALIZED="$(printf '%s' "${REQUIRE_BACKEND}" | tr 'A-Z' 'a-z')"
+REQUIRE_BACKEND_NORMALIZED="$(printf '%s' "${REQUIRE_BACKEND}" | tr '[:upper:]' '[:lower:]')"
 if [[ -n "${REQUIRE_BACKEND}" && -z "${MINING_BACKEND}" ]]; then
   case "${REQUIRE_BACKEND_NORMALIZED}" in
     1|true|yes|on|0|false|no|off|none|disabled)
@@ -227,7 +227,7 @@ if ! [[ "${MAX_BACKEND_FALLBACKS}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 if [[ -n "${GPU_INPUTS}" ]]; then
-  gpu_inputs_normalized="$(printf '%s' "${GPU_INPUTS}" | tr 'A-Z' 'a-z')"
+  gpu_inputs_normalized="$(printf '%s' "${GPU_INPUTS}" | tr '[:upper:]' '[:lower:]')"
   case "${gpu_inputs_normalized}" in
     auto|1|true|yes|on|0|false|no|off)
       ;;

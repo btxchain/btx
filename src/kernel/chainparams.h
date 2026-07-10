@@ -204,6 +204,9 @@ public:
         std::optional<int32_t> matmul_binding_height{};
         std::optional<int32_t> matmul_product_digest_height{};
         std::optional<bool> matmul_require_product_payload{};
+        std::optional<uint32_t> matmul_dimension{};
+        std::optional<uint32_t> matmul_transcript_block_size{};
+        std::optional<uint32_t> matmul_noise_rank{};
         std::optional<int64_t> matmul_asert_half_life{};
         std::optional<int32_t> matmul_asert_half_life_upgrade_height{};
         std::optional<int64_t> matmul_asert_half_life_upgrade{};

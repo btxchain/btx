@@ -16,6 +16,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from urllib.parse import quote
@@ -27,6 +28,8 @@ TOKEN_ENV_VARS = ("BTX_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
 CHECKSUM_FILE_NAME = "SHA256SUMS"
 RELEASE_MANIFEST_NAME = "btx-release-manifest.json"
 OPTIONAL_UNSIGNED_ASSETS = {"SHA256SUMS.asc"}
+PUBLIC_RELEASE_REPOSITORY = "btxchain/btx"
+HEX40_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -50,6 +53,33 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--target-branch",
         default="main",
         help="Branch or commitish to associate with a newly created tag (default: main).",
+    )
+    parser.add_argument(
+        "--target-commit",
+        help=(
+            "Exact 40-character commit to associate with the release tag. "
+            "Required for publication to btxchain/btx."
+        ),
+    )
+    parser.add_argument(
+        "--expected-signing-fingerprint",
+        help=(
+            "Expected 40-character OpenPGP fingerprint for SHA256SUMS. "
+            "Required for publication to btxchain/btx."
+        ),
+    )
+    parser.add_argument(
+        "--validate-public-release",
+        action="store_true",
+        help="Apply the strict btxchain/btx provenance and signing gates during a dry run.",
+    )
+    parser.add_argument(
+        "--allow-public-recovery",
+        action="store_true",
+        help=(
+            "Explicitly allow replacing assets on an already-public release. "
+            "Without this recovery flag, public releases are immutable."
+        ),
     )
     parser.add_argument(
         "--draft",
@@ -107,6 +137,26 @@ def token_from_env(extra_names: list[str]) -> str | None:
         if token:
             return token.strip()
     return None
+
+
+def curl_auth_config(token: str | None) -> str | None:
+    if token is None:
+        return None
+    if any(character in token for character in ('\r', '\n', '"', '\\')):
+        raise ValueError("GitHub token contains characters unsafe for curl config input")
+    return f'header = "Authorization: Bearer {token}"\n'
+
+
+def run_curl(command: list[str], *, token: str | None = None) -> subprocess.CompletedProcess[str]:
+    auth_config = curl_auth_config(token)
+    if auth_config is not None:
+        command[1:1] = ["--config", "-"]
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        input=auth_config,
+    )
 
 
 def sha256_file(path: Path) -> str:
@@ -205,33 +255,111 @@ def validate_manifest_contract(manifest: dict[str, Any], checksums: dict[str, st
             referenced_assets.add(asset_name)
 
 
-def verify_checksum_signature(checksum_path: Path, signature_path: Path, gpg_bin: str) -> None:
+def normalize_fingerprint(value: str) -> str:
+    normalized = "".join(value.split()).upper()
+    if not HEX40_RE.fullmatch(normalized):
+        raise ValueError("OpenPGP fingerprint must contain exactly 40 hexadecimal characters")
+    return normalized
+
+
+def verify_checksum_signature(checksum_path: Path, signature_path: Path, gpg_bin: str) -> set[str]:
     result = subprocess.run(
-        [gpg_bin, "--verify", str(signature_path), str(checksum_path)],
+        [gpg_bin, "--status-fd=1", "--verify", str(signature_path), str(checksum_path)],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip() or "gpg --verify failed"
         raise RuntimeError(f"Checksum signature verification failed for {signature_path.name}: {message}")
+    fingerprints: set[str] = set()
+    for line in result.stdout.splitlines():
+        if not line.startswith("[GNUPG:] VALIDSIG "):
+            continue
+        for token in line.split()[2:]:
+            if HEX40_RE.fullmatch(token):
+                fingerprints.add(token.upper())
+    if not fingerprints:
+        raise RuntimeError(
+            f"Checksum signature verification for {signature_path.name} returned no VALIDSIG fingerprint"
+        )
+    return fingerprints
 
 
-def verify_bundle_signature(bundle_dir: Path, manifest: dict[str, Any], gpg_bin: str) -> None:
+def verify_bundle_signature(
+    bundle_dir: Path,
+    manifest: dict[str, Any],
+    gpg_bin: str,
+    *,
+    required: bool = False,
+    expected_fingerprint: str | None = None,
+) -> set[str]:
     checksum_path = bundle_dir / CHECKSUM_FILE_NAME
     signature_file = manifest.get("signature_file")
     signature_path = bundle_dir / "SHA256SUMS.asc"
 
     if isinstance(signature_file, str) and signature_file:
-        signature_path = bundle_dir / signature_file
+        if signature_file != "SHA256SUMS.asc":
+            raise ValueError(
+                f"{RELEASE_MANIFEST_NAME} signature_file must be exactly SHA256SUMS.asc"
+            )
+        signature_path = bundle_dir / "SHA256SUMS.asc"
         if not signature_path.is_file():
             raise FileNotFoundError(
                 f"Bundle directory is missing declared signature file {signature_file}: {bundle_dir}"
             )
-        verify_checksum_signature(checksum_path, signature_path, gpg_bin)
-        return
+        fingerprints = verify_checksum_signature(checksum_path, signature_path, gpg_bin) or set()
+    elif signature_path.is_file():
+        fingerprints = verify_checksum_signature(checksum_path, signature_path, gpg_bin) or set()
+    elif required:
+        raise FileNotFoundError("Public release bundles must include a declared SHA256SUMS signature")
+    else:
+        return set()
 
-    if signature_path.is_file():
-        verify_checksum_signature(checksum_path, signature_path, gpg_bin)
+    if expected_fingerprint is not None:
+        expected = normalize_fingerprint(expected_fingerprint)
+        if expected not in fingerprints:
+            actual = ", ".join(sorted(fingerprints)) or "none"
+            raise RuntimeError(
+                f"Checksum signature signer mismatch: expected {expected}, got {actual}"
+            )
+    return fingerprints
+
+
+def validate_release_identity(
+    args: argparse.Namespace,
+    manifest: dict[str, Any],
+    *,
+    strict_public_release: bool,
+) -> str | None:
+    manifest_tag = manifest.get("release_tag")
+    if manifest_tag is not None and manifest_tag != args.tag:
+        raise ValueError(
+            f"Release tag mismatch: bundle manifest has {manifest_tag!r}, command requested {args.tag!r}"
+        )
+
+    target_commit = args.target_commit
+    if target_commit is not None and not HEX40_RE.fullmatch(target_commit):
+        raise ValueError("--target-commit must be exactly 40 hexadecimal characters")
+    if not strict_public_release:
+        return target_commit
+
+    source_repository = manifest.get("source_repository")
+    source_commit = manifest.get("source_commit")
+    if source_repository != args.repo:
+        raise ValueError(
+            f"Public release source repository mismatch: expected {args.repo}, got {source_repository!r}"
+        )
+    if not isinstance(source_commit, str) or not HEX40_RE.fullmatch(source_commit):
+        raise ValueError("Public release manifest must record an exact 40-character source_commit")
+    if target_commit != source_commit:
+        raise ValueError(
+            "Public release --target-commit must exactly match the bundle manifest source_commit"
+        )
+    if manifest_tag != args.tag:
+        raise ValueError("Public release manifest must record the exact requested release_tag")
+    if not args.expected_signing_fingerprint:
+        raise ValueError("Public releases require --expected-signing-fingerprint")
+    return target_commit
 
 
 def curl_json(method: str, url: str, token: str | None = None, payload: dict[str, Any] | None = None) -> Any:
@@ -246,12 +374,10 @@ def curl_json(method: str, url: str, token: str | None = None, payload: dict[str
         "-H",
         f"X-GitHub-Api-Version: {API_VERSION}",
     ]
-    if token:
-        cmd.extend(["-H", f"Authorization: Bearer {token}"])
     if payload is not None:
         cmd.extend(["-H", "Content-Type: application/json", "-d", json.dumps(payload)])
     cmd.append(url)
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = run_curl(cmd, token=token)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"curl failed for {url}")
     if not result.stdout.strip():
@@ -271,12 +397,10 @@ def curl_binary(method: str, url: str, source: Path, token: str | None = None, c
         "-H",
         f"X-GitHub-Api-Version: {API_VERSION}",
     ]
-    if token:
-        cmd.extend(["-H", f"Authorization: Bearer {token}"])
     if content_type:
         cmd.extend(["-H", f"Content-Type: {content_type}"])
     cmd.extend(["--data-binary", f"@{source}", url])
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = run_curl(cmd, token=token)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"curl upload failed for {source.name}")
 
@@ -285,7 +409,13 @@ def ensure_bundle(bundle_dir: Path) -> tuple[list[Path], dict[str, Any]]:
     if not bundle_dir.is_dir():
         raise FileNotFoundError(f"Bundle directory does not exist: {bundle_dir}")
     manifest = load_release_manifest(bundle_dir)
-    assets = sorted(path for path in bundle_dir.iterdir() if path.is_file())
+    children = list(bundle_dir.iterdir())
+    symlinks = sorted(path.name for path in children if path.is_symlink())
+    if symlinks:
+        raise RuntimeError(
+            f"Bundle directory must not contain symbolic links: {', '.join(symlinks)}"
+        )
+    assets = sorted(path for path in children if path.is_file())
     if not assets:
         raise FileNotFoundError(f"Bundle directory is empty: {bundle_dir}")
     checksum_path = bundle_dir / CHECKSUM_FILE_NAME
@@ -318,7 +448,7 @@ def ensure_bundle(bundle_dir: Path) -> tuple[list[Path], dict[str, Any]]:
 
 def get_release(repo: str, tag: str, token: str) -> dict[str, Any] | None:
     url = f"https://api.github.com/repos/{repo}/releases/tags/{quote(tag, safe='')}"
-    result = subprocess.run(
+    result = run_curl(
         [
             "curl",
             "-sS",
@@ -326,16 +456,12 @@ def get_release(repo: str, tag: str, token: str) -> dict[str, Any] | None:
             "GET",
             "-H",
             "Accept: application/vnd.github+json",
-            "-H",
-            f"Authorization: Bearer {token}",
-            "-H",
             f"X-GitHub-Api-Version: {API_VERSION}",
             "-w",
             "\n%{http_code}",
             url,
         ],
-        capture_output=True,
-        text=True,
+        token=token,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"curl failed for {url}")
@@ -345,6 +471,75 @@ def get_release(repo: str, tag: str, token: str) -> dict[str, Any] | None:
     if http_code != "200":
         raise RuntimeError(f"Unexpected HTTP {http_code} for {url}: {body.strip()}")
     return json.loads(body)
+
+
+def require_repository_commit(repo: str, commit: str, token: str) -> None:
+    result = curl_json(
+        "GET",
+        f"https://api.github.com/repos/{repo}/commits/{quote(commit, safe='')}",
+        token=token,
+    )
+    actual = result.get("sha") if isinstance(result, dict) else None
+    if actual != commit:
+        raise RuntimeError(
+            f"Target repository {repo} did not resolve the exact release commit {commit}"
+        )
+
+
+def resolve_repository_commit(repo: str, ref: str, token: str) -> str | None:
+    url = f"https://api.github.com/repos/{repo}/commits/{quote(ref, safe='')}"
+    result = run_curl(
+        [
+            "curl",
+            "-sS",
+            "-X",
+            "GET",
+            "-H",
+            "Accept: application/vnd.github+json",
+            f"X-GitHub-Api-Version: {API_VERSION}",
+            "-w",
+            "\n%{http_code}",
+            url,
+        ],
+        token=token,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"curl failed for {url}")
+    body, _, http_code = result.stdout.rpartition("\n")
+    if http_code == "404":
+        return None
+    if http_code != "200":
+        raise RuntimeError(f"Unexpected HTTP {http_code} for {url}: {body.strip()}")
+    payload = json.loads(body)
+    commit = payload.get("sha") if isinstance(payload, dict) else None
+    if not isinstance(commit, str) or not HEX40_RE.fullmatch(commit):
+        raise RuntimeError(f"GitHub returned an invalid commit for {repo}@{ref}")
+    return commit
+
+
+def validate_uploaded_assets(release: dict[str, Any], assets: list[Path]) -> None:
+    expected = {asset.name: asset.stat().st_size for asset in assets}
+    remote_assets = release.get("assets", [])
+    if not isinstance(remote_assets, list):
+        raise RuntimeError("GitHub release response did not include an asset list")
+    actual: dict[str, int] = {}
+    for entry in remote_assets:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        size = entry.get("size")
+        if isinstance(name, str) and isinstance(size, int):
+            actual[name] = size
+    if actual != expected:
+        missing = sorted(set(expected) - set(actual))
+        extra = sorted(set(actual) - set(expected))
+        wrong_size = sorted(
+            name for name in set(expected) & set(actual) if expected[name] != actual[name]
+        )
+        raise RuntimeError(
+            "Uploaded release asset verification failed "
+            f"(missing={missing}, extra={extra}, wrong_size={wrong_size})"
+        )
 
 
 def create_release(repo: str, tag: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -359,7 +554,7 @@ def update_release(repo: str, release_id: int, token: str, payload: dict[str, An
 
 def delete_asset(repo: str, asset_id: int, token: str) -> None:
     url = f"https://api.github.com/repos/{repo}/releases/assets/{asset_id}"
-    result = subprocess.run(
+    result = run_curl(
         [
             "curl",
             "-sS",
@@ -368,14 +563,10 @@ def delete_asset(repo: str, asset_id: int, token: str) -> None:
             "DELETE",
             "-H",
             "Accept: application/vnd.github+json",
-            "-H",
-            f"Authorization: Bearer {token}",
-            "-H",
             f"X-GitHub-Api-Version: {API_VERSION}",
             url,
         ],
-        capture_output=True,
-        text=True,
+        token=token,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -405,6 +596,15 @@ def main(argv: list[str]) -> int:
     if args.publish and args.draft:
         raise ValueError("--publish and --draft are mutually exclusive")
 
+    strict_public_release = args.repo.lower() == PUBLIC_RELEASE_REPOSITORY and (
+        args.publish or args.validate_public_release
+    )
+    target_commit = validate_release_identity(
+        args,
+        manifest,
+        strict_public_release=strict_public_release,
+    )
+
     draft = not args.publish if not args.draft else True
     release_name = args.release_name or args.tag
     body = read_body(args.body_file)
@@ -413,12 +613,20 @@ def main(argv: list[str]) -> int:
         "name": release_name,
         "draft": draft,
         "prerelease": args.prerelease,
-        "target_commitish": args.target_branch,
+        "target_commitish": target_commit or args.target_branch,
     }
     if body is not None:
         release_payload["body"] = body
 
-    verify_bundle_signature(bundle_dir, manifest, args.gpg)
+    verified_fingerprints = verify_bundle_signature(
+        bundle_dir,
+        manifest,
+        args.gpg,
+        required=strict_public_release,
+        expected_fingerprint=(
+            args.expected_signing_fingerprint if strict_public_release else None
+        ),
+    )
 
     if args.dry_run:
         print(json.dumps(
@@ -430,6 +638,8 @@ def main(argv: list[str]) -> int:
                 "prerelease": args.prerelease,
                 "assets": [asset.name for asset in assets],
                 "signature_file": manifest.get("signature_file"),
+                "verified_signing_fingerprints": sorted(verified_fingerprints),
+                "target_commit": target_commit,
             },
             indent=2,
         ))
@@ -440,8 +650,31 @@ def main(argv: list[str]) -> int:
             "No GitHub token found. Set BTX_GITHUB_TOKEN, GITHUB_TOKEN, or GH_TOKEN."
         )
 
+    if strict_public_release:
+        assert target_commit is not None
+        require_repository_commit(args.repo, target_commit, token)
+
+        existing_tag_commit = resolve_repository_commit(args.repo, args.tag, token)
+        if existing_tag_commit is not None and existing_tag_commit != target_commit:
+            raise RuntimeError(
+                f"Existing tag {args.tag} resolves to {existing_tag_commit}, "
+                f"not the authorized release commit {target_commit}"
+            )
+
     release = get_release(args.repo, args.tag, token)
-    if release is None:
+    if strict_public_release:
+        if release is not None and release.get("draft", True) is False and not args.allow_public_recovery:
+            raise RuntimeError(
+                "Refusing to replace assets on an already-public release; "
+                "use --allow-public-recovery only for an explicitly approved recovery"
+            )
+        staging_payload = dict(release_payload)
+        staging_payload["draft"] = True
+        if release is None:
+            release = create_release(args.repo, args.tag, token, staging_payload)
+        else:
+            release = update_release(args.repo, int(release["id"]), token, staging_payload)
+    elif release is None:
         release = create_release(args.repo, args.tag, token, release_payload)
     else:
         release = update_release(args.repo, int(release["id"]), token, release_payload)
@@ -452,6 +685,17 @@ def main(argv: list[str]) -> int:
         if existing is not None:
             delete_asset(args.repo, int(existing["id"]), token)
         upload_asset(args.repo, release, asset, token)
+
+    if strict_public_release:
+        refreshed = get_release(args.repo, args.tag, token)
+        if refreshed is None:
+            raise RuntimeError("GitHub release disappeared while verifying staged assets")
+        validate_uploaded_assets(refreshed, assets)
+        release = refreshed
+        if args.publish:
+            final_payload = dict(release_payload)
+            final_payload["draft"] = False
+            release = update_release(args.repo, int(release["id"]), token, final_payload)
 
     print(release["html_url"])
     return 0

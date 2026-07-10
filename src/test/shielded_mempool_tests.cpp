@@ -130,6 +130,15 @@ CMutableTransaction BuildShieldedV2SendTx(const Nullifier& nf,
     return mtx;
 }
 
+void SetV2SendValueBalance(CMutableTransaction& mtx, CAmount value_balance)
+{
+    BOOST_REQUIRE(mtx.shielded_bundle.v2_bundle.has_value());
+    auto& v2_bundle = *mtx.shielded_bundle.v2_bundle;
+    auto& payload = std::get<shielded::v2::SendPayload>(v2_bundle.payload);
+    payload.value_balance = value_balance;
+    v2_bundle.header.payload_digest = shielded::v2::ComputeSendPayloadDigest(payload);
+}
+
 CMutableTransaction BuildShieldedV2SpendPathRecoveryTx(
     const Nullifier& nf,
     const uint256& spend_anchor)
@@ -543,6 +552,48 @@ BOOST_FIXTURE_TEST_CASE(shielded_v2_registry_anchor_cleanup_evicts_stale_transac
 
     BOOST_CHECK(!pool.exists(stale_txid));
     BOOST_CHECK(pool.exists(fresh_txid));
+}
+
+BOOST_FIXTURE_TEST_CASE(shielded_pool_balance_cleanup_evicts_overdrawn_exit_transactions, TestingSetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+
+    LOCK2(::cs_main, pool.cs);
+    BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+    BOOST_REQUIRE(chainman.SetShieldedPoolBalanceForTest(1));
+
+    const uint256 spend_anchor = chainman.GetShieldedMerkleTree().Root();
+    const uint256 account_registry_anchor = chainman.GetShieldedAccountRegistryRoot();
+    BOOST_REQUIRE(!spend_anchor.IsNull());
+    BOOST_REQUIRE(!account_registry_anchor.IsNull());
+
+    auto stale_mtx = BuildShieldedV2SendTx(GetRandHash(), spend_anchor, account_registry_anchor);
+    SetV2SendValueBalance(stale_mtx, 1);
+    const auto stale_tx = MakeTransactionRef(stale_mtx);
+    const auto stale_txid = GenTxid::Txid(stale_tx->GetHash());
+
+    auto retained_mtx = BuildShieldedV2SendTx(GetRandHash(), spend_anchor, account_registry_anchor);
+    SetV2SendValueBalance(retained_mtx, -1);
+    const auto retained_tx = MakeTransactionRef(retained_mtx);
+    const auto retained_txid = GenTxid::Txid(retained_tx->GetHash());
+
+    TestMemPoolEntryHelper entry;
+    AddToMempool(pool, entry.FromTx(stale_tx));
+    AddToMempool(pool, entry.FromTx(retained_tx));
+    BOOST_REQUIRE(pool.exists(stale_txid));
+    BOOST_REQUIRE(pool.exists(retained_txid));
+    BOOST_CHECK(!HasInvalidShieldedPoolBalanceMempoolState(*stale_tx, chainman));
+    BOOST_CHECK(!HasInvalidShieldedPoolBalanceMempoolState(*retained_tx, chainman));
+
+    BOOST_REQUIRE(chainman.SetShieldedPoolBalanceForTest(0));
+    BOOST_CHECK(HasInvalidShieldedPoolBalanceMempoolState(*stale_tx, chainman));
+    BOOST_CHECK(!HasInvalidShieldedPoolBalanceMempoolState(*retained_tx, chainman));
+
+    RemoveStaleShieldedPoolBalanceMempoolTransactions(pool, chainman.ActiveChain(), chainman);
+
+    BOOST_CHECK(!pool.exists(stale_txid));
+    BOOST_CHECK(pool.exists(retained_txid));
 }
 
 BOOST_FIXTURE_TEST_CASE(shielded_v2_egress_cleanup_preserves_valid_anchor_refs_and_evicts_missing_ones, TestChain100Setup)

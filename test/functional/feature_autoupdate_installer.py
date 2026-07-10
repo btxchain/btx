@@ -215,6 +215,32 @@ def create_fake_tools(root):
         """,
     )
 
+    write_executable(
+        tools / "uname",
+        r"""
+        #!/bin/sh
+        if [ "${BTX_TEST_UNAME_LINUX_X86_64:-0}" = "1" ]; then
+          case "${1:-}" in
+            -s) printf '%s\n' Linux ;;
+            -m) printf '%s\n' x86_64 ;;
+            *) printf '%s\n' Linux ;;
+          esac
+          exit 0
+        fi
+        exec /usr/bin/uname "$@"
+        """,
+    )
+
+    write_executable(
+        tools / "nvidia-smi",
+        r"""
+        #!/bin/sh
+        version="${BTX_TEST_NVIDIA_SMI_CUDA_VERSION:-}"
+        [ -n "$version" ] || exit 9
+        printf '| NVIDIA-SMI test  Driver Version: test  CUDA Version: %s |\n' "$version"
+        """,
+    )
+
     return tools
 
 
@@ -479,7 +505,7 @@ def host_platform_keys():
 
 
 def build_prebuilt_tarball(tmp, tar_path, *, bad_btxd=False):
-    staging = tmp / "prebuilt-staging"
+    staging = tmp / f"prebuilt-staging-{tar_path.name}"
     bindir = staging / "bin"
     bindir.mkdir(parents=True)
     write_executable(bindir / "btxd", PREBUILT_BAD_BTXD if bad_btxd else PREBUILT_BTXD)
@@ -533,20 +559,20 @@ def test_unhealthy_restart_triggers_rollback_path():
             _kill_datadir_daemon(scenario.target_datadir)
 
 
+def _prebuilt_manifest_entry(scenario, name, *, bad_btxd=False):
+    tar_path = scenario.origin / f"{name}.tar.gz"
+    build_prebuilt_tarball(scenario.tmp, tar_path, bad_btxd=bad_btxd)
+    sig_path = scenario.origin / f"{name}.tar.gz.sig"
+    sig_path.write_text("signature\n", encoding="utf8")
+    return {"url": tar_path.as_uri(), "sig_url": sig_path.as_uri()}
+
+
 def _add_prebuilt_to_manifest(scenario, *, bad_btxd=False):
     """Augment the scenario's signed manifest with a prebuilt entry for this host, returning the
     platform key used."""
-    tar_path = scenario.origin / "btx-prebuilt.tar.gz"
-    build_prebuilt_tarball(scenario.tmp, tar_path, bad_btxd=bad_btxd)
-    (scenario.origin / "btx-prebuilt.tar.gz.sig").write_text("signature\n", encoding="utf8")
     key = host_platform_keys()[0]
     manifest = json.loads((scenario.origin / "version.txt").read_text(encoding="utf8"))
-    manifest["prebuilt"] = {
-        key: {
-            "url": tar_path.as_uri(),
-            "sig_url": (scenario.origin / "btx-prebuilt.tar.gz.sig").as_uri(),
-        }
-    }
+    manifest["prebuilt"] = {key: _prebuilt_manifest_entry(scenario, "btx-prebuilt", bad_btxd=bad_btxd)}
     (scenario.origin / "version.txt").write_text(json.dumps(manifest), encoding="utf8")
     return key
 
@@ -576,6 +602,82 @@ def test_prebuilt_binary_is_used_without_source_build():
                 raise AssertionError(f"status log missing prebuilt install:\n{status}")
             if not (scenario.target_datadir / "node.ready").exists():
                 raise AssertionError("prebuilt node never reported healthy")
+        finally:
+            _kill_datadir_daemon(scenario.target_datadir)
+
+
+def test_cuda13_prebuilt_is_preferred_over_generic_linux():
+    with Scenario(
+        "prebuilt-cuda13",
+        {
+            "BTX_AUTO_RESTART": "1",
+            "BTX_TEST_UNAME_LINUX_X86_64": "1",
+            "BTX_TEST_NVIDIA_SMI_CUDA_VERSION": "13.2",
+        },
+    ) as scenario:
+        try:
+            manifest_path = scenario.origin / "version.txt"
+            manifest = json.loads(manifest_path.read_text(encoding="utf8"))
+            manifest["prebuilt"] = {
+                "linux-x86_64-glibc": _prebuilt_manifest_entry(
+                    scenario, "btx-prebuilt-generic-bad", bad_btxd=True
+                ),
+                "linux-x86_64-cuda12": _prebuilt_manifest_entry(
+                    scenario, "btx-prebuilt-cuda12-bad", bad_btxd=True
+                ),
+                "linux-x86_64-cuda13": _prebuilt_manifest_entry(
+                    scenario, "btx-prebuilt-cuda13"
+                ),
+            }
+            manifest_path.write_text(json.dumps(manifest), encoding="utf8")
+
+            result = scenario.run_installer()
+            assert_success(result)
+            release_manifest = json.loads(
+                (scenario.tmp / "install" / "current" / "manifest.json").read_text(encoding="utf8")
+            )
+            if release_manifest.get("platform") != "linux-x86_64-cuda13":
+                raise AssertionError(f"CUDA 13 archive was not preferred: {release_manifest!r}")
+            actions = scenario.action_log.read_text(encoding="utf8") if scenario.action_log.exists() else ""
+            if "--build" in actions:
+                raise AssertionError(f"source build ran despite a usable CUDA 13 prebuilt:\n{actions}")
+        finally:
+            _kill_datadir_daemon(scenario.target_datadir)
+
+
+def test_cuda12_prebuilt_is_preferred_over_generic_linux():
+    with Scenario(
+        "prebuilt-cuda12",
+        {
+            "BTX_AUTO_RESTART": "1",
+            "BTX_TEST_UNAME_LINUX_X86_64": "1",
+            "BTX_TEST_NVIDIA_SMI_CUDA_VERSION": "12.9",
+        },
+    ) as scenario:
+        try:
+            manifest_path = scenario.origin / "version.txt"
+            manifest = json.loads(manifest_path.read_text(encoding="utf8"))
+            manifest["prebuilt"] = {
+                "linux-x86_64-glibc": _prebuilt_manifest_entry(
+                    scenario, "btx-prebuilt-generic-bad", bad_btxd=True
+                ),
+                "linux-x86_64-cuda12": _prebuilt_manifest_entry(
+                    scenario, "btx-prebuilt-cuda12"
+                ),
+                # A CUDA 12 driver must not attempt this newer flavor.
+                "linux-x86_64-cuda13": _prebuilt_manifest_entry(
+                    scenario, "btx-prebuilt-cuda13-bad", bad_btxd=True
+                ),
+            }
+            manifest_path.write_text(json.dumps(manifest), encoding="utf8")
+
+            result = scenario.run_installer()
+            assert_success(result)
+            release_manifest = json.loads(
+                (scenario.tmp / "install" / "current" / "manifest.json").read_text(encoding="utf8")
+            )
+            if release_manifest.get("platform") != "linux-x86_64-cuda12":
+                raise AssertionError(f"CUDA 12 archive was not preferred: {release_manifest!r}")
         finally:
             _kill_datadir_daemon(scenario.target_datadir)
 
@@ -632,6 +734,8 @@ def main():
         test_healthy_restart_passes_health_probe,
         test_unhealthy_restart_triggers_rollback_path,
         test_prebuilt_binary_is_used_without_source_build,
+        test_cuda13_prebuilt_is_preferred_over_generic_linux,
+        test_cuda12_prebuilt_is_preferred_over_generic_linux,
         test_prebuilt_falls_back_to_source_when_disabled,
         test_unusable_prebuilt_falls_back_to_source_build,
     ]

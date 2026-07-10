@@ -112,6 +112,7 @@ using fixed constants.
 | `BTX_MATMUL_PREPARE_PREFETCH_DEPTH` | How many windows ahead the prepare workers stage. Trades memory for steady-state throughput. | Backend-specific; usually small single digits. |
 | `BTX_MATMUL_SOLVE_BATCH_SIZE` | Batch size submitted to the accelerated solver per call. | Backend-specific. |
 | `BTX_MATMUL_NONCE_SEED_BATCH_SIZE` | Exact post-`nMatMulNonceSeedHeight` GPU nonce-seed batch size. Overrides backend auto sizing. | Backend-specific auto sizing when unset. |
+| `BTX_MATMUL_NONCE_SEED_SCAN_MULTIPLIER` | Post-`nMatMulNonceSeedHeight` GPU prehash scan-window multiplier. Values are clamped to `1..8`. | `1` |
 | `BTX_MATMUL_CUDA_NONCE_SEED_MEMORY_PERCENT` | Fraction of the first selected CUDA device's global memory used to cap CUDA nonce-seed auto batch sizing. | `25` |
 | `BTX_MATMUL_PIPELINE_ASYNC` | Set to `1` to enable asynchronous pipelining of prepare and solve stages. | On for Metal when unset. |
 

@@ -415,6 +415,13 @@ BOOST_AUTO_TEST_CASE(getblocktemplate_includes_matmul_params)
     BOOST_CHECK_EQUAL(time_policy.find_value("curtime").getInt<int64_t>(), tmpl.find_value("curtime").getInt<int64_t>());
     BOOST_CHECK(time_policy.find_value("recommended_action").isStr());
 
+    const auto template_context = tmpl.find_value("template_context").get_obj();
+    BOOST_CHECK_EQUAL(template_context.find_value("parent_hash").get_str(), tmpl.find_value("previousblockhash").get_str());
+    BOOST_CHECK_EQUAL(template_context.find_value("parent_hash").get_str(), ActiveTipHash().GetHex());
+    BOOST_CHECK_EQUAL(template_context.find_value("parent_height").getInt<int>(), ActiveHeight());
+    BOOST_CHECK_EQUAL(template_context.find_value("next_height").getInt<int>(), ActiveHeight() + 1);
+    BOOST_CHECK(template_context.find_value("matches_template_prev").get_bool());
+
     const auto matmul = tmpl.find_value("matmul").get_obj();
     BOOST_CHECK_EQUAL(matmul.find_value("n").getInt<int>(), static_cast<int>(consensus.nMatMulDimension));
     BOOST_CHECK_EQUAL(matmul.find_value("b").getInt<int>(), static_cast<int>(consensus.nMatMulTranscriptBlockSize));
@@ -431,6 +438,36 @@ BOOST_AUTO_TEST_CASE(getblocktemplate_includes_matmul_params)
     BOOST_CHECK_EQUAL(seed_b.size(), 64U);
     BOOST_CHECK(seed_a != std::string(64, '0'));
     BOOST_CHECK(seed_b != std::string(64, '0'));
+
+    const auto seed_derivation = tmpl.find_value("matmul_seed_derivation").get_obj();
+    BOOST_CHECK_EQUAL(seed_derivation.find_value("parent_hash").get_str(), tmpl.find_value("previousblockhash").get_str());
+    BOOST_CHECK_EQUAL(seed_derivation.find_value("parent_height").getInt<int>(), ActiveHeight());
+    BOOST_CHECK_EQUAL(seed_derivation.find_value("height").getInt<int>(), ActiveHeight() + 1);
+    BOOST_CHECK_EQUAL(seed_derivation.find_value("version").getInt<int32_t>(), tmpl.find_value("version").getInt<int32_t>());
+    BOOST_CHECK_EQUAL(seed_derivation.find_value("time").getInt<int64_t>(), tmpl.find_value("curtime").getInt<int64_t>());
+    BOOST_CHECK_EQUAL(seed_derivation.find_value("bits").get_str(), tmpl.find_value("bits").get_str());
+    BOOST_CHECK_EQUAL(seed_derivation.find_value("nonce64").getInt<uint64_t>(), 0U);
+    BOOST_CHECK_EQUAL(seed_derivation.find_value("matmul_dim").getInt<int>(), static_cast<int>(consensus.nMatMulDimension));
+    BOOST_CHECK_EQUAL(seed_derivation.find_value("seed_a").get_str(), seed_a);
+    BOOST_CHECK_EQUAL(seed_derivation.find_value("seed_b").get_str(), seed_b);
+    BOOST_CHECK(!seed_derivation.find_value("scope").get_str().empty());
+    BOOST_CHECK(!seed_derivation.find_value("rule").get_str().empty());
+
+    CBlockHeader header;
+    header.nVersion = tmpl.find_value("version").getInt<int32_t>();
+    header.hashPrevBlock = ParseUint256HexChecked(tmpl.find_value("previousblockhash"));
+    header.hashMerkleRoot = ParseUint256HexChecked(seed_derivation.find_value("merkleroot"));
+    header.nTime = static_cast<uint32_t>(tmpl.find_value("curtime").getInt<int64_t>());
+    header.nBits = ParseBitsHex(tmpl.find_value("bits").get_str());
+    header.nNonce64 = seed_derivation.find_value("nonce64").getInt<uint64_t>();
+    header.matmul_dim = static_cast<uint16_t>(seed_derivation.find_value("matmul_dim").getInt<int>());
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(
+        header,
+        consensus,
+        seed_derivation.find_value("height").getInt<int>(),
+        seed_derivation.find_value("parent_median_time_past").getInt<int64_t>()));
+    BOOST_CHECK_EQUAL(header.seed_a.GetHex(), seed_a);
+    BOOST_CHECK_EQUAL(header.seed_b.GetHex(), seed_b);
 
     const auto mutable_fields = tmpl.find_value("mutable").get_array();
     bool saw_nonce64{false};

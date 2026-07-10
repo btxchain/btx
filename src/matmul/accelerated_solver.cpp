@@ -676,9 +676,11 @@ std::vector<DigestResult> ComputeCudaVariableBaseDigestsPreparedBatch(
         const uint32_t n = blocks.front().matmul_dim;
         std::vector<uint256> seed_a;
         std::vector<uint256> seed_b;
+        std::vector<uint256> sigmas;
         std::vector<const btx::cuda::MatMulGeneratedInputsDevice*> generated_inputs;
         seed_a.reserve(blocks.size());
         seed_b.reserve(blocks.size());
+        sigmas.reserve(blocks.size());
         generated_inputs.reserve(prepared_batch.size());
 
         for (size_t i = 0; i < prepared_batch.size(); ++i) {
@@ -709,7 +711,59 @@ std::vector<DigestResult> ComputeCudaVariableBaseDigestsPreparedBatch(
             }
             seed_a.push_back(block.seed_a);
             seed_b.push_back(block.seed_b);
+            sigmas.push_back(prepared.sigma);
             generated_inputs.push_back(prepared.cuda_generated_inputs.get());
+        }
+
+        if (digest_scheme == DigestScheme::PRODUCT_COMMITTED) {
+            auto cuda_digest_result = btx::cuda::ComputeProductDigestsLowRankVariableBaseDeviceBatchMultiDevice({
+                .n = n,
+                .b = transcript_block_size,
+                .r = noise_rank,
+                .batch_size = static_cast<uint32_t>(prepared_batch.size()),
+                .matrix_a_seeds = seed_a.data(),
+                .matrix_b_seeds = seed_b.data(),
+                .sigmas = sigmas.data(),
+                .generated_inputs = generated_inputs.data(),
+            });
+
+            if (!cuda_digest_result.success) {
+                const std::string cuda_error = cuda_digest_result.error.empty() ? "cuda_variable_base_product_digest_batch_failed" : cuda_digest_result.error;
+                return ComputeVariableBaseDigestBatchFallbackResults(
+                    blocks,
+                    transcript_block_size,
+                    noise_rank,
+                    prepared_batch,
+                    digest_scheme,
+                    backend::Kind::CUDA,
+                    cuda_error,
+                    "cuda_variable_base_batch_backend_fallback_to_cpu:");
+            }
+
+            if (cuda_digest_result.digests.size() != prepared_batch.size()) {
+                return ComputeVariableBaseDigestBatchFallbackResults(
+                    blocks,
+                    transcript_block_size,
+                    noise_rank,
+                    prepared_batch,
+                    digest_scheme,
+                    backend::Kind::CUDA,
+                    "cuda_variable_base_product_digest_batch_size_mismatch",
+                    "cuda_variable_base_batch_backend_fallback_to_cpu:");
+            }
+
+            std::vector<DigestResult> results;
+            results.reserve(prepared_batch.size());
+            for (size_t i = 0; i < prepared_batch.size(); ++i) {
+                DigestResult result;
+                result.digest = cuda_digest_result.digests[i];
+                result.backend = backend::Kind::CUDA;
+                result.accelerated = true;
+                result.ok = true;
+                results.push_back(std::move(result));
+            }
+            g_cuda_successes.fetch_add(results.size(), std::memory_order_relaxed);
+            return results;
         }
 
         auto cuda_result = btx::cuda::ComputeCompressedWordsLowRankVariableBaseDeviceBatchMultiDevice(
@@ -1433,6 +1487,136 @@ PreparedDigestInputs PrepareMatMulDigestInputsForBackend(const CBlockHeader& blo
         .compress_vec = transcript::DeriveCompressionVector(sigma, transcript_block_size),
         .cuda_generated_inputs = nullptr,
     };
+}
+
+std::vector<PreparedDigestInputs> PrepareMatMulDigestInputsBatchForBackend(
+    const std::vector<CBlockHeader>& blocks,
+    uint32_t transcript_block_size,
+    uint32_t noise_rank,
+    backend::Kind preferred_backend,
+    DigestScheme digest_scheme)
+{
+    std::vector<uint256> sigmas;
+    sigmas.reserve(blocks.size());
+    for (const auto& block : blocks) {
+        sigmas.push_back(DeriveSigma(block));
+    }
+    return PrepareMatMulDigestInputsBatchForBackend(
+        blocks,
+        sigmas,
+        transcript_block_size,
+        noise_rank,
+        preferred_backend,
+        digest_scheme);
+}
+
+std::vector<PreparedDigestInputs> PrepareMatMulDigestInputsBatchForBackend(
+    const std::vector<CBlockHeader>& blocks,
+    const std::vector<uint256>& sigmas,
+    uint32_t transcript_block_size,
+    uint32_t noise_rank,
+    backend::Kind preferred_backend,
+    DigestScheme digest_scheme)
+{
+    std::vector<PreparedDigestInputs> prepared_batch;
+    prepared_batch.reserve(blocks.size());
+    if (blocks.empty()) {
+        return prepared_batch;
+    }
+    if (sigmas.size() != blocks.size()) {
+        return PrepareMatMulDigestInputsBatchForBackend(
+            blocks,
+            transcript_block_size,
+            noise_rank,
+            preferred_backend,
+            digest_scheme);
+    }
+
+    const uint32_t n = blocks.front().matmul_dim;
+    bool same_shape{true};
+    for (const auto& block : blocks) {
+        same_shape = same_shape && block.matmul_dim == n;
+    }
+
+    const auto gpu_policy = ResolveGpuInputGenerationPolicy();
+    if (same_shape &&
+        preferred_backend == backend::Kind::CUDA &&
+        ShouldUseGpuGeneratedInputsForShape(preferred_backend, n, transcript_block_size, noise_rank) &&
+        ShouldUseCudaDevicePreparedInputsFastPath(n, transcript_block_size, noise_rank, digest_scheme)) {
+        g_gpu_input_generation_attempts.fetch_add(blocks.size(), std::memory_order_relaxed);
+        try {
+            const auto generated = btx::cuda::GenerateMatMulInputsGPUDeviceBatch({
+                .n = n,
+                .b = transcript_block_size,
+                .r = noise_rank,
+                .batch_size = static_cast<uint32_t>(blocks.size()),
+                .sigmas = sigmas.data(),
+            });
+
+            if (generated.success && generated.inputs.size() == blocks.size()) {
+                g_gpu_input_generation_successes.fetch_add(blocks.size(), std::memory_order_relaxed);
+                for (size_t i = 0; i < blocks.size(); ++i) {
+                    prepared_batch.push_back(PreparedDigestInputs{
+                        .sigma = sigmas[i],
+                        .noise = std::nullopt,
+                        .compress_vec = {},
+                        .cuda_generated_inputs = generated.inputs[i],
+                    });
+                }
+                return prepared_batch;
+            }
+
+            g_gpu_input_generation_failures.fetch_add(blocks.size(), std::memory_order_relaxed);
+            const std::string gpu_error = generated.error.empty()
+                ? "gpu_input_generation_batch_failed"
+                : generated.error;
+            SetLastGpuInputError(gpu_error);
+
+            if (gpu_policy == GpuInputGenerationPolicy::AUTO &&
+                ShouldDisableGpuInputAutoModeForError(gpu_error)) {
+                DisableGpuInputAutoMode(gpu_error);
+            }
+
+            LogBackendFallbackOnce(
+                GpuInputFallbackLogFlag(preferred_backend),
+                GpuInputFallbackLabel(preferred_backend),
+                gpu_error);
+        } catch (const std::exception& e) {
+            g_gpu_input_generation_failures.fetch_add(blocks.size(), std::memory_order_relaxed);
+            const std::string gpu_error = std::string("gpu_input_generation_batch_exception:") + e.what();
+            SetLastGpuInputError(gpu_error);
+            LogBackendFallbackOnce(
+                GpuInputFallbackLogFlag(preferred_backend),
+                GpuInputFallbackLabel(preferred_backend),
+                gpu_error);
+            if (gpu_policy == GpuInputGenerationPolicy::AUTO) {
+                DisableGpuInputAutoMode(gpu_error);
+            }
+        } catch (...) {
+            g_gpu_input_generation_failures.fetch_add(blocks.size(), std::memory_order_relaxed);
+            const std::string gpu_error = "gpu_input_generation_batch_unknown_exception";
+            SetLastGpuInputError(gpu_error);
+            LogBackendFallbackOnce(
+                GpuInputFallbackLogFlag(preferred_backend),
+                GpuInputFallbackLabel(preferred_backend),
+                gpu_error);
+            if (gpu_policy == GpuInputGenerationPolicy::AUTO) {
+                DisableGpuInputAutoMode(gpu_error);
+            }
+        }
+
+        prepared_batch.clear();
+    }
+
+    for (const auto& block : blocks) {
+        prepared_batch.push_back(PrepareMatMulDigestInputsForBackend(
+            block,
+            transcript_block_size,
+            noise_rank,
+            preferred_backend,
+            digest_scheme));
+    }
+    return prepared_batch;
 }
 
 DigestResult ComputeMatMulDigestPrepared(const CBlockHeader& block,

@@ -11,6 +11,7 @@
 #include <matmul/transcript.h>
 #include <span.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -28,9 +29,22 @@ namespace {
 using Element = matmul::field::Element;
 constexpr uint32_t MODULUS = matmul::field::MODULUS;
 constexpr uint32_t ORACLE_THREADS = 256;
+constexpr uint32_t ORACLE_SCAN_THREADS = 256;
 
 struct OracleSeedBytes {
     uint8_t data[32];
+};
+
+struct DeviceNonceSeedPreHashPassRecord {
+    Element offset;
+    uint8_t seed_a[32];
+    uint8_t seed_b[32];
+    uint8_t sigma[32];
+};
+
+struct DeviceNonceSeedPreHashMidstates {
+    uint32_t seed[8];
+    uint32_t header[8];
 };
 
 struct OracleProfileState {
@@ -108,9 +122,35 @@ struct OracleWorkspace {
     Element* out_f_r{nullptr};
     Element* out_cv{nullptr};
     Element* out_scan_flags{nullptr};
+    Element* out_scan_pass_count{nullptr};
+    DeviceNonceSeedPreHashPassRecord* out_scan_pass_records{nullptr};
+    DeviceNonceSeedPreHashMidstates* out_scan_midstates{nullptr};
+    OracleSeedBytes* batch_seed_el{nullptr};
+    OracleSeedBytes* batch_seed_er{nullptr};
+    OracleSeedBytes* batch_seed_fl{nullptr};
+    OracleSeedBytes* batch_seed_fr{nullptr};
+    OracleSeedBytes* batch_seed_cv{nullptr};
+    Element** batch_out_e_l{nullptr};
+    Element** batch_out_e_r{nullptr};
+    Element** batch_out_f_l{nullptr};
+    Element** batch_out_f_r{nullptr};
+    Element** batch_out_cv{nullptr};
     size_t noise_capacity{0};
     size_t compress_capacity{0};
     size_t scan_flags_capacity{0};
+    size_t scan_pass_count_capacity{0};
+    size_t scan_pass_records_capacity{0};
+    size_t scan_midstates_capacity{0};
+    size_t batch_seed_el_capacity{0};
+    size_t batch_seed_er_capacity{0};
+    size_t batch_seed_fl_capacity{0};
+    size_t batch_seed_fr_capacity{0};
+    size_t batch_seed_cv_capacity{0};
+    size_t batch_out_e_l_capacity{0};
+    size_t batch_out_e_r_capacity{0};
+    size_t batch_out_f_l_capacity{0};
+    size_t batch_out_f_r_capacity{0};
+    size_t batch_out_cv_capacity{0};
     HostStageBuffer host_e_l;
     HostStageBuffer host_e_r;
     HostStageBuffer host_f_l;
@@ -118,16 +158,51 @@ struct OracleWorkspace {
     HostStageBuffer host_cv;
     HostStageBuffer host_scan_flags;
 
-    void ReleaseOutputs()
+    void ReleaseScanBuffers()
     {
         cudaFree(out_scan_flags);
+        cudaFree(out_scan_pass_count);
+        cudaFree(out_scan_pass_records);
+        cudaFree(out_scan_midstates);
+        out_scan_flags = nullptr;
+        out_scan_pass_count = nullptr;
+        out_scan_pass_records = nullptr;
+        out_scan_midstates = nullptr;
+        scan_flags_capacity = 0;
+        scan_pass_count_capacity = 0;
+        scan_pass_records_capacity = 0;
+        scan_midstates_capacity = 0;
+    }
+
+    void ReleaseOutputs()
+    {
+        ReleaseScanBuffers();
+        cudaFree(batch_seed_el);
+        cudaFree(batch_seed_er);
+        cudaFree(batch_seed_fl);
+        cudaFree(batch_seed_fr);
+        cudaFree(batch_seed_cv);
+        cudaFree(batch_out_e_l);
+        cudaFree(batch_out_e_r);
+        cudaFree(batch_out_f_l);
+        cudaFree(batch_out_f_r);
+        cudaFree(batch_out_cv);
         cudaFree(out_cv);
         cudaFree(out_f_r);
         cudaFree(out_f_l);
         cudaFree(out_e_r);
         cudaFree(out_e_l);
 
-        out_scan_flags = nullptr;
+        batch_seed_el = nullptr;
+        batch_seed_er = nullptr;
+        batch_seed_fl = nullptr;
+        batch_seed_fr = nullptr;
+        batch_seed_cv = nullptr;
+        batch_out_e_l = nullptr;
+        batch_out_e_r = nullptr;
+        batch_out_f_l = nullptr;
+        batch_out_f_r = nullptr;
+        batch_out_cv = nullptr;
         out_cv = nullptr;
         out_f_r = nullptr;
         out_f_l = nullptr;
@@ -135,7 +210,16 @@ struct OracleWorkspace {
         out_e_l = nullptr;
         noise_capacity = 0;
         compress_capacity = 0;
-        scan_flags_capacity = 0;
+        batch_seed_el_capacity = 0;
+        batch_seed_er_capacity = 0;
+        batch_seed_fl_capacity = 0;
+        batch_seed_fr_capacity = 0;
+        batch_seed_cv_capacity = 0;
+        batch_out_e_l_capacity = 0;
+        batch_out_e_r_capacity = 0;
+        batch_out_f_l_capacity = 0;
+        batch_out_f_r_capacity = 0;
+        batch_out_cv_capacity = 0;
     }
 
     void ReleaseStream()
@@ -158,6 +242,15 @@ struct OracleWorkspace {
 
 thread_local OracleWorkspace g_workspace;
 OracleProfileState g_profile;
+
+struct ScanScratchReleaseGuard {
+    OracleWorkspace& workspace;
+
+    ~ScanScratchReleaseGuard()
+    {
+        workspace.ReleaseScanBuffers();
+    }
+};
 
 struct DeviceInputPoolSlot {
     MatMulGeneratedInputsDevice inputs;
@@ -215,6 +308,11 @@ OracleSeedBytes ToInternalSeedBytes(const uint256& seed)
     return out;
 }
 
+uint256 FromInternalSeedBytes(const uint8_t bytes[32])
+{
+    return uint256{Span<const unsigned char>{bytes, 32}};
+}
+
 void ResetWorkspaceForDevice(OracleWorkspace& workspace, int device_index)
 {
     if (workspace.device_index == device_index) {
@@ -259,6 +357,31 @@ bool EnsureDeviceBuffer(Element*& buffer, size_t& capacity, size_t required, std
     }
 
     const cudaError_t alloc_error = cudaMalloc(&buffer, required * sizeof(Element));
+    if (alloc_error != cudaSuccess) {
+        error = "cudaMalloc failed:" + std::string(cudaGetErrorString(alloc_error));
+        return false;
+    }
+
+    capacity = required;
+    return true;
+}
+
+template <typename T>
+bool EnsureTypedDeviceBuffer(T*& buffer, size_t& capacity, size_t required, std::string& error)
+{
+    if (capacity >= required && buffer != nullptr) {
+        return true;
+    }
+
+    cudaFree(buffer);
+    buffer = nullptr;
+    capacity = 0;
+
+    if (required == 0) {
+        return true;
+    }
+
+    const cudaError_t alloc_error = cudaMalloc(reinterpret_cast<void**>(&buffer), required * sizeof(T));
     if (alloc_error != cudaSuccess) {
         error = "cudaMalloc failed:" + std::string(cudaGetErrorString(alloc_error));
         return false;
@@ -608,6 +731,34 @@ __device__ inline void SetByte(uint32_t w[64], uint32_t offset, uint32_t byte)
     w[word_index] |= (byte & 0xffU) << shift;
 }
 
+__device__ inline void SetBytes(uint32_t w[16], uint32_t offset, const uint8_t* data, uint32_t size)
+{
+    for (uint32_t i = 0; i < size; ++i) {
+        SetByte(w, offset + i, data[i]);
+    }
+}
+
+__device__ inline void SetLE16(uint32_t w[16], uint32_t offset, uint16_t value)
+{
+    SetByte(w, offset, static_cast<uint8_t>(value & 0xffU));
+    SetByte(w, offset + 1U, static_cast<uint8_t>((value >> 8U) & 0xffU));
+}
+
+__device__ inline void SetLE32(uint32_t w[16], uint32_t offset, uint32_t value)
+{
+    SetByte(w, offset, static_cast<uint8_t>(value & 0xffU));
+    SetByte(w, offset + 1U, static_cast<uint8_t>((value >> 8U) & 0xffU));
+    SetByte(w, offset + 2U, static_cast<uint8_t>((value >> 16U) & 0xffU));
+    SetByte(w, offset + 3U, static_cast<uint8_t>((value >> 24U) & 0xffU));
+}
+
+__device__ inline void SetLE64(uint32_t w[16], uint32_t offset, uint64_t value)
+{
+    for (uint32_t i = 0; i < 8U; ++i) {
+        SetByte(w, offset + i, static_cast<uint8_t>((value >> (i * 8U)) & 0xffU));
+    }
+}
+
 __device__ inline uint32_t Bswap32(uint32_t x)
 {
     return ((x & 0x000000ffU) << 24U) |
@@ -659,6 +810,16 @@ __device__ inline void Sha256Compress(uint32_t state[8], uint32_t w[16])
     state[5] += f;
     state[6] += g;
     state[7] += h;
+}
+
+__device__ inline void Sha256StateToBytes(const uint32_t state[8], uint8_t out[32])
+{
+    for (uint32_t i = 0; i < 8; ++i) {
+        out[i * 4U] = static_cast<uint8_t>((state[i] >> 24U) & 0xffU);
+        out[i * 4U + 1U] = static_cast<uint8_t>((state[i] >> 16U) & 0xffU);
+        out[i * 4U + 2U] = static_cast<uint8_t>((state[i] >> 8U) & 0xffU);
+        out[i * 4U + 3U] = static_cast<uint8_t>(state[i] & 0xffU);
+    }
 }
 
 __device__ inline uint32_t CandidateFromSeedAndIndex(const OracleSeedBytes& seed,
@@ -735,233 +896,167 @@ __device__ inline uint32_t FromOracle(const OracleSeedBytes& seed, uint32_t inde
     return FallbackCandidate(seed, index);
 }
 
-__device__ inline void Sha256Bytes(const uint8_t* message, uint32_t message_len, uint8_t out[32])
+__device__ inline void CopySha256State(const uint32_t in[8], uint32_t out[8])
 {
-    uint32_t state[8];
-    Sha256Init(state);
-
-    const uint32_t total_blocks = (message_len + 9U + 63U) / 64U;
-    const uint64_t bit_len = static_cast<uint64_t>(message_len) * 8U;
-    for (uint32_t block = 0; block < total_blocks; ++block) {
-        uint32_t w[16] = {};
-        for (uint32_t word = 0; word < 16; ++word) {
-            uint32_t packed{0};
-            for (uint32_t byte = 0; byte < 4; ++byte) {
-                const uint32_t message_index = block * 64U + word * 4U + byte;
-                uint8_t value{0};
-                if (message_index < message_len) {
-                    value = message[message_index];
-                } else if (message_index == message_len) {
-                    value = 0x80U;
-                } else {
-                    const uint32_t length_start = total_blocks * 64U - 8U;
-                    if (message_index >= length_start) {
-                        const uint32_t shift = (7U - (message_index - length_start)) * 8U;
-                        value = static_cast<uint8_t>((bit_len >> shift) & 0xffU);
-                    }
-                }
-                packed = (packed << 8U) | value;
-            }
-            w[word] = packed;
-        }
-        Sha256Compress(state, w);
-    }
-
     for (uint32_t i = 0; i < 8; ++i) {
-        out[i * 4U] = static_cast<uint8_t>((state[i] >> 24U) & 0xffU);
-        out[i * 4U + 1U] = static_cast<uint8_t>((state[i] >> 16U) & 0xffU);
-        out[i * 4U + 2U] = static_cast<uint8_t>((state[i] >> 8U) & 0xffU);
-        out[i * 4U + 3U] = static_cast<uint8_t>(state[i] & 0xffU);
+        out[i] = in[i];
     }
 }
 
-// Midstate after the FIRST 64-byte block of a >64-byte message. Both nonce-seed
-// scan messages (seed_v2: 110 B, header-hash: 150 B) keep every nonce-dependent
-// byte past offset 63 (nonce at 99 / 76, `which` at 109), so this midstate is
-// constant across a whole scan window and is computed once per CUDA block.
-__device__ inline void Sha256Block0Midstate(const uint8_t* message, uint32_t state[8])
+__device__ inline void Sha256MidstateFromBlockWords(uint32_t w[16], uint32_t state[8])
 {
     Sha256Init(state);
-    uint32_t w[16];
-    for (uint32_t word = 0; word < 16; ++word) {
-        uint32_t packed{0};
-        for (uint32_t byte = 0; byte < 4; ++byte) {
-            packed = (packed << 8U) | message[word * 4U + byte];
-        }
-        w[word] = packed;
-    }
     Sha256Compress(state, w);
 }
 
-// Sha256Bytes, resumed after block 0 from a precomputed midstate. Byte-identical
-// to Sha256Bytes for any message longer than 64 bytes whose first block matches
-// the midstate's input.
-__device__ inline void Sha256BytesFromMidstate(const uint32_t midstate[8],
-                                               const uint8_t* message,
-                                               uint32_t message_len,
-                                               uint8_t out[32])
+__device__ inline void BuildSeedV2Block0Midstate(const OracleSeedBytes& previous_block_hash,
+                                                 const OracleSeedBytes& merkle_root,
+                                                 uint32_t height,
+                                                 uint32_t version,
+                                                 uint32_t state[8])
+{
+    uint32_t w[16] = {};
+    constexpr char TAG[] = "BTX_MATMUL_SEED_V2";
+    SetByte(w, 0U, 18U);
+    for (uint32_t i = 0; i < 18U; ++i) {
+        SetByte(w, 1U + i, static_cast<uint8_t>(TAG[i]));
+    }
+    SetBytes(w, 19U, previous_block_hash.data, 32U);
+    SetLE32(w, 51U, height);
+    SetLE32(w, 55U, version);
+    SetBytes(w, 59U, merkle_root.data, 5U);
+    Sha256MidstateFromBlockWords(w, state);
+}
+
+__device__ inline void BuildSeedV3Block0Midstate(const OracleSeedBytes& previous_block_hash,
+                                                 uint64_t parent_median_time_past,
+                                                 uint32_t height,
+                                                 uint32_t version,
+                                                 uint32_t state[8])
+{
+    uint32_t w[16] = {};
+    constexpr char TAG[] = "BTX_MATMUL_SEED_V3";
+    SetByte(w, 0U, 18U);
+    for (uint32_t i = 0; i < 18U; ++i) {
+        SetByte(w, 1U + i, static_cast<uint8_t>(TAG[i]));
+    }
+    SetBytes(w, 19U, previous_block_hash.data, 32U);
+    SetLE64(w, 51U, parent_median_time_past);
+    SetLE32(w, 59U, height);
+    SetByte(w, 63U, static_cast<uint8_t>(version & 0xffU));
+    Sha256MidstateFromBlockWords(w, state);
+}
+
+__device__ inline void BuildHeaderBlock0Midstate(uint32_t version,
+                                                 const OracleSeedBytes& previous_block_hash,
+                                                 const OracleSeedBytes& merkle_root,
+                                                 uint32_t state[8])
+{
+    uint32_t w[16] = {};
+    SetLE32(w, 0U, version);
+    SetBytes(w, 4U, previous_block_hash.data, 32U);
+    SetBytes(w, 36U, merkle_root.data, 28U);
+    Sha256MidstateFromBlockWords(w, state);
+}
+
+__device__ inline void DigestSeedV2FromMidstate(const uint32_t seed_midstate[8],
+                                                const OracleSeedBytes& merkle_root,
+                                                uint32_t time,
+                                                uint32_t bits,
+                                                uint64_t nonce,
+                                                uint16_t matmul_dim,
+                                                uint8_t which,
+                                                uint8_t out[32])
 {
     uint32_t state[8];
-    for (uint32_t i = 0; i < 8; ++i) {
-        state[i] = midstate[i];
+    CopySha256State(seed_midstate, state);
+
+    uint32_t w[16] = {};
+    SetBytes(w, 0U, merkle_root.data + 5U, 27U);
+    SetLE32(w, 27U, time);
+    SetLE32(w, 31U, bits);
+    SetLE64(w, 35U, nonce);
+    SetLE16(w, 43U, matmul_dim);
+    SetByte(w, 45U, which);
+    SetByte(w, 46U, 0x80U);
+    w[15] = 110U * 8U;
+    Sha256Compress(state, w);
+    Sha256StateToBytes(state, out);
+}
+
+__device__ inline void DigestSeedV3FromMidstate(const uint32_t seed_midstate[8],
+                                                const OracleSeedBytes& merkle_root,
+                                                uint32_t version,
+                                                uint32_t time,
+                                                uint32_t bits,
+                                                uint64_t nonce,
+                                                uint16_t matmul_dim,
+                                                uint8_t which,
+                                                uint8_t out[32])
+{
+    uint32_t state[8];
+    CopySha256State(seed_midstate, state);
+
+    uint32_t w[16] = {};
+    SetByte(w, 0U, static_cast<uint8_t>((version >> 8U) & 0xffU));
+    SetByte(w, 1U, static_cast<uint8_t>((version >> 16U) & 0xffU));
+    SetByte(w, 2U, static_cast<uint8_t>((version >> 24U) & 0xffU));
+    SetBytes(w, 3U, merkle_root.data, 32U);
+    SetLE32(w, 35U, time);
+    SetLE32(w, 39U, bits);
+    SetLE64(w, 43U, nonce);
+    SetLE16(w, 51U, matmul_dim);
+    SetByte(w, 53U, which);
+    SetByte(w, 54U, 0x80U);
+    w[15] = 118U * 8U;
+    Sha256Compress(state, w);
+    Sha256StateToBytes(state, out);
+}
+
+__device__ inline void Sha256DigestWords(const uint32_t digest_state[8], uint8_t out[32])
+{
+    uint32_t state[8];
+    Sha256Init(state);
+
+    uint32_t w[16] = {};
+    for (uint32_t i = 0; i < 8U; ++i) {
+        w[i] = digest_state[i];
     }
-
-    const uint32_t total_blocks = (message_len + 9U + 63U) / 64U;
-    const uint64_t bit_len = static_cast<uint64_t>(message_len) * 8U;
-    for (uint32_t block = 1; block < total_blocks; ++block) {
-        uint32_t w[16] = {};
-        for (uint32_t word = 0; word < 16; ++word) {
-            uint32_t packed{0};
-            for (uint32_t byte = 0; byte < 4; ++byte) {
-                const uint32_t message_index = block * 64U + word * 4U + byte;
-                uint8_t value{0};
-                if (message_index < message_len) {
-                    value = message[message_index];
-                } else if (message_index == message_len) {
-                    value = 0x80U;
-                } else {
-                    const uint32_t length_start = total_blocks * 64U - 8U;
-                    if (message_index >= length_start) {
-                        const uint32_t shift = (7U - (message_index - length_start)) * 8U;
-                        value = static_cast<uint8_t>((bit_len >> shift) & 0xffU);
-                    }
-                }
-                packed = (packed << 8U) | value;
-            }
-            w[word] = packed;
-        }
-        Sha256Compress(state, w);
-    }
-
-    for (uint32_t i = 0; i < 8; ++i) {
-        out[i * 4U] = static_cast<uint8_t>((state[i] >> 24U) & 0xffU);
-        out[i * 4U + 1U] = static_cast<uint8_t>((state[i] >> 16U) & 0xffU);
-        out[i * 4U + 2U] = static_cast<uint8_t>((state[i] >> 8U) & 0xffU);
-        out[i * 4U + 3U] = static_cast<uint8_t>(state[i] & 0xffU);
-    }
+    w[8] = 0x80000000U;
+    w[15] = 32U * 8U;
+    Sha256Compress(state, w);
+    Sha256StateToBytes(state, out);
 }
 
-__device__ inline void AppendByte(uint8_t* message, uint32_t& offset, uint8_t value)
+__device__ inline void DigestHeaderSigmaFromMidstate(const uint32_t header_midstate[8],
+                                                     const OracleSeedBytes& merkle_root,
+                                                     uint32_t time,
+                                                     uint32_t bits,
+                                                     uint64_t nonce,
+                                                     uint16_t matmul_dim,
+                                                     const uint8_t seed_a[32],
+                                                     const uint8_t seed_b[32],
+                                                     uint8_t out[32])
 {
-    message[offset++] = value;
-}
+    uint32_t state[8];
+    CopySha256State(header_midstate, state);
 
-__device__ inline void AppendBytes(uint8_t* message, uint32_t& offset, const uint8_t* data, uint32_t size)
-{
-    for (uint32_t i = 0; i < size; ++i) {
-        message[offset++] = data[i];
-    }
-}
+    uint32_t w1[16] = {};
+    SetBytes(w1, 0U, merkle_root.data + 28U, 4U);
+    SetLE32(w1, 4U, time);
+    SetLE32(w1, 8U, bits);
+    SetLE64(w1, 12U, nonce);
+    SetLE16(w1, 20U, matmul_dim);
+    SetBytes(w1, 22U, seed_a, 32U);
+    SetBytes(w1, 54U, seed_b, 10U);
+    Sha256Compress(state, w1);
 
-__device__ inline void AppendLE16(uint8_t* message, uint32_t& offset, uint16_t value)
-{
-    AppendByte(message, offset, static_cast<uint8_t>(value & 0xffU));
-    AppendByte(message, offset, static_cast<uint8_t>((value >> 8U) & 0xffU));
-}
-
-__device__ inline void AppendLE32(uint8_t* message, uint32_t& offset, uint32_t value)
-{
-    AppendByte(message, offset, static_cast<uint8_t>(value & 0xffU));
-    AppendByte(message, offset, static_cast<uint8_t>((value >> 8U) & 0xffU));
-    AppendByte(message, offset, static_cast<uint8_t>((value >> 16U) & 0xffU));
-    AppendByte(message, offset, static_cast<uint8_t>((value >> 24U) & 0xffU));
-}
-
-__device__ inline void AppendLE64(uint8_t* message, uint32_t& offset, uint64_t value)
-{
-    for (uint32_t i = 0; i < 8; ++i) {
-        AppendByte(message, offset, static_cast<uint8_t>((value >> (i * 8U)) & 0xffU));
-    }
-}
-
-// Builds the seed_v2 message; the nonce lands at offset 99 and `which` at 109,
-// both inside the SECOND SHA-256 block. Returns the message length (110).
-__device__ inline uint32_t BuildMatMulSeedV2Message(const OracleSeedBytes& previous_block_hash,
-                                                    const OracleSeedBytes& merkle_root,
-                                                    uint32_t height,
-                                                    uint32_t version,
-                                                    uint32_t time,
-                                                    uint32_t bits,
-                                                    uint64_t nonce,
-                                                    uint16_t matmul_dim,
-                                                    uint8_t which,
-                                                    uint8_t message[110])
-{
-    uint32_t offset{0};
-    constexpr char TAG[] = "BTX_MATMUL_SEED_V2";
-    AppendByte(message, offset, 18U);
-    for (uint32_t i = 0; i < 18U; ++i) {
-        AppendByte(message, offset, static_cast<uint8_t>(TAG[i]));
-    }
-    AppendBytes(message, offset, previous_block_hash.data, 32U);
-    AppendLE32(message, offset, height);
-    AppendLE32(message, offset, version);
-    AppendBytes(message, offset, merkle_root.data, 32U);
-    AppendLE32(message, offset, time);
-    AppendLE32(message, offset, bits);
-    AppendLE64(message, offset, nonce);
-    AppendLE16(message, offset, matmul_dim);
-    AppendByte(message, offset, which);
-    return offset;
-}
-
-// Builds the seed_v3 message; the nonce lands at offset 107 and `which` at 117,
-// both inside the SECOND SHA-256 block. Returns the message length (118).
-__device__ inline uint32_t BuildMatMulSeedV3Message(const OracleSeedBytes& previous_block_hash,
-                                                    const OracleSeedBytes& merkle_root,
-                                                    uint64_t parent_median_time_past,
-                                                    uint32_t height,
-                                                    uint32_t version,
-                                                    uint32_t time,
-                                                    uint32_t bits,
-                                                    uint64_t nonce,
-                                                    uint16_t matmul_dim,
-                                                    uint8_t which,
-                                                    uint8_t message[118])
-{
-    uint32_t offset{0};
-    constexpr char TAG[] = "BTX_MATMUL_SEED_V3";
-    AppendByte(message, offset, 18U);
-    for (uint32_t i = 0; i < 18U; ++i) {
-        AppendByte(message, offset, static_cast<uint8_t>(TAG[i]));
-    }
-    AppendBytes(message, offset, previous_block_hash.data, 32U);
-    AppendLE64(message, offset, parent_median_time_past);
-    AppendLE32(message, offset, height);
-    AppendLE32(message, offset, version);
-    AppendBytes(message, offset, merkle_root.data, 32U);
-    AppendLE32(message, offset, time);
-    AppendLE32(message, offset, bits);
-    AppendLE64(message, offset, nonce);
-    AppendLE16(message, offset, matmul_dim);
-    AppendByte(message, offset, which);
-    return offset;
-}
-
-// Builds the header-hash message; the nonce lands at offset 76 and the seeds at
-// 86/118, all inside the second and third SHA-256 blocks. Returns length (150).
-__device__ inline uint32_t BuildMatMulHeaderHashMessage(uint32_t version,
-                                                        const OracleSeedBytes& previous_block_hash,
-                                                        const OracleSeedBytes& merkle_root,
-                                                        uint32_t time,
-                                                        uint32_t bits,
-                                                        uint64_t nonce,
-                                                        uint16_t matmul_dim,
-                                                        const uint8_t seed_a[32],
-                                                        const uint8_t seed_b[32],
-                                                        uint8_t message[150])
-{
-    uint32_t offset{0};
-    AppendLE32(message, offset, version);
-    AppendBytes(message, offset, previous_block_hash.data, 32U);
-    AppendBytes(message, offset, merkle_root.data, 32U);
-    AppendLE32(message, offset, time);
-    AppendLE32(message, offset, bits);
-    AppendLE64(message, offset, nonce);
-    AppendLE16(message, offset, matmul_dim);
-    AppendBytes(message, offset, seed_a, 32U);
-    AppendBytes(message, offset, seed_b, 32U);
-    return offset;
+    uint32_t w2[16] = {};
+    SetBytes(w2, 0U, seed_b + 10U, 22U);
+    SetByte(w2, 22U, 0x80U);
+    w2[15] = 150U * 8U;
+    Sha256Compress(state, w2);
+    Sha256DigestWords(state, out);
 }
 
 __device__ inline bool Uint256InternalBytesLessOrEqual(const uint8_t lhs[32], const OracleSeedBytes& rhs)
@@ -973,45 +1068,127 @@ __device__ inline bool Uint256InternalBytesLessOrEqual(const uint8_t lhs[32], co
     return true;
 }
 
-__global__ void ScanNonceSeedPreHashKernel(OracleSeedBytes previous_block_hash,
-                                           OracleSeedBytes merkle_root,
+__device__ inline void ComputeNonceSeedPreHashMaterials(const uint32_t seed_midstate[8],
+                                                        const uint32_t header_midstate[8],
+                                                        const OracleSeedBytes& merkle_root,
+                                                        uint32_t version,
+                                                        uint32_t time,
+                                                        uint32_t bits,
+                                                        uint64_t nonce,
+                                                        uint16_t matmul_dim,
+                                                        uint32_t seed_version,
+                                                        uint8_t seed_a[32],
+                                                        uint8_t seed_b[32],
+                                                        uint8_t sigma[32])
+{
+    if (seed_version == 3U) {
+        DigestSeedV3FromMidstate(
+            seed_midstate,
+            merkle_root,
+            version,
+            time,
+            bits,
+            nonce,
+            matmul_dim,
+            0U,
+            seed_a);
+        DigestSeedV3FromMidstate(
+            seed_midstate,
+            merkle_root,
+            version,
+            time,
+            bits,
+            nonce,
+            matmul_dim,
+            1U,
+            seed_b);
+    } else {
+        DigestSeedV2FromMidstate(
+            seed_midstate,
+            merkle_root,
+            time,
+            bits,
+            nonce,
+            matmul_dim,
+            0U,
+            seed_a);
+        DigestSeedV2FromMidstate(
+            seed_midstate,
+            merkle_root,
+            time,
+            bits,
+            nonce,
+            matmul_dim,
+            1U,
+            seed_b);
+    }
+    DigestHeaderSigmaFromMidstate(
+        header_midstate,
+        merkle_root,
+        time,
+        bits,
+        nonce,
+        matmul_dim,
+        seed_a,
+        seed_b,
+        sigma);
+}
+
+__global__ void BuildNonceSeedPreHashMidstatesKernel(OracleSeedBytes previous_block_hash,
+                                                     OracleSeedBytes merkle_root,
+                                                     uint32_t version,
+                                                     uint32_t height,
+                                                     uint32_t seed_version,
+                                                     uint64_t parent_median_time_past,
+                                                     DeviceNonceSeedPreHashMidstates* out_midstates)
+{
+    if (seed_version == 3U) {
+        BuildSeedV3Block0Midstate(
+            previous_block_hash,
+            parent_median_time_past,
+            height,
+            version,
+            out_midstates->seed);
+    } else {
+        BuildSeedV2Block0Midstate(
+            previous_block_hash,
+            merkle_root,
+            height,
+            version,
+            out_midstates->seed);
+    }
+    BuildHeaderBlock0Midstate(
+        version,
+        previous_block_hash,
+        merkle_root,
+        out_midstates->header);
+}
+
+__global__ void ScanNonceSeedPreHashKernel(OracleSeedBytes merkle_root,
                                            OracleSeedBytes pre_hash_target,
                                            uint32_t version,
-                                           uint32_t height,
                                            uint32_t time,
                                            uint32_t bits,
                                            uint64_t start_nonce,
                                            uint16_t matmul_dim,
                                            uint32_t seed_version,
-                                           uint64_t parent_median_time_past,
-                                           Element* out_flags,
+                                           const DeviceNonceSeedPreHashMidstates* midstates,
+                                           Element* out_scan_values,
+                                           Element* out_pass_count,
+                                           bool compact_pass_offsets,
                                            uint32_t scan_count)
 {
-    // Block 0 of the seed and header messages is nonce-independent,
-    // so its compression is done ONCE per CUDA block and shared: 8 -> 5 SHA-256
-    // compressions per nonce. The midstates must be computed before the bounds
-    // guard so every thread reaches the barrier.
+    // Block 0 of the seed and header messages is nonce-independent. A setup
+    // kernel computes those midstates once per scan window; each CUDA block
+    // copies them into shared memory before the bounds guard so every thread
+    // reaches the barrier.
     __shared__ uint32_t seed_midstate[8];
     __shared__ uint32_t header_midstate[8];
     if (threadIdx.x == 0) {
-        uint8_t prefix[150];
-        if (seed_version == 3U) {
-            BuildMatMulSeedV3Message(
-                previous_block_hash, merkle_root, parent_median_time_past,
-                height, version, time, bits,
-                /*nonce=*/0U, matmul_dim, /*which=*/0U, prefix);
-        } else {
-            BuildMatMulSeedV2Message(
-                previous_block_hash, merkle_root, height, version, time, bits,
-                /*nonce=*/0U, matmul_dim, /*which=*/0U, prefix);
+        for (uint32_t i = 0; i < 8U; ++i) {
+            seed_midstate[i] = midstates->seed[i];
+            header_midstate[i] = midstates->header[i];
         }
-        Sha256Block0Midstate(prefix, seed_midstate);
-        BuildMatMulHeaderHashMessage(
-            version, previous_block_hash, merkle_root, time, bits,
-            /*nonce=*/0U, matmul_dim,
-            /*seed_a=*/previous_block_hash.data, /*seed_b=*/previous_block_hash.data,
-            prefix);
-        Sha256Block0Midstate(prefix, header_midstate);
     }
     __syncthreads();
 
@@ -1021,28 +1198,77 @@ __global__ void ScanNonceSeedPreHashKernel(OracleSeedBytes previous_block_hash,
     }
 
     const uint64_t nonce = start_nonce + static_cast<uint64_t>(gid);
-    uint8_t message[150];
     uint8_t seed_a[32];
     uint8_t seed_b[32];
-    uint8_t header_hash[32];
     uint8_t sigma[32];
-    const uint32_t seed_len = seed_version == 3U
-        ? BuildMatMulSeedV3Message(
-            previous_block_hash, merkle_root, parent_median_time_past,
-            height, version, time, bits,
-            nonce, matmul_dim, 0U, message)
-        : BuildMatMulSeedV2Message(
-            previous_block_hash, merkle_root, height, version, time, bits,
-            nonce, matmul_dim, 0U, message);
-    Sha256BytesFromMidstate(seed_midstate, message, seed_len, seed_a);
-    message[seed_len - 1U] = 1U; // `which` is the final byte; the rest is identical
-    Sha256BytesFromMidstate(seed_midstate, message, seed_len, seed_b);
-    const uint32_t header_len = BuildMatMulHeaderHashMessage(
-        version, previous_block_hash, merkle_root, time, bits,
-        nonce, matmul_dim, seed_a, seed_b, message);
-    Sha256BytesFromMidstate(header_midstate, message, header_len, header_hash);
-    Sha256Bytes(header_hash, 32U, sigma);
-    out_flags[gid] = Uint256InternalBytesLessOrEqual(sigma, pre_hash_target) ? 1U : 0U;
+    ComputeNonceSeedPreHashMaterials(
+        seed_midstate,
+        header_midstate,
+        merkle_root,
+        version,
+        time,
+        bits,
+        nonce,
+        matmul_dim,
+        seed_version,
+        seed_a,
+        seed_b,
+        sigma);
+    const bool passed = Uint256InternalBytesLessOrEqual(sigma, pre_hash_target);
+    if (compact_pass_offsets) {
+        if (passed) {
+            const Element slot = atomicAdd(out_pass_count, Element{1});
+            out_scan_values[slot] = gid;
+        }
+    } else {
+        out_scan_values[gid] = passed ? 1U : 0U;
+    }
+}
+
+__global__ void HydrateNonceSeedPreHashPassRecordsKernel(OracleSeedBytes merkle_root,
+                                                         uint32_t version,
+                                                         uint32_t time,
+                                                         uint32_t bits,
+                                                         uint64_t start_nonce,
+                                                         uint16_t matmul_dim,
+                                                         uint32_t seed_version,
+                                                         const DeviceNonceSeedPreHashMidstates* midstates,
+                                                         const Element* pass_offsets,
+                                                         uint32_t pass_count,
+                                                         DeviceNonceSeedPreHashPassRecord* out_records)
+{
+    __shared__ uint32_t seed_midstate[8];
+    __shared__ uint32_t header_midstate[8];
+    if (threadIdx.x == 0) {
+        for (uint32_t i = 0; i < 8U; ++i) {
+            seed_midstate[i] = midstates->seed[i];
+            header_midstate[i] = midstates->header[i];
+        }
+    }
+    __syncthreads();
+
+    const uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= pass_count) {
+        return;
+    }
+
+    const Element offset = pass_offsets[gid];
+    DeviceNonceSeedPreHashPassRecord record{};
+    record.offset = offset;
+    ComputeNonceSeedPreHashMaterials(
+        seed_midstate,
+        header_midstate,
+        merkle_root,
+        version,
+        time,
+        bits,
+        start_nonce + static_cast<uint64_t>(offset),
+        matmul_dim,
+        seed_version,
+        record.seed_a,
+        record.seed_b,
+        record.sigma);
+    out_records[gid] = record;
 }
 
 __global__ void GenerateOracleNoiseKernel(OracleSeedBytes seed_el,
@@ -1076,6 +1302,45 @@ __global__ void GenerateOracleVectorKernel(OracleSeedBytes seed_cv,
     }
 
     out[gid] = FromOracle(seed_cv, gid);
+}
+
+__global__ void GenerateOracleNoiseBatchKernel(const OracleSeedBytes* seed_el,
+                                               const OracleSeedBytes* seed_er,
+                                               const OracleSeedBytes* seed_fl,
+                                               const OracleSeedBytes* seed_fr,
+                                               Element* const* out_e_l,
+                                               Element* const* out_e_r,
+                                               Element* const* out_f_l,
+                                               Element* const* out_f_r,
+                                               uint32_t count,
+                                               size_t total_count)
+{
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total_count) {
+        return;
+    }
+
+    const uint32_t batch_index = static_cast<uint32_t>(gid / count);
+    const uint32_t local_index = static_cast<uint32_t>(gid % count);
+    out_e_l[batch_index][local_index] = FromOracle(seed_el[batch_index], local_index);
+    out_e_r[batch_index][local_index] = FromOracle(seed_er[batch_index], local_index);
+    out_f_l[batch_index][local_index] = FromOracle(seed_fl[batch_index], local_index);
+    out_f_r[batch_index][local_index] = FromOracle(seed_fr[batch_index], local_index);
+}
+
+__global__ void GenerateOracleVectorBatchKernel(const OracleSeedBytes* seed_cv,
+                                                Element* const* out,
+                                                uint32_t count,
+                                                size_t total_count)
+{
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total_count) {
+        return;
+    }
+
+    const uint32_t batch_index = static_cast<uint32_t>(gid / count);
+    const uint32_t local_index = static_cast<uint32_t>(gid % count);
+    out[batch_index][local_index] = FromOracle(seed_cv[batch_index], local_index);
 }
 
 } // namespace
@@ -1340,6 +1605,190 @@ MatMulInputGenerationDeviceResult GenerateMatMulInputsGPUDevice(const MatMulInpu
     return result;
 }
 
+MatMulInputGenerationDeviceBatchResult GenerateMatMulInputsGPUDeviceBatch(
+    const MatMulInputGenerationDeviceBatchRequest& request)
+{
+    MatMulInputGenerationDeviceBatchResult result;
+    const auto runtime = ProbeCudaRuntime();
+    result.available = runtime.available;
+    if (!runtime.available) {
+        result.error = runtime.reason;
+        return result;
+    }
+    if (request.batch_size == 0) {
+        result.success = true;
+        return result;
+    }
+    if (request.sigmas == nullptr) {
+        result.error = "CUDA batched input generation requires sigma array";
+        return result;
+    }
+
+    uint32_t noise_words{0};
+    uint32_t compress_words{0};
+    if (!ValidateInputGenerationRequest(
+            {
+                .n = request.n,
+                .b = request.b,
+                .r = request.r,
+                .sigma = request.sigmas[0],
+            },
+            result.error,
+            noise_words,
+            compress_words)) {
+        return result;
+    }
+
+    std::vector<OracleSeedBytes> seed_el(request.batch_size);
+    std::vector<OracleSeedBytes> seed_er(request.batch_size);
+    std::vector<OracleSeedBytes> seed_fl(request.batch_size);
+    std::vector<OracleSeedBytes> seed_fr(request.batch_size);
+    std::vector<OracleSeedBytes> seed_cv(request.batch_size);
+    for (uint32_t i = 0; i < request.batch_size; ++i) {
+        seed_el[i] = ToInternalSeedBytes(matmul::noise::DeriveNoiseSeed(matmul::noise::TAG_EL, request.sigmas[i]));
+        seed_er[i] = ToInternalSeedBytes(matmul::noise::DeriveNoiseSeed(matmul::noise::TAG_ER, request.sigmas[i]));
+        seed_fl[i] = ToInternalSeedBytes(matmul::noise::DeriveNoiseSeed(matmul::noise::TAG_FL, request.sigmas[i]));
+        seed_fr[i] = ToInternalSeedBytes(matmul::noise::DeriveNoiseSeed(matmul::noise::TAG_FR, request.sigmas[i]));
+        seed_cv[i] = ToInternalSeedBytes(DeriveCompressionSeed(request.sigmas[i]));
+    }
+
+    auto& workspace = g_workspace;
+    ResetWorkspaceForDevice(workspace, runtime.device_index);
+
+    cudaError_t error = cudaSetDevice(runtime.device_index);
+    if (error != cudaSuccess) {
+        result.error = "cudaSetDevice failed:" + std::string(cudaGetErrorString(error));
+        return result;
+    }
+    if (!EnsureWorkspaceStream(workspace, result.error)) {
+        return result;
+    }
+
+    std::vector<std::shared_ptr<const MatMulGeneratedInputsDevice>> generated_inputs;
+    generated_inputs.reserve(request.batch_size);
+    std::vector<Element*> out_e_l(request.batch_size);
+    std::vector<Element*> out_e_r(request.batch_size);
+    std::vector<Element*> out_f_l(request.batch_size);
+    std::vector<Element*> out_f_r(request.batch_size);
+    std::vector<Element*> out_cv(request.batch_size);
+    for (uint32_t i = 0; i < request.batch_size; ++i) {
+        auto generated = AcquireGeneratedInputsDevice(
+            runtime.device_index,
+            request.n,
+            request.b,
+            request.r,
+            noise_words,
+            compress_words,
+            result.error);
+        if (!generated) {
+            return result;
+        }
+        out_e_l[i] = generated->noise_e_l;
+        out_e_r[i] = generated->noise_e_r;
+        out_f_l[i] = generated->noise_f_l;
+        out_f_r[i] = generated->noise_f_r;
+        out_cv[i] = generated->compress_vec;
+        generated_inputs.push_back(std::move(generated));
+    }
+
+    if (!EnsureTypedDeviceBuffer(workspace.batch_seed_el, workspace.batch_seed_el_capacity, request.batch_size, result.error) ||
+        !EnsureTypedDeviceBuffer(workspace.batch_seed_er, workspace.batch_seed_er_capacity, request.batch_size, result.error) ||
+        !EnsureTypedDeviceBuffer(workspace.batch_seed_fl, workspace.batch_seed_fl_capacity, request.batch_size, result.error) ||
+        !EnsureTypedDeviceBuffer(workspace.batch_seed_fr, workspace.batch_seed_fr_capacity, request.batch_size, result.error) ||
+        !EnsureTypedDeviceBuffer(workspace.batch_seed_cv, workspace.batch_seed_cv_capacity, request.batch_size, result.error) ||
+        !EnsureTypedDeviceBuffer(workspace.batch_out_e_l, workspace.batch_out_e_l_capacity, request.batch_size, result.error) ||
+        !EnsureTypedDeviceBuffer(workspace.batch_out_e_r, workspace.batch_out_e_r_capacity, request.batch_size, result.error) ||
+        !EnsureTypedDeviceBuffer(workspace.batch_out_f_l, workspace.batch_out_f_l_capacity, request.batch_size, result.error) ||
+        !EnsureTypedDeviceBuffer(workspace.batch_out_f_r, workspace.batch_out_f_r_capacity, request.batch_size, result.error) ||
+        !EnsureTypedDeviceBuffer(workspace.batch_out_cv, workspace.batch_out_cv_capacity, request.batch_size, result.error)) {
+        return result;
+    }
+
+    const auto h2d_start = std::chrono::steady_clock::now();
+    error = cudaMemcpyAsync(workspace.batch_seed_el, seed_el.data(), request.batch_size * sizeof(OracleSeedBytes), cudaMemcpyHostToDevice, workspace.stream);
+    if (error == cudaSuccess) error = cudaMemcpyAsync(workspace.batch_seed_er, seed_er.data(), request.batch_size * sizeof(OracleSeedBytes), cudaMemcpyHostToDevice, workspace.stream);
+    if (error == cudaSuccess) error = cudaMemcpyAsync(workspace.batch_seed_fl, seed_fl.data(), request.batch_size * sizeof(OracleSeedBytes), cudaMemcpyHostToDevice, workspace.stream);
+    if (error == cudaSuccess) error = cudaMemcpyAsync(workspace.batch_seed_fr, seed_fr.data(), request.batch_size * sizeof(OracleSeedBytes), cudaMemcpyHostToDevice, workspace.stream);
+    if (error == cudaSuccess) error = cudaMemcpyAsync(workspace.batch_seed_cv, seed_cv.data(), request.batch_size * sizeof(OracleSeedBytes), cudaMemcpyHostToDevice, workspace.stream);
+    if (error == cudaSuccess) error = cudaMemcpyAsync(workspace.batch_out_e_l, out_e_l.data(), request.batch_size * sizeof(Element*), cudaMemcpyHostToDevice, workspace.stream);
+    if (error == cudaSuccess) error = cudaMemcpyAsync(workspace.batch_out_e_r, out_e_r.data(), request.batch_size * sizeof(Element*), cudaMemcpyHostToDevice, workspace.stream);
+    if (error == cudaSuccess) error = cudaMemcpyAsync(workspace.batch_out_f_l, out_f_l.data(), request.batch_size * sizeof(Element*), cudaMemcpyHostToDevice, workspace.stream);
+    if (error == cudaSuccess) error = cudaMemcpyAsync(workspace.batch_out_f_r, out_f_r.data(), request.batch_size * sizeof(Element*), cudaMemcpyHostToDevice, workspace.stream);
+    if (error == cudaSuccess) error = cudaMemcpyAsync(workspace.batch_out_cv, out_cv.data(), request.batch_size * sizeof(Element*), cudaMemcpyHostToDevice, workspace.stream);
+    const double h2d_us = std::chrono::duration<double, std::micro>(
+                              std::chrono::steady_clock::now() - h2d_start)
+                              .count();
+    if (error != cudaSuccess) {
+        result.error = "CUDA batched oracle request copy failed:" + std::string(cudaGetErrorString(error));
+        return result;
+    }
+
+    const size_t total_noise_words = static_cast<size_t>(request.batch_size) * noise_words;
+    const uint32_t noise_blocks = static_cast<uint32_t>((total_noise_words + ORACLE_THREADS - 1) / ORACLE_THREADS);
+    const auto encode_noise_start = std::chrono::steady_clock::now();
+    GenerateOracleNoiseBatchKernel<<<noise_blocks, ORACLE_THREADS, 0, workspace.stream>>>(
+        workspace.batch_seed_el,
+        workspace.batch_seed_er,
+        workspace.batch_seed_fl,
+        workspace.batch_seed_fr,
+        workspace.batch_out_e_l,
+        workspace.batch_out_e_r,
+        workspace.batch_out_f_l,
+        workspace.batch_out_f_r,
+        noise_words,
+        total_noise_words);
+    const double encode_noise_us = std::chrono::duration<double, std::micro>(
+                                       std::chrono::steady_clock::now() - encode_noise_start)
+                                       .count();
+
+    error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        result.error = "CUDA batched oracle noise kernel failed:" + std::string(cudaGetErrorString(error));
+        return result;
+    }
+
+    const size_t total_compress_words = static_cast<size_t>(request.batch_size) * compress_words;
+    const uint32_t compress_blocks = static_cast<uint32_t>((total_compress_words + ORACLE_THREADS - 1) / ORACLE_THREADS);
+    const auto encode_compress_start = std::chrono::steady_clock::now();
+    GenerateOracleVectorBatchKernel<<<compress_blocks, ORACLE_THREADS, 0, workspace.stream>>>(
+        workspace.batch_seed_cv,
+        workspace.batch_out_cv,
+        compress_words,
+        total_compress_words);
+    const double encode_compress_us = std::chrono::duration<double, std::micro>(
+                                          std::chrono::steady_clock::now() - encode_compress_start)
+                                          .count();
+
+    error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        result.error = "CUDA batched oracle compress kernel failed:" + std::string(cudaGetErrorString(error));
+        return result;
+    }
+
+    const auto submit_wait_start = std::chrono::steady_clock::now();
+    for (const auto& generated : generated_inputs) {
+        auto* generated_input = const_cast<MatMulGeneratedInputsDevice*>(generated.get());
+        if (!EnsureGeneratedInputsReadyEvent(*generated_input, result.error)) {
+            return result;
+        }
+        error = cudaEventRecord(
+            reinterpret_cast<cudaEvent_t>(generated_input->ready_event),
+            workspace.stream);
+        if (error != cudaSuccess) {
+            result.error = "CUDA batched oracle ready-event record failed:" + std::string(cudaGetErrorString(error));
+            return result;
+        }
+    }
+    const double submit_wait_us = std::chrono::duration<double, std::micro>(
+                                      std::chrono::steady_clock::now() - submit_wait_start)
+                                      .count();
+
+    result.inputs = std::move(generated_inputs);
+    result.success = true;
+    UpdateProfile(encode_noise_us, encode_compress_us, h2d_us + submit_wait_us, "cuda_noise4_plus_compress_device_batch");
+    return result;
+}
+
 MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(
     const MatMulNonceSeedPreHashScanRequest& request)
 {
@@ -1367,6 +1816,10 @@ MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(
         result.error = "CUDA seed-v3 nonce-seed pre-hash scan requires non-negative parent median time past";
         return result;
     }
+    if (request.compact_pass_records && !request.compact_pass_offsets) {
+        result.error = "CUDA nonce-seed pre-hash pass records require compact_pass_offsets";
+        return result;
+    }
 
     auto& workspace = g_workspace;
     ResetWorkspaceForDevice(workspace, runtime.device_index);
@@ -1379,6 +1832,7 @@ MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(
     if (!EnsureWorkspaceStream(workspace, result.error)) {
         return result;
     }
+    ScanScratchReleaseGuard release_scan_scratch{workspace};
 
     if (!EnsureDeviceBuffer(
             workspace.out_scan_flags,
@@ -1387,21 +1841,64 @@ MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(
             result.error)) {
         return result;
     }
+    if (request.compact_pass_offsets &&
+        !EnsureDeviceBuffer(
+            workspace.out_scan_pass_count,
+            workspace.scan_pass_count_capacity,
+            1,
+            result.error)) {
+        return result;
+    }
+    if (!EnsureTypedDeviceBuffer(
+            workspace.out_scan_midstates,
+            workspace.scan_midstates_capacity,
+            1,
+            result.error)) {
+        return result;
+    }
 
-    const uint32_t scan_blocks = (request.scan_count + ORACLE_THREADS - 1) / ORACLE_THREADS;
-    ScanNonceSeedPreHashKernel<<<scan_blocks, ORACLE_THREADS, 0, workspace.stream>>>(
+    if (request.compact_pass_offsets) {
+        error = cudaMemsetAsync(
+            workspace.out_scan_pass_count,
+            0,
+            sizeof(Element),
+            workspace.stream);
+        if (error != cudaSuccess) {
+            result.error = "CUDA nonce-seed pre-hash scan count reset failed:" +
+                std::string(cudaGetErrorString(error));
+            return result;
+        }
+    }
+
+    BuildNonceSeedPreHashMidstatesKernel<<<1, 1, 0, workspace.stream>>>(
         ToInternalSeedBytes(request.previous_block_hash),
+        ToInternalSeedBytes(request.merkle_root),
+        static_cast<uint32_t>(request.version),
+        request.block_height,
+        request.seed_version,
+        static_cast<uint64_t>(request.parent_median_time_past),
+        workspace.out_scan_midstates);
+    error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        result.error = "CUDA nonce-seed pre-hash midstate setup kernel failed:" +
+            std::string(cudaGetErrorString(error));
+        return result;
+    }
+
+    const uint32_t scan_blocks = (request.scan_count + ORACLE_SCAN_THREADS - 1) / ORACLE_SCAN_THREADS;
+    ScanNonceSeedPreHashKernel<<<scan_blocks, ORACLE_SCAN_THREADS, 0, workspace.stream>>>(
         ToInternalSeedBytes(request.merkle_root),
         ToInternalSeedBytes(request.pre_hash_target),
         static_cast<uint32_t>(request.version),
-        request.block_height,
         request.time,
         request.bits,
         request.start_nonce,
         request.matmul_dim,
         request.seed_version,
-        static_cast<uint64_t>(request.parent_median_time_past),
+        workspace.out_scan_midstates,
         workspace.out_scan_flags,
+        workspace.out_scan_pass_count,
+        request.compact_pass_offsets,
         request.scan_count);
     error = cudaGetLastError();
     if (error != cudaSuccess) {
@@ -1410,28 +1907,140 @@ MatMulNonceSeedPreHashScanResult ScanMatMulNonceSeedPreHashGPU(
     }
 
     std::string staging_warning;
-    if (!workspace.host_scan_flags.Ensure(request.scan_count, staging_warning)) {
-        result.error = staging_warning;
-        return result;
-    }
-    error = cudaMemcpyAsync(
-        workspace.host_scan_flags.data(),
-        workspace.out_scan_flags,
-        request.scan_count * sizeof(Element),
-        cudaMemcpyDeviceToHost,
-        workspace.stream);
-    if (error == cudaSuccess) {
-        error = cudaStreamSynchronize(workspace.stream);
-    }
-    if (error != cudaSuccess) {
-        result.error = "CUDA nonce-seed pre-hash scan completion failed:" + std::string(cudaGetErrorString(error));
-        return result;
-    }
+    if (request.compact_pass_offsets) {
+        if (!workspace.host_scan_flags.Ensure(1, staging_warning)) {
+            result.error = staging_warning;
+            return result;
+        }
+        error = cudaMemcpyAsync(
+            workspace.host_scan_flags.data(),
+            workspace.out_scan_pass_count,
+            sizeof(Element),
+            cudaMemcpyDeviceToHost,
+            workspace.stream);
+        if (error == cudaSuccess) {
+            error = cudaStreamSynchronize(workspace.stream);
+        }
+        if (error != cudaSuccess) {
+            result.error = "CUDA nonce-seed pre-hash compact count copy failed:" +
+                std::string(cudaGetErrorString(error));
+            return result;
+        }
 
-    result.pass_flags.resize(request.scan_count);
-    const Element* flags = workspace.host_scan_flags.data();
-    for (uint32_t i = 0; i < request.scan_count; ++i) {
-        result.pass_flags[i] = flags[i] != 0 ? 1U : 0U;
+        const uint32_t pass_count = workspace.host_scan_flags.data()[0];
+        if (pass_count > request.scan_count) {
+            result.error = "CUDA nonce-seed pre-hash compact count exceeded scan count";
+            return result;
+        }
+        if (!workspace.host_scan_flags.Ensure(pass_count, staging_warning)) {
+            result.error = staging_warning;
+            return result;
+        }
+        std::vector<DeviceNonceSeedPreHashPassRecord> host_pass_records;
+        if (request.compact_pass_records && pass_count > 0) {
+            if (!EnsureTypedDeviceBuffer(
+                    workspace.out_scan_pass_records,
+                    workspace.scan_pass_records_capacity,
+                    pass_count,
+                    result.error)) {
+                return result;
+            }
+
+            const uint32_t record_blocks = (pass_count + ORACLE_SCAN_THREADS - 1) / ORACLE_SCAN_THREADS;
+            HydrateNonceSeedPreHashPassRecordsKernel<<<record_blocks, ORACLE_SCAN_THREADS, 0, workspace.stream>>>(
+                ToInternalSeedBytes(request.merkle_root),
+                static_cast<uint32_t>(request.version),
+                request.time,
+                request.bits,
+                request.start_nonce,
+                request.matmul_dim,
+                request.seed_version,
+                workspace.out_scan_midstates,
+                workspace.out_scan_flags,
+                pass_count,
+                workspace.out_scan_pass_records);
+            error = cudaGetLastError();
+            if (error != cudaSuccess) {
+                result.error = "CUDA nonce-seed pre-hash pass record kernel failed:" +
+                    std::string(cudaGetErrorString(error));
+                return result;
+            }
+            host_pass_records.resize(pass_count);
+        }
+
+        if (pass_count > 0) {
+            error = cudaMemcpyAsync(
+                workspace.host_scan_flags.data(),
+                workspace.out_scan_flags,
+                pass_count * sizeof(Element),
+                cudaMemcpyDeviceToHost,
+                workspace.stream);
+            if (error == cudaSuccess && request.compact_pass_records) {
+                error = cudaMemcpyAsync(
+                    host_pass_records.data(),
+                    workspace.out_scan_pass_records,
+                    pass_count * sizeof(DeviceNonceSeedPreHashPassRecord),
+                    cudaMemcpyDeviceToHost,
+                    workspace.stream);
+            }
+            if (error == cudaSuccess) {
+                error = cudaStreamSynchronize(workspace.stream);
+            }
+            if (error != cudaSuccess) {
+                result.error = "CUDA nonce-seed pre-hash compact result copy failed:" +
+                    std::string(cudaGetErrorString(error));
+                return result;
+            }
+        }
+
+        result.pass_offsets.resize(pass_count);
+        const Element* offsets = workspace.host_scan_flags.data();
+        for (uint32_t i = 0; i < pass_count; ++i) {
+            result.pass_offsets[i] = offsets[i];
+        }
+        std::sort(result.pass_offsets.begin(), result.pass_offsets.end());
+        if (request.compact_pass_records) {
+            result.pass_records.reserve(host_pass_records.size());
+            for (const auto& record : host_pass_records) {
+                result.pass_records.push_back(MatMulNonceSeedPreHashPassRecord{
+                    .offset = record.offset,
+                    .seed_a = FromInternalSeedBytes(record.seed_a),
+                    .seed_b = FromInternalSeedBytes(record.seed_b),
+                    .sigma = FromInternalSeedBytes(record.sigma),
+                });
+            }
+            std::sort(
+                result.pass_records.begin(),
+                result.pass_records.end(),
+                [](const MatMulNonceSeedPreHashPassRecord& lhs,
+                   const MatMulNonceSeedPreHashPassRecord& rhs) {
+                    return lhs.offset < rhs.offset;
+                });
+        }
+    } else {
+        if (!workspace.host_scan_flags.Ensure(request.scan_count, staging_warning)) {
+            result.error = staging_warning;
+            return result;
+        }
+        error = cudaMemcpyAsync(
+            workspace.host_scan_flags.data(),
+            workspace.out_scan_flags,
+            request.scan_count * sizeof(Element),
+            cudaMemcpyDeviceToHost,
+            workspace.stream);
+        if (error == cudaSuccess) {
+            error = cudaStreamSynchronize(workspace.stream);
+        }
+        if (error != cudaSuccess) {
+            result.error = "CUDA nonce-seed pre-hash scan completion failed:" + std::string(cudaGetErrorString(error));
+            return result;
+        }
+
+        result.pass_flags.resize(request.scan_count);
+        const Element* flags = workspace.host_scan_flags.data();
+        for (uint32_t i = 0; i < request.scan_count; ++i) {
+            result.pass_flags[i] = flags[i] != 0 ? 1U : 0U;
+        }
     }
     result.scanned_count = request.scan_count;
     result.success = true;

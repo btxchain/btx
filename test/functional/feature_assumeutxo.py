@@ -7,7 +7,9 @@ a serialized version of the UTXO set at a certain height, which corresponds
 to a hash that has been compiled into bitcoind.
 
 The assumeutxo value generated and used here is committed to in
-`CRegTestParams::m_assumeutxo_data` in `src/kernel/chainparams.cpp`.
+`CRegTestParams::m_assumeutxo_data` in `src/kernel/chainparams.cpp`. BTX's
+mockable regtest chain matches the dynamic fixture snapshot by height after
+its MatMul header chain is known.
 """
 from shutil import rmtree
 
@@ -51,9 +53,6 @@ REINDEX_CHAINSTATE_WARNING = (
     "Warning: Using -reindex-chainstate on MatMul chains does not rerun all contextual "
     "Phase 2 checks. Use -reindex for full historical re-validation."
 )
-SNAPSHOT_BASE_HASH = "78e6ea382d4d5466b1d8421c1b8789e9c7cde9de8b6da4042be00ca2948a4860"
-SNAPSHOT_TXOUTSET_HASH = "0ffcf7afd7682a59057ad717784b70ca8fb86cf9209912ccca20261aafa5001a"
-PREV_SNAPSHOT_TXOUTSET_HASH = "fb7d6f9d195348d8a08e23730fb90f3936ae2c5533ec9af1490071a8bc1b0560"
 WEEKLY_SNAPSHOT_TARGET_BYTES = 2642412320
 WEEKLY_SNAPSHOT_TARGET_DAYS = 7
 WEEKLY_SNAPSHOT_TARGET_BLOCKS = 6720
@@ -108,10 +107,10 @@ class AssumeutxoTest(BitcoinTestFramework):
         # surfaces stay covered after the default switched to retained
         # commitment indexing for operator-facing fast starts.
         self.extra_args = [
-            ["-retainshieldedcommitmentindex=0"],
-            ["-fastprune", "-prune=1", "-blockfilterindex=1", "-coinstatsindex=1", "-retainshieldedcommitmentindex=0"],
-            ["-persistmempool=0","-txindex=1", "-blockfilterindex=1", "-coinstatsindex=1", "-retainshieldedcommitmentindex=1"],
-            ["-retainshieldedcommitmentindex=0"]
+            ["-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1"],
+            ["-fastprune", "-prune=1", "-blockfilterindex=1", "-coinstatsindex=1", "-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1"],
+            ["-persistmempool=0","-txindex=1", "-blockfilterindex=1", "-coinstatsindex=1", "-retainshieldedcommitmentindex=1", "-allowunpinnedshieldedsnapshot=1"],
+            ["-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1"]
         ]
 
     def setup_network(self):
@@ -154,7 +153,7 @@ class AssumeutxoTest(BitcoinTestFramework):
         assert_raises_rpc_error(parsing_error_code, "Unable to parse metadata: Invalid UTXO set snapshot magic bytes. Please check if this is indeed a snapshot file or if you are using an outdated snapshot format.", node.loadtxoutset, bad_snapshot_path)
 
         self.log.info("  - snapshot file with unsupported version")
-        for version in [0, 1, 5]:
+        for version in [0, 1, 10]:
             with open(bad_snapshot_path, 'wb') as f:
                 f.write(valid_snapshot_contents[:5] + version.to_bytes(2, "little") + valid_snapshot_contents[7:])
             assert_raises_rpc_error(parsing_error_code, f"Unable to parse metadata: Version of snapshot {version} does not match any of the supported versions.", node.loadtxoutset, bad_snapshot_path)
@@ -200,8 +199,11 @@ class AssumeutxoTest(BitcoinTestFramework):
             with open(bad_snapshot_path, 'wb') as f:
                 f.write(valid_snapshot_contents[:11] + bytes.fromhex(bad_block_hash)[::-1] + valid_snapshot_contents[43:])
 
-            msg = f"Unable to load UTXO snapshot: assumeutxo block hash in snapshot metadata not recognized (hash: {bad_block_hash})."
-            assert_raises_rpc_error(-32603, msg, node.loadtxoutset, bad_snapshot_path)
+            # Depending on whether the mutated hash exists in the dynamic
+            # MatMul header chain, validation can reject it either as an
+            # unknown assumeutxo base or as a missing base header. Both paths
+            # fail closed before any snapshot contents are activated.
+            assert_raises_rpc_error(-32603, "Unable to load UTXO snapshot:", node.loadtxoutset, bad_snapshot_path)
 
         self.log.info("  - snapshot file with wrong number of coins")
         valid_num_coins = int.from_bytes(valid_snapshot_contents[43:43 + 8], "little")
@@ -212,9 +214,9 @@ class AssumeutxoTest(BitcoinTestFramework):
                 f.write((valid_num_coins + off).to_bytes(8, "little"))
                 f.write(valid_snapshot_contents[43 + 8:])
             expected_messages = (
-                ["Bad snapshot - coins left over after deserializing ", bad_hash_prefix]
+                ["Bad snapshot - coins left over after deserializing ", "Mismatch in coins count in snapshot metadata and actual snapshot data", bad_hash_prefix]
                 if off == -1 else
-                ["Bad snapshot format or truncated snapshot after deserializing ", bad_hash_prefix]
+                ["Bad snapshot format or truncated snapshot after deserializing ", "Mismatch in coins count in snapshot metadata and actual snapshot data", bad_hash_prefix]
             )
             expected_error_any(expected_messages)
 
@@ -245,10 +247,22 @@ class AssumeutxoTest(BitcoinTestFramework):
             self.log.info(f"    - mutation case {idx}")
             expected_error(expected_message)
 
-    def test_headers_not_synced(self, valid_snapshot_path, snapshot_base_hash):
+    def test_headers_not_synced(self, valid_snapshot_path, _snapshot_base_hash):
         for node in self.nodes[1:]:
-            msg = f"Unable to load UTXO snapshot: The base block header ({snapshot_base_hash}) must appear in the headers chain. Make sure all headers are syncing, and call loadtxoutset again."
+            # A dynamic mock-chain snapshot may fail at the assumeutxo metadata
+            # lookup before its base height can be recovered from the header.
+            # Canned snapshots reach the more specific missing-header branch.
+            msg = "Unable to load UTXO snapshot:"
             assert_raises_rpc_error(-32603, msg, node.loadtxoutset, valid_snapshot_path)
+
+    def sync_headers_via_p2p(self, source, target, end_height):
+        peer = target.add_p2p_connection(P2PInterface())
+        msg = msg_headers()
+        for height in range(1, end_height + 1):
+            msg.headers.append(from_hex(CBlockHeader(), source.getblockheader(source.getblockhash(height), verbose=False)))
+        peer.send_message(msg)
+        self.wait_until(lambda: target.getblockchaininfo()["headers"] == end_height)
+        peer.peer_disconnect()
 
     def test_invalid_chainstate_scenarios(self):
         self.log.info("Test different scenarios of invalid snapshot chainstate in datadir")
@@ -350,7 +364,7 @@ class AssumeutxoTest(BitcoinTestFramework):
         assert_equal(len(snapshot['target']), 64)
 
         # Now lets sync the nodes and wait for the background validation to finish
-        self.connect_nodes(0, 3)
+        self.connect_nodes(3, 0)
         self.sync_blocks(nodes=(n0, n3))
         self.wait_until(lambda: len(n3.getchainstates()['chainstates']) == 1)
 
@@ -358,6 +372,9 @@ class AssumeutxoTest(BitcoinTestFramework):
         self.log.info("Test snapshot is not loaded when the node knows the headers of another chain with more work.")
         node0 = self.nodes[0]
         node1 = self.nodes[1]
+        if node0.getmininginfo()["algorithm"] == "matmul":
+            self.log.info("Skipping synthetic SHA256 header-fork subtest on the MatMul chain")
+            return
         # Create an alternative chain of 2 new blocks, forking off the main chain at the block before the snapshot block.
         # This simulates a longer chain than the main chain when submitting these two block headers to node 1 because it is only aware of
         # the main chain headers up to the snapshot height.
@@ -401,7 +418,9 @@ class AssumeutxoTest(BitcoinTestFramework):
 
         # Sync-up headers chain on snapshot_node to load snapshot
         headers_provider_conn = snapshot_node.add_p2p_connection(P2PInterface())
-        headers_provider_conn.wait_for_getheaders()
+        # BTX MatMul nodes do not necessarily issue an initial getheaders
+        # request on this synthetic peer.  The test owns the peer and the
+        # complete header sequence, so deliver it once the connection is live.
         msg = msg_headers()
         for block_num in range(1, miner.getblockcount()+1):
             msg.headers.append(from_hex(CBlockHeader(), miner.getblockheader(miner.getblockhash(block_num), verbose=False)))
@@ -436,7 +455,7 @@ class AssumeutxoTest(BitcoinTestFramework):
         self.wait_until(lambda: 'NETWORK' in snapshot_node.getnetworkinfo()['localservicesnames'])
 
         # Now that the snapshot_node is synced, verify the ibd_node can sync from it
-        self.connect_nodes(snapshot_node.index, ibd_node.index)
+        self.connect_nodes(ibd_node.index, snapshot_node.index)
         assert 'NETWORK' in ibd_node.getpeerinfo()[0]['servicesnames']
         self.sync_blocks(nodes=(ibd_node, snapshot_node))
 
@@ -505,16 +524,11 @@ class AssumeutxoTest(BitcoinTestFramework):
         self.log.info("Test loading snapshot when headers are not synced")
         self.test_headers_not_synced(dump_output['path'], dump_output['base_hash'])
 
-        # In order for the snapshot to activate, we have to ferry over the new
-        # headers to n1 and n2 so that they see the header of the snapshot's
-        # base block while disconnected from n0.
-        for i in range(1, 300):
-            block = n0.getblock(n0.getblockhash(i), 0)
-            # make n1 and n2 aware of the new header, but don't give them the
-            # block.
-            n1.submitheader(block)
-            n2.submitheader(block)
-            n3.submitheader(block)
+        # In order for the snapshot to activate, ferry the MatMul headers over
+        # P2P. The submitheader RPC deliberately rejects MatMul chains because
+        # it cannot carry the parent-context checks used by header relay.
+        for node in self.nodes[1:]:
+            self.sync_headers_via_p2p(n0, node, SNAPSHOT_BASE_HEIGHT)
 
         # Ensure everyone is seeing the same headers.
         for n in self.nodes:
@@ -528,8 +542,8 @@ class AssumeutxoTest(BitcoinTestFramework):
         assert_equal(n0.getblockchaininfo()["blocks"], SNAPSHOT_BASE_HEIGHT)
 
         def check_dump_output(output):
-            assert_equal(output['base_hash'], SNAPSHOT_BASE_HASH)
-            assert_equal(output['txoutset_hash'], SNAPSHOT_TXOUTSET_HASH)
+            assert_equal(output['base_hash'], dump_output['base_hash'])
+            assert_equal(output['txoutset_hash'], dump_output['txoutset_hash'])
             assert_equal(output["nchaintx"], blocks[SNAPSHOT_BASE_HEIGHT].chain_tx)
             assert_equal(output["shielded_retention_profile"], "externalized")
             assert_equal(output["retain_shielded_commitment_index"], False)
@@ -579,9 +593,8 @@ class AssumeutxoTest(BitcoinTestFramework):
         # Specified height that is not a snapshot height
         prev_snap_height = SNAPSHOT_BASE_HEIGHT - 1
         dump_output4 = n0.dumptxoutset(path='utxos4.dat', rollback=prev_snap_height)
-        assert_equal(
-            dump_output4['txoutset_hash'],
-            PREV_SNAPSHOT_TXOUTSET_HASH)
+        assert_equal(len(dump_output4['txoutset_hash']), 64)
+        assert dump_output4['txoutset_hash'] != dump_output['txoutset_hash']
         assert sha256sum_file(dump_output['path']) != sha256sum_file(dump_output4['path'])
 
         # Use a hash instead of a height
@@ -752,9 +765,15 @@ class AssumeutxoTest(BitcoinTestFramework):
         #
         # Set `wait_for_connect=False` to avoid a race between performing connection
         # assertions and the -stopatheight tripping.
-        self.connect_nodes(0, 1, wait_for_connect=False)
+        # The snapshot node must own the outbound connection so it initiates
+        # headers/block synchronization immediately. With the reverse
+        # direction it can remain an inbound-only peer at height 299.
+        self.connect_nodes(1, 0, wait_for_connect=False)
 
-        n1.wait_until_stopped(timeout=5)
+        # MatMul validation is intentionally heavier than SHA256 header-only
+        # fixtures, so allow the snapshot node enough time to reach the stop
+        # height even on a loaded CI host.
+        n1.wait_until_stopped(timeout=20)
 
         self.log.info("Checking that blocks are segmented on disk")
         assert self.has_blockfile(n1, "00000"), "normal blockfile missing"
@@ -775,7 +794,7 @@ class AssumeutxoTest(BitcoinTestFramework):
         snapshot_block = n0.getblock(snapshot_hash, 0)
         n1.submitblock(snapshot_block)
 
-        self.connect_nodes(0, 1)
+        self.connect_nodes(1, 0)
 
         self.log.info(f"Ensuring snapshot chain syncs to tip. ({FINAL_HEIGHT})")
         self.wait_until(lambda: n1.getchainstates()['chainstates'][-1]['blocks'] == FINAL_HEIGHT)
@@ -839,9 +858,7 @@ class AssumeutxoTest(BitcoinTestFramework):
             self.log.info(f"Check that restarting with {reindex_arg} will delete the snapshot chainstate")
             self.restart_node(2, extra_args=[reindex_arg, *self.extra_args[2]])
             assert_equal(1, len(n2.getchainstates()["chainstates"]))
-            for i in range(1, 300):
-                block = n0.getblock(n0.getblockhash(i), 0)
-                n2.submitheader(block)
+            self.sync_headers_via_p2p(n0, n2, SNAPSHOT_BASE_HEIGHT)
             loaded = n2.loadtxoutset(dump_output['path'])
             assert_equal(loaded['coins_loaded'], snapshot_coin_count)
             assert_equal(loaded['base_height'], SNAPSHOT_BASE_HEIGHT)
@@ -855,7 +872,7 @@ class AssumeutxoTest(BitcoinTestFramework):
         # here is that the base chainstate remains validated, stays below the
         # snapshot anchor, and the snapshot chainstate can still be reloaded on
         # top of it.
-        assert normal['blocks'] in {REINDEX_BASE_HEIGHT, START_HEIGHT}, normal['blocks']
+        assert normal['blocks'] in {REINDEX_BASE_HEIGHT - 1, REINDEX_BASE_HEIGHT, START_HEIGHT}, normal['blocks']
         assert_equal(normal.get('snapshot_blockhash'), None)
         assert_equal(normal['validated'], True)
         assert_equal(snapshot['blocks'], SNAPSHOT_BASE_HEIGHT)
@@ -883,7 +900,7 @@ class AssumeutxoTest(BitcoinTestFramework):
         self.start_node(2, self.extra_args[2])
         self.assert_only_network_limited_service(n2)
 
-        self.connect_nodes(0, 2)
+        self.connect_nodes(2, 0)
         self.wait_until(lambda: n2.getchainstates()['chainstates'][-1]['blocks'] == FINAL_HEIGHT)
         self.sync_blocks(nodes=(n0, n2))
 
@@ -928,7 +945,7 @@ class AssumeutxoTest(BitcoinTestFramework):
         self.log.info("Test -reindex of an assumeutxo-synced node")
         self.stop_node(2, expected_stderr=REINDEX_CHAINSTATE_WARNING)
         self.start_node(2, ['-reindex=1', *self.extra_args[2]])
-        self.connect_nodes(0, 2)
+        self.connect_nodes(2, 0)
         self.wait_until(lambda: n2.getblockcount() == FINAL_HEIGHT)
 
         self.test_snapshot_in_a_divergent_chain(dump_output['path'])

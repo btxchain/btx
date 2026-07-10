@@ -130,6 +130,21 @@ PreparedDigestInputs PrepareMatMulDigestInputsForBackend(const CBlockHeader& blo
                                                          backend::Kind preferred_backend,
                                                          DigestScheme digest_scheme = DigestScheme::TRANSCRIPT);
 
+std::vector<PreparedDigestInputs> PrepareMatMulDigestInputsBatchForBackend(
+    const std::vector<CBlockHeader>& blocks,
+    uint32_t transcript_block_size,
+    uint32_t noise_rank,
+    backend::Kind preferred_backend,
+    DigestScheme digest_scheme = DigestScheme::TRANSCRIPT);
+
+std::vector<PreparedDigestInputs> PrepareMatMulDigestInputsBatchForBackend(
+    const std::vector<CBlockHeader>& blocks,
+    const std::vector<uint256>& sigmas,
+    uint32_t transcript_block_size,
+    uint32_t noise_rank,
+    backend::Kind preferred_backend,
+    DigestScheme digest_scheme = DigestScheme::TRANSCRIPT);
+
 DigestResult ComputeMatMulDigestPrepared(const CBlockHeader& block,
                                          const Matrix& A,
                                          const Matrix& B,

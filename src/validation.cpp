@@ -3343,6 +3343,21 @@ bool HasInvalidShieldedRecoveryExitMempoolState(const CTransaction& tx, const Ch
            chainman.IsShieldedRecoveryExitCommitmentRetired(re_ids.commitment);
 }
 
+bool HasInvalidShieldedPoolBalanceMempoolState(const CTransaction& tx, const ChainstateManager& chainman)
+{
+    AssertLockHeld(::cs_main);
+    if (!tx.HasShieldedBundle()) return false;
+
+    std::string pool_balance_reject;
+    const auto state_value_balance =
+        TryGetShieldedStateValueBalance(tx.GetShieldedBundle(), pool_balance_reject);
+    if (!state_value_balance.has_value()) return true;
+
+    ShieldedPoolBalance projected_pool;
+    return !projected_pool.SetBalance(chainman.GetShieldedPoolBalance()) ||
+           !projected_pool.ApplyValueBalance(*state_value_balance);
+}
+
 bool CollectShieldedMempoolRetirementsForBlock(const CTransaction& tx,
                                                std::vector<Nullifier>& out_nullifiers,
                                                std::vector<uint256>& out_recovery_commitments)
@@ -3449,6 +3464,27 @@ void RemoveShieldedMempoolConflictsForBlock(CTxMemPool& pool,
                  chain.Height());
         pool.removeRecursive(*tx, MemPoolRemovalReason::CONFLICT);
     }
+}
+
+void RemoveStaleShieldedPoolBalanceMempoolTransactions(CTxMemPool& pool,
+                                                       CChain& chain,
+                                                       ChainstateManager& chainman)
+{
+    AssertLockHeld(::cs_main);
+    AssertLockHeld(pool.cs);
+
+    const auto stale_pool_filter = [&](CTxMemPool::txiter it) EXCLUSIVE_LOCKS_REQUIRED(pool.cs, ::cs_main) {
+        const CTransaction& tx = it->GetTx();
+        if (!tx.HasShieldedBundle()) return false;
+        if (!HasInvalidShieldedPoolBalanceMempoolState(tx, chainman)) return false;
+
+        LogDebug(BCLog::MEMPOOL,
+                 "removing mempool tx %s: stale shielded pool balance at height %d\n",
+                 tx.GetHash().ToString(),
+                 chain.Height());
+        return true;
+    };
+    pool.removeForReorg(chain, stale_pool_filter);
 }
 
 void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool,
@@ -8519,6 +8555,9 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                                                m_chainman,
                                                this,
                                                blockConnecting.vtx);
+        if (BlockHasShieldedBundle(blockConnecting)) {
+            RemoveStaleShieldedPoolBalanceMempoolTransactions(*m_mempool, m_chain, m_chainman);
+        }
         const int32_t previous_next_block_height{pindexNew->nHeight};
         const int32_t current_next_block_height{NextBlockHeightOrLimit(pindexNew->nHeight)};
         if (CrossesShieldedMempoolHeightGate(m_chainman.GetConsensus(),
