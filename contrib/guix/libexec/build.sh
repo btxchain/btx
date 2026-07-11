@@ -251,6 +251,11 @@ mkdir -p "$OUTDIR"
 
 # CONFIGFLAGS
 BASE_CONFIGFLAGS="-DREDUCE_EXPORTS=ON -DBUILD_BENCH=OFF -DBUILD_GUI_TESTS=OFF -DBUILD_FUZZ_BINARY=OFF"
+# Ship ZMQ notifications in release binaries. WITH_ZMQ defaults OFF in CMakeLists.txt,
+# so without this flag the released btxd silently ignores -zmqpub* settings
+# ("built without ZMQ support"). libzmq is already provided by the depends system
+# (packages.mk: zmq_packages=zeromq, built by default unless NO_ZMQ is set).
+BASE_CONFIGFLAGS="$BASE_CONFIGFLAGS -DWITH_ZMQ=ON"
 BASE_CONFIGFLAGS="$BASE_CONFIGFLAGS -DCMAKE_SKIP_BUILD_RPATH=TRUE"  # check-symbols is fussy about rpath and we don't need it
 
 make_cuda_host_compiler_wrapper() {
