@@ -106,7 +106,42 @@ If the computer has malware, it can compromise the wallet when recovering the ba
 
 If both the wallet and all backups are lost for any reason, the bitcoins related to this wallet will become permanently inaccessible.
 
-### 1.4.1 BTX Wallet Backup Bundle RPC
+### 1.4.1 BTX Browser Wallet Bundle RPC
+
+The separately deployed BTX browser wallet exports a v1 `.btxwallet` JSON file
+for self-custody recovery into a native node wallet. This file contains the
+plaintext PQ master seed, so treat it like private-key material: keep it offline,
+delete temporary copies, and do not confuse it with the encrypted `.bundle.btx`
+operator backup archive.
+
+Two node RPCs support this browser-wallet recovery path:
+
+- `restorewalletbundle` creates and loads a new blank descriptor wallet, verifies
+  the `.btxwallet` metadata, installs the PQ master seed, activates the P2MR
+  receive/change descriptors, and optionally rescans from the bundle birthday
+- `importwalletbundle` imports the same bundle into the selected existing
+  descriptor wallet
+- both RPCs verify the bundle format, version, chain/network, account, seed
+  length, derived first receive address, and descriptor strings before import
+
+Examples:
+
+```
+$ btx-cli restorewalletbundle "webwallet" /secure/offline/btx-wallet.btxwallet.json
+
+$ btx-cli -rpcwallet="webwallet" importwalletbundle /secure/offline/btx-wallet.btxwallet.json false
+```
+
+Use `restorewalletbundle` for the normal browser-to-node recovery flow. Use
+`importwalletbundle` only when you have already created the destination
+descriptor wallet.
+
+See [BTX Browser Wallet and Node Wallet Interop](btxwallet-browser-node-interop.md)
+for the full `.btxwallet` schema boundary, browser-to-node restore flow, and
+why native node wallets should use encrypted `.bundle.btx` archives instead of
+exporting raw browser-importable seeds.
+
+### 1.4.2 BTX Wallet Backup Bundle RPC
 
 BTX now provides a native per-wallet RPC for consistent backup exports:
 
@@ -124,7 +159,7 @@ $ btx-cli -rpcwallet=mywallet -stdinwalletpassphrase \
 
 This is the preferred single-wallet backup flow because it is implemented in BTX itself and exercises the same RPC surface used for restore verification.
 
-### 1.4.2 BTX Wallet Bundle Archive RPC
+### 1.4.3 BTX Wallet Bundle Archive RPC
 
 BTX also provides a native encrypted single-file archive flow:
 
@@ -148,7 +183,7 @@ $ btx-cli -stdinbundlepassphrase \
 
 This is the preferred sealed-offline backup flow when operators want a single encrypted file per wallet without relying on external archive tooling.
 
-### 1.4.3 BTX Secure Backup Utility
+### 1.4.4 BTX Secure Backup Utility
 
 BTX ships a helper script for the production backup flow that:
 

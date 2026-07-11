@@ -74,6 +74,10 @@ hardware-specific accelerated path with a CPU fallback.
 - Browser key custody, WebAssembly cryptography, document signing, explorer
   history, and the public HTTP gateway are website/explorer components, not
   `btx-node` artifacts.
+- Native wallet RPCs now provide the node-side recovery bridge for browser
+  `.btxwallet` v1 JSON exports. `restorewalletbundle` creates a descriptor
+  wallet from a browser bundle, while `importwalletbundle` imports the same
+  verified seed/descriptors into an existing descriptor wallet.
 - Never expose the node JSON-RPC port directly to the public internet or store
   node RPC credentials in a browser.
 
@@ -101,7 +105,9 @@ hardware-specific accelerated path with a CPU fallback.
   release binaries and representative NVIDIA architectures before promotion
   to the public release repository.
 - The browser wallet and post-quantum document-signing suite remain beta
-  website features and are versioned separately from node consensus.
+  website features and are versioned separately from node consensus. The node
+  now accepts the browser wallet's `.btxwallet` recovery export, but the file is
+  plaintext seed material and must be handled like a private key.
 
 # Credits
 

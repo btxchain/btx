@@ -31,12 +31,15 @@
 #include <util/strencodings.h>
 #include <util/time.h>
 #include <util/translation.h>
+#include <wallet/context.h>
+#include <wallet/db.h>
 #include <wallet/receive.h>
 #include <wallet/crypter.h>
 #include <wallet/rpc/util.h>
 #include <wallet/shielded_wallet.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
+#include <wallet/walletutil.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -1383,6 +1386,163 @@ static UniValue ReadJsonBytes(Span<const unsigned char> bytes, const std::string
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("Failed to parse wallet bundle archive JSON file %s", label));
     }
     return value;
+}
+
+struct BtxWalletBundle
+{
+    std::vector<unsigned char> master_seed;
+    std::string network;
+    int64_t birthday{1};
+    std::string first_receive_address;
+    std::string receive_descriptor;
+    std::string change_descriptor;
+};
+
+static std::string ExpectedBtxWalletBundleNetwork()
+{
+    const ChainType chain_type = Params().GetChainType();
+    if (chain_type == ChainType::MAIN) return "main";
+    if (chain_type == ChainType::REGTEST) return "regtest";
+    return "test";
+}
+
+static std::string RequiredBtxWalletBundleString(const UniValue& bundle, const std::string& field)
+{
+    const UniValue& value = bundle[field];
+    if (!value.isStr()) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("BTX wallet bundle field '%s' must be a string", field));
+    }
+    return value.get_str();
+}
+
+static int64_t RequiredBtxWalletBundleInt(const UniValue& bundle, const std::string& field)
+{
+    const UniValue& value = bundle[field];
+    if (!value.isNum()) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("BTX wallet bundle field '%s' must be a number", field));
+    }
+    return value.getInt<int64_t>();
+}
+
+static std::string PrivatePQWalletDescriptorString(Span<const unsigned char> seed, const bool internal, const int64_t creation_time)
+{
+    WalletDescriptor descriptor = GeneratePQWalletDescriptor(seed, internal);
+    descriptor.creation_time = creation_time;
+    FlatSigningProvider keys;
+    std::string out;
+    if (!descriptor.descriptor->ToPrivateString(keys, out)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to render generated BTX wallet bundle descriptor");
+    }
+    return out;
+}
+
+static std::string DeriveBtxWalletBundleFirstReceiveAddress(Span<const unsigned char> seed)
+{
+    WalletDescriptor descriptor = GeneratePQWalletDescriptor(seed, /*internal=*/false);
+    FlatSigningProvider keys;
+    std::vector<CScript> scripts;
+    if (!descriptor.descriptor->Expand(0, keys, scripts, keys) || scripts.empty()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to derive BTX wallet bundle receive descriptor");
+    }
+    CTxDestination dest;
+    if (!ExtractDestination(scripts[0], dest) || !IsValidDestination(dest)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to derive BTX wallet bundle receive address");
+    }
+    return EncodeDestination(dest);
+}
+
+static BtxWalletBundle ParseBtxWalletBundle(const UniValue& bundle)
+{
+    if (!bundle.isObject()) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "BTX wallet bundle must be a JSON object");
+    }
+    if (RequiredBtxWalletBundleString(bundle, "format") != "btx-wallet-bundle") {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "BTX wallet bundle has unsupported format");
+    }
+    if (RequiredBtxWalletBundleInt(bundle, "version") != 1) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "BTX wallet bundle has unsupported version");
+    }
+
+    BtxWalletBundle parsed;
+    parsed.network = RequiredBtxWalletBundleString(bundle, "network");
+    const std::string expected_network = ExpectedBtxWalletBundleNetwork();
+    if (parsed.network != expected_network) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           strprintf("BTX wallet bundle network '%s' does not match current chain '%s'",
+                                     parsed.network, expected_network));
+    }
+
+    const int64_t account = bundle["account"].isNull() ? 0 : RequiredBtxWalletBundleInt(bundle, "account");
+    if (account != 0) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "BTX wallet bundle accounts other than 0 are not supported");
+    }
+    if (!bundle["coin_type"].isNull()) {
+        const int64_t expected_coin_type = Params().IsTestChain() ? 1 : 0;
+        const int64_t coin_type = RequiredBtxWalletBundleInt(bundle, "coin_type");
+        if (coin_type != expected_coin_type) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               strprintf("BTX wallet bundle coin_type %d does not match current chain coin_type %d",
+                                         coin_type, expected_coin_type));
+        }
+    }
+    if (!bundle["algorithms"].isNull()) {
+        const UniValue& algorithms = bundle["algorithms"];
+        if (!algorithms.isArray() || algorithms.size() != 2 ||
+            !algorithms[0].isStr() || algorithms[0].get_str() != "ml-dsa-44" ||
+            !algorithms[1].isStr() || algorithms[1].get_str() != "slh-dsa-128s") {
+            throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "BTX wallet bundle algorithms must be [\"ml-dsa-44\", \"slh-dsa-128s\"]");
+        }
+    }
+
+    parsed.birthday = RequiredBtxWalletBundleInt(bundle, "birthday");
+    if (parsed.birthday < 1) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "BTX wallet bundle birthday must be a positive Unix timestamp");
+    }
+
+    const std::string seed_hex = RequiredBtxWalletBundleString(bundle, "pq_master_seed");
+    if (seed_hex.size() != 64 || !IsHex(seed_hex)) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "BTX wallet bundle pq_master_seed must be 32 bytes encoded as 64 hex characters");
+    }
+    parsed.master_seed = ParseHex(seed_hex);
+    if (parsed.master_seed.size() != 32) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "BTX wallet bundle pq_master_seed decoded to an invalid length");
+    }
+
+    parsed.first_receive_address = DeriveBtxWalletBundleFirstReceiveAddress(parsed.master_seed);
+    if (!bundle["first_receive_address"].isNull()) {
+        const std::string claimed = RequiredBtxWalletBundleString(bundle, "first_receive_address");
+        if (claimed != parsed.first_receive_address) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                               strprintf("BTX wallet bundle first_receive_address does not match pq_master_seed (expected %s)",
+                                         parsed.first_receive_address));
+        }
+    }
+
+    parsed.receive_descriptor = PrivatePQWalletDescriptorString(parsed.master_seed, /*internal=*/false, parsed.birthday);
+    parsed.change_descriptor = PrivatePQWalletDescriptorString(parsed.master_seed, /*internal=*/true, parsed.birthday);
+    if (!bundle["descriptors"].isNull()) {
+        const UniValue& descriptors = bundle["descriptors"];
+        if (!descriptors.isArray() || descriptors.size() < 2 || !descriptors[0].isStr() || !descriptors[1].isStr()) {
+            throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "BTX wallet bundle descriptors must contain receive and change descriptor strings");
+        }
+        if (descriptors[0].get_str() != parsed.receive_descriptor ||
+            descriptors[1].get_str() != parsed.change_descriptor) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "BTX wallet bundle descriptors do not match pq_master_seed/network/account");
+        }
+    }
+
+    return parsed;
+}
+
+static BtxWalletBundle ReadBtxWalletBundleFile(const fs::path& path)
+{
+    const std::vector<unsigned char> bytes = ReadBinaryFile(path);
+    const std::string text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    UniValue bundle;
+    if (!bundle.read(text)) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("Failed to parse BTX wallet bundle JSON file %s", fs::PathToString(path)));
+    }
+    return ParseBtxWalletBundle(bundle);
 }
 
 static void ValidateWalletBundleArchiveMetadata(const WalletBundleArchivePayload& payload,
@@ -3025,6 +3185,103 @@ UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const in
     return result;
 }
 
+static UniValue ImportBtxWalletBundleIntoWallet(CWallet& wallet, const BtxWalletBundle& bundle, const bool rescan)
+{
+    wallet.BlockUntilSyncedToCurrentChain();
+
+    if (!wallet.IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "importwalletbundle is not available for non-descriptor wallets");
+    }
+    if (wallet.IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Cannot import .btxwallet seed into a wallet with private keys disabled");
+    }
+    if (wallet.IsWalletFlagSet(WALLET_FLAG_EXTERNAL_SIGNER)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Cannot import .btxwallet seed into an external signer wallet");
+    }
+
+    WalletRescanReserver reserver(wallet);
+    if (rescan) {
+        if (!reserver.reserve(/*with_passphrase=*/true)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Wallet is currently rescanning. Abort existing rescan or wait.");
+        }
+        EnsureBlockDataFromTime(wallet, bundle.birthday);
+    }
+
+    LOCK(wallet.m_relock_mutex);
+    {
+        LOCK(wallet.cs_wallet);
+        EnsureWalletIsUnlocked(wallet);
+        WalletBatch batch(wallet.GetDatabase());
+        wallet.SetupImportedPQWalletBundle(batch, Span<const unsigned char>{bundle.master_seed.data(), bundle.master_seed.size()}, bundle.birthday);
+        wallet.ConnectScriptPubKeyManNotifiers();
+    }
+
+    if (rescan) {
+        RescanWallet(wallet, reserver, bundle.birthday);
+        wallet.ResubmitWalletTransactions(/*relay=*/false, /*force=*/true);
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("success", true);
+    result.pushKV("wallet_name", wallet.GetName());
+    result.pushKV("format", "btx-wallet-bundle");
+    result.pushKV("version", 1);
+    result.pushKV("network", bundle.network);
+    result.pushKV("birthday", bundle.birthday);
+    result.pushKV("first_receive_address", bundle.first_receive_address);
+    result.pushKV("rescan", rescan);
+    result.pushKV("descriptors_imported", 2);
+    return result;
+}
+
+RPCHelpMan importwalletbundle()
+{
+    return RPCHelpMan{
+        "importwalletbundle",
+        "\nImport a BTX Wallet Bundle v1 `.btxwallet` JSON file into the current descriptor wallet.\n"
+        "The bundle's 32-byte PQ master seed is installed as the wallet PQ seed and active P2MR receive/change descriptors are created from it.\n"
+        "The bundle must match the currently selected chain, and its first_receive_address and descriptors are verified before import.\n",
+        {
+            {"bundle_file", RPCArg::Type::STR, RPCArg::Optional::NO, "Path to a .btxwallet or .btxwallet.json file created by the BTX browser wallet."},
+            {"rescan", RPCArg::Type::BOOL, RPCArg::Default{true}, "Scan the chain from the bundle birthday after import."},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::BOOL, "success", "Whether the import completed"},
+                {RPCResult::Type::STR, "wallet_name", "Wallet name"},
+                {RPCResult::Type::STR, "format", "Bundle format"},
+                {RPCResult::Type::NUM, "version", "Bundle version"},
+                {RPCResult::Type::STR, "network", "Bundle network"},
+                {RPCResult::Type::NUM, "birthday", "Bundle birthday timestamp used for rescans"},
+                {RPCResult::Type::STR, "first_receive_address", "Verified receive[0] address derived from the bundle seed"},
+                {RPCResult::Type::BOOL, "rescan", "Whether a rescan was requested"},
+                {RPCResult::Type::NUM, "descriptors_imported", "Number of descriptors imported"},
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("importwalletbundle", "\"/path/to/btx-wallet-abcd1234.btxwallet.json\"") +
+            HelpExampleRpc("importwalletbundle", "\"/path/to/btx-wallet-abcd1234.btxwallet.json\", true")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return UniValue::VNULL;
+
+    BtxWalletBundle bundle = ReadBtxWalletBundleFile(fs::u8path(request.params[0].get_str()));
+    const bool rescan = request.params[1].isNull() ? true : request.params[1].get_bool();
+    try {
+        UniValue result = ImportBtxWalletBundleIntoWallet(*pwallet, bundle, rescan);
+        memory_cleanse(bundle.master_seed.data(), bundle.master_seed.size());
+        return result;
+    } catch (...) {
+        if (!bundle.master_seed.empty()) memory_cleanse(bundle.master_seed.data(), bundle.master_seed.size());
+        throw;
+    }
+},
+    };
+}
+
 RPCHelpMan importdescriptors()
 {
     return RPCHelpMan{"importdescriptors",
@@ -3279,6 +3536,96 @@ RPCHelpMan listdescriptors()
 
     const bool priv = !request.params[0].isNull() && request.params[0].get_bool();
     return BuildListDescriptorsResult(*wallet, priv);
+},
+    };
+}
+
+RPCHelpMan restorewalletbundle()
+{
+    return RPCHelpMan{
+        "restorewalletbundle",
+        "\nCreates and loads a new descriptor wallet from a BTX Wallet Bundle v1 `.btxwallet` JSON file.\n"
+        "The bundle is verified exactly as importwalletbundle verifies it, then its PQ master seed is installed as\n"
+        "the wallet seed and active P2MR receive/change descriptors are created from the bundle birthday.\n",
+        {
+            {"wallet_name", RPCArg::Type::STR, RPCArg::Optional::NO, "The name for the new wallet."},
+            {"bundle_file", RPCArg::Type::STR, RPCArg::Optional::NO, "Path to a .btxwallet or .btxwallet.json file created by the BTX browser wallet."},
+            {"load_on_startup", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Save wallet name to persistent settings and load on startup. True to add wallet to startup list, false to remove, null to leave unchanged."},
+            {"rescan", RPCArg::Type::BOOL, RPCArg::Default{true}, "Scan the chain from the bundle birthday after restore."},
+            {"wallet_passphrase", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Encrypt the restored wallet with this passphrase before importing the bundle seed."},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR, "name", "The created wallet name"},
+                {RPCResult::Type::BOOL, "success", "Whether the import completed"},
+                {RPCResult::Type::STR, "wallet_name", "Wallet name"},
+                {RPCResult::Type::STR, "format", "Bundle format"},
+                {RPCResult::Type::NUM, "version", "Bundle version"},
+                {RPCResult::Type::STR, "network", "Bundle network"},
+                {RPCResult::Type::NUM, "birthday", "Bundle birthday timestamp used for rescans"},
+                {RPCResult::Type::STR, "first_receive_address", "Verified receive[0] address derived from the bundle seed"},
+                {RPCResult::Type::BOOL, "rescan", "Whether a rescan was requested"},
+                {RPCResult::Type::NUM, "descriptors_imported", "Number of descriptors imported"},
+                {RPCResult::Type::ARR, "warnings", /*optional=*/true, "Warning messages, if any, related to creating, loading, and importing the wallet.",
+                {
+                    {RPCResult::Type::STR, "", ""},
+                }},
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("restorewalletbundle", "\"webwallet\" \"/path/to/btx-wallet-abcd1234.btxwallet.json\"") +
+            HelpExampleRpc("restorewalletbundle", "\"webwallet\", \"/path/to/btx-wallet-abcd1234.btxwallet.json\", null, true")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    EnsureNotWalletRestricted(request);
+
+    WalletContext& context = EnsureWalletContext(request.context);
+    const std::string wallet_name = request.params[0].get_str();
+    BtxWalletBundle bundle = ReadBtxWalletBundleFile(fs::u8path(request.params[1].get_str()));
+    const std::optional<bool> load_on_start = request.params[2].isNull()
+        ? std::nullopt
+        : std::optional<bool>(request.params[2].get_bool());
+    const bool rescan = request.params[3].isNull() ? true : request.params[3].get_bool();
+
+    SecureString passphrase;
+    passphrase.reserve(100);
+    if (!request.params[4].isNull()) {
+        passphrase = std::string_view{request.params[4].get_str()};
+    }
+
+    DatabaseOptions options;
+    DatabaseStatus status;
+    ReadDatabaseArgs(*context.args, options);
+    options.require_create = true;
+    options.create_flags = WALLET_FLAG_DESCRIPTORS | WALLET_FLAG_BLANK_WALLET;
+    options.create_passphrase = passphrase;
+
+    bilingual_str error;
+    std::vector<bilingual_str> warnings;
+    const std::shared_ptr<CWallet> wallet = CreateWallet(context, wallet_name, load_on_start, options, status, error, warnings);
+    HandleWalletError(wallet, status, error);
+
+    bool relock{false};
+    try {
+        if (!passphrase.empty()) {
+            if (!wallet->Unlock(passphrase)) {
+                throw JSONRPCError(RPC_WALLET_PASSPHRASE_INCORRECT, "wallet_passphrase was incorrect after wallet creation");
+            }
+            relock = true;
+        }
+        UniValue result = ImportBtxWalletBundleIntoWallet(*wallet, bundle, rescan);
+        if (relock) wallet->Lock();
+        result.pushKV("name", wallet->GetName());
+        PushWarnings(warnings, result);
+        memory_cleanse(bundle.master_seed.data(), bundle.master_seed.size());
+        return result;
+    } catch (...) {
+        if (relock) wallet->Lock();
+        if (!bundle.master_seed.empty()) memory_cleanse(bundle.master_seed.data(), bundle.master_seed.size());
+        throw;
+    }
 },
     };
 }

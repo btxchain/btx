@@ -5472,6 +5472,67 @@ DescriptorScriptPubKeyMan& CWallet::SetupPQDescriptorScriptPubKeyMan(WalletBatch
     return *out;
 }
 
+void CWallet::SetupImportedPQWalletBundle(WalletBatch& batch, Span<const unsigned char> pq_seed, int64_t creation_time)
+{
+    AssertLockHeld(cs_wallet);
+    assert(IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS));
+    if (IsWalletFlagSet(WALLET_FLAG_EXTERNAL_SIGNER)) {
+        throw std::runtime_error(std::string(__func__) + ": external signer wallets cannot import .btxwallet seeds");
+    }
+    if (IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+        throw std::runtime_error(std::string(__func__) + ": private keys are disabled for this wallet");
+    }
+    if (pq_seed.size() != 32) {
+        throw std::runtime_error(std::string(__func__) + ": BTX wallet bundle master seed must be 32 bytes");
+    }
+    if (IsCrypted() && IsLocked()) {
+        throw std::runtime_error(std::string(__func__) + ": Wallet is locked, cannot import .btxwallet seed");
+    }
+
+    constexpr std::string_view kPQMasterSeedPurpose{"pqmasterseed"};
+    std::vector<unsigned char> seed_vec(pq_seed.begin(), pq_seed.end());
+    if (IsCrypted()) {
+        uint256 iv = GetRandHash();
+        std::vector<unsigned char> encrypted_seed;
+        const bool encrypted = WithEncryptionKey([&](const CKeyingMaterial& encryption_key) {
+            return EncryptAuthenticatedSecret(encryption_key,
+                                              std::span<const unsigned char>{seed_vec.data(), seed_vec.size()},
+                                              iv,
+                                              encrypted_seed,
+                                              kPQMasterSeedPurpose);
+        });
+        if (!encrypted || encrypted_seed.empty()) {
+            throw std::runtime_error(std::string(__func__) + ": encrypting imported PQ master seed failed");
+        }
+        if (!batch.WriteCryptedPQMasterSeed(iv, encrypted_seed)) {
+            throw std::runtime_error(std::string(__func__) + ": writing encrypted imported PQ master seed failed");
+        }
+        if (!batch.ErasePQMasterSeed()) {
+            WalletLogPrintf("%s: failed to erase plaintext PQ master seed after importing encrypted .btxwallet seed\n", __func__);
+        }
+    } else {
+        if (!batch.WritePQMasterSeed(seed_vec)) {
+            throw std::runtime_error(std::string(__func__) + ": writing imported PQ master seed failed");
+        }
+        if (!batch.EraseCryptedPQMasterSeed()) {
+            WalletLogPrintf("%s: failed to erase stale encrypted PQ master seed after importing unencrypted .btxwallet seed\n", __func__);
+        }
+    }
+
+    FlatSigningProvider empty_provider;
+    for (const bool internal : {false, true}) {
+        WalletDescriptor desc = GeneratePQWalletDescriptor(seed_vec, internal);
+        desc.creation_time = creation_time;
+        ScriptPubKeyMan* spk_man = AddWalletDescriptor(desc, empty_provider, /*label=*/"", internal);
+        if (spk_man == nullptr) {
+            throw std::runtime_error(std::string(__func__) + ": importing BTX wallet bundle descriptor failed");
+        }
+        AddActiveScriptPubKeyManWithDb(batch, spk_man->GetID(), OutputType::P2MR, internal);
+    }
+
+    memory_cleanse(seed_vec.data(), seed_vec.size());
+}
+
 void CWallet::SetupOwnPQDescriptorScriptPubKeyMans(WalletBatch& batch)
 {
     AssertLockHeld(cs_wallet);
