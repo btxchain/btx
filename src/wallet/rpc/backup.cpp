@@ -10,6 +10,7 @@
 #include <codex32.h>
 #include <core_io.h>
 #include <crypto/aes.h>
+#include <crypto/sha256.h>
 #include <crypto/sha512.h>
 #include <hash.h>
 #include <interfaces/chain.h>
@@ -42,6 +43,7 @@
 #include <wallet/walletutil.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -1436,6 +1438,22 @@ static std::string PrivatePQWalletDescriptorString(Span<const unsigned char> see
     return out;
 }
 
+static std::string PublicPQWalletDescriptorString(Span<const unsigned char> seed, const bool internal, const int64_t creation_time)
+{
+    WalletDescriptor descriptor = GeneratePQWalletDescriptor(seed, internal);
+    descriptor.creation_time = creation_time;
+    return descriptor.descriptor->ToString();
+}
+
+static std::array<unsigned char, 4> PQSeedFingerprint(Span<const unsigned char> seed)
+{
+    std::array<unsigned char, 32> hash{};
+    CSHA256().Write(seed.data(), seed.size()).Finalize(hash.data());
+    std::array<unsigned char, 4> fingerprint{};
+    std::copy(hash.begin(), hash.begin() + fingerprint.size(), fingerprint.begin());
+    return fingerprint;
+}
+
 static std::string DeriveBtxWalletBundleFirstReceiveAddress(Span<const unsigned char> seed)
 {
     WalletDescriptor descriptor = GeneratePQWalletDescriptor(seed, /*internal=*/false);
@@ -1518,20 +1536,218 @@ static BtxWalletBundle ParseBtxWalletBundle(const UniValue& bundle)
         }
     }
 
-    parsed.receive_descriptor = PrivatePQWalletDescriptorString(parsed.master_seed, /*internal=*/false, parsed.birthday);
-    parsed.change_descriptor = PrivatePQWalletDescriptorString(parsed.master_seed, /*internal=*/true, parsed.birthday);
+    parsed.receive_descriptor = PublicPQWalletDescriptorString(parsed.master_seed, /*internal=*/false, parsed.birthday);
+    parsed.change_descriptor = PublicPQWalletDescriptorString(parsed.master_seed, /*internal=*/true, parsed.birthday);
     if (!bundle["descriptors"].isNull()) {
         const UniValue& descriptors = bundle["descriptors"];
         if (!descriptors.isArray() || descriptors.size() < 2 || !descriptors[0].isStr() || !descriptors[1].isStr()) {
             throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "BTX wallet bundle descriptors must contain receive and change descriptor strings");
         }
-        if (descriptors[0].get_str() != parsed.receive_descriptor ||
-            descriptors[1].get_str() != parsed.change_descriptor) {
+        const std::string receive_private = PrivatePQWalletDescriptorString(parsed.master_seed, /*internal=*/false, parsed.birthday);
+        const std::string change_private = PrivatePQWalletDescriptorString(parsed.master_seed, /*internal=*/true, parsed.birthday);
+        if ((descriptors[0].get_str() != parsed.receive_descriptor && descriptors[0].get_str() != receive_private) ||
+            (descriptors[1].get_str() != parsed.change_descriptor && descriptors[1].get_str() != change_private)) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "BTX wallet bundle descriptors do not match pq_master_seed/network/account");
         }
     }
 
     return parsed;
+}
+
+static std::vector<unsigned char> ParsePQMasterSeedHex(const std::string& seed_hex, const std::string& context)
+{
+    if (seed_hex.size() != 64 || !IsHex(seed_hex)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be 32 bytes encoded as 64 hex characters", context));
+    }
+    std::vector<unsigned char> seed = ParseHex(seed_hex);
+    if (seed.size() != 32) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s decoded to an invalid length", context));
+    }
+    return seed;
+}
+
+static std::vector<unsigned char> ReadWalletPQMasterSeedForExport(CWallet& wallet)
+{
+    if (!wallet.IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "exportwalletbundle is not available for non-descriptor wallets");
+    }
+    if (wallet.IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Cannot export .btxwallet from a wallet with private keys disabled");
+    }
+    if (wallet.IsWalletFlagSet(WALLET_FLAG_EXTERNAL_SIGNER)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Cannot export .btxwallet from an external signer wallet");
+    }
+    if (wallet.IsCrypted() && wallet.IsLocked()) {
+        throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "Wallet is encrypted and must be unlocked before exportwalletbundle");
+    }
+
+    WalletBatch batch(wallet.GetDatabase());
+
+    uint256 iv;
+    std::vector<unsigned char> encrypted_seed;
+    if (batch.ReadCryptedPQMasterSeed(iv, encrypted_seed) && !encrypted_seed.empty()) {
+        std::vector<unsigned char> decrypted_seed;
+        const bool decrypted = wallet.WithEncryptionKey([&](const CKeyingMaterial& encryption_key) {
+            return DecryptAuthenticatedSecret(encryption_key,
+                                              encrypted_seed,
+                                              iv,
+                                              decrypted_seed,
+                                              "pqmasterseed");
+        });
+        if (!decrypted || decrypted_seed.size() != 32) {
+            if (!decrypted_seed.empty()) memory_cleanse(decrypted_seed.data(), decrypted_seed.size());
+            throw JSONRPCError(RPC_WALLET_ERROR, "Wallet PQ master seed is unreadable or corrupted");
+        }
+        return decrypted_seed;
+    }
+
+    std::vector<unsigned char> seed;
+    if (batch.ReadPQMasterSeed(seed) && !seed.empty()) {
+        if (seed.size() != 32) {
+            if (!seed.empty()) memory_cleanse(seed.data(), seed.size());
+            throw JSONRPCError(RPC_WALLET_ERROR, "Wallet PQ master seed has invalid length");
+        }
+        return seed;
+    }
+
+    std::optional<std::array<unsigned char, 32>> descriptor_seed;
+    for (const auto& spkm : wallet.GetAllScriptPubKeyMans()) {
+        const auto* desc_spkm = dynamic_cast<const DescriptorScriptPubKeyMan*>(spkm);
+        if (!desc_spkm) continue;
+
+        std::string desc_str;
+        if (!desc_spkm->GetDescriptorString(desc_str, /*priv=*/true)) continue;
+
+        FlatSigningProvider keys;
+        std::string error;
+        auto parsed_descs = Parse(desc_str, keys, error, /*require_checksum=*/true);
+        for (const auto& desc : parsed_descs) {
+            for (const auto& entry : desc->ExtractAllPQSeeds()) {
+                if (!descriptor_seed) {
+                    descriptor_seed = entry.second;
+                } else if (*descriptor_seed != entry.second) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Wallet contains multiple PQ master seeds; exportwalletbundle only supports single-seed browser wallet exports");
+                }
+            }
+        }
+    }
+    if (descriptor_seed) {
+        return std::vector<unsigned char>(descriptor_seed->begin(), descriptor_seed->end());
+    }
+
+    throw JSONRPCError(RPC_WALLET_ERROR, "Wallet does not contain an exportable PQ master seed");
+}
+
+static UniValue BuildBtxWalletBundleExport(Span<const unsigned char> seed, const int64_t birthday)
+{
+    UniValue descriptors(UniValue::VARR);
+    descriptors.push_back(PublicPQWalletDescriptorString(seed, /*internal=*/false, birthday));
+    descriptors.push_back(PublicPQWalletDescriptorString(seed, /*internal=*/true, birthday));
+
+    UniValue algorithms(UniValue::VARR);
+    algorithms.push_back("ml-dsa-44");
+    algorithms.push_back("slh-dsa-128s");
+
+    UniValue bundle(UniValue::VOBJ);
+    bundle.pushKV("format", "btx-wallet-bundle");
+    bundle.pushKV("version", 1);
+    bundle.pushKV("network", ExpectedBtxWalletBundleNetwork());
+    bundle.pushKV("coin_type", Params().IsTestChain() ? 1 : 0);
+    bundle.pushKV("account", 0);
+    bundle.pushKV("birthday", birthday);
+    bundle.pushKV("algorithms", std::move(algorithms));
+    bundle.pushKV("pq_master_seed", HexStr(seed));
+    bundle.pushKV("first_receive_address", DeriveBtxWalletBundleFirstReceiveAddress(seed));
+    bundle.pushKV("descriptors", std::move(descriptors));
+    return bundle;
+}
+
+RPCHelpMan exportwalletbundle()
+{
+    return RPCHelpMan{
+        "exportwalletbundle",
+        "\nExport the current descriptor wallet as a BTX Wallet Bundle v1 `.btxwallet` JSON file.\n"
+        "The exported file contains plaintext PQ master seed material and public receive/change descriptors for browser-wallet interoperability.\n"
+        "Handle the file like a private key and delete temporary copies after use. For routine native-node backups, prefer backupwalletbundlearchive.\n",
+        {
+            {"bundle_file", RPCArg::Type::STR, RPCArg::Optional::NO, "Destination path for the .btxwallet or .btxwallet.json file."},
+            {"wallet_passphrase", RPCArg::Type::STR, RPCArg::DefaultHint{"omit if wallet is already unlocked"}, "Wallet passphrase used for a temporary unlock when exporting an encrypted locked wallet."},
+            {"birthday", RPCArg::Type::NUM, RPCArg::DefaultHint{"oldest wallet keypool time, or 1 when unavailable"}, "Unix timestamp used by importers as the rescan start time."},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::BOOL, "success", "Whether the export completed"},
+                {RPCResult::Type::STR, "wallet_name", "Wallet name"},
+                {RPCResult::Type::STR, "bundle_file", "Absolute path written"},
+                {RPCResult::Type::STR, "format", "Bundle format"},
+                {RPCResult::Type::NUM, "version", "Bundle version"},
+                {RPCResult::Type::STR, "network", "Bundle network"},
+                {RPCResult::Type::NUM, "birthday", "Bundle birthday timestamp"},
+                {RPCResult::Type::STR, "first_receive_address", "Receive[0] address derived from the exported seed"},
+                {RPCResult::Type::BOOL, "unlocked_by_rpc", "Whether this RPC temporarily unlocked the wallet"},
+                {RPCResult::Type::ARR, "warnings", "Security warnings",
+                {
+                    {RPCResult::Type::STR, "", "Warning message"},
+                }},
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("exportwalletbundle", "\"/secure/offline/btx-wallet.btxwallet.json\"") +
+            HelpExampleCli("exportwalletbundle", "\"/secure/offline/btx-wallet.btxwallet.json\" \"wallet passphrase\"") +
+            HelpExampleRpc("exportwalletbundle", "\"/secure/offline/btx-wallet.btxwallet.json\", \"wallet passphrase\"")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!pwallet) return UniValue::VNULL;
+    CWallet& wallet{*pwallet};
+
+    wallet.BlockUntilSyncedToCurrentChain();
+
+    const fs::path bundle_path = fs::u8path(request.params[0].get_str());
+    const std::optional<std::string> wallet_passphrase = request.params[1].isNull() ? std::nullopt : std::optional<std::string>{request.params[1].get_str()};
+    const int64_t birthday = request.params[2].isNull() ?
+        std::max<int64_t>(1, wallet.GetOldestKeyPoolTime().value_or(1)) :
+        request.params[2].getInt<int64_t>();
+    if (birthday < 1) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "birthday must be a positive Unix timestamp");
+    }
+
+    const bool need_unlock = wallet.IsCrypted() && wallet.IsLocked();
+    WalletBundleUnlockSession unlock_session(wallet, wallet_passphrase, need_unlock, "exportwalletbundle");
+
+    std::vector<unsigned char> seed;
+    UniValue bundle(UniValue::VOBJ);
+    {
+        LOCK(wallet.cs_wallet);
+        seed = ReadWalletPQMasterSeedForExport(wallet);
+        bundle = BuildBtxWalletBundleExport(Span<const unsigned char>{seed.data(), seed.size()}, birthday);
+    }
+    memory_cleanse(seed.data(), seed.size());
+
+    WriteJsonFile(bundle_path, bundle);
+
+    UniValue warnings(UniValue::VARR);
+    warnings.push_back("The exported .btxwallet file contains plaintext PQ master seed material and can spend funds. Store it offline and delete temporary copies.");
+    if (wallet.IsCrypted()) {
+        warnings.push_back(WALLET_PASSPHRASE_NOT_INCLUDED_WARNING);
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("success", true);
+    result.pushKV("wallet_name", wallet.GetName());
+    result.pushKV("bundle_file", fs::PathToString(fs::absolute(bundle_path)));
+    result.pushKV("format", "btx-wallet-bundle");
+    result.pushKV("version", 1);
+    result.pushKV("network", bundle["network"].get_str());
+    result.pushKV("birthday", birthday);
+    result.pushKV("first_receive_address", bundle["first_receive_address"].get_str());
+    result.pushKV("unlocked_by_rpc", unlock_session.UnlockedByRPC());
+    result.pushKV("warnings", std::move(warnings));
+    return result;
+},
+    };
 }
 
 static BtxWalletBundle ReadBtxWalletBundleFile(const fs::path& path)
@@ -1679,6 +1895,7 @@ RPCHelpMan importprivkey()
     };
 }
 
+UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const int64_t timestamp, const std::vector<CExtKey>& master_keys, const std::vector<std::array<unsigned char, 32>>& pq_master_seeds) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const int64_t timestamp, const std::vector<CExtKey>& master_keys = {}) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 
 RPCHelpMan importaddress()
@@ -3011,7 +3228,7 @@ RPCHelpMan importmulti()
     };
 }
 
-UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const int64_t timestamp, const std::vector<CExtKey>& master_keys) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const int64_t timestamp, const std::vector<CExtKey>& master_keys, const std::vector<std::array<unsigned char, 32>>& pq_master_seeds) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     UniValue warnings(UniValue::VARR);
     UniValue result(UniValue::VOBJ);
@@ -3039,6 +3256,13 @@ UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const in
         auto parsed_descs = Parse(descriptor, keys, error, /* require_checksum = */ true, parse_opts);
         if (parsed_descs.empty()) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, error);
+        }
+        for (const auto& pq_seed : pq_master_seeds) {
+            const Span<const unsigned char> seed_span{pq_seed};
+            const auto fingerprint = PQSeedFingerprint(seed_span);
+            for (const auto& parsed_desc : parsed_descs) {
+                parsed_desc->InjectPQSeedByFingerprint(fingerprint, seed_span);
+            }
         }
         std::optional<bool> internal;
         if (data.exists("internal")) {
@@ -3185,6 +3409,12 @@ UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const in
     return result;
 }
 
+UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const int64_t timestamp, const std::vector<CExtKey>& master_keys) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    static const std::vector<std::array<unsigned char, 32>> EMPTY_PQ_MASTER_SEEDS;
+    return ProcessDescriptorImport(wallet, data, timestamp, master_keys, EMPTY_PQ_MASTER_SEEDS);
+}
+
 static UniValue ImportBtxWalletBundleIntoWallet(CWallet& wallet, const BtxWalletBundle& bundle, const bool rescan)
 {
     wallet.BlockUntilSyncedToCurrentChain();
@@ -3322,6 +3552,11 @@ RPCHelpMan importdescriptors()
                             },
                         },
                         RPCArgOptions{.oneline_description="seeds"}},
+                    {"pq_master_seeds", RPCArg::Type::ARR, RPCArg::Default{UniValue::VARR}, "BTX PQ master seeds for pqhd(fingerprint/...) descriptors, as 32-byte hex strings. This is the manual import path for .btxwallet files; prefer importwalletbundle when available.",
+                        {
+                            {"seed", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "A 32-byte PQ master seed encoded as 64 hex characters."},
+                        },
+                        RPCArgOptions{.oneline_description="pq_master_seeds"}},
                 },
                 RPCResult{
                     RPCResult::Type::ARR, "", "Response is an array with the same size as the input that has the execution result",
@@ -3343,7 +3578,8 @@ RPCHelpMan importdescriptors()
                 RPCExamples{
                     HelpExampleCli("importdescriptors", "'[{ \"desc\": \"<my descriptor>\", \"timestamp\":1455191478, \"internal\": true }, "
                                           "{ \"desc\": \"<my descriptor 2>\", \"label\": \"example 2\", \"timestamp\": 1455191480 }]'") +
-                    HelpExampleCli("importdescriptors", "'[{ \"desc\": \"<my descriptor>\", \"timestamp\":1455191478, \"active\": true, \"range\": [0,100], \"label\": \"<my bech32 wallet>\" }]'")
+                    HelpExampleCli("importdescriptors", "'[{ \"desc\": \"<my descriptor>\", \"timestamp\":1455191478, \"active\": true, \"range\": [0,100], \"label\": \"<my bech32 wallet>\" }]'") +
+                    HelpExampleCli("importdescriptors", "'[{\"desc\":\"<btxwallet receive descriptor>\",\"timestamp\":1,\"active\":true,\"range\":[0,100]}, {\"desc\":\"<btxwallet change descriptor>\",\"timestamp\":1,\"active\":true,\"internal\":true,\"range\":[0,100]}]' '[]' '[\"<pq_master_seed hex>\"]'")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& main_request) -> UniValue
 {
@@ -3413,6 +3649,23 @@ RPCHelpMan importdescriptors()
             CExtKey master_key;
             master_key.SetSeed(Span{(std::byte*) seed.data(), seed.size()});
             master_keys.push_back(master_key);
+            memory_cleanse(seed.data(), seed.size());
+        }
+    }
+
+    std::vector<std::array<unsigned char, 32>> pq_master_seeds;
+    if (main_request.params[2].isArray()) {
+        const auto& requested_pq_seeds = main_request.params[2].get_array();
+        pq_master_seeds.reserve(requested_pq_seeds.size());
+        for (size_t i = 0; i < requested_pq_seeds.size(); ++i) {
+            if (!requested_pq_seeds[i].isStr()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "pq_master_seeds entries must be 32-byte hex strings");
+            }
+            std::vector<unsigned char> seed_vec = ParsePQMasterSeedHex(requested_pq_seeds[i].get_str(), "pq_master_seeds entry");
+            std::array<unsigned char, 32> seed{};
+            std::copy(seed_vec.begin(), seed_vec.end(), seed.begin());
+            pq_master_seeds.push_back(seed);
+            memory_cleanse(seed_vec.data(), seed_vec.size());
         }
     }
 
@@ -3427,7 +3680,7 @@ RPCHelpMan importdescriptors()
         for (const UniValue& request : requests.getValues()) {
             // This throws an error if "timestamp" doesn't exist
             const int64_t timestamp = std::max(GetImportTimestamp(request, now), minimum_timestamp);
-            const UniValue result = ProcessDescriptorImport(*pwallet, request, timestamp, master_keys);
+            const UniValue result = ProcessDescriptorImport(*pwallet, request, timestamp, master_keys, pq_master_seeds);
             response.push_back(result);
 
             if (lowest_timestamp > timestamp ) {

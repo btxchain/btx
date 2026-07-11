@@ -5,6 +5,7 @@
 """Exercise first-class .btxwallet restore/import support."""
 
 import json
+import hashlib
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_raises_rpc_error
@@ -53,6 +54,29 @@ class WalletBtxWalletTest(BitcoinTestFramework):
         wallet = node.get_wallet_rpc("from-btxwallet")
         assert_equal(wallet.getnewaddress(), restored["first_receive_address"])
 
+        self.log.info("Export the restored native wallet back to a .btxwallet file")
+        exported_path = self.nodes[0].datadir_path / "exported-webwallet.btxwallet.json"
+        exported = wallet.exportwalletbundle(exported_path, None, 1)
+        assert_equal(exported["success"], True)
+        assert_equal(exported["first_receive_address"], restored["first_receive_address"])
+        exported_bundle = json.loads(exported_path.read_text(encoding="utf-8"))
+        assert_equal(exported_bundle["format"], "btx-wallet-bundle")
+        assert_equal(exported_bundle["version"], 1)
+        assert_equal(exported_bundle["network"], "regtest")
+        assert_equal(exported_bundle["pq_master_seed"], "11" * 32)
+        assert_equal(exported_bundle["first_receive_address"], restored["first_receive_address"])
+        assert_equal(len(exported_bundle["descriptors"]), 2)
+        fingerprint = hashlib.sha256(bytes.fromhex(exported_bundle["pq_master_seed"])).hexdigest()[:8]
+        assert f"pqhd({fingerprint}/" in exported_bundle["descriptors"][0]
+        assert f"pqhd({fingerprint}/" in exported_bundle["descriptors"][1]
+        assert exported_bundle["pq_master_seed"] not in exported_bundle["descriptors"][0]
+        assert exported_bundle["pq_master_seed"] not in exported_bundle["descriptors"][1]
+
+        self.log.info("Restore and import from an exported public-descriptor .btxwallet file")
+        restored_export = node.restorewalletbundle("from-exported-btxwallet", exported_path, None, False)
+        assert_equal(restored_export["success"], True)
+        assert_equal(restored_export["first_receive_address"], restored["first_receive_address"])
+
         self.log.info("Import the same bundle into an existing blank descriptor wallet")
         node.createwallet(wallet_name="blank-target", descriptors=True, blank=True)
         blank = node.get_wallet_rpc("blank-target")
@@ -60,6 +84,32 @@ class WalletBtxWalletTest(BitcoinTestFramework):
         assert_equal(imported["success"], True)
         assert_equal(imported["first_receive_address"], restored["first_receive_address"])
         assert_equal(blank.getnewaddress(), restored["first_receive_address"])
+
+        self.log.info("Import exported public descriptors manually with the bundle PQ master seed")
+        node.createwallet(wallet_name="manual-target", descriptors=True, blank=True)
+        manual = node.get_wallet_rpc("manual-target")
+        manual_import = manual.importdescriptors(
+            [
+                {
+                    "desc": exported_bundle["descriptors"][0],
+                    "timestamp": exported_bundle["birthday"],
+                    "active": True,
+                    "range": [0, 100],
+                },
+                {
+                    "desc": exported_bundle["descriptors"][1],
+                    "timestamp": exported_bundle["birthday"],
+                    "active": True,
+                    "internal": True,
+                    "range": [0, 100],
+                },
+            ],
+            [],
+            [exported_bundle["pq_master_seed"]],
+        )
+        assert_equal(manual_import[0]["success"], True)
+        assert_equal(manual_import[1]["success"], True)
+        assert_equal(manual.getnewaddress(), restored["first_receive_address"])
 
         self.log.info("Reject bundles whose claimed first address does not match the seed")
         mismatch_path = self.write_bundle(

@@ -2,8 +2,9 @@
 
 BTX supports two wallet portability formats with different security goals:
 
-- `.btxwallet` browser wallet export: a plaintext JSON recovery file produced by
-  the BTX browser wallet for import into a native `btxd` descriptor wallet.
+- `.btxwallet` wallet bundle: a plaintext JSON recovery file used to move a
+  BTX browser wallet into a native `btxd` descriptor wallet, or to export a
+  single-seed native descriptor wallet for browser custody.
 - `.bundle.btx` native archive: an encrypted node-wallet backup produced by
   `backupwalletbundlearchive` for offline/operator recovery.
 
@@ -39,6 +40,20 @@ wallet:
 btx-cli -rpcwallet="webwallet" importwalletbundle "/secure/offline/btx-wallet.btxwallet.json" true
 ```
 
+If you need the manual fallback path advertised by the browser wallet, create a
+blank descriptor wallet and pass the bundle's public descriptors plus its
+`pq_master_seed` to `importdescriptors`:
+
+```bash
+btx-cli createwallet "webwallet" false true "" false true
+
+btx-cli -rpcwallet="webwallet" importdescriptors \
+  '[{"desc":"<receive descriptor>","timestamp":<birthday>,"active":true,"range":[0,100]},
+    {"desc":"<change descriptor>","timestamp":<birthday>,"active":true,"internal":true,"range":[0,100]}]' \
+  '[]' \
+  '["<pq_master_seed hex>"]'
+```
+
 Both RPCs verify the bundle before installing keys:
 
 - `format` must be `btx-wallet-bundle`
@@ -62,17 +77,32 @@ btx-cli -rpcwallet="mywallet" \
   backupwalletbundlearchive /secure/offline/mywallet.bundle.btx
 ```
 
-The node does not provide a default native-to-browser raw seed export. That is
-intentional: exporting the node PQ master seed into a browser-importable
-plaintext JSON file would bypass wallet encryption and produce a file that can
-spend the wallet. If a recovery workflow requires browser custody, generate the
-wallet in the browser first, then import the `.btxwallet` into the node with
-`restorewalletbundle`.
+Use `exportwalletbundle` only when you intentionally need a browser-compatible
+plaintext `.btxwallet` export:
+
+```bash
+btx-cli -rpcwallet="mywallet" \
+  exportwalletbundle "/secure/offline/mywallet.btxwallet.json"
+```
+
+For encrypted wallets, either unlock the wallet first or pass the optional
+wallet passphrase argument:
+
+```bash
+btx-cli -rpcwallet="mywallet" \
+  exportwalletbundle "/secure/offline/mywallet.btxwallet.json" "wallet passphrase"
+```
+
+The export contains the PQ master seed in plaintext plus public receive/change
+descriptors. It can spend funds. Prefer `backupwalletbundlearchive` for normal
+native backups and use `exportwalletbundle` only for deliberate browser/node
+interop or recovery handoff.
 
 ## WebAssembly Signing Core
 
 The `src/libbitcoinpqc/wasm` target builds the same ML-DSA-44 and
 SLH-DSA-SHAKE-128s signing core for browser and Node use. CI checks that
 caller-supplied entropy produces byte-identical key material in native and WASM
-builds. Website releases should consume the generated `btx-pqc.js` and
-`btx-pqc.wasm` artifacts rather than reimplementing PQ key generation.
+builds. Website releases should consume the generated `btx-pqc.js`,
+`btx-pqc.mjs`, and `btx-pqc.wasm` artifacts rather than reimplementing PQ key
+generation.

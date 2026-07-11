@@ -1120,6 +1120,7 @@ RPCHelpMan importprivkey();
 RPCHelpMan importaddress();
 RPCHelpMan importpubkey();
 RPCHelpMan dumpwallet();
+RPCHelpMan exportwalletbundle();
 RPCHelpMan importwallet();
 RPCHelpMan importwalletbundle();
 RPCHelpMan importprunedfunds();
@@ -1294,6 +1295,7 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &dumpmasterprivkey},
         {"wallet", &dumpwallet},
         {"wallet", &encryptwallet},
+        {"wallet", &exportwalletbundle},
         {"wallet", &getaddressesbylabel},
         {"wallet", &getaddressinfo},
         {"wallet", &getbalance},

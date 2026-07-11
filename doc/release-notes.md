@@ -44,6 +44,15 @@ hardware-specific accelerated path with a CPU fallback.
   `.btxwallet` v1 JSON exports. `restorewalletbundle` creates a descriptor
   wallet from a browser bundle, while `importwalletbundle` imports the same
   verified seed/descriptors into an existing descriptor wallet.
+- `exportwalletbundle` exports a single-seed descriptor wallet as a
+  browser-compatible `.btxwallet` JSON file containing the PQ master seed and
+  public receive/change descriptors. This is intended for explicit browser/node
+  interop; ordinary node backups should continue to use
+  `backupwalletbundlearchive`.
+- `importdescriptors` now accepts an optional `pq_master_seeds` array so the
+  browser-wallet manual fallback path, `createwallet` plus
+  `importdescriptors`, can import public `pqhd(fingerprint/...)` descriptors
+  from a `.btxwallet` file and attach the matching PQ seed.
 - Browser bundle import verifies the format, version, network, coin type,
   account, seed length, first receive address, and optional descriptor strings
   before installing key material.
@@ -60,9 +69,9 @@ hardware-specific accelerated path with a CPU fallback.
 
 - `.btxwallet` files contain plaintext PQ master seed material. Handle them like
   private keys, keep them offline, and delete temporary copies after import.
-- Native node wallets should be exported with `backupwalletbundlearchive`; the
-  node intentionally does not provide a default encrypted-wallet-to-plaintext
-  browser-seed export path.
+- Native node wallets should normally be exported with
+  `backupwalletbundlearchive`; `exportwalletbundle` is intentionally plaintext
+  for browser interop and should not be used as the routine backup format.
 
 # Credits
 

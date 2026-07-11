@@ -121,6 +121,8 @@ Two node RPCs support this browser-wallet recovery path:
   receive/change descriptors, and optionally rescans from the bundle birthday
 - `importwalletbundle` imports the same bundle into the selected existing
   descriptor wallet
+- `exportwalletbundle` exports a single-seed descriptor wallet back into a
+  browser-compatible plaintext `.btxwallet` JSON file
 - both RPCs verify the bundle format, version, chain/network, account, seed
   length, derived first receive address, and descriptor strings before import
 
@@ -130,16 +132,31 @@ Examples:
 $ btx-cli restorewalletbundle "webwallet" /secure/offline/btx-wallet.btxwallet.json
 
 $ btx-cli -rpcwallet="webwallet" importwalletbundle /secure/offline/btx-wallet.btxwallet.json false
+
+$ btx-cli -rpcwallet="webwallet" exportwalletbundle /secure/offline/webwallet.btxwallet.json
 ```
 
 Use `restorewalletbundle` for the normal browser-to-node recovery flow. Use
 `importwalletbundle` only when you have already created the destination
-descriptor wallet.
+descriptor wallet. Use `exportwalletbundle` only when you intentionally need a
+plaintext browser-compatible file; use `backupwalletbundlearchive` for routine
+encrypted node backups.
+
+The manual browser-wallet fallback is also supported:
+
+```
+$ btx-cli createwallet "webwallet" false true "" false true
+
+$ btx-cli -rpcwallet="webwallet" importdescriptors \
+    '[{"desc":"<receive descriptor>","timestamp":1,"active":true,"range":[0,100]},
+      {"desc":"<change descriptor>","timestamp":1,"active":true,"internal":true,"range":[0,100]}]' \
+    '[]' \
+    '["<pq_master_seed hex>"]'
+```
 
 See [BTX Browser Wallet and Node Wallet Interop](btxwallet-browser-node-interop.md)
-for the full `.btxwallet` schema boundary, browser-to-node restore flow, and
-why native node wallets should use encrypted `.bundle.btx` archives instead of
-exporting raw browser-importable seeds.
+for the full `.btxwallet` schema boundary, browser/node import and export flows,
+and why native node wallets should usually use encrypted `.bundle.btx` archives.
 
 ### 1.4.2 BTX Wallet Backup Bundle RPC
 
