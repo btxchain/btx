@@ -1120,7 +1120,9 @@ RPCHelpMan importprivkey();
 RPCHelpMan importaddress();
 RPCHelpMan importpubkey();
 RPCHelpMan dumpwallet();
+RPCHelpMan exportwalletbundle();
 RPCHelpMan importwallet();
+RPCHelpMan importwalletbundle();
 RPCHelpMan importprunedfunds();
 RPCHelpMan removeprunedfunds();
 RPCHelpMan importmulti();
@@ -1129,6 +1131,7 @@ RPCHelpMan listdescriptors();
 RPCHelpMan backupwallet();
 RPCHelpMan backupwalletbundle();
 RPCHelpMan backupwalletbundlearchive();
+RPCHelpMan restorewalletbundle();
 RPCHelpMan restorewalletbundlearchive();
 RPCHelpMan restorewallet();
 
@@ -1286,11 +1289,13 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &createwallet},
         {"wallet", &createwalletdescriptor},
         {"wallet", &restorewallet},
+        {"wallet", &restorewalletbundle},
         {"wallet", &restorewalletbundlearchive},
         {"wallet", &dumpprivkey},
         {"wallet", &dumpmasterprivkey},
         {"wallet", &dumpwallet},
         {"wallet", &encryptwallet},
+        {"wallet", &exportwalletbundle},
         {"wallet", &getaddressesbylabel},
         {"wallet", &getaddressinfo},
         {"wallet", &getbalance},
@@ -1310,6 +1315,7 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &importprunedfunds},
         {"wallet", &importpubkey},
         {"wallet", &importwallet},
+        {"wallet", &importwalletbundle},
         {"wallet", &keypoolrefill},
         {"wallet", &listaddressgroupings},
         {"wallet", &listdescriptors},

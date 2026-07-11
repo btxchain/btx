@@ -1309,6 +1309,8 @@ public:
 
     //! Create new PQ-native DescriptorScriptPubKeyMan from a PQ seed
     DescriptorScriptPubKeyMan& SetupPQDescriptorScriptPubKeyMan(WalletBatch& batch, Span<const unsigned char> pq_seed, bool internal) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    //! Import a BTX Wallet Bundle v1 seed as active receive/change PQ descriptors
+    void SetupImportedPQWalletBundle(WalletBatch& batch, Span<const unsigned char> pq_seed, int64_t creation_time) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     //! Create PQ master seed and default PQ-native DescriptorScriptPubKeyMans
     void SetupOwnPQDescriptorScriptPubKeyMans(WalletBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 

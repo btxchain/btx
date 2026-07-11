@@ -806,6 +806,16 @@ btx-cli -rpcwallet=mywallet \
 # Restore from archive
 btx-cli -stdinbundlepassphrase \
   restorewalletbundlearchive "restored" "/path/to/mywallet.bundle.btx"
+
+# Restore a browser self-custody .btxwallet JSON bundle
+btx-cli restorewalletbundle "webwallet" "/path/to/btx-wallet.btxwallet.json"
+
+# Or import that browser bundle into an existing blank descriptor wallet
+btx-cli -rpcwallet=webwallet importwalletbundle "/path/to/btx-wallet.btxwallet.json"
+
+# Export a native descriptor wallet as a browser-compatible .btxwallet file
+# This file contains plaintext PQ master seed material.
+btx-cli -rpcwallet=mywallet exportwalletbundle "/path/to/mywallet.btxwallet.json"
 ```
 
 ### Wallet Encryption
