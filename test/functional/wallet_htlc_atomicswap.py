@@ -144,7 +144,8 @@ class WalletHtlcAtomicSwapTest(BitcoinTestFramework):
 
         # The preimage is now revealed on-chain in the claim witness (so the EVM leg
         # can be claimed). Scan the witness stack for the matching item.
-        claim_tx = node.getrawtransaction(claim_txid, True)
+        # No -txindex on this node: scope the lookup to the block that confirmed it.
+        claim_tx = node.getrawtransaction(claim_txid, True, node.getbestblockhash())
         revealed = False
         want = hash160(preimage)
         for vin in claim_tx["vin"]:

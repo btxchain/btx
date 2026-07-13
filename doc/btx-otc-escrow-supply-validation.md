@@ -1,8 +1,12 @@
 # BTX OTC Escrow & Verifiable-Supply Design
 
-**Status:** Design proposal (rev 1). No consensus changes required — every
-construction in this document is expressible with script/descriptor/RPC
-surfaces that are already consensus-active and shipped on `main`.
+**Status:** Design (rev 1) + Phase-1 reference tooling implemented in
+[`contrib/otc/`](../contrib/otc/README.md) (offer creation, verification,
+watching, bond refund, HTLC settlement wrappers; exercised end to end by
+`test/functional/wallet_otc_offer.py`). No consensus changes required —
+every construction in this document is expressible with
+script/descriptor/RPC surfaces that are already consensus-active and
+shipped on `main`.
 
 **Problem being solved:** OTC desks and brokers are quoting large blocks of
 BTX for sale that they cannot actually deliver ("phantom supply"), which
