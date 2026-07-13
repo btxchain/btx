@@ -447,6 +447,7 @@ BASE_SCRIPTS = [
     'wallet_bridge_attested_unshield.py --descriptors',
     'wallet_bridge_refund_timeout.py --descriptors',
     'wallet_htlc_atomicswap.py --descriptors',
+    'wallet_otc_offer.py --descriptors',
     'p2p_leak.py',
     'wallet_encryption.py --legacy-wallet',
     'wallet_encryption.py --descriptors',
