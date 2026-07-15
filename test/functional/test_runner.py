@@ -149,6 +149,7 @@ BASE_SCRIPTS = [
     'wallet_taproot.py --descriptors',
     'feature_bip68_sequence.py',
     'feature_btx_matmul_consensus.py',
+    'feature_content_elimination.py --descriptors',
     'feature_btx_block_capacity.py --descriptors',
     'mining_shielded_exit_velocity_template.py',
     'feature_btx_subsidy_schedule.py',

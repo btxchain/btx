@@ -300,6 +300,16 @@ struct Params {
      *  enforce the mempool/template hardening immediately from the 128,000 cleanup
      *  boundary without retroactively changing the 125,000..127,999 history. */
     int32_t nShieldedDirectSendPublicFlowDisableHeight{std::numeric_limits<int32_t>::max()};
+    /** Content-elimination hard fork: at/after this height the chain forbids the
+     *  data-carriage channels that inscription/NFT/token meta-protocols depend on
+     *  (non-coinbase OP_RETURN outputs, non-financial P2MR witness leaves,
+     *  free-form CSFS/HTLC message elements, unspanned shielded proof-payload
+     *  bytes, and oversized coinbase scriptSig content), while preserving every
+     *  monetary/custody/vault/swap/bridge/shielded-exit surface. Flag-day gated so
+     *  upgraded and legacy nodes agree pre-activation. See
+     *  doc/btx-inscription-elimination-plan.md. Must be >= nShieldedSunsetHeight
+     *  when set so the shielded-credit disable already holds. */
+    int32_t nContentEliminationHeight{std::numeric_limits<int32_t>::max()};
     /** Post-sunset zero-output V2_SEND z->t exit activation. Disabled by default
      *  so the decode compatibility fix can ship before a later consensus
      *  activation height permits these transactions once the sunset rules are
@@ -517,6 +527,12 @@ struct Params {
         return height >= 0 &&
             nShieldedDirectSendPublicFlowDisableHeight != std::numeric_limits<int32_t>::max() &&
             height >= nShieldedDirectSendPublicFlowDisableHeight;
+    }
+    bool IsContentEliminationActive(int32_t height) const
+    {
+        return height >= 0 &&
+            nContentEliminationHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nContentEliminationHeight;
     }
     bool IsShieldedV2SendZeroOutputExitActive(int32_t height) const
     {

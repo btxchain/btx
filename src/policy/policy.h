@@ -84,8 +84,10 @@ static constexpr unsigned int DEFAULT_BYTES_PER_SIGOP{20};
 static constexpr unsigned int DEFAULT_BYTES_PER_SIGOP_STRICT{20};
 /** Default for -datacarriercost (multiplied by WITNESS_SCALE_FACTOR) */
 static constexpr unsigned int DEFAULT_WEIGHT_PER_DATA_BYTE{4};
-/** Default for -rejecttokens */
-static constexpr bool DEFAULT_REJECT_TOKENS{false};
+/** Default for -rejecttokens.
+ * BTX is a financial-only chain: runes/OLGA-style token overlays are rejected at
+ * relay by default (see the inscription-elimination plan, Pillar 6). */
+static constexpr bool DEFAULT_REJECT_TOKENS{true};
 
 // NOTE: Changes to these three require manually adjusting doc in init.cpp
 /** Default for -permitephemeral=send */
@@ -141,8 +143,14 @@ static constexpr unsigned int DEFAULT_ANCESTOR_SIZE_LIMIT_KVB{1024};
 static constexpr unsigned int DEFAULT_DESCENDANT_LIMIT{100};
 /** Default for -limitdescendantsize, maximum kilobytes of in-mempool descendants */
 static constexpr unsigned int DEFAULT_DESCENDANT_SIZE_LIMIT_KVB{1024};
-/** Default for -datacarrier */
-static const bool DEFAULT_ACCEPT_DATACARRIER = true;
+/** Default for -datacarrier.
+ * BTX is a financial-only chain: non-coinbase OP_RETURN data-carrier outputs are
+ * non-standard at relay by default (see the inscription-elimination plan, Pillar
+ * 6), ahead of the consensus rule. With this off, max_datacarrier_bytes defaults
+ * to nullopt so any OP_RETURN output is non-standard. The coinbase witness
+ * commitment is produced by the miner and never relayed as a standalone tx, so
+ * this does not affect block production. */
+static const bool DEFAULT_ACCEPT_DATACARRIER = false;
 /**
  * Default setting for -datacarriersize. 80 bytes of data, +1 for OP_RETURN,
  * +2 for the pushdata opcodes.
