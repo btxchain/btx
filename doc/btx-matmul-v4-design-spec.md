@@ -1147,7 +1147,7 @@ The nonce-rate drop is the *time* ratio (ops move to far-faster tensor cores):
 Z = t_nonce(v4)/t_nonce(v3) = (ops_v4/ops_v3) × (ALU throughput / INT8 tensor throughput)
 ```
 
-RTX 5090 (~105 T 32-bit-ALU-ops/s; ~400 INT8 TOPS): v3 ≈ 5×10⁹ nonces/s (realistic); v4 (sketch, ε=0.65) = 400×10¹²×0.65 / 1.7717×10¹⁰ ≈ **1.47×10⁴ nonces/s** → **Z ≈ 3.6×10⁵–7×10⁵**; other devices **Z ≈ 10⁵–10⁶** (×~8 under full-C).
+RTX 5090 (~105 T 32-bit-ALU-ops/s; **838 INT8 TOPS**, §P.1): v3 ≈ 5×10⁹ nonces/s (realistic); v4 (sketch, ε=0.65, b=16 basis) = 838×10¹²×0.65 / 1.7717×10¹⁰ ≈ **3.07×10⁴ nonces/s** → **Z ≈ 1.6×10⁵**; other devices **Z ≈ 10⁵–10⁶**. *(Z scales with the work unit — halve the nonce rate / double Z at the launch b=8; ×~4 under full-C. Immaterial: Ω is **read from chainparams, never estimated**, §Q.9.2.)*
 
 Network illustration: 100 H100s = 7.26×10⁶ nonces/s vs today's 3.157×10⁸ = a **43× drop** in `M_BTX`, while real useful compute is up ~400,000× (Q.4). **Raw `M_BTX` under-represents — inverts — the compute change**; un-recalibrated, btxprice's `SEH` reports a ~99.999 % "hashrate collapse" at the fork.
 
@@ -1397,7 +1397,7 @@ Physical resolution: the v3 fleet's INT8 tensor capacity was **installed but idl
 
 **(a) "More effective compute in a real way vs Bitcoin?"** — **YES in useful-output/economic-value terms; NO in raw-security terms.** In `U`-terms the same hardware produces ~30× more useful matrix arithmetic, and that arithmetic is dense INT8 GEMM — the commodity AI clouds rent by the hour — where Bitcoin's SHA-256 output has no external market. In `S`-terms nothing jumps (~1.59% of Bitcoin on an unchanged fleet). Any "more compute vs Bitcoin" claim must be a **value-of-work** claim, never a security claim.
 
-**(b) "Exactly the same, keep numbers consistent?"** — **YES for the security metric; §Q.5 is the mechanism.** `w_v4 = w_v3 × Den/Num` (the §I.4 constant) preserves `SEH`/`BTX_security_%`. The raw nonce rate drops ~10⁵–10⁶× as a **unit change**; reporting it un-rescaled prints a fictitious 99.999% collapse. "Keep it consistent" is right — *for this metric*.
+**(b) "Exactly the same, keep numbers consistent?"** — **YES for the security metric; §Q.5 is the mechanism.** `w_v4 = w_v3 × Ω` (Ω = Num/Den = Z > 1, §Q.9.2) preserves `SEH`/`BTX_security_%`. The raw nonce rate drops ~10⁵–10⁶× as a **unit change**; reporting it un-rescaled prints a fictitious 99.999% collapse. "Keep it consistent" is right — *for this metric*.
 
 **(c) "Uncovers hidden power the inefficient solver masked?"** — **YES, precisely.** The v3 fleet's tensor cores executed zero mining cycles. v4 routes the work onto units that were always there. Decomposition: ≈2× (SHA reclaimed) × ≈5–30× (ALU emulation → native tensor) × ≈1.2–2× (n=512→4096) ≈ 30×. "Uncovered latent capacity" accurate; "created new capacity" not.
 
@@ -1451,7 +1451,7 @@ Shippable formulation: **v4 is AI-native proof-of-work on dual-use, market-price
 |---|---|---|---|
 | 1 | "v4 unlocks ~30× more useful matrix compute per unit hardware (12–120×), ~10²–10³× network-wide with the datacenter shift." | useful compute | §Q.4, §Q.7 |
 | 2 | "Compute is now market-priced AI compute: `TOPS_net = getnetworkhashps × 1.7717×10¹⁰`, backing `TOPS_net × $17/dTOPS-yr` per year (a flow) and a production-cost floor of `N_eq·r/800` $/BTX (a price)." | useful compute | §Q.6 |
-| 3 | "Security is continuous across the fork; `BTX_security_%` preserved by `w_v4 = w_v3 × Den/Num`." | security | §Q.5, §I.4 |
+| 3 | "Security is continuous across the fork; `BTX_security_%` preserved by `w_v4 = w_v3 × Ω` (Ω = Num/Den = Z > 1, §Q.9.2)." | security | §Q.5, §I.4 |
 | 4 | "Nonce rate drops ~10⁵–10⁶× because each v4 nonce embodies ~2×10⁶× more work — a unit change, like re-quoting meters as kilometers." | metric semantics | §Q.2–§Q.3 |
 | 5 | "Unlike SHA-256, whose work has no external market, v4's per-nonce operation (dense INT8 GEMM) is the commodity AI clouds rent by the hour." | useful compute | §Q.14.1 |
 | 6 | "Mining now carries a **real, AI-market-indexed marginal cost** in place of v3's near-zero junk-hardware cost; the **zero-cost engine** behind price-insensitive mine-and-dump is removed (dumping is no longer *free*). This is a **soft cost anchor that tracks price both ways, not a hard price support**, and it does not by itself defeat a determined suppressor — §0.7-(4)." | economics | §S.4.3–§S.4.5 |
@@ -1764,6 +1764,44 @@ So the equilibrium narrative in one line: **low price → small consumer-Apple n
 4. **Everything moves.** `P*_g ∝ TOPS_net × R_g`: difficulty growth raises thresholds mechanically; rental repricing (H100 rates fell ~2× during 2024–26) lowers them. Timestamp every rental poll; never quote a `P*` without its `(TOPS_net, R_g)` snapshot.
 5. **Per-GPU, share-based.** The model assumes §O.2 proportional pooled rewards (BTX/hr = expected share). Solo-mining variance, pool fees, and vardiff overhead sit on top and only *raise* effective break-evens.
 6. **Descriptive, never prescriptive — and the input price may be manipulated (§0.7-(4)).** This entire metric consumes `P_BTX` as an *exogenous* variable; it produces which-card-mines-at-what-price, and nothing here may flow back into a consensus parameter. Because `P_BTX` can be adversarially suppressed (mine-and-dump, wash/fake-supply selling, §S.4), the low-price outcomes above are an **attack state**, not the equilibrium: reading them as "the network is naturally consumer-dominated, so keep the bar low" is exactly the manipulation the price-independence invariant forbids. Use this chart to *explain* miner behavior and to show how the floor rises once genuine demand clears the datacenter thresholds — never to justify tuning difficulty, `n`, the work unit, or the floor to the current print.
+
+---
+
+### Q.22 Price as an output: metric taxonomy, manipulation model, and display (normative for btxprice)
+
+> **Status:** governing for all btxprice presentation, implementing §0.7-(4). Price is an **output the market discovers** — on a thin market, a manipulable one — never an input to any protocol parameter or any headline metric.
+
+**Q.22.1 Taxonomy — every displayed series carries exactly one tag.** Data flow is one-way: `chain → PHYSICAL → MODEL → display`; the observed price enters only the display layer.
+
+| Tag | Meaning | Movable by moving the BTX print? |
+|---|---|---|
+| **[PHYSICAL]** | from chainwork, timestamps, consensus constants, hardware datasheets only | **No** — only by physically adding/removing Freivalds-verified compute |
+| **[OBSERVED]** | a market output the network does not control and never consumes | Yes — that is the point; it is labeled as such |
+| **[MODEL]** | a bracket/read-out combining PHYSICAL series with *external, non-BTX* market prices (GPU rental, Bitcoin) | Only via those external markets — not via the BTX print |
+
+Assignment: `BTX_security_%`/`SEH`, `TOPS_net`/`N_eq`, raw `M_BTX` are **[PHYSICAL]**; `P_prod`, `P_prod_inf`, `P⁰`, `P*_g`, `P_btc`, `C_51` are **[MODEL]**; the exchange print `P_obs`, observed market cap, and reported volumes are **[OBSERVED]**.
+
+**Q.22.2 The suppression burn-rate model.** Emission is fixed at 800 BTX/hr, so a dumper controlling share `s` of work dumps `s·800` BTX/hr and runs a metered loss
+
+```
+B = s · 800 · (P*_marginal − P_obs)⁺   [$/hr]   (+ wash-trading fees)
+```
+
+v3: `P*_marginal ≈ 0` (paid-off junk) ⇒ `B ≈ 0`, suppression self-financing. v4 (100-H100-eq, 5090-marginal `P* = $0.16`): pinning `P_obs = $0.05` costs `B = 800·($0.16−$0.05) = $88/hr ≈ $770k/yr`, forever, in real dollars (§S.4.3 negative-carry). **Fake supply** (wash/spoof) moves `P_obs` only — it mints no coin, adds no nonce, moves no chainwork, so every [PHYSICAL] series is untouched. That asymmetry *is* the security argument.
+
+**Q.22.3 Gap decomposition.** `G = P_btc/P_obs = (P_btc/P_prod) × (P_prod/P_obs)`: the first factor is **structural** disequilibrium (constant in `N_eq`, parallel on a log axis — the honest distance between cost-to-produce and Bitcoin-grade security valuation, ≈3.6×10⁷ same-snapshot, §Q.20); the second is the **stress residual** = 1 in a rational regime, and > 1 only under capitulation (transient) or subsidized/manufactured supply (manipulation). A wide `P_btc/P_obs` is therefore *partly* manipulation, not purely honest disequilibrium; v4 compresses it **from below** (raising `P_prod`), never by chasing the print.
+
+**Q.22.4 Diagnostics (all price-free on the evidence side; display annotations only).**
+
+| # | Indicator | Manipulation-consistent reading |
+|---|---|---|
+| D1 | `P_obs < P*_marginal` for > k ASERT half-lives (k≈48 h) *while `TOPS_net` is flat/rising* | rational miners would have exited (shown in `TOPS_net`); someone is eating a metered loss or the flow is not real. Amber; below `P⁰`, red |
+| D2 | reported daily sell volume ÷ (19,200 BTX/day + bounded float) ≫ low single digits | reported volume cannot be real coins — wash-consistent (Bitwise 2019; Cong et al. 2023) |
+| D3 | `TOPS_net` rising while `P_obs` grinds down | real capital entering *against* the print — the print, not the network, is the anomaly |
+
+**Q.22.5 Display rules (binding).** (1) Never "BTX is worth $X" — always "BTX trades at $X **(observed; may be suppressed)**; production-cost floor read-out $A; security-comparable $B." (2) Render `P_obs` as badged dots; when `P_obs < P_prod` or `< P⁰`, **show it below the floor** — never clamp or re-anchor the floor to it; the violation *is* the signal. (3) Chart D′: log $/BTX; `P_btc` dashed ("aspirational, not a floor"), `P_prod` band `[P*_marginal, P*_H100]` ("soft anchor"), `P⁰` dotted, `P_obs` badged dots; zones **green** `[P*_marginal, P_btc]` = fair-discovery range, **amber** `[P⁰, P*_marginal)` = below marginal cost / possible manipulation, **red** `< P⁰` = sub-viability; parallel bracket lines, no crossover. Beside it a **price-integrity panel** (D1–D3 with thresholds/state). (4) The standing line on every price view: *"No BTX price is an input to any consensus parameter (§0.7-(4)). These charts describe; the protocol does not read them."* (5) The prior "consumer-dominated ~$0.31-floor" wording is retired as an *equilibrium* description — it is the descriptive read-out at a suppressed print (the attack state), not the resting state.
+
+**Q.22.6 No-feedback guard.** `getnetworkhashps` is a read-only RPC (`src/rpc/mining.cpp:271-315`); ASERT reads only heights/timestamps/constants (`src/pow.cpp:1829/2106/2455`); no consensus path consumes an exchange feed or btxprice. Recommended CI check: assert `src/pow.cpp`, `src/validation.cpp`, `src/kernel/chainparams.cpp` contain no price/HTTP dependency, and that btxprice's pipeline is one-directional.
 
 ---
 
