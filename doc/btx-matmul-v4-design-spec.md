@@ -67,7 +67,11 @@ The following matrix maps each point raised in the requirements discussion to th
 | 13 | CMP cards / old hardware / cheap electricity dumping price (2 CMP ≈ 1 5080) | CMP-class cards lack low-precision tensor GEMM (CMP-170HX FP32 = 0.39 TFLOPS) and are excluded by the INT8-tensor + VRAM-gate design | §K, §N |
 | 14 | Advisor: make it memory-bound to limit low-VRAM GPUs | Adopted **only as a capacity gate**, not as bandwidth-hardness; design stays compute-bound (resolves the tension in #10) | §L, §M |
 | 15 | Change consensus immediately; give requirements | This document; clean hard-fork swap with a complete implementation checklist | §G–§J |
-| 16 | Consumer/Apple users must still pool massively and earn rewards, not be shut out | v4 *orders* by INT8 throughput, never hard-excludes; share-based pooling over cheap Freivalds-verified shares pays proportional-to-compute (PPLNS/PPS); Apple M5 re-enters with a genuine INT8 path | §O.1, §O.2 |
+| 16 | Consumer/Apple users must still pool massively and earn rewards, not be shut out | v4 *orders* by INT8 throughput, never hard-excludes; share-based pooling over cheap Freivalds-verified shares pays proportional-to-compute (PPLNS/PPS); Apple M5 re-enters with a genuine INT8 path | §O.1, §O.2, §P.3 |
+| 17 | How M1+ Apple / RTX 3090/5090 / datacenter fare in v3 vs v4 | Full cross-generation comparison: CMP & M1–M4 fall to verify-only, M5+ and all Ampere+ NVIDIA re-rank by INT8 TOPS (H100 = 2.4× a 5090); datacenter wins per device & per watt | §P |
+| 18 | Measure network compute in nonces / % of Bitcoin (btxprice.com) & reflect the true compute growth | Nonce metric *inverts* at the fork (drops ~10⁵–10⁶×); recalibrate `w` to the §I.4 fork constant or switch to an INT8-TOPS/H100-eq/AI-$ metric; effective compute rises ~30× same-hardware, ~10²–10³× combined | §Q |
+| 19 | End-to-end post-quantum (hard requirement) | **Met** — PQ-only chain from genesis (`fEnforceP2MROnlyOutputs` + `SCRIPT_VERIFY_REJECT_LEGACY_SIGS`); v4 PoW, Freivalds, hashes (128-bit post-Grover), ML-DSA/SLH-DSA all PQ-safe | §R |
+| 20 | Close FPGA/ASIC loopholes — need AI-native GPU compute to win; stop rogue mine-and-dump pools (btxpool.org) | Only bit-exact INT8 tensor silicon wins (FPGAs 13–31× behind, SHA/bandwidth ASICs gain nothing); junk-hardware pools de-rated 10–360×/excluded; AI-rental opportunity cost creates a `N_eq·r/800` $/BTX floor that makes below-floor dumping irrational | §S |
 
 ---
 
@@ -78,7 +82,11 @@ The following matrix maps each point raised in the requirements discussion to th
 - **§G–§J** — Consensus params, header/serialization, validation/mining/difficulty wiring, file-by-file hard-fork checklist *(the integration)*
 - **§K–§N** — Hardware economics, compute-vs-memory reconciliation, parameter calibration, migration & risk register *(the economics)*
 - **§O** — Evolving consumer matmul hardware (Apple M5) & inclusive pooling *(who can still participate)*
-- **Appendices** — Test vectors & test matrix, glossary, references
+- **§P** — Cross-generation hardware: M1→M5, RTX 3090/4090/5090, datacenter, v3 vs v4, solo & pooled *(who wins)*
+- **§Q** — Network compute accounting & the btxprice valuation model across the fork *(measuring the compute)*
+- **§R** — Post-quantum security — end-to-end audit *(the quantum requirement)*
+- **§S** — ASIC/FPGA resistance, AI-native-compute necessity & rogue-pool (mine-and-dump) economics *(closing the loopholes)*
+- **Appendices** — Glossary (A), references (B), open calibration items (C), optional CRT compute-multiplier variant — full spec (D)
 
 ---
 
@@ -742,13 +750,15 @@ Baseline: v3's measured bench is 569.4 µs **per round** at n=512 (`MatMulFreiva
 
 All figures are **dense** peak throughput; 2:4 structured-sparse peaks (marked \*) are shown for completeness but are irrelevant to v4, since PoW matrices are full-rank dense by construction.
 
+> **Correction (governed by §P):** the consumer Blackwell INT8 rows below were originally ~2× low — they quoted the FP8-with-FP32-accumulate rate. GeForce halves *floating-point*-accumulate throughput but runs **INT8→INT32 at full rate**, and v4 uses INT8, so the true dense INT8 is **RTX 5090 = 838 TOPS, RTX 5080 = 450.2 TOPS** ([RTX Blackwell whitepaper, App. A/B](https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf)). The corrected per-device datacenter lever is **H100 ≈ 2.4× / B200 ≈ 5.4× over a 5090** (not the ~5×/~11× printed in the ratio prose of §K.3/§O). §P is authoritative for all consumer-GPU INT8 figures and cross-generation ratios; the numbers there supersede the estimates in this table and in §K.3/§O where they differ. Direction of every conclusion (datacenter wins per device and per watt; consumer/Apple pooled-viable) is unchanged.
+
 | Device | FP64 | BF16/FP16 | FP8 | INT8 (s8×s8→s32) | Memory | Bandwidth |
 |---|---|---|---|---|---|---|
 | NVIDIA H100 SXM5 | ~60–67 TFLOPS | ~990 TFLOPS (1,979\*) | ~1,979 TFLOPS (3,958\*) | **~1,979 TOPS** (3,958\*) | 80 GB HBM3 | 3.35 TB/s |
 | NVIDIA H200 | as H100 (same die) | as H100 | as H100 | **~1,979 TOPS** | 141 GB HBM3e | 4.8 TB/s |
 | NVIDIA B200 | ~40 TFLOPS (cut vs Hopper) | 2,250 TFLOPS (4,500\*) | 4,500 TFLOPS (9,000\*) | **4,500 TOPS** (9,000\*) | 192 GB HBM3e | ~8 TB/s |
-| GeForce RTX 5090 | — | 209.5 TFLOPS | ~400 TFLOPS | **~400 TOPS** (est.; 3,352 "AI TOPS" is sparse marketing) | 32 GB GDDR7 | 1.79 TB/s |
-| GeForce RTX 5080 | — | 112.6 TFLOPS | ~225 TFLOPS | **~225 TOPS** (est.) | 16 GB GDDR7 | 0.96 TB/s |
+| GeForce RTX 5090 | — | 209.5 TFLOPS | ~419 TFLOPS | **838 TOPS** dense (1,676 sparse) — corrected, see §P | 32 GB GDDR7 | 1.79 TB/s |
+| GeForce RTX 5080 | — | 112.6 TFLOPS | ~225 TFLOPS | **450.2 TOPS** dense — corrected, see §P | 16 GB GDDR7 | 0.96 TB/s |
 | Apple M4 Max | — | 36.9 TFLOPS FP16 (GPU); ANE "38 TOPS INT8" dequantizes to FP16, true ~19 TFLOPS | n/a | **~19–37 TOPS effective** (no real INT8 speedup) | up to 128 GB unified | 546 GB/s |
 | Apple M5 (10-core GPU, est.) | — | ~16–18 TFLOPS FP16 (GPU Neural Accelerators; no native BF16) | n/a | **~25–35 TOPS** (s8×s8→s32, est.) | up to 32 GB unified | 153 GB/s |
 | Apple M5 Max (40-core GPU, est.) | — | ~70 TFLOPS FP16 (GPU Neural Accelerators) | n/a | **~110–140 TOPS** (s8×s8→s32, est.) | up to 128 GB unified | 460–614 GB/s |
@@ -859,7 +869,7 @@ Retain **90 s**. With the k = 1 baseline, the per-nonce work unit is the §E.3 s
 
 ### N.1 Strategic pivot — stated explicitly
 
-BTX's existing spec/site optimize for commodity fairness: viability "on any machine from the last decade" (`doc/btx-matmul-pow-spec.md`), commodity GPU/TPU alignment as the ASIC story (`doc/btx-matmul-pow-spec-analysis.md`), first-class Apple/Metal/CPU paths (`src/pow.cpp`). **v4 intentionally reverses this priority:** the marginal mining reward accrues to the device with the most dense low-precision tensor throughput — current-generation datacenter accelerators — and consumer (16–32 GB), Apple, CPU, and repurposed-mining hardware become structurally less competitive (§K.3). This is an objective change, not a side effect; all public docs/site/mining guides must be rewritten before activation, or shipping v4 under v3's fairness messaging is a credibility failure. Note that ordering is **not** exclusion: share-based pooling (§O.2) preserves proportional-to-compute rewards for consumer and Apple devices with a conforming INT8 path (Apple M5-class and later, §O.1), so "less competitive per device" does not mean "shut out."
+BTX's existing spec/site optimize for commodity fairness: viability "on any machine from the last decade" (`doc/btx-matmul-pow-spec.md`), commodity GPU/TPU alignment as the ASIC story (`doc/btx-matmul-pow-spec-analysis.md`), first-class Apple/Metal/CPU paths (`src/pow.cpp`). **v4 intentionally reverses this priority:** the marginal mining reward accrues to the device with the most dense low-precision tensor throughput — current-generation datacenter accelerators — and consumer (16–32 GB), Apple, CPU, and repurposed-mining hardware become structurally less competitive (§K.3). This is an objective change, not a side effect; all public docs/site/mining guides must be rewritten before activation, or shipping v4 under v3's fairness messaging is a credibility failure. Note that ordering is **not** exclusion: share-based pooling (§O.2) preserves proportional-to-compute rewards for consumer and Apple devices with a conforming INT8 path (Apple M5-class and later, §O.1), so "less competitive per device" does not mean "shut out." Conversely, pools built on non-INT8 junk hardware lose their economic basis entirely — the mine-and-dump analysis (btxpool.org) and the AI-rental cost floor that replaces zero-cost dumping are in §S.4. **Residual risk (spot-rental mine-and-dump during price spikes):** bounded by the §S.4.3 cost floor and the ASERT difficulty response — proceeds are capped at `price − spot-floor`/BTX and the rented-capacity influx raises difficulty within hours; monitor nonce-rate spikes vs spot-GPU price troughs (§N.3).
 
 ### N.2 Mining-ops implications
 
@@ -932,6 +942,384 @@ Because the per-nonce cost is one full dense INT8 matmul (the §A.6/§E.3 work u
 
 ---
 
+## P. Cross-generation hardware: how each class fares in v3 vs v4 (solo and pooled)
+
+*This section is descriptive, not normative. It reconciles §K.1/§K.3 against primary sources (NVIDIA architecture whitepapers and datasheets, Apple announcements, third-party microbenchmarks) and walks each hardware class through the v3→v4 regime change. **Where a figure here conflicts with §K.1/§K.3, this section's primary-sourced figure governs** (corrections listed at the end). Headline correction: the RTX 5090 dense INT8 is **838 TOPS**, not the ~400 printed in §K — the ~400 figure is the FP8-with-FP32-accumulate rate; GeForce's 2× reduced-precision cut applies only to floating-point accumulate, while **INT8→INT32 runs full-rate**. The true per-device datacenter lever is therefore H100 ≈ 2.4× and B200 ≈ 5.4× over a 5090 (not ~5×/~11×). Direction of every conclusion is unchanged; magnitudes are corrected.*
+
+### P.0 The two regimes, one line each
+
+- **v3 (old):** an 18-bit SHA-256 pre-hash gate (~1/262,144 nonces reach the matmul) followed by a small n=512 exact matmul over GF(2³¹−1), cache-resident (~2 MiB), on **integer ALUs / shader cores** — no tensor cores anywhere in the hot path. Winner ≈ SHA-256 throughput × integer-ALU throughput at low memory latency. Tensor cores and HBM contributed **nothing**.
+- **v4 (new):** one fresh dense **n=4096 INT8 matmul per nonce** (k=1, no SHA gate), exact s8×s8→s32, Freivalds-verified in O(n²). Winner = **dense INT8 tensor TOPS**. Devices without an exact-integer matmul path cannot mine (they can still verify — verification needs no tensor units).
+
+### P.1 Master comparison table
+
+Dense (non-sparse) figures; 2:4 sparsity peaks (\*) are irrelevant to v4. Per-nonce time on the full-matmul reference basis 2n³ ≈ 1.374×10¹¹ INT8 ops at n=4096 (the §E.3 sketch basis scales every device by the same 2/b, ratios unchanged). The n=4096 working set (~100 MB) fits every device, so at launch **eligibility = exact INT8 matrix path**, not VRAM.
+
+| Device (year) | Dense INT8 TOPS | FP16 tensor TFLOPS | VRAM | Bandwidth | Matrix units | v4 mining | t/nonce | vs H100 |
+|---|---|---|---|---|---|---|---|---|
+| **Apple M1 / Pro / Max / Ultra** (2020–22) | — (no matrix path) | 2.6–20.8 FP32 shader | ≤128 GB unified | 68–800 GB/s | **No** | **verify-only** | — | ∞ |
+| **Apple M2 / M3 / M4 (+Max)** (2022–24) | — (ANE dequantizes to FP16) | 3.6–19.5 FP32 shader | ≤128 GB | ≤546 GB/s | **No** | **verify-only** | — | ∞ |
+| **Apple M5** (Oct 2025) | ~27–33 (est.) | ~16–18 (est.) | ≤32 GB | 153.6 GB/s | **Yes** (Neural Accel/core) | **Yes** | ~4.6 ms | ~66× |
+| **Apple M5 Pro** (Mar 2026) | ~55–65 (est.) | ~35 (est.) | ≤64 GB | 307 GB/s | **Yes** | **Yes** | ~2.3 ms | ~33× |
+| **Apple M5 Max** (Mar 2026) | ~130 (est.) | ~70 (est.) | ≤128 GB | 460–614 GB/s | **Yes** | **Yes** | ~1.06 ms | ~15× |
+| **RTX 3090** (2020, Ampere) | **284.7** | 71.2/142.3 | 24 GB GDDR6X | 936 GB/s | Yes (3rd-gen TC) | **Yes** | 483 µs | 7.0× |
+| **RTX 3090 Ti** (2022) | **320** | 80 | 24 GB | 1,008 GB/s | Yes | **Yes** | 429 µs | 6.2× |
+| **RTX 4090** (2022, Ada) | **660.6** | 165.2/330.3 | 24 GB GDDR6X | 1,008 GB/s | Yes (4th-gen TC) | **Yes** | 208 µs | 3.0× |
+| **RTX 5090** (2025, Blackwell) | **838** (1,676\*) | 209.5/419 | 32 GB GDDR7 | 1,792 GB/s | Yes (5th-gen TC) | **Yes** | 164 µs | 2.4× |
+| **RTX 5080** (2025) | **450.2** (900.4\*) | 112.6/225.1 | 16 GB GDDR7 | 960 GB/s | Yes | **Yes** | 305 µs | 4.4× |
+| **A100 80GB** (2020, DC) | **624** (1,248\*) | 312 | 80 GB HBM2e | 2,039 GB/s | Yes | **Yes** | 220 µs | 3.2× |
+| **H100 SXM** (2022, Hopper) | **1,979** (3,958\*) | 989 | 80 GB HBM3 | 3.35 TB/s | Yes | **Yes** | 69.4 µs | **1× (ref)** |
+| **H200** (2024) | **1,979** (same die) | 989 | 141 GB HBM3e | 4.8 TB/s | Yes | **Yes** | 69.4 µs | 1× |
+| **B200 (HGX)** (2024–25) | **4,500** (9,000\*) | 2,250 | 180 GB HBM3e | 7.7 TB/s | Yes | **Yes** | 30.5 µs | 0.44× |
+| **GB200 (per GPU)** | **5,000** (10,000\*) | 2,500 | 186 GB HBM3e | 8 TB/s | Yes | **Yes** | 27.5 µs | 0.40× |
+| **CMP 170HX** (2021, ex-Ethash) | — (tensor cores unusable; ~12.5 TIOPS ALU) | ~42 shader | 8 GB HBM2e | 1,355 GB/s meas. | Fused off | **verify-only** | — | ∞ |
+
+Sources: [RTX Blackwell WP App. A/B](https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf) (5090 INT8 838 dense / 5080 450.2; GeForce INT8 is full-rate, only FP-accumulate is halved), [Ada WP](https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf) (4090 660.6), [GA102 WP v2.1](https://www.nvidia.com/content/PDF/nvidia-ampere-ga-102-gpu-architecture-whitepaper-v2.1.pdf) (3090 284.7), [3090 Ti](https://gpupoet.com/gpu/learn/card/nvidia-geforce-rtx-3090-ti), [A100 DS](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-nvidia-us-2188504-web.pdf), [H100 DS](https://resources.nvidia.com/en-us-gpu-resources/h100-datasheet-24306), [H200](https://www.nvidia.com/en-us/data-center/h200/), [B200 DS](https://www.primeline-solutions.com/media/categories/server/nach-gpu/nvidia-hgx-h200/nvidia-blackwell-b200-datasheet.pdf), [Hopper WP](https://www.advancedclustering.com/wp-content/uploads/2022/03/gtc22-whitepaper-hopper.pdf), [CMP 170HX](https://niconiconi.neocities.org/tech-notes/nvidia-cmp-170hx-review/), [Apple silicon](https://en.wikipedia.org/wiki/Apple_silicon), [Apple M5](https://en.wikipedia.org/wiki/Apple_M5), [M5 newsroom](https://www.apple.com/newsroom/2025/10/apple-unleashes-m5-the-next-big-leap-in-ai-performance-for-apple-silicon/), [M5 Pro/Max newsroom](https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/), [Zakharko M5 microbenchmark](https://tzakharko.github.io/apple-neural-accelerators-benchmark/). M1–M4 have **no** GPU matrix units (the A19/M5 Neural Accelerator is "the first appearance of dedicated matrix multiplication acceleration hardware on Apple GPUs"); M4 ANE "38 TOPS" is a dequantize-to-FP16 path, consensus-ineligible. M5-family INT8 estimates scale the measured A19 rate (~2,048 INT8 OPS/core/cycle, 13.4 TOPS on 5-core A19) by GPU-core count; pending the §N.3-v determinism self-test.
+
+### P.2 Per-class verdicts: v3 → v4
+
+v3 proxy = integer-ALU throughput (whitepaper INT32/non-tensor): RTX 3090 **17.8** TIOPS, 4090 **41.3**, 5080 **56.3**, 5090 **104.8**, CMP 170HX **12.5**, H100 ≈ **33**. Note the v3 compression: an H100 out-ALUs a 3090 by only ~1.9× and a CMP 170HX by ~2.6× — at 10–15× the price — with its 1,979 INT8 TOPS + 3.35 TB/s HBM idle. (A 5090 actually *out-ALUs an H100 ~3×* under v3.)
+
+| Class | v3 (SHA lottery + n=512 ALU matmul) | v4 (n=4096 INT8 tensor matmul) |
+|---|---|---|
+| **Apple M1–M4** | **Competitive** — cache-resident integer work + ARM SHA extensions + low-latency unified memory; mined within small factors of discrete GPUs. | **Verify-only** — no matrix units / no exact integer path. A Mac that mined v3 does **zero eligible v4 work**; still validates the chain fully (Freivalds is O(n²) on any CPU). |
+| **Apple M5 / Pro / Max** | Same as M4 (accelerators irrelevant to SHA/ALU). | **Re-enters** — genuine s8×s8→s32 per-core matrix hardware. M5 Max ≈ 130 TOPS → **~1/15 H100**, ~29% of a 5080, ~16% of a 5090; base M5 ~1/66 H100. Modest but real; pooled-viable (P.3). |
+| **RTX 3090 / 3090 Ti (Ampere)** | Among the best perf/$ SHA+ALU parts of the era. | **Still eligible** — Ampere tensor cores do real dense INT8 (284.7/320). Falls to **~1/7 / ~1/6.2 H100**. Key asymmetry vs Apple: a 2020 consumer NVIDIA card survives; a 2023 Apple flagship does not. |
+| **RTX 4090 (Ada)** | Competitive (41.3 TIOPS — above H100's ~33). | Eligible at 660.6 → **~1/3 H100**, and **beats an A100 (624)** per device. |
+| **RTX 5090 / 5080 (Blackwell)** | v3's top consumer parts (a 5090 out-ALUs an H100 ~3×). | Best consumer v4 miners: 838 / 450.2 → **~1/2.4 and ~1/4.4 H100**, ~1/5.4 and ~1/10 B200. Reranked below datacenter, not excluded. |
+| **A100 / H100 / H200 / B200–GB200** | **Uncompetitive per dollar** — no SHA edge; tensor cores + HBM idle. | **Win per device** — 1,979 / 4,500 / 5,000 dense INT8 = 2.4–5.4× a 5090, 7–16× a 3090, 15–35× an M5 Max, ~2× better TOPS/W (H100 ≈ 2.8 vs 5090 ≈ 1.5). The intended reversal (§K). |
+| **CMP 170HX (& pre-Turing GPUs)** | **The v3 archetype winner** — 12.5 TIOPS + 1.5 TB/s HBM2e on a cheap ex-mining card, ~parity-class with a 5090 on v3 economics. | **~0 eligible work** — tensor cores non-functional, FP32 FMA locked to 394 GFLOPS, no s8×s8→s32 path; its bandwidth (the reason it existed) buys nothing against a compute-bound AI≈1,365 GEMM. The card that thrived under hash PoW is exactly what v4 retires. |
+
+**The reversal in one sentence:** under v3, a $300 ex-mining CMP and a MacBook were parity-class with datacenter silicon whose tensor cores idled; under v4, the CMP does zero eligible work, M1–M4 Macs drop to verify-only, M5 Macs re-enter at ~1/15 of an H100 — and every consumer NVIDIA card back to Ampere keeps mining, just reranked 2.4–7× below Hopper.
+
+### P.3 Pooled scaling (cross-ref §O.2)
+
+Aggregation is linear in TOPS (independent work units, Freivalds-cheap shares), so "N devices = one datacenter part" is exact:
+
+| Device | Dense INT8 TOPS | N ≈ one H100 (1,979) | N ≈ one B200 (4,500) |
+|---|---|---|---|
+| RTX 5090 | 838 | **2.4** | **5.4** |
+| RTX 4090 | 660.6 | 3.0 | 6.8 |
+| A100 80GB | 624 | 3.2 | 7.2 |
+| RTX 5080 | 450.2 | 4.4 | 10.0 |
+| RTX 3090 Ti | 320 | 6.2 | 14.1 |
+| RTX 3090 | 284.7 | 7.0 | 15.8 |
+| Apple M5 Max | ~130 | ~15 | ~35 |
+| Apple M5 Pro | ~60 | ~33 | ~75 |
+| Apple M5 | ~30 | ~66 | ~150 |
+| Apple M1–M4 / CMP 170HX | — | **∞ (verify-only)** | ∞ |
+
+Worked pools (§O.2 machinery): 1,000× RTX 3090 ≈ 285 POPS ≈ 144 H100 / 63 B200; 1,000× RTX 5090 ≈ 838 POPS ≈ 423 H100 / 186 B200; 1,000× M5 Max ≈ 130 POPS ≈ 66 H100 / 29 B200; a 10,000-device mixed consumer pool (~100 TOPS avg) ≈ 1,000 POPS ≈ 505 H100 — a datacenter rack row. Every device clears hundreds–thousands of nonces/s at n=4096 (M5 ~200/s, 3090 ~2,100/s, 5090 ~6,100/s, H100 ~14,400/s), so vardiff targets of ~0.1–1 share/s/worker give low-variance PPLNS even for the weakest eligible device.
+
+**Two asymmetries stated plainly:** (1) **v4 does not exclude consumer NVIDIA** — Ampere/Ada/Blackwell all carry full-rate dense INT8; v4 *reranks* (2.4–7× below H100) rather than ejecting. Three 4090s ≈ one H100. (2) Among Apple the line is **generational**: M1–M4 out (no matrix hardware), M5-family in at ~15–66 devices per H100; the M5 Max's 128 GB unified memory also gives headroom if n is ever retargeted up (§L).
+
+### P.4 Intent check (against §0.5 objectives)
+
+| Goal | Outcome | Verdict |
+|---|---|---|
+| Datacenter wins per device (§0.5 #1,#9) | H100 = 2.4× 5090, 3.0× 4090, 15× M5 Max; B200 = 5.4×/6.8×/35×; +~2× TOPS/W, rack density. | **Met** (see nuance b) |
+| Old SHA-era hardware falls away (§0.5 #13) | CMP 170HX: v3 parity-class → v4 zero eligible work. | **Met, vividly.** |
+| Matrix-less Apple excluded; capable Apple included (§O.1) | M1–M4 verify-only; M5/Pro/Max mine at their tier. | **Met.** |
+| Consumer/Apple still participate, esp. pooled (§0.5 #16, §O.2) | All NVIDIA back to Ampere eligible; 2.4 5090s or 15 M5 Maxes ≈ 1 H100; linear pooled aggregation. | **Met — stronger than the spec's stated ratios** (nuance a). |
+
+**Nuances for owner sign-off:** (a) the per-device lever vs a 5090 is **2.4×/5.4×, not ~5×/~11×** (those used FP8-FP32-accumulate rates; INT8→INT32 is full-rate on GeForce) — direction unchanged, magnitude corrected before activation. (b) a consumer RTX 5090 (838) and 4090 (660.6) **out-mine an A100 (624)** per device, so "datacenter wins" holds against *Hopper/Blackwell-generation* datacenter parts, not NVIDIA's 2020 datacenter part; state the goal as "current-generation datacenter accelerators win." (c) consumer NVIDIA remaining eligible + pooled-viable is a **feature** per §0.5 #16.
+
+---
+
+## Q. Network compute accounting & the btxprice valuation model across the v3→v4 fork
+
+> **Status:** informative/economic companion to the normative consensus sections. Cross-refs: gate removal §A.5, work-unit bound §A.6/§E.3, one-time difficulty rescale §I.4, hardware table §K.1/§K.3, work-unit sizing §M.4, strategic pivot §N.1, pooling §O.2.
+> External model under analysis: the [btxprice.com valuation model](https://btxprice.com/valuation-model) ([btxprice.com](https://btxprice.com)). Figures in §Q.3–§Q.4 are pre-calibration estimates, superseded by the measured §I.4 benchmark once available.
+
+### Q.0 Summary
+
+The v3→v4 fork changes *what a nonce is*. In v3 a nonce attempt is a 4-compression SHA-256d header hash that reaches the n=512 matmul only 1 time in 2¹⁸; in v4 every nonce is one fresh dense n=4096 INT8 tensor-core GEMM. Consequently the chainwork-derived rate `M_BTX` reported by `getnetworkhashps(6720)` — the sole compute input to btxprice.com's raw-compute floor — will **drop by roughly five orders of magnitude at the fork while the network's real, useful matrix compute rises by two to six orders of magnitude**. Read naively, the metric inverts reality. This section derives the discontinuity, the exact recalibration of btxprice's `w` constant needed for continuity, and a replacement metric (network INT8-TOPS / H100-equivalents / AI-compute-$) that measures what v4 actually produces.
+
+### Q.1 The btxprice.com model as it stands (v3 baseline)
+
+From [btxprice.com/valuation-model](https://btxprice.com/valuation-model):
+
+- **Raw compute floor:** `P_raw = P_BTC · (SEH / H_BTC)`, with `SEH = w · M_BTX_1w`, `H_BTC` = Bitcoin 1-week hashrate, `w` = calibration constant, `M_BTX_1w` = BTX 1-week MatMul rate from `getnetworkhashps(6720)`.
+- **Security %:** `BTX_security_% = 100 · w · M_BTX_1w / H_BTC` — currently **1.5897 %**.
+- **Current rate:** `M_BTX` = **315,669,420.87 MatMul/sec** (≈ 3.157×10⁸/s).
+- **Calibration constant:** `matmul_security_weight w = 45,251,427,826.03` (≈ 4.525×10¹⁰).
+- **Sanity:** `w·M_BTX` = 1.4285×10¹⁹ H/s-equivalent ≈ 1.59 % of `H_BTC` ≈ 9×10²⁰ H/s. ✓
+- **Estimator:** work-per-block from the exact 6,720-block chainwork delta ÷ block count (6,720 × 90 s = 7 days); upward moves linear, downward under a 7-day-half-life soft cap; 10-min buckets; 90 s target.
+- **Forward assumption:** 12-month forward difficulty estimate **12.71 %**.
+
+Every quantity except `P_BTC`/`H_BTC` is downstream of one number, `M_BTX`. So the fork's effect on the model reduces to its effect on the semantics of `M_BTX`.
+
+### Q.2 What `M_BTX` counts: v3 vs v4 semantics of `getnetworkhashps(6720)`
+
+`getnetworkhashps` is chainwork arithmetic: per-block work = `2²⁵⁶/(target+1)` = expected nonce *attempts* to find a block, so the 6,720-block delta ÷ time is the network's **nonce-attempt rate**, whatever an attempt costs. The label "MatMul/sec" is aspirational; the true unit is nonces/s.
+
+**v3.** A nonce begins with `σ = SHA256d(header)` (182-byte header: 4 SHA-256 compressions) and must pass the 18-bit pre-hash gate (`CheckMatMulPreHashGate`, `src/pow.cpp:2688-2697`) before the matmul; only 1 in 2¹⁸ = 262,144 reaches the n=512 GEMM over GF(2³¹−1) on **integer ALUs**. Therefore:
+
+- `M_BTX` = 3.157×10⁸/s is a rate of **cheap σ-gate hash attempts**, not matmuls.
+- Actual n=512 matmul rate = `M_BTX / 2¹⁸` ≈ **1,204 full matmuls/s network-wide**.
+- Amortized per-matmul: gate ≈ 2¹⁸ σ-hashes ≈ **1.5×10⁹ ALU ops**; matmul ≈ n³ = 1.34×10⁸ field-mults × ~7–8 ALU ops ≈ **1.0×10⁹ ALU ops** → **~50/50 SHA/ALU-matmul split, zero tensor-core cycles.**
+- Per-nonce amortized cost ≈ **~10⁴ 32-bit ALU ops/nonce**.
+
+**v4.** Gate removed (`ε = 0`); every nonce is one fresh dense n=4096 s8×s8→s32 GEMM, k=1, exact INT32 accumulation, Freivalds-verified. Per-nonce enforced work:
+
+- Full-C reference: `2n³` = **1.3744×10¹¹ INT8 ops/nonce**.
+- Sketch-optimal (b=16, m=256 — what a rational miner pays): `4n²m + 2nm²` = **1.7717×10¹⁰ INT8 ops/nonce** (ratio to full-C = 7.76 ≈ b/2).
+
+So post-fork `getnetworkhashps` counts **full n=4096 tensor-core matmuls/s** — the label finally becomes literal.
+
+**Per-nonce cost ratio (v4 ÷ v3):**
+
+| Basis | ops per v4 nonce | ops per v3 nonce | ratio |
+|---|---|---|---|
+| Sketch-optimal | 1.7717×10¹⁰ INT8 | ~1.0×10⁴ ALU | **≈ 1.8×10⁶×** |
+| Full-C | 1.3744×10¹¹ INT8 | ~1.0×10⁴ ALU | **≈ 1.4×10⁷×** |
+
+Decomposition: gate removal 2¹⁸ ≈ 2.6×10⁵; n=512→4096 = 512× per matmul (66× on the sketch basis); the σ-vs-matmul cost structure supplies the rest. **Each v4 nonce is ~2×10⁶ (sketch) to ~10⁷ (full-C)× more raw work than a v3 nonce.**
+
+### Q.3 The `M_BTX` discontinuity: direction and magnitude (Z)
+
+The nonce-rate drop is the *time* ratio (ops move to far-faster tensor cores):
+
+```
+Z = t_nonce(v4)/t_nonce(v3) = (ops_v4/ops_v3) × (ALU throughput / INT8 tensor throughput)
+```
+
+RTX 5090 (~105 T 32-bit-ALU-ops/s; ~400 INT8 TOPS): v3 ≈ 5×10⁹ nonces/s (realistic); v4 (sketch, ε=0.65) = 400×10¹²×0.65 / 1.7717×10¹⁰ ≈ **1.47×10⁴ nonces/s** → **Z ≈ 3.6×10⁵–7×10⁵**; other devices **Z ≈ 10⁵–10⁶** (×~8 under full-C).
+
+Network illustration: 100 H100s = 7.26×10⁶ nonces/s vs today's 3.157×10⁸ = a **43× drop** in `M_BTX`, while real useful compute is up ~400,000× (Q.4). **Raw `M_BTX` under-represents — inverts — the compute change**; un-recalibrated, btxprice's `SEH` reports a ~99.999 % "hashrate collapse" at the fork.
+
+Post-fork per-device nonce rates (sketch basis, ε=0.65, W=1.7717×10¹⁰):
+
+| Device | Dense INT8 TOPS | Delivered (ε=0.65) | v4 nonces/s |
+|---|---|---|---|
+| B200 | 4,500 | 2,925 | 1.65×10⁵ |
+| H100/H200 | 1,979 | 1,286 | 7.26×10⁴ |
+| RTX 5090 | ~400 | 260 | 1.47×10⁴ |
+| RTX 5080 | ~225 | 146 | 8.3×10³ |
+| Apple M5 Max | ~130 | ~85 | 4.8×10³ |
+| Apple M5 | ~30 | ~20 | 1.1×10³ |
+| Apple M4 | ~0 usable | — | 0 (verify-only, §O.1) |
+
+### Q.4 Effective useful matrix compute, before vs after (X and Y)
+
+**Before (v3).** Real matmul rate = 1,204 n=512 matmuls/s → useful ops = 1,204 × 2×512³ = **3.23×10¹¹ ops/s ≈ 0.32 TOPS network-wide** (32-bit ALU field ops, not tensor). The entire v3 network does **~1/4,000 of one H100's matrix arithmetic**, with ~half its cycles burned on SHA-256 of no matrix value.
+
+**After (v4).** Effective matrix compute = delivered network INT8 tensor throughput `TOPS_net = ε · Σ P_int8` — ~100 % of mining cycles are dense INT8 GEMM (verification is O(n²) noise).
+
+**Same-hardware boost X** (v3 fleet flips the switch):
+
+```
+X ≈ f_gate × f_tensor × f_util
+  f_gate   ≈ 2×      (SHA-gate cycles redirected; 1.9–2.4× for 47–60 % SHA share)
+  f_tensor ≈ 5–30×   (integer-ALU field emulation → native INT8 tensor path)
+  f_util   ≈ 1.2–2×  (n=512 cache-resident → n=4096 compute-bound, AI = n/3 ≈ 1,365)
+  X ≈ 12–120×,  headline ≈ 30×  (direct RTX 5090 check ≈ 17–35×) ✓
+```
+
+**Composition boost Y** (fleet → datacenter INT8; per-device H100/5090 ≈ 4.9×, B200/5090 ≈ 11.2×, H100/M5 Max ≈ 15×; tensor-less v3-optimal hardware exits): fleet-weighted **Y ≈ 5–10×**.
+
+Combined **X·Y ≈ 10²–10³× on a value-conserved fleet**; unbounded beyond that as commodity AI capacity joins (one marginal H100 ≈ 4,000× today's entire useful rate).
+
+### Q.5 Recalibrating btxprice: the `w` rescale (exact)
+
+Continuity at fork height `t_f` on an unchanged fleet requires `w_v4 · M_BTX(t_f⁺) = w_v3 · M_BTX(t_f⁻)`, and `M_BTX(t_f⁺)/M_BTX(t_f⁻) = 1/Z`, so:
+
+```
+w_v4 = w_v3 · Z = w_v3 · (device-time per v4 nonce / per v3 nonce)
+```
+
+Numerically `w_v4 ≈ 4.525×10¹⁰ × ~5×10⁵ ≈ 2×10¹⁶` (order 10¹⁵–10¹⁶); check `w_v4·M_v4` ≈ 1.43×10¹⁹ = `w_v3·M_v3`. ✓
+
+**Do not estimate Z — read it from consensus.** §I.4 mandates a one-time `next_target = parent_target × Num/Den` rescale + ASERT re-anchor at `nMatMulV4Height`. Since `getnetworkhashps` = `2²⁵⁶/(target+1)` arithmetic, the fork rescales reported nonce-rate by exactly that constant, so **`w_v4 = w_v3 × Den/Num` exactly, read from chainparams at tag time** — continuity of `SEH` and `BTX_security_%` preserved by construction.
+
+Estimator plumbing fixes: (1) **never span the fork with the 6,720-block window** (split deltas below/above `nMatMulV4Height`, or scale pre-fork per-block work by `Den/Num`); (2) **bypass the 7-day downward soft cap at the fork** (the drop is a unit change, not a decline); (3) **re-base the 12.71 % forward estimate** (post-fork growth tracks INT8 accelerator deployment, a steeper curve).
+
+### Q.6 From "% of Bitcoin" to AI-compute: the metric v4 deserves
+
+v3 compute is economically ~worthless outside the security-equivalence frame (half SHA-256, half GF(2³¹−1) ALU emulation = 0.32 TOPS ≈ **~$5/yr** as AI compute for the whole network). v4 compute is dense s8×s8→s32 GEMM — the same commodity AI clouds rent hourly. Natural units: INT8-TOPS, H100-equivalents, dollars.
+
+**Reinterpret `getnetworkhashps`:**
+
+```
+TOPS_net = getnetworkhashps(6720) × W_nonce,   W_nonce = 4n²m + 2nm² = 1.7717×10¹⁰   (n=4096, b=16, m=256)
+H100_eq  = TOPS_net / (ε_H100 × 1,979×10¹²) ≈ TOPS_net / 1.286×10¹⁵
+```
+
+`W_nonce` is the §E.3/§M.4 consensus work unit, so `TOPS_net` is a lower bound (full-C miners do 7.76× more). Check: one H100 at 7.26×10⁴ nonces/s → 1.286×10¹⁵ ops/s = 1,286 TOPS = its delivered throughput. ✓
+
+**AI-compute floor (proposed btxprice addition):**
+
+```
+P_ai = TOPS_net × c_TOPS·yr / S = H100_eq × C_H100·yr / S     (optionally capitalized × T_life ≈ 3 yr)
+```
+
+Mid-2026 H100 on-demand ≈ **$2–3/GPU-hr** (median ≈$2.99: [IntuitionLabs](https://intuitionlabs.ai/articles/h100-rental-prices-cloud-comparison), [getdeploying](https://getdeploying.com/gpus/nvidia-h100), [Thunder Compute](https://www.thundercompute.com/blog/nvidia-h100-pricing), [CloudZero](https://www.cloudzero.com/blog/h100-gpu-cost/)). At **$2.50/hr**: `C_H100·yr` = **$21,900/H100-yr** → `c_TOPS·yr` = **$17.0 per delivered TOPS-year**.
+
+**Worked example** (100-H100-eq network): `getnetworkhashps` = 7.26×10⁶ nonces/s → `TOPS_net` = **128,600 TOPS = 100 H100-eq**; annual AI value = **$2.19 M/yr** (~$6.6 M capitalized over 3 yr) → ÷ supply for the per-coin floor. Versus v3 today: `M_BTX` *looks* 43× bigger yet is worth ~$5/yr vs $2.19 M/yr — a ~10⁵–10⁶× understatement, matching Z.
+
+Recommended post-fork: keep `P_raw`/`BTX_security_%` (with `w_v4`) as the Bitcoin-security floor, add `TOPS_net`/`H100_eq`/`P_ai` as the headline; `max(P_raw, P_ai)` is the composite floor, and `P_ai` is anchored to an external market independent of Bitcoin.
+
+### Q.7 Headline (the crisp answer)
+
+**Moving v3→v4, the network's effective (useful matrix) compute rate increases by ≈30× on the same hardware (range ~12–120×: ≈2× from deleting the SHA-gate half of the cycle budget × ≈5–30× from leaving integer-ALU field emulation for native INT8 tensor cores × ≈1.2–2× from n=512→4096 utilization), and by a further ≈5–10× as hardware composition shifts to datacenter INT8 parts — ≈10²–10³× combined on a value-conserved fleet, with unbounded further growth as commodity AI capacity joins (one H100 alone ≈4,000× today's entire 0.32-TOPS useful rate). The raw nonce-rate metric `M_BTX` will instead DROP by Z ≈ 3×10⁵–10⁶× per unit of hardware (each v4 nonce costs ~2×10⁶× the ops of a v3 σ-gate attempt: 2¹⁸ gate removal × 66–512× matrix-size jump, partially offset in time by tensor throughput), and must either be recalibrated — `w_v4 = w_v3 × Z`, read exactly from the §I.4 `Num/Den` fork constant, ≈4.5×10¹⁰ → ~10¹⁶ — or, better, replaced by the INT8-TOPS metric `TOPS_net = getnetworkhashps × 1.7717×10¹⁰`, which reports the true growth in units the AI-compute market already prices.**
+
+### Q.8 Sources
+
+- [btxprice.com valuation model](https://btxprice.com/valuation-model); [btxprice.com](https://btxprice.com)
+- Hardware: [H100 datasheet](https://resources.nvidia.com/en-us-gpu/h100-datasheet-24306) · [H200](https://www.nvidia.com/en-us/data-center/h200/) · [B200](https://www.spheron.network/blog/nvidia-b200-complete-guide/) · [RTX 5090](https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5090/) · [Puget 5090/5080](https://www.pugetsystems.com/labs/articles/nvidia-geforce-rtx-5090-amp-5080-ai-review/)
+- H100 rental (2026): [IntuitionLabs](https://intuitionlabs.ai/articles/h100-rental-prices-cloud-comparison) · [getdeploying](https://getdeploying.com/gpus/nvidia-h100) · [Thunder Compute](https://www.thundercompute.com/blog/nvidia-h100-pricing) · [CloudZero](https://www.cloudzero.com/blog/h100-gpu-cost/)
+
+---
+
+## R. Post-quantum security — end-to-end audit
+
+> **TOP-LINE VERDICT: the end-to-end post-quantum requirement is MET.** BTX is a **post-quantum-only chain from genesis.** Every non-OP_RETURN output must be a witness-v2 P2MR program (ML-DSA / SLH-DSA); legacy secp256k1 ECDSA, P2WPKH, and Schnorr/Taproot outputs **cannot be created** (consensus-rejected) and legacy signature verification is **additionally rejected** at the interpreter as defense-in-depth. Combined with the PQ-safe v4 PoW, information-theoretic Freivalds verification, SHA-256 at the 128-bit post-Grover tier, and the FIPS-204 / FIPS-205 signature schemes, BTX is end-to-end post-quantum. All primitives audited PQ-SAFE. (Verified against the code; see §R.2. An earlier draft of this audit wrongly reported legacy signatures as live — it searched for `nECDSADisableHeight`/`DISALLOW_ECDSA`-style gates and missed BTX's actual mechanism, `fEnforceP2MROnlyOutputs` + `SCRIPT_VERIFY_REJECT_LEGACY_SIGS`; corrected here.)
+
+### R.1 Summary verdict table
+
+| # | Primitive / role | Location | Quantum threat | PQ status |
+|---|---|---|---|---|
+| 1 | **PQ-only output rule** (non-OP_RETURN outputs must be witness-v2 P2MR) | `validation.cpp:9685-9717` (called `:9791`); `fEnforceP2MROnlyOutputs`+`fReducedDataLimits` = true `chainparams.cpp:161-162` | Blocks creation of any secp256k1 (ECDSA/Schnorr/Taproot) output | 🟢 **PQ-SAFE (enforced from genesis)** |
+| 1 | **Legacy-sig rejection** (`SCRIPT_VERIFY_REJECT_LEGACY_SIGS`) | flag `interpreter.h:169`; set `validation.cpp:6811-6812`; enforced `interpreter.cpp:408-412` | Defense-in-depth vs Shor on secp256k1 (paths already unreachable) | 🟢 **PQ-SAFE** |
+| 2 | **ML-DSA-44** (FIPS 204 / Dilithium) | `pqkey.h:26-28`, `libbitcoinpqc`, `interpreter.cpp:1173-1333` | Lattice (MLWE/MSIS); no known quantum poly-time algorithm | 🟢 **PQ-SAFE** |
+| 2 | **SLH-DSA-SHAKE-128s** (FIPS 205 / SPHINCS+) | `pqkey.h:27`, `slh_dsa.h:12-15` | Hash-based; only Grover on SHAKE-256 | 🟢 **PQ-SAFE (most conservative)** |
+| 3 | **SHA-256 seed derivation** (`DeterministicMatMulSeedV4`) | §H.4; `pow.cpp:53-100` | Grover preimage 2²⁵⁶→~2¹²⁸ | 🟢 **PQ-SAFE** |
+| 3 | **Product-committed digest / sketch commit** `H(σ‖Ĉ)` | §A.3/§E.1; `transcript.cpp:485-509` | Grover preimage ~2¹²⁸; quantum collision ~2⁸⁵ (BHT) | 🟢 **PQ-SAFE** (R.4) |
+| 3 | **Block header hash** `GetHash` (SHA256d) | §H.1; `block.cpp:11-14` | Grover mining: quadratic speedup on `digest ≤ target` | 🟢 **PQ-SAFE** (difficulty absorbs) |
+| 4 | **MatMul work** (dense INT8 GEMM `C = A·B`) | §A, §B, §K | No relevant quantum speedup on emitting the classical n² product | 🟢 **PQ-SAFE** |
+| 5 | **Freivalds verification** over `q = 2⁶¹−1` | §D.3 | None — information-theoretic (Schwartz–Zippel) | 🟢 **PQ-SAFE (unconditional)** |
+| 6 | **Optional ZK (Plonky2, FRI/Goldilocks)** | §F | Grover on FRI hash / random oracle | 🟢 **PQ-plausible** (hash-based) |
+| 7 | **SHA-256 Merkle / witness commitments** | Bitcoin-core inherited | Grover collision/preimage | 🟢 **PQ-SAFE** |
+| 7 | **P2MR address / leaf hashing** (SHA-256, PQ key material) | `pqm.h:17-31` | Grover preimage ~2¹²⁸ | 🟢 **PQ-SAFE** |
+| 7 | **Shielded pool** (lattice commitments, SLH-DSA/FIPS-205, ML-KEM) | `params.h:280-360` | Lattice-based; Grover on internal hashes | 🟢 **PQ-SAFE** (out of PoW scope) |
+| — | **ML-DSA emergency disable** (`nMLDSADisableHeight`, defensive) | `params.h:323`; `interpreter.h:154` | Hedge if lattices ever break → falls back to SLH-DSA | 🟢 **defensive feature, not a hole** |
+
+### R.2 How BTX enforces end-to-end PQ (verified in code)
+
+BTX is **not** Bitcoin-with-PQ-bolted-on; it is a **PQ-only chain from genesis**, enforced at two layers:
+
+**(1) Output creation — no non-PQ output can exist.** On mainnet, testnet, testnet4 and signet, `consensus.fReducedDataLimits = true` and `consensus.fEnforceP2MROnlyOutputs = true` (`chainparams.cpp:161-162, 534-535, 716-717, 928-929`; false only on regtest, `:1089-1090`). `CheckReducedDataOutputLimits` (`validation.cpp:9685-9717`, invoked from the block/tx validation path at `:9791`) iterates every output and, for any non-`OP_RETURN` output that is **not** a witness-v2 program with a 32-byte payload (`is_p2mr_output`, `:9689-9694`), returns `state.Invalid(BLOCK_CONSENSUS, "bad-txns-nonp2mr-output", "non-OP_RETURN outputs must be witness v2 P2MR")` (`:9713-9716`). Witness v2 + 32 bytes is precisely the P2MR (pay-to-MatRiCT-root) PQ output type (`pqm.h:17-31`) that commits ML-DSA / SLH-DSA key material. This **excludes every secp256k1 output type**: legacy P2PK/P2PKH (BASE), P2WPKH/P2WSH (witness v0), and Taproot (witness v1) are all non-v2 and therefore rejected. There is **no height gate** — the rule is a plain consensus boolean active from block 0, so no window ever existed in which a non-PQ output could be mined.
+
+**(2) Spend verification — legacy signatures rejected outright (defense-in-depth).** `GetBlockScriptFlags` sets `SCRIPT_VERIFY_REJECT_LEGACY_SIGS` (`interpreter.h:169`, bit 25) whenever `fEnforceP2MROnlyOutputs` holds (`validation.cpp:6807-6813`). In `EvalChecksig` (`interpreter.cpp:400-412`), that flag causes any checksig under `SigVersion::BASE`, `WITNESS_V0`, or `TAPSCRIPT` — i.e. every secp256k1 ECDSA or Schnorr path — to return `SCRIPT_ERR_BAD_OPCODE` before verification. PQ signatures use the dedicated `OP_CHECKSIG_MLDSA` / `OP_CHECKSIG_SLHDSA` opcodes under `SigVersion::P2MR` (`interpreter.cpp:1173-1333`), a separate route. The in-tree comment states the design intent verbatim: *"BTX is post-quantum only … legacy … are unreachable on a PQ-only chain (no non-P2MR outputs exist), and are rejected outright at consensus."* This layer is redundant with (1) by design — belt and suspenders.
+
+**Why the earlier draft was wrong.** A name-based search for `nECDSADisableHeight` / `SCRIPT_VERIFY_DISALLOW_ECDSA` / `DISALLOW_SCHNORR` returns nothing, and the ECDSA/Schnorr verifier *functions* still exist in `interpreter.cpp` (inherited from Bitcoin Core), so a search that stopped there concluded legacy spending was live. It is not: the enforcement is by the differently-named `fEnforceP2MROnlyOutputs` + `SCRIPT_VERIFY_REJECT_LEGACY_SIGS`, and the verifier functions are dead code (no UTXO can reach them). The correct verdict is **end-to-end PQ: MET.**
+
+### R.3 Detailed per-primitive analysis
+
+**Signatures (PQ-SAFE).** ML-DSA-44 (FIPS 204, Module-LWE/SIS, NIST Cat-2) and SLH-DSA-SHAKE-128s (FIPS 205, hash-based, Cat-1; 32-byte pk, 7856-byte sig) are the NIST PQ standards, both Shor-immune. SLH-DSA is the conservative fallback if ML-DSA is ever disabled via the defensive `nMLDSADisableHeight` hedge (`params.h:323`) — an intentional safety valve (if module-lattice cryptanalysis ever advances, the chain drops to the hash-based scheme), not a weakness. No secp256k1 hybrid is used for on-chain verification. These are the *only* spendable signature schemes on the chain.
+
+**v4 SHA-256 usage — Grover (PQ-SAFE).** Grover gives at most a quadratic speedup: SHA-256 preimage 2²⁵⁶→~2¹²⁸ (hard to parallelize, √(machines) only — NIST SP 800-208 / IR 8105). (a) 128-bit post-Grover is ample for seed unpredictability and Fiat–Shamir binding. (b) The `digest ≤ target` mining search gets the same quadratic edge as Bitcoin's SHA PoW — not chain-breaking: difficulty auto-adjusts (ASERT §I.4), Grover barely parallelizes, and the edge is a constant hashrate multiplier like any ASIC jump; in v4 the dominant per-nonce cost is the INT8 GEMM, not the header hash, so the lever matters even less. (c) **Recommendation: keep SHA-256/SHA256d — 128-bit post-Grover is the deliberate, sound design point.** Optional future hardening: move the *product-committed digest and Fiat–Shamir transcript hash* to SHA-512/256 (same 32-byte output, faster on 64-bit nodes, more internal-state margin) if a 256-bit-post-Grover commitment margin is ever desired. Not required.
+
+**MatMul work (PQ-SAFE).** Emitting the full classical product `C = A·B` has no relevant quantum speedup: quantum GEMM/linear-algebra speedups act on structured/quantum-encoded inputs and produce quantum states/samples, not the explicit n² classical matrix a validator re-checks (readout is Ω(n²)); Freivalds over q pins the exact product (invariant I6), so an approximate/sampled result cannot pass. A quantum miner has no asymptotic per-nonce edge beyond the generic Grover-on-header lever, which difficulty absorbs.
+
+**Freivalds & field (PQ-SAFE, unconditional).** Soundness over `q = 2⁶¹−1` is information-theoretic (Schwartz–Zippel), resting on **no** computational assumption → secure against any adversary, quantum or classical. The only cryptographic ingredient is the SHA-256 Fiat–Shamir challenge (covered above).
+
+**Optional ZK Plonky2 (PQ-plausible).** FRI + Goldilocks, no pairings/trusted setup; soundness reduces to hash/random-oracle resistance. Plausibly PQ if the FRI/Poseidon hash targets ≥128-bit post-Grover. No DLP/pairing primitive involved.
+
+**Merkle / addresses / shielded pool (PQ-SAFE).** SHA-256 Merkle & witness commitments (Grover-adjusted, acceptable); P2MR address derivation commits ML-DSA/SLH-DSA key material over SHA-256, no EC primitive; the shielded pool uses lattice commitments (MatRiCT/SMILE) with an SLH-DSA/FIPS-205 activation and a PQ-128 upgrade path — out of PoW scope, unmodified by v4, sound at the primitive level.
+
+### R.4 Grover / hash-width recommendation (consolidated)
+
+- **Mining/target (header SHA256d):** keep SHA-256; 128-bit post-Grover accepted, quadratic mining edge difficulty-absorbed and non-parallelizable. No change.
+- **Commitment & Fiat–Shamir (seed, product digest, challenge):** keep SHA-256/SHA256d; optional drop-in to SHA-512/256 for extra margin. Not required.
+- **If Plonky2 activated:** size FRI/Poseidon hash for ≥128-bit post-Grover.
+
+The hash layer is PQ-SAFE at the 128-bit post-Grover tier — the correct, sufficient design point.
+
+### R.5 Bottom line & standards
+
+**BTX meets the end-to-end post-quantum requirement today**, on mainnet, at the current block height, enforced from genesis: only PQ (P2MR / ML-DSA / SLH-DSA) outputs can be created or spent, the v4 PoW and its verification are quantum-safe, and the hash layer is sound at the 128-bit post-Grover tier. The only recommended items are *optional* hardening (SHA-512/256 on the commitment digest; ≥128-bit-post-Grover FRI hash if Plonky2 is ever enabled) — none required. Keep the `nMLDSADisableHeight`→SLH-DSA fallback as the standing lattice-break contingency.
+
+Standards: FIPS 203 (ML-KEM), **FIPS 204 (ML-DSA)**, **FIPS 205 (SLH-DSA)**, FIPS 180-4 (SHA-2), FIPS 202 (SHA-3/SHAKE), NIST SP 800-208 & IR 8105 (Grover rationale). The secp256k1 schemes (BIP340/341/342) are present only as inherited dead code and are consensus-rejected.
+
+---
+
+## S. ASIC/FPGA resistance, AI-native-compute necessity, and rogue-pool economics
+
+### S.1 Reframing "ASIC resistance": the goal is AI-native-compute necessity
+
+For v4 the classic "can anyone build fixed-function silicon that beats commodity hardware?" question dissolves, because the answer is yes — and that silicon is **mass-produced, commoditized, and the intended winner**. A dense, exact `s8×s8→s32` GEMM is *the* canonical workload of the AI era; its optimal circuit is a large tiled INT8 MAC array with high-bandwidth local memory — i.e. a **tensor core** (NVIDIA IMMA), a **TPU MXU**, an **MFMA unit** (AMD CDNA), or an **Apple GPU Neural Accelerator** (§O.1). A bespoke "BTX ASIC" would spend hundreds of millions re-deriving a TPU and then lose to vendors who ship that exact circuit at frontier nodes in volume. There is no secret better circuit — the AI industry has already spent ~$10¹¹ optimizing this precise primitive.
+
+v4's hardware-security claim is therefore **not** "no ASIC can win." It is:
+
+> **AI-native-compute necessity.** The only hardware that can win v4 blocks is hardware with a genuine, bit-exact, high-throughput dense INT8 tensor-matmul path — current AI accelerators (datacenter GPUs, TPUs, AI-capable consumer GPUs, M5-class Apple silicon). All **non-AI** hardware — SHA-256 ASICs, FPGAs, CPUs, memory-bandwidth cards (CMP-class), pre-tensor and FP-only GPUs — is structurally uncompetitive or excluded. "ASICs win" and "the design works as intended" are the same statement, because the relevant ASIC *is* AI-native compute.
+
+### S.2 Closure: no non-AI device class can win
+
+**S.2.1 FPGAs lose on throughput, $/TOPS, and TOPS/W — by construction of the workload.** FPGAs win on exotic bit widths, irregular dataflow, and ultra-low-latency small-batch inference — the polar opposite of v4 (one enormous dense latency-insensitive GEMM per nonce at full utilization). Even the AI-optimized flagship FPGAs:
+
+| Device | Dense INT8 peak | vs H100 (1,979) | vs B200 (4,500) |
+|---|---|---|---|
+| Intel Stratix 10 NX (AI Tensor Blocks) | **143 TOPS** @ ~1 TOPS/W | 13.8× behind | 31× behind |
+| AMD Versal AI Core VC1902 | **133 TOPS** | 14.9× | 34× |
+| AMD VCK5000 card ($2,495) | **145 TOPS** | 13.6× | 31× |
+| *ref: RTX 5090 (consumer GPU)* | 838 TOPS | 2.4× | 5.4× |
+| *ref: TPU v5e / v6e* | 393 / ~1,836 TOPS | — | — |
+
+Three independently fatal facts: (1) **throughput** — the best AI-FPGA ≈ 7% of an H100, 3% of a B200; a consumer 5090 beats every FPGA card ~5.8×; (2) **$/TOPS** — VCK5000 ≈ $17/TOPS vs 5090 ≈ $2.4/TOPS ($2,000/838) vs rentable H100 with zero capex; (3) **TOPS/W** — Stratix 10 NX ≈ 1 vs H100 ≈ 2.8 vs B200 ≈ 4.5, so the FPGA pays 3–4.5× the electricity per op on a PoW whose only recurring cost is energy per op. The deepest point: the *only* reason these FPGAs post triple-digit TOPS is that their vendors **hardened matmul units into the fabric** — the FPGA industry's own answer to dense INT8 GEMM was to stop being an FPGA. No reconfigurability dividend remains for v4 to leak. Sources: [Intel Stratix 10 NX white paper](https://www.intel.com/content/dam/www/public/us/en/documents/white-papers/a1153843-beyond-peak-performance-white-paper.pdf), [IEEE FCCM 2021](https://ieeexplore.ieee.org/document/9415606/), [AMD Versal AI Core](https://www.amd.com/en/products/adaptive-socs-and-fpgas/versal/ai-core-series.html), [AMD VCK5000](https://www.amd.com/en/products/adaptive-socs-and-fpgas/evaluation-boards/vck5000.html), [HPCwire](https://www.hpcwire.com/2022/03/08/amd-xilinx-takes-aim-at-nvidia-with-improved-vck5000-inferencing-card/), [Google TPU v6e](https://docs.cloud.google.com/tpu/docs/v6e).
+
+**S.2.2 Component-by-component shortcut audit — no non-AI ASIC angle exists.**
+
+| Component | Share of per-nonce cost | Fixed-function/ASIC edge? |
+|---|---|---|
+| **SHA-256 seed + sealing** | ~10⁻⁶ of the work (2 header hashes vs 1.7×10¹⁰ GEMM ops) | **None.** Contrast v3, where the ε-gate made 262,143/262,144 attempts *pure SHA* — so SHA silicon (CMP-class) effectively *was* the miner. v4 demotes SHA to seed/seal; a Bitcoin SHA ASIC mines v4 at rate ≈ 0. |
+| **Operand expansion (XOF, O(n²))** | <1% | Negligible by Amdahl; GPUs generate operands on-die anyway. |
+| **Dense GEMM** (exact s8×s8→s32, INT32 accumulate) | **>99%** | AI silicon's native op. No exotic width, no GF(2ⁿ) bit-twiddling, no mid-loop modular reduction (§B.4 keeps the whole K-dim in one INT32 accumulation). Any optimal circuit is a tensor core/MXU. |
+| **Memory profile** | AI(n)=n/3≈1,365 ops/byte, compute-bound | Bandwidth ASICs gain nothing; the CMP-170HX profile (1.5 TB/s, ~no compute) is 158× behind H100 (§K.3). |
+| **Determinism** | — | Property of two's-complement integer MMA on *any* conforming unit (§B.6) — IMMA, MFMA, M5 TensorOps, AVX-512 VNNI all match; excludes only FP-approximate paths, which no ASIC can smuggle past the digest (I6). |
+| **Sub-cubic (Strassen) / sketch shortcut** | ≤~1.3× / factor b/2, available to all | Constant-factor, hardware-agnostic, difficulty-absorbed (§A.6, §N.3-ii); both still reduce to dense INT8 GEMMs. |
+
+**Conclusion: the cheapest way on Earth to produce a bit-exact dense INT8 GEMM at scale is commodity AI tensor silicon.** A from-scratch non-AI ASIC has no component to attack. The only "ASIC" that helps is a big INT8 MAC array — a TPU — and building one means paying leading-node NRE (~$542M at 5nm, $0.5–1.5B at 3nm — [SemiEngineering](https://semiengineering.com/big-trouble-at-3nm/), [SemiEngineering](https://semiengineering.com/what-will-that-chip-cost/)) to arrive years later at a worse-than-B200 part whose difficulty target (§I.4) has already absorbed that generation. **Honest residual caveat:** a mining-only tensor chip could strip FP64/graphics/NVLink for a modest cost/watt edge — but that is again a TPU-class *AI inference ASIC*, i.e. AI-native compute with a different logo. It does not reopen participation to SHA farms, FPGAs, or junk cards; it is the disclosed centralization cost of §N.3-iv, by design.
+
+### S.3 Hardening recommendations: maximize the AI-GPU-necessity property
+
+1. **Keep SHA at seed/seal only — never reintroduce any pre-hash gate or hash-priced step** (any per-nonce hash filter recreates the v3 SHA lottery; enforce the §M.3 invariant that commit/hash ≪1% of tensor time).
+2. **Keep the GEMM large, dense, full-rank, high-arithmetic-intensity** (n≥4096 keeps AI ≥ 2.3× above every ridge; full-rank i.i.d. operands keep sparse/low-rank tricks unusable; never add sparsity, fixed structure, small tiles, or repeated sub-blocks).
+3. **Keep the precision exactly `s8×s8→s32`** — highest-leverage datacenter dtype, bit-exact/ZK-free, *and* the industry-standard quantized-inference precision, so consensus arithmetic tracks mainstream AI silicon for free. Never adopt bespoke widths (10-bit, GF(2ⁿ), mid-loop modular) — non-standard arithmetic is the one thing an FPGA does better than a tensor core.
+4. **Shape the GEMM like real AI GEMMs** (n=4096 mirrors transformer d_model/FFN shapes; the §E.3 sketch GEMMs are literally skinny inference-style GEMMs), so the optimal miner is *literally* the optimal inference box and any mining ASIC is automatically a merchant AI part.
+5. **Calibrate difficulty against the true optimal work unit** `n³·(2/b)` and measured honest dense cost (§E.3, §I.4), so constant-factor optimizations are absorbed as ordinary efficiency, not accumulated into a custom-silicon shortcut.
+6. **Keep the determinism self-test + cross-vendor golden vectors mandatory** (§N.2, §N.3-v): eligibility ("has a genuine bit-exact INT8 tensor path") must be machine-checkable, not vendor-claimed (the M4 ANE "38 TOPS" marketing case shows why).
+7. **Monitor for non-AI-hardware anomalies** (nonce-rate-vs-declared-hardware outliers) via the §N.3 dashboard.
+8. **Accept and disclose the fixed point:** a datacenter AI GPU/TPU *is* the optimal "ASIC" for v4, permanently — hardening keeps that true (and non-AI silicon excluded), not prevents it.
+
+### S.4 Rogue-pool economics: v4 vs the mine-and-dump model (btxpool.org case study)
+
+**S.4.1 The parasitic model under v3.** A community report identifies `btxpool.org` — advertising "High-Yield BTX Mining Pool," PPLNS, hourly auto-payouts, 0% miner fee / ~10% dev fee, global Stratum — as running a **mine-and-dump arbitrage on low-quality "JEET hashrate."** Its public pages corroborate a hardware profile headed by **CMP 30HX/40HX/50HX** and end-of-life parts (RTX 2060 SUPER, V100), PPLNS over a 10,000-share window, hourly payout ≥ 0.1 BTX, a "temporarily reduced 5%" dev fee, and a global Stratum endpoint. Under v3 this is rational and corrosive: the ε-gate made the work a **SHA lottery** on which CMP-class/old cards sit near parity (§0.5 #13, "2 CMP ≈ 1 5080"); the hardware is paid-off and otherwise worthless (post-Ethash CMP cards have no resale market and no alternative workload), so marginal cost ≈ electricity only (~$0.0125/hr for a 250 W card at $0.05/kWh) — an effective **$0 floor** where *any* sale price is pure profit, so the rational policy is continuous 100% liquidation: structural, price-insensitive sell pressure.
+
+**S.4.2 v4 collapses the hardware base.** Re-pricing the pool's advertised fleet by dense INT8 (§K.3):
+
+| btxpool.org device | v3 standing | v4 standing |
+|---|---|---|
+| CMP 30HX (TU116) | competitive | **Excluded** — no tensor cores at all, no s8×s8→s32 path |
+| CMP 170HX-class | competitive | **~158× behind H100, ~360× behind B200** — effectively excluded |
+| Tesla V100 (Volta) | competitive | **Verify-only** — Volta tensor cores are FP16-only (non-deterministic, inadmissible); INT8 MMA arrived with Turing |
+| CMP 40HX/50HX, RTX 2060 SUPER (Turing) | competitive | *If* IMMA exposed: ~100–230 TOPS → **~9–20× behind H100**; else excluded |
+| pre-M5 Apple | competitive | **Excluded** |
+| RTX 4090 / A100 sliver | competitive | Participates — as ordinary AI hardware at real cost (S.4.3) |
+
+A fleet at ~parity per card under v3 drops to **1/9–1/360 of a modern accelerator per card, several classes excluded outright**. Since v4 pool revenue is strictly proportional to contributed *verified* compute (§O.2 — shares are Freivalds-checked matmul work, unfakeable and un-SHA-grindable), the pool's share, payout, and dev-fee take collapse by the same factor. The one asset the model depends on — cheap hardware that still does competitive work — no longer exists.
+
+**S.4.3 A real marginal-cost floor replaces zero-cost dumping.** v4-capable hardware is, by S.1, **AI-rentable hardware** with a liquid hourly market (H100 on-demand ~$2–3.6/hr, specialist ~$2–2.4/hr, spot as low as ~$0.34/hr — [Spheron](https://www.spheron.network/blog/gpu-cloud-pricing-comparison-2026/), [Thunder Compute](https://www.thundercompute.com/blog/nvidia-h100-pricing), [GetDeploying](https://getdeploying.com/gpus/nvidia-h100), [IntuitionLabs](https://intuitionlabs.ai/articles/h100-rental-prices-cloud-comparison)). Every INT8 TOPS-hour pointed at BTX is one not sold to the AI market — a real opportunity cost for rented (cash) and owned (foregone revenue) fleets alike. At 90 s blocks and 20 BTX subsidy the network emits **800 BTX/hour**; with `N_eq` H100-equivalents (1 = 1,979 TOPS) at rate `r`/H100-eq-hour:
+
+```
+Floor($/BTX) ≈ N_eq · r / 800
+```
+
+| `N_eq` | r=$0.34 (spot) | r=$2.50 | r=$3.61 (avg) |
+|---|---|---|---|
+| 100 | $0.04 | $0.31 | $0.45 |
+| 500 | $0.21 | $1.56 | $2.26 |
+| 2,000 | $0.85 | $6.25 | $9.03 |
+| 10,000 | $4.25 | $31.25 | $45.13 |
+
+The floor is **self-enforcing through difficulty (ASERT, §I)**: below it, operators redeploy to AI rental and difficulty falls until the marginal miner's $/BTX again equals their compute's AI-market value; selling below it is strictly irrational (the same TOPS-hours convert to more dollars via AI). Contrast v3's ~$0 junk-hardware floor where dumping at any price was profit: v4 replaces price-insensitive structural selling with ordinary commodity-producer economics.
+
+**S.4.4 Legit pooling survives; the parasitic variant does not (reconciles §O.2).** v4 does **not** kill pooling — it kills a specific pooling *business model*. Legit pools (§O.2) aggregate real INT8-capable devices (RTX 30/40/50, M5-family, A100/H100 fragments) with Freivalds-verified shares and proportional payouts; their members' hardware has alternative value and real operating cost, so output behaves like production at cost and incentives align with BTX's health. The parasitic pool's defining asset — hardware whose *only* residual use was BTX (zero opportunity cost → zero-floor dumping) — is exactly what v4 de-rates 10–360× or excludes; to stay relevant it must re-capitalize onto real AI hardware, inheriting the S.4.3 floor and becoming, economically, a legit pool. **Residual risk — spot-rental mine-and-dump during price spikes:** bounded, not eliminated — proceeds capped at `price − spot-floor`/BTX (a thin arbitrage, rent is a hard fiat cost), the influx raises difficulty within hours (ASERT) compressing the margin, and at equilibrium the same mechanism is a *feature* (it recruits genuine AI capacity and arbitrages price toward the compute-cost floor from above, not toward zero from below). Monitor via §N.3 (nonce-rate spikes vs spot-GPU price troughs).
+
+**S.4.5 Net effect.** v4 converts BTX mining from a **zero-marginal-cost junk-hardware arbitrage** (v3: SHA lottery on paid-off cards → floorless sell pressure) into a **real-cost AI-compute activity** whose production cost — and rational sell floor — is indexed to the AI-compute market ($/TOPS-hour). Parasitic mine-and-dump pools lose both pillars at once (hardware stops doing competitive work; replacement hardware carries a real floor), while legitimate pooled participation by consumer and Apple-M5 AI hardware is preserved with consensus-grade share verification (§O.2). The structural sell pressure of the v3 era is replaced by commodity-producer economics anchored to the marginal price of AI compute.
+
+---
+
 ## Appendix A — Glossary
 
 | Term | Definition |
@@ -994,6 +1382,22 @@ Because the per-nonce cost is one full dense INT8 matmul (the §A.6/§E.3 work u
 **Post-quantum signatures (unchanged subsystem)**
 - NIST FIPS 203/204/205 issuance. https://www.federalregister.gov/documents/2024/08/14/2024-17956/
 - ML-DSA (FIPS 204) overview. https://www.encryptionconsulting.com/education-center/ml-dsa-fips-204/
+- NIST SP 800-208 (stateful hash-based sigs) & IR 8105 (post-quantum crypto / Grover rationale).
+
+**Cross-generation hardware (§P)**
+- RTX Blackwell whitepaper (5090/5080 dense INT8). https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf ; Ada whitepaper (4090). https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf ; GA102 whitepaper v2.1 (3090). https://www.nvidia.com/content/PDF/nvidia-ampere-ga-102-gpu-architecture-whitepaper-v2.1.pdf
+- A100 datasheet. https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-nvidia-us-2188504-web.pdf ; B200 datasheet. https://www.primeline-solutions.com/media/categories/server/nach-gpu/nvidia-hgx-h200/nvidia-blackwell-b200-datasheet.pdf ; Hopper whitepaper. https://www.advancedclustering.com/wp-content/uploads/2022/03/gtc22-whitepaper-hopper.pdf
+- Apple M5 / Pro / Max newsroom. https://www.apple.com/newsroom/2025/10/apple-unleashes-m5-the-next-big-leap-in-ai-performance-for-apple-silicon/ ; https://www.apple.com/newsroom/2026/03/apple-debuts-m5-pro-and-m5-max-to-supercharge-the-most-demanding-pro-workflows/ ; Apple silicon (Wikipedia). https://en.wikipedia.org/wiki/Apple_silicon ; A19/M5 Neural Accelerator microbenchmark. https://tzakharko.github.io/apple-neural-accelerators-benchmark/
+
+**btxprice / compute accounting (§Q)**
+- btxprice valuation model. https://btxprice.com/valuation-model ; btxprice.com. https://btxprice.com
+- H100 rental (2026): https://intuitionlabs.ai/articles/h100-rental-prices-cloud-comparison · https://getdeploying.com/gpus/nvidia-h100 · https://www.thundercompute.com/blog/nvidia-h100-pricing · https://www.cloudzero.com/blog/h100-gpu-cost/ · https://www.spheron.network/blog/gpu-cloud-pricing-comparison-2026/
+
+**FPGA/ASIC economics (§S)**
+- Intel Stratix 10 NX ("Beyond Peak Performance"). https://www.intel.com/content/dam/www/public/us/en/documents/white-papers/a1153843-beyond-peak-performance-white-paper.pdf ; IEEE FCCM 2021. https://ieeexplore.ieee.org/document/9415606/
+- AMD Versal AI Core. https://www.amd.com/en/products/adaptive-socs-and-fpgas/versal/ai-core-series.html ; AMD VCK5000. https://www.amd.com/en/products/adaptive-socs-and-fpgas/evaluation-boards/vck5000.html ; HPCwire VCK5000. https://www.hpcwire.com/2022/03/08/amd-xilinx-takes-aim-at-nvidia-with-improved-vck5000-inferencing-card/
+- Google Cloud TPU v6e. https://docs.cloud.google.com/tpu/docs/v6e ; NVIDIA Turing whitepaper. https://images.nvidia.com/aem-dam/en-zz/Solutions/design-visualization/technologies/turing-architecture/NVIDIA-Turing-Architecture-Whitepaper.pdf
+- Chip design cost (NRE). https://semiengineering.com/big-trouble-at-3nm/ · https://semiengineering.com/what-will-that-chip-cost/
 
 ## Appendix C — Open calibration items (must be resolved before mainnet activation)
 
@@ -1006,3 +1410,70 @@ Because the per-nonce cost is one full dense INT8 matmul (the §A.6/§E.3 work u
 7. **DoS verify-budget retune** for O(n²) at the chosen n (§E.4, §I.5).
 8. **Difficulty work-unit** — calibrate the one-time ASERT rescale (§I.4) against the sketch work unit n³·(2/b), not naïve n³ (§E.3).
 9. **Committed-object definition — RESOLVED (k = 1).** The baseline is a single exact-integer s8 matmul: dense pseudorandom s8 operands `A, B ∈ [-125,125]`, exact INT32 product `C = A·B` (native `s8×s8→s32`), committed via the sketch and Freivalds-verified over `q = 2⁶¹−1` (§0.7 "Resolved", §D.3). The k-prime CRT scheme (§B.3/§B.5) is demoted to an optional, off-by-default compute-multiplier (each lane a separate exact-integer GEMM + per-lane q-Freivalds, ×k verify cost). Remaining sub-item: decide whether to keep the §B.3 CRT text as a documented optional variant (current choice) or delete it for a leaner spec.
+
+---
+
+## Appendix D — Optional k > 1 CRT compute-multiplier variant (complete specification)
+
+This appendix fully specifies the optional, off-by-default construction that was resolved out of the baseline in §0.7 (formerly the open "Appendix C-9" item). The **normative v4 baseline is k = 1** — a single exact-integer s8 matmul (§0.7, §D.3). Everything here is a *documented alternative* that a future governance retarget may enable by setting `nMatMulV4PrimeCount = k > 1`; it is not active at launch. It is documented in full so the choice is a switch, not a redesign.
+
+### D.1 Purpose and when it would be used
+
+The baseline per-nonce work unit is one dense n×n INT8 GEMM (§A.6/§E.3). If a future network wants to **raise the per-nonce compute by an integer factor k without enlarging n** (e.g. to keep verification/payload at the n = 4096 point while demanding more work per nonce, or to widen the hardware gap by forcing k concurrent GEMMs and thus k× the on-device tensor pressure), the CRT variant multiplies compute by exactly k. It is strictly a *compute multiplier*: it changes neither soundness (supplied by the verification prime q, §D.3) nor determinism (each lane is exact-integer). Prefer raising n (within the §D.5 verification budget) or difficulty first; reach for k > 1 only when n is already at the verification ceiling and more per-nonce work is still wanted.
+
+### D.2 Construction
+
+Fix `k` distinct small primes `p_1 … p_k`, each `< 2⁸`, so a balanced residue mod `p_i` fits a signed INT8 operand. The reference set (also the `matmul::field::V4_PRIMES` constant, active only when k > 1):
+
+```
+p_1 = 251,  p_2 = 241,  p_3 = 239,  p_4 = 233
+M   = ∏ p_i = 3,368,562,317 ≈ 2^31.65     (used only for the digest-alphabet framing, not for verification)
+```
+
+Per nonce, derive **k independent operand pairs** `(A⁽ⁱ⁾, B⁽ⁱ⁾)` from the header seeds (extend the §H.4 preimage with the lane index `i` as an extra domain byte), each a dense pseudorandom s8 matrix with entries in `[-125, 125]` (balanced residues; `p_1 = 251` bounds the range, so all lanes share the `[-125,125]` domain and the §B.4 overflow bound `|C⁽ⁱ⁾_jl| ≤ n·125² = 15,625·n < 2³⁰`). Compute the **k exact-integer lane products**:
+
+```
+C⁽ⁱ⁾ = A⁽ⁱ⁾ · B⁽ⁱ⁾      (native s8×s8→s32, exact INT32, no modular reduction) for i = 1..k
+```
+
+These are `k` independent, standard INT8 GEMMs with no data dependence — they parallelize perfectly across SMs or devices (this is the tensor-core analogue of v3's "split16" 4×-DGEMM idea; §B.3). The **committed object** is the concatenation of the k lane sketches (default payload) or the k full lane products (strict-binding payload):
+
+```
+digest = H( σ_v4 ‖ Ĉ⁽¹⁾ ‖ Ĉ⁽²⁾ ‖ … ‖ Ĉ⁽ᵏ⁾ ),   Ĉ⁽ⁱ⁾ = U · C⁽ⁱ⁾ · V   (per-lane sketch, §E.1)
+```
+
+There is **no CRT reconstruction to Z_M** anywhere in mining or verification — each lane stands alone as an exact-integer product. (The primes are merely a convenient, distinct way to derive k lane operand sets; any k independent s8 operand derivations would serve identically. The `M` value survives only as the notional digest alphabet.)
+
+### D.3 Verification (per-lane Freivalds over q)
+
+Verification runs the §D.3 exact-integer / `q = 2⁶¹−1` Freivalds **once per lane**: for each lane `i` and each of `R` rounds, derive `r` from `H(matmul_digest ‖ round ‖ i)` and check
+
+```
+C⁽ⁱ⁾ · r  ≡  A⁽ⁱ⁾ · (B⁽ⁱ⁾ · r)   (mod q)
+```
+
+regenerating `A⁽ⁱ⁾, B⁽ⁱ⁾` from the seeds on the fly (O(n²) each). Each lane inherits the baseline per-round soundness `≤ 1/q` (full-C) or `≤ 2/q` (sketch); a corrupted lane is caught by that lane's rounds with the same 2⁻¹⁸³/2⁻¹⁸⁰ margin at R = 3. **There is no composite-modulus check and no `Z_M` reconstruction** — the §D.2 trap is avoided because verification never leaves the per-lane exact-integer domain. This is the crucial correctness point that makes the variant sound.
+
+### D.4 Costs (everything scales ×k)
+
+| Quantity | Baseline (k = 1) | CRT variant (k lanes) |
+|---|---|---|
+| Per-nonce compute | 2n³ ops (full) / ~2n²m (sketch) | **k ×** baseline |
+| Payload | 512 KiB sketch (b=16, n=4096) | **k ×** (e.g. k=4 → 2 MiB — still within the §D.5 few-MiB budget and existing 16 MB message limit) |
+| Verification | R rounds, ~0.14–0.28 s (§I.5) | **k ×** rounds → ~k × time (k=4 → ~0.6–1.1 s — at the §D.5 ceiling; do not combine k=4 with n>4096) |
+| Operand regen on verify | 2n² PRF | **k ×** (2kn²) |
+| Determinism | exact per §B.6 | identical, per lane |
+
+The device *ratios* of §K.3 are unchanged (every device does k× more of the same INT8 GEMM), so the datacenter lever and pooled economics are unaffected — only the absolute work unit and the verification cost move by k. The binding constraint is the §D.5 verification budget: `k · (n/512)² · R` per-round cost must stay under the ~1 s single-thread ceiling, which caps `k·n²` and is why k > 1 is incompatible with n at its own maximum.
+
+### D.5 Consensus wiring (delta from the baseline)
+
+- `nMatMulV4PrimeCount = k` (§G.2). k = 1 disables the variant (baseline). k > 1 enables it; `V4_PRIMES` must list ≥ k distinct primes < 2⁸; `static_assert` that k ≤ `V4_PRIME_COUNT`.
+- Seed derivation (§H.4): append the lane index `i ∈ [0,k)` to the `DeterministicMatMulSeedV4` preimage so the k operand pairs are independent.
+- Payload (§H.2): `matrix_c_data` carries the k concatenated lane sketches (or full lane products); size = k × the baseline. Range-check every word.
+- Verification (§I.2): the `CheckMatMulProofOfWork_V4ProductCommitted` cascade loops the per-lane q-Freivalds over i = 1..k; all lanes must pass. DoS budgets (§I.5) scale the per-verification cost by k (retune `nMatMulV4GlobalVerifyBudgetPerMin` accordingly).
+- Difficulty (§I.4/§M.4): the work unit becomes `k ×` the baseline sketch unit; calibrate the fork rescale against it.
+
+### D.6 Recommendation
+
+**Leave k = 1.** The baseline single exact-integer matmul already achieves every stated objective — SHA demoted to seeding/sealing, matmul as the sole per-nonce cost, INT8 tensor-core datacenter lever, cheap O(n²) Freivalds verification. The CRT variant buys only a per-nonce compute multiple at a proportional verification-cost multiple, which difficulty adjustment achieves for free without touching verification cost. It is specified here so that, should a future need arise (e.g. a deliberate work-unit enlargement that must avoid growing n or the payload dimension), enabling it is a parameter change with a fully-documented, sound verification path — not a re-architecture.
