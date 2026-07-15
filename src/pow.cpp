@@ -15,6 +15,7 @@
 #include <cuda/matmul_accel.h>
 #include <hash.h>
 #include <logging.h>
+#include <matmul/accel_v4.h>
 #include <matmul/accelerated_solver.h>
 #include <matmul/field.h>
 #include <matmul/freivalds.h>
@@ -4087,11 +4088,16 @@ static bool SolveMatMulV4(CBlockHeader& block,
 
         uint256 digest;
         std::vector<unsigned char> sketch_payload;
-        // matmul_v4::ComputeDigest runs the single dense INT8 GEMM (the
-        // O(n^3) miner-side work per spec §A.6/§E.3) and returns the
-        // product-committed digest plus the sketch payload that verifiers
-        // Freivalds-check in O(n^2) via matmul_v4::VerifySketch.
-        if (matmul_v4::ComputeDigest(block, params.nMatMulV4Dimension, params.nMatMulV4FreivaldsRounds,
+        // matmul_v4::accel::ComputeDigestDispatched runs the single dense INT8
+        // GEMM (the O(n^3) miner-side work per spec §A.6/§E.3) on the resolved
+        // device backend (CPU / CUDA / Metal / HIP), then re-verifies the
+        // result against the CPU reference with matmul_v4::VerifySketch and
+        // falls back to the byte-exact CPU path (matmul_v4::ComputeDigest) on
+        // any device error or digest mismatch. The returned digest + payload are
+        // therefore always consensus-valid: a wrong GPU digest can never win a
+        // block. Verifiers Freivalds-check the payload in O(n^2) via
+        // matmul_v4::VerifySketch.
+        if (matmul_v4::accel::ComputeDigestDispatched(block, params.nMatMulV4Dimension, params.nMatMulV4FreivaldsRounds,
                                       digest, sketch_payload) &&
             UintToArith256(digest) <= *bnTarget) {
             block.matmul_digest = digest;
