@@ -1130,7 +1130,7 @@ w_v4 = w_v3 · Z = w_v3 · (device-time per v4 nonce / per v3 nonce)
 
 Numerically `w_v4 ≈ 4.525×10¹⁰ × ~5×10⁵ ≈ 2×10¹⁶` (order 10¹⁵–10¹⁶); check `w_v4·M_v4` ≈ 1.43×10¹⁹ = `w_v3·M_v3`. ✓
 
-**Do not estimate Z — read it from consensus.** §I.4 mandates a one-time `next_target = parent_target × Num/Den` rescale + ASERT re-anchor at `nMatMulV4Height`. Since `getnetworkhashps` = `2²⁵⁶/(target+1)` arithmetic, the fork rescales reported nonce-rate by exactly that constant, so **`w_v4 = w_v3 × Den/Num` exactly, read from chainparams at tag time** — continuity of `SEH` and `BTX_security_%` preserved by construction.
+**Do not estimate Z — read it from consensus.** §I.4 mandates a one-time `next_target = parent_target × Num/Den` rescale + ASERT re-anchor at `nMatMulV4Height`. Since `getnetworkhashps` = `2²⁵⁶/(target+1)` arithmetic, the fork rescales reported nonce-rate by exactly that constant, so `w` rescales by the reciprocal — read from chainparams at tag time — and continuity of `SEH` and `BTX_security_%` is preserved by construction. **See §Q.9.2 for the convention-proof form: publish the single scalar `Ω ≡ w_v4/w_v3 = Num/Den = Z > 1` with the three tag-time sign checks; the earlier "Den/Num" shorthand here inverts §I.4's target-rescale direction and is superseded by Ω.**
 
 Estimator plumbing fixes: (1) **never span the fork with the 6,720-block window** (split deltas below/above `nMatMulV4Height`, or scale pre-fork per-block work by `Den/Num`); (2) **bypass the 7-day downward soft cap at the fork** (the drop is a unit change, not a decline); (3) **re-base the 12.71 % forward estimate** (post-fork growth tracks INT8 accelerator deployment, a steeper curve).
 
@@ -1168,6 +1168,379 @@ Recommended post-fork: keep `P_raw`/`BTX_security_%` (with `w_v4`) as the Bitcoi
 - [btxprice.com valuation model](https://btxprice.com/valuation-model); [btxprice.com](https://btxprice.com)
 - Hardware: [H100 datasheet](https://resources.nvidia.com/en-us-gpu/h100-datasheet-24306) · [H200](https://www.nvidia.com/en-us/data-center/h200/) · [B200](https://www.spheron.network/blog/nvidia-b200-complete-guide/) · [RTX 5090](https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5090/) · [Puget 5090/5080](https://www.pugetsystems.com/labs/articles/nvidia-geforce-rtx-5090-amp-5080-ai-review/)
 - H100 rental (2026): [IntuitionLabs](https://intuitionlabs.ai/articles/h100-rental-prices-cloud-comparison) · [getdeploying](https://getdeploying.com/gpus/nvidia-h100) · [Thunder Compute](https://www.thundercompute.com/blog/nvidia-h100-pricing) · [CloudZero](https://www.cloudzero.com/blog/h100-gpu-cost/)
+
+---
+
+### Q.9 Continuity model: the two-metric representation
+
+> **Status:** informative; extends §Q.5–§Q.6 into a full representation model for [btxprice.com](https://btxprice.com). Cross-refs: §I.4 (fork rescale), §Q.2 (nonce semantics), §Q.4 (X, Y), §E.3/§M.4 (work unit). **This subsection also corrects the sign convention of the §Q.5 shorthand — see Q.9.2.**
+
+### Q.9.1 The continuity invariant, fully derived
+
+The btxprice security metric is `SEH = w · M_BTX_1w`, `BTX_security_% = 100·w·M_BTX_1w/H_BTC`, `P_raw = P_BTC·SEH/H_BTC`. At the fork instant `t_f` the physical fleet is unchanged — same devices, capital, energy. An attacker must still match that fleet, and every v4 efficiency gain accrues identically to attacker and defender, so the Z factors cancel from the attack-cost ratio: **attack cost is invariant at `t_f`**, and the security metric must be **continuous** there. Continuity of `SEH` requires
+
+```
+w_v4 · M_BTX(t_f⁺) = w_v3 · M_BTX(t_f⁻)                      (Q.9-1)
+M_BTX(t_f⁺) = M_BTX(t_f⁻)/Z  (unit change, §Q.3)  ⇒  w_v4 = w_v3·Z    (Q.9-2)
+```
+
+One rescale makes `SEH`, `BTX_security_%`, `P_raw` all continuous by construction. Worked (midpoint Z=5×10⁵): pre-fork `SEH` = 4.5251×10¹⁰ × 3.1567×10⁸ = 1.4285×10¹⁹ H/s-eq = 1.5897% of `H_BTC` ≈ 8.985×10²⁰ ✓; post-fork `M(t_f⁺)` = 631.3 nonces/s, `w_v4` = 2.2626×10¹⁶, `SEH` = 1.4284×10¹⁹ ✓ identical, **no step**. Range `w_v4` = 4.525×10¹⁰ × (3×10⁵…10⁶) = **1.36×10¹⁶ … 4.53×10¹⁶** (order 10¹⁶).
+
+### Q.9.2 The exact fork constant Ω — and a sign correction
+
+**Do not estimate Z — read it from consensus.** §I.4 mandates `next_target = parent_target × Num/Den` at `nMatMulV4Height`. Because v4 attempts/s *drop* by Z, blocks get Z× easier, so the target gets Z× **larger**: `Num/Den = Z > 1`. `getnetworkhashps` = `2²⁵⁶/(target+1)` arithmetic, so reported nonce rate multiplies by the reciprocal `Den/Num = 1/Z`. Substituting into (Q.9-1): `w_v4 = w_v3 × Num/Den = w_v3 × Z`.
+
+> **Correction to the §Q.5 shorthand.** §Q.5 wrote "`w_v4 = w_v3 × Den/Num`" alongside "`w_v4 = w_v3·Z`"; these are consistent only if (Num,Den) name the *reported-rate* rescale rather than §I.4's *target* rescale. To make the direction impossible to get wrong, publish one dimensionless scalar:
+>
+> ```
+> Ω ≡ w_v4/w_v3 = target(t_f⁺)/target(t_f⁻) = M(t_f⁻)/M(t_f⁺) = Z
+> ```
+>
+> with three tag-time sign checks: **Ω > 1**, **w_v4 > w_v3**, **reported M_BTX drops by Ω**. Expected Ω ≈ 3×10⁵–10⁶. Any implementation whose displayed security % moves at the fork has Ω inverted.
+
+### Q.9.3 Estimator plumbing (drop-in changes)
+
+1. **Fork-split window — never average across incommensurate units.** While `h_f` is inside the 6,720-block window: `SEH_1w = [w_v3·ΔCW(pre) + w_v4·ΔCW(post)] / T_window`. Post-fork per-block chainwork is exactly `1/Ω` of pre-fork on the same fleet, so both terms are in identical security units. Never divide a raw mixed-unit chainwork delta by 6,720.
+2. **Soft-cap bypass at `h_f`.** The 7-day-half-life downward cap treats drops as decay; un-bypassed, a Z=3×10⁵–10⁶ rebase takes `log₂(Z) ≈ 18–20` half-lives ≈ **18–20 weeks** of fabricated "collapse." Mark the `h_f` sample a unit rebase, exempt from the cap. With fixes 1+2 the displayed `SEH` never drops — assert in CI.
+3. **Re-base the 12.71% forward estimate.** It regresses on v3 difficulty history (dead units after `h_f`). Freeze as a legacy lower band, restart the regression at `h_f`, prior the interim growth on the INT8-accelerator deployment curve (v4 `M_BTX` growth *is* fleet INT8-TOPS growth, §Q.6 — far steeper than 12.71%/yr).
+
+### Q.9.4 The two metrics, side by side
+
+| | **(a) Security-equivalence** | **(b) AI-compute** |
+|---|---|---|
+| Series | `BTX_security_%`, `SEH`, `P_raw` | `TOPS_net = getnetworkhashps × 1.7717×10¹⁰`; `H100_eq = TOPS_net/1.286×10¹⁵`; `P_ai = TOPS_net·$17/S` per yr |
+| Measures | Capital+energy committed = attack cost | Valuable AI matmul actually produced |
+| At fork | **CONTINUOUS** — recalibrate `w_v4 = w_v3·Ω`; 1.5897%→1.5897% | **STEPS UP ~30×** — 0.32 TOPS → ~5.6–18.6 TOPS same fleet (Q.10) |
+| `w` role | `w_v3` below `h_f`, `w_v3·Ω` at/above | none — absolute units |
+| Why | Same hardware at `t_f`; attacker gains the same Z; attack cost invariant | v3 burned ~½ cycles on SHA + rest on ALU field emulation (0.32 TOPS); v4 production ≈ capability |
+
+The step and the flat line answer different questions about the same fleet: security = *cost to replicate the network* (unchanged at `t_f`); AI-compute = *what the cycles are worth outside* (v3 wasted ~97% of latent tensor capability, v4 spends ~100% on hourly-rentable INT8 GEMM). The step is a **utilization/efficiency reveal, not new hardware and not a security event.** Rendering the efficiency gain as a security jump double-counts; rendering the security continuity as "no improvement" hides the point of v4.
+
+---
+
+### Q.10 Latent capacity and the hidden-power question
+
+### Q.10.1 Back-cast methods
+
+**Method A — efficiency back-cast (primary):** `L = 0.32 TOPS × X`, X ≈ 12–120 → **3.8…38 TOPS**, headline 0.32×30 ≈ **10 TOPS**.
+**Method B — hardware-mix (cross-check):** all-RTX-5090 fleet → 0.0631 device-eq × 260 TOPS = 16.4 TOPS; half tensor-less → ~8; all tensor-less → ~0.
+**Method C — consensus-implied (most authoritative, available at tag time):** `TOPS_net(t_f⁺) = [3.157×10⁸/Ω]×1.7717×10¹⁰` → Ω=3×10⁵: **18.6 TOPS**; 5×10⁵: **11.2**; 10⁶: **5.6**.
+
+Agreement: **latent ≈ 4–40 TOPS, central ≈ 10 TOPS** = ~0.008 H100-eq (~1/130th of an H100), worth ~$170/yr as AI compute vs the ~$5.4/yr v3 actually produced. Implied v3 capability utilization ≈ 0.32/9.7 ≈ **3%** (and even that was field-emulation ops with no external market). Uncertainty is dominated by hardware mix (Method B spread ~0–40); the band collapses to a point at `t_f⁺` when Method C turns the back-cast into a measurement.
+
+### Q.10.2 How the AI-compute graph treats the fork
+
+**Recommendation: show both.** Solid headline series = **measured useful work only** (0.32 TOPS pre-fork, `getnetworkhashps × W_nonce` post-fork, honest step included — no back-cast ever headline). Overlay the **pre-fork latent band (4–40 TOPS, dashed, central 10)** with the vertical gap at `h_f` labeled **"efficiency the v3 solver wasted (~30×)"**. Mandatory caveat: *back-cast assumes the v3 fleet carries tensor silicon; the mix is unobserved, true latent may sit anywhere in the band incl. near its floor for a tensor-less fleet.* After `t_f⁺`, replace the band's right endpoint with the Method-C measured point.
+
+---
+
+### Q.11 Graph specifications (v3→v4)
+
+> Four charts for [btxprice.com](https://btxprice.com). Time axis: block height with a labeled `h_f = nMatMulV4Height` marker (date secondary). Shared annotation: *"MatMul v4 fork — work-unit change (Ω rescale). Security continuous; AI output steps."*
+
+**(A) "BTX security vs Bitcoin %" — continuous, no-cliff.** Y linear ~0–3%. Series `100·w(h)·M_BTX_1w/H_BTC` with per-era `w` and fork-split window. Flat at 1.5897% through `h_f` (**no discontinuity**), then organic growth. Acceptance test: `|%(h_f⁺) − %(h_f⁻)| < window noise`.
+
+```
+ %BTC
+ 2.0 |                            ..·
+1.59 |—•—•—•—•—•—•—•╂—•—•—•—•·˙
+     |              ┆h_f  (no cliff)
+     +──────────────┴────────────── height
+```
+
+**(B) "Raw nonce rate M_BTX" — diagnostic only; never headline raw.** Y log 10²–10⁹. Raw `getnetworkhashps`. ~3.157×10⁸ into the fork, **vertical cliff to ~3×10²–10³** (drop by Ω; reads as 99.999+% collapse). Treatment (pick one): (1) hide on an advanced/diagnostics page; (2) plot per-era normalized (×1/Ω pre-fork) → continuous line ≡ chart A numerator; (3) if raw shown, force a hatched "unit change" break band at `h_f` with both unit labels ("σ-gate attempts/s" | "n=4096 INT8 matmuls/s") and disable %-change readout across `h_f`. Soft cap must never render this as an 18–20-week decay ramp.
+
+```
+ nonce/s (log)
+ 10⁸ |━━━━━━━━━━━━━━┓
+     |  "σ-gate     ┃ ▓▓ unit-change band
+ 10⁵ |   attempts"  ┃ ▓▓  (drop = Ω, by construction)
+     |              ┗━━━━━━━━━━━  "n=4096 INT8 matmuls"
+ 10² |              ┆h_f
+     +──────────────┴────────────── height
+```
+
+**(C) NEW — "Network AI-compute (TOPS_net / H100-eq)" — the reveal chart.** Y log 0.1→10⁶; right axis `H100_eq = TOPS_net/1.286×10¹⁵`. Solid = measured useful work: flat 0.32 TOPS pre-fork, **step at `h_f`** to `TOPS_net` (~5.6–18.6 same-fleet), then ×5–10 (composition Y) toward 10²–10³× (100 H100-eq = 128,600 TOPS). Dashed pre-fork band 4–40 TOPS (latent, central 10); gap arrow **"efficiency the v3 solver wasted (~30×)"**; band caveat per Q.10.2.
+
+```
+ TOPS (log)                              ___···  ×5–10 composition (→10²–10³×)
+ 10²  |                           __——˙˙
+ 10   | ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ●━━━˙          ← measured TOPS_net
+      |  latent back-cast    ┆ ↕ gap = "efficiency the
+ 1    |  band 4–40 (dashed)  ┆    v3 solver wasted (~30×)"
+ 0.32 |━━━━━━━━━━━━━━━━━━━━━━┥
+      |   measured useful    ┆h_f
+      +──────────────────────┴──────────── height
+```
+
+**(D) NEW — "AI-compute value floor P_ai ($)" — floor comparison.** Y log $. `P_raw` (continuous, Bitcoin-anchored) + `P_ai = TOPS_net × $17/S` per yr (optionally ×T_life≈3 yr) + composite `max(P_raw,P_ai)` (bold). Pre-fork `P_ai` negligible (network-wide 0.32 × $17 ≈ **$5.4/yr**) → `P_raw` is the floor; at `h_f`, `P_ai` steps ~30× (≈$100–320/yr, below `P_raw`) then **grows with INT8 adoption until it crosses `P_raw`** (100 H100-eq → $2.19 M/yr, ~$6.6 M capitalized). Annotate the crossover.
+
+```
+ $ (log)
+      |            P_ai ···                ___···X  crossover: floor becomes
+P_raw |━━━━━━━━━━━━━━━━━━━━━━━━━━━···——˙˙          AI-anchored
+      |               ●·˙   (composite = max, bold)
+ $5/yr|••••••••••••••┆
+      |    P_ai(v3)  ┆h_f
+      +──────────────┴──────────────────── height
+```
+
+---
+
+### Q.12 btxprice team handoff (implementation checklist)
+
+> Self-contained. Current constants: `w_v3 = 45,251,427,826.03`, `M_BTX ≈ 3.157×10⁸/s`, security % = 1.5897%, 6,720-block (7-day) window, 90 s blocks, 7-day-half-life downward soft cap, 12.71% forward estimate.
+
+1. **The one fork constant.** From BTX chainparams at tag: `nMatMulV4Height (=h_f)`, `nMatMulV4AsertRescaleNum/Den`. Publish `Ω = Num/Den = w_v4/w_v3 = M_BTX(h_f⁻)/M_BTX(h_f⁺)`. Hard-fail gates: `Ω > 1`; `Ω ≈ 3×10⁵–10⁶`; reported `getnetworkhashps` drops by exactly Ω. (Direction: §I.4 rescales the *target* by Num/Den; reported hash-rate rescales by Den/Num = 1/Ω.)
+2. **Recalibrate w — era-indexed.** `w(h)=w_v3` for h<h_f; `w(h)=w_v3×Ω` for h≥h_f (≈2.26×10¹⁶ at Ω=5×10⁵). Check `w_v4·M(h_f⁺) = w_v3·M(h_f⁻) = 1.4285×10¹⁹` → security stays 1.5897%.
+3. **Fork-split the window** (item Q.9.3-1). Never average pre/post nonce rates.
+4. **Soft cap:** exempt the `h_f` transition (unit rebase, not decline); with 2–3 the SEH series shows no drop — regression-test it.
+5. **Forward estimate:** freeze 12.71% as legacy band; restart regression at `h_f`; interim central = INT8-accelerator deployment growth; display as a band.
+6. **Add two series** (post-fork `getnetworkhashps` = literal n=4096 INT8 matmuls/s): `TOPS_net = getnetworkhashps × 1.7717×10¹⁰`; `H100_eq = TOPS_net/1.286×10¹⁵`; `P_ai = TOPS_net × $17/S` per yr (refresh quarterly). Pre-fork chart-C values: measured useful `M_BTX/2¹⁸ × 2·512³ ≈ 0.32 TOPS`; latent band 4–40 (central 10), dashed, caveated. Composite price floor `max(P_raw, P_ai)`.
+7. **Charts** per §Q.11 (A continuous; B diagnostics-only with unit-change band; C step + latent band; D P_ai vs P_raw crossover). Relabel v3-era "MatMul/sec" → "nonce attempts/s" (literal only at v4).
+8. **Messaging guardrail (verbatim-usable):** *"The v4 fork changes the unit of work, not the security of the chain. BTX security (% of Bitcoin) is continuous through the fork — same hardware, same attack cost, no jump. What steps up ~30× is useful AI output per unit hardware: v3 spent ~97% of the fleet's latent tensor capability on SHA gates and ALU emulation; v4 turns it on. The new TOPS/H100-eq charts show an efficiency/utilization reveal — not new hardware, and not a security increase."* Never present the AI-compute step as a security gain; never show the raw nonce cliff without the unit-change band.
+9. **Dry-run** on regtest (`nMatMulV4Height=100`; use a synthetic Ω to exercise items 2–4) before mainnet `h_f`.
+
+---
+
+### Q.13 Interpretation: resolving the four framings
+
+> **Status:** informative. Companion to §Q.0–§Q.7. This subsection settles how to *talk about* the fork's effect on "the network's compute." Four reasonable framings of the same event appear to contradict each other. They do not — they are statements about **two different quantities**, and every honest claim must say which one it is about.
+
+### Q.13.1 The two quantities
+
+- **`S(t)` — security / attack-cost.** The capital-plus-energy cost of assembling enough compute to out-work the honest network (the 51% budget). What `P_raw` / `BTX_security_%` proxy (§Q.1), and what chainwork measures *after* the §Q.5 `w` recalibration.
+- **`U(t)` — useful/productive compute.** The rate of economically valuable dense-matrix arithmetic the network actually performs, in units the AI market prices: `TOPS_net = getnetworkhashps(6720) × 1.7717×10¹⁰` (§Q.6), dollarized as `P_ai = TOPS_net · $17/TOPS-yr / supply`.
+
+**At the fork, `S` is continuous and `U` steps up ~30× on the same hardware (~10²–10³× combined with composition shift, §Q.4).** Compatible because they measure different things:
+
+| | `S` (attack cost) | `U` (useful compute) |
+|---|---|---|
+| v3 value | 1.5897% of Bitcoin | **0.32 TOPS** ≈ **$5/yr** as AI compute |
+| At the fork | **Continuous** — same fleet/capital/electricity; an attacker's hardware enjoys the same v4 efficiency gains, so the *ratio* (cost to out-compute) is unchanged to first order. | **Steps up ~30×** same-hardware (12–120×) — work per joule changes from SHA + integer-ALU field emulation to native INT8 tensor GEMM. |
+| Why | Security is *relative* (attacker vs honest majority); a solver-efficiency change applied to both sides cancels. | Useful output is *absolute*; a solver-efficiency change applied to production does not cancel — it is the whole point. |
+
+Physical resolution: the v3 fleet's INT8 tensor capacity was **installed but idle** — ~50% of cycles on SHA-256 of no matrix value, ~50% emulating GF(2³¹−1) on integer ALUs, surfacing only 0.32 TOPS while tensor cores sat dark. The capacity was *physically present* (hence `S` continuity), *masked by the solver* (hence the ~30× jump in `U`), and *invisible to the SHA-nonce metric* (hence the new `TOPS_net` metric).
+
+### Q.13.2 The four framings, answered
+
+**(a) "More effective compute in a real way vs Bitcoin?"** — **YES in useful-output/economic-value terms; NO in raw-security terms.** In `U`-terms the same hardware produces ~30× more useful matrix arithmetic, and that arithmetic is dense INT8 GEMM — the commodity AI clouds rent by the hour — where Bitcoin's SHA-256 output has no external market. In `S`-terms nothing jumps (~1.59% of Bitcoin on an unchanged fleet). Any "more compute vs Bitcoin" claim must be a **value-of-work** claim, never a security claim.
+
+**(b) "Exactly the same, keep numbers consistent?"** — **YES for the security metric; §Q.5 is the mechanism.** `w_v4 = w_v3 × Den/Num` (the §I.4 constant) preserves `SEH`/`BTX_security_%`. The raw nonce rate drops ~10⁵–10⁶× as a **unit change**; reporting it un-rescaled prints a fictitious 99.999% collapse. "Keep it consistent" is right — *for this metric*.
+
+**(c) "Uncovers hidden power the inefficient solver masked?"** — **YES, precisely.** The v3 fleet's tensor cores executed zero mining cycles. v4 routes the work onto units that were always there. Decomposition: ≈2× (SHA reclaimed) × ≈5–30× (ALU emulation → native tensor) × ≈1.2–2× (n=512→4096) ≈ 30×. "Uncovered latent capacity" accurate; "created new capacity" not.
+
+**(d) "Already there and accounted for, so no new claims?"** — **Already there: yes. Accounted for: no.** The capacity was installed (consistent with security continuity) but no metric surfaced it: `M_BTX` counted σ-gate attempts, and only 0.32 TOPS of matrix arithmetic was ever performed (~$5/yr). Post-fork it is both *used* and *measured* (`TOPS_net`/`H100_eq`/`P_ai`). So a new **capacity-utilization and value** metric IS warranted, while the **security** metric correctly reports nothing jumped. Reporting both, clearly labeled, is the discipline of this section.
+
+### Q.13.3 One-line reconciliation
+
+**The fork does not add a single transistor (`S` continuous); it stops wasting ~97% of the transistors already there (`U` up ~30×) and starts measuring what they produce in the units the AI market prices.** Any statement about the fork's effect on "compute" is ill-formed until it names whether it is about `S` or `U`.
+
+---
+
+### Q.14 BTX v4 compute vs Bitcoin: sterile vs productive security spend
+
+> **Status:** informative. Cross-refs §Q.6, §S.1/§S.4.3, §N.1, v3 spec §3.2 (`doc/btx-matmul-pow-spec.md`).
+
+### Q.14.1 The qualitative claim, precisely
+
+Bitcoin and BTX v4 both convert capital + energy into attack cost. The difference is **what the spend consists of and whether it has value outside the chain it secures**:
+
+1. **Bitcoin's SHA-256 work is economically sterile outside securing BTC.** No market rents SHA-256d compressions; competitive hardware (SHA ASICs) does nothing else; the nonce has zero external value. By design — but 100% of the security budget is, to the outside economy, pure burn.
+2. **BTX v4's work is the exact commodity the AI market prices.** A v4 nonce is one dense n=4096 INT8 tensor-core GEMM — same operation, silicon, precision as production AI inference. The competitive hardware *is* AI-rental hardware with a liquid hourly market (H100 ≈ $2–3/GPU-hr mid-2026: [IntuitionLabs](https://intuitionlabs.ai/articles/h100-rental-prices-cloud-comparison), [getdeploying](https://getdeploying.com/gpus/nvidia-h100), [Thunder Compute](https://www.thundercompute.com/blog/nvidia-h100-pricing), [CloudZero](https://www.cloudzero.com/blog/h100-gpu-cost/); spot ≈$0.34/hr: [Spheron](https://www.spheron.network/blog/gpu-cloud-pricing-comparison-2026/)). Every TOPS-hour has a market-quoted opportunity cost (§S.4.3) and replacement value (`P_ai`, §Q.6).
+3. **v3 was Bitcoin-like, not v4-like:** ~half SHA-256, ~half integer-ALU emulation — neither externally bought — netting 0.32 TOPS ≈ $5/yr. The fork **converts the security spend from sterile to productive**: from work with no external reference price to work whose reference price is published hourly.
+
+### Q.14.2 The PoUW distinction — where the value lives (do not overclaim)
+
+The useful-work literature ([Primecoin, King 2013](https://primecoin.io/bin/primecoin-paper.pdf); [Ball–Rosen–Sabin–Vasudevan, ePrint 2017/203](https://eprint.iacr.org/2017/203); [Ofelimos, ePrint 2021/1379](https://eprint.iacr.org/2021/1379); [Komargodski–Shen–Weinstein, arXiv:2504.09971](https://arxiv.org/abs/2504.09971)) distinguishes work whose *outputs* are wanted from work that merely resembles it. BTX must be exact:
+
+- **v4's work *products* are NOT externally useful.** Operands `A, B` are seed-derived pseudorandom (§A.2); the product `C` answers no customer's question and is discarded after the sketch commitment. The v3 spec already draws this line and it carries forward: v1/v3 is "AI-native PoW," and calling it "Proof-of-Useful-Work" "would misrepresent the system's actual properties" (`doc/btx-matmul-pow-spec.md` §3.2). A PoUW claim would require arbitrary external input matrices + a data-availability layer, which v4 deliberately does not ship.
+- **v4's work *inputs* ARE dual-use and market-priced.** What changes is the market character of the inputs: the hardware, energy, and skill that produce a v4 block are the identical bundle an AI cloud sells, redeployable to paying AI workloads in minutes. This gives the *security spend itself* an external valuation (`TOPS_net × $17/TOPS-yr`), an opportunity-cost floor (§S.4.3), and a recruitment pool (every idle accelerator on earth) that sterile-hash coins lack.
+
+Shippable formulation: **v4 is AI-native proof-of-work on dual-use, market-priced hardware — not proof-of-useful-work.** The matrices are lottery tickets; the machine that prints them is a working AI accelerator, and the network's aggregate throughput is real, measurable, market-denominated AI compute capacity.
+
+### Q.14.3 What this does and does NOT imply
+
+| Implied — claim it | Not implied — never claim it |
+|---|---|
+| The security budget is *productive*: it maintains a fleet whose capacity has independent market value (`P_ai`), not pure burn. | That BTX is **more secure than Bitcoin**, or more secure *per dollar*. Attack cost is set by dollars of compute defending the chain; Bitcoin's defended budget is ~63× larger (`BTX_security_%` ≈ 1.59%). |
+| Miner economics anchor to an external market: rational sell floor = AI-rental opportunity cost (§S.4.3), replacing v3's zero-cost dumping. | That productive work makes attacks *harder per dollar*. It does not; commodity **rentability cuts both ways** — the same liquid market that recruits honest capacity lets an attacker rent without capital lock-in (bounded/difficulty-damped per §S.4.4/§N.1, but real; Bitcoin's ASIC lock-in is a security property v4 trades away). |
+| The valuation floor `max(P_raw, P_ai)` gains a leg independent of Bitcoin (§Q.6). | That the network "does AI work for customers," "trains models," or produces externally consumed results. It does not (Q.14.2). |
+| v4 fixes v3's pathology: ~97–99% of the fleet's arithmetic capability idle or on sterile cycles, now redirected to the market-priced operation. | That Bitcoin is "doing it wrong." Sterile burn is a coherent choice (no dual-use exit, maximal lock-in); v4 makes a different, explicitly stated trade (§N.1). |
+
+---
+
+### Q.15 Honest-claims guidance (do / don't)
+
+> **Status:** informative but **binding on project communications** (btxprice.com, website, mining guides, exchange notes, social). Rule of thumb: every compute claim must be tagged **[security]** (`S`, continuous) or **[useful compute]** (`U`, steps up ~30×). Mixed-tag claims are the lies.
+
+### Q.15.1 Claims you CAN make
+
+| # | Approved claim | Tag | Basis |
+|---|---|---|---|
+| 1 | "v4 unlocks ~30× more useful matrix compute per unit hardware (12–120×), ~10²–10³× network-wide with the datacenter shift." | useful compute | §Q.4, §Q.7 |
+| 2 | "Compute is now market-priced AI compute: `TOPS_net = getnetworkhashps × 1.7717×10¹⁰`, worth `TOPS_net × $17/TOPS-yr`." | useful compute | §Q.6 |
+| 3 | "Security is continuous across the fork; `BTX_security_%` preserved by `w_v4 = w_v3 × Den/Num`." | security | §Q.5, §I.4 |
+| 4 | "Nonce rate drops ~10⁵–10⁶× because each v4 nonce embodies ~2×10⁶× more work — a unit change, like re-quoting meters as kilometers." | metric semantics | §Q.2–§Q.3 |
+| 5 | "Unlike SHA-256, whose work has no external market, v4's per-nonce operation (dense INT8 GEMM) is the commodity AI clouds rent by the hour." | useful compute | §Q.14.1 |
+| 6 | "Mining now carries a real marginal-cost floor indexed to AI-rental prices; zero-cost mine-and-dump is structurally dead." | economics | §S.4.3–§S.4.5 |
+| 7 | "v3 surfaced only 0.32 TOPS of actual matrix arithmetic (~$5/yr); v4 makes production ≈ installed capability." | useful compute | §Q.4, §Q.6 |
+| 8 | "The security spend is now productive: it maintains a measurable, market-denominated AI-compute fleet instead of sterile hashing." | economics | §Q.14 |
+
+### Q.15.2 Claims you CANNOT make — with the compliant replacement
+
+| # | Forbidden claim | Why false | Say instead |
+|---|---|---|---|
+| 1 | "Hashrate jumped 30×." | Mixes tags: `U` rose ~30×; nonce rate *fell* ~10⁵–10⁶×; security-weighted work flat. | "Useful compute per unit hardware rose ~30×; security-weighted work (`w·M_BTX`) is unchanged." |
+| 2 | "The network is 30× more secure." | `S` is continuous; the attacker gains the same efficiency. | "Security is continuous — and now grows with every accelerator that joins." |
+| 3 | "BTX hashrate collapsed 99.999%." | Unit change, not decline. | Claim 4 of §Q.15.1 + the recalibrated `BTX_security_%`. |
+| 4 | "BTX out-computes Bitcoin." | On security-equivalent work BTX is ~1.59% of Bitcoin; the true claim is about work *character*. | "BTX's compute is market-priced AI compute; Bitcoin's is sterile hashing. Per unit of security spend BTX's is productive — Bitcoin's total spend remains ~63× larger." |
+| 5 | "BTX matrices do useful AI work / trains models / PoUW." | Operands seed-derived; products discarded; v3 §3.2 rejects the label. | "AI-native PoW: same operation, silicon, precision as production AI inference, on dual-use market-priced hardware — but the matrices are consensus-generated, not customer workloads." |
+| 6 | "More secure than Bitcoin per dollar because the work is useful." | Usefulness doesn't change attack dollars; rentability mildly cuts the other way. | "Same security-per-dollar logic as any PoW; BTX's dollars buy productive capacity instead of pure burn." |
+| 7 | "`P_ai` is what the network earns." | Replacement-value/opportunity floor, not revenue. | "`P_ai` values the network's capacity at AI-market rates — a floor anchored to what it would earn if rented." |
+| 8 | "The fork added compute to the network." | No hardware changed; capacity was installed and idle. | "The fork stopped wasting compute already installed: the old solver masked it; the new one uses and measures it." |
+
+**Operational rule for btxprice.com:** ship *both* dashboards — `BTX_security_%` (recalibrated, flat through the fork) and `TOPS_net`/`H100_eq`/`P_ai` (the step) — and never render the raw un-recalibrated nonce rate as a headline series. The flat line and the step, side by side, *are* the honest story; either alone, mislabeled, is the dishonest one.
+
+---
+
+### Q.16 Public explanation (fork-day copy)
+
+> **Status:** informative; approved verbatim for btxprice.com and project channels at `nMatMulV4Height`.
+
+> **What changed at the v4 fork — and what didn't.** At the fork, BTX changed what one "nonce" means: under v3 a nonce was a cheap SHA-256 lottery ticket that only occasionally triggered a small matrix multiplication on the GPU's general-purpose cores; under v4 every nonce *is* one full 4096×4096 INT8 matrix multiplication on tensor cores. Because each new nonce packs about a million times more work, the reported nonce rate drops sharply at the fork — that is a **change of units, not a decline**, exactly like re-quoting a distance in kilometers instead of meters — and our security metric (`BTX_security_%`) is recalibrated by the exact consensus constant so it reads **continuously through the fork**: the same hardware secures the chain the moment after as the moment before, and an attack costs just as much. What genuinely steps up is the network's **useful output**: v3's solver wasted almost all of the fleet's silicon on SHA hashing and software-emulated arithmetic, surfacing only ~0.32 TOPS of real matrix compute — about $5 per year at AI-market rates — while the tensor cores sat idle; v4's efficient solver unlocks that latent capacity, producing roughly **30× more useful matrix compute on the very same machines** (and 100–1,000× as AI-grade hardware joins). And unlike SHA-256 hashing, which no one outside a blockchain will ever pay for, the operation BTX now runs — dense INT8 matrix multiplication — is the exact commodity AI clouds rent by the hour, so the network's compute is measured in TOPS and valued at published AI-market prices. To be precise about what we are *not* claiming: the matrices themselves are generated by the protocol, not by AI customers — BTX is AI-native proof-of-work on market-priced hardware, not "useful work" for hire — and the fork does not make the chain more secure than it was; it makes the security spend *productive* instead of sterile, and finally measures it in units the real world prices.
+
+---
+
+### Q.17 Two valuation anchors: Bitcoin-security-model price and AI-inference-model price
+
+The v4 fork makes BTX's proof-of-work *the same commodity the AI-inference market prices*: dense s8×s8→s32 GEMM (§A.5, §E.3). That admits two independent valuation anchors:
+
+| Anchor | Question it answers | External market | Fork behavior |
+|---|---|---|---|
+| **`P_btc`** (§Q.18) | "What does it cost to attack this chain, in Bitcoin-security terms?" | Bitcoin spot + hashrate | **Continuous** via the §I.4/§Q.9.2 `w` recalibration |
+| **`P_ai` / `P_inf`** (§Q.19) | "What could the hardware securing this chain earn if pointed at the AI market?" | GPU rental $/hr (`P_ai`); inference $/token (`P_inf`) | ≈ 0 pre-fork; **meaningful only under v4** |
+
+> **Honesty constraint (normative for btxprice presentation).** The v4 PoW matrices are seed-derived pseudorandom (§B); the network produces **no sellable inference and no externally useful work products** (§Q.14.2). Both `P_ai` and `P_inf` price the **capacity / opportunity cost** of the INT8 hardware the difficulty proves is attached to the chain — what that silicon *could* earn — never revenue the network earns. Dashboard copy must say "capacity value," "opportunity-cost floor," or "hardware-equivalent value" — never "revenue." Both are downstream of one consensus observable, `getnetworkhashps(6720)`, so btxprice needs no new chain data — only new constants (§Q.20).
+
+### Q.18 Bitcoin-model price `P_btc` (recalibrated security anchor)
+
+```
+P_btc = P_BTC · SEH / H_BTC ,   SEH = w_v4 · M_BTX_v4(1w)
+```
+
+**Continuity across the fork.** With `w_v4 = w_v3·Ω` (Ω = w_v4/w_v3 = target rescale = M(t_f⁻)/M(t_f⁺), §Q.9.2) and reported nonce rate rescaling by `1/Ω`, the boundary product is preserved: `w_v4·M(t_f⁺) = (w_v3·Ω)·(M(t_f⁻)/Ω) = w_v3·M(t_f⁻)`. So `SEH`, `BTX_security_%`, and `P_btc` are continuous by construction — both constants read from chainparams at tag time. `P_btc` is the *attack-cost/security* floor: the hardware mining BTX represents the same security-purchase as ≈1.59% of Bitcoin's hashpower, priced at Bitcoin's own valuation of security.
+
+**Worked value (July 2026 inputs):**
+- `w_v3·M_BTX` = 4.525×10¹⁰ × 3.157×10⁸ = **1.4285×10¹⁹ H/s-eq** (§Q.1).
+- `P_BTC` ≈ **$62,550** (July 14 2026, [Fortune](https://fortune.com/article/price-of-bitcoin-07-14-2026/)).
+- `H_BTC` ≈ **9.08×10²⁰ H/s** (908 EH/s July 11; range 866–1,010 EH/s: [CoinWarz](https://www.coinwarz.com/bitcoin-hashrate), [news.bitcoin.com](https://news.bitcoin.com/bitcoins-14th-difficulty-reset-slashes-mining-pressure-by-6-7-trillion/)).
+
+```
+SEH/H_BTC = 1.4285×10¹⁹ / 9.08×10²⁰ = 0.01573 (1.573%)
+P_btc     = $62,550 × 0.01573 ≈ $984 / BTX
+  (band over July H_BTC 866–1,010 EH/s: $885–$1,032; at the site's 1.5897%: $994)
+```
+
+**`P_btc` ≈ $980–995 per BTX** — the continuity anchor, the only line guaranteed smooth through `nMatMulV4Height`, denominated in Bitcoin's security market.
+
+### Q.19 Inference-model price `P_inf` (reference-benchmark-anchored)
+
+`P_ai` (§Q.6) values network INT8 capacity at GPU **rental** rates. `P_inf` values it at what it produces *sold as inference output* — tokens:
+
+```
+P_inf = TOPS_net × r_tok × p_tok × u × T_yr / S
+```
+
+`TOPS_net = getnetworkhashps(6720) × W_nonce` (delivered, §Q.6); `r_tok` = output tok/s per delivered-TOPS; `p_tok` = market $/output-token; `u` = serving/utilization factor; `T_yr` = 3.1536×10⁷ s; `S` ≈ 3,170,980 BTX.
+
+**(a) Reference throughputs (H100, 1 H100 = 1,286 delivered INT8 TOPS at ε=0.65).** [NVIDIA TensorRT-LLM perf](https://nvidia.github.io/TensorRT-LLM/performance/perf-overview.html) (FP8, per-GPU):
+
+| Reference | ISL/OSL | tok/s/H100 | `r_tok` = ÷1,286 |
+|---|---|---:|---:|
+| Llama-3.1-8B TP1 | 128/128 (peak) | 26,401 | 20.5 |
+| Llama-3.1-8B TP1 | **1000/1000** | 14,992 | **11.66** |
+| Llama-3.3-70B TP2 | 128/128 (peak) | 3,046 | 2.37 |
+| Llama-3.3-70B TP2 | **1000/1000** | 2,090 | **1.63** |
+
+Cross-check: MLPerf Inference v4.1 Llama-2-70B offline = 3,066 tok/s/H100 ([NVIDIA](https://developer.nvidia.com/blog/nvidia-blackwell-platform-sets-new-llm-inference-records-in-mlperf-inference-v4-1/), [MLCommons](https://mlcommons.org/2024/03/mlperf-llama2-70b/)) — within 0.7% of the 70B peak. ✓ Use the realistic 1000/1000 rows as central.
+
+**(b) Market $/1M output tokens (mid-2026):**
+
+| Provider | 8B (out) | 70B (out) |
+|---|---:|---:|
+| DeepInfra | $0.08 | $0.40 |
+| Groq | $0.08 | $0.79 |
+| Together.ai | $0.18 | $0.88 |
+| Fireworks | $0.20 | $0.90 |
+
+Sources: [AI Pricing Guru](https://www.aipricing.guru/meta-llama-pricing/), [pricepertoken DeepInfra/Together](https://pricepertoken.com/endpoints/compare/deepinfra-vs-together), [Groq](https://groq.com/pricing), [Together](https://www.together.ai/pricing), [pricepertoken Fireworks/Together](https://pricepertoken.com/endpoints/compare/fireworks-vs-together). Central `p_tok`: **8B $0.10/Mtok, 70B $0.60/Mtok** (output only — input processing ignored, conservative).
+
+**(c) Chained arithmetic (100 H100-eq ⇔ TOPS_net = 128,600 dTOPS, §Q.6; S = 3,170,980):**
+- *8B central:* 128,600 × 11.66 = 1.500×10⁶ tok/s → 4.729×10¹³ tok/yr → ×$0.10×10⁻⁶×u=0.5 = $2.364×10⁶/yr → **$0.75/BTX**.
+- *70B central:* 128,600 × 1.63 = 2.090×10⁵ tok/s → 6.590×10¹² tok/yr → ×$0.60×10⁻⁶×0.5 = $1.977×10⁶/yr → **$0.62/BTX**.
+- *2,000 H100-eq (×20):* 8B **$14.91**, 70B **$12.47**/BTX (rental `P_ai` = $13.81).
+
+**Sensitivity ($/BTX per 100 H100-eq, realistic basis; ×1.76/1.46 for peak MFU; linear in H100-eq):**
+
+| Reference × $/Mtok | u=0.25 | u=0.5 | u=1.0 |
+|---|---:|---:|---:|
+| 8B @ $0.08 | $0.30 | $0.60 | $1.19 |
+| 8B @ $0.10 (central) | $0.37 | **$0.75** | $1.49 |
+| 8B @ $0.18 | $0.67 | $1.34 | $2.68 |
+| 70B @ $0.40 | $0.21 | $0.42 | $0.83 |
+| 70B @ $0.60 (central) | $0.31 | **$0.62** | $1.25 |
+| 70B @ $0.90 | $0.47 | $0.94 | $1.87 |
+| *rental `P_ai` ref* | — | — | *$0.69* |
+
+The independent 8B and 70B chains land within ±10% at central assumptions: **`P_inf` ≈ $0.62–0.75/BTX per 100 H100-eq** (full range $0.21–2.68).
+
+**(d) Cross-check vs rental `P_ai`.** Per delivered-TOPS-yr at u=1: 8B → 367.7 Mtok × $0.08–0.18 = **$29–66**; 70B → 51.3 Mtok × $0.40–0.90 = **$21–46**; vs rental **$17.0/dTOPS-yr** (§Q.6). Same order, sitting **1.2–3.9× above rental** at full utilization (token prices embed serving stack + margin + sub-peak recovery); at realistic u≈0.5 the central chains ($19.8–23.6k/H100-yr) converge on the $21,900/H100-yr rental figure. **`P_ai` (rental) is the harder, conservative floor** (a miner can actually rent capacity out at it with no serving stack); **`P_inf` is the productive-value reference/upper anchor.** Both are capacity valuations, not revenue.
+
+### Q.20 Combining the anchors + btxprice handoff
+
+| Line | Pre-fork | Post-fork | Tells the viewer |
+|---|---|---|---|
+| `P_btc` — security floor | ≈ **$984** ($885–1,032) | continuous, `w_v4` | attack-cost parity with ≈1.59% of Bitcoin |
+| `P_ai` — compute floor (rental) | ≈ **$0** (v3 = 0.32 TOPS ≈ $1.7×10⁻⁶/BTX) | $0.69/BTX per 100 H100-eq | what the proven hardware could rent for |
+| `P_inf` — productive value (inference) | ≈ **$0** (v3 compute unsalable in this market) | $0.62–0.75/BTX per 100 H100-eq | what that capacity's token output sells for |
+
+**Composite:** headline = **`max(P_btc, P_ai)`** (max of two floors is a floor), with `P_inf` as a productive-value band around/above `P_ai`. Crossover where the compute floor overtakes the security floor: `N* = P_btc·S/C_H100·yr = $984 × 3,170,980 / $21,900 ≈ 1.42×10⁵ H100-eq` — `P_btc` leads until ~140k H100-eq; `P_ai`/`P_inf` grow from zero with adoption.
+
+**The quantified pivot:** pre-fork the AI anchors are ≈0; post-fork `P_ai`/`P_inf` is a **new valuation floor that did not exist under v3** — the dashboard's own numbers prove the compute became economically real: the identical `getnetworkhashps` observable that priced ~$5/yr of hardware capacity under v3 prices ~$21,900/H100-eq-yr under v4.
+
+**btxprice implementation block:**
+
+```
+# Inputs (polled)
+P_BTC   : BTC spot                    — exchange/aggregator API     (10 min)
+H_BTC   : BTC 1w hashrate             — mempool.space/coinwarz      (10 min)
+R_nonce : BTX getnetworkhashps(6720)  — BTX RPC (split window at nMatMulV4Height, §Q.9.3)
+S       : circulating supply          — BTX RPC (grows 800 BTX/hr; poll, don't hardcode)
+
+# Constants
+Ω        = Num/Den from chainparams (§I.4) ;  w_v4 = w_v3 × Ω        # Ω>1, ≈3e5–1e6 (§Q.9.2)
+W_nonce  = 1.7717e10 INT8 ops (§E.3/§M.4)
+TOPS_net = R_nonce × W_nonce / 1e12  (dTOPS) ;  H100_eq = TOPS_net/1286
+c_rental = $17.0 /dTOPS·yr ($2.50/H100-hr; refresh quarterly)
+r_tok_8B = 11.66 tok/s/dTOPS (peak 20.5)   # TRT-LLM Llama-3.1-8B FP8 1000/1000
+r_tok_70B= 1.63  tok/s/dTOPS (peak 2.37)   # TRT-LLM Llama-3.3-70B FP8 TP2; MLPerf ✓
+p_tok_8B = $0.10e-6/tok (0.08–0.18) ;  p_tok_70B = $0.60e-6/tok (0.40–0.90)
+u        = 0.5 (band 0.25–1.0) ;  T_yr = 31,536,000
+
+# Formulas
+P_btc = P_BTC × w_v4 × R_nonce_1w / H_BTC                  # security floor (continuous)
+P_ai  = TOPS_net × c_rental / S                            # compute floor
+P_inf = TOPS_net × r_tok × p_tok × u × T_yr / S            # productive-value reference (per ref)
+headline = max(P_btc, P_ai) ; show P_inf as band [70B-low, 8B-high]
+
+# Refresh: r_tok quarterly (TRT-LLM/MLPerf) ; p_tok monthly (provider pages) ; rental quarterly.
+# GUARDRAIL (ship with UI): P_ai/P_inf value the CAPACITY / OPPORTUNITY COST of the hardware the
+# difficulty proves exists — matrices are pseudorandom, the network sells no inference and earns
+# no AI revenue. Valuation FLOORS/references, not income claims, not a price promise.
+```
+
+**Sources:** [Fortune BTC 07-14-2026](https://fortune.com/article/price-of-bitcoin-07-14-2026/) · [CoinWarz hashrate](https://www.coinwarz.com/bitcoin-hashrate) · [news.bitcoin.com difficulty reset](https://news.bitcoin.com/bitcoins-14th-difficulty-reset-slashes-mining-pressure-by-6-7-trillion/) · [TensorRT-LLM perf](https://nvidia.github.io/TensorRT-LLM/performance/perf-overview.html) · [NVIDIA MLPerf v4.1](https://developer.nvidia.com/blog/nvidia-blackwell-platform-sets-new-llm-inference-records-in-mlperf-inference-v4-1/) · [MLCommons Llama-2-70B](https://mlcommons.org/2024/03/mlperf-llama2-70b/) · [H100 datasheet](https://resources.nvidia.com/en-us-gpu/h100-datasheet-24306) · [AI Pricing Guru](https://www.aipricing.guru/meta-llama-pricing/) · [pricepertoken DeepInfra/Together](https://pricepertoken.com/endpoints/compare/deepinfra-vs-together) · [pricepertoken Fireworks/Together](https://pricepertoken.com/endpoints/compare/fireworks-vs-together) · [Groq](https://groq.com/pricing) · [Together](https://www.together.ai/pricing) · [IntuitionLabs H100 rental](https://intuitionlabs.ai/articles/h100-rental-prices-cloud-comparison) · [btxprice.com/valuation-model](https://btxprice.com/valuation-model)
 
 ---
 
