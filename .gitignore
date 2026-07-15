@@ -63,3 +63,5 @@ github.key
 *~
 .cache/*
 btx-release-key/
+# Claude Code local state and agent worktrees (never track)
+.claude/
