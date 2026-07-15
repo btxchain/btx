@@ -52,7 +52,7 @@ The following matrix maps each point raised in the requirements discussion to th
 
 | # | Concern as raised | v4 resolution | Section |
 |---|---|---|---|
-| 1 | Consumer 5090 is the most efficient miner, at parity with H100/H200 | Invert via INT8 tensor-core dense matmul at large n + memory-capacity gate; datacenter INT8 FLOPS + HBM win | §K, §L, §M |
+| 1 | Consumer 5090 is the most efficient miner, at parity with H100/H200 | Invert via INT8 tensor-core dense matmul at large n (b=8 keeps it compute-bound, §K.2a); datacenter wins per card (H100 ≈ 2.4×, B200 ≈ 5.4× a 5090) and per joule. No capacity gate (closed, §L.4) — the lever is compute + energy | §K, §L, §M |
 | 2 | "Increase the compute level while washing out the retail guys" | Matmul is the sole per-nonce cost; difficulty tracks tensor-FLOPS; n scaled to exceed consumer VRAM | §A, §K, §M |
 | 3 | SHA-256 share is enormous; matrix share shrinks as difficulty rises | **Remove the pre-hash epsilon gate**; SHA limited to seed + sealing; one dense matmul per nonce | §A, §C, §I |
 | 4 | "Hashing takes up way more of the mining effort than GPU compute" | Same as #3 — matmul runs on every nonce; SHA cost becomes negligible per attempt | §A, §C |
@@ -61,11 +61,11 @@ The following matrix maps each point raised in the requirements discussion to th
 | 7 | Retain ML-DSA / SLH-DSA for quantum resistance | Untouched — orthogonal subsystem | §0.4, §J |
 | 8 | "If we can't efficiently do Freivalds it is a problem" | Deterministic Freivalds over an independent 61-bit prime on the exact-integer product (§D.3 — never over the composite CRT modulus, §D.2); R = 3 rounds for ≤ 2⁻¹⁸⁰; ≈ 0.1 s verify at n = 4096 | §D |
 | 9 | Target datacenters (H100/H200); let them win more blocks | INT8 tensor-FLOPS + HBM-capacity design gives datacenter the best cost-per-block | §K, §M |
-| 10 | Must scale compute; worst case is compute going down via memory-hardness | Compute-bound above the roofline ridge; memory used as *capacity gate*, never *bandwidth bottleneck* | §L |
+| 10 | Must scale compute; worst case is compute going down via memory-hardness | Compute-bound above the roofline ridge (AI_opt = 2n/b, b=8, §K.2a); never bandwidth-bound; no capacity gate (§L.4). More tensor FLOPS always → more reward | §L |
 | 11 | May need to abandon SHA-256 (consumer excels at it) | SHA-256 demoted to seed derivation + block sealing; it is no longer the mining bottleneck | §A, §C |
 | 12 | Don't break the chain / past blocks | Height-gated hard fork; legacy blocks validated under v3 rules | §0.4, §G, §J |
 | 13 | CMP cards / old hardware / cheap electricity dumping price (2 CMP ≈ 1 5080) | CMP-class cards lack low-precision tensor GEMM (CMP-170HX FP32 = 0.39 TFLOPS) and are excluded by the INT8-tensor + VRAM-gate design | §K, §N |
-| 14 | Advisor: make it memory-bound to limit low-VRAM GPUs | Adopted **only as a capacity gate**, not as bandwidth-hardness; design stays compute-bound (resolves the tension in #10) | §L, §M |
+| 14 | Advisor: make it memory-bound to limit low-VRAM GPUs | **Not adopted** — no verification-preserving capacity gate exists (§L.4), and bandwidth-hardness would resurrect junk (rejected). Admission is by INT8-tensor-path eligibility (§S.1); design stays compute-bound | §L, §M, §S |
 | 15 | Change consensus immediately; give requirements | This document; clean hard-fork swap with a complete implementation checklist | §G–§J |
 | 16 | Consumer/Apple users must still pool massively and earn rewards, not be shut out | v4 *orders* by INT8 throughput, never hard-excludes; share-based pooling over cheap Freivalds-verified shares pays proportional-to-compute (PPLNS/PPS); Apple M5 re-enters with a genuine INT8 path | §O.1, §O.2, §P.3 |
 | 17 | How M1+ Apple / RTX 3090/5090 / datacenter fare in v3 vs v4 | Full cross-generation comparison: CMP & M1–M4 fall to verify-only, M5+ and all Ampere+ NVIDIA re-rank by INT8 TOPS (H100 = 2.4× a 5090); datacenter wins per device & per watt | §P |
@@ -458,7 +458,7 @@ Any linear commitment of C admits an algebraic evaluation shortcut: Ĉ = (U·A)�
 | Tier | Per-block cost | Storage |
 |---|---|---|
 | Mining | ≈ 2n²m INT8-MACs per lane per nonce (GPU tensor cores; §E.3) + digest hash | working set per §M |
-| Consensus-validating | full §E.2 check: ≈ 0.1–0.2 s CPU (n = 4096) | payload to prune depth 10 000 (`src/consensus/params.h:151`): 10⁴ × 512 KiB ≈ **5 GiB rolling** |
+| Consensus-validating | full §E.2 check: ≈ 0.1–0.2 s CPU (n = 4096) | payload to prune depth 10 000 (`src/consensus/params.h:151`): 10⁴ × 2 MiB ≈ **20 GiB rolling** (b=8) |
 | Economic (exchange/merchant) | full check over recent window only (`nMatMulValidationWindow = 1000`, `:145`), assumevalid beneath | ≈ 500 MiB rolling |
 | SPV | header-only: `matmul_digest ≤ target`, O(1) | headers only; no payload download |
 
@@ -483,7 +483,7 @@ The advisor's concern — "large n makes re-verification expensive for nodes" �
 |---|---|---|
 | Miner overhead per block | none (payload is a by-product) | minutes-to-hours of proving (F.2) |
 | Verify time | ≈ 0.1 s (n = 4096) | ~ms once proof exists |
-| Extra payload | 512 KiB sketch | ≈ 43 KB proof |
+| Extra payload | 2 MiB sketch | ≈ 43 KB proof |
 | Soundness | statistical, ≤ 2⁻¹⁸⁰ | computational (hash-based, FRI) |
 | Trusted setup | none | none |
 
@@ -610,7 +610,7 @@ v4 **keeps the 182-byte header** (`BTX_HEADER_SIZE = 182`, static_assert `src/pr
 
 ### H.2 v4 block payload
 
-> **Profile note (§0.7-(3)):** H.2–H.3 specify the **full-C (strict-binding) profile**. Under the **default sketch profile** the payload is `Ĉ ∈ 𝔽_q^{m×m}` (8·m² bytes = 512 KiB at n = 4096, b = 16; §E.1), which fits every existing size limit — none of the H.3 size-limit changes are then required.
+> **Profile note (§0.7-(3)):** H.2–H.3 specify the **full-C (strict-binding) profile**. Under the **default sketch profile** the payload is `Ĉ ∈ 𝔽_q^{m×m}` (8·m² bytes = 2 MiB at n = 4096, b = 8; §E.1), which fits every existing size limit — none of the H.3 size-limit changes are then required.
 
 Reuses the trailing-payload serialization (`block.h:119-153`) with new rules:
 - `matrix_c_data` — **required**; exactly `n²` uint32 words, row-major, each the two's-complement exact ℤ entry `C_ij = Σ_t A_it·B_tj` (`|C_ij| ≤ 15,625·n`; out-of-bound words are non-canonical → invalid).
@@ -652,7 +652,7 @@ Binds A,B to prevhash, height, merkle, nBits, the 64-bit nonce, dim, and parent 
 
 - Header relay never carries payload (empty-`vtx` shim, `block.h:122-129`, untouched).
 - BIP152 compact blocks remain disabled at payload-carrying heights (rationale `chainparams.cpp:176-186`; `ProcessGetBlockData`), extended to all heights ≥ `nMatMulV4Height`.
-- Under the full-C profile the 64 MiB payload makes full-block relay the dominant bandwidth cost; the default 512 KiB sketch keeps relay tx-dominated. DoS budgets (I.5) and the pending cap are sized against the shipped profile.
+- Under the full-C profile the 64 MiB payload makes full-block relay the dominant bandwidth cost; the default 2 MiB sketch keeps relay tx-dominated. DoS budgets (I.5) and the pending cap are sized against the shipped profile.
 
 ---
 
@@ -761,7 +761,7 @@ Baseline: v3's measured bench is 569.4 µs **per round** at n=512 (`MatMulFreiva
 
 **Explicitly NOT modified:** PQ signatures (`src/libbitcoinpqc`, `src/script/pqm.*`, `interpreter.cpp` ML-DSA/SLH-DSA), and the shielded pool + its formal-verification artifacts/generators. The v4 diff must contain no hunks under these paths; CI should enforce a path guard on the fork branch.
 
-**Editor's load-bearing findings:** (1) v3 payload validators cap dim at 2048 (`pow.cpp:137`, `params.h:143`), *below* v4's 4096 — height-selected bounds are mandatory. (2) Under the full-C profile the 64 MiB C payload at n=4096 exceeds `nMaxBlockSerializedSize` (24 MB) and `MAX_PROTOCOL_MESSAGE_LENGTH` (16 MB), and n=8192 exceeds the `MAX_SIZE` element cap — H.3/J#7-8 are fork deliverables **only if** full-C is chosen; the default 512 KiB sketch requires none of them (§0.7-(3)).
+**Editor's load-bearing findings:** (1) v3 payload validators cap dim at 2048 (`pow.cpp:137`, `params.h:143`), *below* v4's 4096 — height-selected bounds are mandatory. (2) Under the full-C profile the 64 MiB C payload at n=4096 exceeds `nMaxBlockSerializedSize` (24 MB) and `MAX_PROTOCOL_MESSAGE_LENGTH` (16 MB), and n=8192 exceeds the `MAX_SIZE` element cap — H.3/J#7-8 are fork deliverables **only if** full-C is chosen; the default 2 MiB sketch requires none of them (§0.7-(3)).
 
 ---
 
@@ -868,6 +868,10 @@ Attainable = `min(peak_FLOPS, AI·peak_bandwidth)`, ridge `AI* = peak_FLOPS/peak
 
 Going bandwidth-bound would *help* consumer/junk cards (lower ridge points) and resurrect CMP-class; staying above every ridge keeps ranking strictly ∝ tensor TOPS. Minimum-traffic is the standard tiled-GEMM result (cuBLASLt IMMA already achieves it).
 
+#### L.2.1 Work-unit-neutrality theorem (the floor and ordering are invariant to the work-unit size)
+
+Let the per-nonce work be scaled by any constant `c` (via `n`, `k`, `b`, or full-C vs sketch). Every device's nonce rate scales by `1/c`; ASERT re-targets to hold 40 blocks/hr (§I.4); each device's share of the 800 BTX/hr emission, `(BTX/hr)_g = 800·T_g/TOPS_net`, is **unchanged**. Hence every break-even `P*_g = R_g·TOPS_net/(800·T_g)` and the §S.4.3 floor are **invariant under `c`**. Corollaries: (i) a bigger work unit makes *a nonce* dearer, not *a coin* — coins cost `ρ·TOPS_net/800` regardless; (ii) `TOPS_net = ν_net·W_nonce` is the hardware's true ops/s and is `b`-invariant, so `N_eq`, `P_prod`, `BTX_security_%`, and every hardware ratio are `b`-invariant (the §Q.4 note). **What is *not* neutral is anything that changes the *relative* `T_g` between classes** — which is exactly why the `b=8` roofline fix (§K.2a) matters (it restores datacenter `T_g`) while `n`/`k` do not move the economics. Independently derived by both the solver and security-economics re-derivations. This is why the only price-independent floor levers are *eligibility* (§S.1) and *relative efficiency* (§K.2a), never work-unit inflation.
+
 ### L.3 Capacity as a gate — rejected with proof (superseded by §L.4)
 
 The intuition of §L.1 (residency gate → binary admission → datacenter-only) is appealing, but **no verification-preserving capacity gate exists**: any resident-set requirement is either (a) evaluable by the O(n²) verifier — in which case the miner shares the same shortcut and no residency is forced (verifier-linearity collapse), or (b) nonlinear enough to force miner residency — in which case the verifier is forced to O(n³) and blows the §D.5 budget; and even a per-nonce-varying footprint is defeated by grinding the selection PRF (I8/§L.4). The prior "Adopted, sized `32 GB < W < 80 GB`, filed as future hardening" disposition is **retracted**; §L.4 is the proof. As hardware improves, `n` is retargetable upward within the verify budget — compute scales up, never down — but that is a throughput knob, not a capacity gate.
@@ -901,14 +905,14 @@ Per nonce per prime: n³ MACs (2n³ ops); operand n² B (int8), accumulator 4n²
 | 16,384 | 8.80·10¹² | 4.4 ms | 22 ms | 1.61 GB | no | no | yes | 8.1·10⁸ | multi-second, 1 GiB payload — **exceeds verify budget** |
 | 32,768 | 7.04·10¹³ | 36 ms | 176 ms | 6.44 GB | no | no | yes | 3.2·10⁹ | seconds+, 4 GiB — **excluded** |
 
-*(Times shown are for the full n³ product; the optimal sketch miner runs at ×(2/b) = 1/8 of them, §E.3. Payload figures in the last column are full-C; the default sketch payload is 8·(n/b)² B — 512 KiB at n = 4096, b = 16, §E.1.)*
+*(Times shown are for the full n³ product; the optimal sketch miner runs at ×(2/b) = 1/4 of them at b=8, §E.3. Payload figures in the last column are full-C; the default sketch payload is 8·(n/b)² B — 2 MiB at n = 4096, b = 8, §E.1.)*
 
 Per-nonce footprint alone does not gate 32 GB consumer VRAM until n ≈ 74,000 — where verification/payload are far past budget. **The single-matmul VRAM gate is therefore incompatible with cheap verification** (§0.7). Two consequences:
 
-- **Launch (normative): n = 4096, single-C verification.** Compute-bound (AI ≈ 1,365, ≥ 2.3× every ridge), per-nonce ~0.1 ms on H100 → thousands of nonces per 90 s block, Freivalds verify ~0.15–0.3 s, payload 512 KiB sketch (64 MiB full-C alternative). The datacenter advantage is the ~5×/~11× INT8 compute lever (§K.3) plus the resident/thermal/scale-out edges of datacenter parts. n may rise to **8192** once the serialization limits (§H.3) are lifted, trading verification headroom for a larger work unit.
-- **Future hardening (optional, non-launch): capacity gate.** A resident-C-window (hold m recent products, digest chained with random back-references so a dropped C must be recomputed) would gate 32 GB VRAM at moderate n. It is **excluded from the launch consensus** because it makes block validity depend on more than the winning nonce's C and must first be shown to preserve O(n²) verification (§0.7). Recorded in Appendix C.
+- **Launch (normative): n = 4096, single-C verification.** Compute-bound (AI ≈ 1,365, ≥ 2.3× every ridge), per-nonce ~0.1 ms on H100 → thousands of nonces per 90 s block, Freivalds verify ~0.15–0.3 s, payload 2 MiB sketch (64 MiB full-C alternative). The datacenter advantage is the ~5×/~11× INT8 compute lever (§K.3) plus the resident/thermal/scale-out edges of datacenter parts. n may rise to **8192** once the serialization limits (§H.3) are lifted, trading verification headroom for a larger work unit.
+- **Capacity gate — closed, not deferred (§L.4).** A resident-C-window (hold m recent products, digest chained with random back-references) was considered as a way to gate 32 GB VRAM, but it is defeated by winner-recompute (the back-referenced C's are the miner's own prior candidates, fabricated on demand at win time) and is unverifiable without shipping the referenced C's. More generally, no verification-preserving capacity/bandwidth/working-set gate exists in the O(n²)-verify, single-winner model (§L.4). The launch and permanent datacenter lever is INT8 compute + energy.
 
-**Recommendation: n = 4096, k = 1 (single exact-integer s8 matmul, §0.7), b = 16, sketch payload, Freivalds verification over q = 2⁶¹−1.** n=8192 is a governance-raisable option after the §H.3 plumbing lands; larger n, the optional k > 1 compute-multiplier (§B.3/§M.2), and the capacity gate are all deferred pending a verification-preserving construction / verification-budget headroom.
+**Recommendation: n = 4096, k = 1 (single exact-integer s8 matmul, §0.7), b = 8 (roofline-driven, §K.2a), sketch payload (2 MiB), Freivalds verification over q = 2⁶¹−1.** n=8192 is a governance-raisable option after the §H.3 plumbing lands; larger n and the optional k > 1 compute-multiplier (§B.3/§M.2) are deferred pending verification-budget headroom. The capacity gate is **not** deferred — it is closed (no verification-preserving construction exists, §L.4); the datacenter lever is compute + energy, permanently.
 
 ### M.2 k — compute lanes (baseline k = 1)
 
@@ -945,7 +949,7 @@ BTX's existing spec/site optimize for commodity fairness: viability "on any mach
 | iii | **Field too small for soundness** (per-round Freivalds ~1/p ≈ 2⁻⁸/prime; the composite modulus M is no better — an adversary localizes the error to one CRT plane, §D.2). | Low | High if mis-specified | Lift to the exact integer product and run Freivalds over the independent prime q = 2⁶¹−1 (§D.3): R = 3 → ≤ 2⁻¹⁸⁰ (sketch) / ≤ 2⁻¹⁸³ (full-C). Never check over ℤ_M or per-lane mod p_i. Consensus tests encode the bound. |
 | iv | **Centralization toward datacenters** — hashpower concentrates among capital/power-advantaged operators; 51% surface shifts to a few clouds/HPC operators. | High (the goal's cost) | High | Accepted and disclosed (N.1). Offsets: spot-rental markets lower entry vs ASIC fabs; (n,k) governance-retargetable if concentration exceeds thresholds; monitor Nakamoto coefficient on-chain. |
 | v | **Determinism bugs across INT8 implementations** (exact in principle, [arXiv:2511.00025](https://arxiv.org/pdf/2511.00025), but library bugs — saturating vs wrapping, sparsity flags, quant pre-passes — could diverge). | Medium | High (fork) | Extend v3's cross-vendor spot-check: golden C digests over CUDA/ROCm/CPU reference; mandatory miner self-test at startup; the pure-integer CPU implementation is the consensus definition, tensor paths must match bit-for-bit. |
-| vi | **Verification/DA cost at large n** (Freivalds O(n²) but verifier regenerates 2n² operand bytes + downloads C). | Medium | Medium–High | Hard invariant (§0.7): full-node verify < ~0.3 s CPU, payload 512 KiB sketch (64 MiB full-C) at n=4096; caps n growth (raise k before n; n≤8192 only after §H.3); stream PRF regeneration (O(n) RAM on verifiers). |
+| vi | **Verification/DA cost at large n** (Freivalds O(n²) but verifier regenerates 2n² operand bytes + downloads C). | Medium | Medium–High | Hard invariant (§0.7): full-node verify < ~0.3 s CPU, payload 2 MiB sketch (64 MiB full-C) at n=4096; caps n growth (raise k before n; n≤8192 only after §H.3); stream PRF regeneration (O(n) RAM on verifiers). |
 
 ---
 
@@ -1985,7 +1989,7 @@ v3: ρ ≈ 0 (CMP/junk had no alternative market → zero opportunity cost). v4 
 | **p** | A small prime < 2⁸ used as the base field so elements fit an INT8 tensor-core operand. |
 | **k** | Number of CRT primes (residue channels). The effective modulus is P = ∏pᵢ. |
 | **P** | CRT-reconstructed modulus = ∏ pᵢ = 3,368,562,317 ≈ 2³¹·⁶⁵. A ring, not a field — Freivalds is never run over ℤ_P (§D.2); soundness is evaluated over the independent prime q = 2⁶¹−1 (§D.3). |
-| **b** | Product-commitment/sketch tile size; n must be divisible by b. Network-wide b = 16 (§G.2); sets sketch dimension m = n/b and the §E.3 work factor b/2. |
+| **b** | Product-commitment/sketch tile size; n must be divisible by b. Network-wide **b = 8** (§G.2/§K.2a); sets sketch dimension m = n/b, payload 8m², the §E.3 work factor b/2, and the optimal-miner arithmetic intensity `AI_opt = 2n/b` (kept above every INT8 roofline ridge). |
 | **E_max** | Maximum canonical field element value; bounds INT32 accumulation (n·E_max² < 2³¹). |
 | **A, B, C** | Per-nonce input matrices A, B and their product C = A·B over the field. |
 | **σ (sigma)** | Per-nonce challenge = H(header), binds seeds, Freivalds vector, and commitment. |
@@ -2061,12 +2065,16 @@ v3: ρ ≈ 0 (CMP/junk had no alternative market → zero opportunity cost). v4 
 1. **Genesis/bootstrap difficulty** for the n=4096 INT8 work unit — requires benchmarking on reference H100/H200/5090 hardware.
 2. **s8 operand sampling** — pin the seed→`[-125,125]` rejection-sampling PRF and test vectors (k = 1 baseline; no prime set needed unless the optional §B.3 CRT variant is ever enabled).
 3. **Cross-vendor INT8 determinism test vectors** — generate a pinned reference (independent implementation) before writing consensus code, mirroring v3's TV1–TV6 discipline.
-4. **n final value** — confirm n = 4096 (or ≤ 8192) meets the < 100 ms verification target and per-nonce cadence on reference hardware. Per §0.7/§D.5 the launch datacenter lever is INT8 tensor-core compute, not a VRAM gate; any future verification-preserving memory-capacity gate (§L.3) is a separate, deferred item, not a launch dependency.
+4. **n final value** — confirm n = 4096 (or ≤ 8192) meets the < 100 ms verification target and per-nonce cadence on reference hardware. Per §0.7/§D.5 the launch datacenter lever is INT8 tensor-core compute + energy, not a VRAM gate. **Capacity gate: RESOLVED-NEGATIVE (§L.4)** — no verification-preserving capacity/bandwidth/working-set gate exists (verifier-linearity collapse + selection-filtering + batch-streaming winner-recompute); this is closed, not a deferred launch item.
 5. **Freivalds soundness field & round count** — confirm q = 2⁶¹−1 (or GF((2³¹−1)²)) with R = 3 (§D.3); do NOT use the composite CRT modulus (§D.2).
 6. **Payload profile** — confirm the compressed-sketch default (§E.1) vs the full-C strict-binding alternative (§0.7); if full-C is chosen, land the §H.3 message/`MAX_SIZE` plumbing.
 7. **DoS verify-budget retune** for O(n²) at the chosen n (§E.4, §I.5).
 8. **Difficulty work-unit** — calibrate the one-time ASERT rescale (§I.4) against the sketch work unit n³·(2/b), not naïve n³ (§E.3).
 9. **Committed-object definition — RESOLVED (k = 1).** The baseline is a single exact-integer s8 matmul: dense pseudorandom s8 operands `A, B ∈ [-125,125]`, exact INT32 product `C = A·B` (native `s8×s8→s32`), committed via the sketch and Freivalds-verified over `q = 2⁶¹−1` (§0.7 "Resolved", §D.3). The k-prime CRT scheme (§B.3/§B.5) is demoted to an optional, off-by-default compute-multiplier (each lane a separate exact-integer GEMM + per-lane q-Freivalds, ×k verify cost). Remaining sub-item: decide whether to keep the §B.3 CRT text as a documented optional variant (current choice) or delete it for a leaner spec.
+10. **Sketch tile b = 8 — RESOLVED, with confirmation items (§K.2a/§L.2).** b was set 16 → 8 so the optimal-miner arithmetic intensity `AI_opt = 2n/b = 1,024` clears every INT8 roofline ridge. Confirm on real kernels: (a) bench the b=8 verify path (2 MiB payload SHA + R=3 Freivalds) on reference CPUs against the 300 ms budget; (b) empirically confirm `AI_opt ≥ ridge` on real H100/B200/4090 IMMA kernels (the L2-residency assumption for the m×n intermediates); if measured AI falls short (write-traffic spill), b = 4 (8.4 MiB payload) is the fallback with the §I.5 DoS retune.
+11. **Pin the balanced-s8 `U, V` derivation** and its test vectors (normative dtype, §0.7/§E.1): `U·A`, `B·V` must be native IMMA GEMMs; the m×m stage exact 64-bit integer / mod-q.
+12. **Operand-expansion XOF** — pin the seed→operand PRF (ChaCha8/12-class recommended); single-thread regeneration of the 2n² operand bytes must hold the 15–35 ms envelope (part of the §I.5 verify budget).
+13. **ρ launch disclosure (monitoring, never a parameter)** — re-measure consumer/datacenter AI-rental centrals at activation and recompute the price-robust floor ratio ρ (§S.4.6) for the launch disclosure; refresh quarterly with timestamps.
 
 ---
 
@@ -2116,7 +2124,7 @@ regenerating `A⁽ⁱ⁾, B⁽ⁱ⁾` from the seeds on the fly (O(n²) each). E
 | Quantity | Baseline (k = 1) | CRT variant (k lanes) |
 |---|---|---|
 | Per-nonce compute | 2n³ ops (full) / ~2n²m (sketch) | **k ×** baseline |
-| Payload | 512 KiB sketch (b=16, n=4096) | **k ×** (e.g. k=4 → 2 MiB — still within the §D.5 few-MiB budget and existing 16 MB message limit) |
+| Payload | 2 MiB sketch (b=8, n=4096) | **k ×** (e.g. k=4 → 8 MiB — still within the §D.5 few-MiB budget and existing 16 MB message limit) |
 | Verification | R rounds, ~0.14–0.28 s (§I.5) | **k ×** rounds → ~k × time (k=4 → ~0.6–1.1 s — at the §D.5 ceiling; do not combine k=4 with n>4096) |
 | Operand regen on verify | 2n² PRF | **k ×** (2kn²) |
 | Determinism | exact per §B.6 | identical, per lane |
