@@ -1516,7 +1516,7 @@ The v4 fork makes BTX's proof-of-work *the same commodity the AI-inference marke
 P_btc = P_BTC · SEH / H_BTC ,   SEH = w_v4 · M_BTX_v4(1w)
 ```
 
-**Continuity across the fork.** With `w_v4 = w_v3·Ω` (Ω = w_v4/w_v3 = target rescale = M(t_f⁻)/M(t_f⁺), §Q.9.2) and reported nonce rate rescaling by `1/Ω`, the boundary product is preserved: `w_v4·M(t_f⁺) = (w_v3·Ω)·(M(t_f⁻)/Ω) = w_v3·M(t_f⁻)`. So `SEH`, `BTX_security_%`, and `P_btc` are continuous by construction — both constants read from chainparams at tag time. `P_btc` is the *attack-cost/security* floor: the hardware mining BTX represents the same security-purchase as ≈1.59% of Bitcoin's hashpower, priced at Bitcoin's own valuation of security.
+**Continuity across the fork.** With `w_v4 = w_v3·Ω` (Ω = w_v4/w_v3 = target rescale = M(t_f⁻)/M(t_f⁺), §Q.9.2) and reported nonce rate rescaling by `1/Ω`, the boundary product is preserved: `w_v4·M(t_f⁺) = (w_v3·Ω)·(M(t_f⁻)/Ω) = w_v3·M(t_f⁻)`. So `SEH`, `BTX_security_%`, and `P_btc` are continuous by construction — both constants read from chainparams at tag time. `P_btc` is a demand-side **security-comparable** (aspirational — **explicitly not a floor**, §Q.20): what a coin *would* fetch if the hardware mining BTX were valued like ≈1.59 % of Bitcoin's hashpower at Bitcoin's own valuation of security.
 
 **Worked value (July 2026 inputs):**
 - `w_v3·M_BTX` = 4.525×10¹⁰ × 3.157×10⁸ = **1.4285×10¹⁹ H/s-eq** (§Q.1).
@@ -1530,6 +1530,8 @@ P_btc     = $62,550 × 0.01573 ≈ $984 / BTX
 ```
 
 **`P_btc` ≈ $980–995 per BTX** — the continuity anchor, the only line guaranteed smooth through `nMatMulV4Height`, denominated in Bitcoin's security market.
+
+**Inherited-calibration caveat (honesty; model agent finding).** `P_btc`'s *absolute level* rests entirely on btxprice's inherited v3 constant `w_v3` — a calibration equating the small v3 fleet to 1.59 % of Bitcoin's hashpower, whose capital-equivalence basis is not independently verifiable — and it grows ∝ `N_eq`, which *overstates* attack-cost growth as `$/TOPS`-cheap capacity joins. Keep `P_btc` labeled relative-comparable/aspirational, and carry a **price-free attack-cost cross-check** that needs no `w` at all: `C_51_rent = N_eq·r` [$/hr to rent a matching fleet], `C_51_buy = N_eq·capex_H100` [$ to buy one] — both [MODEL], BTX-price-free (fork fleet ≈ $0.02/hr rent-equiv; 100 H100-eq = $250/hr rent / ≈$3M buy). Display of `C_51` is a comms choice, but it should exist internally so `P_btc`'s eye-watering absolute level is never mistaken for a hard attack-cost claim.
 
 ### Q.19 Inference-basis production-cost price `P_prod_inf` (reference-benchmark-anchored)
 
