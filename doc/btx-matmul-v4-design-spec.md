@@ -1273,17 +1273,18 @@ Agreement: **latent ≈ 4–40 TOPS, central ≈ 10 TOPS** = ~0.008 H100-eq (~1/
       +──────────────────────┴──────────── height
 ```
 
-**(D) NEW — "Price anchors ($/BTX): production floor and security-comparable valuation" — two same-dimension lines.** Y log $/BTX; both series are **prices (stocks, §Q.17.0)**. (1) `P_prod = N_eq·r/800` (cost-of-production floor, §Q.6 ≡ §S.4.3): ≈ $0 pre-fork under v3 (0.32 TOPS of junk-fleet compute → negligible production cost, §S.4.1 — the pre-fork era genuinely had no compute-cost signal, only `P_btc`), switches on at `h_f`, then rises ∝ `N_eq`. (2) `P_btc` (§Q.18): continuous through `h_f` via `w_v4`, then also rises ∝ `N_eq` (post-fork `M_BTX ∝ N_eq`). Shade the band between them, labeled **"implied monetary premium"** — because both lines scale ∝ `N_eq`, their ratio is constant (§Q.20): on the log axis they are **parallel**, and there is **no crossover** (the former "crossover" annotation is retracted — it compared a $/BTX price to a $/BTX·yr flow and froze `P_btc` while growing the flow). Optional dotted overlay: `P_prod_inf` (inference basis, §Q.19) hugging `P_prod` within ±10%. Never plot the annual flow `V_ai` ($/yr) on this axis.
+**(D) NEW — "Price bracket ($/BTX): cost-of-production floor, market price, security-comparable" — three same-dimension lines.** Y log $/BTX; all series are **prices (stocks, §Q.17.0)**, and they **bracket** the market — never `max()`-ed (§Q.20). (1) `P_prod = N_eq·r/800` (supply-side cost **floor**, §Q.6 ≡ §S.4.3): ≈ $0 pre-fork under v3 (0.32 TOPS junk-fleet compute → near-zero cost, §S.4.1 — the near-zero floor is the dumping regime, not a missing signal), switches on at `h_f`, then rises ∝ `N_eq`. (2) observed market price: sits between the two. (3) `P_btc` (§Q.18): demand-side relative-comparable (**not a floor**), continuous through `h_f` via `w_v4`, then also rises ∝ `N_eq`. Shade the `P_prod → P_btc` band labeled **"disequilibrium the market prices"** — because both bracket lines scale ∝ `N_eq`, their ratio is constant (§Q.20): on the log axis they are **parallel**, **no crossover** (the former "crossover" annotation is retracted — it compared a $/BTX price to a $/BTX·yr flow and froze `P_btc` while growing the flow). Annotate that v4's thesis (§S.4.3/§S.4.5) is to **raise `P_prod`**, narrowing the band from below. Optional dotted overlay: `P_prod_inf` (inference basis, §Q.19) hugging `P_prod` within ±10%. Never plot the annual flow `V_ai` ($/yr) on this axis.
 
 ```
  $/BTX (log)
        |                     P_btc      ___···
- ~10³  |━━━━━━━━━━━━━━━━━━━━●━━━———˙˙            (continuous at h_f; ∝ N_eq after)
-       |   ▒▒▒▒▒▒ implied monetary premium ▒▒▒▒▒  (constant ratio — parallel lines,
-       |                     P_prod     ___···     NO crossover)
- ~10⁻⁴ |                    ●———˙˙                (cost floor, ∝ N_eq; ·· P_prod_inf ±10%)
-  ~$0  |••••••••••••••••••••┆   v3: P_prod ≈ 0 (0.32 TOPS → negligible cost;
-       |                    ┆h_f     only P_btc had signal pre-fork)
+ ~10³  |━━━━━━━━━━━━━━━━━━━━●━━━———˙˙            (demand comparable; NOT a floor; ∝ N_eq)
+       |   ▒▒ "disequilibrium the market prices" ▒▒  (constant ratio — parallel,
+       |          ·· market price ··                    NO crossover; v4 raises floor↑)
+       |                     P_prod     ___···
+ ~10⁻⁴ |                    ●———˙˙                (cost FLOOR, ∝ N_eq; ·· P_prod_inf ±10%)
+  ~$0  |••••••••••••••••••••┆   v3: P_prod ≈ 0 (junk-hw dumping regime, §S.4.1)
+       |                    ┆h_f
        +────────────────────┴──────────────── height
 ```
 
@@ -1298,8 +1299,8 @@ Agreement: **latent ≈ 4–40 TOPS, central ≈ 10 TOPS** = ~0.008 H100-eq (~1/
 3. **Fork-split the window** (item Q.9.3-1). Never average pre/post nonce rates.
 4. **Soft cap:** exempt the `h_f` transition (unit rebase, not decline); with 2–3 the SEH series shows no drop — regression-test it.
 5. **Forward estimate:** freeze 12.71% as legacy band; restart regression at `h_f`; interim central = INT8-accelerator deployment growth; display as a band.
-6. **Add the compute series and the production floor** (post-fork `getnetworkhashps` = literal n=4096 INT8 matmuls/s): `TOPS_net = getnetworkhashps × 1.7717×10¹⁰`; `H100_eq = N_eq = TOPS_net/1.286×10¹⁵`; price floor `P_prod = N_eq × r/800` in $/BTX (r = $/H100-eq-hr, refresh quarterly; ≡ §S.4.3). Pre-fork chart-C values: measured useful `M_BTX/2¹⁸ × 2·512³ ≈ 0.32 TOPS`; latent band 4–40 (central 10), dashed, caveated. Present **two price lenses, no `max()` composite**: `P_prod` (cost floor) + `P_raw`/`P_btc` (relative valuation); the spread is the implied monetary premium (§Q.20). The annual flow `V_ai = TOPS_net × $17/dTOPS·yr` [$/yr] is footnote-only and never compared to a price (§Q.17.0).
-7. **Charts** per §Q.11 (A continuous; B diagnostics-only with unit-change band; C step + latent band; D `P_prod` floor + `P_btc` with the premium spread — no crossover annotation). Relabel v3-era "MatMul/sec" → "nonce attempts/s" (literal only at v4).
+6. **Add the compute series and the production floor** (post-fork `getnetworkhashps` = literal n=4096 INT8 matmuls/s): `TOPS_net = getnetworkhashps × 1.7717×10¹⁰`; `H100_eq = N_eq = TOPS_net/1.286×10¹⁵`; price floor `P_prod = N_eq × r/800` in $/BTX (r = $/H100-eq-hr, refresh quarterly; ≡ §S.4.3). Pre-fork chart-C values: measured useful `M_BTX/2¹⁸ × 2·512³ ≈ 0.32 TOPS`; latent band 4–40 (central 10), dashed, caveated. Present the **three-object bracket, no `max()` composite**: `P_prod` (supply-side cost floor) ≤ market price ≤ `P_raw`/`P_btc` (demand-side relative-comparable, not a floor); `P_prod` is a cost, not a valuation; the spread is the disequilibrium the market prices (§Q.20). The annual flow `V_ai = TOPS_net × $17/dTOPS·yr` [$/yr] is footnote-only and never compared to a price (§Q.17.0).
+7. **Charts** per §Q.11 (A continuous; B diagnostics-only with unit-change band; C step + latent band; D three-object $/BTX bracket `P_prod` ≤ market ≤ `P_btc` — no crossover annotation). Relabel v3-era "MatMul/sec" → "nonce attempts/s" (literal only at v4).
 8. **Messaging guardrail (verbatim-usable):** *"The v4 fork changes the unit of work, not the security of the chain. BTX security (% of Bitcoin) is continuous through the fork — same hardware, same attack cost, no jump. What steps up ~30× is useful AI output per unit hardware: v3 spent ~97% of the fleet's latent tensor capability on SHA gates and ALU emulation; v4 turns it on. The new TOPS/H100-eq charts show an efficiency/utilization reveal — not new hardware, and not a security increase."* Never present the AI-compute step as a security gain; never show the raw nonce cliff without the unit-change band.
 9. **Dry-run** on regtest (`nMatMulV4Height=100`; use a synthetic Ω to exercise items 2–4) before mainnet `h_f`.
 
@@ -1367,7 +1368,7 @@ Shippable formulation: **v4 is AI-native proof-of-work on dual-use, market-price
 |---|---|
 | The security budget is *productive*: it maintains a fleet whose capacity has independent market value (flow `V_ai`; per-coin floor `P_prod`), not pure burn. | That BTX is **more secure than Bitcoin**, or more secure *per dollar*. Attack cost is set by dollars of compute defending the chain; Bitcoin's defended budget is ~63× larger (`BTX_security_%` ≈ 1.59%). |
 | Miner economics anchor to an external market: rational sell floor = AI-rental opportunity cost (§S.4.3), replacing v3's zero-cost dumping. | That productive work makes attacks *harder per dollar*. It does not; commodity **rentability cuts both ways** — the same liquid market that recruits honest capacity lets an attacker rent without capital lock-in (bounded/difficulty-damped per §S.4.4/§N.1, but real; Bitcoin's ASIC lock-in is a security property v4 trades away). |
-| The valuation gains a second, same-dimension price leg independent of Bitcoin: the cost-of-production floor `P_prod` [$/BTX] (§Q.6 ≡ §S.4.3), presented alongside `P_raw` as two lenses (§Q.20). | That the network "does AI work for customers," "trains models," or produces externally consumed results. It does not (Q.14.2). |
+| Mining gains a same-dimension supply-side **cost floor** independent of Bitcoin: `P_prod` [$/BTX] (§Q.6 ≡ §S.4.3), which brackets the market price from below (`P_raw`/`P_btc` is the demand-side comparable above it — §Q.20). `P_prod` is a cost, not a valuation. | That the network "does AI work for customers," "trains models," or produces externally consumed results. It does not (Q.14.2). |
 | v4 fixes v3's pathology: ~97–99% of the fleet's arithmetic capability idle or on sterile cycles, now redirected to the market-priced operation. | That Bitcoin is "doing it wrong." Sterile burn is a coherent choice (no dual-use exit, maximal lock-in); v4 makes a different, explicitly stated trade (§N.1). |
 
 ---
@@ -1512,26 +1513,29 @@ Sources: [AI Pricing Guru](https://www.aipricing.guru/meta-llama-pricing/), [pri
 
 **(d) Convergence cross-check — the place where "both AI methods agree" (against each other, never against `P_btc`).** Three independent AI-market bases price the marginal coin within ±10% at central assumptions: rental **$0.31**, 8B-inference **$0.34**, 70B-inference **$0.28** /BTX per 100 H100-eq (full sensitivity range $0.09–1.21). Per H100-hr at u=1 the token chains gross $5.40 (8B) and $4.51 (70B) vs $2.50 rental — 1.8–2.2× above, as expected (token prices embed the serving stack, margin, and sub-peak recovery); the realistic u≈0.5 haircut brings them back onto the rental line ($2.70 and $2.26 vs $2.50/hr). **`P_prod` (rental) is the harder, conservative floor** (a miner can actually redeploy at it with no serving stack); **`P_prod_inf` is the corroborating cross-check / upper edge of the floor band.** Both are capacity-cost valuations, not revenue — and both live in $/BTX, so §Q.20 may lawfully put them on the same chart as `P_btc`.
 
-### Q.20 The two lenses (no composite) + btxprice handoff
+### Q.20 The three-object bracket (no composite) + btxprice handoff
 
-Both lenses are prices in $/BTX (§Q.17.0), so one chart may carry both:
+`P_prod`, the observed market price, and `P_btc` are all prices in $/BTX (§Q.17.0), so one chart may carry all three. They are **not competing valuations** — they bracket the market price from the supply side and the demand side:
 
-| Lens ($/BTX) | Pre-fork | Post-fork | Tells the viewer |
-|---|---|---|---|
-| `P_prod` — cost-of-production floor (compute market, §Q.6 ≡ §S.4.3) | ≈ **$0** (v3 = 0.32 TOPS of junk-fleet compute → negligible production cost, §S.4.1) | **$0.31/BTX per 100 H100-eq** (= 100 × $2.50 / 800), ∝ `N_eq`; inference cross-check $0.28–0.34 (§Q.19) | hard lower bound — miners won't persistently sell below marginal cost (§S.4.3) |
-| `P_btc` — security-comparable relative valuation (Bitcoin monetary market, §Q.18) | ≈ **$984** ($885–1,032) | continuous via `w_v4`, then ∝ `N_eq` | what the chain's proven security spend is worth at Bitcoin's monetary pricing |
+| Object ($/BTX) | Side | Pre-fork | Post-fork | Tells the viewer |
+|---|---|---|---|---|
+| `P_prod` — cost-of-production **floor** (compute market, §Q.6 ≡ §S.4.3) | supply (lower) | ≈ **$0** (v3 = 0.32 TOPS junk-fleet compute → near-zero cost, §S.4.1) | **$0.31 per newly-minted coin at 100 H100-eq** (= 100×$2.50/800), ∝ `N_eq`; inference cross-check $0.28–0.34 (§Q.19) | hard lower bound — miners won't persistently sell below marginal cost (§S.4.3) |
+| *observed market price* | — | trades far above the ~$0 floor, far below `P_btc` | rises as the floor rises | where supply meets demand today |
+| `P_btc` — security-**comparable** (Bitcoin monetary market, §Q.18) | demand (upper) | ≈ **$984** ($885–1,032) | continuous via `w_v4`, then ∝ `N_eq` | aspirational — what a coin *would* fetch if valued like Bitcoin per unit security; **not a floor** |
 
-**No `max()` composite.** The former headline `max(P_btc, P_ai)` is removed: it `max()`-ed a $/BTX price against a $/BTX·yr flow (dimensionally invalid, §Q.17.0) and mixed the compute market into Bitcoin's monetary market. Present the two prices as **two lenses**: market price ≥ `P_prod` (cost floor); the spread `P_btc / P_prod` is the **implied monetary-premium multiple**.
+**No `max()` composite, and `P_prod` is a cost, not a valuation.** The former headline `max(P_btc, P_ai)` is removed on two grounds: (1) it `max()`-ed a $/BTX price against a $/BTX·yr flow (dimensionally invalid, §Q.17.0); (2) even between the two *prices*, `max()` is wrong — a supply-side cost floor and a demand-side comparable are not interchangeable "floors" to take the larger of. Present the **bracket**: `P_prod` ≤ market price ≤ `P_btc`. The spread `P_btc / P_prod` is the **disequilibrium the market is pricing** — the distance between what a coin costs to mine and what it would be worth at Bitcoin-grade security valuation.
 
-**Constant ratio — there is no crossover.** Post-fork *both* anchors scale linearly with network size: `P_btc = P_BTC·w_v4·R_nonce/H_BTC` with `R_nonce ∝ N_eq` (7.26×10⁴ nonces/s per H100-eq, §Q.3), and `P_prod = N_eq·r/800`. `N_eq` cancels from the ratio:
+**Why the pre-fork floor is near-zero — this IS the dumping diagnosis (a feature of the analysis, not a bug).** Under v3, `P_prod` ≈ $0 because a high emission (800 BTX/hr) is produced by cheap, paid-off junk hardware at ~electricity-only cost (§S.4.1): mining a coin costs almost nothing, so **dumping at any price is profitable**, and the market price sits far below the ~$984 security-comparable. **v4's entire economic thesis (§S.4.3/§S.4.5) is to RAISE this floor:** real INT8 hardware carries a real AI-rental opportunity cost, lifting `P_prod` from ~$0 toward a meaningful $/BTX, narrowing the `P_prod → P_btc` gap and ending cheap dumping. **The floor rising over time is the fix**, not a contradiction; the wide `P_btc / P_prod` spread is precisely the disequilibrium v4 is designed to compress from below.
+
+**N_eq is set by mining profitability — both anchors scale ∝ N_eq, so the ratio is ~constant and there is no crossover.** Miners enter until `P_prod ≈ market price` (below it they redeploy to AI rental, §S.4.3; ASERT difficulty clears the market), so `N_eq` is endogenous, not a free axis to slide to a "crossover." And *both* anchors scale linearly with network size: `P_btc = P_BTC·w_v4·R_nonce/H_BTC` with `R_nonce ∝ N_eq` (7.26×10⁴ nonces/s per H100-eq, §Q.3), and `P_prod = N_eq·r/800`. `N_eq` cancels from the ratio:
 
 ```
 P_btc / P_prod = [P_BTC · w_v4 · ν / H_BTC] / [r / 800]        ν = 7.26×10⁴ nonce/s per H100-eq
 ```
 
-Per H100-eq at July-2026 inputs (Ω = 5×10⁵ central): `P_btc`-contribution = $62,550 × 2.2626×10¹⁶ × 7.26×10⁴ / 9.08×10²⁰ ≈ **$113,000**; `P_prod`-contribution = $2.50/800 = **$0.003125** → ratio ≈ **3.6×10⁷** (band ≈ 2.2×10⁷–7.2×10⁷ over Ω = 3×10⁵–10⁶). Anchor check at the fork fleet: `N_eq(t_f⁺)` ≈ 0.0087 H100-eq (Method C central, §Q.10.1) → `P_prod` ≈ 0.0087 × $2.50/800 ≈ $2.7×10⁻⁵/BTX vs `P_btc` ≈ $984 → same ≈3.6×10⁷ ✓. A fleet ×k multiplies **both** anchors by k (e.g., growth to 100 H100-eq lifts `P_prod` to $0.31 and `P_btc` by the identical factor), so the premium multiple is invariant in `N_eq`, moving only with `P_BTC/(H_BTC·r)` and the tag-time Ω. *The earlier "crossover at N\* ≈ 1.42×10⁵ H100-eq" is retracted:* it froze `P_btc` at $984 while growing a $/BTX·yr flow with `N_eq` — an artifact of the stock-vs-flow error compounded by the frozen numerator. The correct statement: both lines rise together and never cross; interpret the constant ~10⁷-fold spread as the monetary premium the security lens assigns over marginal production cost (a *relative-valuation* readout inherited from the `w_v4` continuity calibration, not a market prediction).
+A fleet ×k multiplies **both** anchors by k (growth to 100 H100-eq lifts `P_prod` to $0.31 and `P_btc` by the identical factor), so the ratio is invariant in `N_eq`, moving only with `P_BTC/(H_BTC·r)` and the tag-time Ω. *The earlier "crossover at N\* ≈ 1.42×10⁵ H100-eq" is retracted:* it froze `P_btc` at $984 while growing a $/BTX·yr flow with `N_eq` — an artifact of the stock-vs-flow error compounded by the frozen numerator. Correct statement: the floor and the comparable rise together and never cross; the spread narrows only as `P_prod`'s *inputs* (r, hardware quality) rise relative to Bitcoin's, i.e. as v4's floor-raising thesis plays out.
 
-**The quantified pivot (unchanged in substance):** pre-fork the AI anchor is ≈0; post-fork `P_prod` is a **real production-cost floor that did not exist under v3** — the identical `getnetworkhashps` observable that implied a ~$0 marginal cost under v3 (junk-fleet floor, §S.4.1) implies $0.31/BTX per 100 H100-eq under v4, with the annual capacity flow `V_ai` going from ~$5/yr to $21,900/H100-eq-yr (flow, footnote — §Q.6).
+**The quantified pivot (unchanged in substance):** pre-fork the production floor is ≈$0 (the dumping regime); post-fork `P_prod` is a **real cost floor that did not exist under v3** — the identical `getnetworkhashps` observable that implied a ~$0 marginal cost under v3 (junk-fleet floor, §S.4.1) implies $0.31 per newly-minted coin at 100 H100-eq under v4, with the annual capacity flow `V_ai` going from ~$5/yr to $21,900/H100-eq-yr (flow, footnote — §Q.6).
 
 **btxprice implementation block:**
 
@@ -1559,8 +1563,10 @@ u        = 0.5 (band 0.25–1.0)
 P_btc      = P_BTC × w_v4 × R_nonce_1w / H_BTC             # $/BTX — security-comparable valuation
 P_prod     = N_eq × r_rental / MINT                        # $/BTX — cost-of-production floor ≡ §S.4.3
 P_prod_inf = TOPS_net × r_tok × 3600 × p_tok × u / MINT    # $/BTX — inference-basis cross-check
-present    : P_prod (floor) + P_btc (relative valuation) as TWO LENSES on one $/BTX chart;
-             shade spread = implied monetary premium ;  premium = P_btc / P_prod  (constant in N_eq)
+present    : THREE-OBJECT BRACKET on one $/BTX chart, never max()-ed:
+             P_prod (supply-side cost floor) <= observed market price <= P_btc (demand-side
+             relative-comparable, aspirational, NOT a floor). P_prod is a COST, not a valuation.
+             shade spread = disequilibrium the market prices ; ratio P_btc/P_prod ~const in N_eq
 V_ai       = TOPS_net × c_rental                           # $/yr FLOW — footnote only; annual
                                                            # AI-capacity value backing the network
 # Refresh: r_tok quarterly (TRT-LLM/MLPerf) ; p_tok monthly (provider pages) ; r_rental quarterly.
