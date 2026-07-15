@@ -17,6 +17,9 @@
 
 #include <matmul/pow_v4.h>
 
+#include <matmul/int8_field.h>
+#include <matmul/matmul_v4.h>
+
 #include <crypto/common.h>
 #include <primitives/block.h>
 #include <random.h>
@@ -115,6 +118,50 @@ HonestProof ComputeHonestProof(uint64_t nonce = 1,
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(matmul_v4_sketch_tests, BasicTestingSetup)
+
+// --- Optimal-vs-reference sketch equivalence --------------------------------
+
+BOOST_AUTO_TEST_CASE(optimal_sketch_matches_full_c_reference)
+{
+    // The miner path (ComputeDigest) uses ComputeSketchOptimal, which evaluates
+    // Chat = (U*A)(B*V) without forming C. It MUST equal the full-C reference
+    // ComputeSketch(U, ComputeExactProduct(A,B), V) word-for-word: by
+    // integer-matrix associativity (U*A)(B*V) == U*(A*B)*V == U*C*V, every m*m
+    // entry is the same integer and thus the same canonical F_q residue. This
+    // is what makes the SerializeSketch payload and the digest byte-identical.
+    for (const uint32_t n : {kTestDim, uint32_t{512}}) {
+        uint32_t m = 0;
+        BOOST_REQUIRE(matmul::v4::ValidateDims(n, matmul_v4::kTileB, m));
+
+        // Exercise several distinct nonces (fresh operands + projectors each).
+        for (uint64_t nonce : {uint64_t{1}, uint64_t{7}, uint64_t{4242}}) {
+            const CBlockHeader header = MakeV4Header(nonce, n);
+
+            const uint256 sigma = matmul::v4::DeriveSigma(header);
+            const uint256 seed_a = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::A);
+            const uint256 seed_b = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::B);
+            const auto [seed_u, seed_v] = matmul::v4::DeriveProjectorSeeds(sigma);
+
+            const std::vector<int8_t> A = matmul::v4::ExpandOperand(seed_a, n);
+            const std::vector<int8_t> B = matmul::v4::ExpandOperand(seed_b, n);
+            const std::vector<int8_t> U = matmul::v4::ExpandProjector(seed_u, m, n);
+            const std::vector<int8_t> V = matmul::v4::ExpandProjector(seed_v, n, m);
+
+            const std::vector<int32_t> C = matmul::v4::ComputeExactProduct(A, B, n);
+            const std::vector<matmul::v4::Fq> reference = matmul::v4::ComputeSketch(U, C, V, n, m);
+            const std::vector<matmul::v4::Fq> optimal = matmul::v4::ComputeSketchOptimal(U, A, B, V, n, m);
+
+            BOOST_REQUIRE_EQUAL(reference.size(), static_cast<size_t>(m) * m);
+            BOOST_REQUIRE_EQUAL(optimal.size(), reference.size());
+            BOOST_CHECK_MESSAGE(optimal == reference,
+                                "ComputeSketchOptimal != full-C ComputeSketch at n=" << n
+                                    << " nonce=" << nonce);
+
+            // And therefore the serialized payloads are byte-identical.
+            BOOST_CHECK(matmul::v4::SerializeSketch(optimal) == matmul::v4::SerializeSketch(reference));
+        }
+    }
+}
 
 // --- Honest round-trips -----------------------------------------------------
 

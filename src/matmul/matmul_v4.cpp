@@ -187,6 +187,78 @@ std::vector<Fq> ComputeSketch(const std::vector<int8_t>& U,
     return Chat;
 }
 
+std::vector<Fq> ComputeSketchOptimal(const std::vector<int8_t>& U,
+                                     const std::vector<int8_t>& A,
+                                     const std::vector<int8_t>& B,
+                                     const std::vector<int8_t>& V,
+                                     uint32_t n, uint32_t m)
+{
+    // Optimal miner factoring Chat = (U*A)(B*V) (§E.3), computed WITHOUT ever
+    // forming the n x n product C. By integer-matrix associativity
+    //     (U*A)(B*V) == U*(A*B)*V == U*C*V
+    // as EXACT integer matrices, so this returns the byte-identical Chat to
+    // ComputeSketch(U, ComputeExactProduct(A,B), V): identical integers reduce
+    // to the identical UNIQUE canonical F_q residue in [0, q).
+    //
+    // Cost is ~2*n^2*m MACs (two rectangular GEMMs + an m x m combine) versus
+    // the Theta(n^3) full product; the projector stages are the same ones the
+    // GPU backends fold in (§E.3).
+
+    // P = U * A, exact s8xs8->s32, m x n. Each entry P[a][k] = sum_i U[a][i]*A[i][k]
+    // is a length-n balanced-s8 dot: |P[a][k]| <= n*125^2 < 2^30, exact in int32
+    // (same accumulation bound as C, already validated by CheckAccumulationBound).
+    std::vector<int32_t> P(static_cast<size_t>(m) * n, 0);
+    for (uint32_t a = 0; a < m; ++a) {
+        const int8_t* u_row = &U[static_cast<size_t>(a) * n];
+        int32_t* p_row = &P[static_cast<size_t>(a) * n];
+        for (uint32_t i = 0; i < n; ++i) {
+            const int32_t u_ai = u_row[i];
+            if (u_ai == 0) continue; // deterministic skip of zero MACs
+            const int8_t* a_row = &A[static_cast<size_t>(i) * n];
+            for (uint32_t k = 0; k < n; ++k) {
+                p_row[k] += u_ai * static_cast<int32_t>(a_row[k]);
+            }
+        }
+    }
+
+    // Q = B * V, exact s8xs8->s32, n x m. Each entry Q[k][c] = sum_j B[k][j]*V[j][c]
+    // is a length-n balanced-s8 dot, same |.| < 2^30 bound as P.
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m, 0);
+    for (uint32_t k = 0; k < n; ++k) {
+        const int8_t* b_row = &B[static_cast<size_t>(k) * n];
+        int32_t* q_row = &Q[static_cast<size_t>(k) * m];
+        for (uint32_t j = 0; j < n; ++j) {
+            const int32_t b_kj = b_row[j];
+            if (b_kj == 0) continue; // deterministic skip of zero MACs
+            const int8_t* v_row = &V[static_cast<size_t>(j) * m];
+            for (uint32_t c = 0; c < m; ++c) {
+                q_row[c] += b_kj * static_cast<int32_t>(v_row[c]);
+            }
+        }
+    }
+
+    // Combine Chat[a][c] = (sum_k P[a][k]*Q[k][c]) mod q over F_q. P,Q entries are
+    // exact int32 (|.| < 2^30); lift each to its canonical F_q image and MAC with
+    // the same FqFromInt32/FqMul/FqAdd used by ComputeSketch, so the accumulated
+    // residue is the canonical (U*C*V)[a][c] mod q -- identical to the full path.
+    std::vector<Fq> Chat(static_cast<size_t>(m) * m, 0);
+    for (uint32_t a = 0; a < m; ++a) {
+        const int32_t* p_row = &P[static_cast<size_t>(a) * n];
+        Fq* chat_row = &Chat[static_cast<size_t>(a) * m];
+        for (uint32_t k = 0; k < n; ++k) {
+            const int32_t p_ak = p_row[k];
+            if (p_ak == 0) continue;
+            const Fq p_fq = int8_field::FqFromInt32(p_ak);
+            const int32_t* q_row = &Q[static_cast<size_t>(k) * m];
+            for (uint32_t c = 0; c < m; ++c) {
+                chat_row[c] = int8_field::FqAdd(chat_row[c],
+                                                int8_field::FqMul(p_fq, int8_field::FqFromInt32(q_row[c])));
+            }
+        }
+    }
+    return Chat;
+}
+
 std::vector<unsigned char> SerializeSketch(const std::vector<Fq>& sketch)
 {
     std::vector<unsigned char> payload(sketch.size() * sizeof(uint64_t));

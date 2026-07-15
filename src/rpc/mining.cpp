@@ -24,10 +24,13 @@
 #include <interfaces/mining.h>
 #include <key_io.h>
 #include <logging.h>
+#include <matmul/accel_v4.h>
 #include <matmul/accelerated_solver.h>
 #include <matmul/backend_capabilities.h>
 #include <matmul/field.h>
+#include <matmul/int8_field.h>
 #include <matmul/matmul_pow.h>
+#include <matmul/pow_v4.h>
 #include <net.h>
 #include <net_processing.h>
 #include <node/context.h>
@@ -1781,7 +1784,13 @@ static UniValue BuildMatMulChallengeResponse(
     challenge_header.nNonce = 0;
     challenge_header.mix_hash.SetNull();
     challenge_header.matmul_digest.SetNull();
-    if (challenge_header.matmul_dim == 0) {
+    // MatMul v4 (spec §H.1/§I): the pooled work-unit advertises the v4 dimension
+    // at and above nMatMulV4Height, matching the consensus getblocktemplate
+    // path; below the fork the v3 dimension is used unchanged.
+    const bool challenge_v4 = consensus.IsMatMulV4Active(next_height);
+    if (challenge_v4) {
+        challenge_header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulV4Dimension);
+    } else if (challenge_header.matmul_dim == 0) {
         challenge_header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
     }
     if (!SetDeterministicMatMulSeeds(challenge_header, consensus, next_height, parent_median_time_past)) {
@@ -1846,9 +1855,12 @@ static UniValue BuildMatMulChallengeResponse(
 
     UniValue matmul(UniValue::VOBJ);
     matmul.pushKV("n", static_cast<uint64_t>(challenge_header.matmul_dim));
-    matmul.pushKV("b", static_cast<uint64_t>(consensus.nMatMulTranscriptBlockSize));
-    matmul.pushKV("r", static_cast<uint64_t>(consensus.nMatMulNoiseRank));
-    matmul.pushKV("q", static_cast<uint64_t>(consensus.nMatMulFieldModulus));
+    matmul.pushKV("b", challenge_v4 ? static_cast<uint64_t>(matmul_v4::kTileB)
+                                    : static_cast<uint64_t>(consensus.nMatMulTranscriptBlockSize));
+    matmul.pushKV("r", challenge_v4 ? static_cast<uint64_t>(consensus.nMatMulV4FreivaldsRounds)
+                                    : static_cast<uint64_t>(consensus.nMatMulNoiseRank));
+    matmul.pushKV("q", challenge_v4 ? static_cast<uint64_t>(matmul::int8_field::kFieldPrime)
+                                    : static_cast<uint64_t>(consensus.nMatMulFieldModulus));
     matmul.pushKV("min_dimension", static_cast<uint64_t>(consensus.nMatMulMinDimension));
     matmul.pushKV("max_dimension", static_cast<uint64_t>(consensus.nMatMulMaxDimension));
     matmul.pushKV("seed_a", challenge_header.seed_a.GetHex());
@@ -2069,6 +2081,15 @@ struct MatMulServiceChallengeContext {
     uint32_t n{0};
     uint32_t b{0};
     uint32_t r{0};
+    // MatMul v4 (spec §G/§H/§I): at and above nMatMulV4Height the pooled /
+    // service challenge/proof interface mirrors the consensus v4 path -- the
+    // dimension is nMatMulV4Dimension, the digest is the sketch-committed
+    // matmul_v4::ComputeDigest output, and shares are checked with
+    // matmul_v4::VerifySketch instead of the v3 transcript/Freivalds ladder.
+    // Below the fork these stay false/0 and every v3 field/path is unchanged.
+    bool is_v4{false};
+    int32_t challenge_height{0};
+    uint32_t v4_rounds{0};
     CBlockHeader header;
     arith_uint256 target;
 };
@@ -2611,6 +2632,10 @@ struct MatMulServiceProofBatchItem {
     UniValue challenge;
     std::string nonce64_hex;
     std::string digest_hex;
+    // MatMul v4 share body: hex of the flat little-endian sketch payload
+    // (matmul_v4::ComputeDigest output), carried through the matrix_c_data
+    // channel. Empty for v3 proofs, which are nonce/digest-only.
+    std::string matrix_c_data_hex;
 };
 
 static Mutex g_matmul_service_challenge_registry_mutex;
@@ -3112,11 +3137,17 @@ static std::vector<MatMulServiceProofBatchItem> ParseMatMulServiceProofBatchItem
             if (!digest_hex.isStr()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "digest_hex must be a string");
             }
+            // Optional v4 sketch body (matrix_c_data channel); absent for v3.
+            const UniValue& matrix_c_data = entry.find_value("matrix_c_data");
+            if (!matrix_c_data.isNull() && !matrix_c_data.isStr()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "matrix_c_data must be a string");
+            }
 
             MatMulServiceProofBatchItem item;
             item.challenge = challenge;
             item.nonce64_hex = nonce64_hex.get_str();
             item.digest_hex = digest_hex.get_str();
+            item.matrix_c_data_hex = matrix_c_data.isNull() ? std::string{} : matrix_c_data.get_str();
             items.push_back(std::move(item));
         } catch (const UniValue& obj_error) {
             throw JSONRPCError(
@@ -3372,8 +3403,21 @@ static UniValue BuildMatMulServiceChallengeResponse(
     challenge_header.nNonce = 0;
     challenge_header.mix_hash.SetNull();
     challenge_header.matmul_digest.SetNull();
-    challenge_header.matmul_dim =
-        template_header.matmul_dim == 0 ? static_cast<uint16_t>(consensus.nMatMulDimension) : template_header.matmul_dim;
+    // MatMul v4 (spec §H.1/§I): the service challenge advertises the v4 instance
+    // (dimension nMatMulV4Dimension, sketch tile b, v4 Freivalds rounds, prime
+    // q = 2^61-1) at and above nMatMulV4Height so the miner solves and the
+    // verifier checks the same shape the consensus v4 path uses. Below the fork
+    // the v3 template/default dimension and parameters are emitted unchanged.
+    const bool issue_v4 = consensus.IsMatMulV4Active(next_height);
+    challenge_header.matmul_dim = issue_v4
+        ? static_cast<uint16_t>(consensus.nMatMulV4Dimension)
+        : (template_header.matmul_dim == 0 ? static_cast<uint16_t>(consensus.nMatMulDimension) : template_header.matmul_dim);
+    const uint64_t issue_b = issue_v4 ? static_cast<uint64_t>(matmul_v4::kTileB)
+                                      : static_cast<uint64_t>(consensus.nMatMulTranscriptBlockSize);
+    const uint64_t issue_r = issue_v4 ? static_cast<uint64_t>(consensus.nMatMulV4FreivaldsRounds)
+                                      : static_cast<uint64_t>(consensus.nMatMulNoiseRank);
+    const uint64_t issue_q = issue_v4 ? static_cast<uint64_t>(matmul::int8_field::kFieldPrime)
+                                      : static_cast<uint64_t>(consensus.nMatMulFieldModulus);
     challenge_header.seed_a = DeriveMatMulServiceSeed(challenge_id, challenge_header.hashPrevBlock, "seed_a");
     challenge_header.seed_b = DeriveMatMulServiceSeed(challenge_id, challenge_header.hashPrevBlock, "seed_b");
 
@@ -3431,9 +3475,9 @@ static UniValue BuildMatMulServiceChallengeResponse(
 
     UniValue matmul(UniValue::VOBJ);
     matmul.pushKV("n", static_cast<uint64_t>(challenge_header.matmul_dim));
-    matmul.pushKV("b", static_cast<uint64_t>(consensus.nMatMulTranscriptBlockSize));
-    matmul.pushKV("r", static_cast<uint64_t>(consensus.nMatMulNoiseRank));
-    matmul.pushKV("q", static_cast<uint64_t>(consensus.nMatMulFieldModulus));
+    matmul.pushKV("b", issue_b);
+    matmul.pushKV("r", issue_r);
+    matmul.pushKV("q", issue_q);
     matmul.pushKV("min_dimension", static_cast<uint64_t>(consensus.nMatMulMinDimension));
     matmul.pushKV("max_dimension", static_cast<uint64_t>(consensus.nMatMulMaxDimension));
     matmul.pushKV("seed_a", challenge_header.seed_a.GetHex());
@@ -4111,9 +4155,22 @@ static MatMulServiceChallengeContext ParseMatMulServiceChallenge(
             ctx.interval_scale = 1.0;
             ctx.difficulty_clamped = false;
         }
-        ctx.n = static_cast<uint32_t>(consensus.nMatMulDimension);
-        ctx.b = static_cast<uint32_t>(consensus.nMatMulTranscriptBlockSize);
-        ctx.r = static_cast<uint32_t>(consensus.nMatMulNoiseRank);
+        // MatMul v4 (spec §H.1/§I): the challenge anchors on the parent, so the
+        // proof height is anchor_height + 1. At and above nMatMulV4Height the
+        // service instance uses the v4 dimension, the sketch tile b, and the v4
+        // Freivalds round count; below the fork the v3 parameters stand.
+        ctx.challenge_height = ctx.anchor_height + 1;
+        ctx.is_v4 = consensus.IsMatMulV4Active(ctx.challenge_height);
+        if (ctx.is_v4) {
+            ctx.n = static_cast<uint32_t>(consensus.nMatMulV4Dimension);
+            ctx.b = static_cast<uint32_t>(matmul_v4::kTileB);
+            ctx.r = static_cast<uint32_t>(consensus.nMatMulV4FreivaldsRounds);
+            ctx.v4_rounds = static_cast<uint32_t>(consensus.nMatMulV4FreivaldsRounds);
+        } else {
+            ctx.n = static_cast<uint32_t>(consensus.nMatMulDimension);
+            ctx.b = static_cast<uint32_t>(consensus.nMatMulTranscriptBlockSize);
+            ctx.r = static_cast<uint32_t>(consensus.nMatMulNoiseRank);
+        }
         const int64_t target_solve_time_ms = static_cast<int64_t>(std::llround(ctx.solve_time_target_s * 1000.0));
         const int64_t validation_overhead_ms = static_cast<int64_t>(std::llround(ctx.validation_overhead_s * 1000.0));
         const int64_t propagation_overhead_ms = static_cast<int64_t>(std::llround(ctx.propagation_overhead_s * 1000.0));
@@ -4137,7 +4194,7 @@ static MatMulServiceChallengeContext ParseMatMulServiceChallenge(
         ctx.header.nTime = static_cast<uint32_t>(ctx.issued_at);
         ctx.header.nNonce64 = 0;
         ctx.header.nNonce = 0;
-        ctx.header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+        ctx.header.matmul_dim = static_cast<uint16_t>(ctx.n);
         ctx.header.seed_a = DeriveMatMulServiceSeed(ctx.challenge_id, ctx.anchor_hash, "seed_a");
         ctx.header.seed_b = DeriveMatMulServiceSeed(ctx.challenge_id, ctx.anchor_hash, "seed_b");
         const CBlockIndex* anchor_tip{nullptr};
@@ -4263,7 +4320,13 @@ static std::optional<std::string> GetMatMulServiceChallengeMismatch(
     if (ParseIntegralServiceField<uint32_t>(matmul.find_value("n"), "challenge.matmul.n") != ctx.n) return "challenge.matmul.n";
     if (ParseIntegralServiceField<uint32_t>(matmul.find_value("b"), "challenge.matmul.b") != ctx.b) return "challenge.matmul.b";
     if (ParseIntegralServiceField<uint32_t>(matmul.find_value("r"), "challenge.matmul.r") != ctx.r) return "challenge.matmul.r";
-    if (ParseIntegralServiceField<uint64_t>(matmul.find_value("q"), "challenge.matmul.q") != static_cast<uint64_t>(matmul::field::MODULUS)) return "challenge.matmul.q";
+    // v4 Freivalds runs over the independent prime q = 2^61-1; v3 uses the
+    // legacy transcript field modulus. The challenge advertises whichever the
+    // proof height selects (see ParseMatMulServiceChallenge).
+    const uint64_t expected_q = ctx.is_v4
+        ? static_cast<uint64_t>(matmul::int8_field::kFieldPrime)
+        : static_cast<uint64_t>(matmul::field::MODULUS);
+    if (ParseIntegralServiceField<uint64_t>(matmul.find_value("q"), "challenge.matmul.q") != expected_q) return "challenge.matmul.q";
     if (matmul.find_value("seed_a").get_str() != ctx.header.seed_a.GetHex()) return "challenge.matmul.seed_a";
     if (matmul.find_value("seed_b").get_str() != ctx.header.seed_b.GetHex()) return "challenge.matmul.seed_b";
 
@@ -4320,10 +4383,29 @@ static matmul::PowConfig BuildMatMulServicePowConfig(const MatMulServiceChalleng
     };
 }
 
+// MatMul v4: materialize the service instance as the CBlockHeader that
+// matmul_v4::ComputeDigest / VerifySketch bind against. The challenge's fixed
+// prev/merkle/time/bits/seeds are carried from ctx.header; the miner grinds
+// nNonce64 (which the v4 seed/sigma derivation folds in via the full-header
+// hash) and commits matmul_digest. Mirrors SolveMatMulV4 / the consensus
+// CheckMatMulProofOfWork_V4ProductCommitted header handling in pow.cpp.
+static CBlockHeader BuildMatMulServiceV4Header(
+    const MatMulServiceChallengeContext& ctx, uint64_t nonce64, const uint256& digest)
+{
+    CBlockHeader header = ctx.header;
+    header.nNonce64 = nonce64;
+    header.nNonce = static_cast<uint32_t>(nonce64);
+    header.mix_hash.SetNull();
+    header.matmul_dim = static_cast<uint16_t>(ctx.n);
+    header.matmul_digest = digest;
+    return header;
+}
+
 static UniValue EvaluateMatMulServiceProof(
     const MatMulServiceChallengeContext& ctx,
     const std::string& nonce64_hex,
     const std::string& digest_hex,
+    const std::string& matrix_c_data_hex,
     bool& transcript_valid)
 {
     uint64_t nonce64{0};
@@ -4333,11 +4415,51 @@ static UniValue EvaluateMatMulServiceProof(
     if (digest_hex.size() != 64 || !IsHex(digest_hex)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "digest_hex must be exactly 64 hex characters");
     }
+    const uint256 digest = ParseUint256HexOrThrow(digest_hex, "digest_hex must be exactly 64 hex characters");
 
-    matmul::PowState state = BuildMatMulServicePowState(
-        ctx,
-        nonce64,
-        ParseUint256HexOrThrow(digest_hex, "digest_hex must be exactly 64 hex characters"));
+    // MatMul v4 (spec §I.2): height-gated dispatch to the sketch verifier,
+    // mirroring CheckMatMulProofOfWork_V4ProductCommitted -- the O(n^2)
+    // Freivalds/digest-seal cascade over the submitted sketch body (carried in
+    // the matrix_c_data channel) plus the difficulty-target check. The v3
+    // transcript path below is left untouched for pre-fork heights.
+    if (ctx.is_v4) {
+        if (!matrix_c_data_hex.empty() && !IsHex(matrix_c_data_hex)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "matrix_c_data must be hexadecimal");
+        }
+        const CBlockHeader header = BuildMatMulServiceV4Header(ctx, nonce64, digest);
+        std::vector<unsigned char> sketch_payload;
+        if (!matrix_c_data_hex.empty()) {
+            const auto parsed = TryParseHex<unsigned char>(matrix_c_data_hex);
+            if (!parsed) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "matrix_c_data must be hexadecimal");
+            }
+            sketch_payload = *parsed;
+        }
+        // Seal: the shipped body must hash to the committed digest (a mismatch
+        // is a body mutation, not a valid share). Target: the digest must meet
+        // the challenge difficulty. Transcript: the full O(n^2) sketch-Freivalds
+        // + digest recompute (VerifySketch also re-checks digest==matmul_digest).
+        const bool payload_sealed =
+            !sketch_payload.empty() && matmul_v4::PayloadMatchesCommitment(header, sketch_payload);
+        const bool meets_target = payload_sealed && UintToArith256(digest) <= ctx.target;
+        uint256 recomputed;
+        transcript_valid = meets_target &&
+            matmul_v4::VerifySketch(header, ctx.n, ctx.v4_rounds, sketch_payload, recomputed);
+
+        UniValue proof(UniValue::VOBJ);
+        proof.pushKV("nonce64_hex", nonce64_hex);
+        proof.pushKV("digest", digest_hex);
+        // v4 sigma follows the v3 full-header rule (matmul_v4::DeriveSigma just
+        // forwards to matmul::DeriveSigma; spec §A.2 invariant I7).
+        proof.pushKV("sigma", matmul::DeriveSigma(header).GetHex());
+        proof.pushKV("matmul_version", 4);
+        proof.pushKV("meets_target", meets_target);
+        proof.pushKV("commitment_valid", meets_target);
+        proof.pushKV("transcript_valid", transcript_valid);
+        return proof;
+    }
+
+    matmul::PowState state = BuildMatMulServicePowState(ctx, nonce64, digest);
     const matmul::PowConfig config = BuildMatMulServicePowConfig(ctx);
 
     const bool commitment_valid = matmul::VerifyCommitment(state, config);
@@ -4358,6 +4480,7 @@ static UniValue BuildMatMulServiceProofResult(
     const UniValue& challenge_value,
     const std::string& nonce64_hex,
     const std::string& digest_hex,
+    const std::string& matrix_c_data_hex,
     bool include_local_registry_status = true)
 {
     const MatMulServiceChallengeContext ctx = ParseMatMulServiceChallenge(chainman, challenge_value);
@@ -4394,7 +4517,7 @@ static UniValue BuildMatMulServiceProofResult(
     }
 
     bool transcript_valid{false};
-    UniValue proof = EvaluateMatMulServiceProof(ctx, nonce64_hex, digest_hex, transcript_valid);
+    UniValue proof = EvaluateMatMulServiceProof(ctx, nonce64_hex, digest_hex, matrix_c_data_hex, transcript_valid);
 
     result.pushKV("valid", transcript_valid);
     result.pushKV("expired", false);
@@ -4408,7 +4531,8 @@ static UniValue BuildMatMulServiceRedeemResult(
     ChainstateManager& chainman,
     const UniValue& challenge_value,
     const std::string& nonce64_hex,
-    const std::string& digest_hex)
+    const std::string& digest_hex,
+    const std::string& matrix_c_data_hex)
 {
     const MatMulServiceChallengeContext ctx = ParseMatMulServiceChallenge(chainman, challenge_value);
     const int64_t checked_at = GetTime();
@@ -4466,7 +4590,7 @@ static UniValue BuildMatMulServiceRedeemResult(
     }
 
     bool transcript_valid{false};
-    UniValue proof = EvaluateMatMulServiceProof(ctx, nonce64_hex, digest_hex, transcript_valid);
+    UniValue proof = EvaluateMatMulServiceProof(ctx, nonce64_hex, digest_hex, matrix_c_data_hex, transcript_valid);
     if (!transcript_valid) {
         registry_status.redeemable = true;
         AppendMatMulServiceRegistryStatus(result, registry_status);
@@ -6948,16 +7072,54 @@ static RPCHelpMan solvematmulservicechallenge()
     const auto ctx = ParseMatMulServiceChallenge(chainman, challenge_value);
     const uint64_t requested_tries = max_tries;
     const auto started_us = GetTime<std::chrono::microseconds>();
-    matmul::PowState state = BuildMatMulServicePowState(ctx, 0, uint256{});
-    const matmul::PowConfig config = BuildMatMulServicePowConfig(ctx);
-    const bool solved = matmul::Solve(
-        state,
-        config,
-        max_tries,
-        {
-            .time_budget_ms = static_cast<uint64_t>(time_budget_ms),
-            .max_worker_threads = static_cast<uint32_t>(solver_threads),
-        });
+
+    bool solved{false};
+    uint64_t solved_nonce{0};
+    uint256 solved_digest;
+    std::vector<unsigned char> solved_payload;
+
+    if (ctx.is_v4) {
+        // MatMul v4 (spec §I.3): grind nNonce64 through the dispatched v4 digest
+        // (matmul_v4::accel::ComputeDigestDispatched -- device backend with a
+        // byte-exact CPU verify/fallback, mirroring SolveMatMulV4 in pow.cpp)
+        // and accept the first nonce whose sketch-committed digest meets the
+        // challenge target. The sketch body travels back in matrix_c_data.
+        uint64_t nonce{0};
+        while (max_tries > 0) {
+            CBlockHeader header = BuildMatMulServiceV4Header(ctx, nonce, uint256{});
+            uint256 digest;
+            std::vector<unsigned char> payload;
+            const bool ok = matmul_v4::accel::ComputeDigestDispatched(
+                header, ctx.n, ctx.v4_rounds, digest, payload);
+            --max_tries;
+            if (ok && UintToArith256(digest) <= ctx.target) {
+                solved = true;
+                solved_nonce = nonce;
+                solved_digest = digest;
+                solved_payload = std::move(payload);
+                break;
+            }
+            if (nonce == std::numeric_limits<uint64_t>::max()) break;
+            ++nonce;
+            if (time_budget_ms > 0 &&
+                ((GetTime<std::chrono::microseconds>() - started_us).count() / 1000) >= time_budget_ms) {
+                break;
+            }
+        }
+    } else {
+        matmul::PowState state = BuildMatMulServicePowState(ctx, 0, uint256{});
+        const matmul::PowConfig config = BuildMatMulServicePowConfig(ctx);
+        solved = matmul::Solve(
+            state,
+            config,
+            max_tries,
+            {
+                .time_budget_ms = static_cast<uint64_t>(time_budget_ms),
+                .max_worker_threads = static_cast<uint32_t>(solver_threads),
+            });
+        solved_nonce = state.nonce;
+        solved_digest = state.digest;
+    }
     const double elapsed_ms = static_cast<double>(
         (GetTime<std::chrono::microseconds>() - started_us).count()) / 1000.0;
 
@@ -6976,8 +7138,8 @@ static RPCHelpMan solvematmulservicechallenge()
         return result;
     }
 
-    const std::string nonce64_hex = strprintf("%016x", state.nonce);
-    const std::string digest_hex = state.digest.GetHex();
+    const std::string nonce64_hex = strprintf("%016x", solved_nonce);
+    const std::string digest_hex = solved_digest.GetHex();
     result.pushKV("reason", "ok");
     result.pushKV("nonce64_hex", nonce64_hex);
     result.pushKV("digest_hex", digest_hex);
@@ -6985,6 +7147,13 @@ static RPCHelpMan solvematmulservicechallenge()
     proof.pushKV("challenge", challenge_value);
     proof.pushKV("nonce64_hex", nonce64_hex);
     proof.pushKV("digest_hex", digest_hex);
+    if (ctx.is_v4) {
+        // Carry the v4 sketch body through the matrix_c_data channel so the
+        // verifier can replay matmul_v4::VerifySketch against it.
+        const std::string matrix_c_data_hex = HexStr(solved_payload);
+        result.pushKV("matrix_c_data", matrix_c_data_hex);
+        proof.pushKV("matrix_c_data", matrix_c_data_hex);
+    }
     result.pushKV("proof", std::move(proof));
     return result;
 },
@@ -7000,6 +7169,7 @@ static RPCHelpMan verifymatmulserviceproof()
                     {"nonce64_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted 64-bit nonce in hexadecimal"},
                     {"digest_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted transcript digest in hexadecimal"},
                     {MATMUL_SERVICE_VERIFY_LOOKUP_LOCAL_STATUS, RPCArg::Type::BOOL, RPCArg::Default{true}, "Whether to consult the local/shared issued-challenge registry and include issued/redeemed/redeemable fields. Disable this for stateless high-volume verification."},
+                    {"matrix_c_data", RPCArg::Type::STR_HEX, RPCArg::Default{""}, "MatMul v4 sketch payload (hex) accompanying the share; required for v4 challenges (at and above the v4 activation height) and ignored for v3."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -7031,6 +7201,8 @@ static RPCHelpMan verifymatmulserviceproof()
     const ArgsManager& args = EnsureArgsman(node);
     const bool include_local_registry_status =
         request.params[3].isNull() ? true : request.params[3].get_bool();
+    const std::string matrix_c_data_hex =
+        request.params[4].isNull() ? std::string{} : request.params[4].get_str();
     if (!chainman.GetConsensus().fMatMulPOW) {
         throw JSONRPCError(RPC_MISC_ERROR, "MatMul proof-of-work is not active on this chain");
     }
@@ -7040,6 +7212,7 @@ static RPCHelpMan verifymatmulserviceproof()
         request.params[0],
         request.params[1].get_str(),
         request.params[2].get_str(),
+        matrix_c_data_hex,
         include_local_registry_status);
 },
     };
@@ -7053,6 +7226,7 @@ static RPCHelpMan redeemmatmulserviceproof()
                     {"challenge", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Challenge envelope returned by getmatmulservicechallenge", std::vector<RPCArg>{}},
                     {"nonce64_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted 64-bit nonce in hexadecimal"},
                     {"digest_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted transcript digest in hexadecimal"},
+                    {"matrix_c_data", RPCArg::Type::STR_HEX, RPCArg::Default{""}, "MatMul v4 sketch payload (hex) accompanying the share; required for v4 challenges (at and above the v4 activation height) and ignored for v3."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -7082,6 +7256,8 @@ static RPCHelpMan redeemmatmulserviceproof()
     NodeContext& node = EnsureAnyNodeContext(request.context);
     ChainstateManager& chainman = EnsureChainman(node);
     const ArgsManager& args = EnsureArgsman(node);
+    const std::string matrix_c_data_hex =
+        request.params[3].isNull() ? std::string{} : request.params[3].get_str();
     if (!chainman.GetConsensus().fMatMulPOW) {
         throw JSONRPCError(RPC_MISC_ERROR, "MatMul proof-of-work is not active on this chain");
     }
@@ -7090,7 +7266,8 @@ static RPCHelpMan redeemmatmulserviceproof()
         chainman,
         request.params[0],
         request.params[1].get_str(),
-        request.params[2].get_str());
+        request.params[2].get_str(),
+        matrix_c_data_hex);
 },
     };
 }
@@ -7107,6 +7284,7 @@ static RPCHelpMan verifymatmulserviceproofs()
                                     {"challenge", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Challenge envelope returned by getmatmulservicechallenge", std::vector<RPCArg>{}},
                                     {"nonce64_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted 64-bit nonce in hexadecimal"},
                                     {"digest_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted transcript digest in hexadecimal"},
+                                    {"matrix_c_data", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "MatMul v4 sketch payload (hex); required for v4 challenges and ignored for v3."},
                                 },
                             },
                         },
@@ -7166,6 +7344,7 @@ static RPCHelpMan verifymatmulserviceproofs()
             item.challenge,
             item.nonce64_hex,
             item.digest_hex,
+            item.matrix_c_data_hex,
             include_local_registry_status);
     });
 },
@@ -7184,6 +7363,7 @@ static RPCHelpMan redeemmatmulserviceproofs()
                                     {"challenge", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Challenge envelope returned by getmatmulservicechallenge", std::vector<RPCArg>{}},
                                     {"nonce64_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted 64-bit nonce in hexadecimal"},
                                     {"digest_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted transcript digest in hexadecimal"},
+                                    {"matrix_c_data", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "MatMul v4 sketch payload (hex); required for v4 challenges and ignored for v3."},
                                 },
                             },
                         },
@@ -7239,7 +7419,8 @@ static RPCHelpMan redeemmatmulserviceproofs()
             chainman,
             item.challenge,
             item.nonce64_hex,
-            item.digest_hex);
+            item.digest_hex,
+            item.matrix_c_data_hex);
     });
 },
     };
@@ -8019,8 +8200,16 @@ static UniValue TemplateToJSON(
     block_header.nNonce = 0;
     block_header.nNonce64 = 0;
     block_header.mix_hash.SetNull();
+    // MatMul v4 (spec §I.3, §J#10): at and above nMatMulV4Height the template
+    // carries the v4 dimension so the getblocktemplate miner (SolveMatMul ->
+    // SolveMatMulV4) grinds the correct shape; below the fork the v3 dimension
+    // default stands. The heavy solve/sketch-payload work already dispatches to
+    // v4 through SolveMatMul; this only fixes the advertised dimension/params.
+    const bool gbt_matmul_v4 = consensusParams.fMatMulPOW && consensusParams.IsMatMulV4Active(next_height);
     if (consensusParams.fMatMulPOW) {
-        if (block_header.matmul_dim == 0) {
+        if (gbt_matmul_v4) {
+            block_header.matmul_dim = static_cast<uint16_t>(consensusParams.nMatMulV4Dimension);
+        } else if (block_header.matmul_dim == 0) {
             block_header.matmul_dim = static_cast<uint16_t>(consensusParams.nMatMulDimension);
         }
         block_header.matmul_digest.SetNull();
@@ -8187,11 +8376,19 @@ static UniValue TemplateToJSON(
     result.pushKV("bits", strprintf("%08x", block_header.nBits));
     result.pushKV("height", static_cast<int64_t>(next_height));
     if (matmul_active) {
+        // v4 advertises the sketch tile b, v4 Freivalds rounds, and prime
+        // q = 2^61-1; v3 keeps the transcript block size / noise rank / modulus.
+        const uint64_t gbt_matmul_b = gbt_matmul_v4 ? static_cast<uint64_t>(matmul_v4::kTileB)
+                                                    : static_cast<uint64_t>(consensusParams.nMatMulTranscriptBlockSize);
+        const uint64_t gbt_matmul_r = gbt_matmul_v4 ? static_cast<uint64_t>(consensusParams.nMatMulV4FreivaldsRounds)
+                                                    : static_cast<uint64_t>(consensusParams.nMatMulNoiseRank);
+        const uint64_t gbt_matmul_q = gbt_matmul_v4 ? static_cast<uint64_t>(matmul::int8_field::kFieldPrime)
+                                                    : static_cast<uint64_t>(consensusParams.nMatMulFieldModulus);
         UniValue matmul(UniValue::VOBJ);
         matmul.pushKV("n", block_header.matmul_dim);
-        matmul.pushKV("b", consensusParams.nMatMulTranscriptBlockSize);
-        matmul.pushKV("r", consensusParams.nMatMulNoiseRank);
-        matmul.pushKV("q", static_cast<uint64_t>(consensusParams.nMatMulFieldModulus));
+        matmul.pushKV("b", gbt_matmul_b);
+        matmul.pushKV("r", gbt_matmul_r);
+        matmul.pushKV("q", gbt_matmul_q);
         matmul.pushKV("seed_a", block_header.seed_a.GetHex());
         matmul.pushKV("seed_b", block_header.seed_b.GetHex());
         matmul.pushKV("min_dimension", static_cast<uint64_t>(consensusParams.nMatMulMinDimension));
@@ -8200,11 +8397,11 @@ static UniValue TemplateToJSON(
 
         // Backward-compatible top-level fields retained for existing miners/tests.
         result.pushKV("matmul_n", block_header.matmul_dim);
-        result.pushKV("matmul_b", consensusParams.nMatMulTranscriptBlockSize);
-        result.pushKV("matmul_r", consensusParams.nMatMulNoiseRank);
+        result.pushKV("matmul_b", gbt_matmul_b);
+        result.pushKV("matmul_r", gbt_matmul_r);
         result.pushKV("seed_a", block_header.seed_a.GetHex());
         result.pushKV("seed_b", block_header.seed_b.GetHex());
-        result.pushKV("matmul_field_modulus", (uint64_t)consensusParams.nMatMulFieldModulus);
+        result.pushKV("matmul_field_modulus", gbt_matmul_q);
         result.pushKV("matmul_min_dimension", static_cast<uint64_t>(consensusParams.nMatMulMinDimension));
         result.pushKV("matmul_max_dimension", static_cast<uint64_t>(consensusParams.nMatMulMaxDimension));
 

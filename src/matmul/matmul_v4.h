@@ -75,11 +75,33 @@ enum class Operand : uint8_t { A = 0x41, B = 0x42 };
                                                        uint32_t n);
 
 /** Compute the sketch commitment Chat = U*C*V in F_q, returned row-major as m*m
- *  canonical F_q words (§E.1). U is m*n, V is n*m, C is n*n exact int32. */
+ *  canonical F_q words (§E.1). U is m*n, V is n*m, C is n*n exact int32. This is
+ *  the full-C reference path (Theta(n^3) via ComputeExactProduct); it is the
+ *  consensus definition of the sketch and the verifier-side reference. */
 [[nodiscard]] std::vector<Fq> ComputeSketch(const std::vector<int8_t>& U,
                                             const std::vector<int32_t>& C,
                                             const std::vector<int8_t>& V,
                                             uint32_t n, uint32_t m);
+
+/** Optimal miner sketch (§E.3): compute Chat = (U*A)(B*V) mod q DIRECTLY, never
+ *  forming the n*n product C. U is m*n, A/B are n*n, V is n*m, all balanced-s8.
+ *
+ *  P = U*A (m*n) and Q = B*V (n*m) are exact s8xs8->s32 integer GEMMs -- each
+ *  entry is a length-n balanced-s8 dot, |.| <= n*125^2 < 2^30, so it fits the
+ *  same exact INT32 accumulator as C (CheckAccumulationBound, §B.4). The m*m
+ *  combine Chat[a][c] = (sum_k P[a][k]*Q[k][c]) mod q reproduces the int8_field
+ *  FqFromInt32/FqMul/FqAdd path bit-for-bit.
+ *
+ *  BYTE-IDENTICAL to ComputeSketch(U, A*B, V): by integer-matrix associativity
+ *  (U*A)(B*V) == U*(A*B)*V == U*C*V as EXACT integer matrices, so every m*m
+ *  entry is the same integer and thus the same UNIQUE canonical F_q residue in
+ *  [0, q). Identical residues => identical SerializeSketch bytes => identical
+ *  digest. Cost is ~2*n^2*m MACs instead of Theta(n^3). */
+[[nodiscard]] std::vector<Fq> ComputeSketchOptimal(const std::vector<int8_t>& U,
+                                                   const std::vector<int8_t>& A,
+                                                   const std::vector<int8_t>& B,
+                                                   const std::vector<int8_t>& V,
+                                                   uint32_t n, uint32_t m);
 
 /** Serialize an m*m F_q sketch to canonical little-endian bytes (8 bytes/word,
  *  8*m^2 total -- 2 MiB at n=4096,b=8; §E.1). */

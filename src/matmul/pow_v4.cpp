@@ -37,9 +37,15 @@ bool ComputeDigest(const CBlockHeader& header, uint32_t n, uint32_t rounds,
     const std::vector<int8_t> U = matmul::v4::ExpandProjector(seed_u, m, n);
     const std::vector<int8_t> V = matmul::v4::ExpandProjector(seed_v, n, m);
 
-    // Exact INT32 product C = A*B, then the sketch Chat = U*C*V over q.
-    const std::vector<int32_t> C = matmul::v4::ComputeExactProduct(A, B, n);
-    const std::vector<matmul::v4::Fq> Chat = matmul::v4::ComputeSketch(U, C, V, n, m);
+    // Optimal miner path (§E.3): evaluate the sketch Chat = (U*A)(B*V) over q
+    // directly, never forming the n x n product C. This is byte-identical to the
+    // full-C reference ComputeSketch(U, ComputeExactProduct(A,B), V) by
+    // integer-matrix associativity (U*A)(B*V) == U*(A*B)*V, so the committed
+    // payload and digest are unchanged -- it is a pure performance factoring
+    // (~2*n^2*m MACs vs Theta(n^3)). The full-C path stays exposed in matmul_v4.h
+    // as the consensus/verifier-side reference and is exercised by the unit
+    // tests (matmul_v4_sketch_tests: optimal_sketch_matches_full_c_reference).
+    const std::vector<matmul::v4::Fq> Chat = matmul::v4::ComputeSketchOptimal(U, A, B, V, n, m);
 
     sketch_payload_out = matmul::v4::SerializeSketch(Chat);
     digest_out = matmul::v4::ComputeSketchDigest(sigma, sketch_payload_out);
