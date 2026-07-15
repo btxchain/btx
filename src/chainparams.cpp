@@ -345,6 +345,14 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_parent_mtp_seed_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestmatmulparentmtpseedheight");
     }
+    if (args.IsArgSet("-regtestmatmulv4height")) {
+        options.matmul_v4_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestmatmulv4height");
+    }
+    if (args.IsArgSet("-regtestmatmulv4dimension")) {
+        options.matmul_v4_dimension =
+            ParseRegTestPositiveUInt32Arg(args, "-regtestmatmulv4dimension");
+    }
 
     for (const std::string& arg : args.GetArgs("-testactivationheight")) {
         const auto found{arg.find('@')};

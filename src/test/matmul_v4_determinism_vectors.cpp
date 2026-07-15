@@ -190,7 +190,7 @@ BOOST_FIXTURE_TEST_SUITE(matmul_v4_determinism_vectors, BasicTestingSetup)
 BOOST_AUTO_TEST_CASE(golden_vectors_are_reproducible_and_match_pins)
 {
     for (const GoldenVector& tv : kGoldenVectors) {
-        const CBlockHeader header = HeaderFromVector(tv);
+        CBlockHeader header = HeaderFromVector(tv);
 
         uint256 digest;
         std::vector<unsigned char> payload;
@@ -209,8 +209,12 @@ BOOST_AUTO_TEST_CASE(golden_vectors_are_reproducible_and_match_pins)
             BOOST_CHECK_MESSAGE(payload2 == payload, tv.name << ": payload not reproducible");
         }
 
-        // (2) The emitted proof must verify under the same inputs.
+        // (2) The emitted proof must verify under the same inputs. Seal the
+        // mined digest into the header first, exactly as SolveMatMulV4 does
+        // before finalizing a block: VerifySketch recomputes the digest from
+        // the payload and requires it to equal header.matmul_digest (§0.7-(1)).
         {
+            header.matmul_digest = digest;
             uint256 verified;
             BOOST_CHECK_MESSAGE(
                 matmul_v4::VerifySketch(header, tv.n, tv.rounds, payload, verified),

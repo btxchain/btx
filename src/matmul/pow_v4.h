@@ -64,6 +64,19 @@ static constexpr uint32_t kTileB = 8;
 [[nodiscard]] bool VerifySketch(const CBlockHeader& header, uint32_t n, uint32_t rounds,
                                 const std::vector<unsigned char>& sketch_payload, uint256& digest_out);
 
+/** True iff `sketch_payload` (as shipped) hashes to `header.matmul_digest`, i.e.
+ *  the body is the committed sketch for this header. Runs no Freivalds and no
+ *  target check -- it only answers "is this the payload the header commits to?".
+ *
+ *  Used to classify a failed v4 block: if this returns false the failure is a
+ *  BODY MUTATION (a different, correct payload for this same header hash exists,
+ *  so the block hash must NOT be permanently invalidated -- otherwise an
+ *  attacker could poison a valid header's hash by relaying a corrupted-payload
+ *  copy first). If it returns true, any remaining failure (Freivalds mismatch or
+ *  digest-over-target) is a header-level CONSENSUS fault and is permanent. */
+[[nodiscard]] bool PayloadMatchesCommitment(const CBlockHeader& header,
+                                            const std::vector<unsigned char>& sketch_payload);
+
 } // namespace matmul_v4
 
 #endif // BTX_MATMUL_POW_V4_H

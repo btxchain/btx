@@ -103,6 +103,12 @@ HonestProof ComputeHonestProof(uint64_t nonce = 1,
     HonestProof proof;
     proof.header = MakeV4Header(nonce, n);
     BOOST_REQUIRE(matmul_v4::ComputeDigest(proof.header, n, rounds, proof.digest, proof.payload));
+    // Seal the mined digest into the header, exactly as SolveMatMulV4 does
+    // before a block is finalized: VerifySketch recomputes the digest from the
+    // payload and requires it to equal header.matmul_digest (§0.7-(1)). Honest
+    // round-trips must carry the seal to verify; the mutation/forgery cases
+    // below still fail because a tampered payload no longer hashes to it.
+    proof.header.matmul_digest = proof.digest;
     return proof;
 }
 

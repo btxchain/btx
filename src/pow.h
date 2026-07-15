@@ -174,6 +174,13 @@ bool CheckMatMulProofOfWork_ProductCommitted(const CBlock& block, const Consensu
  *  recomputed digest against the block target. Never recomputes the O(n^3)
  *  product. */
 bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consensus::Params& params, int32_t block_height = -1);
+/** True iff the block's v4 sketch payload reconstructs the header's committed
+ *  matmul_digest. A false result means the payload (block body) is a MUTATION of
+ *  the committed body -- the header hash stays valid and a correct payload
+ *  exists, so validators must reject with BLOCK_MUTATED (non-permanent) rather
+ *  than permanently invalidating the header hash. Runs no Freivalds/target
+ *  check; see CheckMatMulProofOfWork_V4ProductCommitted for the full cascade. */
+bool MatMulV4PayloadMatchesCommitment(const CBlock& block);
 /** Coarse DoS-bound shape check for the v4 sketch payload (dimension match,
  *  non-empty, bounded word count). The authoritative shape/canonicality check
  *  runs inside matmul_v4::VerifySketch itself. */
@@ -227,7 +234,12 @@ MatMulPhase2Punishment RegisterMatMulPhase2Failure(
     const Consensus::Params& params,
     std::chrono::steady_clock::time_point now,
     uint32_t* failures_out = nullptr);
-uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd);
+// Height-selected DoS verify budgets (spec §G.3/§H.4/§I.5): at and above
+// nMatMulV4Height the v4 budget values apply; below (or with v4 disabled) the
+// v3 values apply. reference_height defaults to -1 (== v3), preserving callers
+// that do not supply a height.
+uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd, int32_t reference_height = -1);
+uint32_t EffectiveMatMulGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height = -1);
 bool ConsumeMatMulPeerVerifyBudget(
     MatMulPeerVerificationBudget& budget,
     const Consensus::Params& params,

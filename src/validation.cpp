@@ -9982,6 +9982,15 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
         // height-aware check point, so enforce the exact height-gated
         // dimension here.
         if (consensusParams.IsMatMulV4Active(nHeight)) {
+            // Spec §G.2/§G.4-#2: structural accepted-dimension bounds, enforced
+            // ahead of the exact height-gated dimension below as defense in
+            // depth (reject any out-of-range matmul_dim outright).
+            if (block.matmul_dim < consensusParams.nMatMulV4MinDimension ||
+                block.matmul_dim > consensusParams.nMatMulV4MaxDimension) {
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                     "bad-matmul-dim",
+                                     "matmul v4 dimension out of range for this height");
+            }
             if (block.matmul_dim != consensusParams.nMatMulV4Dimension) {
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
                                      "bad-matmul-dim",
@@ -10147,6 +10156,22 @@ static bool ContextualCheckBlock(const CBlock& block,
                 "matmul v4 block carries malformed product sketch payload");
         }
         if (!CheckMatMulProofOfWork_V4ProductCommitted(block, consensusParams, nHeight)) {
+            // Separate a body MUTATION from a header-level CONSENSUS fault. The
+            // sketch payload lives in the block body while matmul_digest is in
+            // the 182-byte header, so a corrupted payload leaves the block hash
+            // unchanged and a correct payload for that same hash still exists.
+            // Marking such a block permanently invalid (BLOCK_CONSENSUS) would
+            // let an attacker poison a valid header's hash by relaying a
+            // corrupted-payload copy first, blocking the honest block as
+            // "duplicate-invalid". Classify it as BLOCK_MUTATED (non-permanent),
+            // matching the A/B and payload-shape checks above. Only a payload
+            // that DOES reconstruct the committed digest but still fails
+            // (Freivalds mismatch or digest over target) is a real, permanent
+            // PoW failure.
+            if (!MatMulV4PayloadMatchesCommitment(block)) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-matmul-v4-payload",
+                    "matmul v4 sketch payload does not match committed digest");
+            }
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
                 "matmul v4 proof of work failed");
         }

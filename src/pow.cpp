@@ -3140,6 +3140,18 @@ bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consen
     return finish(true);
 }
 
+bool MatMulV4PayloadMatchesCommitment(const CBlock& block)
+{
+    // Distinguishes a v4 body mutation (payload does not reconstruct the
+    // header's committed digest) from a header-level consensus fault. The
+    // sketch payload travels as the trailing matrix_c_data words; unpack it to
+    // the flat byte form the digest routine expects. See
+    // matmul_v4::PayloadMatchesCommitment for why the caller must treat a
+    // false result as a non-permanent mutation.
+    const std::vector<unsigned char> sketch_payload = UnpackMatMulV4SketchWordsToBytes(block.matrix_c_data);
+    return matmul_v4::PayloadMatchesCommitment(block, sketch_payload);
+}
+
 static void SetFreivaldsPayloadFromProduct(std::vector<uint32_t>& payload_out, const matmul::Matrix& C_prime)
 {
     const uint32_t rows = C_prime.rows();
@@ -3341,12 +3353,36 @@ MatMulPhase2Punishment RegisterMatMulPhase2Failure(
     return MatMulPhase2Punishment::DISCONNECT;
 }
 
-uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd)
+namespace {
+// Spec §G.3/§H.4/§I.5: the DoS verify-budget MECHANISM is unchanged across the
+// v4 fork; only the value is height-selected. At and above nMatMulV4Height the
+// v4 budgets apply, below it the v3 budgets do. v4 disabled (height ==
+// INT32_MAX) always yields the v3 value, regardless of reference_height, so an
+// INT32_MAX "unknown height" sentinel can never accidentally select v4.
+uint32_t SelectMatMulPeerVerifyBudgetBase(const Consensus::Params& params, int32_t reference_height)
 {
-    if (!is_ibd) return params.nMatMulPeerVerifyBudgetPerMin;
+    if (!IsDisabledHeight(params.nMatMulV4Height) && params.IsMatMulV4Active(reference_height)) {
+        return params.nMatMulV4PeerVerifyBudgetPerMin;
+    }
+    return params.nMatMulPeerVerifyBudgetPerMin;
+}
+} // namespace
+
+uint32_t EffectiveMatMulGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height)
+{
+    if (!IsDisabledHeight(params.nMatMulV4Height) && params.IsMatMulV4Active(reference_height)) {
+        return params.nMatMulV4GlobalVerifyBudgetPerMin;
+    }
+    return params.nMatMulGlobalVerifyBudgetPerMin;
+}
+
+uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd, int32_t reference_height)
+{
+    const uint32_t base = SelectMatMulPeerVerifyBudgetBase(params, reference_height);
+    if (!is_ibd) return base;
     // IBD needs to process repeated 2000-header batches without disconnect
     // churn. Keep a finite but substantially higher cap than steady-state.
-    return std::max<uint32_t>(params.nMatMulPeerVerifyBudgetPerMin, 200'000U);
+    return std::max<uint32_t>(base, 200'000U);
 }
 
 bool ConsumeMatMulPeerVerifyBudget(
@@ -3362,7 +3398,7 @@ bool ConsumeMatMulPeerVerifyBudget(
         budget.expensive_verifications_this_minute = 0;
     }
 
-    uint32_t effective_budget = EffectiveMatMulPeerVerifyBudgetPerMin(params, is_ibd);
+    uint32_t effective_budget = EffectiveMatMulPeerVerifyBudgetPerMin(params, is_ibd, reference_height);
     if (!is_ibd && params.fMatMulPOW) {
         const bool in_fast_phase = reference_height < params.nFastMineHeight;
         const bool rapid_block_context = params.fPowAllowMinDifficultyBlocks || params.fPowNoRetargeting;

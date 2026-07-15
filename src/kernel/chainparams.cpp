@@ -566,8 +566,18 @@ public:
         // spec §G.2) the same way mainnet's future value must be.
         consensus.nMatMulV4Height = 200'000;
         consensus.nMatMulV4Dimension = 4096;
+        // Accepted-dimension bounds (spec §G.2): production testnet uses the
+        // 4096..8192 window; the exact dimension (4096) is still enforced
+        // separately in ContextualCheckBlockHeader.
+        consensus.nMatMulV4MinDimension = 4096;
+        consensus.nMatMulV4MaxDimension = 8192;
         consensus.nMatMulV4FreivaldsRounds = 3;
         consensus.nMatMulV4TranscriptBlockSize = 8;
+        // DoS verify budgets above the v4 fork (spec §I.5): the O(n^2) verify
+        // costs ~0.14-0.28 s CPU/check at n=4096, so the global cap is 16/min
+        // (~4.8 s CPU/min) and each peer 4/min.
+        consensus.nMatMulV4GlobalVerifyBudgetPerMin = 16;
+        consensus.nMatMulV4PeerVerifyBudgetPerMin = 4;
         // No empirical v3->v4 throughput benchmark exists yet for testnet
         // reference hardware, so leave the one-time ASERT rescale at 1/1
         // ("no rescale"); testnet is fPowAllowMinDifficultyBlocks, so a
@@ -1151,8 +1161,18 @@ public:
         // R=3 production normative) is reserved for regtest per spec §0.7/§G.2.
         consensus.nMatMulV4Height = 100;
         consensus.nMatMulV4Dimension = 256;
+        // Accepted-dimension bounds (spec §G.2): regtest uses the wide 64..1024
+        // window (n=256 sits inside it) so bounds-rejection paths can be
+        // exercised without recompiling; the exact dimension (256) is still
+        // enforced separately in ContextualCheckBlockHeader.
+        consensus.nMatMulV4MinDimension = 64;
+        consensus.nMatMulV4MaxDimension = 1024;
         consensus.nMatMulV4FreivaldsRounds = 2;
         consensus.nMatMulV4TranscriptBlockSize = 8;
+        // Regtest must mine both fork sides fast; do not throttle v4 verify
+        // (mirrors the v3 "no global budget limit in regtest" choice above).
+        consensus.nMatMulV4GlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+        consensus.nMatMulV4PeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
         consensus.nMatMulV4AsertRescaleNum = 1;
         consensus.nMatMulV4AsertRescaleDen = 1;
         consensus.nPowTargetSpacingFastMs = 250;
@@ -1186,6 +1206,31 @@ public:
         }
         if (opts.matmul_dimension.has_value()) {
             consensus.nMatMulDimension = *opts.matmul_dimension;
+        }
+        if (opts.matmul_v4_height.has_value()) {
+            consensus.nMatMulV4Height = *opts.matmul_v4_height;
+        }
+        if (opts.matmul_v4_dimension.has_value()) {
+            consensus.nMatMulV4Dimension = *opts.matmul_v4_dimension;
+        }
+        // Spec §G.2/§G.4: the v4 dimension must divide evenly by the sketch
+        // tile size and stay within the accepted-dimension bounds enforced in
+        // ContextualCheckBlockHeader, so a bad -regtestmatmulv4dimension fails
+        // loudly at startup rather than silently rejecting every mined block.
+        if (consensus.nMatMulV4TranscriptBlockSize == 0 ||
+            consensus.nMatMulV4Dimension % consensus.nMatMulV4TranscriptBlockSize != 0) {
+            throw std::runtime_error(strprintf(
+                "Invalid regtest MatMul v4 shape: dimension %u must be divisible by tile size %u.",
+                consensus.nMatMulV4Dimension,
+                consensus.nMatMulV4TranscriptBlockSize));
+        }
+        if (consensus.nMatMulV4Dimension < consensus.nMatMulV4MinDimension ||
+            consensus.nMatMulV4Dimension > consensus.nMatMulV4MaxDimension) {
+            throw std::runtime_error(strprintf(
+                "Invalid regtest MatMul v4 dimension %u: outside [%u, %u].",
+                consensus.nMatMulV4Dimension,
+                consensus.nMatMulV4MinDimension,
+                consensus.nMatMulV4MaxDimension));
         }
         if (opts.matmul_transcript_block_size.has_value()) {
             consensus.nMatMulTranscriptBlockSize = *opts.matmul_transcript_block_size;
@@ -1329,6 +1374,8 @@ public:
             opts.matmul_asert_half_life_upgrade_height.has_value() ||
             opts.matmul_nonce_seed_height.has_value() ||
             opts.matmul_parent_mtp_seed_height.has_value() ||
+            opts.matmul_v4_height.has_value() ||
+            opts.matmul_v4_dimension.has_value() ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||
             opts.shielded_smile_rice_codec_disable_height.has_value() ||

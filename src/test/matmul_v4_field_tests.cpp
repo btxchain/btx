@@ -398,8 +398,13 @@ BOOST_AUTO_TEST_CASE(canonical_residue_of_signed_entries)
     BOOST_CHECK_EQUAL(CanonicalResidue(0), 0U);
     BOOST_CHECK_EQUAL(CanonicalResidue(1), 1U);
     BOOST_CHECK_EQUAL(CanonicalResidue(-1), q - 1);
-    BOOST_CHECK_EQUAL(CanonicalResidue(15'625LL * 65'535LL), 1'024'046'875ULL);
-    BOOST_CHECK_EQUAL(CanonicalResidue(-15'625LL * 65'535LL), q - 1'024'046'875ULL);
+    // 15'625 * 65'535 = 1'023'984'375 < q, so its canonical residue is itself
+    // (and the negation folds to q - that value). Expressed as the same product
+    // to keep the golden value provably equal to the argument.
+    BOOST_CHECK_EQUAL(CanonicalResidue(15'625LL * 65'535LL),
+                      static_cast<uint64_t>(15'625LL * 65'535LL));
+    BOOST_CHECK_EQUAL(CanonicalResidue(-15'625LL * 65'535LL),
+                      q - static_cast<uint64_t>(15'625LL * 65'535LL));
 }
 
 BOOST_AUTO_TEST_CASE(canonical_residue_is_injective_within_the_entry_range)

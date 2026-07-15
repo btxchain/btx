@@ -79,8 +79,13 @@ BOOST_FIXTURE_TEST_SUITE(matmul_v4_pow_tests, BasicTestingSetup)
 BOOST_AUTO_TEST_CASE(compute_then_verify_is_consistent)
 {
     for (const uint64_t nonce : {uint64_t{0}, uint64_t{1}, uint64_t{42}, uint64_t{0xffffffffffffffffULL}}) {
-        const auto header = MakeV4Header(nonce);
+        auto header = MakeV4Header(nonce);
         const auto proof = MustCompute(header, kTestDim);
+
+        // Seal the mined digest into the header, exactly as SolveMatMulV4 does
+        // before a block is finalized: VerifySketch recomputes the digest from
+        // the payload and requires it to equal header.matmul_digest (§0.7-(1)).
+        header.matmul_digest = proof.digest;
 
         uint256 verified;
         BOOST_CHECK(matmul_v4::VerifySketch(header, kTestDim, matmul_v4::kFreivaldsRounds,
@@ -91,8 +96,9 @@ BOOST_AUTO_TEST_CASE(compute_then_verify_is_consistent)
 
 BOOST_AUTO_TEST_CASE(compute_then_verify_is_consistent_n512)
 {
-    const auto header = MakeV4Header(/*nonce=*/7, /*n=*/512);
+    auto header = MakeV4Header(/*nonce=*/7, /*n=*/512);
     const auto proof = MustCompute(header, 512);
+    header.matmul_digest = proof.digest; // seal, as SolveMatMulV4 does
 
     uint256 verified;
     BOOST_CHECK(matmul_v4::VerifySketch(header, 512, matmul_v4::kFreivaldsRounds,
@@ -105,9 +111,13 @@ BOOST_AUTO_TEST_CASE(round_count_is_part_of_the_contract)
     // The verifier must run the consensus round count; an honest R = 3
     // proof is a valid product commitment regardless, but the two sides
     // must agree on R for digest/challenge derivation to line up.
-    const auto header = MakeV4Header(/*nonce=*/9);
+    auto header = MakeV4Header(/*nonce=*/9);
     const auto proof2 = MustCompute(header, kTestDim, /*rounds=*/2);
     const auto proof3 = MustCompute(header, kTestDim, /*rounds=*/3);
+
+    // The digest/payload are round-count-independent (ComputeDigest runs no
+    // Freivalds), so proof2 and proof3 seal the same digest into the header.
+    header.matmul_digest = proof3.digest;
 
     uint256 verified;
     BOOST_CHECK(matmul_v4::VerifySketch(header, kTestDim, 2, proof2.payload, verified));
@@ -139,8 +149,9 @@ BOOST_AUTO_TEST_CASE(identical_inputs_yield_identical_bytes_across_runs_n512)
 
 BOOST_AUTO_TEST_CASE(verify_is_deterministic_too)
 {
-    const auto header = MakeV4Header(/*nonce=*/125);
+    auto header = MakeV4Header(/*nonce=*/125);
     const auto proof = MustCompute(header, kTestDim);
+    header.matmul_digest = proof.digest; // seal, as SolveMatMulV4 does
 
     for (int run = 0; run < 4; ++run) {
         uint256 verified;
@@ -196,9 +207,13 @@ BOOST_AUTO_TEST_CASE(digest_binds_each_header_field)
 
 BOOST_AUTO_TEST_CASE(verify_rejects_header_mutation_of_honest_proof)
 {
-    const auto header = MakeV4Header(/*nonce=*/77);
+    auto header = MakeV4Header(/*nonce=*/77);
     const auto proof = MustCompute(header, kTestDim);
+    header.matmul_digest = proof.digest; // seal the honest proof first
 
+    // Tampered headers inherit the sealed digest but re-derive a different
+    // challenge chain, so VerifySketch must reject on the binding, not merely
+    // on a null digest.
     auto tampered = header;
     tampered.nNonce64 += 1;
     uint256 digest;
@@ -221,8 +236,9 @@ BOOST_AUTO_TEST_CASE(verifier_inputs_exclude_the_product_matrix)
     // the verifier's inputs; the Freivalds identity reconstructs every
     // needed projection of C from two O(n^2) matvecs (§E.2).
     for (const uint32_t n : {kTestDim, uint32_t{512}}) {
-        const auto header = MakeV4Header(/*nonce=*/88, n);
+        auto header = MakeV4Header(/*nonce=*/88, n);
         const auto proof = MustCompute(header, n);
+        header.matmul_digest = proof.digest; // seal, as SolveMatMulV4 does
 
         const size_t m = n / matmul_v4::kTileB;
         BOOST_CHECK_EQUAL(proof.payload.size(), 8 * m * m);

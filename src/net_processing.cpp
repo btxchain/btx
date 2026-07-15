@@ -2124,11 +2124,15 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
             reference_height >= 0 &&
             reference_height < params.nFastMineHeight;
         if (!is_ibd && !in_fast_phase) {
-            if (!ConsumeGlobalMatMulPhase2Budget(params.nMatMulGlobalVerifyBudgetPerMin, verification_count, now)) {
+            // Height-select the global budget across the v4 fork (spec §I.5);
+            // the rate-limit mechanism is unchanged, only the value.
+            const uint32_t global_budget =
+                EffectiveMatMulGlobalVerifyBudgetPerMin(params, reference_height);
+            if (!ConsumeGlobalMatMulPhase2Budget(global_budget, verification_count, now)) {
                 budget_state.budget.window_start = saved_window_start;
                 budget_state.budget.expensive_verifications_this_minute = saved_count;
                 LogDebug(BCLog::NET, "Global Phase2 budget exhausted (%u/min), throttling peer %s\n",
-                         params.nMatMulGlobalVerifyBudgetPerMin, peer.m_addr.ToStringAddr());
+                         global_budget, peer.m_addr.ToStringAddr());
                 return false;
             }
         }

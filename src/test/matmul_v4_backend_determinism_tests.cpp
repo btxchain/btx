@@ -184,8 +184,25 @@ void RunBackendRowOrWarn(matmul_v4::accel::Kind accel_kind,
 
         uint256 digest;
         std::vector<unsigned char> payload;
+        // Invoke the specific backend's device entry point (each lives in its
+        // own matmul_v4::{cuda,metal,hip} namespace; the CPU reference is
+        // matmul_v4::ComputeDigest). Dispatched by accel_kind so the row under
+        // test exercises exactly one backend.
+        const auto run_backend = [&]() -> bool {
+            switch (accel_kind) {
+                case matmul_v4::accel::Kind::CUDA:
+                    return matmul_v4::cuda::ComputeDigestAccel(header, tv.n, tv.rounds, digest, payload);
+                case matmul_v4::accel::Kind::METAL:
+                    return matmul_v4::metal::ComputeDigestAccel(header, tv.n, tv.rounds, digest, payload);
+                case matmul_v4::accel::Kind::HIP:
+                    return matmul_v4::hip::ComputeDigestAccel(header, tv.n, tv.rounds, digest, payload);
+                case matmul_v4::accel::Kind::CPU:
+                    return matmul_v4::ComputeDigest(header, tv.n, tv.rounds, digest, payload);
+            }
+            return false;
+        };
         BOOST_REQUIRE_MESSAGE(
-            matmul_v4::accel::ComputeDigestAccel(accel_kind, header, tv.n, tv.rounds, digest, payload),
+            run_backend(),
             tv.name << ": backend '" << name
                     << "' is admissible+available but ComputeDigestAccel failed — "
                        "backend may not silently skip the determinism check (§N.3-v)");

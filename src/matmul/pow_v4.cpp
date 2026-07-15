@@ -82,4 +82,14 @@ bool VerifySketch(const CBlockHeader& header, uint32_t n, uint32_t rounds,
     return matmul::v4::SketchFreivalds(A, B, U, V, sketch, sigma, sketch_payload, n, m, rounds);
 }
 
+bool PayloadMatchesCommitment(const CBlockHeader& header,
+                             const std::vector<unsigned char>& sketch_payload)
+{
+    // Recompute the digest over the payload exactly as shipped (§E.1 binding).
+    // A payload that does not hash to the committed digest is a body mutation:
+    // the header is unchanged, so a correct payload for this same header exists.
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    return matmul::v4::ComputeSketchDigest(sigma, sketch_payload) == header.matmul_digest;
+}
+
 } // namespace matmul_v4

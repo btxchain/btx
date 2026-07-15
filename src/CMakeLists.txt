@@ -307,6 +307,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matrix.cpp
   matmul/matmul_v4.cpp
   matmul/accel_v4.cpp
+  matmul/backend_capabilities_v4.cpp
   matmul/noise.cpp
   matmul/pow_v4.cpp
   matmul/solver_runtime.cpp

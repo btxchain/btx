@@ -205,6 +205,15 @@ struct Params {
     /** Required v4 matrix dimension n (matmul_dim at and above nMatMulV4Height).
      *  Spec §0.7 normative launch parameter: 4096 on production nets. */
     uint32_t nMatMulV4Dimension{4096};
+    /** v4 accepted-dimension bounds (spec §G.2/§G.4-#2): a v4 header's
+     *  matmul_dim must satisfy nMatMulV4MinDimension <= matmul_dim <=
+     *  nMatMulV4MaxDimension (and <= 65535, the uint16 header field). These are
+     *  the height-selected replacements for the v3 nMatMul{Min,Max}Dimension
+     *  bounds (v3 max 2048 is below the v4 default 4096, so bounds must be
+     *  height-gated). Enforced structurally in ContextualCheckBlockHeader for
+     *  v4 blocks, ahead of the exact nMatMulV4Dimension equality check. */
+    uint32_t nMatMulV4MinDimension{4096};
+    uint32_t nMatMulV4MaxDimension{8192};
     /** v4 Freivalds' rounds R over the independent prime q = 2^61-1 (spec
      *  §0.7-(2)/(D.3)). Normative: R = 3 (error <= 2^-180 for the default
      *  sketch payload); R = 2 is reserved for regtest only. */
@@ -222,6 +231,14 @@ struct Params {
      *  nBits directly for the v4 work unit leave this at 1/1). */
     int64_t nMatMulV4AsertRescaleNum{1};
     int64_t nMatMulV4AsertRescaleDen{1};
+    /** v4 DoS verify budgets (spec §I.5): the O(n^2) sketch-Freivalds verify is
+     *  far cheaper than the v3 transcript recomputation, but each check still
+     *  costs ~0.14-0.28 s CPU at n=4096, so it stays bounded per-peer and
+     *  globally. These are the height-selected replacements for the v3
+     *  nMatMul{Global,Peer}VerifyBudgetPerMin fields (same rate-limit mechanism;
+     *  only the value changes at and above nMatMulV4Height, spec §G.3/§H.4). */
+    uint32_t nMatMulV4GlobalVerifyBudgetPerMin{16};
+    uint32_t nMatMulV4PeerVerifyBudgetPerMin{4};
     uint32_t nMaxReorgDepth{std::numeric_limits<uint32_t>::max()};
     int32_t nReorgProtectionStartHeight{std::numeric_limits<int32_t>::max()};
 
