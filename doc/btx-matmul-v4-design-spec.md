@@ -83,7 +83,7 @@ The following matrix maps each point raised in the requirements discussion to th
 - **§K–§N** — Hardware economics, compute-vs-memory reconciliation, parameter calibration, migration & risk register *(the economics)*
 - **§O** — Evolving consumer matmul hardware (Apple M5) & inclusive pooling *(who can still participate)*
 - **§P** — Cross-generation hardware: M1→M5, RTX 3090/4090/5090, datacenter, v3 vs v4, solo & pooled *(who wins)*
-- **§Q** — Network compute accounting & the btxprice valuation model across the fork *(measuring the compute)*
+- **§Q** — Network compute accounting, the btxprice valuation model across the fork & the per-GPU mine-vs-AI-rental switchover (§Q.21) *(measuring — and pricing — the compute)*
 - **§R** — Post-quantum security — end-to-end audit *(the quantum requirement)*
 - **§S** — ASIC/FPGA resistance, AI-native-compute necessity & rogue-pool (mine-and-dump) economics *(closing the loopholes)*
 - **Appendices** — Glossary (A), references (B), open calibration items (C), optional CRT compute-multiplier variant — full spec (D)
@@ -1022,7 +1022,7 @@ Worked pools (§O.2 machinery): 1,000× RTX 3090 ≈ 285 POPS ≈ 144 H100 / 63 
 | Matrix-less Apple excluded; capable Apple included (§O.1) | M1–M4 verify-only; M5/Pro/Max mine at their tier. | **Met.** |
 | Consumer/Apple still participate, esp. pooled (§0.5 #16, §O.2) | All NVIDIA back to Ampere eligible; 2.4 5090s or 15 M5 Maxes ≈ 1 H100; linear pooled aggregation. | **Met — stronger than the spec's stated ratios** (nuance a). |
 
-**Nuances for owner sign-off:** (a) the per-device lever vs a 5090 is **2.4×/5.4×, not ~5×/~11×** (those used FP8-FP32-accumulate rates; INT8→INT32 is full-rate on GeForce) — direction unchanged, magnitude corrected before activation. (b) a consumer RTX 5090 (838) and 4090 (660.6) **out-mine an A100 (624)** per device, so "datacenter wins" holds against *Hopper/Blackwell-generation* datacenter parts, not NVIDIA's 2020 datacenter part; state the goal as "current-generation datacenter accelerators win." (c) consumer NVIDIA remaining eligible + pooled-viable is a **feature** per §0.5 #16.
+**Nuances for owner sign-off:** (a) the per-device lever vs a 5090 is **2.4×/5.4×, not ~5×/~11×** (those used FP8-FP32-accumulate rates; INT8→INT32 is full-rate on GeForce) — direction unchanged, magnitude corrected before activation. (b) a consumer RTX 5090 (838) and 4090 (660.6) **out-mine an A100 (624)** per device, so "datacenter wins" holds against *Hopper/Blackwell-generation* datacenter parts, not NVIDIA's 2020 datacenter part; state the goal as "current-generation datacenter accelerators win." (c) consumer NVIDIA remaining eligible + pooled-viable is a **feature** per §0.5 #16. (d) §P ranks *throughput per card* — who wins blocks when mining; *who chooses to mine at a given BTX price* is the distinct opportunity-cost question, answered by the per-GPU AI-rental break-evens of §Q.21 (consumer cards, at roughly half the datacenter's $/TOPS rental opportunity cost, rationally enter first as the price rises).
 
 ---
 
@@ -1034,6 +1034,8 @@ Worked pools (§O.2 machinery): 1,000× RTX 3090 ≈ 285 POPS ≈ 144 H100 / 63 
 ### Q.0 Summary
 
 The v3→v4 fork changes *what a nonce is*. In v3 a nonce attempt is a 4-compression SHA-256d header hash that reaches the n=512 matmul only 1 time in 2¹⁸; in v4 every nonce is one fresh dense n=4096 INT8 tensor-core GEMM. Consequently the chainwork-derived rate `M_BTX` reported by `getnetworkhashps(6720)` — the sole compute input to btxprice.com's raw-compute floor — will **drop by roughly five orders of magnitude at the fork while the network's real, useful matrix compute rises by two to six orders of magnitude**. Read naively, the metric inverts reality. This section derives the discontinuity, the exact recalibration of btxprice's `w` constant needed for continuity, and a replacement metric (network INT8-TOPS / H100-equivalents / AI-compute-$) that measures what v4 actually produces.
+
+**Through-line of the §Q economics (read the section in this order):** **(a)** security is *continuous* through the fork and read by the recalibrated Bitcoin-comparable `P_btc` (§Q.5, §Q.9, §Q.18); **(b)** useful compute is *revealed* and read by `TOPS_net`/H100-eq (§Q.6, §Q.10–§Q.11); **(c)** the productive-value / mining economics is the **per-GPU mine-vs-rent switchover** (§Q.21) — which GPU, at what BTX price, mines rather than rents to the AI market — whose marginal-miner equilibrium *is* the production-cost floor `P_prod` (§Q.6 ≡ §S.4.3) bracketing the market price from below (§Q.20).
 
 ### Q.1 The btxprice.com model as it stands (v3 baseline)
 
@@ -1100,6 +1102,8 @@ Post-fork per-device nonce rates (sketch basis, ε=0.65, W=1.7717×10¹⁰):
 | Apple M5 | ~30 | ~20 | 1.1×10³ |
 | Apple M4 | ~0 usable | — | 0 (verify-only, §O.1) |
 
+*Note: the RTX 5090/5080 rows use pre-§P figures (~400/~225 dense) kept for the Z-derivation's history; §P.1's primary-sourced correction (838/450.2 dense — INT8 is full-rate on GeForce) governs, giving 544.7/292.6 delivered dTOPS → **3.07×10⁴ / 1.65×10⁴ nonces/s**. The §Q.21 economics uses the corrected values. Z's order of magnitude is unaffected.*
+
 ### Q.4 Effective useful matrix compute, before vs after (X and Y)
 
 **Before (v3).** Real matmul rate = 1,204 n=512 matmuls/s → useful ops = 1,204 × 2×512³ = **3.23×10¹¹ ops/s ≈ 0.32 TOPS network-wide** (32-bit ALU field ops, not tensor). The entire v3 network does **~1/4,000 of one H100's matrix arithmetic**, with ~half its cycles burned on SHA-256 of no matrix value.
@@ -1154,6 +1158,8 @@ P_prod ($/BTX) = (compute $ / time) / (BTX minted / time) = N_eq · r / 800
 ```
 
 `N_eq = TOPS_net / 1,286` delivered H100-equivalents; `r` = $/H100-eq-hr; **800 BTX/hr** = 20 BTX subsidy × 40 blocks/hr at 90 s blocks (§S.4.3). This is *exactly* the §S.4.3 floor — one formula, one notation. It is **not a valuation and not a price model** — it is the **supply-side marginal cost to mine one coin** [$/BTX], the hard lower bracket miners won't persistently sell below. It is dimensionally comparable to `P_raw`/`P_btc` (§Q.17.0) but answers a different question (cost-to-produce, not what-it's-worth). Mid-2026 H100 on-demand ≈ **$2–3/GPU-hr** (median ≈$2.99: [IntuitionLabs](https://intuitionlabs.ai/articles/h100-rental-prices-cloud-comparison), [getdeploying](https://getdeploying.com/gpus/nvidia-h100), [Thunder Compute](https://www.thundercompute.com/blog/nvidia-h100-pricing), [CloudZero](https://www.cloudzero.com/blog/h100-gpu-cost/)). At **r = $2.50/hr** and an illustrative 100-H100-eq network: `P_prod = 100 × $2.50 / 800 = **$0.3125 ≈ $0.31 per newly-minted coin**` — i.e. the fleet spends 100 × $2.50 = $250/hr and mints 800 BTX/hr, so each coin costs ~$0.31 to produce. **This is per-coin marginal cost, NOT the network's hourly worth** — linear in both `N_eq` and `r`.
+
+**Per-GPU foundation (§Q.21).** `P_prod` is not a primitive — it is the aggregate/marginal view of the per-GPU mine-vs-rent break-even `P*_g = R_g × TOPS_net/(800·T_g)` (§Q.21.1); identically, `P*_H100 ≡ P_prod`, and the $0.3125 above is the H100's own switchover price at a 100-H100-eq network. The **operative** floor is `P*` of the marginal *active* class: at low `P_BTX` the margin is consumer silicon whose AI-rental $/TOPS is ~half the H100's, so the effective floor sits ~40–50% below the H100-denominated figure until datacenter capacity enters (§Q.21.3–§Q.21.4).
 
 **Annual-flow footnote (a FLOW, $/yr — not a price, never comparable to one):** the same capacity carries an aggregate AI-market value `V_ai = TOPS_net × c_TOPS·yr`, with `c_TOPS·yr = $2.50/hr × 8,760 hr / 1,286 dTOPS` = **$17.0 per delivered-TOPS-year** ($21,900/H100-eq-yr). Worked example (100-H100-eq network): `getnetworkhashps` = 7.26×10⁶ nonces/s → `TOPS_net` = **128,600 TOPS = 100 H100-eq** → `V_ai` = **$2.19 M/yr** (~$6.6 M capitalized over 3 yr). Versus v3 today: `M_BTX` *looks* 43× bigger yet backs ~$5/yr vs $2.19 M/yr — a ~10⁵–10⁶× understatement, matching Z. Dimensions guardrail: `V_ai` is $/yr (dividing by supply would give $/BTX·yr, a yield, still a flow); it must **never** be compared to, plotted against, or `max()`-ed with a $/BTX price such as `P_raw`/`P_btc` or `P_prod` (§Q.17.0).
 
@@ -1236,7 +1242,7 @@ Agreement: **latent ≈ 4–40 TOPS, central ≈ 10 TOPS** = ~0.008 H100-eq (~1/
 
 ### Q.11 Graph specifications (v3→v4)
 
-> Four charts for [btxprice.com](https://btxprice.com). Time axis: block height with a labeled `h_f = nMatMulV4Height` marker (date secondary). Shared annotation: *"MatMul v4 fork — work-unit change (Ω rescale). Security continuous; AI output steps."*
+> Four time-series charts for [btxprice.com](https://btxprice.com) (a fifth, chart **E** — the per-GPU mine-vs-rent switchover diagram, price on the x-axis rather than height — is specified in §Q.21.4). Time axis: block height with a labeled `h_f = nMatMulV4Height` marker (date secondary). Shared annotation: *"MatMul v4 fork — work-unit change (Ω rescale). Security continuous; AI output steps."*
 
 **(A) "BTX security vs Bitcoin %" — continuous, no-cliff.** Y linear ~0–3%. Series `100·w(h)·M_BTX_1w/H_BTC` with per-era `w` and fork-split window. Flat at 1.5897% through `h_f` (**no discontinuity**), then organic growth. Acceptance test: `|%(h_f⁺) − %(h_f⁻)| < window noise`.
 
@@ -1300,9 +1306,10 @@ Agreement: **latent ≈ 4–40 TOPS, central ≈ 10 TOPS** = ~0.008 H100-eq (~1/
 4. **Soft cap:** exempt the `h_f` transition (unit rebase, not decline); with 2–3 the SEH series shows no drop — regression-test it.
 5. **Forward estimate:** freeze 12.71% as legacy band; restart regression at `h_f`; interim central = INT8-accelerator deployment growth; display as a band.
 6. **Add the compute series and the production floor** (post-fork `getnetworkhashps` = literal n=4096 INT8 matmuls/s): `TOPS_net = getnetworkhashps × 1.7717×10¹⁰`; `H100_eq = N_eq = TOPS_net/1.286×10¹⁵`; price floor `P_prod = N_eq × r/800` in $/BTX (r = $/H100-eq-hr, refresh quarterly; ≡ §S.4.3). Pre-fork chart-C values: measured useful `M_BTX/2¹⁸ × 2·512³ ≈ 0.32 TOPS`; latent band 4–40 (central 10), dashed, caveated. Present the **three-object bracket, no `max()` composite**: `P_prod` (supply-side cost floor) ≤ market price ≤ `P_raw`/`P_btc` (demand-side relative-comparable, not a floor); `P_prod` is a cost, not a valuation; the spread is the disequilibrium the market prices (§Q.20). The annual flow `V_ai = TOPS_net × $17/dTOPS·yr` [$/yr] is footnote-only and never compared to a price (§Q.17.0).
-7. **Charts** per §Q.11 (A continuous; B diagnostics-only with unit-change band; C step + latent band; D three-object $/BTX bracket `P_prod` ≤ market ≤ `P_btc` — no crossover annotation). Relabel v3-era "MatMul/sec" → "nonce attempts/s" (literal only at v4).
-8. **Messaging guardrail (verbatim-usable):** *"The v4 fork changes the unit of work, not the security of the chain. BTX security (% of Bitcoin) is continuous through the fork — same hardware, same attack cost, no jump. What steps up ~30× is useful AI output per unit hardware: v3 spent ~97% of the fleet's latent tensor capability on SHA gates and ALU emulation; v4 turns it on. The new TOPS/H100-eq charts show an efficiency/utilization reveal — not new hardware, and not a security increase."* Never present the AI-compute step as a security gain; never show the raw nonce cliff without the unit-change band.
-9. **Dry-run** on regtest (`nMatMulV4Height=100`; use a synthetic Ω to exercise items 2–4) before mainnet `h_f`.
+7. **Add the per-GPU switchover series (§Q.21).** Poll per-GPU AI-rental rates `R_g` quarterly with timestamps (datacenter: provider medians for H100/H200/B200; consumer: vast.ai/RunPod marketplace medians for RTX 5090/4090/3090, A100; Apple: none — use the power-only floor). Per GPU compute `BTX/hr_g = 800·T_g/TOPS_net`, break-even price `P*_g = R_g/(BTX/hr_g)` [$/BTX], break-even rental `R*_g = BTX/hr_g × P_spot` [$/hr]; render the §Q.21.2 table + chart E (§Q.21.4). Identity checks: `P*_H100 ≡ P_prod` (item 6); operative floor = `P*` of the marginal active class, not necessarily the H100's.
+8. **Charts** per §Q.11 (A continuous; B diagnostics-only with unit-change band; C step + latent band; D three-object $/BTX bracket `P_prod` ≤ market ≤ `P_btc` — no crossover annotation; E per-GPU switchover, §Q.21.4). Relabel v3-era "MatMul/sec" → "nonce attempts/s" (literal only at v4).
+9. **Messaging guardrail (verbatim-usable):** *"The v4 fork changes the unit of work, not the security of the chain. BTX security (% of Bitcoin) is continuous through the fork — same hardware, same attack cost, no jump. What steps up ~30× is useful AI output per unit hardware: v3 spent ~97% of the fleet's latent tensor capability on SHA gates and ALU emulation; v4 turns it on. The new TOPS/H100-eq charts show an efficiency/utilization reveal — not new hardware, and not a security increase."* Never present the AI-compute step as a security gain; never show the raw nonce cliff without the unit-change band.
+10. **Dry-run** on regtest (`nMatMulV4Height=100`; use a synthetic Ω to exercise items 2–4) before mainnet `h_f`.
 
 ---
 
@@ -1527,7 +1534,7 @@ Sources: [AI Pricing Guru](https://www.aipricing.guru/meta-llama-pricing/), [pri
 
 **Why the pre-fork floor is near-zero — this IS the dumping diagnosis (a feature of the analysis, not a bug).** Under v3, `P_prod` ≈ $0 because a high emission (800 BTX/hr) is produced by cheap, paid-off junk hardware at ~electricity-only cost (§S.4.1): mining a coin costs almost nothing, so **dumping at any price is profitable**, and the market price sits far below the ~$984 security-comparable. **v4's entire economic thesis (§S.4.3/§S.4.5) is to RAISE this floor:** real INT8 hardware carries a real AI-rental opportunity cost, lifting `P_prod` from ~$0 toward a meaningful $/BTX, narrowing the `P_prod → P_btc` gap and ending cheap dumping. **The floor rising over time is the fix**, not a contradiction; the wide `P_btc / P_prod` spread is precisely the disequilibrium v4 is designed to compress from below.
 
-**N_eq is set by mining profitability — both anchors scale ∝ N_eq, so the ratio is ~constant and there is no crossover.** Miners enter until `P_prod ≈ market price` (below it they redeploy to AI rental, §S.4.3; ASERT difficulty clears the market), so `N_eq` is endogenous, not a free axis to slide to a "crossover." And *both* anchors scale linearly with network size: `P_btc = P_BTC·w_v4·R_nonce/H_BTC` with `R_nonce ∝ N_eq` (7.26×10⁴ nonces/s per H100-eq, §Q.3), and `P_prod = N_eq·r/800`. `N_eq` cancels from the ratio:
+**N_eq is set by mining profitability — both anchors scale ∝ N_eq, so the ratio is ~constant and there is no crossover.** Miners enter until `P_prod ≈ market price` (below it they redeploy to AI rental, §S.4.3; ASERT difficulty clears the market) — the per-GPU mechanism behind this equilibrium, *which* GPU class enters at *which* `P_BTX` and why the marginal class's break-even pins the floor, is §Q.21.4 — so `N_eq` is endogenous, not a free axis to slide to a "crossover." And *both* anchors scale linearly with network size: `P_btc = P_BTC·w_v4·R_nonce/H_BTC` with `R_nonce ∝ N_eq` (7.26×10⁴ nonces/s per H100-eq, §Q.3), and `P_prod = N_eq·r/800`. `N_eq` cancels from the ratio:
 
 ```
 P_btc / P_prod = [P_BTC · w_v4 · ν / H_BTC] / [r / 800]        ν = 7.26×10⁴ nonce/s per H100-eq
@@ -1563,6 +1570,14 @@ u        = 0.5 (band 0.25–1.0)
 P_btc      = P_BTC × w_v4 × R_nonce_1w / H_BTC             # $/BTX — security-comparable valuation
 P_prod     = N_eq × r_rental / MINT                        # $/BTX — cost-of-production floor ≡ §S.4.3
 P_prod_inf = TOPS_net × r_tok × 3600 × p_tok × u / MINT    # $/BTX — inference-basis cross-check
+
+# Per-GPU switchover (§Q.21) — T_g = delivered dTOPS (0.65 × dense, §P.1); R_g = polled rental $/hr
+#   (H100 2.50 · H200 3.95 · B200 5.89 · GB200 ~12 · A100 0.73 · 5090 0.55 · 4090 0.35 ·
+#    5080 0.20 · 3090 0.15 · Apple —; refresh quarterly with timestamps, §Q.21.2 sources)
+BTXhr_g    = 800 × T_g / TOPS_net                          # BTX/hr GPU g mines (share basis, §O.2)
+P_star_g   = R_g / BTXhr_g                                 # $/BTX — g's mine-vs-rent break-even price
+R_star_g   = BTXhr_g × P_spot                              # $/hr  — rent below this ⇒ mine (per GPU)
+             # identities: P_star(H100) ≡ P_prod ; operative floor = P_star(marginal active class)
 present    : THREE-OBJECT BRACKET on one $/BTX chart, never max()-ed:
              P_prod (supply-side cost floor) <= observed market price <= P_btc (demand-side
              relative-comparable, aspirational, NOT a floor). P_prod is a COST, not a valuation.
@@ -1580,6 +1595,109 @@ V_ai       = TOPS_net × c_rental                           # $/yr FLOW — foot
 ```
 
 **Sources:** [Fortune BTC 07-14-2026](https://fortune.com/article/price-of-bitcoin-07-14-2026/) · [CoinWarz hashrate](https://www.coinwarz.com/bitcoin-hashrate) · [news.bitcoin.com difficulty reset](https://news.bitcoin.com/bitcoins-14th-difficulty-reset-slashes-mining-pressure-by-6-7-trillion/) · [TensorRT-LLM perf](https://nvidia.github.io/TensorRT-LLM/performance/perf-overview.html) · [NVIDIA MLPerf v4.1](https://developer.nvidia.com/blog/nvidia-blackwell-platform-sets-new-llm-inference-records-in-mlperf-inference-v4-1/) · [MLCommons Llama-2-70B](https://mlcommons.org/2024/03/mlperf-llama2-70b/) · [H100 datasheet](https://resources.nvidia.com/en-us-gpu/h100-datasheet-24306) · [AI Pricing Guru](https://www.aipricing.guru/meta-llama-pricing/) · [pricepertoken DeepInfra/Together](https://pricepertoken.com/endpoints/compare/deepinfra-vs-together) · [pricepertoken Fireworks/Together](https://pricepertoken.com/endpoints/compare/fireworks-vs-together) · [Groq](https://groq.com/pricing) · [Together](https://www.together.ai/pricing) · [IntuitionLabs H100 rental](https://intuitionlabs.ai/articles/h100-rental-prices-cloud-comparison) · [btxprice.com/valuation-model](https://btxprice.com/valuation-model)
+
+---
+
+### Q.21 Mining-vs-AI-rental switchover: the per-GPU break-even metric
+
+> **Status:** informative; the per-GPU microfoundation of the §Q.6/§S.4.3 production floor and the §Q.20 bracket. Cross-refs: hardware table §P.1 (dense INT8 TOPS govern), efficiency ε §Q.3/§Q.6, emission 800 BTX/hr §S.4.3, ASERT §I.4. Everything here is downstream of one chain observable (`getnetworkhashps` → `TOPS_net`) plus polled AI-rental rates. Dimensional discipline per §Q.17.0 throughout: mining revenue and rental are **$/hr flows**; the break-even *price* `P*_g` is a **$/BTX stock** obtained by dividing a $/hr flow by a BTX/hr flow — never by the coin stock `S`.
+
+#### Q.21.1 The model — one decision, per GPU
+
+A rational owner of GPU `g` faces one hourly choice: point it at BTX, or rent it to the AI market.
+
+```
+mine BTX  ⟺  (BTX/hr)_g × P_BTX  ≥  R_g            [$/hr vs $/hr]
+
+(BTX/hr)_g = 800 × T_g / TOPS_net                    [BTX/hr]   (proportional-reward share, §O.2)
+P*_g  = R_g / (BTX/hr)_g = R_g × TOPS_net/(800·T_g)  [$/BTX]    break-even BTX price
+R*_g  = (BTX/hr)_g × P_BTX                           [$/hr]     break-even rental rate
+```
+
+`T_g` = GPU `g`'s **delivered** INT8 throughput (dense §P.1 × ε≈0.65, §Q.3); `TOPS_net` = network delivered throughput (§Q.6); `800 BTX/hr` = 20 BTX × 40 blocks/hr (§S.4.3); `R_g` = the AI-rental rate `g` can actually fetch, $/hr. Above `P*_g` the GPU mines; below it, it rents. Equivalently: **if the AI market won't pay more than `R*_g` for your card, mine BTX with it** — the owner's "X ¢/hr" threshold, but per card, not one number. (Nonce-rate form, for pool telemetry: `g` clears `7.26×10⁴ × T_g^dense/1,979` nonces/s, §M.4/§Q.3 sketch basis — BTX/hr is the same share either way.)
+
+**Electricity.** Both activities run the card at load, and in both the owner pays for power (marketplace hosts pay their own electricity), so the power cost `c_g = TDP_g × p_elec` largely **cancels** from the mine-vs-rent comparison; it survives as the **absolute-viability floor** `P⁰_g = c_g/(BTX/hr)_g` — the only binding threshold where no rental market exists (Apple).
+
+**Unification with §Q.6.** `P_prod = N_eq·r/800` is this model evaluated at the H100: `P*_H100 = r × TOPS_net/(800 × 1,286) = (TOPS_net/1,286)·r/800 ≡ N_eq·r/800 = P_prod`. The aggregate floor is the **marginal miner's** per-GPU break-even; §Q.21.4 gives the equilibrium.
+
+#### Q.21.2 The per-GPU switchover table
+
+**Reference scenario (state both knobs):** network `TOPS_net = 128,600 dTOPS` (= 100 H100-eq, the §Q.6 illustrative launch network) and reference price `P_BTX = $0.20`. Power at **$0.08/kWh** (US industrial average ≈8.5–9¢/kWh, 2026: [EIA](https://www.eia.gov/electricity/monthly/epm_table_grapher.php?t=epmt_5_6_a); sensitivity band $0.05–0.10). Rental rates are mid-2026 on-demand centrals; sources below the table.
+
+| GPU | dense TOPS (§P.1) | delivered T_g (×0.65) | BTX/hr | mine rev $/hr (= R\*_g @ $0.20) | AI-rental R_g $/hr | rental $/POPS·hr | TDP → power $/hr | net mine $/hr | **P\*_g $/BTX** | verdict @ $0.20 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| GB200 (per GPU) | 5,000 | 3,250 | 20.22 | $4.04 | ~$12 (early) | $3.69 | ~1,200 W → $0.096 | $3.95 | **$0.59** | **rent** |
+| H200 | 1,979 | 1,286 | 8.00 | $1.60 | $3.95 | $3.07 | 700 W → $0.056 | $1.54 | **$0.49** | **rent** |
+| B200 | 4,500 | 2,925 | 18.20 | $3.64 | $5.89 | $2.01 | 1,000 W → $0.080 | $3.56 | **$0.32** | **rent** |
+| H100 SXM | 1,979 | 1,286 | 8.00 | $1.60 | $2.50 | $1.94 | 700 W → $0.056 | $1.54 | **$0.31** (≡ P_prod) | **rent** |
+| A100 80GB | 624 | 406 | 2.52 | $0.50 | $0.73 | $1.80 | 400 W → $0.032 | $0.47 | **$0.29** | **rent** |
+| RTX 5090 | 838 | 545 | 3.39 | $0.68 | $0.55 | $1.01 | 575 W → $0.046 | $0.63 | **$0.16** | **mine** |
+| RTX 4090 | 660.6 | 429 | 2.67 | $0.53 | $0.35 | $0.82 | 450 W → $0.036 | $0.50 | **$0.13** | **mine** |
+| RTX 3090 | 284.7 | 185 | 1.15 | $0.23 | $0.15 | $0.81 | 350 W → $0.028 | $0.20 | **$0.13** | **mine** |
+| RTX 3090 Ti | 320 | 208 | 1.29 | $0.26 | ~$0.15 (thin) | ~$0.72 | 450 W → $0.036 | $0.22 | **~$0.12** | **mine** |
+| RTX 5080 | 450.2 | 293 | 1.82 | $0.36 | $0.20 | $0.68 | 360 W → $0.029 | $0.34 | **$0.11** | **mine** |
+| Apple M5 Max | ~130 | ~84.5 | 0.53 | $0.105 | ≈ none (no market) | ≈ $0 | ~40 W (est.) → $0.003 | $0.10 | **~$0.006** (P⁰, power-only) | **mine** |
+| Apple M5 | ~30 | ~19.5 | 0.12 | $0.024 | ≈ none | ≈ $0 | ~20 W (est.) → $0.002 | $0.02 | **~$0.013** (P⁰) | **mine** |
+
+Worked rows (all others identical in form):
+
+- **H100:** `T = 0.65×1,979 = 1,286 dTOPS` → `BTX/hr = 800×1,286/128,600 = 8.00` → mine revenue `8.00 × $0.20 = $1.60/hr` < rental `$2.50/hr` → **rent**. `P* = $2.50/8.00 = $0.3125` — exactly the §Q.6 `P_prod` at this network size ✓. `R* = 8.00×P_BTX`: at `P_BTX = $0.31` an H100's mining revenue matches its $2.50 rental.
+- **RTX 5090:** `T = 0.65×838 = 544.7` → `BTX/hr = 800×544.7/128,600 = 3.39` → `3.39 × $0.20 = $0.68/hr` > rental `$0.55/hr` → **mine**. `P* = $0.55/3.39 = $0.16`; `R* = $0.68/hr` — *if your 5090 can't fetch more than 68¢/hr on the marketplace, mining BTX at $0.20 pays better.*
+- **RTX 3090:** `BTX/hr = 800×185.1/128,600 = 1.15` → `$0.23/hr` vs rental `$0.15/hr` → **mine**; `P* = $0.15/1.15 = $0.13`. Power check: `$0.23 − $0.028 = $0.20/hr` net — thin in absolute terms, but the card's alternative is a thinner $0.15.
+
+**Rental-rate sources (mid-2026, on-demand):** H100 $2.50 central, $2–3 band (§Q.6: [IntuitionLabs](https://intuitionlabs.ai/articles/h100-rental-prices-cloud-comparison), [getdeploying](https://getdeploying.com/gpus/nvidia-h100), [Thunder Compute](https://www.thundercompute.com/blog/nvidia-h100-pricing)); H200 median ≈$3.95, specialists $3.72–4.39, hyperscalers to ~$10.9 ([getdeploying H200](https://getdeploying.com/gpus/nvidia-h200), [RunPod](https://www.runpod.io/pricing) $4.39, [Vast.ai](https://vast.ai/pricing/gpu/H200) $3.75); B200 $5.89 ([RunPod](https://www.runpod.io/pricing); [Lambda](https://lambda.ai/pricing) $4.99, Spheron from $3.70, AWS p6 to $14.24 — [getdeploying B200](https://getdeploying.com/gpus/nvidia-b200), [Spheron](https://www.spheron.network/blog/nvidia-b200-cloud-pricing-2026/)); GB200 ~$10.5–27/GPU-hr, early/illiquid, ~$12 central ([getdeploying GB200](https://getdeploying.com/gpus/nvidia-gb200)); A100 80GB marketplace $0.68–0.73 ([Vast.ai A100](https://vast.ai/pricing/gpu/A100-SXM4)), managed $1.39–1.49 ([RunPod](https://www.runpod.io/pricing)) — miner-relevant central $0.73; RTX 5090 marketplace from $0.40 ([Vast.ai 5090](https://vast.ai/pricing/gpu/RTX-5090)), on-demand average $0.58, full range $0.13–1.05 ([getdeploying 5090](https://getdeploying.com/gpus/nvidia-rtx-5090), [RunPod](https://www.runpod.io/pricing) secure $0.99) — central $0.55; RTX 4090 from $0.15 marketplace ([Vast.ai](https://vast.ai/pricing)) to $0.69 managed ([RunPod 4090](https://www.runpod.io/gpu-models/rtx-4090)) — central $0.35; RTX 5080 from $0.13–0.17, median ≈$0.23 ([Vast.ai 5080](https://vast.ai/pricing/gpu/RTX-5080), [gpus.io](https://gpus.io/en/gpus/rtx5080)) — central $0.20; RTX 3090 from $0.13 ([Vast.ai 3090](https://vast.ai/pricing/gpu/RTX-3090)) — central $0.15; 3090 Ti: no quoted tier, proxied at 3090 (thin market flag). **TDPs:** H100 SXM 700 W ([datasheet](https://resources.nvidia.com/en-us-gpu-resources/h100-datasheet-24306)); H200 700 W ([NVIDIA](https://www.nvidia.com/en-us/data-center/h200/)); B200 1,000 W ([B200 datasheet](https://www.primeline-solutions.com/media/categories/server/nach-gpu/nvidia-hgx-h200/nvidia-blackwell-b200-datasheet.pdf)); GB200 ~1,200 W/GPU in NVL72 (est., [NVIDIA GB200 NVL72](https://www.nvidia.com/en-us/data-center/gb200-nvl72/)); A100 SXM 400 W ([datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-nvidia-us-2188504-web.pdf)); RTX 5090 575 W / 5080 360 W ([NVIDIA 50-series](https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5090/)); RTX 4090 450 W ([NVIDIA](https://www.nvidia.com/en-us/geforce/graphics-cards/40-series/rtx-4090/)); RTX 3090 350 W / 3090 Ti 450 W ([NVIDIA](https://www.nvidia.com/en-us/geforce/graphics-cards/30-series/rtx-3090-3090ti/)); Apple M5/M5 Max: no published TDP — ~20/~40 W package under sustained GPU load (est.).
+
+**Sensitivity (exact scaling laws — no re-derivation needed):** `P*_g ∝ TOPS_net` (double the network → every break-even price doubles: at 200 H100-eq, H100 `P*` = $0.625, 5090 `P*` = $0.32) and `P*_g ∝ R_g` (rental reprices → `P*` moves 1:1: H100 at spot $0.34/hr → `P*` = $0.04). `R*_g ∝ P_BTX × T_g / TOPS_net`. Verdicts flip, the formulas don't.
+
+#### Q.21.3 The $/TOPS insight: who *chooses* to mine ≠ who *wins* per card
+
+Divide each rental rate by delivered throughput — the **opportunity cost per unit of mining power** ($ per delivered POPS-hour, i.e. per 10³ dTOPS·hr). Since `P*_g = (R_g/T_g) × TOPS_net/800`, **the mine-entry order is exactly the ascending $/TOPS order** — the ratio, not the card's size, decides who mines:
+
+| rank (mines first) | GPU | rental $/POPS·hr | P\*_g @ 100 H100-eq |
+|---|---|---:|---:|
+| 0 | Apple M5 / M5 Max | ≈ $0 (no rental market) | ~$0.006–0.013 (power-only) |
+| 1 | RTX 5080 | $0.68 | $0.11 |
+| 2 | RTX 3090 Ti | ~$0.72 | ~$0.12 |
+| 3 | RTX 3090 | $0.81 | $0.13 |
+| 4 | RTX 4090 | $0.82 | $0.13 |
+| 5 | RTX 5090 | $1.01 | $0.16 |
+| 6 | A100 80GB | $1.80 | $0.29 |
+| 7 | H100 | $1.94 | $0.31 |
+| 8 | B200 | $2.01 | $0.32 |
+| 9 | H200 | $3.07 | $0.49 |
+| 10 | GB200 | $3.69 | $0.59 |
+
+The structure is stark: **consumer/gaming silicon sells its TOPS at $0.68–1.01/POPS·hr; datacenter silicon at $1.80–3.69 — a 1.8–5.4× premium** (the AI market pays for VRAM, NVLink, interconnect, SLAs, datacenter siting — none of which the §A matmul uses), and Apple's TOPS have essentially **no rental bid at all**. So the cards most inclined to mine BTX at any given price are precisely the **low-$/TOPS consumer cards with thin AI-rental demand** — and Apple M5s, whose opportunity cost is a rounding error above electricity.
+
+**Reconciliation with §K/§P (honest form).** §K/§P answer *"who wins a block / most throughput per card"* — datacenter, unambiguously (H100 = 2.4× a 5090, B200 = 5.4×; §P.1). §Q.21 answers *"who chooses to mine at a given price"* — and there the ranking **inverts**, because the H100 mines 2.4× more BTX/hr than a 5090 but forgoes 4.5× the rental ($2.50 vs $0.55). This does partially tension the "datacenter always wins" narrative, and the resolution is a conditional, not a contradiction: **datacenter wins per card whenever it shows up; opportunity cost decides whether it shows up.** At low `P_BTX` the network is consumer-INT8-dominated (plus Apple) at a correspondingly low production floor; as `P_BTX` rises past ~$0.29–0.32 (at 100-H100-eq scale) A100/H100/B200 capacity rationally enters, and because datacenter capacity is *deep* (§K), once it enters it dominates `TOPS_net`, per-card block share, and the floor. §K's lever is about **capability and scale**; §Q.21 prices **the switch that turns it on**. Corollary for §Q.6: the H100-denominated `P_prod` **overstates the floor whenever the marginal miner is consumer silicon** — with a 5090-class margin the effective floor is `1.01/1.94 ≈ 52%` of the H100 figure (≈42% on a 3090/4090 margin). State the operative floor as `P*` of the marginal *active* class.
+
+#### Q.21.4 The switchover curve and the entry equilibrium
+
+As `P_BTX` rises, GPU classes cross from rent→mine in ascending-`P*` order: Apple (≈$0.01) → 5080/3090/3090 Ti (≈$0.11–0.13) → 4090 ($0.13) → 5090 ($0.16) → A100 ($0.29) → H100 ($0.31) → B200 ($0.32) → H200 ($0.49) → GB200 ($0.59) *(at the 100-H100-eq reference; all thresholds slide ∝ `TOPS_net`)*. But entry is self-damping: each entrant raises `TOPS_net`, which raises **every** `P*` proportionally (difficulty via ASERT, §I.4). Capacity therefore fills in ascending $/TOPS order until the **marginal** class is indifferent:
+
+```
+Equilibrium:  P*_marginal = P_BTX   ⟺   R*_marginal = R_marginal
+              TOPS_net* = 800 × P_BTX / (R/T)_marginal        [(R/T) in $/dTOPS·hr]
+```
+
+and at that margin the §Q.6 floor coincides with the market price — `P_prod`-generalized-to-the-marginal-class **is** the marginal-miner equilibrium of this switchover (one mechanism, two views; do not compute them separately). Cheaper-$/TOPS classes below the margin mine at an inframarginal profit; pricier classes stay in the AI market.
+
+**Worked equilibria:**
+
+- **`P_BTX = $0.20`:** consumer-marginal (5090 class, $1.01×10⁻³/dTOPS·hr): `TOPS_net* = 800×0.20/1.01×10⁻³ = 158,000 dTOPS ≈ 123 H100-eq` — but composed of **consumer silicon** (~290 5090s, or a larger mixed fleet). Check the datacenter stays out: H100 `P*` at 158 POPS = `1.94×10⁻³ × 158,000/800 = $0.38 > $0.20` ✓ rents. 5080/3090/4090 mine at inframarginal margins; effective floor = $0.20 (consumer-denominated), ~52% of what the H100-denominated `P_prod` formula would print.
+- **`P_BTX = $0.50`:** H100 class is in the money at 158 POPS (`P*` = $0.38 < $0.50) → datacenter capacity enters until `TOPS_net* = 800×0.50/1.94×10⁻³ = 206,000 dTOPS = 160 H100-eq`. Check indifference: H100 earns `800×1,286/206,000 = 5.0 BTX/hr × $0.50 = $2.50/hr` = its rental ✓ (marginal). The 5090 now earns `800×545/206,000 × $0.50 = $1.06/hr` vs $0.55 rental — deep inframarginal, stays. H200 (`P*` = `3.07×10⁻³×206,000/800 = $0.79`) keeps renting. Floor = `P_prod` = `160×$2.50/800 = $0.50` = price ✓ — the §Q.6/§S.4.3 identity at the margin.
+
+So the equilibrium narrative in one line: **low price → small consumer-Apple network at a low floor; rising price → datacenter switchover thresholds cleared in $/TOPS order → `TOPS_net`, per-card dominance (§K), and the floor all climb together, marginal class pinned at indifference.** (Downside is symmetric and soft: price below the margin → exit → `TOPS_net` falls → all `P*` fall until the remaining marginal miner is again indifferent — the §S.4.3 "self-enforcing through difficulty" dynamic; in the limit the last capacity standing is the ≈zero-opportunity-cost class, Apple/idle consumer, at the electricity-only floor `P⁰`.)
+
+**Chart (E) — "Per-GPU switchover: mine vs rent" (btxprice; extends the §Q.11 set).** Log-log. **X-axis `P_BTX` [$/BTX]; Y-axis $/hr** — one dimension per axis, never mixed (§Q.17.0). Per GPU class, two curves: a **horizontal line at its AI-rental rate `R_g`** and a **slope-1 mining-revenue line `(BTX/hr)_g × P_BTX`** computed at live `TOPS_net`. Their intersection projects down to `P*_g` on the x-axis; **below the intersection the class rents (region unshaded), above it mines (shade the region, filling in class by class as price rises)** — the shaded frontier *is* the switchover curve. Overlay a vertical line at spot `P_BTX` and a marker on the marginal class. Companion table (dashboard): the §Q.21.2 columns with live `P*_g`/`R*_g`, refreshed with rental polls; annotate that all mining-revenue lines shift down in lockstep as `TOPS_net` grows (crossings slide right, ∝ `TOPS_net`). The break-even *prices* may additionally be shown on the §Q.11-D $/BTX chart as tick marks under `P_prod` (same dimension); the $/hr curves may not.
+
+#### Q.21.5 Guardrails (honest use)
+
+1. **Opportunity-cost economics, not a price prediction.** `P*_g`/`R*_g` describe rational capacity allocation at quoted rental rates; they say nothing about where `P_BTX` will trade. Demand lives in §Q.18/§Q.20's other bracket arm.
+2. **Rental markets are illiquid at the edges.** Apple M5-class has essentially no rental market (opportunity cost ≈ residual/electricity → the `P⁰` floor is the honest threshold, and "mine" is near-costless default, not arbitrage); 3090 Ti is proxied; GB200 quotes are early-adopter and wide ($10.5–27). Treat those `P*` as soft bounds.
+3. **List price ≠ take-home.** Marketplace list rates (vast.ai et al.) exceed host take-home (platform fees, idle time, egress/support burden), so consumer `R_g` here are *upper* bounds on true opportunity cost and the consumer `P*_g` are conservative (true switchover slightly lower / mining slightly more attractive than shown). Datacenter on-demand rates similarly embed provider margin over an owner-operator's realizable rate.
+4. **Everything moves.** `P*_g ∝ TOPS_net × R_g`: difficulty growth raises thresholds mechanically; rental repricing (H100 rates fell ~2× during 2024–26) lowers them. Timestamp every rental poll; never quote a `P*` without its `(TOPS_net, R_g)` snapshot.
+5. **Per-GPU, share-based.** The model assumes §O.2 proportional pooled rewards (BTX/hr = expected share). Solo-mining variance, pool fees, and vardiff overhead sit on top and only *raise* effective break-evens.
 
 ---
 
@@ -1717,7 +1835,7 @@ A fleet at ~parity per card under v3 drops to **1/9–1/360 of a modern accelera
 Floor($/BTX) ≈ N_eq · r / 800
 ```
 
-*(This floor is identical — same formula, same $/BTX dimension — to the btxprice production-cost anchor `P_prod` of §Q.6/§Q.17–§Q.20.)*
+*(This floor is identical — same formula, same $/BTX dimension — to the btxprice production-cost anchor `P_prod` of §Q.6/§Q.17–§Q.20; its per-GPU decomposition — the mine-vs-AI-rental break-even by device class, whose marginal-miner equilibrium this floor is — is §Q.21.)*
 
 | `N_eq` | r=$0.34 (spot) | r=$2.50 | r=$3.61 (avg) |
 |---|---|---|---|
