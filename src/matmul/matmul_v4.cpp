@@ -12,6 +12,7 @@
 #include <span.h>
 #include <uint256.h>
 
+#include <algorithm>
 #include <cstdint>
 
 namespace matmul::v4 {
@@ -67,13 +68,41 @@ uint256 DeriveSigma(const CBlockHeader& header)
     return matmul::DeriveSigma(header);
 }
 
+uint256 ComputeTemplateHash(const CBlockHeader& header)
+{
+    // §A.2 v4.1: the template projection zeroes EVERY nonce-dependent header
+    // field before hashing. nNonce64/nNonce are the nonce itself; seed_a and
+    // seed_b are nonce-DERIVED under the §H.4 rule (their preimage includes
+    // nNonce64), so leaving them in would make the "template" hash vary per
+    // nonce and silently defeat the whole §K.2b amortization. They are safe
+    // to drop here: consensus pins header.seed_a/seed_b to their §H.4
+    // derivation independently, and sigma / seed_B still bind them in full.
+    // Remaining bound fields: nVersion, hashPrevBlock, hashMerkleRoot, nTime,
+    // nBits, matmul_dim — so the template hash exists only once the parent
+    // block and the concrete template exist (no pre-mining).
+    CBlockHeader template_header{header};
+    template_header.nNonce64 = 0;
+    template_header.nNonce = 0;
+    template_header.seed_a.SetNull();
+    template_header.seed_b.SetNull();
+    return matmul::ComputeMatMulHeaderHash(template_header);
+}
+
 uint256 DeriveOperandSeed(const CBlockHeader& header, Operand which)
 {
-    // Bind every header field via the canonical v3 header hash, then
-    // domain-separate by operand byte 'A'/'B' (§A.2). Because the header hash
-    // folds nNonce64 and hashPrevBlock, operands are nonce-fresh and cannot be
-    // precomputed before the parent block exists (invariant I1).
-    const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
+    // Bind the header via the canonical v3 header hash, then domain-separate
+    // by operand byte 'A'/'B' (§A.2, v4.1 revision — see matmul_v4.h):
+    //
+    //   B: full header hash (nNonce64 + §H.4 seeds included) — nonce-fresh.
+    //      The per-nonce marginal work (expand B, B*V, combine, digest) hangs
+    //      off this seed and is what difficulty prices (invariant I1').
+    //   A: TEMPLATE hash (ComputeTemplateHash) — constant across the nonce
+    //      sweep, so a miner expands A (and computes P = U*A) once per
+    //      template (§K.2b batched-sketch profile). Still parent/template-
+    //      bound: nothing is precomputable before the template exists.
+    const uint256 header_hash = (which == Operand::A)
+        ? ComputeTemplateHash(header)
+        : matmul::ComputeMatMulHeaderHash(header);
 
     CSHA256 hasher;
     hasher.Write(reinterpret_cast<const unsigned char*>(kSeedTag), sizeof(kSeedTag) - 1);
@@ -86,12 +115,20 @@ uint256 DeriveOperandSeed(const CBlockHeader& header, Operand which)
     return uint256{Span<const unsigned char>{out, sizeof(out)}};
 }
 
-std::pair<uint256, uint256> DeriveProjectorSeeds(const uint256& sigma)
+std::pair<uint256, uint256> DeriveProjectorSeeds(const CBlockHeader& header)
 {
-    auto derive = [&sigma](const char* tag, size_t taglen) {
+    // §A.2 v4.1 (invariant I1', supersedes v4.0's I7): U and V are TEMPLATE-
+    // scoped — derived from the template hash, not from sigma — so P = U*A is
+    // computable once per template and the per-nonce combines batch into one
+    // dense GEMM (§K.2b). The Fiat-Shamir Freivalds challenges stay nonce-
+    // fresh (DeriveChallengeSeed binds sigma and the payload), so verifier
+    // soundness is unchanged. See spec §C I1' for the anti-amortization
+    // relaxation this entails and its needs-external-review status.
+    const uint256 template_hash = ComputeTemplateHash(header);
+    auto derive = [&template_hash](const char* tag, size_t taglen) {
         CSHA256 hasher;
         hasher.Write(reinterpret_cast<const unsigned char*>(tag), taglen);
-        hasher.Write(sigma.data(), uint256::size());
+        hasher.Write(template_hash.data(), uint256::size());
         uint8_t out[CSHA256::OUTPUT_SIZE];
         hasher.Finalize(out);
         return uint256{Span<const unsigned char>{out, sizeof(out)}};
@@ -186,23 +223,10 @@ std::vector<Fq> ComputeSketch(const std::vector<int8_t>& U,
     return Chat;
 }
 
-std::vector<Fq> ComputeSketchOptimal(const std::vector<int8_t>& U,
-                                     const std::vector<int8_t>& A,
-                                     const std::vector<int8_t>& B,
-                                     const std::vector<int8_t>& V,
-                                     uint32_t n, uint32_t m)
+std::vector<int32_t> ComputeProjectedLeft(const std::vector<int8_t>& U,
+                                          const std::vector<int8_t>& A,
+                                          uint32_t n, uint32_t m)
 {
-    // Optimal miner factoring Chat = (U*A)(B*V) (§E.3), computed WITHOUT ever
-    // forming the n x n product C. By integer-matrix associativity
-    //     (U*A)(B*V) == U*(A*B)*V == U*C*V
-    // as EXACT integer matrices, so this returns the byte-identical Chat to
-    // ComputeSketch(U, ComputeExactProduct(A,B), V): identical integers reduce
-    // to the identical UNIQUE canonical F_q residue in [0, q).
-    //
-    // Cost is ~2*n^2*m MACs (two rectangular GEMMs + an m x m combine) versus
-    // the Theta(n^3) full product; the projector stages are the same ones the
-    // GPU backends fold in (§E.3).
-
     // P = U * A, exact s8xs8->s32, m x n. Each entry P[a][k] = sum_i U[a][i]*A[i][k]
     // is a length-n balanced-s8 dot: |P[a][k]| <= n*125^2 < 2^30, exact in int32
     // (same accumulation bound as C, already validated by CheckAccumulationBound).
@@ -219,7 +243,13 @@ std::vector<Fq> ComputeSketchOptimal(const std::vector<int8_t>& U,
             }
         }
     }
+    return P;
+}
 
+std::vector<int32_t> ComputeProjectedRight(const std::vector<int8_t>& B,
+                                           const std::vector<int8_t>& V,
+                                           uint32_t n, uint32_t m)
+{
     // Q = B * V, exact s8xs8->s32, n x m. Each entry Q[k][c] = sum_j B[k][j]*V[j][c]
     // is a length-n balanced-s8 dot, same |.| < 2^30 bound as P.
     std::vector<int32_t> Q(static_cast<size_t>(n) * m, 0);
@@ -235,7 +265,24 @@ std::vector<Fq> ComputeSketchOptimal(const std::vector<int8_t>& U,
             }
         }
     }
+    return Q;
+}
 
+bool CheckCombineLimbBound(uint32_t n)
+{
+    // 4 balanced base-128 digits represent [-128^4/2, 128^4/2) = [-2^27, 2^27).
+    // Entries of P/Q are bounded by 15,625*n, so the decomposition is total
+    // iff 15,625*n < 2^27, i.e. n <= 8589 — covering the 4096..8192 window.
+    static_assert(kCombineLimbs == 4 && kCombineLimbBase == 128,
+                  "limb bound derivation assumes 4 balanced base-128 digits");
+    const int64_t half_range = (static_cast<int64_t>(1) << 27); // 128^4 / 2
+    return static_cast<int64_t>(n) * int8_field::kElementSqBound < half_range;
+}
+
+std::vector<Fq> ComputeCombineModQ(const std::vector<int32_t>& P,
+                                   const std::vector<int32_t>& Q,
+                                   uint32_t n, uint32_t m)
+{
     // Combine Chat[a][c] = (sum_k P[a][k]*Q[k][c]) mod q over F_q. P,Q entries are
     // exact int32 (|.| < 2^30); lift each to its canonical F_q image and MAC with
     // the same FqFromInt32/FqMul/FqAdd used by ComputeSketch, so the accumulated
@@ -256,6 +303,132 @@ std::vector<Fq> ComputeSketchOptimal(const std::vector<int8_t>& U,
         }
     }
     return Chat;
+}
+
+namespace {
+
+// Entrywise balanced base-2^7 digit decomposition (Appendix C-13):
+//   x = sum_i digits[i] * 128^i,  digits[i] in [-64, 63],
+// unique and deterministic for every |x| < 128^4/2 = 2^27 (checked by
+// CheckCombineLimbBound). Each digit plane is a valid s8 tensor operand.
+void DecomposeLimbPlanes(const std::vector<int32_t>& M, std::vector<int8_t>* planes)
+{
+    for (uint32_t l = 0; l < kCombineLimbs; ++l) {
+        planes[l].resize(M.size());
+    }
+    for (size_t idx = 0; idx < M.size(); ++idx) {
+        int32_t x = M[idx];
+        for (uint32_t l = 0; l < kCombineLimbs; ++l) {
+            // Balanced digit in [-64, 63]: d = ((x + 64) mod 128) - 64.
+            const int32_t d = ((x + 64) & (kCombineLimbBase - 1)) - 64;
+            planes[l][idx] = static_cast<int8_t>(d);
+            x = (x - d) / kCombineLimbBase; // exact: (x - d) is a multiple of 128
+        }
+        // The decomposition is total under CheckCombineLimbBound; x must be 0.
+        // (Not asserted in the hot loop; pinned by the unit tests.)
+    }
+}
+
+} // namespace
+
+std::vector<Fq> ComputeCombineLimbTensorStacked(const std::vector<int32_t>& P,
+                                                const std::vector<int32_t>& Qstack,
+                                                uint32_t n, uint32_t m,
+                                                uint32_t q_cols)
+{
+    // Tensor-shaped combine (Appendix C-13), stacked across a nonce window
+    // (§K.2b): 16 limb-pair m*q_cols*n products with exact s8xs8->s32
+    // accumulation, then a single O(m*q_cols) shifted mod-q recombine. With
+    // q_cols = Q*m this is the batched miner's ONE LARGE DENSE GEMM
+    // P * [B_1*V | ... | B_Q*V]; with q_cols = m it is the single-nonce
+    // consensus combine. Every limb-pair accumulator is exact: |sum_k d_i*d_j|
+    // <= n*64*64 = n*2^12 < 2^31 for every header n <= 65,535 (§B.4 analogue).
+    //
+    // BYTE-EXACT equivalence to ComputeCombineModQ, per column block: as exact
+    // integers,
+    //   sum_k P[a][k]*Qstack[k][c] = sum_ij 128^(i+j) * S_ij[a][c],
+    // so reducing each S_ij termwise with the canonical 128^(i+j) mod q weight
+    // yields the same canonical residue; and each output entry depends only on
+    // its own P row and Qstack column, so stacking columns changes no byte.
+    // This function is the CPU consensus reference for the GPU backends'
+    // tensor-core combine; on device the 16 limb-pair GEMMs are native
+    // s8xs8->s32 IMMA/MFMA/TensorOps calls (the dominant, dense m x Q*m x n
+    // shapes of the v4.1 batched profile, §K.2b).
+    std::vector<int8_t> p_planes[kCombineLimbs];
+    std::vector<int8_t> q_planes[kCombineLimbs];
+    DecomposeLimbPlanes(P, p_planes);
+    DecomposeLimbPlanes(Qstack, q_planes);
+
+    // Precompute the canonical weights w_ij = 128^(i+j) mod q. All exponents
+    // 7*(i+j) <= 42 < 61, so the weight is just the small power of two itself.
+    Fq weight[kCombineLimbs][kCombineLimbs];
+    for (uint32_t i = 0; i < kCombineLimbs; ++i) {
+        for (uint32_t j = 0; j < kCombineLimbs; ++j) {
+            weight[i][j] = static_cast<Fq>(1) << (7 * (i + j));
+        }
+    }
+
+    const size_t out_size = static_cast<size_t>(m) * q_cols;
+    std::vector<Fq> Chat(out_size, 0);
+    std::vector<int32_t> S(out_size); // one limb-pair product at a time
+    for (uint32_t i = 0; i < kCombineLimbs; ++i) {
+        const std::vector<int8_t>& Pi = p_planes[i]; // m x n s8
+        for (uint32_t j = 0; j < kCombineLimbs; ++j) {
+            const std::vector<int8_t>& Qj = q_planes[j]; // n x q_cols s8
+            // S = Pi * Qj, exact s8xs8->s32 (the tensor GEMM on device).
+            std::fill(S.begin(), S.end(), 0);
+            for (uint32_t a = 0; a < m; ++a) {
+                const int8_t* p_row = &Pi[static_cast<size_t>(a) * n];
+                int32_t* s_row = &S[static_cast<size_t>(a) * q_cols];
+                for (uint32_t k = 0; k < n; ++k) {
+                    const int32_t p_ak = p_row[k];
+                    if (p_ak == 0) continue; // deterministic skip of zero MACs
+                    const int8_t* q_row = &Qj[static_cast<size_t>(k) * q_cols];
+                    for (uint32_t c = 0; c < q_cols; ++c) {
+                        s_row[c] += p_ak * static_cast<int32_t>(q_row[c]);
+                    }
+                }
+            }
+            // O(m*q_cols) shifted mod-q recombine (integer ALU on device).
+            const Fq w = weight[i][j];
+            for (size_t idx = 0; idx < out_size; ++idx) {
+                Chat[idx] = int8_field::FqAdd(
+                    Chat[idx], int8_field::FqMul(w, int8_field::FqFromSigned(S[idx])));
+            }
+        }
+    }
+    return Chat;
+}
+
+std::vector<Fq> ComputeCombineLimbTensor(const std::vector<int32_t>& P,
+                                         const std::vector<int32_t>& Q,
+                                         uint32_t n, uint32_t m)
+{
+    // Single-nonce consensus combine: the q_cols = m instance of the stacked
+    // path above (Appendix C-13). Kept as its own entry point because it is
+    // the byte-exact CPU reference the unit tests pin against ComputeCombineModQ.
+    return ComputeCombineLimbTensorStacked(P, Q, n, m, m);
+}
+
+std::vector<Fq> ComputeSketchOptimal(const std::vector<int8_t>& U,
+                                     const std::vector<int8_t>& A,
+                                     const std::vector<int8_t>& B,
+                                     const std::vector<int8_t>& V,
+                                     uint32_t n, uint32_t m)
+{
+    // Optimal miner factoring Chat = (U*A)(B*V) (§E.3), computed WITHOUT ever
+    // forming the n x n product C. By integer-matrix associativity
+    //     (U*A)(B*V) == U*(A*B)*V == U*C*V
+    // as EXACT integer matrices, so this returns the byte-identical Chat to
+    // ComputeSketch(U, ComputeExactProduct(A,B), V): identical integers reduce
+    // to the identical UNIQUE canonical F_q residue in [0, q).
+    //
+    // Cost is ~2*n^2*m MACs (two rectangular GEMMs) plus the combine; the
+    // direct mod-q combine is used here (CPU reference); GPU backends use the
+    // byte-identical limb-tensor combine (ComputeCombineLimbTensor, C-13).
+    const std::vector<int32_t> P = ComputeProjectedLeft(U, A, n, m);
+    const std::vector<int32_t> Q = ComputeProjectedRight(B, V, n, m);
+    return ComputeCombineModQ(P, Q, n, m);
 }
 
 std::vector<unsigned char> SerializeSketch(const std::vector<Fq>& sketch)

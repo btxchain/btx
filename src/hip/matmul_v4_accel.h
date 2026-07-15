@@ -40,7 +40,8 @@ namespace hip {
  *  dimension `n` on an AMD CDNA device, bit-identically to
  *  matmul_v4::ComputeDigest (§A.4 Solve, §E.1 payload).
  *
- *  Derives sigma and the nonce-fresh operands A,B and projectors U,V exactly as
+ *  Derives sigma, the nonce-fresh operand B, and the template-scoped operand A
+ *  and projectors U,V (§A.2 v4.1/I1') exactly as
  *  the CPU reference (balanced-s8; the operands are guaranteed equal to CPU
  *  because they are expanded with the shared matmul::v4 host routines), forms
  *  the two exact INT8->INT32 GEMMs P = U*A (m x n) and Q = B*V (n x m) on the
@@ -49,7 +50,7 @@ namespace hip {
  *  (U*A)(B*V) path), serializes Chat to `payload_out`, and sets
  *  `digest_out = H(sigma || Chat)`.
  *
- *  Returns false iff (n, kTileB=8) is invalid for v4, `rounds == 0`, or any HIP
+ *  Returns false iff (n, kTileB=4) is invalid for v4, `rounds == 0`, or any HIP
  *  runtime/device error occurred (no usable GPU, allocation failure, ...). On
  *  false the outputs are unspecified and the caller MUST fall back to CPU.
  *  `rounds` is accepted for API symmetry with the CPU entry point and validated

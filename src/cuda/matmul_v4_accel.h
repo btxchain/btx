@@ -30,14 +30,15 @@ namespace matmul_v4::cuda {
 
 /** Reproduce matmul_v4::ComputeDigest on NVIDIA INT8 tensor cores.
  *
- *  Derives sigma and the nonce-fresh balanced-s8 operands A,B and projectors
- *  U,V EXACTLY as matmul_v4.cpp does (it reuses those host routines, so the
+ *  Derives sigma, the nonce-fresh balanced-s8 operand B, and the template-
+ *  scoped operand A and projectors U,V (§A.2 v4.1/I1')
+ *  EXACTLY as matmul_v4.cpp does (it reuses those host routines, so the
  *  operands are byte-identical to the CPU), evaluates the §E.3 optimal sketch
  *  Chat = (U*A)(B*V) mod q -- the two INT8->INT32 GEMMs on tensor cores, the
  *  final m x m combine reduced mod q = 2^61-1 in the integer ALU -- serializes
  *  Chat and sets `digest_out = H(sigma || Chat)`.
  *
- *  Returns false (so the caller uses the CPU path) iff (n, kTileB=8) is invalid
+ *  Returns false (so the caller uses the CPU path) iff (n, kTileB=4) is invalid
  *  for v4, `rounds` is 0 (matching the CPU ComputeDigest validity gate), or any
  *  CUDA / cuBLASLt error occurs. On success `payload_out` holds the serialized
  *  m x m sketch (8*m^2 bytes) and `digest_out` the consensus digest. This

@@ -15,6 +15,8 @@
 
 namespace matmul_v4 {
 
+static_assert(kTileB == matmul::v4::kTileB, "v4 tile size constants diverged");
+
 bool ComputeDigest(const CBlockHeader& header, uint32_t n, uint32_t rounds,
                    uint256& digest_out, std::vector<unsigned char>& sketch_payload_out)
 {
@@ -30,7 +32,7 @@ bool ComputeDigest(const CBlockHeader& header, uint32_t n, uint32_t rounds,
     const uint256 sigma = matmul::v4::DeriveSigma(header);
     const uint256 seed_a = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::A);
     const uint256 seed_b = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::B);
-    const auto [seed_u, seed_v] = matmul::v4::DeriveProjectorSeeds(sigma);
+    const auto [seed_u, seed_v] = matmul::v4::DeriveProjectorSeeds(header);
 
     const std::vector<int8_t> A = matmul::v4::ExpandOperand(seed_a, n);
     const std::vector<int8_t> B = matmul::v4::ExpandOperand(seed_b, n);
@@ -78,7 +80,7 @@ bool VerifySketch(const CBlockHeader& header, uint32_t n, uint32_t rounds,
 
     const uint256 seed_a = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::A);
     const uint256 seed_b = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::B);
-    const auto [seed_u, seed_v] = matmul::v4::DeriveProjectorSeeds(sigma);
+    const auto [seed_u, seed_v] = matmul::v4::DeriveProjectorSeeds(header);
 
     const std::vector<int8_t> A = matmul::v4::ExpandOperand(seed_a, n);
     const std::vector<int8_t> B = matmul::v4::ExpandOperand(seed_b, n);

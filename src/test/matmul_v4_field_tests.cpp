@@ -18,6 +18,7 @@
 // same numbers. The pure-integer CPU semantics tested here are the
 // consensus definition (§N.3-v).
 
+#include <matmul/matmul_v4.h>
 #include <matmul/pow_v4.h>
 
 #include <random.h>
@@ -219,9 +220,19 @@ BOOST_AUTO_TEST_CASE(v4_soundness_modulus_is_the_mersenne_prime_2_61_minus_1)
 
 BOOST_AUTO_TEST_CASE(v4_consensus_constants_match_spec)
 {
-    // §0.7 normative launch parameters: R = 3, b = 8.
+    // §0.7 normative launch parameters: R = 3, b = 4 (v4.1 batched-sketch
+    // profile, §K.2b — revised 8 -> 4 so the per-nonce tensor volume dominates
+    // measured wall-time on datacenter parts, PR #89).
     BOOST_CHECK_EQUAL(matmul_v4::kFreivaldsRounds, 3U);
-    BOOST_CHECK_EQUAL(matmul_v4::kTileB, 8U);
+    BOOST_CHECK_EQUAL(matmul_v4::kTileB, 4U);
+    BOOST_CHECK_EQUAL(matmul::v4::kCombineLimbs, 4U);
+    BOOST_CHECK_EQUAL(matmul::v4::kCombineLimbBase, 128);
+    // 4-limb combine coverage: whole 4096..8192 dimension window (§C-13);
+    // exact bound 15,625*n < 2^27 <=> n <= 8589.
+    BOOST_CHECK(matmul::v4::CheckCombineLimbBound(4096));
+    BOOST_CHECK(matmul::v4::CheckCombineLimbBound(8192));
+    BOOST_CHECK(matmul::v4::CheckCombineLimbBound(8589));
+    BOOST_CHECK(!matmul::v4::CheckCombineLimbBound(8590));
 }
 
 BOOST_AUTO_TEST_CASE(fold61_edge_cases)

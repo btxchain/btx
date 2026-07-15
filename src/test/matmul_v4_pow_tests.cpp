@@ -9,7 +9,7 @@
 //   - determinism: identical inputs always produce bit-identical digest
 //     and payload bytes (the INT8 path is exact, §B.6);
 //   - the digest is a fresh function of every header field it must bind
-//     (prevhash, merkle, time, bits, dim, nNonce64 — §H.4, §C-I7);
+//     (prevhash, merkle, time, bits, dim, nNonce64 — §H.4, §C-I1');
 //   - the verifier's inputs are O(m^2), never the O(n^2)-word product C,
 //     and verification succeeds from (header, payload) alone — i.e. no C
 //     is ever formed or shipped (§0.7-(1), §E.2);
@@ -165,8 +165,9 @@ BOOST_AUTO_TEST_CASE(verify_is_deterministic_too)
 
 BOOST_AUTO_TEST_CASE(distinct_nonces_yield_distinct_digests)
 {
-    // §C-I7: sketch projectors and challenges must be nonce-fresh, so
-    // distinct nonces must produce unrelated digests (and payloads).
+    // §C-I1': sigma, operand B and the Fiat-Shamir challenges must be
+    // nonce-fresh (A/U/V are template-scoped in v4.1), so distinct nonces
+    // must still produce unrelated digests (and payloads).
     std::set<uint256> digests;
     std::set<std::vector<unsigned char>> payloads;
     for (uint64_t nonce = 0; nonce < 8; ++nonce) {
@@ -242,7 +243,7 @@ BOOST_AUTO_TEST_CASE(verifier_inputs_exclude_the_product_matrix)
 
         const size_t m = n / matmul_v4::kTileB;
         BOOST_CHECK_EQUAL(proof.payload.size(), 8 * m * m);
-        // At b = 8 the sketch is 32x smaller than full C (ratio b^2 / 2).
+        // At b = 4 the sketch is 8x smaller than full C (ratio b^2 / 2).
         BOOST_CHECK_EQUAL((static_cast<size_t>(4) * n * n) / proof.payload.size(),
                           static_cast<size_t>(matmul_v4::kTileB) * matmul_v4::kTileB / 2);
 

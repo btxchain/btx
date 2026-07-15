@@ -26,8 +26,9 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 
 # Heights/dimensions chosen for CI speed: v3 regtest dimension is 64; the
-# v4 dimension is set to 128 (m = 128/8 = 16, sketch payload 2 KiB) so the
-# per-nonce GEMM stays trivial on CPU regtest miners.
+# v4 dimension is set to 128 (b = 4 -> m = 128/4 = 32, sketch payload 8 KiB)
+# so the per-nonce GEMM stays trivial on CPU regtest miners (which now run
+# the v4.1 batched-sketch solve loop, spec §K.2b).
 V4_ACTIVATION_HEIGHT = 8
 V3_DIMENSION = 64
 V4_DIMENSION = 128

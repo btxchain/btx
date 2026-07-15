@@ -38,6 +38,7 @@ add_executable(bench_btx
   matmul_prehash_bench.cpp
   matmul_reuse_bench.cpp
   matmul_solve_bench.cpp
+  matmul_v4_stage_bench.cpp
   mempool_ephemeral_spends.cpp
   mempool_eviction.cpp
   mempool_stress.cpp

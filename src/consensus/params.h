@@ -219,8 +219,13 @@ struct Params {
      *  sketch payload); R = 2 is reserved for regtest only. */
     uint32_t nMatMulV4FreivaldsRounds{3};
     /** v4 product-commit/sketch tile size b; sketch dimension m = n/b (spec
-     *  §0.7/§E.1/§K.2a). Normative: b = 8. */
-    uint32_t nMatMulV4TranscriptBlockSize{8};
+     *  §0.7/§E.1/§K.2a/§K.2b). Normative: b = 4 at n = 4096 (m = 1024, payload
+     *  8 MiB) — revised 8 -> 4 by the v4.1 batched-sketch profile (PR #89
+     *  wall-time fix) so the enforced per-nonce INT8 tensor volume
+     *  (~1.5*n^3 MACs incl. the C-13 limb combine) dominates wall-time on
+     *  datacenter parts. If n is retargeted to 8192, b MUST become 8 (m stays
+     *  1024). Keep in sync with matmul_v4::kTileB. */
+    uint32_t nMatMulV4TranscriptBlockSize{4};
     /** One-time ASERT target rescale applied at nMatMulV4Height, mechanically
      *  identical to nMatMulAsertRetune2*: next_target = parent_target * Num/Den,
      *  then ASERT re-anchors on that block. The v4 per-nonce work unit differs

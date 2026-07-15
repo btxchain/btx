@@ -558,7 +558,7 @@ bool ComputeDigestImpl(MetalV4Context& ctx,
         const uint256 sigma = matmul::v4::DeriveSigma(header);
         const uint256 seed_a = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::A);
         const uint256 seed_b = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::B);
-        const auto [seed_u, seed_v] = matmul::v4::DeriveProjectorSeeds(sigma);
+        const auto [seed_u, seed_v] = matmul::v4::DeriveProjectorSeeds(header);
 
         const std::vector<int8_t> A = matmul::v4::ExpandOperand(seed_a, n);
         const std::vector<int8_t> B = matmul::v4::ExpandOperand(seed_b, n);

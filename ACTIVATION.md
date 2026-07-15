@@ -32,6 +32,7 @@ hardware runbook: `doc/matmul-v4-gpu-backends.md`.
 | A11 | Pooled-mining / challenge-header RPC paths made v4-aware | ✅ done |
 | A12 | Optimal-miner `(U·A)(B·V)` path in CPU `ComputeDigest` (byte-identical to full-C; enforced by equivalence test) | ✅ done |
 | A13 | Public code review of design spec + implementation | ☐ todo (PR #89) |
+| A14 | **v4.1 batched-sketch profile (spec §A.2 v4.1 / §C I1′ / §K.2b, PR #89 wall-time fix):** b = 8 → 4; A/U/V template-scoped (template hash zeroes nNonce64 + §H.4 seed fields), B/σ nonce-fresh; CPU batched miner (`matmul_v4_batch.{h,cpp}`, one stacked combine GEMM per window) wired into `SolveMatMulV4` (window Q via `BTX_MATMUL_V4_BATCH`, default 8) with the winner re-derived through the single-nonce reference before sealing; C-13 limb-tensor combine CPU reference; per-stage bench (`matmul_v4_stage_bench`); golden vectors re-pinned; verifier UNCHANGED (O(n²), one nonce). All 6 v4 suites + regtest activation functional test green | ✅ done (code) — ⚠ security review B4′ + measurement B2g outstanding |
 
 Exit criterion: A1–A11 done, CPU suite green, reviewed → merge to `main`
 with `nMatMulV4Height` unset.
@@ -86,15 +87,26 @@ Details + per-backend build flags: `doc/matmul-v4-gpu-backends.md`.
 |---|---|---|
 | B2a | Cross-vendor INT8 determinism golden vectors — generate on H100/B200/consumer/Apple-M5/CDNA and confirm identical | **real GPUs** |
 | B2b | One-time ASERT rescale `Num/Den` — benchmark real v3→v4 throughput on reference hardware and set empirically | reference GPU |
-| B2c | b=8 roofline confirmation on real IMMA/MFMA/Metal kernels | real GPUs |
+| B2c | ~~b=8 roofline confirmation~~ superseded by B2g: the b=8 profile was MEASURED consumer-favoring (reviewer: H100/5090 = 0.40× at n=8192) — roofline-only confirmation is no longer accepted for any b | — |
 | B2d | Operand XOF regen timing envelope (15–35 ms); s8 operand + U/V sampling vectors. **Note (PR #89 review): the 15–35 ms envelope is the VERIFIER's once-per-block cost — the MINER pays expansion on every nonce**, so the XOF is also gated by the §K.2a-WT wall-time check. The per-element-hash XOF (~38.5M SHA-256/nonce at n=4096, 62.9% of per-nonce time on a 5090) is replaced by the wide counter-mode XOF (~1.2M, ~32× fewer; spec §A.2/C-12); operand values and all digests changed | CPU/GPU |
 | B2e | n=4096 verify-budget confirmation on reference CPUs (<1 s single-thread) | CPU |
-| B2f | **Mod-q combine on tensor cores (spec Appendix C-13, post-XOF-fix miner bottleneck)** — limb-decompose the P·Q combine onto s8×s8→s32 tensor GEMMs so the GEMM dominates per-nonce wall-time (§K.2a-WT); until then the int-ALU combine (~n³/64 mod-q MACs) is the dominant per-nonce stage on GPU backends | GPU kernels + real-GPU re-measure |
+| B2f | **Mod-q combine on tensor cores (spec Appendix C-13)** — CPU reference LANDED (4-limb balanced base-2⁷, valid for n ≤ 8589, byte-identical to the direct combine, incl. the stacked cross-nonce form); REMAINING: port to the CUDA/HIP/Metal kernels and re-measure | GPU kernels + real-GPU re-measure |
+| B2g | **v4.1 batched-sketch GO/NO-GO (spec §K.2b)** — instrument the `matmul_v4_stage_bench` stage boundaries on physical H100/B200 (+ 5090 anchor) at n=4096, b=4, window Q ≥ 32: (a) tensor stages (S2+S3b) strict majority of MARGINAL per-nonce wall-time; (b) batched tensor utilization ≥ ~60% of peak INT8; (c) nonce/s ordering actually datacenter-favoring; (d) b=4 verify (8 MiB payload) inside the CPU budget. **The datacenter claim is a hypothesis until this passes — two prior model estimates were falsified.** Also feeds B2b (ASERT rescale must use the MARGINAL per-nonce unit, since U·A is template-amortized) | **real GPUs** |
 
 ### B3. Security audit
 External consensus/security audit. Focus: verifier DoS surface (payload
 parser fuzzing, oversized/malformed sketches), the ASERT rescale, the
 v3→v4 dispatch boundary, and the GPU-vs-CPU verify/fallback path.
+
+### B4′. External adversarial review of the I1′ anti-amortization relaxation (BLOCKING)
+v4.1 deliberately relaxes v4.0's I1/I7: A, U, V are template-scoped so `U·A`
+amortizes and per-nonce combines batch into one dense GEMM (spec §C I1′,
+§K.2b). The security argument (soundness preserved; no pre-mining; symmetric
+across miners; difficulty prices the marginal unit) is written in §C I1′ but
+is **needs-review, not proven-safe** — specifically the marginal-work floor
+assumption and the reopened projector-cache channel. Solicit adversarial
+review (the PR #89 reviewer is invited; the stage-bench harness is the shared
+measurement tool). Mainnet activation MUST NOT proceed without this review.
 
 ### B4. Public testnet burn-in
 Deploy on testnet, mine across `nMatMulV4Height` with **diverse hardware**,
@@ -110,7 +122,8 @@ problems surface in the wild.
   upgrades *before* the height.
 - Rewrite mining guides + pool software (§N.2 — Freivalds-verified shares).
 
-Exit criterion: B1–B4 green, height set with lead time + signaling,
+Exit criterion: B1–B4 green **plus B2g (batched-profile measurement) and B4′
+(I1′ adversarial review)**, height set with lead time + signaling,
 supermajority upgraded → activate.
 
 ---
@@ -139,8 +152,8 @@ Until step 2 is committed and released, the network stays on v3. This branch
 contains everything needed for steps 1–5 to be mechanical once GO is reached.
 
 ## Hard dependencies this repo cannot satisfy
-- **Real GPUs** (H100/B200/RTX/Apple-M5/CDNA) for B1 and B2a–B2c.
-- **External audit** (B3).
+- **Real GPUs** (H100/B200/RTX/Apple-M5/CDNA) for B1, B2a–B2b and B2f–B2g.
+- **External audit** (B3) and the I1′ adversarial review (B4′).
 - **Public testnet operators + time** (B4).
 
 Everything else (Gate A, the code for B1, the calibration harnesses) is in

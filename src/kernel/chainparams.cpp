@@ -572,7 +572,7 @@ public:
         consensus.nMatMulV4MinDimension = 4096;
         consensus.nMatMulV4MaxDimension = 8192;
         consensus.nMatMulV4FreivaldsRounds = 3;
-        consensus.nMatMulV4TranscriptBlockSize = 8;
+        consensus.nMatMulV4TranscriptBlockSize = 4; // v4.1 batched-sketch profile (spec §K.2b): m = n/4, 8 MiB payload at n=4096
         // DoS verify budgets above the v4 fork (spec §I.5): the O(n^2) verify
         // costs ~0.14-0.28 s CPU/check at n=4096, so the global cap is 16/min
         // (~4.8 s CPU/min) and each peer 4/min.
@@ -1168,7 +1168,7 @@ public:
         consensus.nMatMulV4MinDimension = 64;
         consensus.nMatMulV4MaxDimension = 1024;
         consensus.nMatMulV4FreivaldsRounds = 2;
-        consensus.nMatMulV4TranscriptBlockSize = 8;
+        consensus.nMatMulV4TranscriptBlockSize = 4; // v4.1 batched-sketch profile (spec §K.2b): m = n/4, 8 MiB payload at n=4096
         // Regtest must mine both fork sides fast; do not throttle v4 verify
         // (mirrors the v3 "no global budget limit in regtest" choice above).
         consensus.nMatMulV4GlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();

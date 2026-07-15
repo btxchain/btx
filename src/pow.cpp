@@ -20,6 +20,7 @@
 #include <matmul/field.h>
 #include <matmul/freivalds.h>
 #include <matmul/matmul_pow.h>
+#include <matmul/matmul_v4_batch.h>
 #include <matmul/noise.h>
 #include <matmul/pow_v4.h>
 #include <matmul/transcript.h>
@@ -161,7 +162,7 @@ constexpr uint64_t MATMUL_V2_ABS_MAX_DIM{2048};
 constexpr uint64_t MATMUL_V2_MAX_PAYLOAD_WORDS{MATMUL_V2_ABS_MAX_DIM * MATMUL_V2_ABS_MAX_DIM};
 // MatMul v4 (spec §G.4 invariant #7 / §H.3): DoS-bound cap for the v4 sketch
 // payload word count. The sketch profile (default; spec §0.7-(3)) is far
-// smaller than n^2 words (~2 MiB at n=4096, b=8), so this remains a generous
+// smaller than n^2 words (~8 MiB at n=4096, b=4), so this remains a generous
 // upper bound rather than a tight one; it exists only to reject an obviously
 // oversized relayed payload before further processing.
 constexpr uint64_t MATMUL_V4_ABS_MAX_DIM{8192};
@@ -4110,6 +4111,95 @@ static bool SolveMatMulV4(CBlockHeader& block,
     if (!bnTarget) return false;
 
     const auto start = std::chrono::steady_clock::now();
+
+    // v4.1 batched-sketch CPU path (spec §K.2b, matmul/matmul_v4_batch.h):
+    // when the resolved backend is the CPU reference, grind nonces in windows
+    // of Q through BatchedSketchMiner — A, U, V and P = U*A are expanded once
+    // per template (invariant I1'), each window's combines run as one stacked
+    // dense GEMM, and every digest is byte-identical to the single-nonce
+    // matmul_v4::ComputeDigest (enforced by matmul_v4_batch_tests; the rare
+    // winning candidate is additionally re-derived through the reference
+    // path below before it is sealed, so a batch-miner bug can never emit a
+    // non-consensus block). GPU backends keep the per-nonce dispatch loop for
+    // now — their device-side batching is tracked in ACTIVATION B2f/B2g.
+    if (matmul_v4::accel::ResolveBackend() == matmul_v4::accel::Kind::CPU) {
+        uint32_t window_span = matmul::v4::kDefaultMinerBatch;
+        if (const char* env = std::getenv("BTX_MATMUL_V4_BATCH")) {
+            const auto parsed = static_cast<uint32_t>(std::strtoul(env, nullptr, 10));
+            if (parsed > 0) window_span = std::min(parsed, matmul::v4::kMaxMinerBatch);
+        }
+        const matmul::v4::BatchedSketchMiner batch_miner{block, params.nMatMulV4Dimension};
+        if (!batch_miner.Valid()) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        while (max_tries > 0) {
+            if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+            const uint64_t nonce_room = std::numeric_limits<uint64_t>::max() - block.nNonce64;
+            uint32_t window = static_cast<uint32_t>(std::min<uint64_t>(window_span, max_tries));
+            if (nonce_room < window - 1) window = static_cast<uint32_t>(nonce_room) + 1;
+
+            // Fully populate each candidate header: nonce plus the §H.4
+            // nonce-bound seed_a/seed_b re-derivation (the template projection
+            // zeroes both, so the cached A/U/V/P stay valid across the window).
+            std::vector<CBlockHeader> candidates(window, block);
+            for (uint32_t i = 0; i < window; ++i) {
+                candidates[i].nNonce64 = block.nNonce64 + i;
+                candidates[i].nNonce = static_cast<uint32_t>(candidates[i].nNonce64);
+                if (!SetDeterministicMatMulSeeds(candidates[i], params, block_height, parent_median_time_past)) {
+                    RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                    return false;
+                }
+            }
+
+            std::vector<matmul::v4::BatchNonceResult> results;
+            if (!batch_miner.Mine(candidates, results) || results.size() != window) {
+                LogWarning("SolveMatMulV4: batched miner failed (template mismatch?); aborting solve\n");
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+
+            for (uint32_t i = 0; i < window; ++i) {
+                if (UintToArith256(results[i].digest) > *bnTarget) {
+                    --max_tries;
+                    continue;
+                }
+                // Candidate win: re-derive through the single-nonce reference
+                // path and seal ONLY the reference result (defense in depth;
+                // equality is also pinned by matmul_v4_batch_tests).
+                uint256 ref_digest;
+                std::vector<unsigned char> ref_payload;
+                if (!matmul_v4::ComputeDigest(candidates[i], params.nMatMulV4Dimension,
+                                              params.nMatMulV4FreivaldsRounds, ref_digest, ref_payload) ||
+                    ref_digest != results[i].digest || ref_payload != results[i].payload) {
+                    LogWarning("SolveMatMulV4: batched digest diverged from reference at nonce=%u; discarding candidate\n",
+                               candidates[i].nNonce64);
+                    --max_tries;
+                    continue;
+                }
+                block = candidates[i];
+                block.matmul_digest = ref_digest;
+                if (freivalds_payload_out != nullptr) {
+                    *freivalds_payload_out = PackMatMulV4SketchBytesToWords(ref_payload);
+                }
+                RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
+                return true;
+            }
+
+            if (nonce_room < window) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false; // nonce space exhausted (last window ended at UINT64_MAX)
+            }
+            block.nNonce64 += window;
+            block.nNonce = static_cast<uint32_t>(block.nNonce64);
+        }
+        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+        return false;
+    }
+
     while (max_tries > 0) {
         if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);

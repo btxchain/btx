@@ -77,6 +77,7 @@ add_executable(test_btx
   matmul_dgw_tests.cpp
   matmul_subsidy_tests.cpp
   matmul_mining_tests.cpp
+  matmul_v4_batch_tests.cpp
   matmul_v4_field_tests.cpp
   matmul_v4_sketch_tests.cpp
   matmul_v4_pow_tests.cpp

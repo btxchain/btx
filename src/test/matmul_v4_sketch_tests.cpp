@@ -5,8 +5,9 @@
 // MatMul v4 sketch-commitment tests (design spec §E / §0.7-(3)).
 //
 // The consensus payload is the compressed sketch C_hat = U * C * V in
-// F_q^{m x m} (q = 2^61 - 1, m = n / b, b = kTileB = 8), with U, V dense
-// sigma-derived balanced-s8 projectors and the digest H(sigma || C_hat).
+// F_q^{m x m} (q = 2^61 - 1, m = n / b, b = kTileB = 4), with U, V dense
+// template-derived balanced-s8 projectors (§A.2 v4.1, invariant I1') and
+// the digest H(sigma || C_hat).
 // The verifier never forms C: it checks x^T * C_hat * y against
 // (U^T x)^T * A * (B * (V y)) per Freivalds round, catching any wrong
 // sketch word with probability >= 1 - 2/q per round (§E.2), i.e. a forged
@@ -48,7 +49,9 @@ uint256 ParseUint256(std::string_view hex)
 }
 
 //! Deterministic v4 candidate header. All challenge material (seeds,
-//! projectors U/V, Freivalds vectors) derives from these fields (§H.4/§C-I7).
+//! projectors U/V, Freivalds vectors) derives from these fields (§H.4/§C-I1':
+//! A/U/V bind the template projection; sigma, B and the Fiat-Shamir
+//! challenges additionally bind nNonce64).
 CBlockHeader MakeV4Header(uint64_t nonce = 1, uint32_t n = kTestDim)
 {
     CBlockHeader header;
@@ -230,7 +233,7 @@ BOOST_AUTO_TEST_CASE(optimal_sketch_matches_full_c_reference)
             const uint256 sigma = matmul::v4::DeriveSigma(header);
             const uint256 seed_a = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::A);
             const uint256 seed_b = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::B);
-            const auto [seed_u, seed_v] = matmul::v4::DeriveProjectorSeeds(sigma);
+            const auto [seed_u, seed_v] = matmul::v4::DeriveProjectorSeeds(header);
 
             const std::vector<int8_t> A = matmul::v4::ExpandOperand(seed_a, n);
             const std::vector<int8_t> B = matmul::v4::ExpandOperand(seed_b, n);
@@ -420,9 +423,9 @@ BOOST_AUTO_TEST_CASE(wrong_shape_payloads_are_rejected)
 
 BOOST_AUTO_TEST_CASE(payload_for_another_header_is_rejected)
 {
-    // The sketch commits to *this* header's product: projectors and
-    // challenges are nonce-fresh (§C-I7), so an honestly computed payload
-    // for a sibling nonce is a wrong C for this header.
+    // The sketch commits to *this* header's product: operand B, sigma and
+    // the Fiat-Shamir challenges are nonce-fresh (§C-I1'), so an honestly
+    // computed payload for a sibling nonce is a wrong C for this header.
     const auto proof_a = ComputeHonestProof(/*nonce=*/10);
     const auto proof_b = ComputeHonestProof(/*nonce=*/11);
     BOOST_REQUIRE(proof_a.payload != proof_b.payload);

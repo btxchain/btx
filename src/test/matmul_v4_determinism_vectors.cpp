@@ -84,10 +84,11 @@ constexpr GoldenVector kGoldenVectors[] = {
         .seed_b = "0000000000000000000000000000000000000000000000000000000000000000",
         .n = 256,
         .rounds = 2, // regtest round count (§G.2)
-        // TODO(pin): fill from the harness log once the reference
-        // implementation of matmul_v4 lands and is reviewed.
-        .expected_digest_hex = "",
-        .expected_payload_sha256_hex = "",
+        // Pinned 2026-07-15 from the reviewed v4.1 batched-sketch reference
+        // (b = 4, template-scoped A/U/V per §A.2 v4.1/I1'; supersedes every
+        // earlier b = 8 / sigma-derived-projector value).
+        .expected_digest_hex = "8d1b687fc7693f20d893326443cbff348d84a98a411113797ea9d03cbea8b519",
+        .expected_payload_sha256_hex = "a4d30087ceadba54ca35551257a65a06377edd442ecb59bf666ca4ddf84b9af2",
     },
     {
         .name = "V4-TV2-n256-r3-structured-seed",
@@ -100,13 +101,14 @@ constexpr GoldenVector kGoldenVectors[] = {
         .seed_b = "4504d44d861b69197db1d95e473442346c4f2bc1f5869996bdccd63cfbdbd150",
         .n = 256,
         .rounds = 3, // production round count (§0.7-(2))
-        .expected_digest_hex = "",
-        .expected_payload_sha256_hex = "",
+        .expected_digest_hex = "338e64d0ba3d582c823593fe16dc7e35c2fbbe134584e378b25e9a6f269f1860",
+        .expected_payload_sha256_hex = "f65a9b9f5ce8f5a6b932cc4fb924211da43889349078f09e08ba79631f41e6c1",
     },
     {
         .name = "V4-TV3-n256-r3-adjacent-nonce",
         // Identical to V4-TV2 except nNonce64: pins nonce-freshness of the
-        // whole (seed, projector, challenge) derivation chain (§C-I7).
+        // sigma/seed_B/challenge chain (§C-I1'; A/U/V are template-scoped
+        // in v4.1, so only the B-side and the digest binding may differ).
         .prev_hash = "1111111111111111111111111111111111111111111111111111111111111111",
         .merkle_root = "2222222222222222222222222222222222222222222222222222222222222222",
         .time = 1'770'000'090,
@@ -116,8 +118,8 @@ constexpr GoldenVector kGoldenVectors[] = {
         .seed_b = "4504d44d861b69197db1d95e473442346c4f2bc1f5869996bdccd63cfbdbd150",
         .n = 256,
         .rounds = 3,
-        .expected_digest_hex = "",
-        .expected_payload_sha256_hex = "",
+        .expected_digest_hex = "1efae97b48b38b9d7399399cd84dae8d0ad345b19f3dc3282f6c58ba605c0d39",
+        .expected_payload_sha256_hex = "66df2b82fc83e118dacae97d48e23ce1b96cbc607d5a7932cb4c58e02fcead80",
     },
     {
         .name = "V4-TV4-n512-r3",
@@ -130,8 +132,8 @@ constexpr GoldenVector kGoldenVectors[] = {
         .seed_b = "c6a811f7f75fe4e64be106a50351aed9c04403a74bfe7b4bbe59f7311722b735",
         .n = 512,
         .rounds = 3,
-        .expected_digest_hex = "",
-        .expected_payload_sha256_hex = "",
+        .expected_digest_hex = "eae171c056ff30f7c1341d70f271afad2d235ea01eb0eb3a9bf0efcd81a81eb1",
+        .expected_payload_sha256_hex = "b80502649893db648ba8393b8b60665c89ebfe93c7d0069afbc8208350a41493",
     },
 };
 
@@ -255,7 +257,7 @@ BOOST_AUTO_TEST_CASE(golden_vectors_are_reproducible_and_match_pins)
 BOOST_AUTO_TEST_CASE(adjacent_nonce_vectors_diverge)
 {
     // V4-TV2 vs V4-TV3 differ only in nNonce64; their digests and payloads
-    // must be unrelated (nonce-fresh challenge chain, §C-I7). Pinning both
+    // must be unrelated (nonce-fresh sigma/B chain, §C-I1'). Pinning both
     // makes this property part of the cross-backend contract.
     const GoldenVector& tv2 = kGoldenVectors[1];
     const GoldenVector& tv3 = kGoldenVectors[2];
