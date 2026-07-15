@@ -93,6 +93,25 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   endif()
 endif()
 
+# AMD ROCm/HIP backend for the MatMul v4 digest (src/hip/matmul_v4_accel.hip).
+# Mirrors the experimental CUDA backend above but targets AMD CDNA (MFMA)
+# accelerators via hipcc. Requires an explicit AMD GPU arch list (e.g. gfx942
+# for MI300, gfx90a for MI200, gfx908 for MI100).
+option(BTX_ENABLE_HIP "Enable experimental AMD ROCm/HIP MatMul v4 backend (requires ROCm/hipcc)" OFF)
+set(BTX_HIP_ARCHITECTURES "" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942)")
+
+if(BTX_ENABLE_HIP)
+  if(BTX_HIP_ARCHITECTURES STREQUAL "" AND DEFINED CMAKE_HIP_ARCHITECTURES AND NOT CMAKE_HIP_ARCHITECTURES STREQUAL "")
+    set(BTX_HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942)" FORCE)
+  endif()
+  if(BTX_HIP_ARCHITECTURES STREQUAL "")
+    message(FATAL_ERROR "BTX_ENABLE_HIP=ON requires BTX_HIP_ARCHITECTURES to be set explicitly (for example gfx942).")
+  endif()
+  set(CMAKE_HIP_ARCHITECTURES "${BTX_HIP_ARCHITECTURES}" CACHE STRING "AMD GPU architectures for BTX HIP targets" FORCE)
+  enable_language(HIP)
+  find_package(hip REQUIRED)
+endif()
+
 #=============================
 # Subprojects
 #=============================
@@ -287,6 +306,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/int8_field.cpp
   matmul/matrix.cpp
   matmul/matmul_v4.cpp
+  matmul/accel_v4.cpp
   matmul/noise.cpp
   matmul/pow_v4.cpp
   matmul/solver_runtime.cpp
@@ -397,6 +417,7 @@ set_source_files_properties(matmul/matmul_pow.cpp PROPERTIES
 
 add_library(btx_matmul_backend STATIC EXCLUDE_FROM_ALL
   matmul/backend_capabilities.cpp
+  matmul/accel_v4_stub.cpp
   cuda/cuda_scheduler.cpp
   metal/matmul_accel_env.cpp
 )
@@ -407,6 +428,7 @@ if(APPLE AND BTX_ENABLE_METAL)
   )
   target_sources(btx_matmul_backend PRIVATE
     metal/matmul_accel.mm
+    metal/matmul_v4_accel.mm
     metal/nonce_accel.mm
     metal/oracle_accel.mm
   )
@@ -422,6 +444,9 @@ if(APPLE AND BTX_ENABLE_METAL)
     set(BTX_ORACLE_METAL_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/metal/oracle_accel_kernels.metal)
     set(BTX_ORACLE_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/oracle_accel_kernels.air)
     set(BTX_ORACLE_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/oracle_accel_kernels.metallib)
+    set(BTX_MATMUL_V4_METAL_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_accel_kernels.metal)
+    set(BTX_MATMUL_V4_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_accel_kernels.air)
+    set(BTX_MATMUL_V4_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_accel_kernels.metallib)
     add_custom_command(
       OUTPUT ${BTX_MATMUL_METALLIB}
       COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -c ${BTX_MATMUL_METAL_SOURCE} -o ${BTX_MATMUL_METAL_AIR}
@@ -438,12 +463,26 @@ if(APPLE AND BTX_ENABLE_METAL)
       COMMENT "Compiling prebuilt Metal oracle kernels"
       VERBATIM
     )
+    # The v4 kernels compile under the default (pre-Metal-4) language version:
+    # the mpp::tensor_ops section is guarded by __METAL_VERSION__/__has_include
+    # and the Metal 4 tensor pipeline is always runtime-compiled by the host
+    # glue with an explicit metal4.0 language version (see matmul_v4_accel.mm).
+    add_custom_command(
+      OUTPUT ${BTX_MATMUL_V4_METALLIB}
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -c ${BTX_MATMUL_V4_METAL_SOURCE} -o ${BTX_MATMUL_V4_METAL_AIR}
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metallib ${BTX_MATMUL_V4_METAL_AIR} -o ${BTX_MATMUL_V4_METALLIB}
+      DEPENDS ${BTX_MATMUL_V4_METAL_SOURCE}
+      COMMENT "Compiling prebuilt MatMul v4 Metal kernels"
+      VERBATIM
+    )
     add_custom_target(btx_matmul_metallib DEPENDS ${BTX_MATMUL_METALLIB})
     add_custom_target(btx_oracle_metallib DEPENDS ${BTX_ORACLE_METALLIB})
-    add_dependencies(btx_matmul_backend btx_matmul_metallib btx_oracle_metallib)
+    add_custom_target(btx_matmul_v4_metallib DEPENDS ${BTX_MATMUL_V4_METALLIB})
+    add_dependencies(btx_matmul_backend btx_matmul_metallib btx_oracle_metallib btx_matmul_v4_metallib)
     target_compile_definitions(btx_matmul_backend PRIVATE
       BTX_MATMUL_METALLIB_PATH=\"${BTX_MATMUL_METALLIB}\"
       BTX_ORACLE_METALLIB_PATH=\"${BTX_ORACLE_METALLIB}\"
+      BTX_MATMUL_V4_METALLIB_PATH=\"${BTX_MATMUL_V4_METALLIB}\"
     )
   else()
     if(BTX_MATMUL_METAL_PRECOMPILE_KERNELS)
@@ -461,6 +500,7 @@ if(APPLE AND BTX_ENABLE_METAL)
 else()
   target_sources(btx_matmul_backend PRIVATE
     metal/matmul_accel_stub.cpp
+    metal/matmul_v4_accel_stub.cpp
     metal/nonce_accel_stub.cpp
     metal/oracle_accel_stub.cpp
   )
@@ -470,6 +510,7 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     cuda/cuda_context.cpp
     cuda/matmul_accel.cu
     cuda/oracle_accel.cu
+    cuda/matmul_v4_accel.cu
   )
   target_compile_definitions(btx_matmul_backend PRIVATE BTX_ENABLE_CUDA_EXPERIMENTAL=1)
   if(BTX_CUDA_RUNTIME_LIBRARY STREQUAL "Static")
@@ -477,6 +518,17 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   else()
     target_link_libraries(btx_matmul_backend PRIVATE CUDA::cudart)
   endif()
+  # cuBLASLt provides the exact INT8->INT32 (CUDA_R_8I -> CUDA_R_32I,
+  # CUBLAS_COMPUTE_32I) tensor-core GEMMs used by the MatMul v4 backend.
+  target_link_libraries(btx_matmul_backend PRIVATE CUDA::cublasLt)
+  # matmul_v4_accel.cu reuses the exact CPU derivation / serialization / digest
+  # routines (matmul::v4::*, defined in bitcoin_common) to guarantee bit-exact
+  # operands and digest. Both are STATIC libraries and bitcoin_common already
+  # links btx_matmul_backend PUBLIC, so this closes a static-library cycle;
+  # CMake resolves it with a linker group (cyclic deps among STATIC libs are
+  # supported). If a cycle-free layout is preferred, move the ComputeDigestAccel
+  # host orchestration into a bitcoin_common .cpp that calls a device-only entry.
+  target_link_libraries(btx_matmul_backend PRIVATE bitcoin_common)
   set_target_properties(btx_matmul_backend PROPERTIES
     CUDA_ARCHITECTURES "${BTX_CUDA_ARCHITECTURES}"
     CUDA_RUNTIME_LIBRARY "${BTX_CUDA_RUNTIME_LIBRARY}"
@@ -487,6 +539,31 @@ else()
   target_sources(btx_matmul_backend PRIVATE
     cuda/matmul_accel_stub.cpp
     cuda/oracle_accel_stub.cpp
+    cuda/matmul_v4_accel_stub.cpp
+  )
+endif()
+if(BTX_ENABLE_HIP)
+  target_sources(btx_matmul_backend PRIVATE
+    hip/matmul_v4_accel.hip
+  )
+  set_source_files_properties(hip/matmul_v4_accel.hip PROPERTIES LANGUAGE HIP)
+  target_compile_definitions(btx_matmul_backend PRIVATE BTX_ENABLE_HIP=1)
+  target_link_libraries(btx_matmul_backend PRIVATE hip::device)
+  # The HIP backend reuses the shared matmul::v4 host reference (operand
+  # expansion, serialization, digest) from bitcoin_common so its output is
+  # bit-identical to the CPU by construction. bitcoin_common PUBLIC-links
+  # btx_matmul_backend, so this closes a STATIC<->STATIC cycle that CMake
+  # resolves by repeating the archives at final link. The cycle only exists
+  # when BTX_ENABLE_HIP=ON (the stub path stays self-contained).
+  target_link_libraries(btx_matmul_backend PRIVATE bitcoin_common)
+  set_target_properties(btx_matmul_backend PROPERTIES
+    HIP_ARCHITECTURES "${BTX_HIP_ARCHITECTURES}"
+    HIP_STANDARD 20
+    HIP_STANDARD_REQUIRED ON
+  )
+else()
+  target_sources(btx_matmul_backend PRIVATE
+    hip/matmul_v4_accel_stub.cpp
   )
 endif()
 target_link_libraries(btx_matmul_backend PRIVATE core_interface)
