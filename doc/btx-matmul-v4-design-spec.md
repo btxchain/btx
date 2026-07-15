@@ -459,7 +459,7 @@ Any linear commitment of C admits an algebraic evaluation shortcut: Ĉ = (U·A)�
 |---|---|---|
 | Mining | ≈ 2n²m INT8-MACs per lane per nonce (GPU tensor cores; §E.3) + digest hash | working set per §M |
 | Consensus-validating | full §E.2 check: ≈ 0.1–0.2 s CPU (n = 4096) | payload to prune depth 10 000 (`src/consensus/params.h:151`): 10⁴ × 2 MiB ≈ **20 GiB rolling** (b=8) |
-| Economic (exchange/merchant) | full check over recent window only (`nMatMulValidationWindow = 1000`, `:145`), assumevalid beneath | ≈ 500 MiB rolling |
+| Economic (high-value operator) | full check over recent window only (`nMatMulValidationWindow = 1000`, `:145`), assumevalid beneath | ≈ 500 MiB rolling |
 | SPV | header-only: `matmul_digest ≤ target`, O(1) | headers only; no payload download |
 
 DoS budgets rescaled from v3's envelope (512 global/min × ~5 ms ≈ 2.6 s CPU/min, `:172-174`), holding the same ≈3 s CPU/min ceiling (honest steady-state demand is only ~0.7 blocks/min at 90 s spacing):
@@ -1447,7 +1447,7 @@ Shippable formulation: **v4 is AI-native proof-of-work on dual-use, market-price
 
 ### Q.15 Honest-claims guidance (do / don't)
 
-> **Status:** informative but **binding on project communications** (btxprice.com, website, mining guides, exchange notes, social). Rule of thumb: every compute claim must be tagged **[security]** (`S`, continuous) or **[useful compute]** (`U`, steps up ~30×). Mixed-tag claims are the lies.
+> **Status:** informative but **binding on project communications** (btxprice.com, website, mining guides, social). Rule of thumb: every compute claim must be tagged **[security]** (`S`, continuous) or **[useful compute]** (`U`, steps up ~30×). Mixed-tag claims are the lies.
 
 ### Q.15.1 Claims you CAN make
 
