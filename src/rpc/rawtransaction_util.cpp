@@ -104,17 +104,14 @@ std::vector<std::pair<CTxDestination, CAmount>> ParseOutputs(const UniValue& out
     // Duplicate checking
     std::set<CTxDestination> destinations;
     std::vector<std::pair<CTxDestination, CAmount>> parsed_outputs;
-    bool has_data{false};
     for (const std::string& name_ : outputs.getKeys()) {
         if (name_ == "data") {
-            if (has_data) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, duplicate key: data");
-            }
-            has_data = true;
-            std::vector<unsigned char> data = ParseHexV(outputs[name_].getValStr(), "Data");
-            CTxDestination destination{CNoDestination{CScript() << OP_RETURN << data}};
-            CAmount amount{0};
-            parsed_outputs.emplace_back(destination, amount);
+            // BTX is a financial-only chain: OP_RETURN data-carrier outputs are
+            // disabled (inscription-elimination plan, Pillar 6). First-party
+            // tooling must not be able to mint OP_RETURN data payloads, so the
+            // "data" output field is rejected rather than turned into an
+            // OP_RETURN scriptPubKey.
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "OP_RETURN \"data\" outputs are disabled on BTX (financial-only chain); this output type is not supported");
         } else {
             CTxDestination destination{DecodeDestination(name_)};
             CAmount amount{AmountFromValue(outputs[name_])};

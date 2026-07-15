@@ -784,7 +784,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-acceptstalefeeestimates", strprintf("Read fee estimates even if they are stale (%sdefault: %u) fee estimates are considered stale if they are %s hours old", "regtest only; ", DEFAULT_ACCEPT_STALE_FEE_ESTIMATES, Ticks<std::chrono::hours>(MAX_FILE_AGE)), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-bytespersigop", strprintf("Equivalent bytes per sigop in transactions for relay and mining (default: %u)", DEFAULT_BYTES_PER_SIGOP), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-bytespersigopstrict", strprintf("Minimum bytes per sigop in transactions we relay and mine (default: %u)", DEFAULT_BYTES_PER_SIGOP_STRICT), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
-    argsman.AddArg("-datacarrier", strprintf("Relay and mine data carrier transactions (default: %u)", DEFAULT_ACCEPT_DATACARRIER), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
+    argsman.AddArg("-datacarrier", strprintf("Relay and mine data carrier (OP_RETURN) transactions. BTX is a financial-only chain and rejects non-coinbase data-carrier outputs at relay by default (default: %u)", DEFAULT_ACCEPT_DATACARRIER), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-datacarriercost", strprintf("Treat extra data in transactions as at least N vbytes per actual byte (default: %s)", DEFAULT_WEIGHT_PER_DATA_BYTE / 4.0), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-datacarrierfullcount", strprintf("Apply datacarriersize limit to all known datacarrier methods (default: %u)", DEFAULT_DATACARRIER_FULLCOUNT), ArgsManager::ALLOW_ANY | (DEFAULT_DATACARRIER_FULLCOUNT ? uint32_t{ArgsManager::DEBUG_ONLY} : 0), OptionsCategory::NODE_RELAY);
     argsman.AddArg("-datacarriersize",
@@ -828,7 +828,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
         CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-rejectparasites", strprintf("Refuse to relay or mine parasitic overlay protocols (default: %u)", DEFAULT_REJECT_PARASITES), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-rejecttokens",
-                   strprintf("Refuse to relay or mine transactions involving non-BTX tokens (default: %u)",
+                   strprintf("Refuse to relay or mine transactions involving non-BTX tokens (runes/OLGA overlays). BTX is a financial-only chain and rejects these by default (default: %u)",
                              DEFAULT_REJECT_TOKENS),
                    ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-spkreuse=<policy>", strprintf("Either \"allow\" to relay/mine transactions reusing addresses or other pubkey scripts, or \"conflict\" to treat them as exclusive prior to being mined (default: %s)", DEFAULT_SPKREUSE), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
@@ -941,24 +941,36 @@ void InitParameterInteraction(ArgsManager& args)
             args.ForceSetArg("-minrelaytxfee", FormatMoney(std::max(ParseMoney(args.GetArg("-incrementalrelayfee", "")).value_or(0), CORE_INCREMENTAL_RELAY_FEE)));
         }
         args.SoftSetArg("-blockmintxfee", "0.00000001");
-        args.SoftSetArg("-acceptnonstddatacarrier", "1");
         args.SoftSetArg("-blockreconstructionextratxn", "100");
         args.SoftSetArg("-blockreconstructionextratxnsize", strprintf("%s", std::numeric_limits<size_t>::max() / 1000000 + 1));
         args.SoftSetArg("-bytespersigopstrict", "0");
-        args.SoftSetArg("-permitbaredatacarrier", "1");
-        args.SoftSetArg("-permitbarepubkey", "1");
-        args.SoftSetArg("-permitbaremultisig", "1");
-        args.SoftSetArg("-rejectparasites", "0");
-        args.SoftSetArg("-datacarriercost", "0.25");
-        args.SoftSetArg("-datacarrierfullcount", "0");
-        args.SoftSetArg("-maxtxlegacysigops", strprintf("%s", std::numeric_limits<unsigned int>::max()));
-        args.SoftSetArg("-maxscriptsize", strprintf("%s", std::numeric_limits<unsigned int>::max()));
         args.SoftSetArg("-mempooltruc", "enforce");
         args.SoftSetArg("-permitephemeral", "anchor,send,dust");
         args.SoftSetArg("-spkreuse", "allow");
         args.SoftSetArg("-blockprioritysize", "0");
         args.SoftSetArg("-blockmaxsize", "24000000");
         args.SoftSetArg("-blockmaxweight", "24000000");
+
+        // BTX is a financial-only chain. The datacarrier / bare-output / parasite
+        // / token relay filters exist to keep inscription and content-storage
+        // meta-protocols off the chain (inscription-elimination plan, Pillar 6).
+        // On mainnet, -corepolicy MUST NOT be able to re-loosen those filters back
+        // to upstream Bitcoin Core defaults; only the neutral fee/block/mempool
+        // ergonomics above are applied. On regtest/testnet the full upstream
+        // loosening is preserved so tests can build arbitrary outputs.
+        if (args.GetChainType() != ChainType::MAIN) {
+            args.SoftSetArg("-acceptnonstddatacarrier", "1");
+            args.SoftSetArg("-permitbaredatacarrier", "1");
+            args.SoftSetArg("-permitbarepubkey", "1");
+            args.SoftSetArg("-permitbaremultisig", "1");
+            args.SoftSetArg("-rejectparasites", "0");
+            args.SoftSetArg("-datacarriercost", "0.25");
+            args.SoftSetArg("-datacarrierfullcount", "0");
+            args.SoftSetArg("-maxtxlegacysigops", strprintf("%s", std::numeric_limits<unsigned int>::max()));
+            args.SoftSetArg("-maxscriptsize", strprintf("%s", std::numeric_limits<unsigned int>::max()));
+        } else {
+            LogPrintf("-corepolicy: ignoring datacarrier/bare-output/parasite/token relay loosenings on mainnet; BTX financial-only relay policy is enforced\n");
+        }
     }
 
     // when specifying an explicit binding address, you want to listen on it

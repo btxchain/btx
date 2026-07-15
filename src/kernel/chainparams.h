@@ -195,6 +195,7 @@ public:
         std::optional<int32_t> shielded_pool_credit_disable_height{};
         std::optional<int32_t> shielded_sunset_height{};
         std::optional<int32_t> shielded_direct_send_public_flow_disable_height{};
+        std::optional<int32_t> content_elimination_height{};
         std::optional<int32_t> shielded_v2_send_zero_output_exit_activation_height{};
         std::optional<int32_t> shielded_recovery_exit_activation_height{};
         std::optional<uint256> shielded_recovery_exit_frozen_root{};

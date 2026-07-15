@@ -53,6 +53,11 @@ static constexpr int32_t BTX_V03210_HARDENING_HEIGHT{130'500};
 static constexpr int32_t BTX_V03211_HARDENING_HEIGHT{132'000};
 static constexpr int32_t BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT{135'000};
 static constexpr CAmount BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP{10'000 * COIN};
+// Content-elimination hard fork (inscription/NFT/token meta-protocol removal).
+// Provisional flag-day height: must be > current tip with upgrade lead time and
+// >= BTX_SHIELDED_SUNSET_HEIGHT. Confirm at release sign-off; see
+// doc/btx-inscription-elimination-plan.md §9.
+static constexpr int32_t BTX_CONTENT_ELIMINATION_HEIGHT{165'000};
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
                                  const CScript& genesisOutputScript,
@@ -262,6 +267,7 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nContentEliminationHeight = BTX_CONTENT_ELIMINATION_HEIGHT;
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
@@ -598,6 +604,7 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nContentEliminationHeight = BTX_CONTENT_ELIMINATION_HEIGHT;
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
@@ -780,6 +787,7 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nContentEliminationHeight = BTX_CONTENT_ELIMINATION_HEIGHT;
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
@@ -992,6 +1000,7 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nContentEliminationHeight = BTX_CONTENT_ELIMINATION_HEIGHT;
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
@@ -1208,6 +1217,8 @@ public:
             opts.shielded_sunset_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedDirectSendPublicFlowDisableHeight =
             opts.shielded_direct_send_public_flow_disable_height.value_or(std::numeric_limits<int32_t>::max());
+        consensus.nContentEliminationHeight =
+            opts.content_elimination_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             opts.shielded_v2_send_zero_output_exit_activation_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedRecoveryExitActivationHeight =
@@ -1474,6 +1485,7 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nContentEliminationHeight = BTX_CONTENT_ELIMINATION_HEIGHT;
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;

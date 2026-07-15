@@ -1271,6 +1271,16 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool& mempool,
         if (!PassesReducedDataOutputLimits(it->GetTx(), chainparams.GetConsensus())) {
             return false;
         }
+        // BTX content-elimination hard fork (Pillar 1): once active, non-coinbase
+        // OP_RETURN outputs are consensus-invalid, so never select such a tx into
+        // a template. doc/btx-inscription-elimination-plan.md.
+        if (chainparams.GetConsensus().IsContentEliminationActive(nHeight)) {
+            for (const auto& txout : it->GetTx().vout) {
+                if (!txout.scriptPubKey.empty() && txout.scriptPubKey[0] == OP_RETURN) {
+                    return false;
+                }
+            }
+        }
         for (const auto& txin : it->GetTx().vin) {
             if (txin.prevout.IsNull() || !spent_outpoints.insert(txin.prevout).second) {
                 return false;
