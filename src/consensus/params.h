@@ -194,6 +194,34 @@ struct Params {
      *  authoritative.  Requires fMatMulFreivaldsEnabled and a non-empty
      *  matrix_c_data payload. */
     int32_t nMatMulProductDigestHeight{std::numeric_limits<int32_t>::max()};
+
+    // MatMul v4 PoW parameters (see doc/btx-matmul-v4-design-spec.md, sections
+    // G/H/I). v4 is a height-gated hard fork: at heights < nMatMulV4Height the
+    // v3 rules above apply unchanged; at and above nMatMulV4Height, v4 rules
+    // apply exclusively (no dual-algorithm grace period, no v3 fallback).
+    // DEFAULT = INT32_MAX = disabled. Networks that have not explicitly set
+    // this stay on v3 forever.
+    int32_t nMatMulV4Height{std::numeric_limits<int32_t>::max()};
+    /** Required v4 matrix dimension n (matmul_dim at and above nMatMulV4Height).
+     *  Spec §0.7 normative launch parameter: 4096 on production nets. */
+    uint32_t nMatMulV4Dimension{4096};
+    /** v4 Freivalds' rounds R over the independent prime q = 2^61-1 (spec
+     *  §0.7-(2)/(D.3)). Normative: R = 3 (error <= 2^-180 for the default
+     *  sketch payload); R = 2 is reserved for regtest only. */
+    uint32_t nMatMulV4FreivaldsRounds{3};
+    /** v4 product-commit/sketch tile size b; sketch dimension m = n/b (spec
+     *  §0.7/§E.1/§K.2a). Normative: b = 8. */
+    uint32_t nMatMulV4TranscriptBlockSize{8};
+    /** One-time ASERT target rescale applied at nMatMulV4Height, mechanically
+     *  identical to nMatMulAsertRetune2*: next_target = parent_target * Num/Den,
+     *  then ASERT re-anchors on that block. The v4 per-nonce work unit differs
+     *  sharply from v3 (dense INT8 GEMM vs. the v3 pre-hash-gated transcript),
+     *  so attempts/s drops by a large hardware-dependent factor at the fork;
+     *  this ratio must be calibrated empirically pre-release per network
+     *  (spec §I.4). Default 1/1 = "no rescale" (fresh chains that bootstrap
+     *  nBits directly for the v4 work unit leave this at 1/1). */
+    int64_t nMatMulV4AsertRescaleNum{1};
+    int64_t nMatMulV4AsertRescaleDen{1};
     uint32_t nMaxReorgDepth{std::numeric_limits<uint32_t>::max()};
     int32_t nReorgProtectionStartHeight{std::numeric_limits<int32_t>::max()};
 
@@ -404,6 +432,16 @@ struct Params {
     {
         return fMatMulFreivaldsEnabled &&
             (fMatMulRequireProductPayload || IsMatMulProductDigestActive(height));
+    }
+    /** True at and above the v4 height-gated hard fork. When true, v4 rules
+     *  apply exclusively for PoW validation, difficulty work-unit accounting,
+     *  and mining (see pow.cpp/validation.cpp v4 dispatch); the v3 fields
+     *  above (nMatMulDimension, nMatMulNoiseRank, nMatMulFreivaldsRounds,
+     *  the pre-hash epsilon gate, etc.) are retired/ignored for this height
+     *  and only consulted for < nMatMulV4Height (spec §G.3). */
+    bool IsMatMulV4Active(int32_t height) const
+    {
+        return height >= 0 && height >= nMatMulV4Height;
     }
     bool IsMatMulPreHashEpsilonBitsUpgradeActive(int32_t height) const
     {

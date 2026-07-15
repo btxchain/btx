@@ -9976,6 +9976,23 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
     // because Phase 1 operates on header-only data without block index access.
     // Skip when fSkipMatMulValidation is true (default regtest without -test=matmulstrict).
     if (consensusParams.fMatMulPOW && !consensusParams.fSkipMatMulValidation && !block.hashPrevBlock.IsNull()) {
+        // MatMul v4 (spec §I.1/§I.2): Phase1 (CheckBlockHeader) is
+        // context-free and, when a v4 fork height is configured, leniently
+        // accepts EITHER the v3 or v4 dimension. This is the first
+        // height-aware check point, so enforce the exact height-gated
+        // dimension here.
+        if (consensusParams.IsMatMulV4Active(nHeight)) {
+            if (block.matmul_dim != consensusParams.nMatMulV4Dimension) {
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                     "bad-matmul-dim",
+                                     "matmul v4 dimension mismatch for this height");
+            }
+        } else if (block.matmul_dim != consensusParams.nMatMulDimension) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                 "bad-matmul-dim",
+                                 "matmul dimension mismatch for this height");
+        }
+
         CBlockHeader expected_header{block};
         if (!SetDeterministicMatMulSeeds(expected_header, consensusParams, nHeight, pindexPrev->GetMedianTimePast())) {
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
@@ -9988,7 +10005,11 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
                                  "matmul seeds do not match deterministic derivation for this height");
         }
 
-        if (fCheckPOW && !CheckMatMulPreHashGate(block, consensusParams, nHeight)) {
+        // MatMul v4 (spec §G.3): the pre-hash lottery gate is retired at v4
+        // heights -- CheckMatMulPreHashGate is bypassed (returns true
+        // unconditionally in effect) because v4 has no pre-hash step.
+        if (fCheckPOW && !consensusParams.IsMatMulV4Active(nHeight) &&
+            !CheckMatMulPreHashGate(block, consensusParams, nHeight)) {
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
                                  "high-hash",
                                  "matmul pre-hash proof failed");
@@ -10109,7 +10130,27 @@ static bool ContextualCheckBlock(const CBlock& block,
     const bool is_ibd = chainman.IsInitialBlockDownload();
     const Consensus::Params& consensusParams = chainman.GetConsensus();
 
-    if (fCheckPOW && consensusParams.fMatMulPOW) {
+    if (fCheckPOW && consensusParams.fMatMulPOW && consensusParams.IsMatMulV4Active(nHeight)) {
+        // MatMul v4 (spec §I.2): exclusive cascade at and above nMatMulV4Height
+        // -- no v3 Phase2/Freivalds/ProductCommitted fallback, no transcript
+        // path, no dual-algorithm grace period.
+        if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty()) {
+            return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "v4-forbidden-ab-payload",
+                "matmul v4 block carries forbidden legacy A/B matrix payload");
+        }
+        if (block.matrix_c_data.empty()) {
+            return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "missing-product-payload",
+                "matmul v4 block missing required product sketch payload");
+        }
+        if (!IsMatMulV4PayloadSizeValid(block, consensusParams)) {
+            return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "invalid-product-payload",
+                "matmul v4 block carries malformed product sketch payload");
+        }
+        if (!CheckMatMulProofOfWork_V4ProductCommitted(block, consensusParams, nHeight)) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
+                "matmul v4 proof of work failed");
+        }
+    } else if (fCheckPOW && consensusParams.fMatMulPOW) {
         const bool has_v2_payload = HasMatMulV2Payload(block);
         const bool payload_shape_valid =
             !has_v2_payload || IsMatMulV2PayloadSizeValid(block, consensusParams);

@@ -1,0 +1,85 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <matmul/pow_v4.h>
+
+#include <matmul/int8_field.h>
+#include <matmul/matmul_v4.h>
+#include <primitives/block.h>
+#include <uint256.h>
+
+#include <cstdint>
+#include <utility>
+#include <vector>
+
+namespace matmul_v4 {
+
+bool ComputeDigest(const CBlockHeader& header, uint32_t n, uint32_t rounds,
+                   uint256& digest_out, std::vector<unsigned char>& sketch_payload_out)
+{
+    // §A.4 Solve (digest + sketch), §E.1 payload.
+    uint32_t m = 0;
+    if (!matmul::v4::ValidateDims(n, kTileB, m)) {
+        return false;
+    }
+    if (rounds == 0) {
+        return false;
+    }
+
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    const uint256 seed_a = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::A);
+    const uint256 seed_b = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::B);
+    const auto [seed_u, seed_v] = matmul::v4::DeriveProjectorSeeds(sigma);
+
+    const std::vector<int8_t> A = matmul::v4::ExpandOperand(seed_a, n);
+    const std::vector<int8_t> B = matmul::v4::ExpandOperand(seed_b, n);
+    const std::vector<int8_t> U = matmul::v4::ExpandProjector(seed_u, m, n);
+    const std::vector<int8_t> V = matmul::v4::ExpandProjector(seed_v, n, m);
+
+    // Exact INT32 product C = A*B, then the sketch Chat = U*C*V over q.
+    const std::vector<int32_t> C = matmul::v4::ComputeExactProduct(A, B, n);
+    const std::vector<matmul::v4::Fq> Chat = matmul::v4::ComputeSketch(U, C, V, n, m);
+
+    sketch_payload_out = matmul::v4::SerializeSketch(Chat);
+    digest_out = matmul::v4::ComputeSketchDigest(sigma, sketch_payload_out);
+    return true;
+}
+
+bool VerifySketch(const CBlockHeader& header, uint32_t n, uint32_t rounds,
+                  const std::vector<unsigned char>& sketch_payload, uint256& digest_out)
+{
+    // §0.7-(1)/§D/§E.2: O(n^2) verify -- regenerate A,B, run sketch-Freivalds,
+    // recompute digest. Never forms C, never runs the O(n^3) product.
+    uint32_t m = 0;
+    if (!matmul::v4::ValidateDims(n, kTileB, m)) {
+        return false;
+    }
+
+    // Parse and range-check the payload before any hashing/algebra (§D.3-(1)).
+    std::vector<matmul::v4::Fq> sketch;
+    if (!matmul::v4::ParseSketch(sketch_payload, m, sketch)) {
+        return false;
+    }
+
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+
+    // Digest recompute and Fiat-Shamir binding both use the payload as shipped.
+    digest_out = matmul::v4::ComputeSketchDigest(sigma, sketch_payload);
+    if (digest_out != header.matmul_digest) {
+        return false;
+    }
+
+    const uint256 seed_a = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::A);
+    const uint256 seed_b = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::B);
+    const auto [seed_u, seed_v] = matmul::v4::DeriveProjectorSeeds(sigma);
+
+    const std::vector<int8_t> A = matmul::v4::ExpandOperand(seed_a, n);
+    const std::vector<int8_t> B = matmul::v4::ExpandOperand(seed_b, n);
+    const std::vector<int8_t> U = matmul::v4::ExpandProjector(seed_u, m, n);
+    const std::vector<int8_t> V = matmul::v4::ExpandProjector(seed_v, n, m);
+
+    return matmul::v4::SketchFreivalds(A, B, U, V, sketch, sigma, sketch_payload, n, m, rounds);
+}
+
+} // namespace matmul_v4

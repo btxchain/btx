@@ -284,8 +284,11 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   merkleblock.cpp
   matmul/field.cpp
   matmul/freivalds.cpp
+  matmul/int8_field.cpp
   matmul/matrix.cpp
+  matmul/matmul_v4.cpp
   matmul/noise.cpp
+  matmul/pow_v4.cpp
   matmul/solver_runtime.cpp
   matmul/matmul_pow.cpp
   matmul/transcript.cpp

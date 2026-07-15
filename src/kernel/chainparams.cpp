@@ -186,6 +186,15 @@ public:
         consensus.fMatMulRequireProductPayload = false;
         consensus.nMatMulFreivaldsBindingHeight = 61'000;
         consensus.nMatMulProductDigestHeight = 61'000;
+        // MatMul v4 (doc/btx-matmul-v4-design-spec.md): consensus.nMatMulV4Height
+        // is deliberately left at its Consensus::Params default
+        // (std::numeric_limits<int32_t>::max(), i.e. disabled) here. v4 mainnet
+        // activation deliberately unset -- requires calibration + audit (spec
+        // Appendix C). Mainnet stays on v3 exclusively until a future release
+        // explicitly sets this height, chooses nMatMulV4AsertRescaleNum/Den from
+        // benchmarked v4 reference-miner throughput, and schedules at least two
+        // release cycles of deployment runway past the tip at tag time (spec
+        // §G.1, §G.4 invariant #6). Do not set a mainnet value speculatively.
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -548,6 +557,24 @@ public:
         consensus.fMatMulRequireProductPayload = true;
         consensus.nMatMulFreivaldsBindingHeight = 61'000;
         consensus.nMatMulProductDigestHeight = 61'000;
+        // MatMul v4 (doc/btx-matmul-v4-design-spec.md): enabled on testnet only,
+        // for testing. Chosen well past every existing testnet hardening height
+        // (up to BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT = 135,000) so it can
+        // never be at or below an already-mined testnet height (spec §G.4
+        // invariant #6). This is a test placeholder, not a calibrated production
+        // value; a real testnet deployment should re-derive it (TBD at tag time,
+        // spec §G.2) the same way mainnet's future value must be.
+        consensus.nMatMulV4Height = 200'000;
+        consensus.nMatMulV4Dimension = 4096;
+        consensus.nMatMulV4FreivaldsRounds = 3;
+        consensus.nMatMulV4TranscriptBlockSize = 8;
+        // No empirical v3->v4 throughput benchmark exists yet for testnet
+        // reference hardware, so leave the one-time ASERT rescale at 1/1
+        // ("no rescale"); testnet is fPowAllowMinDifficultyBlocks, so a
+        // miscalibrated rescale does not risk a liveness stall the way it
+        // would on mainnet (spec §I.4).
+        consensus.nMatMulV4AsertRescaleNum = 1;
+        consensus.nMatMulV4AsertRescaleDen = 1;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -1107,6 +1134,27 @@ public:
         consensus.nMatMulPreHashEpsilonBits = 0; // Disable pre-hash filter for fast regtest mining
         consensus.nMatMulPreHashEpsilonBitsUpgrade = consensus.nMatMulPreHashEpsilonBits;
         consensus.nMatMulGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max(); // No global budget limit in regtest
+        // MatMul v4 (doc/btx-matmul-v4-design-spec.md): enabled on regtest at a
+        // low, non-genesis height so tests can mine both sides of the fork
+        // (matches the spec's own regtest recommendation, §G.2, which also
+        // gives regtest n=256). n is kept small relative to the production
+        // default of 4096 (a real dense INT8 GEMM at n=4096 is ~6.9e10
+        // ops/attempt, far too slow for a nonce-search loop on regtest/CI
+        // reference hardware), and deliberately DIFFERENT from the v3
+        // regtest dimension (64, set above) rather than reusing it: Phase1
+        // (CheckMatMulProofOfWork_Phase1) is context-free and cannot see
+        // height, so it accepts either the v3 or the v4 dimension whenever
+        // both are configured. Keeping them numerically distinct means a
+        // pre-fork block can never be Phase1-ambiguous with a post-fork
+        // dimension; the exact height-gated dimension is still authoritative
+        // at ContextualCheckBlockHeader/ContextualCheckBlock. R=2 (below the
+        // R=3 production normative) is reserved for regtest per spec §0.7/§G.2.
+        consensus.nMatMulV4Height = 100;
+        consensus.nMatMulV4Dimension = 256;
+        consensus.nMatMulV4FreivaldsRounds = 2;
+        consensus.nMatMulV4TranscriptBlockSize = 8;
+        consensus.nMatMulV4AsertRescaleNum = 1;
+        consensus.nMatMulV4AsertRescaleDen = 1;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;

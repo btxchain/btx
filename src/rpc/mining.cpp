@@ -4708,8 +4708,15 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
     };
 
     if (matmul_active) {
+        // MatMul v4 (spec §I.3, §J#10): at and above nMatMulV4Height the
+        // template/generated block carries the v4 dimension. SolveMatMul
+        // (pow.cpp) internally dispatches to the v4 solver loop
+        // (SolveMatMulV4 -> matmul_v4::ComputeDigest) whenever
+        // IsMatMulV4Active(next_height); no separate call site is needed here.
         if (block.matmul_dim == 0) {
-            block.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+            block.matmul_dim = consensus.IsMatMulV4Active(next_height)
+                ? static_cast<uint16_t>(consensus.nMatMulV4Dimension)
+                : static_cast<uint16_t>(consensus.nMatMulDimension);
         }
         if (!SetDeterministicMatMulSeeds(block, consensus, next_height, parent_median_time_past)) {
             throw JSONRPCError(RPC_INTERNAL_ERROR, "unable to derive deterministic MatMul seeds");
@@ -4738,6 +4745,16 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
         // or once the transcript-binding upgrade makes the optional payload
         // path safe for honest miners again.
         if (include_freivalds_payload && block.matrix_c_data.empty()) {
+            if (consensus.IsMatMulV4Active(next_height)) {
+                // The v4 solver (SolveMatMulV4) always attaches the sketch
+                // payload directly via freivalds_payload_out on success; the
+                // v3 PopulateFreivaldsPayload fallback below assumes v3's
+                // noise/transcript-block-size machinery and must never run
+                // against a v4-dimension block.
+                cleanup_watcher();
+                throw JSONRPCError(RPC_INTERNAL_ERROR,
+                    "matmul v4 solve succeeded without attaching a product sketch payload");
+            }
             // Populate Freivalds' C' payload unless SolveMatMul already
             // generated it via CPU confirmation on the accepted candidate.
             PopulateFreivaldsPayload(block, consensus);

@@ -77,6 +77,10 @@ add_executable(test_btx
   matmul_dgw_tests.cpp
   matmul_subsidy_tests.cpp
   matmul_mining_tests.cpp
+  matmul_v4_field_tests.cpp
+  matmul_v4_sketch_tests.cpp
+  matmul_v4_pow_tests.cpp
+  matmul_v4_determinism_vectors.cpp
   mining_chain_guard_tests.cpp
   mining_crash_guard_tests.cpp
   pq_crypto_tests.cpp

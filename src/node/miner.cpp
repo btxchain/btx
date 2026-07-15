@@ -1095,7 +1095,13 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     pblock->nNonce64       = 0;
     pblock->mix_hash.SetNull();
     if (chainparams.GetConsensus().fMatMulPOW) {
-        pblock->matmul_dim = static_cast<uint16_t>(chainparams.GetConsensus().nMatMulDimension);
+        // MatMul v4 (spec §I.3, §J#9): at and above nMatMulV4Height the
+        // template carries the v4 dimension; SetDeterministicMatMulSeeds
+        // below already dispatches to the v4 (unconditionally nonce/parent-
+        // MTP-bound) seed derivation internally via IsMatMulV4Active.
+        pblock->matmul_dim = chainparams.GetConsensus().IsMatMulV4Active(nHeight)
+            ? static_cast<uint16_t>(chainparams.GetConsensus().nMatMulV4Dimension)
+            : static_cast<uint16_t>(chainparams.GetConsensus().nMatMulDimension);
         if (!SetDeterministicMatMulSeeds(
                 *pblock,
                 chainparams.GetConsensus(),
@@ -1105,10 +1111,12 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         }
         pblock->matmul_digest.SetNull();
         // v1 uses seed-derived matrices; do not store full matrices in block body.
-        // Validators regenerate A and B from seed_a/seed_b on demand.
+        // Validators regenerate A and B from seed_a/seed_b on demand. v4 blocks
+        // are likewise seed-derived only (spec §H.2: A/B payload forbidden).
         pblock->matrix_a_data.clear();
         pblock->matrix_b_data.clear();
-        // C' payload is populated after mining solves the block (see PopulateFreivaldsPayload)
+        // C' / sketch payload is populated after mining solves the block (see
+        // PopulateFreivaldsPayload for v3, SolveMatMul's v4 dispatch for v4).
         pblock->matrix_c_data.clear();
     } else {
         pblock->matmul_dim = 0;

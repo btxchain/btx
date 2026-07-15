@@ -20,6 +20,7 @@
 #include <matmul/freivalds.h>
 #include <matmul/matmul_pow.h>
 #include <matmul/noise.h>
+#include <matmul/pow_v4.h>
 #include <matmul/transcript.h>
 #include <metal/matmul_accel.h>
 #include <metal/oracle_accel.h>
@@ -110,6 +111,27 @@ bool SetDeterministicMatMulSeeds(
         block.seed_b.SetNull();
         return true;
     }
+    // MatMul v4 (spec §H.4): seeds are unconditionally nonce- and parent-MTP-
+    // bound at and above the v4 fork height, regardless of the legacy
+    // nMatMulNonceSeedHeight / nMatMulParentMtpSeedHeight gates -- those are
+    // subsumed by v4 activation (spec §G.3: "V4 seed rule is unconditionally
+    // nonce- and parent-MTP-bound"). v4 reuses the existing V3 seed preimage
+    // (prevhash, parent MTP, height, version, merkle, time, bits, nonce64,
+    // dim, which) rather than introducing a new domain-separated scheme:
+    // v3 and v4 heights are disjoint by construction (v4 only activates
+    // above v3 history) and matmul_dim differs between every v3 network's
+    // configured dimension and the v4 dimension, so no cross-version seed
+    // collision is possible despite the shared "BTX_MATMUL_SEED_V3" label.
+    if (params.IsMatMulV4Active(block_height)) {
+        if (!parent_median_time_past.has_value()) {
+            block.seed_a.SetNull();
+            block.seed_b.SetNull();
+            return false;
+        }
+        block.seed_a = DeterministicMatMulSeedV3(block, static_cast<uint32_t>(block_height), *parent_median_time_past, 0);
+        block.seed_b = DeterministicMatMulSeedV3(block, static_cast<uint32_t>(block_height), *parent_median_time_past, 1);
+        return true;
+    }
     if (params.IsMatMulParentMtpSeedActive(block_height)) {
         if (!parent_median_time_past.has_value()) {
             block.seed_a.SetNull();
@@ -136,6 +158,42 @@ constexpr int64_t DGW_PAST_BLOCKS{180};
 constexpr uint32_t DEFAULT_MINER_HEADER_TIME_REFRESH_ATTEMPTS{4'096U};
 constexpr uint64_t MATMUL_V2_ABS_MAX_DIM{2048};
 constexpr uint64_t MATMUL_V2_MAX_PAYLOAD_WORDS{MATMUL_V2_ABS_MAX_DIM * MATMUL_V2_ABS_MAX_DIM};
+// MatMul v4 (spec §G.4 invariant #7 / §H.3): DoS-bound cap for the v4 sketch
+// payload word count. The sketch profile (default; spec §0.7-(3)) is far
+// smaller than n^2 words (~2 MiB at n=4096, b=8), so this remains a generous
+// upper bound rather than a tight one; it exists only to reject an obviously
+// oversized relayed payload before further processing.
+constexpr uint64_t MATMUL_V4_ABS_MAX_DIM{8192};
+constexpr uint64_t MATMUL_V4_MAX_PAYLOAD_WORDS{MATMUL_V4_ABS_MAX_DIM * MATMUL_V4_ABS_MAX_DIM};
+
+// Byte<->word packing for the v4 sketch payload channel. matmul_v4::ComputeDigest
+// / VerifySketch operate on a flat little-endian byte buffer (per the
+// matmul_v4 API), but CBlock's existing trailing-payload relay field
+// (matrix_c_data, reused per spec §H.2) is a vector<uint32_t>. These helpers
+// are the one serialization seam between this file and src/matmul/pow_v4.h;
+// mining (SolveMatMulV4) and verification (CheckMatMulProofOfWork_V4ProductCommitted)
+// must use the same packing, which they do by sharing these functions.
+std::vector<uint32_t> PackMatMulV4SketchBytesToWords(const std::vector<unsigned char>& bytes)
+{
+    std::vector<uint32_t> words((bytes.size() + 3) / 4, 0);
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        words[i / 4] |= static_cast<uint32_t>(bytes[i]) << (8 * (i % 4));
+    }
+    return words;
+}
+
+std::vector<unsigned char> UnpackMatMulV4SketchWordsToBytes(const std::vector<uint32_t>& words)
+{
+    std::vector<unsigned char> bytes;
+    bytes.reserve(words.size() * 4);
+    for (uint32_t w : words) {
+        bytes.push_back(static_cast<unsigned char>(w & 0xFF));
+        bytes.push_back(static_cast<unsigned char>((w >> 8) & 0xFF));
+        bytes.push_back(static_cast<unsigned char>((w >> 16) & 0xFF));
+        bytes.push_back(static_cast<unsigned char>((w >> 24) & 0xFF));
+    }
+    return bytes;
+}
 constexpr int64_t WARMUP_HARDENING_MIN_NUM{5};
 constexpr int64_t WARMUP_HARDENING_MIN_DEN{6};
 constexpr int64_t WARMUP_EASING_MAX_NUM{3};
@@ -893,6 +951,16 @@ int32_t LatestMatMulAsertPreUpgradeAnchorHeight(const CBlockIndex* pindexLast, c
                pindexLast->nHeight >= params.nMatMulAsertRetuneHeight) {
         anchor_height = params.nMatMulAsertRetuneHeight;
     }
+    // MatMul v4 (spec §I.4): the one-time v4 rescale re-anchors ASERT at
+    // nMatMulV4Height, mechanically identical to the retune2 anchor above.
+    // v4 is always the latest chronological hard fork on any network that
+    // activates it, so this unconditionally wins over any earlier retune/
+    // retune2 anchor once the tip has passed it.
+    if (!IsDisabledHeight(params.nMatMulV4Height) &&
+        pindexLast->nHeight >= params.nMatMulV4Height &&
+        params.nMatMulV4Height > anchor_height) {
+        anchor_height = params.nMatMulV4Height;
+    }
     return anchor_height;
 }
 
@@ -959,6 +1027,17 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
     if (params.nMatMulAsertRetune2TargetNum == 0 || params.nMatMulAsertRetune2TargetDen == 0) {
         LogWarning("MatMulAsert: retune2 ratio is invalid (num=%u den=%u) at height %d, failing closed to powLimit\n",
                    params.nMatMulAsertRetune2TargetNum, params.nMatMulAsertRetune2TargetDen, next_height);
+        return false;
+    }
+    if (params.nMatMulV4AsertRescaleNum <= 0 || params.nMatMulV4AsertRescaleDen <= 0) {
+        LogWarning("MatMulAsert: v4 rescale ratio is invalid (num=%lld den=%lld) at height %d, failing closed to powLimit\n",
+                   static_cast<long long>(params.nMatMulV4AsertRescaleNum),
+                   static_cast<long long>(params.nMatMulV4AsertRescaleDen), next_height);
+        return false;
+    }
+    if (!IsDisabledHeight(params.nMatMulV4Height) && params.nMatMulV4Height < params.nMatMulAsertHeight) {
+        LogWarning("MatMulAsert: v4 height=%d is below ASERT activation=%d at height %d, failing closed to powLimit\n",
+                   params.nMatMulV4Height, params.nMatMulAsertHeight, next_height);
         return false;
     }
 
@@ -2165,6 +2244,27 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         return retune2_target.GetCompact();
     }
 
+    // MatMul v4 (spec §I.4): one-time ASERT rescale at the v4 fork height,
+    // mechanically identical to the retune2 mechanism above --
+    // next_target = parent_target * Num/Den, then ASERT re-anchors on this
+    // block (LatestMatMulAsertPreUpgradeAnchorHeight, above). The v4 per-nonce
+    // work unit (a dense INT8 GEMM) differs sharply in cost from the v3
+    // pre-hash-gated transcript work unit it replaces, so attempts/s can drop
+    // by a large hardware-dependent factor exactly at the fork; Num/Den must
+    // be calibrated empirically pre-release per network (nMatMulV4AsertRescaleNum/
+    // Den, default 1/1 = no rescale for fresh chains that bootstrap nBits
+    // directly for the v4 work unit).
+    if (next_height == params.nMatMulV4Height) {
+        arith_uint256 parent_target{};
+        parent_target.SetCompact(pindexLast->nBits);
+        arith_uint256 v4_target = ScaleTargetByTimespan(
+            parent_target,
+            params.nMatMulV4AsertRescaleNum,
+            params.nMatMulV4AsertRescaleDen);
+        v4_target = ClampRetargetResult(v4_target, pow_limit);
+        return v4_target.GetCompact();
+    }
+
     if (next_height == params.nMatMulAsertHalfLifeUpgradeHeight) {
         arith_uint256 parent_target{};
         parent_target.SetCompact(pindexLast->nBits);
@@ -2670,12 +2770,28 @@ bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::P
         return block.GetHash() == params.hashGenesisBlock;
     }
 
-    if (params.nMatMulTranscriptBlockSize == 0) return false;
-    if (block.matmul_dim != params.nMatMulDimension) return false;
-    if (block.matmul_dim < params.nMatMulMinDimension) return false;
-    if (block.matmul_dim > params.nMatMulMaxDimension) return false;
-    if (block.matmul_dim % params.nMatMulTranscriptBlockSize != 0) return false;
-    if (params.nMatMulNoiseRank == 0 || params.nMatMulNoiseRank > block.matmul_dim) return false;
+    // MatMul v4 (spec §I.1): height is not available at this context-free
+    // layer -- CheckBlockHeader/CheckBlock in validation.cpp both call this
+    // before the block index (and hence height) is resolved. Accept EITHER
+    // the legacy v3 dimension or the v4 dimension (only when a v4 fork
+    // height is actually configured on this network); the height-gated
+    // exact-match enforcement runs contextually in ContextualCheckBlockHeader,
+    // exactly mirroring how the rest of the v3 cascade (Phase2/Freivalds/
+    // ProductCommitted, and now CheckMatMulProofOfWork_V4ProductCommitted)
+    // already defers to ContextualCheckBlock for full block-index context.
+    const bool v4_configured = params.nMatMulV4Height != std::numeric_limits<int32_t>::max();
+    const bool matches_v4_dim = v4_configured && block.matmul_dim == params.nMatMulV4Dimension;
+    if (matches_v4_dim) {
+        if (params.nMatMulV4TranscriptBlockSize == 0) return false;
+        if (block.matmul_dim % params.nMatMulV4TranscriptBlockSize != 0) return false;
+    } else {
+        if (params.nMatMulTranscriptBlockSize == 0) return false;
+        if (block.matmul_dim != params.nMatMulDimension) return false;
+        if (block.matmul_dim < params.nMatMulMinDimension) return false;
+        if (block.matmul_dim > params.nMatMulMaxDimension) return false;
+        if (block.matmul_dim % params.nMatMulTranscriptBlockSize != 0) return false;
+        if (params.nMatMulNoiseRank == 0 || params.nMatMulNoiseRank > block.matmul_dim) return false;
+    }
     if (block.seed_a.IsNull() || block.seed_b.IsNull()) return false;
 
     auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
@@ -2811,6 +2927,10 @@ bool HasMatMulFreivaldsPayload(const CBlock& block)
 
 bool ShouldIncludeMatMulFreivaldsPayloadForMining(int32_t block_height, const Consensus::Params& params)
 {
+    // MatMul v4 (spec §G.3): v4 blocks are always product-committed and the
+    // C payload is always required, independent of the legacy
+    // fMatMulFreivaldsEnabled / fMatMulRequireProductPayload flags.
+    if (params.IsMatMulV4Active(block_height)) return true;
     if (!params.fMatMulFreivaldsEnabled) return false;
     if (params.IsMatMulProductPayloadRequired(block_height)) return true;
     return params.IsMatMulFreivaldsBindingActive(block_height);
@@ -2962,6 +3082,61 @@ bool CheckMatMulProofOfWork_ProductCommitted(const CBlock& block, const Consensu
         A_prime, B_prime, C_prime, sigma, params.nMatMulFreivaldsRounds);
 
     return finish(fv_result.passed);
+}
+
+bool IsMatMulV4PayloadSizeValid(const CBlock& block, const Consensus::Params& params)
+{
+    if (block.matmul_dim == 0) return false;
+    if (block.matmul_dim != params.nMatMulV4Dimension) return false;
+    if (block.matrix_c_data.empty()) return false;
+    if (block.matrix_c_data.size() > MATMUL_V4_MAX_PAYLOAD_WORDS) return false;
+    return true;
+}
+
+bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consensus::Params& params, int32_t block_height)
+{
+    const auto start = std::chrono::steady_clock::now();
+    const auto finish = [&](bool passed) {
+        RegisterMatMulValidationRuntimeSample(
+            MatMulValidationPath::FREIVALDS,
+            passed,
+            std::chrono::steady_clock::now() - start);
+        return passed;
+    };
+
+    if (!params.IsMatMulV4Active(block_height)) return finish(false);
+    if (block.matmul_dim != params.nMatMulV4Dimension) return finish(false);
+    if (block.seed_a.IsNull() || block.seed_b.IsNull()) return finish(false);
+    // v4 blocks are seed-derived only; the legacy v2 arbitrary-matrix payload
+    // channels must be empty (spec §H.2: "matrix_a_data, matrix_b_data --
+    // must be empty (A,B fully determined by seeds; non-empty -> invalid
+    // v4-forbidden-ab-payload)").
+    if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty()) return finish(false);
+    if (!IsMatMulV4PayloadSizeValid(block, params)) return finish(false);
+    if (params.nMatMulV4FreivaldsRounds == 0) return finish(false);
+
+    auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
+    if (!bnTarget) return finish(false);
+
+    // Unpack the trailing product-sketch payload (vector<uint32_t> LE words,
+    // spec §H.2's reused trailing-payload serialization) into the flat byte
+    // buffer matmul_v4::VerifySketch expects.
+    const std::vector<unsigned char> sketch_payload = UnpackMatMulV4SketchWordsToBytes(block.matrix_c_data);
+
+    // matmul_v4::VerifySketch performs the full O(n^2) v4 cascade (spec §I.2):
+    // payload shape/canonicality mod q, regenerating A,B from the header
+    // seeds, R deterministic Freivalds rounds over the independent prime
+    // q = 2^61-1, and recomputing the product-committed digest. It never
+    // recomputes the O(n^3) product.
+    uint256 digest;
+    if (!matmul_v4::VerifySketch(block, params.nMatMulV4Dimension, params.nMatMulV4FreivaldsRounds,
+                                  sketch_payload, digest)) {
+        return finish(false);
+    }
+    if (digest != block.matmul_digest) return finish(false);
+    if (UintToArith256(digest) > *bnTarget) return finish(false);
+
+    return finish(true);
 }
 
 static void SetFreivaldsPayloadFromProduct(std::vector<uint32_t>& payload_out, const matmul::Matrix& C_prime)
@@ -3870,6 +4045,75 @@ bool SolveMatMulParallel(CBlockHeader& block,
     return false;
 }
 
+// MatMul v4 (spec §I.3): dedicated solver loop, mirroring the v3 solvers'
+// nonce/max_tries/abort_flag contract but dispatched separately because v4
+// has no pre-hash gate, no noise, and no pooled share-target override (out
+// of scope for this fork; see spec §I.3 -- the v4 reference miner MUST
+// implement the optimal §E.3 (U*A)(B*V) sketch evaluation, which is an
+// internal implementation detail of matmul_v4::ComputeDigest, not something
+// this dispatch layer needs to know about).
+static bool SolveMatMulV4(CBlockHeader& block,
+                          const Consensus::Params& params,
+                          uint64_t& max_tries,
+                          int32_t block_height,
+                          const std::atomic<bool>* abort_flag,
+                          std::vector<uint32_t>* freivalds_payload_out,
+                          std::optional<int64_t> parent_median_time_past)
+{
+    if (!params.IsMatMulV4Active(block_height)) return false;
+    if (!parent_median_time_past.has_value()) return false;
+    if (params.nMatMulV4Dimension == 0 ||
+        params.nMatMulV4Dimension > std::numeric_limits<uint16_t>::max()) {
+        LogWarning("SolveMatMulV4: nMatMulV4Dimension=%u out of uint16_t range\n", params.nMatMulV4Dimension);
+        return false;
+    }
+    block.matmul_dim = static_cast<uint16_t>(params.nMatMulV4Dimension);
+
+    auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
+    if (!bnTarget) return false;
+
+    const auto start = std::chrono::steady_clock::now();
+    while (max_tries > 0) {
+        if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        // H.4: v4 seeds are unconditionally nonce-bound, so seed_a/seed_b are
+        // re-derived for every nonce attempt (see SetDeterministicMatMulSeeds).
+        if (!SetDeterministicMatMulSeeds(block, params, block_height, parent_median_time_past)) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+
+        uint256 digest;
+        std::vector<unsigned char> sketch_payload;
+        // matmul_v4::ComputeDigest runs the single dense INT8 GEMM (the
+        // O(n^3) miner-side work per spec §A.6/§E.3) and returns the
+        // product-committed digest plus the sketch payload that verifiers
+        // Freivalds-check in O(n^2) via matmul_v4::VerifySketch.
+        if (matmul_v4::ComputeDigest(block, params.nMatMulV4Dimension, params.nMatMulV4FreivaldsRounds,
+                                      digest, sketch_payload) &&
+            UintToArith256(digest) <= *bnTarget) {
+            block.matmul_digest = digest;
+            if (freivalds_payload_out != nullptr) {
+                *freivalds_payload_out = PackMatMulV4SketchBytesToWords(sketch_payload);
+            }
+            RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
+            return true;
+        }
+
+        --max_tries;
+        if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        ++block.nNonce64;
+        block.nNonce = static_cast<uint32_t>(block.nNonce64);
+    }
+    RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+    return false;
+}
+
 bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t& max_tries,
                  int32_t block_height,
                  const std::atomic<bool>* abort_flag,
@@ -3882,6 +4126,15 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
         freivalds_payload_out->clear();
     }
     if (max_tries == 0) return false;
+
+    // MatMul v4 (spec §I.3): height-gated dispatch to the dedicated v4
+    // solver loop, ahead of all v3 nonce-seed/backend-selection machinery
+    // below. Mirrors how CheckMatMulProofOfWork_V4ProductCommitted fully
+    // replaces the v3 verification ladder at and above nMatMulV4Height.
+    if (params.IsMatMulV4Active(block_height)) {
+        return SolveMatMulV4(block, params, max_tries, block_height, abort_flag,
+                              freivalds_payload_out, parent_median_time_past);
+    }
     if (block.matmul_dim == 0) {
         if (params.nMatMulDimension > std::numeric_limits<uint16_t>::max()) {
             LogWarning("SolveMatMul: nMatMulDimension=%u exceeds uint16_t range\n", params.nMatMulDimension);

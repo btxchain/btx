@@ -164,6 +164,20 @@ bool CheckMatMulProofOfWork_Freivalds(const CBlock& block, const Consensus::Para
 /** Product-committed O(n^2) verification: computes digest from (sigma, A', B', C')
  *  and verifies A'*B'==C' via Freivalds. No transcript recomputation needed. */
 bool CheckMatMulProofOfWork_ProductCommitted(const CBlock& block, const Consensus::Params& params, int32_t block_height = -1);
+/** MatMul v4 (doc/btx-matmul-v4-design-spec.md, §I.2): the single v4 expensive
+ *  verification check, run exclusively at and above nMatMulV4Height (no v3
+ *  fallback ladder). Extracts the trailing sketch payload from
+ *  block.matrix_c_data (spec §H.2's "reuses the trailing-payload
+ *  serialization", byte-packed as little-endian uint32 words), regenerates
+ *  A,B from the header seeds, runs matmul_v4::VerifySketch's O(n^2)
+ *  deterministic Freivalds cascade over q = 2^61-1, and checks the
+ *  recomputed digest against the block target. Never recomputes the O(n^3)
+ *  product. */
+bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consensus::Params& params, int32_t block_height = -1);
+/** Coarse DoS-bound shape check for the v4 sketch payload (dimension match,
+ *  non-empty, bounded word count). The authoritative shape/canonicality check
+ *  runs inside matmul_v4::VerifySketch itself. */
+bool IsMatMulV4PayloadSizeValid(const CBlock& block, const Consensus::Params& params);
 bool ShouldIncludeMatMulFreivaldsPayloadForMining(int32_t block_height, const Consensus::Params& params);
 bool HasMatMulV2Payload(const CBlock& block);
 bool HasMatMulFreivaldsPayload(const CBlock& block);
