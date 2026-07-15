@@ -87,8 +87,9 @@ Details + per-backend build flags: `doc/matmul-v4-gpu-backends.md`.
 | B2a | Cross-vendor INT8 determinism golden vectors — generate on H100/B200/consumer/Apple-M5/CDNA and confirm identical | **real GPUs** |
 | B2b | One-time ASERT rescale `Num/Den` — benchmark real v3→v4 throughput on reference hardware and set empirically | reference GPU |
 | B2c | b=8 roofline confirmation on real IMMA/MFMA/Metal kernels | real GPUs |
-| B2d | Operand XOF regen timing envelope (15–35 ms); s8 operand + U/V sampling vectors | CPU/GPU |
+| B2d | Operand XOF regen timing envelope (15–35 ms); s8 operand + U/V sampling vectors. **Note (PR #89 review): the 15–35 ms envelope is the VERIFIER's once-per-block cost — the MINER pays expansion on every nonce**, so the XOF is also gated by the §K.2a-WT wall-time check. The per-element-hash XOF (~38.5M SHA-256/nonce at n=4096, 62.9% of per-nonce time on a 5090) is replaced by the wide counter-mode XOF (~1.2M, ~32× fewer; spec §A.2/C-12); operand values and all digests changed | CPU/GPU |
 | B2e | n=4096 verify-budget confirmation on reference CPUs (<1 s single-thread) | CPU |
+| B2f | **Mod-q combine on tensor cores (spec Appendix C-13, post-XOF-fix miner bottleneck)** — limb-decompose the P·Q combine onto s8×s8→s32 tensor GEMMs so the GEMM dominates per-nonce wall-time (§K.2a-WT); until then the int-ALU combine (~n³/64 mod-q MACs) is the dominant per-nonce stage on GPU backends | GPU kernels + real-GPU re-measure |
 
 ### B3. Security audit
 External consensus/security audit. Focus: verifier DoS surface (payload

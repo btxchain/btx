@@ -102,11 +102,12 @@ std::pair<uint256, uint256> DeriveProjectorSeeds(const uint256& sigma)
 
 std::vector<int8_t> ExpandOperand(const uint256& seed, uint32_t n)
 {
+    // Wide counter-mode XOF (§A.2, Appendix C-12): ~31.4 elements per SHA-256
+    // compression instead of the retired one-hash-per-element oracle, so the
+    // per-nonce hash cost stays subdominant to the INT8 GEMM (PR #89 review).
     const size_t count = static_cast<size_t>(n) * n;
     std::vector<int8_t> out(count);
-    for (size_t idx = 0; idx < count; ++idx) {
-        out[idx] = int8_field::SampleBalancedS8FromOracle(seed, static_cast<uint32_t>(idx));
-    }
+    int8_field::ExpandBalancedS8Stream(seed, count, out.data());
     return out;
 }
 
@@ -114,9 +115,7 @@ std::vector<int8_t> ExpandProjector(const uint256& seed, uint32_t rows, uint32_t
 {
     const size_t count = static_cast<size_t>(rows) * cols;
     std::vector<int8_t> out(count);
-    for (size_t idx = 0; idx < count; ++idx) {
-        out[idx] = int8_field::SampleBalancedS8FromOracle(seed, static_cast<uint32_t>(idx));
-    }
+    int8_field::ExpandBalancedS8Stream(seed, count, out.data());
     return out;
 }
 
@@ -343,12 +342,12 @@ bool SketchFreivalds(const std::vector<int8_t>& A,
     for (uint32_t round = 0; round < rounds; ++round) {
         const uint256 seed = DeriveChallengeSeed(sigma, payload_hash, round);
 
-        // Challenge vectors x, y in F_q^m (§E.2).
-        std::vector<Fq> x(m), y(m);
-        for (uint32_t i = 0; i < m; ++i) {
-            x[i] = int8_field::FqFromOracle(seed, i);
-            y[i] = int8_field::FqFromOracle(seed, m + i);
-        }
+        // Challenge vectors x, y in F_q^m (§E.2), drawn from one wide
+        // counter-mode F_q keystream: elements [0, m) are x, [m, 2m) are y.
+        std::vector<Fq> xy(2 * static_cast<size_t>(m));
+        int8_field::ExpandFqStream(seed, xy.size(), xy.data());
+        const std::vector<Fq> x(xy.begin(), xy.begin() + m);
+        const std::vector<Fq> y(xy.begin() + m, xy.end());
 
         // Left side: x^T Chat y in O(m^2).
         Fq lhs = 0;

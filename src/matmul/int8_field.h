@@ -5,6 +5,7 @@
 #ifndef BTX_MATMUL_INT8_FIELD_H
 #define BTX_MATMUL_INT8_FIELD_H
 
+#include <cstddef>
 #include <cstdint>
 
 class uint256;
@@ -61,10 +62,17 @@ inline constexpr uint32_t kMaxHeaderDim = 65535;
  *  r - 125 in [-125, 125]. */
 [[nodiscard]] int8_t SampleBalancedS8(uint8_t byte, bool& accepted);
 
-/** Deterministically derive one canonical balanced-s8 element from a seed and
- *  index via per-byte rejection sampling over SHA-256 (the v4 s8 analogue of
- *  matmul::field::from_oracle, §A.2). */
-[[nodiscard]] int8_t SampleBalancedS8FromOracle(const uint256& seed, uint32_t index);
+/** Deterministically expand `count` canonical balanced-s8 elements from a
+ *  seed via a WIDE counter-mode SHA-256 XOF (§A.2, Appendix C-12): keystream
+ *  block j = SHA256(seed_le || 's' || LE64(j)), all 32 bytes rejection-sampled
+ *  in stream order (~31.4 accepted elements per compression). Exact-integer,
+ *  byte-reproducible, and PQ-safe (SHA-256 only); the accepted-byte order is
+ *  the normative element order for every backend.
+ *
+ *  This replaces the retired per-element oracle (one full SHA-256 per element,
+ *  31 of 32 output bytes discarded) which made operand expansion -- not the
+ *  INT8 GEMM -- the dominant per-nonce cost (PR #89 review). */
+void ExpandBalancedS8Stream(const uint256& seed, size_t count, int8_t* out);
 
 /** Exact s8xs8->s32 dot product of two length-`len` balanced-s8 vectors
  *  (§B.2/§B.6). The caller MUST have established the accumulation bound
@@ -100,10 +108,12 @@ inline constexpr Fq kFieldPrime = (static_cast<Fq>(1) << 61) - 1;
 /** General signed-integer lift into F_q. */
 [[nodiscard]] Fq FqFromSigned(int64_t x);
 
-/** Deterministically derive a uniform F_q element from a seed and index by
- *  rejection sampling (the F_q analogue of matmul::field::from_oracle),
- *  used for the nonce-fresh Freivalds challenge vectors (§D.1, invariant I7). */
-[[nodiscard]] Fq FqFromOracle(const uint256& seed, uint32_t index);
+/** Deterministically expand `count` uniform F_q elements from a seed via the
+ *  same wide counter-mode SHA-256 XOF as ExpandBalancedS8Stream (domain byte
+ *  'q'): four LE64 words per compression, each masked to 61 bits and
+ *  rejection-sampled (only the value q itself rejects, probability 2^-61).
+ *  Used for the nonce-fresh Freivalds challenge vectors (§D.1, invariant I7). */
+void ExpandFqStream(const uint256& seed, size_t count, Fq* out);
 
 } // namespace matmul::int8_field
 

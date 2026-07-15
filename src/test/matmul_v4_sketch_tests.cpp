@@ -21,6 +21,7 @@
 #include <matmul/matmul_v4.h>
 
 #include <crypto/common.h>
+#include <crypto/sha256.h>
 #include <primitives/block.h>
 #include <random.h>
 #include <test/util/setup_common.h>
@@ -118,6 +119,95 @@ HonestProof ComputeHonestProof(uint64_t nonce = 1,
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(matmul_v4_sketch_tests, BasicTestingSetup)
+
+// --- Wide counter-mode XOF (§A.2, Appendix C-12; PR #89 review fix) ---------
+
+BOOST_AUTO_TEST_CASE(wide_xof_stream_matches_normative_construction)
+{
+    // Pin the normative operand XOF: keystream block j is
+    //   SHA256( seed_le(32) || 's' (0x73) || LE64(j) )
+    // and elements are the accepted (< 251) bytes in stream order, mapped to
+    // [-125, 125]. Re-derive the stream here independently of int8_field.cpp
+    // so any layout drift (domain byte, counter width/endianness, byte order,
+    // rejection rule) breaks this test.
+    const uint256 seed = ParseUint256("4504d44d861b69197db1d95e473442346c4f2bc1f5869996bdccd63cfbdbd150");
+    constexpr size_t kCount = 10'000;
+
+    std::vector<int8_t> got(kCount);
+    matmul::int8_field::ExpandBalancedS8Stream(seed, kCount, got.data());
+
+    uint8_t seed_le[32];
+    for (size_t i = 0; i < 32; ++i) seed_le[i] = seed.data()[31 - i];
+
+    std::vector<int8_t> want;
+    want.reserve(kCount);
+    uint64_t hashes = 0;
+    for (uint64_t block = 0; want.size() < kCount; ++block) {
+        CSHA256 hasher;
+        hasher.Write(seed_le, sizeof(seed_le));
+        const uint8_t domain = 0x73; // 's'
+        hasher.Write(&domain, 1);
+        uint8_t block_le[8];
+        WriteLE64(block_le, block);
+        hasher.Write(block_le, sizeof(block_le));
+        uint8_t hash[CSHA256::OUTPUT_SIZE];
+        hasher.Finalize(hash);
+        ++hashes;
+        for (size_t i = 0; i < CSHA256::OUTPUT_SIZE && want.size() < kCount; ++i) {
+            if (hash[i] < 251) {
+                want.push_back(static_cast<int8_t>(static_cast<int32_t>(hash[i]) - 125));
+            }
+        }
+    }
+    BOOST_CHECK(got == want);
+
+    // Width property (the load-bearing fix): ~31.4 elements per compression,
+    // i.e. hash count must be a small fraction of the element count — never
+    // the >= 1 hash/element of the retired per-element oracle.
+    BOOST_CHECK_LT(hashes, kCount / 25);
+
+    // Canonical balanced range.
+    for (const int8_t v : got) {
+        BOOST_CHECK_LE(static_cast<int32_t>(v), 125);
+        BOOST_CHECK_GE(static_cast<int32_t>(v), -125);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(wide_xof_fq_stream_matches_normative_construction)
+{
+    // Same pin for the F_q challenge stream: block j is
+    //   SHA256( seed_le(32) || 'q' (0x71) || LE64(j) )
+    // -> four LE64 words, each masked to 61 bits, rejecting only the value q.
+    const uint256 seed = ParseUint256("c6a811f7f75fe4e64be106a50351aed9c04403a74bfe7b4bbe59f7311722b735");
+    constexpr size_t kCount = 4'096;
+    constexpr uint64_t q = kMersenne61;
+
+    std::vector<matmul::int8_field::Fq> got(kCount);
+    matmul::int8_field::ExpandFqStream(seed, kCount, got.data());
+
+    uint8_t seed_le[32];
+    for (size_t i = 0; i < 32; ++i) seed_le[i] = seed.data()[31 - i];
+
+    std::vector<uint64_t> want;
+    want.reserve(kCount);
+    for (uint64_t block = 0; want.size() < kCount; ++block) {
+        CSHA256 hasher;
+        hasher.Write(seed_le, sizeof(seed_le));
+        const uint8_t domain = 0x71; // 'q'
+        hasher.Write(&domain, 1);
+        uint8_t block_le[8];
+        WriteLE64(block_le, block);
+        hasher.Write(block_le, sizeof(block_le));
+        uint8_t hash[CSHA256::OUTPUT_SIZE];
+        hasher.Finalize(hash);
+        for (size_t w = 0; w < CSHA256::OUTPUT_SIZE / 8 && want.size() < kCount; ++w) {
+            const uint64_t candidate = ReadLE64(hash + w * 8) & q;
+            if (candidate < q) want.push_back(candidate);
+        }
+    }
+    BOOST_CHECK(std::vector<uint64_t>(got.begin(), got.end()) == want);
+    for (const uint64_t v : got) BOOST_CHECK_LT(v, q);
+}
 
 // --- Optimal-vs-reference sketch equivalence --------------------------------
 

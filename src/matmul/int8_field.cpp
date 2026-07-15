@@ -6,7 +6,6 @@
 
 #include <crypto/common.h>
 #include <crypto/sha256.h>
-#include <logging.h>
 #include <uint256.h>
 
 #include <bit>
@@ -31,6 +30,13 @@ void SeedBytesLE(const uint256& seed, uint8_t out[32])
         out[i] = seed.data()[31 - i];
     }
 }
+
+// Domain-separation bytes for the two counter-mode XOF keystreams, so a seed
+// accidentally shared between the s8 and F_q samplers could never yield
+// correlated streams. Hash input is seed(32) || domain(1) || LE64(block) =
+// 41 bytes -- still a single SHA-256 compression per keystream block.
+constexpr uint8_t kS8StreamDomain = 0x73; // 's'
+constexpr uint8_t kFqStreamDomain = 0x71; // 'q'
 
 } // namespace
 
@@ -57,50 +63,50 @@ int8_t SampleBalancedS8(uint8_t byte, bool& accepted)
     return static_cast<int8_t>(static_cast<int32_t>(byte) - kBalancedBound);
 }
 
-int8_t SampleBalancedS8FromOracle(const uint256& seed, uint32_t index)
+void ExpandBalancedS8Stream(const uint256& seed, size_t count, int8_t* out)
 {
+    // WIDE counter-mode XOF (Appendix C-12; PR #89 review fix). One SHA-256
+    // per 32-byte keystream block -- SHA256(seed_le || 's' || LE64(block)) --
+    // and per-byte rejection sampling over the whole block, consuming accepted
+    // bytes in stream order. Expected yield is 32 * 251/256 ~ 31.4 elements
+    // per compression, i.e. ~32x fewer hashes than the retired per-element
+    // oracle (which burned one full SHA-256 per element and kept one byte).
+    //
+    // Determinism: the accepted-byte stream is a pure function of the seed --
+    // exact-integer, byte-reproducible, endianness pinned by SeedBytesLE /
+    // WriteLE64 -- so every conforming backend (CPU reference, CUDA, Metal,
+    // MFMA, AVX-512) reproduces identical operands bit-for-bit. Backends may
+    // hash keystream blocks in parallel and compact accepted bytes with a
+    // prefix sum, but the element order committed here is normative.
+    //
+    // No retry cap / fallback is needed: rejection simply advances the stream,
+    // and the probability that any fixed prefix rejects forever is 0; the
+    // stream always terminates after ~count*256/251 bytes in expectation.
     uint8_t seed_bytes[32];
     SeedBytesLE(seed, seed_bytes);
 
-    for (uint32_t retry = 0; retry < 256; ++retry) {
+    size_t filled = 0;
+    uint64_t block = 0;
+    while (filled < count) {
         CSHA256 hasher;
         hasher.Write(seed_bytes, sizeof(seed_bytes));
-
-        uint8_t index_le[4];
-        WriteLE32(index_le, index);
-        hasher.Write(index_le, sizeof(index_le));
-
-        if (retry > 0) {
-            uint8_t retry_le[4];
-            WriteLE32(retry_le, retry);
-            hasher.Write(retry_le, sizeof(retry_le));
-        }
+        hasher.Write(&kS8StreamDomain, 1);
+        uint8_t block_le[8];
+        WriteLE64(block_le, block);
+        hasher.Write(block_le, sizeof(block_le));
 
         uint8_t hash[CSHA256::OUTPUT_SIZE];
         hasher.Finalize(hash);
 
-        bool accepted = false;
-        const int8_t candidate = SampleBalancedS8(hash[0], accepted);
-        if (accepted) {
-            return candidate;
+        for (size_t i = 0; i < CSHA256::OUTPUT_SIZE && filled < count; ++i) {
+            bool accepted = false;
+            const int8_t candidate = SampleBalancedS8(hash[i], accepted);
+            if (accepted) {
+                out[filled++] = candidate;
+            }
         }
+        ++block;
     }
-
-    // Effectively unreachable (rejection probability per draw ~2%, so 256
-    // consecutive rejections is ~2^-1470), but consensus requires a
-    // deterministic result if it is ever reached.
-    CSHA256 fallback;
-    fallback.Write(seed_bytes, sizeof(seed_bytes));
-    uint8_t index_le[4];
-    WriteLE32(index_le, index);
-    fallback.Write(index_le, sizeof(index_le));
-    static constexpr uint8_t fallback_tag[] = "s8-oracle-fallback";
-    fallback.Write(fallback_tag, sizeof(fallback_tag) - 1);
-    uint8_t hash[CSHA256::OUTPUT_SIZE];
-    fallback.Finalize(hash);
-    LogPrintf("MATMUL v4 WARNING: SampleBalancedS8FromOracle exhausted retries at index=%u; using deterministic fallback\n", index);
-    // Map uniformly into [0,250] then to the balanced range; deterministic.
-    return static_cast<int8_t>(static_cast<int32_t>(hash[0] % kRejectThreshold) - kBalancedBound);
 }
 
 int32_t ExactDot(const int8_t* a, const int8_t* b, uint32_t len)
@@ -180,48 +186,40 @@ Fq FqFromInt32(int32_t x)
     return FqFromSigned(static_cast<int64_t>(x));
 }
 
-Fq FqFromOracle(const uint256& seed, uint32_t index)
+void ExpandFqStream(const uint256& seed, size_t count, Fq* out)
 {
+    // WIDE counter-mode XOF for F_q challenge vectors, mirroring
+    // ExpandBalancedS8Stream: SHA256(seed_le || 'q' || LE64(block)) yields
+    // four little-endian 64-bit words per compression; each word is masked to
+    // its low 61 bits and rejection-sampled (the only rejected value is
+    // exactly q, the non-canonical representative of 0, probability 2^-61),
+    // keeping every accepted element exactly uniform over [0, q).
+    // Deterministic, exact-integer, endianness pinned -- same cross-backend
+    // bit-exactness argument as the s8 stream.
     uint8_t seed_bytes[32];
     SeedBytesLE(seed, seed_bytes);
 
-    for (uint32_t retry = 0; retry < 256; ++retry) {
+    size_t filled = 0;
+    uint64_t block = 0;
+    while (filled < count) {
         CSHA256 hasher;
         hasher.Write(seed_bytes, sizeof(seed_bytes));
-
-        uint8_t index_le[4];
-        WriteLE32(index_le, index);
-        hasher.Write(index_le, sizeof(index_le));
-
-        if (retry > 0) {
-            uint8_t retry_le[4];
-            WriteLE32(retry_le, retry);
-            hasher.Write(retry_le, sizeof(retry_le));
-        }
+        hasher.Write(&kFqStreamDomain, 1);
+        uint8_t block_le[8];
+        WriteLE64(block_le, block);
+        hasher.Write(block_le, sizeof(block_le));
 
         uint8_t hash[CSHA256::OUTPUT_SIZE];
         hasher.Finalize(hash);
 
-        // Take the low 61 bits; the only rejected value is exactly q (the mask
-        // maximum), which is the non-canonical representative of 0. Rejection
-        // keeps the sample exactly uniform over [0, q).
-        const uint64_t candidate = ReadLE64(hash) & kFieldPrime;
-        if (candidate < kFieldPrime) {
-            return candidate;
+        for (size_t word = 0; word < CSHA256::OUTPUT_SIZE / sizeof(uint64_t) && filled < count; ++word) {
+            const uint64_t candidate = ReadLE64(hash + word * sizeof(uint64_t)) & kFieldPrime;
+            if (candidate < kFieldPrime) {
+                out[filled++] = candidate;
+            }
         }
+        ++block;
     }
-
-    CSHA256 fallback;
-    fallback.Write(seed_bytes, sizeof(seed_bytes));
-    uint8_t index_le[4];
-    WriteLE32(index_le, index);
-    fallback.Write(index_le, sizeof(index_le));
-    static constexpr uint8_t fallback_tag[] = "fq-oracle-fallback";
-    fallback.Write(fallback_tag, sizeof(fallback_tag) - 1);
-    uint8_t hash[CSHA256::OUTPUT_SIZE];
-    fallback.Finalize(hash);
-    LogPrintf("MATMUL v4 WARNING: FqFromOracle exhausted retries at index=%u; using deterministic fallback\n", index);
-    return FqReduce(static_cast<unsigned __int128>(ReadLE64(hash)));
 }
 
 } // namespace matmul::int8_field
