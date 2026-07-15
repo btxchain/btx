@@ -29,8 +29,8 @@ hardware runbook: `doc/matmul-v4-gpu-backends.md`.
 | A8 | CPU unit suite builds + **runs green** (all 5 v4 suites + regtest activation test) | ✅ done |
 | A9 | Golden determinism vectors — CPU run-to-run byte-identity validated by green suite | ✅ done (hard-pin optional) |
 | A10 | DoS verify-budget params + min/max dimension bounds (§G.2/§I.5) | ✅ done |
-| A11 | Pooled-mining / challenge-header RPC paths (still v3-only) | ☐ todo |
-| A12 | Optimal-miner `(U·A)(B·V)` path in CPU `ComputeDigest` (currently forms full C; correct but Θ(n³)) | ☐ todo (perf; backends already do it) |
+| A11 | Pooled-mining / challenge-header RPC paths made v4-aware | ✅ done |
+| A12 | Optimal-miner `(U·A)(B·V)` path in CPU `ComputeDigest` (byte-identical to full-C; enforced by equivalence test) | ✅ done |
 | A13 | Public code review of design spec + implementation | ☐ todo (PR #89) |
 
 Exit criterion: A1–A11 done, CPU suite green, reviewed → merge to `main`
