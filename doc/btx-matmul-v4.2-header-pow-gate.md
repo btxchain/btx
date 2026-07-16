@@ -45,14 +45,40 @@ remotely-triggerable, zero-cost **resource/liveness DoS** on header sync. The v3
 v4 (`validation.cpp`, "the pre-hash lottery gate is retired at v4"), which is
 what re-exposes this surface.
 
-## 2. The fix: a cheap, unforgeable header-work gate
+## 2. The mitigation: a header-work THROTTLE bound to nBits (audit C2), and why it is not full authentication (audit C1)
 
-Restore "producing a header costs real work" with an **additional** header
-validity rule at activated heights:
+Impose an **additional** header validity rule at activated heights whose cost is
+**proportional to the chainwork the header claims**:
 
 ```
-H( GetHash() || spam_nonce )  ≤  DeriveTarget(nMatMulHeaderPoWBits)
+H( GetHash() || spam_nonce )  ≤  ( block_target(nBits) << nMatMulHeaderPoWDiscountBits )
 ```
+
+Binding the throttle target to the block's OWN difficulty target (`nBits`),
+rather than a fixed target, is the audit-C2 correction: forging a header that
+claims difficulty `D` now costs `~D / 2^discount` header hashes, so an attacker
+cannot pay one easy grind while claiming arbitrarily large ASERT-derived work.
+Smaller `discount` = stronger throttle; honest overhead stays negligible because
+`SHA256d` is vastly cheaper than a matmul evaluation.
+
+**This is a rate-limiting THROTTLE, not authentication of chainwork (audit C1,
+OPEN).** A SHA-based header PoW cannot *authenticate* matmul-calibrated
+chainwork: a matmul evaluation is ~10^7× more expensive than a `SHA256d`, so an
+attacker can still out-hash the honest matmul work-rate in cheap SHA and forge a
+higher-claimed-work header chain — the throttle only bounds the *rate* at which
+they can do so (proportional to claimed work), it does not make forging as
+expensive as honest mining. **Closing C1 requires one of:**
+
+1. a compact header-verifiable proof of *matmul* work quantitatively bound to the
+   chainwork credited from `nBits` (so header acceptance costs real matmul work); or
+2. a chain-selection redesign that does **not** credit MatMul chainwork to
+   `nChainWork` / best-header / IBD decisions until the block *body* has been
+   verified (treat un-authenticated matmul headers as provisional / zero-trusted
+   work until the sketch proof validates).
+
+Option 2 is likely the smaller change and avoids a new header-format proof; it is
+the recommended direction. Both are **architectural** and out of scope for a
+single staged commit — this throttle is the interim, honestly-labelled mitigation.
 
 - `GetHash()` already commits every consensus header field (including the
   self-declared `matmul_digest`), so the gate binds the whole header.

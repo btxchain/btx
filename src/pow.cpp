@@ -1018,7 +1018,16 @@ MatMulAsertHalfLifeInfo ResolveMatMulAsertHalfLifeInfo(
         pindexLast->nHeight >= params.nMatMulAsertHalfLifeUpgradeHeight) {
         info.upgrade_active = true;
         info.current_half_life_s = params.nMatMulAsertHalfLifeUpgrade;
-        info.current_anchor_height = params.nMatMulAsertHalfLifeUpgradeHeight;
+        // Audit C4: the ASERT ANCHOR is the LATEST re-anchor point the tip has
+        // passed. The half-life upgrade re-anchors at its own height, but a v4 or
+        // BMX4C rescale that forks AFTER it is a later re-anchor and must win --
+        // previously this unconditionally overrode to the upgrade height,
+        // discarding a later rescale (unwinding a calibrated fork target). Take
+        // the max so any legal ordering (upgrade before OR after the rescales) is
+        // handled without a restrictive validation guard. The half-life VALUE is
+        // orthogonal and correctly upgrades once the tip passes the upgrade height.
+        info.current_anchor_height =
+            std::max(info.current_anchor_height, params.nMatMulAsertHalfLifeUpgradeHeight);
     }
 
     return info;
@@ -1118,6 +1127,38 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         return false;
     }
 
+    // Audit C5: the MatMulAsert cascade dispatches special one-time-rescale heights
+    // in a fixed order (asert -> retune -> retune2 -> v4 -> bmx4c) and returns on
+    // the FIRST match. A NON-inert (!= 1/1) rescale whose height collides with an
+    // EARLIER branch is silently shadowed (its calibrated re-anchor never applies).
+    // Reject such collisions at construction/validation so a misconfiguration fails
+    // LOUD; a 1/1 rescale shadowed is a no-op and stays legal. (bmx4c == v4 is the
+    // unified flag day -- the v4 branch is guarded out there so bmx4c is NOT
+    // shadowed; that case is handled by the v4-ratio-1/1 check above.)
+    {
+        const auto shadowed_by_earlier = [&](int32_t h) -> bool {
+            return (!IsDisabledHeight(params.nMatMulAsertHeight) && h == params.nMatMulAsertHeight) ||
+                   (!IsDisabledHeight(params.nMatMulAsertRetuneHeight) && h == params.nMatMulAsertRetuneHeight) ||
+                   (!IsDisabledHeight(params.nMatMulAsertRetune2Height) && h == params.nMatMulAsertRetune2Height);
+        };
+        if (!IsDisabledHeight(params.nMatMulV4Height) &&
+            params.nMatMulV4AsertRescaleNum != params.nMatMulV4AsertRescaleDen &&
+            shadowed_by_earlier(params.nMatMulV4Height)) {
+            LogWarning("MatMulAsert: non-inert v4 rescale height=%d collides with an earlier ASERT branch "
+                       "(rescale would be silently skipped) at height %d, failing closed to powLimit\n",
+                       params.nMatMulV4Height, next_height);
+            return false;
+        }
+        if (!IsDisabledHeight(params.nMatMulBMX4CHeight) &&
+            params.nMatMulBMX4CAsertRescaleNum != params.nMatMulBMX4CAsertRescaleDen &&
+            shadowed_by_earlier(params.nMatMulBMX4CHeight)) {
+            LogWarning("MatMulAsert: non-inert BMX4C rescale height=%d collides with an earlier ASERT branch "
+                       "(rescale would be silently skipped) at height %d, failing closed to powLimit\n",
+                       params.nMatMulBMX4CHeight, next_height);
+            return false;
+        }
+    }
+
     const bool retune_enabled = !IsDisabledHeight(params.nMatMulAsertRetuneHeight);
     const bool retune2_enabled = !IsDisabledHeight(params.nMatMulAsertRetune2Height);
     if (retune_enabled && params.nMatMulAsertRetuneHeight < params.nMatMulAsertHeight) {
@@ -1150,20 +1191,13 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         if (retune2_enabled) {
             latest_pre_upgrade_anchor = std::max(latest_pre_upgrade_anchor, params.nMatMulAsertRetune2Height);
         }
-        // Audit (wave-3, deep-consensus F1): the v4 and BMX4C one-time rescales are
-        // ALSO ASERT re-anchor points. ResolveMatMulAsertHalfLifeInfo overrides the
-        // anchor to the half-life-upgrade height once the tip passes it, so if the
-        // upgrade sits at/below a rescale fork it silently discards that rescale's
-        // re-anchor (the calibrated fork target is unwound after one block). Fold
-        // the rescale fork heights into the "latest prior anchor" so the upgrade
-        // must sit strictly ABOVE them, or fail closed. (No shipped net configures
-        // the upgrade, so this only tightens a latent misconfig.)
-        if (!IsDisabledHeight(params.nMatMulV4Height)) {
-            latest_pre_upgrade_anchor = std::max(latest_pre_upgrade_anchor, params.nMatMulV4Height);
-        }
-        if (!IsDisabledHeight(params.nMatMulBMX4CHeight)) {
-            latest_pre_upgrade_anchor = std::max(latest_pre_upgrade_anchor, params.nMatMulBMX4CHeight);
-        }
+        // Audit C4: do NOT fold the v4/BMX4C rescale heights into this guard. The
+        // anchor is now selected monotonically (ResolveMatMulAsertHalfLifeInfo takes
+        // the LATEST of the pre-upgrade anchor and the half-life-upgrade height), so
+        // a half-life upgrade BEFORE a later v4/BMX4C rescale is a valid, safe
+        // configuration (the later rescale wins as anchor). Requiring the upgrade to
+        // sit above the rescales would reject that valid config and fail difficulty
+        // closed to powLimit. Only the base/retune ordering below is constrained.
         if (params.nMatMulAsertHalfLifeUpgradeHeight <= latest_pre_upgrade_anchor) {
             LogWarning("MatMulAsert: half-life upgrade height=%d must be above latest prior anchor=%d at height %d, failing closed to powLimit\n",
                        params.nMatMulAsertHalfLifeUpgradeHeight, latest_pre_upgrade_anchor, next_height);
@@ -2921,22 +2955,37 @@ bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::P
 
 bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Params& params)
 {
-    // Audit F1: unforgeable cheap header work. The spam preimage is the block
-    // hash (which already commits every consensus header field, incl. the
-    // self-declared matmul_digest) concatenated with the DECOUPLED grinding nonce
-    // `nNonce`. Because nNonce is NOT part of ComputeMatMulHeaderHash (the matmul
-    // operand/digest preimage), an honest miner grinds nNonce to satisfy this gate
-    // WITHOUT recomputing the matmul -- so the honest cost is a few cheap hashes,
-    // while an attacker forging headers (matmul_digest = 0) must still pay ~1/p
-    // hashes PER header. Bit-exact: SHA256d over a fixed little-endian preimage.
-    // bits == 0 is the "disabled" sentinel (single-activation model: the gate has
-    // no height of its own, only this target -- 0 => no-op / always passes).
-    if (params.nMatMulHeaderPoWBits == 0) return true;
-    auto bnTarget{DeriveTarget(params.nMatMulHeaderPoWBits, params.powLimit)};
-    if (!bnTarget) return false;
+    // Audit F1/C1/C2: header-PoW THROTTLE bound to nBits. The preimage is the block
+    // hash (which commits every consensus header field, incl. the self-declared
+    // matmul_digest) concatenated with the DECOUPLED grinding nonce `nNonce`. Since
+    // nNonce is NOT part of ComputeMatMulHeaderHash, an honest miner grinds it
+    // WITHOUT recomputing the matmul. The throttle target is the block's OWN
+    // difficulty target (from nBits) shifted EASIER by the discount, so the header
+    // hash-work required to forge a header is PROPORTIONAL to the chainwork it
+    // claims (audit C2 -- a fixed target would let one easy grind claim arbitrary
+    // ASERT-derived work). This is a rate-limiting throttle, NOT full authentication
+    // of matmul-calibrated chainwork (audit C1 -- SHA << matmul; see the doc).
+    // Disabled sentinel: discount == UINT32_MAX -> always passes.
+    if (!params.IsMatMulHeaderPoWEnabled()) return true;
+    const auto block_target{DeriveTarget(block.nBits, params.powLimit)};
+    if (!block_target) return false;
+    const arith_uint256 pow_limit{UintToArith256(params.powLimit)};
+    const uint32_t d{params.nMatMulHeaderPoWDiscountBits};
+    arith_uint256 gate_target{*block_target};
+    if (d >= 256) {
+        gate_target = pow_limit;                       // discount past 256 bits: easiest allowed
+    } else if (d != 0) {
+        // Clamp to powLimit if the left-shift would overflow 256 bits.
+        if ((gate_target >> (256 - d)) != arith_uint256{0}) {
+            gate_target = pow_limit;
+        } else {
+            gate_target <<= d;
+            if (gate_target > pow_limit) gate_target = pow_limit;
+        }
+    }
     HashWriter hw;
     hw << block.GetHash() << block.nNonce;
-    return UintToArith256(hw.GetHash()) <= *bnTarget;
+    return UintToArith256(hw.GetHash()) <= gate_target;
 }
 
 bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height)

@@ -322,27 +322,39 @@ struct Params {
      *  the network has no pre-fork history). */
     int64_t nMatMulBMX4CAsertRescaleNum{1};
     int64_t nMatMulBMX4CAsertRescaleDen{1};
-    /** MatMul v4 header-PoW spam gate (audit F1, doc/btx-matmul-v4.2-header-pow-gate.md).
+    /** MatMul v4 header-PoW throttle (audit F1/C1/C2, doc/btx-matmul-v4.2-header-pow-gate.md).
      *  At v4 heights the ONLY header-level PoW check is `matmul_digest <= target`,
      *  but `matmul_digest` is a self-declared header field, not a hash of the
      *  header -- so an attacker can forge headers claiming arbitrary work at zero
      *  cost (set digest = 0) and flood header sync (best-header poisoning / stall).
-     *  The gate restores "producing a header costs real, unforgeable hash work":
-     *  it requires H(GetHash() || spam_nonce) <= DeriveTarget(nMatMulHeaderPoWBits),
-     *  where spam_nonce is a header field DECOUPLED from the matmul preimage (so an
-     *  honest miner grinds this cheap gate WITHOUT recomputing the expensive matmul;
-     *  coupling it to nNonce64 would multiply honest mining cost by 1/p_gate).
+     *  The throttle requires H(GetHash() || spam_nonce) <= (block_target <<
+     *  nMatMulHeaderPoWDiscountBits), where spam_nonce is a header field DECOUPLED
+     *  from the matmul preimage (so an honest miner grinds it WITHOUT recomputing
+     *  the expensive matmul).
      *
-     *  SINGLE ACTIVATION (no separate gate): the whole MatMul upgrade activates on
-     *  ONE flag day, so this gate has NO height of its own -- it rides the v4 fork
-     *  (IsMatMulV4Active). It is controlled solely by nMatMulHeaderPoWBits, whose
-     *  value 0 is the "disabled" sentinel (gate is a no-op). At the unified
-     *  activation the flag-day params set a real easy target here, alongside the
-     *  ACTIVATION-BLOCKING header-format change that adds the decoupled spam_nonce
-     *  (the legacy header `nNonce`) to the P2P header wire serialization so peers
-     *  receive the grinder (it is NOT transmitted today) -- see the header-pow-gate
-     *  doc. Default 0 = disabled, so no network is affected until that flag day. */
-    uint32_t nMatMulHeaderPoWBits{0};
+     *  BOUND TO nBits, NOT A FIXED COST (audit C2): the throttle target is the
+     *  block's OWN difficulty target (from nBits) shifted EASIER by the discount,
+     *  so the header hash-work an attacker must pay to forge a header is
+     *  PROPORTIONAL to the chainwork that header claims (~ D / 2^discount hashes for
+     *  claimed difficulty D) -- a fixed target would let an attacker pay one easy
+     *  grind while claiming arbitrary ASERT-derived chainwork. smaller discount =
+     *  stronger throttle; honest overhead stays negligible because SHA256d is vastly
+     *  cheaper than a matmul eval.
+     *
+     *  NOT full authentication (audit C1, OPEN): a SHA-based header PoW cannot
+     *  *authenticate* matmul-calibrated chainwork -- SHA is ~10^7x cheaper than a
+     *  matmul eval, so an attacker can still out-hash the honest matmul rate in SHA.
+     *  This is a rate-limiting THROTTLE, not a chainwork proof. Closing C1 requires
+     *  a header-verifiable matmul-work proof bound to nBits, or a chain-selection
+     *  redesign that does not credit matmul chainwork until the body is verified --
+     *  an architectural change tracked in the header-pow-gate doc.
+     *
+     *  SINGLE ACTIVATION: rides the v4 fork (IsMatMulV4Active), no height of its own.
+     *  UINT32_MAX = disabled sentinel (default). Enabling it is ALSO gated on the
+     *  ACTIVATION-BLOCKING header-format change that puts the decoupled spam_nonce
+     *  (legacy `nNonce`) on the P2P wire (it is not transmitted today) -- asserted
+     *  by AssertBMX4CConstructionInvariants via BTX_HEADER_NONCE_ON_WIRE. */
+    uint32_t nMatMulHeaderPoWDiscountBits{std::numeric_limits<uint32_t>::max()};
     /** C-1' accumulator-eligibility qualification threshold (consensus-
      *  PROTECTING, not consensus-changing): the minimum PROVEN exact
      *  FP-mantissa accumulator width t (in bits, 2^t exact-integer capacity)
@@ -589,13 +601,13 @@ struct Params {
             nMatMulBMX4CHeight != std::numeric_limits<int32_t>::max() &&
             height >= nMatMulBMX4CHeight;
     }
-    /** Header-PoW spam gate (audit F1) is enabled iff a non-zero easy target is
-     *  configured; it has NO separate activation height -- it rides the single v4
-     *  fork (see nMatMulHeaderPoWBits). Callers gate on IsMatMulV4Active(height)
-     *  && IsMatMulHeaderPoWEnabled(). Default disabled (bits == 0). */
+    /** Header-PoW throttle (audit F1/C1/C2) is enabled iff a discount is configured;
+     *  it has NO separate activation height -- it rides the single v4 fork (see
+     *  nMatMulHeaderPoWDiscountBits). Callers gate on IsMatMulV4Active(height) &&
+     *  IsMatMulHeaderPoWEnabled(). Default disabled (discount == UINT32_MAX). */
     bool IsMatMulHeaderPoWEnabled() const
     {
-        return nMatMulHeaderPoWBits != 0;
+        return nMatMulHeaderPoWDiscountBits != std::numeric_limits<uint32_t>::max();
     }
     /** The committed-operand encoding profile live at this height. Only
      *  meaningful at v4 heights (below nMatMulV4Height the v3 rules apply

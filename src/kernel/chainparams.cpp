@@ -12,6 +12,7 @@
 #include <hash.h>
 #include <kernel/messagestartchars.h>
 #include <logging.h>
+#include <matmul/matmul_v4.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
@@ -65,7 +66,17 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // the header wire -- enabling it before that wire change (and the miner grind)
     // lands is a reject-all mining halt. Fail LOUD at startup instead: the gate
     // may only be enabled once nNonce is on the wire.
-    assert(CBlockHeader::BTX_HEADER_NONCE_ON_WIRE || consensus.nMatMulHeaderPoWBits == 0);
+    assert(CBlockHeader::BTX_HEADER_NONCE_ON_WIRE || !consensus.IsMatMulHeaderPoWEnabled());
+
+    // Audit I1: the miner and verifier use the compile-time tile size
+    // matmul::v4::kTileB (b); a consensus nMatMulV4TranscriptBlockSize that differs
+    // from it would make EVERY v4 block invalid at the fork. Pin them equal
+    // wherever v4 is configured (nMatMulV4TranscriptBlockSize is not yet a truly
+    // parameterizable value -- the b=8/n=8192 profile is a future consensus change,
+    // not a live parameter).
+    if (consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max()) {
+        assert(consensus.nMatMulV4TranscriptBlockSize == matmul::v4::kTileB);
+    }
 
     if (consensus.nMatMulBMX4CHeight == std::numeric_limits<int32_t>::max()) return;
     // ENC-BMX4C is a profile of the v4 machine. It must fork at or above the v4

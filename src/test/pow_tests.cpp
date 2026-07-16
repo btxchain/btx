@@ -4666,9 +4666,9 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoWSpamGate_grindable_decoupled_and_enforced)
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
-    // SINGLE ACTIVATION: no gate height of its own. Default bits == 0 => disabled
-    // (a no-op that always passes), and it rides the v4 fork otherwise.
-    BOOST_CHECK(consensus.nMatMulHeaderPoWBits == 0);
+    // SINGLE ACTIVATION: no gate height of its own. Default discount == UINT32_MAX
+    // => disabled (a no-op that always passes), and it rides the v4 fork otherwise.
+    BOOST_CHECK(consensus.nMatMulHeaderPoWDiscountBits == std::numeric_limits<uint32_t>::max());
     BOOST_CHECK(!consensus.IsMatMulHeaderPoWEnabled());
     {
         CBlockHeader h{};
@@ -4676,18 +4676,19 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoWSpamGate_grindable_decoupled_and_enforced)
         BOOST_CHECK(CheckMatMulHeaderSpamGate(h, consensus));  // disabled => passes
     }
 
-    // Enable with an easy-but-nonzero target: top 12 bits zero (~1/4096 per hash),
-    // so grinding is fast yet most nonces fail.
-    const arith_uint256 easy_target{(~arith_uint256{0}) >> 12};
-    consensus.nMatMulHeaderPoWBits = easy_target.GetCompact();
+    // Enable, discount = 0 (strongest throttle: gate target == block target). Set a
+    // block nBits whose target has its top 12 bits zero (~1/4096 per hash) so
+    // grinding is fast yet most nonces fail.
+    consensus.nMatMulHeaderPoWDiscountBits = 0;
     BOOST_CHECK(consensus.IsMatMulHeaderPoWEnabled());
+    const arith_uint256 easy_target{(~arith_uint256{0}) >> 12};
 
     CBlockHeader header{};
     header.nVersion = 4;
     header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000606"};
     header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000607"};
     header.nTime = 1'780'000'030U;
-    header.nBits = 0x1d00ffff;
+    header.nBits = easy_target.GetCompact();  // the block's OWN target drives the gate
     header.nNonce64 = 7;
     header.matmul_digest.SetNull();  // an attacker's free "digest=0" forgery...
 
@@ -4715,6 +4716,21 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoWSpamGate_grindable_decoupled_and_enforced)
         if (!CheckMatMulHeaderSpamGate(header, consensus)) { found_failing = true; break; }
     }
     BOOST_CHECK_MESSAGE(found_failing, "gate accepted every nonce -- target too loose to be a filter");
+
+    // Audit C2 (bound to nBits): a much HARDER block target makes the gate strictly
+    // harder. The nonce that won the easy (top-12-bits-zero) target had its hash in
+    // [0, 2^244); against a top-60-bits-zero target it fails with overwhelming
+    // certainty (~1 - 2^-48) -- proving the gate scales with the claimed chainwork,
+    // not a fixed cost. (Test inputs are fixed-seed deterministic.)
+    const arith_uint256 harder_target{(~arith_uint256{0}) >> 60};
+    consensus.nMatMulHeaderPoWDiscountBits = 0;
+    header.nBits = harder_target.GetCompact();
+    header.nNonce = winning_nonce;
+    BOOST_CHECK_MESSAGE(!CheckMatMulHeaderSpamGate(header, consensus),
+                        "gate did not tighten when nBits got harder -- not bound to nBits");
+    // ...but a large discount re-opens it (discount is the nBits-relative easing).
+    consensus.nMatMulHeaderPoWDiscountBits = 256;  // gate target clamps to powLimit
+    BOOST_CHECK(CheckMatMulHeaderSpamGate(header, consensus));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
