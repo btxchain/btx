@@ -4,6 +4,7 @@
 
 #include <matmul/accel_v4.h>
 
+#include <arith_uint256.h>
 #include <matmul/backend_capabilities.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_bmx4_batch.h>
@@ -537,6 +538,7 @@ bool ComputeDigestsBatchedDispatched(const std::vector<CBlockHeader>& headers, u
 }
 
 bool ComputeDigestsBMX4CDispatched(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                   const uint256& win_target,
                                    std::vector<uint256>& digests_out,
                                    std::vector<std::vector<unsigned char>>& payloads_out)
 {
@@ -578,15 +580,29 @@ bool ComputeDigestsBMX4CDispatched(const std::vector<CBlockHeader>& headers, uin
     }
 
     if (device_ok) {
-        // HARD REQUIREMENT (same contract as the ENC-S8 batched path): verify
-        // EVERY returned (digest,payload) reproduces the ENC-BMX4C CPU reference
-        // via matmul::v4::bmx4::VerifySketchBMX4C (which re-derives the honest
+        // HARD REQUIREMENT (same contract as the ENC-S8 batched path): every
+        // returned (digest,payload) whose digest is a POTENTIAL WINNER
+        // (digest <= win_target) must reproduce the ENC-BMX4C CPU reference via
+        // matmul::v4::bmx4::VerifySketchBMX4C (which re-derives the honest
         // M11+E8M0 operands on the host, recomputes the digest, and runs the
         // UNCHANGED sketch-Freivalds check over q = 2^61-1). A single failure
-        // anywhere discards the ENTIRE device window; it is recomputed on the
-        // CPU below. A wrong device digest can therefore never win a block.
+        // among the potential winners discards the ENTIRE device window; it is
+        // recomputed on the CPU below. A wrong device digest can therefore never
+        // win a block.
+        //
+        // Audit P1-4: LOSING nonces (digest > win_target) are NOT Freivalds-
+        // verified here. A losing nonce can never be sealed no matter whether its
+        // device digest is right or wrong, so an 8 MiB verify on it is pure wasted
+        // CPU -- and at a Q=64 window at most one nonce can win, so verifying all
+        // 64 paid ~64x the cost for zero safety gain. The winning nonce (if any)
+        // is additionally re-derived through the single-nonce reference and
+        // resealed by the caller, so winners stay doubly protected.
+        const arith_uint256 win_target_arith = UintToArith256(win_target);
         bool all_verified = true;
         for (size_t i = 0; i < headers.size(); ++i) {
+            if (UintToArith256(accel_digests[i]) > win_target_arith) {
+                continue; // losing nonce: cannot win, skip the 8 MiB verify
+            }
             CBlockHeader verify_header = headers[i];
             verify_header.matmul_digest = accel_digests[i];
             uint256 verify_digest;

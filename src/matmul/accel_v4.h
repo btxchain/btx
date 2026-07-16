@@ -149,9 +149,24 @@ Kind ResolveBackend();
  *  the batch miner rejects the shape / template. `digests_out` / `payloads_out`
  *  are sized to headers.size() on success. Returns false only if `headers` is
  *  empty or the ENC-BMX4C reference itself rejects the shape (invalid (n, b) or
- *  n % 32 != 0). Same safety contract as the per-nonce / ENC-S8 paths: a single
- *  wrong device digest anywhere discards the WHOLE device window. */
+ *  n % 32 != 0).
+ *
+ *  Safety contract (audit P1-4): the host still runs the full O(n^2)
+ *  VerifySketchBMX4C over every returned (digest,payload) whose digest is a
+ *  POTENTIAL WINNER -- i.e. digest <= `win_target` -- and falls back the WHOLE
+ *  device window on ANY such mismatch, wrong window size, or device error, so a
+ *  wrong device digest can never win a block. It does NOT spend an 8 MiB
+ *  Freivalds verify on LOSING nonces (digest > win_target): a losing nonce can
+ *  never be sealed regardless of whether its device digest is correct, so
+ *  verifying it only burns CPU (previously every nonce in the window was
+ *  verified, so a Q=64 window paid ~64x the 8 MiB verify even though at most one
+ *  nonce can win). The winning nonce, if any, is additionally re-derived through
+ *  the single-nonce reference and resealed by the caller (SolveMatMulV4BMX4C),
+ *  so winners are doubly protected. Pass a win_target of all-ones (~uint256{})
+ *  to force verification of the entire window (e.g. determinism harnesses that
+ *  are not solving against a target). */
 [[nodiscard]] bool ComputeDigestsBMX4CDispatched(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                                 const uint256& win_target,
                                                  std::vector<uint256>& digests_out,
                                                  std::vector<std::vector<unsigned char>>& payloads_out);
 

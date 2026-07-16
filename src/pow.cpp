@@ -4520,8 +4520,13 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
 
         std::vector<uint256> digests;
         std::vector<std::vector<unsigned char>> payloads;
+        // Audit P1-4: pass the solve target so the dispatch host-verifies (full
+        // 8 MiB Freivalds) ONLY potential winners (digest <= bnTarget); losing
+        // nonces cannot be sealed, so their device digests are not re-verified
+        // (the winner is reference-resealed below regardless). At a Q=window
+        // batch this replaces ~window full verifies per batch with ~0.
         if (!matmul_v4::accel::ComputeDigestsBMX4CDispatched(candidates, n, params.nMatMulV4FreivaldsRounds,
-                                                             digests, payloads) ||
+                                                             ArithToUint256(bnTarget), digests, payloads) ||
             digests.size() != window || payloads.size() != window) {
             LogWarning("SolveMatMulV4BMX4C: batched ENC-BMX4C miner failed; aborting solve\n");
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
