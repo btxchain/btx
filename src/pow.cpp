@@ -1150,6 +1150,20 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         if (retune2_enabled) {
             latest_pre_upgrade_anchor = std::max(latest_pre_upgrade_anchor, params.nMatMulAsertRetune2Height);
         }
+        // Audit (wave-3, deep-consensus F1): the v4 and BMX4C one-time rescales are
+        // ALSO ASERT re-anchor points. ResolveMatMulAsertHalfLifeInfo overrides the
+        // anchor to the half-life-upgrade height once the tip passes it, so if the
+        // upgrade sits at/below a rescale fork it silently discards that rescale's
+        // re-anchor (the calibrated fork target is unwound after one block). Fold
+        // the rescale fork heights into the "latest prior anchor" so the upgrade
+        // must sit strictly ABOVE them, or fail closed. (No shipped net configures
+        // the upgrade, so this only tightens a latent misconfig.)
+        if (!IsDisabledHeight(params.nMatMulV4Height)) {
+            latest_pre_upgrade_anchor = std::max(latest_pre_upgrade_anchor, params.nMatMulV4Height);
+        }
+        if (!IsDisabledHeight(params.nMatMulBMX4CHeight)) {
+            latest_pre_upgrade_anchor = std::max(latest_pre_upgrade_anchor, params.nMatMulBMX4CHeight);
+        }
         if (params.nMatMulAsertHalfLifeUpgradeHeight <= latest_pre_upgrade_anchor) {
             LogWarning("MatMulAsert: half-life upgrade height=%d must be above latest prior anchor=%d at height %d, failing closed to powLimit\n",
                        params.nMatMulAsertHalfLifeUpgradeHeight, latest_pre_upgrade_anchor, next_height);
