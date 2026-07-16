@@ -152,6 +152,32 @@ arith_uint256 GetBlockProof(const CBlockIndex& block)
     return (~bnTarget / (bnTarget + 1)) + 1;
 }
 
+bool IsBlockAuthenticated(const CBlockIndex& block, const Consensus::Params& params)
+{
+    // Below the MatMul v4 fork, v3 header work is credited immediately (matches
+    // legacy nChainWork exactly). At and above the fork, a header's work is only
+    // authenticated once its body arrived and its MatMul product-committed proof
+    // verified -- which is precisely the point at which the index reaches
+    // BLOCK_VALID_TRANSACTIONS (ContextualCheckBlock runs the MatMul body proof
+    // before ReceivedBlockTransactions raises validity). A block that failed
+    // validation can never authenticate.
+    if (!params.IsMatMulV4Active(block.nHeight)) return true;
+    if (block.nStatus & BLOCK_FAILED_MASK) return false;
+    return (block.nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_TRANSACTIONS;
+}
+
+arith_uint256 GetBlockAuthenticatedProof(const CBlockIndex& block, const Consensus::Params& params)
+{
+    return IsBlockAuthenticated(block, params) ? GetBlockProof(block) : arith_uint256{};
+}
+
+void UpdateAuthenticatedChainWork(CBlockIndex& block, const Consensus::Params& params)
+{
+    block.nAuthenticatedChainWork =
+        (block.pprev ? block.pprev->nAuthenticatedChainWork : arith_uint256{}) +
+        GetBlockAuthenticatedProof(block, params);
+}
+
 int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& from, const CBlockIndex& tip, const Consensus::Params& params)
 {
     arith_uint256 r;

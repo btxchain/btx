@@ -168,6 +168,19 @@ public:
     //! (memory only) Total amount of work (expected number of hashes) in the chain up to and including this block
     arith_uint256 nChainWork{};
 
+    //! (memory only) AUTHENTICATED chainwork (audit P0.1/C1). Identical to
+    //! nChainWork for any block whose entire ancestry has verified block bodies,
+    //! and for every block at a pre-MatMul (v3) height. At MatMul (v4/v4.2)
+    //! heights a header contributes work here ONLY once its full block body has
+    //! arrived and its MatMul product-committed proof has verified (i.e. the
+    //! index reached BLOCK_VALID_TRANSACTIONS and is not BLOCK_FAILED). A forged
+    //! `matmul_digest`-only header chain (no bodies) therefore contributes ZERO
+    //! authenticated work even though it accrues full provisional nChainWork.
+    //! Like nChainWork this is derived, never serialized; it is deterministically
+    //! recomputed from persisted nStatus on restart/reindex.
+    //! @sa GetBlockAuthenticatedProof, UpdateAuthenticatedChainWork
+    arith_uint256 nAuthenticatedChainWork{};
+
     //! Number of transactions in this block. This will be nonzero if the block
     //! reached the VALID_TRANSACTIONS level, and zero otherwise.
     //! Note: in a potential headers-first mode, this number cannot be relied upon
@@ -370,6 +383,29 @@ protected:
 };
 
 arith_uint256 GetBlockProof(const CBlockIndex& block);
+
+/** Audit P0.1/C1 — authenticated-chainwork accounting.
+ *
+ *  IsBlockAuthenticated: whether `block`'s own PoW work may be credited as
+ *  AUTHENTICATED. At heights below the MatMul v4 fork this is always true (v3
+ *  header work is unforgeable-on-sight and credited immediately, byte-identical
+ *  to legacy behavior). At MatMul heights it is true iff the block's body has
+ *  been received and its MatMul product-committed proof verified -- i.e. the
+ *  index reached BLOCK_VALID_TRANSACTIONS and carries no BLOCK_FAILED bit. A
+ *  self-declared `matmul_digest` header with no valid body is never authenticated.
+ *
+ *  GetBlockAuthenticatedProof: GetBlockProof(block) when authenticated, else 0.
+ *
+ *  UpdateAuthenticatedChainWork: (re)derive block.nAuthenticatedChainWork as
+ *  pprev->nAuthenticatedChainWork + GetBlockAuthenticatedProof(block). This is the
+ *  single source of truth used by every maintenance site (AddToBlockIndex,
+ *  ReceivedBlockTransactions, LoadBlockIndex) and by the unit tests.
+ *
+ *  Callers hold cs_main (nStatus is cs_main-guarded). */
+bool IsBlockAuthenticated(const CBlockIndex& block, const Consensus::Params& params);
+arith_uint256 GetBlockAuthenticatedProof(const CBlockIndex& block, const Consensus::Params& params);
+void UpdateAuthenticatedChainWork(CBlockIndex& block, const Consensus::Params& params);
+
 /** Return the time it would take to redo the work difference between from and to, assuming the current hashrate corresponds to the difficulty at tip, in seconds. */
 int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& from, const CBlockIndex& tip, const Consensus::Params&);
 /** Find the forking point between two chain tips. */

@@ -6881,7 +6881,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         if (it != m_blockman.m_block_index.end()) {
             if (it->second.GetAncestor(pindex->nHeight) == pindex &&
                 m_chainman.m_best_header->GetAncestor(pindex->nHeight) == pindex &&
-                m_chainman.m_best_header->nChainWork >= m_chainman.MinimumChainWork()) {
+                // Audit P0.1/C1: use AUTHENTICATED work so a forged matmul-header
+                // chain cannot inflate best-header work past MinimumChainWork and
+                // thereby relax (skip) expensive script verification. Equal to
+                // nChainWork pre-fork and for any body-verified chain.
+                m_chainman.m_best_header->nAuthenticatedChainWork >= m_chainman.MinimumChainWork()) {
                 // This block is a member of the assumed verified chain and an ancestor of the best header.
                 // Script verification is skipped when connecting blocks under the
                 // assumevalid block. Assuming the assumevalid block is valid this
@@ -9539,6 +9543,14 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
     pindexNew->RaiseValidity(BLOCK_VALID_TRANSACTIONS);
     m_blockman.m_dirty_blockindex.insert(pindexNew);
 
+    // Audit P0.1/C1: the block's body (and, at MatMul heights, its MatMul
+    // product-committed proof) has now verified -- ContextualCheckBlock ran before
+    // us. Promote this index's authenticated-work contribution from 0 to its full
+    // GetBlockProof. Handles the case where pprev is not yet connected (the else
+    // branch below); the descendant walk repeats this for every block that becomes
+    // connected, in parent-before-child order.
+    UpdateAuthenticatedChainWork(*pindexNew, GetConsensus());
+
     if (pindexNew->pprev == nullptr || pindexNew->pprev->HaveNumChainTxs()) {
         // If pindexNew is the genesis block or all parents are BLOCK_VALID_TRANSACTIONS.
         std::deque<CBlockIndex*> queue;
@@ -9557,6 +9569,10 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
                    pindex->nHeight, pindex->m_chain_tx_count, prev_tx_sum(*pindex), CLIENT_NAME, FormatFullVersion(), CLIENT_BUGREPORT);
             }
             pindex->m_chain_tx_count = prev_tx_sum(*pindex);
+            // Audit P0.1/C1: re-derive authenticated chainwork for each block that
+            // just became connected. pprev is always processed before its children
+            // here, so pprev->nAuthenticatedChainWork is final by the time we read it.
+            UpdateAuthenticatedChainWork(*pindex, GetConsensus());
             pindex->nSequenceId = nBlockSequenceId++;
             for (Chainstate *c : GetAll()) {
                 c->TryAddBlockIndexCandidate(pindex);
@@ -10494,7 +10510,9 @@ void ChainstateManager::ReportHeadersPresync(const arith_uint256& work, int64_t 
         // Don't report headers presync progress if we already have a post-minchainwork header chain.
         // This means we lose reporting for potentially legitimate, but unlikely, deep reorgs, but
         // prevent attackers that spam low-work headers from filling our logs.
-        if (m_best_header->nChainWork >= UintToArith256(GetConsensus().nMinimumChainWork)) return;
+        // Audit P0.1/C1: gate on AUTHENTICATED work so a forged matmul-header chain
+        // cannot suppress/flip presync reporting. Equal to nChainWork pre-fork.
+        if (m_best_header->nAuthenticatedChainWork >= UintToArith256(GetConsensus().nMinimumChainWork)) return;
         // Rate limit headers presync updates to 4 per second, as these are not subject to DoS
         // protection.
         auto now = std::chrono::steady_clock::now();
