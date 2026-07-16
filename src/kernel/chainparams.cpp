@@ -191,11 +191,30 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // PROOF CARRIAGE (design §3): D's ~32 MiB sketch is carried as a SEGREGATED
     // PRUNABLE PROOF, excluded from the block serialized size by construction, so
     // there is NO in-block 32 MiB payload gating to assert here (that was the old
-    // P1/P3 blocker). Stage 2 wires the getmatmulproof/matmulproof relay, the
-    // §3.4 proof size cap, and the prune/archive machinery; when that lands, its
-    // activation coupling (new P2P messages + body-serialization gate) is
-    // asserted here in lockstep, mirroring the BTX_HEADER_NONCE_ON_WIRE coupling.
+    // P1/P3 blocker). Stage 2a wires the body-serialization gate, the store-backed
+    // §3.3 binding + §3.4 size cap, and the miner offload; Stage 2b wires the
+    // getmatmulproof/matmulproof P2P relay; Stage 2c wires prune/archive.
     if (consensus.nMatMulBMX4CDHeight == std::numeric_limits<int32_t>::max()) return;
+
+    // ACTIVATION COUPLING (design §3.6), mirroring the BTX_HEADER_NONCE_ON_WIRE
+    // gate: enabling a segregated-proof profile is a coordinated header/relay
+    // protocol change. A NETWORKED node that receives a segregated block from a
+    // peer must be able to OBTAIN its proof, or it stalls (the sketch is off-body).
+    // Stage 2a delivers the single-node carriage + a PROCESS-LOCAL proof store, but
+    // the Stage-2b P2P relay is NOT yet present, so D MUST NOT be activatable on any
+    // PUBLIC (peer-to-peer) network until BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY is
+    // flipped true in the change that lands the relay. Fail LOUD at startup here.
+    //
+    // The single-node on-demand-mining exemption is deliberate and narrowly scoped:
+    // on such a chain (regtest / dev) the miner and validator share one process and
+    // the LOCAL store fully stands in for the relay, so the Stage-2a segregated path
+    // is exercisable end-to-end WITHOUT the relay. MineBlocksOnDemand() ==
+    // consensus.fPowNoRetargeting, which is FALSE on every PUBLIC network
+    // (main/testnet/testnet4/signet all set it false above), so this cannot loosen
+    // them: activating D there while the relay flag is false aborts the node.
+    assert(Consensus::BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY ||
+           consensus.fPowNoRetargeting);
+
     assert(consensus.nMatMulBMX4CDHeight > consensus.nMatMulBMX4CHeight);
     assert(consensus.nMatMulBMX4CDAsertRescaleNum > 0);
     assert(consensus.nMatMulBMX4CDAsertRescaleDen > 0);
@@ -1431,6 +1450,18 @@ public:
         if (opts.matmul_bmx4c_height.has_value() && !opts.matmul_v4_height.has_value()) {
             consensus.nMatMulV4Height = consensus.nMatMulBMX4CHeight;
         }
+        // MatMul v4.2-D ENC-BMX4C-D segregated-proof profile (solver-evolution
+        // Stage 2a; design §3). Regtest-only override so a single node can mine
+        // across into D heights and exercise the store-backed binding + Freivalds
+        // path. D must fork STRICTLY ABOVE the ENC-BMX4C height (D succeeds C — the
+        // strict-above assert in AssertBMX4CConstructionInvariants fails loud on
+        // D<=C). The D ASERT rescale stays at its 1/1 default (regtest has no
+        // pre-fork throughput history). Activation here is permitted because
+        // regtest is fPowNoRetargeting (MineBlocksOnDemand) — the segregated-proof
+        // relay-ready compile gate exempts single-node chains (see the assert).
+        if (opts.matmul_bmx4cd_height.has_value()) {
+            consensus.nMatMulBMX4CDHeight = *opts.matmul_bmx4cd_height;
+        }
         // Spec §G.2/§G.4: the v4 dimension must divide evenly by the sketch
         // tile size and stay within the accepted-dimension bounds enforced in
         // ContextualCheckBlockHeader, so a bad -regtestmatmulv4dimension fails
@@ -1609,6 +1640,7 @@ public:
             opts.matmul_v4_height.has_value() ||
             opts.matmul_v4_dimension.has_value() ||
             opts.matmul_bmx4c_height.has_value() ||
+            opts.matmul_bmx4cd_height.has_value() ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||
             opts.shielded_smile_rice_codec_disable_height.has_value() ||

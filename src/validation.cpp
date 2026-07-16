@@ -9778,6 +9778,12 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-length", "size limits failed");
     }
     const uint64_t stripped_block_size = ::GetSerializeSize(TX_NO_WITNESS_WITH_SHIELDED(block));
+    // MatMul segregated-proof accounting (design §3.6): at proof_segregated heights
+    // the block body carries NO sketch (matrix_c_data is empty by construction —
+    // the miner offloads it to the proof store and ContextualCheckBlock rejects any
+    // inline sketch), so serialized_block_size EXCLUDES the ~32 MiB proof and the
+    // 24 MB nMaxBlockSerializedSize ceiling stays unchanged and un-breached. Below
+    // segregated heights the in-block sketch is counted here exactly as before.
     const uint64_t serialized_block_size = ::GetSerializeSize(TX_WITH_WITNESS(block));
     if (block.vtx.size() > consensusParams.nMaxBlockWeight / WITNESS_SCALE_FACTOR ||
         stripped_block_size > consensusParams.nMaxBlockWeight / WITNESS_SCALE_FACTOR ||
@@ -10192,33 +10198,81 @@ static bool ContextualCheckBlock(const CBlock& block,
             return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "v4-forbidden-ab-payload",
                 "matmul v4 block carries forbidden legacy A/B matrix payload");
         }
-        if (block.matrix_c_data.empty()) {
-            return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "missing-product-payload",
-                "matmul v4 block missing required product sketch payload");
-        }
-        if (!IsMatMulV4PayloadSizeValid(block, consensusParams)) {
-            return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "invalid-product-payload",
-                "matmul v4 block carries malformed product sketch payload");
-        }
-        if (!CheckMatMulProofOfWork_V4ProductCommitted(block, consensusParams, nHeight)) {
-            // Separate a body MUTATION from a header-level CONSENSUS fault. The
-            // sketch payload lives in the block body while matmul_digest is in
-            // the 182-byte header, so a corrupted payload leaves the block hash
-            // unchanged and a correct payload for that same hash still exists.
-            // Marking such a block permanently invalid (BLOCK_CONSENSUS) would
-            // let an attacker poison a valid header's hash by relaying a
-            // corrupted-payload copy first, blocking the honest block as
-            // "duplicate-invalid". Classify it as BLOCK_MUTATED (non-permanent),
-            // matching the A/B and payload-shape checks above. Only a payload
-            // that DOES reconstruct the committed digest but still fails
-            // (Freivalds mismatch or digest over target) is a real, permanent
-            // PoW failure.
-            if (!MatMulV4PayloadMatchesCommitment(block)) {
-                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-matmul-v4-payload",
-                    "matmul v4 sketch payload does not match committed digest");
+        const Consensus::MatMulProfileParams matmul_profile = consensusParams.GetMatMulProfileParams(nHeight);
+        if (matmul_profile.proof_segregated) {
+            // SEGREGATED-PROOF path (design §3; solver-evolution Stage 2a), height-
+            // gated on GetMatMulProfileParams(height).proof_segregated (ENC-BMX4C-D).
+            // The ~32 MiB sketch is NOT in the block body: the block commits only
+            // the 32-byte header matmul_digest and the sketch is carried out-of-band
+            // (Stage 2a: a process-local store; Stage 2b: the getmatmulproof/
+            // matmulproof relay). The block-serialized-size check in CheckBlock
+            // therefore sees a body WITHOUT the sketch, so nMaxBlockSerializedSize
+            // (24 MB) excludes the proof BY CONSTRUCTION (design §3.6).
+            //
+            // (1) The in-block body sketch MUST be empty. A non-empty inline sketch
+            // at a segregated height is a body mutation (BLOCK_MUTATED, non-permanent
+            // — the honest empty-body block with the same header hash must not be
+            // poisoned).
+            if (!block.matrix_c_data.empty()) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "v4-segregated-inline-sketch",
+                    "matmul v4 segregated-proof block carries a forbidden inline sketch");
             }
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
-                "matmul v4 proof of work failed");
+            // (2) Fetch the proof from the store, enforce the §3.4 size cap, bind it
+            // to matmul_digest (§3.3), then Freivalds-verify. The MUTATED/CONSENSUS
+            // split is IDENTICAL to the in-block path below, relocated to the store-
+            // backed carriage with no weakening.
+            switch (CheckMatMulV4SegregatedProof(block, consensusParams, nHeight)) {
+            case MatMulSegregatedProofStatus::OK:
+                break;
+            case MatMulSegregatedProofStatus::INCOMPLETE:
+                // We do not have the proof yet: PoW-INCOMPLETE, not creditable, but
+                // NON-permanent (mirrors "missing block body" — Stage 2b re-requests
+                // it). BLOCK_MUTATED so the header hash is never permanently failed.
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "matmul-v4-proof-incomplete",
+                    "matmul v4 segregated proof not yet available");
+            case MatMulSegregatedProofStatus::MUTATED:
+                // Over-cap or fails the H(sigma||proof)==matmul_digest binding: a
+                // wrong/substituted proof, a relay mutation. NON-permanent.
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-matmul-v4-proof",
+                    "matmul v4 segregated proof does not match committed digest");
+            case MatMulSegregatedProofStatus::CONSENSUS_FAIL:
+                // Proof binds to the committed digest but fails Freivalds / is over
+                // target: a real, PERMANENT PoW fault.
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
+                    "matmul v4 proof of work failed");
+            }
+        } else {
+            // LEGACY IN-BLOCK path (ENC-S8 / ENC-BMX4C and all pre-segregation
+            // history) — byte-for-byte unchanged. History is never rewritten; the
+            // carriage is chosen deterministically by height.
+            if (block.matrix_c_data.empty()) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "missing-product-payload",
+                    "matmul v4 block missing required product sketch payload");
+            }
+            if (!IsMatMulV4PayloadSizeValid(block, consensusParams)) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "invalid-product-payload",
+                    "matmul v4 block carries malformed product sketch payload");
+            }
+            if (!CheckMatMulProofOfWork_V4ProductCommitted(block, consensusParams, nHeight)) {
+                // Separate a body MUTATION from a header-level CONSENSUS fault. The
+                // sketch payload lives in the block body while matmul_digest is in
+                // the 182-byte header, so a corrupted payload leaves the block hash
+                // unchanged and a correct payload for that same hash still exists.
+                // Marking such a block permanently invalid (BLOCK_CONSENSUS) would
+                // let an attacker poison a valid header's hash by relaying a
+                // corrupted-payload copy first, blocking the honest block as
+                // "duplicate-invalid". Classify it as BLOCK_MUTATED (non-permanent),
+                // matching the A/B and payload-shape checks above. Only a payload
+                // that DOES reconstruct the committed digest but still fails
+                // (Freivalds mismatch or digest over target) is a real, permanent
+                // PoW failure.
+                if (!MatMulV4PayloadMatchesCommitment(block)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-matmul-v4-payload",
+                        "matmul v4 sketch payload does not match committed digest");
+                }
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
+                    "matmul v4 proof of work failed");
+            }
         }
     } else if (fCheckPOW && consensusParams.fMatMulPOW) {
         const bool has_v2_payload = HasMatMulV2Payload(block);

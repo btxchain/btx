@@ -357,6 +357,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_bmx4c_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestbmx4cheight");
     }
+    if (args.IsArgSet("-regtestbmx4cdheight")) {
+        options.matmul_bmx4cd_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestbmx4cdheight");
+    }
 
     for (const std::string& arg : args.GetArgs("-testactivationheight")) {
         const auto found{arg.find('@')};

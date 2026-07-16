@@ -4922,6 +4922,15 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
         } else if (!include_freivalds_payload) {
             block.matrix_c_data.clear();
         }
+        // Segregated-proof carriage (design §3.6; solver-evolution Stage 2a): at
+        // proof_segregated heights (ENC-BMX4C-D) the solver produced the ~32 MiB
+        // sketch above, but it must NOT ride in the block body. Move it into the
+        // local proof store keyed by the (now-finalized) block hash and clear the
+        // in-body sketch, so the block serializes without the proof and validation
+        // fetches it back from the store to run the §3.3 binding + Freivalds.
+        if (consensus.GetMatMulProfileParams(next_height).proof_segregated) {
+            OffloadMatMulV4SegregatedProofToStore(block);
+        }
     } else if (kawpow_active) {
         if (consensus.fSkipKAWPOWValidation) {
             // Keep regtest generation fast; KAWPOW validity is bypassed there.

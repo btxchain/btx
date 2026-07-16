@@ -1001,7 +1001,13 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     // cannot pack transactions that, once the payload is appended, push the block
     // over nMaxBlockSerializedSize / nMaxBlockWeight -- which would make the miner's
     // OWN solved block invalid (a self-DoS / mining halt under a full mempool).
-    if (chainparams.GetConsensus().IsMatMulV4Active(nHeight)) {
+    // Segregated-proof heights (design §3.6): the ~32 MiB sketch is NOT carried
+    // in-block (the miner offloads it to the proof store and emits an empty body
+    // sketch, see rpc/mining.cpp GenerateBlock), so there is nothing to reserve —
+    // the block no longer counts the sketch against nMaxBlockSerializedSize /
+    // nMaxBlockWeight. Reserve ONLY at in-block (non-segregated) v4 heights.
+    if (chainparams.GetConsensus().IsMatMulV4Active(nHeight) &&
+        !chainparams.GetConsensus().GetMatMulProfileParams(nHeight).proof_segregated) {
         const uint64_t m{static_cast<uint64_t>(chainparams.GetConsensus().nMatMulV4Dimension) / matmul::v4::kTileB};
         const uint64_t words{2 * m * m};  // 2 uint32 words per F_q sketch element, m*m elements
         const size_t payload_bytes{GetSizeOfCompactSize(words) + static_cast<size_t>(words) * sizeof(uint32_t)};

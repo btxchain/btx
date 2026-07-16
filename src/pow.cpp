@@ -21,6 +21,7 @@
 #include <matmul/freivalds.h>
 #include <matmul/matmul_pow.h>
 #include <matmul/matmul_v4_batch.h>
+#include <matmul/matmul_proof_store.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/noise.h>
@@ -3440,6 +3441,93 @@ bool IsMatMulV4PayloadSizeValid(const CBlock& block, const Consensus::Params& pa
     return true;
 }
 
+// Shared verify CORE over the flat sketch bytes, sourced from EITHER the in-block
+// body (legacy / non-segregated profiles) OR the segregated proof store (design
+// §3). Given the sketch bytes it runs the per-profile O(n^2) Freivalds cascade,
+// recomputes the product-committed digest, and checks it against the header's
+// matmul_digest AND the difficulty target. It does NOT inspect the block body's
+// A/B/C channels or their sizes — the caller enforces the carriage-specific
+// preconditions (in-block: A/B empty + IsMatMulV4PayloadSizeValid; segregated:
+// A/B/C empty + the §3.4 proof size cap + the §3.3 binding). Returns true iff the
+// sketch verifies and the recomputed digest is at/under target. Callers own the
+// runtime-sample bookkeeping.
+static bool CheckMatMulV4SketchVerifies(const CBlock& block, const Consensus::Params& params,
+                                        int32_t block_height,
+                                        const std::vector<unsigned char>& sketch_payload)
+{
+    if (params.nMatMulV4FreivaldsRounds == 0) return false;
+
+    auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
+    if (!bnTarget) return false;
+
+    // MatMul v4.2 / ENC-BMX4C profile dispatch (spec §8.2): GetMatMulEncodingProfile
+    // is the SINGLE selector. The v4 cascade is structurally unchanged; only the
+    // operand ENCODING differs, so at BMX4C heights the verify sketch step routes
+    // to the ENC-BMX4C reference. No new reject codes.
+    const uint32_t v4_dim = params.nMatMulV4Dimension;
+    uint256 digest;
+    // Per-profile SHAPE (design §4.1): the b/m/payload triple is read from the
+    // profile, not a hardcoded constant. The structural combine/accumulator
+    // preconditions below are m-INDEPENDENT (design §5.1), so both BMX4 profiles
+    // share them; only the verify routine + committed sketch rank differ by
+    // profile.tile_b (C: b=4/m=1024; D: b=2/m=2048).
+    const Consensus::MatMulProfileParams profile_params = params.GetMatMulProfileParams(block_height);
+    const Consensus::MatMulEncodingProfile enc_profile = profile_params.profile;
+    if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4CD) {
+        // ENC-BMX4C-D (v4.2-D deeper-commit profile): identical to ENC-BMX4C but
+        // the sketch tile b = 2 (m = n/2), committing 4x more of C. The
+        // accumulator preconditions are IDENTICAL (all bounds m-independent);
+        // only the verifier's sketch rank differs. At segregated-proof heights
+        // `sketch_payload` is the store-fetched proof already bound to
+        // matmul_digest by the caller (design §3.3); here it is Freivalds-verified.
+        if (!matmul::v4::bmx4::CheckCombineLimbBoundBMX4C(v4_dim)) return false;
+        if (static_cast<int64_t>(Consensus::BMX4C_BASE_PRODUCT_BOUND_PER_N) * v4_dim >
+            std::numeric_limits<int32_t>::max()) {
+            return false;
+        }
+        if (!matmul::v4::bmx4::VerifySketchBMX4D(block, v4_dim, params.nMatMulV4FreivaldsRounds,
+                                                 sketch_payload, digest)) {
+            return false;
+        }
+    } else if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
+        // Structural combine/accumulator preconditions for ENC-BMX4C (spec
+        // §2.4/§5.2/§8.2), checked ahead of the O(n^2) verify as defense in
+        // depth. (i) The base-2^6 remainder-top decomposition must be total:
+        // 288*n <= 2^23-1 (CheckCombineLimbBoundBMX4C). (ii) The full-C per-word
+        // magnitude bound |C| <= 2304*n — the ENC-BMX4C successor to the
+        // 15,625*n ENC-S8 bound — must stay exact in int32.
+        if (!matmul::v4::bmx4::CheckCombineLimbBoundBMX4C(v4_dim)) return false;
+        if (static_cast<int64_t>(Consensus::BMX4C_BASE_PRODUCT_BOUND_PER_N) * v4_dim >
+            std::numeric_limits<int32_t>::max()) {
+            return false;
+        }
+        // matmul::v4::bmx4::VerifySketchBMX4C runs the full O(n^2) cascade with
+        // the ENC-BMX4C M11+E8M0 operand encoding: payload shape/canonicality
+        // mod q, regenerating Ahat/Bhat/U/V from the V4.2 seeds, R Freivalds
+        // rounds over q = 2^61-1, and recomputing the product-committed digest.
+        if (!matmul::v4::bmx4::VerifySketchBMX4C(block, v4_dim, params.nMatMulV4FreivaldsRounds,
+                                                 sketch_payload, digest)) {
+            return false;
+        }
+    } else {
+        // ENC_S8 (v4.1): the existing path, unchanged.
+        //
+        // matmul_v4::VerifySketch performs the full O(n^2) v4 cascade (spec §I.2):
+        // payload shape/canonicality mod q, regenerating A,B from the header
+        // seeds, R deterministic Freivalds rounds over the independent prime
+        // q = 2^61-1, and recomputing the product-committed digest. It never
+        // recomputes the O(n^3) product.
+        if (!matmul_v4::VerifySketch(block, v4_dim, params.nMatMulV4FreivaldsRounds,
+                                      sketch_payload, digest)) {
+            return false;
+        }
+    }
+    if (digest != block.matmul_digest) return false;
+    if (UintToArith256(digest) > *bnTarget) return false;
+
+    return true;
+}
+
 bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consensus::Params& params, int32_t block_height)
 {
     const auto start = std::chrono::steady_clock::now();
@@ -3460,87 +3548,92 @@ bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consen
     // v4-forbidden-ab-payload)").
     if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty()) return finish(false);
     if (!IsMatMulV4PayloadSizeValid(block, params)) return finish(false);
-    if (params.nMatMulV4FreivaldsRounds == 0) return finish(false);
-
-    auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
-    if (!bnTarget) return finish(false);
 
     // Unpack the trailing product-sketch payload (vector<uint32_t> LE words,
     // spec §H.2's reused trailing-payload serialization) into the flat byte
-    // buffer matmul_v4::VerifySketch expects.
+    // buffer the shared verify core expects. This is the IN-BLOCK carriage:
+    // non-segregated profiles (ENC-S8 / ENC-BMX4C) only. Segregated-proof
+    // profiles never reach here (ContextualCheckBlock routes them to
+    // CheckMatMulV4SegregatedProof); their body sketch is empty by construction.
     const std::vector<unsigned char> sketch_payload = UnpackMatMulV4SketchWordsToBytes(block.matrix_c_data);
+    return finish(CheckMatMulV4SketchVerifies(block, params, block_height, sketch_payload));
+}
 
-    // MatMul v4.2 / ENC-BMX4C profile dispatch (spec §8.2): GetMatMulEncodingProfile
-    // is the SINGLE selector. The v4 cascade is structurally unchanged; only the
-    // operand ENCODING differs, so at BMX4C heights the verify sketch step routes
-    // to the ENC-BMX4C reference. No new reject codes.
-    const uint32_t v4_dim = params.nMatMulV4Dimension;
-    uint256 digest;
-    // Per-profile SHAPE (design §4.1): the b/m/payload triple is read from the
-    // profile, not a hardcoded constant. The structural combine/accumulator
-    // preconditions below are m-INDEPENDENT (design §5.1), so both BMX4 profiles
-    // share them; only the verify routine + committed sketch rank differ by
-    // profile.tile_b (C: b=4/m=1024; D: b=2/m=2048).
-    const Consensus::MatMulProfileParams profile_params = params.GetMatMulProfileParams(block_height);
-    const Consensus::MatMulEncodingProfile enc_profile = profile_params.profile;
-    if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4CD) {
-        // ENC-BMX4C-D (v4.2-D deeper-commit profile): identical to ENC-BMX4C but
-        // the sketch tile b = 2 (m = n/2), committing 4x more of C. The
-        // accumulator preconditions are IDENTICAL (all bounds m-independent);
-        // only the verifier's sketch rank differs.
-        //
-        // TODO(Stage 2): the ~32 MiB D sketch is carried as a SEGREGATED PRUNABLE
-        // PROOF (design §3), not in-block. Here Stage 1 keeps D on the existing
-        // in-block payload path (sketch_payload above); Stage 2 replaces this with
-        // the getmatmulproof/matmulproof relay + the §3.4 proof size cap
-        // (MAX_MATMUL_PROOF_SIZE = 8·m² derived from profile_params) and the
-        // §3.3 binding H(σ‖proof) == matmul_digest check ahead of Freivalds.
-        if (!matmul::v4::bmx4::CheckCombineLimbBoundBMX4C(v4_dim)) return finish(false);
-        if (static_cast<int64_t>(Consensus::BMX4C_BASE_PRODUCT_BOUND_PER_N) * v4_dim >
-            std::numeric_limits<int32_t>::max()) {
-            return finish(false);
-        }
-        if (!matmul::v4::bmx4::VerifySketchBMX4D(block, v4_dim, params.nMatMulV4FreivaldsRounds,
-                                                 sketch_payload, digest)) {
-            return finish(false);
-        }
-    } else if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
-        // Structural combine/accumulator preconditions for ENC-BMX4C (spec
-        // §2.4/§5.2/§8.2), checked ahead of the O(n^2) verify as defense in
-        // depth. (i) The base-2^6 remainder-top decomposition must be total:
-        // 288*n <= 2^23-1 (CheckCombineLimbBoundBMX4C). (ii) The full-C per-word
-        // magnitude bound |C| <= 2304*n — the ENC-BMX4C successor to the
-        // 15,625*n ENC-S8 bound — must stay exact in int32.
-        if (!matmul::v4::bmx4::CheckCombineLimbBoundBMX4C(v4_dim)) return finish(false);
-        if (static_cast<int64_t>(Consensus::BMX4C_BASE_PRODUCT_BOUND_PER_N) * v4_dim >
-            std::numeric_limits<int32_t>::max()) {
-            return finish(false);
-        }
-        // matmul::v4::bmx4::VerifySketchBMX4C runs the full O(n^2) cascade with
-        // the ENC-BMX4C M11+E8M0 operand encoding: payload shape/canonicality
-        // mod q, regenerating Ahat/Bhat/U/V from the V4.2 seeds, R Freivalds
-        // rounds over q = 2^61-1, and recomputing the product-committed digest.
-        if (!matmul::v4::bmx4::VerifySketchBMX4C(block, v4_dim, params.nMatMulV4FreivaldsRounds,
-                                                 sketch_payload, digest)) {
-            return finish(false);
-        }
-    } else {
-        // ENC_S8 (v4.1): the existing path, unchanged.
-        //
-        // matmul_v4::VerifySketch performs the full O(n^2) v4 cascade (spec §I.2):
-        // payload shape/canonicality mod q, regenerating A,B from the header
-        // seeds, R deterministic Freivalds rounds over the independent prime
-        // q = 2^61-1, and recomputing the product-committed digest. It never
-        // recomputes the O(n^3) product.
-        if (!matmul_v4::VerifySketch(block, v4_dim, params.nMatMulV4FreivaldsRounds,
-                                      sketch_payload, digest)) {
-            return finish(false);
-        }
+MatMulSegregatedProofStatus CheckMatMulV4SegregatedProof(const CBlock& block,
+                                                         const Consensus::Params& params,
+                                                         int32_t block_height)
+{
+    // Store-backed segregated-proof validation (design §3.3/§3.4). Reached ONLY
+    // at heights where GetMatMulProfileParams(height).proof_segregated == true
+    // (currently ENC-BMX4C-D). The caller (ContextualCheckBlock) has already
+    // established that height gate and that the in-block body sketch is EMPTY.
+    //
+    // Ordering is load-bearing and mirrors the in-block MUTATED/CONSENSUS split
+    // with NO weakening (design §3.3):
+    //   1. fetch the proof from the store; ABSENT => PoW-INCOMPLETE (non-permanent
+    //      "we don't have it yet" — Stage 2b re-requests it from the network);
+    //   2. size cap BEFORE any parse/binding (§3.4) — over-cap is a relay/body
+    //      MUTATION, non-permanent, cannot poison the honest block;
+    //   3. binding H(sigma || proof) == matmul_digest (§3.3) — a substituted or
+    //      corrupted proof fails here as a MUTATION (non-permanent);
+    //   4. Freivalds + target on the BOUND proof — a proof that reconstructs the
+    //      digest yet fails verification/target is a PERMANENT consensus fault.
+    const auto start = std::chrono::steady_clock::now();
+    const auto sample = [&](bool passed) {
+        RegisterMatMulValidationRuntimeSample(
+            MatMulValidationPath::FREIVALDS, passed,
+            std::chrono::steady_clock::now() - start);
+    };
+
+    std::vector<unsigned char> proof;
+    if (!matmul::GetMatMulProof(block.GetHash(), proof)) {
+        return MatMulSegregatedProofStatus::INCOMPLETE;
     }
-    if (digest != block.matmul_digest) return finish(false);
-    if (UintToArith256(digest) > *bnTarget) return finish(false);
 
-    return finish(true);
+    // §3.4 proof size cap, derived from the ACTIVE profile's 8·m² (not attacker-
+    // chosen), enforced ahead of the binding/parse so an oversize blob cannot
+    // force allocation/iteration. A well-formed sketch is exactly
+    // sketch_payload_bytes; a tiny slack keeps this a coarse pre-parse DoS
+    // backstop while ParseSketch (inside VerifySketch*) is the exact-size gate.
+    const Consensus::MatMulProfileParams profile_params = params.GetMatMulProfileParams(block_height);
+    const uint64_t max_proof_size = profile_params.sketch_payload_bytes + MATMUL_SEGREGATED_PROOF_OVERHEAD;
+    if (proof.size() > max_proof_size) {
+        return MatMulSegregatedProofStatus::MUTATED;
+    }
+
+    // §3.3 binding: the only byte-string that satisfies H(sigma || .) ==
+    // matmul_digest is the sketch the miner committed to (sigma is header-derived,
+    // matmul_digest is header-fixed and block-hash-covered). matmul_v4::
+    // PayloadMatchesCommitment is the SAME binding predicate the in-block path
+    // uses for its MUTATED classification (MatMulV4PayloadMatchesCommitment),
+    // here fed the store bytes instead of matrix_c_data.
+    if (!matmul_v4::PayloadMatchesCommitment(block, proof)) {
+        return MatMulSegregatedProofStatus::MUTATED;
+    }
+
+    // Binding passed: any remaining failure is a PERMANENT consensus fault.
+    const bool ok = CheckMatMulV4SketchVerifies(block, params, block_height, proof);
+    sample(ok);
+    return ok ? MatMulSegregatedProofStatus::OK
+              : MatMulSegregatedProofStatus::CONSENSUS_FAIL;
+}
+
+bool OffloadMatMulV4SegregatedProofToStore(CBlock& block)
+{
+    // Segregated-proof miner handoff (design §3.6). The solver filled
+    // block.matrix_c_data with the word-packed sketch and finalized the header
+    // (matmul_digest / seeds / nonce), so block.GetHash() — the HEADER hash, and
+    // thus the proof-store key — is now stable and independent of the body sketch.
+    // Move the raw sketch bytes into the local store, then CLEAR the in-body sketch
+    // so the block serializes with an EMPTY matrix_c_data (the wire invariant in
+    // primitives/block.h). ContextualCheckBlock later Get()s it back by the same
+    // block hash to run the §3.3 binding + Freivalds. The packing seam
+    // (word<->byte) stays entirely inside this file.
+    if (block.matrix_c_data.empty()) return false;
+    std::vector<unsigned char> sketch = UnpackMatMulV4SketchWordsToBytes(block.matrix_c_data);
+    matmul::PutMatMulProof(block.GetHash(), std::move(sketch));
+    block.matrix_c_data.clear();
+    return true;
 }
 
 bool MatMulV4PayloadMatchesCommitment(const CBlock& block)

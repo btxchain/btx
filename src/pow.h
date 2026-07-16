@@ -210,6 +210,54 @@ bool CheckMatMulProofOfWork_ProductCommitted(const CBlock& block, const Consensu
  *  recomputed digest against the block target. Never recomputes the O(n^3)
  *  product. */
 bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consensus::Params& params, int32_t block_height = -1);
+
+/** Coarse pre-parse slack added to the §3.4 segregated-proof size cap
+ *  (MAX_MATMUL_PROOF_SIZE = profile.sketch_payload_bytes + this). A well-formed
+ *  proof is exactly sketch_payload_bytes raw sketch bytes; the slack keeps the
+ *  cap a coarse DoS backstop while ParseSketch (inside VerifySketch*) remains the
+ *  exact-size gate. Small and constant so the cap stays derived from consensus
+ *  profile params, never attacker-chosen. */
+static constexpr uint64_t MATMUL_SEGREGATED_PROOF_OVERHEAD{64};
+
+/** Result of validating a SEGREGATED-PROOF block's out-of-body sketch against its
+ *  header commitment (design §3.3/§3.4; solver-evolution Stage 2a). Distinguishes
+ *  the non-permanent "not yet creditable" states from a permanent consensus fault
+ *  so ContextualCheckBlock maps each to the correct BlockValidationResult:
+ *    OK             -> block fully valid, work creditable.
+ *    INCOMPLETE     -> no proof in the store yet; PoW-incomplete, NON-permanent
+ *                      (Stage 2b re-requests from the network). BLOCK_MUTATED-class.
+ *    MUTATED        -> proof present but over the §3.4 cap or fails the §3.3
+ *                      binding H(sigma||proof)==matmul_digest; a relay/body
+ *                      mutation, NON-permanent (must not poison the honest block).
+ *                      BLOCK_MUTATED-class.
+ *    CONSENSUS_FAIL -> proof binds to the committed digest but fails Freivalds or
+ *                      is over target; a PERMANENT PoW fault. BLOCK_CONSENSUS. */
+enum class MatMulSegregatedProofStatus {
+    OK,
+    INCOMPLETE,
+    MUTATED,
+    CONSENSUS_FAIL,
+};
+
+/** Validate a segregated-proof block's sketch (design §3): fetch it from the
+ *  local proof store keyed by block hash, enforce the §3.4 size cap, bind it to
+ *  the header via H(sigma||proof)==matmul_digest (§3.3), then run the per-profile
+ *  O(n^2) Freivalds + target check on the bound bytes. See
+ *  MatMulSegregatedProofStatus for the MUTATED/CONSENSUS split. Reached ONLY at
+ *  proof_segregated heights; the caller must have verified the in-block body
+ *  sketch is empty. */
+MatMulSegregatedProofStatus CheckMatMulV4SegregatedProof(const CBlock& block,
+                                                         const Consensus::Params& params,
+                                                         int32_t block_height);
+
+/** Segregated-proof miner handoff (design §3.6; solver-evolution Stage 2a): move a
+ *  freshly-solved block's in-body sketch (matrix_c_data, word-packed) into the
+ *  local proof store keyed by the block hash, then CLEAR matrix_c_data so the block
+ *  body serializes with an empty sketch. Call ONLY at proof_segregated heights and
+ *  ONLY after the solver has finalized the header (so block.GetHash() is stable).
+ *  Returns false (no-op) if the body sketch is already empty. */
+bool OffloadMatMulV4SegregatedProofToStore(CBlock& block);
+
 /** True iff the block's v4 sketch payload reconstructs the header's committed
  *  matmul_digest. A false result means the payload (block body) is a MUTATION of
  *  the committed body -- the header hash stays valid and a correct payload

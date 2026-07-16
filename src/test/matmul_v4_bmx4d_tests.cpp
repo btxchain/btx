@@ -40,13 +40,20 @@
 //       digest (distinct V4.2-D domain tags + different rank).
 //   + GOLDEN vectors: pinned ENC-BMX4C-D digests at fixed headers.
 
+#include <arith_uint256.h>
+#include <consensus/amount.h>
 #include <consensus/params.h>
 #include <matmul/int8_field.h>
+#include <matmul/matmul_proof_store.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
+#include <pow.h>
 
 #include <crypto/sha256.h>
 #include <primitives/block.h>
+#include <primitives/transaction.h>
+#include <script/script.h>
+#include <streams.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
 #include <util/strencodings.h>
@@ -422,6 +429,246 @@ BOOST_AUTO_TEST_CASE(validate_dims_bmx4_is_b_parametric)
     BOOST_CHECK(!bx::ValidateDimsBMX4(n + 1, 2, dummy)); // 257 % 32 != 0
     BOOST_CHECK(!bx::ValidateDimsBMX4(n, 3, dummy));     // 3 does not divide 256
     BOOST_CHECK(!bx::ValidateDimsBMX4(n, 0, dummy));     // b = 0 invalid
+}
+
+// --- SEGREGATED-PROOF CARRIAGE (solver-evolution Stage 2a; design §3) --------
+//
+// These pin the CONSENSUS CORE of the segregated proof: the height-gated block
+// serialization change (the ~32 MiB sketch leaves the body), the local proof
+// store, and the store-backed binding + Freivalds validation with the
+// MUTATED/INCOMPLETE/CONSENSUS split. Everything runs single-process (no P2P).
+
+namespace {
+
+// A minimal but well-formed CBlock shell: a v4-D header + one coinbase-shaped tx
+// so the SERIALIZE_METHODS payload region is exercised. Matrices left empty.
+CBlock MakeBlockShell(uint32_t n, uint64_t nonce)
+{
+    CBlock block;
+    static_cast<CBlockHeader&>(block) = MakeV4Header(nonce, n);
+    CMutableTransaction cb;
+    cb.vin.resize(1);
+    cb.vin[0].prevout.SetNull();
+    cb.vin[0].scriptSig = CScript() << OP_0 << OP_1; // 2 bytes, shape only
+    cb.vout.resize(1);
+    cb.vout[0].nValue = 50 * COIN;
+    cb.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    block.vtx.push_back(MakeTransactionRef(std::move(cb)));
+    return block;
+}
+
+std::vector<std::byte> SerializeBlock(const CBlock& block)
+{
+    DataStream ss{};
+    ss << TX_WITH_WITNESS(block);
+    return {ss.begin(), ss.end()};
+}
+
+// Mirror pow.cpp's PackMatMulV4SketchBytesToWords (the in-body word packing the
+// solver uses) so a test can emulate an in-body sketch before offload.
+std::vector<uint32_t> SketchBytesToWordsForTest(const std::vector<unsigned char>& bytes)
+{
+    std::vector<uint32_t> words((bytes.size() + 3) / 4, 0);
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        words[i / 4] |= static_cast<uint32_t>(bytes[i]) << (8 * (i % 4));
+    }
+    return words;
+}
+
+// Params for the store-backed verify path: unified v4/C at 100, segregated D at
+// 200, at a small D-valid dimension. powLimit is set wide so a handful of ground
+// nonces land under target.
+Consensus::Params SegregatedParams(uint32_t dim)
+{
+    Consensus::Params p{};
+    p.nMatMulV4Height = 100;
+    p.nMatMulBMX4CHeight = 100;
+    p.nMatMulBMX4CDHeight = 200;
+    p.nMatMulV4Dimension = dim;
+    p.nMatMulV4FreivaldsRounds = 3;
+    p.powLimit = *uint256::FromHex(
+        "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    return p;
+}
+
+} // namespace
+
+// (1) SERIALIZATION GATING (design §3.1/§3.6). At a segregated height the block
+// body carries an EMPTY sketch, so the ~32 MiB proof is EXCLUDED from the wire
+// by construction; round-trips are byte-identical.
+BOOST_AUTO_TEST_CASE(segregated_block_serialization_excludes_sketch)
+{
+    const uint32_t n = kTestDim;
+    CBlock block = MakeBlockShell(n, 0);
+    BOOST_REQUIRE(block.matrix_c_data.empty());
+
+    // Serialized with an empty body sketch: tiny, and FAR under the 24 MB ceiling.
+    const std::vector<std::byte> wire_empty = SerializeBlock(block);
+    BOOST_CHECK_LT(wire_empty.size(), 1024u);
+    BOOST_CHECK_LT(wire_empty.size(), 24u * 1000 * 1000);
+
+    // Round-trip: deserialize, then re-serialize -> byte-identical, and the
+    // decoded block still has an empty sketch (no phantom trailing bytes).
+    CBlock decoded;
+    DataStream ss_in{wire_empty};
+    ss_in >> TX_WITH_WITNESS(decoded);
+    BOOST_CHECK(decoded.matrix_c_data.empty());
+    BOOST_CHECK(decoded.matrix_a_data.empty());
+    BOOST_CHECK(decoded.matrix_b_data.empty());
+    const std::vector<std::byte> wire_reencoded = SerializeBlock(decoded);
+    BOOST_CHECK(wire_empty == wire_reencoded);
+
+    // Demonstrate EXCLUSION: the same block with the real D sketch inlined is
+    // larger by exactly the sketch serialization; the segregated block omits it.
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(bx::ComputeDigestBMX4D(block, n, digest, payload));
+    CBlock inlined = block;
+    inlined.matrix_c_data = SketchBytesToWordsForTest(payload);
+    const std::vector<std::byte> wire_inlined = SerializeBlock(inlined);
+    BOOST_CHECK_GT(wire_inlined.size(), wire_empty.size());
+    // The delta is the sketch payload words (4 bytes each) + its length prefix.
+    BOOST_CHECK_GE(wire_inlined.size() - wire_empty.size(),
+                   inlined.matrix_c_data.size() * sizeof(uint32_t));
+}
+
+// (2) PROOF STORE round-trip.
+BOOST_AUTO_TEST_CASE(matmul_proof_store_roundtrip)
+{
+    matmul::MatMulProofStore store;
+    const uint256 h1 = ParseUint256("1100000000000000000000000000000000000000000000000000000000000000");
+    const uint256 h2 = ParseUint256("2200000000000000000000000000000000000000000000000000000000000000");
+    const std::vector<unsigned char> a{1, 2, 3, 4};
+    const std::vector<unsigned char> b{9, 8, 7};
+
+    BOOST_CHECK(!store.Have(h1));
+    std::vector<unsigned char> out;
+    BOOST_CHECK(!store.Get(h1, out));
+
+    store.Put(h1, a);
+    store.Put(h2, b);
+    BOOST_CHECK(store.Have(h1));
+    BOOST_CHECK_EQUAL(store.Size(), 2u);
+    BOOST_REQUIRE(store.Get(h1, out));
+    BOOST_CHECK(out == a);
+    BOOST_REQUIRE(store.Get(h2, out));
+    BOOST_CHECK(out == b);
+
+    store.Erase(h1);
+    BOOST_CHECK(!store.Have(h1));
+    BOOST_CHECK_EQUAL(store.Size(), 1u);
+    store.Clear();
+    BOOST_CHECK_EQUAL(store.Size(), 0u);
+}
+
+// (3) STORE-BACKED BINDING + FREIVALDS (design §3.3/§3.4). Drives every arm of
+// the MUTATED / INCOMPLETE / CONSENSUS split through CheckMatMulV4SegregatedProof.
+BOOST_AUTO_TEST_CASE(segregated_proof_binding_and_verify)
+{
+    const uint32_t n = 64; // b=2 -> m=32; 64 % 32 == 0, 32 % 32 == 0
+    const Consensus::Params params = SegregatedParams(n);
+    const int32_t d_height = 200;
+    BOOST_REQUIRE(params.GetMatMulProfileParams(d_height).proof_segregated);
+
+    const auto bnTarget = DeriveTarget(0x207fffff, params.powLimit);
+    BOOST_REQUIRE(bnTarget.has_value());
+
+    // Grind a nonce whose honest D digest lands at/under target (like the miner).
+    CBlock block;
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    bool found = false;
+    for (uint64_t nonce = 0; nonce < 4096 && !found; ++nonce) {
+        block = MakeBlockShell(n, nonce);
+        BOOST_REQUIRE(bx::ComputeDigestBMX4D(block, n, digest, payload));
+        if (UintToArith256(digest) <= *bnTarget) found = true;
+    }
+    BOOST_REQUIRE_MESSAGE(found, "no ground nonce landed under target");
+    block.matmul_digest = digest;
+    const uint256 block_hash = block.GetHash();
+
+    // Ensure a clean store for this block hash.
+    matmul::GetLocalMatMulProofStore().Erase(block_hash);
+
+    // INCOMPLETE: proof absent from the store.
+    BOOST_CHECK(CheckMatMulV4SegregatedProof(block, params, d_height) ==
+                MatMulSegregatedProofStatus::INCOMPLETE);
+
+    // OK: honest proof present, binds to the digest, verifies, under target.
+    matmul::PutMatMulProof(block_hash, payload);
+    BOOST_CHECK(CheckMatMulV4SegregatedProof(block, params, d_height) ==
+                MatMulSegregatedProofStatus::OK);
+
+    // MUTATED (binding): a corrupted proof that no longer hashes to matmul_digest.
+    {
+        std::vector<unsigned char> corrupt = payload;
+        corrupt[0] ^= 0x01;
+        matmul::PutMatMulProof(block_hash, corrupt);
+        BOOST_CHECK(CheckMatMulV4SegregatedProof(block, params, d_height) ==
+                    MatMulSegregatedProofStatus::MUTATED);
+    }
+
+    // MUTATED (oversize): a blob past the §3.4 cap is rejected before any parse.
+    {
+        const uint64_t cap = params.GetMatMulProfileParams(d_height).sketch_payload_bytes +
+                             MATMUL_SEGREGATED_PROOF_OVERHEAD;
+        std::vector<unsigned char> oversize(cap + 1, 0);
+        matmul::PutMatMulProof(block_hash, oversize);
+        BOOST_CHECK(CheckMatMulV4SegregatedProof(block, params, d_height) ==
+                    MatMulSegregatedProofStatus::MUTATED);
+    }
+
+    // Restore the honest proof -> OK again (idempotent, order-independent).
+    matmul::PutMatMulProof(block_hash, payload);
+    BOOST_CHECK(CheckMatMulV4SegregatedProof(block, params, d_height) ==
+                MatMulSegregatedProofStatus::OK);
+
+    // CONSENSUS_FAIL: perturb the sketch AND re-seal matmul_digest over it so the
+    // §3.3 binding PASSES, leaving only the O(n^2) Freivalds cascade to reject it.
+    // Re-sealing changes matmul_digest -> a new block hash; store under that key.
+    {
+        std::vector<unsigned char> bad = payload;
+        bad[0] ^= 0x01;
+        const uint256 sigma = DeriveSigma(block); // sigma excludes matmul_digest
+        CBlock consensus_block = block;
+        consensus_block.matmul_digest = ComputeSketchDigest(sigma, bad);
+        const uint256 consensus_hash = consensus_block.GetHash();
+        matmul::PutMatMulProof(consensus_hash, bad);
+        BOOST_CHECK(CheckMatMulV4SegregatedProof(consensus_block, params, d_height) ==
+                    MatMulSegregatedProofStatus::CONSENSUS_FAIL);
+        matmul::GetLocalMatMulProofStore().Erase(consensus_hash);
+    }
+
+    // Teardown.
+    matmul::GetLocalMatMulProofStore().Erase(block_hash);
+}
+
+// (4) MINER OFFLOAD (design §3.6): the handoff moves the solved sketch into the
+// store and empties the body, keyed by the header hash (stable across the clear).
+BOOST_AUTO_TEST_CASE(segregated_miner_offload_to_store)
+{
+    const uint32_t n = 64;
+    CBlock block = MakeBlockShell(n, 7);
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(bx::ComputeDigestBMX4D(block, n, digest, payload));
+    block.matmul_digest = digest;
+    // Emulate the solver having attached the word-packed sketch in-body.
+    block.matrix_c_data = SketchBytesToWordsForTest(payload);
+    const uint256 block_hash = block.GetHash();
+    matmul::GetLocalMatMulProofStore().Erase(block_hash);
+
+    BOOST_REQUIRE(OffloadMatMulV4SegregatedProofToStore(block));
+    // Body sketch cleared; hash unchanged (header-only); proof now in the store.
+    BOOST_CHECK(block.matrix_c_data.empty());
+    BOOST_CHECK(block.GetHash() == block_hash);
+    std::vector<unsigned char> stored;
+    BOOST_REQUIRE(matmul::GetMatMulProof(block_hash, stored));
+    BOOST_CHECK(stored == payload);
+    // Idempotent no-op once the body is already empty.
+    BOOST_CHECK(!OffloadMatMulV4SegregatedProofToStore(block));
+
+    matmul::GetLocalMatMulProofStore().Erase(block_hash);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

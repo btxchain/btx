@@ -184,6 +184,26 @@ struct MatMulProfileParams {
 };
 
 /**
+ * COMPILE-TIME activation coupling for the segregated-proof relay (design §3.6;
+ * solver-evolution Stage 2). Enabling a segregated-proof profile (ENC-BMX4C-D at
+ * a non-INT32_MAX height) is a coordinated header/relay-protocol change: a node
+ * that receives a segregated block must be able to OBTAIN its proof, or it stalls
+ * (the ~32 MiB sketch is off-body). The pieces that must ship together are (i)
+ * the body-serialization gate (empty inline sketch), (ii) the store-backed
+ * binding + Freivalds validation, and (iii) the getmatmulproof/matmulproof P2P
+ * relay + prune/archive plumbing.
+ *
+ * Stage 2a delivers (i) and (ii) and a PROCESS-LOCAL proof store standing in for
+ * (iii) — enough for a SINGLE-node regtest, NOT for a live multi-node network.
+ * Until the Stage-2b relay lands this flag stays FALSE, and
+ * AssertBMX4CConstructionInvariants asserts D cannot be configured non-INT32_MAX
+ * on any PUBLIC network while it is false — fail LOUD at startup, exactly like
+ * CBlockHeader::BTX_HEADER_NONCE_ON_WIRE gates the header-PoW spam throttle.
+ * Flip to true in the SAME change that lands the P2P relay.
+ */
+static constexpr bool BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY{false};
+
+/**
  * Parameters that influence chain consensus.
  */
 struct Params {
