@@ -13,6 +13,7 @@
 #include <uint256.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 
 namespace matmul::v4 {
@@ -331,8 +332,17 @@ void DecomposeLimbPlanes(const std::vector<int32_t>& M, std::vector<int8_t>* pla
             planes[l][idx] = static_cast<int8_t>(d);
             x = (x - d) / kCombineLimbBase; // exact: (x - d) is a multiple of 128
         }
-        // The decomposition is total under CheckCombineLimbBound; x must be 0.
-        // (Not asserted in the hot loop; pinned by the unit tests.)
+        // The decomposition is total under CheckCombineLimbBound; the remainder
+        // MUST be fully consumed (x == 0), otherwise the top limb would silently
+        // drop a nonzero high part and the combine would diverge from
+        // ComputeCombineModQ. Debug-assert it (defense-in-depth, F-L4): a valid
+        // (n, b) already gates |P|,|Q| <= 15,625*n within the 4-digit range via
+        // CheckCombineLimbBound, so this can never fire on consensus-valid input;
+        // it is a no-op in NDEBUG release builds and never on the verifier path
+        // (SketchFreivalds does not decompose).
+        assert(x == 0 && "DecomposeLimbPlanes: remainder not fully consumed "
+                         "(entry exceeds the 4-digit base-2^7 range; "
+                         "CheckCombineLimbBound must gate n)");
     }
 }
 

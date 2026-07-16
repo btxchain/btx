@@ -49,6 +49,17 @@ Consensus::Params MatMulRetargetParams()
     params.nMatMulAsertHeight = 0;
     params.nMatMulAsertHalfLife = 14'400;
     params.nMatMulAsertBootstrapFactor = 1;
+    // These are pure-ASERT retargeting tests that predate the v4 / ENC-BMX4C
+    // hard forks and freely raise nMatMulAsertHeight (e.g. to 361/500/541)
+    // above the regtest v4/BMX4-C fork heights (100/150). The consensus ASERT
+    // ordering guard (ValidateMatMulAsertParams) fails closed to powLimit
+    // whenever nMatMulV4Height / nMatMulBMX4CHeight sit below ASERT activation,
+    // so the inherited regtest fork heights would otherwise make every such
+    // test fail closed. Disable both forks here so the ASERT mechanics are
+    // exercised in isolation; the focused v4/BMX4-C rescale tests set these
+    // heights explicitly on top of this baseline.
+    params.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    params.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
     return params;
 }
 
@@ -464,6 +475,68 @@ BOOST_AUTO_TEST_CASE(asert_post_retune2_anchors_on_retune2_block)
     const arith_uint256 target_371_after_parent_mutation =
         DecodeTarget(GetNextWorkRequired(&blocks[370], &after_retune2, params));
     BOOST_CHECK_EQUAL(target_371_after_parent_mutation, target_371);
+}
+
+// --- ENC-BMX4C one-time ASERT rescale mechanism (B2b readiness) ---
+
+BOOST_AUTO_TEST_CASE(asert_bmx4c_rescale_mechanism_applies_at_height)
+{
+    auto params = MatMulRetargetParams();
+    params.nFastMineHeight = 361;
+    params.nMatMulAsertHeight = 361;
+    params.nMatMulAsertHalfLife = 14'400;
+    params.nMatMulAsertBootstrapFactor = 40;
+    // v4 fork just after activation, ENC-BMX4C strictly above it, both with the
+    // default 1/1 rescale (the mechanism is wired; the real ratio is the
+    // measurement-gated B2b calibration).
+    params.nMatMulV4Height = 362;
+    params.nMatMulV4AsertRescaleNum = 1;
+    params.nMatMulV4AsertRescaleDen = 1;
+    params.nMatMulBMX4CHeight = 366;
+    params.nMatMulBMX4CAsertRescaleNum = 1;
+    params.nMatMulBMX4CAsertRescaleDen = 1;
+
+    std::vector<CBlockIndex> blocks(367);
+    SeedFixedDifficultyChain(blocks, 0x1f00ffffU, 1'700'000'000, 90);
+
+    CBlockHeader activation{};
+    activation.nTime = blocks[360].GetBlockTime() + 1;
+    blocks[361].nHeight = 361;
+    blocks[361].nBits = GetNextWorkRequired(&blocks[360], &activation, params);
+    blocks[361].nTime = activation.nTime;
+    blocks[361].pprev = &blocks[360];
+    for (int h = 362; h <= 365; ++h) {
+        AppendSimulatedBlock(params, blocks, h, 90);
+    }
+
+    CBlockHeader bmx4c_next{};
+    bmx4c_next.nTime = blocks[365].GetBlockTime() + 90;
+    const arith_uint256 bmx4c_target =
+        DecodeTarget(GetNextWorkRequired(&blocks[365], &bmx4c_next, params));
+    const arith_uint256 parent_target = DecodeTarget(blocks[365].nBits);
+
+    // 1/1 rescale is a no-op: the BMX4-C block inherits the parent target
+    // exactly, so difficulty is continuous across the profile boundary.
+    BOOST_CHECK_EQUAL(bmx4c_target, parent_target);
+
+    // Advance onto the BMX4-C block itself and confirm ASERT re-anchors there:
+    // mutating a pre-boundary parent must not perturb the post-boundary target.
+    blocks[366].nHeight = 366;
+    blocks[366].nBits = GetNextWorkRequired(&blocks[365], &bmx4c_next, params);
+    blocks[366].nTime = bmx4c_next.nTime;
+    blocks[366].pprev = &blocks[365];
+
+    CBlockHeader after_bmx4c{};
+    after_bmx4c.nTime = blocks[366].GetBlockTime() + 90;
+    const arith_uint256 target_367 =
+        DecodeTarget(GetNextWorkRequired(&blocks[366], &after_bmx4c, params));
+
+    const uint32_t saved_365_bits = blocks[365].nBits;
+    blocks[365].nBits = 0x1b0404cbU;
+    const arith_uint256 target_367_after_parent_mutation =
+        DecodeTarget(GetNextWorkRequired(&blocks[366], &after_bmx4c, params));
+    blocks[365].nBits = saved_365_bits;
+    BOOST_CHECK_EQUAL(target_367_after_parent_mutation, target_367);
 }
 
 BOOST_AUTO_TEST_CASE(asert_half_life_upgrade_keeps_activation_target_continuous)

@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstdint>
 #include <utility>
 
@@ -295,6 +296,15 @@ void DecomposeLimbPlanesBMX4C(const std::vector<int32_t>& M, std::vector<int8_t>
             x = (x - d) / kCombineLimbBase; // exact: (x - d) is a multiple of 64
         }
         // Remainder-top digit: whatever remains, in [-32, +32] under the bound.
+        // Debug-assert the remainder stays a valid s8 top digit (F-L4,
+        // defense-in-depth vs a silent high-part drop): CheckCombineLimbBoundBMX4C
+        // gates |P|,|Q| <= 288*n <= 2^23-1 via ValidateDimsBMX4C, so x is in
+        // [-32, +32] for every consensus-valid entry and this can never fire;
+        // it is a no-op in NDEBUG release builds and is never reached on the
+        // verifier path (SketchFreivalds does not decompose).
+        assert(x >= -kHalf && x <= kHalf &&
+               "DecomposeLimbPlanesBMX4C: remainder-top digit out of [-32,+32] "
+               "(entry exceeds 2^23-1; CheckCombineLimbBoundBMX4C must gate n)");
         planes[kCombineLimbs - 1][idx] = static_cast<int8_t>(x);
     }
 }
@@ -397,6 +407,14 @@ bool VerifySketchBMX4C(const CBlockHeader& header, uint32_t n, uint32_t rounds,
 {
     uint32_t m = 0;
     if (!ValidateDimsBMX4C(n, matmul::v4::kTileB, m)) {
+        return false;
+    }
+    // Fail-closed on rounds == 0 (F-L3): matmul::v4::SketchFreivalds returns true
+    // unconditionally when rounds == 0, so a misconfigured 0-round verify would
+    // otherwise become a no-op accept. rounds is a fixed consensus param (never
+    // 0, never attacker-controlled), but the verifier MUST reject here to match
+    // ComputeDigestBMX4C's guard and the ENC-S8 VerifySketch.
+    if (rounds == 0) {
         return false;
     }
 

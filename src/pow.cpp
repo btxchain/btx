@@ -182,7 +182,14 @@ constexpr uint64_t MATMUL_V2_MAX_PAYLOAD_WORDS{MATMUL_V2_ABS_MAX_DIM * MATMUL_V2
 // upper bound rather than a tight one; it exists only to reject an obviously
 // oversized relayed payload before further processing.
 constexpr uint64_t MATMUL_V4_ABS_MAX_DIM{8192};
-constexpr uint64_t MATMUL_V4_MAX_PAYLOAD_WORDS{MATMUL_V4_ABS_MAX_DIM * MATMUL_V4_ABS_MAX_DIM};
+// Tightened (audit F-L4): the sketch payload is exactly m*m F_q words at
+// m = dim/b (b = matmul_v4::kTileB = 4), each F_q serialized as 2 uint32 words,
+// so the maximum relayed word count is 2*(MATMUL_V4_ABS_MAX_DIM/4)^2 =
+// 8,388,608 -- not dim^2 (which was 8x loose). ParseSketch's exact-size reject
+// (payload.size() != m*m*8 bytes) remains the real gate; this is the coarse
+// pre-parse DoS backstop, now sized to the true bound.
+constexpr uint64_t MATMUL_V4_MAX_PAYLOAD_WORDS{
+    2 * (MATMUL_V4_ABS_MAX_DIM / 4) * (MATMUL_V4_ABS_MAX_DIM / 4)};
 
 // Byte<->word packing for the v4 sketch payload channel. matmul_v4::ComputeDigest
 // / VerifySketch operate on a flat little-endian byte buffer (per the
@@ -979,6 +986,16 @@ int32_t LatestMatMulAsertPreUpgradeAnchorHeight(const CBlockIndex* pindexLast, c
         params.nMatMulV4Height > anchor_height) {
         anchor_height = params.nMatMulV4Height;
     }
+    // MatMul v4.2 / ENC-BMX4C (B2b): the one-time BMX4-C rescale re-anchors
+    // ASERT at nMatMulBMX4CHeight, mechanically identical to the v4 anchor
+    // above. ENC-BMX4C forks strictly above the v4 height by construction, so
+    // once the tip passes it, it is the latest chronological fork and wins over
+    // any earlier v4/retune/retune2 anchor.
+    if (!IsDisabledHeight(params.nMatMulBMX4CHeight) &&
+        pindexLast->nHeight >= params.nMatMulBMX4CHeight &&
+        params.nMatMulBMX4CHeight > anchor_height) {
+        anchor_height = params.nMatMulBMX4CHeight;
+    }
     return anchor_height;
 }
 
@@ -1056,6 +1073,29 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
     if (!IsDisabledHeight(params.nMatMulV4Height) && params.nMatMulV4Height < params.nMatMulAsertHeight) {
         LogWarning("MatMulAsert: v4 height=%d is below ASERT activation=%d at height %d, failing closed to powLimit\n",
                    params.nMatMulV4Height, params.nMatMulAsertHeight, next_height);
+        return false;
+    }
+    // MatMul v4.2 / ENC-BMX4C (B2b): mirror the v4 rescale-ratio and ordering
+    // guards for the BMX4-C one-time rescale. The ratio must be strictly
+    // positive (num/den), the fork must not sit below ASERT activation, and --
+    // since ENC-BMX4C is a profile of the v4 machine (exactly one profile live
+    // at any height, no dual-profile window) -- it must fork strictly ABOVE the
+    // v4 height whenever both are configured.
+    if (params.nMatMulBMX4CAsertRescaleNum <= 0 || params.nMatMulBMX4CAsertRescaleDen <= 0) {
+        LogWarning("MatMulAsert: BMX4C rescale ratio is invalid (num=%lld den=%lld) at height %d, failing closed to powLimit\n",
+                   static_cast<long long>(params.nMatMulBMX4CAsertRescaleNum),
+                   static_cast<long long>(params.nMatMulBMX4CAsertRescaleDen), next_height);
+        return false;
+    }
+    if (!IsDisabledHeight(params.nMatMulBMX4CHeight) && params.nMatMulBMX4CHeight < params.nMatMulAsertHeight) {
+        LogWarning("MatMulAsert: BMX4C height=%d is below ASERT activation=%d at height %d, failing closed to powLimit\n",
+                   params.nMatMulBMX4CHeight, params.nMatMulAsertHeight, next_height);
+        return false;
+    }
+    if (!IsDisabledHeight(params.nMatMulBMX4CHeight) && !IsDisabledHeight(params.nMatMulV4Height) &&
+        params.nMatMulBMX4CHeight <= params.nMatMulV4Height) {
+        LogWarning("MatMulAsert: BMX4C height=%d must be strictly above v4 height=%d at height %d, failing closed to powLimit\n",
+                   params.nMatMulBMX4CHeight, params.nMatMulV4Height, next_height);
         return false;
     }
 
@@ -2281,6 +2321,26 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
             params.nMatMulV4AsertRescaleDen);
         v4_target = ClampRetargetResult(v4_target, pow_limit);
         return v4_target.GetCompact();
+    }
+
+    // MatMul v4.2 / ENC-BMX4C (B2b): one-time ASERT rescale at the ENC-BMX4C
+    // encoding-profile fork height, mechanically identical to the v4 rescale
+    // above -- next_target = parent_target * Num/Den, then ASERT re-anchors on
+    // this block (LatestMatMulAsertPreUpgradeAnchorHeight, above). The ENC-BMX4C
+    // marginal per-nonce work unit differs from ENC-S8's (~28% less XOF work;
+    // per-class GEMM rates shift), so attempts/s can move at the profile fork;
+    // Num/Den must be calibrated empirically pre-release per network from the
+    // measured marginal nonce/s (nMatMulBMX4CAsertRescaleNum/Den, default 1/1 =
+    // no rescale = target continuous across the boundary).
+    if (next_height == params.nMatMulBMX4CHeight) {
+        arith_uint256 parent_target{};
+        parent_target.SetCompact(pindexLast->nBits);
+        arith_uint256 bmx4c_target = ScaleTargetByTimespan(
+            parent_target,
+            params.nMatMulBMX4CAsertRescaleNum,
+            params.nMatMulBMX4CAsertRescaleDen);
+        bmx4c_target = ClampRetargetResult(bmx4c_target, pow_limit);
+        return bmx4c_target.GetCompact();
     }
 
     if (next_height == params.nMatMulAsertHalfLifeUpgradeHeight) {

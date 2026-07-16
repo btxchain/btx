@@ -63,6 +63,14 @@ bool VerifySketch(const CBlockHeader& header, uint32_t n, uint32_t rounds,
     if (!matmul::v4::ValidateDims(n, kTileB, m)) {
         return false;
     }
+    // Fail-closed on rounds == 0 (F-L3): SketchFreivalds returns true
+    // unconditionally when rounds == 0 (an empty AND of round checks), so a
+    // misconfigured 0-round verify would otherwise degrade to a no-op accept.
+    // rounds is a fixed consensus param (never 0, never attacker-controlled),
+    // but the verifier MUST match ComputeDigest's guard and reject here.
+    if (rounds == 0) {
+        return false;
+    }
 
     // Parse and range-check the payload before any hashing/algebra (§D.3-(1)).
     std::vector<matmul::v4::Fq> sketch;

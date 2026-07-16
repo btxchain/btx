@@ -399,6 +399,43 @@ BOOST_AUTO_TEST_CASE(verifier_freivalds_rejects_wrong_but_consistent_sketch)
     BOOST_CHECK(!bx::VerifySketchBMX4C(header, kTestDim, matmul_v4::kFreivaldsRounds, bad_payload, vout));
 }
 
+// --- F-L3: verifiers fail-closed on rounds == 0 -----------------------------
+
+BOOST_AUTO_TEST_CASE(verifier_bmx4c_rejects_zero_rounds)
+{
+    // A correct, digest-consistent ENC-BMX4C sketch that verifies at R = 3 MUST
+    // be REJECTED when rounds == 0: SketchFreivalds returns true on an empty
+    // round set, so the verifier must guard rounds == 0 itself (defense-in-depth
+    // vs a misconfigured 0-round verify degrading to a no-op accept).
+    CBlockHeader header = MakeV4Header(0x1234'5678'0000'00f0ULL, kTestDim);
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(bx::ComputeDigestBMX4C(header, kTestDim, digest, payload));
+    header.matmul_digest = digest;
+
+    uint256 vout;
+    // Control: the honest R = 3 verify accepts.
+    BOOST_CHECK(bx::VerifySketchBMX4C(header, kTestDim, matmul_v4::kFreivaldsRounds, payload, vout));
+    // rounds == 0 fails closed (reject), even for the correct payload/digest.
+    BOOST_CHECK(!bx::VerifySketchBMX4C(header, kTestDim, 0, payload, vout));
+}
+
+BOOST_AUTO_TEST_CASE(verifier_v4_encs8_rejects_zero_rounds)
+{
+    // Same fail-closed guard for the v4.1 ENC-S8 verifier (matmul_v4::VerifySketch):
+    // a correct sketch that passes at R = 3 must be rejected at rounds == 0.
+    CBlockHeader header = MakeV4Header(0x1234'5678'0000'00f1ULL, kTestDim);
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(matmul_v4::ComputeDigest(header, kTestDim, matmul_v4::kFreivaldsRounds,
+                                           digest, payload));
+    header.matmul_digest = digest;
+
+    uint256 vout;
+    BOOST_CHECK(matmul_v4::VerifySketch(header, kTestDim, matmul_v4::kFreivaldsRounds, payload, vout));
+    BOOST_CHECK(!matmul_v4::VerifySketch(header, kTestDim, 0, payload, vout));
+}
+
 // --- GOLDEN digests (pinned by running this reference) ----------------------
 
 namespace {

@@ -220,6 +220,39 @@ expand-B ≈ 385 k SHA compressions at n = 4096 (~28 % below ENC-S8's 535 k). Th
 SHA anti-amortization freshness floor survives; verification regeneration gets
 cheaper.
 
+**Digest domain tag — decision (F-L2): reuse the v4.1 tag, defer explicit
+per-profile separation to fork-time.** The sketch digest is
+`H(σ‖Ĉ) = SHA256d("BTX_MATMUL_V4" ‖ σ ‖ payload)` — `ComputeDigestBMX4C` reuses
+`matmul::v4::ComputeSketchDigest`, i.e. the **same `"BTX_MATMUL_V4"` digest
+domain tag as ENC-S8**, rather than a profile-specific tag.
+
+* **Why it is SAFE today (no per-profile tag required for correctness).** The two
+  profiles are **height-disjoint** (a node runs exactly one active profile per
+  height, §7.3), and even setting height aside they can never collide: the digest
+  binds σ = SHA256d(header) and the payload `Ĉ`, and every ENC-BMX4C operand
+  derives from **v4.2 seed/XOF domain tags** (`BTX_MATMUL_SEED_V42`,
+  `…_V42_SKETCH_U/V`, plane bytes 'm'/'e') that share no keystream byte with any
+  v4.1 tag. So for any fixed header the ENC-S8 and ENC-BMX4C payloads (hence
+  digests) differ with overwhelming probability; there is no cross-profile
+  collision or replay surface. The reuse is a **defense-in-depth gap, not a
+  live bug** (audit F-L2, Low).
+* **Why explicit separation is deferred to fork-time rather than landed now.**
+  The digest tag is a **shared consensus-encoding parameter reproduced
+  byte-for-byte by ≥ 3 independent code paths that MUST stay in lockstep**: the
+  single-nonce reference (`ComputeDigestBMX4C`), the batched miner
+  (`matmul_v4_bmx4_batch.cpp`, which today calls the shared
+  `ComputeSketchDigest`), and every accelerated backend's bit-exactness contract
+  (`cuda/hip/metal … _accel`). Threading a profile tag cleanly means changing all
+  of them **together** and regenerating the pinned golden digests plus the
+  batch/accel bit-exactness fixtures — a coordinated pre-activation encoding
+  change, not the "one-line" isolated hardening it first appears to be. Because
+  it is SAFE today and ENC-BMX4C is **unactivated**, this is deferred to the
+  §7.5 migration pipeline (it can still land before ENC-BMX4C activates). **When
+  it lands**, the profile tag (e.g. `"BTX_MATMUL_V42_BMX4C"`) MUST be threaded
+  through the digest for the single-nonce, batched, AND accelerated paths in one
+  change, and the golden + batch/accel fixtures regenerated against the new
+  reference. Tracked in ACTIVATION.md alongside the §7.5 L1 surface.
+
 ---
 
 ## §2. The committed object and its magnitude bounds
@@ -230,7 +263,10 @@ The committed product is the **exact integer matrix** `C̄ = Â·B̂` over ℤ, 
 via the unchanged sketch `Ĉ = U·C̄·V` evaluated in F_q (equivalently, and
 byte-identically, `Ĉ = P·Q mod q` with `P = U·Â`, `Q = B̂·V` — the §3 combine),
 digest `H(σ‖Ĉ)` over the 8 MiB payload. Nothing about payload shape, canonical
-residue encoding, or digest changes from v4.1.
+residue encoding, or the digest construction changes from v4.1 — including the
+digest **domain tag**, which ENC-BMX4C deliberately reuses (`"BTX_MATMUL_V4"`);
+see the §1.5 F-L2 decision for why this is safe today and why an explicit
+per-profile tag is deferred to fork-time.
 
 ### §2.2 Element and product exactness
 
@@ -262,6 +298,30 @@ prices) is ≤ 2²³ at both production dims and ≤ 2²² at mainnet n = 4096; 
 proven-t = 24 unit, and ≤ 1 promotion per output at n = 8192 (K′ = 7,264);
 (iii) all stages < 2³¹ ⇒ a true int32 accumulator covers the whole pipeline in
 one pass at every header dimension.
+
+**Note (F-L1, normative constraint on FP-native backends).**
+FP-native accumulator-exactness-*by-bound* is a property of the **marginal unit
+that difficulty prices — never of a direct base product `C̄`**:
+
+* The **marginal** GEMMs a committed miner actually forms — the projections
+  `P = U·Â`, `Q = B̂·V` (≤ 288·n) and the limb-pair products `S_ij` (≤ 1024·n) —
+  stay **< 2²⁴ at every header dimension, n = 8192 included** (288·8192 =
+  2,359,296; 1024·8192 = 8,388,608 = 2²³). They are therefore exact-by-bound on
+  any proven-t = 24 unit across the whole 4096–8192 window.
+* The **direct base product** `C̄ = Â·B̂` is bounded by `2304·n`, which **exceeds
+  2²⁴ at n = 8192** (2304·8192 = 18,874,368 > 16,777,216 = 2²⁴). A hypothetical
+  *direct-C* FP-native evaluation would thus be **ineligible-by-bound at
+  n = 8192** (it needs promotion / a true int32 accumulator — consequence (ii)).
+
+The committed miner path (§2.1, §3) and the CPU reference **never form `C̄` on an
+FP unit**: they evaluate `Ĉ = (U·Â)(B̂·V)` through the marginal `P`/`Q`/limb-pair
+GEMMs and never materialize the n × n product. **A future accelerated backend
+MUST NOT form `C̄` on an FP-native (mantissa-bounded) accumulator at n = 8192**
+either — the direct-C shape is only eligible on a true ≥ 32-bit integer
+accumulator (the §5.1 C-1′ eligibility invariant; the full-C reference is exact
+because it accumulates in int32/int64, not because `C̄` is bounded by 2²⁴). This
+constrains only the (non-committed) full-C compute shape; the verifier (§4) is
+unaffected — it never forms `C̄`.
 
 ---
 
