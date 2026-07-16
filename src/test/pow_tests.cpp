@@ -2997,6 +2997,14 @@ BOOST_AUTO_TEST_CASE(matmul_share_target_override_relaxes_only_digest_exit)
     consensus.nMatMulNoiseRank = 4;
     consensus.nMatMulPreHashEpsilonBits = 0;
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    // Cover the legacy pre-activation and V2 nonce-seeded solver paths (both still
+    // live on mainnet, where v4 is not activated). Pin a concrete nonce-seed height
+    // and neutralize the regtest v4/BMX4C activation (heights 100/150) so the test
+    // heights below stay on the legacy/V2 paths instead of landing in v4/BMX4C
+    // territory (regtest leaves nMatMulNonceSeedHeight == INT32_MAX by default).
+    consensus.nMatMulNonceSeedHeight = 125'000;
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
 
     // Block target == 1 (set via nBits below) is effectively unsolvable in a handful of tries, while the
     // maximal share target accepts the first scanned nonce. The two together prove the override changed
@@ -3970,6 +3978,13 @@ BOOST_AUTO_TEST_CASE(matmul_solve_crosses_60999_to_61000_with_product_digest_con
     consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
     consensus.nMatMulPreHashEpsilonBitsUpgrade = 0;
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    // This exercises the v3 transcript->product-committed digest fork at 61'000,
+    // which is the live mechanic on mainnet (v4 is not activated there — see the
+    // sibling live_mainnet_61000 test, which uses MAIN consensus). Neutralize the
+    // regtest v4/BMX4C activation (heights 100/150) so heights 60'999/61'000 keep
+    // the v3 digest scheme instead of routing through the v4/BMX4C solver.
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
 
     BOOST_CHECK(!consensus.IsMatMulProductDigestActive(60'999));
     BOOST_CHECK(consensus.IsMatMulProductDigestActive(61'000));
@@ -4407,6 +4422,12 @@ BOOST_AUTO_TEST_CASE(e1_v2_miner_produces_consensus_valid_nonce_bound_seeds_acro
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
     constexpr int32_t kActivation = 125'000;
     consensus.nMatMulNonceSeedHeight = kActivation;
+    // This exercises the V2 nonce-seed fork, which is still the live mechanic on
+    // mainnet (mainnet leaves nMatMulV4Height/nMatMulBMX4CHeight unset). Neutralize
+    // the regtest v4/BMX4C activation (heights 100/150) so height 125'000 selects
+    // the V2 path rather than the v4 parent-MTP-bound (and BMX4C) seed rule.
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
 
     auto make_candidate = [&]() {
         CBlockHeader c{};
@@ -4481,6 +4502,11 @@ BOOST_AUTO_TEST_CASE(e1_v2_parallel_solver_engages_and_stays_consensus_valid)
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
     constexpr int32_t kActivation = 125'000;
     consensus.nMatMulNonceSeedHeight = kActivation;
+    // V2 nonce-seed fork (live on mainnet). Neutralize the regtest v4/BMX4C
+    // activation so height 125'000 selects the V2 path (see the sibling
+    // e1_v2_miner test for the rationale).
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
 
     CBlockHeader candidate{};
     candidate.nVersion = 4;
