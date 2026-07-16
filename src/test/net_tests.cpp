@@ -6,6 +6,7 @@
 #include <clientversion.h>
 #include <common/args.h>
 #include <compat/compat.h>
+#include <consensus/consensus.h>
 #include <cstdint>
 #include <crypto/ml_kem.h>
 #include <net.h>
@@ -1703,6 +1704,61 @@ BOOST_AUTO_TEST_CASE(v2transport_pqonly_enforcement_test)
     }
 
     gArgs.ForceSetArg("-v2pqonly", "0"); // restore default for subsequent tests
+}
+
+namespace {
+//! Feed a single V1 message header of the given command type and declared body
+//! size to a fresh V1Transport and report whether the transport accepted it
+//! (true) or rejected it as a protocol/size error (false). Only the header is
+//! fed; readHeader validates the declared size before any body is expected, so
+//! this isolates the command-specific size ceiling (audit P1-1).
+bool V1HeaderSizeAccepted(const std::string& msg_type, unsigned int declared_size)
+{
+    V1Transport transport{/*node_id=*/NodeId{0}};
+    CMessageHeader hdr(Params().MessageStart(), msg_type.c_str(), declared_size);
+    DataStream ser{};
+    ser << hdr;
+    std::vector<uint8_t> bytes(UCharCast(ser.data()), UCharCast(ser.data()) + ser.size());
+    Span<const uint8_t> span{bytes};
+    // ReceivedBytes returns false iff readHeader hit an error (bad magic / size
+    // too large). The magic is correct here, so the boolean is exactly the
+    // size-ceiling verdict.
+    return transport.ReceivedBytes(span);
+}
+} // namespace
+
+//! Audit P1-1: block-bearing commands (`block`, `blocktxn`) get the 24 MB
+//! MAX_BLOCK_MESSAGE_LENGTH ceiling so a consensus-valid block (up to
+//! MAX_BLOCK_SERIALIZED_SIZE) stays relayable, while every other command keeps
+//! the 16 MB MAX_PROTOCOL_MESSAGE_LENGTH ceiling so a peer cannot force 24 MB of
+//! buffering/parsing on an arbitrary message. This pins both ceilings and the
+//! command-specific split at the exact boundary values.
+BOOST_AUTO_TEST_CASE(v1transport_block_message_size_ceiling)
+{
+    // The two compile-time ceilings must bracket a maximum serialized block, or
+    // the whole scheme is unsound. (Mirrors the static_assert in net.cpp.)
+    static_assert(MAX_PROTOCOL_MESSAGE_LENGTH < MAX_BLOCK_MESSAGE_LENGTH);
+    static_assert(MAX_BLOCK_SERIALIZED_SIZE <= MAX_BLOCK_MESSAGE_LENGTH);
+
+    // A full-size block (and a full-size blocktxn) must be admissible over the
+    // block-bearing path -- this is the P0.5 relayability guarantee.
+    BOOST_CHECK(V1HeaderSizeAccepted(NetMsgType::BLOCK, MAX_BLOCK_SERIALIZED_SIZE));
+    BOOST_CHECK(V1HeaderSizeAccepted(NetMsgType::BLOCK, MAX_BLOCK_MESSAGE_LENGTH));
+    BOOST_CHECK(V1HeaderSizeAccepted(NetMsgType::BLOCKTXN, MAX_BLOCK_MESSAGE_LENGTH));
+    // One byte over the block-bearing ceiling is rejected.
+    BOOST_CHECK(!V1HeaderSizeAccepted(NetMsgType::BLOCK, MAX_BLOCK_MESSAGE_LENGTH + 1));
+    BOOST_CHECK(!V1HeaderSizeAccepted(NetMsgType::BLOCKTXN, MAX_BLOCK_MESSAGE_LENGTH + 1));
+
+    // An ordinary command keeps the 16 MB ceiling: it is rejected at exactly the
+    // sizes a block is accepted at (proving the larger ceiling is block-specific,
+    // audit P1-1 -- raising the GLOBAL limit is the DoS-envelope expansion we
+    // must avoid).
+    BOOST_CHECK(V1HeaderSizeAccepted(NetMsgType::ADDR, MAX_PROTOCOL_MESSAGE_LENGTH));
+    BOOST_CHECK(!V1HeaderSizeAccepted(NetMsgType::ADDR, MAX_PROTOCOL_MESSAGE_LENGTH + 1));
+    BOOST_CHECK(!V1HeaderSizeAccepted(NetMsgType::ADDR, MAX_BLOCK_SERIALIZED_SIZE));
+    // An unknown/arbitrary command likewise gets only the ordinary ceiling.
+    BOOST_CHECK(V1HeaderSizeAccepted("arbitrarycmd", MAX_PROTOCOL_MESSAGE_LENGTH));
+    BOOST_CHECK(!V1HeaderSizeAccepted("arbitrarycmd", MAX_PROTOCOL_MESSAGE_LENGTH + 1));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
