@@ -1095,10 +1095,26 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
                    params.nMatMulBMX4CHeight, params.nMatMulAsertHeight, next_height);
         return false;
     }
+    // Single-activation: BMX4C may fork AT (unified flag day) or above (staged)
+    // the v4 height, never strictly below. At equality the MatMulAsert cascade
+    // guards the v4-rescale branch out so the BMX4C rescale fires (see above).
     if (!IsDisabledHeight(params.nMatMulBMX4CHeight) && !IsDisabledHeight(params.nMatMulV4Height) &&
-        params.nMatMulBMX4CHeight <= params.nMatMulV4Height) {
-        LogWarning("MatMulAsert: BMX4C height=%d must be strictly above v4 height=%d at height %d, failing closed to powLimit\n",
+        params.nMatMulBMX4CHeight < params.nMatMulV4Height) {
+        LogWarning("MatMulAsert: BMX4C height=%d must be at or above v4 height=%d at height %d, failing closed to powLimit\n",
                    params.nMatMulBMX4CHeight, params.nMatMulV4Height, next_height);
+        return false;
+    }
+    // When unified (bmx4c == v4), the v4 rescale branch never fires (guarded out
+    // in MatMulAsert), so its ratio MUST be the inert 1/1 -- a non-1/1 v4 ratio
+    // signals a miscalibrated two-phase config mistakenly collapsed to one height.
+    if (!IsDisabledHeight(params.nMatMulBMX4CHeight) && !IsDisabledHeight(params.nMatMulV4Height) &&
+        params.nMatMulBMX4CHeight == params.nMatMulV4Height &&
+        params.nMatMulV4AsertRescaleNum != params.nMatMulV4AsertRescaleDen) {
+        LogWarning("MatMulAsert: unified activation (bmx4c==v4=%d) requires the v4 rescale ratio to be 1/1 "
+                   "(got %lld/%lld); use the BMX4C rescale for the v3->BMX4C shift. Failing closed.\n",
+                   params.nMatMulV4Height,
+                   static_cast<long long>(params.nMatMulV4AsertRescaleNum),
+                   static_cast<long long>(params.nMatMulV4AsertRescaleDen));
         return false;
     }
 
@@ -2315,7 +2331,14 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
     // be calibrated empirically pre-release per network (nMatMulV4AsertRescaleNum/
     // Den, default 1/1 = no rescale for fresh chains that bootstrap nBits
     // directly for the v4 work unit).
-    if (next_height == params.nMatMulV4Height) {
+    // Single-activation (audit wave-3): when the whole upgrade activates on ONE
+    // flag day, nMatMulV4Height == nMatMulBMX4CHeight and the LIVE profile at the
+    // fork is ENC-BMX4C (GetMatMulEncodingProfile returns ENC_BMX4C at that
+    // height) -- so the BMX4C rescale (calibrated for the actual v3->BMX4C work
+    // shift) must fire, NOT the v4/ENC-S8 one. Guard the v4 branch out at
+    // equality so control falls through to the BMX4C branch below. In the staged
+    // two-phase config (v4 < bmx4c) the heights differ and this changes nothing.
+    if (next_height == params.nMatMulV4Height && next_height != params.nMatMulBMX4CHeight) {
         arith_uint256 parent_target{};
         parent_target.SetCompact(pindexLast->nBits);
         arith_uint256 v4_target = ScaleTargetByTimespan(
@@ -2892,6 +2915,9 @@ bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Param
     // WITHOUT recomputing the matmul -- so the honest cost is a few cheap hashes,
     // while an attacker forging headers (matmul_digest = 0) must still pay ~1/p
     // hashes PER header. Bit-exact: SHA256d over a fixed little-endian preimage.
+    // bits == 0 is the "disabled" sentinel (single-activation model: the gate has
+    // no height of its own, only this target -- 0 => no-op / always passes).
+    if (params.nMatMulHeaderPoWBits == 0) return true;
     auto bnTarget{DeriveTarget(params.nMatMulHeaderPoWBits, params.powLimit)};
     if (!bnTarget) return false;
     HashWriter hw;

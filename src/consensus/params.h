@@ -332,17 +332,17 @@ struct Params {
      *  where spam_nonce is a header field DECOUPLED from the matmul preimage (so an
      *  honest miner grinds this cheap gate WITHOUT recomputing the expensive matmul;
      *  coupling it to nNonce64 would multiply honest mining cost by 1/p_gate).
-     *  DEFAULT = INT32_MAX = disabled. ACTIVATION-BLOCKING: the decoupled spam_nonce
-     *  (the legacy header `nNonce`) must first be added to the P2P header wire
-     *  serialization (it is NOT transmitted today) so peers receive the grinder --
-     *  a header-format change requiring testnet burn-in. Until then this is a
-     *  staged, parameter-frozen mechanism (like nMatMulBMX4CHeight). */
-    int32_t nMatMulHeaderPoWHeight{std::numeric_limits<int32_t>::max()};
-    /** Easy fixed spam-target for the header-PoW gate, as an nBits compact. Sized
-     *  so honest miners satisfy it in a handful of cheap hashes while flooding N
-     *  fake headers costs ~N/p_gate hashes. Calibrated at activation; the default
-     *  is a placeholder (never live while nMatMulHeaderPoWHeight is disabled). */
-    uint32_t nMatMulHeaderPoWBits{0x207fffff};
+     *
+     *  SINGLE ACTIVATION (no separate gate): the whole MatMul upgrade activates on
+     *  ONE flag day, so this gate has NO height of its own -- it rides the v4 fork
+     *  (IsMatMulV4Active). It is controlled solely by nMatMulHeaderPoWBits, whose
+     *  value 0 is the "disabled" sentinel (gate is a no-op). At the unified
+     *  activation the flag-day params set a real easy target here, alongside the
+     *  ACTIVATION-BLOCKING header-format change that adds the decoupled spam_nonce
+     *  (the legacy header `nNonce`) to the P2P header wire serialization so peers
+     *  receive the grinder (it is NOT transmitted today) -- see the header-pow-gate
+     *  doc. Default 0 = disabled, so no network is affected until that flag day. */
+    uint32_t nMatMulHeaderPoWBits{0};
     /** C-1' accumulator-eligibility qualification threshold (consensus-
      *  PROTECTING, not consensus-changing): the minimum PROVEN exact
      *  FP-mantissa accumulator width t (in bits, 2^t exact-integer capacity)
@@ -589,14 +589,13 @@ struct Params {
             nMatMulBMX4CHeight != std::numeric_limits<int32_t>::max() &&
             height >= nMatMulBMX4CHeight;
     }
-    /** True at and above the header-PoW spam-gate activation (audit F1). Default
-     *  disabled (INT32_MAX). When active, ContextualCheckBlockHeader additionally
-     *  requires the header spam gate (unforgeable cheap hash work per header). */
-    bool IsMatMulHeaderPoWActive(int32_t height) const
+    /** Header-PoW spam gate (audit F1) is enabled iff a non-zero easy target is
+     *  configured; it has NO separate activation height -- it rides the single v4
+     *  fork (see nMatMulHeaderPoWBits). Callers gate on IsMatMulV4Active(height)
+     *  && IsMatMulHeaderPoWEnabled(). Default disabled (bits == 0). */
+    bool IsMatMulHeaderPoWEnabled() const
     {
-        return height >= 0 &&
-            nMatMulHeaderPoWHeight != std::numeric_limits<int32_t>::max() &&
-            height >= nMatMulHeaderPoWHeight;
+        return nMatMulHeaderPoWBits != 0;
     }
     /** The committed-operand encoding profile live at this height. Only
      *  meaningful at v4 heights (below nMatMulV4Height the v3 rules apply

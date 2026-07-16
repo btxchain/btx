@@ -60,10 +60,22 @@ static constexpr CAmount BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP{10'000 * COIN};
 // misconfiguration fails loudly at node startup rather than at the fork.
 static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus)
 {
+    // Audit F1 (wave-3): the header-PoW spam gate is enabled by a non-zero
+    // nMatMulHeaderPoWBits, but it grinds the legacy `nNonce` which is not yet on
+    // the header wire -- enabling it before that wire change (and the miner grind)
+    // lands is a reject-all mining halt. Fail LOUD at startup instead: the gate
+    // may only be enabled once nNonce is on the wire.
+    assert(CBlockHeader::BTX_HEADER_NONCE_ON_WIRE || consensus.nMatMulHeaderPoWBits == 0);
+
     if (consensus.nMatMulBMX4CHeight == std::numeric_limits<int32_t>::max()) return;
-    // ENC-BMX4C is a profile of the v4 machine: it must fork strictly ABOVE the
-    // v4 height (exactly one profile live at any height; no dual-profile window).
-    assert(consensus.nMatMulBMX4CHeight > consensus.nMatMulV4Height);
+    // ENC-BMX4C is a profile of the v4 machine. It must fork at or above the v4
+    // height. Equality is the SINGLE-ACTIVATION flag day: v4 and ENC-BMX4C go live
+    // together at one height, the ENC-S8 phase is skipped entirely, and the live
+    // profile at the fork is ENC-BMX4C (GetMatMulEncodingProfile returns ENC_BMX4C
+    // there). A strictly-greater height is the staged two-phase config (an
+    // ENC-S8 window in [v4, bmx4c)). Either way exactly one profile is live at any
+    // height -- no dual-profile window.
+    assert(consensus.nMatMulBMX4CHeight >= consensus.nMatMulV4Height);
     // The base-2^6 remainder-top combine must totally decompose every P/Q entry
     // across the whole accepted-dimension window: 288 * MaxDim <= 2^23 - 1.
     assert(static_cast<int64_t>(Consensus::BMX4C_PROJECTION_BOUND_PER_N) *

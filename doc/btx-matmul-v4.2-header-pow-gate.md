@@ -87,21 +87,25 @@ exactly such a field: the legacy **`nNonce`** (`uint32`), which is:
 attacker's per-header cost is the deterrent. (`mix_hash` is an equally-valid
 decoupled field; `nNonce` is chosen as it is already a nonce.)
 
-## 4. What is implemented now (disabled)
+## 4. What is implemented now (disabled) — SINGLE ACTIVATION, no separate gate
 
-- `Consensus::Params::nMatMulHeaderPoWHeight` (INT32_MAX = disabled),
-  `nMatMulHeaderPoWBits` (placeholder easy target), and
-  `IsMatMulHeaderPoWActive(height)` (`src/consensus/params.h`).
+The entire MatMul upgrade activates on ONE flag day, so this gate has **no
+activation height of its own** — it rides the v4 fork (`IsMatMulV4Active`) and is
+enabled purely by a non-zero target. This avoids proliferating activation gates.
+
+- `Consensus::Params::nMatMulHeaderPoWBits` (`src/consensus/params.h`): the easy
+  spam target, **`0` = disabled sentinel** (default), and `IsMatMulHeaderPoWEnabled()`
+  (`== bits != 0`). There is deliberately NO `nMatMulHeaderPoWHeight`.
 - `CheckMatMulHeaderSpamGate(header, params)` (`src/pow.cpp`): the exact gate
-  above, bit-exact SHA256d.
+  above, bit-exact SHA256d; returns `true` immediately when `bits == 0`.
 - Enforcement wired into `ContextualCheckBlockHeader` (`src/validation.cpp`),
-  height-gated on `IsMatMulHeaderPoWActive`, NOT gated by
-  `fSkipMatMulValidation` (it is a one-hash relay/DoS defense, not an
-  expensive-verify correctness check). Reject code `bad-matmul-header-pow`.
+  gated on `IsMatMulV4Active(nHeight) && IsMatMulHeaderPoWEnabled()`, NOT gated by
+  `fSkipMatMulValidation` (a one-hash relay/DoS defense, not an expensive-verify
+  correctness check). Reject code `bad-matmul-header-pow`.
 - Unit test `pow_tests/MatMulHeaderPoWSpamGate_grindable_decoupled_and_enforced`:
-  proves the gate is grindable via `nNonce`, that grinding `nNonce` does not
-  change `GetHash()` (decoupling), that it is disabled by default and
-  height-gated, and that an easy-but-nonzero target still rejects most nonces.
+  proves the disabled sentinel (bits == 0) passes; that once enabled the gate is
+  grindable via `nNonce`; that grinding `nNonce` does not change `GetHash()`
+  (decoupling); and that an easy-but-nonzero target still rejects most nonces.
 
 ## 5. The one activation-blocking step: wire-serialize the grinding nonce
 
@@ -121,12 +125,13 @@ hashes, and every pinned header golden stable). Concretely:
    gate on that copy — a `BLOCK_MUTATED`-class outcome, not header poisoning).
 2. Set `nMatMulHeaderPoWBits` from a spam-price calibration (target the honest
    cost at a few ms and the flood price at seconds/header on commodity CPUs).
-3. Set `nMatMulHeaderPoWHeight` at a future fork height, above all mined history.
-4. Teach the miner/solver to grind `nNonce` for the gate after sealing the matmul
+   Setting it non-zero is what enables the gate — it activates at the SAME
+   flag-day height as the rest of the upgrade (no separate gate).
+3. Teach the miner/solver to grind `nNonce` for the gate after sealing the matmul
    winner (a few cheap hashes; independent of the matmul).
-5. Testnet burn-in (header propagation with the new wire field; confirm honest
+4. Testnet burn-in (header propagation with the new wire field; confirm honest
    miners pass trivially and a synthetic header-flood is rate-limited), then
-   supermajority signaling — the same posture as `nMatMulBMX4CHeight`.
+   supermajority signaling — the same single flag-day as the rest of the upgrade.
 
 This is a header-FORMAT change and so is treated as a staged hard fork, not a
 same-session live flip: the logic ships reviewed and tested here; the wire change

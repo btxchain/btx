@@ -159,10 +159,11 @@ bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::P
  *  DeriveTarget(nMatMulHeaderPoWBits). spam_nonce is the legacy header `nNonce`
  *  field, which is DECOUPLED from the matmul preimage (ComputeMatMulHeaderHash),
  *  so an honest miner grinds this cheap gate without recomputing the expensive
- *  matmul. Only enforced where params.IsMatMulHeaderPoWActive(height) (default
- *  disabled). NOTE (activation-blocking): `nNonce` is not yet in the P2P header
- *  wire serialization, so this is a staged mechanism -- see
- *  doc/btx-matmul-v4.2-header-pow-gate.md. */
+ *  matmul. SINGLE ACTIVATION: no gate height of its own -- callers enforce it
+ *  where IsMatMulV4Active(height) && params.IsMatMulHeaderPoWEnabled() (i.e.
+ *  nMatMulHeaderPoWBits != 0; default 0 = disabled). NOTE (activation-blocking):
+ *  `nNonce` is not yet in the P2P header wire serialization, so this is a staged
+ *  mechanism -- see doc/btx-matmul-v4.2-header-pow-gate.md. */
 bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Params& params);
 bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height);
 bool CheckMatMulProofOfWork_Phase2(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height = -1);

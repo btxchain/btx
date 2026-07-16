@@ -27,6 +27,16 @@ public:
     static constexpr size_t BTX_HEADER_SIZE = 182;
     static_assert(BTX_HEADER_SIZE == (4 + 32 + 32 + 4 + 4 + 8 + 32 + 2 + 32 + 32));
 
+    // Audit F1: the header-PoW spam gate grinds the legacy `nNonce` as a decoupled
+    // nonce, but `nNonce` is NOT yet in the header wire serialization below (a
+    // received header deserializes nNonce = 0, so a miner's grind is lost in
+    // transit). This flag is false until that wire change lands; enabling the gate
+    // (nMatMulHeaderPoWBits != 0) while this is false is a reject-all mining halt,
+    // so AssertBMX4CConstructionInvariants asserts the coupling. Flip to true in
+    // the SAME change that adds nNonce to the wire (and bumps BTX_HEADER_SIZE) --
+    // see doc/btx-matmul-v4.2-header-pow-gate.md §5.
+    static constexpr bool BTX_HEADER_NONCE_ON_WIRE = false;
+
     // header
     int32_t nVersion;
     uint256 hashPrevBlock;

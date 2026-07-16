@@ -4666,17 +4666,21 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoWSpamGate_grindable_decoupled_and_enforced)
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
-    // Default is disabled (INT32_MAX): the gate never fires.
-    BOOST_CHECK(consensus.nMatMulHeaderPoWHeight == std::numeric_limits<int32_t>::max());
-    BOOST_CHECK(!consensus.IsMatMulHeaderPoWActive(1'000'000));
+    // SINGLE ACTIVATION: no gate height of its own. Default bits == 0 => disabled
+    // (a no-op that always passes), and it rides the v4 fork otherwise.
+    BOOST_CHECK(consensus.nMatMulHeaderPoWBits == 0);
+    BOOST_CHECK(!consensus.IsMatMulHeaderPoWEnabled());
+    {
+        CBlockHeader h{};
+        h.nBits = 0x1d00ffff;
+        BOOST_CHECK(CheckMatMulHeaderSpamGate(h, consensus));  // disabled => passes
+    }
 
-    // Activate at a height with an easy-but-nonzero target: top 12 bits zero
-    // (~1/4096 per hash), so grinding is fast yet most nonces fail.
+    // Enable with an easy-but-nonzero target: top 12 bits zero (~1/4096 per hash),
+    // so grinding is fast yet most nonces fail.
     const arith_uint256 easy_target{(~arith_uint256{0}) >> 12};
     consensus.nMatMulHeaderPoWBits = easy_target.GetCompact();
-    consensus.nMatMulHeaderPoWHeight = 100;
-    BOOST_CHECK(!consensus.IsMatMulHeaderPoWActive(99));
-    BOOST_CHECK(consensus.IsMatMulHeaderPoWActive(100));
+    BOOST_CHECK(consensus.IsMatMulHeaderPoWEnabled());
 
     CBlockHeader header{};
     header.nVersion = 4;
