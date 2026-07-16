@@ -111,26 +111,41 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // wherever v4 is configured (nMatMulV4TranscriptBlockSize is not yet a truly
     // parameterizable value -- the b=8/n=8192 profile is a future consensus change,
     // not a live parameter).
+    // §0.3 / §4.3 PER-PROFILE dimension-invariant guard: for each configured
+    // profile P live at some height, nMatMulV4Dimension at PRODUCTION scale MUST
+    // reduce to exactly P.sketch_rank_m under P.tile_b (tile_b·m == n), and
+    // P.sketch_payload_bytes MUST equal 8·m². The committed sketch rank, its
+    // 8·m² payload, and the O(n²) verify DoS budget are calibrated PER PROFILE
+    // for that rank at the PRODUCTION dimension. Nothing else pins the dimension
+    // to the compile-time tile, so raising nMatMulV4Dimension (allowed by the
+    // 4096..8192 accept window) without a lockstep per-profile tile_b change
+    // would SILENTLY yield a different-shaped committed object with no profile
+    // bump / golden regeneration. §0.3 requires m to STAY FIXED with b tracking
+    // n (b -> 8 at n -> 8192 for C; b -> 4 for D). Small test dimensions (regtest
+    // n=256, -regtestmatmulv4dimension overrides) are below production scale and
+    // exempt: their committed object is fixed by the exact-match check, not
+    // calibrated against mainnet goldens. Expressed via the per-profile
+    // MatMulProfileParams (design §4.1/§4.2) so C pins (b=4 -> m=1024 -> 8 MiB)
+    // and D pins (b=2 -> m=2048 -> 32 MiB) INDEPENDENTLY.
+    const auto assert_profile_dimension_pin =
+        [&consensus](const Consensus::MatMulProfileParams& p) {
+            assert(p.tile_b > 0);
+            assert(p.sketch_payload_bytes ==
+                   uint64_t{8} * p.sketch_rank_m * p.sketch_rank_m);
+            assert(consensus.nMatMulV4Dimension % p.tile_b == 0);
+            if (consensus.nMatMulV4Dimension >= p.tile_b * p.sketch_rank_m) {
+                assert(consensus.nMatMulV4Dimension / p.tile_b == p.sketch_rank_m);
+            }
+        };
+
     if (consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max()) {
         assert(consensus.nMatMulV4TranscriptBlockSize == matmul::v4::kTileB);
-        // Audit (design §0.3, non-surface invariant): the committed sketch rank
-        // m = nMatMulV4Dimension / kTileB, its 8 MiB payload (8·m²), and the O(n²)
-        // verify DoS budget are calibrated for m = BMX4C_SKETCH_RANK_M (1024) at
-        // the PRODUCTION dimension. Nothing else pins the dimension to the
-        // compile-time tile, so raising nMatMulV4Dimension to 8192 (allowed by the
-        // 4096..8192 accept window) would SILENTLY yield m = 2048 / a 32 MiB
-        // payload -- a different committed object with no profile bump or
-        // golden-vector regeneration. §0.3 requires m to STAY FIXED with b tracking
-        // n (b -> 8 at n -> 8192), so pin: any dimension AT OR ABOVE production
-        // scale (kTileB · BMX4C_SKETCH_RANK_M) MUST reduce to exactly the calibrated
-        // rank -- a lockstep kTileB bump passes, a bare dimension bump fails LOUD.
-        // Small test dimensions (regtest n=256, and -regtestmatmulv4dimension
-        // overrides) are below production scale and exempt: their committed object
-        // is fixed by the exact-match check, not calibrated against mainnet goldens.
-        assert(consensus.nMatMulV4Dimension % matmul::v4::kTileB == 0);
-        if (consensus.nMatMulV4Dimension >= matmul::v4::kTileB * Consensus::BMX4C_SKETCH_RANK_M) {
-            assert(consensus.nMatMulV4Dimension / matmul::v4::kTileB == Consensus::BMX4C_SKETCH_RANK_M);
-        }
+        // Base profile (ENC-S8 / ENC-BMX4C): pin its own (b=4, m=1024, 8 MiB)
+        // triple via the per-profile params. At nMatMulV4Height the live profile
+        // is S8 or C (both the base shape) in every valid config; a v4-only
+        // misconfig is caught by the strict-unified invariant below.
+        assert_profile_dimension_pin(
+            consensus.GetMatMulProfileParams(consensus.nMatMulV4Height));
     }
 
     // AUDIT P0.2 (STRICT UNIFIED ACTIVATION): the MatMul upgrade activates on ONE
@@ -168,11 +183,30 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     assert(consensus.nMatMulBMX4CAsertRescaleNum > 0);
     assert(consensus.nMatMulBMX4CAsertRescaleDen > 0);
 
-    // NOTE (round-3 P0-2): the ENC-BMX4C-D (v4.2-D) construction invariants were
-    // REMOVED along with the profile itself. D is no longer part of the
-    // consensus state machine: there is no nMatMulBMX4CDHeight to gate on, no D
-    // ASERT-positivity asserts, and no D §0.3 dimension/tile pin. The live
-    // profile ladder terminates at ENC-BMX4C.
+    // ENC-BMX4C-D (v4.2-D) is an ADDITIONAL profile above ENC-BMX4C (design §2):
+    // if configured it MUST fork STRICTLY ABOVE the ENC-BMX4C height (D succeeds
+    // C; no dual-profile window at the same height), and its ASERT rescale ratio
+    // must be strictly positive. Disabled (INT32_MAX) => no coupling.
+    //
+    // PROOF CARRIAGE (design §3): D's ~32 MiB sketch is carried as a SEGREGATED
+    // PRUNABLE PROOF, excluded from the block serialized size by construction, so
+    // there is NO in-block 32 MiB payload gating to assert here (that was the old
+    // P1/P3 blocker). Stage 2 wires the getmatmulproof/matmulproof relay, the
+    // §3.4 proof size cap, and the prune/archive machinery; when that lands, its
+    // activation coupling (new P2P messages + body-serialization gate) is
+    // asserted here in lockstep, mirroring the BTX_HEADER_NONCE_ON_WIRE coupling.
+    if (consensus.nMatMulBMX4CDHeight == std::numeric_limits<int32_t>::max()) return;
+    assert(consensus.nMatMulBMX4CDHeight > consensus.nMatMulBMX4CHeight);
+    assert(consensus.nMatMulBMX4CDAsertRescaleNum > 0);
+    assert(consensus.nMatMulBMX4CDAsertRescaleDen > 0);
+    // §4.3 per-profile dimension/payload pin for the D profile: its DELIBERATELY
+    // larger committed object (b=2 -> m=2048 -> 32 MiB) is pinned to the D tile
+    // via the per-profile params, so a dimension retarget cannot silently move
+    // the D rank/payload off its calibrated 32 MiB either (b -> 4 at n -> 8192
+    // would hold m = 2048). At nMatMulBMX4CDHeight the live profile is ENC_BMX4CD
+    // (D > C is asserted just above), so GetMatMulProfileParams yields the D shape.
+    assert_profile_dimension_pin(
+        consensus.GetMatMulProfileParams(consensus.nMatMulBMX4CDHeight));
 }
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,

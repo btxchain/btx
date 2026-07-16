@@ -101,12 +101,25 @@ enum class MatMulEncodingProfile : uint8_t {
     //! {0,±1,±2,±3,±4,±6} × per-32-block power-of-two scale 2^e, e ∈ {0..3};
     //! scale-free M11 U/V; base-2^6 remainder-top limb combine.
     ENC_BMX4C = 2,
-    // NOTE (round-3 P0-2): the ENC-BMX4C-D (v4.2-D, enum value 3) compute-bound
-    // profile was REMOVED from the consensus state machine. The lead decision
-    // is to stay on the 8 MiB ENC-BMX4C profile and never deploy D; D can no
-    // longer be configured or activated. Its pure integer arithmetic survives
-    // only as clearly-labeled non-consensus research reference (see
-    // src/matmul/matmul_v4_bmx4.{h,cpp}); nothing on a consensus path reaches it.
+    //! v4.2-D BMX4-C-D (doc/btx-matmul-v4.2-solver-evolution-design.md §2): the
+    //! ENC-BMX4C encoding UNCHANGED except the sketch tile b = 4 -> 2, so the
+    //! sketch rank m = n/b doubles (m = 2048 at n = 4096). Commits 4x more of
+    //! the product C to make the enforced per-nonce tensor work ~3.6x (limb
+    //! combine 16·n·m², quadratic in m); the verifier stays O(n²) integer-exact
+    //! and every accumulator / M-t24 bound is m-independent (byte-identical
+    //! determinism). Distinct V4.2-D domain tags. REINSTATED (round-3 P0-2
+    //! removed it; the on-silicon per-CARD measurement — B200 leads a 5090 by
+    //! 1.54x at D vs a 1.06x tie at C — reversed that decision) as an ADDITIONAL
+    //! versioned L1 profile above ENC-BMX4C, which stays the base live profile.
+    //! STAGED / activation-disabled (nMatMulBMX4CDHeight = INT32_MAX).
+    //! PROOF CARRIAGE (design §3): the block commits ONLY the existing 32-byte
+    //! header matmul_digest = H(σ‖Ĉ); the ~32 MiB sketch is carried as a
+    //! SEGREGATED PRUNABLE PROOF (getmatmulproof/matmulproof, Stage 2), so the
+    //! block serialized size is unaffected by m and the sketch is excluded from
+    //! MAX_BLOCK_SERIALIZED_SIZE by construction. This SUPERSEDES the earlier
+    //! blocker ("requires P1/P3 relay extension / 32 MiB in-block") that parked
+    //! the profile.
+    ENC_BMX4CD = 3,
 };
 
 // ENC-BMX4C profile constants (consensus-normative; pinned by
@@ -139,11 +152,36 @@ static constexpr int64_t BMX4C_LIMB_PAIR_BOUND_PER_N{1024}; //!< per-entry limb-
 //! LOUD at startup instead of silently committing a different object. Small test
 //! dimensions (regtest) sit below production scale and are exempt.
 static constexpr uint32_t BMX4C_SKETCH_RANK_M{1024};
+//! The CALIBRATED PRODUCTION sketch rank m = n/b for the ENC-BMX4C-D profile
+//! (tile kTileBMX4D = 2 at the mainnet n = 4096). Exactly DOUBLE the ENC-S8 /
+//! ENC-BMX4C rank, so the 8·m² sketch payload is 32 MiB (4x the C profile) and
+//! the enforced per-nonce tensor work is ~3.6x. Design §2.3/§4.1: m is a
+//! PER-PROFILE parameter (not a single global rank), pinned and validated per
+//! profile by AssertBMX4CConstructionInvariants under this profile's own tile b.
+static constexpr uint32_t BMX4CD_SKETCH_RANK_M{2048};
 // C-1' accumulator-eligibility anchors (consensus-PROTECTING, not
 // consensus-changing: consumed by backend qualification/self-tests, never by
 // block validation — doc/btx-matmul-v4.2-bmx4c-spec.md §5).
 static constexpr uint32_t BMX4C_NATIVE_PATH_PROVEN_T{24};   //!< proven exact FP-mantissa accumulator bits required for the native block-scaled FP4/MX path; t≈14 fails closed to the 1-GEMM INT8 fallback
 static constexpr uint32_t BMX4C_FALLBACK_INT8_ACCUMULATOR_BITS{32}; //!< C-1 floor for the INT8 fallback path (true two's-complement int32)
+
+/**
+ * Per-profile MatMul v4 shape (consensus-normative; design §4.1). The single
+ * profile selector GetMatMulEncodingProfile(height) chooses WHICH encoding is
+ * live; GetMatMulProfileParams(height) wraps it and attaches the per-profile
+ * SHAPE (tile b, production sketch rank m, the 8·m² sketch payload size, and
+ * whether the proof is carried in-block or segregated), so every rank/tile/size
+ * call site reads the profile instead of a single global constant (design §4.2).
+ * The shape values are the CALIBRATED PRODUCTION constants (m at the mainnet n),
+ * not values recomputed from a runtime dimension.
+ */
+struct MatMulProfileParams {
+    MatMulEncodingProfile profile;   //!< ENC_S8 | ENC_BMX4C | ENC_BMX4CD
+    uint32_t tile_b;                 //!< sketch tile b: 4 (S8/C) | 2 (D). Mirrors matmul::v4::kTileB / matmul::v4::bmx4::kTileBMX4D.
+    uint32_t sketch_rank_m;          //!< production rank m = n / tile_b: 1024 (C) | 2048 (D)
+    uint64_t sketch_payload_bytes;   //!< 8·m² bytes: 8 MiB (C) | 32 MiB (D)
+    bool     proof_segregated;       //!< false (S8/C: sketch in-block) | true (D: sketch relayed as a segregated prunable proof, Stage 2 wires the relay — here it is just the declared flag)
+};
 
 /**
  * Parameters that influence chain consensus.
@@ -350,10 +388,35 @@ struct Params {
      *  the network has no pre-fork history). */
     int64_t nMatMulBMX4CAsertRescaleNum{1};
     int64_t nMatMulBMX4CAsertRescaleDen{1};
-    // NOTE (round-3 P0-2): the v4.2-D / ENC-BMX4C-D height + ASERT-rescale
-    // fields (nMatMulBMX4CDHeight, nMatMulBMX4CDAsertRescaleNum/Den) were
-    // REMOVED. D is no longer part of the consensus state machine and cannot be
-    // configured or activated. See the MatMulEncodingProfile enum note above.
+    /** MatMul v4.2-D / ENC-BMX4C-D encoding-profile hard fork (see
+     *  doc/btx-matmul-v4.2-solver-evolution-design.md §2/§4). ENC-BMX4C-D is a
+     *  height-gated hard fork of the sketch tile ONLY (b = 4 -> 2, m = n/2):
+     *  the operand encoding, verifier (q = 2^61-1, R = 3), digest, and every
+     *  accumulator / M-t24 bound are UNCHANGED; only the committed sketch rank
+     *  m and the domain tags differ. When set it MUST be strictly greater than
+     *  nMatMulBMX4CHeight (D succeeds C, an ADDITIONAL profile above the base
+     *  C profile), above every already-mined height, and never lowered.
+     *  DEFAULT = INT32_MAX = disabled: v4.2-D is STAGED, parameter-frozen, and
+     *  NOT the current activation candidate.
+     *  PROOF CARRIAGE: D commits matmul_digest in-block and relays the ~32 MiB
+     *  sketch as a SEGREGATED PRUNABLE PROOF (design §3) — so the sketch is
+     *  excluded from the block serialized size by construction and the earlier
+     *  in-block 32 MiB / P1-P3 relay blocker no longer applies. Stage 2 wires
+     *  the getmatmulproof/matmulproof relay, prune, and archive machinery.
+     *  ACTIVATION-BLOCKING beyond the v4.2 gates (design §6): the difficulty
+     *  rescale below MUST be calibrated against a measured Strassen/LCMA-aware
+     *  combine cost (audit F2), not a schoolbook 16·n·m² count; and the per-card
+     *  ordering + 32 MiB proof propagation must be re-confirmed on the final
+     *  kernel before activation. */
+    int32_t nMatMulBMX4CDHeight{std::numeric_limits<int32_t>::max()};
+    /** One-time ASERT target rescale + re-anchor at nMatMulBMX4CDHeight,
+     *  mechanically identical to nMatMulBMX4CAsertRescale*. The D-profile
+     *  marginal unit is ~3.6x the C-profile's enforced tensor work, and the
+     *  rational miner runs an LCMA/Strassen-accelerated combine, so this ratio
+     *  MUST be calibrated EMPIRICALLY from measured marginal nonce/s on the
+     *  LCMA path (audit F2, design §6-3). Default 1/1 = "no rescale". */
+    int64_t nMatMulBMX4CDAsertRescaleNum{1};
+    int64_t nMatMulBMX4CDAsertRescaleDen{1};
     /** MatMul v4 header-PoW throttle (audit F1/C1/C2, doc/btx-matmul-v4.2-header-pow-gate.md).
      *  At v4 heights the ONLY header-level PoW check is `matmul_digest <= target`,
      *  but `matmul_digest` is a self-declared header field, not a hash of the
@@ -633,9 +696,17 @@ struct Params {
             nMatMulBMX4CHeight != std::numeric_limits<int32_t>::max() &&
             height >= nMatMulBMX4CHeight;
     }
-    // NOTE (round-3 P0-2): IsBMX4CDActive() was REMOVED. The profile ladder now
-    // terminates at ENC_BMX4C (ENC_S8 -> ENC_BMX4C); there is no D activation
-    // predicate and GetMatMulEncodingProfile() below never returns ENC_BMX4CD.
+    /** True at and above the v4.2-D ENC-BMX4C-D profile hard fork. Requires the
+     *  ENC-BMX4C profile to be active (D is a tile re-version of C, an
+     *  ADDITIONAL profile above the base C profile), so D succeeds C in the
+     *  profile ladder ENC_S8 -> ENC_BMX4C -> ENC_BMX4CD. Default height
+     *  INT32_MAX => never active (staged). */
+    bool IsBMX4CDActive(int32_t height) const
+    {
+        return IsBMX4CActive(height) &&
+            nMatMulBMX4CDHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nMatMulBMX4CDHeight;
+    }
     /** Header-PoW throttle (audit F1/C1/C2) is enabled iff a discount is configured;
      *  it has NO separate activation height -- it rides the single v4 fork (see
      *  nMatMulHeaderPoWDiscountBits). Callers gate on IsMatMulV4Active(height) &&
@@ -668,8 +739,42 @@ struct Params {
      *  (spec §8.2). */
     MatMulEncodingProfile GetMatMulEncodingProfile(int32_t height) const
     {
+        if (IsBMX4CDActive(height)) return MatMulEncodingProfile::ENC_BMX4CD;
         return IsBMX4CActive(height) ? MatMulEncodingProfile::ENC_BMX4C
                                      : MatMulEncodingProfile::ENC_S8;
+    }
+    /** The per-profile SHAPE (design §4.1) live at this height: wraps
+     *  GetMatMulEncodingProfile and attaches the profile's tile b, production
+     *  sketch rank m, 8·m² sketch payload size, and proof-carriage flag. Every
+     *  rank/tile/size call site (validator, verify/solve dispatch, payload/size
+     *  bounds, per-profile construction assert) reads the shape from HERE rather
+     *  than from a single global constant, so C validates against b=4/m=1024/
+     *  8 MiB and D against b=2/m=2048/32 MiB with no shared magic number
+     *  (design §4.2). The b/m/payload triple is the CALIBRATED PRODUCTION shape
+     *  (mainnet n), not a value recomputed from a runtime dimension. */
+    MatMulProfileParams GetMatMulProfileParams(int32_t height) const
+    {
+        const MatMulEncodingProfile profile = GetMatMulEncodingProfile(height);
+        if (profile == MatMulEncodingProfile::ENC_BMX4CD) {
+            // b = 2 (matmul::v4::bmx4::kTileBMX4D); m = 2048; 8·m² = 32 MiB;
+            // proof segregated (relayed prunable, Stage 2 wires the relay).
+            return MatMulProfileParams{
+                profile,
+                /*tile_b=*/2,
+                /*sketch_rank_m=*/BMX4CD_SKETCH_RANK_M,
+                /*sketch_payload_bytes=*/uint64_t{8} * BMX4CD_SKETCH_RANK_M * BMX4CD_SKETCH_RANK_M,
+                /*proof_segregated=*/true,
+            };
+        }
+        // ENC_S8 and ENC_BMX4C share the base shape: b = 4 (matmul::v4::kTileB);
+        // m = 1024; 8·m² = 8 MiB; proof carried in-block.
+        return MatMulProfileParams{
+            profile,
+            /*tile_b=*/4,
+            /*sketch_rank_m=*/BMX4C_SKETCH_RANK_M,
+            /*sketch_payload_bytes=*/uint64_t{8} * BMX4C_SKETCH_RANK_M * BMX4C_SKETCH_RANK_M,
+            /*proof_segregated=*/false,
+        };
     }
     bool IsMatMulPreHashEpsilonBitsUpgradeActive(int32_t height) const
     {

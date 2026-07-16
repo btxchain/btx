@@ -189,9 +189,18 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out);
 
 // --- Digest + verify (mirrors the pow_v4 contract) -------------------------
 
-/** Validate (n, b=kTileB) for ENC-BMX4C: the v4.1 ValidateDims checks PLUS
- *  n % 32 == 0 (block scales) and CheckCombineLimbBoundBMX4C(n). Returns
- *  m = n/b on success. */
+/** b-PARAMETRIC BMX4 dimension validator (design §4.2): the v4.1 ValidateDims
+ *  checks (n > 0, b | n, exact-int32 accumulation bound) PLUS the BMX4 gates
+ *  n % 32 == 0 (E8M0 block scales) and CheckCombineLimbBoundBMX4C(n) (288·n
+ *  <= 2^23-1, m-independent). Returns m = n/b on success. The structural gates
+ *  are IDENTICAL for every BMX4 encoding profile — only the tile b differs — so
+ *  ENC-BMX4C (b = kTileB = 4) and ENC-BMX4C-D (b = kTileBMX4D = 2) both flow
+ *  through this single routine; the profile-specific ValidateDimsBMX4C/D below
+ *  are thin b-fixing wrappers. */
+[[nodiscard]] bool ValidateDimsBMX4(uint32_t n, uint32_t b, uint32_t& m_out);
+
+/** ENC-BMX4C wrapper for ValidateDimsBMX4 (b passed by the caller; production
+ *  b = kTileB = 4). Returns m = n/b on success. */
 [[nodiscard]] bool ValidateDimsBMX4C(uint32_t n, uint32_t b, uint32_t& m_out);
 
 /** Miner: derive the ENC-BMX4C consensus digest and sketch payload for
@@ -217,20 +226,20 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out);
                                      uint256& digest_out);
 
 // ---------------------------------------------------------------------------
-// NON-CONSENSUS research reference (ENC-BMX4C-D / v4.2-D was NEVER deployed).
+// ENC-BMX4C-D / v4.2-D CONSENSUS PROFILE (reinstated; solver-evolution Stage 1).
 //
-// ROUND-3 P0-2: the ENC-BMX4C-D compute-bound profile was REMOVED from the
-// consensus state machine (no enum value, no activation height, no ASERT
-// params, no verify/solve dispatch, no construction asserts). The declarations
-// below are the profile's PURE INTEGER ARITHMETIC only, retained as inert
-// research/reference code. They are NOT reachable from any consensus path --
-// no verifier, miner, chainparams, or pow dispatch calls them; the only
-// callers are the arithmetic-only tests in test/matmul_v4_bmx4d_tests.cpp. Do
-// NOT wire these back into a consensus path: the lead decision is to stay on
-// the 8 MiB ENC-BMX4C profile permanently.
-// ---------------------------------------------------------------------------
-// ENC-BMX4C-D: the compute-bound "deeper-commit" successor profile (v4.2-D).
-// Design: doc/btx-matmul-v4.2-compute-bound-redesign.md.
+// ROUND-3 P0-2 removed ENC-BMX4C-D from the consensus state machine; the
+// on-silicon per-card measurement (B200 leads a 5090 by 1.54x at D vs a 1.06x
+// tie at C) reversed that decision, so D is a REAL consensus profile again
+// (enum value ENC_BMX4CD = 3, activation predicate IsBMX4CDActive, verify/solve
+// dispatch, and per-profile construction asserts). It remains STAGED /
+// activation-disabled (nMatMulBMX4CDHeight = INT32_MAX on every network); the
+// evolution vs the earlier parked design is PROOF CARRIAGE — the 32 MiB sketch
+// is relayed as a segregated prunable proof (design §3), not carried in-block,
+// so the payload no longer breaches the block/P2P ceiling. Stage 2 wires the
+// getmatmulproof/matmulproof relay; Stage 1 leaves D on the existing in-block
+// payload path (the profile exists, dispatches, and validates b-parametrically).
+// Design: doc/btx-matmul-v4.2-solver-evolution-design.md.
 //
 // IDENTICAL to ENC-BMX4C in EVERY operand-encoding respect: the M11 mantissa
 // alphabet, E8M0 power-of-two block scales (block length 32, S = 3, E_max = 48),
@@ -256,9 +265,11 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out);
 //     ~4.2x (b=4) to ~2.3x (b=2); at b=1 (full C, out of transport bounds) it
 //     reaches 1.5x -- the linear commitment can never drive it to 1 while the
 //     verifier stays O(n^2) (the L1 theorem; we do not pretend to escape it).
-//   * sketch payload 8*m^2: 8 MiB (b=4) -> 32 MiB (b=2). This EXCEEDS the
-//     16 MiB P2P / 24 MiB block ceiling and REQUIRES the relay-extension plan
-//     (redesign doc §6, P1/P3). Stated plainly; it is the price of the work.
+//   * sketch payload 8*m^2: 8 MiB (b=4) -> 32 MiB (b=2). Carried as a
+//     SEGREGATED PRUNABLE PROOF (design §3), NOT in-block, so it is excluded
+//     from the block/P2P serialized-size ceiling by construction (this removes
+//     the sole blocker that parked the profile). Stated plainly; it is the
+//     price of the work. Stage 2 wires the relay/prune/archive machinery.
 //   * verifier stays O(n^2): dominated by the two dense n^2 matvecs
 //     A*(B*(V*y)); the O(m^2) left side and O(nm) projections grow with m but
 //     stay sub-dominant (~+25% verify at n=4096, still well under a second).
@@ -290,21 +301,22 @@ inline constexpr uint32_t kTileBMX4D = 2;
 [[nodiscard]] uint256 DeriveOperandSeedBMX4D(const CBlockHeader& header, Operand which);
 [[nodiscard]] std::pair<uint256, uint256> DeriveProjectorSeedsBMX4D(const CBlockHeader& header);
 
-/** Validate (n, b = kTileBMX4D = 2) for ENC-BMX4C-D: identical structural gates
- *  to ValidateDimsBMX4C (n % 32 == 0, CheckCombineLimbBoundBMX4C, b | n, s32
- *  accum bound) but at b = 2. Returns m = n/2 on success. */
+/** ENC-BMX4C-D wrapper for ValidateDimsBMX4 at the fixed D tile b = kTileBMX4D
+ *  = 2: identical structural gates to ENC-BMX4C (n % 32 == 0,
+ *  CheckCombineLimbBoundBMX4C, b | n, s32 accum bound) — only b differs.
+ *  Returns m = n/2 on success. */
 [[nodiscard]] bool ValidateDimsBMX4D(uint32_t n, uint32_t& m_out);
 
-/** [NON-CONSENSUS reference] Derive the ENC-BMX4C-D digest + sketch payload for
- *  `header` at dimension `n`. Byte-for-byte the ENC-BMX4C ComputeDigestBMX4C
- *  algorithm with the D domain tags and m = n/2, so the payload is 8*(n/2)^2
- *  bytes and the enforced tensor work is ~3.6x the C-profile. Pure integer
- *  arithmetic; no consensus path calls this (D was never deployed). */
+/** Miner: derive the ENC-BMX4C-D consensus digest + sketch payload for `header`
+ *  at dimension `n`. Byte-for-byte the ENC-BMX4C ComputeDigestBMX4C algorithm
+ *  with the D domain tags and m = n/2, so the payload is 8*(n/2)^2 bytes and the
+ *  enforced tensor work is ~3.6x the C-profile. Returns false iff (n, kTileBMX4D)
+ *  is invalid for ENC-BMX4C-D. Pure integer arithmetic; no float. */
 [[nodiscard]] bool ComputeDigestBMX4D(const CBlockHeader& header, uint32_t n,
                                       uint256& digest_out,
                                       std::vector<unsigned char>& payload_out);
 
-/** [NON-CONSENSUS reference] O(n^2) ENC-BMX4C-D check. The ENC-BMX4C verifier at
+/** Verifier: O(n^2) ENC-BMX4C-D consensus check. The ENC-BMX4C verifier at
  *  m = n/2 with the D seeds -- SketchFreivalds is reused UNCHANGED (it is
  *  compute-path- AND rank-agnostic). Returns true iff every round matches AND
  *  the recomputed digest equals `header.matmul_digest`. */

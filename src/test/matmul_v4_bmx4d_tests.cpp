@@ -2,13 +2,14 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
-// NON-CONSENSUS research-reference tests (ROUND-3 P0-2): ENC-BMX4C-D was REMOVED
-// from the consensus state machine and was never deployed. These cases exercise
-// ONLY the pure integer arithmetic retained as reference code in
-// src/matmul/matmul_v4_bmx4.{h,cpp} (ComputeDigestBMX4D / VerifySketchBMX4D /
-// ValidateDimsBMX4D and the D seed derivations). They do NOT touch any consensus
-// dispatch, activation predicate, or chainparams -- there is no consensus D path
-// to test any more. Kept solely to pin the reference arithmetic's determinism.
+// ENC-BMX4C-D CONSENSUS PROFILE tests (reinstated; solver-evolution Stage 1).
+// ROUND-3 P0-2 removed D from the consensus state machine; the on-silicon
+// per-card measurement reversed that, so D is a REAL consensus profile again
+// (enum ENC_BMX4CD = 3, IsBMX4CDActive, verify/solve dispatch, per-profile
+// construction asserts). These cases pin BOTH the D-profile CPU-reference
+// arithmetic AND its consensus wiring: the profile selector, the per-profile
+// MatMulProfileParams shape (C -> b4/m1024/8 MiB/segregated=false;
+// D -> b2/m2048/32 MiB/segregated=true), and the b-parametric ValidateDimsBMX4.
 //
 // ENC-BMX4C-D committed-object profile tests (MatMul v4.2-D; design
 // doc/btx-matmul-v4.2-compute-bound-redesign.md). ENC-BMX4C-D is ENC-BMX4C with
@@ -39,6 +40,7 @@
 //       digest (distinct V4.2-D domain tags + different rank).
 //   + GOLDEN vectors: pinned ENC-BMX4C-D digests at fixed headers.
 
+#include <consensus/params.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
@@ -53,6 +55,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -318,6 +321,107 @@ BOOST_AUTO_TEST_CASE(d_profile_golden_vectors)
                                         << " != pinned " << tv.expected_payload_sha256_hex);
         }
     }
+}
+
+// --- CONSENSUS WIRING: profile selector + per-profile params (design §4.1) ---
+
+namespace {
+// Minimal params exposing the three MatMul height gates the profile selector
+// reads. GetMatMulEncodingProfile / GetMatMulProfileParams consult only these
+// (no ASERT machinery), so a bare struct suffices. D forks strictly above C.
+Consensus::Params ProfileLadderParams(int32_t c_height, int32_t d_height)
+{
+    Consensus::Params p{};
+    p.nMatMulV4Height = c_height;      // unified v3 -> v4.2 flag day (v4 == C)
+    p.nMatMulBMX4CHeight = c_height;
+    p.nMatMulBMX4CDHeight = d_height;
+    return p;
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(d_profile_selector_returns_enc_bmx4cd_when_active)
+{
+    // Ladder: v4/C at 100, D at 200. Below C -> S8 (meaningless, v3 rules);
+    // [100,200) -> ENC_BMX4C; >=200 -> ENC_BMX4CD.
+    const auto p = ProfileLadderParams(100, 200);
+
+    BOOST_CHECK(!p.IsBMX4CDActive(199));
+    BOOST_CHECK(p.IsBMX4CActive(199));
+    BOOST_CHECK(p.GetMatMulEncodingProfile(199) ==
+                Consensus::MatMulEncodingProfile::ENC_BMX4C);
+
+    BOOST_CHECK(p.IsBMX4CDActive(200));
+    BOOST_CHECK(p.IsBMX4CDActive(5000));
+    BOOST_CHECK(p.GetMatMulEncodingProfile(200) ==
+                Consensus::MatMulEncodingProfile::ENC_BMX4CD);
+
+    // Disabled D (default INT32_MAX): selector never returns ENC_BMX4CD.
+    const auto p_no_d = ProfileLadderParams(100, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!p_no_d.IsBMX4CDActive(1'000'000));
+    BOOST_CHECK(p_no_d.GetMatMulEncodingProfile(1'000'000) ==
+                Consensus::MatMulEncodingProfile::ENC_BMX4C);
+}
+
+BOOST_AUTO_TEST_CASE(get_matmul_profile_params_c_and_d_shapes)
+{
+    const auto p = ProfileLadderParams(100, 200);
+
+    // C shape: b=4, m=1024, 8 MiB, in-block proof.
+    const auto pc = p.GetMatMulProfileParams(150);
+    BOOST_CHECK(pc.profile == Consensus::MatMulEncodingProfile::ENC_BMX4C);
+    BOOST_CHECK_EQUAL(pc.tile_b, 4u);
+    BOOST_CHECK_EQUAL(pc.sketch_rank_m, Consensus::BMX4C_SKETCH_RANK_M);
+    BOOST_CHECK_EQUAL(pc.sketch_rank_m, 1024u);
+    BOOST_CHECK_EQUAL(pc.sketch_payload_bytes, uint64_t{8} * 1024 * 1024); // 8 MiB
+    BOOST_CHECK_EQUAL(pc.sketch_payload_bytes, 8u * 1024u * 1024u);
+    BOOST_CHECK(!pc.proof_segregated);
+
+    // D shape: b=2, m=2048, 32 MiB, segregated proof.
+    const auto pd = p.GetMatMulProfileParams(200);
+    BOOST_CHECK(pd.profile == Consensus::MatMulEncodingProfile::ENC_BMX4CD);
+    BOOST_CHECK_EQUAL(pd.tile_b, 2u);
+    BOOST_CHECK_EQUAL(pd.sketch_rank_m, Consensus::BMX4CD_SKETCH_RANK_M);
+    BOOST_CHECK_EQUAL(pd.sketch_rank_m, 2048u);
+    BOOST_CHECK_EQUAL(pd.sketch_payload_bytes, uint64_t{8} * 2048 * 2048); // 32 MiB
+    BOOST_CHECK(pd.proof_segregated);
+
+    // Payload accounting is exactly 8*m^2 for each profile, and D is 4x C.
+    BOOST_CHECK_EQUAL(pc.sketch_payload_bytes,
+                      uint64_t{8} * pc.sketch_rank_m * pc.sketch_rank_m);
+    BOOST_CHECK_EQUAL(pd.sketch_payload_bytes,
+                      uint64_t{8} * pd.sketch_rank_m * pd.sketch_rank_m);
+    BOOST_CHECK_EQUAL(pd.sketch_payload_bytes, 4u * pc.sketch_payload_bytes);
+    // The tile b matches the compile-time tiles the matmul layer uses.
+    BOOST_CHECK_EQUAL(pd.tile_b, bx::kTileBMX4D);
+    BOOST_CHECK_EQUAL(pc.tile_b, kTileB);
+}
+
+// --- b-PARAMETRIC VALIDATOR (design §4.2) -----------------------------------
+
+BOOST_AUTO_TEST_CASE(validate_dims_bmx4_is_b_parametric)
+{
+    const uint32_t n = kTestDim; // 256, a multiple of 32 (and of both tiles)
+    uint32_t m_b2 = 0, m_b4 = 0;
+
+    // One routine, both tiles: m = n/b.
+    BOOST_REQUIRE(bx::ValidateDimsBMX4(n, 2, m_b2));
+    BOOST_REQUIRE(bx::ValidateDimsBMX4(n, 4, m_b4));
+    BOOST_CHECK_EQUAL(m_b2, n / 2);
+    BOOST_CHECK_EQUAL(m_b4, n / 4);
+
+    // The thin C/D wrappers must agree with the unified routine at their tiles.
+    uint32_t m_c = 0, m_d = 0;
+    BOOST_REQUIRE(bx::ValidateDimsBMX4C(n, 4, m_c));
+    BOOST_REQUIRE(bx::ValidateDimsBMX4D(n, m_d));
+    BOOST_CHECK_EQUAL(m_c, m_b4);
+    BOOST_CHECK_EQUAL(m_d, m_b2);
+
+    // Structural gates are shared (only b differs): n % 32 != 0 fails for any b;
+    // b that does not divide n fails.
+    uint32_t dummy = 0;
+    BOOST_CHECK(!bx::ValidateDimsBMX4(n + 1, 2, dummy)); // 257 % 32 != 0
+    BOOST_CHECK(!bx::ValidateDimsBMX4(n, 3, dummy));     // 3 does not divide 256
+    BOOST_CHECK(!bx::ValidateDimsBMX4(n, 0, dummy));     // b = 0 invalid
 }
 
 BOOST_AUTO_TEST_SUITE_END()

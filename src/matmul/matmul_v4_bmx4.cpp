@@ -372,11 +372,22 @@ std::vector<Fq> ComputeCombineLimbTensorBMX4C(const std::vector<int32_t>& P,
     return Chat;
 }
 
-bool ValidateDimsBMX4C(uint32_t n, uint32_t b, uint32_t& m_out)
+bool ValidateDimsBMX4(uint32_t n, uint32_t b, uint32_t& m_out)
 {
+    // b-PARAMETRIC BMX4 validator (design §4.2): the structural gates are
+    // IDENTICAL across every BMX4 encoding profile — n % 32 == 0 (E8M0 block
+    // scales), CheckCombineLimbBoundBMX4C(n) (288·n <= 2^23-1, m-independent),
+    // n > 0, b | n, and the exact-int32 accumulation bound. Only the tile b
+    // differs between profiles (C: b = kTileB = 4; D: b = kTileBMX4D = 2), so a
+    // single routine serves both.
     if ((n % kBlockLen) != 0) return false;      // E8M0 block scales
     if (!CheckCombineLimbBoundBMX4C(n)) return false;
     return matmul::v4::ValidateDims(n, b, m_out); // n>0, b|n, s32 accum bound
+}
+
+bool ValidateDimsBMX4C(uint32_t n, uint32_t b, uint32_t& m_out)
+{
+    return ValidateDimsBMX4(n, b, m_out); // C tile (b = kTileB = 4) passed by caller
 }
 
 bool ComputeDigestBMX4C(const CBlockHeader& header, uint32_t n,
@@ -452,12 +463,14 @@ bool VerifySketchBMX4C(const CBlockHeader& header, uint32_t n, uint32_t rounds,
 }
 
 // ---------------------------------------------------------------------------
-// NON-CONSENSUS research reference (ENC-BMX4C-D / v4.2-D was NEVER deployed).
-// ROUND-3 P0-2 removed ENC-BMX4C-D from the consensus state machine; the pure
-// integer arithmetic below is retained as inert research/reference code only.
-// It is NOT reachable from any consensus path (no verifier, miner, chainparams,
-// or pow dispatch calls it) -- the sole callers are the arithmetic-only tests
-// in test/matmul_v4_bmx4d_tests.cpp. Do NOT re-wire into consensus.
+// ENC-BMX4C-D / v4.2-D CONSENSUS PROFILE (reinstated; solver-evolution Stage 1).
+// ROUND-3 P0-2 removed ENC-BMX4C-D; the on-silicon per-card measurement reversed
+// that decision, so the routines below are a REAL consensus code path again
+// (reached from pow.cpp verify/solve dispatch when ENC_BMX4CD is the live
+// profile). D stays activation-disabled (nMatMulBMX4CDHeight = INT32_MAX). The
+// evolution vs the parked design is proof carriage: the 32 MiB sketch relays as
+// a segregated prunable proof (design §3), wired in Stage 2; Stage 1 keeps D on
+// the existing in-block payload path. See doc/btx-matmul-v4.2-solver-evolution-design.md.
 // ---------------------------------------------------------------------------
 // ENC-BMX4C-D (deeper-commit profile): the ENC-BMX4C construction with b = 2
 // (m = n/2), so the sketch commits 4x more of the exact-integer product C and
@@ -493,9 +506,7 @@ std::pair<uint256, uint256> DeriveProjectorSeedsBMX4D(const CBlockHeader& header
 
 bool ValidateDimsBMX4D(uint32_t n, uint32_t& m_out)
 {
-    if ((n % kBlockLen) != 0) return false;      // E8M0 block scales
-    if (!CheckCombineLimbBoundBMX4C(n)) return false; // 288*n <= 2^23-1 (m-independent)
-    return matmul::v4::ValidateDims(n, kTileBMX4D, m_out); // b=2 | n, s32 accum bound
+    return ValidateDimsBMX4(n, kTileBMX4D, m_out); // D tile (b = kTileBMX4D = 2)
 }
 
 bool ComputeDigestBMX4D(const CBlockHeader& header, uint32_t n,
