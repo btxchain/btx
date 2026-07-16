@@ -201,3 +201,23 @@ intermittent AUP safeguard and were re-run on Opus).
 - Miner integration: the normal (gate-disabled) path round-trips; seeds, dim,
   payload channel, and the winner reseal are exactly what validation recomputes;
   the solver picks ENC-BMX4C at the unified fork via the shared profile selector.
+
+### Pre-existing test-harness gap (discovered wave-3, documented — not a consensus issue)
+
+The unit-test mining helpers do not support MatMul v4 blocks: `MineHeaderForConsensus`
+call sites (`setup_common.cpp` `CreateBlock`, `miner_tests`, `validation_block_tests`,
+`blockfilter_index_tests`, `headers_sync_chainwork_tests`, `peerman_tests`, the
+`p2p_headers_presync` fuzzer) do not pass the parent MTP that v4 seed derivation
+requires, and the `CBlock` helper populates the v3 Freivalds payload rather than
+the v4 product sketch (`matrix_c_data`); the Mining-interface `submitSolution`
+does not carry the v4 payload at all. So any fixture that mines past the v4
+activation height (e.g. regtest `TestChain100Setup` at height 100) aborts in the
+helper. This is **pre-existing** (broken since v4 landed at regtest height 100,
+~35 commits before this audit — confirmed by reverting the audit changes) and is
+**test-infrastructure only**: no consensus code is involved, and the real miner
+(`BlockAssembler` + `SolveMatMul`) produces valid v4 blocks (verified by the
+enforcing round-trip test). Fixing it is a bounded but cross-cutting test-infra
+task: thread the parent MTP through every `MineHeaderForConsensus` call site,
+capture the solved sketch into `matrix_c_data` for v4 (skipping the v3
+`PopulateFreivaldsPayload`), and teach `submitSolution` to carry the v4 payload.
+Scoped as a follow-up so it does not entangle the consensus-audit fixes.
