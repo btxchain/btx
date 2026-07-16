@@ -516,8 +516,23 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     cuda/matmul_accel.cu
     cuda/oracle_accel.cu
     cuda/matmul_v4_accel.cu
+    # External review (vanities): the BMX4-C (v4.2) device backend source was
+    # never listed, so the v4.2 accelerated path never linked. Wire it in so the
+    # profile is dispatchable (it falls back to the INT8 path on NVIDIA, where the
+    # MXFP4 native GEMM is currently unserved by cuBLASLt -- see the round-2
+    # remediation doc). Compile-verified only on real CUDA toolchains.
+    cuda/matmul_v4_bmx4_accel.cu
   )
   target_compile_definitions(btx_matmul_backend PRIVATE BTX_ENABLE_CUDA_EXPERIMENTAL=1)
+  # External review (vanities), the eligibility-classifier fix: CudaEligibility()
+  # lives in matmul/backend_capabilities_v4.cpp, which compiles into bitcoin_common
+  # (not btx_matmul_backend). Without the define here it takes the
+  # #else -> DisabledByBuild() branch and the whole measurement run silently times
+  # the CPU stub while reporting `compiled=no reason=disabled_by_build` -- so every
+  # GPU number an operator would submit is really a CPU number unless they catch
+  # that line. The probe it then calls (btx::cuda::ProbeMatMulDigestAcceleration)
+  # is a host function in btx_matmul_backend, which bitcoin_common already links.
+  target_compile_definitions(bitcoin_common PRIVATE BTX_ENABLE_CUDA_EXPERIMENTAL=1)
   if(BTX_CUDA_RUNTIME_LIBRARY STREQUAL "Static")
     target_link_libraries(btx_matmul_backend PRIVATE CUDA::cudart_static)
   else()

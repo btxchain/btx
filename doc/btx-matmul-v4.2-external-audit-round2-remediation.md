@@ -69,6 +69,68 @@ carried by the BMX4-C rescale (the v4 rescale stays inert `1/1`).
 | **G4** | CUDA OOM adaptation incomplete (host/native allocations before the adaptive-Q retry) | **OPEN** — move all Q-dependent allocations inside the retry region; test host/device/native OOM and deterministic final fallback. |
 | **G5** | Hardware matrix incomplete (CUDA/HIP runtime, Blackwell MXF4, mixed-GPU, M5 Metal, M-t24, stress/thermal) | **OPEN by design** — needs real multi-vendor hardware; consensus-safe (CPU re-verify) but not activation-performance evidence. |
 
+## External hardware review (vanities) — measured findings on real silicon
+An independent reviewer benchmarked the PR on RTX 5090 (sm_120) / H100 SXM (sm_90) /
+B200 (sm_100). Their findings, verified against this tree:
+
+### Toolchain: the measurement tool silently reported CPU numbers as device numbers (FIXED)
+Five defects stood between a clean checkout and a real device measurement; all
+confirmed at head `c324361` and **fixed** on this branch (compile-verified for the
+default CPU build; the CUDA-ON path is verifiable only on a real toolchain):
+- **The critical one:** `CudaEligibility()` (in `backend_capabilities_v4.cpp`,
+  compiled into `bitcoin_common`) took the `#else → DisabledByBuild()` branch
+  because `BTX_ENABLE_CUDA_EXPERIMENTAL` was defined only on `btx_matmul_backend`.
+  The tool then printed `compiled=no reason=disabled_by_build` and **silently timed
+  the CPU stub** — so every GPU number an operator submitted was really a CPU
+  number unless they noticed that line. Fixed by defining the macro on
+  `bitcoin_common` too (`src/CMakeLists.txt`).
+- `cuda/matmul_v4_bmx4_accel.cu` (the ENC-BMX4C device backend) was absent from the
+  CMake source list → the v4.2 path never linked. **Wired in.**
+- `src/primitives/transaction.h` — the `CTransaction(deserialize_type,…)` ctors are
+  rejected by nvcc; **guarded under `#ifndef __CUDACC__`** (host build unchanged).
+- `contrib/matmul-v4/measure-hardware.sh` — `BUILD_UTIL` defaults to `${BUILD_TESTS}`,
+  so `-DBUILD_TESTS=OFF` left the `matmul-v4-report` tool unbuilt; and the
+  `CUDA_ARCH` default omitted Blackwell (`75;80;89;90`). **Both fixed**
+  (`-DBUILD_UTIL=ON`; arch list extended to `…;100;120`).
+
+**B1 (bit-exact determinism) is trustworthy on real GPUs** — the reviewer confirmed
+byte-identical CUDA-vs-CPU digests on sm_120, matching earlier sm_90 (cross-architecture
+determinism holds). The tool is a correct **determinism** instrument.
+
+### Not yet a performance instrument (OPEN)
+The `stages` block is timed on the **CPU reference by design** (n=1024 → 8–12 s/window;
+n=4096 never finishes), and the device path runs one window at a time with host
+round-trips, so **B2b/B2g cannot be produced at the large-n, Q≥32 regime where the
+ordering question lives**. Settling B2g/B2b needs the per-stage timers to read the
+on-device stacked-window path and the batched dispatch to keep the device busy.
+
+### Ordering is a utilization problem (structural — not a bug)
+Consistent across the reviewer's runs (n=4096/8192, wide XOF, C-13 combine): a
+**consumer RTX 5090 beats an H100 ~2–2.5×/card** (and ~11×/rental-dollar). The
+sketch enforces only `2·n²·m` INT8 MACs, so on-device tensor utilization tops out
+around **~25% of the card's INT8 peak** — the combine is bandwidth/launch-bound, and
+operand-gen is SHA/memory-bound, both favouring high-clock consumer parts. *"The
+ordering question is really a utilization question, and right now nobody's tensor
+units are full,"* so a datacenter part's extra TOPS have nothing to convert. This
+matches the 0.40× anchor and means **the datacenter-favouring goal is not delivered
+by the current sketch construction** — a design-level finding, independent of any
+toolchain bug, and the central open question for the whole approach.
+
+### v4.2 native MXFP4 path is inert on all current NVIDIA silicon (OPEN, cuBLASLt)
+`matmul_v4_bmx4_accel.cu` requests `CUDA_R_4F_E2M1` operands with `VEC32_UE8M0`
+(MXFP4) scales, for which **cuBLASLt has no kernel** on any tested card/toolkit
+(5090, B200; cuBLASLt 12.8.4/13.0.0/13.5.1 all return zero algorithms), while INT8
+and NVFP4 controls dispatch fine. So the native path **fails closed to the INT8
+fallback on every NVIDIA card** — the tax inversion never engages through cuBLASLt,
+and B200 behaves as consumer. NVFP4 is not an out (its `UE4M3` fractional scale is
+correctly rejected by the determinism discipline). The hardware itself is capable —
+the reviewer verified the underlying `mma.sync…mxf8f6f4…e2m1.e2m1.f32.ue8m0` PTX at
+the instruction level on a 5090 (compiles only with `compute_120a`), and confirmed
+bit-perfect accumulation to `2^24−64`, endorsing our **odd-target `16,777,145`
+M-t24 discriminator** (an even-step rail only pins t≥19). **Disposition:** the native
+path should be documented as **inert on NVIDIA until NVIDIA ships an MXFP4 GEMM**, with
+**CUTLASS block-scaled MXF4 / tcgen05** as the integration target (not cuBLASLt).
+
 ## Documentation (audit §8) — done / in progress
 All v4.2 docs are being made to consistently state: unified direct v3→v4.2/ENC-BMX4C
 (`nMatMulBMX4CHeight == nMatMulV4Height`, no public ENC-S8); mainnet + all public

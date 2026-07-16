@@ -58,7 +58,12 @@ BUILD="${BUILD_DIR:-$ROOT/build-measure-$BACKEND}"
 
 case "$BACKEND" in
   cpu)   CMAKE_FLAGS=() ;;
-  cuda)  CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90}") ;;
+  # External review (vanities): the default arch list omitted Blackwell, so a
+  # 5090 (sm_120) / B200 (sm_100) ran JIT'd sm_90 instead of native code. Include
+  # 100;120 so the INT8 tensor path is built for Blackwell. (The MXFP4 native GEMM
+  # additionally needs the compute_120a variant, but it is currently unserved by
+  # cuBLASLt and falls back to INT8 regardless -- see the round-2 remediation doc.)
+  cuda)  CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90;100;120}") ;;
   metal) CMAKE_FLAGS=(-DBTX_ENABLE_METAL=ON) ;;
   hip)   CMAKE_FLAGS=(-DBTX_ENABLE_HIP=ON "-DBTX_HIP_ARCHITECTURES=${HIP_ARCH:?set HIP_ARCH e.g. gfx942}") ;;
   *) echo "usage: $0 <cpu|cuda|metal|hip> [extra --flags for matmul-v4-report]"; exit 2 ;;
@@ -83,8 +88,11 @@ fi
 echo "-- configuring ($BUILD)"
 # ENABLE_WALLET=ON + WITH_SQLITE=ON avoids a known CPU-only link failure; the
 # report tool only needs the consensus/matmul libraries, so tests are off.
+# External review (vanities): BUILD_UTIL defaults to ${BUILD_TESTS}, so with
+# BUILD_TESTS=OFF the matmul-v4-report target is never configured and the build
+# step below dies -- force BUILD_UTIL=ON so the report tool is always built.
 cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF \
-      -DENABLE_WALLET=ON -DWITH_SQLITE=ON -DBUILD_TESTS=OFF \
+      -DENABLE_WALLET=ON -DWITH_SQLITE=ON -DBUILD_TESTS=OFF -DBUILD_UTIL=ON \
       "${CMAKE_FLAGS[@]}" >/dev/null || { echo "CONFIGURE FAILED"; exit 2; }
 
 echo "-- building matmul-v4-report"
