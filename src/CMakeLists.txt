@@ -1001,6 +1001,25 @@ if(BUILD_UTIL)
   endif()
   install_binary_component(btx-matmul-cost-bench)
 
+  # One-command MatMul v4.1 hardware measurement report (feeds activation
+  # gates B1 / B2b / B2g). Standalone; drives matmul_v4::accel batched dispatch
+  # and the CPU reference stage boundaries, emits JSON + a human summary.
+  add_executable(matmul-v4-report matmul-v4-report.cpp)
+  target_include_directories(matmul-v4-report PRIVATE
+    $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
+  )
+  target_link_libraries(matmul-v4-report
+    core_interface
+  )
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(matmul-v4-report ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(matmul-v4-report
+      bitcoin_shielded
+    )
+  endif()
+  install_binary_component(matmul-v4-report)
+
   add_executable(btx-genesis btx-genesis.cpp)
   target_link_libraries(btx-genesis
     core_interface

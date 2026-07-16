@@ -13,6 +13,33 @@ mainnet** — v4 is enabled only on regtest/testnet for testing. Two gates:
 Design source of truth: `doc/btx-matmul-v4-design-spec.md`. Per-backend
 hardware runbook: `doc/matmul-v4-gpu-backends.md`.
 
+### One-command hardware report (feeds B1 + B2b + B2g)
+
+Anyone can run **one command** on their machine and send back a single JSON:
+
+```
+contrib/matmul-v4/measure-hardware.sh cpu     # any host (baseline)
+contrib/matmul-v4/measure-hardware.sh cuda    # NVIDIA sm>=75
+contrib/matmul-v4/measure-hardware.sh metal   # Apple M5-class
+contrib/matmul-v4/measure-hardware.sh hip     # AMD CDNA
+# forward tool flags, e.g. real-hardware calibration run:
+contrib/matmul-v4/measure-hardware.sh cuda --n 4096 --window 32 \
+    --device-peak-int8-tops 1979 --v3-hashrate 1200000
+```
+
+It builds only the `matmul-v4-report` target, resolves the backend + device
+identity, and emits `matmul-v4-report-<hostname>.json` plus a human summary
+carrying: **B1** bit-exactness (resolved backend's batched digests vs the CPU
+reference, PASS/FAIL — a FAIL is a hard consensus-split signal); **B2b**
+sustained MARGINAL nonce/s (+ an `nMatMulV4AsertRescaleNum/Den` suggestion when
+`--v3-hashrate` is given); **B2g** the §K.2a-WT per-stage wall-time breakdown on
+the STACKED window shapes, the tensor-stage share, and an implied INT8
+tensor-utilization estimate (with `--device-peak-int8-tops`). The tool alone
+cannot decide the datacenter-favoring **ordering** (that needs multiple
+machines) — it prints each machine's inputs; aggregate the JSON across a
+datacenter part, a consumer part, and an Apple M5 to settle §K.2b(c). This is
+the shared measurement instrument named in B2g / B4′.
+
 ---
 
 ## Gate A — merge to main (disabled)
@@ -91,7 +118,7 @@ Details + per-backend build flags: `doc/matmul-v4-gpu-backends.md`.
 | B2d | Operand XOF regen timing envelope (15–35 ms); s8 operand + U/V sampling vectors. **Note (PR #89 review): the 15–35 ms envelope is the VERIFIER's once-per-block cost — the MINER pays expansion on every nonce**, so the XOF is also gated by the §K.2a-WT wall-time check. The per-element-hash XOF (~38.5M SHA-256/nonce at n=4096, 62.9% of per-nonce time on a 5090) is replaced by the wide counter-mode XOF (~1.2M, ~32× fewer; spec §A.2/C-12); operand values and all digests changed | CPU/GPU |
 | B2e | n=4096 verify-budget confirmation on reference CPUs (<1 s single-thread) | CPU |
 | B2f | **Mod-q combine on tensor cores (spec Appendix C-13)** — CPU reference LANDED (4-limb balanced base-2⁷, valid for n ≤ 8589, byte-identical to the direct combine, incl. the stacked cross-nonce form); REMAINING: port to the CUDA/HIP/Metal kernels and re-measure | GPU kernels + real-GPU re-measure |
-| B2g | **v4.1 batched-sketch GO/NO-GO (spec §K.2b)** — instrument the `matmul_v4_stage_bench` stage boundaries on physical H100/B200 (+ 5090 anchor) at n=4096, b=4, window Q ≥ 32: (a) tensor stages (S2+S3b) strict majority of MARGINAL per-nonce wall-time; (b) batched tensor utilization ≥ ~60% of peak INT8; (c) nonce/s ordering actually datacenter-favoring; (d) b=4 verify (8 MiB payload) inside the CPU budget. **The datacenter claim is a hypothesis until this passes — two prior model estimates were falsified.** Also feeds B2b (ASERT rescale must use the MARGINAL per-nonce unit, since U·A is template-amortized) | **real GPUs** |
+| B2g | **v4.1 batched-sketch GO/NO-GO (spec §K.2b)** — run `contrib/matmul-v4/measure-hardware.sh <backend>` (the `matmul-v4-report` tool; same stage boundaries as `matmul_v4_stage_bench`, one-command + JSON) on physical H100/B200 (+ 5090 anchor) at n=4096, b=4, window Q ≥ 32: (a) tensor stages (S2+S3b) strict majority of MARGINAL per-nonce wall-time; (b) batched tensor utilization ≥ ~60% of peak INT8; (c) nonce/s ordering actually datacenter-favoring; (d) b=4 verify (8 MiB payload) inside the CPU budget. **The datacenter claim is a hypothesis until this passes — two prior model estimates were falsified.** Also feeds B2b (ASERT rescale must use the MARGINAL per-nonce unit, since U·A is template-amortized) | **real GPUs** |
 
 ### B3. Security audit
 External consensus/security audit. Focus: verifier DoS surface (payload

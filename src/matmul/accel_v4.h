@@ -48,6 +48,21 @@ enum class Kind { CPU, CUDA, METAL, HIP };
 using AccelFn = bool (*)(const CBlockHeader&, uint32_t n, uint32_t rounds,
                          uint256& digest_out, std::vector<unsigned char>& payload_out);
 
+/** Host-callable per-backend BATCHED entry point (v4.1 §K.2b cross-nonce
+ *  window). Mirrors AccelFn but computes a whole nonce window at once: given a
+ *  vector of fully-populated candidate `headers` (all projecting onto one
+ *  template — nNonce64 / §H.4 seeds set per candidate exactly as SolveMatMulV4
+ *  does), dimension `n`, and `rounds`, it fills `digests_out[i]` /
+ *  `payloads_out[i]` for header i. Each pair MUST reproduce
+ *  matmul_v4::ComputeDigest(headers[i], ...) BYTE-FOR-BYTE, so every pair
+ *  passes matmul_v4::VerifySketch. `digests_out` and `payloads_out` MUST be
+ *  sized to headers.size() on success. Return false on any device/setup error
+ *  (the dispatcher then falls back to the CPU batched reference). This is the
+ *  fixed signature every GPU backend (matmul_v4::{cuda,metal,hip}) implements. */
+using BatchAccelFn = bool (*)(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                              std::vector<uint256>& digests_out,
+                              std::vector<std::vector<unsigned char>>& payloads_out);
+
 /** Runtime counters for the dispatch layer (probe via ProbeStats). `*_ok`
  *  counts device results that passed CPU verification and were accepted;
  *  `*_mismatch` counts device results that FAILED CPU verification (a wrong
@@ -64,6 +79,24 @@ struct Stats {
     uint64_t hip_ok{0};
     uint64_t hip_mismatch{0};
     uint64_t hip_fallback{0};
+
+    // BATCHED dispatch counters (ComputeDigestsBatchedDispatched). One request
+    // is one nonce WINDOW. `*_batch_ok` counts windows where EVERY returned
+    // (digest,payload) passed CPU verification and the whole window was
+    // accepted; `*_batch_mismatch` counts windows where the device output
+    // failed CPU verification (a wrong digest, rejected); `*_batch_fallback`
+    // counts every window that fell through to the CPU batched reference
+    // (device error, wrong window size, OR verification mismatch).
+    uint64_t batch_requests{0};
+    uint64_t cuda_batch_ok{0};
+    uint64_t cuda_batch_mismatch{0};
+    uint64_t cuda_batch_fallback{0};
+    uint64_t metal_batch_ok{0};
+    uint64_t metal_batch_mismatch{0};
+    uint64_t metal_batch_fallback{0};
+    uint64_t hip_batch_ok{0};
+    uint64_t hip_batch_mismatch{0};
+    uint64_t hip_batch_fallback{0};
 };
 
 /** Human-readable backend label ("cpu" / "cuda" / "metal" / "hip"). */
@@ -85,6 +118,24 @@ Kind ResolveBackend();
 [[nodiscard]] bool ComputeDigestDispatched(const CBlockHeader& header, uint32_t n, uint32_t rounds,
                                            uint256& digest_out, std::vector<unsigned char>& payload_out);
 
+/** Compute a whole nonce WINDOW's digests + sketch payloads via the resolved
+ *  backend's BATCHED path (§K.2b), VERIFY every returned (digest,payload) with
+ *  matmul_v4::VerifySketch (re-deriving the honest operands on the host per
+ *  header), and fall back to the CPU reference on ANY mismatch, wrong window
+ *  size, or device error. The safety contract is identical to the per-nonce
+ *  ComputeDigestDispatched, extended to a window: a single wrong device digest
+ *  anywhere in the window discards the WHOLE device result and recomputes the
+ *  window on the CPU, so a bad device output can never be mined. On the CPU
+ *  fallback / CPU-resolved path each nonce is computed with the byte-exact
+ *  matmul_v4::ComputeDigest reference (equivalently reproducible by
+ *  matmul::v4::BatchedSketchMiner). `digests_out` / `payloads_out` are sized to
+ *  headers.size() on success. Returns false only if `headers` is empty or the
+ *  CPU reference itself rejects the shape (invalid (n, b)). This is what the
+ *  measurement tool and (later) the batched GPU miner call. */
+[[nodiscard]] bool ComputeDigestsBatchedDispatched(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                                   std::vector<uint256>& digests_out,
+                                                   std::vector<std::vector<unsigned char>>& payloads_out);
+
 /** Snapshot the runtime dispatch counters. */
 Stats ProbeStats();
 
@@ -104,19 +155,33 @@ void ResetStats();
 // dispatch layer links and runs CPU-only. The signatures match AccelFn exactly.
 // ---------------------------------------------------------------------------
 
+// Each backend also implements the BATCHED entry point ComputeDigestsBatchedAccel
+// (the fixed BatchAccelFn signature, §K.2b). Same weak-stub gating as the
+// per-nonce ComputeDigestAccel: a strong device definition when the backend's
+// CMake define is set, else the weak stub (accel_v4_stub.cpp) returns false.
+
 namespace matmul_v4::cuda {
 [[nodiscard]] bool ComputeDigestAccel(const CBlockHeader& header, uint32_t n, uint32_t rounds,
                                       uint256& digest_out, std::vector<unsigned char>& payload_out);
+[[nodiscard]] bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                              std::vector<uint256>& digests_out,
+                                              std::vector<std::vector<unsigned char>>& payloads_out);
 } // namespace matmul_v4::cuda
 
 namespace matmul_v4::metal {
 [[nodiscard]] bool ComputeDigestAccel(const CBlockHeader& header, uint32_t n, uint32_t rounds,
                                       uint256& digest_out, std::vector<unsigned char>& payload_out);
+[[nodiscard]] bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                              std::vector<uint256>& digests_out,
+                                              std::vector<std::vector<unsigned char>>& payloads_out);
 } // namespace matmul_v4::metal
 
 namespace matmul_v4::hip {
 [[nodiscard]] bool ComputeDigestAccel(const CBlockHeader& header, uint32_t n, uint32_t rounds,
                                       uint256& digest_out, std::vector<unsigned char>& payload_out);
+[[nodiscard]] bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                              std::vector<uint256>& digests_out,
+                                              std::vector<std::vector<unsigned char>>& payloads_out);
 } // namespace matmul_v4::hip
 
 #endif // BTX_MATMUL_ACCEL_V4_H

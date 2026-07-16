@@ -34,6 +34,22 @@ std::atomic_bool g_logged_cuda_fallback{false};
 std::atomic_bool g_logged_metal_fallback{false};
 std::atomic_bool g_logged_hip_fallback{false};
 
+// ---- batched dispatch counters (ComputeDigestsBatchedDispatched) ----
+std::atomic<uint64_t> g_batch_requests{0};
+std::atomic<uint64_t> g_cuda_batch_ok{0};
+std::atomic<uint64_t> g_cuda_batch_mismatch{0};
+std::atomic<uint64_t> g_cuda_batch_fallback{0};
+std::atomic<uint64_t> g_metal_batch_ok{0};
+std::atomic<uint64_t> g_metal_batch_mismatch{0};
+std::atomic<uint64_t> g_metal_batch_fallback{0};
+std::atomic<uint64_t> g_hip_batch_ok{0};
+std::atomic<uint64_t> g_hip_batch_mismatch{0};
+std::atomic<uint64_t> g_hip_batch_fallback{0};
+
+std::atomic_bool g_logged_cuda_batch_fallback{false};
+std::atomic_bool g_logged_metal_batch_fallback{false};
+std::atomic_bool g_logged_hip_batch_fallback{false};
+
 char ToLowerAscii(char c)
 {
     if (c >= 'A' && c <= 'Z') {
@@ -120,6 +136,23 @@ AccelFn DeviceFnFor(Kind kind)
     return nullptr;
 }
 
+// Address of the BATCHED device entry point for `kind` (or nullptr for CPU).
+// A weak stub always provides a definition, so these are never dangling.
+BatchAccelFn BatchDeviceFnFor(Kind kind)
+{
+    switch (kind) {
+    case Kind::CUDA:
+        return &matmul_v4::cuda::ComputeDigestsBatchedAccel;
+    case Kind::METAL:
+        return &matmul_v4::metal::ComputeDigestsBatchedAccel;
+    case Kind::HIP:
+        return &matmul_v4::hip::ComputeDigestsBatchedAccel;
+    case Kind::CPU:
+        return nullptr;
+    }
+    return nullptr;
+}
+
 void RecordOk(Kind kind)
 {
     switch (kind) {
@@ -156,6 +189,66 @@ void RecordFallback(Kind kind, const std::string& reason)
     if (log_once->compare_exchange_strong(expected, true)) {
         LogPrintf("MATMUL-V4 WARNING: %s backend fallback to CPU (%s)\n", label, reason);
     }
+}
+
+void RecordBatchOk(Kind kind)
+{
+    switch (kind) {
+    case Kind::CUDA: g_cuda_batch_ok.fetch_add(1, std::memory_order_relaxed); break;
+    case Kind::METAL: g_metal_batch_ok.fetch_add(1, std::memory_order_relaxed); break;
+    case Kind::HIP: g_hip_batch_ok.fetch_add(1, std::memory_order_relaxed); break;
+    case Kind::CPU: break;
+    }
+}
+
+void RecordBatchMismatch(Kind kind)
+{
+    switch (kind) {
+    case Kind::CUDA: g_cuda_batch_mismatch.fetch_add(1, std::memory_order_relaxed); break;
+    case Kind::METAL: g_metal_batch_mismatch.fetch_add(1, std::memory_order_relaxed); break;
+    case Kind::HIP: g_hip_batch_mismatch.fetch_add(1, std::memory_order_relaxed); break;
+    case Kind::CPU: break;
+    }
+}
+
+void RecordBatchFallback(Kind kind, const std::string& reason)
+{
+    std::atomic<uint64_t>* counter = nullptr;
+    std::atomic_bool* log_once = nullptr;
+    const char* label = "";
+    switch (kind) {
+    case Kind::CUDA: counter = &g_cuda_batch_fallback; log_once = &g_logged_cuda_batch_fallback; label = "CUDA"; break;
+    case Kind::METAL: counter = &g_metal_batch_fallback; log_once = &g_logged_metal_batch_fallback; label = "METAL"; break;
+    case Kind::HIP: counter = &g_hip_batch_fallback; log_once = &g_logged_hip_batch_fallback; label = "HIP"; break;
+    case Kind::CPU: return;
+    }
+    counter->fetch_add(1, std::memory_order_relaxed);
+    bool expected{false};
+    if (log_once->compare_exchange_strong(expected, true)) {
+        LogPrintf("MATMUL-V4 WARNING: %s batched backend fallback to CPU (%s)\n", label, reason);
+    }
+}
+
+// Byte-exact CPU reference for a whole window: each nonce via the single-nonce
+// consensus reference matmul_v4::ComputeDigest (equivalently reproducible by
+// matmul::v4::BatchedSketchMiner, enforced by matmul_v4_batch_tests). Used both
+// for the CPU-resolved path and as the fallback when a device result is
+// rejected. Returns false only if the shape (n, b) is invalid.
+bool ComputeBatchCpuReference(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                              std::vector<uint256>& digests_out,
+                              std::vector<std::vector<unsigned char>>& payloads_out)
+{
+    const size_t count = headers.size();
+    digests_out.assign(count, uint256{});
+    payloads_out.assign(count, std::vector<unsigned char>{});
+    for (size_t i = 0; i < count; ++i) {
+        if (!matmul_v4::ComputeDigest(headers[i], n, rounds, digests_out[i], payloads_out[i])) {
+            digests_out.clear();
+            payloads_out.clear();
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -291,6 +384,92 @@ bool ComputeDigestDispatched(const CBlockHeader& header, uint32_t n, uint32_t ro
     return matmul_v4::ComputeDigest(header, n, rounds, digest_out, payload_out);
 }
 
+bool ComputeDigestsBatchedDispatched(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                     std::vector<uint256>& digests_out,
+                                     std::vector<std::vector<unsigned char>>& payloads_out)
+{
+    g_batch_requests.fetch_add(1, std::memory_order_relaxed);
+
+    if (headers.empty()) {
+        digests_out.clear();
+        payloads_out.clear();
+        return false;
+    }
+
+    const Kind backend = ResolveBackend();
+    if (backend == Kind::CPU) {
+        return ComputeBatchCpuReference(headers, n, rounds, digests_out, payloads_out);
+    }
+
+    const BatchAccelFn fn = BatchDeviceFnFor(backend);
+
+    std::vector<uint256> accel_digests;
+    std::vector<std::vector<unsigned char>> accel_payloads;
+    bool device_ok = false;
+    std::string error;
+    try {
+        device_ok = (fn != nullptr) &&
+            fn(headers, n, rounds, accel_digests, accel_payloads);
+        if (!device_ok) {
+            error = "device_returned_false_or_unavailable";
+        } else if (accel_digests.size() != headers.size() ||
+                   accel_payloads.size() != headers.size()) {
+            device_ok = false;
+            error = "device_returned_wrong_window_size";
+        }
+    } catch (const std::exception& e) {
+        device_ok = false;
+        error = std::string("device_exception:") + e.what();
+    } catch (...) {
+        device_ok = false;
+        error = "device_unknown_exception";
+    }
+
+    if (device_ok) {
+        // HARD REQUIREMENT (same contract as the per-nonce path, applied to the
+        // whole window): verify EVERY returned (digest,payload) reproduces the
+        // CPU reference via matmul_v4::VerifySketch. A single failure anywhere
+        // in the window discards the ENTIRE device result -- we never mine a
+        // partially-trusted window -- and the whole window is recomputed on the
+        // CPU below. A wrong GPU digest can therefore never win a block.
+        bool all_verified = true;
+        for (size_t i = 0; i < headers.size(); ++i) {
+            CBlockHeader verify_header = headers[i];
+            verify_header.matmul_digest = accel_digests[i];
+            uint256 verify_digest;
+            bool verified = false;
+            try {
+                verified = matmul_v4::VerifySketch(verify_header, n, rounds, accel_payloads[i], verify_digest);
+            } catch (const std::exception& e) {
+                verified = false;
+                error = std::string("verify_exception:") + e.what();
+            } catch (...) {
+                verified = false;
+                error = "verify_unknown_exception";
+            }
+            if (!(verified && verify_digest == accel_digests[i])) {
+                all_verified = false;
+                if (error.empty()) {
+                    error = "digest_mismatch_failed_cpu_verification";
+                }
+                break;
+            }
+        }
+
+        if (all_verified) {
+            digests_out = std::move(accel_digests);
+            payloads_out = std::move(accel_payloads);
+            RecordBatchOk(backend);
+            return true;
+        }
+
+        RecordBatchMismatch(backend);
+    }
+
+    RecordBatchFallback(backend, error);
+    return ComputeBatchCpuReference(headers, n, rounds, digests_out, payloads_out);
+}
+
 Stats ProbeStats()
 {
     Stats stats;
@@ -304,6 +483,16 @@ Stats ProbeStats()
     stats.hip_ok = g_hip_ok.load(std::memory_order_relaxed);
     stats.hip_mismatch = g_hip_mismatch.load(std::memory_order_relaxed);
     stats.hip_fallback = g_hip_fallback.load(std::memory_order_relaxed);
+    stats.batch_requests = g_batch_requests.load(std::memory_order_relaxed);
+    stats.cuda_batch_ok = g_cuda_batch_ok.load(std::memory_order_relaxed);
+    stats.cuda_batch_mismatch = g_cuda_batch_mismatch.load(std::memory_order_relaxed);
+    stats.cuda_batch_fallback = g_cuda_batch_fallback.load(std::memory_order_relaxed);
+    stats.metal_batch_ok = g_metal_batch_ok.load(std::memory_order_relaxed);
+    stats.metal_batch_mismatch = g_metal_batch_mismatch.load(std::memory_order_relaxed);
+    stats.metal_batch_fallback = g_metal_batch_fallback.load(std::memory_order_relaxed);
+    stats.hip_batch_ok = g_hip_batch_ok.load(std::memory_order_relaxed);
+    stats.hip_batch_mismatch = g_hip_batch_mismatch.load(std::memory_order_relaxed);
+    stats.hip_batch_fallback = g_hip_batch_fallback.load(std::memory_order_relaxed);
     return stats;
 }
 
@@ -322,6 +511,19 @@ void ResetStats()
     g_logged_cuda_fallback.store(false, std::memory_order_relaxed);
     g_logged_metal_fallback.store(false, std::memory_order_relaxed);
     g_logged_hip_fallback.store(false, std::memory_order_relaxed);
+    g_batch_requests.store(0, std::memory_order_relaxed);
+    g_cuda_batch_ok.store(0, std::memory_order_relaxed);
+    g_cuda_batch_mismatch.store(0, std::memory_order_relaxed);
+    g_cuda_batch_fallback.store(0, std::memory_order_relaxed);
+    g_metal_batch_ok.store(0, std::memory_order_relaxed);
+    g_metal_batch_mismatch.store(0, std::memory_order_relaxed);
+    g_metal_batch_fallback.store(0, std::memory_order_relaxed);
+    g_hip_batch_ok.store(0, std::memory_order_relaxed);
+    g_hip_batch_mismatch.store(0, std::memory_order_relaxed);
+    g_hip_batch_fallback.store(0, std::memory_order_relaxed);
+    g_logged_cuda_batch_fallback.store(false, std::memory_order_relaxed);
+    g_logged_metal_batch_fallback.store(false, std::memory_order_relaxed);
+    g_logged_hip_batch_fallback.store(false, std::memory_order_relaxed);
 }
 
 } // namespace matmul_v4::accel

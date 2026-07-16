@@ -42,6 +42,12 @@ BTX_ACCEL_V4_WEAK bool ComputeDigestAccel(const CBlockHeader&, uint32_t, uint32_
 {
     return false;
 }
+BTX_ACCEL_V4_WEAK bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>&, uint32_t, uint32_t,
+                                                  std::vector<uint256>&,
+                                                  std::vector<std::vector<unsigned char>>&)
+{
+    return false;
+}
 } // namespace matmul_v4::cuda
 #endif
 
@@ -52,6 +58,12 @@ BTX_ACCEL_V4_WEAK bool ComputeDigestAccel(const CBlockHeader&, uint32_t, uint32_
 {
     return false;
 }
+BTX_ACCEL_V4_WEAK bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>&, uint32_t, uint32_t,
+                                                  std::vector<uint256>&,
+                                                  std::vector<std::vector<unsigned char>>&)
+{
+    return false;
+}
 } // namespace matmul_v4::metal
 #endif
 
@@ -59,6 +71,12 @@ BTX_ACCEL_V4_WEAK bool ComputeDigestAccel(const CBlockHeader&, uint32_t, uint32_
 namespace matmul_v4::hip {
 BTX_ACCEL_V4_WEAK bool ComputeDigestAccel(const CBlockHeader&, uint32_t, uint32_t,
                                           uint256&, std::vector<unsigned char>&)
+{
+    return false;
+}
+BTX_ACCEL_V4_WEAK bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>&, uint32_t, uint32_t,
+                                                  std::vector<uint256>&,
+                                                  std::vector<std::vector<unsigned char>>&)
 {
     return false;
 }
