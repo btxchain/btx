@@ -12,6 +12,7 @@
 #include <cublasLt.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -181,6 +182,93 @@ __global__ void V4GemmS8S32ScalarKernel(const int8_t* __restrict__ A,
     C[gid] = acc;
 }
 
+// --- Batched-sketch device kernels (§K.2b, Appendix C-13) -------------------
+//
+// These three kernels are the only NEW device code the batched path needs on
+// top of the per-nonce backend above: a pure int32 layout permutation, the
+// entrywise limb decomposition, and the shifted mod-q recombine. All GEMMs
+// reuse RunInt8Gemm / the scalar fallback unchanged.
+
+// Vertical -> horizontal stack permutation. Qtall = [Q_1; Q_2; ...; Q_Q]
+// (count*n x m row-major) is the output of the ONE stacked GEMM
+// [B_1; ...; B_Q] * V; ComputeCombineLimbTensorStacked's contract wants
+// Qstack = [Q_1 | Q_2 | ... | Q_Q] (n x count*m row-major, column block i
+// holds Q_i). Row-major identity: Qtall[(i*n + k)*m + c] == Q_i[k][c] ==
+// Qstack[k*(count*m) + i*m + c]. Every element is copied UNCHANGED (exact
+// int32), so this stage cannot affect any byte.
+__global__ void V4ScatterQStackKernel(const int32_t* __restrict__ Qtall,
+                                      int32_t* __restrict__ Qstack,
+                                      uint32_t n,
+                                      uint32_t m,
+                                      uint32_t count)
+{
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t per_nonce = static_cast<size_t>(n) * m;
+    const size_t total = per_nonce * count;
+    if (gid >= total) {
+        return;
+    }
+    const uint32_t i = static_cast<uint32_t>(gid / per_nonce); // nonce index in window
+    const size_t rem = gid % per_nonce;
+    const uint32_t k = static_cast<uint32_t>(rem / m); // row inside Q_i
+    const uint32_t c = static_cast<uint32_t>(rem % m); // column inside Q_i
+    const size_t q_cols = static_cast<size_t>(count) * m;
+    Qstack[static_cast<size_t>(k) * q_cols + static_cast<size_t>(i) * m + c] = Qtall[gid];
+}
+
+// Entrywise balanced base-2^7 limb decomposition -- a bit-for-bit device mirror
+// of matmul_v4.cpp DecomposeLimbPlanes (Appendix C-13):
+//     d = ((x + 64) & 127) - 64;  x = (x - d) / 128;   (4 digits, LSD first)
+// Identical arithmetic statement-for-statement: `&` on the two's-complement
+// int32 (C++20 mandates two's complement on host, CUDA guarantees it on
+// device) yields the low 7 bits as a value in [0, 127], so d is the unique
+// balanced digit in [-64, 63]; (x - d) is an exact multiple of 128, so the
+// truncating signed division is exact. Plane l of the output is stored at
+// planes[l*total ..], matching the CPU's planes[l][idx] indexing. The
+// decomposition is total for every |x| < 128^4/2 = 2^27, guaranteed by the
+// host-side CheckCombineLimbBound gate (|P|,|Q| <= 15,625*n).
+__global__ void V4DecomposeLimbPlanesKernel(const int32_t* __restrict__ M,
+                                            int8_t* __restrict__ planes,
+                                            size_t total)
+{
+    constexpr uint32_t kLimbs = 4;     // == matmul::v4::kCombineLimbs (static_assert below)
+    constexpr int32_t kLimbBase = 128; // == matmul::v4::kCombineLimbBase
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total) {
+        return;
+    }
+    int32_t x = M[gid];
+#pragma unroll
+    for (uint32_t l = 0; l < kLimbs; ++l) {
+        const int32_t d = ((x + 64) & (kLimbBase - 1)) - 64;
+        planes[static_cast<size_t>(l) * total + gid] = static_cast<int8_t>(d);
+        x = (x - d) / kLimbBase;
+    }
+}
+
+// Keep the device-local limb constants pinned to the consensus constants.
+static_assert(matmul::v4::kCombineLimbs == 4 && matmul::v4::kCombineLimbBase == 128,
+              "V4DecomposeLimbPlanesKernel hard-codes the 4 x base-128 balanced decomposition");
+
+// Shifted mod-q recombine of ONE limb-pair product (Appendix C-13):
+//     Chat[idx] = FqAdd(Chat[idx], FqMul(weight, FqFromSigned(S[idx])))
+// with weight = 2^(7*(i+j)) < q already canonical. Statement-for-statement the
+// CPU recombine loop in ComputeCombineLimbTensorStacked; the device Fq helpers
+// above are bit-for-bit the int8_field.cpp routines, and canonical residues
+// are unique, so accumulating the 16 launches in the CPU's (i outer, j inner)
+// order reproduces the identical canonical residue per entry.
+__global__ void V4LimbRecombineKernel(const int32_t* __restrict__ S,
+                                      uint64_t* __restrict__ Chat,
+                                      uint64_t weight,
+                                      size_t total)
+{
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total) {
+        return;
+    }
+    Chat[gid] = V4FqAdd(Chat[gid], V4FqMul(weight, V4FqFromSigned(static_cast<int64_t>(S[gid]))));
+}
+
 constexpr uint32_t kThreads = 256;
 
 bool CudaOk(cudaError_t e, const char* what, std::string& error)
@@ -317,6 +405,42 @@ bool LaunchScalarGemm(cudaStream_t stream,
     const uint32_t blocks = static_cast<uint32_t>((total + kThreads - 1) / kThreads);
     V4GemmS8S32ScalarKernel<<<blocks, kThreads, 0, stream>>>(dA, dB, dC, M, N, K);
     return CudaOk(cudaGetLastError(), "scalar GEMM launch", error);
+}
+
+// Grid size for a 1-thread-per-element launch. Largest batched total is
+// n*(Q*m) int32 elements = 2^30 at n=4096, Q=kMaxBatchedWindow, so blocks
+// <= 2^30/256 = 4,194,304 -- comfortably under the 2^31-1 gridDim.x limit.
+uint32_t BlocksFor(size_t total)
+{
+    return static_cast<uint32_t>((total + kThreads - 1) / kThreads);
+}
+
+// One exact s8xs8->s32 GEMM with the same tensor-core-first / scalar-fallback
+// policy as ComputeSketchOnDevice: cuBLASLt IMMA when available (and not
+// overridden by BTX_MATMUL_V4_CUDA_GEMM=scalar), else the exact scalar kernel.
+// Both paths compute the identical exact integer product -- INT32 accumulation
+// is associative and order-independent (§B.6) -- so a mid-window fallback
+// cannot change any byte of any digest.
+bool RunGemmAuto(cublasLtHandle_t lt,
+                 cudaStream_t stream,
+                 void* workspace,
+                 size_t workspace_size,
+                 const int8_t* dA,
+                 const int8_t* dB,
+                 int32_t* dC,
+                 uint32_t M,
+                 uint32_t N,
+                 uint32_t K,
+                 std::string& error)
+{
+    if (lt != nullptr && workspace != nullptr && !ForceScalarGemm()) {
+        std::string gemm_err;
+        if (RunInt8Gemm(lt, stream, workspace, workspace_size, dA, dB, dC, M, N, K, gemm_err)) {
+            return true;
+        }
+        // Non-fatal: fall through to the exact scalar path (also bit-exact).
+    }
+    return LaunchScalarGemm(stream, dA, dB, dC, M, N, K, error);
 }
 
 // Device evaluation of Chat = (U*A)(B*V) mod q. All host inputs are row-major
@@ -458,6 +582,340 @@ bool ComputeDigestAccel(const CBlockHeader& header, uint32_t n, uint32_t rounds,
     //     committed bytes and H(sigma||Chat) are byte-identical to the CPU.
     payload_out = matmul::v4::SerializeSketch(Chat);
     digest_out = matmul::v4::ComputeSketchDigest(sigma, payload_out);
+    return true;
+}
+
+// ===========================================================================
+// BATCHED-SKETCH backend (design spec §K.2b, Appendix C-13) -- the device
+// mirror of matmul::v4::BatchedSketchMiner::Mine (matmul_v4_batch.cpp). This
+// is the B2f port that makes the datacenter-vs-consumer measurement (B2g) and
+// ASERT calibration (B2b) runnable on NVIDIA hardware.
+//
+// STAGE MAP (host <-> device):
+//   HOST  : template hash + fail-closed projection check for every header;
+//           sigma_i; expansion of A, U, V (template-scoped, once) and the
+//           nonce-fresh B_i -- all via the exact matmul_v4 routines, so every
+//           operand byte is identical to the CPU reference.
+//   DEVICE: P = U*A                    -- ONE m x n x n INT8 GEMM per call.
+//           Qtall = [B_1;...;B_Q] * V  -- ONE (Q*n) x n x m stacked INT8 GEMM
+//                                         per window chunk (the Q per-nonce
+//                                         Q_i = B_i*V GEMMs fused; row block i
+//                                         of Qtall IS Q_i exactly).
+//           scatter Qtall -> Qstack    -- pure int32 permutation into the
+//                                         n x Q*m horizontal-stack layout that
+//                                         ComputeCombineLimbTensorStacked
+//                                         defines (column block i = Q_i).
+//           limb decompose P, Qstack   -- V4DecomposeLimbPlanesKernel, the
+//                                         bit-for-bit DecomposeLimbPlanes
+//                                         mirror (see kernel comment).
+//           16 limb GEMMs + recombine  -- S_ij = P_i * Qstack_j, each an
+//                                         m x (Q*m) x n INT8->INT32 tensor
+//                                         GEMM (the ONE LARGE DENSE COMBINE,
+//                                         run per limb pair), folded as
+//                                         Chat += 2^(7(i+j)) * S_ij mod q on
+//                                         the integer ALU in the CPU's
+//                                         (i outer, j inner) order.
+//   HOST  : slice column block i -> Chat_i (m x m), SerializeSketch,
+//           H(sigma_i || payload_i) -- exact CPU routines again.
+//
+// BIT-EXACTNESS. Stages either (a) reuse host consensus routines verbatim,
+// (b) compute exact integer products (INT32 accumulation, order-independent,
+// §B.6 -- true for cuBLASLt IMMA and the scalar fallback alike), (c) permute
+// int32 values unchanged, or (d) replicate DecomposeLimbPlanes /
+// FqAdd(FqMul(w, FqFromSigned(.))) statement-for-statement with the device Fq
+// helpers that mirror int8_field.cpp bit-for-bit. Canonical residues in [0,q)
+// are unique, so identical integers => identical residues => identical
+// SerializeSketch bytes => identical digests. NO floating point anywhere.
+//
+// DEVICE MEMORY BUDGET (the "large batched buffer" strategy). Bytes at
+// dimension n, m = n/4, window chunk Q (values at n=4096, m=1024):
+//     template-scoped, once per call, reused across chunks:
+//         dA        n*n            s8    16 MiB
+//         dU        m*n            s8     4 MiB
+//         dV        n*m            s8     4 MiB
+//         dP        m*n            s32   16 MiB
+//         dPplanes  4*m*n          s8    16 MiB      (56 MiB total)
+//     per-chunk, sized once for min(count, kMaxBatchedWindow) and REUSED for
+//     every chunk of the window (no per-nonce cudaMalloc traffic):
+//         dBstack   Q*n*n          s8    Q*16 MiB
+//         dQtall    Q*n*m          s32   Q*16 MiB
+//         dQstack   n*(Q*m)        s32   Q*16 MiB
+//         dQplanes  4*n*(Q*m)      s8    Q*16 MiB
+//         dS        m*(Q*m)        s32   Q* 4 MiB    (one limb pair at a time;
+//                                                     16 resident copies would
+//                                                     cost Q*64 MiB for zero
+//                                                     correctness benefit)
+//         dChat     m*(Q*m)        u64   Q* 8 MiB
+//     plus the 32 MiB cuBLASLt workspace => ~56 MiB + Q*76 MiB device, and
+//     Q*16 MiB (Bstack staging) + Q*8 MiB (Chat_wide) host. This is the
+//     device-side big sibling of the CPU header's "~64 MiB int32 intermediates
+//     at n=4096, b=4, Q=8" note. Q = kDefaultBatchedWindow = 64 -> ~4.9 GiB;
+//     Q = kMaxBatchedWindow = 256 -> ~19.1 GiB, sized to fill an H100 80 GB /
+//     B200 while leaving headroom; larger requested windows are processed in
+//     internal chunks of 256 (per-nonce results are independent, so chunking
+//     changes no byte). If cudaMalloc fails (small device, huge n), we fail
+//     closed and the dispatcher falls back to the CPU miner.
+//
+// THROUGHPUT NOTE (same precedent as the per-nonce backend's GEMM API CHOICE
+// block): all GEMMs use row-major CUBLASLT_ORDER_ROW layouts, which cuBLASLt
+// serves on the integer tensor cores (IMMA) on SM_75+ for these shapes. The
+// documented maximum-throughput IMMA layout swap -- transform operands into
+// CUBLASLT_ORDER_COL32 (A/C) x CUBLASLT_ORDER_COL4_4R2_8C / COL32_2R_4R4 (B,
+// with CUBLAS_OP_T) via cublasLtMatrixTransform, run cublasLtMatmul in the
+// transformed layouts, transform C back -- applies UNCHANGED to the batched
+// GEMMs here (the transforms are byte-preserving permutations of exact int32/
+// int8 data, so the result bytes cannot change). It pays off most for the 16
+// combine GEMMs, whose m x (Q*m) x n shape dominates the window; the Qstack
+// limb planes could even be transformed ONCE and reused across all 4 P-limb
+// passes. Left as a hardware-validated follow-up, exactly like the per-nonce
+// path. An alternative to the Qtall+scatter pair is a strided-batched GEMM
+// (CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT = Q with C ld = Q*m, batch stride = m)
+// writing each Q_i directly into its Qstack column block; that saves one
+// Q*16 MiB buffer and the permutation kernel but couples correctness to
+// less-traveled layout attributes, so the port keeps the transparent
+// permutation (it is bandwidth-trivial next to the GEMMs).
+// ===========================================================================
+
+bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                std::vector<uint256>& digests_out,
+                                std::vector<std::vector<unsigned char>>& payloads_out)
+{
+    digests_out.clear();
+    payloads_out.clear();
+
+    // Validity gates: identical to the CPU BatchedSketchMiner (ValidateDims +
+    // CheckCombineLimbBound) plus the per-nonce backend's rounds gate, so the
+    // accel and CPU paths agree on which (n, rounds) are computable.
+    uint32_t m = 0;
+    if (headers.empty()) {
+        return false;
+    }
+    if (!matmul::v4::ValidateDims(n, matmul::v4::kTileB, m)) {
+        return false;
+    }
+    if (!matmul::v4::CheckCombineLimbBound(n)) {
+        return false;
+    }
+    if (rounds == 0) {
+        return false;
+    }
+    const uint32_t count = static_cast<uint32_t>(headers.size());
+
+    // --- HOST: template projection (fail closed) + per-nonce sigma. Every
+    //     header MUST project onto one shared template hash; combining a stale
+    //     template's A/U/V/P with a fresh header would produce digests that
+    //     are NOT the consensus digests for that header.
+    const uint256 template_hash = matmul::v4::ComputeTemplateHash(headers[0]);
+    std::vector<uint256> sigmas(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        if (matmul::v4::ComputeTemplateHash(headers[i]) != template_hash) {
+            return false;
+        }
+        sigmas[i] = matmul::v4::DeriveSigma(headers[i]);
+    }
+
+    // --- HOST: template-scoped operands, byte-identical to the CPU miner
+    //     (BatchedSketchMiner ctor): A, U, V expanded ONCE per call via the
+    //     exact matmul_v4 routines (§A.2 v4.1, invariant I1').
+    const uint256 seed_a = matmul::v4::DeriveOperandSeed(headers[0], matmul::v4::Operand::A);
+    const std::pair<uint256, uint256> proj = matmul::v4::DeriveProjectorSeeds(headers[0]);
+    const std::vector<int8_t> A = matmul::v4::ExpandOperand(seed_a, n);          // n x n
+    const std::vector<int8_t> U = matmul::v4::ExpandProjector(proj.first, m, n); // m x n
+    const std::vector<int8_t> V = matmul::v4::ExpandProjector(proj.second, n, m); // n x m
+
+    const uint32_t chunk_cap = std::min(count, kMaxBatchedWindow);
+    const size_t nn = static_cast<size_t>(n) * n;
+    const size_t mn = static_cast<size_t>(m) * n;     // U, P, and one P limb plane
+    const size_t cap_qcols = static_cast<size_t>(chunk_cap) * m;
+    const size_t cap_stack = static_cast<size_t>(n) * cap_qcols; // Qtall/Qstack elems
+    const size_t cap_out = static_cast<size_t>(m) * cap_qcols;   // Chat_wide elems
+
+    // Host staging, allocated once and reused per chunk.
+    std::vector<int8_t> bstack_host(static_cast<size_t>(chunk_cap) * nn);
+    std::vector<uint64_t> chat_host(cap_out);
+
+    int8_t* dA = nullptr;
+    int8_t* dU = nullptr;
+    int8_t* dV = nullptr;
+    int32_t* dP = nullptr;      // P = U*A, m x n
+    int8_t* dPplanes = nullptr; // 4 limb planes of P, plane stride mn
+    int8_t* dBstack = nullptr;  // [B_1; ...; B_Q], Q*n x n
+    int32_t* dQtall = nullptr;  // [Q_1; ...; Q_Q], Q*n x m
+    int32_t* dQstack = nullptr; // [Q_1 | ... | Q_Q], n x Q*m
+    int8_t* dQplanes = nullptr; // 4 limb planes of Qstack, plane stride n*Q*m
+    int32_t* dS = nullptr;      // one limb-pair product S_ij, m x Q*m
+    uint64_t* dChat = nullptr;  // Chat_wide accumulator, m x Q*m
+    void* workspace = nullptr;
+    cudaStream_t stream = nullptr;
+    cublasLtHandle_t lt = nullptr;
+    constexpr size_t kWorkspaceBytes = size_t{32} << 20;
+
+    digests_out.resize(count);
+    payloads_out.resize(count);
+
+    std::string error;
+    bool ok = false;
+    do {
+        if (!CudaOk(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreate", error)) break;
+
+        if (!CudaOk(cudaMalloc(&dA, nn), "cudaMalloc A", error)) break;
+        if (!CudaOk(cudaMalloc(&dU, mn), "cudaMalloc U", error)) break;
+        if (!CudaOk(cudaMalloc(&dV, mn), "cudaMalloc V", error)) break;
+        if (!CudaOk(cudaMalloc(&dP, mn * sizeof(int32_t)), "cudaMalloc P", error)) break;
+        if (!CudaOk(cudaMalloc(&dPplanes, mn * matmul::v4::kCombineLimbs), "cudaMalloc Pplanes", error)) break;
+        if (!CudaOk(cudaMalloc(&dBstack, static_cast<size_t>(chunk_cap) * nn), "cudaMalloc Bstack", error)) break;
+        if (!CudaOk(cudaMalloc(&dQtall, cap_stack * sizeof(int32_t)), "cudaMalloc Qtall", error)) break;
+        if (!CudaOk(cudaMalloc(&dQstack, cap_stack * sizeof(int32_t)), "cudaMalloc Qstack", error)) break;
+        if (!CudaOk(cudaMalloc(&dQplanes, cap_stack * matmul::v4::kCombineLimbs), "cudaMalloc Qplanes", error)) break;
+        if (!CudaOk(cudaMalloc(&dS, cap_out * sizeof(int32_t)), "cudaMalloc S", error)) break;
+        if (!CudaOk(cudaMalloc(&dChat, cap_out * sizeof(uint64_t)), "cudaMalloc Chat", error)) break;
+
+        if (!CudaOk(cudaMemcpyAsync(dA, A.data(), nn, cudaMemcpyHostToDevice, stream), "H2D A", error)) break;
+        if (!CudaOk(cudaMemcpyAsync(dU, U.data(), mn, cudaMemcpyHostToDevice, stream), "H2D U", error)) break;
+        if (!CudaOk(cudaMemcpyAsync(dV, V.data(), mn, cudaMemcpyHostToDevice, stream), "H2D V", error)) break;
+
+        // cuBLASLt is best-effort: on handle/workspace failure every GEMM runs
+        // the exact scalar fallback instead (identical bytes, lower speed).
+        if (!ForceScalarGemm()) {
+            if (cublasLtCreate(&lt) != CUBLAS_STATUS_SUCCESS) {
+                lt = nullptr;
+            } else if (cudaMalloc(&workspace, kWorkspaceBytes) != cudaSuccess) {
+                workspace = nullptr;
+            }
+        }
+
+        // --- TEMPLATE-scoped device work, ONCE per call: P = U*A (m x n x n
+        //     exact INT8->INT32 GEMM), then its 4 limb planes.
+        if (!RunGemmAuto(lt, stream, workspace, kWorkspaceBytes, dU, dA, dP, m, n, n, error)) break;
+        V4DecomposeLimbPlanesKernel<<<BlocksFor(mn), kThreads, 0, stream>>>(dP, dPplanes, mn);
+        if (!CudaOk(cudaGetLastError(), "P limb decompose launch", error)) break;
+
+        // --- Window chunks. Per-nonce results are independent (every Chat_i
+        //     entry depends only on its own P row and Q_i column), so chunking
+        //     is byte-transparent.
+        bool chunk_failed = false;
+        for (uint32_t start = 0; start < count; start += chunk_cap) {
+            const uint32_t q = std::min(chunk_cap, count - start);
+            const size_t q_cols = static_cast<size_t>(q) * m;
+            const size_t stack_elems = static_cast<size_t>(n) * q_cols;
+            const size_t out_elems = static_cast<size_t>(m) * q_cols;
+
+            // HOST: expand the chunk's nonce-fresh B_i (exact CPU routine,
+            // §A.2/I1') into the vertical staging stack. On a production
+            // miner this expansion overlaps the previous chunk's GEMMs (SHA
+            // on host, GEMMs on device); kept sequential here for clarity.
+            for (uint32_t idx = 0; idx < q; ++idx) {
+                const uint256 seed_b =
+                    matmul::v4::DeriveOperandSeed(headers[start + idx], matmul::v4::Operand::B);
+                const std::vector<int8_t> B = matmul::v4::ExpandOperand(seed_b, n);
+                std::copy(B.begin(), B.end(), bstack_host.begin() + static_cast<size_t>(idx) * nn);
+            }
+            if (!CudaOk(cudaMemcpyAsync(dBstack, bstack_host.data(), static_cast<size_t>(q) * nn,
+                                        cudaMemcpyHostToDevice, stream), "H2D Bstack", error)) {
+                chunk_failed = true;
+                break;
+            }
+
+            // ONE stacked GEMM Qtall = [B_1; ...; B_q] * V ((q*n) x n x m):
+            // row block i of Qtall is exactly Q_i = B_i*V because each output
+            // row depends only on its own Bstack row (exact INT32).
+            if (!RunGemmAuto(lt, stream, workspace, kWorkspaceBytes, dBstack, dV, dQtall,
+                             q * n, m, n, error)) {
+                chunk_failed = true;
+                break;
+            }
+
+            // Qtall -> Qstack permutation, then the entrywise limb planes.
+            V4ScatterQStackKernel<<<BlocksFor(stack_elems), kThreads, 0, stream>>>(dQtall, dQstack, n, m, q);
+            if (!CudaOk(cudaGetLastError(), "Qstack scatter launch", error)) {
+                chunk_failed = true;
+                break;
+            }
+            V4DecomposeLimbPlanesKernel<<<BlocksFor(stack_elems), kThreads, 0, stream>>>(
+                dQstack, dQplanes, stack_elems);
+            if (!CudaOk(cudaGetLastError(), "Q limb decompose launch", error)) {
+                chunk_failed = true;
+                break;
+            }
+
+            // Chat_wide = 0, then the 16 limb-pair combine GEMMs
+            // S_ij = P_i * Qstack_j (m x q*m x n) with the shifted mod-q fold,
+            // in the CPU's (i outer, j inner) order.
+            if (!CudaOk(cudaMemsetAsync(dChat, 0, out_elems * sizeof(uint64_t), stream),
+                        "Chat memset", error)) {
+                chunk_failed = true;
+                break;
+            }
+            for (uint32_t i = 0; i < matmul::v4::kCombineLimbs && !chunk_failed; ++i) {
+                for (uint32_t j = 0; j < matmul::v4::kCombineLimbs; ++j) {
+                    const int8_t* Pi = dPplanes + static_cast<size_t>(i) * mn;
+                    const int8_t* Qj = dQplanes + static_cast<size_t>(j) * stack_elems;
+                    if (!RunGemmAuto(lt, stream, workspace, kWorkspaceBytes, Pi, Qj, dS,
+                                     m, static_cast<uint32_t>(q_cols), n, error)) {
+                        chunk_failed = true;
+                        break;
+                    }
+                    // weight = 2^(7*(i+j)) mod q; exponent <= 42 < 61 so the
+                    // canonical weight is the plain power of two (CPU-equal).
+                    const uint64_t w = static_cast<uint64_t>(1) << (7 * (i + j));
+                    V4LimbRecombineKernel<<<BlocksFor(out_elems), kThreads, 0, stream>>>(dS, dChat, w, out_elems);
+                    if (!CudaOk(cudaGetLastError(), "limb recombine launch", error)) {
+                        chunk_failed = true;
+                        break;
+                    }
+                }
+            }
+            if (chunk_failed) break;
+
+            static_assert(sizeof(Fq) == sizeof(uint64_t), "Fq must be a 64-bit word");
+            if (!CudaOk(cudaMemcpyAsync(chat_host.data(), dChat, out_elems * sizeof(uint64_t),
+                                        cudaMemcpyDeviceToHost, stream), "D2H Chat", error) ||
+                !CudaOk(cudaStreamSynchronize(stream), "stream sync", error)) {
+                chunk_failed = true;
+                break;
+            }
+
+            // HOST: slice column block idx -> Chat_idx (m x m), serialize and
+            // digest with the exact CPU routines -- the same loop as
+            // BatchedSketchMiner::Mine.
+            for (uint32_t idx = 0; idx < q; ++idx) {
+                std::vector<Fq> Chat(static_cast<size_t>(m) * m);
+                for (uint32_t a = 0; a < m; ++a) {
+                    const uint64_t* src = chat_host.data() + static_cast<size_t>(a) * q_cols +
+                                          static_cast<size_t>(idx) * m;
+                    std::copy(src, src + m, Chat.begin() + static_cast<size_t>(a) * m);
+                }
+                payloads_out[start + idx] = matmul::v4::SerializeSketch(Chat);
+                digests_out[start + idx] =
+                    matmul::v4::ComputeSketchDigest(sigmas[start + idx], payloads_out[start + idx]);
+            }
+        }
+        if (chunk_failed) break;
+        ok = true;
+    } while (false);
+
+    if (workspace) cudaFree(workspace);
+    if (lt) cublasLtDestroy(lt);
+    if (dChat) cudaFree(dChat);
+    if (dS) cudaFree(dS);
+    if (dQplanes) cudaFree(dQplanes);
+    if (dQstack) cudaFree(dQstack);
+    if (dQtall) cudaFree(dQtall);
+    if (dBstack) cudaFree(dBstack);
+    if (dPplanes) cudaFree(dPplanes);
+    if (dP) cudaFree(dP);
+    if (dV) cudaFree(dV);
+    if (dU) cudaFree(dU);
+    if (dA) cudaFree(dA);
+    if (stream) cudaStreamDestroy(stream);
+
+    if (!ok) {
+        // Fail closed: no partial windows. The dispatcher falls back to the
+        // CPU reference for the whole window. (Optionally log `error`.)
+        digests_out.clear();
+        payloads_out.clear();
+        return false;
+    }
     return true;
 }
 

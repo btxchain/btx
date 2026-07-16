@@ -46,6 +46,48 @@ namespace matmul_v4::cuda {
 [[nodiscard]] bool ComputeDigestAccel(const CBlockHeader& header, uint32_t n, uint32_t rounds,
                                       uint256& digest_out, std::vector<unsigned char>& payload_out);
 
+/** Suggested nonce-window size Q for ComputeDigestsBatchedAccel. Device memory
+ *  per in-flight nonce is ~76 MiB at n=4096 (b=4, m=1024) -- see the buffer
+ *  budget table in matmul_v4_accel.cu -- so Q=64 is ~4.9 GiB: large enough to
+ *  keep the stacked combine GEMM (m x Q*m x n = 1024 x 65,536 x 4096) firmly
+ *  in the tensor-core-bound regime on H100/B200 while still fitting consumer
+ *  parts (RTX 4090/5090), which is exactly the comparison B2g must measure. */
+inline constexpr uint32_t kDefaultBatchedWindow = 64;
+
+/** Largest window processed as ONE device chunk (~19.1 GiB of device buffers
+ *  at n=4096 -- sized to fill an H100 80 GB / B200 with headroom). Requests
+ *  larger than this are transparently processed in internal chunks of this
+ *  size, reusing the same device allocations, so any window up to the CPU
+ *  miner's kMaxMinerBatch works without over-allocating. */
+inline constexpr uint32_t kMaxBatchedWindow = 256;
+
+/** Batched digests for one nonce window sharing a single template (design spec
+ *  §K.2b, Appendix C-13) -- the device mirror of
+ *  matmul::v4::BatchedSketchMiner::Mine. digests_out[i] and payloads_out[i]
+ *  are BYTE-IDENTICAL to matmul_v4::ComputeDigest(headers[i], n, rounds).
+ *
+ *  Amortization structure (§A.2 v4.1, invariant I1'): the template-scoped
+ *  A, U, V are expanded ONCE on the host, the left factor P = U*A is ONE
+ *  INT8->INT32 device GEMM per call, and the per-nonce right factors
+ *  Q_i = B_i*V run as ONE stacked GEMM [B_1; ...; B_Q] * V per window chunk.
+ *  The Q per-nonce combines fuse into ONE LARGE DENSE GEMM
+ *  P * [Q_1 | ... | Q_Q] evaluated as the 16 limb-pair INT8 tensor GEMMs of
+ *  Appendix C-13 (bit-for-bit the CPU ComputeCombineLimbTensorStacked), with
+ *  the shifted mod-q recombine on the integer ALU. Operand derivation,
+ *  serialization and digest run on the HOST via the exact matmul_v4 routines.
+ *  No floating point anywhere; every device stage is exact integer arithmetic.
+ *
+ *  Returns false (dispatcher falls back to the CPU reference) iff `headers` is
+ *  empty, (n, kTileB=4) is invalid, the combine limb bound fails, `rounds` is
+ *  0, ANY header does not project onto the shared ComputeTemplateHash (fail
+ *  closed: a stale template must never be combined with fresh nonces), or any
+ *  CUDA / cuBLASLt error occurs. BTX_MATMUL_V4_CUDA_GEMM=scalar forces the
+ *  exact scalar-GEMM fallback, as in ComputeDigestAccel. */
+[[nodiscard]] bool ComputeDigestsBatchedAccel(
+    const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+    std::vector<uint256>& digests_out,
+    std::vector<std::vector<unsigned char>>& payloads_out);
+
 } // namespace matmul_v4::cuda
 
 #endif // BITCOIN_CUDA_MATMUL_V4_ACCEL_H
