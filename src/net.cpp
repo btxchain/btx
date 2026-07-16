@@ -785,6 +785,15 @@ int V1Transport::readHeader(Span<const uint8_t> msg_bytes)
         return -1;
     }
 
+    // Audit P0.5: a consensus-valid block is relayed as a single `block` message,
+    // so the message-size ceiling MUST be at least the maximum serialized block
+    // size, or a valid block becomes un-relayable (a latent split/eclipse vector).
+    // Pin the invariant at compile time so the two limits can never silently
+    // diverge again.
+    static_assert(MAX_BLOCK_SERIALIZED_SIZE <= MAX_PROTOCOL_MESSAGE_LENGTH,
+                  "P2P message limit must accommodate a maximum serialized block; "
+                  "otherwise a consensus-valid block cannot be relayed");
+
     // reject messages larger than MAX_SIZE or MAX_PROTOCOL_MESSAGE_LENGTH
     if (hdr.nMessageSize > MAX_SIZE || hdr.nMessageSize > MAX_PROTOCOL_MESSAGE_LENGTH) {
         LogDebug(BCLog::NET, "Header error: Size too large (%s, %u bytes), peer=%d\n", SanitizeString(hdr.GetMessageType()), hdr.nMessageSize, m_node_id);

@@ -61,8 +61,17 @@ static constexpr std::chrono::minutes TIMEOUT_INTERVAL{20};
 static constexpr auto FEELER_INTERVAL = 2min;
 /** Run the extra block-relay-only connection loop once every 5 minutes. **/
 static constexpr auto EXTRA_BLOCK_RELAY_ONLY_PEER_INTERVAL = 5min;
-/** Maximum length of incoming protocol messages. Must accommodate consensus-valid block relay payloads. */
-static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 16 * 1000 * 1000;
+/** Maximum length of incoming protocol messages. MUST accommodate the largest
+ *  consensus-valid object relayed as a message -- a maximum block
+ *  (MAX_BLOCK_SERIALIZED_SIZE). Audit P0.5: this was 16 MB while a block may be up
+ *  to 24 MB, so a 16-24 MB block was consensus-valid but un-relayable over the
+ *  standard `block` message path -- a latent chain-split / eclipse surface (a
+ *  peer could hold a block the network cannot download). Raised to 24 MB to match
+ *  the deliberate SMILE-v2 block-size choice (consensus.h); a `block <= message`
+ *  static_assert in net.cpp keeps the two from silently diverging again. This is a
+ *  P2P bound only (no consensus change): a node must be able to receive a valid
+ *  24 MB block regardless, so it adds no real DoS surface. */
+static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 24 * 1000 * 1000;
 /** Maximum length of the user agent string in `version` message */
 static const unsigned int MAX_SUBVERSION_LENGTH = 256;
 /** Maximum number of automatic outgoing nodes over which we'll relay everything (blocks, tx, addrs, etc) */
