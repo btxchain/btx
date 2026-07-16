@@ -27,5 +27,14 @@ bool ComputeDigestAccel(const CBlockHeader& /*header*/, uint32_t /*n*/, uint32_t
     return false;
 }
 
+bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>& /*headers*/, uint32_t /*n*/,
+                                uint32_t /*rounds*/, std::vector<uint256>& digests_out,
+                                std::vector<std::vector<unsigned char>>& payloads_out)
+{
+    digests_out.clear();
+    payloads_out.clear();
+    return false;
+}
+
 } // namespace hip
 } // namespace matmul_v4
