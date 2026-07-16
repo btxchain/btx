@@ -58,7 +58,7 @@ BUILD="${BUILD_DIR:-$ROOT/build-measure-$BACKEND}"
 
 case "$BACKEND" in
   cpu)   CMAKE_FLAGS=() ;;
-  cuda)  CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90}") ;;
+  cuda)  CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90;100;120}") ;;
   metal) CMAKE_FLAGS=(-DBTX_ENABLE_METAL=ON) ;;
   hip)   CMAKE_FLAGS=(-DBTX_ENABLE_HIP=ON "-DBTX_HIP_ARCHITECTURES=${HIP_ARCH:?set HIP_ARCH e.g. gfx942}") ;;
   *) echo "usage: $0 <cpu|cuda|metal|hip> [extra --flags for matmul-v4-report]"; exit 2 ;;
@@ -84,7 +84,7 @@ echo "-- configuring ($BUILD)"
 # ENABLE_WALLET=ON + WITH_SQLITE=ON avoids a known CPU-only link failure; the
 # report tool only needs the consensus/matmul libraries, so tests are off.
 cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF \
-      -DENABLE_WALLET=ON -DWITH_SQLITE=ON -DBUILD_TESTS=OFF \
+      -DENABLE_WALLET=ON -DWITH_SQLITE=ON -DBUILD_TESTS=OFF -DBUILD_UTIL=ON \
       "${CMAKE_FLAGS[@]}" >/dev/null || { echo "CONFIGURE FAILED"; exit 2; }
 
 echo "-- building matmul-v4-report"

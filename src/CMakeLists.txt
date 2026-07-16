@@ -516,8 +516,13 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     cuda/matmul_accel.cu
     cuda/oracle_accel.cu
     cuda/matmul_v4_accel.cu
+    cuda/matmul_v4_bmx4_accel.cu
   )
   target_compile_definitions(btx_matmul_backend PRIVATE BTX_ENABLE_CUDA_EXPERIMENTAL=1)
+  # backend_capabilities_v4.cpp (CudaEligibility) is compiled into bitcoin_common;
+  # without the define there it takes the #else -> DisabledByBuild() branch and the
+  # tool/miner silently reports the CUDA backend as unavailable and runs the CPU path.
+  target_compile_definitions(bitcoin_common PRIVATE BTX_ENABLE_CUDA_EXPERIMENTAL=1)
   if(BTX_CUDA_RUNTIME_LIBRARY STREQUAL "Static")
     target_link_libraries(btx_matmul_backend PRIVATE CUDA::cudart_static)
   else()

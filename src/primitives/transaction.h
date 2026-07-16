@@ -353,10 +353,12 @@ public:
 
     /** This deserializing constructor is provided instead of an Unserialize method.
      *  Unserialize is not possible, since it would require overwriting const fields. */
+#ifndef __CUDACC__  // nvcc cannot instantiate these deserializing ctors (incomplete-type in device TU)
     template <typename Stream>
     CTransaction(deserialize_type, const TransactionSerParams& params, Stream& s) : CTransaction(CMutableTransaction(deserialize, params, s)) {}
     template <typename Stream>
     CTransaction(deserialize_type, Stream& s) : CTransaction(CMutableTransaction(deserialize, s)) {}
+#endif  // __CUDACC__
 
     bool IsNull() const {
         return vin.empty() && vout.empty() && shielded_bundle.IsEmpty();
