@@ -1127,8 +1127,16 @@ std::set<std::string> g_hmp_markers_emitted;
 
 void EmitHighMagnitudePassMarker(const char* tier, const std::string& device_key)
 {
+    // Audit P1-3: the marker MUST be DEVICE_HIGH_MAGNITUDE_PASS:<backend>:<device-id>
+    // with the backend field EXACTLY the verify-backend.sh backend name ("cuda"),
+    // because that script matches it with grep -oE
+    // "DEVICE_HIGH_MAGNITUDE_PASS:${BACKEND}:[^space]+". Emitting the tier in the
+    // BACKEND field ("cuda-native-mxf4") put a '-' where the script expects ':',
+    // so a genuine on-device PASS never matched and every real run reported FAIL.
+    // Keep backend = "cuda" and fold the tier into the <device-id> so the
+    // native-vs-fallback evidence is still recorded.
     const std::string marker =
-        std::string("DEVICE_HIGH_MAGNITUDE_PASS:cuda-") + tier + ":" + device_key;
+        std::string("DEVICE_HIGH_MAGNITUDE_PASS:cuda:") + tier + "-" + device_key;
     {
         std::lock_guard<std::mutex> lock(g_hmp_marker_mutex);
         if (!g_hmp_markers_emitted.insert(marker).second) return;
