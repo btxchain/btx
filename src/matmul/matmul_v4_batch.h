@@ -63,7 +63,7 @@ class BatchedSketchMiner
 public:
     /** `header` is the block template (any nNonce64 / §H.4 seeds; the
      *  template projection zeroes them). `n` must validate against kTileB
-     *  (ValidateDims) and the combine limb bound (n <= 8589). */
+     *  (ValidateDims) and the combine limb bound (n <= 8522). */
     BatchedSketchMiner(const CBlockHeader& header, uint32_t n);
 
     /** False iff (n, kTileB) failed validation; Mine() must not be called. */

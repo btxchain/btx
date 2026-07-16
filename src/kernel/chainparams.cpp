@@ -72,6 +72,15 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // The accepted (exact) dimension must be a multiple of the E8M0 block length
     // (block scales run along the contraction dim in blocks of 32).
     assert((consensus.nMatMulV4Dimension % Consensus::BMX4C_SCALE_BLOCK_LENGTH) == 0);
+    // Audit ASERT-F1: the one-time ASERT rescale ratio must be strictly positive.
+    // ValidateMatMulAsertParams enforces this at runtime (failing closed to
+    // powLimit), but that only surfaces AT the fork height; assert it at startup
+    // too so a non-positive misconfiguration aborts the node immediately. Only
+    // positivity is checked -- a LARGE ratio can be a legitimate calibration
+    // (Num/Den is the GPU-vs-CPU throughput ratio, which can be large), and ASERT
+    // self-corrects any residual within one half-life, so no arbitrary range cap.
+    assert(consensus.nMatMulBMX4CAsertRescaleNum > 0);
+    assert(consensus.nMatMulBMX4CAsertRescaleDen > 0);
 }
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
@@ -353,6 +362,11 @@ public:
         consensus.hashGenesisBlock = genesis.GetHash();
         assert(consensus.hashGenesisBlock == uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"});
         assert(genesis.hashMerkleRoot == uint256{"94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a"});
+        // Audit W-2 / ASERT-F1: run the ENC-BMX4C construction invariants on every
+        // network (no-op while BMX4C is unset here -- nMatMulBMX4CHeight ==
+        // INT32_MAX -- so a future mainnet activation that sets only the height
+        // cannot ship without the fork-ordering / dim / rescale-positivity guards).
+        AssertBMX4CConstructionInvariants(consensus);
 
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,25);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,50);
@@ -905,6 +919,8 @@ public:
         consensus.hashGenesisBlock = genesis.GetHash();
         assert(consensus.hashGenesisBlock == uint256{"f2bc3fb2eca6aa6059c4d0178b56efe038d46aa440d406905ef752179aa0e1a4"});
         assert(genesis.hashMerkleRoot == uint256{"94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a"});
+        // Audit W-2 / ASERT-F1: BMX4C construction invariants (no-op while unset).
+        AssertBMX4CConstructionInvariants(consensus);
 
         vSeeds.clear();
         vSeeds.emplace_back("testnet4.btxchain.org.");

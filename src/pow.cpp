@@ -3171,6 +3171,18 @@ bool IsMatMulV4PayloadSizeValid(const CBlock& block, const Consensus::Params& pa
     if (block.matmul_dim != params.nMatMulV4Dimension) return false;
     if (block.matrix_c_data.empty()) return false;
     if (block.matrix_c_data.size() > MATMUL_V4_MAX_PAYLOAD_WORDS) return false;
+    // Audit F2: the compile-time MATMUL_V4_MAX_PAYLOAD_WORDS cap is keyed to the
+    // ABSOLUTE max dim (8192), so at the active dim (nMatMulV4Dimension, 4096 on
+    // mainnet) it is ~4x loose -- an attacker could relay a max-size garbage
+    // payload on an accepted header, forcing UnpackMatMulV4SketchWordsToBytes to
+    // allocate/iterate ~4x the real 8 MB before ParseSketch's exact-size reject.
+    // Tighten the coarse pre-parse DoS backstop to the EXACT active-dim word
+    // count (m*m F_q words, m = dim/kTileB, each F_q = 2 uint32 words). Since
+    // matmul_dim is already pinned to nMatMulV4Dimension above, this is a fixed
+    // consensus quantity; ParseSketch's byte-exact check stays the real gate.
+    const uint64_t m{static_cast<uint64_t>(params.nMatMulV4Dimension) / matmul_v4::kTileB};
+    const uint64_t exact_words{2 * m * m};
+    if (block.matrix_c_data.size() > exact_words) return false;
     return true;
 }
 

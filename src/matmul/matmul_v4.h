@@ -65,7 +65,7 @@ inline constexpr uint32_t kTileB = 4;
  *  balanced base-2^7 digits in [-64, 63], so the m*m*n combine runs as
  *  kCombineLimbs^2 native s8xs8->s32 tensor GEMMs plus one O(m^2) mod-q
  *  recombine on the integer ALU. 4 limbs cover |P| <= n*125^2 = 15,625*n for
- *  every n <= 8589, i.e. the whole 4096..8192 dimension window (see
+ *  every n <= 8522, i.e. the whole 4096..8192 dimension window (see
  *  CheckCombineLimbBound).
  *
  *  ACCUMULATOR-WIDTH WARNING (roadmap §4.1 / C-1): each limb-pair GEMM entry
@@ -192,7 +192,7 @@ enum class Operand : uint8_t { A = 0x41, B = 0x42 };
 
 /** True iff the 4-limb balanced base-2^7 decomposition covers every possible
  *  P = U*A / Q = B*V entry at dimension n: 15,625*n < kCombineLimbBase^4 / 2.
- *  Holds for all n <= 8589, i.e. the whole v4 dimension window. */
+ *  Holds for all n <= 8522, i.e. the whole v4 dimension window. */
 [[nodiscard]] bool CheckCombineLimbBound(uint32_t n);
 
 /** Combine stage, direct integer-ALU reference (§E.3): Chat = P*Q mod q, where

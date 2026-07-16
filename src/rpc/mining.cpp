@@ -30,6 +30,7 @@
 #include <matmul/field.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_pow.h>
+#include <matmul/matmul_v4_bmx4.h>
 #include <matmul/pow_v4.h>
 #include <net.h>
 #include <net_processing.h>
@@ -2088,6 +2089,13 @@ struct MatMulServiceChallengeContext {
     // matmul_v4::VerifySketch instead of the v3 transcript/Freivalds ladder.
     // Below the fork these stay false/0 and every v3 field/path is unchanged.
     bool is_v4{false};
+    // MatMul v4.2 / ENC-BMX4C (spec §8.2): at and above nMatMulBMX4CHeight the
+    // pooled/service challenge encodes operands with the ENC-BMX4C profile
+    // (M11 mantissa + E8M0 scale), so shares must be verified with
+    // VerifySketchBMX4C and solved via ComputeDigestBMX4C -- NOT the ENC-S8
+    // matmul_v4::VerifySketch / ComputeDigestDispatched. Selected by the SAME
+    // height-gated profile selector the consensus block path uses.
+    bool is_bmx4c{false};
     int32_t challenge_height{0};
     uint32_t v4_rounds{0};
     CBlockHeader header;
@@ -4161,6 +4169,7 @@ static MatMulServiceChallengeContext ParseMatMulServiceChallenge(
         // Freivalds round count; below the fork the v3 parameters stand.
         ctx.challenge_height = ctx.anchor_height + 1;
         ctx.is_v4 = consensus.IsMatMulV4Active(ctx.challenge_height);
+        ctx.is_bmx4c = consensus.IsBMX4CActive(ctx.challenge_height);
         if (ctx.is_v4) {
             ctx.n = static_cast<uint32_t>(consensus.nMatMulV4Dimension);
             ctx.b = static_cast<uint32_t>(matmul_v4::kTileB);
@@ -4443,8 +4452,14 @@ static UniValue EvaluateMatMulServiceProof(
             !sketch_payload.empty() && matmul_v4::PayloadMatchesCommitment(header, sketch_payload);
         const bool meets_target = payload_sealed && UintToArith256(digest) <= ctx.target;
         uint256 recomputed;
+        // ENC-BMX4C (spec §8.2): at BMX4C heights regenerate M11+E8M0 operands via
+        // the BMX4C verifier; below it the ENC-S8 int8 verifier. Same profile
+        // selector the consensus block path uses -- so a share the network accepts
+        // is a share this service accepts, and vice versa.
         transcript_valid = meets_target &&
-            matmul_v4::VerifySketch(header, ctx.n, ctx.v4_rounds, sketch_payload, recomputed);
+            (ctx.is_bmx4c
+                 ? matmul::v4::bmx4::VerifySketchBMX4C(header, ctx.n, ctx.v4_rounds, sketch_payload, recomputed)
+                 : matmul_v4::VerifySketch(header, ctx.n, ctx.v4_rounds, sketch_payload, recomputed));
 
         UniValue proof(UniValue::VOBJ);
         proof.pushKV("nonce64_hex", nonce64_hex);
@@ -7089,8 +7104,14 @@ static RPCHelpMan solvematmulservicechallenge()
             CBlockHeader header = BuildMatMulServiceV4Header(ctx, nonce, uint256{});
             uint256 digest;
             std::vector<unsigned char> payload;
-            const bool ok = matmul_v4::accel::ComputeDigestDispatched(
-                header, ctx.n, ctx.v4_rounds, digest, payload);
+            // ENC-BMX4C (spec §8.2): grind through the BMX4C single-nonce reference
+            // digest at BMX4C heights (M11+E8M0 operands), else the ENC-S8
+            // dispatched digest. ComputeDigestBMX4C is the same function the
+            // consensus solver reseals through, so the emitted share verifies
+            // under the network's VerifySketchBMX4C.
+            const bool ok = ctx.is_bmx4c
+                ? matmul::v4::bmx4::ComputeDigestBMX4C(header, ctx.n, digest, payload)
+                : matmul_v4::accel::ComputeDigestDispatched(header, ctx.n, ctx.v4_rounds, digest, payload);
             --max_tries;
             if (ok && UintToArith256(digest) <= ctx.target) {
                 solved = true;
