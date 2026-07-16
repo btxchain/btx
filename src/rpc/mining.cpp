@@ -1866,6 +1866,16 @@ static UniValue BuildMatMulChallengeResponse(
     matmul.pushKV("max_dimension", static_cast<uint64_t>(consensus.nMatMulMaxDimension));
     matmul.pushKV("seed_a", challenge_header.seed_a.GetHex());
     matmul.pushKV("seed_b", challenge_header.seed_b.GetHex());
+    // Audit finding A (RPC): advertise the committed-operand encoding profile so
+    // an external solver knows which encoding to use across the ENC-S8 -> BMX4C
+    // fork (every other field is byte-identical across it).
+    if (challenge_v4) {
+        matmul.pushKV("encoding_profile",
+            consensus.GetMatMulEncodingProfile(next_height) ==
+                    Consensus::MatMulEncodingProfile::ENC_BMX4C
+                ? "ENC-BMX4C"
+                : "ENC-S8");
+    }
     obj.pushKV("matmul", std::move(matmul));
     obj.pushKV("work_profile", BuildMatMulWorkProfile(challenge_header, consensus, next_height));
     UniValue service_profile(UniValue::VOBJ);
@@ -3490,6 +3500,15 @@ static UniValue BuildMatMulServiceChallengeResponse(
     matmul.pushKV("max_dimension", static_cast<uint64_t>(consensus.nMatMulMaxDimension));
     matmul.pushKV("seed_a", challenge_header.seed_a.GetHex());
     matmul.pushKV("seed_b", challenge_header.seed_b.GetHex());
+    // Audit finding A (RPC): advertise the committed-operand encoding profile
+    // (ENC-S8 vs ENC-BMX4C) so external solvers pick the right encoding at the fork.
+    if (issue_v4) {
+        matmul.pushKV("encoding_profile",
+            consensus.GetMatMulEncodingProfile(next_height) ==
+                    Consensus::MatMulEncodingProfile::ENC_BMX4C
+                ? "ENC-BMX4C"
+                : "ENC-S8");
+    }
     challenge.pushKV("matmul", std::move(matmul));
     challenge.pushKV("work_profile", BuildMatMulWorkProfile(challenge_header, consensus, next_height, work_profile_options));
     {
@@ -4468,6 +4487,9 @@ static UniValue EvaluateMatMulServiceProof(
         // forwards to matmul::DeriveSigma; spec §A.2 invariant I7).
         proof.pushKV("sigma", matmul::DeriveSigma(header).GetHex());
         proof.pushKV("matmul_version", 4);
+        // Audit finding B (RPC): disambiguate the v4.1/v4.2 encoding profile the
+        // proof was evaluated under (matmul_version stays 4 for compatibility).
+        proof.pushKV("encoding_profile", ctx.is_bmx4c ? "ENC-BMX4C" : "ENC-S8");
         proof.pushKV("meets_target", meets_target);
         proof.pushKV("commitment_valid", meets_target);
         proof.pushKV("transcript_valid", transcript_valid);
@@ -8414,6 +8436,19 @@ static UniValue TemplateToJSON(
         matmul.pushKV("seed_b", block_header.seed_b.GetHex());
         matmul.pushKV("min_dimension", static_cast<uint64_t>(consensusParams.nMatMulMinDimension));
         matmul.pushKV("max_dimension", static_cast<uint64_t>(consensusParams.nMatMulMaxDimension));
+        // Audit finding A (RPC): advertise the committed-operand ENCODING PROFILE
+        // so an external miner/pool that computes the digest itself knows which
+        // operand encoding to use across the ENC-S8 -> ENC-BMX4C fork. Every other
+        // GBT matmul field (n, b, r, q, seeds) is byte-identical across that fork,
+        // so without this there is NO in-band signal that the profile flipped and
+        // a miner would silently produce ENC-S8 digests the network rejects.
+        if (gbt_matmul_v4) {
+            matmul.pushKV("encoding_profile",
+                consensusParams.GetMatMulEncodingProfile(next_height) ==
+                        Consensus::MatMulEncodingProfile::ENC_BMX4C
+                    ? "ENC-BMX4C"
+                    : "ENC-S8");
+        }
         result.pushKV("matmul", std::move(matmul));
 
         // Backward-compatible top-level fields retained for existing miners/tests.
