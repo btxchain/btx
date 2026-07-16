@@ -410,7 +410,12 @@ CBlock TestChain100Setup::CreateBlock(
     RegenerateCommitments(block, *Assert(m_node.chainman));
     const CBlockIndex* prev_block{WITH_LOCK(::cs_main, return m_node.chainman->m_blockman.LookupBlockIndex(block.hashPrevBlock))};
     const uint32_t block_height{prev_block ? static_cast<uint32_t>(prev_block->nHeight + 1) : 0};
-    Assert(MineHeaderForConsensus(block, block_height, m_node.chainman->GetConsensus()));
+    Assert(MineHeaderForConsensus(
+        block,
+        block_height,
+        m_node.chainman->GetConsensus(),
+        5'000'000,
+        prev_block ? std::optional<int64_t>{prev_block->GetMedianTimePast()} : std::nullopt));
 
     return block;
 }
