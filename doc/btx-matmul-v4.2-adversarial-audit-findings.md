@@ -1,10 +1,13 @@
 # BTX MatMul v4 / v4.2 (ENC-BMX4C) — Adversarial Audit Findings (consolidated)
 
-*Two waves, 11 independent adversarial agents, each finding re-verified by the
+*Three waves, 16 independent adversarial agents, each finding re-verified by the
 lead against the code before acceptance. Scope: the ENC-BMX4C (v4.2) and ENC-S8
 (v4.1) committed PoW path, consensus wiring, dispatch/fallback, chainstate
-integration, RPC/pool surface, GPU backends, determinism, DoS, and serialization.
-Date 2026-07-16. Branch `claude/matmul-v4-design-spec-af23sj` (PR #89).*
+integration, RPC/pool surface, GPU backends, determinism, DoS, serialization,
+single-flag-day activation, difficulty/ASERT, net_processing, and miner
+integration. Date 2026-07-16. Branch `claude/matmul-v4-design-spec-af23sj`
+(PR #89). Wave 3 (single-activation, deep-difficulty, net_processing, miner,
+completeness) is in §Wave 3 below.*
 
 ## Headline verdict
 
@@ -118,3 +121,83 @@ net. Fixed by pinning both profiles via the self-reference-free
 - **chainstate F3 (ASERT height distinctness):** the existing ordering check
   allows `v4Height == asertHeight` (`>=`), so equality may be intentional; a
   fail-closed distinctness guard could reject a valid config. Left as documented.
+
+---
+
+## Wave 3 (single-activation, difficulty, network, miner, completeness)
+
+Prompted by the owner directive that the **entire upgrade activates on ONE flag
+day** (no multiple activation gates). Five more lenses (two hit Fable's
+intermittent AUP safeguard and were re-run on Opus).
+
+### Fixed
+- **Single-activation impossible + wrong rescale (HIGH → fixed, `dcad75b`).** A
+  startup `assert(bmx4c > v4)` aborted the node, `ValidateMatMulAsertParams`
+  fail-closed on `bmx4c <= v4`, and the sequential ASERT cascade fired the v4
+  (ENC-S8) rescale first — silently skipping the BMX4C rescale — when heights are
+  equal. Fixed: `>=` construction assert, `< v4` param check, cascade guards the
+  v4 branch out at equality so the BMX4C rescale (correct for the live profile)
+  fires; plus a check that the v4 ratio is inert 1/1 when unified. New suite
+  `matmul_unified_activation_tests` (5 cases) pins the correct behaviour.
+- **Header-gate enablement footgun (HIGH latent → fixed, `dcad75b`).** Enabling
+  the F1 gate (`nMatMulHeaderPoWBits != 0`) without the `nNonce` wire-serialization
+  + miner grind is a reject-all mining halt, with nothing guarding it. Fixed:
+  `CBlockHeader::BTX_HEADER_NONCE_ON_WIRE` (false) + a startup assert that the gate
+  stays disabled until that wire change lands. The F1 gate was also refolded to
+  ride the single v4 fork (no separate height; `bits == 0` disabled sentinel).
+- **ASERT anchor shadowing (LOW latent → fixed, `56044aa`).** The half-life-upgrade
+  anchor guard omitted the v4/BMX4C rescale heights, so an upgrade at/below a fork
+  would silently unwind that fork's rescale. Fixed by folding the fork heights into
+  the guard.
+
+### Documented (not code-changed here)
+- **F-N1 header-flood → unbounded blockindex growth (HIGH, testnet-v4 / mainnet-v4
+  activation gate).** The network realization of F1: forgeable header work lets a
+  peer poison `m_best_header` and grow `m_block_index` unboundedly; presync's
+  work-based memory bound is defeated because the work is forgeable. The mitigation
+  IS the F1 gate — which must be **enabled with wire+miner support at the same
+  flag day v4 activates on mainnet** (never activate v4 with the gate off). The net
+  lens also recommends enforcing the gate inside presync/`CheckHeadersPoW`, not
+  only `ContextualCheckBlockHeader`. **v4 must not be activated on mainnet until
+  this lands.**
+- **F2b `fSkipMatMulValidation` body verify not gated (MED regtest-only).** The v4
+  body verify runs even when the flag skips validation, while net_processing's
+  budget accounting assumes it doesn't → unmetered verify. Only reachable on
+  regtest/dev (prod hardcodes skip=false). Recommend gating
+  `validation.cpp` v4 body verify on `!fSkipMatMulValidation` or keying
+  `ShouldRunMatMulExpensiveVerification` on `IsMatMulV4Active`.
+- **getblockheader.nonce node-divergent (LOW-MED).** `nNonce` rides the block
+  index but not the P2P wire, so a miner reports `low32(nNonce64)` and every
+  relaying node reports `0` for the same block; `getblockheader` never exposes the
+  real `nNonce64`. Recommend reporting `nNonce64` (as `getblock` does) or a
+  `nonce64` field.
+- **Flagship activation functional tests run NON-enforcing (MED coverage).**
+  `feature_matmul_v4_activation.py` / `feature_matmul_bmx4c_activation.py` run
+  without `-matmulstrict` (skip=true), so the `bad-matmul-seeds` / `bad-matmul-dim`
+  header enforcement has ZERO end-to-end functional coverage. Recommend adding an
+  enforcing variant that submits a wrong-seed / wrong-dim block and asserts
+  rejection.
+- **S1 relay ceiling < consensus block size (MED).** `MAX_PROTOCOL_MESSAGE_LENGTH`
+  = 16 MB but `nMaxBlockSerializedSize` = 24 MB, and the v4 sketch payload is ~8 MB
+  — a max consensus block cannot traverse P2P. Recommend an explicit invariant or
+  a documented decision.
+- **GPU CMake / HIP guard (High, GPU-build-only)** — unchanged from wave 1/2:
+  precise fix documented; untestable without a GPU toolchain; consensus-safe.
+
+### Confirmed clean (wave 3, with evidence)
+- Freivalds soundness re-derived independently: per-round ≤ 2/q, R=3 ⇒ 2⁻¹⁸⁰;
+  σ binds prevblock+nonce64+seeds+round; no cross-round/block challenge reuse;
+  `rounds==0` fail-closes both sides.
+- Seed derivation across ALL fork boundaries (legacy/V2/V3/v4): a strict priority
+  chain with no gap and no overlap; V2/V3 preimages exclude the seed fields
+  (idempotent — the W-1 class does not exist in v2/v3).
+- ASERT math: `__int128` saturation, `net_shift` clamp, no target rounds to 0 or
+  exceeds powLimit on any path; miner-majority cannot drive an exploitable extreme
+  (absolute anchoring + BIP94/MTP bounds).
+- Compact blocks / mempool / orphan handling: no bypass of the verify budget at
+  product-required heights; no mempool coupling; no orphan-header accumulation.
+- Deserialization / disk index: payload vectors bounded by the 16 MB message cap;
+  `CDiskBlockIndex` rebuild is hash-consistent (GetHash ignores nNonce/mix_hash).
+- Miner integration: the normal (gate-disabled) path round-trips; seeds, dim,
+  payload channel, and the winner reseal are exactly what validation recomputes;
+  the solver picks ENC-BMX4C at the unified fork via the shared profile selector.
