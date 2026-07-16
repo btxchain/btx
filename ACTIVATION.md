@@ -135,6 +135,40 @@ assumption and the reopened projector-cache channel. Solicit adversarial
 review (the PR #89 reviewer is invited; the stage-bench harness is the shared
 measurement tool). Mainnet activation MUST NOT proceed without this review.
 
+> **Lineage note — this re-treads the exact ground the v2 "e1" fix closed.**
+> The height-125,000 nonce-bound seed rule (`nMatMulNonceSeedHeight`, doc/
+> btx-matmul-nonce-seed-v2-125000.md) was created *specifically* because
+> operands fixed across a nonce sweep let a miner "reuse one consensus work
+> instance across many nonce attempts," underpricing the work — and it
+> **forbids shared-A/B nonce windows** and GPU base-matrix caches that reuse a
+> stale instance. I1′ **intentionally re-opens that channel for A/U/V** (the
+> whole batched-GPU design caches A/U/V/P per template — the precise mechanism
+> v2 banned). Two things make this a *scoped* re-opening rather than a
+> regression to e1, and the review must confirm both:
+> 1. **Operand `B` stays nonce-fresh and consensus-enforced.** Verified in code:
+>    `SetDeterministicMatMulSeeds` derives `seed_a/seed_b` from the full
+>    nonce+parent-MTP preimage and `ContextualCheckBlockHeader` recomputes and
+>    rejects any mismatch (`bad-matmul-seeds`, validation.cpp:10011); operand B
+>    is derived from the full header hash incl. `nNonce64`. So `B`, `B·V`, the
+>    combine, and the digest are all still paid **per nonce** — unlike e1, where
+>    *both* operands were fixed and per-nonce cost collapsed toward zero.
+> 2. **The amortization is bounded to one operand, not total.** `P = U·A` is one
+>    GEMM paid once per window; as the window grows its per-nonce share → 0, so
+>    the maximum underpricing is a *bounded constant factor* (the P-share of
+>    total work), not the e1-style collapse. **This bound is an argument, not a
+>    theorem** — and it is empirically the SAME quantity B2g measures: S0
+>    (template-amortized) vs the marginal S1b+S2+S3+S4. If S0 is not small
+>    relative to the marginal total at window Q ≥ 32 on real hardware, the
+>    amortization is underpricing the work and the ASERT calibration (B2b) is
+>    wrong. B2g is therefore a dual check: hardware ordering *and* e1-underpricing.
+>
+> **The v3 gap (template-precomputation) is NOT reintroduced.** Verified:
+> `ComputeTemplateHash` binds `hashPrevBlock` (→ height + parent chain) and
+> validation fails closed if parent-MTP context is unavailable ("matmul parent
+> context unavailable"), so nothing template-scoped is computable before the
+> parent exists (§C I1 memorylessness survives at template granularity; a
+> different parent = different `hashPrevBlock` = different template).
+
 ### B4. Public testnet burn-in
 Deploy on testnet, mine across `nMatMulV4Height` with **diverse hardware**,
 confirm zero splits over a sustained window. This is where determinism
