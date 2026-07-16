@@ -10,6 +10,7 @@
 #include <matmul/accelerated_solver.h>
 #include <matmul/freivalds.h>
 #include <matmul/matmul_pow.h>
+#include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matrix.h>
 #include <matmul/noise.h>
 #include <matmul/transcript.h>
@@ -4537,6 +4538,121 @@ BOOST_AUTO_TEST_CASE(e1_v2_parallel_solver_engages_and_stays_consensus_valid)
     BOOST_REQUIRE(SetDeterministicMatMulSeeds(expected, consensus, kActivation));
     BOOST_CHECK_EQUAL(expected.seed_a, candidate.seed_a);
     BOOST_CHECK_EQUAL(expected.seed_b, candidate.seed_b);
+}
+
+// Audit W-1 round-trip (adversarial): mine an ENC-BMX4C (MatMul v4.2) block on an
+// ENFORCING regtest config and drive it through BOTH consensus checkpoints the node
+// applies -- (a) ContextualCheckBlockHeader's "bad-matmul-seeds" recompute-and-compare
+// and (b) ContextualCheckBlock's CheckMatMulProofOfWork_V4ProductCommitted (which routes
+// to VerifySketchBMX4C). The pre-existing idempotency test only proved the seed pinning
+// is a fixed point; it NEVER mined+validated a real block. This closes that hole and
+// then tampers (seed field / digest / payload word) to prove rejection.
+BOOST_AUTO_TEST_CASE(MatMulBMX4C_mine_validate_round_trip_enforcing)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    // ENFORCING config: do NOT skip matmul validation (regtest default skips it).
+    consensus.fMatMulPOW = true;
+    consensus.fSkipMatMulValidation = false;
+    // Shrink the v4 dimension to the smallest legal ENC-BMX4C dim for a fast solve:
+    // 64 % 32 == 0 (E8M0 blocks), b=kTileB=4 | 64, within regtest [64,1024].
+    consensus.nMatMulV4Dimension = 64;
+    // Max target so the very first nonce's digest wins -> a single digest evaluation.
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 150; // >= nMatMulBMX4CHeight (150) and >= nMatMulV4Height (100)
+    BOOST_REQUIRE(consensus.IsBMX4CActive(kHeight));
+    BOOST_REQUIRE(consensus.GetMatMulEncodingProfile(kHeight) ==
+                  Consensus::MatMulEncodingProfile::ENC_BMX4C);
+
+    constexpr int64_t parent_mtp{1'780'000'000};
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000404"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000405"};
+    header.nTime = 1'780'000'020U;
+    header.nBits = UintToArith256(consensus.powLimit).GetCompact();
+    header.nNonce64 = 0;
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulV4Dimension);
+
+    // ---- MINE via the real BMX4C solver (SolveMatMul -> SolveMatMulV4 -> SolveMatMulV4BMX4C).
+    std::vector<uint32_t> payload;
+    uint64_t max_tries{8};
+    const bool solved = SolveMatMul(header, consensus, max_tries, kHeight,
+                                    /*abort_flag=*/nullptr, &payload,
+                                    /*share_target_override=*/nullptr, parent_mtp);
+    BOOST_REQUIRE_MESSAGE(solved, "BMX4C solver failed to produce a block at max target");
+    BOOST_REQUIRE(!payload.empty());
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+
+    // The solver must have pinned the header seed fields to the self-reference-free V3 seeds
+    // (this is exactly what the bad-matmul-seeds verifier recomputes).
+    BOOST_CHECK_EQUAL(header.seed_a, DeterministicMatMulSeedV3(header, kHeight, parent_mtp, 0));
+    BOOST_CHECK_EQUAL(header.seed_b, DeterministicMatMulSeedV3(header, kHeight, parent_mtp, 1));
+
+    // Assemble the full block exactly as relayed: seed-derived operands, sketch payload
+    // in the trailing matrix_c_data channel, empty A/B channels.
+    CBlock good;
+    static_cast<CBlockHeader&>(good) = header;
+    good.matrix_c_data = payload;
+
+    // ==== CHECKPOINT (a): ContextualCheckBlockHeader "bad-matmul-seeds" recompute-and-compare
+    // (validation.cpp:10018-10028), replicated verbatim.
+    auto seeds_accept = [&](const CBlockHeader& h) -> bool {
+        CBlockHeader expected{h};
+        if (!SetDeterministicMatMulSeeds(expected, consensus, kHeight, parent_mtp)) return false;
+        return h.seed_a == expected.seed_a && h.seed_b == expected.seed_b;
+    };
+    BOOST_CHECK_MESSAGE(seeds_accept(good), "honest block REJECTED at bad-matmul-seeds recompute");
+
+    // ==== CHECKPOINT (b): full product-committed verify (ContextualCheckBlock path).
+    BOOST_CHECK_MESSAGE(IsMatMulV4PayloadSizeValid(good, consensus),
+                        "honest block payload shape rejected");
+    BOOST_CHECK_MESSAGE(CheckMatMulProofOfWork_V4ProductCommitted(good, consensus, kHeight),
+                        "honest block REJECTED by CheckMatMulProofOfWork_V4ProductCommitted");
+    BOOST_CHECK_MESSAGE(MatMulV4PayloadMatchesCommitment(good),
+                        "honest payload does not reconstruct committed digest");
+
+    // Independent confirmation that miner operand derivation == verifier operand derivation:
+    // re-run the single-nonce reference digest over the sealed header and compare.
+    {
+        uint256 ref_digest;
+        std::vector<unsigned char> ref_payload;
+        BOOST_REQUIRE(matmul::v4::bmx4::ComputeDigestBMX4C(good, consensus.nMatMulV4Dimension,
+                                                           ref_digest, ref_payload));
+        BOOST_CHECK_EQUAL(ref_digest, good.matmul_digest);
+    }
+
+    // ==== TAMPER 1: flip a seed field. Must be caught by bad-matmul-seeds AND by the
+    // full verify (operand-B seed binds seed_b via ComputeMatMulHeaderHash -> digest diverges).
+    {
+        CBlock bad = good;
+        bad.seed_b.data()[0] ^= 0xFF;
+        BOOST_CHECK_MESSAGE(!seeds_accept(bad), "TAMPER(seed_b) accepted at bad-matmul-seeds");
+        BOOST_CHECK_MESSAGE(!CheckMatMulProofOfWork_V4ProductCommitted(bad, consensus, kHeight),
+                            "TAMPER(seed_b) accepted by product-committed verify");
+    }
+
+    // ==== TAMPER 2: flip the committed digest in the header. Verify must reject
+    // (recomputed digest != committed digest, or committed digest > target when it isn't max).
+    {
+        CBlock bad = good;
+        bad.matmul_digest.data()[0] ^= 0xFF;
+        BOOST_CHECK_MESSAGE(!CheckMatMulProofOfWork_V4ProductCommitted(bad, consensus, kHeight),
+                            "TAMPER(matmul_digest) accepted by product-committed verify");
+    }
+
+    // ==== TAMPER 3: flip a payload word. Digest recomputation diverges; the block is a
+    // body mutation (payload no longer reconstructs the committed digest).
+    {
+        CBlock bad = good;
+        BOOST_REQUIRE(!bad.matrix_c_data.empty());
+        bad.matrix_c_data[0] ^= 0x1u;
+        BOOST_CHECK_MESSAGE(!CheckMatMulProofOfWork_V4ProductCommitted(bad, consensus, kHeight),
+                            "TAMPER(payload word) accepted by product-committed verify");
+        BOOST_CHECK_MESSAGE(!MatMulV4PayloadMatchesCommitment(bad),
+                            "TAMPER(payload word) still matches committed digest");
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
