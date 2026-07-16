@@ -65,3 +65,6 @@ github.key
 btx-release-key/
 # Claude Code local state and agent worktrees (never track)
 .claude/
+
+# MatMul v4 hardware measurement tool per-run outputs
+matmul-v4-report-*.json
