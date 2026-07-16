@@ -56,6 +56,59 @@ inline constexpr uint32_t kMaxHeaderDim = 65535;
  *  (§B.4/§0.7-(2)). Every header dimension n <= 65535 satisfies this. */
 [[nodiscard]] bool CheckAccumulationBound(uint32_t n);
 
+// ---------------------------------------------------------------------------
+// Backend accumulator-width ELIGIBILITY invariant (consensus-protecting).
+// ---------------------------------------------------------------------------
+//
+// NORMATIVE INVARIANT (design spec §B.6/§O.1 posture; multi-platform roadmap
+// doc/btx-matmul-v4-multiplatform-roadmap.md §4.1, backlog item C-1; companion
+// doc/btx-matmul-v4-accumulator-eligibility.md):
+//
+//   Every accelerated backend MUST perform ALL v4 INT8-matmul accumulations —
+//   the base product C = A*B, the projections P = U*A and Q = B*V, and each
+//   of the 16 Appendix C-13 limb-pair GEMMs — in a TRUE two's-complement
+//   INTEGER accumulator at least kRequiredAccumulatorBits (32) bits wide. A
+//   device whose "INT8 matmul" accumulates into a floating-point-mantissa-
+//   bounded register — exact only up to 2^24, e.g. the FP32-mantissa MXU of
+//   Google TPU v4 — is INELIGIBLE for every v4 stage and MUST NOT be flagged
+//   mining-capable.
+//
+// Why 2^24 is genuinely inside the workload, not headroom pedantry: the base /
+// projection GEMMs accumulate up to 15,625*n (= 6.4e7 at the mainnet n = 4096)
+// and the C-13 limb-pair GEMMs accumulate up to n*64^2 (= EXACTLY 2^24 at
+// n = 4096, 2^25 at n = 8192) — all past the FP32-mantissa exactness ceiling
+// on precisely the dimension window v4 targets. Such a device silently rounds
+// high-magnitude entries, commits a wrong sketch/digest, and — were it not
+// for the dispatcher's verify+fallback (accel_v4.h) — would split the chain.
+//
+// The invariant is ENFORCED, not assumed: the adversarial high-magnitude
+// golden vectors in src/test/matmul_v4_backend_determinism_tests.cpp (test
+// cases high_magnitude_*) force accumulations into (2^24, 2^31), and
+// contrib/matmul-v4/verify-backend.sh hard-FAILs any backend that either
+// diverges on them or fails to exercise them (§N.3-v).
+
+/** Minimum true-integer accumulator width (bits) an accelerated backend must
+ *  provide for every v4 s8xs8 GEMM stage. 32-bit two's complement covers every
+ *  v4 accumulated magnitude: 15,625*n < 2^30 (CheckAccumulationBound) and
+ *  n*64^2 < 2^31 for all header dimensions n <= 65535. */
+inline constexpr uint32_t kRequiredAccumulatorBits = 32;
+
+/** Exactness ceiling of an IEEE-754 FP32-mantissa-bounded "INT8 matmul"
+ *  accumulator (2^24 = 16,777,216) — the known-inadequate accumulator class
+ *  the invariant above excludes (TPU v4-class MXUs, roadmap §4.1). Integers
+ *  accumulated past this magnitude are silently rounded on such hardware. */
+inline constexpr int64_t kFp32MantissaAccumulatorBound = static_cast<int64_t>(1) << 24;
+
+/** True iff a TRUE integer accumulator of `bits` bits satisfies the backend
+ *  eligibility invariant above. Meaningful only for genuine two's-complement
+ *  integer accumulators: an FP-mantissa-bounded accumulator does not qualify
+ *  at ANY nominal register width (its exact-integer range is the mantissa,
+ *  not the register). */
+[[nodiscard]] inline constexpr bool AccumulatorWidthEligible(uint32_t bits)
+{
+    return bits >= kRequiredAccumulatorBits;
+}
+
 /** Map one XOF byte to a canonical balanced-s8 element by rejection sampling
  *  (§A.2/§B.2/§B.3): bytes >= 251 are rejected (`accepted=false`); otherwise
  *  the residue r in [0,250] is returned as the balanced representative

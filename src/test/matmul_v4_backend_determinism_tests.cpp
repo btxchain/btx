@@ -30,6 +30,8 @@
 // exercise exactly the points the release pins commit to.
 
 #include <matmul/backend_capabilities_v4.h>
+#include <matmul/int8_field.h>
+#include <matmul/matmul_v4.h>
 #include <matmul/pow_v4.h>
 
 #include <primitives/block.h>
@@ -481,6 +483,361 @@ BOOST_AUTO_TEST_CASE(cross_backend_digest_determinism)
                        "hardware). HIP is NOT verified for v4 mining by this run — see "
                        "doc/matmul-v4-gpu-backends.md (§S.1/§N.3-v).");
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// C-1 ADVERSARIAL HIGH-MAGNITUDE ACCUMULATOR-REGIME VECTORS
+// (multi-platform roadmap §4.1 / backlog C-1; companion
+// doc/btx-matmul-v4-accumulator-eligibility.md).
+//
+// The v4 exactness argument (spec §B.6) requires every backend to accumulate
+// its s8xs8->s32 GEMMs in a TRUE >= 32-bit integer accumulator
+// (matmul::int8_field::kRequiredAccumulatorBits). Some AI accelerators (TPU
+// v4-class MXUs) accumulate "INT8 matmuls" in an FP32-MANTISSA-bounded
+// register that is exact only up to 2^24 = 16,777,216
+// (int8_field::kFp32MantissaAccumulatorBound). The ordinary determinism
+// vectors above CANNOT catch such a device: XOF-random operands concentrate
+// every accumulated value around ~2^21 or below at every header dimension, so
+// a mis-accumulating backend passes them by luck. The three high_magnitude_*
+// cases below deliberately force accumulations into the (2^24, 2^31) danger
+// regime for EVERY v4 GEMM stage — the base product C = A*B, the projections
+// P = U*A and Q = B*V, and the Appendix C-13 limb-pair GEMMs (whose entries
+// reach n*64^2 = EXACTLY 2^24 at the mainnet n = 4096 and 2^25 at n = 8192).
+//
+// On this CPU (true int32 accumulation) they pass BY CONSTRUCTION — every
+// assertion is either an analytically-derived exact integer or byte-equality
+// between two independent consensus-equivalent evaluation paths. Their
+// purpose is to be the NORMATIVE adversarial golden-vector set (roadmap M-2):
+// any backend onboarding MUST replay these operand-level vectors through its
+// device GEMM kernels bit-for-bit before it may be flagged mining-capable; an
+// FP32-mantissa accumulator FAILS them deterministically (it must round the
+// odd-stepped partial sums past 2^24) instead of failing silently at some
+// future block. contrib/matmul-v4/verify-backend.sh hard-FAILs unless these
+// cases both RUN and PASS (§N.3-v).
+//
+// Nothing here changes consensus: q, n, b, the committed object, the digest
+// and the Freivalds verifier are untouched — these are additive test vectors
+// over the existing building blocks at magnitudes the spec already bounds
+// (§B.4: |C|,|P|,|Q| <= 15,625*n; C-13: limb-pair <= n*64^2).
+// ---------------------------------------------------------------------------
+
+// VECTOR HM-A — base product C past the FP32-mantissa ceiling.
+//
+// Saturating balanced-s8 operands (every entry at the +/-125 rail — valid s8
+// operand values any conforming GEMM unit must handle; the XOF would never
+// emit them, which is exactly why this hand-built vector is needed) at
+// n = 1088, the smallest b=4-compatible dimension with 15,625*n > 2^24:
+// every C entry is +/-125*125*1088 = +/-17,000,000, strictly inside
+// (2^24, 2^31). The accumulator's partial sums walk up in ODD steps of
+// 15,625 and cross 2^24 at k = 1074, where FP32 spacing is 2 — an
+// FP32-mantissa accumulator MUST round there and corrupts every entry of C,
+// hence the sketch and the digest. (At the mainnet n = 4096 the same rail
+// operands reach the spec's §B.4 peak 4096*125^2 = 6.4e7; n = 1088 keeps the
+// Theta(n^3) reference product affordable in a unit test while landing in
+// the identical rounding regime.)
+BOOST_AUTO_TEST_CASE(high_magnitude_base_product_regime)
+{
+    using matmul::int8_field::kFp32MantissaAccumulatorBound;
+
+    const uint32_t n = 1088;
+    const uint32_t ms = 64; // building-block sketch width for this vector (the
+                            // GEMM danger regime is set by n, not by m; the
+                            // consensus m = n/b shape applies to the header
+                            // path, which random operands cannot push past
+                            // 2^24 — see the section banner).
+    BOOST_REQUIRE(matmul::int8_field::CheckAccumulationBound(n));
+    BOOST_REQUIRE(matmul::v4::CheckCombineLimbBound(n));
+
+    const int32_t peak = 125 * 125 * static_cast<int32_t>(n); // 17,000,000
+    BOOST_REQUIRE_EQUAL(peak, 17'000'000);
+    BOOST_REQUIRE_GT(static_cast<int64_t>(peak), kFp32MantissaAccumulatorBound);
+    BOOST_REQUIRE_LT(static_cast<int64_t>(peak), static_cast<int64_t>(1) << 31);
+
+    // A: every entry +125. B: columns alternate -125 / +125 so both signs of
+    // the danger regime are exercised in one product.
+    std::vector<int8_t> A(static_cast<size_t>(n) * n, int8_t{125});
+    std::vector<int8_t> B(static_cast<size_t>(n) * n);
+    for (uint32_t k = 0; k < n; ++k) {
+        for (uint32_t j = 0; j < n; ++j) {
+            B[static_cast<size_t>(k) * n + j] = (j & 1) ? int8_t{125} : int8_t{-125};
+        }
+    }
+
+    // Reference product: every entry must be EXACTLY +/-17,000,000 — any
+    // accumulator that rounds past 2^24 cannot reproduce this matrix.
+    const std::vector<int32_t> C = matmul::v4::ComputeExactProduct(A, B, n);
+    size_t mismatches = 0;
+    for (size_t idx = 0; idx < C.size(); ++idx) {
+        const int32_t expected = ((idx % n) & 1) ? peak : -peak;
+        mismatches += (C[idx] != expected) ? 1 : 0;
+    }
+    BOOST_REQUIRE_MESSAGE(mismatches == 0,
+                          "HM-A: " << mismatches << " base-product entries diverged from the exact "
+                                   << "+/-17,000,000 rail — int32 accumulation broken in the "
+                                      "(2^24, 2^31) regime");
+
+    // Projectors from the REAL ExpandProjector derivation (fixed seeds), then
+    // the committed sketch through THREE independent consensus-equivalent
+    // paths — full-C projection, direct P*Q mod q, and the C-13 limb-tensor
+    // combine — which must agree byte-for-byte.
+    const uint256 seed_u = ParseUint256("4504d44d861b69197db1d95e473442346c4f2bc1f5869996bdccd63cfbdbd150");
+    const uint256 seed_v = ParseUint256("c6a811f7f75fe4e64be106a50351aed9c04403a74bfe7b4bbe59f7311722b735");
+    const std::vector<int8_t> U = matmul::v4::ExpandProjector(seed_u, ms, n);
+    const std::vector<int8_t> V = matmul::v4::ExpandProjector(seed_v, n, ms);
+
+    const auto sketch_full = matmul::v4::ComputeSketch(U, C, V, n, ms);
+    const std::vector<int32_t> P = matmul::v4::ComputeProjectedLeft(U, A, n, ms);
+    const std::vector<int32_t> Q = matmul::v4::ComputeProjectedRight(B, V, n, ms);
+    const auto sketch_direct = matmul::v4::ComputeCombineModQ(P, Q, n, ms);
+    const auto sketch_limb = matmul::v4::ComputeCombineLimbTensor(P, Q, n, ms);
+    BOOST_REQUIRE_MESSAGE(sketch_direct == sketch_full,
+                          "HM-A: direct (U*A)(B*V) sketch != full-C sketch on high-magnitude C");
+    BOOST_REQUIRE_MESSAGE(sketch_limb == sketch_full,
+                          "HM-A: C-13 limb-tensor sketch != full-C sketch on high-magnitude C");
+
+    // Serialization + committed-digest tie-in: identical residues must yield
+    // identical payload bytes, a canonical ParseSketch round-trip, and one
+    // digest under H(sigma || Chat).
+    const std::vector<unsigned char> payload = matmul::v4::SerializeSketch(sketch_full);
+    BOOST_REQUIRE_EQUAL(payload.size(), static_cast<size_t>(8) * ms * ms);
+    BOOST_REQUIRE(matmul::v4::SerializeSketch(sketch_limb) == payload);
+    std::vector<matmul::v4::Fq> reparsed;
+    BOOST_REQUIRE(matmul::v4::ParseSketch(payload, ms, reparsed));
+    BOOST_REQUIRE(reparsed == sketch_full);
+    const uint256 sigma = ParseUint256("1111111111111111111111111111111111111111111111111111111111111111");
+    BOOST_REQUIRE(matmul::v4::ComputeSketchDigest(sigma, payload) ==
+                  matmul::v4::ComputeSketchDigest(sigma, matmul::v4::SerializeSketch(sketch_direct)));
+}
+
+// VECTOR HM-B — projected P = U*A and Q = B*V past 2^24 from the REAL XOF
+// derivation, at the mainnet dimension n = 4096.
+//
+// A and B are genuine ExpandOperand matrices (fixed seeds). Random projectors
+// cannot push P/Q past ~2^21, so the projector is built as a GRAM slice of
+// the operand itself: U row r is column cols[r] of A (every entry a genuine
+// balanced-s8 value, so U is a valid projector any backend GEMM must accept).
+// Then P[r][cols[r]] = sum_i A[i][cols[r]]^2 — a length-4096 sum of squares
+// with expected value 5,250*4,096 ~ 21.5e6 > 2^24, i.e. a REAL-OPERAND
+// accumulation deep inside the danger regime, with generic (odd/even) partial
+// sums that an FP32-mantissa accumulator must round. Symmetrically for
+// Q = B*V with V columns taken from rows of B. The resulting high-magnitude
+// P/Q (entries > 2^24) are then pushed through the C-13 limb combine, which
+// exercises the top base-2^7 digit planes (d3 != 0) for the first time in
+// this suite.
+BOOST_AUTO_TEST_CASE(high_magnitude_projected_gram_regime)
+{
+    using matmul::int8_field::kFp32MantissaAccumulatorBound;
+
+    const uint32_t n = 4096; // mainnet dimension
+    const uint32_t ms = 8;   // Gram-slice width: 8 projected rows/cols suffice
+                             // to land 8 independent accumulations past 2^24
+                             // while keeping the reference O(ms * n^2).
+    BOOST_REQUIRE(matmul::int8_field::CheckAccumulationBound(n));
+    BOOST_REQUIRE(matmul::v4::CheckCombineLimbBound(n));
+
+    const uint256 seed_a = ParseUint256("4504d44d861b69197db1d95e473442346c4f2bc1f5869996bdccd63cfbdbd150");
+    const uint256 seed_b = ParseUint256("c6a811f7f75fe4e64be106a50351aed9c04403a74bfe7b4bbe59f7311722b735");
+    const std::vector<int8_t> A = matmul::v4::ExpandOperand(seed_a, n);
+    const std::vector<int8_t> B = matmul::v4::ExpandOperand(seed_b, n);
+
+    // -- P = U*A with U rows = columns of A (Gram construction) -------------
+    // The expected values are GOLDEN: generated 2026-07-16 from this exact
+    // seed/XOF derivation on the true-int32 CPU reference and pinned forever.
+    // Every one lies in (2^24, 2^30) — the regime an FP32-mantissa
+    // accumulator cannot reproduce.
+    const uint32_t cols[8] = {0, 1, 191, 1024, 2047, 2718, 3141, 4095};
+    const int32_t kGramP[8] = {21'707'085, 21'770'049, 21'614'300, 21'170'086,
+                               21'643'083, 21'543'048, 22'147'078, 21'749'154};
+    std::vector<int8_t> U(static_cast<size_t>(ms) * n);
+    for (uint32_t r = 0; r < ms; ++r) {
+        for (uint32_t i = 0; i < n; ++i) {
+            U[static_cast<size_t>(r) * n + i] = A[static_cast<size_t>(i) * n + cols[r]];
+        }
+    }
+    const std::vector<int32_t> P = matmul::v4::ComputeProjectedLeft(U, A, n, ms);
+    for (uint32_t r = 0; r < ms; ++r) {
+        // Independent int64 recomputation pins the exact value and proves the
+        // int32 path did not wrap; the range check pins the danger regime;
+        // the golden constant pins the XOF derivation.
+        int64_t ref = 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            const int64_t a = A[static_cast<size_t>(i) * n + cols[r]];
+            ref += a * a;
+        }
+        const int32_t got = P[static_cast<size_t>(r) * n + cols[r]];
+        BOOST_REQUIRE_MESSAGE(static_cast<int64_t>(got) == ref,
+                              "HM-B: P[" << r << "][" << cols[r] << "] = " << got
+                                         << " != exact Gram value " << ref);
+        BOOST_REQUIRE_MESSAGE(got == kGramP[r],
+                              "HM-B: P[" << r << "][" << cols[r] << "] = " << got
+                                         << " != pinned golden value " << kGramP[r]);
+        BOOST_REQUIRE_MESSAGE(ref > kFp32MantissaAccumulatorBound,
+                              "HM-B: Gram column " << cols[r] << " value " << ref
+                                                   << " unexpectedly below 2^24 — vector no longer "
+                                                      "exercises the danger regime");
+        BOOST_REQUIRE_LT(ref, static_cast<int64_t>(1) << 30); // §B.4 envelope
+    }
+
+    // The same accumulation through the scalar consensus primitive.
+    std::vector<int8_t> col0(n);
+    for (uint32_t i = 0; i < n; ++i) col0[i] = A[static_cast<size_t>(i) * n + cols[0]];
+    BOOST_REQUIRE_EQUAL(matmul::int8_field::ExactDot(col0.data(), col0.data(), n),
+                        P[static_cast<size_t>(0) * n + cols[0]]);
+
+    // -- Q = B*V with V columns = rows of B (Gram construction) -------------
+    // Golden values: same derivation/pinning discipline as kGramP above.
+    const uint32_t rows[8] = {0, 7, 512, 1023, 2048, 3000, 4000, 4095};
+    const int32_t kGramQ[8] = {21'738'326, 21'743'142, 21'653'779, 21'133'642,
+                               21'614'940, 21'416'532, 21'188'040, 21'513'072};
+    std::vector<int8_t> V(static_cast<size_t>(n) * ms);
+    for (uint32_t j = 0; j < n; ++j) {
+        for (uint32_t c = 0; c < ms; ++c) {
+            V[static_cast<size_t>(j) * ms + c] = B[static_cast<size_t>(rows[c]) * n + j];
+        }
+    }
+    const std::vector<int32_t> Q = matmul::v4::ComputeProjectedRight(B, V, n, ms);
+    for (uint32_t c = 0; c < ms; ++c) {
+        int64_t ref = 0;
+        for (uint32_t j = 0; j < n; ++j) {
+            const int64_t b = B[static_cast<size_t>(rows[c]) * n + j];
+            ref += b * b;
+        }
+        const int32_t got = Q[static_cast<size_t>(rows[c]) * ms + c];
+        BOOST_REQUIRE_MESSAGE(static_cast<int64_t>(got) == ref,
+                              "HM-B: Q[" << rows[c] << "][" << c << "] = " << got
+                                         << " != exact Gram value " << ref);
+        BOOST_REQUIRE_MESSAGE(got == kGramQ[c],
+                              "HM-B: Q[" << rows[c] << "][" << c << "] = " << got
+                                         << " != pinned golden value " << kGramQ[c]);
+        BOOST_REQUIRE_MESSAGE(ref > kFp32MantissaAccumulatorBound,
+                              "HM-B: Gram row " << rows[c] << " value " << ref
+                                                << " unexpectedly below 2^24");
+        BOOST_REQUIRE_LT(ref, static_cast<int64_t>(1) << 30);
+    }
+
+    // -- C-13 limb combine over REAL P/Q whose entries exceed 2^24 ----------
+    // (combine INPUTS in (2^24, 2^27): the top digit plane d3 is nonzero, and
+    // the direct mod-q path must match the limb-tensor path byte-for-byte).
+    const auto direct = matmul::v4::ComputeCombineModQ(P, Q, n, ms);
+    const auto limb = matmul::v4::ComputeCombineLimbTensor(P, Q, n, ms);
+    BOOST_REQUIRE_MESSAGE(limb == direct,
+                          "HM-B: limb-tensor combine != direct mod-q combine over "
+                          "high-magnitude P/Q (top digit plane mis-handled)");
+    const auto stacked = matmul::v4::ComputeCombineLimbTensorStacked(P, Q, n, ms, ms);
+    BOOST_REQUIRE(stacked == direct);
+}
+
+// VECTOR HM-C — the C-13 limb-pair GEMM at and past its n*64^2 accumulator
+// peak (the stage MOST exposed to an FP32-mantissa accumulator: the peak is
+// EXACTLY 2^24 at the mainnet n = 4096 and 2^25 at n = 8192 — at/past the
+// ceiling on precisely the spec's target dimension window; roadmap §4.1).
+//
+// Construction: an int32 entry x = 64 has balanced base-2^7 digits
+// (d0, d1) = (-64, +1), so all-64 P/Q matrices drive the limb-pair GEMM
+// S_00[a][c] = sum_k (-64)*(-64) = n*64^2 — the exact worst-case accumulator
+// magnitude. Entries x = 65 give d0 = -63 so S_00 = n*3969 climbs in ODD
+// steps: once the partial sum passes 2^24 (where FP32 spacing is 2) every odd
+// step MUST round on an FP32-mantissa accumulator, making the divergence
+// deterministic rather than data-dependent. Each sub-case asserts the exact
+// analytic combine value AND byte-equality between the limb-tensor path and
+// the direct mod-q path.
+BOOST_AUTO_TEST_CASE(high_magnitude_limb_pair_boundary_regime)
+{
+    using matmul::int8_field::kFieldPrime;
+    using matmul::int8_field::kFp32MantissaAccumulatorBound;
+    using matmul::v4::Fq;
+
+    // Pin the roadmap §4.1 arithmetic in code: n*64^2 == 2^24 at n = 4096.
+    BOOST_REQUIRE_EQUAL(static_cast<int64_t>(4096) * 64 * 64, kFp32MantissaAccumulatorBound);
+
+    const uint32_t ms = 4; // limb-pair GEMM width; the accumulator regime is
+                           // set by the reduction length n, not by m.
+
+    // One sub-case: constant-fill P (ms x n) and Q (n x ms), every output
+    // entry n * pval * qval; limb path must equal direct path byte-for-byte
+    // and both must equal the analytic canonical residue.
+    const auto run_case = [&](uint32_t n, int32_t pval, int32_t qval, const char* label) {
+        BOOST_REQUIRE(matmul::v4::CheckCombineLimbBound(n));
+        const std::vector<int32_t> P(static_cast<size_t>(ms) * n, pval);
+        const std::vector<int32_t> Q(static_cast<size_t>(n) * ms, qval);
+        const auto direct = matmul::v4::ComputeCombineModQ(P, Q, n, ms);
+        const auto limb = matmul::v4::ComputeCombineLimbTensor(P, Q, n, ms);
+        BOOST_REQUIRE_MESSAGE(limb == direct,
+                              "HM-C[" << label << "]: limb-tensor combine != direct mod-q combine");
+        const int64_t exact = static_cast<int64_t>(n) * pval * qval; // |.| < 2^63 for all cases here
+        const Fq expected = matmul::int8_field::FqFromSigned(exact);
+        for (const Fq word : direct) {
+            BOOST_REQUIRE_MESSAGE(word == expected,
+                                  "HM-C[" << label << "]: combine entry " << word
+                                          << " != analytic residue " << expected);
+        }
+        return direct;
+    };
+
+    // (a) EXACT boundary at mainnet n = 4096: digits of 64 are (-64, +1), so
+    //     the S_00 limb-pair GEMM accumulates to 4096*64^2 = 2^24 exactly —
+    //     the C-13 accumulator peak at the mainnet dimension. Output entries
+    //     are also exactly 2^24 (canonical residue 2^24 < q).
+    const auto boundary = run_case(4096, 64, 64, "n4096-boundary-2^24");
+    for (const Fq word : boundary) {
+        BOOST_REQUIRE_EQUAL(word, static_cast<Fq>(1) << 24);
+    }
+
+    // (b) n = 8192 (the spec's retarget dimension): S_00 = 8192*64^2 = 2^25,
+    //     a full binade past the FP32-mantissa ceiling.
+    const auto retarget = run_case(8192, 64, 64, "n8192-2^25");
+    for (const Fq word : retarget) {
+        BOOST_REQUIRE_EQUAL(word, static_cast<Fq>(1) << 25);
+    }
+
+    // (c) ODD-STEP climb past 2^24: entries 65 -> d0 = -63, so S_00 =
+    //     4352*3969 = 17,273,088 > 2^24 accumulated in odd steps of 3,969 —
+    //     an FP32-mantissa accumulator must round every odd partial sum past
+    //     2^24. (n = 4352 is the smallest multiple of 128 with n*3969 > 2^24.)
+    run_case(4352, 65, 65, "n4352-odd-steps");
+
+    // (d) NEGATIVE side of the regime at the same magnitude: -64 has the
+    //     single digit d0 = -64, so the combine value is -2^24 and the limb
+    //     recombine must land on the canonical residue q - 2^24.
+    const auto negative = run_case(4096, -64, 64, "n4096-negative-2^24");
+    for (const Fq word : negative) {
+        BOOST_REQUIRE_EQUAL(word, kFieldPrime - (static_cast<Fq>(1) << 24));
+    }
+
+    // (e) Combine INPUTS above 2^24 (as HM-B produces from real operands):
+    //     P entries 16,777,301 (> 2^24, odd, inside the 15,625*n = 68e6
+    //     envelope at n = 4352 and the 2^27 limb-decomposition range) force
+    //     all four digit planes including d3 to be nonzero.
+    run_case(4352, 16'777'301, 64, "n4352-input-past-2^24");
+
+    // (f) STACKED combine (the §K.2b batched-miner GEMM shape): stacking a
+    //     boundary block and an odd-step block must reproduce the single-nonce
+    //     limb combine byte-for-byte per column block.
+    {
+        const uint32_t n = 4352;
+        BOOST_REQUIRE(matmul::v4::CheckCombineLimbBound(n));
+        const std::vector<int32_t> P65(static_cast<size_t>(ms) * n, 65);
+        const std::vector<int32_t> Q64(static_cast<size_t>(n) * ms, 64);
+        const std::vector<int32_t> Q65(static_cast<size_t>(n) * ms, 65);
+        std::vector<int32_t> Qstack(static_cast<size_t>(n) * 2 * ms);
+        for (uint32_t k = 0; k < n; ++k) {
+            for (uint32_t c = 0; c < 2 * ms; ++c) {
+                Qstack[static_cast<size_t>(k) * 2 * ms + c] = (c < ms) ? 64 : 65;
+            }
+        }
+        const auto stacked = matmul::v4::ComputeCombineLimbTensorStacked(P65, Qstack, n, ms, 2 * ms);
+        const auto block0 = matmul::v4::ComputeCombineLimbTensor(P65, Q64, n, ms);
+        const auto block1 = matmul::v4::ComputeCombineLimbTensor(P65, Q65, n, ms);
+        BOOST_REQUIRE_EQUAL(stacked.size(), static_cast<size_t>(ms) * 2 * ms);
+        for (uint32_t a = 0; a < ms; ++a) {
+            for (uint32_t c = 0; c < ms; ++c) {
+                BOOST_REQUIRE_EQUAL(stacked[static_cast<size_t>(a) * 2 * ms + c],
+                                    block0[static_cast<size_t>(a) * ms + c]);
+                BOOST_REQUIRE_EQUAL(stacked[static_cast<size_t>(a) * 2 * ms + ms + c],
+                                    block1[static_cast<size_t>(a) * ms + c]);
+            }
+        }
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

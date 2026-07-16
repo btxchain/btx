@@ -30,6 +30,11 @@ class CBlockHeader;
 // preserve this canonical element order (index-major A/B/U/V, row-major C) and
 // MUST NOT introduce floating point; integer add is associative so tiling is
 // permitted, but the committed serialization order (SerializeSketch) is fixed.
+// Accelerated backends must additionally satisfy the true >= 32-bit integer
+// accumulator ELIGIBILITY INVARIANT (matmul/int8_field.h,
+// kRequiredAccumulatorBits; roadmap §4.1 / C-1): an FP-mantissa-bounded
+// "int8" accumulator (2^24, TPU-v4-class) silently rounds this workload's
+// high-magnitude accumulations and is never bit-exact here.
 
 namespace matmul::v4 {
 
@@ -61,7 +66,16 @@ inline constexpr uint32_t kTileB = 4;
  *  kCombineLimbs^2 native s8xs8->s32 tensor GEMMs plus one O(m^2) mod-q
  *  recombine on the integer ALU. 4 limbs cover |P| <= n*125^2 = 15,625*n for
  *  every n <= 8589, i.e. the whole 4096..8192 dimension window (see
- *  CheckCombineLimbBound). */
+ *  CheckCombineLimbBound).
+ *
+ *  ACCUMULATOR-WIDTH WARNING (roadmap §4.1 / C-1): each limb-pair GEMM entry
+ *  accumulates up to n*64^2 — EXACTLY 2^24 at n = 4096 and 2^25 at n = 8192 —
+ *  i.e. AT or PAST the exactness ceiling of an FP32-mantissa-bounded
+ *  accumulator (int8_field::kFp32MantissaAccumulatorBound) on precisely the
+ *  dimension window v4 targets. The limb path therefore REQUIRES the true
+ *  >= 32-bit integer accumulator eligibility invariant documented in
+ *  matmul/int8_field.h (kRequiredAccumulatorBits); a TPU-v4-class MXU cannot
+ *  run it bit-exactly. */
 inline constexpr uint32_t kCombineLimbs = 4;
 inline constexpr int32_t kCombineLimbBase = 128; // digits in [-64, 63]
 
@@ -193,7 +207,10 @@ enum class Operand : uint8_t { A = 0x41, B = 0x42 };
  *  entrywise into kCombineLimbs balanced base-2^7 digits (each digit matrix a
  *  valid s8 operand), compute the kCombineLimbs^2 = 16 limb-pair m*m products
  *  with exact s8xs8->s32 accumulation (each fits int32: n*64^2 < 2^31 for all
- *  header n), then recombine S_ij with the shifted mod-q fold
+ *  header n — but n*64^2 >= 2^24 from n = 4096 up, so a TRUE >= 32-bit integer
+ *  accumulator is REQUIRED; an FP32-mantissa-bounded unit rounds here — see
+ *  the eligibility invariant in matmul/int8_field.h and roadmap §4.1),
+ *  then recombine S_ij with the shifted mod-q fold
  *      Chat = sum_ij 2^(7(i+j)) * S_ij  (mod q)
  *  in O(m^2) on the integer ALU. BYTE-IDENTICAL to ComputeCombineModQ: the 16
  *  limb-pair sums recompose the exact integer sum_k P[a][k]*Q[k][c] termwise
