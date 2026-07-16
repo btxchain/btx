@@ -160,6 +160,151 @@ kernel void matmul_v4_combine_mod_q(
     chat[(ulong)a * p.m + c] = acc;
 }
 
+// ---------------------------------------------------------------------------
+// Batched-sketch miner kernels (design spec §K.2b, Appendix C-13).
+//
+// The batched miner evaluates the ONE LARGE DENSE COMBINE
+//     Chat_wide = P * Qstack   (m x n by n x q_cols, q_cols = Q*m)
+// through the limb-tensor path: P and Qstack are split ENTRYWISE into 4
+// balanced base-2^7 digit planes (each plane a valid s8 GEMM operand), the 16
+// limb-pair products S_ij = P_i * Q_j run on the exact INT8 -> INT32 GEMM
+// kernels above (integer-ALU everywhere, tensor-ops on M5-class parts), and
+// the shifted mod-q recombine
+//     Chat = sum_ij 2^(7*(i+j)) * S_ij   (mod q)
+// folds every S_ij into the running canonical residue on the integer ALU.
+// All kernels below are portable integer MSL (no Metal 4 features) and run
+// bit-exactly on every Metal GPU family.
+// ---------------------------------------------------------------------------
+
+// Entrywise balanced base-2^7 digit decomposition. MUST match the CPU
+// reference DecomposeLimbPlanes (matmul/matmul_v4.cpp, used by
+// ComputeCombineLimbTensorStacked) digit-for-digit:
+//     d_l = ((x + 64) & 127) - 64;   x = (x - d_l) / 128;
+// The bitwise AND acts on the 32-bit two's-complement value exactly as on the
+// host (C++20 mandates two's complement; MSL int is 32-bit two's complement),
+// and (x - d_l) is an exact multiple of 128, so the truncating division is
+// the exact quotient. The decomposition is total for |x| < 128^4/2 = 2^27,
+// which CheckCombineLimbBound guarantees for every P/Q entry
+// (15,625*n < 2^27 for all n <= 8589).
+inline void btx_v4_limb_digits(int x, thread int* d)
+{
+    for (uint l = 0; l < 4u; ++l) {
+        d[l] = ((x + 64) & 127) - 64;
+        x = (x - d[l]) / 128;
+    }
+}
+
+// P (rows x cols, row-major exact s32) -> four s8 digit planes, same layout.
+struct LimbSplitParams {
+    uint rows;
+    uint cols;
+};
+
+kernel void matmul_v4_limb_split(
+    constant LimbSplitParams& p [[buffer(0)]],
+    device const int* src [[buffer(1)]],
+    device char* plane0 [[buffer(2)]],
+    device char* plane1 [[buffer(3)]],
+    device char* plane2 [[buffer(4)]],
+    device char* plane3 [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.y >= p.rows || gid.x >= p.cols) {
+        return;
+    }
+    const ulong idx = (ulong)gid.y * p.cols + gid.x;
+    int d[4];
+    btx_v4_limb_digits(src[idx], d);
+    plane0[idx] = (char)d[0];
+    plane1[idx] = (char)d[1];
+    plane2[idx] = (char)d[2];
+    plane3[idx] = (char)d[3];
+}
+
+// Qvert ((Q*n) x m, row-major exact s32 -- the output of the stacked GEMM
+// [B_1; ...; B_Q] * V) -> four s8 digit planes in the HORIZONTAL-stack layout
+// n x q_cols (q_cols = Q*m, column block i = the digits of Q_i = B_i*V).
+// This is exactly the Qstack operand layout the CPU reference
+// ComputeCombineLimbTensorStacked consumes; the digit arithmetic is
+// entrywise, so relocating an entry changes no digit.
+struct LimbSplitQParams {
+    uint n;      // rows of each Q_i
+    uint m;      // columns of each Q_i (sketch dimension)
+    uint q_cols; // Q * m
+};
+
+kernel void matmul_v4_limb_split_qstack(
+    constant LimbSplitQParams& p [[buffer(0)]],
+    device const int* qvert [[buffer(1)]],
+    device char* plane0 [[buffer(2)]],
+    device char* plane1 [[buffer(3)]],
+    device char* plane2 [[buffer(4)]],
+    device char* plane3 [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    const uint k = gid.y;   // row in [0, n)
+    const uint col = gid.x; // column in [0, q_cols)
+    if (k >= p.n || col >= p.q_cols) {
+        return;
+    }
+    const uint i = col / p.m;
+    const uint c = col - i * p.m;
+    const ulong src_idx = ((ulong)i * p.n + k) * p.m + c;
+    const ulong dst_idx = (ulong)k * p.q_cols + col;
+    int d[4];
+    btx_v4_limb_digits(qvert[src_idx], d);
+    plane0[dst_idx] = (char)d[0];
+    plane1[dst_idx] = (char)d[1];
+    plane2[dst_idx] = (char)d[2];
+    plane3[dst_idx] = (char)d[3];
+}
+
+// Shifted mod-q fold of one limb-pair product S_ij into the running Chat:
+//     chat[idx] = FqAdd(chat[idx], FqMul(2^shift, FqFromSigned(s[idx])))
+// with shift = 7*(i+j) in {0, 7, ..., 42}.
+//
+// Equivalence with the CPU chain (matmul/int8_field.cpp), term by term:
+//   * FqFromSigned(s32 v): |v| <= n*64^2 < 2^31 < q, so the canonical residue
+//     is v >= 0 ? v : v + q -- one exact lift, bit-identical to the host
+//     FqReduce/FqNeg composition on the same value.
+//   * FqMul(2^shift, r) for canonical r < q = 2^61 - 1: multiplying by a
+//     power of two mod a Mersenne prime is a left ROTATION of the 61-bit
+//     word. Split r = hi*2^(61-shift) + lo; then 2^shift * r = hi*2^61 +
+//     lo*2^shift == hi + lo*2^shift (mod q). hi < 2^shift and lo*2^shift <
+//     2^61 occupy disjoint bit ranges, so the sum is < 2^61 and could equal
+//     q only if every one of the 61 bits were set, i.e. r = q -- excluded
+//     (r is canonical). The rotation therefore IS the unique canonical
+//     residue, identical to the host FqMul's FqReduce fold on the same
+//     operands.
+//   * FqAdd: chat, term < q so chat + term < 2^62 never wraps the u64
+//     accumulator; one conditional subtract restores canonical form --
+//     exactly the host FqAdd.
+struct LimbFoldParams {
+    uint rows;  // m
+    uint cols;  // q_cols
+    uint shift; // 7 * (limb_i + limb_j), in {0, 7, ..., 42}
+};
+
+kernel void matmul_v4_limb_fold_mod_q(
+    constant LimbFoldParams& p [[buffer(0)]],
+    device const int* s [[buffer(1)]],
+    device ulong* chat [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.y >= p.rows || gid.x >= p.cols) {
+        return;
+    }
+    const ulong idx = (ulong)gid.y * p.cols + gid.x;
+    const int v = s[idx];
+    const ulong residue = v >= 0 ? (ulong)v : (ulong)((long)v + (long)FIELD_Q);
+    const ulong hi = residue >> (61u - p.shift);
+    const ulong lo = residue & ((1UL << (61u - p.shift)) - 1UL);
+    const ulong term = (lo << p.shift) | hi;
+    ulong acc = chat[idx] + term;
+    acc = acc >= FIELD_Q ? acc - FIELD_Q : acc;
+    chat[idx] = acc;
+}
+
 #if defined(BTX_MATMUL_V4_HAVE_TENSOR_OPS)
 // ---------------------------------------------------------------------------
 // Metal 4 / M5-class tensor-ops GEMM (GPU neural accelerators).

@@ -60,6 +60,44 @@ AccelProbe ProbeAcceleration();
 bool ComputeDigestAccel(const CBlockHeader& header, uint32_t n, uint32_t rounds,
                         uint256& digest_out, std::vector<unsigned char>& payload_out);
 
+/** Batched miner backend entry point (fixed BatchAccelFn contract shared
+ *  across all backends, design spec §K.2b / Appendix C-13): compute the v4
+ *  consensus digests and sketch payloads for a whole nonce WINDOW of headers
+ *  sharing one template. digests_out[i] / payloads_out[i] are byte-identical
+ *  to matmul_v4::ComputeDigest(headers[i], n, rounds), i.e. bit-for-bit the
+ *  CPU reference matmul::v4::BatchedSketchMiner::Mine.
+ *
+ *  Amortization structure (§A.2 v4.1, invariant I1'): template-scoped A, U, V
+ *  are expanded ONCE on the host, P = U*A is ONE device INT8->INT32 GEMM
+ *  (cached across calls by template hash); per nonce only B is expanded
+ *  (host) and Q_i = B_i*V runs as ONE stacked device GEMM per window; the per-
+ *  nonce combines fuse into ONE LARGE DENSE GEMM P * [Q_1 | ... | Q_Q]
+ *  evaluated as the 16 limb-pair INT8->INT32 GEMMs of Appendix C-13 (the
+ *  entrywise balanced base-2^7 digit split runs on device, replicating the
+ *  CPU ComputeCombineLimbTensorStacked digit-for-digit) plus the shifted
+ *  mod-q recombine in exact 64-bit integer ALU arithmetic. Operand
+ *  derivation, serialization, and digest run on the HOST via the exact
+ *  matmul_v4 consensus routines; there is no floating point anywhere.
+ *
+ *  The GEMMs use the portable integer-ALU kernels on every Metal GPU family
+ *  (pre-M5) and Metal 4 mpp::tensor_ops::matmul2d on M5-class GPU neural
+ *  accelerators when available -- both exact INT8 -> INT32, both gated by a
+ *  one-time bit-exactness self-test against the CPU batched reference.
+ *  Windows are processed in device-sized chunks (default 8 nonces; override
+ *  with BTX_MATMUL_V4_METAL_BATCH, clamped to [1, matmul::v4::kMaxMinerBatch]
+ *  and to the device's buffer/working-set limits).
+ *
+ *  Returns false -- never a wrong or approximate answer -- iff `headers` is
+ *  empty, (n, kTileB=4) is invalid, the combine limb bound fails, `rounds` is
+ *  0, ANY header does not project onto the shared ComputeTemplateHash (fail
+ *  closed: a stale template must never be combined with fresh nonces), Metal
+ *  is unavailable, the batched self-test failed on this device, or any GPU
+ *  submission fails; the dispatch layer then falls back to the CPU path. */
+[[nodiscard]] bool ComputeDigestsBatchedAccel(
+    const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+    std::vector<uint256>& digests_out,
+    std::vector<std::vector<unsigned char>>& payloads_out);
+
 } // namespace matmul_v4::metal
 
 #endif // BITCOIN_METAL_MATMUL_V4_ACCEL_H

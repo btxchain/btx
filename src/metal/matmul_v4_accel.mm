@@ -26,11 +26,23 @@
 // on this device; if even the ALU path fails, the backend reports itself
 // unavailable and every call returns false (CPU fallback). No float, no
 // approximation, ever (design spec §B.6).
+//
+// BATCHED-SKETCH PATH (§K.2b, Appendix C-13; ComputeDigestsBatchedAccel): the
+// cross-nonce miner mirror of matmul::v4::BatchedSketchMiner::Mine. Template-
+// scoped A/U/V are expanded ONCE on the host and P = U*A is one device GEMM
+// (cached across calls by template hash); per window the nonce-fresh B_i are
+// expanded on the host, Q_i = B_i*V runs as ONE stacked GEMM, and the per-
+// nonce combines fuse into ONE LARGE DENSE GEMM P * [Q_1 | ... | Q_Q]
+// evaluated as the 16 limb-pair INT8->INT32 GEMMs of Appendix C-13 (device
+// limb split replicates the CPU digit recurrence bit-for-bit) with the
+// shifted mod-q recombine on the integer ALU. Gated by its own one-time
+// bit-exactness self-test against the CPU batched reference.
 
 #include <metal/matmul_v4_accel.h>
 
 #include <matmul/int8_field.h>
 #include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_batch.h>
 #include <matmul/pow_v4.h>
 #include <primitives/block.h>
 #include <logging.h>
@@ -45,6 +57,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <limits.h>
 #include <memory>
 #include <mutex>
@@ -221,6 +234,151 @@ kernel void matmul_v4_combine_mod_q(
     chat[(ulong)a * p.m + c] = acc;
 }
 
+// ---------------------------------------------------------------------------
+// Batched-sketch miner kernels (design spec §K.2b, Appendix C-13).
+//
+// The batched miner evaluates the ONE LARGE DENSE COMBINE
+//     Chat_wide = P * Qstack   (m x n by n x q_cols, q_cols = Q*m)
+// through the limb-tensor path: P and Qstack are split ENTRYWISE into 4
+// balanced base-2^7 digit planes (each plane a valid s8 GEMM operand), the 16
+// limb-pair products S_ij = P_i * Q_j run on the exact INT8 -> INT32 GEMM
+// kernels above (integer-ALU everywhere, tensor-ops on M5-class parts), and
+// the shifted mod-q recombine
+//     Chat = sum_ij 2^(7*(i+j)) * S_ij   (mod q)
+// folds every S_ij into the running canonical residue on the integer ALU.
+// All kernels below are portable integer MSL (no Metal 4 features) and run
+// bit-exactly on every Metal GPU family.
+// ---------------------------------------------------------------------------
+
+// Entrywise balanced base-2^7 digit decomposition. MUST match the CPU
+// reference DecomposeLimbPlanes (matmul/matmul_v4.cpp, used by
+// ComputeCombineLimbTensorStacked) digit-for-digit:
+//     d_l = ((x + 64) & 127) - 64;   x = (x - d_l) / 128;
+// The bitwise AND acts on the 32-bit two's-complement value exactly as on the
+// host (C++20 mandates two's complement; MSL int is 32-bit two's complement),
+// and (x - d_l) is an exact multiple of 128, so the truncating division is
+// the exact quotient. The decomposition is total for |x| < 128^4/2 = 2^27,
+// which CheckCombineLimbBound guarantees for every P/Q entry
+// (15,625*n < 2^27 for all n <= 8589).
+inline void btx_v4_limb_digits(int x, thread int* d)
+{
+    for (uint l = 0; l < 4u; ++l) {
+        d[l] = ((x + 64) & 127) - 64;
+        x = (x - d[l]) / 128;
+    }
+}
+
+// P (rows x cols, row-major exact s32) -> four s8 digit planes, same layout.
+struct LimbSplitParams {
+    uint rows;
+    uint cols;
+};
+
+kernel void matmul_v4_limb_split(
+    constant LimbSplitParams& p [[buffer(0)]],
+    device const int* src [[buffer(1)]],
+    device char* plane0 [[buffer(2)]],
+    device char* plane1 [[buffer(3)]],
+    device char* plane2 [[buffer(4)]],
+    device char* plane3 [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.y >= p.rows || gid.x >= p.cols) {
+        return;
+    }
+    const ulong idx = (ulong)gid.y * p.cols + gid.x;
+    int d[4];
+    btx_v4_limb_digits(src[idx], d);
+    plane0[idx] = (char)d[0];
+    plane1[idx] = (char)d[1];
+    plane2[idx] = (char)d[2];
+    plane3[idx] = (char)d[3];
+}
+
+// Qvert ((Q*n) x m, row-major exact s32 -- the output of the stacked GEMM
+// [B_1; ...; B_Q] * V) -> four s8 digit planes in the HORIZONTAL-stack layout
+// n x q_cols (q_cols = Q*m, column block i = the digits of Q_i = B_i*V).
+// This is exactly the Qstack operand layout the CPU reference
+// ComputeCombineLimbTensorStacked consumes; the digit arithmetic is
+// entrywise, so relocating an entry changes no digit.
+struct LimbSplitQParams {
+    uint n;      // rows of each Q_i
+    uint m;      // columns of each Q_i (sketch dimension)
+    uint q_cols; // Q * m
+};
+
+kernel void matmul_v4_limb_split_qstack(
+    constant LimbSplitQParams& p [[buffer(0)]],
+    device const int* qvert [[buffer(1)]],
+    device char* plane0 [[buffer(2)]],
+    device char* plane1 [[buffer(3)]],
+    device char* plane2 [[buffer(4)]],
+    device char* plane3 [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    const uint k = gid.y;   // row in [0, n)
+    const uint col = gid.x; // column in [0, q_cols)
+    if (k >= p.n || col >= p.q_cols) {
+        return;
+    }
+    const uint i = col / p.m;
+    const uint c = col - i * p.m;
+    const ulong src_idx = ((ulong)i * p.n + k) * p.m + c;
+    const ulong dst_idx = (ulong)k * p.q_cols + col;
+    int d[4];
+    btx_v4_limb_digits(qvert[src_idx], d);
+    plane0[dst_idx] = (char)d[0];
+    plane1[dst_idx] = (char)d[1];
+    plane2[dst_idx] = (char)d[2];
+    plane3[dst_idx] = (char)d[3];
+}
+
+// Shifted mod-q fold of one limb-pair product S_ij into the running Chat:
+//     chat[idx] = FqAdd(chat[idx], FqMul(2^shift, FqFromSigned(s[idx])))
+// with shift = 7*(i+j) in {0, 7, ..., 42}.
+//
+// Equivalence with the CPU chain (matmul/int8_field.cpp), term by term:
+//   * FqFromSigned(s32 v): |v| <= n*64^2 < 2^31 < q, so the canonical residue
+//     is v >= 0 ? v : v + q -- one exact lift, bit-identical to the host
+//     FqReduce/FqNeg composition on the same value.
+//   * FqMul(2^shift, r) for canonical r < q = 2^61 - 1: multiplying by a
+//     power of two mod a Mersenne prime is a left ROTATION of the 61-bit
+//     word. Split r = hi*2^(61-shift) + lo; then 2^shift * r = hi*2^61 +
+//     lo*2^shift == hi + lo*2^shift (mod q). hi < 2^shift and lo*2^shift <
+//     2^61 occupy disjoint bit ranges, so the sum is < 2^61 and could equal
+//     q only if every one of the 61 bits were set, i.e. r = q -- excluded
+//     (r is canonical). The rotation therefore IS the unique canonical
+//     residue, identical to the host FqMul's FqReduce fold on the same
+//     operands.
+//   * FqAdd: chat, term < q so chat + term < 2^62 never wraps the u64
+//     accumulator; one conditional subtract restores canonical form --
+//     exactly the host FqAdd.
+struct LimbFoldParams {
+    uint rows;  // m
+    uint cols;  // q_cols
+    uint shift; // 7 * (limb_i + limb_j), in {0, 7, ..., 42}
+};
+
+kernel void matmul_v4_limb_fold_mod_q(
+    constant LimbFoldParams& p [[buffer(0)]],
+    device const int* s [[buffer(1)]],
+    device ulong* chat [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.y >= p.rows || gid.x >= p.cols) {
+        return;
+    }
+    const ulong idx = (ulong)gid.y * p.cols + gid.x;
+    const int v = s[idx];
+    const ulong residue = v >= 0 ? (ulong)v : (ulong)((long)v + (long)FIELD_Q);
+    const ulong hi = residue >> (61u - p.shift);
+    const ulong lo = residue & ((1UL << (61u - p.shift)) - 1UL);
+    const ulong term = (lo << p.shift) | hi;
+    ulong acc = chat[idx] + term;
+    acc = acc >= FIELD_Q ? acc - FIELD_Q : acc;
+    chat[idx] = acc;
+}
+
 #if defined(BTX_MATMUL_V4_HAVE_TENSOR_OPS)
 // ---------------------------------------------------------------------------
 // Metal 4 / M5-class tensor-ops GEMM (GPU neural accelerators).
@@ -282,6 +440,24 @@ struct CombineParams {
     uint32_t n{0};
 };
 
+// Host mirrors of the batched-sketch kernel parameter blocks (§K.2b/C-13).
+struct LimbSplitParams {
+    uint32_t rows{0};
+    uint32_t cols{0};
+};
+
+struct LimbSplitQParams {
+    uint32_t n{0};
+    uint32_t m{0};
+    uint32_t q_cols{0};
+};
+
+struct LimbFoldParams {
+    uint32_t rows{0};
+    uint32_t cols{0};
+    uint32_t shift{0};
+};
+
 constexpr uint32_t kGemmTile = 16;
 constexpr uint32_t kTensorTileM = 32;
 constexpr uint32_t kTensorTileN = 32;
@@ -290,6 +466,21 @@ constexpr uint32_t kTensorTileN = 32;
 // (n % 8 == 0, accumulation bound).
 constexpr uint32_t kSelfTestEdgeN = 40;
 constexpr uint32_t kSelfTestTensorN = 64;
+
+/** Default nonce-window size Q for the batched path (§K.2b), overridable with
+ *  BTX_MATMUL_V4_METAL_BATCH (clamped to [1, matmul::v4::kMaxMinerBatch] and
+ *  then to what the device's buffer limits / working set can hold). Apple
+ *  parts share system memory, so the window is deliberately smaller than the
+ *  CUDA default (kDefaultBatchedWindow = 64 on discrete-VRAM parts): at
+ *  n=4096 (m=1024) one in-flight nonce costs ~60.5 MiB of device buffers
+ *  (Bstack 16 MiB + Qvert 16 MiB + Qstack digit planes 16 MiB + S 4 MiB +
+ *  Chat 8 MiB + ~0.5 MiB serialized-payload share), so Q=8 is ~484 MiB of
+ *  window buffers plus ~20 MiB of template-scoped state (V + the four P digit
+ *  planes) -- comfortable on an 8 GB unified-memory Mac while already making
+ *  the stacked combine GEMM (m x Q*m x n = 1024 x 8192 x 4096) dense and
+ *  square-ish. Benchmarks (B2g/B2b) should sweep this upward on big-memory
+ *  parts. */
+constexpr uint32_t kDefaultBatchWindow = 8;
 
 void AppendUniquePath(std::vector<std::string>& paths, const char* path)
 {
@@ -363,6 +554,33 @@ struct MetalV4Context {
     bool self_test_passed{false};
     std::string self_test_error;
 
+    // ---- Batched-sketch path (§K.2b, ComputeDigestsBatchedAccel) ----
+    // Portable kernels for the limb-tensor combine. Created non-fatally: if a
+    // stale precompiled metallib lacks them, only the batched path is
+    // disabled, never the per-nonce path.
+    id<MTLComputePipelineState> limb_split_pipeline{nil};
+    id<MTLComputePipelineState> limb_split_qstack_pipeline{nil};
+    id<MTLComputePipelineState> limb_fold_pipeline{nil};
+    std::string batch_pipeline_error;
+
+    // One-time batched bit-exactness gate vs matmul::v4::BatchedSketchMiner.
+    std::once_flag batch_self_test_once;
+    bool batch_self_test_passed{false};
+    std::string batch_self_test_error;
+    // Tensor-ops GEMM additionally validated on the batched shapes before use.
+    bool batch_tensor_ok{false};
+
+    // Template-scoped cache for the batched miner (guarded by batch_mutex):
+    // V (s8 n x m) and the four balanced base-2^7 digit planes of P = U*A
+    // (s8 m x n each), keyed by (template hash, n). Mirrors the amortization
+    // of matmul::v4::BatchedSketchMiner across successive nonce windows.
+    std::mutex batch_mutex;
+    bool batch_template_valid{false};
+    uint256 batch_template_hash;
+    uint32_t batch_template_n{0};
+    id<MTLBuffer> batch_buf_v{nil};
+    id<MTLBuffer> batch_p_plane[4]{nil, nil, nil, nil};
+
     MetalV4Context()
     {
         @autoreleasepool {
@@ -415,6 +633,18 @@ struct MetalV4Context {
             if (gemm_alu_pipeline == nil) return;
             combine_pipeline = MakePipeline(library, @"matmul_v4_combine_mod_q", error);
             if (combine_pipeline == nil) return;
+
+            // Batched-sketch kernels (§K.2b). Failure here (e.g. a stale
+            // precompiled metallib predating the batched path) is recorded in
+            // batch_pipeline_error and disables ONLY the batched entry point.
+            limb_split_pipeline = MakePipeline(library, @"matmul_v4_limb_split", batch_pipeline_error);
+            if (limb_split_pipeline != nil) {
+                limb_split_qstack_pipeline =
+                    MakePipeline(library, @"matmul_v4_limb_split_qstack", batch_pipeline_error);
+            }
+            if (limb_split_qstack_pipeline != nil) {
+                limb_fold_pipeline = MakePipeline(library, @"matmul_v4_limb_fold_mod_q", batch_pipeline_error);
+            }
 
             InitTensorPipeline();
         }
@@ -735,6 +965,512 @@ bool EnsureReady(MetalV4Context& ctx, std::string& reason)
     return true;
 }
 
+// ===========================================================================
+// Batched-sketch path (§K.2b, Appendix C-13) -- ComputeDigestsBatchedAccel.
+//
+// Device mirror of matmul::v4::BatchedSketchMiner::Mine, bit-for-bit:
+//   TEMPLATE (cached across calls, keyed by template hash):
+//     host   : expand A (n x n), U (m x n), V (n x m)   [consensus routines]
+//     device : P = U*A (one exact INT8->INT32 GEMM, m x n x n)
+//     device : split P into 4 balanced base-2^7 digit planes (C-13)
+//   PER WINDOW of Q nonces:
+//     host   : sigma_i = DeriveSigma(header_i); expand B_i (nonce-fresh)
+//     device : Qvert = [B_1; ...; B_Q] * V (one stacked GEMM, Q*n x n x m)
+//     device : split Qvert into 4 digit planes laid out as the horizontal
+//              stack Qstack = [Q_1 | ... | Q_Q] (n x Q*m)
+//     device : 16 limb-pair GEMMs S_ij = P_i * Q_j (m x Q*m x n) + shifted
+//              mod-q folds Chat += 2^(7(i+j)) * S_ij (integer ALU)
+//     host   : slice column block i, canonicality-check, SerializeSketch,
+//              ComputeSketchDigest -- the identical consensus byte path.
+//
+// The GEMMs run on the same two device tiers as the per-nonce path: the
+// portable integer-ALU kernel on every Metal GPU family (pre-M5), or Metal 4
+// mpp::tensor_ops::matmul2d on M5-class GPU neural accelerators -- both exact
+// INT8->INT32, both gated by bit-exactness self-tests. No floating point
+// anywhere; a template-hash mismatch or any Metal error fails closed.
+// ===========================================================================
+
+std::atomic_bool g_logged_batch_self_test{false};
+
+// Encode a 2D elementwise kernel (limb split / fold) over a cols x rows grid.
+bool EncodeGrid2D(id<MTLCommandBuffer> command,
+                  id<MTLComputePipelineState> pipeline,
+                  id<MTLBuffer> params_buffer,
+                  std::initializer_list<id<MTLBuffer>> buffers,
+                  uint32_t grid_cols, uint32_t grid_rows,
+                  std::string& error)
+{
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    if (encoder == nil) {
+        error = "Failed to create Metal compute encoder";
+        return false;
+    }
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:params_buffer offset:0 atIndex:0];
+    NSUInteger index = 1;
+    for (id<MTLBuffer> buffer : buffers) {
+        [encoder setBuffer:buffer offset:0 atIndex:index++];
+    }
+    const MTLSize groups = MTLSizeMake((grid_cols + kGemmTile - 1) / kGemmTile,
+                                       (grid_rows + kGemmTile - 1) / kGemmTile, 1);
+    const MTLSize group_size = MTLSizeMake(kGemmTile, kGemmTile, 1);
+    [encoder dispatchThreadgroups:groups threadsPerThreadgroup:group_size];
+    [encoder endEncoding];
+    return true;
+}
+
+uint32_t RequestedBatchWindow()
+{
+    const char* env = std::getenv("BTX_MATMUL_V4_METAL_BATCH");
+    if (env != nullptr && env[0] != '\0') {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(env, &end, 10);
+        if (end != nullptr && *end == '\0' && parsed >= 1) {
+            return static_cast<uint32_t>(
+                std::min<unsigned long>(parsed, matmul::v4::kMaxMinerBatch));
+        }
+    }
+    return kDefaultBatchWindow;
+}
+
+// Largest per-window buffer sizes for a window of `w` nonces (bytes).
+struct BatchWindowBytes {
+    uint64_t bstack;  // [B_1; ...; B_Q], s8, w*n*n
+    uint64_t qvert;   // stacked GEMM output, s32, w*n*m
+    uint64_t plane;   // one Qstack digit plane, s8, n*(w*m) (x4 allocated)
+    uint64_t s;       // one limb-pair product, s32, m*(w*m)
+    uint64_t chat;    // wide sketch, u64, m*(w*m)
+
+    BatchWindowBytes(uint32_t w, uint32_t n, uint32_t m)
+        : bstack{static_cast<uint64_t>(w) * n * n},
+          qvert{static_cast<uint64_t>(w) * n * m * sizeof(int32_t)},
+          plane{static_cast<uint64_t>(n) * w * m},
+          s{static_cast<uint64_t>(m) * w * m * sizeof(int32_t)},
+          chat{static_cast<uint64_t>(m) * w * m * sizeof(uint64_t)} {}
+
+    uint64_t Total() const { return bstack + qvert + 4 * plane + s + chat; }
+};
+
+// Clamp the requested window to what this device can hold: every buffer must
+// fit maxBufferLength, and the window total (plus a 1/4 headroom margin) must
+// fit the recommended working set on unified-memory parts. Returns 0 if even
+// a single-nonce window does not fit (caller fails closed).
+uint32_t ResolveBatchWindowSize(MetalV4Context& ctx, uint32_t requested, uint32_t n, uint32_t m)
+{
+    uint32_t window = std::clamp<uint32_t>(requested, 1, matmul::v4::kMaxMinerBatch);
+    const uint64_t max_len = ctx.device.maxBufferLength;
+    const uint64_t working_set = ctx.device.recommendedMaxWorkingSetSize;
+    const auto fits = [&](uint32_t w) {
+        const BatchWindowBytes bytes(w, n, m);
+        if (bytes.bstack > max_len || bytes.qvert > max_len || bytes.plane > max_len ||
+            bytes.s > max_len || bytes.chat > max_len) {
+            return false;
+        }
+        if (working_set > 0 && bytes.Total() > working_set - working_set / 4) {
+            return false;
+        }
+        return true;
+    };
+    while (window > 1 && !fits(window)) {
+        window /= 2;
+    }
+    return fits(window) ? window : 0;
+}
+
+// Build (or reuse) the template-scoped device state: V and the four digit
+// planes of P = U*A. Identical host derivations to BatchedSketchMiner's
+// constructor; P itself is one exact INT8->INT32 GEMM on device (same
+// integers as the CPU ComputeProjectedLeft by exactness + associativity of
+// integer addition), then split with the C-13 digit recurrence on device.
+// Caller holds ctx.batch_mutex.
+bool PrepareBatchTemplate(MetalV4Context& ctx, const CBlockHeader& header,
+                          const uint256& template_hash, uint32_t n, uint32_t m,
+                          bool use_tensor_gemm, std::string& error)
+{
+    if (ctx.batch_template_valid && ctx.batch_template_hash == template_hash &&
+        ctx.batch_template_n == n) {
+        return true;
+    }
+    ctx.batch_template_valid = false;
+    ctx.batch_buf_v = nil;
+    for (auto& plane : ctx.batch_p_plane) {
+        plane = nil;
+    }
+
+    @autoreleasepool {
+        // Template-scoped consensus derivations (§A.2 v4.1, invariant I1'):
+        // A, U, V bind the template hash only, so any header of the window
+        // yields the identical seeds (DeriveOperandSeed/DeriveProjectorSeeds
+        // project onto ComputeTemplateHash internally).
+        const uint256 seed_a = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::A);
+        const auto [seed_u, seed_v] = matmul::v4::DeriveProjectorSeeds(header);
+        const std::vector<int8_t> A = matmul::v4::ExpandOperand(seed_a, n);
+        const std::vector<int8_t> U = matmul::v4::ExpandProjector(seed_u, m, n);
+        const std::vector<int8_t> V = matmul::v4::ExpandProjector(seed_v, n, m);
+
+        const size_t nn = static_cast<size_t>(n) * n;
+        const size_t mn = static_cast<size_t>(m) * n;
+        const NSUInteger max_len = ctx.device.maxBufferLength;
+        if (nn > max_len || mn * sizeof(int32_t) > max_len) {
+            error = "requested dimension exceeds Metal device buffer limits";
+            return false;
+        }
+
+        id<MTLBuffer> buf_a = [ctx.device newBufferWithBytes:A.data() length:nn options:MTLResourceStorageModeShared];
+        id<MTLBuffer> buf_u = [ctx.device newBufferWithBytes:U.data() length:mn options:MTLResourceStorageModeShared];
+        id<MTLBuffer> buf_v = [ctx.device newBufferWithBytes:V.data() length:mn options:MTLResourceStorageModeShared];
+        id<MTLBuffer> buf_p = [ctx.device newBufferWithLength:mn * sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> p_planes[4];
+        bool alloc_failed = buf_a == nil || buf_u == nil || buf_v == nil || buf_p == nil;
+        for (uint32_t l = 0; l < 4; ++l) {
+            p_planes[l] = [ctx.device newBufferWithLength:mn options:MTLResourceStorageModeShared];
+            alloc_failed = alloc_failed || p_planes[l] == nil;
+        }
+
+        const GemmParams p_params{.m_rows = m, .k = n, .n_cols = n};
+        const LimbSplitParams split_params{.rows = m, .cols = n};
+        id<MTLBuffer> buf_p_params = [ctx.device newBufferWithBytes:&p_params length:sizeof(p_params) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> buf_split_params = [ctx.device newBufferWithBytes:&split_params length:sizeof(split_params) options:MTLResourceStorageModeShared];
+        alloc_failed = alloc_failed || buf_p_params == nil || buf_split_params == nil;
+        if (alloc_failed) {
+            error = "Failed to allocate Metal buffers";
+            return false;
+        }
+
+        id<MTLCommandBuffer> command = [ctx.queue commandBuffer];
+        if (command == nil) {
+            error = "Failed to create Metal command buffer";
+            return false;
+        }
+        id<MTLComputePipelineState> gemm_pipeline =
+            use_tensor_gemm ? ctx.gemm_tensor_pipeline : ctx.gemm_alu_pipeline;
+        if (!EncodeGemm(command, gemm_pipeline, use_tensor_gemm, p_params, buf_p_params,
+                        buf_u, buf_a, buf_p, error)) {
+            return false;
+        }
+        if (!EncodeGrid2D(command, ctx.limb_split_pipeline, buf_split_params,
+                          {buf_p, p_planes[0], p_planes[1], p_planes[2], p_planes[3]},
+                          /*grid_cols=*/n, /*grid_rows=*/m, error)) {
+            return false;
+        }
+        [command commit];
+        [command waitUntilCompleted];
+        if (command.status != MTLCommandBufferStatusCompleted) {
+            error = command.error != nil
+                ? std::string{"Metal command buffer failed: "} + [[command.error localizedDescription] UTF8String]
+                : "Metal command buffer did not complete";
+            return false;
+        }
+
+        ctx.batch_buf_v = buf_v;
+        for (uint32_t l = 0; l < 4; ++l) {
+            ctx.batch_p_plane[l] = p_planes[l];
+        }
+        ctx.batch_template_hash = template_hash;
+        ctx.batch_template_n = n;
+        ctx.batch_template_valid = true;
+        return true;
+    }
+}
+
+// Compute one window of `window` nonces (headers[first .. first+window)).
+// Caller holds ctx.batch_mutex and has validated/prepared the template.
+bool ComputeBatchWindow(MetalV4Context& ctx,
+                        const std::vector<CBlockHeader>& headers,
+                        size_t first, uint32_t window,
+                        uint32_t n, uint32_t m, bool use_tensor_gemm,
+                        std::vector<uint256>& digests_out,
+                        std::vector<std::vector<unsigned char>>& payloads_out,
+                        std::string& error)
+{
+    @autoreleasepool {
+        const uint32_t q_cols = window * m;
+        const size_t nn = static_cast<size_t>(n) * n;
+        const BatchWindowBytes bytes(window, n, m);
+        const uint64_t max_len = ctx.device.maxBufferLength;
+        if (bytes.bstack > max_len || bytes.qvert > max_len || bytes.plane > max_len ||
+            bytes.s > max_len || bytes.chat > max_len) {
+            error = "batched window exceeds Metal device buffer limits";
+            return false;
+        }
+
+        id<MTLBuffer> buf_bstack = [ctx.device newBufferWithLength:bytes.bstack options:MTLResourceStorageModeShared];
+        id<MTLBuffer> buf_qvert = [ctx.device newBufferWithLength:bytes.qvert options:MTLResourceStorageModeShared];
+        id<MTLBuffer> buf_s = [ctx.device newBufferWithLength:bytes.s options:MTLResourceStorageModeShared];
+        id<MTLBuffer> buf_chat = [ctx.device newBufferWithLength:bytes.chat options:MTLResourceStorageModeShared];
+        id<MTLBuffer> q_planes[4];
+        bool alloc_failed = buf_bstack == nil || buf_qvert == nil || buf_s == nil || buf_chat == nil;
+        for (uint32_t l = 0; l < 4; ++l) {
+            q_planes[l] = [ctx.device newBufferWithLength:bytes.plane options:MTLResourceStorageModeShared];
+            alloc_failed = alloc_failed || q_planes[l] == nil;
+        }
+
+        const GemmParams qv_params{.m_rows = window * n, .k = n, .n_cols = m};
+        const LimbSplitQParams split_params{.n = n, .m = m, .q_cols = q_cols};
+        const GemmParams limb_params{.m_rows = m, .k = n, .n_cols = q_cols};
+        id<MTLBuffer> buf_qv_params = [ctx.device newBufferWithBytes:&qv_params length:sizeof(qv_params) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> buf_split_params = [ctx.device newBufferWithBytes:&split_params length:sizeof(split_params) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> buf_limb_params = [ctx.device newBufferWithBytes:&limb_params length:sizeof(limb_params) options:MTLResourceStorageModeShared];
+        alloc_failed = alloc_failed || buf_qv_params == nil || buf_split_params == nil || buf_limb_params == nil;
+
+        // Each fold encoder reads its parameters at GPU execution time, so
+        // every (i, j) pair needs its own little params buffer.
+        id<MTLBuffer> fold_params[16];
+        for (uint32_t i = 0; i < 4; ++i) {
+            for (uint32_t j = 0; j < 4; ++j) {
+                const LimbFoldParams fp{.rows = m, .cols = q_cols, .shift = 7u * (i + j)};
+                fold_params[i * 4 + j] =
+                    [ctx.device newBufferWithBytes:&fp length:sizeof(fp) options:MTLResourceStorageModeShared];
+                alloc_failed = alloc_failed || fold_params[i * 4 + j] == nil;
+            }
+        }
+        if (alloc_failed) {
+            error = "Failed to allocate Metal buffers";
+            return false;
+        }
+
+        // Host-side consensus derivation per candidate: sigma binds the nonce
+        // (nonce-fresh, I1'); B is the nonce-fresh operand. Identical
+        // routines -- not re-implementations -- to the CPU reference.
+        std::vector<uint256> sigmas(window);
+        int8_t* bstack_ptr = static_cast<int8_t*>([buf_bstack contents]);
+        for (uint32_t w = 0; w < window; ++w) {
+            const CBlockHeader& header = headers[first + w];
+            sigmas[w] = matmul::v4::DeriveSigma(header);
+            const uint256 seed_b = matmul::v4::DeriveOperandSeed(header, matmul::v4::Operand::B);
+            const std::vector<int8_t> B = matmul::v4::ExpandOperand(seed_b, n);
+            std::memcpy(bstack_ptr + static_cast<size_t>(w) * nn, B.data(), nn);
+        }
+        // Chat accumulates across the 16 shifted folds; start from zero.
+        std::memset([buf_chat contents], 0, bytes.chat);
+
+        id<MTLCommandBuffer> command = [ctx.queue commandBuffer];
+        if (command == nil) {
+            error = "Failed to create Metal command buffer";
+            return false;
+        }
+        id<MTLComputePipelineState> gemm_pipeline =
+            use_tensor_gemm ? ctx.gemm_tensor_pipeline : ctx.gemm_alu_pipeline;
+
+        // Qvert = [B_1; ...; B_Q] * V, one stacked exact GEMM (Q*n x n x m).
+        if (!EncodeGemm(command, gemm_pipeline, use_tensor_gemm, qv_params, buf_qv_params,
+                        buf_bstack, ctx.batch_buf_v, buf_qvert, error)) {
+            return false;
+        }
+        // Digit planes of Qstack = [Q_1 | ... | Q_Q] (n x q_cols layout).
+        if (!EncodeGrid2D(command, ctx.limb_split_qstack_pipeline, buf_split_params,
+                          {buf_qvert, q_planes[0], q_planes[1], q_planes[2], q_planes[3]},
+                          /*grid_cols=*/q_cols, /*grid_rows=*/n, error)) {
+            return false;
+        }
+        // ONE LARGE DENSE COMBINE (C-13): 16 limb-pair GEMMs S_ij = P_i * Q_j
+        // (m x q_cols x n), each folded into Chat with weight 2^(7(i+j)) mod q.
+        // Encoders in one command buffer execute in order, so reusing the one
+        // S buffer across pairs is race-free.
+        for (uint32_t i = 0; i < 4; ++i) {
+            for (uint32_t j = 0; j < 4; ++j) {
+                if (!EncodeGemm(command, gemm_pipeline, use_tensor_gemm, limb_params, buf_limb_params,
+                                ctx.batch_p_plane[i], q_planes[j], buf_s, error)) {
+                    return false;
+                }
+                if (!EncodeGrid2D(command, ctx.limb_fold_pipeline, fold_params[i * 4 + j],
+                                  {buf_s, buf_chat},
+                                  /*grid_cols=*/q_cols, /*grid_rows=*/m, error)) {
+                    return false;
+                }
+            }
+        }
+
+        [command commit];
+        [command waitUntilCompleted];
+        if (command.status != MTLCommandBufferStatusCompleted) {
+            error = command.error != nil
+                ? std::string{"Metal command buffer failed: "} + [[command.error localizedDescription] UTF8String]
+                : "Metal command buffer did not complete";
+            return false;
+        }
+
+        // Slice column block w = Chat_w (m x m), canonicality-check, and run
+        // the identical consensus serialization/digest path on the host.
+        const uint64_t* chat_words = static_cast<const uint64_t*>([buf_chat contents]);
+        std::vector<matmul::v4::Fq> chat_i(static_cast<size_t>(m) * m);
+        for (uint32_t w = 0; w < window; ++w) {
+            for (uint32_t a = 0; a < m; ++a) {
+                const uint64_t* src = chat_words + static_cast<size_t>(a) * q_cols + static_cast<size_t>(w) * m;
+                matmul::v4::Fq* dst = &chat_i[static_cast<size_t>(a) * m];
+                for (uint32_t c = 0; c < m; ++c) {
+                    if (src[c] >= matmul::int8_field::kFieldPrime) {
+                        // Defense in depth: the fold kernel proves words < q,
+                        // so a non-canonical word means a malfunctioning
+                        // device/driver.
+                        error = "Metal produced a non-canonical F_q word";
+                        return false;
+                    }
+                    dst[c] = src[c];
+                }
+            }
+            payloads_out[first + w] = matmul::v4::SerializeSketch(chat_i);
+            digests_out[first + w] = matmul::v4::ComputeSketchDigest(sigmas[w], payloads_out[first + w]);
+        }
+        return true;
+    }
+}
+
+// Full batched pipeline for one header vector. Caller holds ctx.batch_mutex.
+// `window_override` != 0 pins the window size (self-test); 0 resolves the
+// environment/default request against device limits.
+bool ComputeDigestsBatchedImpl(MetalV4Context& ctx,
+                               const std::vector<CBlockHeader>& headers,
+                               uint32_t n, uint32_t m, bool use_tensor_gemm,
+                               uint32_t window_override,
+                               std::vector<uint256>& digests_out,
+                               std::vector<std::vector<unsigned char>>& payloads_out,
+                               std::string& error)
+{
+    // Fail closed on a template mismatch, exactly as BatchedSketchMiner::Mine:
+    // combining a stale template's cached A/U/V/P with a fresh header would
+    // produce digests that are NOT the consensus digests for that header.
+    const uint256 template_hash = matmul::v4::ComputeTemplateHash(headers[0]);
+    for (const CBlockHeader& header : headers) {
+        if (matmul::v4::ComputeTemplateHash(header) != template_hash) {
+            error = "candidate header does not project onto the window template";
+            return false;
+        }
+    }
+    if (!PrepareBatchTemplate(ctx, headers[0], template_hash, n, m, use_tensor_gemm, error)) {
+        return false;
+    }
+
+    const uint32_t requested = window_override != 0 ? window_override : RequestedBatchWindow();
+    const uint32_t window = ResolveBatchWindowSize(ctx, requested, n, m);
+    if (window == 0) {
+        error = "batched window exceeds Metal device buffer limits";
+        return false;
+    }
+
+    const size_t count = headers.size();
+    digests_out.resize(count);
+    payloads_out.resize(count);
+    for (size_t first = 0; first < count; first += window) {
+        const uint32_t this_window = static_cast<uint32_t>(std::min<size_t>(window, count - first));
+        if (!ComputeBatchWindow(ctx, headers, first, this_window, n, m, use_tensor_gemm,
+                                digests_out, payloads_out, error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Replay a small batched window through the GPU and require byte-identical
+// digests AND payloads vs the CPU batched reference (which the unit tests pin
+// to the per-nonce consensus digest for every nonce). Caller holds batch_mutex.
+bool BatchSelfTestCase(MetalV4Context& ctx, uint32_t n, uint32_t count,
+                       uint32_t window_override, bool use_tensor_gemm, std::string& error)
+{
+    uint32_t m = 0;
+    if (!matmul::v4::ValidateDims(n, matmul_v4::kTileB, m) || !matmul::v4::CheckCombineLimbBound(n)) {
+        error = "self-test dimensions invalid";
+        return false;
+    }
+
+    // Deterministic non-trivial template, same rationale as SelfTestCase.
+    const CBlockHeader tmpl{};
+    const matmul::v4::BatchedSketchMiner miner(tmpl, n);
+    if (!miner.Valid()) {
+        error = "self-test CPU batched miner invalid";
+        return false;
+    }
+    std::vector<CBlockHeader> headers(count, tmpl);
+    for (uint32_t i = 0; i < count; ++i) {
+        headers[i].nNonce64 = 1 + i;
+        headers[i].nNonce = static_cast<uint32_t>(headers[i].nNonce64);
+    }
+    std::vector<matmul::v4::BatchNonceResult> cpu;
+    if (!miner.Mine(headers, cpu) || cpu.size() != count) {
+        error = "self-test CPU batched reference failed";
+        return false;
+    }
+
+    std::vector<uint256> digests;
+    std::vector<std::vector<unsigned char>> payloads;
+    if (!ComputeDigestsBatchedImpl(ctx, headers, n, m, use_tensor_gemm, window_override,
+                                   digests, payloads, error)) {
+        return false;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        if (digests[i] != cpu[i].digest || payloads[i] != cpu[i].payload) {
+            error = "batched self-test digest/payload mismatch vs CPU reference";
+            return false;
+        }
+    }
+
+    // Belt and braces: also pin one entry directly against the per-nonce
+    // consensus reference (independent of the batched CPU code path).
+    uint256 ref_digest;
+    std::vector<unsigned char> ref_payload;
+    if (!matmul_v4::ComputeDigest(headers[0], n, /*rounds=*/1, ref_digest, ref_payload) ||
+        ref_digest != digests[0] || ref_payload != payloads[0]) {
+        error = "batched self-test mismatch vs per-nonce consensus reference";
+        return false;
+    }
+    return true;
+}
+
+// One-time batched bit-exactness gate, mirroring RunSelfTest: the ALU path
+// must reproduce the CPU batched reference on an edge-tile shape and a
+// tensor-eligible shape (window_override = 2 with count = 3 exercises the
+// window loop plus a remainder window) or the batched path is reported
+// unavailable. The tensor-ops path must additionally pass on the batched
+// shapes or it is dropped for the batched path only (ALU fallback).
+void RunBatchSelfTest(MetalV4Context& ctx)
+{
+    std::lock_guard<std::mutex> lock(ctx.batch_mutex);
+    std::string error;
+    if (!BatchSelfTestCase(ctx, kSelfTestEdgeN, /*count=*/3, /*window_override=*/2,
+                           /*use_tensor_gemm=*/false, error) ||
+        !BatchSelfTestCase(ctx, kSelfTestTensorN, /*count=*/3, /*window_override=*/0,
+                           /*use_tensor_gemm=*/false, error)) {
+        ctx.batch_self_test_passed = false;
+        ctx.batch_self_test_error = "batch_alu:" + error;
+        return;
+    }
+    ctx.batch_self_test_passed = true;
+
+    if (ctx.gemm_tensor_pipeline != nil) {
+        if (BatchSelfTestCase(ctx, kSelfTestTensorN, /*count=*/3, /*window_override=*/2,
+                              /*use_tensor_gemm=*/true, error)) {
+            ctx.batch_tensor_ok = true;
+        } else {
+            ctx.batch_tensor_ok = false;
+            bool expected{false};
+            if (g_logged_batch_self_test.compare_exchange_strong(expected, true)) {
+                LogPrintf("MATMUL v4 WARNING: Metal tensor-ops batched GEMM failed bit-exactness self-test (%s); using integer-ALU kernels for the batched path\n", error);
+            }
+        }
+    }
+}
+
+bool EnsureBatchReady(MetalV4Context& ctx, std::string& reason)
+{
+    if (!EnsureReady(ctx, reason)) {
+        return false;
+    }
+    if (ctx.limb_split_pipeline == nil || ctx.limb_split_qstack_pipeline == nil ||
+        ctx.limb_fold_pipeline == nil) {
+        reason = ctx.batch_pipeline_error.empty()
+            ? "batched-sketch Metal kernels unavailable"
+            : ctx.batch_pipeline_error;
+        return false;
+    }
+    std::call_once(ctx.batch_self_test_once, [&ctx] { RunBatchSelfTest(ctx); });
+    if (!ctx.batch_self_test_passed) {
+        reason = ctx.batch_self_test_error.empty() ? "batched self-test failed"
+                                                   : ctx.batch_self_test_error;
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 namespace matmul_v4::metal {
@@ -793,6 +1529,55 @@ bool ComputeDigestAccel(const CBlockHeader& header, uint32_t n, uint32_t rounds,
     std::string error;
     if (!ComputeDigestImpl(ctx, header, n, m, use_tensor_gemm, digest_out, payload_out, error)) {
         LogUnavailableOnce(error);
+        return false;
+    }
+    return true;
+}
+
+bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                std::vector<uint256>& digests_out,
+                                std::vector<std::vector<unsigned char>>& payloads_out)
+{
+    digests_out.clear();
+    payloads_out.clear();
+    if (EnvFlagDisabled("BTX_MATMUL_V4_METAL")) {
+        return false;
+    }
+    if (headers.empty()) {
+        return false;
+    }
+
+    uint32_t m = 0;
+    if (!matmul::v4::ValidateDims(n, matmul_v4::kTileB, m)) {
+        return false;
+    }
+    if (!matmul::v4::CheckCombineLimbBound(n)) {
+        return false;
+    }
+    if (rounds == 0) {
+        // API symmetry with the per-nonce entry point.
+        return false;
+    }
+
+    auto& ctx = GetContext();
+    std::string reason;
+    if (!EnsureBatchReady(ctx, reason)) {
+        LogUnavailableOnce(reason);
+        return false;
+    }
+
+    // Same tensor-ops shape gate as the per-nonce path (every batched GEMM
+    // reduces over K = n), plus the batched-shape self-test gate.
+    const bool use_tensor_gemm =
+        ctx.gemm_tensor_pipeline != nil && ctx.batch_tensor_ok && (n % 32u) == 0u;
+
+    std::lock_guard<std::mutex> lock(ctx.batch_mutex);
+    std::string error;
+    if (!ComputeDigestsBatchedImpl(ctx, headers, n, m, use_tensor_gemm, /*window_override=*/0,
+                                   digests_out, payloads_out, error)) {
+        LogUnavailableOnce(error);
+        digests_out.clear();
+        payloads_out.clear();
         return false;
     }
     return true;
