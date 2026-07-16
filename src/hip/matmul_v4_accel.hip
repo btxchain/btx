@@ -516,11 +516,15 @@ bool ComputeDigestAccel(const CBlockHeader& header, uint32_t n, uint32_t rounds,
     }
     {
         const dim3 grid(ceilDiv(m, 16), ceilDiv(n, 16), 1); // N=m cols, M=n rows
+        // Q = B*V is n x m: (M,N,K) = (n,m,n). Passing (n,n,m) sets N=n/K=m,
+        // which contradicts this grid (N=m cols), diverges from the CPU
+        // reference, and overruns dQ (sized n*m). Consensus-correctness fix,
+        // mirrors the CUDA backend's ComputeSketchOnDevice Q GEMM.
         hipLaunchKernelGGL(I8GemmTiled, grid, mfmaBlock, 0, 0,
                            static_cast<const int8_t*>(dB.ptr),
                            static_cast<const int8_t*>(dV.ptr),
                            static_cast<int32_t*>(dQ.ptr),
-                           static_cast<int>(n), static_cast<int>(n), static_cast<int>(m));
+                           static_cast<int>(n), static_cast<int>(m), static_cast<int>(n));
     }
     if (hipGetLastError() != hipSuccess) {
         return false;

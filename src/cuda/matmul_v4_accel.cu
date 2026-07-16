@@ -497,10 +497,14 @@ bool ComputeSketchOnDevice(const int8_t* A_host,
             if (cublasLtCreate(&lt) == CUBLAS_STATUS_SUCCESS &&
                 cudaMalloc(&workspace, kWorkspaceBytes) == cudaSuccess) {
                 std::string gemm_err;
-                // P = U * A : (m x n) = (m x n) * (n x n)  => M=m, K=n, N=n
-                // Q = B * V : (n x m) = (n x n) * (n x m)  => M=n, K=n, N=m
+                // RunInt8Gemm takes dims in (M, N, K) order (C[MxN] = A[MxK]*B[KxN]).
+                // P = U * A : P[m x n] = U[m x n] * A[n x n]  => M=m, N=n, K=n  => (m, n, n)
+                // Q = B * V : Q[n x m] = B[n x n] * V[n x m]  => M=n, N=m, K=n  => (n, m, n)
+                // NB: Q's N and K differ (m != n), so the arg ORDER matters here; passing
+                // (n, n, m) computes an n x n output that both diverges from the CPU
+                // reference AND overruns dQ (sized n*m). Consensus-correctness fix.
                 const bool p_ok = RunInt8Gemm(lt, stream, workspace, kWorkspaceBytes, dU, dA, dP, m, n, n, gemm_err);
-                const bool q_ok = p_ok && RunInt8Gemm(lt, stream, workspace, kWorkspaceBytes, dB, dV, dQ, n, n, m, gemm_err);
+                const bool q_ok = p_ok && RunInt8Gemm(lt, stream, workspace, kWorkspaceBytes, dB, dV, dQ, n, m, n, gemm_err);
                 used_tensor_cores = p_ok && q_ok;
                 if (!used_tensor_cores) {
                     // Non-fatal: fall back to the exact scalar path below.
@@ -512,8 +516,8 @@ bool ComputeSketchOnDevice(const int8_t* A_host,
         if (!used_tensor_cores) {
             // Exact scalar INT32 GEMM fallback (also bit-exact).
             error.clear();
-            if (!LaunchScalarGemm(stream, dU, dA, dP, m, n, n, error)) break; // P = U*A
-            if (!LaunchScalarGemm(stream, dB, dV, dQ, n, n, m, error)) break; // Q = B*V
+            if (!LaunchScalarGemm(stream, dU, dA, dP, m, n, n, error)) break; // P = U*A : (M,N,K)=(m,n,n)
+            if (!LaunchScalarGemm(stream, dB, dV, dQ, n, m, n, error)) break; // Q = B*V : (M,N,K)=(n,m,n)
         }
 
         // Chat = (P * Q) mod q  (exact integer-ALU mod-q GEMM, m x m outputs).
