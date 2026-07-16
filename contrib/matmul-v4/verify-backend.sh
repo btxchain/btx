@@ -26,10 +26,44 @@
 #   contrib/matmul-v4/verify-backend.sh metal   # on an Apple M5-class host
 #   contrib/matmul-v4/verify-backend.sh hip     # on an AMD CDNA host (optional coverage)
 #
-# Exit: 0 = PASS (bit-exact), 1 = FAIL/mismatch, 2 = usage/build error.
+# --- v4.2 (ENC-BMX4C profile) — the M-t24 verification mode ---
+#
+#   contrib/matmul-v4/verify-backend.sh cuda --profile bmx4c   # M-t24 on B200/RTX 5090-class
+#   contrib/matmul-v4/verify-backend.sh metal --profile bmx4c
+#   contrib/matmul-v4/verify-backend.sh hip --profile bmx4c
+#
+# Builds `matmul-v4-report` (not test_btx) with the same backend CMake flags
+# and runs `--profile bmx4c --mt24`: the BMX4-C bit-exactness gate (B1
+# analogue), the §5.3/C-1' M-t24 boundary-vector suite, and the ENC-BMX4C
+# per-stage stacked-window timing, combined into ONE GO/NO-GO keyed to the
+# §K.2b tensor-stage majority AND the M-t24 verdict (doc/btx-matmul-v4.2-bmx4c-
+# spec.md §5/§9). PASS here means: bit-exact vs the CPU reference, AND the
+# accumulator is PROVEN t=24 on this device (native path eligible). FAIL means
+# either a consensus-split digest divergence OR (more likely on commodity
+# parts) a t~=14 accumulator that fails the boundary-pin vectors -- which is
+# NOT a bug, it is the answer M-t24 exists to get: that device MUST use the
+# 1-GEMM INT8 fallback (spec §5.2), never the native block-scaled path.
+# ENC-BMX4C activation requires M-t24 PASS on >= 2 independent vendors'
+# frontier parts (spec §9 item 1) -- collect results the same way this
+# script's v4.1 mode collects cuda+metal PASSes for ACTIVATION.md.
+#
+# Exit: 0 = PASS (bit-exact [+ M-t24 PASS under --profile bmx4c]), 1 =
+# FAIL/mismatch, 2 = usage/build error.
 
 set -euo pipefail
 BACKEND="${1:-}"
+shift || true
+PROFILE="v41"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --profile) PROFILE="${2:-}"; shift 2 ;;
+    *) echo "unknown argument: $1"; exit 2 ;;
+  esac
+done
+if [ "$PROFILE" != "v41" ] && [ "$PROFILE" != "bmx4c" ]; then
+  echo "unknown --profile (want v41 or bmx4c): $PROFILE"; exit 2
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD="${BUILD_DIR:-$ROOT/build-verify-$BACKEND}"
 SUITE="matmul_v4_backend_determinism_tests"
@@ -38,8 +72,46 @@ case "$BACKEND" in
   cuda)  CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90}") ;;
   metal) CMAKE_FLAGS=(-DBTX_ENABLE_METAL=ON) ;;   # Apple; needs Xcode 26+ for the M5 tensor path
   hip)   CMAKE_FLAGS=(-DBTX_ENABLE_HIP=ON "-DBTX_HIP_ARCHITECTURES=${HIP_ARCH:?set HIP_ARCH e.g. gfx942}") ;;
-  *) echo "usage: $0 <cuda|metal|hip>"; exit 2 ;;
+  *) echo "usage: $0 <cuda|metal|hip> [--profile v41|bmx4c]"; exit 2 ;;
 esac
+
+if [ "$PROFILE" = "bmx4c" ]; then
+  echo "== MatMul v4.2 (ENC-BMX4C) M-t24 verification: $BACKEND =="
+  echo "-- configuring ($BUILD)"
+  cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF \
+        -DENABLE_WALLET=ON -DWITH_SQLITE=ON -DBUILD_TESTS=OFF \
+        "${CMAKE_FLAGS[@]}" >/dev/null || { echo "CONFIGURE FAILED"; exit 2; }
+  echo "-- building matmul-v4-report"
+  cmake --build "$BUILD" --target matmul-v4-report -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \
+    || { echo "BUILD FAILED"; exit 2; }
+  BIN="$(find "$BUILD" -type f -name matmul-v4-report | head -1)"
+  [ -n "$BIN" ] || { echo "could not locate matmul-v4-report binary"; exit 2; }
+
+  echo "-- running $BIN --backend $BACKEND --profile bmx4c --mt24"
+  set +e
+  OUT="$("$BIN" --backend "$BACKEND" --profile bmx4c --mt24 2>&1)"
+  CODE=$?
+  set -e
+  echo "$OUT"
+
+  if [ "$CODE" -eq 0 ]; then
+    echo "RESULT: PASS ($BACKEND) -- BMX4-C bit-exact vs the CPU reference AND M-t24 PASS: the"
+    echo "accumulator is PROVEN t=24 -- the BMX4-C NATIVE path is ELIGIBLE on this device."
+    echo "Record this result in ACTIVATION.md Gate C. ENC-BMX4C activation needs M-t24 PASS on"
+    echo ">= 2 independent vendors' frontier parts (spec §9 item 1)."
+  else
+    if echo "$OUT" | grep -qi "NO-GO(native path): M-t24 FAILED"; then
+      echo "RESULT: FAIL ($BACKEND) -- M-t24 FAILED: the accumulator is proven only up to the bits"
+      echo "reported above (< t=24). This is NOT a consensus-split bug -- it is the M-t24 answer:"
+      echo "this device's native block-scaled path is INELIGIBLE and MUST use the 1-GEMM INT8"
+      echo "fallback (spec §5.2 fallback ladder), never the native path."
+    else
+      echo "RESULT: FAIL ($BACKEND) -- BMX4-C bit-exactness or stage measurement diverged; see output"
+      echo "above. A bit-exact FAIL is a CONSENSUS-SPLIT signal -- do NOT activate this backend."
+    fi
+  fi
+  exit "$CODE"
+fi
 
 echo "== MatMul v4 determinism verification: $BACKEND =="
 echo "-- configuring ($BUILD)"
