@@ -7,15 +7,24 @@
 # harness, and returns PASS only if the backend reproduces the CPU reference
 # digest BIT-FOR-BIT (a one-bit divergence is a consensus split -> FAIL).
 #
-# The harness INCLUDES the C-1 adversarial HIGH-MAGNITUDE accumulator vectors
-# (test cases high_magnitude_* in matmul_v4_backend_determinism_tests.cpp;
-# roadmap doc/btx-matmul-v4-multiplatform-roadmap.md §4.1, companion
-# doc/btx-matmul-v4-accumulator-eligibility.md): they force s8xs8->s32
+# The C-1 adversarial HIGH-MAGNITUDE accumulator vectors force s8xs8->s32
 # accumulations into the (2^24, 2^31) regime that an FP32-mantissa-bounded
 # "int8" accumulator (TPU v4-class MXU) silently rounds. A divergence in that
 # regime is a CONSENSUS-SPLIT signal and is a hard FAIL, exactly like any
-# other digest mismatch; a run in which those vectors did not execute proves
-# nothing about accumulator width and is NOT a PASS.
+# other digest mismatch; a run in which those vectors did not execute on the
+# SELECTED DEVICE proves nothing about accumulator width and is NOT a PASS.
+#
+# G4 (device-certification, not name-matching): a high_magnitude_* unit-test
+# NAME appearing in the test log is CPU-only bookkeeping -- it is printed
+# whether or not the selected GPU ran anything, so it is NOT evidence the
+# device covered the accumulator regime. This script therefore requires an
+# explicit RUNTIME MARKER
+#     DEVICE_HIGH_MAGNITUDE_PASS:<backend>:<device-id>
+# that the harness emits ONLY after the selected device entry point executed
+# the (2^24, 2^31) vectors AND matched the CPU reference byte-for-byte. The
+# marker is NEVER emitted on skip / unsupported / ALU-fallback / CPU-fallback /
+# compile-failure, so its presence is positive proof the chosen silicon --
+# identified by <device-id> -- certified true >=32-bit integer accumulation.
 #
 # Activation gate (see ACTIVATION.md): mainnet activation is ready as soon as
 # BOTH `cuda` and `metal` return PASS on real hardware. Collect the results
@@ -121,17 +130,19 @@ echo "-- building test_btx"
 cmake --build "$BUILD" --target test_btx -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" >/dev/null || { echo "BUILD FAILED"; exit 2; }
 
 BIN="$(find "$BUILD" -type f -name test_btx | head -1)"
-echo "-- running $SUITE (incl. C-1 high-magnitude accumulator vectors)"
-# --log_level=test_suite so executed test-case names appear in the log: the
-# C-1 gate below requires positive evidence that the high_magnitude_* vectors
-# actually ran (a log that never entered them must not be recorded as PASS).
+echo "-- running $SUITE (device-vs-CPU determinism + C-1 high-magnitude marker)"
+# --log_level=test_suite so executed suite/case names appear AND so the
+# harness's runtime marker line is captured in $OUT. The C-1 gate below does
+# NOT accept a high_magnitude_* test NAME as evidence (a CPU-only unit test
+# prints that name whether or not the SELECTED DEVICE ran); it requires the
+# explicit DEVICE_HIGH_MAGNITUDE_PASS runtime marker (see header).
 OUT="$("$BIN" --run_test="$SUITE" --log_level=test_suite 2>&1)" && CODE=0 || CODE=$?
 
-echo "$OUT" | grep -iE "SKIPPED-PENDING-HARDWARE|CONSENSUS|SPLIT|error:|failure|No errors detected" || true
+echo "$OUT" | grep -iE "SKIPPED-PENDING-HARDWARE|CONSENSUS|SPLIT|error:|failure|No errors detected|DEVICE_HIGH_MAGNITUDE_PASS" || true
 
 # PASS iff: suite returned 0, AND this backend was actually exercised (no skip),
-# AND no consensus-split mismatch was reported, AND the C-1 high-magnitude
-# accumulator-regime vectors ran.
+# AND no consensus-split mismatch was reported, AND the SELECTED DEVICE emitted
+# the C-1 high-magnitude runtime marker.
 if [ "$CODE" -ne 0 ] || echo "$OUT" | grep -qiE "CONSENSUS|SPLIT|has failed"; then
   echo "RESULT: FAIL ($BACKEND) -- digest diverged from CPU reference; NOT safe to activate."
   echo "If the failure is in a high_magnitude_* case, the device's INT8-matmul accumulator is"
@@ -143,15 +154,24 @@ if echo "$OUT" | grep -qi "SKIPPED-PENDING-HARDWARE"; then
   echo "RESULT: INCONCLUSIVE ($BACKEND) -- backend was not compiled in / not exercised on this host."
   exit 1
 fi
-# C-1 consensus-protecting gate: the (2^24, 2^31) accumulator regime MUST have
-# been exercised, or this run certifies nothing about accumulator width.
-if ! echo "$OUT" | grep -q "high_magnitude"; then
-  echo "RESULT: FAIL ($BACKEND) -- C-1 high-magnitude accumulator vectors (high_magnitude_*) did"
-  echo "not run; true >=32-bit integer accumulation is UNVERIFIED (consensus-split hazard,"
-  echo "doc/btx-matmul-v4-accumulator-eligibility.md). NOT safe to activate."
+# C-1 consensus-protecting gate (G4): require the DEVICE runtime marker for THIS
+# backend -- DEVICE_HIGH_MAGNITUDE_PASS:<backend>:<device-id>. It is emitted by
+# the harness ONLY after the selected device entry point executed the
+# (2^24, 2^31) accumulator vectors AND matched the CPU reference, and NEVER on
+# skip / unsupported / ALU-fallback / CPU-fallback / compile-failure -- so its
+# presence is positive proof the SELECTED silicon (not a CPU unit test) covered
+# the accumulator-width regime. A bare high_magnitude_* NAME is NOT accepted.
+MARKER="$(echo "$OUT" | grep -oE "DEVICE_HIGH_MAGNITUDE_PASS:${BACKEND}:[^[:space:]]+" | head -1)"
+if [ -z "$MARKER" ]; then
+  echo "RESULT: FAIL ($BACKEND) -- no device high-magnitude marker"
+  echo "(DEVICE_HIGH_MAGNITUDE_PASS:${BACKEND}:<device-id>) was emitted: the SELECTED device did"
+  echo "not execute+match the C-1 (2^24..2^31) accumulator vectors, so true >=32-bit integer"
+  echo "accumulation is UNVERIFIED (consensus-split hazard, doc/btx-matmul-v4-accumulator-"
+  echo "eligibility.md). A high_magnitude_* CPU unit-test NAME in the log is NOT evidence."
+  echo "NOT safe to activate."
   exit 1
 fi
-echo "RESULT: PASS ($BACKEND) -- bit-exact vs CPU reference on this hardware,"
-echo "including the C-1 high-magnitude (2^24..2^31) accumulator-regime vectors."
+echo "RESULT: PASS ($BACKEND) -- bit-exact vs CPU reference on this hardware, including the C-1"
+echo "high-magnitude (2^24..2^31) accumulator vectors on the SELECTED device ($MARKER)."
 echo "Record this result in ACTIVATION.md. Activation GO requires PASS on both cuda and metal."
 exit 0

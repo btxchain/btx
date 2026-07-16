@@ -291,9 +291,18 @@ kernel void matmul_v4_bmx4_limb_fold_mod_q(
 // ---------------------------------------------------------------------------
 kernel void matmul_v4_bmx4_s8_gemm_s32_tensor(
     constant GemmParams& p [[buffer(0)]],
-    device const char* x [[buffer(1)]],
-    device const char* y [[buffer(2)]],
-    device int* d [[buffer(3)]],
+    // G3 (macOS 26 MPP fix): the mpp::tensor_ops::matmul2d INT8 specialization
+    // matches MUTABLE `int8_t x int8_t -> int32_t` tensor operands; a
+    // `device const` operand pointer makes tensor(x, ...) deduce a const
+    // element type that the template rejects at compile time. These are pure
+    // INPUTS (matmul2d never writes x/y), so dropping const is a compile fix
+    // only -- it changes no memory access and no result byte. Types are the
+    // template's exact int8_t/int32_t spellings (== the file's char/int, but
+    // matched to the MPP signature to avoid a char-vs-int8_t deduction miss).
+    // COMPILE-UNVERIFIED (no Metal toolchain here).
+    device int8_t* x [[buffer(1)]],
+    device int8_t* y [[buffer(2)]],
+    device int32_t* d [[buffer(3)]],
     uint2 tgid [[threadgroup_position_in_grid]])
 {
     using namespace mpp;

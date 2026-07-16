@@ -4,6 +4,7 @@
 
 #include <cuda/matmul_v4_bmx4_accel.h>
 
+#include <cuda/cuda_context.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
@@ -14,10 +15,11 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -727,18 +729,25 @@ bool RunMxf4Gemm(cublasLtHandle_t lt,
 // present silicon. They are constructed so a log that never entered the
 // rounding regime cannot PASS vacuously:
 //
-//   PROBE 1 (t-discrimination + boundary pin, §5.3 families 1-2): an all-(+3)
-//   rail GEMM with K = 1,864,128 (32-aligned floor of 2^24/9). Every product
-//   is 9, so the running accumulator walks 9, 18, 27, ... up to EXACTLY
-//   9K = 16,777,152 = 2^24 - 64, taking an ODD value on every second step
-//   while crossing EVERY power of two from 2^4 to 2^23. A true t = 24
-//   accumulator holds each partial sum exactly (all integers < 2^24 are
-//   FP32-exact) and must return exactly 2^24 - 64 in every output. Any
-//   t < 24 accumulator MUST round: above 2^t its representable grid is
-//   coarser than 2, so the odd partial sums are unrepresentable and
-//   round-to-nearest-even walks the total off the exact value — the defect is
-//   arithmetically guaranteed to be visible, not probabilistic. (This is the
-//   probe that fails a Hopper-style t~14 path.)
+//   PROBE 1 (t-discrimination, order-INDEPENDENT, §5.3 families 1-2): an
+//   all-(+3) rail GEMM with K = 1,864,128 (32-aligned floor of 2^24/9), with a
+//   SINGLE contraction index k* patched to (+1)*(+2) = 2. Every other product
+//   is 9, so the exact integer result is 9*(K-1) + 2 = 16,777,145 = 2^24 - 71
+//   -- an ODD value in the top binade [2^23, 2^24). A true t = 24 (FP32)
+//   accumulator represents every integer below 2^24 exactly, so no addition
+//   rounds in ANY reduction order and every output equals 16,777,145 -> PASS.
+//   Any t <= 23 accumulator has representable-grid spacing 2 across
+//   [2^23, 2^24) (only EVEN integers are representable), so the ODD RESULT
+//   ITSELF is unrepresentable no matter how the reduction tree is shaped:
+//   round-to-nearest is forced onto an even neighbor and the output mismatches
+//   -> FAIL. This is the correctness fix over an all-(+3) 9K = 16,777,152 =
+//   2^24 - 64 target: 2^24-64 is 64-divisible (~18 significant bits), hence
+//   EXACTLY representable at t <= 23 AND reproducible by a balanced reduction
+//   tree that never forms an odd partial sum -- so it could FALSE-PASS a
+//   narrow accumulator (the defect hides behind the reduction order). The odd
+//   near-2^24 result closes that hole because order-independence is a property
+//   of the final integer, not of any particular summation schedule. (This is
+//   still the probe that fails a Hopper-style t~14 path.)
 //
 //   PROBE 2 (bijection / packing / layout cross-check): a fixed pseudorandom
 //   M11 GEMM (M = N = 64, K = 4096, LCG-seeded, first 512 K-steps pinned to
@@ -753,9 +762,11 @@ bool RunMxf4Gemm(cublasLtHandle_t lt,
 // hardware scales, alphabet-hole replay, promotion-cadence sweeps) lives in
 // the backend qualification suite (verify-backend.sh / M-t24), not in the
 // mining hot path; this in-process subset is the necessary condition gating
-// every call. Result is cached per process (multi-GPU dispatch re-qualifies
-// per process, not per device — acceptable because a FAIL only costs
-// throughput on the other device, never bytes).
+// every call. Result is cached per PHYSICAL device identity (G2): the probes
+// run on the device bound by cudaSetDevice in ComputeDigestsBMX4CAccel, and
+// the verdict is keyed by that device's PCI id, so a mixed-GPU box qualifies
+// each distinct part exactly once and never attributes one part's PASS/FAIL
+// to another.
 // ---------------------------------------------------------------------------
 
 bool RunMxf4Qualification(cublasLtHandle_t lt,
@@ -773,7 +784,14 @@ bool RunMxf4Qualification(cublasLtHandle_t lt,
     constexpr uint32_t kProbe1M = 32;
     constexpr uint32_t kProbe1N = 32;
     constexpr uint32_t kProbe1K = 1'864'128; // 32-aligned floor(2^24 / 9)
-    constexpr double kProbe1Expect = 9.0 * kProbe1K; // 16,777,152 = 2^24 - 64
+    // G1: ODD near-2^24 target (see the PROBE 1 comment above). The rail is
+    // all-(+3) except a single patched contraction index k* where the product
+    // is (+1)*(+2)=2, so the exact integer result is 9*(K-1)+2 = 16,777,145 =
+    // 2^24 - 71. This value is ODD and in [2^23, 2^24), hence NOT representable
+    // by any accumulator with t <= 23 (grid spacing 2 there) for ANY reduction
+    // order -- unlike the old 9K = 2^24-64, which a narrow accumulator could
+    // reproduce under a balanced reduction tree and thus false-pass.
+    constexpr double kProbe1Expect = 9.0 * (kProbe1K - 1) + 2.0; // 16,777,145 = 2^24 - 71, ODD
     constexpr uint32_t kProbe2M = 64;
     constexpr uint32_t kProbe2N = 64;
     constexpr uint32_t kProbe2K = 4096;
@@ -796,6 +814,29 @@ bool RunMxf4Qualification(cublasLtHandle_t lt,
         if (!CudaOk(cudaMalloc(&dD, static_cast<size_t>(kProbe2M) * kProbe2N * sizeof(float)), "cudaMalloc qual D", error)) break;
         if (!CudaOk(cudaMemsetAsync(dA, 0x55, a1_bytes, stream), "qual A memset", error)) break;
         if (!CudaOk(cudaMemsetAsync(dB, 0x55, b1_bytes, stream), "qual B memset", error)) break;
+
+        // G1: patch the SINGLE contraction index k* so the exact sum is ODD
+        // (kProbe1Expect = 16,777,145). Set element k* to +1 (nibble 0x2) in
+        // every A column and to +2 (nibble 0x4) in every B column; k* is the
+        // FIRST packed element of each column-major column, i.e. the LOW nibble
+        // of the column's first byte (offset r*(K/2)). Its byte-mate stays +3
+        // (nibble 0x5), so each patched byte is A:0x52 / B:0x54. This stays
+        // packing-convention-INDEPENDENT: a flipped nibble order moves BOTH the
+        // patched A element and the patched B element to the same neighbouring
+        // index k*+1 together, leaving exactly one (+1)*(+2)=2 product and all
+        // others (+3)*(+3)=9, so the result is 16,777,145 either way -- probe 1
+        // still isolates the accumulator. (kProbe1K is even, so r*(K/2) is a
+        // whole byte offset and k* is genuinely a low nibble.)
+        bool patched = true;
+        for (uint32_t r = 0; r < kProbe1M && patched; ++r) {
+            patched = CudaOk(cudaMemsetAsync(dA + static_cast<size_t>(r) * (kProbe1K / 2), 0x52, 1, stream),
+                             "qual A k* patch", error);
+        }
+        for (uint32_t c = 0; c < kProbe1N && patched; ++c) {
+            patched = CudaOk(cudaMemsetAsync(dB + static_cast<size_t>(c) * (kProbe1K / 2), 0x54, 1, stream),
+                             "qual B k* patch", error);
+        }
+        if (!patched) break;
 
         if (!RunMxf4Gemm(lt, stream, workspace, workspace_size, dA, dB,
                          dUnitScales, dUnitScales, dD, kProbe1M, kProbe1N, kProbe1K, error)) {
@@ -897,9 +938,27 @@ bool RunMxf4Qualification(cublasLtHandle_t lt,
     return ok;
 }
 
-// Process-wide qualification cache: -1 unknown, 0 failed, 1 proven.
+// G2: qualification cache keyed by PHYSICAL device identity (the PCI
+// domain:bus:device string), NOT process-wide. A t=24 PASS proven on one
+// physical part says nothing about a different part, so multi-GPU dispatch --
+// where each call binds to its selected device (cudaSetDevice below) -- must
+// not leak a verdict across distinct silicon. Map value: 0 failed, 1 proven
+// (absence == not yet qualified). Guarded by the mutex, so no atomics needed.
 std::mutex g_mxf4_qual_mutex;
-std::atomic<int> g_mxf4_qualified{-1};
+std::map<std::string, int> g_mxf4_qualified;
+
+// Stable PHYSICAL identity of a device (survives ordinal reshuffles, unlike
+// the cuda ordinal). Falls back to the ordinal only if the PCI id is
+// unavailable so the cache still degrades to per-ordinal keying, never to a
+// single shared verdict.
+std::string DevicePhysicalKey(int device)
+{
+    char pci[32] = {0};
+    if (cudaDeviceGetPCIBusId(pci, static_cast<int>(sizeof(pci)), device) == cudaSuccess && pci[0] != '\0') {
+        return std::string(pci);
+    }
+    return "ordinal:" + std::to_string(device);
+}
 
 // --- Native-tier host packers (all K-major per the TN layout above). -------
 
@@ -1028,17 +1087,20 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
     const ForcedPath forced = GetForcedPath();
     const bool force_scalar = forced == ForcedPath::kScalar;
 
-    const uint32_t chunk_cap = std::min(count, kMaxBatchedWindow);
+    // Configured window; chunk_cap may shrink adaptively on device OOM (G6).
+    const uint32_t configured_window = std::min(count, kMaxBatchedWindow);
+    constexpr uint32_t kMinBatchedWindow = 1; // documented floor: below this we fail closed -> CPU
+    uint32_t chunk_cap = configured_window;
     const size_t nn = static_cast<size_t>(n) * n;
     const size_t mn = static_cast<size_t>(m) * n; // U, P, one P limb plane
     const size_t nm = static_cast<size_t>(n) * m; // V
-    const size_t cap_qcols = static_cast<size_t>(chunk_cap) * m;
-    const size_t cap_stack = static_cast<size_t>(n) * cap_qcols; // Qtall/Qstack elems
-    const size_t cap_out = static_cast<size_t>(m) * cap_qcols;   // Chat_wide elems
 
     digests_out.resize(count);
     payloads_out.resize(count);
-    std::vector<uint64_t> chat_host(cap_out);
+    // Chat_wide host staging, sized for the CONFIGURED (maximum) window. If G6
+    // shrinks chunk_cap, each chunk's out_elems only gets smaller, so this
+    // upper-bound host buffer always stays large enough (no re-alloc needed).
+    std::vector<uint64_t> chat_host(static_cast<size_t>(m) * configured_window * m);
 
     // Shared device state.
     int32_t* dP = nullptr;      // P = U*Ahat, m x n (exact int32)
@@ -1072,15 +1134,29 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
     std::string error;
     bool ok = false;
     do {
+        // G2: bind this entire call -- stream, cuBLASLt handle, EVERY device
+        // allocation, and the qualification probes -- to the SELECTED physical
+        // device. Eligibility is resolved per BTX_MATMUL_CUDA_DEVICES
+        // (ProbeCudaRuntime -> device_index, the same selection the per-nonce
+        // backend binds to); without this the backend would allocate and
+        // execute on the ambient device (ordinal 0) even when the operator
+        // selected another GPU, and the t=24 verdict would be attributed to the
+        // wrong silicon. device_index < 0 (no explicit selection) keeps the
+        // process-default device.
+        {
+            const btx::cuda::CudaRuntimeProbe runtime = btx::cuda::ProbeCudaRuntime();
+            if (runtime.device_index >= 0 &&
+                !CudaOk(cudaSetDevice(runtime.device_index), "cudaSetDevice(selected)", error)) {
+                break;
+            }
+        }
         if (!CudaOk(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreate", error)) break;
 
+        // Template-scoped, NOT window-scoped (independent of Q): allocated once.
         if (!CudaOk(cudaMalloc(&dP, mn * sizeof(int32_t)), "cudaMalloc P", error)) break;
         if (!CudaOk(cudaMalloc(&dPplanes, mn * ref::kCombineLimbs), "cudaMalloc Pplanes", error)) break;
-        if (!CudaOk(cudaMalloc(&dQtall, cap_stack * sizeof(int32_t)), "cudaMalloc Qtall", error)) break;
-        if (!CudaOk(cudaMalloc(&dQstack, cap_stack * sizeof(int32_t)), "cudaMalloc Qstack", error)) break;
-        if (!CudaOk(cudaMalloc(&dQplanes, cap_stack * ref::kCombineLimbs), "cudaMalloc Qplanes", error)) break;
-        if (!CudaOk(cudaMalloc(&dS, cap_out * sizeof(int32_t)), "cudaMalloc S", error)) break;
-        if (!CudaOk(cudaMalloc(&dChat, cap_out * sizeof(uint64_t)), "cudaMalloc Chat", error)) break;
+        // The window (Q) working set is allocated adaptively AFTER tier
+        // selection -- see the G6 block below.
 
         // cuBLASLt is required by the native tier and best-effort for the INT8
         // tier (whose scalar fallback is also bit-exact).
@@ -1102,9 +1178,9 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
         if (forced == ForcedPath::kAuto || forced == ForcedPath::kNative) {
             bool eligible = lt != nullptr && workspace != nullptr &&
                             (n % 32) == 0 && (m % 32) == 0;
+            cudaDeviceProp prop{};
+            int dev = 0;
             if (eligible) {
-                cudaDeviceProp prop{};
-                int dev = 0;
                 eligible = cudaGetDevice(&dev) == cudaSuccess &&
                            cudaGetDeviceProperties(&prop, dev) == cudaSuccess &&
                            prop.major >= 10; // Blackwell tcgen05 block-scaled units
@@ -1123,15 +1199,24 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
                 }
             }
             if (eligible) {
+                // G2: cache the t=24 verdict per PHYSICAL device (PCI id of the
+                // device bound above), not process-wide, so a mixed-GPU host
+                // qualifies each part once and never reuses one part's verdict
+                // for another. `dev` is the ambient/selected device set by the
+                // cudaSetDevice at the top of this call.
+                const std::string dev_key = DevicePhysicalKey(dev);
                 std::lock_guard<std::mutex> lock(g_mxf4_qual_mutex);
-                int state = g_mxf4_qualified.load();
-                if (state == -1) {
+                auto it = g_mxf4_qualified.find(dev_key);
+                int state;
+                if (it == g_mxf4_qualified.end()) {
                     std::string qual_err;
                     state = RunMxf4Qualification(lt, stream, workspace, kWorkspaceBytes,
                                                  dUnitScales, qual_err)
                                 ? 1
                                 : 0;
-                    g_mxf4_qualified.store(state);
+                    g_mxf4_qualified.emplace(dev_key, state);
+                } else {
+                    state = it->second;
                 }
                 eligible = state == 1;
             }
@@ -1152,6 +1237,82 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
 #endif
 
         // ------------------------------------------------------------------
+        // G6: adaptive window (Q) allocation. The per-window working set scales
+        // with chunk_cap -- the shared Qtall/Qstack/Qplanes/S/Chat buffers plus
+        // the chosen tier's Q-dependent operands (native dOpq/dDf32, or INT8
+        // dBstack). On a memory-constrained or shared device the configured Q
+        // can exceed free VRAM; rather than abandoning the whole window (which
+        // fails closed to the CPU miner) we HALVE Q on cudaErrorMemoryAllocation
+        // and retry, down to kMinBatchedWindow. The reduction is byte-
+        // transparent: per-nonce results are independent, so a smaller window
+        // just means more internal chunks with identical digests. Buffers are
+        // freed+reallocated once at the fitted Q, then REUSED across every
+        // chunk of the window (no per-chunk malloc traffic).
+        {
+            auto free_q_buffers = [&]() {
+                if (dChat) { cudaFree(dChat); dChat = nullptr; }
+                if (dS) { cudaFree(dS); dS = nullptr; }
+                if (dQplanes) { cudaFree(dQplanes); dQplanes = nullptr; }
+                if (dQstack) { cudaFree(dQstack); dQstack = nullptr; }
+                if (dQtall) { cudaFree(dQtall); dQtall = nullptr; }
+#if BTX_BMX4C_HAVE_MXF4
+                if (dDf32) { cudaFree(dDf32); dDf32 = nullptr; }
+                if (dOpq) { cudaFree(dOpq); dOpq = nullptr; }
+#endif
+                if (dBstack) { cudaFree(dBstack); dBstack = nullptr; }
+            };
+            // Allocate every Q-dependent buffer for `cap`. Returns cudaSuccess,
+            // or the first failing error with all Q buffers freed (nulled).
+            auto try_alloc_q = [&](uint32_t cap) -> cudaError_t {
+                const size_t q_cols = static_cast<size_t>(cap) * m;
+                const size_t stack = static_cast<size_t>(n) * q_cols; // Qtall/Qstack elems
+                const size_t out = static_cast<size_t>(m) * q_cols;   // Chat_wide elems
+                cudaError_t e;
+                if ((e = cudaMalloc(&dQtall, stack * sizeof(int32_t))) != cudaSuccess) { free_q_buffers(); return e; }
+                if ((e = cudaMalloc(&dQstack, stack * sizeof(int32_t))) != cudaSuccess) { free_q_buffers(); return e; }
+                if ((e = cudaMalloc(&dQplanes, stack * ref::kCombineLimbs)) != cudaSuccess) { free_q_buffers(); return e; }
+                if ((e = cudaMalloc(&dS, out * sizeof(int32_t))) != cudaSuccess) { free_q_buffers(); return e; }
+                if ((e = cudaMalloc(&dChat, out * sizeof(uint64_t))) != cudaSuccess) { free_q_buffers(); return e; }
+#if BTX_BMX4C_HAVE_MXF4
+                if (use_native) {
+                    const size_t packed_nn = (nn + 1) / 2;
+                    const size_t packed_stack = (static_cast<size_t>(cap) * nn + 1) / 2;
+                    if ((e = cudaMalloc(&dOpq, std::max(packed_nn, packed_stack))) != cudaSuccess) { free_q_buffers(); return e; }
+                    if ((e = cudaMalloc(&dDf32, std::max(mn, stack) * sizeof(float))) != cudaSuccess) { free_q_buffers(); return e; }
+                }
+#endif
+                if (!use_native) {
+                    if ((e = cudaMalloc(&dBstack, static_cast<size_t>(cap) * nn)) != cudaSuccess) { free_q_buffers(); return e; }
+                }
+                return cudaSuccess;
+            };
+
+            cudaError_t qe = cudaSuccess;
+            for (;;) {
+                qe = try_alloc_q(chunk_cap);
+                if (qe == cudaSuccess) break;
+                if (qe == cudaErrorMemoryAllocation && chunk_cap > kMinBatchedWindow) {
+                    cudaGetLastError(); // clear the non-sticky OOM before retrying
+                    chunk_cap = std::max<uint32_t>(chunk_cap / 2, kMinBatchedWindow);
+                    continue;
+                }
+                break; // success handled above; here: non-OOM error, or OOM already at the floor
+            }
+            if (qe != cudaSuccess) {
+                error = std::string("cudaMalloc window working set (Q reduced to ") +
+                        std::to_string(chunk_cap) + "): " + cudaGetErrorString(qe);
+                break; // fail closed -> dispatcher runs the CPU reference
+            }
+            if (chunk_cap < configured_window) {
+                // Report the EFFECTIVE Q. A shrink is a device-capacity signal,
+                // not an error -- the digests are unaffected (byte-transparent).
+                std::fprintf(stderr,
+                             "[bmx4c-cuda] window reduced to Q=%u (configured %u) to fit device memory\n",
+                             chunk_cap, configured_window);
+            }
+        }
+
+        // ------------------------------------------------------------------
         // STAGE P = U*Ahat (template-scoped, once per call) and its limb
         // planes. Exact int32 either way; identical bytes either way.
         // ------------------------------------------------------------------
@@ -1169,12 +1330,10 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
             std::vector<uint8_t> u_packed;
             PackProjectorU(U, m, n, u_packed);
 
-            const size_t packed_nn = (nn + 1) / 2;
-            const size_t packed_stack = (static_cast<size_t>(chunk_cap) * nn + 1) / 2;
+            // dUq/dVq/dErr are Q-INDEPENDENT (template-scoped); dOpq/dDf32 are
+            // Q-dependent and already allocated by the G6 adaptive block above.
             if (!CudaOk(cudaMalloc(&dUq, u_packed.size()), "cudaMalloc Uq", error)) break;
             if (!CudaOk(cudaMalloc(&dVq, (nm + 1) / 2), "cudaMalloc Vq", error)) break;
-            if (!CudaOk(cudaMalloc(&dOpq, std::max(packed_nn, packed_stack)), "cudaMalloc Opq", error)) break;
-            if (!CudaOk(cudaMalloc(&dDf32, std::max(mn, cap_stack) * sizeof(float)), "cudaMalloc Df32", error)) break;
             if (!CudaOk(cudaMalloc(&dErr, sizeof(int)), "cudaMalloc Err", error)) break;
             if (!CudaOk(cudaMemsetAsync(dErr, 0, sizeof(int), stream), "Err memset", error)) break;
             if (!CudaOk(cudaMemcpyAsync(dUq, u_packed.data(), u_packed.size(), cudaMemcpyHostToDevice, stream), "H2D Uq", error)) break;
@@ -1221,10 +1380,11 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
             // (mu * 2^e, |.| <= 48) is the committed ExpandOperandA routine
             // itself, so the s8 bytes are the reference's bytes.
             const std::vector<int8_t> Ahat = ref::ExpandOperandA(seed_a, n);
+            // dA/dU/dV are Q-INDEPENDENT; dBstack is Q-dependent and already
+            // allocated by the G6 adaptive block above.
             if (!CudaOk(cudaMalloc(&dA, nn), "cudaMalloc A", error)) break;
             if (!CudaOk(cudaMalloc(&dU, mn), "cudaMalloc U", error)) break;
             if (!CudaOk(cudaMalloc(&dV, nm), "cudaMalloc V", error)) break;
-            if (!CudaOk(cudaMalloc(&dBstack, static_cast<size_t>(chunk_cap) * nn), "cudaMalloc Bstack", error)) break;
             if (!CudaOk(cudaMemcpyAsync(dA, Ahat.data(), nn, cudaMemcpyHostToDevice, stream), "H2D A", error)) break;
             if (!CudaOk(cudaMemcpyAsync(dU, U.data(), mn, cudaMemcpyHostToDevice, stream), "H2D U", error)) break;
             if (!CudaOk(cudaMemcpyAsync(dV, V.data(), nm, cudaMemcpyHostToDevice, stream), "H2D V", error)) break;
