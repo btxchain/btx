@@ -227,12 +227,15 @@ BOOST_AUTO_TEST_CASE(v4_consensus_constants_match_spec)
     BOOST_CHECK_EQUAL(matmul_v4::kTileB, 4U);
     BOOST_CHECK_EQUAL(matmul::v4::kCombineLimbs, 4U);
     BOOST_CHECK_EQUAL(matmul::v4::kCombineLimbBase, 128);
-    // 4-limb combine coverage: whole 4096..8192 dimension window (§C-13);
-    // exact bound 15,625*n < 2^27 <=> n <= 8589.
+    // 4-limb combine coverage: whole 4096..8192 dimension window (§C-13).
+    // Balanced base-128 digits (each in [-64, 63]) reach a POSITIVE extreme of
+    // 63*(128^4-1)/127 = 133,160,895 < 2^27, so total decomposition holds iff
+    // 15,625*n <= 133,160,895 <=> n <= 8522 (NOT 8589 — the top digit maxes at
+    // 63, not 64). The used window is well inside this (15,625*8192 = 128e6).
     BOOST_CHECK(matmul::v4::CheckCombineLimbBound(4096));
     BOOST_CHECK(matmul::v4::CheckCombineLimbBound(8192));
-    BOOST_CHECK(matmul::v4::CheckCombineLimbBound(8589));
-    BOOST_CHECK(!matmul::v4::CheckCombineLimbBound(8590));
+    BOOST_CHECK(matmul::v4::CheckCombineLimbBound(8522));
+    BOOST_CHECK(!matmul::v4::CheckCombineLimbBound(8523));
 }
 
 BOOST_AUTO_TEST_CASE(fold61_edge_cases)

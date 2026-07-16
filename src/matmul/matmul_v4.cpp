@@ -270,13 +270,20 @@ std::vector<int32_t> ComputeProjectedRight(const std::vector<int8_t>& B,
 
 bool CheckCombineLimbBound(uint32_t n)
 {
-    // 4 balanced base-128 digits represent [-128^4/2, 128^4/2) = [-2^27, 2^27).
-    // Entries of P/Q are bounded by 15,625*n, so the decomposition is total
-    // iff 15,625*n < 2^27, i.e. n <= 8589 — covering the 4096..8192 window.
+    // 4 balanced base-128 digits, each in [-64, 63], represent the ASYMMETRIC
+    // range [-135,274,560, +133,160,895] — NOT [-2^27, 2^27): the positive
+    // extreme is 63*(128^4-1)/(128-1) = 133,160,895 < 2^27, because the top
+    // digit maxes at 63, not 64. DecomposeLimbPlanes discards any remainder past
+    // 4 digits (no hot-loop assert), so an entry above the positive extreme
+    // would decompose WRONG. P/Q entries span the symmetric range
+    // |.| <= 15,625*n, so the binding constraint is the positive extreme and the
+    // decomposition is total iff 15,625*n <= 133,160,895, i.e. n <= 8522 — still
+    // covering the whole 4096..8192 dimension window (max entry 128,000,000).
     static_assert(kCombineLimbs == 4 && kCombineLimbBase == 128,
                   "limb bound derivation assumes 4 balanced base-128 digits");
-    const int64_t half_range = (static_cast<int64_t>(1) << 27); // 128^4 / 2
-    return static_cast<int64_t>(n) * int8_field::kElementSqBound < half_range;
+    // Max positive 4-digit balanced base-128 value = 63 * (128^4 - 1) / 127.
+    constexpr int64_t kLimbMaxPositive = 133'160'895;
+    return static_cast<int64_t>(n) * int8_field::kElementSqBound <= kLimbMaxPositive;
 }
 
 std::vector<Fq> ComputeCombineModQ(const std::vector<int32_t>& P,

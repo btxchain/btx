@@ -111,11 +111,13 @@ BOOST_AUTO_TEST_CASE(limb_combine_matches_direct_combine_extremes)
 BOOST_AUTO_TEST_CASE(limb_bound_window)
 {
     // 4 balanced base-128 limbs must cover the whole 4096..8192 dimension
-    // window and fail closed just above it (15,625 * n < 2^27 <=> n <= 8589).
+    // window and fail closed just above it. Balanced digits reach a positive
+    // extreme of 63*(128^4-1)/127 = 133,160,895 (top digit maxes at 63), so the
+    // total-decomposition bound is 15,625*n <= 133,160,895 <=> n <= 8522.
     BOOST_CHECK(matmul::v4::CheckCombineLimbBound(4096));
     BOOST_CHECK(matmul::v4::CheckCombineLimbBound(8192));
-    BOOST_CHECK(matmul::v4::CheckCombineLimbBound(8589));
-    BOOST_CHECK(!matmul::v4::CheckCombineLimbBound(8590));
+    BOOST_CHECK(matmul::v4::CheckCombineLimbBound(8522));
+    BOOST_CHECK(!matmul::v4::CheckCombineLimbBound(8523));
 }
 
 BOOST_AUTO_TEST_CASE(stacked_combine_slices_equal_per_nonce_combine)
