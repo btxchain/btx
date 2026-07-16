@@ -83,9 +83,9 @@ un-enableable until the `nNonce`-on-wire header-format change lands
   close the activation blockers; the header throttle is labelled a throttle, not
   authentication.
 - **D2 (storage):** the "~80 GiB rolling proof store" is **not** implemented —
-  `nMatMulProofPruneDepth` is dead, and on a default node every ~8 MiB proof is
-  retained, i.e. ~2.7 TiB/yr of unbounded growth. No rolling/archival split exists
-  yet.
+  `nMatMulProofPruneDepth` is dead (no consumer), and on a default node every
+  ~8 MiB proof is retained, i.e. **~2.9 TiB/yr of unbounded growth at 90 s
+  spacing**. No rolling/archival split exists yet.
 - **D3 (relay):** the 16 MB P2P message limit, the 24 MB consensus limit, the
   ~8 MiB mandatory proof, and the lack of compact-block proof carriage (full-block
   fallback) are stated (P2/P3).

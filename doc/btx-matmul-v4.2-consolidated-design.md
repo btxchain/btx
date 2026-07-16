@@ -42,7 +42,7 @@ The one-table summary of every decision this document was tasked to make:
 | 4 | The combine | **C-13 limb-tensor retained as the moat**, re-pinned: 4 balanced base-2⁶ digits (remainder-top rule; asymmetric-extreme discipline re-applied → pure-balanced total for n ≤ 28,664, remainder-top total to 2²³), 16 pair-GEMMs, every pair bound ≤ 2²² at n = 4096; deliberately NOT made 4-bit-native (it is the alphabet-independent exact-reduction floor) | §5 |
 | 5 | Ladder & availability | Preserved and steepened toward the frontier **without taxing anyone in GEMM count**: frontier FP4 native 1×, FP8-only fold 1×, INT8 legacy 1× at its own rate, M-class (incl. pre-M5 int-ALU) unchanged and pooled, CMP/SHA/FPGA excluded | §6 |
 | — | Time-resistance | The **format-agnostic multi-native-path architecture** (§8): one canonical exact-integer committed object; the operand *encoding* is a versioned consensus parameter; the verifier never changes; every hardware class computes it via its own exact native path | §8 |
-| — | Activation | **STAGED, not the current candidate**, with a conditioned leapfrog clause; gated on ONE real measurement — **t = 24 exactness of block-scaled FP4/MX accumulation on real silicon** (runnable now on B200/RTX 50-series; extend to B300/MI355X) — plus the C-15 external review (commissioned once, covering v4.1 and v4.2 jointly) | §10 |
+| — | Activation | **UNIFIED direct v3 → v4.2/ENC-BMX4C** (`nMatMulBMX4CHeight == nMatMulV4Height`; no public ENC-S8 interval; updated 2026-07-16, superseding the earlier "staged, not the current candidate" leapfrog wording); DISABLED with no scheduled date; gated on ONE real measurement — **t = 24 exactness of block-scaled FP4/MX accumulation on real silicon** (runnable now on B200/RTX 50-series; extend to B300/MI355X) — plus the C-15 external review (commissioned once, covering v4.1 and v4.2 jointly) | §10 |
 
 **Why this is the superior consolidation (one paragraph).** The ASIC deep-dive proved the
 moat is the combine + XOF freshness + exact-accumulation floor — **alphabet-independent**
@@ -562,11 +562,28 @@ already cover):
 
 ## 10. Migration & activation plan, and the staged-vs-current recommendation
 
+> **UPDATE (2026-07-16, second external audit) — activation model superseded.**
+> The staged "ship v4.1 ENC-S8 first, stage v4.2" recommendation in this section
+> is **withdrawn**. The adopted public model is a **unified, direct v3 →
+> v4.2/ENC-BMX4C** fork at ONE height where `nMatMulBMX4CHeight ==
+> nMatMulV4Height`: there is **no public ENC-S8 (v4.1) activation interval**, and
+> the single calibrated v3→v4.2 rescale is carried by the BMX4-C rescale (the v4
+> rescale stays inert `1/1`). The old staged testnet schedule (ENC-S8 @ 200,000,
+> BMX4-C @ 250,000) is WITHDRAWN — public testnet v4/bmx4c heights are both
+> INT32_MAX (disabled). Mainnet and all public testnets stay DISABLED until every
+> activation gate passes; **no activation date is scheduled**. A strictly-greater
+> staged config (`nMatMulBMX4CHeight > nMatMulV4Height`) survives only as a
+> regtest testing option. The measurement/review gates below (M-t24, the
+> FP-silicon wall-time split, the joint C-15 review, the calibrated rescale) still
+> apply; only the "ENC-S8 goes first" sequencing is reversed.
+
 ### 10.1 Sequencing (normative recommendation)
 
-1. **Now — v4.1 ENC-S8 remains the activation candidate.** Its own gates (B2g batched
-   GO/NO-GO on real H100/B200/5090; B2a golden vectors; B2b ASERT rescale; B4/C-15
-   review) are the critical path. Nothing in this document blocks or reorders them.
+1. **~~Now — v4.1 ENC-S8 remains the activation candidate.~~ (Superseded — see the
+   2026-07-16 update above.)** ENC-S8 is NOT a public activation candidate; the
+   public fork goes directly v3 → v4.2/ENC-BMX4C. The measurement/golden-vector/
+   ASERT-rescale/C-15-review gates still gate the unified activation; nothing in
+   this document blocks or reorders them.
 2. **Now, in parallel — run the one v4.2-gating measurement (M-t24)**: the §4.3
    t-discrimination and boundary vectors on real block-scaled silicon —
    **B200 and RTX 5090-class are rentable/buyable today; extend to B300, MI355X, and
@@ -593,18 +610,22 @@ already cover):
    (the model predicts the combine at ~70–80 % — measure, don't trust); cross-vendor
    golden vectors (B2a analogue incl. FP4/FP8 devices); C-15 review closed; ASERT
    rescale computed from the measured marginal unit on the rational path.
-6. **Conditioned leapfrog clause (explicit, honest):** if M-t24 and the joint C-15
-   review complete **before** v4.1's own activation gates clear, governance SHOULD
-   consider activating v4.2 ENC-BMX4C directly as the first fork — one fork instead of
-   two, at no cost to the INT8 installed base (which mines ENC-BMX4C at 1 GEMM,
-   ≈ unchanged throughput, §6). The leapfrog is *only* available because of the §2.1
-   alphabet decision; it MUST NOT be taken on unmeasured FP-path assumptions — if the
-   FP-silicon wall-time split (5b) is still open, ship v4.1 and stage v4.2.
+6. **Unified direct-to-v4.2 activation (adopted — was the "conditioned leapfrog"):**
+   the upgrade activates v4.2 ENC-BMX4C directly as the single fork
+   (`nMatMulBMX4CHeight == nMatMulV4Height`) — one fork instead of two, at no cost to
+   the INT8 installed base (which mines ENC-BMX4C at 1 GEMM, ≈ unchanged throughput,
+   §6). This is *only* available because of the §2.1 alphabet decision. It MUST NOT be
+   activated on unmeasured FP-path assumptions: if the FP-silicon wall-time split (5b)
+   or any other gate is still open, the network stays DISABLED (both heights
+   INT32_MAX) rather than falling back to a public ENC-S8 interval.
 
 ### 10.2 Recommendation, stated plainly
 
-**STAGED: hold BMX4-C as the parameter-frozen, shelf-ready v4.2; do not make it the
-current activation candidate today.** The single gating measurement is **M-t24 —
+**UNIFIED: BMX4-C is the single, direct v3 → v4.2 fork (adopted 2026-07-16);
+there is no separate/earlier ENC-S8 activation.** It stays parameter-frozen and
+DISABLED (both heights INT32_MAX, no scheduled date) until its gates pass; the
+former "hold ENC-S8 as the current candidate, stage v4.2" posture is withdrawn.
+The single gating measurement is **M-t24 —
 proven t = 24 exact accumulation on the commodity block-scaled FP4/MX path** (frontier
 doc §4.6 vectors; runnable now on B200/RTX 50-series, extending to B300/MI355X/Trn3),
 because every load-bearing v4.2 property that is not pure arithmetic — native-path
@@ -676,7 +697,7 @@ Priority-ordered; owners in parentheses:
 | Alphabet hardness SAFE (tables/BNN/sparsity/Strassen dispositions) | **High** (closures are counting/bandwidth inequalities with ≥ 10²× slack) | Cryptanalysis FINAL, adopted; C-15 review still the blocker for the "no unknown channel" residue |
 | ASIC residual band and ≤ ~1.3× delta; halved cliff under the 1-GEMM fallback | **Medium** (modeled, bracketed by cited anchors) | ASIC deep-dive §5/§7 + §2.1 fallback arithmetic |
 | Frontier ≈ 1× / ladder ordering on real silicon | **Low by design — unmeasured** | No BTX kernel has run on any FP4 part; §K.2b posture; gated by §10 |
-| Staged recommendation + leapfrog conditions | **High** (decision logic) | Follows from the gate structure; no unmeasured claim is load-bearing |
+| Unified direct-to-v4.2 activation (adopted 2026-07-16; was "staged recommendation + leapfrog conditions") | **High** (decision logic) | Follows from the gate structure; no unmeasured claim is load-bearing |
 
 ## References
 

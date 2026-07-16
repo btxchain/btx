@@ -19,6 +19,17 @@ ACTIVATION.md Gate C (M-t24 measurement + joint C-15 review + G-1 trigger +
 supermajority signaling). RFC-2119 keywords (MUST/MUST NOT/SHOULD/MAY) are
 normative.
 
+**Public activation model (updated 2026-07-16, second external audit): unified,
+direct v3 → v4.2/ENC-BMX4C.** On every activated public network the invariant is
+`nMatMulBMX4CHeight == nMatMulV4Height`: the upgrade forks straight from v3 to
+ENC-BMX4C at ONE height, with the single calibrated v3→v4.2 rescale carried by the
+BMX4-C rescale (the v4 rescale stays inert `1/1`). **There is NO public ENC-S8
+(v4.1) activation interval.** A strictly-greater `nMatMulBMX4CHeight >
+nMatMulV4Height` (a non-empty ENC-S8 interval) is retained ONLY as a regtest/testing
+option to exercise both sides of the boundary — never as the public activation
+model. Mainnet and all public testnets remain DISABLED (both heights INT32_MAX)
+until every activation gate passes; no activation date is scheduled.
+
 ---
 
 ## §0. Scope, hard requirements, and the invariant map
@@ -551,7 +562,7 @@ chips the ladder wants to win). Everything smaller stays in L2 forever.
 
 | Profile ID | enum value | Committed operands | Status |
 |---|---|---|---|
-| `ENC-S8` | `MatMulEncodingProfile::ENC_S8` = 1 | balanced s8 ∈ [−125, 125], no scale plane; s8 U/V; base-2⁷ limbs (v4.1 spec §A.2/App. C-13) | live at v4 heights; the v4.1 activation candidate |
+| `ENC-S8` | `MatMulEncodingProfile::ENC_S8` = 1 | balanced s8 ∈ [−125, 125], no scale plane; s8 U/V; base-2⁷ limbs (v4.1 spec §A.2/App. C-13) | defined profile; **NOT a public activation candidate** — under the unified direct-to-v4.2 model (`nMatMulBMX4CHeight == nMatMulV4Height`) it has no public height interval; reachable only under a regtest staged config |
 | `ENC-BMX4C` | `MatMulEncodingProfile::ENC_BMX4C` = 2 | 𝓜₁₁ × per-32-block 2^e, e ∈ {0..3}; scale-free 𝓜₁₁ U/V; base-2⁶ remainder-top limbs (this doc §1–§3) | staged, parameter-frozen; disabled by default |
 | (reserve) `ENC-M15` | — (unassigned) | 𝓜₁₅@S=4 hardening reserve | shelf only; different consensus object; NOT specified here |
 
@@ -573,12 +584,18 @@ profile(h) = v3 rules                 for h <  nMatMulV4Height
 ```
 
 implemented as `Consensus::Params::GetMatMulEncodingProfile(height)` with
-`IsBMX4CActive(height)` the underlying predicate (§8.1). Constraints (enforced at
+`IsBMX4CActive(height)` the underlying predicate (§8.1). **Public activation
+model (updated 2026-07-16): unified.** On every activated public network
+`nMatMulBMX4CHeight == nMatMulV4Height`, so the `ENC_S8` interval above is EMPTY
+and the fork goes directly v3 → ENC_BMX4C at one height. Constraints (enforced at
 chainparams construction): `nMatMulBMX4CHeight`, when set, MUST be
-`> nMatMulV4Height`, above every already-mined height at release, and never
-lowered. Reorgs across the boundary re-validate each block under its own
-height's profile (pure height function; no state). Default on every network:
-INT32_MAX (disabled) — networks that never set it stay on ENC-S8 forever.
+`>= nMatMulV4Height` (`==` on every public network — the unified direct-to-v4.2
+model; `>` only as a regtest testing option to open a non-empty ENC-S8 interval),
+above every already-mined height at release, and never lowered. Reorgs across the
+boundary re-validate each block under its own height's profile (pure height
+function; no state). Default on every network: INT32_MAX (disabled). A public
+network never runs ENC-S8: it either sets both heights equal (unified activation)
+or leaves both disabled.
 
 ### §7.4 The floor any future profile must satisfy (L0-anchored, normative)
 
@@ -660,12 +677,17 @@ decoupling trigger confirmed **on shipped silicon** (not launch slides), and
 (b) the measured GO/NO-GO passes — M-t24 on ≥ 2 independent vendors' frontier
 parts; §K.2a-WT marginal wall-time tensor-majority at Q ≥ 32 on a real FP4 part;
 cross-vendor golden vectors including FP4/FP8 devices; the joint C-15 review
-closed; the ASERT rescale computed from measurement. The **leapfrog clause**: if
-M-t24 and the joint C-15 review complete before v4.1's own activation gates
-clear, governance SHOULD consider activating ENC-BMX4C directly as the first
-fork (one fork instead of two, at no cost to the INT8 installed base) — but it
-MUST NOT be taken while the FP-silicon wall-time split is unmeasured; if that
-gate is open, ship v4.1 and stage v4.2.
+closed; the ASERT rescale computed from measurement. **Activation model (updated 2026-07-16, second external audit): the "leapfrog"
+is now the adopted public model, not a conditional option.** The upgrade
+activates as a single unified fork v3 -> ENC-BMX4C at one height
+(`nMatMulBMX4CHeight == nMatMulV4Height`) — one fork instead of two, at no cost
+to the INT8 installed base (which mines ENC-BMX4C at 1 GEMM). There is no public
+ENC-S8 interval and no separate v4.1 activation. This stays gated on the same
+measurements (M-t24 on the frontier parts above, the FP-silicon wall-time split,
+the joint C-15 review, the calibrated rescale); until they pass, mainnet and all
+public testnets remain DISABLED (both heights INT32_MAX), with no scheduled
+activation date. A staged two-fork config (`nMatMulBMX4CHeight > nMatMulV4Height`,
+a non-empty ENC-S8 interval) survives only as a regtest testing option.
 
 ---
 
@@ -698,7 +720,7 @@ Per-network `Params` fields and accessors:
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `nMatMulBMX4CHeight` | int32 | INT32_MAX (disabled) | ENC-BMX4C profile fork height; when set MUST be > `nMatMulV4Height` and above every mined height |
+| `nMatMulBMX4CHeight` | int32 | INT32_MAX (disabled) | ENC-BMX4C profile fork height; when set MUST be `>= nMatMulV4Height` and above every mined height. Public networks set it **`== nMatMulV4Height`** (unified direct-to-v4.2); strictly `>` (a non-empty ENC-S8 interval) is a regtest-only testing option |
 | `nMatMulBMX4CAsertRescaleNum` / `Den` | int64 | 1 / 1 | One-time ASERT rescale + re-anchor at the profile fork (B2b analogue; calibrated from the measured ENC-BMX4C marginal unit; 1/1 = no rescale) |
 | `nMatMulBMX4CMinProvenAccumulatorBits` | uint32 | 24 | C-1′ qualification threshold t for the native block-scaled path (consensus-protecting: consumed by self-tests/qualification, never by block validation) |
 | `IsBMX4CActive(height)` | accessor | — | `IsMatMulV4Active(height) && height >= nMatMulBMX4CHeight` (with the standard INT32_MAX disabled guard) |
@@ -725,7 +747,7 @@ profile-dispatched:
 | Combine reference | `matmul_v4::CheckCombineLimbBound` successor (e.g. `CheckCombineLimbBoundBMX4C`) | pins `288·n <= 2^23−1`; base-2⁶ remainder-top `DecomposeLimbPlanes` variant; golden vectors pin the fold bytes |
 | Difficulty | `GetNextWorkRequired` / ASERT | one-time rescale + re-anchor at `nMatMulBMX4CHeight` via `nMatMulBMX4CAsertRescaleNum/Den`, mechanically identical to the `nMatMulV4AsertRescale*` / `nMatMulAsertRetune2*` pattern |
 | Mining | `SolveMatMulV4` / batched miner (`matmul_v4_batch`) | profile-dispatched expansion + pre-shift/native path selection; winner re-derived through the single-nonce reference before sealing (A14 discipline, unchanged) |
-| Chainparams | `src/kernel/chainparams.cpp` (5 networks) | assign the §8.1 fields; construction asserts: `nMatMulBMX4CHeight > nMatMulV4Height` when set; `BMX4C_PROJECTION_BOUND_PER_N · MaxDimension <= BMX4C_COMBINE_INPUT_BOUND`; regtest MAY set a low height to exercise both sides of the boundary |
+| Chainparams | `src/kernel/chainparams.cpp` (5 networks) | assign the §8.1 fields; construction asserts: `nMatMulBMX4CHeight >= nMatMulV4Height` when set (public networks set them **equal** — unified direct-to-v4.2; strictly `>` is a regtest-only staged config); `BMX4C_PROJECTION_BOUND_PER_N · MaxDimension <= BMX4C_COMBINE_INPUT_BOUND`; regtest MAY set a strictly-greater height to exercise both sides of the (otherwise empty) ENC-S8 boundary |
 | Self-tests / qualification | `matmul_v4_backend_determinism_tests`, `verify-backend.sh` | §5.3 vector families added per profile; PASS requires the vectors to have entered the regime; `nMatMulBMX4CMinProvenAccumulatorBits` gates the native-path claim |
 | Explicitly NOT touched | verifier internals (`SketchFreivalds`), payload plumbing, DoS budget mechanism, header serialization, pooling RPC | — |
 

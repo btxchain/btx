@@ -497,7 +497,7 @@ At n = 4096, b = 4 (m = 1024): `B·V` = n³/4 ≈ 1.72×10¹⁰ MACs; the limb-t
 | Tier | Per-block cost | Storage |
 |---|---|---|
 | Mining | ≈ 2n²m INT8-MACs per lane per nonce (GPU tensor cores; §E.3) + digest hash | working set per §M |
-| Consensus-validating | full §E.2 check: ≈ 0.1–0.2 s CPU (n = 4096) | payload to prune depth 10 000 (`src/consensus/params.h:151`): 10⁴ × 8 MiB ≈ **80 GiB rolling** (b=4, v4.1) |
+| Consensus-validating | full §E.2 check: ≈ 0.1–0.2 s CPU (n = 4096) | **[corrected 2026-07-16, second external audit]** the "80 GiB rolling" figure below assumed proof-aware pruning that is **NOT implemented**: `nMatMulProofPruneDepth` (`src/consensus/params.h:151`) is **non-functional (no consumer)**, so a default node retains every ~8 MiB proof — **~2.9 TiB/yr of unbounded growth at 90 s spacing, no rolling store**. Historical (unrealized) design figure: payload to prune depth 10 000 = 10⁴ × 8 MiB ≈ 80 GiB (b=4, v4.1). |
 | Economic (high-value operator) | full check over recent window only (`nMatMulValidationWindow = 1000`, `:145`), assumevalid beneath | ≈ 500 MiB rolling |
 | SPV | header-only: `matmul_digest ≤ target`, O(1) | headers only; no payload download |
 

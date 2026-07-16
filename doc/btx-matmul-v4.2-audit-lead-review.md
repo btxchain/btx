@@ -94,7 +94,9 @@ and/or the independent oracle.
   a direct C) so no future backend forms C on an FP unit at n=8192.
 - **F-L2 (Low, defense-in-depth):** `ComputeDigestBMX4C` reuses the `"BTX_MATMUL_V4"`
   digest domain tag. Safe today (ENC-S8/ENC-BMX4C are height-disjoint with different
-  operands and different `hashPrevBlock`→σ, so no cross-profile collision or replay), but
+  operands and different `hashPrevBlock`→σ, so no cross-profile collision or replay —
+  and under the unified direct-to-v4.2 model, `nMatMulBMX4CHeight == nMatMulV4Height`,
+  ENC-S8 has no public height interval at all, which only strengthens this), but
   an explicit per-profile digest domain tag is a clean one-line hardening to decide at
   fork time (also flagged by the foundation implementer).
 - **F-L3 (Low, defense-in-depth — my verifier-core finding):** `VerifySketchBMX4C` (like

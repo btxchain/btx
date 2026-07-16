@@ -31,6 +31,15 @@
   ENC-BMX4C at height 250,000** — that chain halts at the fork under the current
   code.
 
+  > **Update (2026-07-16, second external audit):** the staged testnet schedule
+  > (ENC-S8 @ 200,000, ENC-BMX4C @ 250,000) has since been **WITHDRAWN** — public
+  > testnet `nMatMulV4Height` and `nMatMulBMX4CHeight` are now both INT32_MAX
+  > (disabled), so **no public network still activates ENC-BMX4C at 250,000** and
+  > this halt is no longer reachable on any public chain. The underlying W-1
+  > seed-idempotency defect remains **real and must be fixed** before any unified
+  > direct-to-v4.2 activation (`nMatMulBMX4CHeight == nMatMulV4Height`); references
+  > to height 250,000 below are historical (the audited-head code state).
+
 ---
 
 ## Findings by severity
@@ -87,9 +96,11 @@ bad-matmul-seeds PASS?   False
 **Blast radius.** `fMatMulPOW=true` on all real networks; `fSkipMatMulValidation`
 defaults false and is only forced true on regtest-without-`-test=matmulstrict`
 (`src/kernel/chainparams.cpp:1166`) and one custom net (`:1583`). **Testnet
-(`:566`, no skip) enforces this check and sets `nMatMulBMX4CHeight = 250'000`
-(`:620`).** So the moment testnet reaches 250k (or any enforcing net activates
-BMX4C), the recompute rejects all blocks → the chain cannot advance past the
+(`:566`, no skip) enforces this check and, at the audited head, set
+`nMatMulBMX4CHeight = 250'000` (`:620`) — a schedule since WITHDRAWN (testnet is
+now INT32_MAX/disabled; see the 2026-07-16 note above).** So the moment an
+enforcing net activates BMX4C (as testnet would have at 250k under the withdrawn
+schedule), the recompute rejects all blocks → the chain cannot advance past the
 fork. Mainnet (`:152-538`) and testnet4 (`:765-1137`) never set
 `nMatMulBMX4CHeight` → INT32_MAX → inert, which is why this has not surfaced. The
 default-skip on regtest also explains why unit/functional coverage did not catch
@@ -127,9 +138,11 @@ The invariant assert is called from the **testnet** (`src/kernel/chainparams.cpp
 and **regtest/opts** (`:1289`) constructors only. The **mainnet** and **testnet4**
 constructors do not call it. Today this is harmless (both leave BMX4C inert, and
 the function early-returns for `INT32_MAX`), and the assert body itself is
-correct: it pins strict fork ordering (`nMatMulBMX4CHeight > nMatMulV4Height`, so
-no dual-profile window), the combine-bound (`288 * MaxDim ≤ 2^23-1`), and
-`dim % 32 == 0`. **Risk:** a future release that enables BMX4C on mainnet/testnet4
+correct: it pins fork ordering (`nMatMulBMX4CHeight >= nMatMulV4Height`, so no
+dual-profile window; **updated 2026-07-16** to `>=` for the unified
+direct-to-v4.2 model where public networks set `nMatMulBMX4CHeight ==
+nMatMulV4Height` — a strictly-greater ENC-S8 interval is now a regtest-only
+option), the combine-bound (`288 * MaxDim ≤ 2^23-1`), and `dim % 32 == 0`. **Risk:** a future release that enables BMX4C on mainnet/testnet4
 by only setting the height, without also wiring the assert call into that
 constructor, would ship a misconfig with no startup guard. **Fix:** call
 `AssertBMX4CConstructionInvariants` unconditionally from `CChainParams`
@@ -283,8 +296,9 @@ rejects seed derivation when parent context is unavailable. No action.
 3. **Real accept-wrong / replay / split path:** none found. The verify+fallback
    contract is sound and the profile transition has no replay/off-by-one. The
    highest-value finding (W-1) is the opposite failure mode: a *reject-all*
-   liveness break on enforcing networks (testnet at height 250,000), latent while
-   mainnet/testnet4 keep BMX4C inert.
+   liveness break on enforcing networks (testnet at the withdrawn height 250,000 —
+   testnet is now INT32_MAX/disabled, so this is historical; the defect itself is
+   FIXED, see Resolution status), latent while mainnet/testnet4 keep BMX4C inert.
 4. **Verify+fallback soundness verdict:** SOUND, closed with strong margin
    (every device result re-verified by the consensus verifier; winner
    additionally byte-identical to the single-nonce reference; all error/partial

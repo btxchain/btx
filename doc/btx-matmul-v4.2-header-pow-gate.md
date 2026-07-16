@@ -83,9 +83,29 @@ single staged commit — this throttle is the interim, honestly-labelled mitigat
 - `GetHash()` already commits every consensus header field (including the
   self-declared `matmul_digest`), so the gate binds the whole header.
 - `H` is `SHA256d` over a fixed little-endian preimage — bit-exact, deterministic.
-- `nMatMulHeaderPoWBits` is an **easy** fixed target: honest miners satisfy it in
-  a handful of cheap hashes, while flooding `N` fake headers costs `~N/p_gate`
-  hashes (`p_gate` = target/2²⁵⁶). This is the tunable spam price.
+- The gate target is `nBits`-relative (not a fixed target): it is the block's own
+  `DeriveTarget(nBits)` eased by `nMatMulHeaderPoWDiscountBits` (0..255). Honest
+  miners satisfy it in a handful of cheap hashes, while flooding `N` fake headers
+  claiming difficulty `D` costs `~N·D/2^discount` hashes — proportional to the
+  claimed chainwork (audit C2). The discount is the tunable spam price.
+
+**Update (second external audit, 2026-07-16) — H2 discount range + H4 pure
+derivation.** The throttle discount (`nMatMulHeaderPoWDiscountBits`, the left
+shift on `block_target(nBits)` above) is valid **only in `0..255`**, with
+`UINT32_MAX` reserved as the **disabled** sentinel. Values `256..UINT32_MAX-1`
+are **rejected fatally at chain-parameter construction** (and fail **closed** —
+hardest target — at runtime, never `powLimit`): a discount ≥ 256 would shift the
+256-bit target to or past `powLimit`, collapsing the nBits-proportional throttle
+back into a **fixed-cost gate** — exactly the constant-work weakness the audit-C2
+rebinding removed. Enforced by `Consensus::Params::MATMUL_HEADER_POW_MAX_DISCOUNT_BITS
+= 255` + `IsMatMulHeaderPoWDiscountValid()`. The nBits→gate-target mapping is now a
+**pure helper `DeriveMatMulHeaderPoWGateTarget(nBits, discount, powLimit)`**
+(declared in `pow.h`), which is the tested derivation (H4): fixed-vector tests
+(`MatMulHeaderPoWGateTarget_pure_fixed_vectors`) cover discounts 0/1/8/255, the
+rejected 256 and `UINT32_MAX-1`, the disabled sentinel, `powLimit` saturation,
+and nBits-ordering — vectors a fixed-target implementation cannot reproduce
+(the earlier target-binding test was probabilistic because `nBits` sits inside
+`GetHash()`).
 
 ## 3. Why the grinding nonce MUST be decoupled from the matmul (the key subtlety)
 
@@ -119,19 +139,34 @@ The entire MatMul upgrade activates on ONE flag day, so this gate has **no
 activation height of its own** — it rides the v4 fork (`IsMatMulV4Active`) and is
 enabled purely by a non-zero target. This avoids proliferating activation gates.
 
-- `Consensus::Params::nMatMulHeaderPoWBits` (`src/consensus/params.h`): the easy
-  spam target, **`0` = disabled sentinel** (default), and `IsMatMulHeaderPoWEnabled()`
-  (`== bits != 0`). There is deliberately NO `nMatMulHeaderPoWHeight`.
-- `CheckMatMulHeaderSpamGate(header, params)` (`src/pow.cpp`): the exact gate
-  above, bit-exact SHA256d; returns `true` immediately when `bits == 0`.
+- `Consensus::Params::nMatMulHeaderPoWDiscountBits` (`src/consensus/params.h`):
+  the nBits-relative easing (audit C2), **`UINT32_MAX` = disabled sentinel**
+  (default). `IsMatMulHeaderPoWEnabled()` is `discount != UINT32_MAX`. The **only**
+  valid enabled range is **0..255** (`MATMUL_HEADER_POW_MAX_DISCOUNT_BITS`, audit
+  H2); `IsMatMulHeaderPoWDiscountValid()` enforces it. A value in
+  `[256, UINT32_MAX-1]` is rejected fatally at chain-parameter construction (it
+  would drive the target to `powLimit` irrespective of nBits, recreating the
+  fixed-cost C2 gate). There is deliberately NO `nMatMulHeaderPoWHeight`.
+- `DeriveMatMulHeaderPoWGateTarget(nBits, discount, powLimit)` (`src/pow.cpp`,
+  audit H4): the PURE, directly-testable target derivation (no header, no hash) —
+  `DeriveTarget(nBits)` shifted easier by `discount`, saturating at `powLimit`;
+  returns `nullopt` for the disabled sentinel, an out-of-range discount, or an
+  undecodable nBits.
+- `CheckMatMulHeaderSpamGate(header, params)` (`src/pow.cpp`): returns `true`
+  immediately when disabled; otherwise computes the gate target via the pure helper
+  (fail-**closed** on an out-of-range discount) and compares
+  `SHA256d(GetHash() || nNonce) <= gate_target`.
 - Enforcement wired into `ContextualCheckBlockHeader` (`src/validation.cpp`),
   gated on `IsMatMulV4Active(nHeight) && IsMatMulHeaderPoWEnabled()`, NOT gated by
   `fSkipMatMulValidation` (a one-hash relay/DoS defense, not an expensive-verify
   correctness check). Reject code `bad-matmul-header-pow`.
-- Unit test `pow_tests/MatMulHeaderPoWSpamGate_grindable_decoupled_and_enforced`:
-  proves the disabled sentinel (bits == 0) passes; that once enabled the gate is
-  grindable via `nNonce`; that grinding `nNonce` does not change `GetHash()`
-  (decoupling); and that an easy-but-nonzero target still rejects most nonces.
+- Unit tests (`src/test/pow_tests.cpp`):
+  `MatMulHeaderPoWSpamGate_grindable_decoupled_and_enforced` proves the disabled
+  sentinel passes, the gate is grindable via `nNonce`, grinding `nNonce` does not
+  change `GetHash()` (decoupling), and the target is bound to nBits; and
+  `MatMulHeaderPoWGateTarget_pure_fixed_vectors` (H4) pins the exact target for
+  discounts 0/1/8/255, the invalid 256 and `UINT32_MAX-1`, the disabled sentinel,
+  and the `powLimit` saturation edge.
 
 ## 5. The one activation-blocking step: wire-serialize the grinding nonce
 
@@ -149,10 +184,11 @@ hashes, and every pinned header golden stable). Concretely:
    unchanged; `nNonce` rides along like the payload does for the body (not part
    of the block's identity, so stripping/mutating it in transit just fails the
    gate on that copy — a `BLOCK_MUTATED`-class outcome, not header poisoning).
-2. Set `nMatMulHeaderPoWBits` from a spam-price calibration (target the honest
-   cost at a few ms and the flood price at seconds/header on commodity CPUs).
-   Setting it non-zero is what enables the gate — it activates at the SAME
-   flag-day height as the rest of the upgrade (no separate gate).
+2. Set `nMatMulHeaderPoWDiscountBits` in `0..255` from a spam-price calibration
+   (target the honest cost at a few ms and the flood price at seconds/header on
+   commodity CPUs). Setting it away from the `UINT32_MAX` disabled sentinel is what
+   enables the gate — it activates at the SAME flag-day height as the rest of the
+   upgrade (no separate gate).
 3. Teach the miner/solver to grind `nNonce` for the gate after sealing the matmul
    winner (a few cheap hashes; independent of the matmul).
 4. Testnet burn-in (header propagation with the new wire field; confirm honest
