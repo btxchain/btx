@@ -7906,6 +7906,7 @@ static RPCHelpMan getblocktemplate()
                     {RPCResult::Type::STR_HEX, "seed_b", "MatMul matrix seed B"},
                     {RPCResult::Type::NUM, "min_dimension", "minimum allowed MatMul matrix dimension"},
                     {RPCResult::Type::NUM, "max_dimension", "maximum allowed MatMul matrix dimension"},
+                    {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C\" or \"ENC-S8\"); present only under the v4 profile so a self-computing miner knows which operand encoding the network expects across the ENC-S8 -> ENC-BMX4C fork"},
                 }},
                 {RPCResult::Type::NUM, "matmul_n", /*optional=*/true, "MatMul matrix dimension (n)"},
                 {RPCResult::Type::NUM, "matmul_b", /*optional=*/true, "MatMul transcript block size (b)"},
