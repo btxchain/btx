@@ -7,6 +7,7 @@
 
 #include <chainparamsseeds.h>
 #include <consensus/amount.h>
+#include <consensus/consensus.h>
 #include <consensus/merkle.h>
 #include <consensus/params.h>
 #include <hash.h>
@@ -63,6 +64,20 @@ static constexpr CAmount BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP{10'000 * COIN};
 // misconfiguration fails loudly at node startup rather than at the fork.
 static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus)
 {
+    // Audit P1-1 (per-network relay invariant): the enforced block-size ceiling
+    // is the per-network consensus value nMaxBlockSerializedSize, but the P2P
+    // layer sizes its block-message buffer from the compile-time
+    // MAX_BLOCK_SERIALIZED_SIZE (see net.cpp's MAX_BLOCK_MESSAGE_LENGTH
+    // static_assert). If any network raised its consensus block ceiling above
+    // that compile-time bound, a consensus-valid block on that network would
+    // exceed MAX_BLOCK_MESSAGE_LENGTH and become un-relayable -- reintroducing the
+    // P0.5 split/eclipse surface at the per-network level. Pin every network's
+    // block ceiling to the compile-time bound here so a mismatch aborts startup
+    // rather than surfacing as an un-downloadable block in production. (This runs
+    // unconditionally, before the MatMul-specific checks, so it covers networks
+    // with the MatMul upgrade disabled too.)
+    assert(consensus.nMaxBlockSerializedSize <= MAX_BLOCK_SERIALIZED_SIZE);
+
     // Audit F1 (wave-3): the header-PoW spam gate is enabled by a non-zero
     // nMatMulHeaderPoWBits, but it grinds the legacy `nNonce` which is not yet on
     // the header wire -- enabling it before that wire change (and the miner grind)

@@ -785,17 +785,27 @@ int V1Transport::readHeader(Span<const uint8_t> msg_bytes)
         return -1;
     }
 
-    // Audit P0.5: a consensus-valid block is relayed as a single `block` message,
-    // so the message-size ceiling MUST be at least the maximum serialized block
-    // size, or a valid block becomes un-relayable (a latent split/eclipse vector).
-    // Pin the invariant at compile time so the two limits can never silently
-    // diverge again.
-    static_assert(MAX_BLOCK_SERIALIZED_SIZE <= MAX_PROTOCOL_MESSAGE_LENGTH,
-                  "P2P message limit must accommodate a maximum serialized block; "
-                  "otherwise a consensus-valid block cannot be relayed");
+    // Audit P0.5 / P1-1: a consensus-valid block is relayed as a single `block`
+    // (or `blocktxn`) message, so the ceiling for THOSE commands must be at least
+    // the maximum serialized block size, or a valid block becomes un-relayable (a
+    // latent split/eclipse vector). But that larger ceiling must apply ONLY to
+    // block-bearing commands -- raising the GLOBAL limit would let a peer force
+    // 24 MB of buffering/parsing on any arbitrary command (a 50% DoS-envelope
+    // expansion). So ordinary messages keep MAX_PROTOCOL_MESSAGE_LENGTH (16 MB)
+    // and only `block`/`blocktxn` get MAX_BLOCK_MESSAGE_LENGTH (24 MB). The
+    // block-message ceiling is pinned >= a max block at compile time.
+    static_assert(MAX_BLOCK_SERIALIZED_SIZE <= MAX_BLOCK_MESSAGE_LENGTH,
+                  "block-bearing message limit must accommodate a maximum serialized "
+                  "block; otherwise a consensus-valid block cannot be relayed");
 
-    // reject messages larger than MAX_SIZE or MAX_PROTOCOL_MESSAGE_LENGTH
-    if (hdr.nMessageSize > MAX_SIZE || hdr.nMessageSize > MAX_PROTOCOL_MESSAGE_LENGTH) {
+    const std::string hdr_msg_type = hdr.GetMessageType();
+    const bool is_block_bearing_msg =
+        (hdr_msg_type == NetMsgType::BLOCK || hdr_msg_type == NetMsgType::BLOCKTXN);
+    const unsigned int msg_size_limit =
+        is_block_bearing_msg ? MAX_BLOCK_MESSAGE_LENGTH : MAX_PROTOCOL_MESSAGE_LENGTH;
+
+    // reject messages larger than MAX_SIZE or the command-specific size limit
+    if (hdr.nMessageSize > MAX_SIZE || hdr.nMessageSize > msg_size_limit) {
         LogDebug(BCLog::NET, "Header error: Size too large (%s, %u bytes), peer=%d\n", SanitizeString(hdr.GetMessageType()), hdr.nMessageSize, m_node_id);
         return -1;
     }

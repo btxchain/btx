@@ -6,12 +6,12 @@
 
 STRICT UNIFIED ACTIVATION (audit P0.2): the MatMul upgrade activates on ONE flag
 day, v3 -> v4.2/ENC-BMX4C directly, with NO reachable ENC-S8 interval on any
-network. So v4_height == bmx4c_height == H: at heights below H the v3 rules apply;
-at and above H the ENC_BMX4C profile applies exclusively (the verifier, payload
-shape, digest, and matmul_dim are UNCHANGED across the fork -- only how header
-seeds become exact integer operands changes). There is no [v4, bmx4c) ENC_S8
-window; a config with v4_height != bmx4c_height fails the strict-unified startup
-assert (AssertBMX4CConstructionInvariants).
+network. So v4_height == bmx4c_height == H: at heights below H the v3 rules apply
+(v3 dimension); at and above H the ENC_BMX4C profile applies exclusively (the v4
+dimension, the ENC-BMX4C verifier/payload/digest). The committed dimension changes
+across this v3 -> v4.2 boundary (v3 nMatMulDimension -> v4 nMatMulV4Dimension).
+There is no [v4, bmx4c) ENC_S8 window; a config with v4_height != bmx4c_height
+fails the strict-unified startup assert (AssertBMX4CConstructionInvariants).
 
 This test mines across the single boundary on regtest and asserts:
   * pre-fork v3 blocks validate on an independently-validating peer;
@@ -41,7 +41,10 @@ from test_framework.util import assert_equal
 # ACTIVATION_HEIGHT are v3 (product-committed from V3_BINDING_HEIGHT); heights at
 # and above ACTIVATION_HEIGHT are ENC-BMX4C. There is NO ENC_S8 interval.
 ACTIVATION_HEIGHT = 6
-DIMENSION = 128
+# Below H the blocks are v3 and carry the regtest v3 dimension (nMatMulDimension
+# = 64); at and above H they carry the v4 dimension (-regtestmatmulv4dimension).
+V3_DIMENSION = 64
+V4_DIMENSION = 128
 V3_BINDING_HEIGHT = 2
 
 
@@ -56,7 +59,7 @@ class BTXMatMulBMX4CActivation(BitcoinTestFramework):
             f"-regtestmatmulproductdigestheight={V3_BINDING_HEIGHT}",
             "-regtestmatmulrequireproductpayload=0",
             f"-regtestmatmulv4height={ACTIVATION_HEIGHT}",
-            f"-regtestmatmulv4dimension={DIMENSION}",
+            f"-regtestmatmulv4dimension={V4_DIMENSION}",
             f"-regtestbmx4cheight={ACTIVATION_HEIGHT}",
         ]
         self.extra_args = [common, common]
@@ -82,7 +85,7 @@ class BTXMatMulBMX4CActivation(BitcoinTestFramework):
         self.log.info("The last pre-fork v3 block validated on the peer")
         v3_block = node1.getblock(node1.getblockhash(pre_fork_height), 2)
         assert_equal(v3_block["height"], pre_fork_height)
-        assert_equal(v3_block["matmul_dim"], DIMENSION)
+        assert_equal(v3_block["matmul_dim"], V3_DIMENSION)
 
         tip_hash = node1.getbestblockhash()
 
@@ -116,9 +119,9 @@ class BTXMatMulBMX4CActivation(BitcoinTestFramework):
         self.log.info("The activation block validates under the ENC-BMX4C profile")
         bmx4c_block = node1.getblock(node1.getbestblockhash(), 2)
         assert_equal(bmx4c_block["height"], ACTIVATION_HEIGHT)
-        # matmul_dim is UNCHANGED across the encoding-profile fork (only the
-        # operand encoding changes).
-        assert_equal(bmx4c_block["matmul_dim"], DIMENSION)
+        # At the unified v3 -> v4.2 fork the committed dimension changes from the
+        # v3 dimension (V3_DIMENSION) to the v4 dimension (V4_DIMENSION).
+        assert_equal(bmx4c_block["matmul_dim"], V4_DIMENSION)
 
         self.log.info("Post-fork ENC-BMX4C blocks continue to validate on both nodes")
         self.generate(node0, 3, sync_fun=self.no_op)
@@ -129,13 +132,13 @@ class BTXMatMulBMX4CActivation(BitcoinTestFramework):
         )
         for height in range(ACTIVATION_HEIGHT, ACTIVATION_HEIGHT + 4):
             block = node1.getblock(node1.getblockhash(height), 2)
-            assert_equal(block["matmul_dim"], DIMENSION)
+            assert_equal(block["matmul_dim"], V4_DIMENSION)
 
         self.log.info("The v3->ENC-BMX4C unified transition is intact on both nodes")
         assert_equal(node0.getbestblockhash(), node1.getbestblockhash())
         # The v3 side of the boundary is unchanged after activation.
         boundary_parent = node1.getblock(node1.getblockhash(pre_fork_height), 2)
-        assert_equal(boundary_parent["matmul_dim"], DIMENSION)
+        assert_equal(boundary_parent["matmul_dim"], V3_DIMENSION)
 
 
 if __name__ == "__main__":
