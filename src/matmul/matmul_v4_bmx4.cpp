@@ -28,6 +28,13 @@ constexpr char kSeedTagV42[] = "BTX_MATMUL_SEED_V42";
 constexpr char kProjectorUTagV42[] = "BTX_MATMUL_V42_SKETCH_U";
 constexpr char kProjectorVTagV42[] = "BTX_MATMUL_V42_SKETCH_V";
 
+// V4.2-D domain-separation tags (ENC-BMX4C-D deeper-commit profile). Distinct
+// from the V42 (C-profile) tags so the two profiles are cryptographically
+// independent objects: a seed can never yield correlated C/D operand streams.
+constexpr char kSeedTagV42D[] = "BTX_MATMUL_SEED_V42D";
+constexpr char kProjectorUTagV42D[] = "BTX_MATMUL_V42D_SKETCH_U";
+constexpr char kProjectorVTagV42D[] = "BTX_MATMUL_V42D_SKETCH_V";
+
 // XOF stream domain bytes for the two operand planes. Distinct from the
 // existing int8_field streams ('s' = 0x73, 'q' = 0x71) so a seed can never
 // yield correlated mantissa/scale/s8/Fq keystreams.
@@ -435,6 +442,111 @@ bool VerifySketchBMX4C(const CBlockHeader& header, uint32_t n, uint32_t rounds,
     const uint256 seed_a = DeriveOperandSeedBMX4C(header, Operand::A);
     const uint256 seed_b = DeriveOperandSeedBMX4C(header, Operand::B);
     const auto [seed_u, seed_v] = DeriveProjectorSeedsBMX4C(header);
+    const std::vector<int8_t> Ahat = ExpandOperandA(seed_a, n);
+    const std::vector<int8_t> Bhat = ExpandOperandB(seed_b, n);
+    const std::vector<int8_t> U = ExpandProjectorBMX4C(seed_u, m, n);
+    const std::vector<int8_t> V = ExpandProjectorBMX4C(seed_v, n, m);
+
+    return matmul::v4::SketchFreivalds(Ahat, Bhat, U, V, sketch, sigma, payload,
+                                       n, m, rounds);
+}
+
+// ---------------------------------------------------------------------------
+// ENC-BMX4C-D (deeper-commit profile): the ENC-BMX4C construction with b = 2
+// (m = n/2), so the sketch commits 4x more of the exact-integer product C and
+// the enforced per-nonce tensor work is ~3.6x (limb-tensor combine 16*n*m^2,
+// quadratic in m). EVERY operand-encoding primitive is REUSED UNCHANGED
+// (ExpandOperandA/B, ExpandProjectorBMX4C, ComputeProjectedLeft/Right,
+// ComputeCombineModQ, SerializeSketch, ComputeSketchDigest, SketchFreivalds) --
+// only the sketch rank m and the domain tags differ. The accumulator bounds
+// (2304*n, 288*n, 1024*n) are m-INDEPENDENT, so ENC-BMX4C-D preserves M-t24
+// determinism byte-for-byte. See matmul_v4_bmx4.h and
+// doc/btx-matmul-v4.2-compute-bound-redesign.md.
+// ---------------------------------------------------------------------------
+
+uint256 DeriveOperandSeedBMX4D(const CBlockHeader& header, Operand which)
+{
+    // A: template hash (nonce-independent); B: full header hash (nonce-fresh).
+    const uint256 header_hash = (which == Operand::A)
+        ? matmul::v4::ComputeTemplateHash(header)
+        : matmul::ComputeMatMulHeaderHash(header);
+    const uint8_t which_byte = static_cast<uint8_t>(which);
+    return DeriveTaggedSeed(kSeedTagV42D, sizeof(kSeedTagV42D) - 1, header_hash,
+                            &which_byte, 1);
+}
+
+std::pair<uint256, uint256> DeriveProjectorSeedsBMX4D(const CBlockHeader& header)
+{
+    const uint256 template_hash = matmul::v4::ComputeTemplateHash(header);
+    return {DeriveTaggedSeed(kProjectorUTagV42D, sizeof(kProjectorUTagV42D) - 1,
+                             template_hash, nullptr, 0),
+            DeriveTaggedSeed(kProjectorVTagV42D, sizeof(kProjectorVTagV42D) - 1,
+                             template_hash, nullptr, 0)};
+}
+
+bool ValidateDimsBMX4D(uint32_t n, uint32_t& m_out)
+{
+    if ((n % kBlockLen) != 0) return false;      // E8M0 block scales
+    if (!CheckCombineLimbBoundBMX4C(n)) return false; // 288*n <= 2^23-1 (m-independent)
+    return matmul::v4::ValidateDims(n, kTileBMX4D, m_out); // b=2 | n, s32 accum bound
+}
+
+bool ComputeDigestBMX4D(const CBlockHeader& header, uint32_t n,
+                        uint256& digest_out, std::vector<unsigned char>& payload_out)
+{
+    uint32_t m = 0;
+    if (!ValidateDimsBMX4D(n, m)) {
+        return false;
+    }
+
+    const uint256 sigma = matmul::v4::DeriveSigma(header); // UNCHANGED
+    const uint256 seed_a = DeriveOperandSeedBMX4D(header, Operand::A);
+    const uint256 seed_b = DeriveOperandSeedBMX4D(header, Operand::B);
+    const auto [seed_u, seed_v] = DeriveProjectorSeedsBMX4D(header);
+
+    const std::vector<int8_t> Ahat = ExpandOperandA(seed_a, n);
+    const std::vector<int8_t> Bhat = ExpandOperandB(seed_b, n);
+    const std::vector<int8_t> U = ExpandProjectorBMX4C(seed_u, m, n);
+    const std::vector<int8_t> V = ExpandProjectorBMX4C(seed_v, n, m);
+
+    // Optimal factoring Chat = (U*Ahat)(Bhat*V), never forming C -- byte-
+    // identical to the full-C U*C*V path and to the base-2^6 limb-tensor path
+    // at m = n/2. The larger m is exactly what the miner cannot avoid
+    // committing, which is what raises the enforced tensor work.
+    const std::vector<int32_t> P = matmul::v4::ComputeProjectedLeft(U, Ahat, n, m);
+    const std::vector<int32_t> Q = matmul::v4::ComputeProjectedRight(Bhat, V, n, m);
+    const std::vector<Fq> Chat = matmul::v4::ComputeCombineModQ(P, Q, n, m);
+
+    payload_out = matmul::v4::SerializeSketch(Chat);
+    digest_out = matmul::v4::ComputeSketchDigest(sigma, payload_out);
+    return true;
+}
+
+bool VerifySketchBMX4D(const CBlockHeader& header, uint32_t n, uint32_t rounds,
+                       const std::vector<unsigned char>& payload, uint256& digest_out)
+{
+    uint32_t m = 0;
+    if (!ValidateDimsBMX4D(n, m)) {
+        return false;
+    }
+    if (rounds == 0) { // fail-closed, mirroring VerifySketchBMX4C (F-L3)
+        return false;
+    }
+
+    std::vector<Fq> sketch;
+    if (!matmul::v4::ParseSketch(payload, m, sketch)) {
+        return false;
+    }
+
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    digest_out = matmul::v4::ComputeSketchDigest(sigma, payload);
+    if (digest_out != header.matmul_digest) {
+        return false;
+    }
+
+    const uint256 seed_a = DeriveOperandSeedBMX4D(header, Operand::A);
+    const uint256 seed_b = DeriveOperandSeedBMX4D(header, Operand::B);
+    const auto [seed_u, seed_v] = DeriveProjectorSeedsBMX4D(header);
     const std::vector<int8_t> Ahat = ExpandOperandA(seed_a, n);
     const std::vector<int8_t> Bhat = ExpandOperandB(seed_b, n);
     const std::vector<int8_t> U = ExpandProjectorBMX4C(seed_u, m, n);

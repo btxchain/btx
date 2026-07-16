@@ -216,6 +216,89 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out);
                                      const std::vector<unsigned char>& payload,
                                      uint256& digest_out);
 
+// ---------------------------------------------------------------------------
+// ENC-BMX4C-D: the compute-bound "deeper-commit" successor profile (v4.2-D).
+// Design: doc/btx-matmul-v4.2-compute-bound-redesign.md.
+//
+// IDENTICAL to ENC-BMX4C in EVERY operand-encoding respect: the M11 mantissa
+// alphabet, E8M0 power-of-two block scales (block length 32, S = 3, E_max = 48),
+// scale-free M11 U/V, the wide counter-mode SHA-256 XOF, the base-2^6
+// remainder-top limb combine, q = 2^61-1, R = 3, and the digest H(sigma||Chat).
+// It changes EXACTLY ONE L1 parameter -- the sketch tile b, 4 -> 2 -- so the
+// sketch rank m = n/b DOUBLES (m = 2048 at n = 4096). This commits MORE of the
+// exact-integer product C: a rank-m^2 = n^2/4 linear sketch (4x compression of
+// C, up from the 16x compression at b = 4). Per design-spec §L.4 (verifier-
+// linearity collapse), growing m is the ONLY lever that simultaneously (i)
+// raises the enforced per-nonce tensor work and (ii) shrinks the (U*A)(B*V)
+// factoring shortcut, WHILE keeping the verifier O(n^2) and integer-exact.
+//
+// ENFORCED-WORK / PAYLOAD TRADEOFF at n = 4096 (the honest operating point):
+//   * per-nonce MARGINAL tensor MACs on the limb-tensor combine path
+//     (B nonce-fresh; A/U/V template-scoped under I1'):
+//         B*V = n^2*m   +   combine = 16*n*m^2
+//         b = 4 (m=1024): n^3/4 + n^3     = 1.25 n^3
+//         b = 2 (m=2048): n^3/2 + 4 n^3   = 4.5  n^3   (3.6x more enforced work)
+//     The combine term (16*n*m^2, QUADRATIC in m) rises to ~89% of the unit and
+//     is the tensor-core-resident work (16 native s8 limb-pair GEMMs).
+//   * (U*A)(B*V) shortcut speedup vs a per-nonce full-C recompute shrinks from
+//     ~4.2x (b=4) to ~2.3x (b=2); at b=1 (full C, out of transport bounds) it
+//     reaches 1.5x -- the linear commitment can never drive it to 1 while the
+//     verifier stays O(n^2) (the L1 theorem; we do not pretend to escape it).
+//   * sketch payload 8*m^2: 8 MiB (b=4) -> 32 MiB (b=2). This EXCEEDS the
+//     16 MiB P2P / 24 MiB block ceiling and REQUIRES the relay-extension plan
+//     (redesign doc §6, P1/P3). Stated plainly; it is the price of the work.
+//   * verifier stays O(n^2): dominated by the two dense n^2 matvecs
+//     A*(B*(V*y)); the O(m^2) left side and O(nm) projections grow with m but
+//     stay sub-dominant (~+25% verify at n=4096, still well under a second).
+//   * DETERMINISM / M-t24 UNTOUCHED: every accumulator bound (|C| <= 2304*n,
+//     |P|,|Q| <= 288*n, |S_ij| <= 1024*n) is m-INDEPENDENT, so ENC-BMX4C-D is
+//     byte-for-byte identical to ENC-BMX4C on the accumulator-exactness axis.
+//     Growing m spends payload, NEVER precision.
+//
+// Cryptographically INDEPENDENT of ENC-BMX4C: distinct V4.2-D domain tags, so a
+// seed can never produce correlated C-profile / D-profile operand streams.
+// This is a versioned L1 profile (a clean hard fork of parameters+vectors into
+// the SAME L0 machine); it does NOT touch q, R, the verifier structure, the
+// digest form, C-1', or price-independence.
+// ---------------------------------------------------------------------------
+
+/** ENC-BMX4C-D sketch tile: b = 2 at the mainnet n = 4096, so m = n/2 = 2048
+ *  (payload 8*m^2 = 32 MiB). If n is ever retargeted, b retargets to HOLD
+ *  m = 2048 (b = 4 at n = 8192), mirroring the ENC-BMX4C m = 1024 discipline;
+ *  the compile-time constant here pins the mainnet-dimension tile. */
+inline constexpr uint32_t kTileBMX4D = 2;
+
+/** V4.2-D seed derivations (distinct domain tags from ENC-BMX4C's V42 tags):
+ *   seed_A = SHA256("BTX_MATMUL_SEED_V42D"     || template_hash    || 0x41) TMPL
+ *   seed_B = SHA256("BTX_MATMUL_SEED_V42D"     || full_header_hash || 0x42) NONCE
+ *   seed_U = SHA256("BTX_MATMUL_V42D_SKETCH_U" || template_hash)           TMPL
+ *   seed_V = SHA256("BTX_MATMUL_V42D_SKETCH_V" || template_hash)           TMPL
+ *  Same I1' scoping as ENC-BMX4C (A/U/V template-scoped -> batch-fusible;
+ *  B nonce-fresh). sigma = SHA256d(header) is reused UNCHANGED. */
+[[nodiscard]] uint256 DeriveOperandSeedBMX4D(const CBlockHeader& header, Operand which);
+[[nodiscard]] std::pair<uint256, uint256> DeriveProjectorSeedsBMX4D(const CBlockHeader& header);
+
+/** Validate (n, b = kTileBMX4D = 2) for ENC-BMX4C-D: identical structural gates
+ *  to ValidateDimsBMX4C (n % 32 == 0, CheckCombineLimbBoundBMX4C, b | n, s32
+ *  accum bound) but at b = 2. Returns m = n/2 on success. */
+[[nodiscard]] bool ValidateDimsBMX4D(uint32_t n, uint32_t& m_out);
+
+/** Miner: derive the ENC-BMX4C-D consensus digest + sketch payload for `header`
+ *  at dimension `n`. Byte-for-byte the ENC-BMX4C ComputeDigestBMX4C algorithm
+ *  with the D domain tags and m = n/2, so the payload is 8*(n/2)^2 bytes and the
+ *  enforced tensor work is ~3.6x the C-profile. Pure integer arithmetic. */
+[[nodiscard]] bool ComputeDigestBMX4D(const CBlockHeader& header, uint32_t n,
+                                      uint256& digest_out,
+                                      std::vector<unsigned char>& payload_out);
+
+/** Verifier: O(n^2) ENC-BMX4C-D consensus check. The ENC-BMX4C verifier at
+ *  m = n/2 with the D seeds -- SketchFreivalds is reused UNCHANGED (it is
+ *  compute-path- AND rank-agnostic). Returns true iff every round matches AND
+ *  the recomputed digest equals `header.matmul_digest`. */
+[[nodiscard]] bool VerifySketchBMX4D(const CBlockHeader& header, uint32_t n, uint32_t rounds,
+                                     const std::vector<unsigned char>& payload,
+                                     uint256& digest_out);
+
 } // namespace matmul::v4::bmx4
 
 #endif // BTX_MATMUL_MATMUL_V4_BMX4_H

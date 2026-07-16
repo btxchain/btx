@@ -13,6 +13,7 @@
 #include <kernel/messagestartchars.h>
 #include <logging.h>
 #include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_bmx4.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -97,6 +98,24 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // not a live parameter).
     if (consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max()) {
         assert(consensus.nMatMulV4TranscriptBlockSize == matmul::v4::kTileB);
+        // Audit (design §0.3, non-surface invariant): the committed sketch rank
+        // m = nMatMulV4Dimension / kTileB, its 8 MiB payload (8·m²), and the O(n²)
+        // verify DoS budget are calibrated for m = BMX4C_SKETCH_RANK_M (1024) at
+        // the PRODUCTION dimension. Nothing else pins the dimension to the
+        // compile-time tile, so raising nMatMulV4Dimension to 8192 (allowed by the
+        // 4096..8192 accept window) would SILENTLY yield m = 2048 / a 32 MiB
+        // payload -- a different committed object with no profile bump or
+        // golden-vector regeneration. §0.3 requires m to STAY FIXED with b tracking
+        // n (b -> 8 at n -> 8192), so pin: any dimension AT OR ABOVE production
+        // scale (kTileB · BMX4C_SKETCH_RANK_M) MUST reduce to exactly the calibrated
+        // rank -- a lockstep kTileB bump passes, a bare dimension bump fails LOUD.
+        // Small test dimensions (regtest n=256, and -regtestmatmulv4dimension
+        // overrides) are below production scale and exempt: their committed object
+        // is fixed by the exact-match check, not calibrated against mainnet goldens.
+        assert(consensus.nMatMulV4Dimension % matmul::v4::kTileB == 0);
+        if (consensus.nMatMulV4Dimension >= matmul::v4::kTileB * Consensus::BMX4C_SKETCH_RANK_M) {
+            assert(consensus.nMatMulV4Dimension / matmul::v4::kTileB == Consensus::BMX4C_SKETCH_RANK_M);
+        }
     }
 
     if (consensus.nMatMulBMX4CHeight == std::numeric_limits<int32_t>::max()) return;
@@ -125,6 +144,29 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // self-corrects any residual within one half-life, so no arbitrary range cap.
     assert(consensus.nMatMulBMX4CAsertRescaleNum > 0);
     assert(consensus.nMatMulBMX4CAsertRescaleDen > 0);
+
+    // ENC-BMX4C-D (v4.2-D) is a tile re-version of ENC-BMX4C: if configured it
+    // MUST fork STRICTLY ABOVE the ENC-BMX4C height (D succeeds C; no
+    // dual-profile window), and its ASERT rescale ratio must be strictly
+    // positive. Disabled (INT32_MAX) => no coupling. Its 32 MiB payload gating
+    // (P1/P3 relay extension) is a deployment precondition, documented in
+    // params.h and the redesign doc, not a chainparams assert.
+    if (consensus.nMatMulBMX4CDHeight == std::numeric_limits<int32_t>::max()) return;
+    assert(consensus.nMatMulBMX4CDHeight > consensus.nMatMulBMX4CHeight);
+    assert(consensus.nMatMulBMX4CDAsertRescaleNum > 0);
+    assert(consensus.nMatMulBMX4CDAsertRescaleDen > 0);
+    // Same §0.3 dimension/tile pin for the D profile: its DELIBERATELY larger
+    // committed object is m = nMatMulV4Dimension / kTileBMX4D = 2·BMX4C_SKETCH_RANK_M
+    // (2048, 32 MiB) BY DESIGN. Pin n to the D tile so a dimension retarget cannot
+    // silently move the D rank/payload off its calibrated 32 MiB either (b -> 4 at
+    // n -> 8192 would hold m = 2048). Production-scale gate as above; small test
+    // dimensions are exempt.
+    assert(consensus.nMatMulV4Dimension % matmul::v4::bmx4::kTileBMX4D == 0);
+    if (consensus.nMatMulV4Dimension >=
+        matmul::v4::bmx4::kTileBMX4D * (2 * Consensus::BMX4C_SKETCH_RANK_M)) {
+        assert(consensus.nMatMulV4Dimension / matmul::v4::bmx4::kTileBMX4D ==
+               2 * Consensus::BMX4C_SKETCH_RANK_M);
+    }
 }
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,

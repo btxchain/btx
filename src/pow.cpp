@@ -3476,7 +3476,23 @@ bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consen
     // to the ENC-BMX4C reference. No new reject codes.
     const uint32_t v4_dim = params.nMatMulV4Dimension;
     uint256 digest;
-    if (params.GetMatMulEncodingProfile(block_height) == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
+    const Consensus::MatMulEncodingProfile enc_profile = params.GetMatMulEncodingProfile(block_height);
+    if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4CD) {
+        // ENC-BMX4C-D (v4.2-D deeper-commit profile): identical to ENC-BMX4C but
+        // the sketch tile b = 2 (m = n/2), committing 4x more of C. The
+        // accumulator preconditions are IDENTICAL (all bounds m-independent);
+        // only the verifier's sketch rank differs. The 32 MiB payload requires
+        // the P1/P3 relay extension to be enabled at activation (staged).
+        if (!matmul::v4::bmx4::CheckCombineLimbBoundBMX4C(v4_dim)) return finish(false);
+        if (static_cast<int64_t>(Consensus::BMX4C_BASE_PRODUCT_BOUND_PER_N) * v4_dim >
+            std::numeric_limits<int32_t>::max()) {
+            return finish(false);
+        }
+        if (!matmul::v4::bmx4::VerifySketchBMX4D(block, v4_dim, params.nMatMulV4FreivaldsRounds,
+                                                 sketch_payload, digest)) {
+            return finish(false);
+        }
+    } else if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
         // Structural combine/accumulator preconditions for ENC-BMX4C (spec
         // §2.4/§5.2/§8.2), checked ahead of the O(n^2) verify as defense in
         // depth. (i) The base-2^6 remainder-top decomposition must be total:
@@ -4560,6 +4576,58 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
     return false;
 }
 
+// ENC-BMX4C-D (v4.2-D) reference solve loop. The D profile has no wired batched
+// device dispatch (backends implement the ENC-BMX4C signature; D is a staged
+// CPU-reference profile), so this grinds nonces per-nonce through the byte-exact
+// matmul::v4::bmx4::ComputeDigestBMX4D reference. Structurally identical to the
+// ENC-BMX4C loop above minus the batch fusion; correctness, not throughput, is
+// the point until a D device backend + relay extension land (redesign doc §6).
+static bool SolveMatMulV4BMX4D(CBlockHeader& block,
+                               const Consensus::Params& params,
+                               uint64_t& max_tries,
+                               int32_t block_height,
+                               const std::atomic<bool>* abort_flag,
+                               std::vector<uint32_t>* freivalds_payload_out,
+                               std::optional<int64_t> parent_median_time_past,
+                               const arith_uint256& bnTarget,
+                               std::chrono::steady_clock::time_point start)
+{
+    const uint32_t n = params.nMatMulV4Dimension;
+    while (max_tries > 0) {
+        if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        if (!SetDeterministicMatMulSeeds(block, params, block_height, parent_median_time_past)) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        uint256 digest;
+        std::vector<unsigned char> payload;
+        if (!matmul::v4::bmx4::ComputeDigestBMX4D(block, n, digest, payload)) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        if (UintToArith256(digest) <= bnTarget) {
+            block.matmul_digest = digest;
+            if (freivalds_payload_out != nullptr) {
+                *freivalds_payload_out = PackMatMulV4SketchBytesToWords(payload);
+            }
+            RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
+            return true;
+        }
+        --max_tries;
+        if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        ++block.nNonce64;
+        block.nNonce = static_cast<uint32_t>(block.nNonce64);
+    }
+    RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+    return false;
+}
+
 static bool SolveMatMulV4(CBlockHeader& block,
                           const Consensus::Params& params,
                           uint64_t& max_tries,
@@ -4585,7 +4653,12 @@ static bool SolveMatMulV4(CBlockHeader& block,
     // MatMul v4.2 / ENC-BMX4C profile dispatch (spec §8.2): GetMatMulEncodingProfile
     // is the SINGLE selector. At BMX4C heights the whole solve routes to the
     // ENC-BMX4C loop; the ENC-S8 path below is unchanged.
-    if (params.GetMatMulEncodingProfile(block_height) == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
+    const Consensus::MatMulEncodingProfile solve_profile = params.GetMatMulEncodingProfile(block_height);
+    if (solve_profile == Consensus::MatMulEncodingProfile::ENC_BMX4CD) {
+        return SolveMatMulV4BMX4D(block, params, max_tries, block_height, abort_flag,
+                                  freivalds_payload_out, parent_median_time_past, *bnTarget, start);
+    }
+    if (solve_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
         return SolveMatMulV4BMX4C(block, params, max_tries, block_height, abort_flag,
                                   freivalds_payload_out, parent_median_time_past, *bnTarget, start);
     }
