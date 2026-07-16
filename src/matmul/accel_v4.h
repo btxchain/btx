@@ -169,7 +169,7 @@ void ResetStats();
 // Each device backend implements exactly ONE of these functions -- a strong
 // definition compiled into btx_matmul_backend when the backend's CMake define
 // is enabled (BTX_ENABLE_CUDA_EXPERIMENTAL / BTX_ENABLE_METAL /
-// BTX_ENABLE_HIP_EXPERIMENTAL). When a backend is NOT compiled in, a weak stub
+// BTX_ENABLE_HIP). When a backend is NOT compiled in, a weak stub
 // (matmul/accel_v4_stub.cpp) provides a definition that returns false, so the
 // dispatch layer links and runs CPU-only. The signatures match AccelFn exactly.
 // ---------------------------------------------------------------------------

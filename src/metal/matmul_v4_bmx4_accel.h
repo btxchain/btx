@@ -46,7 +46,15 @@ class CBlockHeader;
 // every entry point reports unavailable, so callers always fall back to the
 // CPU reference.
 
-namespace matmul_v4::metal {
+// The probe type/entry point live in matmul_v4::bmx4::metal -- a DISTINCT
+// namespace from the v4.1 backend's matmul_v4::metal::AccelProbe /
+// ProbeAcceleration (mirroring the HIP split matmul_v4::bmx4::hip vs
+// matmul_v4::hip). Both TUs are linked into btx_matmul_backend together, so
+// sharing matmul_v4::metal would make AccelProbe an ODR clash and
+// ProbeAcceleration a duplicate strong symbol. The dispatched miner entry
+// (ComputeDigestsBMX4CAccel) stays in matmul_v4::metal because accel_v4.cpp
+// dispatches on it there and it has no v4.1 counterpart to collide with.
+namespace matmul_v4::bmx4::metal {
 
 struct AccelProbe {
     bool available{false};
@@ -62,6 +70,10 @@ struct AccelProbe {
  *  the CPU reference matmul::v4::bmx4::ComputeDigestBMX4C. Cheap after the
  *  first call. */
 AccelProbe ProbeAcceleration();
+
+} // namespace matmul_v4::bmx4::metal
+
+namespace matmul_v4::metal {
 
 /** Batched miner backend entry point for ENC-BMX4C: compute the BMX4-C
  *  consensus digests and sketch payloads for a whole nonce WINDOW of headers

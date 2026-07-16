@@ -359,7 +359,11 @@ __global__ void Bmx4PromoteShiftedKernel(const float* __restrict__ D,
         atomicExch(error_flag, 1);
         return;
     }
-    out[gid] += static_cast<int32_t>(v) << shift;
+    // Power-of-two scale by multiplication, not a signed left shift: v may be
+    // negative and `negative << shift` is undefined behavior in C++/CUDA. This
+    // mirrors the CPU Dequant discipline (matmul_v4_bmx4.cpp: int32(mu)*(1<<e)).
+    // shift is a committed E8M0 exponent in {0..3}, so 1<<shift is exact.
+    out[gid] += static_cast<int32_t>(v) * (1 << shift);
 }
 
 constexpr uint32_t kThreads = 256;

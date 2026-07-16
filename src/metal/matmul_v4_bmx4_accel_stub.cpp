@@ -4,7 +4,7 @@
 
 #include <metal/matmul_v4_bmx4_accel.h>
 
-namespace matmul_v4::metal {
+namespace matmul_v4::bmx4::metal {
 
 AccelProbe ProbeAcceleration()
 {
@@ -13,6 +13,10 @@ AccelProbe ProbeAcceleration()
     probe.reason = "Metal MatMul BMX4-C acceleration is unavailable on this build";
     return probe;
 }
+
+} // namespace matmul_v4::bmx4::metal
+
+namespace matmul_v4::metal {
 
 bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& /*headers*/, uint32_t /*n*/,
     uint32_t /*rounds*/, std::vector<uint256>& /*digests_out*/,

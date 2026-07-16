@@ -434,6 +434,13 @@ if(APPLE AND BTX_ENABLE_METAL)
   target_sources(btx_matmul_backend PRIVATE
     metal/matmul_accel.mm
     metal/matmul_v4_accel.mm
+    # External review (P1.5): the BMX4-C (v4.2) Metal device backend source was
+    # never listed. With BTX_ENABLE_METAL defined the weak metal stub in
+    # accel_v4_stub.cpp is compiled out, so without this the strong
+    # matmul_v4::metal::ComputeDigestsBMX4CAccel had no definition -- a Metal
+    # build suppressed the weak stub while providing no strong impl (link error /
+    # silently unserved profile). Wire it in alongside its kernels metallib.
+    metal/matmul_v4_bmx4_accel.mm
     metal/nonce_accel.mm
     metal/oracle_accel.mm
   )
@@ -452,6 +459,9 @@ if(APPLE AND BTX_ENABLE_METAL)
     set(BTX_MATMUL_V4_METAL_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_accel_kernels.metal)
     set(BTX_MATMUL_V4_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_accel_kernels.air)
     set(BTX_MATMUL_V4_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_accel_kernels.metallib)
+    set(BTX_MATMUL_V4_BMX4_METAL_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_bmx4_accel_kernels.metal)
+    set(BTX_MATMUL_V4_BMX4_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_bmx4_accel_kernels.air)
+    set(BTX_MATMUL_V4_BMX4_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_bmx4_accel_kernels.metallib)
     add_custom_command(
       OUTPUT ${BTX_MATMUL_METALLIB}
       COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -c ${BTX_MATMUL_METAL_SOURCE} -o ${BTX_MATMUL_METAL_AIR}
@@ -480,14 +490,26 @@ if(APPLE AND BTX_ENABLE_METAL)
       COMMENT "Compiling prebuilt MatMul v4 Metal kernels"
       VERBATIM
     )
+    # BMX4-C (v4.2) kernels: same pre-Metal-4 language version as the v4 kernels;
+    # the Metal 4 tensor pipeline is runtime-compiled by matmul_v4_bmx4_accel.mm.
+    add_custom_command(
+      OUTPUT ${BTX_MATMUL_V4_BMX4_METALLIB}
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -c ${BTX_MATMUL_V4_BMX4_METAL_SOURCE} -o ${BTX_MATMUL_V4_BMX4_METAL_AIR}
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metallib ${BTX_MATMUL_V4_BMX4_METAL_AIR} -o ${BTX_MATMUL_V4_BMX4_METALLIB}
+      DEPENDS ${BTX_MATMUL_V4_BMX4_METAL_SOURCE}
+      COMMENT "Compiling prebuilt MatMul v4 BMX4-C Metal kernels"
+      VERBATIM
+    )
     add_custom_target(btx_matmul_metallib DEPENDS ${BTX_MATMUL_METALLIB})
     add_custom_target(btx_oracle_metallib DEPENDS ${BTX_ORACLE_METALLIB})
     add_custom_target(btx_matmul_v4_metallib DEPENDS ${BTX_MATMUL_V4_METALLIB})
-    add_dependencies(btx_matmul_backend btx_matmul_metallib btx_oracle_metallib btx_matmul_v4_metallib)
+    add_custom_target(btx_matmul_v4_bmx4_metallib DEPENDS ${BTX_MATMUL_V4_BMX4_METALLIB})
+    add_dependencies(btx_matmul_backend btx_matmul_metallib btx_oracle_metallib btx_matmul_v4_metallib btx_matmul_v4_bmx4_metallib)
     target_compile_definitions(btx_matmul_backend PRIVATE
       BTX_MATMUL_METALLIB_PATH=\"${BTX_MATMUL_METALLIB}\"
       BTX_ORACLE_METALLIB_PATH=\"${BTX_ORACLE_METALLIB}\"
       BTX_MATMUL_V4_METALLIB_PATH=\"${BTX_MATMUL_V4_METALLIB}\"
+      BTX_MATMUL_V4_BMX4_METALLIB_PATH=\"${BTX_MATMUL_V4_BMX4_METALLIB}\"
     )
   else()
     if(BTX_MATMUL_METAL_PRECOMPILE_KERNELS)
@@ -496,7 +518,12 @@ if(APPLE AND BTX_ENABLE_METAL)
       message(STATUS "BTX_MATMUL_METAL_PRECOMPILE_KERNELS=OFF; MatMul Metal backend will compile inline kernels at runtime")
     endif()
   endif()
-  target_compile_definitions(btx_matmul_backend PRIVATE BTX_ENABLE_METAL=1)
+  # PUBLIC so the define propagates through bitcoin_common (which PUBLIC-links
+  # btx_matmul_backend) to consumers -- in particular the backend-determinism
+  # test TU (src/test/matmul_v4_backend_determinism_tests.cpp) compiled into
+  # test_btx, which #if-guards its Metal determinism row on BTX_ENABLE_METAL.
+  # PRIVATE would silently compile that row out of the test even in a Metal build.
+  target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_METAL=1)
   target_link_libraries(btx_matmul_backend PRIVATE
     ${BTX_FOUNDATION_FRAMEWORK}
     ${BTX_IOKIT_FRAMEWORK}
@@ -506,6 +533,7 @@ else()
   target_sources(btx_matmul_backend PRIVATE
     metal/matmul_accel_stub.cpp
     metal/matmul_v4_accel_stub.cpp
+    metal/matmul_v4_bmx4_accel_stub.cpp
     metal/nonce_accel_stub.cpp
     metal/oracle_accel_stub.cpp
   )
@@ -523,16 +551,18 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     # remediation doc). Compile-verified only on real CUDA toolchains.
     cuda/matmul_v4_bmx4_accel.cu
   )
-  target_compile_definitions(btx_matmul_backend PRIVATE BTX_ENABLE_CUDA_EXPERIMENTAL=1)
-  # External review (vanities), the eligibility-classifier fix: CudaEligibility()
-  # lives in matmul/backend_capabilities_v4.cpp, which compiles into bitcoin_common
-  # (not btx_matmul_backend). Without the define here it takes the
+  # PUBLIC so the define propagates to every consumer of btx_matmul_backend.
+  # This subsumes the eligibility-classifier fix: CudaEligibility() lives in
+  # matmul/backend_capabilities_v4.cpp, compiled into bitcoin_common (not
+  # btx_matmul_backend); without the define visible there it takes the
   # #else -> DisabledByBuild() branch and the whole measurement run silently times
   # the CPU stub while reporting `compiled=no reason=disabled_by_build` -- so every
   # GPU number an operator would submit is really a CPU number unless they catch
-  # that line. The probe it then calls (btx::cuda::ProbeMatMulDigestAcceleration)
-  # is a host function in btx_matmul_backend, which bitcoin_common already links.
-  target_compile_definitions(bitcoin_common PRIVATE BTX_ENABLE_CUDA_EXPERIMENTAL=1)
+  # that line. It also reaches the backend-determinism test TU compiled into
+  # test_btx, whose CUDA determinism row #if-guards on BTX_ENABLE_CUDA_EXPERIMENTAL.
+  # bitcoin_common PUBLIC-links btx_matmul_backend, so the INTERFACE define flows
+  # transitively to bitcoin_common and on to test_btx.
+  target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_CUDA_EXPERIMENTAL=1)
   if(BTX_CUDA_RUNTIME_LIBRARY STREQUAL "Static")
     target_link_libraries(btx_matmul_backend PRIVATE CUDA::cudart_static)
   else()
@@ -560,14 +590,25 @@ else()
     cuda/matmul_accel_stub.cpp
     cuda/oracle_accel_stub.cpp
     cuda/matmul_v4_accel_stub.cpp
+    cuda/matmul_v4_bmx4_accel_stub.cpp
   )
 endif()
 if(BTX_ENABLE_HIP)
   target_sources(btx_matmul_backend PRIVATE
     hip/matmul_v4_accel.hip
+    # External review (P1.5): the BMX4-C (v4.2) HIP device backend source was
+    # never listed, so the strong matmul_v4::hip::ComputeDigestsBMX4CAccel never
+    # linked and the profile fell back to the (weak) stub on ROCm.
+    hip/matmul_v4_bmx4_accel.hip
   )
-  set_source_files_properties(hip/matmul_v4_accel.hip PROPERTIES LANGUAGE HIP)
-  target_compile_definitions(btx_matmul_backend PRIVATE BTX_ENABLE_HIP=1)
+  set_source_files_properties(
+    hip/matmul_v4_accel.hip
+    hip/matmul_v4_bmx4_accel.hip
+    PROPERTIES LANGUAGE HIP)
+  # PUBLIC so the define reaches the backend-determinism test TU (compiled into
+  # test_btx), whose HIP determinism row #if-guards on BTX_ENABLE_HIP; PRIVATE
+  # would silently drop that row even in a HIP build.
+  target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_HIP=1)
   target_link_libraries(btx_matmul_backend PRIVATE hip::device)
   # The HIP backend reuses the shared matmul::v4 host reference (operand
   # expansion, serialization, digest) from bitcoin_common so its output is
@@ -584,6 +625,7 @@ if(BTX_ENABLE_HIP)
 else()
   target_sources(btx_matmul_backend PRIVATE
     hip/matmul_v4_accel_stub.cpp
+    hip/matmul_v4_bmx4_accel_stub.cpp
   )
 endif()
 target_link_libraries(btx_matmul_backend PRIVATE core_interface)

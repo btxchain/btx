@@ -8,9 +8,9 @@
 // present. Each stub is:
 //
 //   * #if-guarded by the backend's CMake define -- when a backend is compiled in
-//     (BTX_ENABLE_CUDA_EXPERIMENTAL / BTX_ENABLE_METAL /
-//     BTX_ENABLE_HIP_EXPERIMENTAL, all PRIVATE to btx_matmul_backend, mirroring
-//     v3's *_stub.cpp gating), the corresponding real strong definition in the
+//     (BTX_ENABLE_CUDA_EXPERIMENTAL / BTX_ENABLE_METAL / BTX_ENABLE_HIP, all
+//     PUBLIC on btx_matmul_backend, mirroring v3's *_stub.cpp gating), the
+//     corresponding real strong definition in the
 //     device translation unit is the sole definition and this stub drops out;
 //
 //   * marked WEAK regardless, so that even if a real backend definition is
@@ -79,7 +79,7 @@ BTX_ACCEL_V4_WEAK bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>&
 } // namespace matmul_v4::metal
 #endif
 
-#if !defined(BTX_ENABLE_HIP_EXPERIMENTAL)
+#if !defined(BTX_ENABLE_HIP)
 namespace matmul_v4::hip {
 BTX_ACCEL_V4_WEAK bool ComputeDigestAccel(const CBlockHeader&, uint32_t, uint32_t,
                                           uint256&, std::vector<unsigned char>&)
