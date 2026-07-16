@@ -80,6 +80,54 @@ struct BIP9Deployment {
 };
 
 /**
+ * MatMul v4 committed-operand ENCODING PROFILES — the L1 (versioned) layer of
+ * the v4.2 profile architecture (doc/btx-matmul-v4.2-bmx4c-spec.md §7,
+ * doc/btx-matmul-v4.2-longevity-threat-model.md §3.1). Exactly one profile is
+ * live at any height; the profile decides how header seeds become exact
+ * integer operands (mantissa alphabet, scale structure, U/V alphabet, XOF
+ * sampling rule + domain tags, magnitude constants, golden vectors, limb-base
+ * reference). It NEVER touches the L0 invariant core (SketchFreivalds verifier
+ * and its O(n^2) cost, q = 2^61-1, R = 3, exact-integer commitment, digest
+ * form H(sigma||C_hat), Fiat-Shamir rule, price-independence, the hardness
+ * floor, C-1' "no rounding on the committed path"). A profile change is a
+ * height-gated hard fork of parameters-and-vectors into the same machine.
+ * Profile IDs are never reused or redefined once activated on any network.
+ */
+enum class MatMulEncodingProfile : uint8_t {
+    //! v4/v4.1 (spec §A.2/App. C-13): balanced signed-INT8 operands and U/V in
+    //! [-125, 125], no scale planes, base-2^7 limb combine.
+    ENC_S8 = 1,
+    //! v4.2 BMX4-C (doc/btx-matmul-v4.2-bmx4c-spec.md §1-§3): M11 mantissas
+    //! {0,±1,±2,±3,±4,±6} × per-32-block power-of-two scale 2^e, e ∈ {0..3};
+    //! scale-free M11 U/V; base-2^6 remainder-top limb combine.
+    ENC_BMX4C = 2,
+};
+
+// ENC-BMX4C profile constants (consensus-normative; pinned by
+// doc/btx-matmul-v4.2-bmx4c-spec.md §2.4/§3/§8.1, from
+// doc/btx-matmul-v4.2-consolidated-design.md §2/§5 — the same source the
+// src/matmul BMX4 implementation pins from; keep in sync). These are
+// compile-time PROFILE DEFINITIONS, not per-network tunables: changing any of
+// them defines a different encoding profile (a new hard fork with regenerated
+// golden vectors), so they are deliberately not Params fields.
+static constexpr uint32_t BMX4C_MANTISSA_ALPHABET_SIZE{11}; //!< |M11| = |{0,±1,±2,±3,±4,±6}| (exact-integer E2M1 subset; ±5/±0.5/±1.5/−0 never occur)
+static constexpr int32_t BMX4C_MANTISSA_MAX{6};             //!< max |mu| over M11
+static constexpr uint32_t BMX4C_SCALE_BLOCK_LENGTH{32};     //!< OCP MX block length L along the contraction dimension
+static constexpr uint32_t BMX4C_SCALE_EXPONENT_MAX{3};      //!< e ∈ {0..S}, S = 3 (E8M0 codes 127..130); scales are powers of two ONLY (L0 rule)
+static constexpr int32_t BMX4C_OPERAND_MAG_MAX{48};         //!< E_max = 6·2^3; ≤ 127 ⇒ every INT8 part runs ONE s8 GEMM on pre-shifted operands
+static constexpr int64_t BMX4C_BASE_PRODUCT_BOUND_PER_N{2304};  //!< |C_ij| ≤ 2304·n = n·E_max² (< 2^24 at n = 4096: zero-promotion t=24 eligibility by bound)
+static constexpr int64_t BMX4C_PROJECTION_BOUND_PER_N{288};     //!< |P|,|Q| ≤ 288·n = n·6·E_max (scale-free M11 U/V; < 2^21 at n = 4096)
+static constexpr uint32_t BMX4C_COMBINE_LIMBS{4};           //!< C-13' fold digits per P/Q entry (16 limb-pair GEMMs)
+static constexpr int32_t BMX4C_COMBINE_LIMB_BASE{64};       //!< balanced base-2^6 digits in [-32, 31], remainder-top rule (top digit ∈ [-32, +32])
+static constexpr int64_t BMX4C_COMBINE_INPUT_BOUND{(int64_t{1} << 23) - 1}; //!< CheckCombineLimbBound successor pins 288·n ≤ 2^23-1 (⇔ n ≤ 29,127); pure-balanced coverage would end at 8,255,455 (n ≤ 28,664)
+static constexpr int64_t BMX4C_LIMB_PAIR_BOUND_PER_N{1024}; //!< per-entry limb-pair GEMM bound n·32² (2^22 at n = 4096, 2^23 at n = 8192)
+// C-1' accumulator-eligibility anchors (consensus-PROTECTING, not
+// consensus-changing: consumed by backend qualification/self-tests, never by
+// block validation — doc/btx-matmul-v4.2-bmx4c-spec.md §5).
+static constexpr uint32_t BMX4C_NATIVE_PATH_PROVEN_T{24};   //!< proven exact FP-mantissa accumulator bits required for the native block-scaled FP4/MX path; t≈14 fails closed to the 1-GEMM INT8 fallback
+static constexpr uint32_t BMX4C_FALLBACK_INT8_ACCUMULATOR_BITS{32}; //!< C-1 floor for the INT8 fallback path (true two's-complement int32)
+
+/**
  * Parameters that influence chain consensus.
  */
 struct Params {
@@ -244,6 +292,47 @@ struct Params {
      *  only the value changes at and above nMatMulV4Height, spec §G.3/§H.4). */
     uint32_t nMatMulV4GlobalVerifyBudgetPerMin{16};
     uint32_t nMatMulV4PeerVerifyBudgetPerMin{4};
+
+    // MatMul v4.2 / ENC-BMX4C encoding-profile parameters (see
+    // doc/btx-matmul-v4.2-bmx4c-spec.md §7-§8 and
+    // doc/btx-matmul-v4.2-consolidated-design.md). ENC-BMX4C is a
+    // height-gated HARD FORK of the committed-operand ENCODING ONLY (L1):
+    // at heights in [nMatMulV4Height, nMatMulBMX4CHeight) the ENC_S8 profile
+    // applies; at and above nMatMulBMX4CHeight the ENC_BMX4C profile applies
+    // exclusively (exactly one profile live at any height — no dual-profile
+    // window). The verifier (q = 2^61-1, R = 3, b = 4, sketch payload,
+    // digest, Fiat-Shamir) is byte-for-byte UNCHANGED across profiles.
+    // DEFAULT = INT32_MAX = disabled: v4.2 is STAGED, parameter-frozen, and
+    // NOT the current activation candidate; networks that never set this
+    // stay on ENC-S8 forever. When set, the height MUST be strictly greater
+    // than nMatMulV4Height, above every already-mined height at release, and
+    // never lowered. Activation gates: ACTIVATION.md Gate C (M-t24 proven
+    // t = 24 measurement on ≥ 2 vendors' frontier parts, joint v4.1+v4.2
+    // C-15 external review, G-1 trigger confirmed on shipped silicon,
+    // supermajority signaling).
+    int32_t nMatMulBMX4CHeight{std::numeric_limits<int32_t>::max()};
+    /** One-time ASERT target rescale + re-anchor at nMatMulBMX4CHeight,
+     *  mechanically identical to nMatMulV4AsertRescale*: next_target =
+     *  parent_target * Num/Den, then ASERT re-anchors on that block. The
+     *  ENC-BMX4C marginal unit differs from ENC-S8's (~28% less XOF work;
+     *  per-class GEMM rates shift), so this ratio MUST be calibrated
+     *  empirically from the measured marginal nonce/s on the path rational
+     *  miners actually run (ACTIVATION Gate C, B2b analogue). Default 1/1 =
+     *  "no rescale" (only valid where measurement shows equal work units or
+     *  the network has no pre-fork history). */
+    int64_t nMatMulBMX4CAsertRescaleNum{1};
+    int64_t nMatMulBMX4CAsertRescaleDen{1};
+    /** C-1' accumulator-eligibility qualification threshold (consensus-
+     *  PROTECTING, not consensus-changing): the minimum PROVEN exact
+     *  FP-mantissa accumulator width t (in bits, 2^t exact-integer capacity)
+     *  a backend must demonstrate via the §5.3 adversarial vectors before it
+     *  may claim the native block-scaled FP4/MX path. Consumed by backend
+     *  qualification/self-test harnesses only — block validation never reads
+     *  it. A device that cannot prove t fails closed down the fallback
+     *  ladder (FP8 fold → 1-GEMM INT8 → mantissa-plane → CPU), never off
+     *  the network and never able to split the chain (the dispatcher
+     *  re-verifies every device result). */
+    uint32_t nMatMulBMX4CMinProvenAccumulatorBits{BMX4C_NATIVE_PATH_PROVEN_T};
     uint32_t nMaxReorgDepth{std::numeric_limits<uint32_t>::max()};
     int32_t nReorgProtectionStartHeight{std::numeric_limits<int32_t>::max()};
 
@@ -464,6 +553,33 @@ struct Params {
     bool IsMatMulV4Active(int32_t height) const
     {
         return height >= 0 && height >= nMatMulV4Height;
+    }
+    /** True at and above the v4.2 ENC-BMX4C encoding-profile hard fork.
+     *  Mirrors IsMatMulV4Active; additionally requires v4 to be active,
+     *  since ENC-BMX4C is a profile of the v4 machine (it re-versions the
+     *  operand encoding only; the v4 verifier/payload/digest machinery is
+     *  unchanged, doc/btx-matmul-v4.2-bmx4c-spec.md §0.3/§7.3). When true,
+     *  operand/projector derivation, domain tags, magnitude constants, limb
+     *  reference, golden vectors, and the one-time ASERT rescale follow
+     *  ENC-BMX4C exclusively. */
+    bool IsBMX4CActive(int32_t height) const
+    {
+        return IsMatMulV4Active(height) &&
+            nMatMulBMX4CHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nMatMulBMX4CHeight;
+    }
+    /** The committed-operand encoding profile live at this height. Only
+     *  meaningful at v4 heights (below nMatMulV4Height the v3 rules apply
+     *  and no profile is defined; callers dispatch on IsMatMulV4Active
+     *  first). This is the SINGLE profile selector: every profile-dependent
+     *  call site (seed derivation, operand/projector expansion, payload
+     *  magnitude bounds, limb-combine reference, golden-vector selection)
+     *  takes its profile from here and performs no second height compare
+     *  (spec §8.2). */
+    MatMulEncodingProfile GetMatMulEncodingProfile(int32_t height) const
+    {
+        return IsBMX4CActive(height) ? MatMulEncodingProfile::ENC_BMX4C
+                                     : MatMulEncodingProfile::ENC_S8;
     }
     bool IsMatMulPreHashEpsilonBitsUpgradeActive(int32_t height) const
     {

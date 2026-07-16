@@ -212,10 +212,135 @@ On GO (CUDA + Metal both PASS), activation is a single, pre-planned change:
 Until step 2 is committed and released, the network stays on v3. This branch
 contains everything needed for steps 1–5 to be mechanical once GO is reached.
 
+---
+
+## Gate C — v4.2 ENC-BMX4C (BMX4-C) encoding-profile fork — STAGED, parameter-frozen
+
+**`nMatMulBMX4CHeight` is deliberately UNSET (disabled) on every network.**
+v4.2 is the shelf-ready next encoding profile, NOT the current activation
+candidate: v4.1 ENC-S8 (Gate B) remains the critical path, and nothing in Gate C
+blocks or reorders Gate B. Design source of truth:
+`doc/btx-matmul-v4.2-consolidated-design.md`; normative encoding spec + profile
+machinery: `doc/btx-matmul-v4.2-bmx4c-spec.md`; governance framework:
+`doc/btx-matmul-v4.2-longevity-threat-model.md`. The verifier (q = 2⁶¹−1, R = 3,
+b = 4, 8 MiB sketch, digest, Fiat–Shamir) is byte-for-byte UNCHANGED across
+profiles — Gate C is "new operands into the same machine".
+
+### C1. Build items (shelf phase — research-only, zero consensus exposure)
+
+| # | Item | Status |
+|---|---|---|
+| C1a | Normative ENC-BMX4C spec + L0/L1/L2 profile-versioning design (`doc/btx-matmul-v4.2-bmx4c-spec.md`) | ✅ done (this branch) |
+| C1b | Consensus params, inert (`src/consensus/params.h`): `MatMulEncodingProfile` enum, `BMX4C_*` profile constants, `nMatMulBMX4CHeight` (INT32_MAX), `nMatMulBMX4CAsertRescaleNum/Den`, `nMatMulBMX4CMinProvenAccumulatorBits`, `IsBMX4CActive` / `GetMatMulEncodingProfile` | ✅ done (this branch) |
+| C1c | CPU consensus reference (`src/matmul/matmul_v4_bmx4.*`): §1.2 nibble sampler (identity-on-E2M1 bijection), §1.3 scale planes, exact-shift dequant, base-2⁶ remainder-top limb combine + `CheckCombineLimbBound` successor (pins 288·n ≤ 2²³−1) | ☐ foundation agent |
+| C1d | Validation/pow wiring per spec §8.2 (profile-dispatched seeds `"BTX_MATMUL_SEED_V42"`/sketch tags, expander profile arg, full-C word bound 2304·n, ASERT rescale at the profile height); chainparams assignment + construction asserts (`nMatMulBMX4CHeight > nMatMulV4Height` when set) | ☐ later integration wave (design pinned in spec §8.2 — do NOT wire ahead of it) |
+| C1e | ENC-BMX4C golden vectors + regenerated C-1′ adversarial vectors (spec §5.3 families 1–5: t-discrimination, boundary-pin, scale-exactness, alphabet-hole, promotion-cadence). **A replayed s8-era vector set is VOID** — the old HM-A/HM-B/HM-C regimes are unreachable under BMX4-C operands | ☐ after C1c |
+| C1f | Backend kernels (CUDA mxf4/IMMA, Metal, HIP, + first FP4/FP8-path device) + `verify-backend.sh` / `measure-hardware.sh` profile support | ☐ after C1c/C1e |
+| C1g | Spec-text debts due at fork time: §A.6 Strassen rewrite (one INT8-path level at E_max = 48, zero frontier levels); §S.2.2 ASIC-residual re-disclosure (halved t-cliff ≈ 3–5× under the 1-GEMM INT8 fallback); C-1 → C-1′ codification in code comments; ρ re-measured on FP4 rental centrals (disclosure only) | ☐ at fork time |
+
+### C2. M-t24 — THE gating measurement (runnable NOW, in parallel with Gate B)
+
+Proven **t = 24 exact accumulation** on the commodity block-scaled FP4/MX path,
+via the spec §5.3 t-discrimination + boundary-pin vectors on real silicon. This
+single measurement decides (a) native-path eligibility, (b) which side of the
+ASIC-residual band applies (bounded ~1.5–2.5× vs the ~3–5× cliff), (c) whether
+the FP8-fold tier exists. Registered prediction: passes on CDNA4/Trn3
+(architected FP32 accumulate), genuinely uncertain on Blackwell TMEM (Hopper
+t≈14 precedent). Datasheets are never a PASS; a log that never entered the
+regime is not a PASS.
+
+| Path | Hardware | Result |
+|---|---|---|
+| `mxf4`-E8M0 TMEM accumulate | B200 / B300 (rentable now) | ☐ pending |
+| UE4M3-hosted-2^e FP4 path | RTX 5090-class (buyable now) | ☐ pending |
+| CDNA4 OCP MX | MI355X | ☐ pending |
+| Matmul-MX PSUM (NKI; incl. explicit committed-scale-tensor loadability) | Trainium3 | ☐ pending |
+| FP8 MXU fold | TPU v7 | ☐ pending |
+
+**ENC-BMX4C MUST NOT activate without M-t24 PASS on ≥ 2 independent vendors'
+frontier parts.** A t≈14 outcome on a path is not a Gate C failure — that path
+falls closed to its FP8 fold or the 1-GEMM INT8 fallback (spec §5.2); it moves
+the ladder, not the chain.
+
+### C3. Joint v4.1 + v4.2 C-15 external adversarial review (mainnet blocker — commission ONCE)
+
+Extends B4′, commissioned once covering both objects (the I1′ relaxation is
+common; one review is cheaper and more coherent than two). Scope MUST name
+verbatim: the I1′ marginal-work floor; **small-alphabet batch algebra over fixed
+(P, V)** with the cryptanalysis §2.6 opening condition (≤ ~1.5 effective
+symbols) as the attack target; **𝓜-valued template-scoped U/V**;
+difficulty-calibration gaming between template refreshes. If the review demands
+entropy margin above the §7.4 floor, the pre-analyzed 𝓜₁₅@S=4 hardening reserve
+exists — as a *different* profile with its own §2.1-documented costs (4× INT8
+tax, lost sub-2²⁴ envelope), never a parameter tweak to ENC-BMX4C.
+
+### C4. Activation trigger (both required) + remaining measurement gates
+
+Activate ENC-BMX4C only when BOTH hold:
+
+- **(a) G-1 decoupling trigger confirmed on SHIPPED silicon** (INT8 flat/cut
+  while frontier FP4/FP8 ≥ 2× across a generation — confirm per R-1 on silicon,
+  never launch slides), and
+- **(b) measured GO/NO-GO passes**: C2 M-t24 on ≥ 2 vendors; §K.2a-WT marginal
+  wall-time tensor-majority at Q ≥ 32 on a real FP4 part (model predicts the
+  combine at ~70–80% — measure, don't trust); cross-vendor ENC-BMX4C golden
+  vectors (B2a analogue, ≥ 2 vendors + ≥ 3 jurisdictions, incl. FP4/FP8
+  devices); verify budget re-benched ≤ the v4.1 budget (B2e analogue; expected
+  ~28% cheaper regeneration); C3 review closed; `nMatMulBMX4CAsertRescaleNum/Den`
+  computed from the MEASURED marginal unit on the path rational miners actually
+  run (B2b analogue — never ship 1/1 on a network with pre-fork history).
+
+Mechanics then follow B5/B6 verbatim at `nMatMulBMX4CHeight`: height set with
+≥ 2 release cycles of runway, **supermajority miner/version signaling as a
+readiness gate**, pools/miners retooled against published vectors before the
+height, one-line flip + rescale in chainparams.
+
+### C5. Leapfrog clause (explicit, conditioned)
+
+If C2 (M-t24) and C3 (joint review) complete **before** v4.1's own Gate B
+clears, governance SHOULD consider activating v4.2 ENC-BMX4C directly as the
+first fork — one fork instead of two, at no cost to the INT8 installed base
+(which mines ENC-BMX4C at 1 s8 GEMM, ≈ unchanged throughput). The leapfrog MUST
+NOT be taken on unmeasured FP-path assumptions: if the FP-silicon wall-time
+split (C4-b) is still open, ship v4.1 and stage v4.2. Record the decision here.
+
+### C6. Profile-migration governance (standing obligations — this and every future profile)
+
+Per spec §7.5 / longevity doc §3 (the L1 pipeline; L0 is constitutionally
+frozen; L2 needs no governance):
+
+- **FER monitor (G-2)**: publish quarterly the Frontier Exactness Ratio per new
+  DC generation + the exactness-envelope register (proven t/K′ per commodity
+  path), measured with `measure-hardware.sh` JSON — never inferred from peak
+  TOPS. States: GREEN (FER ≥ ~0.5) / WATCH (< 0.5, or any fastest-path K′
+  collapse → refresh the shelf candidate) / ARM (< ~0.25 across two consecutive
+  generations AND measured ordering flattened/inverted → run the pipeline) /
+  FIRE (ARM + candidate gates green → set height, signal, activate). Thresholds
+  are governance defaults, re-pinnable only in the open and never mid-episode.
+  The difficulty-vs-compute-envelope audit note corroborates but can never fire
+  an activation; the protocol reads neither signal (§0.7-(4)).
+- **Cadence floor**: at most one committed-object migration per two DC hardware
+  generations (≥ 4 years between activation heights). Sole exception:
+  determinism/chain-split defects, handled as emergency bugfixes outside this
+  framework.
+- **Single-live-profile rule**: exactly one encoding profile live at any height;
+  multi-profile acceptance windows are rejected (difficulty-semantics
+  fragmentation + within-window monopoly).
+- **Per-version invariants**: fresh C-15-class review (blocker), golden + C-1′
+  vectors regenerated at the new magnitude boundaries, ≥ 2 vendors / ≥ 3
+  jurisdictions in the passing vector set, ASERT rescale from measurement,
+  §S.2.2/§A.6 re-disclosures, and the spec §7.4 floor checked BEFORE golden
+  vectors are generated. Pre-committed fallback: a gate-failed candidate never
+  activates — the honest fallback is the L2 Ozaki-class bridge plus difficulty
+  absorbing the k² tax.
+
 ## Hard dependencies this repo cannot satisfy
 - **Real GPUs** (H100/B200/RTX/Apple-M5/CDNA) for B1, B2a–B2b and B2f–B2g.
-- **External audit** (B3) and the I1′ adversarial review (B4′).
+- **External audit** (B3) and the I1′ adversarial review (B4′, joint with C3).
 - **Public testnet operators + time** (B4).
+- **Real block-scaled FP4/MX silicon** (B200/B300, RTX 5090, MI355X, Trainium3,
+  TPU v7) for the Gate C M-t24 measurement (C2) and the ENC-BMX4C vector set
+  (C1e/C4-b).
 
 Everything else (Gate A, the code for B1, the calibration harnesses) is in
 this branch.
