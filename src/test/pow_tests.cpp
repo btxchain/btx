@@ -4717,20 +4717,133 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoWSpamGate_grindable_decoupled_and_enforced)
     }
     BOOST_CHECK_MESSAGE(found_failing, "gate accepted every nonce -- target too loose to be a filter");
 
-    // Audit C2 (bound to nBits): a much HARDER block target makes the gate strictly
-    // harder. The nonce that won the easy (top-12-bits-zero) target had its hash in
-    // [0, 2^244); against a top-60-bits-zero target it fails with overwhelming
-    // certainty (~1 - 2^-48) -- proving the gate scales with the claimed chainwork,
-    // not a fixed cost. (Test inputs are fixed-seed deterministic.)
+    // Audit C2/H4 (bound to nBits): assert the DERIVED GATE TARGET directly via the
+    // pure helper, NOT by grinding across an nBits change. The earlier probabilistic
+    // check ("harder nBits => the winning nonce now fails") was ineffective because
+    // nBits is inside GetHash(), so changing it also changes the tested hash -- a
+    // fixed-target implementation could still pass it (audit H4). The pure helper
+    // isolates the target, so a fixed-target implementation is provably rejected.
     const arith_uint256 harder_target{(~arith_uint256{0}) >> 60};
-    consensus.nMatMulHeaderPoWDiscountBits = 0;
-    header.nBits = harder_target.GetCompact();
+    const uint32_t easy_bits{easy_target.GetCompact()};
+    const uint32_t harder_bits{harder_target.GetCompact()};
+    const auto t_easy{DeriveMatMulHeaderPoWGateTarget(easy_bits, /*discount=*/0, consensus.powLimit)};
+    const auto t_hard{DeriveMatMulHeaderPoWGateTarget(harder_bits, /*discount=*/0, consensus.powLimit)};
+    BOOST_REQUIRE(t_easy && t_hard);
+    // At discount 0 the gate target IS the block's own nBits target...
+    BOOST_CHECK_EQUAL(*t_easy, DecodeTarget(easy_bits));
+    BOOST_CHECK_EQUAL(*t_hard, DecodeTarget(harder_bits));
+    // ...so a harder-claimed nBits yields a strictly harder (smaller) gate target.
+    // This is the property a fixed-cost gate CANNOT satisfy (it would return the
+    // same target for both), so it fails under the former C2 weakness.
+    BOOST_CHECK(*t_hard < *t_easy);
+    // A large in-range discount re-opens the gate: shifting easier by 255 bits
+    // saturates to powLimit, so every hash passes (discount is the nBits-relative
+    // easing knob). Note: discount 256 is INVALID (audit H2), tested separately.
+    consensus.nMatMulHeaderPoWDiscountBits = Consensus::Params::MATMUL_HEADER_POW_MAX_DISCOUNT_BITS; // 255
+    header.nBits = harder_bits;
     header.nNonce = winning_nonce;
-    BOOST_CHECK_MESSAGE(!CheckMatMulHeaderSpamGate(header, consensus),
-                        "gate did not tighten when nBits got harder -- not bound to nBits");
-    // ...but a large discount re-opens it (discount is the nBits-relative easing).
-    consensus.nMatMulHeaderPoWDiscountBits = 256;  // gate target clamps to powLimit
     BOOST_CHECK(CheckMatMulHeaderSpamGate(header, consensus));
+}
+
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoWGateTarget_pure_fixed_vectors)
+{
+    // Audit H4: fixed, deterministic vectors for the PURE gate-target derivation.
+    // These pin the exact target for representative (nBits, discount) inputs and
+    // cover discounts 0, 1, 255, the invalid 256, the disabled sentinel, and the
+    // powLimit saturation edge -- values a fixed-target implementation cannot
+    // reproduce. No header, no hashing; the target is compared bit-for-bit.
+    const uint256 pow_limit{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    const arith_uint256 limit{UintToArith256(pow_limit)};
+
+    // A mid-range base target: top 64 bits zero (well clear of the powLimit ceiling
+    // so small discounts do not immediately saturate).
+    const arith_uint256 base{(~arith_uint256{0}) >> 64};
+    const uint32_t base_bits{base.GetCompact()};
+    const arith_uint256 base_decoded{DecodeTarget(base_bits)}; // round-trips through compact
+
+    // discount 0 => exactly the nBits target.
+    {
+        const auto t{DeriveMatMulHeaderPoWGateTarget(base_bits, 0, pow_limit)};
+        BOOST_REQUIRE(t);
+        BOOST_CHECK_EQUAL(*t, base_decoded);
+    }
+    // discount 1 => target << 1 (still below powLimit, no saturation).
+    {
+        const auto t{DeriveMatMulHeaderPoWGateTarget(base_bits, 1, pow_limit)};
+        BOOST_REQUIRE(t);
+        BOOST_CHECK_EQUAL(*t, base_decoded << 1);
+        BOOST_CHECK(*t <= limit);
+    }
+    // discount 8 => target << 8, exact.
+    {
+        const auto t{DeriveMatMulHeaderPoWGateTarget(base_bits, 8, pow_limit)};
+        BOOST_REQUIRE(t);
+        BOOST_CHECK_EQUAL(*t, base_decoded << 8);
+    }
+    // discount 255 => far overflow => saturates to powLimit.
+    {
+        const auto t{DeriveMatMulHeaderPoWGateTarget(base_bits, 255, pow_limit)};
+        BOOST_REQUIRE(t);
+        BOOST_CHECK_EQUAL(*t, limit);
+    }
+    // discount 256 => INVALID (audit H2) => nullopt.
+    BOOST_CHECK(!DeriveMatMulHeaderPoWGateTarget(base_bits, 256, pow_limit).has_value());
+    // discount UINT32_MAX-1 => still invalid => nullopt.
+    BOOST_CHECK(!DeriveMatMulHeaderPoWGateTarget(base_bits, std::numeric_limits<uint32_t>::max() - 1, pow_limit).has_value());
+    // discount UINT32_MAX => DISABLED sentinel => nullopt.
+    BOOST_CHECK(!DeriveMatMulHeaderPoWGateTarget(base_bits, std::numeric_limits<uint32_t>::max(), pow_limit).has_value());
+
+    // nBits-binding: two different nBits give two different discount-0 targets,
+    // ordered the same way as their difficulties. A fixed-cost gate cannot do this.
+    const arith_uint256 easy{(~arith_uint256{0}) >> 16};
+    const arith_uint256 hard{(~arith_uint256{0}) >> 80};
+    const auto te{DeriveMatMulHeaderPoWGateTarget(easy.GetCompact(), 0, pow_limit)};
+    const auto th{DeriveMatMulHeaderPoWGateTarget(hard.GetCompact(), 0, pow_limit)};
+    BOOST_REQUIRE(te && th);
+    BOOST_CHECK(*th < *te);
+}
+
+BOOST_AUTO_TEST_CASE(ReduceRescaleRatioToU32_exact_and_rejects)
+{
+    // Audit D3: the one-time ASERT rescale ratio must reduce to an EXACT 32-bit
+    // rational so ScaleTargetByTimespan's independent per-term uint32 clamp cannot
+    // distort it. These vectors pin the reduction and the rejection boundary.
+    uint32_t n{0}, d{0};
+
+    // The audit's canonical example: 2^40 / 2^39 must reduce to 2/1 (NOT the
+    // 1/1 that an independent-clamp implementation would produce).
+    BOOST_REQUIRE(ReduceRescaleRatioToU32(int64_t{1} << 40, int64_t{1} << 39, n, d));
+    BOOST_CHECK_EQUAL(n, 2u);
+    BOOST_CHECK_EQUAL(d, 1u);
+
+    // Symmetric: 2^39 / 2^40 => 1/2.
+    BOOST_REQUIRE(ReduceRescaleRatioToU32(int64_t{1} << 39, int64_t{1} << 40, n, d));
+    BOOST_CHECK_EQUAL(n, 1u);
+    BOOST_CHECK_EQUAL(d, 2u);
+
+    // Already lowest terms and in range.
+    BOOST_REQUIRE(ReduceRescaleRatioToU32(3, 5, n, d));
+    BOOST_CHECK_EQUAL(n, 3u);
+    BOOST_CHECK_EQUAL(d, 5u);
+
+    // A common factor reduces: 6/9 => 2/3.
+    BOOST_REQUIRE(ReduceRescaleRatioToU32(6, 9, n, d));
+    BOOST_CHECK_EQUAL(n, 2u);
+    BOOST_CHECK_EQUAL(d, 3u);
+
+    // Exactly UINT32_MAX / 1 reduces to itself (boundary, still valid).
+    BOOST_REQUIRE(ReduceRescaleRatioToU32(int64_t{std::numeric_limits<uint32_t>::max()}, 1, n, d));
+    BOOST_CHECK_EQUAL(n, std::numeric_limits<uint32_t>::max());
+    BOOST_CHECK_EQUAL(d, 1u);
+
+    // Rejections: non-positive, and irreducible ratios whose reduced terms exceed
+    // uint32 (not a usable difficulty calibration).
+    BOOST_CHECK(!ReduceRescaleRatioToU32(0, 1, n, d));
+    BOOST_CHECK(!ReduceRescaleRatioToU32(1, 0, n, d));
+    BOOST_CHECK(!ReduceRescaleRatioToU32(-2, 1, n, d));
+    BOOST_CHECK(!ReduceRescaleRatioToU32((int64_t{1} << 33) + 1, 1, n, d)); // > UINT32_MAX, odd => irreducible
+    // A coprime pair both above UINT32_MAX cannot reduce into range.
+    BOOST_CHECK(!ReduceRescaleRatioToU32(int64_t{4'294'967'311LL} /*prime>2^32*/, int64_t{4'294'967'357LL} /*prime>2^32*/, n, d));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

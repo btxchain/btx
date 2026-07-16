@@ -45,6 +45,7 @@
 #include <future>
 #include <limits>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -922,6 +923,53 @@ arith_uint256 ScaleTargetByTimespan(const arith_uint256& target, int64_t actual_
     return scaled;
 }
 
+} // namespace
+
+// AUDIT D1/D3: these two helpers are declared in pow.h and referenced from other
+// translation units (chainparams.cpp for construction-time validation, unit
+// tests), so they must have EXTERNAL linkage -- keep them OUTSIDE the anonymous
+// namespace that wraps the rest of pow.cpp's internals.
+bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32_t& out_den)
+{
+    // AUDIT D3: reduce a one-time ASERT rescale ratio num/den to lowest terms and
+    // confirm BOTH reduced terms fit in uint32. ScaleTargetByTimespan clamps each
+    // of its two scale arguments to UINT32_MAX independently, so a large but
+    // exactly-valued ratio -- e.g. 2^40 / 2^39 (= 2) -- would otherwise be mangled
+    // into UINT32_MAX / UINT32_MAX (= 1), silently distorting a calibrated fork
+    // rescale. GCD reduction makes such ratios exact; a ratio that is STILL larger
+    // than UINT32_MAX after reduction (an irreducible >4.29e9 rational) is not a
+    // usable difficulty calibration and is rejected. Callers treat rejection as a
+    // fatal construction error / consensus-halt condition, NEVER as powLimit.
+    if (num <= 0 || den <= 0) return false;
+    const int64_t g{std::gcd(num, den)};
+    const int64_t rn{num / g};
+    const int64_t rd{den / g};
+    if (rn > std::numeric_limits<uint32_t>::max() || rd > std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    out_num = static_cast<uint32_t>(rn);
+    out_den = static_cast<uint32_t>(rd);
+    return true;
+}
+
+unsigned int MatMulAsertFailClosedBits()
+{
+    // AUDIT D1: a runtime ASERT-configuration invariant breach must NOT weaken
+    // difficulty. Returning powLimit (the EASIEST target) is fail-OPEN and
+    // directly exploitable -- a malformed (even future-dated) parameter set would
+    // collapse CURRENT difficulty the moment the binary starts. Return the hardest
+    // representable target instead so the calculation fails CLOSED: mining halts
+    // (a loud, safe liveness stop) rather than difficulty collapsing. This path is
+    // UNREACHABLE in a validly-configured node because the immutable ASERT
+    // parameters are validated fatally at chain-parameter construction
+    // (AssertBMX4CConstructionInvariants -> ValidateMatMulAsertParams); it exists purely as a
+    // defence-in-depth backstop that cannot be turned into a difficulty-weakening
+    // exploit.
+    return arith_uint256{1}.GetCompact();
+}
+
+namespace {
+
 arith_uint256 ApplyDgwSlewGuard(
     arith_uint256 candidate_target,
     const arith_uint256& parent_target,
@@ -1049,41 +1097,54 @@ MatMulPreHashEpsilonBitsInfo ResolveMatMulPreHashEpsilonBitsInfo(
     return info;
 }
 
+} // namespace
+
+// AUDIT D1: ValidateMatMulAsertParams is declared in pow.h and invoked from
+// chainparams.cpp at construction time (fatal-on-invalid startup), so it needs
+// EXTERNAL linkage -- keep it outside the anonymous namespace. It still freely
+// calls the internal-linkage helpers defined above it in this TU.
 bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_height)
 {
     if (params.nMatMulAsertHalfLife <= 0) {
-        LogWarning("MatMulAsert: invalid half-life=%lld at height %d, failing closed to powLimit\n",
+        LogWarning("MatMulAsert: invalid half-life=%lld at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                    static_cast<long long>(params.nMatMulAsertHalfLife), next_height);
         return false;
     }
     if (params.nPowTargetSpacing <= 0) {
-        LogWarning("MatMulAsert: invalid target spacing=%lld at height %d, failing closed to powLimit\n",
+        LogWarning("MatMulAsert: invalid target spacing=%lld at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                    static_cast<long long>(params.nPowTargetSpacing), next_height);
         return false;
     }
     if (params.nMatMulAsertBootstrapFactor == 0) {
-        LogWarning("MatMulAsert: bootstrap factor is zero at height %d, failing closed to powLimit\n",
+        LogWarning("MatMulAsert: bootstrap factor is zero at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                    next_height);
         return false;
     }
     if (params.nMatMulAsertRetuneHardeningFactor == 0) {
-        LogWarning("MatMulAsert: retune hardening factor is zero at height %d, failing closed to powLimit\n",
+        LogWarning("MatMulAsert: retune hardening factor is zero at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                    next_height);
         return false;
     }
     if (params.nMatMulAsertRetune2TargetNum == 0 || params.nMatMulAsertRetune2TargetDen == 0) {
-        LogWarning("MatMulAsert: retune2 ratio is invalid (num=%u den=%u) at height %d, failing closed to powLimit\n",
+        LogWarning("MatMulAsert: retune2 ratio is invalid (num=%u den=%u) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                    params.nMatMulAsertRetune2TargetNum, params.nMatMulAsertRetune2TargetDen, next_height);
         return false;
     }
-    if (params.nMatMulV4AsertRescaleNum <= 0 || params.nMatMulV4AsertRescaleDen <= 0) {
-        LogWarning("MatMulAsert: v4 rescale ratio is invalid (num=%lld den=%lld) at height %d, failing closed to powLimit\n",
-                   static_cast<long long>(params.nMatMulV4AsertRescaleNum),
-                   static_cast<long long>(params.nMatMulV4AsertRescaleDen), next_height);
-        return false;
+    {
+        // AUDIT D3: the ratio must be strictly positive AND reduce to a 32-bit
+        // rational, otherwise ScaleTargetByTimespan's independent per-term uint32
+        // clamp would silently distort a large but exact calibration (e.g. 2/1
+        // expressed as 2^40/2^39).
+        uint32_t v4_rn, v4_rd;
+        if (!ReduceRescaleRatioToU32(params.nMatMulV4AsertRescaleNum, params.nMatMulV4AsertRescaleDen, v4_rn, v4_rd)) {
+            LogWarning("MatMulAsert: v4 rescale ratio is invalid (num=%lld den=%lld; must be positive and reduce to a 32-bit rational) at height %d, failing closed\n",
+                       static_cast<long long>(params.nMatMulV4AsertRescaleNum),
+                       static_cast<long long>(params.nMatMulV4AsertRescaleDen), next_height);
+            return false;
+        }
     }
     if (!IsDisabledHeight(params.nMatMulV4Height) && params.nMatMulV4Height < params.nMatMulAsertHeight) {
-        LogWarning("MatMulAsert: v4 height=%d is below ASERT activation=%d at height %d, failing closed to powLimit\n",
+        LogWarning("MatMulAsert: v4 height=%d is below ASERT activation=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                    params.nMatMulV4Height, params.nMatMulAsertHeight, next_height);
         return false;
     }
@@ -1093,14 +1154,18 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
     // since ENC-BMX4C is a profile of the v4 machine (exactly one profile live
     // at any height, no dual-profile window) -- it must fork strictly ABOVE the
     // v4 height whenever both are configured.
-    if (params.nMatMulBMX4CAsertRescaleNum <= 0 || params.nMatMulBMX4CAsertRescaleDen <= 0) {
-        LogWarning("MatMulAsert: BMX4C rescale ratio is invalid (num=%lld den=%lld) at height %d, failing closed to powLimit\n",
-                   static_cast<long long>(params.nMatMulBMX4CAsertRescaleNum),
-                   static_cast<long long>(params.nMatMulBMX4CAsertRescaleDen), next_height);
-        return false;
+    {
+        // AUDIT D3 (mirror of the v4 check): positive and 32-bit-reducible.
+        uint32_t bmx4c_rn, bmx4c_rd;
+        if (!ReduceRescaleRatioToU32(params.nMatMulBMX4CAsertRescaleNum, params.nMatMulBMX4CAsertRescaleDen, bmx4c_rn, bmx4c_rd)) {
+            LogWarning("MatMulAsert: BMX4C rescale ratio is invalid (num=%lld den=%lld; must be positive and reduce to a 32-bit rational) at height %d, failing closed\n",
+                       static_cast<long long>(params.nMatMulBMX4CAsertRescaleNum),
+                       static_cast<long long>(params.nMatMulBMX4CAsertRescaleDen), next_height);
+            return false;
+        }
     }
     if (!IsDisabledHeight(params.nMatMulBMX4CHeight) && params.nMatMulBMX4CHeight < params.nMatMulAsertHeight) {
-        LogWarning("MatMulAsert: BMX4C height=%d is below ASERT activation=%d at height %d, failing closed to powLimit\n",
+        LogWarning("MatMulAsert: BMX4C height=%d is below ASERT activation=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                    params.nMatMulBMX4CHeight, params.nMatMulAsertHeight, next_height);
         return false;
     }
@@ -1109,7 +1174,7 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
     // guards the v4-rescale branch out so the BMX4C rescale fires (see above).
     if (!IsDisabledHeight(params.nMatMulBMX4CHeight) && !IsDisabledHeight(params.nMatMulV4Height) &&
         params.nMatMulBMX4CHeight < params.nMatMulV4Height) {
-        LogWarning("MatMulAsert: BMX4C height=%d must be at or above v4 height=%d at height %d, failing closed to powLimit\n",
+        LogWarning("MatMulAsert: BMX4C height=%d must be at or above v4 height=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                    params.nMatMulBMX4CHeight, params.nMatMulV4Height, next_height);
         return false;
     }
@@ -1145,7 +1210,7 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
             params.nMatMulV4AsertRescaleNum != params.nMatMulV4AsertRescaleDen &&
             shadowed_by_earlier(params.nMatMulV4Height)) {
             LogWarning("MatMulAsert: non-inert v4 rescale height=%d collides with an earlier ASERT branch "
-                       "(rescale would be silently skipped) at height %d, failing closed to powLimit\n",
+                       "(rescale would be silently skipped) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                        params.nMatMulV4Height, next_height);
             return false;
         }
@@ -1153,7 +1218,7 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
             params.nMatMulBMX4CAsertRescaleNum != params.nMatMulBMX4CAsertRescaleDen &&
             shadowed_by_earlier(params.nMatMulBMX4CHeight)) {
             LogWarning("MatMulAsert: non-inert BMX4C rescale height=%d collides with an earlier ASERT branch "
-                       "(rescale would be silently skipped) at height %d, failing closed to powLimit\n",
+                       "(rescale would be silently skipped) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                        params.nMatMulBMX4CHeight, next_height);
             return false;
         }
@@ -1162,24 +1227,56 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
     const bool retune_enabled = !IsDisabledHeight(params.nMatMulAsertRetuneHeight);
     const bool retune2_enabled = !IsDisabledHeight(params.nMatMulAsertRetune2Height);
     if (retune_enabled && params.nMatMulAsertRetuneHeight < params.nMatMulAsertHeight) {
-        LogWarning("MatMulAsert: retune height=%d is below ASERT activation=%d at height %d, failing closed to powLimit\n",
+        LogWarning("MatMulAsert: retune height=%d is below ASERT activation=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                    params.nMatMulAsertRetuneHeight, params.nMatMulAsertHeight, next_height);
         return false;
     }
     if (retune2_enabled && params.nMatMulAsertRetune2Height < params.nMatMulAsertHeight) {
-        LogWarning("MatMulAsert: retune2 height=%d is below ASERT activation=%d at height %d, failing closed to powLimit\n",
+        LogWarning("MatMulAsert: retune2 height=%d is below ASERT activation=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                    params.nMatMulAsertRetune2Height, params.nMatMulAsertHeight, next_height);
         return false;
     }
     if (retune_enabled && retune2_enabled &&
         params.nMatMulAsertRetune2Height < params.nMatMulAsertRetuneHeight) {
-        LogWarning("MatMulAsert: retune2 height=%d is below retune height=%d at height %d, failing closed to powLimit\n",
+        LogWarning("MatMulAsert: retune2 height=%d is below retune height=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                    params.nMatMulAsertRetune2Height, params.nMatMulAsertRetuneHeight, next_height);
         return false;
     }
+    // AUDIT D2: complete the branch-collision coverage. The cascade dispatches in
+    // the fixed order asert -> retune -> retune2 -> v4 -> bmx4c and returns on the
+    // FIRST height match, so a later branch whose height EQUALS an earlier branch's
+    // height is silently shadowed. The v4/bmx4c-vs-earlier collisions are rejected
+    // in the C5 block above; here reject the remaining retune-family EQUALITY
+    // collisions when the SHADOWED operation is NON-inert (an inert no-op is safe
+    // to shadow). retune is non-inert iff its hardening factor > 1 (the branch only
+    // divides when factor > 1); retune2 is non-inert iff num != den.
+    {
+        const bool retune_non_inert{retune_enabled && params.nMatMulAsertRetuneHardeningFactor > 1};
+        const bool retune2_non_inert{retune2_enabled &&
+            params.nMatMulAsertRetune2TargetNum != params.nMatMulAsertRetune2TargetDen};
+        if (retune_non_inert && params.nMatMulAsertRetuneHeight == params.nMatMulAsertHeight) {
+            LogWarning("MatMulAsert: non-inert retune height=%d collides with the ASERT activation height "
+                       "(retune would be silently skipped) at height %d, failing closed\n",
+                       params.nMatMulAsertRetuneHeight, next_height);
+            return false;
+        }
+        if (retune2_non_inert && params.nMatMulAsertRetune2Height == params.nMatMulAsertHeight) {
+            LogWarning("MatMulAsert: non-inert retune2 height=%d collides with the ASERT activation height "
+                       "(retune2 would be silently skipped) at height %d, failing closed\n",
+                       params.nMatMulAsertRetune2Height, next_height);
+            return false;
+        }
+        if (retune2_non_inert && retune_enabled &&
+            params.nMatMulAsertRetune2Height == params.nMatMulAsertRetuneHeight) {
+            LogWarning("MatMulAsert: non-inert retune2 height=%d collides with the retune height "
+                       "(retune2 would be silently skipped) at height %d, failing closed\n",
+                       params.nMatMulAsertRetune2Height, next_height);
+            return false;
+        }
+    }
     if (IsMatMulAsertHalfLifeUpgradeConfigured(params)) {
         if (params.nMatMulAsertHalfLifeUpgrade <= 0) {
-            LogWarning("MatMulAsert: half-life upgrade value=%lld is invalid at height %d, failing closed to powLimit\n",
+            LogWarning("MatMulAsert: half-life upgrade value=%lld is invalid at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                        static_cast<long long>(params.nMatMulAsertHalfLifeUpgrade), next_height);
             return false;
         }
@@ -1199,13 +1296,15 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         // sit above the rescales would reject that valid config and fail difficulty
         // closed to powLimit. Only the base/retune ordering below is constrained.
         if (params.nMatMulAsertHalfLifeUpgradeHeight <= latest_pre_upgrade_anchor) {
-            LogWarning("MatMulAsert: half-life upgrade height=%d must be above latest prior anchor=%d at height %d, failing closed to powLimit\n",
+            LogWarning("MatMulAsert: half-life upgrade height=%d must be above latest prior anchor=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                        params.nMatMulAsertHalfLifeUpgradeHeight, latest_pre_upgrade_anchor, next_height);
             return false;
         }
     }
     return true;
 }
+
+namespace {
 
 bool ShouldEnableAsyncPrepare(matmul::backend::Kind backend, uint32_t configured_batch_size)
 {
@@ -2041,16 +2140,21 @@ arith_uint256 CalculateMatMulAsertTarget(
     if (anchor_target == 0 || anchor_target > pow_limit) {
         return pow_limit;
     }
+    // AUDIT D1: these are "cannot happen on a valid chain" invariant breaches
+    // (a negative height delta, or half-life/spacing that are validated fatally at
+    // construction). Fail CLOSED to the hardest representable target rather than
+    // OPEN to powLimit, so a breach can never weaken difficulty.
+    const arith_uint256 hardest_target{1};
     if (height_diff < 0) {
-        LogWarning("CalculateMatMulAsertTarget: height_diff=%lld is negative, failing closed to powLimit\n",
+        LogWarning("CalculateMatMulAsertTarget: height_diff=%lld is negative, failing closed (hardest target)\n",
                    static_cast<long long>(height_diff));
-        return pow_limit;
+        return hardest_target;
     }
     if (half_life <= 0 || params.nPowTargetSpacing <= 0) {
-        LogWarning("CalculateMatMulAsertTarget: invalid parameters (half_life=%lld target_spacing=%lld), failing closed to powLimit\n",
+        LogWarning("CalculateMatMulAsertTarget: invalid parameters (half_life=%lld target_spacing=%lld), failing closed (hardest target)\n",
                    static_cast<long long>(half_life),
                    static_cast<long long>(params.nPowTargetSpacing));
-        return pow_limit;
+        return hardest_target;
     }
 
     const int64_t target_spacing = params.nPowTargetSpacing;
@@ -2329,7 +2433,10 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
     }
 
     if (!ValidateMatMulAsertParams(params, next_height)) {
-        return pow_limit.GetCompact();
+        // AUDIT D1: fail CLOSED (hardest target), never open to powLimit. Immutable
+        // ASERT params are validated fatally at construction, so this is an
+        // unreachable defence-in-depth backstop for a validly-started node.
+        return MatMulAsertFailClosedBits();
     }
 
     const uint32_t bootstrap_factor = params.nMatMulAsertBootstrapFactor;
@@ -2389,10 +2496,13 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
     if (next_height == params.nMatMulV4Height && next_height != params.nMatMulBMX4CHeight) {
         arith_uint256 parent_target{};
         parent_target.SetCompact(pindexLast->nBits);
-        arith_uint256 v4_target = ScaleTargetByTimespan(
-            parent_target,
-            params.nMatMulV4AsertRescaleNum,
-            params.nMatMulV4AsertRescaleDen);
+        // AUDIT D3: apply the GCD-reduced 32-bit ratio so a large-but-exact
+        // calibration is not distorted by ScaleTargetByTimespan's per-term clamp.
+        uint32_t v4_rn, v4_rd;
+        if (!ReduceRescaleRatioToU32(params.nMatMulV4AsertRescaleNum, params.nMatMulV4AsertRescaleDen, v4_rn, v4_rd)) {
+            return MatMulAsertFailClosedBits();  // D1: unreachable post-construction; never powLimit
+        }
+        arith_uint256 v4_target = ScaleTargetByTimespan(parent_target, v4_rn, v4_rd);
         v4_target = ClampRetargetResult(v4_target, pow_limit);
         return v4_target.GetCompact();
     }
@@ -2409,10 +2519,12 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
     if (next_height == params.nMatMulBMX4CHeight) {
         arith_uint256 parent_target{};
         parent_target.SetCompact(pindexLast->nBits);
-        arith_uint256 bmx4c_target = ScaleTargetByTimespan(
-            parent_target,
-            params.nMatMulBMX4CAsertRescaleNum,
-            params.nMatMulBMX4CAsertRescaleDen);
+        // AUDIT D3: GCD-reduced 32-bit ratio (see the v4 branch).
+        uint32_t bmx4c_rn, bmx4c_rd;
+        if (!ReduceRescaleRatioToU32(params.nMatMulBMX4CAsertRescaleNum, params.nMatMulBMX4CAsertRescaleDen, bmx4c_rn, bmx4c_rd)) {
+            return MatMulAsertFailClosedBits();  // D1: unreachable post-construction; never powLimit
+        }
+        arith_uint256 bmx4c_target = ScaleTargetByTimespan(parent_target, bmx4c_rn, bmx4c_rd);
         bmx4c_target = ClampRetargetResult(bmx4c_target, pow_limit);
         return bmx4c_target.GetCompact();
     }
@@ -2953,6 +3065,39 @@ bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::P
     return true;
 }
 
+std::optional<arith_uint256> DeriveMatMulHeaderPoWGateTarget(
+    unsigned int nBits, uint32_t discount_bits, const uint256& pow_limit)
+{
+    // AUDIT H4: the PURE gate-target derivation, extracted so it can be unit-tested
+    // directly with fixed vectors (no header, no hashing). Returns the throttle
+    // target a header claiming difficulty `nBits` must hash at or under, or
+    // std::nullopt when the throttle does not apply / is misconfigured, namely:
+    //   - discount_bits == UINT32_MAX (the "disabled" sentinel), or
+    //   - discount_bits > 255 (AUDIT H2: an out-of-range discount that would force
+    //     the target to powLimit regardless of nBits, recreating the fixed-cost
+    //     C2 gate), or
+    //   - nBits does not decode to a valid target.
+    // The target is the block's OWN nBits-derived target shifted EASIER by
+    // `discount_bits`, saturating at powLimit -- so forging cost stays PROPORTIONAL
+    // to the claimed chainwork (audit C2), never a fixed constant.
+    if (discount_bits == std::numeric_limits<uint32_t>::max()) return std::nullopt; // disabled
+    if (discount_bits > Consensus::Params::MATMUL_HEADER_POW_MAX_DISCOUNT_BITS) return std::nullopt; // H2
+    const auto block_target{DeriveTarget(nBits, pow_limit)};
+    if (!block_target) return std::nullopt;
+    const arith_uint256 limit{UintToArith256(pow_limit)};
+    arith_uint256 gate_target{*block_target};
+    if (discount_bits != 0) {
+        // Saturate at powLimit if the left-shift would overflow 256 bits.
+        if ((gate_target >> (256 - discount_bits)) != arith_uint256{0}) {
+            gate_target = limit;
+        } else {
+            gate_target <<= discount_bits;
+            if (gate_target > limit) gate_target = limit;
+        }
+    }
+    return gate_target;
+}
+
 bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Params& params)
 {
     // Audit F1/C1/C2: header-PoW THROTTLE bound to nBits. The preimage is the block
@@ -2967,25 +3112,19 @@ bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Param
     // of matmul-calibrated chainwork (audit C1 -- SHA << matmul; see the doc).
     // Disabled sentinel: discount == UINT32_MAX -> always passes.
     if (!params.IsMatMulHeaderPoWEnabled()) return true;
-    const auto block_target{DeriveTarget(block.nBits, params.powLimit)};
-    if (!block_target) return false;
-    const arith_uint256 pow_limit{UintToArith256(params.powLimit)};
-    const uint32_t d{params.nMatMulHeaderPoWDiscountBits};
-    arith_uint256 gate_target{*block_target};
-    if (d >= 256) {
-        gate_target = pow_limit;                       // discount past 256 bits: easiest allowed
-    } else if (d != 0) {
-        // Clamp to powLimit if the left-shift would overflow 256 bits.
-        if ((gate_target >> (256 - d)) != arith_uint256{0}) {
-            gate_target = pow_limit;
-        } else {
-            gate_target <<= d;
-            if (gate_target > pow_limit) gate_target = pow_limit;
-        }
-    }
+    // AUDIT H2: a discount >= 256 (but != the UINT32_MAX "disabled" sentinel) is an
+    // invalid configuration (rejected fatally at chain-parameter construction). If
+    // one ever reaches here it is a runtime invariant violation, so FAIL CLOSED
+    // (reject the header) rather than fail open to the easiest target. The pure
+    // helper below returns nullopt for both the disabled sentinel and any
+    // out-of-range/undecodable case, so the explicit check keeps the disabled path
+    // (return true, above) distinct from the invalid path (return false, here).
+    const auto gate_target{
+        DeriveMatMulHeaderPoWGateTarget(block.nBits, params.nMatMulHeaderPoWDiscountBits, params.powLimit)};
+    if (!gate_target) return false;
     HashWriter hw;
     hw << block.GetHash() << block.nNonce;
-    return UintToArith256(hw.GetHash()) <= gate_target;
+    return UintToArith256(hw.GetHash()) <= *gate_target;
 }
 
 bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height)

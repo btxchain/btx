@@ -803,8 +803,17 @@ BOOST_AUTO_TEST_CASE(asert_zero_and_negative_time_diff_are_bounded)
     BOOST_CHECK(target_negative <= pow_limit);
 }
 
-BOOST_AUTO_TEST_CASE(asert_invalid_params_fail_closed_to_powlimit)
+BOOST_AUTO_TEST_CASE(asert_invalid_params_fail_closed_to_hardest_target)
 {
+    // AUDIT D1: an invalid immutable ASERT schedule must fail CLOSED (the hardest
+    // representable target = a mining halt), NEVER open to powLimit (the EASIEST
+    // target), which would let a malformed even future-dated config weaken current
+    // difficulty. This test drives the runtime defence-in-depth backstop directly
+    // via a raw Consensus::Params (real chainparams reject these at construction --
+    // see the CRegTestParams startup assert). The expected result is exactly
+    // MatMulAsertFailClosedBits(); the former version of this test asserted the
+    // (fail-OPEN) powLimit and was named ...fail_closed_to_powlimit, perpetuating
+    // the very misnomer the audit flagged.
     auto params = MatMulRetargetParams();
     params.nFastMineHeight = 10;
     params.nMatMulAsertHeight = 10;
@@ -814,26 +823,71 @@ BOOST_AUTO_TEST_CASE(asert_invalid_params_fail_closed_to_powlimit)
     SeedFixedDifficultyChain(blocks, 0x1f00ffffU, 1'700'000'000, 90);
     CBlockHeader next{};
     next.nTime = blocks.back().GetBlockTime() + 90;
-    const uint32_t powlimit_bits = UintToArith256(params.powLimit).GetCompact();
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, params), powlimit_bits);
+    const uint32_t hardest_bits = MatMulAsertFailClosedBits();
+    // Sanity: the fail-closed target is strictly HARDER (smaller) than powLimit.
+    BOOST_CHECK(DecodeTarget(hardest_bits) < UintToArith256(params.powLimit));
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, params), hardest_bits);
 
     params.nMatMulAsertHalfLife = 14'400;
     params.nMatMulAsertRetuneHeight = 9; // below activation => invalid schedule
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, params), powlimit_bits);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, params), hardest_bits);
 
     params.nMatMulAsertRetuneHeight = 16;
     params.nMatMulAsertRetune2Height = 14; // below retune => invalid schedule
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, params), powlimit_bits);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, params), hardest_bits);
 
     params.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
     params.nMatMulAsertHalfLifeUpgradeHeight = 16;
     params.nMatMulAsertHalfLifeUpgrade = 0;
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, params), powlimit_bits);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, params), hardest_bits);
 
     params.nMatMulAsertHalfLifeUpgrade = 3'600;
     params.nMatMulAsertRetune2Height = 16;
     params.nMatMulAsertHalfLifeUpgradeHeight = 16; // upgrade must be strictly after latest retune anchor
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, params), powlimit_bits);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, params), hardest_bits);
+}
+
+BOOST_AUTO_TEST_CASE(asert_retune_family_collision_rejected_fail_closed)
+{
+    // AUDIT D2: a NON-inert later branch whose height collides with an earlier
+    // branch (dispatch order asert->retune->retune2->v4->bmx4c) is silently
+    // shadowed; ValidateMatMulAsertParams must reject it, so GetNextWorkRequired
+    // fails closed (hardest target). Inert collisions stay legal.
+    const uint32_t hardest_bits = MatMulAsertFailClosedBits();
+    std::vector<CBlockIndex> blocks(12);
+    SeedFixedDifficultyChain(blocks, 0x1f00ffffU, 1'700'000'000, 90);
+    CBlockHeader next{};
+    next.nTime = blocks.back().GetBlockTime() + 90;
+
+    auto base = MatMulRetargetParams();
+    base.nFastMineHeight = 10;
+    base.nMatMulAsertHeight = 10;
+    base.nMatMulAsertHalfLife = 14'400;
+
+    // Non-inert retune (hardening factor > 1) colliding with the asert height.
+    {
+        auto p = base;
+        p.nMatMulAsertRetuneHeight = p.nMatMulAsertHeight; // collision
+        p.nMatMulAsertRetuneHardeningFactor = 2;           // non-inert
+        BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, p), hardest_bits);
+        // Inert (factor 1) at the same collision is legal (no fail-closed).
+        p.nMatMulAsertRetuneHardeningFactor = 1;
+        BOOST_CHECK(GetNextWorkRequired(&blocks.back(), &next, p) != hardest_bits);
+    }
+    // Non-inert retune2 (num != den) colliding with the retune height.
+    {
+        auto p = base;
+        p.nMatMulAsertRetuneHeight = 11;
+        p.nMatMulAsertRetuneHardeningFactor = 1;
+        p.nMatMulAsertRetune2Height = 11; // collision with retune
+        p.nMatMulAsertRetune2TargetNum = 3;
+        p.nMatMulAsertRetune2TargetDen = 4; // non-inert
+        BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, p), hardest_bits);
+        // Inert retune2 (num==den) at the same collision is legal.
+        p.nMatMulAsertRetune2TargetNum = 1;
+        p.nMatMulAsertRetune2TargetDen = 1;
+        BOOST_CHECK(GetNextWorkRequired(&blocks.back(), &next, p) != hardest_bits);
+    }
 }
 
 // Mainnet launch vector: fast phase active before boundary, ASERT activates at nFastMineHeight.

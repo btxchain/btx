@@ -154,6 +154,22 @@ uint256 DeterministicMatMulSeedV3(const CBlockHeader& block, uint32_t height, in
     int32_t block_height,
     std::optional<int64_t> parent_median_time_past = std::nullopt);
 bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::Params& params);
+/** Validate the immutable MatMul-ASERT schedule parameters (ratios, ordering,
+ *  branch-collision freedom). Purely a function of @p params -- @p next_height is
+ *  used only for log context. Called both at chain-parameter construction
+ *  (AUDIT D1: an invalid immutable config aborts node startup, rather than
+ *  silently weakening current difficulty at some future height) and defensively
+ *  per-block inside MatMulAsert. */
+bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_height);
+/** AUDIT D3: reduce a one-time ASERT rescale ratio num/den to lowest terms; return
+ *  false (and leave outputs unspecified) unless it is strictly positive AND both
+ *  reduced terms fit in uint32. Prevents ScaleTargetByTimespan's independent
+ *  per-term uint32 clamp from distorting a large-but-exact ratio (e.g. 2^40/2^39).*/
+bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32_t& out_den);
+/** AUDIT D1: the fail-CLOSED difficulty result (hardest representable target) used
+ *  when a runtime ASERT invariant is breached, so an invalid config can never
+ *  weaken (fail open to powLimit) current difficulty. */
+unsigned int MatMulAsertFailClosedBits();
 /** Header-PoW spam gate (audit F1). Returns true iff the header carries the
  *  required cheap, UNFORGEABLE hash work: H(GetHash() || spam_nonce) <=
  *  DeriveTarget(nMatMulHeaderPoWBits). spam_nonce is the legacy header `nNonce`
@@ -164,6 +180,15 @@ bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::P
  *  nMatMulHeaderPoWBits != 0; default 0 = disabled). NOTE (activation-blocking):
  *  `nNonce` is not yet in the P2P header wire serialization, so this is a staged
  *  mechanism -- see doc/btx-matmul-v4.2-header-pow-gate.md. */
+/** AUDIT H4: the PURE header-PoW throttle target derivation (no header, no hash),
+ *  exposed for direct fixed-vector testing. Returns the target a header claiming
+ *  difficulty @p nBits must hash at or under, or std::nullopt when the throttle
+ *  does not apply / is misconfigured: @p discount_bits == UINT32_MAX (disabled),
+ *  @p discount_bits > 255 (AUDIT H2, out of range), or @p nBits undecodable. The
+ *  target is DeriveTarget(nBits) shifted easier by @p discount_bits, saturating at
+ *  @p pow_limit, so forging cost stays proportional to the claimed work (C2). */
+std::optional<arith_uint256> DeriveMatMulHeaderPoWGateTarget(
+    unsigned int nBits, uint32_t discount_bits, const uint256& pow_limit);
 bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Params& params);
 bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height);
 bool CheckMatMulProofOfWork_Phase2(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height = -1);

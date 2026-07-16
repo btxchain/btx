@@ -196,6 +196,16 @@ struct Params {
     uint32_t nMatMulPhase2FailBanThreshold{1};
     bool fMatMulStrictPunishment{false};
     uint32_t nMatMulSnapshotInterval{10'000};
+    /** AUDIT P2: NON-FUNCTIONAL / RESERVED. No code path consumes this value --
+     *  there is currently NO proof-aware pruning. On a default node every ~8 MiB
+     *  MatMul product proof is retained indefinitely, i.e. unbounded growth on the
+     *  order of ~2.9 TiB/yr of proof data alone at a 90 s spacing (before ordinary
+     *  tx/index data). Closing this requires either implementing proof-aware
+     *  pruning (with reorg / reindex / assumeUTXO / RPC semantics) or removing this
+     *  field; until then it is retained only to avoid churning the 6 chainparams
+     *  sites, and the true storage cost is disclosed here and in
+     *  doc/btx-matmul-v4.2-external-audit-remediation.md (D2). Do NOT read this as
+     *  an implemented retention bound. */
     uint32_t nMatMulProofPruneDepth{10'000};
     /** Pre-hash epsilon bits: sigma must satisfy target << N before a nonce reaches
      *  the expensive MatMul path. This makes the sigma gate 2^N easier than the
@@ -608,6 +618,20 @@ struct Params {
     bool IsMatMulHeaderPoWEnabled() const
     {
         return nMatMulHeaderPoWDiscountBits != std::numeric_limits<uint32_t>::max();
+    }
+    /** AUDIT H2: the ONLY valid configured discount range is 0..255. UINT32_MAX
+     *  is reserved EXCLUSIVELY for "disabled". Any value in [256, UINT32_MAX-1]
+     *  is a configuration error: a discount >= 256 would drive the throttle
+     *  target to powLimit regardless of nBits, recreating the fixed-cost C2 gate
+     *  that the nBits binding was introduced to remove. Such values must be
+     *  rejected at chain-parameter construction (fatal startup, see
+     *  AssertBMX4CConstructionInvariants) rather than silently clamped, and are
+     *  additionally fail-closed at runtime in CheckMatMulHeaderSpamGate. */
+    static constexpr uint32_t MATMUL_HEADER_POW_MAX_DISCOUNT_BITS{255};
+    bool IsMatMulHeaderPoWDiscountValid() const
+    {
+        return nMatMulHeaderPoWDiscountBits <= MATMUL_HEADER_POW_MAX_DISCOUNT_BITS ||
+               nMatMulHeaderPoWDiscountBits == std::numeric_limits<uint32_t>::max();
     }
     /** The committed-operand encoding profile live at this height. Only
      *  meaningful at v4 heights (below nMatMulV4Height the v3 rules apply
