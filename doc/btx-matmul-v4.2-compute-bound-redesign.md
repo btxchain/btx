@@ -1,8 +1,21 @@
 # BTX MatMul v4.2-D — the compute-bound redesign (ENC-BMX4C-D)
 
-Status: **DESIGN + CPU-reference landed; activation-disabled on every network
-(mainnet + all public testnets at `nMatMulBMX4CDHeight = INT32_MAX`).** This is
-a staged, parameter-frozen L1 encoding profile. Nothing here flips activation.
+> **LEAD DECISION (2026-07-16): ENC-BMX4C-D is PARKED — NOT the deployment path.**
+> On review, the 32 MiB payload (m=2048, b=2) quadruples data for marginal ordering
+> gain and adds a data-availability cost, while the **8 MiB ENC-BMX4C profile
+> (m=1024, b=4) is the chosen encoding**: it already excludes older cards and
+> captures the main datacenter lever — the INT8 combine is ~80% of the per-nonce
+> work, so INT8 TOPS throughput with a **tuned combine kernel** is the deciding
+> factor. This document is retained as the analysis of the deeper-commit option and
+> the L1 tension; the profile stays in-tree but activation-disabled and is not a
+> candidate. Forward compute-bound work targets a tuned INT8 combine kernel on the
+> 8 MiB profile, not a larger payload. See
+> `doc/btx-matmul-v4.2-external-audit-round2-remediation.md` §"Lead design decisions".
+
+Status: **DESIGN + CPU-reference landed; PARKED, activation-disabled on every
+network (mainnet + all public testnets at `nMatMulBMX4CDHeight = INT32_MAX`).**
+This is a staged, parameter-frozen L1 encoding profile. Nothing here flips
+activation, and per the lead decision above it is not the deployment path.
 
 Author track: lead designer/implementer, worktree
 `claude/matmul-v4-design-spec-af23sj`. Companion docs:
