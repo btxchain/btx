@@ -9971,6 +9971,19 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
     if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect proof of work");
 
+    // Audit F1: header-PoW spam gate. At v4 heights the header-level PoW check is
+    // only `matmul_digest <= target`, and matmul_digest is a self-declared field
+    // (not a hash of the header), so header work is forgeable at zero cost -- a
+    // header-flood / best-header-poisoning DoS vector. When activated
+    // (nMatMulHeaderPoWHeight; default disabled) this requires cheap UNFORGEABLE
+    // hash work per header. It is NOT gated by fSkipMatMulValidation: it is a
+    // relay/DoS defense (one hash), not an expensive-verify correctness check.
+    if (consensusParams.fMatMulPOW && consensusParams.IsMatMulHeaderPoWActive(nHeight) &&
+        !CheckMatMulHeaderSpamGate(block, consensusParams)) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-matmul-header-pow",
+                             "matmul header proof-of-work spam gate not satisfied");
+    }
+
     // Deterministic seed enforcement: verify MatMul seeds match the active
     // height-gated derivation. This is done contextually (not in Phase 1)
     // because Phase 1 operates on header-only data without block index access.

@@ -154,6 +154,16 @@ uint256 DeterministicMatMulSeedV3(const CBlockHeader& block, uint32_t height, in
     int32_t block_height,
     std::optional<int64_t> parent_median_time_past = std::nullopt);
 bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::Params& params);
+/** Header-PoW spam gate (audit F1). Returns true iff the header carries the
+ *  required cheap, UNFORGEABLE hash work: H(GetHash() || spam_nonce) <=
+ *  DeriveTarget(nMatMulHeaderPoWBits). spam_nonce is the legacy header `nNonce`
+ *  field, which is DECOUPLED from the matmul preimage (ComputeMatMulHeaderHash),
+ *  so an honest miner grinds this cheap gate without recomputing the expensive
+ *  matmul. Only enforced where params.IsMatMulHeaderPoWActive(height) (default
+ *  disabled). NOTE (activation-blocking): `nNonce` is not yet in the P2P header
+ *  wire serialization, so this is a staged mechanism -- see
+ *  doc/btx-matmul-v4.2-header-pow-gate.md. */
+bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Params& params);
 bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height);
 bool CheckMatMulProofOfWork_Phase2(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height = -1);
 bool CheckMatMulProofOfWork_Phase2WithPayload(const CBlock& block, const Consensus::Params& params, int32_t block_height = -1);

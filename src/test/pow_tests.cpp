@@ -4655,4 +4655,62 @@ BOOST_AUTO_TEST_CASE(MatMulBMX4C_mine_validate_round_trip_enforcing)
     }
 }
 
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoWSpamGate_grindable_decoupled_and_enforced)
+{
+    // Audit F1: the header-PoW spam gate must be (a) satisfiable by grinding the
+    // DECOUPLED nNonce (cheap, no matmul recompute), (b) height-gated + disabled
+    // by default, and (c) a real filter (most nNonces fail an easy-but-nonzero
+    // target). This tests the gate LOGIC directly; wiring nNonce onto the P2P
+    // header wire (so peers receive the grinder) is the activation-blocking step
+    // documented in doc/btx-matmul-v4.2-header-pow-gate.md.
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    // Default is disabled (INT32_MAX): the gate never fires.
+    BOOST_CHECK(consensus.nMatMulHeaderPoWHeight == std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!consensus.IsMatMulHeaderPoWActive(1'000'000));
+
+    // Activate at a height with an easy-but-nonzero target: top 12 bits zero
+    // (~1/4096 per hash), so grinding is fast yet most nonces fail.
+    const arith_uint256 easy_target{(~arith_uint256{0}) >> 12};
+    consensus.nMatMulHeaderPoWBits = easy_target.GetCompact();
+    consensus.nMatMulHeaderPoWHeight = 100;
+    BOOST_CHECK(!consensus.IsMatMulHeaderPoWActive(99));
+    BOOST_CHECK(consensus.IsMatMulHeaderPoWActive(100));
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000606"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000607"};
+    header.nTime = 1'780'000'030U;
+    header.nBits = 0x1d00ffff;
+    header.nNonce64 = 7;
+    header.matmul_digest.SetNull();  // an attacker's free "digest=0" forgery...
+
+    // ...still must pay real hash work at the gate: grind the DECOUPLED nNonce.
+    // Crucially, changing nNonce does NOT change GetHash() inputs used by the
+    // matmul (nNonce is not serialized into the header hash preimage of the
+    // operand derivation), so this grind is independent of any matmul work.
+    const uint256 hash_before = header.GetHash();
+    bool passed = false;
+    uint32_t winning_nonce = 0;
+    for (uint32_t n = 0; n < (1u << 22); ++n) {
+        header.nNonce = n;
+        if (CheckMatMulHeaderSpamGate(header, consensus)) { passed = true; winning_nonce = n; break; }
+    }
+    BOOST_REQUIRE_MESSAGE(passed, "header spam gate not satisfiable by grinding nNonce");
+    BOOST_CHECK(CheckMatMulHeaderSpamGate(header, consensus));
+    // nNonce is decoupled: grinding it never altered the (matmul-relevant) block hash.
+    BOOST_CHECK_EQUAL(header.GetHash(), hash_before);
+
+    // Enforcement: a header WITHOUT the required work (a different nNonce) is very
+    // likely rejected -- find one to prove the gate is not vacuous.
+    bool found_failing = false;
+    for (uint32_t n = winning_nonce + 1; n < winning_nonce + 1 + 4096; ++n) {
+        header.nNonce = n;
+        if (!CheckMatMulHeaderSpamGate(header, consensus)) { found_failing = true; break; }
+    }
+    BOOST_CHECK_MESSAGE(found_failing, "gate accepted every nonce -- target too loose to be a filter");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

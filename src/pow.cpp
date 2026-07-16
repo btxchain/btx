@@ -2882,6 +2882,23 @@ bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::P
     return true;
 }
 
+bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Params& params)
+{
+    // Audit F1: unforgeable cheap header work. The spam preimage is the block
+    // hash (which already commits every consensus header field, incl. the
+    // self-declared matmul_digest) concatenated with the DECOUPLED grinding nonce
+    // `nNonce`. Because nNonce is NOT part of ComputeMatMulHeaderHash (the matmul
+    // operand/digest preimage), an honest miner grinds nNonce to satisfy this gate
+    // WITHOUT recomputing the matmul -- so the honest cost is a few cheap hashes,
+    // while an attacker forging headers (matmul_digest = 0) must still pay ~1/p
+    // hashes PER header. Bit-exact: SHA256d over a fixed little-endian preimage.
+    auto bnTarget{DeriveTarget(params.nMatMulHeaderPoWBits, params.powLimit)};
+    if (!bnTarget) return false;
+    HashWriter hw;
+    hw << block.GetHash() << block.nNonce;
+    return UintToArith256(hw.GetHash()) <= *bnTarget;
+}
+
 bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height)
 {
     const uint32_t pre_hash_epsilon_bits = GetMatMulPreHashEpsilonBitsForHeight(params, block_height);
