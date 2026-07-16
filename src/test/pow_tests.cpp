@@ -1446,6 +1446,44 @@ BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_activation_selects_v3_and_requires_pare
     BOOST_CHECK_NE(v3.seed_b, alternate_parent.seed_b);
 }
 
+BOOST_AUTO_TEST_CASE(MatMulBMX4CSeed_field_pinning_is_v3_and_idempotent)
+{
+    // Audit W-1 regression (consensus-critical). At ENC-BMX4C heights the header
+    // seed FIELDS must be pinned by the self-reference-free V3 derivation, NOT by
+    // DeriveOperandSeedBMX4C -- whose operand-B preimage (ComputeMatMulHeaderHash)
+    // includes seed_b, so seed_b := f(H(..., seed_b)) has no fixed point and the
+    // verifier's recompute-and-compare (bad-matmul-seeds) would reject EVERY
+    // honestly-mined block. The pinning MUST therefore be idempotent.
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    // Regtest activates v4 at 100 and ENC-BMX4C at 150.
+    BOOST_REQUIRE(consensus.GetMatMulEncodingProfile(150) ==
+                  Consensus::MatMulEncodingProfile::ENC_BMX4C);
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000204"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000205"};
+    header.nTime = 1'780'000'020U;
+    header.nBits = 0x1d00ffff;
+    header.nNonce64 = 22;
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulV4Dimension);
+
+    constexpr int64_t parent_mtp{1'780'000'000};
+    CBlockHeader pinned{header};
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(pinned, consensus, 150, parent_mtp));
+    // Header fields are the self-reference-free V3 seeds.
+    BOOST_CHECK_EQUAL(pinned.seed_a, DeterministicMatMulSeedV3(header, 150, parent_mtp, 0));
+    BOOST_CHECK_EQUAL(pinned.seed_b, DeterministicMatMulSeedV3(header, 150, parent_mtp, 1));
+
+    // Idempotency: recomputing on the already-pinned header (what bad-matmul-seeds
+    // does) yields identical seeds. The buggy self-referential seed_b changed here.
+    CBlockHeader recompute{pinned};
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(recompute, consensus, 150, parent_mtp));
+    BOOST_CHECK_EQUAL(recompute.seed_a, pinned.seed_a);
+    BOOST_CHECK_EQUAL(recompute.seed_b, pinned.seed_b);
+}
+
 BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_solver_requires_parent_context_after_activation)
 {
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();

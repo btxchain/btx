@@ -132,20 +132,23 @@ bool SetDeterministicMatMulSeeds(
             block.seed_b.SetNull();
             return false;
         }
-        // MatMul v4.2 / ENC-BMX4C (spec §1.5, §8.2): at BMX4C heights the header
-        // seed fields commit to the V4.2 domain-tagged operand seeds
-        // (DeterministicMatMulSeedV42) — template-scoped A, nonce-fresh B — so
-        // the ContextualCheckBlockHeader recompute-and-compare (bad-matmul-seeds)
-        // validates the same seeds the ENC-BMX4C reference derives internally.
-        // The parent-MTP-has-value guard above stays (fail-closed symmetry with
-        // the ENC-S8 branch; the template hash binds the parent transitively).
-        // GetMatMulEncodingProfile is the SINGLE profile selector (no second
-        // height compare, spec §8.2).
-        if (params.GetMatMulEncodingProfile(block_height) == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
-            block.seed_a = matmul::v4::bmx4::DeriveOperandSeedBMX4C(block, matmul::v4::Operand::A);
-            block.seed_b = matmul::v4::bmx4::DeriveOperandSeedBMX4C(block, matmul::v4::Operand::B);
-            return true;
-        }
+        // MatMul v4.2 / ENC-BMX4C: the header seed FIELDS are pinned the SAME
+        // self-reference-free way as ENC-S8 (DeterministicMatMulSeedV3 below),
+        // which is idempotent, so ContextualCheckBlockHeader's recompute-and-
+        // compare (bad-matmul-seeds) validates them. The ENC-BMX4C operand
+        // DERIVATION (template-scoped A, nonce-fresh B, V4.2 domain tags) is a
+        // SEPARATE step applied at digest/verify time by the bmx4 reference
+        // (DeriveOperandSeedBMX4C) — it is NOT the header-field pinning.
+        //
+        // Audit W-1 (consensus-critical): pinning the header fields TO the operand
+        // seeds is a self-reference bug. DeriveOperandSeedBMX4C(B) hashes the FULL
+        // header including seed_b (ComputeMatMulHeaderHash, matmul_pow.cpp:240), so
+        // seed_b := f(H(…, seed_b)) has no fixed point; the verifier recomputes a
+        // different value and rejects EVERY honestly-mined block (a reject-all
+        // liveness break on an enforcing network). Both profiles therefore pin the
+        // fields via V3; operand A stays template-scoped regardless (its template
+        // hash zeroes the seed fields), operand B binds the V3-pinned (nonce- and
+        // parent-fresh) seed fields via the full header hash.
         block.seed_a = DeterministicMatMulSeedV3(block, static_cast<uint32_t>(block_height), *parent_median_time_past, 0);
         block.seed_b = DeterministicMatMulSeedV3(block, static_cast<uint32_t>(block_height), *parent_median_time_past, 1);
         return true;
