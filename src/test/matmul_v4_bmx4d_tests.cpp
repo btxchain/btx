@@ -2,6 +2,14 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
+// NON-CONSENSUS research-reference tests (ROUND-3 P0-2): ENC-BMX4C-D was REMOVED
+// from the consensus state machine and was never deployed. These cases exercise
+// ONLY the pure integer arithmetic retained as reference code in
+// src/matmul/matmul_v4_bmx4.{h,cpp} (ComputeDigestBMX4D / VerifySketchBMX4D /
+// ValidateDimsBMX4D and the D seed derivations). They do NOT touch any consensus
+// dispatch, activation predicate, or chainparams -- there is no consensus D path
+// to test any more. Kept solely to pin the reference arithmetic's determinism.
+//
 // ENC-BMX4C-D committed-object profile tests (MatMul v4.2-D; design
 // doc/btx-matmul-v4.2-compute-bound-redesign.md). ENC-BMX4C-D is ENC-BMX4C with
 // the sketch tile b = 4 -> 2 (m = n/2), committing 4x more of the product C to

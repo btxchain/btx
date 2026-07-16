@@ -217,6 +217,18 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out);
                                      uint256& digest_out);
 
 // ---------------------------------------------------------------------------
+// NON-CONSENSUS research reference (ENC-BMX4C-D / v4.2-D was NEVER deployed).
+//
+// ROUND-3 P0-2: the ENC-BMX4C-D compute-bound profile was REMOVED from the
+// consensus state machine (no enum value, no activation height, no ASERT
+// params, no verify/solve dispatch, no construction asserts). The declarations
+// below are the profile's PURE INTEGER ARITHMETIC only, retained as inert
+// research/reference code. They are NOT reachable from any consensus path --
+// no verifier, miner, chainparams, or pow dispatch calls them; the only
+// callers are the arithmetic-only tests in test/matmul_v4_bmx4d_tests.cpp. Do
+// NOT wire these back into a consensus path: the lead decision is to stay on
+// the 8 MiB ENC-BMX4C profile permanently.
+// ---------------------------------------------------------------------------
 // ENC-BMX4C-D: the compute-bound "deeper-commit" successor profile (v4.2-D).
 // Design: doc/btx-matmul-v4.2-compute-bound-redesign.md.
 //
@@ -283,15 +295,16 @@ inline constexpr uint32_t kTileBMX4D = 2;
  *  accum bound) but at b = 2. Returns m = n/2 on success. */
 [[nodiscard]] bool ValidateDimsBMX4D(uint32_t n, uint32_t& m_out);
 
-/** Miner: derive the ENC-BMX4C-D consensus digest + sketch payload for `header`
- *  at dimension `n`. Byte-for-byte the ENC-BMX4C ComputeDigestBMX4C algorithm
- *  with the D domain tags and m = n/2, so the payload is 8*(n/2)^2 bytes and the
- *  enforced tensor work is ~3.6x the C-profile. Pure integer arithmetic. */
+/** [NON-CONSENSUS reference] Derive the ENC-BMX4C-D digest + sketch payload for
+ *  `header` at dimension `n`. Byte-for-byte the ENC-BMX4C ComputeDigestBMX4C
+ *  algorithm with the D domain tags and m = n/2, so the payload is 8*(n/2)^2
+ *  bytes and the enforced tensor work is ~3.6x the C-profile. Pure integer
+ *  arithmetic; no consensus path calls this (D was never deployed). */
 [[nodiscard]] bool ComputeDigestBMX4D(const CBlockHeader& header, uint32_t n,
                                       uint256& digest_out,
                                       std::vector<unsigned char>& payload_out);
 
-/** Verifier: O(n^2) ENC-BMX4C-D consensus check. The ENC-BMX4C verifier at
+/** [NON-CONSENSUS reference] O(n^2) ENC-BMX4C-D check. The ENC-BMX4C verifier at
  *  m = n/2 with the D seeds -- SketchFreivalds is reused UNCHANGED (it is
  *  compute-path- AND rank-agnostic). Returns true iff every round matches AND
  *  the recomputed digest equals `header.matmul_digest`. */

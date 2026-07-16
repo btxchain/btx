@@ -168,28 +168,11 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     assert(consensus.nMatMulBMX4CAsertRescaleNum > 0);
     assert(consensus.nMatMulBMX4CAsertRescaleDen > 0);
 
-    // ENC-BMX4C-D (v4.2-D) is a tile re-version of ENC-BMX4C: if configured it
-    // MUST fork STRICTLY ABOVE the ENC-BMX4C height (D succeeds C; no
-    // dual-profile window), and its ASERT rescale ratio must be strictly
-    // positive. Disabled (INT32_MAX) => no coupling. Its 32 MiB payload gating
-    // (P1/P3 relay extension) is a deployment precondition, documented in
-    // params.h and the redesign doc, not a chainparams assert.
-    if (consensus.nMatMulBMX4CDHeight == std::numeric_limits<int32_t>::max()) return;
-    assert(consensus.nMatMulBMX4CDHeight > consensus.nMatMulBMX4CHeight);
-    assert(consensus.nMatMulBMX4CDAsertRescaleNum > 0);
-    assert(consensus.nMatMulBMX4CDAsertRescaleDen > 0);
-    // Same §0.3 dimension/tile pin for the D profile: its DELIBERATELY larger
-    // committed object is m = nMatMulV4Dimension / kTileBMX4D = 2·BMX4C_SKETCH_RANK_M
-    // (2048, 32 MiB) BY DESIGN. Pin n to the D tile so a dimension retarget cannot
-    // silently move the D rank/payload off its calibrated 32 MiB either (b -> 4 at
-    // n -> 8192 would hold m = 2048). Production-scale gate as above; small test
-    // dimensions are exempt.
-    assert(consensus.nMatMulV4Dimension % matmul::v4::bmx4::kTileBMX4D == 0);
-    if (consensus.nMatMulV4Dimension >=
-        matmul::v4::bmx4::kTileBMX4D * (2 * Consensus::BMX4C_SKETCH_RANK_M)) {
-        assert(consensus.nMatMulV4Dimension / matmul::v4::bmx4::kTileBMX4D ==
-               2 * Consensus::BMX4C_SKETCH_RANK_M);
-    }
+    // NOTE (round-3 P0-2): the ENC-BMX4C-D (v4.2-D) construction invariants were
+    // REMOVED along with the profile itself. D is no longer part of the
+    // consensus state machine: there is no nMatMulBMX4CDHeight to gate on, no D
+    // ASERT-positivity asserts, and no D §0.3 dimension/tile pin. The live
+    // profile ladder terminates at ENC-BMX4C.
 }
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,

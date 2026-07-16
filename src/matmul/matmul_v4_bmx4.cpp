@@ -452,6 +452,13 @@ bool VerifySketchBMX4C(const CBlockHeader& header, uint32_t n, uint32_t rounds,
 }
 
 // ---------------------------------------------------------------------------
+// NON-CONSENSUS research reference (ENC-BMX4C-D / v4.2-D was NEVER deployed).
+// ROUND-3 P0-2 removed ENC-BMX4C-D from the consensus state machine; the pure
+// integer arithmetic below is retained as inert research/reference code only.
+// It is NOT reachable from any consensus path (no verifier, miner, chainparams,
+// or pow dispatch calls it) -- the sole callers are the arithmetic-only tests
+// in test/matmul_v4_bmx4d_tests.cpp. Do NOT re-wire into consensus.
+// ---------------------------------------------------------------------------
 // ENC-BMX4C-D (deeper-commit profile): the ENC-BMX4C construction with b = 2
 // (m = n/2), so the sketch commits 4x more of the exact-integer product C and
 // the enforced per-nonce tensor work is ~3.6x (limb-tensor combine 16*n*m^2,
