@@ -78,7 +78,9 @@ BUILD="${BUILD_DIR:-$ROOT/build-verify-$BACKEND}"
 SUITE="matmul_v4_backend_determinism_tests"
 
 case "$BACKEND" in
-  cuda)  CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90}") ;;
+  # External review: include Blackwell (sm_100/sm_120) so a 5090/B200 builds
+  # native code instead of JIT'd sm_90 (mirrors measure-hardware.sh).
+  cuda)  CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90;100;120}") ;;
   metal) CMAKE_FLAGS=(-DBTX_ENABLE_METAL=ON) ;;   # Apple; needs Xcode 26+ for the M5 tensor path
   hip)   CMAKE_FLAGS=(-DBTX_ENABLE_HIP=ON "-DBTX_HIP_ARCHITECTURES=${HIP_ARCH:?set HIP_ARCH e.g. gfx942}") ;;
   *) echo "usage: $0 <cuda|metal|hip> [--profile v41|bmx4c]"; exit 2 ;;
@@ -87,8 +89,11 @@ esac
 if [ "$PROFILE" = "bmx4c" ]; then
   echo "== MatMul v4.2 (ENC-BMX4C) M-t24 verification: $BACKEND =="
   echo "-- configuring ($BUILD)"
+  # External review: BUILD_UTIL defaults to ${BUILD_TESTS}; with BUILD_TESTS=OFF
+  # the matmul-v4-report target is never configured and the build step below dies.
+  # Force BUILD_UTIL=ON so the report tool is always built (mirrors measure-hardware.sh).
   cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF \
-        -DENABLE_WALLET=ON -DWITH_SQLITE=ON -DBUILD_TESTS=OFF \
+        -DENABLE_WALLET=ON -DWITH_SQLITE=ON -DBUILD_TESTS=OFF -DBUILD_UTIL=ON \
         "${CMAKE_FLAGS[@]}" >/dev/null || { echo "CONFIGURE FAILED"; exit 2; }
   echo "-- building matmul-v4-report"
   cmake --build "$BUILD" --target matmul-v4-report -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \
