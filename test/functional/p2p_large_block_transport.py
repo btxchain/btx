@@ -31,7 +31,7 @@ class P2PLargeBlockTransportTest(BitcoinTestFramework):
         node0, node1 = self.nodes
 
         self.log.info("Raise mining policy to consensus maximum so large serialized blocks can be assembled")
-        self.restart_node(0, extra_args=["-blockmaxweight=24000000", "-acceptnonstdtxn=1"])
+        self.restart_node(0, extra_args=["-blockmaxweight=24000000", "-blockmaxtemplatetxs=0", "-acceptnonstdtxn=1"])
         self.connect_nodes(0, 1)
 
         wallet = MiniWallet(node0)

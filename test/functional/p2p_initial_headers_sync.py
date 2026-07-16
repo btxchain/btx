@@ -108,7 +108,7 @@ class HeadersSyncTest(BitcoinTestFramework):
             p2p_idx=0,
             connection_type="outbound-full-relay",
             wait_for_disconnect=True,
-            services=P2P_SERVICES,
+            services=P2P_SERVICES & ~NODE_MATMUL_CONSENSUS,
         )
         assert not non_consensus_peer.is_connected
         with p2p_lock:

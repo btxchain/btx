@@ -118,15 +118,23 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         }
     }
 
+    // AUDIT P0.2 (STRICT UNIFIED ACTIVATION): the MatMul upgrade activates on ONE
+    // flag day, v3 -> v4.2/ENC-BMX4C directly, with NO reachable ENC-S8 interval on
+    // ANY network. So the ONLY valid configs are (i) the whole upgrade disabled, or
+    // (ii) v4 and ENC-BMX4C at the SAME height. A v4-only config (bmx4c disabled
+    // while v4 is set) would open a permanent ENC-S8 window, and a staged bmx4c > v4
+    // config would open a transient one -- both forbidden. Checked BEFORE the
+    // disabled-early-return so a v4-only config cannot slip through.
+    assert((consensus.nMatMulV4Height == std::numeric_limits<int32_t>::max() &&
+            consensus.nMatMulBMX4CHeight == std::numeric_limits<int32_t>::max()) ||
+           (consensus.nMatMulV4Height == consensus.nMatMulBMX4CHeight));
+
     if (consensus.nMatMulBMX4CHeight == std::numeric_limits<int32_t>::max()) return;
-    // ENC-BMX4C is a profile of the v4 machine. It must fork at or above the v4
-    // height. Equality is the SINGLE-ACTIVATION flag day: v4 and ENC-BMX4C go live
-    // together at one height, the ENC-S8 phase is skipped entirely, and the live
-    // profile at the fork is ENC-BMX4C (GetMatMulEncodingProfile returns ENC_BMX4C
-    // there). A strictly-greater height is the staged two-phase config (an
-    // ENC-S8 window in [v4, bmx4c)). Either way exactly one profile is live at any
-    // height -- no dual-profile window.
-    assert(consensus.nMatMulBMX4CHeight >= consensus.nMatMulV4Height);
+    // At this point ENC-BMX4C is enabled, so (by the strict-unified invariant above)
+    // v4 and ENC-BMX4C share one height: the single-activation flag day. ENC-S8 is
+    // never live; the live profile at and above the fork is ENC-BMX4C. Exactly one
+    // profile is live at any height -- no dual-profile window, no ENC-S8 interval.
+    assert(consensus.nMatMulBMX4CHeight == consensus.nMatMulV4Height);
     // The base-2^6 remainder-top combine must totally decompose every P/Q entry
     // across the whole accepted-dimension window: 288 * MaxDim <= 2^23 - 1.
     assert(static_cast<int64_t>(Consensus::BMX4C_PROJECTION_BOUND_PER_N) *
@@ -1328,15 +1336,15 @@ public:
         consensus.nMatMulV4PeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
         consensus.nMatMulV4AsertRescaleNum = 1;
         consensus.nMatMulV4AsertRescaleDen = 1;
-        // MatMul v4.2 / ENC-BMX4C (spec §7-§8): enable the encoding-profile hard
-        // fork on regtest at a test height strictly above nMatMulV4Height (100),
-        // reusing the v4 shape (dim 256, R=2). Regtest must be able to mine both
-        // profile sides fast, and the functional test lowers this via
-        // -regtestbmx4cheight to exercise the v4->bmx4c transition without mining
-        // to 150. The one-time ASERT rescale stays at 1/1 (regtest has no
-        // pre-fork throughput history to calibrate against; fPowNoRetargeting /
+        // MatMul v4.2 / ENC-BMX4C (spec §7-§8): STRICT UNIFIED ACTIVATION (audit
+        // P0.2) -- ENC-BMX4C activates at the SAME height as v4 (100), so regtest
+        // mirrors production's single flag day (v3 -> v4.2/ENC-BMX4C directly) with
+        // NO reachable ENC-S8 interval. The former staged 150 (an ENC-S8 window in
+        // [100,150)) is withdrawn; -regtestbmx4cheight now sets BOTH heights
+        // atomically (see below). The one-time ASERT rescale stays at 1/1 (regtest
+        // has no pre-fork throughput history; fPowNoRetargeting /
         // fPowAllowMinDifficultyBlocks make a placeholder ratio safe here).
-        consensus.nMatMulBMX4CHeight = 150;
+        consensus.nMatMulBMX4CHeight = 100;
         consensus.nMatMulBMX4CAsertRescaleNum = 1;
         consensus.nMatMulBMX4CAsertRescaleDen = 1;
         consensus.nPowTargetSpacingFastMs = 250;
@@ -1379,6 +1387,17 @@ public:
         }
         if (opts.matmul_bmx4c_height.has_value()) {
             consensus.nMatMulBMX4CHeight = *opts.matmul_bmx4c_height;
+        }
+        // AUDIT P0.2 (strict unified): the v4 and ENC-BMX4C heights must be equal.
+        // A LONE -regtestmatmulv4height / -regtestbmx4cheight sets the OTHER to the
+        // same height so a single override stays unified; supplying BOTH with
+        // DIFFERENT values falls through to the strict-unified startup assert in
+        // AssertBMX4CConstructionInvariants and fails loud (no staged ENC-S8 window).
+        if (opts.matmul_v4_height.has_value() && !opts.matmul_bmx4c_height.has_value()) {
+            consensus.nMatMulBMX4CHeight = consensus.nMatMulV4Height;
+        }
+        if (opts.matmul_bmx4c_height.has_value() && !opts.matmul_v4_height.has_value()) {
+            consensus.nMatMulV4Height = consensus.nMatMulBMX4CHeight;
         }
         // Spec §G.2/§G.4: the v4 dimension must divide evenly by the sketch
         // tile size and stay within the accepted-dimension bounds enforced in
