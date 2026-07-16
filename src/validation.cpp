@@ -9996,6 +9996,19 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
                                      "bad-matmul-dim",
                                      "matmul v4 dimension mismatch for this height");
             }
+            // MatMul v4.2 / ENC-BMX4C (spec §1.3/§8.2): at BMX4C heights the
+            // accepted-dim invariant additionally requires n % 32 == 0 (E8M0
+            // block scales run along the contraction dim in blocks of 32).
+            // Trivially true for the 4096/8192 (and regtest 256) dimensions,
+            // enforced here as defense in depth. GetMatMulEncodingProfile is the
+            // single profile selector (no second height compare, spec §8.2).
+            if (consensusParams.GetMatMulEncodingProfile(nHeight) ==
+                    Consensus::MatMulEncodingProfile::ENC_BMX4C &&
+                (block.matmul_dim % Consensus::BMX4C_SCALE_BLOCK_LENGTH) != 0) {
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                     "bad-matmul-dim",
+                                     "matmul bmx4c dimension not a multiple of the E8M0 block length");
+            }
         } else if (block.matmul_dim != consensusParams.nMatMulDimension) {
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
                                  "bad-matmul-dim",

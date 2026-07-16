@@ -136,6 +136,25 @@ Kind ResolveBackend();
                                                    std::vector<uint256>& digests_out,
                                                    std::vector<std::vector<unsigned char>>& payloads_out);
 
+/** ENC-BMX4C batched dispatch (MatMul v4.2 profile). The exact sibling of
+ *  ComputeDigestsBatchedDispatched, for the ENC_BMX4C encoding profile: compute
+ *  a whole nonce WINDOW's digests + sketch payloads via the resolved backend's
+ *  ENC-BMX4C batched device path, VERIFY every returned (digest,payload) with
+ *  matmul::v4::bmx4::VerifySketchBMX4C (re-deriving the honest M11+E8M0
+ *  operands on the host per header), and fall back on ANY mismatch, wrong
+ *  window size, or device error. The CPU-resolved and fallback path computes
+ *  the window with matmul::v4::bmx4::BatchedSketchMinerBMX4C (byte-identical to
+ *  the single-nonce matmul::v4::bmx4::ComputeDigestBMX4C reference, enforced by
+ *  matmul_v4_bmx4_batch_tests), falling back to the single-nonce reference if
+ *  the batch miner rejects the shape / template. `digests_out` / `payloads_out`
+ *  are sized to headers.size() on success. Returns false only if `headers` is
+ *  empty or the ENC-BMX4C reference itself rejects the shape (invalid (n, b) or
+ *  n % 32 != 0). Same safety contract as the per-nonce / ENC-S8 paths: a single
+ *  wrong device digest anywhere discards the WHOLE device window. */
+[[nodiscard]] bool ComputeDigestsBMX4CDispatched(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                                 std::vector<uint256>& digests_out,
+                                                 std::vector<std::vector<unsigned char>>& payloads_out);
+
 /** Snapshot the runtime dispatch counters. */
 Stats ProbeStats();
 
@@ -160,12 +179,23 @@ void ResetStats();
 // per-nonce ComputeDigestAccel: a strong device definition when the backend's
 // CMake define is set, else the weak stub (accel_v4_stub.cpp) returns false.
 
+// Each backend ALSO implements the ENC-BMX4C batched entry point
+// ComputeDigestsBMX4CAccel (MatMul v4.2 profile; same fixed signature as
+// ComputeDigestsBatchedAccel, one nonce window at a time). Same weak-stub
+// gating: a strong device definition when the backend's CMake define is set,
+// else the weak stub (accel_v4_stub.cpp) returns false. Each returned
+// (digest,payload) MUST reproduce matmul::v4::bmx4::ComputeDigestBMX4C(headers[i])
+// BYTE-FOR-BYTE, so it passes matmul::v4::bmx4::VerifySketchBMX4C.
+
 namespace matmul_v4::cuda {
 [[nodiscard]] bool ComputeDigestAccel(const CBlockHeader& header, uint32_t n, uint32_t rounds,
                                       uint256& digest_out, std::vector<unsigned char>& payload_out);
 [[nodiscard]] bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
                                               std::vector<uint256>& digests_out,
                                               std::vector<std::vector<unsigned char>>& payloads_out);
+[[nodiscard]] bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                            std::vector<uint256>& digests_out,
+                                            std::vector<std::vector<unsigned char>>& payloads_out);
 } // namespace matmul_v4::cuda
 
 namespace matmul_v4::metal {
@@ -174,6 +204,9 @@ namespace matmul_v4::metal {
 [[nodiscard]] bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
                                               std::vector<uint256>& digests_out,
                                               std::vector<std::vector<unsigned char>>& payloads_out);
+[[nodiscard]] bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                            std::vector<uint256>& digests_out,
+                                            std::vector<std::vector<unsigned char>>& payloads_out);
 } // namespace matmul_v4::metal
 
 namespace matmul_v4::hip {
@@ -182,6 +215,9 @@ namespace matmul_v4::hip {
 [[nodiscard]] bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
                                               std::vector<uint256>& digests_out,
                                               std::vector<std::vector<unsigned char>>& payloads_out);
+[[nodiscard]] bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                            std::vector<uint256>& digests_out,
+                                            std::vector<std::vector<unsigned char>>& payloads_out);
 } // namespace matmul_v4::hip
 
 #endif // BTX_MATMUL_ACCEL_V4_H

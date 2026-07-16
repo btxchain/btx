@@ -1205,7 +1205,7 @@ bool EnsureReady(MetalBmx4Context& ctx, std::string& reason)
 
 } // namespace
 
-namespace matmul_v4::bmx4::metal {
+namespace matmul_v4::metal {
 
 AccelProbe ProbeAcceleration()
 {
@@ -1278,4 +1278,4 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
     return true;
 }
 
-} // namespace matmul_v4::bmx4::metal
+} // namespace matmul_v4::metal

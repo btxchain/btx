@@ -4,7 +4,7 @@
 
 #include <metal/matmul_v4_bmx4_accel.h>
 
-namespace matmul_v4::bmx4::metal {
+namespace matmul_v4::metal {
 
 AccelProbe ProbeAcceleration()
 {
@@ -24,4 +24,4 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& /*headers*/, uint
     return false;
 }
 
-} // namespace matmul_v4::bmx4::metal
+} // namespace matmul_v4::metal

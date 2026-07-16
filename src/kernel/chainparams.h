@@ -216,6 +216,7 @@ public:
         std::optional<int32_t> matmul_parent_mtp_seed_height{};
         std::optional<int32_t> matmul_v4_height{};
         std::optional<uint32_t> matmul_v4_dimension{};
+        std::optional<int32_t> matmul_bmx4c_height{};
         bool fastprune{false};
         bool enforce_bip94{false};
         bool matmul_strict{false};

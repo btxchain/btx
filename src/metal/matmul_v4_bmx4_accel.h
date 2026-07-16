@@ -46,7 +46,7 @@ class CBlockHeader;
 // every entry point reports unavailable, so callers always fall back to the
 // CPU reference.
 
-namespace matmul_v4::bmx4::metal {
+namespace matmul_v4::metal {
 
 struct AccelProbe {
     bool available{false};
@@ -104,6 +104,6 @@ AccelProbe ProbeAcceleration();
 [[nodiscard]] bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
     std::vector<uint256>& digests_out, std::vector<std::vector<unsigned char>>& payloads_out);
 
-} // namespace matmul_v4::bmx4::metal
+} // namespace matmul_v4::metal
 
 #endif // BITCOIN_METAL_MATMUL_V4_BMX4_ACCEL_H

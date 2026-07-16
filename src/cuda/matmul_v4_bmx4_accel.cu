@@ -169,7 +169,7 @@
 //   staging for the chunk's mu/scale planes. cudaMalloc failure fails closed.
 // ===========================================================================
 
-namespace matmul_v4::bmx4::cuda {
+namespace matmul_v4::cuda {
 namespace {
 
 using matmul::v4::Fq;
@@ -1443,4 +1443,4 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
     return true;
 }
 
-} // namespace matmul_v4::bmx4::cuda
+} // namespace matmul_v4::cuda

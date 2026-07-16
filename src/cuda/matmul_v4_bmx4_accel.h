@@ -51,7 +51,7 @@ class CBlockHeader;
 // reference's direct ComputeCombineModQ). Operand derivation, serialization
 // and digest run on the HOST via the exact committed routines.
 
-namespace matmul_v4::bmx4::cuda {
+namespace matmul_v4::cuda {
 
 /** Suggested nonce-window size Q for ComputeDigestsBMX4CAccel. Device memory
  *  per in-flight nonce at n = 4096, m = 1024 is ~76 MiB on the INT8 tier
@@ -89,6 +89,6 @@ inline constexpr uint32_t kMaxBatchedWindow = 32;
 [[nodiscard]] bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
     std::vector<uint256>& digests_out, std::vector<std::vector<unsigned char>>& payloads_out);
 
-} // namespace matmul_v4::bmx4::cuda
+} // namespace matmul_v4::cuda
 
 #endif // BITCOIN_CUDA_MATMUL_V4_BMX4_ACCEL_H

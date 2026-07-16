@@ -21,6 +21,8 @@
 #include <matmul/freivalds.h>
 #include <matmul/matmul_pow.h>
 #include <matmul/matmul_v4_batch.h>
+#include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/noise.h>
 #include <matmul/pow_v4.h>
 #include <matmul/transcript.h>
@@ -129,6 +131,20 @@ bool SetDeterministicMatMulSeeds(
             block.seed_a.SetNull();
             block.seed_b.SetNull();
             return false;
+        }
+        // MatMul v4.2 / ENC-BMX4C (spec §1.5, §8.2): at BMX4C heights the header
+        // seed fields commit to the V4.2 domain-tagged operand seeds
+        // (DeterministicMatMulSeedV42) — template-scoped A, nonce-fresh B — so
+        // the ContextualCheckBlockHeader recompute-and-compare (bad-matmul-seeds)
+        // validates the same seeds the ENC-BMX4C reference derives internally.
+        // The parent-MTP-has-value guard above stays (fail-closed symmetry with
+        // the ENC-S8 branch; the template hash binds the parent transitively).
+        // GetMatMulEncodingProfile is the SINGLE profile selector (no second
+        // height compare, spec §8.2).
+        if (params.GetMatMulEncodingProfile(block_height) == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
+            block.seed_a = matmul::v4::bmx4::DeriveOperandSeedBMX4C(block, matmul::v4::Operand::A);
+            block.seed_b = matmul::v4::bmx4::DeriveOperandSeedBMX4C(block, matmul::v4::Operand::B);
+            return true;
         }
         block.seed_a = DeterministicMatMulSeedV3(block, static_cast<uint32_t>(block_height), *parent_median_time_past, 0);
         block.seed_b = DeterministicMatMulSeedV3(block, static_cast<uint32_t>(block_height), *parent_median_time_past, 1);
@@ -3125,15 +3141,44 @@ bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consen
     // buffer matmul_v4::VerifySketch expects.
     const std::vector<unsigned char> sketch_payload = UnpackMatMulV4SketchWordsToBytes(block.matrix_c_data);
 
-    // matmul_v4::VerifySketch performs the full O(n^2) v4 cascade (spec §I.2):
-    // payload shape/canonicality mod q, regenerating A,B from the header
-    // seeds, R deterministic Freivalds rounds over the independent prime
-    // q = 2^61-1, and recomputing the product-committed digest. It never
-    // recomputes the O(n^3) product.
+    // MatMul v4.2 / ENC-BMX4C profile dispatch (spec §8.2): GetMatMulEncodingProfile
+    // is the SINGLE selector. The v4 cascade is structurally unchanged; only the
+    // operand ENCODING differs, so at BMX4C heights the verify sketch step routes
+    // to the ENC-BMX4C reference. No new reject codes.
+    const uint32_t v4_dim = params.nMatMulV4Dimension;
     uint256 digest;
-    if (!matmul_v4::VerifySketch(block, params.nMatMulV4Dimension, params.nMatMulV4FreivaldsRounds,
-                                  sketch_payload, digest)) {
-        return finish(false);
+    if (params.GetMatMulEncodingProfile(block_height) == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
+        // Structural combine/accumulator preconditions for ENC-BMX4C (spec
+        // §2.4/§5.2/§8.2), checked ahead of the O(n^2) verify as defense in
+        // depth. (i) The base-2^6 remainder-top decomposition must be total:
+        // 288*n <= 2^23-1 (CheckCombineLimbBoundBMX4C). (ii) The full-C per-word
+        // magnitude bound |C| <= 2304*n — the ENC-BMX4C successor to the
+        // 15,625*n ENC-S8 bound — must stay exact in int32.
+        if (!matmul::v4::bmx4::CheckCombineLimbBoundBMX4C(v4_dim)) return finish(false);
+        if (static_cast<int64_t>(Consensus::BMX4C_BASE_PRODUCT_BOUND_PER_N) * v4_dim >
+            std::numeric_limits<int32_t>::max()) {
+            return finish(false);
+        }
+        // matmul::v4::bmx4::VerifySketchBMX4C runs the full O(n^2) cascade with
+        // the ENC-BMX4C M11+E8M0 operand encoding: payload shape/canonicality
+        // mod q, regenerating Ahat/Bhat/U/V from the V4.2 seeds, R Freivalds
+        // rounds over q = 2^61-1, and recomputing the product-committed digest.
+        if (!matmul::v4::bmx4::VerifySketchBMX4C(block, v4_dim, params.nMatMulV4FreivaldsRounds,
+                                                 sketch_payload, digest)) {
+            return finish(false);
+        }
+    } else {
+        // ENC_S8 (v4.1): the existing path, unchanged.
+        //
+        // matmul_v4::VerifySketch performs the full O(n^2) v4 cascade (spec §I.2):
+        // payload shape/canonicality mod q, regenerating A,B from the header
+        // seeds, R deterministic Freivalds rounds over the independent prime
+        // q = 2^61-1, and recomputing the product-committed digest. It never
+        // recomputes the O(n^3) product.
+        if (!matmul_v4::VerifySketch(block, v4_dim, params.nMatMulV4FreivaldsRounds,
+                                      sketch_payload, digest)) {
+            return finish(false);
+        }
     }
     if (digest != block.matmul_digest) return finish(false);
     if (UintToArith256(digest) > *bnTarget) return finish(false);
@@ -4090,6 +4135,102 @@ bool SolveMatMulParallel(CBlockHeader& block,
 // implement the optimal §E.3 (U*A)(B*V) sketch evaluation, which is an
 // internal implementation detail of matmul_v4::ComputeDigest, not something
 // this dispatch layer needs to know about).
+// MatMul v4.2 / ENC-BMX4C solve loop (spec §8.2 "Mining" row). Profile-gated
+// sibling of the SolveMatMulV4 CPU-batched branch: nonces are ground in windows
+// of Q through matmul_v4::accel::ComputeDigestsBMX4CDispatched — the ENC-BMX4C
+// batched dispatch (CPU batched miner or device path, every result verified via
+// VerifySketchBMX4C). Each candidate header carries the §H.4 nonce-bound seed
+// re-derivation (which, at BMX4C heights, is the V4.2 domain-tagged seed pair).
+// The rare winning candidate is additionally re-derived through the single-nonce
+// reference matmul::v4::bmx4::ComputeDigestBMX4C and ONLY the reference result
+// is sealed (A14 discipline), so a batch/device bug can never emit a
+// non-consensus block.
+static bool SolveMatMulV4BMX4C(CBlockHeader& block,
+                               const Consensus::Params& params,
+                               uint64_t& max_tries,
+                               int32_t block_height,
+                               const std::atomic<bool>* abort_flag,
+                               std::vector<uint32_t>* freivalds_payload_out,
+                               std::optional<int64_t> parent_median_time_past,
+                               const arith_uint256& bnTarget,
+                               std::chrono::steady_clock::time_point start)
+{
+    const uint32_t n = params.nMatMulV4Dimension;
+    uint32_t window_span = matmul::v4::kDefaultMinerBatch;
+    if (const char* env = std::getenv("BTX_MATMUL_V4_BATCH")) {
+        const auto parsed = static_cast<uint32_t>(std::strtoul(env, nullptr, 10));
+        if (parsed > 0) window_span = std::min(parsed, matmul::v4::kMaxMinerBatch);
+    }
+
+    while (max_tries > 0) {
+        if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        const uint64_t nonce_room = std::numeric_limits<uint64_t>::max() - block.nNonce64;
+        uint32_t window = static_cast<uint32_t>(std::min<uint64_t>(window_span, max_tries));
+        if (nonce_room < window - 1) window = static_cast<uint32_t>(nonce_room) + 1;
+
+        // Fully populate each candidate: nonce plus the §H.4 nonce-bound seed
+        // re-derivation (V4.2 domain tags at BMX4C heights; the template
+        // projection zeroes the seed fields, so the miner's cached Ahat/U/V/P
+        // stay valid across the window).
+        std::vector<CBlockHeader> candidates(window, block);
+        for (uint32_t i = 0; i < window; ++i) {
+            candidates[i].nNonce64 = block.nNonce64 + i;
+            candidates[i].nNonce = static_cast<uint32_t>(candidates[i].nNonce64);
+            if (!SetDeterministicMatMulSeeds(candidates[i], params, block_height, parent_median_time_past)) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+        }
+
+        std::vector<uint256> digests;
+        std::vector<std::vector<unsigned char>> payloads;
+        if (!matmul_v4::accel::ComputeDigestsBMX4CDispatched(candidates, n, params.nMatMulV4FreivaldsRounds,
+                                                             digests, payloads) ||
+            digests.size() != window || payloads.size() != window) {
+            LogWarning("SolveMatMulV4BMX4C: batched ENC-BMX4C miner failed; aborting solve\n");
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+
+        for (uint32_t i = 0; i < window; ++i) {
+            if (UintToArith256(digests[i]) > bnTarget) {
+                --max_tries;
+                continue;
+            }
+            // Candidate win: re-derive through the single-nonce ENC-BMX4C
+            // reference and seal ONLY the reference result (defense in depth).
+            uint256 ref_digest;
+            std::vector<unsigned char> ref_payload;
+            if (!matmul::v4::bmx4::ComputeDigestBMX4C(candidates[i], n, ref_digest, ref_payload) ||
+                ref_digest != digests[i] || ref_payload != payloads[i]) {
+                LogWarning("SolveMatMulV4BMX4C: batched digest diverged from reference at nonce=%u; discarding candidate\n",
+                           candidates[i].nNonce64);
+                --max_tries;
+                continue;
+            }
+            block = candidates[i];
+            block.matmul_digest = ref_digest;
+            if (freivalds_payload_out != nullptr) {
+                *freivalds_payload_out = PackMatMulV4SketchBytesToWords(ref_payload);
+            }
+            RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
+            return true;
+        }
+
+        if (nonce_room < window) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false; // nonce space exhausted (last window ended at UINT64_MAX)
+        }
+        block.nNonce64 += window;
+        block.nNonce = static_cast<uint32_t>(block.nNonce64);
+    }
+    RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+    return false;
+}
+
 static bool SolveMatMulV4(CBlockHeader& block,
                           const Consensus::Params& params,
                           uint64_t& max_tries,
@@ -4111,6 +4252,14 @@ static bool SolveMatMulV4(CBlockHeader& block,
     if (!bnTarget) return false;
 
     const auto start = std::chrono::steady_clock::now();
+
+    // MatMul v4.2 / ENC-BMX4C profile dispatch (spec §8.2): GetMatMulEncodingProfile
+    // is the SINGLE selector. At BMX4C heights the whole solve routes to the
+    // ENC-BMX4C loop; the ENC-S8 path below is unchanged.
+    if (params.GetMatMulEncodingProfile(block_height) == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
+        return SolveMatMulV4BMX4C(block, params, max_tries, block_height, abort_flag,
+                                  freivalds_payload_out, parent_median_time_past, *bnTarget, start);
+    }
 
     // v4.1 batched-sketch CPU path (spec §K.2b, matmul/matmul_v4_batch.h):
     // when the resolved backend is the CPU reference, grind nonces in windows

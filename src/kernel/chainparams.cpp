@@ -54,6 +54,26 @@ static constexpr int32_t BTX_V03211_HARDENING_HEIGHT{132'000};
 static constexpr int32_t BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT{135'000};
 static constexpr CAmount BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP{10'000 * COIN};
 
+// MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
+// the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled, e.g.
+// mainnet); when a network sets a BMX4C activation height these MUST hold, so a
+// misconfiguration fails loudly at node startup rather than at the fork.
+static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus)
+{
+    if (consensus.nMatMulBMX4CHeight == std::numeric_limits<int32_t>::max()) return;
+    // ENC-BMX4C is a profile of the v4 machine: it must fork strictly ABOVE the
+    // v4 height (exactly one profile live at any height; no dual-profile window).
+    assert(consensus.nMatMulBMX4CHeight > consensus.nMatMulV4Height);
+    // The base-2^6 remainder-top combine must totally decompose every P/Q entry
+    // across the whole accepted-dimension window: 288 * MaxDim <= 2^23 - 1.
+    assert(static_cast<int64_t>(Consensus::BMX4C_PROJECTION_BOUND_PER_N) *
+               consensus.nMatMulV4MaxDimension <=
+           Consensus::BMX4C_COMBINE_INPUT_BOUND);
+    // The accepted (exact) dimension must be a multiple of the E8M0 block length
+    // (block scales run along the contraction dim in blocks of 32).
+    assert((consensus.nMatMulV4Dimension % Consensus::BMX4C_SCALE_BLOCK_LENGTH) == 0);
+}
+
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
                                  const CScript& genesisOutputScript,
                                  uint32_t nTime,
@@ -585,6 +605,21 @@ public:
         // would on mainnet (spec §I.4).
         consensus.nMatMulV4AsertRescaleNum = 1;
         consensus.nMatMulV4AsertRescaleDen = 1;
+        // MatMul v4.2 / ENC-BMX4C encoding-profile hard fork
+        // (doc/btx-matmul-v4.2-bmx4c-spec.md §7-§8): enabled on testnet only,
+        // for testing, at a height strictly above nMatMulV4Height (200,000) and
+        // past every existing testnet hardening height so it can never sit at or
+        // below already-mined testnet history. This is a STAGED test placeholder
+        // (not a calibrated production value); a real testnet deployment must
+        // re-derive it and the ASERT rescale from measured marginal nonce/s
+        // (spec §8.4, ACTIVATION Gate C), exactly as the future mainnet value
+        // must be. The ENC-BMX4C marginal unit differs from ENC-S8's, so on a
+        // network with pre-fork history the rescale MUST NOT ship at 1/1 unless
+        // measurement shows the units equal; testnet is
+        // fPowAllowMinDifficultyBlocks, so a placeholder 1/1 cannot wedge it.
+        consensus.nMatMulBMX4CHeight = 250'000;
+        consensus.nMatMulBMX4CAsertRescaleNum = 1;
+        consensus.nMatMulBMX4CAsertRescaleDen = 1;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -688,6 +723,7 @@ public:
         consensus.hashGenesisBlock = genesis.GetHash();
         assert(consensus.hashGenesisBlock == uint256{"f2bc3fb2eca6aa6059c4d0178b56efe038d46aa440d406905ef752179aa0e1a4"});
         assert(genesis.hashMerkleRoot == uint256{"94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a"});
+        AssertBMX4CConstructionInvariants(consensus);
 
         // Testnet DNS seeds mirror mainnet domains; fixed seeds provide fallback.
         vSeeds.clear();
@@ -1175,6 +1211,17 @@ public:
         consensus.nMatMulV4PeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
         consensus.nMatMulV4AsertRescaleNum = 1;
         consensus.nMatMulV4AsertRescaleDen = 1;
+        // MatMul v4.2 / ENC-BMX4C (spec §7-§8): enable the encoding-profile hard
+        // fork on regtest at a test height strictly above nMatMulV4Height (100),
+        // reusing the v4 shape (dim 256, R=2). Regtest must be able to mine both
+        // profile sides fast, and the functional test lowers this via
+        // -regtestbmx4cheight to exercise the v4->bmx4c transition without mining
+        // to 150. The one-time ASERT rescale stays at 1/1 (regtest has no
+        // pre-fork throughput history to calibrate against; fPowNoRetargeting /
+        // fPowAllowMinDifficultyBlocks make a placeholder ratio safe here).
+        consensus.nMatMulBMX4CHeight = 150;
+        consensus.nMatMulBMX4CAsertRescaleNum = 1;
+        consensus.nMatMulBMX4CAsertRescaleDen = 1;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -1213,6 +1260,9 @@ public:
         if (opts.matmul_v4_dimension.has_value()) {
             consensus.nMatMulV4Dimension = *opts.matmul_v4_dimension;
         }
+        if (opts.matmul_bmx4c_height.has_value()) {
+            consensus.nMatMulBMX4CHeight = *opts.matmul_bmx4c_height;
+        }
         // Spec §G.2/§G.4: the v4 dimension must divide evenly by the sketch
         // tile size and stay within the accepted-dimension bounds enforced in
         // ContextualCheckBlockHeader, so a bad -regtestmatmulv4dimension fails
@@ -1232,6 +1282,11 @@ public:
                 consensus.nMatMulV4MinDimension,
                 consensus.nMatMulV4MaxDimension));
         }
+        // MatMul v4.2 / ENC-BMX4C construction invariants, re-checked after the
+        // regtest -regtest* overrides (v4 height/dim and BMX4C height) so a bad
+        // combination (e.g. a BMX4C height at/below the overridden v4 height)
+        // fails loudly at startup. No-op when BMX4C is disabled.
+        AssertBMX4CConstructionInvariants(consensus);
         if (opts.matmul_transcript_block_size.has_value()) {
             consensus.nMatMulTranscriptBlockSize = *opts.matmul_transcript_block_size;
         }
@@ -1376,6 +1431,7 @@ public:
             opts.matmul_parent_mtp_seed_height.has_value() ||
             opts.matmul_v4_height.has_value() ||
             opts.matmul_v4_dimension.has_value() ||
+            opts.matmul_bmx4c_height.has_value() ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||
             opts.shielded_smile_rice_codec_disable_height.has_value() ||

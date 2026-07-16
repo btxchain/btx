@@ -14,7 +14,7 @@ class CBlockHeader;
 // (matmul::v4::bmx4::ComputeDigestBMX4C). Keeps the tree building without a
 // CUDA toolkit when BTX_ENABLE_CUDA_EXPERIMENTAL is OFF.
 
-namespace matmul_v4::bmx4::cuda {
+namespace matmul_v4::cuda {
 
 bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& /*headers*/, uint32_t /*n*/,
                               uint32_t /*rounds*/, std::vector<uint256>& /*digests_out*/,
@@ -23,4 +23,4 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& /*headers*/, uint
     return false;
 }
 
-} // namespace matmul_v4::bmx4::cuda
+} // namespace matmul_v4::cuda

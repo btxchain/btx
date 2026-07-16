@@ -5,6 +5,8 @@
 #include <matmul/accel_v4.h>
 
 #include <matmul/backend_capabilities.h>
+#include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/pow_v4.h>
 #include <primitives/block.h>
 #include <logging.h>
@@ -153,6 +155,24 @@ BatchAccelFn BatchDeviceFnFor(Kind kind)
     return nullptr;
 }
 
+// Address of the ENC-BMX4C BATCHED device entry point for `kind` (or nullptr
+// for CPU). A weak stub always provides a definition, so these are never
+// dangling.
+BatchAccelFn BMX4CDeviceFnFor(Kind kind)
+{
+    switch (kind) {
+    case Kind::CUDA:
+        return &matmul_v4::cuda::ComputeDigestsBMX4CAccel;
+    case Kind::METAL:
+        return &matmul_v4::metal::ComputeDigestsBMX4CAccel;
+    case Kind::HIP:
+        return &matmul_v4::hip::ComputeDigestsBMX4CAccel;
+    case Kind::CPU:
+        return nullptr;
+    }
+    return nullptr;
+}
+
 void RecordOk(Kind kind)
 {
     switch (kind) {
@@ -248,6 +268,52 @@ bool ComputeBatchCpuReference(const std::vector<CBlockHeader>& headers, uint32_t
             return false;
         }
     }
+    return true;
+}
+
+// Byte-exact CPU reference for a whole ENC-BMX4C window. Prefers the batched
+// miner (matmul::v4::bmx4::BatchedSketchMinerBMX4C — template-cached Ahat/U/V
+// and P = U*Ahat, one stacked combine GEMM per window) keyed on the first
+// header's template; on any shape/template rejection it falls back to the
+// single-nonce matmul::v4::bmx4::ComputeDigestBMX4C reference. Both are
+// byte-identical (matmul_v4_bmx4_batch_tests). Returns false only if the
+// ENC-BMX4C reference rejects the shape (invalid (n, b) or n % 32 != 0).
+bool ComputeBatchCpuReferenceBMX4C(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                   std::vector<uint256>& digests_out,
+                                   std::vector<std::vector<unsigned char>>& payloads_out)
+{
+    const size_t count = headers.size();
+    digests_out.assign(count, uint256{});
+    payloads_out.assign(count, std::vector<unsigned char>{});
+
+    // Fast path: all headers share a template (the solve loop's per-window
+    // invariant) — mine the whole window with the batched miner.
+    const matmul::v4::bmx4::BatchedSketchMinerBMX4C miner{headers.front(), n};
+    if (miner.Valid()) {
+        std::vector<matmul::v4::bmx4::BatchNonceResultBMX4C> results;
+        if (miner.Mine(headers, results) && results.size() == count) {
+            for (size_t i = 0; i < count; ++i) {
+                digests_out[i] = results[i].digest;
+                payloads_out[i] = std::move(results[i].payload);
+            }
+            return true;
+        }
+    }
+
+    // Fallback: per-nonce single-nonce reference (also the shape-rejection path
+    // — if this rejects the shape, the whole window is invalid).
+    for (size_t i = 0; i < count; ++i) {
+        uint256 digest;
+        std::vector<unsigned char> payload;
+        if (!matmul::v4::bmx4::ComputeDigestBMX4C(headers[i], n, digest, payload)) {
+            digests_out.clear();
+            payloads_out.clear();
+            return false;
+        }
+        digests_out[i] = digest;
+        payloads_out[i] = std::move(payload);
+    }
+    (void)rounds; // ENC-BMX4C miner runs no Freivalds (API symmetry)
     return true;
 }
 
@@ -468,6 +534,93 @@ bool ComputeDigestsBatchedDispatched(const std::vector<CBlockHeader>& headers, u
 
     RecordBatchFallback(backend, error);
     return ComputeBatchCpuReference(headers, n, rounds, digests_out, payloads_out);
+}
+
+bool ComputeDigestsBMX4CDispatched(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                   std::vector<uint256>& digests_out,
+                                   std::vector<std::vector<unsigned char>>& payloads_out)
+{
+    g_batch_requests.fetch_add(1, std::memory_order_relaxed);
+
+    if (headers.empty()) {
+        digests_out.clear();
+        payloads_out.clear();
+        return false;
+    }
+
+    const Kind backend = ResolveBackend();
+    if (backend == Kind::CPU) {
+        return ComputeBatchCpuReferenceBMX4C(headers, n, rounds, digests_out, payloads_out);
+    }
+
+    const BatchAccelFn fn = BMX4CDeviceFnFor(backend);
+
+    std::vector<uint256> accel_digests;
+    std::vector<std::vector<unsigned char>> accel_payloads;
+    bool device_ok = false;
+    std::string error;
+    try {
+        device_ok = (fn != nullptr) &&
+            fn(headers, n, rounds, accel_digests, accel_payloads);
+        if (!device_ok) {
+            error = "device_returned_false_or_unavailable";
+        } else if (accel_digests.size() != headers.size() ||
+                   accel_payloads.size() != headers.size()) {
+            device_ok = false;
+            error = "device_returned_wrong_window_size";
+        }
+    } catch (const std::exception& e) {
+        device_ok = false;
+        error = std::string("device_exception:") + e.what();
+    } catch (...) {
+        device_ok = false;
+        error = "device_unknown_exception";
+    }
+
+    if (device_ok) {
+        // HARD REQUIREMENT (same contract as the ENC-S8 batched path): verify
+        // EVERY returned (digest,payload) reproduces the ENC-BMX4C CPU reference
+        // via matmul::v4::bmx4::VerifySketchBMX4C (which re-derives the honest
+        // M11+E8M0 operands on the host, recomputes the digest, and runs the
+        // UNCHANGED sketch-Freivalds check over q = 2^61-1). A single failure
+        // anywhere discards the ENTIRE device window; it is recomputed on the
+        // CPU below. A wrong device digest can therefore never win a block.
+        bool all_verified = true;
+        for (size_t i = 0; i < headers.size(); ++i) {
+            CBlockHeader verify_header = headers[i];
+            verify_header.matmul_digest = accel_digests[i];
+            uint256 verify_digest;
+            bool verified = false;
+            try {
+                verified = matmul::v4::bmx4::VerifySketchBMX4C(verify_header, n, rounds, accel_payloads[i], verify_digest);
+            } catch (const std::exception& e) {
+                verified = false;
+                error = std::string("verify_exception:") + e.what();
+            } catch (...) {
+                verified = false;
+                error = "verify_unknown_exception";
+            }
+            if (!(verified && verify_digest == accel_digests[i])) {
+                all_verified = false;
+                if (error.empty()) {
+                    error = "digest_mismatch_failed_cpu_verification";
+                }
+                break;
+            }
+        }
+
+        if (all_verified) {
+            digests_out = std::move(accel_digests);
+            payloads_out = std::move(accel_payloads);
+            RecordBatchOk(backend);
+            return true;
+        }
+
+        RecordBatchMismatch(backend);
+    }
+
+    RecordBatchFallback(backend, error);
+    return ComputeBatchCpuReferenceBMX4C(headers, n, rounds, digests_out, payloads_out);
 }
 
 Stats ProbeStats()
