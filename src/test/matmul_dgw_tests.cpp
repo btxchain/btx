@@ -539,6 +539,76 @@ BOOST_AUTO_TEST_CASE(asert_bmx4c_rescale_mechanism_applies_at_height)
     BOOST_CHECK_EQUAL(target_367_after_parent_mutation, target_367);
 }
 
+// --- ENC-BMX4C-D one-time ASERT rescale mechanism (adversarial finding F1) ---
+//
+// Before the F1 fix, nMatMulBMX4CDAsertRescaleNum/Den + nMatMulBMX4CDHeight were
+// declared and asserted-positive but NEVER consumed by MatMulAsert, so a D
+// rescale was silently ignored (difficulty continuous across the ~3.6x-work D
+// fork). This proves the rescale is now wired: a NON-inert D ratio moves the
+// target at the D height, and ASERT re-anchors on the D block.
+BOOST_AUTO_TEST_CASE(asert_bmx4cd_rescale_mechanism_applies_at_height)
+{
+    auto params = MatMulRetargetParams();
+    params.nFastMineHeight = 361;
+    params.nMatMulAsertHeight = 361;
+    params.nMatMulAsertHalfLife = 14'400;
+    params.nMatMulAsertBootstrapFactor = 40;
+    params.nMatMulV4Height = 362;
+    params.nMatMulV4AsertRescaleNum = 1;
+    params.nMatMulV4AsertRescaleDen = 1;
+    params.nMatMulBMX4CHeight = 366;
+    params.nMatMulBMX4CAsertRescaleNum = 1;
+    params.nMatMulBMX4CAsertRescaleDen = 1;
+    // ENC-BMX4C-D forks STRICTLY above C, with a non-inert HARDER rescale (2/3:
+    // target * 2/3 -> smaller target, so no pow_limit clamp masks the effect).
+    params.nMatMulBMX4CDHeight = 370;
+    params.nMatMulBMX4CDAsertRescaleNum = 2;
+    params.nMatMulBMX4CDAsertRescaleDen = 3;
+
+    std::vector<CBlockIndex> blocks(371);
+    SeedFixedDifficultyChain(blocks, 0x1f00ffffU, 1'700'000'000, 90);
+
+    CBlockHeader activation{};
+    activation.nTime = blocks[360].GetBlockTime() + 1;
+    blocks[361].nHeight = 361;
+    blocks[361].nBits = GetNextWorkRequired(&blocks[360], &activation, params);
+    blocks[361].nTime = activation.nTime;
+    blocks[361].pprev = &blocks[360];
+    for (int h = 362; h <= 369; ++h) {
+        AppendSimulatedBlock(params, blocks, h, 90);
+    }
+
+    CBlockHeader d_next{};
+    d_next.nTime = blocks[369].GetBlockTime() + 90;
+    const arith_uint256 d_target =
+        DecodeTarget(GetNextWorkRequired(&blocks[369], &d_next, params));
+    const arith_uint256 parent_target = DecodeTarget(blocks[369].nBits);
+
+    // The 2/3 D rescale is applied (not silently skipped as it was pre-fix): the
+    // D block's target is the parent scaled HARDER, so it differs and is smaller.
+    BOOST_CHECK(d_target != parent_target);
+    BOOST_CHECK(d_target < parent_target);
+
+    // ASERT re-anchors on the D block: mutating a pre-D parent must not perturb
+    // the post-D target.
+    blocks[370].nHeight = 370;
+    blocks[370].nBits = GetNextWorkRequired(&blocks[369], &d_next, params);
+    blocks[370].nTime = d_next.nTime;
+    blocks[370].pprev = &blocks[369];
+
+    CBlockHeader after_d{};
+    after_d.nTime = blocks[370].GetBlockTime() + 90;
+    const arith_uint256 target_371 =
+        DecodeTarget(GetNextWorkRequired(&blocks[370], &after_d, params));
+
+    const uint32_t saved_369_bits = blocks[369].nBits;
+    blocks[369].nBits = 0x1b0404cbU;
+    const arith_uint256 target_371_after_mut =
+        DecodeTarget(GetNextWorkRequired(&blocks[370], &after_d, params));
+    blocks[369].nBits = saved_369_bits;
+    BOOST_CHECK_EQUAL(target_371_after_mut, target_371);
+}
+
 BOOST_AUTO_TEST_CASE(asert_half_life_upgrade_keeps_activation_target_continuous)
 {
     auto params = MatMulRetargetParams();

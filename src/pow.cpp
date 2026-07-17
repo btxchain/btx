@@ -1048,6 +1048,18 @@ int32_t LatestMatMulAsertPreUpgradeAnchorHeight(const CBlockIndex* pindexLast, c
         params.nMatMulBMX4CHeight > anchor_height) {
         anchor_height = params.nMatMulBMX4CHeight;
     }
+    // MatMul v4.2-D / ENC-BMX4C-D (adversarial finding F1): the one-time D rescale
+    // re-anchors ASERT at nMatMulBMX4CDHeight, mechanically identical to the BMX4C
+    // anchor above. ENC-BMX4C-D forks STRICTLY above the ENC-BMX4C height by
+    // construction (chainparams asserts D > C), so once the tip passes it, it is
+    // the latest chronological fork and wins over any earlier bmx4c/v4/retune
+    // anchor. Without this the D rescale's re-anchor would never apply and ASERT
+    // would keep baselining on the C anchor after the D fork.
+    if (!IsDisabledHeight(params.nMatMulBMX4CDHeight) &&
+        pindexLast->nHeight >= params.nMatMulBMX4CDHeight &&
+        params.nMatMulBMX4CDHeight > anchor_height) {
+        anchor_height = params.nMatMulBMX4CDHeight;
+    }
     return anchor_height;
 }
 
@@ -1193,6 +1205,36 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         return false;
     }
 
+    // MatMul v4.2-D / ENC-BMX4C-D (adversarial finding F1): mirror the BMX4C
+    // rescale-ratio and ordering guards for the one-time D rescale, so the
+    // documented D difficulty calibration is validated (and applied — see the
+    // MatMulAsert cascade and the re-anchor) rather than silently ignored.
+    {
+        // AUDIT D3 (mirror): positive and 32-bit-reducible.
+        uint32_t bmx4cd_rn, bmx4cd_rd;
+        if (!ReduceRescaleRatioToU32(params.nMatMulBMX4CDAsertRescaleNum, params.nMatMulBMX4CDAsertRescaleDen, bmx4cd_rn, bmx4cd_rd)) {
+            LogWarning("MatMulAsert: BMX4C-D rescale ratio is invalid (num=%lld den=%lld; must be positive and reduce to a 32-bit rational) at height %d, failing closed\n",
+                       static_cast<long long>(params.nMatMulBMX4CDAsertRescaleNum),
+                       static_cast<long long>(params.nMatMulBMX4CDAsertRescaleDen), next_height);
+            return false;
+        }
+    }
+    if (!IsDisabledHeight(params.nMatMulBMX4CDHeight) && params.nMatMulBMX4CDHeight < params.nMatMulAsertHeight) {
+        LogWarning("MatMulAsert: BMX4C-D height=%d is below ASERT activation=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                   params.nMatMulBMX4CDHeight, params.nMatMulAsertHeight, next_height);
+        return false;
+    }
+    // ENC-BMX4C-D is an ADDITIONAL profile that succeeds ENC-BMX4C: it must fork
+    // STRICTLY ABOVE the BMX4C height (no dual-profile window, no unified case --
+    // unlike bmx4c-vs-v4 there is no equal-height flag day for D). Mirrors the
+    // chainparams AssertBMX4CConstructionInvariants D > C assert.
+    if (!IsDisabledHeight(params.nMatMulBMX4CDHeight) && !IsDisabledHeight(params.nMatMulBMX4CHeight) &&
+        params.nMatMulBMX4CDHeight <= params.nMatMulBMX4CHeight) {
+        LogWarning("MatMulAsert: BMX4C-D height=%d must be strictly above BMX4C height=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                   params.nMatMulBMX4CDHeight, params.nMatMulBMX4CHeight, next_height);
+        return false;
+    }
+
     // Audit C5: the MatMulAsert cascade dispatches special one-time-rescale heights
     // in a fixed order (asert -> retune -> retune2 -> v4 -> bmx4c) and returns on
     // the FIRST match. A NON-inert (!= 1/1) rescale whose height collides with an
@@ -1221,6 +1263,20 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
             LogWarning("MatMulAsert: non-inert BMX4C rescale height=%d collides with an earlier ASERT branch "
                        "(rescale would be silently skipped) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                        params.nMatMulBMX4CHeight, next_height);
+            return false;
+        }
+        // ENC-BMX4C-D is the LAST rescale branch in the cascade, so it can be
+        // shadowed by ANY earlier one: asert/retune/retune2 (shadowed_by_earlier)
+        // OR the v4/bmx4c heights. A non-inert D rescale at a colliding height
+        // would be silently skipped -- reject it (finding F1).
+        if (!IsDisabledHeight(params.nMatMulBMX4CDHeight) &&
+            params.nMatMulBMX4CDAsertRescaleNum != params.nMatMulBMX4CDAsertRescaleDen &&
+            (shadowed_by_earlier(params.nMatMulBMX4CDHeight) ||
+             (!IsDisabledHeight(params.nMatMulV4Height) && params.nMatMulBMX4CDHeight == params.nMatMulV4Height) ||
+             (!IsDisabledHeight(params.nMatMulBMX4CHeight) && params.nMatMulBMX4CDHeight == params.nMatMulBMX4CHeight))) {
+            LogWarning("MatMulAsert: non-inert BMX4C-D rescale height=%d collides with an earlier ASERT branch "
+                       "(rescale would be silently skipped) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                       params.nMatMulBMX4CDHeight, next_height);
             return false;
         }
     }
@@ -2528,6 +2584,26 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         arith_uint256 bmx4c_target = ScaleTargetByTimespan(parent_target, bmx4c_rn, bmx4c_rd);
         bmx4c_target = ClampRetargetResult(bmx4c_target, pow_limit);
         return bmx4c_target.GetCompact();
+    }
+
+    // MatMul v4.2-D / ENC-BMX4C-D (adversarial finding F1): the one-time D rescale
+    // at nMatMulBMX4CDHeight, mechanically identical to the BMX4C branch above. The
+    // D fork raises the enforced marginal tensor work ~3.6x (deeper commit, m
+    // doubles), so attempts/s move at the C->D boundary; nMatMulBMX4CDAsertRescale
+    // Num/Den (default 1/1) must be calibrated empirically pre-release from the
+    // measured marginal nonce/s on the Strassen/LCMA-accelerated combine path. D
+    // forks strictly above BMX4C (validated above), so it is reached AFTER the
+    // BMX4C branch and its re-anchor wins in LatestMatMulAsertPreUpgradeAnchorHeight.
+    if (next_height == params.nMatMulBMX4CDHeight) {
+        arith_uint256 parent_target{};
+        parent_target.SetCompact(pindexLast->nBits);
+        uint32_t bmx4cd_rn, bmx4cd_rd;
+        if (!ReduceRescaleRatioToU32(params.nMatMulBMX4CDAsertRescaleNum, params.nMatMulBMX4CDAsertRescaleDen, bmx4cd_rn, bmx4cd_rd)) {
+            return MatMulAsertFailClosedBits();  // D1: unreachable post-construction; never powLimit
+        }
+        arith_uint256 bmx4cd_target = ScaleTargetByTimespan(parent_target, bmx4cd_rn, bmx4cd_rd);
+        bmx4cd_target = ClampRetargetResult(bmx4cd_target, pow_limit);
+        return bmx4cd_target.GetCompact();
     }
 
     if (next_height == params.nMatMulAsertHalfLifeUpgradeHeight) {

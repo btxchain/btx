@@ -2265,7 +2265,17 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // survive restart and are available while historical blocks are (re)connected
     // during load/IBD. leveldb table under <netdir>/matmulproofs, keyed by block
     // hash; resident RAM holds only the key index (the 32 MiB blobs stay on disk).
-    // Wiped on -reindex (proofs are re-fetched with the rebuilt blocks).
+    //
+    // Adversarial finding F2: the store is NOT wiped on -reindex. A segregated
+    // block serializes with an EMPTY body sketch (the ~32 MiB proof lives ONLY in
+    // this store, never in blk*.dat), so -reindex cannot reconstruct proofs from
+    // block data. Wiping here would (a) force every historical segregated block to
+    // re-validate as proof-INCOMPLETE and be re-fetched from peers — impossible
+    // during the LoadingBlocks() window where the relay drops proof responses —
+    // and (b) permanently destroy an archive node's proofs (data loss). Proofs are
+    // keyed by the block HASH, which is stable across a reindex (the same blk*.dat
+    // rebuild the same headers/hashes), so the retained proofs stay valid and let
+    // segregated blocks re-validate WITHOUT re-fetching. Never auto-wipe.
     {
         const bool matmul_proof_archive = args.GetBoolArg("-matmulproofarchive", DEFAULT_MATMUL_PROOF_ARCHIVE);
         static constexpr size_t MATMUL_PROOF_DB_CACHE_BYTES{8 << 20}; // 8 MiB block cache
@@ -2273,7 +2283,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             args.GetDataDirNet() / "matmulproofs",
             MATMUL_PROOF_DB_CACHE_BYTES,
             matmul_proof_archive,
-            /*wipe=*/do_reindex);
+            /*wipe=*/false);
     }
 
     // Chainstate initialization and loading may be retried once with reindexing by GUI users
