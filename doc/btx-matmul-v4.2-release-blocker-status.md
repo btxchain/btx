@@ -104,3 +104,48 @@ any activation. Not closable here.
 **Net:** blockers 2, 3, 4, and 5 are addressed on-branch; blocker 1's core is
 fixed with a defined Stage-2c adversarial follow-up; blocker 6 is a standing
 hardware gate. All activation remains disabled.
+
+---
+
+# Segregated-proof relay audit (post Stage 2a/2b) → status
+
+A second audit reviewed the segregated-proof RELAY specifically and found it not
+production-ready for ENC-BMX4C-D activation. D stays disabled on all public
+networks (`nMatMulBMX4CDHeight == INT32_MAX`), so none of this is live; the PR
+remains fail-closed until every item lands. Mapping:
+
+1. **BIP324 / v2 transport cannot carry the ~32 MiB proof.** CRITICAL / NEW /
+   OPEN. BIP324's packet-length field is 24-bit (~16 MiB max), but the D proof is
+   ~32 MiB (8·m², m=2048), so a single `matmulproof` truncates and the v2 peer
+   disconnects. Needs application-layer CHUNKING + bounded reassembly. Designed in
+   `doc/btx-matmul-v4.2-relay-hardening-design.md`; implemented in Stage 2d. Until
+   then the relay is v1-only / small-proof-only, so `RELAY_READY` must go back to
+   FALSE (item 6).
+2. **Proof storage process-local + unbounded.** Being fixed in Stage 2c
+   (persistent on-disk store, `nMatMulProofPruneDepth` window, `-matmulproofarchive`,
+   IBD fetch, byte limits). In progress.
+3. **Pending-proof queue unbounded in bytes / never expires.** OPEN. The 64-entry
+   `m_matmul_proofs_pending` bounds count but each entry holds a full CBlock with
+   no byte budget or expiry → memory/availability exhaustion. Stage 2d adds a byte
+   budget + per-entry expiry + eviction that releases the held block.
+4. **getmatmulproof has no serving limits.** OPEN. A tiny request triggers a
+   ~32 MiB response repeatedly (outbound amplification). Stage 2d adds per-peer +
+   global serving rate limits and an outbound bandwidth budget.
+5. **Functional test is not production-size.** OPEN. The relay test uses n=128
+   (tiny proof); it never exercises v2 encrypted transport at the real 32 MiB size.
+   A production-size (m=2048) encrypted-transport test is added after Stage 2d
+   chunking lands.
+6. **CI has not run — repository billing lock.** OPEN (needs admin). Confirmed:
+   the "BTX Readiness CI" job fails in ~3 s with `runner_id=0` (no runner ever
+   assigned) on every recent commit including HEAD — a repository/org GitHub
+   Actions billing lock, NOT a test failure. A repo/org admin must resolve Actions
+   billing; then CI must be re-run green on the exact release commit. Not fixable
+   from the agent side.
+
+**Fail-closed posture (item 6 of the relay audit).** Because item 1 means the
+relay is not production-ready, `BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY` returns
+to FALSE in Stage 2d, and the regtest activation exemption in
+`AssertBMX4CConstructionInvariants` is re-keyed from `fPowNoRetargeting` (which
+`-test=matmuldgw` clears) to the chain being regtest, so regtest tests still run
+while every PUBLIC network hard-aborts on any D activation. D remains INT32_MAX
+everywhere regardless.
