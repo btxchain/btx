@@ -29,6 +29,7 @@
 #include <index/blockfilterindex.h>
 #include <index/coinstatsindex.h>
 #include <index/txindex.h>
+#include <matmul/matmul_proof_store.h>
 #include <init/common.h>
 #include <interfaces/chain.h>
 #include <interfaces/init.h>
@@ -155,6 +156,9 @@ using util::ReplaceAll;
 using util::ToString;
 
 static constexpr bool DEFAULT_COREPOLICY{false};
+//! MatMul v4.2-D segregated-proof archive role (design §3.5). Default off: a
+//! node keeps only the rolling nMatMulProofPruneDepth window of proofs.
+static constexpr bool DEFAULT_MATMUL_PROOF_ARCHIVE{false};
 static constexpr bool DEFAULT_PROXYRANDOMIZE{true};
 static constexpr bool DEFAULT_REST_ENABLE{false};
 static constexpr bool DEFAULT_I2P_ACCEPT_INCOMING{true};
@@ -433,6 +437,10 @@ void Shutdown(NodeContext& node)
     node.mempool.reset();
     node.fee_estimator.reset();
     node.chainman.reset();
+    // Release the persistent MatMul proof-store leveldb handle now (after the
+    // chainstate that uses it is gone) rather than at static-destructor time,
+    // which runs after logging is torn down (MatMul v4.2 Stage 2c).
+    matmul::GetLocalMatMulProofStore().CloseDiskBacking();
     node.validation_signals.reset();
     node.scheduler.reset();
     node.ecc_context.reset();
@@ -518,6 +526,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-assumevalid=<hex>", strprintf("If this block is in the chain assume that it and its ancestors are valid and potentially skip script verification for their transactions while still checking other consensus rules (0 to verify all, default: %s, testnet3: %s, testnet4: %s, signet: %s, shieldedv2dev: %s)", defaultChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnetChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnet4ChainParams->GetConsensus().defaultAssumeValid.GetHex(), signetChainParams->GetConsensus().defaultAssumeValid.GetHex(), shieldedv2devChainParams->GetConsensus().defaultAssumeValid.GetHex()), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulvalidation=<mode>", "Select MatMul transcript verification mode: consensus (default), economic, or spv. consensus runs Phase 2 checks within the validation window (full-node tier). economic runs Phase 1-only header checks and trusts full-node majority; it is not a full node. spv is header-only Phase 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulservicechallengefile=<file>", "Path to the persistent MatMul service challenge registry. Relative paths are resolved under the network datadir. Point multiple service nodes at the same shared file to let getmatmulservicechallenge issuance and redeemmatmulserviceproof redemption work across the cluster. (default: <netdir>/matmul_service_challenges.dat)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
+    argsman.AddArg("-matmulproofarchive", strprintf("Act as a MatMul v4.2-D segregated-proof ARCHIVE node: retain ALL verified proofs (never prune below the rolling window) and serve getmatmulproof for any historical block (default: %u). A default node keeps only the last nMatMulProofPruneDepth blocks of proofs. Archive nodes advertise NODE_MATMUL_PROOF_ARCHIVE and are preferred by syncing peers fetching buried proofs. Proofs are always persisted under <netdir>/matmulproofs regardless of this flag.", DEFAULT_MATMUL_PROOF_ARCHIVE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-retainshieldedcommitmentindex", "Keep the shielded commitment-position index in the local LevelDB store across restart and snapshot recovery (default: 1). Set this to 0 only if you explicitly want the slower externalized-retention posture that rebuilds the index in memory after restart in exchange for lower retained shielded-state growth.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-fastshieldedstartup", "Zero-downtime restart: when matching persisted shielded state is available at startup, restore it without forcing the full cross-chain shielded audit (default: 1). The persisted state reaching the restore path already had its frontier root/size matched to the tip and its commitment index/anchor windows validated; settlement/netting metadata may still be synchronized from available blocks, and per-block consensus still runs on newly connected blocks. Set to 0 to force the thorough full-chain drift sync + audit on every restart.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-shieldedstartupaudit", "Audit restored shielded state against historical block data during startup (default: 1). Applies when -fastshieldedstartup is disabled or cannot be taken: set to 0 to keep the persisted-state drift sync but skip the cross-chain audit. Consensus checks still run for newly connected blocks.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1270,6 +1279,13 @@ bool AppInitParameterInteraction(const ArgsManager& args)
             // Tier 3 SPV advertises neither consensus nor economic MatMul tier.
         } else {
             return InitError(strprintf(_("Invalid -matmulvalidation value (%s). Valid values: consensus, economic, spv"), matmul_validation_mode));
+        }
+        // Advertise the segregated-proof ARCHIVE role (design §3.5) so syncing
+        // peers can prefer us when fetching buried MatMul v4.2-D proofs.
+        if (args.GetBoolArg("-matmulproofarchive", DEFAULT_MATMUL_PROOF_ARCHIVE)) {
+            services |= static_cast<uint64_t>(NODE_MATMUL_PROOF_ARCHIVE);
+        } else {
+            services &= ~static_cast<uint64_t>(NODE_MATMUL_PROOF_ARCHIVE);
         }
         g_local_services = static_cast<ServiceFlags>(services);
     }
@@ -2243,6 +2259,22 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     bool do_reindex{args.GetBoolArg("-reindex", false)};
     const bool do_reindex_chainstate{args.GetBoolArg("-reindex-chainstate", false)};
+
+    // Open the persistent MatMul segregated-proof store (MatMul v4.2 solver-
+    // evolution Stage 2c, design §3.5) BEFORE loading the chainstate, so proofs
+    // survive restart and are available while historical blocks are (re)connected
+    // during load/IBD. leveldb table under <netdir>/matmulproofs, keyed by block
+    // hash; resident RAM holds only the key index (the 32 MiB blobs stay on disk).
+    // Wiped on -reindex (proofs are re-fetched with the rebuilt blocks).
+    {
+        const bool matmul_proof_archive = args.GetBoolArg("-matmulproofarchive", DEFAULT_MATMUL_PROOF_ARCHIVE);
+        static constexpr size_t MATMUL_PROOF_DB_CACHE_BYTES{8 << 20}; // 8 MiB block cache
+        matmul::GetLocalMatMulProofStore().OpenDiskBacking(
+            args.GetDataDirNet() / "matmulproofs",
+            MATMUL_PROOF_DB_CACHE_BYTES,
+            matmul_proof_archive,
+            /*wipe=*/do_reindex);
+    }
 
     // Chainstate initialization and loading may be retried once with reindexing by GUI users
     auto [status, error] = InitAndLoadChainstate(

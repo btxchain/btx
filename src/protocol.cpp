@@ -103,6 +103,7 @@ static std::string serviceFlagToStr(size_t bit)
     case NODE_UTREEXO:         return "UTREEXO";
     case NODE_UTREEXO_ARCHIVE: return "UTREEXO_ARCHIVE";
     case NODE_UTREEXO_TMP:     return "UTREEXO_TMP?";
+    case NODE_MATMUL_PROOF_ARCHIVE: return "MATMUL_PROOF_ARCHIVE";
     case NODE_REPLACE_BY_FEE:  return "REPLACE_BY_FEE?";
     case NODE_MATMUL_CONSENSUS: return "MATMUL_CONSENSUS";
     case NODE_MATMUL_ECONOMIC: return "MATMUL_ECONOMIC";

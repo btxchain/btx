@@ -60,6 +60,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <limits>
@@ -559,6 +560,80 @@ BOOST_AUTO_TEST_CASE(matmul_proof_store_roundtrip)
     BOOST_CHECK_EQUAL(store.Size(), 1u);
     store.Clear();
     BOOST_CHECK_EQUAL(store.Size(), 0u);
+}
+
+// (2b) DISK PERSISTENCE + ARCHIVE FLAG (solver-evolution Stage 2c, design §3.5).
+// A disk-backed store keeps proofs on leveldb keyed by block hash and reloads them
+// on (re)open — the on-restart persistence the node relies on. The Put/Get/Have
+// surface is byte-identical to MEMORY mode, and the archive flag is exposed.
+BOOST_AUTO_TEST_CASE(matmul_proof_store_disk_persistence)
+{
+    const fs::path dir = m_path_root / "matmulproofs_test";
+    const uint256 h1 = ParseUint256("aa00000000000000000000000000000000000000000000000000000000000000");
+    const uint256 h2 = ParseUint256("bb00000000000000000000000000000000000000000000000000000000000000");
+    const std::vector<unsigned char> a{5, 6, 7, 8, 9};
+    const std::vector<unsigned char> b(4096, 0x42); // a larger blob, exercises the value path
+
+    {
+        matmul::MatMulProofStore store;
+        store.OpenDiskBacking(dir, /*cache_bytes=*/1 << 20, /*archive=*/true, /*wipe=*/true);
+        BOOST_CHECK(store.IsDiskBacked());
+        BOOST_CHECK(store.IsArchive());
+        BOOST_CHECK_EQUAL(store.Size(), 0u);
+        store.Put(h1, a);
+        store.Put(h2, b);
+        BOOST_CHECK_EQUAL(store.Size(), 2u);
+        std::vector<unsigned char> out;
+        BOOST_REQUIRE(store.Get(h1, out));
+        BOOST_CHECK(out == a);
+        BOOST_REQUIRE(store.Get(h2, out));
+        BOOST_CHECK(out == b);
+        store.CloseDiskBacking();
+        BOOST_CHECK(!store.IsDiskBacked());
+        BOOST_CHECK_EQUAL(store.Size(), 0u); // resident index dropped on close
+    }
+
+    // Re-open the SAME directory (simulates a node restart): proofs survive, and
+    // the resident key index is rebuilt from disk without loading the blobs.
+    {
+        matmul::MatMulProofStore store;
+        store.OpenDiskBacking(dir, /*cache_bytes=*/1 << 20, /*archive=*/false, /*wipe=*/false);
+        BOOST_CHECK(!store.IsArchive());
+        BOOST_CHECK_EQUAL(store.Size(), 2u);
+        BOOST_CHECK(store.Have(h1));
+        BOOST_CHECK(store.Have(h2));
+        std::vector<unsigned char> out;
+        BOOST_REQUIRE(store.Get(h2, out));
+        BOOST_CHECK(out == b);
+
+        // Keys() snapshot drives the prune sweep; both hashes must be present.
+        const std::vector<uint256> keys = store.Keys();
+        BOOST_CHECK_EQUAL(keys.size(), 2u);
+        BOOST_CHECK(std::find(keys.begin(), keys.end(), h1) != keys.end());
+        BOOST_CHECK(std::find(keys.begin(), keys.end(), h2) != keys.end());
+
+        // Erase persists to disk.
+        store.Erase(h1);
+        BOOST_CHECK(!store.Have(h1));
+        store.CloseDiskBacking();
+    }
+    {
+        matmul::MatMulProofStore store;
+        store.OpenDiskBacking(dir, /*cache_bytes=*/1 << 20, /*archive=*/false, /*wipe=*/false);
+        BOOST_CHECK_EQUAL(store.Size(), 1u);
+        BOOST_CHECK(!store.Have(h1));
+        BOOST_CHECK(store.Have(h2));
+        store.Clear();
+        BOOST_CHECK_EQUAL(store.Size(), 0u);
+        store.CloseDiskBacking();
+    }
+    // wipe=true starts empty even though the dir has prior (now-cleared) data.
+    {
+        matmul::MatMulProofStore store;
+        store.OpenDiskBacking(dir, /*cache_bytes=*/1 << 20, /*archive=*/true, /*wipe=*/true);
+        BOOST_CHECK_EQUAL(store.Size(), 0u);
+        store.CloseDiskBacking();
+    }
 }
 
 // (3) STORE-BACKED BINDING + FREIVALDS (design §3.3/§3.4). Drives every arm of

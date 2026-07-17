@@ -354,6 +354,10 @@ target_link_libraries(bitcoin_common
   PRIVATE
     core_interface
     bitcoin_consensus
+    # matmul/matmul_proof_store.cpp persists the segregated MatMul v4.2-D proof to
+    # a leveldb table (CDBWrapper); pull in the DB wrapper. Only binaries that
+    # actually reference the proof store (i.e. link pow.o / the node) pull leveldb.
+    bitcoin_db
     bitcoinpqc
     secp256k1
     Boost::headers

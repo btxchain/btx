@@ -30,6 +30,7 @@
 #include <kernel/warning.h>
 #include <logging.h>
 #include <logging/timer.h>
+#include <matmul/matmul_proof_store.h>
 #include <node/blockstorage.h>
 #include <node/utxo_snapshot.h>
 #include <policy/coin_age_priority.h>
@@ -8051,6 +8052,80 @@ CoinsCacheSizeState Chainstate::GetCoinsCacheSizeState(
     return CoinsCacheSizeState::OK;
 }
 
+//! Rolling proof-prune sweep (MatMul v4.2 solver-evolution Stage 2c, design §3.5).
+//!
+//! A verified segregated proof is retained only until its block is buried by
+//! `nMatMulProofPruneDepth` (default ~10 000 blocks). Below that depth a DEFAULT
+//! (pruned-proof) node discards the redundant-after-verify ~32 MiB sketch bytes;
+//! the block's VALIDITY survives (it was verified once) and the header's
+//! matmul_digest is retained forever, so nothing about chain state is lost — only
+//! the large witness. An ARCHIVE node (`-matmulproofarchive`) retains everything
+//! and this sweep is a no-op for it. Bounds resident proof storage and logs what
+//! it drops (no silent cap). Height is resolved authoritatively from the block
+//! index (a block hash maps to a single pindex), so a reorg cannot mis-key it.
+static void PruneMatMulSegregatedProofs(Chainstate& chainstate) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    matmul::MatMulProofStore& store = matmul::GetLocalMatMulProofStore();
+    if (store.IsArchive()) return;          // archive node: retain ALL proofs
+    if (store.Size() == 0) return;
+    const Consensus::Params& consensus = chainstate.m_chainman.GetConsensus();
+    if (!consensus.fMatMulPOW) return;
+    const int prune_depth = static_cast<int>(consensus.nMatMulProofPruneDepth);
+    if (prune_depth <= 0) return;           // 0 => disabled (retain-forever)
+    const int tip_height = chainstate.m_chain.Height();
+    if (tip_height < 0) return;
+    // A proof whose block height h satisfies (tip_height - h) >= prune_depth, i.e.
+    // h <= cutoff, is buried deeply enough to drop.
+    const int64_t cutoff = static_cast<int64_t>(tip_height) - prune_depth;
+    if (cutoff < 0) return;                  // nothing buried deep enough yet
+
+    size_t pruned = 0;
+    for (const uint256& hash : store.Keys()) {
+        const CBlockIndex* pindex = chainstate.m_blockman.LookupBlockIndex(hash);
+        // Unknown block (orphan / not-yet-connected): keep — we cannot place it in
+        // the window, and it is bounded by the held/pending relay caps.
+        if (pindex == nullptr) continue;
+        if (pindex->nHeight <= cutoff) {
+            store.Erase(hash);
+            ++pruned;
+        }
+    }
+    if (pruned > 0) {
+        LogPrintf("MatMul proof store: pruned %u segregated proof(s) at/below height %d "
+                  "(tip %d, window %d blocks); %u proof(s) resident\n",
+                  pruned, static_cast<int>(cutoff), tip_height, prune_depth, store.Size());
+    }
+}
+
+//! Incremental O(1) companion to PruneMatMulSegregatedProofs, run per tip advance
+//! (design §3.5: "on tip update"). As the tip advances by one, exactly one height
+//! falls out of the rolling window; drop the ACTIVE-chain proof at that height
+//! directly by height->hash lookup instead of scanning the whole store, so the
+//! sweep stays cheap even during IBD (O(1)/block, not O(store)/block). Stale /
+//! side-chain proofs at the cutoff height are caught by the full sweep above.
+static void PruneMatMulSegregatedProofAtTip(Chainstate& chainstate) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    matmul::MatMulProofStore& store = matmul::GetLocalMatMulProofStore();
+    if (store.IsArchive() || store.Size() == 0) return;
+    const Consensus::Params& consensus = chainstate.m_chainman.GetConsensus();
+    if (!consensus.fMatMulPOW) return;
+    const int prune_depth = static_cast<int>(consensus.nMatMulProofPruneDepth);
+    if (prune_depth <= 0) return;
+    const int64_t cutoff = static_cast<int64_t>(chainstate.m_chain.Height()) - prune_depth;
+    if (cutoff < 0) return;
+    const CBlockIndex* pindex = chainstate.m_chain[cutoff];
+    if (pindex == nullptr) return;
+    const uint256 hash = pindex->GetBlockHash();
+    if (!store.Have(hash)) return;
+    store.Erase(hash);
+    LogPrintf("MatMul proof store: pruned segregated proof for block %s at height %d "
+              "(tip %d, window %d blocks); %u proof(s) resident\n",
+              hash.ToString(), static_cast<int>(cutoff), chainstate.m_chain.Height(),
+              prune_depth, store.Size());
+}
+
 bool Chainstate::FlushStateToDisk(
     BlockValidationState &state,
     FlushStateMode mode,
@@ -8110,6 +8185,13 @@ bool Chainstate::FlushStateToDisk(
         }
         // It's been a while since we wrote the block index and chain state to disk. Do this frequently, so we don't need to redownload or reindex after a crash.
         bool fPeriodicWrite = mode == FlushStateMode::PERIODIC && nNow >= m_next_write;
+        // Rolling MatMul segregated-proof prune (design §3.5). Independent of block-file
+        // pruning: a full-block DEFAULT node still discards proof bytes below the window,
+        // an archive node retains them. Bounded to the same cadence as periodic/forced
+        // disk writes so it never runs per-block.
+        if (fPeriodicWrite || mode == FlushStateMode::ALWAYS) {
+            PruneMatMulSegregatedProofs(*this);
+        }
         // Combine all conditions that result in a write to disk.
         bool should_write = (mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicWrite || fFlushForPrune;
         // Write blocks, block index and best chain related state to disk.
@@ -8244,6 +8326,11 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
         }
         return;
     }
+
+    // Rolling MatMul segregated-proof prune (design §3.5): drop the proof for the
+    // single active-chain block that just fell out of the retention window. Cheap
+    // (O(1)) so it is safe to run on every tip advance, including during IBD.
+    PruneMatMulSegregatedProofAtTip(*this);
 
     // New best block
     if (m_mempool) {

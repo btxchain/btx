@@ -397,6 +397,13 @@ enum ServiceFlags : uint64_t {
 
     NODE_UTREEXO_TMP = (1 << 24),
 
+    // NODE_MATMUL_PROOF_ARCHIVE indicates the node retains and serves the
+    // segregated MatMul v4.2-D proof (getmatmulproof/matmulproof) for ANY
+    // historical block, not only the rolling prune window — analogous to an
+    // archival/-txindex node (MatMul v4.2 solver-evolution Stage 2c, design §3.5).
+    // A syncing/pruned node prefers these peers when fetching buried proofs.
+    NODE_MATMUL_PROOF_ARCHIVE = (1 << 25),
+
     NODE_REPLACE_BY_FEE = (1 << 26),
     // NODE_MATMUL_CONSENSUS indicates the node validates MatMul transcripts
     // (Tier 0/1 behavior: mining or consensus-validating).

@@ -123,6 +123,14 @@ static constexpr auto MATMUL_PROOF_REQUEST_TIMEOUT{10s};
  *  never permanently rejected (design §3.5), so this is only a long-tail safety net
  *  for "every peer we knew was exhausted". */
 static constexpr auto MATMUL_PROOF_RETRY_RESET{5min};
+/** For a proof whose block is buried below the rolling prune window (design §3.5:
+ *  a default peer has very likely pruned it), we PREFER archive peers
+ *  (NODE_MATMUL_PROOF_ARCHIVE) as the source. To avoid stalling when no archive
+ *  peer is connected, non-archive peers are deferred only for this grace period
+ *  after the block is first held; after it, ANY block-serving peer may be asked
+ *  (some full nodes retain more than the window). The block is never permanently
+ *  rejected — if nobody has the proof it stays held (design §3.5). */
+static constexpr auto MATMUL_PROOF_ARCHIVE_PREFERENCE_GRACE{20s};
 /** Defensive cap on how many proof-incomplete blocks we hold awaiting their
  *  segregated proof at once. Each held block already passed CheckBlock + header
  *  acceptance (real PoW work to forge), so the surface is naturally bounded like
@@ -1102,6 +1110,9 @@ private:
         NodeId requested_from{-1};
         //! When the outstanding request was sent (drives the timeout).
         std::chrono::microseconds requested_time{0us};
+        //! When we first started holding this block (drives the archive-peer
+        //! preference grace window for buried proofs, design §3.5 IBD/reorg fetch).
+        std::chrono::microseconds first_seen{0us};
         //! Peers that already failed us for this proof (served a non-binding proof,
         //! or timed out); skipped until MATMUL_PROOF_RETRY_RESET forgets them.
         std::set<NodeId> tried_peers;
@@ -2719,6 +2730,7 @@ void PeerManagerImpl::BlockChecked(const CBlock& block, const BlockValidationSta
             auto& entry = m_matmul_proofs_pending[hash];
             if (!entry.block) {
                 entry.block = std::make_shared<const CBlock>(block);
+                entry.first_seen = GetTime<std::chrono::microseconds>();
             }
             if (it != mapBlockSource.end()) {
                 entry.announced_by = it->second.first;
@@ -6000,11 +6012,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
     if (msg_type == NetMsgType::GETMATMULPROOF) {
         // Serve a segregated MatMul proof on request (design §3.2 step; solver-
-        // evolution Stage 2b). Request/response, modeled on getblocktxn: we reply
-        // ONLY when we hold the proof in our store (locally mined, or fetched +
-        // verified from a peer). Archival serving of pruned proofs is Stage 2c, so
-        // for now we serve exactly what the store holds; a request for a proof we
-        // don't have is ignored (like a getblocktxn for a block we don't have),
+        // evolution Stage 2b/2c). Request/response, modeled on getblocktxn: we reply
+        // with whatever our store holds (locally mined, or fetched + verified from a
+        // peer, and persisted across restart). An ARCHIVE node (-matmulproofarchive)
+        // has retained ALL historical proofs and so answers for any buried block; a
+        // default (pruned-proof) node holds only the rolling window and answers only
+        // within it. Either way we serve exactly what we Have(); a request for a proof
+        // we don't have is ignored (like a getblocktxn for a block we don't have),
         // never an error. Proofs are never gossiped unsolicited.
         uint256 block_hash;
         vRecv >> block_hash;
@@ -7664,6 +7678,11 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // rejected, design §3.5), so after exhausting known peers we reset and
         // retry from scratch.
         if (!m_matmul_proofs_pending.empty() && CanServeBlocks(*peer)) {
+            const Consensus::Params& matmul_consensus = m_chainparams.GetConsensus();
+            const int matmul_tip_height = m_chainman.ActiveChain().Height();
+            const int matmul_prune_depth = static_cast<int>(matmul_consensus.nMatMulProofPruneDepth);
+            const bool peer_is_proof_archive =
+                (peer->m_their_services & NODE_MATMUL_PROOF_ARCHIVE) == NODE_MATMUL_PROOF_ARCHIVE;
             for (auto& [proof_hash, req] : m_matmul_proofs_pending) {
                 // Long-tail reset: nothing in flight and every known peer exhausted.
                 if (req.requested_from == -1 && !req.tried_peers.empty() &&
@@ -7679,6 +7698,22 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 }
                 if (req.requested_from != -1) continue;      // still awaiting a reply
                 if (req.tried_peers.count(pto->GetId())) continue; // this peer failed us
+                // Archive-peer preference for BURIED proofs (design §3.5 IBD/reorg):
+                // a block below the rolling window has very likely been pruned by a
+                // default peer, so prefer archive peers as the source. Non-archive
+                // peers defer only during the grace window after we first held the
+                // block; after it they may still be tried (some full nodes retain
+                // more than the window), so a missing archive peer never permanently
+                // stalls — the block is simply held until some peer serves the proof.
+                if (matmul_prune_depth > 0 && !peer_is_proof_archive) {
+                    const CBlockIndex* proof_index = m_chainman.m_blockman.LookupBlockIndex(proof_hash);
+                    const bool buried = proof_index != nullptr &&
+                        proof_index->nHeight <= static_cast<int64_t>(matmul_tip_height) - matmul_prune_depth;
+                    if (buried && req.first_seen != 0us &&
+                        req.first_seen > current_time - MATMUL_PROOF_ARCHIVE_PREFERENCE_GRACE) {
+                        continue;
+                    }
+                }
                 // Prefer the announcing peer for the first request.
                 if (req.announced_by != -1 && req.announced_by != pto->GetId() &&
                     !req.tried_peers.count(req.announced_by) && State(req.announced_by) != nullptr) {

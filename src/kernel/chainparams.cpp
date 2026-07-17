@@ -1461,6 +1461,14 @@ public:
         if (opts.matmul_bmx4cd_height.has_value()) {
             consensus.nMatMulBMX4CDHeight = *opts.matmul_bmx4cd_height;
         }
+        // MatMul v4.2-D segregated-proof rolling prune window (design §3.5). The
+        // production default is 10 000 blocks; the regtest override lets a
+        // functional test pick a tiny window so a pruned node discards proofs
+        // after just a few blocks without mining 10 000. 0 disables pruning
+        // (retain-forever), matching an archive node's retention.
+        if (opts.matmul_proof_prune_depth.has_value()) {
+            consensus.nMatMulProofPruneDepth = *opts.matmul_proof_prune_depth;
+        }
         // Spec §G.2/§G.4: the v4 dimension must divide evenly by the sketch
         // tile size and stay within the accepted-dimension bounds enforced in
         // ContextualCheckBlockHeader, so a bad -regtestmatmulv4dimension fails
@@ -1640,6 +1648,7 @@ public:
             opts.matmul_v4_dimension.has_value() ||
             opts.matmul_bmx4c_height.has_value() ||
             opts.matmul_bmx4cd_height.has_value() ||
+            opts.matmul_proof_prune_depth.has_value() ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||
             opts.shielded_smile_rice_codec_disable_height.has_value() ||
