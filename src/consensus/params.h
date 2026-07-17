@@ -199,14 +199,26 @@ struct MatMulProfileParams {
  * network, so a node receiving a segregated block whose validation returned
  * INCOMPLETE fetches the proof from a peer, completes the §3.3 binding + Freivalds
  * cascade, and re-validates — the missing multi-node piece. With the relay present
- * this flag is now TRUE, lifting the "relay not present" startup block in
- * AssertBMX4CConstructionInvariants (exactly like CBlockHeader::
+ * this flag is now TRUE, lifting the "relay-not-present" startup block in
+ * AssertBMX4CConstructionInvariants, exactly like CBlockHeader::
  * BTX_HEADER_NONCE_ON_WIRE gating the header-PoW spam throttle once its wire
- * carriage exists). This does NOT activate D: nMatMulBMX4CDHeight stays INT32_MAX on
- * every network, so the relay path is exercised only under a regtest override. (The
- * §3.5 prune/archive plumbing is Stage 2c; verified proofs are cached and served
- * onward but not yet pruned, so this flag asserts only that the relay itself is
- * present, which it is.)
+ * carriage exists.
+ *
+ * SCOPE — this flag gates exactly RELAY PRESENCE (the wire-protocol coupling),
+ * nothing more; it is NOT the activation switch. Activating ENC-BMX4C-D
+ * ADDITIONALLY requires, and is gated on, all of: the §3.5 prune/archive/IBD-fetch
+ * plumbing (Stage 2c — until it lands a node would grow proof storage unbounded and
+ * could not serve/complete IBD), the two-vendor M-t24 PASS, the re-confirmed
+ * per-card ordering at the production kernel, and the Strassen/LCMA-aware difficulty
+ * calibration (design §6). Those remaining preconditions are enforced by
+ * nMatMulBMX4CDHeight staying INT32_MAX on EVERY network — which it is — so D is
+ * inert regardless of this flag. Setting a D height is a deliberate, reviewed
+ * release action taken ONLY once every gate above is met; this flag is merely the
+ * first (wire-protocol) coupling that must hold. The regtest single-process /
+ * multi-node relay tests activate D via -regtestbmx4cdheight to exercise the
+ * Stage-2a/2b paths end-to-end, and need this flag true because -test=matmuldgw
+ * clears fPowNoRetargeting (so the fPowNoRetargeting startup exemption does not
+ * cover them).
  */
 static constexpr bool BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY{true};
 
