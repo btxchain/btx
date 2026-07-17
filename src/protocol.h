@@ -286,6 +286,27 @@ inline constexpr const char* DLTX{"dltx"};
  * Empty payload.
  */
 inline constexpr const char* DANDELIONACC{"dandelionacc"};
+/**
+ * getmmproof requests the segregated MatMul PoW proof (the ~32 MiB ENC-BMX4C-D
+ * sketch, 8·m² bytes) for a block the peer already holds the header/body of.
+ * (Wire name kept within the 12-byte CMessageHeader message-type limit.)
+ * Payload: a single 32-byte block hash. Modeled on the getdata/block request-
+ * response pattern (NOT unsolicited gossip): the proof travels only when asked
+ * for, so a large witness-like artifact never rides the compact-block fast path
+ * (design §3.2). Reply is a `matmulproof` if we hold the proof, else ignored.
+ * @since MatMul v4.2 solver-evolution Stage 2b (activation-disabled).
+ */
+inline constexpr const char* GETMATMULPROOF{"getmmproof"};
+/**
+ * mmproof carries the raw serialized segregated sketch bytes for a block, in
+ * response to a `getmmproof`. Payload: the 32-byte block hash followed by the
+ * length-prefixed raw sketch bytes. The receiver enforces the §3.4 size cap
+ * (profile's 8·m² + overhead) BEFORE deserialization, binds the bytes to the
+ * header via H(sigma||proof)==matmul_digest, then Freivalds-verifies — so a
+ * substituted/corrupted proof is rejected and never credited (design §3.3).
+ * @since MatMul v4.2 solver-evolution Stage 2b (activation-disabled).
+ */
+inline constexpr const char* MATMULPROOF{"mmproof"};
 }; // namespace NetMsgType
 
 /** All known message types (see above). Keep this in the same order as the list of messages above. */
@@ -330,6 +351,8 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::SENDTXRCNCL,
     NetMsgType::DLTX,
     NetMsgType::DANDELIONACC,
+    NetMsgType::GETMATMULPROOF,
+    NetMsgType::MATMULPROOF,
 })};
 
 /** nServices flags */

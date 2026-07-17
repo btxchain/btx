@@ -76,6 +76,24 @@ static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 16 * 1000 * 1000;
  *  ceiling is applied ONLY to these commands (see net.cpp), so ordinary messages
  *  keep the 16 MB bound. */
 static const unsigned int MAX_BLOCK_MESSAGE_LENGTH = 24 * 1000 * 1000;
+/** Maximum length of a segregated-proof `matmulproof` message (MatMul v4.2
+ *  solver-evolution Stage 2b, design §3.2/§3.4). The segregated ENC-BMX4C-D
+ *  sketch is 8·m² bytes (32 MiB at the m = 2048 production profile), which alone
+ *  exceeds even MAX_BLOCK_MESSAGE_LENGTH, so `matmulproof` needs its own command-
+ *  specific ceiling. Like the block-bearing ceiling it is applied ONLY to this one
+ *  command (see net.cpp), so ordinary messages keep the 16 MB bound and this does
+ *  NOT widen the global allocation/bandwidth DoS envelope. This is a COARSE
+ *  net-layer backstop that admits the largest configured profile's proof plus
+ *  framing; the EXACT per-profile §3.4 cap (GetMatMulProofSizeCap = the height's
+ *  8·m² + overhead) is enforced in net_processing BEFORE the sketch is
+ *  deserialized. Sized to 40 MB: > 32 MiB (D) + block-hash + compactSize framing,
+ *  with headroom for a future governance-raised m rung. NOTE: this ceiling is only
+ *  reachable when ENC-BMX4C-D is activated at a non-INT32_MAX height, which is
+ *  disabled on every network; the V2 (BIP324) transport cannot key its length
+ *  check on the (encrypted) command and so still caps at MAX_PROTOCOL_MESSAGE_LENGTH
+ *  — raising the V2 envelope network-wide is part of the §6.4 propagation work
+ *  gating D's activation, not this stage. */
+static const unsigned int MAX_MATMULPROOF_MESSAGE_LENGTH = 40 * 1000 * 1000;
 /** Maximum length of the user agent string in `version` message */
 static const unsigned int MAX_SUBVERSION_LENGTH = 256;
 /** Maximum number of automatic outgoing nodes over which we'll relay everything (blocks, tx, addrs, etc) */

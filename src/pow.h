@@ -219,6 +219,15 @@ bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consen
  *  profile params, never attacker-chosen. */
 static constexpr uint64_t MATMUL_SEGREGATED_PROOF_OVERHEAD{64};
 
+/** The §3.4 segregated-proof size cap for the profile live at @p block_height:
+ *  GetMatMulProfileParams(height).sketch_payload_bytes (the CONSENSUS 8·m², not an
+ *  attacker-chosen value) + MATMUL_SEGREGATED_PROOF_OVERHEAD. A well-formed sketch
+ *  is exactly sketch_payload_bytes; the small constant slack keeps this a coarse
+ *  pre-parse DoS backstop while ParseSketch (inside VerifySketch*) is the exact-size
+ *  gate. Shared by the store-backed validator (CheckMatMulV4SegregatedProof) and the
+ *  P2P relay (net_processing matmulproof handler) so both enforce ONE cap. */
+uint64_t GetMatMulProofSizeCap(const Consensus::Params& params, int32_t block_height);
+
 /** Result of validating a SEGREGATED-PROOF block's out-of-body sketch against its
  *  header commitment (design §3.3/§3.4; solver-evolution Stage 2a). Distinguishes
  *  the non-permanent "not yet creditable" states from a permanent consensus fault

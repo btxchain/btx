@@ -2023,6 +2023,51 @@ class msg_no_witness_blocktxn(msg_blocktxn):
         return self.block_transactions.serialize(with_witness=False)
 
 
+class msg_getmatmulproof:
+    """Request the segregated MatMul PoW proof for a block (MatMul v4.2 Stage 2b).
+
+    Payload: a single 32-byte block hash. Request/response, modeled on getdata."""
+    __slots__ = ("block_hash",)
+    msgtype = b"getmmproof"
+
+    def __init__(self, block_hash=0):
+        self.block_hash = block_hash
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+
+    def serialize(self):
+        return ser_uint256(self.block_hash)
+
+    def __repr__(self):
+        return "msg_getmatmulproof(block_hash=%064x)" % self.block_hash
+
+
+class msg_matmulproof:
+    """Carry the raw segregated sketch bytes for a block (MatMul v4.2 Stage 2b).
+
+    Payload: 32-byte block hash followed by the length-prefixed raw sketch bytes."""
+    __slots__ = ("block_hash", "proof")
+    msgtype = b"mmproof"
+
+    def __init__(self, block_hash=0, proof=b""):
+        self.block_hash = block_hash
+        self.proof = proof
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+        self.proof = deser_string(f)
+
+    def serialize(self):
+        r = b""
+        r += ser_uint256(self.block_hash)
+        r += ser_string(self.proof)
+        return r
+
+    def __repr__(self):
+        return "msg_matmulproof(block_hash=%064x, proof_len=%d)" % (self.block_hash, len(self.proof))
+
+
 class msg_getcfilters:
     __slots__ = ("filter_type", "start_height", "stop_hash")
     msgtype =  b"getcfilters"

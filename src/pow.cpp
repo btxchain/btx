@@ -3559,6 +3559,12 @@ bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consen
     return finish(CheckMatMulV4SketchVerifies(block, params, block_height, sketch_payload));
 }
 
+uint64_t GetMatMulProofSizeCap(const Consensus::Params& params, int32_t block_height)
+{
+    const Consensus::MatMulProfileParams profile_params = params.GetMatMulProfileParams(block_height);
+    return profile_params.sketch_payload_bytes + MATMUL_SEGREGATED_PROOF_OVERHEAD;
+}
+
 MatMulSegregatedProofStatus CheckMatMulV4SegregatedProof(const CBlock& block,
                                                          const Consensus::Params& params,
                                                          int32_t block_height)
@@ -3595,8 +3601,7 @@ MatMulSegregatedProofStatus CheckMatMulV4SegregatedProof(const CBlock& block,
     // force allocation/iteration. A well-formed sketch is exactly
     // sketch_payload_bytes; a tiny slack keeps this a coarse pre-parse DoS
     // backstop while ParseSketch (inside VerifySketch*) is the exact-size gate.
-    const Consensus::MatMulProfileParams profile_params = params.GetMatMulProfileParams(block_height);
-    const uint64_t max_proof_size = profile_params.sketch_payload_bytes + MATMUL_SEGREGATED_PROOF_OVERHEAD;
+    const uint64_t max_proof_size = GetMatMulProofSizeCap(params, block_height);
     if (proof.size() > max_proof_size) {
         return MatMulSegregatedProofStatus::MUTATED;
     }

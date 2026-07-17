@@ -801,8 +801,16 @@ int V1Transport::readHeader(Span<const uint8_t> msg_bytes)
     const std::string hdr_msg_type = hdr.GetMessageType();
     const bool is_block_bearing_msg =
         (hdr_msg_type == NetMsgType::BLOCK || hdr_msg_type == NetMsgType::BLOCKTXN);
+    // The segregated-proof `matmulproof` message (MatMul v4.2 Stage 2b) may carry a
+    // sketch larger than a whole block (32 MiB at the D profile), so it gets its own
+    // command-specific ceiling. Like the block-bearing exception this larger limit
+    // is scoped to exactly this one command, so no other/unknown command can force
+    // more than MAX_PROTOCOL_MESSAGE_LENGTH of buffering.
+    const bool is_matmulproof_msg = (hdr_msg_type == NetMsgType::MATMULPROOF);
     const unsigned int msg_size_limit =
-        is_block_bearing_msg ? MAX_BLOCK_MESSAGE_LENGTH : MAX_PROTOCOL_MESSAGE_LENGTH;
+        is_block_bearing_msg  ? MAX_BLOCK_MESSAGE_LENGTH :
+        is_matmulproof_msg    ? MAX_MATMULPROOF_MESSAGE_LENGTH :
+                                MAX_PROTOCOL_MESSAGE_LENGTH;
 
     // reject messages larger than MAX_SIZE or the command-specific size limit
     if (hdr.nMessageSize > MAX_SIZE || hdr.nMessageSize > msg_size_limit) {

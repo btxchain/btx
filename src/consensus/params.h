@@ -193,15 +193,22 @@ struct MatMulProfileParams {
  * binding + Freivalds validation, and (iii) the getmatmulproof/matmulproof P2P
  * relay + prune/archive plumbing.
  *
- * Stage 2a delivers (i) and (ii) and a PROCESS-LOCAL proof store standing in for
- * (iii) — enough for a SINGLE-node regtest, NOT for a live multi-node network.
- * Until the Stage-2b relay lands this flag stays FALSE, and
- * AssertBMX4CConstructionInvariants asserts D cannot be configured non-INT32_MAX
- * on any PUBLIC network while it is false — fail LOUD at startup, exactly like
- * CBlockHeader::BTX_HEADER_NONCE_ON_WIRE gates the header-PoW spam throttle.
- * Flip to true in the SAME change that lands the P2P relay.
+ * Stage 2a delivered (i) and (ii) and a PROCESS-LOCAL proof store standing in for
+ * (iii). Stage 2b lands (iii): the getmatmulproof/matmulproof P2P request-response
+ * relay (protocol.h + net_processing.cpp) that POPULATES that same store from the
+ * network, so a node receiving a segregated block whose validation returned
+ * INCOMPLETE fetches the proof from a peer, completes the §3.3 binding + Freivalds
+ * cascade, and re-validates — the missing multi-node piece. With the relay present
+ * this flag is now TRUE, lifting the "relay not present" startup block in
+ * AssertBMX4CConstructionInvariants (exactly like CBlockHeader::
+ * BTX_HEADER_NONCE_ON_WIRE gating the header-PoW spam throttle once its wire
+ * carriage exists). This does NOT activate D: nMatMulBMX4CDHeight stays INT32_MAX on
+ * every network, so the relay path is exercised only under a regtest override. (The
+ * §3.5 prune/archive plumbing is Stage 2c; verified proofs are cached and served
+ * onward but not yet pruned, so this flag asserts only that the relay itself is
+ * present, which it is.)
  */
-static constexpr bool BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY{false};
+static constexpr bool BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY{true};
 
 /**
  * Parameters that influence chain consensus.

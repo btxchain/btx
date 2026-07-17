@@ -191,27 +191,26 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // PROOF CARRIAGE (design §3): D's ~32 MiB sketch is carried as a SEGREGATED
     // PRUNABLE PROOF, excluded from the block serialized size by construction, so
     // there is NO in-block 32 MiB payload gating to assert here (that was the old
-    // P1/P3 blocker). Stage 2a wires the body-serialization gate, the store-backed
+    // P1/P3 blocker). Stage 2a wired the body-serialization gate, the store-backed
     // §3.3 binding + §3.4 size cap, and the miner offload; Stage 2b wires the
-    // getmatmulproof/matmulproof P2P relay; Stage 2c wires prune/archive.
+    // getmatmulproof/matmulproof P2P relay (now present); Stage 2c wires prune/archive.
     if (consensus.nMatMulBMX4CDHeight == std::numeric_limits<int32_t>::max()) return;
 
     // ACTIVATION COUPLING (design §3.6), mirroring the BTX_HEADER_NONCE_ON_WIRE
     // gate: enabling a segregated-proof profile is a coordinated header/relay
     // protocol change. A NETWORKED node that receives a segregated block from a
     // peer must be able to OBTAIN its proof, or it stalls (the sketch is off-body).
-    // Stage 2a delivers the single-node carriage + a PROCESS-LOCAL proof store, but
-    // the Stage-2b P2P relay is NOT yet present, so D MUST NOT be activatable on any
-    // PUBLIC (peer-to-peer) network until BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY is
-    // flipped true in the change that lands the relay. Fail LOUD at startup here.
-    //
-    // The single-node on-demand-mining exemption is deliberate and narrowly scoped:
-    // on such a chain (regtest / dev) the miner and validator share one process and
-    // the LOCAL store fully stands in for the relay, so the Stage-2a segregated path
-    // is exercisable end-to-end WITHOUT the relay. MineBlocksOnDemand() ==
-    // consensus.fPowNoRetargeting, which is FALSE on every PUBLIC network
-    // (main/testnet/testnet4/signet all set it false above), so this cannot loosen
-    // them: activating D there while the relay flag is false aborts the node.
+    // The Stage-2b getmatmulproof/matmulproof relay POPULATES the proof store from
+    // the network, so this coupling is now SATISFIED and
+    // BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY is true — the assert below no longer
+    // blocks a PUBLIC-network config on the relay's absence. D itself remains
+    // activation-disabled everywhere (nMatMulBMX4CDHeight == INT32_MAX on every
+    // network, so this branch is unreached in shipping configs); the relay is
+    // exercised only under a regtest -regtestbmx4cdheight override. Should the flag
+    // ever regress to false (relay removed), this still fails LOUD at startup on any
+    // public network. The single-node on-demand-mining exemption
+    // (MineBlocksOnDemand() == consensus.fPowNoRetargeting, FALSE on every public
+    // network) is retained as the regtest/dev escape hatch.
     assert(Consensus::BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY ||
            consensus.fPowNoRetargeting);
 
