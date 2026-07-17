@@ -112,30 +112,56 @@ hardware gate. All activation remains disabled.
 A second audit reviewed the segregated-proof RELAY specifically and found it not
 production-ready for ENC-BMX4C-D activation. D stays disabled on all public
 networks (`nMatMulBMX4CDHeight == INT32_MAX`), so none of this is live; the PR
-remains fail-closed until every item lands. Mapping:
+remains fail-closed. Stage 2c (storage) and Stage 2d (relay hardening) have now
+landed; mapping:
 
-1. **BIP324 / v2 transport cannot carry the ~32 MiB proof.** CRITICAL / NEW /
-   OPEN. BIP324's packet-length field is 24-bit (~16 MiB max), but the D proof is
-   ~32 MiB (8·m², m=2048), so a single `matmulproof` truncates and the v2 peer
-   disconnects. Needs application-layer CHUNKING + bounded reassembly. Designed in
-   `doc/btx-matmul-v4.2-relay-hardening-design.md`; implemented in Stage 2d. Until
-   then the relay is v1-only / small-proof-only, so `RELAY_READY` must go back to
-   FALSE (item 6).
-2. **Proof storage process-local + unbounded.** Being fixed in Stage 2c
-   (persistent on-disk store, `nMatMulProofPruneDepth` window, `-matmulproofarchive`,
-   IBD fetch, byte limits). In progress.
-3. **Pending-proof queue unbounded in bytes / never expires.** OPEN. The 64-entry
-   `m_matmul_proofs_pending` bounds count but each entry holds a full CBlock with
-   no byte budget or expiry → memory/availability exhaustion. Stage 2d adds a byte
-   budget + per-entry expiry + eviction that releases the held block.
-4. **getmatmulproof has no serving limits.** OPEN. A tiny request triggers a
-   ~32 MiB response repeatedly (outbound amplification). Stage 2d adds per-peer +
-   global serving rate limits and an outbound bandwidth budget.
-5. **Functional test is not production-size.** OPEN. The relay test uses n=128
-   (tiny proof); it never exercises v2 encrypted transport at the real 32 MiB size.
-   A production-size (m=2048) encrypted-transport test is added after Stage 2d
-   chunking lands.
-6. **CI has not run — repository billing lock.** OPEN (needs admin). Confirmed:
+1. **BIP324 / v2 transport cannot carry the ~32 MiB proof.** RESOLVED (Stage 2d).
+   BIP324's packet-length field is 24-bit (~16 MiB max), but the D proof is
+   ~32 MiB (8·m², m=2048), so a single `matmulproof` truncated and the v2 peer
+   disconnected. Fixed with application-layer CHUNKING: the retired single-shot
+   `mmproof` is replaced by self-describing 1 MiB `mmproofchunk` slices, cut at
+   serve time and reassembled application-side with strict bounds (declared
+   `total_size` capped vs the §3.4 8·m² cap BEFORE allocation, exact per-chunk
+   length, dup-index rejection, single in-flight reassembly from the requested peer,
+   mid-stream framing-change rejection), bound (H(σ‖proof)==matmul_digest) +
+   Freivalds-verified ONLY once whole. A 1 MiB chunk rides under the ordinary 16 MiB
+   ceiling on BOTH v1 and v2, so the 40 MB net-layer exception is removed (per-
+   message proof-relay DoS envelope 40 MB → ~1 MiB). Designed in
+   `doc/btx-matmul-v4.2-relay-hardening-design.md`.
+2. **Proof storage process-local + unbounded.** RESOLVED (Stage 2c): persistent
+   on-disk (leveldb) store, `nMatMulProofPruneDepth` rolling window,
+   `-matmulproofarchive`, IBD fetch, byte limits. Survives reindex (proofs keyed by
+   stable block hash) and restart.
+3. **Pending-proof queue unbounded in bytes / never expires.** RESOLVED (Stage 2d).
+   On top of the 64-entry cap, `m_matmul_proofs_pending` now carries a 128 MiB byte
+   budget with lowest-chain-work (tie: oldest) eviction, a 20-min node-clock TTL,
+   and a 10-attempt cap; an expired/exhausted entry is dropped (re-downloadable via
+   normal sync, never marked permanently invalid, never pinned forever).
+4. **getmatmulproof has no serving limits.** RESOLVED (Stage 2d). Serving is gated
+   on a per-peer token bucket (burst 16, refill 1/s — sized so it bounds a single
+   peer's distinct-proof request rate without throttling legitimate IBD catch-up),
+   a node-wide 8 MiB/s egress byte budget (the hard anti-amplification bandwidth
+   cap), and a per-(peer,block) 10-min dedup window. Over-limit → silent skip.
+5. **Functional test is not production-size.** RESOLVED (Stage 2d). New
+   `p2p_matmul_segregated_proof_v2_chunked.py` drives dim 4096 ⇒ D m=2048 ⇒ a real
+   32 MiB proof (32 chunks) over the v2 ENCRYPTED transport, asserting chunk bounds,
+   reassembly with NO v2 disconnect (control: monolithic 32 MiB drops the v2 peer),
+   and corrupt/oversize/dup/gap rejection. Enabled via a new regtest-only
+   `-regtestmatmulv4maxdimension`.
+
+   *Relay busy-loop fix (found during Stage-2d verification).* A held proof-
+   incomplete block was re-selected for BODY download every SendMessages pass
+   (`FindNextBlocksToDownload` skipped only `BLOCK_HAVE_DATA`/in-flight blocks, and
+   a proof-incomplete block is neither), spinning a tight receive→incomplete→
+   re-request loop that flooded the log and exhausted disk while the proof was
+   outstanding — latent since Stage 2b, exposed once Stage 2d's serve throttle
+   delayed the proof. Fixed by skipping blocks already held in
+   `m_matmul_proofs_pending` (body in hand; only the proof is fetched, via the
+   separate `getmatmulproof`/`mmproofchunk` path). `p2p_matmul_proof_prune_archive.py`
+   now completes in ~2 s (was: hang past 800 s).
+6. **CI has not run — repository billing lock.** OPEN (needs admin) — but NOT a
+   release blocker for this workstream (the failure alert is used only to confirm
+   the PR ran). Confirmed:
    the "BTX Readiness CI" job fails in ~3 s with `runner_id=0` (no runner ever
    assigned) on every recent commit including HEAD — a repository/org GitHub
    Actions billing lock, NOT a test failure. A repo/org admin must resolve Actions
