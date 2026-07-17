@@ -98,6 +98,14 @@ class BTXMatMulSegregatedProofV2Chunked(BitcoinTestFramework):
         common = [
             "-test=matmuldgw",
             "-v2transport=1",
+            # BTX extends BIP324 v2 with the post-quantum X25519+ML-KEM-768 hybrid key
+            # upgrade (default ON). The Python P2P harness (v2_p2p.py) speaks only stock
+            # BIP324, so with the hybrid enabled every P2PInterface v2 connection drops
+            # mid-handshake. Disable it here → a stock-BIP324 v2 peer, STILL encrypted;
+            # the 32 MiB > 24-bit packet-length ceiling that forces chunking is a BIP324
+            # framing limit, unaffected by the PQ upgrade, so this preserves what the test
+            # exercises. (Remove once the harness implements the hybrid handshake.)
+            "-v2pqhybrid=0",
             f"-regtestmatmulbindingheight={V3_BINDING_HEIGHT}",
             f"-regtestmatmulproductdigestheight={V3_BINDING_HEIGHT}",
             "-regtestmatmulrequireproductpayload=0",
@@ -169,23 +177,35 @@ class BTXMatMulSegregatedProofV2Chunked(BitcoinTestFramework):
 
         def feed_bad_stream(label, stream):
             """Attach a fresh v2 server that announces the D block and serves `stream`;
-            assert node1 requests the proof, rejects the stream, and does NOT advance."""
+            assert node1 requests the proof, rejects the stream, and does NOT advance.
+
+            The node reacts to a malformed stream in one of two ways, and the drain must
+            tolerate BOTH: an oversized-total chunk is treated as Misbehaving and node1
+            DISCONNECTS the sender, whereas a duplicate / inconsistent / gapped stream is
+            rejected but the peer is KEPT. So a ping barrier (which needs the peer alive)
+            cannot be assumed — flush with it if the peer survived, else just wait for the
+            disconnect. The tip-unchanged check is via RPC and needs no live peer.
+            """
             srv = node1.add_p2p_connection(ChunkStreamServer())
             srv.target_block_hash = d_hash
             srv.stream = stream
             srv.send_and_ping(msg_block(d_block))   # node1 holds it proof-INCOMPLETE
             self.wait_until(lambda: len(srv.requests) >= 1, timeout=90)
-            # The chunk stream is queued from on_getmmproof before this returns; ping to
-            # flush it through node1's (in-order, single-threaded) message processing,
-            # then drain the validation queue so any ProcessBlock has fully settled.
-            srv.sync_with_ping()
+            # The chunk stream is queued from on_getmmproof before this returns. Flush
+            # node1's in-order processing: ping-barrier + disconnect if the peer survived;
+            # if node1 already dropped it (oversize), that raises and we just confirm the
+            # disconnect. Then drain the validation queue so any ProcessBlock has settled.
+            try:
+                srv.sync_with_ping()
+                srv.peer_disconnect()
+            except AssertionError:
+                pass
+            srv.wait_for_disconnect()
             node1.syncwithvalidationinterfacequeue()
-            # node1 must NOT have advanced on the bad stream.
+            # node1 must NOT have advanced on the bad stream (verified via RPC).
             assert_equal(node1.getbestblockhash(), node1_base)
             assert_equal(node1.getblockcount(), H_D - 1)
             self.log.info(f"  [{label}] rejected; node1 tip unchanged, held block still incomplete")
-            srv.peer_disconnect()
-            srv.wait_for_disconnect()
 
         self.log.info("[4a] Oversized declared total_size (> per-height cap) rejected before allocation")
         over = matmul_proof_chunks(d_hash, real_proof)[0]
