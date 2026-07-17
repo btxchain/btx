@@ -134,16 +134,31 @@ static constexpr auto MATMUL_PROOF_ARCHIVE_PREFERENCE_GRACE{20s};
 /** Defensive cap on how many proof-incomplete blocks we hold awaiting their
  *  segregated proof at once. Each held block already passed CheckBlock + header
  *  acceptance (real PoW work to forge), so the surface is naturally bounded like
- *  the block-download window; this cap is a memory backstop. */
-static constexpr size_t MAX_MATMUL_PROOFS_PENDING{64};
-/** Stage 2d (relay-hardening design §3): a total BYTE budget for held proof-incomplete
- *  blocks, on top of the entry-count cap. Each held entry pins a full CBlock plus a
- *  reassembly buffer up to 8·m² (32 MiB at the D profile); 64 × (block + 32 MiB) ≈ 2
- *  GiB of pinnable memory with no byte bound. 128 MiB caps worst-case pinned memory at
- *  ~1/16 of that while comfortably admitting a handful of concurrent 32 MiB
- *  reassemblies plus the small held blocks. On overflow we evict lowest-chain-work
- *  (tie: oldest) entries, releasing their CBlock + reassembly buffer; the evicted block
- *  is re-requestable via normal sync (never marked permanently invalid). */
+ *  the block-download window; the true memory bound is MAX_MATMUL_PROOFS_PENDING_BYTES
+ *  (below), and this count is a coarse backstop.
+ *
+ *  It MUST stay >= BLOCK_DOWNLOAD_WINDOW (1024). FindNextBlocksToDownload never
+ *  fetches a block whose height exceeds pindexLastCommonBlock + BLOCK_DOWNLOAD_WINDOW,
+ *  and (since commit 63d434d) skips any block already held here. If the cap were below
+ *  the window, a run of proof-incomplete blocks could fill it, and the NEXT in-window
+ *  block would be dropped-not-held (BlockChecked cap branch) -> not skipped by
+ *  FindNextBlocksToDownload -> re-requested every pass: the exact download/validate/drop
+ *  busy-loop 63d434d fixed, resurrected in the over-cap branch. Sizing the cap to cover
+ *  the whole window means every in-window proof-incomplete block is holdable and
+ *  skipped, so nothing re-downloads; the block bodies are tiny (the ~32 MiB sketch is
+ *  segregated), so 2048 tiny CBlocks cost only a few MiB and the byte budget still caps
+ *  total pinned memory. */
+static constexpr size_t MAX_MATMUL_PROOFS_PENDING{2048};
+/** Stage 2d (relay-hardening design §3): the total BYTE budget for held proof-incomplete
+ *  blocks, and the TRUE memory bound (the entry-count cap above is deliberately generous
+ *  to cover the download window, so this byte budget — not the count — is what caps RAM).
+ *  Each held entry pins a full CBlock plus a reassembly buffer up to 8·m² (32 MiB at the
+ *  D profile); without a byte bound a large count × 32 MiB would be gigabytes. 128 MiB
+ *  caps worst-case pinned memory while comfortably admitting a handful of concurrent
+ *  32 MiB reassemblies plus the small held blocks (whose bodies are tiny — the sketch is
+ *  segregated). On overflow we evict lowest-chain-work (tie: oldest) entries, releasing
+ *  their CBlock + reassembly buffer; the evicted block is re-requestable via normal sync
+ *  (never marked permanently invalid). */
 static constexpr size_t MAX_MATMUL_PROOFS_PENDING_BYTES{size_t{128} * 1024 * 1024};
 /** Stage 2d (design §3.3): a held proof-incomplete block is DROPPED (re-downloadable
  *  later via normal sync, never pinned forever) once EITHER condition fires. The TTL is
@@ -1029,9 +1044,11 @@ private:
     double m_matmul_serve_global_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){
         static_cast<double>(MATMUL_PROOF_SERVE_GLOBAL_BYTES_PER_SEC)};
     std::chrono::microseconds m_matmul_serve_global_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
-    //! Emit a held proof to `pfrom` as an ordered mmproofchunk sequence, charging the
-    //! global egress bucket per chunk. Returns false (serving nothing more) if the
-    //! bucket is exhausted mid-proof. Stage 2d, design §1.3/§4.
+    //! Emit a held proof to `pfrom` as an ordered mmproofchunk sequence. The caller
+    //! (GETMATMULPROOF handler) applies the global egress budget ALL-OR-NOTHING before
+    //! calling: it debits the whole proof size up front and only then serves, so this
+    //! emitter unconditionally pushes every chunk (a partial set can never bind, so a
+    //! mid-proof cut would only waste uplink and stall the receiver). Stage 2d, §1.3/§4.
     void ServeMatMulProofChunks(CNode& pfrom, const uint256& block_hash,
                                 const std::vector<unsigned char>& proof,
                                 std::chrono::microseconds now)
@@ -6493,6 +6510,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                       entry.reasm_buf.begin() + static_cast<size_t>(chunk_index) * chunk_size);
             entry.reasm_have[chunk_index] = true;
             ++entry.reasm_received;
+            // Progress refreshes the request deadline: MATMUL_PROOF_REQUEST_TIMEOUT is
+            // an INACTIVITY timeout, not a total-transfer deadline. A large proof (up to
+            // ~32 MiB / 32 chunks) served under the 8 MiB/s egress pacing can legitimately
+            // take longer than the timeout to arrive in full; without this refresh the
+            // SendMessages sweep would reset an actively-streaming reassembly mid-flight
+            // and re-request from scratch, potentially livelocking a big proof on a slow/
+            // paced link. A stalled peer (no chunk within the window) still times out; the
+            // 20-min TTL (first_seen, never refreshed) still bounds total hold time.
+            entry.requested_time = now;
 
             if (entry.reasm_received == entry.reasm_total_chunks) {
                 // Whole proof reassembled: hand the candidate blob to the bind path.
