@@ -8245,6 +8245,13 @@ bool Chainstate::FlushStateToDisk(
             if (empty_cache ? !CoinsTip().Flush() : !CoinsTip().Sync()) {
                 return FatalError(m_chainman.GetNotifications(), state, _("Failed to write to coin database."));
             }
+            // Durability parity for segregated MatMul proofs (design §3): fsync the
+            // proof store together with the coins DB so a connected segregated
+            // block's ~32 MiB proof reaches disk with the chainstate that depends
+            // on it. The hot Put path is fSync=false (proofs are re-fetchable, never
+            // corruption), but flushing here closes the crash window where the block
+            // body is durable and its proof is not. No-op in MEMORY mode.
+            matmul::GetLocalMatMulProofStore().Sync();
             full_flush_completed = true;
             TRACEPOINT(utxocache, flush,
                     int64_t{Ticks<std::chrono::microseconds>(NodeClock::now() - nNow)},
@@ -10328,7 +10335,7 @@ static bool ContextualCheckBlock(const CBlock& block,
                     av_it->second.GetAncestor(nHeight) == pindex_self &&
                     chainman.m_best_header->GetAncestor(nHeight) == pindex_self &&
                     chainman.m_best_header->nAuthenticatedChainWork >= chainman.MinimumChainWork() &&
-                    GetBlockProofEquivalentTime(*chainman.m_best_header, *pindex_self, *chainman.m_best_header, consensusParams) > 60 * 60 * 24 * 7 * 2) {
+                    GetBlockProofEquivalentTime(*chainman.m_best_header, *pindex_self, *chainman.m_best_header, consensusParams) > static_cast<int64_t>(consensusParams.nMatMulProofAssumeValidMinAge)) {
                     proof_assumevalid_trusted = true;
                 }
             }

@@ -304,6 +304,15 @@ struct Params {
      *  doc/btx-matmul-v4.2-external-audit-remediation.md (D2). Do NOT read this as
      *  an implemented retention bound. */
     uint32_t nMatMulProofPruneDepth{10'000};
+    /** Minimum equivalent-time age (seconds) a segregated-proof block must be buried
+     *  under the best header before its proof may be assumevalid-TRUSTED rather than
+     *  fetched+verified (design §3.5-2, validation.cpp). Defaults to the 2-week
+     *  equivalent-time DoS guard that mirrors the ConnectBlock buried-scriptSig skip;
+     *  regtest can shrink it via -regtestmatmulproofassumevalidminage so a functional
+     *  test can exercise the trust boundary without mining ~13 000 blocks. The trust
+     *  ALSO requires an assumed-valid ancestor carrying >= MinimumChainWork of
+     *  AUTHENTICATED work, so shrinking this alone never weakens a real network. */
+    uint32_t nMatMulProofAssumeValidMinAge{60u * 60u * 24u * 7u * 2u};
     /** Pre-hash epsilon bits: sigma must satisfy target << N before a nonce reaches
      *  the expensive MatMul path. This makes the sigma gate 2^N easier than the
      *  final digest target before 256-bit saturation, but the absolute pass rate

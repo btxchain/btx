@@ -1483,6 +1483,15 @@ public:
         if (opts.matmul_proof_prune_depth.has_value()) {
             consensus.nMatMulProofPruneDepth = *opts.matmul_proof_prune_depth;
         }
+        // MatMul v4.2-D assumevalid buried-proof trust min-age (design §3.5-2). The
+        // production default is the 2-week equivalent-time DoS guard; at regtest's
+        // 90 s spacing that is ~13 000 blocks, so the override lets a functional test
+        // exercise the trust boundary after burying a D block by only a few blocks.
+        // The trust still requires an assumed-valid ancestor with >= MinimumChainWork
+        // of AUTHENTICATED work, so this regtest knob never weakens a real network.
+        if (opts.matmul_proof_assumevalid_min_age.has_value()) {
+            consensus.nMatMulProofAssumeValidMinAge = *opts.matmul_proof_assumevalid_min_age;
+        }
         // Spec §G.2/§G.4: the v4 dimension must divide evenly by the sketch
         // tile size and stay within the accepted-dimension bounds enforced in
         // ContextualCheckBlockHeader, so a bad -regtestmatmulv4dimension fails

@@ -369,6 +369,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_proof_prune_depth =
             ParseRegTestUInt32Arg(args, "-regtestmatmulproofprunedepth");
     }
+    if (args.IsArgSet("-regtestmatmulproofassumevalidminage")) {
+        options.matmul_proof_assumevalid_min_age =
+            ParseRegTestUInt32Arg(args, "-regtestmatmulproofassumevalidminage");
+    }
 
     for (const std::string& arg : args.GetArgs("-testactivationheight")) {
         const auto found{arg.find('@')};

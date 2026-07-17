@@ -95,6 +95,15 @@ public:
     //! Drop the proof for `block_hash` (no-op if absent).
     void Erase(const uint256& block_hash);
 
+    //! Durably flush every prior (fSync=false) Put/Erase to disk in ONE fsync.
+    //! No-op in MEMORY mode. Called from FlushStateToDisk so a connected
+    //! segregated block's proof reaches disk together with the chainstate that
+    //! depends on it (durability parity) -- closing the crash window where the
+    //! block body is persisted but its ~32 MiB proof is not. The hot Put path
+    //! stays fSync=false (proofs are re-fetchable, never corruption); this is
+    //! one fsync per flush checkpoint, not per proof.
+    void Sync();
+
     //! Number of proofs currently resident (diagnostics/tests).
     [[nodiscard]] size_t Size() const;
 

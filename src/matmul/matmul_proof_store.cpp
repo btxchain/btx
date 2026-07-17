@@ -18,6 +18,9 @@ namespace {
 //! A single-byte prefix keeps the table self-describing and lets a future record
 //! type (e.g. metadata) coexist without a schema migration.
 constexpr uint8_t DB_PROOF{'p'};
+//! Reserved key prefix for the durable-flush sentinel (Sync()): NEVER a proof, so
+//! the key-index load loop (which keeps only DB_PROOF keys) ignores it.
+constexpr uint8_t DB_SYNC_SENTINEL{'s'};
 using ProofKey = std::pair<uint8_t, uint256>;
 } // namespace
 
@@ -118,6 +121,23 @@ void MatMulProofStore::Erase(const uint256& block_hash)
     } else {
         m_mem.erase(block_hash);
     }
+}
+
+void MatMulProofStore::Sync()
+{
+    LOCK(m_mutex);
+    if (!m_db) return;  // MEMORY mode: RAM-only, nothing on disk to fsync.
+    // Durably flush every prior fSync=false Put/Erase in a single fsync. leveldb's
+    // write-ahead log is sequential and append-only, so fsync'ing one later record
+    // forces the log to disk up to that point -- making all earlier async proof
+    // writes durable. We fsync a tombstone on a RESERVED sentinel key (never a
+    // proof, and a Delete always emits a log record regardless of prior presence),
+    // so this is a pure flush that leaves the proof keyspace untouched. Called from
+    // FlushStateToDisk next to the coins-DB sync: without it a connected block's
+    // proof lagged the block body across a crash (a non-permanent, re-fetchable
+    // state -- never corruption -- but it could stall an offline -reindex of an
+    // above-assumevalid segregated block until a peer re-serves the proof).
+    m_db->Erase(ProofKey{DB_SYNC_SENTINEL, uint256()}, /*fSync=*/true);
 }
 
 size_t MatMulProofStore::Size() const
