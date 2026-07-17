@@ -10304,29 +10304,60 @@ static bool ContextualCheckBlock(const CBlock& block,
                 return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "v4-segregated-inline-sketch",
                     "matmul v4 segregated-proof block carries a forbidden inline sketch");
             }
-            // (2) Fetch the proof from the store, enforce the §3.4 size cap, bind it
-            // to matmul_digest (§3.3), then Freivalds-verify. The MUTATED/CONSENSUS
-            // split is IDENTICAL to the in-block path below, relocated to the store-
-            // backed carriage with no weakening.
-            switch (CheckMatMulV4SegregatedProof(block, consensusParams, nHeight)) {
-            case MatMulSegregatedProofStatus::OK:
-                break;
-            case MatMulSegregatedProofStatus::INCOMPLETE:
-                // We do not have the proof yet: PoW-INCOMPLETE, not creditable, but
-                // NON-permanent (mirrors "missing block body" — Stage 2b re-requests
-                // it). BLOCK_MUTATED so the header hash is never permanently failed.
-                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "matmul-v4-proof-incomplete",
-                    "matmul v4 segregated proof not yet available");
-            case MatMulSegregatedProofStatus::MUTATED:
-                // Over-cap or fails the H(sigma||proof)==matmul_digest binding: a
-                // wrong/substituted proof, a relay mutation. NON-permanent.
-                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-matmul-v4-proof",
-                    "matmul v4 segregated proof does not match committed digest");
-            case MatMulSegregatedProofStatus::CONSENSUS_FAIL:
-                // Proof binds to the committed digest but fails Freivalds / is over
-                // target: a real, PERMANENT PoW fault.
-                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
-                    "matmul v4 proof of work failed");
+            // (2) ASSUMEVALID BURIED-PROOF TRUST (design §3.5-2). Below the
+            // configured assumevalid block, a node TRUSTS that the buried chain's
+            // segregated proofs were verified by the network -- the IDENTICAL trust
+            // ConnectBlock already extends to buried scriptSigs -- instead of
+            // re-fetching and re-verifying every historical ~32 MiB proof. This is
+            // what lets a syncing / pruned node sync a segregated chain without
+            // obtaining all of history's proofs (archive peers need only serve
+            // proofs ABOVE assumevalid) and lets default nodes prune below it, while
+            // a fully-verifying node (-assumevalid=0 => AssumedValidBlock null)
+            // NEVER trusts and always fetches+verifies. The trust condition mirrors
+            // the ConnectBlock fScriptChecks skip EXACTLY: the block is an assumed-
+            // valid ancestor of the best header; the best header carries at least
+            // MinimumChainWork of AUTHENTICATED work (C1 -- a forged-header chain
+            // cannot induce the skip); and it is buried more than the 2-week
+            // equivalent-time DoS guard. When trusted, the proof is neither
+            // required, fetched, nor verified for this block.
+            bool proof_assumevalid_trusted = false;
+            if (!chainman.AssumedValidBlock().IsNull() && chainman.m_best_header != nullptr) {
+                const CBlockIndex* pindex_self = chainman.m_blockman.LookupBlockIndex(block.GetHash());
+                const auto av_it = chainman.m_blockman.m_block_index.find(chainman.AssumedValidBlock());
+                if (pindex_self != nullptr && av_it != chainman.m_blockman.m_block_index.end() &&
+                    av_it->second.GetAncestor(nHeight) == pindex_self &&
+                    chainman.m_best_header->GetAncestor(nHeight) == pindex_self &&
+                    chainman.m_best_header->nAuthenticatedChainWork >= chainman.MinimumChainWork() &&
+                    GetBlockProofEquivalentTime(*chainman.m_best_header, *pindex_self, *chainman.m_best_header, consensusParams) > 60 * 60 * 24 * 7 * 2) {
+                    proof_assumevalid_trusted = true;
+                }
+            }
+            // (3) Above assumevalid (or -assumevalid=0): fetch the proof from the
+            // store, enforce the §3.4 size cap, bind it to matmul_digest (§3.3),
+            // then Freivalds-verify. The MUTATED/CONSENSUS split is IDENTICAL to the
+            // in-block path below, relocated to the store-backed carriage with no
+            // weakening.
+            if (!proof_assumevalid_trusted) {
+                switch (CheckMatMulV4SegregatedProof(block, consensusParams, nHeight)) {
+                case MatMulSegregatedProofStatus::OK:
+                    break;
+                case MatMulSegregatedProofStatus::INCOMPLETE:
+                    // We do not have the proof yet: PoW-INCOMPLETE, not creditable, but
+                    // NON-permanent (mirrors "missing block body" — Stage 2b re-requests
+                    // it). BLOCK_MUTATED so the header hash is never permanently failed.
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "matmul-v4-proof-incomplete",
+                        "matmul v4 segregated proof not yet available");
+                case MatMulSegregatedProofStatus::MUTATED:
+                    // Over-cap or fails the H(sigma||proof)==matmul_digest binding: a
+                    // wrong/substituted proof, a relay mutation. NON-permanent.
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-matmul-v4-proof",
+                        "matmul v4 segregated proof does not match committed digest");
+                case MatMulSegregatedProofStatus::CONSENSUS_FAIL:
+                    // Proof binds to the committed digest but fails Freivalds / is over
+                    // target: a real, PERMANENT PoW fault.
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
+                        "matmul v4 proof of work failed");
+                }
             }
         } else {
             // LEGACY IN-BLOCK path (ENC-S8 / ENC-BMX4C and all pre-segregation
