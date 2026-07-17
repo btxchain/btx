@@ -62,7 +62,7 @@ static constexpr CAmount BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP{10'000 * COIN};
 // the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled, e.g.
 // mainnet); when a network sets a BMX4C activation height these MUST hold, so a
 // misconfiguration fails loudly at node startup rather than at the fork.
-static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus)
+static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus, bool is_regtest)
 {
     // Audit P1-1 (per-network relay invariant): the enforced block-size ceiling
     // is the per-network consensus value nMaxBlockSerializedSize, but the P2P
@@ -200,19 +200,21 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // gate: enabling a segregated-proof profile is a coordinated header/relay
     // protocol change. A NETWORKED node that receives a segregated block from a
     // peer must be able to OBTAIN its proof, or it stalls (the sketch is off-body).
-    // The Stage-2b getmatmulproof/matmulproof relay POPULATES the proof store from
-    // the network, so this coupling is now SATISFIED and
-    // BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY is true — the assert below no longer
-    // blocks a PUBLIC-network config on the relay's absence. D itself remains
-    // activation-disabled everywhere (nMatMulBMX4CDHeight == INT32_MAX on every
-    // network, so this branch is unreached in shipping configs); the relay is
-    // exercised only under a regtest -regtestbmx4cdheight override. Should the flag
-    // ever regress to false (relay removed), this still fails LOUD at startup on any
-    // public network. The single-node on-demand-mining exemption
-    // (MineBlocksOnDemand() == consensus.fPowNoRetargeting, FALSE on every public
-    // network) is retained as the regtest/dev escape hatch.
-    assert(Consensus::BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY ||
-           consensus.fPowNoRetargeting);
+    // BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY is FALSE while the relay is not yet
+    // production-ready (Stage-2b relay disconnects v2 peers on the ~32 MiB proof;
+    // Stage 2d chunking + Stage 2c storage must land and be re-flipped together),
+    // so this assert HARD-BLOCKS any PUBLIC network from configuring a D height.
+    // D itself remains activation-disabled everywhere (nMatMulBMX4CDHeight ==
+    // INT32_MAX on every network, so this branch is unreached in shipping configs).
+    //
+    // The exemption is keyed on the chain being REGTEST (is_regtest), NOT on
+    // consensus.fPowNoRetargeting: the -test=matmuldgw option CLEARS fPowNoRetargeting
+    // (see below), which would otherwise remove the exemption from exactly the
+    // -regtestbmx4cdheight relay tests that must exercise the path. Public networks
+    // stay hard-blocked whether or not they retarget; regtest is always exempt
+    // whether or not -test=matmuldgw is set, so the relay tests run with the flag
+    // false (the real fail-closed state for public nets, exercisable in regtest).
+    assert(Consensus::BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY || is_regtest);
 
     assert(consensus.nMatMulBMX4CDHeight > consensus.nMatMulBMX4CHeight);
     assert(consensus.nMatMulBMX4CDAsertRescaleNum > 0);
@@ -510,7 +512,7 @@ public:
         // network (no-op while BMX4C is unset here -- nMatMulBMX4CHeight ==
         // INT32_MAX -- so a future mainnet activation that sets only the height
         // cannot ship without the fork-ordering / dim / rescale-positivity guards).
-        AssertBMX4CConstructionInvariants(consensus);
+        AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
 
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,25);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,50);
@@ -889,7 +891,7 @@ public:
         consensus.hashGenesisBlock = genesis.GetHash();
         assert(consensus.hashGenesisBlock == uint256{"f2bc3fb2eca6aa6059c4d0178b56efe038d46aa440d406905ef752179aa0e1a4"});
         assert(genesis.hashMerkleRoot == uint256{"94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a"});
-        AssertBMX4CConstructionInvariants(consensus);
+        AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
 
         // Testnet DNS seeds mirror mainnet domains; fixed seeds provide fallback.
         vSeeds.clear();
@@ -1072,7 +1074,7 @@ public:
         assert(consensus.hashGenesisBlock == uint256{"f2bc3fb2eca6aa6059c4d0178b56efe038d46aa440d406905ef752179aa0e1a4"});
         assert(genesis.hashMerkleRoot == uint256{"94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a"});
         // Audit W-2 / ASERT-F1: BMX4C construction invariants (no-op while unset).
-        AssertBMX4CConstructionInvariants(consensus);
+        AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
 
         vSeeds.clear();
         vSeeds.emplace_back("testnet4.btxchain.org.");
@@ -1302,7 +1304,7 @@ public:
         // networks -- H2 header-PoW discount range, D1 ASERT-schedule validity,
         // I1 tile size, and the BMX4C profile checks. (No-op today: signet leaves
         // v4/bmx4c disabled and the discount at the UINT32_MAX default.)
-        AssertBMX4CConstructionInvariants(consensus);
+        AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
     }
 };
 
@@ -1435,6 +1437,16 @@ public:
         if (opts.matmul_v4_dimension.has_value()) {
             consensus.nMatMulV4Dimension = *opts.matmul_v4_dimension;
         }
+        // Regtest-only: raise the accepted-dimension ceiling so a functional test can
+        // exercise a PRODUCTION-scale dimension (e.g. 4096 ⇒ D m=2048 ⇒ a real 32 MiB
+        // segregated proof, the Stage-2d chunking/v2 path). 4096 is a legitimate MAINNET
+        // dimension (CMainParams sets nMatMulV4MaxDimension = 8192), so this only lifts
+        // regtest's default 1024 cap; the §8.1 combine-input bound
+        // (BMX4C_PROJECTION_BOUND_PER_N * MaxDimension <= BMX4C_COMBINE_INPUT_BOUND) is
+        // re-asserted in AssertBMX4CConstructionInvariants and still holds well past 4096.
+        if (opts.matmul_v4_max_dimension.has_value()) {
+            consensus.nMatMulV4MaxDimension = *opts.matmul_v4_max_dimension;
+        }
         if (opts.matmul_bmx4c_height.has_value()) {
             consensus.nMatMulBMX4CHeight = *opts.matmul_bmx4c_height;
         }
@@ -1455,9 +1467,11 @@ public:
         // path. D must fork STRICTLY ABOVE the ENC-BMX4C height (D succeeds C — the
         // strict-above assert in AssertBMX4CConstructionInvariants fails loud on
         // D<=C). The D ASERT rescale stays at its 1/1 default (regtest has no
-        // pre-fork throughput history). Activation here is permitted because
-        // regtest is fPowNoRetargeting (MineBlocksOnDemand) — the segregated-proof
-        // relay-ready compile gate exempts single-node chains (see the assert).
+        // pre-fork throughput history). Activation here is permitted because this is
+        // the REGTEST chain (is_regtest) — the segregated-proof relay-ready compile
+        // gate exempts regtest by chain identity (see the assert), so the relay tests
+        // run even with BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY false and even when
+        // -test=matmuldgw has cleared fPowNoRetargeting.
         if (opts.matmul_bmx4cd_height.has_value()) {
             consensus.nMatMulBMX4CDHeight = *opts.matmul_bmx4cd_height;
         }
@@ -1492,7 +1506,7 @@ public:
         // regtest -regtest* overrides (v4 height/dim and BMX4C height) so a bad
         // combination (e.g. a BMX4C height at/below the overridden v4 height)
         // fails loudly at startup. No-op when BMX4C is disabled.
-        AssertBMX4CConstructionInvariants(consensus);
+        AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/true);
         if (opts.matmul_transcript_block_size.has_value()) {
             consensus.nMatMulTranscriptBlockSize = *opts.matmul_transcript_block_size;
         }
@@ -1646,6 +1660,7 @@ public:
             opts.matmul_parent_mtp_seed_height.has_value() ||
             opts.matmul_v4_height.has_value() ||
             opts.matmul_v4_dimension.has_value() ||
+            opts.matmul_v4_max_dimension.has_value() ||
             opts.matmul_bmx4c_height.has_value() ||
             opts.matmul_bmx4cd_height.has_value() ||
             opts.matmul_proof_prune_depth.has_value() ||
@@ -1928,7 +1943,7 @@ public:
         // so enforce the same construction invariants (H2 discount range, D1 ASERT
         // schedule validity, I1 tile size, BMX4C profile) as the other MatMul
         // networks. No-op today (v4/bmx4c disabled, discount at default).
-        AssertBMX4CConstructionInvariants(consensus);
+        AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
     }
 };
 

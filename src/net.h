@@ -76,24 +76,24 @@ static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 16 * 1000 * 1000;
  *  ceiling is applied ONLY to these commands (see net.cpp), so ordinary messages
  *  keep the 16 MB bound. */
 static const unsigned int MAX_BLOCK_MESSAGE_LENGTH = 24 * 1000 * 1000;
-/** Maximum length of a segregated-proof `matmulproof` message (MatMul v4.2
- *  solver-evolution Stage 2b, design §3.2/§3.4). The segregated ENC-BMX4C-D
- *  sketch is 8·m² bytes (32 MiB at the m = 2048 production profile), which alone
- *  exceeds even MAX_BLOCK_MESSAGE_LENGTH, so `matmulproof` needs its own command-
- *  specific ceiling. Like the block-bearing ceiling it is applied ONLY to this one
- *  command (see net.cpp), so ordinary messages keep the 16 MB bound and this does
- *  NOT widen the global allocation/bandwidth DoS envelope. This is a COARSE
- *  net-layer backstop that admits the largest configured profile's proof plus
- *  framing; the EXACT per-profile §3.4 cap (GetMatMulProofSizeCap = the height's
- *  8·m² + overhead) is enforced in net_processing BEFORE the sketch is
- *  deserialized. Sized to 40 MB: > 32 MiB (D) + block-hash + compactSize framing,
- *  with headroom for a future governance-raised m rung. NOTE: this ceiling is only
- *  reachable when ENC-BMX4C-D is activated at a non-INT32_MAX height, which is
- *  disabled on every network; the V2 (BIP324) transport cannot key its length
- *  check on the (encrypted) command and so still caps at MAX_PROTOCOL_MESSAGE_LENGTH
- *  — raising the V2 envelope network-wide is part of the §6.4 propagation work
- *  gating D's activation, not this stage. */
-static const unsigned int MAX_MATMULPROOF_MESSAGE_LENGTH = 40 * 1000 * 1000;
+/** Maximum payload of a single segregated-proof `mmproofchunk` message (MatMul v4.2
+ *  solver-evolution Stage 2d, relay-hardening design §1). The ~32 MiB (D) sketch is
+ *  no longer carried whole: it exceeds the v2 (BIP324) 24-bit packet-length ceiling
+ *  (~16 MB) and disconnects the peer. Instead the proof is CHUNKED at serve time into
+ *  self-describing slices, each ≤ this size, reassembled application-side, and bound
+ *  ONLY once whole. At 1 MiB, a `mmproofchunk` (1 MiB payload + 32-byte hash + three
+ *  uint32 + compactSize framing, < 1.05 MB total) rides comfortably under BOTH the v2
+ *  ~16 MB packet ceiling AND the v1 MAX_PROTOCOL_MESSAGE_LENGTH (16 MB) with no
+ *  transport re-tuning — so this command needs NO special net-layer ceiling and falls
+ *  under the ordinary 16 MB bound (unlike the retired MAX_MATMULPROOF_MESSAGE_LENGTH).
+ *  The per-message unsolicited-buffer DoS envelope for proof relay is thus ~1 MiB, a
+ *  40× reduction from the old 40 MB. This is the WIRE chunk size; the exact per-chunk
+ *  length and the total-size §3.4 cap are re-checked in net_processing during
+ *  reassembly. D ⇒ 32 chunks, C ⇒ 8 chunks. */
+static const unsigned int MAX_MATMULPROOF_CHUNK_SIZE = 1024 * 1024;
+static_assert(MAX_MATMULPROOF_CHUNK_SIZE < MAX_PROTOCOL_MESSAGE_LENGTH,
+              "a mmproofchunk (payload + framing) must ride under the ordinary "
+              "protocol-message ceiling on both v1 and v2 transports");
 /** Maximum length of the user agent string in `version` message */
 static const unsigned int MAX_SUBVERSION_LENGTH = 256;
 /** Maximum number of automatic outgoing nodes over which we'll relay everything (blocks, tx, addrs, etc) */

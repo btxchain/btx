@@ -30,8 +30,8 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.messages import (
     CBlock,
     from_hex,
+    matmul_proof_chunks,
     msg_block,
-    msg_matmulproof,
 )
 from test_framework.p2p import P2PInterface
 from test_framework.util import assert_equal, assert_greater_than
@@ -45,7 +45,8 @@ V4_DIMENSION = 128
 
 class ProofServingPeer(P2PInterface):
     """A P2P peer that records getmatmulproof requests and answers them with a
-    configurable (honest or corrupt) matmulproof, and can serve a block body."""
+    configurable (honest or corrupt) proof, served as the Stage-2d mmproofchunk
+    sequence, and can serve a block body."""
 
     def __init__(self):
         super().__init__()
@@ -56,7 +57,8 @@ class ProofServingPeer(P2PInterface):
     def on_getmmproof(self, message):
         self.getmatmulproof_requests.append(message.block_hash)
         if self.proof_response is not None and message.block_hash == self.target_block_hash:
-            self.send_message(msg_matmulproof(message.block_hash, self.proof_response))
+            for chunk in matmul_proof_chunks(message.block_hash, self.proof_response):
+                self.send_message(chunk)
 
 
 class BTXMatMulSegregatedProofRelay(BitcoinTestFramework):

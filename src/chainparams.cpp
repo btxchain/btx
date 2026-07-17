@@ -353,6 +353,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_v4_dimension =
             ParseRegTestPositiveUInt32Arg(args, "-regtestmatmulv4dimension");
     }
+    if (args.IsArgSet("-regtestmatmulv4maxdimension")) {
+        options.matmul_v4_max_dimension =
+            ParseRegTestPositiveUInt32Arg(args, "-regtestmatmulv4maxdimension");
+    }
     if (args.IsArgSet("-regtestbmx4cheight")) {
         options.matmul_bmx4c_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestbmx4cheight");

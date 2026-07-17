@@ -38,7 +38,7 @@ regtest miner and each proof is a few tens of KiB.
 import time
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.messages import msg_getmatmulproof
+from test_framework.messages import MatMulProofReassembler, msg_getmatmulproof
 from test_framework.p2p import P2PInterface
 from test_framework.util import assert_equal
 
@@ -50,15 +50,19 @@ PRUNE_DEPTH = 3  # tiny rolling window so a few D blocks bury the earliest
 
 
 class ProofQueryPeer(P2PInterface):
-    """A P2P peer that requests a proof (getmatmulproof) and records any
-    matmulproof the node serves back."""
+    """A P2P peer that requests a proof (getmatmulproof) and records any proof the
+    node serves back, reassembling the Stage-2d mmproofchunk sequence."""
 
     def __init__(self):
         super().__init__()
-        self.received_proofs = {}   # block_hash_int -> proof bytes
+        self.received_proofs = {}   # block_hash_int -> reassembled proof bytes
+        self._reasm = {}            # block_hash_int -> MatMulProofReassembler
 
-    def on_mmproof(self, message):
-        self.received_proofs[message.block_hash] = message.proof
+    def on_mmproofchunk(self, message):
+        r = self._reasm.setdefault(message.block_hash, MatMulProofReassembler())
+        r.add(message)
+        if r.done():
+            self.received_proofs[message.block_hash] = r.bytes()
 
 
 class BTXMatMulProofPruneArchive(BitcoinTestFramework):

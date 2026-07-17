@@ -293,20 +293,32 @@ inline constexpr const char* DANDELIONACC{"dandelionacc"};
  * Payload: a single 32-byte block hash. Modeled on the getdata/block request-
  * response pattern (NOT unsolicited gossip): the proof travels only when asked
  * for, so a large witness-like artifact never rides the compact-block fast path
- * (design §3.2). Reply is a `matmulproof` if we hold the proof, else ignored.
+ * (design §3.2). Reply is an ordered sequence of `mmproofchunk` messages if we hold
+ * the proof (Stage 2d chunking), else the request is ignored.
  * @since MatMul v4.2 solver-evolution Stage 2b (activation-disabled).
  */
 inline constexpr const char* GETMATMULPROOF{"getmmproof"};
 /**
- * mmproof carries the raw serialized segregated sketch bytes for a block, in
- * response to a `getmmproof`. Payload: the 32-byte block hash followed by the
- * length-prefixed raw sketch bytes. The receiver enforces the §3.4 size cap
- * (profile's 8·m² + overhead) BEFORE deserialization, binds the bytes to the
- * header via H(sigma||proof)==matmul_digest, then Freivalds-verifies — so a
- * substituted/corrupted proof is rejected and never credited (design §3.3).
- * @since MatMul v4.2 solver-evolution Stage 2b (activation-disabled).
+ * mmproofchunk carries ONE ordered slice of a segregated sketch, in response to a
+ * `getmmproof`. The full ~32 MiB (D) proof does not fit a single v2/BIP324 packet
+ * (its 24-bit length field caps content at ~16 MB), so the proof is CHUNKED at
+ * serve time and reassembled application-side (MatMul v4.2 solver-evolution Stage
+ * 2d, relay-hardening design §1). Each chunk is SELF-DESCRIBING so the receiver can
+ * validate/allocate on the first chunk regardless of arrival order. Payload:
+ *   block_hash   (uint256)          the block the proof binds to (header hash);
+ *   total_size   (uint32, LE)       full proof length = the profile's exact 8·m²;
+ *   total_chunks (uint32, LE)       ceil(total_size / MAX_MATMULPROOF_CHUNK_SIZE);
+ *   chunk_index  (uint32, LE)       [0, total_chunks);
+ *   chunk_bytes  (var-length bytes) this chunk's slice (1 MiB except the last).
+ * The receiver enforces the §3.4 size cap on `total_size` BEFORE allocating, checks
+ * exact per-chunk size / index / no-dup / no-overlap, and binds
+ * H(sigma||proof)==matmul_digest + Freivalds-verifies ONLY on the fully reassembled
+ * blob — so a substituted/corrupted chunk fails binding (MUTATED, non-permanent) and
+ * the proof is re-requested from another peer (design §1.4/§1.5). Replaces the
+ * Stage-2b single-shot `mmproof` message, which could not ride v2.
+ * @since MatMul v4.2 solver-evolution Stage 2d (activation-disabled).
  */
-inline constexpr const char* MATMULPROOF{"mmproof"};
+inline constexpr const char* MATMULPROOFCHUNK{"mmproofchunk"};
 }; // namespace NetMsgType
 
 /** All known message types (see above). Keep this in the same order as the list of messages above. */
@@ -352,7 +364,7 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::DLTX,
     NetMsgType::DANDELIONACC,
     NetMsgType::GETMATMULPROOF,
-    NetMsgType::MATMULPROOF,
+    NetMsgType::MATMULPROOFCHUNK,
 })};
 
 /** nServices flags */
