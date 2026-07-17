@@ -154,13 +154,26 @@ static constexpr auto MATMUL_PROOF_PENDING_TTL{20min};
 static constexpr unsigned MATMUL_PROOF_MAX_ATTEMPTS{10};
 /** Stage 2d getmatmulproof serving limits (design §4): a 32-byte request triggers a
  *  ~32 MiB (chunked) reply — a ~10⁶× amplification. Three composable limits, hooked
- *  BEFORE the responder emits any chunk: a per-peer token bucket (burst 2 proofs,
- *  refill 1/10 s ≈ 6/min), a node-wide egress byte budget (8 MiB/s), and a
- *  per-(peer,block) dedup window (an honest peer that got the proof does not re-ask in
- *  10 min). All use the node clock; empty bucket / exhausted budget / dup → silently
- *  skip serving (never an error, like a getblocktxn we won't answer). */
-static constexpr double MATMUL_PROOF_SERVE_BUCKET_MAX{2.0};
-static constexpr auto MATMUL_PROOF_SERVE_REFILL{10s};
+ *  BEFORE the responder emits any chunk: a per-peer token bucket (burst
+ *  MATMUL_PROOF_SERVE_BUCKET_MAX proofs, refill 1/MATMUL_PROOF_SERVE_REFILL), a
+ *  node-wide egress byte budget (8 MiB/s), and a per-(peer,block) dedup window (an
+ *  honest peer that got the proof does not re-ask in 10 min). All use the node clock;
+ *  empty bucket / exhausted budget / dup → silently skip serving (never an error, like
+ *  a getblocktxn we won't answer).
+ *
+ *  The per-peer bucket is sized for LEGITIMATE SYNC, not just the steady state: a peer
+ *  in IBD/reorg-catchup pulls one DISTINCT proof per D block it validates, back to back,
+ *  so an over-tight per-peer rate (an earlier 2-burst / 6-per-min setting) throttled
+ *  honest catch-up to a crawl — thousands of D blocks would take hours of pure
+ *  rate-limit wait. Anti-amplification does NOT rest on this bucket: the node-wide
+ *  8 MiB/s egress budget is the hard bandwidth cap (a 32 MiB proof already costs ~4 s of
+ *  it), and the per-(peer,block) dedup window blocks re-serving the SAME proof — so the
+ *  amplification pattern (one peer re-asking one huge proof) is already closed. The
+ *  bucket only bounds the rate of DISTINCT-proof requests from a single peer; burst 16 /
+ *  refill 1 s (≈ 60/min sustained) keeps that bound meaningful while letting real sync
+ *  proceed at the global-budget-paced rate. */
+static constexpr double MATMUL_PROOF_SERVE_BUCKET_MAX{16.0};
+static constexpr auto MATMUL_PROOF_SERVE_REFILL{1s};
 static constexpr size_t MATMUL_PROOF_SERVE_GLOBAL_BYTES_PER_SEC{size_t{8} * 1024 * 1024};
 static constexpr auto MATMUL_PROOF_SERVE_DEDUP_WINDOW{10min};
 /** Maximum depth of blocks we're willing to serve as compact blocks to peers
@@ -1795,6 +1808,19 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                     // This is the first already-in-flight block.
                     waitingfor = mapBlocksInFlight.lower_bound(pindex->GetBlockHash())->second.first;
                 }
+                continue;
+            }
+
+            // Are we already HOLDING this block proof-incomplete? Its body is in
+            // hand (m_matmul_proofs_pending); we are fetching only its segregated
+            // MatMul proof via the separate getmatmulproof/mmproofchunk path, NOT
+            // the block body. The block never reaches BLOCK_HAVE_DATA until the
+            // proof binds, so without this guard the body would be re-selected here
+            // every SendMessages pass -- a tight receive -> proof-incomplete ->
+            // re-request busy loop that spins (and floods the debug log) for as long
+            // as the proof is outstanding. Treat a held block as already obtained for
+            // download purposes; the proof-fetch machinery drives it to completion.
+            if (m_matmul_proofs_pending.count(pindex->GetBlockHash())) {
                 continue;
             }
 
