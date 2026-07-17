@@ -1020,8 +1020,17 @@ BOOST_AUTO_TEST_CASE(asert_mainnet_fast_phase_bootstrap_bits_match_powlimit)
     BOOST_CHECK_GT(observed, genesis.nBits);
 }
 
-BOOST_AUTO_TEST_CASE(asert_missing_anchor_fails_closed_to_powlimit)
+BOOST_AUTO_TEST_CASE(asert_missing_anchor_fails_closed_to_hardest_target)
 {
+    // AUDIT P1.1: an unresolvable ASERT anchor (a broken pprev link below the
+    // anchor height, i.e. index corruption / a deep-reorg artefact) must fail
+    // CLOSED to the hardest representable target -- NOT open to powLimit. This
+    // is the same D1 discipline the rest of MatMulAsert already applies (see the
+    // "never powLimit" backstops in pow.cpp): on a validly-linked index this path
+    // is unreachable (GetAncestor always resolves any height <= nHeight from a
+    // genesis-linked index), so the only way to reach it is corruption, and a
+    // corrupted node must HALT (loud, safe) rather than silently accept
+    // minimum-difficulty blocks that an attacker could exploit.
     auto params = MatMulRetargetParams();
     params.nFastMineHeight = 100;
     params.nMatMulAsertHeight = 100;
@@ -1035,7 +1044,13 @@ BOOST_AUTO_TEST_CASE(asert_missing_anchor_fails_closed_to_powlimit)
     CBlockHeader next{};
     next.nTime = blocks.back().GetBlockTime() + 90;
     const uint32_t powlimit_bits = UintToArith256(params.powLimit).GetCompact();
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, params), powlimit_bits);
+    const uint32_t fail_closed_bits = MatMulAsertFailClosedBits();
+    const uint32_t observed = GetNextWorkRequired(&blocks.back(), &next, params);
+    BOOST_CHECK_EQUAL(observed, fail_closed_bits);
+    // The hardest target must be strictly harder (smaller) than powLimit: proving
+    // this is a fail-CLOSED halt, not a fail-OPEN collapse to the difficulty floor.
+    BOOST_CHECK(DecodeTarget(observed) < DecodeTarget(powlimit_bits));
+    BOOST_CHECK_NE(observed, powlimit_bits);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

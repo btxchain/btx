@@ -2635,13 +2635,26 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
     }
     const CBlockIndex* anchor = pindexLast->GetAncestor(anchor_height);
     if (anchor == nullptr) {
-        return pow_limit.GetCompact();
+        // AUDIT P1.1: a MISSING ASERT anchor must fail CLOSED, not OPEN to powLimit.
+        // LatestMatMulAsertPreUpgradeAnchorHeight only ever returns an anchor height
+        // <= pindexLast->nHeight, and GetNextWorkRequired is computed over a
+        // pprev-linked chain, so anchor == nullptr is UNREACHABLE on any valid
+        // linked chain -- it can arise only from a malformed / synthetic / unlinked
+        // index (e.g. a crafted header-replay attempt). Returning powLimit there
+        // would be fail-OPEN (easiest difficulty) and could let such a replay ease
+        // the target; the hardest representable target instead makes the breach
+        // reject-all rather than weaken difficulty (mirrors CalculateMatMulAsert
+        // Target's D1 fail-closed discipline).
+        return MatMulAsertFailClosedBits();
     }
 
     arith_uint256 anchor_target{};
     anchor_target.SetCompact(anchor->nBits);
     if (anchor_target == 0 || anchor_target > pow_limit) {
-        anchor_target = pow_limit;
+        // A corrupt anchor target (zero / above powLimit) is likewise a "cannot
+        // happen on a valid chain" breach -- fail CLOSED (D1) instead of clamping
+        // UP to powLimit, so it can only ever harden, never weaken, difficulty.
+        return MatMulAsertFailClosedBits();
     }
     const int64_t time_diff = pindexLast->GetBlockTime() - anchor->GetBlockTime();
     const int64_t height_diff = static_cast<int64_t>(pindexLast->nHeight) - anchor->nHeight;
