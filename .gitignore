@@ -68,3 +68,7 @@ btx-release-key/
 
 # MatMul v4 hardware measurement tool per-run outputs
 matmul-v4-report-*.json
+
+# session working artifacts (never commit)
+/scratchpad/
+scratchpad-*.md
