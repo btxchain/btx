@@ -679,14 +679,23 @@ private:
     void MaybeExpireMatMulAddrBudgets(std::chrono::steady_clock::time_point now)
         EXCLUSIVE_LOCKS_REQUIRED(m_matmul_addr_budget_mutex);
 
-    /** Consume per-address MatMul verification budget for an incoming peer. */
+    /** Consume per-address MatMul verification budget for an incoming peer.
+     *
+     * @param[out] global_exhausted  DoS-F2: set true iff the rejection was caused
+     *   by the process-wide GLOBAL Phase-2 budget (a shared limit), rather than
+     *   this peer's own per-peer budget. Callers must NOT disconnect on a global
+     *   exhaustion — an honest peer must not be punished for others' spend; they
+     *   should defer processing this message instead. Left false on success and
+     *   on per-peer exhaustion (that peer is the abuser and may be disconnected).
+     */
     bool ConsumeMatMulVerificationBudgetForPeer(
         const Peer& peer,
         const Consensus::Params& params,
         uint32_t verification_count,
         std::chrono::steady_clock::time_point now,
         bool is_ibd,
-        int32_t reference_height);
+        int32_t reference_height,
+        bool& global_exhausted);
 
     /** Register a MatMul phase2 failure against a reconnect-resistant address budget. */
     MatMulPhase2Punishment RegisterMatMulPhase2FailureForPeer(
@@ -2147,8 +2156,10 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
     uint32_t verification_count,
     std::chrono::steady_clock::time_point now,
     bool is_ibd,
-    int32_t reference_height)
+    int32_t reference_height,
+    bool& global_exhausted)
 {
+    global_exhausted = false;
     if (verification_count == 0) return true;
 
     // Per-peer budget check FIRST (all-or-nothing) — cheap and doesn't
@@ -2195,7 +2206,12 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
             if (!ConsumeGlobalMatMulPhase2Budget(global_budget, verification_count, now)) {
                 budget_state.budget.window_start = saved_window_start;
                 budget_state.budget.expensive_verifications_this_minute = saved_count;
-                LogDebug(BCLog::NET, "Global Phase2 budget exhausted (%u/min), throttling peer %s\n",
+                // DoS-F2: the GLOBAL (shared) budget is the limiter here, not this
+                // peer's per-peer budget. Signal the caller to DEFER this message
+                // (not disconnect) so an honest peer is not punished for others'
+                // spend. The per-peer rate-limit state was rolled back above.
+                global_exhausted = true;
+                LogDebug(BCLog::NET, "Global Phase2 budget exhausted (%u/min), deferring peer %s\n",
                          global_budget, peer.m_addr.ToStringAddr());
                 return false;
             }
@@ -2251,8 +2267,23 @@ static bool IsMatMulPhase1Failure(const BlockValidationState& state)
 
 static bool IsMatMulPhase2Failure(const BlockValidationState& state)
 {
-    return state.GetRejectReason() == "high-hash" &&
-        state.GetDebugMessage().find("matmul phase2 proof of work failed") != std::string::npos;
+    // DoS-F1: a block that passes header Phase-1 PoW but fails the expensive
+    // Phase-2 verification is a forged proof, routed to the dedicated MatMul
+    // Phase-2 punishment ladder (which penalizes the delivering peer even when
+    // the block arrived via compact-block relay — see MaybePunishNodeForBlock).
+    // Two debug strings denote this same class of expensive-verify PoW failure:
+    //   - "matmul phase2 proof of work failed": the legacy O(n^3) transcript /
+    //     Freivalds Phase-2 path (ContextualCheckBlock).
+    //   - "matmul v4 proof of work failed": the v4.4 ENC-DR O(W) digest recompute
+    //     (CheckMatMulProofOfWork_V4EncDr, reachable via compact relay). Both are
+    //     BLOCK_CONSENSUS/"high-hash" header-committed PoW faults; without this
+    //     second match the ENC-DR case fell through to the generic BLOCK_CONSENSUS
+    //     switch and was silently skipped for via_compact_block peers, defeating
+    //     the per-peer recompute throttle.
+    if (state.GetRejectReason() != "high-hash") return false;
+    const std::string& msg = state.GetDebugMessage();
+    return msg.find("matmul phase2 proof of work failed") != std::string::npos ||
+           msg.find("matmul v4 proof of work failed") != std::string::npos;
 }
 
 static bool IsHighConfidenceInvalidShieldedBlock(const BlockValidationState& state)
@@ -3696,12 +3727,18 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     // use any more memory (and we are not leaking information that could be
     // used to fingerprint us).
     const CBlockIndex *last_received_header{nullptr};
+    // DoS-F2: whether we already hold full block DATA for this batch's terminal
+    // header. If so, this is a redundant relay of a block we have already
+    // validated and it must not be allowed to drain the shared verify budget.
+    bool already_have_block_data{false};
     {
         LOCK(cs_main);
         last_received_header = m_chainman.m_blockman.LookupBlockIndex(headers.back().GetHash());
         if (IsAncestorOfBestHeaderOrTip(last_received_header)) {
             already_validated_work = true;
         }
+        already_have_block_data = last_received_header != nullptr &&
+                                  (last_received_header->nStatus & BLOCK_HAVE_DATA);
     }
 
     // If our peer has NetPermissionFlags::NoBan privileges, then bypass our
@@ -3777,7 +3814,11 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 ? std::numeric_limits<int32_t>::max()
                 : chain_start_header->nHeight + 1;
 
-        if (phase2_checks > 0) {
+        // DoS-F2: skip the budget/slot machinery entirely for a redundant relay
+        // of a block we already have with data — it will not re-trigger the
+        // expensive recompute, so charging for it would let a Sybil replaying the
+        // current tip drain the shared budget.
+        if (phase2_checks > 0 && !already_have_block_data) {
             if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, consensus_params)) {
                 LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul pending verification cap reached\n", pfrom.GetId());
                 pfrom.fDisconnect = true;
@@ -3785,13 +3826,23 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
             }
             pending_matmul_slot.emplace(m_matmul_pending_verifications);
 
+            bool global_exhausted{false};
             if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && !ConsumeMatMulVerificationBudgetForPeer(
                     peer,
                     consensus_params,
                     phase2_checks,
                     std::chrono::steady_clock::now(),
                     is_ibd,
-                    budget_reference_height)) {
+                    budget_reference_height,
+                    global_exhausted)) {
+                if (global_exhausted) {
+                    // DoS-F2: the process-wide shared budget is exhausted; DEFER
+                    // this message instead of disconnecting an otherwise-honest
+                    // peer for others' spend. The reserved pending-verification
+                    // slot is released by pending_matmul_slot on return.
+                    LogDebug(BCLog::NET, "Deferring headers from peer=%d: global MatMul verification budget exhausted\n", pfrom.GetId());
+                    return;
+                }
                 LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul per-peer verification budget exhausted\n", pfrom.GetId());
                 pfrom.fDisconnect = true;
                 return;
@@ -5645,6 +5696,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         bool requires_matmul_phase2{false};
         bool is_ibd{false};
         int32_t matmul_reference_height{0};
+        // DoS-F2: whether we already hold full block DATA for this compact block.
+        bool already_have_block_data{false};
 
         {
         LOCK(cs_main);
@@ -5690,26 +5743,41 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 ? std::numeric_limits<int32_t>::max()
                 : prev_block->nHeight + 1;
 
-        if (!m_chainman.m_blockman.LookupBlockIndex(blockhash)) {
+        if (const CBlockIndex* existing = m_chainman.m_blockman.LookupBlockIndex(blockhash)) {
+            already_have_block_data = existing->nStatus & BLOCK_HAVE_DATA;
+        } else {
             received_new_header = true;
         }
         }
 
         std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
-        if (requires_matmul_phase2) {
+        // DoS-F2: skip the budget/slot machinery for a redundant relay of a block
+        // we already have with data — it will not re-trigger the expensive
+        // recompute, so a Sybil replaying the current tip must not be able to
+        // drain the shared budget with it.
+        if (requires_matmul_phase2 && !already_have_block_data) {
             if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, consensus_params)) {
                 LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul pending verification cap reached (cmpctblock)\n", pfrom.GetId());
                 pfrom.fDisconnect = true;
                 return;
             }
             pending_matmul_slot.emplace(m_matmul_pending_verifications);
+            bool global_exhausted{false};
             if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && !ConsumeMatMulVerificationBudgetForPeer(
                     *peer,
                     consensus_params,
                     /*verification_count=*/1,
                     std::chrono::steady_clock::now(),
                     is_ibd,
-                    matmul_reference_height)) {
+                    matmul_reference_height,
+                    global_exhausted)) {
+                if (global_exhausted) {
+                    // DoS-F2: shared global budget exhausted — defer (do not
+                    // disconnect an honest peer for others' spend). The reserved
+                    // slot is released by pending_matmul_slot on return.
+                    LogDebug(BCLog::NET, "Deferring cmpctblock from peer=%d: global MatMul verification budget exhausted\n", pfrom.GetId());
+                    return;
+                }
                 LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul per-peer verification budget exhausted (cmpctblock)\n", pfrom.GetId());
                 pfrom.fDisconnect = true;
                 return;
@@ -6159,6 +6227,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
         const Consensus::MatMulProfileParams profile = consensus.GetMatMulProfileParams(block_height);
+        // F3: mirror the request side (MaybeRequestMatMulSketch) — the sketch
+        // cache is an ENC-DR (DIGEST_RECOMPUTE) construct only. Legacy
+        // FLAT_SKETCH profiles (reachable only via the regtest-only replay
+        // switch) carry their sketch in-block and have no cache authentication
+        // path here, so an mmsketch for such a height is never useful; ignore it
+        // rather than caching unauthenticated bytes for it.
+        if (profile.commitment != Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
+            LogDebug(BCLog::NET, "Ignoring mmsketch %s from peer=%d (not a DIGEST_RECOMPUTE height)\n",
+                     block_hash.ToString(), pfrom.GetId());
+            return;
+        }
         // Size cap = the profile 8·m² bound (anti-amplification / pre-hash DoS
         // gate; the exact-size check lives in ParseSketch on the verify path).
         if (sketch_bytes.size() > profile.SketchCacheBytes()) {
@@ -6261,6 +6340,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         bool requires_matmul_phase2{false};
         bool is_ibd{false};
         int32_t budget_reference_height{std::numeric_limits<int32_t>::max()};
+        // DoS-F2: whether we already hold full block DATA for this block.
+        bool already_have_block_data{false};
         const Consensus::Params& consensus_params = m_chainparams.GetConsensus();
         std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
         {
@@ -6273,6 +6354,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // which peers send us compact blocks, so the race between here and
             // cs_main in ProcessNewBlock is fine.
             mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
+
+            if (const CBlockIndex* existing = m_chainman.m_blockman.LookupBlockIndex(hash)) {
+                already_have_block_data = existing->nStatus & BLOCK_HAVE_DATA;
+            }
 
             // Check claimed work on this block against our anti-dos thresholds.
             if (prev_block) {
@@ -6306,20 +6391,44 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
         }
 
-        if (requires_matmul_phase2) {
+        // DoS-F2: skip the budget/slot machinery for a redundant relay of a
+        // block we already have with data — AcceptBlock short-circuits on
+        // BLOCK_HAVE_DATA before the O(n^3) recompute, so it must not be allowed
+        // to drain the shared budget (Sybil tip-replay protection).
+        if (requires_matmul_phase2 && !already_have_block_data) {
+            // Recompute-budget concurrency (item 6): ReserveMatMulVerificationSlot
+            // atomically bumps m_matmul_pending_verifications and fails once the
+            // configured cap is reached; the ScopedMatMulPendingVerification held
+            // in pending_matmul_slot keeps the slot occupied for the whole lifetime
+            // of this block's verification (through the cs_main-released O(n^3)
+            // recompute inside ProcessBlock -> ... -> CheckMatMulProofOfWork_V4EncDr)
+            // and releases it on scope exit. That cap is therefore the hard bound
+            // on the number of concurrent in-flight expensive recomputes across all
+            // message-handler activity; no separate counter is required.
             if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, consensus_params)) {
                 LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul pending verification cap reached (block)\n", pfrom.GetId());
                 pfrom.fDisconnect = true;
                 return;
             }
             pending_matmul_slot.emplace(m_matmul_pending_verifications);
+            bool global_exhausted{false};
             if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && !ConsumeMatMulVerificationBudgetForPeer(
                     *peer,
                     consensus_params,
                     /*verification_count=*/1,
                     std::chrono::steady_clock::now(),
                     is_ibd,
-                    budget_reference_height)) {
+                    budget_reference_height,
+                    global_exhausted)) {
+                if (global_exhausted) {
+                    // DoS-F2: shared global budget exhausted — defer this block
+                    // (do not disconnect an honest peer for others' spend). The
+                    // reserved slot is released by pending_matmul_slot on return;
+                    // the block request was already removed above, so the block
+                    // can be re-requested/re-announced later.
+                    LogDebug(BCLog::NET, "Deferring block from peer=%d: global MatMul verification budget exhausted (block)\n", pfrom.GetId());
+                    return;
+                }
                 LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul per-peer verification budget exhausted (block)\n", pfrom.GetId());
                 pfrom.fDisconnect = true;
                 return;

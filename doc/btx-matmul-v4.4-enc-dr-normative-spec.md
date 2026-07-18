@@ -305,6 +305,19 @@ evaluations are conforming only if byte-equal to it.
 - F_q residues are the unique canonical representatives in `[0, q)`,
   q = 2⁶¹−1; the `int8_field` `FqFromInt32`/`FqMul`/`FqAdd` reduction path is
   normative.
+- **128-bit multiply requirement (backend authors).** `FqMul`/`FqReduce`
+  (`int8_field.cpp`) form the full ~122-bit product of two `[0, q)` operands in
+  `unsigned __int128` before reducing mod q = 2⁶¹−1. `__int128` is a GCC/Clang
+  extension, not ISO C++; the reference and all current consensus builds target
+  GNU-family compilers, so it is available. The reduction is *mathematically
+  exact* modular arithmetic, so the committed bytes are bit-identical on ANY
+  correct 128-bit (or wider) unsigned multiply — no specific compiler intrinsic
+  is normative, only the exact 122-bit-product-then-reduce result. A future
+  non-GNU consensus port (MSVC, a formal-methods backend, an FPGA/HDL verifier)
+  MUST therefore supply an equivalent full-width unsigned multiply (e.g. MSVC
+  `_umul128`, a 64×64→128 double-word routine, or a bignum) that reproduces the
+  same `[0, q)` residue; a 64-bit-truncating multiply is non-conforming and a
+  chain-split vector (DR-17).
 - Accelerated GEMM paths MUST satisfy the true ≥ 32-bit integer accumulator
   eligibility invariant (`int8_field.h`, `kRequiredAccumulatorBits`;
   `BMX4C_NATIVE_PATH_PROVEN_T = 24` for the native block-scaled path,

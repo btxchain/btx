@@ -10201,7 +10201,18 @@ static bool ContextualCheckBlock(const CBlock& block,
                                  BlockValidationState& state,
                                  const ChainstateManager& chainman,
                                  const CBlockIndex* pindexPrev,
-                                 bool fCheckPOW = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+                                 bool fCheckPOW = true,
+                                 // E: gates whether the ENC-DR recompute below is permitted to
+                                 // release cs_main (see CsMainScopedRelease). AcceptBlock (the hot
+                                 // P2P path) passes true so the O(W) recompute never serializes
+                                 // under the global lock. TestBlockValidity passes false: it holds
+                                 // a stack-local CCoinsViewCache/CBlockIndex and a
+                                 // pindexPrev==Tip() precondition ACROSS this call and then runs
+                                 // ConnectBlock against them, so a mid-call tip advance by a
+                                 // concurrent thread must not be possible. Holding cs_main across
+                                 // the recompute is harmless there (not the hot path, and its
+                                 // fCheckPOW=true callers are single-threaded).
+                                 bool may_release_cs_main = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     AssertLockHeld(::cs_main);
     if (pindexPrev != nullptr && pindexPrev->nHeight == std::numeric_limits<int>::max()) {
@@ -10290,12 +10301,18 @@ static bool ContextualCheckBlock(const CBlock& block,
                 // assumevalid-trust) is already made; only this bool crosses the
                 // release boundary.
                 bool encdr_ok;
-                {
+                if (may_release_cs_main) {
                     CsMainScopedRelease release_cs_main_for_recompute;
                     // DO NOT add cs_main-requiring code in this scope: TSA still
                     // believes cs_main is held here (the RAII guard is
                     // NO_THREAD_SAFETY_ANALYSIS), so a guarded call would compile
                     // yet run unlocked. Keep it to the single pure recompute.
+                    encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight);
+                } else {
+                    // E: TestBlockValidity path — keep cs_main held across the
+                    // recompute so the caller's Tip()-pinned viewNew/indexDummy
+                    // cannot be invalidated by a concurrent tip advance. The
+                    // verdict is identical; only the locking discipline differs.
                     encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight);
                 }
                 if (!encdr_ok) {
@@ -10867,7 +10884,11 @@ bool TestBlockValidity(BlockValidationState& state,
         LogError("%s: Consensus::CheckBlock: %s\n", __func__, state.ToString());
         return false;
     }
-    if (!ContextualCheckBlock(block, state, chainstate.m_chainman, pindexPrev, fCheckPOW)) {
+    // E: pass may_release_cs_main=false. TestBlockValidity holds viewNew /
+    // indexDummy and the pindexPrev==Tip() precondition across this call and
+    // ConnectBlock below, so ContextualCheckBlock must NOT release cs_main
+    // mid-call even on the fCheckPOW=true ENC-DR recompute branch.
+    if (!ContextualCheckBlock(block, state, chainstate.m_chainman, pindexPrev, fCheckPOW, /*may_release_cs_main=*/false)) {
         LogError("%s: Consensus::ContextualCheckBlock: %s\n", __func__, state.ToString());
         return false;
     }

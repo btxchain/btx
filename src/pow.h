@@ -111,6 +111,12 @@ struct MatMulValidationRuntimeStats {
     uint64_t max_phase2_elapsed_us{0};
     uint64_t max_freivalds_elapsed_us{0};
     uint64_t max_transcript_elapsed_us{0};
+    // G.3+: first-class ENC-DR O(W) recompute sub-bucket (v4.4). Additive; the
+    // aggregate phase2_* fields still include recompute samples.
+    uint64_t recompute_checks{0};
+    uint64_t total_recompute_elapsed_us{0};
+    uint64_t last_recompute_elapsed_us{0};
+    uint64_t max_recompute_elapsed_us{0};
 };
 
 struct MatMulAsertHalfLifeInfo {

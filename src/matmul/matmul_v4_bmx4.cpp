@@ -303,12 +303,17 @@ void DecomposeLimbPlanesBMX4C(const std::vector<int32_t>& M, std::vector<int8_t>
             x = (x - d) / kCombineLimbBase; // exact: (x - d) is a multiple of 64
         }
         // Remainder-top digit: whatever remains, in [-32, +32] under the bound.
-        // Debug-assert the remainder stays a valid s8 top digit (F-L4,
-        // defense-in-depth vs a silent high-part drop): CheckCombineLimbBoundBMX4C
-        // gates |P|,|Q| <= 288*n <= 2^23-1 via ValidateDimsBMX4C, so x is in
-        // [-32, +32] for every consensus-valid entry and this can never fire;
-        // it is a no-op in NDEBUG release builds and is never reached on the
-        // verifier path (SketchFreivalds does not decompose).
+        // CheckCombineLimbBoundBMX4C gates |P|,|Q| <= 288*n <= 2^23-1 via
+        // ValidateDimsBMX4C, so x is in [-32, +32] for every consensus-valid
+        // entry and this can never fire; it is never reached on the verifier
+        // path (SketchFreivalds does not decompose). RELEASE-LIVE HARD GUARD vs
+        // a silent high-part drop, NOT a debug-only no-op (F-L4): this project
+        // strips -DNDEBUG from every build configuration
+        // (cmake/module/ProcessConfigurations.cmake), so the assert is compiled
+        // into release builds and aborts (fail-CLOSED) on a violation instead of
+        // committing a corrupt top digit. Left as an assert deliberately:
+        // DecomposeLimbPlanesBMX4C returns void on the hot combine path, so
+        // abort-on-violation is the lower-risk fail-closed choice.
         assert(x >= -kHalf && x <= kHalf &&
                "DecomposeLimbPlanesBMX4C: remainder-top digit out of [-32,+32] "
                "(entry exceeds 2^23-1; CheckCombineLimbBoundBMX4C must gate n)");

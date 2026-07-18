@@ -299,6 +299,13 @@ std::atomic<uint64_t> g_matmul_validation_last_transcript_elapsed_us{0};
 std::atomic<uint64_t> g_matmul_validation_max_phase2_elapsed_us{0};
 std::atomic<uint64_t> g_matmul_validation_max_freivalds_elapsed_us{0};
 std::atomic<uint64_t> g_matmul_validation_max_transcript_elapsed_us{0};
+// G.3+: first-class counters for the v4.4 ENC-DR O(W) digest RECOMPUTE path.
+// Previously recompute cost had to be derived as (phase2 - freivalds -
+// transcript); these track it directly as its own sub-bucket.
+std::atomic<uint64_t> g_matmul_validation_recompute_checks{0};
+std::atomic<uint64_t> g_matmul_validation_total_recompute_elapsed_us{0};
+std::atomic<uint64_t> g_matmul_validation_last_recompute_elapsed_us{0};
+std::atomic<uint64_t> g_matmul_validation_max_recompute_elapsed_us{0};
 std::mutex g_matmul_digest_compare_mutex;
 uint64_t g_matmul_digest_compare_nonce64{0};
 uint32_t g_matmul_digest_compare_nonce32{0};
@@ -428,11 +435,18 @@ void RegisterMatMulValidationRuntimeSample(
         g_matmul_validation_total_transcript_elapsed_us.fetch_add(elapsed_us, std::memory_order_relaxed);
         g_matmul_validation_last_transcript_elapsed_us.store(elapsed_us, std::memory_order_relaxed);
         UpdateMaxAtomic(g_matmul_validation_max_transcript_elapsed_us, elapsed_us);
+    } else if (path == MatMulValidationPath::RECOMPUTE) {
+        g_matmul_validation_recompute_checks.fetch_add(1, std::memory_order_relaxed);
+        g_matmul_validation_total_recompute_elapsed_us.fetch_add(elapsed_us, std::memory_order_relaxed);
+        g_matmul_validation_last_recompute_elapsed_us.store(elapsed_us, std::memory_order_relaxed);
+        UpdateMaxAtomic(g_matmul_validation_max_recompute_elapsed_us, elapsed_us);
     }
-    // MatMulValidationPath::RECOMPUTE (v4.4 ENC-DR, G.3): counted only in the
-    // phase2 aggregate above — NOT in the FREIVALDS or TRANSCRIPT sub-buckets, so
-    // the cheap-path FREIVALDS timing is not polluted by the ~10^3x-costlier
-    // recompute. Recompute cost = phase2 - freivalds - transcript.
+    // MatMulValidationPath::RECOMPUTE (v4.4 ENC-DR, G.3+): included in the phase2
+    // aggregate above AND now tracked in its own first-class sub-bucket (just
+    // above) — but still NOT in the FREIVALDS or TRANSCRIPT sub-buckets, so the
+    // cheap-path FREIVALDS timing is not polluted by the ~10^3x-costlier
+    // recompute. Recompute cost is now measured directly rather than derived as
+    // (phase2 - freivalds - transcript).
 
     if (passed) {
         g_matmul_validation_successes.fetch_add(1, std::memory_order_relaxed);
@@ -2755,6 +2769,11 @@ MatMulValidationRuntimeStats ProbeMatMulValidationRuntimeStats()
     stats.max_phase2_elapsed_us = g_matmul_validation_max_phase2_elapsed_us.load(std::memory_order_relaxed);
     stats.max_freivalds_elapsed_us = g_matmul_validation_max_freivalds_elapsed_us.load(std::memory_order_relaxed);
     stats.max_transcript_elapsed_us = g_matmul_validation_max_transcript_elapsed_us.load(std::memory_order_relaxed);
+    // G.3+: first-class recompute sub-bucket.
+    stats.recompute_checks = g_matmul_validation_recompute_checks.load(std::memory_order_relaxed);
+    stats.total_recompute_elapsed_us = g_matmul_validation_total_recompute_elapsed_us.load(std::memory_order_relaxed);
+    stats.last_recompute_elapsed_us = g_matmul_validation_last_recompute_elapsed_us.load(std::memory_order_relaxed);
+    stats.max_recompute_elapsed_us = g_matmul_validation_max_recompute_elapsed_us.load(std::memory_order_relaxed);
     return stats;
 }
 
@@ -2774,6 +2793,11 @@ void ResetMatMulValidationRuntimeStats()
     g_matmul_validation_max_phase2_elapsed_us.store(0, std::memory_order_relaxed);
     g_matmul_validation_max_freivalds_elapsed_us.store(0, std::memory_order_relaxed);
     g_matmul_validation_max_transcript_elapsed_us.store(0, std::memory_order_relaxed);
+    // G.3+: first-class recompute sub-bucket.
+    g_matmul_validation_recompute_checks.store(0, std::memory_order_relaxed);
+    g_matmul_validation_total_recompute_elapsed_us.store(0, std::memory_order_relaxed);
+    g_matmul_validation_last_recompute_elapsed_us.store(0, std::memory_order_relaxed);
+    g_matmul_validation_max_recompute_elapsed_us.store(0, std::memory_order_relaxed);
 }
 
 void RegisterMatMulDigestCompareAttempt(const CBlockHeader& block,

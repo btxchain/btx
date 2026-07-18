@@ -291,17 +291,11 @@ struct Params {
     uint32_t nMatMulPhase2FailBanThreshold{1};
     bool fMatMulStrictPunishment{false};
     uint32_t nMatMulSnapshotInterval{10'000};
-    /** DEAD / INERT since v4.4 ENC-DR. No code path consumes this value. It is a
-     *  leftover from the deleted segregated-proof store; under ENC-DR the block
-     *  carries ZERO proof bytes (the 32-byte digest rides in the header and the
-     *  sketch is recomputable from the header forever), so there is nothing to
-     *  retain or prune and this "prune depth" governs nothing. The pre-ENC-DR
-     *  concern this field once tracked (~8 MiB/proof, unbounded archive growth)
-     *  no longer exists. The field and the -regtestmatmulproofprunedepth arg are
-     *  retained only for arg/ABI compatibility (chainparamsbase.cpp) to avoid
-     *  churning the chainparams sites; reintroducing a real retention subsystem
-     *  is the only reason to ever read it. Do NOT treat it as a live bound. */
-    uint32_t nMatMulProofPruneDepth{10'000};
+    // Audit dead-code deletion: nMatMulProofPruneDepth removed. It was a leftover
+    // from the deleted segregated-proof store with no consensus/validation reader;
+    // under v4.4 ENC-DR the block carries ZERO proof bytes, so there is nothing to
+    // prune. The -regtestmatmulproofprunedepth arg registration survives in
+    // chainparamsbase.cpp as a harmless (unread) no-op for arg compatibility.
     /** Minimum equivalent-time age (seconds) an ENC-DR block must be buried under
      *  the best header before its digest-recompute PoW verification may be
      *  assumevalid-SKIPPED rather than recomputed (v4.4 tension-resolution §3.1-vi;
@@ -410,8 +404,13 @@ struct Params {
      *  globally. These are the height-selected replacements for the v3
      *  nMatMul{Global,Peer}VerifyBudgetPerMin fields (same rate-limit mechanism;
      *  only the value changes at and above nMatMulV4Height, spec §G.3/§H.4). */
-    uint32_t nMatMulV4GlobalVerifyBudgetPerMin{16};
-    uint32_t nMatMulV4PeerVerifyBudgetPerMin{4};
+    // DoS-F2 re-price: conservative default sized for the O(n^3) ENC-DR recompute
+    // (~seconds/check), not the O(n^2) Freivalds fast path — honest block rate is
+    // << 1/min so this leaves ample headroom while bounding attacker-forced
+    // recompute CPU. Networks that set concrete values (testnet) match this;
+    // pending the release-blocking on-hardware bench that may raise it.
+    uint32_t nMatMulV4GlobalVerifyBudgetPerMin{4};
+    uint32_t nMatMulV4PeerVerifyBudgetPerMin{2};
 
     // MatMul v4.2 / ENC-BMX4C encoding-profile parameters (see
     // doc/btx-matmul-v4.2-bmx4c-spec.md §7-§8 and

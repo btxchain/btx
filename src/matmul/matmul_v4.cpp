@@ -58,6 +58,15 @@ bool ValidateDims(uint32_t n, uint32_t b, uint32_t& m_out)
     if (n > int8_field::kMaxHeaderDim) return false;
     if ((n % b) != 0) return false;
     if (!int8_field::CheckAccumulationBound(n)) return false;
+    // Defense-in-depth / symmetry with ValidateDimsBMX4 (which gates
+    // CheckCombineLimbBoundBMX4C): also enforce the base-2^7 limb-decomposition
+    // totality bound here so a future S8 dimension retarget cannot silently
+    // outrun DecomposeLimbPlanes (it discards any remainder past 4 digits).
+    // Fails CLOSED (return false, matching this validator's style) on violation
+    // rather than asserting. Rejects no currently-valid dimension: the bound is
+    // 15,625*n <= 133,160,895, i.e. n <= 8522, which covers the whole documented
+    // 4096..8192 window (n=4096: 15,625*4096 = 64,000,000 <= 133,160,895).
+    if (!CheckCombineLimbBound(n)) return false;
     m_out = n / b;
     return true;
 }
@@ -335,11 +344,18 @@ void DecomposeLimbPlanes(const std::vector<int32_t>& M, std::vector<int8_t>* pla
         // The decomposition is total under CheckCombineLimbBound; the remainder
         // MUST be fully consumed (x == 0), otherwise the top limb would silently
         // drop a nonzero high part and the combine would diverge from
-        // ComputeCombineModQ. Debug-assert it (defense-in-depth, F-L4): a valid
-        // (n, b) already gates |P|,|Q| <= 15,625*n within the 4-digit range via
-        // CheckCombineLimbBound, so this can never fire on consensus-valid input;
-        // it is a no-op in NDEBUG release builds and never on the verifier path
-        // (SketchFreivalds does not decompose).
+        // ComputeCombineModQ. A valid (n, b) already gates |P|,|Q| <= 15,625*n
+        // within the 4-digit range via CheckCombineLimbBound (now also enforced
+        // up front by ValidateDims), so this can never fire on consensus-valid
+        // input, and it is never reached on the verifier path (SketchFreivalds
+        // does not decompose). RELEASE-LIVE HARD GUARD, not a debug-only no-op:
+        // this project strips -DNDEBUG from every build configuration
+        // (cmake/module/ProcessConfigurations.cmake), so the assert is compiled
+        // into release builds and aborts (fail-CLOSED) on any violation instead
+        // of committing a corrupt decomposition. Left as an assert deliberately
+        // (F-L4): DecomposeLimbPlanes returns void on the hot combine path, so
+        // abort-on-violation is the lower-risk fail-closed choice (no status to
+        // thread through the tensor GEMM loop).
         assert(x == 0 && "DecomposeLimbPlanes: remainder not fully consumed "
                          "(entry exceeds the 4-digit base-2^7 range; "
                          "CheckCombineLimbBound must gate n)");
@@ -517,8 +533,14 @@ bool SketchFreivalds(const std::vector<int8_t>& A,
                      const std::vector<unsigned char>& payload,
                      uint32_t n, uint32_t m, uint32_t rounds)
 {
+    // Fail-closed on rounds == 0 (F-L3 defense-in-depth): an empty round set is
+    // NOT a valid verification (a vacuous AND-of-rounds), so reject rather than
+    // trivially accept. Every consensus caller (pow_v4::VerifySketch,
+    // VerifySketchBMX4C, VerifySketchBMX4D) already pre-rejects rounds == 0
+    // before reaching here, so this changes NO valid path; it only closes the
+    // latent fail-OPEN if a future caller ever reaches this with rounds == 0.
     if (rounds == 0) {
-        return true;
+        return false;
     }
 
     // H(Chat) = SHA256 of the serialized payload, bound into every challenge.

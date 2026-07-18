@@ -1013,6 +1013,13 @@ static UniValue BuildValidationRuntimeProfile()
     obj.pushKV("mean_transcript_elapsed_ms", MeanMicrosToMillis(stats.total_transcript_elapsed_us, stats.transcript_checks));
     obj.pushKV("last_transcript_elapsed_ms", MicrosToMillis(stats.last_transcript_elapsed_us));
     obj.pushKV("max_transcript_elapsed_ms", MicrosToMillis(stats.max_transcript_elapsed_us));
+    // G.3+: first-class ENC-DR O(W) recompute counters (additive; recompute
+    // samples are also included in the phase2 aggregate above).
+    obj.pushKV("recompute_checks", stats.recompute_checks);
+    obj.pushKV("total_recompute_elapsed_ms", MicrosToMillis(stats.total_recompute_elapsed_us));
+    obj.pushKV("mean_recompute_elapsed_ms", MeanMicrosToMillis(stats.total_recompute_elapsed_us, stats.recompute_checks));
+    obj.pushKV("last_recompute_elapsed_ms", MicrosToMillis(stats.last_recompute_elapsed_us));
+    obj.pushKV("max_recompute_elapsed_ms", MicrosToMillis(stats.max_recompute_elapsed_us));
     return obj;
 }
 
@@ -6068,6 +6075,11 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::NUM, "mean_transcript_elapsed_ms", "Mean elapsed time for full transcript checks"},
                                     {RPCResult::Type::NUM, "last_transcript_elapsed_ms", "Elapsed time of the latest full transcript check"},
                                     {RPCResult::Type::NUM, "max_transcript_elapsed_ms", "Slowest full transcript check observed"},
+                                    {RPCResult::Type::NUM, "recompute_checks", "ENC-DR O(W) digest recompute checks recorded since process start"},
+                                    {RPCResult::Type::NUM, "total_recompute_elapsed_ms", "Total elapsed time for ENC-DR recompute checks"},
+                                    {RPCResult::Type::NUM, "mean_recompute_elapsed_ms", "Mean elapsed time for ENC-DR recompute checks"},
+                                    {RPCResult::Type::NUM, "last_recompute_elapsed_ms", "Elapsed time of the latest ENC-DR recompute check"},
+                                    {RPCResult::Type::NUM, "max_recompute_elapsed_ms", "Slowest ENC-DR recompute check observed"},
                                 }},
                                 {RPCResult::Type::OBJ, "propagation_proxy", "", {
                                     {RPCResult::Type::BOOL, "network_active", "Whether P2P networking is active"},
@@ -6442,6 +6454,11 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::NUM, "mean_transcript_elapsed_ms", "Mean elapsed time for full transcript checks"},
                                     {RPCResult::Type::NUM, "last_transcript_elapsed_ms", "Elapsed time of the latest full transcript check"},
                                     {RPCResult::Type::NUM, "max_transcript_elapsed_ms", "Slowest full transcript check observed"},
+                                    {RPCResult::Type::NUM, "recompute_checks", "ENC-DR O(W) digest recompute checks recorded since process start"},
+                                    {RPCResult::Type::NUM, "total_recompute_elapsed_ms", "Total elapsed time for ENC-DR recompute checks"},
+                                    {RPCResult::Type::NUM, "mean_recompute_elapsed_ms", "Mean elapsed time for ENC-DR recompute checks"},
+                                    {RPCResult::Type::NUM, "last_recompute_elapsed_ms", "Elapsed time of the latest ENC-DR recompute check"},
+                                    {RPCResult::Type::NUM, "max_recompute_elapsed_ms", "Slowest ENC-DR recompute check observed"},
                                 }},
                                 {RPCResult::Type::OBJ, "propagation_proxy", "", {
                                     {RPCResult::Type::BOOL, "network_active", "Whether P2P networking is active"},

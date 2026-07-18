@@ -362,10 +362,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
             ParseRegTestNonNegativeInt32Arg(args, "-regtestbmx4cheight");
     }
     options.matmul_flat_sketch_replay = args.GetBoolArg("-regtestmatmulflatsketchreplay", false);
-    if (args.IsArgSet("-regtestmatmulproofprunedepth")) {
-        options.matmul_proof_prune_depth =
-            ParseRegTestUInt32Arg(args, "-regtestmatmulproofprunedepth");
-    }
+    // Audit dead-code deletion: the -regtestmatmulproofprunedepth parse was removed
+    // along with the dead nMatMulProofPruneDepth field / matmul_proof_prune_depth
+    // option. The arg stays REGISTERED in chainparamsbase.cpp as a harmless unread
+    // no-op (accepted but ignored) for arg compatibility.
     if (args.IsArgSet("-regtestmatmulproofassumevalidminage")) {
         options.matmul_proof_assumevalid_min_age =
             ParseRegTestUInt32Arg(args, "-regtestmatmulproofassumevalidminage");

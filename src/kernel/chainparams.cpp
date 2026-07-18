@@ -105,6 +105,17 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         assert(ValidateMatMulAsertParams(consensus, consensus.nMatMulAsertHeight));
     }
 
+    // Audit DoS-F3: correct MatMul difficulty adjustment requires the MatMul-ASERT
+    // activation height to EQUAL the fast-mine boundary -- ASERT must take over the
+    // instant the fixed-difficulty fast-mining phase ends, with no gap or overlap
+    // (pow.cpp treats nFastMineHeight as the anchor and nMatMulAsertHeight as the
+    // ASERT epoch; a mismatch silently corrupts targeting at the transition). This
+    // is enforced at runtime in init.cpp, but assert it at construction too so a
+    // misconfigured network aborts at startup rather than at the fast->normal
+    // boundary. Every shipped network sets both equal (50'000 on mainnet, 61'000 on
+    // the public test nets, 0/2 on the mockable chains).
+    assert(consensus.nFastMineHeight == consensus.nMatMulAsertHeight);
+
     // Audit I1: the miner and verifier use the compile-time tile size
     // matmul::v4::kTileB (b); a consensus nMatMulV4TranscriptBlockSize that differs
     // from it would make EVERY v4 block invalid at the fork. Pin them equal
@@ -208,6 +219,23 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     assert(is_regtest ||
            consensus.nMatMulV4Height == std::numeric_limits<int32_t>::max() ||
            Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+
+    // Audit DoS-F1 FAIL-CLOSED HEADER-POW ACTIVATION COUPLING (mirrors DR-34
+    // above). The header-PoW admission gate (nMatMulHeaderPoWDiscountBits, default
+    // UINT32_MAX = disabled; predicate IsMatMulHeaderPoWEnabled()) is the throttle
+    // that makes forging a v4 header cost SHA work. With v4 live but the gate off,
+    // forged v4 headers/blocks are free to manufacture yet each one forces an
+    // O(n^3) sketch recompute on the verifier -- an asymmetric DoS. Nothing else
+    // couples "v4 live" to "header-PoW enabled", so pin it here: a NON-regtest
+    // network with a LIVE (non-INT32_MAX) nMatMulV4Height MUST have the header-PoW
+    // gate enabled. Regtest is exempt -- it runs v4 with the gate off for testing
+    // (mirroring the is_regtest carve-outs above and the nonce-on-wire coupling at
+    // the top of this function). All current public networks are INT32_MAX (v4
+    // disabled), so this is inert until a future activation, at which point it
+    // forces the gate to be turned on in the same release.
+    assert(is_regtest ||
+           consensus.nMatMulV4Height == std::numeric_limits<int32_t>::max() ||
+           consensus.IsMatMulHeaderPoWEnabled());
 }
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
@@ -325,7 +353,6 @@ public:
         consensus.nMatMulPhase2FailBanThreshold = 1;
         consensus.fMatMulStrictPunishment = false;
         consensus.nMatMulSnapshotInterval = 10'000;
-        consensus.nMatMulProofPruneDepth = 10'000;
         // Freivalds' O(n^2) probabilistic verification (k=2 rounds, error < 2^-62).
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
@@ -712,7 +739,6 @@ public:
         consensus.nMatMulPhase2FailBanThreshold = std::numeric_limits<uint32_t>::max();
         consensus.fMatMulStrictPunishment = false;
         consensus.nMatMulSnapshotInterval = 10'000;
-        consensus.nMatMulProofPruneDepth = 10'000;
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
         consensus.fMatMulRequireProductPayload = true;
@@ -744,11 +770,14 @@ public:
         consensus.nMatMulV4MaxDimension = 8192;
         consensus.nMatMulV4FreivaldsRounds = 3;
         consensus.nMatMulV4TranscriptBlockSize = 4; // v4.1 batched-sketch profile (spec §K.2b): m = n/4, 8 MiB payload at n=4096
-        // DoS verify budgets above the v4 fork (spec §I.5): the O(n^2) verify
-        // costs ~0.14-0.28 s CPU/check at n=4096, so the global cap is 16/min
-        // (~4.8 s CPU/min) and each peer 4/min.
-        consensus.nMatMulV4GlobalVerifyBudgetPerMin = 16;
-        consensus.nMatMulV4PeerVerifyBudgetPerMin = 4;
+        // DoS verify budgets above the v4 fork (spec §I.5). Audit DoS re-pricing:
+        // the original 16/4 caps were sized for the O(n^2) Freivalds check, but
+        // v4.4 ENC-DR now admits the O(n^3) sketch RECOMPUTE (~seconds per verify),
+        // so lower them CONSERVATIVELY to 4/min global and 2/min per peer pending
+        // the release-blocking bench. Honest block production is << 1/min, so even
+        // 4/min leaves ample headroom; a future benchmark may raise these.
+        consensus.nMatMulV4GlobalVerifyBudgetPerMin = 4;
+        consensus.nMatMulV4PeerVerifyBudgetPerMin = 2;
         // No empirical v3->v4 throughput benchmark exists yet for testnet
         // reference hardware, so leave the one-time ASERT rescale at 1/1
         // ("no rescale"); testnet is fPowAllowMinDifficultyBlocks, so a
@@ -946,7 +975,6 @@ public:
         consensus.nMatMulPhase2FailBanThreshold = std::numeric_limits<uint32_t>::max();
         consensus.fMatMulStrictPunishment = false;
         consensus.nMatMulSnapshotInterval = 10'000;
-        consensus.nMatMulProofPruneDepth = 10'000;
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
         consensus.fMatMulRequireProductPayload = true;
@@ -1160,7 +1188,6 @@ public:
         consensus.nMatMulPhase2FailBanThreshold = std::numeric_limits<uint32_t>::max();
         consensus.fMatMulStrictPunishment = false;
         consensus.nMatMulSnapshotInterval = 10'000;
-        consensus.nMatMulProofPruneDepth = 10'000;
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
         consensus.fMatMulRequireProductPayload = true;
@@ -1329,7 +1356,6 @@ public:
         consensus.nMatMulPhase2FailBanThreshold = std::numeric_limits<uint32_t>::max();
         consensus.fMatMulStrictPunishment = false;
         consensus.nMatMulSnapshotInterval = 10'000;
-        consensus.nMatMulProofPruneDepth = 10'000;
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
         consensus.fMatMulRequireProductPayload = true;
@@ -1451,17 +1477,11 @@ public:
             // AssertBMX4CConstructionInvariants.
             consensus.fMatMulV4FlatSketchReplay = true;
         }
-        // INERT since v4.4 ENC-DR: nMatMulProofPruneDepth is a dead field left
-        // over from the deleted segregated-proof store (design §3.5). Under
-        // ENC-DR the block carries no proof bytes, so there is nothing to prune;
-        // NO consensus or validation code reads this value. The field and the
-        // -regtestmatmulproofprunedepth arg are retained only for arg/ABI
-        // compatibility (see chainparamsbase.cpp) and set here to a harmless
-        // constant. Do NOT wire new behavior to it without reintroducing a real
-        // retention subsystem.
-        if (opts.matmul_proof_prune_depth.has_value()) {
-            consensus.nMatMulProofPruneDepth = *opts.matmul_proof_prune_depth;
-        }
+        // Audit dead-code deletion: the nMatMulProofPruneDepth field and its
+        // -regtestmatmulproofprunedepth apply block were removed (dead since v4.4
+        // ENC-DR -- no consensus/validation reader; the deleted segregated-proof
+        // store left it inert). The arg registration in chainparamsbase.cpp
+        // survives as a harmless unread no-op for arg compatibility.
         // MatMul v4.2-D assumevalid buried-proof trust min-age (design §3.5-2). The
         // production default is the 2-week equivalent-time DoS guard; at regtest's
         // 90 s spacing that is ~13 000 blocks, so the override lets a functional test
@@ -1651,7 +1671,6 @@ public:
             opts.matmul_v4_max_dimension.has_value() ||
             opts.matmul_bmx4c_height.has_value() ||
             opts.matmul_flat_sketch_replay ||
-            opts.matmul_proof_prune_depth.has_value() ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||
             opts.shielded_smile_rice_codec_disable_height.has_value() ||
@@ -1808,7 +1827,6 @@ public:
         consensus.nMatMulPhase2FailBanThreshold = std::numeric_limits<uint32_t>::max();
         consensus.fMatMulStrictPunishment = false;
         consensus.nMatMulSnapshotInterval = 10'000;
-        consensus.nMatMulProofPruneDepth = 10'000;
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
         consensus.fMatMulRequireProductPayload = true;
