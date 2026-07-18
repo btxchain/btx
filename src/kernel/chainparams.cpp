@@ -193,6 +193,21 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // replay carriage selected — the ENC-DR digest-only rule is the single live
     // consensus carriage everywhere v4 activates.
     assert(!consensus.fMatMulV4FlatSketchReplay || is_regtest);
+
+    // v4.4 ENC-DR DR-34 FAIL-CLOSED ACTIVATION GATE (normative spec §5, DR-34).
+    // A public network (regtest exempt) MUST NOT be constructible with a LIVE
+    // (non-INT32_MAX) v4 activation height until the §K.2b silicon no-inversion
+    // measurement (GO) and L0 ratification are recorded as passed in this
+    // release via Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED. That flag
+    // defaults false, so shipping a public-network activation height without
+    // flipping it (i.e. without recording the gates) aborts the node at startup
+    // — the same fail-closed mechanism as the retired relay-ready flag,
+    // retargeted to measured no-inversion + ratification. (Reachable here only
+    // when v4 is live — we are past the bmx4c==INT32_MAX early return above — but
+    // the height clause keeps the assert correct independent of placement.)
+    assert(is_regtest ||
+           consensus.nMatMulV4Height == std::numeric_limits<int32_t>::max() ||
+           Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
 }
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,

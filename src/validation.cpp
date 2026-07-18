@@ -10292,6 +10292,10 @@ static bool ContextualCheckBlock(const CBlock& block,
                 bool encdr_ok;
                 {
                     CsMainScopedRelease release_cs_main_for_recompute;
+                    // DO NOT add cs_main-requiring code in this scope: TSA still
+                    // believes cs_main is held here (the RAII guard is
+                    // NO_THREAD_SAFETY_ANALYSIS), so a guarded call would compile
+                    // yet run unlocked. Keep it to the single pure recompute.
                     encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight);
                 }
                 if (!encdr_ok) {
@@ -10704,6 +10708,18 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         LogError("%s: %s\n", __func__, state.ToString());
         return false;
     }
+
+    // G.1 duplicate-processing guard: ContextualCheckBlock may have RELEASED
+    // cs_main during the v4.4 ENC-DR recompute, opening a window in which
+    // another thread (a local submitblock/generateblock RPC, or reindex racing
+    // net) could have fully processed this same block — write +
+    // ReceivedBlockTransactions (which sets BLOCK_HAVE_DATA). fAlreadyHave was
+    // sampled BEFORE that window (above), so re-check now under the re-acquired
+    // lock to avoid a duplicate disk write / NewPoWValidBlock /
+    // ReceivedBlockTransactions for the same block. (A remote peer cannot
+    // trigger this — the message handler is single-threaded — but a concurrent
+    // RPC/reindex can.)
+    if (pindex->nStatus & BLOCK_HAVE_DATA) return true;
 
     // Header is valid/has work, merkle tree and segwit merkle tree are good...RELAY NOW
     // (but if it does not build on our best tip, let the SendMessages loop relay it)

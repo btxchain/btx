@@ -175,6 +175,21 @@ static constexpr uint32_t BMX4C_SKETCH_RANK_M{1024};
 static constexpr uint32_t BMX4C_NATIVE_PATH_PROVEN_T{24};   //!< proven exact FP-mantissa accumulator bits required for the native block-scaled FP4/MX path; t≈14 fails closed to the 1-GEMM INT8 fallback
 static constexpr uint32_t BMX4C_FALLBACK_INT8_ACCUMULATOR_BITS{32}; //!< C-1 floor for the INT8 fallback path (true two's-complement int32)
 
+//! DR-34 FAIL-CLOSED ACTIVATION GATE (v4.4 ENC-DR normative spec §5, DR-34).
+//! A public network (main/testnet/signet — regtest exempt) MUST NOT configure a
+//! LIVE (non-INT32_MAX) `nMatMulV4Height` until BOTH activation gates are
+//! recorded as passed IN THIS RELEASE:
+//!   (1) the §K.2b silicon no-inversion measurement (GO/NO-GO), and
+//!   (2) hard-fork ratification via the L0 amendment process.
+//! This flag is the code-enforced record of that: it defaults to FALSE, and
+//! `AssertBMX4CConstructionInvariants` aborts node startup if any public network
+//! is built with a live v4 height while it is false. It is the same fail-closed
+//! MECHANISM as the retired `BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY` flag,
+//! retargeted to the correct object (measured no-inversion + ratification, not
+//! relay readiness). Flip to true ONLY in the deliberate, reviewed source change
+//! of the release that ships activation, AFTER gates (1)-(2) are recorded.
+static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{false};
+
 /**
  * Per-profile MatMul v4 shape + carriage (consensus-normative; design §4.1 and
  * v4.4 tension-resolution §4.5). The single profile selector

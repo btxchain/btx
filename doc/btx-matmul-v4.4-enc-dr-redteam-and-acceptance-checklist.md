@@ -78,19 +78,46 @@ before the RC is considered complete.
 - [ ] Budget the recompute path SEPARATELY from the fail-fast cache path
   (cache-authenticated blocks must never queue behind attacker-forced recomputes).
   Keep the concurrency-slot cap.
-- [ ] Re-tune `nMatMulV4{Global,Peer}VerifyBudgetPerMin` to measured O(W) recompute
-  wall-time — RELEASE-BLOCKING, not informational.
-- [ ] Verify the IBD/fast-phase global-budget relaxation does not open an
-  unbudgeted recompute firehose during sync.
+- [ ] **Re-tune the verify budget in CPU-SECONDS, not check-count — RELEASE-BLOCKING.**
+  (Adversarial round, DoS lens Finding 1, sharpened.) The current
+  `nMatMulV4{Global,Peer}VerifyBudgetPerMin` are sized for the O(n²) Freivalds
+  fast path (~0.14–0.28 s/check → the chainparams "~4.8 CPU-s/min" comment), but at
+  an ENC-DR height a forged block (guaranteed cache+accel miss) is decided by the
+  O(n³) **recompute** (~10³× costlier). The same count budget therefore admits
+  ~32–64 CPU-s/min, not 4.8. Give the recompute path its OWN small budget
+  (e.g. 1–2/min) distinct from the Freivalds budget. Bench on a reference validator.
+- [ ] **Move the recompute OFF the single message-handler thread — RELEASE-BLOCKING.**
+  (Same finding.) `ProcessMessage→ProcessBlock→ProcessNewBlock` runs the recompute
+  synchronously on the one net thread; a forced multi-second GEMM stalls ALL peer
+  relay/ping for its duration → P2P livelock even though total CPU is ~1 core.
+  G.1 (cs_main release) does NOT fix this — it frees other cs_main takers, not the
+  net thread's own occupancy. Use an async worker with a bounded queue.
+- [ ] **Global-budget exhaustion must DEFER, not disconnect honest peers.**
+  (DoS lens Finding 2.) Once an attacker drains the 16/min global budget with forged
+  blocks, an honest peer relaying a REAL block in that minute is refused +
+  `fDisconnect`. Prefer deferral so a shared global limit never punishes a peer for
+  others' spend.
+- [ ] Verify the IBD/fast-phase global-budget relaxation (per-peer → 200 000/min,
+  global skipped) does not open an unbudgeted recompute firehose during sync;
+  assumevalid-trust + too-far-ahead bound but do not eliminate it.
 - [ ] Enable the SHA header spam-gate (`nMatMulHeaderPoWDiscountBits`) at activation
-  with its wire prerequisite, so header/block delivery is not free (else the verify
-  budget is the only line against forced-recompute + forged-best-header churn). C1
-  (SHA ≪ matmul) remains open — inherited, not introduced.
+  with its wire prerequisite (`BTX_HEADER_NONCE_ON_WIRE`), so header/block delivery
+  is not free — it is `UINT32_MAX` (disabled) in EVERY chainparams today, leaving the
+  mispriced verify budget as the SOLE throttle. C1 (SHA ≪ matmul) remains open —
+  inherited, not introduced; either enable the gate before activation or explicitly
+  remove it from the threat model.
 
 ### Activation
 - [ ] Single-height flag day; profile at `nMatMulV4Height` INT32_MAX on mainnet
   until GO. Relay-ready gate deleted; replacement gate = K.2b silicon no-inversion
   GO/NO-GO (κ=1.00) + L0 ratification, enforced by a startup invariant.
+- [x] **DR-34 fail-closed activation guard IMPLEMENTED.** `AssertBMX4CConstructionInvariants`
+  now aborts node startup if any public network (regtest exempt) is built with a live
+  (non-INT32_MAX) `nMatMulV4Height` while `Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED`
+  is false (its default). Flip that flag only in the reviewed release that ships
+  activation, AFTER the K.2b GO + L0 ratification are recorded — the same fail-closed
+  mechanism as the retired relay-ready flag, retargeted to measured no-inversion.
+  (Adversarial round, PoW-soundness lens Finding 2.)
 
 ## Bottom line
 Ship only with **R1 wired** and the **verify-side golden-vector gate** in place;

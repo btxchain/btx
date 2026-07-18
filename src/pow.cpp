@@ -3711,26 +3711,29 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
                 block, params.nMatMulV4Dimension, params.nMatMulV4FreivaldsRounds,
                 accel_digest, accel_sketch);
         }
-        if (accel_ok && UintToArith256(accel_digest) <= *bnTarget) {
-            // accel_digest is REFERENCE-GRADE here: a candidate at/under the
-            // target is a POTENTIAL WINNER, and the dispatch host-verifies every
-            // potential winner against the CPU pure-integer reference
-            // (VerifySketchBMX4C re-derives the honest operands, recomputes the
-            // digest, and runs the sketch-Freivalds check) before returning it —
-            // the same P1-4 contract the accept branch already trusted. So
-            // accel_digest equals what the CPU reference would produce, and the
-            // verdict below is bit-identical to the recompute path's. Reuse it
-            // instead of recomputing on the CPU a SECOND time (G.2). R1 holds:
-            // the value is reference-anchored, never raw device output. (A
-            // digest ABOVE target — a losing nonce, P1-4-unverified device
-            // output, or a device-error CPU fallback whose reference digest is
-            // itself > target — is NOT reused: it falls through to the
-            // authoritative recompute below, which alone may pronounce a reject.)
-            const bool ok = (accel_digest == block.matmul_digest);
-            if (ok) matmul::GetMatMulSketchCache().Put(block_hash, std::move(accel_sketch));
-            return finish(ok, MatMulValidationPath::RECOMPUTE);
+        if (accel_ok && accel_digest == block.matmul_digest &&
+            UintToArith256(accel_digest) <= *bnTarget) {
+            // ACCEPT-FAST ONLY (G.2). A potential winner (digest <= target) is
+            // host-verified by the dispatch against the honest operands before
+            // return, but via VerifySketchBMX4C's Fiat–Shamir FREIVALDS check
+            // (ε ≤ ~2⁻¹⁸⁰), not an exact ε=0 recompute — and on a device error
+            // the dispatch may fall back to the (test-asserted, not
+            // runtime-verified) batched-miner path. So accel_digest is
+            // Freivalds-grade, NOT exact-reference-grade. Accepting on a digest
+            // MATCH is fine: it carries the same ε the cache/accept side already
+            // does (a wrong accept needs a SHA collision). But a MISMATCH must
+            // NOT be rejected here — R1 reserves invalidity for the ε=0 CPU
+            // reference (pow.cpp §"R1 CPU-REFERENCE-ANCHORED REJECTION"), so any
+            // non-match (and any digest > target) falls through to the recompute
+            // below, which alone may pronounce a reject. (Cost of falling
+            // through on a ≤-target mismatch: one redundant recompute in a case
+            // that requires either a device/batched-miner divergence — exactly
+            // when you want the reference — or an attacker who burned a full
+            // valid PoW solution on a miscommitted header; never a DoS lever.)
+            matmul::GetMatMulSketchCache().Put(block_hash, std::move(accel_sketch));
+            return finish(true, MatMulValidationPath::RECOMPUTE);
         }
-        // Fall through: only the CPU reference may pronounce a reject.
+        // Fall through: only the CPU reference (ε=0) may pronounce a reject.
     }
 
     // --- RECOMPUTE reference path (the consensus definition; epsilon = 0).

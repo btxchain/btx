@@ -6080,11 +6080,21 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         // All gates passed: NOW take the single ~8 MiB copy (E.1) and serve. If
         // the entry was evicted (FIFO) between the size lookup and here, just
-        // skip WITHOUT stamping dedup so the requester may retry — the token/byte
-        // debits above are a harmless over-charge in that rare race.
+        // skip WITHOUT stamping dedup so the requester may retry — only the
+        // global byte budget was debited above (the per-peer token is spent
+        // below, after the copy succeeds), so this rare race is a harmless
+        // one-sketch over-charge of the egress budget, nothing else.
         std::vector<unsigned char> sketch;
         if (!matmul::GetMatMulSketchCache().Get(block_hash, sketch)) {
             LogDebug(BCLog::NET, "matmul: getmmsketch %s from peer=%d evicted before serve, skipping\n",
+                     block_hash.ToString(), pfrom.GetId());
+            return;
+        }
+        // Defense in depth: the ceiling was checked against GetSize()'s value;
+        // re-assert it against the actually-copied bytes so a Put that replaced
+        // the entry between GetSize and Get can never push an oversize message.
+        if (sketch.size() > MAX_MMSKETCH_PAYLOAD_SIZE) {
+            LogDebug(BCLog::NET, "matmul: getmmsketch %s from peer=%d grew past ceiling before serve, skipping\n",
                      block_hash.ToString(), pfrom.GetId());
             return;
         }
