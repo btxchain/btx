@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstddef>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdint.h>
 #include <string>
@@ -278,6 +279,46 @@ bool RecomputeMatMulV4SketchReference(const CBlockHeader& header,
                                       uint256& digest_out,
                                       std::vector<unsigned char>& sketch_out);
 
+// H5: process-wide SINGLE-FLIGHT for the ENC-DR digest recompute. The existing
+// per-block WRITE dedup (validation.cpp) and the global recompute budget
+// (ConsumeGlobalMatMulPhase2Budget) bound total CPU, but two peers delivering
+// the SAME block hash concurrently could still each launch the expensive
+// O(W) recompute. This RAII guard collapses those: for a given block hash only
+// ONE caller (the leader) performs the recompute; concurrent callers for the
+// same hash block in the constructor until the leader finishes, then read the
+// leader's verdict via LeaderResult() (and, on an accepted block, find the
+// sketch already in the local cache — the recompute path Put()s it). The
+// recompute is a pure function of the header, so reusing the leader's verdict
+// is consensus-equivalent to recomputing.
+struct MatMulRecomputeInFlight; // opaque; defined in pow.cpp
+class MatMulRecomputeSingleFlight
+{
+public:
+    /** Elect a leader for `block_hash`. If another thread is already recomputing
+     *  this hash, BLOCKS until it finishes; this caller then becomes a follower
+     *  (IsLeader() == false). Otherwise this caller is the leader
+     *  (IsLeader() == true) and must perform the recompute, publish the verdict
+     *  via SetResult(), and let the guard go out of scope to release waiters. */
+    explicit MatMulRecomputeSingleFlight(const uint256& block_hash);
+    ~MatMulRecomputeSingleFlight();
+    MatMulRecomputeSingleFlight(const MatMulRecomputeSingleFlight&) = delete;
+    MatMulRecomputeSingleFlight& operator=(const MatMulRecomputeSingleFlight&) = delete;
+
+    /** True iff this caller must perform the recompute. */
+    [[nodiscard]] bool IsLeader() const { return m_leader; }
+    /** Leader-only: publish the recompute verdict for waiting followers. No-op
+     *  for a follower. Call before the guard is destroyed. */
+    void SetResult(bool valid);
+    /** Follower-only: the leader's published verdict, or nullopt if the leader
+     *  did not publish one (e.g. it exited before recomputing) — in which case
+     *  the follower must recompute itself. Always nullopt for the leader. */
+    [[nodiscard]] std::optional<bool> LeaderResult() const;
+
+private:
+    std::shared_ptr<MatMulRecomputeInFlight> m_entry;
+    bool m_leader{false};
+};
+
 /** Miner handoff for the ENC-DR sketch cache (tension-resolution §4.3): move a
  *  freshly-solved block's in-body sketch (matrix_c_data, word-packed) into the
  *  local non-consensus sketch cache keyed by the block hash, then CLEAR
@@ -287,6 +328,19 @@ bool RecomputeMatMulV4SketchReference(const CBlockHeader& header,
  *  after the solver finalized the header (block.GetHash() stable). Returns
  *  false (no-op) if the body sketch is already empty. */
 bool OffloadMatMulV4SketchToCache(CBlock& block);
+
+/** WP-2 / C3 central producer finalizer: the single place every block PRODUCER
+ *  (generateblock RPC, submitSolution IPC, test mining helpers) routes a
+ *  freshly-solved block through so an ENC-DR block never serializes with a
+ *  non-empty body (validation.cpp rejects a non-empty body at DIGEST_RECOMPUTE
+ *  heights). Wraps the exact guard used by the generate RPC: at heights where
+ *  IsMatMulV4Active(height) AND the active commitment scheme is
+ *  DIGEST_RECOMPUTE, offload the just-committed 8·m² sketch (block.matrix_c_data)
+ *  to the local non-consensus sketch cache and CLEAR the in-block body via
+ *  OffloadMatMulV4SketchToCache. Under FLAT_SKETCH_INBLOCK (regtest replay only)
+ *  the body is left intact. Returns true iff the body was offloaded+cleared.
+ *  Call ONLY after the solver finalized the header (block.GetHash() stable). */
+bool FinalizeMatMulSolvedBlock(CBlock& block, const Consensus::Params& params, int height);
 
 /** True iff the block's v4 sketch payload reconstructs the header's committed
  *  matmul_digest. A false result means the payload (block body) is a MUTATION of

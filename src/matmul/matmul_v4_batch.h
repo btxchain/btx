@@ -79,6 +79,21 @@ public:
     [[nodiscard]] bool Mine(const std::vector<CBlockHeader>& headers,
                             std::vector<BatchNonceResult>& out) const;
 
+    /** H7 two-phase (digest-then-sketch) window. Identical to Mine() above —
+     *  every out[i].digest and out[i].nonce is byte-identical — EXCEPT the full
+     *  8·m² serialized sketch payload is RETAINED only for candidates whose
+     *  digest is <= `target` (winners / pool shares); losing nonces leave
+     *  out[i].payload empty. This bounds retained memory over a Q-wide window to
+     *  O(winners) full payloads instead of O(Q), mirroring the BMX4C
+     *  target-gated host-verify. The digest still binds the full sketch (it is
+     *  H(sigma || SerializeSketch(Chat))), so the sketch is materialized
+     *  transiently per candidate and discarded for losers rather than never
+     *  computed. Pass the block target for solo mining or an easier share target
+     *  for pooled mining. Same fail-closed template-projection contract. */
+    [[nodiscard]] bool Mine(const std::vector<CBlockHeader>& headers,
+                            const uint256& target,
+                            std::vector<BatchNonceResult>& out) const;
+
     /** Convenience window for tests/benches: clones the construction template
      *  and sets nNonce64 = start_nonce + i for i in [0, count). NOTE: this
      *  does NOT re-derive the §H.4 seed_a/seed_b header fields per nonce, so
@@ -95,6 +110,14 @@ public:
     [[nodiscard]] const uint256& TemplateHash() const { return m_template_hash; }
 
 private:
+    /** Shared implementation for both Mine() overloads. When `target` is
+     *  non-null, the serialized sketch payload is retained only for candidates
+     *  whose digest is <= *target (two-phase); when null, every payload is
+     *  retained (single-phase). Digests and nonces are identical either way. */
+    [[nodiscard]] bool MineImpl(const std::vector<CBlockHeader>& headers,
+                                const uint256* target,
+                                std::vector<BatchNonceResult>& out) const;
+
     CBlockHeader m_template;
     uint256 m_template_hash;
     uint32_t m_n{0};

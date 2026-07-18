@@ -9,6 +9,7 @@
 #include <util/chaintype.h>
 
 #include <boost/test/unit_test.hpp>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -379,7 +380,39 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_ibd_budget_floor_supports_repeated_he
     params.nMatMulPeerVerifyBudgetPerMin = 32;
 
     BOOST_CHECK_EQUAL(EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/false), 32U);
+    // WP-10 / C2 residual: the IBD floor is now a TWO-REGIME function of the
+    // reference height (see EffectiveMatMulPeerVerifyBudgetPerMin in pow.cpp).
+    //
+    // (a) Fast-phase bootstrap regime — the default reference_height=-1 sentinel
+    //     (and any height < nFastMineHeight) retains the full 200000 floor, since
+    //     every fast-phase header is phase-2-relevant. This preserves the old
+    //     honest-bootstrap contract, so the original assertion still holds as-is.
     BOOST_CHECK_GE(EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true), 200'000U);
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true, /*reference_height=*/-1),
+        200'000U);
+
+    // (b) Post-fast-phase IBD regime — with a concrete reference_height at/above
+    //     nFastMineHeight the floor is BOUNDED to
+    //     max(base, global, nMatMulIbdPeerVerifyBudgetPerMin) instead of the old
+    //     unconditional 200000, restoring concrete per-peer accountability during
+    //     near-tip catch-up. Compute the expected bound from the public budget
+    //     accessors (base == the non-IBD value at that height) so this locks the
+    //     new two-regime contract without hard-coding the arithmetic.
+    const int32_t post_fast_height = static_cast<int32_t>(params.nFastMineHeight);
+    const uint32_t base_at_height =
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/false, post_fast_height);
+    const uint32_t global_at_height =
+        EffectiveMatMulGlobalVerifyBudgetPerMin(params, post_fast_height);
+    const uint32_t expected_bounded =
+        std::max({base_at_height, global_at_height, params.nMatMulIbdPeerVerifyBudgetPerMin});
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true, post_fast_height),
+        expected_bounded);
+    // The post-fast-phase bound is a strict tightening of the old 200000 floor.
+    BOOST_CHECK_LT(
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true, post_fast_height),
+        200'000U);
 }
 
 BOOST_AUTO_TEST_CASE(validation_rate_limit_fast_phase_budget_floor_outside_ibd)

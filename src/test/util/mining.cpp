@@ -18,6 +18,7 @@
 #include <validationinterface.h>
 #include <versionbits.h>
 
+#include <cassert>
 #include <limits>
 
 using node::BlockAssembler;
@@ -135,6 +136,21 @@ bool MineHeaderForConsensus(CBlock& block,
         if (block.matrix_c_data.empty() && consensus.fMatMulFreivaldsEnabled) {
             PopulateFreivaldsPayload(block, consensus);
         }
+        // WP-1 / C3: at ENC-DR (DIGEST_RECOMPUTE) heights the block body MUST be
+        // empty (validation rejects a non-empty body at DIGEST_RECOMPUTE), so
+        // route the freshly-committed sketch through the central producer
+        // finalizer, which offloads it to the local cache and clears
+        // matrix_c_data. Without this the helper produces self-rejecting ENC-DR
+        // blocks that break validation_block_tests / mempool_locks_reorg. Under
+        // FLAT_SKETCH_INBLOCK (regtest replay only) the inline sketch is retained.
+        const int height = static_cast<int>(block_height);
+        const bool enc_dr =
+            consensus.IsMatMulV4Active(height) &&
+            consensus.GetMatMulProfileParams(height).commitment ==
+                Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE;
+        FinalizeMatMulSolvedBlock(block, consensus, height);
+        // The ENC-DR block body is now empty; the sketch lives in the cache.
+        assert(!enc_dr || block.matrix_c_data.empty());
     } else if (consensus.fMatMulPOW && consensus.fMatMulFreivaldsEnabled) {
         // v3 (pre-product-digest) path: unchanged.
         PopulateFreivaldsPayload(block, consensus);

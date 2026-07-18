@@ -288,6 +288,24 @@ struct Params {
     uint32_t nMatMulValidationWindow{1000};
     uint32_t nMatMulMaxPendingVerifications{16};
     uint32_t nMatMulPeerVerifyBudgetPerMin{32};
+    /** WP-10 / C2 residual: BOUNDED per-peer expensive-verify budget floor used
+     *  DURING IBD only. Historically IBD escalated the per-peer budget to
+     *  200000/min, which effectively removed per-peer throttling during
+     *  catch-up (only the shared global cap deferred), so a single peer bore no
+     *  individual accountability. This floor applies ONLY to POST-fast-phase IBD
+     *  (EffectiveMatMulPeerVerifyBudgetPerMin): fast-phase bootstrap keeps the
+     *  full 200000 because every header there is phase-2-relevant. Post-fast-phase,
+     *  deep history is assumevalid-skipped (0 checks) and only the unburied
+     *  near-tip window charges — bounded by the assumevalid age (~2 weeks ~= ~13k
+     *  blocks at production spacing), a one-time catch-up burst. 65536 covers that
+     *  burst with ~5x margin (honest catch-up is never per-peer-throttled) while
+     *  giving a concrete per-peer ceiling — a ~3x tightening from the old
+     *  unconditional 200000. Note the expensive O(W) recompute is bounded
+     *  separately (shared global 4/min for v4 + concurrency slots), so this
+     *  header-check floor is not the expensive-DoS bound; combined with the
+     *  already-landed defer-not-disconnect policy, exceeding it paces the peer
+     *  rather than churning the connection. */
+    uint32_t nMatMulIbdPeerVerifyBudgetPerMin{65536};
     uint32_t nMatMulPhase2FailBanThreshold{1};
     bool fMatMulStrictPunishment{false};
     uint32_t nMatMulSnapshotInterval{10'000};

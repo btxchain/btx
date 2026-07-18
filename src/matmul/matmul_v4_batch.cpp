@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_batch.h>
 
+#include <arith_uint256.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_v4.h>
 #include <primitives/block.h>
@@ -11,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -41,6 +43,20 @@ BatchedSketchMiner::BatchedSketchMiner(const CBlockHeader& header, uint32_t n)
 
 bool BatchedSketchMiner::Mine(const std::vector<CBlockHeader>& headers,
                               std::vector<BatchNonceResult>& out) const
+{
+    return MineImpl(headers, /*target=*/nullptr, out);
+}
+
+bool BatchedSketchMiner::Mine(const std::vector<CBlockHeader>& headers,
+                              const uint256& target,
+                              std::vector<BatchNonceResult>& out) const
+{
+    return MineImpl(headers, &target, out);
+}
+
+bool BatchedSketchMiner::MineImpl(const std::vector<CBlockHeader>& headers,
+                                  const uint256* target,
+                                  std::vector<BatchNonceResult>& out) const
 {
     out.clear();
     if (!m_valid || headers.empty()) return false;
@@ -79,18 +95,33 @@ bool BatchedSketchMiner::Mine(const std::vector<CBlockHeader>& headers,
     // byte-identical per column block to the single-nonce combine.
     const std::vector<Fq> Chat_wide = ComputeCombineLimbTensorStacked(m_P, Qstack, m_n, m_m, q_cols);
 
-    // Slice per nonce, serialize, digest.
+    // Slice per nonce, serialize, digest. H7 two-phase: the digest binds the
+    // full serialized sketch (H(sigma||SerializeSketch(Chat))), so each
+    // candidate's 8·m² payload is materialized into a REUSED scratch buffer to
+    // compute the digest, but is retained in out[idx].payload only when it is a
+    // winner/share (digest <= *target). Losing nonces leave payload empty, so at
+    // most one loser payload lives at a time (plus retained winners) instead of
+    // Q simultaneous 8 MiB payloads. With target==nullptr every payload is
+    // retained (single-phase behaviour, byte-identical to the legacy Mine).
+    const std::optional<arith_uint256> bnTarget =
+        target != nullptr ? std::optional<arith_uint256>(UintToArith256(*target)) : std::nullopt;
     out.reserve(count);
+    std::vector<unsigned char> scratch;
     for (uint32_t idx = 0; idx < count; ++idx) {
         std::vector<Fq> Chat(static_cast<size_t>(m_m) * m_m);
         for (uint32_t a = 0; a < m_m; ++a) {
             const Fq* src = &Chat_wide[static_cast<size_t>(a) * q_cols + static_cast<size_t>(idx) * m_m];
             std::copy(src, src + m_m, &Chat[static_cast<size_t>(a) * m_m]);
         }
+        scratch = SerializeSketch(Chat);
         BatchNonceResult res;
         res.nonce = headers[idx].nNonce64;
-        res.payload = SerializeSketch(Chat);
-        res.digest = ComputeSketchDigest(sigmas[idx], res.payload);
+        res.digest = ComputeSketchDigest(sigmas[idx], scratch);
+        const bool retain_payload =
+            !bnTarget.has_value() || UintToArith256(res.digest) <= *bnTarget;
+        if (retain_payload) {
+            res.payload = std::move(scratch);
+        }
         out.push_back(std::move(res));
     }
     return true;

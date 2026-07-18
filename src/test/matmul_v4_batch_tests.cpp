@@ -17,6 +17,7 @@
 //      nonce-derived seed_a/seed_b header fields) while operand B and sigma
 //      remain nonce-fresh (§A.2 v4.1, invariant I1').
 
+#include <arith_uint256.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_batch.h>
 #include <matmul/pow_v4.h>
@@ -28,6 +29,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <iterator>
 #include <limits>
@@ -202,6 +204,89 @@ BOOST_AUTO_TEST_CASE(batched_miner_matches_single_nonce_reference)
         BOOST_CHECK(matmul_v4::VerifySketch(header, n, /*rounds=*/2, batch[i].payload, verified));
         BOOST_CHECK(verified == batch[i].digest);
     }
+}
+
+// H7: two-phase (digest-then-sketch) window. Digests/nonces are byte-identical
+// to the single-phase Mine, but the full 8*m^2 sketch payload is RETAINED only
+// for candidates meeting the target (winners/shares); losers carry an empty
+// payload, bounding retained memory over a Q-wide window from O(Q) to
+// O(winners). This mirrors the BMX4C target-gated host verify.
+BOOST_AUTO_TEST_CASE(batched_miner_two_phase_retains_only_winner_payloads)
+{
+    const uint32_t n = kTestDim;
+    const CBlockHeader tmpl = MakeV4Header(/*nonce=*/0, n);
+    const matmul::v4::BatchedSketchMiner miner{tmpl, n};
+    BOOST_REQUIRE(miner.Valid());
+
+    const uint64_t start = 41;
+    const uint32_t count = 8;
+    std::vector<CBlockHeader> candidates(count, tmpl);
+    for (uint32_t i = 0; i < count; ++i) {
+        candidates[i].nNonce64 = start + i;
+        candidates[i].nNonce = static_cast<uint32_t>(candidates[i].nNonce64);
+    }
+
+    // Reference: the single-phase Mine retains every payload.
+    std::vector<matmul::v4::BatchNonceResult> reference;
+    BOOST_REQUIRE(miner.Mine(candidates, reference));
+    BOOST_REQUIRE_EQUAL(reference.size(), count);
+    for (const auto& r : reference) {
+        BOOST_CHECK_EQUAL(r.payload.size(), 8u * (n / matmul_v4::kTileB) * (n / matmul_v4::kTileB));
+    }
+
+    // Phase A — an all-rejecting target (0): every nonce is a loser, so NO
+    // payload is retained. Digests still match the reference exactly (the
+    // sketch is materialized transiently to compute each digest, then dropped).
+    const uint256 no_winner_target = uint256::ZERO;
+    std::vector<matmul::v4::BatchNonceResult> losers;
+    BOOST_REQUIRE(miner.Mine(candidates, no_winner_target, losers));
+    BOOST_REQUIRE_EQUAL(losers.size(), count);
+    size_t retained_bytes = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        BOOST_CHECK(losers[i].digest == reference[i].digest);
+        BOOST_CHECK_EQUAL(losers[i].nonce, reference[i].nonce);
+        BOOST_CHECK(losers[i].payload.empty()); // MEMORY CEILING: no loser payload
+        retained_bytes += losers[i].payload.size();
+    }
+    BOOST_CHECK_EQUAL(retained_bytes, 0u);
+
+    // Phase B — an all-accepting target (max): every candidate is a winner, so
+    // every payload is retained and byte-identical to the single-phase result.
+    const uint256 all_winner_target = ParseUint256(
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    std::vector<matmul::v4::BatchNonceResult> winners;
+    BOOST_REQUIRE(miner.Mine(candidates, all_winner_target, winners));
+    BOOST_REQUIRE_EQUAL(winners.size(), count);
+    for (uint32_t i = 0; i < count; ++i) {
+        BOOST_CHECK(winners[i].digest == reference[i].digest);
+        BOOST_CHECK(winners[i].payload == reference[i].payload);
+    }
+
+    // Phase C — an intermediate target: payload retained IFF digest <= target,
+    // and every retained payload is byte-identical to the reference. Pick the
+    // median digest as the threshold so at least one winner and one loser exist
+    // regardless of the deterministic digest distribution.
+    std::vector<arith_uint256> sorted;
+    for (const auto& r : reference) sorted.push_back(UintToArith256(r.digest));
+    std::sort(sorted.begin(), sorted.end());
+    const uint256 mid_target = ArithToUint256(sorted[count / 2]);
+    const arith_uint256 mid = UintToArith256(mid_target);
+    std::vector<matmul::v4::BatchNonceResult> mixed;
+    BOOST_REQUIRE(miner.Mine(candidates, mid_target, mixed));
+    BOOST_REQUIRE_EQUAL(mixed.size(), count);
+    bool saw_winner = false, saw_loser = false;
+    for (uint32_t i = 0; i < count; ++i) {
+        BOOST_CHECK(mixed[i].digest == reference[i].digest);
+        if (UintToArith256(reference[i].digest) <= mid) {
+            BOOST_CHECK(mixed[i].payload == reference[i].payload);
+            saw_winner = true;
+        } else {
+            BOOST_CHECK(mixed[i].payload.empty());
+            saw_loser = true;
+        }
+    }
+    BOOST_CHECK(saw_winner);
+    BOOST_CHECK(saw_loser);
 }
 
 BOOST_AUTO_TEST_CASE(batched_miner_matches_reference_under_seed_churn)

@@ -10,6 +10,7 @@
 #include <matmul/accelerated_solver.h>
 #include <matmul/freivalds.h>
 #include <matmul/matmul_pow.h>
+#include <matmul/matmul_sketch_cache.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matrix.h>
 #include <matmul/noise.h>
@@ -24,11 +25,14 @@
 #include <validation.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -3082,6 +3086,203 @@ BOOST_AUTO_TEST_CASE(matmul_share_target_override_relaxes_only_digest_exit)
                                 "block-target override unexpectedly solved at height " << height);
         }
     }
+}
+
+// H6 (WP-9): the pooled share_target_override must ALSO be honored at v4
+// heights, where SolveMatMul dispatches early to SolveMatMulV4 (the legacy path
+// at pow_tests.cpp above covers only pre-v4 solvers). Without threading the
+// override through the v4 dispatch, pool shares are silently dropped once v4 is
+// active. Exercised on the ENC-S8 CPU batched path (n=256, BMX4C disabled so the
+// profile is ENC_S8).
+BOOST_AUTO_TEST_CASE(matmul_v4_share_target_override_relaxes_only_digest_exit)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    // v4 active at height 100; keep BMX4C disabled so the live profile is ENC_S8
+    // (the path whose solver previously ignored the override).
+    consensus.nMatMulV4Height = 100;
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulV4Dimension = 256;
+    consensus.nMatMulV4MinDimension = 64;
+    consensus.nMatMulV4MaxDimension = 1024;
+    consensus.nMatMulV4TranscriptBlockSize = 4;
+    consensus.nMatMulV4FreivaldsRounds = 2;
+
+    const int32_t height = 100;
+    const int64_t parent_mtp = 1'700'000'000;
+    BOOST_REQUIRE(consensus.IsMatMulV4Active(height));
+    BOOST_REQUIRE(consensus.GetMatMulEncodingProfile(height) ==
+                  Consensus::MatMulEncodingProfile::ENC_S8);
+
+    auto make_candidate = [&]() {
+        CBlockHeader c{};
+        c.nVersion = 0x20000004;
+        c.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000041"};
+        c.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000042"};
+        c.nTime = 1'700'000'900U;
+        c.nBits = arith_uint256{1}.GetCompact(); // block target == 1 (unsolvable in a few tries)
+        c.nNonce64 = 1;
+        c.nNonce = 1;
+        c.matmul_dim = static_cast<uint16_t>(consensus.nMatMulV4Dimension);
+        c.matmul_digest.SetNull();
+        return c;
+    };
+
+    // 1) Mining against the (tiny) block target finds nothing in a few tries.
+    {
+        CBlockHeader candidate = make_candidate();
+        uint64_t max_tries{8};
+        BOOST_CHECK(!SolveMatMul(candidate, consensus, max_tries, height,
+                                 /*abort_flag=*/nullptr, /*freivalds_payload_out=*/nullptr,
+                                 /*share_target_override=*/nullptr, parent_mtp));
+    }
+
+    // 2) The easy share target accepts the first scanned nonce as a share, and
+    //    the committed sketch payload is surfaced (H7 winner retention).
+    {
+        const uint256 easy_share_target{
+            uint256::FromHex("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff").value()};
+        CBlockHeader candidate = make_candidate();
+        std::vector<uint32_t> payload;
+        uint64_t max_tries{8};
+        const bool solved = SolveMatMul(candidate, consensus, max_tries, height,
+                                        /*abort_flag=*/nullptr, &payload,
+                                        &easy_share_target, parent_mtp);
+        BOOST_CHECK(solved);
+        BOOST_CHECK(!candidate.matmul_digest.IsNull());
+        BOOST_CHECK_LE(UintToArith256(candidate.matmul_digest), UintToArith256(easy_share_target));
+        BOOST_CHECK(!payload.empty()); // winner sketch retained by the two-phase miner
+        // The share digest does NOT meet the block target (== 1): override relaxed
+        // ONLY the digest early-exit, exactly as on the legacy path.
+        const auto block_target = DeriveTarget(candidate.nBits, consensus.powLimit);
+        BOOST_REQUIRE(block_target.has_value());
+        BOOST_CHECK_GT(UintToArith256(candidate.matmul_digest), *block_target);
+    }
+
+    // 3) A zero share target is rejected at v4 heights too.
+    {
+        CBlockHeader candidate = make_candidate();
+        uint64_t max_tries{8};
+        const uint256 zero_target{};
+        BOOST_CHECK(!SolveMatMul(candidate, consensus, max_tries, height,
+                                 nullptr, nullptr, &zero_target, parent_mtp));
+    }
+}
+
+// WP-2 / C3: FinalizeMatMulSolvedBlock is the central producer finalizer. At an
+// ENC-DR (DIGEST_RECOMPUTE) height it must offload the committed sketch to the
+// local cache and CLEAR the block body so the block serializes digest-only;
+// otherwise the validator rejects the non-empty body. This is the fix wired into
+// submitSolution (IPC) and the test mining helper.
+BOOST_AUTO_TEST_CASE(finalize_matmul_solved_block_offloads_at_enc_dr_height)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulV4Height = 100;
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+    consensus.fMatMulV4FlatSketchReplay = false; // DIGEST_RECOMPUTE (default)
+
+    const int enc_dr_height = 100;
+    BOOST_REQUIRE(consensus.GetMatMulProfileParams(enc_dr_height).commitment ==
+                  Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE);
+
+    auto make_block = [&]() {
+        CBlock block{};
+        block.nVersion = 0x20000004;
+        block.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000a1"};
+        block.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000a2"};
+        block.nTime = 1'700'000'123U;
+        block.nBits = arith_uint256{1}.GetCompact();
+        block.nNonce64 = 7;
+        block.nNonce = 7;
+        block.matmul_dim = 256;
+        // Stand-in committed sketch payload (word-packed matrix_c_data).
+        block.matrix_c_data.assign({0x11111111U, 0x22222222U, 0x33333333U, 0x44444444U});
+        return block;
+    };
+
+    // ENC-DR height: offloads + clears the body, and the cache holds the sketch.
+    {
+        CBlock block = make_block();
+        const uint256 hash = block.GetHash();
+        matmul::GetMatMulSketchCache().Erase(hash); // clean slate
+        const bool offloaded = FinalizeMatMulSolvedBlock(block, consensus, enc_dr_height);
+        BOOST_CHECK(offloaded);
+        BOOST_CHECK(block.matrix_c_data.empty());          // empty-body rule satisfied
+        BOOST_CHECK(matmul::GetMatMulSketchCache().Have(hash)); // sketch cached for serving
+        matmul::GetMatMulSketchCache().Erase(hash);
+    }
+
+    // Below v4 activation: no offload, body left intact.
+    {
+        CBlock block = make_block();
+        const bool offloaded = FinalizeMatMulSolvedBlock(block, consensus, /*height=*/50);
+        BOOST_CHECK(!offloaded);
+        BOOST_CHECK(!block.matrix_c_data.empty());
+    }
+
+    // FLAT_SKETCH_INBLOCK (regtest replay only): body retained, no offload.
+    {
+        auto replay = consensus;
+        replay.fMatMulV4FlatSketchReplay = true;
+        BOOST_REQUIRE(replay.GetMatMulProfileParams(enc_dr_height).commitment ==
+                      Consensus::MatMulCommitmentScheme::FLAT_SKETCH_INBLOCK);
+        CBlock block = make_block();
+        const bool offloaded = FinalizeMatMulSolvedBlock(block, replay, enc_dr_height);
+        BOOST_CHECK(!offloaded);
+        BOOST_CHECK(!block.matrix_c_data.empty());
+    }
+}
+
+// H5 (WP-9): the process-wide single-flight collapses duplicate concurrent
+// recomputes of the SAME block hash. Two threads racing on one hash must elect
+// exactly one leader; the follower blocks until the leader finishes and then
+// reuses the leader's verdict instead of launching a second expensive recompute.
+BOOST_AUTO_TEST_CASE(matmul_recompute_single_flight_collapses_duplicates)
+{
+    const uint256 hash{uint256::FromHex(std::string(64, 'a')).value()};
+
+    std::atomic<int> recompute_count{0};
+    std::atomic<bool> leader_registered{false};
+    std::atomic<bool> follower_reached{false};
+    std::atomic<bool> follower_is_leader{true};
+    std::optional<bool> follower_result;
+
+    std::thread follower([&]() {
+        while (!leader_registered.load(std::memory_order_acquire)) std::this_thread::yield();
+        follower_reached.store(true, std::memory_order_release);
+        // Blocks in the constructor until the leader releases the guard.
+        MatMulRecomputeSingleFlight guard(hash);
+        follower_is_leader.store(guard.IsLeader(), std::memory_order_relaxed);
+        if (guard.IsLeader()) {
+            recompute_count.fetch_add(1, std::memory_order_relaxed); // would be a 2nd recompute
+        } else {
+            follower_result = guard.LeaderResult();
+            if (!follower_result.has_value()) {
+                recompute_count.fetch_add(1, std::memory_order_relaxed); // no verdict -> must recompute
+            }
+        }
+    });
+
+    {
+        MatMulRecomputeSingleFlight leader(hash);
+        BOOST_REQUIRE(leader.IsLeader());
+        leader_registered.store(true, std::memory_order_release);
+        // Wait until the follower has begun its (blocking) acquisition so it
+        // deterministically observes us as in-flight, then simulate the
+        // expensive recompute and publish the verdict.
+        while (!follower_reached.load(std::memory_order_acquire)) std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        recompute_count.fetch_add(1, std::memory_order_relaxed);
+        leader.SetResult(true);
+    } // leader guard destroyed -> follower released
+
+    follower.join();
+    BOOST_CHECK(!follower_is_leader.load());            // exactly one leader
+    BOOST_REQUIRE(follower_result.has_value());         // follower saw the leader's verdict
+    BOOST_CHECK_EQUAL(follower_result.value(), true);
+    BOOST_CHECK_EQUAL(recompute_count.load(), 1);       // ONE recompute for the shared hash
 }
 
 BOOST_AUTO_TEST_CASE(matmul_solve_prefetches_following_single_nonce_batches_when_async_enabled)

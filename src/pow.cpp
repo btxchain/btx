@@ -45,6 +45,8 @@
 #include <functional>
 #include <future>
 #include <limits>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <numeric>
 #include <optional>
@@ -3810,6 +3812,86 @@ bool OffloadMatMulV4SketchToCache(CBlock& block)
     return true;
 }
 
+bool FinalizeMatMulSolvedBlock(CBlock& block, const Consensus::Params& params, int height)
+{
+    // WP-2 / C3: central producer finalizer. Mirrors the generateblock RPC
+    // guard (rpc/mining.cpp): at ENC-DR heights the block body MUST be empty
+    // (validation.cpp rejects a non-empty body at DIGEST_RECOMPUTE), so offload
+    // the just-committed sketch to the local cache and clear matrix_c_data. The
+    // predicate is IsMatMulV4Active(height) AND the active commitment scheme is
+    // DIGEST_RECOMPUTE; under FLAT_SKETCH_INBLOCK (regtest replay only) the body
+    // is left intact.
+    if (params.IsMatMulV4Active(height) &&
+        params.GetMatMulProfileParams(height).commitment ==
+            Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
+        return OffloadMatMulV4SketchToCache(block);
+    }
+    return false;
+}
+
+// H5: process-wide single-flight for the ENC-DR digest recompute. Keyed by
+// block hash; one shared entry per in-flight hash carries a condition variable,
+// a done flag, and the leader's verdict. All access is under a single global
+// mutex (the recomputes themselves run OUTSIDE the lock — only the short
+// enqueue/dequeue/publish transitions hold it).
+struct MatMulRecomputeInFlight {
+    uint256 hash;
+    std::condition_variable cv;
+    bool done{false};
+    bool has_result{false};
+    bool result_valid{false};
+};
+
+namespace {
+std::mutex g_matmul_recompute_singleflight_mutex;
+std::map<uint256, std::shared_ptr<MatMulRecomputeInFlight>> g_matmul_recompute_inflight;
+} // namespace
+
+MatMulRecomputeSingleFlight::MatMulRecomputeSingleFlight(const uint256& block_hash)
+{
+    std::unique_lock<std::mutex> lock(g_matmul_recompute_singleflight_mutex);
+    auto it = g_matmul_recompute_inflight.find(block_hash);
+    if (it == g_matmul_recompute_inflight.end()) {
+        // No in-flight recompute for this hash: become the leader.
+        m_entry = std::make_shared<MatMulRecomputeInFlight>();
+        m_entry->hash = block_hash;
+        g_matmul_recompute_inflight.emplace(block_hash, m_entry);
+        m_leader = true;
+        return;
+    }
+    // A recompute for this hash is already in flight: become a follower and
+    // wait for the leader to finish. The shared entry keeps the verdict alive
+    // even after the leader erases it from the map.
+    m_entry = it->second;
+    m_leader = false;
+    m_entry->cv.wait(lock, [this] { return m_entry->done; });
+}
+
+MatMulRecomputeSingleFlight::~MatMulRecomputeSingleFlight()
+{
+    if (!m_leader || !m_entry) return;
+    std::lock_guard<std::mutex> lock(g_matmul_recompute_singleflight_mutex);
+    g_matmul_recompute_inflight.erase(m_entry->hash);
+    m_entry->done = true;
+    m_entry->cv.notify_all();
+}
+
+void MatMulRecomputeSingleFlight::SetResult(bool valid)
+{
+    if (!m_leader || !m_entry) return;
+    std::lock_guard<std::mutex> lock(g_matmul_recompute_singleflight_mutex);
+    m_entry->result_valid = valid;
+    m_entry->has_result = true;
+}
+
+std::optional<bool> MatMulRecomputeSingleFlight::LeaderResult() const
+{
+    if (m_leader || !m_entry) return std::nullopt;
+    std::lock_guard<std::mutex> lock(g_matmul_recompute_singleflight_mutex);
+    if (!m_entry->has_result) return std::nullopt;
+    return m_entry->result_valid;
+}
+
 bool MatMulV4PayloadMatchesCommitment(const CBlock& block)
 {
     // Distinguishes a v4 body mutation (payload does not reconstruct the
@@ -4050,9 +4132,42 @@ uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, 
 {
     const uint32_t base = SelectMatMulPeerVerifyBudgetBase(params, reference_height);
     if (!is_ibd) return base;
-    // IBD needs to process repeated 2000-header batches without disconnect
-    // churn. Keep a finite but substantially higher cap than steady-state.
-    return std::max<uint32_t>(base, 200'000U);
+    // WP-10 / C2 residual: SAFE-MIDDLE IBD escalation (re-tuned after the naive
+    // max(base, 200000) neutralized per-peer throttling and the naive
+    // max(base, global, 240) broke honest bootstrap sync — see
+    // matmul_trust_model_tests::...ibd_budget_floor_supports_repeated_header_batches).
+    //
+    // This budget gates CountMatMulPhase2Checks — the *header-batch* phase-2
+    // checks, which are cheap. The expensive O(W) full-block recompute is bounded
+    // independently by the shared GLOBAL cap (4/min for v4 ENC-DR) and the
+    // concurrency slots (nMatMulMaxPendingVerifications), so tightening THIS
+    // per-peer header-check floor does not weaken the expensive-recompute DoS
+    // bound — it only governs how many phase-2-relevant headers one peer may
+    // present per minute during catch-up.
+    //
+    // Two regimes:
+    //  (a) Fast-phase bootstrap (reference_height < nFastMineHeight, or the -1
+    //      "unknown height" sentinel used by callers without a height): EVERY
+    //      header is phase-2-relevant, so honest catch-up legitimately needs the
+    //      full floor — retain the tested 200000 (mirrors the non-IBD fast-phase
+    //      floor below). Real runtime always passes a concrete height here; -1 is
+    //      the conservative default.
+    //  (b) Post-fast-phase IBD: deep history is assumevalid-skipped (0 checks),
+    //      so only the unburied near-tip window charges. That window is bounded by
+    //      the assumevalid age (~2 weeks ~= ~13k blocks at production spacing),
+    //      delivered as a one-time catch-up burst. Bound the floor to
+    //      max(base, global, nMatMulIbdPeerVerifyBudgetPerMin) — a finite cap that
+    //      comfortably covers that burst (default 65536, ~5x margin over the
+    //      window) while restoring concrete per-peer accountability (a ~3x
+    //      tightening from the old unconditional 200000).
+    // NOTE: fully re-enabling the header-PoW spam throttle still requires putting
+    // the header nonce on the wire (BTX_HEADER_NONCE_ON_WIRE) — a separate
+    // coordinated header-format change, out of scope here.
+    if (reference_height < 0 || reference_height < params.nFastMineHeight) {
+        return std::max<uint32_t>(base, 200'000U);
+    }
+    const uint32_t global_budget = EffectiveMatMulGlobalVerifyBudgetPerMin(params, reference_height);
+    return std::max<uint32_t>({base, global_budget, params.nMatMulIbdPeerVerifyBudgetPerMin});
 }
 
 bool ConsumeMatMulPeerVerifyBudget(
@@ -4754,11 +4869,13 @@ bool SolveMatMulParallel(CBlockHeader& block,
 
 // MatMul v4 (spec §I.3): dedicated solver loop, mirroring the v3 solvers'
 // nonce/max_tries/abort_flag contract but dispatched separately because v4
-// has no pre-hash gate, no noise, and no pooled share-target override (out
-// of scope for this fork; see spec §I.3 -- the v4 reference miner MUST
-// implement the optimal §E.3 (U*A)(B*V) sketch evaluation, which is an
-// internal implementation detail of matmul_v4::ComputeDigest, not something
-// this dispatch layer needs to know about).
+// has no pre-hash gate and no noise. H6: the pooled share-target override IS
+// honored here (threaded from the SolveMatMul v4 dispatch) — it relaxes ONLY
+// the digest early-exit so pool shares are not silently dropped at v4 heights,
+// exactly as on the legacy path. The v4 reference miner MUST implement the
+// optimal §E.3 (U*A)(B*V) sketch evaluation, which is an internal
+// implementation detail of matmul_v4::ComputeDigest, not something this
+// dispatch layer needs to know about.
 // MatMul v4.2 / ENC-BMX4C solve loop (spec §8.2 "Mining" row). Profile-gated
 // sibling of the SolveMatMulV4 CPU-batched branch: nonces are ground in windows
 // of Q through matmul_v4::accel::ComputeDigestsBMX4CDispatched — the ENC-BMX4C
@@ -4777,13 +4894,28 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
                                std::vector<uint32_t>* freivalds_payload_out,
                                std::optional<int64_t> parent_median_time_past,
                                const arith_uint256& bnTarget,
-                               std::chrono::steady_clock::time_point start)
+                               std::chrono::steady_clock::time_point start,
+                               const uint256* share_target_override)
 {
     const uint32_t n = params.nMatMulV4Dimension;
     uint32_t window_span = matmul::v4::kDefaultMinerBatch;
     if (const char* env = std::getenv("BTX_MATMUL_V4_BATCH")) {
         const auto parsed = static_cast<uint32_t>(std::strtoul(env, nullptr, 10));
         if (parsed > 0) window_span = std::min(parsed, matmul::v4::kMaxMinerBatch);
+    }
+
+    // H6: optional pool/share target override. Mirrors the legacy SolveMatMul
+    // path (relaxes ONLY the digest early-exit): every returned share is still a
+    // genuine block candidate reference-resealed below, and a share that also
+    // meets the block target (bnTarget) is a fully consensus-valid block. The
+    // easier effective_target ALSO drives the two-phase host-verify gate passed
+    // to the batched dispatch, so share candidates get their 8 MiB Freivalds
+    // payload materialized (and thus can be sealed). Solo mining (override ==
+    // nullptr) leaves effective_target == bnTarget: byte-for-byte unchanged.
+    arith_uint256 effective_target = bnTarget;
+    if (share_target_override != nullptr) {
+        effective_target = UintToArith256(*share_target_override);
+        if (effective_target == 0) return false;
     }
 
     while (max_tries > 0) {
@@ -4817,7 +4949,7 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
         // (the winner is reference-resealed below regardless). At a Q=window
         // batch this replaces ~window full verifies per batch with ~0.
         if (!matmul_v4::accel::ComputeDigestsBMX4CDispatched(candidates, n, params.nMatMulV4FreivaldsRounds,
-                                                             ArithToUint256(bnTarget), digests, payloads) ||
+                                                             ArithToUint256(effective_target), digests, payloads) ||
             digests.size() != window || payloads.size() != window) {
             LogWarning("SolveMatMulV4BMX4C: batched ENC-BMX4C miner failed; aborting solve\n");
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
@@ -4825,7 +4957,7 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
         }
 
         for (uint32_t i = 0; i < window; ++i) {
-            if (UintToArith256(digests[i]) > bnTarget) {
+            if (UintToArith256(digests[i]) > effective_target) {
                 --max_tries;
                 continue;
             }
@@ -4867,7 +4999,8 @@ static bool SolveMatMulV4(CBlockHeader& block,
                           int32_t block_height,
                           const std::atomic<bool>* abort_flag,
                           std::vector<uint32_t>* freivalds_payload_out,
-                          std::optional<int64_t> parent_median_time_past)
+                          std::optional<int64_t> parent_median_time_past,
+                          const uint256* share_target_override)
 {
     if (!params.IsMatMulV4Active(block_height)) return false;
     if (!parent_median_time_past.has_value()) return false;
@@ -4881,6 +5014,17 @@ static bool SolveMatMulV4(CBlockHeader& block,
     auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
     if (!bnTarget) return false;
 
+    // H6: optional pool/share target override. Relaxes ONLY the digest
+    // early-exit comparison (and, for the CPU batch path, the two-phase
+    // payload-retention gate) exactly as the legacy SolveMatMul path does; the
+    // block target *bnTarget stays the consensus reference. Solo/consensus
+    // mining passes nullptr, leaving effective_target == *bnTarget.
+    arith_uint256 effective_target = *bnTarget;
+    if (share_target_override != nullptr) {
+        effective_target = UintToArith256(*share_target_override);
+        if (effective_target == 0) return false;
+    }
+
     const auto start = std::chrono::steady_clock::now();
 
     // MatMul v4.2 / ENC-BMX4C profile dispatch (spec §8.2): GetMatMulEncodingProfile
@@ -4889,7 +5033,8 @@ static bool SolveMatMulV4(CBlockHeader& block,
     const Consensus::MatMulEncodingProfile solve_profile = params.GetMatMulEncodingProfile(block_height);
     if (solve_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
         return SolveMatMulV4BMX4C(block, params, max_tries, block_height, abort_flag,
-                                  freivalds_payload_out, parent_median_time_past, *bnTarget, start);
+                                  freivalds_payload_out, parent_median_time_past, *bnTarget, start,
+                                  share_target_override);
     }
 
     // v4.1 batched-sketch CPU path (spec §K.2b, matmul/matmul_v4_batch.h):
@@ -4936,14 +5081,21 @@ static bool SolveMatMulV4(CBlockHeader& block,
             }
 
             std::vector<matmul::v4::BatchNonceResult> results;
-            if (!batch_miner.Mine(candidates, results) || results.size() != window) {
+            // H7: two-phase digest-then-sketch. The batched miner computes every
+            // candidate's digest but retains the full 8·m² sketch payload ONLY
+            // for candidates meeting effective_target (winners/shares); losing
+            // nonces carry an empty payload, so a Q-wide window no longer holds Q
+            // simultaneous 8 MiB payloads (mirrors the BMX4C target-gated host
+            // verify). Byte-identical digests to the single-phase Mine.
+            if (!batch_miner.Mine(candidates, ArithToUint256(effective_target), results) ||
+                results.size() != window) {
                 LogWarning("SolveMatMulV4: batched miner failed (template mismatch?); aborting solve\n");
                 RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
                 return false;
             }
 
             for (uint32_t i = 0; i < window; ++i) {
-                if (UintToArith256(results[i].digest) > *bnTarget) {
+                if (UintToArith256(results[i].digest) > effective_target) {
                     --max_tries;
                     continue;
                 }
@@ -5005,7 +5157,7 @@ static bool SolveMatMulV4(CBlockHeader& block,
         // matmul_v4::VerifySketch.
         if (matmul_v4::accel::ComputeDigestDispatched(block, params.nMatMulV4Dimension, params.nMatMulV4FreivaldsRounds,
                                       digest, sketch_payload) &&
-            UintToArith256(digest) <= *bnTarget) {
+            UintToArith256(digest) <= effective_target) {
             block.matmul_digest = digest;
             if (freivalds_payload_out != nullptr) {
                 *freivalds_payload_out = PackMatMulV4SketchBytesToWords(sketch_payload);
@@ -5045,7 +5197,8 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
     // replaces the v3 verification ladder at and above nMatMulV4Height.
     if (params.IsMatMulV4Active(block_height)) {
         return SolveMatMulV4(block, params, max_tries, block_height, abort_flag,
-                              freivalds_payload_out, parent_median_time_past);
+                              freivalds_payload_out, parent_median_time_past,
+                              share_target_override);
     }
     if (block.matmul_dim == 0) {
         if (params.nMatMulDimension > std::numeric_limits<uint16_t>::max()) {

@@ -1110,6 +1110,14 @@ public:
 	            } else {
 	                block.matrix_c_data.clear();
 	            }
+	            // WP-2 / C3: route the solved block through the central producer
+	            // finalizer so an IPC-submitted ENC-DR block serializes digest-only.
+	            // At DIGEST_RECOMPUTE heights this offloads the just-committed sketch
+	            // to the local cache and clears matrix_c_data; without it the block
+	            // carries a non-empty body the validator rejects (validation.cpp
+	            // DIGEST_RECOMPUTE empty-body rule), so IPC-submitted ENC-DR blocks
+	            // would be self-rejecting. Mirrors the generateblock RPC path.
+	            FinalizeMatMulSolvedBlock(block, consensus, next_height);
 	        }
 
 	        auto block_ptr = std::make_shared<const CBlock>(block);
