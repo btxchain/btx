@@ -315,6 +315,12 @@ int64_t g_matmul_global_phase2_window_start_sec GUARDED_BY(g_matmul_global_phase
 enum class MatMulValidationPath {
     FREIVALDS,
     TRANSCRIPT,
+    // v4.4 ENC-DR (G.3): the full O(W) digest recompute — orders of magnitude
+    // costlier than the cheap cache/accel FREIVALDS fast path. Counted in the
+    // phase2 aggregate but deliberately NOT in the FREIVALDS sub-bucket, so the
+    // FREIVALDS timing reflects only the fast path. Recompute time is therefore
+    // (phase2 - freivalds - transcript).
+    RECOMPUTE,
 };
 
 void UpdateMaxAtomic(std::atomic<uint64_t>& target, uint64_t candidate)
@@ -417,12 +423,16 @@ void RegisterMatMulValidationRuntimeSample(
         g_matmul_validation_total_freivalds_elapsed_us.fetch_add(elapsed_us, std::memory_order_relaxed);
         g_matmul_validation_last_freivalds_elapsed_us.store(elapsed_us, std::memory_order_relaxed);
         UpdateMaxAtomic(g_matmul_validation_max_freivalds_elapsed_us, elapsed_us);
-    } else {
+    } else if (path == MatMulValidationPath::TRANSCRIPT) {
         g_matmul_validation_transcript_checks.fetch_add(1, std::memory_order_relaxed);
         g_matmul_validation_total_transcript_elapsed_us.fetch_add(elapsed_us, std::memory_order_relaxed);
         g_matmul_validation_last_transcript_elapsed_us.store(elapsed_us, std::memory_order_relaxed);
         UpdateMaxAtomic(g_matmul_validation_max_transcript_elapsed_us, elapsed_us);
     }
+    // MatMulValidationPath::RECOMPUTE (v4.4 ENC-DR, G.3): counted only in the
+    // phase2 aggregate above — NOT in the FREIVALDS or TRANSCRIPT sub-buckets, so
+    // the cheap-path FREIVALDS timing is not polluted by the ~10^3x-costlier
+    // recompute. Recompute cost = phase2 - freivalds - transcript.
 
     if (passed) {
         g_matmul_validation_successes.fetch_add(1, std::memory_order_relaxed);
@@ -3610,9 +3620,14 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
                                     int32_t block_height)
 {
     const auto start = std::chrono::steady_clock::now();
-    const auto finish = [&](bool passed) {
+    // G.3: default the telemetry bucket to FREIVALDS (the cheap cache/accel fast
+    // path and the O(1) structural pre-checks); the full recompute-path exits
+    // below pass MatMulValidationPath::RECOMPUTE explicitly so the fast-path
+    // timing is not polluted by the ~10^3x-costlier recompute.
+    const auto finish = [&](bool passed,
+                            MatMulValidationPath path = MatMulValidationPath::FREIVALDS) {
         RegisterMatMulValidationRuntimeSample(
-            MatMulValidationPath::FREIVALDS,
+            path,
             passed,
             std::chrono::steady_clock::now() - start);
         return passed;
@@ -3696,10 +3711,24 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
                 block, params.nMatMulV4Dimension, params.nMatMulV4FreivaldsRounds,
                 accel_digest, accel_sketch);
         }
-        if (accel_ok && accel_digest == block.matmul_digest &&
-            UintToArith256(accel_digest) <= *bnTarget) {
-            matmul::GetMatMulSketchCache().Put(block_hash, std::move(accel_sketch));
-            return finish(true);
+        if (accel_ok && UintToArith256(accel_digest) <= *bnTarget) {
+            // accel_digest is REFERENCE-GRADE here: a candidate at/under the
+            // target is a POTENTIAL WINNER, and the dispatch host-verifies every
+            // potential winner against the CPU pure-integer reference
+            // (VerifySketchBMX4C re-derives the honest operands, recomputes the
+            // digest, and runs the sketch-Freivalds check) before returning it —
+            // the same P1-4 contract the accept branch already trusted. So
+            // accel_digest equals what the CPU reference would produce, and the
+            // verdict below is bit-identical to the recompute path's. Reuse it
+            // instead of recomputing on the CPU a SECOND time (G.2). R1 holds:
+            // the value is reference-anchored, never raw device output. (A
+            // digest ABOVE target — a losing nonce, P1-4-unverified device
+            // output, or a device-error CPU fallback whose reference digest is
+            // itself > target — is NOT reused: it falls through to the
+            // authoritative recompute below, which alone may pronounce a reject.)
+            const bool ok = (accel_digest == block.matmul_digest);
+            if (ok) matmul::GetMatMulSketchCache().Put(block_hash, std::move(accel_sketch));
+            return finish(ok, MatMulValidationPath::RECOMPUTE);
         }
         // Fall through: only the CPU reference may pronounce a reject.
     }
@@ -3723,17 +3752,17 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
     std::vector<unsigned char> recomputed_sketch;
     if (!RecomputeMatMulV4SketchReference(block, params, block_height,
                                           recomputed_digest, recomputed_sketch)) {
-        return finish(false);
+        return finish(false, MatMulValidationPath::RECOMPUTE);
     }
     // Exact digest check (epsilon = 0) + target — tension-resolution §4.1
     // clauses 3 and 4.
-    if (recomputed_digest != block.matmul_digest) return finish(false);
-    if (UintToArith256(recomputed_digest) > *bnTarget) return finish(false);
+    if (recomputed_digest != block.matmul_digest) return finish(false, MatMulValidationPath::RECOMPUTE);
+    if (UintToArith256(recomputed_digest) > *bnTarget) return finish(false, MatMulValidationPath::RECOMPUTE);
 
     // Accepted via recompute: this node has now materialized the 8·m² bytes and
     // may serve them to CPU peers (best-effort, non-consensus, §4.3).
     matmul::GetMatMulSketchCache().Put(block_hash, std::move(recomputed_sketch));
-    return finish(true);
+    return finish(true, MatMulValidationPath::RECOMPUTE);
 }
 
 bool OffloadMatMulV4SketchToCache(CBlock& block)

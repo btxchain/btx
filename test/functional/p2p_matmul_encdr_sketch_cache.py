@@ -17,17 +17,29 @@ Asserts:
     dramatically smaller than the 8*m^2 in-block carriage would be);
   * node1 — with its sketch cache DISABLED (-mmsketchcache=0), so it can never
     take the Freivalds fast path — accepts the same chain by pure recompute;
-  * node2 — cache enabled — accepts the same chain (cache-or-recompute path);
-    all three reach the same tip: both evaluation strategies decide the same
-    predicate;
+  * node2 — cache enabled (small capacity) — accepts the same chain; all three
+    reach the same tip: both evaluation strategies decide the same predicate;
   * the winner (node0) serves the sketch on getmmsketch, and the served bytes
     are non-empty and exactly 8*m^2;
-  * a TAMPERED mmsketch from a mininode is rejected (fails the one-hash
-    H(sigma||bytes)==matmul_digest authentication) without affecting the chain,
-    and the node keeps working — a cache failure is never evidence about a
-    block; an HONEST mmsketch is accepted silently;
+  * SERVE dedup gate (G.4): two identical getmmsketch from one peer within the
+    dedup window yield exactly ONE mmsketch reply (the second is silently
+    skipped — the anti-amplification pattern);
+  * RECEIVE authentication path (G.4): a TAMPERED mmsketch for an UNCACHED v4
+    block fails the one-hash H(sigma||bytes)==matmul_digest authentication and
+    the sender is discouraged/disconnected (Misbehaving), WITHOUT touching the
+    chain; an HONEST mmsketch for the same uncached block is authenticated and
+    cached (the node then serves it back). Targeting an *uncached* block is what
+    makes this deterministic: for a cached block the receive handler short-
+    circuits on Have() before authentication, so the penalty path never runs.
   * liveness is independent of the cache throughout (no node ever stalls
     waiting for sketch bytes).
+
+Coverage note: the per-peer token bucket and node-wide egress byte budget are
+NOT exercised here — at the CI dimension a sketch is only 8192 bytes and the
+buckets (16-request burst, ~8 MiB/s) would need hundreds-to-thousands of
+requests to exhaust, which is impractical in a fast functional test. They are
+covered by construction/inspection; the dedup gate (the cheapest to trip) is
+the one asserted end-to-end here.
 
 Heights/dims chosen for CI speed: v4/ENC-BMX4C at H_V4 (single flag day), n = 128
 => m = 32 => sketch 8*32^2 = 8192 bytes.
@@ -45,18 +57,21 @@ V3_BINDING_HEIGHT = 2
 H_V4 = 6                # unified v3 -> v4.4 ENC-DR flag day
 V4_DIMENSION = 128      # b = 4 -> m = 32 -> 8*m^2 = 8192-byte sketch
 SKETCH_BYTES = 8 * (V4_DIMENSION // 4) ** 2
+NODE2_CACHE = 2         # small cache so early v4 blocks are FIFO-evicted -> uncached
 
 
 class SketchPeer(P2PInterface):
     """Requests and records mmsketch replies; can inject (honest or tampered)
-    mmsketch messages."""
+    mmsketch messages. Counts replies so the dedup serve gate is checkable."""
 
     def __init__(self):
         super().__init__()
-        self.sketches = {}  # block_hash int -> bytes
+        self.sketches = {}   # block_hash int -> bytes
+        self.reply_count = 0
 
     def on_mmsketch(self, message):
         self.sketches[message.block_hash] = message.sketch
+        self.reply_count += 1
 
 
 class BTXMatMulEncDrSketchCache(BitcoinTestFramework):
@@ -73,7 +88,13 @@ class BTXMatMulEncDrSketchCache(BitcoinTestFramework):
             f"-regtestbmx4cheight={H_V4}",
         ]
         # node1: cache DISABLED -> forced pure-recompute validator.
-        self.extra_args = [common, common + ["-mmsketchcache=0"], common]
+        # node2: tiny cache -> old v4 blocks get evicted (needed for the
+        #        uncached-block receive/authentication coverage below).
+        self.extra_args = [
+            common,
+            common + ["-mmsketchcache=0"],
+            common + [f"-mmsketchcache={NODE2_CACHE}"],
+        ]
 
     def run_test(self):
         node0, node1, node2 = self.nodes
@@ -88,7 +109,8 @@ class BTXMatMulEncDrSketchCache(BitcoinTestFramework):
         )
 
         self.log.info("Mine across the flag day: digest-only ENC-DR blocks")
-        target_height = H_V4 + 3
+        # Mine enough v4 blocks that node2's small cache evicts the earliest one.
+        target_height = H_V4 + NODE2_CACHE + 3   # >= NODE2_CACHE+1 v4 blocks
         self.generate(node0, target_height, sync_fun=self.no_op)
         assert_equal(node0.getblockcount(), target_height)
 
@@ -124,22 +146,52 @@ class BTXMatMulEncDrSketchCache(BitcoinTestFramework):
         honest_sketch = peer.sketches[tip_hash]
         assert_equal(len(honest_sketch), SKETCH_BYTES)
 
-        self.log.info("A tampered mmsketch is rejected without touching the chain")
-        # node2 validated by recompute (its cache holds its own regenerated
-        # bytes for recent blocks); target a mininode delivery at node1? node1's
-        # cache is disabled, so it ignores deliveries. Use node2: overwrite is
-        # skipped for already-cached blocks, so aim at an OLD v4 block that may
-        # have been evicted or never cached. Simplest robust probe: a fresh
-        # mininode on node2 sends a tampered sketch for the tip; whether node2
-        # already caches the tip or not, the node must neither crash, nor
-        # reorg, nor mark anything invalid.
+        self.log.info("SERVE dedup gate: a repeat getmmsketch yields no 2nd reply")
+        dedup_peer = node0.add_p2p_connection(SketchPeer())
+        dedup_peer.send_message(msg_getmmsketch(block_hash=tip_hash))
+        self.wait_until(lambda: dedup_peer.reply_count >= 1, timeout=60)
+        # Second identical request within the dedup window must be silently
+        # skipped -> still exactly one reply after a round-trip.
+        dedup_peer.send_message(msg_getmmsketch(block_hash=tip_hash))
+        dedup_peer.sync_with_ping(timeout=60)
+        assert_equal(dedup_peer.reply_count, 1)
+
+        # Pick a v4 block that node2 has FIFO-evicted from its small cache, so
+        # the receive handler runs authentication instead of the Have() short
+        # circuit. The earliest v4 block (H_V4) is evicted once > NODE2_CACHE
+        # later v4 blocks exist.
+        uncached_height = H_V4
+        uncached_hex = node2.getblockhash(uncached_height)
+        uncached_hash = int(uncached_hex, 16)
+
+        self.log.info("RECEIVE: tampered mmsketch for an UNCACHED block is penalized")
+        # Fetch the honest sketch for the uncached block from the winner first.
+        peer.send_message(msg_getmmsketch(block_hash=uncached_hash))
+        self.wait_until(lambda: uncached_hash in peer.sketches, timeout=60)
+        uncached_sketch = peer.sketches[uncached_hash]
+        assert_equal(len(uncached_sketch), SKETCH_BYTES)
+
         bad_peer = node2.add_p2p_connection(SketchPeer())
-        tampered = bytearray(honest_sketch)
+        tampered = bytearray(uncached_sketch)
         tampered[0] ^= 0x01
-        bad_peer.send_message(msg_mmsketch(block_hash=tip_hash, sketch=bytes(tampered)))
-        # And an honest delivery right after (accepted silently when not cached).
-        bad_peer.send_message(msg_mmsketch(block_hash=tip_hash, sketch=honest_sketch))
-        bad_peer.sync_with_ping(timeout=60)
+        with node2.assert_debug_log(["does not authenticate against matmul_digest"]):
+            bad_peer.send_message(
+                msg_mmsketch(block_hash=uncached_hash, sketch=bytes(tampered)))
+            # One authentication failure discourages the peer -> disconnect.
+            bad_peer.wait_for_disconnect(timeout=60)
+        # The chain is untouched by a bad cache delivery.
+        assert_equal(node2.getbestblockhash(), tip_hash_hex)
+
+        self.log.info("RECEIVE: honest mmsketch for the uncached block is cached")
+        good_peer = node2.add_p2p_connection(SketchPeer())
+        good_peer.send_message(
+            msg_mmsketch(block_hash=uncached_hash, sketch=uncached_sketch))
+        good_peer.sync_with_ping(timeout=60)
+        # Proof it was authenticated + cached: node2 now serves it back.
+        serve_probe = node2.add_p2p_connection(SketchPeer())
+        serve_probe.send_message(msg_getmmsketch(block_hash=uncached_hash))
+        self.wait_until(lambda: uncached_hash in serve_probe.sketches, timeout=60)
+        assert_equal(serve_probe.sketches[uncached_hash], uncached_sketch)
         assert_equal(node2.getbestblockhash(), tip_hash_hex)
 
         self.log.info("Chain keeps extending regardless of cache state (liveness)")

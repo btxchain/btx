@@ -113,10 +113,13 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // not a live parameter).
     // §0.3 / §4.3 PER-PROFILE dimension-invariant guard: for each configured
     // profile P live at some height, nMatMulV4Dimension at PRODUCTION scale MUST
-    // reduce to exactly P.sketch_rank_m under P.tile_b (tile_b·m == n), and
-    // P.sketch_payload_bytes MUST equal 8·m². The committed sketch rank, its
-    // 8·m² payload, and the O(n²) verify DoS budget are calibrated PER PROFILE
-    // for that rank at the PRODUCTION dimension. Nothing else pins the dimension
+    // reduce to exactly P.sketch_rank_m under P.tile_b (tile_b·m == n), and the
+    // per-profile sketch byte count SketchCacheBytes() MUST equal 8·m². The
+    // committed sketch rank, its 8·m² byte count, and the O(n²) verify DoS budget
+    // are calibrated PER PROFILE for that rank at the PRODUCTION dimension.
+    // (Under v4.4 ENC-DR those 8·m² bytes live only in the non-consensus sketch
+    // cache, never in the block; the pin still fixes the recompute/verify shape.)
+    // Nothing else pins the dimension
     // to the compile-time tile, so raising nMatMulV4Dimension (allowed by the
     // 4096..8192 accept window) without a lockstep per-profile tile_b change
     // would SILENTLY yield a different-shaped committed object with no profile
@@ -130,8 +133,9 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     const auto assert_profile_dimension_pin =
         [&consensus](const Consensus::MatMulProfileParams& p) {
             assert(p.tile_b > 0);
-            assert(p.SketchCacheBytes() ==
-                   uint64_t{8} * p.sketch_rank_m * p.sketch_rank_m);
+            // (Note: no assert on SketchCacheBytes()==8·m² — that merely restates
+            // the method's own definition. The meaningful pins are the dimension
+            // ties below, which tie the byte count to n transitively via m.)
             assert(consensus.nMatMulV4Dimension % p.tile_b == 0);
             if (consensus.nMatMulV4Dimension >= p.tile_b * p.sketch_rank_m) {
                 assert(consensus.nMatMulV4Dimension / p.tile_b == p.sketch_rank_m);
@@ -1432,11 +1436,14 @@ public:
             // AssertBMX4CConstructionInvariants.
             consensus.fMatMulV4FlatSketchReplay = true;
         }
-        // MatMul v4.2-D segregated-proof rolling prune window (design §3.5). The
-        // production default is 10 000 blocks; the regtest override lets a
-        // functional test pick a tiny window so a pruned node discards proofs
-        // after just a few blocks without mining 10 000. 0 disables pruning
-        // (retain-forever), matching an archive node's retention.
+        // INERT since v4.4 ENC-DR: nMatMulProofPruneDepth is a dead field left
+        // over from the deleted segregated-proof store (design §3.5). Under
+        // ENC-DR the block carries no proof bytes, so there is nothing to prune;
+        // NO consensus or validation code reads this value. The field and the
+        // -regtestmatmulproofprunedepth arg are retained only for arg/ABI
+        // compatibility (see chainparamsbase.cpp) and set here to a harmless
+        // constant. Do NOT wire new behavior to it without reintroducing a real
+        // retention subsystem.
         if (opts.matmul_proof_prune_depth.has_value()) {
             consensus.nMatMulProofPruneDepth = *opts.matmul_proof_prune_depth;
         }

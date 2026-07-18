@@ -276,16 +276,16 @@ struct Params {
     uint32_t nMatMulPhase2FailBanThreshold{1};
     bool fMatMulStrictPunishment{false};
     uint32_t nMatMulSnapshotInterval{10'000};
-    /** AUDIT P2: NON-FUNCTIONAL / RESERVED. No code path consumes this value --
-     *  there is currently NO proof-aware pruning. On a default node every ~8 MiB
-     *  MatMul product proof is retained indefinitely, i.e. unbounded growth on the
-     *  order of ~2.9 TiB/yr of proof data alone at a 90 s spacing (before ordinary
-     *  tx/index data). Closing this requires either implementing proof-aware
-     *  pruning (with reorg / reindex / assumeUTXO / RPC semantics) or removing this
-     *  field; until then it is retained only to avoid churning the 6 chainparams
-     *  sites, and the true storage cost is disclosed here and in
-     *  doc/btx-matmul-v4.2-external-audit-remediation.md (D2). Do NOT read this as
-     *  an implemented retention bound. */
+    /** DEAD / INERT since v4.4 ENC-DR. No code path consumes this value. It is a
+     *  leftover from the deleted segregated-proof store; under ENC-DR the block
+     *  carries ZERO proof bytes (the 32-byte digest rides in the header and the
+     *  sketch is recomputable from the header forever), so there is nothing to
+     *  retain or prune and this "prune depth" governs nothing. The pre-ENC-DR
+     *  concern this field once tracked (~8 MiB/proof, unbounded archive growth)
+     *  no longer exists. The field and the -regtestmatmulproofprunedepth arg are
+     *  retained only for arg/ABI compatibility (chainparamsbase.cpp) to avoid
+     *  churning the chainparams sites; reintroducing a real retention subsystem
+     *  is the only reason to ever read it. Do NOT treat it as a live bound. */
     uint32_t nMatMulProofPruneDepth{10'000};
     /** Minimum equivalent-time age (seconds) an ENC-DR block must be buried under
      *  the best header before its digest-recompute PoW verification may be

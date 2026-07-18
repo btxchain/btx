@@ -156,10 +156,10 @@ using util::ReplaceAll;
 using util::ToString;
 
 static constexpr bool DEFAULT_COREPOLICY{false};
-//! MatMul v4.2-D segregated-proof archive role (design §3.5). Default off: a
-//! node keeps only the rolling nMatMulProofPruneDepth window of proofs.
 //! Default v4.4 ENC-DR sketch-cache capacity, in sketches (~8 MiB each at the
 //! production m = 1024). Non-consensus, best-effort (-mmsketchcache=<n>, 0 = off).
+//! (The former segregated-proof archive/prune role, design §3.5, was deleted in
+//! v4.4 ENC-DR: under ENC-DR the block carries no proof bytes to retain or prune.)
 static constexpr int64_t DEFAULT_MMSKETCH_CACHE_ENTRIES{8};
 static constexpr bool DEFAULT_PROXYRANDOMIZE{true};
 static constexpr bool DEFAULT_REST_ENABLE{false};

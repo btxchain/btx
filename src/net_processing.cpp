@@ -5986,13 +5986,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, strprintf("trailing data after getmmsketch = %u bytes", vRecv.size()));
             return;
         }
-        std::vector<unsigned char> sketch;
-        if (!matmul::GetMatMulSketchCache().Get(block_hash, sketch)) {
+        // E.1: fetch only the sketch SIZE first (no copy). The actual ~8 MiB
+        // Get() copy is deferred until AFTER every anti-amplification gate below
+        // passes, so a flood of over-limit requests is refused for the cost of an
+        // O(1) size lookup + bucket math, never an 8 MiB vector copy at line rate.
+        size_t sketch_size = 0;
+        if (!matmul::GetMatMulSketchCache().GetSize(block_hash, sketch_size)) {
             LogDebug(BCLog::NET, "Ignoring getmmsketch %s from peer=%d (sketch not held)\n",
                      block_hash.ToString(), pfrom.GetId());
             return;
         }
-        if (sketch.size() > MAX_MMSKETCH_PAYLOAD_SIZE) {
+        if (sketch_size > MAX_MMSKETCH_PAYLOAD_SIZE) {
             // A future larger-m profile: simply don't serve (peers recompute).
             LogDebug(BCLog::NET, "Ignoring getmmsketch %s from peer=%d (sketch exceeds single-message ceiling)\n",
                      block_hash.ToString(), pfrom.GetId());
@@ -6072,10 +6076,20 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                      block_hash.ToString(), pfrom.GetId());
             return;
         }
-        m_matmul_serve_global_tokens -= static_cast<double>(sketch.size());
+        m_matmul_serve_global_tokens -= static_cast<double>(sketch_size);
 
-        // All gates passed: spend the peer token, record the dedup stamp, and
-        // emit the single-message reply (fits every transport at m = 1024).
+        // All gates passed: NOW take the single ~8 MiB copy (E.1) and serve. If
+        // the entry was evicted (FIFO) between the size lookup and here, just
+        // skip WITHOUT stamping dedup so the requester may retry — the token/byte
+        // debits above are a harmless over-charge in that rare race.
+        std::vector<unsigned char> sketch;
+        if (!matmul::GetMatMulSketchCache().Get(block_hash, sketch)) {
+            LogDebug(BCLog::NET, "matmul: getmmsketch %s from peer=%d evicted before serve, skipping\n",
+                     block_hash.ToString(), pfrom.GetId());
+            return;
+        }
+        // Spend the peer token, record the dedup stamp, and emit the
+        // single-message reply (fits every transport at m = 1024).
         peer->m_matmul_serve_tokens -= 1.0;
         peer->m_matmul_served[block_hash] = now;
         MakeAndPushMessage(pfrom, NetMsgType::MMSKETCH, block_hash, sketch);

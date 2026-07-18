@@ -40,6 +40,15 @@ bool MatMulSketchCache::Have(const uint256& block_hash) const
     return m_entries.count(block_hash) > 0;
 }
 
+bool MatMulSketchCache::GetSize(const uint256& block_hash, size_t& size_out) const
+{
+    LOCK(m_mutex);
+    const auto it = m_entries.find(block_hash);
+    if (it == m_entries.end()) return false;
+    size_out = it->second.size();
+    return true;
+}
+
 void MatMulSketchCache::Erase(const uint256& block_hash)
 {
     LOCK(m_mutex);

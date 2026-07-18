@@ -10169,6 +10169,28 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
     return true;
 }
 
+namespace {
+/** G.1: RAII scoped release of an already-held cs_main for the duration of an
+ *  expensive, chainstate-INDEPENDENT computation, re-acquiring on scope exit
+ *  (including on exception). Used to run the v4.4 ENC-DR reference recompute —
+ *  a one-nonce O(W) GEMM (~seconds of CPU, ~100 MB transient at n=4096 on the
+ *  cache/accel miss path) — WITHOUT serializing it under the node's global lock.
+ *  Mirrors the LEAVE/ENTER_CRITICAL_SECTION longpoll precedent in
+ *  rpc/mining.cpp, made exception-safe by RAII. Safe here because
+ *  CheckMatMulProofOfWork_V4EncDr reads NO cs_main-guarded state (only the
+ *  caller-owned block, immutable consensus params, and a local height; its only
+ *  mutations are to the sketch cache and the phase2-budget counter, each under
+ *  its OWN mutex), and only a pure bool crosses the release boundary. cs_main
+ *  must be the innermost-held critical section at construction (it is, at the
+ *  ENC-DR recompute point in ContextualCheckBlock). */
+struct CsMainScopedRelease {
+    CsMainScopedRelease() NO_THREAD_SAFETY_ANALYSIS { LEAVE_CRITICAL_SECTION(::cs_main); }
+    ~CsMainScopedRelease() NO_THREAD_SAFETY_ANALYSIS { ENTER_CRITICAL_SECTION(::cs_main); }
+    CsMainScopedRelease(const CsMainScopedRelease&) = delete;
+    CsMainScopedRelease& operator=(const CsMainScopedRelease&) = delete;
+};
+} // namespace
+
 /** NOTE: This function is not currently invoked by ConnectBlock(), so we
  *  should consider upgrade issues if we change which consensus rules are
  *  enforced in this function (eg by adding a new consensus rule). See comment
@@ -10257,7 +10279,22 @@ static bool ContextualCheckBlock(const CBlock& block,
             // the MUTATED/permanent classification collapses (§4.1 clause 2)
             // and "high-hash" is always correct here.
             if (!recompute_assumevalid_trusted) {
-                if (!CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight)) {
+                // G.1: run the ENC-DR predicate WITHOUT cs_main held. On the
+                // cache/accel-miss path it performs the full O(W) one-nonce
+                // reference GEMM; holding the global lock across it would let a
+                // header-PoW-paying attacker (or a near-tip IBD node) serialize
+                // seconds of CPU under cs_main per non-cached block. The check is
+                // a pure function of the header + immutable params and reads no
+                // cs_main-guarded state (see CsMainScopedRelease), and every
+                // cs_main-dependent decision above (empty-body classification,
+                // assumevalid-trust) is already made; only this bool crosses the
+                // release boundary.
+                bool encdr_ok;
+                {
+                    CsMainScopedRelease release_cs_main_for_recompute;
+                    encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight);
+                }
+                if (!encdr_ok) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
                         "matmul v4 proof of work failed");
                 }

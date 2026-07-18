@@ -232,21 +232,30 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out);
 // (nMatMulBMX4CDHeight / IsBMX4CDActive / verify+solve dispatch) is removed,
 // and enum value 3 is RESERVED. Under digest-only carriage a deeper commit is
 // a storage-free parameter retarget, not a new profile. The D reference
-// routines below are retained as LIBRARY code only (no consensus caller);
-// the historical rationale follows.
+// routines below are retained as LIBRARY code only (NO consensus caller:
+// GetMatMulEncodingProfile only ever returns ENC_S8/ENC_BMX4C, there is no
+// IsBMX4CDActive predicate, and no verify/solve path dispatches to them).
 //
-// ROUND-3 P0-2 removed ENC-BMX4C-D from the consensus state machine; the
-// on-silicon per-card measurement (B200 leads a 5090 by 1.54x at D vs a 1.06x
-// tie at C) reversed that decision, so D is a REAL consensus profile again
-// (enum value ENC_BMX4CD = 3, activation predicate IsBMX4CDActive, verify/solve
-// dispatch, and per-profile construction asserts). It remains STAGED /
-// activation-disabled (nMatMulBMX4CDHeight = INT32_MAX on every network); the
-// evolution vs the earlier parked design is PROOF CARRIAGE — the 32 MiB sketch
-// is relayed as a segregated prunable proof (design §3), not carried in-block,
-// so the payload no longer breaches the block/P2P ceiling. Stage 2 wires the
-// getmatmulproof/matmulproof relay; Stage 1 leaves D on the existing in-block
-// payload path (the profile exists, dispatches, and validates b-parametrically).
-// Design: doc/btx-matmul-v4.2-solver-evolution-design.md.
+// ==== SUPERSEDED HISTORY (do NOT read as current wiring) ====================
+// The paragraph below records a decision that was itself REVERSED by v4.4
+// ENC-DR and is kept only for provenance. It described briefly re-adding D as a
+// live consensus profile (ENC_BMX4CD=3, IsBMX4CDActive, verify/solve dispatch)
+// carried as a 32 MiB SEGREGATED PRUNABLE PROOF. ENC-DR then deleted the entire
+// segregated-proof subsystem (there is no getmatmulproof/matmulproof relay, no
+// proof store) and made a "deeper commit" a storage-free digest-only parameter
+// retarget rather than a distinct profile — so NONE of the wiring described
+// below exists in the tree today:
+//
+//   [HISTORICAL] ROUND-3 P0-2 removed ENC-BMX4C-D from the consensus state
+//   machine; an on-silicon per-card measurement (B200 leads a 5090 by 1.54x at
+//   D vs a 1.06x tie at C) briefly reversed that, re-adding D as a consensus
+//   profile (enum ENC_BMX4CD=3, IsBMX4CDActive, verify/solve dispatch,
+//   per-profile construction asserts), STAGED/disabled (nMatMulBMX4CDHeight =
+//   INT32_MAX), with the 32 MiB sketch relayed as a segregated prunable proof
+//   (design §3) rather than carried in-block. v4.4 ENC-DR superseded this.
+// ===========================================================================
+// Design: doc/btx-matmul-v4.2-solver-evolution-design.md (the b=2 operand math
+// below remains valid as library/reference code regardless of carriage).
 //
 // IDENTICAL to ENC-BMX4C in EVERY operand-encoding respect: the M11 mantissa
 // alphabet, E8M0 power-of-two block scales (block length 32, S = 3, E_max = 48),

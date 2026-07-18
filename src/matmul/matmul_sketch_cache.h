@@ -60,6 +60,11 @@ public:
     //! True iff an entry is held for `block_hash`.
     [[nodiscard]] bool Have(const uint256& block_hash) const;
 
+    //! Fetch the byte length of the held sketch WITHOUT copying it (sets
+    //! `size_out`), or return false if absent. Lets the getmmsketch serve path
+    //! apply its anti-amplification gates before the ~8 MiB Get() copy (E.1).
+    [[nodiscard]] bool GetSize(const uint256& block_hash, size_t& size_out) const;
+
     //! Drop the entry for `block_hash` (no-op if absent). Used when an entry
     //! fails the H(sigma||bytes)==matmul_digest authentication (garbage cache).
     void Erase(const uint256& block_hash);
