@@ -7341,7 +7341,18 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // the latest blocks is from an inbound peer, we have to be sure to
             // eventually download it (and not just wait indefinitely for an
             // outbound peer to have it).
-            if (!require_matmul_consensus &&
+            //
+            // In MatMul consensus mode we still deprioritize peers that cannot
+            // serve/validate the MatMul chain, but a peer that DOES advertise
+            // NODE_MATMUL_CONSENSUS (or is NoBan-whitelisted) is exactly what we
+            // want to sync from, even inbound. Mirror the fPreferredDownload
+            // gate above so that a node whose only source of blocks is an
+            // inbound consensus-tier peer does not stall forever (which would
+            // also suppress the low-work anti-DoS headers path for that peer).
+            const bool consensus_ok = !require_matmul_consensus ||
+                PeerAdvertisesMatMulConsensus(peer->m_their_services) ||
+                pto->HasPermission(NetPermissionFlags::NoBan);
+            if (consensus_ok &&
                 (m_num_preferred_download_peers == 0 || mapBlocksInFlight.empty())) {
                 sync_blocks_and_headers_from_peer = true;
             }
