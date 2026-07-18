@@ -226,7 +226,14 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out);
                                      uint256& digest_out);
 
 // ---------------------------------------------------------------------------
-// ENC-BMX4C-D / v4.2-D CONSENSUS PROFILE (reinstated; solver-evolution Stage 1).
+// ENC-BMX4C-D / v4.2-D — RETIRED as a consensus profile by v4.4 ENC-DR
+// (doc/btx-matmul-v4.4-tension-resolution.md §4.4): the segregated-proof
+// carriage it depended on is deleted, its activation plumbing
+// (nMatMulBMX4CDHeight / IsBMX4CDActive / verify+solve dispatch) is removed,
+// and enum value 3 is RESERVED. Under digest-only carriage a deeper commit is
+// a storage-free parameter retarget, not a new profile. The D reference
+// routines below are retained as LIBRARY code only (no consensus caller);
+// the historical rationale follows.
 //
 // ROUND-3 P0-2 removed ENC-BMX4C-D from the consensus state machine; the
 // on-silicon per-card measurement (B200 leads a 5090 by 1.54x at D vs a 1.06x

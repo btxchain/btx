@@ -211,61 +211,76 @@ bool CheckMatMulProofOfWork_ProductCommitted(const CBlock& block, const Consensu
  *  product. */
 bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consensus::Params& params, int32_t block_height = -1);
 
-/** Coarse pre-parse slack added to the §3.4 segregated-proof size cap
- *  (MAX_MATMUL_PROOF_SIZE = profile.sketch_payload_bytes + this). A well-formed
- *  proof is exactly sketch_payload_bytes raw sketch bytes; the slack keeps the
- *  cap a coarse DoS backstop while ParseSketch (inside VerifySketch*) remains the
- *  exact-size gate. Small and constant so the cap stays derived from consensus
- *  profile params, never attacker-chosen. */
-static constexpr uint64_t MATMUL_SEGREGATED_PROOF_OVERHEAD{64};
+/** v4.4 ENC-DR (doc/btx-matmul-v4.4-tension-resolution.md §4.1/§4.2): the
+ *  digest-only consensus check at DIGEST_RECOMPUTE heights. The block carries
+ *  ZERO proof bytes; validity is a pure function of the header:
+ *
+ *      matmul_digest == H(sigma || SerializeSketch(Chat_true(header)))
+ *      AND matmul_digest <= target(nBits)
+ *
+ *  Two consensus-equivalent evaluation strategies decide that predicate:
+ *    - CACHE-ASSISTED fast path (§4.2): if untrusted sketch-cache bytes are
+ *      available for this block hash and authenticate as
+ *      H(sigma||bytes) == matmul_digest (one hash — fail-fast; a mismatching
+ *      cache entry is dropped and is NEVER evidence about the block), the
+ *      existing v4.3 O(n^2) Freivalds verifier runs over them
+ *      (epsilon <= 2^-180). Bypasses the recompute DoS budget entirely.
+ *    - RECOMPUTE reference path (§4.2, the CONSENSUS DEFINITION, epsilon = 0):
+ *      Chat_true is deterministically recomputed from the header via the SAME
+ *      CPU pure-integer reference the miner seals with
+ *      (bmx4::ComputeDigestBMX4C at ENC_BMX4C heights; matmul_v4::ComputeDigest
+ *      at ENC_S8 test heights) and the digest compared EXACTLY.
+ *
+ *  MULTI-PLATFORM TRUSTLESS VERIFICATION (adoption condition): the recompute
+ *  strategy is available on every mining-eligible compute platform — CPU
+ *  reference plus the CUDA / Metal / HIP backends through the same accel_v4
+ *  registry and backend_capabilities_v4 eligibility harness mining uses, and
+ *  open to further backends (Vulkan/SYCL/CPU-SIMD) with NO consensus change,
+ *  because the consensus definition is the CPU integer reference and every
+ *  accelerated backend is only an optional ACCEPT-FAST path validated by the
+ *  same golden vectors. Independent verification is not vendor-locked.
+ *
+ *  R1 CPU-REFERENCE-ANCHORED REJECTION (consensus-safety invariant): a block
+ *  may be pronounced invalid-by-recompute ONLY by the CPU pure-integer
+ *  reference. An accelerated backend may recompute Chat to ACCEPT FAST (a
+ *  digest match reproduces the committed preimage; eligibility bit-identity +
+ *  the miner-side CPU reseal pin it to Chat_true), but ANY digest mismatch or
+ *  device error falls back to the CPU reference BEFORE any reject — no
+ *  GPU/FP/Ozaki path may ever emit a "reject", so a device-side divergence
+ *  can never reject a block CPU nodes accept (mining stays fail-safe;
+ *  verification stays fail-safe by the same rule).
+ *
+ *  Does NOT inspect matrix_c_data (the caller enforces the §4.1 empty-body
+ *  rule and its non-permanent MUTATED classification). On success via the
+ *  recompute path the recomputed sketch bytes are offered to the local sketch
+ *  cache so this node can serve peers (best-effort, non-consensus). */
+bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params& params,
+                                    int32_t block_height);
 
-/** The §3.4 segregated-proof size cap for the profile live at @p block_height:
- *  GetMatMulProfileParams(height).sketch_payload_bytes (the CONSENSUS 8·m², not an
- *  attacker-chosen value) + MATMUL_SEGREGATED_PROOF_OVERHEAD. A well-formed sketch
- *  is exactly sketch_payload_bytes; the small constant slack keeps this a coarse
- *  pre-parse DoS backstop while ParseSketch (inside VerifySketch*) is the exact-size
- *  gate. Shared by the store-backed validator (CheckMatMulV4SegregatedProof) and the
- *  P2P relay (net_processing matmulproof handler) so both enforce ONE cap. */
-uint64_t GetMatMulProofSizeCap(const Consensus::Params& params, int32_t block_height);
+/** The ENC-DR CPU pure-integer reference recompute (verify-side entry point of
+ *  the SAME code path the miner seals winning blocks with — bit-identical by
+ *  construction, tension-resolution §4.2 RECOMPUTE). Dispatches on the active
+ *  encoding profile (ENC_BMX4C -> bmx4::ComputeDigestBMX4C; ENC_S8 ->
+ *  matmul_v4::ComputeDigest) after re-checking the same structural
+ *  combine/accumulator guards the in-block verifier enforces. Returns false on
+ *  a structural failure; otherwise fills `digest_out` = H(sigma||Chat_true) and
+ *  `sketch_out` = SerializeSketch(Chat_true) (8·m² bytes). Runs no target
+ *  check. NEVER dispatches to an accelerated or FP backend (R1). */
+bool RecomputeMatMulV4SketchReference(const CBlockHeader& header,
+                                      const Consensus::Params& params,
+                                      int32_t block_height,
+                                      uint256& digest_out,
+                                      std::vector<unsigned char>& sketch_out);
 
-/** Result of validating a SEGREGATED-PROOF block's out-of-body sketch against its
- *  header commitment (design §3.3/§3.4; solver-evolution Stage 2a). Distinguishes
- *  the non-permanent "not yet creditable" states from a permanent consensus fault
- *  so ContextualCheckBlock maps each to the correct BlockValidationResult:
- *    OK             -> block fully valid, work creditable.
- *    INCOMPLETE     -> no proof in the store yet; PoW-incomplete, NON-permanent
- *                      (Stage 2b re-requests from the network). BLOCK_MUTATED-class.
- *    MUTATED        -> proof present but over the §3.4 cap or fails the §3.3
- *                      binding H(sigma||proof)==matmul_digest; a relay/body
- *                      mutation, NON-permanent (must not poison the honest block).
- *                      BLOCK_MUTATED-class.
- *    CONSENSUS_FAIL -> proof binds to the committed digest but fails Freivalds or
- *                      is over target; a PERMANENT PoW fault. BLOCK_CONSENSUS. */
-enum class MatMulSegregatedProofStatus {
-    OK,
-    INCOMPLETE,
-    MUTATED,
-    CONSENSUS_FAIL,
-};
-
-/** Validate a segregated-proof block's sketch (design §3): fetch it from the
- *  local proof store keyed by block hash, enforce the §3.4 size cap, bind it to
- *  the header via H(sigma||proof)==matmul_digest (§3.3), then run the per-profile
- *  O(n^2) Freivalds + target check on the bound bytes. See
- *  MatMulSegregatedProofStatus for the MUTATED/CONSENSUS split. Reached ONLY at
- *  proof_segregated heights; the caller must have verified the in-block body
- *  sketch is empty. */
-MatMulSegregatedProofStatus CheckMatMulV4SegregatedProof(const CBlock& block,
-                                                         const Consensus::Params& params,
-                                                         int32_t block_height);
-
-/** Segregated-proof miner handoff (design §3.6; solver-evolution Stage 2a): move a
+/** Miner handoff for the ENC-DR sketch cache (tension-resolution §4.3): move a
  *  freshly-solved block's in-body sketch (matrix_c_data, word-packed) into the
- *  local proof store keyed by the block hash, then CLEAR matrix_c_data so the block
- *  body serializes with an empty sketch. Call ONLY at proof_segregated heights and
- *  ONLY after the solver has finalized the header (so block.GetHash() is stable).
- *  Returns false (no-op) if the body sketch is already empty. */
-bool OffloadMatMulV4SegregatedProofToStore(CBlock& block);
+ *  local non-consensus sketch cache keyed by the block hash, then CLEAR
+ *  matrix_c_data so the block serializes digest-only (the §4.1 empty-body
+ *  rule). Byte-identical mining to v4.3 — the sketch simply is not attached to
+ *  the block; the winner MAY then serve it to peers via getmmsketch. Call ONLY
+ *  after the solver finalized the header (block.GetHash() stable). Returns
+ *  false (no-op) if the body sketch is already empty. */
+bool OffloadMatMulV4SketchToCache(CBlock& block);
 
 /** True iff the block's v4 sketch payload reconstructs the header's committed
  *  matmul_digest. A false result means the payload (block body) is a MUTATION of

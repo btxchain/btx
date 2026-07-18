@@ -21,7 +21,7 @@
 #include <matmul/freivalds.h>
 #include <matmul/matmul_pow.h>
 #include <matmul/matmul_v4_batch.h>
-#include <matmul/matmul_proof_store.h>
+#include <matmul/matmul_sketch_cache.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/noise.h>
@@ -1048,18 +1048,6 @@ int32_t LatestMatMulAsertPreUpgradeAnchorHeight(const CBlockIndex* pindexLast, c
         params.nMatMulBMX4CHeight > anchor_height) {
         anchor_height = params.nMatMulBMX4CHeight;
     }
-    // MatMul v4.2-D / ENC-BMX4C-D (adversarial finding F1): the one-time D rescale
-    // re-anchors ASERT at nMatMulBMX4CDHeight, mechanically identical to the BMX4C
-    // anchor above. ENC-BMX4C-D forks STRICTLY above the ENC-BMX4C height by
-    // construction (chainparams asserts D > C), so once the tip passes it, it is
-    // the latest chronological fork and wins over any earlier bmx4c/v4/retune
-    // anchor. Without this the D rescale's re-anchor would never apply and ASERT
-    // would keep baselining on the C anchor after the D fork.
-    if (!IsDisabledHeight(params.nMatMulBMX4CDHeight) &&
-        pindexLast->nHeight >= params.nMatMulBMX4CDHeight &&
-        params.nMatMulBMX4CDHeight > anchor_height) {
-        anchor_height = params.nMatMulBMX4CDHeight;
-    }
     return anchor_height;
 }
 
@@ -1205,35 +1193,6 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         return false;
     }
 
-    // MatMul v4.2-D / ENC-BMX4C-D (adversarial finding F1): mirror the BMX4C
-    // rescale-ratio and ordering guards for the one-time D rescale, so the
-    // documented D difficulty calibration is validated (and applied — see the
-    // MatMulAsert cascade and the re-anchor) rather than silently ignored.
-    {
-        // AUDIT D3 (mirror): positive and 32-bit-reducible.
-        uint32_t bmx4cd_rn, bmx4cd_rd;
-        if (!ReduceRescaleRatioToU32(params.nMatMulBMX4CDAsertRescaleNum, params.nMatMulBMX4CDAsertRescaleDen, bmx4cd_rn, bmx4cd_rd)) {
-            LogWarning("MatMulAsert: BMX4C-D rescale ratio is invalid (num=%lld den=%lld; must be positive and reduce to a 32-bit rational) at height %d, failing closed\n",
-                       static_cast<long long>(params.nMatMulBMX4CDAsertRescaleNum),
-                       static_cast<long long>(params.nMatMulBMX4CDAsertRescaleDen), next_height);
-            return false;
-        }
-    }
-    if (!IsDisabledHeight(params.nMatMulBMX4CDHeight) && params.nMatMulBMX4CDHeight < params.nMatMulAsertHeight) {
-        LogWarning("MatMulAsert: BMX4C-D height=%d is below ASERT activation=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
-                   params.nMatMulBMX4CDHeight, params.nMatMulAsertHeight, next_height);
-        return false;
-    }
-    // ENC-BMX4C-D is an ADDITIONAL profile that succeeds ENC-BMX4C: it must fork
-    // STRICTLY ABOVE the BMX4C height (no dual-profile window, no unified case --
-    // unlike bmx4c-vs-v4 there is no equal-height flag day for D). Mirrors the
-    // chainparams AssertBMX4CConstructionInvariants D > C assert.
-    if (!IsDisabledHeight(params.nMatMulBMX4CDHeight) && !IsDisabledHeight(params.nMatMulBMX4CHeight) &&
-        params.nMatMulBMX4CDHeight <= params.nMatMulBMX4CHeight) {
-        LogWarning("MatMulAsert: BMX4C-D height=%d must be strictly above BMX4C height=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
-                   params.nMatMulBMX4CDHeight, params.nMatMulBMX4CHeight, next_height);
-        return false;
-    }
 
     // Audit C5: the MatMulAsert cascade dispatches special one-time-rescale heights
     // in a fixed order (asert -> retune -> retune2 -> v4 -> bmx4c) and returns on
@@ -1263,20 +1222,6 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
             LogWarning("MatMulAsert: non-inert BMX4C rescale height=%d collides with an earlier ASERT branch "
                        "(rescale would be silently skipped) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                        params.nMatMulBMX4CHeight, next_height);
-            return false;
-        }
-        // ENC-BMX4C-D is the LAST rescale branch in the cascade, so it can be
-        // shadowed by ANY earlier one: asert/retune/retune2 (shadowed_by_earlier)
-        // OR the v4/bmx4c heights. A non-inert D rescale at a colliding height
-        // would be silently skipped -- reject it (finding F1).
-        if (!IsDisabledHeight(params.nMatMulBMX4CDHeight) &&
-            params.nMatMulBMX4CDAsertRescaleNum != params.nMatMulBMX4CDAsertRescaleDen &&
-            (shadowed_by_earlier(params.nMatMulBMX4CDHeight) ||
-             (!IsDisabledHeight(params.nMatMulV4Height) && params.nMatMulBMX4CDHeight == params.nMatMulV4Height) ||
-             (!IsDisabledHeight(params.nMatMulBMX4CHeight) && params.nMatMulBMX4CDHeight == params.nMatMulBMX4CHeight))) {
-            LogWarning("MatMulAsert: non-inert BMX4C-D rescale height=%d collides with an earlier ASERT branch "
-                       "(rescale would be silently skipped) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
-                       params.nMatMulBMX4CDHeight, next_height);
             return false;
         }
     }
@@ -2586,25 +2531,6 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         return bmx4c_target.GetCompact();
     }
 
-    // MatMul v4.2-D / ENC-BMX4C-D (adversarial finding F1): the one-time D rescale
-    // at nMatMulBMX4CDHeight, mechanically identical to the BMX4C branch above. The
-    // D fork raises the enforced marginal tensor work ~3.6x (deeper commit, m
-    // doubles), so attempts/s move at the C->D boundary; nMatMulBMX4CDAsertRescale
-    // Num/Den (default 1/1) must be calibrated empirically pre-release from the
-    // measured marginal nonce/s on the Strassen/LCMA-accelerated combine path. D
-    // forks strictly above BMX4C (validated above), so it is reached AFTER the
-    // BMX4C branch and its re-anchor wins in LatestMatMulAsertPreUpgradeAnchorHeight.
-    if (next_height == params.nMatMulBMX4CDHeight) {
-        arith_uint256 parent_target{};
-        parent_target.SetCompact(pindexLast->nBits);
-        uint32_t bmx4cd_rn, bmx4cd_rd;
-        if (!ReduceRescaleRatioToU32(params.nMatMulBMX4CDAsertRescaleNum, params.nMatMulBMX4CDAsertRescaleDen, bmx4cd_rn, bmx4cd_rd)) {
-            return MatMulAsertFailClosedBits();  // D1: unreachable post-construction; never powLimit
-        }
-        arith_uint256 bmx4cd_target = ScaleTargetByTimespan(parent_target, bmx4cd_rn, bmx4cd_rd);
-        bmx4cd_target = ClampRetargetResult(bmx4cd_target, pow_limit);
-        return bmx4cd_target.GetCompact();
-    }
 
     if (next_height == params.nMatMulAsertHalfLifeUpgradeHeight) {
         arith_uint256 parent_target{};
@@ -3531,15 +3457,16 @@ bool IsMatMulV4PayloadSizeValid(const CBlock& block, const Consensus::Params& pa
 }
 
 // Shared verify CORE over the flat sketch bytes, sourced from EITHER the in-block
-// body (legacy / non-segregated profiles) OR the segregated proof store (design
-// §3). Given the sketch bytes it runs the per-profile O(n^2) Freivalds cascade,
-// recomputes the product-committed digest, and checks it against the header's
+// body (legacy FLAT_SKETCH_INBLOCK regtest-replay carriage) OR the untrusted
+// v4.4 ENC-DR sketch cache (tension-resolution §4.2 CACHE-ASSISTED path). Given
+// the sketch bytes it runs the per-profile O(n^2) Freivalds cascade, recomputes
+// the product-committed digest, and checks it against the header's
 // matmul_digest AND the difficulty target. It does NOT inspect the block body's
 // A/B/C channels or their sizes — the caller enforces the carriage-specific
-// preconditions (in-block: A/B empty + IsMatMulV4PayloadSizeValid; segregated:
-// A/B/C empty + the §3.4 proof size cap + the §3.3 binding). Returns true iff the
-// sketch verifies and the recomputed digest is at/under target. Callers own the
-// runtime-sample bookkeeping.
+// preconditions (in-block: A/B empty + IsMatMulV4PayloadSizeValid; cache: A/B/C
+// empty + the H(sigma||bytes)==matmul_digest authentication). Returns true iff
+// the sketch verifies and the recomputed digest is at/under target. Callers own
+// the runtime-sample bookkeeping.
 static bool CheckMatMulV4SketchVerifies(const CBlock& block, const Consensus::Params& params,
                                         int32_t block_height,
                                         const std::vector<unsigned char>& sketch_payload)
@@ -3562,23 +3489,7 @@ static bool CheckMatMulV4SketchVerifies(const CBlock& block, const Consensus::Pa
     // profile.tile_b (C: b=4/m=1024; D: b=2/m=2048).
     const Consensus::MatMulProfileParams profile_params = params.GetMatMulProfileParams(block_height);
     const Consensus::MatMulEncodingProfile enc_profile = profile_params.profile;
-    if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4CD) {
-        // ENC-BMX4C-D (v4.2-D deeper-commit profile): identical to ENC-BMX4C but
-        // the sketch tile b = 2 (m = n/2), committing 4x more of C. The
-        // accumulator preconditions are IDENTICAL (all bounds m-independent);
-        // only the verifier's sketch rank differs. At segregated-proof heights
-        // `sketch_payload` is the store-fetched proof already bound to
-        // matmul_digest by the caller (design §3.3); here it is Freivalds-verified.
-        if (!matmul::v4::bmx4::CheckCombineLimbBoundBMX4C(v4_dim)) return false;
-        if (static_cast<int64_t>(Consensus::BMX4C_BASE_PRODUCT_BOUND_PER_N) * v4_dim >
-            std::numeric_limits<int32_t>::max()) {
-            return false;
-        }
-        if (!matmul::v4::bmx4::VerifySketchBMX4D(block, v4_dim, params.nMatMulV4FreivaldsRounds,
-                                                 sketch_payload, digest)) {
-            return false;
-        }
-    } else if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
+    if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
         // Structural combine/accumulator preconditions for ENC-BMX4C (spec
         // §2.4/§5.2/§8.2), checked ahead of the O(n^2) verify as defense in
         // depth. (i) The base-2^6 remainder-top decomposition must be total:
@@ -3641,91 +3552,204 @@ bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consen
     // Unpack the trailing product-sketch payload (vector<uint32_t> LE words,
     // spec §H.2's reused trailing-payload serialization) into the flat byte
     // buffer the shared verify core expects. This is the IN-BLOCK carriage:
-    // non-segregated profiles (ENC-S8 / ENC-BMX4C) only. Segregated-proof
-    // profiles never reach here (ContextualCheckBlock routes them to
-    // CheckMatMulV4SegregatedProof); their body sketch is empty by construction.
+    // the legacy FLAT_SKETCH_INBLOCK regtest-replay path only. ENC-DR
+    // (DIGEST_RECOMPUTE) blocks never reach here (ContextualCheckBlock routes
+    // them to CheckMatMulProofOfWork_V4EncDr); their body sketch is empty by
+    // consensus rule (tension-resolution §4.1 clause 2).
     const std::vector<unsigned char> sketch_payload = UnpackMatMulV4SketchWordsToBytes(block.matrix_c_data);
     return finish(CheckMatMulV4SketchVerifies(block, params, block_height, sketch_payload));
 }
 
-uint64_t GetMatMulProofSizeCap(const Consensus::Params& params, int32_t block_height)
+bool RecomputeMatMulV4SketchReference(const CBlockHeader& header,
+                                      const Consensus::Params& params,
+                                      int32_t block_height,
+                                      uint256& digest_out,
+                                      std::vector<unsigned char>& sketch_out)
 {
-    const Consensus::MatMulProfileParams profile_params = params.GetMatMulProfileParams(block_height);
-    return profile_params.sketch_payload_bytes + MATMUL_SEGREGATED_PROOF_OVERHEAD;
+    // v4.4 ENC-DR RECOMPUTE reference (tension-resolution §4.2): the verify-side
+    // entry point of the SAME CPU pure-integer reference the miner seals winning
+    // blocks with (SolveMatMulV4BMX4C reseals every candidate through
+    // bmx4::ComputeDigestBMX4C; the ENC-S8 batch path through
+    // matmul_v4::ComputeDigest), so Chat_true here is bit-identical to the mine
+    // path BY SHARED CODE, and the exact digest equality check can never split
+    // consensus between miner and verifier.
+    //
+    // R1 CPU-REFERENCE-ANCHORED REJECTION: this function is the SOLE arbiter of
+    // invalid-by-recompute. It NEVER dispatches to an accelerated backend
+    // (matmul_v4::accel::*) and never to any FP/Ozaki path
+    // (matmul_v4_exact_float) — mining's fail-safe posture (wrong device Chat
+    // -> digest miss -> discarded candidate) does not exist on the verify path,
+    // so a device divergence here would be a chain split, not a lost nonce.
+    // Accelerated verify-side recompute is admissible in the future ONLY as a
+    // fast-ACCEPT (digest match proves Chat correct under SHA collision
+    // resistance); any mismatch must fall back to this reference before a
+    // reject is pronounced.
+    const uint32_t n = params.nMatMulV4Dimension;
+    const Consensus::MatMulEncodingProfile enc_profile =
+        params.GetMatMulEncodingProfile(block_height);
+    if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
+        // Preserve the structural combine/accumulator guards the reference
+        // relies on (identical to the CheckMatMulV4SketchVerifies preconditions;
+        // spec §2.4/§5.2/§8.2): (i) the base-2^6 remainder-top decomposition
+        // must be total; (ii) the full-C per-word magnitude bound must stay
+        // exact in int32.
+        if (!matmul::v4::bmx4::CheckCombineLimbBoundBMX4C(n)) return false;
+        if (static_cast<int64_t>(Consensus::BMX4C_BASE_PRODUCT_BOUND_PER_N) * n >
+            std::numeric_limits<int32_t>::max()) {
+            return false;
+        }
+        return matmul::v4::bmx4::ComputeDigestBMX4C(header, n, digest_out, sketch_out);
+    }
+    // ENC_S8 (unit-test/regtest shapes): the v4.1 CPU reference. ComputeDigest
+    // internally validates (n, kTileB) and the §B.4 accumulation bound.
+    return matmul_v4::ComputeDigest(header, n, params.nMatMulV4FreivaldsRounds,
+                                    digest_out, sketch_out);
 }
 
-MatMulSegregatedProofStatus CheckMatMulV4SegregatedProof(const CBlock& block,
-                                                         const Consensus::Params& params,
-                                                         int32_t block_height)
+bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params& params,
+                                    int32_t block_height)
 {
-    // Store-backed segregated-proof validation (design §3.3/§3.4). Reached ONLY
-    // at heights where GetMatMulProfileParams(height).proof_segregated == true
-    // (currently ENC-BMX4C-D). The caller (ContextualCheckBlock) has already
-    // established that height gate and that the in-block body sketch is EMPTY.
-    //
-    // Ordering is load-bearing and mirrors the in-block MUTATED/CONSENSUS split
-    // with NO weakening (design §3.3):
-    //   1. fetch the proof from the store; ABSENT => PoW-INCOMPLETE (non-permanent
-    //      "we don't have it yet" — Stage 2b re-requests it from the network);
-    //   2. size cap BEFORE any parse/binding (§3.4) — over-cap is a relay/body
-    //      MUTATION, non-permanent, cannot poison the honest block;
-    //   3. binding H(sigma || proof) == matmul_digest (§3.3) — a substituted or
-    //      corrupted proof fails here as a MUTATION (non-permanent);
-    //   4. Freivalds + target on the BOUND proof — a proof that reconstructs the
-    //      digest yet fails verification/target is a PERMANENT consensus fault.
     const auto start = std::chrono::steady_clock::now();
-    const auto sample = [&](bool passed) {
+    const auto finish = [&](bool passed) {
         RegisterMatMulValidationRuntimeSample(
-            MatMulValidationPath::FREIVALDS, passed,
+            MatMulValidationPath::FREIVALDS,
+            passed,
             std::chrono::steady_clock::now() - start);
+        return passed;
     };
 
-    std::vector<unsigned char> proof;
-    if (!matmul::GetMatMulProof(block.GetHash(), proof)) {
-        return MatMulSegregatedProofStatus::INCOMPLETE;
+    if (!params.IsMatMulV4Active(block_height)) return finish(false);
+    if (block.matmul_dim != params.nMatMulV4Dimension) return finish(false);
+    if (block.seed_a.IsNull() || block.seed_b.IsNull()) return finish(false);
+
+    auto bnTarget{DeriveTarget(block.nBits, params.powLimit)};
+    if (!bnTarget) return finish(false);
+
+    const uint256 block_hash = block.GetHash();
+
+    // --- CACHE-ASSISTED fast path (tension-resolution §4.2, an accept-side
+    // optimization; epsilon <= 2^-180). Fail-fast and budget-free: a
+    // cache-authenticated block never queues behind attacker-forced recomputes.
+    {
+        std::vector<unsigned char> cached;
+        if (matmul::GetMatMulSketchCache().Get(block_hash, cached)) {
+            // (a) One-hash authentication: H(sigma||bytes) == matmul_digest
+            //     proves (under SHA-256 collision resistance) the bytes are
+            //     exactly the preimage the miner committed. On mismatch the
+            //     CACHE is garbage — discard the entry and fall through to
+            //     recompute; a cache failure is NEVER evidence about the block.
+            if (!matmul_v4::PayloadMatchesCommitment(block, cached)) {
+                matmul::GetMatMulSketchCache().Erase(block_hash);
+            } else if (CheckMatMulV4SketchVerifies(block, params, block_height, cached)) {
+                // (b)+(c)+(d): ParseSketch canonicality + R Freivalds rounds +
+                // digest/target — the v4.3 verifier byte-identical.
+                return finish(true);
+            }
+            // An AUTHENTICATED payload failing Freivalds implies (whp) the
+            // miner committed Chat' != Chat_true, so the recompute path below
+            // rejects too — but the RECOMPUTE reference is the CONSENSUS
+            // definition (epsilon = 0), so it, not the probabilistic path,
+            // pronounces the verdict. Fall through.
+        }
     }
 
-    // §3.4 proof size cap, derived from the ACTIVE profile's 8·m² (not attacker-
-    // chosen), enforced ahead of the binding/parse so an oversize blob cannot
-    // force allocation/iteration. A well-formed sketch is exactly
-    // sketch_payload_bytes; a tiny slack keeps this a coarse pre-parse DoS
-    // backstop while ParseSketch (inside VerifySketch*) is the exact-size gate.
-    const uint64_t max_proof_size = GetMatMulProofSizeCap(params, block_height);
-    if (proof.size() > max_proof_size) {
-        return MatMulSegregatedProofStatus::MUTATED;
+    // --- MULTI-PLATFORM ACCELERATED RECOMPUTE, ACCEPT-FAST ONLY (adoption
+    // condition: trustless verification must not be vendor-locked). A
+    // validator on ANY mining-eligible backend — CUDA / Metal / HIP today,
+    // further backends addable through the same accel_v4 registry +
+    // backend_capabilities_v4 eligibility harness WITHOUT consensus changes —
+    // may recompute Chat on its accelerator exactly as mining does. A digest
+    // MATCH accepts fast: the backend reproduced the committed preimage, and
+    // eligibility (cross-vendor bit-identity vs the CPU reference on the
+    // golden vectors, backend_capabilities_v4) plus the miner-side CPU reseal
+    // (SolveMatMulV4* seals only reference-confirmed digests) pin that
+    // preimage to Chat_true. R1 CPU-REFERENCE-ANCHORED REJECTION: a mismatch
+    // or device error NEVER rejects — it falls through to the CPU
+    // pure-integer reference below, the SOLE arbiter of invalidity, so a
+    // device-side divergence can cost this node a redundant recompute but can
+    // never split it from CPU consensus. (FP/Ozaki paths are not in the
+    // backend registry's verify surface at all.)
+    if (matmul_v4::accel::ResolveBackend() != matmul_v4::accel::Kind::CPU) {
+        bool accel_ok = false;
+        uint256 accel_digest;
+        std::vector<unsigned char> accel_sketch;
+        const Consensus::MatMulEncodingProfile enc_profile =
+            params.GetMatMulEncodingProfile(block_height);
+        if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
+            std::vector<CBlockHeader> headers{static_cast<const CBlockHeader&>(block)};
+            std::vector<uint256> digests;
+            std::vector<std::vector<unsigned char>> payloads;
+            // Window of one; the dispatch host-verifies candidates at/under the
+            // target against the reference before returning them.
+            if (matmul_v4::accel::ComputeDigestsBMX4CDispatched(
+                    headers, params.nMatMulV4Dimension, params.nMatMulV4FreivaldsRounds,
+                    ArithToUint256(*bnTarget), digests, payloads) &&
+                digests.size() == 1 && payloads.size() == 1) {
+                accel_ok = true;
+                accel_digest = digests[0];
+                accel_sketch = std::move(payloads[0]);
+            }
+        } else {
+            // ENC_S8 test shapes: the per-header dispatch (internally
+            // reference-confirmed, CPU fallback on any device error).
+            accel_ok = matmul_v4::accel::ComputeDigestDispatched(
+                block, params.nMatMulV4Dimension, params.nMatMulV4FreivaldsRounds,
+                accel_digest, accel_sketch);
+        }
+        if (accel_ok && accel_digest == block.matmul_digest &&
+            UintToArith256(accel_digest) <= *bnTarget) {
+            matmul::GetMatMulSketchCache().Put(block_hash, std::move(accel_sketch));
+            return finish(true);
+        }
+        // Fall through: only the CPU reference may pronounce a reject.
     }
 
-    // §3.3 binding: the only byte-string that satisfies H(sigma || .) ==
-    // matmul_digest is the sketch the miner committed to (sigma is header-derived,
-    // matmul_digest is header-fixed and block-hash-covered). matmul_v4::
-    // PayloadMatchesCommitment is the SAME binding predicate the in-block path
-    // uses for its MUTATED classification (MatMulV4PayloadMatchesCommitment),
-    // here fed the store bytes instead of matrix_c_data.
-    if (!matmul_v4::PayloadMatchesCommitment(block, proof)) {
-        return MatMulSegregatedProofStatus::MUTATED;
+    // --- RECOMPUTE reference path (the consensus definition; epsilon = 0).
+    // DoS accounting: this is the expensive (one-nonce, O(W)) path an attacker
+    // could try to force with header-PoW-paying garbage. It is priced by the
+    // existing v4 global verify budget (spec §I.5) SEPARATELY from the
+    // fail-fast cache path above; exhaustion is logged for rate observability
+    // but cannot change the verdict — ContextualCheckBlock requires a
+    // decision, and the header-PoW pre-gate (nMatMulHeaderPoWDiscountBits) is
+    // the admission throttle that keeps attempts priced upstream.
+    if (!ConsumeGlobalMatMulPhase2Budget(
+            EffectiveMatMulGlobalVerifyBudgetPerMin(params, block_height), 1,
+            std::chrono::steady_clock::now())) {
+        LogDebug(BCLog::NET, "ENC-DR recompute budget exhausted; recomputing block %s anyway (verdict required)\n",
+                 block_hash.ToString());
     }
 
-    // Binding passed: any remaining failure is a PERMANENT consensus fault.
-    const bool ok = CheckMatMulV4SketchVerifies(block, params, block_height, proof);
-    sample(ok);
-    return ok ? MatMulSegregatedProofStatus::OK
-              : MatMulSegregatedProofStatus::CONSENSUS_FAIL;
+    uint256 recomputed_digest;
+    std::vector<unsigned char> recomputed_sketch;
+    if (!RecomputeMatMulV4SketchReference(block, params, block_height,
+                                          recomputed_digest, recomputed_sketch)) {
+        return finish(false);
+    }
+    // Exact digest check (epsilon = 0) + target — tension-resolution §4.1
+    // clauses 3 and 4.
+    if (recomputed_digest != block.matmul_digest) return finish(false);
+    if (UintToArith256(recomputed_digest) > *bnTarget) return finish(false);
+
+    // Accepted via recompute: this node has now materialized the 8·m² bytes and
+    // may serve them to CPU peers (best-effort, non-consensus, §4.3).
+    matmul::GetMatMulSketchCache().Put(block_hash, std::move(recomputed_sketch));
+    return finish(true);
 }
 
-bool OffloadMatMulV4SegregatedProofToStore(CBlock& block)
+bool OffloadMatMulV4SketchToCache(CBlock& block)
 {
-    // Segregated-proof miner handoff (design §3.6). The solver filled
+    // ENC-DR miner handoff (tension-resolution §4.3/§5): the solver filled
     // block.matrix_c_data with the word-packed sketch and finalized the header
     // (matmul_digest / seeds / nonce), so block.GetHash() — the HEADER hash, and
-    // thus the proof-store key — is now stable and independent of the body sketch.
-    // Move the raw sketch bytes into the local store, then CLEAR the in-body sketch
-    // so the block serializes with an EMPTY matrix_c_data (the wire invariant in
-    // primitives/block.h). ContextualCheckBlock later Get()s it back by the same
-    // block hash to run the §3.3 binding + Freivalds. The packing seam
-    // (word<->byte) stays entirely inside this file.
+    // thus the cache key — is now stable and independent of the body sketch.
+    // Move the raw sketch bytes into the local non-consensus sketch cache, then
+    // CLEAR the in-body sketch so the block serializes DIGEST-ONLY (the §4.1
+    // empty-body rule). Mining is byte-identical to v4.3 up to this point; the
+    // sketch simply is not attached to the block. The packing seam (word<->byte)
+    // stays entirely inside this file.
     if (block.matrix_c_data.empty()) return false;
     std::vector<unsigned char> sketch = UnpackMatMulV4SketchWordsToBytes(block.matrix_c_data);
-    matmul::PutMatMulProof(block.GetHash(), std::move(sketch));
+    matmul::GetMatMulSketchCache().Put(block.GetHash(), std::move(sketch));
     block.matrix_c_data.clear();
     return true;
 }
@@ -4780,64 +4804,6 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
     return false;
 }
 
-// ENC-BMX4C-D (v4.2-D) reference solve loop (reinstated; solver-evolution
-// Stage 1). The D profile has no wired batched device dispatch (backends
-// implement the ENC-BMX4C signature; D is a staged CPU-reference profile), so
-// this grinds nonces per-nonce through the byte-exact
-// matmul::v4::bmx4::ComputeDigestBMX4D reference. Structurally identical to the
-// ENC-BMX4C loop above minus the batch fusion; correctness, not throughput, is
-// the point until a D device backend lands.
-//
-// TODO(Stage 2): D's ~32 MiB sketch is carried as a segregated prunable proof
-// (design §3). Here freivalds_payload_out still returns the in-block payload
-// words; Stage 2 routes the D sketch to the getmatmulproof/matmulproof relay
-// (the block body no longer carries it) while the header's matmul_digest
-// commitment is unchanged.
-static bool SolveMatMulV4BMX4D(CBlockHeader& block,
-                               const Consensus::Params& params,
-                               uint64_t& max_tries,
-                               int32_t block_height,
-                               const std::atomic<bool>* abort_flag,
-                               std::vector<uint32_t>* freivalds_payload_out,
-                               std::optional<int64_t> parent_median_time_past,
-                               const arith_uint256& bnTarget,
-                               std::chrono::steady_clock::time_point start)
-{
-    const uint32_t n = params.nMatMulV4Dimension;
-    while (max_tries > 0) {
-        if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
-            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
-            return false;
-        }
-        if (!SetDeterministicMatMulSeeds(block, params, block_height, parent_median_time_past)) {
-            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
-            return false;
-        }
-        uint256 digest;
-        std::vector<unsigned char> payload;
-        if (!matmul::v4::bmx4::ComputeDigestBMX4D(block, n, digest, payload)) {
-            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
-            return false;
-        }
-        if (UintToArith256(digest) <= bnTarget) {
-            block.matmul_digest = digest;
-            if (freivalds_payload_out != nullptr) {
-                *freivalds_payload_out = PackMatMulV4SketchBytesToWords(payload);
-            }
-            RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
-            return true;
-        }
-        --max_tries;
-        if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) {
-            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
-            return false;
-        }
-        ++block.nNonce64;
-        block.nNonce = static_cast<uint32_t>(block.nNonce64);
-    }
-    RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
-    return false;
-}
 
 static bool SolveMatMulV4(CBlockHeader& block,
                           const Consensus::Params& params,
@@ -4865,11 +4831,6 @@ static bool SolveMatMulV4(CBlockHeader& block,
     // is the SINGLE selector. At BMX4C heights the whole solve routes to the
     // ENC-BMX4C loop; the ENC-S8 path below is unchanged.
     const Consensus::MatMulEncodingProfile solve_profile = params.GetMatMulEncodingProfile(block_height);
-    if (solve_profile == Consensus::MatMulEncodingProfile::ENC_BMX4CD) {
-        // ENC-BMX4C-D (v4.2-D): per-nonce CPU-reference grind at b=2/m=2048.
-        return SolveMatMulV4BMX4D(block, params, max_tries, block_height, abort_flag,
-                                  freivalds_payload_out, parent_median_time_past, *bnTarget, start);
-    }
     if (solve_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
         return SolveMatMulV4BMX4C(block, params, max_tries, block_height, abort_flag,
                                   freivalds_payload_out, parent_median_time_past, *bnTarget, start);

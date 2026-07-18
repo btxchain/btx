@@ -130,7 +130,7 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     const auto assert_profile_dimension_pin =
         [&consensus](const Consensus::MatMulProfileParams& p) {
             assert(p.tile_b > 0);
-            assert(p.sketch_payload_bytes ==
+            assert(p.SketchCacheBytes() ==
                    uint64_t{8} * p.sketch_rank_m * p.sketch_rank_m);
             assert(consensus.nMatMulV4Dimension % p.tile_b == 0);
             if (consensus.nMatMulV4Dimension >= p.tile_b * p.sketch_rank_m) {
@@ -183,50 +183,12 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     assert(consensus.nMatMulBMX4CAsertRescaleNum > 0);
     assert(consensus.nMatMulBMX4CAsertRescaleDen > 0);
 
-    // ENC-BMX4C-D (v4.2-D) is an ADDITIONAL profile above ENC-BMX4C (design §2):
-    // if configured it MUST fork STRICTLY ABOVE the ENC-BMX4C height (D succeeds
-    // C; no dual-profile window at the same height), and its ASERT rescale ratio
-    // must be strictly positive. Disabled (INT32_MAX) => no coupling.
-    //
-    // PROOF CARRIAGE (design §3): D's ~32 MiB sketch is carried as a SEGREGATED
-    // PRUNABLE PROOF, excluded from the block serialized size by construction, so
-    // there is NO in-block 32 MiB payload gating to assert here (that was the old
-    // P1/P3 blocker). Stage 2a wired the body-serialization gate, the store-backed
-    // §3.3 binding + §3.4 size cap, and the miner offload; Stage 2b wires the
-    // getmatmulproof/matmulproof P2P relay (now present); Stage 2c wires prune/archive.
-    if (consensus.nMatMulBMX4CDHeight == std::numeric_limits<int32_t>::max()) return;
-
-    // ACTIVATION COUPLING (design §3.6), mirroring the BTX_HEADER_NONCE_ON_WIRE
-    // gate: enabling a segregated-proof profile is a coordinated header/relay
-    // protocol change. A NETWORKED node that receives a segregated block from a
-    // peer must be able to OBTAIN its proof, or it stalls (the sketch is off-body).
-    // BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY is FALSE while the relay is not yet
-    // production-ready (Stage-2b relay disconnects v2 peers on the ~32 MiB proof;
-    // Stage 2d chunking + Stage 2c storage must land and be re-flipped together),
-    // so this assert HARD-BLOCKS any PUBLIC network from configuring a D height.
-    // D itself remains activation-disabled everywhere (nMatMulBMX4CDHeight ==
-    // INT32_MAX on every network, so this branch is unreached in shipping configs).
-    //
-    // The exemption is keyed on the chain being REGTEST (is_regtest), NOT on
-    // consensus.fPowNoRetargeting: the -test=matmuldgw option CLEARS fPowNoRetargeting
-    // (see below), which would otherwise remove the exemption from exactly the
-    // -regtestbmx4cdheight relay tests that must exercise the path. Public networks
-    // stay hard-blocked whether or not they retarget; regtest is always exempt
-    // whether or not -test=matmuldgw is set, so the relay tests run with the flag
-    // false (the real fail-closed state for public nets, exercisable in regtest).
-    assert(Consensus::BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY || is_regtest);
-
-    assert(consensus.nMatMulBMX4CDHeight > consensus.nMatMulBMX4CHeight);
-    assert(consensus.nMatMulBMX4CDAsertRescaleNum > 0);
-    assert(consensus.nMatMulBMX4CDAsertRescaleDen > 0);
-    // §4.3 per-profile dimension/payload pin for the D profile: its DELIBERATELY
-    // larger committed object (b=2 -> m=2048 -> 32 MiB) is pinned to the D tile
-    // via the per-profile params, so a dimension retarget cannot silently move
-    // the D rank/payload off its calibrated 32 MiB either (b -> 4 at n -> 8192
-    // would hold m = 2048). At nMatMulBMX4CDHeight the live profile is ENC_BMX4CD
-    // (D > C is asserted just above), so GetMatMulProfileParams yields the D shape.
-    assert_profile_dimension_pin(
-        consensus.GetMatMulProfileParams(consensus.nMatMulBMX4CDHeight));
+    // v4.4 ENC-DR carriage fail-close (tension-resolution §4.5): the legacy
+    // FLAT_SKETCH_INBLOCK carriage survives ONLY as a regtest differential-
+    // testing switch. A public network must never be constructible with the
+    // replay carriage selected — the ENC-DR digest-only rule is the single live
+    // consensus carriage everywhere v4 activates.
+    assert(!consensus.fMatMulV4FlatSketchReplay || is_regtest);
 }
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
@@ -356,8 +318,8 @@ public:
         // cannot carry, compact-block serving is intentionally disabled for blocks at
         // these heights (a reconstructed payload-less block would fail validation) --
         // see ProcessGetBlockData in net_processing.cpp. There is no scheduled upgrade
-        // that re-enables compact serving; that would require a payload-carrying P2P
-        // extension (getmatmulproof/matmulproof, btx-matmul-pow-spec.md S13.3).
+        // that re-enables compact serving for these v3 heights. (v4.4 ENC-DR blocks
+        // carry no payload at all, so this constraint is a v3-history artifact.)
         consensus.fMatMulRequireProductPayload = false;
         consensus.nMatMulFreivaldsBindingHeight = 61'000;
         consensus.nMatMulProductDigestHeight = 61'000;
@@ -1461,19 +1423,14 @@ public:
         if (opts.matmul_bmx4c_height.has_value() && !opts.matmul_v4_height.has_value()) {
             consensus.nMatMulV4Height = consensus.nMatMulBMX4CHeight;
         }
-        // MatMul v4.2-D ENC-BMX4C-D segregated-proof profile (solver-evolution
-        // Stage 2a; design §3). Regtest-only override so a single node can mine
-        // across into D heights and exercise the store-backed binding + Freivalds
-        // path. D must fork STRICTLY ABOVE the ENC-BMX4C height (D succeeds C — the
-        // strict-above assert in AssertBMX4CConstructionInvariants fails loud on
-        // D<=C). The D ASERT rescale stays at its 1/1 default (regtest has no
-        // pre-fork throughput history). Activation here is permitted because this is
-        // the REGTEST chain (is_regtest) — the segregated-proof relay-ready compile
-        // gate exempts regtest by chain identity (see the assert), so the relay tests
-        // run even with BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY false and even when
-        // -test=matmuldgw has cleared fPowNoRetargeting.
-        if (opts.matmul_bmx4cd_height.has_value()) {
-            consensus.nMatMulBMX4CDHeight = *opts.matmul_bmx4cd_height;
+        if (opts.matmul_flat_sketch_replay) {
+            // v4.4 ENC-DR regtest-only differential switch: re-select the legacy
+            // FLAT_SKETCH_INBLOCK carriage so golden-vector replay tests can
+            // exercise the retired in-block path against the recompute path
+            // (tension-resolution §5-2). Permitted here because this is the
+            // REGTEST chain; public networks fail closed in
+            // AssertBMX4CConstructionInvariants.
+            consensus.fMatMulV4FlatSketchReplay = true;
         }
         // MatMul v4.2-D segregated-proof rolling prune window (design §3.5). The
         // production default is 10 000 blocks; the regtest override lets a
@@ -1671,7 +1628,7 @@ public:
             opts.matmul_v4_dimension.has_value() ||
             opts.matmul_v4_max_dimension.has_value() ||
             opts.matmul_bmx4c_height.has_value() ||
-            opts.matmul_bmx4cd_height.has_value() ||
+            opts.matmul_flat_sketch_replay ||
             opts.matmul_proof_prune_depth.has_value() ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||

@@ -60,6 +60,11 @@ class BTXMatMulBMX4CActivation(BitcoinTestFramework):
             "-regtestmatmulrequireproductpayload=0",
             f"-regtestmatmulv4height={ACTIVATION_HEIGHT}",
             f"-regtestmatmulv4dimension={V4_DIMENSION}",
+            # v4.4 ENC-DR: this test exercises the LEGACY in-block sketch
+            # carriage (payload semantics + corruption rejection); replay it via
+            # the regtest-only differential switch. The ENC-DR digest-only
+            # carriage is covered by p2p_matmul_encdr_sketch_cache.py.
+            "-regtestmatmulflatsketchreplay",
             f"-regtestbmx4cheight={ACTIVATION_HEIGHT}",
         ]
         self.extra_args = [common, common]

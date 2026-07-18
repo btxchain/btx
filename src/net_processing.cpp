@@ -31,7 +31,8 @@
 #include <policy/fees.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
-#include <matmul/matmul_proof_store.h>
+#include <matmul/matmul_sketch_cache.h>
+#include <matmul/pow_v4.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -114,83 +115,24 @@ static constexpr auto BLOCK_STALLING_TIMEOUT_DEFAULT{2s};
 static constexpr auto BLOCK_STALLING_TIMEOUT_FAST_PHASE{750ms};
 /** Maximum timeout for stalling block download. */
 static constexpr auto BLOCK_STALLING_TIMEOUT_MAX{64s};
-/** Segregated MatMul proof relay (MatMul v4.2 solver-evolution Stage 2b,
- *  design §3.2/§3.5). Time we wait for a `matmulproof` response before freeing the
- *  in-flight request so it can be re-issued (to another peer). */
-static constexpr auto MATMUL_PROOF_REQUEST_TIMEOUT{10s};
-/** After this long with a HELD proof-incomplete block and no successful fetch, we
- *  forget which peers already failed us and retry them from scratch. The block is
- *  never permanently rejected (design §3.5), so this is only a long-tail safety net
- *  for "every peer we knew was exhausted". */
-static constexpr auto MATMUL_PROOF_RETRY_RESET{5min};
-/** For a proof whose block is buried below the rolling prune window (design §3.5:
- *  a default peer has very likely pruned it), we PREFER archive peers
- *  (NODE_MATMUL_PROOF_ARCHIVE) as the source. To avoid stalling when no archive
- *  peer is connected, non-archive peers are deferred only for this grace period
- *  after the block is first held; after it, ANY block-serving peer may be asked
- *  (some full nodes retain more than the window). The block is never permanently
- *  rejected — if nobody has the proof it stays held (design §3.5). */
-static constexpr auto MATMUL_PROOF_ARCHIVE_PREFERENCE_GRACE{20s};
-/** Defensive cap on how many proof-incomplete blocks we hold awaiting their
- *  segregated proof at once. Each held block already passed CheckBlock + header
- *  acceptance (real PoW work to forge), so the surface is naturally bounded like
- *  the block-download window; the true memory bound is MAX_MATMUL_PROOFS_PENDING_BYTES
- *  (below), and this count is a coarse backstop.
- *
- *  It MUST stay >= BLOCK_DOWNLOAD_WINDOW (1024). FindNextBlocksToDownload never
- *  fetches a block whose height exceeds pindexLastCommonBlock + BLOCK_DOWNLOAD_WINDOW,
- *  and (since commit 63d434d) skips any block already held here. If the cap were below
- *  the window, a run of proof-incomplete blocks could fill it, and the NEXT in-window
- *  block would be dropped-not-held (BlockChecked cap branch) -> not skipped by
- *  FindNextBlocksToDownload -> re-requested every pass: the exact download/validate/drop
- *  busy-loop 63d434d fixed, resurrected in the over-cap branch. Sizing the cap to cover
- *  the whole window means every in-window proof-incomplete block is holdable and
- *  skipped, so nothing re-downloads; the block bodies are tiny (the ~32 MiB sketch is
- *  segregated), so 2048 tiny CBlocks cost only a few MiB and the byte budget still caps
- *  total pinned memory. */
-static constexpr size_t MAX_MATMUL_PROOFS_PENDING{2048};
-/** Stage 2d (relay-hardening design §3): the total BYTE budget for held proof-incomplete
- *  blocks, and the TRUE memory bound (the entry-count cap above is deliberately generous
- *  to cover the download window, so this byte budget — not the count — is what caps RAM).
- *  Each held entry pins a full CBlock plus a reassembly buffer up to 8·m² (32 MiB at the
- *  D profile); without a byte bound a large count × 32 MiB would be gigabytes. 128 MiB
- *  caps worst-case pinned memory while comfortably admitting a handful of concurrent
- *  32 MiB reassemblies plus the small held blocks (whose bodies are tiny — the sketch is
- *  segregated). On overflow we evict lowest-chain-work (tie: oldest) entries, releasing
- *  their CBlock + reassembly buffer; the evicted block is re-requestable via normal sync
- *  (never marked permanently invalid). */
-static constexpr size_t MAX_MATMUL_PROOFS_PENDING_BYTES{size_t{128} * 1024 * 1024};
-/** Stage 2d (design §3.3): a held proof-incomplete block is DROPPED (re-downloadable
- *  later via normal sync, never pinned forever) once EITHER condition fires. The TTL is
- *  measured on the NODE time source passed into SendMessages (GetTime, mockable via
- *  SetMockTime), NOT std::chrono::system_clock — so a slow/silent peer set cannot pin a
- *  block past the TTL, and tests can drive expiry deterministically. */
-static constexpr auto MATMUL_PROOF_PENDING_TTL{20min};
-static constexpr unsigned MATMUL_PROOF_MAX_ATTEMPTS{10};
-/** Stage 2d getmatmulproof serving limits (design §4): a 32-byte request triggers a
- *  ~32 MiB (chunked) reply — a ~10⁶× amplification. Three composable limits, hooked
- *  BEFORE the responder emits any chunk: a per-peer token bucket (burst
- *  MATMUL_PROOF_SERVE_BUCKET_MAX proofs, refill 1/MATMUL_PROOF_SERVE_REFILL), a
- *  node-wide egress byte budget (8 MiB/s), and a per-(peer,block) dedup window (an
- *  honest peer that got the proof does not re-ask in 10 min). All use the node clock;
- *  empty bucket / exhausted budget / dup → silently skip serving (never an error, like
- *  a getblocktxn we won't answer).
- *
- *  The per-peer bucket is sized for LEGITIMATE SYNC, not just the steady state: a peer
- *  in IBD/reorg-catchup pulls one DISTINCT proof per D block it validates, back to back,
- *  so an over-tight per-peer rate (an earlier 2-burst / 6-per-min setting) throttled
- *  honest catch-up to a crawl — thousands of D blocks would take hours of pure
- *  rate-limit wait. Anti-amplification does NOT rest on this bucket: the node-wide
- *  8 MiB/s egress budget is the hard bandwidth cap (a 32 MiB proof already costs ~4 s of
- *  it), and the per-(peer,block) dedup window blocks re-serving the SAME proof — so the
- *  amplification pattern (one peer re-asking one huge proof) is already closed. The
- *  bucket only bounds the rate of DISTINCT-proof requests from a single peer; burst 16 /
- *  refill 1 s (≈ 60/min sustained) keeps that bound meaningful while letting real sync
- *  proceed at the global-budget-paced rate. */
-static constexpr double MATMUL_PROOF_SERVE_BUCKET_MAX{16.0};
-static constexpr auto MATMUL_PROOF_SERVE_REFILL{1s};
-static constexpr size_t MATMUL_PROOF_SERVE_GLOBAL_BYTES_PER_SEC{size_t{8} * 1024 * 1024};
-static constexpr auto MATMUL_PROOF_SERVE_DEDUP_WINDOW{10min};
+/** v4.4 ENC-DR getmmsketch serving limits (tension-resolution §4.3). The sketch
+ *  cache is untrusted and best-effort for the REQUESTER, but serving is a real
+ *  amplification surface for the SERVER's uplink: a 32-byte request triggers an
+ *  ~8 MiB reply (~2.6x10^5 amplification). Three composable limits, hooked BEFORE
+ *  any reply is emitted (ported unchanged from the retired segregated-proof
+ *  relay's audited serve gates): (1) a per-peer token bucket (burst
+ *  MATMUL_SKETCH_SERVE_BUCKET_MAX sketches, refill 1/MATMUL_SKETCH_SERVE_REFILL)
+ *  bounding the rate of DISTINCT-sketch requests from one peer; (2) a node-wide
+ *  egress byte budget (8 MiB/s, all-or-nothing per reply, allowed to go negative
+ *  after a serve) — the REAL anti-amplification bound versus Sybil peer sets;
+ *  (3) a per-(peer,block) dedup window (an honest peer that got the sketch does
+ *  not re-ask within 10 min; a repeat is a silent skip). All use the node clock;
+ *  empty bucket / exhausted budget / dup => silently skip serving (never an
+ *  error, like a getblocktxn we won't answer). */
+static constexpr double MATMUL_SKETCH_SERVE_BUCKET_MAX{16.0};
+static constexpr auto MATMUL_SKETCH_SERVE_REFILL{1s};
+static constexpr size_t MATMUL_SKETCH_SERVE_GLOBAL_BYTES_PER_SEC{size_t{8} * 1024 * 1024};
+static constexpr auto MATMUL_SKETCH_SERVE_DEDUP_WINDOW{10min};
 /** Maximum depth of blocks we're willing to serve as compact blocks to peers
  *  when requested. For older blocks, a regular BLOCK response will be sent. */
 static const int MAX_CMPCTBLOCK_DEPTH = 5;
@@ -558,12 +500,13 @@ struct Peer {
     /** Remote network address used for reconnect-resistant MatMul budgeting. */
     const CNetAddr m_addr;
 
-    /** Stage 2d getmatmulproof serving rate-limit state (design §4), all touched only
-     *  from ProcessMessage under g_msgproc_mutex. Token bucket: burst
-     *  MATMUL_PROOF_SERVE_BUCKET_MAX proofs, lazily refilled 1 per MATMUL_PROOF_SERVE_REFILL
-     *  from node-clock deltas. Dedup: block hash -> node-clock time it was last served to
-     *  this peer, pruned by the MATMUL_PROOF_SERVE_DEDUP_WINDOW. */
-    double m_matmul_serve_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){MATMUL_PROOF_SERVE_BUCKET_MAX};
+    /** v4.4 ENC-DR getmmsketch serving rate-limit state (tension-resolution §4.3),
+     *  all touched only from ProcessMessage under g_msgproc_mutex. Token bucket:
+     *  burst MATMUL_SKETCH_SERVE_BUCKET_MAX sketches, lazily refilled 1 per
+     *  MATMUL_SKETCH_SERVE_REFILL from node-clock deltas. Dedup: block hash ->
+     *  node-clock time it was last served to this peer, pruned by the
+     *  MATMUL_SKETCH_SERVE_DEDUP_WINDOW. */
+    double m_matmul_serve_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){MATMUL_SKETCH_SERVE_BUCKET_MAX};
     std::chrono::microseconds m_matmul_serve_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
     std::map<uint256, std::chrono::microseconds> m_matmul_served GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
@@ -1037,21 +980,20 @@ private:
     };
     mutable Mutex m_matmul_addr_budget_mutex;
     std::map<CNetAddr, MatMulAddrBudgetState> m_matmul_addr_budgets GUARDED_BY(m_matmul_addr_budget_mutex);
-    /** Stage 2d node-wide getmatmulproof egress budget (design §4): a byte token
-     *  bucket refilled at MATMUL_PROOF_SERVE_GLOBAL_BYTES_PER_SEC, so N peers cannot
-     *  multiply the proof-serving uplink drain. Charged as chunks are emitted.
-     *  Touched only from ProcessMessage under g_msgproc_mutex. */
+    /** v4.4 ENC-DR node-wide getmmsketch egress budget (tension-resolution §4.3):
+     *  a byte token bucket refilled at MATMUL_SKETCH_SERVE_GLOBAL_BYTES_PER_SEC,
+     *  debited ALL-OR-NOTHING per served sketch (and allowed to go negative), so N
+     *  peers cannot multiply the sketch-serving uplink drain. Touched only from
+     *  ProcessMessage under g_msgproc_mutex. */
     double m_matmul_serve_global_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){
-        static_cast<double>(MATMUL_PROOF_SERVE_GLOBAL_BYTES_PER_SEC)};
+        static_cast<double>(MATMUL_SKETCH_SERVE_GLOBAL_BYTES_PER_SEC)};
     std::chrono::microseconds m_matmul_serve_global_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
-    //! Emit a held proof to `pfrom` as an ordered mmproofchunk sequence. The caller
-    //! (GETMATMULPROOF handler) applies the global egress budget ALL-OR-NOTHING before
-    //! calling: it debits the whole proof size up front and only then serves, so this
-    //! emitter unconditionally pushes every chunk (a partial set can never bind, so a
-    //! mid-proof cut would only waste uplink and stall the receiver). Stage 2d, §1.3/§4.
-    void ServeMatMulProofChunks(CNode& pfrom, const uint256& block_hash,
-                                const std::vector<unsigned char>& proof,
-                                std::chrono::microseconds now)
+    //! v4.4 ENC-DR: opportunistically request the sketch-cache bytes for a block
+    //! we are about to download/validate, from the peer we are talking to. Purely
+    //! best-effort (tension-resolution §4.3): never awaited, never re-requested on
+    //! silence, never a validation dependency — a missing reply just means the
+    //! block verifies by recompute.
+    void MaybeRequestMatMulSketch(CNode& pto, const CBlockIndex& index)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
     /** Number of outbound peers with m_chain_sync.m_protect. */
@@ -1171,72 +1113,6 @@ private:
     typedef std::multimap<uint256, std::pair<NodeId, std::list<QueuedBlock>::iterator>> BlockDownloadMap;
     BlockDownloadMap mapBlocksInFlight GUARDED_BY(cs_main);
 
-    /** Segregated MatMul proof relay (MatMul v4.2 solver-evolution Stage 2b,
-     *  design §3.2/§3.5). A block accepted as otherwise-valid but proof-INCOMPLETE
-     *  (its off-body ENC-BMX4C-D sketch is not yet in the proof store) is HELD here
-     *  keyed by block hash while we fetch the proof over the getmatmulproof/
-     *  matmulproof request-response exchange, then re-validate it. At most ONE
-     *  proof request is in flight per block at a time (mirrors block-download
-     *  bookkeeping); a peer that serves a non-binding proof is penalized and the
-     *  proof re-requested from another peer. Entries are erased once the block
-     *  completes (bound + Freivalds-verified) or is proven permanently invalid. */
-    struct QueuedMatMulProof {
-        //! The held incomplete block, re-processed once a bound proof arrives.
-        std::shared_ptr<const CBlock> block;
-        //! Peer this block was announced/relayed by (requested first).
-        NodeId announced_by{-1};
-        //! Peer we currently have an outstanding getmatmulproof to; -1 == none in
-        //! flight (free to (re)request). Also the ONE peer whose mmproofchunk stream
-        //! we accept for the in-flight reassembly (Stage 2d, design §1.4).
-        NodeId requested_from{-1};
-        //! When the outstanding request was sent (drives the timeout).
-        std::chrono::microseconds requested_time{0us};
-        //! When we first started holding this block (drives the archive-peer
-        //! preference grace window for buried proofs, design §3.5 IBD/reorg fetch,
-        //! AND the Stage-2d MATMUL_PROOF_PENDING_TTL expiry).
-        std::chrono::microseconds first_seen{0us};
-        //! Peers that already failed us for this proof (served a non-binding proof,
-        //! or timed out); skipped until MATMUL_PROOF_RETRY_RESET forgets them.
-        std::set<NodeId> tried_peers;
-        // --- Stage 2d chunked reassembly (design §1.4), bounded by the same entry /
-        //     byte budget as the held block; at most ONE reassembly per held block. ---
-        //! Serialized size of `block`, charged to m_matmul_proofs_pending_bytes.
-        size_t block_bytes{0};
-        //! Reassembly buffer, sized to total_size on the first valid chunk; its
-        //! capacity is charged to m_matmul_proofs_pending_bytes (reasm_charged).
-        std::vector<uint8_t> reasm_buf;
-        //! total_chunks bits; guards dup / gap / overlap.
-        std::vector<bool> reasm_have;
-        //! Latched from the first valid chunk; every later chunk MUST match.
-        uint32_t reasm_total_size{0};
-        uint32_t reasm_total_chunks{0};
-        //! popcount(reasm_have); complete iff == reasm_total_chunks.
-        uint32_t reasm_received{0};
-        //! The peer whose chunk stream this buffer is accumulating (must equal
-        //! requested_from); a stream from any other peer is ignored.
-        NodeId reasm_from{-1};
-        //! Bytes charged to the pending byte budget for reasm_buf (== capacity when
-        //! allocated, 0 otherwise) — decremented exactly on reset/erase.
-        size_t reasm_charged{0};
-        //! Failed fetch cycles (timeout / non-binding / bad-chunk stream); at
-        //! MATMUL_PROOF_MAX_ATTEMPTS the entry is dropped (design §3.3).
-        unsigned attempts{0};
-    };
-    std::map<uint256, QueuedMatMulProof> m_matmul_proofs_pending GUARDED_BY(cs_main);
-    //! Running Σ over m_matmul_proofs_pending of (block_bytes + reasm_charged),
-    //! bounded by MAX_MATMUL_PROOFS_PENDING_BYTES (Stage 2d, design §3.2).
-    size_t m_matmul_proofs_pending_bytes GUARDED_BY(cs_main){0};
-
-    //! Drop the reassembly buffer of a held entry, releasing its charged bytes (the
-    //! block itself stays held). Called on any chunk-stream rejection / re-request.
-    void ResetMatMulReassembly(QueuedMatMulProof& entry) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    //! Erase a held proof entry, releasing its CBlock + reassembly buffer and
-    //! decrementing the byte counter. Returns true if an entry was erased.
-    bool EraseMatMulPending(const uint256& block_hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    //! Evict lowest-chain-work (tie: oldest first_seen) held entries other than
-    //! `keep` until `incoming_bytes` additional bytes would fit under the budget.
-    void EvictMatMulPendingToFit(size_t incoming_bytes, const uint256& keep)
-        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** When our tip was last updated. */
     std::atomic<std::chrono::seconds> m_last_tip_update{0s};
@@ -1828,19 +1704,6 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 continue;
             }
 
-            // Are we already HOLDING this block proof-incomplete? Its body is in
-            // hand (m_matmul_proofs_pending); we are fetching only its segregated
-            // MatMul proof via the separate getmatmulproof/mmproofchunk path, NOT
-            // the block body. The block never reaches BLOCK_HAVE_DATA until the
-            // proof binds, so without this guard the body would be re-selected here
-            // every SendMessages pass -- a tight receive -> proof-incomplete ->
-            // re-request busy loop that spins (and floods the debug log) for as long
-            // as the proof is outstanding. Treat a held block as already obtained for
-            // download purposes; the proof-fetch machinery drives it to completion.
-            if (m_matmul_proofs_pending.count(pindex->GetBlockHash())) {
-                continue;
-            }
-
             // The block is not already downloaded, and not yet in flight.
             if (pindex->nHeight > nWindowEnd) {
                 // We reached the end of the window.
@@ -1983,16 +1846,6 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
             }
         }
     }
-    // Free any in-flight segregated MatMul proof request pointed at this peer so it
-    // is re-issued to another peer on the next SendMessages pass instead of waiting
-    // out the timeout (design §3.5: the held block is never abandoned). Drop any
-    // partial reassembly we were accumulating from this peer (Stage 2d §1.4: single
-    // in-flight reassembly per block, tied to the requested peer) so its bytes are
-    // released; another peer re-serves the whole proof from scratch.
-    for (auto& [proof_hash, req] : m_matmul_proofs_pending) {
-        if (req.requested_from == nodeid) req.requested_from = -1;
-        if (req.reasm_from == nodeid) ResetMatMulReassembly(req);
-    }
     {
         LOCK(m_tx_download_mutex);
         m_txdownloadman.DisconnectedPeer(nodeid);
@@ -2030,102 +1883,22 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     LogDebug(BCLog::NET, "Cleared nodestate for peer=%d\n", nodeid);
 }
 
-void PeerManagerImpl::ResetMatMulReassembly(QueuedMatMulProof& entry)
-{
-    AssertLockHeld(cs_main);
-    // Release the buffer's charged bytes and clear all reassembly state. The held
-    // block is untouched; the whole proof is re-served from scratch by whichever peer
-    // we ask next (per-chunk framing carries no partial-credit across attempts).
-    if (entry.reasm_charged != 0) {
-        Assume(m_matmul_proofs_pending_bytes >= entry.reasm_charged);
-        m_matmul_proofs_pending_bytes -= entry.reasm_charged;
-        entry.reasm_charged = 0;
-    }
-    entry.reasm_buf.clear();
-    entry.reasm_buf.shrink_to_fit();
-    entry.reasm_have.clear();
-    entry.reasm_have.shrink_to_fit();
-    entry.reasm_total_size = 0;
-    entry.reasm_total_chunks = 0;
-    entry.reasm_received = 0;
-    entry.reasm_from = -1;
-}
-
-bool PeerManagerImpl::EraseMatMulPending(const uint256& block_hash)
-{
-    AssertLockHeld(cs_main);
-    auto it = m_matmul_proofs_pending.find(block_hash);
-    if (it == m_matmul_proofs_pending.end()) return false;
-    const size_t charged = it->second.block_bytes + it->second.reasm_charged;
-    Assume(m_matmul_proofs_pending_bytes >= charged);
-    m_matmul_proofs_pending_bytes -= std::min(m_matmul_proofs_pending_bytes, charged);
-    m_matmul_proofs_pending.erase(it);
-    return true;
-}
-
-void PeerManagerImpl::EvictMatMulPendingToFit(size_t incoming_bytes, const uint256& keep)
-{
-    AssertLockHeld(cs_main);
-    // Evict lowest-chain-work (tie: oldest first_seen) held entries other than `keep`
-    // until `incoming_bytes` additional bytes fit under the budget (design §3.2). A
-    // lower-work fork is the cheapest to drop and re-fetch; nothing is marked
-    // permanently invalid, so an evicted block is re-requestable via normal sync.
-    while (m_matmul_proofs_pending_bytes + incoming_bytes > MAX_MATMUL_PROOFS_PENDING_BYTES) {
-        const uint256* victim = nullptr;
-        arith_uint256 victim_work;
-        std::chrono::microseconds victim_seen{0us};
-        bool victim_has_work = false;
-        for (const auto& [h, req] : m_matmul_proofs_pending) {
-            if (h == keep) continue;
-            const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(h);
-            const bool has_work = pindex != nullptr;
-            const arith_uint256 work = has_work ? pindex->nChainWork : arith_uint256{0};
-            if (victim == nullptr ||
-                // Prefer an entry with no known index (cheapest / already gone), then
-                // lowest chain-work, then oldest first_seen.
-                (!has_work && victim_has_work) ||
-                (has_work == victim_has_work && has_work && work < victim_work) ||
-                (has_work == victim_has_work && work == victim_work && req.first_seen < victim_seen)) {
-                victim = &h;
-                victim_work = work;
-                victim_seen = req.first_seen;
-                victim_has_work = has_work;
-            }
-        }
-        if (victim == nullptr) break;  // nothing left to evict but `keep`
-        const uint256 victim_hash = *victim;
-        LogDebug(BCLog::NET, "matmul: evicting held proof-incomplete block %s to fit byte budget\n",
-                 victim_hash.ToString());
-        EraseMatMulPending(victim_hash);
-    }
-}
-
-void PeerManagerImpl::ServeMatMulProofChunks(CNode& pfrom, const uint256& block_hash,
-                                             const std::vector<unsigned char>& proof,
-                                             std::chrono::microseconds now)
+void PeerManagerImpl::MaybeRequestMatMulSketch(CNode& pto, const CBlockIndex& index)
 {
     AssertLockHeld(g_msgproc_mutex);
-    // Cut the flat proof into ordered self-describing chunks at serve time (design
-    // §1.3/§2.4 "chunk-on-serve, not chunk-on-store"). Each chunk is ≤
-    // MAX_MATMULPROOF_CHUNK_SIZE and rides under the ordinary protocol-message ceiling
-    // on both v1 and v2. The global egress budget is applied ALL-OR-NOTHING per proof
-    // by the caller (see the GETMATMULPROOF handler): a proof is either fully served or
-    // skipped, never partially — a partial chunk set can never complete (bind-when-
-    // whole), so a mid-proof cut would only waste bandwidth and stall the receiver.
-    (void)now;
-    const uint32_t total_size = static_cast<uint32_t>(proof.size());
-    const uint32_t chunk_size = MAX_MATMULPROOF_CHUNK_SIZE;
-    const uint32_t total_chunks =
-        total_size == 0 ? 1u : (total_size + chunk_size - 1) / chunk_size;
-    for (uint32_t i = 0; i < total_chunks; ++i) {
-        const uint32_t off = i * chunk_size;
-        const uint32_t len = std::min<uint32_t>(chunk_size, total_size - off);
-        std::vector<unsigned char> chunk_bytes(proof.begin() + off, proof.begin() + off + len);
-        MakeAndPushMessage(pfrom, NetMsgType::MATMULPROOFCHUNK, block_hash,
-                           total_size, total_chunks, i, chunk_bytes);
-    }
-    LogDebug(BCLog::NET, "Served matmul proof %s (%u bytes, %u chunks) to peer=%d\n",
-             block_hash.ToString(), total_size, total_chunks, pfrom.GetId());
+    const Consensus::Params& consensus = m_chainparams.GetConsensus();
+    if (!consensus.fMatMulPOW) return;
+    if (!consensus.IsMatMulV4Active(index.nHeight)) return;
+    const Consensus::MatMulProfileParams profile = consensus.GetMatMulProfileParams(index.nHeight);
+    if (profile.commitment != Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) return;
+    // A profile whose 8·m² exceeds the single-message ceiling is simply not
+    // served/requested (peers recompute; the cache is best-effort, §4.3).
+    if (profile.SketchCacheBytes() > MAX_MMSKETCH_PAYLOAD_SIZE) return;
+    if (matmul::GetMatMulSketchCache().Capacity() == 0) return;   // cache disabled
+    if (matmul::GetMatMulSketchCache().Have(index.GetBlockHash())) return;
+    MakeAndPushMessage(pto, NetMsgType::GETMMSKETCH, index.GetBlockHash());
+    LogDebug(BCLog::NET, "Requesting matmul sketch %s peer=%d (best-effort)\n",
+             index.GetBlockHash().ToString(), pto.GetId());
 }
 
 bool PeerManagerImpl::HasAllDesirableServiceFlags(ServiceFlags services) const
@@ -2480,20 +2253,6 @@ static bool IsMatMulPhase2Failure(const BlockValidationState& state)
 {
     return state.GetRejectReason() == "high-hash" &&
         state.GetDebugMessage().find("matmul phase2 proof of work failed") != std::string::npos;
-}
-
-//! True iff @p state is the non-permanent "segregated MatMul proof not yet in our
-//! store" outcome (design §3.3; solver-evolution Stage 2b). ContextualCheckBlock
-//! returns BLOCK_MUTATED / "matmul-v4-proof-incomplete" for an otherwise-valid
-//! segregated ENC-BMX4C-D block whose ~32 MiB sketch is off-body and not yet
-//! fetched. This is NOT peer misbehavior — the announcing peer relayed an honest
-//! block; the proof travels separately over the getmatmulproof/matmulproof relay.
-//! The block is HELD (not rejected permanently) and re-validated once the proof
-//! arrives, so this case is routed AROUND MaybePunishNodeForBlock.
-static bool IsMatMulProofIncomplete(const BlockValidationState& state)
-{
-    return state.GetResult() == BlockValidationResult::BLOCK_MUTATED &&
-           state.GetRejectReason() == "matmul-v4-proof-incomplete";
 }
 
 static bool IsHighConfidenceInvalidShieldedBlock(const BlockValidationState& state)
@@ -2948,48 +2707,6 @@ void PeerManagerImpl::BlockChecked(const CBlock& block, const BlockValidationSta
 
     const uint256 hash(block.GetHash());
     std::map<uint256, std::pair<NodeId, bool>>::iterator it = mapBlockSource.find(hash);
-
-    // Segregated MatMul proof relay (design §3.2; solver-evolution Stage 2b): an
-    // otherwise-valid segregated ENC-BMX4C-D block whose off-body proof is not yet
-    // in our store validates as BLOCK_MUTATED / "matmul-v4-proof-incomplete". This
-    // is NOT peer misbehavior — HOLD the block and fetch its proof over the
-    // getmatmulproof/matmulproof exchange, then re-validate. Routed AROUND
-    // MaybePunishNodeForBlock. The block body was NOT written to disk (AcceptBlock
-    // drops BLOCK_MUTATED bodies without marking the header failed), so we keep a
-    // copy here to re-process once the proof binds.
-    if (state.IsInvalid() &&
-        m_chainparams.GetConsensus().fMatMulPOW &&
-        IsMatMulProofIncomplete(state)) {
-        auto existing = m_matmul_proofs_pending.find(hash);
-        if (existing != m_matmul_proofs_pending.end() ||
-            m_matmul_proofs_pending.size() < MAX_MATMUL_PROOFS_PENDING) {
-            auto& entry = m_matmul_proofs_pending[hash];
-            if (!entry.block) {
-                // Charge the held block against the Stage-2d byte budget, evicting
-                // lowest-work held entries first if needed (design §3.2). The block
-                // already passed CheckBlock (real PoW to forge); eviction never marks
-                // it permanently invalid, so an evicted block is re-requestable.
-                entry.block = std::make_shared<const CBlock>(block);
-                entry.block_bytes = ::GetSerializeSize(TX_WITH_WITNESS(*entry.block));
-                entry.first_seen = GetTime<std::chrono::microseconds>();
-                EvictMatMulPendingToFit(entry.block_bytes, hash);
-                m_matmul_proofs_pending_bytes += entry.block_bytes;
-            }
-            if (it != mapBlockSource.end()) {
-                entry.announced_by = it->second.first;
-            }
-            // SendMessages issues the getmatmulproof (to the announcer first, then
-            // others on timeout); wake it so the fetch starts promptly.
-            m_connman.WakeMessageHandler();
-            LogDebug(BCLog::NET, "matmul: holding proof-incomplete block %s (announced by peer=%d), fetching proof\n",
-                     hash.ToString(), it != mapBlockSource.end() ? it->second.first : -1);
-        } else {
-            LogDebug(BCLog::NET, "matmul: proof-incomplete hold cap reached, dropping block %s (will re-download)\n",
-                     hash.ToString());
-        }
-        if (it != mapBlockSource.end()) mapBlockSource.erase(it);
-        return;
-    }
 
     // If the block failed validation, we know where it came from and we're still connected
     // to that peer, maybe punish.
@@ -3808,6 +3525,8 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
                 uint32_t nFetchFlags = GetFetchFlags(peer);
                 vGetData.emplace_back(MSG_BLOCK | nFetchFlags, pindex->GetBlockHash());
                 BlockRequested(pfrom.GetId(), *pindex);
+                // v4.4 ENC-DR: best-effort sketch prefetch (see SendMessages).
+                MaybeRequestMatMulSketch(pfrom, *pindex);
                 LogDebug(BCLog::NET, "Requesting block %s from  peer=%d\n",
                         pindex->GetBlockHash().ToString(), pfrom.GetId());
             }
@@ -6253,35 +5972,41 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return ProcessCompactBlockTxns(pfrom, *peer, resp);
     }
 
-    if (msg_type == NetMsgType::GETMATMULPROOF) {
-        // Serve a segregated MatMul proof on request (design §3.2 step; solver-
-        // evolution Stage 2b/2c). Request/response, modeled on getblocktxn: we reply
-        // with whatever our store holds (locally mined, or fetched + verified from a
-        // peer, and persisted across restart). An ARCHIVE node (-matmulproofarchive)
-        // has retained ALL historical proofs and so answers for any buried block; a
-        // default (pruned-proof) node holds only the rolling window and answers only
-        // within it. Either way we serve exactly what we Have(); a request for a proof
-        // we don't have is ignored (like a getblocktxn for a block we don't have),
-        // never an error. Proofs are never gossiped unsolicited.
+    if (msg_type == NetMsgType::GETMMSKETCH) {
+        // Serve v4.4 ENC-DR sketch-cache bytes on request (tension-resolution
+        // §4.3). Request/response, modeled on getblocktxn: we reply with whatever
+        // our (memory-only, non-consensus) sketch cache holds — locally mined,
+        // regenerated by our own recompute-verify, or authenticated from a peer.
+        // A request for a sketch we don't hold is ignored (like a getblocktxn for
+        // a block we don't have), never an error. Sketches are never gossiped
+        // unsolicited.
         uint256 block_hash;
         vRecv >> block_hash;
         if (!vRecv.empty()) {
-            Misbehaving(*peer, strprintf("trailing data after getmatmulproof = %u bytes", vRecv.size()));
+            Misbehaving(*peer, strprintf("trailing data after getmmsketch = %u bytes", vRecv.size()));
             return;
         }
-        std::vector<unsigned char> proof;
-        if (!matmul::GetMatMulProof(block_hash, proof)) {
-            LogDebug(BCLog::NET, "Ignoring getmatmulproof %s from peer=%d (proof not held)\n",
+        std::vector<unsigned char> sketch;
+        if (!matmul::GetMatMulSketchCache().Get(block_hash, sketch)) {
+            LogDebug(BCLog::NET, "Ignoring getmmsketch %s from peer=%d (sketch not held)\n",
+                     block_hash.ToString(), pfrom.GetId());
+            return;
+        }
+        if (sketch.size() > MAX_MMSKETCH_PAYLOAD_SIZE) {
+            // A future larger-m profile: simply don't serve (peers recompute).
+            LogDebug(BCLog::NET, "Ignoring getmmsketch %s from peer=%d (sketch exceeds single-message ceiling)\n",
                      block_hash.ToString(), pfrom.GetId());
             return;
         }
 
-        // Stage 2d serving limits (design §4): a 32-byte request triggers a ~32 MiB
-        // (chunked) reply — a ~10⁶× amplification. Gate the serve on (1) a per-peer
-        // token bucket, (2) a per-(peer,block) dedup window, and (3) the node-wide
-        // egress byte budget. Every over-limit case is a SILENT skip (never an error,
-        // and — deliberately — never misbehavior; see the dedup note below), like a
-        // getblocktxn we choose not to answer.
+        // Serving limits (§4.3, ported unchanged from the audited Stage-2d serve
+        // gates): a 32-byte request triggers an ~8 MiB reply. Gate the serve on
+        // (1) a per-peer token bucket, (2) a per-(peer,block) dedup window, and
+        // (3) the node-wide egress byte budget. Every over-limit case is a SILENT
+        // skip (never an error, and — deliberately — never misbehavior; see the
+        // dedup note below), like a getblocktxn we choose not to answer. The
+        // untrusted/best-effort nature of the cache protects the REQUESTER, not
+        // this node's uplink — these limits are what bound the amplification.
         const auto now = GetTime<std::chrono::microseconds>();
 
         // (1) Per-peer token bucket: lazy refill from node-clock deltas, then spend 1.
@@ -6290,296 +6015,141 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             if (elapsed > 0us) {
                 const double refill = static_cast<double>(count_microseconds(elapsed)) /
                                       static_cast<double>(count_microseconds(
-                                          std::chrono::microseconds{MATMUL_PROOF_SERVE_REFILL}));
+                                          std::chrono::microseconds{MATMUL_SKETCH_SERVE_REFILL}));
                 peer->m_matmul_serve_tokens =
-                    std::min<double>(MATMUL_PROOF_SERVE_BUCKET_MAX, peer->m_matmul_serve_tokens + refill);
+                    std::min<double>(MATMUL_SKETCH_SERVE_BUCKET_MAX, peer->m_matmul_serve_tokens + refill);
             }
         }
         peer->m_matmul_serve_last_refill = now;
         if (peer->m_matmul_serve_tokens < 1.0) {
-            LogDebug(BCLog::NET, "matmul: per-peer serve bucket empty, skipping getmatmulproof %s from peer=%d\n",
+            LogDebug(BCLog::NET, "matmul: per-peer serve bucket empty, skipping getmmsketch %s from peer=%d\n",
                      block_hash.ToString(), pfrom.GetId());
             return;
         }
 
-        // (2) Per-(peer,block) dedup window: prune stale entries, then SILENTLY SKIP a
-        // repeat (do NOT serve the same 32 MiB proof to the same peer twice within the
-        // window — that is the amplification pattern). Deliberately NOT treated as
-        // misbehavior: in this codebase Misbehaving immediately flags the peer for
-        // discouragement, which would punish an HONEST peer that legitimately re-asks
-        // after a dropped/partial transfer. The per-peer token bucket (above) and the
-        // global egress budget (below) already bound a spammer's drain; a determined
-        // spammer re-asking the same proof simply gets nothing served (no token spent),
-        // and one requesting many DISTINCT proofs is capped by the bucket. (Judgment
-        // call vs design §4.2's "mild misbehaving on repeats" — favors data availability
-        // over a false-positive disconnect; see the Stage-2d report.)
+        // (2) Per-(peer,block) dedup window: prune stale entries, then SILENTLY
+        // SKIP a repeat (do NOT serve the same ~8 MiB sketch to the same peer
+        // twice within the window — that is the amplification pattern).
+        // Deliberately NOT treated as misbehavior: Misbehaving immediately flags
+        // the peer for discouragement, which would punish an HONEST peer that
+        // legitimately re-asks after a dropped transfer. The token bucket and the
+        // global egress budget already bound a spammer's drain.
         for (auto sit = peer->m_matmul_served.begin(); sit != peer->m_matmul_served.end();) {
-            if (now - sit->second > MATMUL_PROOF_SERVE_DEDUP_WINDOW) {
+            if (now - sit->second > MATMUL_SKETCH_SERVE_DEDUP_WINDOW) {
                 sit = peer->m_matmul_served.erase(sit);
             } else {
                 ++sit;
             }
         }
         if (auto dit = peer->m_matmul_served.find(block_hash); dit != peer->m_matmul_served.end()) {
-            LogDebug(BCLog::NET, "matmul: getmatmulproof %s from peer=%d within dedup window, skipping re-serve\n",
+            LogDebug(BCLog::NET, "matmul: getmmsketch %s from peer=%d within dedup window, skipping re-serve\n",
                      block_hash.ToString(), pfrom.GetId());
             return;
         }
 
-        // (3) Node-wide egress budget: a rate-limiting byte bucket refilled at
-        // MATMUL_PROOF_SERVE_GLOBAL_BYTES_PER_SEC, capped at 1 s of burst on the positive
-        // side but allowed to go NEGATIVE after a serve. A proof is served ALL-OR-NOTHING
-        // (a partial chunk set can never complete — bind-when-whole — so serving part of
-        // one only wastes uplink and stalls the receiver): if the bucket is currently
-        // positive we serve the whole proof and debit its full size (driving the bucket
-        // negative for a ~32 MiB proof), so the NEXT proof is deferred until the bucket
-        // refills back above zero — sustaining ~8 MiB/s node-wide regardless of peer
-        // count. Exhausted → skip WITHOUT recording the dedup stamp, so the requester
-        // may retry once the budget recovers.
+        // (3) Node-wide egress budget: a byte bucket refilled at
+        // MATMUL_SKETCH_SERVE_GLOBAL_BYTES_PER_SEC, capped at 1 s of burst on the
+        // positive side but allowed to go NEGATIVE after a serve. A sketch is
+        // served ALL-OR-NOTHING: if the bucket is currently positive we serve the
+        // whole sketch and debit its full size (driving the bucket negative), so
+        // the NEXT sketch is deferred until the bucket refills back above zero —
+        // sustaining ~8 MiB/s node-wide regardless of peer count. Exhausted →
+        // skip WITHOUT recording the dedup stamp, so the requester may retry once
+        // the budget recovers.
         if (m_matmul_serve_global_last_refill != 0us) {
             const auto elapsed = now - m_matmul_serve_global_last_refill;
             if (elapsed > 0us) {
                 m_matmul_serve_global_tokens = std::min<double>(
-                    static_cast<double>(MATMUL_PROOF_SERVE_GLOBAL_BYTES_PER_SEC),
+                    static_cast<double>(MATMUL_SKETCH_SERVE_GLOBAL_BYTES_PER_SEC),
                     m_matmul_serve_global_tokens +
-                        static_cast<double>(MATMUL_PROOF_SERVE_GLOBAL_BYTES_PER_SEC) *
+                        static_cast<double>(MATMUL_SKETCH_SERVE_GLOBAL_BYTES_PER_SEC) *
                             (static_cast<double>(count_microseconds(elapsed)) / 1e6));
             }
         }
         m_matmul_serve_global_last_refill = now;
         if (m_matmul_serve_global_tokens <= 0.0) {
-            LogDebug(BCLog::NET, "matmul: global egress budget exhausted, deferring getmatmulproof %s from peer=%d\n",
+            LogDebug(BCLog::NET, "matmul: global egress budget exhausted, deferring getmmsketch %s from peer=%d\n",
                      block_hash.ToString(), pfrom.GetId());
             return;
         }
-        m_matmul_serve_global_tokens -= static_cast<double>(proof.size());
+        m_matmul_serve_global_tokens -= static_cast<double>(sketch.size());
 
-        // All gates passed: spend the peer token, record the dedup stamp, and emit the
-        // ordered chunk sequence.
+        // All gates passed: spend the peer token, record the dedup stamp, and
+        // emit the single-message reply (fits every transport at m = 1024).
         peer->m_matmul_serve_tokens -= 1.0;
         peer->m_matmul_served[block_hash] = now;
-        ServeMatMulProofChunks(pfrom, block_hash, proof, now);
+        MakeAndPushMessage(pfrom, NetMsgType::MMSKETCH, block_hash, sketch);
+        LogDebug(BCLog::NET, "Served matmul sketch %s (%u bytes) to peer=%d\n",
+                 block_hash.ToString(), sketch.size(), pfrom.GetId());
         return;
     }
 
-    if (msg_type == NetMsgType::MATMULPROOFCHUNK) {
-        // Receive ONE ordered slice of a segregated MatMul proof and, once the whole
-        // proof is reassembled, complete a HELD proof-incomplete block (design §1.4/
-        // §1.5; solver-evolution Stage 2d). Per-chunk framing checks (size / index /
-        // no-dup / no-overlap) bound reassembly, but they DELIBERATELY do NOT verify
-        // contents — the SHA binding H(sigma||proof)==matmul_digest over the WHOLE
-        // 8·m² blob is the end-to-end integrity check, run ONLY on the fully
-        // reassembled buffer. A chunk stream that reassembles to the wrong bytes fails
-        // that binding (BLOCK_MUTATED, non-permanent) exactly like Stage 2a, and the
-        // peer is penalized, the buffer dropped, the proof re-requested elsewhere.
+    if (msg_type == NetMsgType::MMSKETCH) {
+        // Receive UNTRUSTED v4.4 ENC-DR sketch-cache bytes (tension-resolution
+        // §4.2/§4.3). STRICTLY best-effort and NEVER load-bearing: no block is
+        // ever waiting on this message (validation already decided, or will
+        // decide, by recompute), so this handler only ever (a) authenticates and
+        // caches useful bytes or (b) drops garbage and penalizes the sender. The
+        // authentication is ONE hash: H(sigma||bytes) == matmul_digest proves the
+        // bytes are exactly the sketch the miner committed (garbage-cache
+        // rejection is fail-fast even though recompute is not). A failed
+        // authentication is evidence about the PEER, never about the block.
         if (m_chainman.m_blockman.LoadingBlocks()) {
-            LogDebug(BCLog::NET, "Unexpected mmproofchunk received from peer %d\n", pfrom.GetId());
+            LogDebug(BCLog::NET, "Unexpected mmsketch received from peer %d\n", pfrom.GetId());
             return;
         }
-
         uint256 block_hash;
-        uint32_t total_size{0};
-        uint32_t total_chunks{0};
-        uint32_t chunk_index{0};
-        std::vector<unsigned char> chunk_bytes;   // bounded by the 16 MB net message cap
-        vRecv >> block_hash >> total_size >> total_chunks >> chunk_index >> chunk_bytes;
+        std::vector<unsigned char> sketch_bytes;   // bounded by the 16 MB net message cap
+        vRecv >> block_hash >> sketch_bytes;
         if (!vRecv.empty()) {
-            Misbehaving(*peer, strprintf("trailing data after mmproofchunk = %u bytes", vRecv.size()));
+            Misbehaving(*peer, strprintf("trailing data after mmsketch = %u bytes", vRecv.size()));
+            return;
+        }
+        if (matmul::GetMatMulSketchCache().Capacity() == 0) return;   // cache disabled
+        if (matmul::GetMatMulSketchCache().Have(block_hash)) {
+            LogDebug(BCLog::NET, "Ignoring mmsketch %s from peer=%d (already cached)\n",
+                     block_hash.ToString(), pfrom.GetId());
             return;
         }
 
+        // Authentication needs the header (sigma is header-derived and
+        // matmul_digest is a header field): an mmsketch for an unknown header
+        // cannot be authenticated and is ignored (it also cannot pin memory).
+        CBlockHeader header;
+        int32_t block_height{0};
+        {
+            LOCK(cs_main);
+            const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(block_hash);
+            if (pindex == nullptr) {
+                LogDebug(BCLog::NET, "Ignoring mmsketch %s from peer=%d (unknown header)\n",
+                         block_hash.ToString(), pfrom.GetId());
+                return;
+            }
+            block_height = pindex->nHeight;
+            header = pindex->GetBlockHeader();
+        }
         const Consensus::Params& consensus = m_chainparams.GetConsensus();
-        // A completed reassembly is finished OUTSIDE cs_main (ProcessBlock re-locks),
-        // so gather what we need and release the lock before validating.
-        bool complete = false;
-        std::vector<unsigned char> candidate;
-        std::shared_ptr<const CBlock> held_block;
-        {
-            LOCK(cs_main);
-            auto it = m_matmul_proofs_pending.find(block_hash);
-            if (it == m_matmul_proofs_pending.end()) {
-                // Unsolicited chunk (no pending entry) — cannot pin memory, ignore.
-                LogDebug(BCLog::NET, "Ignoring unsolicited mmproofchunk %s from peer=%d\n",
-                         block_hash.ToString(), pfrom.GetId());
-                return;
-            }
-            QueuedMatMulProof& entry = it->second;
-
-            // Solicited-only, single in-flight: accept chunks ONLY from the peer we
-            // asked. A peer we didn't ask cannot inject chunks into the reassembly.
-            if (entry.requested_from != pfrom.GetId()) {
-                LogDebug(BCLog::NET, "Ignoring mmproofchunk %s from unexpected peer=%d (awaiting peer=%d)\n",
-                         block_hash.ToString(), pfrom.GetId(), entry.requested_from);
-                return;
-            }
-
-            // Expiry (design §3.3): a permanently-unavailable proof's block is dropped,
-            // never pinned. Also drop if the header vanished (reorg/prune).
-            const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(block_hash);
-            const auto now = GetTime<std::chrono::microseconds>();
-            if (pindex == nullptr || !entry.block ||
-                (entry.first_seen != 0us && now - entry.first_seen >
-                    std::chrono::duration_cast<std::chrono::microseconds>(MATMUL_PROOF_PENDING_TTL))) {
-                LogDebug(BCLog::NET, "Dropping held block %s (header gone or TTL expired) on mmproofchunk\n",
-                         block_hash.ToString());
-                EraseMatMulPending(block_hash);
-                return;
-            }
-            const int32_t block_height = pindex->nHeight;
-            const uint64_t cap = GetMatMulProofSizeCap(consensus, block_height);
-            const uint32_t chunk_size = MAX_MATMULPROOF_CHUNK_SIZE;
-            const uint32_t max_chunks =
-                static_cast<uint32_t>((cap + chunk_size - 1) / chunk_size);
-
-            // A helper that penalizes this chunk stream, drops the partial buffer and
-            // this peer, and (after MAX_ATTEMPTS) drops the whole held block.
-            const auto reject = [&](const char* why) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
-                entry.tried_peers.insert(pfrom.GetId());
-                if (entry.requested_from == pfrom.GetId()) entry.requested_from = -1;
-                ResetMatMulReassembly(entry);
-                if (++entry.attempts >= MATMUL_PROOF_MAX_ATTEMPTS) {
-                    LogDebug(BCLog::NET, "Dropping held block %s after %u failed proof-fetch attempts\n",
-                             block_hash.ToString(), entry.attempts);
-                    EraseMatMulPending(block_hash);
-                } else {
-                    m_connman.WakeMessageHandler();
-                }
-                Misbehaving(*peer, why);
-            };
-
-            // (2) Cap the declared total BEFORE allocating (the pre-allocation DoS gate).
-            if (total_size == 0 || total_size > cap) {
-                LogDebug(BCLog::NET, "mmproofchunk %s bad total_size %u (cap %u) from peer=%d\n",
-                         block_hash.ToString(), total_size, cap, pfrom.GetId());
-                reject("mmproofchunk oversize total");
-                return;
-            }
-            // (3) Self-consistency of the declared framing.
-            const uint32_t expect_total_chunks = (total_size + chunk_size - 1) / chunk_size;
-            if (total_chunks != expect_total_chunks || total_chunks > max_chunks ||
-                chunk_index >= total_chunks) {
-                LogDebug(BCLog::NET, "mmproofchunk %s inconsistent framing (total_size=%u total_chunks=%u index=%u) from peer=%d\n",
-                         block_hash.ToString(), total_size, total_chunks, chunk_index, pfrom.GetId());
-                reject("mmproofchunk inconsistent framing");
-                return;
-            }
-            // (4) Exact per-chunk size (no overlap / no gap).
-            const uint32_t expect_len =
-                (chunk_index + 1 == total_chunks) ? (total_size - (total_chunks - 1) * chunk_size)
-                                                   : chunk_size;
-            if (chunk_bytes.size() != expect_len || chunk_bytes.size() > chunk_size) {
-                LogDebug(BCLog::NET, "mmproofchunk %s bad chunk length %u (expected %u) index=%u from peer=%d\n",
-                         block_hash.ToString(), chunk_bytes.size(), expect_len, chunk_index, pfrom.GetId());
-                reject("mmproofchunk bad chunk length");
-                return;
-            }
-
-            // First chunk of a fresh reassembly: latch the framing and allocate the
-            // buffer (evicting lower-work held entries first if the byte budget needs
-            // it). Later chunks MUST match the latched framing (no mid-stream resize).
-            if (entry.reasm_from == -1) {
-                EvictMatMulPendingToFit(total_size, block_hash);
-                entry.reasm_from = pfrom.GetId();
-                entry.reasm_total_size = total_size;
-                entry.reasm_total_chunks = total_chunks;
-                entry.reasm_buf.assign(total_size, 0);
-                entry.reasm_have.assign(total_chunks, false);
-                entry.reasm_received = 0;
-                entry.reasm_charged = entry.reasm_buf.capacity();
-                m_matmul_proofs_pending_bytes += entry.reasm_charged;
-            } else if (entry.reasm_from != pfrom.GetId() ||
-                       entry.reasm_total_size != total_size ||
-                       entry.reasm_total_chunks != total_chunks) {
-                LogDebug(BCLog::NET, "mmproofchunk %s framing changed mid-stream from peer=%d\n",
-                         block_hash.ToString(), pfrom.GetId());
-                reject("mmproofchunk framing changed mid-stream");
-                return;
-            }
-
-            // Duplicate index → reject (would otherwise be a free re-write / overlap).
-            if (entry.reasm_have[chunk_index]) {
-                LogDebug(BCLog::NET, "mmproofchunk %s duplicate index %u from peer=%d\n",
-                         block_hash.ToString(), chunk_index, pfrom.GetId());
-                reject("mmproofchunk duplicate index");
-                return;
-            }
-
-            // Copy at the exact offset; index + length are exact and dups are rejected,
-            // so the buffer fills with no overlap and no gap by construction.
-            std::copy(chunk_bytes.begin(), chunk_bytes.end(),
-                      entry.reasm_buf.begin() + static_cast<size_t>(chunk_index) * chunk_size);
-            entry.reasm_have[chunk_index] = true;
-            ++entry.reasm_received;
-            // Progress refreshes the request deadline: MATMUL_PROOF_REQUEST_TIMEOUT is
-            // an INACTIVITY timeout, not a total-transfer deadline. A large proof (up to
-            // ~32 MiB / 32 chunks) served under the 8 MiB/s egress pacing can legitimately
-            // take longer than the timeout to arrive in full; without this refresh the
-            // SendMessages sweep would reset an actively-streaming reassembly mid-flight
-            // and re-request from scratch, potentially livelocking a big proof on a slow/
-            // paced link. A stalled peer (no chunk within the window) still times out; the
-            // 20-min TTL (first_seen, never refreshed) still bounds total hold time.
-            entry.requested_time = now;
-
-            if (entry.reasm_received == entry.reasm_total_chunks) {
-                // Whole proof reassembled: hand the candidate blob to the bind path.
-                candidate = std::move(entry.reasm_buf);
-                held_block = entry.block;
-                ResetMatMulReassembly(entry);   // release the (now moved-from) buffer's bytes
-                complete = true;
-            }
+        if (!consensus.IsMatMulV4Active(block_height)) {
+            LogDebug(BCLog::NET, "Ignoring mmsketch %s from peer=%d (not a v4 height)\n",
+                     block_hash.ToString(), pfrom.GetId());
+            return;
         }
-        if (!complete) return;
-
-        // Store the (untrusted) reassembled bytes and re-validate the held block —
-        // VERBATIM the Stage-2b completion path (design §1.5). The store just holds
-        // them; CheckMatMulV4SegregatedProof (via ProcessNewBlock -> ContextualCheck
-        // Block) re-runs the §3.3 binding + Freivalds cascade. mapBlockSource points
-        // at the proof PROVIDER with the "direct" flag so BlockChecked ->
-        // MaybePunishNodeForBlock penalizes it on a non-binding (BLOCK_MUTATED) or
-        // permanently-invalid (BLOCK_CONSENSUS) outcome.
-        matmul::PutMatMulProof(block_hash, std::move(candidate));
-        WITH_LOCK(cs_main, mapBlockSource.insert_or_assign(block_hash, std::make_pair(pfrom.GetId(), true)));
-        ProcessBlock(pfrom, held_block, /*force_processing=*/true, /*min_pow_checked=*/true);
-
-        // Inspect the outcome and update our pending bookkeeping.
-        {
-            LOCK(cs_main);
-            const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(block_hash);
-            const bool completed = pindex && (pindex->nStatus & BLOCK_HAVE_DATA);
-            const bool permanently_invalid = pindex && (pindex->nStatus & BLOCK_FAILED_MASK);
-            if (completed) {
-                // Proof bound + Freivalds-verified: block accepted. Keep the proof
-                // cached in the store for onward relay; drop the pending entry.
-                LogDebug(BCLog::NET, "Completed proof-incomplete block %s with proof from peer=%d\n",
-                         block_hash.ToString(), pfrom.GetId());
-                EraseMatMulPending(block_hash);
-            } else if (permanently_invalid) {
-                // Bound to the committed digest but failed Freivalds / over target: a
-                // real permanent PoW fault. BlockChecked already penalized the provider.
-                LogDebug(BCLog::NET, "Proof-completed block %s is permanently invalid; dropping\n",
-                         block_hash.ToString());
-                matmul::GetLocalMatMulProofStore().Erase(block_hash);
-                EraseMatMulPending(block_hash);
-            } else {
-                // Reassembled blob did NOT bind (a corrupted/substituted chunk that
-                // passed the framing checks). Discard the bytes, exclude this peer,
-                // free the request, count the attempt, and let SendMessages retry.
-                LogDebug(BCLog::NET, "reassembled proof %s from peer=%d did not bind; re-requesting from another peer\n",
-                         block_hash.ToString(), pfrom.GetId());
-                matmul::GetLocalMatMulProofStore().Erase(block_hash);
-                auto it = m_matmul_proofs_pending.find(block_hash);
-                if (it != m_matmul_proofs_pending.end()) {
-                    it->second.tried_peers.insert(pfrom.GetId());
-                    if (it->second.requested_from == pfrom.GetId()) it->second.requested_from = -1;
-                    if (++it->second.attempts >= MATMUL_PROOF_MAX_ATTEMPTS) {
-                        LogDebug(BCLog::NET, "Dropping held block %s after %u failed proof-fetch attempts\n",
-                                 block_hash.ToString(), it->second.attempts);
-                        EraseMatMulPending(block_hash);
-                    }
-                }
-                m_connman.WakeMessageHandler();
-            }
+        const Consensus::MatMulProfileParams profile = consensus.GetMatMulProfileParams(block_height);
+        // Size cap = the profile 8·m² bound (anti-amplification / pre-hash DoS
+        // gate; the exact-size check lives in ParseSketch on the verify path).
+        if (sketch_bytes.size() > profile.SketchCacheBytes()) {
+            Misbehaving(*peer, strprintf("mmsketch oversize (%u > %u bytes)",
+                                         sketch_bytes.size(), profile.SketchCacheBytes()));
+            return;
         }
+        // ONE-hash authentication against the header commitment.
+        if (!matmul_v4::PayloadMatchesCommitment(header, sketch_bytes)) {
+            Misbehaving(*peer, "mmsketch does not authenticate against matmul_digest");
+            return;
+        }
+        matmul::GetMatMulSketchCache().Put(block_hash, std::move(sketch_bytes));
+        LogDebug(BCLog::NET, "Cached authenticated matmul sketch %s from peer=%d\n",
+                 block_hash.ToString(), pfrom.GetId());
         return;
     }
 
@@ -8065,6 +7635,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 uint32_t nFetchFlags = GetFetchFlags(*peer);
                 vGetData.emplace_back(MSG_BLOCK | nFetchFlags, pindex->GetBlockHash());
                 BlockRequested(pto->GetId(), *pindex);
+                // v4.4 ENC-DR: opportunistically pull the sketch-cache bytes with
+                // the body so the Freivalds fast path may apply (best-effort;
+                // validation never waits, tension-resolution §4.3).
+                MaybeRequestMatMulSketch(*pto, *pindex);
                 LogDebug(BCLog::NET, "Requesting block %s (%d) peer=%d\n", pindex->GetBlockHash().ToString(),
                     pindex->nHeight, pto->GetId());
             }
@@ -8073,93 +7647,6 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     State(staller)->m_stalling_since = current_time;
                     LogDebug(BCLog::NET, "Stall started peer=%d\n", staller);
                 }
-            }
-        }
-
-        //
-        // Message: getmatmulproof (segregated MatMul v4.2-D proof fetch, Stage 2b)
-        //
-        // For each HELD proof-incomplete block, issue a getmatmulproof to fetch the
-        // off-body sketch. Bookkeeping mirrors block download: at most one request
-        // in flight per block (requested_from), a timeout that frees it to try
-        // another peer, and a tried-peers set so we don't hammer one peer or re-ask
-        // a peer that just served us a non-binding proof. The announcing peer is
-        // preferred for the first request; other peers defer to it until it is
-        // tried or gone. The block is HELD indefinitely (never permanently
-        // rejected, design §3.5), so after exhausting known peers we reset and
-        // retry from scratch.
-        // Stage 2d expiry sweep (design §3.3), run before (re)issuing requests: drop
-        // any held block whose proof is permanently unavailable — a wall TTL on the
-        // NODE clock (covers "every peer is slow/silent"), or the per-entry attempt
-        // cap (covers "every peer exhausted"). Dropping releases the CBlock + any
-        // reassembly buffer (byte counter decremented) and leaves the block
-        // re-downloadable via normal sync — never pinned forever, never marked invalid.
-        if (!m_matmul_proofs_pending.empty()) {
-            std::vector<uint256> expired;
-            for (const auto& [proof_hash, req] : m_matmul_proofs_pending) {
-                const bool ttl_expired = req.first_seen != 0us &&
-                    current_time - req.first_seen >
-                        std::chrono::duration_cast<std::chrono::microseconds>(MATMUL_PROOF_PENDING_TTL);
-                if (ttl_expired || req.attempts >= MATMUL_PROOF_MAX_ATTEMPTS) {
-                    expired.push_back(proof_hash);
-                }
-            }
-            for (const uint256& h : expired) {
-                LogDebug(BCLog::NET, "matmul: dropping held proof-incomplete block %s (expired: TTL or attempt cap)\n",
-                         h.ToString());
-                EraseMatMulPending(h);
-            }
-        }
-        if (!m_matmul_proofs_pending.empty() && CanServeBlocks(*peer)) {
-            const Consensus::Params& matmul_consensus = m_chainparams.GetConsensus();
-            const int matmul_tip_height = m_chainman.ActiveChain().Height();
-            const int matmul_prune_depth = static_cast<int>(matmul_consensus.nMatMulProofPruneDepth);
-            const bool peer_is_proof_archive =
-                (peer->m_their_services & NODE_MATMUL_PROOF_ARCHIVE) == NODE_MATMUL_PROOF_ARCHIVE;
-            for (auto& [proof_hash, req] : m_matmul_proofs_pending) {
-                // Long-tail reset: nothing in flight and every known peer exhausted.
-                if (req.requested_from == -1 && !req.tried_peers.empty() &&
-                    req.requested_time != 0us &&
-                    req.requested_time < current_time - MATMUL_PROOF_RETRY_RESET) {
-                    req.tried_peers.clear();
-                }
-                // Timeout an outstanding request: mark that peer tried, count the
-                // attempt, drop any partial reassembly it left, and free the slot.
-                if (req.requested_from != -1 &&
-                    req.requested_time < current_time - MATMUL_PROOF_REQUEST_TIMEOUT) {
-                    req.tried_peers.insert(req.requested_from);
-                    if (req.reasm_from == req.requested_from) ResetMatMulReassembly(req);
-                    req.requested_from = -1;
-                    ++req.attempts;
-                }
-                if (req.requested_from != -1) continue;      // still awaiting a reply
-                if (req.tried_peers.count(pto->GetId())) continue; // this peer failed us
-                // Archive-peer preference for BURIED proofs (design §3.5 IBD/reorg):
-                // a block below the rolling window has very likely been pruned by a
-                // default peer, so prefer archive peers as the source. Non-archive
-                // peers defer only during the grace window after we first held the
-                // block; after it they may still be tried (some full nodes retain
-                // more than the window), so a missing archive peer never permanently
-                // stalls — the block is simply held until some peer serves the proof.
-                if (matmul_prune_depth > 0 && !peer_is_proof_archive) {
-                    const CBlockIndex* proof_index = m_chainman.m_blockman.LookupBlockIndex(proof_hash);
-                    const bool buried = proof_index != nullptr &&
-                        proof_index->nHeight <= static_cast<int64_t>(matmul_tip_height) - matmul_prune_depth;
-                    if (buried && req.first_seen != 0us &&
-                        req.first_seen > current_time - MATMUL_PROOF_ARCHIVE_PREFERENCE_GRACE) {
-                        continue;
-                    }
-                }
-                // Prefer the announcing peer for the first request.
-                if (req.announced_by != -1 && req.announced_by != pto->GetId() &&
-                    !req.tried_peers.count(req.announced_by) && State(req.announced_by) != nullptr) {
-                    continue;
-                }
-                MakeAndPushMessage(*pto, NetMsgType::GETMATMULPROOF, proof_hash);
-                req.requested_from = pto->GetId();
-                req.requested_time = current_time;
-                LogDebug(BCLog::NET, "Requesting matmul proof %s peer=%d\n",
-                         proof_hash.ToString(), pto->GetId());
             }
         }
 

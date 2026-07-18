@@ -993,21 +993,23 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     LogDebug(BCLog::MINING, "CreateNewBlock(): building on tip height=%d hash=%s\n",
              pindexPrev->nHeight, pindexPrev->GetBlockHash().GetHex());
 
-    // Audit P1: at v4 heights the solved block carries a MANDATORY product-sketch
-    // payload (matrix_c_data, ~8 MiB at n=4096) that is attached AFTER transaction
-    // selection but still counts toward the consensus block size/weight limits
-    // (WITNESS_SCALE_FACTOR == 1, so the payload is in GetBlockWeight and the
-    // serialized size). Reserve its EXACT serialized size up front so the assembler
-    // cannot pack transactions that, once the payload is appended, push the block
-    // over nMaxBlockSerializedSize / nMaxBlockWeight -- which would make the miner's
-    // OWN solved block invalid (a self-DoS / mining halt under a full mempool).
-    // Segregated-proof heights (design §3.6): the ~32 MiB sketch is NOT carried
-    // in-block (the miner offloads it to the proof store and emits an empty body
-    // sketch, see rpc/mining.cpp GenerateBlock), so there is nothing to reserve —
-    // the block no longer counts the sketch against nMaxBlockSerializedSize /
-    // nMaxBlockWeight. Reserve ONLY at in-block (non-segregated) v4 heights.
+    // Audit P1: at legacy in-block v4 heights the solved block carries a MANDATORY
+    // product-sketch payload (matrix_c_data, ~8 MiB at n=4096) that is attached
+    // AFTER transaction selection but still counts toward the consensus block
+    // size/weight limits (WITNESS_SCALE_FACTOR == 1, so the payload is in
+    // GetBlockWeight and the serialized size). Reserve its EXACT serialized size
+    // up front so the assembler cannot pack transactions that, once the payload is
+    // appended, push the block over nMaxBlockSerializedSize / nMaxBlockWeight --
+    // which would make the miner's OWN solved block invalid (a self-DoS / mining
+    // halt under a full mempool).
+    // v4.4 ENC-DR (DIGEST_RECOMPUTE, the production carriage): the sketch is NOT
+    // carried in-block (the miner offloads it to the non-consensus sketch cache
+    // and emits a digest-only body, see rpc/mining.cpp GenerateBlock), so there is
+    // nothing to reserve. Reserve ONLY on the regtest FLAT_SKETCH_INBLOCK replay
+    // path.
     if (chainparams.GetConsensus().IsMatMulV4Active(nHeight) &&
-        !chainparams.GetConsensus().GetMatMulProfileParams(nHeight).proof_segregated) {
+        chainparams.GetConsensus().GetMatMulProfileParams(nHeight).commitment ==
+            Consensus::MatMulCommitmentScheme::FLAT_SKETCH_INBLOCK) {
         const uint64_t m{static_cast<uint64_t>(chainparams.GetConsensus().nMatMulV4Dimension) / matmul::v4::kTileB};
         const uint64_t words{2 * m * m};  // 2 uint32 words per F_q sketch element, m*m elements
         const size_t payload_bytes{GetSizeOfCompactSize(words) + static_cast<size_t>(words) * sizeof(uint32_t)};

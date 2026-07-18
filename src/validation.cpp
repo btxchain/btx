@@ -30,7 +30,6 @@
 #include <kernel/warning.h>
 #include <logging.h>
 #include <logging/timer.h>
-#include <matmul/matmul_proof_store.h>
 #include <node/blockstorage.h>
 #include <node/utxo_snapshot.h>
 #include <policy/coin_age_priority.h>
@@ -8052,79 +8051,6 @@ CoinsCacheSizeState Chainstate::GetCoinsCacheSizeState(
     return CoinsCacheSizeState::OK;
 }
 
-//! Rolling proof-prune sweep (MatMul v4.2 solver-evolution Stage 2c, design §3.5).
-//!
-//! A verified segregated proof is retained only until its block is buried by
-//! `nMatMulProofPruneDepth` (default ~10 000 blocks). Below that depth a DEFAULT
-//! (pruned-proof) node discards the redundant-after-verify ~32 MiB sketch bytes;
-//! the block's VALIDITY survives (it was verified once) and the header's
-//! matmul_digest is retained forever, so nothing about chain state is lost — only
-//! the large witness. An ARCHIVE node (`-matmulproofarchive`) retains everything
-//! and this sweep is a no-op for it. Bounds resident proof storage and logs what
-//! it drops (no silent cap). Height is resolved authoritatively from the block
-//! index (a block hash maps to a single pindex), so a reorg cannot mis-key it.
-static void PruneMatMulSegregatedProofs(Chainstate& chainstate) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
-{
-    AssertLockHeld(cs_main);
-    matmul::MatMulProofStore& store = matmul::GetLocalMatMulProofStore();
-    if (store.IsArchive()) return;          // archive node: retain ALL proofs
-    if (store.Size() == 0) return;
-    const Consensus::Params& consensus = chainstate.m_chainman.GetConsensus();
-    if (!consensus.fMatMulPOW) return;
-    const int prune_depth = static_cast<int>(consensus.nMatMulProofPruneDepth);
-    if (prune_depth <= 0) return;           // 0 => disabled (retain-forever)
-    const int tip_height = chainstate.m_chain.Height();
-    if (tip_height < 0) return;
-    // A proof whose block height h satisfies (tip_height - h) >= prune_depth, i.e.
-    // h <= cutoff, is buried deeply enough to drop.
-    const int64_t cutoff = static_cast<int64_t>(tip_height) - prune_depth;
-    if (cutoff < 0) return;                  // nothing buried deep enough yet
-
-    size_t pruned = 0;
-    for (const uint256& hash : store.Keys()) {
-        const CBlockIndex* pindex = chainstate.m_blockman.LookupBlockIndex(hash);
-        // Unknown block (orphan / not-yet-connected): keep — we cannot place it in
-        // the window, and it is bounded by the held/pending relay caps.
-        if (pindex == nullptr) continue;
-        if (pindex->nHeight <= cutoff) {
-            store.Erase(hash);
-            ++pruned;
-        }
-    }
-    if (pruned > 0) {
-        LogPrintf("MatMul proof store: pruned %u segregated proof(s) at/below height %d "
-                  "(tip %d, window %d blocks); %u proof(s) resident\n",
-                  pruned, static_cast<int>(cutoff), tip_height, prune_depth, store.Size());
-    }
-}
-
-//! Incremental O(1) companion to PruneMatMulSegregatedProofs, run per tip advance
-//! (design §3.5: "on tip update"). As the tip advances by one, exactly one height
-//! falls out of the rolling window; drop the ACTIVE-chain proof at that height
-//! directly by height->hash lookup instead of scanning the whole store, so the
-//! sweep stays cheap even during IBD (O(1)/block, not O(store)/block). Stale /
-//! side-chain proofs at the cutoff height are caught by the full sweep above.
-static void PruneMatMulSegregatedProofAtTip(Chainstate& chainstate) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
-{
-    AssertLockHeld(cs_main);
-    matmul::MatMulProofStore& store = matmul::GetLocalMatMulProofStore();
-    if (store.IsArchive() || store.Size() == 0) return;
-    const Consensus::Params& consensus = chainstate.m_chainman.GetConsensus();
-    if (!consensus.fMatMulPOW) return;
-    const int prune_depth = static_cast<int>(consensus.nMatMulProofPruneDepth);
-    if (prune_depth <= 0) return;
-    const int64_t cutoff = static_cast<int64_t>(chainstate.m_chain.Height()) - prune_depth;
-    if (cutoff < 0) return;
-    const CBlockIndex* pindex = chainstate.m_chain[cutoff];
-    if (pindex == nullptr) return;
-    const uint256 hash = pindex->GetBlockHash();
-    if (!store.Have(hash)) return;
-    store.Erase(hash);
-    LogPrintf("MatMul proof store: pruned segregated proof for block %s at height %d "
-              "(tip %d, window %d blocks); %u proof(s) resident\n",
-              hash.ToString(), static_cast<int>(cutoff), chainstate.m_chain.Height(),
-              prune_depth, store.Size());
-}
 
 bool Chainstate::FlushStateToDisk(
     BlockValidationState &state,
@@ -8185,13 +8111,6 @@ bool Chainstate::FlushStateToDisk(
         }
         // It's been a while since we wrote the block index and chain state to disk. Do this frequently, so we don't need to redownload or reindex after a crash.
         bool fPeriodicWrite = mode == FlushStateMode::PERIODIC && nNow >= m_next_write;
-        // Rolling MatMul segregated-proof prune (design §3.5). Independent of block-file
-        // pruning: a full-block DEFAULT node still discards proof bytes below the window,
-        // an archive node retains them. Bounded to the same cadence as periodic/forced
-        // disk writes so it never runs per-block.
-        if (fPeriodicWrite || mode == FlushStateMode::ALWAYS) {
-            PruneMatMulSegregatedProofs(*this);
-        }
         // Combine all conditions that result in a write to disk.
         bool should_write = (mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicWrite || fFlushForPrune;
         // Write blocks, block index and best chain related state to disk.
@@ -8245,13 +8164,6 @@ bool Chainstate::FlushStateToDisk(
             if (empty_cache ? !CoinsTip().Flush() : !CoinsTip().Sync()) {
                 return FatalError(m_chainman.GetNotifications(), state, _("Failed to write to coin database."));
             }
-            // Durability parity for segregated MatMul proofs (design §3): fsync the
-            // proof store together with the coins DB so a connected segregated
-            // block's ~32 MiB proof reaches disk with the chainstate that depends
-            // on it. The hot Put path is fSync=false (proofs are re-fetchable, never
-            // corruption), but flushing here closes the crash window where the block
-            // body is durable and its proof is not. No-op in MEMORY mode.
-            matmul::GetLocalMatMulProofStore().Sync();
             full_flush_completed = true;
             TRACEPOINT(utxocache, flush,
                     int64_t{Ticks<std::chrono::microseconds>(NodeClock::now() - nNow)},
@@ -8333,11 +8245,6 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
         }
         return;
     }
-
-    // Rolling MatMul segregated-proof prune (design §3.5): drop the proof for the
-    // single active-chain block that just fell out of the retention window. Cheap
-    // (O(1)) so it is safe to run on every tip advance, including during IBD.
-    PruneMatMulSegregatedProofAtTip(*this);
 
     // New best block
     if (m_mempool) {
@@ -9872,12 +9779,13 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-length", "size limits failed");
     }
     const uint64_t stripped_block_size = ::GetSerializeSize(TX_NO_WITNESS_WITH_SHIELDED(block));
-    // MatMul segregated-proof accounting (design §3.6): at proof_segregated heights
-    // the block body carries NO sketch (matrix_c_data is empty by construction —
-    // the miner offloads it to the proof store and ContextualCheckBlock rejects any
-    // inline sketch), so serialized_block_size EXCLUDES the ~32 MiB proof and the
-    // 24 MB nMaxBlockSerializedSize ceiling stays unchanged and un-breached. Below
-    // segregated heights the in-block sketch is counted here exactly as before.
+    // MatMul v4.4 ENC-DR size accounting (tension-resolution §3.1-ii): at
+    // DIGEST_RECOMPUTE heights the block body carries NO sketch (matrix_c_data
+    // is empty by consensus rule — the miner emits a digest-only body and
+    // ContextualCheckBlock rejects any inline sketch), so serialized_block_size
+    // is headers + txs only and the 24 MB nMaxBlockSerializedSize ceiling is
+    // untouched. On the regtest FLAT_SKETCH_INBLOCK replay path the in-block
+    // sketch is counted here exactly as before.
     const uint64_t serialized_block_size = ::GetSerializeSize(TX_WITH_WITNESS(block));
     if (block.vtx.size() > consensusParams.nMaxBlockWeight / WITNESS_SCALE_FACTOR ||
         stripped_block_size > consensusParams.nMaxBlockWeight / WITNESS_SCALE_FACTOR ||
@@ -10293,41 +10201,45 @@ static bool ContextualCheckBlock(const CBlock& block,
                 "matmul v4 block carries forbidden legacy A/B matrix payload");
         }
         const Consensus::MatMulProfileParams matmul_profile = consensusParams.GetMatMulProfileParams(nHeight);
-        if (matmul_profile.proof_segregated) {
-            // SEGREGATED-PROOF path (design §3; solver-evolution Stage 2a), height-
-            // gated on GetMatMulProfileParams(height).proof_segregated (ENC-BMX4C-D).
-            // The ~32 MiB sketch is NOT in the block body: the block commits only
-            // the 32-byte header matmul_digest and the sketch is carried out-of-band
-            // (Stage 2a: a process-local store; Stage 2b: the getmatmulproof/
-            // matmulproof relay). The block-serialized-size check in CheckBlock
-            // therefore sees a body WITHOUT the sketch, so nMaxBlockSerializedSize
-            // (24 MB) excludes the proof BY CONSTRUCTION (design §3.6).
+        if (matmul_profile.commitment == Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
+            // v4.4 ENC-DR path (doc/btx-matmul-v4.4-tension-resolution.md §4.1):
+            // the block carries ZERO consensus proof bytes. The header's
+            // matmul_digest = H(sigma||Chat_true) is the whole commitment; the
+            // predicate is a pure function of the header, decided by exact
+            // recompute (the consensus definition, epsilon = 0) or by the
+            // cache-assisted Freivalds fast path (epsilon <= 2^-180) inside
+            // CheckMatMulProofOfWork_V4EncDr.
             //
-            // (1) The in-block body sketch MUST be empty. A non-empty inline sketch
-            // at a segregated height is a body mutation (BLOCK_MUTATED, non-permanent
-            // — the honest empty-body block with the same header hash must not be
-            // poisoned).
+            // (1) The in-block body sketch MUST be empty (§4.1 clause 2). A
+            // non-empty inline sketch at an ENC-DR height is classified as a
+            // body mutation (BLOCK_MUTATED, non-permanent): matrix_c_data is
+            // body data not covered by the header hash, so a relayer could
+            // append garbage bytes to an honest digest-only block — the honest
+            // empty-body block with the same header hash must not be poisoned.
             if (!block.matrix_c_data.empty()) {
-                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "v4-segregated-inline-sketch",
-                    "matmul v4 segregated-proof block carries a forbidden inline sketch");
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "v4-encdr-nonempty-sketch",
+                    "matmul v4.4 ENC-DR block carries a forbidden inline sketch payload");
             }
-            // (2) ASSUMEVALID BURIED-PROOF TRUST (design §3.5-2). Below the
-            // configured assumevalid block, a node TRUSTS that the buried chain's
-            // segregated proofs were verified by the network -- the IDENTICAL trust
-            // ConnectBlock already extends to buried scriptSigs -- instead of
-            // re-fetching and re-verifying every historical ~32 MiB proof. This is
-            // what lets a syncing / pruned node sync a segregated chain without
-            // obtaining all of history's proofs (archive peers need only serve
-            // proofs ABOVE assumevalid) and lets default nodes prune below it, while
-            // a fully-verifying node (-assumevalid=0 => AssumedValidBlock null)
-            // NEVER trusts and always fetches+verifies. The trust condition mirrors
-            // the ConnectBlock fScriptChecks skip EXACTLY: the block is an assumed-
-            // valid ancestor of the best header; the best header carries at least
-            // MinimumChainWork of AUTHENTICATED work (C1 -- a forged-header chain
-            // cannot induce the skip); and it is buried more than the 2-week
-            // equivalent-time DoS guard. When trusted, the proof is neither
-            // required, fetched, nor verified for this block.
-            bool proof_assumevalid_trusted = false;
+            // (2) ASSUMEVALID BURIED-RECOMPUTE TRUST (tension-resolution
+            // §3.1-vi; retargeted byte-for-byte from the retired segregated
+            // buried-proof trust, design §3.5-2). Below the configured
+            // assumevalid block, a node TRUSTS that the buried chain's PoW
+            // recomputes were verified by the network — the IDENTICAL trust
+            // ConnectBlock already extends to buried scriptSigs — instead of
+            // re-running the O(W) Chat recompute for every historical block.
+            // This predicate is the SOLE bound on deep-history recompute cost
+            // for a default node's IBD; a fully-verifying node
+            // (-assumevalid=0 => AssumedValidBlock null) NEVER trusts and
+            // always recomputes. The trust condition mirrors the ConnectBlock
+            // fScriptChecks skip EXACTLY: the block is an assumed-valid
+            // ancestor of the best header; the best header carries at least
+            // MinimumChainWork of AUTHENTICATED work (C1 — a forged-header
+            // chain cannot induce the skip); and it is buried more than the
+            // 2-week equivalent-time DoS guard. When trusted, the recompute is
+            // skipped for this block (every buried block stays re-auditable
+            // forever by digest-only recompute — re-derivability underneath
+            // the trust, §4.4).
+            bool recompute_assumevalid_trusted = false;
             if (!chainman.AssumedValidBlock().IsNull() && chainman.m_best_header != nullptr) {
                 const CBlockIndex* pindex_self = chainman.m_blockman.LookupBlockIndex(block.GetHash());
                 const auto av_it = chainman.m_blockman.m_block_index.find(chainman.AssumedValidBlock());
@@ -10336,40 +10248,25 @@ static bool ContextualCheckBlock(const CBlock& block,
                     chainman.m_best_header->GetAncestor(nHeight) == pindex_self &&
                     chainman.m_best_header->nAuthenticatedChainWork >= chainman.MinimumChainWork() &&
                     GetBlockProofEquivalentTime(*chainman.m_best_header, *pindex_self, *chainman.m_best_header, consensusParams) > static_cast<int64_t>(consensusParams.nMatMulProofAssumeValidMinAge)) {
-                    proof_assumevalid_trusted = true;
+                    recompute_assumevalid_trusted = true;
                 }
             }
-            // (3) Above assumevalid (or -assumevalid=0): fetch the proof from the
-            // store, enforce the §3.4 size cap, bind it to matmul_digest (§3.3),
-            // then Freivalds-verify. The MUTATED/CONSENSUS split is IDENTICAL to the
-            // in-block path below, relocated to the store-backed carriage with no
-            // weakening.
-            if (!proof_assumevalid_trusted) {
-                switch (CheckMatMulV4SegregatedProof(block, consensusParams, nHeight)) {
-                case MatMulSegregatedProofStatus::OK:
-                    break;
-                case MatMulSegregatedProofStatus::INCOMPLETE:
-                    // We do not have the proof yet: PoW-INCOMPLETE, not creditable, but
-                    // NON-permanent (mirrors "missing block body" — Stage 2b re-requests
-                    // it). BLOCK_MUTATED so the header hash is never permanently failed.
-                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "matmul-v4-proof-incomplete",
-                        "matmul v4 segregated proof not yet available");
-                case MatMulSegregatedProofStatus::MUTATED:
-                    // Over-cap or fails the H(sigma||proof)==matmul_digest binding: a
-                    // wrong/substituted proof, a relay mutation. NON-permanent.
-                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-matmul-v4-proof",
-                        "matmul v4 segregated proof does not match committed digest");
-                case MatMulSegregatedProofStatus::CONSENSUS_FAIL:
-                    // Proof binds to the committed digest but fails Freivalds / is over
-                    // target: a real, PERMANENT PoW fault.
+            // (3) Above assumevalid (or -assumevalid=0): decide the §4.1
+            // predicate. Any failure is a header-level PERMANENT consensus
+            // fault: with an empty body there are no proof bytes to mutate, so
+            // the MUTATED/permanent classification collapses (§4.1 clause 2)
+            // and "high-hash" is always correct here.
+            if (!recompute_assumevalid_trusted) {
+                if (!CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight)) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
                         "matmul v4 proof of work failed");
                 }
             }
         } else {
-            // LEGACY IN-BLOCK path (ENC-S8 / ENC-BMX4C and all pre-segregation
-            // history) — byte-for-byte unchanged. History is never rewritten; the
-            // carriage is chosen deterministically by height.
+            // LEGACY IN-BLOCK path (FLAT_SKETCH_INBLOCK) — v4.4: reachable ONLY
+            // via the regtest-only fMatMulV4FlatSketchReplay differential-
+            // testing switch (tension-resolution §4.5); byte-for-byte the
+            // pre-ENC-DR carriage.
             if (block.matrix_c_data.empty()) {
                 return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "missing-product-payload",
                     "matmul v4 block missing required product sketch payload");

@@ -76,23 +76,19 @@ static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 16 * 1000 * 1000;
  *  ceiling is applied ONLY to these commands (see net.cpp), so ordinary messages
  *  keep the 16 MB bound. */
 static const unsigned int MAX_BLOCK_MESSAGE_LENGTH = 24 * 1000 * 1000;
-/** Maximum payload of a single segregated-proof `mmproofchunk` message (MatMul v4.2
- *  solver-evolution Stage 2d, relay-hardening design §1). The ~32 MiB (D) sketch is
- *  no longer carried whole: it exceeds the v2 (BIP324) 24-bit packet-length ceiling
- *  (~16 MB) and disconnects the peer. Instead the proof is CHUNKED at serve time into
- *  self-describing slices, each ≤ this size, reassembled application-side, and bound
- *  ONLY once whole. At 1 MiB, a `mmproofchunk` (1 MiB payload + 32-byte hash + three
- *  uint32 + compactSize framing, < 1.05 MB total) rides comfortably under BOTH the v2
- *  ~16 MB packet ceiling AND the v1 MAX_PROTOCOL_MESSAGE_LENGTH (16 MB) with no
- *  transport re-tuning — so this command needs NO special net-layer ceiling and falls
- *  under the ordinary 16 MB bound (unlike the retired MAX_MATMULPROOF_MESSAGE_LENGTH).
- *  The per-message unsolicited-buffer DoS envelope for proof relay is thus ~1 MiB, a
- *  40× reduction from the old 40 MB. This is the WIRE chunk size; the exact per-chunk
- *  length and the total-size §3.4 cap are re-checked in net_processing during
- *  reassembly. D ⇒ 32 chunks, C ⇒ 8 chunks. */
-static const unsigned int MAX_MATMULPROOF_CHUNK_SIZE = 1024 * 1024;
-static_assert(MAX_MATMULPROOF_CHUNK_SIZE < MAX_PROTOCOL_MESSAGE_LENGTH,
-              "a mmproofchunk (payload + framing) must ride under the ordinary "
+/** Maximum payload of a v4.4 ENC-DR `mmsketch` sketch-cache message: the
+ *  profile's 8·m² serialized sketch (8 MiB at the production m = 1024) plus
+ *  small framing (32-byte block hash + compactSize). Rides in ONE piece under
+ *  BOTH the v2 (BIP324) ~16 MB packet ceiling AND the v1
+ *  MAX_PROTOCOL_MESSAGE_LENGTH (16 MB), so the command needs NO special
+ *  net-layer ceiling (tension-resolution §4.3). If a future shape retarget
+ *  pushes 8·m² past this bound, nodes simply stop serving sketches for that
+ *  profile (peers recompute) — the cache is best-effort, never load-bearing.
+ *  The exact profile-derived cap is re-checked in net_processing on both the
+ *  serve and receive sides. */
+static const unsigned int MAX_MMSKETCH_PAYLOAD_SIZE = 8 * 1024 * 1024 + 64;
+static_assert(MAX_MMSKETCH_PAYLOAD_SIZE < MAX_PROTOCOL_MESSAGE_LENGTH,
+              "an mmsketch (payload + framing) must ride under the ordinary "
               "protocol-message ceiling on both v1 and v2 transports");
 /** Maximum length of the user agent string in `version` message */
 static const unsigned int MAX_SUBVERSION_LENGTH = 256;

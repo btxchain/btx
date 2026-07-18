@@ -4922,14 +4922,18 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
         } else if (!include_freivalds_payload) {
             block.matrix_c_data.clear();
         }
-        // Segregated-proof carriage (design §3.6; solver-evolution Stage 2a): at
-        // proof_segregated heights (ENC-BMX4C-D) the solver produced the ~32 MiB
-        // sketch above, but it must NOT ride in the block body. Move it into the
-        // local proof store keyed by the (now-finalized) block hash and clear the
-        // in-body sketch, so the block serializes without the proof and validation
-        // fetches it back from the store to run the §3.3 binding + Freivalds.
-        if (consensus.GetMatMulProfileParams(next_height).proof_segregated) {
-            OffloadMatMulV4SegregatedProofToStore(block);
+        // v4.4 ENC-DR digest-only carriage (tension-resolution §4.1/§4.3): at
+        // DIGEST_RECOMPUTE heights the solver produced the 8·m² sketch above
+        // (mining is byte-identical to v4.3), but it must NOT ride in the block
+        // body — the header's matmul_digest is the entire consensus commitment.
+        // Move the bytes into the local non-consensus sketch cache keyed by the
+        // (now-finalized) block hash and clear the in-body sketch, so the block
+        // serializes digest-only; the winner MAY then serve the sketch to peers
+        // via the best-effort getmmsketch/mmsketch cache transport.
+        if (consensus.IsMatMulV4Active(next_height) &&
+            consensus.GetMatMulProfileParams(next_height).commitment ==
+                Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
+            OffloadMatMulV4SketchToCache(block);
         }
     } else if (kawpow_active) {
         if (consensus.fSkipKAWPOWValidation) {
@@ -8494,17 +8498,20 @@ static UniValue TemplateToJSON(
     UniValue block_capacity(UniValue::VOBJ);
     block_capacity.pushKV("max_block_weight", static_cast<int64_t>(MAX_BLOCK_WEIGHT));
     block_capacity.pushKV("max_block_serialized_size", static_cast<int64_t>(MAX_BLOCK_SERIALIZED_SIZE));
-    // Adversarial finding L1: at IN-BLOCK MatMul v4 heights the solved block MUST
-    // carry a mandatory ~8 MiB product-sketch payload (BlockAssembler reserves
-    // exactly this before tx selection), so the effective transaction budget is
-    // max_block_serialized_size MINUS this reservation. Advertise it so an
-    // external pool that fills a block itself (ignoring the returned tx list)
+    // Adversarial finding L1: at legacy IN-BLOCK MatMul v4 heights the solved
+    // block MUST carry a mandatory ~8 MiB product-sketch payload (BlockAssembler
+    // reserves exactly this before tx selection), so the effective transaction
+    // budget is max_block_serialized_size MINUS this reservation. Advertise it so
+    // an external pool that fills a block itself (ignoring the returned tx list)
     // does not build a self-invalid >max block by filling to the raw ceiling and
-    // then appending the sketch. Zero at SEGREGATED-proof heights (the sketch is
-    // relayed off-body, design §3.6) and at non-v4 heights. Matches the miner's
-    // reservation exactly: 2*m*m uint32 words = 8*m^2 bytes, m = dim / kTileB.
+    // then appending the sketch. Zero at v4.4 ENC-DR heights (digest-only
+    // carriage — the block body carries no sketch at all, tension-resolution
+    // §4.1) and at non-v4 heights. Matches the miner's reservation exactly:
+    // 2*m*m uint32 words = 8*m^2 bytes, m = dim / kTileB.
     int64_t matmul_proof_reserved_bytes = 0;
-    if (matmul_active && !consensusParams.GetMatMulProfileParams(next_height).proof_segregated) {
+    if (matmul_active && consensusParams.IsMatMulV4Active(next_height) &&
+        consensusParams.GetMatMulProfileParams(next_height).commitment ==
+            Consensus::MatMulCommitmentScheme::FLAT_SKETCH_INBLOCK) {
         const uint64_t reserve_m = static_cast<uint64_t>(consensusParams.nMatMulV4Dimension) / matmul_v4::kTileB;
         matmul_proof_reserved_bytes = static_cast<int64_t>(8 * reserve_m * reserve_m);
     }

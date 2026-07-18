@@ -2023,12 +2023,12 @@ class msg_no_witness_blocktxn(msg_blocktxn):
         return self.block_transactions.serialize(with_witness=False)
 
 
-class msg_getmatmulproof:
-    """Request the segregated MatMul PoW proof for a block (MatMul v4.2 Stage 2b).
-
-    Payload: a single 32-byte block hash. Request/response, modeled on getdata."""
+class msg_getmmsketch:
+    """Request the v4.4 ENC-DR sketch-cache bytes for a block (tension-resolution
+    §4.3). Payload: a single 32-byte block hash. Best-effort request/response,
+    modeled on getdata; a peer that does not hold the sketch silently ignores it."""
     __slots__ = ("block_hash",)
-    msgtype = b"getmmproof"
+    msgtype = b"getmmsketch"
 
     def __init__(self, block_hash=0):
         self.block_hash = block_hash
@@ -2040,133 +2040,34 @@ class msg_getmatmulproof:
         return ser_uint256(self.block_hash)
 
     def __repr__(self):
-        return "msg_getmatmulproof(block_hash=%064x)" % self.block_hash
+        return "msg_getmmsketch(block_hash=%064x)" % self.block_hash
 
 
-class msg_matmulproof:
-    """Carry the raw segregated sketch bytes for a block in a SINGLE message.
+class msg_mmsketch:
+    """Carry the full self-authenticating 8*m^2 sketch-cache payload for one block
+    (v4.4 ENC-DR, tension-resolution §4.3). Payload: 32-byte block hash followed by
+    the length-prefixed raw sketch bytes. The receiver authenticates with ONE hash
+    (H(sigma||bytes) == matmul_digest) before caching; a mismatch penalizes the
+    sender and is never evidence about the block."""
+    __slots__ = ("block_hash", "sketch")
+    msgtype = b"mmsketch"
 
-    Retired on the C++ side by Stage 2d chunking (a single ~32 MiB message cannot ride
-    the v2/BIP324 transport); kept here ONLY so a test can send a monolithic proof as a
-    control and assert the v2 peer drops it. Payload: 32-byte block hash followed by the
-    length-prefixed raw sketch bytes."""
-    __slots__ = ("block_hash", "proof")
-    msgtype = b"mmproof"
-
-    def __init__(self, block_hash=0, proof=b""):
+    def __init__(self, block_hash=0, sketch=b""):
         self.block_hash = block_hash
-        self.proof = proof
+        self.sketch = sketch
 
     def deserialize(self, f):
         self.block_hash = deser_uint256(f)
-        self.proof = deser_string(f)
+        self.sketch = deser_string(f)
 
     def serialize(self):
         r = b""
         r += ser_uint256(self.block_hash)
-        r += ser_string(self.proof)
+        r += ser_string(self.sketch)
         return r
 
     def __repr__(self):
-        return "msg_matmulproof(block_hash=%064x, proof_len=%d)" % (self.block_hash, len(self.proof))
-
-
-class msg_matmulproofchunk:
-    """Carry ONE ordered slice of a segregated proof (MatMul v4.2 Stage 2d chunking).
-
-    Payload (all integers uint32 little-endian, self-describing so the receiver can
-    validate/allocate on the first chunk regardless of arrival order):
-        block_hash   (uint256)
-        total_size   (uint32)  full proof length = the profile's exact 8*m^2
-        total_chunks (uint32)  ceil(total_size / MAX_MATMULPROOF_CHUNK_SIZE)  (1 MiB)
-        chunk_index  (uint32)  [0, total_chunks)
-        chunk_bytes  (bytes)   this slice (1 MiB except the last = remainder)
-    Binding H(sigma||proof)==matmul_digest + Freivalds run only on the reassembled
-    blob, so a corrupted chunk fails binding (MUTATED, non-permanent)."""
-    __slots__ = ("block_hash", "total_size", "total_chunks", "chunk_index", "chunk_bytes")
-    msgtype = b"mmproofchunk"
-
-    def __init__(self, block_hash=0, total_size=0, total_chunks=0, chunk_index=0, chunk_bytes=b""):
-        self.block_hash = block_hash
-        self.total_size = total_size
-        self.total_chunks = total_chunks
-        self.chunk_index = chunk_index
-        self.chunk_bytes = chunk_bytes
-
-    def deserialize(self, f):
-        self.block_hash = deser_uint256(f)
-        self.total_size = int.from_bytes(f.read(4), "little")
-        self.total_chunks = int.from_bytes(f.read(4), "little")
-        self.chunk_index = int.from_bytes(f.read(4), "little")
-        self.chunk_bytes = deser_string(f)
-
-    def serialize(self):
-        r = b""
-        r += ser_uint256(self.block_hash)
-        r += self.total_size.to_bytes(4, "little")
-        r += self.total_chunks.to_bytes(4, "little")
-        r += self.chunk_index.to_bytes(4, "little")
-        r += ser_string(self.chunk_bytes)
-        return r
-
-    def __repr__(self):
-        return ("msg_matmulproofchunk(block_hash=%064x, total_size=%d, total_chunks=%d, "
-                "chunk_index=%d, chunk_len=%d)" % (self.block_hash, self.total_size,
-                self.total_chunks, self.chunk_index, len(self.chunk_bytes)))
-
-
-# MatMul v4.2 Stage 2d segregated-proof chunk size (mirrors the C++
-# MAX_MATMULPROOF_CHUNK_SIZE = 1 MiB in src/net.h). A proof is served as an ordered
-# sequence of mmproofchunk messages of this size (last = remainder).
-MAX_MATMULPROOF_CHUNK_SIZE = 1024 * 1024
-
-
-def matmul_proof_chunks(block_hash, proof, chunk_size=MAX_MATMULPROOF_CHUNK_SIZE):
-    """Split a flat proof blob into the ordered msg_matmulproofchunk sequence the
-    C++ responder emits (Stage 2d). Used by a mininode SERVING a proof to a node."""
-    total_size = len(proof)
-    total_chunks = (total_size + chunk_size - 1) // chunk_size if total_size else 1
-    out = []
-    for i in range(total_chunks):
-        off = i * chunk_size
-        out.append(msg_matmulproofchunk(
-            block_hash=block_hash,
-            total_size=total_size,
-            total_chunks=total_chunks,
-            chunk_index=i,
-            chunk_bytes=proof[off:off + chunk_size],
-        ))
-    return out
-
-
-class MatMulProofReassembler:
-    """Receiver-side reassembly of a chunked proof (Stage 2d). A mininode that REQUESTS
-    a proof (getmmproof) feeds each on_mmproofchunk here; done() reports completion and
-    the reassembled bytes. Records the observed chunk framing for bounds assertions."""
-    def __init__(self):
-        self.total_size = None
-        self.total_chunks = None
-        self.buf = None
-        self.have = set()
-        self.indices = []          # order/multiplicity of received indices
-        self.chunk_lengths = {}    # index -> chunk byte length
-
-    def add(self, message):
-        if self.total_size is None:
-            self.total_size = message.total_size
-            self.total_chunks = message.total_chunks
-            self.buf = bytearray(message.total_size)
-        self.indices.append(message.chunk_index)
-        self.chunk_lengths[message.chunk_index] = len(message.chunk_bytes)
-        off = message.chunk_index * MAX_MATMULPROOF_CHUNK_SIZE
-        self.buf[off:off + len(message.chunk_bytes)] = message.chunk_bytes
-        self.have.add(message.chunk_index)
-
-    def done(self):
-        return self.total_chunks is not None and len(self.have) == self.total_chunks
-
-    def bytes(self):
-        return bytes(self.buf)
+        return "msg_mmsketch(block_hash=%064x, sketch_len=%d)" % (self.block_hash, len(self.sketch))
 
 
 class msg_getcfilters:

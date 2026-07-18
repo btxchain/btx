@@ -801,12 +801,12 @@ int V1Transport::readHeader(Span<const uint8_t> msg_bytes)
     const std::string hdr_msg_type = hdr.GetMessageType();
     const bool is_block_bearing_msg =
         (hdr_msg_type == NetMsgType::BLOCK || hdr_msg_type == NetMsgType::BLOCKTXN);
-    // The segregated-proof relay (MatMul v4.2 Stage 2d) carries the ~32 MiB sketch as
-    // a sequence of `mmproofchunk` messages, each ≤ MAX_MATMULPROOF_CHUNK_SIZE (1 MiB)
-    // + small framing, so it needs NO command-specific ceiling — it rides under the
-    // ordinary MAX_PROTOCOL_MESSAGE_LENGTH on both v1 and v2. (The old single-shot
-    // `matmulproof` needed a 40 MB exception that v2 could not honor; chunking retires
-    // it, shrinking the proof-relay per-message DoS envelope from 40 MB to ~1 MiB.)
+    // The v4.4 ENC-DR sketch-cache transport (`mmsketch`, tension-resolution §4.3)
+    // carries the 8·m² sketch (~8 MiB at m = 1024) in ONE message + small framing,
+    // so it needs NO command-specific ceiling — it rides under the ordinary
+    // MAX_PROTOCOL_MESSAGE_LENGTH (16 MB) on both v1 and v2 transports. (The
+    // retired segregated-proof relay's 40 MB single-shot / 1 MiB chunked framing
+    // is gone with the subsystem.)
     const unsigned int msg_size_limit =
         is_block_bearing_msg  ? MAX_BLOCK_MESSAGE_LENGTH :
                                 MAX_PROTOCOL_MESSAGE_LENGTH;

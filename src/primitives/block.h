@@ -138,23 +138,26 @@ public:
         // legacy blocks that predate payload serialization by treating missing
         // trailing payload bytes as empty vectors.
         //
-        // SEGREGATED-PROOF WIRE INVARIANT (MatMul v4.2-D; design §3.1/§3.6;
-        // solver-evolution Stage 2a). SERIALIZE_METHODS has NO height context, so
-        // the segregated-proof carriage is expressed as a CONTENT invariant rather
-        // than a serialization flag: at proof_segregated heights
-        // (GetMatMulProfileParams(height).proof_segregated) matrix_c_data MUST be
-        // EMPTY on the wire and on disk. It is enforced at the two ends that DO know
-        // the height — the miner (rpc/mining.cpp: offloads the solved sketch to the
-        // proof store and clears matrix_c_data) and validation (ContextualCheckBlock:
-        // rejects a non-empty inline sketch at a segregated height). A v4 block also
-        // always has matrix_a_data / matrix_b_data empty (spec §H.2), so a
-        // segregated-height block writes exactly two zero-length varints (a,b) and
-        // ZERO bytes for the ~32 MiB sketch (the `!matrix_c_data.empty()` guard
-        // below emits nothing for an empty c). Round-trips are byte-identical
-        // (read: two empty vectors, then no trailing bytes -> c stays empty). The
-        // proof lives in the store, bound to the block by the header's matmul_digest.
-        // Below segregated heights this path is UNCHANGED — history is never
-        // rewritten; the format is chosen by height, deterministically.
+        // v4.4 ENC-DR DIGEST-ONLY WIRE INVARIANT (tension-resolution §4.1
+        // clause 2). SERIALIZE_METHODS has NO height context, so the digest-only
+        // carriage is expressed as a CONTENT invariant rather than a
+        // serialization flag: at DIGEST_RECOMPUTE heights
+        // (GetMatMulProfileParams(height).commitment) matrix_c_data MUST be
+        // EMPTY on the wire and on disk — the header's matmul_digest =
+        // H(sigma||Chat) is the ENTIRE PoW commitment and Chat is re-derivable
+        // from the header by anyone. Enforced at the two ends that DO know the
+        // height — the miner (rpc/mining.cpp: offloads the solved sketch to the
+        // non-consensus sketch cache and clears matrix_c_data) and validation
+        // (ContextualCheckBlock: rejects a non-empty inline sketch at an ENC-DR
+        // height). A v4 block also always has matrix_a_data / matrix_b_data
+        // empty (spec §H.2), so an ENC-DR block writes exactly two zero-length
+        // varints (a,b) and ZERO bytes for the sketch (the
+        // `!matrix_c_data.empty()` guard below emits nothing for an empty c).
+        // Round-trips are byte-identical (read: two empty vectors, then no
+        // trailing bytes -> c stays empty). On the regtest-only
+        // FLAT_SKETCH_INBLOCK replay path this serialization is UNCHANGED from
+        // the legacy in-block carriage — the format is chosen by
+        // height/carriage, deterministically.
         if constexpr (Operation::ForRead()) {
             if (!obj.vtx.empty() && obj.StreamHasTrailingPayload(s)) {
                 READWRITE(obj.matrix_a_data, obj.matrix_b_data);

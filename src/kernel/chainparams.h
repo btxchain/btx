@@ -218,7 +218,7 @@ public:
         std::optional<uint32_t> matmul_v4_dimension{};
         std::optional<uint32_t> matmul_v4_max_dimension{};
         std::optional<int32_t> matmul_bmx4c_height{};
-        std::optional<int32_t> matmul_bmx4cd_height{};
+        bool matmul_flat_sketch_replay{false};
         std::optional<uint32_t> matmul_proof_prune_depth{};
         std::optional<uint32_t> matmul_proof_assumevalid_min_age{};
         bool fastprune{false};

@@ -287,38 +287,37 @@ inline constexpr const char* DLTX{"dltx"};
  */
 inline constexpr const char* DANDELIONACC{"dandelionacc"};
 /**
- * getmmproof requests the segregated MatMul PoW proof (the ~32 MiB ENC-BMX4C-D
- * sketch, 8·m² bytes) for a block the peer already holds the header/body of.
- * (Wire name kept within the 12-byte CMessageHeader message-type limit.)
- * Payload: a single 32-byte block hash. Modeled on the getdata/block request-
- * response pattern (NOT unsolicited gossip): the proof travels only when asked
- * for, so a large witness-like artifact never rides the compact-block fast path
- * (design §3.2). Reply is an ordered sequence of `mmproofchunk` messages if we hold
- * the proof (Stage 2d chunking), else the request is ignored.
- * @since MatMul v4.2 solver-evolution Stage 2b (activation-disabled).
+ * getmmsketch requests the v4.4 ENC-DR sketch-cache bytes (the 8·m² serialized
+ * sketch, ~8 MiB at m = 1024) for a block, by 32-byte block (header) hash.
+ * STRICTLY NON-CONSENSUS, best-effort (tension-resolution §4.3): the reply is
+ * an accept-side optimization letting the requester run the cheap Freivalds
+ * verifier instead of the full Chat recompute — a peer that never answers
+ * costs the requester nothing but CPU (fallback = recompute; a block is never
+ * held proof-incomplete). Modeled on the getdata/block request-response
+ * pattern (NOT unsolicited gossip). Reply is a single `mmsketch` if the peer
+ * holds the bytes in its sketch cache and its anti-amplification serve limits
+ * (per-peer token bucket + node-wide egress budget + per-(peer,block) dedup)
+ * admit it; else the request is silently ignored. Explicitly NOT advertised
+ * via any NODE_* service bit — serving sketches is not a trust role.
+ * @since MatMul v4.4 ENC-DR.
  */
-inline constexpr const char* GETMATMULPROOF{"getmmproof"};
+inline constexpr const char* GETMMSKETCH{"getmmsketch"};
 /**
- * mmproofchunk carries ONE ordered slice of a segregated sketch, in response to a
- * `getmmproof`. The full ~32 MiB (D) proof does not fit a single v2/BIP324 packet
- * (its 24-bit length field caps content at ~16 MB), so the proof is CHUNKED at
- * serve time and reassembled application-side (MatMul v4.2 solver-evolution Stage
- * 2d, relay-hardening design §1). Each chunk is SELF-DESCRIBING so the receiver can
- * validate/allocate on the first chunk regardless of arrival order. Payload:
- *   block_hash   (uint256)          the block the proof binds to (header hash);
- *   total_size   (uint32, LE)       full proof length = the profile's exact 8·m²;
- *   total_chunks (uint32, LE)       ceil(total_size / MAX_MATMULPROOF_CHUNK_SIZE);
- *   chunk_index  (uint32, LE)       [0, total_chunks);
- *   chunk_bytes  (var-length bytes) this chunk's slice (1 MiB except the last).
- * The receiver enforces the §3.4 size cap on `total_size` BEFORE allocating, checks
- * exact per-chunk size / index / no-dup / no-overlap, and binds
- * H(sigma||proof)==matmul_digest + Freivalds-verifies ONLY on the fully reassembled
- * blob — so a substituted/corrupted chunk fails binding (MUTATED, non-permanent) and
- * the proof is re-requested from another peer (design §1.4/§1.5). Replaces the
- * Stage-2b single-shot `mmproof` message, which could not ride v2.
- * @since MatMul v4.2 solver-evolution Stage 2d (activation-disabled).
+ * mmsketch carries the full self-authenticating sketch-cache payload for one
+ * block, in response to a `getmmsketch`. Payload:
+ *   block_hash   (uint256)          the block the sketch binds to (header hash);
+ *   sketch_bytes (var-length bytes) the 8·m² serialized sketch.
+ * The bytes are UNTRUSTED: the receiver enforces the profile 8·m² size cap
+ * BEFORE buffering, then authenticates with ONE hash —
+ * H(sigma||bytes) == matmul_digest (sigma header-derived, matmul_digest
+ * header-fixed) — before admitting the bytes to its local sketch cache. A
+ * mismatching payload is dropped and the supplying peer penalized; it is
+ * NEVER evidence about the block itself. At m = 1024 the ~8 MiB message rides
+ * under every transport ceiling (16 MiB BIP324 v2 packet limit) in one piece;
+ * at larger future m a node simply does not serve (peers recompute).
+ * @since MatMul v4.4 ENC-DR.
  */
-inline constexpr const char* MATMULPROOFCHUNK{"mmproofchunk"};
+inline constexpr const char* MMSKETCH{"mmsketch"};
 }; // namespace NetMsgType
 
 /** All known message types (see above). Keep this in the same order as the list of messages above. */
@@ -363,8 +362,8 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::SENDTXRCNCL,
     NetMsgType::DLTX,
     NetMsgType::DANDELIONACC,
-    NetMsgType::GETMATMULPROOF,
-    NetMsgType::MATMULPROOFCHUNK,
+    NetMsgType::GETMMSKETCH,
+    NetMsgType::MMSKETCH,
 })};
 
 /** nServices flags */
@@ -409,12 +408,10 @@ enum ServiceFlags : uint64_t {
 
     NODE_UTREEXO_TMP = (1 << 24),
 
-    // NODE_MATMUL_PROOF_ARCHIVE indicates the node retains and serves the
-    // segregated MatMul v4.2-D proof (getmatmulproof/matmulproof) for ANY
-    // historical block, not only the rolling prune window — analogous to an
-    // archival/-txindex node (MatMul v4.2 solver-evolution Stage 2c, design §3.5).
-    // A syncing/pruned node prefers these peers when fetching buried proofs.
-    NODE_MATMUL_PROOF_ARCHIVE = (1 << 25),
+    // Bit 25 RESERVED (was NODE_MATMUL_PROOF_ARCHIVE, retired with the v4.4
+    // ENC-DR deletion of the segregated-proof subsystem; the best-effort
+    // sketch cache is deliberately NOT service-bit-advertised — serving
+    // sketches is not a trust role, tension-resolution §4.3).
 
     NODE_REPLACE_BY_FEE = (1 << 26),
     // NODE_MATMUL_CONSENSUS indicates the node validates MatMul transcripts

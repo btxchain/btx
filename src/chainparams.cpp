@@ -361,10 +361,7 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_bmx4c_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestbmx4cheight");
     }
-    if (args.IsArgSet("-regtestbmx4cdheight")) {
-        options.matmul_bmx4cd_height =
-            ParseRegTestNonNegativeInt32Arg(args, "-regtestbmx4cdheight");
-    }
+    options.matmul_flat_sketch_replay = args.GetBoolArg("-regtestmatmulflatsketchreplay", false);
     if (args.IsArgSet("-regtestmatmulproofprunedepth")) {
         options.matmul_proof_prune_depth =
             ParseRegTestUInt32Arg(args, "-regtestmatmulproofprunedepth");
