@@ -1570,7 +1570,27 @@ struct MatMulWorkProfileOptions {
     int32_t pre_hash_epsilon_bits_override{-1};
 };
 
-static UniValue BuildMatMulWorkProfile(
+// Central resolver for the advertised committed-operand ENCODING PROFILE
+// (ENC-S8 vs ENC-BMX4C). getblocktemplate, getmatmulchallenge, and
+// getmatmulchallengeprofile all advertise this field in their "matmul" object
+// at v4 heights; routing them through one function keeps the advertised value
+// byte-identical and stops the three result schemas from drifting (H11).
+static const char* ResolveMatMulEncodingProfileName(
+    const Consensus::Params& consensus, int32_t height)
+{
+    return consensus.GetMatMulEncodingProfile(height) ==
+                   Consensus::MatMulEncodingProfile::ENC_BMX4C
+               ? "ENC-BMX4C"
+               : "ENC-S8";
+}
+
+// Central resolver for the deterministic MatMul work profile implied by the
+// active consensus parameters at a height. Single source of truth consumed by
+// getmatmulchallenge and getmatmulchallengeprofile so their identical
+// "work_profile" result schemas cannot drift apart (H11). (getblocktemplate
+// does not emit a work_profile object, so it is intentionally not wired here;
+// see the encoding-profile resolver above for the field the three RPCs share.)
+static UniValue ResolveMatMulWorkProfile(
     const CBlockHeader& challenge_header,
     const Consensus::Params& consensus,
     int32_t block_height,
@@ -1878,13 +1898,10 @@ static UniValue BuildMatMulChallengeResponse(
     // fork (every other field is byte-identical across it).
     if (challenge_v4) {
         matmul.pushKV("encoding_profile",
-            consensus.GetMatMulEncodingProfile(next_height) ==
-                    Consensus::MatMulEncodingProfile::ENC_BMX4C
-                ? "ENC-BMX4C"
-                : "ENC-S8");
+            ResolveMatMulEncodingProfileName(consensus, next_height));
     }
     obj.pushKV("matmul", std::move(matmul));
-    obj.pushKV("work_profile", BuildMatMulWorkProfile(challenge_header, consensus, next_height));
+    obj.pushKV("work_profile", ResolveMatMulWorkProfile(challenge_header, consensus, next_height));
     UniValue service_profile(UniValue::VOBJ);
     {
         LOCK(cs_main);
@@ -3511,13 +3528,10 @@ static UniValue BuildMatMulServiceChallengeResponse(
     // (ENC-S8 vs ENC-BMX4C) so external solvers pick the right encoding at the fork.
     if (issue_v4) {
         matmul.pushKV("encoding_profile",
-            consensus.GetMatMulEncodingProfile(next_height) ==
-                    Consensus::MatMulEncodingProfile::ENC_BMX4C
-                ? "ENC-BMX4C"
-                : "ENC-S8");
+            ResolveMatMulEncodingProfileName(consensus, next_height));
     }
     challenge.pushKV("matmul", std::move(matmul));
-    challenge.pushKV("work_profile", BuildMatMulWorkProfile(challenge_header, consensus, next_height, work_profile_options));
+    challenge.pushKV("work_profile", ResolveMatMulWorkProfile(challenge_header, consensus, next_height, work_profile_options));
     {
         LOCK(cs_main);
         challenge.pushKV(
@@ -5955,6 +5969,7 @@ static RPCHelpMan getmatmulchallenge()
                             {RPCResult::Type::NUM, "max_dimension", "Maximum dimension"},
                             {RPCResult::Type::STR_HEX, "seed_a", "Matrix seed A"},
                             {RPCResult::Type::STR_HEX, "seed_b", "Matrix seed B"},
+                            {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C\" or \"ENC-S8\"); present only under the v4 profile so a self-computing miner knows which operand encoding the network expects across the ENC-S8 -> ENC-BMX4C fork"},
                         }},
                         {RPCResult::Type::OBJ, "work_profile", "Deterministic work profile implied by the active MatMul parameters", {
                             {RPCResult::Type::NUM, "field_element_bytes", "Bytes per field element"},
@@ -6334,6 +6349,7 @@ static RPCHelpMan getmatmulchallengeprofile()
                             {RPCResult::Type::NUM, "max_dimension", "Maximum dimension"},
                             {RPCResult::Type::STR_HEX, "seed_a", "Matrix seed A"},
                             {RPCResult::Type::STR_HEX, "seed_b", "Matrix seed B"},
+                            {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C\" or \"ENC-S8\"); present only under the v4 profile so a self-computing miner knows which operand encoding the network expects across the ENC-S8 -> ENC-BMX4C fork"},
                         }},
                         {RPCResult::Type::OBJ, "work_profile", "Deterministic work profile implied by the active MatMul parameters", {
                             {RPCResult::Type::NUM, "field_element_bytes", "Bytes per field element"},
@@ -7902,6 +7918,8 @@ static RPCHelpMan getblocktemplate()
                 {
                     {RPCResult::Type::NUM, "max_block_weight", "consensus maximum block weight"},
                     {RPCResult::Type::NUM, "max_block_serialized_size", "consensus maximum serialized block size in bytes"},
+                    {RPCResult::Type::NUM, "max_protocol_message_length", "maximum length in bytes of an ordinary (non-block-bearing) P2P protocol message"},
+                    {RPCResult::Type::NUM, "relay_serialized_limit", "maximum serialized size in bytes of a block-bearing P2P message (block/blocktxn); a fully assembled block must fit within this to be relayable"},
                     {RPCResult::Type::NUM, "matmul_proof_reserved_bytes", "bytes reserved in the block for the mandatory in-block MatMul v4 product-sketch payload (subtract from max_block_serialized_size for the effective transaction budget); 0 at segregated-proof heights (sketch relayed off-body) and non-v4 heights"},
                     {RPCResult::Type::NUM, "max_block_sigops_cost", "consensus maximum block sigops cost"},
                     {RPCResult::Type::NUM, "default_block_max_weight", "default block template weight target"},
@@ -8515,6 +8533,12 @@ static UniValue TemplateToJSON(
     UniValue block_capacity(UniValue::VOBJ);
     block_capacity.pushKV("max_block_weight", static_cast<int64_t>(MAX_BLOCK_WEIGHT));
     block_capacity.pushKV("max_block_serialized_size", static_cast<int64_t>(MAX_BLOCK_SERIALIZED_SIZE));
+    // Transport ceilings so a self-filling pool sees that a serialized block is
+    // relayed under the block-bearing message limit (block/blocktxn) while any
+    // ordinary P2P message is capped lower. relay_serialized_limit is the
+    // effective ceiling a fully assembled block must fit within on the wire.
+    block_capacity.pushKV("max_protocol_message_length", static_cast<int64_t>(MAX_PROTOCOL_MESSAGE_LENGTH));
+    block_capacity.pushKV("relay_serialized_limit", static_cast<int64_t>(MAX_BLOCK_MESSAGE_LENGTH));
     // Adversarial finding L1: at legacy IN-BLOCK MatMul v4 heights the solved
     // block MUST carry a mandatory ~8 MiB product-sketch payload (BlockAssembler
     // reserves exactly this before tx selection), so the effective transaction
@@ -8596,10 +8620,7 @@ static UniValue TemplateToJSON(
         // a miner would silently produce ENC-S8 digests the network rejects.
         if (gbt_matmul_v4) {
             matmul.pushKV("encoding_profile",
-                consensusParams.GetMatMulEncodingProfile(next_height) ==
-                        Consensus::MatMulEncodingProfile::ENC_BMX4C
-                    ? "ENC-BMX4C"
-                    : "ENC-S8");
+                ResolveMatMulEncodingProfileName(consensusParams, next_height));
         }
         result.pushKV("matmul", std::move(matmul));
 

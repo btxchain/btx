@@ -52,6 +52,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -383,6 +384,106 @@ BOOST_AUTO_TEST_CASE(resolve_backend_never_selects_inadmissible_backend)
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// C7: runtime dispatch must consult the certification registry.
+//
+// The backend that actually RUNS (matmul_v4::accel::ResolveBackend, which the
+// miner and ComputeDigest*Dispatched call) must be exactly the backend the v4
+// admissibility/certification registry (matmul_v4::backend::ResolveBackend)
+// admits for the same request -- NEVER an inadmissible / verification-only
+// backend. Before the fix, accel::ResolveBackend consulted only the v3
+// "compiled + device present" capability table, so it could dispatch to a
+// backend the registry deems inadmissible. This pins the two in lock-step.
+// ---------------------------------------------------------------------------
+
+#if defined(BTX_V4_HAVE_ACCEL_DISPATCH)
+namespace {
+//! RAII guard for BTX_MATMUL_V4_BACKEND (the env the resolver reads).
+class ScopedBackendEnv
+{
+public:
+    explicit ScopedBackendEnv(const char* value)
+    {
+        if (const char* cur = std::getenv("BTX_MATMUL_V4_BACKEND")) {
+            m_had_original = true;
+            m_original = cur;
+        }
+        if (value != nullptr) {
+            setenv("BTX_MATMUL_V4_BACKEND", value, 1);
+        } else {
+            unsetenv("BTX_MATMUL_V4_BACKEND");
+        }
+    }
+    ~ScopedBackendEnv()
+    {
+        if (m_had_original) {
+            setenv("BTX_MATMUL_V4_BACKEND", m_original.c_str(), 1);
+        } else {
+            unsetenv("BTX_MATMUL_V4_BACKEND");
+        }
+    }
+
+private:
+    bool m_had_original{false};
+    std::string m_original;
+};
+} // namespace
+
+BOOST_AUTO_TEST_CASE(runtime_dispatch_equals_certification_registry)
+{
+    using matmul_v4::accel::Kind;
+
+    // For every explicit request, the accel dispatch layer must resolve to the
+    // SAME active backend the certification registry resolves -- and whatever
+    // ends up active must itself be registry-admissible+available (§S.1). An
+    // inadmissible or unavailable request must fall back to CPU in BOTH.
+    for (const char* req : {"cpu", "cuda", "nvidia", "metal", "mlx", "apple",
+                            "hip", "rocm", "amd", "not-a-backend"}) {
+        const ScopedBackendEnv env{req};
+
+        const Kind active = matmul_v4::accel::ResolveBackend();
+        const matmul_v4::backend::Selection sel = matmul_v4::backend::ResolveBackend(req);
+
+        // The runtime-dispatched backend name equals the registry's active name.
+        BOOST_CHECK_MESSAGE(
+            matmul_v4::accel::ToString(active) == matmul_v4::backend::ToString(sel.active),
+            "request '" << req << "': accel dispatch resolved to "
+                        << matmul_v4::accel::ToString(active)
+                        << " but the certification registry admits "
+                        << matmul_v4::backend::ToString(sel.active));
+
+        // C7 invariant: the backend that actually runs is registry-admissible.
+        const auto elig = matmul_v4::backend::EligibilityFor(sel.active);
+        BOOST_CHECK_MESSAGE(
+            elig.available && elig.admissible,
+            "request '" << req << "': dispatched-to backend "
+                        << matmul_v4::backend::ToString(sel.active)
+                        << " is NOT admissible+available (" << elig.reason
+                        << ") -- runtime must never dispatch to an uncertified backend");
+    }
+
+    // Unset env: the default request must still resolve to an admissible backend
+    // (CPU everywhere except Apple, where Metal may be admissible if present).
+    {
+        const ScopedBackendEnv env{nullptr};
+        const Kind active = matmul_v4::accel::ResolveBackend();
+        const auto backend_kind = [&]() {
+            switch (active) {
+            case Kind::CPU: return matmul_v4::backend::Kind::CPU;
+            case Kind::CUDA: return matmul_v4::backend::Kind::CUDA;
+            case Kind::METAL: return matmul_v4::backend::Kind::METAL;
+            case Kind::HIP: return matmul_v4::backend::Kind::HIP;
+            }
+            return matmul_v4::backend::Kind::CPU;
+        }();
+        const auto elig = matmul_v4::backend::EligibilityFor(backend_kind);
+        BOOST_CHECK_MESSAGE(elig.available && elig.admissible,
+                            "default request resolved to a non-admissible backend ("
+                                << elig.reason << ")");
+    }
+}
+#endif // BTX_V4_HAVE_ACCEL_DISPATCH
 
 // ---------------------------------------------------------------------------
 // Cross-backend determinism harness (§B.6 / Appendix C-3 automated).

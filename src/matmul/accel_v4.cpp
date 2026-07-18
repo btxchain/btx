@@ -5,7 +5,7 @@
 #include <matmul/accel_v4.h>
 
 #include <arith_uint256.h>
-#include <matmul/backend_capabilities.h>
+#include <matmul/backend_capabilities_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/pow_v4.h>
@@ -53,22 +53,6 @@ std::atomic_bool g_logged_cuda_batch_fallback{false};
 std::atomic_bool g_logged_metal_batch_fallback{false};
 std::atomic_bool g_logged_hip_batch_fallback{false};
 
-char ToLowerAscii(char c)
-{
-    if (c >= 'A' && c <= 'Z') {
-        return static_cast<char>(c + ('a' - 'A'));
-    }
-    return c;
-}
-
-std::string ToLowerAsciiString(std::string value)
-{
-    for (char& c : value) {
-        c = ToLowerAscii(c);
-    }
-    return value;
-}
-
 std::string DefaultBackendRequest()
 {
 #if defined(__APPLE__)
@@ -78,47 +62,20 @@ std::string DefaultBackendRequest()
 #endif
 }
 
-// Parse BTX_MATMUL_V4_BACKEND into a Kind. Unknown tokens map to CPU with
-// `known=false` so the resolver can log the fallback reason.
-Kind ParseKind(const std::string& requested, bool& known)
-{
-    const std::string normalized = ToLowerAsciiString(requested);
-    known = true;
-    if (normalized == "cpu") return Kind::CPU;
-    if (normalized == "cuda") return Kind::CUDA;
-    if (normalized == "metal" || normalized == "mlx") return Kind::METAL;
-    if (normalized == "hip" || normalized == "rocm") return Kind::HIP;
-    known = false;
-    return Kind::CPU;
-}
-
-// Availability of an accelerated backend. CUDA/METAL reuse the v3 capability
-// probe (compiled-in AND a usable device). HIP has no v3 capability probe, so
-// it is treated as "available" whenever requested -- if only the weak stub is
-// linked, its ComputeDigestAccel returns false and the dispatcher falls back to
-// CPU on the very first nonce (correct, just no speedup).
-bool IsAcceleratedBackendAvailable(Kind kind, std::string& reason)
+// Convert a v4 certification-registry Kind (matmul_v4::backend::Kind) into the
+// dispatch-layer Kind. The two enums mirror each other member-for-member
+// (backend_capabilities_v4.h documents this contract), so this is a pure
+// name-for-name map -- it exists so the dispatch layer can delegate the
+// eligibility/admissibility decision to the registry and translate the result.
+Kind FromBackendKind(matmul_v4::backend::Kind kind)
 {
     switch (kind) {
-    case Kind::CUDA: {
-        const auto cap = matmul::backend::CapabilityFor(matmul::backend::Kind::CUDA);
-        reason = cap.reason;
-        return cap.available;
+    case matmul_v4::backend::Kind::CPU: return Kind::CPU;
+    case matmul_v4::backend::Kind::CUDA: return Kind::CUDA;
+    case matmul_v4::backend::Kind::METAL: return Kind::METAL;
+    case matmul_v4::backend::Kind::HIP: return Kind::HIP;
     }
-    case Kind::METAL: {
-        const auto cap = matmul::backend::CapabilityFor(matmul::backend::Kind::METAL);
-        reason = cap.reason;
-        return cap.available;
-    }
-    case Kind::HIP:
-        reason = "hip_selected_by_request";
-        return true;
-    case Kind::CPU:
-        reason = "always_available";
-        return true;
-    }
-    reason = "unknown_backend";
-    return false;
+    return Kind::CPU;
 }
 
 // Address of the device entry point for `kind` (or nullptr for CPU). A weak
@@ -338,39 +295,40 @@ Kind ResolveBackend()
         ? std::string{env}
         : DefaultBackendRequest();
 
-    bool known{false};
-    const Kind requested_kind = ParseKind(requested, known);
-
-    Kind active = Kind::CPU;
-    std::string reason;
-    if (!known) {
-        reason = "unknown_backend_fallback_to_cpu:" + requested;
-    } else if (requested_kind == Kind::CPU) {
-        active = Kind::CPU;
-        reason = "requested_cpu";
-    } else {
-        std::string avail_reason;
-        if (IsAcceleratedBackendAvailable(requested_kind, avail_reason)) {
-            active = requested_kind;
-            reason = "requested_backend_available:" + avail_reason;
-        } else {
-            reason = ToString(requested_kind) + "_unavailable_fallback_to_cpu:" + avail_reason;
-        }
-    }
+    // C7 (certification integrity): the runtime dispatch decision MUST consult
+    // the v4 ADMISSIBILITY / CERTIFICATION registry (matmul/backend_capabilities
+    // _v4.h), NOT merely the v3 "compiled + device present" capability table.
+    // matmul_v4::backend::ResolveBackend resolves a backend to ACTIVE only when
+    // it is compiled, available, AND §S.1-admissible -- i.e. it presents a
+    // genuine bit-exact integer tensor path (the same predicate the report and
+    // the cross-backend determinism harness certify against). An unknown,
+    // unavailable, or INADMISSIBLE (verification-only) request resolves to CPU
+    // with a machine-readable reason. Dispatching through this registry
+    // guarantees the backend that actually RUNS is exactly the one certification
+    // admitted: emulation / verification-only silicon can never be the DISPATCH
+    // target in the first place. (The per-result matmul_v4::VerifySketch +
+    // CPU-fallback safety net in ComputeDigest*Dispatched below is unchanged --
+    // this fix is about not dispatching to an uncertified backend, not about the
+    // consensus recompute.)
+    const matmul_v4::backend::Selection selection =
+        matmul_v4::backend::ResolveBackend(requested);
+    const Kind active = FromBackendKind(selection.active);
+    const Kind requested_kind = FromBackendKind(selection.requested);
 
     // Emit one clear line describing the RESOLVED v4 mining backend the first
     // time this is called (mirrors v3 ResolveMiningBackendFromEnvironment), so a
-    // silent CPU fallback from an unavailable GPU request can never hide.
+    // silent CPU fallback from an unavailable / inadmissible GPU request can
+    // never hide.
     static std::atomic_bool logged_resolved{false};
     bool expected{false};
     if (logged_resolved.compare_exchange_strong(expected, true)) {
-        if (active == requested_kind && known) {
+        if (selection.requested_known && active == requested_kind) {
             LogPrintf("MatMul-v4 mining backend: %s (requested=%s, %s)\n",
-                      ToString(active), requested, reason);
+                      ToString(active), requested, selection.reason);
         } else {
-            LogPrintf("MatMul-v4 mining backend: %s [WARNING: requested %s but it is "
-                      "unavailable -> %s]\n",
-                      ToString(active), requested, reason);
+            LogPrintf("MatMul-v4 mining backend: %s [WARNING: requested %s but the v4 "
+                      "certification registry did not admit it -> %s]\n",
+                      ToString(active), requested, selection.reason);
         }
     }
 

@@ -733,13 +733,21 @@ bool LaunchMxf4MmaTile(cudaStream_t /*stream*/, const void* /*dA_packed*/,
 // Hand-written FP4 GEMM launcher. Prefers the mma.sync tensor tile on a real
 // Blackwell toolchain (opt-in), else the guaranteed-correct scalar kernel.
 // Returns false on any launch error (caller falls to the INT8 tier).
+//
+// C6 (certification integrity): `used_tensor_path` reports which datapath
+// actually served the GEMM -- true ONLY for the genuine block-scaled FP4 mma
+// tensor tile, false for the scalar-decode kernel (a bit-exact CPU-style
+// per-(r,c) decode-and-accumulate, NOT a tensor path). The caller must not
+// advertise a `native-mxf4` certification marker for a scalar-decode run.
 bool LaunchMxf4HandwrittenGemm(cudaStream_t stream,
                                const void* dA_packed,
                                const void* dB_packed,
                                float* dD,
                                uint32_t M, uint32_t N, uint32_t K,
+                               bool& used_tensor_path,
                                std::string& error)
 {
+    used_tensor_path = false;
 #if defined(BTX_BMX4C_MXF4_MMA_TILE)
     // Tensor-core path: the block-scaled FP4 mma tile. VERIFIABLE ONLY on real
     // sm_120a/sm_100a silicon; enabled by the build, gated by M-t24. The tile
@@ -748,8 +756,12 @@ bool LaunchMxf4HandwrittenGemm(cudaStream_t stream,
     //     .scale_vec::1X.f32.e2m1.e2m1.f32.ue8m0
     // with constant unit (0x7F) UE8M0 scales (the E8M0 block exponent is applied
     // host-side, so the operand scale is 2^0). See Bmx4Mxf4MmaTile.
-    return LaunchMxf4MmaTile(stream, dA_packed, dB_packed, dD, M, N, K, error);
+    const bool tile_ok = LaunchMxf4MmaTile(stream, dA_packed, dB_packed, dD, M, N, K, error);
+    used_tensor_path = tile_ok; // a real tensor tile only when it actually ran
+    return tile_ok;
 #else
+    // Scalar-decode fallback: correct (bit-exact for the committed integer M11
+    // subset) but NOT a tensor path -- leave used_tensor_path = false.
     const dim3 block(16, 16);
     const dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
     Bmx4Mxf4ScalarKernel<<<grid, block, 0, stream>>>(
@@ -787,8 +799,14 @@ bool RunMxf4Gemm(cublasLtHandle_t lt,
                  uint32_t M,
                  uint32_t N,
                  uint32_t K,
+                 bool& used_tensor_path,
                  std::string& error)
 {
+    // C6: true only if a genuine block-scaled FP4 TENSOR datapath served this
+    // GEMM (cuBLASLt mxf4 kernel, or the mma.sync tile). The hand-written
+    // scalar-decode fallback leaves this false so a scalar run can never be
+    // certified as a native tensor path.
+    used_tensor_path = false;
     cublasLtMatmulDesc_t op_desc = nullptr;
     cublasLtMatrixLayout_t a_layout = nullptr;
     cublasLtMatrixLayout_t b_layout = nullptr;
@@ -856,7 +874,8 @@ bool RunMxf4Gemm(cublasLtHandle_t lt,
             // so the native tier stays reachable without the library. Result is
             // byte-checked by M-t24 (RunMxf4Qualification) and the dispatcher's
             // per-digest re-verify, so this fallback is fail-closed.
-            ok = LaunchMxf4HandwrittenGemm(stream, dA_packed, dB_packed, dD, M, N, K, error);
+            ok = LaunchMxf4HandwrittenGemm(stream, dA_packed, dB_packed, dD, M, N, K,
+                                           used_tensor_path, error);
             break;
         }
 
@@ -877,6 +896,8 @@ bool RunMxf4Gemm(cublasLtHandle_t lt,
             error = "cublasLtMatmul (mxf4) failed, status " + std::to_string(static_cast<int>(mstat));
             break;
         }
+        // A genuine cuBLASLt block-scaled FP4 tensor kernel served the GEMM.
+        used_tensor_path = true;
         ok = true;
     } while (false);
 
@@ -940,8 +961,14 @@ bool RunMxf4Qualification(cublasLtHandle_t lt,
                           void* workspace,
                           size_t workspace_size,
                           const uint8_t* dUnitScales, // >= UnitScaleBytes(128, kProbe1K)
+                          bool& used_tensor_path,
                           std::string& error)
 {
+    // C6: true only if BOTH qualification GEMMs ran on a genuine block-scaled
+    // FP4 tensor datapath. If the scalar-decode fallback served either probe,
+    // the device qualifies (results are bit-exact) but MUST NOT be certified
+    // `native-mxf4` -- the caller emits a distinct honest marker instead.
+    used_tensor_path = false;
     if (!CheckE2M1RoundTrip()) {
         error = "E2M1 encode table failed the committed-sampler round trip";
         return false;
@@ -964,6 +991,8 @@ bool RunMxf4Qualification(cublasLtHandle_t lt,
     constexpr uint32_t kProbe2Rail = 512; // pinned +6*+6 prefix: sums cross 2^14
 
     bool ok = false;
+    bool probe1_tensor = false;
+    bool probe2_tensor = false;
     uint8_t* dA = nullptr;
     uint8_t* dB = nullptr;
     float* dD = nullptr;
@@ -1005,7 +1034,8 @@ bool RunMxf4Qualification(cublasLtHandle_t lt,
         if (!patched) break;
 
         if (!RunMxf4Gemm(lt, stream, workspace, workspace_size, dA, dB,
-                         dUnitScales, dUnitScales, dD, kProbe1M, kProbe1N, kProbe1K, error)) {
+                         dUnitScales, dUnitScales, dD, kProbe1M, kProbe1N, kProbe1K,
+                         probe1_tensor, error)) {
             break;
         }
         std::vector<float> d_host(static_cast<size_t>(kProbe1M) * kProbe1N);
@@ -1072,7 +1102,8 @@ bool RunMxf4Qualification(cublasLtHandle_t lt,
         if (!CudaOk(cudaMemcpyAsync(dA, a2_packed.data(), a2_packed.size(), cudaMemcpyHostToDevice, stream), "qual A2 H2D", error)) break;
         if (!CudaOk(cudaMemcpyAsync(dB, b2_packed.data(), b2_packed.size(), cudaMemcpyHostToDevice, stream), "qual B2 H2D", error)) break;
         if (!RunMxf4Gemm(lt, stream, workspace, workspace_size, dA, dB,
-                         dUnitScales, dUnitScales, dD, kProbe2M, kProbe2N, kProbe2K, error)) {
+                         dUnitScales, dUnitScales, dD, kProbe2M, kProbe2N, kProbe2K,
+                         probe2_tensor, error)) {
             break;
         }
         d_host.resize(static_cast<size_t>(kProbe2M) * kProbe2N);
@@ -1095,6 +1126,10 @@ bool RunMxf4Qualification(cublasLtHandle_t lt,
                     "vs exact host reference); native tier ineligible";
             break;
         }
+        // Both probes matched the exact host reference. The device is qualified;
+        // it is a NATIVE tensor path only if BOTH GEMMs ran on the real
+        // block-scaled FP4 tensor datapath (not the scalar-decode fallback).
+        used_tensor_path = probe1_tensor && probe2_tensor;
         ok = true;
     } while (false);
 
@@ -1408,20 +1443,29 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
                 int state;
                 if (it == g_mxf4_qualified.end()) {
                     std::string qual_err;
-                    state = RunMxf4Qualification(lt, stream, workspace, kWorkspaceBytes,
-                                                 dUnitScales, qual_err)
-                                ? 1
-                                : 0;
+                    bool qual_used_tensor = false;
+                    const bool qual_passed = RunMxf4Qualification(
+                        lt, stream, workspace, kWorkspaceBytes, dUnitScales,
+                        qual_used_tensor, qual_err);
+                    // Cache the VERDICT with tier: 0 = failed, 1 = qualified via a
+                    // genuine block-scaled FP4 TENSOR path, 2 = qualified but the
+                    // scalar-decode FALLBACK kernel served the GEMM (bit-exact, but
+                    // NOT a native tensor path -- C6: must not advertise native-mxf4).
+                    state = qual_passed ? (qual_used_tensor ? 1 : 2) : 0;
                     g_mxf4_qualified.emplace(dev_key, state);
                 } else {
                     state = it->second;
                 }
-                eligible = state == 1;
+                eligible = state != 0;
                 if (eligible) {
-                    // G1: the device PROVED M-t24 / high-magnitude exactness on
-                    // the block-scaled FP4 path. Emit the marker verify-backend.sh
-                    // requires, keyed by physical device id (never a CPU stub).
-                    EmitHighMagnitudePassMarker("native-mxf4", dev_key);
+                    // C6: certify `native-mxf4` ONLY when a real device TENSOR
+                    // datapath proved M-t24. When the scalar-decode fallback
+                    // served the qualification (state == 2) the run is honest
+                    // emulation, so emit a DISTINCT marker (`scalar-decode`) --
+                    // certification can never mistake emulation for native tensor
+                    // execution. Keyed by physical device id (never a CPU stub).
+                    EmitHighMagnitudePassMarker(state == 1 ? "native-mxf4" : "scalar-decode",
+                                                dev_key);
                 }
             }
             use_native = eligible;
@@ -1552,12 +1596,13 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
             if (!CudaOk(cudaMemsetAsync(dP, 0, mn * sizeof(int32_t), stream), "P memset", error)) break;
             const float per_gemm_bound = 36.0f * static_cast<float>(n); // spec §2.2, exact in FP32
             bool stage_failed = false;
+            bool p_gemm_used_tensor = false; // C6: discarded here (tier already certified at qualification)
             for (uint32_t e = 0; e < ref::kNumScaleCodes; ++e) {
                 if (!CudaOk(cudaMemcpyAsync(dOpq, a_planes[e].data(), a_planes[e].size(),
                                             cudaMemcpyHostToDevice, stream), "H2D A_e", error) ||
                     !CudaOk(cudaStreamSynchronize(stream), "A_e sync", error) || // host buffer reused next e
                     !RunMxf4Gemm(lt, stream, workspace, kWorkspaceBytes, dUq, dOpq,
-                                 dUnitScales, dUnitScales, dDf32, m, n, n, error)) {
+                                 dUnitScales, dUnitScales, dDf32, m, n, n, p_gemm_used_tensor, error)) {
                     stage_failed = true;
                     break;
                 }
@@ -1649,11 +1694,12 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
                     break;
                 }
                 const float per_gemm_bound = 36.0f * static_cast<float>(n);
+                bool q_gemm_used_tensor = false; // C6: discarded here (tier already certified at qualification)
                 for (uint32_t e = 0; e < ref::kNumScaleCodes; ++e) {
                     if (!CudaOk(cudaMemcpyAsync(dOpq, b_planes[e].data(), b_planes[e].size(),
                                                 cudaMemcpyHostToDevice, stream), "H2D B_e", error) ||
                         !RunMxf4Gemm(lt, stream, workspace, kWorkspaceBytes, dOpq, dVq,
-                                     dUnitScales, dUnitScales, dDf32, q * n, m, n, error) ||
+                                     dUnitScales, dUnitScales, dDf32, q * n, m, n, q_gemm_used_tensor, error) ||
                         !CudaOk(cudaStreamSynchronize(stream), "B_e sync", error)) { // host plane reused next chunk
                         chunk_failed = true;
                         break;

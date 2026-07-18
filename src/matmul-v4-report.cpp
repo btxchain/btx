@@ -946,6 +946,34 @@ int RunBmx4cProfile(const Args& args, const std::string& host, matmul_v4::accel:
     }
     std::cout << "\n[GO/NO-GO §K.2b + M-t24] " << verdict << "\n";
 
+    // ---- H8: device-execution certification gate ---------------------------
+    // The BMX4-C profile is a DEVICE-certification profile: a green PASS
+    // (exit 0) may be emitted ONLY when a real on-silicon BMX4-C native tensor
+    // path actually executed and was certified. `native_path_eligible` is true
+    // for the CPU backend (the CPU is a true int64 accumulator) and for a real
+    // device only once an on-device BMX4-C block-scaled kernel is wired AND
+    // proves M-t24 on that silicon; no such kernel exists in this build, so a
+    // CPU-only run -- or any run on this GPU-less host -- must NOT certify.
+    // Failing closed here is always safe: the failure mode we eliminate is a
+    // CPU/emulation run masquerading as a certified native tensor measurement.
+    const bool ran_on_device = (backend != matmul_v4::accel::Kind::CPU);
+    const bool device_certified = ran_on_device && mt24.native_path_eligible;
+    const bool harness_self_test_ok =
+        bmx4c_bit_exact && stage.stage_bit_exact && mt24.summary.all_pass;
+    if (device_certified) {
+        // Honest device marker: verify-backend.sh (bmx4c mode) requires this in
+        // the report output, not merely exit 0. Emitted ONLY on a real,
+        // certified on-device native tensor path -- never on a CPU-only run.
+        std::cout << "DEVICE_BMX4C_MT24_PASS:" << backend_name << ":" << elig.reason << "\n";
+    } else {
+        std::cout << "\n[CERTIFICATION] NOT-CERTIFIED: no on-device BMX4-C native tensor path "
+                     "executed on this host (resolved backend=" << backend_name
+                  << "). The CPU harness self-test "
+                  << (harness_self_test_ok ? "PASSED" : "FAILED")
+                  << ", but a DEVICE profile certifies only on ACTUAL device execution; "
+                     "exiting non-zero (a CPU-only run of a device profile is NOT a PASS).\n";
+    }
+
     // ---- machine-readable JSON ----------------------------------------------
     UniValue root(UniValue::VOBJ);
     root.pushKV("tool", "matmul-v4-report");
@@ -970,6 +998,9 @@ int RunBmx4cProfile(const Args& args, const std::string& host, matmul_v4::accel:
     root.pushKV("mt24_pass", mt24.summary.all_pass);
     root.pushKV("proven_accumulator_bits", static_cast<uint64_t>(mt24.summary.proven_accumulator_bits));
     root.pushKV("native_path_eligible", mt24.native_path_eligible);
+    // H8: did an ACTUAL device tensor path execute and certify? (Gates exit 0.)
+    root.pushKV("device_execution_certified", device_certified);
+    root.pushKV("harness_self_test_pass", harness_self_test_ok);
 
     root.pushKV("bit_exact", bmx4c_bit_exact);
     root.pushKV("stages", stage_json);
@@ -1015,7 +1046,11 @@ int RunBmx4cProfile(const Args& args, const std::string& host, matmul_v4::accel:
     std::cout << "M-t24 decides native-path eligibility; ENC-BMX4C MUST NOT activate without M-t24 "
                  "PASS on >= 2 independent vendors' frontier parts (spec §7.5/§9).\n";
 
-    return (bmx4c_bit_exact && stage.stage_bit_exact && mt24.summary.all_pass) ? 0 : 1;
+    // H8: exit 0 (green PASS = CERTIFIED) requires an ACTUAL certified on-device
+    // native tensor path. The harness self-test passing on the CPU reference is
+    // necessary but NOT sufficient -- a CPU-only run of this device profile is a
+    // NOT-CERTIFIED result, so it returns non-zero.
+    return device_certified ? 0 : 1;
 }
 
 } // namespace
@@ -1198,6 +1233,30 @@ int main(int argc, char* argv[])
     }
     std::cout << "\n[GO/NO-GO §K.2b] " << verdict << "\n";
 
+    // ---- H8: device-execution certification gate --------------------------
+    // The v4.1 (ENC-S8) profile is a DEVICE-certification profile. A green PASS
+    // (exit 0) may be emitted ONLY when a real device backend actually executed
+    // its accelerated path AND its output was accepted bit-exact against the CPU
+    // reference: backend != CPU, at least one device window ACCEPTED (not fallen
+    // back), and the bit-exact gate green. A CPU-only run (backend resolves to
+    // CPU on this GPU-less host) certifies NOTHING about device silicon, so it
+    // must exit non-zero -- never a green PASS. Failing closed is always safe.
+    const uint64_t device_windows_ok =
+        stats.cuda_batch_ok + stats.metal_batch_ok + stats.hip_batch_ok;
+    const bool ran_on_device = (backend != matmul_v4::accel::Kind::CPU);
+    const bool device_certified = ran_on_device && bit_exact && device_windows_ok > 0;
+    if (device_certified) {
+        // Honest device marker (parallel to the bmx4c profile / verify-backend.sh).
+        std::cout << "DEVICE_V41_BITEXACT_PASS:" << backend_name << ":" << elig.reason << "\n";
+    } else {
+        std::cout << "\n[CERTIFICATION] NOT-CERTIFIED: no accepted on-device tensor path executed "
+                     "on this host (resolved backend=" << backend_name
+                  << ", device windows accepted=" << device_windows_ok
+                  << "). The bit-exact self-test " << (bit_exact ? "PASSED" : "FAILED")
+                  << " on the CPU reference, but a DEVICE profile certifies only on ACTUAL device "
+                     "execution; exiting non-zero (a CPU-only run of a device profile is NOT a PASS).\n";
+    }
+
     // ---- machine-readable JSON --------------------------------------------
     UniValue root(UniValue::VOBJ);
     root.pushKV("tool", "matmul-v4-report");
@@ -1206,6 +1265,8 @@ int main(int argc, char* argv[])
     root.pushKV("host_cpu_arch", HostCpuArch());
     root.pushKV("backend", backend_name);
     root.pushKV("backend_used_device", used_device);
+    // H8: did an ACTUAL device tensor path execute and get accepted? (Gates exit 0.)
+    root.pushKV("device_execution_certified", device_certified);
     UniValue elig_obj(UniValue::VOBJ);
     elig_obj.pushKV("compiled", elig.compiled);
     elig_obj.pushKV("available", elig.available);
@@ -1253,5 +1314,8 @@ int main(int argc, char* argv[])
     std::cout << "\nJSON report written: " << args.out_path << "\n";
     std::cout << "Aggregate the JSON from datacenter + consumer + Apple machines to settle the B2g ordering.\n";
 
-    return bit_exact ? 0 : 1;
+    // H8: exit 0 (green PASS = CERTIFIED) requires an ACTUAL accepted on-device
+    // tensor path. bit_exact alone is a CPU-reference self-test; a CPU-only run
+    // of this device profile is NOT-CERTIFIED and returns non-zero.
+    return device_certified ? 0 : 1;
 }

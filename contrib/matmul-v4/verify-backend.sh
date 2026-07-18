@@ -108,11 +108,28 @@ if [ "$PROFILE" = "bmx4c" ]; then
   set -e
   echo "$OUT"
 
-  if [ "$CODE" -eq 0 ]; then
+  # C6/H8 (device-certification, not exit-code-alone): a report exit 0 is
+  # necessary but NOT sufficient. Mirror the v4.1 mode's device-marker
+  # requirement (see the DEVICE_HIGH_MAGNITUDE_PASS gate below): the report must
+  # ALSO emit the honest on-device native-tensor marker
+  #     DEVICE_BMX4C_MT24_PASS:<backend>:<device-reason>
+  # which matmul-v4-report emits ONLY when a real, certified on-silicon BMX4-C
+  # native tensor path executed -- NEVER on a CPU-only / emulated run (which now
+  # exits non-zero and prints NOT-CERTIFIED). Without this marker a green exit
+  # code from a CPU harness self-test can never be mistaken for a device PASS.
+  MARKER="$(echo "$OUT" | grep -oE "DEVICE_BMX4C_MT24_PASS:${BACKEND}:[^[:space:]]*" | head -1)"
+
+  if [ "$CODE" -eq 0 ] && [ -n "$MARKER" ]; then
     echo "RESULT: PASS ($BACKEND) -- BMX4-C bit-exact vs the CPU reference AND M-t24 PASS: the"
-    echo "accumulator is PROVEN t=24 -- the BMX4-C NATIVE path is ELIGIBLE on this device."
-    echo "Record this result in ACTIVATION.md Gate C. ENC-BMX4C activation needs M-t24 PASS on"
-    echo ">= 2 independent vendors' frontier parts (spec §9 item 1)."
+    echo "accumulator is PROVEN t=24 on the SELECTED device ($MARKER) -- the BMX4-C NATIVE path"
+    echo "is ELIGIBLE on this silicon. Record this result in ACTIVATION.md Gate C. ENC-BMX4C"
+    echo "activation needs M-t24 PASS on >= 2 independent vendors' frontier parts (spec §9 item 1)."
+  elif [ "$CODE" -eq 0 ] && [ -z "$MARKER" ]; then
+    echo "RESULT: FAIL ($BACKEND) -- the report exited 0 but emitted NO on-device BMX4-C marker"
+    echo "(DEVICE_BMX4C_MT24_PASS:${BACKEND}:<device-reason>): no real on-silicon native tensor path"
+    echo "executed (CPU-only / emulated run). A device profile is NOT certified by a CPU harness"
+    echo "self-test. NOT safe to activate."
+    CODE=1
   else
     if echo "$OUT" | grep -qi "NO-GO(native path): M-t24 FAILED"; then
       echo "RESULT: FAIL ($BACKEND) -- M-t24 FAILED: the accumulator is proven only up to the bits"
