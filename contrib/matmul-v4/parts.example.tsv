@@ -1,0 +1,26 @@
+# K.2b aggregation manifest — labels each matmul-v4-report JSON with the two
+# decision inputs the JSON itself does not carry: {vendor, class}. Consumed by
+# contrib/matmul-v4/k2b-gate.py via --manifest.
+#
+# Format: tab-separated. One row per measured box/backend.
+#   <host-or-file>   <vendor>   <class>   [<part>]
+#
+# - <host-or-file> matches the report's `host` field, its filename, or a
+#   substring of either (so `b200` matches matmul-v4-report-b200-cuda.json).
+# - <vendor>  free text; the cross-vendor count (spec §9 item 1) groups by it.
+#             Use DISTINCT vendors — two NVIDIA parts do not satisfy ">=2 vendors".
+# - <class>   one of: datacenter | consumer | apple | other
+#             (backend==cpu is auto-classified cpu-ref and ignored here.)
+# - <part>    optional human label for the printout.
+#
+# Replace the illustrative rows below with your real fleet. Lines starting with
+# '#' and blank lines are ignored.
+#
+# host-or-file        vendor    class        part
+b200                  nvidia    datacenter   B200
+b300                  nvidia    datacenter   B300/GB300
+mi355                 amd       datacenter   MI355X
+rtx5090               nvidia    consumer     RTX5090
+m5max                 apple     apple        M5Max
+# trainium3           aws       datacenter   Trainium3   # once a Kind::Trainium backend lands
+# tpuv7               google    datacenter   TPUv7       # once a Kind::TPU backend lands

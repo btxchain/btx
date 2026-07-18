@@ -389,12 +389,43 @@ Gate C items C2/C4-b), the minimum aggregate set is:
 parts** (spec §9 item 1) — e.g. one NVIDIA (B200/B300) PASS plus one AMD
 (MI355X) PASS, or one NVIDIA PASS plus one Trainium3 PASS once that backend
 exists; two NVIDIA parts alone do not satisfy the cross-vendor requirement.
-Aggregation is manual (paste the JSONs into ACTIVATION.md Gate C's table,
-§9 item 3's ≥2-vendor/≥3-jurisdiction golden-vector tally, and the §K.2b
-tensor-majority + B2b marginal-nonce/s comparison across the collected set)
-— there is no automated aggregator in this repo, by design (per §0.7-(4) the
-protocol itself reads none of this; only humans do, in the open, before an
-episode).
+
+**The GO/NO-GO tally is now one command.** Drop every collected
+`matmul-v4-report-*.json` into a directory, label each with its
+`{vendor, class}` (the two decision inputs the JSON does not itself carry),
+and run the aggregator:
+
+```bash
+# one row per box:  <host-or-file>\t<vendor>\t<class>[\t<part>]
+cp contrib/matmul-v4/parts.example.tsv parts.tsv   # then edit for your fleet
+contrib/matmul-v4/k2b-gate.py results/ --manifest parts.tsv
+#   or label inline, no manifest file:
+contrib/matmul-v4/k2b-gate.py results/ \
+    --label b200=nvidia:datacenter --label mi355=amd:datacenter \
+    --label 5090=nvidia:consumer  --label m5=apple:apple
+```
+
+It prints ONE `GO` / `NO-GO` verdict and exits `0` / `1` (`2` on a usage
+error), applying every gate mechanically: **G1** bit-exactness on every report
+(a FAIL is a hard consensus-split signal → immediate NO-GO); **G2** correct
+ENC-BMX4C profile; **G3** `native_path_eligible` on ≥ 2 independent vendors
+with ≥ 1 datacenter part; **G4** tensor-stage majority (> 50 %) on every
+frontier part; **G5** no reward inversion — device-measured throughput strictly
+`datacenter > consumer > apple`. `--json` emits the same verdict
+machine-readably for CI. A CPU-reference run is auto-tagged and never counts as
+frontier silicon; a CPU-reference nonce/s is never treated as a device rate, so
+today's CPU-only set correctly returns **NO-GO** ("no on-silicon M-t24 yet")
+rather than a fabricated pass — the tool invents nothing.
+
+**This changes nothing about §0.7-(4): the protocol reads none of this.**
+`k2b-gate.py` is a *human* decision-support tool run OFFLINE, before an episode;
+automating the tally does not wire measurements into consensus.
+`nMatMulBMX4CHeight` stays `INT32_MAX` until humans read the `GO` verdict and
+ratify activation in the open (ACTIVATION.md Gate C). Cross-reference the tool's
+table against Gate C's checklist and §9 item 3's ≥2-vendor/≥3-jurisdiction
+golden-vector tally — the aggregator settles the §K.2b tensor-majority,
+cross-vendor M-t24, and no-inversion ordering; the jurisdiction/golden-vector
+tally remains a human cross-check.
 
 ---
 

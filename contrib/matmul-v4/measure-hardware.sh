@@ -117,6 +117,8 @@ if [ -n "$JSON" ]; then
     echo "Send this file back — it carries the M-t24 verdict (mt24_pass / proven_accumulator_bits /"
     echo "native_path_eligible). ENC-BMX4C activation needs M-t24 PASS on >= 2 independent vendors'"
     echo "frontier parts (spec §9 item 1)."
+    echo "Aggregate the collected JSONs into ONE GO/NO-GO with:"
+    echo "  contrib/matmul-v4/k2b-gate.py <dir-of-json> --manifest parts.tsv"
   else
     echo "Send this file back; aggregate across machines to settle the B2g ordering."
   fi
