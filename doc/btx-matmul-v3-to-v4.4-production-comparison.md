@@ -27,9 +27,12 @@ stack. The **cost** of the switch: verification is no longer one hash. A validat
 either (a) checks a relayed, self-authenticating **sketch cache** with a cheap
 Freivalds probabilistic test (~100–200 ms, error ≤ 2⁻¹⁸⁰) or (b), fully
 trustlessly, **recomputes** the GEMM and checks the digest exactly (ε = 0; ~1–3 ms
-on a GPU, ~0.8–2 s on one CPU core). **Storage does not grow**: only the 32-byte
-digest is committed, so archives store **headers only** (~60 MiB/yr) instead of the
-multi-TiB/yr an in-block sketch would have cost.
+on a GPU, ~0.8–2 s on one CPU core). **PoW storage does not grow**: only the 32-byte
+digest is committed, and it rides inside the existing 182-byte header, so the PoW
+object adds **no block or archive blob** (~60 MiB/yr of header growth at 90 s blocks —
+which the header already carried) instead of the multi-TiB/yr an in-block sketch would
+have cost. The archive still retains full blocks, transactions, and chainstate/index
+exactly as v3/Bitcoin does — v4.4 simply attaches no separate proof data to any of it.
 
 ---
 
@@ -128,9 +131,12 @@ new **verify-side** conformance path (not just the mine path).
 ### 3.5 Storage and archive
 v3 stores block bodies like Bitcoin. v4.4 stores **nothing extra** for the PoW: the
 digest is in the header, and the sketch is recomputable from the header forever. An
-archive node therefore keeps **headers** (~60 MiB/yr) rather than the 2.67–10.7 TiB/yr
-an in-block or segregated 8–32 MiB sketch would have accumulated — a 10⁴–10⁵×
-reduction, and the specific problem that killed the earlier segregated/ENC-SC designs.
+archive node still keeps full blocks, transactions, and chainstate/index like any
+Bitcoin archive — that part is **unchanged**. What changes is only the PoW object's
+contribution to growth: it is **O(headers)** (the digest rides in the existing 182-byte
+header, ~60 MiB/yr at 90 s blocks) rather than the 2.67–10.7 TiB/yr an in-block or
+segregated 8–32 MiB sketch would have accumulated — a 10⁴–10⁵× reduction in *PoW-object*
+storage, and the specific problem that killed the earlier segregated/ENC-SC designs.
 
 ### 3.6 Difficulty and compute scaling
 Throughput growth is absorbed continuously by the existing **ASERT** difficulty
@@ -154,7 +160,8 @@ lacked.
 ### 3.8 Decentralization / validator hardware — **the accepted tradeoff**
 This is the one genuine regression versus v3/Bitcoin, and it is **accepted and
 documented here** as a condition of adoption:
-- **Not affected:** running a node, storing the chain (headers only), and following
+- **Not affected:** running a node, storing the chain (full blocks/txs/chainstate as
+  before — the PoW adds no separate blob), and following
   the tip. Tip verification is ~100–200 ms (cache) or ~0.8–2 s (recompute) per block
   per block-time — trivial on a CPU. A CPU node is never *locked out*: recompute is
   always available.
