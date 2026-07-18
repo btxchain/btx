@@ -298,10 +298,15 @@ def evaluate(reports, labels):
                            "failure the whole design exists to prevent.")
 
     gates = {"G1_bit_exact": all(r["bit_exact"] for r in rows),
-             "G2_profile": all(r["bmx4c"] for r in rows if r["backend"] != "cpu") or True,
+             "G2_profile": all(r["bmx4c"] for r in rows if r["backend"] != "cpu"),
              "G3_mt24_cross_vendor": g3, "G4_tensor_majority": g4,
              "G5_no_inversion": g5}
-    go = gates["G1_bit_exact"] and g3 and g4 and g5
+    # G2 is a GO gate per §5.3/§7.5/§9 (see header): every device-measured report
+    # MUST be the production ENC-BMX4C profile (schema_version 2, profile "bmx4c"),
+    # or the measurement does not certify the profile that will actually ship. The
+    # earlier `or True` (and G2's absence from `go`) silently neutralised it, so a
+    # device report on the wrong profile would still read GO. Wire it in for real.
+    go = gates["G1_bit_exact"] and gates["G2_profile"] and g3 and g4 and g5
     return go, gates, rows, reasons, notes, {
         "eligible_vendors": eligible_vendors, "frontier_count": len(frontier),
         "measured_classes": present}
