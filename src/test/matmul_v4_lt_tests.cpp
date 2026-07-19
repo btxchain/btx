@@ -957,6 +957,12 @@ BOOST_AUTO_TEST_CASE(ascend_exactgemm_stub_inert_default_build)
     BOOST_CHECK(!used_cube);
     BOOST_CHECK(out.empty());
     BOOST_CHECK(!matmul_v4::ascend::TryLaunchLtCubeGemmS8S8(a, b, 4, 4, 4, out));
+    used_cube = true;
+    BOOST_CHECK(!matmul_v4::ascend::ExactGemmS32S8Ascend(
+        std::vector<int32_t>(16, 1), a, 4, 4, 4, out, &used_cube));
+    BOOST_CHECK(!used_cube);
+    BOOST_CHECK(!matmul_v4::ascend::TryLaunchLtCubeGemmS32S8(
+        std::vector<int32_t>(16, 1), a, 4, 4, 4, out));
     std::vector<matmul::v4::lt::DigestOnlyResultLT> digests;
     const uint64_t nonce = 1;
     CBlockHeader hdr;
@@ -965,6 +971,7 @@ BOOST_AUTO_TEST_CASE(ascend_exactgemm_stub_inert_default_build)
     const auto elig = matmul_v4::backend::EligibilityFor(matmul_v4::backend::Kind::ASCEND);
     BOOST_CHECK(!elig.admissible);
     BOOST_CHECK(matmul_v4::backend::ResolveBackend("ascend").active == matmul_v4::backend::Kind::CPU);
+    BOOST_CHECK(matmul_v4::backend::ResolveBackend("huawei").active == matmul_v4::backend::Kind::CPU);
 }
 
 BOOST_AUTO_TEST_CASE(lt_accel_entry_bit_identity_or_stub_decline)
