@@ -310,8 +310,11 @@ Internal witnesses: `phase_b_seal_round_trip_and_auth`,
 
 1. Read normative + adversarial docs + pre-review synthesis; skim `src/matmul/matmul_v4_lt.{h,cpp}`.
 2. **Build-independent kit (preferred first pass):** `contrib/matmul-c15-reviewer-kit/` —
-   `python3 reference_extract.py` then `python3 toy_attack_harness.py --n 8 --w 4`.
-   No node build required. See kit `README.md` + `rank_spectral_regression.md`.
+   `python3 reference_extract.py` then `python3 toy_attack_harness.py --n 8 --w 4 --degree 3`.
+   No node build required. See kit `README.md`, `rank_spectral_regression.md`,
+   `named-assumption.md`, and **`reduction-attack-checklist.md`** (firm attacks → §0.1 FAIL).
+   Oracle hints: `test-vectors.json` → `reduction_relevant_finding_notes` (high R², zero
+   Freivalds residual, truncated salt equivalence class).
 3. Optional in-tree witnesses (require `test_btx`): `matmul_v4_lt_tests`, especially
    `matexpand_chacha_prf_golden_vectors`, `matexpand_position_salt_differential`
    (full-width `(i,j)`), `matexpand_extract_r2_nonapproximability` (affine/deg≤3 R²<0.05),
@@ -323,6 +326,23 @@ Internal witnesses: `phase_b_seal_round_trip_and_auth`,
 7. Return a short signed note: **PASS / FAIL / INCONCLUSIVE** per table ID and for the §0.1 game /
    named assumption `BTX-C15-NonCollapse-v1` (§0.2), with any concrete vectors attached. Do **not**
    fill silicon nonce/s.
+
+### 6.1 Wave-1 survey / reduction companions (not proofs)
+
+Read for context only — **none closes C-15**; all record gaps / non-reductions:
+
+| Doc | Role |
+|---|---|
+| `doc/btx-matmul-v4.4-lt-c15-prereview-synthesis-2026-07-19.md` | Dual-panel synthesis + reduction-research status |
+| `doc/btx-matmul-v4.4-lt-c15-reduction-survey-finegrained-2026-07-19.md` | Fine-grained (SETH/OV/…) survey |
+| `doc/btx-matmul-v4.4-lt-c15-reduction-survey-crypto-2026-07-19.md` | Crypto/PoW named-assumption survey |
+| `doc/btx-matmul-v4.4-lt-c15-reduction-drafts-2026-07-19.md` | Reduction sketches with explicit GAP lists |
+| `doc/btx-matmul-v4.4-lt-c15-reduction-obstructions-2026-07-19.md` | Why standard reductions miss hypotheses |
+| `doc/btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md` | ASERT/FMM efficiency vs HonestMAC hardness (orthogonal) |
+| `doc/btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md` | Mant/Scale related-nonce amortization depth |
+
+Leap checklist remains **C-15 OPEN** / public heights **`INT32_MAX`**:
+`doc/btx-matmul-v4.4-lt-leap-checklist.md`.
 
 ## 7. How this plugs into the silicon campaign
 

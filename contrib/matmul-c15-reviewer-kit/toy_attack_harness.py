@@ -6,15 +6,17 @@
 Toy-n C-15 attack harness (stdlib only).
 
 Builds a synthetic low-rank B32 = (G·W)·H (or random full-rank noise),
-runs normative Extract, fits best affine / degree-2 surrogates of Bhat from
-B32, reports R², and checks a Freivalds-style residual on a random probe.
+runs normative Extract, fits best polynomial surrogates of Bhat from B32
+for degrees 1..D (default D=3), reports R² for each degree, and checks a
+Freivalds-style residual on a random affine probe.
 
 Expected outcome for honest MatExpand + ChaCha Extract:
-  - affine / degree-2 R² far below 1 (collapse rejected)
+  - affine / low-degree R² far below 1 (collapse rejected)
   - Freivalds residual on an affine-surrogate Bhat is typically nonzero
 
 This does NOT close C-15; it is a build-free reproducibility aid for
-external cryptanalysts. See README.md and the external C-15 packet.
+external cryptanalysts. See README.md, reduction-attack-checklist.md, and
+the external C-15 packet.
 """
 
 from __future__ import annotations
@@ -202,7 +204,11 @@ def apply_surrogate(B32: list[list[int]], beta: list[float]) -> list[list[int]]:
     return out
 
 
-def run(n: int = 8, w: int = 4, seed: int = 1) -> int:
+def run(n: int = 8, w: int = 4, seed: int = 1, max_degree: int = 3) -> int:
+    if max_degree < 1 or max_degree > 6:
+        print("FAIL: --degree must be in 1..6 (stdlib OLS; keep small)", file=sys.stderr)
+        return 1
+
     vectors = load_vectors()
     prf_key = derive_matexpand_prf_key(vectors["seed_w_hex"])
     rng = random.Random(seed)
@@ -222,29 +228,38 @@ def run(n: int = 8, w: int = 4, seed: int = 1) -> int:
             xs.append(float(B32[i][j]))
             ys.append(float(Bhat[i][j]))
 
-    beta1, r2_affine = _fit_poly(xs, ys, degree=1)
-    beta2, r2_deg2 = _fit_poly(xs, ys, degree=2)
+    fits: list[tuple[int, list[float], float]] = []
+    for deg in range(1, max_degree + 1):
+        beta, r2 = _fit_poly(xs, ys, degree=deg)
+        fits.append((deg, beta, r2))
+        label = "affine" if deg == 1 else f"degree-{deg}"
+        print(f"{label} fit β={beta}  R²={r2:.6f}")
 
+    beta1 = fits[0][1]
+    r2_by_deg = {deg: r2 for deg, _, r2 in fits}
     Bhat_aff = apply_surrogate(B32, beta1)
     residual = freivalds_residual(Bhat, Bhat_aff, rng)
 
-    print(f"affine fit β={beta1}  R²={r2_affine:.6f}")
-    print(f"degree-2 fit β={beta2}  R²={r2_deg2:.6f}")
     print(f"Freivalds-style residual rᵀ(B̂−B̂')s = {residual}  (nonzero expected)")
     print()
     print(
         "Interpretation: rejection of affine/low-degree collapse is EXPECTED for "
-        "ChaCha20-PRF Extract. High R² or a zero residual on dense samples would "
-        "be a C-15 finding — report it. C-15 remains OPEN (not closed by this toy)."
+        "ChaCha20-PRF Extract. High R², a systematic zero Freivalds residual, or a "
+        "truncated-(i,j) salt equivalence class would be a C-15 finding — report it. "
+        "C-15 remains OPEN (not closed by this toy)."
     )
 
     # Soft expectations for CI-ish smoke: R² should not look like a perfect fit.
-    if math.isnan(r2_affine) or math.isnan(r2_deg2):
+    if any(math.isnan(r2) for r2 in r2_by_deg.values()):
         print("FAIL: degenerate fit")
         return 1
-    if r2_affine > 0.95 or r2_deg2 > 0.98:
-        print("FAIL: unexpectedly high surrogate R² (investigate C-15)")
-        return 1
+    # Slightly looser thresholds as degree grows (more parameters, still far from 1).
+    smoke_caps = {1: 0.95, 2: 0.98, 3: 0.99}
+    for deg, r2 in r2_by_deg.items():
+        cap = smoke_caps.get(deg, 0.995)
+        if r2 > cap:
+            print(f"FAIL: unexpectedly high degree-{deg} surrogate R² (investigate C-15)")
+            return 1
     if residual == 0 and n >= 4:
         # Possible but rare on tiny n; warn rather than hard-fail.
         print("WARN: Freivalds residual was zero — rerun with larger n/seed")
@@ -257,10 +272,16 @@ def main(argv: list[str]) -> int:
     p.add_argument("--n", type=int, default=8, help="toy matrix dimension")
     p.add_argument("--w", type=int, default=4, help="toy panel width (rank bound)")
     p.add_argument("--seed", type=int, default=1, help="RNG seed")
+    p.add_argument(
+        "--degree",
+        type=int,
+        default=3,
+        help="max polynomial degree; print R² for each deg in 1..degree (default 3)",
+    )
     args = p.parse_args(argv[1:])
     if args.w > args.n:
         print("w should be ≤ n for a meaningful low-rank toy", file=sys.stderr)
-    return run(n=args.n, w=args.w, seed=args.seed)
+    return run(n=args.n, w=args.w, seed=args.seed, max_degree=args.degree)
 
 
 if __name__ == "__main__":
