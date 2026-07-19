@@ -154,10 +154,8 @@ std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, ui
 
 namespace {
 
-// ChaCha20 PRF domain tag + lanes (shared with DeriveMatExpandPrfKey / Extract).
+// ChaCha20 PRF domain tag (lanes: kMatExpandPrfLaneMant/Scale in matmul_v4_lt.h).
 constexpr char kMatExpandPrfTag[] = "BTX_MATEXPAND_PRF_V44LT";
-constexpr uint32_t kMatExpandPrfLaneMant = 0x4D414E54u; // 'MANT'
-constexpr uint32_t kMatExpandPrfLaneScale = 0x53434C45u; // 'SCLE'
 
 // One ChaCha20 keystream (≤64 bytes) bound to (raw,i,j,counter,lane).
 // Nonce96 = (raw⊕lane, pack(i,j)); block counter = remix. Matches RFC8439
@@ -340,6 +338,16 @@ uint64_t AccelReplicaMatExpandPrfLE64(const uint32_t key[8], int32_t raw, uint32
 
 } // namespace
 
+uint64_t MatExpandPrfLaneLE64(const uint256& prf_key, int32_t raw, uint32_t i, uint32_t j,
+                              uint32_t remix, uint32_t lane)
+{
+    uint32_t key[8];
+    for (int w = 0; w < 8; ++w) {
+        key[w] = ReadLE32(prf_key.data() + static_cast<size_t>(w) * 4);
+    }
+    return AccelReplicaMatExpandPrfLE64(key, raw, i, j, remix, lane);
+}
+
 int8_t ExtractDequantMatExpandAccelReplica(int32_t raw, uint32_t i, uint32_t j,
                                            const uint256& prf_key)
 {
@@ -347,18 +355,17 @@ int8_t ExtractDequantMatExpandAccelReplica(int32_t raw, uint32_t i, uint32_t j,
     for (int w = 0; w < 8; ++w) {
         key[w] = ReadLE32(prf_key.data() + static_cast<size_t>(w) * 4);
     }
-    constexpr uint32_t kLaneMant = 0x4D414E54u;
-    constexpr uint32_t kLaneScale = 0x53434C45u;
     uint32_t remix = 0;
     for (;;) {
-        const uint64_t mixed = AccelReplicaMatExpandPrfLE64(key, raw, i, j, remix, kLaneMant);
+        const uint64_t mixed =
+            AccelReplicaMatExpandPrfLE64(key, raw, i, j, remix, kMatExpandPrfLaneMant);
         for (int shift = 0; shift < 64; shift += 4) {
             bool accepted = false;
             const int8_t mu = matmul::v4::bmx4::SampleMantissaNibble(
                 static_cast<uint8_t>((mixed >> shift) & 0x0F), accepted);
             if (!accepted) continue;
             const uint64_t scale_stream =
-                AccelReplicaMatExpandPrfLE64(key, raw, i, j, remix, kLaneScale);
+                AccelReplicaMatExpandPrfLE64(key, raw, i, j, remix, kMatExpandPrfLaneScale);
             const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
             // Exact mul — matches device kernels (never signed left-shift).
             return static_cast<int8_t>(static_cast<int32_t>(mu) * (int32_t{1} << e));

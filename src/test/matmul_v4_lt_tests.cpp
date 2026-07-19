@@ -426,6 +426,76 @@ BOOST_AUTO_TEST_CASE(matexpand_position_salt_differential)
                 lt::MixMatExpandEntry(raw, 0, 0, salt ^ 1));
 }
 
+BOOST_AUTO_TEST_CASE(matexpand_related_nonce_lane_xor_identity)
+{
+    // WITNESS (not a proof): MantPRF(raw) = ScalePRF(raw⊕Δ) with
+    // Δ = MANT⊕SCLE = 0x1e020211. Leftover C15-C related-nonce structure —
+    // PRF-consistent, not a ChaCha break, not MatExpand amortization.
+    // See doc/btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md.
+    static_assert(lt::kMatExpandPrfLaneXorDelta == 0x1e020211u);
+    const uint256 seed = ParseUint256(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
+    constexpr uint32_t remix = 0;
+
+    // Frozen golden tuple (seed above, raw=42, i=3, j=5, remix=0).
+    {
+        constexpr int32_t raw = 42;
+        constexpr uint32_t i = 3, j = 5;
+        const uint64_t mant = lt::MatExpandPrfLaneLE64(
+            prf_key, raw, i, j, remix, lt::kMatExpandPrfLaneMant);
+        const uint64_t scale = lt::MatExpandPrfLaneLE64(
+            prf_key, raw, i, j, remix, lt::kMatExpandPrfLaneScale);
+        const int32_t raw_rel =
+            static_cast<int32_t>(static_cast<uint32_t>(raw) ^ lt::kMatExpandPrfLaneXorDelta);
+        BOOST_CHECK_EQUAL(mant, lt::MatExpandPrfLaneLE64(
+                                    prf_key, raw_rel, i, j, remix, lt::kMatExpandPrfLaneScale));
+        BOOST_CHECK_EQUAL(scale, lt::MatExpandPrfLaneLE64(
+                                     prf_key, raw_rel, i, j, remix, lt::kMatExpandPrfLaneMant));
+        // Pinned AccelReplica LE64 — re-pin only if lane packing deliberately changes.
+        BOOST_CHECK_EQUAL(mant, 0x74deee0cb5814942ULL);
+        BOOST_CHECK_EQUAL(scale, 0x1de4e58a12efb7b9ULL);
+    }
+
+    // Dense sample: identity holds for all probed (raw,i,j).
+    int checked = 0;
+    int first_nibble_lock = 0;
+    for (int32_t raw = -200; raw <= 200; raw += 17) {
+        for (uint32_t i = 0; i < 3; ++i) {
+            for (uint32_t j = 0; j < 3; ++j) {
+                const uint64_t mant = lt::MatExpandPrfLaneLE64(
+                    prf_key, raw, i, j, remix, lt::kMatExpandPrfLaneMant);
+                const uint64_t scale = lt::MatExpandPrfLaneLE64(
+                    prf_key, raw, i, j, remix, lt::kMatExpandPrfLaneScale);
+                const int32_t raw_rel = static_cast<int32_t>(
+                    static_cast<uint32_t>(raw) ^ lt::kMatExpandPrfLaneXorDelta);
+                BOOST_CHECK_EQUAL(
+                    mant, lt::MatExpandPrfLaneLE64(prf_key, raw_rel, i, j, remix,
+                                                   lt::kMatExpandPrfLaneScale));
+                BOOST_CHECK_EQUAL(
+                    scale, lt::MatExpandPrfLaneLE64(prf_key, raw_rel, i, j, remix,
+                                                    lt::kMatExpandPrfLaneMant));
+                ++checked;
+
+                // First-nibble accept on MantPRF(raw⊕Δ)=ScalePRF(raw) locks
+                // Extract(raw⊕Δ) = μ' · 2^(MantPRF(raw)&3).
+                bool accepted = false;
+                const uint8_t nib = static_cast<uint8_t>(scale & 0x0F);
+                const int8_t mu = matmul::v4::bmx4::SampleMantissaNibble(nib, accepted);
+                if (!accepted) continue;
+                const uint8_t e_from_mant_raw = static_cast<uint8_t>(mant & 0x3);
+                const int8_t v_rel = lt::ExtractDequantMatExpand(raw_rel, i, j, prf_key);
+                const int32_t expect =
+                    static_cast<int32_t>(mu) * (int32_t{1} << e_from_mant_raw);
+                BOOST_CHECK_EQUAL(static_cast<int>(v_rel), static_cast<int>(expect));
+                ++first_nibble_lock;
+            }
+        }
+    }
+    BOOST_CHECK(checked >= 100);
+    BOOST_CHECK(first_nibble_lock >= 50);
+}
+
 BOOST_AUTO_TEST_CASE(matexpand_chacha_prf_golden_vectors)
 {
     // Frozen ChaCha20-PRF Extract + full ENC_BMX4C_LT digest at kTestDim.
