@@ -12,13 +12,13 @@ Branch: `feat/bmx4c-exact-accel-lanes` → PR #89 (`claude/matmul-v4-design-spec
 | 4 | FP4/FP8/Tensor genuinely wired | Portable exact MXFP4; CUTLASS/device FP8 **fail-closed**; cuBLASLt MXFP4 no-algo on sm_100/sm_120 (PR #89); hand PTX sm_120a ≠ sm_100a; never `used_tensor_path` on scalar | sm_100a / MI350 M-t24 qualified |
 | 5 | Cross-vendor exactness | Harness schema + `BTX_REQUIRE_GPU_GOLDEN`; Dockerfile.tests Ubuntu | H100/B200/M5/MI350 PASS |
 | 6 | Production benchmarks | `--profile bmx4c-lt` in report + measure-hardware; lt-gate device JSON | ≥4× nonce/s / nonce/$ against **fastest known exact** baseline (not naive GEMM; see FMM/ASERT calibration note) |
-| 7 | Adversarial shortcut resistance | ChaCha20-PRF MatExpand candidate + internal non-affinity/goldens; external C-15 packet **hardened draft (falsifiable §0.1 game; candidate selected; OPEN — not closed)**; public exact combine baselines published (`ComputeCombineModQ` deferred, adaptive limb, Karatsuba-9) + CPU tournament harness | Independent cryptanalyst PASS on packet game + measured tournament vs silicon (**orthogonal** to FMM efficiency calibration) |
+| 7 | Adversarial shortcut resistance | Lever-B **MX-block Extract** landed (consensus digest hard fork of LT transcript) + internal non-affinity/goldens; external C-15 packet **hardened draft (falsifiable §0.1 game; OPEN — not closed)**; ~32× PRF dilution ≠ C-15 closure; public exact combine baselines + CPU tournament harness | Independent cryptanalyst PASS on packet game + measured tournament vs silicon (**orthogonal** to FMM); **re-measure after Lever B — do not claim ≥4×** |
 | 8 | Consensus safety (2026-07-19 harden) | Q* env invariance; prepared seal template; trust-adjusted best-header; no sync EncDr on msg-thread saturation; complete-header accel batching | Activation still NO-GO until full checklist |
 
 ## Explicitly NOT claimed
 
 - K.2b GO/NO-GO
-- External C-15 closed (OPEN; ChaCha-PRF ≠ work lower bound)
+- External C-15 closed (OPEN; MX Extract / PRF ≠ work lower bound)
 - Finite activation heights (`nMatMulDRLTHeight` / `nMatMulV4Height` = `INT32_MAX`)
 - HeaderPoW bit-26 wire live (withdrawn)
 - Tensor MXFP4 / device FP8 as production-trusted without self-qual

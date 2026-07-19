@@ -1,17 +1,17 @@
 # BTX MatMul v4.4-LT — Adversarial analysis & hardening status
 
 *Status: MatExpand C-15 class has a **selected cryptographic extractor candidate**
-(ChaCha20 PRF + M11 rejection; frozen goldens) with **implementation mitigations**
-(non-affinity tests) but **external review remains open** — not closed. Q* Phase B
-seal-as-PoW is implemented and inert (`nMatMulDRLTHeight = INT32_MAX`). Activation
-remains gated.*
+(Lever-B MX/E2M1 block-scale Extract + M11; frozen goldens) with **implementation
+mitigations** (non-affinity tests) but **external review remains open** — not
+closed. Q* Phase B seal-as-PoW is implemented and inert (`nMatMulDRLTHeight =
+INT32_MAX`). Activation remains gated.*
 *Companion: `doc/btx-matmul-v4.4-lt-normative-spec.md`. Hardening response: `doc/btx-matmul-v4.4-lt-hardening-response-2026-07-19.md`.*
 
 ## Threat model (LT-specific)
 
 | ID | Attack | Disposition |
 |---|---|---|
-| LT-C15 | Freivalds reassociation through linear MatExpand fold (`B̂ = fold(GWH)` affine in panels) | **CANDIDATE SELECTED; EXTERNAL REVIEW OPEN** — normative `ExtractDequantMatExpand` = domain-separated ChaCha20 PRF over `(prf_key, raw, i, j, remix)` + M11 rejection + scale `e∈{0..3}` (`prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT"‖seed_W)`). In-tree witnesses disagree with affine/low-degree surrogates on dense samples; that is **not** a Freivalds non-collapse proof. SplitMix path retained only for differential tests. **Do not claim C-15 cryptographically closed.** Pre-Extract `rank(B32)≤w=1024` is by design (`O(n²·w)` MatExpand, not `O(n³)`); linearized Extract would reopen ~`n/w=4×` panel collapse. ChaCha-as-PRF ≠ MatExpand work lower bound. Falsifiable game: `doc/btx-matmul-v4.4-lt-external-c15-packet.md` §0.1. |
+| LT-C15 | Freivalds reassociation through linear MatExpand fold (`B̂ = fold(GWH)` affine in panels) | **CANDIDATE SELECTED; EXTERNAL REVIEW OPEN** — normative `ExtractDequantMatExpand` = Lever-B MX-block Extract: E8M0 scales shared on 32-col blocks per row + one ChaCha20 M11 tile stream per `(i,bj)` (`prf_key = SHA256("BTX_MATEXPAND_MXPRF_V44LT"‖seed_W)`). Legacy per-cell ChaCha (`ExtractDequantMatExpandChaChaCell`) is differential-only. In-tree witnesses disagree with affine/low-degree surrogates on dense samples; that is **not** a Freivalds non-collapse proof. **Do not claim C-15 cryptographically closed.** Pre-Extract `rank(B32)≤w=1024` is by design; linearized Extract would reopen ~`n/w=4×` panel collapse. PRF/MX ≠ MatExpand work lower bound; ~32× PRF dilution ≠ closure. Falsifiable game: `doc/btx-matmul-v4.4-lt-external-c15-packet.md` §0.1. |
 | LT-Q1 | Skinny single-nonce launches under fat `Q*` schedule | **IMPLEMENTED, REVIEW PENDING (Phase B, inert)** — when `fMatMulLTSealAsPoW` + live DRLT, lottery object is the Q* window seal (`ComputeSealDigestBMX4CLT`); Phase A remains per-nonce digest when the toggle is off. **Q\* is aggregate work commitment only** — it commits leaf digests and does **not** prove classical GEMM, tensor-core use, or simultaneous slot execution. **Slot-id binding is consensus:** full 256-bit `DeriveWindowSlotId` folds into V3 seeds via `BindWindowSlotIdIntoSeeds` and into each Merkle leaf via `CommitWindowSlotLeaf`; duplicate slot ids fail closed. Low-64 `DeriveWindowSlotNonce` is only the header grinding field (`ReadLE64(slot_id)`). External seal-binding review still required before any public height that enables seal-as-PoW. |
 | LT-Q2 | Window-seal PoW without MTP-threaded sibling seeds | **IMPLEMENTED, REVIEW PENDING (Phase B, inert)** — EncDr / solve thread parent MTP into `SlotSeedFn` → `SetDeterministicMatMulSeeds` for every slot, then consensus `BindWindowSlotIdIntoSeeds`; sketch-cache `H(σ‖Chat)==matmul_digest` skipped in seal mode. Code complete; independent review of MTP/seed binding still pending. |
 | LT-A1 | ASERT continuous across MatExpand/deep-m work shift | **CLOSED in code** — `nMatMulDRLTHeight` rescale + re-anchor; ratios default 1/1 until silicon calibration against the **fastest known exact** miner path |
@@ -20,31 +20,32 @@ remains gated.*
 
 ## MatExpand non-collapse argument (implementation)
 
-Normative map (per entry `(i,j)`):
+Normative map (per tile `(i, bj=j/32)` then cell `(i,j)`):
 
 1. `Y = G·W`, `B32 = Y·H` — exact integer GEMMs (unchanged).
-2. `prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W)` — 256-bit ChaCha20 key.
-3. Mantissa stream = ChaCha20 keystream (`crypto/chacha20.h`, RFC8439 layout)
-   with Nonce96 `(uint32(raw)⊕lane, pack(i,j)=(uint64(i)<<32)|j)`, `counter = remix`;
-   take first 8 bytes LE (`ReadLE64`). Encoding pin: external C-15 packet §1.4.
-4. Walk nibbles through `SampleMantissaNibble` → `μ ∈ M11` (remix++ on exhaustion).
-5. Scale stream = independent ChaCha20 lane (`SCLE`); `e = stream & 3`;
-   output **exact mul** `μ·2^e` with `|μ·2^e| ≤ 48` (never signed left-shift).
+2. `prf_key = SHA256("BTX_MATEXPAND_MXPRF_V44LT" ‖ seed_W)` — 256-bit ChaCha20 key.
+3. `e = SHA256("BTX_MATEXPAND_MXSCALE_V44LT" ‖ prf_key ‖ LE32(i) ‖ LE32(bj))[0] & 3`.
+4. Mantissa tile = one ChaCha20 stream (`nonce_first = bj ⊕ 'MXBL'`,
+   `nonce_second = (i<<32)|bj`, `counter = remix`); nibbles XOR-mixed with
+   `((uint32(raw)*0x9E3779B9)>>28)` then `SampleMantissaNibble` until 32 μ.
+5. Output **exact mul** `μ·2^e` with `|μ·2^e| ≤ 48` (never signed left-shift).
 
-**Rationale (candidate selection):** in-tree ChaCha20 is a reviewed stream cipher
-(RFC8439 / Bitcoin Core). Prefer over SplitMix64 (not a PRF) and over per-entry
-SHA256 (heavier; same security class as existing seed tags). BLAKE3 is not in-tree.
-This is a **candidate**, not a closed cryptanalysis. **ChaCha-as-PRF ≠ work lower bound.**
+**Rationale (candidate selection):** MX/E2M1 block layout matches miner tensor
+lanes and cuts MatExpand PRF blocks ~32× vs per-cell ChaCha while keeping the
+`[-48,48]` alphabet. This is a **consensus digest hard fork** of the LT
+transcript. **Not** a closed cryptanalysis. **PRF ≠ work lower bound.**
 
 Why this is argued to block the linear shortcut class (not proven):
 
-- A Freivalds probe that is linear in `B̂` cannot pull `G`/`W`/`H` through ChaCha/M11/table rejection **if** Extract has no useful affine/low-degree surrogate.
-- Position salts `(i,j)` and full `seed_W`-derived key kill translation / panel-reuse collapses across A vs B; `U`/`V` are rank-transparent and do not hide `rank(B32)≤128`.
-- Legacy `FoldInt32ToEmax48` (`y % 97 → [-48,48]`) and SplitMix
-  `ExtractDequantMatExpandSplitMix` remain exported **only** for differential tests.
+- A Freivalds probe that is linear in `B̂` cannot pull `G`/`W`/`H` through
+  ChaCha/M11/table rejection **if** Extract has no useful affine/low-degree surrogate.
+- Position salts `(i,bj)` and full `seed_W`-derived key kill translation /
+  panel-reuse collapses across A vs B; B32-bound nibble mix keeps Extract non-XOF.
+- Legacy Fold / SplitMix / ChaChaCell remain exported **only** for differential tests.
 
 Tests: `matexpand_extract_range`, `matexpand_not_affine_in_raw`,
-`matexpand_position_salt_differential`, `matexpand_chacha_prf_golden_vectors`
+`matexpand_position_salt_differential`, `matexpand_chacha_prf_golden_vectors`,
+`matexpand_mx_scale_partitioned_right_matches_dense`
 in `src/test/matmul_v4_lt_tests.cpp`.
 
 ## Consensus Q* — Phase A vs Phase B

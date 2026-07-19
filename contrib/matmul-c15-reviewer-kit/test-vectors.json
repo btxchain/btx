@@ -1,5 +1,5 @@
 {
-  "status": "C-15 OPEN \u2014 candidate ChaCha20-PRF Extract; not cryptographically closed",
+  "status": "C-15 OPEN \u2014 Lever-B MX-block Extract; not cryptographically closed",
   "source": "src/test/matmul_v4_lt_tests.cpp::matexpand_chacha_prf_golden_vectors",
   "normative_refs": [
     "doc/btx-matmul-v4.4-lt-external-c15-packet.md",
@@ -7,16 +7,18 @@
     "src/matmul/matmul_v4_lt.cpp::DeriveMatExpandPrfKey"
   ],
   "prf_key_derivation": {
-    "tag_ascii": "BTX_MATEXPAND_PRF_V44LT",
-    "tag_hex": "4254585f4d4154455850414e445f5052465f5634344c54",
+    "tag_ascii": "BTX_MATEXPAND_MXPRF_V44LT",
+    "tag_hex": "4254585f4d4154455850414e445f4d585052465f5634344c54",
     "formula": "prf_key = SHA256(tag_bytes || seed_w_le32)",
-    "notes": "tag is the ASCII string without NUL. seed_w_le32 is Bitcoin uint256 memory order (little-endian blob): GetHex/FromHex display is byte-reversed vs bytes.fromhex()."
+    "notes": "Lever-B MX tag. Legacy cell tag BTX_MATEXPAND_PRF_V44LT is chacha_cell_prf_key_hex only."
   },
   "lane_constants": {
     "MANT": "0x4D414E54",
     "MANT_ascii": "MANT",
     "SCLE": "0x53434C45",
-    "SCLE_ascii": "SCLE"
+    "SCLE_ascii": "SCLE",
+    "MXBL": "0x4D58424C",
+    "MXBL_ascii": "MXBL"
   },
   "endian_notes": {
     "seed_w_hex": "Bitcoin GetHex/FromHex display order (MSB digits first). Memory bytes = reverse(bytes.fromhex(hex)).",
@@ -55,13 +57,13 @@
     ]
   },
   "seed_w_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "prf_key_hex": "a522d5eeda6366cf3c8ed91b7f029b852cba9fc25dd6cf1c18c72b44f783271b",
+  "prf_key_hex": "0e22eb752acb8b727befd3b001a07d4697e674f24e1f58c8f0d7832c1214ce9f",
   "extract_goldens": [
     {
       "raw": 0,
       "i": 0,
       "j": 0,
-      "expected": 4
+      "expected": 1
     },
     {
       "raw": 1,
@@ -73,31 +75,31 @@
       "raw": -1,
       "i": 1,
       "j": 0,
-      "expected": 4
+      "expected": -1
     },
     {
       "raw": 42,
       "i": 3,
       "j": 5,
-      "expected": 2
+      "expected": -4
     },
     {
       "raw": -1000,
       "i": 7,
       "j": 11,
-      "expected": -16
+      "expected": -2
     },
     {
       "raw": 2147483647,
       "i": 2,
       "j": 4,
-      "expected": -8
+      "expected": 8
     },
     {
       "raw": -2147483648,
       "i": 9,
       "j": 13,
-      "expected": 0
+      "expected": -2
     }
   ],
   "accel_replica_parity": {
@@ -107,31 +109,33 @@
         "raw": 0,
         "i": 0,
         "j": 0,
-        "expected": 4
+        "expected": 1
       },
       {
         "raw": 42,
         "i": 3,
         "j": 5,
-        "expected": 2
+        "expected": -4
       },
       {
         "raw": -1000,
         "i": 7,
         "j": 11,
-        "expected": -16
+        "expected": -2
       },
       {
         "raw": 7,
         "i": 2,
         "j": 3,
-        "expected_via_reference": true
+        "expected_via_reference": true,
+        "expected": -4
       },
       {
         "raw": -97,
         "i": 4,
         "j": 1,
-        "expected_via_reference": true
+        "expected_via_reference": true,
+        "expected": 2
       }
     ]
   },
@@ -532,6 +536,57 @@
         "sum": 0
       },
       "verdict": "no denser \u0394-graph than chance on this grid; C-15 remains OPEN"
+    },
+    "notes": "Legacy ChaChaCell Mant/Scale XOR identity under BTX_MATEXPAND_PRF_V44LT. Demoted under Lever-B MX Extract; still a firm pack for differential review. C-15 OPEN."
+  },
+  "mx_scale_derivation": {
+    "tag_ascii": "BTX_MATEXPAND_MXSCALE_V44LT",
+    "formula": "e(i,bj) = SHA256(tag || prf_key || LE32(i) || LE32(bj))[0] & 3",
+    "block_len": 32
+  },
+  "chacha_cell_prf_key_hex": "a522d5eeda6366cf3c8ed91b7f029b852cba9fc25dd6cf1c18c72b44f783271b",
+  "chacha_cell_extract_goldens": [
+    {
+      "raw": 0,
+      "i": 0,
+      "j": 0,
+      "expected": 4
+    },
+    {
+      "raw": 1,
+      "i": 0,
+      "j": 1,
+      "expected": 1
+    },
+    {
+      "raw": -1,
+      "i": 1,
+      "j": 0,
+      "expected": 4
+    },
+    {
+      "raw": 42,
+      "i": 3,
+      "j": 5,
+      "expected": 2
+    },
+    {
+      "raw": -1000,
+      "i": 7,
+      "j": 11,
+      "expected": -16
+    },
+    {
+      "raw": 2147483647,
+      "i": 2,
+      "j": 4,
+      "expected": -8
+    },
+    {
+      "raw": -2147483648,
+      "i": 9,
+      "j": 13,
+      "expected": 0
     }
-  }
+  ]
 }

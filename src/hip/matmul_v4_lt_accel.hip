@@ -126,24 +126,18 @@ __device__ __forceinline__ void DeviceChaChaQuarter(uint32_t& a, uint32_t& b, ui
     c += d; b = DeviceRotl32(b ^ c, 7);
 }
 
-// Bit-identical to matmul_v4_lt.cpp MatExpandPrfKeystream first 8 bytes (LE64).
-// Position salt (i,j) MUST be full-width uint32 — never truncate to 16 bits:
-//   nonce_second = (uint64_t{i} << 32) | uint64_t{j}
-// Truncation consensus-splits vs CPU and reopens a ~32× low-rank shortcut.
-// See doc/btx-matmul-v4.4-lt-matexpand-position-salt.md.
-__device__ __forceinline__ uint64_t DeviceMatExpandPrfLE64(const uint32_t key[8], int32_t raw,
-                                                          uint32_t i, uint32_t j, uint32_t remix,
-                                                          uint32_t lane)
+// Bit-identical to matmul_v4_lt.cpp MatExpandMxTileKeystream (full 64-byte block).
+__device__ __forceinline__ void DeviceMatExpandMxTileKeystream(const uint32_t key[8],
+                                                              uint32_t i, uint32_t bj,
+                                                              uint32_t remix, uint8_t out64[64])
 {
-    static_assert(sizeof(i) == 4 && sizeof(j) == 4,
-                  "DeviceMatExpandPrfLE64: (i,j) must be full-width uint32");
+    constexpr uint32_t kLaneMxBl = 0x4D58424Cu; // 'MXBL'
     uint32_t x0 = 0x61707865u, x1 = 0x3320646eu, x2 = 0x79622d32u, x3 = 0x6b206574u;
     uint32_t x4 = key[0], x5 = key[1], x6 = key[2], x7 = key[3];
     uint32_t x8 = key[4], x9 = key[5], x10 = key[6], x11 = key[7];
     uint32_t x12 = remix;
-    uint32_t x13 = static_cast<uint32_t>(raw) ^ lane;
-    // Full 32-bit i → x15, full 32-bit j → x14. Do not mask to 0xffff.
-    const uint64_t nonce_second = (static_cast<uint64_t>(i) << 32) | static_cast<uint64_t>(j);
+    uint32_t x13 = bj ^ kLaneMxBl;
+    const uint64_t nonce_second = (static_cast<uint64_t>(i) << 32) | static_cast<uint64_t>(bj);
     uint32_t x14 = static_cast<uint32_t>(nonce_second);
     uint32_t x15 = static_cast<uint32_t>(nonce_second >> 32);
 
@@ -168,7 +162,15 @@ __device__ __forceinline__ uint64_t DeviceMatExpandPrfLE64(const uint32_t key[8]
     x8 += j8; x9 += j9; x10 += j10; x11 += j11;
     x12 += j12; x13 += j13; x14 += j14; x15 += j15;
 
-    return static_cast<uint64_t>(x0) | (static_cast<uint64_t>(x1) << 32);
+    const uint32_t words[16] = {x0, x1, x2, x3, x4, x5, x6, x7,
+                                x8, x9, x10, x11, x12, x13, x14, x15};
+#pragma unroll
+    for (int w = 0; w < 16; ++w) {
+        out64[w * 4 + 0] = static_cast<uint8_t>(words[w] & 0xff);
+        out64[w * 4 + 1] = static_cast<uint8_t>((words[w] >> 8) & 0xff);
+        out64[w * 4 + 2] = static_cast<uint8_t>((words[w] >> 16) & 0xff);
+        out64[w * 4 + 3] = static_cast<uint8_t>((words[w] >> 24) & 0xff);
+    }
 }
 
 __device__ __forceinline__ int8_t DeviceSampleMantissaNibble(uint8_t nibble, bool& accepted)
@@ -194,40 +196,53 @@ __device__ __forceinline__ int8_t DeviceSampleMantissaNibble(uint8_t nibble, boo
     return static_cast<int8_t>(sign ? -mag : mag);
 }
 
-__device__ __forceinline__ int8_t DeviceExtractDequant(int32_t raw, uint32_t i, uint32_t j,
-                                                      const uint32_t key[8])
+__global__ void DeviceExtractDequantMatExpandMx(const int32_t* __restrict__ B32,
+                                                int8_t* __restrict__ Bhat,
+                                                const uint8_t* __restrict__ scales,
+                                                uint32_t n, uint32_t k0, uint32_t k1, uint32_t k2,
+                                                uint32_t k3, uint32_t k4, uint32_t k5, uint32_t k6,
+                                                uint32_t k7)
 {
-    constexpr uint32_t kLaneMant = 0x4D414E54u;
-    constexpr uint32_t kLaneScale = 0x53434C45u;
+    constexpr uint32_t kBlk = 32;
+    const uint32_t nblk = n / kBlk;
+    const uint32_t tile = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t ntiles = n * nblk;
+    if (tile >= ntiles) return;
+
+    const uint32_t i = tile / nblk;
+    const uint32_t bj = tile % nblk;
+    const uint32_t key[8] = {k0, k1, k2, k3, k4, k5, k6, k7};
+    const int32_t* raw32 = B32 + static_cast<size_t>(i) * n + static_cast<size_t>(bj) * kBlk;
+
+    int8_t mu[kBlk];
     uint32_t remix = 0;
-    for (;;) {
-        const uint64_t mixed = DeviceMatExpandPrfLE64(key, raw, i, j, remix, kLaneMant);
-        for (int shift = 0; shift < 64; shift += 4) {
-            bool accepted = false;
-            const int8_t mu = DeviceSampleMantissaNibble(
-                static_cast<uint8_t>((mixed >> shift) & 0x0F), accepted);
-            if (!accepted) continue;
-            const uint64_t scale_stream =
-                DeviceMatExpandPrfLE64(key, raw, i, j, remix, kLaneScale);
-            // Exact mul — never signed left-shift (negative mu << e is UB).
-            const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
-            return static_cast<int8_t>(static_cast<int32_t>(mu) * (int32_t{1} << e));
+    uint32_t filled = 0;
+    while (filled < kBlk) {
+        uint8_t ks[64];
+        DeviceMatExpandMxTileKeystream(key, i, bj, remix, ks);
+        for (int b = 0; b < 64 && filled < kBlk; ++b) {
+            const uint8_t byte = ks[b];
+            for (int shift = 0; shift < 8 && filled < kBlk; shift += 4) {
+                const uint8_t nibble = static_cast<uint8_t>((byte >> shift) & 0x0F);
+                const uint32_t raw_u = static_cast<uint32_t>(raw32[filled]);
+                const uint8_t mixed = static_cast<uint8_t>(
+                    (nibble ^ static_cast<uint8_t>((raw_u * 0x9E3779B9u) >> 28)) & 0x0F);
+                bool accepted = false;
+                const int8_t m = DeviceSampleMantissaNibble(mixed, accepted);
+                if (accepted) {
+                    mu[filled++] = m;
+                }
+            }
         }
         ++remix;
     }
-}
 
-__global__ void DeviceExtractDequantMatExpand(const int32_t* __restrict__ B32,
-                                              int8_t* __restrict__ Bhat,
-                                              uint32_t n, uint32_t k0, uint32_t k1, uint32_t k2,
-                                              uint32_t k3, uint32_t k4, uint32_t k5, uint32_t k6,
-                                              uint32_t k7)
-{
-    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const size_t nn = static_cast<size_t>(n) * n;
-    if (idx >= nn) return;
-    const uint32_t key[8] = {k0, k1, k2, k3, k4, k5, k6, k7};
-    Bhat[idx] = DeviceExtractDequant(B32[idx], idx / n, idx % n, key);
+    const uint8_t e = scales[static_cast<size_t>(i) * nblk + bj];
+    const int32_t scale = int32_t{1} << e;
+    int8_t* out = Bhat + static_cast<size_t>(i) * n + static_cast<size_t>(bj) * kBlk;
+    for (uint32_t t = 0; t < kBlk; ++t) {
+        out[t] = static_cast<int8_t>(static_cast<int32_t>(mu[t]) * scale);
+    }
 }
 
 // Exact s32 -> four signed-byte planes. The low three unsigned bytes are
@@ -418,6 +433,7 @@ struct LtHipResidentPool {
     int8_t *dW{nullptr}, *dBhat{nullptr};
     int32_t *dY{nullptr}, *dB32{nullptr}, *dQ{nullptr};
     uint64_t* dChat{nullptr};
+    uint8_t* dScales{nullptr};
 
     int8_t *dGemmS8L{nullptr}, *dGemmS8R{nullptr};
     int32_t *dGemmS32L{nullptr}, *dGemmOut{nullptr};
@@ -445,6 +461,7 @@ struct LtHipResidentPool {
         auto free_p = [](auto*& p) { if (p) { hipFree(p); p = nullptr; } };
         free_p(dG); free_p(dH); free_p(dU); free_p(dV); free_p(dAhat); free_p(dP);
         free_p(dW); free_p(dY); free_p(dB32); free_p(dBhat); free_p(dQ); free_p(dChat);
+        free_p(dScales);
         free_p(dGemmS8L); free_p(dGemmS8R); free_p(dGemmS32L); free_p(dGemmOut);
         gemm_s8l_bytes = gemm_s8r_bytes = gemm_s32l_bytes = gemm_out_bytes = 0;
         if (stream) { hipStreamDestroy(stream); stream = nullptr; }
@@ -482,6 +499,7 @@ struct LtHipResidentPool {
         const size_t mn = static_cast<size_t>(m) * n;
         const size_t nm = static_cast<size_t>(n) * m;
         const size_t mm = static_cast<size_t>(m) * m;
+        const size_t nscales = static_cast<size_t>(n) * (n / matmul::v4::lt::kMatExpandMxBlockLen);
         auto mall = [](void** p, size_t bytes) {
             return bytes == 0 || hipMalloc(p, bytes) == hipSuccess;
         };
@@ -496,11 +514,38 @@ struct LtHipResidentPool {
             !mall(reinterpret_cast<void**>(&dB32), nn * sizeof(int32_t)) ||
             !mall(reinterpret_cast<void**>(&dBhat), nn) ||
             !mall(reinterpret_cast<void**>(&dQ), nm * sizeof(int32_t)) ||
-            !mall(reinterpret_cast<void**>(&dChat), mm * sizeof(uint64_t))) {
+            !mall(reinterpret_cast<void**>(&dChat), mm * sizeof(uint64_t)) ||
+            !mall(reinterpret_cast<void**>(&dScales), nscales)) {
             Release();
             return false;
         }
         return true;
+    }
+
+    [[nodiscard]] bool LaunchMxExtract(int8_t* dOut, const uint256& prf_key)
+    {
+        const uint32_t nblk = n / matmul::v4::lt::kMatExpandMxBlockLen;
+        const size_t nscales = static_cast<size_t>(n) * nblk;
+        std::vector<uint8_t> scales(nscales);
+        for (uint32_t i = 0; i < n; ++i) {
+            for (uint32_t bj = 0; bj < nblk; ++bj) {
+                scales[static_cast<size_t>(i) * nblk + bj] =
+                    matmul::v4::lt::DeriveMatExpandMxScale(prf_key, i, bj);
+            }
+        }
+        if (hipMemcpyAsync(dScales, scales.data(), nscales, hipMemcpyHostToDevice, stream) !=
+            hipSuccess) {
+            return false;
+        }
+        uint32_t kw[8];
+        for (int t = 0; t < 8; ++t) kw[t] = ReadLE32(prf_key.data() + static_cast<size_t>(t) * 4);
+        const uint32_t ntiles = n * nblk;
+        const int et = 256;
+        const int eb = static_cast<int>((ntiles + et - 1) / et);
+        hipLaunchKernelGGL(DeviceExtractDequantMatExpandMx, dim3(eb), dim3(et), 0, stream,
+                           dB32, dOut, dScales, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5],
+                           kw[6], kw[7]);
+        return hipGetLastError() == hipSuccess;
     }
 
     [[nodiscard]] bool CaptureGraphsScalar()
@@ -676,13 +721,7 @@ struct LtHipResidentPool {
         }
 
         const uint256 prf_a = matmul::v4::lt::DeriveMatExpandPrfKey(seed_wa);
-        uint32_t kw[8];
-        for (int t = 0; t < 8; ++t) kw[t] = ReadLE32(prf_a.data() + static_cast<size_t>(t) * 4);
-        const int et = 256;
-        const int eb = static_cast<int>((nn + et - 1) / et);
-        hipLaunchKernelGGL(DeviceExtractDequantMatExpand, dim3(eb), dim3(et), 0, stream,
-                           dB32, dAhat, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
-        if (hipGetLastError() != hipSuccess) return false;
+        if (!LaunchMxExtract(dAhat, prf_a)) return false;
 
         if (mfma_s8s8) {
             if (!LaunchProjectLeftMfma()) {
@@ -728,14 +767,7 @@ struct LtHipResidentPool {
         }
 
         const uint256 prf = matmul::v4::lt::DeriveMatExpandPrfKey(seed_w);
-        uint32_t kw[8];
-        for (int t = 0; t < 8; ++t) kw[t] = ReadLE32(prf.data() + static_cast<size_t>(t) * 4);
-        const size_t nn = static_cast<size_t>(n) * n;
-        const int et = 256;
-        const int eb = static_cast<int>((nn + et - 1) / et);
-        hipLaunchKernelGGL(DeviceExtractDequantMatExpand, dim3(eb), dim3(et), 0, stream,
-                           dB32, dBhat, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
-        if (hipGetLastError() != hipSuccess) return false;
+        if (!LaunchMxExtract(dBhat, prf)) return false;
 
         if (mfma_s8s8) {
             if (!LaunchProjectRightMfma()) return false;
