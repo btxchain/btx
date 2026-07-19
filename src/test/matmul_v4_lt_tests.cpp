@@ -47,6 +47,41 @@ CBlockHeader MakeLTHeader(uint64_t nonce, uint32_t n)
     return header;
 }
 
+// Device-backend stand-ins for the MatExpand GEMMs. The "mock" pair wraps the
+// CPU ExactGemm* reference bit-for-bit (a device backend MUST reproduce it), so
+// routing through it MUST leave every digest byte-identical. The "fail" pair
+// returns false to exercise the CPU fallback contract.
+int g_mock_s8s8_calls = 0;
+int g_mock_s32s8_calls = 0;
+
+bool MockGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                  uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
+{
+    ++g_mock_s8s8_calls;
+    out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
+    return true;
+}
+
+bool MockGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
+                   uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
+{
+    ++g_mock_s32s8_calls;
+    out = lt::ExactGemmS32S8(L, R, rows, inner, cols);
+    return true;
+}
+
+bool FailGemmS8S8(const std::vector<int8_t>&, const std::vector<int8_t>&,
+                  uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
+{
+    return false;
+}
+
+bool FailGemmS32S8(const std::vector<int32_t>&, const std::vector<int8_t>&,
+                   uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
+{
+    return false;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(fold_int32_to_emax48_range)
@@ -231,6 +266,156 @@ BOOST_AUTO_TEST_CASE(window_miner_matches_reference)
         std::vector<unsigned char> payload;
         BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(h, kTestDim, ref, payload));
         BOOST_CHECK(results[i].digest == ref);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_backend_mock_matches_cpu)
+{
+    // Injectable backend that wraps ExactGemm* must be byte-identical to the
+    // default CPU path (the contract device backends must also satisfy).
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = +[](const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                            uint32_t rows, uint32_t inner, uint32_t cols,
+                            std::vector<int32_t>& out) -> bool {
+        out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
+        return true;
+    };
+    backend.gemm_s32s8 = +[](const std::vector<int32_t>& L, const std::vector<int8_t>& R,
+                             uint32_t rows, uint32_t inner, uint32_t cols,
+                             std::vector<int32_t>& out) -> bool {
+        out = lt::ExactGemmS32S8(L, R, rows, inner, cols);
+        return true;
+    };
+    BOOST_CHECK(backend.HasDeviceGemms());
+
+    auto h = MakeLTHeader(42, kTestDim);
+    uint256 cpu_d, backend_d;
+    std::vector<unsigned char> cpu_p, backend_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(h, kTestDim, cpu_d, cpu_p));
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(h, kTestDim, backend, backend_d, backend_p));
+    BOOST_CHECK(cpu_d == backend_d);
+    BOOST_CHECK(cpu_p == backend_p);
+
+    lt::WindowSketchMinerLT miner{h, kTestDim, backend};
+    BOOST_REQUIRE(miner.Valid());
+    BOOST_CHECK(miner.UsingDeviceGemms());
+    std::vector<lt::DigestOnlyResultLT> results;
+    BOOST_REQUIRE(miner.Mine({42}, uint256::ONE, results, nullptr));
+    BOOST_REQUIRE_EQUAL(results.size(), 1U);
+    BOOST_CHECK(results[0].digest == cpu_d);
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_backend_default_matches_cpu)
+{
+    // A default-constructed (all-nullptr) backend MUST be the CPU reference.
+    auto header = MakeLTHeader(31, kTestDim);
+    uint256 ref_d, be_d;
+    std::vector<unsigned char> ref_p, be_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref_d, ref_p));
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, lt::ExactGemmBackend{}, be_d, be_p));
+    BOOST_CHECK(be_d == ref_d);
+    BOOST_CHECK(be_p == ref_p);
+
+    // Operand expansion via the empty backend is byte-identical too.
+    const lt::ExactGemmBackend cpu{};
+    BOOST_CHECK(lt::ExpandOperandAMatExpand(header, kTestDim) ==
+                lt::ExpandOperandAMatExpand(header, kTestDim, cpu));
+    BOOST_CHECK(lt::ExpandOperandBMatExpand(header, kTestDim) ==
+                lt::ExpandOperandBMatExpand(header, kTestDim, cpu));
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_backend_mock_matches_reference)
+{
+    // A mock device backend that wraps ExactGemm* bit-for-bit must produce the
+    // exact same digest / payload as the pure-CPU default path, and both GEMM
+    // stages (s8s8 for G*W, s32s8 for (G*W)*H) must actually be invoked.
+    auto header = MakeLTHeader(42, kTestDim);
+    uint256 ref_d, mock_d;
+    std::vector<unsigned char> ref_p, mock_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref_d, ref_p));
+
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &MockGemmS8S8;
+    backend.gemm_s32s8 = &MockGemmS32S8;
+    BOOST_CHECK(backend.HasDeviceGemms());
+
+    g_mock_s8s8_calls = 0;
+    g_mock_s32s8_calls = 0;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, backend, mock_d, mock_p));
+    BOOST_CHECK(mock_d == ref_d);
+    BOOST_CHECK(mock_p == ref_p);
+    BOOST_CHECK(g_mock_s8s8_calls > 0);
+    BOOST_CHECK(g_mock_s32s8_calls > 0);
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_backend_falls_back_on_false)
+{
+    // A backend whose GEMMs always report failure must transparently fall back
+    // to the CPU reference and still yield the identical digest.
+    auto header = MakeLTHeader(43, kTestDim);
+    uint256 ref_d, fb_d;
+    std::vector<unsigned char> ref_p, fb_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref_d, ref_p));
+
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &FailGemmS8S8;
+    backend.gemm_s32s8 = &FailGemmS32S8;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, backend, fb_d, fb_p));
+    BOOST_CHECK(fb_d == ref_d);
+    BOOST_CHECK(fb_p == ref_p);
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_backend_partial_slot_matches)
+{
+    // Only one slot supplied: the other stage falls back to CPU. Result must
+    // still match the all-CPU reference regardless of which slot is device-driven.
+    auto header = MakeLTHeader(44, kTestDim);
+    uint256 ref_d;
+    std::vector<unsigned char> ref_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref_d, ref_p));
+
+    lt::ExactGemmBackend only_s8s8;
+    only_s8s8.gemm_s8s8 = &MockGemmS8S8;
+    uint256 d1;
+    std::vector<unsigned char> p1;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, only_s8s8, d1, p1));
+    BOOST_CHECK(d1 == ref_d);
+    BOOST_CHECK(p1 == ref_p);
+
+    lt::ExactGemmBackend only_s32s8;
+    only_s32s8.gemm_s32s8 = &MockGemmS32S8;
+    uint256 d2;
+    std::vector<unsigned char> p2;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, only_s32s8, d2, p2));
+    BOOST_CHECK(d2 == ref_d);
+    BOOST_CHECK(p2 == ref_p);
+}
+
+BOOST_AUTO_TEST_CASE(window_miner_backend_matches_reference)
+{
+    // WindowSketchMinerLT driven by the mock device backend must reproduce the
+    // pure-CPU miner (and hence ComputeDigestBMX4CLT) for every nonce.
+    auto tmpl = MakeLTHeader(0, kTestDim);
+    const std::vector<uint64_t> nonces{101, 102, 103};
+
+    lt::WindowSketchMinerLT cpu_miner{tmpl, kTestDim};
+    BOOST_REQUIRE(cpu_miner.Valid());
+    BOOST_CHECK(!cpu_miner.UsingDeviceGemms());
+    std::vector<lt::DigestOnlyResultLT> cpu_res;
+    BOOST_REQUIRE(cpu_miner.Mine(nonces, uint256::ONE, cpu_res, nullptr));
+
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &MockGemmS8S8;
+    backend.gemm_s32s8 = &MockGemmS32S8;
+    lt::WindowSketchMinerLT dev_miner{tmpl, kTestDim, backend};
+    BOOST_REQUIRE(dev_miner.Valid());
+    BOOST_CHECK(dev_miner.UsingDeviceGemms());
+    std::vector<lt::DigestOnlyResultLT> dev_res;
+    BOOST_REQUIRE(dev_miner.Mine(nonces, uint256::ONE, dev_res, nullptr));
+
+    BOOST_REQUIRE_EQUAL(cpu_res.size(), dev_res.size());
+    for (size_t i = 0; i < nonces.size(); ++i) {
+        BOOST_CHECK(dev_res[i].digest == cpu_res[i].digest);
     }
 }
 

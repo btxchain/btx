@@ -54,13 +54,42 @@ inline constexpr uint32_t kConsensusQStarMax = 128;
                                                   const std::vector<int8_t>& R,
                                                   uint32_t rows, uint32_t inner, uint32_t cols);
 
+/** Injectable exact-GEMM backend for MatExpand operand GEMMs (G*W and (G*W)*H).
+ *  Null function pointers ⇒ CPU ExactGemm*. Non-null backends MUST be
+ *  bit-identical to ExactGemm* (self-test before advertising availability).
+ *  Consensus ComputeDigestBMX4CLT defaults to CPU; miners inject a backend
+ *  into ExpandOperand* / WindowSketchMinerLT for throughput. */
+struct ExactGemmBackend {
+    using S8S8Fn = bool (*)(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                            uint32_t rows, uint32_t inner, uint32_t cols,
+                            std::vector<int32_t>& out);
+    using S32S8Fn = bool (*)(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
+                             uint32_t rows, uint32_t inner, uint32_t cols,
+                             std::vector<int32_t>& out);
+    S8S8Fn gemm_s8s8{nullptr};
+    S32S8Fn gemm_s32s8{nullptr};
+
+    [[nodiscard]] bool HasDeviceGemms() const
+    {
+        return gemm_s8s8 != nullptr && gemm_s32s8 != nullptr;
+    }
+};
+
 [[nodiscard]] std::vector<int8_t> ExpandOperandAMatExpand(const CBlockHeader& header, uint32_t n);
+[[nodiscard]] std::vector<int8_t> ExpandOperandAMatExpand(const CBlockHeader& header, uint32_t n,
+                                                          const ExactGemmBackend& backend);
 [[nodiscard]] std::vector<int8_t> ExpandOperandBMatExpand(const CBlockHeader& header, uint32_t n);
+[[nodiscard]] std::vector<int8_t> ExpandOperandBMatExpand(const CBlockHeader& header, uint32_t n,
+                                                          const ExactGemmBackend& backend);
 
 [[nodiscard]] std::pair<uint256, uint256> DeriveProjectorSeedsBMX4CLT(const CBlockHeader& header);
 
 [[nodiscard]] bool ValidateDimsBMX4CLT(uint32_t n, uint32_t& m_out);
 [[nodiscard]] bool ComputeDigestBMX4CLT(const CBlockHeader& header, uint32_t n,
+                                        uint256& digest_out,
+                                        std::vector<unsigned char>& payload_out);
+[[nodiscard]] bool ComputeDigestBMX4CLT(const CBlockHeader& header, uint32_t n,
+                                        const ExactGemmBackend& backend,
                                         uint256& digest_out,
                                         std::vector<unsigned char>& payload_out);
 [[nodiscard]] bool VerifySketchBMX4CLT(const CBlockHeader& header, uint32_t n, uint32_t rounds,
@@ -78,9 +107,6 @@ struct WindowSlot {
 [[nodiscard]] bool VerifyWindowSlotFreivalds(const CBlockHeader& tmpl, uint32_t n,
                                              const std::vector<WindowSlot>& slots, uint32_t r);
 
-/** Miner-local lane planner for ENC-DR-LT (MatExpand GEMMs + deep-m sketch).
- *  Consensus remains path-agnostic integer Ĉ; this only selects FP8/MXFP4
- *  projection hints for device backends. Unknown device_class → INT8 + Karatsuba-9. */
 [[nodiscard]] matmul::v4::bmx4::ExactAccelPlan PlanLTAccel(std::string_view device_class);
 
 struct DigestOnlyResultLT {
@@ -94,23 +120,18 @@ struct DigestOnlyResultLT {
 class WindowSketchMinerLT
 {
 public:
-    WindowSketchMinerLT(const CBlockHeader& header, uint32_t n);
+    explicit WindowSketchMinerLT(const CBlockHeader& header, uint32_t n,
+                                 ExactGemmBackend backend = {});
 
     [[nodiscard]] bool Valid() const { return m_valid; }
     [[nodiscard]] uint32_t SketchDim() const { return m_m; }
     [[nodiscard]] const uint256& TemplateHash() const { return m_template_hash; }
+    [[nodiscard]] bool UsingDeviceGemms() const { return m_backend.HasDeviceGemms(); }
 
-    /** Mine fully-populated candidate headers. Each header MUST already carry
-     *  the consensus-correct nonce-bound seed_a/seed_b (via
-     *  SetDeterministicMatMulSeeds); MatExpand-B binds ComputeMatMulHeaderHash
-     *  which includes those seeds. Template hash must match this miner. */
     [[nodiscard]] bool MineWindow(const std::vector<CBlockHeader>& headers,
                                   const uint256& target,
                                   std::vector<DigestOnlyResultLT>& out) const;
 
-    /** Convenience: bind only nNonce64/nNonce onto the cached template.
-     *  Does NOT re-derive seed_a/seed_b — callers that need consensus digests
-     *  under v4 seed rules MUST use MineWindow with pre-seeded headers. */
     [[nodiscard]] bool Mine(const std::vector<uint64_t>& nonces, const uint256& target,
                             std::vector<DigestOnlyResultLT>& out,
                             std::vector<std::vector<unsigned char>>* payloads_out = nullptr) const;
@@ -121,6 +142,7 @@ private:
     uint32_t m_n{0};
     uint32_t m_m{0};
     bool m_valid{false};
+    ExactGemmBackend m_backend{};
     std::vector<int8_t> m_A;
     std::vector<int8_t> m_U;
     std::vector<int8_t> m_V;

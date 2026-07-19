@@ -179,6 +179,32 @@ bool IsMatMulLTHipAvailable()
     return SelfTestGemmKernelsOnce();
 }
 
+namespace {
+
+[[nodiscard]] bool HipGemmS8S8Fn(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                                 uint32_t rows, uint32_t inner, uint32_t cols,
+                                 std::vector<int32_t>& out)
+{
+    return LaunchGemmS8S8(L, R, rows, inner, cols, out);
+}
+
+[[nodiscard]] bool HipGemmS32S8Fn(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
+                                  uint32_t rows, uint32_t inner, uint32_t cols,
+                                  std::vector<int32_t>& out)
+{
+    return LaunchGemmS32S8(L, R, rows, inner, cols, out);
+}
+
+[[nodiscard]] matmul::v4::lt::ExactGemmBackend MakeHipExactGemmBackend()
+{
+    matmul::v4::lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &HipGemmS8S8Fn;
+    backend.gemm_s32s8 = &HipGemmS32S8Fn;
+    return backend;
+}
+
+} // namespace
+
 bool ComputeDigestsOnlyLTHip(const CBlockHeader& tmpl, uint32_t n,
                              const uint64_t* nonces, size_t count,
                              std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
@@ -193,10 +219,9 @@ bool ComputeDigestsOnlyLTHip(const CBlockHeader& tmpl, uint32_t n,
         return false;
     }
 
-    // Host-exact, template-amortized reference miner -- see the .h/CUDA
-    // sibling's file header for why the self-tested device GEMMs above are
-    // not yet spliced into its internal P/Q stages.
-    matmul::v4::lt::WindowSketchMinerLT miner(tmpl, n);
+    const bool device_ok = IsMatMulLTHipAvailable();
+    matmul::v4::lt::WindowSketchMinerLT miner(
+        tmpl, n, device_ok ? MakeHipExactGemmBackend() : matmul::v4::lt::ExactGemmBackend{});
     if (!miner.Valid()) {
         return false;
     }
@@ -207,12 +232,12 @@ bool ComputeDigestsOnlyLTHip(const CBlockHeader& tmpl, uint32_t n,
     if (!miner.Mine(nonce_vec, kNoTarget, results, nullptr)) {
         return false;
     }
+    const auto status = device_ok ? matmul::v4::bmx4::DigestOnlyBackendStatus::Ok
+                                  : matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
     for (auto& r : results) {
         r.target_match = false;
-        r.backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
+        r.backend_status = status;
     }
-
-    (void)IsMatMulLTHipAvailable();
 
     out = std::move(results);
     return true;

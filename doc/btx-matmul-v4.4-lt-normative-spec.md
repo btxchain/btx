@@ -63,12 +63,14 @@ Profile enum: `ENC_BMX4C_LT = 4`. Live only when `IsDRLTActive(height)`.
 | Backend | Entry | Status |
 |---|---|---|
 | CPU reference | `matmul::v4::lt::*` | **normative** |
-| Dispatch | `ComputeDigestsBMX4CLTDispatched` | host-verified; device host-exact today |
-| CUDA | `ComputeDigestsOnlyLTCuda` | host MatExpand + exact miner; device GEMM soak next |
-| Metal | stub → CPU | Apple bring-up |
-| HIP | stub → CPU | MI350 bring-up |
+| Dispatch | `ComputeDigestsBMX4CLTDispatched` | host-verified |
+| Injectable GEMMs | `ExactGemmBackend` | device splice for MatExpand `G*W` / `(G*W)*H` |
+| CUDA | `ComputeDigestsOnlyLTCuda` | exact device GEMMs via `ExactGemmBackend` (self-tested); CPU fallback if unavailable |
+| Metal | `ComputeDigestsOnlyLTMetal` | exact MSL integer GEMMs via `ExactGemmBackend` (self-tested); CPU fallback if unavailable |
+| HIP | `ComputeDigestsOnlyLTHip` | exact device GEMMs via `ExactGemmBackend` (self-tested); CPU fallback if unavailable |
 
 Planner: `PlanLTAccel(device_class)`.
+Linker `*_stub.cpp` files remain only for builds with the corresponding `BTX_ENABLE_*=OFF`.
 
 ## GO/NO-GO (before raising height)
 

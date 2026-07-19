@@ -2,23 +2,10 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 //
-// Apple Metal host glue for the MatMul v4.4 ENC-DR-LT ("MatExpand") mining
-// backend.
-//
-// RELEASE SCOPE (explicitly allowed by this backend's task brief): no Metal
-// compute kernels are wired yet. This TU runs the host-exact, template-
-// amortized matmul::v4::lt::WindowSketchMinerLT pipeline -- byte-identical to
-// matmul::v4::lt::ComputeDigestBMX4CLT by construction -- behind the Metal
-// entry point, exactly mirroring how the reviewed BMX4-C CUDA context
-// (cuda/matmul_v4_bmx4_context.h) documents "device buffers reserved for
-// bring-up; the host-exact miner is the normative schedule today" for its
-// own profile. A future revision can splice the portable integer-ALU / Metal
-// 4 mpp::tensor_ops::matmul2d kernels from matmul_v4_bmx4_accel.mm into the
-// window miner's P/Q GEMM stages once WindowSketchMinerLT exposes an
-// injectable device backend. This file is deliberately kept free of any
-// Objective-C/Metal API usage beyond the device-presence probe below, so it
-// carries zero GPU correctness risk while still reporting truthful device
-// availability.
+// Apple Metal host glue for MatMul v4.4 ENC-DR-LT (MatExpand).
+// Exact int8×int8→int32 and int32×int8→int32 GEMM compute kernels (MSL),
+// self-tested against ExactGemm*, then injected via ExactGemmBackend into
+// WindowSketchMinerLT so MatExpand's dense stages run on device.
 
 #include <metal/matmul_v4_lt_accel.h>
 
@@ -32,14 +19,228 @@
 #import <Metal/Metal.h>
 
 #include <cstdint>
+#include <cstring>
+#include <algorithm>
+#include <mutex>
 #include <vector>
 
 namespace matmul_v4::metal {
+namespace {
+
+static NSString* const kGemmLibrarySource = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void gemm_s8s8(device const char* A [[buffer(0)]],
+                      device const char* B [[buffer(1)]],
+                      device int* D [[buffer(2)]],
+                      constant int& M [[buffer(3)]],
+                      constant int& N [[buffer(4)]],
+                      constant int& K [[buffer(5)]],
+                      uint2 gid [[thread_position_in_grid]])
+{
+    const int col = int(gid.x);
+    const int row = int(gid.y);
+    if (row >= M || col >= N) return;
+    int acc = 0;
+    const size_t arow = size_t(row) * size_t(K);
+    for (int k = 0; k < K; ++k) {
+        acc += int(A[arow + size_t(k)]) * int(B[size_t(k) * size_t(N) + size_t(col)]);
+    }
+    D[size_t(row) * size_t(N) + size_t(col)] = acc;
+}
+
+kernel void gemm_s32s8(device const int* A [[buffer(0)]],
+                       device const char* B [[buffer(1)]],
+                       device int* D [[buffer(2)]],
+                       constant int& M [[buffer(3)]],
+                       constant int& N [[buffer(4)]],
+                       constant int& K [[buffer(5)]],
+                       uint2 gid [[thread_position_in_grid]])
+{
+    const int col = int(gid.x);
+    const int row = int(gid.y);
+    if (row >= M || col >= N) return;
+    long acc = 0;
+    const size_t arow = size_t(row) * size_t(K);
+    for (int k = 0; k < K; ++k) {
+        acc += long(A[arow + size_t(k)]) * long(B[size_t(k) * size_t(N) + size_t(col)]);
+    }
+    D[size_t(row) * size_t(N) + size_t(col)] = int(acc);
+}
+)MSL";
+
+struct MetalGemmContext {
+    id<MTLDevice> device{nil};
+    id<MTLCommandQueue> queue{nil};
+    id<MTLComputePipelineState> s8s8{nil};
+    id<MTLComputePipelineState> s32s8{nil};
+    bool ready{false};
+};
+
+MetalGemmContext& Ctx()
+{
+    static MetalGemmContext ctx;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        ctx.device = MTLCreateSystemDefaultDevice();
+        if (ctx.device == nil) return;
+        ctx.queue = [ctx.device newCommandQueue];
+        if (ctx.queue == nil) return;
+        NSError* err = nil;
+        id<MTLLibrary> lib = [ctx.device newLibraryWithSource:kGemmLibrarySource
+                                                      options:nil
+                                                        error:&err];
+        if (lib == nil) return;
+        id<MTLFunction> f8 = [lib newFunctionWithName:@"gemm_s8s8"];
+        id<MTLFunction> f32 = [lib newFunctionWithName:@"gemm_s32s8"];
+        if (f8 == nil || f32 == nil) return;
+        ctx.s8s8 = [ctx.device newComputePipelineStateWithFunction:f8 error:&err];
+        ctx.s32s8 = [ctx.device newComputePipelineStateWithFunction:f32 error:&err];
+        ctx.ready = (ctx.s8s8 != nil && ctx.s32s8 != nil);
+    });
+    return ctx;
+}
+
+bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
+                    uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
+{
+    auto& ctx = Ctx();
+    if (!ctx.ready) return false;
+    if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
+
+    const size_t lhs_bytes = size_t(rows) * k * sizeof(int8_t);
+    const size_t rhs_bytes = size_t(k) * cols * sizeof(int8_t);
+    const size_t out_bytes = size_t(rows) * cols * sizeof(int32_t);
+
+    id<MTLBuffer> bA = [ctx.device newBufferWithBytes:left.data() length:lhs_bytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bB = [ctx.device newBufferWithBytes:right.data() length:rhs_bytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bD = [ctx.device newBufferWithLength:out_bytes options:MTLResourceStorageModeShared];
+    if (bA == nil || bB == nil || bD == nil) return false;
+
+    int M = int(rows), N = int(cols), K = int(k);
+    id<MTLBuffer> bM = [ctx.device newBufferWithBytes:&M length:sizeof(M) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bN = [ctx.device newBufferWithBytes:&N length:sizeof(N) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bK = [ctx.device newBufferWithBytes:&K length:sizeof(K) options:MTLResourceStorageModeShared];
+
+    id<MTLCommandBuffer> cmd = [ctx.queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:ctx.s8s8];
+    [enc setBuffer:bA offset:0 atIndex:0];
+    [enc setBuffer:bB offset:0 atIndex:1];
+    [enc setBuffer:bD offset:0 atIndex:2];
+    [enc setBuffer:bM offset:0 atIndex:3];
+    [enc setBuffer:bN offset:0 atIndex:4];
+    [enc setBuffer:bK offset:0 atIndex:5];
+    const MTLSize grid = MTLSizeMake(cols, rows, 1);
+    const NSUInteger tw = ctx.s8s8.threadExecutionWidth;
+    const MTLSize tgroup = MTLSizeMake(tw, std::max<NSUInteger>(1, ctx.s8s8.maxTotalThreadsPerThreadgroup / tw), 1);
+    [enc dispatchThreads:grid threadsPerThreadgroup:tgroup];
+    [enc endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    if (cmd.status != MTLCommandBufferStatusCompleted) return false;
+
+    out.resize(size_t(rows) * cols);
+    std::memcpy(out.data(), [bD contents], out_bytes);
+    return true;
+}
+
+bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
+                     uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
+{
+    auto& ctx = Ctx();
+    if (!ctx.ready) return false;
+    if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
+
+    const size_t lhs_bytes = size_t(rows) * k * sizeof(int32_t);
+    const size_t rhs_bytes = size_t(k) * cols * sizeof(int8_t);
+    const size_t out_bytes = size_t(rows) * cols * sizeof(int32_t);
+
+    id<MTLBuffer> bA = [ctx.device newBufferWithBytes:left.data() length:lhs_bytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bB = [ctx.device newBufferWithBytes:right.data() length:rhs_bytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bD = [ctx.device newBufferWithLength:out_bytes options:MTLResourceStorageModeShared];
+    if (bA == nil || bB == nil || bD == nil) return false;
+
+    int M = int(rows), N = int(cols), K = int(k);
+    id<MTLBuffer> bM = [ctx.device newBufferWithBytes:&M length:sizeof(M) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bN = [ctx.device newBufferWithBytes:&N length:sizeof(N) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bK = [ctx.device newBufferWithBytes:&K length:sizeof(K) options:MTLResourceStorageModeShared];
+
+    id<MTLCommandBuffer> cmd = [ctx.queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:ctx.s32s8];
+    [enc setBuffer:bA offset:0 atIndex:0];
+    [enc setBuffer:bB offset:0 atIndex:1];
+    [enc setBuffer:bD offset:0 atIndex:2];
+    [enc setBuffer:bM offset:0 atIndex:3];
+    [enc setBuffer:bN offset:0 atIndex:4];
+    [enc setBuffer:bK offset:0 atIndex:5];
+    const MTLSize grid = MTLSizeMake(cols, rows, 1);
+    const NSUInteger tw = ctx.s32s8.threadExecutionWidth;
+    const MTLSize tgroup = MTLSizeMake(tw, std::max<NSUInteger>(1, ctx.s32s8.maxTotalThreadsPerThreadgroup / tw), 1);
+    [enc dispatchThreads:grid threadsPerThreadgroup:tgroup];
+    [enc endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    if (cmd.status != MTLCommandBufferStatusCompleted) return false;
+
+    out.resize(size_t(rows) * cols);
+    std::memcpy(out.data(), [bD contents], out_bytes);
+    return true;
+}
+
+bool SelfTestGemmKernelsOnce()
+{
+    static std::once_flag once;
+    static bool ok = false;
+    std::call_once(once, [] {
+        if (!Ctx().ready) return;
+        constexpr uint32_t kDim = 24;
+        std::vector<int8_t> left(size_t(kDim) * kDim);
+        std::vector<int8_t> right(size_t(kDim) * kDim);
+        std::vector<int32_t> mid(size_t(kDim) * kDim);
+        for (uint32_t i = 0; i < kDim * kDim; ++i) {
+            left[i] = matmul::v4::lt::FoldInt32ToEmax48(int32_t(i) * 7 - 101);
+            right[i] = matmul::v4::lt::FoldInt32ToEmax48(int32_t(i) * 11 + 53);
+            mid[i] = int32_t(left[i]) * 997 - 12345;
+        }
+        const auto cpu8 = matmul::v4::lt::ExactGemmS8S8(left, right, kDim, kDim, kDim);
+        std::vector<int32_t> gpu8;
+        if (!LaunchGemmS8S8(left, right, kDim, kDim, kDim, gpu8) || gpu8 != cpu8) return;
+        const auto cpu32 = matmul::v4::lt::ExactGemmS32S8(mid, right, kDim, kDim, kDim);
+        std::vector<int32_t> gpu32;
+        if (!LaunchGemmS32S8(mid, right, kDim, kDim, kDim, gpu32) || gpu32 != cpu32) return;
+        ok = true;
+    });
+    return ok;
+}
+
+bool MetalGemmS8S8Fn(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                     uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
+{
+    return LaunchGemmS8S8(L, R, rows, inner, cols, out);
+}
+
+bool MetalGemmS32S8Fn(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
+                      uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
+{
+    return LaunchGemmS32S8(L, R, rows, inner, cols, out);
+}
+
+matmul::v4::lt::ExactGemmBackend MakeMetalExactGemmBackend()
+{
+    matmul::v4::lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &MetalGemmS8S8Fn;
+    backend.gemm_s32s8 = &MetalGemmS32S8Fn;
+    return backend;
+}
+
+} // namespace
 
 bool IsMatMulLTMetalAvailable()
 {
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-    return device != nil;
+    return SelfTestGemmKernelsOnce();
 }
 
 bool ComputeDigestsOnlyLTMetal(const CBlockHeader& tmpl, uint32_t n,
@@ -56,7 +257,9 @@ bool ComputeDigestsOnlyLTMetal(const CBlockHeader& tmpl, uint32_t n,
         return false;
     }
 
-    matmul::v4::lt::WindowSketchMinerLT miner(tmpl, n);
+    const bool device_ok = IsMatMulLTMetalAvailable();
+    matmul::v4::lt::WindowSketchMinerLT miner(
+        tmpl, n, device_ok ? MakeMetalExactGemmBackend() : matmul::v4::lt::ExactGemmBackend{});
     if (!miner.Valid()) {
         return false;
     }
@@ -67,11 +270,12 @@ bool ComputeDigestsOnlyLTMetal(const CBlockHeader& tmpl, uint32_t n,
     if (!miner.Mine(nonce_vec, kNoTarget, results, nullptr)) {
         return false;
     }
+    const auto status = device_ok ? matmul::v4::bmx4::DigestOnlyBackendStatus::Ok
+                                  : matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
     for (auto& r : results) {
         r.target_match = false;
-        r.backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
+        r.backend_status = status;
     }
-
     out = std::move(results);
     return true;
 }

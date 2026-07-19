@@ -74,7 +74,11 @@ uint256 Sha256dPair(const uint256& a, const uint256& b)
 // C-15 non-collapse: Extract is NOT an affine function of B32. A Freivalds
 // verifier that only sees Bhat therefore cannot reassociate through G/W/H to
 // skip the dense MatExpand GEMMs (the linear-fold shortcut class).
-std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, uint32_t n)
+//
+// `backend` may redirect the two dense GEMMs to a bit-exact device path;
+// nullptr slots (or a false return) fall back to ExactGemm*.
+std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, uint32_t n,
+                                  const ExactGemmBackend& backend)
 {
     const uint32_t w = kMatExpandPanelW;
     const uint256 seed_g = DeriveTaggedSeed(kMatExpandGTag, sizeof(kMatExpandGTag) - 1, tmpl);
@@ -84,8 +88,14 @@ std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, ui
     const std::vector<int8_t> H = bx::ExpandProjectorBMX4C(seed_h, w, n); // w x n
     const std::vector<int8_t> W = bx::ExpandProjectorBMX4C(seed_w, n, w); // n x w
 
-    const std::vector<int32_t> Y = ExactGemmS8S8(G, W, n, n, w);    // n x w
-    const std::vector<int32_t> B32 = ExactGemmS32S8(Y, H, n, w, n); // n x n
+    std::vector<int32_t> Y;
+    if (backend.gemm_s8s8 == nullptr || !backend.gemm_s8s8(G, W, n, n, w, Y)) {
+        Y = ExactGemmS8S8(G, W, n, n, w);
+    }
+    std::vector<int32_t> B32;
+    if (backend.gemm_s32s8 == nullptr || !backend.gemm_s32s8(Y, H, n, w, n, B32)) {
+        B32 = ExactGemmS32S8(Y, H, n, w, n);
+    }
 
     // Position salt binds the panel seed so A vs B (and distinct nonces) never
     // share an Extract stream even when B32 collides.
@@ -193,22 +203,34 @@ std::vector<int32_t> ExactGemmS32S8(const std::vector<int32_t>& L, const std::ve
 
 std::vector<int8_t> ExpandOperandBMatExpand(const CBlockHeader& header, uint32_t n)
 {
+    return ExpandOperandBMatExpand(header, n, ExactGemmBackend{});
+}
+
+std::vector<int8_t> ExpandOperandBMatExpand(const CBlockHeader& header, uint32_t n,
+                                            const ExactGemmBackend& backend)
+{
     // B is nonce-fresh: the thin panel W binds the FULL header hash (which binds
     // nNonce64), mirroring DeriveOperandSeedBMX4C's B scoping. G/H are template-
     // scoped, so the marginal per-nonce MatExpand work (G*W, (G*W)*H) is priced.
     const uint256 tmpl = matmul::v4::ComputeTemplateHash(header);
     const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
     const uint256 seed_w = DeriveTaggedSeed(kMatExpandWTag, sizeof(kMatExpandWTag) - 1, header_hash);
-    return MatExpandCore(tmpl, seed_w, n);
+    return MatExpandCore(tmpl, seed_w, n, backend);
 }
 
 std::vector<int8_t> ExpandOperandAMatExpand(const CBlockHeader& header, uint32_t n)
+{
+    return ExpandOperandAMatExpand(header, n, ExactGemmBackend{});
+}
+
+std::vector<int8_t> ExpandOperandAMatExpand(const CBlockHeader& header, uint32_t n,
+                                            const ExactGemmBackend& backend)
 {
     // A is template-scoped: the thin panel W binds the TEMPLATE hash only, so A
     // is constant across a miner's nonce sweep (invariant I1'). Distinct WA tag.
     const uint256 tmpl = matmul::v4::ComputeTemplateHash(header);
     const uint256 seed_w = DeriveTaggedSeed(kMatExpandWATag, sizeof(kMatExpandWATag) - 1, tmpl);
-    return MatExpandCore(tmpl, seed_w, n);
+    return MatExpandCore(tmpl, seed_w, n, backend);
 }
 
 std::pair<uint256, uint256> DeriveProjectorSeedsBMX4CLT(const CBlockHeader& header)
@@ -227,6 +249,13 @@ bool ValidateDimsBMX4CLT(uint32_t n, uint32_t& m_out)
 bool ComputeDigestBMX4CLT(const CBlockHeader& header, uint32_t n,
                           uint256& digest_out, std::vector<unsigned char>& payload_out)
 {
+    return ComputeDigestBMX4CLT(header, n, ExactGemmBackend{}, digest_out, payload_out);
+}
+
+bool ComputeDigestBMX4CLT(const CBlockHeader& header, uint32_t n,
+                          const ExactGemmBackend& backend,
+                          uint256& digest_out, std::vector<unsigned char>& payload_out)
+{
     uint32_t m = 0;
     if (!ValidateDimsBMX4CLT(n, m)) {
         return false;
@@ -235,8 +264,8 @@ bool ComputeDigestBMX4CLT(const CBlockHeader& header, uint32_t n,
     const uint256 sigma = matmul::v4::DeriveSigma(header); // UNCHANGED
     const auto [seed_u, seed_v] = DeriveProjectorSeedsBMX4CLT(header);
 
-    const std::vector<int8_t> Ahat = ExpandOperandAMatExpand(header, n);
-    const std::vector<int8_t> Bhat = ExpandOperandBMatExpand(header, n);
+    const std::vector<int8_t> Ahat = ExpandOperandAMatExpand(header, n, backend);
+    const std::vector<int8_t> Bhat = ExpandOperandBMatExpand(header, n, backend);
     const std::vector<int8_t> U = bx::ExpandProjectorBMX4C(seed_u, m, n);
     const std::vector<int8_t> V = bx::ExpandProjectorBMX4C(seed_v, n, m);
 
@@ -349,8 +378,9 @@ bool VerifyWindowSlotFreivalds(const CBlockHeader& tmpl, uint32_t n,
     return true;
 }
 
-WindowSketchMinerLT::WindowSketchMinerLT(const CBlockHeader& header, uint32_t n)
-    : m_template{header}, m_n{n}
+WindowSketchMinerLT::WindowSketchMinerLT(const CBlockHeader& header, uint32_t n,
+                                         ExactGemmBackend backend)
+    : m_template{header}, m_n{n}, m_backend{backend}
 {
     uint32_t m = 0;
     if (!ValidateDimsBMX4CLT(n, m)) return;
@@ -360,9 +390,9 @@ WindowSketchMinerLT::WindowSketchMinerLT(const CBlockHeader& header, uint32_t n)
     // Template-scoped derivations (invariant I1'): Ahat (MatExpand with the
     // template panel), U, V, and the left factor P = U*Ahat are paid ONCE per
     // template. The per-nonce marginal work is {MatExpand Bhat, Bhat*V, combine,
-    // digest}.
+    // digest}. Device backends accelerate only the MatExpand GEMMs.
     const auto [seed_u, seed_v] = DeriveProjectorSeedsBMX4CLT(m_template);
-    m_A = ExpandOperandAMatExpand(m_template, n);
+    m_A = ExpandOperandAMatExpand(m_template, n, m_backend);
     m_U = bx::ExpandProjectorBMX4C(seed_u, m_m, n);
     m_V = bx::ExpandProjectorBMX4C(seed_v, n, m_m);
     m_P = matmul::v4::ComputeProjectedLeft(m_U, m_A, n, m_m);
@@ -384,7 +414,7 @@ bool WindowSketchMinerLT::MineWindow(const std::vector<CBlockHeader>& headers,
             return false;
         }
         const uint256 sigma = matmul::v4::DeriveSigma(header);
-        const std::vector<int8_t> Bhat = ExpandOperandBMatExpand(header, m_n);
+        const std::vector<int8_t> Bhat = ExpandOperandBMatExpand(header, m_n, m_backend);
         const std::vector<int32_t> Q = matmul::v4::ComputeProjectedRight(Bhat, m_V, m_n, m_m);
         const std::vector<Fq> Chat = matmul::v4::ComputeCombineModQ(m_P, Q, m_n, m_m);
 
