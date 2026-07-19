@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 VALID_CLASSES = {"datacenter", "consumer", "apple", "other", "cpu-ref"}
 FRONTIER_CLASSES = {"datacenter", "consumer", "other"}
+LT_PRODUCTION_N = 4096
 
 
 def die(msg: str, code: int = 2) -> None:
@@ -360,6 +361,33 @@ def device_nps(rep: dict) -> float | None:
     return positive_number(rep.get("device_nonce_per_s"))
 
 
+def g2_comparison_config(rep: dict) -> tuple[int, int, int, str, str] | None:
+    """Return the exact workload/build identity required for a G2 comparison."""
+    dimensions: list[int] = []
+    for field in ("n", "window", "rounds"):
+        value = rep.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return None
+        dimensions.append(value)
+    measurement_mode = rep.get("measurement_mode")
+    source_revision = rep.get("source_revision")
+    if not isinstance(measurement_mode, str) or not measurement_mode:
+        return None
+    if (
+        not isinstance(source_revision, str)
+        or not source_revision
+        or source_revision.endswith("-dirty")
+    ):
+        return None
+    return (*dimensions, measurement_mode, source_revision)
+
+
+def g2_part_matches(row: dict, expected: str) -> bool:
+    """Require the explicitly labeled silicon named by the B200/5090 gate."""
+    part = re.sub(r"[^a-z0-9]", "", (row.get("part") or "").lower())
+    return expected in part
+
+
 def host_orchestrated_nps(rep: dict) -> float | None:
     """Diagnostic wall rate; never usable by G2/G3 or ASERT."""
     return positive_number(rep.get("host_orchestrated_nonce_per_s"))
@@ -410,6 +438,7 @@ def evaluate(
         tup = tensor_util(rep)
         npe = bool(rep.get("native_path_eligible", False))
         measured_nps = device_nps(rep)
+        comparison_config = g2_comparison_config(rep)
         reported_asert = asert_suggestion(rep)
         expected_asert = expected_asert_suggestion(rep)
         row = {
@@ -438,6 +467,7 @@ def evaluate(
             "silicon_rate_provenance": silicon_rate_provenance(rep),
             "device_measured": device_measured(rep),
             "nps": measured_nps,
+            "g2_comparison_config": comparison_config,
             "host_orchestrated_nps": host_orchestrated_nps(rep),
             "cpu_nps": None,
             "v3_hashrate": positive_number(rep.get("v3_hashrate")),
@@ -566,9 +596,22 @@ def evaluate(
 
     # G2 — B200/5090 silicon nonce/s ratio >= ~4x. Fail closed unless each rate
     # is a consensus-Q* device-resident batch with W generation and digest on
-    # device and no per-nonce synchronization.
-    dc = [r for r in frontier if r["class"] == "datacenter" and r["nps"] is not None]
-    cons = [r for r in frontier if r["class"] == "consumer" and r["nps"] is not None]
+    # device and no per-nonce synchronization. Reports are comparable only
+    # when workload, measurement mode, and source revision match exactly.
+    dc = [
+        r
+        for r in frontier
+        if r["class"] == "datacenter"
+        and g2_part_matches(r, "b200")
+        and r["nps"] is not None
+    ]
+    cons = [
+        r
+        for r in frontier
+        if r["class"] == "consumer"
+        and g2_part_matches(r, "5090")
+        and r["nps"] is not None
+    ]
     g2 = False
     g2_evidence = {
         "datacenter_file": None,
@@ -576,41 +619,110 @@ def evaluate(
         "datacenter_nonce_per_s": None,
         "consumer_nonce_per_s": None,
         "ratio": None,
+        "comparison_config": None,
     }
     if not dc or not cons:
         reasons.append(
-            "G2 B200/5090 ratio: UNVERIFIED — need a finite positive device_nonce_per_s "
-            "from a device-resident consensus-Q* batch (device W generation + digest; no "
-            "per-nonce sync) on at least one datacenter and one consumer LT report. "
-            "CPU and host-orchestrated rates do not count."
+            "G2 B200/5090 ratio: UNVERIFIED — need explicitly labeled B200 and RTX 5090 "
+            "reports with finite positive device_nonce_per_s from resident consensus-Q* "
+            "batches (device W generation + digest; no per-nonce sync). Other parts, CPU "
+            "rates, and host-orchestrated rates do not count."
         )
     else:
-        best_dc = max(dc, key=lambda r: r["nps"])
-        best_c = max(cons, key=lambda r: r["nps"])
-        ratio = best_dc["nps"] / best_c["nps"]
-        g2_evidence = {
-            "datacenter_file": best_dc["file"],
-            "consumer_file": best_c["file"],
-            "datacenter_nonce_per_s": best_dc["nps"],
-            "consumer_nonce_per_s": best_c["nps"],
-            "ratio": ratio,
-        }
-        g2 = ratio >= 4.0
-        if not g2:
+        comparable: list[tuple[dict, dict]] = []
+        for dc_row in dc:
+            config = dc_row["g2_comparison_config"]
+            if config is None or config[0] != LT_PRODUCTION_N:
+                continue
+            for consumer_row in cons:
+                if consumer_row["g2_comparison_config"] == config:
+                    comparable.append((dc_row, consumer_row))
+
+        if not comparable:
             reasons.append(
-                "G2 B200/5090 ratio FAIL: %.3g / %.3g = %.2fx < 4x."
-                % (best_dc["nps"], best_c["nps"], ratio)
+                "G2 B200/5090 ratio: UNVERIFIED — no comparable datacenter/consumer "
+                "production report pair. Both reports must use n=4096 and have identical "
+                "positive integer window and rounds plus identical non-empty "
+                "measurement_mode and identical clean source_revision (-dirty builds are rejected)."
             )
+        else:
+            configs = {dc_row["g2_comparison_config"] for dc_row, _ in comparable}
+            if len(configs) != 1:
+                reasons.append(
+                    "G2 B200/5090 ratio: UNVERIFIED — multiple comparable production "
+                    "campaign configurations were supplied; filter inputs to one exact "
+                    "n/window/rounds/measurement_mode/source_revision campaign."
+                )
+            else:
+                config = next(iter(configs))
+                matching_dc = [r for r in dc if r["g2_comparison_config"] == config]
+                matching_consumers = [r for r in cons if r["g2_comparison_config"] == config]
+                best_dc = max(matching_dc, key=lambda r: r["nps"])
+                best_c = max(matching_consumers, key=lambda r: r["nps"])
+                ratio = best_dc["nps"] / best_c["nps"]
+                n, window, rounds, measurement_mode, source_revision = config
+                g2_evidence = {
+                    "datacenter_file": best_dc["file"],
+                    "consumer_file": best_c["file"],
+                    "datacenter_nonce_per_s": best_dc["nps"],
+                    "consumer_nonce_per_s": best_c["nps"],
+                    "ratio": ratio,
+                    "comparison_config": {
+                        "n": n,
+                        "window": window,
+                        "rounds": rounds,
+                        "measurement_mode": measurement_mode,
+                        "source_revision": source_revision,
+                    },
+                }
+                g2 = ratio >= 4.0
+                if not g2:
+                    reasons.append(
+                        "G2 B200/5090 ratio FAIL: %.3g / %.3g = %.2fx < 4x "
+                        "(n=%d window=%d rounds=%d mode=%s revision=%s)."
+                        % (
+                            best_dc["nps"],
+                            best_c["nps"],
+                            ratio,
+                            n,
+                            window,
+                            rounds,
+                            measurement_mode,
+                            source_revision,
+                        )
+                    )
 
     # G3 — nonce/$ ordering from operator-supplied costs only (never invent $/hr).
+    # Use the same exact workload/build campaign selected for G2. Comparing the
+    # best cost-normalized reports independently would recreate the old G2 bug:
+    # a cheap/small/old consumer run could be ranked against an unrelated
+    # production/new datacenter run even though both rates are individually
+    # silicon-eligible.
     g3 = False
     if not costs:
         reasons.append(
             "G3 nonce/$: UNVERIFIED — supply --cost host=dollars_per_unit for labeled "
             "parts (this tool invents no rental/purchase prices)."
         )
+    elif g2_evidence["comparison_config"] is None:
+        reasons.append(
+            "G3 nonce/$: UNVERIFIED — no exact workload/build-matched "
+            "datacenter/consumer campaign is available for cost comparison."
+        )
     else:
-        measured = [r for r in frontier if r["nps"] is not None]
+        selected = g2_evidence["comparison_config"]
+        selected_config = (
+            selected["n"],
+            selected["window"],
+            selected["rounds"],
+            selected["measurement_mode"],
+            selected["source_revision"],
+        )
+        measured = [
+            r
+            for r in frontier
+            if r["nps"] is not None and r["g2_comparison_config"] == selected_config
+        ]
         scored = []
         for r in measured:
             c = cost_for(r, costs)
@@ -619,14 +731,36 @@ def evaluate(
             scored.append((r, r["nps"] / c))
         dc_s = [s for s in scored if s[0]["class"] == "datacenter"]
         c_s = [s for s in scored if s[0]["class"] == "consumer"]
-        if not dc_s or not c_s:
+        costed_configs = {
+            dc_score[0]["g2_comparison_config"]
+            for dc_score in dc_s
+            for consumer_score in c_s
+            if dc_score[0]["g2_comparison_config"] is not None
+            and dc_score[0]["g2_comparison_config"][0] == LT_PRODUCTION_N
+            and dc_score[0]["g2_comparison_config"]
+            == consumer_score[0]["g2_comparison_config"]
+        }
+        if not costed_configs:
             reasons.append(
-                "G3 nonce/$: UNVERIFIED — need --cost for both datacenter and consumer "
-                "parts that also carry silicon-eligible batched device_nonce_per_s."
+                "G3 nonce/$: UNVERIFIED — need --cost for a comparable datacenter/consumer "
+                "n=4096 pair with identical window, rounds, measurement_mode, and "
+                "clean source_revision that also carries silicon-eligible device_nonce_per_s."
+            )
+        elif len(costed_configs) != 1:
+            reasons.append(
+                "G3 nonce/$: UNVERIFIED — multiple costed production campaign "
+                "configurations were supplied; filter inputs to one exact campaign."
             )
         else:
-            best_dc_s = max(dc_s, key=lambda x: x[1])
-            best_c_s = max(c_s, key=lambda x: x[1])
+            config = next(iter(costed_configs))
+            best_dc_s = max(
+                (score for score in dc_s if score[0]["g2_comparison_config"] == config),
+                key=lambda x: x[1],
+            )
+            best_c_s = max(
+                (score for score in c_s if score[0]["g2_comparison_config"] == config),
+                key=lambda x: x[1],
+            )
             g3 = best_dc_s[1] >= best_c_s[1]
             if not g3:
                 reasons.append(

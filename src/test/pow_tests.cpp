@@ -1464,7 +1464,10 @@ BOOST_AUTO_TEST_CASE(MatMulBMX4CSeed_field_pinning_is_v3_and_idempotent)
     // honestly-mined block. The pinning MUST therefore be idempotent.
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
-    // Regtest activates v4 at 100 and ENC-BMX4C at 150.
+    // This fixture targets BMX4C seed pinning, not the later LT profile.
+    consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    consensus.fMatMulLTSealAsPoW = false;
+    // Regtest activates v4 at 100 and ENC-BMX4C at 150 once LT is disabled.
     BOOST_REQUIRE(consensus.GetMatMulEncodingProfile(150) ==
                   Consensus::MatMulEncodingProfile::ENC_BMX4C);
 
@@ -4771,6 +4774,10 @@ BOOST_AUTO_TEST_CASE(MatMulBMX4C_mine_validate_round_trip_enforcing)
     // ENFORCING config: do NOT skip matmul validation (regtest default skips it).
     consensus.fMatMulPOW = true;
     consensus.fSkipMatMulValidation = false;
+    // Keep this round trip on the profile named by the test. Regtest normally
+    // enables DR-LT at height 100 and would otherwise supersede BMX4C here.
+    consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    consensus.fMatMulLTSealAsPoW = false;
     // Shrink the v4 dimension to the smallest legal ENC-BMX4C dim for a fast solve:
     // 64 % 32 == 0 (E8M0 blocks), b=kTileB=4 | 64, within regtest [64,1024].
     consensus.nMatMulV4Dimension = 64;

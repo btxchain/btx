@@ -69,6 +69,7 @@ constexpr char kMatExpandHTag[] = "BTX_MATEXPAND_H_V44LT";
 constexpr char kMatExpandWTag[] = "BTX_MATEXPAND_W_V44LT";
 constexpr char kMatExpandWATag[] = "BTX_MATEXPAND_WA_V44LT";
 constexpr size_t kDigestBytes = 32;
+constexpr size_t kMaxConsensusBatch = matmul::v4::lt::kConsensusQStarMax;
 
 // The exact logical-MX lowering below schedules four dense INT8 GEMMs. Keep it
 // as a qualification/benchmark lane until silicon data shows it beating the
@@ -1510,7 +1511,10 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
                                       uint32_t n, uint32_t m,
                                       std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
 {
-    if (headers.empty()) return false;
+    // Bound every allocation before EnsureBatchCapacity. Consensus Q* is at
+    // most 512, so a larger full-header vector is malformed for this ABI and
+    // must fail closed rather than growing device/host staging buffers.
+    if (headers.empty() || headers.size() > kMaxConsensusBatch) return false;
     auto& pool = Pool();
     std::lock_guard<std::mutex> lock(pool.mu);
     if (!pool.BindTemplate(headers.front(), n, m) ||
@@ -1673,7 +1677,10 @@ bool ComputeDigestsOnlyLTCuda(
 {
     out.clear();
     if (provenance != nullptr) *provenance = {};
-    if (headers.empty()) return false;
+    // Keep the hard bound at the public boundary too: an oversized request
+    // must not silently turn into the host ExactGemm fallback after the
+    // resident path declines it.
+    if (headers.empty() || headers.size() > kMaxConsensusBatch) return false;
 
     uint32_t m = 0;
     if (!matmul::v4::lt::ValidateDimsBMX4CLT(n, m)) return false;

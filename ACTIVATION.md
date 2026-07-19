@@ -50,7 +50,7 @@ the shared measurement instrument named in B2g / B4′.
 | A2 | Height-gated dispatch + one-time ASERT rescale (`pow.cpp`, `validation.cpp`) | ✅ done |
 | A3 | Chainparams: regtest/testnet v4 params; **mainnet unset** | ✅ done |
 | A4 | GPU backends (CUDA/Metal/HIP) + dispatch + capabilities — host side compiles | ✅ done |
-| A5 | Dispatch re-verifies every accelerated result vs CPU, falls back | ✅ done |
+| A5 | Dispatch verifies every full-payload accelerated result; ENC-DR-LT returns digest-only losing slots and CPU-reconstructs/verifies/reseals every potential winner; any device/winner failure falls back | ✅ done |
 | A6 | Miner seals `header.matmul_digest` (mining-flow correctness) | ✅ done |
 | A7 | Fix `matmul_v4_pow_tests` / `matmul_v4_determinism_vectors` digest-seal + field-const bug | ✅ done |
 | A8 | CPU unit suite builds + **runs green** (all 5 v4 suites + regtest activation test) | ✅ done |
@@ -202,7 +202,8 @@ supermajority upgraded → activate.
 ### B6. Staged mainnet activation — the one-line flip on GO
 
 Mainnet `nMatMulV4Height` is **UNSET** (disabled) in `src/kernel/chainparams.cpp`.
-On GO (CUDA + Metal both PASS), activation is a single, pre-planned change:
+Once every exit criterion above is GO (with CUDA and Metal PASSes only two of
+the required inputs), activation is a single, pre-planned change:
 
 1. **Pick the height with lead time.** `H_activate = current_mainnet_height +
    Δ`, where `Δ` gives **≥ 2 weeks** of blocks at 90 s spacing

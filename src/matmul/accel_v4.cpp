@@ -404,9 +404,28 @@ bool TryDeviceDigestsBMX4CLT(Kind backend, const std::vector<CBlockHeader>& head
 
     std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
     if (backend == Kind::CUDA) {
-        if (!matmul_v4::cuda::ComputeDigestsOnlyLTCuda(headers, n, results)) return false;
+        matmul_v4::cuda::LtCudaBatchProvenance provenance;
+        if (!matmul_v4::cuda::ComputeDigestsOnlyLTCuda(
+                headers, n, results, &provenance) ||
+            !provenance.device_w_generation || !provenance.device_digest ||
+            !provenance.per_nonce_sync_absent ||
+            (headers.size() > 1 && !provenance.qstar_device_batched)) {
+            // The CUDA entry point deliberately has a bit-exact host fallback,
+            // which may itself use individual device GEMMs and report Ok. That
+            // is useful below the backend API, but it is not resident LT mining:
+            // require the same provenance tuple used by performance telemetry
+            // before accounting this as a successful device batch.
+            return false;
+        }
     } else if (backend == Kind::HIP) {
-        if (!matmul_v4::hip::ComputeDigestsOnlyLTHip(headers, n, results)) return false;
+        matmul_v4::hip::LtHipBatchProvenance provenance;
+        if (!matmul_v4::hip::ComputeDigestsOnlyLTHip(
+                headers, n, results, &provenance) ||
+            !provenance.device_w_generation || !provenance.device_digest ||
+            !provenance.per_nonce_sync_absent ||
+            (headers.size() > 1 && !provenance.qstar_device_batched)) {
+            return false;
+        }
     } else if (nonce_only_batch) {
         std::vector<uint64_t> nonces(headers.size());
         for (size_t i = 0; i < headers.size(); ++i) {

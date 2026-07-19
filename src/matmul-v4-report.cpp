@@ -88,6 +88,8 @@
 // It never publishes device_nonce_per_s, ASERT, tensor-majority, bit-exact, or
 // readiness evidence and its JSON must not be aggregated by lt-gate.py.
 
+#include <bitcoin-build-info.h>
+#include <clientversion.h>
 #include <crypto/sha256.h>
 #include <matmul/accel_v4.h>
 #include <matmul/backend_capabilities_v4.h>
@@ -129,6 +131,20 @@ const TranslateFn G_TRANSLATION_FUN{nullptr};
 namespace {
 
 std::string g_sha256_implementation{"uninitialized"};
+
+std::string ReportSourceRevision()
+{
+#if defined(BUILD_GIT_COMMIT)
+    return BUILD_GIT_COMMIT;
+#elif defined(BUILD_GIT_TAG)
+    return BUILD_GIT_TAG;
+#else
+    // Release archives without generated VCS metadata still expose a stable
+    // version identity. Development builds normally take one of the branches
+    // above, including the "-dirty" suffix emitted by GenerateBuildInfo.cmake.
+    return FormatFullVersion();
+#endif
+}
 
 using Clock = std::chrono::steady_clock;
 namespace mv4 = matmul::v4;
@@ -1062,6 +1078,7 @@ int RunBmx4cProfile(const Args& args, const std::string& host, matmul_v4::accel:
     UniValue root(UniValue::VOBJ);
     root.pushKV("tool", "matmul-v4-report");
     root.pushKV("schema_version", 2);
+    root.pushKV("source_revision", ReportSourceRevision());
     root.pushKV("host", host);
     root.pushKV("host_cpu_arch", HostCpuArch());
     root.pushKV("sha256_implementation", g_sha256_implementation);
@@ -1553,6 +1570,7 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     UniValue root(UniValue::VOBJ);
     root.pushKV("tool", "matmul-v4-report");
     root.pushKV("schema_version", 3);
+    root.pushKV("source_revision", ReportSourceRevision());
     root.pushKV("host", host);
     root.pushKV("host_cpu_arch", HostCpuArch());
     root.pushKV("sha256_implementation", g_sha256_implementation);
@@ -1884,6 +1902,7 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     UniValue root(UniValue::VOBJ);
     root.pushKV("tool", "matmul-v4-report");
     root.pushKV("schema_version", 3);
+    root.pushKV("source_revision", ReportSourceRevision());
     root.pushKV("host", host);
     root.pushKV("host_cpu_arch", HostCpuArch());
     root.pushKV("sha256_implementation", g_sha256_implementation);
@@ -2230,6 +2249,7 @@ int main(int argc, char* argv[])
     UniValue root(UniValue::VOBJ);
     root.pushKV("tool", "matmul-v4-report");
     root.pushKV("schema_version", 1);
+    root.pushKV("source_revision", ReportSourceRevision());
     root.pushKV("host", host);
     root.pushKV("host_cpu_arch", HostCpuArch());
     root.pushKV("sha256_implementation", g_sha256_implementation);

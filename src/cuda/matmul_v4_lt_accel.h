@@ -72,9 +72,11 @@ struct LtCudaBatchProvenance {
  *  WindowSketchMinerLT on decline. `out[i].digest` is BYTE-IDENTICAL to
  *  matmul::v4::lt::ComputeDigestBMX4CLT for the corresponding header.
  *  `target_match` is always false (no target in this signature).
- *  `backend_status` is Ok when the device path served the window, Fallback
- *  when host ExactGemm produced it (still bit-exact). Returns false only on
- *  structural failure; on false, `out` is cleared. */
+ *  `backend_status` reports bit-exact execution success, but does not prove a
+ *  resident batch: host orchestration may still use successful per-call device
+ *  GEMMs. Callers making mining/performance claims must use the full-header
+ *  overload and require its provenance fields. Returns false only on structural
+ *  failure; on false, `out` is cleared. */
 [[nodiscard]] bool ComputeDigestsOnlyLTCuda(const CBlockHeader& tmpl, uint32_t n,
                                             const uint64_t* nonces, size_t count,
                                             std::vector<matmul::v4::lt::DigestOnlyResultLT>& out);
@@ -84,7 +86,9 @@ struct LtCudaBatchProvenance {
  *  resident call generates W and SHA256d(Chat) on device, returns only one
  *  32-byte digest per candidate, and has one stream synchronization at the
  *  batch boundary. Host fallback remains bit-exact but reports all provenance
- *  fields false. Every header must have the same ComputeTemplateHash. */
+ *  fields false. Every header must have the same ComputeTemplateHash, and the
+ *  batch must contain at most kConsensusQStarMax (512) headers; oversized calls
+ *  fail before device allocation or host fallback. */
 [[nodiscard]] bool ComputeDigestsOnlyLTCuda(
     const std::vector<CBlockHeader>& headers, uint32_t n,
     std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,

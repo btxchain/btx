@@ -234,6 +234,29 @@ static std::chrono::milliseconds TargetSpacingForTip(const CBlockIndex* tip, con
 
 // Internal stuff
 namespace {
+/** Return the canonical byte length of the cache sketch committed by `header`.
+ *
+ * MatMulProfileParams::sketch_rank_m is the calibrated production rank. Small
+ * regtest profiles deliberately use a smaller runtime dimension, so the wire
+ * object must instead derive m from the authenticated header dimension and the
+ * active profile's tile size. Invalid/non-integral shapes have no canonical
+ * sketch representation.
+ */
+std::optional<uint64_t> CanonicalMatMulSketchBytes(
+    const CBlockHeader& header,
+    const Consensus::MatMulProfileParams& profile)
+{
+    const uint64_t dimension{header.matmul_dim};
+    const uint64_t tile_b{profile.tile_b};
+    if (dimension == 0 || tile_b == 0 || dimension % tile_b != 0) return std::nullopt;
+
+    const uint64_t rank_m{dimension / tile_b};
+    if (rank_m > std::numeric_limits<uint64_t>::max() / rank_m) return std::nullopt;
+    const uint64_t words{rank_m * rank_m};
+    if (words > std::numeric_limits<uint64_t>::max() / sizeof(uint64_t)) return std::nullopt;
+    return sizeof(uint64_t) * words;
+}
+
 /** Blocks that are in flight, and that are in the queue to be downloaded. */
 struct QueuedBlock {
     /** BlockIndex. We must have this since we only request blocks when we've already validated the header. */
@@ -2098,9 +2121,14 @@ void PeerManagerImpl::MaybeRequestMatMulSketch(CNode& pto, const CBlockIndex& in
     // Single-slot mmsketch cannot authenticate under Phase-A PayloadMatchesCommitment;
     // tip verify uses ε=0 seal recompute. Do not prefetch.
     if (consensus.IsMatMulLTSealAsPoWActive(index.nHeight)) return;
-    // A profile whose 8·m² exceeds the single-message ceiling is simply not
-    // served/requested (peers recompute; the cache is best-effort, §4.3).
-    if (profile.SketchCacheBytes() > MAX_MMSKETCH_PAYLOAD_SIZE) return;
+    // Derive the wire object's rank from this header, not the profile's
+    // calibrated production rank: reduced-dimension regtest blocks have a
+    // correspondingly smaller canonical sketch. Invalid shapes and profiles
+    // whose 8·m² exceeds the single-message ceiling are simply not requested
+    // (peers recompute; the cache is best-effort, §4.3).
+    const std::optional<uint64_t> sketch_bytes{
+        CanonicalMatMulSketchBytes(index.GetBlockHeader(), profile)};
+    if (!sketch_bytes || *sketch_bytes > MAX_MMSKETCH_PAYLOAD_SIZE) return;
     if (matmul::GetMatMulSketchCache().Capacity() == 0) return;   // cache disabled
     if (matmul::GetMatMulSketchCache().Have(index.GetBlockHash())) return;
     // WP-8 / H9/H10 (a): node-wide prefetch <-> cache coupling. The per-peer
@@ -4633,6 +4661,18 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     // to its defensive self-reservation after we intentionally skip admission.
     if (already_have_block_data) return true;
 
+    // Network message processing is serialized by g_msgproc_mutex. Therefore
+    // a marker found here belongs to the one delivery that already reserved a
+    // slot and entered the async single-flight path; reject redundant BLOCK,
+    // CMPCTBLOCK, or BLOCKTXN completions before charging either admission
+    // capacity or the peer/global verification budgets.
+    if (IsMatMulAsyncVerificationPending(block_hash)) {
+        LogDebug(BCLog::NET,
+                 "Ignoring duplicate %s hash=%s from peer=%d: MatMul verification already pending\n",
+                 source, block_hash.ToString(), node.GetId());
+        return false;
+    }
+
     const Consensus::Params& params{m_chainparams.GetConsensus()};
     const uint32_t work{MatMulEncDrWorkUnits(params, reference_height)};
     if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, params,
@@ -6797,11 +6837,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // commitment hash so a solicited malformed frame cannot buy an up-to-8
         // MiB SHA pass or enter the cache. ParseSketch repeats this invariant on
         // the eventual verify path as defense in depth.
-        const uint64_t expected_sketch_bytes{profile.SketchCacheBytes()};
-        if (sketch_bytes.size() != expected_sketch_bytes) {
+        const std::optional<uint64_t> expected_sketch_bytes{
+            CanonicalMatMulSketchBytes(header, profile)};
+        if (!expected_sketch_bytes) {
+            WITH_LOCK(cs_main, m_matmul_sketch_requested.erase(block_hash));
+            Misbehaving(*peer, "mmsketch has no canonical size for header dimension");
+            return;
+        }
+        if (sketch_bytes.size() != *expected_sketch_bytes) {
             WITH_LOCK(cs_main, m_matmul_sketch_requested.erase(block_hash));
             Misbehaving(*peer, strprintf("mmsketch non-canonical size (%u != %u bytes)",
-                                         sketch_bytes.size(), expected_sketch_bytes));
+                                         sketch_bytes.size(), *expected_sketch_bytes));
             return;
         }
         // ONE-hash authentication against the header commitment.

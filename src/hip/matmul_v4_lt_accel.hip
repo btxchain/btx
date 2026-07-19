@@ -46,6 +46,8 @@ namespace matmul_v4::hip {
 
 namespace {
 
+constexpr size_t kMaxConsensusBatch = matmul::v4::lt::kConsensusQStarMax;
+
 constexpr char kMatExpandGTag[] = "BTX_MATEXPAND_G_V44LT";
 constexpr char kMatExpandHTag[] = "BTX_MATEXPAND_H_V44LT";
 constexpr char kMatExpandWTag[] = "BTX_MATEXPAND_W_V44LT";
@@ -1376,7 +1378,6 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
     matmul_v4::hip::LtHipBatchProvenance* provenance)
 {
-    constexpr size_t kMaxConsensusBatch{512};
     if (headers.empty() || headers.size() > kMaxConsensusBatch) return false;
     const uint256 template_hash = matmul::v4::ComputeTemplateHash(headers.front());
     for (const CBlockHeader& header : headers) {
@@ -1567,7 +1568,10 @@ bool ComputeDigestsOnlyLTHip(
 {
     out.clear();
     if (provenance) *provenance = {};
-    if (headers.empty()) return false;
+    // Match CUDA's public fail-closed contract: requests larger than the
+    // consensus Q* ceiling never enter either device allocation or host
+    // fallback paths.
+    if (headers.empty() || headers.size() > kMaxConsensusBatch) return false;
     uint32_t m = 0;
     if (!matmul::v4::lt::ValidateDimsBMX4CLT(n, m)) return false;
 

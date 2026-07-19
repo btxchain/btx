@@ -1540,6 +1540,41 @@ BOOST_AUTO_TEST_CASE(hip_full_header_batch_stub_clears_provenance)
 }
 #endif
 
+BOOST_AUTO_TEST_CASE(full_header_batch_rejects_above_consensus_qstar)
+{
+    const auto header = MakeLTHeader(13, kTestDim);
+    std::vector<CBlockHeader> headers(
+        static_cast<size_t>(lt::kConsensusQStarMax) + 1, header);
+    std::vector<lt::DigestOnlyResultLT> out(1);
+
+    matmul_v4::cuda::LtCudaBatchProvenance cuda_provenance;
+    cuda_provenance.qstar_device_batched = true;
+    cuda_provenance.device_w_generation = true;
+    cuda_provenance.device_digest = true;
+    cuda_provenance.per_nonce_sync_absent = true;
+    BOOST_CHECK(!matmul_v4::cuda::ComputeDigestsOnlyLTCuda(
+        headers, kTestDim, out, &cuda_provenance));
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!cuda_provenance.qstar_device_batched);
+    BOOST_CHECK(!cuda_provenance.device_w_generation);
+    BOOST_CHECK(!cuda_provenance.device_digest);
+    BOOST_CHECK(!cuda_provenance.per_nonce_sync_absent);
+
+    out.resize(1);
+    matmul_v4::hip::LtHipBatchProvenance hip_provenance;
+    hip_provenance.qstar_device_batched = true;
+    hip_provenance.device_w_generation = true;
+    hip_provenance.device_digest = true;
+    hip_provenance.per_nonce_sync_absent = true;
+    BOOST_CHECK(!matmul_v4::hip::ComputeDigestsOnlyLTHip(
+        headers, kTestDim, out, &hip_provenance));
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!hip_provenance.qstar_device_batched);
+    BOOST_CHECK(!hip_provenance.device_w_generation);
+    BOOST_CHECK(!hip_provenance.device_digest);
+    BOOST_CHECK(!hip_provenance.per_nonce_sync_absent);
+}
+
 BOOST_AUTO_TEST_CASE(matexpand_extract_r2_nonapproximability)
 {
     // C15-A quantitative witness (dual pre-review): best LS affine and

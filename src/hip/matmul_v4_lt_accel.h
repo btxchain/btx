@@ -67,7 +67,10 @@ struct LtHipBatchProvenance {
  *  ABI, each slot carries its own seed_a/seed_b. All headers must have the
  *  same ComputeTemplateHash. The resident HIP path queues the complete batch,
  *  hashes each Chat on device, then performs one digest/status transfer and
- *  one stream synchronization. */
+ *  one stream synchronization. Callers must require those provenance fields
+ *  before treating success as resident mining; backend status alone is not
+ *  residency proof. Batches larger than kConsensusQStarMax (512) fail before
+ *  device allocation or host fallback. */
 [[nodiscard]] bool ComputeDigestsOnlyLTHip(
     const std::vector<CBlockHeader>& headers, uint32_t n,
     std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,

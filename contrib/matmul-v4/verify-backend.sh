@@ -26,9 +26,10 @@
 # compile-failure, so its presence is positive proof the chosen silicon --
 # identified by <device-id> -- certified true >=32-bit integer accumulation.
 #
-# Activation gate (see ACTIVATION.md): mainnet activation is ready as soon as
-# BOTH `cuda` and `metal` return PASS on real hardware. Collect the results
-# from an NVIDIA host and an Apple M-series host; two PASSes => GO.
+# Backend qualification only (see ACTIVATION.md): CUDA and Metal PASSes on real
+# hardware are required evidence, but do not authorize mainnet activation.
+# Activation remains staged/inert until every profile-specific consensus,
+# measurement, review, and policy gate is independently closed.
 #
 # Usage:
 #   contrib/matmul-v4/verify-backend.sh cuda    # on an NVIDIA (sm>=75) host
@@ -243,5 +244,6 @@ if [ -z "$MARKER" ]; then
 fi
 echo "RESULT: PASS ($BACKEND) -- bit-exact vs CPU reference on this hardware, including the C-1"
 echo "high-magnitude (2^24..2^31) accumulator vectors on the SELECTED device ($MARKER)."
-echo "Record this result in ACTIVATION.md. Activation GO requires PASS on both cuda and metal."
+echo "Record this result in ACTIVATION.md. CUDA and Metal PASSes are necessary backend evidence,"
+echo "but are not sufficient for activation GO; every ACTIVATION.md gate remains independent."
 exit 0

@@ -39,6 +39,11 @@ def report(
     device_tensor_counters_valid: object = True,
     device_tensor_timing_domain: object = "device-kernel-timing-and-counters",
     tensor_util_pct: object = 60.0,
+    n: object = 4096,
+    window: object = 128,
+    rounds: object = 3,
+    measurement_mode: object = "phase-a-digest",
+    source_revision: object = "1ca87fb",
     v3_hashrate: object = 0.0,
     asert: object = "n/a (pass --v3-hashrate)",
 ) -> dict:
@@ -49,6 +54,11 @@ def report(
         "profile": "bmx4c-lt",
         "host": name.removesuffix(".json"),
         "backend": backend,
+        "n": n,
+        "window": window,
+        "rounds": rounds,
+        "measurement_mode": measurement_mode,
+        "source_revision": source_revision,
         "native_path_eligible": native_path_eligible,
         "device_execution_certified": False,
         "device_tensor_timing_valid": device_tensor_timing_valid,
@@ -109,7 +119,166 @@ class LtGateSchemaTest(unittest.TestCase):
         self.assertTrue(all(row["device_measured"] for row in rows))
         self.assertTrue(all(row["native_path_eligible"] for row in rows))
         self.assertEqual(summary["g2_evidence"]["ratio"], 4.0)
+        self.assertEqual(
+            summary["g2_evidence"]["comparison_config"],
+            {
+                "n": 4096,
+                "window": 128,
+                "rounds": 3,
+                "measurement_mode": "phase-a-digest",
+                "source_revision": "1ca87fb",
+            },
+        )
         self.assertFalse(any("G2 B200/5090 ratio" in reason for reason in reasons))
+
+    def test_g2_rejects_incomparable_workload_mode_or_revision(self):
+        mismatches = {
+            "n": 64,
+            "window": 256,
+            "rounds": 5,
+            "measurement_mode": "telemetry-only-device-resident-qstar",
+            "source_revision": "new-tip",
+        }
+        for field, value in mismatches.items():
+            with self.subTest(field=field):
+                consumer = report("5090.json", 100.0, **{field: value})
+                _, gates, _, reasons, _, summary = self.evaluate_pair(
+                    report("b200.json", 400.0), consumer
+                )
+                self.assertFalse(gates["G2_b200_5090_ratio"])
+                self.assertIsNone(summary["g2_evidence"]["ratio"])
+                self.assertTrue(any("no comparable" in reason for reason in reasons))
+
+    def test_g2_rejects_missing_or_invalid_comparison_identity(self):
+        invalid = (None, "", 0, True)
+        for field in ("n", "window", "rounds", "measurement_mode", "source_revision"):
+            for value in invalid:
+                with self.subTest(field=field, value=value):
+                    candidate = report("b200.json", 400.0)
+                    candidate[field] = value
+                    self.assertIsNone(lt_gate.g2_comparison_config(candidate))
+                    _, gates, _, reasons, _, _ = self.evaluate_pair(
+                        candidate, report("5090.json", 100.0)
+                    )
+                    self.assertFalse(gates["G2_b200_5090_ratio"])
+                    self.assertTrue(any("no comparable" in reason for reason in reasons))
+
+        dirty = report("b200.json", 400.0, source_revision="1ca87fb-dirty")
+        self.assertIsNone(lt_gate.g2_comparison_config(dirty))
+        _, gates, _, reasons, _, _ = self.evaluate_pair(
+            dirty, report("5090.json", 100.0)
+        )
+        self.assertFalse(gates["G2_b200_5090_ratio"])
+        self.assertTrue(any("no comparable" in reason for reason in reasons))
+
+    def test_g2_ignores_faster_but_incompatible_report(self):
+        dc_fast_wrong_shape = report("b200-fast.json", 1000.0, n=64, window=64)
+        dc_matched = report("b200.json", 400.0)
+        consumer = report("5090.json", 100.0)
+        labels = {
+            **LABELS,
+            "b200-fast.json": ("nvidia", "datacenter", "B200"),
+        }
+
+        _, gates, _, _, _, summary = lt_gate.evaluate(
+            [dc_fast_wrong_shape, dc_matched, consumer], labels, {}, False
+        )
+
+        self.assertTrue(gates["G2_b200_5090_ratio"])
+        self.assertEqual(summary["g2_evidence"]["datacenter_file"], "b200.json")
+        self.assertEqual(summary["g2_evidence"]["consumer_file"], "5090.json")
+        self.assertEqual(summary["g2_evidence"]["ratio"], 4.0)
+
+    def test_g2_ignores_other_datacenter_and_consumer_models(self):
+        reports = [
+            report("b200.json", 400.0),
+            report("5090.json", 100.0),
+            report("h200.json", 2000.0),
+            report("5060.json", 2000.0),
+        ]
+        labels = {
+            **LABELS,
+            "h200.json": ("nvidia", "datacenter", "H200"),
+            "5060.json": ("nvidia", "consumer", "RTX 5060 Ti"),
+        }
+
+        _, gates, _, _, _, summary = lt_gate.evaluate(reports, labels, {}, False)
+
+        self.assertTrue(gates["G2_b200_5090_ratio"])
+        self.assertEqual(summary["g2_evidence"]["datacenter_file"], "b200.json")
+        self.assertEqual(summary["g2_evidence"]["consumer_file"], "5090.json")
+
+    def test_g2_rejects_multiple_compatible_campaigns_without_cherry_picking(self):
+        reports = [
+            report("b200.json", 400.0),
+            report("5090.json", 100.0),
+            report("b200-old.json", 600.0, source_revision="old-tip"),
+            report("5090-old.json", 100.0, source_revision="old-tip"),
+        ]
+        labels = {
+            **LABELS,
+            "b200-old.json": ("nvidia", "datacenter", "B200"),
+            "5090-old.json": ("nvidia", "consumer", "RTX5090"),
+        }
+
+        _, gates, _, reasons, _, summary = lt_gate.evaluate(reports, labels, {}, False)
+
+        self.assertFalse(gates["G2_b200_5090_ratio"])
+        self.assertIsNone(summary["g2_evidence"]["ratio"])
+        self.assertTrue(any("multiple comparable" in reason for reason in reasons))
+
+    def test_g3_requires_costed_reports_from_same_production_campaign(self):
+        costs = {"B200": 1.0, "RTX5090": 1.0}
+        dc = report("b200.json", 400.0)
+        consumer = report("5090.json", 100.0)
+
+        _, gates, _, _, _, _ = lt_gate.evaluate([dc, consumer], LABELS, costs, False)
+        self.assertTrue(gates["G3_nonce_per_dollar"])
+
+        consumer["source_revision"] = "other-tip"
+        _, gates, _, reasons, _, _ = lt_gate.evaluate(
+            [dc, consumer], LABELS, costs, False
+        )
+        self.assertFalse(gates["G3_nonce_per_dollar"])
+        self.assertTrue(
+            any("G3" in reason and "no exact workload/build-matched" in reason
+                for reason in reasons)
+        )
+
+    def test_g3_ignores_cheaper_but_incompatible_report(self):
+        dc = report("b200.json", 400.0)
+        consumer = report("5090.json", 100.0)
+        incompatible_consumer = report(
+            "5090-small.json", 1000.0, n=64, window=64, source_revision="old-tip"
+        )
+        labels = {
+            **LABELS,
+            "5090-small.json": ("nvidia", "consumer", "RTX 5090 small"),
+        }
+        costs = {
+            "b200.json": 4.0,
+            "5090.json": 1.0,
+            "5090-small.json": 0.01,
+        }
+
+        _, gates, _, reasons, _, _ = lt_gate.evaluate(
+            [dc, consumer, incompatible_consumer], labels, costs, False
+        )
+
+        self.assertTrue(gates["G3_nonce_per_dollar"])
+        self.assertFalse(any("G3 REWARD INVERSION" in reason for reason in reasons))
+
+    def test_g3_is_unverified_without_a_comparable_campaign(self):
+        dc = report("b200.json", 400.0)
+        consumer = report("5090.json", 100.0, n=64)
+        _, gates, _, reasons, _, _ = lt_gate.evaluate(
+            [dc, consumer], LABELS, {"b200.json": 1.0, "5090.json": 1.0}, False
+        )
+
+        self.assertFalse(gates["G3_nonce_per_dollar"])
+        self.assertTrue(
+            any("G3" in reason and "no exact workload/build-matched" in reason for reason in reasons)
+        )
 
     def test_g2_silicon_rate_does_not_substitute_for_g1_native_counters(self):
         dc = report(

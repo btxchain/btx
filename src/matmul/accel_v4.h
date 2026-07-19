@@ -20,15 +20,17 @@ class CBlockHeader;
 // the miner (src/pow.cpp SolveMatMulV4) and the pure-integer v4 reference in
 // matmul/pow_v4.h + matmul/matmul_v4.h.
 //
-// CORRECTNESS INVARIANT (consensus-critical): a device backend MUST reproduce
-// the CPU reference (matmul_v4::ComputeDigest) BYTE-FOR-BYTE -- the same
-// `digest_out` and the same sketch `payload_out`, so the result passes
-// matmul_v4::VerifySketch against the honest operands A,B regenerated on the
-// host. The dispatcher NEVER trusts a device result: it re-verifies every
-// accepted digest with matmul_v4::VerifySketch (the O(n^2) sketch-Freivalds
-// check over q = 2^61-1) and, on ANY mismatch or device/setup error, discards
-// the device output and falls back to the CPU reference. A GPU that computes a
-// wrong digest can therefore never win a block; it only ever loses throughput.
+// CORRECTNESS INVARIANT (consensus-critical): full-payload device entry points
+// MUST reproduce the CPU reference BYTE-FOR-BYTE -- the same `digest_out` and
+// sketch `payload_out` -- and the dispatcher verifies the returned pair before
+// accepting it. ENC-DR-LT mining intentionally uses a narrower digest-only
+// contract: losing slots return an empty payload and are never sealed, while
+// every potential winner is reconstructed from the CPU reference, verified,
+// and resealed before acceptance. On ANY winner mismatch or device/setup error,
+// the dispatcher discards the device window and falls back to the CPU reference.
+// A wrong device result can therefore never win a block; it only loses
+// throughput. See ComputeDigestsBMX4CLTDispatched below for the precise LT
+// winner/loser contract.
 //
 // BIT-EXACTNESS: v4 is pure integer arithmetic (balanced-s8 operands, exact
 // INT32 product, F_q sketch). Backends MUST NOT introduce floating point and
@@ -83,13 +85,13 @@ struct Stats {
     uint64_t ascend_mismatch{0};
     uint64_t ascend_fallback{0};
 
-    // BATCHED dispatch counters (ComputeDigestsBatchedDispatched). One request
-    // is one nonce WINDOW. `*_batch_ok` counts windows where EVERY returned
-    // (digest,payload) passed CPU verification and the whole window was
-    // accepted; `*_batch_mismatch` counts windows where the device output
-    // failed CPU verification (a wrong digest, rejected); `*_batch_fallback`
-    // counts every window that fell through to the CPU batched reference
-    // (device error, wrong window size, OR verification mismatch).
+    // BATCHED dispatch counters. One request is one nonce WINDOW. For
+    // full-payload profiles, `*_batch_ok` means every returned (digest,payload)
+    // passed CPU verification. For ENC-DR-LT, losing slots are digest-only and
+    // only potential winners are reconstructed and verified; `*_batch_ok`
+    // means all such winners passed. `*_batch_mismatch` counts a rejected
+    // device window; `*_batch_fallback` counts every fall-through to the CPU
+    // batched reference (device error, wrong window size, or winner mismatch).
     uint64_t batch_requests{0};
     uint64_t cuda_batch_ok{0};
     uint64_t cuda_batch_mismatch{0};
