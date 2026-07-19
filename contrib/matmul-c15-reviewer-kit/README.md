@@ -15,6 +15,7 @@ GO, or permission to raise `nMatMulDRLTHeight`.
 | `reference_extract.py` | Standalone Python ChaCha20-PRF Extract (stdlib only) |
 | `toy_attack_harness.py` | Toy-`n` synthetic MatExpand + affine / degree-2 R² + Freivalds residual |
 | `rank_spectral_regression.md` | `rank(B32) ≤ w` note and smoke procedure |
+| `named-assumption.md` | Pointer to packet **§0.2** (`BTX-C15-NonCollapse-v1`, unreduced) |
 
 ## Requirements
 

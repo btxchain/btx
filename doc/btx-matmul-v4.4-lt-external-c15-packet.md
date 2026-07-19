@@ -71,6 +71,88 @@ Internal non-affinity / golden tests are **witnesses**, not a PASS.
 
 ---
 
+## 0.2 Named novel assumption (unreduced)
+
+**Name:** `BTX-C15-NonCollapse-v1`
+
+**Status:** **UNREDUCED** novel assumption. C-15 remains **OPEN**. This section
+names what external review must stress-test; it does **not** close C-15, does
+**not** authorize raising `nMatMulDRLTHeight`, and does **not** claim a
+reduction to ChaCha20-PRF, SETH/OV/APSP/3SUM, KW secret low-rank, Freivalds
+soundness, or any other standard named problem.
+
+### Informal statement
+
+Under the normative ENC_BMX4C_LT MatExpand Extract (ChaCha20-PRF + M11 +
+position salts) and deep-`m` sketch/combine path, no classical PPT adversary in
+the §0.1 class wins the §0.1 game: accepting Phase-A digests (or seals if SB in
+scope) at advantage `≥ ε` while paying `≤ (1−δ)·HonestMAC(n)` exact-int MACs.
+
+### Game (identical to §0.1; parameter pin)
+
+| Pin | Value |
+|---|---|
+| **Assumption id** | `BTX-C15-NonCollapse-v1` |
+| **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=128`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative ChaCha20-PRF+M11 (`ENC_BMX4C_LT`) |
+| **Honest cost** | `HonestMAC(n)` as in §0.1 (MatExpand-B + `B̂·V` + combine `P·Q`; I1′ template work excluded from marginal) |
+| **Adversary class** | Classical PPT vs `HonestMAC`; poly-many adaptive MatExpand/digest queries and Freivalds transcripts at production EncDr rounds. Primary FAIL class: **linear / degree-≤2 entrywise** Extract surrogates; deg-≤3 and spectral/TMTO surfaces are mandatory firm checklist items (below). Unrestricted adversaries may return INCONCLUSIVE. |
+| **δ, ε** | `δ = 1/2`, `ε = 2⁻⁴⁰` above Freivalds false-accept (firm may retune in SOW — do not silently change) |
+| **Win** | Accepting digest/seal with `Adv ≥ ε` at MAC cost `≤ (1−δ)·HonestMAC(n)` |
+
+PASS/FAIL/INCONCLUSIVE return criteria are exactly those of §0.1. A firm
+**PASS** on this named assumption is still **not** a height raise.
+
+### Does NOT follow from ChaCha20-PRF alone
+
+ChaCha20 being a secure PRF (in the AEAD sense, or even as an ideal block
+function on distinct `(key,nonce,counter)` tuples) is **necessary for the
+candidate mixer**, not **sufficient for MatExpand work-binding**. A PRF
+guarantees that Extract outputs look pseudorandom given secret `prf_key`; it
+does **not** imply that there is no algebraic / amortized / spectral shortcut
+that produces Freivalds-accepting sketches cheaper than `HonestMAC`. Counterexample
+template: wrap a low-rank public core (`rank(B32)≤w`) in a thin PRF that an
+adversary can bypass via an affine fold, related-nonce structure, truncated
+`(i,j)` salt, or TMTO across nonces — the PRF game can still hold on honest
+queries while the PoW non-collapse game fails. Therefore
+`BTX-C15-NonCollapse-v1` is a **separate, unreduced** assumption. Do not write
+“ChaCha is fine ⇒ C-15 closed.”
+
+### Attack-surface checklist (human firm)
+
+Firms should explicitly attempt (or rule out with vectors/metrics) each surface.
+Any concrete win against §0.1 thresholds is a **FAIL** of
+`BTX-C15-NonCollapse-v1`.
+
+| # | Surface | What to try / measure |
+|---|---|---|
+| 1 | **Affine surrogate** | Entrywise `f(B32)=α·raw+β` (or panel-linear) matching Extract; Freivalds rewrite through `G,W,H` |
+| 2 | **Degree ≤ 3** | Polynomial / low-degree LS surrogates; require R² ≪ 0.05 on dense samples **or** exhibit usable rewrite |
+| 3 | **Spectral / low-rank residue** | Shared-φ / Fourier structure on `B̂` after Extract; usable rank ≪ `n` for reassociation (`U`/`V` are rank-transparent) |
+| 4 | **TMTO / cross-nonce** | Tables or partial Expand reuse across nonces / templates under I1′; cheaper than marginal MatExpand-B |
+| 5 | **Related-nonce Mant/Scale XOR** | Lane packing `MANT`/`SCLE` and any `Mant(raw)↔Scale(raw⊕Δ)` identity — amortization beyond per-cell ChaCha? |
+| 6 | **Truncated position salt** | Collapse `(i,j)` to low bits / tiles; equivalence classes that reopen ~`n/w≈32×` thin-panel shortcut |
+
+### Witnesses ≠ proof (in-tree + reviewer kit)
+
+| Artifact | Role |
+|---|---|
+| In-tree Boost tests (`matexpand_not_affine_in_raw`, `matexpand_extract_r2_nonapproximability`, `matexpand_c15b_affine_surrogate_sketch_rejected`, `matexpand_position_salt_differential`, goldens, …) | **Witnesses** that disagree with specific surrogate classes on sampled regimes |
+| `contrib/matmul-c15-reviewer-kit/` (`reference_extract.py`, `toy_attack_harness.py`, goldens) | Build-free **reproduction** of Extract + toy collapse attempts |
+| This named assumption + §0.1 game | What a firm must break or argue against |
+
+Green witnesses / kit runs are **not** a cryptographic proof, **not** a
+reduction, and **not** a C-15 PASS. Only an independent firm note against
+§0.1 / this section (plus separate silicon/tip-soak/HeaderPoW gates) can move
+activation process — and even then height raise is a separate operator
+decision.
+
+**Analog (non-claim):** cuPOW/Pearl conjectures transcript unpredictability /
+batch low-rank equations; BTX conjectures Extract–Freivalds non-collapse under
+public deterministic panels. Same *posture* (named work-binding conjecture),
+different *encoding* — not interchangeable.
+
+---
+
 ## 1. Normative objects (short)
 
 Domain tags (V44LT) and map (see normative spec for full text):
@@ -235,8 +317,9 @@ Internal witnesses: `phase_b_seal_round_trip_and_auth`,
 4. Attempt C15-A/B with a small `n` (e.g. 64) and dense accumulator samples; cost against §0.1.
 5. Attempt I1 / batch-algebra rewrite against the optimal sketch path.
 6. If Phase B is in the launch package, work SB-A..D against seal helpers.
-7. Return a short signed note: **PASS / FAIL / INCONCLUSIVE** per table ID and for the §0.1 game,
-   with any concrete vectors attached. Do **not** fill silicon nonce/s.
+7. Return a short signed note: **PASS / FAIL / INCONCLUSIVE** per table ID and for the §0.1 game /
+   named assumption `BTX-C15-NonCollapse-v1` (§0.2), with any concrete vectors attached. Do **not**
+   fill silicon nonce/s.
 
 ## 7. How this plugs into the silicon campaign
 
@@ -266,3 +349,5 @@ lt-gate.py <dir> --manifest parts.tsv [--cost ...] [--ack-external-c15]
 - Any B200/5090 nonce/s or nonce/$ figure
 - Cryptographic proof that ChaCha20-PRF Extract has no cheaper algebraic shortcut
 - That ChaCha-as-PRF alone is a MatExpand work lower bound
+- That `BTX-C15-NonCollapse-v1` (§0.2) reduces to any standard named problem
+  (SETH/OV/KW/PRF/Freivalds, …) — it is **named and unreduced**
