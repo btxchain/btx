@@ -8,6 +8,7 @@
 #include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <cuda/cuda_context.h>
+#include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_pow.h>
 #include <matmul/matmul_v4.h>
@@ -732,6 +733,9 @@ bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& 
                     uint32_t rows, uint32_t k, uint32_t cols,
                     std::vector<int32_t>& out)
 {
+    if (TryLaunchLtImmaGemmS8S8(left, right, rows, k, cols, out)) {
+        return true;
+    }
     return CudaOkLaunchGemmS8S8(left, right, rows, k, cols, out);
 }
 
@@ -739,6 +743,9 @@ bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>
                      uint32_t rows, uint32_t k, uint32_t cols,
                      std::vector<int32_t>& out)
 {
+    if (TryLaunchLtImmaGemmS32S8(left, right, rows, k, cols, out)) {
+        return true;
+    }
     return CudaOkLaunchGemmS32S8(left, right, rows, k, cols, out);
 }
 
