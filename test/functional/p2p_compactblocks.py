@@ -8,6 +8,7 @@ import random
 from test_framework.blocktools import (
     COINBASE_MATURITY,
     NORMAL_GBT_REQUEST_PARAMS,
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
     add_witness_commitment,
     create_block,
 )
@@ -145,8 +146,12 @@ class CompactBlocksTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 1
+        # create_block() does not attach Freivalds product payloads; keep the
+        # body-payload / v4 requirements inactive (regtest-only). Consensus
+        # unchanged — see REGTEST_GENERIC_P2P_MATMUL_ARGS.
         self.extra_args = [[
             "-acceptnonstdtxn=1",
+            *REGTEST_GENERIC_P2P_MATMUL_ARGS,
         ]]
         self.utxos = []
 

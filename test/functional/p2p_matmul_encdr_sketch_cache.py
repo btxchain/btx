@@ -104,11 +104,18 @@ class BTXMatMulEncDrSketchCache(BitcoinTestFramework):
             common + [f"-mmsketchcache={NODE2_CACHE}"],
         ]
 
+    def setup_network(self):
+        # Star topology only: 0—1 and 0—2. The default chain (1—2) lets node1
+        # keep feeding node2 after disconnect_nodes(0, 2), so the solicited
+        # getmmsketch goes to node1 instead of the attacker P2P peer.
+        self.setup_nodes()
+        self.connect_nodes(0, 1)
+        self.connect_nodes(0, 2)
+        self.sync_all()
+
     def run_test(self):
         node0, node1, node2 = self.nodes
 
-        self.connect_nodes(0, 1)
-        self.connect_nodes(0, 2)
         self.wait_until(
             lambda: node0.getconnectioncount() >= 2
             and node1.getconnectioncount() >= 1
@@ -209,6 +216,8 @@ class BTXMatMulEncDrSketchCache(BitcoinTestFramework):
         # fetch the new block from our attacker peer. Announcing the header makes
         # node2 direct-fetch the block AND prefetch its sketch (getmmsketch) from
         # the attacker: a deterministic SOLICITED delivery.
+        # setup_network uses a star (no 1—2 edge); otherwise node1 would still
+        # relay the tip and steal the solicited prefetch.
         self.disconnect_nodes(0, 2)
         self.generate(node0, 1, sync_fun=self.no_op)
         solicited_hex = node0.getbestblockhash()

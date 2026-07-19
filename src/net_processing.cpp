@@ -1060,13 +1060,15 @@ private:
         static_cast<double>(MATMUL_SKETCH_SERVE_GLOBAL_BYTES_PER_SEC)};
     std::chrono::microseconds m_matmul_serve_global_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
     /** WP-8 / H9/H10: node-wide outstanding GETMMSKETCH prefetch requests
-     *  (hash -> request time). Couples the prefetch rate to the cache: never
-     *  more sketches in flight than the cache has slots, never the same hash
-     *  from two peers. Entries expire after MATMUL_SKETCH_REQUEST_TTL and are
-     *  erased on every terminal MMSKETCH outcome. Only touched from the
-     *  message-handler thread. */
-    std::map<uint256, std::chrono::microseconds> m_matmul_sketch_requested
-        GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+     *  (hash -> (peer, request time)). Couples the prefetch rate to the cache:
+     *  never more sketches in flight than the cache has slots, never the same
+     *  hash from two peers. Entries expire after MATMUL_SKETCH_REQUEST_TTL,
+     *  are erased on every terminal MMSKETCH outcome, and are freed when the
+     *  requesting peer disconnects (so a 2-slot cache cannot be pinned forever
+     *  by an unanswered request to a peer that just left). Guarded by cs_main
+     *  so FinalizeNode can reclaim slots without taking g_msgproc_mutex. */
+    std::map<uint256, std::pair<NodeId, std::chrono::microseconds>> m_matmul_sketch_requested
+        GUARDED_BY(cs_main);
 
     //! v4.4 ENC-DR: opportunistically request the sketch-cache bytes for a block
     //! we are about to download/validate, from the peer we are talking to. Purely
@@ -2002,6 +2004,16 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
 
     m_node_states.erase(nodeid);
 
+    // Free any outstanding GETMMSKETCH prefetch slots owned by this peer so a
+    // tiny -mmsketchcache cannot stay saturated after disconnect (H9 coupling).
+    for (auto it = m_matmul_sketch_requested.begin(); it != m_matmul_sketch_requested.end();) {
+        if (it->second.first == nodeid) {
+            it = m_matmul_sketch_requested.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     if (m_node_states.empty()) {
         // Do a consistency check after the last peer is removed.
         assert(mapBlocksInFlight.empty());
@@ -2047,7 +2059,7 @@ void PeerManagerImpl::MaybeRequestMatMulSketch(CNode& pto, const CBlockIndex& in
     // cache has slots, and never ask two peers for the same hash.
     const auto now{GetTime<std::chrono::microseconds>()};
     for (auto it = m_matmul_sketch_requested.begin(); it != m_matmul_sketch_requested.end();) {
-        if (now - it->second > MATMUL_SKETCH_REQUEST_TTL) {
+        if (now - it->second.second > MATMUL_SKETCH_REQUEST_TTL) {
             it = m_matmul_sketch_requested.erase(it);
         } else {
             ++it;
@@ -2059,7 +2071,7 @@ void PeerManagerImpl::MaybeRequestMatMulSketch(CNode& pto, const CBlockIndex& in
     // whose recompute is assumevalid-trusted never runs Freivalds either, so
     // its sketch is dead weight — don't spend ~8 MiB of ingress on it in IBD.
     if (m_chainman.IsMatMulRecomputeAssumeValidTrusted(&index, index.nHeight)) return;
-    m_matmul_sketch_requested.emplace(index.GetBlockHash(), now);
+    m_matmul_sketch_requested.emplace(index.GetBlockHash(), std::make_pair(pto.GetId(), now));
     MakeAndPushMessage(pto, NetMsgType::GETMMSKETCH, index.GetBlockHash());
     LogDebug(BCLog::NET, "Requesting matmul sketch %s peer=%d (best-effort)\n",
              index.GetBlockHash().ToString(), pto.GetId());
@@ -6544,19 +6556,20 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // v4 DIGEST_RECOMPUTE heights), and every pre-fork path through this
         // handler was already a silent drop — wire behavior is unchanged.
         {
+            LOCK(cs_main);
             const auto now_req{GetTime<std::chrono::microseconds>()};
             for (auto it = m_matmul_sketch_requested.begin(); it != m_matmul_sketch_requested.end();) {
-                if (now_req - it->second > MATMUL_SKETCH_REQUEST_TTL) {
+                if (now_req - it->second.second > MATMUL_SKETCH_REQUEST_TTL) {
                     it = m_matmul_sketch_requested.erase(it);
                 } else {
                     ++it;
                 }
             }
-        }
-        if (!m_matmul_sketch_requested.count(block_hash)) {
-            LogDebug(BCLog::NET, "Ignoring unsolicited mmsketch %s from peer=%d\n",
-                     block_hash.ToString(), pfrom.GetId());
-            return;
+            if (!m_matmul_sketch_requested.count(block_hash)) {
+                LogDebug(BCLog::NET, "Ignoring unsolicited mmsketch %s from peer=%d\n",
+                         block_hash.ToString(), pfrom.GetId());
+                return;
+            }
         }
 
         // WP-8 / H9/H10 (2): per-peer ingress token bucket, spent BEFORE any
@@ -6605,6 +6618,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (!consensus.IsMatMulV4Active(block_height)) {
             LogDebug(BCLog::NET, "Ignoring mmsketch %s from peer=%d (not a v4 height)\n",
                      block_hash.ToString(), pfrom.GetId());
+            WITH_LOCK(cs_main, m_matmul_sketch_requested.erase(block_hash));
             return;
         }
         const Consensus::MatMulProfileParams profile = consensus.GetMatMulProfileParams(block_height);
@@ -6617,23 +6631,24 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (profile.commitment != Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
             LogDebug(BCLog::NET, "Ignoring mmsketch %s from peer=%d (not a DIGEST_RECOMPUTE height)\n",
                      block_hash.ToString(), pfrom.GetId());
+            WITH_LOCK(cs_main, m_matmul_sketch_requested.erase(block_hash));
             return;
         }
         // Size cap = the profile 8·m² bound (anti-amplification / pre-hash DoS
         // gate; the exact-size check lives in ParseSketch on the verify path).
         if (sketch_bytes.size() > profile.SketchCacheBytes()) {
-            m_matmul_sketch_requested.erase(block_hash); // terminal: free the in-flight slot
+            WITH_LOCK(cs_main, m_matmul_sketch_requested.erase(block_hash));
             Misbehaving(*peer, strprintf("mmsketch oversize (%u > %u bytes)",
                                          sketch_bytes.size(), profile.SketchCacheBytes()));
             return;
         }
         // ONE-hash authentication against the header commitment.
         if (!matmul_v4::PayloadMatchesCommitment(header, sketch_bytes)) {
-            m_matmul_sketch_requested.erase(block_hash); // terminal: free the in-flight slot
+            WITH_LOCK(cs_main, m_matmul_sketch_requested.erase(block_hash));
             Misbehaving(*peer, "mmsketch does not authenticate against matmul_digest");
             return;
         }
-        m_matmul_sketch_requested.erase(block_hash); // terminal: request satisfied
+        WITH_LOCK(cs_main, m_matmul_sketch_requested.erase(block_hash));
         matmul::GetMatMulSketchCache().Put(block_hash, std::move(sketch_bytes));
         LogDebug(BCLog::NET, "Cached authenticated matmul sketch %s from peer=%d\n",
                  block_hash.ToString(), pfrom.GetId());

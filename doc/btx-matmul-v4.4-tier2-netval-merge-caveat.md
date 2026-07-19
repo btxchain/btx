@@ -38,45 +38,66 @@ byte-identical to pre-Tier-2 behavior. Verified for the two highest-risk items:
   active + opt-in), and `LookupMatMulEncDrVerdict` returns `std::nullopt` when v4
   inactive, so `ProcessBlock` and the recompute seam run the synchronous path.
 
-## REQUIRED before merge (not yet done here)
+## REQUIRED before merge
 
-1. **Full unit suite, clean run.** `build/bin/test_btx` compiles clean (verified) and
-   a *complete* run of **3386 test cases** finished with **89 failures, ALL 89 in
-   `shielded_*` suites** (shielded_v2_proof / _ingress / _send / audit_regression /
-   stress / adversarial_proof_corpus / bundle / hardening). **Zero failures in
-   matmul / pow / validation / net / mempool / consensus** — the entire surface this
-   change touches is green.
+1. **[DONE]** Full unit suite clean run on this branch (including ENC-DR-LT Rank-1
+   + Tier-2). `build/bin/test_btx` — a complete run of **3386 test cases** finished
+   with **89 failures, ALL 89 in `shielded_*` suites** (shielded_v2_proof /
+   _ingress / _send / audit_regression / stress / adversarial_proof_corpus /
+   bundle / hardening). **Zero failures in matmul / pow / validation / net /
+   mempool / consensus** — the entire surface this change touches is green.
    - **The 89 shielded failures are a known-ignorable environmental flake:**
      `ShieldedMerkleTree: failed to persist commitment index` — leveldb/disk-FD
-     persistence pressure in the shielded subsystem under the full suite, **unrelated
-     to this change** (no shielded code is touched here). Re-running on a box with more
-     disk/FD headroom clears them; a reviewer should re-run once on their CI to
-     reconfirm, but this is not a code defect and not a blocker.
-2. **Functional battery, serial + non-contended.** Re-run the P2P battery
-   (`p2p_v2_transport`, `p2p_compactblocks_hb`, `p2p_headers_sync_with_minchainwork`,
-   the matmul p2p tests, and `p2p_matmul_encdr_sketch_cache`) **serially** on an
-   unloaded box. Under heavy CPU load these flake on `assert self.is_connected`
-   (P2P handshake timeout at connection setup) — a load artifact, not a logic failure.
-   Confirm each passes when run alone.
-3. **Pre-existing generic-P2P test gap (NOT introduced here).**
-   `p2p_compactblocks.py` and `p2p_compactblocks_blocksonly.py` FAIL on BTX matmul
-   regtest because they are generic upstream tests that build blocks manually
-   (`create_block`, no matmul payload); such blocks are rejected at height 1 with
-   `missing-product-payload` (a pre-existing consensus requirement this diff does not
-   touch). This is the same class of gap as the historical
-   `p2p_headers_sync_with_minchainwork` issue (task #78) and requires making those
-   tests matmul-aware (mirror the `-regtestmatmulv4height` / payload handling used by
-   the adapted tests). It is orthogonal to PR#89 and should be tracked separately.
-4. **New tests added here** — `matmul_chainwork_auth_tests` (C1 forged-chain routing),
-   `net_tests` additions (Item D transport bound), and the updated
-   `p2p_matmul_encdr_sketch_cache.py` — confirm green in the clean runs above.
-5. **Activation remains fail-closed.** Do not set a finite `nMatMulV4Height` on any
-   public network until the §K.2b silicon no-inversion GO/NO-GO measurement and L0
-   ratification are recorded (DR-34). This Tier-2 code only takes effect after that.
+     persistence pressure in the shielded subsystem under the full suite,
+     **unrelated to this change** (no shielded code is touched here). Re-running
+     on a box with more disk/FD headroom clears them; a reviewer should re-run
+     once on their CI to reconfirm, but this is not a code defect and not a
+     blocker.
+2. **[DONE]** Functional battery, serial + non-contended:
+   `p2p_v2_transport`, `p2p_compactblocks` (+ `_blocksonly` / `_hb` / `_extratxs`),
+   `p2p_headers_sync_with_minchainwork`, `p2p_matmul_encdr_sketch_cache`.
+   Under heavy CPU load these can still flake on `assert self.is_connected`
+   (handshake timeout) — re-run alone if that appears.
+3. **[DONE]** Pre-existing generic-P2P test gap (NOT introduced by Tier-2).
+   `p2p_compactblocks*.py` used `create_block()` without Freivalds product
+   payloads and were rejected with `missing-product-payload` at height 1.
+   Fixed by `REGTEST_GENERIC_P2P_MATMUL_ARGS` in
+   `test/functional/test_framework/blocktools.py` (regtest-only height /
+   `requireproductpayload=0` overrides; **consensus unchanged**; `fMatMulPOW`
+   stays on). Same class of adaptation as `p2p_headers_sync_with_minchainwork`
+   (task #78). `p2p_compactblocks_blocksonly` also needs a clean tip (shared
+   cache invalid under `-regtestmatmul*`) plus the same args because Python
+   `getblock`→`from_hex`→`msg_block` does not round-trip product payloads.
+4. **[DONE]** New Tier-2 tests (`matmul_chainwork_auth_tests`, `net_tests`
+   transport bound, updated `p2p_matmul_encdr_sketch_cache.py`) included in the
+   clean runs above / unit suite.
+5. **Activation remains fail-closed.** Do not set a finite `nMatMulV4Height` (or
+   `nMatMulDRLTHeight`) on any public network until the §K.2b silicon no-inversion
+   GO/NO-GO measurement and L0 ratification are recorded (DR-34). Tier-2 and
+   ENC-DR-LT Rank-1 scaffolding only take effect after that.
+
+## Follow-up fixes landed with the compactblocks adaptation
+
+- **Net (not consensus):** `m_matmul_sketch_requested` now stores `(NodeId, time)`,
+  is erased on peer disconnect under `cs_main`, and is freed on every MMSKETCH
+  terminal under `cs_main`. Without this, a tiny `-mmsketchcache` could stay
+  saturated after a peer left mid-prefetch.
+- **Test:** `p2p_matmul_encdr_sketch_cache` uses a star topology (`0—1`, `0—2`
+  only). The default chain edge `1—2` let node1 keep relaying after
+  `disconnect_nodes(0, 2)`, so the solicited `getmmsketch` never reached the
+  attacker peer.
+
+## Synthesis with ENC-DR-LT (Rank-1)
+
+This branch also carries inert ENC-DR-LT scaffolding (`ENC_BMX4C_LT`, MatExpand,
+deep-`m`, Q\* miner windows, exact-accel lanes). That work does **not** change the
+compactblocks adaptation: generic P2P tests keep v4/DRLT inactive via the same
+regtest overrides. LT activation tests remain
+`feature_matmul_drlt_activation.py` / `scripts/matmul_lt_readiness.sh`.
 
 ## Attribution note
 
-The Tier-2 diff is clean with respect to the observed functional failures: the two
-compactblocks failures are the pre-existing generic-test gap (item 3); the other
-transient functional failures were the load-driven handshake flake (item 2). No
-matmul/pow/validation unit test regressed.
+The Tier-2 diff is clean with respect to the observed functional failures: the
+compactblocks failures were the pre-existing generic-test gap (item 3, now
+closed); other transient functional failures were the load-driven handshake
+flake (item 2). No matmul/pow/validation unit test regressed from Tier-2 alone.
