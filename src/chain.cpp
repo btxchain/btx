@@ -169,7 +169,20 @@ bool IsBlockAuthenticated(const CBlockIndex& block, const Consensus::Params& par
     // validation can never authenticate.
     if (!params.IsMatMulV4Active(block.nHeight)) return true;
     if (block.nStatus & BLOCK_FAILED_MASK) return false;
-    return (block.nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_TRANSACTIONS;
+    if ((block.nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TRANSACTIONS) return false;
+
+    // Authentication is a contiguous-prefix property, not a count of
+    // independently verified bodies. A child body can arrive and pass the
+    // context-free/body checks before an earlier body on the same branch is
+    // available (m_blocks_unlinked handles exactly that case). Crediting the
+    // child immediately would create a hole in authenticated chainwork and let
+    // a branch interleave cheap forged headers with isolated valid bodies.
+    //
+    // The parent-first load/recompute order and the descendant propagation in
+    // ReceivedBlockTransactions guarantee that a verified child is promoted
+    // as soon as the missing parent prefix becomes fully authenticated.
+    return block.pprev == nullptr ||
+           block.pprev->nAuthenticatedChainWork == block.pprev->nChainWork;
 }
 
 arith_uint256 GetBlockAuthenticatedProof(const CBlockIndex& block, const Consensus::Params& params)

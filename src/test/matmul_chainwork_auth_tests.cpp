@@ -148,6 +148,40 @@ BOOST_AUTO_TEST_CASE(valid_body_promotes_deterministically)
     BOOST_CHECK(h5->nAuthenticatedChainWork > authed_before);
 }
 
+// A verified body above a header-only gap must not earn authenticated work
+// until the gap is filled. Authenticated chainwork is a contiguous prefix;
+// otherwise an attacker could interleave forged headers with isolated valid
+// bodies and receive trust credit for a branch whose ancestry is not valid.
+BOOST_AUTO_TEST_CASE(out_of_order_body_does_not_authenticate_across_gap)
+{
+    LOCK(::cs_main);
+    const int32_t kFork = 2;
+    const Consensus::Params params = ParamsWithFork(kFork);
+    Chain c;
+    for (int i = 0; i < kFork; ++i) c.Add(ST_AUTHENTICATED); // 0..1 pre-fork
+    CBlockIndex* base = c.Add(ST_AUTHENTICATED);             // height 2 authenticated
+    CBlockIndex* gap = c.Add(ST_HEADER_ONLY);                // height 3 body missing
+    CBlockIndex* child = c.Add(ST_AUTHENTICATED);            // height 4 body arrived first
+    c.Recompute(params);
+
+    const arith_uint256 prefix_work = base->nAuthenticatedChainWork;
+    BOOST_CHECK(!IsBlockAuthenticated(*gap, params));
+    BOOST_CHECK(!IsBlockAuthenticated(*child, params));
+    BOOST_CHECK_EQUAL(gap->nAuthenticatedChainWork.GetHex(), prefix_work.GetHex());
+    BOOST_CHECK_EQUAL(child->nAuthenticatedChainWork.GetHex(), prefix_work.GetHex());
+
+    // Filling the gap promotes both the gap and its already-verified child in
+    // parent-first order, exactly as ReceivedBlockTransactions' descendant
+    // propagation does in production.
+    gap->nStatus = ST_AUTHENTICATED;
+    c.Recompute(params);
+    const arith_uint256 expected = prefix_work + GetBlockProof(*gap) + GetBlockProof(*child);
+    BOOST_CHECK(IsBlockAuthenticated(*gap, params));
+    BOOST_CHECK(IsBlockAuthenticated(*child, params));
+    BOOST_CHECK_EQUAL(child->nAuthenticatedChainWork.GetHex(), expected.GetHex());
+    BOOST_CHECK_EQUAL(child->nAuthenticatedChainWork.GetHex(), child->nChainWork.GetHex());
+}
+
 // A body that fails validation can NEVER contribute authenticated work, even if
 // some VALID_* bits are set alongside the FAILED bit.
 BOOST_AUTO_TEST_CASE(invalid_body_never_promotes)
