@@ -7,6 +7,7 @@
 
 #include <arith_uint256.h>
 #include <consensus/params.h>
+#include <crypto/common.h>
 #include <cuda/matmul_v4_lt_accel.h>
 #include <hip/matmul_v4_lt_accel.h>
 #include <metal/matmul_v4_lt_accel.h>
@@ -105,10 +106,12 @@ BOOST_AUTO_TEST_CASE(fold_int32_to_emax48_range)
 
 BOOST_AUTO_TEST_CASE(matexpand_extract_range_and_determinism)
 {
-    constexpr uint64_t salt = 0xC0FFEEULL;
+    const uint256 seed = ParseUint256(
+        "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ff");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
     for (int32_t raw = -2000; raw <= 2000; raw += 17) {
-        const int8_t a = lt::ExtractDequantMatExpand(raw, 3, 5, salt);
-        const int8_t b = lt::ExtractDequantMatExpand(raw, 3, 5, salt);
+        const int8_t a = lt::ExtractDequantMatExpand(raw, 3, 5, prf_key);
+        const int8_t b = lt::ExtractDequantMatExpand(raw, 3, 5, prf_key);
         BOOST_CHECK_EQUAL(a, b);
         BOOST_CHECK(a >= -48 && a <= 48);
     }
@@ -116,23 +119,37 @@ BOOST_AUTO_TEST_CASE(matexpand_extract_range_and_determinism)
 
 BOOST_AUTO_TEST_CASE(matexpand_not_affine_in_raw)
 {
-    // Linear fold satisfies f(x+d)-f(x) period structure; Mix+M11 Extract must not
-    // coincide with Fold on a dense sample (non-collapse witness).
-    constexpr uint64_t salt = 0xA5A5A5A5ULL;
+    // Linear fold satisfies f(x+d)-f(x) period structure; ChaCha PRF Extract must
+    // not coincide with Fold on a dense sample (non-collapse witness).
+    const uint256 seed = ParseUint256(
+        "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
     int disagreements = 0;
     for (int32_t y = -500; y <= 500; ++y) {
-        if (lt::ExtractDequantMatExpand(y, 0, 0, salt) !=
+        if (lt::ExtractDequantMatExpand(y, 0, 0, prf_key) !=
             static_cast<int8_t>(lt::FoldInt32ToEmax48(y))) {
             ++disagreements;
         }
     }
     BOOST_CHECK(disagreements > 100);
 
+    // Also disagree with legacy SplitMix Extract on a dense sample (proves the
+    // normative path is not silently still SplitMix).
+    constexpr uint64_t salt = 0xA5A5A5A5ULL;
+    int splitmix_diff = 0;
+    for (int32_t y = -200; y <= 200; ++y) {
+        if (lt::ExtractDequantMatExpand(y, 1, 1, prf_key) !=
+            lt::ExtractDequantMatExpandSplitMix(y, 1, 1, salt)) {
+            ++splitmix_diff;
+        }
+    }
+    BOOST_CHECK(splitmix_diff > 50);
+
     // Homogeneity collapse f(2x)=2f(x) must fail for a non-zero sample point.
     bool homogeneity_broken = false;
     for (int32_t x = 1; x <= 200; ++x) {
-        const int8_t fx = lt::ExtractDequantMatExpand(x, 1, 2, salt);
-        const int8_t f2x = lt::ExtractDequantMatExpand(2 * x, 1, 2, salt);
+        const int8_t fx = lt::ExtractDequantMatExpand(x, 1, 2, prf_key);
+        const int8_t f2x = lt::ExtractDequantMatExpand(2 * x, 1, 2, prf_key);
         if (fx != 0 && f2x != static_cast<int8_t>(2 * fx)) {
             homogeneity_broken = true;
             break;
@@ -143,16 +160,69 @@ BOOST_AUTO_TEST_CASE(matexpand_not_affine_in_raw)
 
 BOOST_AUTO_TEST_CASE(matexpand_position_salt_differential)
 {
-    constexpr uint64_t salt = 0x1234567890ABCDEFULL;
+    const uint256 seed = ParseUint256(
+        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
     const int32_t raw = 42;
-    BOOST_CHECK(lt::ExtractDequantMatExpand(raw, 0, 0, salt) !=
-                    lt::ExtractDequantMatExpand(raw, 1, 0, salt) ||
-                lt::MixMatExpandEntry(raw, 0, 0, salt) !=
-                    lt::MixMatExpandEntry(raw, 1, 0, salt));
+    BOOST_CHECK(lt::ExtractDequantMatExpand(raw, 0, 0, prf_key) !=
+                lt::ExtractDequantMatExpand(raw, 1, 0, prf_key));
+    BOOST_CHECK(lt::ExtractDequantMatExpand(raw, 0, 0, prf_key) !=
+                lt::ExtractDequantMatExpand(raw, 0, 1, prf_key));
+    const uint256 seed2 = ParseUint256(
+        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdee");
+    const uint256 prf_key2 = lt::DeriveMatExpandPrfKey(seed2);
+    BOOST_CHECK(lt::ExtractDequantMatExpand(raw, 0, 0, prf_key) !=
+                lt::ExtractDequantMatExpand(raw, 0, 0, prf_key2));
+
+    // Legacy SplitMix position salt still distinct (differential witness).
+    constexpr uint64_t salt = 0x1234567890ABCDEFULL;
     BOOST_CHECK(lt::MixMatExpandEntry(raw, 0, 0, salt) !=
                 lt::MixMatExpandEntry(raw, 0, 1, salt));
     BOOST_CHECK(lt::MixMatExpandEntry(raw, 0, 0, salt) !=
                 lt::MixMatExpandEntry(raw, 0, 0, salt ^ 1));
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_chacha_prf_golden_vectors)
+{
+    // Frozen ChaCha20-PRF Extract + full ENC_BMX4C_LT digest at kTestDim.
+    // Re-pin only when the normative Extract construction deliberately changes.
+    const uint256 seed_w = ParseUint256(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed_w);
+
+    struct ExtractCase {
+        int32_t raw;
+        uint32_t i;
+        uint32_t j;
+        int8_t expected;
+    };
+    const ExtractCase extract_cases[] = {
+        {0, 0, 0, 4},
+        {1, 0, 1, 1},
+        {-1, 1, 0, 4},
+        {42, 3, 5, 2},
+        {-1000, 7, 11, -16},
+        {2147483647, 2, 4, -8},
+        {static_cast<int32_t>(-2147483647 - 1), 9, 13, 0},
+    };
+    for (const auto& c : extract_cases) {
+        const int8_t got = lt::ExtractDequantMatExpand(c.raw, c.i, c.j, prf_key);
+        BOOST_CHECK_EQUAL(static_cast<int>(got), static_cast<int>(c.expected));
+        BOOST_CHECK(got >= -48 && got <= 48);
+    }
+
+    auto header = MakeLTHeader(0xdeadbeefULL, kTestDim);
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, digest, payload));
+    BOOST_CHECK_EQUAL(digest.GetHex(),
+                      "db1136f2974d45d9757262978ab074ef53ba54c368df9829f565ee2d26da0da9");
+    // CPU bit-identical replay.
+    uint256 digest2;
+    std::vector<unsigned char> payload2;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, digest2, payload2));
+    BOOST_CHECK(digest == digest2);
+    BOOST_CHECK(payload == payload2);
 }
 
 BOOST_AUTO_TEST_CASE(plan_lt_accel_known_classes)
@@ -443,10 +513,19 @@ BOOST_AUTO_TEST_CASE(phase_b_seal_round_trip_and_auth)
     BOOST_REQUIRE_EQUAL(slots.size(), Q);
     BOOST_REQUIRE_EQUAL(payloads.size(), Q);
 
-    // Slot nonces are deterministic from sigma.
+    // Slot ids are full 256-bit; nNonce64 is the low 64 bits LE.
     const uint256 sigma = matmul::v4::DeriveSigma(anchor);
     for (uint32_t j = 0; j < Q; ++j) {
+        const uint256 expected_id = lt::DeriveWindowSlotId(sigma, j);
+        BOOST_CHECK(slots[j].slot_id == expected_id);
         BOOST_CHECK_EQUAL(slots[j].nonce, lt::DeriveWindowSlotNonce(sigma, j));
+        BOOST_CHECK_EQUAL(slots[j].nonce, ReadLE64(expected_id.data()));
+    }
+    // Full-window uniqueness of slot identifiers.
+    for (uint32_t i = 0; i < Q; ++i) {
+        for (uint32_t j = i + 1; j < Q; ++j) {
+            BOOST_CHECK(slots[i].slot_id != slots[j].slot_id);
+        }
     }
 
     uint256 seal_fv;
@@ -545,7 +624,9 @@ BOOST_AUTO_TEST_CASE(phase_b_seal_parent_mtp_slot_seeds_and_encdr)
     };
 
     uint256 seal;
-    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 64, slot_seed, seal));
+    std::vector<lt::WindowSlot> slots;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 64, slot_seed, seal, &slots));
+    BOOST_REQUIRE_EQUAL(slots.size(), 64U);
     anchor.matmul_digest = seal;
 
     // Library seal == EncDr reference recompute.
@@ -573,17 +654,131 @@ BOOST_AUTO_TEST_CASE(phase_b_seal_parent_mtp_slot_seeds_and_encdr)
     BOOST_CHECK(seal_other != seal);
 }
 
+BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q64)
+{
+    // Golden vectors at kTestDim for Q*=64: pin leaf order, uniqueness, parent
+    // MTP binding, and the consensus seal hex. Phase B remains inert on public
+    // nets; these vectors lock the slot-id binding preimage.
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulBMX4CHeight = 1;
+    p.nMatMulDRLTHeight = 1;
+    p.nMatMulV4Dimension = kTestDim;
+    p.nMatMulConsensusQStar = 64;
+    p.nMatMulLTTranscriptBlockSize = 2;
+    p.fMatMulLTSealAsPoW = true;
+    p.nMatMulV4FreivaldsRounds = 8;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 10;
+    constexpr int64_t kMtp = 1'700'000'000;
+    auto anchor = MakeLTHeader(42, kTestDim);
+    anchor.nBits = UintToArith256(p.powLimit).GetCompact();
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(anchor, p, kHeight, kMtp));
+
+    const auto slot_seed = [&](CBlockHeader& h) -> bool {
+        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp);
+    };
+
+    uint256 seal;
+    std::vector<lt::WindowSlot> slots;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 64, slot_seed, seal, &slots));
+    BOOST_REQUIRE_EQUAL(slots.size(), 64U);
+
+    const uint256 sigma = matmul::v4::DeriveSigma(anchor);
+    std::vector<uint256> leaves;
+    leaves.reserve(64);
+    for (uint32_t j = 0; j < 64; ++j) {
+        BOOST_CHECK(slots[j].slot_id == lt::DeriveWindowSlotId(sigma, j));
+        BOOST_CHECK_EQUAL(slots[j].nonce, ReadLE64(slots[j].slot_id.data()));
+        leaves.push_back(lt::CommitWindowSlotLeaf(slots[j].slot_id, slots[j].digest));
+        for (uint32_t i = 0; i < j; ++i) {
+            BOOST_CHECK(slots[i].slot_id != slots[j].slot_id);
+            BOOST_CHECK(leaves[i] != leaves[j]);
+        }
+    }
+    const uint256 merkle = lt::ComputeWindowMerkleRoot(leaves);
+    BOOST_CHECK(lt::SealWindowCommit(sigma, merkle, 64) == seal);
+
+    // Parent MTP flip changes the seal (LT-Q2 + slot-id seed bind).
+    const auto slot_seed_mtp = [&](CBlockHeader& h) -> bool {
+        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp + 7);
+    };
+    uint256 seal_mtp;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 64, slot_seed_mtp, seal_mtp));
+    BOOST_CHECK(seal_mtp != seal);
+
+    // Golden: first/last slot id, first leaf, merkle, seal (kTestDim=64, nonce=42).
+    BOOST_CHECK(slots[0].slot_id == ParseUint256(
+        "aadee863c8d19f4f9468ed076b68f513c7593a7a861fd5758319ac72ae690043"));
+    BOOST_CHECK(slots[63].slot_id == ParseUint256(
+        "27ad637efcdbdfe6fc47392f3b45aa0ecad2f35793725b954a4b71282bd67b7b"));
+    BOOST_CHECK(leaves[0] == ParseUint256(
+        "30c7ba9192ba9e26a77f731a66a1d7f53d6aa08dbdc74ba37b1738c25b657623"));
+    BOOST_CHECK(merkle == ParseUint256(
+        "b07c66aabc2a16a706ab44e127526e189959c52d9fe0174ff90d5a31b3e04b3f"));
+    BOOST_CHECK(seal == ParseUint256(
+        "2edf9cd35e8774bae87e21d4843419cc3250efcb94b25cf17d461cdc42634e30"));
+}
+
+BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q128)
+{
+    // Q*=128 golden at kTestDim — same anchor/MTP as Q=64; seal must differ.
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulBMX4CHeight = 1;
+    p.nMatMulDRLTHeight = 1;
+    p.nMatMulV4Dimension = kTestDim;
+    p.nMatMulConsensusQStar = 128;
+    p.nMatMulLTTranscriptBlockSize = 2;
+    p.fMatMulLTSealAsPoW = true;
+    p.nMatMulV4FreivaldsRounds = 8;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 10;
+    constexpr int64_t kMtp = 1'700'000'000;
+    auto anchor = MakeLTHeader(42, kTestDim);
+    anchor.nBits = UintToArith256(p.powLimit).GetCompact();
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(anchor, p, kHeight, kMtp));
+
+    const auto slot_seed = [&](CBlockHeader& h) -> bool {
+        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp);
+    };
+
+    uint256 seal64, seal128;
+    std::vector<lt::WindowSlot> slots;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 64, slot_seed, seal64));
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 128, slot_seed, seal128, &slots));
+    BOOST_REQUIRE_EQUAL(slots.size(), 128U);
+    BOOST_CHECK(seal128 != seal64);
+
+    const uint256 sigma = matmul::v4::DeriveSigma(anchor);
+    for (uint32_t j = 0; j < 128; ++j) {
+        BOOST_CHECK(slots[j].slot_id == lt::DeriveWindowSlotId(sigma, j));
+        for (uint32_t i = 0; i < j; ++i) {
+            BOOST_CHECK(slots[i].slot_id != slots[j].slot_id);
+        }
+    }
+
+    BOOST_CHECK(seal128 == ParseUint256(
+        "0523029346117ed2af130491296e9162ab9dfd89a3e0240cc8e1456f24da0861"));
+}
+
 BOOST_AUTO_TEST_CASE(matexpand_additivity_noncollapse)
 {
     // Linear fold satisfies f(x)+f(y) ≈ f(x+y) on a large fraction of samples;
-    // Mix+M11 Extract must break additivity often enough to witness non-collapse.
-    constexpr uint64_t salt = 0xDEADBEEF42ULL;
+    // ChaCha PRF Extract must break additivity often enough to witness non-collapse.
+    const uint256 seed = ParseUint256(
+        "deadbeef42deadbeef42deadbeef42deadbeef42deadbeef42deadbeef42dead");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
     int broken = 0;
     for (int32_t x = -80; x <= 80; x += 7) {
         for (int32_t y = -80; y <= 80; y += 11) {
-            const int8_t fx = lt::ExtractDequantMatExpand(x, 2, 3, salt);
-            const int8_t fy = lt::ExtractDequantMatExpand(y, 2, 3, salt);
-            const int8_t fxy = lt::ExtractDequantMatExpand(x + y, 2, 3, salt);
+            const int8_t fx = lt::ExtractDequantMatExpand(x, 2, 3, prf_key);
+            const int8_t fy = lt::ExtractDequantMatExpand(y, 2, 3, prf_key);
+            const int8_t fxy = lt::ExtractDequantMatExpand(x + y, 2, 3, prf_key);
             const int sum = static_cast<int>(fx) + static_cast<int>(fy);
             if (sum < -48 || sum > 48 || fxy != static_cast<int8_t>(sum)) {
                 ++broken;
@@ -618,14 +813,20 @@ BOOST_AUTO_TEST_CASE(seal_binding_sigma_and_merkle_leaf)
 {
     // Seal binds (sigma_anchor, merkle_root, Q*): flipping sigma or one leaf
     // digest must change SealWindowCommit (adversarial seal-binding witness).
-    std::vector<uint256> digests(64);
-    for (size_t i = 0; i < digests.size(); ++i) {
-        unsigned char b[32]{};
-        b[0] = static_cast<unsigned char>(i + 1);
-        b[31] = static_cast<unsigned char>(0xA5 ^ i);
-        digests[i] = uint256{Span<const unsigned char>{b, sizeof(b)}};
+    // Leaves are CommitWindowSlotLeaf(slot_id, digest), not bare digests.
+    std::vector<uint256> leaves(64);
+    for (size_t i = 0; i < leaves.size(); ++i) {
+        unsigned char idb[32]{};
+        unsigned char db[32]{};
+        idb[0] = static_cast<unsigned char>(i + 1);
+        idb[31] = static_cast<unsigned char>(0x5A ^ i);
+        db[0] = static_cast<unsigned char>(i + 1);
+        db[31] = static_cast<unsigned char>(0xA5 ^ i);
+        const uint256 slot_id{Span<const unsigned char>{idb, sizeof(idb)}};
+        const uint256 digest{Span<const unsigned char>{db, sizeof(db)}};
+        leaves[i] = lt::CommitWindowSlotLeaf(slot_id, digest);
     }
-    const uint256 root = lt::ComputeWindowMerkleRoot(digests);
+    const uint256 root = lt::ComputeWindowMerkleRoot(leaves);
     const uint256 sigma = ParseUint256(
         "3333333333333333333333333333333333333333333333333333333333333333");
     const uint256 sigma2 = ParseUint256(
@@ -633,14 +834,51 @@ BOOST_AUTO_TEST_CASE(seal_binding_sigma_and_merkle_leaf)
     const uint256 seal = lt::SealWindowCommit(sigma, root, 64);
     BOOST_CHECK(seal != lt::SealWindowCommit(sigma2, root, 64));
 
-    digests[7] = uint256::ONE;
-    const uint256 root_flip = lt::ComputeWindowMerkleRoot(digests);
+    // Flip one leaf's digest binding → different merkle → different seal.
+    leaves[7] = lt::CommitWindowSlotLeaf(uint256::ONE, uint256::ONE);
+    const uint256 root_flip = lt::ComputeWindowMerkleRoot(leaves);
     BOOST_CHECK(root_flip != root);
     BOOST_CHECK(lt::SealWindowCommit(sigma, root_flip, 64) != seal);
 
-    // Distinct anchors ⇒ disjoint slot-nonce sets (LT-Q1 fat-window binding).
+    // Distinct anchors ⇒ disjoint full slot ids (and therefore low-64 nonces).
+    BOOST_CHECK(lt::DeriveWindowSlotId(sigma, 0) != lt::DeriveWindowSlotId(sigma2, 0));
+    BOOST_CHECK(lt::DeriveWindowSlotId(sigma, 0) != lt::DeriveWindowSlotId(sigma, 1));
     BOOST_CHECK(lt::DeriveWindowSlotNonce(sigma, 0) != lt::DeriveWindowSlotNonce(sigma2, 0));
     BOOST_CHECK(lt::DeriveWindowSlotNonce(sigma, 0) != lt::DeriveWindowSlotNonce(sigma, 1));
+    // Nonce mapping is exactly low 64 bits of the slot id.
+    BOOST_CHECK_EQUAL(lt::DeriveWindowSlotNonce(sigma, 0),
+                      ReadLE64(lt::DeriveWindowSlotId(sigma, 0).data()));
+}
+
+BOOST_AUTO_TEST_CASE(slot_id_seed_and_leaf_binding)
+{
+    // Full 256-bit slot_id must affect seeds and Merkle leaf, not only nNonce64.
+    const uint256 sigma = ParseUint256(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const uint256 id0 = lt::DeriveWindowSlotId(sigma, 0);
+    const uint256 id1 = lt::DeriveWindowSlotId(sigma, 1);
+    BOOST_CHECK(id0 != id1);
+
+    CBlockHeader h = MakeLTHeader(0, kTestDim);
+    h.nNonce64 = ReadLE64(id0.data());
+    h.nNonce = static_cast<uint32_t>(h.nNonce64);
+    CBlockHeader h_bound = h;
+    lt::BindWindowSlotIdIntoSeeds(h_bound, id0);
+    BOOST_CHECK(h_bound.seed_a != h.seed_a);
+    BOOST_CHECK(h_bound.seed_b != h.seed_b);
+
+    // Same V3 seeds + different slot_id ⇒ different bound seeds (high bits matter).
+    CBlockHeader h1 = h;
+    lt::BindWindowSlotIdIntoSeeds(h1, id1);
+    BOOST_CHECK(h1.seed_a != h_bound.seed_a);
+    BOOST_CHECK(h1.seed_b != h_bound.seed_b);
+
+    const uint256 digest = ParseUint256(
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    BOOST_CHECK(lt::CommitWindowSlotLeaf(id0, digest) !=
+                lt::CommitWindowSlotLeaf(id1, digest));
+    BOOST_CHECK(lt::CommitWindowSlotLeaf(id0, digest) !=
+                lt::CommitWindowSlotLeaf(id0, uint256::ONE));
 }
 
 BOOST_AUTO_TEST_CASE(lt_accel_entry_bit_identity_or_stub_decline)

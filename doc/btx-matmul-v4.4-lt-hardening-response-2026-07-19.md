@@ -33,7 +33,7 @@ Progressively more capable AI-native hardware receives progressively greater **e
 
 | Report item | Why deferred |
 |---|---|
-| §5 Cryptographic extractor replacement | SplitMix is weak as a PRF story; swapping extractor is a consensus transcript change — needs golden vectors + external review before activation. |
+| §5 Cryptographic extractor replacement | **Acted (candidate)** — SplitMix replaced by domain-separated ChaCha20 PRF Extract under ENC_BMX4C_LT; SplitMix retained for differential tests; golden vectors frozen. External C-15 review still required before activation (not closed). |
 | §6 / §8 Adaptive limbs / Strassen tournament | **Acted (miner-local)** | Public exact baselines: deferred `ComputeCombineModQ`, `ComputeCombineAdaptiveLimbBMX4C` / base-256 + two-limb routes, Karatsuba-9; CPU tournament harness + `doc/btx-matmul-v4.4-combine-algorithm-tournament.md`. Integer transcript unchanged (byte-identical tests). ASERT still calibrates to fastest known exact after silicon measure. |
 | §12–14 Native IMMA/MFMA/MXFP4/Metal MPP | Real gaps; keep fail-closed stubs; do not mislabel scalar kernels. Full tensor residency is Phase 3. |
 

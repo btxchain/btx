@@ -101,15 +101,55 @@ __global__ void DeviceGemmS32S8Tiled(const int32_t* __restrict__ A,
     D[static_cast<size_t>(row) * N + col] = static_cast<int32_t>(acc);
 }
 
-__device__ __forceinline__ uint64_t DeviceMixMatExpandEntry(int32_t raw, uint32_t i, uint32_t j, uint64_t salt)
+__device__ __forceinline__ uint32_t DeviceRotl32(uint32_t x, int n)
 {
-    uint64_t z = static_cast<uint64_t>(static_cast<uint32_t>(raw));
-    z ^= static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL;
-    z ^= static_cast<uint64_t>(j) * 0xBF58476D1CE4E5B9ULL;
-    z ^= salt;
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-    return z ^ (z >> 31);
+    return (x << n) | (x >> (32 - n));
+}
+
+__device__ __forceinline__ void DeviceChaChaQuarter(uint32_t& a, uint32_t& b, uint32_t& c, uint32_t& d)
+{
+    a += b; d = DeviceRotl32(d ^ a, 16);
+    c += d; b = DeviceRotl32(b ^ c, 12);
+    a += b; d = DeviceRotl32(d ^ a, 8);
+    c += d; b = DeviceRotl32(b ^ c, 7);
+}
+
+// Bit-identical to matmul_v4_lt.cpp MatExpandPrfKeystream first 8 bytes (LE64).
+__device__ __forceinline__ uint64_t DeviceMatExpandPrfLE64(const uint32_t key[8], int32_t raw,
+                                                          uint32_t i, uint32_t j, uint32_t remix,
+                                                          uint32_t lane)
+{
+    uint32_t x0 = 0x61707865u, x1 = 0x3320646eu, x2 = 0x79622d32u, x3 = 0x6b206574u;
+    uint32_t x4 = key[0], x5 = key[1], x6 = key[2], x7 = key[3];
+    uint32_t x8 = key[4], x9 = key[5], x10 = key[6], x11 = key[7];
+    uint32_t x12 = remix;
+    uint32_t x13 = static_cast<uint32_t>(raw) ^ lane;
+    const uint64_t nonce_second = (static_cast<uint64_t>(i) << 32) | static_cast<uint64_t>(j);
+    uint32_t x14 = static_cast<uint32_t>(nonce_second);
+    uint32_t x15 = static_cast<uint32_t>(nonce_second >> 32);
+
+    const uint32_t j4 = x4, j5 = x5, j6 = x6, j7 = x7;
+    const uint32_t j8 = x8, j9 = x9, j10 = x10, j11 = x11;
+    const uint32_t j12 = x12, j13 = x13, j14 = x14, j15 = x15;
+
+#pragma unroll
+    for (int r = 0; r < 10; ++r) {
+        DeviceChaChaQuarter(x0, x4, x8, x12);
+        DeviceChaChaQuarter(x1, x5, x9, x13);
+        DeviceChaChaQuarter(x2, x6, x10, x14);
+        DeviceChaChaQuarter(x3, x7, x11, x15);
+        DeviceChaChaQuarter(x0, x5, x10, x15);
+        DeviceChaChaQuarter(x1, x6, x11, x12);
+        DeviceChaChaQuarter(x2, x7, x8, x13);
+        DeviceChaChaQuarter(x3, x4, x9, x14);
+    }
+
+    x0 += 0x61707865u; x1 += 0x3320646eu; x2 += 0x79622d32u; x3 += 0x6b206574u;
+    x4 += j4; x5 += j5; x6 += j6; x7 += j7;
+    x8 += j8; x9 += j9; x10 += j10; x11 += j11;
+    x12 += j12; x13 += j13; x14 += j14; x15 += j15;
+
+    return static_cast<uint64_t>(x0) | (static_cast<uint64_t>(x1) << 32);
 }
 
 // Bit-identical to matmul::v4::bmx4::SampleMantissaNibble (E2M1 M11 table).
@@ -136,36 +176,41 @@ __device__ __forceinline__ int8_t DeviceSampleMantissaNibble(uint8_t nibble, boo
     return static_cast<int8_t>(sign ? -mag : mag);
 }
 
-__device__ __forceinline__ int8_t DeviceExtractDequant(int32_t raw, uint32_t i, uint32_t j, uint64_t salt)
+__device__ __forceinline__ int8_t DeviceExtractDequant(int32_t raw, uint32_t i, uint32_t j,
+                                                      const uint32_t key[8])
 {
-    uint64_t mixed = DeviceMixMatExpandEntry(raw, i, j, salt);
-    uint64_t remix = 0;
+    constexpr uint32_t kLaneMant = 0x4D414E54u;
+    constexpr uint32_t kLaneScale = 0x53434C45u;
+    uint32_t remix = 0;
     for (;;) {
+        const uint64_t mixed = DeviceMatExpandPrfLE64(key, raw, i, j, remix, kLaneMant);
         for (int shift = 0; shift < 64; shift += 4) {
             bool accepted = false;
             const int8_t mu = DeviceSampleMantissaNibble(
                 static_cast<uint8_t>((mixed >> shift) & 0x0F), accepted);
             if (!accepted) continue;
-            const uint64_t scale_stream = DeviceMixMatExpandEntry(
-                raw, i, j, salt ^ 0xD1B54A32D192ED03ULL ^ (remix << 1));
-            const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
-            return static_cast<int8_t>(static_cast<int32_t>(mu) << e);
+            const uint64_t scale_stream =
+                DeviceMatExpandPrfLE64(key, raw, i, j, remix, kLaneScale);
+            return static_cast<int8_t>(static_cast<int32_t>(mu) <<
+                                      static_cast<uint8_t>(scale_stream & 0x3));
         }
         ++remix;
-        mixed = DeviceMixMatExpandEntry(raw, i, j, salt + remix);
     }
 }
 
 __global__ void DeviceExtractDequantMatExpand(const int32_t* __restrict__ B32,
                                               int8_t* __restrict__ Bhat,
-                                              uint32_t n, uint64_t salt)
+                                              uint32_t n, uint32_t k0, uint32_t k1, uint32_t k2,
+                                              uint32_t k3, uint32_t k4, uint32_t k5, uint32_t k6,
+                                              uint32_t k7)
 {
     const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const size_t nn = static_cast<size_t>(n) * n;
     if (idx >= nn) return;
+    const uint32_t key[8] = {k0, k1, k2, k3, k4, k5, k6, k7};
     const uint32_t i = idx / n;
     const uint32_t j = idx % n;
-    Bhat[idx] = DeviceExtractDequant(B32[idx], i, j, salt);
+    Bhat[idx] = DeviceExtractDequant(B32[idx], i, j, key);
 }
 
 // F_q = 2^61-1 helpers (device twin of matmul::int8_field).
@@ -449,12 +494,14 @@ struct LtCudaResidentPool {
 
         // MatExpand A on device (graph), Extract → dAhat, then P = U*Ahat.
         if (cudaGraphLaunch(matexpand_exec, stream) != cudaSuccess) return false;
-        const uint64_t salt_a = ReadLE64(seed_wa.data());
+        const uint256 prf_a = matmul::v4::lt::DeriveMatExpandPrfKey(seed_wa);
+        uint32_t kw[8];
+        for (int t = 0; t < 8; ++t) kw[t] = ReadLE32(prf_a.data() + static_cast<size_t>(t) * 4);
         const size_t nn_u = nn;
         const int extract_threads = 256;
         const int extract_blocks = static_cast<int>((nn_u + extract_threads - 1) / extract_threads);
         DeviceExtractDequantMatExpand<<<extract_blocks, extract_threads, 0, stream>>>(
-            dB32, dAhat, n, salt_a);
+            dB32, dAhat, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
         if (cudaGetLastError() != cudaSuccess) return false;
 
         const dim3 block(16, 16, 1);
@@ -487,12 +534,14 @@ struct LtCudaResidentPool {
         }
         if (cudaGraphLaunch(matexpand_exec, stream) != cudaSuccess) return false;
 
-        const uint64_t salt = ReadLE64(seed_w.data());
+        const uint256 prf = matmul::v4::lt::DeriveMatExpandPrfKey(seed_w);
+        uint32_t kw[8];
+        for (int t = 0; t < 8; ++t) kw[t] = ReadLE32(prf.data() + static_cast<size_t>(t) * 4);
         const size_t nn = static_cast<size_t>(n) * n;
         const int extract_threads = 256;
         const int extract_blocks = static_cast<int>((nn + extract_threads - 1) / extract_threads);
         DeviceExtractDequantMatExpand<<<extract_blocks, extract_threads, 0, stream>>>(
-            dB32, dBhat, n, salt);
+            dB32, dBhat, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
         if (cudaGetLastError() != cudaSuccess) return false;
 
         if (cudaGraphLaunch(project_right_exec, stream) != cudaSuccess) return false;

@@ -12,7 +12,7 @@ Branch: `feat/bmx4c-exact-accel-lanes` → PR #89 (`claude/matmul-v4-design-spec
 | 4 | FP4/FP8/Tensor genuinely wired | Portable exact MXFP4 integer path; CUTLASS/device FP8 **fail-closed stubs** (not native-tensor complete) | sm_100a / MI350 M-t24 qualified |
 | 5 | Cross-vendor exactness | Harness schema + `BTX_REQUIRE_GPU_GOLDEN`; Dockerfile.tests Ubuntu | H100/B200/M5/MI350 PASS |
 | 6 | Production benchmarks | `--profile bmx4c-lt` in report + measure-hardware; lt-gate device JSON | ≥4× nonce/s / nonce/$ against **fastest known exact** baseline |
-| 7 | Adversarial shortcut resistance | Internal MatExpand non-affinity tests; external C-15 packet **drafted (not closed)**; public exact combine baselines published (`ComputeCombineModQ` deferred, adaptive limb, Karatsuba-9) + CPU tournament harness | Independent cryptanalyst + measured tournament vs silicon |
+| 7 | Adversarial shortcut resistance | ChaCha20-PRF MatExpand candidate + internal non-affinity/goldens; external C-15 packet **drafted (candidate selected, not closed)**; public exact combine baselines published (`ComputeCombineModQ` deferred, adaptive limb, Karatsuba-9) + CPU tournament harness | Independent cryptanalyst + measured tournament vs silicon |
 | 8 | Consensus safety (2026-07-19 harden) | Q* env invariance; prepared seal template; trust-adjusted best-header; no sync EncDr on msg-thread saturation; complete-header accel batching | Activation still NO-GO until full checklist |
 
 ## Explicitly NOT claimed

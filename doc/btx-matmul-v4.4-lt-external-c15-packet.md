@@ -1,10 +1,12 @@
 # BTX MatMul v4.4-LT — External C-15 adversarial review packet
 
-*Status: **DRAFT for independent cryptanalyst** — not closed. Internal Mix+M11
-MatExpand hardening is implemented; this packet is the external review brief.*
+*Status: **DRAFT for independent cryptanalyst** — not closed. ChaCha20-PRF
+MatExpand Extract candidate is implemented with frozen goldens; this packet is
+the external review brief.*
 *Companions: `doc/btx-matmul-v4.4-lt-normative-spec.md`,
 `doc/btx-matmul-v4.4-lt-adversarial-analysis.md`.*
 *Do not treat completion of this packet as automatic GO for Rank-1 activation.*
+*Do not claim C-15 cryptographically closed.*
 
 ## 0. Scope and non-goals
 
@@ -35,9 +37,10 @@ Domain tags (V44LT) and map (see normative spec for full text):
 ```
 Y = G · W          # s8×s8→s32, n×w, w=128
 B32 = Y · H        # s32×s8→s32, n×n
-salt = LE64(seed_W)
-B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, salt)
-# Mix (SplitMix64-style) → M11 rejection nibbles → e∈{0..3}; μ<<e ∈ [-48,48]
+prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W)
+B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
+# ChaCha20 PRF (RFC8439 in-tree crypto/chacha20.h) over (key, raw, i, j, remix)
+# → M11 rejection nibbles → e∈{0..3}; μ<<e ∈ [-48,48]
 ```
 
 - Operand A: MatExpand with template-scoped `W_A` (I1′ amortized).
@@ -46,8 +49,12 @@ B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, salt)
 - Phase B seal (optional mode): `matmul_digest := SealWindowCommit(σ_anchor,
   Merkle(slot digests), Q*)` with `Q*∈{64,128}` and parent-MTP-threaded slot seeds.
 
-Legacy `FoldInt32ToEmax48` (`y % 97`) is **non-normative** (differential tests
-only). A review that only breaks Fold does not break consensus MatExpand.
+Legacy `FoldInt32ToEmax48` (`y % 97`) and SplitMix
+`ExtractDequantMatExpandSplitMix` are **non-normative** (differential tests
+only). A review that only breaks Fold/SplitMix does not break consensus MatExpand.
+
+**Candidate status:** ChaCha20-PRF Extract is selected for `ENC_BMX4C_LT`;
+**external review still required before activation.** Not closed.
 
 ## 2. Attack class LT-C15 (Freivalds reassociation)
 
@@ -55,12 +62,14 @@ only). A review that only breaks Fold does not break consensus MatExpand.
 panels and Freivalds probes linear in `B̂`, recovers accepting sketches without
 paying for the dense MatExpand GEMMs (up to negligible Freivalds soundness).
 
-**Why implementers believe Mix+M11 blocks the linear class:**
+**Why implementers believe ChaCha20-PRF+M11 blocks the linear class:**
 
 - Extract is not an affine function of the GEMM accumulator `B32[i,j]`.
-- Position salts `(i,j)` and panel salt kill translation / panel-reuse collapses.
+- Position salts `(i,j)` and full `seed_W`-derived PRF key kill translation /
+  panel-reuse collapses.
 - M11 rejection + discrete scale `e∈{0..3}` destroy homomorphism useful to
   Freivalds reassociation through `fold(GWH)`.
+- Mixer is a reviewed in-tree primitive (ChaCha20), not SplitMix64.
 
 **Reviewer deliverables:**
 
@@ -68,11 +77,12 @@ paying for the dense MatExpand GEMMs (up to negligible Freivalds soundness).
 |---|---|---|
 | C15-A | Exhibit (or rule out) an affine / low-degree surrogate `f(B32)` that matches Extract on a dense sample with advantage ≫ Freivalds ε | Proof sketch or concrete counterexample vectors |
 | C15-B | Show whether Freivalds probes on `Ĉ` can be rewritten as probes on `G,W,H` alone | Reduction or impossibility argument |
-| C15-C | Quantify any leftover structure (e.g. scale-lane bias, nibble remix cycles) usable as a distinguisher | Notes + optional machine-checkable vectors |
+| C15-C | Quantify any leftover structure (e.g. scale-lane bias, nibble remix cycles, ChaCha nonce packing) usable as a distinguisher | Notes + optional machine-checkable vectors |
 
 Internal witnesses (not a substitute for external review):
 `matexpand_not_affine_in_raw`, `matexpand_position_salt_differential`,
-`matexpand_additivity_noncollapse` in `src/test/matmul_v4_lt_tests.cpp`.
+`matexpand_additivity_noncollapse`, `matexpand_chacha_prf_golden_vectors`
+in `src/test/matmul_v4_lt_tests.cpp`.
 
 ## 3. Invariant I1′ (template amortization)
 
@@ -114,7 +124,7 @@ cross-anchor amortization fail.
 
 | ID | Question | Expected artifact |
 |---|---|---|
-| SB-A | Can two anchors share useful slot digests? | Binding via `DeriveWindowSlotNonce(σ_anchor, j)` |
+| SB-A | Can two anchors share useful slot digests? | Binding via full `DeriveWindowSlotId(σ_anchor, j)` into seeds + Merkle leaf (`CommitWindowSlotLeaf`); `nNonce64` is only `ReadLE64(slot_id)` |
 | SB-B | Does mutating one leaf / payload break `SealWindowCommit` and seal-auth? | Reduction to Merkle + tagged commit |
 | SB-C | Parent-MTP omission / swap attack surface | Fail-closed checklist vs EncDr recompute |
 | SB-D | Interaction with Phase-A sketch-cache auth (`H(σ‖Ĉ)==digest`) | Confirm Phase-A auth is correctly skipped in seal mode |
@@ -155,7 +165,8 @@ lt-gate.py <dir> --manifest parts.tsv [--cost ...] [--ack-external-c15]
 
 ## 8. Explicitly not claimed
 
-- External C-15 **closed**
+- External C-15 **closed** (candidate selected; review still required)
 - Rank-1 GO/NO-GO **closed**
 - Finite public `nMatMulDRLTHeight`
 - Any B200/5090 nonce/s or nonce/$ figure
+- Cryptographic proof that ChaCha20-PRF Extract has no cheaper algebraic shortcut

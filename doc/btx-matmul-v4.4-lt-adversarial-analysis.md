@@ -1,15 +1,19 @@
 # BTX MatMul v4.4-LT — Adversarial analysis & hardening status
 
-*Status: MatExpand C-15 class has **implementation mitigations** (non-affinity tests) but **external review remains open**. Q* Phase B seal-as-PoW is implemented and inert (`nMatMulDRLTHeight = INT32_MAX`). Activation remains gated.*
+*Status: MatExpand C-15 class has a **selected cryptographic extractor candidate**
+(ChaCha20 PRF + M11 rejection; frozen goldens) with **implementation mitigations**
+(non-affinity tests) but **external review remains open** — not closed. Q* Phase B
+seal-as-PoW is implemented and inert (`nMatMulDRLTHeight = INT32_MAX`). Activation
+remains gated.*
 *Companion: `doc/btx-matmul-v4.4-lt-normative-spec.md`. Hardening response: `doc/btx-matmul-v4.4-lt-hardening-response-2026-07-19.md`.*
 
 ## Threat model (LT-specific)
 
 | ID | Attack | Disposition |
 |---|---|---|
-| LT-C15 | Freivalds reassociation through linear MatExpand fold (`B̂ = fold(GWH)` affine in panels) | **MITIGATED in code; EXTERNAL REVIEW OPEN** — `ExtractDequantMatExpand` = position-salted Mix + M11 rejection + scale `e∈{0..3}`; blocks the linear reassociation class tested in-tree. SplitMix64-style mixer is **not** a proved cryptographic PRF. No shortcut exceeding the measured threshold was found within explicitly tested algorithms/dimensions; general shortcut resistance remains an external-review assumption. |
-| LT-Q1 | Skinny single-nonce launches under fat `Q*` schedule | **CLOSED (Phase B, inert)** — when `fMatMulLTSealAsPoW` + live DRLT, lottery object is the Q* window seal (`ComputeSealDigestBMX4CLT`); Phase A remains per-nonce digest when the toggle is off. Q* commits aggregate leaf digests — it does **not** prove classical GEMM, tensor-core use, or simultaneous slot execution. |
-| LT-Q2 | Window-seal PoW without MTP-threaded sibling seeds | **CLOSED (Phase B, inert)** — EncDr / solve thread parent MTP into `SlotSeedFn` → `SetDeterministicMatMulSeeds` for every slot; sketch-cache `H(σ‖Chat)==matmul_digest` skipped in seal mode |
+| LT-C15 | Freivalds reassociation through linear MatExpand fold (`B̂ = fold(GWH)` affine in panels) | **CANDIDATE SELECTED; EXTERNAL REVIEW OPEN** — normative `ExtractDequantMatExpand` = domain-separated ChaCha20 PRF over `(prf_key, raw, i, j, remix)` + M11 rejection + scale `e∈{0..3}` (`prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT"‖seed_W)`). Blocks the linear reassociation class tested in-tree. SplitMix path retained only for differential tests. **Do not claim C-15 cryptographically closed.** No shortcut exceeding the measured threshold was found within explicitly tested algorithms/dimensions; general shortcut resistance remains an external-review assumption. |
+| LT-Q1 | Skinny single-nonce launches under fat `Q*` schedule | **CLOSED (Phase B, inert)** — when `fMatMulLTSealAsPoW` + live DRLT, lottery object is the Q* window seal (`ComputeSealDigestBMX4CLT`); Phase A remains per-nonce digest when the toggle is off. **Q\* is aggregate work commitment only** — it commits leaf digests and does **not** prove classical GEMM, tensor-core use, or simultaneous slot execution. **Slot-id binding is consensus:** full 256-bit `DeriveWindowSlotId` folds into V3 seeds via `BindWindowSlotIdIntoSeeds` and into each Merkle leaf via `CommitWindowSlotLeaf`; duplicate slot ids fail closed. Low-64 `DeriveWindowSlotNonce` is only the header grinding field (`ReadLE64(slot_id)`). |
+| LT-Q2 | Window-seal PoW without MTP-threaded sibling seeds | **CLOSED (Phase B, inert)** — EncDr / solve thread parent MTP into `SlotSeedFn` → `SetDeterministicMatMulSeeds` for every slot, then consensus `BindWindowSlotIdIntoSeeds`; sketch-cache `H(σ‖Chat)==matmul_digest` skipped in seal mode |
 | LT-A1 | ASERT continuous across MatExpand/deep-m work shift | **CLOSED in code** — `nMatMulDRLTHeight` rescale + re-anchor; ratios default 1/1 until silicon calibration against the **fastest known exact** miner path |
 | LT-V1 | Missing `n % 32` gate for `ENC_BMX4C_LT` | **CLOSED** — validation mirrors ENC-BMX4C |
 | LT-P1 | Live DRLT with wrong tile/rank pin | **CLOSED** — construction asserts `b=2`, `m=BMX4C_LT_SKETCH_RANK_M` |
@@ -19,18 +23,28 @@
 Normative map (per entry `(i,j)`):
 
 1. `Y = G·W`, `B32 = Y·H` — exact integer GEMMs (unchanged).
-2. `salt = LE64(seed_W)`.
-3. `mixed = Mix(B32[i,j], i, j, salt)` — SplitMix64-style avalanche.
-4. Walk nibbles of `mixed` (remix on exhaustion) through `SampleMantissaNibble` → `μ ∈ M11`.
-5. `e = Mix(...scale lane...) & 3`; output `μ << e` with `|μ<<e| ≤ 48`.
+2. `prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W)` — 256-bit ChaCha20 key.
+3. Mantissa stream = ChaCha20 keystream (`crypto/chacha20.h`, RFC8439 layout)
+   with `nonce = (raw ⊕ 'MANT', pack(i,j))`, `counter = remix`; take LE64.
+4. Walk nibbles through `SampleMantissaNibble` → `μ ∈ M11` (remix on exhaustion).
+5. Scale stream = independent ChaCha20 lane (`raw ⊕ 'SCLE'`); `e = stream & 3`;
+   output `μ << e` with `|μ<<e| ≤ 48`.
+
+**Rationale (candidate selection):** in-tree ChaCha20 is a reviewed stream cipher
+(RFC8439 / Bitcoin Core). Prefer over SplitMix64 (not a PRF) and over per-entry
+SHA256 (heavier; same security class as existing seed tags). BLAKE3 is not in-tree.
+This is a **candidate**, not a closed cryptanalysis.
 
 Why this blocks the linear shortcut class:
 
-- A Freivalds probe that is linear in `B̂` cannot pull `G`/`W`/`H` through Mix/M11/table rejection.
-- Position salts `(i,j)` and panel salt kill translation / panel-reuse collapses across A vs B.
-- Legacy `FoldInt32ToEmax48` (`y % 97 → [-48,48]`) remains exported **only** for differential tests; it is not normative.
+- A Freivalds probe that is linear in `B̂` cannot pull `G`/`W`/`H` through ChaCha/M11/table rejection.
+- Position salts `(i,j)` and full `seed_W`-derived key kill translation / panel-reuse collapses across A vs B.
+- Legacy `FoldInt32ToEmax48` (`y % 97 → [-48,48]`) and SplitMix
+  `ExtractDequantMatExpandSplitMix` remain exported **only** for differential tests.
 
-Tests: `matexpand_extract_range`, `matexpand_not_affine_in_raw`, `matexpand_position_salt_differential` in `src/test/matmul_v4_lt_tests.cpp`.
+Tests: `matexpand_extract_range`, `matexpand_not_affine_in_raw`,
+`matexpand_position_salt_differential`, `matexpand_chacha_prf_golden_vectors`
+in `src/test/matmul_v4_lt_tests.cpp`.
 
 ## Consensus Q* — Phase A vs Phase B
 
@@ -43,8 +57,8 @@ Tests: `matexpand_extract_range`, `matexpand_not_affine_in_raw`, `matexpand_posi
 **Phase B (IMPLEMENTED, inert on public nets):**
 
 1. Mode toggle `Consensus::Params::fMatMulLTSealAsPoW` (default `false`). Active only via `IsMatMulLTSealAsPoWActive(height)` = `IsDRLTActive(height) && fMatMulLTSealAsPoW`. Public nets keep `nMatMulDRLTHeight = INT32_MAX`, so the mode is fail-closed regardless of the toggle. Regtest opt-in: `-regtestmatmulltsealaspow` with a live `-regtestdrltheight`.
-2. Lottery object: `matmul_digest := SealWindowCommit(σ_anchor, Merkle(slot digests), Q*)` via `ComputeSealDigestBMX4CLT`.
-3. Slot nonces: `DeriveWindowSlotNonce(σ_anchor, j)`. Sibling V3 seeds: `SlotSeedFn` → `SetDeterministicMatMulSeeds(..., parent_MTP)` in solve + EncDr recompute.
+2. Lottery object: `matmul_digest := SealWindowCommit(σ_anchor, Merkle(CommitWindowSlotLeaf(slot_id, digest)), Q*)` via `ComputeSealDigestBMX4CLT`.
+3. Slot identity: `slot_id := DeriveWindowSlotId(σ_anchor, j)` (256-bit); `nNonce64 := ReadLE64(slot_id)`. Sibling V3 seeds: `SlotSeedFn` → `SetDeterministicMatMulSeeds(..., parent_MTP)` then mandatory `BindWindowSlotIdIntoSeeds` (LT-Q2 + full-id bind). Duplicate `slot_id` rejects the seal.
 4. Sketch-cache / MMSKETCH: Phase-A `H(σ‖Chat)==matmul_digest` auth is **not** used in seal mode (prefetch/ingress ignored; tip verify is ε=0 seal recompute). Seal-auth helpers: `SealWindowProofMatchesCommitment` / `VerifySealWindowFreivalds`.
 5. Async EncDr worker: `ClassifyMatMulEncDrRecompute` returns height + parent MTP
    when prev is known (including seal heights); `MatMulVerifyWorker::Job` carries

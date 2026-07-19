@@ -9,7 +9,7 @@
 | Lever | Normative value | Effect |
 |---|---|---|
 | Deep-`m` under ENC-DR | `b = 2`, `m = n/2` (2048 @ n=4096) | ~3.6× tensor MACs; **0 B** permanent sketch growth |
-| MatExpand | `B̂ = Extract(Mix(G·W·H))`, `w=128` | SHA operand floor → dense exact-int GEMMs; C-15 non-collapse |
+| MatExpand | `B̂ = Extract_PRF(G·W·H)`, `w=128` | SHA operand floor → dense exact-int GEMMs; C-15 candidate mixer |
 | Consensus `Q*` | `{64,128}` (default 64) | Fat stacked miner windows (Phase A); Phase B seal-as-PoW via `fMatMulLTSealAsPoW` (implemented, default off, inert while DRLT is INT32_MAX) |
 | Alphabet / Ĉ | Path-agnostic integer; M11 projectors; Extract to `[-48,48]` | FP8/MXFP4 remain **miner-local** lanes |
 
@@ -25,12 +25,19 @@ Domain tags (V44LT):
 ```
 Y = G · W          # s8×s8→s32, n×w
 B32 = Y · H        # s32×s8→s32, n×n
-salt = LE64(seed_W)
-B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, salt)
-# Mix (SplitMix64-style) → M11 rejection nibbles → e∈{0..3}; value = μ<<e ∈ [-48,48]
+prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W)
+B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
+# ChaCha20 PRF keystream (RFC8439; key=prf_key; nonce=(raw⊕lane, pack(i,j));
+# counter=remix; lanes MANT/SCLE) → M11 rejection nibbles → e∈{0..3};
+# value = μ<<e ∈ [-48,48]
 ```
 
-`FoldInt32ToEmax48` (`y % 97`) is **non-normative** (differential tests only).
+`FoldInt32ToEmax48` (`y % 97`) and SplitMix `MixMatExpandEntry` /
+`ExtractDequantMatExpandSplitMix` are **non-normative** (differential tests only).
+
+**Extractor status:** ChaCha20-PRF Extract is the **selected consensus candidate**
+under `ENC_BMX4C_LT`. It is **not** cryptographically closed — external C-15
+review remains required before any public activation height is raised.
 
 Projectors use `BTX_MATMUL_V44LT_SKETCH_U/V`. Digest = `H(σ ‖ Chat)` with
 `Chat = (U·Â)(B̂·V)` over `q = 2⁶¹−1`, tile `b=2`.
@@ -42,16 +49,28 @@ digests; lottery object remains the per-nonce ENC-DR digest (sketch-cache auth
 intact). `fMatMulLTSealAsPoW = false`.
 
 **Phase B (IMPLEMENTED, inert while `nMatMulDRLTHeight = INT32_MAX`):** when
-`IsMatMulLTSealAsPoWActive(height)` the lottery object is the window seal:
+`IsMatMulLTSealAsPoWActive(height)` the lottery object is the window seal.
+`Q*` is an **aggregate work commitment** over leaf digests — it does **not**
+prove classical GEMM, tensor-core use, or simultaneous slot execution. Full
+256-bit **slot-id binding** (seeds + Merkle leaf) **is** consensus:
 
 ```
-matmul_digest := SealWindowCommit(σ_anchor, Merkle(slot digests), Q*)
-slot_j.nonce  := DeriveWindowSlotNonce(σ_anchor, j)
-slot_j.seeds  := SetDeterministicMatMulSeeds(slot_j, height, parent_MTP)  # LT-Q2
-slot_j.digest := ComputeDigestBMX4CLT(slot_j)  # H(σ_slot ‖ Chat_slot)
+slot_id_j     := DeriveWindowSlotId(σ_anchor, j)
+              = SHA256("BTX_QSTAR_SLOT_V44LT" ‖ σ_anchor ‖ j LE32)   # 256-bit
+nNonce64_j    := ReadLE64(slot_id_j)                                 # grinding field
+v3_seeds_j    := SetDeterministicMatMulSeeds(slot_j, height, parent_MTP)  # LT-Q2
+seed_a/b_j    := BindWindowSlotIdIntoSeeds(v3_seeds_j, slot_id_j)
+              # seed_a := SHA256("BTX_QSTAR_SLOTSEED_A_V44LT" ‖ seed_a ‖ slot_id)
+              # seed_b := SHA256("BTX_QSTAR_SLOTSEED_B_V44LT" ‖ seed_b ‖ slot_id)
+digest_j      := ComputeDigestBMX4CLT(slot_j)                        # H(σ_slot ‖ Chat_slot)
+leaf_j        := CommitWindowSlotLeaf(slot_id_j, digest_j)
+              = SHA256("BTX_QSTAR_LEAF_V44LT" ‖ slot_id_j ‖ digest_j)
+matmul_digest := SealWindowCommit(σ_anchor, Merkle(leaves), Q*)
 ```
 
 Seal commit tag: `SHA256("BTX_QSTAR_COMMIT_V44LT" ‖ σ_anchor ‖ merkle ‖ Q* LE32)`.
+Duplicate `slot_id` values fail seal construction closed (do not rely on low-64
+`nNonce64` uniqueness alone).
 
 EncDr verify recomputes the seal with parent MTP (`CheckMatMulProofOfWork_V4EncDr`);
 Phase-A `H(σ‖Chat)==matmul_digest` cache auth / MMSKETCH are skipped in seal mode.
@@ -91,7 +110,8 @@ Linker `*_stub.cpp` files remain only for builds with the corresponding `BTX_ENA
 2. B200/5090 nonce/s ≥ ~4× on fat shape
 3. Nonce/$ proxies: B200 ≥ 5090 (honest: fleets may still invert)
 4. MI350 FER / OCP MX exactness PASS
-5. MatExpand adversarial review closed on Mix+M11 Extract (internal: done; external C-15 still required)
+5. MatExpand adversarial review: ChaCha20-PRF candidate selected (internal
+   non-affinity + golden vectors); external C-15 still required — not closed
 6. Tip verify budget with sketch-cache
 7. Header-PoW + authenticated chainwork blockers unchanged
 8. Phase B seal-as-PoW tip-verify budget soak + seal-binding review if Rank-1

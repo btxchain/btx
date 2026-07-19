@@ -67,7 +67,8 @@ def check_inert() -> list[str]:
     if not lt_h.is_file() or not lt_c.is_file():
         errors.append("missing matmul_v4_lt reference sources")
     else:
-        for sym in ("MixMatExpandEntry", "ExtractDequantMatExpand", "PlanLTAccel"):
+        for sym in ("MixMatExpandEntry", "ExtractDequantMatExpand", "DeriveMatExpandPrfKey",
+                    "ExtractDequantMatExpandSplitMix", "PlanLTAccel"):
             if not _has_def(lt_h, sym) and f"{sym}" not in lt_h.read_text(encoding="utf-8"):
                 errors.append(f"missing declaration of {sym} in matmul_v4_lt.h")
             if not _has_def(lt_c, sym):
@@ -75,10 +76,16 @@ def check_inert() -> list[str]:
         lt_body = lt_c.read_text(encoding="utf-8")
         if "ExtractDequantMatExpand" not in lt_body or "MatExpandCore" not in lt_body:
             errors.append("MatExpandCore must use ExtractDequantMatExpand")
+        if "ChaCha20" not in lt_body and "chacha20" not in lt_body:
+            errors.append("normative MatExpand Extract must use in-tree ChaCha20 PRF")
+        if "BTX_MATEXPAND_PRF_V44LT" not in lt_body:
+            errors.append("missing MatExpand PRF domain tag BTX_MATEXPAND_PRF_V44LT")
         if re.search(r"MatExpandCore[\s\S]*?FoldInt32ToEmax48\s*\(", lt_body):
             core = re.search(r"MatExpandCore\s*\([\s\S]*?\n\}\s*\n", lt_body)
             if core and "FoldInt32ToEmax48" in core.group(0):
                 errors.append("MatExpandCore still uses FoldInt32ToEmax48 (affine fold)")
+        if re.search(r"MatExpandCore[\s\S]*?ExtractDequantMatExpandSplitMix\s*\(", lt_body):
+            errors.append("MatExpandCore must not call legacy SplitMix Extract")
 
     accel = (ROOT / "src/matmul/accel_v4.cpp").read_text(encoding="utf-8")
     if "ComputeDigestsBMX4CLTDispatched" not in accel:
@@ -108,7 +115,7 @@ def print_gates() -> None:
         "G2 B200/5090 nonce/s >= ~4x on fat MatExpand+Q* miner schedule",
         "G3 Nonce/$ proxies: B200 >= 5090 (rental + purchase) — operator-supplied costs only",
         "G4 MI350 FER / OCP MX exactness PASS",
-        "G5 MatExpand adversarial review (Mix+M11 Extract; external C-15 still required)",
+        "G5 MatExpand adversarial review (ChaCha20-PRF candidate selected; external C-15 still required)",
         "G6 Tip verify budget with sketch-cache within policy",
         "G7 Header-PoW + authenticated chainwork blockers still required",
         "G8 Phase B seal-as-PoW only if Rank-1 launch requires consensus-bound windows",

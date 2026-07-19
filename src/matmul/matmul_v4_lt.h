@@ -39,14 +39,25 @@ inline constexpr uint32_t kConsensusQStarMax = 128;
 
 [[nodiscard]] int32_t FoldInt32ToEmax48(int32_t y);
 
-/** Position-salted SplitMix64 avalanche (MatExpand C-15 non-collapse).
- *  Pure integer; identical on every backend. */
+/** Domain-separated ChaCha20 PRF key for normative MatExpand Extract.
+ *  key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W). */
+[[nodiscard]] uint256 DeriveMatExpandPrfKey(const uint256& seed_w);
+
+/** Position-salted SplitMix64 avalanche — LEGACY / differential tests only.
+ *  Not used by normative ENC_BMX4C_LT MatExpand. */
 [[nodiscard]] uint64_t MixMatExpandEntry(int32_t raw, uint32_t i, uint32_t j, uint64_t salt);
 
-/** Nonlinear map raw → dequantized int8 in [-48,48]: M11 rejection sample
- *  from Mix stream + E8M0-style scale e∈{0..3}, value = mu<<e.
- *  NOT an affine function of `raw` — blocks Freivalds reassociation shortcuts. */
-[[nodiscard]] int8_t ExtractDequantMatExpand(int32_t raw, uint32_t i, uint32_t j, uint64_t salt);
+/** Legacy SplitMix+M11 Extract — differential tests only (non-normative). */
+[[nodiscard]] int8_t ExtractDequantMatExpandSplitMix(int32_t raw, uint32_t i, uint32_t j,
+                                                     uint64_t salt);
+
+/** Normative MatExpand Extract (ENC_BMX4C_LT): ChaCha20 PRF over
+ *  (prf_key, raw, i, j, remix) → M11 rejection + scale e∈{0..3}, μ<<e ∈ [-48,48].
+ *  `prf_key` MUST be DeriveMatExpandPrfKey(seed_W). NOT affine in `raw`.
+ *  Candidate cryptographic mixer — external C-15 review still required before
+ *  any public activation height is raised. */
+[[nodiscard]] int8_t ExtractDequantMatExpand(int32_t raw, uint32_t i, uint32_t j,
+                                             const uint256& prf_key);
 
 [[nodiscard]] std::vector<int32_t> ExactGemmS8S8(const std::vector<int8_t>& L,
                                                  const std::vector<int8_t>& R,
@@ -98,19 +109,31 @@ struct ExactGemmBackend {
                                        uint256& digest_out);
 
 struct WindowSlot {
-    uint64_t nonce{0};
-    uint256 digest;
+    uint256 slot_id;   // DeriveWindowSlotId(sigma_anchor, j) — full 256-bit identity
+    uint64_t nonce{0}; // == ReadLE64(slot_id) — header grinding field only
+    uint256 digest;    // Phase-A ENC-DR-LT digest H(sigma_slot ‖ Chat_slot)
 };
 
 [[nodiscard]] uint256 ComputeWindowMerkleRoot(Span<const uint256> digests);
 [[nodiscard]] uint256 SealWindowCommit(const uint256& sigma_anchor,
                                        const uint256& merkle_root, uint32_t Qstar);
+/** Consensus Merkle leaf for slot j (exact preimage):
+ *  SHA256("BTX_QSTAR_LEAF_V44LT" ‖ slot_id ‖ digest). */
+[[nodiscard]] uint256 CommitWindowSlotLeaf(const uint256& slot_id, const uint256& digest);
+/** After SlotSeedFn pins V3 seeds, fold the full 256-bit slot_id into seed_a /
+ *  seed_b (exact preimage):
+ *    seed_a := SHA256("BTX_QSTAR_SLOTSEED_A_V44LT" ‖ seed_a ‖ slot_id)
+ *    seed_b := SHA256("BTX_QSTAR_SLOTSEED_B_V44LT" ‖ seed_b ‖ slot_id)
+ *  Mandatory on every seal path so high bits of slot_id bind into operand B /
+ *  sigma even when nNonce64 only carries the low 64 bits. */
+void BindWindowSlotIdIntoSeeds(CBlockHeader& header, const uint256& slot_id);
 /** TEST/DIAGNOSTIC ONLY — does NOT prove Q* window membership.
  *
  *  Reconstructs digests from caller-supplied slot nonces without re-deriving
- *  expected nonces from sigma_anchor, without SlotSeedFn / parent MTP, and
- *  without checking seal order or uniqueness. Unused in production validation.
- *  Prefer VerifySealWindowFreivalds / SealWindowProofMatchesCommitment. */
+ *  expected slot ids from sigma_anchor, without SlotSeedFn / parent MTP /
+ *  BindWindowSlotIdIntoSeeds, and without checking seal order or uniqueness.
+ *  Unused in production validation. Prefer VerifySealWindowFreivalds /
+ *  SealWindowProofMatchesCommitment. */
 [[nodiscard]] bool VerifyWindowSlotFreivalds(const CBlockHeader& tmpl, uint32_t n,
                                              const std::vector<WindowSlot>& slots, uint32_t r);
 
@@ -121,44 +144,53 @@ struct WindowSlot {
 // Consensus::Params::IsMatMulLTSealAsPoWActive, which requires the still-
 // INT32_MAX nMatMulDRLTHeight). In seal mode the header's lottery object is not
 // the per-nonce ENC-DR-LT digest but the WINDOW SEAL binding a full Q* window of
-// sibling-nonce digests:
+// sibling slot digests:
 //
-//   matmul_digest := SealWindowCommit(sigma_anchor, Merkle(slot digests), Q*)
+//   slot_id_j  := DeriveWindowSlotId(sigma_anchor, j)          // 256-bit
+//   nNonce64_j := ReadLE64(slot_id_j)                         // grinding field
+//   seeds_j    := BindWindowSlotIdIntoSeeds(V3(...), slot_id_j)
+//   digest_j   := ComputeDigestBMX4CLT(slot_j)                // H(σ‖Chat)
+//   leaf_j     := CommitWindowSlotLeaf(slot_id_j, digest_j)
+//   matmul_digest := SealWindowCommit(sigma_anchor, Merkle(leaves), Q*)
 //
-// where sigma_anchor = DeriveSigma(anchor), slot j has nonce
-// DeriveWindowSlotNonce(sigma_anchor, j) with the consensus V3 (parent-MTP-
-// bound) seed_a/seed_b pinned onto it (SlotSeedFn — threads LT-Q2), and each
-// slot digest is the Phase-A ENC-DR-LT digest ComputeDigestBMX4CLT(slot header)
-// = H(sigma_slot || Chat_slot).
+// Q* is an aggregate work commitment over the leaf digests — it does NOT prove
+// classical GEMM, tensor-core use, or simultaneous slot execution. Slot-id
+// binding (id → seeds + leaf) IS consensus.
 // ---------------------------------------------------------------------------
 
-/** Deterministic per-anchor window-slot nonce for slot `slot_index`
- *  (SHA256("BTX_QSTAR_SLOT_V44LT" ‖ sigma_anchor ‖ slot_index LE32), low 64
- *  bits LE). Pseudo-random per anchor so distinct anchors' windows are disjoint
- *  nonce sets: a miner cannot amortize one nonce's digest across many anchors'
- *  windows, so evaluating the seal genuinely costs Q* fresh digests (the
- *  fat-window enforcement, adversarial LT-Q1). */
+/** Full 256-bit per-anchor window-slot identifier:
+ *  SHA256("BTX_QSTAR_SLOT_V44LT" ‖ sigma_anchor ‖ slot_index LE32). */
+[[nodiscard]] uint256 DeriveWindowSlotId(const uint256& sigma_anchor, uint32_t slot_index);
+
+/** Header grinding field for slot `slot_index`: low 64 bits LE of
+ *  DeriveWindowSlotId(sigma_anchor, slot_index). Distinct anchors still yield
+ *  disjoint low-64 sets with overwhelming probability; consensus uniqueness is
+ *  enforced on the full slot_id, not this truncation. */
 [[nodiscard]] uint64_t DeriveWindowSlotNonce(const uint256& sigma_anchor, uint32_t slot_index);
 
-/** Callback that pins the consensus-correct seed_a/seed_b onto a window-slot
- *  header whose nNonce64/nNonce are already set to the slot nonce. The caller
- *  binds the params/height/parent-MTP and typically wraps
+/** Callback that pins the consensus-correct V3 seed_a/seed_b onto a window-slot
+ *  header whose nNonce64/nNonce are already set to the slot nonce (low 64 of
+ *  slot_id). The caller binds the params/height/parent-MTP and typically wraps
  *  SetDeterministicMatMulSeeds, so every sibling slot re-derives its V3 seeds
  *  under the SAME parent-MTP rule as any block at this height (threads the
- *  parent MTP into the whole window — adversarial LT-Q2). Returns false if the
- *  seeds cannot be derived (e.g. parent MTP unavailable), which fails the seal
- *  closed. */
+ *  parent MTP into the whole window — adversarial LT-Q2). After this callback
+ *  returns, ComputeSealDigestBMX4CLT always applies BindWindowSlotIdIntoSeeds.
+ *  Returns false if the seeds cannot be derived (e.g. parent MTP unavailable),
+ *  which fails the seal closed. */
 using SlotSeedFn = std::function<bool(CBlockHeader&)>;
 
 /** CONSENSUS DEFINITION of the seal-as-PoW lottery object (ε = 0). Derives the
  *  Q* window from `anchor` (sigma_anchor = DeriveSigma(anchor)), computes each
  *  slot's ENC-DR-LT digest via ComputeDigestBMX4CLT after `slot_seed_fn` pins
- *  its V3 seeds, builds the Merkle root, and returns the seal in `seal_out`.
- *  `Qstar` MUST be a valid consensus Q* ({64,128}). On success `slots_out` (if
- *  non-null) receives the per-slot (nonce, digest) leaves in window order, and
- *  `slot_payloads_out` (if non-null) receives each slot's serialized sketch
- *  bytes (for the Freivalds seal-auth path / harnesses). Returns false if any
- *  slot fails (bad dims, slot_seed_fn failure). */
+ *  its V3 seeds and BindWindowSlotIdIntoSeeds folds in the full slot_id, builds
+ *  the Merkle root over CommitWindowSlotLeaf(slot_id, digest) leaves, and
+ *  returns the seal in `seal_out`. `Qstar` MUST be a valid consensus Q*
+ *  ({64,128}). Rejects duplicate slot_ids deterministically. On success
+ *  `slots_out` (if non-null) receives the per-slot (slot_id, nonce, digest)
+ *  records in window order, and `slot_payloads_out` (if non-null) receives each
+ *  slot's serialized sketch bytes (for the Freivalds seal-auth path /
+ *  harnesses). Returns false if any slot fails (bad dims, slot_seed_fn failure,
+ *  duplicate slot_id). */
 [[nodiscard]] bool ComputeSealDigestBMX4CLT(
     const CBlockHeader& anchor, uint32_t n, uint32_t Qstar,
     const SlotSeedFn& slot_seed_fn, uint256& seal_out,

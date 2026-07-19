@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_bmx4.h>
 
 #include <arith_uint256.h>
+#include <crypto/chacha20.h>
 #include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <primitives/block.h>
@@ -16,6 +17,7 @@
 #include <uint256.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <string_view>
@@ -37,7 +39,22 @@ constexpr char kMatExpandWATag[] = "BTX_MATEXPAND_WA_V44LT"; // template panel (
 constexpr char kProjectorUTagV44LT[] = "BTX_MATMUL_V44LT_SKETCH_U";
 constexpr char kProjectorVTagV44LT[] = "BTX_MATMUL_V44LT_SKETCH_V";
 constexpr char kQStarCommitTag[] = "BTX_QSTAR_COMMIT_V44LT";
-constexpr char kQStarSlotTag[] = "BTX_QSTAR_SLOT_V44LT"; // Phase B slot-nonce derivation
+constexpr char kQStarSlotTag[] = "BTX_QSTAR_SLOT_V44LT";       // Phase B full slot id
+constexpr char kQStarLeafTag[] = "BTX_QSTAR_LEAF_V44LT";       // Merkle leaf preimage
+constexpr char kQStarSlotSeedATag[] = "BTX_QSTAR_SLOTSEED_A_V44LT";
+constexpr char kQStarSlotSeedBTag[] = "BTX_QSTAR_SLOTSEED_B_V44LT";
+
+// SHA256(tag ‖ a ‖ b) → uint256 (domain-separated two-hash fold).
+uint256 DeriveTaggedPair(const char* tag, size_t taglen, const uint256& a, const uint256& b)
+{
+    CSHA256 hasher;
+    hasher.Write(reinterpret_cast<const unsigned char*>(tag), taglen);
+    hasher.Write(a.data(), uint256::size());
+    hasher.Write(b.data(), uint256::size());
+    uint8_t out[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(out);
+    return uint256{Span<const unsigned char>{out, sizeof(out)}};
+}
 
 // SHA256(tag || hash [|| extra]) -> uint256. Matches the single-SHA256 tagged
 // derivation style of matmul_v4_bmx4.cpp::DeriveTaggedSeed.
@@ -64,17 +81,19 @@ uint256 Sha256dPair(const uint256& a, const uint256& b)
     return uint256{Span<const unsigned char>{d2, sizeof(d2)}};
 }
 
-// MatExpand core: Bhat = Extract(Mix((G * W) * H)), n*n row-major, |.| <= 48.
+// MatExpand core: Bhat = Extract_PRF((G * W) * H), n*n row-major, |.| <= 48.
 //   G = ExpandProjectorBMX4C(seed_G, n, n)   template-scoped M11
 //   H = ExpandProjectorBMX4C(seed_H, w, n)   template-scoped M11
 //   W = ExpandProjectorBMX4C(seed_W, n, w)   panel (nonce/template per caller)
 //   Y  = G * W          (n x n)*(n x w) = n x w  exact s8xs8->s32, |Y| <= 36*n
 //   B32 = Y * H         (n x w)*(w x n) = n x n  exact s32xs8->s32
-//   Bhat[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, salt(seed_W))
+//   prf_key = DeriveMatExpandPrfKey(seed_W)
+//   Bhat[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
 //
 // C-15 non-collapse: Extract is NOT an affine function of B32. A Freivalds
 // verifier that only sees Bhat therefore cannot reassociate through G/W/H to
 // skip the dense MatExpand GEMMs (the linear-fold shortcut class).
+// ChaCha20 PRF replaces SplitMix as the candidate mixer (external review open).
 //
 // `backend` may redirect the two dense GEMMs to a bit-exact device path;
 // nullptr slots (or a false return) fall back to ExactGemm*.
@@ -98,18 +117,42 @@ std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, ui
         B32 = ExactGemmS32S8(Y, H, n, w, n);
     }
 
-    // Position salt binds the panel seed so A vs B (and distinct nonces) never
-    // share an Extract stream even when B32 collides.
-    const uint64_t salt = ReadLE64(seed_w.data());
+    // Full 256-bit PRF key (not truncated LE64 salt) so A vs B / distinct
+    // nonces never share an Extract stream even when B32 collides.
+    const uint256 prf_key = DeriveMatExpandPrfKey(seed_w);
 
     std::vector<int8_t> out(static_cast<size_t>(n) * n);
     for (uint32_t i = 0; i < n; ++i) {
         for (uint32_t j = 0; j < n; ++j) {
             const size_t idx = static_cast<size_t>(i) * n + j;
-            out[idx] = ExtractDequantMatExpand(B32[idx], i, j, salt);
+            out[idx] = ExtractDequantMatExpand(B32[idx], i, j, prf_key);
         }
     }
     return out;
+}
+
+} // namespace
+
+namespace {
+
+// ChaCha20 PRF domain tag + lanes (shared with DeriveMatExpandPrfKey / Extract).
+constexpr char kMatExpandPrfTag[] = "BTX_MATEXPAND_PRF_V44LT";
+constexpr uint32_t kMatExpandPrfLaneMant = 0x4D414E54u; // 'MANT'
+constexpr uint32_t kMatExpandPrfLaneScale = 0x53434C45u; // 'SCLE'
+
+// One ChaCha20 keystream (≤64 bytes) bound to (raw,i,j,counter,lane).
+// Nonce96 = (raw⊕lane, pack(i,j)); block counter = remix. Matches RFC8439
+// layout used by crypto/chacha20.h — device twins must reproduce bit-exactly.
+void MatExpandPrfKeystream(const uint256& prf_key, int32_t raw, uint32_t i, uint32_t j,
+                           uint32_t remix, uint32_t lane, Span<std::byte> out)
+{
+    std::array<std::byte, ChaCha20::KEYLEN> key_bytes{};
+    std::memcpy(key_bytes.data(), prf_key.data(), ChaCha20::KEYLEN);
+    ChaCha20 chacha{Span<const std::byte>{key_bytes}};
+    const uint32_t nonce_first = static_cast<uint32_t>(raw) ^ lane;
+    const uint64_t nonce_second = (static_cast<uint64_t>(i) << 32) | static_cast<uint64_t>(j);
+    chacha.Seek(ChaCha20::Nonce96{nonce_first, nonce_second}, remix);
+    chacha.Keystream(out);
 }
 
 } // namespace
@@ -123,10 +166,20 @@ int32_t FoldInt32ToEmax48(int32_t y)
     return a - 48; // [-48, 48]
 }
 
+uint256 DeriveMatExpandPrfKey(const uint256& seed_w)
+{
+    CSHA256 hasher;
+    hasher.Write(reinterpret_cast<const unsigned char*>(kMatExpandPrfTag),
+                 sizeof(kMatExpandPrfTag) - 1);
+    hasher.Write(seed_w.data(), uint256::size());
+    uint8_t out[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(out);
+    return uint256{Span<const unsigned char>{out, sizeof(out)}};
+}
+
 uint64_t MixMatExpandEntry(int32_t raw, uint32_t i, uint32_t j, uint64_t salt)
 {
-    // SplitMix64-style avalanche over (raw, i, j, salt). Pure integer; identical
-    // on every backend. Position salts kill translation-invariance shortcuts.
+    // LEGACY SplitMix64-style avalanche — differential tests only.
     uint64_t z = static_cast<uint64_t>(static_cast<uint32_t>(raw));
     z ^= static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL;
     z ^= static_cast<uint64_t>(j) * 0xBF58476D1CE4E5B9ULL;
@@ -136,29 +189,53 @@ uint64_t MixMatExpandEntry(int32_t raw, uint32_t i, uint32_t j, uint64_t salt)
     return z ^ (z >> 31);
 }
 
-int8_t ExtractDequantMatExpand(int32_t raw, uint32_t i, uint32_t j, uint64_t salt)
+int8_t ExtractDequantMatExpandSplitMix(int32_t raw, uint32_t i, uint32_t j, uint64_t salt)
 {
-    // M11 rejection sample from the Mix nibble stream, then E8M0-style scale
-    // e ∈ {0,1,2,3} from an independent Mix lane. Output = mu << e ∈ [-48,48].
-    // Nonlinearity: SampleMantissaNibble is a table over a 4-bit domain with
-    // rejections, so Extract is not affine in `raw` and does not commute with
-    // left/right multiplication by Freivalds probes.
+    // LEGACY SplitMix+M11 path — not consensus under ENC_BMX4C_LT.
     uint64_t mixed = MixMatExpandEntry(raw, i, j, salt);
     uint64_t remix = 0;
     for (;;) {
         for (int shift = 0; shift < 64; shift += 4) {
             bool accepted = false;
-            const int8_t mu = bx::SampleMantissaNibble(
+            const int8_t mu = matmul::v4::bmx4::SampleMantissaNibble(
                 static_cast<uint8_t>((mixed >> shift) & 0x0F), accepted);
             if (!accepted) continue;
             const uint64_t scale_stream = MixMatExpandEntry(
                 raw, i, j, salt ^ 0xD1B54A32D192ED03ULL ^ (remix << 1));
             const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
-            const int32_t v = static_cast<int32_t>(mu) << e;
-            return static_cast<int8_t>(v);
+            return static_cast<int8_t>(static_cast<int32_t>(mu) << e);
         }
         ++remix;
         mixed = MixMatExpandEntry(raw, i, j, salt + remix);
+    }
+}
+
+int8_t ExtractDequantMatExpand(int32_t raw, uint32_t i, uint32_t j, const uint256& prf_key)
+{
+    // Normative ENC_BMX4C_LT Extract: ChaCha20 PRF keystream → M11 rejection →
+    // independent scale lane e∈{0..3}. Domain-separated over (key, raw, i, j,
+    // remix). Stronger mixer candidate than SplitMix; C-15 external review still
+    // required before activation (do not claim cryptographically closed).
+    std::array<std::byte, 8> mant_bytes{};
+    std::array<std::byte, 8> scale_bytes{};
+    uint32_t remix = 0;
+    for (;;) {
+        MatExpandPrfKeystream(prf_key, raw, i, j, remix, kMatExpandPrfLaneMant,
+                              Span<std::byte>{mant_bytes});
+        const uint64_t mixed = ReadLE64(reinterpret_cast<const unsigned char*>(mant_bytes.data()));
+        for (int shift = 0; shift < 64; shift += 4) {
+            bool accepted = false;
+            const int8_t mu = matmul::v4::bmx4::SampleMantissaNibble(
+                static_cast<uint8_t>((mixed >> shift) & 0x0F), accepted);
+            if (!accepted) continue;
+            MatExpandPrfKeystream(prf_key, raw, i, j, remix, kMatExpandPrfLaneScale,
+                                  Span<std::byte>{scale_bytes});
+            const uint64_t scale_stream =
+                ReadLE64(reinterpret_cast<const unsigned char*>(scale_bytes.data()));
+            const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
+            return static_cast<int8_t>(static_cast<int32_t>(mu) << e);
+        }
+        ++remix;
     }
 }
 
@@ -352,6 +429,19 @@ uint256 SealWindowCommit(const uint256& sigma_anchor, const uint256& merkle_root
     return uint256{Span<const unsigned char>{out, sizeof(out)}};
 }
 
+uint256 CommitWindowSlotLeaf(const uint256& slot_id, const uint256& digest)
+{
+    return DeriveTaggedPair(kQStarLeafTag, sizeof(kQStarLeafTag) - 1, slot_id, digest);
+}
+
+void BindWindowSlotIdIntoSeeds(CBlockHeader& header, const uint256& slot_id)
+{
+    header.seed_a = DeriveTaggedPair(kQStarSlotSeedATag, sizeof(kQStarSlotSeedATag) - 1,
+                                     header.seed_a, slot_id);
+    header.seed_b = DeriveTaggedPair(kQStarSlotSeedBTag, sizeof(kQStarSlotSeedBTag) - 1,
+                                     header.seed_b, slot_id);
+}
+
 bool VerifyWindowSlotFreivalds(const CBlockHeader& tmpl, uint32_t n,
                                const std::vector<WindowSlot>& slots, uint32_t r)
 {
@@ -371,6 +461,12 @@ bool VerifyWindowSlotFreivalds(const CBlockHeader& tmpl, uint32_t n,
         CBlockHeader header = tmpl;
         header.nNonce64 = slots[i].nonce;
         header.nNonce = static_cast<uint32_t>(slots[i].nonce);
+        // Diagnostic path: if the caller supplied a slot_id, bind it the same
+        // way production seal construction does; otherwise fall back to nonce-
+        // only (legacy harnesses that never set slot_id).
+        if (!slots[i].slot_id.IsNull()) {
+            BindWindowSlotIdIntoSeeds(header, slots[i].slot_id);
+        }
         uint256 digest;
         std::vector<unsigned char> payload;
         if (!ComputeDigestBMX4CLT(header, n, digest, payload)) return false;
@@ -379,7 +475,7 @@ bool VerifyWindowSlotFreivalds(const CBlockHeader& tmpl, uint32_t n,
     return true;
 }
 
-uint64_t DeriveWindowSlotNonce(const uint256& sigma_anchor, uint32_t slot_index)
+uint256 DeriveWindowSlotId(const uint256& sigma_anchor, uint32_t slot_index)
 {
     CSHA256 hasher;
     hasher.Write(reinterpret_cast<const unsigned char*>(kQStarSlotTag), sizeof(kQStarSlotTag) - 1);
@@ -389,7 +485,14 @@ uint64_t DeriveWindowSlotNonce(const uint256& sigma_anchor, uint32_t slot_index)
     hasher.Write(idx_le, sizeof(idx_le));
     uint8_t out[CSHA256::OUTPUT_SIZE];
     hasher.Finalize(out);
-    return ReadLE64(out);
+    return uint256{Span<const unsigned char>{out, sizeof(out)}};
+}
+
+uint64_t DeriveWindowSlotNonce(const uint256& sigma_anchor, uint32_t slot_index)
+{
+    // Header grinding compatibility: nNonce64 := low 64 bits LE of the full
+    // 256-bit slot identifier (same bytes as historical DeriveWindowSlotNonce).
+    return ReadLE64(DeriveWindowSlotId(sigma_anchor, slot_index).data());
 }
 
 bool ComputeSealDigestBMX4CLT(const CBlockHeader& anchor, uint32_t n, uint32_t Qstar,
@@ -410,34 +513,39 @@ bool ComputeSealDigestBMX4CLT(const CBlockHeader& anchor, uint32_t n, uint32_t Q
     if (!prepared.Valid()) return false;
 
     const uint256 sigma_anchor = matmul::v4::DeriveSigma(anchor);
-    std::vector<uint256> digests;
-    digests.reserve(Qstar);
+    std::vector<uint256> leaves;
+    leaves.reserve(Qstar);
     if (slots_out) slots_out->reserve(Qstar);
     if (slot_payloads_out) slot_payloads_out->reserve(Qstar);
 
-    // Reject duplicate slot nonces deterministically (pathological collision
-    // in DeriveWindowSlotNonce would otherwise silently under-work the seal).
-    std::vector<uint64_t> seen_nonces;
-    seen_nonces.reserve(Qstar);
+    // Reject duplicate full slot identifiers deterministically. Low-64 nNonce
+    // collisions alone must NOT under-work the seal: seeds + leaf bind the
+    // full 256-bit id.
+    std::vector<uint256> seen_ids;
+    seen_ids.reserve(Qstar);
 
     for (uint32_t j = 0; j < Qstar; ++j) {
-        CBlockHeader slot = anchor;
-        slot.nNonce64 = DeriveWindowSlotNonce(sigma_anchor, j);
-        slot.nNonce = static_cast<uint32_t>(slot.nNonce64);
-        if (std::find(seen_nonces.begin(), seen_nonces.end(), slot.nNonce64) != seen_nonces.end()) {
+        const uint256 slot_id = DeriveWindowSlotId(sigma_anchor, j);
+        if (std::find(seen_ids.begin(), seen_ids.end(), slot_id) != seen_ids.end()) {
             return false;
         }
-        seen_nonces.push_back(slot.nNonce64);
+        seen_ids.push_back(slot_id);
+
+        CBlockHeader slot = anchor;
+        slot.nNonce64 = ReadLE64(slot_id.data());
+        slot.nNonce = static_cast<uint32_t>(slot.nNonce64);
         if (!slot_seed_fn(slot)) return false;
+        BindWindowSlotIdIntoSeeds(slot, slot_id);
 
         uint256 slot_digest;
         std::vector<unsigned char> payload;
         if (!prepared.MineSlot(slot, slot_digest, slot_payloads_out ? &payload : nullptr)) {
             return false;
         }
-        digests.push_back(slot_digest);
+        leaves.push_back(CommitWindowSlotLeaf(slot_id, slot_digest));
         if (slots_out) {
             WindowSlot leaf;
+            leaf.slot_id = slot_id;
             leaf.nonce = slot.nNonce64;
             leaf.digest = slot_digest;
             slots_out->push_back(std::move(leaf));
@@ -445,7 +553,7 @@ bool ComputeSealDigestBMX4CLT(const CBlockHeader& anchor, uint32_t n, uint32_t Q
         if (slot_payloads_out) slot_payloads_out->push_back(std::move(payload));
     }
 
-    const uint256 merkle = ComputeWindowMerkleRoot(digests);
+    const uint256 merkle = ComputeWindowMerkleRoot(leaves);
     seal_out = SealWindowCommit(sigma_anchor, merkle, Qstar);
     return true;
 }
@@ -462,14 +570,23 @@ bool VerifySealWindowFreivalds(const CBlockHeader& anchor, uint32_t n, uint32_t 
     if (!ValidateDimsBMX4CLT(n, m)) return false;
 
     const uint256 sigma_anchor = matmul::v4::DeriveSigma(anchor);
-    std::vector<uint256> digests;
-    digests.reserve(Qstar);
+    std::vector<uint256> leaves;
+    leaves.reserve(Qstar);
+    std::vector<uint256> seen_ids;
+    seen_ids.reserve(Qstar);
 
     for (uint32_t j = 0; j < Qstar; ++j) {
+        const uint256 slot_id = DeriveWindowSlotId(sigma_anchor, j);
+        if (std::find(seen_ids.begin(), seen_ids.end(), slot_id) != seen_ids.end()) {
+            return false;
+        }
+        seen_ids.push_back(slot_id);
+
         CBlockHeader slot = anchor;
-        slot.nNonce64 = DeriveWindowSlotNonce(sigma_anchor, j);
+        slot.nNonce64 = ReadLE64(slot_id.data());
         slot.nNonce = static_cast<uint32_t>(slot.nNonce64);
         if (!slot_seed_fn(slot)) return false;
+        BindWindowSlotIdIntoSeeds(slot, slot_id);
 
         // VerifySketchBMX4CLT requires header.matmul_digest == H(sigma‖payload).
         // Seal mode stores the lottery object on the ANCHOR only; pin the slot
@@ -479,10 +596,10 @@ bool VerifySealWindowFreivalds(const CBlockHeader& anchor, uint32_t n, uint32_t 
 
         uint256 slot_digest;
         if (!VerifySketchBMX4CLT(slot, n, rounds, slot_payloads[j], slot_digest)) return false;
-        digests.push_back(slot_digest);
+        leaves.push_back(CommitWindowSlotLeaf(slot_id, slot_digest));
     }
 
-    const uint256 merkle = ComputeWindowMerkleRoot(digests);
+    const uint256 merkle = ComputeWindowMerkleRoot(leaves);
     seal_out = SealWindowCommit(sigma_anchor, merkle, Qstar);
     return true;
 }
@@ -497,23 +614,33 @@ bool SealWindowProofMatchesCommitment(const CBlockHeader& anchor, uint32_t n, ui
     if (!ValidateDimsBMX4CLT(n, m)) return false;
 
     const uint256 sigma_anchor = matmul::v4::DeriveSigma(anchor);
-    std::vector<uint256> digests;
-    digests.reserve(Qstar);
+    std::vector<uint256> leaves;
+    leaves.reserve(Qstar);
+    std::vector<uint256> seen_ids;
+    seen_ids.reserve(Qstar);
 
     for (uint32_t j = 0; j < Qstar; ++j) {
+        const uint256 slot_id = DeriveWindowSlotId(sigma_anchor, j);
+        if (std::find(seen_ids.begin(), seen_ids.end(), slot_id) != seen_ids.end()) {
+            return false;
+        }
+        seen_ids.push_back(slot_id);
+
         CBlockHeader slot = anchor;
-        slot.nNonce64 = DeriveWindowSlotNonce(sigma_anchor, j);
+        slot.nNonce64 = ReadLE64(slot_id.data());
         slot.nNonce = static_cast<uint32_t>(slot.nNonce64);
         if (!slot_seed_fn(slot)) return false;
+        BindWindowSlotIdIntoSeeds(slot, slot_id);
 
         // Auth-only: digest = H(sigma_slot ‖ payload bytes); no Freivalds.
         std::vector<Fq> sketch;
         if (!matmul::v4::ParseSketch(slot_payloads[j], m, sketch)) return false;
-        const uint256 sigma_slot = matmul::v4::DeriveSigma(slot);
-        digests.push_back(matmul::v4::ComputeSketchDigest(sigma_slot, slot_payloads[j]));
+        leaves.push_back(CommitWindowSlotLeaf(
+            slot_id, matmul::v4::ComputeSketchDigest(matmul::v4::DeriveSigma(slot),
+                                                     slot_payloads[j])));
     }
 
-    const uint256 merkle = ComputeWindowMerkleRoot(digests);
+    const uint256 merkle = ComputeWindowMerkleRoot(leaves);
     const uint256 seal = SealWindowCommit(sigma_anchor, merkle, Qstar);
     return seal == anchor.matmul_digest;
 }
