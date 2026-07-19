@@ -18,6 +18,9 @@ Progressively more capable AI-native hardware receives progressively greater **e
 | §7 Per-MAC Fq reduction | **Confirmed worthwhile** | `ComputeCombineModQ` deferred `__int128` + one reduce (byte-identical) |
 | §15 Sync EncDr on msg thread | **Confirmed** | Saturated queue: defer/drop; never `ProcessBlockSync` EncDr |
 | §16 Best-header raw chainwork | **Confirmed** | Trust-adjusted selection + descendant auth-work propagation |
+| IBD unbounded expensive budget | **Confirmed** | Global leaf-unit budget always charged; IBD/fast-phase uses finite elevated ceiling (≥256) |
+| Q* charged as 1 verification | **Confirmed** | `MatMulEncDrWorkUnits` = Q* in seal mode; pending/budget consume leaf units |
+| V2-only blocktxn ceiling | **Confirmed** | Prefer full `BLOCK` fallback when blocktxn exceeds V2 payload; NOTFOUND only if BLOCK also too large |
 | §3 Unified public activation | **Confirmed useful** | Public nets require `v4==bmx4c==drlt` + `seal_as_pow` when DRLT live |
 | §13 Metal ARC `id<MTLBuffer>&` | **Confirmed** | `__strong&` ownership fix |
 | §19 `VerifyWindowSlotFreivalds` | **Confirmed** unsafe as general API | Marked test/diagnostic-only |

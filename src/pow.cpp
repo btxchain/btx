@@ -4334,10 +4334,33 @@ uint32_t SelectMatMulPeerVerifyBudgetBase(const Consensus::Params& params, int32
 }
 } // namespace
 
+uint32_t MatMulEncDrWorkUnits(const Consensus::Params& params, int32_t reference_height)
+{
+    // One EncDr leaf digest = 1 unit. Phase-B seal recomputes Q* sibling leaves.
+    if (!IsDisabledHeight(params.nMatMulDRLTHeight) &&
+        params.IsMatMulLTSealAsPoWActive(reference_height)) {
+        uint32_t q = params.nMatMulConsensusQStar;
+        if (q != 64 && q != 128) q = 64;
+        return q;
+    }
+    return 1;
+}
+
 uint32_t EffectiveMatMulMaxPendingVerifications(const Consensus::Params& params, int32_t reference_height)
 {
     if (!IsDisabledHeight(params.nMatMulDRLTHeight) && params.IsDRLTActive(reference_height)) {
-        return params.nMatMulLTMaxPendingVerifications;
+        // Cap is in leaf work-units. Default nMatMulLTMaxPendingVerifications=2
+        // means up to two concurrent seal jobs when seal-as-PoW is live
+        // (2 * Q*), or two Phase-A digests otherwise.
+        const uint32_t jobs = params.nMatMulLTMaxPendingVerifications;
+        if (jobs == std::numeric_limits<uint32_t>::max()) {
+            return jobs;
+        }
+        const uint32_t units = MatMulEncDrWorkUnits(params, reference_height);
+        if (jobs > std::numeric_limits<uint32_t>::max() / units) {
+            return std::numeric_limits<uint32_t>::max();
+        }
+        return jobs * units;
     }
     return params.nMatMulMaxPendingVerifications;
 }
@@ -4459,6 +4482,16 @@ bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus:
                                 int32_t reference_height)
 {
     return pending_verifications < EffectiveMatMulMaxPendingVerifications(params, reference_height);
+}
+
+bool CanStartMatMulVerification(uint32_t pending_verifications, uint32_t work_units,
+                                const Consensus::Params& params, int32_t reference_height)
+{
+    if (work_units == 0) return true;
+    const uint32_t cap = EffectiveMatMulMaxPendingVerifications(params, reference_height);
+    if (cap == std::numeric_limits<uint32_t>::max()) return true;
+    if (work_units > cap) return false;
+    return pending_verifications <= cap - work_units;
 }
 
 bool SolveMatMulNonceSeeded(CBlockHeader& block,

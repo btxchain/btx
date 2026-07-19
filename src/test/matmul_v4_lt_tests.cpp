@@ -468,6 +468,22 @@ BOOST_AUTO_TEST_CASE(phase_b_seal_round_trip_and_auth)
     BOOST_CHECK(!lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/32, seed_fn, junk));
 }
 
+BOOST_AUTO_TEST_CASE(seal_env_batch_does_not_change_library_seal)
+{
+    // BTX_MATMUL_LT_BATCH must never alter ComputeSealDigestBMX4CLT — consensus
+    // Q* is an explicit argument. (SolveMatMulV4LT also keeps env off the seal
+    // leaf count; this pins the library boundary.)
+    auto anchor = MakeLTHeader(31, kTestDim);
+    const auto seed_fn = [](CBlockHeader& /*h*/) -> bool { return true; };
+    uint256 seal_a;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/64, seed_fn, seal_a));
+    setenv("BTX_MATMUL_LT_BATCH", "128", /*overwrite=*/1);
+    uint256 seal_b;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/64, seed_fn, seal_b));
+    BOOST_CHECK(seal_a == seal_b);
+    unsetenv("BTX_MATMUL_LT_BATCH");
+}
+
 BOOST_AUTO_TEST_CASE(prepared_template_slot_matches_full_digest)
 {
     // Production seal path prepares A/U/V/P once via WindowSketchMinerLT; each

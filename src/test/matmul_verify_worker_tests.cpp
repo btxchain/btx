@@ -250,6 +250,8 @@ BOOST_AUTO_TEST_CASE(lt_tip_verify_budget_knobs)
     params.nMatMulV4Height = 1;
     params.nMatMulBMX4CHeight = 1; // IsDRLTActive requires IsBMX4CActive
     params.nMatMulDRLTHeight = 100;
+    params.nMatMulConsensusQStar = 64;
+    params.fMatMulLTSealAsPoW = false;
     params.nMatMulV4GlobalVerifyBudgetPerMin = 4;
     params.nMatMulV4PeerVerifyBudgetPerMin = 2;
     params.nMatMulLTGlobalVerifyBudgetPerMin = 1;
@@ -259,17 +261,27 @@ BOOST_AUTO_TEST_CASE(lt_tip_verify_budget_knobs)
 
     // Below DRLT: v4 (or v3) caps apply; LT knobs stay inert.
     BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(params, /*reference_height=*/50), 16U);
+    BOOST_CHECK_EQUAL(MatMulEncDrWorkUnits(params, 50), 1U);
     BOOST_CHECK_EQUAL(EffectiveMatMulGlobalVerifyBudgetPerMin(params, 50), 4U);
     BOOST_CHECK_EQUAL(EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/false, 50), 2U);
     BOOST_CHECK(CanStartMatMulVerification(15, params, 50));
     BOOST_CHECK(!CanStartMatMulVerification(16, params, 50));
 
-    // At/above DRLT: LT tip-verify knobs apply (tighter pending + budgets).
+    // At/above DRLT Phase A (seal off): LT tip-verify knobs apply; each job = 1 leaf unit.
+    BOOST_CHECK_EQUAL(MatMulEncDrWorkUnits(params, 100), 1U);
     BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(params, 100), 2U);
     BOOST_CHECK_EQUAL(EffectiveMatMulGlobalVerifyBudgetPerMin(params, 100), 1U);
     BOOST_CHECK_EQUAL(EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/false, 100), 1U);
     BOOST_CHECK(CanStartMatMulVerification(1, params, 100));
     BOOST_CHECK(!CanStartMatMulVerification(2, params, 100));
+
+    // Phase B seal-as-PoW: each job costs Q* leaf units; pending cap = jobs * Q*.
+    params.fMatMulLTSealAsPoW = true;
+    BOOST_CHECK_EQUAL(MatMulEncDrWorkUnits(params, 100), 64U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(params, 100), 128U);
+    BOOST_CHECK(CanStartMatMulVerification(/*pending=*/0, /*work_units=*/64, params, 100));
+    BOOST_CHECK(CanStartMatMulVerification(/*pending=*/64, /*work_units=*/64, params, 100));
+    BOOST_CHECK(!CanStartMatMulVerification(/*pending=*/65, /*work_units=*/64, params, 100));
 
     // DRLT disabled (INT32_MAX): LT knobs never select, even at high height.
     params.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();

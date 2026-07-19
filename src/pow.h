@@ -444,8 +444,12 @@ uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, 
 uint32_t EffectiveMatMulGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height = -1);
 /** Height-selected pending EncDr concurrency cap: LT tip-verify
  *  (nMatMulLTMaxPendingVerifications) when IsDRLTActive, else
- *  nMatMulMaxPendingVerifications. reference_height defaults to -1 (== non-LT). */
+ *  nMatMulMaxPendingVerifications. reference_height defaults to -1 (== non-LT).
+ *  Cap is expressed in EncDr *work units* (see MatMulEncDrWorkUnits). */
 uint32_t EffectiveMatMulMaxPendingVerifications(const Consensus::Params& params, int32_t reference_height = -1);
+/** Work units for one EncDr tip-verify job: 1 for a single digest recompute,
+ *  consensus Q* when seal-as-PoW is active at `reference_height`. */
+uint32_t MatMulEncDrWorkUnits(const Consensus::Params& params, int32_t reference_height = -1);
 bool ConsumeMatMulPeerVerifyBudget(
     MatMulPeerVerificationBudget& budget,
     const Consensus::Params& params,
@@ -454,6 +458,9 @@ bool ConsumeMatMulPeerVerifyBudget(
     int32_t reference_height = std::numeric_limits<int32_t>::max());
 bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus::Params& params,
                                 int32_t reference_height = -1);
+/** True if `pending + work_units` fits under the height-selected leaf-unit cap. */
+bool CanStartMatMulVerification(uint32_t pending_verifications, uint32_t work_units,
+                                const Consensus::Params& params, int32_t reference_height = -1);
 bool ConsumeGlobalMatMulPhase2Budget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
 MatMulSolvePipelineStats ProbeMatMulSolvePipelineStats();
 void ResetMatMulSolvePipelineStats();

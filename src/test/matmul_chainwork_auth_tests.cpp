@@ -327,4 +327,53 @@ BOOST_AUTO_TEST_CASE(trust_adjusted_work_identity_and_clamp)
     }
 }
 
+BOOST_AUTO_TEST_CASE(prefer_trust_adjusted_header_rejects_forged_long_chain)
+{
+    LOCK(::cs_main);
+    const int32_t kFork = 2;
+    const Consensus::Params params = ParamsWithFork(kFork);
+
+    // Shared authenticated base through the fork height.
+    Chain base;
+    for (int i = 0; i < kFork; ++i) base.Add(ST_AUTHENTICATED);
+    CBlockIndex* fork = base.Add(ST_AUTHENTICATED);
+    base.Recompute(params);
+
+    // Honest tip: many body-authenticated blocks past the fork.
+    std::deque<CBlockIndex> auth_branch;
+    CBlockIndex* auth_tip = fork;
+    for (int i = 0; i < 40; ++i) {
+        auth_branch.emplace_back();
+        CBlockIndex& idx = auth_branch.back();
+        idx.pprev = auth_tip;
+        idx.nHeight = auth_tip->nHeight + 1;
+        idx.nBits = TEST_NBITS;
+        idx.nStatus = BLOCK_VALID_TREE | BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA;
+        idx.nChainWork = idx.pprev->nChainWork + GetBlockProof(idx);
+        UpdateAuthenticatedChainWork(idx, params);
+        auth_tip = &idx;
+    }
+
+    // Forged tip: long header-only suffix (claimed work >> authenticated).
+    std::deque<CBlockIndex> forged_branch;
+    CBlockIndex* forged_tip = fork;
+    for (int i = 0; i < 80; ++i) {
+        forged_branch.emplace_back();
+        CBlockIndex& idx = forged_branch.back();
+        idx.pprev = forged_tip;
+        idx.nHeight = forged_tip->nHeight + 1;
+        idx.nBits = TEST_NBITS;
+        idx.nStatus = BLOCK_VALID_TREE;
+        idx.nChainWork = idx.pprev->nChainWork + GetBlockProof(idx);
+        UpdateAuthenticatedChainWork(idx, params);
+        forged_tip = &idx;
+    }
+
+    // Raw claimed work prefers the forged tip; trust-adjusted must prefer the
+    // longer authenticated tip once unauth credit is capped at the allowance.
+    BOOST_CHECK(forged_tip->nChainWork > auth_tip->nChainWork);
+    BOOST_CHECK(PreferTrustAdjustedHeader(*forged_tip, *auth_tip));
+    BOOST_CHECK(!PreferTrustAdjustedHeader(*auth_tip, *forged_tip));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
