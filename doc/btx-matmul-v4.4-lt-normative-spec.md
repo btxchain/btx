@@ -9,8 +9,8 @@
 | Lever | Normative value | Effect |
 |---|---|---|
 | Deep-`m` under ENC-DR | `b = 2`, `m = n/2` (2048 @ n=4096) | ~3.6× tensor MACs; **0 B** permanent sketch growth |
-| MatExpand | `B̂ = Extract_PRF(G·W·H)`, `w=128` | Thin ExactGemm floor `O(n²·w)` (not `O(n³)`); C-15 candidate mixer; cubic floor is deep-`m` sketch/combine |
-| Consensus `Q*` | `{64,128}` (default 64) | Fat stacked miner windows (Phase A); Phase B seal-as-PoW via `fMatMulLTSealAsPoW` (implemented, default off, inert while DRLT is INT32_MAX) |
+| MatExpand | `B̂ = Extract_PRF(G·W·H)`, `w=1024` | ExactGemm floor `O(n²·w)` (not `O(n³)`); C-15 candidate mixer; cubic floor is deep-`m` sketch/combine |
+| Consensus `Q*` | `{128,256,512}` (default 256) | Fat stacked miner windows (Phase A); Phase B seal-as-PoW via `fMatMulLTSealAsPoW` (implemented; public default off / DRLT `INT32_MAX`; **regtest** finite DRLT + seal on) |
 | Alphabet / Ĉ | Path-agnostic integer; M11 projectors; Extract to `[-48,48]` | FP8/MXFP4 remain **miner-local** lanes |
 
 ## MatExpand (reference)
@@ -23,8 +23,8 @@ Domain tags (V44LT):
 - `BTX_MATEXPAND_W_V44LT` ‖ full-header hash → `W_B ∈ M11^{n×w}` (nonce-fresh; operand B)
 
 ```
-Y = G · W          # s8×s8→s32, n×w, w=128  →  O(n²·w) MACs
-B32 = Y · H        # s32×s8→s32, n×n         →  O(n²·w) MACs; rank(B32)≤128
+Y = G · W          # s8×s8→s32, n×w, w=1024  →  O(n²·w) MACs
+B32 = Y · H        # s32×s8→s32, n×n         →  O(n²·w) MACs; rank(B32)≤1024
 prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W)
 B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
 # ChaCha20 PRF keystream (RFC8439; key=prf_key LE32 bytes;
@@ -48,7 +48,7 @@ review remains required before any public activation height is raised.
 `INT32_MAX`.
 
 **Scoping:** MatExpand is `O(n²·w)`; the honest cubic-ish MAC floor is deep-`m`
-`B̂·V` / combine (`m=n/2`). Linearized Extract would reopen ~`n/w≈32×` thin-panel
+`B̂·V` / combine (`m=n/2`). Linearized Extract would reopen ~`n/w≈4×` panel
 collapse vs dense `n×n`. Projectors `U`/`V` are **rank-transparent**.
 
 Projectors use `BTX_MATMUL_V44LT_SKETCH_U/V`. Digest = `H(σ ‖ Chat)` with
@@ -92,11 +92,11 @@ Regtest opt-in: `-regtestmatmulltsealaspow` (requires live `-regtestdrltheight`)
 
 | Param | Default |
 |---|---|
-| `nMatMulDRLTHeight` | `INT32_MAX` |
-| `nMatMulConsensusQStar` | `64` |
+| `nMatMulDRLTHeight` | `INT32_MAX` (public); regtest finite (Phase B live) |
+| `nMatMulConsensusQStar` | `256` |
 | `nMatMulLTTranscriptBlockSize` | `2` |
 | `nMatMulDRLTAsertRescaleNum/Den` | `1/1` (calibrate from silicon) |
-| `fMatMulLTSealAsPoW` | `false` (Phase B mode; inert without live DRLT) |
+| `fMatMulLTSealAsPoW` | `false` on public (Phase B mode; inert without live DRLT); **`true` on regtest** |
 | `nMatMulLTMaxPendingVerifications` | `2` (tip-verify pending; inert while DRLT INT32_MAX) |
 | `nMatMulLT{Global,Peer}VerifyBudgetPerMin` | `1` / `1` (conservative; calibrate via soak) |
 

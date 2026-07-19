@@ -516,7 +516,7 @@ bool VerifySketchBMX4CLT(const CBlockHeader& header, uint32_t n, uint32_t rounds
 
 uint256 ComputeWindowMerkleRoot(Span<const uint256> digests)
 {
-    // Consensus seal paths always pass Q* ∈ {64,128}. Assert power-of-two for
+    // Consensus seal paths always pass Q* ∈ {128,256,512}. Assert power-of-two for
     // any non-empty input so a shared-helper misuse cannot silently pad.
     assert(digests.empty() || (digests.size() & (digests.size() - 1)) == 0);
     if (digests.empty()) return uint256{}; // zero root for an empty window

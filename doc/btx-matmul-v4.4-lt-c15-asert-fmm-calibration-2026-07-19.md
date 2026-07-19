@@ -44,7 +44,7 @@ is the deep-`m` path, not MatExpand:
 
 | Stage | Shape (prod. `n=4096`) | Naive MAC order | Exact FMM eligible? |
 |---|---|---|---|
-| MatExpand-B (`G·W`, `Y·H`) | `n×w`, `w=128` | `Θ(n²·w)` | Panels too thin / low arithmetic intensity for a practical Strassen win |
+| MatExpand-B (`G·W`, `Y·H`) | `n×w`, `w=1024` | `Θ(n²·w)` | Fatter panel vs Extract; still `O(n²·w)` vs cubic sketch floor |
 | `B̂·V` | `n×n` × `n×m` | `Θ(n²·m)` | Yes in principle (exact int / mod-q lanes) |
 | Combine `P·Q` | `m×m` sketch | `Θ(m²·n)`-class / limb-tensor variants | Yes — primary tournament target (`ComputeCombine*`) |
 
@@ -80,7 +80,7 @@ require classical GEMM — only correct dense sketch bytes.
 
 Load-bearing scoping (packet §1.1–§1.2):
 
-- MatExpand ExactGemm is **`O(n²·w)`** with `w = kMatExpandPanelW = 128`,
+- MatExpand ExactGemm is **`O(n²·w)`** with `w = kMatExpandPanelW = 1024`,
   **not** `O(n³)`.
 - At `n=4096`: MatExpand-B ≈ `4n²w ≈ 8.59×10⁹` MACs; `B̂·V` ≈ `2n²m ≈ 6.87×10¹⁰`.
 - The **cubic MAC floor** of one marginal nonce unit is deep-`m` sketch work

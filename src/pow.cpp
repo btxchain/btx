@@ -4342,7 +4342,9 @@ uint32_t MatMulEncDrWorkUnits(const Consensus::Params& params, int32_t reference
     if (!IsDisabledHeight(params.nMatMulDRLTHeight) &&
         params.IsMatMulLTSealAsPoWActive(reference_height)) {
         uint32_t q = params.nMatMulConsensusQStar;
-        if (q != 64 && q != 128) q = 64;
+        if (!matmul::v4::lt::IsValidConsensusQStar(q)) {
+            q = matmul::v4::lt::kConsensusQStarDefault;
+        }
         return q;
     }
     return 1;

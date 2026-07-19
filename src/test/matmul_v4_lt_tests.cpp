@@ -587,7 +587,7 @@ BOOST_AUTO_TEST_CASE(matexpand_chacha_prf_golden_vectors)
     std::vector<unsigned char> payload;
     BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, digest, payload));
     BOOST_CHECK_EQUAL(digest.GetHex(),
-                      "db1136f2974d45d9757262978ab074ef53ba54c368df9829f565ee2d26da0da9");
+                      "4f4caf9ad38776a52bf1be71ecce41e9a5d7547834fc0df25e47f5f6ff129c7f");
     // CPU bit-identical replay.
     uint256 digest2;
     std::vector<unsigned char> payload2;
@@ -635,7 +635,7 @@ BOOST_AUTO_TEST_CASE(qstar_128_seal_distinct)
     const uint256 sigma = ParseUint256(
         "3333333333333333333333333333333333333333333333333333333333333333");
     BOOST_CHECK(lt::SealWindowCommit(sigma, root, 128) !=
-                lt::SealWindowCommit(sigma, root, 64));
+                lt::SealWindowCommit(sigma, root, 256));
 }
 
 BOOST_AUTO_TEST_CASE(matexpand_a_template_invariant_b_nonce_fresh)
@@ -691,9 +691,12 @@ BOOST_AUTO_TEST_CASE(window_merkle_and_seal)
     BOOST_CHECK(!root.IsNull());
     const uint256 sigma = ParseUint256(
         "3333333333333333333333333333333333333333333333333333333333333333");
-    BOOST_CHECK(lt::SealWindowCommit(sigma, root, 64) !=
-                lt::SealWindowCommit(sigma, root, 128));
-    BOOST_CHECK(lt::IsValidConsensusQStar(64));
+    BOOST_CHECK(lt::SealWindowCommit(sigma, root, 128) !=
+                lt::SealWindowCommit(sigma, root, 256));
+    BOOST_CHECK(lt::IsValidConsensusQStar(128));
+    BOOST_CHECK(lt::IsValidConsensusQStar(256));
+    BOOST_CHECK(lt::IsValidConsensusQStar(512));
+    BOOST_CHECK(!lt::IsValidConsensusQStar(64));
     BOOST_CHECK(!lt::IsValidConsensusQStar(32));
 }
 
@@ -874,7 +877,7 @@ BOOST_AUTO_TEST_CASE(phase_b_seal_round_trip_and_auth)
     // template seeds) so the test does not need chain MTP.
     auto anchor = MakeLTHeader(7, kTestDim);
     const auto seed_fn = [](CBlockHeader& /*h*/) -> bool { return true; };
-    constexpr uint32_t Q = 64; // use full consensus Q* for correctness; slowish at n=64
+    constexpr uint32_t Q = 128; // smallest consensus Q*; slowish at n=64 with w=1024
 
     uint256 seal;
     std::vector<lt::WindowSlot> slots;
@@ -926,10 +929,10 @@ BOOST_AUTO_TEST_CASE(seal_env_batch_does_not_change_library_seal)
     auto anchor = MakeLTHeader(31, kTestDim);
     const auto seed_fn = [](CBlockHeader& /*h*/) -> bool { return true; };
     uint256 seal_a;
-    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/64, seed_fn, seal_a));
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/128, seed_fn, seal_a));
     setenv("BTX_MATMUL_LT_BATCH", "128", /*overwrite=*/1);
     uint256 seal_b;
-    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/64, seed_fn, seal_b));
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/128, seed_fn, seal_b));
     BOOST_CHECK(seal_a == seal_b);
     unsetenv("BTX_MATMUL_LT_BATCH");
 }
@@ -976,7 +979,7 @@ BOOST_AUTO_TEST_CASE(phase_b_seal_parent_mtp_slot_seeds_and_encdr)
     p.nMatMulBMX4CHeight = 1;
     p.nMatMulDRLTHeight = 1;
     p.nMatMulV4Dimension = kTestDim;
-    p.nMatMulConsensusQStar = 64;
+    p.nMatMulConsensusQStar = 128;
     p.nMatMulLTTranscriptBlockSize = 2;
     p.fMatMulLTSealAsPoW = true;
     p.nMatMulV4FreivaldsRounds = 8;
@@ -996,8 +999,8 @@ BOOST_AUTO_TEST_CASE(phase_b_seal_parent_mtp_slot_seeds_and_encdr)
 
     uint256 seal;
     std::vector<lt::WindowSlot> slots;
-    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 64, slot_seed, seal, &slots));
-    BOOST_REQUIRE_EQUAL(slots.size(), 64U);
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 128, slot_seed, seal, &slots));
+    BOOST_REQUIRE_EQUAL(slots.size(), 128U);
     anchor.matmul_digest = seal;
 
     // Library seal == EncDr reference recompute.
@@ -1021,81 +1024,15 @@ BOOST_AUTO_TEST_CASE(phase_b_seal_parent_mtp_slot_seeds_and_encdr)
         return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp + 1);
     };
     uint256 seal_other;
-    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 64, slot_seed_other, seal_other));
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 128, slot_seed_other, seal_other));
     BOOST_CHECK(seal_other != seal);
 }
 
-BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q64)
+BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q128_pin)
 {
-    // Golden vectors at kTestDim for Q*=64: pin leaf order, uniqueness, parent
+    // Golden vectors at kTestDim for Q*=128: pin leaf order, uniqueness, parent
     // MTP binding, and the consensus seal hex. Phase B remains inert on public
     // nets; these vectors lock the slot-id binding preimage.
-    Consensus::Params p;
-    p.fMatMulPOW = true;
-    p.nMatMulV4Height = 1;
-    p.nMatMulBMX4CHeight = 1;
-    p.nMatMulDRLTHeight = 1;
-    p.nMatMulV4Dimension = kTestDim;
-    p.nMatMulConsensusQStar = 64;
-    p.nMatMulLTTranscriptBlockSize = 2;
-    p.fMatMulLTSealAsPoW = true;
-    p.nMatMulV4FreivaldsRounds = 8;
-    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
-
-    constexpr int32_t kHeight = 10;
-    constexpr int64_t kMtp = 1'700'000'000;
-    auto anchor = MakeLTHeader(42, kTestDim);
-    anchor.nBits = UintToArith256(p.powLimit).GetCompact();
-    BOOST_REQUIRE(SetDeterministicMatMulSeeds(anchor, p, kHeight, kMtp));
-
-    const auto slot_seed = [&](CBlockHeader& h) -> bool {
-        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp);
-    };
-
-    uint256 seal;
-    std::vector<lt::WindowSlot> slots;
-    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 64, slot_seed, seal, &slots));
-    BOOST_REQUIRE_EQUAL(slots.size(), 64U);
-
-    const uint256 sigma = matmul::v4::DeriveSigma(anchor);
-    std::vector<uint256> leaves;
-    leaves.reserve(64);
-    for (uint32_t j = 0; j < 64; ++j) {
-        BOOST_CHECK(slots[j].slot_id == lt::DeriveWindowSlotId(sigma, j));
-        BOOST_CHECK_EQUAL(slots[j].nonce, ReadLE64(slots[j].slot_id.data()));
-        leaves.push_back(lt::CommitWindowSlotLeaf(slots[j].slot_id, slots[j].digest));
-        for (uint32_t i = 0; i < j; ++i) {
-            BOOST_CHECK(slots[i].slot_id != slots[j].slot_id);
-            BOOST_CHECK(leaves[i] != leaves[j]);
-        }
-    }
-    const uint256 merkle = lt::ComputeWindowMerkleRoot(leaves);
-    BOOST_CHECK(lt::SealWindowCommit(sigma, merkle, 64) == seal);
-
-    // Parent MTP flip changes the seal (LT-Q2 + slot-id seed bind).
-    const auto slot_seed_mtp = [&](CBlockHeader& h) -> bool {
-        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp + 7);
-    };
-    uint256 seal_mtp;
-    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 64, slot_seed_mtp, seal_mtp));
-    BOOST_CHECK(seal_mtp != seal);
-
-    // Golden: first/last slot id, first leaf, merkle, seal (kTestDim=64, nonce=42).
-    BOOST_CHECK(slots[0].slot_id == ParseUint256(
-        "aadee863c8d19f4f9468ed076b68f513c7593a7a861fd5758319ac72ae690043"));
-    BOOST_CHECK(slots[63].slot_id == ParseUint256(
-        "27ad637efcdbdfe6fc47392f3b45aa0ecad2f35793725b954a4b71282bd67b7b"));
-    BOOST_CHECK(leaves[0] == ParseUint256(
-        "30c7ba9192ba9e26a77f731a66a1d7f53d6aa08dbdc74ba37b1738c25b657623"));
-    BOOST_CHECK(merkle == ParseUint256(
-        "b07c66aabc2a16a706ab44e127526e189959c52d9fe0174ff90d5a31b3e04b3f"));
-    BOOST_CHECK(seal == ParseUint256(
-        "2edf9cd35e8774bae87e21d4843419cc3250efcb94b25cf17d461cdc42634e30"));
-}
-
-BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q128)
-{
-    // Q*=128 golden at kTestDim — same anchor/MTP as Q=64; seal must differ.
     Consensus::Params p;
     p.fMatMulPOW = true;
     p.nMatMulV4Height = 1;
@@ -1118,12 +1055,79 @@ BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q128)
         return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp);
     };
 
-    uint256 seal64, seal128;
+    uint256 seal;
     std::vector<lt::WindowSlot> slots;
-    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 64, slot_seed, seal64));
-    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 128, slot_seed, seal128, &slots));
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 128, slot_seed, seal, &slots));
     BOOST_REQUIRE_EQUAL(slots.size(), 128U);
-    BOOST_CHECK(seal128 != seal64);
+
+    const uint256 sigma = matmul::v4::DeriveSigma(anchor);
+    std::vector<uint256> leaves;
+    leaves.reserve(128);
+    for (uint32_t j = 0; j < 128; ++j) {
+        BOOST_CHECK(slots[j].slot_id == lt::DeriveWindowSlotId(sigma, j));
+        BOOST_CHECK_EQUAL(slots[j].nonce, ReadLE64(slots[j].slot_id.data()));
+        leaves.push_back(lt::CommitWindowSlotLeaf(slots[j].slot_id, slots[j].digest));
+        for (uint32_t i = 0; i < j; ++i) {
+            BOOST_CHECK(slots[i].slot_id != slots[j].slot_id);
+            BOOST_CHECK(leaves[i] != leaves[j]);
+        }
+    }
+    const uint256 merkle = lt::ComputeWindowMerkleRoot(leaves);
+    BOOST_CHECK(lt::SealWindowCommit(sigma, merkle, 128) == seal);
+
+    // Parent MTP flip changes the seal (LT-Q2 + slot-id seed bind).
+    const auto slot_seed_mtp = [&](CBlockHeader& h) -> bool {
+        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp + 7);
+    };
+    uint256 seal_mtp;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 128, slot_seed_mtp, seal_mtp));
+    BOOST_CHECK(seal_mtp != seal);
+
+    // Golden: first/last slot id (independent of MatExpand w); leaf/merkle/seal
+    // re-pinned after w=1024 (see failure GetHex if these drift).
+    BOOST_CHECK_EQUAL(slots[0].slot_id.GetHex(),
+                      "aadee863c8d19f4f9468ed076b68f513c7593a7a861fd5758319ac72ae690043");
+    BOOST_CHECK_EQUAL(slots[127].slot_id.GetHex(),
+                      "cb5d2d89025e4675f88d3392adcfece8df050c80c951a491bf8ac6ff73465a2a");
+    BOOST_CHECK_EQUAL(leaves[0].GetHex(),
+                      "2588d4d0f2d56d8512a7bf4d0bfb481bdc4c20f91075547da4963975c66dd178");
+    BOOST_CHECK_EQUAL(merkle.GetHex(),
+                      "3c8ba9bdb7f3464e8035daa0d9f72578a648dd509f67abe3266f627d41e5ae0d");
+    BOOST_CHECK_EQUAL(seal.GetHex(),
+                      "92919a488446f90f4d0b58380bd1672ca29ad6dae3107914f61663f80cf255d2");
+}
+
+BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q128)
+{
+    // Q*=128 vs Q*=256 at kTestDim — same anchor/MTP; seals must differ.
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulBMX4CHeight = 1;
+    p.nMatMulDRLTHeight = 1;
+    p.nMatMulV4Dimension = kTestDim;
+    p.nMatMulConsensusQStar = 128;
+    p.nMatMulLTTranscriptBlockSize = 2;
+    p.fMatMulLTSealAsPoW = true;
+    p.nMatMulV4FreivaldsRounds = 8;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 10;
+    constexpr int64_t kMtp = 1'700'000'000;
+    auto anchor = MakeLTHeader(42, kTestDim);
+    anchor.nBits = UintToArith256(p.powLimit).GetCompact();
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(anchor, p, kHeight, kMtp));
+
+    const auto slot_seed = [&](CBlockHeader& h) -> bool {
+        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp);
+    };
+
+    uint256 seal128, seal256;
+    std::vector<lt::WindowSlot> slots;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 128, slot_seed, seal128, &slots));
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 256, slot_seed, seal256));
+    BOOST_REQUIRE_EQUAL(slots.size(), 128U);
+    BOOST_CHECK(seal128 != seal256);
 
     const uint256 sigma = matmul::v4::DeriveSigma(anchor);
     for (uint32_t j = 0; j < 128; ++j) {
@@ -1133,8 +1137,9 @@ BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q128)
         }
     }
 
-    BOOST_CHECK(seal128 == ParseUint256(
-        "0523029346117ed2af130491296e9162ab9dfd89a3e0240cc8e1456f24da0861"));
+    // Seal hex re-pinned after w=1024 MatExpand (digests in leaves change).
+    BOOST_CHECK_EQUAL(seal128.GetHex(),
+                      "92919a488446f90f4d0b58380bd1672ca29ad6dae3107914f61663f80cf255d2");
 }
 
 BOOST_AUTO_TEST_CASE(matexpand_additivity_noncollapse)

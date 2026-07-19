@@ -11,15 +11,15 @@ Y  = G · W     # n×n · n×w → n×w
 B32 = Y · H    # n×w · w×n → n×n
 ```
 
-with production panel width `w = kMatExpandPanelW = 128`, we have
+with production panel width `w = kMatExpandPanelW = 1024`, we have
 
 ```
-rank(B32) ≤ w ≤ 128
+rank(B32) ≤ w ≤ 1024
 ```
 
 over the integers (and therefore over any field of characteristic 0 or large
 prime). At production `n = 4096`, a linear Extract would reopen an
-approximately `n/w ≈ 32×` Freivalds-style shortcut that skips the dense
+approximately `n/w = 4×` Freivalds-style shortcut that skips the dense
 MatExpand GEMMs.
 
 ## Why Extract matters
@@ -37,7 +37,7 @@ python3 spectral_approx_probe.py          # SVD/CCA vs Extract, n∈{8,16,32}
 ```
 
 The harness builds synthetic `(G·W)·H`, prints `rank(B32)`, and asserts it is
-`≤ w` (warns otherwise). Production `w=128` is recorded in `test-vectors.json`
+`≤ w` (warns otherwise). Production `w=1024` is recorded in `test-vectors.json`
 as `production_panel_w`. For post-Extract spectral / CCA residuals and the
 **§0.1-win-required** rule, see [`spectral_approx_probe.md`](spectral_approx_probe.md).
 

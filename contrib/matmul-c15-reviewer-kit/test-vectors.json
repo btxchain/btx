@@ -135,7 +135,7 @@
       }
     ]
   },
-  "production_panel_w": 128,
+  "production_panel_w": 1024,
   "rank_note": "Honest B32 = (G\u00b7W)\u00b7H has rank(B32) \u2264 w (=128 at production). Affine collapse of Extract would reopen a ~n/w Freivalds-style shortcut; see rank_spectral_regression.md.",
   "reduction_relevant_finding_notes": {
     "purpose": "Oracle hints for external reviewers \u2014 what would constitute a reduction-relevant / \u00a70.1 FAIL finding. Not a theorem; C-15 remains OPEN.",

@@ -472,8 +472,8 @@ struct Params {
      *  (doc/btx-matmul-v4.4-lt-normative-spec.md). When live, MUST be >=
      *  nMatMulBMX4CHeight (LT supersedes ENC-BMX4C at/above this height). */
     int32_t nMatMulDRLTHeight{std::numeric_limits<int32_t>::max()};
-    /** Consensus-bound MatExpand window size Q* ∈ {64,128}. */
-    uint32_t nMatMulConsensusQStar{64};
+    /** Consensus-bound MatExpand window size Q* ∈ {128,256,512}. */
+    uint32_t nMatMulConsensusQStar{256};
     /** LT tile b (deep-m). Normative Phase A: 2 (m = n/2). */
     uint32_t nMatMulLTTranscriptBlockSize{2};
     /** One-time ASERT rescale at nMatMulDRLTHeight (calibrate from silicon). */

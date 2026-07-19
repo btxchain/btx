@@ -30,7 +30,7 @@ C-15 and does **not** import BRSV as a cited assumption.
 | `HonestMAC(n)` | Exact-int MAC of one **marginal** nonce unit: MatExpand-B (`G·W`+`Y·H`) + `B̂·V` + combine `P·Q` |
 | `C_tmpl(n)` | One-time template cost under I1′: MatExpand-A + `U`/`V`/`P=U·Â` (and cacheable `G`/`H` expand) — **excluded** from each marginal unit |
 | `MineSlot(σ, nonce)` | Honest Phase-A path producing accepting digest `H(σ‖Ĉ)` (ENC-DR auth intact) |
-| `Q* ∈ {64,128}` | Consensus window size (miner schedule Phase A; seal object Phase B) |
+| `Q* ∈ {128,256,512}` | Consensus window size (miner schedule Phase A; seal object Phase B) |
 | Phase A | Lottery object = **per-nonce** digest (default when LT live; seal-as-PoW off) |
 | Phase B | Lottery = `SealWindowCommit(σ, Merkle(leaves), Q*)` — **inert** on public nets (`nMatMulDRLTHeight=INT32_MAX`) |
 

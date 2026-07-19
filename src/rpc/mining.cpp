@@ -6006,7 +6006,7 @@ static RPCHelpMan getmatmulchallenge()
                             {RPCResult::Type::STR_HEX, "seed_a", "Matrix seed A"},
                             {RPCResult::Type::STR_HEX, "seed_b", "Matrix seed B"},
                             {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C-LT\", \"ENC-BMX4C\", or \"ENC-S8\"); present only under the v4 profile"},
-                            {RPCResult::Type::NUM, "consensus_q_star", /*optional=*/true, "ENC-DR-LT miner fat-window size Q* in {64,128} (Phase A schedule hint; present only under ENC-BMX4C-LT)"},
+                            {RPCResult::Type::NUM, "consensus_q_star", /*optional=*/true, "ENC-DR-LT miner fat-window size Q* in {128,256,512} (Phase A schedule hint; present only under ENC-BMX4C-LT)"},
                             {RPCResult::Type::NUM, "lt_transcript_block_size", /*optional=*/true, "ENC-DR-LT deep-m tile b (present only under ENC-BMX4C-LT)"},
                         }},
                         {RPCResult::Type::OBJ, "work_profile", "Deterministic work profile implied by the active MatMul parameters", {
@@ -6388,7 +6388,7 @@ static RPCHelpMan getmatmulchallengeprofile()
                             {RPCResult::Type::STR_HEX, "seed_a", "Matrix seed A"},
                             {RPCResult::Type::STR_HEX, "seed_b", "Matrix seed B"},
                             {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C-LT\", \"ENC-BMX4C\", or \"ENC-S8\"); present only under the v4 profile"},
-                            {RPCResult::Type::NUM, "consensus_q_star", /*optional=*/true, "ENC-DR-LT miner fat-window size Q* in {64,128} (Phase A schedule hint; present only under ENC-BMX4C-LT)"},
+                            {RPCResult::Type::NUM, "consensus_q_star", /*optional=*/true, "ENC-DR-LT miner fat-window size Q* in {128,256,512} (Phase A schedule hint; present only under ENC-BMX4C-LT)"},
                             {RPCResult::Type::NUM, "lt_transcript_block_size", /*optional=*/true, "ENC-DR-LT deep-m tile b (present only under ENC-BMX4C-LT)"},
                         }},
                         {RPCResult::Type::OBJ, "work_profile", "Deterministic work profile implied by the active MatMul parameters", {
@@ -7996,7 +7996,7 @@ static RPCHelpMan getblocktemplate()
                     {RPCResult::Type::NUM, "min_dimension", "minimum allowed MatMul matrix dimension"},
                     {RPCResult::Type::NUM, "max_dimension", "maximum allowed MatMul matrix dimension"},
                     {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C-LT\", \"ENC-BMX4C\", or \"ENC-S8\"); present only under the v4 profile"},
-                    {RPCResult::Type::NUM, "consensus_q_star", /*optional=*/true, "ENC-DR-LT miner fat-window size Q* in {64,128} (Phase A schedule hint; present only under ENC-BMX4C-LT)"},
+                    {RPCResult::Type::NUM, "consensus_q_star", /*optional=*/true, "ENC-DR-LT miner fat-window size Q* in {128,256,512} (Phase A schedule hint; present only under ENC-BMX4C-LT)"},
                     {RPCResult::Type::NUM, "lt_transcript_block_size", /*optional=*/true, "ENC-DR-LT deep-m tile b (present only under ENC-BMX4C-LT)"},
                 }},
                 {RPCResult::Type::NUM, "matmul_n", /*optional=*/true, "MatMul matrix dimension (n)"},

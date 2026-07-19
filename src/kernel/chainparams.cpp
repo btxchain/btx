@@ -250,12 +250,14 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
             assert(consensus.nMatMulBMX4CHeight == consensus.nMatMulDRLTHeight);
             assert(consensus.fMatMulLTSealAsPoW);
         }
-        // Miner-local MatExpand window Q* is restricted to {64,128} (Rank-1
+        // Miner-local MatExpand window Q* is restricted to {128,256,512} (Rank-1
         // Phase A schedule; seal-as-PoW is Phase B). The deep-m tile is fixed
         // at b=2 for Phase A (m = n/2, storage-free under ENC-DR). A
         // misconfigured value here would silently commit a different
         // (unspecified) object, so fail loud at startup rather than at the fork.
-        assert(consensus.nMatMulConsensusQStar == 64 || consensus.nMatMulConsensusQStar == 128);
+        assert(consensus.nMatMulConsensusQStar == 128 ||
+               consensus.nMatMulConsensusQStar == 256 ||
+               consensus.nMatMulConsensusQStar == 512);
         assert(consensus.nMatMulLTTranscriptBlockSize == 2);
         assert(consensus.nMatMulDRLTAsertRescaleNum > 0);
         assert(consensus.nMatMulDRLTAsertRescaleDen > 0);
@@ -284,7 +286,9 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // consensus-object redefinition, not a free knob.
     if (consensus.fMatMulLTSealAsPoW) {
         assert(consensus.nMatMulDRLTHeight != std::numeric_limits<int32_t>::max());
-        assert(consensus.nMatMulConsensusQStar == 64 || consensus.nMatMulConsensusQStar == 128);
+        assert(consensus.nMatMulConsensusQStar == 128 ||
+               consensus.nMatMulConsensusQStar == 256 ||
+               consensus.nMatMulConsensusQStar == 512);
         assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
     }
 }
@@ -439,7 +443,7 @@ public:
         // ratification (AssertBMX4CConstructionInvariants fails closed on
         // this via BTX_MATMUL_NO_INVERSION_GATE_RATIFIED).
         consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
-        consensus.nMatMulConsensusQStar = 64;
+        consensus.nMatMulConsensusQStar = 256;
         consensus.nMatMulLTTranscriptBlockSize = 2;
         consensus.nMatMulDRLTAsertRescaleNum = 1;
         consensus.nMatMulDRLTAsertRescaleDen = 1;
@@ -868,7 +872,7 @@ public:
         consensus.nMatMulBMX4CAsertRescaleDen = 1;
         // v4.4-LT Rank-1 (MatExpand + deep-m + Q*): STAGED / inert until GO/NO-GO.
         consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
-        consensus.nMatMulConsensusQStar = 64;
+        consensus.nMatMulConsensusQStar = 256;
         consensus.nMatMulLTTranscriptBlockSize = 2;
         consensus.nMatMulDRLTAsertRescaleNum = 1;
         consensus.nMatMulDRLTAsertRescaleDen = 1;
@@ -1482,16 +1486,15 @@ public:
         consensus.nMatMulBMX4CHeight = 100;
         consensus.nMatMulBMX4CAsertRescaleNum = 1;
         consensus.nMatMulBMX4CAsertRescaleDen = 1;
-        // Rank-1 LT stays inert on regtest by default (opt-in via -regtestdrltheight).
-        consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
-        consensus.nMatMulConsensusQStar = 64;
+        // Rank-1 LT + Phase B seal-as-PoW: LIVE on regtest at the unified v4/BMX4C
+        // height (100) so functional tests exercise fat Q* seals immediately.
+        // Override still available via -regtestdrltheight / -regtestmatmulltsealaspow.
+        consensus.nMatMulDRLTHeight = 100;
+        consensus.nMatMulConsensusQStar = 256;
         consensus.nMatMulLTTranscriptBlockSize = 2;
         consensus.nMatMulDRLTAsertRescaleNum = 1;
         consensus.nMatMulDRLTAsertRescaleDen = 1;
-        // Q* Phase B seal-as-PoW: OFF by default; opt-in via
-        // -regtestmatmulltsealaspow for the functional test that exercises the
-        // window-seal lottery object under a live regtest LT height.
-        consensus.fMatMulLTSealAsPoW = false;
+        consensus.fMatMulLTSealAsPoW = true;
         // LT tip-verify budgets: unthrottled on regtest (mirrors v4), so
         // -regtestdrltheight / seal-as-PoW functional tests are not paced.
         consensus.nMatMulLTMaxPendingVerifications = std::numeric_limits<uint32_t>::max();

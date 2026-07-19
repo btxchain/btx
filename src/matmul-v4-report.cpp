@@ -415,8 +415,8 @@ bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
     // bmx4c-lt from --mt24 (M-t24 is a BMX4C gate, not an LT gate).
     if (args.profile == "bmx4c") args.mt24 = true;
     else if (args.mt24 && args.profile != "bmx4c-lt") args.profile = "bmx4c";
-    // Rank-1 LT production windows are consensus Q* ∈ {64,128}; default the
-    // measurement window to 64 when the operator did not override it.
+    // Rank-1 LT production windows are consensus Q* ∈ {128,256,512}; default the
+    // measurement window to kConsensusQStarDefault (256) when not overridden.
     if (args.profile == "bmx4c-lt" && !args.window_explicit) {
         args.window = matmul::v4::lt::kConsensusQStarDefault;
     }
@@ -1158,7 +1158,7 @@ StageResultLT MeasureStagesLT(uint32_t n, uint32_t window, uint64_t base_nonce)
     // S5: Q* seal sample over the measured window (Phase-B cost signal;
     // Phase-A lottery remains per-nonce). Uses CommitWindowSlotLeaf +
     // SealWindowCommit with the measured window size even if it is not a
-    // consensus Q* — operators should pass --window 64|128 for production
+    // consensus Q* — operators should pass --window 128|256|512 for production
     // Rank-1 shapes.
     auto cs0 = Clock::now();
     const uint256 sigma_anchor = mv4::DeriveSigma(headers[0]);
@@ -1237,8 +1237,8 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     }
     if (!lt::IsValidConsensusQStar(args.window)) {
         std::cout << "NOTE: --window=" << args.window
-                  << " is not a consensus Q* ({64,128}); stage timings are still valid but "
-                     "Rank-1 production campaigns should use --window 64 or 128.\n";
+                  << " is not a consensus Q* ({128,256,512}); stage timings are still valid but "
+                     "Rank-1 production campaigns should use --window 128, 256, or 512.\n";
     }
 
     // ---- LT bit-exactness gate (B1 analogue) -------------------------------
