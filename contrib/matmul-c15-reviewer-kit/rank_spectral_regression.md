@@ -33,17 +33,19 @@ nonlinearity, the low-rank factorization of `B32` is the attack surface
 
 ```bash
 python3 toy_attack_harness.py --n 16 --w 4
+python3 spectral_approx_probe.py          # SVD/CCA vs Extract, n∈{8,16,32}
 ```
 
 The harness builds synthetic `(G·W)·H`, prints `rank(B32)`, and asserts it is
 `≤ w` (warns otherwise). Production `w=128` is recorded in `test-vectors.json`
-as `production_panel_w`.
+as `production_panel_w`. For post-Extract spectral / CCA residuals and the
+**§0.1-win-required** rule, see [`spectral_approx_probe.md`](spectral_approx_probe.md).
 
 ## What this does *not* prove
 
 - It does not bound the best degree-`d` approximant of Extract at production
   `n`.
 - It does not replace Freivalds soundness arguments in the sketch domain.
-- It does not close C-15.
+- It does not close C-15. Empirics alone ≠ packet §0.1 FAIL.
 
 See `doc/btx-matmul-v4.4-lt-external-c15-packet.md`.

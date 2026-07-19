@@ -97,7 +97,7 @@ Review defaults: `δ = 1/2`, `ε = 2⁻⁴⁰`. Do not silently retune.
 2. Estimate numerical / modular rank; search shared-φ / Fourier residue across rows/tiles.
 3. If residue exists, attempt Freivalds rewrite cheaper than Expand+BV+combine.
 
-**Oracle / FAIL.** Only if residue yields §0.1 win. Documented alphabet concentration without shortcut → **INCONCLUSIVE** / non-finding (see `test-vectors.json` `non_findings`).
+**Oracle / FAIL.** Only if residue yields §0.1 win. Documented alphabet concentration without shortcut → **INCONCLUSIVE** / non-finding (see `test-vectors.json` `non_findings`). Empirics from `spectral_approx_probe.py` (`n∈{8,16,32}` SVD/CCA) alone ≠ FAIL — see `spectral_approx_probe.md`.
 
 ---
 
@@ -189,10 +189,12 @@ cd contrib/matmul-c15-reviewer-kit
 python3 reference_extract.py
 python3 toy_attack_harness.py --n 8 --w 4
 python3 toy_attack_harness.py --n 16 --w 4 --seed 7 --degree 3
+python3 spectral_approx_probe.py   # SVD/CCA n∈{8,16,32}; empirics ≠ §0.1 FAIL
 ```
 
 Reduction-relevant finding signals (also in `test-vectors.json`):
 **high R²**, **zero Freivalds residual** (systematic), **truncated salt equivalence class**.
+Spectral/CCA toy residuals → see `spectral_approx_probe.md` (need §0.1 win to claim FAIL).
 
 ## Explicit non-claims
 

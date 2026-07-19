@@ -14,6 +14,8 @@ GO, or permission to raise `nMatMulDRLTHeight`.
 | `test-vectors.json` | Frozen Extract goldens, PRF tag, MANT/SCLE lanes, endian notes; **`reduction_relevant_finding_notes`** (high R² / zero Freivalds residual / truncated salt) |
 | `reference_extract.py` | Standalone Python ChaCha20-PRF Extract (stdlib only) |
 | `toy_attack_harness.py` | Toy-`n` synthetic MatExpand + poly R² for deg 1..`--degree` (default 3) + Freivalds residual |
+| `spectral_approx_probe.py` | Stdlib SVD/CCA-style residual vs Extract for `n∈{8,16,32}` (Gap #6) |
+| `spectral_approx_probe.md` | Empirics ≠ §0.1 FAIL; C-15 stays OPEN |
 | `rank_spectral_regression.md` | `rank(B32) ≤ w` note and smoke procedure |
 | `named-assumption.md` | Pointer to packet **§0.2** (`BTX-C15-NonCollapse-v1`, unreduced) |
 | `reduction-attack-checklist.md` | Step-by-step firm attacks mapped to §0.1 FAIL; **LFR taxonomy** (linear Freivalds rewrites beyond affine/shared-φ; heuristic vs theorem) |
@@ -34,6 +36,9 @@ python3 reference_extract.py
 # 2) Toy collapse harness (expect low R² for deg 1..3 + nonzero Freivalds residual)
 python3 toy_attack_harness.py --n 8 --w 4
 python3 toy_attack_harness.py --n 16 --w 4 --seed 7 --degree 3
+
+# 3) Spectral / approx-B̂ probe (SVD/CCA residuals; empirics ≠ §0.1 FAIL)
+python3 spectral_approx_probe.py
 ```
 
 Firm pointers (read before filing a finding):
@@ -74,4 +79,6 @@ pinned in `test-vectors.json` and mirrored in `reference_extract.py`.
 
 Rejection of affine / low-degree collapse is **expected**. High R² or a
 systematic zero Freivalds residual on dense samples would be a C-15 finding —
-please report it with vectors. C-15 remains **OPEN**.
+please report it with vectors. Spectral/CCA toy residuals
+([`spectral_approx_probe.md`](spectral_approx_probe.md)) are the same class:
+interesting only if costed to a **§0.1** win. C-15 remains **OPEN**.
