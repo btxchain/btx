@@ -1155,13 +1155,20 @@ StageResultLT MeasureStagesLT(uint32_t n, uint32_t window, uint64_t base_nonce)
         }
     }
 
-    // S5: Q* seal sample over the measured window digests (Phase-B cost signal;
-    // Phase-A lottery remains per-nonce). Uses SealWindowCommit with the
-    // measured window size even if it is not a consensus Q* — operators should
-    // pass --window 64|128 for production Rank-1 shapes.
+    // S5: Q* seal sample over the measured window (Phase-B cost signal;
+    // Phase-A lottery remains per-nonce). Uses CommitWindowSlotLeaf +
+    // SealWindowCommit with the measured window size even if it is not a
+    // consensus Q* — operators should pass --window 64|128 for production
+    // Rank-1 shapes.
     auto cs0 = Clock::now();
     const uint256 sigma_anchor = mv4::DeriveSigma(headers[0]);
-    const uint256 merkle = lt::ComputeWindowMerkleRoot(digests);
+    std::vector<uint256> leaves;
+    leaves.reserve(digests.size());
+    for (size_t i = 0; i < digests.size(); ++i) {
+        const uint256 slot_id = lt::DeriveWindowSlotId(sigma_anchor, static_cast<uint32_t>(i));
+        leaves.push_back(lt::CommitWindowSlotLeaf(slot_id, digests[i]));
+    }
+    const uint256 merkle = lt::ComputeWindowMerkleRoot(leaves);
     const uint256 seal = lt::SealWindowCommit(sigma_anchor, merkle, window);
     auto cs1 = Clock::now();
     r.s5_qstar_seal = Secs(cs0, cs1);
