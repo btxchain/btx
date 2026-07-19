@@ -6,6 +6,7 @@
 
 #include <ascend/matmul_v4_lt_accel.h>
 #include <cuda/matmul_accel.h>
+#include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <metal/matmul_accel.h>
 
 #if defined(BTX_ENABLE_HIP)
@@ -101,16 +102,13 @@ Eligibility MetalEligibility()
             .reason = probe.reason,
         };
     }
-    // §O.1: only M5-class devices expose Metal 4 INT8 TensorOps
-    // (s8xs8->s32). The current Metal backend (built for the v3 32-bit
-    // integer field) carries no INT8-TensorOps attestation, so every device
-    // classifies as verification-only until the v4 Metal backend lands a
-    // real probe and routes it through ClassifyMetalDevice(true) — plus the
-    // §N.3-v determinism self-test — on genuine M5 hardware.
-    // TODO(v4-metal): replace the constant with the Metal 4 TensorOps probe
-    // (MTLDevice supportsFamily + tensor-ops feature query, OS 26.4+).
-    Eligibility eligibility = ClassifyMetalDevice(/*has_metal4_int8_tensor_ops=*/false);
-    eligibility.reason = "metal4_int8_tensorops_probe_unavailable_in_this_build:" + eligibility.reason;
+    // §O.1: only M5-class devices expose Metal 4 INT8 TensorOps (s8xs8->s32).
+    // IsLtTensorOpsGemmAvailable is true ONLY after ExactGemmS8S8 self-qual
+    // (never from ALU shaders alone). M4-class stays verification-only.
+    const bool has_metal4_int8_tensor_ops = matmul_v4::metal::IsLtTensorOpsGemmAvailable();
+    Eligibility eligibility = ClassifyMetalDevice(has_metal4_int8_tensor_ops);
+    const auto arch = matmul_v4::metal::ProbeLtMetalArch();
+    eligibility.reason = std::string{eligibility.reason} + ":arch=" + arch.name_class_string;
     return eligibility;
 #else
     return DisabledByBuild();

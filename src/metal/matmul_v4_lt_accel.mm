@@ -3,12 +3,11 @@
 // file COPYING or https://opensource.org/license/mit/.
 //
 // Apple Metal host glue for MatMul v4.4 ENC-DR-LT (MatExpand).
-// Exact int8×int8→int32 and int32×int8→int32 GEMM compute kernels (MSL),
-// self-tested against ExactGemm*, with persistent MTLBuffer scratch reuse
-// across launches. Injected via ExactGemmBackend into WindowSketchMinerLT
-// (fail-closed host ExactGemm when Metal declines). Fuller
-// MatExpand→project→combine device residency lives on the CUDA/HIP LT
-// backends; this TU keeps Metal's GEMM offload + buffer reuse honest.
+// Exact int8×int8→int32 and int32×int8→int32 GEMM compute kernels (MSL ALU),
+// with Metal 4 MPP TensorOps preferred for s8xs8 when ExactGemmS8S8 self-qual
+// passes. Injected via ExactGemmBackend into WindowSketchMinerLT (fail-closed
+// host ExactGemm when Metal declines). Never label ALU shaders as TensorOps.
+// Fuller MatExpand→project→combine device residency lives on CUDA/HIP LT.
 
 #include <metal/matmul_v4_lt_accel.h>
 
@@ -22,6 +21,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
@@ -30,6 +30,8 @@
 
 namespace matmul_v4::metal {
 namespace {
+
+std::atomic_bool g_lt_last_s8s8_tensor_ops{false};
 
 static NSString* const kGemmLibrarySource = @R"MSL(
 #include <metal_stdlib>
@@ -127,12 +129,9 @@ MetalGemmContext& Ctx()
     return ctx;
 }
 
-bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
-                    uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
+bool LaunchAluGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
+                       uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
 {
-    if (TryLaunchLtTensorOpsGemmS8S8(left, right, rows, k, cols, out)) {
-        return true;
-    }
     auto& ctx = Ctx();
     if (!ctx.ready) return false;
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
@@ -173,12 +172,9 @@ bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& 
     return true;
 }
 
-bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
-                     uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
+bool LaunchAluGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
+                        uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
 {
-    if (TryLaunchLtTensorOpsGemmS32S8(left, right, rows, k, cols, out)) {
-        return true;
-    }
     auto& ctx = Ctx();
     if (!ctx.ready) return false;
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
@@ -219,12 +215,39 @@ bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>
     return true;
 }
 
+bool LaunchGemmS8S8Internal(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
+                            uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
+{
+    // TensorOps only when ExactGemmS8S8 self-qual passed — never label ALU as TensorOps.
+    if (TryLaunchLtTensorOpsGemmS8S8(left, right, rows, k, cols, out)) {
+        g_lt_last_s8s8_tensor_ops = true;
+        return true;
+    }
+    g_lt_last_s8s8_tensor_ops = false;
+    return LaunchAluGemmS8S8(left, right, rows, k, cols, out);
+}
+
+bool LaunchGemmS32S8Internal(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
+                             uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
+{
+    if (TryLaunchLtTensorOpsGemmS32S8(left, right, rows, k, cols, out)) {
+        return true;
+    }
+    return LaunchAluGemmS32S8(left, right, rows, k, cols, out);
+}
+
 bool SelfTestGemmKernelsOnce()
 {
     static std::once_flag once;
     static bool ok = false;
     std::call_once(once, [] {
-        if (!Ctx().ready) return;
+        // Qualify the ALU shaders directly so availability does not depend on
+        // TensorOps (and so a TensorOps-only pass cannot mask an ALU break).
+        if (!Ctx().ready) {
+            // TensorOps-only devices are still fine for ExactGemmS8S8 via MPP.
+            ok = IsLtTensorOpsGemmAvailable();
+            return;
+        }
         constexpr uint32_t kDim = 24;
         std::vector<int8_t> left(size_t(kDim) * kDim);
         std::vector<int8_t> right(size_t(kDim) * kDim);
@@ -236,10 +259,10 @@ bool SelfTestGemmKernelsOnce()
         }
         const auto cpu8 = matmul::v4::lt::ExactGemmS8S8(left, right, kDim, kDim, kDim);
         std::vector<int32_t> gpu8;
-        if (!LaunchGemmS8S8(left, right, kDim, kDim, kDim, gpu8) || gpu8 != cpu8) return;
+        if (!LaunchAluGemmS8S8(left, right, kDim, kDim, kDim, gpu8) || gpu8 != cpu8) return;
         const auto cpu32 = matmul::v4::lt::ExactGemmS32S8(mid, right, kDim, kDim, kDim);
         std::vector<int32_t> gpu32;
-        if (!LaunchGemmS32S8(mid, right, kDim, kDim, kDim, gpu32) || gpu32 != cpu32) return;
+        if (!LaunchAluGemmS32S8(mid, right, kDim, kDim, kDim, gpu32) || gpu32 != cpu32) return;
         ok = true;
     });
     return ok;
@@ -248,13 +271,13 @@ bool SelfTestGemmKernelsOnce()
 bool MetalGemmS8S8Fn(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
                      uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
 {
-    return LaunchGemmS8S8(L, R, rows, inner, cols, out);
+    return LaunchGemmS8S8Internal(L, R, rows, inner, cols, out);
 }
 
 bool MetalGemmS32S8Fn(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
                       uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
 {
-    return LaunchGemmS32S8(L, R, rows, inner, cols, out);
+    return LaunchGemmS32S8Internal(L, R, rows, inner, cols, out);
 }
 
 matmul::v4::lt::ExactGemmBackend MakeMetalExactGemmBackend()
@@ -266,6 +289,18 @@ matmul::v4::lt::ExactGemmBackend MakeMetalExactGemmBackend()
 }
 
 } // namespace
+
+bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
+                    uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
+{
+    return LaunchGemmS8S8Internal(left, right, rows, k, cols, out);
+}
+
+bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
+                     uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
+{
+    return LaunchGemmS32S8Internal(left, right, rows, k, cols, out);
+}
 
 bool IsMatMulLTMetalAvailable()
 {
@@ -307,6 +342,11 @@ bool ComputeDigestsOnlyLTMetal(const CBlockHeader& tmpl, uint32_t n,
     }
     out = std::move(results);
     return true;
+}
+
+bool LtLastS8S8UsedTensorOps()
+{
+    return g_lt_last_s8s8_tensor_ops.load(std::memory_order_relaxed);
 }
 
 } // namespace matmul_v4::metal

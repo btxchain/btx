@@ -10,24 +10,30 @@
 
 class CBlockHeader;
 
-// Non-Apple / non-Metal build: the MatMul v4.4 ENC-DR-LT ("MatExpand") Metal
-// backend is unavailable, so every entry point declines. Callers use the
-// host ExactGemm / WindowSketchMinerLT fail-closed path — safety net, not a
-// complete device accelerator.
-
 namespace matmul_v4::metal {
 
-bool IsMatMulLTMetalAvailable()
+bool IsMatMulLTMetalAvailable() { return false; }
+
+bool LaunchGemmS8S8(const std::vector<int8_t>&, const std::vector<int8_t>&,
+                    uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
 {
     return false;
 }
 
-bool ComputeDigestsOnlyLTMetal(const CBlockHeader& /*tmpl*/, uint32_t /*n*/,
-                               const uint64_t* /*nonces*/, size_t /*count*/,
+bool LaunchGemmS32S8(const std::vector<int32_t>&, const std::vector<int8_t>&,
+                     uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
+{
+    return false;
+}
+
+bool ComputeDigestsOnlyLTMetal(const CBlockHeader&, uint32_t,
+                               const uint64_t*, size_t,
                                std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
 {
     out.clear();
     return false;
 }
+
+bool LtLastS8S8UsedTensorOps() { return false; }
 
 } // namespace matmul_v4::metal
