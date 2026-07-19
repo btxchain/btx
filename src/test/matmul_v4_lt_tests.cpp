@@ -34,11 +34,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-<<<<<<< HEAD
-#include <limits>
-=======
 #include <iterator>
->>>>>>> 4d906e9 (test(matmul): ship Wave-3 Gap#5 related-nonce firm pack (C-15 OPEN))
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string_view>
