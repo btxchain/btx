@@ -1,5 +1,5 @@
 {
-  "status": "C-15 OPEN — candidate ChaCha20-PRF Extract; not cryptographically closed",
+  "status": "C-15 OPEN \u2014 candidate ChaCha20-PRF Extract; not cryptographically closed",
   "source": "src/test/matmul_v4_lt_tests.cpp::matexpand_chacha_prf_golden_vectors",
   "normative_refs": [
     "doc/btx-matmul-v4.4-lt-external-c15-packet.md",
@@ -23,68 +23,515 @@
     "prf_key_bytes": "SHA256 digest written in natural byte order; used as ChaCha20 key via eight LE32 words (RFC8439 / crypto/chacha20.h).",
     "chacha_nonce96": "nonce_first = uint32(raw) XOR lane; nonce_second = (uint64(i)<<32) | uint64(j). Seek(Nonce96{nonce_first, nonce_second}, remix) with remix as block counter.",
     "keystream_le64": "First 8 keystream bytes interpreted as little-endian uint64 (AccelReplica returns x0 | (x1<<32) of the ChaCha block).",
-    "scale": "e = scale_stream & 0x3; return exact_mul(mu, 1<<e) — never signed left-shift of a negative mantissa."
+    "scale": "e = scale_stream & 0x3; return exact_mul(mu, 1<<e) \u2014 never signed left-shift of a negative mantissa."
   },
   "m11_rejection": {
-    "alphabet": [0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6],
-    "rejected_nibbles": [1, 3, 8, 9, 11],
-    "rejected_meanings": ["+0.5", "+1.5", "-0", "-0.5", "-1.5"]
+    "alphabet": [
+      0,
+      1,
+      -1,
+      2,
+      -2,
+      3,
+      -3,
+      4,
+      -4,
+      6,
+      -6
+    ],
+    "rejected_nibbles": [
+      1,
+      3,
+      8,
+      9,
+      11
+    ],
+    "rejected_meanings": [
+      "+0.5",
+      "+1.5",
+      "-0",
+      "-0.5",
+      "-1.5"
+    ]
   },
   "seed_w_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "prf_key_hex": "a522d5eeda6366cf3c8ed91b7f029b852cba9fc25dd6cf1c18c72b44f783271b",
   "extract_goldens": [
-    {"raw": 0, "i": 0, "j": 0, "expected": 4},
-    {"raw": 1, "i": 0, "j": 1, "expected": 1},
-    {"raw": -1, "i": 1, "j": 0, "expected": 4},
-    {"raw": 42, "i": 3, "j": 5, "expected": 2},
-    {"raw": -1000, "i": 7, "j": 11, "expected": -16},
-    {"raw": 2147483647, "i": 2, "j": 4, "expected": -8},
-    {"raw": -2147483648, "i": 9, "j": 13, "expected": 0}
+    {
+      "raw": 0,
+      "i": 0,
+      "j": 0,
+      "expected": 4
+    },
+    {
+      "raw": 1,
+      "i": 0,
+      "j": 1,
+      "expected": 1
+    },
+    {
+      "raw": -1,
+      "i": 1,
+      "j": 0,
+      "expected": 4
+    },
+    {
+      "raw": 42,
+      "i": 3,
+      "j": 5,
+      "expected": 2
+    },
+    {
+      "raw": -1000,
+      "i": 7,
+      "j": 11,
+      "expected": -16
+    },
+    {
+      "raw": 2147483647,
+      "i": 2,
+      "j": 4,
+      "expected": -8
+    },
+    {
+      "raw": -2147483648,
+      "i": 9,
+      "j": 13,
+      "expected": 0
+    }
   ],
   "accel_replica_parity": {
     "note": "ExtractDequantMatExpandAccelReplica must equal ExtractDequantMatExpand on these cases (and the broader grid in the C++ test).",
     "cases": [
-      {"raw": 0, "i": 0, "j": 0, "expected": 4},
-      {"raw": 42, "i": 3, "j": 5, "expected": 2},
-      {"raw": -1000, "i": 7, "j": 11, "expected": -16},
-      {"raw": 7, "i": 2, "j": 3, "expected_via_reference": true},
-      {"raw": -97, "i": 4, "j": 1, "expected_via_reference": true}
+      {
+        "raw": 0,
+        "i": 0,
+        "j": 0,
+        "expected": 4
+      },
+      {
+        "raw": 42,
+        "i": 3,
+        "j": 5,
+        "expected": 2
+      },
+      {
+        "raw": -1000,
+        "i": 7,
+        "j": 11,
+        "expected": -16
+      },
+      {
+        "raw": 7,
+        "i": 2,
+        "j": 3,
+        "expected_via_reference": true
+      },
+      {
+        "raw": -97,
+        "i": 4,
+        "j": 1,
+        "expected_via_reference": true
+      }
     ]
   },
   "production_panel_w": 128,
-  "rank_note": "Honest B32 = (G·W)·H has rank(B32) ≤ w (=128 at production). Affine collapse of Extract would reopen a ~n/w Freivalds-style shortcut; see rank_spectral_regression.md.",
+  "rank_note": "Honest B32 = (G\u00b7W)\u00b7H has rank(B32) \u2264 w (=128 at production). Affine collapse of Extract would reopen a ~n/w Freivalds-style shortcut; see rank_spectral_regression.md.",
   "reduction_relevant_finding_notes": {
-    "purpose": "Oracle hints for external reviewers — what would constitute a reduction-relevant / §0.1 FAIL finding. Not a theorem; C-15 remains OPEN.",
+    "purpose": "Oracle hints for external reviewers \u2014 what would constitute a reduction-relevant / \u00a70.1 FAIL finding. Not a theorem; C-15 remains OPEN.",
     "packet_refs": [
-      "doc/btx-matmul-v4.4-lt-external-c15-packet.md §0.1 (FAIL criteria)",
-      "doc/btx-matmul-v4.4-lt-external-c15-packet.md §0.2 (BTX-C15-NonCollapse-v1)",
+      "doc/btx-matmul-v4.4-lt-external-c15-packet.md \u00a70.1 (FAIL criteria)",
+      "doc/btx-matmul-v4.4-lt-external-c15-packet.md \u00a70.2 (BTX-C15-NonCollapse-v1)",
       "contrib/matmul-c15-reviewer-kit/reduction-attack-checklist.md"
     ],
     "what_would_constitute_a_reduction_relevant_finding": [
       {
         "id": "high_r2_surrogate",
-        "signal": "High R²",
-        "detail": "An affine or low-degree (deg ≤ 2 primary; deg ≤ 3 checklist) entrywise polynomial surrogate f(B32) matching Extract on ≥ N=10^6 realistic B32 samples with R² ≳ 0.05 (in-tree witness bar) — and especially R² near 1 — that admits a Freivalds-usable rewrite through G,W,H. Toy harness R² ≫ smoke thresholds is a reportable finding; firm FAIL needs the rewrite + cost vs HonestMAC.",
-        "maps_to": "§0.1 FAIL (affine/low-degree surrogate class); C15-A"
+        "signal": "High R\u00b2",
+        "detail": "An affine or low-degree (deg \u2264 2 primary; deg \u2264 3 checklist) entrywise polynomial surrogate f(B32) matching Extract on \u2265 N=10^6 realistic B32 samples with R\u00b2 \u2273 0.05 (in-tree witness bar) \u2014 and especially R\u00b2 near 1 \u2014 that admits a Freivalds-usable rewrite through G,W,H. Toy harness R\u00b2 \u226b smoke thresholds is a reportable finding; firm FAIL needs the rewrite + cost vs HonestMAC.",
+        "maps_to": "\u00a70.1 FAIL (affine/low-degree surrogate class); C15-A"
       },
       {
         "id": "zero_freivalds_residual",
         "signal": "Zero Freivalds residual",
-        "detail": "A systematic zero (or Freivalds-soundness-bounded) residual rᵀ(B̂−B̂')s on dense samples for a cheap surrogate B̂' — i.e. the surrogate equals Extract on the probe with Adv ≥ ε — while exact-int MAC cost stays ≤ (1−δ)·HonestMAC(n). A single lucky zero on tiny toy-n is noise; systematic zeros with accepting sketches are FAIL.",
-        "maps_to": "§0.1 FAIL (Adv ≥ ε at half-cost); C15-B"
+        "detail": "A systematic zero (or Freivalds-soundness-bounded) residual r\u1d40(B\u0302\u2212B\u0302')s on dense samples for a cheap surrogate B\u0302' \u2014 i.e. the surrogate equals Extract on the probe with Adv \u2265 \u03b5 \u2014 while exact-int MAC cost stays \u2264 (1\u2212\u03b4)\u00b7HonestMAC(n). A single lucky zero on tiny toy-n is noise; systematic zeros with accepting sketches are FAIL.",
+        "maps_to": "\u00a70.1 FAIL (Adv \u2265 \u03b5 at half-cost); C15-B"
       },
       {
         "id": "truncated_salt_equivalence_class",
         "signal": "Truncated salt equivalence class",
-        "detail": "Any truncation / tiling / low-bit collapse of position salts (i,j) that creates a large equivalence class of cells sharing the same ChaCha Nonce96 high half (or otherwise reusable keystream), reopening a ~n/w ≈ 32× thin-panel / shared-φ shortcut. Normative encoding REQUIRES full-width 32-bit i and j in nonce_second; a finding that consensus twins truncate, or that an adversary forces an effective truncation class with Adv ≥ ε at ≤ (1−δ)·HonestMAC, is FAIL.",
-        "maps_to": "§0.1 FAIL; §0.2 attack-surface #6; matexpand_position_salt_differential"
+        "detail": "Any truncation / tiling / low-bit collapse of position salts (i,j) that creates a large equivalence class of cells sharing the same ChaCha Nonce96 high half (or otherwise reusable keystream), reopening a ~n/w \u2248 32\u00d7 thin-panel / shared-\u03c6 shortcut. Normative encoding REQUIRES full-width 32-bit i and j in nonce_second; a finding that consensus twins truncate, or that an adversary forces an effective truncation class with Adv \u2265 \u03b5 at \u2264 (1\u2212\u03b4)\u00b7HonestMAC, is FAIL.",
+        "maps_to": "\u00a70.1 FAIL; \u00a70.2 attack-surface #6; matexpand_position_salt_differential"
+      },
+      {
+        "id": "related_nonce_amortization",
+        "signal": "Related-nonce GEMM amortization",
+        "detail": "Mant/Scale lane-XOR identity (\u0394=MANT\u2295SCLE) is documented leftover ExtractStruct. FAIL only if an adversary amortizes beyond per-cell ChaCha with Adv\u2265\u03b5 at \u2264(1\u2212\u03b4)\u00b7HonestMAC \u2014 e.g. denser-than-chance B32 \u0394-mate graph enabling sub-GEMM solve. Firm pack \u226532 identity tuples + B32 \u0394-collision negative control are witnesses, not closure.",
+        "maps_to": "\u00a70.2 #5; checklist A7; C15-C residue"
       }
     ],
     "non_findings": [
       "Green goldens / AccelReplica parity alone",
-      "IdealExtract 23-value alphabet or P(v=0)≈1/11 (by design)",
-      "Low toy R² without a Freivalds-usable rewrite",
-      "ChaCha20 looking like a PRF in isolation (does not imply MatExpand work lower bound)"
+      "IdealExtract 23-value alphabet or P(v=0)\u22481/11 (by design)",
+      "Low toy R\u00b2 without a Freivalds-usable rewrite",
+      "ChaCha20 looking like a PRF in isolation (does not imply MatExpand work lower bound)",
+      "MantPRF(raw)=ScalePRF(raw\u2295\u0394) identity alone (PRF-consistent)",
+      "\u03bc\u2032\u2194e lock on first-nibble accept without MAC savings",
+      "Zero/near-zero B32 \u0394-collisions on small grids (expected under uniform 32-bit XOR)"
     ]
+  },
+  "related_nonce_lane_xor": {
+    "status": "C-15 OPEN \u2014 firm vector pack + \u0394-collision negative control; not a PRF break; not MatExpand amortization",
+    "note": "Wave-3 Gap#5 firm pack. C-15 OPEN. Identity is PRF-consistent leftover ExtractStruct (C15-C), not a ChaCha break and not MatExpand amortization.",
+    "delta": 503448081,
+    "delta_hex": "0x1e020211",
+    "identity": "mant_le64 == scale_at_raw_xor_delta AND scale_le64 == mant_at_raw_xor_delta",
+    "witness_test": "src/test/matmul_v4_lt_tests.cpp::matexpand_related_nonce_lane_xor_identity",
+    "reduction_note": "doc/btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md",
+    "tuple_count": 32,
+    "tuples": [
+      {
+        "raw": 0,
+        "i": 0,
+        "j": 0,
+        "remix": 0,
+        "mant_le64": 11223433793238995507,
+        "scale_le64": 13073776326290805266,
+        "mant_at_raw_xor_delta": 13073776326290805266,
+        "scale_at_raw_xor_delta": 11223433793238995507
+      },
+      {
+        "raw": 1,
+        "i": 0,
+        "j": 1,
+        "remix": 0,
+        "mant_le64": 148905383317522610,
+        "scale_le64": 9703444906283927276,
+        "mant_at_raw_xor_delta": 9703444906283927276,
+        "scale_at_raw_xor_delta": 148905383317522610
+      },
+      {
+        "raw": -1,
+        "i": 1,
+        "j": 0,
+        "remix": 0,
+        "mant_le64": 7143755091964925362,
+        "scale_le64": 4521930347394166958,
+        "mant_at_raw_xor_delta": 4521930347394166958,
+        "scale_at_raw_xor_delta": 7143755091964925362
+      },
+      {
+        "raw": 42,
+        "i": 3,
+        "j": 5,
+        "remix": 0,
+        "mant_le64": 8421430091581573442,
+        "scale_le64": 2154098902975887289,
+        "mant_at_raw_xor_delta": 2154098902975887289,
+        "scale_at_raw_xor_delta": 8421430091581573442
+      },
+      {
+        "raw": -1000,
+        "i": 7,
+        "j": 11,
+        "remix": 1,
+        "mant_le64": 3939806738593734299,
+        "scale_le64": 5888199847780800968,
+        "mant_at_raw_xor_delta": 5888199847780800968,
+        "scale_at_raw_xor_delta": 3939806738593734299
+      },
+      {
+        "raw": 2147483647,
+        "i": 2,
+        "j": 4,
+        "remix": 0,
+        "mant_le64": 8038051694144584350,
+        "scale_le64": 7505020536886552589,
+        "mant_at_raw_xor_delta": 7505020536886552589,
+        "scale_at_raw_xor_delta": 8038051694144584350
+      },
+      {
+        "raw": -2147483648,
+        "i": 9,
+        "j": 13,
+        "remix": 0,
+        "mant_le64": 8694622829843747680,
+        "scale_le64": 6659546795166078174,
+        "mant_at_raw_xor_delta": 6659546795166078174,
+        "scale_at_raw_xor_delta": 8694622829843747680
+      },
+      {
+        "raw": 7,
+        "i": 1,
+        "j": 2,
+        "remix": 2,
+        "mant_le64": 15442835147077385856,
+        "scale_le64": 13327873786773477438,
+        "mant_at_raw_xor_delta": 13327873786773477438,
+        "scale_at_raw_xor_delta": 15442835147077385856
+      },
+      {
+        "raw": -97,
+        "i": 4,
+        "j": 1,
+        "remix": 0,
+        "mant_le64": 2773759710906139184,
+        "scale_le64": 17984733247378025315,
+        "mant_at_raw_xor_delta": 17984733247378025315,
+        "scale_at_raw_xor_delta": 2773759710906139184
+      },
+      {
+        "raw": 100,
+        "i": 5,
+        "j": 6,
+        "remix": 0,
+        "mant_le64": 4974781773947574307,
+        "scale_le64": 11698980040536284545,
+        "mant_at_raw_xor_delta": 11698980040536284545,
+        "scale_at_raw_xor_delta": 4974781773947574307
+      },
+      {
+        "raw": -100,
+        "i": 8,
+        "j": 3,
+        "remix": 0,
+        "mant_le64": 3376263298637378587,
+        "scale_le64": 12062174099897168465,
+        "mant_at_raw_xor_delta": 12062174099897168465,
+        "scale_at_raw_xor_delta": 3376263298637378587
+      },
+      {
+        "raw": 12345,
+        "i": 10,
+        "j": 12,
+        "remix": 0,
+        "mant_le64": 8379385047123725099,
+        "scale_le64": 16873087791560471053,
+        "mant_at_raw_xor_delta": 16873087791560471053,
+        "scale_at_raw_xor_delta": 8379385047123725099
+      },
+      {
+        "raw": -54321,
+        "i": 15,
+        "j": 15,
+        "remix": 1,
+        "mant_le64": 11844551410720621670,
+        "scale_le64": 7161920311263655136,
+        "mant_at_raw_xor_delta": 7161920311263655136,
+        "scale_at_raw_xor_delta": 11844551410720621670
+      },
+      {
+        "raw": 16909060,
+        "i": 31,
+        "j": 7,
+        "remix": 0,
+        "mant_le64": 13841160074316702333,
+        "scale_le64": 7436000394956967700,
+        "mant_at_raw_xor_delta": 7436000394956967700,
+        "scale_at_raw_xor_delta": 13841160074316702333
+      },
+      {
+        "raw": -270544960,
+        "i": 63,
+        "j": 31,
+        "remix": 0,
+        "mant_le64": 8869323054392668078,
+        "scale_le64": 7291768553084543217,
+        "mant_at_raw_xor_delta": 7291768553084543217,
+        "scale_at_raw_xor_delta": 8869323054392668078
+      },
+      {
+        "raw": 246267631,
+        "i": 127,
+        "j": 63,
+        "remix": 2,
+        "mant_le64": 12099185327236730267,
+        "scale_le64": 422094389199154252,
+        "mant_at_raw_xor_delta": 422094389199154252,
+        "scale_at_raw_xor_delta": 12099185327236730267
+      },
+      {
+        "raw": -777,
+        "i": 0,
+        "j": 0,
+        "remix": 0,
+        "mant_le64": 10442525506887395042,
+        "scale_le64": 8234916964678545791,
+        "mant_at_raw_xor_delta": 8234916964678545791,
+        "scale_at_raw_xor_delta": 10442525506887395042
+      },
+      {
+        "raw": 999,
+        "i": 0,
+        "j": 1,
+        "remix": 0,
+        "mant_le64": 7491866905661739891,
+        "scale_le64": 2491177164246130797,
+        "mant_at_raw_xor_delta": 2491177164246130797,
+        "scale_at_raw_xor_delta": 7491866905661739891
+      },
+      {
+        "raw": 2,
+        "i": 1,
+        "j": 0,
+        "remix": 0,
+        "mant_le64": 3896529266355308407,
+        "scale_le64": 3422268755454103584,
+        "mant_at_raw_xor_delta": 3422268755454103584,
+        "scale_at_raw_xor_delta": 3896529266355308407
+      },
+      {
+        "raw": -2,
+        "i": 3,
+        "j": 5,
+        "remix": 0,
+        "mant_le64": 4142798441851476381,
+        "scale_le64": 10092076572585396979,
+        "mant_at_raw_xor_delta": 10092076572585396979,
+        "scale_at_raw_xor_delta": 4142798441851476381
+      },
+      {
+        "raw": 3,
+        "i": 7,
+        "j": 11,
+        "remix": 1,
+        "mant_le64": 10437980921145036038,
+        "scale_le64": 16418886340585032941,
+        "mant_at_raw_xor_delta": 16418886340585032941,
+        "scale_at_raw_xor_delta": 10437980921145036038
+      },
+      {
+        "raw": -3,
+        "i": 2,
+        "j": 4,
+        "remix": 0,
+        "mant_le64": 3694490223302061083,
+        "scale_le64": 3545471036272778678,
+        "mant_at_raw_xor_delta": 3545471036272778678,
+        "scale_at_raw_xor_delta": 3694490223302061083
+      },
+      {
+        "raw": 65535,
+        "i": 9,
+        "j": 13,
+        "remix": 0,
+        "mant_le64": 14127152255159468034,
+        "scale_le64": 15142339958792886514,
+        "mant_at_raw_xor_delta": 15142339958792886514,
+        "scale_at_raw_xor_delta": 14127152255159468034
+      },
+      {
+        "raw": -65536,
+        "i": 1,
+        "j": 2,
+        "remix": 2,
+        "mant_le64": 13776419625003104816,
+        "scale_le64": 1939133614405470133,
+        "mant_at_raw_xor_delta": 1939133614405470133,
+        "scale_at_raw_xor_delta": 13776419625003104816
+      },
+      {
+        "raw": 286331153,
+        "i": 4,
+        "j": 1,
+        "remix": 0,
+        "mant_le64": 11544630045050117437,
+        "scale_le64": 17074894957546226278,
+        "mant_at_raw_xor_delta": 17074894957546226278,
+        "scale_at_raw_xor_delta": 11544630045050117437
+      },
+      {
+        "raw": -572662306,
+        "i": 5,
+        "j": 6,
+        "remix": 0,
+        "mant_le64": 17828116553697539543,
+        "scale_le64": 602410659425728882,
+        "mant_at_raw_xor_delta": 602410659425728882,
+        "scale_at_raw_xor_delta": 17828116553697539543
+      },
+      {
+        "raw": 8675309,
+        "i": 8,
+        "j": 3,
+        "remix": 0,
+        "mant_le64": 17996636878097039707,
+        "scale_le64": 9233920086575909030,
+        "mant_at_raw_xor_delta": 9233920086575909030,
+        "scale_at_raw_xor_delta": 17996636878097039707
+      },
+      {
+        "raw": -314159,
+        "i": 10,
+        "j": 12,
+        "remix": 0,
+        "mant_le64": 1296703165000638259,
+        "scale_le64": 1337923910293912715,
+        "mant_at_raw_xor_delta": 1337923910293912715,
+        "scale_at_raw_xor_delta": 1296703165000638259
+      },
+      {
+        "raw": 2130771712,
+        "i": 15,
+        "j": 15,
+        "remix": 1,
+        "mant_le64": 5811196366673675968,
+        "scale_le64": 6428679286221403673,
+        "mant_at_raw_xor_delta": 6428679286221403673,
+        "scale_at_raw_xor_delta": 5811196366673675968
+      },
+      {
+        "raw": -16711935,
+        "i": 31,
+        "j": 7,
+        "remix": 0,
+        "mant_le64": 9723614631735697353,
+        "scale_le64": 10647325620476909687,
+        "mant_at_raw_xor_delta": 10647325620476909687,
+        "scale_at_raw_xor_delta": 9723614631735697353
+      },
+      {
+        "raw": 13,
+        "i": 63,
+        "j": 31,
+        "remix": 0,
+        "mant_le64": 3896978249531627246,
+        "scale_le64": 17101191155483301588,
+        "mant_at_raw_xor_delta": 17101191155483301588,
+        "scale_at_raw_xor_delta": 3896978249531627246
+      },
+      {
+        "raw": -26,
+        "i": 127,
+        "j": 63,
+        "remix": 2,
+        "mant_le64": 14407722323872439908,
+        "scale_le64": 13057463290122549697,
+        "mant_at_raw_xor_delta": 13057463290122549697,
+        "scale_at_raw_xor_delta": 14407722323872439908
+      }
+    ],
+    "b32_delta_collision_negative_control": {
+      "purpose": "Amortization negative control: honest/synthetic B32 should not be denser in \u0394-mates than chance 32-bit XOR. Even perfect 2\u21921 ChaCha share on rare pairs cannot drop below GEMM term of sketch D.",
+      "grid": {
+        "n": 16,
+        "w": 4,
+        "seed": 20260719,
+        "kind": "synthetic_(G\u00b7W)\u00b7H_M11"
+      },
+      "cells": 256,
+      "unordered_pairs": 32640,
+      "delta": 503448081,
+      "delta_hex": "0x1e020211",
+      "delta_collision_count": 0,
+      "expected_uniform_approx": 7.599592208862305e-06,
+      "random_delta_control": {
+        "trials": 32,
+        "mean": 0.0,
+        "max": 0,
+        "sum": 0
+      },
+      "verdict": "no denser \u0394-graph than chance on this grid; C-15 remains OPEN"
+    }
   }
 }

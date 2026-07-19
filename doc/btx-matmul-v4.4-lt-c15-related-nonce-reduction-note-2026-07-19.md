@@ -128,28 +128,35 @@ claims in A**, **belongs in C**, **does not amortize D**.
 
 ---
 
-## 4. Recommended firm experiment
+## 4. Firm experiment (Wave 3 Gap #5 — shipped)
 
 **Firm (primary):** machine-checkable vector pack + independence game.
 
-1. Publish ≥32 tuples
+1. **Published ≥32 identity tuples** in
+   `contrib/matmul-c15-reviewer-kit/test-vectors.json::related_nonce_lane_xor`
+   as
    `(seed_w, raw, i, j, remix, Δ, mant_le64, scale_le64, mant_at_raw⊕Δ, scale_at_raw⊕Δ)`
    with `mant_le64 == scale_at_raw⊕Δ` and `scale_le64 == mant_at_raw⊕Δ`
-   (in-tree oracle: `MatExpandPrfLaneLE64`).
-2. Conditionally, when first nibble of `mant_at_raw⊕Δ` accepts, check the
-   `(μ′, e(Extract(raw)))` lock table in §1.
-3. **Amortization negative control:** on a small `n` MatExpand grid, count how
-   often `B32[i,j] ⊕ B32[i′,j′] = Δ` for distinct cells; expect ≈ uniform
-   collision rate on 32-bit XOR (no denser Δ-graph than chance). Argue that
-   even a perfect 2→1 ChaCha share on those rare pairs cannot drop below the
+   (oracles: `MatExpandPrfLaneLE64` / `reference_extract.py`).
+2. Conditionally, when first nibble of `mant_at_raw⊕Δ` accepts, the C++ witness
+   checks the `(μ′, e)` lock table in §1 on a dense sample.
+3. **Amortization negative control (shipped):**
+   - Reviewer-kit synthetic `(G·W)·H` grid (`n=16`, `w=4`, seed `20260719`):
+     `Δ`-collision count `0` on `C(256,2)` pairs (≈ uniform / `2³²`).
+   - In-tree honest MatExpand `B32` at `n=8` via `ExpandOperandBB32ForTest`:
+     `Δ`-collision count `≤ 1` (expect `0`; `C(64,2)/2³² ≈ 4.7×10⁻⁷`).
+   Even a perfect 2→1 ChaCha share on those rare pairs cannot drop below the
    GEMM term of sketch D.
 4. Optional defense-in-depth (consensus-breaking if adopted): put scale on
    `ctr = remix + 2³¹` or a nonce half nonlinear in `raw`, killing the XOR
    identity — only if activation wants a cleaner C15-C story.
 
 **In-tree witness (shipped):** `matexpand_related_nonce_lane_xor_identity`
-pins the LE64 identity on a dense sample + one frozen golden tuple. Empirical
-only — **not** a PRF proof and **not** a C-15 closure.
+pins ≥32 frozen LE64 identity tuples (mirroring `test-vectors.json`), a dense
+sample + μ′↔e lock, and the honest-`B32` Δ-collision negative control.
+`python3 contrib/matmul-c15-reviewer-kit/reference_extract.py` re-checks the
+JSON pack. Empirical only — **not** a PRF proof and **not** a C-15 closure.
+**C-15 remains OPEN.**
 
 ---
 
