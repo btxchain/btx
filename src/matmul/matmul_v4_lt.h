@@ -39,9 +39,24 @@ inline constexpr uint32_t kConsensusQStarMax = 128;
 
 [[nodiscard]] int32_t FoldInt32ToEmax48(int32_t y);
 
+/** ChaCha lane tags for MatExpand Extract nonce_first = raw⊕lane.
+ *  Related-nonce identity: MantPRF(raw) = ScalePRF(raw⊕Δ) with
+ *  Δ = kMatExpandPrfLaneMant ⊕ kMatExpandPrfLaneScale (= 0x1e020211).
+ *  See doc/btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md. */
+inline constexpr uint32_t kMatExpandPrfLaneMant = 0x4D414E54u;  // 'MANT'
+inline constexpr uint32_t kMatExpandPrfLaneScale = 0x53434C45u; // 'SCLE'
+inline constexpr uint32_t kMatExpandPrfLaneXorDelta =
+    kMatExpandPrfLaneMant ^ kMatExpandPrfLaneScale; // 0x1e020211
+
 /** Domain-separated ChaCha20 PRF key for normative MatExpand Extract.
  *  key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W). */
 [[nodiscard]] uint256 DeriveMatExpandPrfKey(const uint256& seed_w);
+
+/** First 8 bytes (LE64) of MatExpand ChaCha keystream for (raw,i,j,remix,lane).
+ *  AccelReplica / device-twin oracle for C15-C related-nonce identity tests.
+ *  Not used by consensus digests. */
+[[nodiscard]] uint64_t MatExpandPrfLaneLE64(const uint256& prf_key, int32_t raw, uint32_t i,
+                                            uint32_t j, uint32_t remix, uint32_t lane);
 
 /** Position-salted SplitMix64 avalanche — LEGACY / differential tests only.
  *  Not used by normative ENC_BMX4C_LT MatExpand. */
