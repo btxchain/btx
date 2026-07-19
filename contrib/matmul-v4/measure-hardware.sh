@@ -54,7 +54,7 @@
 #
 # Production-shape measurement (MatExpand + deep-m + Q*):
 #
-#   contrib/matmul-v4/measure-hardware.sh cuda --profile bmx4c-lt --n 4096 --window 64
+#   contrib/matmul-v4/measure-hardware.sh cuda --profile bmx4c-lt --n 4096 --window 256
 #   contrib/matmul-v4/measure-hardware.sh cpu  --profile bmx4c-lt --n 256 --window 8   # smoke
 #
 # Emits schema_version 3 JSON with MatExpand/Q* stage boundaries. Does NOT invent

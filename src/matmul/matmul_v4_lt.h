@@ -27,14 +27,17 @@ namespace matmul::v4::lt {
 using int8_field::Fq;
 
 inline constexpr uint32_t kTileBLT = 2;
-inline constexpr uint32_t kMatExpandPanelW = 128;
+/** MatExpand panel width. Raised 128→1024 to rebalance MatExpand GEMM (Θ(n²·w))
+ *  vs per-cell ChaCha Extract (Θ(n²)) for the datacenter thesis. */
+inline constexpr uint32_t kMatExpandPanelW = 1024;
 inline constexpr int32_t kMatExpandEmax = 48;
-inline constexpr uint32_t kConsensusQStarDefault = 64;
-inline constexpr uint32_t kConsensusQStarMax = 128;
+/** Consensus Q* window sizes: {128,256,512}. Default 256 (Phase B fat window). */
+inline constexpr uint32_t kConsensusQStarDefault = 256;
+inline constexpr uint32_t kConsensusQStarMax = 512;
 
 [[nodiscard]] inline bool IsValidConsensusQStar(uint32_t q_star)
 {
-    return q_star == kConsensusQStarDefault || q_star == kConsensusQStarMax;
+    return q_star == 128 || q_star == 256 || q_star == 512;
 }
 
 [[nodiscard]] int32_t FoldInt32ToEmax48(int32_t y);
@@ -208,7 +211,7 @@ using SlotSeedFn = std::function<bool(CBlockHeader&)>;
  *  its V3 seeds and BindWindowSlotIdIntoSeeds folds in the full slot_id, builds
  *  the Merkle root over CommitWindowSlotLeaf(slot_id, digest) leaves, and
  *  returns the seal in `seal_out`. `Qstar` MUST be a valid consensus Q*
- *  ({64,128}). Rejects duplicate slot_ids deterministically. On success
+ *  ({128,256,512}). Rejects duplicate slot_ids deterministically. On success
  *  `slots_out` (if non-null) receives the per-slot (slot_id, nonce, digest)
  *  records in window order, and `slot_payloads_out` (if non-null) receives each
  *  slot's serialized sketch bytes (for the Freivalds seal-auth path /

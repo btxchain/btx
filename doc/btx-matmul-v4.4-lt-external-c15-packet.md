@@ -39,7 +39,7 @@ C-15; invents no silicon).
 raise `nMatMulDRLTHeight`; do not claim GO/NO-GO closed from this draft alone.
 
 **Scoping correction (load-bearing):** MatExpand ExactGemm work is
-`O(n²·w)` (thin panels, `w=128`), **not** `O(n³)`. The cubic MAC floor on the
+`O(n²·w)` (panels, `w=1024`), **not** `O(n³)`. The cubic MAC floor on the
 honest marginal unit is the deep-`m` sketch/combine path (`B̂·V` + `P·Q`), not
 MatExpand itself. See §1.1–§1.2.
 
@@ -55,8 +55,8 @@ MatExpand itself. See §1.1–§1.2.
 
 | Item | Fixed definition |
 |---|---|
-| **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=128`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative ChaCha20-PRF+M11 (`ENC_BMX4C_LT`) |
-| **Honest cost** `HonestMAC(n)` | Exact-int MAC count of one marginal nonce unit: **MatExpand-B** (`G·W` + `Y·H`) + **`B̂·V`** + **combine `P·Q`** (I1′: template A / `U`/`V`/`P` excluded from marginal). At `n=4096`: MatExpand-B `4n²w ≈ 8.59×10⁹`; `B̂·V` `2n²m ≈ 6.87×10¹⁰`; combine on `m×m` sketch (see shortcut/TMTO pre-review). |
+| **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=1024`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative ChaCha20-PRF+M11 (`ENC_BMX4C_LT`) |
+| **Honest cost** `HonestMAC(n)` | Exact-int MAC count of one marginal nonce unit: **MatExpand-B** (`G·W` + `Y·H`) + **`B̂·V`** + **combine `P·Q`** (I1′: template A / `U`/`V`/`P` excluded from marginal). At `n=4096`: MatExpand-B `4n²w ≈ 6.87×10¹⁰`; `B̂·V` `2n²m ≈ 6.87×10¹⁰`; combine on `m×m` sketch (see shortcut/TMTO pre-review). |
 | **Adversary class** | Classical PPT relative to `HonestMAC`; may use poly-many adaptive honest MatExpand/digest queries and Freivalds verify transcripts at production EncDr rounds. Label the class explicitly (**MENC-Lin** / **MENC-Unres** / optional **MENC-Cubic** — table below). Primary FAIL class = **MENC-Lin** (linear / degree-≤2 entrywise surrogates). **MENC-Unres** may return INCONCLUSIVE. |
 | **Win** | Output an accepting Phase-A digest (or seal if SB annex in scope) with **advantage** `Adv ≥ ε` over Freivalds false-accept, while using exact-int MatExpand+BV+combine MAC count `≤ (1−δ)·HonestMAC(n)`. |
 | **Metric** | Exact-int MAC (multiply-accumulate) count vs `HonestMAC`; optional same-machine wall-time of CPU ExactGemm reference as secondary (must not invent silicon). Wall-time / Strassen wins update **ASERT** baselines only — see FMM calibration note; they do not substitute for a C-15 MAC-count FAIL/PASS. |
@@ -109,7 +109,7 @@ scope) at advantage `≥ ε` while paying `≤ (1−δ)·HonestMAC(n)` exact-int
 |---|---|
 | **Assumption id** | `BTX-C15-NonCollapse-v1` |
 | **Aliases (class labels)** | **MENC-Lin** / **MENC-Unres** / **MENC-Cubic** — adversary-class aliases under this id (§0.1 table). Also: `BTX-MatExpand-NonCollapse-v1`, umbrella **MENC**. Same assumption; labels differ by restriction. |
-| **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=128`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative ChaCha20-PRF+M11 (`ENC_BMX4C_LT`) |
+| **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=1024`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative ChaCha20-PRF+M11 (`ENC_BMX4C_LT`) |
 | **Honest cost** | `HonestMAC(n)` as in §0.1 (MatExpand-B + `B̂·V` + combine `P·Q`; I1′ template work excluded from marginal). MatExpand = Θ(n²·w); **cubic MAC floor** = deep-`m` sketch (`B̂·V` + combine) — MENC-Cubic scope, not Expand. |
 | **Adversary class** | Classical PPT vs `HonestMAC`; poly-many adaptive MatExpand/digest queries and Freivalds transcripts at production EncDr rounds. Primary FAIL class: **MENC-Lin** (linear / degree-≤2 entrywise Extract surrogates); deg-≤3 and spectral/TMTO surfaces are mandatory firm checklist items (below). **MENC-Unres** may return INCONCLUSIVE. |
 | **δ, ε** | `δ = 1/2`, `ε = 2⁻⁴⁰` above Freivalds false-accept (firm may retune in SOW — do not silently change) |
@@ -213,7 +213,7 @@ Any concrete win against §0.1 thresholds is a **FAIL** of
 | 3 | **Spectral / low-rank residue** | Shared-φ / Fourier structure on `B̂` after Extract; usable rank ≪ `n` for reassociation (`U`/`V` are rank-transparent) |
 | 4 | **TMTO / cross-nonce** | Tables or partial Expand reuse across nonces / templates under I1′; cheaper than marginal MatExpand-B |
 | 5 | **Related-nonce Mant/Scale XOR** | Lane packing `MANT`/`SCLE` and any `Mant(raw)↔Scale(raw⊕Δ)` identity — amortization beyond per-cell ChaCha? |
-| 6 | **Truncated position salt** | Collapse `(i,j)` to low bits / tiles; equivalence classes that reopen ~`n/w≈32×` thin-panel shortcut |
+| 6 | **Truncated position salt** | Collapse `(i,j)` to low bits / tiles; equivalence classes that reopen ~`n/w=4×` panel shortcut |
 
 ### Witnesses ≠ proof (in-tree + reviewer kit)
 
@@ -241,7 +241,7 @@ different *encoding* — not interchangeable.
 Domain tags (V44LT) and map (see normative spec for full text):
 
 ```
-Y = G · W          # s8×s8→s32, n×w, w=128
+Y = G · W          # s8×s8→s32, n×w, w=1024
 B32 = Y · H        # s32×s8→s32, n×n
 prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W)
 B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
@@ -253,7 +253,7 @@ B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
 - Operand B: MatExpand with nonce-fresh `W_B` (marginal work).
 - Sketch: `Ĉ = (U·Â)(B̂·V)` over `q=2⁶¹−1`, tile `b=2`, digest `H(σ‖Ĉ)`.
 - Phase B seal (optional mode): `matmul_digest := SealWindowCommit(σ_anchor,
-  Merkle(slot digests), Q*)` with `Q*∈{64,128}` and parent-MTP-threaded slot seeds.
+  Merkle(slot digests), Q*)` with `Q*∈{128,256,512}` and parent-MTP-threaded slot seeds.
 
 Legacy `FoldInt32ToEmax48` (`y % 97`) and SplitMix
 `ExtractDequantMatExpandSplitMix` are **non-normative** (differential tests
@@ -262,27 +262,27 @@ only). A review that only breaks Fold/SplitMix does not break consensus MatExpan
 **Candidate status:** ChaCha20-PRF Extract is selected for `ENC_BMX4C_LT`;
 **external review still required before activation.** Not closed.
 
-### 1.1 Rank-≤`w=128` structure of `B32` (load-bearing)
+### 1.1 Rank-≤`w=1024` structure of `B32` (load-bearing)
 
-At production `n=4096`, `w = kMatExpandPanelW = 128`:
+At production `n=4096`, `w = kMatExpandPanelW = 1024`:
 
-- `Y = G·W` ⇒ `rank(Y) ≤ w = 128`.
-- `B32 = Y·H = (G·W)·H` ⇒ **`rank(B32) ≤ 128`** unconditionally (over ℝ/ℚ; high-probability exact for random M11 panels).
+- `Y = G·W` ⇒ `rank(Y) ≤ w = 1024`.
+- `B32 = Y·H = (G·W)·H` ⇒ **`rank(B32) ≤ 1024`** unconditionally (over ℝ/ℚ; high-probability exact for random M11 panels).
 - Honest MatExpand MAC is `Θ(n²·w)` per panel product (`G·W` and `Y·H`), **not** `Θ(n³)`.
 
-**If Extract were linearized / omitted** (affine fold class / legacy `Fold`): Freivalds probes linear in `B̂` reassociate through `G,W,H` and reopen design-spec **L1** thin-panel collapse. Relative to treating the operand as an unstructured dense `n×n` ExactGemm (`Θ(n³)`), the thin factorization saves a factor on the order of **`n/w = 4096/128 = 32`** (~**30–32×** arithmetic shortcut). Extract is **necessary** to destroy that class; sufficiency is **unproven** (this packet).
+**If Extract were linearized / omitted** (affine fold class / legacy `Fold`): Freivalds probes linear in `B̂` reassociate through `G,W,H` and reopen design-spec **L1** thin-panel collapse. Relative to treating the operand as an unstructured dense `n×n` ExactGemm (`Θ(n³)`), the panel factorization saves a factor on the order of **`n/w = 4096/1024 = 4`** (~**4×** arithmetic shortcut). Extract is **necessary** to destroy that class; sufficiency is **unproven** (this packet).
 
-**`U` / `V` are rank-transparent:** Freivalds / sketch projectors are linear maps. They do **not** hide `rank(B32)≤128` or a residual low-rank structure in `B̂`. Nonlinear, position-salted Extract is what must destroy usable low-rank residue for reassociation — not the projectors.
+**`U` / `V` are rank-transparent:** Freivalds / sketch projectors are linear maps. They do **not** hide `rank(B32)≤1024` or a residual low-rank structure in `B̂`. Nonlinear, position-salted Extract is what must destroy usable low-rank residue for reassociation — not the projectors.
 
 ### 1.2 Parameter pin / justification
 
 | Param | Normative | Justification / status |
 |---|---|---|
-| `w=128` | `kMatExpandPanelW` | Thin ExactGemm floor replacing SHA XOF; `n/w≈32` is intentional priced structure **after** Extract. Rationale: strategy Rank-1 + L1 kill switch. |
+| `w=1024` | `kMatExpandPanelW` | ExactGemm floor replacing SHA XOF; `n/w=4` is intentional priced structure **after** Extract. Rationale: Rank-1 param lever A (fatter MatExpand vs Extract). |
 | M11 | E2M1-compatible `{0,±1,±2,±3,±4,±6}` | Frontier FP4 alphabet; prior BMX4 shortcut study. |
 | `e∈{0..3}` | Independent SCLE lane | Discrete scale; `|μ·2^e|≤48`. |
 | `b=2`, `m=n/2` | Deep-`m` under ENC-DR | ~3.6× tensor MACs; **cubic floor** is here (`B̂·V` / combine), not MatExpand. |
-| `Q*∈{64,128}` | Consensus window | Phase A = miner schedule; Phase B = seal (inert). Aggregate commitment ≠ GEMM proof. |
+| `Q*∈{128,256,512}` (def 256) | Consensus window | Phase A = miner schedule; Phase B = seal (**regtest live**; public inert). Aggregate commitment ≠ GEMM proof. |
 | Freivalds rounds | Consensus `nMatMulV4FreivaldsRounds` (mainnet pin **3**; see chainparams) | Soundness `~q^{-r}`; **TBD for firm SOW** if EncDr path uses a different effective round count — cite `SketchFreivalds` / verify path. |
 
 **IdealExtract zero mass:** under IdealExtract (uniform `(μ,e)∈M11×{0..3}`, `v=μ·2^e`), `P(v=0) = 1/11 ≈ 9.1%` (four scale codes × `μ=0`). Distinguisher vs `U[-48,48]` is **by design**, not a PoW shortcut by itself.

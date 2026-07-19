@@ -250,7 +250,7 @@ BOOST_AUTO_TEST_CASE(lt_tip_verify_budget_knobs)
     params.nMatMulV4Height = 1;
     params.nMatMulBMX4CHeight = 1; // IsDRLTActive requires IsBMX4CActive
     params.nMatMulDRLTHeight = 100;
-    params.nMatMulConsensusQStar = 64;
+    params.nMatMulConsensusQStar = 128;
     params.fMatMulLTSealAsPoW = false;
     params.nMatMulV4GlobalVerifyBudgetPerMin = 4;
     params.nMatMulV4PeerVerifyBudgetPerMin = 2;
@@ -277,6 +277,7 @@ BOOST_AUTO_TEST_CASE(lt_tip_verify_budget_knobs)
 
     // Phase B seal-as-PoW: each job costs Q* leaf units; pending cap = jobs * Q*.
     params.fMatMulLTSealAsPoW = true;
+<<<<<<< HEAD
     BOOST_CHECK_EQUAL(MatMulEncDrWorkUnits(params, 100), 64U);
     BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(params, 100), 128U);
     // The operator knobs are complete jobs/minute; effective admission is in
@@ -288,6 +289,13 @@ BOOST_AUTO_TEST_CASE(lt_tip_verify_budget_knobs)
     BOOST_CHECK(CanStartMatMulVerification(/*pending=*/0, /*work_units=*/64, params, 100));
     BOOST_CHECK(CanStartMatMulVerification(/*pending=*/64, /*work_units=*/64, params, 100));
     BOOST_CHECK(!CanStartMatMulVerification(/*pending=*/65, /*work_units=*/64, params, 100));
+=======
+    BOOST_CHECK_EQUAL(MatMulEncDrWorkUnits(params, 100), 128U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(params, 100), 256U);
+    BOOST_CHECK(CanStartMatMulVerification(/*pending=*/0, /*work_units=*/128, params, 100));
+    BOOST_CHECK(CanStartMatMulVerification(/*pending=*/128, /*work_units=*/128, params, 100));
+    BOOST_CHECK(!CanStartMatMulVerification(/*pending=*/129, /*work_units=*/128, params, 100));
+>>>>>>> ce8412c (matmul(v4.4-LT): max A-params — w=1024, Q*∈{128,256,512} def 256)
 
     // Unbounded/test values saturate rather than wrapping during unit scaling.
     params.nMatMulLTGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();

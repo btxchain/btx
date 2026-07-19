@@ -28,7 +28,7 @@ The test asserts the FULL seal path end-to-end on regtest:
     matrix_c_data / no matrix_c_words) — seal mode never packs a sketch body.
   * mining keeps making progress across several seal blocks (both nodes agree).
 
-RUNTIME NOTE: each seal attempt evaluates Q* (=64) full ENC-DR-LT digests, so
+RUNTIME NOTE: each seal attempt evaluates Q* (=256 default on regtest) full ENC-DR-LT digests, so
 seal-mode blocks are ~Q* times costlier to mine than Phase-A blocks. The test
 uses the smallest viable regtest shape (n=128, the drlt-activation dimension)
 and a minimal seal-block count to keep wall-clock bounded (a few seconds of
@@ -95,14 +95,14 @@ class BTXMatMulDRLTSealAsPoW(BitcoinTestFramework):
             timeout=180,
         )
 
-        # Under ENC-DR-LT the challenge advertises Q* in {64,128}; the seal window
-        # uses this exact Q*. (There is no separate challenge flag for seal mode:
-        # the consensus object flip is height/knob-gated, not template-advertised.)
+        # Under ENC-DR-LT the challenge advertises Q* in {128,256,512}; the seal
+        # window uses this exact Q*. (There is no separate challenge flag for seal
+        # mode: the consensus object flip is height/knob-gated, not template-advertised.)
         challenge = node0.getmatmulchallenge()
         assert_equal(challenge["height"], DRLT_HEIGHT)
         assert_equal(challenge["matmul"]["encoding_profile"], "ENC-BMX4C-LT")
         q_star = challenge["matmul"]["consensus_q_star"]
-        assert q_star in (64, 128), f"unexpected Q* {q_star}"
+        assert q_star in (128, 256, 512), f"unexpected Q* {q_star}"
         self.log.info(f"ENC-DR-LT active at {DRLT_HEIGHT}; seal window Q*={q_star}")
 
         self.log.info(f"Mine the ENC-DR-LT SEAL activation block {DRLT_HEIGHT} (Phase B)")
