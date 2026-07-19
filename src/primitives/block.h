@@ -21,27 +21,32 @@
 class CBlockHeader
 {
 public:
-    // Legacy identity size (pre–Header-PoW commitment): nVersion(4) + hashPrevBlock(32)
-    // + hashMerkleRoot(32) + nTime(4) + nBits(4) + nNonce64(8) + matmul_digest(32)
-    // + matmul_dim(2) + seed_a(32) + seed_b(32). Post-activation headers that set
-    // BTX_HEADER_POW_COMMIT_VERSION_BIT append nNonce (+4 => 186) and fold it into
-    // GetHash() — see doc/btx-matmul-v4.4-lt-hardening-response-2026-07-19.md §4.
+    // Canonical BTX header identity / P2P wire size:
+    // nVersion(4) + hashPrevBlock(32) + hashMerkleRoot(32) + nTime(4) + nBits(4)
+    // + nNonce64(8) + matmul_digest(32) + matmul_dim(2) + seed_a(32) + seed_b(32).
+    //
+    // HARD NO-GO (v4.4): do NOT gate wire length or GetHash() on nVersion bit 26.
+    // Bit 26 was previously legal for miners to set; a self-describing 182↔186
+    // parse creates an immediate pre-activation consensus/wire split between
+    // old nodes (always 182) and new nodes (186 when the bit is set). A future
+    // HeaderPoW commitment needs height-contextual (de)serialization or another
+    // design that keeps pre-activation peers byte-identical — not a free version
+    // bit. See doc/btx-matmul-v4.4-lt-hardening-response-2026-07-19.md §4.
     static constexpr size_t BTX_HEADER_SIZE = 182;
     static_assert(BTX_HEADER_SIZE == (4 + 32 + 32 + 4 + 4 + 8 + 32 + 2 + 32 + 32));
+
+    // Deferred future size if/when a safe hard-fork wire lands. Not used by
+    // SERIALIZE_METHODS or GetHash() today.
     static constexpr size_t BTX_HEADER_SIZE_WITH_POW_COMMIT = BTX_HEADER_SIZE + sizeof(uint32_t);
     static_assert(BTX_HEADER_SIZE_WITH_POW_COMMIT == 186);
 
-    // Hard-fork format bit (nVersion bit 26). Self-describing: SERIALIZE_METHODS
-    // and GetHash() key off this bit alone — no compile-time wire fork, no height
-    // needed at (de)serialize time. Consensus requires the bit at/above the
-    // unified v4 height and forbids it below. Unused by BIP9 deployments
-    // (taproot=2, testdummy=28).
+    // Reserved marker only — MUST NOT change wire or GetHash. Kept so tests and
+    // docs can name the historical mistake; unused by BIP9 (taproot=2, testdummy=28).
     static constexpr int32_t BTX_HEADER_POW_COMMIT_VERSION_BIT = (1 << 26);
 
     // Deprecated compile-time wire opt-in. Kept so transitional cmake
-    // -DBTX_ENABLE_HEADER_NONCE_ON_WIRE=ON builds still compile, but it MUST NOT
-    // alter consensus/P2P serialization (that forked peers). Wire + identity are
-    // exclusively version-bit gated via HasHeaderPoWCommitment().
+    // -DBTX_ENABLE_HEADER_NONCE_ON_WIRE=ON builds still compile; it MUST NOT
+    // alter consensus/P2P serialization.
     static constexpr bool BTX_HEADER_NONCE_ON_WIRE =
 #if defined(BTX_ENABLE_HEADER_NONCE_ON_WIRE) && BTX_ENABLE_HEADER_NONCE_ON_WIRE
         true // build tag only; see SERIALIZE_METHODS — does not change wire
@@ -50,8 +55,6 @@ public:
 #endif
         ;
 
-    // Legacy alias: base identity size. Prefer GetSerializeSize(header) or
-    // BTX_HEADER_SIZE_WITH_POW_COMMIT when the commitment bit is set.
     static constexpr size_t BTX_HEADER_WIRE_SIZE = BTX_HEADER_SIZE;
 
     // header
@@ -67,8 +70,9 @@ public:
     uint256 seed_b;
 
     // Legacy nonce/mix members kept for transitional compatibility.
-    // nNonce is the HeaderPoW grind field: on the wire and in GetHash() iff
-    // HasHeaderPoWCommitment() (BTX_HEADER_POW_COMMIT_VERSION_BIT).
+    // nNonce is the HeaderPoW grind field for the decoupled spam-gate preimage
+    // H(GetHash() || nNonce). It is NOT on the P2P wire and NOT in GetHash()
+    // until a safe height-gated wire design replaces the withdrawn bit-26 scheme.
     uint32_t nNonce;
     uint256 mix_hash;
 
@@ -77,11 +81,13 @@ public:
         SetNull();
     }
 
+    /** Historical helper: reports whether bit 26 is set. Does not affect wire/hash. */
     bool HasHeaderPoWCommitment() const
     {
         return (nVersion & BTX_HEADER_POW_COMMIT_VERSION_BIT) != 0;
     }
 
+    /** Historical helper: toggles bit 26. Does not affect wire/hash. */
     void SetHeaderPoWCommitment(bool enabled)
     {
         if (enabled) {
@@ -93,36 +99,36 @@ public:
 
     SERIALIZE_METHODS(CBlockHeader, obj)
     {
-        // Identity fields (182 bytes) — always on the wire.
+        // Fixed 182-byte identity — always. Never condition on version bits.
         READWRITE(obj.nVersion, obj.hashPrevBlock, obj.hashMerkleRoot, obj.nTime, obj.nBits, obj.nNonce64, obj.matmul_digest, obj.matmul_dim, obj.seed_a, obj.seed_b);
-        // Versioned HeaderPoW commitment (v4.4 hard fork): nNonce rides on the
-        // wire iff the self-describing version bit is set. Both ON and OFF
-        // cmake builds speak this protocol — BTX_HEADER_NONCE_ON_WIRE is not
-        // consulted here (must not fork peers).
-        if (obj.HasHeaderPoWCommitment()) {
-            READWRITE(obj.nNonce);
-        } else if constexpr (Operation::ForRead()) {
-            obj.nNonce = 0;
+        if constexpr (Operation::ForRead()) {
+            obj.nNonce = 0; // not on wire
         }
+        (void)BTX_HEADER_NONCE_ON_WIRE; // suppress unused warning on tagged builds
     }
 
-    /** Explicit 186-byte commitment wire image (version bit forced on for the
-     *  stream). Does not mutate @p header. */
+    /** TEST-ONLY helpers — not consensus wire.
+     *
+     *  Serialize a 186-byte image that includes nNonce for unit tests / benches.
+     *  MUST NOT be used by P2P, disk, or GetHash(): the withdrawn bit-26
+     *  self-describing wire forked pre-activation peers (bit 26 was previously
+     *  legal). Production SERIALIZE_METHODS is fixed at 182 bytes. */
     template <typename Stream>
     static void SerializeWithNonce(Stream& s, const CBlockHeader& header)
     {
-        const int32_t ver = header.nVersion | BTX_HEADER_POW_COMMIT_VERSION_BIT;
-        s << ver << header.hashPrevBlock << header.hashMerkleRoot << header.nTime
+        s << header.nVersion << header.hashPrevBlock << header.hashMerkleRoot << header.nTime
           << header.nBits << header.nNonce64 << header.matmul_digest << header.matmul_dim
           << header.seed_a << header.seed_b << header.nNonce;
     }
     template <typename Stream>
     static void UnserializeWithNonce(Stream& s, CBlockHeader& header)
     {
-        s >> header;
+        s >> header.nVersion >> header.hashPrevBlock >> header.hashMerkleRoot >> header.nTime
+          >> header.nBits >> header.nNonce64 >> header.matmul_digest >> header.matmul_dim
+          >> header.seed_a >> header.seed_b >> header.nNonce;
     }
 
-    /** Legacy 182-byte identity image (never includes nNonce), for tests/goldens. */
+    /** Explicit 182-byte identity image (never includes nNonce). */
     template <typename Stream>
     static void SerializeIdentityOnly(Stream& s, const CBlockHeader& header)
     {

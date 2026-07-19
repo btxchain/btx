@@ -37,19 +37,24 @@ Progressively more capable AI-native hardware receives progressively greater **e
 | §6 / §8 Adaptive limbs / Strassen tournament | **Acted (miner-local)** | Public exact baselines: deferred `ComputeCombineModQ`, `ComputeCombineAdaptiveLimbBMX4C` / base-256 + two-limb routes, Karatsuba-9; CPU tournament harness + `doc/btx-matmul-v4.4-combine-algorithm-tournament.md`. Integer transcript unchanged (byte-identical tests). ASERT still calibrates to fastest known exact after silicon measure. |
 | §12–14 Native IMMA/MFMA/MXFP4/Metal MPP | Real gaps; keep fail-closed stubs; do not mislabel scalar kernels. Full tensor residency is Phase 3. |
 
-## §4 Header-PoW wire redesign (**acted** 2026-07-19)
+## §4 Header-PoW wire redesign (**WITHDRAWN** 2026-07-19 — activation hard NO-GO)
 
-**Problem:** `BTX_ENABLE_HEADER_NONCE_ON_WIRE` made Header-PoW wire format build-dependent. Peers compiled differently would disagree on header bytes; `GetHash()` excluded `nNonce`, so grind/malleation could poison caches without changing block identity.
+**Problem (original):** `BTX_ENABLE_HEADER_NONCE_ON_WIRE` made Header-PoW wire format build-dependent.
 
-**Design (hard-fork appropriate; public heights remain `INT32_MAX`):**
+**Attempted fix (withdrawn):** self-describing `nVersion` bit 26 appending `nNonce` (+4 → 186) and folding it into `GetHash()`.
 
-1. **Self-describing format bit** — `CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT` (`nVersion` bit 26). `SERIALIZE_METHODS` appends `nNonce` (+4 → 186 bytes) iff the bit is set. No height context needed at (de)serialize; mixed 182/186 headers in one `headers` message work.
-2. **Canonical identity** — `GetHash()` folds `nNonce` when the bit is set. Post-activation, changing `nNonce` changes block identity.
-3. **Activation** — rides unified v4 (`IsMatMulV4Active` / `nMatMulV4Height`). At/above: bit **required**. Below: bit **forbidden**. `ComputeBlockVersion` and `CreateNewBlock` set the bit automatically.
-4. **HeaderPoW gate** — commitment form: `GetHash() <= eased_nBits_target`. Legacy (bit clear): `H(GetHash() || nNonce)`. `nNonce` stays out of `ComputeMatMulHeaderHash` either way.
-5. **Compile flag** — `BTX_ENABLE_HEADER_NONCE_ON_WIRE` is a **deprecated no-op** for wire/consensus (may remain as a build tag). Both ON and OFF builds speak the same protocol.
+**Confirmed defect:** bit 26 was previously legal for miners to set. Pre-activation, old nodes always read 182-byte headers while new nodes demanded 186 whenever the bit was set — an immediate consensus/wire split. A historical chain scan cannot fix that; the design itself is unsafe.
 
-**Not done here:** setting mainnet/testnet `nMatMulV4Height` finite, or enabling `nMatMulHeaderPoWDiscountBits` on public nets.
+**Current posture (this tree):**
+
+1. **Fixed 182-byte wire** — `SERIALIZE_METHODS` never appends `nNonce`; bit 26 does not change framing.
+2. **Fixed 182-byte `GetHash()`** — `nNonce` is never folded into identity.
+3. **Spam gate (when enabled in tests)** — `H(GetHash() || nNonce)` with `nNonce` local/decoupled. **Not safe to enable on public nets** until a height-contextual wire carries `nNonce`.
+4. **`SerializeWithNonce` / `UnserializeWithNonce`** — **TEST-ONLY** helpers; not consensus wire.
+5. **`ComputeBlockVersion` / miner** — do **not** OR bit 26.
+6. **Activation** — HeaderPoW commitment-format activation remains a **hard NO-GO** regardless of arithmetic / LT fixes. Public heights stay `INT32_MAX`.
+
+**Required before any retry:** height-contextual (de)serialization (or another design that keeps all pre-activation peers byte-identical), not a free version bit.
 
 ## Documentation posture
 

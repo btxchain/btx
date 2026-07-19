@@ -177,21 +177,22 @@ BOOST_AUTO_TEST_CASE(unified_chainparams_construction_survives)
 
 // (F) Header-PoW commitment version bit rides the unified v4 flag day via
 // ComputeBlockVersion: required at/above fork, absent below.
-BOOST_AUTO_TEST_CASE(unified_header_pow_commit_bit_in_block_version)
+BOOST_AUTO_TEST_CASE(unified_header_pow_commit_bit_not_forced_in_block_version)
 {
+    // WITHDRAWN: ComputeBlockVersion must NOT OR bit 26 (pre-activation wire split).
     const int32_t H = 100;
     const auto p = UnifiedParams(H);
     HeaderChain chain(H + 2, 0x1e0fffff, p.nPowTargetSpacing);
     VersionBitsCache cache;
 
-    const int32_t pre = cache.ComputeBlockVersion(chain.at(H - 2), p); // next height H-1
+    const int32_t pre = cache.ComputeBlockVersion(chain.at(H - 2), p);
     BOOST_CHECK_EQUAL(pre & CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT, 0);
 
-    const int32_t at_fork = cache.ComputeBlockVersion(chain.at(H - 1), p); // next height H
-    BOOST_CHECK((at_fork & CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT) != 0);
+    const int32_t at_fork = cache.ComputeBlockVersion(chain.at(H - 1), p);
+    BOOST_CHECK_EQUAL(at_fork & CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT, 0);
 
-    const int32_t post = cache.ComputeBlockVersion(chain.at(H), p); // next height H+1
-    BOOST_CHECK((post & CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT) != 0);
+    const int32_t post = cache.ComputeBlockVersion(chain.at(H), p);
+    BOOST_CHECK_EQUAL(post & CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT, 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

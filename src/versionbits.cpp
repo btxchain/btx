@@ -255,12 +255,8 @@ int32_t VersionBitsCache::ComputeBlockVersion(const CBlockIndex* pindexPrev, con
         }
     }
 
-    // Unified v4.4 Header-PoW commitment format: require nVersion bit 26 so
-    // templates, expected-version checks, and wire/GetHash stay aligned.
-    const int32_t next_height = pindexPrev ? pindexPrev->nHeight + 1 : 0;
-    if (params.fMatMulPOW && params.IsMatMulV4Active(next_height)) {
-        nVersion |= CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT;
-    }
+    // Do NOT OR BTX_HEADER_POW_COMMIT_VERSION_BIT: bit 26 must not imply a
+    // different wire/GetHash (withdrawn self-describing HeaderPoW design).
 
     return nVersion;
 }

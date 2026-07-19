@@ -217,14 +217,17 @@ void ExpandScaleStreamPortable(const uint256& seed, size_t count, uint8_t* out);
  *  When every P/Q entry fits, ComputeCombineTwoLimbBMX4C is exact with 4 GEMMs. */
 inline constexpr int64_t kCombineTwoLimbBase64MaxAbs = 31 + 32 * 64; // 2079
 
-/** Two-limb base-256 remainder-top bound: |x| <= 127 + 128*256 = 32895. */
-inline constexpr int64_t kCombineTwoLimbBase256MaxAbs = 127 + 128 * 256; // 32895
+/** Two-limb base-256 remainder-top bound with every digit in int8_t [-128,127]:
+ *  |x| <= 127 + 127*256 = 32639.
+ *  Note: the balanced low-digit step can yield remainder +128 at |x|=32640;
+ *  +128 is not representable in int8_t, so 32640 must use three limbs. */
+inline constexpr int64_t kCombineTwoLimbBase256MaxAbs = 127 + 127 * 256; // 32639
 
-/** Three-limb base-256 remainder-top bound:
- *  |x| <= 127 + 127*256 + 128*256^2 = 8,421,247.
+/** Three-limb base-256 remainder-top bound with every digit in int8_t:
+ *  |x| <= 127 + 127*256 + 127*256^2 = 8,355,711.
  *  Covers the full ENC-BMX4C projection envelope 288*n at n <= 8192. */
 inline constexpr int64_t kCombineThreeLimbBase256MaxAbs =
-    127 + 127 * 256 + 128 * 256 * 256; // 8,421,247
+    127 + 127 * 256 + 127 * 256 * 256; // 8,355,711
 
 /** Miner-local exact two-limb base-2^6 combine (4 limb-pair GEMMs). Requires
  *  ScanCombineMaxAbsBMX4C(P,Q) <= kCombineTwoLimbBase64MaxAbs. BYTE-IDENTICAL

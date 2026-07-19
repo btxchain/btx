@@ -10,18 +10,13 @@
 
 uint256 CBlockHeader::GetHash() const
 {
-    // Canonical block identity.
-    // Pre–Header-PoW commitment (bit clear): 182-byte field set — nNonce is
-    // excluded so historical genesis / goldens stay stable.
-    // Post-commitment (BTX_HEADER_POW_COMMIT_VERSION_BIT set at unified v4):
-    // fold nNonce into the hash so the grind cannot malleate relayed headers
-    // or poison caches without changing block identity.
+    // Canonical block identity: fixed 182-byte field set. nNonce is excluded so
+    // historical genesis / goldens stay stable and so a previously-legal
+    // nVersion bit cannot fork identity pre-activation (withdrawn bit-26
+    // HeaderPoW commitment wire — see block.h).
     HashWriter hw{};
     hw << nVersion << hashPrevBlock << hashMerkleRoot << nTime << nBits << nNonce64
        << matmul_digest << matmul_dim << seed_a << seed_b;
-    if (HasHeaderPoWCommitment()) {
-        hw << nNonce;
-    }
     return hw.GetHash();
 }
 

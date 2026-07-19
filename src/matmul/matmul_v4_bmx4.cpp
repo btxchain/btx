@@ -607,8 +607,10 @@ bool PlaneAllZero(const std::vector<int8_t>& plane)
     return true;
 }
 
-// Remainder-top base-256 digits in [-128,127] (low) / remainder on top.
-// Total for L limbs under |top|<=128: kCombine{Two,Three}LimbBase256MaxAbs.
+// Remainder-top base-256 digits: low digits in [-128,127], top remainder also
+// in [-128,127] so every plane stores losslessly in int8_t. Gated by
+// kCombine{Two,Three}LimbBase256MaxAbs (top never +128: that value is not
+// representable in int8_t — e.g. 32640 requires three limbs).
 void DecomposeBase256Planes(const std::vector<int32_t>& M, uint32_t limbs,
                             std::vector<int8_t>* planes)
 {
@@ -621,7 +623,9 @@ void DecomposeBase256Planes(const std::vector<int32_t>& M, uint32_t limbs,
             planes[l][idx] = static_cast<int8_t>(d);
             x = (x - d) / kBase256;
         }
-        assert(x >= -kBase256Half && x <= kBase256Half);
+        // Top must fit int8_t: [-128, 127]. Cap is kBase256Half - 1 (=127);
+        // +128 is excluded by kCombine{Two,Three}LimbBase256MaxAbs.
+        assert(x >= -kBase256Half && x <= kBase256Half - 1);
         planes[limbs - 1][idx] = static_cast<int8_t>(x);
     }
 }

@@ -78,13 +78,10 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // with the MatMul upgrade disabled too.)
     assert(consensus.nMaxBlockSerializedSize <= MAX_BLOCK_SERIALIZED_SIZE);
 
-    // Audit F1 / v4.4 §4: HeaderPoW grinds nNonce. Wire + GetHash commit to
-    // nNonce via CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT (self-describing;
-    // always compiled in). The deprecated BTX_ENABLE_HEADER_NONCE_ON_WIRE cmake
-    // flag must not gate consensus — both builds speak the same protocol.
-    // Enabling the discount without the versioned format path would still be a
-    // reject-all at v4 (ContextualCheck requires the bit); the format path is
-    // unconditional in this binary, so only the discount-range assert remains.
+    // Audit F1 / v4.4 §4: HeaderPoW grind field is nNonce, but the bit-26
+    // self-describing 182↔186 wire was WITHDRAWN (pre-activation peer split).
+    // Wire stays 182; enabling nMatMulHeaderPoWDiscountBits on public nets is a
+    // hard NO-GO until a height-contextual wire design lands.
 
     // Audit H2: the header-PoW discount is valid ONLY in 0..255 (or the
     // UINT32_MAX "disabled" sentinel). A value in [256, UINT32_MAX-1] would push

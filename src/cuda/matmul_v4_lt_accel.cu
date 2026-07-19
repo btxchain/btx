@@ -191,8 +191,9 @@ __device__ __forceinline__ int8_t DeviceExtractDequant(int32_t raw, uint32_t i, 
             if (!accepted) continue;
             const uint64_t scale_stream =
                 DeviceMatExpandPrfLE64(key, raw, i, j, remix, kLaneScale);
-            return static_cast<int8_t>(static_cast<int32_t>(mu) <<
-                                      static_cast<uint8_t>(scale_stream & 0x3));
+            // Exact mul — never signed left-shift (negative mu << e is UB).
+            const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
+            return static_cast<int8_t>(static_cast<int32_t>(mu) * (int32_t{1} << e));
         }
         ++remix;
     }
