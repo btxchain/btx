@@ -5,6 +5,7 @@
 #include <hip/matmul_v4_lt_accel.h>
 
 #include <arith_uint256.h>
+#include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
@@ -81,6 +82,9 @@ __global__ void DeviceGemmS32S8Tiled(const int32_t* __restrict__ A,
                                   uint32_t rows, uint32_t k, uint32_t cols,
                                   std::vector<int32_t>& out)
 {
+    if (TryLaunchLtMfmaGemmS8S8(left, right, rows, k, cols, out)) {
+        return true;
+    }
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
     const size_t lhs_bytes = static_cast<size_t>(rows) * k * sizeof(int8_t);
     const size_t rhs_bytes = static_cast<size_t>(k) * cols * sizeof(int8_t);
@@ -108,6 +112,9 @@ __global__ void DeviceGemmS32S8Tiled(const int32_t* __restrict__ A,
                                    uint32_t rows, uint32_t k, uint32_t cols,
                                    std::vector<int32_t>& out)
 {
+    if (TryLaunchLtMfmaGemmS32S8(left, right, rows, k, cols, out)) {
+        return true;
+    }
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
     const size_t lhs_bytes = static_cast<size_t>(rows) * k * sizeof(int32_t);
     const size_t rhs_bytes = static_cast<size_t>(k) * cols * sizeof(int8_t);

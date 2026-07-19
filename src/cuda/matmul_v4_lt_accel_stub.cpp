@@ -11,10 +11,11 @@
 class CBlockHeader;
 
 // No-CUDA build: the MatMul v4.4 ENC-DR-LT ("MatExpand") backend is
-// unavailable, so every entry point declines and the caller uses the CPU/
-// host-exact reference (matmul::v4::lt::ComputeDigestBMX4CLT /
-// matmul::v4::lt::WindowSketchMinerLT). Keeps the tree building without a
-// CUDA toolkit when BTX_ENABLE_CUDA_EXPERIMENTAL is OFF.
+// unavailable, so every entry point declines. Callers fall back to the
+// host ExactGemm / WindowSketchMinerLT fail-closed path
+// (matmul::v4::lt::ComputeDigestBMX4CLT) — that host path is the safety net,
+// not a complete device accelerator. Keeps the tree building without a CUDA
+// toolkit when BTX_ENABLE_CUDA_EXPERIMENTAL is OFF.
 
 namespace matmul_v4::cuda {
 

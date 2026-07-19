@@ -12,9 +12,8 @@ class CBlockHeader;
 
 // Stub compiled when BTX_ENABLE_HIP is OFF (no ROCm toolchain). Keeps the
 // matmul_v4::hip LT symbols present so a caller can link unconditionally;
-// the backend simply reports itself unavailable and the caller uses the
-// CPU/host-exact reference (matmul::v4::lt::ComputeDigestBMX4CLT /
-// matmul::v4::lt::WindowSketchMinerLT).
+// the backend declines and callers use the host ExactGemm /
+// WindowSketchMinerLT fail-closed path (not a complete device accelerator).
 
 namespace matmul_v4::hip {
 

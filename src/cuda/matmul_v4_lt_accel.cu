@@ -6,6 +6,7 @@
 
 #include <arith_uint256.h>
 #include <cuda/cuda_context.h>
+#include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
@@ -124,6 +125,9 @@ bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& 
                     uint32_t rows, uint32_t k, uint32_t cols,
                     std::vector<int32_t>& out)
 {
+    if (TryLaunchLtImmaGemmS8S8(left, right, rows, k, cols, out)) {
+        return true;
+    }
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
     const size_t lhs_bytes = static_cast<size_t>(rows) * k * sizeof(int8_t);
     const size_t rhs_bytes = static_cast<size_t>(k) * cols * sizeof(int8_t);
@@ -150,6 +154,9 @@ bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>
                      uint32_t rows, uint32_t k, uint32_t cols,
                      std::vector<int32_t>& out)
 {
+    if (TryLaunchLtImmaGemmS32S8(left, right, rows, k, cols, out)) {
+        return true;
+    }
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
     const size_t lhs_bytes = static_cast<size_t>(rows) * k * sizeof(int32_t);
     const size_t rhs_bytes = static_cast<size_t>(k) * cols * sizeof(int8_t);

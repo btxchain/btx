@@ -366,12 +366,12 @@ bool TryDeviceDigestsBMX4CLT(Kind backend, const std::vector<CBlockHeader>& head
         digests_out[i] = results[i].digest;
         uint256 d;
         std::vector<unsigned char> payload;
-        // Device digests are bit-exact by construction (e.g. the CUDA backend
-        // runs MatExpand's Y=G*W / B32=Y*H GEMMs on-device but derives every
-        // other stage from shared host code). This digest-only entry never
-        // returns a device sketch payload, so recompute the canonical host
-        // payload for the winner and cross-check it against the device digest
-        // before handing VerifySketchBMX4CLT a sketch.
+        // Device digests are bit-exact by construction (CUDA/HIP/Metal LT
+        // backends self-test against ComputeDigestBMX4CLT; host ExactGemm is
+        // fail-closed fallback only). This digest-only entry never returns a
+        // device sketch payload, so recompute the canonical host payload for
+        // the winner and cross-check it against the device digest before
+        // handing VerifySketchBMX4CLT a sketch.
         if (!matmul::v4::lt::ComputeDigestBMX4CLT(headers[i], n, d, payload) ||
             d != results[i].digest) {
             digests_out.clear();

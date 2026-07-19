@@ -11,9 +11,9 @@
 class CBlockHeader;
 
 // Non-Apple / non-Metal build: the MatMul v4.4 ENC-DR-LT ("MatExpand") Metal
-// backend is unavailable, so every entry point declines and the caller uses
-// the CPU/host-exact reference (matmul::v4::lt::ComputeDigestBMX4CLT /
-// matmul::v4::lt::WindowSketchMinerLT).
+// backend is unavailable, so every entry point declines. Callers use the
+// host ExactGemm / WindowSketchMinerLT fail-closed path — safety net, not a
+// complete device accelerator.
 
 namespace matmul_v4::metal {
 

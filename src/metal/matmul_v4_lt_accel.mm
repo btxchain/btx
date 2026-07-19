@@ -4,12 +4,16 @@
 //
 // Apple Metal host glue for MatMul v4.4 ENC-DR-LT (MatExpand).
 // Exact int8×int8→int32 and int32×int8→int32 GEMM compute kernels (MSL),
-// self-tested against ExactGemm*, then injected via ExactGemmBackend into
-// WindowSketchMinerLT so MatExpand's dense stages run on device.
+// self-tested against ExactGemm*, with persistent MTLBuffer scratch reuse
+// across launches. Injected via ExactGemmBackend into WindowSketchMinerLT
+// (fail-closed host ExactGemm when Metal declines). Fuller
+// MatExpand→project→combine device residency lives on the CUDA/HIP LT
+// backends; this TU keeps Metal's GEMM offload + buffer reuse honest.
 
 #include <metal/matmul_v4_lt_accel.h>
 
 #include <arith_uint256.h>
+#include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_lt.h>
 #include <primitives/block.h>
@@ -75,7 +79,28 @@ struct MetalGemmContext {
     id<MTLCommandQueue> queue{nil};
     id<MTLComputePipelineState> s8s8{nil};
     id<MTLComputePipelineState> s32s8{nil};
+    // Cross-call persistent scratch (grow-only) — avoids per-nonce buffer alloc.
+    id<MTLBuffer> scratchA{nil};
+    id<MTLBuffer> scratchB{nil};
+    id<MTLBuffer> scratchD{nil};
+    size_t scratchA_bytes{0};
+    size_t scratchB_bytes{0};
+    size_t scratchD_bytes{0};
     bool ready{false};
+
+    [[nodiscard]] bool EnsureScratch(size_t a_bytes, size_t b_bytes, size_t d_bytes)
+    {
+        auto grow = [&](id<MTLBuffer>& buf, size_t& have, size_t need) -> bool {
+            if (need <= have && buf != nil) return true;
+            buf = [device newBufferWithLength:need options:MTLResourceStorageModeShared];
+            if (buf == nil) { have = 0; return false; }
+            have = need;
+            return true;
+        };
+        return grow(scratchA, scratchA_bytes, a_bytes) &&
+               grow(scratchB, scratchB_bytes, b_bytes) &&
+               grow(scratchD, scratchD_bytes, d_bytes);
+    }
 };
 
 MetalGemmContext& Ctx()
@@ -105,6 +130,9 @@ MetalGemmContext& Ctx()
 bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
                     uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
 {
+    if (TryLaunchLtTensorOpsGemmS8S8(left, right, rows, k, cols, out)) {
+        return true;
+    }
     auto& ctx = Ctx();
     if (!ctx.ready) return false;
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
@@ -113,10 +141,9 @@ bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& 
     const size_t rhs_bytes = size_t(k) * cols * sizeof(int8_t);
     const size_t out_bytes = size_t(rows) * cols * sizeof(int32_t);
 
-    id<MTLBuffer> bA = [ctx.device newBufferWithBytes:left.data() length:lhs_bytes options:MTLResourceStorageModeShared];
-    id<MTLBuffer> bB = [ctx.device newBufferWithBytes:right.data() length:rhs_bytes options:MTLResourceStorageModeShared];
-    id<MTLBuffer> bD = [ctx.device newBufferWithLength:out_bytes options:MTLResourceStorageModeShared];
-    if (bA == nil || bB == nil || bD == nil) return false;
+    if (!ctx.EnsureScratch(lhs_bytes, rhs_bytes, out_bytes)) return false;
+    std::memcpy([ctx.scratchA contents], left.data(), lhs_bytes);
+    std::memcpy([ctx.scratchB contents], right.data(), rhs_bytes);
 
     int M = int(rows), N = int(cols), K = int(k);
     id<MTLBuffer> bM = [ctx.device newBufferWithBytes:&M length:sizeof(M) options:MTLResourceStorageModeShared];
@@ -126,9 +153,9 @@ bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& 
     id<MTLCommandBuffer> cmd = [ctx.queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
     [enc setComputePipelineState:ctx.s8s8];
-    [enc setBuffer:bA offset:0 atIndex:0];
-    [enc setBuffer:bB offset:0 atIndex:1];
-    [enc setBuffer:bD offset:0 atIndex:2];
+    [enc setBuffer:ctx.scratchA offset:0 atIndex:0];
+    [enc setBuffer:ctx.scratchB offset:0 atIndex:1];
+    [enc setBuffer:ctx.scratchD offset:0 atIndex:2];
     [enc setBuffer:bM offset:0 atIndex:3];
     [enc setBuffer:bN offset:0 atIndex:4];
     [enc setBuffer:bK offset:0 atIndex:5];
@@ -142,13 +169,16 @@ bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& 
     if (cmd.status != MTLCommandBufferStatusCompleted) return false;
 
     out.resize(size_t(rows) * cols);
-    std::memcpy(out.data(), [bD contents], out_bytes);
+    std::memcpy(out.data(), [ctx.scratchD contents], out_bytes);
     return true;
 }
 
 bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
                      uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
 {
+    if (TryLaunchLtTensorOpsGemmS32S8(left, right, rows, k, cols, out)) {
+        return true;
+    }
     auto& ctx = Ctx();
     if (!ctx.ready) return false;
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
@@ -157,10 +187,9 @@ bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>
     const size_t rhs_bytes = size_t(k) * cols * sizeof(int8_t);
     const size_t out_bytes = size_t(rows) * cols * sizeof(int32_t);
 
-    id<MTLBuffer> bA = [ctx.device newBufferWithBytes:left.data() length:lhs_bytes options:MTLResourceStorageModeShared];
-    id<MTLBuffer> bB = [ctx.device newBufferWithBytes:right.data() length:rhs_bytes options:MTLResourceStorageModeShared];
-    id<MTLBuffer> bD = [ctx.device newBufferWithLength:out_bytes options:MTLResourceStorageModeShared];
-    if (bA == nil || bB == nil || bD == nil) return false;
+    if (!ctx.EnsureScratch(lhs_bytes, rhs_bytes, out_bytes)) return false;
+    std::memcpy([ctx.scratchA contents], left.data(), lhs_bytes);
+    std::memcpy([ctx.scratchB contents], right.data(), rhs_bytes);
 
     int M = int(rows), N = int(cols), K = int(k);
     id<MTLBuffer> bM = [ctx.device newBufferWithBytes:&M length:sizeof(M) options:MTLResourceStorageModeShared];
@@ -170,9 +199,9 @@ bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>
     id<MTLCommandBuffer> cmd = [ctx.queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
     [enc setComputePipelineState:ctx.s32s8];
-    [enc setBuffer:bA offset:0 atIndex:0];
-    [enc setBuffer:bB offset:0 atIndex:1];
-    [enc setBuffer:bD offset:0 atIndex:2];
+    [enc setBuffer:ctx.scratchA offset:0 atIndex:0];
+    [enc setBuffer:ctx.scratchB offset:0 atIndex:1];
+    [enc setBuffer:ctx.scratchD offset:0 atIndex:2];
     [enc setBuffer:bM offset:0 atIndex:3];
     [enc setBuffer:bN offset:0 atIndex:4];
     [enc setBuffer:bK offset:0 atIndex:5];
@@ -186,7 +215,7 @@ bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>
     if (cmd.status != MTLCommandBufferStatusCompleted) return false;
 
     out.resize(size_t(rows) * cols);
-    std::memcpy(out.data(), [bD contents], out_bytes);
+    std::memcpy(out.data(), [ctx.scratchD contents], out_bytes);
     return true;
 }
 

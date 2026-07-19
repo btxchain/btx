@@ -514,7 +514,9 @@ WindowSketchMinerLT::WindowSketchMinerLT(const CBlockHeader& header, uint32_t n,
     // Template-scoped derivations (invariant I1'): Ahat (MatExpand with the
     // template panel), U, V, and the left factor P = U*Ahat are paid ONCE per
     // template. The per-nonce marginal work is {MatExpand Bhat, Bhat*V, combine,
-    // digest}. Device backends accelerate only the MatExpand GEMMs.
+    // digest}. Injectable ExactGemmBackend may accelerate MatExpand GEMMs here;
+    // CUDA/HIP/Metal accel TUs prefer a fuller device-resident loop and use
+    // this miner only as the fail-closed ExactGemm fallback.
     const auto [seed_u, seed_v] = DeriveProjectorSeedsBMX4CLT(m_template);
     m_A = ExpandOperandAMatExpand(m_template, n, m_backend);
     m_U = bx::ExpandProjectorBMX4C(seed_u, m_m, n);
