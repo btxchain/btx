@@ -446,9 +446,10 @@ if(APPLE AND BTX_ENABLE_METAL)
     # build suppressed the weak stub while providing no strong impl (link error /
     # silently unserved profile). Wire it in alongside its kernels metallib.
     metal/matmul_v4_bmx4_accel.mm
-    # MatMul v4.4 ENC-DR-LT ("MatExpand") Metal entry point: see
-    # matmul_v4_lt_accel.h/.mm for why no Metal kernels are wired yet (the
-    # host-exact WindowSketchMinerLT pipeline runs behind this entry point).
+    # MatMul v4.4 ENC-DR-LT ("MatExpand") Metal backend: exact integer MSL
+    # GEMM kernels (int8xint8->int32 and int32xint8->int32) self-tested against
+    # matmul::v4::lt::ExactGemm* and injected into WindowSketchMinerLT via
+    # ExactGemmBackend (see matmul_v4_lt_accel.h/.mm).
     metal/matmul_v4_lt_accel.mm
     metal/nonce_accel.mm
     metal/oracle_accel.mm
@@ -613,8 +614,8 @@ if(BTX_ENABLE_HIP)
     # linked and the profile fell back to the (weak) stub on ROCm.
     hip/matmul_v4_bmx4_accel.hip
     # MatMul v4.4 ENC-DR-LT ("MatExpand") HIP backend: self-tested device GEMM
-    # kernels + the host-exact WindowSketchMinerLT digest pipeline (see
-    # matmul_v4_lt_accel.h/.hip for the full contract).
+    # kernels (int8xint8->int32 and int32xint8->int32) injected into
+    # WindowSketchMinerLT via ExactGemmBackend (see matmul_v4_lt_accel.h/.hip).
     hip/matmul_v4_lt_accel.hip
   )
   set_source_files_properties(

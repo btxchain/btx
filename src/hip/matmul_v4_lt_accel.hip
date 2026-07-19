@@ -19,13 +19,12 @@
 #include <vector>
 
 // ===========================================================================
-// AMD ROCm/HIP backend for MatMul v4.4 ENC-DR-LT ("MatExpand") mining.
-//
-// See cuda/matmul_v4_lt_accel.cu's file header for the full reasoning; this
-// TU mirrors it exactly on HIP (same self-tested GEMM kernels, same
-// host-exact WindowSketchMinerLT digest computation, same "device buffers
-// reserved for bring-up" posture already established by
-// hip/matmul_v4_bmx4_accel.hip's own tier-(a)/tier-(b) gating).
+// AMD ROCm/HIP backend for MatMul v4.4 ENC-DR-LT (MatExpand). Digests are
+// bit-identical to matmul::v4::lt::ComputeDigestBMX4CLT. When an AMD GPU is
+// present and the one-time ExactGemm self-test passes, MatExpand's two dense
+// GEMMs (G*W and (G*W)*H) run on device via an ExactGemmBackend injected into
+// WindowSketchMinerLT; otherwise the same miner runs on CPU ExactGemm*
+// (backend_status=Fallback). Linker stub when BTX_ENABLE_HIP is off.
 // ===========================================================================
 
 namespace matmul_v4::hip {
@@ -42,9 +41,10 @@ struct DeviceBuffer {
     }
 };
 
-// Portable scalar-integer GEMM kernels (exact, not latency-tuned -- see the
-// CUDA sibling's comment on why a plain ALU kernel is the right choice for a
-// bit-exactness-gated bring-up primitive). One thread per output element.
+// Portable scalar-integer GEMM kernels: exact INT8xINT8->INT32 and
+// INT32xINT8->INT32 tiled GEMMs (true integer accumulation, no float), one
+// thread per output element. Self-tested bit-for-bit against ExactGemm*
+// before the backend is ever advertised as available.
 __global__ void DeviceGemmS8S8Tiled(const int8_t* __restrict__ A,
                                     const int8_t* __restrict__ B,
                                     int32_t* __restrict__ D,
@@ -181,26 +181,26 @@ bool IsMatMulLTHipAvailable()
 
 namespace {
 
+// Per-thread flag: set true whenever a device GEMM launch fails and MatExpand
+// silently falls back to CPU ExactGemm. Consumed to distinguish Ok vs Fallback.
+thread_local bool g_lt_device_gemm_failed = false;
+
 [[nodiscard]] bool HipGemmS8S8Fn(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
                                  uint32_t rows, uint32_t inner, uint32_t cols,
                                  std::vector<int32_t>& out)
 {
-    return LaunchGemmS8S8(L, R, rows, inner, cols, out);
+    if (LaunchGemmS8S8(L, R, rows, inner, cols, out)) return true;
+    g_lt_device_gemm_failed = true;
+    return false;
 }
 
 [[nodiscard]] bool HipGemmS32S8Fn(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
                                   uint32_t rows, uint32_t inner, uint32_t cols,
                                   std::vector<int32_t>& out)
 {
-    return LaunchGemmS32S8(L, R, rows, inner, cols, out);
-}
-
-[[nodiscard]] matmul::v4::lt::ExactGemmBackend MakeHipExactGemmBackend()
-{
-    matmul::v4::lt::ExactGemmBackend backend;
-    backend.gemm_s8s8 = &HipGemmS8S8Fn;
-    backend.gemm_s32s8 = &HipGemmS32S8Fn;
-    return backend;
+    if (LaunchGemmS32S8(L, R, rows, inner, cols, out)) return true;
+    g_lt_device_gemm_failed = true;
+    return false;
 }
 
 } // namespace
@@ -219,9 +219,15 @@ bool ComputeDigestsOnlyLTHip(const CBlockHeader& tmpl, uint32_t n,
         return false;
     }
 
-    const bool device_ok = IsMatMulLTHipAvailable();
-    matmul::v4::lt::WindowSketchMinerLT miner(
-        tmpl, n, device_ok ? MakeHipExactGemmBackend() : matmul::v4::lt::ExactGemmBackend{});
+    const bool device = IsMatMulLTHipAvailable();
+    matmul::v4::lt::ExactGemmBackend backend;
+    if (device) {
+        backend.gemm_s8s8 = &HipGemmS8S8Fn;
+        backend.gemm_s32s8 = &HipGemmS32S8Fn;
+    }
+    g_lt_device_gemm_failed = false;
+
+    matmul::v4::lt::WindowSketchMinerLT miner(tmpl, n, backend);
     if (!miner.Valid()) {
         return false;
     }
@@ -232,8 +238,11 @@ bool ComputeDigestsOnlyLTHip(const CBlockHeader& tmpl, uint32_t n,
     if (!miner.Mine(nonce_vec, kNoTarget, results, nullptr)) {
         return false;
     }
-    const auto status = device_ok ? matmul::v4::bmx4::DigestOnlyBackendStatus::Ok
-                                  : matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
+    const bool device_served =
+        device && miner.UsingDeviceGemms() && !g_lt_device_gemm_failed;
+    const auto status = device_served
+                            ? matmul::v4::bmx4::DigestOnlyBackendStatus::Ok
+                            : matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
     for (auto& r : results) {
         r.target_match = false;
         r.backend_status = status;

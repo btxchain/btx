@@ -20,6 +20,7 @@
 //     accumulator boundary vectors (exact-2^t limb-pair pins, odd-step 2^14
 //     crossings, E8M0 scale-exactness) so a rounding device fails loudly.
 
+#include <cuda/matmul_v4_bmx4_cutlass_mxfp4.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
@@ -313,6 +314,73 @@ BOOST_AUTO_TEST_CASE(scale_partitioned_projection_matches_dense)
     const auto Q_part = bx::ComputeProjectedRightScalePartitionedBMX4C(mu_b, scale_b, V, n, m);
     BOOST_CHECK(P_part == P_dense);
     BOOST_CHECK(Q_part == Q_dense);
+}
+
+BOOST_AUTO_TEST_CASE(grouped_mxfp4_header_path_matches_reference)
+{
+    // The portable exact grouped-MXFP4 projection lane (the "used when CUTLASS
+    // is unavailable" datapath in cuda/matmul_v4_bmx4_cutlass_mxfp4.h) must be
+    // byte-identical to both the scale-partitioned CPU reference and the dense
+    // dequantized GEMM. This is the software fallback for the hardware-gated
+    // CUTLASS grouped kernel.
+    namespace mxf4 = matmul_v4::cuda::cutlass_mxfp4;
+
+    BOOST_CHECK(mxf4::IsGroupedMxfp4Available()); // portable exact path always there
+
+    const uint32_t n = kTestDim;
+    uint32_t m = 0;
+    BOOST_REQUIRE(bx::ValidateDimsBMX4C(n, kTileB, m));
+    const auto header = MakeV4Header(11, n);
+    const uint256 seed_a = bx::DeriveOperandSeedBMX4C(header, Operand::A);
+    const uint256 seed_b = bx::DeriveOperandSeedBMX4C(header, Operand::B);
+    const auto [seed_u, seed_v] = bx::DeriveProjectorSeedsBMX4C(header);
+
+    std::vector<int8_t> mu_a(static_cast<size_t>(n) * n);
+    bx::ExpandMantissaStream(seed_a, mu_a.size(), mu_a.data());
+    std::vector<uint8_t> scale_a(static_cast<size_t>(n) * (n / bx::kBlockLen));
+    bx::ExpandScaleStream(seed_a, scale_a.size(), scale_a.data());
+    std::vector<int8_t> mu_b(static_cast<size_t>(n) * n);
+    bx::ExpandMantissaStream(seed_b, mu_b.size(), mu_b.data());
+    std::vector<uint8_t> scale_b(static_cast<size_t>(n / bx::kBlockLen) * n);
+    bx::ExpandScaleStream(seed_b, scale_b.size(), scale_b.data());
+
+    const auto U = bx::ExpandProjectorBMX4C(seed_u, m, n);
+    const auto V = bx::ExpandProjectorBMX4C(seed_v, n, m);
+    const auto Ahat = bx::ExpandOperandA(seed_a, n);
+    const auto Bhat = bx::ExpandOperandB(seed_b, n);
+
+    const auto P_dense = ComputeProjectedLeft(U, Ahat, n, m);
+    const auto Q_dense = ComputeProjectedRight(Bhat, V, n, m);
+
+    std::vector<int32_t> P_grouped;
+    std::vector<int32_t> Q_grouped;
+    mxf4::GroupedMxfp4Problem shape_p{};
+    mxf4::GroupedMxfp4Problem shape_q{};
+    std::string err;
+
+    BOOST_REQUIRE(mxf4::LaunchGroupedMxfp4Projection(
+        mxf4::GroupedMxfp4Orientation::Left, U.data(), mu_a.data(), scale_a.data(),
+        n, m, P_grouped, &shape_p, err));
+    BOOST_REQUIRE(mxf4::LaunchGroupedMxfp4Projection(
+        mxf4::GroupedMxfp4Orientation::Right, V.data(), mu_b.data(), scale_b.data(),
+        n, m, Q_grouped, &shape_q, err));
+
+    BOOST_CHECK(P_grouped == P_dense);
+    BOOST_CHECK(Q_grouped == Q_dense);
+
+    // Total K across the four exponent buckets is n per block, i.e. n*(n/32)
+    // over the whole operand — NOT 4n per block (the tensor-intensity win).
+    const uint64_t expect_total = static_cast<uint64_t>(n) * (n / bx::kBlockLen);
+    BOOST_CHECK_EQUAL(shape_p.K_total, expect_total);
+    BOOST_CHECK_EQUAL(shape_q.K_total, expect_total);
+    BOOST_CHECK_EQUAL(shape_p.K_e[0] + shape_p.K_e[1] + shape_p.K_e[2] + shape_p.K_e[3],
+                      expect_total);
+
+    // Invalid dimensions fail closed (not a silent no-op).
+    std::vector<int32_t> junk;
+    BOOST_CHECK(!mxf4::LaunchGroupedMxfp4Projection(
+        mxf4::GroupedMxfp4Orientation::Left, U.data(), mu_a.data(), scale_a.data(),
+        /*n=*/n + 1, m, junk, nullptr, err));
 }
 
 BOOST_AUTO_TEST_CASE(exact_accel_planner_selects_documented_lanes)

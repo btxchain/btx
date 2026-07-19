@@ -419,4 +419,46 @@ BOOST_AUTO_TEST_CASE(window_miner_backend_matches_reference)
     }
 }
 
+BOOST_AUTO_TEST_CASE(phase_b_seal_round_trip_and_auth)
+{
+    // Phase B seal helpers: ε=0 seal matches Freivalds seal-auth; wrong merkle
+    // / mutated payload fails commitment match. Slot seeds are identity (copy
+    // template seeds) so the test does not need chain MTP.
+    auto anchor = MakeLTHeader(7, kTestDim);
+    const auto seed_fn = [](CBlockHeader& /*h*/) -> bool { return true; };
+    constexpr uint32_t Q = 64; // use full consensus Q* for correctness; slowish at n=64
+
+    uint256 seal;
+    std::vector<lt::WindowSlot> slots;
+    std::vector<std::vector<unsigned char>> payloads;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, Q, seed_fn, seal, &slots, &payloads));
+    BOOST_CHECK(!seal.IsNull());
+    BOOST_REQUIRE_EQUAL(slots.size(), Q);
+    BOOST_REQUIRE_EQUAL(payloads.size(), Q);
+
+    // Slot nonces are deterministic from sigma.
+    const uint256 sigma = matmul::v4::DeriveSigma(anchor);
+    for (uint32_t j = 0; j < Q; ++j) {
+        BOOST_CHECK_EQUAL(slots[j].nonce, lt::DeriveWindowSlotNonce(sigma, j));
+    }
+
+    uint256 seal_fv;
+    BOOST_REQUIRE(lt::VerifySealWindowFreivalds(anchor, kTestDim, Q, /*rounds=*/8, seed_fn,
+                                                payloads, seal_fv));
+    BOOST_CHECK(seal_fv == seal);
+
+    anchor.matmul_digest = seal;
+    BOOST_CHECK(lt::SealWindowProofMatchesCommitment(anchor, kTestDim, Q, seed_fn, payloads));
+
+    // Mutate one payload byte → commitment mismatch.
+    auto bad = payloads;
+    BOOST_REQUIRE(!bad[0].empty());
+    bad[0][0] ^= 0x01;
+    BOOST_CHECK(!lt::SealWindowProofMatchesCommitment(anchor, kTestDim, Q, seed_fn, bad));
+
+    // Wrong Q* rejected.
+    uint256 junk;
+    BOOST_CHECK(!lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/32, seed_fn, junk));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

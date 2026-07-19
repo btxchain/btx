@@ -20,17 +20,20 @@ class CBlockHeader;
 // metal/matmul_v4_bmx4_accel.{h,mm}, retargeted to the LT profile (deep-m
 // tile b = kTileBLT = 2, dense MatExpand operands instead of a SHA XOF).
 //
-// Metal kernels are OPTIONAL for this backend's first release (the task
-// brief explicitly allows "a stub that calls the CPU LT reference" here):
-// this header's single entry point runs the host-exact, template-amortized
-// matmul::v4::lt::WindowSketchMinerLT pipeline on Apple builds too, so the
-// digest is bit-identical to matmul::v4::lt::ComputeDigestBMX4CLT by
-// construction with no GPU risk surface at all. A future revision can splice
-// Metal compute (portable integer-ALU kernels, or Metal 4
-// mpp::tensor_ops::matmul2d on M5-class GPUs, mirroring
-// metal/matmul_v4_bmx4_accel.mm) into the window miner's P/Q stages once that
-// class exposes an injectable device backend; see matmul_v4_lt_accel.mm's
-// file header for the same reasoning cuda/matmul_v4_lt_accel.cu documents.
+// This backend ships exact integer Metal (MSL) compute kernels for
+// MatExpand's two dense stages -- int8xint8->int32 (Y = G*W) and
+// int32xint8->int32 (B32 = Y*H) -- reproducing matmul::v4::lt::ExactGemmS8S8 /
+// ExactGemmS32S8 bit-for-bit with true integer accumulation (no float). The
+// kernels are self-tested against those CPU references on first use;
+// IsMatMulLTMetalAvailable() returns true only once that self-test passes.
+// When available, the kernels are injected as a matmul::v4::lt::ExactGemmBackend
+// into matmul::v4::lt::WindowSketchMinerLT, so MatExpand's dense GEMM workload
+// runs on device while every downstream projection / combine / serialize /
+// digest step stays on the host-exact consensus path -- the returned digest is
+// therefore bit-identical to matmul::v4::lt::ComputeDigestBMX4CLT by
+// construction. If the device or self-test is unavailable, the entry point
+// falls back to the pure-CPU reference pipeline (still bit-exact, tagged
+// DigestOnlyBackendStatus::Fallback).
 //
 // The non-Apple / non-Metal build links matmul_v4_lt_accel_stub.cpp, where
 // the entry point reports unavailable, so callers always fall back to the
@@ -40,10 +43,12 @@ class CBlockHeader;
 
 namespace matmul_v4::metal {
 
-/** True iff this build was compiled with Metal (BTX_ENABLE_METAL) and a
- *  Metal device is present. Always returns a truthful availability signal;
- *  ComputeDigestsOnlyLTMetal below is bit-exact regardless (it always runs
- *  the host-exact reference pipeline -- see the file header). */
+/** True iff this build was compiled with Metal (BTX_ENABLE_METAL), a Metal
+ *  device is present, the MatExpand GEMM pipelines built, and the one-time
+ *  bit-exactness self-test against matmul::v4::lt::ExactGemmS8S8 /
+ *  ExactGemmS32S8 passed. ComputeDigestsOnlyLTMetal below is bit-exact
+ *  regardless: when this returns false it falls back to the host-exact
+ *  reference pipeline (see the file header). */
 [[nodiscard]] bool IsMatMulLTMetalAvailable();
 
 /** Digest-only ENC-DR-LT mining entry, matching the CUDA/HIP LT backends'

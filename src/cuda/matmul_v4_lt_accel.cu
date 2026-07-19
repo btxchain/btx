@@ -146,9 +146,9 @@ bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& 
     return cudaMemcpy(out.data(), dD.ptr, out_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
 }
 
-[[nodiscard]] bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
-                                   uint32_t rows, uint32_t k, uint32_t cols,
-                                   std::vector<int32_t>& out)
+bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
+                     uint32_t rows, uint32_t k, uint32_t cols,
+                     std::vector<int32_t>& out)
 {
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
     const size_t lhs_bytes = static_cast<size_t>(rows) * k * sizeof(int32_t);
@@ -170,6 +170,33 @@ bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& 
 
     out.assign(static_cast<size_t>(rows) * cols, 0);
     return cudaMemcpy(out.data(), dD.ptr, out_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+}
+
+namespace {
+
+// Per-thread flag: set true whenever a device GEMM launch fails and the
+// MatExpand path silently falls back to the CPU ExactGemm. ComputeDigestsOnly
+// LTCuda consumes it to distinguish an Ok (device-served) window from a
+// Fallback (CPU-served) one. Reset at the start of every entry-point call.
+thread_local bool g_lt_device_gemm_failed = false;
+
+// matmul::v4::lt::ExactGemmBackend adapters: run the device GEMM and, on any
+// CUDA fault, record the fallback and return false so MatExpandCore uses the
+// CPU ExactGemm for that stage (keeping the produced digest bit-exact).
+bool BackendGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                     uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
+{
+    if (LaunchGemmS8S8(L, R, rows, inner, cols, out)) return true;
+    g_lt_device_gemm_failed = true;
+    return false;
+}
+
+bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
+                      uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
+{
+    if (LaunchGemmS32S8(L, R, rows, inner, cols, out)) return true;
+    g_lt_device_gemm_failed = true;
+    return false;
 }
 
 // Deterministic small fixture; independent of any consensus seed so the
@@ -220,32 +247,6 @@ bool IsMatMulLTCudaAvailable()
     return SelfTestGemmKernelsOnce();
 }
 
-namespace {
-
-[[nodiscard]] bool CudaGemmS8S8Fn(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
-                                  uint32_t rows, uint32_t inner, uint32_t cols,
-                                  std::vector<int32_t>& out)
-{
-    return LaunchGemmS8S8(L, R, rows, inner, cols, out);
-}
-
-[[nodiscard]] bool CudaGemmS32S8Fn(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
-                                   uint32_t rows, uint32_t inner, uint32_t cols,
-                                   std::vector<int32_t>& out)
-{
-    return LaunchGemmS32S8(L, R, rows, inner, cols, out);
-}
-
-[[nodiscard]] matmul::v4::lt::ExactGemmBackend MakeCudaExactGemmBackend()
-{
-    matmul::v4::lt::ExactGemmBackend backend;
-    backend.gemm_s8s8 = &CudaGemmS8S8Fn;
-    backend.gemm_s32s8 = &CudaGemmS32S8Fn;
-    return backend;
-}
-
-} // namespace
-
 bool ComputeDigestsOnlyLTCuda(const CBlockHeader& tmpl, uint32_t n,
                               const uint64_t* nonces, size_t count,
                               std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
@@ -260,21 +261,49 @@ bool ComputeDigestsOnlyLTCuda(const CBlockHeader& tmpl, uint32_t n,
         return false;
     }
 
-    const bool device_ok = IsMatMulLTCudaAvailable();
-    matmul::v4::lt::WindowSketchMinerLT miner(
-        tmpl, n, device_ok ? MakeCudaExactGemmBackend() : matmul::v4::lt::ExactGemmBackend{});
+    // Template-amortized miner: builds P = U*A once, then per nonce runs
+    // MatExpand-B -> Q -> combine -> digest. When a calibrated CUDA device is
+    // present, install the self-tested device GEMMs as the MatExpand backend so
+    // Y = G*W and B32 = Y*H run on device for operand A (once) AND every
+    // per-nonce operand B; ExpandProjectorBMX4C, ExtractDequantMatExpand, the
+    // projected combine and the digest all stay on shared host code, so every
+    // digest is byte-identical to matmul::v4::lt::ComputeDigestBMX4CLT by
+    // construction (see matmul_v4_lt.h's WindowSketchMinerLT contract).
+    const bool device = IsMatMulLTCudaAvailable();
+    matmul::v4::lt::ExactGemmBackend backend;
+    if (device) {
+        backend.gemm_s8s8 = &BackendGemmS8S8;
+        backend.gemm_s32s8 = &BackendGemmS32S8;
+    }
+    g_lt_device_gemm_failed = false;
+
+    matmul::v4::lt::WindowSketchMinerLT miner(tmpl, n, backend);
     if (!miner.Valid()) {
         return false;
     }
 
     const std::vector<uint64_t> nonce_vec(nonces, nonces + count);
+    // No target is supplied by this entry point's signature -- pass an
+    // all-ones sentinel (matches the accel_v4.h convention: "~uint256{} to
+    // force verification of the entire window") purely so the miner never
+    // special-cases an all-zero target; target_match is cleared below since it
+    // is meaningless without a caller-supplied target (DigestOnlyResultLT is
+    // miner-local telemetry, never consensus-visible).
     const uint256 kNoTarget = ArithToUint256(~arith_uint256{});
     std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
     if (!miner.Mine(nonce_vec, kNoTarget, results, nullptr)) {
         return false;
     }
-    const auto status = device_ok ? matmul::v4::bmx4::DigestOnlyBackendStatus::Ok
-                                  : matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
+
+    // Ok iff the device served the MatExpand GEMMs end-to-end. A runtime CUDA
+    // fault transparently fell back to the CPU ExactGemm inside MatExpandCore
+    // (still bit-exact) and is honestly reported as Fallback, as is a build /
+    // host with no calibrated device.
+    const bool device_served =
+        device && miner.UsingDeviceGemms() && !g_lt_device_gemm_failed;
+    const auto status = device_served
+                            ? matmul::v4::bmx4::DigestOnlyBackendStatus::Ok
+                            : matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
     for (auto& r : results) {
         r.target_match = false;
         r.backend_status = status;

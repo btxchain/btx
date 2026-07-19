@@ -7,6 +7,10 @@
 #include <cuda/matmul_accel.h>
 #include <metal/matmul_accel.h>
 
+#if defined(BTX_ENABLE_HIP)
+#include <hip/hip_runtime.h>
+#endif
+
 #include <algorithm>
 #include <string>
 #include <string_view>
@@ -110,20 +114,37 @@ Eligibility MetalEligibility()
 Eligibility HipEligibility()
 {
 #if defined(BTX_ENABLE_HIP)
-    // The ROCm/HIP backend must provide a probe reporting the device's gfx
-    // target (hipDeviceProp_t::gcnArchName) and route it through
-    // ClassifyHipDevice(). Until that backend lands, a BTX_ENABLE_HIP build
-    // reports compiled-but-unwired so it can never silently mine.
-    // TODO(v4-hip): const auto probe = btx::hip::ProbeMatMulV4DigestAcceleration();
-    //               if (!probe.available) return {...probe.reason...};
-    //               return ClassifyHipDevice(probe.gcn_arch_name);
-    return Eligibility{
-        .compiled = true,
-        .available = false,
-        .admissible = false,
-        .self_test_required = true,
-        .reason = "hip_probe_not_wired",
-    };
+    // Real device probe: read the gfx target (hipDeviceProp_t::gcnArchName)
+    // and route it through ClassifyHipDevice(). Only CDNA MFMA parts are
+    // admissible (§S.1); a missing or unqueryable device reports unavailable
+    // so a BTX_ENABLE_HIP build can never silently mine on a device without a
+    // qualified exact INT8->INT32 matrix path.
+    int device_count = 0;
+    if (hipGetDeviceCount(&device_count) != hipSuccess || device_count <= 0) {
+        return Eligibility{
+            .compiled = true,
+            .available = false,
+            .admissible = false,
+            .self_test_required = true,
+            .reason = "hip_no_device",
+        };
+    }
+
+    int device = 0;
+    hipDeviceProp_t props{};
+    if (hipGetDevice(&device) != hipSuccess ||
+        hipGetDeviceProperties(&props, device) != hipSuccess) {
+        return Eligibility{
+            .compiled = true,
+            .available = false,
+            .admissible = false,
+            .self_test_required = true,
+            .reason = "hip_device_query_failed",
+        };
+    }
+
+    // §N.3-v determinism self-test still required on top of arch admissibility.
+    return ClassifyHipDevice(props.gcnArchName);
 #else
     return DisabledByBuild();
 #endif

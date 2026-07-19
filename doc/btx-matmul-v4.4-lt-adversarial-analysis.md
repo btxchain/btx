@@ -8,8 +8,8 @@
 | ID | Attack | Disposition |
 |---|---|---|
 | LT-C15 | Freivalds reassociation through linear MatExpand fold (`B̂ = fold(GWH)` affine in panels) | **CLOSED in code** — `ExtractDequantMatExpand` = position-salted Mix + M11 rejection + scale `e∈{0..3}`; not affine in the GEMM accumulator |
-| LT-Q1 | Skinny single-nonce launches under fat `Q*` schedule | **Mitigated (miner)** — `SolveMatMulV4LT` mines `Q*∈{64,128}` windows; **not** consensus-bound seal-as-digest (see Phase B) |
-| LT-Q2 | Window-seal PoW without MTP-threaded sibling seeds | **Deferred (Phase B)** — would break ENC-DR sketch-cache `H(σ‖Chat)==matmul_digest` auth unless redesigned |
+| LT-Q1 | Skinny single-nonce launches under fat `Q*` schedule | **Mitigated** — Phase A miner windows; Phase B seal-as-PoW binds full Q* when `fMatMulLTSealAsPoW` (still inert: needs live DRLT height) |
+| LT-Q2 | Window-seal PoW without MTP-threaded sibling seeds | **Mitigated (Phase B)** — `SlotSeedFn` + `SetDeterministicMatMulSeeds` threads parent MTP into every window slot |
 | LT-A1 | ASERT continuous across MatExpand/deep-m work shift | **CLOSED in code** — `nMatMulDRLTHeight` rescale + re-anchor; ratios default 1/1 until silicon calibration |
 | LT-V1 | Missing `n % 32` gate for `ENC_BMX4C_LT` | **CLOSED** — validation mirrors ENC-BMX4C |
 | LT-P1 | Live DRLT with wrong tile/rank pin | **CLOSED** — construction asserts `b=2`, `m=BMX4C_LT_SKETCH_RANK_M` |
@@ -40,13 +40,15 @@ Tests: `matexpand_extract_range`, `matexpand_not_affine_in_raw`, `matexpand_posi
 - Miner evaluates fat windows; lottery object remains **per-nonce** `H(σ‖Ĉ)` (ENC-DR cache auth intact).
 - Seal helpers (`ComputeWindowMerkleRoot` / `SealWindowCommit`) are available for measurement harnesses.
 
-**Phase B (activation blocker if Rank-1 requires seal-as-PoW):**
+**Phase B (implemented, inert until DRLT height is live AND `fMatMulLTSealAsPoW`):**
 
-1. Redefine `matmul_digest := SealWindowCommit(σ_base, Merkle(slot digests), Q*)`.
-2. Thread parent MTP into EncDr recompute so sibling nonces re-derive V3 seeds.
-3. Redesign sketch-cache authentication for seal digests (slot-0 Chat is not the seal preimage).
-4. Measure tip verify cost at production `n` with `Q*` full recompute; pass GO/NO-GO budget gate.
-5. External C-15-class review of the seal binding + MatExpand surface.
+1. ~~Redefine `matmul_digest := SealWindowCommit(...)`~~ — `ComputeSealDigestBMX4CLT`
+2. ~~Thread parent MTP into sibling seeds~~ — `SlotSeedFn` / solve path
+3. ~~Sketch-cache auth for seal~~ — `SealWindowProofMatchesCommitment` + `VerifySealWindowFreivalds` (no `H(σ‖Chat)==seal` requirement)
+4. Tip verify cost at production `n` with `Q*` — still a silicon GO/NO-GO measurement
+5. External C-15-class review of the seal binding + MatExpand surface — still required before raising height
+
+Default: `fMatMulLTSealAsPoW = false` on all nets; regtest opt-in via `-regtestmatmulltsealaspow`.
 
 ## Silicon / ratification gates (unchanged)
 

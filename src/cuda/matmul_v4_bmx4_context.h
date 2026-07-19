@@ -19,9 +19,19 @@
 // Template-scoped persistent CUDA mining context (exact-accel redesign step 1).
 //
 // Cross-call reuse of host-exact pipeline state (A/U/V/P, Karatsuba planes,
-// adaptive Q, triple-buffer ring). Device buffer handles are reserved for the
-// CUDA bring-up; until then the host PersistentSketchMinerBMX4C is the
-// normative device-resident schedule (XOF → Karatsuba-9 → streaming digest).
+// adaptive Q, triple-buffer ring). This context is NOT the device compute
+// path: the real CUDA device kernels (INT8 IMMA / hand-written + cuBLASLt FP4
+// projection, Karatsuba-9 combine, base-2^6 limb decompose/fold) live in
+// matmul_v4_bmx4_accel.cu::ComputeDigestsBMX4CAccel and run FIRST in the
+// digest-only entry point (ComputeDigestsOnlyBMX4CAccel). This context holds
+// the host PersistentSketchMinerBMX4C used as the cross-call template cache
+// and the fail-closed fallback when the device path declines — the same
+// bit-exact XOF → Karatsuba-9 → streaming-digest schedule, produced by the
+// shared consensus reference routines so every digest is byte-identical.
+//
+// (Remaining silicon-bound optimization: binding CUDA graphs to the device
+// stages for lower per-launch overhead. That is a throughput lever, not a
+// correctness gap — the device kernels above are already the hot path.)
 //
 // Pipeline:
 //   buffer N+1: exact SHA-256 XOF + stable rejection compaction + packing

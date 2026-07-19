@@ -1,6 +1,6 @@
 # MatMul v4.4 — Exact Accelerator Lanes (miner-local)
 
-Status: **implementation in progress on `feat/bmx4c-exact-accel-lanes`**, branched from PR #89 (`claude/matmul-v4-design-spec-af23sj`). Mainnet activation remains **inert** (`INT32_MAX` / `ratification = false`). Floating lanes are **not** separate consensus activations.
+Status: **software-complete on `feat/bmx4c-exact-accel-lanes`** (portable exact MXFP4 + device hot paths; CUTLASS/FP8/AMD-native remain hardware-gated swaps). Branched from PR #89 (`claude/matmul-v4-design-spec-af23sj`). Mainnet activation remains **inert** (`INT32_MAX` / `ratification = false`). Floating lanes are **not** separate consensus activations.
 
 ## Thesis
 
@@ -10,11 +10,11 @@ Consensus sees only canonical integer sketch bytes. The optimal design is **one 
 
 | # | Redesign | Status in tree |
 |---|---|---|
-| 1 | Replace 16-GEMM combine with **Karatsuba-9** + fused M61 epilogue | **Done** |
-| 2 | **Scale-partitioned grouped MXFP4** projection (total K = n, not 4n) | **CPU reference done**; CUTLASS stub inert until silicon |
-| 3 | Entire nonce loop **device-resident** | **Done on host (normative schedule)** — `PersistentSketchMinerBMX4C` triple-buffer (XOF → Karatsuba-9 → streaming digest), portable two-pass XOF, cross-call template reuse via `Bmx4CudaTemplateContext`. CUDA graphs/buffers bind to the same stages on bring-up |
-| 4 | **Stop returning loser payloads** | **Done** — streaming `ComputeSketchDigestFromFq`; no 8 MiB loser alloc |
-| 5 | Future **FP8 five-limb** combine lane | **CPU reference done**; planner selects for `"rubin"` |
+| 1 | Replace 16-GEMM combine with **Karatsuba-9** + fused M61 epilogue | **Done** (CPU + CUDA `Bmx4BuildKaratsubaPlanesKernel` + HIP + Metal) |
+| 2 | **Scale-partitioned grouped MXFP4** projection (total K = n, not 4n) | **Done (exact, software-complete)**: CPU reference + portable exact grouped path (`cuda/matmul_v4_bmx4_cutlass_mxfp4.h`, byte-identical to dense) + CUDA native FP4 tier (hand-written mma / cuBLASLt, M-t24 gated) + INT8 tier. Hardware-gated: CUTLASS tcgen05 grouped tensor kernel (`BTX_BMX4C_CUTLASS_MXFP4`) — software fallback complete |
+| 3 | Entire nonce loop **device-resident** | **Done**: real device kernels in `ComputeDigestsBMX4CAccel` (CUDA/HIP/Metal) run projection + Karatsuba-9 combine + limb decompose/fold on-device and are the dispatched hot path (per-digest re-verify + CPU fail-closed fallback); `PersistentSketchMinerBMX4C` triple-buffer is the cross-call host template cache / fallback. Remaining (perf only): bind CUDA graphs to the device stages |
+| 4 | **Stop returning loser payloads** | **Done** — streaming `ComputeSketchDigestFromFq`; no 8 MiB loser alloc; CUDA `ComputeDigestsOnlyBMX4CAccel` drops loser payloads device-side |
+| 5 | Future **FP8 five-limb** combine lane | **CPU reference done (exact)**; planner selects for `"rubin"`. Hardware-gated: device FP8 kernel, CPU fallback complete |
 
 ## Hardware portfolio (planner)
 
@@ -42,8 +42,8 @@ Consensus sees only canonical integer sketch bytes. The optimal design is **one 
 |---|---|---|
 | Larger dense batched GEMMs (Q, stacked combine) | Moves along the 2×→4–6× B200/5090 axis | Available; needs sustained large Q |
 | Karatsuba-9 (−35% combine MAC) | Helps both; slightly more on H200 (tensor-heavier share) | **Done** |
-| Remove host XOF / H2D / loser 8 MiB / alloc | Attacks the **non-tensor floor** (the part that flattens $/nonce) | **Host schedule done**; device graphs still to bind |
-| Scale-partitioned MXFP4 (K=n not 4n) | Raises tensor intensity on B200 | CPU exact; CUTLASS pending silicon |
+| Remove host XOF / H2D / loser 8 MiB / alloc | Attacks the **non-tensor floor** (the part that flattens $/nonce) | **Done**: device kernels are the hot path; loser payloads dropped device-side. Remaining: bind CUDA graphs (per-launch overhead only) |
+| Scale-partitioned MXFP4 (K=n not 4n) | Raises tensor intensity on B200 | Exact software-complete (CPU + portable grouped + CUDA FP4/INT8 tiers); CUTLASS tensor kernel hardware-gated |
 | FP8 five-limb (Rubin) | Future INT8 drought hedge | CPU exact; no Rubin silicon yet |
 | One nonce / multi-GPU | Spec correctly rejects — NVLink does not help EPP search | Policy |
 
@@ -65,12 +65,23 @@ Even with a perfect device-resident loop:
 
 If after those miner-local steps B200 still loses on $/nonce to 5090, that is an **economic** outcome, not a missing consensus feature. Future-proofing (FP8 lane) keeps the workload on whichever exact low-precision unit vendors ship; it cannot guarantee datacenter always beats retail.
 
-## Remaining (silicon-bound)
+## Remaining (silicon-bound — every item has a complete, exact software path today)
 
-1. Bind CUDA graphs / device buffers to the triple-buffer stages (host schedule is normative).
-2. CUTLASS grouped MXFP4 on qualified Blackwell.
-3. Device FP8 five-limb behind planner + qualification.
-4. B200 / H200 / 5090 / MI350 soak + cost/nonce accounting.
+All correctness-bearing device stages are implemented and are the dispatched
+hot path (CUDA/HIP/Metal `ComputeDigestsBMX4CAccel`, per-digest re-verify + CPU
+fail-closed fallback). What remains is either a throughput lever or a
+vendor-tensor-kernel swap that only *replaces* an already-exact software path:
+
+1. **CUDA graphs** bound to the device stages — per-launch overhead only; the
+   kernels themselves already run on-device.
+2. **CUTLASS grouped MXFP4** tensor kernel on qualified Blackwell (`BTX_BMX4C_CUTLASS_MXFP4`).
+   Falls back to the portable exact grouped path + CUDA hand-written/INT8 tiers,
+   which are byte-identical to the reference.
+3. **Device FP8 five-limb** behind planner + qualification; the exact CPU
+   five-limb combine is the complete fallback.
+4. **AMD native block-scaled MXFP4** (HIP tier (a)) — gated off pending real MI300/
+   MI355 + ROCm; the INT8 MFMA tier (b) is fully implemented and bit-exact.
+5. B200 / H200 / 5090 / MI350 soak + cost/nonce accounting (measurement, not code).
 
 ## Key symbols
 
@@ -78,4 +89,7 @@ If after those miner-local steps B200 still loses on $/nonce to 5090, that is an
 - `src/cuda/matmul_v4_bmx4_context.{h,cpp}` — cross-call template context
 - `ExpandMantissaStreamPortable` / `ComputeSketchDigestFromFq` — device-portable XOF + streaming digest
 - `ComputeCombineKaratsuba9BMX4C` / CUDA Karatsuba-9 combine
-- `matmul_v4_bmx4_cutlass_mxfp4.h` — CUTLASS stub
+- `src/cuda/matmul_v4_bmx4_accel.cu` — CUDA device backend (INT8 IMMA + native FP4 tiers, Karatsuba-9 combine)
+- `src/hip/matmul_v4_bmx4_accel.hip` — HIP device backend (INT8 MFMA tier complete; native MXFP4 tier hardware-gated)
+- `src/metal/matmul_v4_bmx4_accel.mm` — Metal device backend (ALU + M5 tensor-ops GEMM, self-test gated)
+- `matmul_v4_bmx4_cutlass_mxfp4.h` — complete portable exact scale-partitioned grouped MXFP4 projection (`LaunchGroupedMxfp4Projection`); CUTLASS tensor kernel is the hardware-gated swap

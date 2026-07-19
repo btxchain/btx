@@ -10,7 +10,7 @@
 |---|---|---|
 | Deep-`m` under ENC-DR | `b = 2`, `m = n/2` (2048 @ n=4096) | ~3.6× tensor MACs; **0 B** permanent sketch growth |
 | MatExpand | `B̂ = Extract(Mix(G·W·H))`, `w=128` | SHA operand floor → dense exact-int GEMMs; C-15 non-collapse |
-| Consensus `Q*` | `{64,128}` (default 64) | Fat stacked miner windows (Phase A); seal-as-PoW is Phase B |
+| Consensus `Q*` | `{64,128}` (default 64) | Fat stacked miner windows (Phase A); Phase B seal-as-PoW via `fMatMulLTSealAsPoW` (implemented, default off, inert while DRLT is INT32_MAX) |
 | Alphabet / Ĉ | Path-agnostic integer; M11 projectors; Extract to `[-48,48]` | FP8/MXFP4 remain **miner-local** lanes |
 
 ## MatExpand (reference)

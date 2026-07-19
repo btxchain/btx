@@ -13,6 +13,7 @@
 #include <uint256.h>
 
 #include <cstdint>
+#include <functional>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -106,6 +107,85 @@ struct WindowSlot {
                                        const uint256& merkle_root, uint32_t Qstar);
 [[nodiscard]] bool VerifyWindowSlotFreivalds(const CBlockHeader& tmpl, uint32_t n,
                                              const std::vector<WindowSlot>& slots, uint32_t r);
+
+// ---------------------------------------------------------------------------
+// Q* Phase B — SEAL-AS-PoW (doc/btx-matmul-v4.4-lt-normative-spec.md "Q* window";
+// doc/btx-matmul-v4.4-lt-adversarial-analysis.md "Phase B"). Implemented and
+// unit-tested, but INERT on every public network (gated behind
+// Consensus::Params::IsMatMulLTSealAsPoWActive, which requires the still-
+// INT32_MAX nMatMulDRLTHeight). In seal mode the header's lottery object is not
+// the per-nonce ENC-DR-LT digest but the WINDOW SEAL binding a full Q* window of
+// sibling-nonce digests:
+//
+//   matmul_digest := SealWindowCommit(sigma_anchor, Merkle(slot digests), Q*)
+//
+// where sigma_anchor = DeriveSigma(anchor), slot j has nonce
+// DeriveWindowSlotNonce(sigma_anchor, j) with the consensus V3 (parent-MTP-
+// bound) seed_a/seed_b pinned onto it (SlotSeedFn — threads LT-Q2), and each
+// slot digest is the Phase-A ENC-DR-LT digest ComputeDigestBMX4CLT(slot header)
+// = H(sigma_slot || Chat_slot).
+// ---------------------------------------------------------------------------
+
+/** Deterministic per-anchor window-slot nonce for slot `slot_index`
+ *  (SHA256("BTX_QSTAR_SLOT_V44LT" ‖ sigma_anchor ‖ slot_index LE32), low 64
+ *  bits LE). Pseudo-random per anchor so distinct anchors' windows are disjoint
+ *  nonce sets: a miner cannot amortize one nonce's digest across many anchors'
+ *  windows, so evaluating the seal genuinely costs Q* fresh digests (the
+ *  fat-window enforcement, adversarial LT-Q1). */
+[[nodiscard]] uint64_t DeriveWindowSlotNonce(const uint256& sigma_anchor, uint32_t slot_index);
+
+/** Callback that pins the consensus-correct seed_a/seed_b onto a window-slot
+ *  header whose nNonce64/nNonce are already set to the slot nonce. The caller
+ *  binds the params/height/parent-MTP and typically wraps
+ *  SetDeterministicMatMulSeeds, so every sibling slot re-derives its V3 seeds
+ *  under the SAME parent-MTP rule as any block at this height (threads the
+ *  parent MTP into the whole window — adversarial LT-Q2). Returns false if the
+ *  seeds cannot be derived (e.g. parent MTP unavailable), which fails the seal
+ *  closed. */
+using SlotSeedFn = std::function<bool(CBlockHeader&)>;
+
+/** CONSENSUS DEFINITION of the seal-as-PoW lottery object (ε = 0). Derives the
+ *  Q* window from `anchor` (sigma_anchor = DeriveSigma(anchor)), computes each
+ *  slot's ENC-DR-LT digest via ComputeDigestBMX4CLT after `slot_seed_fn` pins
+ *  its V3 seeds, builds the Merkle root, and returns the seal in `seal_out`.
+ *  `Qstar` MUST be a valid consensus Q* ({64,128}). On success `slots_out` (if
+ *  non-null) receives the per-slot (nonce, digest) leaves in window order, and
+ *  `slot_payloads_out` (if non-null) receives each slot's serialized sketch
+ *  bytes (for the Freivalds seal-auth path / harnesses). Returns false if any
+ *  slot fails (bad dims, slot_seed_fn failure). */
+[[nodiscard]] bool ComputeSealDigestBMX4CLT(
+    const CBlockHeader& anchor, uint32_t n, uint32_t Qstar,
+    const SlotSeedFn& slot_seed_fn, uint256& seal_out,
+    std::vector<WindowSlot>* slots_out = nullptr,
+    std::vector<std::vector<unsigned char>>* slot_payloads_out = nullptr);
+
+/** SEAL-AUTH FAST PATH (accept-side; per-slot Freivalds, ε ≤ 2^-180). Given the
+ *  window proof `slot_payloads` (exactly Q* per-slot serialized sketches), re-
+ *  derives each slot header (nonce + `slot_seed_fn` seeds), Freivalds-checks
+ *  that slot's sketch against its re-MatExpanded operands with `rounds` rounds,
+ *  recomputes the slot digest H(sigma_slot ‖ bytes), rebuilds the Merkle root
+ *  and returns the resulting seal in `seal_out`. The slot sketches stay
+ *  Freivalds-checkable and the seal binds the Merkle of the slot DIGESTS — this
+ *  path never requires H(sigma ‖ Chat) == matmul_digest (that Phase-A identity
+ *  does not hold in seal mode). The caller compares `seal_out` to the header's
+ *  matmul_digest and the target. Returns false on any slot Freivalds failure,
+ *  size/dim error, or slot_seed_fn failure. */
+[[nodiscard]] bool VerifySealWindowFreivalds(
+    const CBlockHeader& anchor, uint32_t n, uint32_t Qstar, uint32_t rounds,
+    const SlotSeedFn& slot_seed_fn,
+    const std::vector<std::vector<unsigned char>>& slot_payloads, uint256& seal_out);
+
+/** One-pass seal-mode authentication of a relayed/cached window proof (the seal
+ *  analogue of matmul_v4::PayloadMatchesCommitment). Recomputes each slot digest
+ *  H(sigma_slot ‖ bytes) from `slot_payloads`, rebuilds the Merkle root + seal,
+ *  and returns true iff it equals `anchor.matmul_digest`. Runs NO Freivalds and
+ *  NO target check — it only answers "is this window proof the one the seal
+ *  commits to?" (the MUTATED-vs-CONSENSUS classifier), so a caller must still
+ *  run VerifySealWindowFreivalds (or the ε = 0 recompute) before accepting. */
+[[nodiscard]] bool SealWindowProofMatchesCommitment(
+    const CBlockHeader& anchor, uint32_t n, uint32_t Qstar,
+    const SlotSeedFn& slot_seed_fn,
+    const std::vector<std::vector<unsigned char>>& slot_payloads);
 
 [[nodiscard]] matmul::v4::bmx4::ExactAccelPlan PlanLTAccel(std::string_view device_class);
 

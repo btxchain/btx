@@ -1927,8 +1927,9 @@ bool ComputeDigestsOnlyBMX4CAccel(const std::vector<CBlockHeader>& headers, uint
     if (headers.empty() || rounds == 0) return false;
 
     // GPU path first (when compiled/available): full device combine, then drop
-    // loser payloads. Persistent host pipeline is the cross-call CPU fallback
-    // and the normative schedule for device-resident XOF/hash bring-up.
+    // loser payloads. Persistent host pipeline (Bmx4CudaTemplateContext) is the
+    // cross-call CPU fallback when the device path declines — same bit-exact
+    // schedule, not a pending/bring-up stand-in.
     std::vector<uint256> digests;
     std::vector<std::vector<unsigned char>> payloads;
     if (ComputeDigestsBMX4CAccel(headers, n, rounds, digests, payloads) &&

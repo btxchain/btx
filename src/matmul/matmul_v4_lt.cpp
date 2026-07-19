@@ -37,6 +37,7 @@ constexpr char kMatExpandWATag[] = "BTX_MATEXPAND_WA_V44LT"; // template panel (
 constexpr char kProjectorUTagV44LT[] = "BTX_MATMUL_V44LT_SKETCH_U";
 constexpr char kProjectorVTagV44LT[] = "BTX_MATMUL_V44LT_SKETCH_V";
 constexpr char kQStarCommitTag[] = "BTX_QSTAR_COMMIT_V44LT";
+constexpr char kQStarSlotTag[] = "BTX_QSTAR_SLOT_V44LT"; // Phase B slot-nonce derivation
 
 // SHA256(tag || hash [|| extra]) -> uint256. Matches the single-SHA256 tagged
 // derivation style of matmul_v4_bmx4.cpp::DeriveTaggedSeed.
@@ -376,6 +377,129 @@ bool VerifyWindowSlotFreivalds(const CBlockHeader& tmpl, uint32_t n,
         if (digest != slots[i].digest) return false;
     }
     return true;
+}
+
+uint64_t DeriveWindowSlotNonce(const uint256& sigma_anchor, uint32_t slot_index)
+{
+    CSHA256 hasher;
+    hasher.Write(reinterpret_cast<const unsigned char*>(kQStarSlotTag), sizeof(kQStarSlotTag) - 1);
+    hasher.Write(sigma_anchor.data(), uint256::size());
+    uint8_t idx_le[4];
+    WriteLE32(idx_le, slot_index);
+    hasher.Write(idx_le, sizeof(idx_le));
+    uint8_t out[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(out);
+    return ReadLE64(out);
+}
+
+bool ComputeSealDigestBMX4CLT(const CBlockHeader& anchor, uint32_t n, uint32_t Qstar,
+                              const SlotSeedFn& slot_seed_fn, uint256& seal_out,
+                              std::vector<WindowSlot>* slots_out,
+                              std::vector<std::vector<unsigned char>>* slot_payloads_out)
+{
+    seal_out.SetNull();
+    if (slots_out) slots_out->clear();
+    if (slot_payloads_out) slot_payloads_out->clear();
+    if (!IsValidConsensusQStar(Qstar) || !slot_seed_fn) return false;
+    uint32_t m = 0;
+    if (!ValidateDimsBMX4CLT(n, m)) return false;
+
+    const uint256 sigma_anchor = matmul::v4::DeriveSigma(anchor);
+    std::vector<uint256> digests;
+    digests.reserve(Qstar);
+    if (slots_out) slots_out->reserve(Qstar);
+    if (slot_payloads_out) slot_payloads_out->reserve(Qstar);
+
+    for (uint32_t j = 0; j < Qstar; ++j) {
+        CBlockHeader slot = anchor;
+        slot.nNonce64 = DeriveWindowSlotNonce(sigma_anchor, j);
+        slot.nNonce = static_cast<uint32_t>(slot.nNonce64);
+        if (!slot_seed_fn(slot)) return false;
+
+        uint256 slot_digest;
+        std::vector<unsigned char> payload;
+        if (!ComputeDigestBMX4CLT(slot, n, slot_digest, payload)) return false;
+        digests.push_back(slot_digest);
+        if (slots_out) {
+            WindowSlot leaf;
+            leaf.nonce = slot.nNonce64;
+            leaf.digest = slot_digest;
+            slots_out->push_back(std::move(leaf));
+        }
+        if (slot_payloads_out) slot_payloads_out->push_back(std::move(payload));
+    }
+
+    const uint256 merkle = ComputeWindowMerkleRoot(digests);
+    seal_out = SealWindowCommit(sigma_anchor, merkle, Qstar);
+    return true;
+}
+
+bool VerifySealWindowFreivalds(const CBlockHeader& anchor, uint32_t n, uint32_t Qstar,
+                               uint32_t rounds, const SlotSeedFn& slot_seed_fn,
+                               const std::vector<std::vector<unsigned char>>& slot_payloads,
+                               uint256& seal_out)
+{
+    seal_out.SetNull();
+    if (!IsValidConsensusQStar(Qstar) || !slot_seed_fn) return false;
+    if (slot_payloads.size() != Qstar) return false;
+    uint32_t m = 0;
+    if (!ValidateDimsBMX4CLT(n, m)) return false;
+
+    const uint256 sigma_anchor = matmul::v4::DeriveSigma(anchor);
+    std::vector<uint256> digests;
+    digests.reserve(Qstar);
+
+    for (uint32_t j = 0; j < Qstar; ++j) {
+        CBlockHeader slot = anchor;
+        slot.nNonce64 = DeriveWindowSlotNonce(sigma_anchor, j);
+        slot.nNonce = static_cast<uint32_t>(slot.nNonce64);
+        if (!slot_seed_fn(slot)) return false;
+
+        // VerifySketchBMX4CLT requires header.matmul_digest == H(sigma‖payload).
+        // Seal mode stores the lottery object on the ANCHOR only; pin the slot
+        // commitment digest onto the ephemeral slot header before Freivalds.
+        const uint256 sigma_slot = matmul::v4::DeriveSigma(slot);
+        slot.matmul_digest = matmul::v4::ComputeSketchDigest(sigma_slot, slot_payloads[j]);
+
+        uint256 slot_digest;
+        if (!VerifySketchBMX4CLT(slot, n, rounds, slot_payloads[j], slot_digest)) return false;
+        digests.push_back(slot_digest);
+    }
+
+    const uint256 merkle = ComputeWindowMerkleRoot(digests);
+    seal_out = SealWindowCommit(sigma_anchor, merkle, Qstar);
+    return true;
+}
+
+bool SealWindowProofMatchesCommitment(const CBlockHeader& anchor, uint32_t n, uint32_t Qstar,
+                                      const SlotSeedFn& slot_seed_fn,
+                                      const std::vector<std::vector<unsigned char>>& slot_payloads)
+{
+    if (!IsValidConsensusQStar(Qstar) || !slot_seed_fn) return false;
+    if (slot_payloads.size() != Qstar) return false;
+    uint32_t m = 0;
+    if (!ValidateDimsBMX4CLT(n, m)) return false;
+
+    const uint256 sigma_anchor = matmul::v4::DeriveSigma(anchor);
+    std::vector<uint256> digests;
+    digests.reserve(Qstar);
+
+    for (uint32_t j = 0; j < Qstar; ++j) {
+        CBlockHeader slot = anchor;
+        slot.nNonce64 = DeriveWindowSlotNonce(sigma_anchor, j);
+        slot.nNonce = static_cast<uint32_t>(slot.nNonce64);
+        if (!slot_seed_fn(slot)) return false;
+
+        // Auth-only: digest = H(sigma_slot ‖ payload bytes); no Freivalds.
+        std::vector<Fq> sketch;
+        if (!matmul::v4::ParseSketch(slot_payloads[j], m, sketch)) return false;
+        const uint256 sigma_slot = matmul::v4::DeriveSigma(slot);
+        digests.push_back(matmul::v4::ComputeSketchDigest(sigma_slot, slot_payloads[j]));
+    }
+
+    const uint256 merkle = ComputeWindowMerkleRoot(digests);
+    const uint256 seal = SealWindowCommit(sigma_anchor, merkle, Qstar);
+    return seal == anchor.matmul_digest;
 }
 
 WindowSketchMinerLT::WindowSketchMinerLT(const CBlockHeader& header, uint32_t n,

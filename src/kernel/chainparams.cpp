@@ -273,6 +273,17 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         // deepening of the same hardness floor, not an independent one).
         assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
     }
+    // v4.4-LT Q* Phase B (seal-as-PoW). The mode toggle is only meaningful when
+    // the LT profile is itself live; a network that flips it without a live LT
+    // height is misconfigured (the toggle would be silently inert, masking an
+    // ops error). On public networks it additionally rides the SAME
+    // no-inversion + ratification gate as LT activation -- seal-as-PoW is a
+    // consensus-object redefinition, not a free knob.
+    if (consensus.fMatMulLTSealAsPoW) {
+        assert(consensus.nMatMulDRLTHeight != std::numeric_limits<int32_t>::max());
+        assert(consensus.nMatMulConsensusQStar == 64 || consensus.nMatMulConsensusQStar == 128);
+        assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+    }
 }
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
@@ -429,6 +440,9 @@ public:
         consensus.nMatMulLTTranscriptBlockSize = 2;
         consensus.nMatMulDRLTAsertRescaleNum = 1;
         consensus.nMatMulDRLTAsertRescaleDen = 1;
+        // Q* Phase B seal-as-PoW: implemented but OFF (and inert regardless,
+        // since DRLT is INT32_MAX above).
+        consensus.fMatMulLTSealAsPoW = false;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -855,6 +869,8 @@ public:
         consensus.nMatMulLTTranscriptBlockSize = 2;
         consensus.nMatMulDRLTAsertRescaleNum = 1;
         consensus.nMatMulDRLTAsertRescaleDen = 1;
+        // Q* Phase B seal-as-PoW: implemented but OFF (inert; DRLT is INT32_MAX).
+        consensus.fMatMulLTSealAsPoW = false;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -1463,12 +1479,16 @@ public:
         consensus.nMatMulBMX4CHeight = 100;
         consensus.nMatMulBMX4CAsertRescaleNum = 1;
         consensus.nMatMulBMX4CAsertRescaleDen = 1;
-        // Rank-1 LT stays inert on regtest by default (opt-in via future flag).
+        // Rank-1 LT stays inert on regtest by default (opt-in via -regtestdrltheight).
         consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulConsensusQStar = 64;
         consensus.nMatMulLTTranscriptBlockSize = 2;
         consensus.nMatMulDRLTAsertRescaleNum = 1;
         consensus.nMatMulDRLTAsertRescaleDen = 1;
+        // Q* Phase B seal-as-PoW: OFF by default; opt-in via
+        // -regtestmatmulltsealaspow for the functional test that exercises the
+        // window-seal lottery object under a live regtest LT height.
+        consensus.fMatMulLTSealAsPoW = false;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -1538,6 +1558,12 @@ public:
         // height is already final (100 by default, or the overridden value).
         if (opts.matmul_drlt_height.has_value()) {
             consensus.nMatMulDRLTHeight = *opts.matmul_drlt_height;
+        }
+        // v4.4-LT Q* Phase B: regtest-only opt-in to the seal-as-PoW lottery
+        // object. Only meaningful together with a live -regtestdrltheight;
+        // AssertBMX4CConstructionInvariants fails closed if set without one.
+        if (opts.matmul_lt_seal_as_pow) {
+            consensus.fMatMulLTSealAsPoW = true;
         }
         if (opts.matmul_flat_sketch_replay) {
             // v4.4 ENC-DR regtest-only differential switch: re-select the legacy
@@ -1742,6 +1768,7 @@ public:
             opts.matmul_v4_max_dimension.has_value() ||
             opts.matmul_bmx4c_height.has_value() ||
             opts.matmul_drlt_height.has_value() ||
+            opts.matmul_lt_seal_as_pow ||
             opts.matmul_flat_sketch_replay ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||

@@ -479,6 +479,20 @@ struct Params {
     /** One-time ASERT rescale at nMatMulDRLTHeight (calibrate from silicon). */
     int64_t nMatMulDRLTAsertRescaleNum{1};
     int64_t nMatMulDRLTAsertRescaleDen{1};
+    /** v4.4-LT Q* Phase B — SEAL-AS-PoW mode (doc/btx-matmul-v4.4-lt-normative-spec.md
+     *  "Q* window", doc/btx-matmul-v4.4-lt-adversarial-analysis.md "Phase B").
+     *  When true AND DRLT is live, the header's matmul_digest is no longer the
+     *  per-nonce ENC-DR-LT digest but the WINDOW SEAL
+     *    matmul_digest := SealWindowCommit(sigma_anchor, Merkle(slot digests), Q*)
+     *  binding a full Q* window of sibling-nonce ENC-DR-LT digests into a single
+     *  consensus-bound lottery object (fat-window PoW; adversarial LT-Q1/LT-Q2).
+     *  DEFAULT = false and, independently, INERT on every public network because
+     *  IsMatMulLTSealAsPoWActive requires IsDRLTActive, which is fail-closed while
+     *  nMatMulDRLTHeight == INT32_MAX. Regtest may opt in for functional tests.
+     *  This is a MODE toggle of the already-height-gated LT profile, NOT a second
+     *  activation height: it never widens the surface that is live on a public
+     *  net (that stays gated by nMatMulDRLTHeight == INT32_MAX). */
+    bool fMatMulLTSealAsPoW{false};
     /** v4.4 ENC-DR regtest-only DIFFERENTIAL-TESTING switch: when true, v4
      *  heights keep the legacy FLAT_SKETCH_INBLOCK carriage (the full 8·m²
      *  sketch in matrix_c_data, Freivalds-verified in-block) instead of the
@@ -773,6 +787,18 @@ struct Params {
         return IsBMX4CActive(height) &&
             nMatMulDRLTHeight != std::numeric_limits<int32_t>::max() &&
             height >= nMatMulDRLTHeight;
+    }
+    /** True iff the v4.4-LT Q* Phase B SEAL-AS-PoW mode governs this height: the
+     *  LT profile is live AND the seal-as-PoW mode toggle is set. Fail-closed on
+     *  every public network: IsDRLTActive is false while nMatMulDRLTHeight ==
+     *  INT32_MAX, so seal mode can only ever engage on a network that has BOTH
+     *  configured a live LT height (still blocked by the no-inversion +
+     *  ratification gate in AssertBMX4CConstructionInvariants) AND flipped the
+     *  mode toggle. When false the LT lottery object is the Phase A per-nonce
+     *  ENC-DR-LT digest H(sigma||Chat); when true it is the window seal. */
+    bool IsMatMulLTSealAsPoWActive(int32_t height) const
+    {
+        return IsDRLTActive(height) && fMatMulLTSealAsPoW;
     }
     /** Header-PoW throttle (audit F1/C1/C2) is enabled iff a discount is configured;
      *  it has NO separate activation height -- it rides the single v4 fork (see

@@ -224,6 +224,9 @@ public:
         //! at/after ENC-BMX4C, never before it (see
         //! AssertBMX4CConstructionInvariants).
         std::optional<int32_t> matmul_drlt_height{};
+        //! v4.4-LT Q* Phase B seal-as-PoW mode (regtest-only opt-in). Requires a
+        //! live matmul_drlt_height; enables the window-seal lottery object.
+        bool matmul_lt_seal_as_pow{false};
         bool matmul_flat_sketch_replay{false};
         std::optional<uint32_t> matmul_proof_assumevalid_min_age{};
         bool fastprune{false};

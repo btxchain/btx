@@ -5007,7 +5007,8 @@ bool SolveMatMulParallel(CBlockHeader& block,
 }
 
 // MatMul v4.4-LT Rank-1 solve loop: Q*-sized windows through WindowSketchMinerLT
-// (MatExpand + deep-m). Winning candidates are resealed via ComputeDigestBMX4CLT.
+// (MatExpand + deep-m). Winning candidates are resealed via ComputeDigestBMX4CLT
+// (Phase A) or ComputeSealDigestBMX4CLT (Phase B seal-as-PoW when active).
 static bool SolveMatMulV4LT(CBlockHeader& block,
                             const Consensus::Params& params,
                             uint64_t& max_tries,
@@ -5026,6 +5027,56 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
     if (const char* env = std::getenv("BTX_MATMUL_LT_BATCH")) {
         const auto parsed = static_cast<uint32_t>(std::strtoul(env, nullptr, 10));
         if (parsed > 0) window_span = std::min(parsed, matmul::v4::lt::kConsensusQStarMax);
+    }
+
+    // Phase B: seal-as-PoW — lottery object is the Q* window seal. Each attempt
+    // evaluates one full seal (Q* digests); max_tries counts seals attempted.
+    if (params.IsMatMulLTSealAsPoWActive(block_height)) {
+        if (!parent_median_time_past.has_value()) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        const uint32_t Qstar = window_span;
+        const auto slot_seed = [&](CBlockHeader& h) -> bool {
+            return SetDeterministicMatMulSeeds(h, params, block_height, parent_median_time_past);
+        };
+        while (max_tries > 0) {
+            if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+            --max_tries;
+
+            // Advance the anchor nonce so successive seals use distinct sigma.
+            if (!SetDeterministicMatMulSeeds(block, params, block_height, parent_median_time_past)) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+
+            uint256 seal;
+            std::vector<matmul::v4::lt::WindowSlot> slots;
+            std::vector<std::vector<unsigned char>> payloads;
+            if (!matmul::v4::lt::ComputeSealDigestBMX4CLT(block, n, Qstar, slot_seed, seal,
+                                                          &slots, &payloads)) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+            if (UintToArith256(seal) <= bnTarget) {
+                block.matmul_digest = seal;
+                // Pack slot-0 sketch for optional Freivalds harnesses; seal mode
+                // does not require in-block sketch carriage under ENC-DR.
+                if (freivalds_payload_out != nullptr && !payloads.empty()) {
+                    *freivalds_payload_out = PackMatMulV4SketchBytesToWords(payloads[0]);
+                }
+                RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
+                return true;
+            }
+            if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) break;
+            ++block.nNonce64;
+            block.nNonce = static_cast<uint32_t>(block.nNonce64);
+        }
+        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+        return false;
     }
 
     matmul::v4::lt::WindowSketchMinerLT miner{block, n};
