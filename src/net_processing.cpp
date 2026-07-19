@@ -2264,11 +2264,12 @@ static void DisconnectNodeNow(CConnman& connman, NodeId node_id)
     });
 }
 
-static bool ReserveMatMulVerificationSlot(std::atomic<uint32_t>& pending_verifications, const Consensus::Params& params)
+static bool ReserveMatMulVerificationSlot(std::atomic<uint32_t>& pending_verifications, const Consensus::Params& params,
+                                          int32_t reference_height = -1)
 {
     uint32_t pending = pending_verifications.load();
     while (true) {
-        if (!CanStartMatMulVerification(pending, params)) {
+        if (!CanStartMatMulVerification(pending, params, reference_height)) {
             return false;
         }
         if (pending_verifications.compare_exchange_weak(pending, pending + 1)) {
@@ -4480,17 +4481,19 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                                    std::function<void()> post_process)
 {
     if (m_matmul_verify_worker) {
-        const std::optional<int32_t> encdr_height{
+        const std::optional<ChainstateManager::MatMulEncDrClassifyResult> encdr{
             WITH_LOCK(cs_main, return m_chainman.ClassifyMatMulEncDrRecompute(*block))};
-        if (encdr_height) {
+        if (encdr) {
             // Every async recompute must hold a pending-verification slot (the
             // message thread no longer serializes them). The BLOCK/cmpctblock
             // callers pass theirs in; the BLOCKTXN reconstruction path holds
             // none today — self-reserve here, and fall back to the synchronous
             // path (implicitly bounded by the single message thread) when the
-            // cap is reached.
+            // cap is reached. Height-select the LT tip-verify pending cap when
+            // DRLT is live (seal recompute is ~Q*× a single EncDr).
             if (!matmul_slot &&
-                ReserveMatMulVerificationSlot(m_matmul_pending_verifications, m_chainparams.GetConsensus())) {
+                ReserveMatMulVerificationSlot(m_matmul_pending_verifications, m_chainparams.GetConsensus(),
+                                              encdr->height)) {
                 matmul_slot.emplace(m_matmul_pending_verifications);
             }
             if (matmul_slot) {
@@ -4501,7 +4504,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 // Stop() draining the queue without running completions.
                 auto slot{std::make_shared<ScopedMatMulPendingVerification>(std::move(*matmul_slot))};
                 node::MatMulVerifyWorker::Job job{
-                    block, *encdr_height,
+                    block, encdr->height, encdr->parent_median_time_past,
                     [this, nodeid, block, force_processing, min_pow_checked, slot,
                      post = std::move(post_process)](bool /*encdr_ok*/) {
                         // The verdict reaches validation via the ENC-DR verdict

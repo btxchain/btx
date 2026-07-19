@@ -1168,17 +1168,22 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** WP-7 / C5: ADVISORY classifier for the async ENC-DR verify worker.
-     *  Returns the height `block` would validate at iff accepting it now would
-     *  reach the O(W) ENC-DR reference recompute inside ContextualCheckBlock
+     *  Returns height + parent MTP iff accepting `block` now would reach the
+     *  O(W) ENC-DR reference recompute inside ContextualCheckBlock
      *  (fMatMulPOW, v4-active DIGEST_RECOMPUTE height, digest-only body, known
      *  prev header, no stored data for this hash, not assumevalid-trusted).
      *  nullopt means the synchronous path is cheap (or would fail cheaply) and
-     *  the block must NOT be dispatched off-thread. Also returns nullopt for
-     *  Phase B seal-as-PoW heights (tip verify needs parent MTP). Divergence
-     *  from the seam's own logic is fail-safe: it degrades to a recompute, never
-     *  to a wrong verdict (the memoized verdict is a pure function of the
-     *  header). */
-    std::optional<int32_t> ClassifyMatMulEncDrRecompute(const CBlock& block) const
+     *  the block must NOT be dispatched off-thread. Phase B seal-as-PoW heights
+     *  are eligible when parent MTP can be supplied from prev (always, once
+     *  prev is known); without MTP Classify stays fail-closed (nullopt).
+     *  Divergence from the seam's own logic is fail-safe: it degrades to a
+     *  recompute, never to a wrong verdict (the memoized verdict is a pure
+     *  function of the header + parent MTP). */
+    struct MatMulEncDrClassifyResult {
+        int32_t height{0};
+        std::optional<int64_t> parent_median_time_past;
+    };
+    std::optional<MatMulEncDrClassifyResult> ClassifyMatMulEncDrRecompute(const CBlock& block) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**

@@ -10000,8 +10000,8 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
     // (not a hash of the header), so header work is forgeable at zero cost -- a
     // header-flood / best-header-poisoning DoS vector. When enabled this requires
     // cheap UNFORGEABLE hash work per header. SINGLE ACTIVATION: no gate height of
-    // its own -- it rides the v4 fork and is enabled by a non-zero
-    // nMatMulHeaderPoWBits (default 0 = disabled). NOT gated by
+    // its own -- it rides the v4 fork and is enabled by a non-sentinel
+    // nMatMulHeaderPoWDiscountBits (default UINT32_MAX = disabled). NOT gated by
     // fSkipMatMulValidation: it is a one-hash relay/DoS defense, not an
     // expensive-verify correctness check.
     if (consensusParams.fMatMulPOW && consensusParams.IsMatMulV4Active(nHeight) &&
@@ -10214,7 +10214,8 @@ bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* p
            static_cast<int64_t>(GetConsensus().nMatMulProofAssumeValidMinAge);
 }
 
-std::optional<int32_t> ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block) const
+std::optional<ChainstateManager::MatMulEncDrClassifyResult>
+ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block) const
 {
     AssertLockHeld(::cs_main);
     const Consensus::Params& params = GetConsensus();
@@ -10233,20 +10234,17 @@ std::optional<int32_t> ChainstateManager::ClassifyMatMulEncDrRecompute(const CBl
     if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty() || !block.matrix_c_data.empty()) {
         return std::nullopt;
     }
-    // Phase B seal-as-PoW: tip verify needs parent MTP for sibling-slot V3 seeds
-    // (CheckMatMulProofOfWork_V4EncDr). Keep seal-mode heights on the synchronous
-    // ContextualCheckBlock path (which has pindexPrev->GetMedianTimePast()); the
-    // async worker has no MTP and must not memoize a fail-closed false verdict.
-    if (params.IsMatMulLTSealAsPoWActive(nHeight)) {
-        return std::nullopt;
-    }
+    // Phase B seal-as-PoW: tip verify needs parent MTP for sibling-slot V3
+    // seeds. Prev is known here, so MTP is always available — allow async
+    // enqueue and thread MTP into the worker Job. CheckMatMulProofOfWork_V4EncDr
+    // still fails closed if a Job somehow lacks MTP at seal heights.
     if (const CBlockIndex* existing = m_blockman.LookupBlockIndex(block.GetHash())) {
         // Already have the data: AcceptBlock short-circuits before the seam.
         if (existing->nStatus & BLOCK_HAVE_DATA) return std::nullopt;
         // Assumevalid-buried: the seam skips the recompute entirely.
         if (IsMatMulRecomputeAssumeValidTrusted(existing, nHeight)) return std::nullopt;
     }
-    return nHeight;
+    return MatMulEncDrClassifyResult{nHeight, prev->GetMedianTimePast()};
 }
 
 /** NOTE: This function is not currently invoked by ConnectBlock(), so we

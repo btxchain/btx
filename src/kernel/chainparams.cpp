@@ -1489,6 +1489,11 @@ public:
         // -regtestmatmulltsealaspow for the functional test that exercises the
         // window-seal lottery object under a live regtest LT height.
         consensus.fMatMulLTSealAsPoW = false;
+        // LT tip-verify budgets: unthrottled on regtest (mirrors v4), so
+        // -regtestdrltheight / seal-as-PoW functional tests are not paced.
+        consensus.nMatMulLTMaxPendingVerifications = std::numeric_limits<uint32_t>::max();
+        consensus.nMatMulLTGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+        consensus.nMatMulLTPeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;

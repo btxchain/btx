@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -31,8 +32,11 @@ namespace node {
  *  peer's messages queue behind seconds of GEMM per non-cached block. This
  *  worker takes the PURE part of that work off the message thread:
  *
- *   - A Job carries the block, its resolved height (= prev->nHeight + 1,
- *     resolved by the dispatcher under cs_main) and a completion closure.
+ *   - A Job carries the block, its resolved height (= prev->nHeight + 1),
+ *     parent median-time-past (both resolved by the dispatcher under cs_main),
+ *     and a completion closure. Parent MTP is required for Phase B seal-as-PoW
+ *     sibling-slot V3 seeds; Classify only enqueues seal heights when MTP can
+ *     be supplied, and the pure predicate fails closed without it.
  *   - The worker computes only the pure predicate
  *     CheckMatMulProofOfWork_V4EncDr (never touching cs_main or
  *     g_msgproc_mutex), under the process-wide MatMulRecomputeSingleFlight
@@ -44,8 +48,9 @@ namespace node {
  *     repeated.
  *
  *  Queue depth needs no separate bound: every enqueued job's closure owns a
- *  ScopedMatMulPendingVerification slot, so depth is bounded by
- *  nMatMulMaxPendingVerifications by construction.
+ *  ScopedMatMulPendingVerification slot, so depth is bounded by the effective
+ *  pending cap (nMatMulMaxPendingVerifications, or the LT seal tip-verify
+ *  nMatMulLTMaxPendingVerifications when DRLT is live) by construction.
  *
  *  INACTIVITY INVARIANT: net_processing constructs this object only when
  *  nMatMulV4Height != INT32_MAX (and -matmulasyncverify is not disabled); with
@@ -58,6 +63,10 @@ public:
         //! Height the block validates at (= prev->nHeight + 1), resolved by the
         //! dispatcher under cs_main before enqueueing.
         int32_t height{0};
+        //! Parent median-time-past from prev under cs_main. Always set when the
+        //! dispatcher classifies a recompute (prev is known). Phase B seal
+        //! EncDr fails closed if missing.
+        std::optional<int64_t> parent_median_time_past;
         //! Runs on the worker thread after the verdict is memoized. May be
         //! empty. NOT run for jobs still queued when Stop() destroys the queue
         //! (their captured RAII state releases resources on destruction).
@@ -67,11 +76,13 @@ public:
     /** @param[in] params       Consensus params (must outlive this object).
      *  @param[in] max_threads  Worker pool size; 0 = auto
      *                          (hardware_concurrency()/2 clamped to
-     *                          [1, nMatMulMaxPendingVerifications]).
+     *                          [1, max pending cap]).
      *  @param[in] verify_for_test  Test-only seam replacing the pure predicate
-     *                          (skips single-flight + verdict memo). */
+     *                          (skips single-flight + verdict memo). Receives
+     *                          the same (block, height, parent_mtp) the real
+     *                          predicate would see. */
     explicit MatMulVerifyWorker(const Consensus::Params& params, uint32_t max_threads = 0,
-                                std::function<bool(const CBlock&, int32_t)> verify_for_test = nullptr);
+                                std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> verify_for_test = nullptr);
     ~MatMulVerifyWorker(); // Stop() + join
 
     /** Try to enqueue a job. On success the job is moved-from and true is
@@ -92,7 +103,7 @@ private:
     void WorkerLoop();
 
     const Consensus::Params& m_params;
-    const std::function<bool(const CBlock&, int32_t)> m_verify_override;
+    const std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> m_verify_override;
     const uint32_t m_max_threads;
 
     mutable std::mutex m_mutex;

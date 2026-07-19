@@ -46,8 +46,31 @@ Tests: `matexpand_extract_range`, `matexpand_not_affine_in_raw`, `matexpand_posi
 2. Lottery object: `matmul_digest := SealWindowCommit(σ_anchor, Merkle(slot digests), Q*)` via `ComputeSealDigestBMX4CLT`.
 3. Slot nonces: `DeriveWindowSlotNonce(σ_anchor, j)`. Sibling V3 seeds: `SlotSeedFn` → `SetDeterministicMatMulSeeds(..., parent_MTP)` in solve + EncDr recompute.
 4. Sketch-cache / MMSKETCH: Phase-A `H(σ‖Chat)==matmul_digest` auth is **not** used in seal mode (prefetch/ingress ignored; tip verify is ε=0 seal recompute). Seal-auth helpers: `SealWindowProofMatchesCommitment` / `VerifySealWindowFreivalds`.
-5. Async EncDr worker: `ClassifyMatMulEncDrRecompute` returns nullopt at seal heights so validation always has parent MTP.
-6. External tip-verify budget soak + C-15 seal-binding review remain GO/NO-GO items before raising a public height.
+5. Async EncDr worker: `ClassifyMatMulEncDrRecompute` returns height + parent MTP
+   when prev is known (including seal heights); `MatMulVerifyWorker::Job` carries
+   `parent_median_time_past` into `CheckMatMulProofOfWork_V4EncDr`. Seal mode
+   fails closed without MTP. Tip-verify pending/budgets height-select via
+   `nMatMulLTMaxPendingVerifications` / `nMatMulLT{Global,Peer}VerifyBudgetPerMin`
+   when `IsDRLTActive` (defaults 2 / 1 / 1; inert while DRLT is INT32_MAX).
+6. External tip-verify budget soak + C-15 seal-binding review remain GO/NO-GO
+   items before raising a public height (see soak protocol below).
+
+### Tip-verify soak protocol (Phase B; no silicon numbers)
+
+Before setting a public `nMatMulDRLTHeight` with seal-as-PoW, run a **protocol
+soak** on representative tip-verify hardware — record wall times locally; do
+**not** paste unverified silicon numbers into this doc:
+
+1. Enable LT + seal on a private/regtest chain (`-regtestdrltheight`,
+   `-regtestmatmulltsealaspow`); leave public nets at `INT32_MAX`.
+2. Deliver near-tip seal blocks over P2P so the async EncDr path runs
+   (`MatMulVerifyWorker` with parent MTP from Classify under `cs_main`).
+3. Measure: seal recompute wall time, pending-slot occupancy vs
+   `nMatMulLTMaxPendingVerifications`, global/peer defer rate vs
+   `nMatMulLT*VerifyBudgetPerMin`, message-thread latency (g_msgproc_mutex).
+4. Calibrate LT pending/budget knobs from those measurements; raise only after
+   honest tip advance stays unpaced and attacker-forced seal flood is bounded.
+5. Pair with external seal-binding / C-15 review before any public height raise.
 
 ## Silicon / ratification gates (unchanged)
 
@@ -57,12 +80,17 @@ Do **not** set public `nMatMulDRLTHeight` finite until:
 2. Calibrated `nMatMulDRLTAsertRescaleNum/Den` from measured nonce/s.
 3. MI350 / OCP MX exactness PASS where claimed.
 4. `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` for any non-regtest live height.
-5. Phase B tip-verify budget + external seal-binding review if seal-as-PoW is required for the launch package (code path exists; measurement/review still required).
+5. Phase B tip-verify budget soak (protocol above) + external seal-binding review
+   if seal-as-PoW is required for the launch package.
 
 ## Source map
 
 - Reference: `src/matmul/matmul_v4_lt.{h,cpp}` (`ComputeSealDigestBMX4CLT`, seal-auth helpers)
 - Dispatch: `src/matmul/accel_v4.cpp` (`ComputeDigestsBMX4CLTDispatched`)
 - Consensus: `src/pow.cpp` (solve + EncDr seal recompute), `src/validation.cpp`, `src/kernel/chainparams.cpp`, `src/net_processing.cpp` (MMSKETCH skip)
-- Params: `fMatMulLTSealAsPoW` / `IsMatMulLTSealAsPoWActive`
-- Tests: `src/test/matmul_v4_lt_tests.cpp` (`phase_b_seal_*`)
+- Params: `fMatMulLTSealAsPoW` / `IsMatMulLTSealAsPoWActive`,
+  `nMatMulLTMaxPendingVerifications`, `nMatMulLT{Global,Peer}VerifyBudgetPerMin`
+- Async: `src/node/matmul_verify_worker.*` (Job carries parent MTP)
+- Tests: `src/test/matmul_v4_lt_tests.cpp` (`phase_b_seal_*`),
+  `src/test/matmul_verify_worker_tests.cpp` (`seal_async_forwards_parent_mtp`,
+  `lt_tip_verify_budget_knobs`)

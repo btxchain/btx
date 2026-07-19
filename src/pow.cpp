@@ -4312,6 +4312,9 @@ namespace {
 // INT32_MAX "unknown height" sentinel can never accidentally select v4.
 uint32_t SelectMatMulPeerVerifyBudgetBase(const Consensus::Params& params, int32_t reference_height)
 {
+    if (!IsDisabledHeight(params.nMatMulDRLTHeight) && params.IsDRLTActive(reference_height)) {
+        return params.nMatMulLTPeerVerifyBudgetPerMin;
+    }
     if (!IsDisabledHeight(params.nMatMulV4Height) && params.IsMatMulV4Active(reference_height)) {
         return params.nMatMulV4PeerVerifyBudgetPerMin;
     }
@@ -4319,8 +4322,19 @@ uint32_t SelectMatMulPeerVerifyBudgetBase(const Consensus::Params& params, int32
 }
 } // namespace
 
+uint32_t EffectiveMatMulMaxPendingVerifications(const Consensus::Params& params, int32_t reference_height)
+{
+    if (!IsDisabledHeight(params.nMatMulDRLTHeight) && params.IsDRLTActive(reference_height)) {
+        return params.nMatMulLTMaxPendingVerifications;
+    }
+    return params.nMatMulMaxPendingVerifications;
+}
+
 uint32_t EffectiveMatMulGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height)
 {
+    if (!IsDisabledHeight(params.nMatMulDRLTHeight) && params.IsDRLTActive(reference_height)) {
+        return params.nMatMulLTGlobalVerifyBudgetPerMin;
+    }
     if (!IsDisabledHeight(params.nMatMulV4Height) && params.IsMatMulV4Active(reference_height)) {
         return params.nMatMulV4GlobalVerifyBudgetPerMin;
     }
@@ -4429,9 +4443,10 @@ bool ConsumeGlobalMatMulPhase2Budget(
     return true;
 }
 
-bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus::Params& params)
+bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus::Params& params,
+                                int32_t reference_height)
 {
-    return pending_verifications < params.nMatMulMaxPendingVerifications;
+    return pending_verifications < EffectiveMatMulMaxPendingVerifications(params, reference_height);
 }
 
 bool SolveMatMulNonceSeeded(CBlockHeader& block,

@@ -15,15 +15,24 @@
 #include <utility>
 
 namespace node {
+namespace {
+//! Upper bound for the async queue / pool size. LT tip-verify may use a
+//! tighter pending cap, but the worker may see mixed heights; take the max so
+//! the Assume never false-fires when the looser (non-LT) cap is in force.
+uint32_t MaxPendingCap(const Consensus::Params& params)
+{
+    return std::max(params.nMatMulMaxPendingVerifications, params.nMatMulLTMaxPendingVerifications);
+}
+} // namespace
 
 MatMulVerifyWorker::MatMulVerifyWorker(const Consensus::Params& params, uint32_t max_threads,
-                                       std::function<bool(const CBlock&, int32_t)> verify_for_test)
+                                       std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> verify_for_test)
     : m_params{params},
       m_verify_override{std::move(verify_for_test)},
       m_max_threads{max_threads > 0
                         ? max_threads
                         : std::clamp<uint32_t>(std::thread::hardware_concurrency() / 2, 1,
-                                               std::max<uint32_t>(1, params.nMatMulMaxPendingVerifications))}
+                                               std::max<uint32_t>(1, MaxPendingCap(params)))}
 {
 }
 
@@ -41,7 +50,7 @@ bool MatMulVerifyWorker::Enqueue(Job& job)
         m_queue.push_back(std::move(job));
         // Depth is bounded by the pending-verification slot cap by construction
         // (every job's closure owns a slot); flag a violation in debug builds.
-        Assume(m_queue.size() <= std::max<uint32_t>(1, m_params.nMatMulMaxPendingVerifications));
+        Assume(m_queue.size() <= std::max<uint32_t>(1, MaxPendingCap(m_params)));
         // Lazily scale the pool: one thread per enqueue until the cap.
         if (m_threads.size() < m_max_threads && m_threads.size() < m_queue.size()) {
             m_threads.emplace_back([this] { WorkerLoop(); });
@@ -95,25 +104,27 @@ void MatMulVerifyWorker::WorkerLoop()
         const uint256 hash{job.block->GetHash()};
         bool ok;
         if (m_verify_override) {
-            ok = m_verify_override(*job.block, job.height);
+            ok = m_verify_override(*job.block, job.height, job.parent_median_time_past);
         } else {
             // Single-flight wiring (H5 primitive): duplicate deliveries of the
             // same hash across worker threads collapse to ONE recompute; the
             // followers reuse the leader's verdict (pure function of the
-            // header). NOTE for WP-9: this wraps the WHOLE predicate from the
-            // worker; when WP-9 wires the same primitive INSIDE the pow.cpp
-            // recompute branch for the remaining synchronous callers, drop
-            // this outer wrap (one-line change) so the guard is not taken
-            // re-entrantly with two different scopes.
+            // header + parent MTP). NOTE for WP-9: this wraps the WHOLE
+            // predicate from the worker; when WP-9 wires the same primitive
+            // INSIDE the pow.cpp recompute branch for the remaining
+            // synchronous callers, drop this outer wrap (one-line change) so
+            // the guard is not taken re-entrantly with two different scopes.
             MatMulRecomputeSingleFlight sf(hash);
             if (sf.IsLeader()) {
-                ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height);
+                ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height,
+                                                    job.parent_median_time_past);
                 sf.SetResult(ok); // publish before ~sf releases waiters
             } else if (const auto leader_result{sf.LeaderResult()}) {
                 ok = *leader_result; // sketch already Put() on an accepted block
             } else {
                 // Leader exited without publishing: decide ourselves.
-                ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height);
+                ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height,
+                                                    job.parent_median_time_past);
             }
             CacheMatMulEncDrVerdict(hash, ok);
             LogDebug(BCLog::NET, "matmul async verify: block %s height %d encdr_ok=%d\n",

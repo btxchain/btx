@@ -8,6 +8,7 @@
 #include <node/matmul_verify_worker.h>
 
 #include <chainparams.h>
+#include <consensus/params.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
@@ -18,8 +19,10 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 using node::MatMulVerifyWorker;
@@ -99,11 +102,11 @@ BOOST_AUTO_TEST_CASE(bounded_concurrency)
     BlockingVerify gate;
     std::atomic<int> completions{0};
     MatMulVerifyWorker worker{params, /*max_threads=*/2,
-                              [&](const CBlock&, int32_t) { return gate.Run(); }};
+                              [&](const CBlock&, int32_t, std::optional<int64_t>) { return gate.Run(); }};
 
     constexpr int kJobs{6};
     for (int i = 0; i < kJobs; ++i) {
-        MatMulVerifyWorker::Job job{MakeBlock(i), /*height=*/100,
+        MatMulVerifyWorker::Job job{MakeBlock(i), /*height=*/100, /*parent_mtp=*/std::nullopt,
                                     [&](bool ok) {
                                         BOOST_CHECK(ok);
                                         ++completions;
@@ -132,12 +135,12 @@ BOOST_AUTO_TEST_CASE(stop_drains_queue_without_completions)
     std::atomic<int> completions{0};
     std::atomic<int> slots_released{0};
     MatMulVerifyWorker worker{params, /*max_threads=*/1,
-                              [&](const CBlock&, int32_t) { return gate.Run(); }};
+                              [&](const CBlock&, int32_t, std::optional<int64_t>) { return gate.Run(); }};
 
     constexpr int kJobs{4};
     for (int i = 0; i < kJobs; ++i) {
         auto sentinel{std::make_shared<SlotSentinel>(&slots_released)};
-        MatMulVerifyWorker::Job job{MakeBlock(i), /*height=*/100,
+        MatMulVerifyWorker::Job job{MakeBlock(i), /*height=*/100, /*parent_mtp=*/std::nullopt,
                                     [&completions, sentinel](bool) { ++completions; }};
         BOOST_CHECK(worker.Enqueue(job));
     }
@@ -153,7 +156,8 @@ BOOST_AUTO_TEST_CASE(stop_drains_queue_without_completions)
 
     // Enqueue after Stop() fails and leaves the job intact for the caller's
     // synchronous fallback.
-    MatMulVerifyWorker::Job late{MakeBlock(99), /*height=*/100, [&](bool) { ++completions; }};
+    MatMulVerifyWorker::Job late{MakeBlock(99), /*height=*/100, /*parent_mtp=*/std::nullopt,
+                                 [&](bool) { ++completions; }};
     BOOST_CHECK(!worker.Enqueue(late));
     BOOST_CHECK(late.block != nullptr);
     BOOST_CHECK(late.completion);
@@ -193,6 +197,84 @@ BOOST_AUTO_TEST_CASE(encdr_verdict_memo_bounded_fifo)
     // Re-caching an existing key keeps its (pure-function) verdict readable.
     CacheMatMulEncDrVerdict(salted_hash(kInserted - 1), (kInserted - 1) % 3 == 0);
     BOOST_CHECK(LookupMatMulEncDrVerdict(salted_hash(kInserted - 1)).has_value());
+}
+
+// Phase B seal-as-PoW async path: parent MTP on the Job is forwarded into the
+// verify seam (Classify/ProcessBlock supply it under cs_main; EncDr fails
+// closed without it at seal heights).
+BOOST_AUTO_TEST_CASE(seal_async_forwards_parent_mtp)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    constexpr int64_t kMtp = 1'700'000'042;
+    std::atomic<int> seen_mtp{0};
+    std::atomic<int> seen_nullopt{0};
+    std::atomic<int> completions{0};
+
+    MatMulVerifyWorker worker{params, /*max_threads=*/1,
+                              [&](const CBlock&, int32_t height, std::optional<int64_t> parent_mtp) {
+                                  BOOST_CHECK_EQUAL(height, 42);
+                                  if (parent_mtp.has_value() && *parent_mtp == kMtp) {
+                                      ++seen_mtp;
+                                      return true;
+                                  }
+                                  ++seen_nullopt;
+                                  return false;
+                              }};
+
+    MatMulVerifyWorker::Job with_mtp{MakeBlock(1), /*height=*/42, kMtp,
+                                     [&](bool ok) {
+                                         BOOST_CHECK(ok);
+                                         ++completions;
+                                     }};
+    BOOST_CHECK(worker.Enqueue(with_mtp));
+    BOOST_CHECK(WaitFor([&] { return completions.load() == 1; }));
+    BOOST_CHECK_EQUAL(seen_mtp.load(), 1);
+    BOOST_CHECK_EQUAL(seen_nullopt.load(), 0);
+
+    MatMulVerifyWorker::Job without_mtp{MakeBlock(2), /*height=*/42, std::nullopt,
+                                        [&](bool ok) {
+                                            BOOST_CHECK(!ok);
+                                            ++completions;
+                                        }};
+    BOOST_CHECK(worker.Enqueue(without_mtp));
+    BOOST_CHECK(WaitFor([&] { return completions.load() == 2; }));
+    BOOST_CHECK_EQUAL(seen_nullopt.load(), 1);
+}
+
+// LT tip-verify pending / budget knobs height-select when DRLT is live.
+BOOST_AUTO_TEST_CASE(lt_tip_verify_budget_knobs)
+{
+    Consensus::Params params;
+    params.nMatMulMaxPendingVerifications = 16;
+    params.nMatMulLTMaxPendingVerifications = 2;
+    params.nMatMulV4Height = 1;
+    params.nMatMulBMX4CHeight = 1; // IsDRLTActive requires IsBMX4CActive
+    params.nMatMulDRLTHeight = 100;
+    params.nMatMulV4GlobalVerifyBudgetPerMin = 4;
+    params.nMatMulV4PeerVerifyBudgetPerMin = 2;
+    params.nMatMulLTGlobalVerifyBudgetPerMin = 1;
+    params.nMatMulLTPeerVerifyBudgetPerMin = 1;
+    params.nMatMulGlobalVerifyBudgetPerMin = 512;
+    params.nMatMulPeerVerifyBudgetPerMin = 32;
+
+    // Below DRLT: v4 (or v3) caps apply; LT knobs stay inert.
+    BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(params, /*reference_height=*/50), 16U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulGlobalVerifyBudgetPerMin(params, 50), 4U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/false, 50), 2U);
+    BOOST_CHECK(CanStartMatMulVerification(15, params, 50));
+    BOOST_CHECK(!CanStartMatMulVerification(16, params, 50));
+
+    // At/above DRLT: LT tip-verify knobs apply (tighter pending + budgets).
+    BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(params, 100), 2U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulGlobalVerifyBudgetPerMin(params, 100), 1U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/false, 100), 1U);
+    BOOST_CHECK(CanStartMatMulVerification(1, params, 100));
+    BOOST_CHECK(!CanStartMatMulVerification(2, params, 100));
+
+    // DRLT disabled (INT32_MAX): LT knobs never select, even at high height.
+    params.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(params, 1'000'000), 16U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulGlobalVerifyBudgetPerMin(params, 1'000'000), 4U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

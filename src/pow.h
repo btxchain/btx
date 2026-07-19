@@ -267,8 +267,9 @@ bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consen
  *  (single-slot Chat is not the seal preimage). `parent_median_time_past` MUST
  *  be supplied so every window slot re-derives V3 seeds under the same parent
  *  MTP rule as ContextualCheckBlockHeader (adversarial LT-Q2); missing MTP
- *  fails closed. Async EncDr workers must not enqueue seal-mode heights
- *  (ClassifyMatMulEncDrRecompute returns nullopt) so validation always has MTP. */
+ *  fails closed. Async EncDr workers enqueue seal-mode heights only when the
+ *  dispatcher can supply parent MTP under cs_main (ClassifyMatMulEncDrRecompute
+ *  threads MTP into MatMulVerifyWorker::Job). */
 bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params& params,
                                     int32_t block_height,
                                     std::optional<int64_t> parent_median_time_past = std::nullopt);
@@ -435,13 +436,18 @@ MatMulPhase2Punishment RegisterMatMulPhase2Failure(
 // that do not supply a height.
 uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd, int32_t reference_height = -1);
 uint32_t EffectiveMatMulGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height = -1);
+/** Height-selected pending EncDr concurrency cap: LT tip-verify
+ *  (nMatMulLTMaxPendingVerifications) when IsDRLTActive, else
+ *  nMatMulMaxPendingVerifications. reference_height defaults to -1 (== non-LT). */
+uint32_t EffectiveMatMulMaxPendingVerifications(const Consensus::Params& params, int32_t reference_height = -1);
 bool ConsumeMatMulPeerVerifyBudget(
     MatMulPeerVerificationBudget& budget,
     const Consensus::Params& params,
     std::chrono::steady_clock::time_point now,
     bool is_ibd = false,
     int32_t reference_height = std::numeric_limits<int32_t>::max());
-bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus::Params& params);
+bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus::Params& params,
+                                int32_t reference_height = -1);
 bool ConsumeGlobalMatMulPhase2Budget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
 MatMulSolvePipelineStats ProbeMatMulSolvePipelineStats();
 void ResetMatMulSolvePipelineStats();

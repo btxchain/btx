@@ -66,6 +66,8 @@ Regtest opt-in: `-regtestmatmulltsealaspow` (requires live `-regtestdrltheight`)
 | `nMatMulLTTranscriptBlockSize` | `2` |
 | `nMatMulDRLTAsertRescaleNum/Den` | `1/1` (calibrate from silicon) |
 | `fMatMulLTSealAsPoW` | `false` (Phase B mode; inert without live DRLT) |
+| `nMatMulLTMaxPendingVerifications` | `2` (tip-verify pending; inert while DRLT INT32_MAX) |
+| `nMatMulLT{Global,Peer}VerifyBudgetPerMin` | `1` / `1` (conservative; calibrate via soak) |
 
 Profile enum: `ENC_BMX4C_LT = 4`. Live only when `IsDRLTActive(height)`.
 
@@ -92,7 +94,11 @@ Linker `*_stub.cpp` files remain only for builds with the corresponding `BTX_ENA
 5. MatExpand adversarial review closed on Mix+M11 Extract (internal: done; external C-15 still required)
 6. Tip verify budget with sketch-cache
 7. Header-PoW + authenticated chainwork blockers unchanged
-8. Phase B seal-as-PoW tip-verify budget + seal-binding review if Rank-1 launch requires consensus-bound windows (code implemented; measurement/review still required)
+8. Phase B seal-as-PoW tip-verify budget soak + seal-binding review if Rank-1
+   launch requires consensus-bound windows (async EncDr+MTP + LT pending/budget
+   knobs implemented; run the soak protocol in
+   `doc/btx-matmul-v4.4-lt-adversarial-analysis.md` — no unverified silicon
+   numbers in-tree)
 
 ## Source map
 

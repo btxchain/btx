@@ -493,6 +493,19 @@ struct Params {
      *  activation height: it never widens the surface that is live on a public
      *  net (that stays gated by nMatMulDRLTHeight == INT32_MAX). */
     bool fMatMulLTSealAsPoW{false};
+    /** LT tip-verify concurrency (pending EncDr / seal recomputes). Height-
+     *  selected by EffectiveMatMulMaxPendingVerifications when IsDRLTActive.
+     *  Default 2 — tighter than nMatMulMaxPendingVerifications because a Phase B
+     *  seal recompute is ~Q* sibling EncDr digests. INERT while
+     *  nMatMulDRLTHeight == INT32_MAX. Regtest may raise via params. */
+    uint32_t nMatMulLTMaxPendingVerifications{2};
+    /** LT DoS verify budgets (global / per-peer) when IsDRLTActive. Sized for
+     *  tip-verify of fat EncDr-LT / seal-as-PoW recomputes (honest rate << 1/min).
+     *  Defaults are conservative placeholders pending on-hardware soak; never
+     *  raise a public DRLT height until calibrated. INERT while DRLT is
+     *  INT32_MAX. Regtest defaults to UINT32_MAX (unthrottled). */
+    uint32_t nMatMulLTGlobalVerifyBudgetPerMin{1};
+    uint32_t nMatMulLTPeerVerifyBudgetPerMin{1};
     /** v4.4 ENC-DR regtest-only DIFFERENTIAL-TESTING switch: when true, v4
      *  heights keep the legacy FLAT_SKETCH_INBLOCK carriage (the full 8·m²
      *  sketch in matrix_c_data, Freivalds-verified in-block) instead of the
