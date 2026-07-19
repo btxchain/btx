@@ -216,6 +216,8 @@ void RunBackendRowOrWarn(matmul_v4::accel::Kind accel_kind,
                     return matmul_v4::metal::ComputeDigestAccel(header, tv.n, tv.rounds, digest, payload);
                 case matmul_v4::accel::Kind::HIP:
                     return matmul_v4::hip::ComputeDigestAccel(header, tv.n, tv.rounds, digest, payload);
+                case matmul_v4::accel::Kind::ASCEND:
+                    return matmul_v4::ascend::ComputeDigestAccel(header, tv.n, tv.rounds, digest, payload);
                 case matmul_v4::accel::Kind::CPU:
                     return matmul_v4::ComputeDigest(header, tv.n, tv.rounds, digest, payload);
             }
@@ -347,6 +349,14 @@ BOOST_AUTO_TEST_CASE(metal_classifier_admits_m5_int8_tensorops_only)
     BOOST_CHECK_EQUAL(m5.reason, "metal4_int8_tensorops_m5_class");
 }
 
+BOOST_AUTO_TEST_CASE(ascend_classifier_admits_950_cube_candidates)
+{
+    using matmul_v4::backend::ClassifyAscendDevice;
+    BOOST_CHECK(ClassifyAscendDevice("dav-3510").admissible);
+    BOOST_CHECK(ClassifyAscendDevice("Ascend950PR").admissible);
+    BOOST_CHECK(!ClassifyAscendDevice("atlas-200").admissible);
+}
+
 BOOST_AUTO_TEST_CASE(resolve_backend_never_selects_inadmissible_backend)
 {
     using matmul_v4::backend::Kind;
@@ -369,7 +379,7 @@ BOOST_AUTO_TEST_CASE(resolve_backend_never_selects_inadmissible_backend)
     // must be compiled+available+admissible; anything else must have fallen
     // back to CPU with a machine-readable reason (§S.1 — inadmissible
     // devices are verification-only and must never mine).
-    for (const char* name : {"cuda", "nvidia", "metal", "mlx", "apple", "hip", "rocm", "amd"}) {
+    for (const char* name : {"cuda", "nvidia", "metal", "mlx", "apple", "hip", "rocm", "amd", "ascend", "huawei", "npu"}) {
         const auto selection = ResolveBackend(name);
         BOOST_CHECK_MESSAGE(selection.requested_known, name << " should parse");
         const auto eligibility = matmul_v4::backend::EligibilityFor(selection.active);
@@ -387,10 +397,12 @@ BOOST_AUTO_TEST_CASE(resolve_backend_never_selects_inadmissible_backend)
     BOOST_CHECK(ResolveBackend("mlx").requested == Kind::METAL);
     BOOST_CHECK(ResolveBackend("rocm").requested == Kind::HIP);
     BOOST_CHECK(ResolveBackend("nvidia").requested == Kind::CUDA);
+    BOOST_CHECK(ResolveBackend("ascend").requested == Kind::ASCEND);
+    BOOST_CHECK(ResolveBackend("huawei").requested == Kind::ASCEND);
 
     // AllEligibility covers every backend exactly once, CPU first.
     const auto all = matmul_v4::backend::AllEligibility();
-    BOOST_REQUIRE_EQUAL(all.size(), 4U);
+    BOOST_REQUIRE_EQUAL(all.size(), 5U);
     BOOST_CHECK(all[0].first == Kind::CPU);
     for (const auto& [kind, eligibility] : all) {
         BOOST_CHECK_MESSAGE(!eligibility.reason.empty(),
@@ -491,6 +503,7 @@ BOOST_AUTO_TEST_CASE(runtime_dispatch_equals_certification_registry)
             case Kind::CUDA: return matmul_v4::backend::Kind::CUDA;
             case Kind::METAL: return matmul_v4::backend::Kind::METAL;
             case Kind::HIP: return matmul_v4::backend::Kind::HIP;
+            case Kind::ASCEND: return matmul_v4::backend::Kind::ASCEND;
             }
             return matmul_v4::backend::Kind::CPU;
         }();
@@ -602,6 +615,15 @@ BOOST_AUTO_TEST_CASE(cross_backend_digest_determinism)
         "this binary (needs -DBTX_ENABLE_HIP=ON + matmul/accel_v4.h + CDNA MFMA "
         "hardware). HIP is NOT verified for v4 mining by this run — see "
         "doc/matmul-v4-gpu-backends.md (§S.1/§N.3-v).");
+#endif
+
+#if defined(BTX_V4_HAVE_ACCEL_DISPATCH) && defined(BTX_ENABLE_ASCEND) && defined(BTX_HAVE_CANN)
+    RunBackendRowOrWarn(matmul_v4::accel::Kind::ASCEND, matmul_v4::backend::Kind::ASCEND, refs);
+#else
+    SkipOrFailGpuRow(
+        "SKIPPED-PENDING-HARDWARE: Ascend v4 determinism row not compiled into "
+        "this binary (needs -DBTX_ENABLE_ASCEND=ON + CANN + Ascend 950 ExactGemm "
+        "self-qual). See doc/btx-matmul-v4.4-ascend-950-cann-backend.md.");
 #endif
 }
 

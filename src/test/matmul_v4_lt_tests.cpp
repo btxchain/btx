@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <matmul/backend_capabilities_v4.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/accel_v4.h>
 
@@ -9,6 +10,7 @@
 #include <consensus/params.h>
 #include <crypto/common.h>
 #include <cuda/matmul_v4_lt_accel.h>
+#include <ascend/matmul_v4_lt_accel.h>
 #include <hip/matmul_v4_lt_accel.h>
 #include <metal/matmul_v4_lt_accel.h>
 #include <pow.h>
@@ -209,6 +211,21 @@ BOOST_AUTO_TEST_CASE(matexpand_chacha_prf_golden_vectors)
         const int8_t got = lt::ExtractDequantMatExpand(c.raw, c.i, c.j, prf_key);
         BOOST_CHECK_EQUAL(static_cast<int>(got), static_cast<int>(c.expected));
         BOOST_CHECK(got >= -48 && got <= 48);
+        // Accel host replica must track CPU goldens (CUDA/HIP kernels twin this).
+        BOOST_CHECK_EQUAL(static_cast<int>(lt::ExtractDequantMatExpandAccelReplica(
+                              c.raw, c.i, c.j, prf_key)),
+                          static_cast<int>(c.expected));
+    }
+
+    // Broader parity grid: replica == normative Extract for many (raw,i,j).
+    for (int32_t raw : {0, 1, -1, 7, -7, 97, -97, 1000, -1000, 1 << 20, -(1 << 20)}) {
+        for (uint32_t i = 0; i < 5; ++i) {
+            for (uint32_t j = 0; j < 5; ++j) {
+                const int8_t cpu = lt::ExtractDequantMatExpand(raw, i, j, prf_key);
+                const int8_t accel = lt::ExtractDequantMatExpandAccelReplica(raw, i, j, prf_key);
+                BOOST_CHECK_EQUAL(static_cast<int>(cpu), static_cast<int>(accel));
+            }
+        }
     }
 
     auto header = MakeLTHeader(0xdeadbeefULL, kTestDim);
@@ -881,6 +898,27 @@ BOOST_AUTO_TEST_CASE(slot_id_seed_and_leaf_binding)
                 lt::CommitWindowSlotLeaf(id0, uint256::ONE));
 }
 
+BOOST_AUTO_TEST_CASE(ascend_exactgemm_stub_inert_default_build)
+{
+    // Default CI / no CANN: Ascend ExactGemm must stay fail-closed.
+    BOOST_CHECK(!matmul_v4::ascend::IsAscendExactGemmAvailable());
+    std::vector<int8_t> a(16, 1), b(16, 2);
+    std::vector<int32_t> out;
+    bool used_cube = true;
+    BOOST_CHECK(!matmul_v4::ascend::ExactGemmS8S8Ascend(a, b, 4, 4, 4, out, &used_cube));
+    BOOST_CHECK(!used_cube);
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!matmul_v4::ascend::TryLaunchLtCubeGemmS8S8(a, b, 4, 4, 4, out));
+    std::vector<matmul::v4::lt::DigestOnlyResultLT> digests;
+    const uint64_t nonce = 1;
+    CBlockHeader hdr;
+    BOOST_CHECK(!matmul_v4::ascend::ComputeDigestsOnlyLTAscend(hdr, 64, &nonce, 1, digests));
+    BOOST_CHECK(digests.empty());
+    const auto elig = matmul_v4::backend::EligibilityFor(matmul_v4::backend::Kind::ASCEND);
+    BOOST_CHECK(!elig.admissible);
+    BOOST_CHECK(matmul_v4::backend::ResolveBackend("ascend").active == matmul_v4::backend::Kind::CPU);
+}
+
 BOOST_AUTO_TEST_CASE(lt_accel_entry_bit_identity_or_stub_decline)
 {
     // ENABLE=OFF stubs decline; with calibrated GPU, digests must match CPU.
@@ -916,6 +954,8 @@ BOOST_AUTO_TEST_CASE(lt_accel_entry_bit_identity_or_stub_decline)
                   &matmul_v4::hip::ComputeDigestsOnlyLTHip);
     check_backend(matmul_v4::metal::IsMatMulLTMetalAvailable(),
                   &matmul_v4::metal::ComputeDigestsOnlyLTMetal);
+    check_backend(matmul_v4::ascend::IsAscendExactGemmAvailable(),
+                  &matmul_v4::ascend::ComputeDigestsOnlyLTAscend);
 
     uint256 d;
     std::vector<unsigned char> payload;
