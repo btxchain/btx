@@ -84,12 +84,22 @@ struct LtCudaExactGemmCapabilities {
 namespace matmul_v4::hip {
 
 /** True iff hipBLASLt/rocBLAS s8×s8→s32 (INT32 accumulate) executed and matched
- *  ExactGemmS8S8. Never true for scalar device-ALU tiles alone. */
+ *  ExactGemmS8S8 (square + MatExpand panel). Never true for scalar device-ALU
+ *  tiles alone. Target arches: gfx942 (MI300), gfx950 (MI350) via
+ *  BTX_HIP_ARCHITECTURES. */
 [[nodiscard]] bool IsLtMfmaGemmAvailable();
 [[nodiscard]] bool TryLaunchLtMfmaGemmS8S8(const std::vector<int8_t>& left,
                                            const std::vector<int8_t>& right,
                                            uint32_t rows, uint32_t inner, uint32_t cols,
                                            std::vector<int32_t>& out);
+
+/** Device-resident MFMA s8xs8→s32 on existing device pointers (row-major).
+ *  `stream` may be nullptr (default stream). Returns false → caller MUST use
+ *  scalar DeviceGemm* and MUST NOT claim MFMA. */
+[[nodiscard]] bool TryLaunchLtMfmaGemmS8S8Device(const int8_t* dA, const int8_t* dB, int32_t* dC,
+                                                 uint32_t rows, uint32_t cols, uint32_t inner,
+                                                 void* stream /* hipStream_t */);
+
 [[nodiscard]] bool TryLaunchLtMfmaGemmS32S8(const std::vector<int32_t>& left,
                                             const std::vector<int8_t>& right,
                                             uint32_t rows, uint32_t inner, uint32_t cols,
@@ -110,6 +120,38 @@ namespace matmul_v4::hip {
 
 namespace matmul_v4::metal {
 
+/** Named Apple Silicon classes for logging / capabilities JSON (PR #89).
+ *  M4-class = pre-M5 GPU / ANE (ALU ExactGemm only; no INT8 TensorOps).
+ *  M5-class = Metal 4 mpp::tensor_ops INT8→INT32 neural accelerators. */
+enum class LtMetalArchNameClass : uint8_t {
+    Unknown = 0,
+    M4Class = 1,
+    M5Class = 2,
+    Other = 3,
+};
+
+struct LtMetalArchProbe {
+    bool available{false};
+    std::string device_name;
+    LtMetalArchNameClass name_class{LtMetalArchNameClass::Unknown};
+    std::string name_class_string; // m4_class / m5_class / unknown / other
+    bool metal4_tensor_ops_compile_ok{false};
+};
+
+/** Miner-local ExactGemm capability snapshot (never conflates ALU with TensorOps). */
+struct LtMetalExactGemmCapabilities {
+    bool exact_s8_s8_s32{false};          // MPP TensorOps self-qualified
+    bool exact_partitioned_s32_s8{false}; // TensorOps s32xs8 via base-256 limbs
+    bool device_alu_gemm{false};          // MSL integer ALU tiles available
+    bool device_hashing{false};           // false: digest still host-side
+    LtMetalArchProbe arch{};
+};
+
+[[nodiscard]] LtMetalArchProbe ProbeLtMetalArch();
+[[nodiscard]] LtMetalExactGemmCapabilities ProbeLtMetalExactGemmCapabilities();
+
+/** True iff Metal 4 mpp::tensor_ops::matmul2d INT8→INT32 passed ExactGemm
+ *  self-qual. Never true for plain ALU shaders alone. */
 [[nodiscard]] bool IsLtTensorOpsGemmAvailable();
 [[nodiscard]] bool TryLaunchLtTensorOpsGemmS8S8(const std::vector<int8_t>& left,
                                                 const std::vector<int8_t>& right,

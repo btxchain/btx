@@ -607,9 +607,32 @@ BOOST_AUTO_TEST_CASE(lt_tensor_gemm_availability_and_arch_probe)
     }
 #endif
 
+#if !defined(BTX_ENABLE_HIP)
+    // CPU / non-HIP builds: MFMA and device-ALU flags must stay fail-closed.
     BOOST_CHECK(!matmul_v4::hip::IsLtMfmaGemmAvailable());
     BOOST_CHECK(!matmul_v4::hip::IsLtDeviceAluGemmAvailable());
+#else
+    // HIP builds: MFMA true only after hipBLASLt/rocBLAS ExactGemm match;
+    // device ALU is a separate honest flag (never implies MFMA).
+    if (matmul_v4::hip::IsLtMfmaGemmAvailable()) {
+        BOOST_CHECK(matmul_v4::hip::IsLtMfmaGemmAvailable());
+    }
+#endif
+    const auto metal_arch = matmul_v4::metal::ProbeLtMetalArch();
+    BOOST_CHECK(!metal_arch.name_class_string.empty());
+    const auto metal_caps = matmul_v4::metal::ProbeLtMetalExactGemmCapabilities();
+    BOOST_CHECK_EQUAL(metal_caps.device_hashing, false);
+#if !defined(BTX_ENABLE_METAL)
     BOOST_CHECK(!matmul_v4::metal::IsLtTensorOpsGemmAvailable());
+    BOOST_CHECK(!metal_caps.exact_s8_s8_s32);
+    BOOST_CHECK_EQUAL(metal_arch.name_class_string, "unknown");
+#else
+    if (!matmul_v4::metal::IsLtTensorOpsGemmAvailable()) {
+        BOOST_CHECK(!metal_caps.exact_s8_s8_s32);
+    } else {
+        BOOST_CHECK(metal_caps.exact_s8_s8_s32);
+    }
+#endif
 
     std::vector<int8_t> a(16, 1), b(16, 2);
     std::vector<int32_t> out;
@@ -619,14 +642,28 @@ BOOST_AUTO_TEST_CASE(lt_tensor_gemm_availability_and_arch_probe)
 #else
         (void)matmul_v4::cuda::TryLaunchLtImmaGemmS8S8(a, b, 4, 4, 4, out);
 #endif
+#if !defined(BTX_ENABLE_HIP)
         BOOST_CHECK(!matmul_v4::hip::TryLaunchLtMfmaGemmS8S8(a, b, 4, 4, 4, out));
         BOOST_CHECK(!matmul_v4::hip::TryLaunchLtDeviceAluGemmS8S8(a, b, 4, 4, 4, out));
+        BOOST_CHECK(!matmul_v4::hip::TryLaunchLtMfmaGemmS8S8Device(
+            nullptr, nullptr, nullptr, 4, 4, 4, nullptr));
+#else
+        (void)matmul_v4::hip::TryLaunchLtMfmaGemmS8S8(a, b, 4, 4, 4, out);
+        (void)matmul_v4::hip::TryLaunchLtDeviceAluGemmS8S8(a, b, 4, 4, 4, out);
+#endif
+#if !defined(BTX_ENABLE_METAL)
         BOOST_CHECK(!matmul_v4::metal::TryLaunchLtTensorOpsGemmS8S8(a, b, 4, 4, 4, out));
+#else
+        (void)matmul_v4::metal::TryLaunchLtTensorOpsGemmS8S8(a, b, 4, 4, 4, out);
+#endif
     }
 
     // S32S8 IMMA always declines — scalar DeviceGemmS32S8Tiled / CPU ExactGemm remain.
     std::vector<int32_t> mid(16, 3);
     BOOST_CHECK(!matmul_v4::cuda::TryLaunchLtImmaGemmS32S8(mid, b, 4, 4, 4, out));
+#if !defined(BTX_ENABLE_HIP)
+    BOOST_CHECK(!matmul_v4::hip::TryLaunchLtMfmaGemmS32S8(mid, b, 4, 4, 4, out));
+#endif
 #if !defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
     BOOST_CHECK(!matmul_v4::cuda::LtLastS8S8UsedImma());
 #endif

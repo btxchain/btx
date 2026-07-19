@@ -14,32 +14,29 @@
 
 class CBlockHeader;
 
-// ---------------------------------------------------------------------------
 // Apple Metal backend for MatMul v4.4 ENC-DR-LT (MatExpand).
-//
- // Digests are bit-identical to matmul::v4::lt::ComputeDigestBMX4CLT.
- // When a Metal device is present and the GEMM self-test passes, MatExpand's
- // dense GEMMs run on device via ExactGemmBackend with persistent MTLBuffer
- // scratch reuse (cross-call). Projection / combine / digest remain on the
- // shared host routines for this backend; host ExactGemm /
- // WindowSketchMinerLT is the fail-closed fallback when Metal declines —
- // not a claim that host ExactGemm is the complete accelerator (CUDA/HIP
- // carry the fuller device-resident MatExpand→project→combine loop).
- //
- // Linker stub when Metal is unavailable.
-// ---------------------------------------------------------------------------
+// Digests bit-identical to ComputeDigestBMX4CLT. s8xs8 prefers MPP TensorOps
+// after ExactGemm self-qual; else MSL ALU. Never label ALU as TensorOps.
 
 namespace matmul_v4::metal {
 
-/** True iff Metal is enabled, a device is present, pipelines built, and the
- *  one-time ExactGemm bit-exactness self-test passed. */
 [[nodiscard]] bool IsMatMulLTMetalAvailable();
 
-/** Digest-only ENC-DR-LT mining entry. Digests are byte-identical to
- *  ComputeDigestBMX4CLT. Falls back to host ExactGemm when Metal declines. */
+[[nodiscard]] bool LaunchGemmS8S8(const std::vector<int8_t>& left,
+                                  const std::vector<int8_t>& right,
+                                  uint32_t rows, uint32_t inner, uint32_t cols,
+                                  std::vector<int32_t>& out);
+[[nodiscard]] bool LaunchGemmS32S8(const std::vector<int32_t>& left,
+                                   const std::vector<int8_t>& right,
+                                   uint32_t rows, uint32_t inner, uint32_t cols,
+                                   std::vector<int32_t>& out);
+
 [[nodiscard]] bool ComputeDigestsOnlyLTMetal(const CBlockHeader& tmpl, uint32_t n,
                                              const uint64_t* nonces, size_t count,
                                              std::vector<matmul::v4::lt::DigestOnlyResultLT>& out);
+
+/** True iff most recent LaunchGemmS8S8 used MPP TensorOps (not ALU). */
+[[nodiscard]] bool LtLastS8S8UsedTensorOps();
 
 } // namespace matmul_v4::metal
 

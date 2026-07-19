@@ -30,9 +30,20 @@ Living implementation notes for miner-local ExactGemm backends. Consensus remain
 
 ## AMD ROCm / HIP (MI300 / MI350)
 
-- Prefer hipBLASLt / rocBLAS integer GEMM with INT32 accumulate when linked.
-- `IsLtMfmaGemmAvailable` must mean actual MFMA/hipBLASLt path executed + ExactGemm match — not scalar ALU self-test.
-- Target arches via `BTX_HIP_ARCHITECTURES` (e.g. gfx942).
+| Arch | ISA | Notes |
+|---|---|---|
+| MI300X / MI300A | gfx942 | CDNA3 MFMA i8→i32 via hipBLASLt `HIPBLAS_COMPUTE_32I` or rocBLAS `gemm_ex` |
+| MI350 / MI355 | gfx950 | CDNA4; same integer ExactGemm path; set via `BTX_HIP_ARCHITECTURES` |
+
+**Implemented (this branch):**
+
+1. **hipBLASLt `HIPBLAS_COMPUTE_32I` (preferred) / rocBLAS `gemm_ex` i8×i8→i32** (`matmul_v4_lt_tensor_gemm.hip`): host + **device-pointer** s8xs8→s32; multi-shape self-test vs `ExactGemmS8S8` (square 32×32 + MatExpand panel `n×n · n×kMatExpandPanelW`). `IsLtMfmaGemmAvailable()` is true only after that match. Scalar tiles are `IsLtDeviceAluGemmAvailable` only — never MFMA.
+2. **LT ExactGemmBackend / `LaunchGemmS8S8`**: MFMA first; device ALU / pooled scalar tile on decline. `LtLastS8S8UsedMfma()` reports which path ran. `MakeResolvedExactGemmBackend` injects `LaunchGemm*` (not MFMA-only Try*).
+3. **Device-resident MatExpand** (`matmul_v4_lt_accel.hip`): when MFMA available, G\*W / U\*Ahat / Bhat\*V use `TryLaunchLtMfmaGemmS8S8Device` on persistent buffers; Y\*H stays scalar s32xs8 (no MFMA recipe — never claimed). Scalar hipGraphs remain the non-MFMA path.
+4. **CMake**: `BTX_ENABLE_HIP=ON` requires explicit `BTX_HIP_ARCHITECTURES` (e.g. `gfx942;gfx950`). Optional `BTX_HAVE_HIPBLASLT` / `BTX_HAVE_ROCBLAS` probes; without libs MFMA flag stays false and device ALU may still qualify.
+5. **Fail closed when HIP off**: stubs keep `IsLtMfmaGemmAvailable` / `IsLtDeviceAluGemmAvailable` / `LaunchGemm*` false.
+
+**Honest stubs:** native block-scaled MXFP4 on MI300/MI350 remains hardware-gated. Consensus remains CPU; activation stays `INT32_MAX`.
 
 ## Huawei Ascend 950 (昇腾)
 
@@ -56,7 +67,20 @@ Sources (Chinese CANN ecosystem):
 
 ## Apple Metal
 
-Existing LT ExactGemm + MPP TensorOps stubs; keep M4/M5 records separate.
+| Class | Silicon | ExactGemm lane | Capability string |
+|---|---|---|---|
+| **M4-class** (pre-M5) | M1–M4 GPU / ANE | MSL integer ALU ExactGemm only (verification / pooled ALU) | `m4_class` — **never** advertise TensorOps |
+| **M5-class** | M5 GPU Neural Accelerators | Metal 4 `mpp::tensor_ops::matmul2d` INT8→INT32 (MPP) | `m5_class` + `exact_s8_s8_s32` only after ExactGemmS8S8 self-qual |
+
+**Implemented (this branch):**
+
+1. **MPP TensorOps ExactGemm** (`metal/matmul_v4_lt_tensor_gemm.mm`): runtime metal4.0 compile of `matmul_v4_lt_s8_gemm_s32_tensor`; self-test vs `ExactGemmS8S8` (square + MatExpand panel). `IsLtTensorOpsGemmAvailable()` is true **only** after that match — never from ALU shaders alone.
+2. **LT ExactGemmBackend / `LaunchGemmS8S8`**: TensorOps first; MSL ALU `gemm_s8s8` only on decline. `LtLastS8S8UsedTensorOps()` reports which path ran (`used_tensor_path` honesty).
+3. **S32S8**: TensorOps always declines (no dedicated recipe); ALU `gemm_s32s8` / CPU ExactGemmS32S8 remain.
+4. **Arch probe**: `ProbeLtMetalArch` / `ProbeLtMetalExactGemmCapabilities` → `m4_class` / `m5_class` (compile evidence preferred over device-name soft map).
+5. **Env kill-switch**: `BTX_MATMUL_V4_LT_TENSOR_OPS=0` forces TensorOps decline (ALU may still run).
+
+**Honest stubs (non-Apple CI):** `matmul_v4_lt_accel_stub.cpp` + tensor_gemm stub under `!BTX_ENABLE_METAL` decline all entry points; tests expect TensorOps unavailable.
 
 ## Production wiring
 

@@ -503,8 +503,9 @@ matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
         backend.gemm_s32s8 = &matmul_v4::cuda::LaunchGemmS32S8;
         break;
     case Kind::HIP:
-        backend.gemm_s8s8 = &matmul_v4::hip::TryLaunchLtMfmaGemmS8S8;
-        backend.gemm_s32s8 = &matmul_v4::hip::TryLaunchLtMfmaGemmS32S8;
+        // LaunchGemm* prefers hipBLASLt/rocBLAS MFMA then device ALU tiles.
+        backend.gemm_s8s8 = &matmul_v4::hip::LaunchGemmS8S8;
+        backend.gemm_s32s8 = &matmul_v4::hip::LaunchGemmS32S8;
         break;
     case Kind::METAL:
         backend.gemm_s8s8 = &matmul_v4::metal::TryLaunchLtTensorOpsGemmS8S8;

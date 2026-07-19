@@ -64,6 +64,12 @@ bool TryLaunchLtMfmaGemmS8S8(const std::vector<int8_t>&, const std::vector<int8_
     return false;
 }
 
+bool TryLaunchLtMfmaGemmS8S8Device(const int8_t*, const int8_t*, int32_t*,
+                                   uint32_t, uint32_t, uint32_t, void*)
+{
+    return false;
+}
+
 bool TryLaunchLtMfmaGemmS32S8(const std::vector<int32_t>&, const std::vector<int8_t>&,
                               uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
 {
@@ -89,6 +95,21 @@ bool TryLaunchLtDeviceAluGemmS32S8(const std::vector<int32_t>&, const std::vecto
 
 #if !defined(BTX_ENABLE_METAL)
 namespace matmul_v4::metal {
+
+LtMetalArchProbe ProbeLtMetalArch()
+{
+    LtMetalArchProbe out;
+    out.name_class = LtMetalArchNameClass::Unknown;
+    out.name_class_string = "unknown";
+    return out;
+}
+
+LtMetalExactGemmCapabilities ProbeLtMetalExactGemmCapabilities()
+{
+    LtMetalExactGemmCapabilities caps;
+    caps.arch = ProbeLtMetalArch();
+    return caps;
+}
 
 bool IsLtTensorOpsGemmAvailable() { return false; }
 
