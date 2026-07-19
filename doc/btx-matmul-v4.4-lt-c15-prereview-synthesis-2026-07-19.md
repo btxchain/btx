@@ -65,8 +65,21 @@ FMM calibration of ASERT vs naive GEMM.
 | Full-width `(i,j)` salt | CPU/CUDA/HIP + AccelReplica + high-half test |
 | LT-Q1/Q2 “review pending”; P(0)≈9.1%; MatExpand `O(n²·w)` | Docs + lt-gate G5 wording |
 
+## Reduction research status (2026-07-19)
+
+Wave-1 reduction mapping is **in progress** (fine-grained complexity survey,
+crypto/PoW named-assumption survey, reduction sketches with explicit gaps,
+obstruction write-ups). **No reduction** of LT-C15 / MatExpand non-collapse to
+a standard named problem (SETH, OV, APSP, 3SUM, KW secret low-rank, ChaCha20-PRF
+alone, Freivalds soundness, …) is claimed or completed.
+
+What *is* formalized: novel unreduced assumption **`BTX-C15-NonCollapse-v1`**
+in packet §0.2 (game = §0.1; witness ≠ proof). Reviewer pointer:
+`contrib/matmul-c15-reviewer-kit/named-assumption.md`.
+
 ## Explicit non-claims
 
 - C-15 closed
 - Finite public `nMatMulDRLTHeight`
 - ChaCha-PRF alone as a MatExpand MAC lower bound
+- Reduction of `BTX-C15-NonCollapse-v1` to any classical / fine-grained named conjecture
