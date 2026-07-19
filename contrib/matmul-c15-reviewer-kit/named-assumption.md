@@ -47,7 +47,7 @@ Same assumption; two break modes. **C-15 remains OPEN.**
 
 - `reference_extract.py` / `test-vectors.json` — reproduce normative Extract
 - `toy_attack_harness.py --degree 3` — smoke affine / deg-1..3 collapse at toy `n`
-- `reduction-attack-checklist.md` — firm attacks mapped to §0.1 FAIL
+- `reduction-attack-checklist.md` — firm attacks mapped to §0.1 FAIL (**§LFR** linear Freivalds rewrite taxonomy)
 - In-tree `matmul_v4_lt_tests` — denser **witnesses** (optional node build)
 
 All of the above are **witnesses**. Breaking (or carefully ruling out) the

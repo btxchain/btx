@@ -129,6 +129,59 @@ Review defaults: `δ = 1/2`, `ε = 2⁻⁴⁰`. Do not silently retune.
 
 ---
 
+## LFR — Linear Freivalds rewrite taxonomy (GAP-B1)
+
+**Scope.** Packet C15-B / Sketch B: Freivalds (or sketch) probes that are
+**linear in `B̂`** rewrite as probes on `G,W,H` alone (or a cheap fold of
+panels), yielding accepting digests at `≤ (1−δ)·HonestMAC`. The classical
+write-ups cover only **affine entrywise** and **shared-φ** residues; this
+table classifies the wider linear-rewrite surface firms must probe.
+
+**Status labels (per subclass).**
+
+| Label | Meaning |
+|---|---|
+| **theorem** | Normative / algebraic fact under stated hypotheses (consensus pin, exact identity, or IdealExtract/PRF fragment). Still **not** a C-15 close. |
+| **heuristic** | Plausible obstruction or attack shape; empirics / witnesses only; Sketch B full-rank claim remains unproven (`PositionSalted-FullRank-Heuristic-v1`). |
+
+Completing every row with **negative** evidence is **PASS for that subclass
+only**, not a theorem for unrestricted adversaries, and **does not** authorize
+raising `nMatMulDRLTHeight`.
+
+| ID | Subclass (beyond / including affine·shared-φ) | Status | Oracle / FAIL surface | Checklist link |
+|---|---|---|---|---|
+| **LFR-0** | Legacy thin-panel L1: Extract omitted or replaced by linear `Fold` of `B32=GWH` | **theorem** | Probes reassociate through `G,W,H`; ~`n/w≈32×` vs dense ExactGemm. Extract is **necessary** vs this class; sufficiency unproven. | packet §1.1 |
+| **LFR-1** | Affine entrywise `B̂[i,j]≈α·B32[i,j]+β` (global or per-panel) | **heuristic** empirics; IdealExtract/PRF ⇒ no dense match is a **theorem fragment** only | R² / match on ≥`N=10⁶` **and** Freivalds-usable rewrite at half-cost | A1 |
+| **LFR-2** | Shared-φ / Simon-style `φ∘(GWH)` spectral residue, effective rank `≲w` | **heuristic** (`PositionSalted-FullRank-Heuristic-v1`; GAP-B2) | Numerical/modular rank ≪`n` correlated with panels; rewrite cheaper than Expand+BV | A5 |
+| **LFR-3** | Separable / panel-linear bias `α·raw + β_i + γ_j` (or tile-constant offsets) | **heuristic** (same primary FAIL family as LFR-1; not separately reduced) | OLS with row/col dummies; nonzero structure ⇒ attempt L1-style rewrite | A1 |
+| **LFR-4** | Degree-≤2 entrywise polynomial surrogate | **heuristic** empirics; IdealExtract/PRF fragment as in LFR-1 | Deg≤2 R² bar + rewrite; **primary** §0.1 FAIL class | A2 |
+| **LFR-5** | Degree-3 entrywise polynomial surrogate | **heuristic** (§0.2 checklist extension; out of Sketch A arrow) | Deg-3 R² ≳0.05 ⇒ rewrite attempt; reportable even if primary table emphasizes deg≤2 | A2 |
+| **LFR-6** | Truncated `(i,j)` salt / tile keystream equivalence class | **theorem** that normative full-width is required (truncation = consensus-split); collapse under truncation is **heuristic** attack shape | Equivalence-class size vs IdealExtract ~1/23; shared-φ / panel-reuse rewrite | A4 |
+| **LFR-7** | Sketch-projector–induced fold (`U`/`V` create usable structure; rank-transparent projectors) | **heuristic** (GAP-B4: no lemma that projectors cannot *create* structure) | Cheap algebraic form in `(U,V,G,W,H)` matching probes without full Expand | A3, A5 |
+| **LFR-8** | Approx-`B̂` / high-rank but Freivalds-forgery-friendly residual | **heuristic** (GAP-B3) | Multi-probe residuals within soundness at half-cost; systematic accept of forged sketches | A3 |
+| **LFR-9** | Batch-algebra / associativity “past Extract” into `GWH` | **theorem** that exact int associativity *after* Extract does **not** pull panels through Extract (`matexpand_batch_algebra_optimal_equals_full`); any *new* linear fold past Extract remains **heuristic** | BA-A/B witnesses; search for accidental linearization (Q* windows, BA-C) | packet §4 |
+| **LFR-10** | Cached Expand / TMTO / cross-nonce panel reuse feeding linear probes | **heuristic** (state-space / differential cost bounds) | Concrete table or reuse with §0.1 MAC win; speculative infeasible TMTO ≠ FAIL | A6 |
+| **LFR-11** | Related-nonce Mant/Scale XOR as *linear* amortization across cells | Lane identity `Mant(raw)=Scale(raw⊕Δ)` is **theorem** (PRF encoding); GEMM/Freivalds skip is **heuristic** / non-finding to date | Identity tuples + ask whether probes collapse across Δ-mates with MAC savings | A7 |
+
+### How to run the taxonomy
+
+1. For each LFR row, attempt the linked A-attack (or packet BA) at toy `n` then
+   `n∈{64,256,4096}` where feasible.
+2. Record: surrogate agreement / rank / equivalence-class size / Freivalds
+   residuals / exact-int MAC vs `HonestMAC`.
+3. Map to §0.1: only **rewrite + cost win** (or primary surrogate+rewrite) is
+   **FAIL**; distinguisher-only / alphabet concentration without shortcut →
+   **INCONCLUSIVE**.
+4. Do **not** treat LFR-0 necessity of Extract as sufficiency (Sketch B remains
+   open; GAP-B2/B3/B6 untouched by this taxonomy alone).
+
+**Cross-links.** Sketch B / GAP-B1:
+[`doc/btx-matmul-v4.4-lt-c15-reduction-drafts-2026-07-19.md`](../../doc/btx-matmul-v4.4-lt-c15-reduction-drafts-2026-07-19.md);
+Wave-1 gap rank #3:
+[`doc/btx-matmul-v4.4-lt-c15-reduction-research-synthesis-2026-07-19.md`](../../doc/btx-matmul-v4.4-lt-c15-reduction-research-synthesis-2026-07-19.md).
+
+---
+
 ## Kit commands (build-free)
 
 ```bash

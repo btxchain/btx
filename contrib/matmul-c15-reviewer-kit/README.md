@@ -16,7 +16,7 @@ GO, or permission to raise `nMatMulDRLTHeight`.
 | `toy_attack_harness.py` | Toy-`n` synthetic MatExpand + poly R² for deg 1..`--degree` (default 3) + Freivalds residual |
 | `rank_spectral_regression.md` | `rank(B32) ≤ w` note and smoke procedure |
 | `named-assumption.md` | Pointer to packet **§0.2** (`BTX-C15-NonCollapse-v1`, unreduced) |
-| `reduction-attack-checklist.md` | Step-by-step firm attacks mapped to §0.1 FAIL |
+| `reduction-attack-checklist.md` | Step-by-step firm attacks mapped to §0.1 FAIL; **LFR taxonomy** (linear Freivalds rewrites beyond affine/shared-φ; heuristic vs theorem) |
 
 ## Requirements
 
