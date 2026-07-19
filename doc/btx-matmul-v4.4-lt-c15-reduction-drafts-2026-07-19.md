@@ -55,6 +55,13 @@ tagged **GAP**.
 > sample ] ≤ ε_surr`  
 > with `ε_surr ≪ ε` (packet Freivalds advantage threshold).
 
+**Canonical write-up (Wave 3 Gap #2):**  
+[`doc/btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md`](btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md)
+— restated lemma, MatExpand nonce-packing PRF hybrid outline (H0–H3),
+related-nonce absorbed into `Adv_ExtractStruct`, quantitative agreement ⇒ Adv
+map, master **GAP-EN1..EN10**. Inline text below is kept for sketch continuity;
+prefer the canonical file for firm citations. **Still unproven; C-15 OPEN.**
+
 ### Sketch steps
 
 1. Let `A` be a §0.1 FAIL adversary in the **primary FAIL class** (affine /
@@ -72,7 +79,9 @@ tagged **GAP**.
    Extract via the oracle, and compares agreement rate vs the recovered `φ`.
    - **GAP-A2:** Hybrid from “real Extract” to “IdealExtract / random
      function” under the *exact* MatExpand nonce packing (related-`raw`,
-     Mant/Scale related-nonce XOR, remix) is **not** written.
+     Mant/Scale related-nonce XOR, remix) — **outline now in**
+     `doc/btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md` §3–§4
+     (H0–H3; related-nonce → ExtractStruct). Outline ≠ discharged proof.
 4. If agreement remains high under a true random function, contradict
    `Extract-Nonlinearity-v1` (lemma break, not necessarily ChaCha break).
 5. If agreement collapses under IdealExtract but stays high under ChaCha,
@@ -96,8 +105,8 @@ FAIL into a primitive/lemma break.
 | ID | Gap |
 |---|---|
 | **GAP-A1** | Surrogate extraction from general PPT (not oracle-published `φ`). |
-| **GAP-A2** | PRF hybrid under MatExpand nonce packing / related-nonce / remix. |
-| **GAP-A3** | Quantitative: when does high `φ`-agreement imply PRF advantage vs lemma break? |
+| **GAP-A2** | PRF hybrid under MatExpand nonce packing / related-nonce / remix — **outline** in extract-nonlinearity-v1 note (§3–§4); not proved. |
+| **GAP-A3** | Quantitative: when does high `φ`-agreement imply PRF advantage vs lemma break? — **outline** in extract-nonlinearity-v1 note §5 (GAP-EN7). |
 | **GAP-A4** | Deg≤2 only; deg≥3 / spectral / TMTO adversaries out of scope for this arrow. |
 | **GAP-A5** | Freivalds-usable rewrite through `G,W,H` after surrogate match not reduced to a named lemma (needs Sketch B link). |
 | **GAP-A6** | Cost accounting: distinguishing game must not burn more MACs than the reduction budget allows. |

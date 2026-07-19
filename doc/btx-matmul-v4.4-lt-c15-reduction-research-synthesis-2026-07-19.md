@@ -74,6 +74,7 @@ not as a ChaCha-PRF break and not as MatExpand amortization.
 | [`doc/btx-matmul-v4.4-lt-c15-reduction-drafts-2026-07-19.md`](btx-matmul-v4.4-lt-c15-reduction-drafts-2026-07-19.md) | Sketches A–E + explicit GAP lists |
 | [`doc/btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md`](btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md) | C-15 hardness vs ASERT/FMM efficiency (orthogonal) |
 | [`doc/btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md`](btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md) | Mant/Scale lane-XOR → ExtractStruct |
+| [`doc/btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md`](btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md) | Wave 3 Gap #2: EN-v1 + PRF hybrid outline (DRAFT; C-15 OPEN) |
 | [`doc/btx-matmul-v4.4-lt-c15-qstar-i1-amortization-game-2026-07-19.md`](btx-matmul-v4.4-lt-c15-qstar-i1-amortization-game-2026-07-19.md) | Wave 3 Gap #9: Q*/I1′ direct-sum amortization game (heuristic) |
 | [`doc/btx-matmul-v4.4-lt-c15-prereview-synthesis-2026-07-19.md`](btx-matmul-v4.4-lt-c15-prereview-synthesis-2026-07-19.md) | Dual-panel pre-review (empirical pillars) |
 | `/tmp/c15_wave1_harden_requests.md` | Accumulated packet harden requests (Wave 1) |
@@ -119,7 +120,7 @@ raise height.*
 | Rank | Gap | Falsifiable / tightening deliverable | Source GAP ids |
 |---|---|---|---|
 | **1** | Pin break modes of `BTX-C15-NonCollapse-v1` | Packet wording: structured-surrogate FAIL vs full-digest FAIL both count as assumption breaks | GAP-D1; harden log |
-| **2** | Formalize `Extract-Nonlinearity-v1` + PRF hybrid under MatExpand nonce packing | Stated lemma + hybrid outline (related-nonce absorbed in ExtractStruct); quantitative agreement ⇒ Adv map | GAP-A2/A3; related-nonce note |
+| **2** | Formalize `Extract-Nonlinearity-v1` + PRF hybrid under MatExpand nonce packing | **Landed (DRAFT):** [`btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md`](btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md) — lemma + H0–H3 hybrid + ExtractStruct absorption + Adv map; **GAP-EN1..EN10** remain; **C-15 OPEN** | GAP-A2/A3; related-nonce note |
 | **3** | Taxonomy of “linear Freivalds rewrite” beyond affine/shared-φ | **Wave-3 DONE (doc):** `contrib/matmul-c15-reviewer-kit/reduction-attack-checklist.md` §LFR (LFR-0..11) + heuristic/theorem marks + oracles; does **not** close C-15 / Sketch B | GAP-B1; A3/A5 checklist |
 | **4** | Separate MENC-Lin vs MENC-Unres vs MENC-Cubic in packet language | **Wave-3 DONE (doc):** packet §0.1/§0.2 class-label table + fold naming; **Lin PASS ≠ Unres PASS**; sketch-floor ≠ MatExpand; C-15 OPEN | FG survey §3; harden log |
 | **5** | Related-nonce firm vector pack | ≥32 identity tuples + B32 Δ-collision negative control on small grid | Related-nonce §4; checklist A7 |
