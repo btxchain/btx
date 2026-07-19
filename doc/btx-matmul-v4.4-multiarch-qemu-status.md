@@ -5,8 +5,8 @@
 | Platform | Image / path | Status | Notes |
 |---|---|---|---|
 | `linux/amd64` | `btx-matmul-test:linux_amd64` via Ubuntu `Dockerfile.tests` | **PASS** (2026-07-19) | `matmul*` 550 cases, 0 errors |
-| `linux/arm64` | QEMU buildx Ubuntu 24.04 | **BUILDING** (snapshot 2026-07-19T14:04+09) | ~3% — leveldb / test_util under qemu-aarch64; wrap log only |
-| `linux/riscv64` | QEMU buildx Ubuntu 24.04 | **BUILDING** (snapshot 2026-07-19T14:04+09) | ~60% — `bitcoin_node` RPC units under qemu-riscv64-static |
+| `linux/arm64` | QEMU buildx Ubuntu 24.04 | **FAIL (build)** (snapshot 2026-07-19T14:33+09) | QEMU SIGSEGV (Error 139) compiling leveldb under qemu-aarch64 (`FAIL_qemu_sigsegv`); **not** a matmul* PASS |
+| `linux/riscv64` | QEMU buildx Ubuntu 24.04 | **BUILDING** (snapshot 2026-07-19T14:33+09) | ~75% — `test_btx` PQ suites under qemu-riscv64-static |
 
 Canonical recipe (repo):
 
