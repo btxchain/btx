@@ -10005,6 +10005,25 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
     if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect proof of work");
 
+    // v4.4 Header-PoW commitment format (hardening §4): at unified v4 heights
+    // headers MUST set BTX_HEADER_POW_COMMIT_VERSION_BIT so nNonce is on the wire
+    // and in GetHash(); below the fork the bit is forbidden (preserves 182-byte
+    // identity / genesis goldens). Self-describing — no compile-time wire fork.
+    if (consensusParams.fMatMulPOW) {
+        const bool commit = block.HasHeaderPoWCommitment();
+        if (consensusParams.IsMatMulV4Active(nHeight)) {
+            if (!commit) {
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                     "bad-header-pow-format",
+                                     "matmul v4 header missing HeaderPoW commitment version bit");
+            }
+        } else if (commit) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                 "bad-header-pow-format-premature",
+                                 "HeaderPoW commitment version bit set before matmul v4 activation");
+        }
+    }
+
     // Audit F1: header-PoW spam gate. At v4 heights the header-level PoW check is
     // only `matmul_digest <= target`, and matmul_digest is a self-declared field
     // (not a hash of the header), so header work is forgeable at zero cost -- a

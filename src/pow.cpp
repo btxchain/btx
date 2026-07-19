@@ -3230,16 +3230,22 @@ std::optional<arith_uint256> DeriveMatMulHeaderPoWGateTarget(
 
 bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Params& params)
 {
-    // Audit F1/C1/C2: header-PoW THROTTLE bound to nBits. The preimage is the block
-    // hash (which commits every consensus header field, incl. the self-declared
-    // matmul_digest) concatenated with the DECOUPLED grinding nonce `nNonce`. Since
-    // nNonce is NOT part of ComputeMatMulHeaderHash, an honest miner grinds it
-    // WITHOUT recomputing the matmul. The throttle target is the block's OWN
-    // difficulty target (from nBits) shifted EASIER by the discount, so the header
-    // hash-work required to forge a header is PROPORTIONAL to the chainwork it
-    // claims (audit C2 -- a fixed target would let one easy grind claim arbitrary
-    // ASERT-derived work). This is a rate-limiting throttle, NOT full authentication
-    // of matmul-calibrated chainwork (audit C1 -- SHA << matmul; see the doc).
+    // Audit F1/C1/C2: header-PoW THROTTLE bound to nBits.
+    //
+    // v4.4 commitment format (HasHeaderPoWCommitment): nNonce is already folded
+    // into GetHash(), so the gate is simply GetHash() <= eased_nBits_target.
+    // Grinding nNonce changes block identity; malleated/stripped nonces cannot
+    // keep the same hash.
+    //
+    // Legacy (bit clear): preimage is H(GetHash() || nNonce) with nNonce still
+    // decoupled from GetHash / ComputeMatMulHeaderHash. Kept for transitional
+    // callers; consensus at unified v4 requires the commitment bit, so the live
+    // path is the commitment form.
+    //
+    // nNonce stays OUT of ComputeMatMulHeaderHash either way — honest miners
+    // grind the gate without recomputing the matmul. Throttle target is the
+    // block's OWN nBits target shifted EASIER by the discount (audit C2). This
+    // is a rate-limiting throttle, NOT full chainwork authentication (audit C1).
     // Disabled sentinel: discount == UINT32_MAX -> always passes.
     if (!params.IsMatMulHeaderPoWEnabled()) return true;
     // AUDIT H2: a discount >= 256 (but != the UINT32_MAX "disabled" sentinel) is an
@@ -3252,6 +3258,9 @@ bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Param
     const auto gate_target{
         DeriveMatMulHeaderPoWGateTarget(block.nBits, params.nMatMulHeaderPoWDiscountBits, params.powLimit)};
     if (!gate_target) return false;
+    if (block.HasHeaderPoWCommitment()) {
+        return UintToArith256(block.GetHash()) <= *gate_target;
+    }
     HashWriter hw;
     hw << block.GetHash() << block.nNonce;
     return UintToArith256(hw.GetHash()) <= *gate_target;
@@ -4408,9 +4417,8 @@ uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, 
     //      comfortably covers that burst (default 65536, ~5x margin over the
     //      window) while restoring concrete per-peer accountability (a ~3x
     //      tightening from the old unconditional 200000).
-    // NOTE: fully re-enabling the header-PoW spam throttle still requires putting
-    // the header nonce on the wire (BTX_HEADER_NONCE_ON_WIRE) — a separate
-    // coordinated header-format change, out of scope here.
+    // NOTE: header-PoW wire/identity is the versioned commitment bit
+    // (CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT), not a compile flag.
     if (reference_height < 0 || reference_height < params.nFastMineHeight) {
         return std::max<uint32_t>(base, 200'000U);
     }

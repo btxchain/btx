@@ -65,10 +65,17 @@ BOOST_AUTO_TEST_CASE(header_serialize_roundtrip)
     BOOST_CHECK_EQUAL(decoded.seed_b, header.seed_b);
 }
 
-BOOST_AUTO_TEST_CASE(header_size_is_182_bytes)
+BOOST_AUTO_TEST_CASE(header_size_is_182_bytes_without_commitment)
 {
     const CBlockHeader header = MakeHeader();
+    BOOST_CHECK(!header.HasHeaderPoWCommitment());
     BOOST_CHECK_EQUAL(GetSerializeSize(header), 182U);
+
+    CBlockHeader committed = header;
+    committed.SetHeaderPoWCommitment(true);
+    committed.nNonce = 42;
+    BOOST_CHECK_EQUAL(GetSerializeSize(committed), 186U);
+    BOOST_CHECK(committed.GetHash() != header.GetHash());
 }
 
 // TEST: header_setNull_clears_all

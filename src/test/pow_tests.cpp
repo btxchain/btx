@@ -25,6 +25,7 @@
 #include <util/chaintype.h>
 #include <util/time.h>
 #include <validation.h>
+#include <versionbits.h>
 
 #include <algorithm>
 #include <atomic>
@@ -5006,20 +5007,13 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoWGateTarget_pure_fixed_vectors)
     BOOST_CHECK(*th < *te);
 }
 
-BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_wire_nonce_default_off_and_identity_hash)
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_wire_versioned_commitment_and_identity_hash)
 {
-    // GetHash is always the 182-byte identity image (never folds nNonce), so
-    // HeaderPoW can opt-in later without rewriting genesis / pinned header goldens.
-    // Production default keeps nNonce OFF the P2P wire; cmake
-    // -DBTX_ENABLE_HEADER_NONCE_ON_WIRE=ON flips the wire path for burn-in builds.
+    // v4.4 §4: HeaderPoW wire is version-bit self-describing. Compile flag must
+    // not change serialization of unmarked headers (no peer fork).
     BOOST_CHECK_EQUAL(CBlockHeader::BTX_HEADER_SIZE, 182U);
-#if defined(BTX_ENABLE_HEADER_NONCE_ON_WIRE) && BTX_ENABLE_HEADER_NONCE_ON_WIRE
-    BOOST_CHECK(CBlockHeader::BTX_HEADER_NONCE_ON_WIRE);
-    BOOST_CHECK_EQUAL(CBlockHeader::BTX_HEADER_WIRE_SIZE, CBlockHeader::BTX_HEADER_SIZE + 4);
-#else
-    BOOST_CHECK(!CBlockHeader::BTX_HEADER_NONCE_ON_WIRE);
-    BOOST_CHECK_EQUAL(CBlockHeader::BTX_HEADER_WIRE_SIZE, CBlockHeader::BTX_HEADER_SIZE);
-#endif
+    BOOST_CHECK_EQUAL(CBlockHeader::BTX_HEADER_SIZE_WITH_POW_COMMIT, 186U);
+    BOOST_CHECK_EQUAL(CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT, (1 << 26));
 
     CBlockHeader header{};
     header.nVersion = 4;
@@ -5034,41 +5028,132 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_wire_nonce_default_off_and_identity_hash)
     header.seed_b = uint256{"0000000000000000000000000000000000000000000000000000000000000a05"};
     header.nNonce = 0xdeadbeef;
 
-    BOOST_CHECK_EQUAL(GetSerializeSize(header), CBlockHeader::BTX_HEADER_WIRE_SIZE);
-
-    // Wire round-trip: default build drops nNonce; opt-in build preserves it.
+    // Legacy (bit clear): 182-byte wire; nNonce dropped; GetHash ignores nNonce.
+    BOOST_CHECK(!header.HasHeaderPoWCommitment());
+    BOOST_CHECK_EQUAL(GetSerializeSize(header), CBlockHeader::BTX_HEADER_SIZE);
     {
         DataStream ss{};
         ss << header;
-        BOOST_CHECK_EQUAL(ss.size(), CBlockHeader::BTX_HEADER_WIRE_SIZE);
+        BOOST_CHECK_EQUAL(ss.size(), CBlockHeader::BTX_HEADER_SIZE);
         CBlockHeader decoded{};
         ss >> decoded;
-#if defined(BTX_ENABLE_HEADER_NONCE_ON_WIRE) && BTX_ENABLE_HEADER_NONCE_ON_WIRE
-        BOOST_CHECK_EQUAL(decoded.nNonce, 0xdeadbeefU);
-#else
         BOOST_CHECK_EQUAL(decoded.nNonce, 0U);
-#endif
-        BOOST_CHECK_EQUAL(decoded.nNonce64, header.nNonce64);
+        BOOST_CHECK(!decoded.HasHeaderPoWCommitment());
         BOOST_CHECK_EQUAL(decoded.GetHash(), header.GetHash());
     }
+    const uint256 legacy_hash = header.GetHash();
+    header.nNonce = 1;
+    BOOST_CHECK_EQUAL(header.GetHash(), legacy_hash);
+    header.nNonce = 0xdeadbeef;
 
-    // Future wire preview (always available): SerializeWithNonce preserves grind nonce.
+    // Commitment format: 186-byte wire; nNonce preserved; GetHash folds nNonce.
+    header.SetHeaderPoWCommitment(true);
+    BOOST_CHECK(header.HasHeaderPoWCommitment());
+    BOOST_CHECK_EQUAL(GetSerializeSize(header), CBlockHeader::BTX_HEADER_SIZE_WITH_POW_COMMIT);
+    {
+        DataStream ss{};
+        ss << header;
+        BOOST_CHECK_EQUAL(ss.size(), CBlockHeader::BTX_HEADER_SIZE_WITH_POW_COMMIT);
+        CBlockHeader decoded{};
+        ss >> decoded;
+        BOOST_CHECK(decoded.HasHeaderPoWCommitment());
+        BOOST_CHECK_EQUAL(decoded.nNonce, 0xdeadbeefU);
+        BOOST_CHECK_EQUAL(decoded.GetHash(), header.GetHash());
+    }
+    const uint256 commit_hash = header.GetHash();
+    BOOST_CHECK(commit_hash != legacy_hash); // version bit alone changes identity
+    header.nNonce = 1;
+    BOOST_CHECK(header.GetHash() != commit_hash); // nNonce now part of identity
+    header.nNonce = 0xdeadbeef;
+    BOOST_CHECK_EQUAL(header.GetHash(), commit_hash);
+
+    // SerializeWithNonce forces commitment bit on the stream.
+    header.SetHeaderPoWCommitment(false);
     {
         DataStream ss{};
         CBlockHeader::SerializeWithNonce(ss, header);
-        BOOST_CHECK_EQUAL(ss.size(), CBlockHeader::BTX_HEADER_SIZE + 4);
+        BOOST_CHECK_EQUAL(ss.size(), CBlockHeader::BTX_HEADER_SIZE_WITH_POW_COMMIT);
         CBlockHeader decoded{};
         CBlockHeader::UnserializeWithNonce(ss, decoded);
+        BOOST_CHECK(decoded.HasHeaderPoWCommitment());
         BOOST_CHECK_EQUAL(decoded.nNonce, 0xdeadbeefU);
-        BOOST_CHECK_EQUAL(decoded.GetHash(), header.GetHash());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_activation_boundary_and_malformed_wire)
+{
+    // Mixed-version peers: a headers blob may contain both 182- and 186-byte
+    // headers; each self-describes via nVersion bit 26.
+    CBlockHeader legacy{};
+    legacy.nVersion = VERSIONBITS_TOP_BITS | 4;
+    legacy.nBits = 0x207fffff;
+    legacy.nNonce = 0x11111111;
+    BOOST_CHECK(!legacy.HasHeaderPoWCommitment());
+
+    CBlockHeader committed{legacy};
+    committed.SetHeaderPoWCommitment(true);
+    committed.nNonce = 0x22222222;
+
+    DataStream mixed{};
+    mixed << legacy << committed;
+    BOOST_CHECK_EQUAL(mixed.size(),
+                      CBlockHeader::BTX_HEADER_SIZE + CBlockHeader::BTX_HEADER_SIZE_WITH_POW_COMMIT);
+
+    CBlockHeader out_a{}, out_b{};
+    mixed >> out_a >> out_b;
+    BOOST_CHECK(!out_a.HasHeaderPoWCommitment());
+    BOOST_CHECK_EQUAL(out_a.nNonce, 0U);
+    BOOST_CHECK(out_b.HasHeaderPoWCommitment());
+    BOOST_CHECK_EQUAL(out_b.nNonce, 0x22222222U);
+
+    // Truncated commitment header (claims bit 26 but missing nNonce bytes).
+    {
+        DataStream trunc{};
+        CBlockHeader::SerializeIdentityOnly(trunc, committed); // 182 bytes, bit set, no nNonce
+        BOOST_CHECK_EQUAL(trunc.size(), CBlockHeader::BTX_HEADER_SIZE);
+        CBlockHeader decoded{};
+        BOOST_CHECK_THROW(trunc >> decoded, std::ios_base::failure);
     }
 
-    // Identity: grinding nNonce never changes GetHash.
-    const uint256 hash_before = header.GetHash();
-    header.nNonce = 1;
-    BOOST_CHECK_EQUAL(header.GetHash(), hash_before);
-    header.nNonce = 0xffffffffU;
-    BOOST_CHECK_EQUAL(header.GetHash(), hash_before);
+    // Consensus height gate mirrors unified v4 activation (regtest fixture).
+    Consensus::Params p{};
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 100;
+    p.nMatMulBMX4CHeight = 100;
+    BOOST_CHECK(!p.IsMatMulV4Active(99));
+    BOOST_CHECK(p.IsMatMulV4Active(100));
+    // Format requirement is IsMatMulV4Active — same flag day as HeaderPoW gate.
+}
+
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_commitment_gate_changes_gethash)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    consensus.nMatMulHeaderPoWDiscountBits = 0;
+    const arith_uint256 easy_target{(~arith_uint256{0}) >> 12};
+
+    CBlockHeader header{};
+    header.nVersion = VERSIONBITS_TOP_BITS | 4;
+    header.SetHeaderPoWCommitment(true);
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000c01"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000c02"};
+    header.nTime = 1'780'000'060U;
+    header.nBits = easy_target.GetCompact();
+    header.nNonce64 = 5;
+    header.matmul_digest.SetNull();
+    header.nNonce = 0;
+
+    const uint256 hash0 = header.GetHash();
+    uint64_t tries = 1u << 22;
+    BOOST_REQUIRE(GrindMatMulHeaderSpamNonce(header, consensus, tries));
+    BOOST_CHECK(CheckMatMulHeaderSpamGate(header, consensus));
+    BOOST_CHECK(header.GetHash() != hash0 || header.nNonce == 0);
+    // Changing nNonce after a win must change identity and typically fail the gate.
+    const uint256 win_hash = header.GetHash();
+    const uint32_t win_nonce = header.nNonce;
+    header.nNonce = win_nonce ^ 0x5a5a5a5aU;
+    BOOST_CHECK(header.GetHash() != win_hash);
 }
 
 BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_grind_helper_and_public_nets_disabled)
@@ -5084,6 +5169,11 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_grind_helper_and_public_nets_disabled)
         BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulHeaderPoWDiscountBits,
                           std::numeric_limits<uint32_t>::max());
         BOOST_CHECK(!params->GetConsensus().IsMatMulHeaderPoWEnabled());
+        // Public activation heights stay inert.
+        if (chain != ChainType::REGTEST) {
+            BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulV4Height,
+                              std::numeric_limits<int32_t>::max());
+        }
     }
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
@@ -5102,13 +5192,13 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_grind_helper_and_public_nets_disabled)
     header.nNonce = 0;
     header.matmul_digest.SetNull();
 
+    // Legacy grind path (bit clear): GetHash stable.
     const uint256 hash_before = header.GetHash();
     uint64_t tries = 1u << 22;
     const uint32_t nonce_before = header.nNonce;
     BOOST_REQUIRE(GrindMatMulHeaderSpamNonce(header, consensus, tries));
     BOOST_CHECK(CheckMatMulHeaderSpamGate(header, consensus));
     BOOST_CHECK_EQUAL(header.GetHash(), hash_before);
-    // Either the starting nonce already passed (tries untouched) or grind advanced.
     BOOST_CHECK(tries < (1u << 22) || header.nNonce == nonce_before);
 
     // Disabled => grind is a no-op success and does not burn tries.

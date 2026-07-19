@@ -78,14 +78,13 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // with the MatMul upgrade disabled too.)
     assert(consensus.nMaxBlockSerializedSize <= MAX_BLOCK_SERIALIZED_SIZE);
 
-    // Audit F1 (wave-3): the header-PoW spam gate is enabled by a non-sentinel
-    // nMatMulHeaderPoWDiscountBits (UINT32_MAX = disabled), but it grinds the
-    // legacy `nNonce` which is on the header wire only when
-    // BTX_HEADER_NONCE_ON_WIRE (compile-time opt-in; production default OFF).
-    // Enabling the gate before that wire change (and the miner grind) lands is a
-    // reject-all mining halt. Fail LOUD at startup instead: the gate may only be
-    // enabled once nNonce is on the wire.
-    assert(CBlockHeader::BTX_HEADER_NONCE_ON_WIRE || !consensus.IsMatMulHeaderPoWEnabled());
+    // Audit F1 / v4.4 §4: HeaderPoW grinds nNonce. Wire + GetHash commit to
+    // nNonce via CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT (self-describing;
+    // always compiled in). The deprecated BTX_ENABLE_HEADER_NONCE_ON_WIRE cmake
+    // flag must not gate consensus — both builds speak the same protocol.
+    // Enabling the discount without the versioned format path would still be a
+    // reject-all at v4 (ContextualCheck requires the bit); the format path is
+    // unconditional in this binary, so only the discount-range assert remains.
 
     // Audit H2: the header-PoW discount is valid ONLY in 0..255 (or the
     // UINT32_MAX "disabled" sentinel). A value in [256, UINT32_MAX-1] would push

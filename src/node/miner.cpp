@@ -1023,6 +1023,13 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     if (chainparams.MineBlocksOnDemand()) {
         pblock->nVersion = gArgs.GetIntArg("-blockversion", pblock->nVersion);
     }
+    // ComputeBlockVersion already ORs BTX_HEADER_POW_COMMIT_VERSION_BIT at v4.
+    // If -blockversion cleared it on regtest, restore so templates remain
+    // consensus-valid (ContextualCheck requires the bit at v4 heights).
+    if (chainparams.GetConsensus().fMatMulPOW &&
+        chainparams.GetConsensus().IsMatMulV4Active(nHeight)) {
+        pblock->SetHeaderPoWCommitment(true);
+    }
 
     pblock->nTime = TicksSinceEpoch<std::chrono::seconds>(NodeClock::now());
     m_lock_time_cutoff = pindexPrev->GetMedianTimePast();

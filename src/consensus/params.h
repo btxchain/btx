@@ -542,10 +542,10 @@ struct Params {
      *  an architectural change tracked in the header-pow-gate doc.
      *
      *  SINGLE ACTIVATION: rides the v4 fork (IsMatMulV4Active), no height of its own.
-     *  UINT32_MAX = disabled sentinel (default). Enabling it is ALSO gated on the
-     *  ACTIVATION-BLOCKING header-format change that puts the decoupled spam_nonce
-     *  (legacy `nNonce`) on the P2P wire (it is not transmitted today) -- asserted
-     *  by AssertBMX4CConstructionInvariants via BTX_HEADER_NONCE_ON_WIRE. */
+     *  UINT32_MAX = disabled sentinel (default). At v4 heights the HeaderPoW
+     *  commitment version bit (CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT)
+     *  puts nNonce on the wire and in GetHash(); the deprecated cmake
+     *  BTX_ENABLE_HEADER_NONCE_ON_WIRE flag must not gate consensus. */
     uint32_t nMatMulHeaderPoWDiscountBits{std::numeric_limits<uint32_t>::max()};
     /** C-1' accumulator-eligibility qualification threshold (consensus-
      *  PROTECTING, not consensus-changing): the minimum PROVEN exact

@@ -4983,9 +4983,9 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
                 Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
             OffloadMatMulV4SketchToCache(block);
         }
-        // HeaderPoW spam gate (audit F1): after the matmul seal is fixed, grind the
-        // decoupled nNonce. No-op when nMatMulHeaderPoWDiscountBits == UINT32_MAX.
-        // Requires BTX_HEADER_NONCE_ON_WIRE for relayed headers to carry the grind.
+        // HeaderPoW spam gate (audit F1): after the matmul seal is fixed, grind
+        // nNonce. No-op when nMatMulHeaderPoWDiscountBits == UINT32_MAX. At v4 the
+        // commitment version bit puts nNonce on the wire and in GetHash().
         if (consensus.IsMatMulV4Active(next_height) &&
             !GrindMatMulHeaderSpamNonce(block, consensus, max_tries)) {
             cleanup_watcher();

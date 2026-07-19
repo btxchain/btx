@@ -57,14 +57,13 @@ if(APPLE)
 else()
   option(BTX_ENABLE_METAL "Enable optional Metal acceleration helpers for BTX utilities" OFF)
 endif()
-# HeaderPoW opt-in: put legacy nNonce on the P2P CBlockHeader wire (+4 bytes).
-# Default OFF — public wire stays 182-byte identity. GetHash() never includes nNonce.
-# Enable only for regtest/HeaderPoW burn-in builds: -DBTX_ENABLE_HEADER_NONCE_ON_WIRE=ON
-# (see doc/btx-matmul-v4.2-header-pow-gate.md §5). Do NOT ship ON as the production default.
-option(BTX_ENABLE_HEADER_NONCE_ON_WIRE "Serialize CBlockHeader.nNonce on the P2P wire (HeaderPoW grind; changes wire format)." OFF)
+# DEPRECATED build tag only. Consensus/P2P header wire is version-bit self-describing
+# (CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT); this flag must NOT fork peers.
+# Kept so transitional cmake lines still configure; SERIALIZE_METHODS ignores it.
+option(BTX_ENABLE_HEADER_NONCE_ON_WIRE "DEPRECATED no-op build tag (HeaderPoW wire is version-bit gated)." OFF)
 if(BTX_ENABLE_HEADER_NONCE_ON_WIRE)
   add_compile_definitions(BTX_ENABLE_HEADER_NONCE_ON_WIRE=1)
-  message(STATUS "BTX_ENABLE_HEADER_NONCE_ON_WIRE=ON (CBlockHeader wire includes nNonce; GetHash unchanged)")
+  message(STATUS "BTX_ENABLE_HEADER_NONCE_ON_WIRE=ON (deprecated build tag; wire format unchanged)")
 endif()
 # CUTLASS grouped MXFP4 tensor TU (default OFF). When ON and CUTLASS headers are
 # found, compile the tensor TU; IsGroupedMxfp4TensorKernelLinked() stays false

@@ -25,17 +25,31 @@ Progressively more capable AI-native hardware receives progressively greater **e
 | §13 Metal ARC `id<MTLBuffer>&` | **Confirmed** | `__strong&` ownership fix |
 | §19 `VerifyWindowSlotFreivalds` | **Confirmed** unsafe as general API | Marked test/diagnostic-only |
 | §5 / §25 C-15 / overclaims | **Confirmed** | Docs corrected (below) |
+| §4 Header-PoW wire redesign | **Confirmed** | Version-bit self-describing wire + `GetHash` commit; cmake flag no-op (see §4 below) |
+| Full 256-bit slot IDs | **Confirmed worthwhile** | `DeriveWindowSlotId` + seed/leaf bind + duplicate-id reject; `nNonce64 = ReadLE64(slot_id)` |
+| §9 Q* algorithm enforcement | **Confirmed** | Docs: Q* = aggregate commitment only; slot-id binding is consensus |
 
 ## Verified but deferred (not yet better as consensus changes)
 
 | Report item | Why deferred |
 |---|---|
-| §4 Header-PoW wire redesign | Real malleability risk with compile flag; redesign needs versioned activation + identity commit. Flag stays default-OFF. |
 | §5 Cryptographic extractor replacement | SplitMix is weak as a PRF story; swapping extractor is a consensus transcript change — needs golden vectors + external review before activation. |
-| §6 / §8 Adaptive limbs / Strassen tournament | Plausible private miner advantage; publish as miner-local exact algs + calibrate ASERT to fastest known — do **not** change the integer transcript until measured. |
-| §9 Q* algorithm enforcement | Correct: Q* is aggregate commitment only. Document; no fake tensor consensus rule. |
+| §6 / §8 Adaptive limbs / Strassen tournament | **Acted (miner-local)** | Public exact baselines: deferred `ComputeCombineModQ`, `ComputeCombineAdaptiveLimbBMX4C` / base-256 + two-limb routes, Karatsuba-9; CPU tournament harness + `doc/btx-matmul-v4.4-combine-algorithm-tournament.md`. Integer transcript unchanged (byte-identical tests). ASERT still calibrates to fastest known exact after silicon measure. |
 | §12–14 Native IMMA/MFMA/MXFP4/Metal MPP | Real gaps; keep fail-closed stubs; do not mislabel scalar kernels. Full tensor residency is Phase 3. |
-| Full 256-bit slot IDs | Low-64 slot nonce + uniqueness reject is an interim harden; full ID binding later. |
+
+## §4 Header-PoW wire redesign (**acted** 2026-07-19)
+
+**Problem:** `BTX_ENABLE_HEADER_NONCE_ON_WIRE` made Header-PoW wire format build-dependent. Peers compiled differently would disagree on header bytes; `GetHash()` excluded `nNonce`, so grind/malleation could poison caches without changing block identity.
+
+**Design (hard-fork appropriate; public heights remain `INT32_MAX`):**
+
+1. **Self-describing format bit** — `CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT` (`nVersion` bit 26). `SERIALIZE_METHODS` appends `nNonce` (+4 → 186 bytes) iff the bit is set. No height context needed at (de)serialize; mixed 182/186 headers in one `headers` message work.
+2. **Canonical identity** — `GetHash()` folds `nNonce` when the bit is set. Post-activation, changing `nNonce` changes block identity.
+3. **Activation** — rides unified v4 (`IsMatMulV4Active` / `nMatMulV4Height`). At/above: bit **required**. Below: bit **forbidden**. `ComputeBlockVersion` and `CreateNewBlock` set the bit automatically.
+4. **HeaderPoW gate** — commitment form: `GetHash() <= eased_nBits_target`. Legacy (bit clear): `H(GetHash() || nNonce)`. `nNonce` stays out of `ComputeMatMulHeaderHash` either way.
+5. **Compile flag** — `BTX_ENABLE_HEADER_NONCE_ON_WIRE` is a **deprecated no-op** for wire/consensus (may remain as a build tag). Both ON and OFF builds speak the same protocol.
+
+**Not done here:** setting mainnet/testnet `nMatMulV4Height` finite, or enabling `nMatMulHeaderPoWDiscountBits` on public nets.
 
 ## Documentation posture
 

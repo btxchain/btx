@@ -7,12 +7,12 @@ Branch: `feat/bmx4c-exact-accel-lanes` → PR #89 (`claude/matmul-v4-design-spec
 | # | Criterion | Code status | Gate |
 |---|---|---|---|
 | 1 | Q* verify bounded + async | Phase-B seal MTP threaded into `MatMulVerifyWorker` + Classify | Tip-verify soak at Q*∈{64,128} |
-| 2 | Header admission + chainwork auth | HeaderPoW `nNonce` opt-in via `BTX_ENABLE_HEADER_NONCE_ON_WIRE` (default OFF); public discount `UINT32_MAX` | Wire ON + calibrated discount |
+| 2 | Header admission + chainwork auth | Versioned HeaderPoW commitment (`nVersion` bit 26): wire + `GetHash` include `nNonce` at unified v4; cmake wire flag deprecated no-op; public discount `UINT32_MAX` | Calibrated discount + finite public heights |
 | 3 | Persistent device-resident GPU | LT CUDA path has persistent buffers / graph scaffolding; **hot GEMMs in resident graphs are still scalar tiled loops today** (not IMMA). Host ExactGemm fail-closed | Real cuBLASLt/CUTLASS IMMA in graph + B200/5090 perf proof |
 | 4 | FP4/FP8/Tensor genuinely wired | Portable exact MXFP4 integer path; CUTLASS/device FP8 **fail-closed stubs** (not native-tensor complete) | sm_100a / MI350 M-t24 qualified |
 | 5 | Cross-vendor exactness | Harness schema + `BTX_REQUIRE_GPU_GOLDEN`; Dockerfile.tests Ubuntu | H100/B200/M5/MI350 PASS |
 | 6 | Production benchmarks | `--profile bmx4c-lt` in report + measure-hardware; lt-gate device JSON | ≥4× nonce/s / nonce/$ against **fastest known exact** baseline |
-| 7 | Adversarial shortcut resistance | Internal MatExpand non-affinity tests; external C-15 packet **drafted (not closed)**; adaptive-limb/Strassen paths acknowledged as open calibration work | Independent cryptanalyst + algorithm tournament |
+| 7 | Adversarial shortcut resistance | Internal MatExpand non-affinity tests; external C-15 packet **drafted (not closed)**; public exact combine baselines published (`ComputeCombineModQ` deferred, adaptive limb, Karatsuba-9) + CPU tournament harness | Independent cryptanalyst + measured tournament vs silicon |
 | 8 | Consensus safety (2026-07-19 harden) | Q* env invariance; prepared seal template; trust-adjusted best-header; no sync EncDr on msg-thread saturation; complete-header accel batching | Activation still NO-GO until full checklist |
 
 ## Explicitly NOT claimed
@@ -21,5 +21,5 @@ Branch: `feat/bmx4c-exact-accel-lanes` → PR #89 (`claude/matmul-v4-design-spec
 - External C-15 closed
 - Finite activation heights
 - Tensor MXFP4 / device FP8 as production-trusted without self-qual
-- “No cheaper exact mathematical path” (adaptive limbs / Strassen remain open)
+- “No cheaper exact mathematical path” (**retired** — adaptive limbs / Strassen / LCMA remain open *efficiency* work; public baselines + tournament published; calibrate to fastest known exact)
 - Hardware-dependent per-block subsidy (forbidden; throughput share only)

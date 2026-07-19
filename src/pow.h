@@ -178,17 +178,14 @@ bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32
  *  weaken (fail open to powLimit) current difficulty. */
 unsigned int MatMulAsertFailClosedBits();
 /** Header-PoW spam gate (audit F1). Returns true iff the header carries the
- *  required cheap, UNFORGEABLE hash work: H(GetHash() || spam_nonce) <=
+ *  required cheap, UNFORGEABLE hash work against
  *  DeriveMatMulHeaderPoWGateTarget(nBits, nMatMulHeaderPoWDiscountBits, powLimit).
- *  spam_nonce is the legacy header `nNonce` field, which is DECOUPLED from the
- *  matmul preimage (ComputeMatMulHeaderHash), so an honest miner grinds this
- *  cheap gate without recomputing the expensive matmul. SINGLE ACTIVATION: no
- *  gate height of its own -- callers enforce it where IsMatMulV4Active(height) &&
- *  params.IsMatMulHeaderPoWEnabled() (i.e. nMatMulHeaderPoWDiscountBits !=
- *  UINT32_MAX; default UINT32_MAX = disabled). NOTE (activation-blocking):
- *  `nNonce` is on the P2P header wire only when BTX_HEADER_NONCE_ON_WIRE
- *  (compile-time opt-in, production default OFF) — see
- *  doc/btx-matmul-v4.2-header-pow-gate.md. */
+ *  With HasHeaderPoWCommitment() (v4.4 wire): GetHash() already includes nNonce,
+ *  so the check is GetHash() <= gate_target. Legacy (bit clear): H(GetHash() ||
+ *  nNonce) <= gate_target. nNonce stays DECOUPLED from ComputeMatMulHeaderHash
+ *  either way. SINGLE ACTIVATION: rides IsMatMulV4Active; enabled by
+ *  nMatMulHeaderPoWDiscountBits != UINT32_MAX. Wire/identity are version-bit
+ *  self-describing — see doc/btx-matmul-v4.4-lt-hardening-response-2026-07-19.md. */
 /** AUDIT H4: the PURE header-PoW throttle target derivation (no header, no hash),
  *  exposed for direct fixed-vector testing. Returns the target a header claiming
  *  difficulty @p nBits must hash at or under, or std::nullopt when the throttle
@@ -200,8 +197,9 @@ std::optional<arith_uint256> DeriveMatMulHeaderPoWGateTarget(
     unsigned int nBits, uint32_t discount_bits, const uint256& pow_limit);
 bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Params& params);
 /** Grind `block.nNonce` until CheckMatMulHeaderSpamGate passes (or tries/nonce
- *  space exhausted). No-op success when HeaderPoW is disabled. Does not change
- *  GetHash() (nNonce is decoupled). Decrements @p max_tries per attempt. */
+ *  space exhausted). No-op success when HeaderPoW is disabled. With the v4.4
+ *  commitment bit set, grinding changes GetHash(); legacy (bit clear) keeps
+ *  GetHash stable. Decrements @p max_tries per attempt. */
 bool GrindMatMulHeaderSpamNonce(CBlockHeader& block, const Consensus::Params& params, uint64_t& max_tries);
 bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height);
 bool CheckMatMulProofOfWork_Phase2(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height = -1);

@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <consensus/params.h>
+#include <primitives/block.h>
 #include <util/check.h>
 #include <versionbits.h>
 
@@ -252,6 +253,13 @@ int32_t VersionBitsCache::ComputeBlockVersion(const CBlockIndex* pindexPrev, con
         if (state == ThresholdState::LOCKED_IN || state == ThresholdState::STARTED) {
             nVersion |= Mask(params, pos);
         }
+    }
+
+    // Unified v4.4 Header-PoW commitment format: require nVersion bit 26 so
+    // templates, expected-version checks, and wire/GetHash stay aligned.
+    const int32_t next_height = pindexPrev ? pindexPrev->nHeight + 1 : 0;
+    if (params.fMatMulPOW && params.IsMatMulV4Active(next_height)) {
+        nVersion |= CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT;
     }
 
     return nVersion;
