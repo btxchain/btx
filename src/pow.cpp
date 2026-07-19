@@ -3257,6 +3257,18 @@ bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Param
     return UintToArith256(hw.GetHash()) <= *gate_target;
 }
 
+bool GrindMatMulHeaderSpamNonce(CBlockHeader& block, const Consensus::Params& params, uint64_t& max_tries)
+{
+    if (!params.IsMatMulHeaderPoWEnabled()) return true;
+    while (max_tries > 0) {
+        if (CheckMatMulHeaderSpamGate(block, params)) return true;
+        if (block.nNonce == std::numeric_limits<uint32_t>::max()) return false;
+        ++block.nNonce;
+        --max_tries;
+    }
+    return CheckMatMulHeaderSpamGate(block, params);
+}
+
 bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height)
 {
     const uint32_t pre_hash_epsilon_bits = GetMatMulPreHashEpsilonBitsForHeight(params, block_height);

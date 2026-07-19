@@ -17,6 +17,8 @@
 #include <matmul/transcript.h>
 #include <metal/oracle_accel.h>
 #include <pow.h>
+#include <primitives/block.h>
+#include <streams.h>
 #include <test/util/mining.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
@@ -5002,6 +5004,127 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoWGateTarget_pure_fixed_vectors)
     const auto th{DeriveMatMulHeaderPoWGateTarget(hard.GetCompact(), 0, pow_limit)};
     BOOST_REQUIRE(te && th);
     BOOST_CHECK(*th < *te);
+}
+
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_wire_nonce_default_off_and_identity_hash)
+{
+    // GetHash is always the 182-byte identity image (never folds nNonce), so
+    // HeaderPoW can opt-in later without rewriting genesis / pinned header goldens.
+    // Production default keeps nNonce OFF the P2P wire; cmake
+    // -DBTX_ENABLE_HEADER_NONCE_ON_WIRE=ON flips the wire path for burn-in builds.
+    BOOST_CHECK_EQUAL(CBlockHeader::BTX_HEADER_SIZE, 182U);
+#if defined(BTX_ENABLE_HEADER_NONCE_ON_WIRE) && BTX_ENABLE_HEADER_NONCE_ON_WIRE
+    BOOST_CHECK(CBlockHeader::BTX_HEADER_NONCE_ON_WIRE);
+    BOOST_CHECK_EQUAL(CBlockHeader::BTX_HEADER_WIRE_SIZE, CBlockHeader::BTX_HEADER_SIZE + 4);
+#else
+    BOOST_CHECK(!CBlockHeader::BTX_HEADER_NONCE_ON_WIRE);
+    BOOST_CHECK_EQUAL(CBlockHeader::BTX_HEADER_WIRE_SIZE, CBlockHeader::BTX_HEADER_SIZE);
+#endif
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000a01"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000a02"};
+    header.nTime = 1'780'000'040U;
+    header.nBits = 0x1d00ffff;
+    header.nNonce64 = 99;
+    header.matmul_digest = uint256{"0000000000000000000000000000000000000000000000000000000000000a03"};
+    header.matmul_dim = 256;
+    header.seed_a = uint256{"0000000000000000000000000000000000000000000000000000000000000a04"};
+    header.seed_b = uint256{"0000000000000000000000000000000000000000000000000000000000000a05"};
+    header.nNonce = 0xdeadbeef;
+
+    BOOST_CHECK_EQUAL(GetSerializeSize(header), CBlockHeader::BTX_HEADER_WIRE_SIZE);
+
+    // Wire round-trip: default build drops nNonce; opt-in build preserves it.
+    {
+        DataStream ss{};
+        ss << header;
+        BOOST_CHECK_EQUAL(ss.size(), CBlockHeader::BTX_HEADER_WIRE_SIZE);
+        CBlockHeader decoded{};
+        ss >> decoded;
+#if defined(BTX_ENABLE_HEADER_NONCE_ON_WIRE) && BTX_ENABLE_HEADER_NONCE_ON_WIRE
+        BOOST_CHECK_EQUAL(decoded.nNonce, 0xdeadbeefU);
+#else
+        BOOST_CHECK_EQUAL(decoded.nNonce, 0U);
+#endif
+        BOOST_CHECK_EQUAL(decoded.nNonce64, header.nNonce64);
+        BOOST_CHECK_EQUAL(decoded.GetHash(), header.GetHash());
+    }
+
+    // Future wire preview (always available): SerializeWithNonce preserves grind nonce.
+    {
+        DataStream ss{};
+        CBlockHeader::SerializeWithNonce(ss, header);
+        BOOST_CHECK_EQUAL(ss.size(), CBlockHeader::BTX_HEADER_SIZE + 4);
+        CBlockHeader decoded{};
+        CBlockHeader::UnserializeWithNonce(ss, decoded);
+        BOOST_CHECK_EQUAL(decoded.nNonce, 0xdeadbeefU);
+        BOOST_CHECK_EQUAL(decoded.GetHash(), header.GetHash());
+    }
+
+    // Identity: grinding nNonce never changes GetHash.
+    const uint256 hash_before = header.GetHash();
+    header.nNonce = 1;
+    BOOST_CHECK_EQUAL(header.GetHash(), hash_before);
+    header.nNonce = 0xffffffffU;
+    BOOST_CHECK_EQUAL(header.GetHash(), hash_before);
+}
+
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_grind_helper_and_public_nets_disabled)
+{
+    // Public nets ship with the disabled sentinel; unit-test grind uses a
+    // Consensus::Params copy (construction assert only fires at chainparams build).
+    BOOST_CHECK_EQUAL(Params().GetConsensus().nMatMulHeaderPoWDiscountBits,
+                      std::numeric_limits<uint32_t>::max());
+    BOOST_CHECK(!Params().GetConsensus().IsMatMulHeaderPoWEnabled());
+
+    for (const ChainType chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::REGTEST}) {
+        const auto params = CreateChainParams(*m_node.args, chain);
+        BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulHeaderPoWDiscountBits,
+                          std::numeric_limits<uint32_t>::max());
+        BOOST_CHECK(!params->GetConsensus().IsMatMulHeaderPoWEnabled());
+    }
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    consensus.nMatMulHeaderPoWDiscountBits = 0;
+    BOOST_REQUIRE(consensus.IsMatMulHeaderPoWEnabled());
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000b01"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000b02"};
+    header.nTime = 1'780'000'050U;
+    header.nBits = 0x207fffffU;
+    header.nNonce64 = 3;
+    header.nNonce = 0;
+    header.matmul_digest.SetNull();
+
+    const uint256 hash_before = header.GetHash();
+    uint64_t tries = 1u << 22;
+    const uint32_t nonce_before = header.nNonce;
+    BOOST_REQUIRE(GrindMatMulHeaderSpamNonce(header, consensus, tries));
+    BOOST_CHECK(CheckMatMulHeaderSpamGate(header, consensus));
+    BOOST_CHECK_EQUAL(header.GetHash(), hash_before);
+    // Either the starting nonce already passed (tries untouched) or grind advanced.
+    BOOST_CHECK(tries < (1u << 22) || header.nNonce == nonce_before);
+
+    // Disabled => grind is a no-op success and does not burn tries.
+    consensus.nMatMulHeaderPoWDiscountBits = std::numeric_limits<uint32_t>::max();
+    header.nNonce = 0;
+    tries = 7;
+    BOOST_CHECK(GrindMatMulHeaderSpamNonce(header, consensus, tries));
+    BOOST_CHECK_EQUAL(tries, 7U);
+    BOOST_CHECK_EQUAL(header.nNonce, 0U);
+
+    // Invalid discount (not UINT32_MAX, >255) => gate fails closed; grind cannot satisfy.
+    consensus.nMatMulHeaderPoWDiscountBits = 256;
+    header.nNonce = 0;
+    tries = 64;
+    BOOST_CHECK(!CheckMatMulHeaderSpamGate(header, consensus));
+    BOOST_CHECK(!GrindMatMulHeaderSpamNonce(header, consensus, tries));
 }
 
 BOOST_AUTO_TEST_CASE(ReduceRescaleRatioToU32_exact_and_rejects)

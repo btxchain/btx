@@ -4983,6 +4983,15 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
                 Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
             OffloadMatMulV4SketchToCache(block);
         }
+        // HeaderPoW spam gate (audit F1): after the matmul seal is fixed, grind the
+        // decoupled nNonce. No-op when nMatMulHeaderPoWDiscountBits == UINT32_MAX.
+        // Requires BTX_HEADER_NONCE_ON_WIRE for relayed headers to carry the grind.
+        if (consensus.IsMatMulV4Active(next_height) &&
+            !GrindMatMulHeaderSpamNonce(block, consensus, max_tries)) {
+            cleanup_watcher();
+            if (max_tries == 0 || chainman.m_interrupt) return false;
+            return false;
+        }
     } else if (kawpow_active) {
         if (consensus.fSkipKAWPOWValidation) {
             // Keep regtest generation fast; KAWPOW validity is bypassed there.

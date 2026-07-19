@@ -68,7 +68,8 @@ bool MineHeaderForConsensus(CBlockHeader& header,
             nullptr,
             v4_payload_out,
             nullptr,
-            parent_median_time_past);
+            parent_median_time_past) &&
+               GrindMatMulHeaderSpamNonce(header, consensus, max_tries);
     }
 
     const bool kawpow_active{consensus.fKAWPOW && consensus.nKAWPOWHeight <= static_cast<int>(block_height)};

@@ -140,7 +140,7 @@ intermittent AUP safeguard and were re-run on Opus).
   fires; plus a check that the v4 ratio is inert 1/1 when unified. New suite
   `matmul_unified_activation_tests` (5 cases) pins the correct behaviour.
 - **Header-gate enablement footgun (HIGH latent → fixed, `dcad75b`).** Enabling
-  the F1 gate (`nMatMulHeaderPoWBits != 0`) without the `nNonce` wire-serialization
+  the F1 gate (`nMatMulHeaderPoWDiscountBits != UINT32_MAX`) without the `nNonce` wire-serialization
   + miner grind is a reject-all mining halt, with nothing guarding it. Fixed:
   `CBlockHeader::BTX_HEADER_NONCE_ON_WIRE` (false) + a startup assert that the gate
   stays disabled until that wire change lands. The F1 gate was also refolded to

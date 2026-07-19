@@ -2,9 +2,10 @@
 
 *Design + staged mechanism for the forgeable-header-work DoS found in the
 wave-2 adversarial audit. Status: gate LOGIC + consensus params + enforcement
-point implemented and unit-tested, DISABLED by default (`nMatMulHeaderPoWHeight
-== INT32_MAX`). One activation-blocking step remains (wire-serializing the
-grinding nonce) — see §5. Written 2026-07-16.*
+point implemented and unit-tested, DISABLED by default
+(`nMatMulHeaderPoWDiscountBits == UINT32_MAX`). Wire `nNonce` is compile-time
+opt-in (`BTX_ENABLE_HEADER_NONCE_ON_WIRE`, production default OFF) — see §5.
+Written 2026-07-16; opt-in plumbing updated 2026-07-19.*
 
 ## 1. The finding (F1, HIGH — architectural, not a consensus break)
 
@@ -170,27 +171,41 @@ enabled purely by a non-zero target. This avoids proliferating activation gates.
 
 ## 5. The one activation-blocking step: wire-serialize the grinding nonce
 
-`nNonce` is **not** in the P2P header wire serialization
-(`CBlockHeader::SERIALIZE_METHODS`), so a received header always deserializes
-`nNonce = 0` — the miner's grind is lost in transit, and the gate cannot be
-satisfied by relayed headers. **Activation requires adding `nNonce` to the header
-wire serialization** so peers receive the grinder, WITHOUT adding it to
-`GetHash()` (which must stay the 182-byte image to keep block identity, genesis
-hashes, and every pinned header golden stable). Concretely:
+`nNonce` is **not** in the default P2P header wire serialization
+(`CBlockHeader::SERIALIZE_METHODS` when `BTX_HEADER_NONCE_ON_WIRE == false`), so a
+received header always deserializes `nNonce = 0` — the miner's grind is lost in
+transit, and the gate cannot be satisfied by relayed headers.
 
-1. Give `CBlockHeader` a hash-only serialization (the current 182-byte field set)
-   used by `GetHash()`, and a separate wire serialization that additionally
-   includes `nNonce` (→ 186-byte wire header). Block identity = `GetHash()` is
+**Production default stays OFF** (`BTX_HEADER_NONCE_ON_WIRE = false`, cmake
+`BTX_ENABLE_HEADER_NONCE_ON_WIRE=OFF`) so public wire format remains the 182-byte
+identity header. Opt-in for regtest / burn-in:
+
+```
+cmake -DBTX_ENABLE_HEADER_NONCE_ON_WIRE=ON ...
+```
+
+That flips the compile-time flag, adds `nNonce` to wire serialization (186-byte
+wire header), and allows `nMatMulHeaderPoWDiscountBits ∈ [0,255]` past the
+startup assert. `GetHash()` **never** includes `nNonce` (identity stays 182 bytes
+whether the flag is on or off). Concretely:
+
+1. `CBlockHeader::GetHash()` hashes only the identity field set (182 bytes).
+   Wire serialization additionally includes `nNonce` when
+   `BTX_HEADER_NONCE_ON_WIRE` (→ 186-byte wire). Block identity = `GetHash()` is
    unchanged; `nNonce` rides along like the payload does for the body (not part
    of the block's identity, so stripping/mutating it in transit just fails the
    gate on that copy — a `BLOCK_MUTATED`-class outcome, not header poisoning).
+   Unit tests exercise the future wire via `SerializeWithNonce` /
+   `UnserializeWithNonce` without flipping the production default.
 2. Set `nMatMulHeaderPoWDiscountBits` in `0..255` from a spam-price calibration
    (target the honest cost at a few ms and the flood price at seconds/header on
    commodity CPUs). Setting it away from the `UINT32_MAX` disabled sentinel is what
    enables the gate — it activates at the SAME flag-day height as the rest of the
-   upgrade (no separate gate).
+   upgrade (no separate gate). Public mainnet/testnet keep `UINT32_MAX` until a
+   coordinated activation release that also ships `BTX_ENABLE_HEADER_NONCE_ON_WIRE=ON`.
 3. Teach the miner/solver to grind `nNonce` for the gate after sealing the matmul
-   winner (a few cheap hashes; independent of the matmul).
+   winner (`GrindMatMulHeaderSpamNonce` — a few cheap hashes; independent of the
+   matmul). Wired from `GenerateBlock` / `MineHeaderForConsensus`.
 4. Testnet burn-in (header propagation with the new wire field; confirm honest
    miners pass trivially and a synthetic header-flood is rate-limited), then
    supermajority signaling — the same single flag-day as the rest of the upgrade.

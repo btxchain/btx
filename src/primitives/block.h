@@ -21,21 +21,31 @@
 class CBlockHeader
 {
 public:
-    // Serialized BTX header size:
+    // Identity / GetHash size (never includes the decoupled HeaderPoW grind nonce):
     // nVersion(4) + hashPrevBlock(32) + hashMerkleRoot(32) + nTime(4) + nBits(4)
     // + nNonce64(8) + matmul_digest(32) + matmul_dim(2) + seed_a(32) + seed_b(32)
     static constexpr size_t BTX_HEADER_SIZE = 182;
     static_assert(BTX_HEADER_SIZE == (4 + 32 + 32 + 4 + 4 + 8 + 32 + 2 + 32 + 32));
 
-    // Audit F1: the header-PoW spam gate grinds the legacy `nNonce` as a decoupled
-    // nonce, but `nNonce` is NOT yet in the header wire serialization below (a
-    // received header deserializes nNonce = 0, so a miner's grind is lost in
-    // transit). This flag is false until that wire change lands; enabling the gate
-    // (nMatMulHeaderPoWBits != 0) while this is false is a reject-all mining halt,
-    // so AssertBMX4CConstructionInvariants asserts the coupling. Flip to true in
-    // the SAME change that adds nNonce to the wire (and bumps BTX_HEADER_SIZE) --
-    // see doc/btx-matmul-v4.2-header-pow-gate.md §5.
-    static constexpr bool BTX_HEADER_NONCE_ON_WIRE = false;
+    // Audit F1 / doc/btx-matmul-v4.2-header-pow-gate.md §5:
+    // The header-PoW spam gate grinds the legacy `nNonce` as a DECOUPLED nonce.
+    // Production default is OFF so public P2P wire stays 182 bytes (identity only).
+    // Opt-in: cmake -DBTX_ENABLE_HEADER_NONCE_ON_WIRE=ON (or -DBTX_ENABLE_HEADER_NONCE_ON_WIRE=1)
+    // which adds nNonce to wire/disk-of-header serialization (+4 => 186) WITHOUT
+    // changing GetHash() (block identity stays the 182-byte image). Enabling
+    // nMatMulHeaderPoWDiscountBits while this is false is a reject-all mining
+    // halt; AssertBMX4CConstructionInvariants asserts the coupling.
+    static constexpr bool BTX_HEADER_NONCE_ON_WIRE =
+#if defined(BTX_ENABLE_HEADER_NONCE_ON_WIRE) && BTX_ENABLE_HEADER_NONCE_ON_WIRE
+        true
+#else
+        false
+#endif
+        ;
+    static constexpr size_t BTX_HEADER_WIRE_SIZE =
+        BTX_HEADER_SIZE + (BTX_HEADER_NONCE_ON_WIRE ? sizeof(uint32_t) : 0);
+    static_assert(BTX_HEADER_WIRE_SIZE == BTX_HEADER_SIZE ||
+                  BTX_HEADER_WIRE_SIZE == BTX_HEADER_SIZE + 4);
 
     // header
     int32_t nVersion;
@@ -50,6 +60,8 @@ public:
     uint256 seed_b;
 
     // Legacy nonce/mix members kept for transitional compatibility.
+    // nNonce is the HeaderPoW grind field: on the wire only when
+    // BTX_HEADER_NONCE_ON_WIRE; never part of GetHash()/BTX_HEADER_SIZE.
     uint32_t nNonce;
     uint256 mix_hash;
 
@@ -60,7 +72,30 @@ public:
 
     SERIALIZE_METHODS(CBlockHeader, obj)
     {
+        // Identity fields (182 bytes) — always on the wire.
         READWRITE(obj.nVersion, obj.hashPrevBlock, obj.hashMerkleRoot, obj.nTime, obj.nBits, obj.nNonce64, obj.matmul_digest, obj.matmul_dim, obj.seed_a, obj.seed_b);
+        // HeaderPoW grind nonce rides along only under explicit opt-in (does not
+        // affect GetHash; see CBlockHeader::GetHash).
+        if constexpr (CBlockHeader::BTX_HEADER_NONCE_ON_WIRE) {
+            READWRITE(obj.nNonce);
+        }
+    }
+
+    /** Test / preview helper: serialize identity fields + nNonce (future wire).
+     *  Production SERIALIZE_METHODS only emits nNonce when BTX_HEADER_NONCE_ON_WIRE. */
+    template <typename Stream>
+    static void SerializeWithNonce(Stream& s, const CBlockHeader& header)
+    {
+        s << header.nVersion << header.hashPrevBlock << header.hashMerkleRoot << header.nTime
+          << header.nBits << header.nNonce64 << header.matmul_digest << header.matmul_dim
+          << header.seed_a << header.seed_b << header.nNonce;
+    }
+    template <typename Stream>
+    static void UnserializeWithNonce(Stream& s, CBlockHeader& header)
+    {
+        s >> header.nVersion >> header.hashPrevBlock >> header.hashMerkleRoot >> header.nTime >>
+            header.nBits >> header.nNonce64 >> header.matmul_digest >> header.matmul_dim >>
+            header.seed_a >> header.seed_b >> header.nNonce;
     }
 
     void SetNull()

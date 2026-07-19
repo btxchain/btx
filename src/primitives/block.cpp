@@ -10,7 +10,13 @@
 
 uint256 CBlockHeader::GetHash() const
 {
-    return (HashWriter{} << *this).GetHash();
+    // Block identity is the 182-byte field set only. Never fold in nNonce even
+    // when BTX_HEADER_NONCE_ON_WIRE puts it on the P2P wire — HeaderPoW grinds a
+    // decoupled spam nonce without changing genesis hashes / block ids
+    // (doc/btx-matmul-v4.2-header-pow-gate.md §5).
+    return (HashWriter{} << nVersion << hashPrevBlock << hashMerkleRoot << nTime << nBits
+                         << nNonce64 << matmul_digest << matmul_dim << seed_a << seed_b)
+        .GetHash();
 }
 
 std::string CBlock::ToString() const
