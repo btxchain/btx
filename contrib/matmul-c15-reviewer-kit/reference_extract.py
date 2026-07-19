@@ -155,6 +155,104 @@ def load_vectors(path: Path | None = None) -> dict:
         return json.load(f)
 
 
+def _i32(u: int) -> int:
+    u &= 0xFFFFFFFF
+    return u - 0x100000000 if u >= 0x80000000 else u
+
+
+def verify_related_nonce_pack(v: dict, prf_key: bytes) -> bool:
+    """Wave-3 Gap#5: ≥32 Mant/Scale XOR-identity tuples + B32 Δ negative control."""
+    import random
+
+    rn = v.get("related_nonce_lane_xor")
+    if not rn:
+        print("FAIL related_nonce_lane_xor section missing")
+        return False
+    ok = True
+    delta = int(rn["delta"])
+    if delta != (LANE_MANT ^ LANE_SCALE):
+        print(f"FAIL related-nonce Δ: got {delta:#x} expected {LANE_MANT ^ LANE_SCALE:#x}")
+        ok = False
+    tuples = rn.get("tuples") or []
+    if len(tuples) < 32:
+        print(f"FAIL related-nonce tuples: need ≥32, got {len(tuples)}")
+        ok = False
+    for t in tuples:
+        raw, i, j, remix = t["raw"], t["i"], t["j"], t["remix"]
+        mant = matexpand_prf_le64(prf_key, raw, i, j, remix, LANE_MANT)
+        scale = matexpand_prf_le64(prf_key, raw, i, j, remix, LANE_SCALE)
+        raw_rel = _i32((raw & 0xFFFFFFFF) ^ delta)
+        mant_rel = matexpand_prf_le64(prf_key, raw_rel, i, j, remix, LANE_MANT)
+        scale_rel = matexpand_prf_le64(prf_key, raw_rel, i, j, remix, LANE_SCALE)
+        if mant != scale_rel or scale != mant_rel:
+            print(f"FAIL identity raw={raw} i={i} j={j} remix={remix}")
+            ok = False
+        if (
+            mant != t["mant_le64"]
+            or scale != t["scale_le64"]
+            or mant_rel != t["mant_at_raw_xor_delta"]
+            or scale_rel != t["scale_at_raw_xor_delta"]
+        ):
+            print(f"FAIL pinned LE64 raw={raw} i={i} j={j} remix={remix}")
+            ok = False
+
+    nc = rn.get("b32_delta_collision_negative_control") or {}
+    grid = nc.get("grid") or {}
+    n, w, seed = int(grid.get("n", 0)), int(grid.get("w", 0)), int(grid.get("seed", 0))
+    if n < 2 or w < 1:
+        print("FAIL B32 Δ-collision grid missing")
+        return False
+
+    def rand_m11(rng: random.Random) -> int:
+        return rng.choice([0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6])
+
+    def mm_i8(A: list[list[int]], B: list[list[int]]) -> list[list[int]]:
+        nn, kk, mm = len(A), len(A[0]), len(B[0])
+        return [
+            [sum(int(A[r][t]) * int(B[t][c]) for t in range(kk)) for c in range(mm)]
+            for r in range(nn)
+        ]
+
+    def mm_i32(A: list[list[int]], B: list[list[int]]) -> list[list[int]]:
+        nn, kk, mm = len(A), len(A[0]), len(B[0])
+        return [
+            [sum(int(A[r][t]) * int(B[t][c]) for t in range(kk)) for c in range(mm)]
+            for r in range(nn)
+        ]
+
+    rng = random.Random(seed)
+    G = [[rand_m11(rng) for _ in range(n)] for _ in range(n)]
+    W = [[rand_m11(rng) for _ in range(w)] for _ in range(n)]
+    H = [[rand_m11(rng) for _ in range(n)] for _ in range(w)]
+    B32 = mm_i32(mm_i8(G, W), H)
+    flat = [B32[r][c] & 0xFFFFFFFF for r in range(n) for c in range(n)]
+    cells = len(flat)
+    pairs = cells * (cells - 1) // 2
+
+    def count_xor(delta_u: int) -> int:
+        d = delta_u & 0xFFFFFFFF
+        c = 0
+        for a in range(cells):
+            for b in range(a + 1, cells):
+                if (flat[a] ^ flat[b]) == d:
+                    c += 1
+        return c
+
+    got_delta = count_xor(delta)
+    if got_delta != int(nc.get("delta_collision_count", -1)):
+        print(
+            f"FAIL B32 Δ-collisions: got {got_delta} expected {nc.get('delta_collision_count')}"
+        )
+        ok = False
+    if got_delta > 1:
+        print(f"FAIL B32 Δ-graph denser than chance bound: count={got_delta}")
+        ok = False
+    if cells != int(nc.get("cells", -1)) or pairs != int(nc.get("unordered_pairs", -1)):
+        print("FAIL B32 Δ-collision metadata cells/pairs mismatch")
+        ok = False
+    return ok
+
+
 def verify_goldens(vectors: dict | None = None) -> int:
     """Return 0 on PASS, 1 on FAIL. Prints PASS/FAIL."""
     v = vectors if vectors is not None else load_vectors()
@@ -190,6 +288,9 @@ def verify_goldens(vectors: dict | None = None) -> int:
         if got < -48 or got > 48:
             print(f"FAIL accel range raw={raw}: got={got}")
             ok = False
+
+    if not verify_related_nonce_pack(v, prf_key):
+        ok = False
 
     if ok:
         print("PASS")

@@ -121,11 +121,16 @@ Review defaults: `δ = 1/2`, `ε = 2⁻⁴⁰`. Do not silently retune.
 
 **Steps.**
 
-1. Reproduce related-nonce observations from pre-review notes.
-2. Ask whether any identity skips GEMM or collapses Freivalds probes across cells.
-3. If only distinguisher / μ′↔e lock without MAC savings → document as C15-C residue, not FAIL.
+1. Reproduce related-nonce observations from pre-review notes / firm pack
+   (`test-vectors.json::related_nonce_lane_xor` — ≥32 identity tuples;
+   `python3 reference_extract.py`; C++ `matexpand_related_nonce_lane_xor_identity`).
+2. Check B32 Δ-collision negative control (synthetic n=16 in JSON; honest n=8
+   in C++): no denser-than-chance Δ-mate graph.
+3. Ask whether any identity skips GEMM or collapses Freivalds probes across cells.
+4. If only distinguisher / μ′↔e lock without MAC savings → document as C15-C residue, not FAIL.
 
-**Oracle / FAIL.** Amortization that wins §0.1. Distinguisher-only → **INCONCLUSIVE**.
+**Oracle / FAIL.** Amortization that wins §0.1. Distinguisher-only / green firm
+pack → **INCONCLUSIVE**. **C-15 remains OPEN.**
 
 ---
 

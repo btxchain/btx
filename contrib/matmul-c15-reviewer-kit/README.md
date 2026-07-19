@@ -11,7 +11,7 @@ GO, or permission to raise `nMatMulDRLTHeight`.
 
 | File | Purpose |
 |---|---|
-| `test-vectors.json` | Frozen Extract goldens, PRF tag, MANT/SCLE lanes, endian notes; **`reduction_relevant_finding_notes`** (high R² / zero Freivalds residual / truncated salt) |
+| `test-vectors.json` | Frozen Extract goldens, PRF tag, MANT/SCLE lanes, endian notes; **`related_nonce_lane_xor`** (≥32 identity tuples + B32 Δ-collision NC); **`reduction_relevant_finding_notes`** |
 | `reference_extract.py` | Standalone Python ChaCha20-PRF Extract (stdlib only) |
 | `toy_attack_harness.py` | Toy-`n` synthetic MatExpand + poly R² for deg 1..`--degree` (default 3) + Freivalds residual |
 | `spectral_approx_probe.py` | Stdlib SVD/CCA-style residual vs Extract for `n∈{8,16,32}` (Gap #6) |

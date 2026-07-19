@@ -31,9 +31,14 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+<<<<<<< HEAD
 #include <limits>
+=======
+#include <iterator>
+>>>>>>> 4d906e9 (test(matmul): ship Wave-3 Gap#5 related-nonce firm pack (C-15 OPEN))
 #include <optional>
 #include <stdexcept>
 #include <string_view>
@@ -431,35 +436,85 @@ BOOST_AUTO_TEST_CASE(matexpand_related_nonce_lane_xor_identity)
     // WITNESS (not a proof): MantPRF(raw) = ScalePRF(raw⊕Δ) with
     // Δ = MANT⊕SCLE = 0x1e020211. Leftover C15-C related-nonce structure —
     // PRF-consistent, not a ChaCha break, not MatExpand amortization.
+    // Firm pack (≥32 tuples + B32 Δ-collision negative control) mirrors
+    // contrib/matmul-c15-reviewer-kit/test-vectors.json::related_nonce_lane_xor.
     // See doc/btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md.
+    // C-15 remains OPEN.
     static_assert(lt::kMatExpandPrfLaneXorDelta == 0x1e020211u);
     const uint256 seed = ParseUint256(
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
     const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
-    constexpr uint32_t remix = 0;
 
-    // Frozen golden tuple (seed above, raw=42, i=3, j=5, remix=0).
-    {
-        constexpr int32_t raw = 42;
-        constexpr uint32_t i = 3, j = 5;
+    // Firm pack: 32 related-nonce identity tuples (test-vectors.json).
+    struct RelatedNonceTuple {
+        int32_t raw;
+        uint32_t i;
+        uint32_t j;
+        uint32_t remix;
+        uint64_t mant_le64;
+        uint64_t scale_le64;
+    };
+    const RelatedNonceTuple kRelatedNonceFirmPack[] = {
+        {0, 0u, 0u, 0u, 0x9bc1a59216201233ULL, 0xb56f624d09799212ULL},
+        {1, 0u, 1u, 0u, 0x021104a83dc8c8b2ULL, 0x86a98fbb30a086ecULL},
+        {-1, 1u, 0u, 0u, 0x6323b7682af515b2ULL, 0x3ec11fb1577cf0aeULL},
+        {42, 3u, 5u, 0u, 0x74deee0cb5814942ULL, 0x1de4e58a12efb7b9ULL},
+        {-1000, 7u, 11u, 1u, 0x36ad015ad191de9bULL, 0x51b71690857bd9c8ULL},
+        {2147483647, 2u, 4u, 0u, 0x6f8ce56dabb6fa9eULL, 0x6827306a3d22680dULL},
+        {static_cast<int32_t>(-2147483647 - 1), 9u, 13u, 0u, 0x78a98165ccd69360ULL, 0x5c6b7686c2f714deULL},
+        {7, 1u, 2u, 2u, 0xd64ff8bf2276fe80ULL, 0xb8f61e984fdf983eULL},
+        {-97, 4u, 1u, 0u, 0x267e5fc2d4d9c230ULL, 0xf9969b99ee1feb63ULL},
+        {100, 5u, 6u, 0u, 0x4509f9aa773b9823ULL, 0xa25b205cee8cdd81ULL},
+        {-100, 8u, 3u, 0u, 0x2edae594f778341bULL, 0xa765736f8b49b251ULL},
+        {12345, 10u, 12u, 0u, 0x74498e4df2078b2bULL, 0xea293ff2eff1320dULL},
+        {-54321, 15u, 15u, 1u, 0xa4604cc0bfdac466ULL, 0x63644093de8674e0ULL},
+        {16909060, 31u, 7u, 0u, 0xc015adc104f7627dULL, 0x6731faf62b130f14ULL},
+        {-270544960, 63u, 31u, 0u, 0x7b162a538741efaeULL, 0x653190dd96f7e0f1ULL},
+        {246267631, 127u, 63u, 2u, 0xa7e8f0f36d904d9bULL, 0x05db949c51e6ac4cULL},
+        {-777, 0u, 0u, 0u, 0x90eb4d9f23faa6e2ULL, 0x72484d595280b17fULL},
+        {999, 0u, 1u, 0u, 0x67f87541d0791373ULL, 0x2292706e9b74a06dULL},
+        {2, 1u, 0u, 0u, 0x361340b91a058777ULL, 0x2f7e574d16c29020ULL},
+        {-2, 3u, 5u, 0u, 0x397e2d3bbe99599dULL, 0x8c0e422c32fe8af3ULL},
+        {3, 7u, 11u, 1u, 0x90db285851278d06ULL, 0xe3db9a22c2158cedULL},
+        {-3, 2u, 4u, 0u, 0x33457748aa12ac1bULL, 0x31340b1f6e799db6ULL},
+        {65535, 9u, 13u, 0u, 0xc40dba2090a38002ULL, 0xd22465f7080d98f2ULL},
+        {-65536, 1u, 2u, 2u, 0xbf2faca88907ba30ULL, 0x1ae92fbf92a847b5ULL},
+        {286331153, 4u, 1u, 0u, 0xa036c3dc22839d3dULL, 0xecf6367f49a6c266ULL},
+        {-572662306, 5u, 6u, 0u, 0xf76a318c556735d7ULL, 0x085c314d93fab972ULL},
+        {8675309, 8u, 3u, 0u, 0xf9c0e5e3eeab415bULL, 0x8025796534b388a6ULL},
+        {-314159, 10u, 12u, 0u, 0x11fed0a888fcdf33ULL, 0x129142b53191fc8bULL},
+        {2130771712, 15u, 15u, 1u, 0x50a5844e73a006c0ULL, 0x593741c00e237619ULL},
+        {-16711935, 31u, 7u, 0u, 0x86f137fd59659fc9ULL, 0x93c2e63d68711877ULL},
+        {13, 63u, 31u, 0u, 0x3614d91224c196eeULL, 0xed53a2bffaa256d4ULL},
+        {-26, 127u, 63u, 2u, 0xc7f2831e40e1de64ULL, 0xb5356dae537539c1ULL},
+    };
+    static_assert(std::size(kRelatedNonceFirmPack) >= 32);
+
+    int firm_checked = 0;
+    for (const auto& t : kRelatedNonceFirmPack) {
         const uint64_t mant = lt::MatExpandPrfLaneLE64(
-            prf_key, raw, i, j, remix, lt::kMatExpandPrfLaneMant);
+            prf_key, t.raw, t.i, t.j, t.remix, lt::kMatExpandPrfLaneMant);
         const uint64_t scale = lt::MatExpandPrfLaneLE64(
-            prf_key, raw, i, j, remix, lt::kMatExpandPrfLaneScale);
-        const int32_t raw_rel =
-            static_cast<int32_t>(static_cast<uint32_t>(raw) ^ lt::kMatExpandPrfLaneXorDelta);
-        BOOST_CHECK_EQUAL(mant, lt::MatExpandPrfLaneLE64(
-                                    prf_key, raw_rel, i, j, remix, lt::kMatExpandPrfLaneScale));
-        BOOST_CHECK_EQUAL(scale, lt::MatExpandPrfLaneLE64(
-                                     prf_key, raw_rel, i, j, remix, lt::kMatExpandPrfLaneMant));
-        // Pinned AccelReplica LE64 — re-pin only if lane packing deliberately changes.
-        BOOST_CHECK_EQUAL(mant, 0x74deee0cb5814942ULL);
-        BOOST_CHECK_EQUAL(scale, 0x1de4e58a12efb7b9ULL);
+            prf_key, t.raw, t.i, t.j, t.remix, lt::kMatExpandPrfLaneScale);
+        const int32_t raw_rel = static_cast<int32_t>(
+            static_cast<uint32_t>(t.raw) ^ lt::kMatExpandPrfLaneXorDelta);
+        BOOST_CHECK_EQUAL(mant, t.mant_le64);
+        BOOST_CHECK_EQUAL(scale, t.scale_le64);
+        BOOST_CHECK_EQUAL(
+            mant, lt::MatExpandPrfLaneLE64(prf_key, raw_rel, t.i, t.j, t.remix,
+                                           lt::kMatExpandPrfLaneScale));
+        BOOST_CHECK_EQUAL(
+            scale, lt::MatExpandPrfLaneLE64(prf_key, raw_rel, t.i, t.j, t.remix,
+                                            lt::kMatExpandPrfLaneMant));
+        ++firm_checked;
     }
+    BOOST_CHECK(firm_checked >= 32);
 
-    // Dense sample: identity holds for all probed (raw,i,j).
+    // Dense sample: identity holds for all probed (raw,i,j); μ′↔e lock when
+    // first nibble of MantPRF(raw⊕Δ)=ScalePRF(raw) accepts.
     int checked = 0;
     int first_nibble_lock = 0;
+    constexpr uint32_t remix = 0;
     for (int32_t raw = -200; raw <= 200; raw += 17) {
         for (uint32_t i = 0; i < 3; ++i) {
             for (uint32_t j = 0; j < 3; ++j) {
@@ -477,8 +532,6 @@ BOOST_AUTO_TEST_CASE(matexpand_related_nonce_lane_xor_identity)
                                                     lt::kMatExpandPrfLaneMant));
                 ++checked;
 
-                // First-nibble accept on MantPRF(raw⊕Δ)=ScalePRF(raw) locks
-                // Extract(raw⊕Δ) = μ' · 2^(MantPRF(raw)&3).
                 bool accepted = false;
                 const uint8_t nib = static_cast<uint8_t>(scale & 0x0F);
                 const int8_t mu = matmul::v4::bmx4::SampleMantissaNibble(nib, accepted);
@@ -494,6 +547,29 @@ BOOST_AUTO_TEST_CASE(matexpand_related_nonce_lane_xor_identity)
     }
     BOOST_CHECK(checked >= 100);
     BOOST_CHECK(first_nibble_lock >= 50);
+
+    // Amortization negative control: honest MatExpand B32 on a small grid must
+    // not form a denser-than-chance Δ-mate graph (uniform 32-bit XOR). Even a
+    // perfect 2→1 ChaCha share on rare pairs cannot drop below the GEMM term.
+    {
+        constexpr uint32_t n = 8;
+        const CBlockHeader header = MakeLTHeader(/*nonce=*/0xC15C15Cull, n);
+        const auto bundle = ExpandOperandBB32ForTest(header, n);
+        BOOST_REQUIRE_EQUAL(bundle.B32.size(), static_cast<size_t>(n) * n);
+        const size_t cells = bundle.B32.size();
+        size_t delta_collisions = 0;
+        for (size_t a = 0; a < cells; ++a) {
+            const uint32_t ua = static_cast<uint32_t>(bundle.B32[a]);
+            for (size_t b = a + 1; b < cells; ++b) {
+                const uint32_t ub = static_cast<uint32_t>(bundle.B32[b]);
+                if ((ua ^ ub) == lt::kMatExpandPrfLaneXorDelta) {
+                    ++delta_collisions;
+                }
+            }
+        }
+        // C(64,2)/2^32 ≈ 4.7e-7 — expect 0; allow ≤1 for rare luck.
+        BOOST_CHECK_LE(delta_collisions, static_cast<size_t>(1));
+    }
 }
 
 BOOST_AUTO_TEST_CASE(matexpand_chacha_prf_golden_vectors)
