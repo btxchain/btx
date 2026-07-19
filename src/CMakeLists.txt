@@ -125,6 +125,37 @@ if(BTX_ENABLE_HIP)
   find_package(hip REQUIRED)
 endif()
 
+# Huawei Ascend 950 (昇腾) ExactGemm host backend (src/ascend/). Default OFF;
+# CI has no CANN SDK — fail closed via stub. When ON, probe ASCEND_HOME /
+# ASCEND_TOOLKIT_HOME / common toolkit paths; define BTX_HAVE_CANN and link
+# acl/ascend libs only when found, otherwise still build the inert stub.
+option(BTX_ENABLE_ASCEND "Enable experimental Huawei Ascend/CANN ExactGemm backend (requires CANN toolkit)" OFF)
+set(BTX_ASCEND_HOME "" CACHE PATH "Ascend/CANN toolkit root (directory containing include/acl/acl.h)")
+set(BTX_HAVE_CANN FALSE)
+if(BTX_ENABLE_ASCEND)
+  set(_btx_cann_root "")
+  if(BTX_ASCEND_HOME AND EXISTS "${BTX_ASCEND_HOME}/include/acl/acl.h")
+    set(_btx_cann_root "${BTX_ASCEND_HOME}")
+  elseif(DEFINED ENV{ASCEND_HOME} AND EXISTS "$ENV{ASCEND_HOME}/include/acl/acl.h")
+    set(_btx_cann_root "$ENV{ASCEND_HOME}")
+  elseif(DEFINED ENV{ASCEND_TOOLKIT_HOME} AND EXISTS "$ENV{ASCEND_TOOLKIT_HOME}/include/acl/acl.h")
+    set(_btx_cann_root "$ENV{ASCEND_TOOLKIT_HOME}")
+  elseif(DEFINED ENV{ASCEND_HOME_PATH} AND EXISTS "$ENV{ASCEND_HOME_PATH}/include/acl/acl.h")
+    set(_btx_cann_root "$ENV{ASCEND_HOME_PATH}")
+  elseif(EXISTS "/usr/local/Ascend/ascend-toolkit/latest/include/acl/acl.h")
+    set(_btx_cann_root "/usr/local/Ascend/ascend-toolkit/latest")
+  elseif(EXISTS "/usr/local/Ascend/latest/include/acl/acl.h")
+    set(_btx_cann_root "/usr/local/Ascend/latest")
+  endif()
+  if(_btx_cann_root)
+    set(BTX_HAVE_CANN TRUE)
+    set(BTX_CANN_ROOT "${_btx_cann_root}" CACHE INTERNAL "Detected CANN toolkit root")
+    message(STATUS "BTX_ENABLE_ASCEND=ON: CANN found at ${BTX_CANN_ROOT} (BTX_HAVE_CANN=1)")
+  else()
+    message(WARNING "BTX_ENABLE_ASCEND=ON but CANN toolkit not found (ASCEND_HOME / include/acl/acl.h); building inert Ascend stub (fail-closed)")
+  endif()
+endif()
+
 #=============================
 # Subprojects
 #=============================
@@ -678,6 +709,36 @@ if(BTX_ENABLE_HIP)
   # would silently drop that row even in a HIP build.
   target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_HIP=1)
   target_link_libraries(btx_matmul_backend PRIVATE hip::device)
+  # Optional hipBLASLt (preferred) or rocBLAS for LT ExactGemm MFMA-class
+  # s8×s8→s32. Without these, IsLtMfmaGemmAvailable stays false; device ALU
+  # remains available under IsLtDeviceAluGemmAvailable.
+  find_path(BTX_HIPBLASLT_INCLUDE_DIR hipblaslt/hipblaslt.h
+    HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
+    PATH_SUFFIXES include)
+  find_library(BTX_HIPBLASLT_LIBRARY NAMES hipblaslt
+    HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
+    PATH_SUFFIXES lib lib64)
+  if(BTX_HIPBLASLT_INCLUDE_DIR AND BTX_HIPBLASLT_LIBRARY)
+    target_compile_definitions(btx_matmul_backend PRIVATE BTX_HAVE_HIPBLASLT=1)
+    target_include_directories(btx_matmul_backend PRIVATE "${BTX_HIPBLASLT_INCLUDE_DIR}")
+    target_link_libraries(btx_matmul_backend PRIVATE "${BTX_HIPBLASLT_LIBRARY}")
+    message(STATUS "BTX HIP LT ExactGemm: hipBLASLt linked (MFMA path)")
+  else()
+    find_path(BTX_ROCBLAS_INCLUDE_DIR rocblas/rocblas.h
+      HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
+      PATH_SUFFIXES include)
+    find_library(BTX_ROCBLAS_LIBRARY NAMES rocblas
+      HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
+      PATH_SUFFIXES lib lib64)
+    if(BTX_ROCBLAS_INCLUDE_DIR AND BTX_ROCBLAS_LIBRARY)
+      target_compile_definitions(btx_matmul_backend PRIVATE BTX_HAVE_ROCBLAS=1)
+      target_include_directories(btx_matmul_backend PRIVATE "${BTX_ROCBLAS_INCLUDE_DIR}")
+      target_link_libraries(btx_matmul_backend PRIVATE "${BTX_ROCBLAS_LIBRARY}")
+      message(STATUS "BTX HIP LT ExactGemm: rocBLAS linked (MFMA path)")
+    else()
+      message(STATUS "BTX HIP LT ExactGemm: no hipBLASLt/rocBLAS — MFMA flag false; device ALU only")
+    endif()
+  endif()
   # The HIP backend reuses the shared matmul::v4 host reference (operand
   # expansion, serialization, digest) from bitcoin_common so its output is
   # bit-identical to the CPU by construction. bitcoin_common PUBLIC-links
@@ -696,6 +757,42 @@ else()
     hip/matmul_v4_bmx4_accel_stub.cpp
     hip/matmul_v4_lt_accel_stub.cpp
   )
+endif()
+if(BTX_ENABLE_ASCEND AND BTX_HAVE_CANN)
+  target_sources(btx_matmul_backend PRIVATE
+    ascend/matmul_v4_lt_accel.cpp
+  )
+  target_include_directories(btx_matmul_backend PRIVATE
+    "${BTX_CANN_ROOT}/include"
+  )
+  set(_btx_cann_lib_dirs
+    "${BTX_CANN_ROOT}/lib64"
+    "${BTX_CANN_ROOT}/lib"
+    "${BTX_CANN_ROOT}/aarch64-linux/lib64"
+    "${BTX_CANN_ROOT}/x86_64-linux/lib64"
+  )
+  foreach(_d IN LISTS _btx_cann_lib_dirs)
+    if(EXISTS "${_d}")
+      target_link_directories(btx_matmul_backend PRIVATE "${_d}")
+    endif()
+  endforeach()
+  target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_ASCEND=1 BTX_HAVE_CANN=1)
+  target_link_libraries(btx_matmul_backend PRIVATE ascendcl nnopbase)
+  foreach(_cann_lib IN ITEMS opapi ops_infer)
+    find_library(_btx_cann_${_cann_lib} ${_cann_lib}
+      PATHS ${_btx_cann_lib_dirs} NO_DEFAULT_PATH)
+    if(_btx_cann_${_cann_lib})
+      target_link_libraries(btx_matmul_backend PRIVATE ${_btx_cann_${_cann_lib}})
+    endif()
+  endforeach()
+  target_link_libraries(btx_matmul_backend PRIVATE bitcoin_common)
+else()
+  target_sources(btx_matmul_backend PRIVATE
+    ascend/matmul_v4_lt_accel_stub.cpp
+  )
+  if(BTX_ENABLE_ASCEND)
+    target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_ASCEND=1)
+  endif()
 endif()
 target_link_libraries(btx_matmul_backend PRIVATE core_interface)
 target_link_libraries(bitcoin_common PUBLIC btx_matmul_backend)

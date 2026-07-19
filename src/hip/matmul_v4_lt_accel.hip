@@ -171,8 +171,9 @@ __device__ __forceinline__ int8_t DeviceExtractDequant(int32_t raw, uint32_t i, 
             if (!accepted) continue;
             const uint64_t scale_stream =
                 DeviceMatExpandPrfLE64(key, raw, i, j, remix, kLaneScale);
-            return static_cast<int8_t>(static_cast<int32_t>(mu) <<
-                                      static_cast<uint8_t>(scale_stream & 0x3));
+            // Exact mul — never signed left-shift (negative mu << e is UB).
+            const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
+            return static_cast<int8_t>(static_cast<int32_t>(mu) * (int32_t{1} << e));
         }
         ++remix;
     }
@@ -479,7 +480,12 @@ LtHipResidentPool& Pool()
                                   uint32_t rows, uint32_t k, uint32_t cols,
                                   std::vector<int32_t>& out)
 {
+    // Prefer real hipBLASLt/rocBLAS MFMA-class path; then honest device ALU;
+    // then this TU's pooled scalar tile (also device ALU, never labeled MFMA).
     if (TryLaunchLtMfmaGemmS8S8(left, right, rows, k, cols, out)) {
+        return true;
+    }
+    if (TryLaunchLtDeviceAluGemmS8S8(left, right, rows, k, cols, out)) {
         return true;
     }
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
@@ -507,6 +513,9 @@ LtHipResidentPool& Pool()
                                    std::vector<int32_t>& out)
 {
     if (TryLaunchLtMfmaGemmS32S8(left, right, rows, k, cols, out)) {
+        return true;
+    }
+    if (TryLaunchLtDeviceAluGemmS32S8(left, right, rows, k, cols, out)) {
         return true;
     }
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }

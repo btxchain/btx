@@ -22,10 +22,12 @@
 
 #include <cuda/matmul_v4_bmx4_cutlass_mxfp4.h>
 #include <cuda/matmul_v4_bmx4_fp8_five_limb.h>
+#include <ascend/matmul_v4_lt_accel.h>
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/matmul_v4_bmx4_pipeline.h>
 #include <matmul/pow_v4.h>
@@ -323,7 +325,7 @@ BOOST_AUTO_TEST_CASE(adaptive_limb_combine_matches_direct_and_fallback)
         BOOST_CHECK(adapt == direct);
     }
 
-    // (2) Two-limb base-256 regime (above base-64 two-limb, below 32896).
+    // (2) Two-limb base-256 regime (above base-64 two-limb, below 32640).
     {
         const uint32_t n = 96;
         const uint32_t m = 16;
@@ -338,6 +340,38 @@ BOOST_AUTO_TEST_CASE(adaptive_limb_combine_matches_direct_and_fallback)
         const auto adapt = bx::ComputeCombineAdaptiveLimbBMX4C(P, Q, n, m);
         BOOST_CHECK(b256 == direct);
         BOOST_CHECK(adapt == direct);
+    }
+
+    // (2b) Base-256 int8 top-limb boundaries — differential vs ComputeCombineModQ.
+    // Safe caps: 32639 / 8355711. Just above (32640 / 8355712) and the old
+    // overflowing guard extremes (32895 / 8421247) must still match via
+    // three-limb / Karatsuba fallback — never wrap top=+128 into int8_t.
+    {
+        BOOST_CHECK_EQUAL(bx::kCombineTwoLimbBase256MaxAbs, 32639);
+        BOOST_CHECK_EQUAL(bx::kCombineThreeLimbBase256MaxAbs, 8355711);
+        const uint32_t n = 4;
+        const uint32_t m = 4;
+        const size_t pn = static_cast<size_t>(m) * n;
+        const size_t qn = static_cast<size_t>(n) * m;
+        const int32_t corners[] = {
+            32639, 32640, -32639, -32640,
+            32895, -32895, // old (unsafe) two-limb max — must use 3 limbs
+            8355711, 8355712, -8355711, -8355712,
+            8421247, -8421247, // old (unsafe) three-limb max — Karatsuba fallback
+        };
+        for (const int32_t corner : corners) {
+            std::vector<int32_t> P(pn, 0);
+            std::vector<int32_t> Q(qn, 0);
+            P[0] = corner;
+            Q[0] = corner;
+            const auto direct = ComputeCombineModQ(P, Q, n, m);
+            const auto b256 = bx::ComputeCombineAdaptiveBase256BMX4C(P, Q, n, m);
+            const auto adapt = bx::ComputeCombineAdaptiveLimbBMX4C(P, Q, n, m);
+            BOOST_CHECK_MESSAGE(b256 == direct,
+                                "base-256 combine mismatch at corner " << corner);
+            BOOST_CHECK_MESSAGE(adapt == direct,
+                                "adaptive combine mismatch at corner " << corner);
+        }
     }
 
     // (3) Full-envelope / three-limb base-256 + sparse high-limb (zeros mixed
@@ -518,24 +552,63 @@ BOOST_AUTO_TEST_CASE(fp8_five_limb_device_fail_closed_uses_cpu)
     }
 }
 
-BOOST_AUTO_TEST_CASE(lt_tensor_gemm_availability_flags_default_false)
+BOOST_AUTO_TEST_CASE(lt_tensor_gemm_availability_and_arch_probe)
 {
     // Without CUDA/HIP/Metal silicon + self-qual, tensor preference declines.
+    // Arch probe still returns a well-formed unknown snapshot (CPU-only builds).
+    // HIP device ALU is a separate honest flag — also false when HIP is off.
+    const auto arch = matmul_v4::cuda::ProbeLtCudaArch();
+    BOOST_CHECK(!arch.sm_string.empty());
+    BOOST_CHECK(!arch.name_class_string.empty());
+
+    const auto caps = matmul_v4::cuda::ProbeLtCudaExactGemmCapabilities();
+    BOOST_CHECK_EQUAL(caps.device_hashing, false); // Chat D2H gap documented
+    BOOST_CHECK_EQUAL(caps.exact_partitioned_s32_s8, false);
+
+#if !defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
     BOOST_CHECK(!matmul_v4::cuda::IsLtImmaGemmAvailable());
+    BOOST_CHECK(!caps.exact_s8_s8_s32);
+    BOOST_CHECK_EQUAL(arch.name_class_string, "unknown");
+#else
+    if (matmul_v4::cuda::IsLtImmaGemmAvailable()) {
+        BOOST_CHECK(caps.exact_s8_s8_s32);
+        constexpr uint32_t kDim = 32;
+        std::vector<int8_t> left(static_cast<size_t>(kDim) * kDim);
+        std::vector<int8_t> right(static_cast<size_t>(kDim) * kDim);
+        for (uint32_t i = 0; i < kDim * kDim; ++i) {
+            left[i] = static_cast<int8_t>((i * 7u) % 97) - 48;
+            right[i] = static_cast<int8_t>((i * 11u) % 97) - 48;
+        }
+        const auto cpu = matmul::v4::lt::ExactGemmS8S8(left, right, kDim, kDim, kDim);
+        std::vector<int32_t> gpu;
+        BOOST_REQUIRE(matmul_v4::cuda::TryLaunchLtImmaGemmS8S8(left, right, kDim, kDim, kDim, gpu));
+        BOOST_CHECK(gpu == cpu);
+    } else {
+        BOOST_CHECK(!caps.exact_s8_s8_s32);
+    }
+#endif
+
     BOOST_CHECK(!matmul_v4::hip::IsLtMfmaGemmAvailable());
+    BOOST_CHECK(!matmul_v4::hip::IsLtDeviceAluGemmAvailable());
     BOOST_CHECK(!matmul_v4::metal::IsLtTensorOpsGemmAvailable());
 
     std::vector<int8_t> a(16, 1), b(16, 2);
     std::vector<int32_t> out;
     {
-        const bool c = matmul_v4::cuda::TryLaunchLtImmaGemmS8S8(a, b, 4, 4, 4, out);
-        const bool h = matmul_v4::hip::TryLaunchLtMfmaGemmS8S8(a, b, 4, 4, 4, out);
-        const bool m = matmul_v4::metal::TryLaunchLtTensorOpsGemmS8S8(a, b, 4, 4, 4, out);
-        BOOST_CHECK(!c);
-        BOOST_CHECK(!h);
-        BOOST_CHECK(!m);
+#if !defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+        BOOST_CHECK(!matmul_v4::cuda::TryLaunchLtImmaGemmS8S8(a, b, 4, 4, 4, out));
+#else
+        (void)matmul_v4::cuda::TryLaunchLtImmaGemmS8S8(a, b, 4, 4, 4, out);
+#endif
+        BOOST_CHECK(!matmul_v4::hip::TryLaunchLtMfmaGemmS8S8(a, b, 4, 4, 4, out));
+        BOOST_CHECK(!matmul_v4::hip::TryLaunchLtDeviceAluGemmS8S8(a, b, 4, 4, 4, out));
+        BOOST_CHECK(!matmul_v4::metal::TryLaunchLtTensorOpsGemmS8S8(a, b, 4, 4, 4, out));
     }
+
+    std::vector<int32_t> mid(16, 3);
+    BOOST_CHECK(!matmul_v4::cuda::TryLaunchLtImmaGemmS32S8(mid, b, 4, 4, 4, out));
 }
+
 
 BOOST_AUTO_TEST_CASE(exact_accel_planner_selects_documented_lanes)
 {

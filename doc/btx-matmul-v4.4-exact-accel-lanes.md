@@ -15,7 +15,7 @@ Consensus sees only canonical integer sketch bytes. The optimal design is **one 
 | 1 | Replace 16-GEMM combine with **Karatsuba-9** + fused M61 epilogue | **Done** (CPU + CUDA `Bmx4BuildKaratsubaPlanesKernel` + HIP + Metal) |
 | 2 | **Scale-partitioned grouped MXFP4** projection (total K = n, not 4n) | **Done (exact, software-complete)**: CPU reference + portable exact grouped path (`cuda/matmul_v4_bmx4_cutlass_mxfp4.h`, byte-identical to dense) + CUDA native FP4 tier (hand-written scalar / cuBLASLt, M-t24 gated; C6: scalar never sets `used_tensor_path`) + INT8 tier. Hardware-gated: CMake `BTX_BMX4C_CUTLASS_MXFP4` + CUTLASS headers; `IsGroupedMxfp4TensorKernelLinked()` true only after self-qual |
 | 2b | Adaptive base-256 / two-limb exact combine | **Done (miner-local)**: `ComputeCombineAdaptiveLimbBMX4C` + deferred `__int128` `ComputeCombineModQ` + classical oracle; tournament harness under `bench/` |
-| 3 | Entire nonce loop **device-resident** | **Partial**: device kernels in `ComputeDigestsBMX4CAccel` (CUDA/HIP/Metal) run projection + combine on-device with CPU re-verify; LT “resident” graphs still use **scalar** GEMM loops today (not IMMA). `PersistentSketchMinerBMX4C` is host template cache. Remaining: real tensor kernels in graphs, digest-only D2H, stacked Q |
+| 3 | Entire nonce loop **device-resident** | **Partial**: BMX4C device kernels run projection + combine on-device with CPU re-verify; **LT resident path uses cuBLASLt IMMA for s8xs8** when `IsLtImmaGemmAvailable()`, scalar s32xs8 + scalar graphs on decline. Remaining: device-side digest (drop Chat D2H), stacked Q, IMMA s32xs8 recipe |
 | 4 | **Stop returning loser payloads** | **Done** — streaming `ComputeSketchDigestFromFq`; no 8 MiB loser alloc; CUDA `ComputeDigestsOnlyBMX4CAccel` drops loser payloads device-side |
 | 5 | Future **FP8 five-limb** combine lane | **CPU reference done (exact)**; planner selects for `"rubin"`. Device path: fail-closed API (`IsDeviceFp8FiveLimbAvailable`, `LaunchDeviceFp8FiveLimbCombine`) with transparent CPU fallback via `ComputeCombineFp8FiveLimbDeviceOrCpu` — no Rubin silicon headers in default builds |
 
@@ -82,9 +82,10 @@ vendor-tensor-kernel swap that only *replaces* an already-exact software path:
    headers **and** self-qual; portable exact grouped path is always available.
 3. **Device FP8 five-limb** behind planner + qualification; fail-closed launch +
    `ComputeCombineFp8FiveLimbDeviceOrCpu` CPU fallback is complete today.
-4. **LT ExactGemm tensor preference** — IMMA (cuBLASLt) / MFMA / Metal TensorOps
-   Try* hooks with bit-exact self-test; scalar/ALU tiles remain the fallback.
-   Metal TensorOps recipe still declines until factored from BMX4C M5 path.
+4. **LT ExactGemm tensor preference** — **CUDA IMMA wired** (cuBLASLt `CUBLAS_COMPUTE_32I`
+   in `LaunchGemm*` + resident MatExpand s8xs8). MFMA (hipBLASLt|rocBLAS) /
+   Metal TensorOps Try* hooks remain decline-until-self-qual. HIP scalar tiles
+   are `IsLtDeviceAluGemmAvailable` only — never advertised as MFMA.
 5. **AMD native block-scaled MXFP4** (HIP tier (a)) — gated off pending real MI300/
    MI355 + ROCm; the INT8 MFMA tier (b) is fully implemented and bit-exact.
 6. B200 / H200 / 5090 / MI350 soak + cost/nonce accounting (measurement, not code).
@@ -96,6 +97,8 @@ vendor-tensor-kernel swap that only *replaces* an already-exact software path:
 - `ExpandMantissaStreamPortable` / `ComputeSketchDigestFromFq` — device-portable XOF + streaming digest
 - `ComputeCombineKaratsuba9BMX4C` / CUDA Karatsuba-9 combine
 - `src/cuda/matmul_v4_bmx4_accel.cu` — CUDA device backend (INT8 IMMA + native FP4 tiers, Karatsuba-9 combine)
+- `src/cuda/matmul_v4_lt_tensor_gemm.cu` — LT cuBLASLt IMMA ExactGemm + arch probe
+- `src/cuda/matmul_v4_lt_accel.cu` — LT resident MatExpand (IMMA s8xs8 + scalar s32xs8)
 - `src/hip/matmul_v4_bmx4_accel.hip` — HIP device backend (INT8 MFMA tier complete; native MXFP4 tier hardware-gated)
 - `src/metal/matmul_v4_bmx4_accel.mm` — Metal device backend (ALU + M5 tensor-ops GEMM, self-test gated)
 - `matmul_v4_bmx4_cutlass_mxfp4.h` — complete portable exact scale-partitioned grouped MXFP4 projection (`LaunchGroupedMxfp4Projection`); CUTLASS tensor kernel is the hardware-gated swap
