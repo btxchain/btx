@@ -101,7 +101,12 @@ I1′ *intentionally* amortizes template A / `U`/`V`/`P`; the priced object is n
 
 ### 3.4 Residual useful lemma
 
-**Design hygiene only:** treat multi-instance mining (Q* Phase A skinny grind vs Phase B seal) with an explicit amortization game — packet I1-A/B, SB-*, shortcut audit S9/S10. Use BRSV as **vocabulary** (“prove direct-sum or admit heuristic”), not as a cited hardness assumption for MatExpand.
+**Design hygiene only:** treat multi-instance mining (Q* Phase A skinny grind vs Phase B seal) with an explicit amortization game — packet I1-A/B/D, SB-*, shortcut audit S9/S10. Use BRSV as **vocabulary** (“prove direct-sum or admit heuristic”), not as a cited hardness assumption for MatExpand.
+
+**Wave 3 Gap #9 deliverable:** explicit game statement (heuristic / unproved) in
+`doc/btx-matmul-v4.4-lt-c15-qstar-i1-amortization-game-2026-07-19.md`
+(`BTX-I1p-QStar-DirectSum-Heuristic-v1`). Does **not** close C-15; Gap #10 KW
+redesign skipped.
 
 ---
 
@@ -231,7 +236,7 @@ Attempting to “add KW noise” would re-open v3 amortization classes and contr
 |---|---|---|---|---|
 | Ideal PRF / ChaCha-PRF | Fragment F1 | High for non-affinity | ≠ work lower bound; custom encoding | Ideal-model kill of affine/deg≤2 surrogates |
 | Random-oracle mining bounds | Outer lottery only | Low for MatExpand MAC | Wrong metric | Separate digest lottery from GEMM floor |
-| Ball et al. / BRSV non-amortization | I1′ vocabulary | Conceptual only | Wrong task family | Demand explicit multi-instance game for Q*/I1′ |
+| Ball et al. / BRSV non-amortization | I1′ vocabulary | Conceptual only | Wrong task family | Explicit game: `…-qstar-i1-amortization-game-…` (heuristic) |
 | Pearl / cuPOW transcript unpredictability | Closest published peer conjecture | High taxonomy | Different encoding; no reduction | Template for stating `Adv_Shortcut_MBv` |
 | KW secret low-rank | **Cannot invoke** | None (direct) | Public deterministic panels | Negative lemma: no Pearl⇒BTX transfer |
 | Freivalds soundness | ε floor | High (verify) | Correctness ≠ work | Split forge vs shortcut advantages |
