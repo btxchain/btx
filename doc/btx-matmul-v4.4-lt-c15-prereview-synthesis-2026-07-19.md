@@ -68,15 +68,21 @@ FMM calibration of ASERT vs naive GEMM
 
 ## Reduction research status (2026-07-19)
 
-Wave-1 reduction mapping is **in progress** (fine-grained complexity survey,
-crypto/PoW named-assumption survey, reduction sketches with explicit gaps,
-obstruction write-ups). **No reduction** of LT-C15 / MatExpand non-collapse to
-a standard named problem (SETH, OV, APSP, 3SUM, KW secret low-rank, ChaCha20-PRF
-alone, Freivalds soundness, …) is claimed or completed.
+Wave-1 reduction mapping is **folded** — see the index:
+
+→ **`doc/btx-matmul-v4.4-lt-c15-reduction-research-synthesis-2026-07-19.md`**
+
+That fold indexes fine-grained + crypto/PoW surveys, obstruction notes,
+reduction sketches (explicit GAP lists), ASERT/FMM calibration split, and
+related-nonce ExtractStruct residue. **No reduction** of LT-C15 / MatExpand
+non-collapse to a standard named problem (SETH, OV, APSP, 3SUM, KW secret
+low-rank, ChaCha20-PRF alone, Freivalds soundness, …) is claimed or completed.
+C-15 remains **OPEN**.
 
 What *is* formalized: novel unreduced assumption **`BTX-C15-NonCollapse-v1`**
-in packet §0.2 (game = §0.1; witness ≠ proof). Reviewer pointer:
-`contrib/matmul-c15-reviewer-kit/named-assumption.md`.
+in packet §0.2 (game = §0.1; witness ≠ proof), aliased as
+`BTX-MatExpand-NonCollapse-v1` / MENC family in Wave-1 drafts. Reviewer
+pointer: `contrib/matmul-c15-reviewer-kit/named-assumption.md`.
 
 ## Explicit non-claims
 

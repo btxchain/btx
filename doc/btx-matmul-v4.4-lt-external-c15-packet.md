@@ -329,17 +329,25 @@ Internal witnesses: `phase_b_seal_round_trip_and_auth`,
 
 ### 6.1 Wave-1 survey / reduction companions (not proofs)
 
-Read for context only — **none closes C-15**; all record gaps / non-reductions:
+**Fold / index (start here for reduction research):**
+`doc/btx-matmul-v4.4-lt-c15-reduction-research-synthesis-2026-07-19.md`
+— executive non-reduction verdict, naming alignment
+(`BTX-C15-NonCollapse-v1` ≡ `BTX-MatExpand-NonCollapse-v1` ≡ MENC family),
+attempted-target table, ranked Wave 2/3 gaps. **Does not close C-15.**
+
+Read individual surveys for detail — **none closes C-15**; all record gaps /
+non-reductions:
 
 | Doc | Role |
 |---|---|
-| `doc/btx-matmul-v4.4-lt-c15-prereview-synthesis-2026-07-19.md` | Dual-panel synthesis + reduction-research status |
-| `doc/btx-matmul-v4.4-lt-c15-reduction-survey-finegrained-2026-07-19.md` | Fine-grained (SETH/OV/…) survey |
+| `doc/btx-matmul-v4.4-lt-c15-reduction-research-synthesis-2026-07-19.md` | **Wave-1 fold / index** (this §6.1 entry point) |
+| `doc/btx-matmul-v4.4-lt-c15-prereview-synthesis-2026-07-19.md` | Dual-panel empirics + reduction-research status |
+| `doc/btx-matmul-v4.4-lt-c15-reduction-survey-finegrained-2026-07-19.md` | Fine-grained (SETH/OV/…) survey; MENC draft |
 | `doc/btx-matmul-v4.4-lt-c15-reduction-survey-crypto-2026-07-19.md` | Crypto/PoW named-assumption survey |
 | `doc/btx-matmul-v4.4-lt-c15-reduction-drafts-2026-07-19.md` | Reduction sketches with explicit GAP lists |
 | `doc/btx-matmul-v4.4-lt-c15-reduction-obstructions-2026-07-19.md` | Why standard reductions miss hypotheses |
 | `doc/btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md` | ASERT/FMM efficiency vs HonestMAC hardness (orthogonal) |
-| `doc/btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md` | Mant/Scale related-nonce amortization depth |
+| `doc/btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md` | Mant/Scale related-nonce → ExtractStruct |
 
 Leap checklist remains **C-15 OPEN** / public heights **`INT32_MAX`**:
 `doc/btx-matmul-v4.4-lt-leap-checklist.md`.
