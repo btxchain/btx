@@ -58,8 +58,7 @@ namespace matmul_v4::ascend {
                                        std::vector<int32_t>& out,
                                        bool* used_cube_path = nullptr);
 
-/** ExactGemmS32S8Ascend — declines until a proven exact Cube INT32×INT8 path
- *  exists; callers fall back to CPU ExactGemmS32S8. Never sets used_cube_path. */
+/** Bounded exact S32×S8 implemented as four radix-256 S8 Cube GEMMs. */
 [[nodiscard]] bool ExactGemmS32S8Ascend(const std::vector<int32_t>& left,
                                         const std::vector<int8_t>& right,
                                         uint32_t rows, uint32_t inner, uint32_t cols,
@@ -77,7 +76,7 @@ namespace matmul_v4::ascend {
                                             std::vector<int32_t>& out);
 
 /** Digest-only ENC-DR-LT entry. Declines unless IsAscendExactGemmAvailable().
- *  Injects Cube S8S8 only; S32S8 remains CPU ExactGemm. */
+ *  Injects the exact Cube S8S8 and radix-lowered S32S8 paths. */
 [[nodiscard]] bool ComputeDigestsOnlyLTAscend(
     const CBlockHeader& tmpl, uint32_t n, const uint64_t* nonces, size_t count,
     std::vector<matmul::v4::lt::DigestOnlyResultLT>& out);

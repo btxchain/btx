@@ -83,6 +83,21 @@ uint256 Sha256dPair(const uint256& a, const uint256& b)
     return uint256{Span<const unsigned char>{d2, sizeof(d2)}};
 }
 
+struct MatExpandTemplateProjectors {
+    std::vector<int8_t> G;
+    std::vector<int8_t> H;
+};
+
+MatExpandTemplateProjectors PrepareMatExpandTemplateProjectors(const uint256& tmpl, uint32_t n)
+{
+    const uint256 seed_g = DeriveTaggedSeed(kMatExpandGTag, sizeof(kMatExpandGTag) - 1, tmpl);
+    const uint256 seed_h = DeriveTaggedSeed(kMatExpandHTag, sizeof(kMatExpandHTag) - 1, tmpl);
+    MatExpandTemplateProjectors out;
+    out.G = bx::ExpandProjectorBMX4C(seed_g, n, n);
+    out.H = bx::ExpandProjectorBMX4C(seed_h, kMatExpandPanelW, n);
+    return out;
+}
+
 // MatExpand core: Bhat = Extract_MX((G * W) * H), n*n row-major, |.| <= 48.
 //   G = ExpandProjectorBMX4C(seed_G, n, n)   template-scoped M11
 //   H = ExpandProjectorBMX4C(seed_H, w, n)   template-scoped M11
@@ -99,18 +114,18 @@ uint256 Sha256dPair(const uint256& a, const uint256& b)
 //
 // `backend` may redirect the two dense GEMMs to a bit-exact device path;
 // nullptr slots (or a false return) fall back to ExactGemm*.
-std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, uint32_t n,
-                                  const ExactGemmBackend& backend,
-                                  std::vector<int8_t>* mu_out = nullptr,
-                                  std::vector<uint8_t>* scales_out = nullptr)
+std::vector<int8_t> MatExpandCorePrepared(const uint256& seed_w, uint32_t n,
+                                          const std::vector<int8_t>& G,
+                                          const std::vector<int8_t>& H,
+                                          const ExactGemmBackend& backend,
+                                          std::vector<int8_t>* mu_out = nullptr,
+                                          std::vector<uint8_t>* scales_out = nullptr,
+                                          bool materialize_dense = true)
 {
     assert(n % kMatExpandMxBlockLen == 0);
     const uint32_t w = kMatExpandPanelW;
-    const uint256 seed_g = DeriveTaggedSeed(kMatExpandGTag, sizeof(kMatExpandGTag) - 1, tmpl);
-    const uint256 seed_h = DeriveTaggedSeed(kMatExpandHTag, sizeof(kMatExpandHTag) - 1, tmpl);
-
-    const std::vector<int8_t> G = bx::ExpandProjectorBMX4C(seed_g, n, n); // n x n
-    const std::vector<int8_t> H = bx::ExpandProjectorBMX4C(seed_h, w, n); // w x n
+    assert(G.size() == static_cast<size_t>(n) * n);
+    assert(H.size() == static_cast<size_t>(w) * n);
     const std::vector<int8_t> W = bx::ExpandProjectorBMX4C(seed_w, n, w); // n x w
 
     std::vector<int32_t> Y;
@@ -142,7 +157,10 @@ std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, ui
 
     const uint256 prf_key = DeriveMatExpandPrfKey(seed_w);
     const uint32_t nblk = n / kMatExpandMxBlockLen;
-    std::vector<int8_t> out(static_cast<size_t>(n) * n);
+    std::vector<int8_t> out;
+    if (materialize_dense) {
+        out.resize(static_cast<size_t>(n) * n);
+    }
     if (mu_out) {
         mu_out->assign(static_cast<size_t>(n) * n, 0);
     }
@@ -166,11 +184,24 @@ std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, ui
                 if (mu_out) {
                     (*mu_out)[idx] = mu_tile[t];
                 }
-                out[idx] = static_cast<int8_t>(static_cast<int32_t>(mu_tile[t]) * scale);
+                if (materialize_dense) {
+                    out[idx] = static_cast<int8_t>(static_cast<int32_t>(mu_tile[t]) * scale);
+                }
             }
         }
     }
     return out;
+}
+
+std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, uint32_t n,
+                                  const ExactGemmBackend& backend,
+                                  std::vector<int8_t>* mu_out = nullptr,
+                                  std::vector<uint8_t>* scales_out = nullptr,
+                                  bool materialize_dense = true)
+{
+    const MatExpandTemplateProjectors projectors = PrepareMatExpandTemplateProjectors(tmpl, n);
+    return MatExpandCorePrepared(seed_w, n, projectors.G, projectors.H, backend, mu_out, scales_out,
+                                 materialize_dense);
 }
 
 } // namespace
@@ -535,6 +566,18 @@ std::vector<int8_t> ExpandOperandBMatExpandMx(const CBlockHeader& header, uint32
     return MatExpandCore(tmpl, seed_w, n, backend, &mu_out, &scales_out);
 }
 
+void ExpandOperandBMatExpandMxComponents(const CBlockHeader& header, uint32_t n,
+                                         const ExactGemmBackend& backend,
+                                         std::vector<int8_t>& mu_out,
+                                         std::vector<uint8_t>& scales_out)
+{
+    const uint256 tmpl = matmul::v4::ComputeTemplateHash(header);
+    const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
+    const uint256 seed_w = DeriveTaggedSeed(kMatExpandWTag, sizeof(kMatExpandWTag) - 1, header_hash);
+    (void)MatExpandCore(tmpl, seed_w, n, backend, &mu_out, &scales_out,
+                        /*materialize_dense=*/false);
+}
+
 std::vector<int32_t> ComputeProjectedRightMxBlockScaleLT(const std::vector<int8_t>& mu,
                                                          const std::vector<uint8_t>& scales,
                                                          const std::vector<int8_t>& V, uint32_t n,
@@ -547,17 +590,22 @@ std::vector<int32_t> ComputeProjectedRightMxBlockScaleLT(const std::vector<int8_
     assert(V.size() == static_cast<size_t>(n) * m);
     std::vector<int32_t> Q(static_cast<size_t>(n) * m, 0);
     for (uint32_t i = 0; i < n; ++i) {
+        int32_t* q_row = Q.data() + static_cast<size_t>(i) * m;
         for (uint32_t bj = 0; bj < nblk; ++bj) {
             const uint8_t e = scales[static_cast<size_t>(i) * nblk + bj];
             const int32_t scale = int32_t{1} << e;
-            for (uint32_t c = 0; c < m; ++c) {
-                int32_t acc = 0;
-                for (uint32_t t = 0; t < kMatExpandMxBlockLen; ++t) {
-                    const uint32_t j = bj * kMatExpandMxBlockLen + t;
-                    acc += static_cast<int32_t>(mu[static_cast<size_t>(i) * n + j]) *
-                           static_cast<int32_t>(V[static_cast<size_t>(j) * m + c]);
+            const size_t mu_base = static_cast<size_t>(i) * n +
+                                   static_cast<size_t>(bj) * kMatExpandMxBlockLen;
+            for (uint32_t t = 0; t < kMatExpandMxBlockLen; ++t) {
+                const int32_t coeff = static_cast<int32_t>(mu[mu_base + t]) * scale;
+                if (coeff == 0) continue;
+                const uint32_t j = bj * kMatExpandMxBlockLen + t;
+                const int8_t* v_row = V.data() + static_cast<size_t>(j) * m;
+                // Stream contiguous V/Q rows so compilers can vectorize this
+                // exact s8-by-small-int update. All public bounds fit int32.
+                for (uint32_t c = 0; c < m; ++c) {
+                    q_row[c] += coeff * static_cast<int32_t>(v_row[c]);
                 }
-                Q[static_cast<size_t>(i) * m + c] += acc * scale;
             }
         }
     }
@@ -608,23 +656,29 @@ bool ComputeDigestBMX4CLT(const CBlockHeader& header, uint32_t n,
     }
 
     const uint256 sigma = matmul::v4::DeriveSigma(header); // UNCHANGED
+    const uint256 tmpl = matmul::v4::ComputeTemplateHash(header);
+    const MatExpandTemplateProjectors projectors = PrepareMatExpandTemplateProjectors(tmpl, n);
+    const uint256 seed_wa = DeriveTaggedSeed(kMatExpandWATag, sizeof(kMatExpandWATag) - 1, tmpl);
+    const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
+    const uint256 seed_w = DeriveTaggedSeed(kMatExpandWTag, sizeof(kMatExpandWTag) - 1, header_hash);
     const auto [seed_u, seed_v] = DeriveProjectorSeedsBMX4CLT(header);
 
-    const std::vector<int8_t> Ahat = ExpandOperandAMatExpand(header, n, backend);
-    std::vector<int8_t> mu_b;
-    std::vector<uint8_t> scales_b;
-    const std::vector<int8_t> Bhat =
-        ExpandOperandBMatExpandMx(header, n, backend, mu_b, scales_b);
-    (void)Bhat;
+    const std::vector<int8_t> Ahat =
+        MatExpandCorePrepared(seed_wa, n, projectors.G, projectors.H, backend);
+    std::vector<int8_t> b_mu;
+    std::vector<uint8_t> b_scales;
+    (void)MatExpandCorePrepared(seed_w, n, projectors.G, projectors.H, backend,
+                                &b_mu, &b_scales, /*materialize_dense=*/false);
     const std::vector<int8_t> U = bx::ExpandProjectorBMX4C(seed_u, m, n);
     const std::vector<int8_t> V = bx::ExpandProjectorBMX4C(seed_v, n, m);
 
-    // Optimal factoring Chat = (U*Ahat)(Bhat*V), never forming C. Lever-B:
-    // right projection uses MX scale-partitioned lane (bit-identical to dense
-    // Bhat·V). |Ahat|,|Bhat| <= 48 and |U|,|V| <= 6.
+    // Optimal factoring Chat = (U*Ahat)(Bhat*V), never forming C or a dense
+    // dequantized Bhat. The MX component lane is exactly Bhat*V with
+    // Bhat[i,j]=mu[i,j]*2^e[i,j/32]. Deep tile m=n/2 raises the enforced
+    // combine work but touches no accumulator bound.
     const std::vector<int32_t> P = matmul::v4::ComputeProjectedLeft(U, Ahat, n, m);
     const std::vector<int32_t> Q =
-        ComputeProjectedRightMxBlockScaleLT(mu_b, scales_b, V, n, m);
+        ComputeProjectedRightMxBlockScaleLT(b_mu, b_scales, V, n, m);
     const std::vector<Fq> Chat = matmul::v4::ComputeCombineModQ(P, Q, n, m);
 
     payload_out = matmul::v4::SerializeSketch(Chat);
@@ -659,9 +713,16 @@ bool VerifySketchBMX4CLT(const CBlockHeader& header, uint32_t n, uint32_t rounds
 
     // Re-MatExpand the operands; the UNCHANGED SketchFreivalds verifier consumes
     // them as exact integers -- it is compute-path-agnostic (design §3).
+    const uint256 tmpl = matmul::v4::ComputeTemplateHash(header);
+    const MatExpandTemplateProjectors projectors = PrepareMatExpandTemplateProjectors(tmpl, n);
+    const uint256 seed_wa = DeriveTaggedSeed(kMatExpandWATag, sizeof(kMatExpandWATag) - 1, tmpl);
+    const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
+    const uint256 seed_w = DeriveTaggedSeed(kMatExpandWTag, sizeof(kMatExpandWTag) - 1, header_hash);
     const auto [seed_u, seed_v] = DeriveProjectorSeedsBMX4CLT(header);
-    const std::vector<int8_t> Ahat = ExpandOperandAMatExpand(header, n);
-    const std::vector<int8_t> Bhat = ExpandOperandBMatExpand(header, n);
+    const std::vector<int8_t> Ahat =
+        MatExpandCorePrepared(seed_wa, n, projectors.G, projectors.H, ExactGemmBackend{});
+    const std::vector<int8_t> Bhat =
+        MatExpandCorePrepared(seed_w, n, projectors.G, projectors.H, ExactGemmBackend{});
     const std::vector<int8_t> U = bx::ExpandProjectorBMX4C(seed_u, m, n);
     const std::vector<int8_t> V = bx::ExpandProjectorBMX4C(seed_v, n, m);
 
@@ -932,14 +993,21 @@ WindowSketchMinerLT::WindowSketchMinerLT(const CBlockHeader& header, uint32_t n,
     m_m = m;
     m_template_hash = matmul::v4::ComputeTemplateHash(m_template);
 
-    // Template-scoped derivations (invariant I1'): Ahat (MatExpand with the
-    // template panel), U, V, and the left factor P = U*Ahat are paid ONCE per
-    // template. The per-nonce marginal work is {MatExpand Bhat, Bhat*V, combine,
-    // digest}. Injectable ExactGemmBackend may accelerate MatExpand GEMMs here;
-    // CUDA/HIP/Metal accel TUs prefer a fuller device-resident loop and use
-    // this miner only as the fail-closed ExactGemm fallback.
+    // Template-scoped derivations (invariant I1'): G, H, Ahat (MatExpand with
+    // the template panel), U, V, and the left factor P = U*Ahat are paid ONCE
+    // per template. In particular, retaining G/H prevents the CPU and
+    // per-call-device-GEMM fallback from regenerating n*n + w*n deterministic
+    // projector bytes for every nonce. The per-nonce marginal work is now
+    // exactly {expand W, G*W, (G*W)*H, MX Extract, Bhat*V, combine, digest}.
+    // CUDA/HIP accel TUs prefer a fuller device-resident loop and use this
+    // miner only as the fail-closed ExactGemm fallback.
+    const uint256 seed_wa = DeriveTaggedSeed(kMatExpandWATag, sizeof(kMatExpandWATag) - 1,
+                                             m_template_hash);
     const auto [seed_u, seed_v] = DeriveProjectorSeedsBMX4CLT(m_template);
-    m_A = ExpandOperandAMatExpand(m_template, n, m_backend);
+    MatExpandTemplateProjectors projectors = PrepareMatExpandTemplateProjectors(m_template_hash, n);
+    m_G = std::move(projectors.G);
+    m_H = std::move(projectors.H);
+    m_A = MatExpandCorePrepared(seed_wa, n, m_G, m_H, m_backend);
     m_U = bx::ExpandProjectorBMX4C(seed_u, m_m, n);
     m_V = bx::ExpandProjectorBMX4C(seed_v, n, m_m);
     m_P = matmul::v4::ComputeProjectedLeft(m_U, m_A, n, m_m);
@@ -957,8 +1025,10 @@ bool WindowSketchMinerLT::MineWindow(const std::vector<CBlockHeader>& headers,
     out.reserve(headers.size());
     for (const CBlockHeader& header : headers) {
         DigestOnlyResultLT res;
-        std::vector<unsigned char> payload;
-        if (!MineSlot(header, res.digest, &payload)) {
+        // Phase A needs only the digest. Avoid serializing and then discarding
+        // the m*m field payload for every losing nonce; Mine() materializes it
+        // only for target matches below.
+        if (!MineSlot(header, res.digest, nullptr)) {
             out.clear();
             return false;
         }
@@ -979,11 +1049,13 @@ bool WindowSketchMinerLT::MineSlot(const CBlockHeader& header, uint256& digest_o
     if (matmul::v4::ComputeTemplateHash(header) != m_template_hash) return false;
 
     const uint256 sigma = matmul::v4::DeriveSigma(header);
+    const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
+    const uint256 seed_w = DeriveTaggedSeed(kMatExpandWTag, sizeof(kMatExpandWTag) - 1,
+                                            header_hash);
     std::vector<int8_t> mu;
     std::vector<uint8_t> scales;
-    const std::vector<int8_t> Bhat =
-        ExpandOperandBMatExpandMx(header, m_n, m_backend, mu, scales);
-    (void)Bhat; // dense Bhat retained for digest-path identity; Q uses MX lane
+    (void)MatExpandCorePrepared(seed_w, m_n, m_G, m_H, m_backend, &mu, &scales,
+                                /*materialize_dense=*/false);
     const std::vector<int32_t> Q =
         ComputeProjectedRightMxBlockScaleLT(mu, scales, m_V, m_n, m_m);
     const std::vector<Fq> Chat = matmul::v4::ComputeCombineModQ(m_P, Q, m_n, m_m);
@@ -1020,7 +1092,9 @@ bool WindowSketchMinerLT::Mine(const std::vector<uint64_t>& nonces, const uint25
             }
             uint256 d;
             std::vector<unsigned char> payload;
-            if (ComputeDigestBMX4CLT(headers[i], m_n, d, payload) && d == out[i].digest) {
+            // Reuse the prepared A/G/H/U/V/P state for the rare winner rather
+            // than invoking the full one-shot digest path again.
+            if (MineSlot(headers[i], d, &payload) && d == out[i].digest) {
                 (*payloads_out)[i] = std::move(payload);
             } else {
                 (*payloads_out)[i].clear();
@@ -1032,11 +1106,10 @@ bool WindowSketchMinerLT::Mine(const std::vector<uint64_t>& nonces, const uint25
 
 matmul::v4::bmx4::ExactAccelPlan PlanLTAccel(std::string_view device_class)
 {
-    // MatExpand replaces the SHA operand XOF with dense exact-int GEMMs; the
-    // projection/combine lane choice for the deep-m sketch is the same device
-    // taxonomy as ENC-BMX4C. After Lever-B MX Extract, ScalePartitionedMxfp4
-    // means e(i, j/32) col-block scales + partitioned B̂·V (NOT BMX4C operand-B
-    // row-block e(rb,j) layout). Consensus never sees these lanes — only Ĉ.
+    // This is a static lane-intent taxonomy shared with ENC-BMX4C, not runtime
+    // proof that a native instruction executed. The current frontier LT path
+    // consumes logical MX components through an exact INT8 IMMA/MFMA lowering;
+    // native MXFP4 remains separately hardware-gated. Consensus sees only Ĉ.
     return matmul::v4::bmx4::PlanExactAccelLanes(device_class);
 }
 

@@ -1,5 +1,13 @@
 # BTX MatMul v4.2-D — the compute-bound redesign (ENC-BMX4C-D)
 
+> **Implementation correction (2026-07-20).** Sections describing the native
+> path as “realized” are design targets, not current execution evidence. The
+> portable grouped path is exact integer emulation. cuBLASLt returns no OCP
+> MXFP4 algorithm on tested B200/5090 configurations, and no admitted
+> CUTLASS/tcgen05 or CDNA native kernel is wired. Current LT CUDA/HIP paths use
+> dense INT8 IMMA/MFMA after logical MX dequantization. Planner labels do not
+> qualify hardware. This profile remains parked and inert.
+
 > **LEAD DECISION (2026-07-16): ENC-BMX4C-D is PARKED — NOT the deployment path.**
 > On review, the 32 MiB payload (m=2048, b=2) quadruples data for marginal ordering
 > gain and adds a data-availability cost, while the **8 MiB ENC-BMX4C profile
@@ -349,7 +357,7 @@ relay extension is a hard, disclosed prerequisite.
 
 ### 7.1 The problem being fixed
 
-Today the only library-locked path is the CUDA native MXFP4 GEMM
+The attempted library-locked path is the CUDA native-MXFP4 request
 (`RunMxf4Gemm`): a single `cublasLtMatmulAlgoGetHeuristic` with
 `CUDA_R_4F_E2M1` + `CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0`. cuBLASLt returns
 **zero algorithms** for this on every tested NVIDIA card/toolkit (5090, B200;
@@ -387,8 +395,8 @@ Fallback: the hand-written INT8 s8→s32 path (1 GEMM on pre-shifted operands,
   E_max=48≤127), available on every IMMA/MFMA/TensorOps device.
 ```
 
-The native path is realized as **hand-written kernels, NEVER a library
-dependency**:
+The native path was proposed as **hand-written kernels, never a library
+dependency**; the following bullets are targets, not landed native execution:
 - **CUDA:** a hand-written `mma.sync…mxf8f6f4…e2m1.e2m1.f32.ue8m0` kernel behind
   the existing tier-select (`compute_120a`), reachable without cuBLASLt. See §7.3.
 - **CDNA:** MFMA `f8f6f4` block-scaled path (contract stub consistent with the
@@ -466,9 +474,9 @@ the mandate.
 - `src/kernel/chainparams.cpp` — construction invariant for the D height (must
   succeed C; positive ASERT ratio).
 - `src/test/matmul_v4_bmx4d_tests.cpp` (+ CMake) — the invariant suite above.
-- `src/cuda/matmul_v4_bmx4_accel.cu` — hand-written native MXFP4 path +
-  DEVICE_HIGH_MAGNITUDE_PASS marker (see the CUDA notes; compile-guarded,
-  verifiable only on a real toolchain).
+- `src/cuda/matmul_v4_bmx4_accel.cu` — portable/integer fallback plus
+  compile-guarded native-MX integration points. No current path may emit a
+  native marker without real tensor execution and self-qualification.
 
 Everything stays activation-disabled (`nMatMulBMX4CDHeight = INT32_MAX` on every
 network). No price/market input anywhere. The datacenter ordering is framed as a

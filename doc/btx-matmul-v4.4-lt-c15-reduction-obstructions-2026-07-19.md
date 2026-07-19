@@ -1,5 +1,12 @@
 # C-15 Wave 1 — Why standard reductions FAIL for BTX MatExpand (as designed)
 
+> **Lever-B supersession note (2026-07-20).** Parameter and extractor examples
+> below describe the historical `w=128` per-cell ChaChaCell design. Current
+> consensus code uses `w=1024` (`rank(B32)≤min(n,1024)`, production `n/w=4`)
+> and real 32-value MX tiles salted by `(i,bj)`. The named-reduction
+> obstructions may remain conceptually useful, but have not been proved for the
+> new construction. Legacy `MANT`/`SCLE` identities are differential-only.
+
 *Date: 2026-07-19. Branch context: `feat/bmx4c-exact-accel-lanes`.*  
 *Status: **NEGATIVE RESULTS / OBSTRUCTIONS** — informal but precise. Not a security proof.*  
 *Companions: `doc/btx-matmul-v4.4-lt-external-c15-packet.md` §0.1,
@@ -59,7 +66,7 @@ Normative MatExpand (v4.4-LT):
 
 ```
 Y  = G · W          # panels from header / template / nonce seeds
-B32 = Y · H         # ⇒ rank(B32) ≤ w = 128  (public structure)
+B32 = Y · H         # ⇒ rank(B32) ≤ min(n,w), current w=1024 (public structure)
 prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W)
 B̂[i,j] = Extract(B32[i,j], i, j, prf_key)
 ```
@@ -68,7 +75,7 @@ B̂[i,j] = Extract(B32[i,j], i, j, prf_key)
 |---|---|---|
 | Operand matrices | Often external / job inputs | **Deterministic** from public seeds |
 | Low-rank object | **Secret** noise / correction (priced to hide) | **Public** thin factorization `G,W,H` (priced to *compute*) |
-| `rank ≤ r` | Adversarial shortcut if peelable | **By design** (`w=128`); honest cost is `Θ(n²w)`, not `Θ(n³)` |
+| `rank ≤ r` | Adversarial shortcut if peelable | **By design** (current `w=1024`); honest cost is `Θ(n²w)`, not `Θ(n³)` |
 | Binding mechanism | Transcript RO over tiles | Sketch digest + Freivalds on `Ĉ`; Extract on cells |
 
 Anyone who knows the header / nonce / template can **locally regenerate**
@@ -89,7 +96,7 @@ recovery is the hardness statement.
 In BTX:
 
 - `G, W, H` are **public deterministic functions of seeds**.
-- `B32 = (G·W)·H` is **deterministically regenerable**; `rank(B32)≤128` is
+- `B32 = (G·W)·H` is **deterministically regenerable**; current `rank(B32)≤min(n,1024)` is
   public knowledge, not a secret.
 - Extract’s `prf_key` is likewise `SHA256(tag‖seed_W)` — **public given the
   same seeds** (it is a domain-separated mixer key, not a KW-style hidden
@@ -283,7 +290,7 @@ BTX v4.4-LT deliberately:
 
 - uses **deterministic seed → panels** so every node / accelerator reproduces
   the same ExactGemm operands;
-- prices a **public** thin factorization (`w=128`) as the MatExpand floor;
+- prices a **public** thin factorization (current `w=1024`) as the MatExpand floor;
 - relies on **nonlinear position-salted Extract** to kill Freivalds
   reassociation through that public structure.
 

@@ -135,11 +135,13 @@ representation (+0); −0 is rejected, never canonicalized.
 
 Each operand element additionally carries a **per-block power-of-two scale**:
 
-- Block length **L = 32 along the contraction dimension** (OCP MX v1.0
-  discipline): for Â in row i, blocks are runs of 32 consecutive columns
-  k ∈ [32j, 32j+31]; for B̂ in column j, runs of 32 consecutive rows. One scale
-  exponent per (row, block) of A and per (block, column) of B: n²/32 exponents
-  per operand at n ≡ 0 (mod 32) (all accepted dims are; n % b == 0 and
+- Block length **L = 32 along the contraction dimension of the consensus
+  projection GEMMs** (OCP MX v1.0 discipline). In `P = U·Â`, A is the right
+  operand and its contraction index is row `i`, so `e_A(⌊i/32⌋,k)` is shared
+  over 32 consecutive rows for each output column `k`. In `Q = B̂·V`, B is the
+  left operand and its contraction index is column `j`, so `e_B(k,⌊j/32⌋)` is
+  shared over 32 consecutive columns for each output row `k`. Each operand has
+  n²/32 exponents at n ≡ 0 (mod 32) (all accepted dims are; n % b == 0 and
   n % 32 == 0 MUST both hold — every v4 window dim 4096/8192 qualifies).
 - Exponent **e ∈ {0, 1, 2, 3}** (S = 3). Scale format: E8M0 restricted to codes
   **127..130** (code = e + 127); on consumer hardware hosting scales in UE4M3
@@ -152,10 +154,11 @@ Each operand element additionally carries a **per-block power-of-two scale**:
 The dequantized committed operand entry is the exact integer
 
 ```
-Â[i,k] = μ_A[i,k] · 2^(e_A(i, ⌊k/32⌋)),      |Â| ≤ E_max = 6·2³ = 48
+Â[i,k] = μ_A[i,k] · 2^(e_A(⌊i/32⌋, k)),      |Â| ≤ E_max = 6·2³ = 48
+B̂[k,j] = μ_B[k,j] · 2^(e_B(k, ⌊j/32⌋)),      |B̂| ≤ E_max
 ```
 
-(and symmetrically B̂). E_max = 48 ≤ 127 is the load-bearing inequality: every
+E_max = 48 ≤ 127 is the load-bearing inequality: every
 INT8 device runs the whole object as **one** s8 GEMM on pre-shifted operands.
 
 ### §1.4 The U/V projectors (scale-free 𝓜₁₁; profile P-B, ADOPTED)
@@ -218,8 +221,8 @@ rejection count, and the planes are never correlated (keep in sync with
 2. **Scale plane** (A and B only; plane byte 'e', same seed). One 2-bit code
    per 32-element block, 4 codes per keystream byte consumed from the LSB up
    (bits [1:0], then [3:2], [5:4], [7:6]), bytes in stream order; blocks in
-   row-major block order (A: n × n/32 by rows; B: n/32 × n by block-rows —
-   i.e. blocks run along each operand's contraction dimension, §1.3). The
+   row-major block order (A: n/32 × n by contraction-row blocks; B: n × n/32
+   by output rows and contraction-column blocks, §1.3). The
    2-bit value IS e (rejection-free).
 
 **No template-scoped structure on B's planes** (redesign condition #6,

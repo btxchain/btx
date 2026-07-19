@@ -151,6 +151,12 @@ class TestNode():
                 "-softwareexpiry=0",
                 "-walletimplicitsegwit",
             ]
+            if self.chain == "regtest":
+                # The product's regtest profile intentionally defaults to the
+                # expensive Q*=256 Phase-B seal. Keep the general functional
+                # harness and its 199-block cache on Phase A; the dedicated
+                # seal test opts back in with a later command-line argument.
+                self.args.append("-regtestmatmulltsealaspow=0")
 
         if self.version_is_at_least(190000):
             self.args.append("-logthreadnames")

@@ -3,8 +3,8 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/license/mit/.
 """Regtest functional coverage for the BTX MatMul v4.4-LT Q* Phase B
-seal-as-PoW window lottery object (INERT-by-default; opt-in on regtest via
--regtestmatmulltsealaspow together with a live -regtestdrltheight).
+seal-as-PoW window lottery object (inert on public networks; live by default
+on regtest and explicitly pinned here with -regtestmatmulltsealaspow=1).
 
 feature_matmul_drlt_activation.py already exercises Phase A (the per-nonce
 ENC-DR-LT digest). This test exercises Phase B: with -regtestmatmulltsealaspow
@@ -69,7 +69,7 @@ class BTXMatMulDRLTSealAsPoW(BitcoinTestFramework):
             f"-regtestbmx4cheight={BMX4C_HEIGHT}",
             f"-regtestdrltheight={DRLT_HEIGHT}",
             # Phase B: turn the ENC-DR-LT lottery object into the Q* window seal.
-            "-regtestmatmulltsealaspow",
+            "-regtestmatmulltsealaspow=1",
         ]
         self.extra_args = [common, common]
 
@@ -123,13 +123,22 @@ class BTXMatMulDRLTSealAsPoW(BitcoinTestFramework):
         assert "matrix_c_words" not in seal_block
 
         self.log.info(f"Mine {SEAL_BLOCKS} more seal blocks; both nodes keep agreeing")
-        self.generate(node0, SEAL_BLOCKS, sync_fun=self.no_op)
+        # A Phase-B verification occupies Q* leaf-work units and the default LT
+        # pending cap admits two complete seal jobs.  Do not burst more blocks
+        # than that cap at the peer: a third compact-block reconstruction is
+        # intentionally deferred while the first two seals are still being
+        # recomputed, and immediate redelivery can turn this functional test
+        # into a noisy request/defer loop.  Mining and syncing one at a time
+        # still exercises repeated seal anchors while respecting the production
+        # admission contract.
+        for expected_height in range(DRLT_HEIGHT + 1, DRLT_HEIGHT + SEAL_BLOCKS + 1):
+            self.generate(node0, 1, sync_fun=self.no_op)
+            self.wait_until(
+                lambda: node1.getblockcount() == expected_height
+                and node1.getbestblockhash() == node0.getbestblockhash(),
+                timeout=600,
+            )
         target_height = DRLT_HEIGHT + SEAL_BLOCKS
-        self.wait_until(
-            lambda: node1.getblockcount() == target_height
-            and node1.getbestblockhash() == node0.getbestblockhash(),
-            timeout=600,
-        )
         for height in range(DRLT_HEIGHT, target_height + 1):
             block = node1.getblock(node1.getblockhash(height), 2)
             assert_equal(block["matmul_dim"], V4_DIMENSION)

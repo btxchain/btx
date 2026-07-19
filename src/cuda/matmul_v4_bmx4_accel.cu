@@ -80,22 +80,19 @@
 //
 // THE NATIVE-FP4 EVALUATION (exactness by construction):
 //
-//   The committed scale planes are blocked along the BASE product's
-//   contraction dimension (spec §1.3: Ahat per (row i, 32-column block);
-//   Bhat per (32-row block, column j)). The MARGINAL GEMMs contract along the
-//   OTHER axis of each operand (P = U*Ahat contracts Ahat's rows; Q = Bhat*V
-//   contracts Bhat's columns), so the committed scales are NOT constant over
-//   32-element runs of those GEMMs' K dimension and therefore cannot legally
-//   occupy the hardware per-32-K-block SFA/SFB scale slots of the marginal
-//   GEMMs. (They CAN for the full-C base GEMM Ahat*Bhat — the §5.2 row-1
-//   path — but the marginal factoring is what the batched miner runs.)
+//   The committed scale planes are blocked along the contraction axes of the
+//   two marginal GEMMs: Ahat uses e_A(i/32,k) for P = U*Ahat, and Bhat uses
+//   e_B(k,j/32) for Q = Bhat*V. The bytes are therefore structurally suitable
+//   for a direct OCP-MX block-scaled GEMM: one scale per output coordinate and
+//   32 K elements. This axis orientation is consensus-visible and must not be
+//   transposed back to the former full-Ahat*Bhat orientation.
 //
-//   The backend therefore applies the E8M0 scale as an EXACT SHIFT, which is
-//   all an E8M0 scale ever is (a pure exponent add — spec §2.2): split each
-//   operand by scale code,
+//   This translation unit does not yet pack the committed scale tensors into
+//   a qualified vendor-native SFA/SFB layout. Its existing qualified path keeps
+//   applying E8M0 as an EXACT SHIFT by splitting each operand by scale code,
 //
-//       Ahat = sum_{e=0}^{3} 2^e * A_e,   A_e[i][k] = mu_A[i][k] * [e_A(i,k/32) == e]
-//       Bhat = sum_{e=0}^{3} 2^e * B_e    (mask along Bhat's own scale plane)
+//       Ahat = sum_{e=0}^{3} 2^e * A_e,   A_e[i][k] = mu_A[i][k] * [e_A(i/32,k) == e]
+//       Bhat = sum_{e=0}^{3} 2^e * B_e,   B_e[k][j] = mu_B[k][j] * [e_B(k,j/32) == e]
 //
 //   where every A_e / B_e entry is in M11 — EXACTLY representable in E2M1 by
 //   construction (spec §1.1: M11 IS the integer subset of E2M1; the sampler's
@@ -149,8 +146,9 @@
 //     + (c/4)*512 + (r/128)*512*ceil(Kblocks/4)). THIS BACKEND ONLY EVER
 //     FEEDS UNIT SCALES (every byte = 127 = 2^0), so the buffer content is
 //     constant and the swizzle is IRRELEVANT TO CORRECTNESS by construction —
-//     the committed scales travel through the int32 shift instead. The layout
-//     is documented here for the future direct-slot full-C path only.
+//     the committed scales travel through the int32 shift instead. A future
+//     direct marginal path may pack the now contraction-aligned committed
+//     scales only after its layout and silicon result are self-qualified.
 //
 // THE COMBINE (shared by both tiers) runs on the INT8/IMMA pipe, NOT on the
 // FP4 units: the base-2^6 digits reach magnitude 32 (remainder-top digit),
@@ -1228,7 +1226,7 @@ void PackProjectorV(const std::vector<int8_t>& V, uint32_t n, uint32_t m, std::v
 }
 
 // B-operand of P = U*Ahat: the FOUR exponent-masked mantissa planes of A
-// (spec §1.3 A-orientation: scale plane n x n/32, e_A(i, k/32)). Logical
+// (spec §1.3 A-orientation: scale plane n/32 x n, e_A(i/32, k)). Logical
 // K = n (contraction over Ahat's ROWS i), N = n; K-major linear index
 // k*n + i <- mu_A[i][k] masked to blocks with e == plane. One pass fills all
 // four planes (unmasked positions stay the packed +0 nibble 0x0).
@@ -1239,12 +1237,11 @@ void PackOperandAMaskedPlanes(const std::vector<int8_t>& mu_a,
 {
     const size_t packed = (static_cast<size_t>(n) * n + 1) / 2;
     for (auto& plane : out) plane.assign(packed, 0);
-    const uint32_t nblk = n / ref::kBlockLen;
     for (uint32_t i = 0; i < n; ++i) {
         const size_t row = static_cast<size_t>(i) * n;
-        const size_t srow = static_cast<size_t>(i) * nblk;
+        const size_t srow = static_cast<size_t>(i / ref::kBlockLen) * n;
         for (uint32_t k = 0; k < n; ++k) {
-            const uint8_t e = scale_a[srow + k / ref::kBlockLen];
+            const uint8_t e = scale_a[srow + k];
             PackNibble(out[e].data(), static_cast<size_t>(k) * n + i,
                        EncodeE2M1Nibble(mu_a[row + k]));
         }
@@ -1253,7 +1250,7 @@ void PackOperandAMaskedPlanes(const std::vector<int8_t>& mu_a,
 
 // A-operand rows of the stacked Q GEMM [B_1;...;B_q]*V: the FOUR
 // exponent-masked mantissa planes of one nonce's B (spec §1.3 B-orientation:
-// scale plane n/32 x n, e_B(k/32, j)). Logical row r = nonce_row0 + k,
+// scale plane n x n/32, e_B(k, j/32)). Logical row r = nonce_row0 + k,
 // K = n (contraction over Bhat's COLUMNS j); K-major linear index r*n + j —
 // identical memory image to the row-major masked matrix appended at r.
 void PackOperandBMaskedPlanes(const std::vector<int8_t>& mu_b,
@@ -1264,10 +1261,10 @@ void PackOperandBMaskedPlanes(const std::vector<int8_t>& mu_b,
 {
     for (uint32_t k = 0; k < n; ++k) {
         const size_t row = static_cast<size_t>(k) * n;
-        const size_t srow = static_cast<size_t>(k / ref::kBlockLen) * n;
+        const size_t srow = static_cast<size_t>(k) * (n / ref::kBlockLen);
         const size_t out_base = (nonce_row0 + k) * n;
         for (uint32_t j = 0; j < n; ++j) {
-            const uint8_t e = scale_b[srow + j];
+            const uint8_t e = scale_b[srow + j / ref::kBlockLen];
             PackNibble(out[e].data(), out_base + j, EncodeE2M1Nibble(mu_b[row + j]));
         }
     }

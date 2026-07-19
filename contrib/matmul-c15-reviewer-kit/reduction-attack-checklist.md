@@ -30,11 +30,16 @@ Review defaults: `δ = 1/2`, `ε = 2⁻⁴⁰`. Do not silently retune.
 ## A1 — Affine entrywise surrogate (C15-A → §0.1 FAIL)
 
 **Goal.** Fit `f(raw) = α·raw + β` (or panel-linear) so `f(B32[i,j]) ≈ Extract(...)`.
+This is only the entrywise-marginal baseline: current MX rejection alignment
+also depends on the other real values in the same 32-cell tile.
 
 **Steps.**
 
 1. Sample dense realistic `B32` from synthetic `(G·W)·H` (`rank ≤ w`) and/or honest MatExpand traces.
-2. Fit affine OLS; record R² (`toy_attack_harness.py --degree 1` or in-tree `matexpand_extract_r2_nonapproximability`).
+2. Fit affine OLS; record R² (`toy_attack_harness.py --degree 1` or in-tree
+   witness). Then add tile-local features (offset, earlier rejection inputs,
+   raw high nibbles, shared scale) so the current joint Extract surface is not
+   reduced to a fictitious scalar function.
 3. If R² is non-negligible, build Freivalds probes on `Ĉ` and attempt rewrite through `G,W,H` (L1 thin-panel class).
 4. Count MACs of the shortcut vs `HonestMAC`.
 
@@ -48,8 +53,9 @@ Review defaults: `δ = 1/2`, `ε = 2⁻⁴⁰`. Do not silently retune.
 
 **Steps.**
 
-1. Same samples as A1.
-2. Fit deg 1..3; print all R²: `python3 toy_attack_harness.py --n 16 --w 4 --degree 3`.
+1. Same samples and real-tile context as A1.
+2. Fit deg 1..3 over real 32-value MX tiles; print all R²:
+   `python3 toy_attack_harness.py --n 32 --w 4 --degree 3`.
 3. Firm bar (in-tree witness): R² < 0.05 expected on dense regimes; R² ≳ 0.05 demands rewrite attempt.
 4. If any degree yields a Freivalds-linearizable `B̂'`, cost it against §0.1.
 
@@ -72,14 +78,18 @@ Review defaults: `δ = 1/2`, `ε = 2⁻⁴⁰`. Do not silently retune.
 
 ---
 
-## A4 — Truncated `(i,j)` salt equivalence class (§0.2 #6 → §0.1 FAIL)
+## A4 — Truncated `(i,bj)` MX tile-salt equivalence class (§0.2 #6 → §0.1 FAIL)
 
-**Goal.** Show that collapsing position salts to low bits / tiles creates a large shared-keystream equivalence class and reopens ~`n/w ≈ 32×` thin-panel amortization.
+**Goal.** Show that collapsing MX tile salts to low bits creates a large
+shared-keystream/scale equivalence class and reopens the current `n/w=4×`
+production thin-panel amortization (the historical `w=128` design used 32×).
 
 **Steps.**
 
-1. Confirm normative Nonce96: `nonce_second = (uint64(i)<<32) | uint64(j)` full-width (see `test-vectors.json` / packet §1.4).
-2. Diff Extract under `(i,j)` vs `(i⊕2³²k, j)` / high-half flips — kit/C++ `matexpand_position_salt_differential`.
+1. Confirm normative Nonce96: `nonce_second = (uint64(i)<<32) | uint64(bj)`
+   with full-width `bj=j/32`, and `nonce_first=bj⊕MXBL` (see vectors / packet §1.4).
+2. Diff Extract under full-width row/tile-block high-half flips — C++
+   `matexpand_position_salt_differential`.
 3. Hypothesize a truncated implementation or adversary-forced tile reuse; measure collision / equivalence-class size vs IdealExtract baseline (~1/23).
 4. If class is large, attempt shared-φ / panel-reuse Freivalds rewrite; cost vs `HonestMAC`.
 
@@ -97,7 +107,7 @@ Review defaults: `δ = 1/2`, `ε = 2⁻⁴⁰`. Do not silently retune.
 2. Estimate numerical / modular rank; search shared-φ / Fourier residue across rows/tiles.
 3. If residue exists, attempt Freivalds rewrite cheaper than Expand+BV+combine.
 
-**Oracle / FAIL.** Only if residue yields §0.1 win. Documented alphabet concentration without shortcut → **INCONCLUSIVE** / non-finding (see `test-vectors.json` `non_findings`). Empirics from `spectral_approx_probe.py` (`n∈{8,16,32}` SVD/CCA) alone ≠ FAIL — see `spectral_approx_probe.md`.
+**Oracle / FAIL.** Only if residue yields §0.1 win. Documented alphabet concentration without shortcut → **INCONCLUSIVE** / non-finding (see `test-vectors.json` `non_findings`). Empirics from `spectral_approx_probe.py` (`n∈{32,64}` SVD/CCA over real MX tiles) alone ≠ FAIL — see `spectral_approx_probe.md`.
 
 ---
 
@@ -117,17 +127,22 @@ Review defaults: `δ = 1/2`, `ε = 2⁻⁴⁰`. Do not silently retune.
 
 ## A7 — Mant/Scale related-nonce XOR (§0.2 #5)
 
-**Goal.** Exploit `MANT`/`SCLE` lane packing or `Mant(raw)↔Scale(raw⊕Δ)` structure to amortize beyond per-cell ChaCha.
+**Goal.** Determine whether the historical `MANT`/`SCLE` related-nonce
+identity from the non-normative ChaChaCell extractor has any bridge to the
+current MXBL tile construction. There is no such bridge known.
 
 **Steps.**
 
-1. Reproduce related-nonce observations from pre-review notes / firm pack
+1. Reproduce the explicitly legacy related-nonce observations from pre-review notes / firm pack
    (`test-vectors.json::related_nonce_lane_xor` — ≥32 identity tuples;
    `python3 reference_extract.py`; C++ `matexpand_related_nonce_lane_xor_identity`).
 2. Check B32 Δ-collision negative control (synthetic n=16 in JSON; honest n=8
    in C++): no denser-than-chance Δ-mate graph.
-3. Ask whether any identity skips GEMM or collapses Freivalds probes across cells.
-4. If only distinguisher / μ′↔e lock without MAC savings → document as C15-C residue, not FAIL.
+3. First require a bridge from legacy per-cell `raw⊕lane` nonces to normative
+   `(i,bj)` MXBL streams plus hash-derived tile scales; then ask whether it
+   skips GEMM or collapses Freivalds probes.
+4. Without that bridge, classify it as a historical differential, not current
+   ExtractStruct evidence. A distinguisher without MAC savings is still not FAIL.
 
 **Oracle / FAIL.** Amortization that wins §0.1. Distinguisher-only / green firm
 pack → **INCONCLUSIVE**. **C-15 remains OPEN.**
@@ -155,18 +170,18 @@ raising `nMatMulDRLTHeight`.
 
 | ID | Subclass (beyond / including affine·shared-φ) | Status | Oracle / FAIL surface | Checklist link |
 |---|---|---|---|---|
-| **LFR-0** | Legacy thin-panel L1: Extract omitted or replaced by linear `Fold` of `B32=GWH` | **theorem** | Probes reassociate through `G,W,H`; ~`n/w≈32×` vs dense ExactGemm. Extract is **necessary** vs this class; sufficiency unproven. | packet §1.1 |
-| **LFR-1** | Affine entrywise `B̂[i,j]≈α·B32[i,j]+β` (global or per-panel) | **heuristic** empirics; IdealExtract/PRF ⇒ no dense match is a **theorem fragment** only | R² / match on ≥`N=10⁶` **and** Freivalds-usable rewrite at half-cost | A1 |
+| **LFR-0** | Legacy thin-panel L1: Extract omitted or replaced by linear `Fold` of `B32=GWH` | **theorem** | Probes reassociate through `G,W,H`; current production `n/w=4×` vs dense ExactGemm (historical `w=128`: 32×). Extract is **necessary** vs this class; sufficiency unproven. | packet §1.1 |
+| **LFR-1** | Affine entrywise `B̂[i,j]≈α·B32[i,j]+β`, then 32-cell tile-local affine features (global or per-panel) | **heuristic** empirics; current Extract is jointly tile-contextual, so raw-only rejection is only a baseline | R² / match on ≥`N=10⁶` real-tile samples **and** Freivalds-usable rewrite at half-cost | A1 |
 | **LFR-2** | Shared-φ / Simon-style `φ∘(GWH)` spectral residue, effective rank `≲w` | **heuristic** (`PositionSalted-FullRank-Heuristic-v1`; GAP-B2) | Numerical/modular rank ≪`n` correlated with panels; rewrite cheaper than Expand+BV | A5 |
 | **LFR-3** | Separable / panel-linear bias `α·raw + β_i + γ_j` (or tile-constant offsets) | **heuristic** (same primary FAIL family as LFR-1; not separately reduced) | OLS with row/col dummies; nonzero structure ⇒ attempt L1-style rewrite | A1 |
-| **LFR-4** | Degree-≤2 entrywise polynomial surrogate | **heuristic** empirics; IdealExtract/PRF fragment as in LFR-1 | Deg≤2 R² bar + rewrite; **primary** §0.1 FAIL class | A2 |
-| **LFR-5** | Degree-3 entrywise polynomial surrogate | **heuristic** (§0.2 checklist extension; out of Sketch A arrow) | Deg-3 R² ≳0.05 ⇒ rewrite attempt; reportable even if primary table emphasizes deg≤2 | A2 |
-| **LFR-6** | Truncated `(i,j)` salt / tile keystream equivalence class | **theorem** that normative full-width is required (truncation = consensus-split); collapse under truncation is **heuristic** attack shape | Equivalence-class size vs IdealExtract ~1/23; shared-φ / panel-reuse rewrite | A4 |
+| **LFR-4** | Degree-≤2 entrywise or MX-tile-local polynomial surrogate | **heuristic** empirics; IdealExtract/PRF fragment as in LFR-1 | Deg≤2 R² bar + rewrite; **primary** §0.1 FAIL class | A2 |
+| **LFR-5** | Degree-3 entrywise or MX-tile-local polynomial surrogate | **heuristic** (§0.2 checklist extension; out of Sketch A arrow) | Deg-3 R² ≳0.05 ⇒ rewrite attempt; reportable even if primary table emphasizes deg≤2 | A2 |
+| **LFR-6** | Truncated `(i,bj)` MX salt / tile-keystream equivalence class (`bj=j/32`) | **theorem** that normative full-width is required (truncation = consensus-split); collapse under truncation is **heuristic** attack shape | Equivalence-class size vs IdealExtract; shared-φ / panel-reuse rewrite | A4 |
 | **LFR-7** | Sketch-projector–induced fold (`U`/`V` create usable structure; rank-transparent projectors) | **heuristic** (GAP-B4: no lemma that projectors cannot *create* structure) | Cheap algebraic form in `(U,V,G,W,H)` matching probes without full Expand | A3, A5 |
 | **LFR-8** | Approx-`B̂` / high-rank but Freivalds-forgery-friendly residual | **heuristic** (GAP-B3) | Multi-probe residuals within soundness at half-cost; systematic accept of forged sketches | A3 |
 | **LFR-9** | Batch-algebra / associativity “past Extract” into `GWH` | **theorem** that exact int associativity *after* Extract does **not** pull panels through Extract (`matexpand_batch_algebra_optimal_equals_full`); any *new* linear fold past Extract remains **heuristic** | BA-A/B witnesses; search for accidental linearization (Q* windows, BA-C) | packet §4 |
 | **LFR-10** | Cached Expand / TMTO / cross-nonce panel reuse feeding linear probes | **heuristic** (state-space / differential cost bounds) | Concrete table or reuse with §0.1 MAC win; speculative infeasible TMTO ≠ FAIL | A6 |
-| **LFR-11** | Related-nonce Mant/Scale XOR as *linear* amortization across cells | Lane identity `Mant(raw)=Scale(raw⊕Δ)` is **theorem** (PRF encoding); GEMM/Freivalds skip is **heuristic** / non-finding to date | Identity tuples + ask whether probes collapse across Δ-mates with MAC savings | A7 |
+| **LFR-11** | Legacy related-nonce Mant/Scale XOR as *linear* amortization across cells | Lane identity is a **theorem only for non-normative ChaChaCell**; no bridge to MXBL tile streams/scales is known | First bridge legacy identity to normative MX, then require probe collapse with MAC savings | A7 |
 
 ### How to run the taxonomy
 
@@ -192,9 +207,9 @@ Wave-1 gap rank #3:
 ```bash
 cd contrib/matmul-c15-reviewer-kit
 python3 reference_extract.py
-python3 toy_attack_harness.py --n 8 --w 4
-python3 toy_attack_harness.py --n 16 --w 4 --seed 7 --degree 3
-python3 spectral_approx_probe.py   # SVD/CCA n∈{8,16,32}; empirics ≠ §0.1 FAIL
+python3 toy_attack_harness.py --n 32 --w 4
+python3 toy_attack_harness.py --n 64 --w 8 --seed 7 --degree 3
+python3 spectral_approx_probe.py   # SVD/CCA n∈{32,64}; empirics ≠ §0.1 FAIL
 ```
 
 Reduction-relevant finding signals (also in `test-vectors.json`):

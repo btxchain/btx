@@ -1,5 +1,11 @@
 # LT-C15 ↔ fine-grained complexity: reduction survey
 
+> **Lever-B supersession note (2026-07-20).** Any `w=128`, rank-128, 32×
+> panel-ratio, or per-cell Extract statement below is historical. Current code
+> uses `w=1024`, `rank(B32)≤min(n,1024)`, production `n/w=4`, and real
+> 32-value MX tiles salted by `(i,bj)`. The mapping remains survey material;
+> its cost numbers do not apply unchanged. C-15 remains OPEN.
+
 *Date: 2026-07-19. Wave 1 — SURVEY only.*  
 *Branch context: `feat/bmx4c-exact-accel-lanes`.*  
 *Sources: `doc/btx-matmul-v4.4-lt-external-c15-packet.md` §0.1 / §1.1–§1.3;
@@ -27,14 +33,14 @@ This document is a **mapping and obstruction analysis**, not a security proof.
 From packet §0.1 / §1.1 (load-bearing):
 
 ```
-Y = G·W,   B32 = Y·H = (G·W)·H     # rank(B32) ≤ w = 128
+Y = G·W,   B32 = Y·H = (G·W)·H     # current rank(B32) ≤ min(n,w), w=1024
 B̂[i,j] = ExtractChaCha20PRF(B32[i,j], i, j, prf_key)  # position-salted
 Ĉ = (U·Â)(B̂·V) over F_q, q = 2⁶¹−1                   # exact Freivalds binding
 ```
 
 | Object | Honest cost class | Notes |
 |---|---|---|
-| MatExpand ExactGemm | **Θ(n²·w)** with `w=128` fixed | Thin panels; **not** Θ(n³) |
+| MatExpand ExactGemm | **Θ(n²·w)** with current `w=1024` fixed | Panels; **not** Θ(n³) |
 | Marginal cubic floor | **`B̂·V` + combine `P·Q`** (deep-`m`, `m=n/2`) | Sketch path after Extract |
 | Public structure | Deterministic Expand from seeds; **no secret low-rank** | Rank ≤ `w` is public and intentional |
 | Win condition | Accepting digest / Freivalds transcript at `≤ (1−δ)·HonestMAC` with `Adv ≥ ε` | Forgery/shortcut game, not “output B̂ correctly” |
@@ -112,7 +118,7 @@ Closest *shape* among classical FG statements (cubic barrier for matrix-shaped w
 
 **BTX obstruction.**  
 1. **Alphabet / ring:** BTX uses s8/s32 ExactGemm and `F_q` sketches, not Boolean (∨,∧) products.  
-2. **Thin panel:** `B32=(G·W)·H` has **rank ≤ w=128**; honest MatExpand is Θ(n²w), already “combinatorially cheap” relative to dense n³ — Extract exists precisely because that structure is public.  
+2. **Panel structure:** `B32=(G·W)·H` has current **rank ≤ min(n,w)** with `w=1024`; honest MatExpand is Θ(n²w), already cheaper than dense n³ at production — Extract exists precisely because that structure is public.
 3. **Wrong hardness axis:** combinatorial BMM separates combinatorial vs algebraic *bilinear* MM; LT-C15 hardness is about **nonlinear Extract** blocking Freivalds reassociation — orthogonal to Strassen vs schoolbook.  
 4. **Win condition:** adversary may forge digests without outputting a correct Boolean product.
 
@@ -161,7 +167,7 @@ Suggestive for “you cannot skip Mv work online,” but BTX’s Expand is not a
 
 | Obstruction | Why it blocks “standard FG ⇒ LT-C15” |
 |---|---|
-| **O1 — Cost-model mismatch** | MatExpand is Θ(n²·w), w=128 fixed. “No O(n^{3−ε})” statements target dense cubic problems. |
+| **O1 — Cost-model mismatch** | MatExpand is Θ(n²·w), current w=1024 fixed. “No O(n^{3−ε})” statements target dense cubic problems. |
 | **O2 — Public thin rank** | `rank(B32)≤w` is unconditional and public. Classical hard MM instances are dense unstructured products. |
 | **O3 — Wrong win condition** | C-15 adversary wins by **accepting digests / Freivalds transcripts**, not by outputting correct `B32`/`B̂` as a named FG output. |
 | **O4 — Nonlinear Extract** | Hardness after Extract is about destroying homomorphism for reassociation; FG MM conjectures are about bilinear product complexity. |

@@ -4,6 +4,7 @@
 
 #include <ascend/matmul_v4_lt_accel.h>
 
+#include <matmul/exact_gemm_radix.h>
 #include <matmul/matmul_v4_lt.h>
 
 #include <arith_uint256.h>
@@ -593,17 +594,36 @@ bool ExactGemmS8S8Ascend(const std::vector<int8_t>& left,
 #endif
 }
 
-bool ExactGemmS32S8Ascend(const std::vector<int32_t>& /*left*/,
-                          const std::vector<int8_t>& /*right*/,
-                          uint32_t /*rows*/, uint32_t /*inner*/, uint32_t /*cols*/,
+bool ExactGemmS32S8Ascend(const std::vector<int32_t>& left,
+                          const std::vector<int8_t>& right,
+                          uint32_t rows, uint32_t inner, uint32_t cols,
                           std::vector<int32_t>& out, bool* used_cube_path)
 {
-    // CANN's INT32 operands in QuantMatmul are packed INT4, not semantic
-    // INT32 multiplicands. There is no documented exact INT32xINT8->INT32
-    // Cube contract, so MatExpand's S32S8 stage remains CPU-only.
     out.clear();
     if (used_cube_path) *used_cube_path = false;
+#if defined(BTX_HAVE_CANN)
+    if (!IsAscendExactGemmAvailable()) return false;
+    const bool ok = matmul::v4::lt::ExactGemmS32S8ViaRadix256(
+        left, right, rows, inner, cols, out,
+        [](const std::vector<int8_t>& plane,
+           const std::vector<int8_t>& rhs,
+           uint32_t m, uint32_t k, uint32_t n,
+           std::vector<int32_t>& product) {
+            // Availability and whole-device exactness were gated above. Calling
+            // the launch primitive directly avoids four redundant self-qual checks.
+            return LaunchCubeS8S8(plane, rhs, m, k, n, product);
+        });
+    if (!ok) return false;
+    if (used_cube_path) *used_cube_path = true;
+    return true;
+#else
+    (void)left;
+    (void)right;
+    (void)rows;
+    (void)inner;
+    (void)cols;
     return false;
+#endif
 }
 
 bool TryLaunchLtCubeGemmS8S8(const std::vector<int8_t>& left,
@@ -633,7 +653,7 @@ bool ComputeDigestsOnlyLTAscend(const CBlockHeader& tmpl, uint32_t n,
 
     matmul::v4::lt::ExactGemmBackend backend;
     backend.gemm_s8s8 = &TryLaunchLtCubeGemmS8S8;
-    // S32S8 stays null: MatExpand uses the exact CPU implementation.
+    backend.gemm_s32s8 = &TryLaunchLtCubeGemmS32S8;
 
     const matmul::v4::lt::WindowSketchMinerLT miner{tmpl, n, backend};
     if (!miner.Valid()) return false;

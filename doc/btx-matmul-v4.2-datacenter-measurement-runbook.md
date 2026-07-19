@@ -515,10 +515,10 @@ applies at k²=1:
 
 | Device | Native path assumed | k² (GEMM-count tax) | MODELED effective rate (illustrative TOPS, ÷k²) | MODELED vs own frontier |
 |---|---|---|---|---|
-| **B300/GB300** | native `mxf4` block-scaled, **M-t24 must PASS** | 1 | **≈11,553** (modeled from §3.2) | ≈1× — this is the "9× tax removed" headline IF M-t24 passes |
+| **B300/GB300** | conditional native block-scaled target; repo kernel absent; **kernel qualification + M-t24 must PASS** | 1 if qualified | **≈11,553** modeled from peak | ≈1× only as a hardware model |
 | **Rubin** | native FP4 block-scaled ⚠ INT8 survival unconfirmed | 1 | **≈35,000–50,000 class** (vendor roadmap, wide uncertainty) | ≈1× ⚠ |
 | **MI355X** | native OCP MXFP4, **M-t24 must PASS** | 1 | **≈10,100** | ≈1× |
-| **B200** | native `mxf4` (same block-scaled kinds as B300) | 1 | **≈7,702** (this figure IS a real measurement — arXiv:2512.02189 — for FP4 peak; its APPLICATION to BMX4-C's exact shapes is still modeled) | ≈1× |
+| **B200** | conditional tcgen05/CUTLASS MXFP4 target; no admitted repo kernel (current LT: dense INT8 IMMA) | 1 if qualified | FP4 peak evidence does not measure this workload | ≈1× only after kernel + M-t24 qualification |
 | **RTX 5090** | FP4 with 2^e in UE4M3 scale slots (exact embed), or INT8 fallback | 1 | **≈1,676 modeled (FP4) / 838 measured (INT8)** | ≈1× |
 | **Trainium3** | native Matmul-MX (MXFP4), **M-t24 outcome flagged "genuinely uncertain" in spec §10** | 1 if PASS | ≈4× its BF16 rate (no absolute TOPS pinned) | ≈1× IF M-t24 PASSES; otherwise this device has **no fallback** (no INT8 matmul unit at all) |
 | **TPU v7** | FP8 scale-fold (needs proven t≥24), else INT8 native | 1 | FP8 ≈4,614 TF-class OR native INT8 rate | ≈1× either way |

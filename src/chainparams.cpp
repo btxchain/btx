@@ -365,7 +365,9 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_drlt_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestdrltheight");
     }
-    options.matmul_lt_seal_as_pow = args.GetBoolArg("-regtestmatmulltsealaspow", false);
+    if (args.IsArgSet("-regtestmatmulltsealaspow")) {
+        options.matmul_lt_seal_as_pow = args.GetBoolArg("-regtestmatmulltsealaspow", true);
+    }
     options.matmul_flat_sketch_replay = args.GetBoolArg("-regtestmatmulflatsketchreplay", false);
     // Audit dead-code deletion: the -regtestmatmulproofprunedepth parse was removed
     // along with the dead nMatMulProofPruneDepth field / matmul_proof_prune_depth

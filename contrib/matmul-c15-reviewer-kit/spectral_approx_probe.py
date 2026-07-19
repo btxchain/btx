@@ -5,9 +5,9 @@
 """
 Spectral / approx-B̂ probe for C-15 Gap #6 (stdlib only).
 
-For each toy n ∈ {8, 16, 32}:
+For each toy n ∈ {32, 64}:
   1) Build synthetic low-rank B32 = (G·W)·H (rank ≤ w).
-  2) Run normative ChaCha20-PRF Extract → B̂.
+  2) Run normative MX-block Extract over real 32-value tiles → B̂.
   3) SVD-style spectrum of B̂ (power iteration + deflation).
   4) CCA-style: cos(θ_min) between col(B32) and top-w left singular subspace of B̂.
   5) Structured approx: project B̂ onto the row/col spaces of B32; measure
@@ -31,8 +31,9 @@ import sys
 from pathlib import Path
 
 from reference_extract import (
+    BLOCK_LEN,
     derive_matexpand_prf_key,
-    extract_dequant_matexpand,
+    extract_dequant_matexpand_matrix,
     load_vectors,
 )
 from toy_attack_harness import (
@@ -42,15 +43,12 @@ from toy_attack_harness import (
 )
 
 
-DEFAULT_NS = (8, 16, 32)
+DEFAULT_NS = (32, 64)
 
 
 def extract_matrix(B32: list[list[int]], prf_key: bytes) -> list[list[int]]:
-    n = len(B32)
-    return [
-        [extract_dequant_matexpand(B32[i][j], i, j, prf_key) for j in range(n)]
-        for i in range(n)
-    ]
+    """Apply consensus-faithful MX extraction to complete 32-value tiles."""
+    return extract_dequant_matexpand_matrix(B32, prf_key)
 
 
 def to_float(M: list[list[int]]) -> list[list[float]]:
@@ -339,6 +337,12 @@ def run(ns: tuple[int, ...], w: int, seed: int) -> int:
     results: list[dict] = []
 
     for n in ns:
+        if n < BLOCK_LEN or n % BLOCK_LEN != 0:
+            print(
+                f"SKIP n={n}: dimension must be a positive multiple of MX tile length {BLOCK_LEN}",
+                file=sys.stderr,
+            )
+            continue
         if w > n:
             print(f"SKIP n={n}: w={w} > n (need w ≤ n)", file=sys.stderr)
             continue
@@ -367,7 +371,7 @@ def main(argv: list[str]) -> int:
         type=int,
         nargs="*",
         default=list(DEFAULT_NS),
-        help="matrix sizes to probe (default: 8 16 32)",
+        help="matrix sizes to probe, each a multiple of 32 (default: 32 64)",
     )
     p.add_argument("--w", type=int, default=4, help="toy panel width / rank bound")
     p.add_argument("--seed", type=int, default=1, help="RNG seed")

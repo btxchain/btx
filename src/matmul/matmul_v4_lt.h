@@ -152,6 +152,14 @@ struct ExactGemmBackend {
     const CBlockHeader& header, uint32_t n, const ExactGemmBackend& backend,
     std::vector<int8_t>& mu_out, std::vector<uint8_t>& scales_out);
 
+/** Expand only the MX mantissas / scales needed by the optimized miner lane.
+ *  Unlike ExpandOperandBMatExpandMx, this does not materialize the dense
+ *  dequantized n*n Bhat matrix. */
+void ExpandOperandBMatExpandMxComponents(const CBlockHeader& header, uint32_t n,
+                                         const ExactGemmBackend& backend,
+                                         std::vector<int8_t>& mu_out,
+                                         std::vector<uint8_t>& scales_out);
+
 /** Q = (μ · 2^e) · V with e shared on 32-col blocks per row (Lever-B MX layout).
  *  Bit-identical to ComputeProjectedRight(Bhat, V) when Bhat[i,j]=μ[i,j]<<e[i,j/32]. */
 [[nodiscard]] std::vector<int32_t> ComputeProjectedRightMxBlockScaleLT(
@@ -332,6 +340,11 @@ private:
     uint32_t m_m{0};
     bool m_valid{false};
     ExactGemmBackend m_backend{};
+    // Template-scoped MatExpand projectors. Keeping them in the prepared miner
+    // avoids regenerating n*n + kMatExpandPanelW*n M11 bytes per nonce on the
+    // CPU/per-call accelerator fallback; resident CUDA/HIP pools mirror this.
+    std::vector<int8_t> m_G;
+    std::vector<int8_t> m_H;
     std::vector<int8_t> m_A;
     std::vector<int8_t> m_U;
     std::vector<int8_t> m_V;

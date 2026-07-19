@@ -1,5 +1,15 @@
 # BTX MatMul v4.2 — Frontier-Native Committed Format (Tax-Inversion Study & Determination)
 
+> **Execution-status correction (2026-07-20).** This is a format/tax study,
+> not proof that the repository issues native MXFP4. “One native GEMM” tables
+> are conditional hardware models. The current portable grouped path is exact
+> integer emulation; tested cuBLASLt B200/5090 configurations expose no OCP
+> MXFP4 algorithm, and the branch has no admitted tcgen05/CUTLASS or CDNA
+> native kernel. LT's frontier CUDA/HIP path now keeps logical MX components
+> and lowers them exactly through four exponent-partitioned INT8 IMMA/MFMA
+> GEMMs; H200/MI300 retain one dense INT8 GEMM. Neither is native MXFP4.
+> Static planner labels are not execution proof.
+
 *Status: STUDY + DETERMINATION deliverable (design doc). NOT a code change, NOT an
 activation, and — unlike the miner-only v4.1 Ozaki path — the object designed here IS a
 consensus (hard-fork-level) workload change, explicitly classified in §7. Companion to
@@ -182,14 +192,17 @@ same math.
   halves** vs the s8 object (4 bits + 1/32 scale byte per element ≈ 0.53 bytes/element vs
   1) — the per-nonce SHA floor *shrinks*, helping the §K.2a-WT tensor-majority requirement.
 - **Microscale block structure.** OCP-standard blocks of **32 elements along the
-  contraction dimension** (A: along columns; B: along rows — matching `tcgen05` /
-  Matmul-MX / CDNA4 scale layout). One scale per block, format **E8M0 restricted to
+  contraction dimension of the projection that consumes each operand** (A: rows in
+  `U·A`; B: columns in `B·V` — matching `tcgen05` / Matmul-MX / CDNA4 scale layout).
+  One scale per block, format **E8M0 restricted to
   `X = 2^e, e ∈ {0, 1, …, S}` with S = 4** (codes 127…127+S; the *scale constraint*:
   non-negative, power-of-two, range-bounded). Scale exponents are seed-derived uniform
   over {0..S} (3-bit rejection sampling), `n²/32` scales per operand.
-- **The committed integer operand** is `Ā[i][k] = μ_A[i][k] · 2^(e_A[i, ⌊k/32⌋])`, an
-  integer of magnitude ≤ `12·2^S = 192` (< 2⁸ but > 127 — deliberately: §5's old-chip
-  dial). Same for `B̄`. The committed product is the exact integer matrix
+- **The committed integer operands** are
+  `Ā[i][k] = μ_A[i][k] · 2^(e_A[⌊i/32⌋, k])` and
+  `B̄[k][j] = μ_B[k][j] · 2^(e_B[k, ⌊j/32⌋])`, each an integer of magnitude
+  ≤ `12·2^S = 192` (< 2⁸ but > 127 — deliberately: §5's old-chip dial). The
+  committed product is the exact integer matrix
   `C̄ = Ā·B̄` — entries ≤ `n·144·2^(2S) = n·36,864` (≈1.51×10⁸ at n = 4096, still inside
   int32; `n_max = ⌊(2³¹−1)/36,864⌋ = 58,254`, slightly below the old 65,535 header bound —
   a v4.2 parameter note).
@@ -321,7 +334,7 @@ pays 4–9×; INT8 legacy pays nothing.
 | **Rubin** | native FP4 block-scaled ⚠ (confirm E8M0 kind survives) | **1** | ≈ 35–50 PF vendor peak class | **≈1×** ⚠ |
 | **MI355X** | native OCP MXFP4 | **1** | ≈ 10,100 TOPS class | **≈1×** |
 | **Trainium3** | native Matmul-MX (MXFP4), FP32 PSUM, K′-blocked | **1** | ≈ 4× BF16 rate | **≈1× — newly mineable at frontier rate** |
-| **B200** | native `mxf4` (B200 has the same block-scaled kinds) | **1** | ≈ 7,702 TOPS | ≈1× — B200 is frontier-capable, not "old" |
+| **B200** | conditional tcgen05/CUTLASS MXFP4 target; **not admitted in this branch** (current LT path: MX-layout, four-pass INT8 IMMA lowering) | **1 if a native kernel qualifies** | FP4 application rate unmeasured for this workload | modeled ≈1× only after kernel + M-t24 qualification |
 | **RTX 5090 (consumer Blackwell)** | FP4 with power-of-two scales in UE4M3 slots (exact embed) | **1** | ≈ its FP4 rate (~2× its 838 INT8) | ≈1× — ladder preserved by absolute TOPS |
 | **TPU v7** | scale-fold → 1 plain FP8 GEMM (needs proven t=24) | **1** | ≈ 4,614 TF FP8 | ≈1× in GEMM count; pays only the FP8-vs-FP4 rate gap (no FP4 unit exists) |
 | **Trainium2** | scale-fold → FP8 (t must prove 24) else vector-engine/host path | 1 ⚠ | FP8 rate | ≈1× ⚠ (t unproven) |
@@ -349,13 +362,14 @@ chosen direction.
 
 ## 6. Honest verdict
 
-1. **Can the new-chip tax be driven to ≈1×? YES — for OCP-MX-E8M0 hardware, and only
-   with power-of-two scales.** On B200/B300 (`tcgen05` `mxf4`/`mxf8f6f4` with UE8M0),
+1. **Can the new-chip tax be driven to ≈1×? Conditionally — for an admitted
+   OCP-MX-E8M0 kernel, and only with power-of-two scales.** On a future qualified
+   B200/B300 tcgen05/CUTLASS path,
    MI350X/MI355X (OCP MX in CDNA4), and Trainium3 (Matmul-MX with UINT8 power-of-two
    scale tensors), the BMX4 object is one native block-scaled GEMM plus a K′=256–448
    extract-and-promote cadence whose overhead is the same one promotion per few hundred
    K-elements that production FP8 training already pays (DeepSeek's every-128 promotion)
-   — near-native by construction, *pending the t=24 proof on real silicon*. FP8-only
+   — near-native by construction, *pending an implemented kernel and the t=24 proof on real silicon*. FP8-only
    frontier chips (TPU v7, Trainium2) reach ≈1× in GEMM count at their FP8 rate via exact
    scale-folding; they pay only the FP4-vs-FP8 rate gap that their own silicon defines.
 2. **NVFP4's fractional E4M3 scale is unusable as a committed format** (§3a: unprovable

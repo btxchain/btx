@@ -1,5 +1,13 @@
 # Extract-Nonlinearity-v1 + PRF hybrid (Wave 3 Gap #2) — 2026-07-19
 
+> **Lever-B supersession note (2026-07-20).** This Wave-3 draft models the
+> historical per-cell `MANT`/`SCLE` ChaChaCell extractor. It is not the current
+> normative construction. Consensus now uses `w=1024` and MX-block extraction:
+> one `MXBL` ChaCha stream and one hash-derived scale per real 32-value `B32`
+> tile, salted by full-width `(i,bj)` where `bj=j/32`. The draft remains useful
+> only as historical/differential analysis; every lemma must be restated for MX
+> tiles before use. C-15 remains OPEN.
+
 *Branch: `feat/bmx4c-exact-accel-lanes`.*  
 *Status: **DRAFT formalization + hybrid outline.** Every incomplete step is
 tagged **GAP**. This file does **not** prove the lemma, does **not** reduce
@@ -74,7 +82,7 @@ Alphabet has 23 values; `P(0)=1/11≈9.1%` by design (packet §1.2).
 ### 1.2 Statement
 
 > **`Extract-Nonlinearity-v1` (DRAFT).** Fix packet public params
-> (`n∈{64,256,4096}`, `w=128`, …) and thresholds `δ=1/2`, `ε` as in §0.1,
+> (current `n∈{64,256,4096}`, `w=1024`, …) and thresholds `δ=1/2`, `ε` as in §0.1,
 > sample size `N=10⁶`. Let `IdealExtract` be as above. For a uniformly random
 > `prf_key` **or** in the IdealExtract / RF world, and for every classical
 > circuit / map `f` of size `≤ (1−δ)·HonestMAC(n)` that is **entrywise** of the

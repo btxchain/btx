@@ -35,7 +35,7 @@ Progressively more capable AI-native hardware receives progressively greater **e
 |---|---|
 | §5 Cryptographic extractor replacement | **Acted (candidate)** — SplitMix replaced by domain-separated ChaCha20 PRF Extract under ENC_BMX4C_LT; SplitMix retained for differential tests; golden vectors frozen. External C-15 review still required before activation (not closed). |
 | §6 / §8 Adaptive limbs / Strassen tournament | **Acted (miner-local)** | Public exact baselines: deferred `ComputeCombineModQ`, `ComputeCombineAdaptiveLimbBMX4C` / base-256 + two-limb routes, Karatsuba-9; CPU tournament harness + `doc/btx-matmul-v4.4-combine-algorithm-tournament.md`. Integer transcript unchanged (byte-identical tests). ASERT still calibrates to fastest known exact after silicon measure. |
-| §12–14 Native IMMA/MFMA/MXFP4/Metal MPP | Real gaps; keep fail-closed stubs; do not mislabel scalar kernels. Full tensor residency is Phase 3. |
+| §12–14 Native IMMA/MFMA/MXFP4/Metal MPP | INT8 IMMA/MFMA residency is now broader (including radix `Y·H` and Karatsuba combine), but native MXFP4 remains a real gap. Logical MX components and planner labels are not hardware execution; keep native stubs fail-closed. |
 
 ## §4 Header-PoW wire redesign (**WITHDRAWN** 2026-07-19 — activation hard NO-GO)
 
@@ -58,6 +58,9 @@ Progressively more capable AI-native hardware receives progressively greater **e
 
 ## Documentation posture
 
-Prefer: exact reference available · scalar device fallback · native tensor unimplemented/qualified · C-15 external review open · direct-product assumption open · fastest-known-as-of-date · activation inert.
+Prefer: exact reference available · logical MX-compatible layout · actual
+execution dtype named separately (CPU integer, dense INT8 IMMA/MFMA, or a
+future self-qualified native MXFP4 kernel) · C-15 external review open ·
+direct-product assumption open · fastest-known-as-of-date · activation inert.
 
 Remove/qualify: “C-15 closed”, “no cheaper mathematical path”, “12.5% shortcut cap”, “software-complete” for native tensor lanes, “device-resident” without “scalar GEMM today”.

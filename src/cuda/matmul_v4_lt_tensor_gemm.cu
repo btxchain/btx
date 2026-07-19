@@ -368,7 +368,7 @@ void DestroyShapePlan(ImmaLtPool::ShapePlan& plan)
             FillFolded(right, 11, 53);
             if (!MatchShapeVsCpu(left, right, kDim, kDim, kDim)) return;
         }
-        // (2) MatExpand panel (G*W, with the production w=128).
+        // (2) MatExpand panel (G*W, with the configured production width).
         {
             constexpr uint32_t kN = 256;
             constexpr uint32_t kW = matmul::v4::lt::kMatExpandPanelW;
@@ -412,8 +412,12 @@ void DestroyShapePlan(ImmaLtPool::ShapePlan& plan)
             std::string error;
             if (!pool.EnsureHandle(32ull << 20) ||
                 GetOrCreateShapePlan(pool, kN, kW, kN, error) == nullptr ||
+                // Four radix-256 limbs lower resident Y*H to n×w · w×n.
+                GetOrCreateShapePlan(pool, kN, kN, kW, error) == nullptr ||
                 GetOrCreateShapePlan(pool, kM, kN, kN, error) == nullptr ||
-                GetOrCreateShapePlan(pool, kN, kM, kN, error) == nullptr) {
+                GetOrCreateShapePlan(pool, kN, kM, kN, error) == nullptr ||
+                // Nine base-64 Karatsuba planes lower combine to m×n · n×m.
+                GetOrCreateShapePlan(pool, kM, kM, kN, error) == nullptr) {
                 return;
             }
         }

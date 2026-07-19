@@ -1568,19 +1568,19 @@ public:
         if (opts.matmul_bmx4c_height.has_value() && !opts.matmul_v4_height.has_value()) {
             consensus.nMatMulV4Height = consensus.nMatMulBMX4CHeight;
         }
-        // v4.4-LT Rank-1: regtest-only opt-in override so a functional test can
-        // exercise LT activation without waiting for a public-network height.
+        // v4.4-LT Rank-1: regtest-only height override so functional tests can
+        // move the default height while public-network activation stays inert.
         // Applied AFTER the BMX4C unification above so a LONE -regtestdrltheight
         // (no explicit -regtestbmx4cheight) lands on top of whichever BMX4C
         // height is already final (100 by default, or the overridden value).
         if (opts.matmul_drlt_height.has_value()) {
             consensus.nMatMulDRLTHeight = *opts.matmul_drlt_height;
         }
-        // v4.4-LT Q* Phase B: regtest-only opt-in to the seal-as-PoW lottery
-        // object. Only meaningful together with a live -regtestdrltheight;
-        // AssertBMX4CConstructionInvariants fails closed if set without one.
-        if (opts.matmul_lt_seal_as_pow) {
-            consensus.fMatMulLTSealAsPoW = true;
+        // v4.4-LT Q* Phase B: explicit regtest override in either direction.
+        // Regtest defaults to seal mode, while =0 retains a Phase-A fixture.
+        // Enabling remains meaningful only together with a live DRLT height.
+        if (opts.matmul_lt_seal_as_pow.has_value()) {
+            consensus.fMatMulLTSealAsPoW = *opts.matmul_lt_seal_as_pow;
         }
         if (opts.matmul_flat_sketch_replay) {
             // v4.4 ENC-DR regtest-only differential switch: re-select the legacy
@@ -1785,7 +1785,7 @@ public:
             opts.matmul_v4_max_dimension.has_value() ||
             opts.matmul_bmx4c_height.has_value() ||
             opts.matmul_drlt_height.has_value() ||
-            opts.matmul_lt_seal_as_pow ||
+            opts.matmul_lt_seal_as_pow.has_value() ||
             opts.matmul_flat_sketch_replay ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||

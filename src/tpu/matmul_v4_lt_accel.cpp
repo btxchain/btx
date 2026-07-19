@@ -4,6 +4,7 @@
 
 #include <tpu/matmul_v4_lt_accel.h>
 
+#include <matmul/exact_gemm_radix.h>
 #include <matmul/matmul_v4_lt.h>
 
 #include <algorithm>
@@ -302,13 +303,32 @@ bool TryLaunchLtTpuGemmS32S8(const std::vector<int32_t>& left,
                              uint32_t rows, uint32_t inner, uint32_t cols,
                              std::vector<int32_t>& out)
 {
+    out.clear();
+#if defined(BTX_HAVE_TPU_PJRT)
+    if (!IsTpuPjrtExactGemmAvailable()) return false;
+    TpuPjrtExactGemmProviderV1 provider;
+    {
+        auto& state = State();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (!state.registered || state.qualification != Qualification::PASSED) return false;
+        provider = state.provider;
+    }
+    return matmul::v4::lt::ExactGemmS32S8ViaRadix256(
+        left, right, rows, inner, cols, out,
+        [&provider](const std::vector<int8_t>& plane,
+                    const std::vector<int8_t>& rhs,
+                    uint32_t m, uint32_t k, uint32_t n,
+                    std::vector<int32_t>& product) {
+            return LaunchProvider(provider, plane, rhs, m, k, n, product);
+        });
+#else
     (void)left;
     (void)right;
     (void)rows;
     (void)inner;
     (void)cols;
-    out.clear();
     return false;
+#endif
 }
 
 } // namespace matmul_v4::tpu

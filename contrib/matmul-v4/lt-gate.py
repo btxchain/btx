@@ -22,9 +22,11 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import os
 import re
 import sys
+from math import gcd
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -212,15 +214,65 @@ def stage_bit_exact(rep: dict) -> bool:
     return bool(st.get("bit_exact", False))
 
 
-def tensor_share(rep: dict) -> float | None:
-    v = rep.get("tensor_share_pct")
+def finite_number(value: object) -> float | None:
+    """Return a finite JSON number, rejecting bools and numeric strings."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
+
+
+def report_metric(rep: dict, key: str) -> float | None:
+    """Read a finite top-level metric, falling back to the stages object."""
+    v = rep.get(key)
     if v is None:
         st = rep.get("stages") or {}
-        v = st.get("tensor_share_pct")
-    try:
-        return float(v) if v is not None else None
-    except (TypeError, ValueError):
+        v = st.get(key)
+    return finite_number(v)
+
+
+def tensor_share(rep: dict) -> float | None:
+    return report_metric(rep, "tensor_share_pct")
+
+
+def tensor_util(rep: dict) -> float | None:
+    value = report_metric(rep, "tensor_util_pct")
+    if value is None or value < 0:
         return None
+    return value
+
+
+def positive_number(value: object) -> float | None:
+    result = finite_number(value)
+    return result if result is not None and result > 0 else None
+
+
+def asert_suggestion(rep: dict) -> str | None:
+    """Return a well-formed, reduced positive Num/Den suggestion, if present."""
+    value = rep.get("asert_rescale_num_den_suggestion")
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", value.strip())
+    if not match:
+        return None
+    num, den = int(match.group(1)), int(match.group(2))
+    if gcd(num, den) != 1:
+        return None
+    return "%d/%d" % (num, den)
+
+
+def expected_asert_suggestion(rep: dict) -> str | None:
+    """Mirror matmul-v4-report's positive-value ReducedRatio arithmetic."""
+    v3 = positive_number(rep.get("v3_hashrate"))
+    nps = device_nps(rep)
+    if v3 is None or nps is None:
+        return None
+    # C++ std::llround rounds positive half values away from zero.
+    num, den = int(v3 + 0.5), int(nps + 0.5)
+    if num <= 0 or den <= 0:
+        return None
+    divisor = gcd(num, den)
+    return "%d/%d" % (num // divisor, den // divisor)
 
 
 def device_measured(rep: dict) -> bool:
@@ -228,28 +280,25 @@ def device_measured(rep: dict) -> bool:
     if rep.get("backend") == "cpu":
         return False
     lt = rep.get("lt") or {}
-    if not bool(lt.get("device_native_kernel_wired", False)):
+    # This exact tuple is the report's honest device-assisted provenance. It is
+    # deliberately separate from fully resident/native-path certification.
+    if rep.get("backend_used_device") is not True:
         return False
-    # Fail closed: device_nonce_per_s must be a real number. Null / missing /
-    # CPU-reference fields do not count (matmul-v4-report leaves this null
-    # until on-device stage timers exist).
-    v = rep.get("device_nonce_per_s")
-    if v is None:
+    if rep.get("device_rate_valid") is not True:
         return False
-    try:
-        float(v)
-    except (TypeError, ValueError):
+    if rep.get("execution_path") != "device-assisted-end-to-end":
         return False
-    return True
+    if lt.get("device_assisted_path_exact") is not True:
+        return False
+    # Null/missing/zero/negative/non-finite values and CPU-reference fields do
+    # not count. A measured device rate is necessarily finite and positive.
+    return positive_number(rep.get("device_nonce_per_s")) is not None
 
 
 def device_nps(rep: dict) -> float | None:
     if not device_measured(rep):
         return None
-    try:
-        return float(rep.get("device_nonce_per_s"))
-    except (TypeError, ValueError):
-        return None
+    return positive_number(rep.get("device_nonce_per_s"))
 
 
 def parse_cost_args(cost_args: list[str] | None) -> dict[str, float]:
@@ -292,7 +341,11 @@ def evaluate(
         is_lt = rep.get("schema_version") == 3 and rep.get("profile") == "bmx4c-lt"
         be = bool(rep.get("bit_exact", False)) and stage_bit_exact(rep)
         tsp = tensor_share(rep)
+        tup = tensor_util(rep)
         npe = bool(rep.get("native_path_eligible", False))
+        measured_nps = device_nps(rep)
+        reported_asert = asert_suggestion(rep)
+        expected_asert = expected_asert_suggestion(rep)
         row = {
             "file": rep["_file"],
             "host": rep.get("host", ""),
@@ -304,9 +357,22 @@ def evaluate(
             "bit_exact": be,
             "native_path_eligible": npe,
             "tensor_share_pct": tsp,
+            "tensor_util_pct": tup,
+            "backend_used_device": rep.get("backend_used_device") is True,
+            "device_rate_valid": rep.get("device_rate_valid") is True,
+            "execution_path": rep.get("execution_path"),
+            "device_assisted_path_exact": (rep.get("lt") or {}).get("device_assisted_path_exact") is True,
             "device_measured": device_measured(rep),
-            "nps": device_nps(rep),
+            "nps": measured_nps,
             "cpu_nps": None,
+            "v3_hashrate": positive_number(rep.get("v3_hashrate")),
+            "asert_suggestion": reported_asert,
+            "asert_expected": expected_asert,
+            "asert_consistent": (
+                reported_asert == expected_asert
+                if reported_asert is not None and expected_asert is not None
+                else None
+            ),
         }
         try:
             cn = rep.get("cpu_reference_nonce_per_s")
@@ -315,6 +381,20 @@ def evaluate(
         except (TypeError, ValueError):
             row["cpu_nps"] = None
         rows.append(row)
+
+        if is_lt and measured_nps is not None and row["v3_hashrate"] is not None:
+            if reported_asert is None:
+                notes.append(
+                    "%s has measured LT device nonce/s + v3_hashrate but no valid reduced "
+                    "asert_rescale_num_den_suggestion; expected %s (calibration evidence only; "
+                    "not a G2 substitute)." % (rep["_file"], expected_asert or "n/a")
+                )
+            elif expected_asert is not None and reported_asert != expected_asert:
+                notes.append(
+                    "%s ASERT suggestion %s does not match measured v3/device ratio %s; "
+                    "exclude that suggestion from calibration (G2 still uses measured device "
+                    "nonce/s only)." % (rep["_file"], reported_asert, expected_asert)
+                )
 
         if not be:
             reasons.append(
@@ -397,24 +477,36 @@ def evaluate(
     dc = [r for r in frontier if r["class"] == "datacenter" and r["nps"] is not None]
     cons = [r for r in frontier if r["class"] == "consumer" and r["nps"] is not None]
     g2 = False
+    g2_evidence = {
+        "datacenter_file": None,
+        "consumer_file": None,
+        "datacenter_nonce_per_s": None,
+        "consumer_nonce_per_s": None,
+        "ratio": None,
+    }
     if not dc or not cons:
         reasons.append(
-            "G2 B200/5090 ratio: UNVERIFIED — need device_nonce_per_s on at least one "
-            "datacenter and one consumer LT report (cpu_reference_nonce_per_s does not count)."
+            "G2 B200/5090 ratio: UNVERIFIED — need a finite positive device_nonce_per_s "
+            "with the exact device-assisted provenance tuple on at least one datacenter and "
+            "one consumer LT report (cpu_reference_nonce_per_s does not count)."
         )
     else:
         best_dc = max(dc, key=lambda r: r["nps"])
         best_c = max(cons, key=lambda r: r["nps"])
-        if best_c["nps"] <= 0:
-            reasons.append("G2: consumer device_nonce_per_s is non-positive — fail closed.")
-        else:
-            ratio = best_dc["nps"] / best_c["nps"]
-            g2 = ratio >= 4.0
-            if not g2:
-                reasons.append(
-                    "G2 B200/5090 ratio FAIL: %.3g / %.3g = %.2fx < 4x."
-                    % (best_dc["nps"], best_c["nps"], ratio)
-                )
+        ratio = best_dc["nps"] / best_c["nps"]
+        g2_evidence = {
+            "datacenter_file": best_dc["file"],
+            "consumer_file": best_c["file"],
+            "datacenter_nonce_per_s": best_dc["nps"],
+            "consumer_nonce_per_s": best_c["nps"],
+            "ratio": ratio,
+        }
+        g2 = ratio >= 4.0
+        if not g2:
+            reasons.append(
+                "G2 B200/5090 ratio FAIL: %.3g / %.3g = %.2fx < 4x."
+                % (best_dc["nps"], best_c["nps"], ratio)
+            )
 
     # G3 — nonce/$ ordering from operator-supplied costs only (never invent $/hr).
     g3 = False
@@ -510,44 +602,64 @@ def evaluate(
         "frontier_count": len(frontier),
         "has_datacenter": has_b200ish,
         "has_consumer": has_5090ish,
+        "g2_evidence": g2_evidence,
+        "asert_calibration": [
+            {
+                "file": r["file"],
+                "v3_hashrate": r["v3_hashrate"],
+                "device_nonce_per_s": r["nps"],
+                "reported_suggestion": r["asert_suggestion"],
+                "expected_suggestion": r["asert_expected"],
+                "consistent": r["asert_consistent"],
+            }
+            for r in rows
+            if r["v3_hashrate"] is not None or r["asert_suggestion"] is not None
+        ],
     }
 
 
 def print_human(go: bool, gates: dict, rows: list, reasons: list[str], notes: list[str], extra: dict) -> None:
-    W = 96
+    W = 122
     print("=" * W)
     print("MatMul ENC-DR-LT — Rank-1 GO/NO-GO aggregate verdict")
     print("=" * W)
-    hdr = "%-26s %-8s %-9s %-11s %-6s %-7s %-9s %s" % (
+    hdr = "%-22s %-8s %-9s %-11s %-6s %-7s %-8s %-7s %-10s %s" % (
         "file",
         "backend",
         "vendor",
         "class",
         "bitex",
         "npe",
-        "tensor%",
+        "share%",
+        "util%",
         "dev n/s",
+        "ASERT",
     )
     print(hdr)
     print("-" * W)
     for r in rows:
         tsp = "%.1f" % r["tensor_share_pct"] if r["tensor_share_pct"] is not None else "-"
+        tup = "%.1f" % r["tensor_util_pct"] if r["tensor_util_pct"] is not None else "-"
         nps = ("%.3g" % r["nps"]) if r["nps"] is not None else "-"
+        asert = r["asert_suggestion"] or "-"
         print(
-            "%-26s %-8s %-9s %-11s %-6s %-7s %-9s %s"
+            "%-22s %-8s %-9s %-11s %-6s %-7s %-8s %-7s %-10s %s"
             % (
-                r["file"][:26],
+                r["file"][:22],
                 r["backend"],
                 (r["vendor"] or "UNLABELED")[:9],
                 (r["class"] or "-")[:11],
                 "YES" if r["bit_exact"] else "NO",
                 "YES" if r["native_path_eligible"] else "no",
                 tsp,
+                tup,
                 nps,
+                asert,
             )
         )
     print("-" * W)
-    print("  (device n/s requires device_nonce_per_s; CPU timers never count)")
+    print("  (device n/s requires exact device-assisted provenance + finite positive device_nonce_per_s; CPU timers never count)")
+    print("  (G1 uses share%; util% and ASERT are calibration diagnostics; G2 uses only the measured device-rate ratio)")
     print()
     print("Gate results:")
     labels = {

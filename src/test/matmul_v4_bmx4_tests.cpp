@@ -145,6 +145,42 @@ BOOST_AUTO_TEST_CASE(sampler_streams_are_valid)
     for (int8_t x : U) BOOST_CHECK(x >= -bx::kMantissaMaxAbs && x <= bx::kMantissaMaxAbs);
 }
 
+BOOST_AUTO_TEST_CASE(mx_scale_planes_block_the_gemm_contraction_axis)
+{
+    // A is the right operand of P = U*A, so its scale is shared over 32 rows
+    // i of K and remains independently addressable for every output column k.
+    // B is the left operand of Q = B*V, so its scale is shared over 32 columns
+    // j of K and remains independently addressable for every output row k.
+    const uint32_t n = kTestDim;
+    const uint32_t nblk = n / bx::kBlockLen;
+    const uint256 seed =
+        ParseUint256("836a2f0c33199e496153254a0a42b971a42e68d695704403175c1462a0545678");
+
+    std::vector<int8_t> mu(static_cast<size_t>(n) * n);
+    bx::ExpandMantissaStream(seed, mu.size(), mu.data());
+    std::vector<uint8_t> scale(static_cast<size_t>(nblk) * n);
+    bx::ExpandScaleStream(seed, scale.size(), scale.data());
+    const auto Ahat = bx::ExpandOperandA(seed, n);
+    const auto Bhat = bx::ExpandOperandB(seed, n);
+
+    for (uint32_t i = 0; i < n; ++i) {
+        for (uint32_t k = 0; k < n; ++k) {
+            const size_t elem = static_cast<size_t>(i) * n + k;
+            const uint8_t e = scale[static_cast<size_t>(i / bx::kBlockLen) * n + k];
+            BOOST_CHECK_EQUAL(static_cast<int32_t>(Ahat[elem]),
+                              static_cast<int32_t>(mu[elem]) * (1 << e));
+        }
+    }
+    for (uint32_t k = 0; k < n; ++k) {
+        for (uint32_t j = 0; j < n; ++j) {
+            const size_t elem = static_cast<size_t>(k) * n + j;
+            const uint8_t e = scale[static_cast<size_t>(k) * nblk + j / bx::kBlockLen];
+            BOOST_CHECK_EQUAL(static_cast<int32_t>(Bhat[elem]),
+                              static_cast<int32_t>(mu[elem]) * (1 << e));
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(pinned_constants)
 {
     // The exact ENC-BMX4C constants (design §2.1/§2.4/§5.2).
@@ -520,11 +556,11 @@ BOOST_AUTO_TEST_CASE(scale_partitioned_projection_matches_dense)
 
     std::vector<int8_t> mu_a(static_cast<size_t>(n) * n);
     bx::ExpandMantissaStream(seed_a, mu_a.size(), mu_a.data());
-    std::vector<uint8_t> scale_a(static_cast<size_t>(n) * (n / bx::kBlockLen));
+    std::vector<uint8_t> scale_a(static_cast<size_t>(n / bx::kBlockLen) * n);
     bx::ExpandScaleStream(seed_a, scale_a.size(), scale_a.data());
     std::vector<int8_t> mu_b(static_cast<size_t>(n) * n);
     bx::ExpandMantissaStream(seed_b, mu_b.size(), mu_b.data());
-    std::vector<uint8_t> scale_b(static_cast<size_t>(n / bx::kBlockLen) * n);
+    std::vector<uint8_t> scale_b(static_cast<size_t>(n) * (n / bx::kBlockLen));
     bx::ExpandScaleStream(seed_b, scale_b.size(), scale_b.data());
 
     const auto U = bx::ExpandProjectorBMX4C(seed_u, m, n);
@@ -540,16 +576,18 @@ BOOST_AUTO_TEST_CASE(scale_partitioned_projection_matches_dense)
     BOOST_CHECK(Q_part == Q_dense);
 }
 
-BOOST_AUTO_TEST_CASE(grouped_mxfp4_header_path_matches_reference)
+BOOST_AUTO_TEST_CASE(grouped_mxfp4_integer_emulation_matches_reference)
 {
-    // The portable exact grouped-MXFP4 projection lane (the "used when CUTLASS
+    // The portable exact grouped-MXFP4-shaped integer-emulation lane (used when CUTLASS
     // is unavailable" datapath in cuda/matmul_v4_bmx4_cutlass_mxfp4.h) must be
     // byte-identical to both the scale-partitioned CPU reference and the dense
     // dequantized GEMM. This is the software fallback for the hardware-gated
     // CUTLASS grouped kernel.
     namespace mxf4 = matmul_v4::cuda::cutlass_mxfp4;
 
-    BOOST_CHECK(mxf4::IsGroupedMxfp4Available()); // portable exact path always there
+    // Availability here means portable integer emulation is callable; it is
+    // not evidence that a native MXFP4 tensor kernel ran.
+    BOOST_CHECK(mxf4::IsGroupedMxfp4Available());
 
     const uint32_t n = kTestDim;
     uint32_t m = 0;
@@ -561,11 +599,11 @@ BOOST_AUTO_TEST_CASE(grouped_mxfp4_header_path_matches_reference)
 
     std::vector<int8_t> mu_a(static_cast<size_t>(n) * n);
     bx::ExpandMantissaStream(seed_a, mu_a.size(), mu_a.data());
-    std::vector<uint8_t> scale_a(static_cast<size_t>(n) * (n / bx::kBlockLen));
+    std::vector<uint8_t> scale_a(static_cast<size_t>(n / bx::kBlockLen) * n);
     bx::ExpandScaleStream(seed_a, scale_a.size(), scale_a.data());
     std::vector<int8_t> mu_b(static_cast<size_t>(n) * n);
     bx::ExpandMantissaStream(seed_b, mu_b.size(), mu_b.data());
-    std::vector<uint8_t> scale_b(static_cast<size_t>(n / bx::kBlockLen) * n);
+    std::vector<uint8_t> scale_b(static_cast<size_t>(n) * (n / bx::kBlockLen));
     bx::ExpandScaleStream(seed_b, scale_b.size(), scale_b.data());
 
     const auto U = bx::ExpandProjectorBMX4C(seed_u, m, n);
@@ -765,8 +803,10 @@ BOOST_AUTO_TEST_CASE(lt_tensor_gemm_availability_and_arch_probe)
 }
 
 
-BOOST_AUTO_TEST_CASE(exact_accel_planner_selects_documented_lanes)
+BOOST_AUTO_TEST_CASE(exact_accel_planner_selects_documented_lane_intents)
 {
+    // Static device-name taxonomy only. Runtime native admission separately
+    // requires compiled/linked tensor code plus self-qualification.
     const auto h200 = bx::PlanExactAccelLanes("h200");
     BOOST_CHECK(h200.projection == bx::ProjectionLane::CanonicalInt8);
     BOOST_CHECK(h200.combine == bx::CombineLane::Karatsuba9Int8);
@@ -1102,9 +1142,9 @@ BOOST_AUTO_TEST_CASE(golden_digests)
 {
     struct Case { uint32_t n; uint64_t nonce; std::string_view golden; };
     const Case cases[] = {
-        {128, 0x0000'0000'0000'0001ULL, "c94923800c8a5e344c88efdb2ec5ad07d80694c903af3dae1859ec14ade67b7c"},
-        {256, 0x0000'0000'0000'0001ULL, "4e192d8b907ad2d1383600d6f9b794c3ebf6387d577ca82333e75f544f54a9f9"},
-        {256, 0x0000'0000'0000'0002ULL, "91fe8b670ad84b6b37d6ce859133945f7d8181709f7dbdf8a64b8c7e25f4aeed"},
+        {128, 0x0000'0000'0000'0001ULL, "1cdd18bae59ad3b69519e4b823518de8b66f4cf1752bfd0ebc2d196d29d9cabb"},
+        {256, 0x0000'0000'0000'0001ULL, "77db19a60a9b6aefb5cdabdf38ce20ea564d28163666ed03deb7cc4bb4098188"},
+        {256, 0x0000'0000'0000'0002ULL, "654333d47e7172822e5b2b3bbce6e26b6d82d711ed36091f184fc9d1d94489da"},
     };
     for (const auto& c : cases) {
         const CBlockHeader header = MakeV4Header(c.nonce, c.n);

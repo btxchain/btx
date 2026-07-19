@@ -24,16 +24,17 @@ MatExpand GEMMs.
 
 ## Why Extract matters
 
-ChaCha20-PRF + M11 rejection + discrete scale `e∈{0..3}` is the candidate
-that prevents treating `B̂` as an affine image of `B32`. Without that
+The Lever-B construction uses one position-salted ChaCha stream plus M11
+rejection over each real 32-value tile and one discrete scale `e∈{0..3}`.
+It is the candidate that prevents treating `B̂` as an affine image of `B32`. Without that
 nonlinearity, the low-rank factorization of `B32` is the attack surface
 (LT-C15). External review of Extract is still required before activation.
 
 ## Smoke check (no node build)
 
 ```bash
-python3 toy_attack_harness.py --n 16 --w 4
-python3 spectral_approx_probe.py          # SVD/CCA vs Extract, n∈{8,16,32}
+python3 toy_attack_harness.py --n 32 --w 4
+python3 spectral_approx_probe.py          # SVD/CCA vs Extract, n∈{32,64}
 ```
 
 The harness builds synthetic `(G·W)·H`, prints `rank(B32)`, and asserts it is

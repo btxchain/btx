@@ -62,10 +62,14 @@ and/or the independent oracle.
 - **Sampler stream separation — HOLDS.** Mantissa (`'m'`=0x6D) and scale (`'e'`=0x65)
   planes use distinct XOF domain bytes, both distinct from int8_field's `'s'/'q'` — a
   seed can never produce correlated mantissa/scale/s8/Fq keystreams.
-- **Scale-plane orientation — CORRECT.** A: scale indexed `[i][k/32]` (block along the
-  columns = contraction); B: `[k/32][j]` (block along the rows = contraction). Both
-  index the contraction dimension, matching the base product's contraction (this is the
-  same orthogonality the CUDA backend relies on to apply E8M0 as an exact shift).
+- **Scale-plane orientation — CORRECTED pre-activation.** The original review checked
+  the full base product `A·B` and missed that the priced consensus GEMMs are `P=U·A`
+  and `Q=B·V`. The former `[i][k/32]` / `[k/32][j]` indexing blocked each operand's
+  free axis in those projections and could not occupy native MX K-block scale slots.
+  The corrected indexing is A `[i/32][k]` and B `[k][j/32]`: one scale per 32
+  contraction elements and output coordinate, matching OCP MX hardware. CUDA's exact
+  masked-plane fallback consumes this orientation; direct native scale-tensor dispatch
+  remains fail-closed until separately packed and qualified on silicon.
 - **Combine decomposition totality — VERIFIED.** `DecomposeLimbPlanesBMX4C` (base-2⁶,
   remainder-top): my oracle checked 200k random values + the extremes ±(2²³−1) and
   ±288·{4096,8192}: **0 defects**, every value reconstructs exactly, low digits in

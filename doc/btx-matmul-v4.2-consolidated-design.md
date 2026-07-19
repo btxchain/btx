@@ -1,5 +1,11 @@
 # BTX MatMul v4.2 — Consolidated Design: the BMX4-C Committed Object and the Format-Agnostic Multi-Native-Path Architecture
 
+> **Execution-status correction (2026-07-20).** Claims below that the object is
+> “one native block-scaled GEMM” describe format compatibility and a conditional
+> hardware model, not the current repository path. Portable grouped MX is
+> integer emulation; no admitted B200/MI355 native kernel is wired. Current LT
+> CUDA/HIP dequantize logical MX components to dense INT8 IMMA/MFMA.
+
 *Status: CONSOLIDATED DESIGN / DETERMINATION deliverable (the unified v4.2 design). NOT a
 code change, NOT a spec edit, NOT an activation. This document supersedes-by-consolidation
 the open determinations of `doc/btx-matmul-v4-frontier-native-format.md` (BMX4/𝓜₁₅) and
@@ -55,8 +61,9 @@ observes that the two candidate alphabets differ in exactly one load-bearing res
 sub-2²⁴ envelope, and 7,281 of header range — and that everything v4.1 was demonstrably
 stronger at (INT8-native availability today, machine-checked determinism maturity,
 1-GEMM legacy compatibility, header envelope) is preserved *for free* by 𝓜₁₁@S=3,
-because 48 ≤ 127. BMX4-C is therefore simultaneously: one native block-scaled GEMM on
-FP4/MX silicon, one plain GEMM on FP8 silicon, one plain GEMM on INT8 silicon, and one
+because 48 ≤ 127. BMX4-C is therefore format-compatible with one native
+block-scaled GEMM on qualified FP4/MX silicon, one plain GEMM on qualified FP8
+silicon, one plain GEMM on INT8 silicon, and one
 promotion-free pass on any proven-t=24 FP32-accumulate unit. Nobody slices. The frontier
 tax (4–9× today) goes to ≈ 1×; the legacy tax goes to ≈ 1× (rate-relative only); the
 verifier is unchanged; and the accumulator — the one real cliff — is bracketed by a
@@ -112,9 +119,11 @@ kernels + self-tests, and the §S.2.2/§A.6 re-disclosures.
 ([OCP MX v1.0](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf);
 ±5 is not an E2M1 value and never occurs; ±0.5/±1.5 are excluded to stay on the integer
 grid) — and one shared scale `2^e, e ∈ {0..3}` per **32-element block along the
-contraction dimension** (A: along columns; B: along rows; OCP block length L = 32, scale
-format E8M0 restricted to codes 127..130). The dequantized committed operand is the exact
-integer `Â[i,k] = μ_A[i,k]·2^{e_A(i,⌊k/32⌋)}`, `|Â| ≤ E_max = 6·2³ = 48`. The committed
+contraction dimension of the projection that consumes the operand** (A: rows `i` in
+`P=U·Â`; B: columns `j` in `Q=B̂·V`; OCP block length L = 32, scale format E8M0
+restricted to codes 127..130). The dequantized committed operands are the exact integers
+`Â[i,k] = μ_A[i,k]·2^{e_A(⌊i/32⌋,k)}` and
+`B̂[k,j] = μ_B[k,j]·2^{e_B(k,⌊j/32⌋)}`, with `|Â|,|B̂| ≤ E_max = 6·2³ = 48`. The committed
 product is the exact integer matrix `C̄ = Â·B̂`.
 
 The two source documents pinned different alphabets under the same v4.2 banner

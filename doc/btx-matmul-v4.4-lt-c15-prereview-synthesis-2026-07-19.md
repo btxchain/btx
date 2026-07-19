@@ -1,5 +1,12 @@
 # C-15 dual-panel pre-review synthesis (2026-07-19)
 
+> **Lever-B supersession note (2026-07-20).** The panel reviewed the historical
+> `w=128`, per-cell `MANT`/`SCLE` extractor. Current consensus code uses
+> `w=1024`, so `rank(B32)≤min(n,1024)` and the production raw panel ratio is
+> `n/w=4`, not 30–32×. It also uses real 32-value MX tiles salted by `(i,bj)`,
+> not independent per-cell streams. Results below are historical evidence, not
+> review of the current extractor. C-15 remains OPEN.
+
 *Grok panel:* `/tmp/c15_audit_synthesis_grok.md` + six lens notes
 `/tmp/c15_audit_{algebraic,prf_statistical,shortcut_tmto,lattice_spectral,protocol_specgap,prior_art}.md`.  
 *Opus panel (separate machine):* six independent cryptanalytic lenses; convergent
@@ -20,7 +27,7 @@ Reviewer kit: `contrib/matmul-c15-reviewer-kit/`.
 | Leftover Extract structure (C15-C)? | **Residue documented**; no PoW shortcut shown |
 | ChaCha-as-PRF ⇒ MatExpand work-binding? | **Does not reduce** — novel no-shortcut conjecture (prior-art) |
 | Packet firm-ready (pre-harden)? | Pre-harden **No**; post-harden packet has §0.1 game + kit — still needs a human firm |
-| Rank-128 pre-Extract core? | Real and **load-bearing**: without Extract, L1 thin-panel collapse returns (~30–32×) |
+| Current rank-≤1024 pre-Extract core? | Real and **load-bearing**: without Extract, L1 panel collapse returns (~4× at production); historical panel measured rank-128 / ~30–32× |
 
 ### Three pillars (both panels)
 
@@ -33,7 +40,7 @@ Reviewer kit: `contrib/matmul-c15-reviewer-kit/`.
 1. **Algebraic** — Extract not affine/low-degree on dense samples; linear `Ĉ→G,W,H` rewrite blocked; unrestricted class open.
 2. **PRF/statistical** — Ideal Extract has 23-value alphabet (TV≈0.76 vs uniform by design); `P(0)=1/11≈9.1%` under IdealExtract; cross-lane `Mant(raw)=Scale(raw⊕Δ)` related-nonce; μ′↔e lock when first nibble accepts; no Freivalds/GEMM skip.
 3. **Shortcut/TMTO** — Extract **necessary** vs affine fold; **sufficiency unproven**; Q* Phase A does not bind fat windows; Phase B inert. MatExpand is `O(n²·w)`; deep-m sketch/combine is the cubic floor.
-4. **Lattice/spectral** — `rank(B32)≤128` unconditional; position-salted ChaCha plausibly kills shared-φ spectral residue; `U`/`V` rank-transparent; W-space `128n` is honest work, not an attack win.
+4. **Lattice/spectral** — current `rank(B32)≤min(n,1024)` unconditional; MX tile-salted ChaCha plausibly kills shared-φ spectral residue; `U`/`V` rank-transparent; W-space `1024n` is honest work, not an attack win. The panel's rank-128 result is historical.
 5. **Protocol/spec-gap** — Assumption under-formalized (addressed in packet §0.1 harden); tests are witnesses not proofs; goldens thin; leap-checklist HeaderPoW row was stale (bit-26 withdrawn); activation-tangled with HeaderPoW NO-GO.
 6. **Prior-art** — Closest class: Pearl/cuPOW transcript unpredictability; MatExpand+Extract+Freivalds is **novel encoding risk**.
 

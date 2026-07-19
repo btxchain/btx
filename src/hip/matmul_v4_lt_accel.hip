@@ -5,6 +5,7 @@
 #include <hip/matmul_v4_lt_accel.h>
 
 #include <arith_uint256.h>
+#include <cuda/matmul_v4_lt_device_mx.h>
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <crypto/common.h>
 #include <crypto/sha256.h>
@@ -20,6 +21,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -28,16 +30,13 @@
 // ===========================================================================
 // AMD ROCm/HIP backend for MatMul v4.4 ENC-DR-LT (MatExpand).
 //
-// Lever-B MX Extract (normative): E8M0 on 32-col blocks + tile ChaCha M11.
-// Hot path: MatExpand→MX Extract→project→combine. Right projection prefers
-// scale-partitioned B̂·V (e(i,j/32)) when PlanLTAccel selects
-// ScalePartitionedMxfp4 (MI350/MI355); else dense MFMA / scalar on Bhat.
-//   When IsLtMfmaGemmAvailable(), s8xs8 stages (G*W, U*Ahat, Bhat*V) use
-//   TryLaunchLtMfmaGemmS8S8Device on persistent buffers. Y*H is lowered exactly
-//   into four signed-byte GEMMs, and the F_q combine into nine exact
-//   Karatsuba/base-64 GEMMs. These are limb-lowered MFMA paths, never mislabeled
-//   as a native s32xs8 instruction. When MFMA declines, scalar tiled
-//   DeviceGemm* + hipGraph replay serve.
+// Hot path: persistent device-resident MatExpand→Extract→project→combine.
+//   With MFMA, Bhat*V defaults to one dense INT8 GEMM, with an opt-in
+//   qualification lane consuming MX mantissas/scales through four exponent
+//   partitions (not native MXFP4). Y*H uses four radix-256 products and F_q
+//   combine uses nine Karatsuba/base-64 products. These are exact signed-byte
+//   MFMA lowerings, never mislabeled as native MXFP4 or s32xs8 instructions.
+//   When MFMA declines, scalar tiled DeviceGemm* + hipGraph replay serve.
 // Host ExactGemm / WindowSketchMinerLT is fail-closed fallback only.
 // Target: gfx942 (MI300) / gfx950 (MI350/MI355) via BTX_HIP_ARCHITECTURES.
 // ===========================================================================
@@ -50,6 +49,17 @@ constexpr char kMatExpandGTag[] = "BTX_MATEXPAND_G_V44LT";
 constexpr char kMatExpandHTag[] = "BTX_MATEXPAND_H_V44LT";
 constexpr char kMatExpandWTag[] = "BTX_MATEXPAND_W_V44LT";
 constexpr char kMatExpandWATag[] = "BTX_MATEXPAND_WA_V44LT";
+
+// The exact logical-MX lowering below schedules four dense INT8 GEMMs. Keep it
+// as a qualification/benchmark lane until silicon data shows it beating the
+// single dense-INT8 projection or a native block-scaled kernel replaces it.
+bool LogicalMxQualificationEnabled()
+{
+    const char* value = std::getenv("BTX_MATMUL_V4_LT_LOGICAL_MX");
+    return value != nullptr &&
+           (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 ||
+            std::strcmp(value, "yes") == 0);
+}
 
 uint256 DeriveTaggedSeed(const char* tag, size_t taglen, const uint256& hash)
 {
@@ -200,10 +210,12 @@ __device__ __forceinline__ int8_t DeviceSampleMantissaNibble(uint8_t nibble, boo
     return static_cast<int8_t>(sign ? -mag : mag);
 }
 
+// Scale SHA-256 runs beside tile ChaCha on-device; no per-nonce host scale
+// vector or transfer is part of the resident path.
 __global__ void DeviceExtractDequantMatExpandMx(const int32_t* __restrict__ B32,
                                                 int8_t* __restrict__ Bhat,
                                                 int8_t* __restrict__ Mu,
-                                                const uint8_t* __restrict__ scales,
+                                                uint8_t* __restrict__ Scales,
                                                 uint32_t n, uint32_t k0, uint32_t k1, uint32_t k2,
                                                 uint32_t k3, uint32_t k4, uint32_t k5, uint32_t k6,
                                                 uint32_t k7)
@@ -242,15 +254,48 @@ __global__ void DeviceExtractDequantMatExpandMx(const int32_t* __restrict__ B32,
         ++remix;
     }
 
-    const uint8_t e = scales[static_cast<size_t>(i) * nblk + bj];
+    const uint8_t e = matmul_v4::lt_device::DeriveMatExpandMxScale(key, i, bj);
+    if (Scales != nullptr) Scales[tile] = e;
     const int32_t scale = int32_t{1} << e;
     const size_t base = static_cast<size_t>(i) * n + static_cast<size_t>(bj) * kBlk;
-    int8_t* out = Bhat + base;
-    int8_t* mu_out = Mu ? Mu + base : nullptr;
+    int8_t* dense_out = Bhat != nullptr ? Bhat + base : nullptr;
+    int8_t* mu_out = Mu != nullptr ? Mu + base : nullptr;
     for (uint32_t t = 0; t < kBlk; ++t) {
-        if (mu_out) mu_out[t] = mu[t];
-        out[t] = static_cast<int8_t>(static_cast<int32_t>(mu[t]) * scale);
+        if (mu_out != nullptr) mu_out[t] = mu[t];
+        if (dense_out != nullptr) {
+            dense_out[t] = static_cast<int8_t>(static_cast<int32_t>(mu[t]) * scale);
+        }
     }
+}
+
+// Exact MX-layout lowering for Bhat*V: four exponent-masked M11 matrices feed
+// signed-INT8 MFMA and are accumulated with exact 2^e weights. This consumes
+// the committed (μ, E8M0/32) representation directly; it is not native MXFP4.
+__global__ void DeviceBuildMxExponentPlane(const int8_t* __restrict__ Mu,
+                                           const uint8_t* __restrict__ Scales,
+                                           int8_t* __restrict__ Plane,
+                                           size_t count, uint32_t n, uint32_t exponent)
+{
+    constexpr uint32_t kBlk = 32;
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    const uint32_t row = static_cast<uint32_t>(idx / n);
+    const uint32_t col = static_cast<uint32_t>(idx % n);
+    const uint32_t nblk = n / kBlk;
+    const uint8_t e = Scales[static_cast<size_t>(row) * nblk + col / kBlk];
+    Plane[idx] = e == exponent ? Mu[idx] : int8_t{0};
+}
+
+__global__ void DeviceAccumulateMxProjection(const int32_t* __restrict__ Product,
+                                             int32_t* __restrict__ Q,
+                                             size_t count, uint32_t exponent)
+{
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    const int64_t term = static_cast<int64_t>(Product[idx]) * (int64_t{1} << exponent);
+    auto* q_bits = reinterpret_cast<uint32_t*>(Q);
+    const uint32_t prior = exponent == 0 ? 0U : q_bits[idx];
+    q_bits[idx] = prior + static_cast<uint32_t>(term);
 }
 
 // Exact s32 -> four signed-byte planes. The low three unsigned bytes are
@@ -344,34 +389,6 @@ __global__ void DeviceBuildKaratsubaPlane(const int32_t* __restrict__ input,
     plane[idx] = static_cast<int8_t>(value);
 }
 
-// Q[i,c] = sum_bj 2^{e[i,bj]} * sum_t μ[i,32·bj+t]·V[32·bj+t,c]
-// Bit-identical to ComputeProjectedRightMxBlockScaleLT (not BMX4C row-block scales).
-__global__ void DeviceProjectRightMxBlockScale(const int8_t* __restrict__ mu,
-                                               const uint8_t* __restrict__ scales,
-                                               const int8_t* __restrict__ V,
-                                               int32_t* __restrict__ Q, uint32_t n, uint32_t m)
-{
-    constexpr uint32_t kBlk = 32;
-    const uint32_t nblk = n / kBlk;
-    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t total = n * m;
-    if (idx >= total) return;
-    const uint32_t i = idx / m;
-    const uint32_t c = idx % m;
-    int32_t acc = 0;
-    for (uint32_t bj = 0; bj < nblk; ++bj) {
-        const uint8_t e = scales[static_cast<size_t>(i) * nblk + bj];
-        int32_t partial = 0;
-        for (uint32_t t = 0; t < kBlk; ++t) {
-            const uint32_t j = bj * kBlk + t;
-            partial += static_cast<int32_t>(mu[static_cast<size_t>(i) * n + j]) *
-                       static_cast<int32_t>(V[static_cast<size_t>(j) * m + c]);
-        }
-        acc += partial * (int32_t{1} << e);
-    }
-    Q[static_cast<size_t>(i) * m + c] = acc;
-}
-
 __device__ __forceinline__ uint64_t DeviceFqReduce(unsigned __int128 x)
 {
     constexpr uint64_t q = (uint64_t{1} << 61) - 1;
@@ -463,11 +480,11 @@ struct LtHipResidentPool {
     bool template_bound{false};
     bool graphs_ready{false};
     bool mfma_s8s8{false};
-    bool prefer_mx_right{false};
+    bool mx_partitioned{false};
 
     int8_t *dG{nullptr}, *dH{nullptr}, *dU{nullptr}, *dV{nullptr}, *dAhat{nullptr};
     int32_t* dP{nullptr};
-    int8_t *dW{nullptr}, *dBhat{nullptr}, *dMu{nullptr};
+    int8_t *dW{nullptr}, *dBhat{nullptr}; // dense scalar Bhat or MFMA MX mantissa μ
     int32_t *dY{nullptr}, *dB32{nullptr}, *dQ{nullptr};
     uint64_t* dChat{nullptr};
     uint8_t* dScales{nullptr};
@@ -497,14 +514,14 @@ struct LtHipResidentPool {
         ReleaseGraphs();
         auto free_p = [](auto*& p) { if (p) { hipFree(p); p = nullptr; } };
         free_p(dG); free_p(dH); free_p(dU); free_p(dV); free_p(dAhat); free_p(dP);
-        free_p(dW); free_p(dY); free_p(dB32); free_p(dBhat); free_p(dMu); free_p(dQ); free_p(dChat);
+        free_p(dW); free_p(dY); free_p(dB32); free_p(dBhat); free_p(dQ); free_p(dChat);
         free_p(dScales);
         free_p(dGemmS8L); free_p(dGemmS8R); free_p(dGemmS32L); free_p(dGemmOut);
         gemm_s8l_bytes = gemm_s8r_bytes = gemm_s32l_bytes = gemm_out_bytes = 0;
         if (stream) { hipStreamDestroy(stream); stream = nullptr; }
         template_bound = false;
         mfma_s8s8 = false;
-        prefer_mx_right = false;
+        mx_partitioned = false;
         n = m = w = 0;
     }
 
@@ -530,6 +547,15 @@ struct LtHipResidentPool {
         if (stream && n == n_in && m == m_in && w == w_in) return true;
         Release();
         if (hipStreamCreateWithFlags(&stream, hipStreamNonBlocking) != hipSuccess) return false;
+        int device = 0;
+        hipDeviceProp_t props{};
+        if (hipGetDevice(&device) == hipSuccess &&
+            hipGetDeviceProperties(&props, device) == hipSuccess) {
+            // gfx950 may exercise the exact four-pass logical-MX lane, but it
+            // is opt-in because it schedules 4x dense projection MACs.
+            mx_partitioned = std::strncmp(props.gcnArchName, "gfx950", 6) == 0 &&
+                             LogicalMxQualificationEnabled();
+        }
         n = n_in; m = m_in; w = w_in;
         const size_t nn = static_cast<size_t>(n) * n;
         const size_t nw = static_cast<size_t>(n) * w;
@@ -537,7 +563,8 @@ struct LtHipResidentPool {
         const size_t mn = static_cast<size_t>(m) * n;
         const size_t nm = static_cast<size_t>(n) * m;
         const size_t mm = static_cast<size_t>(m) * m;
-        const size_t nscales = static_cast<size_t>(n) * (n / matmul::v4::lt::kMatExpandMxBlockLen);
+        const size_t nscales = static_cast<size_t>(n) *
+            (n / matmul::v4::lt::kMatExpandMxBlockLen);
         auto mall = [](void** p, size_t bytes) {
             return bytes == 0 || hipMalloc(p, bytes) == hipSuccess;
         };
@@ -551,74 +578,27 @@ struct LtHipResidentPool {
             !mall(reinterpret_cast<void**>(&dY), nw * sizeof(int32_t)) ||
             !mall(reinterpret_cast<void**>(&dB32), nn * sizeof(int32_t)) ||
             !mall(reinterpret_cast<void**>(&dBhat), nn) ||
-            !mall(reinterpret_cast<void**>(&dMu), nn) ||
             !mall(reinterpret_cast<void**>(&dQ), nm * sizeof(int32_t)) ||
             !mall(reinterpret_cast<void**>(&dChat), mm * sizeof(uint64_t)) ||
-            !mall(reinterpret_cast<void**>(&dScales), nscales)) {
+            !mall(reinterpret_cast<void**>(&dScales), mx_partitioned ? nscales : 0)) {
             Release();
             return false;
-        }
-        prefer_mx_right = false;
-        hipDeviceProp_t prop{};
-        int dev = 0;
-        if (hipGetDevice(&dev) == hipSuccess &&
-            hipGetDeviceProperties(&prop, dev) == hipSuccess) {
-            const std::string name = prop.name ? prop.name : "";
-            const std::string gcn = prop.gcnArchName ? prop.gcnArchName : "";
-            for (const char* key : {"mi350", "mi355", "gfx950"}) {
-                if (name.find(key) != std::string::npos || gcn.find(key) != std::string::npos ||
-                    (key[0] == 'g' && gcn.find("gfx950") != std::string::npos)) {
-                    if (matmul::v4::lt::PlanLTAccel(key).projection ==
-                        matmul::v4::bmx4::ProjectionLane::ScalePartitionedMxfp4) {
-                        prefer_mx_right = true;
-                        break;
-                    }
-                }
-            }
-            if (!prefer_mx_right &&
-                matmul::v4::lt::PlanLTAccel("mi350").projection ==
-                    matmul::v4::bmx4::ProjectionLane::ScalePartitionedMxfp4 &&
-                (gcn.find("gfx950") != std::string::npos || name.find("MI350") != std::string::npos ||
-                 name.find("MI355") != std::string::npos)) {
-                prefer_mx_right = true;
-            }
         }
         return true;
     }
 
-    [[nodiscard]] bool LaunchMxExtract(int8_t* dOut, const uint256& prf_key, int8_t* dMuOut)
+    [[nodiscard]] bool LaunchMxExtract(int8_t* dDenseOut, int8_t* dMuOut,
+                                       uint8_t* dScalesOut, const uint256& prf_key)
     {
         const uint32_t nblk = n / matmul::v4::lt::kMatExpandMxBlockLen;
-        const size_t nscales = static_cast<size_t>(n) * nblk;
-        std::vector<uint8_t> scales(nscales);
-        for (uint32_t i = 0; i < n; ++i) {
-            for (uint32_t bj = 0; bj < nblk; ++bj) {
-                scales[static_cast<size_t>(i) * nblk + bj] =
-                    matmul::v4::lt::DeriveMatExpandMxScale(prf_key, i, bj);
-            }
-        }
-        if (hipMemcpyAsync(dScales, scales.data(), nscales, hipMemcpyHostToDevice, stream) !=
-            hipSuccess) {
-            return false;
-        }
         uint32_t kw[8];
         for (int t = 0; t < 8; ++t) kw[t] = ReadLE32(prf_key.data() + static_cast<size_t>(t) * 4);
         const uint32_t ntiles = n * nblk;
         const int et = 256;
         const int eb = static_cast<int>((ntiles + et - 1) / et);
         hipLaunchKernelGGL(DeviceExtractDequantMatExpandMx, dim3(eb), dim3(et), 0, stream,
-                           dB32, dOut, dMuOut, dScales, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5],
-                           kw[6], kw[7]);
-        return hipGetLastError() == hipSuccess;
-    }
-
-    [[nodiscard]] bool LaunchProjectRightMxScale()
-    {
-        const uint32_t total = n * m;
-        const int threads = 256;
-        const int blocks = static_cast<int>((total + threads - 1) / threads);
-        hipLaunchKernelGGL(DeviceProjectRightMxBlockScale, dim3(blocks), dim3(threads), 0, stream,
-                           dMu, dScales, dV, dQ, n, m);
+                           dB32, dDenseOut, dMuOut, dScalesOut, n,
+                           kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
         return hipGetLastError() == hipSuccess;
     }
 
@@ -699,9 +679,38 @@ struct LtHipResidentPool {
         return true;
     }
 
-    [[nodiscard]] bool LaunchProjectRightMfma()
+    [[nodiscard]] bool LaunchProjectRightDenseMfma()
     {
         return TryLaunchLtMfmaGemmS8S8Device(dBhat, dV, dQ, n, m, n, stream);
+    }
+
+    [[nodiscard]] bool LaunchProjectRightMxMfma()
+    {
+        const size_t nn = static_cast<size_t>(n) * n;
+        const size_t nm = static_cast<size_t>(n) * m;
+        if (!EnsureScratch(nn, 0, 0, nm * sizeof(int32_t))) return false;
+
+        constexpr unsigned kElemThreads = 256;
+        const unsigned plane_blocks = static_cast<unsigned>((nn + kElemThreads - 1) /
+                                                             kElemThreads);
+        const unsigned out_blocks = static_cast<unsigned>((nm + kElemThreads - 1) /
+                                                           kElemThreads);
+        for (uint32_t exponent = 0;
+             exponent < matmul::v4::bmx4::kNumScaleCodes; ++exponent) {
+            hipLaunchKernelGGL(DeviceBuildMxExponentPlane,
+                               dim3(plane_blocks), dim3(kElemThreads), 0, stream,
+                               dBhat, dScales, dGemmS8L, nn, n, exponent);
+            if (hipGetLastError() != hipSuccess) return false;
+            if (!TryLaunchLtMfmaGemmS8S8Device(dGemmS8L, dV, dGemmOut,
+                                               n, m, n, stream)) {
+                return false;
+            }
+            hipLaunchKernelGGL(DeviceAccumulateMxProjection,
+                               dim3(out_blocks), dim3(kElemThreads), 0, stream,
+                               dGemmOut, dQ, nm, exponent);
+            if (hipGetLastError() != hipSuccess) return false;
+        }
+        return true;
     }
 
     [[nodiscard]] bool LaunchProjectLeftMfma()
@@ -795,7 +804,7 @@ struct LtHipResidentPool {
         }
 
         const uint256 prf_a = matmul::v4::lt::DeriveMatExpandPrfKey(seed_wa);
-        if (!LaunchMxExtract(dAhat, prf_a, /*dMuOut=*/nullptr)) return false;
+        if (!LaunchMxExtract(dAhat, nullptr, nullptr, prf_a)) return false;
 
         if (mfma_s8s8) {
             if (!LaunchProjectLeftMfma()) {
@@ -841,12 +850,18 @@ struct LtHipResidentPool {
         }
 
         const uint256 prf = matmul::v4::lt::DeriveMatExpandPrfKey(seed_w);
-        if (!LaunchMxExtract(dBhat, prf, dMu)) return false;
+        if (mfma_s8s8 && mx_partitioned) {
+            if (!LaunchMxExtract(nullptr, dBhat, dScales, prf)) return false;
+        } else {
+            if (!LaunchMxExtract(dBhat, nullptr, nullptr, prf)) return false;
+        }
 
-        if (prefer_mx_right) {
-            if (!LaunchProjectRightMxScale()) return false;
-        } else if (mfma_s8s8) {
-            if (!LaunchProjectRightMfma()) return false;
+        if (mfma_s8s8) {
+            if (mx_partitioned) {
+                if (!LaunchProjectRightMxMfma()) return false;
+            } else if (!LaunchProjectRightDenseMfma()) {
+                return false;
+            }
         } else {
             if (hipGraphLaunch(project_right_exec, stream) != hipSuccess) return false;
         }
@@ -860,7 +875,9 @@ struct LtHipResidentPool {
                                dP, dQ, dChat, static_cast<int>(n), static_cast<int>(m));
             if (hipGetLastError() != hipSuccess) return false;
         }
-        chat_out.assign(static_cast<size_t>(m) * m, 0);
+        // The device copy overwrites every word. Preserve capacity across the
+        // Q* window and avoid a redundant host zero-fill per nonce.
+        chat_out.resize(static_cast<size_t>(m) * m);
         if (hipMemcpyAsync(chat_out.data(), dChat, static_cast<size_t>(m) * m * sizeof(uint64_t),
                            hipMemcpyDeviceToHost, stream) != hipSuccess) {
             return false;
@@ -1023,11 +1040,12 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     std::lock_guard<std::mutex> lock(pool.mu);
     if (!pool.BindTemplate(tmpl, n, m)) return false;
     out.resize(count);
+    std::vector<matmul::int8_field::Fq> chat;
+    chat.reserve(static_cast<size_t>(m) * m);
     for (size_t i = 0; i < count; ++i) {
         CBlockHeader header = tmpl;
         header.nNonce64 = nonces[i];
         header.nNonce = static_cast<uint32_t>(nonces[i]);
-        std::vector<matmul::int8_field::Fq> chat;
         if (!pool.MineOneNonce(header, chat)) {
             out.clear();
             return false;

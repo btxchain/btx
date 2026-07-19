@@ -4,8 +4,12 @@
 # file COPYING or https://opensource.org/license/mit/.
 """Regtest rehearsal for the BTX MatMul v4.4-LT Rank-1 / ENC-DR-LT encoding-profile fork.
 
-LT is a further, INERT-by-default deepening staged strictly AT OR AFTER the
-v4.2 ENC-BMX4C fork (Consensus::Params::IsDRLTActive requires IsBMX4CActive;
+LT is a further deepening staged strictly AT OR AFTER the v4.2 ENC-BMX4C fork.
+It remains inert on public networks until an activation height is selected;
+regtest deliberately activates it by default for coverage, and this rehearsal
+overrides that height and selects Phase A to exercise both sides of the profile
+boundary without turning the activation test into a Q*-seal workload test
+(Consensus::Params::IsDRLTActive requires IsBMX4CActive;
 AssertBMX4CConstructionInvariants enforces nMatMulDRLTHeight >=
 nMatMulBMX4CHeight whenever DRLT is configured live). This test stages the two
 forks at DIFFERENT heights (unlike the unified v3->ENC-BMX4C flag day) so the
@@ -22,8 +26,7 @@ This test mines across both boundaries on regtest and asserts:
     mined blocks validate on an independently-validating peer -- which can only
     happen if that peer independently re-derives the Rank-1 MatExpand/deep-m
     operands and recomputes the ENC-DR digest under the LT profile (pow.cpp's
-    ENC_BMX4C_LT dispatch to matmul::v4::lt::ComputeDigestBMX4CLT /
-    VerifySketchBMX4CLT);
+    ENC_BMX4C_LT dispatch to the LT digest reference);
   * every LT block still carries the ENC-DR digest-only carriage (empty
     matrix_c_data / no matrix_c_words), exactly like ENC-BMX4C's DIGEST_RECOMPUTE
     default -- LT never reintroduces an in-block sketch payload;
@@ -36,6 +39,7 @@ convention (src/chainparamsbase.cpp):
   -regtestmatmulv4dimension=<n>   v4 matrix dimension n
   -regtestbmx4cheight=<H>         ENC-BMX4C activation height (== v4 height)
   -regtestdrltheight=<H2>         ENC-DR-LT activation height (H2 >= H)
+  -regtestmatmulltsealaspow=0     keep this profile-transition test in Phase A
 
 If a future refactor ever removes the -regtestdrltheight override, this test
 skips outright rather than failing, since LT staying permanently unreachable
@@ -69,6 +73,7 @@ class BTXMatMulDRLTActivation(BitcoinTestFramework):
             f"-regtestmatmulv4dimension={V4_DIMENSION}",
             f"-regtestbmx4cheight={BMX4C_HEIGHT}",
             f"-regtestdrltheight={DRLT_HEIGHT}",
+            "-regtestmatmulltsealaspow=0",
         ]
         self.extra_args = [common, common]
 
@@ -129,7 +134,7 @@ class BTXMatMulDRLTActivation(BitcoinTestFramework):
         assert_equal(challenge["height"], DRLT_HEIGHT)
         assert_equal(challenge["matmul"]["encoding_profile"], "ENC-BMX4C-LT")
         assert_equal(challenge["matmul"]["b"], 2)
-        assert_equal(challenge["matmul"]["consensus_q_star"], 64)
+        assert_equal(challenge["matmul"]["consensus_q_star"], 256)
         assert_equal(challenge["matmul"]["lt_transcript_block_size"], 2)
 
         self.log.info(f"Mine the ENC-DR-LT activation block {DRLT_HEIGHT} and sync the peer")

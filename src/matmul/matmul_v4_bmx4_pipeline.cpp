@@ -89,15 +89,16 @@ PersistentSketchMinerBMX4C::PersistentSketchMinerBMX4C(const CBlockHeader& heade
     const size_t nn = static_cast<size_t>(n) * n;
     std::vector<int8_t> mu_a(nn);
     ExpandMantissaStreamPortable(seed_a, nn, mu_a.data());
-    std::vector<uint8_t> scale_a(static_cast<size_t>(n) * (n / kBlockLen));
+    const uint32_t nblk = n / kBlockLen;
+    std::vector<uint8_t> scale_a(static_cast<size_t>(nblk) * n);
     ExpandScaleStreamPortable(seed_a, scale_a.size(), scale_a.data());
     m_A.resize(nn);
     for (uint32_t i = 0; i < n; ++i) {
         const size_t row = static_cast<size_t>(i) * n;
-        const size_t srow = static_cast<size_t>(i) * (n / kBlockLen);
+        const size_t srow = static_cast<size_t>(i / kBlockLen) * n;
         for (uint32_t k = 0; k < n; ++k) {
             m_A[row + k] = static_cast<int8_t>(
-                static_cast<int32_t>(mu_a[row + k]) * (1 << scale_a[srow + (k / kBlockLen)]));
+                static_cast<int32_t>(mu_a[row + k]) * (1 << scale_a[srow + k]));
         }
     }
     m_U = ExpandProjectorBMX4C(seed_u, m_m, n);
@@ -148,14 +149,15 @@ void PersistentSketchMinerBMX4C::StageXof(NonceSlot& slot)
     const size_t nn = static_cast<size_t>(m_n) * m_n;
     std::vector<int8_t> mu(nn);
     ExpandMantissaStreamPortable(slot.seed_b, nn, mu.data());
-    std::vector<uint8_t> scale(static_cast<size_t>(m_n / kBlockLen) * m_n);
+    const uint32_t nblk = m_n / kBlockLen;
+    std::vector<uint8_t> scale(static_cast<size_t>(m_n) * nblk);
     ExpandScaleStreamPortable(slot.seed_b, scale.size(), scale.data());
     for (uint32_t k = 0; k < m_n; ++k) {
         const size_t row = static_cast<size_t>(k) * m_n;
-        const size_t srow = static_cast<size_t>(k / kBlockLen) * m_n;
+        const size_t srow = static_cast<size_t>(k) * nblk;
         for (uint32_t j = 0; j < m_n; ++j) {
             slot.Bhat[row + j] = static_cast<int8_t>(
-                static_cast<int32_t>(mu[row + j]) * (1 << scale[srow + j]));
+                static_cast<int32_t>(mu[row + j]) * (1 << scale[srow + (j / kBlockLen)]));
         }
     }
     slot.ready_xof = true;

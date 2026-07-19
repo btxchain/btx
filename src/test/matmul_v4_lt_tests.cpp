@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/backend_capabilities_v4.h>
+#include <matmul/exact_gemm_radix.h>
 #include <matmul/matmul_pow.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
@@ -643,7 +644,9 @@ BOOST_AUTO_TEST_CASE(matexpand_chacha_prf_golden_vectors)
 
 BOOST_AUTO_TEST_CASE(matexpand_mx_scale_partitioned_right_matches_dense)
 {
-    // Lever-B miner lane: Q from (μ, e) must match dense Bhat·V.
+    // Logical Lever-B exact-integer lane: Q from (mu,e) must match dense
+    // Bhat*V. This CPU test proves representation identity only; it does not
+    // execute or qualify a native MXFP4 GPU instruction.
     auto header = MakeLTHeader(0x4d584237ULL, kTestDim);
     std::vector<int8_t> mu;
     std::vector<uint8_t> scales;
@@ -657,10 +660,22 @@ BOOST_AUTO_TEST_CASE(matexpand_mx_scale_partitioned_right_matches_dense)
     const auto Q_dense = matmul::v4::ComputeProjectedRight(Bhat, V, kTestDim, m);
     const auto Q_mx = lt::ComputeProjectedRightMxBlockScaleLT(mu, scales, V, kTestDim, m);
     BOOST_CHECK(Q_dense == Q_mx);
+
+    // The hot miner path skips the otherwise-unused dense Bhat allocation.
+    std::vector<int8_t> mu_components;
+    std::vector<uint8_t> scale_components;
+    lt::ExpandOperandBMatExpandMxComponents(header, kTestDim, lt::ExactGemmBackend{},
+                                            mu_components, scale_components);
+    BOOST_CHECK(mu_components == mu);
+    BOOST_CHECK(scale_components == scales);
+    BOOST_CHECK(lt::ComputeProjectedRightMxBlockScaleLT(
+                    mu_components, scale_components, V, kTestDim, m) == Q_dense);
 }
 
-BOOST_AUTO_TEST_CASE(plan_lt_accel_known_classes)
+BOOST_AUTO_TEST_CASE(plan_lt_accel_labels_intent_not_runtime_native)
 {
+    // String-to-taxonomy design hint inherited from BMX4. PlanLTAccel neither
+    // probes hardware nor proves that LT dispatched native MXFP4.
     const auto b200 = lt::PlanLTAccel("b200");
     BOOST_CHECK(b200.projection == matmul::v4::bmx4::ProjectionLane::ScalePartitionedMxfp4);
     const auto cpu = lt::PlanLTAccel("cpu");
@@ -812,6 +827,47 @@ BOOST_AUTO_TEST_CASE(window_miner_matches_reference)
         BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(h, kTestDim, ref, payload));
         BOOST_CHECK(results[i].digest == ref);
     }
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_s32s8_radix256_matches_cpu)
+{
+    constexpr uint32_t rows = 3;
+    constexpr uint32_t inner = 257;
+    constexpr uint32_t cols = 5;
+    std::vector<int32_t> left(static_cast<size_t>(rows) * inner);
+    std::vector<int8_t> right(static_cast<size_t>(inner) * cols);
+    for (size_t i = 0; i < left.size(); ++i) {
+        left[i] = static_cast<int32_t>((i * 1'000'003ULL + 97) % 1'000'001ULL) - 500'000;
+    }
+    for (size_t i = 0; i < right.size(); ++i) {
+        right[i] = static_cast<int8_t>(static_cast<int32_t>((i * 11 + 3) % 13) - 6);
+    }
+
+    uint32_t launches{0};
+    std::vector<int32_t> lowered;
+    BOOST_REQUIRE(lt::ExactGemmS32S8ViaRadix256(
+        left, right, rows, inner, cols, lowered,
+        [&launches](const std::vector<int8_t>& lhs,
+                    const std::vector<int8_t>& rhs,
+                    uint32_t m, uint32_t k, uint32_t n,
+                    std::vector<int32_t>& out) {
+            ++launches;
+            out = lt::ExactGemmS8S8(lhs, rhs, m, k, n);
+            return true;
+        }));
+    BOOST_CHECK_EQUAL(launches, 4U);
+    BOOST_CHECK(lowered == lt::ExactGemmS32S8(left, right, rows, inner, cols));
+
+    // The generic adapter fails closed when it cannot prove that every output
+    // fits S32; callers retain their existing CPU fallback.
+    lowered.assign(1, 123);
+    BOOST_CHECK(!lt::ExactGemmS32S8ViaRadix256(
+        std::vector<int32_t>{std::numeric_limits<int32_t>::max()},
+        std::vector<int8_t>{2}, 1, 1, 1, lowered,
+        [](const auto&, const auto&, uint32_t, uint32_t, uint32_t, auto&) {
+            return true;
+        }));
+    BOOST_CHECK(lowered.empty());
 }
 
 BOOST_AUTO_TEST_CASE(exact_gemm_backend_mock_matches_cpu)

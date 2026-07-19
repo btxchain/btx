@@ -8,6 +8,7 @@
 #include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <cuda/cuda_context.h>
+#include <cuda/matmul_v4_lt_device_mx.h>
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_pow.h>
@@ -22,6 +23,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -35,13 +37,17 @@
 // match CPU ExtractDequantMatExpand / AccelReplica bit-exactly.
 //
 // Hot path (when a calibrated CUDA device is present):
-//   persistent device-resident loop over MatExpand → MX Extract → project →
-//   combine. Right projection prefers scale-partitioned B̂·V (μ,e layout
-//   e(i,j/32)) when PlanLTAccel selects ScalePartitionedMxfp4 (Blackwell /
-//   sm_100/sm_120 / 5090); else dense IMMA / scalar tiled GEMM on dequantized
-//   Bhat. s32xs8 (Y*H) stays scalar. Digest hashing stays on host after Chat
-//   D2H (device SHA256d of Chat not wired).
-//
+ //   persistent device-resident loop over MatExpand → project → combine.
+ //   When IsLtImmaGemmAvailable(), direct s8xs8 stages use cuBLASLt IMMA;
+ //   Bhat*V defaults to one dense INT8 GEMM, with an opt-in qualification lane
+ //   consuming MX mantissas/scales through four exponent partitions (not native
+ //   MXFP4). Y*H uses four radix-256 IMMA products, and combine
+ //   uses nine base-64 Karatsuba products. TryLaunchLtImmaGemmS32S8 itself
+ //   still honestly declines because cuBLASLt has no direct s32xs8 recipe.
+ //   When IMMA declines, scalar tiled DeviceGemm* + CUDA-graph replay serve
+ //   the same buffers — never labeled IMMA. Digest hashing stays on host after
+ //   Chat D2H (honest gap: device-side SHA256d of Chat is not wired yet).
+ //
  // Fail-closed fallback:
  //   host ExactGemm* / WindowSketchMinerLT (bit-exact MX scale-partitioned
  //   B̂·V on CPU). That host path is the safety net when the device declines.
@@ -59,6 +65,17 @@ constexpr char kMatExpandGTag[] = "BTX_MATEXPAND_G_V44LT";
 constexpr char kMatExpandHTag[] = "BTX_MATEXPAND_H_V44LT";
 constexpr char kMatExpandWTag[] = "BTX_MATEXPAND_W_V44LT";
 constexpr char kMatExpandWATag[] = "BTX_MATEXPAND_WA_V44LT";
+
+// The exact logical-MX lowering below schedules four dense INT8 GEMMs. Keep it
+// as a qualification/benchmark lane until silicon data shows it beating the
+// single dense-INT8 projection or a native block-scaled kernel replaces it.
+bool LogicalMxQualificationEnabled()
+{
+    const char* value = std::getenv("BTX_MATMUL_V4_LT_LOGICAL_MX");
+    return value != nullptr &&
+           (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 ||
+            std::strcmp(value, "yes") == 0);
+}
 
 uint256 DeriveTaggedSeed(const char* tag, size_t taglen, const uint256& hash)
 {
@@ -191,12 +208,12 @@ __device__ __forceinline__ int8_t DeviceSampleMantissaNibble(uint8_t nibble, boo
     return static_cast<int8_t>(sign ? -mag : mag);
 }
 
-// Lever-B MX Extract: one thread per (i, bj) tile. scales[i*nblk+bj] = e.
-// Writes dense Bhat = μ·2^e; optional Mu receives M11 mantissas (n×n).
+// Lever-B MX Extract: one thread per (i, bj) tile. The E8M0 scale is derived
+// on-device, avoiding n*(n/32) host SHA-256 calls and an H2D upload per nonce.
 __global__ void DeviceExtractDequantMatExpandMx(const int32_t* __restrict__ B32,
                                                 int8_t* __restrict__ Bhat,
                                                 int8_t* __restrict__ Mu,
-                                                const uint8_t* __restrict__ scales,
+                                                uint8_t* __restrict__ Scales,
                                                 uint32_t n, uint32_t k0, uint32_t k1, uint32_t k2,
                                                 uint32_t k3, uint32_t k4, uint32_t k5, uint32_t k6,
                                                 uint32_t k7)
@@ -235,43 +252,135 @@ __global__ void DeviceExtractDequantMatExpandMx(const int32_t* __restrict__ B32,
         ++remix;
     }
 
-    const uint8_t e = scales[static_cast<size_t>(i) * nblk + bj];
+    const uint8_t e = matmul_v4::lt_device::DeriveMatExpandMxScale(key, i, bj);
+    if (Scales != nullptr) Scales[tile] = e;
     const int32_t scale = int32_t{1} << e;
     const size_t base = static_cast<size_t>(i) * n + static_cast<size_t>(bj) * kBlk;
-    int8_t* out = Bhat + base;
-    int8_t* mu_out = Mu ? Mu + base : nullptr;
+    int8_t* dense_out = Bhat != nullptr ? Bhat + base : nullptr;
+    int8_t* mu_out = Mu != nullptr ? Mu + base : nullptr;
     for (uint32_t t = 0; t < kBlk; ++t) {
-        if (mu_out) mu_out[t] = mu[t];
-        out[t] = static_cast<int8_t>(static_cast<int32_t>(mu[t]) * scale);
+        if (mu_out != nullptr) mu_out[t] = mu[t];
+        if (dense_out != nullptr) {
+            dense_out[t] = static_cast<int8_t>(static_cast<int32_t>(mu[t]) * scale);
+        }
     }
 }
 
-// Q[i,c] = sum_bj 2^{e[i,bj]} * sum_t μ[i,32·bj+t]·V[32·bj+t,c]
-// Bit-identical to ComputeProjectedRightMxBlockScaleLT (not BMX4C row-block scales).
-__global__ void DeviceProjectRightMxBlockScale(const int8_t* __restrict__ mu,
-                                               const uint8_t* __restrict__ scales,
-                                               const int8_t* __restrict__ V,
-                                               int32_t* __restrict__ Q, uint32_t n, uint32_t m)
+// Build the e-th exact scale partition without materializing dense Bhat.
+// Each μ value is copied only when its row/32-column tile has exponent e;
+// otherwise it is zero. Four ordinary signed-INT8 tensor GEMMs followed by
+// exact power-of-two accumulation reproduce (μ*2^scale)*V bit-for-bit. This is
+// an MX-layout IMMA lowering, not a claim of native OCP-MXFP4 instructions.
+__global__ void DeviceBuildMxExponentPlane(const int8_t* __restrict__ Mu,
+                                           const uint8_t* __restrict__ Scales,
+                                           int8_t* __restrict__ Plane,
+                                           size_t count, uint32_t n, uint32_t exponent)
 {
     constexpr uint32_t kBlk = 32;
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    const uint32_t row = static_cast<uint32_t>(idx / n);
+    const uint32_t col = static_cast<uint32_t>(idx % n);
     const uint32_t nblk = n / kBlk;
-    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const uint32_t total = n * m;
-    if (idx >= total) return;
-    const uint32_t i = idx / m;
-    const uint32_t c = idx % m;
-    int32_t acc = 0;
-    for (uint32_t bj = 0; bj < nblk; ++bj) {
-        const uint8_t e = scales[static_cast<size_t>(i) * nblk + bj];
-        int32_t partial = 0;
-        for (uint32_t t = 0; t < kBlk; ++t) {
-            const uint32_t j = bj * kBlk + t;
-            partial += static_cast<int32_t>(mu[static_cast<size_t>(i) * n + j]) *
-                       static_cast<int32_t>(V[static_cast<size_t>(j) * m + c]);
-        }
-        acc += partial * (int32_t{1} << e);
+    const uint8_t e = Scales[static_cast<size_t>(row) * nblk + col / kBlk];
+    Plane[idx] = e == exponent ? Mu[idx] : int8_t{0};
+}
+
+__global__ void DeviceAccumulateMxProjection(const int32_t* __restrict__ Product,
+                                             int32_t* __restrict__ Q,
+                                             size_t count, uint32_t exponent)
+{
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    const int64_t term = static_cast<int64_t>(Product[idx]) * (int64_t{1} << exponent);
+    auto* q_bits = reinterpret_cast<uint32_t*>(Q);
+    const uint32_t prior = exponent == 0 ? 0U : q_bits[idx];
+    q_bits[idx] = prior + static_cast<uint32_t>(term);
+}
+
+// Exact s32 -> four signed-byte planes. The low three unsigned bytes are
+// recentered into [-128,127], while the high byte remains signed:
+//
+// x = sum_l plane_l(x)*256^l + 128*(1 + 256 + 65536).
+//
+// Four self-qualified s8xs8 IMMA products plus the row-independent correction
+// therefore reproduce Y*H for every int32 bit pattern, with defined modulo-2^32
+// intermediate accumulation and the consensus-bounded signed final result.
+__global__ void DeviceExtractRadix256Plane(const int32_t* __restrict__ input,
+                                           int8_t* __restrict__ plane,
+                                           size_t count, uint32_t limb)
+{
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    const uint32_t bits = static_cast<uint32_t>(input[idx]);
+    const uint32_t byte = (bits >> (8U * limb)) & 0xffU;
+    const int32_t digit = limb < 3
+        ? static_cast<int32_t>(byte) - 128
+        : (byte < 128 ? static_cast<int32_t>(byte) : static_cast<int32_t>(byte) - 256);
+    plane[idx] = static_cast<int8_t>(digit);
+}
+
+__global__ void DeviceColumnSumsS8(const int8_t* __restrict__ matrix,
+                                   int32_t* __restrict__ sums, int rows, int cols)
+{
+    const int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= cols) return;
+    int32_t sum = 0;
+    for (int row = 0; row < rows; ++row) {
+        sum += static_cast<int32_t>(matrix[static_cast<size_t>(row) * cols + col]);
     }
-    Q[static_cast<size_t>(i) * m + c] = acc;
+    sums[col] = sum;
+}
+
+__global__ void DeviceAccumulateRadix256(const int32_t* __restrict__ limb_product,
+                                         int32_t* __restrict__ output,
+                                         const int32_t* __restrict__ rhs_column_sums,
+                                         size_t count, int cols, uint32_t limb)
+{
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    constexpr int64_t kLowByteBias = 128ll * (1ll + 256ll + 65536ll);
+    int64_t term = static_cast<int64_t>(limb_product[idx]) * (int64_t{1} << (8U * limb));
+    if (limb == 3) {
+        term += kLowByteBias * static_cast<int64_t>(rhs_column_sums[idx % cols]);
+    }
+    auto* output_bits = reinterpret_cast<uint32_t*>(output);
+    const uint32_t prior = limb == 0 ? 0U : output_bits[idx];
+    output_bits[idx] = prior + static_cast<uint32_t>(term);
+}
+
+static_assert(matmul::v4::bmx4::kCombineLimbs == 4 &&
+              matmul::v4::bmx4::kCombineLimbBase == 64,
+              "LT CUDA combine kernels pin the BMX4-C four-limb base-64 encoding");
+
+// Emits one of the nine exact Karatsuba planes in the CPU helper's order.
+// Each output is in [-128,127], so it is a legal signed-byte IMMA operand.
+__global__ void DeviceBuildKaratsubaPlane(const int32_t* __restrict__ input,
+                                          int8_t* __restrict__ plane,
+                                          size_t count, uint32_t plane_index)
+{
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    int32_t x = input[idx];
+    const int32_t d0 = ((x + 32) & 63) - 32;
+    x = (x - d0) / 64;
+    const int32_t d1 = ((x + 32) & 63) - 32;
+    x = (x - d1) / 64;
+    const int32_t d2 = ((x + 32) & 63) - 32;
+    const int32_t d3 = (x - d2) / 64;
+    int32_t value = 0;
+    switch (plane_index) {
+    case 0: value = d0; break;
+    case 1: value = d1; break;
+    case 2: value = d0 + d1; break;
+    case 3: value = d2; break;
+    case 4: value = d3; break;
+    case 5: value = d2 + d3; break;
+    case 6: value = d0 + d2; break;
+    case 7: value = d1 + d3; break;
+    case 8: value = d0 + d1 + d2 + d3; break;
+    }
+    plane[idx] = static_cast<int8_t>(value);
 }
 
 // F_q = 2^61-1 helpers (device twin of matmul::int8_field).
@@ -293,6 +402,47 @@ __device__ __forceinline__ uint64_t DeviceFqFromInt64(int64_t x)
     const uint64_t magnitude = static_cast<uint64_t>(-(x + 1)) + 1;
     const uint64_t r = DeviceFqReduce(static_cast<unsigned __int128>(magnitude));
     return r == 0 ? 0 : (q - r);
+}
+
+__device__ __forceinline__ uint64_t DeviceFqAdd(uint64_t a, uint64_t b)
+{
+    constexpr uint64_t q = (uint64_t{1} << 61) - 1;
+    const uint64_t sum = a + b;
+    return sum >= q ? sum - q : sum;
+}
+
+__device__ __forceinline__ uint64_t DeviceFqMul(uint64_t a, uint64_t b)
+{
+    return DeviceFqReduce(static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b));
+}
+
+__global__ void DeviceAccumulateCombinePlane(const int32_t* __restrict__ product,
+                                             uint64_t* __restrict__ chat,
+                                             uint64_t weight, size_t count)
+{
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    chat[idx] = DeviceFqAdd(chat[idx],
+                            DeviceFqMul(weight, DeviceFqFromInt64(product[idx])));
+}
+
+void Karatsuba9FqWeights(uint64_t (&weights)[9])
+{
+    using matmul::int8_field::FqAdd;
+    using matmul::int8_field::FqNeg;
+    const uint64_t w[7] = {
+        uint64_t{1} << 0, uint64_t{1} << 6, uint64_t{1} << 12, uint64_t{1} << 18,
+        uint64_t{1} << 24, uint64_t{1} << 30, uint64_t{1} << 36,
+    };
+    weights[0] = FqAdd(FqAdd(w[0], FqNeg(w[1])), FqAdd(FqNeg(w[2]), w[3]));
+    weights[1] = FqAdd(FqAdd(FqNeg(w[1]), w[2]), FqAdd(w[3], FqNeg(w[4])));
+    weights[2] = FqAdd(w[1], FqNeg(w[3]));
+    weights[3] = FqAdd(FqAdd(FqNeg(w[2]), w[3]), FqAdd(w[4], FqNeg(w[5])));
+    weights[4] = FqAdd(FqAdd(w[3], FqNeg(w[4])), FqAdd(FqNeg(w[5]), w[6]));
+    weights[5] = FqAdd(FqNeg(w[3]), w[5]);
+    weights[6] = FqAdd(w[2], FqNeg(w[3]));
+    weights[7] = FqAdd(FqNeg(w[3]), w[4]);
+    weights[8] = w[3];
 }
 
 static_assert(uint64_t{288} * 288 * 29'127 * 29'127 * 29'127 < (uint64_t{1} << 63),
@@ -373,6 +523,7 @@ struct LtCudaResidentPool {
     bool template_bound{false};
     bool graphs_ready{false};
     bool imma_s8s8{false};
+    bool mx_partitioned{false};
 
     // Template-resident
     int8_t* dG{nullptr};
@@ -386,12 +537,10 @@ struct LtCudaResidentPool {
     int8_t* dW{nullptr};
     int32_t* dY{nullptr};
     int32_t* dB32{nullptr};
-    int8_t* dBhat{nullptr};
-    int8_t* dMu{nullptr};     // n×n M11 mantissas for MX scale-partitioned B̂·V
+    int8_t* dBhat{nullptr}; // dense Bhat, or MX mantissa μ on the frontier IMMA path
+    uint8_t* dScales{nullptr}; // n*(n/32) E8M0 codes for frontier MX projection
     int32_t* dQ{nullptr};
     uint64_t* dChat{nullptr};
-    uint8_t* dScales{nullptr}; // n * (n/32) E8M0 codes for MX Extract
-    bool prefer_mx_right{false}; // PlanLTAccel ScalePartitionedMxfp4 on this GPU
 
     // Generic LaunchGemm scratch (cross-call reuse; minimizes alloc churn)
     int8_t* dGemmS8L{nullptr};
@@ -426,14 +575,14 @@ struct LtCudaResidentPool {
             if (p) { cudaFree(p); p = nullptr; }
         };
         free_p(dG); free_p(dH); free_p(dU); free_p(dV); free_p(dAhat); free_p(dP);
-        free_p(dW); free_p(dY); free_p(dB32); free_p(dBhat); free_p(dMu); free_p(dQ); free_p(dChat);
+        free_p(dW); free_p(dY); free_p(dB32); free_p(dBhat); free_p(dQ); free_p(dChat);
         free_p(dScales);
         free_p(dGemmS8L); free_p(dGemmS8R); free_p(dGemmS32L); free_p(dGemmOut);
         gemm_s8l_bytes = gemm_s8r_bytes = gemm_s32l_bytes = gemm_out_bytes = 0;
         if (stream) { cudaStreamDestroy(stream); stream = nullptr; }
         template_bound = false;
         imma_s8s8 = false;
-        prefer_mx_right = false;
+        mx_partitioned = false;
         n = m = w = 0;
         device = -1;
     }
@@ -471,6 +620,16 @@ struct LtCudaResidentPool {
         }
         if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) return false;
 
+        cudaDeviceProp props{};
+        if (cudaGetDeviceProperties(&props, device) == cudaSuccess) {
+            // SM100/SM120 may exercise the exact four-pass logical-MX lane,
+            // but it is opt-in because it schedules 4x dense projection MACs.
+            // This deliberately does not advertise native MXFP4.
+            const bool frontier_mx = (props.major == 10 && props.minor == 0) ||
+                                     (props.major == 12 && props.minor == 0);
+            mx_partitioned = frontier_mx && LogicalMxQualificationEnabled();
+        }
+
         n = n_in;
         m = m_in;
         w = w_in;
@@ -480,7 +639,8 @@ struct LtCudaResidentPool {
         const size_t mn = static_cast<size_t>(m) * n;
         const size_t nm = static_cast<size_t>(n) * m;
         const size_t mm = static_cast<size_t>(m) * m;
-        const size_t nscales = static_cast<size_t>(n) * (n / matmul::v4::lt::kMatExpandMxBlockLen);
+        const size_t nscales = static_cast<size_t>(n) *
+            (n / matmul::v4::lt::kMatExpandMxBlockLen);
 
         auto mall = [](void** p, size_t bytes) {
             return bytes == 0 || cudaMalloc(p, bytes) == cudaSuccess;
@@ -495,68 +655,27 @@ struct LtCudaResidentPool {
             !mall(reinterpret_cast<void**>(&dY), nw * sizeof(int32_t)) ||
             !mall(reinterpret_cast<void**>(&dB32), nn * sizeof(int32_t)) ||
             !mall(reinterpret_cast<void**>(&dBhat), nn) ||
-            !mall(reinterpret_cast<void**>(&dMu), nn) ||
             !mall(reinterpret_cast<void**>(&dQ), nm * sizeof(int32_t)) ||
             !mall(reinterpret_cast<void**>(&dChat), mm * sizeof(uint64_t)) ||
-            !mall(reinterpret_cast<void**>(&dScales), nscales)) {
+            !mall(reinterpret_cast<void**>(&dScales), mx_partitioned ? nscales : 0)) {
             Release();
             return false;
-        }
-        // PlanLTAccel taxonomy: ScalePartitionedMxfp4 ⇒ prefer MX e(i,j/32) B̂·V.
-        prefer_mx_right = false;
-        cudaDeviceProp prop{};
-        if (cudaGetDeviceProperties(&prop, device) == cudaSuccess) {
-            const std::string tag =
-                "sm" + std::to_string(prop.major) + std::to_string(prop.minor);
-            if (matmul::v4::lt::PlanLTAccel(tag).projection ==
-                matmul::v4::bmx4::ProjectionLane::ScalePartitionedMxfp4) {
-                prefer_mx_right = true;
-            } else {
-                const std::string name = prop.name ? prop.name : "";
-                for (const char* key : {"5090", "B200", "Blackwell", "blackwell"}) {
-                    if (name.find(key) != std::string::npos &&
-                        matmul::v4::lt::PlanLTAccel(key).projection ==
-                            matmul::v4::bmx4::ProjectionLane::ScalePartitionedMxfp4) {
-                        prefer_mx_right = true;
-                        break;
-                    }
-                }
-            }
         }
         return true;
     }
 
-    [[nodiscard]] bool LaunchMxExtract(int8_t* dOut, const uint256& prf_key, int8_t* dMuOut)
+    [[nodiscard]] bool LaunchMxExtract(int8_t* dDenseOut, int8_t* dMuOut,
+                                       uint8_t* dScalesOut, const uint256& prf_key)
     {
         const uint32_t nblk = n / matmul::v4::lt::kMatExpandMxBlockLen;
-        const size_t nscales = static_cast<size_t>(n) * nblk;
-        std::vector<uint8_t> scales(nscales);
-        for (uint32_t i = 0; i < n; ++i) {
-            for (uint32_t bj = 0; bj < nblk; ++bj) {
-                scales[static_cast<size_t>(i) * nblk + bj] =
-                    matmul::v4::lt::DeriveMatExpandMxScale(prf_key, i, bj);
-            }
-        }
-        if (cudaMemcpyAsync(dScales, scales.data(), nscales, cudaMemcpyHostToDevice, stream) !=
-            cudaSuccess) {
-            return false;
-        }
         uint32_t kw[8];
         for (int t = 0; t < 8; ++t) kw[t] = ReadLE32(prf_key.data() + static_cast<size_t>(t) * 4);
         const uint32_t ntiles = n * nblk;
         const int extract_threads = 256;
         const int extract_blocks = static_cast<int>((ntiles + extract_threads - 1) / extract_threads);
         DeviceExtractDequantMatExpandMx<<<extract_blocks, extract_threads, 0, stream>>>(
-            dB32, dOut, dMuOut, dScales, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
-        return cudaGetLastError() == cudaSuccess;
-    }
-
-    [[nodiscard]] bool LaunchProjectRightMxScale()
-    {
-        const uint32_t total = n * m;
-        const int threads = 256;
-        const int blocks = static_cast<int>((total + threads - 1) / threads);
-        DeviceProjectRightMxBlockScale<<<blocks, threads, 0, stream>>>(dMu, dScales, dV, dQ, n, m);
+            dB32, dDenseOut, dMuOut, dScalesOut, n,
+            kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
         return cudaGetLastError() == cudaSuccess;
     }
 
@@ -587,20 +706,104 @@ struct LtCudaResidentPool {
     [[nodiscard]] bool LaunchMatExpandImma()
     {
         if (!TryLaunchLtImmaGemmS8S8Device(dG, dW, dY, n, w, n, stream)) return false;
-        const dim3 block(16, 16, 1);
-        const dim3 grid_b((n + block.x - 1) / block.x, (n + block.y - 1) / block.y, 1);
-        DeviceGemmS32S8Tiled<<<grid_b, block, 0, stream>>>(dY, dH, dB32, (int)n, (int)n, (int)w);
-        return cudaGetLastError() == cudaSuccess;
+        const size_t yw = static_cast<size_t>(n) * w;
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (!EnsureScratch(yw, 0, static_cast<size_t>(n) * sizeof(int32_t),
+                           nn * sizeof(int32_t))) {
+            return false;
+        }
+
+        constexpr unsigned kElemThreads = 256;
+        const unsigned yw_blocks = static_cast<unsigned>((yw + kElemThreads - 1) / kElemThreads);
+        const unsigned out_blocks = static_cast<unsigned>((nn + kElemThreads - 1) / kElemThreads);
+        const unsigned col_blocks = (n + kElemThreads - 1) / kElemThreads;
+        DeviceColumnSumsS8<<<col_blocks, kElemThreads, 0, stream>>>(
+            dH, dGemmS32L, static_cast<int>(w), static_cast<int>(n));
+        if (cudaGetLastError() != cudaSuccess) return false;
+
+        for (uint32_t limb = 0; limb < 4; ++limb) {
+            DeviceExtractRadix256Plane<<<yw_blocks, kElemThreads, 0, stream>>>(
+                dY, dGemmS8L, yw, limb);
+            if (cudaGetLastError() != cudaSuccess) return false;
+            if (!TryLaunchLtImmaGemmS8S8Device(dGemmS8L, dH, dGemmOut,
+                                               n, n, w, stream)) {
+                return false;
+            }
+            DeviceAccumulateRadix256<<<out_blocks, kElemThreads, 0, stream>>>(
+                dGemmOut, dB32, dGemmS32L, nn, static_cast<int>(n), limb);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
+        return true;
     }
 
-    [[nodiscard]] bool LaunchProjectRightImma()
+    [[nodiscard]] bool LaunchProjectRightDenseImma()
     {
         return TryLaunchLtImmaGemmS8S8Device(dBhat, dV, dQ, n, m, n, stream);
+    }
+
+    [[nodiscard]] bool LaunchProjectRightMxImma()
+    {
+        const size_t nn = static_cast<size_t>(n) * n;
+        const size_t nm = static_cast<size_t>(n) * m;
+        if (!EnsureScratch(nn, 0, 0, nm * sizeof(int32_t))) return false;
+
+        constexpr unsigned kElemThreads = 256;
+        const unsigned plane_blocks = static_cast<unsigned>((nn + kElemThreads - 1) /
+                                                             kElemThreads);
+        const unsigned out_blocks = static_cast<unsigned>((nm + kElemThreads - 1) /
+                                                           kElemThreads);
+        for (uint32_t exponent = 0;
+             exponent < matmul::v4::bmx4::kNumScaleCodes; ++exponent) {
+            DeviceBuildMxExponentPlane<<<plane_blocks, kElemThreads, 0, stream>>>(
+                dBhat, dScales, dGemmS8L, nn, n, exponent);
+            if (cudaGetLastError() != cudaSuccess) return false;
+            if (!TryLaunchLtImmaGemmS8S8Device(dGemmS8L, dV, dGemmOut,
+                                               n, m, n, stream)) {
+                return false;
+            }
+            DeviceAccumulateMxProjection<<<out_blocks, kElemThreads, 0, stream>>>(
+                dGemmOut, dQ, nm, exponent);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
+        return true;
     }
 
     [[nodiscard]] bool LaunchProjectLeftImma()
     {
         return TryLaunchLtImmaGemmS8S8Device(dU, dAhat, dP, m, n, n, stream);
+    }
+
+    [[nodiscard]] bool LaunchCombineImma()
+    {
+        const size_t mn = static_cast<size_t>(m) * n;
+        const size_t nm = static_cast<size_t>(n) * m;
+        const size_t mm = static_cast<size_t>(m) * m;
+        if (!EnsureScratch(mn, nm, 0, mm * sizeof(int32_t))) return false;
+
+        constexpr unsigned kElemThreads = 256;
+        const unsigned p_blocks = static_cast<unsigned>((mn + kElemThreads - 1) / kElemThreads);
+        const unsigned q_blocks = static_cast<unsigned>((nm + kElemThreads - 1) / kElemThreads);
+        const unsigned out_blocks = static_cast<unsigned>((mm + kElemThreads - 1) / kElemThreads);
+        if (cudaMemsetAsync(dChat, 0, mm * sizeof(uint64_t), stream) != cudaSuccess) return false;
+
+        uint64_t weights[9];
+        Karatsuba9FqWeights(weights);
+        for (uint32_t plane = 0; plane < 9; ++plane) {
+            DeviceBuildKaratsubaPlane<<<p_blocks, kElemThreads, 0, stream>>>(
+                dP, dGemmS8L, mn, plane);
+            if (cudaGetLastError() != cudaSuccess) return false;
+            DeviceBuildKaratsubaPlane<<<q_blocks, kElemThreads, 0, stream>>>(
+                dQ, dGemmS8R, nm, plane);
+            if (cudaGetLastError() != cudaSuccess) return false;
+            if (!TryLaunchLtImmaGemmS8S8Device(dGemmS8L, dGemmS8R, dGemmOut,
+                                               m, m, n, stream)) {
+                return false;
+            }
+            DeviceAccumulateCombinePlane<<<out_blocks, kElemThreads, 0, stream>>>(
+                dGemmOut, dChat, weights[plane], mm);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
+        return true;
     }
 
     [[nodiscard]] bool BindTemplate(const CBlockHeader& tmpl, uint32_t n_in, uint32_t m_in)
@@ -648,7 +851,7 @@ struct LtCudaResidentPool {
         }
 
         const uint256 prf_a = matmul::v4::lt::DeriveMatExpandPrfKey(seed_wa);
-        if (!LaunchMxExtract(dAhat, prf_a, /*dMuOut=*/nullptr)) return false;
+        if (!LaunchMxExtract(dAhat, nullptr, nullptr, prf_a)) return false;
 
         if (imma_s8s8) {
             if (!LaunchProjectLeftImma()) {
@@ -691,22 +894,35 @@ struct LtCudaResidentPool {
         }
 
         const uint256 prf = matmul::v4::lt::DeriveMatExpandPrfKey(seed_w);
-        if (!LaunchMxExtract(dBhat, prf, dMu)) return false;
+        if (imma_s8s8 && mx_partitioned) {
+            if (!LaunchMxExtract(nullptr, dBhat, dScales, prf)) return false;
+        } else {
+            if (!LaunchMxExtract(dBhat, nullptr, nullptr, prf)) return false;
+        }
 
-        if (prefer_mx_right) {
-            if (!LaunchProjectRightMxScale()) return false;
-        } else if (imma_s8s8) {
-            if (!LaunchProjectRightImma()) return false;
+        if (imma_s8s8) {
+            if (mx_partitioned) {
+                if (!LaunchProjectRightMxImma()) return false;
+            } else if (!LaunchProjectRightDenseImma()) {
+                return false;
+            }
         } else {
             if (cudaGraphLaunch(project_right_exec, stream) != cudaSuccess) return false;
         }
 
-        const dim3 block(16, 16, 1);
-        const dim3 grid_c((m + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
-        DeviceCombineModQ<<<grid_c, block, 0, stream>>>(dP, dQ, dChat, (int)n, (int)m);
-        if (cudaGetLastError() != cudaSuccess) return false;
+        if (imma_s8s8) {
+            if (!LaunchCombineImma()) return false;
+        } else {
+            const dim3 block(16, 16, 1);
+            const dim3 grid_c((m + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
+            DeviceCombineModQ<<<grid_c, block, 0, stream>>>(dP, dQ, dChat, (int)n, (int)m);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
 
-        chat_out.assign(static_cast<size_t>(m) * m, 0);
+        // D2H overwrites the complete buffer. resize() retains capacity across
+        // a Q* window and avoids both per-nonce allocation and a pointless host
+        // zero-fill (32 MiB at n=4096, m=2048).
+        chat_out.resize(static_cast<size_t>(m) * m);
         if (cudaMemcpyAsync(chat_out.data(), dChat, static_cast<size_t>(m) * m * sizeof(uint64_t),
                             cudaMemcpyDeviceToHost, stream) != cudaSuccess) return false;
         return cudaStreamSynchronize(stream) == cudaSuccess;
@@ -888,12 +1104,13 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     if (!pool.BindTemplate(tmpl, n, m)) return false;
 
     out.resize(count);
+    std::vector<matmul::int8_field::Fq> chat;
+    chat.reserve(static_cast<size_t>(m) * m);
     for (size_t i = 0; i < count; ++i) {
         CBlockHeader header = tmpl;
         header.nNonce64 = nonces[i];
         header.nNonce = static_cast<uint32_t>(nonces[i]);
 
-        std::vector<matmul::int8_field::Fq> chat;
         if (!pool.MineOneNonce(header, chat)) {
             out.clear();
             return false;

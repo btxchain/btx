@@ -58,7 +58,7 @@ MatExpand itself. See §1.1–§1.2.
 |---|---|
 | **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=1024`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative **MX-block E8M0 + tile ChaCha M11** (`ENC_BMX4C_LT`, Lever B) |
 | **Honest cost** `HonestMAC(n)` | Exact-int MAC count of one marginal nonce unit: **MatExpand-B** (`G·W` + `Y·H`) + **`B̂·V`** + **combine `P·Q`** (I1′: template A / `U`/`V`/`P` excluded from marginal). At `n=4096`: MatExpand-B `4n²w ≈ 6.87×10¹⁰`; `B̂·V` `2n²m ≈ 6.87×10¹⁰`; combine on `m×m` sketch (see shortcut/TMTO pre-review). |
-| **Adversary class** | Classical PPT relative to `HonestMAC`; may use poly-many adaptive honest MatExpand/digest queries and Freivalds verify transcripts at production EncDr rounds. Label the class explicitly (**MENC-Lin** / **MENC-Unres** / optional **MENC-Cubic** — table below). Primary FAIL class = **MENC-Lin** (linear / degree-≤2 entrywise surrogates). **MENC-Unres** may return INCONCLUSIVE. |
+| **Adversary class** | Classical PPT relative to `HonestMAC`; may use poly-many adaptive honest MatExpand/digest queries and Freivalds verify transcripts at production EncDr rounds. Label the class explicitly (**MENC-Lin** / **MENC-Unres** / optional **MENC-Cubic** — table below). Primary FAIL class = **MENC-Lin** (linear / degree-≤2 entrywise or MX-tile-local surrogates). **MENC-Unres** may return INCONCLUSIVE. |
 | **Win** | Output an accepting Phase-A digest (or seal if SB annex in scope) with **advantage** `Adv ≥ ε` over Freivalds false-accept, while using exact-int MatExpand+BV+combine MAC count `≤ (1−δ)·HonestMAC(n)`. |
 | **Metric** | Exact-int MAC (multiply-accumulate) count vs `HonestMAC`; optional same-machine wall-time of CPU ExactGemm reference as secondary (must not invent silicon). Wall-time / Strassen wins update **ASERT** baselines only — see FMM calibration note; they do not substitute for a C-15 MAC-count FAIL/PASS. |
 | **Thresholds (review defaults)** | `δ = 1/2` (half-cost); `ε = 2⁻⁴⁰` above Freivalds false-accept for the stated round count. Firm may retune in SOW — **do not silently change**. |
@@ -69,7 +69,7 @@ One named assumption (`BTX-C15-NonCollapse-v1`); three **class labels** so firm 
 
 | Label | Restriction | Typical firm return | Must not confuse with |
 |---|---|---|---|
-| **MENC-Lin** | Linear / degree-≤2 entrywise Extract surrogates + Freivalds-linear rewrites through `G,W,H` | Primary FAIL/PASS target | — |
+| **MENC-Lin** | Linear / degree-≤2 entrywise **or 32-cell tile-local** Extract surrogates + Freivalds-linear rewrites through `G,W,H` | Primary FAIL/PASS target | — |
 | **MENC-Unres** | No degree restriction (classical PPT) | Often **INCONCLUSIVE** for years | **MENC-Lin PASS ≠ MENC-Unres PASS** |
 | **MENC-Cubic** *(optional strengthening)* | Shortcut that cuts **`B̂·V` + combine** below `(1−δ)` of honest deep-`m` MAC (Extract ideal) | Separate sketch-floor claim | **Not** a MatExpand Θ(n²·w) claim — cubic floor is sketch/combine, not Expand |
 
@@ -79,7 +79,7 @@ One named assumption (`BTX-C15-NonCollapse-v1`); three **class labels** so firm 
 
 | Verdict | When |
 |---|---|
-| **FAIL** | Concrete vectors + measured cost showing `Adv ≥ ε` at `≤ (1−δ)·HonestMAC`, **or** an affine/low-degree (deg ≤ 2) surrogate matching Extract on ≥ `N=10⁶` realistic `B32` samples with Freivalds-usable rewrite through `G,W,H`. State which MENC label was broken. |
+| **FAIL** | Concrete vectors + measured cost showing `Adv ≥ ε` at `≤ (1−δ)·HonestMAC`, **or** an affine/low-degree (deg ≤ 2) entrywise or MX-tile-local surrogate matching Extract on ≥ `N=10⁶` realistic real-tile `B32` samples with Freivalds-usable rewrite through `G,W,H`. State which MENC label was broken. |
 | **PASS** | No such adversary for the **stated** MENC class; write-up argues why that class fails under the sample regime; residual risks listed and bounded. **Lin PASS ≠ Unres PASS.** **Still does not authorize height raise.** |
 | **INCONCLUSIVE** | Neither FAIL nor PASS (e.g. **MENC-Unres** open; bias documented without PoW shortcut; missing oracles). |
 
@@ -113,7 +113,7 @@ exact-int MACs.
 | **Aliases (class labels)** | **MENC-Lin** / **MENC-Unres** / **MENC-Cubic** — adversary-class aliases under this id (§0.1 table). Also: `BTX-MatExpand-NonCollapse-v1`, umbrella **MENC**. Same assumption; labels differ by restriction. |
 | **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=1024`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative MX-block E8M0 + tile ChaCha M11 (`ENC_BMX4C_LT`) |
 | **Honest cost** | `HonestMAC(n)` as in §0.1 (MatExpand-B + `B̂·V` + combine `P·Q`; I1′ template work excluded from marginal). MatExpand = Θ(n²·w); **cubic MAC floor** = deep-`m` sketch (`B̂·V` + combine) — MENC-Cubic scope, not Expand. |
-| **Adversary class** | Classical PPT vs `HonestMAC`; poly-many adaptive MatExpand/digest queries and Freivalds transcripts at production EncDr rounds. Primary FAIL class: **MENC-Lin** (linear / degree-≤2 entrywise Extract surrogates); deg-≤3 and spectral/TMTO surfaces are mandatory firm checklist items (below). **MENC-Unres** may return INCONCLUSIVE. |
+| **Adversary class** | Classical PPT vs `HonestMAC`; poly-many adaptive MatExpand/digest queries and Freivalds transcripts at production EncDr rounds. Primary FAIL class: **MENC-Lin** (linear / degree-≤2 entrywise or MX-tile-local Extract surrogates); deg-≤3 and spectral/TMTO surfaces are mandatory firm checklist items (below). **MENC-Unres** may return INCONCLUSIVE. |
 | **δ, ε** | `δ = 1/2`, `ε = 2⁻⁴⁰` above Freivalds false-accept (firm may retune in SOW — do not silently change) |
 | **Win** | Accepting digest/seal with `Adv ≥ ε` at MAC cost `≤ (1−δ)·HonestMAC(n)` |
 
@@ -129,7 +129,7 @@ two modes of the **same** assumption — not separate conjectures:
 | Mode | §0.1 FAIL clause | Counts as assumption break? |
 |---|---|---|
 | **Full-digest FAIL** | Concrete vectors + measured cost: accepting Phase-A digest/seal with `Adv ≥ ε` at exact-int MAC `≤ (1−δ)·HonestMAC(n)` | **Yes** |
-| **Structured-surrogate FAIL** | Affine / low-degree (deg ≤ 2) Extract surrogate matching on ≥ `N=10⁶` realistic `B32` samples **with** Freivalds-usable rewrite through `G,W,H` — **even without** a full accepting digest artifact | **Yes** |
+| **Structured-surrogate FAIL** | Affine / low-degree (deg ≤ 2) entrywise or MX-tile-local Extract surrogate matching on ≥ `N=10⁶` realistic real-tile `B32` samples **with** Freivalds-usable rewrite through `G,W,H` — **even without** a full accepting digest artifact | **Yes** |
 
 Rationale: a Freivalds-usable structured surrogate is already a work-binding
 collapse (reopens thin-panel / linear rewrite); requiring a packaged digest on
@@ -144,28 +144,29 @@ reduction to a classical named problem.
 ### Fragment lemma + PRF hybrid (Wave 3 Gap #2 — not a reduction)
 
 Structured-surrogate FAIL is the primary class Sketch A maps toward a
-**fragment** lemma / PRF break — not toward closing NonCollapse. Formalization
-(DRAFT, every step **GAP**-tagged; related-nonce absorbed into
-`Adv_ExtractStruct`, not `Adv_PRF`):
+**fragment** lemma / PRF break — not toward closing NonCollapse. The linked
+formalization is a **historical per-cell ChaChaCell draft** and is not a lemma
+for the current MX tile extractor (DRAFT, every step **GAP**-tagged):
 
 → **`doc/btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md`**
 (`Extract-Nonlinearity-v1` + MatExpand nonce-packing hybrid outline).
 
-That note does **not** prove the lemma, does **not** discharge Sketch A
-GAP-A2/A3, and does **not** imply “ChaCha is fine ⇒ C-15 closed.” **C-15
-remains OPEN.**
+That note must be restated over real 32-value MX tiles before use. It does
+**not** prove the lemma, does **not** discharge Sketch A GAP-A2/A3, and does
+**not** imply “ChaCha is fine ⇒ C-15 closed.” **C-15 remains OPEN.**
 
 ### Does NOT follow from ChaCha20-PRF alone
 
-ChaCha20 being a secure PRF (in the AEAD sense, or even as an ideal block
-function on distinct `(key,nonce,counter)` tuples) is **necessary for the
-candidate mixer**, not **sufficient for MatExpand work-binding**. A PRF
-guarantees that Extract outputs look pseudorandom given secret `prf_key`; it
-does **not** imply that there is no algebraic / amortized / spectral shortcut
+ChaCha20 being a secure PRF (in the AEAD sense), or even granting an ideal
+stream on every distinct tile input, is **necessary evidence for the candidate
+mixer**, not **sufficient for MatExpand work-binding**. The consensus-derived
+`prf_key` is public, so the ordinary secret-key PRF game is not itself the
+mining game. Neither formulation implies that there is no algebraic /
+amortized / spectral shortcut
 that produces Freivalds-accepting sketches cheaper than `HonestMAC`. Counterexample
 template: wrap a low-rank public core (`rank(B32)≤w`) in a thin PRF that an
-adversary can bypass via an affine fold, related-nonce structure, truncated
-`(i,j)` salt, or TMTO across nonces — the PRF game can still hold on honest
+adversary can bypass via an affine fold, MX tile structure, truncated
+`(i,bj)` salt, or TMTO across nonces — the PRF game can still hold on honest
 queries while the PoW non-collapse game fails. Therefore
 `BTX-C15-NonCollapse-v1` is a **separate, unreduced** assumption. Do not write
 “ChaCha is fine ⇒ C-15 closed.”
@@ -210,12 +211,12 @@ Any concrete win against §0.1 thresholds is a **FAIL** of
 
 | # | Surface | What to try / measure |
 |---|---|---|
-| 1 | **Affine surrogate** | Entrywise `f(B32)=α·raw+β` (or panel-linear) matching Extract; Freivalds rewrite through `G,W,H` |
-| 2 | **Degree ≤ 3** | Polynomial / low-degree LS surrogates; require R² ≪ 0.05 on dense samples **or** exhibit usable rewrite |
+| 1 | **Affine surrogate** | Entrywise `f(B32)=α·raw+β` baseline plus tile-local affine features over all 32 real raws (normative rejection alignment is joint); Freivalds rewrite through `G,W,H` |
+| 2 | **Degree ≤ 3** | Polynomial / low-degree LS surrogates over raw and tile context; require R² ≪ 0.05 on dense real-tile samples **or** exhibit usable rewrite |
 | 3 | **Spectral / low-rank residue** | Shared-φ / Fourier structure on `B̂` after Extract; usable rank ≪ `n` for reassociation (`U`/`V` are rank-transparent) |
 | 4 | **TMTO / cross-nonce** | Tables or partial Expand reuse across nonces / templates under I1′; cheaper than marginal MatExpand-B |
 | 5 | **Related-nonce Mant/Scale XOR (legacy)** | Demoted ChaChaCell lanes `MANT`/`SCLE` and `Mant(raw)↔Scale(raw⊕Δ)` — not normative under MX; still a differential witness |
-| 6 | **Truncated position salt** | Collapse `(i,j)` to low bits / tiles; equivalence classes that reopen ~`n/w=4×` panel shortcut |
+| 6 | **Truncated position salt** | Collapse full-width MX `(i,bj)` (`bj=j/32`) to low bits; equivalence classes that reopen ~`n/w=4×` panel shortcut |
 
 ### Witnesses ≠ proof (in-tree + reviewer kit)
 
@@ -265,6 +266,10 @@ Mant/Scale XOR identity notes apply only to that demoted twin.
 **Candidate status:** Lever-B MX-block Extract is selected for `ENC_BMX4C_LT`
 (~32× fewer MatExpand PRF blocks vs per-cell); **external review still required
 before activation.** C-15 **OPEN**. Not closed.
+
+Here “MX-block” names the exact logical mantissa/scale layout. It is not a
+claim that mining executed native MXFP4. Current LT CUDA/HIP paths dequantize
+to dense INT8 and use qualified IMMA/MFMA; native MXFP4 remains fail-closed.
 
 ### 1.1 Rank-≤`w=1024` structure of `B32` (load-bearing)
 
@@ -404,14 +409,14 @@ Internal witnesses: `phase_b_seal_round_trip_and_auth`,
 
 1. Read normative + adversarial docs + pre-review synthesis; skim `src/matmul/matmul_v4_lt.{h,cpp}`.
 2. **Build-independent kit (preferred first pass):** `contrib/matmul-c15-reviewer-kit/` —
-   `python3 reference_extract.py` then `python3 toy_attack_harness.py --n 8 --w 4 --degree 3`.
+   `python3 reference_extract.py` then `python3 toy_attack_harness.py --n 32 --w 4 --degree 3`.
    No node build required. See kit `README.md`, `rank_spectral_regression.md`,
    `named-assumption.md`, and **`reduction-attack-checklist.md`** (firm attacks → §0.1 FAIL).
    Oracle hints: `test-vectors.json` → `reduction_relevant_finding_notes` (high R², zero
    Freivalds residual, truncated salt equivalence class).
 3. Optional in-tree witnesses (require `test_btx`): `matmul_v4_lt_tests`, especially
    `matexpand_chacha_prf_golden_vectors`, `matexpand_position_salt_differential`
-   (full-width `(i,j)`), `matexpand_extract_r2_nonapproximability` (affine/deg≤3 R²<0.05),
+   (full-width MX `(i,bj)`), `matexpand_extract_r2_nonapproximability` (affine/deg≤3 R²<0.05),
    `matexpand_c15b_affine_surrogate_sketch_rejected` (LS surrogate → forged sketch rejected by
    `VerifySketchBMX4CLT`). These are **witnesses**, not a firm PASS.
 4. Attempt C15-A/B with a small `n` (e.g. 64) and dense accumulator samples; cost against §0.1.

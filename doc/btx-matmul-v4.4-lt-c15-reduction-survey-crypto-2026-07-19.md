@@ -1,5 +1,11 @@
 # C-15 reduction survey — cryptographic / PoW-theory named assumptions (2026-07-19)
 
+> **Lever-B supersession note (2026-07-20).** References below to per-cell
+> `MANT`/`SCLE`, `w=128`, or a 32× `n/w` ratio describe the historical design.
+> Current code uses `w=1024`, production `n/w=4`, and joint real-32-value MX
+> tile extraction salted by `(i,bj)`. This remains a literature map, not a
+> security review of Lever-B. C-15 remains OPEN.
+
 *Wave 1 — SURVEY (crypto / PoW-theory lens).*  
 *Scope: named assumptions closest to LT-C15 MatExpand Extract; map formal sketches → BTX applicability → obstructions → residual useful lemmas.*  
 *Sources: `doc/btx-matmul-v4.4-lt-external-c15-packet.md`, `/tmp/c15_audit_prior_art.md`, `/tmp/c15_audit_shortcut_tmto.md`, `contrib/matmul-c15-reviewer-kit/README.md`, companions in prior-art citation list.*  
@@ -161,7 +167,7 @@ Hardness relies on the noise (or equivalent) being **unpredictable / secret rela
 BTX v4.4-LT MatExpand:
 
 - `G,H` template-scoped, `W` nonce-seeded — **public deterministic** from consensus seeds;
-- `rank(B32) ≤ w = 128` is an **unconditional public algebraic fact**, not a secret;
+- current `rank(B32) ≤ min(n,w)`, `w=1024`, is an **unconditional public algebraic fact**, not a secret;
 - Extract keys are `SHA256(tag ‖ seed_W)` — public given `seed_W`;
 - design explicitly **removed** v3-style low-rank noise amortization (`nMatMulNoiseRank` retired).
 

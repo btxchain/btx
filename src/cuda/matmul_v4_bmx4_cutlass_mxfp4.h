@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-// Scale-partitioned grouped MXFP4 projection lane (B200 / Blackwell).
+// Contraction-aligned MXFP4 projection lane (B200 / Blackwell).
 //
 // Design: doc/btx-matmul-v4.4-exact-accel-lanes.md §2.
 // CPU reference: matmul::v4::bmx4::ComputeProjected{Left,Right}ScalePartitionedBMX4C.
@@ -19,22 +19,23 @@
 // vendor-neutral: every path below produces byte-identical int32 output):
 //
 //   (1) PORTABLE EXACT (this header, ALWAYS compiled/available): a complete
-//       integer scale-partitioned grouped projection. For each OCP block along
-//       the committed-scale axis it partitions the contraction index into the
-//       four E8M0 exponent buckets J_e, evaluates the four reduced-K products
-//       (total K = n, NOT 4n), and folds each with the exact power-of-two
-//       shift 2^e. Pure integer arithmetic, no rounding, no float. This is the
-//       "used when CUTLASS is unavailable" path required by the exact-lane
-//       contract, and it is what the CPU/device-ALU tiers run today.
+//       integer MX-block projection. Each committed E8M0 code applies to one
+//       32-element run of the GEMM contraction axis. The block's integer dot
+//       product is therefore accumulated first and multiplied by the exact
+//       power-of-two scale once. Pure integer arithmetic, no rounding, no
+//       float. This is the "used when CUTLASS is unavailable" path required by
+//       the exact-lane contract, and it is what the portable tier runs today.
 //
 //   (2) CUTLASS TENSOR KERNEL (hardware-gated, BTX_BMX4C_CUTLASS_MXFP4): a real
-//       persistent grouped GEMM on qualified Blackwell (tcgen05 mxf4). It
+//       persistent block-scaled GEMM on qualified Blackwell (tcgen05 mxf4). It
 //       replaces path (1) ONLY after the toolkit + silicon are present AND the
-//       device passes M-t24 + scale-partitioned qualification. cuBLAS 13.x
-//       serves NVFP4 (UE4M3/16) but not OCP MXFP4 (E2M1 + E8M0/32), so CUTLASS
-//       is the only vendor route for the committed alphabet; until it is linked
-//       and qualified, IsGroupedMxfp4TensorKernelLinked() is false and callers
-//       transparently use path (1).
+//       device passes M-t24 + scale-partitioned qualification. Stock cuBLAS
+//       exposes a block-16 UE4M3/NVFP4 scale layout rather than OCP block-32
+//       E8M0. Duplicating each exact power-of-two scale into two K16 slots may
+//       be an exact embedding, but that packing is not implemented or
+//       qualified here. CUTLASS is the direct OCP route; until a real kernel
+//       is linked and qualified, IsGroupedMxfp4TensorKernelLinked() is false
+//       and callers transparently use path (1).
 //
 // PTX / arch split (PR #89 silicon comments — keep builds honest):
 //   * sm_120 / sm_120a (consumer Blackwell, RTX 5090): hand PTX `mxf4` /
@@ -53,17 +54,15 @@
 //   * Reject NaN / Inf / fractional outputs / analytic-bound violations.
 //   * Qualification binds GPU, firmware, driver, toolkit, compiler, binary /
 //     kernel hash, algorithm, dimensions, Q, chunking, and math flags.
-//   * Every mantissa product <= 36; every bucket accumulation <= 36n < 2^21,
-//     so a proven 24-bit FP32 accumulator is exact (path (2)); path (1)
-//     accumulates in int32, exact for the full committed magnitude window.
+//   * Every mantissa product <= 36; each 32-wide block sum is <= 1152 and the
+//     full output is <= 36n < 2^21, so a proven 24-bit FP32 accumulator is
+//     exact (path (2)); path (1) accumulates in int32, exact for the full
+//     committed magnitude window.
 //   * Apply 2^e in the exact integer epilogue; do not reorient committed scales.
 //
-// Grouped problem shape for one 32-element committed-scale block:
-//   for e in {0,1,2,3}:
-//     K_e = |{ j : committed_scale(block, j) = e }|
-//     partial_e = Left_block * Right_bucket_e   (K = K_e)
-//   Out_block += sum_e (partial_e << e)
-// Total K across the four buckets equals n, not 4n.
+// The legacy GroupedMxfp4* API names are retained for source compatibility.
+// The corrected consensus layout no longer needs a reduced-K bucket grouping:
+// every scale slot already describes exactly one native 32-element K block.
 
 namespace matmul_v4::cuda::cutlass_mxfp4 {
 
@@ -73,21 +72,22 @@ namespace matmul_v4::cuda::cutlass_mxfp4 {
 inline constexpr uint32_t kBlockLen = 32;      // OCP block length L
 inline constexpr uint32_t kNumScaleCodes = 4;  // committed E8M0 codes e in {0..3}
 
-// Which committed operand a projection contracts. Left = P = U * Ahat (scale is
-// constant on 32-column blocks of Ahat's OTHER axis); Right = Q = Bhat * V.
+// Which committed operand a projection contracts. Left = P = U * Ahat, where
+// A's scales are [K-block][output-column]. Right = Q = Bhat * V, where B's
+// scales are [output-row][K-block].
 enum class GroupedMxfp4Orientation : uint8_t {
-    Left = 0,   // P[a][k] = sum_i U[a][i] * mu_a[i][k] * 2^{e_a(i, k/32)}
-    Right = 1,  // Q[k][c] = sum_j mu_b[k][j] * 2^{e_b(k/32, j)} * V[j][c]
+    Left = 0,   // P[a][k] = sum_i U[a][i] * mu_a[i][k] * 2^{e_a(i/32, k)}
+    Right = 1,  // Q[k][c] = sum_j mu_b[k][j] * 2^{e_b(k, j/32)} * V[j][c]
 };
 
-// Per-call telemetry describing the grouped partition that was executed. The
-// K_e counts are summed over every committed block; K_total is their sum and
-// equals n * (n / kBlockLen) (one full contraction axis per block).
+// Per-call telemetry. K_e counts committed K-block slots carrying exponent e;
+// K_total is the number of slots, n * (n / kBlockLen). Field names are kept for
+// compatibility with the pre-axis-correction reviewer API.
 struct GroupedMxfp4Problem {
     uint32_t M{0};
     uint32_t N{0};
-    uint64_t K_e[kNumScaleCodes]{0, 0, 0, 0}; // partition of K, summed over blocks
-    uint64_t K_total{0};                       // sum == n * (n / kBlockLen)
+    uint64_t K_e[kNumScaleCodes]{0, 0, 0, 0}; // count of scale slots by exponent
+    uint64_t K_total{0};                       // number of committed K-block slots
 };
 
 /** The portable exact scale-partitioned MXFP4 projection is ALWAYS available:
@@ -111,11 +111,10 @@ struct GroupedMxfp4Problem {
 [[nodiscard]] bool IsGroupedMxfp4TensorKernelCompiled();
 
 // ---------------------------------------------------------------------------
-// Portable exact grouped-MXFP4 LEFT projection.
-//   P[a][k] = sum_i U[a][i] * mu_a[i][k] * 2^{e_a(i, k/32)}   (m x n row-major)
-// For each 32-column block kb, rows i are partitioned by their committed scale
-// e_a(i, kb) into buckets; each bucket contributes an exact reduced-K product
-// U[:, J_e] * A_e[J_e, block] that is folded with the power-of-two shift 2^e.
+// Portable exact MXFP4-shaped LEFT projection.
+//   P[a][k] = sum_i U[a][i] * mu_a[i][k] * 2^{e_a(i/32, k)}   (m x n row-major)
+// For each output column k, every 32-row contraction block ib has one scale
+// e_a(ib,k). Accumulate that block's integer dot and fold it with 2^e.
 // Byte-identical to matmul::v4::bmx4::ComputeProjectedLeftScalePartitionedBMX4C
 // and hence to the dense dequantized GEMM ComputeProjectedLeft.
 // ---------------------------------------------------------------------------
@@ -145,53 +144,37 @@ struct GroupedMxfp4Problem {
         shape->N = n;
     }
 
-    std::vector<uint32_t> bucket[kNumScaleCodes];
-    std::vector<int8_t> U_e;
-    std::vector<int8_t> A_e;
-
-    for (uint32_t kb = 0; kb < nblk; ++kb) {
-        for (auto& b : bucket) b.clear();
-        for (uint32_t i = 0; i < n; ++i) {
-            const uint8_t e = scale_a[static_cast<size_t>(i) * nblk + kb];
+    for (uint32_t ib = 0; ib < nblk; ++ib) {
+        for (uint32_t k = 0; k < n; ++k) {
+            const uint8_t e = scale_a[static_cast<size_t>(ib) * n + k];
             if (e >= kNumScaleCodes) {
                 error = "GroupedMxfp4ProjectLeft: scale code out of range";
                 return false;
             }
-            bucket[e].push_back(i);
-        }
-        for (uint32_t e = 0; e < kNumScaleCodes; ++e) {
-            const uint32_t Ke = static_cast<uint32_t>(bucket[e].size());
             if (shape != nullptr) {
-                shape->K_e[e] += Ke;
-                shape->K_total += Ke;
+                ++shape->K_e[e];
+                ++shape->K_total;
             }
-            if (Ke == 0) continue;
-            U_e.resize(static_cast<size_t>(m) * Ke);
-            A_e.resize(static_cast<size_t>(Ke) * kBlockLen);
-            for (uint32_t t = 0; t < Ke; ++t) {
-                const uint32_t i = bucket[e][t];
-                for (uint32_t a = 0; a < m; ++a) {
-                    U_e[static_cast<size_t>(a) * Ke + t] = U[static_cast<size_t>(a) * n + i];
+        }
+    }
+
+    for (uint32_t a = 0; a < m; ++a) {
+        for (uint32_t k = 0; k < n; ++k) {
+            int32_t out = 0;
+            for (uint32_t ib = 0; ib < nblk; ++ib) {
+                int32_t acc = 0;
+                const uint32_t i0 = ib * kBlockLen;
+                for (uint32_t r = 0; r < kBlockLen; ++r) {
+                    const uint32_t i = i0 + r;
+                    acc += static_cast<int32_t>(U[static_cast<size_t>(a) * n + i]) *
+                           static_cast<int32_t>(mu_a[static_cast<size_t>(i) * n + k]);
                 }
-                for (uint32_t c = 0; c < kBlockLen; ++c) {
-                    A_e[static_cast<size_t>(t) * kBlockLen + c] =
-                        mu_a[static_cast<size_t>(i) * n + kb * kBlockLen + c];
-                }
+                const uint8_t e = scale_a[static_cast<size_t>(ib) * n + k];
+                // Multiplication, rather than a signed left shift, is defined
+                // for negative acc and is exact for e in {0,1,2,3}.
+                out += acc * (1 << e);
             }
-            // partial = U_e[m x Ke] * A_e[Ke x 32], then P += partial << e.
-            for (uint32_t a = 0; a < m; ++a) {
-                for (uint32_t c = 0; c < kBlockLen; ++c) {
-                    int32_t acc = 0;
-                    for (uint32_t t = 0; t < Ke; ++t) {
-                        acc += static_cast<int32_t>(U_e[static_cast<size_t>(a) * Ke + t]) *
-                               static_cast<int32_t>(A_e[static_cast<size_t>(t) * kBlockLen + c]);
-                    }
-                    // 2^e via multiplication (not a signed shift: acc may be
-                    // negative; e in {0..3}, so 1<<e is exact). Matches the CPU
-                    // reference / Bmx4PromoteShiftedKernel discipline.
-                    P_out[static_cast<size_t>(a) * n + kb * kBlockLen + c] += acc * (1 << e);
-                }
-            }
+            P_out[static_cast<size_t>(a) * n + k] = out;
         }
     }
     error.clear();
@@ -199,11 +182,10 @@ struct GroupedMxfp4Problem {
 }
 
 // ---------------------------------------------------------------------------
-// Portable exact grouped-MXFP4 RIGHT projection.
-//   Q[k][c] = sum_j mu_b[k][j] * 2^{e_b(k/32, j)} * V[j][c]   (n x m row-major)
-// For each 32-row block rb, columns j are partitioned by committed scale
-// e_b(rb, j); each bucket contributes B_e[block x J_e] * V[J_e, :] folded with
-// 2^e. Byte-identical to ComputeProjectedRightScalePartitionedBMX4C.
+// Portable exact MXFP4-shaped RIGHT projection.
+//   Q[k][c] = sum_j mu_b[k][j] * 2^{e_b(k, j/32)} * V[j][c]   (n x m row-major)
+// For each output row k, every 32-column contraction block jb has one scale
+// e_b(k,jb). Accumulate that block's integer dot and fold it with 2^e.
 // ---------------------------------------------------------------------------
 [[nodiscard]] inline bool GroupedMxfp4ProjectRight(const int8_t* mu_b,
                                                    const uint8_t* scale_b,
@@ -231,60 +213,47 @@ struct GroupedMxfp4Problem {
         shape->N = m;
     }
 
-    std::vector<uint32_t> bucket[kNumScaleCodes];
-    std::vector<int8_t> B_e;
-    std::vector<int8_t> V_e;
-
-    for (uint32_t rb = 0; rb < nblk; ++rb) {
-        for (auto& b : bucket) b.clear();
-        const size_t srow = static_cast<size_t>(rb) * n;
-        for (uint32_t j = 0; j < n; ++j) {
-            const uint8_t e = scale_b[srow + j];
+    for (uint32_t k = 0; k < n; ++k) {
+        const size_t srow = static_cast<size_t>(k) * nblk;
+        for (uint32_t jb = 0; jb < nblk; ++jb) {
+            const uint8_t e = scale_b[srow + jb];
             if (e >= kNumScaleCodes) {
                 error = "GroupedMxfp4ProjectRight: scale code out of range";
                 return false;
             }
-            bucket[e].push_back(j);
-        }
-        for (uint32_t e = 0; e < kNumScaleCodes; ++e) {
-            const uint32_t Ke = static_cast<uint32_t>(bucket[e].size());
             if (shape != nullptr) {
-                shape->K_e[e] += Ke;
-                shape->K_total += Ke;
+                ++shape->K_e[e];
+                ++shape->K_total;
             }
-            if (Ke == 0) continue;
-            B_e.resize(static_cast<size_t>(kBlockLen) * Ke);
-            V_e.resize(static_cast<size_t>(Ke) * m);
-            for (uint32_t t = 0; t < Ke; ++t) {
-                const uint32_t j = bucket[e][t];
+        }
+    }
+
+    for (uint32_t k = 0; k < n; ++k) {
+        const size_t srow = static_cast<size_t>(k) * nblk;
+        for (uint32_t c = 0; c < m; ++c) {
+            int32_t out = 0;
+            for (uint32_t jb = 0; jb < nblk; ++jb) {
+                const uint32_t j0 = jb * kBlockLen;
+                int32_t acc = 0;
                 for (uint32_t r = 0; r < kBlockLen; ++r) {
-                    B_e[static_cast<size_t>(r) * Ke + t] =
-                        mu_b[static_cast<size_t>(rb * kBlockLen + r) * n + j];
+                    const uint32_t j = j0 + r;
+                    acc += static_cast<int32_t>(mu_b[static_cast<size_t>(k) * n + j]) *
+                           static_cast<int32_t>(V[static_cast<size_t>(j) * m + c]);
                 }
-                for (uint32_t c = 0; c < m; ++c) {
-                    V_e[static_cast<size_t>(t) * m + c] = V[static_cast<size_t>(j) * m + c];
-                }
+                const uint8_t e = scale_b[srow + jb];
+                out += acc * (1 << e);
             }
-            for (uint32_t r = 0; r < kBlockLen; ++r) {
-                for (uint32_t c = 0; c < m; ++c) {
-                    int32_t acc = 0;
-                    for (uint32_t t = 0; t < Ke; ++t) {
-                        acc += static_cast<int32_t>(B_e[static_cast<size_t>(r) * Ke + t]) *
-                               static_cast<int32_t>(V_e[static_cast<size_t>(t) * m + c]);
-                    }
-                    Q_out[static_cast<size_t>(rb * kBlockLen + r) * m + c] += acc * (1 << e);
-                }
-            }
+            Q_out[static_cast<size_t>(k) * m + c] = out;
         }
     }
     error.clear();
     return true;
 }
 
-/** Launch the scale-partitioned grouped MXFP4 projection for one operand.
+/** Launch the contraction-aligned MXFP4-shaped projection for one operand.
  *  Dispatches to the CUTLASS tensor kernel when it is linked AND qualified
  *  (path (2)); otherwise runs the complete portable exact integer path (1).
- *  Fills `shape` telemetry (bucket partition) when non-null. Returns false and
+ *  Fills `shape` scale-slot telemetry when non-null. Returns false and
  *  sets `error` on invalid input; never a "pending"/no-op stub. */
 [[nodiscard]] inline bool LaunchGroupedMxfp4Projection(GroupedMxfp4Orientation orient,
                                                        const int8_t* proj,

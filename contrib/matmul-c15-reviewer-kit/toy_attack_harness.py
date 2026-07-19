@@ -5,12 +5,13 @@
 """
 Toy-n C-15 attack harness (stdlib only).
 
-Builds a synthetic low-rank B32 = (G·W)·H (or random full-rank noise),
-runs normative Extract, fits best polynomial surrogates of Bhat from B32
+Builds a synthetic low-rank B32 = (G·W)·H, runs normative MX-block Extract
+over real 32-value tiles, fits best entrywise-marginal polynomial surrogates
+of Bhat from B32
 for degrees 1..D (default D=3), reports R² for each degree, and checks a
 Freivalds-style residual on a random affine probe.
 
-Expected outcome for honest MatExpand + ChaCha Extract:
+Expected outcome for honest MatExpand + MX-block Extract:
   - affine / low-degree R² far below 1 (collapse rejected)
   - Freivalds residual on an affine-surrogate Bhat is typically nonzero
 
@@ -28,8 +29,9 @@ import sys
 from pathlib import Path
 
 from reference_extract import (
+    BLOCK_LEN,
     derive_matexpand_prf_key,
-    extract_dequant_matexpand,
+    extract_dequant_matexpand_matrix,
     load_vectors,
 )
 
@@ -114,11 +116,8 @@ def matrix_rank_mod(M: list[list[int]], modulus: int = 2_147_483_647) -> int:
 
 
 def extract_matrix(B32: list[list[int]], prf_key: bytes) -> list[list[int]]:
-    n = len(B32)
-    return [
-        [extract_dequant_matexpand(B32[i][j], i, j, prf_key) for j in range(n)]
-        for i in range(n)
-    ]
+    """Apply consensus-faithful MX extraction to complete 32-value tiles."""
+    return extract_dequant_matexpand_matrix(B32, prf_key)
 
 
 def _fit_poly(xs: list[float], ys: list[float], degree: int) -> tuple[list[float], float]:
@@ -204,9 +203,15 @@ def apply_surrogate(B32: list[list[int]], beta: list[float]) -> list[list[int]]:
     return out
 
 
-def run(n: int = 8, w: int = 4, seed: int = 1, max_degree: int = 3) -> int:
+def run(n: int = 32, w: int = 4, seed: int = 1, max_degree: int = 3) -> int:
     if max_degree < 1 or max_degree > 6:
         print("FAIL: --degree must be in 1..6 (stdlib OLS; keep small)", file=sys.stderr)
+        return 1
+    if n < BLOCK_LEN or n % BLOCK_LEN != 0:
+        print(
+            f"FAIL: --n must be a positive multiple of the MX tile length {BLOCK_LEN}",
+            file=sys.stderr,
+        )
         return 1
 
     vectors = load_vectors()
@@ -243,9 +248,10 @@ def run(n: int = 8, w: int = 4, seed: int = 1, max_degree: int = 3) -> int:
     print(f"Freivalds-style residual rᵀ(B̂−B̂')s = {residual}  (nonzero expected)")
     print()
     print(
-        "Interpretation: rejection of affine/low-degree collapse is EXPECTED for "
-        "ChaCha20-PRF Extract. High R², a systematic zero Freivalds residual, or a "
-        "truncated-(i,j) salt equivalence class would be a C-15 finding — report it. "
+        "Interpretation: rejection of an entrywise-marginal affine/low-degree "
+        "collapse is EXPECTED for "
+        "MX-block Extract. High R², a systematic zero Freivalds residual, or a "
+        "truncated-(i,bj) tile-salt equivalence class would be a C-15 finding — report it. "
         "C-15 remains OPEN (not closed by this toy)."
     )
 
@@ -269,7 +275,10 @@ def run(n: int = 8, w: int = 4, seed: int = 1, max_degree: int = 3) -> int:
 
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--n", type=int, default=8, help="toy matrix dimension")
+    p.add_argument(
+        "--n", type=int, default=32,
+        help="toy matrix dimension (positive multiple of the 32-column MX tile)",
+    )
     p.add_argument("--w", type=int, default=4, help="toy panel width (rank bound)")
     p.add_argument("--seed", type=int, default=1, help="RNG seed")
     p.add_argument(

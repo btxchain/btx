@@ -408,9 +408,11 @@ struct DeviceBuffer {
 // The ENC-BMX4C sampler's accepted nibble IS the element's OCP E2M1 bit
 // pattern (matmul_v4_bmx4.cpp::SampleMantissaNibble: sign | 2-bit exp | 1-bit
 // mantissa, identity decode) and the scale plane is already E8M0 codes
-// 127..130 (e in {0..3}) at OCP block length L = 32 along the contraction
-// dimension -- i.e. the committed Ahat/Bhat operand streams are, bit for bit,
-// an OCP MX block-scaled MXFP4 tensor with NO reinterpretation step. On CDNA4
+// 127..130 (e in {0..3}) at OCP block length L = 32 along each projection's
+// contraction dimension: A uses e_A(i/32,k) in U*A and B uses e_B(k,j/32)
+// in B*V. The committed values and scale semantics therefore match an OCP MX
+// block-scaled tensor without transposition. A native kernel must still pack
+// the vendor's physical scale layout and qualify it on silicon. On CDNA4
 // (gfx950, e.g. MI355X) this is exactly the native "mxf4"/E8M0-scaled block
 // FP4 GEMM datapath hipBLASLt exposes (block-scaled matmul with an
 // HIPBLASLT_R_4F_E2M1-class element type and an E8M0 scale type, per ROCm

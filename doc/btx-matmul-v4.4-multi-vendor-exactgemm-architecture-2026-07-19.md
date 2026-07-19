@@ -9,6 +9,17 @@ Living implementation notes for miner-local ExactGemm backends. Consensus remain
 - Never label scalar ALU as IMMA / MFMA / Cube / TensorOps.
 - Capabilities report: `exact_s8_s8_s32`, `exact_partitioned_s32_s8`, arch string, max K, device hashing.
 
+## Logical MX versus native MXFP4
+
+Lever-B exposes exact M11 mantissas and E8M0-like power-of-two scales in a
+32-column logical layout. That makes a future OCP-MXFP4 encoding possible; it
+does not establish that a backend executed MXFP4. The optimized CPU projection
+consumes these components without materializing dense `Bhat`. Current LT CUDA
+and HIP kernels materialize dense INT8 `Bhat` and execute the projection with
+qualified INT8 IMMA/MFMA. Neither LT backend has a native MXFP4 projection
+kernel. Static `ProjectionLane::ScalePartitionedMxfp4` planner labels are design
+intent only and are not runtime qualification evidence.
+
 ## NVIDIA CUDA (5090 / H200 / B200)
 
 | Arch | SM | Notes from PR #89 silicon |
@@ -19,14 +30,18 @@ Living implementation notes for miner-local ExactGemm backends. Consensus remain
 
 **Implemented (this branch):**
 
-1. **cuBLASLt `CUBLAS_COMPUTE_32I` IMMA** (`matmul_v4_lt_tensor_gemm.cu`): host + **device-pointer** s8xs8→s32; process-persistent handle, NVIDIA-recommended **32 MiB workspace**, A/B/C scratch, and descriptors/heuristic result cached by `(M,N,K)`. Up to 16 heuristic candidates are inspected and only an algorithm whose numerical flags attest **IMMA + signed INT8 inputs + INT32 accumulator** is admitted. Multi-shape self-qual uses 128/256-scale square and panel cases, host and device pointers, then requires plans for all Rank-1 production geometries (`4096×128×4096`, `2048×4096×4096`, `4096×2048×4096`).
+1. **cuBLASLt `CUBLAS_COMPUTE_32I` IMMA** (`matmul_v4_lt_tensor_gemm.cu`): host + **device-pointer** s8xs8→s32; process-persistent handle, NVIDIA-recommended **32 MiB workspace**, A/B/C scratch, and descriptors/heuristic result cached by `(M,N,K)`. Up to 16 heuristic candidates are inspected and only an algorithm whose numerical flags attest **IMMA + signed INT8 inputs + INT32 accumulator** is admitted. Multi-shape self-qual uses 128/256-scale square and panel cases, host and device pointers, then requires current Rank-1 geometries including `w=1024` MatExpand panels and deep-`m` projections.
 2. **LT ExactGemmBackend / `LaunchGemmS8S8`**: IMMA first; scalar `DeviceGemmS8S8Tiled` only on decline. `LtLastS8S8UsedImma()` reports which path ran (never true for scalar).
-3. **S32S8**: `TryLaunchLtImmaGemmS32S8` **always declines** — `CUBLAS_COMPUTE_32I` is s8×s8→s32 only; no proven exact s32×s8→s32 cuBLASLt/CUTLASS recipe self-qualified on sm_90/100/120. Fast scalar `DeviceGemmS32S8Tiled` / CPU `ExactGemmS32S8` stay the path (`exact_partitioned_s32_s8=false`).
-4. **Device-resident MatExpand** (`matmul_v4_lt_accel.cu`): when IMMA is available, G\*W / U\*Ahat / Bhat\*V use `TryLaunchLtImmaGemmS8S8Device` on persistent buffers; Y\*H stays scalar s32xs8 (never claimed as IMMA). Scalar CUDA graphs remain the non-IMMA path. The final Fq combine now uses shared-memory K tiles, exact deferred signed-64-bit accumulation under the normative `288²·n³` bound, and one Mersenne reduction per output instead of one 128-bit reduction per MAC.
+3. **S32S8**: the direct `TryLaunchLtImmaGemmS32S8` API still honestly declines because cuBLASLt has no direct s32×s8 recipe. The LT resident MatExpand path now decomposes `Y` into four exact signed-byte radix-256 planes and runs four qualified IMMA products plus the column-bias correction. Do not report this lowering as a native s32×s8 instruction.
+4. **Device-resident LT path** (`matmul_v4_lt_accel.cu`): qualified IMMA runs `G·W`, radix-lowered `Y·H`, `U·Ahat`, dense-INT8 `Bhat·V`, and nine exact Karatsuba combine products. MX scale derivation is on-device, but Extract dequantizes to dense INT8; no native MXFP4 instruction is issued. Scalar CUDA graphs remain the non-IMMA path. Chat still returns to the host for hashing.
 5. **Arch probe**: `ProbeLtCudaArch` / `ProbeLtCudaExactGemmCapabilities` → `sm_*` + name class `hopper` / `blackwell_dc` / `blackwell_consumer`.
 6. **Digest-only D2H gap (honest)**: resident path still copies full Chat to host for `ComputeSketchDigestFromFq`. `device_hashing=false` in capabilities until a bit-identical device digest exists. Persistent MatExpand + GEMM scratch reused.
 
-**Honest stubs / fail-closed:** CUTLASS MXFP4 tensor kernel + device FP8 remain fail-closed until self-qual on named silicon. Portable exact MXFP4 integer path is always available and **never** sets `used_tensor_path`. sm_120a (consumer `mxf4` PTX) vs sm_100a (datacenter tcgen05) recipes must not be conflated (see `matmul_v4_bmx4_cutlass_mxfp4.h`).
+**Honest stubs / fail-closed:** Generic BMX4 portable grouped “MXFP4” is
+integer emulation and **never** sets `used_tensor_path`; LT does not dispatch it.
+CUTLASS/tcgen05 native MXFP4 and device FP8 remain fail-closed until a real
+kernel self-qualifies on named silicon. sm_120a consumer PTX and sm_100a
+datacenter tcgen05 recipes must not be conflated.
 
 ## AMD ROCm / HIP (MI300 / MI355)
 

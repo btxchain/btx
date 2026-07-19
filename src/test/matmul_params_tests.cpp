@@ -131,6 +131,25 @@ BOOST_AUTO_TEST_CASE(matmul_params_regtest)
     BOOST_CHECK_EQUAL(c.nMatMulMaxFutureMtpDriftHeight, std::numeric_limits<int32_t>::max());
 }
 
+BOOST_AUTO_TEST_CASE(matmul_lt_regtest_defaults_and_phase_a_override)
+{
+    const auto defaults = CreateChainParams(EmptyArgs(), ChainType::REGTEST);
+    const auto& default_consensus = defaults->GetConsensus();
+    BOOST_CHECK_EQUAL(default_consensus.nMatMulDRLTHeight, 100);
+    BOOST_CHECK_EQUAL(default_consensus.nMatMulConsensusQStar, 256U);
+    BOOST_CHECK(default_consensus.fMatMulLTSealAsPoW);
+
+    ArgsManager phase_a_args;
+    phase_a_args.ForceSetArg("-regtestmatmulltsealaspow", "0");
+    const auto phase_a = CreateChainParams(phase_a_args, ChainType::REGTEST);
+    BOOST_CHECK(!phase_a->GetConsensus().fMatMulLTSealAsPoW);
+
+    ArgsManager phase_b_args;
+    phase_b_args.ForceSetArg("-regtestmatmulltsealaspow", "1");
+    const auto phase_b = CreateChainParams(phase_b_args, ChainType::REGTEST);
+    BOOST_CHECK(phase_b->GetConsensus().fMatMulLTSealAsPoW);
+}
+
 BOOST_AUTO_TEST_CASE(matmul_params_shieldedv2dev)
 {
     const auto base_params = CreateBaseChainParams(ChainType::SHIELDEDV2DEV);

@@ -1,5 +1,10 @@
 # Q* / I1′ multi-instance amortization game (Wave 3 Gap #9)
 
+> **Current-parameter note (2026-07-20).** This game was written against the
+> historical `w=128` parameter line. Current code uses `w=1024` and consensus
+> `Q*∈{128,256,512}` with default 256. Its direct-sum question remains open,
+> but all cost expressions must be recomputed from the current packet before use.
+
 *Date: 2026-07-19. Branch: `feat/bmx4c-exact-accel-lanes`.*  
 *Wave 3 Gap #9 deliverable. Sources: crypto survey §3 (BRSV as vocabulary
 only); packet §§0.1, 3, 5; fold rank **9**; shortcut/TMTO S9/S10; GAP-D8.*  
@@ -46,7 +51,7 @@ path), not about forbidding template reuse.
 
 | Item | Definition |
 |---|---|
-| **Params** | Same as packet §0.1 (`n∈{64,256,4096}`, `w=128`, `b=2`, `m=n/2`, normative Extract) |
+| **Params** | Current packet §0.1 (`n∈{64,256,4096}`, `w=1024`, `b=2`, `m=n/2`, normative MX tile Extract); `Q*∈{128,256,512}`, default 256 |
 | **Challenger** | Samples a template (header / seeds) and allows the adversary poly-many honest `MineSlot` transcripts |
 | **Adversary input** | Public template; may fix `Â,U,V,P` (I1′); must produce **fresh** nonce-bound `W_B` / digests |
 | **Instance count** | Integer `t ≥ 1` (skinny grind: `t=1`; fat miner schedule: `t=Q*` or arbitrary batch) |

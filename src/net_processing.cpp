@@ -59,6 +59,7 @@
 #include <memory>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <typeinfo>
 #include <utility>
 
@@ -1051,6 +1052,16 @@ private:
      *  the historical synchronous path. Stopped/joined in ~PeerManagerImpl —
      *  before chainman/connman teardown (init.cpp resets peerman first). */
     std::unique_ptr<node::MatMulVerifyWorker> m_matmul_verify_worker;
+    /** Blocks whose pure ENC-DR/LT predicate is currently queued or running.
+     *  The ordinary block-download in-flight entry is removed when a body is
+     *  received, before the async predicate completes.  Keep this separate
+     *  per-hash marker so FindNextBlocksToDownload cannot immediately request
+     *  that same body again and enqueue duplicate expensive work. */
+    mutable Mutex m_matmul_async_verify_mutex;
+    std::set<uint256> m_matmul_async_verifying GUARDED_BY(m_matmul_async_verify_mutex);
+    bool MarkMatMulAsyncVerification(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
+    void UnmarkMatMulAsyncVerification(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
+    bool IsMatMulAsyncVerificationPending(const uint256& hash) const NO_THREAD_SAFETY_ANALYSIS;
     struct MatMulAddrBudgetState {
         MatMulPeerVerificationBudget budget;
         std::chrono::steady_clock::time_point last_update{};
@@ -1473,6 +1484,24 @@ bool PeerManagerImpl::IsBlockRequestedFromPeer(const uint256& hash, NodeId peer)
     return false;
 }
 
+bool PeerManagerImpl::MarkMatMulAsyncVerification(const uint256& hash)
+{
+    LOCK(m_matmul_async_verify_mutex);
+    return m_matmul_async_verifying.insert(hash).second;
+}
+
+void PeerManagerImpl::UnmarkMatMulAsyncVerification(const uint256& hash)
+{
+    LOCK(m_matmul_async_verify_mutex);
+    m_matmul_async_verifying.erase(hash);
+}
+
+bool PeerManagerImpl::IsMatMulAsyncVerificationPending(const uint256& hash) const
+{
+    LOCK(m_matmul_async_verify_mutex);
+    return m_matmul_async_verifying.count(hash) != 0;
+}
+
 void PeerManagerImpl::RemoveBlockRequest(const uint256& hash, std::optional<NodeId> from_peer)
 {
     auto range = mapBlocksInFlight.equal_range(hash);
@@ -1852,6 +1881,16 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                     // This is the first already-in-flight block.
                     waitingfor = mapBlocksInFlight.lower_bound(pindex->GetBlockHash())->second.first;
                 }
+                continue;
+            }
+
+            // Receipt removes the ordinary download-in-flight entry before an
+            // asynchronous ENC-DR/LT predicate has finished.  Treat that pure
+            // verification as an in-flight state too.  Otherwise this loop
+            // requests the same body again on every message-handler pass,
+            // filling the verify queue with duplicate Q*-scale jobs and
+            // producing an unbounded getdata/block busy loop.
+            if (IsMatMulAsyncVerificationPending(pindex->GetBlockHash())) {
                 continue;
             }
 
@@ -4522,6 +4561,18 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             }
             if (matmul_slot) {
                 const NodeId nodeid{node.GetId()};
+                const uint256 hash{block->GetHash()};
+                // A body can arrive through BLOCK, CMPCTBLOCK/BLOCKTXN, or as
+                // a redundant relay.  Collapse all of those delivery paths at
+                // the dispatcher boundary, before they can enqueue duplicate
+                // Q*-scale recomputes.  FindNextBlocksToDownload consults the
+                // same marker so removal of the ordinary download-in-flight
+                // entry does not cause immediate redelivery while this job is
+                // still queued/running.
+                if (!MarkMatMulAsyncVerification(hash)) {
+                    if (post_process) post_process();
+                    return;
+                }
                 // std::function requires a copyable callable: box the move-only
                 // slot in a shared_ptr. It is released when the last closure
                 // copy is destroyed — i.e. after recompute AND re-entry, or on
@@ -4529,7 +4580,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 auto slot{std::make_shared<ScopedMatMulPendingVerification>(std::move(*matmul_slot))};
                 node::MatMulVerifyWorker::Job job{
                     block, encdr->height, encdr->parent_median_time_past,
-                    [this, nodeid, block, force_processing, min_pow_checked, slot,
+                    [this, nodeid, block, hash, force_processing, min_pow_checked, slot,
                      post = std::move(post_process)](bool /*encdr_ok*/) {
                         // The verdict reaches validation via the ENC-DR verdict
                         // memo consulted inside ContextualCheckBlock; re-enter
@@ -4538,6 +4589,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         // pipeline handles accept/reject identically to the
                         // synchronous path.
                         ProcessBlockSync(nodeid, /*node=*/nullptr, block, force_processing, min_pow_checked, post);
+                        UnmarkMatMulAsyncVerification(hash);
                     }};
                 if (m_matmul_verify_worker->Enqueue(job)) return; // message thread freed
                 // Worker is stopping (shutdown race): run the job inline —

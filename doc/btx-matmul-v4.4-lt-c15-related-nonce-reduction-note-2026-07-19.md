@@ -1,5 +1,14 @@
 # C15-C related-nonce note — Mant/Scale lane-XOR as reduction / attack surface
 
+> **Historical/differential only (Lever-B update, 2026-07-20).** The
+> `MANT`/`SCLE` identity in this note applies to
+> `ExtractDequantMatExpandChaChaCell`, which is no longer normative. Current
+> MatExpand uses one `MXBL` ChaCha stream and one hash-derived scale per real
+> 32-value tile, salted by `(i,bj)` with `bj=j/32`; raw values are mixed into
+> rejection candidates rather than placed in per-cell nonces. No bridge from
+> the identity below to the normative MX construction is known. This note is
+> retained as a regression/differential witness, not a current attack claim.
+
 *Date: 2026-07-19. Branch: `feat/bmx4c-exact-accel-lanes`.*  
 *Sources: `/tmp/c15_audit_prf_statistical.md` (F2), `src/matmul/matmul_v4_lt.cpp`
 (`MatExpandPrfKeystream`, `ExtractDequantMatExpand`), prior-art reduction sketch
@@ -10,9 +19,9 @@
 
 ---
 
-## 1. Formal identity
+## 1. Historical ChaChaCell identity
 
-Normative nonce packing (fixed `prf_key`, `(i,j)`, remix counter):
+Legacy, non-normative ChaChaCell packing (fixed `prf_key`, `(i,j)`, remix counter):
 
 ```
 MANT  = 0x4D414E54          // 'MANT'

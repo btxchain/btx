@@ -1,10 +1,11 @@
 {
   "status": "C-15 OPEN \u2014 Lever-B MX-block Extract; not cryptographically closed",
-  "source": "src/test/matmul_v4_lt_tests.cpp::matexpand_chacha_prf_golden_vectors",
+  "source": "Lever-B MX consensus reference plus src/test/matmul_v4_lt_tests.cpp::matexpand_chacha_prf_golden_vectors",
   "normative_refs": [
     "doc/btx-matmul-v4.4-lt-external-c15-packet.md",
-    "src/matmul/matmul_v4_lt.cpp::ExtractDequantMatExpand",
-    "src/matmul/matmul_v4_lt.cpp::DeriveMatExpandPrfKey"
+    "src/matmul/matmul_v4_lt.cpp::MatExpandCore",
+    "src/matmul/matmul_v4_lt.cpp::ExtractMatExpandMxTileMantissas",
+    "src/matmul/matmul_v4_lt.cpp::DeriveMatExpandMxScale"
   ],
   "prf_key_derivation": {
     "tag_ascii": "BTX_MATEXPAND_MXPRF_V44LT",
@@ -23,9 +24,10 @@
   "endian_notes": {
     "seed_w_hex": "Bitcoin GetHex/FromHex display order (MSB digits first). Memory bytes = reverse(bytes.fromhex(hex)).",
     "prf_key_bytes": "SHA256 digest written in natural byte order; used as ChaCha20 key via eight LE32 words (RFC8439 / crypto/chacha20.h).",
-    "chacha_nonce96": "nonce_first = uint32(raw) XOR lane; nonce_second = (uint64(i)<<32) | uint64(j). Seek(Nonce96{nonce_first, nonce_second}, remix) with remix as block counter.",
-    "keystream_le64": "First 8 keystream bytes interpreted as little-endian uint64 (AccelReplica returns x0 | (x1<<32) of the ChaCha block).",
-    "scale": "e = scale_stream & 0x3; return exact_mul(mu, 1<<e) \u2014 never signed left-shift of a negative mantissa."
+    "mx_chacha_nonce96": "Normative tile stream: nonce_first = uint32(bj) XOR MXBL; nonce_second = (uint64(i)<<32) | uint64(bj), where bj=j/32. Seek(Nonce96{nonce_first, nonce_second}, remix) with remix as block counter. All 32 real B32 values affect rejection alignment.",
+    "legacy_cell_chacha_nonce96": "Differential-only ChaChaCell path: nonce_first = uint32(raw) XOR MANT/SCLE; nonce_second = (uint64(i)<<32) | uint64(j). Not used by consensus MatExpand after Lever-B MX.",
+    "legacy_keystream_le64": "Legacy ChaChaCell differential only: first 8 keystream bytes interpreted as little-endian uint64.",
+    "mx_scale": "Normative e = SHA256(MXSCALE tag || prf_key || LE32(i) || LE32(bj))[0] & 3; return exact_mul(mu, 1<<e) \u2014 never signed left-shift of a negative mantissa."
   },
   "m11_rejection": {
     "alphabet": [
@@ -102,8 +104,20 @@
       "expected": -2
     }
   ],
+  "extract_goldens_note": "Synthetic repeated-raw 32-value tiles retained for scalar API/differential compatibility. These are not sufficient to validate consensus MatExpand extraction; use mx_real_tile_goldens.",
+  "mx_real_tile_goldens": [
+    {
+      "note": "Consensus-faithful 32-value tile: each real raw feeds the corresponding rejection-sampling position.",
+      "i": 3,
+      "bj": 2,
+      "raw32": [0, 1, -1, 42, -1000, 2147483647, -2147483648, 7, -97, 32, -32, 255, -255, 65535, -65536, 123456789, -123456789, 3, -3, 11, -11, 19, -19, 27, -27, 35, -35, 43, -43, 51, -51, 59],
+      "expected_scale_e": 1,
+      "expected_mantissas": [-3, -3, 3, -1, -2, 3, -6, 3, 0, 4, 0, 1, 2, 4, -1, -2, -2, -3, -1, -3, 0, -4, 6, 6, -2, 2, 4, 2, 4, 2, 0, 1],
+      "expected_dequant": [-6, -6, 6, -2, -4, 6, -12, 6, 0, 8, 0, 2, 4, 8, -2, -4, -4, -6, -2, -6, 0, -8, 12, 12, -4, 4, 8, 4, 8, 4, 0, 2]
+    }
+  ],
   "accel_replica_parity": {
-    "note": "ExtractDequantMatExpandAccelReplica must equal ExtractDequantMatExpand on these cases (and the broader grid in the C++ test).",
+    "note": "Synthetic repeated-raw tile differential: ExtractDequantMatExpandAccelReplica must equal the scalar convenience API. Not a substitute for real-tile MatExpand parity.",
     "cases": [
       {
         "raw": 0,
@@ -140,7 +154,7 @@
     ]
   },
   "production_panel_w": 1024,
-  "rank_note": "Honest B32 = (G\u00b7W)\u00b7H has rank(B32) \u2264 w (=128 at production). Affine collapse of Extract would reopen a ~n/w Freivalds-style shortcut; see rank_spectral_regression.md.",
+  "rank_note": "Honest B32 = (G\u00b7W)\u00b7H has rank(B32) \u2264 min(n,w), with current production w=1024. At n=4096 the raw thin-panel ratio is n/w=4, before pricing MX Extract and dense sketch/combine. Historical w=128 notes imply a 32x ratio and must not be used for current costing.",
   "reduction_relevant_finding_notes": {
     "purpose": "Oracle hints for external reviewers \u2014 what would constitute a reduction-relevant / \u00a70.1 FAIL finding. Not a theorem; C-15 remains OPEN.",
     "packet_refs": [
@@ -152,7 +166,7 @@
       {
         "id": "high_r2_surrogate",
         "signal": "High R\u00b2",
-        "detail": "An affine or low-degree (deg \u2264 2 primary; deg \u2264 3 checklist) entrywise polynomial surrogate f(B32) matching Extract on \u2265 N=10^6 realistic B32 samples with R\u00b2 \u2273 0.05 (in-tree witness bar) \u2014 and especially R\u00b2 near 1 \u2014 that admits a Freivalds-usable rewrite through G,W,H. Toy harness R\u00b2 \u226b smoke thresholds is a reportable finding; firm FAIL needs the rewrite + cost vs HonestMAC.",
+        "detail": "An affine or low-degree (deg \u2264 2 primary; deg \u2264 3 checklist) surrogate matching Extract on \u2265 N=10^6 realistic real-tile B32 samples with R\u00b2 \u2273 0.05 \u2014 and especially R\u00b2 near 1 \u2014 that admits a Freivalds-usable rewrite through G,W,H. The raw-only toy fit is an entrywise-marginal baseline; normative rejection alignment depends on all real values in the 32-cell tile, so firms must also test tile-local features. Firm FAIL needs the rewrite + cost vs HonestMAC.",
         "maps_to": "\u00a70.1 FAIL (affine/low-degree surrogate class); C15-A"
       },
       {
@@ -164,13 +178,13 @@
       {
         "id": "truncated_salt_equivalence_class",
         "signal": "Truncated salt equivalence class",
-        "detail": "Any truncation / tiling / low-bit collapse of position salts (i,j) that creates a large equivalence class of cells sharing the same ChaCha Nonce96 high half (or otherwise reusable keystream), reopening a ~n/w \u2248 32\u00d7 thin-panel / shared-\u03c6 shortcut. Normative encoding REQUIRES full-width 32-bit i and j in nonce_second; a finding that consensus twins truncate, or that an adversary forces an effective truncation class with Adv \u2265 \u03b5 at \u2264 (1\u2212\u03b4)\u00b7HonestMAC, is FAIL.",
+        "detail": "Any truncation / low-bit collapse of normative MX tile salts (i,bj), bj=j/32, that creates a large equivalence class sharing a ChaCha stream or scale. Normative encoding requires full-width 32-bit i and bj. At current production n=4096,w=1024, the raw panel ratio is n/w=4 (not the historical 32x); a consensus-twin truncation or effective reuse class still needs Adv \u2265 \u03b5 at \u2264 (1\u2212\u03b4)\u00b7HonestMAC to be FAIL.",
         "maps_to": "\u00a70.1 FAIL; \u00a70.2 attack-surface #6; matexpand_position_salt_differential"
       },
       {
         "id": "related_nonce_amortization",
         "signal": "Related-nonce GEMM amortization",
-        "detail": "Mant/Scale lane-XOR identity (\u0394=MANT\u2295SCLE) is documented leftover ExtractStruct. FAIL only if an adversary amortizes beyond per-cell ChaCha with Adv\u2265\u03b5 at \u2264(1\u2212\u03b4)\u00b7HonestMAC \u2014 e.g. denser-than-chance B32 \u0394-mate graph enabling sub-GEMM solve. Firm pack \u226532 identity tuples + B32 \u0394-collision negative control are witnesses, not closure.",
+        "detail": "Mant/Scale lane-XOR identity (\u0394=MANT\u2295SCLE) belongs to the legacy per-cell ChaChaCell extractor and is retained only as a historical/differential witness. Normative Lever-B MX uses one MXBL stream and one hash-derived scale per real 32-value tile. The identity is therefore not a current consensus ExtractStruct attack without a new bridge to the MX construction.",
         "maps_to": "\u00a70.2 #5; checklist A7; C15-C residue"
       }
     ],
@@ -179,7 +193,7 @@
       "IdealExtract 23-value alphabet or P(v=0)\u22481/11 (by design)",
       "Low toy R\u00b2 without a Freivalds-usable rewrite",
       "ChaCha20 looking like a PRF in isolation (does not imply MatExpand work lower bound)",
-      "MantPRF(raw)=ScalePRF(raw\u2295\u0394) identity alone (PRF-consistent)",
+      "Legacy ChaChaCell MantPRF(raw)=ScalePRF(raw\u2295\u0394) identity alone (not normative MX)",
       "\u03bc\u2032\u2194e lock on first-nibble accept without MAC savings",
       "Zero/near-zero B32 \u0394-collisions on small grids (expected under uniform 32-bit XOR)"
     ]

@@ -17,7 +17,9 @@
 //              the host expansion code with the CPU reference removes any
 //              possibility of oracle divergence. Apple has no MXFP4 tensor
 //              unit, so this is the spec's INT8 fallback rung (§5.2): the
-//              whole committed object as an exact-integer matmul.
+//              whole committed object as an exact-integer matmul. The shared
+//              expansion now blocks A rows for U*A and B columns for B*V;
+//              Metal needs no separate scale-indexing implementation.
 //   2. GPU   : P = U*Ahat (template-cached) and the stacked
 //              Qvert = [Bhat_1; ...; Bhat_Q]*V as exact INT8 -> INT32 integer
 //              GEMMs (portable integer-ALU kernel everywhere; Metal 4

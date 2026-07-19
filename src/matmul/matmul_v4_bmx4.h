@@ -163,15 +163,16 @@ void ExpandScaleStreamPortable(const uint256& seed, size_t count, uint8_t* out);
 
 // --- Operand / projector expansion + dequant (design §2.1) -----------------
 
-/** Expand + dequantize operand A: Ahat[i][k] = mu_A[i][k] * 2^{e_A(i,k/32)},
+/** Expand + dequantize operand A: Ahat[i][k] = mu_A[i][k] * 2^{e_A(i/32,k)},
  *  n*n row-major exact integers with |Ahat| <= 48 (fits int8). The scale
- *  block runs along the contraction dim (columns of A): scale plane is
- *  n x (n/32) row-major. Requires n % 32 == 0. */
+ *  block runs along the contraction dim (rows i in P = U*Ahat): scale plane
+ *  is (n/32) x n row-major. Requires n % 32 == 0. */
 [[nodiscard]] std::vector<int8_t> ExpandOperandA(const uint256& seed, uint32_t n);
 
-/** Expand + dequantize operand B: Bhat[k][j] = mu_B[k][j] * 2^{e_B(k/32,j)},
+/** Expand + dequantize operand B: Bhat[k][j] = mu_B[k][j] * 2^{e_B(k,j/32)},
  *  n*n row-major exact integers with |Bhat| <= 48. The scale block runs along
- *  the contraction dim (rows of B): scale plane is (n/32) x n row-major. */
+ *  the contraction dim (columns j in Q = Bhat*V): scale plane is
+ *  n x (n/32) row-major. */
 [[nodiscard]] std::vector<int8_t> ExpandOperandB(const uint256& seed, uint32_t n);
 
 /** Expand a scale-free M11 projector (U is m*n, V is n*m; design §2.2). */
@@ -299,12 +300,11 @@ inline constexpr size_t kAdaptiveHighLimbFallbackDivisor = 16;
                                                              const std::vector<int32_t>& Q,
                                                              uint32_t n, uint32_t m);
 
-/** Scale-partitioned projection: for a contraction along an axis whose
- *  committed E8M0 scales are constant on 32-blocks of the OTHER axis, partition
- *  K into four exponent buckets J_e and evaluate
- *      Out = sum_e 2^e * Left[:, J_e] * Right[J_e, :]
- *  (total K = n, not 4n). BYTE-IDENTICAL to the dense dequantized GEMM. Used as
- *  the CPU reference for the B200 grouped-MXFP4 projection lane. */
+/** MX-block-scaled projections. The committed E8M0 scale is constant on each
+ *  32-element block of the contraction axis K, exactly matching the OCP MX
+ *  operand convention. Each K block is accumulated as an integer mantissa dot
+ *  and then multiplied by its exact power-of-two scale. BYTE-IDENTICAL to the
+ *  dense dequantized GEMM and used as the CPU reference for native MXFP4 lanes. */
 [[nodiscard]] std::vector<int32_t> ComputeProjectedLeftScalePartitionedBMX4C(
     const std::vector<int8_t>& U, const std::vector<int8_t>& mu_a,
     const std::vector<uint8_t>& scale_a, uint32_t n, uint32_t m);
@@ -337,7 +337,7 @@ struct DigestOnlyResultBMX4C {
  *  projection and combine lanes without changing consensus bytes. */
 enum class ProjectionLane : uint8_t {
     CanonicalInt8 = 0,           // one INT8->INT32 GEMM on pre-shifted operands
-    ScalePartitionedMxfp4 = 1,   // B200/Blackwell grouped MXFP4
+    ScalePartitionedMxfp4 = 1,   // logical lane intent; native use needs runtime qualification
     ExactFp8 = 2,                // future Rubin-class exact FP8 projection
 };
 

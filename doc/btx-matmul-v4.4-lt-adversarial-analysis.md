@@ -1,10 +1,14 @@
 # BTX MatMul v4.4-LT — Adversarial analysis & hardening status
 
 *Status: MatExpand C-15 class has a **selected cryptographic extractor candidate**
-(Lever-B MX/E2M1 block-scale Extract + M11; frozen goldens) with **implementation
+(Lever-B logical MX/E2M1 block-scale Extract + M11; frozen goldens) with **implementation
 mitigations** (non-affinity tests) but **external review remains open** — not
 closed. Q* Phase B seal-as-PoW is implemented and inert (`nMatMulDRLTHeight =
 INT32_MAX`). Activation remains gated.*
+
+*Execution note: “logical MX” describes consensus mantissas/scales, not a
+native MXFP4 hardware path. Current LT CUDA/HIP dequantize to dense INT8 and
+use qualified IMMA/MFMA; native MXFP4 is not wired.*
 *Companion: `doc/btx-matmul-v4.4-lt-normative-spec.md`. Hardening response: `doc/btx-matmul-v4.4-lt-hardening-response-2026-07-19.md`.*
 
 ## Threat model (LT-specific)

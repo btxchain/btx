@@ -22,7 +22,7 @@ checklist, witness ≠ proof):
 ## One-line statement
 
 No classical PPT adversary wins the §0.1 half-cost / `ε=2⁻⁴⁰` game against
-normative ChaCha20-PRF MatExpand Extract + deep-`m` sketch/combine.
+normative Lever-B MX-block MatExpand Extract + deep-`m` sketch/combine.
 
 ## Break modes (both count)
 
@@ -32,7 +32,7 @@ Per packet §0.2 (GAP-D1 pin), either §0.1 **FAIL** form breaks
 | Mode | Meaning |
 |---|---|
 | **Full-digest FAIL** | Accepting digest/seal at `Adv ≥ ε` and MAC `≤ (1−δ)·HonestMAC` |
-| **Structured-surrogate FAIL** | Affine / deg-≤2 Extract surrogate + Freivalds-usable rewrite (no full digest required) |
+| **Structured-surrogate FAIL** | Affine / deg-≤2 entrywise or MX-tile-local Extract surrogate + Freivalds-usable rewrite (no full digest required) |
 
 Same assumption; two break modes. **C-15 remains OPEN.**
 

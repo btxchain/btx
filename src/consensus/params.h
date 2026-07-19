@@ -488,7 +488,8 @@ struct Params {
      *  consensus-bound lottery object (fat-window PoW; adversarial LT-Q1/LT-Q2).
      *  DEFAULT = false and, independently, INERT on every public network because
      *  IsMatMulLTSealAsPoWActive requires IsDRLTActive, which is fail-closed while
-     *  nMatMulDRLTHeight == INT32_MAX. Regtest may opt in for functional tests.
+     *  nMatMulDRLTHeight == INT32_MAX. Regtest enables this by default for
+     *  functional coverage and permits an explicit Phase-A override.
      *  This is a MODE toggle of the already-height-gated LT profile, NOT a second
      *  activation height: it never widens the surface that is live on a public
      *  net (that stays gated by nMatMulDRLTHeight == INT32_MAX). */

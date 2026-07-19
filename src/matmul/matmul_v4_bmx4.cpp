@@ -295,16 +295,16 @@ std::vector<int8_t> ExpandOperandA(const uint256& seed, uint32_t n)
     std::vector<int8_t> mu(count);
     ExpandMantissaStream(seed, count, mu.data());
 
-    const uint32_t nblk = n / kBlockLen; // blocks along columns (contraction)
-    std::vector<uint8_t> scale(static_cast<size_t>(n) * nblk); // n x (n/32)
+    const uint32_t nblk = n / kBlockLen; // blocks along rows i (contraction in U*A)
+    std::vector<uint8_t> scale(static_cast<size_t>(nblk) * n); // (n/32) x n
     ExpandScaleStream(seed, scale.size(), scale.data());
 
     std::vector<int8_t> out(count);
     for (uint32_t i = 0; i < n; ++i) {
         const size_t row = static_cast<size_t>(i) * n;
-        const size_t srow = static_cast<size_t>(i) * nblk;
+        const size_t srow = static_cast<size_t>(i / kBlockLen) * n;
         for (uint32_t k = 0; k < n; ++k) {
-            out[row + k] = Dequant(mu[row + k], scale[srow + (k / kBlockLen)]);
+            out[row + k] = Dequant(mu[row + k], scale[srow + k]);
         }
     }
     return out;
@@ -316,16 +316,16 @@ std::vector<int8_t> ExpandOperandB(const uint256& seed, uint32_t n)
     std::vector<int8_t> mu(count);
     ExpandMantissaStream(seed, count, mu.data());
 
-    const uint32_t nblk = n / kBlockLen; // blocks along rows (contraction)
-    std::vector<uint8_t> scale(static_cast<size_t>(nblk) * n); // (n/32) x n
+    const uint32_t nblk = n / kBlockLen; // blocks along columns j (contraction in B*V)
+    std::vector<uint8_t> scale(static_cast<size_t>(n) * nblk); // n x (n/32)
     ExpandScaleStream(seed, scale.size(), scale.data());
 
     std::vector<int8_t> out(count);
     for (uint32_t k = 0; k < n; ++k) {
         const size_t row = static_cast<size_t>(k) * n;
-        const size_t srow = static_cast<size_t>(k / kBlockLen) * n;
+        const size_t srow = static_cast<size_t>(k) * nblk;
         for (uint32_t j = 0; j < n; ++j) {
-            out[row + j] = Dequant(mu[row + j], scale[srow + j]);
+            out[row + j] = Dequant(mu[row + j], scale[srow + (j / kBlockLen)]);
         }
     }
     return out;
@@ -904,47 +904,24 @@ std::vector<int32_t> ComputeProjectedLeftScalePartitionedBMX4C(
     const std::vector<int8_t>& U, const std::vector<int8_t>& mu_a,
     const std::vector<uint8_t>& scale_a, uint32_t n, uint32_t m)
 {
-    // P[a][k] = sum_i U[a][i] * mu_a[i][k] * 2^{e(i, k/32)}.
-    // For each column-block kb, partition rows i by e(i, kb) and evaluate four
-    // reduced-K GEMMs whose K's sum to n (not 4n).
+    // P[a][k] = sum_i U[a][i] * mu_a[i][k] * 2^{e(i/32, k)}.
+    // The E8M0 code is shared by each 32-element contraction block of A.
     const uint32_t nblk = n / kBlockLen;
     std::vector<int32_t> P(static_cast<size_t>(m) * n, 0);
-    std::vector<uint32_t> bucket[kNumScaleCodes];
-    std::vector<int8_t> U_e;
-    std::vector<int8_t> A_e;
-
-    for (uint32_t kb = 0; kb < nblk; ++kb) {
-        for (auto& b : bucket) b.clear();
-        for (uint32_t i = 0; i < n; ++i) {
-            const uint8_t e = scale_a[static_cast<size_t>(i) * nblk + kb];
-            bucket[e].push_back(i);
-        }
-        for (uint32_t e = 0; e < kNumScaleCodes; ++e) {
-            const uint32_t Ke = static_cast<uint32_t>(bucket[e].size());
-            if (Ke == 0) continue;
-            U_e.resize(static_cast<size_t>(m) * Ke);
-            A_e.resize(static_cast<size_t>(Ke) * kBlockLen);
-            for (uint32_t t = 0; t < Ke; ++t) {
-                const uint32_t i = bucket[e][t];
-                for (uint32_t a = 0; a < m; ++a) {
-                    U_e[static_cast<size_t>(a) * Ke + t] = U[static_cast<size_t>(a) * n + i];
+    for (uint32_t a = 0; a < m; ++a) {
+        for (uint32_t k = 0; k < n; ++k) {
+            int32_t out = 0;
+            for (uint32_t ib = 0; ib < nblk; ++ib) {
+                int32_t acc = 0;
+                const uint32_t i0 = ib * kBlockLen;
+                for (uint32_t r = 0; r < kBlockLen; ++r) {
+                    const uint32_t i = i0 + r;
+                    acc += static_cast<int32_t>(U[static_cast<size_t>(a) * n + i]) *
+                           static_cast<int32_t>(mu_a[static_cast<size_t>(i) * n + k]);
                 }
-                for (uint32_t c = 0; c < kBlockLen; ++c) {
-                    A_e[static_cast<size_t>(t) * kBlockLen + c] =
-                        mu_a[static_cast<size_t>(i) * n + kb * kBlockLen + c];
-                }
+                out += acc * (1 << scale_a[static_cast<size_t>(ib) * n + k]);
             }
-            // Partial = U_e[m x Ke] * A_e[Ke x 32], then P += partial << e.
-            for (uint32_t a = 0; a < m; ++a) {
-                for (uint32_t c = 0; c < kBlockLen; ++c) {
-                    int32_t acc = 0;
-                    for (uint32_t t = 0; t < Ke; ++t) {
-                        acc += static_cast<int32_t>(U_e[static_cast<size_t>(a) * Ke + t]) *
-                               static_cast<int32_t>(A_e[static_cast<size_t>(t) * kBlockLen + c]);
-                    }
-                    P[static_cast<size_t>(a) * n + kb * kBlockLen + c] += acc * (1 << e);
-                }
-            }
+            P[static_cast<size_t>(a) * n + k] = out;
         }
     }
     return P;
@@ -954,45 +931,25 @@ std::vector<int32_t> ComputeProjectedRightScalePartitionedBMX4C(
     const std::vector<int8_t>& mu_b, const std::vector<uint8_t>& scale_b,
     const std::vector<int8_t>& V, uint32_t n, uint32_t m)
 {
-    // Q[k][c] = sum_j mu_b[k][j] * 2^{e(k/32, j)} * V[j][c].
-    // For each 32-row block of B, partition columns j by committed scale e.
+    // Q[k][c] = sum_j mu_b[k][j] * 2^{e(k, j/32)} * V[j][c].
+    // The E8M0 code is shared by each 32-element contraction block of B.
     const uint32_t nblk = n / kBlockLen;
     std::vector<int32_t> Q(static_cast<size_t>(n) * m, 0);
-    std::vector<uint32_t> bucket[kNumScaleCodes];
-    std::vector<int8_t> B_e;
-    std::vector<int8_t> V_e;
-
-    for (uint32_t rb = 0; rb < nblk; ++rb) {
-        for (auto& b : bucket) b.clear();
-        const size_t srow = static_cast<size_t>(rb) * n;
-        for (uint32_t j = 0; j < n; ++j) {
-            bucket[scale_b[srow + j]].push_back(j);
-        }
-        for (uint32_t e = 0; e < kNumScaleCodes; ++e) {
-            const uint32_t Ke = static_cast<uint32_t>(bucket[e].size());
-            if (Ke == 0) continue;
-            B_e.resize(static_cast<size_t>(kBlockLen) * Ke);
-            V_e.resize(static_cast<size_t>(Ke) * m);
-            for (uint32_t t = 0; t < Ke; ++t) {
-                const uint32_t j = bucket[e][t];
+    for (uint32_t k = 0; k < n; ++k) {
+        const size_t srow = static_cast<size_t>(k) * nblk;
+        for (uint32_t c = 0; c < m; ++c) {
+            int32_t out = 0;
+            for (uint32_t jb = 0; jb < nblk; ++jb) {
+                const uint32_t j0 = jb * kBlockLen;
+                int32_t acc = 0;
                 for (uint32_t r = 0; r < kBlockLen; ++r) {
-                    B_e[static_cast<size_t>(r) * Ke + t] =
-                        mu_b[static_cast<size_t>(rb * kBlockLen + r) * n + j];
+                    const uint32_t j = j0 + r;
+                    acc += static_cast<int32_t>(mu_b[static_cast<size_t>(k) * n + j]) *
+                           static_cast<int32_t>(V[static_cast<size_t>(j) * m + c]);
                 }
-                for (uint32_t c = 0; c < m; ++c) {
-                    V_e[static_cast<size_t>(t) * m + c] = V[static_cast<size_t>(j) * m + c];
-                }
+                out += acc * (1 << scale_b[srow + jb]);
             }
-            for (uint32_t r = 0; r < kBlockLen; ++r) {
-                for (uint32_t c = 0; c < m; ++c) {
-                    int32_t acc = 0;
-                    for (uint32_t t = 0; t < Ke; ++t) {
-                        acc += static_cast<int32_t>(B_e[static_cast<size_t>(r) * Ke + t]) *
-                               static_cast<int32_t>(V_e[static_cast<size_t>(t) * m + c]);
-                    }
-                    Q[static_cast<size_t>(rb * kBlockLen + r) * m + c] += acc * (1 << e);
-                }
-            }
+            Q[static_cast<size_t>(k) * m + c] = out;
         }
     }
     return Q;

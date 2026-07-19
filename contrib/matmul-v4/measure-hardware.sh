@@ -57,9 +57,16 @@
 #   contrib/matmul-v4/measure-hardware.sh cuda --profile bmx4c-lt --n 4096 --window 256
 #   contrib/matmul-v4/measure-hardware.sh cpu  --profile bmx4c-lt --n 256 --window 8   # smoke
 #
-# Emits schema_version 3 JSON with MatExpand/Q* stage boundaries. Does NOT invent
-# on-silicon rates: device_nonce_per_s stays null until on-device stage timers
-# land; lt-gate.py fails closed on G2/G3 when that field is missing. Aggregate:
+# Emits schema_version 3 JSON with MatExpand/Q* stage boundaries. It reports a
+# numeric device_nonce_per_s only when backend_used_device=true,
+# device_rate_valid=true, execution_path="device-assisted-end-to-end", and
+# lt.device_assisted_path_exact=true; otherwise that field stays null. These
+# facts prove the measured device-assisted path, not full device residency or a
+# native kernel: native_path_eligible/device_execution_certified and
+# lt.device_native_kernel_wired may honestly remain false. G1 consumes
+# tensor_share_pct; tensor_util_pct and the optional
+# v3_hashrate/asert_rescale_num_den_suggestion are calibration evidence, while
+# G2/G3 consume the finite positive measured device_nonce_per_s. Aggregate:
 #
 #   contrib/matmul-v4/lt-gate.py <dir-of-json> --manifest parts.tsv
 #
@@ -155,8 +162,9 @@ if [ "$PROFILE" = "bmx4c-lt" ]; then
   if [ "$CODE" -eq 0 ]; then
     echo "RESULT: ENC-DR-LT device-certified PASS ($BACKEND) — see JSON / DEVICE_BMX4CLT_PASS."
   else
-    echo "RESULT: FAIL or NOT-CERTIFIED ($BACKEND) — harness may still have written JSON for lt-gate.py;"
-    echo "CPU timers never count as device_nonce_per_s. See output above."
+    echo "RESULT: FAIL or NOT-FULLY-NATIVE-CERTIFIED ($BACKEND) — inspect the JSON before discarding it;"
+    echo "device_rate_valid=true with the complete device-assisted provenance tuple is valid lt-gate.py"
+    echo "rate evidence even when native eligibility remains false. CPU timers never count."
   fi
 elif [ "$PROFILE" = "bmx4c" ]; then
   if [ "$CODE" -eq 0 ]; then

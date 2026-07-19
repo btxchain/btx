@@ -1,6 +1,6 @@
 # MatMul v4.4-LT — C-15 reviewer kit
 
-**Status: C-15 OPEN.** ChaCha20-PRF MatExpand Extract is a *candidate* with
+**Status: C-15 OPEN.** Lever-B MX-block MatExpand Extract is a *candidate* with
 frozen CPU goldens. This kit lets an external cryptanalyst reproduce Extract
 and toy collapse experiments **without building bitcoind / the full node**.
 
@@ -11,10 +11,10 @@ GO, or permission to raise `nMatMulDRLTHeight`.
 
 | File | Purpose |
 |---|---|
-| `test-vectors.json` | Frozen Extract goldens, PRF tag, MANT/SCLE lanes, endian notes; **`related_nonce_lane_xor`** (≥32 identity tuples + B32 Δ-collision NC); **`reduction_relevant_finding_notes`** |
-| `reference_extract.py` | Standalone Python ChaCha20-PRF Extract (stdlib only) |
+| `test-vectors.json` | Frozen real-32-value MX tile goldens; synthetic scalar and legacy MANT/SCLE differential vectors are explicitly labeled |
+| `reference_extract.py` | Standalone Python MX-block Extract, including consensus-faithful tile/matrix APIs (stdlib only) |
 | `toy_attack_harness.py` | Toy-`n` synthetic MatExpand + poly R² for deg 1..`--degree` (default 3) + Freivalds residual |
-| `spectral_approx_probe.py` | Stdlib SVD/CCA-style residual vs Extract for `n∈{8,16,32}` (Gap #6) |
+| `spectral_approx_probe.py` | Stdlib SVD/CCA-style residual vs real-tile Extract for `n∈{32,64}` (Gap #6) |
 | `spectral_approx_probe.md` | Empirics ≠ §0.1 FAIL; C-15 stays OPEN |
 | `rank_spectral_regression.md` | `rank(B32) ≤ w` note and smoke procedure |
 | `named-assumption.md` | Pointer to packet **§0.2** (`BTX-C15-NonCollapse-v1`, unreduced) |
@@ -34,8 +34,8 @@ cd contrib/matmul-c15-reviewer-kit
 python3 reference_extract.py
 
 # 2) Toy collapse harness (expect low R² for deg 1..3 + nonzero Freivalds residual)
-python3 toy_attack_harness.py --n 8 --w 4
-python3 toy_attack_harness.py --n 16 --w 4 --seed 7 --degree 3
+python3 toy_attack_harness.py --n 32 --w 4
+python3 toy_attack_harness.py --n 64 --w 8 --seed 7 --degree 3
 
 # 3) Spectral / approx-B̂ probe (SVD/CCA residuals; empirics ≠ §0.1 FAIL)
 python3 spectral_approx_probe.py
@@ -58,7 +58,7 @@ In-tree witnesses (optional; requires a node build) in
 `src/test/matmul_v4_lt_tests.cpp`:
 
 - `matexpand_chacha_prf_golden_vectors`
-- `matexpand_position_salt_differential` (full-width `(i,j)` high-half)
+- `matexpand_position_salt_differential` (full-width normative `(i,bj)` tile salt)
 - `matexpand_extract_r2_nonapproximability` (affine / deg-2/3 R² < 0.05)
 - `matexpand_c15b_affine_surrogate_sketch_rejected` (forged sketch vs
   `VerifySketchBMX4CLT`)
@@ -69,11 +69,12 @@ Bitcoin `uint256` hex (`GetHex` / `FromHex`) is **byte-reversed** relative to
 `bytes.fromhex()`. The reference hashes **little-endian memory bytes**:
 
 ```
-prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_w_le)
+prf_key = SHA256("BTX_MATEXPAND_MXPRF_V44LT" ‖ seed_w_le)
 ```
 
-ChaCha20 nonce packing, lane constants `MANT`/`SCLE`, and exact-mul scale are
-pinned in `test-vectors.json` and mirrored in `reference_extract.py`.
+Normative MX tile packing uses full-width `(i,bj)` with `bj=j/32`, lane
+`MXBL`, all 32 real accumulator values, and one hash-derived scale. Legacy
+per-cell `MANT`/`SCLE` vectors remain only as labeled differentials.
 
 ## Expected toy outcome
 

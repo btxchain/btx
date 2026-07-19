@@ -188,8 +188,47 @@ def extract_mat_expand_mx_tile_mantissas(
     return mu_out
 
 
+def extract_dequant_matexpand_tile(
+    raw32: list[int], i: int, bj: int, prf_key: bytes
+) -> list[int]:
+    """Consensus-faithful dequantization of one real 32-value B32 tile."""
+    mu = extract_mat_expand_mx_tile_mantissas(prf_key, i, bj, raw32)
+    scale = 1 << derive_matexpand_mx_scale(prf_key, i, bj)
+    return [int(v) * scale for v in mu]
+
+
+def extract_dequant_matexpand_matrix(B32: list[list[int]], prf_key: bytes) -> list[list[int]]:
+    """Consensus-faithful MX Extract over a square B32 matrix.
+
+    Consensus MatExpand consumes complete 32-column tiles.  Refuse partial
+    tiles so reviewer probes cannot silently fall back to synthetic repeated
+    raw values.
+    """
+    if not B32 or not B32[0]:
+        raise ValueError("B32 must be a non-empty square matrix")
+    n = len(B32)
+    if any(len(row) != n for row in B32):
+        raise ValueError("B32 must be square")
+    if n % BLOCK_LEN != 0:
+        raise ValueError(f"B32 dimension must be a multiple of {BLOCK_LEN}, got {n}")
+
+    out = [[0] * n for _ in range(n)]
+    for i, row in enumerate(B32):
+        for start in range(0, n, BLOCK_LEN):
+            bj = start // BLOCK_LEN
+            out[i][start : start + BLOCK_LEN] = extract_dequant_matexpand_tile(
+                row[start : start + BLOCK_LEN], i, bj, prf_key
+            )
+    return out
+
+
 def extract_dequant_matexpand(raw: int, i: int, j: int, prf_key: bytes) -> int:
-    """Normative MX Extract (synthetic tile: all 32 raws = raw). Returns int8 in [-48, 48]."""
+    """Synthetic repeated-raw tile convenience; not consensus-faithful.
+
+    Retained for frozen differential vectors only.  Reviewer attacks over B32
+    must use extract_dequant_matexpand_tile/matrix so all 32 real values affect
+    rejection-sampling alignment exactly as in MatExpandCore.
+    """
     bj = j // BLOCK_LEN
     t = j % BLOCK_LEN
     raw32 = [raw] * BLOCK_LEN
@@ -341,6 +380,25 @@ def verify_goldens(vectors: dict | None = None) -> int:
             ok = False
         if got < -48 or got > 48:
             print(f"FAIL range raw={case['raw']}: got={got} outside [-48,48]")
+            ok = False
+
+    for case in v.get("mx_real_tile_goldens", []):
+        raw32 = case["raw32"]
+        i, bj = case["i"], case["bj"]
+        got_mu = extract_mat_expand_mx_tile_mantissas(prf_key, i, bj, raw32)
+        got_e = derive_matexpand_mx_scale(prf_key, i, bj)
+        got = extract_dequant_matexpand_tile(raw32, i, bj, prf_key)
+        if got_mu != case["expected_mantissas"]:
+            print(f"FAIL real MX tile mantissas i={i} bj={bj}: got={got_mu}")
+            ok = False
+        if got_e != case["expected_scale_e"]:
+            print(f"FAIL real MX tile scale i={i} bj={bj}: got={got_e}")
+            ok = False
+        if got != case["expected_dequant"]:
+            print(f"FAIL real MX tile dequant i={i} bj={bj}: got={got}")
+            ok = False
+        if any(vv < -48 or vv > 48 for vv in got):
+            print(f"FAIL real MX tile range i={i} bj={bj}: got={got}")
             ok = False
 
     # AccelReplica parity: same Python path is the AccelReplica twin.

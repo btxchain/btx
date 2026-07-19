@@ -6,8 +6,10 @@ packet §0.1 verdict.
 ## What this is
 
 `spectral_approx_probe.py` is a **stdlib-only** SVD / CCA-style residual
-campaign against normative ChaCha20-PRF Extract on toy MatExpand accumulators
-for `n ∈ {8, 16, 32}` (override with `--n`).
+campaign against normative Lever-B MX-block Extract on toy MatExpand
+accumulators for `n ∈ {32, 64}` (override with `--n`). Every input dimension
+must be a multiple of 32; each probe passes the real adjacent 32-value `B32`
+tile to Extract, matching consensus rejection-sampling alignment.
 
 For each `n` it reports:
 
@@ -19,7 +21,7 @@ For each `n` it reports:
 | rel. Frobenius | `‖B̂ − P_col(B32) B̂ P_row(B32)‖_F / ‖B̂‖_F` |
 | Freivalds zeros | How often `rᵀ(B̂−B̂')s = 0` for the structured approx `B̂'` |
 
-Honest ChaCha Extract is expected to **reject** near-perfect B32-space
+Honest MX-block Extract is expected to **reject** near-perfect B32-space
 collapse (energy not locked in top-`w`, CCA well below 1, nonzero Freivalds
 residuals on the structured approx). That matches checklist **A5** /
 drafts **GAP-B3** (high-rank yet still forgery-friendly approx-`B̂`).
@@ -43,7 +45,7 @@ MAC shortcut → **INCONCLUSIVE** / non-finding.
 ```bash
 cd contrib/matmul-c15-reviewer-kit
 python3 spectral_approx_probe.py
-python3 spectral_approx_probe.py --n 8 16 32 --w 4 --seed 1
+python3 spectral_approx_probe.py --n 32 64 --w 4 --seed 1
 ```
 
 Companion: [`rank_spectral_regression.md`](rank_spectral_regression.md)

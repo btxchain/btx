@@ -200,6 +200,14 @@ constexpr uint64_t MATMUL_V4_ABS_MAX_DIM{8192};
 constexpr uint64_t MATMUL_V4_MAX_PAYLOAD_WORDS{
     2 * (MATMUL_V4_ABS_MAX_DIM / 4) * (MATMUL_V4_ABS_MAX_DIM / 4)};
 
+uint32_t ResolveMatMulConsensusQStar(const Consensus::Params& params)
+{
+    const uint32_t q_star{params.nMatMulConsensusQStar};
+    return matmul::v4::lt::IsValidConsensusQStar(q_star)
+        ? q_star
+        : matmul::v4::lt::kConsensusQStarDefault;
+}
+
 // Byte<->word packing for the v4 sketch payload channel. matmul_v4::ComputeDigest
 // / VerifySketch operate on a flat little-endian byte buffer (per the
 // matmul_v4 API), but CBlock's existing trailing-payload relay field
@@ -3736,10 +3744,7 @@ bool RecomputeMatMulV4SketchReference(const CBlockHeader& header,
         // single Chat preimage and must not be fed to Phase-A cache auth.
         if (params.IsMatMulLTSealAsPoWActive(block_height)) {
             if (!parent_median_time_past.has_value()) return false;
-            uint32_t Qstar = params.nMatMulConsensusQStar;
-            if (!matmul::v4::lt::IsValidConsensusQStar(Qstar)) {
-                Qstar = matmul::v4::lt::kConsensusQStarDefault;
-            }
+            const uint32_t Qstar{ResolveMatMulConsensusQStar(params)};
             const auto slot_seed = [&](CBlockHeader& h) -> bool {
                 return SetDeterministicMatMulSeeds(h, params, block_height, parent_median_time_past);
             };
@@ -4326,8 +4331,7 @@ uint32_t ScaleMatMulLTJobBudgetToWorkUnits(const Consensus::Params& params,
         jobs == std::numeric_limits<uint32_t>::max()) {
         return jobs;
     }
-    uint32_t q = params.nMatMulConsensusQStar;
-    if (q != 64 && q != 128) q = 64;
+    const uint32_t q{ResolveMatMulConsensusQStar(params)};
     if (jobs > std::numeric_limits<uint32_t>::max() / q) {
         return std::numeric_limits<uint32_t>::max();
     }
@@ -4354,11 +4358,7 @@ uint32_t MatMulEncDrWorkUnits(const Consensus::Params& params, int32_t reference
     // One EncDr leaf digest = 1 unit. Phase-B seal recomputes Q* sibling leaves.
     if (!IsDisabledHeight(params.nMatMulDRLTHeight) &&
         params.IsMatMulLTSealAsPoWActive(reference_height)) {
-        uint32_t q = params.nMatMulConsensusQStar;
-        if (!matmul::v4::lt::IsValidConsensusQStar(q)) {
-            q = matmul::v4::lt::kConsensusQStarDefault;
-        }
-        return q;
+        return ResolveMatMulConsensusQStar(params);
     }
     return 1;
 }
@@ -5160,10 +5160,7 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
     // Consensus Q* is immutable under local configuration. BTX_MATMUL_LT_BATCH
     // may only size Phase-A execution chunks; it must never rewrite the seal
     // leaf count / Merkle preimage used in Phase B.
-    uint32_t consensus_Qstar = params.nMatMulConsensusQStar;
-    if (!matmul::v4::lt::IsValidConsensusQStar(consensus_Qstar)) {
-        consensus_Qstar = matmul::v4::lt::kConsensusQStarDefault;
-    }
+    const uint32_t consensus_Qstar{ResolveMatMulConsensusQStar(params)};
     uint32_t execution_chunk = consensus_Qstar;
     if (const char* env = std::getenv("BTX_MATMUL_LT_BATCH")) {
         const auto parsed = static_cast<uint32_t>(std::strtoul(env, nullptr, 10));

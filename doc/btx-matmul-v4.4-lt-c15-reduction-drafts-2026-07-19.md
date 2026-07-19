@@ -1,5 +1,12 @@
 # C-15 reduction sketches (Wave 1 — DRAFT) — 2026-07-19
 
+> **Lever-B supersession note (2026-07-20).** These sketches use the historical
+> `w=128`, per-cell `Extract(raw,i,j)` model. Current code uses `w=1024` and
+> joint MX extraction of each real 32-value tile, with one `MXBL` stream and
+> hash-derived scale salted by `(i,bj)`. Thus current `rank(B32)≤min(n,1024)`
+> and production `n/w=4`; all per-cell hybrid/rewrite steps below are historical
+> hypotheses until restated for the MX construction. C-15 remains OPEN.
+
 *Status: **DRAFT candidate sketches only.** Every sketch ends with an explicit
 GAP LIST. **No sketch is complete. C-15 remains OPEN.** Do not raise
 `nMatMulDRLTHeight`. Do not treat any sketch as a PASS.*
@@ -11,8 +18,8 @@ exact-int MAC cost `≤ (1−δ)·HonestMAC(n)`).
 **Notation (packet §1):**
 
 ```
-Y = G·W,  B32 = Y·H = (G·W)·H,  rank(B32) ≤ w = 128
-B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
+Y = G·W,  B32 = Y·H = (G·W)·H,  rank(B32) ≤ min(n,w), current w = 1024
+B̂[i,32bj:32bj+32] = MXTileExtract(B32[i,32bj:32bj+32], i, bj, prf_key)
 Ĉ = (U·Â)(B̂·V) over q = 2⁶¹−1
 ```
 
@@ -122,8 +129,9 @@ FAIL into a primitive/lemma break.
 
 **`PositionSalted-FullRank-Heuristic-v1` (DRAFT, not a theorem):**
 
-> After normative Extract with full-width `(i,j)` salts and `seed_W`-derived
-> `prf_key`, the matrix `B̂ ∈ 𝔽_q^{n×n}` has no *usable* factorization
+> After normative joint extraction over real 32-value tiles with full-width
+> `(i,bj)` salts and `seed_W`-derived `prf_key`, the matrix
+> `B̂ ∈ 𝔽_q^{n×n}` has no *usable* factorization
 > `B̂ ≈ L R` (or shared entrywise `φ∘(GWH)`) of rank `r ≤ w` that is
 > predictable from public panels alone and that lets Freivalds matvecs
 > reassociate past Extract at cost `≪ HonestMAC`.
@@ -171,7 +179,7 @@ Unrestricted (nonlinear) adversaries remain INCONCLUSIVE (synthesis).
 | **GAP-B2** | Full-rank / no-usable-residue after Extract is a **heuristic**, not proven. |
 | **GAP-B3** | Spectral residue could be high-rank yet still Freivalds-forgery-friendly (approx-`B̂`). |
 | **GAP-B4** | `U`/`V` rank-transparency noted; no formal lemma that projectors cannot *create* usable structure. |
-| **GAP-B5** | Truncated `(i,j)` salt reopens ~32× low-rank shortcut — normative full-width assumed; device twin bugs are consensus-splits, not a hardness proof. |
+| **GAP-B5** | Truncated current `(i,bj)` MX salt may reopen the production `n/w=4×` raw-panel shortcut — normative full-width assumed; device twin bugs are consensus-splits, not a hardness proof. |
 | **GAP-B6** | Link from heuristic falsehood to a standard assumption (PRF / random matrix) missing. |
 
 **Status:** incomplete draft. **C-15 not closed.**
@@ -203,7 +211,7 @@ hashing. Closest named object: batch low-rank random linear equations
    There is **no secret low-rank factor** for the reduction to hide behind.
    - **Missing secret:** KW needs a secret (noise / factors / transcript tiles)
      unknown to the adversary. BTX publishes the thin factorization *by design*
-     (`rank(B32)≤128` is priced structure — packet §1.1).
+     (`rank(B32)≤min(n,1024)` is priced structure — current packet §1.1).
 2. **Different firewall.** BTX’s candidate firewall is **nonlinear position-salted
    Extract** into a small alphabet under sketch Freivalds — not KW’s secret
    noise + transcript RO.
@@ -262,7 +270,7 @@ hardness is *not* “ChaCha alone”; it is **not** a second assumption.
 
 | Item | Definition |
 |---|---|
-| **Params** | `n ∈ {64,256,4096}` (prod. `4096`), `w=128`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = `ENC_BMX4C_LT` ChaCha20-PRF+M11 |
+| **Params** | Current: `n ∈ {64,256,4096}` (prod. `4096`), `w=1024`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = `ENC_BMX4C_LT` Lever-B MX tile ChaCha+M11 |
 | **HonestMAC(n)** | Exact-int MAC of one marginal nonce: MatExpand-B (`G·W`+`Y·H`) + `B̂·V` + combine `P·Q` (I1′ template A / `U`/`V`/`P` excluded) |
 | **Adversary** | Classical PPT relative to `HonestMAC`; poly adaptive MatExpand/digest/Freivalds queries |
 | **Win** | Accepting Phase-A digest with `Adv ≥ ε` over Freivalds false-accept **and** exact-int MatExpand+BV+combine MAC `≤ (1−δ)·HonestMAC(n)` |

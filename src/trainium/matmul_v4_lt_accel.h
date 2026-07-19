@@ -51,7 +51,7 @@ void ResetTrainiumNeuronExactGemmProviderForTesting();
                                                uint32_t rows, uint32_t inner, uint32_t cols,
                                                std::vector<int32_t>& out);
 
-/** No exact S32 x S8 Tensor Engine construction is documented; always declines. */
+/** Bounded exact S32 x S8 via four radix-256 S8 tensor GEMMs. */
 [[nodiscard]] bool TryLaunchLtTrainiumGemmS32S8(const std::vector<int32_t>& left,
                                                 const std::vector<int8_t>& right,
                                                 uint32_t rows, uint32_t inner, uint32_t cols,

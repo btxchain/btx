@@ -11,7 +11,7 @@
 | Deep-`m` under ENC-DR | `b = 2`, `m = n/2` (2048 @ n=4096) | ~3.6× tensor MACs; **0 B** permanent sketch growth |
 | MatExpand | `B̂ = Extract_PRF(G·W·H)`, `w=1024` | ExactGemm floor `O(n²·w)` (not `O(n³)`); C-15 candidate mixer; cubic floor is deep-`m` sketch/combine |
 | Consensus `Q*` | `{128,256,512}` (default 256) | Fat stacked miner windows (Phase A); Phase B seal-as-PoW via `fMatMulLTSealAsPoW` (implemented; public default off / DRLT `INT32_MAX`; **regtest** finite DRLT + seal on) |
-| Alphabet / Ĉ | Path-agnostic integer; M11 projectors; Extract to `[-48,48]` | FP8/MXFP4 remain **miner-local** lanes |
+| Alphabet / Ĉ | Path-agnostic integer; M11 projectors; Extract to `[-48,48]` | Logical MX-compatible components are consensus-visible; **native FP8/MXFP4 execution is not currently wired for LT** |
 
 ## MatExpand (reference)
 
@@ -48,6 +48,20 @@ per-cell ChaCha). It is **not** cryptographically closed — external C-15 revie
 remains required before any public activation height is raised.
 **PRF-as-primitive ≠ MatExpand work lower bound.** Public `nMatMulDRLTHeight`
 stays `INT32_MAX`. C-15 stays **OPEN**.
+
+**Logical layout is not a native-hardware claim.** “MX/E2M1 block-scale” above
+describes an exact integer representation: M11 mantissas plus shared powers of
+two on 32-column blocks. It does not mean that CUDA or HIP issued an OCP-MXFP4
+instruction. The CPU miner consumes those components directly and avoids a
+dense `Bhat` allocation. CUDA/HIP default to the single dense-INT8 projection
+on every architecture. SM100/SM120 and gfx950 retain a qualification-only
+`BTX_MATMUL_V4_LT_LOGICAL_MX=1` lane that keeps `(mu, scale/32)` and computes
+`Bhat·V` with four exponent-masked INT8 IMMA/MFMA GEMMs plus exact `2^e`
+accumulation. That lane is not the default because, absent native block-scale
+instructions or measured sparse acceleration, it schedules four dense GEMMs.
+Neither path is native MXFP4; a CUTLASS/tcgen05 or ROCm MXFP4 kernel remains
+unimplemented and fail-closed. `PlanLTAccel` reports design intent, not runtime
+capability evidence.
 
 **Scoping:** MatExpand is `O(n²·w)`; the honest cubic-ish MAC floor is deep-`m`
 `B̂·V` / combine (`m=n/2`). Linearized Extract would reopen ~`n/w≈4×` panel
@@ -111,21 +125,25 @@ Profile enum: `ENC_BMX4C_LT = 4`. Live only when `IsDRLTActive(height)`.
 | CPU reference | `matmul::v4::lt::*` | **normative** |
 | Dispatch | `ComputeDigestsBMX4CLTDispatched` | host-verified |
 | Injectable GEMMs | `ExactGemmBackend` | device splice for MatExpand `G*W` / `(G*W)*H` |
-| CUDA | `ComputeDigestsOnlyLTCuda` | exact device GEMMs via `ExactGemmBackend` (self-tested); CPU fallback if unavailable |
+| CUDA | `ComputeDigestsOnlyLTCuda` | qualified INT8 IMMA: direct s8 stages, four-radix `Y·H`, Karatsuba-9 combine; dense INT8 `Bhat·V` by default; SM100/120 logical-MX four-pass lane is opt-in; no native MXFP4 |
 | Metal | `ComputeDigestsOnlyLTMetal` | exact MSL integer GEMMs via `ExactGemmBackend` (self-tested); CPU fallback if unavailable |
-| HIP | `ComputeDigestsOnlyLTHip` | exact device GEMMs via `ExactGemmBackend` (self-tested); CPU fallback if unavailable |
+| HIP | `ComputeDigestsOnlyLTHip` | qualified INT8 MFMA: direct s8 stages, four-radix `Y·H`, Karatsuba-9 combine; dense INT8 `Bhat·V` by default; gfx950 logical-MX four-pass lane is opt-in; no native MXFP4 |
 
-Planner: `PlanLTAccel(device_class)`. After Lever-B, `ScalePartitionedMxfp4`
-means MX Extract scales `e(i,j/32)` + partitioned `B̂·V` (not BMX4C row-block
-scales). Per-arch reference optimization status:
+Planner: `PlanLTAccel(device_class)` reports intended lane taxonomy only; it
+does not probe, dispatch, qualify, or attest native execution. After the BMX4C
+axis correction, both its operand B and LT's `Bhat` use contraction-aligned
+row-by-K-block scales `e(i,j/32)`; their derivations and transcripts remain
+separate. Per-architecture implementation status:
 
 | Backend | MatExpand Extract | `B̂·V` | Notes |
 |---|---|---|---|
 | CPU | MX-block (normative) | `ComputeProjectedRightMxBlockScaleLT` | Consensus + ExactGemm fallback |
-| CUDA | Device MX twin + host scales | Prefer MX scale-partitioned on Blackwell/sm100/sm120/5090; else dense IMMA/scalar | Re-measure after Lever B |
-| HIP | Device MX twin + host scales | Prefer MX scale-partitioned on MI350/MI355; else dense MFMA/scalar | Re-measure after Lever B |
+| CUDA | Device MX twin + device scales | Dense IMMA/scalar by default; four exact exponent-masked INT8 IMMA passes on sm100/sm120 only with `BTX_MATMUL_V4_LT_LOGICAL_MX=1` | Qualification lane, not native MXFP4; re-measure |
+| HIP | Device MX twin + device scales | Dense MFMA/scalar by default; four exact exponent-masked INT8 MFMA passes on gfx950 only with `BTX_MATMUL_V4_LT_LOGICAL_MX=1` | Qualification lane, not native MXFP4; re-measure |
 | Metal | Host MX via miner/digest | Host scale-partitioned | ExactGemm inject only; no Extract shader |
 | Ascend | Host MX via miner/digest | Host scale-partitioned | ExactGemm Cube self-qual; Fold = GEMM filler only |
+
+Linker `*_stub.cpp` files remain only for builds with the corresponding `BTX_ENABLE_*=OFF`.
 
 ## GO/NO-GO (before raising height)
 

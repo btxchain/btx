@@ -511,10 +511,16 @@ matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
         bool available{false};
         if (is_tpu) {
             available = matmul_v4::tpu::IsTpuPjrtExactGemmAvailable();
-            if (available) backend.gemm_s8s8 = &matmul_v4::tpu::TryLaunchLtTpuGemmS8S8;
+            if (available) {
+                backend.gemm_s8s8 = &matmul_v4::tpu::TryLaunchLtTpuGemmS8S8;
+                backend.gemm_s32s8 = &matmul_v4::tpu::TryLaunchLtTpuGemmS32S8;
+            }
         } else if (is_trainium) {
             available = matmul_v4::trainium::IsTrainiumExactGemmAvailable();
-            if (available) backend.gemm_s8s8 = &matmul_v4::trainium::TryLaunchLtTrainiumGemmS8S8;
+            if (available) {
+                backend.gemm_s8s8 = &matmul_v4::trainium::TryLaunchLtTrainiumGemmS8S8;
+                backend.gemm_s32s8 = &matmul_v4::trainium::TryLaunchLtTrainiumGemmS32S8;
+            }
         }
 
         if (is_tpu || is_trainium) {
@@ -522,7 +528,7 @@ matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
             bool expected{false};
             if (logged_cloud_exact.compare_exchange_strong(expected, true)) {
                 if (available) {
-                    LogPrintf("MatMul-v4.4-LT exact GEMM provider: %s (native tensor path self-qualified; S32xS8 stays CPU)\n",
+                    LogPrintf("MatMul-v4.4-LT exact GEMM provider: %s (native tensor path self-qualified; bounded S32xS8 uses four exact radix-256 tensor GEMMs)\n",
                               exact_request);
                 } else {
                     LogPrintf("MatMul-v4.4-LT exact GEMM provider: CPU [WARNING: requested %s but its provider was not compiled, registered, attested, or self-qualified]\n",
