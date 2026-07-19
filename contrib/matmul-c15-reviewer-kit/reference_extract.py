@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The BTX Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+"""
+Standalone ChaCha20-PRF MatExpand Extract (ENC_BMX4C_LT).
+
+Matches src/matmul/matmul_v4_lt.cpp::ExtractDequantMatExpand /
+DeriveMatExpandPrfKey / AccelReplicaMatExpandPrfLE64 bit-for-bit.
+
+No bitcoind / node build required. Stdlib only.
+
+Bitcoin uint256 endianness: FromHex/GetHex display is byte-reversed vs
+bytes.fromhex(); SHA256(tag || seed_w) hashes the little-endian memory bytes.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import struct
+import sys
+from pathlib import Path
+
+PRF_TAG = b"BTX_MATEXPAND_PRF_V44LT"
+LANE_MANT = 0x4D414E54  # 'MANT'
+LANE_SCALE = 0x53434C45  # 'SCLE'
+
+# E2M1 → M11 rejection (SampleMantissaNibble). Rejected nibbles: 1,3,8,9,11.
+_M11_ACCEPTED = [False] * 16
+_M11_VALUE = [0] * 16
+for _nib in range(16):
+    _sign = (_nib >> 3) & 1
+    _exp = (_nib >> 1) & 3
+    _man = _nib & 1
+    _mag = 0
+    _integer = True
+    if _exp == 0:
+        _mag = 0
+        _integer = _man == 0
+    elif _exp == 1:
+        _mag = 1
+        _integer = _man == 0
+    elif _exp == 2:
+        _mag = 2 if _man == 0 else 3
+    else:
+        _mag = 4 if _man == 0 else 6
+    if not _integer or (_sign and _mag == 0):
+        continue
+    _M11_ACCEPTED[_nib] = True
+    _M11_VALUE[_nib] = -_mag if _sign else _mag
+
+
+def uint256_bytes_from_hex(hex_str: str) -> bytes:
+    """Bitcoin uint256::FromHex → 32 little-endian memory bytes."""
+    h = hex_str.strip().lower()
+    if h.startswith("0x"):
+        h = h[2:]
+    raw = bytes.fromhex(h)
+    if len(raw) != 32:
+        raise ValueError(f"uint256 hex must be 32 bytes, got {len(raw)}")
+    return raw[::-1]
+
+
+def derive_matexpand_prf_key(seed_w_hex: str) -> bytes:
+    """prf_key = SHA256(\"BTX_MATEXPAND_PRF_V44LT\" ‖ seed_w_le)."""
+    return hashlib.sha256(PRF_TAG + uint256_bytes_from_hex(seed_w_hex)).digest()
+
+
+def _rotl32(x: int, n: int) -> int:
+    x &= 0xFFFFFFFF
+    return ((x << n) | (x >> (32 - n))) & 0xFFFFFFFF
+
+
+def _quarter(s: list[int], a: int, b: int, c: int, d: int) -> None:
+    s[a] = (s[a] + s[b]) & 0xFFFFFFFF
+    s[d] = _rotl32(s[d] ^ s[a], 16)
+    s[c] = (s[c] + s[d]) & 0xFFFFFFFF
+    s[b] = _rotl32(s[b] ^ s[c], 12)
+    s[a] = (s[a] + s[b]) & 0xFFFFFFFF
+    s[d] = _rotl32(s[d] ^ s[a], 8)
+    s[c] = (s[c] + s[d]) & 0xFFFFFFFF
+    s[b] = _rotl32(s[b] ^ s[c], 7)
+
+
+def chacha20_block_words(key32: bytes, counter: int, nonce_first: int, nonce_second: int) -> list[int]:
+    """One RFC8439 ChaCha20 block as 16 LE words (crypto/chacha20.h layout)."""
+    if len(key32) != 32:
+        raise ValueError("ChaCha20 key must be 32 bytes")
+    k = [struct.unpack_from("<I", key32, 4 * i)[0] for i in range(8)]
+    x = [
+        0x61707865,
+        0x3320646E,
+        0x79622D32,
+        0x6B206574,
+        k[0],
+        k[1],
+        k[2],
+        k[3],
+        k[4],
+        k[5],
+        k[6],
+        k[7],
+        counter & 0xFFFFFFFF,
+        nonce_first & 0xFFFFFFFF,
+        nonce_second & 0xFFFFFFFF,
+        (nonce_second >> 32) & 0xFFFFFFFF,
+    ]
+    j = x[:]
+    for _ in range(10):
+        _quarter(x, 0, 4, 8, 12)
+        _quarter(x, 1, 5, 9, 13)
+        _quarter(x, 2, 6, 10, 14)
+        _quarter(x, 3, 7, 11, 15)
+        _quarter(x, 0, 5, 10, 15)
+        _quarter(x, 1, 6, 11, 12)
+        _quarter(x, 2, 7, 8, 13)
+        _quarter(x, 3, 4, 9, 14)
+    return [(x[i] + j[i]) & 0xFFFFFFFF for i in range(16)]
+
+
+def matexpand_prf_le64(prf_key: bytes, raw: int, i: int, j: int, remix: int, lane: int) -> int:
+    """AccelReplicaMatExpandPrfLE64 / first 8 bytes of MatExpandPrfKeystream."""
+    nonce_first = (raw & 0xFFFFFFFF) ^ (lane & 0xFFFFFFFF)
+    nonce_second = ((i & 0xFFFFFFFF) << 32) | (j & 0xFFFFFFFF)
+    words = chacha20_block_words(prf_key, remix, nonce_first, nonce_second)
+    return words[0] | (words[1] << 32)
+
+
+def sample_mantissa_nibble(nibble: int) -> tuple[bool, int]:
+    n = nibble & 0x0F
+    return _M11_ACCEPTED[n], _M11_VALUE[n]
+
+
+def extract_dequant_matexpand(raw: int, i: int, j: int, prf_key: bytes) -> int:
+    """Normative ExtractDequantMatExpand. Returns int8 in [-48, 48]."""
+    remix = 0
+    while True:
+        mixed = matexpand_prf_le64(prf_key, raw, i, j, remix, LANE_MANT)
+        for shift in range(0, 64, 4):
+            accepted, mu = sample_mantissa_nibble((mixed >> shift) & 0x0F)
+            if not accepted:
+                continue
+            scale_stream = matexpand_prf_le64(prf_key, raw, i, j, remix, LANE_SCALE)
+            e = scale_stream & 0x3
+            # Exact mul — never signed left-shift (negative mu << e is UB in C++).
+            return int(mu) * (1 << e)
+        remix += 1
+
+
+def load_vectors(path: Path | None = None) -> dict:
+    if path is None:
+        path = Path(__file__).with_name("test-vectors.json")
+    with path.open(encoding="utf-8") as f:
+        return json.load(f)
+
+
+def verify_goldens(vectors: dict | None = None) -> int:
+    """Return 0 on PASS, 1 on FAIL. Prints PASS/FAIL."""
+    v = vectors if vectors is not None else load_vectors()
+    seed_w = v["seed_w_hex"]
+    prf_key = derive_matexpand_prf_key(seed_w)
+    expected_key = bytes.fromhex(v["prf_key_hex"])
+    ok = True
+    if prf_key != expected_key:
+        print(f"FAIL prf_key: got {prf_key.hex()} expected {v['prf_key_hex']}")
+        ok = False
+
+    for case in v["extract_goldens"]:
+        got = extract_dequant_matexpand(case["raw"], case["i"], case["j"], prf_key)
+        exp = case["expected"]
+        if got != exp:
+            print(
+                f"FAIL extract raw={case['raw']} i={case['i']} j={case['j']}: "
+                f"got={got} expected={exp}"
+            )
+            ok = False
+        if got < -48 or got > 48:
+            print(f"FAIL range raw={case['raw']}: got={got} outside [-48,48]")
+            ok = False
+
+    # AccelReplica parity: same Python path is the AccelReplica twin.
+    for case in v.get("accel_replica_parity", {}).get("cases", []):
+        raw, i, j = case["raw"], case["i"], case["j"]
+        got = extract_dequant_matexpand(raw, i, j, prf_key)
+        if "expected" in case:
+            if got != case["expected"]:
+                print(f"FAIL accel parity raw={raw} i={i} j={j}: got={got}")
+                ok = False
+        if got < -48 or got > 48:
+            print(f"FAIL accel range raw={raw}: got={got}")
+            ok = False
+
+    if ok:
+        print("PASS")
+        return 0
+    print("FAIL")
+    return 1
+
+
+def main(argv: list[str]) -> int:
+    path = Path(argv[1]) if len(argv) > 1 else None
+    return verify_goldens(load_vectors(path) if path else None)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -1,0 +1,56 @@
+{
+  "status": "C-15 OPEN — candidate ChaCha20-PRF Extract; not cryptographically closed",
+  "source": "src/test/matmul_v4_lt_tests.cpp::matexpand_chacha_prf_golden_vectors",
+  "normative_refs": [
+    "doc/btx-matmul-v4.4-lt-external-c15-packet.md",
+    "src/matmul/matmul_v4_lt.cpp::ExtractDequantMatExpand",
+    "src/matmul/matmul_v4_lt.cpp::DeriveMatExpandPrfKey"
+  ],
+  "prf_key_derivation": {
+    "tag_ascii": "BTX_MATEXPAND_PRF_V44LT",
+    "tag_hex": "4254585f4d4154455850414e445f5052465f5634344c54",
+    "formula": "prf_key = SHA256(tag_bytes || seed_w_le32)",
+    "notes": "tag is the ASCII string without NUL. seed_w_le32 is Bitcoin uint256 memory order (little-endian blob): GetHex/FromHex display is byte-reversed vs bytes.fromhex()."
+  },
+  "lane_constants": {
+    "MANT": "0x4D414E54",
+    "MANT_ascii": "MANT",
+    "SCLE": "0x53434C45",
+    "SCLE_ascii": "SCLE"
+  },
+  "endian_notes": {
+    "seed_w_hex": "Bitcoin GetHex/FromHex display order (MSB digits first). Memory bytes = reverse(bytes.fromhex(hex)).",
+    "prf_key_bytes": "SHA256 digest written in natural byte order; used as ChaCha20 key via eight LE32 words (RFC8439 / crypto/chacha20.h).",
+    "chacha_nonce96": "nonce_first = uint32(raw) XOR lane; nonce_second = (uint64(i)<<32) | uint64(j). Seek(Nonce96{nonce_first, nonce_second}, remix) with remix as block counter.",
+    "keystream_le64": "First 8 keystream bytes interpreted as little-endian uint64 (AccelReplica returns x0 | (x1<<32) of the ChaCha block).",
+    "scale": "e = scale_stream & 0x3; return exact_mul(mu, 1<<e) — never signed left-shift of a negative mantissa."
+  },
+  "m11_rejection": {
+    "alphabet": [0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6],
+    "rejected_nibbles": [1, 3, 8, 9, 11],
+    "rejected_meanings": ["+0.5", "+1.5", "-0", "-0.5", "-1.5"]
+  },
+  "seed_w_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "prf_key_hex": "a522d5eeda6366cf3c8ed91b7f029b852cba9fc25dd6cf1c18c72b44f783271b",
+  "extract_goldens": [
+    {"raw": 0, "i": 0, "j": 0, "expected": 4},
+    {"raw": 1, "i": 0, "j": 1, "expected": 1},
+    {"raw": -1, "i": 1, "j": 0, "expected": 4},
+    {"raw": 42, "i": 3, "j": 5, "expected": 2},
+    {"raw": -1000, "i": 7, "j": 11, "expected": -16},
+    {"raw": 2147483647, "i": 2, "j": 4, "expected": -8},
+    {"raw": -2147483648, "i": 9, "j": 13, "expected": 0}
+  ],
+  "accel_replica_parity": {
+    "note": "ExtractDequantMatExpandAccelReplica must equal ExtractDequantMatExpand on these cases (and the broader grid in the C++ test).",
+    "cases": [
+      {"raw": 0, "i": 0, "j": 0, "expected": 4},
+      {"raw": 42, "i": 3, "j": 5, "expected": 2},
+      {"raw": -1000, "i": 7, "j": 11, "expected": -16},
+      {"raw": 7, "i": 2, "j": 3, "expected_via_reference": true},
+      {"raw": -97, "i": 4, "j": 1, "expected_via_reference": true}
+    ]
+  },
+  "production_panel_w": 128,
+  "rank_note": "Honest B32 = (G·W)·H has rank(B32) ≤ w (=128 at production). Affine collapse of Extract would reopen a ~n/w Freivalds-style shortcut; see rank_spectral_regression.md."
+}
