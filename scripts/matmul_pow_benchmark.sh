@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# NOTE: this benchmarks the LEGACY v3 MatMul PoW path only
+# (test/benchmark/matmul_phase2_bench.cpp: fixed transcript block b=16, SHA-256
+# noise/compression expand, no v4/ENC-BMX4C/ENC-DR-LT operand machinery). It
+# does not exercise the v4.1 ENC-S8, v4.2 ENC-BMX4C (b=4), or v4.4-LT
+# ENC-DR-LT (b=2, MatExpand, Q*) profiles -- see scripts/m11_matmul_perf_envelope.sh
+# and scripts/matmul_lt_readiness.sh for those.
 export LC_ALL=C
 set -euo pipefail
 

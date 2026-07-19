@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 class CBlockHeader;
@@ -133,11 +134,19 @@ inline constexpr int32_t kCombineLimbPairPerMac = 32 * 32; // 1024
  *  reproducible, PQ-safe. This is the mantissa plane for A, B, U, and V. */
 void ExpandMantissaStream(const uint256& seed, size_t count, int8_t* out);
 
+/** Device-portable schedule for ExpandMantissaStream: two-pass count-then-fill
+ *  with deterministic block extension. BYTE-IDENTICAL output; GPU ports MUST
+ *  preserve counter / byte / nibble / rejection order. */
+void ExpandMantissaStreamPortable(const uint256& seed, size_t count, int8_t* out);
+
 /** Deterministically expand `count` E8M0 exponents e in {0,1,2,3} from a seed
  *  via a wide counter-mode SHA-256 XOF (scale-plane domain byte 'e'): 2 bits
  *  per code, 4 codes per keystream byte from the LSB up, rejection-free. This
  *  is the scale plane for A and B (U/V have none). */
 void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out);
+
+/** Device-portable schedule for ExpandScaleStream (same bytes). */
+void ExpandScaleStreamPortable(const uint256& seed, size_t count, uint8_t* out);
 
 // --- Seed derivation (design §2.3, V4.2 domain tags) -----------------------
 
@@ -186,6 +195,86 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out);
 [[nodiscard]] std::vector<Fq> ComputeCombineLimbTensorBMX4C(const std::vector<int32_t>& P,
                                                             const std::vector<int32_t>& Q,
                                                             uint32_t n, uint32_t m);
+
+/** Karatsuba-9 combine: same base-2^6 remainder-top digits as
+ *  ComputeCombineLimbTensorBMX4C, but evaluates the degree-3 digit polynomials
+ *  with nine GEMMs instead of sixteen (two-level Karatsuba). BYTE-IDENTICAL to
+ *  ComputeCombineLimbTensorBMX4C / ComputeCombineModQ. The largest Karatsuba
+ *  input is the sum of all four limbs, bounded by [-128,125] (fits s8); every
+ *  accumulator satisfies |sum| <= 128^2 * n < 2^29 at the dimension limit, so
+ *  results remain exact in INT32. This is the preferred miner-local INT8
+ *  combine lane (doc/btx-matmul-v4.4-exact-accel-lanes.md). */
+[[nodiscard]] std::vector<Fq> ComputeCombineKaratsuba9BMX4C(const std::vector<int32_t>& P,
+                                                            const std::vector<int32_t>& Q,
+                                                            uint32_t n, uint32_t m);
+
+/** Five-limb exact FP8-alphabet combine (Rubin-class lane): decompose P/Q into
+ *  five balanced base-32 digits in [-16,15] (every digit exactly representable
+ *  in E4M3), evaluate the 25 digit-pair products as exact s8xs8->s32 GEMMs
+ *  (CPU reference; device lanes may group them), convert to INT32, then fold
+ *  with weights 32^(i+j) mod q. BYTE-IDENTICAL to ComputeCombineModQ. Per-pair
+ *  accumulators are bounded by 256*n < 2^22 at n <= 8192. Miner-local only —
+ *  no separate activation height. */
+[[nodiscard]] std::vector<Fq> ComputeCombineFp8FiveLimbBMX4C(const std::vector<int32_t>& P,
+                                                             const std::vector<int32_t>& Q,
+                                                             uint32_t n, uint32_t m);
+
+/** Scale-partitioned projection: for a contraction along an axis whose
+ *  committed E8M0 scales are constant on 32-blocks of the OTHER axis, partition
+ *  K into four exponent buckets J_e and evaluate
+ *      Out = sum_e 2^e * Left[:, J_e] * Right[J_e, :]
+ *  (total K = n, not 4n). BYTE-IDENTICAL to the dense dequantized GEMM. Used as
+ *  the CPU reference for the B200 grouped-MXFP4 projection lane. */
+[[nodiscard]] std::vector<int32_t> ComputeProjectedLeftScalePartitionedBMX4C(
+    const std::vector<int8_t>& U, const std::vector<int8_t>& mu_a,
+    const std::vector<uint8_t>& scale_a, uint32_t n, uint32_t m);
+[[nodiscard]] std::vector<int32_t> ComputeProjectedRightScalePartitionedBMX4C(
+    const std::vector<int8_t>& mu_b, const std::vector<uint8_t>& scale_b,
+    const std::vector<int8_t>& V, uint32_t n, uint32_t m);
+
+// --- Digest-only mining surface (v4.4 ENC-DR) --------------------------------
+
+/** Backend status for a digest-only nonce attempt. Consensus never sees this;
+ *  it is a miner-local telemetry / dispatch signal. */
+enum class DigestOnlyBackendStatus : uint8_t {
+    Ok = 0,
+    Fallback = 1,
+    Error = 2,
+};
+
+/** Digest-only mining result: no loser sketch payload. Under ENC-DR the PoW
+ *  object is digest-only; materializing an 8 MiB sketch for every losing nonce
+ *  is wasted host traffic. Winners are recomputed through ComputeDigestBMX4C
+ *  before publication. */
+struct DigestOnlyResultBMX4C {
+    uint64_t nonce{0};
+    uint256 digest;
+    bool target_match{false};
+    DigestOnlyBackendStatus backend_status{DigestOnlyBackendStatus::Ok};
+};
+
+/** Capability-driven exact-accelerator planner (miner-local). Selects
+ *  projection and combine lanes without changing consensus bytes. */
+enum class ProjectionLane : uint8_t {
+    CanonicalInt8 = 0,           // one INT8->INT32 GEMM on pre-shifted operands
+    ScalePartitionedMxfp4 = 1,   // B200/Blackwell grouped MXFP4
+    ExactFp8 = 2,                // future Rubin-class exact FP8 projection
+};
+
+enum class CombineLane : uint8_t {
+    CanonicalInteger = 0,        // direct mod-q / schoolbook reference
+    Karatsuba9Int8 = 1,          // nine INT8 GEMMs + fused M61 epilogue
+    ExactFp8FiveLimb = 2,        // five-limb E4M3-alphabet combine
+};
+
+struct ExactAccelPlan {
+    ProjectionLane projection{ProjectionLane::CanonicalInt8};
+    CombineLane combine{CombineLane::Karatsuba9Int8};
+};
+
+/** Pick lanes from a coarse device class string ("h200","b200","sm120","mi350",
+ *  "rubin","cpu", ...). Unknown -> INT8 projection + Karatsuba-9 combine. */
+[[nodiscard]] ExactAccelPlan PlanExactAccelLanes(std::string_view device_class);
 
 // --- Digest + verify (mirrors the pow_v4 contract) -------------------------
 

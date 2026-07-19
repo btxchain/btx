@@ -9,6 +9,12 @@ Usage: scripts/m11_matmul_perf_envelope.sh [options]
 Run MatMul solve + Metal digest benchmarks and verify they stay within a named
 performance envelope profile.
 
+NOTE: filters MatMulSolve{Mainnet,Testnet}Dimensions / MatMulMetalDigest*
+benchmark the LEGACY v3 MatMul path (n=512,b=16,r=8 / n=256,b=8,r=4). It does
+not cover the v4.2 ENC-BMX4C (b=4) or v4.4-LT ENC-DR-LT (b=2, MatExpand, Q*)
+profiles; see scripts/matmul_pow_readiness.sh (runs the matmul_v4_lt_tests /
+matmul_v4_bmx4_tests unit suites) and scripts/matmul_lt_readiness.sh for those.
+
 Options:
   --build-dir <path>          Build directory (default: build-btx)
   --artifact <path>           Output JSON artifact path

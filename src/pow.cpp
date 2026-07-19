@@ -24,6 +24,7 @@
 #include <matmul/matmul_sketch_cache.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_bmx4_batch.h>
+#include <matmul/matmul_v4_lt.h>
 #include <matmul/noise.h>
 #include <matmul/pow_v4.h>
 #include <matmul/transcript.h>
@@ -1074,6 +1075,14 @@ int32_t LatestMatMulAsertPreUpgradeAnchorHeight(const CBlockIndex* pindexLast, c
         params.nMatMulBMX4CHeight > anchor_height) {
         anchor_height = params.nMatMulBMX4CHeight;
     }
+    // MatMul v4.4-LT / ENC-DR-LT: one-time ASERT re-anchor at nMatMulDRLTHeight
+    // (MatExpand + deep-m changes marginal nonce/s; Num/Den calibrated from
+    // silicon before any public network raises the height).
+    if (!IsDisabledHeight(params.nMatMulDRLTHeight) &&
+        pindexLast->nHeight >= params.nMatMulDRLTHeight &&
+        params.nMatMulDRLTHeight > anchor_height) {
+        anchor_height = params.nMatMulDRLTHeight;
+    }
     return anchor_height;
 }
 
@@ -1196,6 +1205,40 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
                    params.nMatMulBMX4CHeight, params.nMatMulAsertHeight, next_height);
         return false;
     }
+    // ENC-DR-LT ASERT config guards (mirror BMX4C): positive reducible ratio,
+    // fork at/above ASERT and at/above BMX4C (IsDRLTActive already requires
+    // BMX4C; construction asserts enforce ordering when height is live).
+    {
+        uint32_t lt_rn, lt_rd;
+        if (!ReduceRescaleRatioToU32(params.nMatMulDRLTAsertRescaleNum, params.nMatMulDRLTAsertRescaleDen, lt_rn, lt_rd)) {
+            LogWarning("MatMulAsert: DRLT rescale ratio is invalid (num=%lld den=%lld; must be positive and reduce to a 32-bit rational) at height %d, failing closed\n",
+                       static_cast<long long>(params.nMatMulDRLTAsertRescaleNum),
+                       static_cast<long long>(params.nMatMulDRLTAsertRescaleDen), next_height);
+            return false;
+        }
+    }
+    if (!IsDisabledHeight(params.nMatMulDRLTHeight) && params.nMatMulDRLTHeight < params.nMatMulAsertHeight) {
+        LogWarning("MatMulAsert: DRLT height=%d is below ASERT activation=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                   params.nMatMulDRLTHeight, params.nMatMulAsertHeight, next_height);
+        return false;
+    }
+    if (!IsDisabledHeight(params.nMatMulDRLTHeight) && !IsDisabledHeight(params.nMatMulBMX4CHeight) &&
+        params.nMatMulDRLTHeight < params.nMatMulBMX4CHeight) {
+        LogWarning("MatMulAsert: DRLT height=%d must be at or above BMX4C height=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                   params.nMatMulDRLTHeight, params.nMatMulBMX4CHeight, next_height);
+        return false;
+    }
+    // Unified DRLT==BMX4C: BMX4C branch owns the rescale; DRLT ratio must be 1/1.
+    if (!IsDisabledHeight(params.nMatMulDRLTHeight) && !IsDisabledHeight(params.nMatMulBMX4CHeight) &&
+        params.nMatMulDRLTHeight == params.nMatMulBMX4CHeight &&
+        params.nMatMulDRLTAsertRescaleNum != params.nMatMulDRLTAsertRescaleDen) {
+        LogWarning("MatMulAsert: unified activation (drlt==bmx4c=%d) requires the DRLT rescale ratio to be 1/1 "
+                   "(got %lld/%lld); use the BMX4C rescale for the combined shift. Failing closed.\n",
+                   params.nMatMulBMX4CHeight,
+                   static_cast<long long>(params.nMatMulDRLTAsertRescaleNum),
+                   static_cast<long long>(params.nMatMulDRLTAsertRescaleDen));
+        return false;
+    }
     // Single-activation: BMX4C may fork AT (unified flag day) or above (staged)
     // the v4 height, never strictly below. At equality the MatMulAsert cascade
     // guards the v4-rescale branch out so the BMX4C rescale fires (see above).
@@ -1248,6 +1291,16 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
             LogWarning("MatMulAsert: non-inert BMX4C rescale height=%d collides with an earlier ASERT branch "
                        "(rescale would be silently skipped) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                        params.nMatMulBMX4CHeight, next_height);
+            return false;
+        }
+        if (!IsDisabledHeight(params.nMatMulDRLTHeight) &&
+            params.nMatMulDRLTAsertRescaleNum != params.nMatMulDRLTAsertRescaleDen &&
+            (shadowed_by_earlier(params.nMatMulDRLTHeight) ||
+             (!IsDisabledHeight(params.nMatMulV4Height) && params.nMatMulDRLTHeight == params.nMatMulV4Height) ||
+             (!IsDisabledHeight(params.nMatMulBMX4CHeight) && params.nMatMulDRLTHeight == params.nMatMulBMX4CHeight))) {
+            LogWarning("MatMulAsert: non-inert DRLT rescale height=%d collides with an earlier ASERT branch "
+                       "(rescale would be silently skipped) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                       params.nMatMulDRLTHeight, next_height);
             return false;
         }
     }
@@ -2557,6 +2610,22 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         return bmx4c_target.GetCompact();
     }
 
+    // MatMul v4.4-LT / ENC-DR-LT: one-time ASERT rescale at the Rank-1 fork.
+    // Guard equality with BMX4C the same way v4 is guarded against BMX4C: when
+    // a network unifies DRLT with BMX4C, the BMX4C branch above owns the
+    // rescale and this branch must not double-apply.
+    if (next_height == params.nMatMulDRLTHeight && next_height != params.nMatMulBMX4CHeight) {
+        arith_uint256 parent_target{};
+        parent_target.SetCompact(pindexLast->nBits);
+        uint32_t lt_rn, lt_rd;
+        if (!ReduceRescaleRatioToU32(params.nMatMulDRLTAsertRescaleNum, params.nMatMulDRLTAsertRescaleDen, lt_rn, lt_rd)) {
+            return MatMulAsertFailClosedBits();
+        }
+        arith_uint256 lt_target = ScaleTargetByTimespan(parent_target, lt_rn, lt_rd);
+        lt_target = ClampRetargetResult(lt_target, pow_limit);
+        return lt_target.GetCompact();
+    }
+
 
     if (next_height == params.nMatMulAsertHalfLifeUpgradeHeight) {
         arith_uint256 parent_target{};
@@ -3525,7 +3594,17 @@ static bool CheckMatMulV4SketchVerifies(const CBlock& block, const Consensus::Pa
     // profile.tile_b (C: b=4/m=1024; D: b=2/m=2048).
     const Consensus::MatMulProfileParams profile_params = params.GetMatMulProfileParams(block_height);
     const Consensus::MatMulEncodingProfile enc_profile = profile_params.profile;
-    if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
+    if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C_LT) {
+        if (!matmul::v4::bmx4::CheckCombineLimbBoundBMX4C(v4_dim)) return false;
+        if (static_cast<int64_t>(Consensus::BMX4C_BASE_PRODUCT_BOUND_PER_N) * v4_dim >
+            std::numeric_limits<int32_t>::max()) {
+            return false;
+        }
+        if (!matmul::v4::lt::VerifySketchBMX4CLT(block, v4_dim, params.nMatMulV4FreivaldsRounds,
+                                                 sketch_payload, digest)) {
+            return false;
+        }
+    } else if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
         // Structural combine/accumulator preconditions for ENC-BMX4C (spec
         // §2.4/§5.2/§8.2), checked ahead of the O(n^2) verify as defense in
         // depth. (i) The base-2^6 remainder-top decomposition must be total:
@@ -3623,6 +3702,14 @@ bool RecomputeMatMulV4SketchReference(const CBlockHeader& header,
     const uint32_t n = params.nMatMulV4Dimension;
     const Consensus::MatMulEncodingProfile enc_profile =
         params.GetMatMulEncodingProfile(block_height);
+    if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C_LT) {
+        if (!matmul::v4::bmx4::CheckCombineLimbBoundBMX4C(n)) return false;
+        if (static_cast<int64_t>(Consensus::BMX4C_BASE_PRODUCT_BOUND_PER_N) * n >
+            std::numeric_limits<int32_t>::max()) {
+            return false;
+        }
+        return matmul::v4::lt::ComputeDigestBMX4CLT(header, n, digest_out, sketch_out);
+    }
     if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
         // Preserve the structural combine/accumulator guards the reference
         // relies on (identical to the CheckMatMulV4SketchVerifies preconditions;
@@ -3723,6 +3810,22 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
             // Window of one; the dispatch host-verifies candidates at/under the
             // target against the reference before returning them.
             if (matmul_v4::accel::ComputeDigestsBMX4CDispatched(
+                    headers, params.nMatMulV4Dimension, params.nMatMulV4FreivaldsRounds,
+                    ArithToUint256(*bnTarget), digests, payloads) &&
+                digests.size() == 1 && payloads.size() == 1) {
+                accel_ok = true;
+                accel_digest = digests[0];
+                accel_sketch = std::move(payloads[0]);
+            }
+        } else if (enc_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C_LT) {
+            // v4.4-LT Rank-1 (MatExpand + deep-m): host-verified LT dispatch
+            // (device backends are host-exact today; CPU WindowSketchMinerLT
+            // is the normative fallback). INERT while nMatMulDRLTHeight ==
+            // INT32_MAX.
+            std::vector<CBlockHeader> headers{static_cast<const CBlockHeader&>(block)};
+            std::vector<uint256> digests;
+            std::vector<std::vector<unsigned char>> payloads;
+            if (matmul_v4::accel::ComputeDigestsBMX4CLTDispatched(
                     headers, params.nMatMulV4Dimension, params.nMatMulV4FreivaldsRounds,
                     ArithToUint256(*bnTarget), digests, payloads) &&
                 digests.size() == 1 && payloads.size() == 1) {
@@ -4903,6 +5006,98 @@ bool SolveMatMulParallel(CBlockHeader& block,
     return false;
 }
 
+// MatMul v4.4-LT Rank-1 solve loop: Q*-sized windows through WindowSketchMinerLT
+// (MatExpand + deep-m). Winning candidates are resealed via ComputeDigestBMX4CLT.
+static bool SolveMatMulV4LT(CBlockHeader& block,
+                            const Consensus::Params& params,
+                            uint64_t& max_tries,
+                            int32_t block_height,
+                            const std::atomic<bool>* abort_flag,
+                            std::vector<uint32_t>* freivalds_payload_out,
+                            std::optional<int64_t> parent_median_time_past,
+                            const arith_uint256& bnTarget,
+                            std::chrono::steady_clock::time_point start)
+{
+    const uint32_t n = params.nMatMulV4Dimension;
+    uint32_t window_span = params.nMatMulConsensusQStar;
+    if (!matmul::v4::lt::IsValidConsensusQStar(window_span)) {
+        window_span = matmul::v4::lt::kConsensusQStarDefault;
+    }
+    if (const char* env = std::getenv("BTX_MATMUL_LT_BATCH")) {
+        const auto parsed = static_cast<uint32_t>(std::strtoul(env, nullptr, 10));
+        if (parsed > 0) window_span = std::min(parsed, matmul::v4::lt::kConsensusQStarMax);
+    }
+
+    matmul::v4::lt::WindowSketchMinerLT miner{block, n};
+    if (!miner.Valid()) {
+        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+        return false;
+    }
+
+    const uint256 target = ArithToUint256(bnTarget);
+    while (max_tries > 0) {
+        if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        const uint64_t nonce_room = std::numeric_limits<uint64_t>::max() - block.nNonce64;
+        uint32_t window = static_cast<uint32_t>(std::min<uint64_t>(window_span, max_tries));
+        if (nonce_room < window - 1) window = static_cast<uint32_t>(nonce_room) + 1;
+
+        std::vector<CBlockHeader> candidates(window, block);
+        for (uint32_t i = 0; i < window; ++i) {
+            candidates[i].nNonce64 = block.nNonce64 + i;
+            candidates[i].nNonce = static_cast<uint32_t>(candidates[i].nNonce64);
+            // MatExpand-B binds ComputeMatMulHeaderHash, which includes
+            // seed_a/seed_b — must pin nonce-bound seeds before mining.
+            if (!SetDeterministicMatMulSeeds(candidates[i], params, block_height, parent_median_time_past)) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+        }
+
+        std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
+        if (!miner.MineWindow(candidates, target, results)) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+
+        for (uint32_t i = 0; i < window; ++i) {
+            --max_tries;
+            if (!results[i].target_match) continue;
+
+            CBlockHeader& candidate = candidates[i];
+            uint256 ref_digest;
+            std::vector<unsigned char> ref_payload;
+            if (!matmul::v4::lt::ComputeDigestBMX4CLT(candidate, n, ref_digest, ref_payload) ||
+                ref_digest != results[i].digest) {
+                LogWarning("SolveMatMulV4LT: window digest diverged from reference at nonce=%u; discarding\n",
+                           candidate.nNonce64);
+                continue;
+            }
+            if (UintToArith256(ref_digest) > bnTarget) continue;
+
+            candidate.matmul_digest = ref_digest;
+            block = candidate;
+            if (freivalds_payload_out != nullptr) {
+                *freivalds_payload_out = PackMatMulV4SketchBytesToWords(ref_payload);
+            }
+            RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
+            return true;
+        }
+
+        if (block.nNonce64 > std::numeric_limits<uint64_t>::max() - window) {
+            block.nNonce64 = std::numeric_limits<uint64_t>::max();
+            break;
+        }
+        block.nNonce64 += window;
+        block.nNonce = static_cast<uint32_t>(block.nNonce64);
+    }
+
+    RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+    return false;
+}
+
 // MatMul v4 (spec §I.3): dedicated solver loop, mirroring the v3 solvers'
 // nonce/max_tries/abort_flag contract but dispatched separately because v4
 // has no pre-hash gate and no noise. H6: the pooled share-target override IS
@@ -5067,6 +5262,10 @@ static bool SolveMatMulV4(CBlockHeader& block,
     // is the SINGLE selector. At BMX4C heights the whole solve routes to the
     // ENC-BMX4C loop; the ENC-S8 path below is unchanged.
     const Consensus::MatMulEncodingProfile solve_profile = params.GetMatMulEncodingProfile(block_height);
+    if (solve_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C_LT) {
+        return SolveMatMulV4LT(block, params, max_tries, block_height, abort_flag,
+                               freivalds_payload_out, parent_median_time_past, *bnTarget, start);
+    }
     if (solve_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
         return SolveMatMulV4BMX4C(block, params, max_tries, block_height, abort_flag,
                                   freivalds_payload_out, parent_median_time_past, *bnTarget, start,

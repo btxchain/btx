@@ -503,6 +503,27 @@ uint256 ComputeSketchDigest(const uint256& sigma, const std::vector<unsigned cha
     return Sha256d(buf.data(), buf.size());
 }
 
+uint256 ComputeSketchDigestFromFq(const uint256& sigma, const std::vector<Fq>& sketch)
+{
+    // Streaming equivalent of ComputeSketchDigest(sigma, SerializeSketch(sketch)):
+    // SHA256d(tag || sigma || LE64(sketch[0]) || ... || LE64(sketch[m^2-1])).
+    CSHA256 outer;
+    outer.Write(reinterpret_cast<const unsigned char*>(kSketchDigestTag), sizeof(kSketchDigestTag) - 1);
+    outer.Write(sigma.data(), uint256::size());
+    uint8_t word_le[8];
+    for (Fq w : sketch) {
+        WriteLE64(word_le, w);
+        outer.Write(word_le, sizeof(word_le));
+    }
+    uint8_t mid[CSHA256::OUTPUT_SIZE];
+    outer.Finalize(mid);
+    CSHA256 inner;
+    inner.Write(mid, sizeof(mid));
+    uint8_t out[CSHA256::OUTPUT_SIZE];
+    inner.Finalize(out);
+    return uint256{Span<const unsigned char>{out, sizeof(out)}};
+}
+
 namespace {
 
 // Derive the per-round Freivalds challenge seed (Fiat-Shamir): bind sigma and

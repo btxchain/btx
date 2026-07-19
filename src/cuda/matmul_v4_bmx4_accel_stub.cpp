@@ -23,4 +23,12 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& /*headers*/, uint
     return false;
 }
 
+bool ComputeDigestsOnlyBMX4CAccel(const std::vector<CBlockHeader>& /*headers*/, uint32_t /*n*/,
+                                  uint32_t /*rounds*/, const uint256& /*target*/,
+                                  std::vector<matmul::v4::bmx4::DigestOnlyResultBMX4C>& /*results_out*/,
+                                  std::vector<std::vector<unsigned char>>* /*payloads_out*/)
+{
+    return false;
+}
+
 } // namespace matmul_v4::cuda

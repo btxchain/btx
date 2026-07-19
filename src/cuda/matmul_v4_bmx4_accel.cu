@@ -4,7 +4,9 @@
 
 #include <cuda/matmul_v4_bmx4_accel.h>
 
+#include <arith_uint256.h>
 #include <cuda/cuda_context.h>
+#include <cuda/matmul_v4_bmx4_context.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
@@ -46,7 +48,7 @@
 //           Qtall = [B_1;...;B_q]*V -- stacked per window chunk.
 //           scatter Qtall -> Qstack -- pure int32 permutation.
 //           base-2^6 limb decompose P, Qstack (remainder-top rule).
-//           16 limb-pair s8 GEMMs + shifted mod-q fold (weights 2^(6(i+j))).
+//           9 Karatsuba s8 GEMMs + fused M61 epilogue weights.
 //   HOST  : slice column block i -> Chat_i, SerializeSketch,
 //           H(sigma_i || payload_i) -- exact CPU routines again.
 //
@@ -154,12 +156,11 @@
 // FP4 units: the base-2^6 digits reach magnitude 32 (remainder-top digit),
 // which is not an E2M1 value, and spec §3 deliberately keeps the combine
 // non-4-bit-native ("it runs on whatever exact pipe the device proves" — on
-// NVIDIA that is IMMA's true int32, per-entry bound 1024n < 2^31). The device
-// kernels below mirror matmul_v4_bmx4.cpp DecomposeLimbPlanesBMX4C and the
-// ComputeCombineLimbTensorBMX4C fold statement-for-statement; the fold is
-// BYTE-IDENTICAL to the reference's direct ComputeCombineModQ because the
-// digit identity x = sum_l 64^l d_l is exact and canonical residues mod
-// q = 2^61-1 are unique.
+// NVIDIA that is IMMA's true int32). The device path uses Karatsuba-9
+// (nine s8 GEMMs + fused M61 epilogue weights) — byte-identical to
+// ComputeCombineKaratsuba9BMX4C / ComputeCombineModQ. Karatsuba sum planes are
+// bounded by [-128,125] (fit s8); accumulators stay < 2^29 at the dimension
+// limit, so results remain exact in INT32.
 //
 // DEVICE MEMORY BUDGET (n = 4096, m = 1024, chunk q = kMaxBatchedWindow = 32):
 //   shared: dP 16 MiB, dPplanes 16 MiB, dQtall/dQstack q*16 MiB each,
@@ -312,11 +313,8 @@ __global__ void Bmx4DecomposeLimbPlanesKernel(const int32_t* __restrict__ M,
 
 // Shifted mod-q recombine of ONE limb-pair product:
 //   Chat[idx] = FqAdd(Chat[idx], FqMul(weight, FqFromSigned(S[idx])))
-// with weight = 2^(6(i+j)) < q already canonical (exponent <= 36 < 61).
-// Statement-for-statement the CPU recombine loop in
-// ComputeCombineLimbTensorBMX4C; canonical residues are unique, so
-// accumulating the 16 launches in the CPU's (i outer, j inner) order
-// reproduces the identical canonical residue per entry.
+// with weight already reduced into F_q (including Karatsuba fused-epilogue
+// signed combinations of 64^k). Statement-for-statement the CPU recombine.
 __global__ void Bmx4LimbRecombineKernel(const int32_t* __restrict__ S,
                                         uint64_t* __restrict__ Chat,
                                         uint64_t weight,
@@ -327,6 +325,60 @@ __global__ void Bmx4LimbRecombineKernel(const int32_t* __restrict__ S,
         return;
     }
     Chat[gid] = Bmx4FqAdd(Chat[gid], Bmx4FqMul(weight, Bmx4FqFromSigned(static_cast<int64_t>(S[gid]))));
+}
+
+// Build nine Karatsuba planes from four base-2^6 limb planes.
+// Layout matches CPU BuildKaratsubaPlanes: [d0,d1,d0+d1,d2,d3,d2+d3,d0+d2,d1+d3,sum].
+__global__ void Bmx4BuildKaratsubaPlanesKernel(const int8_t* __restrict__ limbs4,
+                                               int8_t* __restrict__ planes9,
+                                               size_t total)
+{
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total) {
+        return;
+    }
+    const int32_t d0 = limbs4[0 * total + gid];
+    const int32_t d1 = limbs4[1 * total + gid];
+    const int32_t d2 = limbs4[2 * total + gid];
+    const int32_t d3 = limbs4[3 * total + gid];
+    planes9[0 * total + gid] = static_cast<int8_t>(d0);
+    planes9[1 * total + gid] = static_cast<int8_t>(d1);
+    planes9[2 * total + gid] = static_cast<int8_t>(d0 + d1);
+    planes9[3 * total + gid] = static_cast<int8_t>(d2);
+    planes9[4 * total + gid] = static_cast<int8_t>(d3);
+    planes9[5 * total + gid] = static_cast<int8_t>(d2 + d3);
+    planes9[6 * total + gid] = static_cast<int8_t>(d0 + d2);
+    planes9[7 * total + gid] = static_cast<int8_t>(d1 + d3);
+    planes9[8 * total + gid] = static_cast<int8_t>(d0 + d1 + d2 + d3);
+}
+
+// Host-side Fq weights for the nine Karatsuba products (fused M61 epilogue).
+void Bmx4Karatsuba9FqWeights(uint64_t (&w_out)[9])
+{
+    const uint64_t w[7] = {
+        uint64_t{1} << 0,  uint64_t{1} << 6,  uint64_t{1} << 12,
+        uint64_t{1} << 18, uint64_t{1} << 24, uint64_t{1} << 30,
+        uint64_t{1} << 36,
+    };
+    auto add = [](uint64_t a, uint64_t b) {
+        constexpr uint64_t kQ = (uint64_t{1} << 61) - 1;
+        uint64_t s = a + b;
+        if (s >= kQ) s -= kQ;
+        return s;
+    };
+    auto neg = [](uint64_t a) {
+        constexpr uint64_t kQ = (uint64_t{1} << 61) - 1;
+        return a == 0 ? 0 : kQ - a;
+    };
+    w_out[0] = add(add(w[0], neg(w[1])), add(neg(w[2]), w[3]));
+    w_out[1] = add(add(neg(w[1]), w[2]), add(w[3], neg(w[4])));
+    w_out[2] = add(w[1], neg(w[3]));
+    w_out[3] = add(add(neg(w[2]), w[3]), add(w[4], neg(w[5])));
+    w_out[4] = add(add(w[3], neg(w[4])), add(neg(w[5]), w[6]));
+    w_out[5] = add(neg(w[3]), w[5]);
+    w_out[6] = add(w[2], neg(w[3]));
+    w_out[7] = add(neg(w[3]), w[4]);
+    w_out[8] = w[3];
 }
 
 // Native-tier promotion: fold one exponent slice of an mxf4 GEMM result into
@@ -1337,16 +1389,19 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
 
     // Shared device state.
     int32_t* dP = nullptr;      // P = U*Ahat, m x n (exact int32)
-    int8_t* dPplanes = nullptr; // 4 base-2^6 limb planes of P
+    int8_t* dPplanes = nullptr; // 4 base-2^6 limb planes of P (decompose scratch)
+    int8_t* dPkara = nullptr;   // 9 Karatsuba planes of P
     int32_t* dQtall = nullptr;  // [Q_1; ...; Q_q], q*n x m (exact int32)
     int32_t* dQstack = nullptr; // [Q_1 | ... | Q_q], n x q*m
-    int8_t* dQplanes = nullptr; // 4 base-2^6 limb planes of Qstack
-    int32_t* dS = nullptr;      // one limb-pair product, m x q*m
+    int8_t* dQplanes = nullptr; // 4 base-2^6 limb planes of Qstack (decompose scratch)
+    int8_t* dQkara = nullptr;   // 9 Karatsuba planes of Qstack
+    int32_t* dS = nullptr;      // one Karatsuba product, m x q*m
     uint64_t* dChat = nullptr;  // Chat_wide accumulator, m x q*m
     void* workspace = nullptr;
     cudaStream_t stream = nullptr;
     cublasLtHandle_t lt = nullptr;
     constexpr size_t kWorkspaceBytes = size_t{32} << 20;
+    constexpr uint32_t kKaraPlanes = 9;
 
     // INT8-tier device state.
     int8_t* dA = nullptr;      // dequantized Ahat, n x n (|.| <= 48)
@@ -1388,6 +1443,7 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
         // Template-scoped, NOT window-scoped (independent of Q): allocated once.
         if (!CudaOk(cudaMalloc(&dP, mn * sizeof(int32_t)), "cudaMalloc P", error)) break;
         if (!CudaOk(cudaMalloc(&dPplanes, mn * ref::kCombineLimbs), "cudaMalloc Pplanes", error)) break;
+        if (!CudaOk(cudaMalloc(&dPkara, mn * kKaraPlanes), "cudaMalloc Pkara", error)) break;
         // The window (Q) working set is allocated adaptively AFTER tier
         // selection -- see the G6 block below.
 
@@ -1500,6 +1556,7 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
             auto free_q_buffers = [&]() {
                 if (dChat) { cudaFree(dChat); dChat = nullptr; }
                 if (dS) { cudaFree(dS); dS = nullptr; }
+                if (dQkara) { cudaFree(dQkara); dQkara = nullptr; }
                 if (dQplanes) { cudaFree(dQplanes); dQplanes = nullptr; }
                 if (dQstack) { cudaFree(dQstack); dQstack = nullptr; }
                 if (dQtall) { cudaFree(dQtall); dQtall = nullptr; }
@@ -1519,6 +1576,7 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
                 if ((e = cudaMalloc(&dQtall, stack * sizeof(int32_t))) != cudaSuccess) { free_q_buffers(); return e; }
                 if ((e = cudaMalloc(&dQstack, stack * sizeof(int32_t))) != cudaSuccess) { free_q_buffers(); return e; }
                 if ((e = cudaMalloc(&dQplanes, stack * ref::kCombineLimbs)) != cudaSuccess) { free_q_buffers(); return e; }
+                if ((e = cudaMalloc(&dQkara, stack * kKaraPlanes)) != cudaSuccess) { free_q_buffers(); return e; }
                 if ((e = cudaMalloc(&dS, out * sizeof(int32_t))) != cudaSuccess) { free_q_buffers(); return e; }
                 if ((e = cudaMalloc(&dChat, out * sizeof(uint64_t))) != cudaSuccess) { free_q_buffers(); return e; }
 #if BTX_BMX4C_HAVE_MXF4
@@ -1645,6 +1703,8 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
         }
         Bmx4DecomposeLimbPlanesKernel<<<BlocksFor(mn), kThreads, 0, stream>>>(dP, dPplanes, mn);
         if (!CudaOk(cudaGetLastError(), "P limb decompose launch", error)) break;
+        Bmx4BuildKaratsubaPlanesKernel<<<BlocksFor(mn), kThreads, 0, stream>>>(dPplanes, dPkara, mn);
+        if (!CudaOk(cudaGetLastError(), "P karatsuba planes launch", error)) break;
 
         // ------------------------------------------------------------------
         // WINDOW CHUNKS. Per-nonce results are independent, so chunking is
@@ -1762,33 +1822,35 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
                 chunk_failed = true;
                 break;
             }
+            Bmx4BuildKaratsubaPlanesKernel<<<BlocksFor(stack_elems), kThreads, 0, stream>>>(
+                dQplanes, dQkara, stack_elems);
+            if (!CudaOk(cudaGetLastError(), "Q karatsuba planes launch", error)) {
+                chunk_failed = true;
+                break;
+            }
 
-            // Chat_wide = 0, then the 16 limb-pair combine GEMMs
-            // S_ij = P_i * Qstack_j (m x q*m x n, per-entry |.| <= 1024n
-            // < 2^31 — true int32, IMMA-native) with the shifted mod-q fold,
-            // in the CPU's (i outer, j inner) order.
+            // Chat_wide = 0, then the nine Karatsuba combine GEMMs with fused
+            // M61 epilogue weights (1.54x fewer tensor MACs than the 16-pair
+            // schoolbook; byte-identical to ComputeCombineKaratsuba9BMX4C).
             if (!CudaOk(cudaMemsetAsync(dChat, 0, out_elems * sizeof(uint64_t), stream), "Chat memset", error)) {
                 chunk_failed = true;
                 break;
             }
-            for (uint32_t i = 0; i < ref::kCombineLimbs && !chunk_failed; ++i) {
-                for (uint32_t j = 0; j < ref::kCombineLimbs; ++j) {
-                    const int8_t* Pi = dPplanes + static_cast<size_t>(i) * mn;
-                    const int8_t* Qj = dQplanes + static_cast<size_t>(j) * stack_elems;
-                    if (!RunGemmAuto(lt, stream, workspace, kWorkspaceBytes, force_scalar,
-                                     Pi, Qj, dS, m, static_cast<uint32_t>(q_cols), n, error)) {
-                        chunk_failed = true;
-                        break;
-                    }
-                    // weight = 2^(6*(i+j)) mod q; exponent <= 36 < 61 so the
-                    // canonical weight is the plain power of two (CPU-equal,
-                    // matmul_v4_bmx4.cpp weight table).
-                    const uint64_t w = static_cast<uint64_t>(1) << (6 * (i + j));
-                    Bmx4LimbRecombineKernel<<<BlocksFor(out_elems), kThreads, 0, stream>>>(dS, dChat, w, out_elems);
-                    if (!CudaOk(cudaGetLastError(), "limb recombine launch", error)) {
-                        chunk_failed = true;
-                        break;
-                    }
+            uint64_t kara_w[9];
+            Bmx4Karatsuba9FqWeights(kara_w);
+            for (uint32_t r = 0; r < kKaraPlanes && !chunk_failed; ++r) {
+                const int8_t* Pi = dPkara + static_cast<size_t>(r) * mn;
+                const int8_t* Qj = dQkara + static_cast<size_t>(r) * stack_elems;
+                if (!RunGemmAuto(lt, stream, workspace, kWorkspaceBytes, force_scalar,
+                                 Pi, Qj, dS, m, static_cast<uint32_t>(q_cols), n, error)) {
+                    chunk_failed = true;
+                    break;
+                }
+                Bmx4LimbRecombineKernel<<<BlocksFor(out_elems), kThreads, 0, stream>>>(
+                    dS, dChat, kara_w[r], out_elems);
+                if (!CudaOk(cudaGetLastError(), "karatsuba recombine launch", error)) {
+                    chunk_failed = true;
+                    break;
                 }
             }
             if (chunk_failed) break;
@@ -1836,9 +1898,11 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
     if (lt) cublasLtDestroy(lt);
     if (dChat) cudaFree(dChat);
     if (dS) cudaFree(dS);
+    if (dQkara) cudaFree(dQkara);
     if (dQplanes) cudaFree(dQplanes);
     if (dQstack) cudaFree(dQstack);
     if (dQtall) cudaFree(dQtall);
+    if (dPkara) cudaFree(dPkara);
     if (dPplanes) cudaFree(dPplanes);
     if (dP) cudaFree(dP);
     if (stream) cudaStreamDestroy(stream);
@@ -1851,6 +1915,59 @@ bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t
         return false;
     }
     return true;
+}
+
+bool ComputeDigestsOnlyBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                  const uint256& target,
+                                  std::vector<matmul::v4::bmx4::DigestOnlyResultBMX4C>& results_out,
+                                  std::vector<std::vector<unsigned char>>* payloads_out)
+{
+    results_out.clear();
+    if (payloads_out != nullptr) payloads_out->clear();
+    if (headers.empty() || rounds == 0) return false;
+
+    // GPU path first (when compiled/available): full device combine, then drop
+    // loser payloads. Persistent host pipeline is the cross-call CPU fallback
+    // and the normative schedule for device-resident XOF/hash bring-up.
+    std::vector<uint256> digests;
+    std::vector<std::vector<unsigned char>> payloads;
+    if (ComputeDigestsBMX4CAccel(headers, n, rounds, digests, payloads) &&
+        digests.size() == headers.size() && payloads.size() == headers.size()) {
+        const arith_uint256 bn_target = UintToArith256(target);
+        results_out.resize(headers.size());
+        if (payloads_out != nullptr) payloads_out->resize(headers.size());
+        for (size_t i = 0; i < headers.size(); ++i) {
+            auto& r = results_out[i];
+            r.nonce = headers[i].nNonce64;
+            r.digest = digests[i];
+            r.target_match = UintToArith256(digests[i]) <= bn_target;
+            r.backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
+            if (payloads_out != nullptr) {
+                if (r.target_match) {
+                    (*payloads_out)[i] = std::move(payloads[i]);
+                } else {
+                    (*payloads_out)[i].clear();
+                }
+            }
+            payloads[i].clear();
+            payloads[i].shrink_to_fit();
+        }
+        return true;
+    }
+
+    std::string err;
+    auto& ctx = Bmx4CudaTemplateContext::Instance();
+    const auto plan = ref::PlanExactAccelLanes("h200");
+    if (ctx.EnsureTemplate(headers[0], n, plan, err) &&
+        ctx.MineDigestsOnly(headers, target, results_out, payloads_out, /*retain_winner_payload=*/true)) {
+        for (auto& r : results_out) {
+            if (r.backend_status == matmul::v4::bmx4::DigestOnlyBackendStatus::Ok) {
+                r.backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
+            }
+        }
+        return results_out.size() == headers.size();
+    }
+    return false;
 }
 
 } // namespace matmul_v4::cuda

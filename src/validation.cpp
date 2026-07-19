@@ -10042,12 +10042,17 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
             // Trivially true for the 4096/8192 (and regtest 256) dimensions,
             // enforced here as defense in depth. GetMatMulEncodingProfile is the
             // single profile selector (no second height compare, spec §8.2).
-            if (consensusParams.GetMatMulEncodingProfile(nHeight) ==
-                    Consensus::MatMulEncodingProfile::ENC_BMX4C &&
-                (block.matmul_dim % Consensus::BMX4C_SCALE_BLOCK_LENGTH) != 0) {
-                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
-                                     "bad-matmul-dim",
-                                     "matmul bmx4c dimension not a multiple of the E8M0 block length");
+            // ENC-BMX4C-LT inherits the same E8M0 block-length gate (MatExpand
+            // dequant still contracts over n with the BMX4 structural bound).
+            {
+                const auto enc = consensusParams.GetMatMulEncodingProfile(nHeight);
+                if ((enc == Consensus::MatMulEncodingProfile::ENC_BMX4C ||
+                     enc == Consensus::MatMulEncodingProfile::ENC_BMX4C_LT) &&
+                    (block.matmul_dim % Consensus::BMX4C_SCALE_BLOCK_LENGTH) != 0) {
+                    return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                         "bad-matmul-dim",
+                                         "matmul bmx4c dimension not a multiple of the E8M0 block length");
+                }
             }
         } else if (block.matmul_dim != consensusParams.nMatMulDimension) {
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,

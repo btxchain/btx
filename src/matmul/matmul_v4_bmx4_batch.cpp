@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_bmx4_batch.h>
 
+#include <arith_uint256.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
@@ -95,6 +96,68 @@ bool BatchedSketchMinerBMX4C::Mine(const std::vector<CBlockHeader>& headers,
         res.payload = matmul::v4::SerializeSketch(Chat);
         res.digest = matmul::v4::ComputeSketchDigest(sigmas[idx], res.payload);
         out.push_back(std::move(res));
+    }
+    return true;
+}
+
+bool BatchedSketchMinerBMX4C::MineDigestsOnly(const std::vector<CBlockHeader>& headers,
+                                              const uint256& target,
+                                              std::vector<DigestOnlyResultBMX4C>& out,
+                                              std::vector<std::vector<unsigned char>>* payloads_out,
+                                              bool retain_winner_payload) const
+{
+    // Prefer the persistent triple-buffer pipeline (cross-call reusable when
+    // callers hold PersistentSketchMinerBMX4C). This legacy entry still avoids
+    // retaining loser payloads: digests are streamed from F_q words.
+    out.clear();
+    if (payloads_out != nullptr) payloads_out->clear();
+    if (!m_valid || headers.empty()) return false;
+
+    const uint32_t count = static_cast<uint32_t>(headers.size());
+    const uint32_t q_cols = count * m_m;
+    std::vector<uint256> sigmas(count);
+    std::vector<int32_t> Qstack(static_cast<size_t>(m_n) * q_cols);
+    for (uint32_t idx = 0; idx < count; ++idx) {
+        const CBlockHeader& header = headers[idx];
+        if (matmul::v4::ComputeTemplateHash(header) != m_template_hash) {
+            out.clear();
+            return false;
+        }
+        sigmas[idx] = matmul::v4::DeriveSigma(header);
+        const uint256 seed_b = DeriveOperandSeedBMX4C(header, matmul::v4::Operand::B);
+        const std::vector<int8_t> Bhat = ExpandOperandB(seed_b, m_n);
+        const std::vector<int32_t> Qi = matmul::v4::ComputeProjectedRight(Bhat, m_V, m_n, m_m);
+        for (uint32_t k = 0; k < m_n; ++k) {
+            int32_t* dst = &Qstack[static_cast<size_t>(k) * q_cols + static_cast<size_t>(idx) * m_m];
+            const int32_t* src = &Qi[static_cast<size_t>(k) * m_m];
+            std::copy(src, src + m_m, dst);
+        }
+    }
+
+    const std::vector<Fq> Chat_wide =
+        matmul::v4::ComputeCombineLimbTensorStacked(m_P, Qstack, m_n, m_m, q_cols);
+
+    const arith_uint256 bn_target = UintToArith256(target);
+    out.resize(count);
+    if (payloads_out != nullptr) payloads_out->resize(count);
+    for (uint32_t idx = 0; idx < count; ++idx) {
+        std::vector<Fq> Chat(static_cast<size_t>(m_m) * m_m);
+        for (uint32_t a = 0; a < m_m; ++a) {
+            const Fq* src = &Chat_wide[static_cast<size_t>(a) * q_cols + static_cast<size_t>(idx) * m_m];
+            std::copy(src, src + m_m, &Chat[static_cast<size_t>(a) * m_m]);
+        }
+        DigestOnlyResultBMX4C& r = out[idx];
+        r.nonce = headers[idx].nNonce64;
+        r.digest = matmul::v4::ComputeSketchDigestFromFq(sigmas[idx], Chat);
+        r.target_match = UintToArith256(r.digest) <= bn_target;
+        r.backend_status = DigestOnlyBackendStatus::Ok;
+        if (payloads_out != nullptr) {
+            if (retain_winner_payload && r.target_match) {
+                (*payloads_out)[idx] = matmul::v4::SerializeSketch(Chat);
+            } else {
+                (*payloads_out)[idx].clear();
+            }
+        }
     }
     return true;
 }

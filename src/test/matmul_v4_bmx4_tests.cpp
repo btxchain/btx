@@ -23,6 +23,8 @@
 #include <matmul/int8_field.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_bmx4_batch.h>
+#include <matmul/matmul_v4_bmx4_pipeline.h>
 #include <matmul/pow_v4.h>
 
 #include <primitives/block.h>
@@ -239,6 +241,201 @@ BOOST_AUTO_TEST_CASE(limb_combine_matches_direct_high_magnitude_and_bound_edge)
     const auto direct = ComputeCombineModQ(P, Q, n, m);
     const auto limb = bx::ComputeCombineLimbTensorBMX4C(P, Q, n, m);
     BOOST_CHECK(limb == direct);
+}
+
+// --- Karatsuba-9 / FP8 five-limb / scale-partitioned exactness --------------
+
+BOOST_AUTO_TEST_CASE(karatsuba9_combine_matches_limb_and_direct)
+{
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const uint32_t n = 96;
+    const uint32_t m = 24;
+    const int64_t bound = static_cast<int64_t>(bx::kProjPerMac) * n;
+    BOOST_REQUIRE(bx::CheckCombineLimbBoundBMX4C(n));
+
+    std::vector<int32_t> P(static_cast<size_t>(m) * n);
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m);
+    for (auto& x : P) x = static_cast<int32_t>(static_cast<int64_t>(rng.randrange(2 * bound + 1)) - bound);
+    for (auto& x : Q) x = static_cast<int32_t>(static_cast<int64_t>(rng.randrange(2 * bound + 1)) - bound);
+
+    const auto direct = ComputeCombineModQ(P, Q, n, m);
+    const auto limb = bx::ComputeCombineLimbTensorBMX4C(P, Q, n, m);
+    const auto kara = bx::ComputeCombineKaratsuba9BMX4C(P, Q, n, m);
+    BOOST_CHECK(kara == direct);
+    BOOST_CHECK(kara == limb);
+}
+
+BOOST_AUTO_TEST_CASE(fp8_five_limb_combine_matches_direct)
+{
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const uint32_t n = 64;
+    const uint32_t m = 16;
+    const int64_t bound = static_cast<int64_t>(bx::kProjPerMac) * n;
+    BOOST_REQUIRE(bx::CheckCombineLimbBoundBMX4C(n));
+
+    std::vector<int32_t> P(static_cast<size_t>(m) * n);
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m);
+    for (auto& x : P) x = static_cast<int32_t>(static_cast<int64_t>(rng.randrange(2 * bound + 1)) - bound);
+    for (auto& x : Q) x = static_cast<int32_t>(static_cast<int64_t>(rng.randrange(2 * bound + 1)) - bound);
+
+    const auto direct = ComputeCombineModQ(P, Q, n, m);
+    const auto fp8 = bx::ComputeCombineFp8FiveLimbBMX4C(P, Q, n, m);
+    BOOST_CHECK(fp8 == direct);
+}
+
+BOOST_AUTO_TEST_CASE(scale_partitioned_projection_matches_dense)
+{
+    const uint32_t n = kTestDim;
+    uint32_t m = 0;
+    BOOST_REQUIRE(bx::ValidateDimsBMX4C(n, kTileB, m));
+    const auto header = MakeV4Header(7, n);
+    const uint256 seed_a = bx::DeriveOperandSeedBMX4C(header, Operand::A);
+    const uint256 seed_b = bx::DeriveOperandSeedBMX4C(header, Operand::B);
+    const auto [seed_u, seed_v] = bx::DeriveProjectorSeedsBMX4C(header);
+
+    std::vector<int8_t> mu_a(static_cast<size_t>(n) * n);
+    bx::ExpandMantissaStream(seed_a, mu_a.size(), mu_a.data());
+    std::vector<uint8_t> scale_a(static_cast<size_t>(n) * (n / bx::kBlockLen));
+    bx::ExpandScaleStream(seed_a, scale_a.size(), scale_a.data());
+    std::vector<int8_t> mu_b(static_cast<size_t>(n) * n);
+    bx::ExpandMantissaStream(seed_b, mu_b.size(), mu_b.data());
+    std::vector<uint8_t> scale_b(static_cast<size_t>(n / bx::kBlockLen) * n);
+    bx::ExpandScaleStream(seed_b, scale_b.size(), scale_b.data());
+
+    const auto U = bx::ExpandProjectorBMX4C(seed_u, m, n);
+    const auto V = bx::ExpandProjectorBMX4C(seed_v, n, m);
+    const auto Ahat = bx::ExpandOperandA(seed_a, n);
+    const auto Bhat = bx::ExpandOperandB(seed_b, n);
+
+    const auto P_dense = ComputeProjectedLeft(U, Ahat, n, m);
+    const auto Q_dense = ComputeProjectedRight(Bhat, V, n, m);
+    const auto P_part = bx::ComputeProjectedLeftScalePartitionedBMX4C(U, mu_a, scale_a, n, m);
+    const auto Q_part = bx::ComputeProjectedRightScalePartitionedBMX4C(mu_b, scale_b, V, n, m);
+    BOOST_CHECK(P_part == P_dense);
+    BOOST_CHECK(Q_part == Q_dense);
+}
+
+BOOST_AUTO_TEST_CASE(exact_accel_planner_selects_documented_lanes)
+{
+    const auto h200 = bx::PlanExactAccelLanes("h200");
+    BOOST_CHECK(h200.projection == bx::ProjectionLane::CanonicalInt8);
+    BOOST_CHECK(h200.combine == bx::CombineLane::Karatsuba9Int8);
+
+    const auto b200 = bx::PlanExactAccelLanes("b200");
+    BOOST_CHECK(b200.projection == bx::ProjectionLane::ScalePartitionedMxfp4);
+    BOOST_CHECK(b200.combine == bx::CombineLane::Karatsuba9Int8);
+
+    const auto rubin = bx::PlanExactAccelLanes("rubin");
+    BOOST_CHECK(rubin.projection == bx::ProjectionLane::ExactFp8);
+    BOOST_CHECK(rubin.combine == bx::CombineLane::ExactFp8FiveLimb);
+
+    const auto cpu = bx::PlanExactAccelLanes("cpu");
+    BOOST_CHECK(cpu.combine == bx::CombineLane::CanonicalInteger);
+}
+
+BOOST_AUTO_TEST_CASE(digest_only_mining_drops_loser_payloads)
+{
+    const uint32_t n = kTestDim;
+    const auto tmpl = MakeV4Header(0, n);
+    bx::BatchedSketchMinerBMX4C miner{tmpl, n};
+    BOOST_REQUIRE(miner.Valid());
+
+    std::vector<CBlockHeader> headers(4, tmpl);
+    for (uint32_t i = 0; i < headers.size(); ++i) {
+        headers[i].nNonce64 = 100 + i;
+        headers[i].nNonce = static_cast<uint32_t>(headers[i].nNonce64);
+    }
+    // All-ones target => every digest matches (forces winner payload retention path).
+    const uint256 easy_target = ParseUint256("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+
+    std::vector<bx::DigestOnlyResultBMX4C> results;
+    std::vector<std::vector<unsigned char>> payloads;
+    BOOST_REQUIRE(miner.MineDigestsOnly(headers, easy_target, results, &payloads, /*retain_winner_payload=*/true));
+    BOOST_REQUIRE_EQUAL(results.size(), headers.size());
+    BOOST_REQUIRE_EQUAL(payloads.size(), headers.size());
+    for (size_t i = 0; i < results.size(); ++i) {
+        BOOST_CHECK(results[i].target_match);
+        BOOST_CHECK(!payloads[i].empty());
+        uint256 ref_digest;
+        std::vector<unsigned char> ref_payload;
+        BOOST_REQUIRE(bx::ComputeDigestBMX4C(headers[i], n, ref_digest, ref_payload));
+        BOOST_CHECK(results[i].digest == ref_digest);
+        BOOST_CHECK(payloads[i] == ref_payload);
+    }
+
+    // Impossible target => no payloads retained.
+    const uint256 hard_target{}; // zero
+    results.clear();
+    payloads.clear();
+    BOOST_REQUIRE(miner.MineDigestsOnly(headers, hard_target, results, &payloads, /*retain_winner_payload=*/true));
+    for (size_t i = 0; i < results.size(); ++i) {
+        BOOST_CHECK(!results[i].target_match);
+        BOOST_CHECK(payloads[i].empty());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(portable_xof_matches_streaming)
+{
+    const uint256 seed = ParseUint256("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    const size_t count = 4096;
+    std::vector<int8_t> a(count), b(count);
+    bx::ExpandMantissaStream(seed, count, a.data());
+    bx::ExpandMantissaStreamPortable(seed, count, b.data());
+    BOOST_CHECK(a == b);
+
+    std::vector<uint8_t> sa(512), sb(512);
+    bx::ExpandScaleStream(seed, sa.size(), sa.data());
+    bx::ExpandScaleStreamPortable(seed, sb.size(), sb.data());
+    BOOST_CHECK(sa == sb);
+}
+
+BOOST_AUTO_TEST_CASE(streaming_digest_matches_serialized)
+{
+    const uint32_t n = 64;
+    uint32_t m = 0;
+    BOOST_REQUIRE(bx::ValidateDimsBMX4C(n, kTileB, m));
+    const auto header = MakeV4Header(9, n);
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(bx::ComputeDigestBMX4C(header, n, digest, payload));
+    std::vector<Fq> sketch;
+    BOOST_REQUIRE(ParseSketch(payload, m, sketch));
+    const uint256 sigma = DeriveSigma(header);
+    BOOST_CHECK(ComputeSketchDigestFromFq(sigma, sketch) == digest);
+    BOOST_CHECK(ComputeSketchDigest(sigma, payload) == digest);
+}
+
+BOOST_AUTO_TEST_CASE(persistent_pipeline_byte_identical_and_reuses_template)
+{
+    const uint32_t n = kTestDim;
+    const auto tmpl = MakeV4Header(0, n);
+    bx::PersistentSketchMinerBMX4C miner{tmpl, n};
+    BOOST_REQUIRE(miner.Valid());
+    miner.SetRequestedQ(4);
+
+    std::vector<CBlockHeader> headers(5, tmpl);
+    for (uint32_t i = 0; i < headers.size(); ++i) {
+        headers[i].nNonce64 = 200 + i;
+        headers[i].nNonce = static_cast<uint32_t>(headers[i].nNonce64);
+    }
+    const uint256 easy_target = ParseUint256("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+
+    std::vector<bx::DigestOnlyResultBMX4C> r1, r2;
+    std::vector<std::vector<unsigned char>> p1;
+    BOOST_REQUIRE(miner.MineDigestsOnly(headers, easy_target, r1, &p1, true));
+    BOOST_REQUIRE(miner.MineDigestsOnly(headers, easy_target, r2, nullptr, false)); // cross-call reuse
+    BOOST_REQUIRE_EQUAL(r1.size(), r2.size());
+    for (size_t i = 0; i < r1.size(); ++i) {
+        BOOST_CHECK(r1[i].digest == r2[i].digest);
+        uint256 ref_digest;
+        std::vector<unsigned char> ref_payload;
+        BOOST_REQUIRE(bx::ComputeDigestBMX4C(headers[i], n, ref_digest, ref_payload));
+        BOOST_CHECK(r1[i].digest == ref_digest);
+        BOOST_CHECK(p1[i] == ref_payload);
+    }
+    BOOST_CHECK_EQUAL(miner.LastStats().xof_stage_calls, headers.size());
+    BOOST_CHECK_EQUAL(miner.LastStats().combine_stage_calls, headers.size());
+    BOOST_CHECK_EQUAL(miner.LastStats().hash_stage_calls, headers.size());
 }
 
 // --- GOLDEN / C-1' boundary vectors -----------------------------------------

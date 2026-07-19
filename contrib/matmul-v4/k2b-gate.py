@@ -62,6 +62,16 @@
 #   contrib/matmul-v4/k2b-gate.py results/ --json            # machine-readable out
 #
 # Stdlib only (json, argparse, glob, pathlib). No third-party deps, no network.
+#
+# v4.4-LT Rank-1 (ENC-DR-LT): this aggregator stays BMX4C-only (schema_version
+# 2, profile=="bmx4c" -- see G2 below). matmul-v4-report has no LT report
+# schema yet, so there is nothing for this tool to aggregate for LT today; a
+# report with a future profile=="bmx4c-lt" is excluded the same way a v4.1
+# report is (see the G2 note below), not silently miscounted as BMX4C. Use
+# `contrib/matmul-v4/lt-gate.py` for the separate Rank-1 GO/NO-GO checklist
+# (doc/btx-matmul-v4.4-lt-normative-spec.md) -- its gates differ enough
+# (MatExpand adversarial review, Q* window, B200/5090 nonce/$ ratio) that
+# folding them into this aggregator would blur two independent decisions.
 
 import argparse
 import glob
@@ -214,9 +224,15 @@ def evaluate(reports, labels):
                            % (rep["_file"], vendor or "?", rep.get("backend", "?")))
         # G2 — wrong profile carries no M-t24 verdict.
         if not is_bmx4c:
-            notes.append("%s is not an ENC-BMX4C report (schema_version=%r "
-                         "profile=%r) — excluded from the M-t24 gate."
-                         % (rep["_file"], rep.get("schema_version"), rep.get("profile")))
+            if rep.get("profile") == "bmx4c-lt":
+                notes.append("%s is a Rank-1 ENC-DR-LT report (profile=%r) — this "
+                             "aggregator is BMX4C-only; use contrib/matmul-v4/lt-gate.py "
+                             "for the LT GO/NO-GO checklist instead."
+                             % (rep["_file"], rep.get("profile")))
+            else:
+                notes.append("%s is not an ENC-BMX4C report (schema_version=%r "
+                             "profile=%r) — excluded from the M-t24 gate."
+                             % (rep["_file"], rep.get("schema_version"), rep.get("profile")))
             continue
         if rep.get("backend") == "cpu":
             notes.append("%s is a CPU-reference run — certifies the harness, never "

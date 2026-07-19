@@ -309,6 +309,8 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_batch.cpp
   matmul/matmul_v4_bmx4.cpp
   matmul/matmul_v4_bmx4_batch.cpp
+  matmul/matmul_v4_bmx4_pipeline.cpp
+  matmul/matmul_v4_lt.cpp
   matmul/matmul_sketch_cache.cpp
   matmul/matmul_v4_exact_float.cpp
   matmul/accel_v4.cpp
@@ -319,6 +321,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_pow.cpp
   matmul/transcript.cpp
   matmul/accelerated_solver.cpp
+  cuda/matmul_v4_bmx4_context.cpp
   net_permissions.cpp
   net_types.cpp
   netaddress.cpp
@@ -443,6 +446,10 @@ if(APPLE AND BTX_ENABLE_METAL)
     # build suppressed the weak stub while providing no strong impl (link error /
     # silently unserved profile). Wire it in alongside its kernels metallib.
     metal/matmul_v4_bmx4_accel.mm
+    # MatMul v4.4 ENC-DR-LT ("MatExpand") Metal entry point: see
+    # matmul_v4_lt_accel.h/.mm for why no Metal kernels are wired yet (the
+    # host-exact WindowSketchMinerLT pipeline runs behind this entry point).
+    metal/matmul_v4_lt_accel.mm
     metal/nonce_accel.mm
     metal/oracle_accel.mm
   )
@@ -536,6 +543,7 @@ else()
     metal/matmul_accel_stub.cpp
     metal/matmul_v4_accel_stub.cpp
     metal/matmul_v4_bmx4_accel_stub.cpp
+    metal/matmul_v4_lt_accel_stub.cpp
     metal/nonce_accel_stub.cpp
     metal/oracle_accel_stub.cpp
   )
@@ -552,6 +560,7 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     # MXFP4 native GEMM is currently unserved by cuBLASLt -- see the round-2
     # remediation doc). Compile-verified only on real CUDA toolchains.
     cuda/matmul_v4_bmx4_accel.cu
+    cuda/matmul_v4_lt_accel.cu
   )
   # PUBLIC so the define propagates to every consumer of btx_matmul_backend.
   # This subsumes the eligibility-classifier fix: CudaEligibility() lives in
@@ -593,6 +602,7 @@ else()
     cuda/oracle_accel_stub.cpp
     cuda/matmul_v4_accel_stub.cpp
     cuda/matmul_v4_bmx4_accel_stub.cpp
+    cuda/matmul_v4_lt_accel_stub.cpp
   )
 endif()
 if(BTX_ENABLE_HIP)
@@ -602,10 +612,15 @@ if(BTX_ENABLE_HIP)
     # never listed, so the strong matmul_v4::hip::ComputeDigestsBMX4CAccel never
     # linked and the profile fell back to the (weak) stub on ROCm.
     hip/matmul_v4_bmx4_accel.hip
+    # MatMul v4.4 ENC-DR-LT ("MatExpand") HIP backend: self-tested device GEMM
+    # kernels + the host-exact WindowSketchMinerLT digest pipeline (see
+    # matmul_v4_lt_accel.h/.hip for the full contract).
+    hip/matmul_v4_lt_accel.hip
   )
   set_source_files_properties(
     hip/matmul_v4_accel.hip
     hip/matmul_v4_bmx4_accel.hip
+    hip/matmul_v4_lt_accel.hip
     PROPERTIES LANGUAGE HIP)
   # PUBLIC so the define reaches the backend-determinism test TU (compiled into
   # test_btx), whose HIP determinism row #if-guards on BTX_ENABLE_HIP; PRIVATE
@@ -628,6 +643,7 @@ else()
   target_sources(btx_matmul_backend PRIVATE
     hip/matmul_v4_accel_stub.cpp
     hip/matmul_v4_bmx4_accel_stub.cpp
+    hip/matmul_v4_lt_accel_stub.cpp
   )
 endif()
 target_link_libraries(btx_matmul_backend PRIVATE core_interface)

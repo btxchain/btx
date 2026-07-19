@@ -58,6 +58,23 @@
 #
 # Exit: 0 = PASS (bit-exact [+ M-t24 PASS under --profile bmx4c]), 1 =
 # FAIL/mismatch, 2 = usage/build error.
+#
+# --- v4.4-LT Rank-1 (ENC-DR-LT profile) — NOT YET WIRED HERE ---
+#
+# doc/btx-matmul-v4.4-lt-normative-spec.md describes the Rank-1 package
+# (deep-m b=2, MatExpand, consensus Q*) staged strictly after ENC-BMX4C
+# (nMatMulDRLTHeight >= nMatMulBMX4CHeight; INT32_MAX/inert on every public
+# network). Its CPU reference + unit tests exist (src/matmul/matmul_v4_lt.*,
+# src/test/matmul_v4_lt_tests.cpp) and device accel STUBS exist per backend
+# (src/{cuda,metal,hip}/matmul_v4_lt_accel*), but matmul-v4-report has no
+# `--profile bmx4c-lt` mode / DEVICE_*_MT24_PASS marker yet, so this script
+# deliberately does NOT accept that profile value -- fabricating a device
+# certification path ahead of the report tool would contradict the "this
+# script fabricates nothing" rule the bmx4c mode above follows. Once the
+# report tool grows LT support, extend the `--profile` case below the same
+# way `bmx4c` was added. Until then, use `scripts/matmul_lt_readiness.sh` /
+# `contrib/matmul-v4/lt-gate.py` for the current (CPU-reference-only, inert)
+# LT scaffolding status.
 
 set -euo pipefail
 BACKEND="${1:-}"

@@ -6,6 +6,7 @@
 #define BTX_MATMUL_MATMUL_V4_BMX4_BATCH_H
 
 #include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_bmx4.h>
 #include <primitives/block.h>
 #include <uint256.h>
 
@@ -80,6 +81,16 @@ public:
      *  the solve loop uses). */
     [[nodiscard]] bool Mine(uint64_t start_nonce, uint32_t count,
                             std::vector<BatchNonceResultBMX4C>& out) const;
+
+    /** Digest-only window: compute digests without materializing loser sketch
+     *  payloads. When `retain_winner_payload` is true, `payloads_out[i]` is
+     *  filled only for target-matching nonces (empty otherwise). Byte-identical
+     *  digests to Mine() / ComputeDigestBMX4C. */
+    [[nodiscard]] bool MineDigestsOnly(const std::vector<CBlockHeader>& headers,
+                                       const uint256& target,
+                                       std::vector<DigestOnlyResultBMX4C>& out,
+                                       std::vector<std::vector<unsigned char>>* payloads_out = nullptr,
+                                       bool retain_winner_payload = true) const;
 
     /** m = n / kTileB. */
     [[nodiscard]] uint32_t SketchDim() const { return m_m; }

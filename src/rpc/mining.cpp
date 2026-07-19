@@ -1578,10 +1578,37 @@ struct MatMulWorkProfileOptions {
 static const char* ResolveMatMulEncodingProfileName(
     const Consensus::Params& consensus, int32_t height)
 {
-    return consensus.GetMatMulEncodingProfile(height) ==
-                   Consensus::MatMulEncodingProfile::ENC_BMX4C
-               ? "ENC-BMX4C"
-               : "ENC-S8";
+    switch (consensus.GetMatMulEncodingProfile(height)) {
+    case Consensus::MatMulEncodingProfile::ENC_BMX4C_LT:
+        return "ENC-BMX4C-LT";
+    case Consensus::MatMulEncodingProfile::ENC_BMX4C:
+        return "ENC-BMX4C";
+    default:
+        return "ENC-S8";
+    }
+}
+
+/** Sketch/transcript tile b for the live profile at `height` (v4: per-profile
+ *  MatMulProfileParams; pre-v4: legacy nMatMulTranscriptBlockSize). */
+static uint64_t ResolveMatMulAdvertisedTileB(const Consensus::Params& consensus, int32_t height)
+{
+    if (!consensus.IsMatMulV4Active(height)) {
+        return static_cast<uint64_t>(consensus.nMatMulTranscriptBlockSize);
+    }
+    return static_cast<uint64_t>(consensus.GetMatMulProfileParams(height).tile_b);
+}
+
+/** ENC-DR-LT miner hints (Q* schedule + deep-m tile). Present only when the
+ *  live profile is ENC_BMX4C_LT. Q* is a miner-local fat-window hint in Phase A
+ *  (not a consensus seal object); see doc/btx-matmul-v4.4-lt-adversarial-analysis.md. */
+static void PushMatMulLtMinerHints(UniValue& matmul, const Consensus::Params& consensus, int32_t height)
+{
+    if (consensus.GetMatMulEncodingProfile(height) != Consensus::MatMulEncodingProfile::ENC_BMX4C_LT) {
+        return;
+    }
+    matmul.pushKV("consensus_q_star", static_cast<uint64_t>(consensus.nMatMulConsensusQStar));
+    matmul.pushKV("lt_transcript_block_size",
+                  static_cast<uint64_t>(consensus.nMatMulLTTranscriptBlockSize));
 }
 
 // Central resolver for the deterministic MatMul work profile implied by the
@@ -1883,8 +1910,7 @@ static UniValue BuildMatMulChallengeResponse(
 
     UniValue matmul(UniValue::VOBJ);
     matmul.pushKV("n", static_cast<uint64_t>(challenge_header.matmul_dim));
-    matmul.pushKV("b", challenge_v4 ? static_cast<uint64_t>(matmul_v4::kTileB)
-                                    : static_cast<uint64_t>(consensus.nMatMulTranscriptBlockSize));
+    matmul.pushKV("b", ResolveMatMulAdvertisedTileB(consensus, next_height));
     matmul.pushKV("r", challenge_v4 ? static_cast<uint64_t>(consensus.nMatMulV4FreivaldsRounds)
                                     : static_cast<uint64_t>(consensus.nMatMulNoiseRank));
     matmul.pushKV("q", challenge_v4 ? static_cast<uint64_t>(matmul::int8_field::kFieldPrime)
@@ -1899,6 +1925,7 @@ static UniValue BuildMatMulChallengeResponse(
     if (challenge_v4) {
         matmul.pushKV("encoding_profile",
             ResolveMatMulEncodingProfileName(consensus, next_height));
+        PushMatMulLtMinerHints(matmul, consensus, next_height);
     }
     obj.pushKV("matmul", std::move(matmul));
     obj.pushKV("work_profile", ResolveMatMulWorkProfile(challenge_header, consensus, next_height));
@@ -3454,8 +3481,7 @@ static UniValue BuildMatMulServiceChallengeResponse(
     challenge_header.matmul_dim = issue_v4
         ? static_cast<uint16_t>(consensus.nMatMulV4Dimension)
         : (template_header.matmul_dim == 0 ? static_cast<uint16_t>(consensus.nMatMulDimension) : template_header.matmul_dim);
-    const uint64_t issue_b = issue_v4 ? static_cast<uint64_t>(matmul_v4::kTileB)
-                                      : static_cast<uint64_t>(consensus.nMatMulTranscriptBlockSize);
+    const uint64_t issue_b = ResolveMatMulAdvertisedTileB(consensus, next_height);
     const uint64_t issue_r = issue_v4 ? static_cast<uint64_t>(consensus.nMatMulV4FreivaldsRounds)
                                       : static_cast<uint64_t>(consensus.nMatMulNoiseRank);
     const uint64_t issue_q = issue_v4 ? static_cast<uint64_t>(matmul::int8_field::kFieldPrime)
@@ -3529,6 +3555,7 @@ static UniValue BuildMatMulServiceChallengeResponse(
     if (issue_v4) {
         matmul.pushKV("encoding_profile",
             ResolveMatMulEncodingProfileName(consensus, next_height));
+        PushMatMulLtMinerHints(matmul, consensus, next_height);
     }
     challenge.pushKV("matmul", std::move(matmul));
     challenge.pushKV("work_profile", ResolveMatMulWorkProfile(challenge_header, consensus, next_height, work_profile_options));
@@ -5969,7 +5996,9 @@ static RPCHelpMan getmatmulchallenge()
                             {RPCResult::Type::NUM, "max_dimension", "Maximum dimension"},
                             {RPCResult::Type::STR_HEX, "seed_a", "Matrix seed A"},
                             {RPCResult::Type::STR_HEX, "seed_b", "Matrix seed B"},
-                            {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C\" or \"ENC-S8\"); present only under the v4 profile so a self-computing miner knows which operand encoding the network expects across the ENC-S8 -> ENC-BMX4C fork"},
+                            {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C-LT\", \"ENC-BMX4C\", or \"ENC-S8\"); present only under the v4 profile"},
+                            {RPCResult::Type::NUM, "consensus_q_star", /*optional=*/true, "ENC-DR-LT miner fat-window size Q* in {64,128} (Phase A schedule hint; present only under ENC-BMX4C-LT)"},
+                            {RPCResult::Type::NUM, "lt_transcript_block_size", /*optional=*/true, "ENC-DR-LT deep-m tile b (present only under ENC-BMX4C-LT)"},
                         }},
                         {RPCResult::Type::OBJ, "work_profile", "Deterministic work profile implied by the active MatMul parameters", {
                             {RPCResult::Type::NUM, "field_element_bytes", "Bytes per field element"},
@@ -6349,7 +6378,9 @@ static RPCHelpMan getmatmulchallengeprofile()
                             {RPCResult::Type::NUM, "max_dimension", "Maximum dimension"},
                             {RPCResult::Type::STR_HEX, "seed_a", "Matrix seed A"},
                             {RPCResult::Type::STR_HEX, "seed_b", "Matrix seed B"},
-                            {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C\" or \"ENC-S8\"); present only under the v4 profile so a self-computing miner knows which operand encoding the network expects across the ENC-S8 -> ENC-BMX4C fork"},
+                            {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C-LT\", \"ENC-BMX4C\", or \"ENC-S8\"); present only under the v4 profile"},
+                            {RPCResult::Type::NUM, "consensus_q_star", /*optional=*/true, "ENC-DR-LT miner fat-window size Q* in {64,128} (Phase A schedule hint; present only under ENC-BMX4C-LT)"},
+                            {RPCResult::Type::NUM, "lt_transcript_block_size", /*optional=*/true, "ENC-DR-LT deep-m tile b (present only under ENC-BMX4C-LT)"},
                         }},
                         {RPCResult::Type::OBJ, "work_profile", "Deterministic work profile implied by the active MatMul parameters", {
                             {RPCResult::Type::NUM, "field_element_bytes", "Bytes per field element"},
@@ -7955,7 +7986,9 @@ static RPCHelpMan getblocktemplate()
                     {RPCResult::Type::STR_HEX, "seed_b", "MatMul matrix seed B"},
                     {RPCResult::Type::NUM, "min_dimension", "minimum allowed MatMul matrix dimension"},
                     {RPCResult::Type::NUM, "max_dimension", "maximum allowed MatMul matrix dimension"},
-                    {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C\" or \"ENC-S8\"); present only under the v4 profile so a self-computing miner knows which operand encoding the network expects across the ENC-S8 -> ENC-BMX4C fork"},
+                    {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C-LT\", \"ENC-BMX4C\", or \"ENC-S8\"); present only under the v4 profile"},
+                    {RPCResult::Type::NUM, "consensus_q_star", /*optional=*/true, "ENC-DR-LT miner fat-window size Q* in {64,128} (Phase A schedule hint; present only under ENC-BMX4C-LT)"},
+                    {RPCResult::Type::NUM, "lt_transcript_block_size", /*optional=*/true, "ENC-DR-LT deep-m tile b (present only under ENC-BMX4C-LT)"},
                 }},
                 {RPCResult::Type::NUM, "matmul_n", /*optional=*/true, "MatMul matrix dimension (n)"},
                 {RPCResult::Type::NUM, "matmul_b", /*optional=*/true, "MatMul transcript block size (b)"},
@@ -8597,8 +8630,7 @@ static UniValue TemplateToJSON(
     if (matmul_active) {
         // v4 advertises the sketch tile b, v4 Freivalds rounds, and prime
         // q = 2^61-1; v3 keeps the transcript block size / noise rank / modulus.
-        const uint64_t gbt_matmul_b = gbt_matmul_v4 ? static_cast<uint64_t>(matmul_v4::kTileB)
-                                                    : static_cast<uint64_t>(consensusParams.nMatMulTranscriptBlockSize);
+        const uint64_t gbt_matmul_b = ResolveMatMulAdvertisedTileB(consensusParams, next_height);
         const uint64_t gbt_matmul_r = gbt_matmul_v4 ? static_cast<uint64_t>(consensusParams.nMatMulV4FreivaldsRounds)
                                                     : static_cast<uint64_t>(consensusParams.nMatMulNoiseRank);
         const uint64_t gbt_matmul_q = gbt_matmul_v4 ? static_cast<uint64_t>(matmul::int8_field::kFieldPrime)
@@ -8621,6 +8653,7 @@ static UniValue TemplateToJSON(
         if (gbt_matmul_v4) {
             matmul.pushKV("encoding_profile",
                 ResolveMatMulEncodingProfileName(consensusParams, next_height));
+            PushMatMulLtMinerHints(matmul, consensusParams, next_height);
         }
         result.pushKV("matmul", std::move(matmul));
 

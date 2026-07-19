@@ -5,6 +5,7 @@
 #ifndef BITCOIN_CUDA_MATMUL_V4_BMX4_ACCEL_H
 #define BITCOIN_CUDA_MATMUL_V4_BMX4_ACCEL_H
 
+#include <matmul/matmul_v4_bmx4.h>
 #include <uint256.h>
 
 #include <cstdint>
@@ -44,10 +45,10 @@ class CBlockHeader;
 //    <= 127) run the exact IMMA s8xs8->s32 path of the v4.1 backend
 //    (matmul_v4_accel.cu), true int32 accumulation, no slicing, no K'.
 //
-// Both tiers share the base-2^6 limb combine (4 balanced digits in [-32,31]
-// plus the remainder-top digit, 16 limb-pair s8 GEMMs, shifted mod-q fold with
-// weights 2^(6(i+j)) — the device mirror of
-// matmul::v4::bmx4::ComputeCombineLimbTensorBMX4C, byte-identical to the
+// Both tiers share the Karatsuba-9 base-2^6 combine (4 balanced digits in
+// [-32,31] plus the remainder-top digit, nine s8 GEMMs with fused M61
+// epilogue weights — the device mirror of
+// matmul::v4::bmx4::ComputeCombineKaratsuba9BMX4C, byte-identical to the
 // reference's direct ComputeCombineModQ). Operand derivation, serialization
 // and digest run on the HOST via the exact committed routines.
 
@@ -75,7 +76,7 @@ inline constexpr uint32_t kMaxBatchedWindow = 32;
  *  the template-scoped Ahat, U, V are expanded ONCE on the host, P = U*Ahat is
  *  computed once on the device, and the per-nonce right factors Q_i = Bhat_i*V
  *  run as stacked GEMMs per window chunk; the per-nonce combines fuse into the
- *  16 limb-pair GEMMs of the stacked base-2^6 fold.
+ *  nine Karatsuba GEMMs of the stacked base-2^6 fold.
  *
  *  Returns false (dispatcher falls back to the CPU reference) iff `headers` is
  *  empty, ValidateDimsBMX4C(n, kTileB) fails (includes n % 32 == 0 and the
@@ -88,6 +89,16 @@ inline constexpr uint32_t kMaxBatchedWindow = 32;
  *  never be bypassed, only narrowed). */
 [[nodiscard]] bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
     std::vector<uint256>& digests_out, std::vector<std::vector<unsigned char>>& payloads_out);
+
+/** Digest-only CUDA mining entry (ENC-DR): same digests as
+ *  ComputeDigestsBMX4CAccel, but loser sketch payloads are not returned.
+ *  `results_out[i]` carries {nonce, digest, target_match, backend_status}.
+ *  When `payloads_out` is non-null, winner payloads are filled and loser
+ *  payloads are empty. Falls back (returns false) on any device error. */
+[[nodiscard]] bool ComputeDigestsOnlyBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+    const uint256& target,
+    std::vector<matmul::v4::bmx4::DigestOnlyResultBMX4C>& results_out,
+    std::vector<std::vector<unsigned char>>* payloads_out = nullptr);
 
 } // namespace matmul_v4::cuda
 

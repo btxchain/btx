@@ -236,6 +236,43 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     assert(is_regtest ||
            consensus.nMatMulV4Height == std::numeric_limits<int32_t>::max() ||
            consensus.IsMatMulHeaderPoWEnabled());
+
+    // v4.4-LT Rank-1 (ENC-DR-LT, doc/btx-matmul-v4.4-lt-normative-spec.md).
+    // No-op while nMatMulDRLTHeight == INT32_MAX (every public network today).
+    // When a network ever sets it live, LT supersedes ENC-BMX4C at/above this
+    // height (IsDRLTActive requires BMX4C already active), so it must not
+    // precede the BMX4C fork it builds on -- either the single unified flag
+    // day (== nMatMulBMX4CHeight) or a later, separately-staged deepening
+    // (> nMatMulBMX4CHeight); never before it.
+    if (consensus.nMatMulDRLTHeight != std::numeric_limits<int32_t>::max()) {
+        assert(consensus.nMatMulBMX4CHeight != std::numeric_limits<int32_t>::max());
+        assert(consensus.nMatMulDRLTHeight >= consensus.nMatMulBMX4CHeight);
+        // Miner-local MatExpand window Q* is restricted to {64,128} (Rank-1
+        // Phase A schedule; seal-as-PoW is Phase B). The deep-m tile is fixed
+        // at b=2 for Phase A (m = n/2, storage-free under ENC-DR). A
+        // misconfigured value here would silently commit a different
+        // (unspecified) object, so fail loud at startup rather than at the fork.
+        assert(consensus.nMatMulConsensusQStar == 64 || consensus.nMatMulConsensusQStar == 128);
+        assert(consensus.nMatMulLTTranscriptBlockSize == 2);
+        assert(consensus.nMatMulDRLTAsertRescaleNum > 0);
+        assert(consensus.nMatMulDRLTAsertRescaleDen > 0);
+        // Pin the live profile shape (same assert_profile_dimension_pin used for
+        // ENC-BMX4C): deep-m tile b=2 and sketch rank m = n/b at production n.
+        // Raising nMatMulV4Dimension without a lockstep LT rank bump would
+        // silently commit a different ENC-DR object.
+        {
+            const Consensus::MatMulProfileParams lt_profile =
+                consensus.GetMatMulProfileParams(consensus.nMatMulDRLTHeight);
+            assert(lt_profile.profile == Consensus::MatMulEncodingProfile::ENC_BMX4C_LT);
+            assert(lt_profile.tile_b == consensus.nMatMulLTTranscriptBlockSize);
+            assert_profile_dimension_pin(lt_profile);
+        }
+        // Same DR-34-style fail-closed activation coupling as the v4/BMX4C
+        // gates above: a public network must not carry a live LT height
+        // without the same recorded no-inversion + ratification gate (LT is a
+        // deepening of the same hardness floor, not an independent one).
+        assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+    }
 }
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
@@ -378,6 +415,20 @@ public:
         // benchmarked v4 reference-miner throughput, and schedules at least two
         // release cycles of deployment runway past the tip at tag time (spec
         // §G.1, §G.4 invariant #6). Do not set a mainnet value speculatively.
+        // v4.4-LT Rank-1 (doc/btx-matmul-v4.4-lt-normative-spec.md):
+        // consensus.nMatMulDRLTHeight is likewise left at its
+        // Consensus::Params default (INT32_MAX = disabled). LT is a further
+        // deepening staged strictly AFTER v4/ENC-BMX4C mainnet activation
+        // (which is itself unset above), so it stays inert here for the same
+        // reason -- never set a mainnet activation height speculatively,
+        // ahead of the GO/NO-GO silicon no-inversion measurement and L0
+        // ratification (AssertBMX4CConstructionInvariants fails closed on
+        // this via BTX_MATMUL_NO_INVERSION_GATE_RATIFIED).
+        consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulConsensusQStar = 64;
+        consensus.nMatMulLTTranscriptBlockSize = 2;
+        consensus.nMatMulDRLTAsertRescaleNum = 1;
+        consensus.nMatMulDRLTAsertRescaleDen = 1;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -798,6 +849,12 @@ public:
         consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulBMX4CAsertRescaleNum = 1;
         consensus.nMatMulBMX4CAsertRescaleDen = 1;
+        // v4.4-LT Rank-1 (MatExpand + deep-m + Q*): STAGED / inert until GO/NO-GO.
+        consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulConsensusQStar = 64;
+        consensus.nMatMulLTTranscriptBlockSize = 2;
+        consensus.nMatMulDRLTAsertRescaleNum = 1;
+        consensus.nMatMulDRLTAsertRescaleDen = 1;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -1406,6 +1463,12 @@ public:
         consensus.nMatMulBMX4CHeight = 100;
         consensus.nMatMulBMX4CAsertRescaleNum = 1;
         consensus.nMatMulBMX4CAsertRescaleDen = 1;
+        // Rank-1 LT stays inert on regtest by default (opt-in via future flag).
+        consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulConsensusQStar = 64;
+        consensus.nMatMulLTTranscriptBlockSize = 2;
+        consensus.nMatMulDRLTAsertRescaleNum = 1;
+        consensus.nMatMulDRLTAsertRescaleDen = 1;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -1467,6 +1530,14 @@ public:
         }
         if (opts.matmul_bmx4c_height.has_value() && !opts.matmul_v4_height.has_value()) {
             consensus.nMatMulV4Height = consensus.nMatMulBMX4CHeight;
+        }
+        // v4.4-LT Rank-1: regtest-only opt-in override so a functional test can
+        // exercise LT activation without waiting for a public-network height.
+        // Applied AFTER the BMX4C unification above so a LONE -regtestdrltheight
+        // (no explicit -regtestbmx4cheight) lands on top of whichever BMX4C
+        // height is already final (100 by default, or the overridden value).
+        if (opts.matmul_drlt_height.has_value()) {
+            consensus.nMatMulDRLTHeight = *opts.matmul_drlt_height;
         }
         if (opts.matmul_flat_sketch_replay) {
             // v4.4 ENC-DR regtest-only differential switch: re-select the legacy
@@ -1670,6 +1741,7 @@ public:
             opts.matmul_v4_dimension.has_value() ||
             opts.matmul_v4_max_dimension.has_value() ||
             opts.matmul_bmx4c_height.has_value() ||
+            opts.matmul_drlt_height.has_value() ||
             opts.matmul_flat_sketch_replay ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||

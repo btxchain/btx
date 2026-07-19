@@ -17,7 +17,10 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace matmul::v4::bmx4 {
 namespace {
@@ -161,6 +164,63 @@ void ExpandMantissaStream(const uint256& seed, size_t count, int8_t* out)
     }
 }
 
+void ExpandMantissaStreamPortable(const uint256& seed, size_t count, int8_t* out)
+{
+    // Two-pass schedule (device-portable):
+    //   1) Emit SHA-256 counter blocks; count accepted nibbles per block.
+    //   2) If the prefix sum is short, extend with more blocks (deterministic).
+    //   3) Fill `out` in the same low-then-high nibble order as ExpandMantissaStream.
+    // Result MUST be byte-identical to ExpandMantissaStream.
+    if (count == 0) return;
+    uint8_t seed_bytes[32];
+    SeedBytesLE(seed, seed_bytes);
+
+    std::vector<std::array<uint8_t, CSHA256::OUTPUT_SIZE>> blocks;
+    std::vector<uint32_t> accept_per_block;
+    size_t accepted_total = 0;
+    uint64_t block = 0;
+    while (accepted_total < count) {
+        CSHA256 hasher;
+        hasher.Write(seed_bytes, sizeof(seed_bytes));
+        hasher.Write(&kMantissaStreamDomain, 1);
+        uint8_t block_le[8];
+        WriteLE64(block_le, block);
+        hasher.Write(block_le, sizeof(block_le));
+        std::array<uint8_t, CSHA256::OUTPUT_SIZE> hash{};
+        hasher.Finalize(hash.data());
+
+        uint32_t acc = 0;
+        for (size_t i = 0; i < CSHA256::OUTPUT_SIZE; ++i) {
+            for (uint8_t shift : {0, 4}) {
+                bool accepted = false;
+                (void)SampleMantissaNibble(static_cast<uint8_t>((hash[i] >> shift) & 0x0F), accepted);
+                if (accepted) ++acc;
+            }
+        }
+        blocks.push_back(hash);
+        accept_per_block.push_back(acc);
+        accepted_total += acc;
+        ++block;
+    }
+
+    size_t filled = 0;
+    for (size_t b = 0; b < blocks.size() && filled < count; ++b) {
+        const auto& hash = blocks[b];
+        for (size_t i = 0; i < CSHA256::OUTPUT_SIZE && filled < count; ++i) {
+            const uint8_t nibs[2] = {static_cast<uint8_t>(hash[i] & 0x0F),
+                                     static_cast<uint8_t>((hash[i] >> 4) & 0x0F)};
+            for (uint8_t nib : nibs) {
+                bool accepted = false;
+                const int8_t mu = SampleMantissaNibble(nib, accepted);
+                if (accepted) {
+                    out[filled++] = mu;
+                    if (filled == count) break;
+                }
+            }
+        }
+    }
+}
+
 void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out)
 {
     // Wide counter-mode SHA-256 XOF; 2 bits per E8M0 exponent code, 4 codes
@@ -188,6 +248,12 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out)
         }
         ++block;
     }
+}
+
+void ExpandScaleStreamPortable(const uint256& seed, size_t count, uint8_t* out)
+{
+    // Rejection-free: portable schedule == streaming schedule (same counter order).
+    ExpandScaleStream(seed, count, out);
 }
 
 uint256 DeriveOperandSeedBMX4C(const CBlockHeader& header, Operand which)
@@ -375,6 +441,310 @@ std::vector<Fq> ComputeCombineLimbTensorBMX4C(const std::vector<int32_t>& P,
         }
     }
     return Chat;
+}
+
+namespace {
+
+// Build the nine Karatsuba operand planes from four base-2^6 limb planes.
+// Layout: [p0, p1, p0+p1, p2, p3, p2+p3, p0+p2, p1+p3, p0+p1+p2+p3].
+// Digit sums are bounded by [-128,125] and fit signed INT8 (design note).
+void BuildKaratsubaPlanes(const std::vector<int8_t> limbs[kCombineLimbs],
+                          std::vector<int8_t> (&planes)[9])
+{
+    const size_t n = limbs[0].size();
+    for (auto& p : planes) p.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        const int32_t d0 = limbs[0][i];
+        const int32_t d1 = limbs[1][i];
+        const int32_t d2 = limbs[2][i];
+        const int32_t d3 = limbs[3][i];
+        planes[0][i] = static_cast<int8_t>(d0);
+        planes[1][i] = static_cast<int8_t>(d1);
+        planes[2][i] = static_cast<int8_t>(d0 + d1);
+        planes[3][i] = static_cast<int8_t>(d2);
+        planes[4][i] = static_cast<int8_t>(d3);
+        planes[5][i] = static_cast<int8_t>(d2 + d3);
+        planes[6][i] = static_cast<int8_t>(d0 + d2);
+        planes[7][i] = static_cast<int8_t>(d1 + d3);
+        planes[8][i] = static_cast<int8_t>(d0 + d1 + d2 + d3);
+    }
+}
+
+// Exact s8xs8->s32 GEMM: C[m x m] += A[m x n] * B[n x m] (row-major).
+void GemmS8S32Add(const std::vector<int8_t>& A, const std::vector<int8_t>& B,
+                  std::vector<int32_t>& C, uint32_t m, uint32_t n)
+{
+    for (uint32_t a = 0; a < m; ++a) {
+        const int8_t* a_row = &A[static_cast<size_t>(a) * n];
+        int32_t* c_row = &C[static_cast<size_t>(a) * m];
+        for (uint32_t k = 0; k < n; ++k) {
+            const int32_t ak = a_row[k];
+            if (ak == 0) continue;
+            const int8_t* b_row = &B[static_cast<size_t>(k) * m];
+            for (uint32_t c = 0; c < m; ++c) {
+                c_row[c] += ak * static_cast<int32_t>(b_row[c]);
+            }
+        }
+    }
+}
+
+// Fused M61 epilogue weights for the nine Karatsuba products in BuildKaratsubaPlanes
+// order (m00, m11, m01, m22, m33, m23, m02, m13, m03). Derived by expanding the
+// two-level Karatsuba reconstruction into Chat = sum_k 64^k * c_k mod q.
+void Karatsuba9FqWeights(Fq (&w_out)[9])
+{
+    const Fq w[7] = {
+        static_cast<Fq>(1) << 0,
+        static_cast<Fq>(1) << 6,
+        static_cast<Fq>(1) << 12,
+        static_cast<Fq>(1) << 18,
+        static_cast<Fq>(1) << 24,
+        static_cast<Fq>(1) << 30,
+        static_cast<Fq>(1) << 36,
+    };
+    auto add = [](Fq a, Fq b) { return int8_field::FqAdd(a, b); };
+    auto neg = [](Fq a) { return int8_field::FqNeg(a); };
+    // m00: +w0 -w1 -w2 +w3
+    w_out[0] = add(add(w[0], neg(w[1])), add(neg(w[2]), w[3]));
+    // m11: -w1 +w2 +w3 -w4
+    w_out[1] = add(add(neg(w[1]), w[2]), add(w[3], neg(w[4])));
+    // m01: +w1 -w3
+    w_out[2] = add(w[1], neg(w[3]));
+    // m22: -w2 +w3 +w4 -w5
+    w_out[3] = add(add(neg(w[2]), w[3]), add(w[4], neg(w[5])));
+    // m33: +w3 -w4 -w5 +w6
+    w_out[4] = add(add(w[3], neg(w[4])), add(neg(w[5]), w[6]));
+    // m23: -w3 +w5
+    w_out[5] = add(neg(w[3]), w[5]);
+    // m02: +w2 -w3
+    w_out[6] = add(w[2], neg(w[3]));
+    // m13: -w3 +w4
+    w_out[7] = add(neg(w[3]), w[4]);
+    // m03: +w3
+    w_out[8] = w[3];
+}
+
+// Pair the nine Karatsuba left/right plane indices (into BuildKaratsubaPlanes).
+// Products use matching indices: (0,0)=m00 ... (8,8)=m03.
+
+// Five balanced base-32 digits in [-16,15] (exact E4M3 integer alphabet).
+constexpr uint32_t kFp8Limbs = 5;
+constexpr int32_t kFp8Base = 32;
+constexpr int32_t kFp8Half = 16;
+
+void DecomposeFp8FiveLimbPlanes(const std::vector<int32_t>& M, std::vector<int8_t>* planes)
+{
+    for (uint32_t l = 0; l < kFp8Limbs; ++l) planes[l].resize(M.size());
+    for (size_t idx = 0; idx < M.size(); ++idx) {
+        int32_t x = M[idx];
+        for (uint32_t l = 0; l < kFp8Limbs - 1; ++l) {
+            const int32_t d = ((x + kFp8Half) & (kFp8Base - 1)) - kFp8Half;
+            planes[l][idx] = static_cast<int8_t>(d);
+            x = (x - d) / kFp8Base;
+        }
+        // Top digit: under |x| <= 288*n <= 2^23-1, five base-32 digits cover
+        // |x| < 32^5/2 = 2^24, so the remainder is in [-16,16] with margin.
+        assert(x >= -kFp8Half && x <= kFp8Half);
+        planes[kFp8Limbs - 1][idx] = static_cast<int8_t>(x);
+    }
+}
+
+} // namespace
+
+std::vector<Fq> ComputeCombineKaratsuba9BMX4C(const std::vector<int32_t>& P,
+                                              const std::vector<int32_t>& Q,
+                                              uint32_t n, uint32_t m)
+{
+    std::vector<int8_t> p_limbs[kCombineLimbs];
+    std::vector<int8_t> q_limbs[kCombineLimbs];
+    DecomposeLimbPlanesBMX4C(P, p_limbs);
+    DecomposeLimbPlanesBMX4C(Q, q_limbs);
+
+    std::vector<int8_t> p_planes[9];
+    std::vector<int8_t> q_planes[9];
+    BuildKaratsubaPlanes(p_limbs, p_planes);
+    BuildKaratsubaPlanes(q_limbs, q_planes);
+
+    Fq weights[9];
+    Karatsuba9FqWeights(weights);
+
+    const size_t out_size = static_cast<size_t>(m) * m;
+    std::vector<Fq> Chat(out_size, 0);
+    std::vector<int32_t> S(out_size);
+    for (uint32_t r = 0; r < 9; ++r) {
+        std::fill(S.begin(), S.end(), 0);
+        GemmS8S32Add(p_planes[r], q_planes[r], S, m, n);
+        const Fq w = weights[r];
+        for (size_t idx = 0; idx < out_size; ++idx) {
+            Chat[idx] = int8_field::FqAdd(
+                Chat[idx], int8_field::FqMul(w, int8_field::FqFromSigned(S[idx])));
+        }
+    }
+    return Chat;
+}
+
+std::vector<Fq> ComputeCombineFp8FiveLimbBMX4C(const std::vector<int32_t>& P,
+                                               const std::vector<int32_t>& Q,
+                                               uint32_t n, uint32_t m)
+{
+    std::vector<int8_t> p_planes[kFp8Limbs];
+    std::vector<int8_t> q_planes[kFp8Limbs];
+    DecomposeFp8FiveLimbPlanes(P, p_planes);
+    DecomposeFp8FiveLimbPlanes(Q, q_planes);
+
+    Fq weight[kFp8Limbs][kFp8Limbs];
+    for (uint32_t i = 0; i < kFp8Limbs; ++i) {
+        for (uint32_t j = 0; j < kFp8Limbs; ++j) {
+            // 32^(i+j) = 2^(5(i+j)); exponent <= 40 < 61 so the weight is exact.
+            weight[i][j] = static_cast<Fq>(1) << (5 * (i + j));
+        }
+    }
+
+    const size_t out_size = static_cast<size_t>(m) * m;
+    std::vector<Fq> Chat(out_size, 0);
+    std::vector<int32_t> S(out_size);
+    for (uint32_t i = 0; i < kFp8Limbs; ++i) {
+        for (uint32_t j = 0; j < kFp8Limbs; ++j) {
+            std::fill(S.begin(), S.end(), 0);
+            GemmS8S32Add(p_planes[i], q_planes[j], S, m, n);
+            const Fq w = weight[i][j];
+            for (size_t idx = 0; idx < out_size; ++idx) {
+                Chat[idx] = int8_field::FqAdd(
+                    Chat[idx], int8_field::FqMul(w, int8_field::FqFromSigned(S[idx])));
+            }
+        }
+    }
+    return Chat;
+}
+
+std::vector<int32_t> ComputeProjectedLeftScalePartitionedBMX4C(
+    const std::vector<int8_t>& U, const std::vector<int8_t>& mu_a,
+    const std::vector<uint8_t>& scale_a, uint32_t n, uint32_t m)
+{
+    // P[a][k] = sum_i U[a][i] * mu_a[i][k] * 2^{e(i, k/32)}.
+    // For each column-block kb, partition rows i by e(i, kb) and evaluate four
+    // reduced-K GEMMs whose K's sum to n (not 4n).
+    const uint32_t nblk = n / kBlockLen;
+    std::vector<int32_t> P(static_cast<size_t>(m) * n, 0);
+    std::vector<uint32_t> bucket[kNumScaleCodes];
+    std::vector<int8_t> U_e;
+    std::vector<int8_t> A_e;
+
+    for (uint32_t kb = 0; kb < nblk; ++kb) {
+        for (auto& b : bucket) b.clear();
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint8_t e = scale_a[static_cast<size_t>(i) * nblk + kb];
+            bucket[e].push_back(i);
+        }
+        for (uint32_t e = 0; e < kNumScaleCodes; ++e) {
+            const uint32_t Ke = static_cast<uint32_t>(bucket[e].size());
+            if (Ke == 0) continue;
+            U_e.resize(static_cast<size_t>(m) * Ke);
+            A_e.resize(static_cast<size_t>(Ke) * kBlockLen);
+            for (uint32_t t = 0; t < Ke; ++t) {
+                const uint32_t i = bucket[e][t];
+                for (uint32_t a = 0; a < m; ++a) {
+                    U_e[static_cast<size_t>(a) * Ke + t] = U[static_cast<size_t>(a) * n + i];
+                }
+                for (uint32_t c = 0; c < kBlockLen; ++c) {
+                    A_e[static_cast<size_t>(t) * kBlockLen + c] =
+                        mu_a[static_cast<size_t>(i) * n + kb * kBlockLen + c];
+                }
+            }
+            // Partial = U_e[m x Ke] * A_e[Ke x 32], then P += partial << e.
+            for (uint32_t a = 0; a < m; ++a) {
+                for (uint32_t c = 0; c < kBlockLen; ++c) {
+                    int32_t acc = 0;
+                    for (uint32_t t = 0; t < Ke; ++t) {
+                        acc += static_cast<int32_t>(U_e[static_cast<size_t>(a) * Ke + t]) *
+                               static_cast<int32_t>(A_e[static_cast<size_t>(t) * kBlockLen + c]);
+                    }
+                    P[static_cast<size_t>(a) * n + kb * kBlockLen + c] += acc * (1 << e);
+                }
+            }
+        }
+    }
+    return P;
+}
+
+std::vector<int32_t> ComputeProjectedRightScalePartitionedBMX4C(
+    const std::vector<int8_t>& mu_b, const std::vector<uint8_t>& scale_b,
+    const std::vector<int8_t>& V, uint32_t n, uint32_t m)
+{
+    // Q[k][c] = sum_j mu_b[k][j] * 2^{e(k/32, j)} * V[j][c].
+    // For each 32-row block of B, partition columns j by committed scale e.
+    const uint32_t nblk = n / kBlockLen;
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m, 0);
+    std::vector<uint32_t> bucket[kNumScaleCodes];
+    std::vector<int8_t> B_e;
+    std::vector<int8_t> V_e;
+
+    for (uint32_t rb = 0; rb < nblk; ++rb) {
+        for (auto& b : bucket) b.clear();
+        const size_t srow = static_cast<size_t>(rb) * n;
+        for (uint32_t j = 0; j < n; ++j) {
+            bucket[scale_b[srow + j]].push_back(j);
+        }
+        for (uint32_t e = 0; e < kNumScaleCodes; ++e) {
+            const uint32_t Ke = static_cast<uint32_t>(bucket[e].size());
+            if (Ke == 0) continue;
+            B_e.resize(static_cast<size_t>(kBlockLen) * Ke);
+            V_e.resize(static_cast<size_t>(Ke) * m);
+            for (uint32_t t = 0; t < Ke; ++t) {
+                const uint32_t j = bucket[e][t];
+                for (uint32_t r = 0; r < kBlockLen; ++r) {
+                    B_e[static_cast<size_t>(r) * Ke + t] =
+                        mu_b[static_cast<size_t>(rb * kBlockLen + r) * n + j];
+                }
+                for (uint32_t c = 0; c < m; ++c) {
+                    V_e[static_cast<size_t>(t) * m + c] = V[static_cast<size_t>(j) * m + c];
+                }
+            }
+            for (uint32_t r = 0; r < kBlockLen; ++r) {
+                for (uint32_t c = 0; c < m; ++c) {
+                    int32_t acc = 0;
+                    for (uint32_t t = 0; t < Ke; ++t) {
+                        acc += static_cast<int32_t>(B_e[static_cast<size_t>(r) * Ke + t]) *
+                               static_cast<int32_t>(V_e[static_cast<size_t>(t) * m + c]);
+                    }
+                    Q[static_cast<size_t>(rb * kBlockLen + r) * m + c] += acc * (1 << e);
+                }
+            }
+        }
+    }
+    return Q;
+}
+
+ExactAccelPlan PlanExactAccelLanes(std::string_view device_class)
+{
+    ExactAccelPlan plan;
+    // Default: H200/Hopper-class INT8 projection + Karatsuba-9 combine.
+    plan.projection = ProjectionLane::CanonicalInt8;
+    plan.combine = CombineLane::Karatsuba9Int8;
+
+    auto eq = [](std::string_view a, std::string_view b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            const char ca = (a[i] >= 'A' && a[i] <= 'Z') ? static_cast<char>(a[i] - 'A' + 'a') : a[i];
+            const char cb = (b[i] >= 'A' && b[i] <= 'Z') ? static_cast<char>(b[i] - 'A' + 'a') : b[i];
+            if (ca != cb) return false;
+        }
+        return true;
+    };
+
+    if (eq(device_class, "b200") || eq(device_class, "blackwell") || eq(device_class, "sm100") ||
+        eq(device_class, "sm120") || eq(device_class, "5090") || eq(device_class, "mi350") ||
+        eq(device_class, "mi355")) {
+        plan.projection = ProjectionLane::ScalePartitionedMxfp4;
+        plan.combine = CombineLane::Karatsuba9Int8;
+    } else if (eq(device_class, "rubin") || eq(device_class, "rubin-class")) {
+        plan.projection = ProjectionLane::ExactFp8;
+        plan.combine = CombineLane::ExactFp8FiveLimb;
+    } else if (eq(device_class, "cpu") || eq(device_class, "scalar")) {
+        plan.projection = ProjectionLane::CanonicalInt8;
+        plan.combine = CombineLane::CanonicalInteger;
+    }
+    return plan;
 }
 
 bool ValidateDimsBMX4(uint32_t n, uint32_t b, uint32_t& m_out)

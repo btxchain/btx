@@ -251,6 +251,13 @@ enum class Operand : uint8_t { A = 0x41, B = 0x42 };
 [[nodiscard]] uint256 ComputeSketchDigest(const uint256& sigma,
                                           const std::vector<unsigned char>& payload);
 
+/** Same digest as ComputeSketchDigest(SerializeSketch(sketch)), but streams
+ *  canonical little-endian F_q words into SHA256d without materializing the
+ *  8·m² payload. Used by digest-only mining so losers never allocate an
+ *  8 MiB sketch. */
+[[nodiscard]] uint256 ComputeSketchDigestFromFq(const uint256& sigma,
+                                                const std::vector<Fq>& sketch);
+
 /** Run `rounds` sketch-Freivalds checks over F_q (§E.2). For each round the
  *  challenge (x, y) in F_q^m is derived from H(sigma || H(payload)) (Fiat-Shamir,
  *  binds the payload, invariant I7) and the bilinear identity

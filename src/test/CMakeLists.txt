@@ -82,6 +82,7 @@ add_executable(test_btx
   matmul_mining_tests.cpp
   matmul_v4_batch_tests.cpp
   matmul_v4_bmx4_tests.cpp
+  matmul_v4_lt_tests.cpp
   matmul_encdr_tests.cpp
   matmul_v4_bmx4_batch_tests.cpp
   matmul_v4_exact_float_tests.cpp

@@ -170,6 +170,16 @@ Kind ResolveBackend();
                                                  std::vector<uint256>& digests_out,
                                                  std::vector<std::vector<unsigned char>>& payloads_out);
 
+/** ENC-DR-LT (MatExpand + deep-m) batched dispatch. Same contract as
+ *  ComputeDigestsBMX4CDispatched: every potential winner (digest <= win_target)
+ *  is host-verified via matmul::v4::lt::VerifySketchBMX4CLT before acceptance;
+ *  on any mismatch or device error the whole window falls back to the CPU
+ *  WindowSketchMinerLT / ComputeDigestBMX4CLT reference. */
+[[nodiscard]] bool ComputeDigestsBMX4CLTDispatched(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                                   const uint256& win_target,
+                                                   std::vector<uint256>& digests_out,
+                                                   std::vector<std::vector<unsigned char>>& payloads_out);
+
 /** Snapshot the runtime dispatch counters. */
 Stats ProbeStats();
 

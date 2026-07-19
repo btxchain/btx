@@ -112,6 +112,11 @@ enum class MatMulEncodingProfile : uint8_t {
     //! per the profile-ID hygiene rule above (activated on regtest CI); no
     //! activation path exists.
     ENC_BMX4CD = 3,
+    //! v4.4-LT Rank-1 package (doc/btx-matmul-v4.4-lt-normative-spec.md):
+    //! ENC-DR carriage + deep-m (b=2) + MatExpand operand derivation +
+    //! consensus-bound Q* window. STAGED: nMatMulDRLTHeight defaults to
+    //! INT32_MAX on every public network.
+    ENC_BMX4C_LT = 4,
 };
 
 /**
@@ -169,6 +174,9 @@ static constexpr int64_t BMX4C_LIMB_PAIR_BOUND_PER_N{1024}; //!< per-entry limb-
 //! LOUD at startup instead of silently committing a different object. Small test
 //! dimensions (regtest) sit below production scale and are exempt.
 static constexpr uint32_t BMX4C_SKETCH_RANK_M{1024};
+//! ENC-DR-LT Phase-A deep-m sketch rank (b=2 at n=4096). Under ENC-DR the
+//! sketch is not carried on the wire, so deepening m is storage-free.
+static constexpr uint32_t BMX4C_LT_SKETCH_RANK_M{2048};
 // C-1' accumulator-eligibility anchors (consensus-PROTECTING, not
 // consensus-changing: consumed by backend qualification/self-tests, never by
 // block validation — doc/btx-matmul-v4.2-bmx4c-spec.md §5).
@@ -459,6 +467,18 @@ struct Params {
      *  the network has no pre-fork history). */
     int64_t nMatMulBMX4CAsertRescaleNum{1};
     int64_t nMatMulBMX4CAsertRescaleDen{1};
+    /** v4.4-LT Rank-1 activation height (MatExpand + deep-m + Q*). DEFAULT =
+     *  INT32_MAX = disabled on every public network until GO/NO-GO gates pass
+     *  (doc/btx-matmul-v4.4-lt-normative-spec.md). When live, MUST be >=
+     *  nMatMulBMX4CHeight (LT supersedes ENC-BMX4C at/above this height). */
+    int32_t nMatMulDRLTHeight{std::numeric_limits<int32_t>::max()};
+    /** Consensus-bound MatExpand window size Q* ∈ {64,128}. */
+    uint32_t nMatMulConsensusQStar{64};
+    /** LT tile b (deep-m). Normative Phase A: 2 (m = n/2). */
+    uint32_t nMatMulLTTranscriptBlockSize{2};
+    /** One-time ASERT rescale at nMatMulDRLTHeight (calibrate from silicon). */
+    int64_t nMatMulDRLTAsertRescaleNum{1};
+    int64_t nMatMulDRLTAsertRescaleDen{1};
     /** v4.4 ENC-DR regtest-only DIFFERENTIAL-TESTING switch: when true, v4
      *  heights keep the legacy FLAT_SKETCH_INBLOCK carriage (the full 8·m²
      *  sketch in matrix_c_data, Freivalds-verified in-block) instead of the
@@ -746,6 +766,14 @@ struct Params {
             nMatMulBMX4CHeight != std::numeric_limits<int32_t>::max() &&
             height >= nMatMulBMX4CHeight;
     }
+    /** True at and above the v4.4-LT Rank-1 package height (MatExpand + deep-m
+     *  + Q*). Requires BMX4C to already be active; LT supersedes ENC-BMX4C. */
+    bool IsDRLTActive(int32_t height) const
+    {
+        return IsBMX4CActive(height) &&
+            nMatMulDRLTHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nMatMulDRLTHeight;
+    }
     /** Header-PoW throttle (audit F1/C1/C2) is enabled iff a discount is configured;
      *  it has NO separate activation height -- it rides the single v4 fork (see
      *  nMatMulHeaderPoWDiscountBits). Callers gate on IsMatMulV4Active(height) &&
@@ -778,6 +806,7 @@ struct Params {
      *  (spec §8.2). */
     MatMulEncodingProfile GetMatMulEncodingProfile(int32_t height) const
     {
+        if (IsDRLTActive(height)) return MatMulEncodingProfile::ENC_BMX4C_LT;
         return IsBMX4CActive(height) ? MatMulEncodingProfile::ENC_BMX4C
                                      : MatMulEncodingProfile::ENC_S8;
     }
@@ -793,6 +822,15 @@ struct Params {
      *  fMatMulV4FlatSketchReplay differential-testing switch. */
     MatMulProfileParams GetMatMulProfileParams(int32_t height) const
     {
+        if (IsDRLTActive(height)) {
+            return MatMulProfileParams{
+                MatMulEncodingProfile::ENC_BMX4C_LT,
+                fMatMulV4FlatSketchReplay ? MatMulCommitmentScheme::FLAT_SKETCH_INBLOCK
+                                          : MatMulCommitmentScheme::DIGEST_RECOMPUTE,
+                /*tile_b=*/nMatMulLTTranscriptBlockSize,
+                /*sketch_rank_m=*/BMX4C_LT_SKETCH_RANK_M,
+            };
+        }
         return MatMulProfileParams{
             GetMatMulEncodingProfile(height),
             fMatMulV4FlatSketchReplay ? MatMulCommitmentScheme::FLAT_SKETCH_INBLOCK

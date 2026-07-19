@@ -49,6 +49,18 @@
 # Env: CUDA_ARCH / HIP_ARCH (arch lists), BUILD_DIR (build path override).
 # Exit: 0 = PASS (bit-exact, and under --profile bmx4c also M-t24 PASS), 1 =
 # FAIL, 2 = usage/build error.
+#
+# --- v4.4-LT Rank-1 (ENC-DR-LT profile) ---
+#
+# Not yet a first-class `--profile` value here: matmul-v4-report has no LT
+# report schema / DEVICE_*_MT24_PASS marker wired yet (CPU reference + unit
+# tests exist -- src/matmul/matmul_v4_lt.*, src/test/matmul_v4_lt_tests.cpp --
+# but device backends are stubs). `--profile` is forwarded to the tool
+# untouched (see below), so this script will pick up an LT profile value
+# transparently once the tool supports one; until then run
+# `scripts/matmul_lt_readiness.sh` / `contrib/matmul-v4/lt-gate.py --list-gates`
+# for the current inert-scaffolding GO/NO-GO checklist
+# (doc/btx-matmul-v4.4-lt-normative-spec.md).
 
 set -euo pipefail
 BACKEND="${1:-}"

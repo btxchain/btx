@@ -5,10 +5,14 @@
 #include <matmul/accel_v4.h>
 
 #include <arith_uint256.h>
+#include <cuda/matmul_v4_lt_accel.h>
+#include <hip/matmul_v4_lt_accel.h>
 #include <matmul/backend_capabilities_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_bmx4_batch.h>
+#include <matmul/matmul_v4_lt.h>
 #include <matmul/pow_v4.h>
+#include <metal/matmul_v4_lt_accel.h>
 #include <primitives/block.h>
 #include <logging.h>
 
@@ -17,6 +21,7 @@
 #include <exception>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace matmul_v4::accel {
 namespace {
@@ -272,6 +277,105 @@ bool ComputeBatchCpuReferenceBMX4C(const std::vector<CBlockHeader>& headers, uin
         payloads_out[i] = std::move(payload);
     }
     (void)rounds; // ENC-BMX4C miner runs no Freivalds (API symmetry)
+    return true;
+}
+
+bool ComputeBatchCpuReferenceBMX4CLT(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                     std::vector<uint256>& digests_out,
+                                     std::vector<std::vector<unsigned char>>& payloads_out)
+{
+    const size_t count = headers.size();
+    digests_out.assign(count, uint256{});
+    payloads_out.assign(count, std::vector<unsigned char>{});
+
+    const matmul::v4::lt::WindowSketchMinerLT miner{headers.front(), n};
+    if (miner.Valid()) {
+        const uint256 kNoTarget = ArithToUint256(~arith_uint256{});
+        std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
+        if (miner.MineWindow(headers, kNoTarget, results) && results.size() == count) {
+            for (size_t i = 0; i < count; ++i) {
+                digests_out[i] = results[i].digest;
+                uint256 d;
+                std::vector<unsigned char> payload;
+                if (!matmul::v4::lt::ComputeDigestBMX4CLT(headers[i], n, d, payload) ||
+                    d != results[i].digest) {
+                    digests_out.clear();
+                    payloads_out.clear();
+                    return false;
+                }
+                payloads_out[i] = std::move(payload);
+            }
+            (void)rounds;
+            return true;
+        }
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        uint256 digest;
+        std::vector<unsigned char> payload;
+        if (!matmul::v4::lt::ComputeDigestBMX4CLT(headers[i], n, digest, payload)) {
+            digests_out.clear();
+            payloads_out.clear();
+            return false;
+        }
+        digests_out[i] = digest;
+        payloads_out[i] = std::move(payload);
+    }
+    (void)rounds;
+    return true;
+}
+
+bool TryDeviceDigestsBMX4CLT(Kind backend, const std::vector<CBlockHeader>& headers, uint32_t n,
+                             std::vector<uint256>& digests_out,
+                             std::vector<std::vector<unsigned char>>& payloads_out)
+{
+    digests_out.clear();
+    payloads_out.clear();
+    if (headers.empty()) return false;
+
+    std::vector<uint64_t> nonces(headers.size());
+    for (size_t i = 0; i < headers.size(); ++i) {
+        nonces[i] = headers[i].nNonce64;
+    }
+
+    std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
+    bool device_ok = false;
+    switch (backend) {
+    case Kind::CUDA:
+        device_ok = matmul_v4::cuda::ComputeDigestsOnlyLTCuda(
+            headers.front(), n, nonces.data(), nonces.size(), results);
+        break;
+    case Kind::METAL:
+        device_ok = matmul_v4::metal::ComputeDigestsOnlyLTMetal(
+            headers.front(), n, nonces.data(), nonces.size(), results);
+        break;
+    case Kind::HIP:
+        device_ok = matmul_v4::hip::ComputeDigestsOnlyLTHip(
+            headers.front(), n, nonces.data(), nonces.size(), results);
+        break;
+    case Kind::CPU:
+        return false;
+    }
+    if (!device_ok || results.size() != headers.size()) {
+        return false;
+    }
+
+    digests_out.resize(headers.size());
+    payloads_out.resize(headers.size());
+    for (size_t i = 0; i < headers.size(); ++i) {
+        digests_out[i] = results[i].digest;
+        uint256 d;
+        std::vector<unsigned char> payload;
+        // Device backends today are host-exact for LT; still materialize the
+        // reference payload so VerifySketchBMX4CLT has a canonical sketch.
+        if (!matmul::v4::lt::ComputeDigestBMX4CLT(headers[i], n, d, payload) ||
+            d != results[i].digest) {
+            digests_out.clear();
+            payloads_out.clear();
+            return false;
+        }
+        payloads_out[i] = std::move(payload);
+    }
     return true;
 }
 
@@ -595,6 +699,89 @@ bool ComputeDigestsBMX4CDispatched(const std::vector<CBlockHeader>& headers, uin
 
     RecordBatchFallback(backend, error);
     return ComputeBatchCpuReferenceBMX4C(headers, n, rounds, digests_out, payloads_out);
+}
+
+bool ComputeDigestsBMX4CLTDispatched(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                     const uint256& win_target,
+                                     std::vector<uint256>& digests_out,
+                                     std::vector<std::vector<unsigned char>>& payloads_out)
+{
+    g_batch_requests.fetch_add(1, std::memory_order_relaxed);
+
+    if (headers.empty()) {
+        digests_out.clear();
+        payloads_out.clear();
+        return false;
+    }
+
+    const Kind backend = ResolveBackend();
+    if (backend == Kind::CPU) {
+        return ComputeBatchCpuReferenceBMX4CLT(headers, n, rounds, digests_out, payloads_out);
+    }
+
+    std::vector<uint256> accel_digests;
+    std::vector<std::vector<unsigned char>> accel_payloads;
+    bool device_ok = false;
+    std::string error;
+    try {
+        device_ok = TryDeviceDigestsBMX4CLT(backend, headers, n, accel_digests, accel_payloads);
+        if (!device_ok) {
+            error = "device_returned_false_or_unavailable";
+        } else if (accel_digests.size() != headers.size() ||
+                   accel_payloads.size() != headers.size()) {
+            device_ok = false;
+            error = "device_returned_wrong_window_size";
+        }
+    } catch (const std::exception& e) {
+        device_ok = false;
+        error = std::string("device_exception:") + e.what();
+    } catch (...) {
+        device_ok = false;
+        error = "device_unknown_exception";
+    }
+
+    if (device_ok) {
+        const arith_uint256 win_target_arith = UintToArith256(win_target);
+        bool all_verified = true;
+        for (size_t i = 0; i < headers.size(); ++i) {
+            if (UintToArith256(accel_digests[i]) > win_target_arith) {
+                continue;
+            }
+            CBlockHeader verify_header = headers[i];
+            verify_header.matmul_digest = accel_digests[i];
+            uint256 verify_digest;
+            bool verified = false;
+            try {
+                verified = matmul::v4::lt::VerifySketchBMX4CLT(
+                    verify_header, n, rounds, accel_payloads[i], verify_digest);
+            } catch (const std::exception& e) {
+                verified = false;
+                error = std::string("verify_exception:") + e.what();
+            } catch (...) {
+                verified = false;
+                error = "verify_unknown_exception";
+            }
+            if (!(verified && verify_digest == accel_digests[i])) {
+                all_verified = false;
+                if (error.empty()) {
+                    error = "digest_mismatch_failed_cpu_verification";
+                }
+                break;
+            }
+        }
+
+        if (all_verified) {
+            digests_out = std::move(accel_digests);
+            payloads_out = std::move(accel_payloads);
+            RecordBatchOk(backend);
+            return true;
+        }
+
+        RecordBatchMismatch(backend);
+    }
+
+    RecordBatchFallback(backend, error);
+    return ComputeBatchCpuReferenceBMX4CLT(headers, n, rounds, digests_out, payloads_out);
 }
 
 Stats ProbeStats()
