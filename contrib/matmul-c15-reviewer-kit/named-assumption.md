@@ -3,10 +3,11 @@
 **C-15 remains OPEN.** Do not treat this kit, green goldens, or low toy R² as
 cryptographic closure or permission to raise `nMatMulDRLTHeight`.
 
-> **Aliases (one assumption)**  
+> **Aliases (one assumption; class labels)**  
 > **Canonical:** `BTX-C15-NonCollapse-v1` (packet §0.2)  
 > **Also used in Wave-1 drafts:** `BTX-MatExpand-NonCollapse-v1`, **MENC** (*MatExpand–Extract Non-Collapse*), *LT-C15 Work-Binding*  
-> Same §0.1 game; names differ only in emphasis. Prefer the packet id in firm SOWs.
+> **Class labels (packet §0.1):** **MENC-Lin** (deg≤2 primary FAIL), **MENC-Unres** (unrestricted; Lin PASS ≠ Unres PASS), **MENC-Cubic** (sketch-floor `B̂·V`+combine — **not** MatExpand)  
+> Same §0.1 game; labels differ by adversary restriction. Prefer the packet id in firm SOWs.
 
 ## Where to read
 
