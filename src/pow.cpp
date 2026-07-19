@@ -3892,6 +3892,42 @@ std::optional<bool> MatMulRecomputeSingleFlight::LeaderResult() const
     return m_entry->result_valid;
 }
 
+// WP-7 / C5: bounded FIFO memo of ENC-DR verdicts (see pow.h). The verdict is a
+// pure function of the header (the block hash pins prev => height => profile)
+// and of process-constant consensus params, so replaying a memoized verdict is
+// consensus-equivalent to recomputing it.
+namespace {
+constexpr size_t MATMUL_ENCDR_VERDICT_MEMO_MAX{64};
+std::mutex g_matmul_encdr_verdict_mutex;
+std::map<uint256, bool> g_matmul_encdr_verdicts;
+std::deque<uint256> g_matmul_encdr_verdict_fifo;
+} // namespace
+
+void CacheMatMulEncDrVerdict(const uint256& block_hash, bool valid)
+{
+    std::lock_guard<std::mutex> lock(g_matmul_encdr_verdict_mutex);
+    const auto [it, inserted] = g_matmul_encdr_verdicts.emplace(block_hash, valid);
+    if (!inserted) {
+        // Same key: the verdict is a pure function of the key, so it cannot
+        // legitimately change; keep the FIFO position.
+        it->second = valid;
+        return;
+    }
+    g_matmul_encdr_verdict_fifo.push_back(block_hash);
+    while (g_matmul_encdr_verdict_fifo.size() > MATMUL_ENCDR_VERDICT_MEMO_MAX) {
+        g_matmul_encdr_verdicts.erase(g_matmul_encdr_verdict_fifo.front());
+        g_matmul_encdr_verdict_fifo.pop_front();
+    }
+}
+
+std::optional<bool> LookupMatMulEncDrVerdict(const uint256& block_hash)
+{
+    std::lock_guard<std::mutex> lock(g_matmul_encdr_verdict_mutex);
+    const auto it = g_matmul_encdr_verdicts.find(block_hash);
+    if (it == g_matmul_encdr_verdicts.end()) return std::nullopt;
+    return it->second;
+}
+
 bool MatMulV4PayloadMatchesCommitment(const CBlock& block)
 {
     // Distinguishes a v4 body mutation (payload does not reconstruct the

@@ -406,6 +406,17 @@ bool IsBlockAuthenticated(const CBlockIndex& block, const Consensus::Params& par
 arith_uint256 GetBlockAuthenticatedProof(const CBlockIndex& block, const Consensus::Params& params);
 void UpdateAuthenticatedChainWork(CBlockIndex& block, const Consensus::Params& params);
 
+/** WP-8 / C1/H2: claimed chain work clamped for peer-selection / anti-DoS use.
+ *  Returns nAuthenticatedChainWork plus min(unauthenticated suffix work,
+ *  unauth_allowance_blocks * GetBlockProof(block)): honest peers whose headers
+ *  run a bounded distance ahead of body validation keep full credit, while a
+ *  forged high-work header chain is clamped to the allowance above its last
+ *  body-authenticated ancestor. Pre-fork (and for any fully body-validated
+ *  chain) nAuthenticatedChainWork == nChainWork, so this returns EXACTLY
+ *  nChainWork — call sites routed through it are behavior-identical while the
+ *  MatMul v4 fork is disabled. */
+arith_uint256 GetTrustAdjustedChainWork(const CBlockIndex& block, unsigned int unauth_allowance_blocks);
+
 /** Return the time it would take to redo the work difference between from and to, assuming the current hashrate corresponds to the difficulty at tip, in seconds. */
 int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& from, const CBlockIndex& tip, const Consensus::Params&);
 /** Find the forking point between two chain tips. */

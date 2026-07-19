@@ -800,6 +800,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   node/kernel_notifications.cpp
   node/mining_guard.cpp
   node/mempool_args.cpp
+  node/matmul_verify_worker.cpp
   node/mempool_persist.cpp
   node/mempool_persist_args.cpp
   node/miner.cpp

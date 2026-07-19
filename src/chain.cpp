@@ -8,6 +8,8 @@
 #include <tinyformat.h>
 #include <util/time.h>
 
+#include <algorithm>
+
 std::string CBlockFileInfo::ToString() const
 {
     return strprintf("CBlockFileInfo(blocks=%u, size=%u, heights=%u...%u, time=%s...%s)", nBlocks, nSize, nHeightFirst, nHeightLast, FormatISO8601Date(nTimeFirst), FormatISO8601Date(nTimeLast));
@@ -176,6 +178,20 @@ void UpdateAuthenticatedChainWork(CBlockIndex& block, const Consensus::Params& p
     block.nAuthenticatedChainWork =
         (block.pprev ? block.pprev->nAuthenticatedChainWork : arith_uint256{}) +
         GetBlockAuthenticatedProof(block, params);
+}
+
+arith_uint256 GetTrustAdjustedChainWork(const CBlockIndex& block, unsigned int unauth_allowance_blocks)
+{
+    // Invariant maintained by UpdateAuthenticatedChainWork: authenticated work
+    // never exceeds claimed work (each block contributes GetBlockProof or 0).
+    const arith_uint256 unauth{block.nChainWork - block.nAuthenticatedChainWork};
+    // The allowance uses the (possibly forged) tip's own nBits; the nBits
+    // transition validity is enforced upstream (CalculateClaimedHeadersWork),
+    // so the allowance is bounded by unauth_allowance_blocks blocks of
+    // difficulty-consistent work.
+    arith_uint256 allowance{GetBlockProof(block)};
+    allowance *= unauth_allowance_blocks;
+    return block.nAuthenticatedChainWork + std::min(unauth, allowance);
 }
 
 int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& from, const CBlockIndex& tip, const Consensus::Params& params)

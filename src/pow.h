@@ -319,6 +319,21 @@ private:
     bool m_leader{false};
 };
 
+/** WP-7 / C5: bounded process-wide memo of ENC-DR verdicts. The v4.4 ENC-DR
+ *  predicate (CheckMatMulProofOfWork_V4EncDr) is a PURE function of the header
+ *  + immutable consensus params + the height pinned by hashPrevBlock, so a
+ *  verdict computed once (typically by the async verify worker,
+ *  node::MatMulVerifyWorker) may be reused when the same block re-enters
+ *  validation via ProcessNewBlock -> ContextualCheckBlock, instead of re-running
+ *  the O(W) reference recompute. This complements the sketch cache: the cache
+ *  holds only 8 entries (fewer than the 16 possible pending verifications, so a
+ *  pre-warmed sketch can be FIFO-evicted before re-validation) and an INVALID
+ *  block leaves nothing in the cache at all. Bounded FIFO of 64 entries (~4 KiB);
+ *  consensus-safe because the memoized value is a pure function of the key. */
+void CacheMatMulEncDrVerdict(const uint256& block_hash, bool valid);
+/** Look up a memoized ENC-DR verdict for `block_hash` (nullopt if absent). */
+std::optional<bool> LookupMatMulEncDrVerdict(const uint256& block_hash);
+
 /** Miner handoff for the ENC-DR sketch cache (tension-resolution §4.3): move a
  *  freshly-solved block's in-body sketch (matrix_c_data, word-packed) into the
  *  local non-consensus sketch cache keyed by the block hash, then CLEAR

@@ -32,6 +32,8 @@ void ApplyArgsManOptions(const ArgsManager& argsman, PeerManager::Options& optio
     if (auto value{argsman.GetIntArg("-minsmilev2version")}) {
         options.min_smile_v2_version = int(std::clamp<int64_t>(*value, 0, std::numeric_limits<int>::max()));
     }
+
+    if (auto value{argsman.GetBoolArg("-matmulasyncverify")}) options.matmul_async_verify = *value;
 }
 
 } // namespace node

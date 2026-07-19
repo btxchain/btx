@@ -1155,6 +1155,30 @@ public:
     kernel::MatMulValidationMode GetMatMulValidationMode() const { return m_options.matmul_validation_mode; }
     kernel::Notifications& GetNotifications() const { return m_options.notifications; };
 
+    /** WP-7: v4.4 ENC-DR assumevalid buried-recompute trust predicate, factored
+     *  verbatim out of ContextualCheckBlock (its (2) ASSUMEVALID BURIED-RECOMPUTE
+     *  TRUST clause) so the async-verify dispatcher and the sketch-prefetch
+     *  guard share the single implementation. True iff `pindex_self` (the index
+     *  of the block being considered, may be nullptr => false) is an
+     *  assumed-valid ancestor of the best header, the best header carries at
+     *  least MinimumChainWork of AUTHENTICATED work, and the block is buried by
+     *  more than the nMatMulProofAssumeValidMinAge equivalent-time guard. When
+     *  true the O(W) ENC-DR recompute for this block is skipped. */
+    bool IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* pindex_self, int nHeight) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** WP-7 / C5: ADVISORY classifier for the async ENC-DR verify worker.
+     *  Returns the height `block` would validate at iff accepting it now would
+     *  reach the O(W) ENC-DR reference recompute inside ContextualCheckBlock
+     *  (fMatMulPOW, v4-active DIGEST_RECOMPUTE height, digest-only body, known
+     *  prev header, no stored data for this hash, not assumevalid-trusted).
+     *  nullopt means the synchronous path is cheap (or would fail cheaply) and
+     *  the block must NOT be dispatched off-thread. Divergence from the seam's
+     *  own logic is fail-safe: it degrades to a recompute, never to a wrong
+     *  verdict (the memoized verdict is a pure function of the header). */
+    std::optional<int32_t> ClassifyMatMulEncDrRecompute(const CBlock& block) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /**
      * Make various assertions about the state of the block index.
      *

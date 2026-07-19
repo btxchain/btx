@@ -24,6 +24,7 @@
 #include <netbase.h>
 #include <netmessagemaker.h>
 #include <node/blockstorage.h>
+#include <node/matmul_verify_worker.h>
 #include <node/timeoffsets.h>
 #include <node/txdownloadman.h>
 #include <node/txreconciliation.h>
@@ -133,6 +134,17 @@ static constexpr double MATMUL_SKETCH_SERVE_BUCKET_MAX{16.0};
 static constexpr auto MATMUL_SKETCH_SERVE_REFILL{1s};
 static constexpr size_t MATMUL_SKETCH_SERVE_GLOBAL_BYTES_PER_SEC{size_t{8} * 1024 * 1024};
 static constexpr auto MATMUL_SKETCH_SERVE_DEDUP_WINDOW{10min};
+/** WP-8 / H9/H10: expiry for outstanding GETMMSKETCH prefetch requests. An
+ *  entry that received no reply within the TTL frees its node-wide in-flight
+ *  slot (the request side is strictly best-effort — nothing is ever awaited or
+ *  re-requested); a reply arriving after expiry is treated as unsolicited and
+ *  silently dropped. */
+static constexpr auto MATMUL_SKETCH_REQUEST_TTL{60s};
+/** WP-8 / H9/H10: per-peer MMSKETCH ingress token bucket (burst size; refill 1
+ *  per MATMUL_SKETCH_SERVE_REFILL). Mirrors the serve-side bucket: honest
+ *  inflow approximates the block rate, and each accepted message costs up to an
+ *  8 MiB authentication hash — this bounds that CPU per peer BEFORE hashing. */
+static constexpr double MATMUL_SKETCH_RECV_BUCKET_MAX{8.0};
 /** Maximum depth of blocks we're willing to serve as compact blocks to peers
  *  when requested. For older blocks, a regular BLOCK response will be sent. */
 static const int MAX_CMPCTBLOCK_DEPTH = 5;
@@ -510,6 +522,12 @@ struct Peer {
     std::chrono::microseconds m_matmul_serve_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
     std::map<uint256, std::chrono::microseconds> m_matmul_served GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
+    /** WP-8 / H9/H10: per-peer MMSKETCH ingress token bucket (see
+     *  MATMUL_SKETCH_RECV_BUCKET_MAX), same lazy-refill idiom as the serve
+     *  bucket above. Spent BEFORE the up-to-8-MiB authentication hash. */
+    double m_matmul_sketch_recv_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){MATMUL_SKETCH_RECV_BUCKET_MAX};
+    std::chrono::microseconds m_matmul_sketch_recv_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
+
     explicit Peer(NodeId id, ServiceFlags our_services, bool is_inbound, const CNetAddr& addr)
         : m_id{id}
         , m_our_services{our_services}
@@ -596,12 +614,50 @@ struct CNodeState {
     int64_t m_last_block_announcement{0};
 };
 
+/** RAII occupancy of one MatMul pending-verification slot (see
+ *  ReserveMatMulVerificationSlot). Movable so a slot reserved by a message
+ *  handler can be handed to the async verify dispatcher (WP-7). Defined before
+ *  PeerManagerImpl because ProcessBlock takes it by std::optional value. */
+class ScopedMatMulPendingVerification final
+{
+public:
+    ScopedMatMulPendingVerification() = default;
+    explicit ScopedMatMulPendingVerification(std::atomic<uint32_t>& counter) : m_counter(&counter) {}
+    ScopedMatMulPendingVerification(const ScopedMatMulPendingVerification&) = delete;
+    ScopedMatMulPendingVerification& operator=(const ScopedMatMulPendingVerification&) = delete;
+    ScopedMatMulPendingVerification(ScopedMatMulPendingVerification&& other) noexcept : m_counter(other.m_counter)
+    {
+        other.m_counter = nullptr;
+    }
+    ScopedMatMulPendingVerification& operator=(ScopedMatMulPendingVerification&& other) noexcept
+    {
+        if (this != &other) {
+            if (m_counter != nullptr) {
+                m_counter->fetch_sub(1);
+            }
+            m_counter = other.m_counter;
+            other.m_counter = nullptr;
+        }
+        return *this;
+    }
+    ~ScopedMatMulPendingVerification()
+    {
+        if (m_counter != nullptr) {
+            m_counter->fetch_sub(1);
+        }
+    }
+
+private:
+    std::atomic<uint32_t>* m_counter{nullptr};
+};
+
 class PeerManagerImpl final : public PeerManager
 {
 public:
     PeerManagerImpl(CConnman& connman, AddrMan& addrman,
                     BanMan* banman, ChainstateManager& chainman,
                     CTxMemPool& pool, node::Warnings& warnings, Options opts);
+    ~PeerManagerImpl() override;
 
     /** Overridden from CValidationInterface. */
     void ActiveTipChange(const CBlockIndex& new_tip, bool) override
@@ -983,6 +1039,12 @@ private:
     std::atomic<int> m_wtxid_relay_peers{0};
     /** Number of currently active expensive MatMul verification operations. */
     std::atomic<uint32_t> m_matmul_pending_verifications{0};
+    /** WP-7 / C5: bounded off-thread worker pool for the v4.4 ENC-DR reference
+     *  recompute. nullptr = feature off (ALWAYS nullptr while nMatMulV4Height ==
+     *  INT32_MAX, or with -matmulasyncverify=0), in which case ProcessBlock is
+     *  the historical synchronous path. Stopped/joined in ~PeerManagerImpl —
+     *  before chainman/connman teardown (init.cpp resets peerman first). */
+    std::unique_ptr<node::MatMulVerifyWorker> m_matmul_verify_worker;
     struct MatMulAddrBudgetState {
         MatMulPeerVerificationBudget budget;
         std::chrono::steady_clock::time_point last_update{};
@@ -997,13 +1059,24 @@ private:
     double m_matmul_serve_global_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){
         static_cast<double>(MATMUL_SKETCH_SERVE_GLOBAL_BYTES_PER_SEC)};
     std::chrono::microseconds m_matmul_serve_global_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
+    /** WP-8 / H9/H10: node-wide outstanding GETMMSKETCH prefetch requests
+     *  (hash -> request time). Couples the prefetch rate to the cache: never
+     *  more sketches in flight than the cache has slots, never the same hash
+     *  from two peers. Entries expire after MATMUL_SKETCH_REQUEST_TTL and are
+     *  erased on every terminal MMSKETCH outcome. Only touched from the
+     *  message-handler thread. */
+    std::map<uint256, std::chrono::microseconds> m_matmul_sketch_requested
+        GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+
     //! v4.4 ENC-DR: opportunistically request the sketch-cache bytes for a block
     //! we are about to download/validate, from the peer we are talking to. Purely
     //! best-effort (tension-resolution §4.3): never awaited, never re-requested on
     //! silence, never a validation dependency — a missing reply just means the
-    //! block verifies by recompute.
+    //! block verifies by recompute. cs_main is required for the assumevalid-depth
+    //! prefetch guard (both call sites already hold it at their BlockRequested
+    //! points).
     void MaybeRequestMatMulSketch(CNode& pto, const CBlockIndex& index)
-        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_msgproc_mutex);
 
     /** Number of outbound peers with m_chain_sync.m_protect. */
     int m_outbound_peers_with_protect_from_disconnect GUARDED_BY(cs_main) = 0;
@@ -1134,8 +1207,35 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, peer.m_getdata_requests_mutex, NetEventsInterface::g_msgproc_mutex)
         LOCKS_EXCLUDED(::cs_main);
 
-    /** Process a new block. Perform any post-processing housekeeping */
-    void ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked);
+    /** Process a new block. Perform any post-processing housekeeping.
+     *
+     *  WP-7 / C5: when the async ENC-DR verify worker is active
+     *  (m_matmul_verify_worker != nullptr) and the block classifies as
+     *  requiring the O(W) ENC-DR reference recompute, the recompute + the
+     *  re-entry into ProcessNewBlock are dispatched to the worker pool and this
+     *  function returns immediately (freeing the message-handler thread).
+     *  Otherwise the historical, fully synchronous body runs.
+     *
+     *  @param[in] matmul_slot   Pending-verification slot the caller already
+     *                           holds for this block (BLOCK/cmpctblock paths);
+     *                           the dispatcher self-reserves one when absent
+     *                           (BLOCKTXN path holds none today). Every async
+     *                           dispatch owns a slot for recompute + re-entry.
+     *  @param[in] post_process  Housekeeping to run after validation completed
+     *                           (sync: before returning; async: on the worker
+     *                           thread after re-entry). */
+    void ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked,
+                      std::optional<ScopedMatMulPendingVerification> matmul_slot = std::nullopt,
+                      std::function<void()> post_process = nullptr);
+
+    /** The historical synchronous body of ProcessBlock, made node-lifetime-safe
+     *  so it can also run on a worker thread after the peer vanished. `node` is
+     *  the direct pointer when running on the message thread (byte-identical
+     *  legacy behavior); nullptr on a worker thread (falls back to
+     *  CConnman::ForNode). */
+    void ProcessBlockSync(NodeId nodeid, CNode* node, const std::shared_ptr<const CBlock>& block,
+                          bool force_processing, bool min_pow_checked,
+                          const std::function<void()>& post_process);
 
     /** Process compact block txns  */
     void ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const BlockTransactions& block_transactions)
@@ -1533,6 +1633,27 @@ static bool PeerHasHeader(CNodeState *state, const CBlockIndex *pindex) EXCLUSIV
     return false;
 }
 
+//! WP-8 / C1/H2: number of not-yet-body-authenticated blocks' worth of claimed
+//! work a header chain may still count in peer-selection decisions. Two times
+//! the per-peer in-flight window, so an honest peer announcing a burst of new
+//! blocks never loses credit while their bodies are still downloading.
+static constexpr unsigned int UNAUTH_WORK_ALLOWANCE_BLOCKS{2 * MAX_BLOCKS_IN_TRANSIT_PER_PEER}; // 32
+
+//! C1/H2: work value used for peer-selection / anti-DoS decisions in place of
+//! raw claimed nChainWork. Authenticated (body-validated) work plus a bounded
+//! allowance for the unvalidated suffix: honest peers a few blocks ahead of our
+//! validation get full credit (authentication happens at AcceptBlock BODY time,
+//! not connect time, so an honest suffix authenticates progressively as bodies
+//! download earliest-first), while a forged high-claimed-work header chain is
+//! clamped to ~32 blocks of credit above its last body-validated ancestor.
+//! Pre-fork (nMatMulV4Height == INT32_MAX) nAuthenticatedChainWork ==
+//! nChainWork for EVERY index, so this is EXACTLY nChainWork and every routed
+//! call site is behavior-identical while the fork is disabled.
+static arith_uint256 TrustAdjustedWork(const CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    return GetTrustAdjustedChainWork(index, UNAUTH_WORK_ALLOWANCE_BLOCKS);
+}
+
 void PeerManagerImpl::ProcessBlockAvailability(NodeId nodeid) {
     CNodeState *state = State(nodeid);
     assert(state != nullptr);
@@ -1579,7 +1700,20 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // Make sure pindexBestKnownBlock is up to date, we'll need it.
     ProcessBlockAvailability(peer.m_id);
 
-    if (state->pindexBestKnownBlock == nullptr || state->pindexBestKnownBlock->nChainWork < m_chainman.ActiveChain().Tip()->nChainWork || state->pindexBestKnownBlock->nChainWork < m_chainman.MinimumChainWork()) {
+    // WP-8 site 4: download eligibility. The primary test runs on
+    // TRUST-ADJUSTED work; a CLAIMED-work escape (nChainWork >= tip work) is
+    // deliberately kept for the >allowance-deep-reorg case — this path is
+    // SELF-HEALING (bodies download earliest-first from the fork point, so at
+    // most one in-flight window of bodies is fetched before the first invalid
+    // body fails validation, marks the branch BLOCK_FAILED and punishes the
+    // peer), unlike sites 2/3 which never require a body. The MinimumChainWork
+    // floor stays on claimed work: authenticated work cannot precede download
+    // (bootstrap liveness). Pre-fork all three predicates are identical to the
+    // historical raw-nChainWork test.
+    if (state->pindexBestKnownBlock == nullptr ||
+        (TrustAdjustedWork(*state->pindexBestKnownBlock) < m_chainman.ActiveChain().Tip()->nChainWork &&
+         state->pindexBestKnownBlock->nChainWork < m_chainman.ActiveChain().Tip()->nChainWork) ||
+        state->pindexBestKnownBlock->nChainWork < m_chainman.MinimumChainWork()) {
         // This peer has nothing interesting.
         return;
     }
@@ -1894,6 +2028,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
 
 void PeerManagerImpl::MaybeRequestMatMulSketch(CNode& pto, const CBlockIndex& index)
 {
+    AssertLockHeld(cs_main);
     AssertLockHeld(g_msgproc_mutex);
     const Consensus::Params& consensus = m_chainparams.GetConsensus();
     if (!consensus.fMatMulPOW) return;
@@ -1905,6 +2040,26 @@ void PeerManagerImpl::MaybeRequestMatMulSketch(CNode& pto, const CBlockIndex& in
     if (profile.SketchCacheBytes() > MAX_MMSKETCH_PAYLOAD_SIZE) return;
     if (matmul::GetMatMulSketchCache().Capacity() == 0) return;   // cache disabled
     if (matmul::GetMatMulSketchCache().Have(index.GetBlockHash())) return;
+    // WP-8 / H9/H10 (a): node-wide prefetch <-> cache coupling. The per-peer
+    // 16-block in-flight window times N peers previously allowed 16*N
+    // outstanding ~8 MiB prefetches against an 8-entry FIFO cache (pure
+    // thrash + ingress waste). Never keep more requests outstanding than the
+    // cache has slots, and never ask two peers for the same hash.
+    const auto now{GetTime<std::chrono::microseconds>()};
+    for (auto it = m_matmul_sketch_requested.begin(); it != m_matmul_sketch_requested.end();) {
+        if (now - it->second > MATMUL_SKETCH_REQUEST_TTL) {
+            it = m_matmul_sketch_requested.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (m_matmul_sketch_requested.count(index.GetBlockHash())) return;
+    if (m_matmul_sketch_requested.size() >= matmul::GetMatMulSketchCache().Capacity()) return;
+    // (b) Assumevalid-depth guard (shared with the validation seam): a block
+    // whose recompute is assumevalid-trusted never runs Freivalds either, so
+    // its sketch is dead weight — don't spend ~8 MiB of ingress on it in IBD.
+    if (m_chainman.IsMatMulRecomputeAssumeValidTrusted(&index, index.nHeight)) return;
+    m_matmul_sketch_requested.emplace(index.GetBlockHash(), now);
     MakeAndPushMessage(pto, NetMsgType::GETMMSKETCH, index.GetBlockHash());
     LogDebug(BCLog::NET, "Requesting matmul sketch %s peer=%d (best-effort)\n",
              index.GetBlockHash().ToString(), pto.GetId());
@@ -2084,39 +2239,6 @@ void PeerManagerImpl::Misbehaving(Peer& peer, const std::string& message)
         message.c_str()
     );
 }
-
-class ScopedMatMulPendingVerification final
-{
-public:
-    ScopedMatMulPendingVerification() = default;
-    explicit ScopedMatMulPendingVerification(std::atomic<uint32_t>& counter) : m_counter(&counter) {}
-    ScopedMatMulPendingVerification(const ScopedMatMulPendingVerification&) = delete;
-    ScopedMatMulPendingVerification& operator=(const ScopedMatMulPendingVerification&) = delete;
-    ScopedMatMulPendingVerification(ScopedMatMulPendingVerification&& other) noexcept : m_counter(other.m_counter)
-    {
-        other.m_counter = nullptr;
-    }
-    ScopedMatMulPendingVerification& operator=(ScopedMatMulPendingVerification&& other) noexcept
-    {
-        if (this != &other) {
-            if (m_counter != nullptr) {
-                m_counter->fetch_sub(1);
-            }
-            m_counter = other.m_counter;
-            other.m_counter = nullptr;
-        }
-        return *this;
-    }
-    ~ScopedMatMulPendingVerification()
-    {
-        if (m_counter != nullptr) {
-            m_counter->fetch_sub(1);
-        }
-    }
-
-private:
-    std::atomic<uint32_t>* m_counter{nullptr};
-};
 
 static void DisconnectNodeNow(CConnman& connman, NodeId node_id)
 {
@@ -2419,9 +2541,21 @@ bool PeerManagerImpl::BlockRequestAllowed(const CBlockIndex* pindex)
 {
     AssertLockHeld(cs_main);
     if (m_chainman.ActiveChain().Contains(pindex)) return true;
-    return pindex->IsValid(BLOCK_VALID_SCRIPTS) && (m_chainman.m_best_header != nullptr) &&
-           (m_chainman.m_best_header->GetBlockTime() - pindex->GetBlockTime() < STALE_RELAY_AGE_LIMIT) &&
-           (GetBlockProofEquivalentTime(*m_chainman.m_best_header, *pindex, *m_chainman.m_best_header, m_chainparams.GetConsensus()) < STALE_RELAY_AGE_LIMIT);
+    // WP-8 site 8 (H3): anchor the stale-relay wall-clock and equivalent-time
+    // windows on a header whose claimed work is fully AUTHENTICATED. In honest
+    // steady state m_best_header authenticates within about a block, so the
+    // anchor equals the historical one; if the best header carries
+    // unauthenticated (possibly forged) work, fall back to the validated tip so
+    // a header-spammer cannot flip stale-block relay policy. Pre-fork
+    // authenticated == claimed for every index, so the fallback never triggers
+    // and behavior (including the null-best-header case) is bit-identical.
+    const CBlockIndex* anchor{m_chainman.m_best_header};
+    if (anchor != nullptr && anchor->nAuthenticatedChainWork != anchor->nChainWork) {
+        anchor = m_chainman.ActiveChain().Tip();
+    }
+    return pindex->IsValid(BLOCK_VALID_SCRIPTS) && (anchor != nullptr) &&
+           (anchor->GetBlockTime() - pindex->GetBlockTime() < STALE_RELAY_AGE_LIMIT) &&
+           (GetBlockProofEquivalentTime(*anchor, *pindex, *anchor, m_chainparams.GetConsensus()) < STALE_RELAY_AGE_LIMIT);
 }
 
 std::optional<std::string> PeerManagerImpl::FetchBlock(NodeId peer_id, const uint256& hash, const CBlockIndex* block_index)
@@ -2498,6 +2632,31 @@ PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
     if (opts.reconcile_txs) {
         m_txreconciliation = std::make_unique<TxReconciliationTracker>(TXRECONCILIATION_VERSION);
     }
+
+    // WP-7 / C5: the async ENC-DR verify worker exists ONLY on networks where
+    // the MatMul v4 fork height is finite. While nMatMulV4Height == INT32_MAX
+    // (current mainnet) m_matmul_verify_worker stays nullptr, ProcessBlock
+    // compiles down to the historical synchronous body behind one null check,
+    // and no worker thread is ever spawned — the inactivity invariant.
+    {
+        const Consensus::Params& consensus = m_chainparams.GetConsensus();
+        if (consensus.fMatMulPOW &&
+            consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max() &&
+            m_opts.matmul_async_verify) {
+            m_matmul_verify_worker = std::make_unique<node::MatMulVerifyWorker>(consensus);
+        }
+    }
+}
+
+PeerManagerImpl::~PeerManagerImpl()
+{
+    // Stop the async verify worker FIRST: queued jobs are destroyed without
+    // running completions (their RAII slot captures release
+    // m_matmul_pending_verifications), in-flight jobs are joined. This runs
+    // before the rest of the members (and, at the init.cpp level, before
+    // chainman/connman teardown), so no worker thread outlives the state its
+    // completions touch.
+    if (m_matmul_verify_worker) m_matmul_verify_worker->Stop();
 }
 
 void PeerManagerImpl::SetDandelionManager(Dandelion::DandelionManager* mgr)
@@ -2937,6 +3096,21 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         block_pos = pindex->GetBlockPos();
     }
 
+    // WP-8 / C4 residual: the largest single-message payload this peer's
+    // transport can carry. 24 MB for V1, ~16 MB for a V2/BIP324 peer (whose
+    // send path silently DROPS anything larger — the requester would stall to
+    // timeout). Blocks above the bound are routed: compact form where
+    // possible, otherwise an explicit NOTFOUND so the requester re-requests
+    // from another peer immediately. Every block that FITS (all blocks <= 16
+    // MB — the universal case) takes exactly the historical path.
+    const size_t max_sendable{pfrom.m_transport->MaxSendablePayloadBytes()};
+    const auto send_oversize_notfound = [&](size_t block_bytes) {
+        std::vector<CInv> vNotFound{inv};
+        MakeAndPushMessage(pfrom, NetMsgType::NOTFOUND, vNotFound);
+        LogDebug(BCLog::NET, "getdata %s: block %s (%u bytes) exceeds peer transport payload limit (%u), sending notfound peer=%d\n",
+                 inv.ToString(), pindex->GetBlockHash().ToString(), block_bytes, max_sendable, pfrom.GetId());
+    };
+
     std::shared_ptr<const CBlock> pblock;
     if (a_recent_block && a_recent_block->GetHash() == pindex->GetBlockHash()) {
         pblock = a_recent_block;
@@ -2951,6 +3125,10 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
                 LogError("Cannot load block from disk, %s\n", pfrom.DisconnectMsg(fLogIPs));
             }
             pfrom.fDisconnect = true;
+            return;
+        }
+        if (block_data.size() > max_sendable) {
+            send_oversize_notfound(block_data.size());
             return;
         }
         MakeAndPushMessage(pfrom, NetMsgType::BLOCK, Span{block_data});
@@ -2971,8 +3149,20 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
     }
     if (pblock) {
         if (inv.IsMsgBlk()) {
+            // Gate the serialize-size computation on the transport actually
+            // having a sub-24MB bound, so V1 peers pay nothing new.
+            if (max_sendable < MAX_BLOCK_MESSAGE_LENGTH &&
+                ::GetSerializeSize(TX_NO_WITNESS_WITH_SHIELDED(*pblock)) > max_sendable) {
+                send_oversize_notfound(::GetSerializeSize(TX_NO_WITNESS_WITH_SHIELDED(*pblock)));
+                return;
+            }
             MakeAndPushMessage(pfrom, NetMsgType::BLOCK, TX_NO_WITNESS_WITH_SHIELDED(*pblock));
         } else if (inv.IsMsgWitnessBlk()) {
+            if (max_sendable < MAX_BLOCK_MESSAGE_LENGTH &&
+                ::GetSerializeSize(TX_WITH_WITNESS(*pblock)) > max_sendable) {
+                send_oversize_notfound(::GetSerializeSize(TX_WITH_WITNESS(*pblock)));
+                return;
+            }
             MakeAndPushMessage(pfrom, NetMsgType::BLOCK, TX_WITH_WITNESS(*pblock));
         } else if (inv.IsMsgFilteredBlk() || inv.IsMsgFilteredWitnessBlk()) {
             bool sendMerkleBlock = false;
@@ -3018,7 +3208,26 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
                     MakeAndPushMessage(pfrom, NetMsgType::CMPCTBLOCK, cmpctblock);
                 }
             } else {
-                MakeAndPushMessage(pfrom, NetMsgType::BLOCK, TX_WITH_WITNESS(*pblock));
+                // WP-8 / C4 residual: the historical downgrade of a deep
+                // MSG_CMPCT_BLOCK request to a full BLOCK is kept whenever the
+                // full block fits the peer's transport. If it does not (>16 MB
+                // over V2), serve a REAL compact block instead — the short-ID
+                // form is ~block/100 and always fits — so the requester
+                // reconstructs via mempool + getblocktxn. Payload-required
+                // blocks (regtest FLAT_SKETCH replay only) cannot ride compact
+                // form; tell an oversize requester NOTFOUND explicitly.
+                const bool full_block_fits{
+                    max_sendable >= MAX_BLOCK_MESSAGE_LENGTH ||
+                    ::GetSerializeSize(TX_WITH_WITNESS(*pblock)) <= max_sendable};
+                if (full_block_fits) {
+                    MakeAndPushMessage(pfrom, NetMsgType::BLOCK, TX_WITH_WITNESS(*pblock));
+                } else if (!requires_product_payload) {
+                    CBlockHeaderAndShortTxIDs cmpctblock{*pblock, m_rng.rand64()};
+                    MakeAndPushMessage(pfrom, NetMsgType::CMPCTBLOCK, cmpctblock);
+                } else {
+                    send_oversize_notfound(::GetSerializeSize(TX_WITH_WITNESS(*pblock)));
+                    return;
+                }
             }
         }
     }
@@ -3269,6 +3478,22 @@ void PeerManagerImpl::SendBlockTransactions(CNode& pfrom, Peer& peer, const CBlo
         resp.txn[i] = block.vtx[req.indexes[i]];
     }
 
+    // WP-8 / C4 residual: blocktxn shares the 24 MB V1 exception but a single
+    // V2 packet caps at ~16 MB and the send guard silently DROPS an oversized
+    // message. Tell the requester NOTFOUND (compact-block inv) instead, so it
+    // frees its PartiallyDownloadedBlock and re-requests from another peer
+    // rather than stalling to timeout. (Release-note residual: a >16 MB block
+    // whose missing-tx set also exceeds ~16 MB cannot cross a V2-only link at
+    // all — nodes should retain at least one V1-capable connection.)
+    const size_t max_sendable{pfrom.m_transport->MaxSendablePayloadBytes()};
+    if (max_sendable < MAX_BLOCK_MESSAGE_LENGTH && ::GetSerializeSize(resp) > max_sendable) {
+        std::vector<CInv> vNotFound{CInv(MSG_CMPCT_BLOCK, req.blockhash)};
+        MakeAndPushMessage(pfrom, NetMsgType::NOTFOUND, vNotFound);
+        LogDebug(BCLog::NET, "getblocktxn %s: response (%u bytes) exceeds peer transport payload limit (%u), sending notfound peer=%d\n",
+                 req.blockhash.ToString(), ::GetSerializeSize(resp), max_sendable, pfrom.GetId());
+        return;
+    }
+
     MakeAndPushMessage(pfrom, NetMsgType::BLOCKTXN, resp);
 }
 
@@ -3300,7 +3525,11 @@ arith_uint256 PeerManagerImpl::GetAntiDoSWorkThreshold()
         const CBlockIndex *tip = m_chainman.ActiveChain().Tip();
         // Use a 144 block buffer, so that we'll accept headers that fork from
         // near our tip.
-        near_chaintip_work = tip->nChainWork - std::min<arith_uint256>(144*GetBlockProof(*tip), tip->nChainWork);
+        // WP-8 site 5: derive the threshold from AUTHENTICATED tip work. The
+        // active tip is always fully body-validated, so this is identical to
+        // nChainWork today — pure future-proofing against assumed/partial
+        // validity states ever reaching the tip.
+        near_chaintip_work = tip->nAuthenticatedChainWork - std::min<arith_uint256>(144*GetBlockProof(*tip), tip->nAuthenticatedChainWork);
     }
     return std::max(near_chaintip_work, m_chainman.MinimumChainWork());
 }
@@ -3524,7 +3753,11 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
     LOCK(cs_main);
     CNodeState *nodestate = State(pfrom.GetId());
 
-    if (CanDirectFetch() && last_header.IsValid(BLOCK_VALID_TREE) && m_chainman.ActiveChain().Tip()->nChainWork <= last_header.nChainWork) {
+    // WP-8 site 1: gate the direct fetch on TRUST-ADJUSTED work (== nChainWork
+    // pre-fork). Honest announcements extend our validated tip and pass
+    // immediately; a forged deep high-work fork is clamped and falls back to
+    // the (budgeted, self-healing) parallel download path instead.
+    if (CanDirectFetch() && last_header.IsValid(BLOCK_VALID_TREE) && m_chainman.ActiveChain().Tip()->nChainWork <= TrustAdjustedWork(last_header)) {
         std::vector<const CBlockIndex*> vToFetch;
         const CBlockIndex* pindexWalk{&last_header};
         // Calculate all the blocks we'd need to switch to last_header, up to a limit.
@@ -3607,6 +3840,11 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom, Peer& peer
     if (m_chainman.IsInitialBlockDownload() && !may_have_more_headers) {
         // If the peer has no more headers to give us, then we know we have
         // their tip.
+        // WP-8 site 9: DELIBERATELY left on raw claimed work. Forging work here
+        // only lets a peer AVOID this disconnect (an exposure bounded by the
+        // routed download-eligibility test), while routing it through
+        // authenticated work would disconnect every honest peer at IBD start
+        // (nothing is authenticated before bodies download).
         if (nodestate->pindexBestKnownBlock && nodestate->pindexBestKnownBlock->nChainWork < m_chainman.MinimumChainWork()) {
             // This peer has too little work on their headers chain to help
             // us sync -- disconnect if it is an outbound disconnection
@@ -3629,7 +3867,11 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom, Peer& peer
     // thus always subject to eviction under the bad/lagging chain logic.
     // See ChainSyncTimeoutState.
     if (!pfrom.fDisconnect && pfrom.IsFullOutboundConn() && nodestate->pindexBestKnownBlock != nullptr) {
-        if (m_outbound_peers_with_protect_from_disconnect < MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT && nodestate->pindexBestKnownBlock->nChainWork >= m_chainman.ActiveChain().Tip()->nChainWork && !nodestate->m_chain_sync.m_protect) {
+        // WP-8 site 2: protection slots are granted on TRUST-ADJUSTED work
+        // (== nChainWork pre-fork). This site is not self-healing (a forged
+        // header chain never has to produce a body), so a Sybil must no longer
+        // be able to capture the limited protection slots with fabricated work.
+        if (m_outbound_peers_with_protect_from_disconnect < MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT && TrustAdjustedWork(*nodestate->pindexBestKnownBlock) >= m_chainman.ActiveChain().Tip()->nChainWork && !nodestate->m_chain_sync.m_protect) {
             LogDebug(BCLog::NET, "Protecting outbound peer=%d from eviction\n", pfrom.GetId());
             nodestate->m_chain_sync.m_protect = true;
             ++m_outbound_peers_with_protect_from_disconnect;
@@ -4217,12 +4459,71 @@ void PeerManagerImpl::ProcessGetCFCheckPt(CNode& node, Peer& peer, DataStream& v
               headers);
 }
 
-void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked)
+void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked,
+                                   std::optional<ScopedMatMulPendingVerification> matmul_slot,
+                                   std::function<void()> post_process)
+{
+    if (m_matmul_verify_worker) {
+        const std::optional<int32_t> encdr_height{
+            WITH_LOCK(cs_main, return m_chainman.ClassifyMatMulEncDrRecompute(*block))};
+        if (encdr_height) {
+            // Every async recompute must hold a pending-verification slot (the
+            // message thread no longer serializes them). The BLOCK/cmpctblock
+            // callers pass theirs in; the BLOCKTXN reconstruction path holds
+            // none today — self-reserve here, and fall back to the synchronous
+            // path (implicitly bounded by the single message thread) when the
+            // cap is reached.
+            if (!matmul_slot &&
+                ReserveMatMulVerificationSlot(m_matmul_pending_verifications, m_chainparams.GetConsensus())) {
+                matmul_slot.emplace(m_matmul_pending_verifications);
+            }
+            if (matmul_slot) {
+                const NodeId nodeid{node.GetId()};
+                // std::function requires a copyable callable: box the move-only
+                // slot in a shared_ptr. It is released when the last closure
+                // copy is destroyed — i.e. after recompute AND re-entry, or on
+                // Stop() draining the queue without running completions.
+                auto slot{std::make_shared<ScopedMatMulPendingVerification>(std::move(*matmul_slot))};
+                node::MatMulVerifyWorker::Job job{
+                    block, *encdr_height,
+                    [this, nodeid, block, force_processing, min_pow_checked, slot,
+                     post = std::move(post_process)](bool /*encdr_ok*/) {
+                        // The verdict reaches validation via the ENC-DR verdict
+                        // memo consulted inside ContextualCheckBlock; re-enter
+                        // through the ordinary acceptance machinery so the
+                        // existing BlockChecked -> MaybePunishNodeForBlock
+                        // pipeline handles accept/reject identically to the
+                        // synchronous path.
+                        ProcessBlockSync(nodeid, /*node=*/nullptr, block, force_processing, min_pow_checked, post);
+                    }};
+                if (m_matmul_verify_worker->Enqueue(job)) return; // message thread freed
+                // Worker is stopping (shutdown race): run the job inline —
+                // exactly the synchronous fallback, slot released with `job`.
+                job.completion(false);
+                return;
+            }
+        }
+    }
+    ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
+}
+
+void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::shared_ptr<const CBlock>& block,
+                                       bool force_processing, bool min_pow_checked,
+                                       const std::function<void()>& post_process)
 {
     bool new_block{false};
     m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
     if (new_block) {
-        node.m_last_block_time = GetTime<std::chrono::seconds>();
+        if (node != nullptr) {
+            // Message-thread path: identical to the historical direct access.
+            node->m_last_block_time = GetTime<std::chrono::seconds>();
+        } else {
+            // Worker-thread path: the peer may be gone; ForNode is a no-op then.
+            m_connman.ForNode(nodeid, [](CNode* pnode) {
+                pnode->m_last_block_time = GetTime<std::chrono::seconds>();
+                return true;
+            });
+        }
         // In case this block came from a different peer than we requested
         // from, we can erase the block request now anyway (as we just stored
         // this block to disk).
@@ -4232,6 +4533,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         LOCK(cs_main);
         mapBlockSource.erase(block->GetHash());
     }
+    if (post_process) post_process();
 }
 
 void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const BlockTransactions& block_transactions)
@@ -5366,8 +5668,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // being fed a bogus chain when we started up for the first time and
         // getting partitioned off the honest network for serving that chain to
         // others.
+        // WP-8 site 6: compare AUTHENTICATED tip work against the minimum-work
+        // serve gate (identical to nChainWork today — the active tip is fully
+        // validated; hardening against assumed states only).
         if (m_chainman.ActiveTip() == nullptr ||
-                (m_chainman.ActiveTip()->nChainWork < m_chainman.MinimumChainWork() && !pfrom.HasPermission(NetPermissionFlags::Download))) {
+                (m_chainman.ActiveTip()->nAuthenticatedChainWork < m_chainman.MinimumChainWork() && !pfrom.HasPermission(NetPermissionFlags::Download))) {
             LogDebug(BCLog::NET, "Ignoring getheaders from peer=%d because active chain has too little work; sending empty response\n", pfrom.GetId());
             // Just respond with an empty headers message, to tell the peer to
             // go away but not treat us as unresponsive.
@@ -5751,11 +6056,26 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
+        // WP-8 / H1: at a v4 height whose params require the Freivalds product
+        // payload, this handler NEVER verifies anything expensive — it accepts
+        // the header and immediately re-fetches the full block via GETDATA (see
+        // the payload-required bail below), and the arriving BLOCK message is
+        // charged in its own handler. Charging here too double-charged every
+        // fresh block (slot + per-peer budget) for one recompute. So neither
+        // the slot nor the budget belongs to this handler on that path.
+        // GATED on IsMatMulV4Active so behavior while the v4 fork is disabled
+        // (nMatMulV4Height == INT32_MAX, where v3 phase2/product-digest charges
+        // are live at mainnet heights) is byte-identical to before.
+        const bool matmul_v4_payload_refetch{
+            consensus_params.fMatMulPOW && consensus_params.fMatMulFreivaldsEnabled &&
+            matmul_reference_height != std::numeric_limits<int32_t>::max() &&
+            consensus_params.IsMatMulV4Active(matmul_reference_height) &&
+            consensus_params.IsMatMulProductPayloadRequired(matmul_reference_height)};
         // DoS-F2: skip the budget/slot machinery for a redundant relay of a block
         // we already have with data — it will not re-trigger the expensive
         // recompute, so a Sybil replaying the current tip must not be able to
         // drain the shared budget with it.
-        if (requires_matmul_phase2 && !already_have_block_data) {
+        if (requires_matmul_phase2 && !already_have_block_data && !matmul_v4_payload_refetch) {
             if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, consensus_params)) {
                 LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul pending verification cap reached (cmpctblock)\n", pfrom.GetId());
                 pfrom.fDisconnect = true;
@@ -6009,15 +6329,24 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // we have a chain with at least the minimum chain work), and we ignore
             // compact blocks with less work than our tip, it is safe to treat
             // reconstructed compact blocks as having been requested.
-            ProcessBlock(pfrom, pblock, /*force_processing=*/true, /*min_pow_checked=*/true);
-            LOCK(cs_main); // hold cs_main for CBlockIndex::IsValid()
-            if (pindex->IsValid(BLOCK_VALID_TRANSACTIONS)) {
-                // Clear download state for this block, which is in
-                // process from some other peer.  We do this after calling
-                // ProcessNewBlock so that a malleated cmpctblock announcement
-                // can't be used to interfere with block relay.
-                RemoveBlockRequest(pblock->GetHash(), std::nullopt);
-            }
+            // WP-7: the trailing IsValid/RemoveBlockRequest housekeeping rides
+            // post_process because validation may complete asynchronously on
+            // the verify worker; on the synchronous path it runs in the exact
+            // historical order (right after ProcessNewBlock's housekeeping).
+            // The reserved verification slot (if any) is handed to the
+            // dispatcher so it covers the whole async recompute + re-entry.
+            ProcessBlock(pfrom, pblock, /*force_processing=*/true, /*min_pow_checked=*/true,
+                         std::move(pending_matmul_slot),
+                         /*post_process=*/[this, pindex, hash = pblock->GetHash()]() {
+                             LOCK(cs_main); // hold cs_main for CBlockIndex::IsValid()
+                             if (pindex->IsValid(BLOCK_VALID_TRANSACTIONS)) {
+                                 // Clear download state for this block, which is in
+                                 // process from some other peer.  We do this after calling
+                                 // ProcessNewBlock so that a malleated cmpctblock announcement
+                                 // can't be used to interfere with block relay.
+                                 RemoveBlockRequest(hash, std::nullopt);
+                             }
+                         });
         }
         return;
     }
@@ -6204,6 +6533,57 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
 
+        // WP-8 / H9/H10 (1): SOLICITED-ONLY. The serve side never pushes an
+        // unsolicited mmsketch (sketches are only sent in reply to our
+        // getmmsketch), so an un-requested one is either an attacker feeding us
+        // hash work / cache pressure, or a TTL-expired late reply from an
+        // honest-but-slow peer. Silently drop both (deliberately NOT
+        // Misbehaving: the late-reply race is honest). Expired entries are
+        // pruned here too so a stale slot never legitimizes a late delivery.
+        // Pre-fork the request map is always empty (requests are only issued at
+        // v4 DIGEST_RECOMPUTE heights), and every pre-fork path through this
+        // handler was already a silent drop — wire behavior is unchanged.
+        {
+            const auto now_req{GetTime<std::chrono::microseconds>()};
+            for (auto it = m_matmul_sketch_requested.begin(); it != m_matmul_sketch_requested.end();) {
+                if (now_req - it->second > MATMUL_SKETCH_REQUEST_TTL) {
+                    it = m_matmul_sketch_requested.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        if (!m_matmul_sketch_requested.count(block_hash)) {
+            LogDebug(BCLog::NET, "Ignoring unsolicited mmsketch %s from peer=%d\n",
+                     block_hash.ToString(), pfrom.GetId());
+            return;
+        }
+
+        // WP-8 / H9/H10 (2): per-peer ingress token bucket, spent BEFORE any
+        // hashing (PayloadMatchesCommitment below hashes up to ~8 MiB). Same
+        // lazy-refill idiom as the serve bucket. Empty bucket => silent drop
+        // (the request slot stays live for a retry within the TTL).
+        {
+            const auto now_bucket{GetTime<std::chrono::microseconds>()};
+            if (peer->m_matmul_sketch_recv_last_refill != 0us) {
+                const auto elapsed = now_bucket - peer->m_matmul_sketch_recv_last_refill;
+                if (elapsed > 0us) {
+                    const double refill = static_cast<double>(count_microseconds(elapsed)) /
+                                          static_cast<double>(count_microseconds(
+                                              std::chrono::microseconds{MATMUL_SKETCH_SERVE_REFILL}));
+                    peer->m_matmul_sketch_recv_tokens =
+                        std::min<double>(MATMUL_SKETCH_RECV_BUCKET_MAX, peer->m_matmul_sketch_recv_tokens + refill);
+                }
+            }
+            peer->m_matmul_sketch_recv_last_refill = now_bucket;
+            if (peer->m_matmul_sketch_recv_tokens < 1.0) {
+                LogDebug(BCLog::NET, "matmul: per-peer mmsketch ingress bucket empty, dropping %s from peer=%d\n",
+                         block_hash.ToString(), pfrom.GetId());
+                return;
+            }
+            peer->m_matmul_sketch_recv_tokens -= 1.0;
+        }
+
         // Authentication needs the header (sigma is header-derived and
         // matmul_digest is a header field): an mmsketch for an unknown header
         // cannot be authenticated and is ignored (it also cannot pin memory).
@@ -6215,6 +6595,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             if (pindex == nullptr) {
                 LogDebug(BCLog::NET, "Ignoring mmsketch %s from peer=%d (unknown header)\n",
                          block_hash.ToString(), pfrom.GetId());
+                m_matmul_sketch_requested.erase(block_hash); // terminal: free the in-flight slot
                 return;
             }
             block_height = pindex->nHeight;
@@ -6241,15 +6622,18 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // Size cap = the profile 8·m² bound (anti-amplification / pre-hash DoS
         // gate; the exact-size check lives in ParseSketch on the verify path).
         if (sketch_bytes.size() > profile.SketchCacheBytes()) {
+            m_matmul_sketch_requested.erase(block_hash); // terminal: free the in-flight slot
             Misbehaving(*peer, strprintf("mmsketch oversize (%u > %u bytes)",
                                          sketch_bytes.size(), profile.SketchCacheBytes()));
             return;
         }
         // ONE-hash authentication against the header commitment.
         if (!matmul_v4::PayloadMatchesCommitment(header, sketch_bytes)) {
+            m_matmul_sketch_requested.erase(block_hash); // terminal: free the in-flight slot
             Misbehaving(*peer, "mmsketch does not authenticate against matmul_digest");
             return;
         }
+        m_matmul_sketch_requested.erase(block_hash); // terminal: request satisfied
         matmul::GetMatMulSketchCache().Put(block_hash, std::move(sketch_bytes));
         LogDebug(BCLog::NET, "Cached authenticated matmul sketch %s from peer=%d\n",
                  block_hash.ToString(), pfrom.GetId());
@@ -6435,7 +6819,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
         }
 
-        ProcessBlock(pfrom, pblock, forceProcessing, min_pow_checked);
+        // WP-7: hand the reserved verification slot (if any) to the dispatcher
+        // so an async recompute keeps it held through re-entry.
+        ProcessBlock(pfrom, pblock, forceProcessing, min_pow_checked, std::move(pending_matmul_slot));
         return;
     }
 
@@ -6724,6 +7110,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 if (inv.IsGenTxMsg()) {
                     tx_invs.emplace_back(inv.hash);
                 }
+                // WP-8 / C4 residual (D.4): the serve side now answers a block
+                // request its transport cannot carry with an explicit NOTFOUND
+                // (instead of the V2 send guard silently dropping the reply).
+                // Clear OUR request to THIS peer only, so the download
+                // scheduler re-assigns the block to another peer immediately
+                // instead of stalling to the timeout. DoS note: a peer can
+                // only cancel downloads we assigned to IT — which it could
+                // equally sabotage by staying silent (strictly worse for us).
+                if (inv.IsMsgBlk() || inv.IsMsgWitnessBlk() || inv.IsMsgCmpctBlk()) {
+                    WITH_LOCK(cs_main, RemoveBlockRequest(inv.hash, pfrom.GetId()));
+                }
             }
         }
         LOCK(m_tx_download_mutex);
@@ -6873,14 +7270,19 @@ void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seco
         // their chain has more work than ours, we should sync to it,
         // unless it's invalid, in which case we should find that out and
         // disconnect from them elsewhere).
-        if (state.pindexBestKnownBlock != nullptr && state.pindexBestKnownBlock->nChainWork >= m_chainman.ActiveChain().Tip()->nChainWork) {
+        // WP-8 site 3: both chain-sync eviction comparisons run on
+        // TRUST-ADJUSTED work for the peer's best-known block (== nChainWork
+        // pre-fork), so a forged high-work announcement can no longer suppress
+        // eviction. m_work_header is our own past tip — fully validated, its
+        // trust-adjusted work IS its nChainWork — so its side stays raw.
+        if (state.pindexBestKnownBlock != nullptr && TrustAdjustedWork(*state.pindexBestKnownBlock) >= m_chainman.ActiveChain().Tip()->nChainWork) {
             // The outbound peer has sent us a block with at least as much work as our current tip, so reset the timeout if it was set
             if (state.m_chain_sync.m_timeout != 0s) {
                 state.m_chain_sync.m_timeout = 0s;
                 state.m_chain_sync.m_work_header = nullptr;
                 state.m_chain_sync.m_sent_getheaders = false;
             }
-        } else if (state.m_chain_sync.m_timeout == 0s || (state.m_chain_sync.m_work_header != nullptr && state.pindexBestKnownBlock != nullptr && state.pindexBestKnownBlock->nChainWork >= state.m_chain_sync.m_work_header->nChainWork)) {
+        } else if (state.m_chain_sync.m_timeout == 0s || (state.m_chain_sync.m_work_header != nullptr && state.pindexBestKnownBlock != nullptr && TrustAdjustedWork(*state.pindexBestKnownBlock) >= state.m_chain_sync.m_work_header->nChainWork)) {
             // At this point we know that the outbound peer has either never sent us a block/header or they have, but its tip is behind ours
             // AND
             // we are noticing this for the first time (m_timeout is 0)
@@ -7169,8 +7571,12 @@ void PeerManagerImpl::MaybeSendSendHeaders(CNode& node, Peer& peer)
     if (!peer.m_sent_sendheaders && node.GetCommonVersion() >= SENDHEADERS_VERSION) {
         LOCK(cs_main);
         CNodeState &state = *State(node.GetId());
+        // WP-8 site 7: TRUST-ADJUSTED work (== nChainWork pre-fork). During a
+        // v4 IBD, SENDHEADERS is deferred until the peer's chain has
+        // authenticated past minchainwork; peers announce via inv meanwhile —
+        // graceful, no stall.
         if (state.pindexBestKnownBlock != nullptr &&
-                state.pindexBestKnownBlock->nChainWork > m_chainman.MinimumChainWork()) {
+                TrustAdjustedWork(*state.pindexBestKnownBlock) > m_chainman.MinimumChainWork()) {
             // Tell our peer we prefer to receive headers rather than inv's
             // We send this to non-NODE NETWORK peers as well, because even
             // non-NODE NETWORK peers can announce blocks (such as pruning

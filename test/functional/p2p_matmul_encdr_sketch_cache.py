@@ -47,7 +47,10 @@ Heights/dims chosen for CI speed: v4/ENC-BMX4C at H_V4 (single flag day), n = 12
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.messages import (
+    CBlockHeader,
+    from_hex,
     msg_getmmsketch,
+    msg_headers,
     msg_mmsketch,
 )
 from test_framework.p2p import P2PInterface
@@ -62,16 +65,21 @@ NODE2_CACHE = 2         # small cache so early v4 blocks are FIFO-evicted -> unc
 
 class SketchPeer(P2PInterface):
     """Requests and records mmsketch replies; can inject (honest or tampered)
-    mmsketch messages. Counts replies so the dedup serve gate is checkable."""
+    mmsketch messages. Counts replies so the dedup serve gate is checkable, and
+    records incoming getmmsketch so the SOLICITED receive path is testable."""
 
     def __init__(self):
         super().__init__()
         self.sketches = {}   # block_hash int -> bytes
         self.reply_count = 0
+        self.sketch_requests = []   # block hashes the NODE asked us for
 
     def on_mmsketch(self, message):
         self.sketches[message.block_hash] = message.sketch
         self.reply_count += 1
+
+    def on_getmmsketch(self, message):
+        self.sketch_requests.append(message.block_hash)
 
 
 class BTXMatMulEncDrSketchCache(BitcoinTestFramework):
@@ -164,39 +172,74 @@ class BTXMatMulEncDrSketchCache(BitcoinTestFramework):
         uncached_hex = node2.getblockhash(uncached_height)
         uncached_hash = int(uncached_hex, 16)
 
-        self.log.info("RECEIVE: tampered mmsketch for an UNCACHED block is penalized")
+        self.log.info("RECEIVE: UNSOLICITED mmsketch is silently dropped (WP-8 hardening)")
         # Fetch the honest sketch for the uncached block from the winner first.
         peer.send_message(msg_getmmsketch(block_hash=uncached_hash))
         self.wait_until(lambda: uncached_hash in peer.sketches, timeout=60)
         uncached_sketch = peer.sketches[uncached_hash]
         assert_equal(len(uncached_sketch), SKETCH_BYTES)
 
-        bad_peer = node2.add_p2p_connection(SketchPeer())
+        # The serve side never pushes sketches unsolicited, so the receive side
+        # accepts an mmsketch ONLY in reply to its own getmmsketch. A tampered
+        # unsolicited push is dropped BEFORE any authentication hashing and
+        # WITHOUT penalty (the drop must not punish an honest-but-late reply
+        # after the request TTL)...
+        push_peer = node2.add_p2p_connection(SketchPeer())
         tampered = bytearray(uncached_sketch)
         tampered[0] ^= 0x01
-        with node2.assert_debug_log(["does not authenticate against matmul_digest"]):
-            bad_peer.send_message(
+        with node2.assert_debug_log(["Ignoring unsolicited mmsketch"]):
+            push_peer.send_message(
                 msg_mmsketch(block_hash=uncached_hash, sketch=bytes(tampered)))
-            # One authentication failure discourages the peer -> disconnect.
-            bad_peer.wait_for_disconnect(timeout=60)
-        # The chain is untouched by a bad cache delivery.
+            push_peer.sync_with_ping(timeout=60)
+        # ...the peer stays connected and the chain is untouched...
         assert_equal(node2.getbestblockhash(), tip_hash_hex)
-
-        self.log.info("RECEIVE: honest mmsketch for the uncached block is cached")
-        good_peer = node2.add_p2p_connection(SketchPeer())
-        good_peer.send_message(
-            msg_mmsketch(block_hash=uncached_hash, sketch=uncached_sketch))
-        good_peer.sync_with_ping(timeout=60)
-        # Proof it was authenticated + cached: node2 now serves it back.
+        # ...and an unsolicited HONEST sketch is equally not cached: node2 does
+        # not serve it afterwards.
+        with node2.assert_debug_log(["Ignoring unsolicited mmsketch"]):
+            push_peer.send_message(
+                msg_mmsketch(block_hash=uncached_hash, sketch=uncached_sketch))
+            push_peer.sync_with_ping(timeout=60)
         serve_probe = node2.add_p2p_connection(SketchPeer())
         serve_probe.send_message(msg_getmmsketch(block_hash=uncached_hash))
-        self.wait_until(lambda: uncached_hash in serve_probe.sketches, timeout=60)
-        assert_equal(serve_probe.sketches[uncached_hash], uncached_sketch)
-        assert_equal(node2.getbestblockhash(), tip_hash_hex)
+        serve_probe.sync_with_ping(timeout=60)
+        assert uncached_hash not in serve_probe.sketches
+
+        self.log.info("RECEIVE: tampered reply to a node-initiated getmmsketch is penalized")
+        # Cut node2 off from node0 and mine one more ENC-DR block, so node2 must
+        # fetch the new block from our attacker peer. Announcing the header makes
+        # node2 direct-fetch the block AND prefetch its sketch (getmmsketch) from
+        # the attacker: a deterministic SOLICITED delivery.
+        self.disconnect_nodes(0, 2)
+        self.generate(node0, 1, sync_fun=self.no_op)
+        solicited_hex = node0.getbestblockhash()
+        solicited_hash = int(solicited_hex, 16)
+        # The honest bytes (to tamper with) come from the winner.
+        peer.send_message(msg_getmmsketch(block_hash=solicited_hash))
+        self.wait_until(lambda: solicited_hash in peer.sketches, timeout=60)
+        solicited_sketch = peer.sketches[solicited_hash]
+        assert_equal(len(solicited_sketch), SKETCH_BYTES)
+
+        attacker = node2.add_p2p_connection(SketchPeer())
+        header = from_hex(CBlockHeader(), node0.getblockheader(solicited_hex, False))
+        attacker.send_message(msg_headers(headers=[header]))
+        self.wait_until(lambda: solicited_hash in attacker.sketch_requests, timeout=60)
+        tampered_reply = bytearray(solicited_sketch)
+        tampered_reply[0] ^= 0x01
+        with node2.assert_debug_log(["does not authenticate against matmul_digest"]):
+            attacker.send_message(
+                msg_mmsketch(block_hash=solicited_hash, sketch=bytes(tampered_reply)))
+            # One authentication failure on a solicited reply discourages the
+            # peer -> disconnect.
+            attacker.wait_for_disconnect(timeout=60)
+        # A bad cache delivery never touches the chain: node2 still gets the
+        # block from the honest network and reaches the new tip.
+        self.connect_nodes(0, 2)
+        self.wait_until(
+            lambda: node2.getbestblockhash() == solicited_hex, timeout=240)
 
         self.log.info("Chain keeps extending regardless of cache state (liveness)")
         self.generate(node0, 1, sync_fun=self.no_op)
-        final_height = target_height + 1
+        final_height = target_height + 2
         for node in (node1, node2):
             self.wait_until(
                 lambda n=node: n.getblockcount() == final_height

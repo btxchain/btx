@@ -395,6 +395,17 @@ public:
 
     /** Whether upon disconnections, a reconnect with V1 is warranted. */
     virtual bool ShouldReconnectV1() const noexcept = 0;
+
+    /** WP-8 / C4 residual: the largest msg.data payload this transport can
+     *  currently emit as ONE message. V1 carries up to the block-bearing
+     *  ceiling (MAX_BLOCK_MESSAGE_LENGTH, 24 MB); a single V2/BIP324 packet is
+     *  physically capped by its 3-byte contents-length field (~16 MB) and the
+     *  send path DROPS anything larger rather than desyncing the cipher
+     *  stream. Block-serving code must consult this bound BEFORE composing a
+     *  block/blocktxn message so an oversized payload is routed (compact
+     *  block / NOTFOUND) instead of silently vanishing. Call from the message
+     *  handler thread (same discipline as GetInfo()). */
+    virtual size_t MaxSendablePayloadBytes() const noexcept = 0;
 };
 
 class V1Transport final : public Transport
@@ -477,6 +488,13 @@ public:
     void MarkBytesSent(size_t bytes_sent) noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
     size_t GetSendMemoryUsage() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
     bool ShouldReconnectV1() const noexcept override { return false; }
+    size_t MaxSendablePayloadBytes() const noexcept override
+    {
+        // V1 frames the payload length in a 4-byte field; the effective bound
+        // is the per-command receive-side ceiling, whose maximum is the
+        // block-bearing limit (readHeader enforces it on the other end).
+        return MAX_BLOCK_MESSAGE_LENGTH;
+    }
 };
 
 class V2Transport final : public Transport
@@ -739,6 +757,7 @@ public:
     // Miscellaneous functions.
     bool ShouldReconnectV1() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex, !m_send_mutex);
     Info GetInfo() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex);
+    size_t MaxSendablePayloadBytes() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
 
     /** (Test only) Whether the post-quantum hybrid rekey has been applied to the cipher. */
     bool IsHybridActiveForTest() const noexcept EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);

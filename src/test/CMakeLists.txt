@@ -68,6 +68,7 @@ add_executable(test_btx
   matmul_matrix_tests.cpp
   matmul_noise_tests.cpp
   matmul_pow_tests.cpp
+  matmul_verify_worker_tests.cpp
   matmul_accelerated_solver_tests.cpp
   matmul_backend_capabilities_tests.cpp
   matmul_metal_tests.cpp

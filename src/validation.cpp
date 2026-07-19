@@ -10191,6 +10191,52 @@ struct CsMainScopedRelease {
 };
 } // namespace
 
+bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* pindex_self, int nHeight) const
+{
+    AssertLockHeld(::cs_main);
+    // Factored VERBATIM from ContextualCheckBlock's ASSUMEVALID BURIED-RECOMPUTE
+    // TRUST clause (tension-resolution §3.1-vi); see the in-line rationale there.
+    // Behavior must stay bit-identical to the historical in-line predicate: a
+    // null pindex_self, unset -assumevalid, or missing best header always mean
+    // "not trusted" (=> the recompute runs).
+    if (AssumedValidBlock().IsNull() || m_best_header == nullptr || pindex_self == nullptr) return false;
+    const auto av_it = m_blockman.m_block_index.find(AssumedValidBlock());
+    if (av_it == m_blockman.m_block_index.end()) return false;
+    if (av_it->second.GetAncestor(nHeight) != pindex_self) return false;
+    if (m_best_header->GetAncestor(nHeight) != pindex_self) return false;
+    if (m_best_header->nAuthenticatedChainWork < MinimumChainWork()) return false;
+    return GetBlockProofEquivalentTime(*m_best_header, *pindex_self, *m_best_header, GetConsensus()) >
+           static_cast<int64_t>(GetConsensus().nMatMulProofAssumeValidMinAge);
+}
+
+std::optional<int32_t> ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block) const
+{
+    AssertLockHeld(::cs_main);
+    const Consensus::Params& params = GetConsensus();
+    if (!params.fMatMulPOW) return std::nullopt;
+    const CBlockIndex* prev = m_blockman.LookupBlockIndex(block.hashPrevBlock);
+    // An unknown or overflowing prev means AcceptBlock cannot reach the ENC-DR
+    // seam for this delivery (it fails/queues upstream): keep it synchronous.
+    if (prev == nullptr || prev->nHeight == std::numeric_limits<int>::max()) return std::nullopt;
+    const int32_t nHeight = prev->nHeight + 1;
+    if (!params.IsMatMulV4Active(nHeight)) return std::nullopt;
+    if (params.GetMatMulProfileParams(nHeight).commitment !=
+        Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) return std::nullopt;
+    // A non-empty body payload is rejected cheaply at the seam (forbidden
+    // A/B payload, non-empty inline sketch) before any recompute: do not
+    // spend a worker slot on it.
+    if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty() || !block.matrix_c_data.empty()) {
+        return std::nullopt;
+    }
+    if (const CBlockIndex* existing = m_blockman.LookupBlockIndex(block.GetHash())) {
+        // Already have the data: AcceptBlock short-circuits before the seam.
+        if (existing->nStatus & BLOCK_HAVE_DATA) return std::nullopt;
+        // Assumevalid-buried: the seam skips the recompute entirely.
+        if (IsMatMulRecomputeAssumeValidTrusted(existing, nHeight)) return std::nullopt;
+    }
+    return nHeight;
+}
+
 /** NOTE: This function is not currently invoked by ConnectBlock(), so we
  *  should consider upgrade issues if we change which consensus rules are
  *  enforced in this function (eg by adding a new consensus rule). See comment
@@ -10272,18 +10318,12 @@ static bool ContextualCheckBlock(const CBlock& block,
             // skipped for this block (every buried block stays re-auditable
             // forever by digest-only recompute — re-derivability underneath
             // the trust, §4.4).
-            bool recompute_assumevalid_trusted = false;
-            if (!chainman.AssumedValidBlock().IsNull() && chainman.m_best_header != nullptr) {
-                const CBlockIndex* pindex_self = chainman.m_blockman.LookupBlockIndex(block.GetHash());
-                const auto av_it = chainman.m_blockman.m_block_index.find(chainman.AssumedValidBlock());
-                if (pindex_self != nullptr && av_it != chainman.m_blockman.m_block_index.end() &&
-                    av_it->second.GetAncestor(nHeight) == pindex_self &&
-                    chainman.m_best_header->GetAncestor(nHeight) == pindex_self &&
-                    chainman.m_best_header->nAuthenticatedChainWork >= chainman.MinimumChainWork() &&
-                    GetBlockProofEquivalentTime(*chainman.m_best_header, *pindex_self, *chainman.m_best_header, consensusParams) > static_cast<int64_t>(consensusParams.nMatMulProofAssumeValidMinAge)) {
-                    recompute_assumevalid_trusted = true;
-                }
-            }
+            // (Predicate factored to ChainstateManager::IsMatMulRecomputeAssumeValidTrusted
+            // so the WP-7 async-verify dispatcher and the WP-8 sketch-prefetch
+            // guard share this single implementation; behavior unchanged.)
+            const bool recompute_assumevalid_trusted =
+                chainman.IsMatMulRecomputeAssumeValidTrusted(
+                    chainman.m_blockman.LookupBlockIndex(block.GetHash()), nHeight);
             // (3) Above assumevalid (or -assumevalid=0): decide the §4.1
             // predicate. Any failure is a header-level PERMANENT consensus
             // fault: with an empty body there are no proof bytes to mutate, so
@@ -10301,7 +10341,19 @@ static bool ContextualCheckBlock(const CBlock& block,
                 // assumevalid-trust) is already made; only this bool crosses the
                 // release boundary.
                 bool encdr_ok;
-                if (may_release_cs_main) {
+                if (const auto memo{LookupMatMulEncDrVerdict(block.GetHash())}) {
+                    // WP-7 / C5: the async verify worker (net_processing's
+                    // node::MatMulVerifyWorker) already ran the pure ENC-DR
+                    // predicate for this header off-thread and memoized the
+                    // verdict. The predicate is a pure function of the header +
+                    // process-constant params (the hash pins prev => height =>
+                    // profile), so replaying the verdict here is
+                    // consensus-equivalent to recomputing — and it keeps the
+                    // completion's re-entry through ProcessNewBlock O(1) even
+                    // when the 8-entry sketch cache already evicted the entry
+                    // or the block is INVALID (nothing was ever cached).
+                    encdr_ok = *memo;
+                } else if (may_release_cs_main) {
                     CsMainScopedRelease release_cs_main_for_recompute;
                     // DO NOT add cs_main-requiring code in this scope: TSA still
                     // believes cs_main is held here (the RAII guard is

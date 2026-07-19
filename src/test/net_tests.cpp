@@ -1761,4 +1761,22 @@ BOOST_AUTO_TEST_CASE(v1transport_block_message_size_ceiling)
     BOOST_CHECK(!V1HeaderSizeAccepted("arbitrarycmd", MAX_PROTOCOL_MESSAGE_LENGTH + 1));
 }
 
+//! WP-8 / C4 residual (design D.7 #1): Transport::MaxSendablePayloadBytes must
+//! expose the byte-accurate single-message payload bound the send path
+//! enforces, so block-serving code can route oversized blocks instead of
+//! having V2Transport::SetMessageToSend silently drop them.
+BOOST_AUTO_TEST_CASE(transport_max_sendable_payload_bytes)
+{
+    // V1: the block-bearing ceiling (24 MB).
+    V1Transport v1{/*node_id=*/NodeId{0}};
+    BOOST_CHECK_EQUAL(v1.MaxSendablePayloadBytes(), MAX_BLOCK_MESSAGE_LENGTH);
+
+    // V2 (not in V1 fallback): the BIP324 3-byte contents-length bound minus
+    // the worst-case long message-type framing (1 + 12 bytes) — exactly the
+    // ordinary 16 MB protocol ceiling given V2_MAX_CONTENTS_LEN's definition.
+    V2Transport v2{/*nodeid=*/NodeId{0}, /*initiating=*/true};
+    BOOST_CHECK_EQUAL(v2.MaxSendablePayloadBytes(), MAX_PROTOCOL_MESSAGE_LENGTH);
+    BOOST_CHECK(v2.MaxSendablePayloadBytes() < MAX_BLOCK_SERIALIZED_SIZE);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -271,4 +271,60 @@ BOOST_AUTO_TEST_CASE(pre_fork_heights_are_byte_identical)
     }
 }
 
+// WP-8 / C1/H2: GetTrustAdjustedChainWork must be EXACTLY nChainWork pre-fork
+// (the routed peer-selection sites are then behavior-identical), give full
+// credit to an honest short unauthenticated suffix, and clamp a long forged
+// suffix to the allowance above the last authenticated ancestor.
+BOOST_AUTO_TEST_CASE(trust_adjusted_work_identity_and_clamp)
+{
+    LOCK(::cs_main);
+    constexpr unsigned int kAllowance{32}; // net_processing's UNAUTH_WORK_ALLOWANCE_BLOCKS
+
+    // Pre-fork (fork disabled, like INT32_MAX today): identity on every status mix.
+    {
+        const Consensus::Params params = ParamsWithFork(std::numeric_limits<int32_t>::max());
+        Chain c;
+        c.Add(ST_AUTHENTICATED);
+        c.Add(ST_HEADER_ONLY);
+        c.Add(BLOCK_VALID_TREE);
+        c.Add(ST_AUTHENTICATED);
+        c.Recompute(params);
+        for (const CBlockIndex& idx : c.blocks) {
+            BOOST_CHECK_EQUAL(GetTrustAdjustedChainWork(idx, kAllowance).GetHex(), idx.nChainWork.GetHex());
+        }
+    }
+
+    // Post-fork: forged 100-block header-only suffix is clamped to
+    // authenticated + kAllowance * W; an honest 10-block suffix keeps full credit.
+    {
+        const int32_t kFork = 3;
+        const Consensus::Params params = ParamsWithFork(kFork);
+        Chain c;
+        for (int i = 0; i < kFork; ++i) c.Add(ST_AUTHENTICATED); // pre-fork base
+        CBlockIndex* last_auth = c.Add(ST_AUTHENTICATED);        // first v4 block, body-verified
+        for (int i = 0; i < 100; ++i) c.Add(ST_HEADER_ONLY);     // forged suffix
+        c.Recompute(params);
+
+        const CBlockIndex& forged_tip = c.blocks.back();
+        const arith_uint256 W = GetBlockProof(forged_tip);
+        arith_uint256 allowance{W};
+        allowance *= kAllowance;
+
+        // Clamped: authenticated prefix + exactly the allowance.
+        BOOST_CHECK_EQUAL(GetTrustAdjustedChainWork(forged_tip, kAllowance).GetHex(),
+                          (last_auth->nAuthenticatedChainWork + allowance).GetHex());
+        BOOST_CHECK(GetTrustAdjustedChainWork(forged_tip, kAllowance) < forged_tip.nChainWork);
+
+        // A suffix shorter than the allowance keeps full claimed credit: block
+        // 10 past the last authenticated one has unauth == 10*W <= 32*W.
+        const CBlockIndex& shallow = c.blocks[kFork + 1 + 10 - 1]; // 10th header-only block
+        BOOST_CHECK_EQUAL(GetTrustAdjustedChainWork(shallow, kAllowance).GetHex(),
+                          shallow.nChainWork.GetHex());
+
+        // Fully authenticated chains are always identity, post-fork included.
+        BOOST_CHECK_EQUAL(GetTrustAdjustedChainWork(*last_auth, kAllowance).GetHex(),
+                          last_auth->nChainWork.GetHex());
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

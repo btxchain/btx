@@ -1752,6 +1752,19 @@ bool V2Transport::SetMessageToSend(CSerializedNetMsg& msg) noexcept
     return true;
 }
 
+size_t V2Transport::MaxSendablePayloadBytes() const noexcept
+{
+    AssertLockNotHeld(m_send_mutex);
+    LOCK(m_send_mutex);
+    // In V1 fallback the V1 rules apply. Otherwise mirror SetMessageToSend's
+    // contents framing exactly: worst case is the long message-type encoding
+    // (1 type-length byte + 12 type bytes) ahead of the payload, and the whole
+    // contents must fit the BIP324 3-byte length field bound the send guard
+    // enforces (an oversized message is DROPPED there, not truncated).
+    if (m_send_state == SendState::V1) return m_v1_fallback.MaxSendablePayloadBytes();
+    return V2_MAX_CONTENTS_LEN - 1 - CMessageHeader::MESSAGE_TYPE_SIZE;
+}
+
 Transport::BytesToSend V2Transport::GetBytesToSend(bool have_next_message) const noexcept
 {
     AssertLockNotHeld(m_send_mutex);
