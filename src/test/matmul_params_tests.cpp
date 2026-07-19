@@ -110,6 +110,13 @@ BOOST_AUTO_TEST_CASE(matmul_freivalds_payload_mining_policy_matches_network_poli
     auto disabled = main_consensus;
     disabled.fMatMulFreivaldsEnabled = false;
     BOOST_CHECK(!ShouldIncludeMatMulFreivaldsPayloadForMining(61'000, disabled));
+
+    auto seal_mode = regtest_consensus;
+    seal_mode.nMatMulV4Height = 1;
+    seal_mode.nMatMulBMX4CHeight = 1;
+    seal_mode.nMatMulDRLTHeight = 1;
+    seal_mode.fMatMulLTSealAsPoW = true;
+    BOOST_CHECK(!ShouldIncludeMatMulFreivaldsPayloadForMining(1, seal_mode));
 }
 
 BOOST_AUTO_TEST_CASE(matmul_params_regtest)

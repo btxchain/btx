@@ -3397,6 +3397,11 @@ bool HasMatMulFreivaldsPayload(const CBlock& block)
 
 bool ShouldIncludeMatMulFreivaldsPayloadForMining(int32_t block_height, const Consensus::Params& params)
 {
+    // Phase B commits to a Q* window seal, not a single-slot product sketch.
+    // Its consensus carriage is deliberately empty and validation recomputes
+    // the seal from the header. Asking the solver for a v4 product payload here
+    // makes GenerateBlock reject its own valid Phase-B winner as "missing".
+    if (params.IsMatMulLTSealAsPoWActive(block_height)) return false;
     // MatMul v4 (spec §G.3): v4 blocks are always product-committed and the
     // C payload is always required, independent of the legacy
     // fMatMulFreivaldsEnabled / fMatMulRequireProductPayload flags.
