@@ -7,7 +7,11 @@
 // with Metal 4 MPP TensorOps preferred for s8xs8 when ExactGemmS8S8 self-qual
 // passes. Injected via ExactGemmBackend into WindowSketchMinerLT (fail-closed
 // host ExactGemm when Metal declines). Never label ALU shaders as TensorOps.
-// Fuller MatExpand→project→combine device residency lives on CUDA/HIP LT.
+//
+// Lever-B: normative MX Extract stays on the host (WindowSketchMinerLT /
+// ComputeDigestBMX4CLT — ExpandOperandBMatExpandMx + scale-partitioned B̂·V).
+// No Metal MX Extract shader; fuller MatExpand→project→combine residency is
+// CUDA/HIP. Digests remain bit-identical to the CPU reference.
 
 #include <metal/matmul_v4_lt_accel.h>
 

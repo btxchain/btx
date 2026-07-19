@@ -30,19 +30,21 @@
 // ===========================================================================
 // NVIDIA backend for MatMul v4.4 ENC-DR-LT ("MatExpand") mining.
 //
+// Lever-B MX Extract (normative): E8M0 scales on 32-col blocks + tile ChaCha
+// M11 mantissas (`BTX_MATEXPAND_MXPRF_V44LT` / `MXSCALE`). Device twin must
+// match CPU ExtractDequantMatExpand / AccelReplica bit-exactly.
+//
 // Hot path (when a calibrated CUDA device is present):
- //   persistent device-resident loop over MatExpand → project → combine.
- //   When IsLtImmaGemmAvailable(), s8xs8 stages (G*W, U*Ahat, Bhat*V) use
- //   cuBLASLt CUBLAS_COMPUTE_32I IMMA on resident device pointers; s32xs8
- //   (Y*H) stays scalar DeviceGemmS32S8Tiled — TryLaunchLtImmaGemmS32S8 always
- //   declines (no exact s32×s8→s32 cuBLASLt recipe); never labeled IMMA.
- //   When IMMA declines, scalar tiled DeviceGemm* + CUDA-graph replay serve
- //   the same buffers — never labeled IMMA. Digest hashing stays on host after
- //   Chat D2H (honest gap: device-side SHA256d of Chat is not wired yet).
- //
+//   persistent device-resident loop over MatExpand → MX Extract → project →
+//   combine. Right projection prefers scale-partitioned B̂·V (μ,e layout
+//   e(i,j/32)) when PlanLTAccel selects ScalePartitionedMxfp4 (Blackwell /
+//   sm_100/sm_120 / 5090); else dense IMMA / scalar tiled GEMM on dequantized
+//   Bhat. s32xs8 (Y*H) stays scalar. Digest hashing stays on host after Chat
+//   D2H (device SHA256d of Chat not wired).
+//
  // Fail-closed fallback:
- //   host ExactGemm* / WindowSketchMinerLT (bit-exact). That host path is the
- //   safety net when the device declines — it is NOT the complete accelerator.
+ //   host ExactGemm* / WindowSketchMinerLT (bit-exact MX scale-partitioned
+ //   B̂·V on CPU). That host path is the safety net when the device declines.
  //
  // Availability requires a one-time bit-identity self-test of the GEMM kernels
  // AND a one-nonce device-resident digest vs ComputeDigestBMX4CLT.
@@ -190,8 +192,10 @@ __device__ __forceinline__ int8_t DeviceSampleMantissaNibble(uint8_t nibble, boo
 }
 
 // Lever-B MX Extract: one thread per (i, bj) tile. scales[i*nblk+bj] = e.
+// Writes dense Bhat = μ·2^e; optional Mu receives M11 mantissas (n×n).
 __global__ void DeviceExtractDequantMatExpandMx(const int32_t* __restrict__ B32,
                                                 int8_t* __restrict__ Bhat,
+                                                int8_t* __restrict__ Mu,
                                                 const uint8_t* __restrict__ scales,
                                                 uint32_t n, uint32_t k0, uint32_t k1, uint32_t k2,
                                                 uint32_t k3, uint32_t k4, uint32_t k5, uint32_t k6,
@@ -233,10 +237,41 @@ __global__ void DeviceExtractDequantMatExpandMx(const int32_t* __restrict__ B32,
 
     const uint8_t e = scales[static_cast<size_t>(i) * nblk + bj];
     const int32_t scale = int32_t{1} << e;
-    int8_t* out = Bhat + static_cast<size_t>(i) * n + static_cast<size_t>(bj) * kBlk;
+    const size_t base = static_cast<size_t>(i) * n + static_cast<size_t>(bj) * kBlk;
+    int8_t* out = Bhat + base;
+    int8_t* mu_out = Mu ? Mu + base : nullptr;
     for (uint32_t t = 0; t < kBlk; ++t) {
+        if (mu_out) mu_out[t] = mu[t];
         out[t] = static_cast<int8_t>(static_cast<int32_t>(mu[t]) * scale);
     }
+}
+
+// Q[i,c] = sum_bj 2^{e[i,bj]} * sum_t μ[i,32·bj+t]·V[32·bj+t,c]
+// Bit-identical to ComputeProjectedRightMxBlockScaleLT (not BMX4C row-block scales).
+__global__ void DeviceProjectRightMxBlockScale(const int8_t* __restrict__ mu,
+                                               const uint8_t* __restrict__ scales,
+                                               const int8_t* __restrict__ V,
+                                               int32_t* __restrict__ Q, uint32_t n, uint32_t m)
+{
+    constexpr uint32_t kBlk = 32;
+    const uint32_t nblk = n / kBlk;
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t total = n * m;
+    if (idx >= total) return;
+    const uint32_t i = idx / m;
+    const uint32_t c = idx % m;
+    int32_t acc = 0;
+    for (uint32_t bj = 0; bj < nblk; ++bj) {
+        const uint8_t e = scales[static_cast<size_t>(i) * nblk + bj];
+        int32_t partial = 0;
+        for (uint32_t t = 0; t < kBlk; ++t) {
+            const uint32_t j = bj * kBlk + t;
+            partial += static_cast<int32_t>(mu[static_cast<size_t>(i) * n + j]) *
+                       static_cast<int32_t>(V[static_cast<size_t>(j) * m + c]);
+        }
+        acc += partial * (int32_t{1} << e);
+    }
+    Q[static_cast<size_t>(i) * m + c] = acc;
 }
 
 // F_q = 2^61-1 helpers (device twin of matmul::int8_field).
@@ -352,9 +387,11 @@ struct LtCudaResidentPool {
     int32_t* dY{nullptr};
     int32_t* dB32{nullptr};
     int8_t* dBhat{nullptr};
+    int8_t* dMu{nullptr};     // n×n M11 mantissas for MX scale-partitioned B̂·V
     int32_t* dQ{nullptr};
     uint64_t* dChat{nullptr};
     uint8_t* dScales{nullptr}; // n * (n/32) E8M0 codes for MX Extract
+    bool prefer_mx_right{false}; // PlanLTAccel ScalePartitionedMxfp4 on this GPU
 
     // Generic LaunchGemm scratch (cross-call reuse; minimizes alloc churn)
     int8_t* dGemmS8L{nullptr};
@@ -389,13 +426,14 @@ struct LtCudaResidentPool {
             if (p) { cudaFree(p); p = nullptr; }
         };
         free_p(dG); free_p(dH); free_p(dU); free_p(dV); free_p(dAhat); free_p(dP);
-        free_p(dW); free_p(dY); free_p(dB32); free_p(dBhat); free_p(dQ); free_p(dChat);
+        free_p(dW); free_p(dY); free_p(dB32); free_p(dBhat); free_p(dMu); free_p(dQ); free_p(dChat);
         free_p(dScales);
         free_p(dGemmS8L); free_p(dGemmS8R); free_p(dGemmS32L); free_p(dGemmOut);
         gemm_s8l_bytes = gemm_s8r_bytes = gemm_s32l_bytes = gemm_out_bytes = 0;
         if (stream) { cudaStreamDestroy(stream); stream = nullptr; }
         template_bound = false;
         imma_s8s8 = false;
+        prefer_mx_right = false;
         n = m = w = 0;
         device = -1;
     }
@@ -457,16 +495,38 @@ struct LtCudaResidentPool {
             !mall(reinterpret_cast<void**>(&dY), nw * sizeof(int32_t)) ||
             !mall(reinterpret_cast<void**>(&dB32), nn * sizeof(int32_t)) ||
             !mall(reinterpret_cast<void**>(&dBhat), nn) ||
+            !mall(reinterpret_cast<void**>(&dMu), nn) ||
             !mall(reinterpret_cast<void**>(&dQ), nm * sizeof(int32_t)) ||
             !mall(reinterpret_cast<void**>(&dChat), mm * sizeof(uint64_t)) ||
             !mall(reinterpret_cast<void**>(&dScales), nscales)) {
             Release();
             return false;
         }
+        // PlanLTAccel taxonomy: ScalePartitionedMxfp4 ⇒ prefer MX e(i,j/32) B̂·V.
+        prefer_mx_right = false;
+        cudaDeviceProp prop{};
+        if (cudaGetDeviceProperties(&prop, device) == cudaSuccess) {
+            const std::string tag =
+                "sm" + std::to_string(prop.major) + std::to_string(prop.minor);
+            if (matmul::v4::lt::PlanLTAccel(tag).projection ==
+                matmul::v4::bmx4::ProjectionLane::ScalePartitionedMxfp4) {
+                prefer_mx_right = true;
+            } else {
+                const std::string name = prop.name ? prop.name : "";
+                for (const char* key : {"5090", "B200", "Blackwell", "blackwell"}) {
+                    if (name.find(key) != std::string::npos &&
+                        matmul::v4::lt::PlanLTAccel(key).projection ==
+                            matmul::v4::bmx4::ProjectionLane::ScalePartitionedMxfp4) {
+                        prefer_mx_right = true;
+                        break;
+                    }
+                }
+            }
+        }
         return true;
     }
 
-    [[nodiscard]] bool LaunchMxExtract(int8_t* dOut, const uint256& prf_key)
+    [[nodiscard]] bool LaunchMxExtract(int8_t* dOut, const uint256& prf_key, int8_t* dMuOut)
     {
         const uint32_t nblk = n / matmul::v4::lt::kMatExpandMxBlockLen;
         const size_t nscales = static_cast<size_t>(n) * nblk;
@@ -487,7 +547,16 @@ struct LtCudaResidentPool {
         const int extract_threads = 256;
         const int extract_blocks = static_cast<int>((ntiles + extract_threads - 1) / extract_threads);
         DeviceExtractDequantMatExpandMx<<<extract_blocks, extract_threads, 0, stream>>>(
-            dB32, dOut, dScales, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
+            dB32, dOut, dMuOut, dScales, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
+        return cudaGetLastError() == cudaSuccess;
+    }
+
+    [[nodiscard]] bool LaunchProjectRightMxScale()
+    {
+        const uint32_t total = n * m;
+        const int threads = 256;
+        const int blocks = static_cast<int>((total + threads - 1) / threads);
+        DeviceProjectRightMxBlockScale<<<blocks, threads, 0, stream>>>(dMu, dScales, dV, dQ, n, m);
         return cudaGetLastError() == cudaSuccess;
     }
 
@@ -579,7 +648,7 @@ struct LtCudaResidentPool {
         }
 
         const uint256 prf_a = matmul::v4::lt::DeriveMatExpandPrfKey(seed_wa);
-        if (!LaunchMxExtract(dAhat, prf_a)) return false;
+        if (!LaunchMxExtract(dAhat, prf_a, /*dMuOut=*/nullptr)) return false;
 
         if (imma_s8s8) {
             if (!LaunchProjectLeftImma()) {
@@ -622,9 +691,11 @@ struct LtCudaResidentPool {
         }
 
         const uint256 prf = matmul::v4::lt::DeriveMatExpandPrfKey(seed_w);
-        if (!LaunchMxExtract(dBhat, prf)) return false;
+        if (!LaunchMxExtract(dBhat, prf, dMu)) return false;
 
-        if (imma_s8s8) {
+        if (prefer_mx_right) {
+            if (!LaunchProjectRightMxScale()) return false;
+        } else if (imma_s8s8) {
             if (!LaunchProjectRightImma()) return false;
         } else {
             if (cudaGraphLaunch(project_right_exec, stream) != cudaSuccess) return false;

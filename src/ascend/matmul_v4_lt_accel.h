@@ -29,9 +29,11 @@ class CBlockHeader;
 // matched byte-for-byte. Ordinary aclnnMm/Matmul is deliberately not used:
 // released public dtype contracts do not document it as INT8->INT32.
 //
-// Without CANN (default CI / BTX_ENABLE_ASCEND=OFF, or ON without toolkit):
-// stub declines — never pretends Cube ran. Consensus remains the CPU integer
-// transcript. Public activation remains inert (INT32_MAX).
+// Lever-B: MatExpand Extract is normative MX-block on the CPU path
+// (ComputeDigestBMX4CLT / WindowSketchMinerLT). FoldInt32ToEmax48 in self-qual
+// fillers is GEMM shape noise only — not consensus Extract. Digests use host
+// MX scale-partitioned B̂·V. Without CANN: stub declines. Public activation
+// remains inert (INT32_MAX).
 // ---------------------------------------------------------------------------
 
 namespace matmul_v4::ascend {
