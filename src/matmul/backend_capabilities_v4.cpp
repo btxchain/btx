@@ -13,12 +13,7 @@
 #include <hip/hip_runtime.h>
 #endif
 
-#if defined(BTX_HAVE_CANN)
-#include <acl/acl.h>
-#endif
-
 #include <algorithm>
-#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -80,10 +75,18 @@ Eligibility CudaEligibility()
             .reason = probe.reason,
         };
     }
-    // §S.1: availability of the v3 CUDA path is not enough for v4 mining —
-    // the device must be IMMA-capable (Turing+, s8xs8->s32 tensor cores).
-    return ClassifyCudaDevice(probe.compute_capability_major,
-                              probe.compute_capability_minor);
+    // §S.1: availability of the v3 CUDA path is not enough for v4 mining.
+    // Compute capability is only a coarse candidate filter (some sm_75
+    // products have no usable Tensor Core path). Require cuBLASLt to select an
+    // algorithm that declares native IMMA + INT8 input + INT32 accumulation
+    // and then pass the multi-shape exactness self-test.
+    Eligibility eligibility = ClassifyCudaDevice(probe.compute_capability_major,
+                                                  probe.compute_capability_minor);
+    if (eligibility.admissible && !matmul_v4::cuda::IsLtImmaGemmAvailable()) {
+        eligibility.admissible = false;
+        eligibility.reason = "cuda_native_imma_self_qual_failed:" + eligibility.reason;
+    }
+    return eligibility;
 #else
     return DisabledByBuild();
 #endif
@@ -149,8 +152,15 @@ Eligibility HipEligibility()
         };
     }
 
-    // §N.3-v determinism self-test still required on top of arch admissibility.
-    return ClassifyHipDevice(props.gcnArchName);
+    // Architecture is only a candidate filter. Require a library path that
+    // actually executed I8×I8→I32 on this device and matched the CPU oracle;
+    // scalar HIP ALU kernels must never make the registry claim MFMA.
+    Eligibility eligibility = ClassifyHipDevice(props.gcnArchName);
+    if (eligibility.admissible && !matmul_v4::hip::IsLtMfmaGemmAvailable()) {
+        eligibility.admissible = false;
+        eligibility.reason = "hip_native_mfma_self_qual_failed:" + eligibility.reason;
+    }
+    return eligibility;
 #else
     return DisabledByBuild();
 #endif
@@ -161,26 +171,22 @@ Eligibility AscendEligibility()
 {
 #if defined(BTX_ENABLE_ASCEND)
 #if defined(BTX_HAVE_CANN)
-    uint32_t count = 0;
-    if (aclrtGetDeviceCount(&count) != ACL_SUCCESS || count == 0) {
+    // Use the Ascend backend's shared one-time runtime initialization before
+    // querying device state. Do not call aclInit independently here.
+    std::string soc;
+    if (!matmul_v4::ascend::GetAscendRuntimeSocName(soc)) {
         return Eligibility{
             .compiled = true,
             .available = false,
             .admissible = false,
             .self_test_required = true,
-            .reason = "ascend_no_device",
+            .reason = "ascend_runtime_or_soc_query_failed",
         };
     }
 
-    std::string soc = "ascend_unknown";
-    if (const char* env = std::getenv("ASCEND_DEVICE_SOC")) {
-        if (env[0] != '\0') soc = env;
-    } else if (const char* env = std::getenv("ASCEND_SOC_VERSION")) {
-        if (env[0] != '\0') soc = env;
-    } else {
-        soc = "dav-3510";
-    }
-
+    // Capability admission must use the device reported by AscendCL. An
+    // environment override (and especially the previous dav-3510 default)
+    // could label an unrelated or unknown NPU as an Ascend 950-class device.
     Eligibility eligibility = ClassifyAscendDevice(soc);
     if (!eligibility.admissible) {
         return eligibility;
@@ -341,8 +347,9 @@ Eligibility ClassifyCudaDevice(uint32_t cc_major, uint32_t cc_minor)
 
     const std::string sm = "sm_" + std::to_string(cc_major) + std::to_string(cc_minor);
     if (cc_major < 7) {
-        // Pascal and older, incl. CMP 30HX/TU116-class rebrands: no tensor
-        // cores at all (§S.4.2). DP4A is integer but is not the tensor path.
+        // Pascal and older: no tensor cores. DP4A is integer but is not the
+        // tensor path. Tensor-less sm_75 products are rejected later by the
+        // native-IMMA algorithm attestation rather than by this ISA filter.
         eligibility.reason = "pre_tensor_no_int8_mma:" + sm;
         return eligibility;
     }
@@ -353,9 +360,9 @@ Eligibility ClassifyCudaDevice(uint32_t cc_major, uint32_t cc_minor)
         return eligibility;
     }
 
-    // Turing (sm_75) introduced IMMA s8xs8->s32; every later architecture
-    // (Ampere sm_8x, Ada sm_89, Hopper sm_90, Blackwell sm_10x/sm_12x)
-    // retains the exact integer tensor path (§B.6).
+    // The sm_75 ISA introduced IMMA s8xs8->s32; later architectures retain
+    // it. This is a candidate classification only: CudaEligibility additionally
+    // requires cuBLASLt to attest and self-qualify an actual native IMMA algo.
     eligibility.admissible = true;
     eligibility.reason = "imma_s8s8s32_tensor_path:" + sm;
     return eligibility;

@@ -20,11 +20,13 @@ class CBlockHeader;
 // Digests are bit-identical to matmul::v4::lt::ComputeDigestBMX4CLT.
 // When an AMD GPU is present and the one-time bit-identity self-test passes,
 // ComputeDigestsOnlyLTHip runs a persistent device-resident loop
-// (MatExpand → Extract → project → combine). s8xs8 prefers hipBLASLt/rocBLAS
-// MFMA when self-qualified; s32xs8 / MFMA decline use scalar DeviceGemm*
-// (never labeled MFMA). Host ExactGemm is fail-closed fallback.
+// (MatExpand → Extract → project → combine). s8xs8 prefers the
+// self-qualified rocBLAS/hipBLASLt MFMA lane. On that lane, MatExpand's s32xs8
+// stage is exactly radix-lowered into four INT8 GEMMs and combine uses nine
+// exact Karatsuba/base-64 INT8 GEMMs; scalar DeviceGemm* remains the fail-closed
+// fallback and is never labeled MFMA. Host ExactGemm is the final fallback.
 //
-// Target arches: gfx942 (MI300), gfx950 (MI350) via BTX_HIP_ARCHITECTURES.
+// Target arches: gfx942 (MI300), gfx950 (MI350/MI355) via BTX_HIP_ARCHITECTURES.
 // Linker stub when BTX_ENABLE_HIP is off.
 // ---------------------------------------------------------------------------
 

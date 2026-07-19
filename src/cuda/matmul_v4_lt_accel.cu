@@ -237,49 +237,75 @@ __device__ __forceinline__ uint64_t DeviceFqReduce(unsigned __int128 x)
     return s;
 }
 
-__device__ __forceinline__ uint64_t DeviceFqAdd(uint64_t a, uint64_t b)
+__device__ __forceinline__ uint64_t DeviceFqFromInt64(int64_t x)
 {
     constexpr uint64_t q = (uint64_t{1} << 61) - 1;
-    uint64_t s = a + b;
-    if (s >= q) s -= q;
-    return s;
-}
-
-__device__ __forceinline__ uint64_t DeviceFqMul(uint64_t a, uint64_t b)
-{
-    return DeviceFqReduce(static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b));
-}
-
-__device__ __forceinline__ uint64_t DeviceFqFromInt32(int32_t x)
-{
-    constexpr uint64_t q = (uint64_t{1} << 61) - 1;
-    if (x >= 0) {
-        return DeviceFqReduce(static_cast<unsigned __int128>(static_cast<uint64_t>(x)));
-    }
-    const uint64_t magnitude = static_cast<uint64_t>(-(static_cast<int64_t>(x) + 1)) + 1;
-    uint64_t r = DeviceFqReduce(static_cast<unsigned __int128>(magnitude));
+    if (x >= 0) return DeviceFqReduce(static_cast<unsigned __int128>(static_cast<uint64_t>(x)));
+    const uint64_t magnitude = static_cast<uint64_t>(-(x + 1)) + 1;
+    const uint64_t r = DeviceFqReduce(static_cast<unsigned __int128>(magnitude));
     return r == 0 ? 0 : (q - r);
 }
 
-// Chat[a,c] = sum_k P[a,k]*Q[k,c]  (mod q). One thread per (a,c).
+static_assert(uint64_t{288} * 288 * 29'127 * 29'127 * 29'127 < (uint64_t{1} << 63),
+              "BMX4C deferred combine must fit signed int64 at the construction limit");
+
+// Chat[a,c] = sum_k P[a,k]*Q[k,c] (mod q). BMX4C pins
+// |P|,|Q| <= 288*n, hence at the largest public n=8192 the entire signed dot
+// product is bounded by 288^2*n^3 < 2^56. Accumulate exactly in int64 and do
+// one field reduction per output, matching the CPU deferred-combine oracle.
+// The previous kernel performed a 128-bit Mersenne reduction on every MAC.
+// Shared K tiles also remove the 16-way redundant P/Q global loads in a block.
 __global__ void DeviceCombineModQ(const int32_t* __restrict__ P,
                                   const int32_t* __restrict__ Q,
                                   uint64_t* __restrict__ Chat,
                                   int n, int m)
 {
-    const int c = blockIdx.x * blockDim.x + threadIdx.x;
-    const int a = blockIdx.y * blockDim.y + threadIdx.y;
-    if (a >= m || c >= m) return;
-    uint64_t acc = 0;
-    const size_t prow = static_cast<size_t>(a) * n;
-    for (int k = 0; k < n; ++k) {
-        const int32_t p = P[prow + k];
-        if (p == 0) continue;
-        const uint64_t pf = DeviceFqFromInt32(p);
-        const int32_t qv = Q[static_cast<size_t>(k) * m + c];
-        acc = DeviceFqAdd(acc, DeviceFqMul(pf, DeviceFqFromInt32(qv)));
+    constexpr int kOutputTile = 16;
+    constexpr int kReductionTile = 32;
+    __shared__ int32_t p_tile[kOutputTile][kReductionTile];
+    __shared__ int32_t q_tile[kReductionTile][kOutputTile];
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int c0 = static_cast<int>(blockIdx.x) * kOutputTile;
+    const int a0 = static_cast<int>(blockIdx.y) * kOutputTile;
+    const int c = c0 + tx;
+    const int a = a0 + ty;
+    const int tid = ty * kOutputTile + tx;
+    int64_t acc = 0;
+
+    for (int k0 = 0; k0 < n; k0 += kReductionTile) {
+        for (int linear = tid; linear < kOutputTile * kReductionTile;
+             linear += kOutputTile * kOutputTile) {
+            const int row = linear / kReductionTile;
+            const int kk = linear % kReductionTile;
+            const int ga = a0 + row;
+            const int gk = k0 + kk;
+            p_tile[row][kk] = (ga < m && gk < n)
+                ? P[static_cast<size_t>(ga) * n + gk]
+                : 0;
+        }
+        for (int linear = tid; linear < kReductionTile * kOutputTile;
+             linear += kOutputTile * kOutputTile) {
+            const int kk = linear / kOutputTile;
+            const int col = linear % kOutputTile;
+            const int gk = k0 + kk;
+            const int gc = c0 + col;
+            q_tile[kk][col] = (gk < n && gc < m)
+                ? Q[static_cast<size_t>(gk) * m + gc]
+                : 0;
+        }
+        __syncthreads();
+        if (a < m && c < m) {
+#pragma unroll
+            for (int kk = 0; kk < kReductionTile; ++kk) {
+                acc += static_cast<int64_t>(p_tile[ty][kk]) *
+                       static_cast<int64_t>(q_tile[kk][tx]);
+            }
+        }
+        __syncthreads();
     }
-    Chat[static_cast<size_t>(a) * m + c] = acc;
+    if (a < m && c < m) Chat[static_cast<size_t>(a) * m + c] = DeviceFqFromInt64(acc);
 }
 
 // ---------------------------------------------------------------------------

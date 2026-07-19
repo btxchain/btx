@@ -5138,11 +5138,12 @@ bool SolveMatMulParallel(CBlockHeader& block,
 // MatMul v4.4-LT Rank-1 solve loop: Q*-sized windows through WindowSketchMinerLT
 // (MatExpand + deep-m). Winning candidates are resealed via ComputeDigestBMX4CLT
 // (Phase A) or ComputeSealDigestBMX4CLT (Phase B seal-as-PoW when active).
-// Non-CPU ResolveBackend injects MakeResolvedExactGemmBackend; Phase A prefers
-// ComputeDigestsBMX4CLTDispatched. Phase-B device winners are re-sealed through the
-// CPU reference before success is returned. This rare duplicate protects miners from
-// publishing a bad block when an accelerated backend races, corrupts scratch, or
-// returns a same-sized but incorrect result.
+// MakeResolvedExactGemmBackend also admits explicit LT-only TPU/Trainium
+// providers while the full digest backend remains CPU. Phase A prefers full
+// device dispatch when selected. Every accelerated Phase-B winner is re-sealed
+// through the CPU reference before success is returned. This rare duplicate
+// protects miners from publishing a bad block when a provider races, corrupts
+// scratch, or returns a same-sized but incorrect result.
 static bool SolveMatMulV4LT(CBlockHeader& block,
                             const Consensus::Params& params,
                             uint64_t& max_tries,
@@ -5169,9 +5170,9 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
 
     const matmul_v4::accel::Kind accel_kind = matmul_v4::accel::ResolveBackend();
     const matmul::v4::lt::ExactGemmBackend exact_gemm =
-        (accel_kind != matmul_v4::accel::Kind::CPU)
-            ? matmul_v4::accel::MakeResolvedExactGemmBackend()
-            : matmul::v4::lt::ExactGemmBackend{};
+        matmul_v4::accel::MakeResolvedExactGemmBackend();
+    const bool accelerated_exact_gemm =
+        exact_gemm.gemm_s8s8 != nullptr || exact_gemm.gemm_s32s8 != nullptr;
 
     // Phase B: seal-as-PoW — lottery object is the Q* window seal. Each attempt
     // evaluates one full seal (exactly consensus_Qstar digests); max_tries
@@ -5207,7 +5208,7 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
                 return false;
             }
             if (UintToArith256(seal) <= bnTarget) {
-                if (accel_kind != matmul_v4::accel::Kind::CPU) {
+                if (accel_kind != matmul_v4::accel::Kind::CPU || accelerated_exact_gemm) {
                     uint256 cpu_seal;
                     if (!matmul::v4::lt::ComputeSealDigestBMX4CLT(
                             block, n, Qstar, slot_seed, cpu_seal,

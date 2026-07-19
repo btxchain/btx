@@ -16,6 +16,8 @@
 #include <matmul/pow_v4.h>
 #include <metal/matmul_v4_lt_accel.h>
 #include <primitives/block.h>
+#include <tpu/matmul_v4_lt_accel.h>
+#include <trainium/matmul_v4_lt_accel.h>
 #include <logging.h>
 
 #include <atomic>
@@ -496,6 +498,41 @@ Kind ResolveBackend()
 matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
 {
     matmul::v4::lt::ExactGemmBackend backend;
+
+    // TPU and Trainium accelerate only LT's bounded-exact S8 GEMM lane, not
+    // the full v4 digest dispatcher. Keep that narrower choice separate from
+    // BTX_MATMUL_V4_BACKEND and explicit: an external provider must register,
+    // attest native tensor execution, satisfy the t=24 proof gate, and pass
+    // CPU byte-parity probes before either function pointer is exposed.
+    if (const char* requested = std::getenv("BTX_MATMUL_LT_EXACT_BACKEND")) {
+        const std::string exact_request{requested};
+        const bool is_tpu = exact_request == "tpu";
+        const bool is_trainium = exact_request == "trainium";
+        bool available{false};
+        if (is_tpu) {
+            available = matmul_v4::tpu::IsTpuPjrtExactGemmAvailable();
+            if (available) backend.gemm_s8s8 = &matmul_v4::tpu::TryLaunchLtTpuGemmS8S8;
+        } else if (is_trainium) {
+            available = matmul_v4::trainium::IsTrainiumExactGemmAvailable();
+            if (available) backend.gemm_s8s8 = &matmul_v4::trainium::TryLaunchLtTrainiumGemmS8S8;
+        }
+
+        if (is_tpu || is_trainium) {
+            static std::atomic_bool logged_cloud_exact{false};
+            bool expected{false};
+            if (logged_cloud_exact.compare_exchange_strong(expected, true)) {
+                if (available) {
+                    LogPrintf("MatMul-v4.4-LT exact GEMM provider: %s (native tensor path self-qualified; S32xS8 stays CPU)\n",
+                              exact_request);
+                } else {
+                    LogPrintf("MatMul-v4.4-LT exact GEMM provider: CPU [WARNING: requested %s but its provider was not compiled, registered, attested, or self-qualified]\n",
+                              exact_request);
+                }
+            }
+            return backend;
+        }
+    }
+
     switch (ResolveBackend()) {
     case Kind::CUDA:
         // LaunchGemm* prefers cuBLASLt IMMA then scalar device tiles.

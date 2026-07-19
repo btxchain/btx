@@ -92,6 +92,8 @@ add_executable(test_btx
   matmul_v4_pow_tests.cpp
   matmul_v4_determinism_vectors.cpp
   matmul_v4_backend_determinism_tests.cpp
+  ../tpu/test/matmul_v4_lt_accel_tests.cpp
+  ../trainium/test/matmul_v4_lt_accel_tests.cpp
   mining_chain_guard_tests.cpp
   mining_crash_guard_tests.cpp
   pq_crypto_tests.cpp

@@ -39,7 +39,7 @@ struct LtCudaArchProbe {
 
 /** Miner-local ExactGemm capability snapshot (never conflates scalar with IMMA). */
 struct LtCudaExactGemmCapabilities {
-    bool exact_s8_s8_s32{false};          // cuBLASLt IMMA self-qualified
+    bool exact_s8_s8_s32{false};          // native cuBLASLt IMMA self-qualified
     bool exact_partitioned_s32_s8{false}; // no dedicated IMMA recipe today
     bool device_scalar_gemm{false};       // tiled ALU kernels available
     bool device_hashing{false};           // false: digest-only still Chat D2H
@@ -52,9 +52,10 @@ struct LtCudaExactGemmCapabilities {
 /** Snapshot of ExactGemm lanes + arch for capabilities reporting. */
 [[nodiscard]] LtCudaExactGemmCapabilities ProbeLtCudaExactGemmCapabilities();
 
-/** True iff cuBLASLt IMMA s8xs8->s32 passed multi-shape bit-exact self-test vs
- *  ExactGemmS8S8 (square + MatExpand G*W / U*Ahat / Bhat*V panels). Does NOT
- *  imply s32xs8 IMMA — that lane always declines. */
+/** True iff cuBLASLt s8xs8->s32 passed a multi-shape bit-exact self-test vs
+ *  ExactGemmS8S8 AND every selected algorithm declares native IMMA, signed
+ *  INT8 input, and INT32 accumulation capability flags. A bit-exact SIMT
+ *  fallback is rejected. Does NOT imply s32xs8 IMMA — that lane declines. */
 [[nodiscard]] bool IsLtImmaGemmAvailable();
 
 /** Attempt IMMA ExactGemmS8S8 (host vectors; persistent A/B/C scratch).

@@ -19,16 +19,16 @@ Living implementation notes for miner-local ExactGemm backends. Consensus remain
 
 **Implemented (this branch):**
 
-1. **cuBLASLt `CUBLAS_COMPUTE_32I` IMMA** (`matmul_v4_lt_tensor_gemm.cu`): host + **device-pointer** s8xs8→s32; process-persistent handle/workspace/**A·B·C scratch**. Multi-shape self-qual vs `ExactGemmS8S8`: square 32, thin panel, full `kMatExpandPanelW` G\*W, U\*Ahat (m×n×n), Bhat\*V (n×n×m) — host **and** device-pointer entries. `IsLtImmaGemmAvailable()` is true only after all shapes match.
+1. **cuBLASLt `CUBLAS_COMPUTE_32I` IMMA** (`matmul_v4_lt_tensor_gemm.cu`): host + **device-pointer** s8xs8→s32; process-persistent handle, NVIDIA-recommended **32 MiB workspace**, A/B/C scratch, and descriptors/heuristic result cached by `(M,N,K)`. Up to 16 heuristic candidates are inspected and only an algorithm whose numerical flags attest **IMMA + signed INT8 inputs + INT32 accumulator** is admitted. Multi-shape self-qual uses 128/256-scale square and panel cases, host and device pointers, then requires plans for all Rank-1 production geometries (`4096×128×4096`, `2048×4096×4096`, `4096×2048×4096`).
 2. **LT ExactGemmBackend / `LaunchGemmS8S8`**: IMMA first; scalar `DeviceGemmS8S8Tiled` only on decline. `LtLastS8S8UsedImma()` reports which path ran (never true for scalar).
 3. **S32S8**: `TryLaunchLtImmaGemmS32S8` **always declines** — `CUBLAS_COMPUTE_32I` is s8×s8→s32 only; no proven exact s32×s8→s32 cuBLASLt/CUTLASS recipe self-qualified on sm_90/100/120. Fast scalar `DeviceGemmS32S8Tiled` / CPU `ExactGemmS32S8` stay the path (`exact_partitioned_s32_s8=false`).
-4. **Device-resident MatExpand** (`matmul_v4_lt_accel.cu`): when IMMA available, G\*W / U\*Ahat / Bhat\*V use `TryLaunchLtImmaGemmS8S8Device` on persistent buffers; Y\*H stays scalar s32xs8 (never claimed as IMMA). Scalar CUDA graphs remain the non-IMMA path.
+4. **Device-resident MatExpand** (`matmul_v4_lt_accel.cu`): when IMMA is available, G\*W / U\*Ahat / Bhat\*V use `TryLaunchLtImmaGemmS8S8Device` on persistent buffers; Y\*H stays scalar s32xs8 (never claimed as IMMA). Scalar CUDA graphs remain the non-IMMA path. The final Fq combine now uses shared-memory K tiles, exact deferred signed-64-bit accumulation under the normative `288²·n³` bound, and one Mersenne reduction per output instead of one 128-bit reduction per MAC.
 5. **Arch probe**: `ProbeLtCudaArch` / `ProbeLtCudaExactGemmCapabilities` → `sm_*` + name class `hopper` / `blackwell_dc` / `blackwell_consumer`.
 6. **Digest-only D2H gap (honest)**: resident path still copies full Chat to host for `ComputeSketchDigestFromFq`. `device_hashing=false` in capabilities until a bit-identical device digest exists. Persistent MatExpand + GEMM scratch reused.
 
 **Honest stubs / fail-closed:** CUTLASS MXFP4 tensor kernel + device FP8 remain fail-closed until self-qual on named silicon. Portable exact MXFP4 integer path is always available and **never** sets `used_tensor_path`. sm_120a (consumer `mxf4` PTX) vs sm_100a (datacenter tcgen05) recipes must not be conflated (see `matmul_v4_bmx4_cutlass_mxfp4.h`).
 
-## AMD ROCm / HIP (MI300 / MI350)
+## AMD ROCm / HIP (MI300 / MI355)
 
 | Arch | ISA | Notes |
 |---|---|---|
@@ -37,33 +37,51 @@ Living implementation notes for miner-local ExactGemm backends. Consensus remain
 
 **Implemented (this branch):**
 
-1. **hipBLASLt `HIPBLAS_COMPUTE_32I` (preferred) / rocBLAS `gemm_ex` i8×i8→i32** (`matmul_v4_lt_tensor_gemm.hip`): host + **device-pointer** s8xs8→s32; multi-shape self-test vs `ExactGemmS8S8` (square 32×32 + MatExpand panel `n×n · n×kMatExpandPanelW`). `IsLtMfmaGemmAvailable()` is true only after that match. Scalar tiles are `IsLtDeviceAluGemmAvailable` only — never MFMA.
+1. **hipBLASLt when its installed release supplies a qualifying integer heuristic, then rocBLAS `gemm_ex` I8II** (`matmul_v4_lt_tensor_gemm.hip`): both libraries can be linked simultaneously, descriptors/algorithms are cached by shape, and a failed hipBLASLt shape falls through to rocBLAS. Host and device-pointer s8xs8→s32 are self-tested against `ExactGemmS8S8`; `IsLtMfmaGemmAvailable()` is true only after that match. CDNA architecture naming alone is no longer sufficient for mining admission.
 2. **LT ExactGemmBackend / `LaunchGemmS8S8`**: MFMA first; device ALU / pooled scalar tile on decline. `LtLastS8S8UsedMfma()` reports which path ran. `MakeResolvedExactGemmBackend` injects `LaunchGemm*` (not MFMA-only Try*).
-3. **Device-resident MatExpand** (`matmul_v4_lt_accel.hip`): when MFMA available, G\*W / U\*Ahat / Bhat\*V use `TryLaunchLtMfmaGemmS8S8Device` on persistent buffers; Y\*H stays scalar s32xs8 (no MFMA recipe — never claimed). Scalar hipGraphs remain the non-MFMA path.
-4. **CMake**: `BTX_ENABLE_HIP=ON` requires explicit `BTX_HIP_ARCHITECTURES` (e.g. `gfx942;gfx950`). Optional `BTX_HAVE_HIPBLASLT` / `BTX_HAVE_ROCBLAS` probes; without libs MFMA flag stays false and device ALU may still qualify.
+3. **Device-resident MatExpand** (`matmul_v4_lt_accel.hip`): G\*W / U\*Ahat / Bhat\*V use the qualified INT8 library path. Y\*H is exactly radix-lowered into four signed-byte GEMMs plus a column-bias correction. The Fq combine is lowered into nine exact balanced-base-64/Karatsuba INT8 GEMMs. The scalar fallback GEMMs use shared tiles and remain honestly labeled ALU.
+4. **CMake**: `BTX_ENABLE_HIP=ON` requires explicit `BTX_HIP_ARCHITECTURES` (e.g. `gfx942;gfx950`). hipBLASLt and rocBLAS are probed independently; without a library path, the registry rejects MFMA mining even if scalar HIP ALU kernels work.
 5. **Fail closed when HIP off**: stubs keep `IsLtMfmaGemmAvailable` / `IsLtDeviceAluGemmAvailable` / `LaunchGemm*` false.
 
-**Honest stubs:** native block-scaled MXFP4 on MI300/MI350 remains hardware-gated. Consensus remains CPU; activation stays `INT32_MAX`.
+**Honest stubs:** native block-scaled MXFP4 on MI300/MI350/MI355 remains hardware-gated. Consensus remains CPU; activation stays `INT32_MAX`.
+
+## Google Cloud TPU / PJRT
+
+`src/tpu/` defines a versioned provider ABI rather than importing OpenXLA into the node. `BTX_ENABLE_TPU_PJRT` is OFF by default. A bridge must keep a PJRT/libtpu client, executables, and device buffers resident and attest that the TPU MXU—not a host fallback—executed.
+
+The admitted floating lane is narrowly proven exact: S8 values are exactly representable in BF16, products are exact in FP32, and BTX checks `inner·max|A|·max|B| ≤ 2^24` before every provider call. Thus every possible integer partial sum is exactly representable regardless of reduction order. The inclusive `2^24` boundary is part of self-qualification; the first value above it is rejected before device invocation. S32S8 remains CPU-only.
+
+Select a registered/self-qualified provider with `BTX_MATMUL_LT_EXACT_BACKEND=tpu`. This accelerates LT ExactGemm only; it does not make TPU a full v4 digest backend.
+
+## AWS Trainium / Neuron NKI
+
+`src/trainium/` provides the analogous OFF-by-default `BTX_ENABLE_TRAINIUM_NEURON` provider ABI for a version-pinned NKI NEFF/NRT bridge. The provider must convert S8→BF16 without scaling, keep accumulation/output in FP32 PSUM, validate exact FP32→S32 conversion, and attest native Tensor Engine execution.
+
+The same host proof gate and boundary tests apply. This matches the documented NKI `nc_matmul` BF16 inputs and FP32 internal accumulation while avoiding any unsupported claim of native S8 GEMM. Select it with `BTX_MATMUL_LT_EXACT_BACKEND=trainium`; S32S8 remains CPU-only.
 
 ## Huawei Ascend 950 (昇腾)
 
-Sources (Chinese CANN ecosystem):
+**Implemented (fail-closed without a qualifying CANN SDK/device):**
 
-- asc-devkit Matmul high-level API samples (Ascend 950PR/DT, `dav-3510`, CANN ≥ 9.1.0)
-- `aclnnMatmul` / `aclnnMm` / `aclnnMatmulWeightNz` (ops-nn); INT8 weights via
-  `aclnnCalculateMatmulWeightSize(+V2)` + `aclnnTransMatmulWeight`
-- Cube unit: `int8_t` A/B → INT32 C; **KEEP_DTYPE only** — never HF32 / down-precision
-- **only advertise exact if accumulator proven exact vs CPU** (`IsAscendExactGemmAvailable`)
-
-**Shipped (fail-closed without SDK in CI):**
-
-1. `BTX_ENABLE_ASCEND` CMake option; `BTX_HAVE_CANN` when `include/acl/acl.h` found.
-2. `src/ascend/` host ExactGemm: real TU under `BTX_HAVE_CANN` (two-phase aclnn + optional
-   TransMatmulWeight); else stub returns false.
-3. Accel / backend `Kind::ASCEND` (`"ascend"` / `huawei` / `npu`) — `ResolveBackend` selects
-   only when compiled + CANN + ExactGemmS8S8 self-qual (odd-K + max-|entry|).
-4. `used_cube_path` / ExactGemmBackend adapters require that gate. S32S8 declines.
-5. Doc checklist + known limits: `doc/btx-matmul-v4.4-ascend-950-cann-backend.md`.
+1. The native lane now uses documented CANN 9.1 `aclnnQuantMatmulV5` raw
+   `INT8×INT8→INT32` semantics, with the required persistent `FLOAT32(1)`
+   `x2Scale`; ordinary `aclnnMm`/`aclnnMatmul` is not used for an undocumented
+   integer dtype combination.
+2. `aclnnCalculateMatmulWeightSizeV2` + `aclnnTransMatmulWeight` supplies the
+   processor-affine NZ weight path used as native Cube evidence. Products whose
+   documented contract is ND-only decline rather than being mislabeled Cube.
+3. Device buffers, pinned host staging, one stream, and the largest workspace
+   persist across calls. Async H2D/operator/D2H work has one terminal stream
+   synchronization.
+4. The capability registry initializes AscendCL once and classifies only the
+   actual `aclrtGetSocName()` result. There is no environment override or
+   guessed `dav-3510` default.
+5. CMake links either the recommended split `opapi_nn + opapi_math` pair or
+   generic `opapi`, never both; deprecated `ops_infer` is not used.
+6. `used_cube_path` is exposed only after odd/rectangular/aligned/max-magnitude
+   probes match CPU `ExactGemmS8S8`. S32S8 still declines. The detailed product
+   matrix and qualification checklist are in
+   `doc/btx-matmul-v4.4-ascend-950-cann-backend.md`.
 
 ## Apple Metal
 
@@ -84,4 +102,8 @@ Sources (Chinese CANN ecosystem):
 
 ## Production wiring
 
-`SolveMatMulV4LT` / seal path should inject device `ExactGemmBackend` when backend ≠ CPU, still CPU-reseal winners. CUDA `ComputeDigestsOnlyLTCuda` already prefers resident IMMA/scalar then injects `LaunchGemm*` into host fallback.
+`SolveMatMulV4LT` now always resolves an `ExactGemmBackend`, including the LT-only TPU/Trainium choice while the full digest backend remains CPU. Full CUDA/HIP/Metal/Ascend backends keep their existing dispatch. Phase-B accelerated winners are re-sealed with the CPU reference; Phase-A winners already receive the unconditional CPU digest reseal.
+
+## Validation status
+
+The default macOS build and 84 focused LT/BMX4/backend/cloud-stub tests pass. A separate provider-enabled build passes all 9 fake TPU and Trainium qualification tests, covering correct, incorrect, host-only, proof-boundary, above-bound, resolver-wiring, and S32S8-decline behavior. This host has no CUDA, ROCm, CANN, PJRT/libtpu, Neuron, or target accelerator hardware, so H200/B200, MI300/MI355, Ascend, TPU, and Trainium compilation/performance still require the hardware qualification runbook. No on-silicon throughput claim is made here.

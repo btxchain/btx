@@ -13,11 +13,12 @@
 #include <string>
 #include <vector>
 
-// HIP LT ExactGemm preference layer (MI300/MI350 class — gfx942 / gfx950).
+// HIP LT ExactGemm preference layer (MI300/MI350/MI355 — gfx942 / gfx950).
 //
 // Two distinct paths (never conflate labels):
-//   1) MFMA / library path — hipBLASLt HIPBLAS_COMPUTE_32I (preferred) or
-//      rocBLAS gemm_ex i8×i8→i32. IsLtMfmaGemmAvailable() is true ONLY after
+//   1) MFMA / library path — hipBLASLt when the installed release exposes a
+//      qualifying integer heuristic, with rocBLAS gemm_ex I8II as the documented
+//      exact fallback. IsLtMfmaGemmAvailable() is true ONLY after
 //      this path executes and matches ExactGemmS8S8 bit-for-bit on square +
 //      MatExpand panel shapes.
 //   2) Device ALU — portable scalar int accumulate kernel. Advertised only as
@@ -27,16 +28,16 @@
 // BTX_HAVE_ROCBLAS unset), the MFMA path is compile-time absent and the
 // availability flag stays false.
 
+#if defined(BTX_HAVE_ROCBLAS)
+#if defined(__has_include) && __has_include(<rocblas/rocblas.h>)
+#include <rocblas/rocblas.h>
+#define BTX_HIP_LT_TENSOR_HAVE_ROCBLAS 1
+#endif
+#endif
 #if defined(BTX_HAVE_HIPBLASLT)
 #if defined(__has_include) && __has_include(<hipblaslt/hipblaslt.h>)
 #include <hipblaslt/hipblaslt.h>
 #define BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT 1
-#endif
-#endif
-#if !defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT) && defined(BTX_HAVE_ROCBLAS)
-#if defined(__has_include) && __has_include(<rocblas/rocblas.h>)
-#include <rocblas/rocblas.h>
-#define BTX_HIP_LT_TENSOR_HAVE_ROCBLAS 1
 #endif
 #endif
 
@@ -65,19 +66,40 @@ struct MfmaLibPool {
     std::mutex mu;
 
 #if defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT)
+    struct LtProblem {
+        uint32_t m{0};
+        uint32_t n{0};
+        uint32_t k{0};
+        hipblasLtMatmulDesc_t op_desc{nullptr};
+        hipblasLtMatrixLayout_t a_layout{nullptr};
+        hipblasLtMatrixLayout_t b_layout{nullptr};
+        hipblasLtMatrixLayout_t c_layout{nullptr};
+        hipblasLtMatmulAlgo_t algo{};
+    };
+
     hipblasLtHandle_t lt{nullptr};
     void* workspace{nullptr};
     size_t workspace_bytes{0};
-#elif defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
-    rocblas_handle roc{nullptr};
+    std::vector<LtProblem> lt_problems;
+    bool lt_ready{false};
 #endif
-    bool ready{false};
+#if defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
+    rocblas_handle roc{nullptr};
+    bool roc_ready{false};
+#endif
 
     ~MfmaLibPool() { Release(); }
 
     void Release()
     {
 #if defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT)
+        for (auto& problem : lt_problems) {
+            if (problem.c_layout) hipblasLtMatrixLayoutDestroy(problem.c_layout);
+            if (problem.b_layout) hipblasLtMatrixLayoutDestroy(problem.b_layout);
+            if (problem.a_layout) hipblasLtMatrixLayoutDestroy(problem.a_layout);
+            if (problem.op_desc) hipblasLtMatmulDescDestroy(problem.op_desc);
+        }
+        lt_problems.clear();
         if (workspace) {
             hipFree(workspace);
             workspace = nullptr;
@@ -87,24 +109,26 @@ struct MfmaLibPool {
             hipblasLtDestroy(lt);
             lt = nullptr;
         }
-#elif defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
+        lt_ready = false;
+#endif
+#if defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
         if (roc) {
             rocblas_destroy_handle(roc);
             roc = nullptr;
         }
+        roc_ready = false;
 #endif
-        ready = false;
     }
 
-    [[nodiscard]] bool EnsureHandles(size_t need_workspace)
-    {
 #if defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT)
-        if (!ready) {
+    [[nodiscard]] bool EnsureLt(size_t need_workspace)
+    {
+        if (!lt_ready) {
             if (hipblasLtCreate(&lt) != HIPBLAS_STATUS_SUCCESS) {
                 lt = nullptr;
                 return false;
             }
-            ready = true;
+            lt_ready = true;
         }
         if (need_workspace <= workspace_bytes) return true;
         if (workspace) {
@@ -116,21 +140,22 @@ struct MfmaLibPool {
         if (hipMalloc(&workspace, need_workspace) != hipSuccess) return false;
         workspace_bytes = need_workspace;
         return true;
-#elif defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
-        (void)need_workspace;
-        if (!ready) {
+    }
+#endif
+
+#if defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
+    [[nodiscard]] bool EnsureRoc()
+    {
+        if (!roc_ready) {
             if (rocblas_create_handle(&roc) != rocblas_status_success) {
                 roc = nullptr;
                 return false;
             }
-            ready = true;
+            roc_ready = true;
         }
         return true;
-#else
-        (void)need_workspace;
-        return false;
-#endif
     }
+#endif
 };
 
 MfmaLibPool& MfmaPool()
@@ -198,88 +223,113 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
 
 #if defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT)
 
-[[nodiscard]] bool RunHipBlasLtS8S8(const int8_t* dA, const int8_t* dB, int32_t* dC,
-                                    uint32_t M, uint32_t N, uint32_t K, hipStream_t stream,
-                                    std::string& error)
+[[nodiscard]] bool RunHipBlasLtNativeS8S8(const int8_t* dA, const int8_t* dB, int32_t* dC,
+                                          uint32_t M, uint32_t N, uint32_t K, hipStream_t stream,
+                                          std::string& error)
 {
     constexpr size_t kDefaultWorkspace = 8ull << 20;
     auto& pool = MfmaPool();
     std::lock_guard<std::mutex> lock(pool.mu);
-    if (!pool.EnsureHandles(kDefaultWorkspace)) {
+    if (!pool.EnsureLt(kDefaultWorkspace)) {
         error = "hipblasLtCreate / workspace alloc failed";
         return false;
     }
 
-    hipblasLtMatmulDesc_t op_desc = nullptr;
-    hipblasLtMatrixLayout_t a_layout = nullptr;
-    hipblasLtMatrixLayout_t b_layout = nullptr;
-    hipblasLtMatrixLayout_t c_layout = nullptr;
-    hipblasLtMatmulPreference_t preference = nullptr;
-
-    auto cleanup = [&]() {
-        if (preference) hipblasLtMatmulPreferenceDestroy(preference);
-        if (c_layout) hipblasLtMatrixLayoutDestroy(c_layout);
-        if (b_layout) hipblasLtMatrixLayoutDestroy(b_layout);
-        if (a_layout) hipblasLtMatrixLayoutDestroy(a_layout);
-        if (op_desc) hipblasLtMatmulDescDestroy(op_desc);
-    };
-
-    if (hipblasLtMatmulDescCreate(&op_desc, HIPBLAS_COMPUTE_32I, HIP_R_32I) != HIPBLAS_STATUS_SUCCESS) {
-        error = "hipblasLtMatmulDescCreate failed";
-        cleanup();
-        return false;
+    MfmaLibPool::LtProblem* problem = nullptr;
+    for (auto& cached : pool.lt_problems) {
+        if (cached.m == M && cached.n == N && cached.k == K) {
+            problem = &cached;
+            break;
+        }
     }
-    const hipblasOperation_t op_n = HIPBLAS_OP_N;
-    if (hipblasLtMatmulDescSetAttribute(op_desc, HIPBLASLT_MATMUL_DESC_TRANSA, &op_n, sizeof(op_n)) !=
-            HIPBLAS_STATUS_SUCCESS ||
-        hipblasLtMatmulDescSetAttribute(op_desc, HIPBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n)) !=
+    if (!problem) {
+        MfmaLibPool::LtProblem candidate;
+        candidate.m = M;
+        candidate.n = N;
+        candidate.k = K;
+        auto cleanup_candidate = [&]() {
+            if (candidate.c_layout) hipblasLtMatrixLayoutDestroy(candidate.c_layout);
+            if (candidate.b_layout) hipblasLtMatrixLayoutDestroy(candidate.b_layout);
+            if (candidate.a_layout) hipblasLtMatrixLayoutDestroy(candidate.a_layout);
+            if (candidate.op_desc) hipblasLtMatmulDescDestroy(candidate.op_desc);
+        };
+        if (hipblasLtMatmulDescCreate(&candidate.op_desc, HIPBLAS_COMPUTE_32I, HIP_R_32I) !=
             HIPBLAS_STATUS_SUCCESS) {
-        error = "hipblasLtMatmulDescSetAttribute failed";
-        cleanup();
-        return false;
-    }
-    if (hipblasLtMatrixLayoutCreate(&a_layout, HIP_R_8I, M, K, K) != HIPBLAS_STATUS_SUCCESS ||
-        hipblasLtMatrixLayoutCreate(&b_layout, HIP_R_8I, K, N, N) != HIPBLAS_STATUS_SUCCESS ||
-        hipblasLtMatrixLayoutCreate(&c_layout, HIP_R_32I, M, N, N) != HIPBLAS_STATUS_SUCCESS) {
-        error = "hipblasLtMatrixLayoutCreate failed";
-        cleanup();
-        return false;
-    }
-    const hipblasLtOrder_t order = HIPBLASLT_ORDER_ROW;
-    hipblasLtMatrixLayoutSetAttribute(a_layout, HIPBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
-    hipblasLtMatrixLayoutSetAttribute(b_layout, HIPBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
-    hipblasLtMatrixLayoutSetAttribute(c_layout, HIPBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+            error = "hipblasLtMatmulDescCreate failed";
+            cleanup_candidate();
+            return false;
+        }
+        const hipblasOperation_t op_n = HIPBLAS_OP_N;
+        if (hipblasLtMatmulDescSetAttribute(candidate.op_desc, HIPBLASLT_MATMUL_DESC_TRANSA,
+                                             &op_n, sizeof(op_n)) != HIPBLAS_STATUS_SUCCESS ||
+            hipblasLtMatmulDescSetAttribute(candidate.op_desc, HIPBLASLT_MATMUL_DESC_TRANSB,
+                                             &op_n, sizeof(op_n)) != HIPBLAS_STATUS_SUCCESS ||
+            hipblasLtMatrixLayoutCreate(&candidate.a_layout, HIP_R_8I, M, K, K) !=
+                                             HIPBLAS_STATUS_SUCCESS ||
+            hipblasLtMatrixLayoutCreate(&candidate.b_layout, HIP_R_8I, K, N, N) !=
+                                             HIPBLAS_STATUS_SUCCESS ||
+            hipblasLtMatrixLayoutCreate(&candidate.c_layout, HIP_R_32I, M, N, N) !=
+                                             HIPBLAS_STATUS_SUCCESS) {
+            error = "hipBLASLt descriptor/layout creation failed";
+            cleanup_candidate();
+            return false;
+        }
+        const hipblasLtOrder_t order = HIPBLASLT_ORDER_ROW;
+        if (hipblasLtMatrixLayoutSetAttribute(candidate.a_layout, HIPBLASLT_MATRIX_LAYOUT_ORDER,
+                                               &order, sizeof(order)) != HIPBLAS_STATUS_SUCCESS ||
+            hipblasLtMatrixLayoutSetAttribute(candidate.b_layout, HIPBLASLT_MATRIX_LAYOUT_ORDER,
+                                               &order, sizeof(order)) != HIPBLAS_STATUS_SUCCESS ||
+            hipblasLtMatrixLayoutSetAttribute(candidate.c_layout, HIPBLASLT_MATRIX_LAYOUT_ORDER,
+                                               &order, sizeof(order)) != HIPBLAS_STATUS_SUCCESS) {
+            error = "hipBLASLt row-major layout unsupported";
+            cleanup_candidate();
+            return false;
+        }
 
-    if (hipblasLtMatmulPreferenceCreate(&preference) != HIPBLAS_STATUS_SUCCESS) {
-        error = "hipblasLtMatmulPreferenceCreate failed";
-        cleanup();
-        return false;
+        hipblasLtMatmulPreference_t preference = nullptr;
+        if (hipblasLtMatmulPreferenceCreate(&preference) != HIPBLAS_STATUS_SUCCESS) {
+            error = "hipblasLtMatmulPreferenceCreate failed";
+            cleanup_candidate();
+            return false;
+        }
+        const hipblasStatus_t pref_status = hipblasLtMatmulPreferenceSetAttribute(
+            preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+            &pool.workspace_bytes, sizeof(pool.workspace_bytes));
+        hipblasLtMatmulHeuristicResult_t heuristic{};
+        int returned = 0;
+        const hipblasStatus_t heuristic_status = pref_status == HIPBLAS_STATUS_SUCCESS
+            ? hipblasLtMatmulAlgoGetHeuristic(pool.lt, candidate.op_desc,
+                                              candidate.a_layout, candidate.b_layout,
+                                              candidate.c_layout, candidate.c_layout,
+                                              preference, 1, &heuristic, &returned)
+            : pref_status;
+        hipblasLtMatmulPreferenceDestroy(preference);
+        if (heuristic_status != HIPBLAS_STATUS_SUCCESS || returned < 1) {
+            error = "no hipBLASLt s8xs8->s32 heuristic";
+            cleanup_candidate();
+            return false;
+        }
+        candidate.algo = heuristic.algo;
+        pool.lt_problems.push_back(candidate);
+        problem = &pool.lt_problems.back();
     }
-    hipblasLtMatmulPreferenceSetAttribute(preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                                          &pool.workspace_bytes, sizeof(pool.workspace_bytes));
 
-    hipblasLtMatmulHeuristicResult_t heuristic{};
-    int returned = 0;
-    if (hipblasLtMatmulAlgoGetHeuristic(pool.lt, op_desc, a_layout, b_layout, c_layout, c_layout, preference, 1,
-                                        &heuristic, &returned) != HIPBLAS_STATUS_SUCCESS ||
-        returned < 1) {
-        error = "no hipBLASLt s8xs8->s32 heuristic";
-        cleanup();
-        return false;
-    }
     const int32_t alpha = 1;
     const int32_t beta = 0;
-    if (hipblasLtMatmul(pool.lt, op_desc, &alpha, dA, a_layout, dB, b_layout, &beta, dC, c_layout, dC, c_layout,
-                        &heuristic.algo, pool.workspace, pool.workspace_bytes, stream) != HIPBLAS_STATUS_SUCCESS) {
+    if (hipblasLtMatmul(pool.lt, problem->op_desc, &alpha,
+                        dA, problem->a_layout, dB, problem->b_layout, &beta,
+                        dC, problem->c_layout, dC, problem->c_layout,
+                        &problem->algo, pool.workspace, pool.workspace_bytes, stream) !=
+        HIPBLAS_STATUS_SUCCESS) {
         error = "hipblasLtMatmul s8xs8->s32 failed";
-        cleanup();
         return false;
     }
-    cleanup();
     return true;
 }
 
-#elif defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
+#endif
+
+#if defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
 
 [[nodiscard]] bool RunRocBlasS8S8(const int8_t* dA, const int8_t* dB, int32_t* dC,
                                   uint32_t M, uint32_t N, uint32_t K, hipStream_t stream,
@@ -288,15 +338,15 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
     // Row-major C = A*B via column-major BLAS: C^T = B^T * A^T.
     auto& pool = MfmaPool();
     std::lock_guard<std::mutex> lock(pool.mu);
-    if (!pool.EnsureHandles(0)) {
+    if (!pool.EnsureRoc()) {
         error = "rocblas_create_handle failed";
         return false;
     }
-    if (stream) {
-        if (rocblas_set_stream(pool.roc, stream) != rocblas_status_success) {
-            error = "rocblas_set_stream failed";
-            return false;
-        }
+    // Always bind the requested stream, including nullptr (legacy default), so
+    // a host-vector call cannot inherit the resident miner's nonblocking stream.
+    if (rocblas_set_stream(pool.roc, stream) != rocblas_status_success) {
+        error = "rocblas_set_stream failed";
+        return false;
     }
     const int32_t alpha = 1;
     const int32_t beta = 0;
@@ -315,23 +365,24 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
     return true;
 }
 
+#endif
+
 [[nodiscard]] bool RunHipBlasLtS8S8(const int8_t* dA, const int8_t* dB, int32_t* dC,
-                                    uint32_t M, uint32_t N, uint32_t K, hipStream_t stream,
-                                    std::string& error)
+                                    uint32_t M, uint32_t N, uint32_t K,
+                                    hipStream_t stream, std::string& error)
 {
-    return RunRocBlasS8S8(dA, dB, dC, M, N, K, stream, error);
-}
-
-#else
-
-[[nodiscard]] bool RunHipBlasLtS8S8(const int8_t*, const int8_t*, int32_t*,
-                                    uint32_t, uint32_t, uint32_t, hipStream_t, std::string& error)
-{
-    error = "hipBLASLt/rocBLAS not linked";
+#if defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT)
+    if (RunHipBlasLtNativeS8S8(dA, dB, dC, M, N, K, stream, error)) return true;
+#endif
+#if defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
+    if (RunRocBlasS8S8(dA, dB, dC, M, N, K, stream, error)) return true;
+#endif
+#if !defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT) && !defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
+    (void)dA; (void)dB; (void)dC; (void)M; (void)N; (void)K; (void)stream;
+#endif
+    error = "no qualifying hipBLASLt/rocBLAS s8xs8->s32 path";
     return false;
 }
-
-#endif
 
 [[nodiscard]] bool LaunchBlasS8S8Host(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
                                       uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
@@ -371,6 +422,25 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
 #if !defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT) && !defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
         return;
 #else
+        // Exact CPU parity alone would also pass if a BLAS implementation
+        // silently chose scalar ALU. Admit the MFMA-labelled capability only
+        // on CDNA targets with documented i8->i32 matrix instructions. This
+        // is inside the one-time qualification to keep it off the hot path.
+        int device = 0;
+        hipDeviceProp_t props{};
+        if (hipGetDevice(&device) != hipSuccess ||
+            hipGetDeviceProperties(&props, device) != hipSuccess) {
+            return;
+        }
+        std::string arch{props.gcnArchName};
+        if (const size_t suffix = arch.find(':'); suffix != std::string::npos) {
+            arch.resize(suffix);
+        }
+        const bool cdna_mfma =
+            arch == "gfx908" || arch == "gfx90a" || arch == "gfx940" ||
+            arch == "gfx941" || arch == "gfx942" || arch == "gfx950";
+        if (!cdna_mfma) return;
+
         constexpr uint32_t kDim = 32;
         std::vector<int8_t> left(static_cast<size_t>(kDim) * kDim);
         std::vector<int8_t> right(static_cast<size_t>(kDim) * kDim);
@@ -405,17 +475,12 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
     return ok;
 }
 
-[[nodiscard]] bool HipDevicePresent()
-{
-    int count = 0;
-    return hipGetDeviceCount(&count) == hipSuccess && count > 0;
-}
-
 } // namespace
 
 bool IsLtMfmaGemmAvailable()
 {
-    if (!HipDevicePresent()) return false;
+    // SelfTestBlasMfmaOnce includes allocation/launch and permanently caches the
+    // device-architecture result. Keep all runtime probes off every limb GEMM.
     return SelfTestBlasMfmaOnce();
 }
 
@@ -445,7 +510,6 @@ bool TryLaunchLtMfmaGemmS32S8(const std::vector<int32_t>&, const std::vector<int
 
 bool IsLtDeviceAluGemmAvailable()
 {
-    if (!HipDevicePresent()) return false;
     return SelfTestDeviceAluOnce();
 }
 

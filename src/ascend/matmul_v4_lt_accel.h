@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 class CBlockHeader;
@@ -18,12 +19,15 @@ class CBlockHeader;
 // Huawei Ascend 950 (昇腾) ExactGemm host backend for MatMul v4.4 ENC-DR-LT.
 //
 // Grounded in CANN ≥ 9.1 / Ascend 950PR·DT (dav-3510) aclnn / asc-devkit notes:
-//   aclnnMatmul / aclnnMm / aclnnMatmulWeightNz + INT8 via
-//   aclnnCalculateMatmulWeightSize(+V2) + aclnnTransMatmulWeight.
-// Two-phase GetWorkspaceSize + execute; cubeMathType KEEP_DTYPE (no HF32 /
-// down-precision). `used_cube_path` is set ONLY after process-local
-// ExactGemmS8S8 self-qual (odd-K + max-|entry| corners) AND a Cube/aclnn
-// launch that matched byte-for-byte.
+//   aclnnQuantMatmulV5 with x1/x2=INT8, x2Scale=FLOAT32(1), and out=INT32 has
+//   documented raw out=x1@x2 semantics; all scale inputs are ignored.
+//   aclnnCalculateMatmulWeightSizeV2 + aclnnTransMatmulWeight supplies the
+//   required AI-processor-affine NZ weight layout. The runtime retains device
+//   buffers, page-locked staging, a stream, and the largest workspace across calls.
+// `used_cube_path` is set ONLY after process-local ExactGemmS8S8 self-qual
+// (odd axes + max-|entry| corners) and a native QuantMatmulV5 launch that
+// matched byte-for-byte. Ordinary aclnnMm/Matmul is deliberately not used:
+// released public dtype contracts do not document it as INT8->INT32.
 //
 // Without CANN (default CI / BTX_ENABLE_ASCEND=OFF, or ON without toolkit):
 // stub declines — never pretends Cube ran. Consensus remains the CPU integer
@@ -31,6 +35,11 @@ class CBlockHeader;
 // ---------------------------------------------------------------------------
 
 namespace matmul_v4::ascend {
+
+/** Initializes the backend-owned AscendCL runtime once and returns the actual
+ *  SoC string reported by aclrtGetSocName. False is fail-closed; no environment
+ *  or guessed-device fallback is used. */
+[[nodiscard]] bool GetAscendRuntimeSocName(std::string& out);
 
 /** True iff this build has CANN, an NPU is visible, and process-local
  *  ExactGemmS8S8 self-qualification (incl. odd-accumulator / max-|entry|

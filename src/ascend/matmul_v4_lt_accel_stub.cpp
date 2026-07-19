@@ -15,6 +15,12 @@ class CBlockHeader;
 
 namespace matmul_v4::ascend {
 
+bool GetAscendRuntimeSocName(std::string& out)
+{
+    out.clear();
+    return false;
+}
+
 bool IsAscendExactGemmAvailable()
 {
     return false;

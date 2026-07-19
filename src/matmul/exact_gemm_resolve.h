@@ -12,11 +12,11 @@
 
 namespace matmul_v4::accel {
 
-/** Build an injectable ExactGemmBackend for MatExpand GEMMs from
- *  ResolveBackend(). Wires CUDA TryLaunchLtImma*, HIP TryLaunchLtMfma*,
- *  Metal TryLaunchLtTensorOps*, and Ascend TryLaunchLtCube* when selected.
- *  Null slots (CPU) keep MatExpand on ExactGemm*; false Try* returns also
- *  fall back per-call. Winners always CPU-reseal. */
+/** Build an injectable ExactGemmBackend for MatExpand GEMMs. An explicit
+ *  BTX_MATMUL_LT_EXACT_BACKEND=tpu|trainium selects a registered, self-qualified
+ *  bounded-exact cloud provider; otherwise ResolveBackend() wires CUDA, HIP,
+ *  Metal, or Ascend. Null slots keep MatExpand on CPU ExactGemm*, and false
+ *  provider returns fall back per call. Winners always CPU-reseal. */
 [[nodiscard]] matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend();
 
 } // namespace matmul_v4::accel

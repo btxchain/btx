@@ -1,139 +1,148 @@
-# Ascend 950 (昇腾) ExactGemm / CANN backend — MatMul v4.4
+# Huawei Ascend CANN backend — MatMul v4.4 LT ExactGemm
 
-Bilingual notes for the Huawei Ascend ExactGemm host backend in `src/ascend/`.
-Public activation remains inert (`INT32_MAX`). Consensus is still the CPU integer transcript.
-
----
+The Ascend backend is experimental and fail-closed. Public activation remains
+inert (`INT32_MAX`), and the CPU integer transcript remains authoritative.
 
 ## 中文摘要
 
-### API 映射（CANN ≥ 9.1，Ascend 950PR/DT，`dav-3510`）
+### 采用的精确整数接口
 
-| BTX 入口 | CANN / aclnn |
-|---|---|
-| `ExactGemmS8S8Ascend` | 两段式 `aclnnMm` → `aclnnMatmul` →（可选）`aclnnMatmulWeightNz`：`GetWorkspaceSize` → execute |
-| INT8 权重亲和 | `aclnnCalculateMatmulWeightSize` / `V2` + `aclnnTransMatmulWeight`（头文件存在时） |
-| `cubeMathType` | **固定 `0` = KEEP_DTYPE**；禁止 HF32 / FP 降精度（1/2/3） |
-| 累加 | 目标 INT8×INT8→INT32，与 `ExactGemmS8S8` 逐字节一致 |
-| `ExactGemmS32S8Ascend` | **未证明** → 恒拒绝，回落 CPU `ExactGemmS32S8` |
+CANN 9.1 的官方 `aclnnQuantMatmulV5` 文档明确规定：当 `x1`、`x2` 为
+`INT8`，输出为 `INT32`，`bias=nullptr` 时，各种 scale 均不参与计算，语义为：
 
-参考资料：ops-nn `aclnnMm` / `aclnnMatmul` / `aclnnMatmulWeightNz`；ops-math `aclnnTransMatmulWeight`（支持 INT8）；asc-devkit Matmul（`dav-3510`，CANN ≥ 9.1）说明 A/B=`int8_t`、C=`int32_t` 的 Cube 组合。
-
-### 精确性门控
-
-1. 进程内自检对比 CPU `ExactGemmS8S8`，覆盖：
-   - 奇数 K / 奇数方阵（奇累加长度）
-   - 矩形 MatExpand 式面板
-   - 最大 \|entry\| 角点矩阵（±127）
-2. 失败则 `IsAscendExactGemmAvailable()=false`。
-3. 仅当自检已通过 **且** Cube/aclnn 实际执行后置 `used_cube_path=true`。
-4. `ResolveBackend("ascend"|"huawei"|"npu")` 仅在 **已编译 + CANN 可用 + 自检通过** 时选中 ASCEND；否则回落 CPU。
-5. 默认 CI **无 CANN SDK** → stub 恒返回 false（fail-closed）。
-
-### 生产资格检查清单（Qualification checklist）
-
-在宣称「Cube ExactGemm 可用」之前，现场必须全部勾选：
-
-- [ ] `BTX_ENABLE_ASCEND=ON` 且 CMake 检测到 `include/acl/acl.h` → `BTX_HAVE_CANN=1`
-- [ ] CANN toolkit ≥ 9.1（Ascend 950PR/DT / `dav-3510` 文档基线）
-- [ ] NPU 可见（`aclrtGetDeviceCount` > 0）；SoC 为 950 类或文档列出的 Cube INT8 候选
-- [ ] 进程启动自检全部 case 与 CPU `ExactGemmS8S8` 逐字节一致
-- [ ] `IsAscendExactGemmAvailable()==true` 之后，`ExactGemmS8S8Ascend(..., &used_cube)` 对生产尺寸返回 `used_cube==true`
-- [ ] `TryLaunchLtCubeGemmS8S8` 注入 `ExactGemmBackend` 时，挖矿 winner 仍由 CPU 重算密封
-- [ ] **禁止** 使用 `cubeMathType∈{1,2,3}`（降精度 / HF32）
-- [ ] S32S8 路径未证明前保持拒绝（CPU fallback）
-
-### 已知限制（Known limits）
-
-| 限制 | 说明 |
-|---|---|
-| 公开 dtype 表偏 FP | ops-nn 文档中 `aclnnMm`/`aclnnMatmul` 列出 BF16/FP16/FP32；INT8 路径依赖工具链实际接纳 + 自检，否则 fail-closed |
-| Ascend 950 NZ | `aclnnMatmulWeightNz` 在 950 上文档要求 `aclnnNpuFormatCast`；本实现优先 TransMatmulWeight（A2/A3 亲和），Nz 为可选回退 |
-| QuantMatmul | `aclnnQuantMatmulV4` 带 scale，**不**用于 ExactGemm（避免非单位量化破坏整数一致性） |
-| Ascend C 内核 | asc-devkit `MatmulType<…, int8_t>`→`int32_t` 是原生 Cube 路径，但需自定义算子；本仓库当前走 host aclnn，不嵌入 Ascend C 内核 |
-| S32S8 | 无已证明的 Cube INT32×INT8→INT32 aclnn 路径 → 恒拒绝 |
-| 无 CANN CI | 默认构建链接 stub；`IsAscendExactGemmAvailable()==false` |
-| 激活 | 公网激活高度仍为 `INT32_MAX`（惰性） |
-
-### 如何用 CANN 构建
-
-```bash
-# 安装 Ascend CANN toolkit 后：
-export ASCEND_HOME=/usr/local/Ascend/ascend-toolkit/latest   # 或 ASCEND_TOOLKIT_HOME
-cmake -S . -B build -DBTX_ENABLE_ASCEND=ON
-# 若检测到 include/acl/acl.h → 定义 BTX_HAVE_CANN 并链接真实 TU
-# 否则仍编译 stub，并警告 cann_sdk_not_found
+```text
+out = x1 @ x2
 ```
 
-可选：`BTX_ASCEND_HOME=/path/to/toolkit` 显式指定根目录。
+输入组合表仍要求一个 `x2Scale` tensor，因此代码传入 page-locked staging 中的
+`FLOAT32(1.0)`；它满足接口类型约束，但按上述官方公式不改变整数结果。本后端只使用
+这个 raw INT8→INT32 模式。旧实现尝试通过
+`aclnnMm`/`aclnnMatmul` 执行 INT8；公开文档并未把该组合列为受支持类型，因此已经
+删除，避免把未文档化的 fallback 误报为 Cube ExactGemm。
 
-### 运行时行为摘要
+`aclnnCalculateMatmulWeightSizeV2` + `aclnnTransMatmulWeight` 将右矩阵转换为
+NPU 亲和的 NZ 布局。该转换是本后端的 native-Cube 证明条件，而不只是可选优化：
+转换接口或 V5 头文件任一缺失，整个后端恒拒绝。虽然 V5 也支持 ND，但本代码不把
+ND-only launch 误报为已经证明的 Cube 路径。
 
-| 构建 | 行为 |
-|---|---|
-| 默认 / 无 CANN | stub：所有入口 false；`ResolveBackend("ascend")` → CPU |
-| `BTX_ENABLE_ASCEND` + CANN，自检失败 | 真实 TU 链接，但 `IsAscendExactGemmAvailable()=false`；不设 `used_cube_path` |
-| CANN + 自检通过 | Cube S8S8 可用；`MakeResolvedExactGemmBackend` 注入 `TryLaunchLtCubeGemmS8S8` |
+### 性能改进
 
----
+- Device A/B/C/scale 缓冲、page-locked host staging、stream 和最大 workspace 均为进程级复用。
+- `aclrtMemsetAsync`、两个 H2D、V5 GEMM 和 D2H 在同一 stream 中保序，仅末尾同步一次。
+- B 的 padding 每次异步清零，避免前一次 NZ 转换留下的数据污染下一次矩阵。
+- 第一阶段 `GetWorkspaceSize` 仍按调用执行；CANN opbase 可通过 `ACLNN_CACHE_LIMIT`
+  缓存 workspace/executor/tiling 信息。
+- 本代码未手工永久缓存 `aclOpExecutor`。官方要求先调用
+  `aclSetAclOpExecutorRepeatable`，且 NZ 转换计划未必满足可复用限制；未经现场 CANN
+  验证时强行缓存会造成生命周期错误。
 
-## English summary
+### 精确性和诚实性门控
 
-### API mapping (CANN ≥ 9.1, Ascend 950PR/DT, `dav-3510`)
+进程首次启用时把 NPU 结果与 CPU `ExactGemmS8S8` 逐字节比较，覆盖：
 
-| BTX entry | CANN / aclnn |
-|---|---|
-| `ExactGemmS8S8Ascend` | Two-phase `aclnnMm` → `aclnnMatmul` → optional `aclnnMatmulWeightNz` |
-| INT8 weight affinity | `aclnnCalculateMatmulWeightSize` / `V2` + `aclnnTransMatmulWeight` when headers exist |
-| `cubeMathType` | **Always `0` = KEEP_DTYPE**; never HF32 / down-precision |
-| Accumulate | INT8×INT8→INT32, byte-identical to `ExactGemmS8S8` |
-| `ExactGemmS32S8Ascend` | **Unproven** → always declines → CPU |
+- 奇数 M/N/K 与非对齐 padding/crop；
+- 矩形 panel；
+- 对齐的 32×64×48 与 K=256 Cube 形状；
+- 密集 `+127/-128` 输入，检查饱和、窄化或错误累加。
 
-Sources: ops-nn Mm/Matmul/MatmulWeightNz; ops-math TransMatmulWeight (INT8); asc-devkit Matmul notes for `dav-3510` int8→int32 Cube.
+只有全部通过后 `IsAscendExactGemmAvailable()` 才返回 true，并且只有成功执行同一
+V5 路径后才设置 `used_cube_path=true`。S32×S8 不映射到 V5：CANN 的 `INT32`
+输入在该接口中表示 packed INT4，不是语义上的 INT32 乘数，因此继续回落 CPU。
 
-### Exactness gates
+### 构建和上线要求
 
-1. Process-local self-qual vs CPU `ExactGemmS8S8`: odd-K / odd squares, rectangular MatExpand-like panels, ±127 corner matrices.
-2. Failure keeps `IsAscendExactGemmAvailable()=false`.
-3. Set `used_cube_path=true` **only** after self-qual **and** a Cube/aclnn launch.
-4. `ResolveBackend("ascend")` selects ASCEND only when **compiled + CANN + self-qual**; else CPU.
-5. Default CI has **no CANN SDK** → stub always returns false.
+- 需要 CANN 9.1+，且存在 `aclnnop/aclnn_quant_matmul_v5.h`。
+- 链接必须包含 CANN 9.1 对应的 NN 和 Math operator libraries；8.5+ 推荐
+  `libopapi_nn.so` + `libopapi_math.so`。若 split libraries 不完整才整体改用
+  `libopapi.so`，官方明确禁止同时引用通用库和 split libraries。
+- 真机必须记录 SoC、CANN/driver 版本、是否使用 NZ、端到端吞吐和与 CPU golden
+  vectors 的结果。
+- 能力分类只接受共享 Ascend runtime 初始化后 `aclrtGetSocName()` 返回的真实 SoC；
+  不再接受环境变量覆盖，也不会把查询失败默认成 `dav-3510`。
+- 公开的 CANN 页面目前主要列出 Atlas A2/A3/350 产品。不能仅凭“Ascend 950”名称
+  宣称已验证；950 实机与对应 CANN 发布包必须完成相同自检和性能审核。
+- V5 的 x2 format 约束随产品系列变化：部分系列允许或要求 NZ，但 9.1 页面把
+  Atlas 350 列为 ND-only。当前代码严格要求 NZ，因此遇到 ND-only 产品会安全拒绝；
+  在 Huawei 发布 950/dav-3510 的明确产品映射和 native-Cube 证据前不猜测回退。
 
-### Production qualification checklist
+## English audit and implementation notes
 
-Before advertising Cube ExactGemm:
+### Exact operator contract
 
-- [ ] `BTX_ENABLE_ASCEND=ON` and CMake found `include/acl/acl.h` (`BTX_HAVE_CANN=1`)
-- [ ] CANN ≥ 9.1 on Ascend 950PR/DT (`dav-3510`) or documented Cube INT8 candidate
-- [ ] NPU present; SoC classified admissible
-- [ ] All self-qual cases match CPU `ExactGemmS8S8` byte-for-byte
-- [ ] After availability, production shapes set `used_cube_path=true`
-- [ ] Mining winners still CPU-resealed
-- [ ] Never use `cubeMathType∈{1,2,3}`
-- [ ] Keep S32S8 declined until a proven Cube path exists
+The backend now requires CANN's documented raw integer mode:
 
-### Known limits
-
-| Limit | Note |
-|---|---|
-| Public dtype tables are FP-centric | INT8 on Mm/Matmul is admit-by-self-qual only |
-| Ascend 950 NZ | Docs prefer `NpuFormatCast` for WeightNz; we try TransMatmulWeight first |
-| QuantMatmul | Not used (scale would break integer ExactGemm) |
-| Ascend C kernels | Native int8→int32 Cube exists in asc-devkit; this tree uses host aclnn only |
-| S32S8 | Declined |
-| No-CANN CI | Stub linked; availability false |
-| Activation | Still `INT32_MAX` (inert) |
-
-### Build with CANN
-
-```bash
-export ASCEND_HOME=/usr/local/Ascend/ascend-toolkit/latest
-cmake -S . -B build -DBTX_ENABLE_ASCEND=ON
-# Detects include/acl/acl.h → BTX_HAVE_CANN + real TU; else inert stub.
+```text
+aclnnQuantMatmulV5(x1=INT8, x2=INT8, out=INT32,
+                   x1Scale=null, x2Scale=FLOAT32(1),
+                   offsets=null, bias=null)
+=> out = x1 @ x2
 ```
 
-### Sources
+CANN 9.1 explicitly says that scales do not participate in this combination.
+The documented dtype table nevertheless requires an `x2Scale` tensor, so the
+backend supplies a stable FLOAT32 value of 1.0; it is an API-contract input,
+not an arithmetic quantization step.
+The previous `aclnnMm`/`aclnnMatmul` experiment was removed because released
+public dtype tables do not document INT8 inputs with INT32 output for those
+ordinary operators. A successful undocumented call is not sufficient evidence
+of native Cube execution or stable semantics.
 
-- `src/ascend/matmul_v4_lt_accel.h` / `.cpp` / `_stub.cpp`
-- Capability string: `"ascend"` (`Kind::ASCEND`); aliases `huawei`, `npu`
-- Architecture notes: `doc/btx-matmul-v4.4-multi-vendor-exactgemm-architecture-2026-07-19.md`
+B is transformed from ND to the explicitly AI-processor-affine NZ layout using
+`aclnnCalculateMatmulWeightSizeV2` and `aclnnTransMatmulWeight`. This is an
+admission requirement, not merely a preference: the backend rejects an ND-only
+launch because arithmetic identity alone would not prove the native Cube path.
+Missing V5 or either transform API means availability is false.
+
+### Runtime lifecycle
+
+The hot path retains:
+
+- one AscendCL stream;
+- grow-only device buffers for A, B, C, scale, and workspace;
+- grow-only host-pinned staging buffers for A, B, C, and scale.
+
+Each launch copies into pinned staging, queues padding clear/H2D/operator/D2H
+on the same stream, and synchronizes once before returning the host vector.
+This removes repeated `aclrtMalloc`, `aclrtMallocHost`, workspace allocation,
+and stream setup from repeated LT GEMMs.
+
+The code deliberately does **not** retain a manually repeatable executor.
+Huawei documents that phase two cannot normally be called twice and that
+`aclSetAclOpExecutorRepeatable` must explicitly admit reuse. The transform may
+also make the plan non-repeatable. CANN's own opbase phase-one cache remains
+available and is the safe executor/tiling cache until the exact V5+NZ plan has
+been qualified on the target toolkit.
+
+### Remaining qualification gaps
+
+- No Ascend hardware or CANN SDK is available in default CI, so only the inert
+  stub can be exercised there.
+- Capability admission obtains the real `aclrtGetSocName()` through the
+  backend-owned one-time runtime initialization. It has no environment override
+  and never defaults an unknown device to `dav-3510`.
+- V5 layout support is product-specific. The 9.1 page documents ND-only x2 on
+  Atlas 350, while other families accept or require the affinity layout. This
+  implementation intentionally rejects ND-only execution rather than label it
+  native Cube without a target-specific trace; an Atlas 350/dav-3510 mapping
+  must not be inferred from a marketing name.
+- `msprof`/operator traces should be retained as production evidence that the
+  exact V5+NZ path ran on Cube on the target CANN/SoC combination.
+- S32×S8 remains CPU-only.
+- This is host ExactGemm injection, not a fully device-resident LT transcript;
+  host round trips between stages will cap end-to-end throughput.
+- Manual repeatable-executor caching and multi-stream double buffering should
+  be enabled only after the selected CANN release proves the V5/NZ executor is
+  repeatable and each stream has disjoint buffers/workspace.
+
+## Official sources
+
+- [CANN 9.1 `aclnnQuantMatmulV5`](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta3/API/aolapi/context/ops-nn/aclnnQuantMatmulV5.md) — raw INT8×INT8→INT32 formula and V5 signature.
+- [CANN 8.5 `aclnnMatmul`](https://www.hiascend.com/document/detail/zh/canncommercial/850/API/aolapi/context/ops-nn/aclnnMatmul.md) — ordinary Matmul contract; not used for ExactGemm.
+- [CANN 8.5 `aclnnCalculateMatmulWeightSizeV2`](https://www.hiascend.com/document/detail/zh/canncommercial/850/API/aolapi/context/ops-math/aclnnCalculateMatmulWeightSizeV2.md) — INT8 NZ allocation is measured in elements.
+- [CANN 8.5 `aclnnTransMatmulWeight`](https://www.hiascend.com/document/detail/zh/canncommercial/850/API/aolapi/context/ops-math/aclnnTransMatmulWeight.md) — INT8 weight-affinity transformation.
+- [CANN 8.5 operator-library linkage](https://www.hiascend.com/document/detail/en/canncommercial/850/API/aolapi/operatorlist_00001.html) — split `opapi_nn`/`opapi_math` linkage and the prohibition on mixing them with generic `opapi`.
+- [CANN 8.5 `aclrtMemcpyAsync`](https://www.hiascend.com/document/detail/en/canncommercial/850/API/appdevgapi/aclcppdevg_03_0106.html) — page-locked host buffers are required for genuinely asynchronous host transfers.
+- [CANN 8.5 `aclrtMemsetAsync`](https://www.hiascend.com/document/detail/en/canncommercial/850/API/appdevgapi/aclcppdevg_03_0104.html) — stream-ordered asynchronous device initialization.
+- [`aclSetAclOpExecutorRepeatable`](https://www.hiascend.com/document/detail/en/canncommercial/800/apiref/aolapi/operatorlist_00041.html) — repeatability admission and executor destruction requirements.
+- [Ascend C Matmul type contract](https://www.hiascend.com/document/detail/en/canncommercial/850/API/ascendcopapi/atlasascendc_api_07_0614.html) — native int8 matrix inputs accumulate to int32 in the Cube API.
+- [Official Ascend custom Matmul kernel invocation sample](https://github.com/Ascend/samples/tree/master/cplusplus/level1_single_api/4_op_dev/6_ascendc_custom_op/kernel_invocation/MatMul) — stream and custom-kernel launch structure.

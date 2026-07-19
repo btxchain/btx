@@ -17,8 +17,11 @@
 
 // CUDA IMMA path for LT ExactGemm: cuBLASLt CUBLAS_COMPUTE_32I (s8xs8->s32).
 // Self-tested bit-for-bit against ExactGemmS8S8 across MatExpand shapes before
-// IsLtImmaGemmAvailable returns true. Host and device-pointer launches share a
-// process-persistent cuBLASLt handle + workspace + A/B/C scratch.
+// IsLtImmaGemmAvailable returns true. The selected algorithm must also declare
+// CUBLASLT_NUMERICAL_IMPL_FLAGS_IMMA + INPUT_8I + ACCUMULATOR_32I, so a SIMT
+// fallback that happens to be exact is never mislabeled as Tensor Core work.
+// Host and device-pointer launches share a process-persistent cuBLASLt handle,
+// 32 MiB workspace, per-shape descriptors/algorithms, and A/B/C scratch.
 //
 // S32S8: cuBLASLt CUBLAS_COMPUTE_32I is an s8×s8→s32 recipe only. There is no
 // documented exact s32×s8→s32 IMMA/cuBLASLt/CUTLASS path we can self-qualify on
@@ -31,6 +34,19 @@ namespace matmul_v4::cuda {
 namespace {
 
 struct ImmaLtPool {
+    struct ShapePlan {
+        uint32_t rows{0};
+        uint32_t cols{0};
+        uint32_t inner{0};
+        cublasLtMatmulDesc_t op_desc{nullptr};
+        cublasLtMatrixLayout_t a_layout{nullptr};
+        cublasLtMatrixLayout_t b_layout{nullptr};
+        cublasLtMatrixLayout_t c_layout{nullptr};
+        cublasLtMatmulAlgo_t algo{};
+        size_t required_workspace{0};
+        bool native_imma{false};
+    };
+
     std::mutex mu;
     cublasLtHandle_t lt{nullptr};
     void* workspace{nullptr};
@@ -41,12 +57,20 @@ struct ImmaLtPool {
     size_t a_bytes{0};
     size_t b_bytes{0};
     size_t c_bytes{0};
+    std::vector<ShapePlan> plans;
     bool ready{false};
 
     ~ImmaLtPool() { Release(); }
 
     void Release()
     {
+        for (auto& plan : plans) {
+            if (plan.c_layout) cublasLtMatrixLayoutDestroy(plan.c_layout);
+            if (plan.b_layout) cublasLtMatrixLayoutDestroy(plan.b_layout);
+            if (plan.a_layout) cublasLtMatrixLayoutDestroy(plan.a_layout);
+            if (plan.op_desc) cublasLtMatmulDescDestroy(plan.op_desc);
+        }
+        plans.clear();
         auto free_p = [](void*& p, size_t& n) {
             if (p) {
                 cudaFree(p);
@@ -63,6 +87,14 @@ struct ImmaLtPool {
             lt = nullptr;
         }
         ready = false;
+    }
+
+    [[nodiscard]] ShapePlan* FindPlan(uint32_t rows, uint32_t cols, uint32_t inner)
+    {
+        for (auto& plan : plans) {
+            if (plan.rows == rows && plan.cols == cols && plan.inner == inner) return &plan;
+        }
+        return nullptr;
     }
 
     [[nodiscard]] bool EnsureHandle(size_t need_workspace)
@@ -110,82 +142,139 @@ ImmaLtPool& ImmaPool()
     return pool;
 }
 
+void DestroyShapePlan(ImmaLtPool::ShapePlan& plan)
+{
+    if (plan.c_layout) cublasLtMatrixLayoutDestroy(plan.c_layout);
+    if (plan.b_layout) cublasLtMatrixLayoutDestroy(plan.b_layout);
+    if (plan.a_layout) cublasLtMatrixLayoutDestroy(plan.a_layout);
+    if (plan.op_desc) cublasLtMatmulDescDestroy(plan.op_desc);
+    plan = {};
+}
+
+/** Caller MUST hold ImmaPool().mu. NVIDIA recommends querying a heuristic once
+ *  and reusing it. LT has only a handful of stable shapes, so cache the full
+ *  descriptor/algo plan instead of rebuilding it for every nonce. */
+[[nodiscard]] ImmaLtPool::ShapePlan* GetOrCreateShapePlan(ImmaLtPool& pool,
+                                                          uint32_t M, uint32_t N, uint32_t K,
+                                                          std::string& error)
+{
+    if (auto* cached = pool.FindPlan(M, N, K)) {
+        if (!cached->native_imma) error = "cached shape has no native IMMA algorithm";
+        return cached->native_imma ? cached : nullptr;
+    }
+
+    ImmaLtPool::ShapePlan plan;
+    plan.rows = M;
+    plan.cols = N;
+    plan.inner = K;
+    if (cublasLtMatmulDescCreate(&plan.op_desc, CUBLAS_COMPUTE_32I, CUDA_R_32I) != CUBLAS_STATUS_SUCCESS) {
+        error = "cublasLtMatmulDescCreate failed";
+        return nullptr;
+    }
+    const cublasOperation_t op_n = CUBLAS_OP_N;
+    if (cublasLtMatmulDescSetAttribute(plan.op_desc, CUBLASLT_MATMUL_DESC_TRANSA, &op_n, sizeof(op_n)) != CUBLAS_STATUS_SUCCESS ||
+        cublasLtMatmulDescSetAttribute(plan.op_desc, CUBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n)) != CUBLAS_STATUS_SUCCESS) {
+        error = "cublasLtMatmulDescSetAttribute failed";
+        DestroyShapePlan(plan);
+        return nullptr;
+    }
+    // Row-major ExactGemm layout: A[M×K], B[K×N], C[M×N] with leading dims K,N,N.
+    if (cublasLtMatrixLayoutCreate(&plan.a_layout, CUDA_R_8I, M, K, K) != CUBLAS_STATUS_SUCCESS ||
+        cublasLtMatrixLayoutCreate(&plan.b_layout, CUDA_R_8I, K, N, N) != CUBLAS_STATUS_SUCCESS ||
+        cublasLtMatrixLayoutCreate(&plan.c_layout, CUDA_R_32I, M, N, N) != CUBLAS_STATUS_SUCCESS) {
+        error = "cublasLtMatrixLayoutCreate failed";
+        DestroyShapePlan(plan);
+        return nullptr;
+    }
+    const cublasLtOrder_t order = CUBLASLT_ORDER_ROW;
+    if (cublasLtMatrixLayoutSetAttribute(plan.a_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)) != CUBLAS_STATUS_SUCCESS ||
+        cublasLtMatrixLayoutSetAttribute(plan.b_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)) != CUBLAS_STATUS_SUCCESS ||
+        cublasLtMatrixLayoutSetAttribute(plan.c_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order)) != CUBLAS_STATUS_SUCCESS) {
+        error = "cublasLtMatrixLayoutSetAttribute failed";
+        DestroyShapePlan(plan);
+        return nullptr;
+    }
+
+    cublasLtMatmulPreference_t preference = nullptr;
+    if (cublasLtMatmulPreferenceCreate(&preference) != CUBLAS_STATUS_SUCCESS) {
+        error = "cublasLtMatmulPreferenceCreate failed";
+        DestroyShapePlan(plan);
+        return nullptr;
+    }
+    if (cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                             &pool.workspace_bytes, sizeof(pool.workspace_bytes)) != CUBLAS_STATUS_SUCCESS) {
+        error = "cublasLtMatmulPreferenceSetAttribute failed";
+        cublasLtMatmulPreferenceDestroy(preference);
+        DestroyShapePlan(plan);
+        return nullptr;
+    }
+
+    // The fastest result for a small self-test shape can be SIMT. Ask for
+    // several candidates and accept only a native integer Tensor Core kernel.
+    constexpr int kMaxHeuristics = 16;
+    cublasLtMatmulHeuristicResult_t heuristics[kMaxHeuristics]{};
+    int returned = 0;
+    if (cublasLtMatmulAlgoGetHeuristic(pool.lt, plan.op_desc, plan.a_layout, plan.b_layout,
+                                       plan.c_layout, plan.c_layout, preference, kMaxHeuristics,
+                                       heuristics, &returned) != CUBLAS_STATUS_SUCCESS) {
+        error = "no IMMA s8xs8->s32 heuristic";
+        cublasLtMatmulPreferenceDestroy(preference);
+        DestroyShapePlan(plan);
+        return nullptr;
+    }
+    constexpr uint64_t kRequiredImpl =
+        CUBLASLT_NUMERICAL_IMPL_FLAGS_IMMA |
+        CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_32I |
+        CUBLASLT_NUMERICAL_IMPL_FLAGS_INPUT_8I;
+    for (int i = 0; i < returned; ++i) {
+        if (heuristics[i].state != CUBLAS_STATUS_SUCCESS) continue;
+        uint64_t impl_flags = 0;
+        size_t written = 0;
+        if (cublasLtMatmulAlgoCapGetAttribute(
+                &heuristics[i].algo, CUBLASLT_ALGO_CAP_NUMERICAL_IMPL_FLAGS,
+                &impl_flags, sizeof(impl_flags), &written) != CUBLAS_STATUS_SUCCESS ||
+            written != sizeof(impl_flags) || (impl_flags & kRequiredImpl) != kRequiredImpl) {
+            continue;
+        }
+        plan.algo = heuristics[i].algo;
+        plan.required_workspace = heuristics[i].workspaceSize;
+        plan.native_imma = true;
+        break;
+    }
+    cublasLtMatmulPreferenceDestroy(preference);
+    if (!plan.native_imma) {
+        error = "heuristics returned no native IMMA+s32 algorithm";
+        pool.plans.push_back(plan); // Cache the negative result too.
+        return nullptr;
+    }
+
+    pool.plans.push_back(plan);
+    return &pool.plans.back();
+}
+
 /** Caller MUST hold ImmaPool().mu. */
 [[nodiscard]] bool RunCublasLtS8S8Locked(ImmaLtPool& pool, const int8_t* dA, const int8_t* dB,
                                          int32_t* dC, uint32_t M, uint32_t N, uint32_t K,
                                          cudaStream_t stream, std::string& error)
 {
-    constexpr size_t kDefaultWorkspace = 8ull << 20;
+    // NVIDIA recommends 32 MiB for Hopper and both Blackwell families. This
+    // unlocks kernels unavailable to the previous 8 MiB preference budget.
+    constexpr size_t kDefaultWorkspace = 32ull << 20;
     if (!pool.EnsureHandle(kDefaultWorkspace)) {
         error = "cublasLtCreate / workspace alloc failed";
         return false;
     }
+    ImmaLtPool::ShapePlan* plan = GetOrCreateShapePlan(pool, M, N, K, error);
+    if (plan == nullptr) return false;
 
-    cublasLtMatmulDesc_t op_desc = nullptr;
-    cublasLtMatrixLayout_t a_layout = nullptr;
-    cublasLtMatrixLayout_t b_layout = nullptr;
-    cublasLtMatrixLayout_t c_layout = nullptr;
-    cublasLtMatmulPreference_t preference = nullptr;
-
-    auto cleanup = [&]() {
-        if (preference) cublasLtMatmulPreferenceDestroy(preference);
-        if (c_layout) cublasLtMatrixLayoutDestroy(c_layout);
-        if (b_layout) cublasLtMatrixLayoutDestroy(b_layout);
-        if (a_layout) cublasLtMatrixLayoutDestroy(a_layout);
-        if (op_desc) cublasLtMatmulDescDestroy(op_desc);
-    };
-
-    if (cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32I, CUDA_R_32I) != CUBLAS_STATUS_SUCCESS) {
-        error = "cublasLtMatmulDescCreate failed";
-        cleanup();
-        return false;
-    }
-    const cublasOperation_t op_n = CUBLAS_OP_N;
-    if (cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSA, &op_n, sizeof(op_n)) != CUBLAS_STATUS_SUCCESS ||
-        cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n)) != CUBLAS_STATUS_SUCCESS) {
-        error = "cublasLtMatmulDescSetAttribute failed";
-        cleanup();
-        return false;
-    }
-    // Row-major ExactGemm layout: A[M×K], B[K×N], C[M×N] with leading dims K,N,N.
-    if (cublasLtMatrixLayoutCreate(&a_layout, CUDA_R_8I, M, K, K) != CUBLAS_STATUS_SUCCESS ||
-        cublasLtMatrixLayoutCreate(&b_layout, CUDA_R_8I, K, N, N) != CUBLAS_STATUS_SUCCESS ||
-        cublasLtMatrixLayoutCreate(&c_layout, CUDA_R_32I, M, N, N) != CUBLAS_STATUS_SUCCESS) {
-        error = "cublasLtMatrixLayoutCreate failed";
-        cleanup();
-        return false;
-    }
-    const cublasLtOrder_t order = CUBLASLT_ORDER_ROW;
-    cublasLtMatrixLayoutSetAttribute(a_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
-    cublasLtMatrixLayoutSetAttribute(b_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
-    cublasLtMatrixLayoutSetAttribute(c_layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
-
-    if (cublasLtMatmulPreferenceCreate(&preference) != CUBLAS_STATUS_SUCCESS) {
-        error = "cublasLtMatmulPreferenceCreate failed";
-        cleanup();
-        return false;
-    }
-    cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                                         &pool.workspace_bytes, sizeof(pool.workspace_bytes));
-
-    cublasLtMatmulHeuristicResult_t heuristic{};
-    int returned = 0;
-    if (cublasLtMatmulAlgoGetHeuristic(pool.lt, op_desc, a_layout, b_layout, c_layout, c_layout,
-                                       preference, 1, &heuristic, &returned) != CUBLAS_STATUS_SUCCESS ||
-        returned < 1) {
-        error = "no IMMA s8xs8->s32 heuristic";
-        cleanup();
-        return false;
-    }
     const int32_t alpha = 1;
     const int32_t beta = 0;
-    if (cublasLtMatmul(pool.lt, op_desc, &alpha, dA, a_layout, dB, b_layout, &beta, dC, c_layout, dC, c_layout,
-                       &heuristic.algo, pool.workspace, pool.workspace_bytes, stream) != CUBLAS_STATUS_SUCCESS) {
+    if (cublasLtMatmul(pool.lt, plan->op_desc, &alpha, dA, plan->a_layout,
+                       dB, plan->b_layout, &beta, dC, plan->c_layout, dC, plan->c_layout,
+                       &plan->algo, pool.workspace, pool.workspace_bytes, stream) != CUBLAS_STATUS_SUCCESS) {
         error = "cublasLtMatmul IMMA failed";
-        cleanup();
         return false;
     }
-    cleanup();
     return true;
 }
 
@@ -267,38 +356,31 @@ ImmaLtPool& ImmaPool()
     static std::once_flag once;
     static bool ok = false;
     std::call_once(once, [] {
+        // Production-aligned sizes make it possible for cuBLASLt to select the
+        // same native IMMA families used by n=4096 while keeping self-test cost
+        // and memory small.
         // (1) Square IMMA tile.
         {
-            constexpr uint32_t kDim = 32;
+            constexpr uint32_t kDim = 128;
             std::vector<int8_t> left(static_cast<size_t>(kDim) * kDim);
             std::vector<int8_t> right(static_cast<size_t>(kDim) * kDim);
             FillFolded(left, 7, -101);
             FillFolded(right, 11, 53);
             if (!MatchShapeVsCpu(left, right, kDim, kDim, kDim)) return;
         }
-        // (2) Thin MatExpand-style panel (G*W with small w).
+        // (2) MatExpand panel (G*W, with the production w=128).
         {
-            constexpr uint32_t kN = 64;
-            constexpr uint32_t kW = 16;
+            constexpr uint32_t kN = 256;
+            constexpr uint32_t kW = matmul::v4::lt::kMatExpandPanelW;
             std::vector<int8_t> G(static_cast<size_t>(kN) * kN);
             std::vector<int8_t> W(static_cast<size_t>(kN) * kW);
             FillFolded(G, 3, -17);
             FillFolded(W, 5, 9);
             if (!MatchShapeVsCpu(G, W, kN, kN, kW)) return;
         }
-        // (3) Full MatExpand panel width (G*W with kMatExpandPanelW).
+        // (3) U*Ahat style: m×n × n×n → m×n (deep tile m = n/2).
         {
-            constexpr uint32_t kN = 64;
-            constexpr uint32_t kW = matmul::v4::lt::kMatExpandPanelW;
-            std::vector<int8_t> G(static_cast<size_t>(kN) * kN);
-            std::vector<int8_t> W(static_cast<size_t>(kN) * kW);
-            FillFolded(G, 13, -41);
-            FillFolded(W, 17, 23);
-            if (!MatchShapeVsCpu(G, W, kN, kN, kW)) return;
-        }
-        // (4) U*Ahat style: m×n × n×n → m×n (deep tile m = n/2).
-        {
-            constexpr uint32_t kN = 64;
+            constexpr uint32_t kN = 256;
             constexpr uint32_t kM = kN / 2;
             std::vector<int8_t> U(static_cast<size_t>(kM) * kN);
             std::vector<int8_t> Ahat(static_cast<size_t>(kN) * kN);
@@ -306,15 +388,34 @@ ImmaLtPool& ImmaPool()
             FillFolded(Ahat, 29, 11);
             if (!MatchShapeVsCpu(U, Ahat, kM, kN, kN)) return;
         }
-        // (5) Bhat*V style: n×n × n×m → n×m.
+        // (4) Bhat*V style: n×n × n×m → n×m.
         {
-            constexpr uint32_t kN = 64;
+            constexpr uint32_t kN = 256;
             constexpr uint32_t kM = kN / 2;
             std::vector<int8_t> Bhat(static_cast<size_t>(kN) * kN);
             std::vector<int8_t> V(static_cast<size_t>(kN) * kM);
             FillFolded(Bhat, 31, -13);
             FillFolded(V, 37, 5);
             if (!MatchShapeVsCpu(Bhat, V, kN, kN, kM)) return;
+        }
+
+        // Admission must cover the actual Rank-1 production geometry, not
+        // merely a small self-test that happens to have an IMMA algorithm.
+        // Heuristic planning needs no production-sized A/B/C allocation and
+        // the plans are retained for the resident miner's first nonce.
+        {
+            constexpr uint32_t kN = 4096;
+            constexpr uint32_t kM = 2048;
+            constexpr uint32_t kW = matmul::v4::lt::kMatExpandPanelW;
+            auto& pool = ImmaPool();
+            std::lock_guard<std::mutex> lock(pool.mu);
+            std::string error;
+            if (!pool.EnsureHandle(32ull << 20) ||
+                GetOrCreateShapePlan(pool, kN, kW, kN, error) == nullptr ||
+                GetOrCreateShapePlan(pool, kM, kN, kN, error) == nullptr ||
+                GetOrCreateShapePlan(pool, kN, kM, kN, error) == nullptr) {
+                return;
+            }
         }
         ok = true;
     });

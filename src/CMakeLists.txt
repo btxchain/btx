@@ -72,6 +72,11 @@ option(BTX_BMX4C_CUTLASS_MXFP4 "Compile CUTLASS grouped MXFP4 tensor TU (require
 set(BTX_CUTLASS_INCLUDE_DIR "" CACHE PATH "CUTLASS include root (directory containing cutlass/cutlass.h)")
 option(BTX_ENABLE_CUDA_EXPERIMENTAL "Enable experimental CUDA backend scaffolding for BTX miner integration" OFF)
 set(BTX_CUDA_ARCHITECTURES "" CACHE STRING "Semicolon-separated CUDA SM architectures for the experimental MatMul backend (for example 120)")
+# Cloud TPU is served through a separately built, version-pinned PJRT/libtpu
+# bridge that registers the narrow provider ABI in src/tpu. The core never
+# links OpenXLA directly. OFF keeps registration and all launches fail-closed.
+option(BTX_ENABLE_TPU_PJRT "Enable the external Google Cloud TPU PJRT provider ABI" OFF)
+option(BTX_ENABLE_TRAINIUM_NEURON "Enable the external AWS Neuron/NRT bounded-exact provider ABI" OFF)
 set(BTX_CUDA_RUNTIME_LIBRARY_DEFAULT "Shared")
 if(DEFINED CMAKE_CUDA_RUNTIME_LIBRARY AND NOT CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "")
   set(BTX_CUDA_RUNTIME_LIBRARY_DEFAULT "${CMAKE_CUDA_RUNTIME_LIBRARY}")
@@ -358,6 +363,11 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_sketch_cache.cpp
   matmul/matmul_v4_exact_float.cpp
   matmul/matmul_v4_fast_exact.cpp
+  # Optional cloud-accelerator boundaries. Both become callable only after a
+  # version-pinned external bridge registers and passes native tensor-engine
+  # attestation plus the bounded-exactness self-qualification.
+  tpu/matmul_v4_lt_accel.cpp
+  trainium/matmul_v4_lt_accel.cpp
   matmul/accel_v4.cpp
   matmul/backend_capabilities_v4.cpp
   matmul/noise.cpp
@@ -397,6 +407,14 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   script/signingprovider.cpp
   script/solver.cpp
 )
+if(BTX_ENABLE_TPU_PJRT)
+  target_compile_definitions(bitcoin_common PUBLIC BTX_HAVE_TPU_PJRT=1)
+  message(STATUS "BTX Cloud TPU PJRT provider ABI enabled; runtime remains fail-closed until a provider registers and self-qualifies")
+endif()
+if(BTX_ENABLE_TRAINIUM_NEURON)
+  target_compile_definitions(bitcoin_common PUBLIC BTX_HAVE_NEURON_NRT=1)
+  message(STATUS "BTX AWS Trainium Neuron/NRT provider ABI enabled; runtime remains fail-closed until a provider registers and self-qualifies")
+endif()
 if(BTX_BMX4C_CUTLASS_MXFP4 AND NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
   message(FATAL_ERROR "BTX_BMX4C_CUTLASS_MXFP4=ON requires BTX_ENABLE_CUDA_EXPERIMENTAL=ON")
 endif()
@@ -710,9 +728,9 @@ if(BTX_ENABLE_HIP)
   # would silently drop that row even in a HIP build.
   target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_HIP=1)
   target_link_libraries(btx_matmul_backend PRIVATE hip::device)
-  # Optional hipBLASLt (preferred) or rocBLAS for LT ExactGemm MFMA-class
-  # s8×s8→s32. Without these, IsLtMfmaGemmAvailable stays false; device ALU
-  # remains available under IsLtDeviceAluGemmAvailable.
+  # Optional hipBLASLt (preferred) and rocBLAS fallback for LT ExactGemm
+  # MFMA-class s8×s8→s32. Discover them independently so an installed
+  # hipBLASLt that declines a shape can fall through to rocBLAS I8II.
   find_path(BTX_HIPBLASLT_INCLUDE_DIR hipblaslt/hipblaslt.h
     HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
     PATH_SUFFIXES include)
@@ -724,21 +742,22 @@ if(BTX_ENABLE_HIP)
     target_include_directories(btx_matmul_backend PRIVATE "${BTX_HIPBLASLT_INCLUDE_DIR}")
     target_link_libraries(btx_matmul_backend PRIVATE "${BTX_HIPBLASLT_LIBRARY}")
     message(STATUS "BTX HIP LT ExactGemm: hipBLASLt linked (MFMA path)")
-  else()
-    find_path(BTX_ROCBLAS_INCLUDE_DIR rocblas/rocblas.h
-      HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
-      PATH_SUFFIXES include)
-    find_library(BTX_ROCBLAS_LIBRARY NAMES rocblas
-      HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
-      PATH_SUFFIXES lib lib64)
-    if(BTX_ROCBLAS_INCLUDE_DIR AND BTX_ROCBLAS_LIBRARY)
-      target_compile_definitions(btx_matmul_backend PRIVATE BTX_HAVE_ROCBLAS=1)
-      target_include_directories(btx_matmul_backend PRIVATE "${BTX_ROCBLAS_INCLUDE_DIR}")
-      target_link_libraries(btx_matmul_backend PRIVATE "${BTX_ROCBLAS_LIBRARY}")
-      message(STATUS "BTX HIP LT ExactGemm: rocBLAS linked (MFMA path)")
-    else()
-      message(STATUS "BTX HIP LT ExactGemm: no hipBLASLt/rocBLAS — MFMA flag false; device ALU only")
-    endif()
+  endif()
+  find_path(BTX_ROCBLAS_INCLUDE_DIR rocblas/rocblas.h
+    HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
+    PATH_SUFFIXES include)
+  find_library(BTX_ROCBLAS_LIBRARY NAMES rocblas
+    HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
+    PATH_SUFFIXES lib lib64)
+  if(BTX_ROCBLAS_INCLUDE_DIR AND BTX_ROCBLAS_LIBRARY)
+    target_compile_definitions(btx_matmul_backend PRIVATE BTX_HAVE_ROCBLAS=1)
+    target_include_directories(btx_matmul_backend PRIVATE "${BTX_ROCBLAS_INCLUDE_DIR}")
+    target_link_libraries(btx_matmul_backend PRIVATE "${BTX_ROCBLAS_LIBRARY}")
+    message(STATUS "BTX HIP LT ExactGemm: rocBLAS linked (MFMA fallback)")
+  endif()
+  if(NOT (BTX_HIPBLASLT_INCLUDE_DIR AND BTX_HIPBLASLT_LIBRARY) AND
+     NOT (BTX_ROCBLAS_INCLUDE_DIR AND BTX_ROCBLAS_LIBRARY))
+    message(STATUS "BTX HIP LT ExactGemm: no hipBLASLt/rocBLAS — MFMA flag false; device ALU only")
   endif()
   # The HIP backend reuses the shared matmul::v4 host reference (operand
   # expansion, serialization, digest) from bitcoin_common so its output is
@@ -779,13 +798,26 @@ if(BTX_ENABLE_ASCEND AND BTX_HAVE_CANN)
   endforeach()
   target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_ASCEND=1 BTX_HAVE_CANN=1)
   target_link_libraries(btx_matmul_backend PRIVATE ascendcl nnopbase)
-  foreach(_cann_lib IN ITEMS opapi ops_infer)
-    find_library(_btx_cann_${_cann_lib} ${_cann_lib}
-      PATHS ${_btx_cann_lib_dirs} NO_DEFAULT_PATH)
-    if(_btx_cann_${_cann_lib})
-      target_link_libraries(btx_matmul_backend PRIVATE ${_btx_cann_${_cann_lib}})
-    endif()
-  endforeach()
+  # CANN 8.5+ recommends the split libraries: QuantMatmulV5 is ops-nn while
+  # Calculate/TransMatmulWeight are ops-math. Huawei explicitly says not to
+  # reference generic libopapi and split libopapi_* in the same binary, so use
+  # the split pair only when both are present and otherwise fall back wholly to
+  # generic opapi. The deprecated ops_infer archive is not a CANN 9.x fallback.
+  find_library(_btx_cann_opapi_nn opapi_nn
+    PATHS ${_btx_cann_lib_dirs} NO_DEFAULT_PATH)
+  find_library(_btx_cann_opapi_math opapi_math
+    PATHS ${_btx_cann_lib_dirs} NO_DEFAULT_PATH)
+  find_library(_btx_cann_opapi opapi
+    PATHS ${_btx_cann_lib_dirs} NO_DEFAULT_PATH)
+  if(_btx_cann_opapi_nn AND _btx_cann_opapi_math)
+    target_link_libraries(btx_matmul_backend PRIVATE
+      ${_btx_cann_opapi_nn} ${_btx_cann_opapi_math})
+  elseif(_btx_cann_opapi)
+    target_link_libraries(btx_matmul_backend PRIVATE ${_btx_cann_opapi})
+  else()
+    message(FATAL_ERROR
+      "BTX_ENABLE_ASCEND=ON requires both libopapi_nn and libopapi_math, or generic libopapi")
+  endif()
   target_link_libraries(btx_matmul_backend PRIVATE bitcoin_common)
 else()
   target_sources(btx_matmul_backend PRIVATE

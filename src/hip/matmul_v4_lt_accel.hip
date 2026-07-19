@@ -29,11 +29,13 @@
 //
 // Hot path: persistent device-resident MatExpand→Extract→project→combine.
 //   When IsLtMfmaGemmAvailable(), s8xs8 stages (G*W, U*Ahat, Bhat*V) use
-//   TryLaunchLtMfmaGemmS8S8Device on persistent buffers; Y*H (s32xs8) stays
-//   scalar DeviceGemmS32S8Tiled (no dedicated MFMA recipe — never claimed).
+//   TryLaunchLtMfmaGemmS8S8Device on persistent buffers. Y*H is lowered exactly
+//   into four signed-byte GEMMs, and the F_q combine into nine exact
+//   Karatsuba/base-64 GEMMs. These are limb-lowered MFMA paths, never mislabeled as a
+//   native s32xs8 instruction.
 //   When MFMA declines, scalar tiled DeviceGemm* + hipGraph replay serve.
 // Host ExactGemm / WindowSketchMinerLT is fail-closed fallback only.
-// Target: gfx942 (MI300) / gfx950 (MI350) via BTX_HIP_ARCHITECTURES.
+// Target: gfx942 (MI300) / gfx950 (MI350/MI355) via BTX_HIP_ARCHITECTURES.
 // ===========================================================================
 
 namespace matmul_v4::hip {
@@ -60,15 +62,27 @@ __global__ void DeviceGemmS8S8Tiled(const int8_t* __restrict__ A,
                                     int32_t* __restrict__ D,
                                     int M, int N, int K)
 {
+    __shared__ int8_t tile_a[16][16];
+    __shared__ int8_t tile_b[16][16];
     const int col = blockIdx.x * blockDim.x + threadIdx.x;
     const int row = blockIdx.y * blockDim.y + threadIdx.y;
-    if (row >= M || col >= N) return;
     int32_t acc = 0;
-    const size_t arow = static_cast<size_t>(row) * K;
-    for (int k = 0; k < K; ++k) {
-        acc += static_cast<int32_t>(A[arow + k]) * static_cast<int32_t>(B[static_cast<size_t>(k) * N + col]);
+    for (int base = 0; base < K; base += 16) {
+        const int ak = base + threadIdx.x;
+        const int bk = base + threadIdx.y;
+        tile_a[threadIdx.y][threadIdx.x] = (row < M && ak < K)
+            ? A[static_cast<size_t>(row) * K + ak] : int8_t{0};
+        tile_b[threadIdx.y][threadIdx.x] = (bk < K && col < N)
+            ? B[static_cast<size_t>(bk) * N + col] : int8_t{0};
+        __syncthreads();
+#pragma unroll
+        for (int k = 0; k < 16; ++k) {
+            acc += static_cast<int32_t>(tile_a[threadIdx.y][k]) *
+                   static_cast<int32_t>(tile_b[k][threadIdx.x]);
+        }
+        __syncthreads();
     }
-    D[static_cast<size_t>(row) * N + col] = acc;
+    if (row < M && col < N) D[static_cast<size_t>(row) * N + col] = acc;
 }
 
 __global__ void DeviceGemmS32S8Tiled(const int32_t* __restrict__ A,
@@ -76,15 +90,27 @@ __global__ void DeviceGemmS32S8Tiled(const int32_t* __restrict__ A,
                                      int32_t* __restrict__ D,
                                      int M, int N, int K)
 {
+    __shared__ int32_t tile_a[16][16];
+    __shared__ int8_t tile_b[16][16];
     const int col = blockIdx.x * blockDim.x + threadIdx.x;
     const int row = blockIdx.y * blockDim.y + threadIdx.y;
-    if (row >= M || col >= N) return;
     int64_t acc = 0;
-    const size_t arow = static_cast<size_t>(row) * K;
-    for (int k = 0; k < K; ++k) {
-        acc += static_cast<int64_t>(A[arow + k]) * static_cast<int64_t>(B[static_cast<size_t>(k) * N + col]);
+    for (int base = 0; base < K; base += 16) {
+        const int ak = base + threadIdx.x;
+        const int bk = base + threadIdx.y;
+        tile_a[threadIdx.y][threadIdx.x] = (row < M && ak < K)
+            ? A[static_cast<size_t>(row) * K + ak] : int32_t{0};
+        tile_b[threadIdx.y][threadIdx.x] = (bk < K && col < N)
+            ? B[static_cast<size_t>(bk) * N + col] : int8_t{0};
+        __syncthreads();
+#pragma unroll
+        for (int k = 0; k < 16; ++k) {
+            acc += static_cast<int64_t>(tile_a[threadIdx.y][k]) *
+                   static_cast<int64_t>(tile_b[k][threadIdx.x]);
+        }
+        __syncthreads();
     }
-    D[static_cast<size_t>(row) * N + col] = static_cast<int32_t>(acc);
+    if (row < M && col < N) D[static_cast<size_t>(row) * N + col] = static_cast<int32_t>(acc);
 }
 
 __device__ __forceinline__ uint32_t DeviceRotl32(uint32_t x, int n)
@@ -204,6 +230,97 @@ __global__ void DeviceExtractDequantMatExpand(const int32_t* __restrict__ B32,
     Bhat[idx] = DeviceExtractDequant(B32[idx], idx / n, idx % n, key);
 }
 
+// Exact s32 -> four signed-byte planes. The low three unsigned bytes are
+// recentered into [-128,127]; the high byte remains signed. Therefore
+//
+//   x = sum_l plane_l(x) * 256^l + 128 * (1 + 256 + 65536).
+//
+// The row-independent correction is applied after the four exact s8xs8->s32
+// GEMMs. This covers every int32 bit pattern, unlike a magnitude-specific
+// decomposition, and preserves the consensus s32xs8 result exactly.
+__global__ void DeviceExtractRadix256Plane(const int32_t* __restrict__ input,
+                                           int8_t* __restrict__ plane,
+                                           size_t count, uint32_t limb)
+{
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    const uint32_t bits = static_cast<uint32_t>(input[idx]);
+    const uint32_t byte = (bits >> (8 * limb)) & 0xffu;
+    const int32_t digit = limb < 3
+        ? static_cast<int32_t>(byte) - 128
+        : (byte < 128 ? static_cast<int32_t>(byte) : static_cast<int32_t>(byte) - 256);
+    plane[idx] = static_cast<int8_t>(digit);
+}
+
+__global__ void DeviceColumnSumsS8(const int8_t* __restrict__ matrix,
+                                   int32_t* __restrict__ sums, int rows, int cols)
+{
+    const int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= cols) return;
+    int32_t sum = 0;
+    for (int row = 0; row < rows; ++row) {
+        sum += static_cast<int32_t>(matrix[static_cast<size_t>(row) * cols + col]);
+    }
+    sums[col] = sum;
+}
+
+__global__ void DeviceAccumulateRadix256(const int32_t* __restrict__ limb_product,
+                                         int32_t* __restrict__ output,
+                                         const int32_t* __restrict__ rhs_column_sums,
+                                         size_t count, int cols, uint32_t limb)
+{
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    constexpr int64_t kLowByteBias = 128ll * (1ll + 256ll + 65536ll);
+    const int64_t scale = int64_t{1} << (8 * limb);
+    int64_t term = static_cast<int64_t>(limb_product[idx]) * scale;
+    if (limb == 3) {
+        term += kLowByteBias * static_cast<int64_t>(rhs_column_sums[idx % cols]);
+    }
+    // Accumulate by bit pattern so every intermediate is defined modulo 2^32.
+    // Consensus MatExpand bounds make the final signed value fit int32.
+    auto* output_bits = reinterpret_cast<uint32_t*>(output);
+    const uint32_t prior = limb == 0 ? 0u : output_bits[idx];
+    output_bits[idx] = prior + static_cast<uint32_t>(term);
+}
+
+static_assert(matmul::v4::bmx4::kCombineLimbs == 4 &&
+              matmul::v4::bmx4::kCombineLimbBase == 64,
+              "LT HIP combine kernels pin the BMX4-C four-limb base-64 encoding");
+
+// Device twin of DecomposeLimbPlanesBMX4C + BuildKaratsubaPlanes. It emits one
+// of the nine planes in the exact CPU order
+// [d0,d1,d0+d1,d2,d3,d2+d3,d0+d2,d1+d3,d0+d1+d2+d3]. The maximum plane
+// magnitude is 128, so every value remains a legal signed-byte tensor operand.
+__global__ void DeviceBuildKaratsubaPlane(const int32_t* __restrict__ input,
+                                          int8_t* __restrict__ plane,
+                                          size_t count, uint32_t plane_index)
+{
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    int32_t x = input[idx];
+    const int32_t d0 = ((x + 32) & 63) - 32;
+    x = (x - d0) / 64;
+    const int32_t d1 = ((x + 32) & 63) - 32;
+    x = (x - d1) / 64;
+    const int32_t d2 = ((x + 32) & 63) - 32;
+    const int32_t d3 = (x - d2) / 64;
+    int32_t value = 0;
+    switch (plane_index) {
+    case 0: value = d0; break;
+    case 1: value = d1; break;
+    case 2: value = d0 + d1; break;
+    case 3: value = d2; break;
+    case 4: value = d3; break;
+    case 5: value = d2 + d3; break;
+    case 6: value = d0 + d2; break;
+    case 7: value = d1 + d3; break;
+    case 8: value = d0 + d1 + d2 + d3; break;
+    default: value = 0; break;
+    }
+    plane[idx] = static_cast<int8_t>(value);
+}
+
 __device__ __forceinline__ uint64_t DeviceFqReduce(unsigned __int128 x)
 {
     constexpr uint64_t q = (uint64_t{1} << 61) - 1;
@@ -237,6 +354,35 @@ __device__ __forceinline__ uint64_t DeviceFqFromInt32(int32_t x)
     const uint64_t magnitude = static_cast<uint64_t>(-(static_cast<int64_t>(x) + 1)) + 1;
     uint64_t r = DeviceFqReduce(static_cast<unsigned __int128>(magnitude));
     return r == 0 ? 0 : (q - r);
+}
+
+__global__ void DeviceAccumulateCombineLimb(const int32_t* __restrict__ product,
+                                            uint64_t* __restrict__ chat,
+                                            uint64_t weight, size_t count)
+{
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    chat[idx] = DeviceFqAdd(chat[idx],
+                            DeviceFqMul(weight, DeviceFqFromInt32(product[idx])));
+}
+
+void Karatsuba9FqWeights(uint64_t (&weights)[9])
+{
+    using matmul::int8_field::FqAdd;
+    using matmul::int8_field::FqNeg;
+    const uint64_t w[7] = {
+        uint64_t{1} << 0, uint64_t{1} << 6, uint64_t{1} << 12, uint64_t{1} << 18,
+        uint64_t{1} << 24, uint64_t{1} << 30, uint64_t{1} << 36,
+    };
+    weights[0] = FqAdd(FqAdd(w[0], FqNeg(w[1])), FqAdd(FqNeg(w[2]), w[3]));
+    weights[1] = FqAdd(FqAdd(FqNeg(w[1]), w[2]), FqAdd(w[3], FqNeg(w[4])));
+    weights[2] = FqAdd(w[1], FqNeg(w[3]));
+    weights[3] = FqAdd(FqAdd(FqNeg(w[2]), w[3]), FqAdd(w[4], FqNeg(w[5])));
+    weights[4] = FqAdd(FqAdd(w[3], FqNeg(w[4])), FqAdd(FqNeg(w[5]), w[6]));
+    weights[5] = FqAdd(FqNeg(w[3]), w[5]);
+    weights[6] = FqAdd(w[2], FqNeg(w[3]));
+    weights[7] = FqAdd(FqNeg(w[3]), w[4]);
+    weights[8] = w[3];
 }
 
 __global__ void DeviceCombineModQ(const int32_t* __restrict__ P,
@@ -404,11 +550,34 @@ struct LtHipResidentPool {
     [[nodiscard]] bool LaunchMatExpandMfma()
     {
         if (!TryLaunchLtMfmaGemmS8S8Device(dG, dW, dY, n, w, n, stream)) return false;
-        const dim3 block(16, 16, 1);
-        const dim3 grid_b((n + block.x - 1) / block.x, (n + block.y - 1) / block.y, 1);
-        hipLaunchKernelGGL(DeviceGemmS32S8Tiled, grid_b, block, 0, stream,
-                           dY, dH, dB32, static_cast<int>(n), static_cast<int>(n), static_cast<int>(w));
-        return hipGetLastError() == hipSuccess;
+        const size_t yw = static_cast<size_t>(n) * w;
+        const size_t nn = static_cast<size_t>(n) * n;
+        if (!EnsureScratch(yw, 0, static_cast<size_t>(n) * sizeof(int32_t),
+                           nn * sizeof(int32_t))) {
+            return false;
+        }
+
+        constexpr unsigned kElemThreads = 256;
+        const unsigned yw_blocks = static_cast<unsigned>((yw + kElemThreads - 1) / kElemThreads);
+        const unsigned out_blocks = static_cast<unsigned>((nn + kElemThreads - 1) / kElemThreads);
+        const unsigned col_blocks = (n + kElemThreads - 1) / kElemThreads;
+        hipLaunchKernelGGL(DeviceColumnSumsS8, dim3(col_blocks), dim3(kElemThreads), 0, stream,
+                           dH, dGemmS32L, static_cast<int>(w), static_cast<int>(n));
+        if (hipGetLastError() != hipSuccess) return false;
+
+        for (uint32_t limb = 0; limb < 4; ++limb) {
+            hipLaunchKernelGGL(DeviceExtractRadix256Plane, dim3(yw_blocks), dim3(kElemThreads), 0, stream,
+                               dY, dGemmS8L, yw, limb);
+            if (hipGetLastError() != hipSuccess) return false;
+            if (!TryLaunchLtMfmaGemmS8S8Device(dGemmS8L, dH, dGemmOut,
+                                               n, n, w, stream)) {
+                return false;
+            }
+            hipLaunchKernelGGL(DeviceAccumulateRadix256, dim3(out_blocks), dim3(kElemThreads), 0, stream,
+                               dGemmOut, dB32, dGemmS32L, nn, static_cast<int>(n), limb);
+            if (hipGetLastError() != hipSuccess) return false;
+        }
+        return true;
     }
 
     [[nodiscard]] bool LaunchProjectRightMfma()
@@ -419,6 +588,46 @@ struct LtHipResidentPool {
     [[nodiscard]] bool LaunchProjectLeftMfma()
     {
         return TryLaunchLtMfmaGemmS8S8Device(dU, dAhat, dP, m, n, n, stream);
+    }
+
+    [[nodiscard]] bool LaunchCombineMfma()
+    {
+        const size_t mn = static_cast<size_t>(m) * n;
+        const size_t nm = static_cast<size_t>(n) * m;
+        const size_t mm = static_cast<size_t>(m) * m;
+        if (!EnsureScratch(mn, nm, 0, mm * sizeof(int32_t))) {
+            return false;
+        }
+
+        constexpr unsigned kElemThreads = 256;
+        const unsigned p_blocks = static_cast<unsigned>((mn + kElemThreads - 1) / kElemThreads);
+        const unsigned q_blocks = static_cast<unsigned>((nm + kElemThreads - 1) / kElemThreads);
+        const unsigned out_blocks = static_cast<unsigned>((mm + kElemThreads - 1) / kElemThreads);
+        if (hipMemsetAsync(dChat, 0, mm * sizeof(uint64_t), stream) != hipSuccess) {
+            return false;
+        }
+
+        uint64_t weights[9];
+        Karatsuba9FqWeights(weights);
+        for (uint32_t r = 0; r < 9; ++r) {
+            hipLaunchKernelGGL(DeviceBuildKaratsubaPlane,
+                               dim3(p_blocks), dim3(kElemThreads), 0, stream,
+                               dP, dGemmS8L, mn, r);
+            if (hipGetLastError() != hipSuccess) return false;
+            hipLaunchKernelGGL(DeviceBuildKaratsubaPlane,
+                               dim3(q_blocks), dim3(kElemThreads), 0, stream,
+                               dQ, dGemmS8R, nm, r);
+            if (hipGetLastError() != hipSuccess) return false;
+            if (!TryLaunchLtMfmaGemmS8S8Device(dGemmS8L, dGemmS8R, dGemmOut,
+                                               m, m, n, stream)) {
+                return false;
+            }
+            hipLaunchKernelGGL(DeviceAccumulateCombineLimb,
+                               dim3(out_blocks), dim3(kElemThreads), 0, stream,
+                               dGemmOut, dChat, weights[r], mm);
+            if (hipGetLastError() != hipSuccess) return false;
+        }
+        return true;
     }
 
     [[nodiscard]] bool BindTemplate(const CBlockHeader& tmpl, uint32_t n_in, uint32_t m_in)
@@ -534,11 +743,15 @@ struct LtHipResidentPool {
             if (hipGraphLaunch(project_right_exec, stream) != hipSuccess) return false;
         }
 
-        const dim3 block(16, 16, 1);
-        const dim3 grid_c((m + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
-        hipLaunchKernelGGL(DeviceCombineModQ, grid_c, block, 0, stream,
-                           dP, dQ, dChat, static_cast<int>(n), static_cast<int>(m));
-        if (hipGetLastError() != hipSuccess) return false;
+        if (mfma_s8s8) {
+            if (!LaunchCombineMfma()) return false;
+        } else {
+            const dim3 block(16, 16, 1);
+            const dim3 grid_c((m + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
+            hipLaunchKernelGGL(DeviceCombineModQ, grid_c, block, 0, stream,
+                               dP, dQ, dChat, static_cast<int>(n), static_cast<int>(m));
+            if (hipGetLastError() != hipSuccess) return false;
+        }
         chat_out.assign(static_cast<size_t>(m) * m, 0);
         if (hipMemcpyAsync(chat_out.data(), dChat, static_cast<size_t>(m) * m * sizeof(uint64_t),
                            hipMemcpyDeviceToHost, stream) != hipSuccess) {
@@ -613,8 +826,8 @@ bool BackendGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
         return true;
     }
     g_lt_last_s8s8_mfma = false;
-    if (TryLaunchLtDeviceAluGemmS8S8(L, R, rows, inner, cols, out)) return true;
     if (HipOkLaunchGemmS8S8(L, R, rows, inner, cols, out)) return true;
+    if (TryLaunchLtDeviceAluGemmS8S8(L, R, rows, inner, cols, out)) return true;
     g_lt_device_gemm_failed = true;
     return false;
 }
@@ -623,8 +836,8 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
                       uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
 {
     if (TryLaunchLtMfmaGemmS32S8(L, R, rows, inner, cols, out)) return true;
-    if (TryLaunchLtDeviceAluGemmS32S8(L, R, rows, inner, cols, out)) return true;
     if (HipOkLaunchGemmS32S8(L, R, rows, inner, cols, out)) return true;
+    if (TryLaunchLtDeviceAluGemmS32S8(L, R, rows, inner, cols, out)) return true;
     g_lt_device_gemm_failed = true;
     return false;
 }
@@ -759,8 +972,8 @@ bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& 
         return true;
     }
     g_lt_last_s8s8_mfma = false;
-    if (TryLaunchLtDeviceAluGemmS8S8(left, right, rows, k, cols, out)) return true;
-    return HipOkLaunchGemmS8S8(left, right, rows, k, cols, out);
+    if (HipOkLaunchGemmS8S8(left, right, rows, k, cols, out)) return true;
+    return TryLaunchLtDeviceAluGemmS8S8(left, right, rows, k, cols, out);
 }
 
 bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
@@ -768,8 +981,8 @@ bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>
                      std::vector<int32_t>& out)
 {
     if (TryLaunchLtMfmaGemmS32S8(left, right, rows, k, cols, out)) return true;
-    if (TryLaunchLtDeviceAluGemmS32S8(left, right, rows, k, cols, out)) return true;
-    return HipOkLaunchGemmS32S8(left, right, rows, k, cols, out);
+    if (HipOkLaunchGemmS32S8(left, right, rows, k, cols, out)) return true;
+    return TryLaunchLtDeviceAluGemmS32S8(left, right, rows, k, cols, out);
 }
 
 bool LtLastS8S8UsedMfma()

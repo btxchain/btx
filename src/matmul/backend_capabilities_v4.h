@@ -22,12 +22,13 @@
 //   - CPU              : always admissible. The pure-integer CPU implementation
 //                        (matmul_v4::ComputeDigest) IS the consensus definition
 //                        (§N.3-v); AVX-512 VNNI etc. are internal details.
-//   - CUDA             : admissible iff the device has IMMA integer tensor
-//                        cores, i.e. compute capability >= 7.5 (Turing and
-//                        later: sm_75/8x/9x/10x/12x). Volta (sm_70/72) tensor
-//                        cores are FP16-multiply only -> verification-only.
-//                        Pre-tensor parts (CMP 30HX/TU116-class, Pascal and
-//                        older) are excluded outright (§S.4.2).
+//   - CUDA             : compute capability >= 7.5 is the candidate filter;
+//                        mining additionally requires a cuBLASLt algorithm
+//                        declaring native IMMA + signed-INT8 input + INT32
+//                        accumulation and passing exact multi-shape self-qual.
+//                        This rejects sm_75 products without a usable native
+//                        Tensor Core route. Volta (sm_70/72) is FP16-only and
+//                        Pascal and older have no tensor path (§S.4.2).
 //   - HIP (ROCm)       : admissible iff the device is CDNA MFMA-capable
 //                        (gfx908 / gfx90a / gfx94x / gfx95x - MI100..MI3xx).
 //                        GCN (gfx900/gfx906) has no matrix cores; RDNA WMMA
@@ -42,9 +43,13 @@
 //                        Ascend 950-class SoC, AND ExactGemmS8S8 self-qual passed.
 //                        Without CANN (default CI): fail-closed / disabled_by_build.
 //
-// FP-only paths (FP16/BF16/FP8, any floating accumulate) are NEVER admissible:
-// floating accumulation rounds per partial sum and is not bit-reproducible
-// (§B.1, §K.4). Admissibility is necessary but NOT sufficient for mining:
+// Generic FP-only paths (FP16/BF16/FP8, unbounded floating accumulation) are
+// NEVER admissible: floating accumulation rounds per partial sum and is not
+// bit-reproducible (§B.1, §K.4). The separate LT-only TPU/Trainium provider
+// splice is intentionally outside this registry: it may use BF16→FP32 only
+// after proving every possible integer partial sum is within 2^24, attesting
+// native tensor execution, and passing CPU parity. Admissibility here is
+// necessary but NOT sufficient for mining:
 // per §N.3-v every non-CPU backend must additionally pass the determinism
 // self-test / cross-backend harness (src/test/
 // matmul_v4_backend_determinism_tests.cpp) bit-for-bit against the CPU
@@ -76,8 +81,9 @@ struct Eligibility {
     bool compiled{false};
     //! Runtime/driver present and a device is visible.
     bool available{false};
-    //! §S.1 admissibility: device presents a bit-exact INT8 s8xs8->s32
-    //! integer tensor path. Only admissible backends may mine.
+    //! §S.1 registry admissibility: device presents a bit-exact INT8
+    //! s8xs8->s32 integer tensor path. The bounded LT-only cloud provider is
+    //! selected separately and does not make a full digest backend admissible.
     bool admissible{false};
     //! §N.3-v: backend must pass the determinism self-test (bit-for-bit
     //! digest+payload match vs the CPU reference) before mining. Always true
@@ -119,8 +125,10 @@ Selection ResolveBackend(const std::string& requested);
 // through these functions so the eligibility rule is a single, tested,
 // consensus-reviewed predicate rather than per-backend ad-hoc logic.
 
-//! CUDA: admissible iff compute capability >= 7.5 (Turing IMMA). Volta
-//! (7.0/7.2) is FP16-tensor-only; < 7.0 has no tensor cores.
+//! CUDA candidate classification: compute capability >= 7.5. Runtime mining
+//! eligibility additionally requires native-IMMA algorithm attestation and
+//! exactness self-qualification in EligibilityFor(CUDA). Volta (7.0/7.2) is
+//! FP16-tensor-only; < 7.0 has no tensor cores.
 Eligibility ClassifyCudaDevice(uint32_t cc_major, uint32_t cc_minor);
 
 //! HIP/ROCm: admissible iff the gfx arch is CDNA MFMA-capable. Accepts full
