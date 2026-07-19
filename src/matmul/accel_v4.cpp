@@ -498,8 +498,9 @@ matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
     matmul::v4::lt::ExactGemmBackend backend;
     switch (ResolveBackend()) {
     case Kind::CUDA:
-        backend.gemm_s8s8 = &matmul_v4::cuda::TryLaunchLtImmaGemmS8S8;
-        backend.gemm_s32s8 = &matmul_v4::cuda::TryLaunchLtImmaGemmS32S8;
+        // LaunchGemm* prefers cuBLASLt IMMA then scalar device tiles.
+        backend.gemm_s8s8 = &matmul_v4::cuda::LaunchGemmS8S8;
+        backend.gemm_s32s8 = &matmul_v4::cuda::LaunchGemmS32S8;
         break;
     case Kind::HIP:
         backend.gemm_s8s8 = &matmul_v4::hip::TryLaunchLtMfmaGemmS8S8;

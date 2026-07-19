@@ -31,11 +31,13 @@
 // NVIDIA backend for MatMul v4.4 ENC-DR-LT ("MatExpand") mining.
 //
 // Hot path (when a calibrated CUDA device is present):
- //   persistent device-resident loop over MatExpand → project → combine, with
- //   CUDA-graph replay of the stable GEMM stages (G*W, Y*H, U*A, Bhat*V).
- //   Cross-call buffer reuse; per-nonce H2D is limited to the thin W panel
- //   (and a one-shot template upload of G/H/U/V). Digest hashing stays on
- //   host after a small Chat D2H.
+ //   persistent device-resident loop over MatExpand → project → combine.
+ //   When IsLtImmaGemmAvailable(), s8xs8 stages (G*W, U*Ahat, Bhat*V) use
+ //   cuBLASLt CUBLAS_COMPUTE_32I IMMA on resident device pointers; s32xs8
+ //   (Y*H) stays scalar DeviceGemmS32S8Tiled (no dedicated IMMA recipe).
+ //   When IMMA declines, scalar tiled DeviceGemm* + CUDA-graph replay serve
+ //   the same buffers — never labeled IMMA. Digest hashing stays on host after
+ //   Chat D2H (honest gap: device-side SHA256d of Chat is not wired yet).
  //
  // Fail-closed fallback:
  //   host ExactGemm* / WindowSketchMinerLT (bit-exact). That host path is the
@@ -286,6 +288,7 @@ struct LtCudaResidentPool {
     uint256 template_hash{};
     bool template_bound{false};
     bool graphs_ready{false};
+    bool imma_s8s8{false};
 
     // Template-resident
     int8_t* dG{nullptr};
@@ -341,6 +344,7 @@ struct LtCudaResidentPool {
         gemm_s8l_bytes = gemm_s8r_bytes = gemm_s32l_bytes = gemm_out_bytes = 0;
         if (stream) { cudaStreamDestroy(stream); stream = nullptr; }
         template_bound = false;
+        imma_s8s8 = false;
         n = m = w = 0;
         device = -1;
     }
@@ -409,62 +413,55 @@ struct LtCudaResidentPool {
         return true;
     }
 
-    [[nodiscard]] bool CaptureGraphs()
+    [[nodiscard]] bool CaptureGraphsScalar()
     {
         ReleaseGraphs();
         const dim3 block(16, 16, 1);
-        // MatExpand: Y = G(n,n)*W(n,w); B32 = Y(n,w)*H(w,n)
         {
             const dim3 grid_y((w + block.x - 1) / block.x, (n + block.y - 1) / block.y, 1);
             const dim3 grid_b((n + block.x - 1) / block.x, (n + block.y - 1) / block.y, 1);
-            if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal) != cudaSuccess) {
-                return false;
-            }
-            DeviceGemmS8S8Tiled<<<grid_y, block, 0, stream>>>(dG, dW, dY,
-                static_cast<int>(n), static_cast<int>(w), static_cast<int>(n));
-            DeviceGemmS32S8Tiled<<<grid_b, block, 0, stream>>>(dY, dH, dB32,
-                static_cast<int>(n), static_cast<int>(n), static_cast<int>(w));
-            if (cudaStreamEndCapture(stream, &matexpand_graph) != cudaSuccess) {
-                matexpand_graph = nullptr;
-                return false;
-            }
-            if (cudaGraphInstantiate(&matexpand_exec, matexpand_graph, nullptr, nullptr, 0) !=
-                cudaSuccess) {
-                ReleaseGraphs();
-                return false;
-            }
+            if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal) != cudaSuccess) return false;
+            DeviceGemmS8S8Tiled<<<grid_y, block, 0, stream>>>(dG, dW, dY, (int)n, (int)w, (int)n);
+            DeviceGemmS32S8Tiled<<<grid_b, block, 0, stream>>>(dY, dH, dB32, (int)n, (int)n, (int)w);
+            if (cudaStreamEndCapture(stream, &matexpand_graph) != cudaSuccess) { matexpand_graph = nullptr; return false; }
+            if (cudaGraphInstantiate(&matexpand_exec, matexpand_graph, nullptr, nullptr, 0) != cudaSuccess) { ReleaseGraphs(); return false; }
         }
-        // Project right: Q = Bhat(n,n)*V(n,m)
         {
             const dim3 grid_q((m + block.x - 1) / block.x, (n + block.y - 1) / block.y, 1);
-            if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal) != cudaSuccess) {
-                ReleaseGraphs();
-                return false;
-            }
-            DeviceGemmS8S8Tiled<<<grid_q, block, 0, stream>>>(dBhat, dV, dQ,
-                static_cast<int>(n), static_cast<int>(m), static_cast<int>(n));
-            if (cudaStreamEndCapture(stream, &project_right_graph) != cudaSuccess) {
-                project_right_graph = nullptr;
-                ReleaseGraphs();
-                return false;
-            }
-            if (cudaGraphInstantiate(&project_right_exec, project_right_graph, nullptr, nullptr, 0) !=
-                cudaSuccess) {
-                ReleaseGraphs();
-                return false;
-            }
+            if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal) != cudaSuccess) { ReleaseGraphs(); return false; }
+            DeviceGemmS8S8Tiled<<<grid_q, block, 0, stream>>>(dBhat, dV, dQ, (int)n, (int)m, (int)n);
+            if (cudaStreamEndCapture(stream, &project_right_graph) != cudaSuccess) { project_right_graph = nullptr; ReleaseGraphs(); return false; }
+            if (cudaGraphInstantiate(&project_right_exec, project_right_graph, nullptr, nullptr, 0) != cudaSuccess) { ReleaseGraphs(); return false; }
         }
         graphs_ready = true;
         return true;
+    }
+
+    [[nodiscard]] bool LaunchMatExpandImma()
+    {
+        if (!TryLaunchLtImmaGemmS8S8Device(dG, dW, dY, n, w, n, stream)) return false;
+        const dim3 block(16, 16, 1);
+        const dim3 grid_b((n + block.x - 1) / block.x, (n + block.y - 1) / block.y, 1);
+        DeviceGemmS32S8Tiled<<<grid_b, block, 0, stream>>>(dY, dH, dB32, (int)n, (int)n, (int)w);
+        return cudaGetLastError() == cudaSuccess;
+    }
+
+    [[nodiscard]] bool LaunchProjectRightImma()
+    {
+        return TryLaunchLtImmaGemmS8S8Device(dBhat, dV, dQ, n, m, n, stream);
+    }
+
+    [[nodiscard]] bool LaunchProjectLeftImma()
+    {
+        return TryLaunchLtImmaGemmS8S8Device(dU, dAhat, dP, m, n, n, stream);
     }
 
     [[nodiscard]] bool BindTemplate(const CBlockHeader& tmpl, uint32_t n_in, uint32_t m_in)
     {
         if (!EnsureDims(n_in, m_in)) return false;
         const uint256 th = matmul::v4::ComputeTemplateHash(tmpl);
-        if (template_bound && template_hash == th && graphs_ready) {
-            return true;
-        }
+        const bool want_imma = IsLtImmaGemmAvailable();
+        if (template_bound && template_hash == th && imma_s8s8 == want_imma && (imma_s8s8 || graphs_ready)) return true;
 
         namespace bx = matmul::v4::bmx4;
         const uint256 seed_g = DeriveTaggedSeed(kMatExpandGTag, sizeof(kMatExpandGTag) - 1, th);
@@ -490,50 +487,67 @@ struct LtCudaResidentPool {
         if (cudaMemcpyAsync(dU, U.data(), mn, cudaMemcpyHostToDevice, stream) != cudaSuccess) return false;
         if (cudaMemcpyAsync(dV, V.data(), nm, cudaMemcpyHostToDevice, stream) != cudaSuccess) return false;
 
-        // Capture graphs AFTER template buffers are allocated (pointer-stable).
-        if (!CaptureGraphs()) return false;
+        imma_s8s8 = want_imma;
+        if (imma_s8s8) {
+            ReleaseGraphs();
+            if (!LaunchMatExpandImma()) {
+                imma_s8s8 = false;
+                if (!CaptureGraphsScalar()) return false;
+                if (cudaGraphLaunch(matexpand_exec, stream) != cudaSuccess) return false;
+            }
+        } else {
+            if (!CaptureGraphsScalar()) return false;
+            if (cudaGraphLaunch(matexpand_exec, stream) != cudaSuccess) return false;
+        }
 
-        // MatExpand A on device (graph), Extract → dAhat, then P = U*Ahat.
-        if (cudaGraphLaunch(matexpand_exec, stream) != cudaSuccess) return false;
         const uint256 prf_a = matmul::v4::lt::DeriveMatExpandPrfKey(seed_wa);
         uint32_t kw[8];
         for (int t = 0; t < 8; ++t) kw[t] = ReadLE32(prf_a.data() + static_cast<size_t>(t) * 4);
-        const size_t nn_u = nn;
         const int extract_threads = 256;
-        const int extract_blocks = static_cast<int>((nn_u + extract_threads - 1) / extract_threads);
+        const int extract_blocks = static_cast<int>((nn + extract_threads - 1) / extract_threads);
         DeviceExtractDequantMatExpand<<<extract_blocks, extract_threads, 0, stream>>>(
             dB32, dAhat, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
         if (cudaGetLastError() != cudaSuccess) return false;
 
-        const dim3 block(16, 16, 1);
-        const dim3 grid_p((n + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
-        DeviceGemmS8S8Tiled<<<grid_p, block, 0, stream>>>(dU, dAhat, dP,
-            static_cast<int>(m), static_cast<int>(n), static_cast<int>(n));
-        if (cudaGetLastError() != cudaSuccess) return false;
+        if (imma_s8s8) {
+            if (!LaunchProjectLeftImma()) {
+                imma_s8s8 = false;
+                const dim3 block(16, 16, 1);
+                const dim3 grid_p((n + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
+                DeviceGemmS8S8Tiled<<<grid_p, block, 0, stream>>>(dU, dAhat, dP, (int)m, (int)n, (int)n);
+                if (cudaGetLastError() != cudaSuccess) return false;
+                if (!graphs_ready && !CaptureGraphsScalar()) return false;
+            }
+        } else {
+            const dim3 block(16, 16, 1);
+            const dim3 grid_p((n + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
+            DeviceGemmS8S8Tiled<<<grid_p, block, 0, stream>>>(dU, dAhat, dP, (int)m, (int)n, (int)n);
+            if (cudaGetLastError() != cudaSuccess) return false;
+        }
         if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
-
         template_hash = th;
         template_bound = true;
         return true;
     }
 
-    // One nonce: H2D W → MatExpand graph → Extract → project-right graph → combine.
-    // Chat returned on host (digest hashing remains host-side).
     [[nodiscard]] bool MineOneNonce(const CBlockHeader& header,
                                     std::vector<matmul::int8_field::Fq>& chat_out)
     {
-        if (!template_bound || !graphs_ready) return false;
+        if (!template_bound) return false;
+        if (!imma_s8s8 && !graphs_ready) return false;
         if (matmul::v4::ComputeTemplateHash(header) != template_hash) return false;
 
         const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
         const uint256 seed_w = DeriveTaggedSeed(kMatExpandWTag, sizeof(kMatExpandWTag) - 1, header_hash);
-        const std::vector<int8_t> W =
-            matmul::v4::bmx4::ExpandProjectorBMX4C(seed_w, n, w);
+        const std::vector<int8_t> W = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_w, n, w);
         const size_t nw = static_cast<size_t>(n) * w;
-        if (cudaMemcpyAsync(dW, W.data(), nw, cudaMemcpyHostToDevice, stream) != cudaSuccess) {
-            return false;
+        if (cudaMemcpyAsync(dW, W.data(), nw, cudaMemcpyHostToDevice, stream) != cudaSuccess) return false;
+
+        if (imma_s8s8) {
+            if (!LaunchMatExpandImma()) return false;
+        } else {
+            if (cudaGraphLaunch(matexpand_exec, stream) != cudaSuccess) return false;
         }
-        if (cudaGraphLaunch(matexpand_exec, stream) != cudaSuccess) return false;
 
         const uint256 prf = matmul::v4::lt::DeriveMatExpandPrfKey(seed_w);
         uint32_t kw[8];
@@ -545,20 +559,20 @@ struct LtCudaResidentPool {
             dB32, dBhat, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
         if (cudaGetLastError() != cudaSuccess) return false;
 
-        if (cudaGraphLaunch(project_right_exec, stream) != cudaSuccess) return false;
+        if (imma_s8s8) {
+            if (!LaunchProjectRightImma()) return false;
+        } else {
+            if (cudaGraphLaunch(project_right_exec, stream) != cudaSuccess) return false;
+        }
 
         const dim3 block(16, 16, 1);
         const dim3 grid_c((m + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
-        DeviceCombineModQ<<<grid_c, block, 0, stream>>>(dP, dQ, dChat,
-            static_cast<int>(n), static_cast<int>(m));
+        DeviceCombineModQ<<<grid_c, block, 0, stream>>>(dP, dQ, dChat, (int)n, (int)m);
         if (cudaGetLastError() != cudaSuccess) return false;
 
         chat_out.assign(static_cast<size_t>(m) * m, 0);
-        if (cudaMemcpyAsync(chat_out.data(), dChat,
-                            static_cast<size_t>(m) * m * sizeof(uint64_t),
-                            cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
-            return false;
-        }
+        if (cudaMemcpyAsync(chat_out.data(), dChat, static_cast<size_t>(m) * m * sizeof(uint64_t),
+                            cudaMemcpyDeviceToHost, stream) != cudaSuccess) return false;
         return cudaStreamSynchronize(stream) == cudaSuccess;
     }
 };
@@ -634,10 +648,16 @@ LtCudaResidentPool& Pool()
 }
 
 thread_local bool g_lt_device_gemm_failed = false;
+thread_local bool g_lt_last_s8s8_imma = false;
 
 bool BackendGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
                      uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
 {
+    if (TryLaunchLtImmaGemmS8S8(L, R, rows, inner, cols, out)) {
+        g_lt_last_s8s8_imma = true;
+        return true;
+    }
+    g_lt_last_s8s8_imma = false;
     if (CudaOkLaunchGemmS8S8(L, R, rows, inner, cols, out)) return true;
     g_lt_device_gemm_failed = true;
     return false;
@@ -646,6 +666,7 @@ bool BackendGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
 bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
                       uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
 {
+    if (TryLaunchLtImmaGemmS32S8(L, R, rows, inner, cols, out)) return true;
     if (CudaOkLaunchGemmS32S8(L, R, rows, inner, cols, out)) return true;
     g_lt_device_gemm_failed = true;
     return false;
@@ -668,8 +689,14 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
 
         const std::vector<int32_t> cpu_s8s8 = matmul::v4::lt::ExactGemmS8S8(left, right, kDim, kDim, kDim);
         std::vector<int32_t> gpu_s8s8;
-        if (!CudaOkLaunchGemmS8S8(left, right, kDim, kDim, kDim, gpu_s8s8) || gpu_s8s8 != cpu_s8s8) {
-            return;
+        bool s8_ok = false;
+        if (IsLtImmaGemmAvailable()) {
+            s8_ok = TryLaunchLtImmaGemmS8S8(left, right, kDim, kDim, kDim, gpu_s8s8) && gpu_s8s8 == cpu_s8s8;
+        }
+        if (!s8_ok) {
+            if (!CudaOkLaunchGemmS8S8(left, right, kDim, kDim, kDim, gpu_s8s8) || gpu_s8s8 != cpu_s8s8) {
+                return;
+            }
         }
 
         const std::vector<int32_t> cpu_s32s8 = matmul::v4::lt::ExactGemmS32S8(mid, right, kDim, kDim, kDim);
@@ -784,8 +811,10 @@ bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& 
                     std::vector<int32_t>& out)
 {
     if (TryLaunchLtImmaGemmS8S8(left, right, rows, k, cols, out)) {
+        g_lt_last_s8s8_imma = true;
         return true;
     }
+    g_lt_last_s8s8_imma = false;
     return CudaOkLaunchGemmS8S8(left, right, rows, k, cols, out);
 }
 
@@ -835,6 +864,11 @@ bool ComputeDigestsOnlyLTCuda(const CBlockHeader& tmpl, uint32_t n,
     }
 
     return MineHostExactFallback(tmpl, n, nonces, count, /*try_device_gemms=*/false, out);
+}
+
+bool LtLastS8S8UsedImma()
+{
+    return g_lt_last_s8s8_imma;
 }
 
 } // namespace matmul_v4::cuda

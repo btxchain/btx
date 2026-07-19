@@ -24,11 +24,28 @@ bool IsMatMulLTCudaAvailable()
     return false;
 }
 
+bool LaunchGemmS8S8(const std::vector<int8_t>&, const std::vector<int8_t>&,
+                    uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
+{
+    return false;
+}
+
+bool LaunchGemmS32S8(const std::vector<int32_t>&, const std::vector<int8_t>&,
+                     uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
+{
+    return false;
+}
+
 bool ComputeDigestsOnlyLTCuda(const CBlockHeader& /*tmpl*/, uint32_t /*n*/,
                               const uint64_t* /*nonces*/, size_t /*count*/,
                               std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
 {
     out.clear();
+    return false;
+}
+
+bool LtLastS8S8UsedImma()
+{
     return false;
 }
 

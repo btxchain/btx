@@ -22,10 +22,9 @@ class CBlockHeader;
 // When a CUDA device is present and the one-time bit-identity self-test
 // passes, ComputeDigestsOnlyLTCuda runs a persistent device-resident loop:
 //   MatExpand (G*W, Y*H) → ExtractDequant → project (Bhat*V) → F_q combine,
-// with CUDA-graph replay of the stable GEMM stages and cross-call buffer
-// reuse (per-nonce H2D limited to the thin W panel). Host ExactGemm* /
-// WindowSketchMinerLT is the fail-closed fallback when the device path
-// declines — not the complete accelerator.
+// s8xs8 prefers cuBLASLt IMMA when self-qualified; s32xs8 / IMMA decline use
+// scalar DeviceGemm* (never labeled IMMA). Host ExactGemm is fail-closed
+// fallback. Digest hashing remains host-side after Chat D2H.
 //
 // Linker stub when BTX_ENABLE_CUDA is off.
 // ---------------------------------------------------------------------------
@@ -68,6 +67,9 @@ namespace matmul_v4::cuda {
 [[nodiscard]] bool ComputeDigestsOnlyLTCuda(const CBlockHeader& tmpl, uint32_t n,
                                             const uint64_t* nonces, size_t count,
                                             std::vector<matmul::v4::lt::DigestOnlyResultLT>& out);
+
+/** True iff most recent LaunchGemmS8S8 / BackendGemmS8S8 used cuBLASLt IMMA. */
+[[nodiscard]] bool LtLastS8S8UsedImma();
 
 } // namespace matmul_v4::cuda
 

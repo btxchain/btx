@@ -36,6 +36,17 @@
 //       and qualified, IsGroupedMxfp4TensorKernelLinked() is false and callers
 //       transparently use path (1).
 //
+// PTX / arch split (PR #89 silicon comments — keep builds honest):
+//   * sm_120 / sm_120a (consumer Blackwell, RTX 5090): hand PTX `mxf4` /
+//     mma.sync.mxf8f6f4 recipes target consumer ISA; may assemble only under
+//     sm_120a.
+//   * sm_100 / sm_100a (datacenter Blackwell, B200): rejects consumer mxf4 PTX;
+//     needs a separate sm_100a-qualified CUTLASS/tcgen05 recipe.
+//   * cuBLASLt mxf4: on current toolkits sm_100 and sm_120 report **no
+//     algorithm** — fail closed for tensor advertising (used_tensor_path stays
+//     false); portable exact path (1) remains the exact fallback. Hand-written
+//     scalar decode is optional and MUST NOT set used_tensor_path.
+//
 // Contract (exactness), enforced by construction in path (1) and by
 // qualification for path (2):
 //   * No fast accumulation, stochastic rounding, TF32, or approximate scales.
