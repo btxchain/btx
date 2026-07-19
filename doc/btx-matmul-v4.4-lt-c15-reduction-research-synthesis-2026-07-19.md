@@ -67,6 +67,7 @@ not as a ChaCha-PRF break and not as MatExpand amortization.
 | [`doc/btx-matmul-v4.4-lt-c15-reduction-drafts-2026-07-19.md`](btx-matmul-v4.4-lt-c15-reduction-drafts-2026-07-19.md) | Sketches A–E + explicit GAP lists |
 | [`doc/btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md`](btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md) | C-15 hardness vs ASERT/FMM efficiency (orthogonal) |
 | [`doc/btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md`](btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md) | Mant/Scale lane-XOR → ExtractStruct |
+| [`doc/btx-matmul-v4.4-lt-c15-qstar-i1-amortization-game-2026-07-19.md`](btx-matmul-v4.4-lt-c15-qstar-i1-amortization-game-2026-07-19.md) | Wave 3 Gap #9: Q*/I1′ direct-sum amortization game (heuristic) |
 | [`doc/btx-matmul-v4.4-lt-c15-prereview-synthesis-2026-07-19.md`](btx-matmul-v4.4-lt-c15-prereview-synthesis-2026-07-19.md) | Dual-panel pre-review (empirical pillars) |
 | `/tmp/c15_wave1_harden_requests.md` | Accumulated packet harden requests (Wave 1) |
 
@@ -112,14 +113,14 @@ raise height.*
 |---|---|---|---|
 | **1** | Pin break modes of `BTX-C15-NonCollapse-v1` | Packet wording: structured-surrogate FAIL vs full-digest FAIL both count as assumption breaks | GAP-D1; harden log |
 | **2** | Formalize `Extract-Nonlinearity-v1` + PRF hybrid under MatExpand nonce packing | Stated lemma + hybrid outline (related-nonce absorbed in ExtractStruct); quantitative agreement ⇒ Adv map | GAP-A2/A3; related-nonce note |
-| **3** | Taxonomy of “linear Freivalds rewrite” beyond affine/shared-φ | Checklist extension + oracle for each subclass; mark heuristic vs theorem | GAP-B1; A3/A5 checklist |
+| **3** | Taxonomy of “linear Freivalds rewrite” beyond affine/shared-φ | **Wave-3 DONE (doc):** `contrib/matmul-c15-reviewer-kit/reduction-attack-checklist.md` §LFR (LFR-0..11) + heuristic/theorem marks + oracles; does **not** close C-15 / Sketch B | GAP-B1; A3/A5 checklist |
 | **4** | Separate MENC-Lin vs MENC-Unres vs MENC-Cubic in packet language | Explicit labels so Lin PASS ≠ Unres PASS; sketch-floor claims not mis-attributed to Expand | FG survey §3; harden log |
 | **5** | Related-nonce firm vector pack | ≥32 identity tuples + B32 Δ-collision negative control on small grid | Related-nonce §4; checklist A7 |
 | **6** | Spectral / approx-`B̂` Freivalds forgery probes | Empirical SVD/CCA / multi-probe residual campaign at `n∈{64,256}`; report only if §0.1 win | GAP-B3; crypto survey §6.3 |
 | **7** | Non-reduction annex polish | Packet one-pager: “LT-C15 does not follow from SETH/OV/APSP/3SUM/BMM/ω/KW/PRF/Freivalds” pointing here | FG survey §6; harden log |
 | **8** | ASERT vs HonestMAC operator hygiene | Tournament baseline = fastest known exact; G5 orthogonal to FMM; no silicon invention | ASERT/FMM calibration |
-| **9** | Multi-instance / I1′ direct-sum *shape* (not BRSV citation) | Explicit amortization game statement for Q*/Phase A skinny grind — admit heuristic if unproved | Crypto survey §3; GAP-D8 |
-| **10** | Optional consensus redesign (KW/transcript) | **Out of scope** for Wave 2/3 unless product fork; document as design fork only | Sketch C; obstructions §5 |
+| **9** | Multi-instance / I1′ direct-sum *shape* (not BRSV citation) | **DONE (Wave 3):** explicit game in `doc/btx-matmul-v4.4-lt-c15-qstar-i1-amortization-game-2026-07-19.md` — heuristic / unproved; packet §3 I1-D + §6.1 link | Crypto survey §3; GAP-D8 |
+| **10** | Optional consensus redesign (KW/transcript) | **SKIPPED** (Wave 3) — out of scope unless product fork | Sketch C; obstructions §5 |
 
 **Explicitly not scheduled as “prove C-15”:** reductions to SETH/OV/KW/cuPOW
 without embeddings (GAP-D3–D6 remain open research, not deliverable theorems).

@@ -134,8 +134,12 @@ FAIL into a primitive/lemma break.
    with error below Freivalds soundness — typically via an affine entrywise
    model `B̂[i,j] ≈ α·B32[i,j] + β_{i,j}` (Sketch A class) or a shared-φ
    spectral residue of rank `≤ w`.
-   - **GAP-B1:** Classify *all* linear rewrites; currently only the affine /
-     shared-φ subclass is written.
+   - **GAP-B1:** Classify *all* linear rewrites beyond affine / shared-φ.
+     **Wave-3 partial close:** firm taxonomy + per-subclass oracles (heuristic
+     vs theorem) live in
+     `contrib/matmul-c15-reviewer-kit/reduction-attack-checklist.md` §LFR
+     (LFR-0..LFR-11). Taxonomy ≠ proof that the list is exhaustive or that
+     Sketch B holds.
 3. Affine / shared-φ models imply `B̂` retains effective rank `≲ w` correlated
    with `GWH` (Simon-style φ∘(low-rank); lattice/spectral pre-review).
 4. Full-width position salt + per-cell PRF is argued to destroy shared-φ /
@@ -154,7 +158,7 @@ Unrestricted (nonlinear) adversaries remain INCONCLUSIVE (synthesis).
 
 | ID | Gap |
 |---|---|
-| **GAP-B1** | Incomplete taxonomy of “linear Freivalds rewrite” beyond affine/shared-φ. |
+| **GAP-B1** | Taxonomy of “linear Freivalds rewrite” beyond affine/shared-φ — **checklist §LFR landed** (heuristic vs theorem per subclass); exhaustiveness / Sketch B proof still open. |
 | **GAP-B2** | Full-rank / no-usable-residue after Extract is a **heuristic**, not proven. |
 | **GAP-B3** | Spectral residue could be high-rank yet still Freivalds-forgery-friendly (approx-`B̂`). |
 | **GAP-B4** | `U`/`V` rank-transparency noted; no formal lemma that projectors cannot *create* usable structure. |
@@ -310,7 +314,7 @@ assumption.
 | **GAP-D5** | No distributional reduction to cuPOW transcript unpredictability. |
 | **GAP-D6** | No SIS/LWE/spectral reduction for post-Extract residue. |
 | **GAP-D7** | Unrestricted adversary class not folded into v1 (may need `…-unrestricted-v1`). |
-| **GAP-D8** | I1′ / batch algebra / Phase-B seal are separate surfaces (packet §§3–5). |
+| **GAP-D8** | I1′ / batch algebra / Phase-B seal are separate surfaces (packet §§3–5). Multi-instance *shape* stated as heuristic game (Wave 3 Gap #9: `…-qstar-i1-amortization-game-…`); not a BRSV reduction. |
 
 **Status:** best intermediate naming for firms; still **unreduced**. **C-15 not closed.**
 
