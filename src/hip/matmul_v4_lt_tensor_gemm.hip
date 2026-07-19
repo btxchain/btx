@@ -13,12 +13,13 @@
 #include <string>
 #include <vector>
 
-// HIP LT ExactGemm preference layer.
+// HIP LT ExactGemm preference layer (MI300/MI350 class — gfx942 / gfx950).
 //
 // Two distinct paths (never conflate labels):
-//   1) MFMA / library path — hipBLASLt (preferred) or rocBLAS s8×s8→s32 with
-//      INT32 accumulate. IsLtMfmaGemmAvailable() is true ONLY after this path
-//      executes and matches ExactGemmS8S8 bit-for-bit.
+//   1) MFMA / library path — hipBLASLt HIPBLAS_COMPUTE_32I (preferred) or
+//      rocBLAS gemm_ex i8×i8→i32. IsLtMfmaGemmAvailable() is true ONLY after
+//      this path executes and matches ExactGemmS8S8 bit-for-bit on square +
+//      MatExpand panel shapes.
 //   2) Device ALU — portable scalar int accumulate kernel. Advertised only as
 //      IsLtDeviceAluGemmAvailable() / TryLaunchLtDeviceAluGemm*. Never MFMA.
 //
@@ -31,7 +32,8 @@
 #include <hipblaslt/hipblaslt.h>
 #define BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT 1
 #endif
-#elif defined(BTX_HAVE_ROCBLAS)
+#endif
+#if !defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT) && defined(BTX_HAVE_ROCBLAS)
 #if defined(__has_include) && __has_include(<rocblas/rocblas.h>)
 #include <rocblas/rocblas.h>
 #define BTX_HIP_LT_TENSOR_HAVE_ROCBLAS 1
@@ -56,6 +58,86 @@ struct DeviceBuffer {
         return hipMalloc(&ptr, bytes) == hipSuccess;
     }
 };
+
+/** Persistent library handles / workspace for MFMA ExactGemm. Host launches
+ *  use per-call DeviceBuffer; resident MatExpand passes device pointers. */
+struct MfmaLibPool {
+    std::mutex mu;
+
+#if defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT)
+    hipblasLtHandle_t lt{nullptr};
+    void* workspace{nullptr};
+    size_t workspace_bytes{0};
+#elif defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
+    rocblas_handle roc{nullptr};
+#endif
+    bool ready{false};
+
+    ~MfmaLibPool() { Release(); }
+
+    void Release()
+    {
+#if defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT)
+        if (workspace) {
+            hipFree(workspace);
+            workspace = nullptr;
+            workspace_bytes = 0;
+        }
+        if (lt) {
+            hipblasLtDestroy(lt);
+            lt = nullptr;
+        }
+#elif defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
+        if (roc) {
+            rocblas_destroy_handle(roc);
+            roc = nullptr;
+        }
+#endif
+        ready = false;
+    }
+
+    [[nodiscard]] bool EnsureHandles(size_t need_workspace)
+    {
+#if defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT)
+        if (!ready) {
+            if (hipblasLtCreate(&lt) != HIPBLAS_STATUS_SUCCESS) {
+                lt = nullptr;
+                return false;
+            }
+            ready = true;
+        }
+        if (need_workspace <= workspace_bytes) return true;
+        if (workspace) {
+            hipFree(workspace);
+            workspace = nullptr;
+            workspace_bytes = 0;
+        }
+        if (need_workspace == 0) return true;
+        if (hipMalloc(&workspace, need_workspace) != hipSuccess) return false;
+        workspace_bytes = need_workspace;
+        return true;
+#elif defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
+        (void)need_workspace;
+        if (!ready) {
+            if (rocblas_create_handle(&roc) != rocblas_status_success) {
+                roc = nullptr;
+                return false;
+            }
+            ready = true;
+        }
+        return true;
+#else
+        (void)need_workspace;
+        return false;
+#endif
+    }
+};
+
+MfmaLibPool& MfmaPool()
+{
+    static MfmaLibPool pool;
+    return pool;
+}
 
 __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, int M, int N, int K)
 {
@@ -116,14 +198,18 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
 
 #if defined(BTX_HIP_LT_TENSOR_HAVE_HIPBLASLT)
 
-[[nodiscard]] bool TryHipBlasLtS8S8(const int8_t* dA, const int8_t* dB, int32_t* dC,
-                                    uint32_t M, uint32_t N, uint32_t K, std::string& error)
+[[nodiscard]] bool RunHipBlasLtS8S8(const int8_t* dA, const int8_t* dB, int32_t* dC,
+                                    uint32_t M, uint32_t N, uint32_t K, hipStream_t stream,
+                                    std::string& error)
 {
-    hipblasLtHandle_t lt = nullptr;
-    if (hipblasLtCreate(&lt) != HIPBLAS_STATUS_SUCCESS) {
-        error = "hipblasLtCreate failed";
+    constexpr size_t kDefaultWorkspace = 8ull << 20;
+    auto& pool = MfmaPool();
+    std::lock_guard<std::mutex> lock(pool.mu);
+    if (!pool.EnsureHandles(kDefaultWorkspace)) {
+        error = "hipblasLtCreate / workspace alloc failed";
         return false;
     }
+
     hipblasLtMatmulDesc_t op_desc = nullptr;
     hipblasLtMatrixLayout_t a_layout = nullptr;
     hipblasLtMatrixLayout_t b_layout = nullptr;
@@ -136,7 +222,6 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
         if (b_layout) hipblasLtMatrixLayoutDestroy(b_layout);
         if (a_layout) hipblasLtMatrixLayoutDestroy(a_layout);
         if (op_desc) hipblasLtMatmulDescDestroy(op_desc);
-        hipblasLtDestroy(lt);
     };
 
     if (hipblasLtMatmulDescCreate(&op_desc, HIPBLAS_COMPUTE_32I, HIP_R_32I) != HIPBLAS_STATUS_SUCCESS) {
@@ -170,9 +255,12 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
         cleanup();
         return false;
     }
+    hipblasLtMatmulPreferenceSetAttribute(preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                          &pool.workspace_bytes, sizeof(pool.workspace_bytes));
+
     hipblasLtMatmulHeuristicResult_t heuristic{};
     int returned = 0;
-    if (hipblasLtMatmulAlgoGetHeuristic(lt, op_desc, a_layout, b_layout, c_layout, c_layout, preference, 1,
+    if (hipblasLtMatmulAlgoGetHeuristic(pool.lt, op_desc, a_layout, b_layout, c_layout, c_layout, preference, 1,
                                         &heuristic, &returned) != HIPBLAS_STATUS_SUCCESS ||
         returned < 1) {
         error = "no hipBLASLt s8xs8->s32 heuristic";
@@ -181,8 +269,8 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
     }
     const int32_t alpha = 1;
     const int32_t beta = 0;
-    if (hipblasLtMatmul(lt, op_desc, &alpha, dA, a_layout, dB, b_layout, &beta, dC, c_layout, dC, c_layout,
-                        &heuristic.algo, nullptr, 0, nullptr) != HIPBLAS_STATUS_SUCCESS) {
+    if (hipblasLtMatmul(pool.lt, op_desc, &alpha, dA, a_layout, dB, b_layout, &beta, dC, c_layout, dC, c_layout,
+                        &heuristic.algo, pool.workspace, pool.workspace_bytes, stream) != HIPBLAS_STATUS_SUCCESS) {
         error = "hipblasLtMatmul s8xs8->s32 failed";
         cleanup();
         return false;
@@ -193,26 +281,33 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
 
 #elif defined(BTX_HIP_LT_TENSOR_HAVE_ROCBLAS)
 
-[[nodiscard]] bool TryRocBlasS8S8(const int8_t* dA, const int8_t* dB, int32_t* dC,
-                                 uint32_t M, uint32_t N, uint32_t K, std::string& error)
+[[nodiscard]] bool RunRocBlasS8S8(const int8_t* dA, const int8_t* dB, int32_t* dC,
+                                  uint32_t M, uint32_t N, uint32_t K, hipStream_t stream,
+                                  std::string& error)
 {
     // Row-major C = A*B via column-major BLAS: C^T = B^T * A^T.
-    rocblas_handle handle = nullptr;
-    if (rocblas_create_handle(&handle) != rocblas_status_success) {
+    auto& pool = MfmaPool();
+    std::lock_guard<std::mutex> lock(pool.mu);
+    if (!pool.EnsureHandles(0)) {
         error = "rocblas_create_handle failed";
         return false;
+    }
+    if (stream) {
+        if (rocblas_set_stream(pool.roc, stream) != rocblas_status_success) {
+            error = "rocblas_set_stream failed";
+            return false;
+        }
     }
     const int32_t alpha = 1;
     const int32_t beta = 0;
     const rocblas_status st = rocblas_gemm_ex(
-        handle, rocblas_operation_none, rocblas_operation_none,
+        pool.roc, rocblas_operation_none, rocblas_operation_none,
         static_cast<rocblas_int>(N), static_cast<rocblas_int>(M), static_cast<rocblas_int>(K), &alpha,
         dB, rocblas_datatype_i8_r, static_cast<rocblas_int>(N),
         dA, rocblas_datatype_i8_r, static_cast<rocblas_int>(K), &beta,
         dC, rocblas_datatype_i32_r, static_cast<rocblas_int>(N),
         dC, rocblas_datatype_i32_r, static_cast<rocblas_int>(N),
         rocblas_datatype_i32_r, rocblas_gemm_algo_standard, 0, rocblas_gemm_flags_none);
-    rocblas_destroy_handle(handle);
     if (st != rocblas_status_success) {
         error = "rocblas_gemm_ex i8xi8->i32 failed";
         return false;
@@ -220,16 +315,17 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
     return true;
 }
 
-[[nodiscard]] bool TryHipBlasLtS8S8(const int8_t* dA, const int8_t* dB, int32_t* dC,
-                                    uint32_t M, uint32_t N, uint32_t K, std::string& error)
+[[nodiscard]] bool RunHipBlasLtS8S8(const int8_t* dA, const int8_t* dB, int32_t* dC,
+                                    uint32_t M, uint32_t N, uint32_t K, hipStream_t stream,
+                                    std::string& error)
 {
-    return TryRocBlasS8S8(dA, dB, dC, M, N, K, error);
+    return RunRocBlasS8S8(dA, dB, dC, M, N, K, stream, error);
 }
 
 #else
 
-[[nodiscard]] bool TryHipBlasLtS8S8(const int8_t*, const int8_t*, int32_t*,
-                                    uint32_t, uint32_t, uint32_t, std::string& error)
+[[nodiscard]] bool RunHipBlasLtS8S8(const int8_t*, const int8_t*, int32_t*,
+                                    uint32_t, uint32_t, uint32_t, hipStream_t, std::string& error)
 {
     error = "hipBLASLt/rocBLAS not linked";
     return false;
@@ -251,13 +347,14 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
     const size_t lhs_bytes = static_cast<size_t>(rows) * k * sizeof(int8_t);
     const size_t rhs_bytes = static_cast<size_t>(k) * cols * sizeof(int8_t);
     const size_t out_bytes = static_cast<size_t>(rows) * cols * sizeof(int32_t);
+    // Per-call device buffers (like CUDA IMMA host path) — library handle stays pooled.
     DeviceBuffer dA, dB, dD;
     if (!dA.Alloc(lhs_bytes) || !dB.Alloc(rhs_bytes) || !dD.Alloc(out_bytes)) return false;
     if (hipMemcpy(dA.ptr, left.data(), lhs_bytes, hipMemcpyHostToDevice) != hipSuccess) return false;
     if (hipMemcpy(dB.ptr, right.data(), rhs_bytes, hipMemcpyHostToDevice) != hipSuccess) return false;
     std::string error;
-    if (!TryHipBlasLtS8S8(static_cast<const int8_t*>(dA.ptr), static_cast<const int8_t*>(dB.ptr),
-                          static_cast<int32_t*>(dD.ptr), rows, cols, k, error)) {
+    if (!RunHipBlasLtS8S8(static_cast<const int8_t*>(dA.ptr), static_cast<const int8_t*>(dB.ptr),
+                          static_cast<int32_t*>(dD.ptr), rows, cols, k, /*stream=*/nullptr, error)) {
         return false;
     }
     if (hipDeviceSynchronize() != hipSuccess) return false;
@@ -284,6 +381,22 @@ __global__ void DeviceAluGemmS8S8(const int8_t* A, const int8_t* B, int32_t* D, 
         const auto cpu = matmul::v4::lt::ExactGemmS8S8(left, right, kDim, kDim, kDim);
         std::vector<int32_t> gpu;
         if (!LaunchBlasS8S8Host(left, right, kDim, kDim, kDim, gpu) || gpu != cpu) {
+            return;
+        }
+        // MatExpand panel: G (n×n) * W (n×w) with normative kMatExpandPanelW.
+        constexpr uint32_t kN = 64;
+        constexpr uint32_t kW = matmul::v4::lt::kMatExpandPanelW;
+        std::vector<int8_t> G(static_cast<size_t>(kN) * kN);
+        std::vector<int8_t> W(static_cast<size_t>(kN) * kW);
+        for (uint32_t i = 0; i < kN * kN; ++i) {
+            G[i] = matmul::v4::lt::FoldInt32ToEmax48(static_cast<int32_t>(i) * 3 - 17);
+        }
+        for (uint32_t i = 0; i < kN * kW; ++i) {
+            W[i] = matmul::v4::lt::FoldInt32ToEmax48(static_cast<int32_t>(i) * 5 + 9);
+        }
+        const auto cpu_panel = matmul::v4::lt::ExactGemmS8S8(G, W, kN, kN, kW);
+        std::vector<int32_t> gpu_panel;
+        if (!LaunchBlasS8S8Host(G, W, kN, kN, kW, gpu_panel) || gpu_panel != cpu_panel) {
             return;
         }
         ok = true;
@@ -313,9 +426,20 @@ bool TryLaunchLtMfmaGemmS8S8(const std::vector<int8_t>& left, const std::vector<
     return LaunchBlasS8S8Host(left, right, rows, inner, cols, out);
 }
 
+bool TryLaunchLtMfmaGemmS8S8Device(const int8_t* dA, const int8_t* dB, int32_t* dC,
+                                   uint32_t rows, uint32_t cols, uint32_t inner, void* stream)
+{
+    if (dA == nullptr || dB == nullptr || dC == nullptr) return false;
+    if (rows == 0 || cols == 0 || inner == 0) return true;
+    if (!IsLtMfmaGemmAvailable()) return false;
+    std::string error;
+    return RunHipBlasLtS8S8(dA, dB, dC, rows, cols, inner, static_cast<hipStream_t>(stream), error);
+}
+
 bool TryLaunchLtMfmaGemmS32S8(const std::vector<int32_t>&, const std::vector<int8_t>&,
                               uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
 {
+    // No dedicated MFMA s32×s8 recipe — never advertise one.
     return false;
 }
 
