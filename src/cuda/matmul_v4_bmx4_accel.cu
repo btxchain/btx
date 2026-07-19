@@ -696,10 +696,11 @@ size_t UnitScaleBytes(size_t outer, size_t K)
 //     sum stays < 2^21 (<= 36*n at n<=4096/8192), so FP32 accumulation is EXACT
 //     here — the t=24 requirement is on the PROMOTED/COMBINED pipeline, not on
 //     one unit-scale FP4 GEMM. This is the reachable-without-cuBLASLt path.
-//   * MMA.SYNC FAST-PATH (opt-in, BTX_BMX4C_MXF4_MMA_TILE, a real sm_120a /
-//     sm_100a toolchain only): the tensor-core tile using the block-scaled FP4
-//     mma. It is documented and shaped here but is VERIFIABLE ONLY on real
-//     Blackwell silicon (this repo has no CUDA toolchain); M-t24 is its gate.
+//     C6: used_tensor_path stays FALSE for this path.
+//   * cuBLASLt block-scaled mxf4 (when a heuristic exists): the only handwritten-
+//     adjacent path that may set used_tensor_path=true (see RunMxf4Gemm). A
+//     hand-written mma.sync tile is NOT shipped here (the prior always-fail
+//     BTX_BMX4C_MXF4_MMA_TILE stub was removed for honesty).
 //
 // D(FP32, M x N col-major) = A(M x K) * B(K x N), A packed E2M1 K-major
 // (row a: a*K + k), B packed E2M1 K-major (col c: c*K + k) — the same TN operand
@@ -749,48 +750,18 @@ __global__ void Bmx4Mxf4ScalarKernel(const uint8_t* __restrict__ A_packed,
     D[static_cast<size_t>(c) * M + r] = acc;
 }
 
-#if defined(BTX_BMX4C_MXF4_MMA_TILE)
-// Tensor-core FP4 tile using the block-scaled mma. This is the PERFORMANCE path
-// the native tier wants; it is INTENTIONALLY left as a documented integration
-// point rather than fabricated here, because it is VERIFIABLE ONLY on real
-// sm_120a/sm_100a silicon (this repo has no CUDA toolchain) and a subtly-wrong
-// warp/fragment layout must be validated on-device, not asserted blind.
+// Hand-written FP4 GEMM launcher: scalar-decode kernel only.
 //
-// Contract for the integrator (fail-closed by M-t24 either way):
-//   * Tile the (M,N,K) GEMM into m16n8k64 mma fragments. Load A (K-major, row
-//     a: a*K+k) and B (K-major, col c: c*K+k) as e2m1 nibbles into the mma
-//     A/B fragments per the Blackwell fragment map.
-//   * Issue, per k-tile,
-//       mma.sync.aligned.m16n8k64.row.col.kind::mxf8f6f4.block_scale
-//         .scale_vec::1X.f32.e2m1.e2m1.f32.ue8m0
-//         {d0..d3}, {a0..a3}, {b0,b1}, {c0..c3},
-//         scaleA, {bidA, tidA}, scaleB, {bidB, tidB};
-//     with CONSTANT unit UE8M0 scale bytes (0x7F): the E8M0 block exponent is
-//     applied host-side (exponent-masked planes + Bmx4PromoteShiftedKernel), so
-//     the tensor op is a unit-scale e2m1*e2m1->f32 accumulate.
-//   * Store the f32 tile to D (M x N col-major, D[c*M+r]).
-// RunMxf4Qualification (probe 2) validates the fragment/packing map bit-for-bit
-// against an exact host reference and DISABLES the native tier on any mismatch,
-// so an incorrect layout can never mine — it only declines to the INT8 tier.
-bool LaunchMxf4MmaTile(cudaStream_t /*stream*/, const void* /*dA_packed*/,
-                       const void* /*dB_packed*/, float* /*dD*/,
-                       uint32_t /*M*/, uint32_t /*N*/, uint32_t /*K*/, std::string& error)
-{
-    error = "BTX_BMX4C_MXF4_MMA_TILE set but the mma.sync tile is a toolchain "
-            "integration point (validate on sm_120a; see the contract comment)";
-    return false; // fail closed -> INT8 tier
-}
-#endif
-
-// Hand-written FP4 GEMM launcher. Prefers the mma.sync tensor tile on a real
-// Blackwell toolchain (opt-in), else the guaranteed-correct scalar kernel.
-// Returns false on any launch error (caller falls to the INT8 tier).
+// The former BTX_BMX4C_MXF4_MMA_TILE / LaunchMxf4MmaTile stub was removed: it
+// claimed an opt-in tensor path while always returning false. A real
+// mma.sync.mxf8f6f4 tile belongs in a separate qualified TU once sm_100a/120a
+// silicon validates the fragment map; until then this launcher MUST NOT set
+// used_tensor_path. cuBLASLt mxf4 (when a heuristic exists) remains the only
+// path that may set used_tensor_path=true in RunMxf4Gemm.
 //
-// C6 (certification integrity): `used_tensor_path` reports which datapath
-// actually served the GEMM -- true ONLY for the genuine block-scaled FP4 mma
-// tensor tile, false for the scalar-decode kernel (a bit-exact CPU-style
-// per-(r,c) decode-and-accumulate, NOT a tensor path). The caller must not
-// advertise a `native-mxf4` certification marker for a scalar-decode run.
+// C6 (certification integrity): `used_tensor_path` is ALWAYS false here — the
+// scalar-decode kernel is a bit-exact CPU-style per-(r,c) decode-and-accumulate,
+// NOT a tensor path. Callers must not advertise `native-mxf4` for this run.
 bool LaunchMxf4HandwrittenGemm(cudaStream_t stream,
                                const void* dA_packed,
                                const void* dB_packed,
@@ -800,20 +771,6 @@ bool LaunchMxf4HandwrittenGemm(cudaStream_t stream,
                                std::string& error)
 {
     used_tensor_path = false;
-#if defined(BTX_BMX4C_MXF4_MMA_TILE)
-    // Tensor-core path: the block-scaled FP4 mma tile. VERIFIABLE ONLY on real
-    // sm_120a/sm_100a silicon; enabled by the build, gated by M-t24. The tile
-    // loop issues
-    //   mma.sync.aligned.m16n8k64.row.col.kind::mxf8f6f4.block_scale
-    //     .scale_vec::1X.f32.e2m1.e2m1.f32.ue8m0
-    // with constant unit (0x7F) UE8M0 scales (the E8M0 block exponent is applied
-    // host-side, so the operand scale is 2^0). See Bmx4Mxf4MmaTile.
-    const bool tile_ok = LaunchMxf4MmaTile(stream, dA_packed, dB_packed, dD, M, N, K, error);
-    used_tensor_path = tile_ok; // a real tensor tile only when it actually ran
-    return tile_ok;
-#else
-    // Scalar-decode fallback: correct (bit-exact for the committed integer M11
-    // subset) but NOT a tensor path -- leave used_tensor_path = false.
     const dim3 block(16, 16);
     const dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
     Bmx4Mxf4ScalarKernel<<<grid, block, 0, stream>>>(
@@ -825,7 +782,6 @@ bool LaunchMxf4HandwrittenGemm(cudaStream_t stream,
         return false;
     }
     return true;
-#endif
 }
 
 // One block-scaled FP4 GEMM: D(FP32, M x N col-major) = A(M x K) * B(K x N),

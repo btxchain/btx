@@ -11,10 +11,10 @@ Consensus sees only canonical integer sketch bytes. The optimal design is **one 
 | # | Redesign | Status in tree |
 |---|---|---|
 | 1 | Replace 16-GEMM combine with **Karatsuba-9** + fused M61 epilogue | **Done** (CPU + CUDA `Bmx4BuildKaratsubaPlanesKernel` + HIP + Metal) |
-| 2 | **Scale-partitioned grouped MXFP4** projection (total K = n, not 4n) | **Done (exact, software-complete)**: CPU reference + portable exact grouped path (`cuda/matmul_v4_bmx4_cutlass_mxfp4.h`, byte-identical to dense) + CUDA native FP4 tier (hand-written mma / cuBLASLt, M-t24 gated) + INT8 tier. Hardware-gated: CUTLASS tcgen05 grouped tensor kernel (`BTX_BMX4C_CUTLASS_MXFP4`) — software fallback complete |
+| 2 | **Scale-partitioned grouped MXFP4** projection (total K = n, not 4n) | **Done (exact, software-complete)**: CPU reference + portable exact grouped path (`cuda/matmul_v4_bmx4_cutlass_mxfp4.h`, byte-identical to dense) + CUDA native FP4 tier (hand-written scalar / cuBLASLt, M-t24 gated; C6: scalar never sets `used_tensor_path`) + INT8 tier. Hardware-gated: CMake `BTX_BMX4C_CUTLASS_MXFP4` + CUTLASS headers; `IsGroupedMxfp4TensorKernelLinked()` true only after self-qual |
 | 3 | Entire nonce loop **device-resident** | **Done**: real device kernels in `ComputeDigestsBMX4CAccel` (CUDA/HIP/Metal) run projection + Karatsuba-9 combine + limb decompose/fold on-device and are the dispatched hot path (per-digest re-verify + CPU fail-closed fallback); `PersistentSketchMinerBMX4C` triple-buffer is the cross-call host template cache / fallback. Remaining (perf only): bind CUDA graphs to the device stages |
 | 4 | **Stop returning loser payloads** | **Done** — streaming `ComputeSketchDigestFromFq`; no 8 MiB loser alloc; CUDA `ComputeDigestsOnlyBMX4CAccel` drops loser payloads device-side |
-| 5 | Future **FP8 five-limb** combine lane | **CPU reference done (exact)**; planner selects for `"rubin"`. Hardware-gated: device FP8 kernel, CPU fallback complete |
+| 5 | Future **FP8 five-limb** combine lane | **CPU reference done (exact)**; planner selects for `"rubin"`. Device path: fail-closed API (`IsDeviceFp8FiveLimbAvailable`, `LaunchDeviceFp8FiveLimbCombine`) with transparent CPU fallback via `ComputeCombineFp8FiveLimbDeviceOrCpu` — no Rubin silicon headers in default builds |
 
 ## Hardware portfolio (planner)
 
@@ -74,14 +74,17 @@ vendor-tensor-kernel swap that only *replaces* an already-exact software path:
 
 1. **CUDA graphs** bound to the device stages — per-launch overhead only; the
    kernels themselves already run on-device.
-2. **CUTLASS grouped MXFP4** tensor kernel on qualified Blackwell (`BTX_BMX4C_CUTLASS_MXFP4`).
-   Falls back to the portable exact grouped path + CUDA hand-written/INT8 tiers,
-   which are byte-identical to the reference.
-3. **Device FP8 five-limb** behind planner + qualification; the exact CPU
-   five-limb combine is the complete fallback.
-4. **AMD native block-scaled MXFP4** (HIP tier (a)) — gated off pending real MI300/
+2. **CUTLASS grouped MXFP4** tensor kernel on qualified Blackwell (`BTX_BMX4C_CUTLASS_MXFP4`
+   + `BTX_CUTLASS_INCLUDE_DIR`). `IsGroupedMxfp4TensorKernelLinked()` requires real TU
+   headers **and** self-qual; portable exact grouped path is always available.
+3. **Device FP8 five-limb** behind planner + qualification; fail-closed launch +
+   `ComputeCombineFp8FiveLimbDeviceOrCpu` CPU fallback is complete today.
+4. **LT ExactGemm tensor preference** — IMMA (cuBLASLt) / MFMA / Metal TensorOps
+   Try* hooks with bit-exact self-test; scalar/ALU tiles remain the fallback.
+   Metal TensorOps recipe still declines until factored from BMX4C M5 path.
+5. **AMD native block-scaled MXFP4** (HIP tier (a)) — gated off pending real MI300/
    MI355 + ROCm; the INT8 MFMA tier (b) is fully implemented and bit-exact.
-5. B200 / H200 / 5090 / MI350 soak + cost/nonce accounting (measurement, not code).
+6. B200 / H200 / 5090 / MI350 soak + cost/nonce accounting (measurement, not code).
 
 ## Key symbols
 

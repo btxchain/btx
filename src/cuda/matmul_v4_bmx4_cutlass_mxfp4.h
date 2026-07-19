@@ -87,18 +87,17 @@ struct GroupedMxfp4Problem {
     return true;
 }
 
-/** True only when a pinned CUTLASS MXFP4 grouped TENSOR kernel is linked (the
- *  hardware datapath). Default builds return false and use the portable exact
- *  path; the runtime M-t24 + scale-partitioned qualification gates whether the
- *  linked kernel is actually trusted on the present silicon. */
-[[nodiscard]] inline bool IsGroupedMxfp4TensorKernelLinked()
-{
-#if defined(BTX_BMX4C_CUTLASS_MXFP4)
-    return true;
-#else
-    return false;
-#endif
-}
+/** True only when a real CUTLASS MXFP4 grouped TENSOR kernel translation unit
+ *  is compiled (CMake `BTX_BMX4C_CUTLASS_MXFP4=ON` + CUTLASS headers) AND the
+ *  process-local M-t24 / scale-partitioned self-qualification has passed.
+ *  Default builds link a stub that returns false — callers must use the
+ *  portable exact path. Never returns true merely because a CMake flag is set. */
+[[nodiscard]] bool IsGroupedMxfp4TensorKernelLinked();
+
+/** True when the CUTLASS tensor TU was compiled into this binary (headers
+ *  present). Does NOT imply it is trusted — see IsGroupedMxfp4TensorKernelLinked.
+ *  Useful for tests distinguishing "option wired" vs "silicon-qualified". */
+[[nodiscard]] bool IsGroupedMxfp4TensorKernelCompiled();
 
 // ---------------------------------------------------------------------------
 // Portable exact grouped-MXFP4 LEFT projection.

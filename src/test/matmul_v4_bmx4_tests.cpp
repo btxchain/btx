@@ -21,6 +21,8 @@
 //     crossings, E8M0 scale-exactness) so a rounding device fails loudly.
 
 #include <cuda/matmul_v4_bmx4_cutlass_mxfp4.h>
+#include <cuda/matmul_v4_bmx4_fp8_five_limb.h>
+#include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
@@ -38,6 +40,7 @@
 #include <array>
 #include <cstdint>
 #include <set>
+#include <string>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -376,11 +379,64 @@ BOOST_AUTO_TEST_CASE(grouped_mxfp4_header_path_matches_reference)
     BOOST_CHECK_EQUAL(shape_p.K_e[0] + shape_p.K_e[1] + shape_p.K_e[2] + shape_p.K_e[3],
                       expect_total);
 
+    // Default builds: CUTLASS tensor kernel is NOT linked/qualified. Portable
+    // path above is the production datapath (C6: never claim tensor here).
+    BOOST_CHECK(!mxf4::IsGroupedMxfp4TensorKernelLinked());
+    BOOST_CHECK(!mxf4::IsGroupedMxfp4TensorKernelCompiled());
+
     // Invalid dimensions fail closed (not a silent no-op).
     std::vector<int32_t> junk;
     BOOST_CHECK(!mxf4::LaunchGroupedMxfp4Projection(
         mxf4::GroupedMxfp4Orientation::Left, U.data(), mu_a.data(), scale_a.data(),
         /*n=*/n + 1, m, junk, nullptr, err));
+}
+
+BOOST_AUTO_TEST_CASE(fp8_five_limb_device_fail_closed_uses_cpu)
+{
+    // Device FP8 five-limb is unavailable without a qualified Rubin TU; the
+    // CPU path must still produce the exact combine.
+    BOOST_CHECK(!matmul_v4::cuda::IsDeviceFp8FiveLimbAvailable());
+    BOOST_CHECK(!matmul_v4::cuda::IsDeviceFp8FiveLimbCompiled());
+
+    const uint32_t n = kTestDim;
+    uint32_t m = 0;
+    BOOST_REQUIRE(bx::ValidateDimsBMX4C(n, kTileB, m));
+    std::vector<int32_t> P(static_cast<size_t>(m) * n, 3);
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m, -2);
+    const std::vector<::matmul::int8_field::Fq> cpu_ref =
+        bx::ComputeCombineFp8FiveLimbBMX4C(P, Q, n, m);
+
+    std::vector<::matmul::int8_field::Fq> out;
+    bool used_device = true;
+    std::string err;
+    BOOST_REQUIRE(matmul_v4::cuda::ComputeCombineFp8FiveLimbDeviceOrCpu(P, Q, n, m, out, used_device, err));
+    BOOST_CHECK(!used_device);
+    BOOST_CHECK(out == cpu_ref);
+
+    {
+        const bool launched =
+            matmul_v4::cuda::LaunchDeviceFp8FiveLimbCombine(P, Q, n, m, out, err);
+        BOOST_CHECK(!launched);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(lt_tensor_gemm_availability_flags_default_false)
+{
+    // Without CUDA/HIP/Metal silicon + self-qual, tensor preference declines.
+    BOOST_CHECK(!matmul_v4::cuda::IsLtImmaGemmAvailable());
+    BOOST_CHECK(!matmul_v4::hip::IsLtMfmaGemmAvailable());
+    BOOST_CHECK(!matmul_v4::metal::IsLtTensorOpsGemmAvailable());
+
+    std::vector<int8_t> a(16, 1), b(16, 2);
+    std::vector<int32_t> out;
+    {
+        const bool c = matmul_v4::cuda::TryLaunchLtImmaGemmS8S8(a, b, 4, 4, 4, out);
+        const bool h = matmul_v4::hip::TryLaunchLtMfmaGemmS8S8(a, b, 4, 4, 4, out);
+        const bool m = matmul_v4::metal::TryLaunchLtTensorOpsGemmS8S8(a, b, 4, 4, 4, out);
+        BOOST_CHECK(!c);
+        BOOST_CHECK(!h);
+        BOOST_CHECK(!m);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(exact_accel_planner_selects_documented_lanes)
