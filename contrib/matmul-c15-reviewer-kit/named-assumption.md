@@ -23,12 +23,24 @@ checklist, witness ≠ proof):
 No classical PPT adversary wins the §0.1 half-cost / `ε=2⁻⁴⁰` game against
 normative ChaCha20-PRF MatExpand Extract + deep-`m` sketch/combine.
 
+## Break modes (both count)
+
+Per packet §0.2 (GAP-D1 pin), either §0.1 **FAIL** form breaks
+`BTX-C15-NonCollapse-v1`:
+
+| Mode | Meaning |
+|---|---|
+| **Full-digest FAIL** | Accepting digest/seal at `Adv ≥ ε` and MAC `≤ (1−δ)·HonestMAC` |
+| **Structured-surrogate FAIL** | Affine / deg-≤2 Extract surrogate + Freivalds-usable rewrite (no full digest required) |
+
+Same assumption; two break modes. **C-15 remains OPEN.**
+
 ## What this is / is not
 
 | Is | Is not |
 |---|---|
 | A **named, unreduced** work-binding assumption for firm SOW | A theorem |
-| Aligned with packet FAIL/PASS/INCONCLUSIVE | A reduction to ChaCha20-PRF alone |
+| Aligned with packet FAIL/PASS/INCONCLUSIVE (both FAIL modes = break) | A reduction to ChaCha20-PRF alone |
 | The target behind C15-A/B/C + I1′ / batch surfaces | Permission to activate Rank-1 |
 
 ## Kit vs assumption

@@ -105,6 +105,26 @@ scope) at advantage `≥ ε` while paying `≤ (1−δ)·HonestMAC(n)` exact-int
 PASS/FAIL/INCONCLUSIVE return criteria are exactly those of §0.1. A firm
 **PASS** on this named assumption is still **not** a height raise.
 
+### Break modes (GAP-D1 pin)
+
+Either §0.1 **FAIL** form is a **break** of `BTX-C15-NonCollapse-v1`. They are
+two modes of the **same** assumption — not separate conjectures:
+
+| Mode | §0.1 FAIL clause | Counts as assumption break? |
+|---|---|---|
+| **Full-digest FAIL** | Concrete vectors + measured cost: accepting Phase-A digest/seal with `Adv ≥ ε` at exact-int MAC `≤ (1−δ)·HonestMAC(n)` | **Yes** |
+| **Structured-surrogate FAIL** | Affine / low-degree (deg ≤ 2) Extract surrogate matching on ≥ `N=10⁶` realistic `B32` samples **with** Freivalds-usable rewrite through `G,W,H` — **even without** a full accepting digest artifact | **Yes** |
+
+Rationale: a Freivalds-usable structured surrogate is already a work-binding
+collapse (reopens thin-panel / linear rewrite); requiring a packaged digest on
+top would under-count the assumption. Deg-≤3 / spectral / TMTO checklist wins
+that meet §0.1 thresholds likewise break the assumption; checklist items that
+do not meet thresholds remain witnesses / INCONCLUSIVE, not breaks.
+
+**C-15 remains OPEN.** Pinning break modes does **not** close the assumption,
+does **not** authorize raising `nMatMulDRLTHeight`, and does **not** invent a
+reduction to a classical named problem.
+
 ### Does NOT follow from ChaCha20-PRF alone
 
 ChaCha20 being a secure PRF (in the AEAD sense, or even as an ideal block
