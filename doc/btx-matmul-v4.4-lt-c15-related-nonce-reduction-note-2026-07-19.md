@@ -77,6 +77,11 @@ vs independent collision baseline `∑ p_v² ≈ 0.052` (PRF audit F2).
 
 So: **not a cryptanalytic break of the mixer**; **yes, leftover C15-C structure** that any reduction or firm brief must name (absorb into `Adv_ExtractStruct`, not into `Adv_PRF`).
 
+**Hybrid absorption (Wave 3 Gap #2):** the PRF hybrid under MatExpand nonce
+packing keeps related-nonce in game **C** — see
+[`doc/btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md`](btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md)
+§2–§4. That formalization does **not** close C-15.
+
 ---
 
 ## 3. Impact on reduction sketches A / D

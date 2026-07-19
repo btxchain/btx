@@ -84,6 +84,11 @@ in packet §0.2 (game = §0.1; witness ≠ proof), aliased as
 `BTX-MatExpand-NonCollapse-v1` / MENC family in Wave-1 drafts. Reviewer
 pointer: `contrib/matmul-c15-reviewer-kit/named-assumption.md`.
 
+Wave 3 Gap #2 fragment (DRAFT, not a theorem): **`Extract-Nonlinearity-v1`**
++ MatExpand nonce-packing PRF hybrid outline, related-nonce → ExtractStruct —
+`doc/btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md`. Does **not**
+close C-15.
+
 ## Explicit non-claims
 
 - C-15 closed
