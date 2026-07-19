@@ -39,7 +39,7 @@ namespace matmul_v4::accel {
 
 /** Device families a v4 digest can be dispatched to. CPU is always available
  *  and is the verification / fallback reference. */
-enum class Kind { CPU, CUDA, METAL, HIP };
+enum class Kind { CPU, CUDA, METAL, HIP, ASCEND };
 
 /** Host-callable per-backend entry point. MUST reproduce the CPU reference
  *  byte-for-byte: `digest_out` + `payload_out` identical to
@@ -79,6 +79,9 @@ struct Stats {
     uint64_t hip_ok{0};
     uint64_t hip_mismatch{0};
     uint64_t hip_fallback{0};
+    uint64_t ascend_ok{0};
+    uint64_t ascend_mismatch{0};
+    uint64_t ascend_fallback{0};
 
     // BATCHED dispatch counters (ComputeDigestsBatchedDispatched). One request
     // is one nonce WINDOW. `*_batch_ok` counts windows where EVERY returned
@@ -97,17 +100,19 @@ struct Stats {
     uint64_t hip_batch_ok{0};
     uint64_t hip_batch_mismatch{0};
     uint64_t hip_batch_fallback{0};
+    uint64_t ascend_batch_ok{0};
+    uint64_t ascend_batch_mismatch{0};
+    uint64_t ascend_batch_fallback{0};
 };
 
-/** Human-readable backend label ("cpu" / "cuda" / "metal" / "hip"). */
+/** Human-readable backend label ("cpu" / "cuda" / "metal" / "hip" / "ascend"). */
 std::string ToString(Kind kind);
 
 /** Select the best available backend from device capabilities and the
- *  BTX_MATMUL_V4_BACKEND environment variable (values: cpu, cuda, metal, hip;
- *  aliases rocm->hip, mlx->metal). An unset/empty value defaults to metal on
- *  Apple and cpu elsewhere. If the requested backend is unavailable (not
- *  compiled in, or its capability probe reports unavailable), this resolves to
- *  Kind::CPU and logs the reason once. */
+ *  BTX_MATMUL_V4_BACKEND environment variable (values: cpu, cuda, metal, hip,
+ *  ascend; aliases rocm->hip, mlx->metal, huawei/npu->ascend). An unset/empty
+ *  value defaults to metal on Apple and cpu elsewhere. ASCEND is never selected
+ *  unless compiled + CANN available + ExactGemm self-qualified. */
 Kind ResolveBackend();
 
 /** Compute the v4 consensus digest + sketch payload via the resolved backend,
@@ -194,9 +199,10 @@ void ResetStats();
 // Each device backend implements exactly ONE of these functions -- a strong
 // definition compiled into btx_matmul_backend when the backend's CMake define
 // is enabled (BTX_ENABLE_CUDA_EXPERIMENTAL / BTX_ENABLE_METAL /
-// BTX_ENABLE_HIP). When a backend is NOT compiled in, a weak stub
-// (matmul/accel_v4_stub.cpp) provides a definition that returns false, so the
-// dispatch layer links and runs CPU-only. The signatures match AccelFn exactly.
+// BTX_ENABLE_HIP / BTX_ENABLE_ASCEND). When a backend is NOT compiled in, a
+// weak stub (matmul/accel_v4_stub.cpp) provides a definition that returns
+// false, so the dispatch layer links and runs CPU-only. The signatures match
+// AccelFn exactly.
 // ---------------------------------------------------------------------------
 
 // Each backend also implements the BATCHED entry point ComputeDigestsBatchedAccel
@@ -244,5 +250,16 @@ namespace matmul_v4::hip {
                                             std::vector<uint256>& digests_out,
                                             std::vector<std::vector<unsigned char>>& payloads_out);
 } // namespace matmul_v4::hip
+
+namespace matmul_v4::ascend {
+[[nodiscard]] bool ComputeDigestAccel(const CBlockHeader& header, uint32_t n, uint32_t rounds,
+                                      uint256& digest_out, std::vector<unsigned char>& payload_out);
+[[nodiscard]] bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                              std::vector<uint256>& digests_out,
+                                              std::vector<std::vector<unsigned char>>& payloads_out);
+[[nodiscard]] bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
+                                            std::vector<uint256>& digests_out,
+                                            std::vector<std::vector<unsigned char>>& payloads_out);
+} // namespace matmul_v4::ascend
 
 #endif // BTX_MATMUL_ACCEL_V4_H

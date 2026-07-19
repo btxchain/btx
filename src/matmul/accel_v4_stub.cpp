@@ -100,3 +100,25 @@ BTX_ACCEL_V4_WEAK bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>&
 }
 } // namespace matmul_v4::hip
 #endif
+
+#if !defined(BTX_ENABLE_ASCEND)
+namespace matmul_v4::ascend {
+BTX_ACCEL_V4_WEAK bool ComputeDigestAccel(const CBlockHeader&, uint32_t, uint32_t,
+                                          uint256&, std::vector<unsigned char>&)
+{
+    return false;
+}
+BTX_ACCEL_V4_WEAK bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>&, uint32_t, uint32_t,
+                                                  std::vector<uint256>&,
+                                                  std::vector<std::vector<unsigned char>>&)
+{
+    return false;
+}
+BTX_ACCEL_V4_WEAK bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>&, uint32_t, uint32_t,
+                                                std::vector<uint256>&,
+                                                std::vector<std::vector<unsigned char>>&)
+{
+    return false;
+}
+} // namespace matmul_v4::ascend
+#endif

@@ -5,7 +5,9 @@
 #include <matmul/accel_v4.h>
 
 #include <arith_uint256.h>
+#include <ascend/matmul_v4_lt_accel.h>
 #include <cuda/matmul_v4_lt_accel.h>
+#include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <hip/matmul_v4_lt_accel.h>
 #include <matmul/backend_capabilities_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
@@ -38,10 +40,14 @@ std::atomic<uint64_t> g_metal_fallback{0};
 std::atomic<uint64_t> g_hip_ok{0};
 std::atomic<uint64_t> g_hip_mismatch{0};
 std::atomic<uint64_t> g_hip_fallback{0};
+std::atomic<uint64_t> g_ascend_ok{0};
+std::atomic<uint64_t> g_ascend_mismatch{0};
+std::atomic<uint64_t> g_ascend_fallback{0};
 
 std::atomic_bool g_logged_cuda_fallback{false};
 std::atomic_bool g_logged_metal_fallback{false};
 std::atomic_bool g_logged_hip_fallback{false};
+std::atomic_bool g_logged_ascend_fallback{false};
 
 // ---- batched dispatch counters (ComputeDigestsBatchedDispatched) ----
 std::atomic<uint64_t> g_batch_requests{0};
@@ -54,10 +60,14 @@ std::atomic<uint64_t> g_metal_batch_fallback{0};
 std::atomic<uint64_t> g_hip_batch_ok{0};
 std::atomic<uint64_t> g_hip_batch_mismatch{0};
 std::atomic<uint64_t> g_hip_batch_fallback{0};
+std::atomic<uint64_t> g_ascend_batch_ok{0};
+std::atomic<uint64_t> g_ascend_batch_mismatch{0};
+std::atomic<uint64_t> g_ascend_batch_fallback{0};
 
 std::atomic_bool g_logged_cuda_batch_fallback{false};
 std::atomic_bool g_logged_metal_batch_fallback{false};
 std::atomic_bool g_logged_hip_batch_fallback{false};
+std::atomic_bool g_logged_ascend_batch_fallback{false};
 
 std::string DefaultBackendRequest()
 {
@@ -80,6 +90,7 @@ Kind FromBackendKind(matmul_v4::backend::Kind kind)
     case matmul_v4::backend::Kind::CUDA: return Kind::CUDA;
     case matmul_v4::backend::Kind::METAL: return Kind::METAL;
     case matmul_v4::backend::Kind::HIP: return Kind::HIP;
+    case matmul_v4::backend::Kind::ASCEND: return Kind::ASCEND;
     }
     return Kind::CPU;
 }
@@ -96,6 +107,8 @@ AccelFn DeviceFnFor(Kind kind)
         return &matmul_v4::metal::ComputeDigestAccel;
     case Kind::HIP:
         return &matmul_v4::hip::ComputeDigestAccel;
+    case Kind::ASCEND:
+        return &matmul_v4::ascend::ComputeDigestAccel;
     case Kind::CPU:
         return nullptr;
     }
@@ -113,6 +126,8 @@ BatchAccelFn BatchDeviceFnFor(Kind kind)
         return &matmul_v4::metal::ComputeDigestsBatchedAccel;
     case Kind::HIP:
         return &matmul_v4::hip::ComputeDigestsBatchedAccel;
+    case Kind::ASCEND:
+        return &matmul_v4::ascend::ComputeDigestsBatchedAccel;
     case Kind::CPU:
         return nullptr;
     }
@@ -131,6 +146,8 @@ BatchAccelFn BMX4CDeviceFnFor(Kind kind)
         return &matmul_v4::metal::ComputeDigestsBMX4CAccel;
     case Kind::HIP:
         return &matmul_v4::hip::ComputeDigestsBMX4CAccel;
+    case Kind::ASCEND:
+        return &matmul_v4::ascend::ComputeDigestsBMX4CAccel;
     case Kind::CPU:
         return nullptr;
     }
@@ -143,6 +160,7 @@ void RecordOk(Kind kind)
     case Kind::CUDA: g_cuda_ok.fetch_add(1, std::memory_order_relaxed); break;
     case Kind::METAL: g_metal_ok.fetch_add(1, std::memory_order_relaxed); break;
     case Kind::HIP: g_hip_ok.fetch_add(1, std::memory_order_relaxed); break;
+    case Kind::ASCEND: g_ascend_ok.fetch_add(1, std::memory_order_relaxed); break;
     case Kind::CPU: break;
     }
 }
@@ -153,6 +171,7 @@ void RecordMismatch(Kind kind)
     case Kind::CUDA: g_cuda_mismatch.fetch_add(1, std::memory_order_relaxed); break;
     case Kind::METAL: g_metal_mismatch.fetch_add(1, std::memory_order_relaxed); break;
     case Kind::HIP: g_hip_mismatch.fetch_add(1, std::memory_order_relaxed); break;
+    case Kind::ASCEND: g_ascend_mismatch.fetch_add(1, std::memory_order_relaxed); break;
     case Kind::CPU: break;
     }
 }
@@ -166,6 +185,7 @@ void RecordFallback(Kind kind, const std::string& reason)
     case Kind::CUDA: counter = &g_cuda_fallback; log_once = &g_logged_cuda_fallback; label = "CUDA"; break;
     case Kind::METAL: counter = &g_metal_fallback; log_once = &g_logged_metal_fallback; label = "METAL"; break;
     case Kind::HIP: counter = &g_hip_fallback; log_once = &g_logged_hip_fallback; label = "HIP"; break;
+    case Kind::ASCEND: counter = &g_ascend_fallback; log_once = &g_logged_ascend_fallback; label = "ASCEND"; break;
     case Kind::CPU: return;
     }
     counter->fetch_add(1, std::memory_order_relaxed);
@@ -181,6 +201,7 @@ void RecordBatchOk(Kind kind)
     case Kind::CUDA: g_cuda_batch_ok.fetch_add(1, std::memory_order_relaxed); break;
     case Kind::METAL: g_metal_batch_ok.fetch_add(1, std::memory_order_relaxed); break;
     case Kind::HIP: g_hip_batch_ok.fetch_add(1, std::memory_order_relaxed); break;
+    case Kind::ASCEND: g_ascend_batch_ok.fetch_add(1, std::memory_order_relaxed); break;
     case Kind::CPU: break;
     }
 }
@@ -191,6 +212,7 @@ void RecordBatchMismatch(Kind kind)
     case Kind::CUDA: g_cuda_batch_mismatch.fetch_add(1, std::memory_order_relaxed); break;
     case Kind::METAL: g_metal_batch_mismatch.fetch_add(1, std::memory_order_relaxed); break;
     case Kind::HIP: g_hip_batch_mismatch.fetch_add(1, std::memory_order_relaxed); break;
+    case Kind::ASCEND: g_ascend_batch_mismatch.fetch_add(1, std::memory_order_relaxed); break;
     case Kind::CPU: break;
     }
 }
@@ -204,6 +226,7 @@ void RecordBatchFallback(Kind kind, const std::string& reason)
     case Kind::CUDA: counter = &g_cuda_batch_fallback; log_once = &g_logged_cuda_batch_fallback; label = "CUDA"; break;
     case Kind::METAL: counter = &g_metal_batch_fallback; log_once = &g_logged_metal_batch_fallback; label = "METAL"; break;
     case Kind::HIP: counter = &g_hip_batch_fallback; log_once = &g_logged_hip_batch_fallback; label = "HIP"; break;
+    case Kind::ASCEND: counter = &g_ascend_batch_fallback; log_once = &g_logged_ascend_batch_fallback; label = "ASCEND"; break;
     case Kind::CPU: return;
     }
     counter->fetch_add(1, std::memory_order_relaxed);
@@ -359,6 +382,8 @@ bool TryDeviceDigestsBMX4CLT(Kind backend, const std::vector<CBlockHeader>& head
             return matmul_v4::metal::ComputeDigestsOnlyLTMetal(header, n, nonces, count, out);
         case Kind::HIP:
             return matmul_v4::hip::ComputeDigestsOnlyLTHip(header, n, nonces, count, out);
+        case Kind::ASCEND:
+            return matmul_v4::ascend::ComputeDigestsOnlyLTAscend(header, n, nonces, count, out);
         case Kind::CPU:
             return false;
         }
@@ -415,6 +440,7 @@ std::string ToString(Kind kind)
     case Kind::CUDA: return "cuda";
     case Kind::METAL: return "metal";
     case Kind::HIP: return "hip";
+    case Kind::ASCEND: return "ascend";
     }
     return "cpu";
 }
@@ -464,6 +490,33 @@ Kind ResolveBackend()
     }
 
     return active;
+}
+
+
+matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
+{
+    matmul::v4::lt::ExactGemmBackend backend;
+    switch (ResolveBackend()) {
+    case Kind::CUDA:
+        backend.gemm_s8s8 = &matmul_v4::cuda::TryLaunchLtImmaGemmS8S8;
+        backend.gemm_s32s8 = &matmul_v4::cuda::TryLaunchLtImmaGemmS32S8;
+        break;
+    case Kind::HIP:
+        backend.gemm_s8s8 = &matmul_v4::hip::TryLaunchLtMfmaGemmS8S8;
+        backend.gemm_s32s8 = &matmul_v4::hip::TryLaunchLtMfmaGemmS32S8;
+        break;
+    case Kind::METAL:
+        backend.gemm_s8s8 = &matmul_v4::metal::TryLaunchLtTensorOpsGemmS8S8;
+        backend.gemm_s32s8 = &matmul_v4::metal::TryLaunchLtTensorOpsGemmS32S8;
+        break;
+    case Kind::ASCEND:
+        backend.gemm_s8s8 = &matmul_v4::ascend::TryLaunchLtCubeGemmS8S8;
+        backend.gemm_s32s8 = &matmul_v4::ascend::TryLaunchLtCubeGemmS32S8;
+        break;
+    case Kind::CPU:
+        break;
+    }
+    return backend;
 }
 
 bool ComputeDigestDispatched(const CBlockHeader& header, uint32_t n, uint32_t rounds,
@@ -824,6 +877,9 @@ Stats ProbeStats()
     stats.hip_ok = g_hip_ok.load(std::memory_order_relaxed);
     stats.hip_mismatch = g_hip_mismatch.load(std::memory_order_relaxed);
     stats.hip_fallback = g_hip_fallback.load(std::memory_order_relaxed);
+    stats.ascend_ok = g_ascend_ok.load(std::memory_order_relaxed);
+    stats.ascend_mismatch = g_ascend_mismatch.load(std::memory_order_relaxed);
+    stats.ascend_fallback = g_ascend_fallback.load(std::memory_order_relaxed);
     stats.batch_requests = g_batch_requests.load(std::memory_order_relaxed);
     stats.cuda_batch_ok = g_cuda_batch_ok.load(std::memory_order_relaxed);
     stats.cuda_batch_mismatch = g_cuda_batch_mismatch.load(std::memory_order_relaxed);
@@ -834,6 +890,9 @@ Stats ProbeStats()
     stats.hip_batch_ok = g_hip_batch_ok.load(std::memory_order_relaxed);
     stats.hip_batch_mismatch = g_hip_batch_mismatch.load(std::memory_order_relaxed);
     stats.hip_batch_fallback = g_hip_batch_fallback.load(std::memory_order_relaxed);
+    stats.ascend_batch_ok = g_ascend_batch_ok.load(std::memory_order_relaxed);
+    stats.ascend_batch_mismatch = g_ascend_batch_mismatch.load(std::memory_order_relaxed);
+    stats.ascend_batch_fallback = g_ascend_batch_fallback.load(std::memory_order_relaxed);
     return stats;
 }
 
@@ -849,9 +908,13 @@ void ResetStats()
     g_hip_ok.store(0, std::memory_order_relaxed);
     g_hip_mismatch.store(0, std::memory_order_relaxed);
     g_hip_fallback.store(0, std::memory_order_relaxed);
+    g_ascend_ok.store(0, std::memory_order_relaxed);
+    g_ascend_mismatch.store(0, std::memory_order_relaxed);
+    g_ascend_fallback.store(0, std::memory_order_relaxed);
     g_logged_cuda_fallback.store(false, std::memory_order_relaxed);
     g_logged_metal_fallback.store(false, std::memory_order_relaxed);
     g_logged_hip_fallback.store(false, std::memory_order_relaxed);
+    g_logged_ascend_fallback.store(false, std::memory_order_relaxed);
     g_batch_requests.store(0, std::memory_order_relaxed);
     g_cuda_batch_ok.store(0, std::memory_order_relaxed);
     g_cuda_batch_mismatch.store(0, std::memory_order_relaxed);
@@ -862,9 +925,13 @@ void ResetStats()
     g_hip_batch_ok.store(0, std::memory_order_relaxed);
     g_hip_batch_mismatch.store(0, std::memory_order_relaxed);
     g_hip_batch_fallback.store(0, std::memory_order_relaxed);
+    g_ascend_batch_ok.store(0, std::memory_order_relaxed);
+    g_ascend_batch_mismatch.store(0, std::memory_order_relaxed);
+    g_ascend_batch_fallback.store(0, std::memory_order_relaxed);
     g_logged_cuda_batch_fallback.store(false, std::memory_order_relaxed);
     g_logged_metal_batch_fallback.store(false, std::memory_order_relaxed);
     g_logged_hip_batch_fallback.store(false, std::memory_order_relaxed);
+    g_logged_ascend_batch_fallback.store(false, std::memory_order_relaxed);
 }
 
 } // namespace matmul_v4::accel

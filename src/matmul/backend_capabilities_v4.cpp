@@ -4,6 +4,7 @@
 
 #include <matmul/backend_capabilities_v4.h>
 
+#include <ascend/matmul_v4_lt_accel.h>
 #include <cuda/matmul_accel.h>
 #include <metal/matmul_accel.h>
 
@@ -11,7 +12,12 @@
 #include <hip/hip_runtime.h>
 #endif
 
+#if defined(BTX_HAVE_CANN)
+#include <acl/acl.h>
+#endif
+
 #include <algorithm>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -150,6 +156,57 @@ Eligibility HipEligibility()
 #endif
 }
 
+
+Eligibility AscendEligibility()
+{
+#if defined(BTX_ENABLE_ASCEND)
+#if defined(BTX_HAVE_CANN)
+    uint32_t count = 0;
+    if (aclrtGetDeviceCount(&count) != ACL_SUCCESS || count == 0) {
+        return Eligibility{
+            .compiled = true,
+            .available = false,
+            .admissible = false,
+            .self_test_required = true,
+            .reason = "ascend_no_device",
+        };
+    }
+
+    std::string soc = "ascend_unknown";
+    if (const char* env = std::getenv("ASCEND_DEVICE_SOC")) {
+        if (env[0] != '\0') soc = env;
+    } else if (const char* env = std::getenv("ASCEND_SOC_VERSION")) {
+        if (env[0] != '\0') soc = env;
+    } else {
+        soc = "dav-3510";
+    }
+
+    Eligibility eligibility = ClassifyAscendDevice(soc);
+    if (!eligibility.admissible) {
+        return eligibility;
+    }
+    if (!matmul_v4::ascend::IsAscendExactGemmAvailable()) {
+        eligibility.admissible = false;
+        eligibility.reason =
+            "ascend_exactgemm_self_qual_failed_or_unavailable:" + eligibility.reason;
+        return eligibility;
+    }
+    eligibility.reason = "cube_s8s8s32_exactgemm_self_qual:" + eligibility.reason;
+    return eligibility;
+#else
+    return Eligibility{
+        .compiled = true,
+        .available = false,
+        .admissible = false,
+        .self_test_required = true,
+        .reason = "cann_sdk_not_found",
+    };
+#endif
+#else
+    return DisabledByBuild();
+#endif
+}
+
 Kind ParseKind(const std::string& requested, bool& known)
 {
     const std::string normalized = ToLower(requested);
@@ -168,6 +225,10 @@ Kind ParseKind(const std::string& requested, bool& known)
     if (normalized == "hip" || normalized == "rocm" || normalized == "amd") {
         known = true;
         return Kind::HIP;
+    }
+    if (normalized == "ascend" || normalized == "huawei" || normalized == "npu") {
+        known = true;
+        return Kind::ASCEND;
     }
 
     known = false;
@@ -197,6 +258,8 @@ std::string ToString(Kind kind)
         return "metal";
     case Kind::HIP:
         return "hip";
+    case Kind::ASCEND:
+        return "ascend";
     }
 
     return "cpu";
@@ -213,6 +276,8 @@ Eligibility EligibilityFor(Kind kind)
         return MetalEligibility();
     case Kind::HIP:
         return HipEligibility();
+    case Kind::ASCEND:
+        return AscendEligibility();
     }
 
     return CpuEligibility();
@@ -225,6 +290,7 @@ std::vector<std::pair<Kind, Eligibility>> AllEligibility()
         {Kind::CUDA, EligibilityFor(Kind::CUDA)},
         {Kind::METAL, EligibilityFor(Kind::METAL)},
         {Kind::HIP, EligibilityFor(Kind::HIP)},
+        {Kind::ASCEND, EligibilityFor(Kind::ASCEND)},
     };
 }
 
@@ -366,6 +432,44 @@ Eligibility ClassifyMetalDevice(bool has_metal4_int8_tensor_ops)
     // OS 26.4+). Admissible pending the mandatory §N.3-v self-test.
     eligibility.admissible = true;
     eligibility.reason = "metal4_int8_tensorops_m5_class";
+    return eligibility;
+}
+
+Eligibility ClassifyAscendDevice(std::string_view soc_name)
+{
+    Eligibility eligibility{
+        .compiled = true,
+        .available = true,
+        .admissible = false,
+        .self_test_required = true,
+        .reason = "",
+    };
+
+    std::string soc{soc_name};
+    for (char& c : soc) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+    }
+
+    // Ascend 950PR/DT (dav-3510) and related Cube INT8 NPU ids from CANN docs.
+    const bool is_950_class =
+        soc.find("dav-3510") != std::string::npos ||
+        soc.find("3510") != std::string::npos ||
+        soc.find("950pr") != std::string::npos ||
+        soc.find("950dt") != std::string::npos ||
+        soc.find("ascend950") != std::string::npos ||
+        soc.find("ascend-950") != std::string::npos ||
+        soc.find("ascend910") != std::string::npos ||
+        soc.find("ascend-910") != std::string::npos;
+
+    if (!is_950_class) {
+        eligibility.reason =
+            "non_ascend950_cube_verification_only:" +
+            (soc.empty() ? std::string{"(empty)"} : soc);
+        return eligibility;
+    }
+
+    eligibility.admissible = true;
+    eligibility.reason = "ascend_cube_int8_candidate:" + soc;
     return eligibility;
 }
 

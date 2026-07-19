@@ -58,6 +58,12 @@ inline constexpr uint32_t kConsensusQStarMax = 128;
  *  any public activation height is raised. */
 [[nodiscard]] int8_t ExtractDequantMatExpand(int32_t raw, uint32_t i, uint32_t j,
                                              const uint256& prf_key);
+/** Host-callable replica of the CUDA/HIP DeviceExtractDequant ChaCha path.
+ *  Must stay bit-identical to ExtractDequantMatExpand and to the device
+ *  kernels — runnable parity tests pin this so a kernel edit cannot silently
+ *  drift from the CPU goldens. */
+[[nodiscard]] int8_t ExtractDequantMatExpandAccelReplica(int32_t raw, uint32_t i, uint32_t j,
+                                                         const uint256& prf_key);
 
 [[nodiscard]] std::vector<int32_t> ExactGemmS8S8(const std::vector<int8_t>& L,
                                                  const std::vector<int8_t>& R,
@@ -190,12 +196,15 @@ using SlotSeedFn = std::function<bool(CBlockHeader&)>;
  *  records in window order, and `slot_payloads_out` (if non-null) receives each
  *  slot's serialized sketch bytes (for the Freivalds seal-auth path /
  *  harnesses). Returns false if any slot fails (bad dims, slot_seed_fn failure,
- *  duplicate slot_id). */
+ *  duplicate slot_id). Optional `backend` injects device ExactGemm for MatExpand
+ *  GEMMs on the prepared WindowSketchMinerLT (miners pass
+ *  MakeResolvedExactGemmBackend()); default {} keeps CPU ExactGemm*. */
 [[nodiscard]] bool ComputeSealDigestBMX4CLT(
     const CBlockHeader& anchor, uint32_t n, uint32_t Qstar,
     const SlotSeedFn& slot_seed_fn, uint256& seal_out,
     std::vector<WindowSlot>* slots_out = nullptr,
-    std::vector<std::vector<unsigned char>>* slot_payloads_out = nullptr);
+    std::vector<std::vector<unsigned char>>* slot_payloads_out = nullptr,
+    ExactGemmBackend backend = {});
 
 /** SEAL-AUTH FAST PATH (accept-side; per-slot Freivalds, ε ≤ 2^-180). Given the
  *  window proof `slot_payloads` (exactly Q* per-slot serialized sketches), re-

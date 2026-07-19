@@ -16,6 +16,7 @@
 #include <hash.h>
 #include <logging.h>
 #include <matmul/accel_v4.h>
+#include <matmul/exact_gemm_resolve.h>
 #include <matmul/accelerated_solver.h>
 #include <matmul/field.h>
 #include <matmul/freivalds.h>
@@ -3232,20 +3233,15 @@ bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Param
 {
     // Audit F1/C1/C2: header-PoW THROTTLE bound to nBits.
     //
-    // v4.4 commitment format (HasHeaderPoWCommitment): nNonce is already folded
-    // into GetHash(), so the gate is simply GetHash() <= eased_nBits_target.
-    // Grinding nNonce changes block identity; malleated/stripped nonces cannot
-    // keep the same hash.
+    // Preimage is always H(GetHash() || nNonce) with nNonce decoupled from
+    // GetHash / ComputeMatMulHeaderHash — honest miners grind the gate without
+    // recomputing the matmul. The withdrawn bit-26 "commitment wire" that folded
+    // nNonce into GetHash() / 186-byte headers is NOT used: it forked
+    // pre-activation peers. nNonce is still not on the P2P wire; enabling this
+    // gate on a public net remains a hard NO-GO until a safe wire design lands.
     //
-    // Legacy (bit clear): preimage is H(GetHash() || nNonce) with nNonce still
-    // decoupled from GetHash / ComputeMatMulHeaderHash. Kept for transitional
-    // callers; consensus at unified v4 requires the commitment bit, so the live
-    // path is the commitment form.
-    //
-    // nNonce stays OUT of ComputeMatMulHeaderHash either way — honest miners
-    // grind the gate without recomputing the matmul. Throttle target is the
-    // block's OWN nBits target shifted EASIER by the discount (audit C2). This
-    // is a rate-limiting throttle, NOT full chainwork authentication (audit C1).
+    // Throttle target is the block's OWN nBits target shifted EASIER by the
+    // discount (audit C2). Rate-limiting throttle, NOT full chainwork auth (C1).
     // Disabled sentinel: discount == UINT32_MAX -> always passes.
     if (!params.IsMatMulHeaderPoWEnabled()) return true;
     // AUDIT H2: a discount >= 256 (but != the UINT32_MAX "disabled" sentinel) is an
@@ -3258,9 +3254,6 @@ bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Param
     const auto gate_target{
         DeriveMatMulHeaderPoWGateTarget(block.nBits, params.nMatMulHeaderPoWDiscountBits, params.powLimit)};
     if (!gate_target) return false;
-    if (block.HasHeaderPoWCommitment()) {
-        return UintToArith256(block.GetHash()) <= *gate_target;
-    }
     HashWriter hw;
     hw << block.GetHash() << block.nNonce;
     return UintToArith256(hw.GetHash()) <= *gate_target;
@@ -4417,8 +4410,7 @@ uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, 
     //      comfortably covers that burst (default 65536, ~5x margin over the
     //      window) while restoring concrete per-peer accountability (a ~3x
     //      tightening from the old unconditional 200000).
-    // NOTE: header-PoW wire/identity is the versioned commitment bit
-    // (CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT), not a compile flag.
+    // NOTE: HeaderPoW bit-26 commitment wire was withdrawn; headers stay 182 bytes.
     if (reference_height < 0 || reference_height < params.nFastMineHeight) {
         return std::max<uint32_t>(base, 200'000U);
     }
@@ -5137,6 +5129,8 @@ bool SolveMatMulParallel(CBlockHeader& block,
 // MatMul v4.4-LT Rank-1 solve loop: Q*-sized windows through WindowSketchMinerLT
 // (MatExpand + deep-m). Winning candidates are resealed via ComputeDigestBMX4CLT
 // (Phase A) or ComputeSealDigestBMX4CLT (Phase B seal-as-PoW when active).
+// Non-CPU ResolveBackend injects MakeResolvedExactGemmBackend; Phase A prefers
+// ComputeDigestsBMX4CLTDispatched; winners always CPU-reseal.
 static bool SolveMatMulV4LT(CBlockHeader& block,
                             const Consensus::Params& params,
                             uint64_t& max_tries,
@@ -5160,6 +5154,12 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
         const auto parsed = static_cast<uint32_t>(std::strtoul(env, nullptr, 10));
         if (parsed > 0) execution_chunk = std::min(parsed, matmul::v4::lt::kConsensusQStarMax);
     }
+
+    const matmul_v4::accel::Kind accel_kind = matmul_v4::accel::ResolveBackend();
+    const matmul::v4::lt::ExactGemmBackend exact_gemm =
+        (accel_kind != matmul_v4::accel::Kind::CPU)
+            ? matmul_v4::accel::MakeResolvedExactGemmBackend()
+            : matmul::v4::lt::ExactGemmBackend{};
 
     // Phase B: seal-as-PoW — lottery object is the Q* window seal. Each attempt
     // evaluates one full seal (exactly consensus_Qstar digests); max_tries
@@ -5187,7 +5187,10 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
             }
 
             uint256 seal;
-            if (!matmul::v4::lt::ComputeSealDigestBMX4CLT(block, n, Qstar, slot_seed, seal)) {
+            if (!matmul::v4::lt::ComputeSealDigestBMX4CLT(block, n, Qstar, slot_seed, seal,
+                                                          /*slots_out=*/nullptr,
+                                                          /*slot_payloads_out=*/nullptr,
+                                                          exact_gemm)) {
                 RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
                 return false;
             }
@@ -5210,7 +5213,7 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
         return false;
     }
 
-    matmul::v4::lt::WindowSketchMinerLT miner{block, n};
+    matmul::v4::lt::WindowSketchMinerLT miner{block, n, exact_gemm};
     if (!miner.Valid()) {
         RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
         return false;
@@ -5232,6 +5235,8 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
             candidates[i].nNonce = static_cast<uint32_t>(candidates[i].nNonce64);
             // MatExpand-B binds ComputeMatMulHeaderHash, which includes
             // seed_a/seed_b — must pin nonce-bound seeds before mining.
+            // Seed-complete headers required so LT device dispatch preserves
+            // per-candidate seeds (accel_v4 TryDeviceDigestsBMX4CLT).
             if (!SetDeterministicMatMulSeeds(candidates[i], params, block_height, parent_median_time_past)) {
                 RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
                 return false;
@@ -5239,9 +5244,28 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
         }
 
         std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
-        if (!miner.MineWindow(candidates, target, results)) {
-            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
-            return false;
+        bool mined = false;
+        if (accel_kind != matmul_v4::accel::Kind::CPU) {
+            std::vector<uint256> digests;
+            std::vector<std::vector<unsigned char>> payloads;
+            if (matmul_v4::accel::ComputeDigestsBMX4CLTDispatched(
+                    candidates, n, params.nMatMulV4FreivaldsRounds, target, digests, payloads) &&
+                digests.size() == window) {
+                results.resize(window);
+                for (uint32_t i = 0; i < window; ++i) {
+                    results[i].nonce = candidates[i].nNonce64;
+                    results[i].digest = digests[i];
+                    results[i].target_match = UintToArith256(digests[i]) <= bnTarget;
+                    results[i].backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
+                }
+                mined = true;
+            }
+        }
+        if (!mined) {
+            if (!miner.MineWindow(candidates, target, results)) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
         }
 
         for (uint32_t i = 0; i < window; ++i) {
@@ -5251,6 +5275,7 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
             CBlockHeader& candidate = candidates[i];
             uint256 ref_digest;
             std::vector<unsigned char> ref_payload;
+            // Always CPU-reseal winners (A14): device digests never seal.
             if (!matmul::v4::lt::ComputeDigestBMX4CLT(candidate, n, ref_digest, ref_payload) ||
                 ref_digest != results[i].digest) {
                 LogWarning("SolveMatMulV4LT: window digest diverged from reference at nonce=%u; discarding\n",

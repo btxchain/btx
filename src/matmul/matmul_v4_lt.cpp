@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <string_view>
@@ -203,7 +204,8 @@ int8_t ExtractDequantMatExpandSplitMix(int32_t raw, uint32_t i, uint32_t j, uint
             const uint64_t scale_stream = MixMatExpandEntry(
                 raw, i, j, salt ^ 0xD1B54A32D192ED03ULL ^ (remix << 1));
             const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
-            return static_cast<int8_t>(static_cast<int32_t>(mu) << e);
+            // Exact mul — never signed left-shift (negative mu << e is UB).
+            return static_cast<int8_t>(static_cast<int32_t>(mu) * (int32_t{1} << e));
         }
         ++remix;
         mixed = MixMatExpandEntry(raw, i, j, salt + remix);
@@ -233,7 +235,89 @@ int8_t ExtractDequantMatExpand(int32_t raw, uint32_t i, uint32_t j, const uint25
             const uint64_t scale_stream =
                 ReadLE64(reinterpret_cast<const unsigned char*>(scale_bytes.data()));
             const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
-            return static_cast<int8_t>(static_cast<int32_t>(mu) << e);
+            // Exact mul — never signed left-shift (negative mu << e is UB).
+            return static_cast<int8_t>(static_cast<int32_t>(mu) * (int32_t{1} << e));
+        }
+        ++remix;
+    }
+}
+
+namespace {
+
+// Host twin of CUDA/HIP DeviceMatExpandPrfLE64 / DeviceExtractDequant. Kept in
+// this TU so unit tests can pin accel kernels against CPU goldens without a GPU.
+inline uint32_t AccelReplicaRotl32(uint32_t x, int n)
+{
+    return (x << n) | (x >> (32 - n));
+}
+
+inline void AccelReplicaChaChaQuarter(uint32_t& a, uint32_t& b, uint32_t& c, uint32_t& d)
+{
+    a += b; d = AccelReplicaRotl32(d ^ a, 16);
+    c += d; b = AccelReplicaRotl32(b ^ c, 12);
+    a += b; d = AccelReplicaRotl32(d ^ a, 8);
+    c += d; b = AccelReplicaRotl32(b ^ c, 7);
+}
+
+uint64_t AccelReplicaMatExpandPrfLE64(const uint32_t key[8], int32_t raw, uint32_t i, uint32_t j,
+                                      uint32_t remix, uint32_t lane)
+{
+    uint32_t x0 = 0x61707865u, x1 = 0x3320646eu, x2 = 0x79622d32u, x3 = 0x6b206574u;
+    uint32_t x4 = key[0], x5 = key[1], x6 = key[2], x7 = key[3];
+    uint32_t x8 = key[4], x9 = key[5], x10 = key[6], x11 = key[7];
+    uint32_t x12 = remix;
+    uint32_t x13 = static_cast<uint32_t>(raw) ^ lane;
+    const uint64_t nonce_second = (static_cast<uint64_t>(i) << 32) | static_cast<uint64_t>(j);
+    uint32_t x14 = static_cast<uint32_t>(nonce_second);
+    uint32_t x15 = static_cast<uint32_t>(nonce_second >> 32);
+
+    const uint32_t j4 = x4, j5 = x5, j6 = x6, j7 = x7;
+    const uint32_t j8 = x8, j9 = x9, j10 = x10, j11 = x11;
+    const uint32_t j12 = x12, j13 = x13, j14 = x14, j15 = x15;
+
+    for (int r = 0; r < 10; ++r) {
+        AccelReplicaChaChaQuarter(x0, x4, x8, x12);
+        AccelReplicaChaChaQuarter(x1, x5, x9, x13);
+        AccelReplicaChaChaQuarter(x2, x6, x10, x14);
+        AccelReplicaChaChaQuarter(x3, x7, x11, x15);
+        AccelReplicaChaChaQuarter(x0, x5, x10, x15);
+        AccelReplicaChaChaQuarter(x1, x6, x11, x12);
+        AccelReplicaChaChaQuarter(x2, x7, x8, x13);
+        AccelReplicaChaChaQuarter(x3, x4, x9, x14);
+    }
+
+    x0 += 0x61707865u; x1 += 0x3320646eu; x2 += 0x79622d32u; x3 += 0x6b206574u;
+    x4 += j4; x5 += j5; x6 += j6; x7 += j7;
+    x8 += j8; x9 += j9; x10 += j10; x11 += j11;
+    x12 += j12; x13 += j13; x14 += j14; x15 += j15;
+
+    return static_cast<uint64_t>(x0) | (static_cast<uint64_t>(x1) << 32);
+}
+
+} // namespace
+
+int8_t ExtractDequantMatExpandAccelReplica(int32_t raw, uint32_t i, uint32_t j,
+                                           const uint256& prf_key)
+{
+    uint32_t key[8];
+    for (int w = 0; w < 8; ++w) {
+        key[w] = ReadLE32(prf_key.data() + static_cast<size_t>(w) * 4);
+    }
+    constexpr uint32_t kLaneMant = 0x4D414E54u;
+    constexpr uint32_t kLaneScale = 0x53434C45u;
+    uint32_t remix = 0;
+    for (;;) {
+        const uint64_t mixed = AccelReplicaMatExpandPrfLE64(key, raw, i, j, remix, kLaneMant);
+        for (int shift = 0; shift < 64; shift += 4) {
+            bool accepted = false;
+            const int8_t mu = matmul::v4::bmx4::SampleMantissaNibble(
+                static_cast<uint8_t>((mixed >> shift) & 0x0F), accepted);
+            if (!accepted) continue;
+            const uint64_t scale_stream =
+                AccelReplicaMatExpandPrfLE64(key, raw, i, j, remix, kLaneScale);
+            const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
+            // Exact mul — matches device kernels (never signed left-shift).
+            return static_cast<int8_t>(static_cast<int32_t>(mu) * (int32_t{1} << e));
         }
         ++remix;
     }
@@ -399,6 +483,9 @@ bool VerifySketchBMX4CLT(const CBlockHeader& header, uint32_t n, uint32_t rounds
 
 uint256 ComputeWindowMerkleRoot(Span<const uint256> digests)
 {
+    // Consensus seal paths always pass Q* ∈ {64,128}. Assert power-of-two for
+    // any non-empty input so a shared-helper misuse cannot silently pad.
+    assert(digests.empty() || (digests.size() & (digests.size() - 1)) == 0);
     if (digests.empty()) return uint256{}; // zero root for an empty window
 
     std::vector<uint256> layer(digests.begin(), digests.end());
@@ -498,7 +585,8 @@ uint64_t DeriveWindowSlotNonce(const uint256& sigma_anchor, uint32_t slot_index)
 bool ComputeSealDigestBMX4CLT(const CBlockHeader& anchor, uint32_t n, uint32_t Qstar,
                               const SlotSeedFn& slot_seed_fn, uint256& seal_out,
                               std::vector<WindowSlot>* slots_out,
-                              std::vector<std::vector<unsigned char>>* slot_payloads_out)
+                              std::vector<std::vector<unsigned char>>* slot_payloads_out,
+                              ExactGemmBackend backend)
 {
     seal_out.SetNull();
     if (slots_out) slots_out->clear();
@@ -509,7 +597,9 @@ bool ComputeSealDigestBMX4CLT(const CBlockHeader& anchor, uint32_t n, uint32_t Q
 
     // Prepare template-invariant A/U/V/P once. Slots share the template hash
     // (seed_a/seed_b are nulled in ComputeTemplateHash); only B/Q/Chat vary.
-    WindowSketchMinerLT prepared{anchor, n};
+    // Injectable ExactGemmBackend accelerates MatExpand GEMMs on this prepared
+    // miner; callers that omit it keep CPU ExactGemm*.
+    WindowSketchMinerLT prepared{anchor, n, std::move(backend)};
     if (!prepared.Valid()) return false;
 
     const uint256 sigma_anchor = matmul::v4::DeriveSigma(anchor);

@@ -38,6 +38,9 @@
 //                        (s8xs8->s32, OS 26.4+). Pre-M5 GPUs and the ANE
 //                        (which dequantizes INT8 to FP16) have no integer
 //                        tensor path -> verification-only (§K.1, §O.1).
+//   - ASCEND (昇腾)    : admissible iff CANN linked (BTX_HAVE_CANN), NPU present,
+//                        Ascend 950-class SoC, AND ExactGemmS8S8 self-qual passed.
+//                        Without CANN (default CI): fail-closed / disabled_by_build.
 //
 // FP-only paths (FP16/BF16/FP8, any floating accumulate) are NEVER admissible:
 // floating accumulation rounds per partial sum and is not bit-reproducible
@@ -51,7 +54,7 @@
 // This header is consumed by the v4 dispatch layer (matmul/accel_v4.h,
 // namespace matmul_v4::accel): accel_v4's ResolveBackend delegates the
 // eligibility decision to ResolveBackend() below. `Kind` mirrors
-// matmul_v4::accel::Kind member-for-member (CPU, CUDA, METAL, HIP) so the two
+// matmul_v4::accel::Kind member-for-member (CPU, CUDA, METAL, HIP, ASCEND) so the two
 // enums convert by name; this header stays dependency-free of accel_v4.h so
 // the include edge is one-way (accel_v4.h -> this header).
 
@@ -63,11 +66,13 @@ enum class Kind {
     CUDA,
     METAL,
     HIP,
+    ASCEND,
 };
 
 struct Eligibility {
     //! Backend code is compiled into this binary (CMake:
-    //! BTX_ENABLE_CUDA_EXPERIMENTAL / BTX_ENABLE_METAL / BTX_ENABLE_HIP).
+    //! BTX_ENABLE_CUDA_EXPERIMENTAL / BTX_ENABLE_METAL / BTX_ENABLE_HIP /
+    //! BTX_ENABLE_ASCEND).
     bool compiled{false};
     //! Runtime/driver present and a device is visible.
     bool available{false};
@@ -100,7 +105,7 @@ Eligibility EligibilityFor(Kind kind);
 std::vector<std::pair<Kind, Eligibility>> AllEligibility();
 
 //! Resolve a user-requested backend string ("cpu", "cuda"/"nvidia",
-//! "metal"/"mlx"/"apple", "hip"/"rocm"/"amd") against runtime eligibility.
+//! "metal"/"mlx"/"apple", "hip"/"rocm"/"amd", "ascend"/"huawei"/"npu") against runtime eligibility.
 //! Unknown, unavailable, or INADMISSIBLE (verification-only, §S.1) requests
 //! fall back to CPU with a machine-readable reason. This is the hook
 //! matmul_v4::accel::ResolveBackend delegates to.
@@ -126,6 +131,9 @@ Eligibility ClassifyHipDevice(std::string_view gcn_arch_name);
 //! (M5-class GPU Neural Accelerator, s8xs8->s32). Pre-M5 / ANE-only devices
 //! pass false and are verification-only.
 Eligibility ClassifyMetalDevice(bool has_metal4_int8_tensor_ops);
+
+//! Ascend/CANN: candidate iff SoC indicates Ascend 950-class Cube INT8.
+Eligibility ClassifyAscendDevice(std::string_view soc_name);
 
 } // namespace matmul_v4::backend
 
