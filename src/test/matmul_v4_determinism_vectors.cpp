@@ -36,6 +36,7 @@
 
 #include <boost/test/unit_test.hpp>
 #include <array>
+#include <cstdlib>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -138,29 +139,50 @@ constexpr GoldenVector kGoldenVectors[] = {
 };
 
 // ---------------------------------------------------------------------------
-// Hardware backend slots — REQUIRE PHYSICAL HARDWARE; placeholders only.
+// Hardware backend slots — SCHEMA ONLY until silicon fills digests.
 //
 // The determinism claim of §B.6 is that s8 x s8 -> s32 MMA is exact and
 // order-independent, so every backend must reproduce the pinned CPU bytes
-// above EXACTLY. Each slot below is filled by running the corresponding
-// miner backend over the same GoldenVector inputs on real silicon and
-// recording (backend id, driver/library versions, digest, payload SHA256).
-// A slot is complete only when its digest/payload hex equals the pinned
-// CPU value for every vector; any divergence is a consensus-critical bug
-// (risk register §N.3-v) and blocks that backend's mining eligibility.
+// above EXACTLY. Each slot is filled by running the corresponding miner
+// backend over the same GoldenVector inputs on real silicon and recording
+// (backend, device_class, driver_info, digest, payload SHA256). Digests MUST
+// equal the pinned CPU value for `vector_name`; any divergence is a
+// consensus-critical bug (§N.3-v). NEVER invent hex — leave empty until a
+// real device run produces them.
 //
-// TODO(hardware, H100):  NVIDIA H100 (IMMA / cuBLASLt INT8) — pending access.
-// TODO(hardware, B200):  NVIDIA B200 (IMMA / cuBLASLt INT8) — pending access.
-// TODO(hardware, Apple): Apple M5-class Metal 4 TensorOps INT8 — pending
-//                        access; pre-M5 Metal has no s8xs8->s32 path and is
-//                        verification-only (§O.1), so no slot exists for it.
-// TODO(hardware, AMD):   CDNA MFMA INT8 (optional at launch) — pending access.
-//
-// struct HardwareVector { std::string_view backend; std::string_view
-//     driver_info; std::string_view vector_name; std::string_view
-//     digest_hex; std::string_view payload_sha256_hex; };
-// static constexpr HardwareVector kHardwareVectors[] = { /* pending */ };
+// BTX_REQUIRE_GPU_GOLDEN=1: empty digest/payload slots FAIL instead of warn
+// (release / silicon certification lane). Default CI leaves them empty and
+// WARN-skips so CPU-only containers stay green.
 // ---------------------------------------------------------------------------
+
+//! One cross-vendor hardware golden slot. Empty digest/payload => PENDING.
+struct HardwareVector {
+    std::string_view backend;             // "cuda" | "metal" | "hip"
+    std::string_view device_class;        // "H100" | "B200" | "Apple-M5" | "MI350" | …
+    std::string_view driver_info;         // empty until recorded on silicon
+    std::string_view vector_name;         // must match a kGoldenVectors[].name
+    std::string_view digest_hex;          // empty = pending (never invent)
+    std::string_view payload_sha256_hex;  // empty = pending (never invent)
+};
+
+// Schema rows for the required Appendix C-3 device classes. Digests intentionally
+// empty — fill only after a bit-identical silicon run against the CPU pins above.
+static constexpr HardwareVector kHardwareVectors[] = {
+    {"cuda", "H100", "", "V4-TV1-n256-r2-zero-seed", "", ""},
+    {"cuda", "H100", "", "V4-TV2-n256-r3-structured-seed", "", ""},
+    {"cuda", "B200", "", "V4-TV1-n256-r2-zero-seed", "", ""},
+    {"cuda", "B200", "", "V4-TV2-n256-r3-structured-seed", "", ""},
+    {"metal", "Apple-M5", "", "V4-TV1-n256-r2-zero-seed", "", ""},
+    {"metal", "Apple-M5", "", "V4-TV2-n256-r3-structured-seed", "", ""},
+    {"hip", "MI350", "", "V4-TV1-n256-r2-zero-seed", "", ""},
+    {"hip", "MI350", "", "V4-TV2-n256-r3-structured-seed", "", ""},
+};
+
+bool RequireGpuGolden()
+{
+    const char* v = std::getenv("BTX_REQUIRE_GPU_GOLDEN");
+    return v != nullptr && std::string_view{v} == "1";
+}
 
 CBlockHeader HeaderFromVector(const GoldenVector& tv)
 {
@@ -272,19 +294,71 @@ BOOST_AUTO_TEST_CASE(adjacent_nonce_vectors_diverge)
     BOOST_CHECK(p2 != p3);
 }
 
-BOOST_AUTO_TEST_CASE(hardware_backend_vectors_pending)
+BOOST_AUTO_TEST_CASE(hardware_backend_vectors_schema)
 {
-    // Placeholder gate for the real-hardware determinism matrix (see the
-    // TODO(hardware, ...) block above). This test exists so the pending
-    // work is tracked inside the suite itself; it intentionally asserts
-    // nothing about hardware we cannot run in CI. When a hardware vector
-    // set is recorded, add a HardwareVector table and compare each entry
-    // against the pinned CPU values of kGoldenVectors bit-for-bit.
-    BOOST_TEST_MESSAGE(
-        "matmul v4 hardware determinism vectors pending: H100, B200, Apple M5 "
-        "(requires physical hardware; CPU reference above is the consensus "
-        "definition per spec §N.3-v)");
-    BOOST_CHECK(true);
+    // Schema gate: every required device class has a row; digests stay empty
+    // until silicon fills them. With BTX_REQUIRE_GPU_GOLDEN=1, pending rows
+    // hard-fail so a certification lane cannot silently skip GPU goldens.
+    BOOST_REQUIRE_MESSAGE(std::size(kHardwareVectors) > 0,
+                           "kHardwareVectors schema must declare device slots");
+
+    size_t pending = 0;
+    size_t filled = 0;
+    for (const HardwareVector& hv : kHardwareVectors) {
+        BOOST_REQUIRE_MESSAGE(!hv.backend.empty(), "HardwareVector.backend required");
+        BOOST_REQUIRE_MESSAGE(!hv.device_class.empty(), "HardwareVector.device_class required");
+        BOOST_REQUIRE_MESSAGE(!hv.vector_name.empty(), "HardwareVector.vector_name required");
+
+        const GoldenVector* pin = nullptr;
+        for (const GoldenVector& gv : kGoldenVectors) {
+            if (gv.name == hv.vector_name) {
+                pin = &gv;
+                break;
+            }
+        }
+        BOOST_REQUIRE_MESSAGE(pin != nullptr,
+                              "HardwareVector.vector_name '" << hv.vector_name
+                                  << "' is not in kGoldenVectors");
+
+        const bool digest_pending = hv.digest_hex.empty();
+        const bool payload_pending = hv.payload_sha256_hex.empty();
+        if (digest_pending || payload_pending) {
+            ++pending;
+            const std::string msg =
+                std::string("PENDING-HARDWARE-GOLDEN: ") + std::string(hv.backend) + "/" +
+                std::string(hv.device_class) + " vector=" + std::string(hv.vector_name) +
+                " (digest/payload empty — fill after silicon run; never invent hex)";
+            if (RequireGpuGolden()) {
+                BOOST_REQUIRE_MESSAGE(false, msg << " [BTX_REQUIRE_GPU_GOLDEN=1]");
+            } else {
+                BOOST_WARN_MESSAGE(false, msg);
+            }
+            continue;
+        }
+
+        ++filled;
+        BOOST_REQUIRE_MESSAGE(
+            !pin->expected_digest_hex.empty() && !pin->expected_payload_sha256_hex.empty(),
+            hv.vector_name << ": cannot certify hardware golden against an UNPINNED CPU vector");
+        BOOST_CHECK_MESSAGE(
+            hv.digest_hex == pin->expected_digest_hex,
+            "CONSENSUS SPLIT: " << hv.backend << "/" << hv.device_class << " digest "
+                                << hv.digest_hex << " != CPU pin " << pin->expected_digest_hex
+                                << " on " << hv.vector_name);
+        BOOST_CHECK_MESSAGE(
+            hv.payload_sha256_hex == pin->expected_payload_sha256_hex,
+            "CONSENSUS SPLIT: " << hv.backend << "/" << hv.device_class << " payload sha256 "
+                                << hv.payload_sha256_hex << " != CPU pin "
+                                << pin->expected_payload_sha256_hex << " on " << hv.vector_name);
+        BOOST_CHECK_MESSAGE(
+            !hv.driver_info.empty(),
+            hv.backend << "/" << hv.device_class
+                       << ": filled golden must record driver_info (toolkit/OS/driver)");
+    }
+
+    BOOST_TEST_MESSAGE("kHardwareVectors: filled=" << filled << " pending=" << pending
+                                                   << " (BTX_REQUIRE_GPU_GOLDEN="
+                                                   << (RequireGpuGolden() ? "1" : "0") << ")");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -77,7 +77,11 @@ vendor-claimed (§S.3-6).
 4. emits a loud `BOOST_WARN` (`SKIPPED-PENDING-HARDWARE: ...`) for every GPU
    row that could not run — backend not compiled in, dispatch header absent,
    no admissible device — so a green CPU-only run can never be mistaken for
-   hardware verification;
+   hardware verification. Set `BTX_REQUIRE_GPU_GOLDEN=1` to turn those skips
+   (and empty `kHardwareVectors` digest slots in
+   `matmul_v4_determinism_vectors`) into hard failures for a certification
+   lane — **never invent digests**; leave schema rows empty until silicon
+   fills them;
 5. additionally pins the pure eligibility classifiers (§1 table) so the
    admission rule itself is regression-tested on every platform, GPU or not.
 
@@ -87,11 +91,22 @@ Run it (any build):
 build/bin/test_btx --run_test=matmul_v4_backend_determinism_tests \
   --log_level=warning
 # or: ctest --test-dir build -R "^matmul_v4" --output-on-failure
+
+# Silicon / release lane (fails if any GPU row would have been skipped):
+BTX_REQUIRE_GPU_GOLDEN=1 build/bin/test_btx \
+  --run_test=matmul_v4_backend_determinism_tests,matmul_v4_determinism_vectors \
+  --log_level=warning
 ```
 
 `--log_level=warning` (or lower) is required to see the
 `SKIPPED-PENDING-HARDWARE` / `UNPINNED` warnings; do not certify a backend
 from output that hides them.
+
+### Multi-arch CPU containers (no GPU)
+
+Use `contrib/docker/Dockerfile.tests` (Ubuntu 24.04). See header comments
+there and `doc/btx-matmul-v4.4-multiarch-qemu-status.md` for amd64/arm64/riscv64
+buildx + `matmul*` run commands.
 
 **Pass criterion for a backend on a given device:** the suite is green **and**
 the log contains

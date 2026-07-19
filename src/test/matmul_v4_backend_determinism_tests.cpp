@@ -159,11 +159,28 @@ std::vector<CpuReference> ComputeCpuReferences()
     return refs;
 }
 
+//! When BTX_REQUIRE_GPU_GOLDEN=1, skipped GPU rows hard-fail (certification
+//! lane). Default CI WARN-skips so CPU-only containers stay green.
+bool RequireGpuGolden()
+{
+    const char* v = std::getenv("BTX_REQUIRE_GPU_GOLDEN");
+    return v != nullptr && std::string_view{v} == "1";
+}
+
+void SkipOrFailGpuRow(std::string_view msg)
+{
+    if (RequireGpuGolden()) {
+        BOOST_REQUIRE_MESSAGE(false, msg << " [BTX_REQUIRE_GPU_GOLDEN=1]");
+    } else {
+        BOOST_WARN_MESSAGE(false, msg);
+    }
+}
+
 #if defined(BTX_V4_HAVE_ACCEL_DISPATCH)
 //! Run one compiled-in GPU backend over every vector and REQUIRE its
 //! (digest, payload) to be byte-identical to the CPU reference. Loudly warns
-//! (never silently passes) when the backend is compiled in but no admissible
-//! device is present at runtime.
+//! (or fails under BTX_REQUIRE_GPU_GOLDEN=1) when the backend is compiled in
+//! but no admissible device is present at runtime.
 void RunBackendRowOrWarn(matmul_v4::accel::Kind accel_kind,
                          matmul_v4::backend::Kind backend_kind,
                          const std::vector<CpuReference>& refs)
@@ -171,13 +188,13 @@ void RunBackendRowOrWarn(matmul_v4::accel::Kind accel_kind,
     const std::string name = matmul_v4::backend::ToString(backend_kind);
     const auto eligibility = matmul_v4::backend::EligibilityFor(backend_kind);
     if (!eligibility.available || !eligibility.admissible) {
-        BOOST_WARN_MESSAGE(false,
-                           "SKIPPED-PENDING-HARDWARE: v4 backend '" << name
-                               << "' compiled in but not runnable here (available="
-                               << eligibility.available << ", admissible=" << eligibility.admissible
-                               << ", reason=" << eligibility.reason
-                               << "). Run this suite on real hardware per doc/matmul-v4-gpu-backends.md; "
-                                  "the backend is NOT verified for mining until this row passes (§N.3-v).");
+        SkipOrFailGpuRow(
+            std::string("SKIPPED-PENDING-HARDWARE: v4 backend '") + name +
+            "' compiled in but not runnable here (available=" +
+            (eligibility.available ? "1" : "0") + ", admissible=" +
+            (eligibility.admissible ? "1" : "0") + ", reason=" + eligibility.reason +
+            "). Run this suite on real hardware per doc/matmul-v4-gpu-backends.md; "
+            "the backend is NOT verified for mining until this row passes (§N.3-v).");
         return;
     }
 
@@ -554,35 +571,37 @@ BOOST_AUTO_TEST_CASE(cross_backend_digest_determinism)
     // Each row either RUNS (and then any single differing bit is a hard
     // failure — a chain split) or is skipped with a loud BOOST_WARN so a
     // green CPU-only run can never be mistaken for hardware verification.
+    // Set BTX_REQUIRE_GPU_GOLDEN=1 to turn those skips into hard failures
+    // (silicon certification lane).
 
 #if defined(BTX_V4_HAVE_ACCEL_DISPATCH) && defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
     RunBackendRowOrWarn(matmul_v4::accel::Kind::CUDA, matmul_v4::backend::Kind::CUDA, refs);
 #else
-    BOOST_WARN_MESSAGE(false,
-                       "SKIPPED-PENDING-HARDWARE: CUDA v4 determinism row not compiled into this "
-                       "binary (needs -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON + matmul/accel_v4.h + IMMA "
-                       "hardware, Turing+). CUDA is NOT verified for v4 mining by this run — see "
-                       "doc/matmul-v4-gpu-backends.md (§B.6/§N.3-v).");
+    SkipOrFailGpuRow(
+        "SKIPPED-PENDING-HARDWARE: CUDA v4 determinism row not compiled into this "
+        "binary (needs -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON + matmul/accel_v4.h + IMMA "
+        "hardware, Turing+). CUDA is NOT verified for v4 mining by this run — see "
+        "doc/matmul-v4-gpu-backends.md (§B.6/§N.3-v).");
 #endif
 
 #if defined(BTX_V4_HAVE_ACCEL_DISPATCH) && defined(BTX_ENABLE_METAL)
     RunBackendRowOrWarn(matmul_v4::accel::Kind::METAL, matmul_v4::backend::Kind::METAL, refs);
 #else
-    BOOST_WARN_MESSAGE(false,
-                       "SKIPPED-PENDING-HARDWARE: Metal v4 determinism row not compiled into this "
-                       "binary (needs -DBTX_ENABLE_METAL=ON + matmul/accel_v4.h + Apple M5-class "
-                       "INT8 TensorOps hardware). Metal is NOT verified for v4 mining by this run — "
-                       "see doc/matmul-v4-gpu-backends.md (§O.1/§N.3-v).");
+    SkipOrFailGpuRow(
+        "SKIPPED-PENDING-HARDWARE: Metal v4 determinism row not compiled into this "
+        "binary (needs -DBTX_ENABLE_METAL=ON + matmul/accel_v4.h + Apple M5-class "
+        "INT8 TensorOps hardware). Metal is NOT verified for v4 mining by this run — "
+        "see doc/matmul-v4-gpu-backends.md (§O.1/§N.3-v).");
 #endif
 
 #if defined(BTX_V4_HAVE_ACCEL_DISPATCH) && defined(BTX_ENABLE_HIP)
     RunBackendRowOrWarn(matmul_v4::accel::Kind::HIP, matmul_v4::backend::Kind::HIP, refs);
 #else
-    BOOST_WARN_MESSAGE(false,
-                       "SKIPPED-PENDING-HARDWARE: HIP/ROCm v4 determinism row not compiled into "
-                       "this binary (needs -DBTX_ENABLE_HIP=ON + matmul/accel_v4.h + CDNA MFMA "
-                       "hardware). HIP is NOT verified for v4 mining by this run — see "
-                       "doc/matmul-v4-gpu-backends.md (§S.1/§N.3-v).");
+    SkipOrFailGpuRow(
+        "SKIPPED-PENDING-HARDWARE: HIP/ROCm v4 determinism row not compiled into "
+        "this binary (needs -DBTX_ENABLE_HIP=ON + matmul/accel_v4.h + CDNA MFMA "
+        "hardware). HIP is NOT verified for v4 mining by this run — see "
+        "doc/matmul-v4-gpu-backends.md (§S.1/§N.3-v).");
 #endif
 }
 

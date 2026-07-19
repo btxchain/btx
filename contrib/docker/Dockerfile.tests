@@ -1,9 +1,32 @@
-# Multi-arch-friendly unit-test image for MatMul / consensus correctness.
-# Build:  docker buildx build --platform linux/amd64 -f contrib/docker/Dockerfile.tests -t btx-test .
-# Run:    docker run --rm btx-test --run_test='matmul*'
+# Multi-arch unit-test image for MatMul / consensus correctness (Ubuntu 24.04).
 #
-# Ubuntu 24.04 (not Alpine): Alpine's stricter constexpr evaluation rejects
-# some Boost.Test / uint256 patterns used in the suite; Ubuntu matches CI.
+# This is the canonical multi-arch path (amd64 native + arm64/riscv64 under
+# QEMU via buildx). Alpine was abandoned: stricter constexpr + QEMU ICE under
+# high -j. Prefer this file over ad-hoc Dockerfiles under /tmp.
+#
+# --- Build (host) ---
+#   # amd64 (native):
+#   docker buildx build --platform linux/amd64 \
+#     -f contrib/docker/Dockerfile.tests -t btx-test:amd64 --load .
+#
+#   # arm64 / riscv64 (QEMU user emulation; slow — use JOBS<=8):
+#   docker buildx build --platform linux/arm64 \
+#     --build-arg JOBS=8 \
+#     -f contrib/docker/Dockerfile.tests -t btx-test:arm64 --load .
+#   docker buildx build --platform linux/riscv64 \
+#     --build-arg JOBS=8 \
+#     -f contrib/docker/Dockerfile.tests -t btx-test:riscv64 --load .
+#
+# --- Run matmul* ---
+#   docker run --rm btx-test:amd64 --run_test='matmul*'
+#   docker run --rm --platform linux/arm64 btx-test:arm64 --run_test='matmul*'
+#   docker run --rm --platform linux/riscv64 btx-test:riscv64 --run_test='matmul*'
+#
+# GPU golden certification is NOT done in this image (CPU-only). On silicon,
+# set BTX_REQUIRE_GPU_GOLDEN=1 when running matmul_v4_backend_determinism_tests
+# / matmul_v4_determinism_vectors (see doc/matmul-v4-gpu-backends.md).
+#
+# Status of in-flight QEMU lanes: doc/btx-matmul-v4.4-multiarch-qemu-status.md
 
 FROM ubuntu:24.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
