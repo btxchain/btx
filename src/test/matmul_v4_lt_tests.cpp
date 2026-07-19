@@ -357,39 +357,41 @@ BOOST_AUTO_TEST_CASE(matexpand_not_affine_in_raw)
 
 BOOST_AUTO_TEST_CASE(matexpand_position_salt_differential)
 {
-    // WITNESS (not a proof): position salts (i,j) and seed_W key change Extract
-    // outputs (dual C-15 / Lemma A position-salt binding). Does not prove
-    // absence of related-nonce amortization beyond per-cell ChaCha.
+    // WITNESS: MX Extract position salts (i, bj=j/32) and seed_W change outputs.
     const uint256 seed = ParseUint256(
         "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
     const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
-    const int32_t raw = 42;
-    BOOST_CHECK(lt::ExtractDequantMatExpand(raw, 0, 0, prf_key) !=
-                lt::ExtractDequantMatExpand(raw, 1, 0, prf_key));
-    BOOST_CHECK(lt::ExtractDequantMatExpand(raw, 0, 0, prf_key) !=
-                lt::ExtractDequantMatExpand(raw, 0, 1, prf_key));
+    int differ_i = 0;
+    int differ_bj = 0;
+    for (uint32_t i = 0; i < 64; ++i) {
+        if (lt::ExtractDequantMatExpand(42, i, 0, prf_key) !=
+            lt::ExtractDequantMatExpand(42, i + 1, 0, prf_key)) {
+            ++differ_i;
+        }
+        if (lt::ExtractDequantMatExpand(42, 0, i * 32, prf_key) !=
+            lt::ExtractDequantMatExpand(42, 0, (i + 1) * 32, prf_key)) {
+            ++differ_bj;
+        }
+    }
+    BOOST_CHECK(differ_i > 50);
+    BOOST_CHECK(differ_bj > 50);
     const uint256 seed2 = ParseUint256(
         "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdee");
     const uint256 prf_key2 = lt::DeriveMatExpandPrfKey(seed2);
-    BOOST_CHECK(lt::ExtractDequantMatExpand(raw, 0, 0, prf_key) !=
-                lt::ExtractDequantMatExpand(raw, 0, 0, prf_key2));
+    BOOST_CHECK(lt::ExtractDequantMatExpand(42, 0, 0, prf_key) !=
+                lt::ExtractDequantMatExpand(42, 0, 0, prf_key2));
 
-    // High-half position salt: flipping only bit 16 of i or j must change
-    // Extract. Proves the full 32-bit halves of nonce_second=(i<<32)|j matter;
-    // truncating to 16 bits would consensus-split and reopen a ~32× low-rank
-    // shortcut. Also pins AccelReplica (host twin of CUDA/HIP kernels).
+    // High-half position salt on row i (ChaCha nonce_second high half).
     constexpr uint32_t i0 = 0x00001234u;
-    constexpr uint32_t j0 = 0x00005678u;
-    const int8_t base = lt::ExtractDequantMatExpand(raw, i0, j0, prf_key);
-    const int8_t i_hi = lt::ExtractDequantMatExpand(raw, i0 | (1u << 16), j0, prf_key);
-    const int8_t j_hi = lt::ExtractDequantMatExpand(raw, i0, j0 | (1u << 16), prf_key);
+    constexpr uint32_t j0 = 0x00000005u;
+    const int8_t base = lt::ExtractDequantMatExpand(42, i0, j0, prf_key);
+    const int8_t i_hi = lt::ExtractDequantMatExpand(42, i0 | (1u << 16), j0, prf_key);
     BOOST_CHECK(base != i_hi);
-    BOOST_CHECK(base != j_hi);
-    BOOST_CHECK_EQUAL(base, lt::ExtractDequantMatExpandAccelReplica(raw, i0, j0, prf_key));
-    BOOST_CHECK_EQUAL(i_hi, lt::ExtractDequantMatExpandAccelReplica(raw, i0 | (1u << 16), j0, prf_key));
-    BOOST_CHECK_EQUAL(j_hi, lt::ExtractDequantMatExpandAccelReplica(raw, i0, j0 | (1u << 16), prf_key));
+    BOOST_CHECK_EQUAL(base, lt::ExtractDequantMatExpandAccelReplica(42, i0, j0, prf_key));
+    BOOST_CHECK_EQUAL(i_hi, lt::ExtractDequantMatExpandAccelReplica(42, i0 | (1u << 16), j0, prf_key));
 
     // Legacy SplitMix position salt still distinct (differential witness).
+    constexpr int32_t raw = 42;
     constexpr uint64_t salt = 0x1234567890ABCDEFULL;
     BOOST_CHECK(lt::MixMatExpandEntry(raw, 0, 0, salt) !=
                 lt::MixMatExpandEntry(raw, 0, 1, salt));
@@ -399,17 +401,13 @@ BOOST_AUTO_TEST_CASE(matexpand_position_salt_differential)
 
 BOOST_AUTO_TEST_CASE(matexpand_related_nonce_lane_xor_identity)
 {
-    // WITNESS (not a proof): MantPRF(raw) = ScalePRF(raw⊕Δ) with
-    // Δ = MANT⊕SCLE = 0x1e020211. Leftover C15-C related-nonce structure —
-    // PRF-consistent, not a ChaCha break, not MatExpand amortization.
-    // Firm pack (≥32 tuples + B32 Δ-collision negative control) mirrors
-    // contrib/matmul-c15-reviewer-kit/test-vectors.json::related_nonce_lane_xor.
-    // See doc/btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md.
-    // C-15 remains OPEN.
+    // WITNESS (not a proof): legacy ChaChaCell MantPRF(raw) = ScalePRF(raw⊕Δ)
+    // with Δ = MANT⊕SCLE = 0x1e020211. Demoted under MX Extract; still pins the
+    // ChaChaCell twin + kit related_nonce_lane_xor pack. C-15 remains OPEN.
     static_assert(lt::kMatExpandPrfLaneXorDelta == 0x1e020211u);
     const uint256 seed = ParseUint256(
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
-    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
+    const uint256 prf_key = lt::DeriveMatExpandPrfKeyChaChaCell(seed);
 
     // Firm pack: 32 related-nonce identity tuples (test-vectors.json).
     struct RelatedNonceTuple {
@@ -503,7 +501,8 @@ BOOST_AUTO_TEST_CASE(matexpand_related_nonce_lane_xor_identity)
                 const int8_t mu = matmul::v4::bmx4::SampleMantissaNibble(nib, accepted);
                 if (!accepted) continue;
                 const uint8_t e_from_mant_raw = static_cast<uint8_t>(mant & 0x3);
-                const int8_t v_rel = lt::ExtractDequantMatExpand(raw_rel, i, j, prf_key);
+                const int8_t v_rel =
+                    lt::ExtractDequantMatExpandChaChaCell(raw_rel, i, j, prf_key);
                 const int32_t expect =
                     static_cast<int32_t>(mu) * (int32_t{1} << e_from_mant_raw);
                 BOOST_CHECK_EQUAL(static_cast<int>(v_rel), static_cast<int>(expect));
@@ -540,11 +539,11 @@ BOOST_AUTO_TEST_CASE(matexpand_related_nonce_lane_xor_identity)
 
 BOOST_AUTO_TEST_CASE(matexpand_chacha_prf_golden_vectors)
 {
-    // Frozen ChaCha20-PRF Extract + full ENC_BMX4C_LT digest at kTestDim.
-    // Re-pin only when the normative Extract construction deliberately changes.
+    // Legacy ChaChaCell extract goldens (non-normative) + MX ENC_BMX4C_LT digest.
     const uint256 seed_w = ParseUint256(
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
-    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed_w);
+    const uint256 cell_key = lt::DeriveMatExpandPrfKeyChaChaCell(seed_w);
+    const uint256 mx_key = lt::DeriveMatExpandPrfKey(seed_w);
 
     struct ExtractCase {
         int32_t raw;
@@ -552,6 +551,7 @@ BOOST_AUTO_TEST_CASE(matexpand_chacha_prf_golden_vectors)
         uint32_t j;
         int8_t expected;
     };
+    // Frozen ChaChaCell goldens (legacy PRF tag).
     const ExtractCase extract_cases[] = {
         {0, 0, 0, 4},
         {1, 0, 1, 1},
@@ -562,21 +562,35 @@ BOOST_AUTO_TEST_CASE(matexpand_chacha_prf_golden_vectors)
         {static_cast<int32_t>(-2147483647 - 1), 9, 13, 0},
     };
     for (const auto& c : extract_cases) {
-        const int8_t got = lt::ExtractDequantMatExpand(c.raw, c.i, c.j, prf_key);
+        const int8_t got = lt::ExtractDequantMatExpandChaChaCell(c.raw, c.i, c.j, cell_key);
         BOOST_CHECK_EQUAL(static_cast<int>(got), static_cast<int>(c.expected));
         BOOST_CHECK(got >= -48 && got <= 48);
-        // Accel host replica must track CPU goldens (CUDA/HIP kernels twin this).
+    }
+
+    // Normative MX synthetic-tile Extract goldens (MXPRF tag).
+    const ExtractCase mx_cases[] = {
+        {0, 0, 0, 1},
+        {1, 0, 1, 1},
+        {-1, 1, 0, -1},
+        {42, 3, 5, -4},
+        {-1000, 7, 11, -2},
+        {2147483647, 2, 4, 8},
+        {static_cast<int32_t>(-2147483647 - 1), 9, 13, -2},
+    };
+    for (const auto& c : mx_cases) {
+        const int8_t got = lt::ExtractDequantMatExpand(c.raw, c.i, c.j, mx_key);
+        BOOST_CHECK_EQUAL(static_cast<int>(got), static_cast<int>(c.expected));
         BOOST_CHECK_EQUAL(static_cast<int>(lt::ExtractDequantMatExpandAccelReplica(
-                              c.raw, c.i, c.j, prf_key)),
+                              c.raw, c.i, c.j, mx_key)),
                           static_cast<int>(c.expected));
     }
 
-    // Broader parity grid: replica == normative Extract for many (raw,i,j).
+    // MX AccelReplica tracks normative synthetic-tile Extract.
     for (int32_t raw : {0, 1, -1, 7, -7, 97, -97, 1000, -1000, 1 << 20, -(1 << 20)}) {
         for (uint32_t i = 0; i < 5; ++i) {
             for (uint32_t j = 0; j < 5; ++j) {
-                const int8_t cpu = lt::ExtractDequantMatExpand(raw, i, j, prf_key);
-                const int8_t accel = lt::ExtractDequantMatExpandAccelReplica(raw, i, j, prf_key);
+                const int8_t cpu = lt::ExtractDequantMatExpand(raw, i, j, mx_key);
+                const int8_t accel = lt::ExtractDequantMatExpandAccelReplica(raw, i, j, mx_key);
                 BOOST_CHECK_EQUAL(static_cast<int>(cpu), static_cast<int>(accel));
             }
         }
@@ -587,13 +601,31 @@ BOOST_AUTO_TEST_CASE(matexpand_chacha_prf_golden_vectors)
     std::vector<unsigned char> payload;
     BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, digest, payload));
     BOOST_CHECK_EQUAL(digest.GetHex(),
-                      "4f4caf9ad38776a52bf1be71ecce41e9a5d7547834fc0df25e47f5f6ff129c7f");
+                      "d1c0cf51ef4bce683273745af172dd0d90a1e230662f9b1b1d05a87b8aecd002");
     // CPU bit-identical replay.
     uint256 digest2;
     std::vector<unsigned char> payload2;
     BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, digest2, payload2));
     BOOST_CHECK(digest == digest2);
     BOOST_CHECK(payload == payload2);
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_mx_scale_partitioned_right_matches_dense)
+{
+    // Lever-B miner lane: Q from (μ, e) must match dense Bhat·V.
+    auto header = MakeLTHeader(0x4d584237ULL, kTestDim);
+    std::vector<int8_t> mu;
+    std::vector<uint8_t> scales;
+    const auto Bhat = lt::ExpandOperandBMatExpandMx(header, kTestDim, lt::ExactGemmBackend{}, mu,
+                                                    scales);
+    const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
+    (void)seed_u;
+    uint32_t m = 0;
+    BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(kTestDim, m));
+    const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, kTestDim, m);
+    const auto Q_dense = matmul::v4::ComputeProjectedRight(Bhat, V, kTestDim, m);
+    const auto Q_mx = lt::ComputeProjectedRightMxBlockScaleLT(mu, scales, V, kTestDim, m);
+    BOOST_CHECK(Q_dense == Q_mx);
 }
 
 BOOST_AUTO_TEST_CASE(plan_lt_accel_known_classes)
@@ -1090,11 +1122,11 @@ BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q128_pin)
     BOOST_CHECK_EQUAL(slots[127].slot_id.GetHex(),
                       "cb5d2d89025e4675f88d3392adcfece8df050c80c951a491bf8ac6ff73465a2a");
     BOOST_CHECK_EQUAL(leaves[0].GetHex(),
-                      "2588d4d0f2d56d8512a7bf4d0bfb481bdc4c20f91075547da4963975c66dd178");
+                      "056b7099fbef2899bf6e488d2ebf0688896001a28922f55240620d644b28df4e");
     BOOST_CHECK_EQUAL(merkle.GetHex(),
-                      "3c8ba9bdb7f3464e8035daa0d9f72578a648dd509f67abe3266f627d41e5ae0d");
+                      "7e67f0d8cfd7895195a871a0d41283082084902f43e4202e16ae2bb669fec113");
     BOOST_CHECK_EQUAL(seal.GetHex(),
-                      "92919a488446f90f4d0b58380bd1672ca29ad6dae3107914f61663f80cf255d2");
+                      "b856426b669753c255dae3ff9907f0244568345774eb5e9b1c849dbec7eed63c");
 }
 
 BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q128)
@@ -1139,7 +1171,7 @@ BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q128)
 
     // Seal hex re-pinned after w=1024 MatExpand (digests in leaves change).
     BOOST_CHECK_EQUAL(seal128.GetHex(),
-                      "92919a488446f90f4d0b58380bd1672ca29ad6dae3107914f61663f80cf255d2");
+                      "b856426b669753c255dae3ff9907f0244568345774eb5e9b1c849dbec7eed63c");
 }
 
 BOOST_AUTO_TEST_CASE(matexpand_additivity_noncollapse)
@@ -1403,7 +1435,8 @@ BOOST_AUTO_TEST_CASE(matexpand_c15b_affine_surrogate_sketch_rejected)
         const uint32_t i = static_cast<uint32_t>(idx / n);
         const uint32_t j = static_cast<uint32_t>(idx % n);
         BOOST_REQUIRE_EQUAL(
-            static_cast<int>(lt::ExtractDequantMatExpand(bundle.B32[idx], i, j, bundle.prf_key)),
+            static_cast<int>(lt::ExtractDequantMatExpandAt(bundle.B32.data(), n, i, j,
+                                                           bundle.prf_key)),
             static_cast<int>(Bhat[idx]));
     }
 

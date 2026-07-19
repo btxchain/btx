@@ -26,6 +26,7 @@
 #include <vector>
 
 namespace matmul::v4::lt {
+
 namespace {
 
 namespace bx = matmul::v4::bmx4;
@@ -82,25 +83,28 @@ uint256 Sha256dPair(const uint256& a, const uint256& b)
     return uint256{Span<const unsigned char>{d2, sizeof(d2)}};
 }
 
-// MatExpand core: Bhat = Extract_PRF((G * W) * H), n*n row-major, |.| <= 48.
+// MatExpand core: Bhat = Extract_MX((G * W) * H), n*n row-major, |.| <= 48.
 //   G = ExpandProjectorBMX4C(seed_G, n, n)   template-scoped M11
 //   H = ExpandProjectorBMX4C(seed_H, w, n)   template-scoped M11
 //   W = ExpandProjectorBMX4C(seed_W, n, w)   panel (nonce/template per caller)
 //   Y  = G * W          (n x n)*(n x w) = n x w  exact s8xs8->s32, |Y| <= 36*n
 //   B32 = Y * H         (n x w)*(w x n) = n x n  exact s32xs8->s32
 //   prf_key = DeriveMatExpandPrfKey(seed_W)
-//   Bhat[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
+//   Bhat = MX-block Extract over B32 tiles (E8M0 scales + tile ChaCha M11)
 //
 // C-15 non-collapse: Extract is NOT an affine function of B32. A Freivalds
 // verifier that only sees Bhat therefore cannot reassociate through G/W/H to
 // skip the dense MatExpand GEMMs (the linear-fold shortcut class).
-// ChaCha20 PRF replaces SplitMix as the candidate mixer (external review open).
+// Lever-B MX Extract replaces per-cell ChaCha (external C-15 review still open).
 //
 // `backend` may redirect the two dense GEMMs to a bit-exact device path;
 // nullptr slots (or a false return) fall back to ExactGemm*.
 std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, uint32_t n,
-                                  const ExactGemmBackend& backend)
+                                  const ExactGemmBackend& backend,
+                                  std::vector<int8_t>* mu_out = nullptr,
+                                  std::vector<uint8_t>* scales_out = nullptr)
 {
+    assert(n % kMatExpandMxBlockLen == 0);
     const uint32_t w = kMatExpandPanelW;
     const uint256 seed_g = DeriveTaggedSeed(kMatExpandGTag, sizeof(kMatExpandGTag) - 1, tmpl);
     const uint256 seed_h = DeriveTaggedSeed(kMatExpandHTag, sizeof(kMatExpandHTag) - 1, tmpl);
@@ -118,15 +122,34 @@ std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, ui
         B32 = ExactGemmS32S8(Y, H, n, w, n);
     }
 
-    // Full 256-bit PRF key (not truncated LE64 salt) so A vs B / distinct
-    // nonces never share an Extract stream even when B32 collides.
     const uint256 prf_key = DeriveMatExpandPrfKey(seed_w);
-
+    const uint32_t nblk = n / kMatExpandMxBlockLen;
     std::vector<int8_t> out(static_cast<size_t>(n) * n);
+    if (mu_out) {
+        mu_out->assign(static_cast<size_t>(n) * n, 0);
+    }
+    if (scales_out) {
+        scales_out->assign(static_cast<size_t>(n) * nblk, 0);
+    }
+    int8_t mu_tile[kMatExpandMxBlockLen];
     for (uint32_t i = 0; i < n; ++i) {
-        for (uint32_t j = 0; j < n; ++j) {
-            const size_t idx = static_cast<size_t>(i) * n + j;
-            out[idx] = ExtractDequantMatExpand(B32[idx], i, j, prf_key);
+        for (uint32_t bj = 0; bj < nblk; ++bj) {
+            const int32_t* raw32 = B32.data() + static_cast<size_t>(i) * n +
+                                   static_cast<size_t>(bj) * kMatExpandMxBlockLen;
+            ExtractMatExpandMxTileMantissas(prf_key, i, bj, raw32, mu_tile);
+            const uint8_t e = DeriveMatExpandMxScale(prf_key, i, bj);
+            if (scales_out) {
+                (*scales_out)[static_cast<size_t>(i) * nblk + bj] = e;
+            }
+            const int32_t scale = int32_t{1} << e;
+            for (uint32_t t = 0; t < kMatExpandMxBlockLen; ++t) {
+                const size_t idx = static_cast<size_t>(i) * n +
+                                   static_cast<size_t>(bj) * kMatExpandMxBlockLen + t;
+                if (mu_out) {
+                    (*mu_out)[idx] = mu_tile[t];
+                }
+                out[idx] = static_cast<int8_t>(static_cast<int32_t>(mu_tile[t]) * scale);
+            }
         }
     }
     return out;
@@ -136,19 +159,13 @@ std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, ui
 
 namespace {
 
-// ChaCha20 PRF domain tag (lanes: kMatExpandPrfLaneMant/Scale in matmul_v4_lt.h).
-constexpr char kMatExpandPrfTag[] = "BTX_MATEXPAND_PRF_V44LT";
+// Normative MX PRF key tag (Lever B). Legacy cell ChaCha uses kMatExpandPrfTagCell.
+constexpr char kMatExpandPrfTag[] = "BTX_MATEXPAND_MXPRF_V44LT";
+constexpr char kMatExpandPrfTagCell[] = "BTX_MATEXPAND_PRF_V44LT";
+constexpr char kMatExpandMxScaleTag[] = "BTX_MATEXPAND_MXSCALE_V44LT";
 
-// One ChaCha20 keystream (≤64 bytes) bound to (raw,i,j,counter,lane).
-// Nonce96 = (raw⊕lane, pack(i,j)); block counter = remix. Matches RFC8439
-// layout used by crypto/chacha20.h — device twins must reproduce bit-exactly.
-//
-// Position salt (i,j) is MANDATORY and FULL-WIDTH uint32:
-//   nonce_second = (uint64_t{i} << 32) | uint64_t{j}
-// i occupies ChaCha nonce bits [63:32], j occupies [31:0]. Device kernels
-// MUST NOT truncate either half (e.g. to 16 bits): that would consensus-split
-// AND reopen a ~32× low-rank shortcut on B32=(G·W)·H. See
-// doc/btx-matmul-v4.4-lt-matexpand-position-salt.md.
+// One ChaCha20 keystream (≤64 bytes) bound to (raw,i,j,counter,lane) — LEGACY
+// per-cell path (ExtractDequantMatExpandChaChaCell / related-nonce tests).
 void MatExpandPrfKeystream(const uint256& prf_key, int32_t raw, uint32_t i, uint32_t j,
                            uint32_t remix, uint32_t lane, Span<std::byte> out)
 {
@@ -158,10 +175,24 @@ void MatExpandPrfKeystream(const uint256& prf_key, int32_t raw, uint32_t i, uint
     std::memcpy(key_bytes.data(), prf_key.data(), ChaCha20::KEYLEN);
     ChaCha20 chacha{Span<const std::byte>{key_bytes}};
     const uint32_t nonce_first = static_cast<uint32_t>(raw) ^ lane;
-    // Full 32-bit i and j — do not mask to 0xffff / cast through uint16_t.
     const uint64_t nonce_second = (static_cast<uint64_t>(i) << 32) | static_cast<uint64_t>(j);
     assert(((nonce_second >> 32) & 0xffffffffull) == static_cast<uint64_t>(i));
     assert((nonce_second & 0xffffffffull) == static_cast<uint64_t>(j));
+    chacha.Seek(ChaCha20::Nonce96{nonce_first, nonce_second}, remix);
+    chacha.Keystream(out);
+}
+
+// MX-block tile ChaCha: nonce_first = bj ⊕ 'MXBL', nonce_second = (i<<32)|bj.
+void MatExpandMxTileKeystream(const uint256& prf_key, uint32_t i, uint32_t bj, uint32_t remix,
+                              Span<std::byte> out)
+{
+    static_assert(sizeof(i) == 4 && sizeof(bj) == 4,
+                  "MatExpand MX tile salt (i,bj) must be full-width uint32");
+    std::array<std::byte, ChaCha20::KEYLEN> key_bytes{};
+    std::memcpy(key_bytes.data(), prf_key.data(), ChaCha20::KEYLEN);
+    ChaCha20 chacha{Span<const std::byte>{key_bytes}};
+    const uint32_t nonce_first = bj ^ kMatExpandPrfLaneMxBlock;
+    const uint64_t nonce_second = (static_cast<uint64_t>(i) << 32) | static_cast<uint64_t>(bj);
     chacha.Seek(ChaCha20::Nonce96{nonce_first, nonce_second}, remix);
     chacha.Keystream(out);
 }
@@ -171,7 +202,7 @@ void MatExpandPrfKeystream(const uint256& prf_key, int32_t raw, uint32_t i, uint
 int32_t FoldInt32ToEmax48(int32_t y)
 {
     // Legacy linear fold retained for adversarial differential tests only.
-    // Normative MatExpand uses ExtractDequantMatExpand (see MatExpandCore).
+    // Normative MatExpand uses MX-block ExtractDequantMatExpand (see MatExpandCore).
     int32_t a = y % 97;
     if (a < 0) a += 97;
     return a - 48; // [-48, 48]
@@ -186,6 +217,62 @@ uint256 DeriveMatExpandPrfKey(const uint256& seed_w)
     uint8_t out[CSHA256::OUTPUT_SIZE];
     hasher.Finalize(out);
     return uint256{Span<const unsigned char>{out, sizeof(out)}};
+}
+
+uint256 DeriveMatExpandPrfKeyChaChaCell(const uint256& seed_w)
+{
+    CSHA256 hasher;
+    hasher.Write(reinterpret_cast<const unsigned char*>(kMatExpandPrfTagCell),
+                 sizeof(kMatExpandPrfTagCell) - 1);
+    hasher.Write(seed_w.data(), uint256::size());
+    uint8_t out[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(out);
+    return uint256{Span<const unsigned char>{out, sizeof(out)}};
+}
+
+uint8_t DeriveMatExpandMxScale(const uint256& prf_key, uint32_t i, uint32_t bj)
+{
+    CSHA256 hasher;
+    hasher.Write(reinterpret_cast<const unsigned char*>(kMatExpandMxScaleTag),
+                 sizeof(kMatExpandMxScaleTag) - 1);
+    hasher.Write(prf_key.data(), uint256::size());
+    uint8_t ile[4], bjle[4];
+    WriteLE32(ile, i);
+    WriteLE32(bjle, bj);
+    hasher.Write(ile, sizeof(ile));
+    hasher.Write(bjle, sizeof(bjle));
+    uint8_t out[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(out);
+    return static_cast<uint8_t>(out[0] & 0x3);
+}
+
+void ExtractMatExpandMxTileMantissas(const uint256& prf_key, uint32_t i, uint32_t bj,
+                                     const int32_t raw32[kMatExpandMxBlockLen],
+                                     int8_t mu_out[kMatExpandMxBlockLen])
+{
+    std::array<std::byte, 64> ks{};
+    uint32_t remix = 0;
+    uint32_t filled = 0;
+    while (filled < kMatExpandMxBlockLen) {
+        MatExpandMxTileKeystream(prf_key, i, bj, remix, Span<std::byte>{ks});
+        for (size_t b = 0; b < ks.size() && filled < kMatExpandMxBlockLen; ++b) {
+            const uint8_t byte = static_cast<uint8_t>(ks[b]);
+            for (uint8_t shift : {0, 4}) {
+                if (filled >= kMatExpandMxBlockLen) break;
+                const uint8_t nibble = static_cast<uint8_t>((byte >> shift) & 0x0F);
+                const uint32_t raw_u = static_cast<uint32_t>(raw32[filled]);
+                // Bind cell to B32: mix raw into the nibble before M11 rejection.
+                const uint8_t mixed = static_cast<uint8_t>(
+                    (nibble ^ static_cast<uint8_t>((raw_u * 0x9E3779B9u) >> 28)) & 0x0F);
+                bool accepted = false;
+                const int8_t mu = matmul::v4::bmx4::SampleMantissaNibble(mixed, accepted);
+                if (accepted) {
+                    mu_out[filled++] = mu;
+                }
+            }
+        }
+        ++remix;
+    }
 }
 
 uint64_t MixMatExpandEntry(int32_t raw, uint32_t i, uint32_t j, uint64_t salt)
@@ -222,20 +309,12 @@ int8_t ExtractDequantMatExpandSplitMix(int32_t raw, uint32_t i, uint32_t j, uint
     }
 }
 
-int8_t ExtractDequantMatExpand(int32_t raw, uint32_t i, uint32_t j, const uint256& prf_key)
+int8_t ExtractDequantMatExpandChaChaCell(int32_t raw, uint32_t i, uint32_t j,
+                                         const uint256& prf_key)
 {
-    // Normative ENC_BMX4C_LT Extract: ChaCha20 PRF keystream → M11 rejection →
-    // independent scale lane e∈{0..3}. Domain-separated over (key, raw, i, j,
-    // remix). Stronger mixer candidate than SplitMix; C-15 external review still
-    // required before activation (do not claim cryptographically closed).
-    //
-    // (i,j) are full-width uint32 position salts packed into ChaCha
-    // nonce_second = (i<<32)|j — mandatory on every backend (CPU / CUDA / HIP /
-    // AccelReplica). Truncating the nonce word consensus-splits and reopens a
-    // ~32× low-rank shortcut. See MatExpandPrfKeystream +
-    // doc/btx-matmul-v4.4-lt-matexpand-position-salt.md.
+    // LEGACY per-cell ChaCha20 Extract — differential / related-nonce tests only.
     static_assert(sizeof(i) == 4 && sizeof(j) == 4,
-                  "ExtractDequantMatExpand position salt (i,j) must be full-width uint32");
+                  "ChaChaCell position salt (i,j) must be full-width uint32");
     std::array<std::byte, 8> mant_bytes{};
     std::array<std::byte, 8> scale_bytes{};
     uint32_t remix = 0;
@@ -253,11 +332,43 @@ int8_t ExtractDequantMatExpand(int32_t raw, uint32_t i, uint32_t j, const uint25
             const uint64_t scale_stream =
                 ReadLE64(reinterpret_cast<const unsigned char*>(scale_bytes.data()));
             const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
-            // Exact mul — never signed left-shift (negative mu << e is UB).
             return static_cast<int8_t>(static_cast<int32_t>(mu) * (int32_t{1} << e));
         }
         ++remix;
     }
+}
+
+int8_t ExtractDequantMatExpand(int32_t raw, uint32_t i, uint32_t j, const uint256& prf_key)
+{
+    // Normative Lever-B MX Extract (synthetic tile: all 32 raws = `raw`).
+    static_assert(sizeof(i) == 4 && sizeof(j) == 4,
+                  "ExtractDequantMatExpand position salt (i,j) must be full-width uint32");
+    const uint32_t bj = j / kMatExpandMxBlockLen;
+    const uint32_t t = j % kMatExpandMxBlockLen;
+    int32_t raw32[kMatExpandMxBlockLen];
+    for (uint32_t k = 0; k < kMatExpandMxBlockLen; ++k) {
+        raw32[k] = raw;
+    }
+    int8_t mu_tile[kMatExpandMxBlockLen];
+    ExtractMatExpandMxTileMantissas(prf_key, i, bj, raw32, mu_tile);
+    const uint8_t e = DeriveMatExpandMxScale(prf_key, i, bj);
+    return static_cast<int8_t>(static_cast<int32_t>(mu_tile[t]) * (int32_t{1} << e));
+}
+
+int8_t ExtractDequantMatExpandAt(const int32_t* B32, uint32_t n, uint32_t i, uint32_t j,
+                                 const uint256& prf_key)
+{
+    assert(B32 != nullptr);
+    assert(n % kMatExpandMxBlockLen == 0);
+    assert(i < n && j < n);
+    const uint32_t bj = j / kMatExpandMxBlockLen;
+    const uint32_t t = j % kMatExpandMxBlockLen;
+    const int32_t* raw32 = B32 + static_cast<size_t>(i) * n +
+                           static_cast<size_t>(bj) * kMatExpandMxBlockLen;
+    int8_t mu_tile[kMatExpandMxBlockLen];
+    ExtractMatExpandMxTileMantissas(prf_key, i, bj, raw32, mu_tile);
+    const uint8_t e = DeriveMatExpandMxScale(prf_key, i, bj);
+    return static_cast<int8_t>(static_cast<int32_t>(mu_tile[t]) * (int32_t{1} << e));
 }
 
 namespace {
@@ -333,27 +444,8 @@ uint64_t MatExpandPrfLaneLE64(const uint256& prf_key, int32_t raw, uint32_t i, u
 int8_t ExtractDequantMatExpandAccelReplica(int32_t raw, uint32_t i, uint32_t j,
                                            const uint256& prf_key)
 {
-    uint32_t key[8];
-    for (int w = 0; w < 8; ++w) {
-        key[w] = ReadLE32(prf_key.data() + static_cast<size_t>(w) * 4);
-    }
-    uint32_t remix = 0;
-    for (;;) {
-        const uint64_t mixed =
-            AccelReplicaMatExpandPrfLE64(key, raw, i, j, remix, kMatExpandPrfLaneMant);
-        for (int shift = 0; shift < 64; shift += 4) {
-            bool accepted = false;
-            const int8_t mu = matmul::v4::bmx4::SampleMantissaNibble(
-                static_cast<uint8_t>((mixed >> shift) & 0x0F), accepted);
-            if (!accepted) continue;
-            const uint64_t scale_stream =
-                AccelReplicaMatExpandPrfLE64(key, raw, i, j, remix, kMatExpandPrfLaneScale);
-            const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
-            // Exact mul — matches device kernels (never signed left-shift).
-            return static_cast<int8_t>(static_cast<int32_t>(mu) * (int32_t{1} << e));
-        }
-        ++remix;
-    }
+    // Must stay bit-identical to normative ExtractDequantMatExpand (MX synthetic tile).
+    return ExtractDequantMatExpand(raw, i, j, prf_key);
 }
 
 std::vector<int32_t> ExactGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
@@ -411,6 +503,46 @@ std::vector<int8_t> ExpandOperandBMatExpand(const CBlockHeader& header, uint32_t
     const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
     const uint256 seed_w = DeriveTaggedSeed(kMatExpandWTag, sizeof(kMatExpandWTag) - 1, header_hash);
     return MatExpandCore(tmpl, seed_w, n, backend);
+}
+
+std::vector<int8_t> ExpandOperandBMatExpandMx(const CBlockHeader& header, uint32_t n,
+                                              const ExactGemmBackend& backend,
+                                              std::vector<int8_t>& mu_out,
+                                              std::vector<uint8_t>& scales_out)
+{
+    const uint256 tmpl = matmul::v4::ComputeTemplateHash(header);
+    const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
+    const uint256 seed_w = DeriveTaggedSeed(kMatExpandWTag, sizeof(kMatExpandWTag) - 1, header_hash);
+    return MatExpandCore(tmpl, seed_w, n, backend, &mu_out, &scales_out);
+}
+
+std::vector<int32_t> ComputeProjectedRightMxBlockScaleLT(const std::vector<int8_t>& mu,
+                                                         const std::vector<uint8_t>& scales,
+                                                         const std::vector<int8_t>& V, uint32_t n,
+                                                         uint32_t m)
+{
+    assert(n % kMatExpandMxBlockLen == 0);
+    const uint32_t nblk = n / kMatExpandMxBlockLen;
+    assert(mu.size() == static_cast<size_t>(n) * n);
+    assert(scales.size() == static_cast<size_t>(n) * nblk);
+    assert(V.size() == static_cast<size_t>(n) * m);
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m, 0);
+    for (uint32_t i = 0; i < n; ++i) {
+        for (uint32_t bj = 0; bj < nblk; ++bj) {
+            const uint8_t e = scales[static_cast<size_t>(i) * nblk + bj];
+            const int32_t scale = int32_t{1} << e;
+            for (uint32_t c = 0; c < m; ++c) {
+                int32_t acc = 0;
+                for (uint32_t t = 0; t < kMatExpandMxBlockLen; ++t) {
+                    const uint32_t j = bj * kMatExpandMxBlockLen + t;
+                    acc += static_cast<int32_t>(mu[static_cast<size_t>(i) * n + j]) *
+                           static_cast<int32_t>(V[static_cast<size_t>(j) * m + c]);
+                }
+                Q[static_cast<size_t>(i) * m + c] += acc * scale;
+            }
+        }
+    }
+    return Q;
 }
 
 std::vector<int8_t> ExpandOperandAMatExpand(const CBlockHeader& header, uint32_t n)
@@ -824,8 +956,13 @@ bool WindowSketchMinerLT::MineSlot(const CBlockHeader& header, uint256& digest_o
     if (matmul::v4::ComputeTemplateHash(header) != m_template_hash) return false;
 
     const uint256 sigma = matmul::v4::DeriveSigma(header);
-    const std::vector<int8_t> Bhat = ExpandOperandBMatExpand(header, m_n, m_backend);
-    const std::vector<int32_t> Q = matmul::v4::ComputeProjectedRight(Bhat, m_V, m_n, m_m);
+    std::vector<int8_t> mu;
+    std::vector<uint8_t> scales;
+    const std::vector<int8_t> Bhat =
+        ExpandOperandBMatExpandMx(header, m_n, m_backend, mu, scales);
+    (void)Bhat; // dense Bhat retained for digest-path identity; Q uses MX lane
+    const std::vector<int32_t> Q =
+        ComputeProjectedRightMxBlockScaleLT(mu, scales, m_V, m_n, m_m);
     const std::vector<Fq> Chat = matmul::v4::ComputeCombineModQ(m_P, Q, m_n, m_m);
     digest_out = matmul::v4::ComputeSketchDigestFromFq(sigma, Chat);
     if (payload_out) {

@@ -3,10 +3,14 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """
-Standalone ChaCha20-PRF MatExpand Extract (ENC_BMX4C_LT).
+Standalone Lever-B MX-block MatExpand Extract (ENC_BMX4C_LT).
 
 Matches src/matmul/matmul_v4_lt.cpp::ExtractDequantMatExpand /
-DeriveMatExpandPrfKey / AccelReplicaMatExpandPrfLE64 bit-for-bit.
+DeriveMatExpandPrfKey / DeriveMatExpandMxScale /
+ExtractMatExpandMxTileMantissas bit-for-bit.
+
+Legacy ChaChaCell Extract (related-nonce differentials) is available as
+extract_dequant_matexpand_chacha_cell + derive_matexpand_prf_key_chacha_cell.
 
 No bitcoind / node build required. Stdlib only.
 
@@ -22,9 +26,13 @@ import struct
 import sys
 from pathlib import Path
 
-PRF_TAG = b"BTX_MATEXPAND_PRF_V44LT"
+MX_PRF_TAG = b"BTX_MATEXPAND_MXPRF_V44LT"
+MX_SCALE_TAG = b"BTX_MATEXPAND_MXSCALE_V44LT"
+CELL_PRF_TAG = b"BTX_MATEXPAND_PRF_V44LT"
 LANE_MANT = 0x4D414E54  # 'MANT'
 LANE_SCALE = 0x53434C45  # 'SCLE'
+LANE_MXBL = 0x4D58424C  # 'MXBL'
+BLOCK_LEN = 32
 
 # E2M1 → M11 rejection (SampleMantissaNibble). Rejected nibbles: 1,3,8,9,11.
 _M11_ACCEPTED = [False] * 16
@@ -63,8 +71,13 @@ def uint256_bytes_from_hex(hex_str: str) -> bytes:
 
 
 def derive_matexpand_prf_key(seed_w_hex: str) -> bytes:
-    """prf_key = SHA256(\"BTX_MATEXPAND_PRF_V44LT\" ‖ seed_w_le)."""
-    return hashlib.sha256(PRF_TAG + uint256_bytes_from_hex(seed_w_hex)).digest()
+    """prf_key = SHA256(\"BTX_MATEXPAND_MXPRF_V44LT\" ‖ seed_w_le)."""
+    return hashlib.sha256(MX_PRF_TAG + uint256_bytes_from_hex(seed_w_hex)).digest()
+
+
+def derive_matexpand_prf_key_chacha_cell(seed_w_hex: str) -> bytes:
+    """Legacy cell key = SHA256(\"BTX_MATEXPAND_PRF_V44LT\" ‖ seed_w_le)."""
+    return hashlib.sha256(CELL_PRF_TAG + uint256_bytes_from_hex(seed_w_hex)).digest()
 
 
 def _rotl32(x: int, n: int) -> int:
@@ -119,8 +132,13 @@ def chacha20_block_words(key32: bytes, counter: int, nonce_first: int, nonce_sec
     return [(x[i] + j[i]) & 0xFFFFFFFF for i in range(16)]
 
 
+def chacha20_block_bytes(key32: bytes, counter: int, nonce_first: int, nonce_second: int) -> bytes:
+    words = chacha20_block_words(key32, counter, nonce_first, nonce_second)
+    return b"".join(struct.pack("<I", w) for w in words)
+
+
 def matexpand_prf_le64(prf_key: bytes, raw: int, i: int, j: int, remix: int, lane: int) -> int:
-    """AccelReplicaMatExpandPrfLE64 / first 8 bytes of MatExpandPrfKeystream."""
+    """Legacy AccelReplicaMatExpandPrfLE64 / first 8 bytes of cell keystream."""
     nonce_first = (raw & 0xFFFFFFFF) ^ (lane & 0xFFFFFFFF)
     nonce_second = ((i & 0xFFFFFFFF) << 32) | (j & 0xFFFFFFFF)
     words = chacha20_block_words(prf_key, remix, nonce_first, nonce_second)
@@ -132,8 +150,56 @@ def sample_mantissa_nibble(nibble: int) -> tuple[bool, int]:
     return _M11_ACCEPTED[n], _M11_VALUE[n]
 
 
+def derive_matexpand_mx_scale(prf_key: bytes, i: int, bj: int) -> int:
+    """e = SHA256(MXSCALE ‖ prf_key ‖ LE32(i) ‖ LE32(bj))[0] & 3."""
+    digest = hashlib.sha256(
+        MX_SCALE_TAG + prf_key + struct.pack("<I", i & 0xFFFFFFFF) + struct.pack("<I", bj & 0xFFFFFFFF)
+    ).digest()
+    return digest[0] & 0x3
+
+
+def extract_mat_expand_mx_tile_mantissas(
+    prf_key: bytes, i: int, bj: int, raw32: list[int]
+) -> list[int]:
+    """32 M11 mantissas for tile (i, bj); raw32 length must be 32."""
+    if len(raw32) != BLOCK_LEN:
+        raise ValueError("raw32 must have length 32")
+    mu_out = [0] * BLOCK_LEN
+    filled = 0
+    remix = 0
+    while filled < BLOCK_LEN:
+        ks = chacha20_block_bytes(
+            prf_key, remix, (bj ^ LANE_MXBL) & 0xFFFFFFFF, ((i & 0xFFFFFFFF) << 32) | (bj & 0xFFFFFFFF)
+        )
+        for byte in ks:
+            if filled >= BLOCK_LEN:
+                break
+            for shift in (0, 4):
+                if filled >= BLOCK_LEN:
+                    break
+                nibble = (byte >> shift) & 0x0F
+                raw_u = raw32[filled] & 0xFFFFFFFF
+                mixed = (nibble ^ (((raw_u * 0x9E3779B9) & 0xFFFFFFFF) >> 28)) & 0x0F
+                accepted, mu = sample_mantissa_nibble(mixed)
+                if accepted:
+                    mu_out[filled] = mu
+                    filled += 1
+        remix += 1
+    return mu_out
+
+
 def extract_dequant_matexpand(raw: int, i: int, j: int, prf_key: bytes) -> int:
-    """Normative ExtractDequantMatExpand. Returns int8 in [-48, 48]."""
+    """Normative MX Extract (synthetic tile: all 32 raws = raw). Returns int8 in [-48, 48]."""
+    bj = j // BLOCK_LEN
+    t = j % BLOCK_LEN
+    raw32 = [raw] * BLOCK_LEN
+    mu = extract_mat_expand_mx_tile_mantissas(prf_key, i, bj, raw32)
+    e = derive_matexpand_mx_scale(prf_key, i, bj)
+    return int(mu[t]) * (1 << e)
+
+
+def extract_dequant_matexpand_chacha_cell(raw: int, i: int, j: int, prf_key: bytes) -> int:
+    """Legacy per-cell ChaCha Extract (related-nonce / differential tests only)."""
     remix = 0
     while True:
         mixed = matexpand_prf_le64(prf_key, raw, i, j, remix, LANE_MANT)
@@ -143,7 +209,6 @@ def extract_dequant_matexpand(raw: int, i: int, j: int, prf_key: bytes) -> int:
                 continue
             scale_stream = matexpand_prf_le64(prf_key, raw, i, j, remix, LANE_SCALE)
             e = scale_stream & 0x3
-            # Exact mul — never signed left-shift (negative mu << e is UB in C++).
             return int(mu) * (1 << e)
         remix += 1
 
@@ -160,8 +225,9 @@ def _i32(u: int) -> int:
     return u - 0x100000000 if u >= 0x80000000 else u
 
 
-def verify_related_nonce_pack(v: dict, prf_key: bytes) -> bool:
-    """Wave-3 Gap#5: ≥32 Mant/Scale XOR-identity tuples + B32 Δ negative control."""
+def verify_related_nonce_pack(v: dict, cell_prf_key: bytes) -> bool:
+    """Wave-3 Gap#5: ≥32 Mant/Scale XOR-identity tuples + B32 Δ negative control.
+    Uses legacy ChaChaCell key/lanes (demoted under MX Extract)."""
     import random
 
     rn = v.get("related_nonce_lane_xor")
@@ -179,11 +245,11 @@ def verify_related_nonce_pack(v: dict, prf_key: bytes) -> bool:
         ok = False
     for t in tuples:
         raw, i, j, remix = t["raw"], t["i"], t["j"], t["remix"]
-        mant = matexpand_prf_le64(prf_key, raw, i, j, remix, LANE_MANT)
-        scale = matexpand_prf_le64(prf_key, raw, i, j, remix, LANE_SCALE)
+        mant = matexpand_prf_le64(cell_prf_key, raw, i, j, remix, LANE_MANT)
+        scale = matexpand_prf_le64(cell_prf_key, raw, i, j, remix, LANE_SCALE)
         raw_rel = _i32((raw & 0xFFFFFFFF) ^ delta)
-        mant_rel = matexpand_prf_le64(prf_key, raw_rel, i, j, remix, LANE_MANT)
-        scale_rel = matexpand_prf_le64(prf_key, raw_rel, i, j, remix, LANE_SCALE)
+        mant_rel = matexpand_prf_le64(cell_prf_key, raw_rel, i, j, remix, LANE_MANT)
+        scale_rel = matexpand_prf_le64(cell_prf_key, raw_rel, i, j, remix, LANE_SCALE)
         if mant != scale_rel or scale != mant_rel:
             print(f"FAIL identity raw={raw} i={i} j={j} remix={remix}")
             ok = False
@@ -289,7 +355,22 @@ def verify_goldens(vectors: dict | None = None) -> int:
             print(f"FAIL accel range raw={raw}: got={got}")
             ok = False
 
-    if not verify_related_nonce_pack(v, prf_key):
+    cell_key = derive_matexpand_prf_key_chacha_cell(seed_w)
+    if "chacha_cell_prf_key_hex" in v and cell_key != bytes.fromhex(v["chacha_cell_prf_key_hex"]):
+        print(
+            f"FAIL cell_prf_key: got {cell_key.hex()} expected {v['chacha_cell_prf_key_hex']}"
+        )
+        ok = False
+    for case in v.get("chacha_cell_extract_goldens", []):
+        got = extract_dequant_matexpand_chacha_cell(case["raw"], case["i"], case["j"], cell_key)
+        if got != case["expected"]:
+            print(
+                f"FAIL cell extract raw={case['raw']} i={case['i']} j={case['j']}: "
+                f"got={got} expected={case['expected']}"
+            )
+            ok = False
+
+    if not verify_related_nonce_pack(v, cell_key):
         ok = False
 
     if ok:

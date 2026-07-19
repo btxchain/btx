@@ -1,8 +1,8 @@
 # BTX MatMul v4.4-LT — External C-15 adversarial review packet
 
-*Status: **DRAFT for independent cryptanalyst** — not closed. ChaCha20-PRF
-MatExpand Extract candidate is implemented with frozen goldens; this packet is
-the external review brief.*
+*Status: **DRAFT for independent cryptanalyst** — not closed. Lever-B MX/E2M1
+block-scale MatExpand Extract is implemented with frozen goldens; this packet is
+the external review brief. C-15 remains **OPEN**.*
 *Companions: `doc/btx-matmul-v4.4-lt-normative-spec.md`,
 `doc/btx-matmul-v4.4-lt-adversarial-analysis.md`,
 `doc/btx-matmul-v4.4-lt-c15-prereview-synthesis-2026-07-19.md`.*
@@ -47,15 +47,16 @@ MatExpand itself. See §1.1–§1.2.
 
 ## 0.1 Falsifiable C-15 security claim (FIXED cost model)
 
-> **ChaCha20 being a PRF does not imply a MatExpand work lower bound.**
-> Primitive security and PoW non-collapse are separate. A PASS on “ChaCha looks
-> like a PRF” is **not** a PASS on LT-C15.
+> **A PRF (or MX-block ChaCha tile stream) does not imply a MatExpand work lower
+> bound.** Primitive security and PoW non-collapse are separate. A PASS on
+> “ChaCha looks like a PRF” is **not** a PASS on LT-C15. Lever-B ~32× PRF
+> dilution vs per-cell ChaCha **does not** close C-15.
 
 ### Game (review target)
 
 | Item | Fixed definition |
 |---|---|
-| **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=1024`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative ChaCha20-PRF+M11 (`ENC_BMX4C_LT`) |
+| **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=1024`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative **MX-block E8M0 + tile ChaCha M11** (`ENC_BMX4C_LT`, Lever B) |
 | **Honest cost** `HonestMAC(n)` | Exact-int MAC count of one marginal nonce unit: **MatExpand-B** (`G·W` + `Y·H`) + **`B̂·V`** + **combine `P·Q`** (I1′: template A / `U`/`V`/`P` excluded from marginal). At `n=4096`: MatExpand-B `4n²w ≈ 6.87×10¹⁰`; `B̂·V` `2n²m ≈ 6.87×10¹⁰`; combine on `m×m` sketch (see shortcut/TMTO pre-review). |
 | **Adversary class** | Classical PPT relative to `HonestMAC`; may use poly-many adaptive honest MatExpand/digest queries and Freivalds verify transcripts at production EncDr rounds. Label the class explicitly (**MENC-Lin** / **MENC-Unres** / optional **MENC-Cubic** — table below). Primary FAIL class = **MENC-Lin** (linear / degree-≤2 entrywise surrogates). **MENC-Unres** may return INCONCLUSIVE. |
 | **Win** | Output an accepting Phase-A digest (or seal if SB annex in scope) with **advantage** `Adv ≥ ε` over Freivalds false-accept, while using exact-int MatExpand+BV+combine MAC count `≤ (1−δ)·HonestMAC(n)`. |
@@ -98,10 +99,11 @@ soundness, or any other standard named problem.
 
 ### Informal statement
 
-Under the normative ENC_BMX4C_LT MatExpand Extract (ChaCha20-PRF + M11 +
-position salts) and deep-`m` sketch/combine path, no classical PPT adversary in
-the §0.1 class wins the §0.1 game: accepting Phase-A digests (or seals if SB in
-scope) at advantage `≥ ε` while paying `≤ (1−δ)·HonestMAC(n)` exact-int MACs.
+Under the normative ENC_BMX4C_LT MatExpand Extract (Lever-B MX-block E8M0 +
+tile ChaCha M11 + position salts) and deep-`m` sketch/combine path, no classical
+PPT adversary in the §0.1 class wins the §0.1 game: accepting Phase-A digests
+(or seals if SB in scope) at advantage `≥ ε` while paying `≤ (1−δ)·HonestMAC(n)`
+exact-int MACs.
 
 ### Game (identical to §0.1; parameter pin)
 
@@ -109,7 +111,7 @@ scope) at advantage `≥ ε` while paying `≤ (1−δ)·HonestMAC(n)` exact-int
 |---|---|
 | **Assumption id** | `BTX-C15-NonCollapse-v1` |
 | **Aliases (class labels)** | **MENC-Lin** / **MENC-Unres** / **MENC-Cubic** — adversary-class aliases under this id (§0.1 table). Also: `BTX-MatExpand-NonCollapse-v1`, umbrella **MENC**. Same assumption; labels differ by restriction. |
-| **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=1024`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative ChaCha20-PRF+M11 (`ENC_BMX4C_LT`) |
+| **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=1024`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative MX-block E8M0 + tile ChaCha M11 (`ENC_BMX4C_LT`) |
 | **Honest cost** | `HonestMAC(n)` as in §0.1 (MatExpand-B + `B̂·V` + combine `P·Q`; I1′ template work excluded from marginal). MatExpand = Θ(n²·w); **cubic MAC floor** = deep-`m` sketch (`B̂·V` + combine) — MENC-Cubic scope, not Expand. |
 | **Adversary class** | Classical PPT vs `HonestMAC`; poly-many adaptive MatExpand/digest queries and Freivalds transcripts at production EncDr rounds. Primary FAIL class: **MENC-Lin** (linear / degree-≤2 entrywise Extract surrogates); deg-≤3 and spectral/TMTO surfaces are mandatory firm checklist items (below). **MENC-Unres** may return INCONCLUSIVE. |
 | **δ, ε** | `δ = 1/2`, `ε = 2⁻⁴⁰` above Freivalds false-accept (firm may retune in SOW — do not silently change) |
@@ -212,7 +214,7 @@ Any concrete win against §0.1 thresholds is a **FAIL** of
 | 2 | **Degree ≤ 3** | Polynomial / low-degree LS surrogates; require R² ≪ 0.05 on dense samples **or** exhibit usable rewrite |
 | 3 | **Spectral / low-rank residue** | Shared-φ / Fourier structure on `B̂` after Extract; usable rank ≪ `n` for reassociation (`U`/`V` are rank-transparent) |
 | 4 | **TMTO / cross-nonce** | Tables or partial Expand reuse across nonces / templates under I1′; cheaper than marginal MatExpand-B |
-| 5 | **Related-nonce Mant/Scale XOR** | Lane packing `MANT`/`SCLE` and any `Mant(raw)↔Scale(raw⊕Δ)` identity — amortization beyond per-cell ChaCha? |
+| 5 | **Related-nonce Mant/Scale XOR (legacy)** | Demoted ChaChaCell lanes `MANT`/`SCLE` and `Mant(raw)↔Scale(raw⊕Δ)` — not normative under MX; still a differential witness |
 | 6 | **Truncated position salt** | Collapse `(i,j)` to low bits / tiles; equivalence classes that reopen ~`n/w=4×` panel shortcut |
 
 ### Witnesses ≠ proof (in-tree + reviewer kit)
@@ -243,10 +245,10 @@ Domain tags (V44LT) and map (see normative spec for full text):
 ```
 Y = G · W          # s8×s8→s32, n×w, w=1024
 B32 = Y · H        # s32×s8→s32, n×n
-prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W)
-B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
-# ChaCha20 PRF (RFC8439 in-tree crypto/chacha20.h) over (key, raw, i, j, remix)
-# → M11 rejection nibbles → e∈{0..3}; μ·2^e ∈ [-48,48]  (exact mul, not <<)
+prf_key = SHA256("BTX_MATEXPAND_MXPRF_V44LT" ‖ seed_W)
+e[i,bj] = SHA256("BTX_MATEXPAND_MXSCALE_V44LT" ‖ prf_key ‖ LE32(i) ‖ LE32(bj))[0] & 3
+μ_tile = MX tile ChaCha M11 over B32[i, 32·bj ..]  # nonce_first=bj⊕'MXBL'
+B̂[i,j] = μ[i,j] · 2^{e[i,j/32]}   # exact mul; alphabet [-48,48]
 ```
 
 - Operand A: MatExpand with template-scoped `W_A` (I1′ amortized).
@@ -255,12 +257,14 @@ B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
 - Phase B seal (optional mode): `matmul_digest := SealWindowCommit(σ_anchor,
   Merkle(slot digests), Q*)` with `Q*∈{128,256,512}` and parent-MTP-threaded slot seeds.
 
-Legacy `FoldInt32ToEmax48` (`y % 97`) and SplitMix
-`ExtractDequantMatExpandSplitMix` are **non-normative** (differential tests
-only). A review that only breaks Fold/SplitMix does not break consensus MatExpand.
+Legacy `FoldInt32ToEmax48`, SplitMix `ExtractDequantMatExpandSplitMix`, and
+per-cell `ExtractDequantMatExpandChaChaCell` (`BTX_MATEXPAND_PRF_V44LT`) are
+**non-normative** (differential / related-nonce tests only). Related-nonce
+Mant/Scale XOR identity notes apply only to that demoted twin.
 
-**Candidate status:** ChaCha20-PRF Extract is selected for `ENC_BMX4C_LT`;
-**external review still required before activation.** Not closed.
+**Candidate status:** Lever-B MX-block Extract is selected for `ENC_BMX4C_LT`
+(~32× fewer MatExpand PRF blocks vs per-cell); **external review still required
+before activation.** C-15 **OPEN**. Not closed.
 
 ### 1.1 Rank-≤`w=1024` structure of `B32` (load-bearing)
 
@@ -280,7 +284,7 @@ At production `n=4096`, `w = kMatExpandPanelW = 1024`:
 |---|---|---|
 | `w=1024` | `kMatExpandPanelW` | ExactGemm floor replacing SHA XOF; `n/w=4` is intentional priced structure **after** Extract. Rationale: Rank-1 param lever A (fatter MatExpand vs Extract). |
 | M11 | E2M1-compatible `{0,±1,±2,±3,±4,±6}` | Frontier FP4 alphabet; prior BMX4 shortcut study. |
-| `e∈{0..3}` | Independent SCLE lane | Discrete scale; `|μ·2^e|≤48`. |
+| `e∈{0..3}` | E8M0 shared on 32-col blocks per row | Discrete scale; `|μ·2^e|≤48`. |
 | `b=2`, `m=n/2` | Deep-`m` under ENC-DR | ~3.6× tensor MACs; **cubic floor** is here (`B̂·V` / combine), not MatExpand. |
 | `Q*∈{128,256,512}` (def 256) | Consensus window | Phase A = miner schedule; Phase B = seal (**regtest live**; public inert). Aggregate commitment ≠ GEMM proof. |
 | Freivalds rounds | Consensus `nMatMulV4FreivaldsRounds` (mainnet pin **3**; see chainparams) | Soundness `~q^{-r}`; **TBD for firm SOW** if EncDr path uses a different effective round count — cite `SketchFreivalds` / verify path. |
@@ -289,7 +293,9 @@ At production `n=4096`, `w = kMatExpandPanelW = 1024`:
 
 ### 1.3 Three pillars (why implementers believe the candidate blocks the linear class)
 
-1. **Position-salted per-cell PRF** — ChaCha20 over `(prf_key, raw, i, j, remix)` with full-width `pack(i,j)`; kills shared-φ / translation collapses.
+1. **Position-salted MX-block Extract** — E8M0 scale per `(i,bj)` + one ChaCha20
+   stream per 32-col tile with full-width `pack(i,bj)` and B32-bound nibble mix;
+   kills shared-φ / translation collapses (~32× fewer PRF blocks vs per-cell).
 2. **Exact `F_q` binding** — sketch/combine over `q=2⁶¹−1` is exact integer; approximate / floating `B̂` is worthless for accepting digests.
 3. **Nonce-fresh `W_B` twice nonlinear** — operand B uses header-fresh `W_B` (distinct PRF key from `seed_W`) **and** nonlinear Extract; template A amortization (I1′) does not collapse marginal B work.
 
@@ -299,13 +305,13 @@ These are **candidate arguments**, not a closed proof.
 
 | Object | Encoding |
 |---|---|
-| `prf_key` | `SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W)` → 32 bytes; Bitcoin `uint256` **little-endian** byte order as `uint256::data()` / ChaCha20 key load (`memcpy` of 32 LE bytes into RFC8439 key). |
-| ChaCha Nonce96 | `nonce_first = uint32(raw) ⊕ lane`; `nonce_second = (uint64(i) << 32) \| uint64(j)` with **full 32-bit** `i` and `j` (**MUST NOT truncate** — consensus-splits and reopens ~32× low-rank shortcut). Lanes: `MANT=0x4D414E54`, `SCLE=0x53434C45`. |
-| Block counter | `remix` (starts at 0); Seek(Nonce96, remix) then first **8 bytes LE** of the keystream block (`ReadLE64`). |
-| Remix termination | Walk 16 nibbles of the MANT LE64; on accept, take SCLE LE64 at **same** `remix`, `e = stream & 3`, return; else `remix++` and retry. Unbounded until accept (almost-sure under IdealExtract). |
-| Scale | **Exact mul** `μ * (1 << e)` as `int32` then narrow to `int8` — **never** signed left-shift on negative `μ` (UB). |
+| `prf_key` | `SHA256("BTX_MATEXPAND_MXPRF_V44LT" ‖ seed_W)` → 32 bytes; Bitcoin `uint256` **little-endian** as `uint256::data()` / ChaCha20 key load. |
+| Scale `e(i,bj)` | `SHA256("BTX_MATEXPAND_MXSCALE_V44LT" ‖ prf_key ‖ LE32(i) ‖ LE32(bj))[0] & 3`. |
+| MX tile ChaCha | `nonce_first = bj ⊕ 0x4D58424C` (`MXBL`); `nonce_second = (uint64(i)<<32)\|bj` (**full-width**); `counter=remix`. Consume keystream nibbles; each candidate nibble XOR-mixed with `((uint32(raw)*0x9E3779B9)>>28)` before M11 rejection until 32 accepted μ. |
+| Legacy cell (non-normative) | `BTX_MATEXPAND_PRF_V44LT`; `nonce_first = uint32(raw) ⊕ lane`; lanes `MANT`/`SCLE` — related-nonce differentials only. |
+| Scale apply | **Exact mul** `μ * (1 << e)` as `int32` then narrow to `int8` — **never** signed left-shift on negative `μ` (UB). |
 
-Device CUDA/HIP twins and `ExtractDequantMatExpandAccelReplica` must match bit-exactly. Metal injects ExactGemm only; Extract stays on host. See **`doc/btx-matmul-v4.4-lt-matexpand-position-salt.md`** (device kernels MUST NOT truncate `(i,j)`; witness `matexpand_position_salt_differential`).
+Device CUDA/HIP twins and `ExtractDequantMatExpandAccelReplica` must match bit-exactly. Metal injects ExactGemm only; Extract stays on host. See **`doc/btx-matmul-v4.4-lt-matexpand-position-salt.md`**.
 
 ---
 
@@ -315,14 +321,15 @@ Device CUDA/HIP twins and `ExtractDequantMatExpandAccelReplica` must match bit-e
 panels and Freivalds probes linear in `B̂`, recovers accepting sketches without
 paying for MatExpand+BV+combine at the honest MAC floor (up to Freivalds soundness).
 
-**Why implementers believe ChaCha20-PRF+M11 blocks the linear class:**
+**Why implementers believe MX-block Extract+M11 blocks the linear class:**
 
 - Extract is not an affine function of the GEMM accumulator `B32[i,j]`.
-- Position salts `(i,j)` and full `seed_W`-derived PRF key kill translation /
-  panel-reuse collapses.
+- Position salts `(i,bj)` and full `seed_W`-derived PRF key kill translation /
+  panel-reuse collapses; B32-bound nibble mix keeps Extract non-XOF.
 - M11 rejection + discrete scale `e∈{0..3}` destroy homomorphism useful to
   Freivalds reassociation through `fold(GWH)`.
-- Mixer is a reviewed in-tree primitive (ChaCha20), not SplitMix64.
+- Mixer is reviewed in-tree ChaCha20 (tile stream), not SplitMix64.
+- ~32× PRF dilution is a **cost** change, not a C-15 closure.
 
 **Reviewer deliverables:**
 

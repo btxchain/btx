@@ -28,9 +28,11 @@ using int8_field::Fq;
 
 inline constexpr uint32_t kTileBLT = 2;
 /** MatExpand panel width. Raised 128→1024 to rebalance MatExpand GEMM (Θ(n²·w))
- *  vs per-cell ChaCha Extract (Θ(n²)) for the datacenter thesis. */
+ *  vs Extract (MX-block PRF, Θ(n²/32) ChaCha tiles) for the datacenter thesis. */
 inline constexpr uint32_t kMatExpandPanelW = 1024;
 inline constexpr int32_t kMatExpandEmax = 48;
+/** MX Extract E8M0 block length along columns (matches bmx4::kBlockLen). */
+inline constexpr uint32_t kMatExpandMxBlockLen = 32;
 /** Consensus Q* window sizes: {128,256,512}. Default 256 (Phase B fat window). */
 inline constexpr uint32_t kConsensusQStarDefault = 256;
 inline constexpr uint32_t kConsensusQStarMax = 512;
@@ -42,42 +44,66 @@ inline constexpr uint32_t kConsensusQStarMax = 512;
 
 [[nodiscard]] int32_t FoldInt32ToEmax48(int32_t y);
 
-/** ChaCha lane tags for MatExpand Extract nonce_first = raw⊕lane.
+/** Legacy per-cell ChaCha lane tags (non-normative ChaChaCell Extract only).
  *  Related-nonce identity: MantPRF(raw) = ScalePRF(raw⊕Δ) with
- *  Δ = kMatExpandPrfLaneMant ⊕ kMatExpandPrfLaneScale (= 0x1e020211).
- *  See doc/btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md. */
+ *  Δ = kMatExpandPrfLaneMant ⊕ kMatExpandPrfLaneScale (= 0x1e020211). */
 inline constexpr uint32_t kMatExpandPrfLaneMant = 0x4D414E54u;  // 'MANT'
 inline constexpr uint32_t kMatExpandPrfLaneScale = 0x53434C45u; // 'SCLE'
 inline constexpr uint32_t kMatExpandPrfLaneXorDelta =
     kMatExpandPrfLaneMant ^ kMatExpandPrfLaneScale; // 0x1e020211
+/** MX-block ChaCha nonce_first tag: bj ⊕ kMatExpandPrfLaneMxBlock. */
+inline constexpr uint32_t kMatExpandPrfLaneMxBlock = 0x4D58424Cu; // 'MXBL'
 
-/** Domain-separated ChaCha20 PRF key for normative MatExpand Extract.
- *  key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W). */
+/** Domain-separated PRF key for normative MX-block MatExpand Extract.
+ *  key = SHA256("BTX_MATEXPAND_MXPRF_V44LT" ‖ seed_W). */
 [[nodiscard]] uint256 DeriveMatExpandPrfKey(const uint256& seed_w);
 
-/** First 8 bytes (LE64) of MatExpand ChaCha keystream for (raw,i,j,remix,lane).
- *  AccelReplica / device-twin oracle for C15-C related-nonce identity tests.
+/** Legacy ChaChaCell PRF key: SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W).
+ *  Only for ExtractDequantMatExpandChaChaCell / related-nonce differentials. */
+[[nodiscard]] uint256 DeriveMatExpandPrfKeyChaChaCell(const uint256& seed_w);
+
+/** E8M0 scale e∈{0..3} for row i, column-block bj = j/32.
+ *  e = SHA256("BTX_MATEXPAND_MXSCALE_V44LT" ‖ prf_key ‖ i ‖ bj)_0 & 3. */
+[[nodiscard]] uint8_t DeriveMatExpandMxScale(const uint256& prf_key, uint32_t i, uint32_t bj);
+
+/** Fill 32 M11 mantissas for tile (i, bj) from raw32[0..31] (B32 row segment).
+ *  One ChaCha20 stream per tile; each accepted nibble is XOR-mixed with the
+ *  corresponding cell's raw so Extract depends on B32 (non-XOF). */
+void ExtractMatExpandMxTileMantissas(const uint256& prf_key, uint32_t i, uint32_t bj,
+                                     const int32_t raw32[kMatExpandMxBlockLen],
+                                     int8_t mu_out[kMatExpandMxBlockLen]);
+
+/** First 8 bytes (LE64) of legacy per-cell ChaCha keystream (ChaChaCell twin).
  *  Not used by consensus digests. */
 [[nodiscard]] uint64_t MatExpandPrfLaneLE64(const uint256& prf_key, int32_t raw, uint32_t i,
                                             uint32_t j, uint32_t remix, uint32_t lane);
 
-/** Position-salted SplitMix64 avalanche — LEGACY / differential tests only.
- *  Not used by normative ENC_BMX4C_LT MatExpand. */
+/** Position-salted SplitMix64 avalanche — LEGACY / differential tests only. */
 [[nodiscard]] uint64_t MixMatExpandEntry(int32_t raw, uint32_t i, uint32_t j, uint64_t salt);
 
 /** Legacy SplitMix+M11 Extract — differential tests only (non-normative). */
 [[nodiscard]] int8_t ExtractDequantMatExpandSplitMix(int32_t raw, uint32_t i, uint32_t j,
                                                      uint64_t salt);
 
-/** Normative MatExpand Extract (ENC_BMX4C_LT): ChaCha20 PRF over
- *  (prf_key, raw, i, j, remix) → M11 rejection + scale e∈{0..3}, μ·2^e ∈ [-48,48].
- *  `prf_key` MUST be DeriveMatExpandPrfKey(seed_W). NOT affine in `raw`.
- *  Position salts `i`,`j` are full-width uint32 in nonce_second=(i<<32)|j —
- *  backends MUST NOT truncate (see doc/btx-matmul-v4.4-lt-matexpand-position-salt.md).
- *  Candidate cryptographic mixer — external C-15 review still required before
- *  any public activation height is raised. */
+/** Legacy per-cell ChaCha20 Extract — differential / related-nonce tests only.
+ *  NOT used by normative ENC_BMX4C_LT MatExpand after Lever-B MX Extract. */
+[[nodiscard]] int8_t ExtractDequantMatExpandChaChaCell(int32_t raw, uint32_t i, uint32_t j,
+                                                       const uint256& prf_key);
+
+/** Normative MatExpand Extract (ENC_BMX4C_LT, Lever-B MX): E8M0 block scale +
+ *  tile ChaCha M11 mantissas. Single-cell convenience builds a synthetic tile
+ *  with all 32 raws equal to `raw` (tests/differentials). Consensus MatExpand
+ *  uses ExtractMatExpandMxTileMantissas over real B32 tiles.
+ *  `prf_key` MUST be DeriveMatExpandPrfKey(seed_W). Output ∈ [-48,48].
+ *  C-15 external review still required before any public height raise. */
 [[nodiscard]] int8_t ExtractDequantMatExpand(int32_t raw, uint32_t i, uint32_t j,
                                              const uint256& prf_key);
+
+/** Consensus-faithful single-cell Extract from a full B32 matrix (reads the
+ *  real 32-col tile containing (i,j)). Prefer this over the synthetic-tile
+ *  convenience API when comparing to MatExpandCore / ExpandOperand*. */
+[[nodiscard]] int8_t ExtractDequantMatExpandAt(const int32_t* B32, uint32_t n, uint32_t i,
+                                               uint32_t j, const uint256& prf_key);
 /** Host-callable replica of the CUDA/HIP DeviceExtractDequant ChaCha path.
  *  Must stay bit-identical to ExtractDequantMatExpand and to the device
  *  kernels — runnable parity tests pin this so a kernel edit cannot silently
@@ -119,6 +145,18 @@ struct ExactGemmBackend {
 [[nodiscard]] std::vector<int8_t> ExpandOperandBMatExpand(const CBlockHeader& header, uint32_t n);
 [[nodiscard]] std::vector<int8_t> ExpandOperandBMatExpand(const CBlockHeader& header, uint32_t n,
                                                           const ExactGemmBackend& backend);
+
+/** Expand Bhat plus MX mantissas / E8M0 scales for scale-partitioned B̂·V.
+ *  `mu_out` is n×n M11; `scales_out` is n×(n/32) with e(i, j/32). */
+[[nodiscard]] std::vector<int8_t> ExpandOperandBMatExpandMx(
+    const CBlockHeader& header, uint32_t n, const ExactGemmBackend& backend,
+    std::vector<int8_t>& mu_out, std::vector<uint8_t>& scales_out);
+
+/** Q = (μ · 2^e) · V with e shared on 32-col blocks per row (Lever-B MX layout).
+ *  Bit-identical to ComputeProjectedRight(Bhat, V) when Bhat[i,j]=μ[i,j]<<e[i,j/32]. */
+[[nodiscard]] std::vector<int32_t> ComputeProjectedRightMxBlockScaleLT(
+    const std::vector<int8_t>& mu, const std::vector<uint8_t>& scales,
+    const std::vector<int8_t>& V, uint32_t n, uint32_t m);
 
 [[nodiscard]] std::pair<uint256, uint256> DeriveProjectorSeedsBMX4CLT(const CBlockHeader& header);
 

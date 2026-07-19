@@ -25,27 +25,29 @@ Domain tags (V44LT):
 ```
 Y = G · W          # s8×s8→s32, n×w, w=1024  →  O(n²·w) MACs
 B32 = Y · H        # s32×s8→s32, n×n         →  O(n²·w) MACs; rank(B32)≤1024
-prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W)
-B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
-# ChaCha20 PRF keystream (RFC8439; key=prf_key LE32 bytes;
-# Nonce96=(uint32(raw)⊕lane, (uint64(i)<<32)|j); counter=remix;
-# lanes MANT/SCLE; first 8 bytes LE) → M11 rejection → e∈{0..3};
-# value = μ·2^e ∈ [-48,48] via exact mul (never signed <<)
+prf_key = SHA256("BTX_MATEXPAND_MXPRF_V44LT" ‖ seed_W)
+# Per row i, column-block bj=j/32 (kBlockLen=32; require n%32==0):
+e[i,bj] = SHA256("BTX_MATEXPAND_MXSCALE_V44LT" ‖ prf_key ‖ LE32(i) ‖ LE32(bj))[0] & 3
+μ[i, 32·bj .. 32·bj+31] = MX tile ChaCha20 M11 (nonce_first=bj⊕'MXBL',
+  nonce_second=(i<<32)|bj; nibble XOR-mixed with B32 raw; remix on exhaustion)
+B̂[i,j] = μ[i,j] · 2^{e[i,j/32]}   # exact mul; alphabet [-48,48] unchanged
 ```
 
 **Byte-encoding pin (normative):** see external C-15 packet
 `doc/btx-matmul-v4.4-lt-external-c15-packet.md` §1.4 (endianness of `prf_key`,
-`pack(i,j)`, remix termination, exact mul). Device twins must match bit-exactly.
-Full-width `(i,j)` (MUST NOT truncate): `doc/btx-matmul-v4.4-lt-matexpand-position-salt.md`.
+tile salts, remix termination, exact mul). Device twins must match bit-exactly.
+Full-width `(i,bj)` (MUST NOT truncate): `doc/btx-matmul-v4.4-lt-matexpand-position-salt.md`.
 
-`FoldInt32ToEmax48` (`y % 97`) and SplitMix `MixMatExpandEntry` /
-`ExtractDequantMatExpandSplitMix` are **non-normative** (differential tests only).
+`FoldInt32ToEmax48`, SplitMix `ExtractDequantMatExpandSplitMix`, and legacy
+per-cell `ExtractDequantMatExpandChaChaCell` (`BTX_MATEXPAND_PRF_V44LT`) are
+**non-normative** (differential / related-nonce tests only).
 
-**Extractor status:** ChaCha20-PRF Extract is the **selected consensus candidate**
-under `ENC_BMX4C_LT`. It is **not** cryptographically closed — external C-15
-review remains required before any public activation height is raised.
-**ChaCha-as-PRF ≠ MatExpand work lower bound.** Public `nMatMulDRLTHeight` stays
-`INT32_MAX`.
+**Extractor status:** Lever-B **MX/E2M1 block-scale Extract** is the **selected
+consensus candidate** under `ENC_BMX4C_LT` (~32× fewer MatExpand PRF blocks vs
+per-cell ChaCha). It is **not** cryptographically closed — external C-15 review
+remains required before any public activation height is raised.
+**PRF-as-primitive ≠ MatExpand work lower bound.** Public `nMatMulDRLTHeight`
+stays `INT32_MAX`. C-15 stays **OPEN**.
 
 **Scoping:** MatExpand is `O(n²·w)`; the honest cubic-ish MAC floor is deep-`m`
 `B̂·V` / combine (`m=n/2`). Linearized Extract would reopen ~`n/w≈4×` panel
@@ -122,8 +124,9 @@ Linker `*_stub.cpp` files remain only for builds with the corresponding `BTX_ENA
 2. B200/5090 nonce/s ≥ ~4× on fat shape
 3. Nonce/$ proxies: B200 ≥ 5090 (honest: fleets may still invert)
 4. MI350 FER / OCP MX exactness PASS
-5. MatExpand adversarial review: ChaCha20-PRF candidate selected (internal
-   non-affinity + golden vectors); external C-15 still required — not closed
+5. MatExpand adversarial review: Lever-B MX-block Extract selected (internal
+   non-affinity + golden vectors); external C-15 still required — not closed;
+   re-measure B200/5090 after Lever B — **do not claim ≥4×** without new JSON
 6. Tip verify budget with sketch-cache
 7. Header-PoW + authenticated chainwork blockers unchanged
 8. Phase B seal-as-PoW tip-verify budget soak + seal-binding review if Rank-1
