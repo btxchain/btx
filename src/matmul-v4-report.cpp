@@ -382,6 +382,8 @@ struct Args {
     bool mt24{false};                 // run the M-t24 boundary-vector suite (forced on for bmx4c)
     bool window_explicit{false};      // true if --window / env set the window
     bool telemetry_only{false};       // raw LT device timing; no CPU/reference/readiness gates
+    bool lt_raw_only_alias{false};    // compatibility spelling from the CUDA review harness
+    bool lt_raw_full_window_alias{false}; // explicit alias; telemetry always runs full Q*
 };
 
 void PrintUsage(std::ostream& os)
@@ -397,6 +399,8 @@ void PrintUsage(std::ostream& os)
        << "                                   env BTX_MATMUL_V4_REPORT_WINDOW)\n"
        << "  --telemetry-only                 bmx4c-lt CUDA/HIP raw timing only; skips CPU reference/stages\n"
        << "                                   and never publishes a certified/readiness/ASERT rate\n"
+       << "  --lt-raw-only                    compatibility alias for --telemetry-only\n"
+       << "  --lt-raw-full-window             implies --lt-raw-only; PR telemetry always times full Q*\n"
        << "  --rounds <R>                     Freivalds rounds for the verify gate (default 3)\n"
        << "  --quick                          also run a fast n=256 and n=512 lane (v4.1 profile only)\n"
        << "  --device-peak-int8-tops <TOPS>   advertised INT8 TOPS, for the tensor-utilization estimate\n"
@@ -425,6 +429,15 @@ bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
         }
         else if (a == "--mt24") { args.mt24 = true; }
         else if (a == "--telemetry-only") { args.telemetry_only = true; }
+        else if (a == "--lt-raw-only") {
+            args.telemetry_only = true;
+            args.lt_raw_only_alias = true;
+        }
+        else if (a == "--lt-raw-full-window") {
+            args.telemetry_only = true;
+            args.lt_raw_only_alias = true;
+            args.lt_raw_full_window_alias = true;
+        }
         else if (a == "--n") { const char* v = need(i); if (!v) return false; args.n = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
         else if (a == "--window") {
             const char* v = need(i); if (!v) return false;
@@ -460,7 +473,7 @@ bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
         args.window = matmul::v4::lt::kConsensusQStarDefault;
     }
     if (args.telemetry_only && args.profile != "bmx4c-lt") {
-        err = "--telemetry-only requires --profile bmx4c-lt";
+        err = "LT raw/telemetry mode requires --profile bmx4c-lt";
         return false;
     }
     return true;
@@ -1501,6 +1514,10 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     std::cout << "\n[TELEMETRY-ONLY] skipping CPU exactness and stage timing\n"
                  "  This mode cannot certify bit-exactness, tensor majority, readiness, ASERT, "
                  "or a silicon-comparable activation rate.\n";
+    if (args.lt_raw_only_alias) {
+        std::cout << "  --lt-raw-only compatibility spelling accepted; timing semantics are "
+                     "identical to --telemetry-only.\n";
+    }
 
     LtThroughputResult throughput;
     if (!lt::IsValidConsensusQStar(args.window)) {
@@ -1553,6 +1570,9 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     root.pushKV("profile", "bmx4c-lt");
     root.pushKV("measurement_mode", "telemetry-only-device-resident-qstar");
     root.pushKV("telemetry_only", true);
+    root.pushKV("lt_raw_only_alias", args.lt_raw_only_alias);
+    root.pushKV("lt_raw_full_window_alias_requested", args.lt_raw_full_window_alias);
+    root.pushKV("lt_raw_full_window", true);
     root.pushKV("rate_unit", "digest_nonces_per_s");
     root.pushKV("telemetry_rate_valid", telemetry_obtained);
     if (telemetry_obtained) {

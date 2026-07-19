@@ -179,7 +179,11 @@ Kind ResolveBackend();
  *  ComputeDigestsBMX4CDispatched: every potential winner (digest <= win_target)
  *  is host-verified via matmul::v4::lt::VerifySketchBMX4CLT before acceptance;
  *  on any mismatch or device error the whole window falls back to the CPU
- *  WindowSketchMinerLT / ComputeDigestBMX4CLT reference. */
+ *  WindowSketchMinerLT / ComputeDigestBMX4CLT reference. `payloads_out` remains
+ *  window-sized, but entries for losing slots (digest > win_target) are empty
+ *  on every backend, including CPU/fallback. Only potential winners retain a
+ *  payload for verification/reseal, so callers must not expect losing Chat
+ *  material to be reconstructed. */
 [[nodiscard]] bool ComputeDigestsBMX4CLTDispatched(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
                                                    const uint256& win_target,
                                                    std::vector<uint256>& digests_out,

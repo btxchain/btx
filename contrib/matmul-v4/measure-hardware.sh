@@ -63,6 +63,8 @@
 #
 #   contrib/matmul-v4/measure-hardware.sh cuda --profile bmx4c-lt \
 #       --n 4096 --window 256 --telemetry-only
+#   CUDA-review compatibility spelling (same full-Q* telemetry semantics):
+#       --n 4096 --window 256 --lt-raw-only --lt-raw-full-window
 #
 # Emits schema_version 3 JSON with MatExpand/Q* stage boundaries. CUDA/HIP now
 # use a full-header batch entry that preserves every nonce-bound seed, generates
@@ -117,7 +119,11 @@ TELEMETRY_ONLY=0
 prev=""
 for a in "$@"; do
   if [ "$prev" = "--profile" ]; then PROFILE="$a"; fi
-  if [ "$a" = "--telemetry-only" ]; then TELEMETRY_ONLY=1; fi
+  if [ "$a" = "--telemetry-only" ] ||
+     [ "$a" = "--lt-raw-only" ] ||
+     [ "$a" = "--lt-raw-full-window" ]; then
+    TELEMETRY_ONLY=1
+  fi
   prev="$a"
 done
 

@@ -688,8 +688,10 @@ BOOST_AUTO_TEST_CASE(accel_dispatch_matches_reference)
     std::vector<CBlockHeader> headers{header};
     std::vector<uint256> digests;
     std::vector<std::vector<unsigned char>> payloads;
+    const uint256 easy_target = ParseUint256(
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
     BOOST_REQUIRE(matmul_v4::accel::ComputeDigestsBMX4CLTDispatched(
-        headers, kTestDim, /*rounds=*/2, uint256::ONE, digests, payloads));
+        headers, kTestDim, /*rounds=*/2, easy_target, digests, payloads));
     BOOST_REQUIRE_EQUAL(digests.size(), 1U);
     BOOST_REQUIRE_EQUAL(payloads.size(), 1U);
     uint256 ref;
@@ -697,6 +699,25 @@ BOOST_AUTO_TEST_CASE(accel_dispatch_matches_reference)
     BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref, ref_payload));
     BOOST_CHECK(digests[0] == ref);
     BOOST_CHECK(payloads[0] == ref_payload);
+}
+
+BOOST_AUTO_TEST_CASE(accel_dispatch_drops_losing_payload)
+{
+    auto header = MakeLTHeader(22, kTestDim);
+    uint256 ref;
+    std::vector<unsigned char> ref_payload;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref, ref_payload));
+    BOOST_REQUIRE(UintToArith256(ref) > 0);
+    const uint256 losing_target = ArithToUint256(UintToArith256(ref) - 1);
+
+    std::vector<uint256> digests;
+    std::vector<std::vector<unsigned char>> payloads;
+    BOOST_REQUIRE(matmul_v4::accel::ComputeDigestsBMX4CLTDispatched(
+        {header}, kTestDim, /*rounds=*/2, losing_target, digests, payloads));
+    BOOST_REQUIRE_EQUAL(digests.size(), 1U);
+    BOOST_REQUIRE_EQUAL(payloads.size(), 1U);
+    BOOST_CHECK(digests[0] == ref);
+    BOOST_CHECK(payloads[0].empty());
 }
 
 #if defined(BTX_ENABLE_METAL)

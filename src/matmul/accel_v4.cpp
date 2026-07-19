@@ -22,6 +22,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cassert>
 #include <cstdlib>
 #include <exception>
 #include <mutex>
@@ -349,6 +350,17 @@ bool ComputeBatchCpuReferenceBMX4CLT(const std::vector<CBlockHeader>& headers, u
     }
     (void)rounds;
     return true;
+}
+
+void DropLosingPayloadsBMX4CLT(const uint256& win_target,
+                               const std::vector<uint256>& digests,
+                               std::vector<std::vector<unsigned char>>& payloads)
+{
+    assert(digests.size() == payloads.size());
+    const arith_uint256 target{UintToArith256(win_target)};
+    for (size_t i = 0; i < digests.size(); ++i) {
+        if (UintToArith256(digests[i]) > target) payloads[i].clear();
+    }
 }
 
 bool TryDeviceDigestsBMX4CLT(Kind backend, const std::vector<CBlockHeader>& headers, uint32_t n,
@@ -861,7 +873,10 @@ bool ComputeDigestsBMX4CLTDispatched(const std::vector<CBlockHeader>& headers, u
 
     const Kind backend = ResolveBackend();
     if (backend == Kind::CPU) {
-        return ComputeBatchCpuReferenceBMX4CLT(headers, n, rounds, digests_out, payloads_out);
+        const bool ok = ComputeBatchCpuReferenceBMX4CLT(
+            headers, n, rounds, digests_out, payloads_out);
+        if (ok) DropLosingPayloadsBMX4CLT(win_target, digests_out, payloads_out);
+        return ok;
     }
 
     std::vector<uint256> accel_digests;
@@ -927,7 +942,10 @@ bool ComputeDigestsBMX4CLTDispatched(const std::vector<CBlockHeader>& headers, u
     }
 
     RecordBatchFallback(backend, error);
-    return ComputeBatchCpuReferenceBMX4CLT(headers, n, rounds, digests_out, payloads_out);
+    const bool ok = ComputeBatchCpuReferenceBMX4CLT(
+        headers, n, rounds, digests_out, payloads_out);
+    if (ok) DropLosingPayloadsBMX4CLT(win_target, digests_out, payloads_out);
+    return ok;
 }
 
 Stats ProbeStats()
