@@ -115,9 +115,9 @@ def print_gates() -> None:
         "G2 B200/5090 nonce/s >= ~4x on fat MatExpand+Q* miner schedule",
         "G3 Nonce/$ proxies: B200 >= 5090 (rental + purchase) — operator-supplied costs only",
         "G4 MI350 FER / OCP MX exactness PASS",
-        "G5 MatExpand adversarial review (ChaCha20-PRF candidate selected; external C-15 still required)",
+        "G5 MatExpand adversarial review (ChaCha20-PRF+M11 candidate; external C-15 OPEN — not closed)",
         "G6 Tip verify budget with sketch-cache within policy",
-        "G7 Header-PoW + authenticated chainwork blockers still required",
+        "G7 Header-PoW + authenticated chainwork blockers still required (bit-26 wire withdrawn)",
         "G8 Phase B seal-as-PoW only if Rank-1 launch requires consensus-bound windows",
     ]
     print("Rank-1 ENC-DR-LT GO/NO-GO gates (silicon / review — not auto-pass):")
@@ -474,7 +474,8 @@ def evaluate(
         reasons.append(
             "G5 external C-15: NOT acknowledged — pass --ack-external-c15 only after an "
             "independent cryptanalyst completes doc/btx-matmul-v4.4-lt-external-c15-packet.md "
-            "(internal Mix+M11 closure is not sufficient)."
+            "(internal ChaCha20-PRF + non-affinity witnesses are not sufficient; "
+            "C-15 remains OPEN until independent review)."
         )
 
     # G6/G7/G8 — measurement/review blockers; this aggregator cannot invent them.

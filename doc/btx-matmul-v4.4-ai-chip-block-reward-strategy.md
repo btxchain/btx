@@ -139,6 +139,6 @@ Consensus **has not** exhausted levers — but it has exhausted *miner-local* on
 
 > **ENC-DR + deeper `m` + tensor-native expand + consensus-bound fat Q\*, with exact FP8/MXFP4 miner lanes for Rubin — not another INT8 alphabet, not NVFP4 lock-in, not a SHA-heavier proof system.**
 
-**Implementation status (this branch):** Rank-1 is scaffolded as **ENC-DR-LT** (`doc/btx-matmul-v4.4-lt-normative-spec.md`, adversarial: `doc/btx-matmul-v4.4-lt-adversarial-analysis.md`): nonlinear MatExpand (Mix+M11 Extract), deep-m `b=2`, Q* fat miner windows (Phase A; seal-as-PoW Phase B), ASERT DRLT rescale hooks, `ComputeDigestsBMX4CLTDispatched`, CUDA/Metal/HIP surfaces, inert `nMatMulDRLTHeight=INT32_MAX`. See `scripts/matmul_lt_readiness.sh` / `contrib/matmul-v4/lt-gate.py`.
+**Implementation status (this branch):** Rank-1 is scaffolded as **ENC-DR-LT** (`doc/btx-matmul-v4.4-lt-normative-spec.md`, adversarial: `doc/btx-matmul-v4.4-lt-adversarial-analysis.md`): nonlinear MatExpand (ChaCha20-PRF + M11 Extract candidate; C-15 OPEN), deep-m `b=2`, Q* fat miner windows (Phase A; seal-as-PoW Phase B), ASERT DRLT rescale hooks, `ComputeDigestsBMX4CLTDispatched`, CUDA/Metal/HIP surfaces, inert `nMatMulDRLTHeight=INT32_MAX`. See `scripts/matmul_lt_readiness.sh` / `contrib/matmul-v4/lt-gate.py` (G5 = external C-15 ack; not auto-pass).
 
 A pure HBM capacity gate (Rank 2) is the nuclear option if geometry+expand still lose on dollars.

@@ -9,7 +9,7 @@
 | Lever | Normative value | Effect |
 |---|---|---|
 | Deep-`m` under ENC-DR | `b = 2`, `m = n/2` (2048 @ n=4096) | ~3.6× tensor MACs; **0 B** permanent sketch growth |
-| MatExpand | `B̂ = Extract_PRF(G·W·H)`, `w=128` | SHA operand floor → dense exact-int GEMMs; C-15 candidate mixer |
+| MatExpand | `B̂ = Extract_PRF(G·W·H)`, `w=128` | Thin ExactGemm floor `O(n²·w)` (not `O(n³)`); C-15 candidate mixer; cubic floor is deep-`m` sketch/combine |
 | Consensus `Q*` | `{64,128}` (default 64) | Fat stacked miner windows (Phase A); Phase B seal-as-PoW via `fMatMulLTSealAsPoW` (implemented, default off, inert while DRLT is INT32_MAX) |
 | Alphabet / Ĉ | Path-agnostic integer; M11 projectors; Extract to `[-48,48]` | FP8/MXFP4 remain **miner-local** lanes |
 
@@ -23,14 +23,20 @@ Domain tags (V44LT):
 - `BTX_MATEXPAND_W_V44LT` ‖ full-header hash → `W_B ∈ M11^{n×w}` (nonce-fresh; operand B)
 
 ```
-Y = G · W          # s8×s8→s32, n×w
-B32 = Y · H        # s32×s8→s32, n×n
+Y = G · W          # s8×s8→s32, n×w, w=128  →  O(n²·w) MACs
+B32 = Y · H        # s32×s8→s32, n×n         →  O(n²·w) MACs; rank(B32)≤128
 prf_key = SHA256("BTX_MATEXPAND_PRF_V44LT" ‖ seed_W)
 B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
-# ChaCha20 PRF keystream (RFC8439; key=prf_key; nonce=(raw⊕lane, pack(i,j));
-# counter=remix; lanes MANT/SCLE) → M11 rejection nibbles → e∈{0..3};
-# value = μ<<e ∈ [-48,48]
+# ChaCha20 PRF keystream (RFC8439; key=prf_key LE32 bytes;
+# Nonce96=(uint32(raw)⊕lane, (uint64(i)<<32)|j); counter=remix;
+# lanes MANT/SCLE; first 8 bytes LE) → M11 rejection → e∈{0..3};
+# value = μ·2^e ∈ [-48,48] via exact mul (never signed <<)
 ```
+
+**Byte-encoding pin (normative):** see external C-15 packet
+`doc/btx-matmul-v4.4-lt-external-c15-packet.md` §1.4 (endianness of `prf_key`,
+`pack(i,j)`, remix termination, exact mul). Device twins must match bit-exactly.
+Full-width `(i,j)` (MUST NOT truncate): `doc/btx-matmul-v4.4-lt-matexpand-position-salt.md`.
 
 `FoldInt32ToEmax48` (`y % 97`) and SplitMix `MixMatExpandEntry` /
 `ExtractDequantMatExpandSplitMix` are **non-normative** (differential tests only).
@@ -38,6 +44,12 @@ B̂[i,j] = ExtractDequantMatExpand(B32[i,j], i, j, prf_key)
 **Extractor status:** ChaCha20-PRF Extract is the **selected consensus candidate**
 under `ENC_BMX4C_LT`. It is **not** cryptographically closed — external C-15
 review remains required before any public activation height is raised.
+**ChaCha-as-PRF ≠ MatExpand work lower bound.** Public `nMatMulDRLTHeight` stays
+`INT32_MAX`.
+
+**Scoping:** MatExpand is `O(n²·w)`; the honest cubic-ish MAC floor is deep-`m`
+`B̂·V` / combine (`m=n/2`). Linearized Extract would reopen ~`n/w≈32×` thin-panel
+collapse vs dense `n×n`. Projectors `U`/`V` are **rank-transparent**.
 
 Projectors use `BTX_MATMUL_V44LT_SKETCH_U/V`. Digest = `H(σ ‖ Chat)` with
 `Chat = (U·Â)(B̂·V)` over `q = 2⁶¹−1`, tile `b=2`.
