@@ -208,6 +208,47 @@ void ExpandScaleStreamPortable(const uint256& seed, size_t count, uint8_t* out);
                                                             const std::vector<int32_t>& Q,
                                                             uint32_t n, uint32_t m);
 
+/** Max |entry| over P and Q (magnitude scan for adaptive limb selection). */
+[[nodiscard]] int64_t ScanCombineMaxAbsBMX4C(const std::vector<int32_t>& P,
+                                            const std::vector<int32_t>& Q);
+
+/** Two-limb base-2^6 remainder-top bound: |x| <= 31 + 32*64 = 2079
+ *  (low digit in [-32,31], top remainder in [-32,32]).
+ *  When every P/Q entry fits, ComputeCombineTwoLimbBMX4C is exact with 4 GEMMs. */
+inline constexpr int64_t kCombineTwoLimbBase64MaxAbs = 31 + 32 * 64; // 2079
+
+/** Two-limb base-256 remainder-top bound: |x| <= 127 + 128*256 = 32895. */
+inline constexpr int64_t kCombineTwoLimbBase256MaxAbs = 127 + 128 * 256; // 32895
+
+/** Three-limb base-256 remainder-top bound:
+ *  |x| <= 127 + 127*256 + 128*256^2 = 8,421,247.
+ *  Covers the full ENC-BMX4C projection envelope 288*n at n <= 8192. */
+inline constexpr int64_t kCombineThreeLimbBase256MaxAbs =
+    127 + 127 * 256 + 128 * 256 * 256; // 8,421,247
+
+/** Miner-local exact two-limb base-2^6 combine (4 limb-pair GEMMs). Requires
+ *  ScanCombineMaxAbsBMX4C(P,Q) <= kCombineTwoLimbBase64MaxAbs. BYTE-IDENTICAL
+ *  to ComputeCombineModQ when the magnitude precondition holds. */
+[[nodiscard]] std::vector<Fq> ComputeCombineTwoLimbBMX4C(const std::vector<int32_t>& P,
+                                                        const std::vector<int32_t>& Q,
+                                                        uint32_t n, uint32_t m);
+
+/** Miner-local adaptive base-256 combine with sparse high-limb plane skip:
+ *  magnitude scan selects 2 or 3 signed base-256 digits; all-zero high planes
+ *  are omitted from the GEMM set. When the scan exceeds the three-limb bound
+ *  (should not happen under CheckCombineLimbBoundBMX4C), falls back
+ *  unconditionally to ComputeCombineKaratsuba9BMX4C. BYTE-IDENTICAL to
+ *  ComputeCombineModQ / Karatsuba-9 on every path. */
+[[nodiscard]] std::vector<Fq> ComputeCombineAdaptiveBase256BMX4C(const std::vector<int32_t>& P,
+                                                                 const std::vector<int32_t>& Q,
+                                                                 uint32_t n, uint32_t m);
+
+/** Dispatcher: two-limb base-64 when safe, else adaptive base-256, else
+ *  Karatsuba-9. Always returns Chat bytes identical to ComputeCombineModQ. */
+[[nodiscard]] std::vector<Fq> ComputeCombineAdaptiveLimbBMX4C(const std::vector<int32_t>& P,
+                                                              const std::vector<int32_t>& Q,
+                                                              uint32_t n, uint32_t m);
+
 /** Five-limb exact FP8-alphabet combine (Rubin-class lane): decompose P/Q into
  *  five balanced base-32 digits in [-16,15] (every digit exactly representable
  *  in E4M3), evaluate the 25 digit-pair products as exact s8xs8->s32 GEMMs
@@ -265,6 +306,7 @@ enum class CombineLane : uint8_t {
     CanonicalInteger = 0,        // direct mod-q / schoolbook reference
     Karatsuba9Int8 = 1,          // nine INT8 GEMMs + fused M61 epilogue
     ExactFp8FiveLimb = 2,        // five-limb E4M3-alphabet combine
+    AdaptiveLimb = 3,            // two-limb / base-256 adaptive + exact fallback
 };
 
 struct ExactAccelPlan {

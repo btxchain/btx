@@ -269,6 +269,104 @@ BOOST_AUTO_TEST_CASE(karatsuba9_combine_matches_limb_and_direct)
     BOOST_CHECK(kara == limb);
 }
 
+BOOST_AUTO_TEST_CASE(deferred_combine_matches_classical_max_dim_adversarial)
+{
+    // Deferred __int128 ComputeCombineModQ must stay BYTE-IDENTICAL to the
+    // classical per-MAC Fq path at max-magnitude entries and at the largest
+    // BMX4C-legal projection envelope exercised in unit tests (n=512, m=16
+    // keeps runtime small while |P|,|Q| hit 288*n).
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const uint32_t n = 512;
+    const uint32_t m = 16;
+    const int64_t bound = static_cast<int64_t>(bx::kProjPerMac) * n;
+    BOOST_REQUIRE(bx::CheckCombineLimbBoundBMX4C(n));
+    BOOST_REQUIRE(bound <= bx::kCombineMaxAbs);
+
+    std::vector<int32_t> P(static_cast<size_t>(m) * n);
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m);
+    // Adversarial: alternate ±bound corners with random mid-magnitude noise.
+    for (size_t i = 0; i < P.size(); ++i) {
+        if ((i % 7) == 0) P[i] = static_cast<int32_t>(bound);
+        else if ((i % 7) == 1) P[i] = static_cast<int32_t>(-bound);
+        else P[i] = static_cast<int32_t>(static_cast<int64_t>(rng.randrange(2 * bound + 1)) - bound);
+    }
+    for (size_t i = 0; i < Q.size(); ++i) {
+        if ((i % 5) == 0) Q[i] = static_cast<int32_t>(-bound);
+        else if ((i % 5) == 1) Q[i] = static_cast<int32_t>(bound);
+        else Q[i] = static_cast<int32_t>(static_cast<int64_t>(rng.randrange(2 * bound + 1)) - bound);
+    }
+
+    const auto deferred = ComputeCombineModQ(P, Q, n, m);
+    const auto classical = ComputeCombineModQClassical(P, Q, n, m);
+    BOOST_CHECK(deferred == classical);
+    BOOST_CHECK(SerializeSketch(deferred) == SerializeSketch(classical));
+}
+
+BOOST_AUTO_TEST_CASE(adaptive_limb_combine_matches_direct_and_fallback)
+{
+    FastRandomContext rng{/*fDeterministic=*/true};
+
+    // (1) Two-limb base-64 regime: |entries| <= 2080.
+    {
+        const uint32_t n = 64;
+        const uint32_t m = 16;
+        const int64_t bound = bx::kCombineTwoLimbBase64MaxAbs;
+        std::vector<int32_t> P(static_cast<size_t>(m) * n);
+        std::vector<int32_t> Q(static_cast<size_t>(n) * m);
+        for (auto& x : P) x = static_cast<int32_t>(static_cast<int64_t>(rng.randrange(2 * bound + 1)) - bound);
+        for (auto& x : Q) x = static_cast<int32_t>(static_cast<int64_t>(rng.randrange(2 * bound + 1)) - bound);
+        BOOST_REQUIRE(bx::ScanCombineMaxAbsBMX4C(P, Q) <= bx::kCombineTwoLimbBase64MaxAbs);
+        const auto direct = ComputeCombineModQ(P, Q, n, m);
+        const auto two = bx::ComputeCombineTwoLimbBMX4C(P, Q, n, m);
+        const auto adapt = bx::ComputeCombineAdaptiveLimbBMX4C(P, Q, n, m);
+        BOOST_CHECK(two == direct);
+        BOOST_CHECK(adapt == direct);
+    }
+
+    // (2) Two-limb base-256 regime (above base-64 two-limb, below 32896).
+    {
+        const uint32_t n = 96;
+        const uint32_t m = 16;
+        const int64_t bound = 20'000;
+        BOOST_REQUIRE(bound <= bx::kCombineTwoLimbBase256MaxAbs);
+        std::vector<int32_t> P(static_cast<size_t>(m) * n, 0);
+        std::vector<int32_t> Q(static_cast<size_t>(n) * m, 0);
+        for (auto& x : P) x = static_cast<int32_t>(static_cast<int64_t>(rng.randrange(2 * bound + 1)) - bound);
+        for (auto& x : Q) x = static_cast<int32_t>(static_cast<int64_t>(rng.randrange(2 * bound + 1)) - bound);
+        const auto direct = ComputeCombineModQ(P, Q, n, m);
+        const auto b256 = bx::ComputeCombineAdaptiveBase256BMX4C(P, Q, n, m);
+        const auto adapt = bx::ComputeCombineAdaptiveLimbBMX4C(P, Q, n, m);
+        BOOST_CHECK(b256 == direct);
+        BOOST_CHECK(adapt == direct);
+    }
+
+    // (3) Full-envelope / three-limb base-256 + sparse high-limb (zeros mixed
+    // with ±(288*n) corners) — must match Karatsuba-9 and direct.
+    {
+        const uint32_t n = 128;
+        const uint32_t m = 16;
+        const int64_t bound = static_cast<int64_t>(bx::kProjPerMac) * n;
+        BOOST_REQUIRE(bound <= bx::kCombineThreeLimbBase256MaxAbs);
+        std::vector<int32_t> P(static_cast<size_t>(m) * n);
+        std::vector<int32_t> Q(static_cast<size_t>(n) * m);
+        for (size_t i = 0; i < P.size(); ++i) {
+            P[i] = ((i % 11) == 0) ? static_cast<int32_t>(bound)
+                                   : static_cast<int32_t>(static_cast<int64_t>(rng.randrange(2 * 500 + 1)) - 500);
+        }
+        for (size_t i = 0; i < Q.size(); ++i) {
+            Q[i] = ((i % 13) == 0) ? static_cast<int32_t>(-bound)
+                                   : static_cast<int32_t>(static_cast<int64_t>(rng.randrange(2 * 500 + 1)) - 500);
+        }
+        const auto direct = ComputeCombineModQ(P, Q, n, m);
+        const auto kara = bx::ComputeCombineKaratsuba9BMX4C(P, Q, n, m);
+        const auto b256 = bx::ComputeCombineAdaptiveBase256BMX4C(P, Q, n, m);
+        const auto adapt = bx::ComputeCombineAdaptiveLimbBMX4C(P, Q, n, m);
+        BOOST_CHECK(b256 == direct);
+        BOOST_CHECK(adapt == direct);
+        BOOST_CHECK(adapt == kara);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(fp8_five_limb_combine_matches_direct)
 {
     FastRandomContext rng{/*fDeterministic=*/true};

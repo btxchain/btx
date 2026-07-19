@@ -296,6 +296,31 @@ bool CheckCombineLimbBound(uint32_t n)
     return static_cast<int64_t>(n) * int8_field::kElementSqBound <= kLimbMaxPositive;
 }
 
+std::vector<Fq> ComputeCombineModQClassical(const std::vector<int32_t>& P,
+                                            const std::vector<int32_t>& Q,
+                                            uint32_t n, uint32_t m)
+{
+    // Per-MAC FqFromInt32/FqMul/FqAdd path (pre-deferred reference). Kept as a
+    // public oracle so ComputeCombineModQ's deferred __int128 reduction can be
+    // proven byte-identical under adversarial max-magnitude inputs.
+    std::vector<Fq> Chat(static_cast<size_t>(m) * m, 0);
+    for (uint32_t a = 0; a < m; ++a) {
+        const int32_t* p_row = &P[static_cast<size_t>(a) * n];
+        Fq* chat_row = &Chat[static_cast<size_t>(a) * m];
+        for (uint32_t k = 0; k < n; ++k) {
+            const int32_t p_ak = p_row[k];
+            if (p_ak == 0) continue;
+            const Fq p_fq = int8_field::FqFromInt32(p_ak);
+            const int32_t* q_row = &Q[static_cast<size_t>(k) * m];
+            for (uint32_t c = 0; c < m; ++c) {
+                chat_row[c] = int8_field::FqAdd(
+                    chat_row[c], int8_field::FqMul(p_fq, int8_field::FqFromInt32(q_row[c])));
+            }
+        }
+    }
+    return Chat;
+}
+
 std::vector<Fq> ComputeCombineModQ(const std::vector<int32_t>& P,
                                    const std::vector<int32_t>& Q,
                                    uint32_t n, uint32_t m)
@@ -304,6 +329,7 @@ std::vector<Fq> ComputeCombineModQ(const std::vector<int32_t>& P,
     // Equivalent to per-MAC FqFromInt32/FqMul/FqAdd because production
     // dimensions keep |sum_k P[a,k]*Q[k,c]| well below q = 2^61-1 (and inside
     // signed __int128). Avoids unnecessary per-MAC modular reductions.
+    // BYTE-IDENTICAL to ComputeCombineModQClassical (pinned by unit tests).
     std::vector<Fq> Chat(static_cast<size_t>(m) * m, 0);
     std::vector<__int128> acc(m, 0);
     for (uint32_t a = 0; a < m; ++a) {

@@ -799,9 +799,10 @@ Tracked in ACTIVATION.md Gate C; summarized normatively:
    (tensor-majority required; the combine's predicted ~70–80 % share is a model,
    not a result).
 5. **Verify-budget re-bench** ≤ the v4.1 budget (B2e analogue; expected cheaper).
-6. **Spec-text debts due at fork time**: §A.6 Strassen rewrite (one INT8-path
-   level at E_max = 48, zero frontier levels, ≤ 12.5 %, difficulty-absorbed);
-   §S.2.2 ASIC-residual re-disclosure (including the halved t-cliff mechanism:
+6. **Spec-text debts due at fork time**: §A.6 Strassen rewrite (**done in design
+   spec**: exact alternatives allowed; “≤12.5% / absorbed” posture retired —
+   calibrate to fastest known exact; see combine tournament doc); §S.2.2
+   ASIC-residual re-disclosure (including the halved t-cliff mechanism:
    ~3–5× under the 1-GEMM INT8 fallback); C-1 → C-1′ codification in the code
    comments (`int8_field.h` / `matmul_v4.h` successors); ρ re-measured on FP4
    rental centrals (disclosure, never a parameter).

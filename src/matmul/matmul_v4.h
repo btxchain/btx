@@ -198,10 +198,23 @@ enum class Operand : uint8_t { A = 0x41, B = 0x42 };
 /** Combine stage, direct integer-ALU reference (§E.3): Chat = P*Q mod q, where
  *  P = U*A is m*n and Q = B*V is n*m, both exact int32 (|.| <= 15,625*n).
  *  Row-major m*m canonical F_q output. This is the consensus semantics of the
- *  combine; ComputeCombineLimbTensor MUST match it byte-for-byte. */
+ *  combine; ComputeCombineLimbTensor MUST match it byte-for-byte.
+ *
+ *  Implementation: signed INT64/__int128 deferred accumulation with one
+ *  canonical FqReduce per output (not a per-MAC FqMul). BYTE-IDENTICAL to
+ *  ComputeCombineModQClassical under every production-valid (n,m) and under
+ *  the max-magnitude adversarial vectors in matmul_v4_bmx4_tests /
+ *  matmul_v4_sketch_tests. */
 [[nodiscard]] std::vector<Fq> ComputeCombineModQ(const std::vector<int32_t>& P,
                                                  const std::vector<int32_t>& Q,
                                                  uint32_t n, uint32_t m);
+
+/** Classical per-MAC FqFromInt32/FqMul/FqAdd combine — the pre-deferred
+ *  reference. Public so miners and tests can pin byte-identity against
+ *  ComputeCombineModQ. Not required on the hot path. */
+[[nodiscard]] std::vector<Fq> ComputeCombineModQClassical(const std::vector<int32_t>& P,
+                                                          const std::vector<int32_t>& Q,
+                                                          uint32_t n, uint32_t m);
 
 /** Combine stage, tensor-shaped limb path (Appendix C-13): decompose P and Q
  *  entrywise into kCombineLimbs balanced base-2^7 digits (each digit matrix a

@@ -257,7 +257,17 @@ Per nonce the enforced work is a dense INT8 tensor-core GEMM with no sub-dense s
 
 - **No cross-nonce reuse.** `A, B` are functions of `nNonce64` (A.2); nothing from nonce `x` recurs at `x+1`.
 - **No low-rank shortcut.** Operands are dense i.i.d. samples (full rank whp per channel); there is no constructed `C = C_cached + Δ_lowrank` because nothing is shared across nonces.
-- **Strassen / sub-cubic.** Not forbidden, made non-remunerative: to pass Freivalds the miner must produce the *correct* committed image of `A·B`, and integer Strassen at n=4096 (2–3 feasible levels) saves ≤ ~1.2–1.3× while its block linear-combinations exceed the s8 input range (needing ≥ s16 operands no s8×s8→s32 MMA accepts) and its extra `Θ(n²)` add passes run on integer ALUs, not tensor cores. Any residual constant-factor edge is absorbed by difficulty calibration (§N-risk-ii), exactly like any miner optimization — not a break, because the unit of work is "the correct product," and `N³` tile products of `b³` MACs is the cheapest way to produce it on tensor cores.
+- **Strassen / sub-cubic / adaptive limbs.** Exact alternatives are **allowed** (the
+  committed object is the canonical integer `Chat` bytes). Integer Strassen,
+  LCMA backends, adaptive limb combines, and similar constant-factor exact
+  algorithms are **not** a consensus break — they are ordinary miner efficiency.
+  Prior “one Strassen level / ≤12.5% / difficulty-absorbed” language is a
+  **narrow-datapath artifact**, not a hardness lower bound (audit F2): ≥1 level
+  is practically realizable on wider-datapath and bespoke parts, and peak-breaking
+  LCMA is shipping technique. There is **no practical lower-bound proof** that
+  the reference algorithm is cheapest. Calibrate ASERT to the **fastest known
+  exact** path (`doc/btx-matmul-v4.4-combine-algorithm-tournament.md`); do not
+  treat a schoolbook combine as the economic unit.
 
 ---
 

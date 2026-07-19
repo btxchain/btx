@@ -583,6 +583,145 @@ std::vector<Fq> ComputeCombineKaratsuba9BMX4C(const std::vector<int32_t>& P,
     return Chat;
 }
 
+namespace {
+
+constexpr int32_t kBase256 = 256;
+constexpr int32_t kBase256Half = 128;
+constexpr uint32_t kBase256MaxLimbs = 3;
+
+int64_t MaxAbsEntries(const std::vector<int32_t>& M)
+{
+    int64_t mx = 0;
+    for (int32_t x : M) {
+        const int64_t ax = x < 0 ? -static_cast<int64_t>(x) : static_cast<int64_t>(x);
+        if (ax > mx) mx = ax;
+    }
+    return mx;
+}
+
+bool PlaneAllZero(const std::vector<int8_t>& plane)
+{
+    for (int8_t d : plane) {
+        if (d != 0) return false;
+    }
+    return true;
+}
+
+// Remainder-top base-256 digits in [-128,127] (low) / remainder on top.
+// Total for L limbs under |top|<=128: kCombine{Two,Three}LimbBase256MaxAbs.
+void DecomposeBase256Planes(const std::vector<int32_t>& M, uint32_t limbs,
+                            std::vector<int8_t>* planes)
+{
+    assert(limbs >= 2 && limbs <= kBase256MaxLimbs);
+    for (uint32_t l = 0; l < limbs; ++l) planes[l].resize(M.size());
+    for (size_t idx = 0; idx < M.size(); ++idx) {
+        int32_t x = M[idx];
+        for (uint32_t l = 0; l < limbs - 1; ++l) {
+            const int32_t d = ((x + kBase256Half) & (kBase256 - 1)) - kBase256Half;
+            planes[l][idx] = static_cast<int8_t>(d);
+            x = (x - d) / kBase256;
+        }
+        assert(x >= -kBase256Half && x <= kBase256Half);
+        planes[limbs - 1][idx] = static_cast<int8_t>(x);
+    }
+}
+
+// Two-limb base-2^6 remainder-top (same digit alphabet as the 4-limb path).
+void DecomposeTwoLimbBase64(const std::vector<int32_t>& M, std::vector<int8_t>* planes)
+{
+    planes[0].resize(M.size());
+    planes[1].resize(M.size());
+    constexpr int32_t kHalf = kCombineLimbBase / 2; // 32
+    for (size_t idx = 0; idx < M.size(); ++idx) {
+        int32_t x = M[idx];
+        const int32_t d0 = ((x + kHalf) & (kCombineLimbBase - 1)) - kHalf;
+        planes[0][idx] = static_cast<int8_t>(d0);
+        x = (x - d0) / kCombineLimbBase;
+        assert(x >= -kHalf && x <= kHalf);
+        planes[1][idx] = static_cast<int8_t>(x);
+    }
+}
+
+std::vector<Fq> CombineLimbPairPlanes(const std::vector<int8_t>* p_planes,
+                                      const std::vector<int8_t>* q_planes,
+                                      uint32_t limbs, uint32_t limb_bits,
+                                      uint32_t n, uint32_t m)
+{
+    // Chat = sum_{i,j} 2^{limb_bits*(i+j)} * (Pi * Qj), skipping all-zero planes.
+    const size_t out_size = static_cast<size_t>(m) * m;
+    std::vector<Fq> Chat(out_size, 0);
+    std::vector<int32_t> S(out_size);
+    std::vector<bool> p_live(limbs), q_live(limbs);
+    for (uint32_t i = 0; i < limbs; ++i) {
+        p_live[i] = !PlaneAllZero(p_planes[i]);
+        q_live[i] = !PlaneAllZero(q_planes[i]);
+    }
+    for (uint32_t i = 0; i < limbs; ++i) {
+        if (!p_live[i]) continue;
+        for (uint32_t j = 0; j < limbs; ++j) {
+            if (!q_live[j]) continue;
+            std::fill(S.begin(), S.end(), 0);
+            GemmS8S32Add(p_planes[i], q_planes[j], S, m, n);
+            const Fq w = static_cast<Fq>(1) << (limb_bits * (i + j));
+            for (size_t idx = 0; idx < out_size; ++idx) {
+                Chat[idx] = int8_field::FqAdd(
+                    Chat[idx], int8_field::FqMul(w, int8_field::FqFromSigned(S[idx])));
+            }
+        }
+    }
+    return Chat;
+}
+
+} // namespace
+
+int64_t ScanCombineMaxAbsBMX4C(const std::vector<int32_t>& P,
+                               const std::vector<int32_t>& Q)
+{
+    const int64_t a = MaxAbsEntries(P);
+    const int64_t b = MaxAbsEntries(Q);
+    return a > b ? a : b;
+}
+
+std::vector<Fq> ComputeCombineTwoLimbBMX4C(const std::vector<int32_t>& P,
+                                          const std::vector<int32_t>& Q,
+                                          uint32_t n, uint32_t m)
+{
+    std::vector<int8_t> p_planes[2];
+    std::vector<int8_t> q_planes[2];
+    DecomposeTwoLimbBase64(P, p_planes);
+    DecomposeTwoLimbBase64(Q, q_planes);
+    return CombineLimbPairPlanes(p_planes, q_planes, /*limbs=*/2, /*limb_bits=*/6, n, m);
+}
+
+std::vector<Fq> ComputeCombineAdaptiveBase256BMX4C(const std::vector<int32_t>& P,
+                                                   const std::vector<int32_t>& Q,
+                                                   uint32_t n, uint32_t m)
+{
+    const int64_t max_abs = ScanCombineMaxAbsBMX4C(P, Q);
+    if (max_abs > kCombineThreeLimbBase256MaxAbs) {
+        // Unconditional exact fallback (should be unreachable under the BMX4C
+        // combine bound; kept for fail-closed miner safety).
+        return ComputeCombineKaratsuba9BMX4C(P, Q, n, m);
+    }
+    const uint32_t limbs = (max_abs <= kCombineTwoLimbBase256MaxAbs) ? 2u : 3u;
+    std::vector<int8_t> p_planes[kBase256MaxLimbs];
+    std::vector<int8_t> q_planes[kBase256MaxLimbs];
+    DecomposeBase256Planes(P, limbs, p_planes);
+    DecomposeBase256Planes(Q, limbs, q_planes);
+    return CombineLimbPairPlanes(p_planes, q_planes, limbs, /*limb_bits=*/8, n, m);
+}
+
+std::vector<Fq> ComputeCombineAdaptiveLimbBMX4C(const std::vector<int32_t>& P,
+                                                const std::vector<int32_t>& Q,
+                                                uint32_t n, uint32_t m)
+{
+    const int64_t max_abs = ScanCombineMaxAbsBMX4C(P, Q);
+    if (max_abs <= kCombineTwoLimbBase64MaxAbs) {
+        return ComputeCombineTwoLimbBMX4C(P, Q, n, m);
+    }
+    return ComputeCombineAdaptiveBase256BMX4C(P, Q, n, m);
+}
+
 std::vector<Fq> ComputeCombineFp8FiveLimbBMX4C(const std::vector<int32_t>& P,
                                                const std::vector<int32_t>& Q,
                                                uint32_t n, uint32_t m)

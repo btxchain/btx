@@ -40,6 +40,7 @@ add_executable(bench_btx
   matmul_solve_bench.cpp
   matmul_v4_stage_bench.cpp
   matmul_v4_lt_stage_bench.cpp
+  matmul_v4_combine_tournament_bench.cpp
   mempool_ephemeral_spends.cpp
   mempool_eviction.cpp
   mempool_stress.cpp
