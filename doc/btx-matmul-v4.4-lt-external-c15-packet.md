@@ -30,7 +30,10 @@ the external review brief.*
 **Out of scope for this packet:** silicon nonce/s campaigns, ASERT calibration,
 Header-PoW / chainwork (separate gates; bit-26 wire **withdrawn**), tip-verify
 soak budgets. C-15 PASS does not unblock HeaderPoW; HeaderPoW NO-GO does not
-vacate C-15 findings.
+vacate C-15 findings. Exact FMM / Strassen–Winograd efficiency vs ASERT is a
+**separate** calibration track — see
+`doc/btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md` (does not close
+C-15; invents no silicon).
 
 **Hard rule for reviewers and operators:** invent no silicon numbers; do not
 raise `nMatMulDRLTHeight`; do not claim GO/NO-GO closed from this draft alone.
@@ -56,7 +59,7 @@ MatExpand itself. See §1.1–§1.2.
 | **Honest cost** `HonestMAC(n)` | Exact-int MAC count of one marginal nonce unit: **MatExpand-B** (`G·W` + `Y·H`) + **`B̂·V`** + **combine `P·Q`** (I1′: template A / `U`/`V`/`P` excluded from marginal). At `n=4096`: MatExpand-B `4n²w ≈ 8.59×10⁹`; `B̂·V` `2n²m ≈ 6.87×10¹⁰`; combine on `m×m` sketch (see shortcut/TMTO pre-review). |
 | **Adversary class** | Classical PPT relative to `HonestMAC`; may use poly-many adaptive honest MatExpand/digest queries and Freivalds verify transcripts at production EncDr rounds. **Linear / degree-≤2 entrywise surrogates** of Extract are the primary FAIL class; unrestricted adversaries may return INCONCLUSIVE. |
 | **Win** | Output an accepting Phase-A digest (or seal if SB annex in scope) with **advantage** `Adv ≥ ε` over Freivalds false-accept, while using exact-int MatExpand+BV+combine MAC count `≤ (1−δ)·HonestMAC(n)`. |
-| **Metric** | Exact-int MAC (multiply-accumulate) count vs `HonestMAC`; optional same-machine wall-time of CPU ExactGemm reference as secondary (must not invent silicon). |
+| **Metric** | Exact-int MAC (multiply-accumulate) count vs `HonestMAC`; optional same-machine wall-time of CPU ExactGemm reference as secondary (must not invent silicon). Wall-time / Strassen wins update **ASERT** baselines only — see FMM calibration note; they do not substitute for a C-15 MAC-count FAIL/PASS. |
 | **Thresholds (review defaults)** | `δ = 1/2` (half-cost); `ε = 2⁻⁴⁰` above Freivalds false-accept for the stated round count. Firm may retune in SOW — **do not silently change**. |
 
 ### Return criteria

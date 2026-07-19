@@ -52,7 +52,8 @@ panel on verdict, pillars, and the actionable harden list (falsifiable claim,
 C15-B LS collapse + deg-2/3 R², rank-128 docs, reviewer kit, encoding pin,
 full-width position salt, scoping / LT-Q1–Q2 labels). Residual disagreements to
 watch in a firm review: cross-lane related-nonce amortization depth; Strassen /
-FMM calibration of ASERT vs naive GEMM.
+FMM calibration of ASERT vs naive GEMM
+(`doc/btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md`).
 
 ## Shipped hardenings (post-synthesis)
 
