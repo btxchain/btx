@@ -105,6 +105,12 @@ struct WindowSlot {
 [[nodiscard]] uint256 ComputeWindowMerkleRoot(Span<const uint256> digests);
 [[nodiscard]] uint256 SealWindowCommit(const uint256& sigma_anchor,
                                        const uint256& merkle_root, uint32_t Qstar);
+/** TEST/DIAGNOSTIC ONLY — does NOT prove Q* window membership.
+ *
+ *  Reconstructs digests from caller-supplied slot nonces without re-deriving
+ *  expected nonces from sigma_anchor, without SlotSeedFn / parent MTP, and
+ *  without checking seal order or uniqueness. Unused in production validation.
+ *  Prefer VerifySealWindowFreivalds / SealWindowProofMatchesCommitment. */
 [[nodiscard]] bool VerifyWindowSlotFreivalds(const CBlockHeader& tmpl, uint32_t n,
                                              const std::vector<WindowSlot>& slots, uint32_t r);
 
@@ -211,6 +217,10 @@ public:
     [[nodiscard]] bool MineWindow(const std::vector<CBlockHeader>& headers,
                                   const uint256& target,
                                   std::vector<DigestOnlyResultLT>& out) const;
+
+[[nodiscard]] bool MineSlot(const CBlockHeader& header,
+                                uint256& digest_out,
+                                std::vector<unsigned char>* payload_out = nullptr) const;
 
     [[nodiscard]] bool Mine(const std::vector<uint64_t>& nonces, const uint256& target,
                             std::vector<DigestOnlyResultLT>& out,

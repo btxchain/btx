@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <string>
 #include <vector>
@@ -416,6 +417,31 @@ void UpdateAuthenticatedChainWork(CBlockIndex& block, const Consensus::Params& p
  *  nChainWork — call sites routed through it are behavior-identical while the
  *  MatMul v4 fork is disabled. */
 arith_uint256 GetTrustAdjustedChainWork(const CBlockIndex& block, unsigned int unauth_allowance_blocks);
+
+/** Default unauthenticated lookahead used for best-header selection and peer
+ *  trust decisions. Matches net_processing's UNAUTH_WORK_ALLOWANCE_BLOCKS
+ *  (2 * MAX_BLOCKS_IN_TRANSIT_PER_PEER = 32). Kept here so validation and
+ *  blockstorage can select m_best_header on the same trust-adjusted metric
+ *  without depending on net_processing. */
+inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 32;
+
+/** True iff `candidate` should replace `current` as best header under the
+ *  trust-adjusted work metric (authenticated work + bounded unauth lookahead).
+ *  Pre-MatMul-fork this is identical to comparing nChainWork. */
+[[nodiscard]] bool PreferTrustAdjustedHeader(const CBlockIndex& current,
+                                             const CBlockIndex& candidate,
+                                             unsigned int unauth_allowance_blocks = TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS);
+
+/** After an ancestor's authenticated work changes, re-derive
+ *  nAuthenticatedChainWork for every known descendant in parent-first order.
+ *  Header-only children contribute zero authenticated proof but must inherit
+ *  the updated parent authenticated base; without this walk a forged long
+ *  header branch can keep a stale (too-low) authenticated sum after a
+ *  genuine body promotion lower in the tree. */
+void PropagateAuthenticatedChainWorkDescendants(
+    CBlockIndex& root,
+    const Consensus::Params& params,
+    std::function<void(std::function<void(CBlockIndex&)>)> for_each_index);
 
 /** Return the time it would take to redo the work difference between from and to, assuming the current hashrate corresponds to the difficulty at tip, in seconds. */
 int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& from, const CBlockIndex& tip, const Consensus::Params&);

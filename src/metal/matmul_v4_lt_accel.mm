@@ -90,7 +90,7 @@ struct MetalGemmContext {
 
     [[nodiscard]] bool EnsureScratch(size_t a_bytes, size_t b_bytes, size_t d_bytes)
     {
-        auto grow = [&](id<MTLBuffer>& buf, size_t& have, size_t need) -> bool {
+        auto grow = [&](id<MTLBuffer> __strong& buf, size_t& have, size_t need) -> bool {
             if (need <= have && buf != nil) return true;
             buf = [device newBufferWithLength:need options:MTLResourceStorageModeShared];
             if (buf == nil) { have = 0; return false; }

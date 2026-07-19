@@ -1,16 +1,16 @@
 # BTX MatMul v4.4-LT — Adversarial analysis & hardening status
 
-*Status: implementation closed for MatExpand C-15 class + Q* Phase B seal-as-PoW; activation still gated (`nMatMulDRLTHeight = INT32_MAX`).*
-*Companion: `doc/btx-matmul-v4.4-lt-normative-spec.md`.*
+*Status: MatExpand C-15 class has **implementation mitigations** (non-affinity tests) but **external review remains open**. Q* Phase B seal-as-PoW is implemented and inert (`nMatMulDRLTHeight = INT32_MAX`). Activation remains gated.*
+*Companion: `doc/btx-matmul-v4.4-lt-normative-spec.md`. Hardening response: `doc/btx-matmul-v4.4-lt-hardening-response-2026-07-19.md`.*
 
 ## Threat model (LT-specific)
 
 | ID | Attack | Disposition |
 |---|---|---|
-| LT-C15 | Freivalds reassociation through linear MatExpand fold (`B̂ = fold(GWH)` affine in panels) | **CLOSED in code** — `ExtractDequantMatExpand` = position-salted Mix + M11 rejection + scale `e∈{0..3}`; not affine in the GEMM accumulator |
-| LT-Q1 | Skinny single-nonce launches under fat `Q*` schedule | **CLOSED (Phase B, inert)** — when `fMatMulLTSealAsPoW` + live DRLT, lottery object is the Q* window seal (`ComputeSealDigestBMX4CLT`); Phase A remains per-nonce digest when the toggle is off |
+| LT-C15 | Freivalds reassociation through linear MatExpand fold (`B̂ = fold(GWH)` affine in panels) | **MITIGATED in code; EXTERNAL REVIEW OPEN** — `ExtractDequantMatExpand` = position-salted Mix + M11 rejection + scale `e∈{0..3}`; blocks the linear reassociation class tested in-tree. SplitMix64-style mixer is **not** a proved cryptographic PRF. No shortcut exceeding the measured threshold was found within explicitly tested algorithms/dimensions; general shortcut resistance remains an external-review assumption. |
+| LT-Q1 | Skinny single-nonce launches under fat `Q*` schedule | **CLOSED (Phase B, inert)** — when `fMatMulLTSealAsPoW` + live DRLT, lottery object is the Q* window seal (`ComputeSealDigestBMX4CLT`); Phase A remains per-nonce digest when the toggle is off. Q* commits aggregate leaf digests — it does **not** prove classical GEMM, tensor-core use, or simultaneous slot execution. |
 | LT-Q2 | Window-seal PoW without MTP-threaded sibling seeds | **CLOSED (Phase B, inert)** — EncDr / solve thread parent MTP into `SlotSeedFn` → `SetDeterministicMatMulSeeds` for every slot; sketch-cache `H(σ‖Chat)==matmul_digest` skipped in seal mode |
-| LT-A1 | ASERT continuous across MatExpand/deep-m work shift | **CLOSED in code** — `nMatMulDRLTHeight` rescale + re-anchor; ratios default 1/1 until silicon calibration |
+| LT-A1 | ASERT continuous across MatExpand/deep-m work shift | **CLOSED in code** — `nMatMulDRLTHeight` rescale + re-anchor; ratios default 1/1 until silicon calibration against the **fastest known exact** miner path |
 | LT-V1 | Missing `n % 32` gate for `ENC_BMX4C_LT` | **CLOSED** — validation mirrors ENC-BMX4C |
 | LT-P1 | Live DRLT with wrong tile/rank pin | **CLOSED** — construction asserts `b=2`, `m=BMX4C_LT_SKETCH_RANK_M` |
 

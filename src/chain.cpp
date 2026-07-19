@@ -9,6 +9,10 @@
 #include <util/time.h>
 
 #include <algorithm>
+#include <deque>
+#include <functional>
+#include <unordered_map>
+#include <vector>
 
 std::string CBlockFileInfo::ToString() const
 {
@@ -192,6 +196,42 @@ arith_uint256 GetTrustAdjustedChainWork(const CBlockIndex& block, unsigned int u
     arith_uint256 allowance{GetBlockProof(block)};
     allowance *= unauth_allowance_blocks;
     return block.nAuthenticatedChainWork + std::min(unauth, allowance);
+}
+
+bool PreferTrustAdjustedHeader(const CBlockIndex& current, const CBlockIndex& candidate,
+                               unsigned int unauth_allowance_blocks)
+{
+    return GetTrustAdjustedChainWork(current, unauth_allowance_blocks) <
+           GetTrustAdjustedChainWork(candidate, unauth_allowance_blocks);
+}
+
+void PropagateAuthenticatedChainWorkDescendants(
+    CBlockIndex& root,
+    const Consensus::Params& params,
+    std::function<void(std::function<void(CBlockIndex&)>)> for_each_index)
+{
+    // Build a parent→children adjacency from the live block index, then BFS
+    // from `root` so every descendant inherits the updated authenticated base.
+    // Called rarely (body promotion), so an O(N) index scan is acceptable.
+    std::unordered_map<CBlockIndex*, std::vector<CBlockIndex*>> children;
+    for_each_index([&](CBlockIndex& idx) {
+        if (idx.pprev != nullptr) {
+            children[idx.pprev].push_back(&idx);
+        }
+    });
+
+    std::deque<CBlockIndex*> queue;
+    queue.push_back(&root);
+    while (!queue.empty()) {
+        CBlockIndex* parent = queue.front();
+        queue.pop_front();
+        const auto it = children.find(parent);
+        if (it == children.end()) continue;
+        for (CBlockIndex* child : it->second) {
+            UpdateAuthenticatedChainWork(*child, params);
+            queue.push_back(child);
+        }
+    }
 }
 
 int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& from, const CBlockIndex& tip, const Consensus::Params& params)

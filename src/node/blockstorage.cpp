@@ -361,7 +361,10 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     // full work here, keeping nAuthenticatedChainWork == nChainWork identical.
     UpdateAuthenticatedChainWork(*pindexNew, GetConsensus());
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
-    if (best_header == nullptr || best_header->nChainWork < pindexNew->nChainWork) {
+    // Prefer trust-adjusted work for best-header selection so a forged
+    // header-only branch cannot displace a more authenticated tip beyond the
+    // bounded unauth lookahead (matches net_processing peer decisions).
+    if (best_header == nullptr || PreferTrustAdjustedHeader(*best_header, *pindexNew)) {
         best_header = pindexNew;
     }
 

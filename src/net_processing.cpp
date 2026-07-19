@@ -1639,7 +1639,7 @@ static bool PeerHasHeader(CNodeState *state, const CBlockIndex *pindex) EXCLUSIV
 //! work a header chain may still count in peer-selection decisions. Two times
 //! the per-peer in-flight window, so an honest peer announcing a burst of new
 //! blocks never loses credit while their bodies are still downloading.
-static constexpr unsigned int UNAUTH_WORK_ALLOWANCE_BLOCKS{2 * MAX_BLOCKS_IN_TRANSIT_PER_PEER}; // 32
+static constexpr unsigned int UNAUTH_WORK_ALLOWANCE_BLOCKS{TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS};
 
 //! C1/H2: work value used for peer-selection / anti-DoS decisions in place of
 //! raw claimed nChainWork. Authenticated (body-validated) work plus a bounded
@@ -4521,6 +4521,16 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 job.completion(false);
                 return;
             }
+            // Queue/slot saturated: NEVER fall through to ProcessBlockSync for
+            // an EncDr/LT seal recompute — that would put Q*-scale work on the
+            // P2P message thread under adversarial load. Drop this attempt;
+            // the peer can retransmit, and other admission paths disconnect
+            // when they fail to reserve a slot.
+            LogDebug(BCLog::NET,
+                     "Deferring MatMul EncDr block hash=%s from peer=%d: verification queue saturated\n",
+                     block->GetHash().ToString(), node.GetId());
+            if (post_process) post_process();
+            return;
         }
     }
     ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);

@@ -404,21 +404,37 @@ bool ComputeSealDigestBMX4CLT(const CBlockHeader& anchor, uint32_t n, uint32_t Q
     uint32_t m = 0;
     if (!ValidateDimsBMX4CLT(n, m)) return false;
 
+    // Prepare template-invariant A/U/V/P once. Slots share the template hash
+    // (seed_a/seed_b are nulled in ComputeTemplateHash); only B/Q/Chat vary.
+    WindowSketchMinerLT prepared{anchor, n};
+    if (!prepared.Valid()) return false;
+
     const uint256 sigma_anchor = matmul::v4::DeriveSigma(anchor);
     std::vector<uint256> digests;
     digests.reserve(Qstar);
     if (slots_out) slots_out->reserve(Qstar);
     if (slot_payloads_out) slot_payloads_out->reserve(Qstar);
 
+    // Reject duplicate slot nonces deterministically (pathological collision
+    // in DeriveWindowSlotNonce would otherwise silently under-work the seal).
+    std::vector<uint64_t> seen_nonces;
+    seen_nonces.reserve(Qstar);
+
     for (uint32_t j = 0; j < Qstar; ++j) {
         CBlockHeader slot = anchor;
         slot.nNonce64 = DeriveWindowSlotNonce(sigma_anchor, j);
         slot.nNonce = static_cast<uint32_t>(slot.nNonce64);
+        if (std::find(seen_nonces.begin(), seen_nonces.end(), slot.nNonce64) != seen_nonces.end()) {
+            return false;
+        }
+        seen_nonces.push_back(slot.nNonce64);
         if (!slot_seed_fn(slot)) return false;
 
         uint256 slot_digest;
         std::vector<unsigned char> payload;
-        if (!ComputeDigestBMX4CLT(slot, n, slot_digest, payload)) return false;
+        if (!prepared.MineSlot(slot, slot_digest, slot_payloads_out ? &payload : nullptr)) {
+            return false;
+        }
         digests.push_back(slot_digest);
         if (slots_out) {
             WindowSlot leaf;
@@ -535,21 +551,35 @@ bool WindowSketchMinerLT::MineWindow(const std::vector<CBlockHeader>& headers,
     const arith_uint256 bn_target = UintToArith256(target);
     out.reserve(headers.size());
     for (const CBlockHeader& header : headers) {
-        if (matmul::v4::ComputeTemplateHash(header) != m_template_hash) {
+        DigestOnlyResultLT res;
+        std::vector<unsigned char> payload;
+        if (!MineSlot(header, res.digest, &payload)) {
             out.clear();
             return false;
         }
-        const uint256 sigma = matmul::v4::DeriveSigma(header);
-        const std::vector<int8_t> Bhat = ExpandOperandBMatExpand(header, m_n, m_backend);
-        const std::vector<int32_t> Q = matmul::v4::ComputeProjectedRight(Bhat, m_V, m_n, m_m);
-        const std::vector<Fq> Chat = matmul::v4::ComputeCombineModQ(m_P, Q, m_n, m_m);
-
-        DigestOnlyResultLT res;
         res.nonce = header.nNonce64;
-        res.digest = matmul::v4::ComputeSketchDigestFromFq(sigma, Chat);
         res.target_match = UintToArith256(res.digest) <= bn_target;
         res.backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
         out.push_back(std::move(res));
+    }
+    return true;
+}
+
+bool WindowSketchMinerLT::MineSlot(const CBlockHeader& header, uint256& digest_out,
+                                   std::vector<unsigned char>* payload_out) const
+{
+    digest_out.SetNull();
+    if (payload_out) payload_out->clear();
+    if (!m_valid) return false;
+    if (matmul::v4::ComputeTemplateHash(header) != m_template_hash) return false;
+
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    const std::vector<int8_t> Bhat = ExpandOperandBMatExpand(header, m_n, m_backend);
+    const std::vector<int32_t> Q = matmul::v4::ComputeProjectedRight(Bhat, m_V, m_n, m_m);
+    const std::vector<Fq> Chat = matmul::v4::ComputeCombineModQ(m_P, Q, m_n, m_m);
+    digest_out = matmul::v4::ComputeSketchDigestFromFq(sigma, Chat);
+    if (payload_out) {
+        *payload_out = matmul::v4::SerializeSketch(Chat);
     }
     return true;
 }

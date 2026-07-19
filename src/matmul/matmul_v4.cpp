@@ -300,22 +300,30 @@ std::vector<Fq> ComputeCombineModQ(const std::vector<int32_t>& P,
                                    const std::vector<int32_t>& Q,
                                    uint32_t n, uint32_t m)
 {
-    // Combine Chat[a][c] = (sum_k P[a][k]*Q[k][c]) mod q over F_q. P,Q entries are
-    // exact int32 (|.| < 2^30); lift each to its canonical F_q image and MAC with
-    // the same FqFromInt32/FqMul/FqAdd used by ComputeSketch, so the accumulated
-    // residue is the canonical (U*C*V)[a][c] mod q -- identical to the full path.
+    // Deferred signed accumulation then one canonical reduction per output.
+    // Equivalent to per-MAC FqFromInt32/FqMul/FqAdd because production
+    // dimensions keep |sum_k P[a,k]*Q[k,c]| well below q = 2^61-1 (and inside
+    // signed __int128). Avoids unnecessary per-MAC modular reductions.
     std::vector<Fq> Chat(static_cast<size_t>(m) * m, 0);
+    std::vector<__int128> acc(m, 0);
     for (uint32_t a = 0; a < m; ++a) {
         const int32_t* p_row = &P[static_cast<size_t>(a) * n];
-        Fq* chat_row = &Chat[static_cast<size_t>(a) * m];
+        std::fill(acc.begin(), acc.end(), 0);
         for (uint32_t k = 0; k < n; ++k) {
             const int32_t p_ak = p_row[k];
             if (p_ak == 0) continue;
-            const Fq p_fq = int8_field::FqFromInt32(p_ak);
             const int32_t* q_row = &Q[static_cast<size_t>(k) * m];
             for (uint32_t c = 0; c < m; ++c) {
-                chat_row[c] = int8_field::FqAdd(chat_row[c],
-                                                int8_field::FqMul(p_fq, int8_field::FqFromInt32(q_row[c])));
+                acc[c] += static_cast<__int128>(p_ak) * static_cast<__int128>(q_row[c]);
+            }
+        }
+        Fq* chat_row = &Chat[static_cast<size_t>(a) * m];
+        for (uint32_t c = 0; c < m; ++c) {
+            if (acc[c] >= 0) {
+                chat_row[c] = int8_field::FqReduce(static_cast<unsigned __int128>(acc[c]));
+            } else {
+                chat_row[c] = int8_field::FqNeg(
+                    int8_field::FqReduce(static_cast<unsigned __int128>(-acc[c])));
             }
         }
     }

@@ -468,6 +468,37 @@ BOOST_AUTO_TEST_CASE(phase_b_seal_round_trip_and_auth)
     BOOST_CHECK(!lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/32, seed_fn, junk));
 }
 
+BOOST_AUTO_TEST_CASE(prepared_template_slot_matches_full_digest)
+{
+    // Production seal path prepares A/U/V/P once via WindowSketchMinerLT; each
+    // slot must remain byte-identical to the single-shot ComputeDigestBMX4CLT.
+    auto anchor = MakeLTHeader(21, kTestDim);
+    lt::WindowSketchMinerLT prepared{anchor, kTestDim};
+    BOOST_REQUIRE(prepared.Valid());
+
+    for (uint32_t j = 0; j < 4; ++j) {
+        CBlockHeader slot = anchor;
+        slot.nNonce64 = lt::DeriveWindowSlotNonce(matmul::v4::DeriveSigma(anchor), j);
+        slot.nNonce = static_cast<uint32_t>(slot.nNonce64);
+        slot.seed_a = ParseUint256("1111111111111111111111111111111111111111111111111111111111111111");
+        slot.seed_b = ParseUint256("2222222222222222222222222222222222222222222222222222222222222222");
+        // Differentiate slots via nonce only for B expansion; vary seed bytes
+        // so the prepared path cannot accidentally ignore seed-bound header hash.
+        slot.seed_a.data()[0] = static_cast<unsigned char>(j + 1);
+        slot.seed_b.data()[0] = static_cast<unsigned char>(j + 100);
+
+        uint256 prepared_digest;
+        std::vector<unsigned char> prepared_payload;
+        BOOST_REQUIRE(prepared.MineSlot(slot, prepared_digest, &prepared_payload));
+
+        uint256 full_digest;
+        std::vector<unsigned char> full_payload;
+        BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(slot, kTestDim, full_digest, full_payload));
+        BOOST_CHECK(prepared_digest == full_digest);
+        BOOST_CHECK(prepared_payload == full_payload);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(phase_b_seal_parent_mtp_slot_seeds_and_encdr)
 {
     // EncDr seal recompute with parent-MTP-threaded V3 seeds (LT-Q2): changing

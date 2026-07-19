@@ -17,6 +17,7 @@
 #include <logging.h>
 
 #include <atomic>
+#include <algorithm>
 #include <cstdlib>
 #include <exception>
 #include <mutex>
@@ -333,31 +334,57 @@ bool TryDeviceDigestsBMX4CLT(Kind backend, const std::vector<CBlockHeader>& head
     payloads_out.clear();
     if (headers.empty()) return false;
 
-    std::vector<uint64_t> nonces(headers.size());
-    for (size_t i = 0; i < headers.size(); ++i) {
-        nonces[i] = headers[i].nNonce64;
-    }
+    // Device entry points historically accepted (tmpl, nonce[]) and rebuilt
+    // candidates by mutating only nNonce64. That discards per-candidate
+    // seed_a/seed_b that SetDeterministicMatMulSeeds pins. Batch the nonce
+    // list only when every candidate matches headers.front() beyond
+    // nNonce/nNonce64; otherwise run one complete header per device call.
+    const CBlockHeader& tmpl = headers.front();
+    auto same_consensus_inputs = [&](const CBlockHeader& h) {
+        return h.seed_a == tmpl.seed_a && h.seed_b == tmpl.seed_b &&
+               h.hashPrevBlock == tmpl.hashPrevBlock &&
+               h.hashMerkleRoot == tmpl.hashMerkleRoot &&
+               h.nTime == tmpl.nTime && h.nBits == tmpl.nBits &&
+               h.nVersion == tmpl.nVersion;
+    };
+    const bool nonce_only_batch =
+        std::all_of(headers.begin(), headers.end(), same_consensus_inputs);
+
+    auto run_device = [&](const CBlockHeader& header, const uint64_t* nonces, size_t count,
+                          std::vector<matmul::v4::lt::DigestOnlyResultLT>& out) -> bool {
+        switch (backend) {
+        case Kind::CUDA:
+            return matmul_v4::cuda::ComputeDigestsOnlyLTCuda(header, n, nonces, count, out);
+        case Kind::METAL:
+            return matmul_v4::metal::ComputeDigestsOnlyLTMetal(header, n, nonces, count, out);
+        case Kind::HIP:
+            return matmul_v4::hip::ComputeDigestsOnlyLTHip(header, n, nonces, count, out);
+        case Kind::CPU:
+            return false;
+        }
+        return false;
+    };
 
     std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
-    bool device_ok = false;
-    switch (backend) {
-    case Kind::CUDA:
-        device_ok = matmul_v4::cuda::ComputeDigestsOnlyLTCuda(
-            headers.front(), n, nonces.data(), nonces.size(), results);
-        break;
-    case Kind::METAL:
-        device_ok = matmul_v4::metal::ComputeDigestsOnlyLTMetal(
-            headers.front(), n, nonces.data(), nonces.size(), results);
-        break;
-    case Kind::HIP:
-        device_ok = matmul_v4::hip::ComputeDigestsOnlyLTHip(
-            headers.front(), n, nonces.data(), nonces.size(), results);
-        break;
-    case Kind::CPU:
-        return false;
-    }
-    if (!device_ok || results.size() != headers.size()) {
-        return false;
+    if (nonce_only_batch) {
+        std::vector<uint64_t> nonces(headers.size());
+        for (size_t i = 0; i < headers.size(); ++i) {
+            nonces[i] = headers[i].nNonce64;
+        }
+        if (!run_device(tmpl, nonces.data(), nonces.size(), results) ||
+            results.size() != headers.size()) {
+            return false;
+        }
+    } else {
+        results.resize(headers.size());
+        for (size_t i = 0; i < headers.size(); ++i) {
+            const uint64_t nonce = headers[i].nNonce64;
+            std::vector<matmul::v4::lt::DigestOnlyResultLT> one;
+            if (!run_device(headers[i], &nonce, 1, one) || one.size() != 1) {
+                return false;
+            }
+            results[i] = std::move(one[0]);
+        }
     }
 
     digests_out.resize(headers.size());
@@ -366,12 +393,8 @@ bool TryDeviceDigestsBMX4CLT(Kind backend, const std::vector<CBlockHeader>& head
         digests_out[i] = results[i].digest;
         uint256 d;
         std::vector<unsigned char> payload;
-        // Device digests are bit-exact by construction (CUDA/HIP/Metal LT
-        // backends self-test against ComputeDigestBMX4CLT; host ExactGemm is
-        // fail-closed fallback only). This digest-only entry never returns a
-        // device sketch payload, so recompute the canonical host payload for
-        // the winner and cross-check it against the device digest before
-        // handing VerifySketchBMX4CLT a sketch.
+        // Host-verify every digest against the COMPLETE candidate header
+        // (including nonce-bound seeds) before handing VerifySketch a sketch.
         if (!matmul::v4::lt::ComputeDigestBMX4CLT(headers[i], n, d, payload) ||
             d != results[i].digest) {
             digests_out.clear();

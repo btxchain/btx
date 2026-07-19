@@ -5107,23 +5107,28 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
                             std::chrono::steady_clock::time_point start)
 {
     const uint32_t n = params.nMatMulV4Dimension;
-    uint32_t window_span = params.nMatMulConsensusQStar;
-    if (!matmul::v4::lt::IsValidConsensusQStar(window_span)) {
-        window_span = matmul::v4::lt::kConsensusQStarDefault;
+    // Consensus Q* is immutable under local configuration. BTX_MATMUL_LT_BATCH
+    // may only size Phase-A execution chunks; it must never rewrite the seal
+    // leaf count / Merkle preimage used in Phase B.
+    uint32_t consensus_Qstar = params.nMatMulConsensusQStar;
+    if (!matmul::v4::lt::IsValidConsensusQStar(consensus_Qstar)) {
+        consensus_Qstar = matmul::v4::lt::kConsensusQStarDefault;
     }
+    uint32_t execution_chunk = consensus_Qstar;
     if (const char* env = std::getenv("BTX_MATMUL_LT_BATCH")) {
         const auto parsed = static_cast<uint32_t>(std::strtoul(env, nullptr, 10));
-        if (parsed > 0) window_span = std::min(parsed, matmul::v4::lt::kConsensusQStarMax);
+        if (parsed > 0) execution_chunk = std::min(parsed, matmul::v4::lt::kConsensusQStarMax);
     }
 
     // Phase B: seal-as-PoW — lottery object is the Q* window seal. Each attempt
-    // evaluates one full seal (Q* digests); max_tries counts seals attempted.
+    // evaluates one full seal (exactly consensus_Qstar digests); max_tries
+    // counts seals attempted.
     if (params.IsMatMulLTSealAsPoWActive(block_height)) {
         if (!parent_median_time_past.has_value()) {
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;
         }
-        const uint32_t Qstar = window_span;
+        const uint32_t Qstar = consensus_Qstar;
         const auto slot_seed = [&](CBlockHeader& h) -> bool {
             return SetDeterministicMatMulSeeds(h, params, block_height, parent_median_time_past);
         };
@@ -5177,7 +5182,7 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
             return false;
         }
         const uint64_t nonce_room = std::numeric_limits<uint64_t>::max() - block.nNonce64;
-        uint32_t window = static_cast<uint32_t>(std::min<uint64_t>(window_span, max_tries));
+        uint32_t window = static_cast<uint32_t>(std::min<uint64_t>(execution_chunk, max_tries));
         if (nonce_room < window - 1) window = static_cast<uint32_t>(nonce_room) + 1;
 
         std::vector<CBlockHeader> candidates(window, block);
@@ -5211,6 +5216,9 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
                            candidate.nNonce64);
                 continue;
             }
+            // bnTarget here is the caller-supplied effective share/block target
+            // (pool override when present); consensus still checks block target
+            // at validation time.
             if (UintToArith256(ref_digest) > bnTarget) continue;
 
             candidate.matmul_digest = ref_digest;
@@ -5399,8 +5407,10 @@ static bool SolveMatMulV4(CBlockHeader& block,
     // ENC-BMX4C loop; the ENC-S8 path below is unchanged.
     const Consensus::MatMulEncodingProfile solve_profile = params.GetMatMulEncodingProfile(block_height);
     if (solve_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C_LT) {
+        // Pass effective_target (share override when present) so LT Phase A/B
+        // pool shares are not silently dropped — mirrors ENC-BMX4C H6.
         return SolveMatMulV4LT(block, params, max_tries, block_height, abort_flag,
-                               freivalds_payload_out, parent_median_time_past, *bnTarget, start);
+                               freivalds_payload_out, parent_median_time_past, effective_target, start);
     }
     if (solve_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C) {
         return SolveMatMulV4BMX4C(block, params, max_tries, block_height, abort_flag,

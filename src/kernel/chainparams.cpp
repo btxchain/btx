@@ -241,14 +241,19 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
 
     // v4.4-LT Rank-1 (ENC-DR-LT, doc/btx-matmul-v4.4-lt-normative-spec.md).
     // No-op while nMatMulDRLTHeight == INT32_MAX (every public network today).
-    // When a network ever sets it live, LT supersedes ENC-BMX4C at/above this
-    // height (IsDRLTActive requires BMX4C already active), so it must not
-    // precede the BMX4C fork it builds on -- either the single unified flag
-    // day (== nMatMulBMX4CHeight) or a later, separately-staged deepening
-    // (> nMatMulBMX4CHeight); never before it.
+    // When a network ever sets it live, public nets must activate as ONE
+    // unified v4.4-LT profile (v4 == BMX4C == DRLT, seal-as-PoW on). Staged
+    // heights (DRLT later than BMX4C, or seal off) remain allowed only on
+    // explicitly isolated regtest fixtures.
     if (consensus.nMatMulDRLTHeight != std::numeric_limits<int32_t>::max()) {
         assert(consensus.nMatMulBMX4CHeight != std::numeric_limits<int32_t>::max());
         assert(consensus.nMatMulDRLTHeight >= consensus.nMatMulBMX4CHeight);
+        if (!is_regtest) {
+            // Public-network launch contract: one immutable ENC_BMX4C_LT profile.
+            assert(consensus.nMatMulV4Height == consensus.nMatMulBMX4CHeight);
+            assert(consensus.nMatMulBMX4CHeight == consensus.nMatMulDRLTHeight);
+            assert(consensus.fMatMulLTSealAsPoW);
+        }
         // Miner-local MatExpand window Q* is restricted to {64,128} (Rank-1
         // Phase A schedule; seal-as-PoW is Phase B). The deep-m tile is fixed
         // at b=2 for Phase A (m = n/2, storage-free under ENC-DR). A

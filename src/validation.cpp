@@ -9551,6 +9551,16 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
     // branch below); the descendant walk repeats this for every block that becomes
     // connected, in parent-before-child order.
     UpdateAuthenticatedChainWork(*pindexNew, GetConsensus());
+    // Header-only descendants already in the index must inherit the updated
+    // authenticated base; without this walk their nAuthenticatedChainWork
+    // stays stale after a late body promotion on an ancestor.
+    PropagateAuthenticatedChainWorkDescendants(*pindexNew, GetConsensus(),
+        [this](std::function<void(CBlockIndex&)> visit) {
+            for (auto& entry : m_blockman.m_block_index) {
+                visit(entry.second);
+            }
+        });
+    RecalculateBestHeader();
 
     if (pindexNew->pprev == nullptr || pindexNew->pprev->HaveNumChainTxs()) {
         // If pindexNew is the genesis block or all parents are BLOCK_VALID_TRANSACTIONS.
@@ -11511,8 +11521,10 @@ bool ChainstateManager::LoadBlockIndex()
             if (pindex->nStatus & BLOCK_FAILED_MASK && (!m_best_invalid || pindex->nChainWork > m_best_invalid->nChainWork)) {
                 m_best_invalid = pindex;
             }
-            if (pindex->IsValid(BLOCK_VALID_TREE) && (m_best_header == nullptr || CBlockIndexWorkComparator()(m_best_header, pindex)))
+            if (pindex->IsValid(BLOCK_VALID_TREE) &&
+                (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, *pindex))) {
                 m_best_header = pindex;
+            }
         }
     }
     return true;
@@ -15340,7 +15352,10 @@ void ChainstateManager::RecalculateBestHeader()
     AssertLockHeld(cs_main);
     m_best_header = ActiveChain().Tip();
     for (auto& entry : m_blockman.m_block_index) {
-        if (!(entry.second.nStatus & BLOCK_FAILED_MASK) && m_best_header->nChainWork < entry.second.nChainWork) {
+        if ((entry.second.nStatus & BLOCK_FAILED_MASK) || m_best_header == nullptr) continue;
+        // Trust-adjusted selection: forged header-only branches only receive a
+        // bounded unauth lookahead above their last authenticated ancestor.
+        if (PreferTrustAdjustedHeader(*m_best_header, entry.second)) {
             m_best_header = &entry.second;
         }
     }
