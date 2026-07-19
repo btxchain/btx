@@ -499,7 +499,9 @@ struct Params {
      *  seal recompute is ~Q* sibling EncDr digests. INERT while
      *  nMatMulDRLTHeight == INT32_MAX. Regtest may raise via params. */
     uint32_t nMatMulLTMaxPendingVerifications{2};
-    /** LT DoS verify budgets (global / per-peer) when IsDRLTActive. Sized for
+    /** LT DoS verify budgets (global / per-peer), in complete tip-verification
+     *  jobs per minute, when IsDRLTActive. Effective helpers convert these to
+     *  leaf work units (multiplying by Q*) while seal-as-PoW is live. Sized for
      *  tip-verify of fat EncDr-LT / seal-as-PoW recomputes (honest rate << 1/min).
      *  Defaults are conservative placeholders pending on-hardware soak; never
      *  raise a public DRLT height until calibrated. INERT while DRLT is

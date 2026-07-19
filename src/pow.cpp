@@ -3797,12 +3797,10 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
         if (!parent_median_time_past.has_value()) {
             return finish(false, MatMulValidationPath::RECOMPUTE);
         }
-        if (!ConsumeGlobalMatMulPhase2Budget(
-                EffectiveMatMulGlobalVerifyBudgetPerMin(params, block_height), 1,
-                std::chrono::steady_clock::now())) {
-            LogDebug(BCLog::NET, "ENC-DR seal recompute budget exhausted; recomputing block %s anyway (verdict required)\n",
-                     block_hash.ToString());
-        }
+        // Resource admission is owned by the caller before it dispatches this
+        // mandatory consensus verdict. Charging the shared P2P limiter here
+        // would double-charge network blocks (Q* leaf units at admission plus
+        // one job here) and would let reindex/RPC validation starve P2P work.
         uint256 recomputed_seal;
         std::vector<unsigned char> unused_sketch;
         if (!RecomputeMatMulV4SketchReference(block, params, block_height,
@@ -3930,19 +3928,10 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
     }
 
     // --- RECOMPUTE reference path (the consensus definition; epsilon = 0).
-    // DoS accounting: this is the expensive (one-nonce, O(W)) path an attacker
-    // could try to force with header-PoW-paying garbage. It is priced by the
-    // existing v4 global verify budget (spec §I.5) SEPARATELY from the
-    // fail-fast cache path above; exhaustion is logged for rate observability
-    // but cannot change the verdict — ContextualCheckBlock requires a
-    // decision, and the header-PoW pre-gate (nMatMulHeaderPoWDiscountBits) is
-    // the admission throttle that keeps attempts priced upstream.
-    if (!ConsumeGlobalMatMulPhase2Budget(
-            EffectiveMatMulGlobalVerifyBudgetPerMin(params, block_height), 1,
-            std::chrono::steady_clock::now())) {
-        LogDebug(BCLog::NET, "ENC-DR recompute budget exhausted; recomputing block %s anyway (verdict required)\n",
-                 block_hash.ToString());
-    }
+    // DoS accounting belongs to the admission/dispatch boundary. Consensus
+    // validation must always return a verdict and must not mutate the shared
+    // P2P limiter; otherwise network blocks are charged twice while reindex,
+    // RPC, and internal checks unexpectedly consume peer capacity.
 
     uint256 recomputed_digest;
     std::vector<unsigned char> recomputed_sketch;
@@ -4324,10 +4313,29 @@ namespace {
 // v4 budgets apply, below it the v3 budgets do. v4 disabled (height ==
 // INT32_MAX) always yields the v3 value, regardless of reference_height, so an
 // INT32_MAX "unknown height" sentinel can never accidentally select v4.
+uint32_t ScaleMatMulLTJobBudgetToWorkUnits(const Consensus::Params& params,
+                                           int32_t reference_height,
+                                           uint32_t jobs)
+{
+    if (!params.IsMatMulLTSealAsPoWActive(reference_height) ||
+        jobs == std::numeric_limits<uint32_t>::max()) {
+        return jobs;
+    }
+    uint32_t q = params.nMatMulConsensusQStar;
+    if (q != 64 && q != 128) q = 64;
+    if (jobs > std::numeric_limits<uint32_t>::max() / q) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    return jobs * q;
+}
+
 uint32_t SelectMatMulPeerVerifyBudgetBase(const Consensus::Params& params, int32_t reference_height)
 {
     if (!IsDisabledHeight(params.nMatMulDRLTHeight) && params.IsDRLTActive(reference_height)) {
-        return params.nMatMulLTPeerVerifyBudgetPerMin;
+        // The parameter is complete jobs/minute. Admission accounting is in
+        // leaf work units, so one Phase-B job must still fit after weighting.
+        return ScaleMatMulLTJobBudgetToWorkUnits(
+            params, reference_height, params.nMatMulLTPeerVerifyBudgetPerMin);
     }
     if (!IsDisabledHeight(params.nMatMulV4Height) && params.IsMatMulV4Active(reference_height)) {
         return params.nMatMulV4PeerVerifyBudgetPerMin;
@@ -4354,15 +4362,8 @@ uint32_t EffectiveMatMulMaxPendingVerifications(const Consensus::Params& params,
         // Cap is in leaf work-units. Default nMatMulLTMaxPendingVerifications=2
         // means up to two concurrent seal jobs when seal-as-PoW is live
         // (2 * Q*), or two Phase-A digests otherwise.
-        const uint32_t jobs = params.nMatMulLTMaxPendingVerifications;
-        if (jobs == std::numeric_limits<uint32_t>::max()) {
-            return jobs;
-        }
-        const uint32_t units = MatMulEncDrWorkUnits(params, reference_height);
-        if (jobs > std::numeric_limits<uint32_t>::max() / units) {
-            return std::numeric_limits<uint32_t>::max();
-        }
-        return jobs * units;
+        return ScaleMatMulLTJobBudgetToWorkUnits(
+            params, reference_height, params.nMatMulLTMaxPendingVerifications);
     }
     return params.nMatMulMaxPendingVerifications;
 }
@@ -4370,7 +4371,8 @@ uint32_t EffectiveMatMulMaxPendingVerifications(const Consensus::Params& params,
 uint32_t EffectiveMatMulGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height)
 {
     if (!IsDisabledHeight(params.nMatMulDRLTHeight) && params.IsDRLTActive(reference_height)) {
-        return params.nMatMulLTGlobalVerifyBudgetPerMin;
+        return ScaleMatMulLTJobBudgetToWorkUnits(
+            params, reference_height, params.nMatMulLTGlobalVerifyBudgetPerMin);
     }
     if (!IsDisabledHeight(params.nMatMulV4Height) && params.IsMatMulV4Active(reference_height)) {
         return params.nMatMulV4GlobalVerifyBudgetPerMin;
@@ -4471,7 +4473,8 @@ bool ConsumeGlobalMatMulPhase2Budget(
         g_matmul_global_phase2_this_minute = 0;
     }
 
-    if (g_matmul_global_phase2_this_minute + count > max_global_per_minute) {
+    if (g_matmul_global_phase2_this_minute > max_global_per_minute ||
+        count > max_global_per_minute - g_matmul_global_phase2_this_minute) {
         return false;
     }
     g_matmul_global_phase2_this_minute += count;
@@ -4489,6 +4492,7 @@ bool CanStartMatMulVerification(uint32_t pending_verifications, uint32_t work_un
 {
     if (work_units == 0) return true;
     const uint32_t cap = EffectiveMatMulMaxPendingVerifications(params, reference_height);
+    if (pending_verifications > std::numeric_limits<uint32_t>::max() - work_units) return false;
     if (cap == std::numeric_limits<uint32_t>::max()) return true;
     if (work_units > cap) return false;
     return pending_verifications <= cap - work_units;

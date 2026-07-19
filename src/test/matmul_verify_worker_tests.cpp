@@ -279,9 +279,29 @@ BOOST_AUTO_TEST_CASE(lt_tip_verify_budget_knobs)
     params.fMatMulLTSealAsPoW = true;
     BOOST_CHECK_EQUAL(MatMulEncDrWorkUnits(params, 100), 64U);
     BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(params, 100), 128U);
+    // The operator knobs are complete jobs/minute; effective admission is in
+    // leaf work units. Default 1 must admit one honest Q*=64 seal job.
+    BOOST_CHECK_EQUAL(EffectiveMatMulGlobalVerifyBudgetPerMin(params, 100), 64U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulPeerVerifyBudgetPerMin(
+                          params, /*is_ibd=*/false, 100),
+                      64U);
     BOOST_CHECK(CanStartMatMulVerification(/*pending=*/0, /*work_units=*/64, params, 100));
     BOOST_CHECK(CanStartMatMulVerification(/*pending=*/64, /*work_units=*/64, params, 100));
     BOOST_CHECK(!CanStartMatMulVerification(/*pending=*/65, /*work_units=*/64, params, 100));
+
+    // Unbounded/test values saturate rather than wrapping during unit scaling.
+    params.nMatMulLTGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+    params.nMatMulLTPeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+    BOOST_CHECK_EQUAL(EffectiveMatMulGlobalVerifyBudgetPerMin(params, 100),
+                      std::numeric_limits<uint32_t>::max());
+    BOOST_CHECK_EQUAL(EffectiveMatMulPeerVerifyBudgetPerMin(
+                          params, /*is_ibd=*/false, 100),
+                      std::numeric_limits<uint32_t>::max());
+    params.nMatMulLTMaxPendingVerifications = std::numeric_limits<uint32_t>::max();
+    BOOST_CHECK(CanStartMatMulVerification(
+        std::numeric_limits<uint32_t>::max() - 64U, 64U, params, 100));
+    BOOST_CHECK(!CanStartMatMulVerification(
+        std::numeric_limits<uint32_t>::max() - 63U, 64U, params, 100));
 
     // DRLT disabled (INT32_MAX): LT knobs never select, even at high height.
     params.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();

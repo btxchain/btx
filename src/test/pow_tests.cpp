@@ -3383,6 +3383,11 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batches_for_metal_product_minin
     ScopedApplePerfLogicalCpuOverrideEnv perf_override_env("10");
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    // This case exercises the legacy shared-matrix batch policy, not the
+    // separately covered nonce-seeded solver (regtest activates that at 9).
+    consensus.nMatMulNonceSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulParentMtpSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
     consensus.fMatMulPOW = true;
     consensus.nMatMulDimension = 512;
     consensus.nMatMulTranscriptBlockSize = 16;
@@ -3655,6 +3660,9 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batch_for_post_activation_mainn
     }
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.nMatMulNonceSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulParentMtpSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
     consensus.fMatMulPOW = true;
     consensus.fMatMulFreivaldsEnabled = true;
     consensus.fMatMulRequireProductPayload = false;
@@ -3705,6 +3713,9 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_high_perf_apple_metal_defaults_when_perf_
     }
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.nMatMulNonceSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulParentMtpSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
     consensus.fMatMulPOW = true;
     consensus.fMatMulFreivaldsEnabled = true;
     consensus.fMatMulRequireProductPayload = false;
@@ -3755,6 +3766,9 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_conservative_generic_apple_metal_prefetch
     }
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.nMatMulNonceSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulParentMtpSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
     consensus.fMatMulPOW = true;
     consensus.fMatMulFreivaldsEnabled = true;
     consensus.fMatMulRequireProductPayload = false;

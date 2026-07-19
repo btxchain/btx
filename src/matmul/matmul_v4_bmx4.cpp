@@ -18,6 +18,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -488,6 +489,46 @@ void GemmS8S32Add(const std::vector<int8_t>& A, const std::vector<int8_t>& B,
     }
 }
 
+struct AdaptiveHighLimb {
+    size_t index;
+    int32_t value;
+};
+
+// Exact balanced-base-256 decomposition. The two dense planes are always
+// legal signed-byte tensor operands. Unlike a fixed two-limb approximation,
+// the residual high limb is retained explicitly, including for adversarial
+// and full-INT32 inputs.
+void DecomposeAdaptiveBase256(const std::vector<int32_t>& in,
+                              std::vector<int8_t>& d0,
+                              std::vector<int8_t>& d1,
+                              std::vector<AdaptiveHighLimb>& high)
+{
+    constexpr int64_t kBase = 256;
+    constexpr int64_t kHalf = 128;
+    d0.resize(in.size());
+    d1.resize(in.size());
+    high.clear();
+    for (size_t idx = 0; idx < in.size(); ++idx) {
+        int64_t x = in[idx];
+        int64_t lo0 = x % kBase;
+        if (lo0 > kHalf - 1) lo0 -= kBase;
+        if (lo0 < -kHalf) lo0 += kBase;
+        d0[idx] = static_cast<int8_t>(lo0);
+        x = (x - lo0) / kBase;
+
+        int64_t lo1 = x % kBase;
+        if (lo1 > kHalf - 1) lo1 -= kBase;
+        if (lo1 < -kHalf) lo1 += kBase;
+        d1[idx] = static_cast<int8_t>(lo1);
+        x = (x - lo1) / kBase;
+        if (x != 0) {
+            assert(x >= std::numeric_limits<int32_t>::min() &&
+                   x <= std::numeric_limits<int32_t>::max());
+            high.push_back({idx, static_cast<int32_t>(x)});
+        }
+    }
+}
+
 // Fused M61 epilogue weights for the nine Karatsuba products in BuildKaratsubaPlanes
 // order (m00, m11, m01, m22, m33, m23, m02, m13, m03). Derived by expanding the
 // two-level Karatsuba reconstruction into Chat = sum_k 64^k * c_k mod q.
@@ -724,6 +765,105 @@ std::vector<Fq> ComputeCombineAdaptiveLimbBMX4C(const std::vector<int32_t>& P,
         return ComputeCombineTwoLimbBMX4C(P, Q, n, m);
     }
     return ComputeCombineAdaptiveBase256BMX4C(P, Q, n, m);
+}
+
+std::vector<Fq> ComputeCombineAdaptiveSparseBase256BMX4C(
+    const std::vector<int32_t>& P, const std::vector<int32_t>& Q,
+    uint32_t n, uint32_t m, AdaptiveCombineStatsBMX4C* stats)
+{
+    // This is deliberately a miner-local implementation alternative: the
+    // verifier still checks the same canonical Chat bytes. Shape assertions
+    // mirror the preconditions of the existing combine routines.
+    assert(P.size() == static_cast<size_t>(m) * n);
+    assert(Q.size() == static_cast<size_t>(n) * m);
+
+    std::vector<int8_t> p0, p1, q0, q1;
+    std::vector<AdaptiveHighLimb> ph, qh;
+    DecomposeAdaptiveBase256(P, p0, p1, ph);
+    DecomposeAdaptiveBase256(Q, q0, q1, qh);
+
+    AdaptiveCombineStatsBMX4C local;
+    local.input_elements = P.size() + Q.size();
+    local.p_high_nonzero = ph.size();
+    local.q_high_nonzero = qh.size();
+    const size_t high_count = ph.size() + qh.size();
+    local.estimated_sparse_correction_macs =
+        static_cast<uint64_t>(high_count) * static_cast<uint64_t>(m);
+
+    // At most one eighth of a classical GEMM's MAC count is spent on sparse
+    // correction: (P+Q elements)/16 * m = m*m*n/8. Keep a floor for tiny unit
+    // matrices so isolated edge values exercise the sparse path.
+    const size_t sparse_limit = std::max<size_t>(
+        4, local.input_elements / kAdaptiveHighLimbFallbackDivisor);
+    if (high_count > sparse_limit) {
+        local.used_direct_fallback = true;
+        if (stats) *stats = local;
+        return ComputeCombineModQ(P, Q, n, m);
+    }
+
+    local.dense_gemm_count = 4;
+    local.used_sparse_high_correction = high_count != 0;
+
+    // Four dense products reconstruct Plo*Qlo, where
+    // Plo=p0+256*p1 and Qlo=q0+256*q1. Each individual signed INT8 dot is
+    // bounded by 16384*n <= 477,216,768 at the BMX4 dimension limit, safely
+    // inside INT32.
+    const std::vector<int8_t>* const pp[2] = {&p0, &p1};
+    const std::vector<int8_t>* const qp[2] = {&q0, &q1};
+    const Fq weight[2][2] = {
+        {static_cast<Fq>(1), static_cast<Fq>(1) << 8},
+        {static_cast<Fq>(1) << 8, static_cast<Fq>(1) << 16},
+    };
+    const size_t out_size = static_cast<size_t>(m) * m;
+    std::vector<Fq> Chat(out_size, 0);
+    std::vector<int32_t> S(out_size, 0);
+    for (uint32_t i = 0; i < 2; ++i) {
+        for (uint32_t j = 0; j < 2; ++j) {
+            std::fill(S.begin(), S.end(), 0);
+            GemmS8S32Add(*pp[i], *qp[j], S, m, n);
+            for (size_t idx = 0; idx < out_size; ++idx) {
+                Chat[idx] = int8_field::FqAdd(
+                    Chat[idx], int8_field::FqMul(
+                        weight[i][j], int8_field::FqFromSigned(S[idx])));
+            }
+        }
+    }
+
+    // Exact sparse residual:
+    //   P*Q = Plo*Qlo + 256^2 * (Ph*Q + Plo*Qh).
+    // Using full Q in the first term includes Ph*Qh exactly once. Products fit
+    // int64 even for arbitrary int32 inputs, and are canonically folded into
+    // Fq before the base^2 weight is applied.
+    constexpr Fq kHighWeight = static_cast<Fq>(1) << 16;
+    for (const AdaptiveHighLimb& e : ph) {
+        const uint32_t a = static_cast<uint32_t>(e.index / n);
+        const uint32_t k = static_cast<uint32_t>(e.index % n);
+        Fq* chat_row = &Chat[static_cast<size_t>(a) * m];
+        const int32_t* q_row = &Q[static_cast<size_t>(k) * m];
+        for (uint32_t c = 0; c < m; ++c) {
+            const int64_t term = static_cast<int64_t>(e.value) * q_row[c];
+            chat_row[c] = int8_field::FqAdd(
+                chat_row[c], int8_field::FqMul(
+                    kHighWeight, int8_field::FqFromSigned(term)));
+        }
+    }
+    for (const AdaptiveHighLimb& e : qh) {
+        const uint32_t k = static_cast<uint32_t>(e.index / m);
+        const uint32_t c = static_cast<uint32_t>(e.index % m);
+        for (uint32_t a = 0; a < m; ++a) {
+            const size_t p_idx = static_cast<size_t>(a) * n + k;
+            const int32_t p_low = static_cast<int32_t>(p0[p_idx]) +
+                                  256 * static_cast<int32_t>(p1[p_idx]);
+            const int64_t term = static_cast<int64_t>(p_low) * e.value;
+            Fq& out = Chat[static_cast<size_t>(a) * m + c];
+            out = int8_field::FqAdd(
+                out, int8_field::FqMul(
+                    kHighWeight, int8_field::FqFromSigned(term)));
+        }
+    }
+
+    if (stats) *stats = local;
+    return Chat;
 }
 
 std::vector<Fq> ComputeCombineFp8FiveLimbBMX4C(const std::vector<int32_t>& P,

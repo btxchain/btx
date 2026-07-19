@@ -10,6 +10,7 @@
 #include <uint256.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 #include <vector>
@@ -251,6 +252,41 @@ inline constexpr int64_t kCombineThreeLimbBase256MaxAbs =
 [[nodiscard]] std::vector<Fq> ComputeCombineAdaptiveLimbBMX4C(const std::vector<int32_t>& P,
                                                               const std::vector<int32_t>& Q,
                                                               uint32_t n, uint32_t m);
+
+/** Miner-local adaptive exact combine statistics. These counters are not part
+ *  of the consensus transcript; they let accelerator planners and benchmarks
+ *  distinguish the common four-GEMM path from its deterministic exact
+ *  fallback. */
+struct AdaptiveCombineStatsBMX4C {
+    size_t input_elements{0};
+    size_t p_high_nonzero{0};
+    size_t q_high_nonzero{0};
+    uint64_t estimated_sparse_correction_macs{0};
+    uint32_t dense_gemm_count{0};
+    bool used_sparse_high_correction{false};
+    bool used_direct_fallback{false};
+};
+
+/** Maximum fraction of non-zero high limbs accepted by the sparse-correction
+ *  path. Once more than 1/16 of all P/Q entries need a high limb, the CPU
+ *  prototype deterministically falls back to ComputeCombineModQ instead of
+ *  allowing adversarially dense "sparse" work. */
+inline constexpr size_t kAdaptiveHighLimbFallbackDivisor = 16;
+
+/** Adaptive balanced-base-256 miner combine prototype. Each P/Q entry is
+ *  decomposed exactly as
+ *
+ *      x = d0 + 256*d1 + 65536*h,  d0,d1 in [-128,127].
+ *
+ *  The common h=0 portion uses four exact s8xs8->s32 GEMMs. Non-zero high
+ *  limbs are applied as exact sparse field corrections; if they exceed the
+ *  deterministic density gate above, the routine uses the direct exact
+ *  combine instead. Both routes are BYTE-IDENTICAL to ComputeCombineModQ and
+ *  change no consensus rule, digest, activation height, or verifier path.
+ *  `stats` is optional and intended for benchmarks/backend planning. */
+[[nodiscard]] std::vector<Fq> ComputeCombineAdaptiveSparseBase256BMX4C(
+    const std::vector<int32_t>& P, const std::vector<int32_t>& Q,
+    uint32_t n, uint32_t m, AdaptiveCombineStatsBMX4C* stats = nullptr);
 
 /** Five-limb exact FP8-alphabet combine (Rubin-class lane): decompose P/Q into
  *  five balanced base-32 digits in [-16,15] (every digit exactly representable

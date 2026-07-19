@@ -5,6 +5,9 @@
 #include <matmul/backend_capabilities_v4.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/accel_v4.h>
+#if defined(BTX_ENABLE_METAL)
+#include <metal/matmul_v4_lt_accel.h>
+#endif
 
 #include <arith_uint256.h>
 #include <consensus/params.h>
@@ -22,6 +25,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -117,6 +121,19 @@ BOOST_AUTO_TEST_CASE(matexpand_extract_range_and_determinism)
         BOOST_CHECK_EQUAL(a, b);
         BOOST_CHECK(a >= -48 && a <= 48);
     }
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_splitmix_extract_signed_dequant_golden)
+{
+    // Pin negative-mantissa dequantization explicitly.  The implementation
+    // must use defined exact arithmetic (not a signed left shift) so these
+    // consensus bytes remain stable across compilers and optimization levels.
+    BOOST_CHECK_EQUAL(lt::ExtractDequantMatExpandSplitMix(-2000, 3, 5, 0xC0FFEEULL), -16);
+    BOOST_CHECK_EQUAL(lt::ExtractDequantMatExpandSplitMix(-1, 0, 0, 0), -16);
+    BOOST_CHECK_EQUAL(lt::ExtractDequantMatExpandSplitMix(42, 1, 2, 0x1234567890ABCDEFULL), -16);
+    BOOST_CHECK_EQUAL(lt::ExtractDequantMatExpandSplitMix(std::numeric_limits<int32_t>::min(),
+                                                         7, 9, 0xA5A5A5A5ULL),
+                      12);
 }
 
 BOOST_AUTO_TEST_CASE(matexpand_not_affine_in_raw)
@@ -267,6 +284,29 @@ BOOST_AUTO_TEST_CASE(accel_dispatch_matches_reference)
     BOOST_CHECK(payloads[0] == ref_payload);
 }
 
+#if defined(BTX_ENABLE_METAL)
+BOOST_AUTO_TEST_CASE(metal_matexpand_backend_matches_reference)
+{
+    auto header = MakeLTHeader(21, kTestDim);
+    const uint64_t nonce = header.nNonce64;
+
+    BOOST_REQUIRE_MESSAGE(matmul_v4::metal::IsMatMulLTMetalAvailable(),
+                          "Metal build must execute and pass the exact LT GEMM self-test");
+
+    std::vector<lt::DigestOnlyResultLT> results;
+    BOOST_REQUIRE(matmul_v4::metal::ComputeDigestsOnlyLTMetal(
+        header, kTestDim, &nonce, /*count=*/1, results));
+    BOOST_REQUIRE_EQUAL(results.size(), 1U);
+    BOOST_CHECK(results[0].backend_status ==
+                matmul::v4::bmx4::DigestOnlyBackendStatus::Ok);
+
+    uint256 ref;
+    std::vector<unsigned char> ref_payload;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref, ref_payload));
+    BOOST_CHECK(results[0].digest == ref);
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(qstar_128_seal_distinct)
 {
     BOOST_CHECK(lt::IsValidConsensusQStar(128));
@@ -341,6 +381,14 @@ BOOST_AUTO_TEST_CASE(window_merkle_and_seal)
                 lt::SealWindowCommit(sigma, root, 128));
     BOOST_CHECK(lt::IsValidConsensusQStar(64));
     BOOST_CHECK(!lt::IsValidConsensusQStar(32));
+
+    // The current 64-bit slot nonce is explicitly the low-64 projection of a
+    // full upgrade-ready identifier.  This refactor must not alter v4.4 bytes.
+    const uint256 slot0 = lt::DeriveWindowSlotId(sigma, 0);
+    const uint256 slot1 = lt::DeriveWindowSlotId(sigma, 1);
+    BOOST_CHECK(slot0 != slot1);
+    BOOST_CHECK_EQUAL(lt::DeriveWindowSlotNonce(sigma, 0), ReadLE64(slot0.data()));
+    BOOST_CHECK_EQUAL(lt::DeriveWindowSlotNonce(sigma, 1), ReadLE64(slot1.data()));
 }
 
 BOOST_AUTO_TEST_CASE(window_miner_matches_reference)

@@ -431,8 +431,10 @@ MatMulPhase2Punishment RegisterMatMulPhase2Failure(
     uint32_t* failures_out = nullptr);
 // Height-selected DoS verify budgets (spec §G.3/§H.4/§I.5): at and above
 // nMatMulV4Height the v4 budget values apply; below (or with v4 disabled) the
-// v3 values apply. reference_height defaults to -1 (== v3), preserving callers
-// that do not supply a height.
+// v3 values apply. Effective LT values are expressed in EncDr work units;
+// operator-facing LT knobs remain complete jobs/minute and are scaled by Q*
+// while seal-as-PoW is active. reference_height defaults to -1 (== v3),
+// preserving callers that do not supply a height.
 uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd, int32_t reference_height = -1);
 uint32_t EffectiveMatMulGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height = -1);
 /** Height-selected pending EncDr concurrency cap: LT tip-verify

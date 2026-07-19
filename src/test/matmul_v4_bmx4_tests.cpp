@@ -30,6 +30,7 @@
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/matmul_v4_bmx4_pipeline.h>
+#include <matmul/matmul_v4_lt.h>
 #include <matmul/pow_v4.h>
 
 #include <primitives/block.h>
@@ -40,7 +41,9 @@
 #include <boost/test/unit_test.hpp>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <set>
 #include <string>
 #include <string>
@@ -401,6 +404,94 @@ BOOST_AUTO_TEST_CASE(adaptive_limb_combine_matches_direct_and_fallback)
     }
 }
 
+BOOST_AUTO_TEST_CASE(adaptive_base256_int8_top_boundaries_are_exact)
+{
+    constexpr uint32_t n = 1;
+    constexpr uint32_t m = 1;
+    const int32_t cases[] = {
+        32'639, 32'640, -32'896, -32'897,
+        8'355'711, 8'355'712, -8'421'504,
+    };
+    for (const int32_t value : cases) {
+        const std::vector<int32_t> P{value};
+        const std::vector<int32_t> Q{1};
+        BOOST_CHECK_MESSAGE(
+            bx::ComputeCombineAdaptiveLimbBMX4C(P, Q, n, m) ==
+                ComputeCombineModQ(P, Q, n, m),
+            "boundary=" << value);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(adaptive_base256_common_four_gemm_path_matches_direct)
+{
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const uint32_t n = 64;
+    const uint32_t m = 16;
+    // Entirely inside the exact two-limb window [-32896,32639].
+    constexpr int32_t bound = 30'000;
+    std::vector<int32_t> P(static_cast<size_t>(m) * n);
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m);
+    for (auto& x : P) x = static_cast<int32_t>(rng.randrange(2 * bound + 1)) - bound;
+    for (auto& x : Q) x = static_cast<int32_t>(rng.randrange(2 * bound + 1)) - bound;
+    P[0] = 32'639;
+    P[1] = -32'896;
+    Q[0] = -32'896;
+    Q[1] = 32'639;
+
+    bx::AdaptiveCombineStatsBMX4C stats;
+    const auto adaptive = bx::ComputeCombineAdaptiveSparseBase256BMX4C(P, Q, n, m, &stats);
+    BOOST_CHECK(adaptive == ComputeCombineModQ(P, Q, n, m));
+    BOOST_CHECK_EQUAL(stats.p_high_nonzero, 0U);
+    BOOST_CHECK_EQUAL(stats.q_high_nonzero, 0U);
+    BOOST_CHECK_EQUAL(stats.dense_gemm_count, 4U);
+    BOOST_CHECK(!stats.used_sparse_high_correction);
+    BOOST_CHECK(!stats.used_direct_fallback);
+}
+
+BOOST_AUTO_TEST_CASE(adaptive_base256_sparse_high_limbs_are_corrected_exactly)
+{
+    const uint32_t n = 8;
+    const uint32_t m = 4;
+    std::vector<int32_t> P(static_cast<size_t>(m) * n, 17);
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m, -23);
+
+    // First values just outside the asymmetric two-limb window, followed by
+    // full BMX4 extrema. Four total high limbs stay on the sparse path.
+    P[0] = 32'640;
+    P[19] = -32'897;
+    // Q[0] shares contraction index k=0 with P[0], pinning the Ph*Qh cross
+    // term in the sparse reconstruction rather than only isolated high limbs.
+    Q[0] = static_cast<int32_t>(bx::kCombineMaxAbs);
+    Q[28] = -static_cast<int32_t>(bx::kCombineMaxAbs);
+
+    bx::AdaptiveCombineStatsBMX4C stats;
+    const auto adaptive = bx::ComputeCombineAdaptiveSparseBase256BMX4C(P, Q, n, m, &stats);
+    BOOST_CHECK(adaptive == ComputeCombineModQ(P, Q, n, m));
+    BOOST_CHECK_EQUAL(stats.p_high_nonzero, 2U);
+    BOOST_CHECK_EQUAL(stats.q_high_nonzero, 2U);
+    BOOST_CHECK_EQUAL(stats.estimated_sparse_correction_macs, 16U);
+    BOOST_CHECK_EQUAL(stats.dense_gemm_count, 4U);
+    BOOST_CHECK(stats.used_sparse_high_correction);
+    BOOST_CHECK(!stats.used_direct_fallback);
+}
+
+BOOST_AUTO_TEST_CASE(adaptive_base256_dense_high_limbs_use_exact_direct_fallback)
+{
+    const uint32_t n = 8;
+    const uint32_t m = 4;
+    std::vector<int32_t> P(static_cast<size_t>(m) * n, 70'000);
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m, -90'000);
+
+    bx::AdaptiveCombineStatsBMX4C stats;
+    const auto adaptive = bx::ComputeCombineAdaptiveSparseBase256BMX4C(P, Q, n, m, &stats);
+    BOOST_CHECK(adaptive == ComputeCombineModQ(P, Q, n, m));
+    BOOST_CHECK_EQUAL(stats.p_high_nonzero, P.size());
+    BOOST_CHECK_EQUAL(stats.q_high_nonzero, Q.size());
+    BOOST_CHECK_EQUAL(stats.dense_gemm_count, 0U);
+    BOOST_CHECK(!stats.used_sparse_high_correction);
+    BOOST_CHECK(stats.used_direct_fallback);
+}
+
 BOOST_AUTO_TEST_CASE(fp8_five_limb_combine_matches_direct)
 {
     FastRandomContext rng{/*fDeterministic=*/true};
@@ -588,27 +679,99 @@ BOOST_AUTO_TEST_CASE(lt_tensor_gemm_availability_and_arch_probe)
     }
 #endif
 
-    BOOST_CHECK(!matmul_v4::hip::IsLtMfmaGemmAvailable());
-    BOOST_CHECK(!matmul_v4::hip::IsLtDeviceAluGemmAvailable());
-    BOOST_CHECK(!matmul_v4::metal::IsLtTensorOpsGemmAvailable());
-
     std::vector<int8_t> a(16, 1), b(16, 2);
     std::vector<int32_t> out;
-    {
-#if !defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
-        BOOST_CHECK(!matmul_v4::cuda::TryLaunchLtImmaGemmS8S8(a, b, 4, 4, 4, out));
-#else
-        (void)matmul_v4::cuda::TryLaunchLtImmaGemmS8S8(a, b, 4, 4, 4, out);
-#endif
-        BOOST_CHECK(!matmul_v4::hip::TryLaunchLtMfmaGemmS8S8(a, b, 4, 4, 4, out));
-        BOOST_CHECK(!matmul_v4::hip::TryLaunchLtDeviceAluGemmS8S8(a, b, 4, 4, 4, out));
-        BOOST_CHECK(!matmul_v4::metal::TryLaunchLtTensorOpsGemmS8S8(a, b, 4, 4, 4, out));
+    // A compiled backend may report true only after its exact self-test; an
+    // unavailable backend must fail closed. Metal 4 MPP is available on
+    // qualifying Apple-family-9+ devices, so do not hard-code Metal=false.
+    for (const auto& backend : std::initializer_list<std::pair<bool, bool>>{
+             {matmul_v4::cuda::IsLtImmaGemmAvailable(),
+              [&] { std::vector<int32_t> out; return matmul_v4::cuda::TryLaunchLtImmaGemmS8S8(a, b, 4, 4, 4, out); }()},
+             {matmul_v4::hip::IsLtMfmaGemmAvailable(),
+              [&] { std::vector<int32_t> out; return matmul_v4::hip::TryLaunchLtMfmaGemmS8S8(a, b, 4, 4, 4, out); }()},
+             {matmul_v4::metal::IsLtTensorOpsGemmAvailable(),
+              [&] { std::vector<int32_t> out; return matmul_v4::metal::TryLaunchLtTensorOpsGemmS8S8(a, b, 4, 4, 4, out); }()}}) {
+        BOOST_CHECK_EQUAL(backend.first, backend.second);
     }
+
+    if (matmul_v4::metal::IsLtTensorOpsGemmAvailable()) {
+        std::vector<int32_t> left32(16, 1000), out;
+        BOOST_REQUIRE(matmul_v4::metal::TryLaunchLtTensorOpsGemmS32S8(
+            left32, b, 4, 4, 4, out));
+        BOOST_REQUIRE_EQUAL(out.size(), 16U);
+        for (const int32_t value : out) BOOST_CHECK_EQUAL(value, 8000);
+
+        // +10,000,000 cannot be represented by the exact three signed-byte limbs;
+        // decline so the caller runs canonical ExactGemmS32S8.
+        std::fill(left32.begin(), left32.end(), 10'000'000);
+        BOOST_CHECK(!matmul_v4::metal::TryLaunchLtTensorOpsGemmS32S8(
+            left32, b, 4, 4, 4, out));
+    }
+
+    BOOST_CHECK_EQUAL(matmul_v4::hip::IsLtDeviceAluGemmAvailable(),
+                      matmul_v4::hip::TryLaunchLtDeviceAluGemmS8S8(a, b, 4, 4, 4, out));
 
     std::vector<int32_t> mid(16, 3);
     BOOST_CHECK(!matmul_v4::cuda::TryLaunchLtImmaGemmS32S8(mid, b, 4, 4, 4, out));
 }
 
+#if defined(BTX_ENABLE_METAL)
+BOOST_AUTO_TEST_CASE(lt_tensor_mpp_benchmark_shape_is_bit_exact)
+{
+    // Default is a cheap CI vector.  On Apple hardware this can also be used
+    // as a one-shot comparative probe at production-like output shapes:
+    // BTX_MATMUL_V4_LT_TENSOR_TEST_N=2048 test_btx -t .../this_test
+    uint32_t n = 64;
+    if (const char* value = std::getenv("BTX_MATMUL_V4_LT_TENSOR_TEST_N")) {
+        n = static_cast<uint32_t>(std::strtoul(value, nullptr, 10));
+    }
+    BOOST_REQUIRE(n >= 1);
+    BOOST_REQUIRE(n <= 4096);
+    constexpr uint32_t panel = 128;
+
+    std::vector<int8_t> g(static_cast<size_t>(n) * n);
+    std::vector<int8_t> w(static_cast<size_t>(n) * panel);
+    std::vector<int8_t> h(static_cast<size_t>(panel) * n);
+    uint64_t state = 0x2c9277b5d7e4a13bULL;
+    auto next_m11 = [&state]() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return static_cast<int8_t>(state % 13 - 6);
+    };
+    for (auto& value : g) value = next_m11();
+    for (auto& value : w) value = next_m11();
+    for (auto& value : h) value = next_m11();
+
+    const auto cpu0 = std::chrono::steady_clock::now();
+    const auto y_ref = matmul::v4::lt::ExactGemmS8S8(g, w, n, n, panel);
+    const auto cpu1 = std::chrono::steady_clock::now();
+    const auto b_ref = matmul::v4::lt::ExactGemmS32S8(y_ref, h, n, panel, n);
+    const auto cpu2 = std::chrono::steady_clock::now();
+
+    if (!matmul_v4::metal::IsLtTensorOpsGemmAvailable()) {
+        BOOST_TEST_MESSAGE("Metal LT TensorOps unavailable; exact fail-closed path exercised elsewhere");
+        return;
+    }
+    std::vector<int32_t> y_mpp, b_mpp;
+    const auto mpp0 = std::chrono::steady_clock::now();
+    BOOST_REQUIRE(matmul_v4::metal::TryLaunchLtTensorOpsGemmS8S8(
+        g, w, n, n, panel, y_mpp));
+    const auto mpp1 = std::chrono::steady_clock::now();
+    BOOST_REQUIRE(matmul_v4::metal::TryLaunchLtTensorOpsGemmS32S8(
+        y_mpp, h, n, panel, n, b_mpp));
+    const auto mpp2 = std::chrono::steady_clock::now();
+
+    BOOST_CHECK(y_mpp == y_ref);
+    BOOST_CHECK(b_mpp == b_ref);
+    const auto ms = [](auto begin, auto end) {
+        return std::chrono::duration<double, std::milli>(end - begin).count();
+    };
+    BOOST_TEST_MESSAGE("LT MPP exact benchmark n=" << n
+        << " CPU[s8=" << ms(cpu0, cpu1) << "ms,s32=" << ms(cpu1, cpu2)
+        << "ms] MPP[s8=" << ms(mpp0, mpp1) << "ms,s32=" << ms(mpp1, mpp2) << "ms]");
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(exact_accel_planner_selects_documented_lanes)
 {
