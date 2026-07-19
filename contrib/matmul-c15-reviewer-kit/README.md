@@ -11,11 +11,12 @@ GO, or permission to raise `nMatMulDRLTHeight`.
 
 | File | Purpose |
 |---|---|
-| `test-vectors.json` | Frozen Extract goldens, PRF tag, MANT/SCLE lanes, endian notes |
+| `test-vectors.json` | Frozen Extract goldens, PRF tag, MANT/SCLE lanes, endian notes; **`reduction_relevant_finding_notes`** (high R² / zero Freivalds residual / truncated salt) |
 | `reference_extract.py` | Standalone Python ChaCha20-PRF Extract (stdlib only) |
-| `toy_attack_harness.py` | Toy-`n` synthetic MatExpand + affine / degree-2 R² + Freivalds residual |
+| `toy_attack_harness.py` | Toy-`n` synthetic MatExpand + poly R² for deg 1..`--degree` (default 3) + Freivalds residual |
 | `rank_spectral_regression.md` | `rank(B32) ≤ w` note and smoke procedure |
 | `named-assumption.md` | Pointer to packet **§0.2** (`BTX-C15-NonCollapse-v1`, unreduced) |
+| `reduction-attack-checklist.md` | Step-by-step firm attacks mapped to §0.1 FAIL |
 
 ## Requirements
 
@@ -30,10 +31,12 @@ cd contrib/matmul-c15-reviewer-kit
 # 1) Verify frozen Extract goldens (must print PASS)
 python3 reference_extract.py
 
-# 2) Toy collapse harness (expect low R² + nonzero Freivalds residual)
+# 2) Toy collapse harness (expect low R² for deg 1..3 + nonzero Freivalds residual)
 python3 toy_attack_harness.py --n 8 --w 4
-python3 toy_attack_harness.py --n 16 --w 4 --seed 7
+python3 toy_attack_harness.py --n 16 --w 4 --seed 7 --degree 3
 ```
+
+Firm attack menu: [`reduction-attack-checklist.md`](reduction-attack-checklist.md).
 
 ## Normative packet (read this)
 

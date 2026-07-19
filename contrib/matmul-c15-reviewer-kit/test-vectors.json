@@ -52,5 +52,39 @@
     ]
   },
   "production_panel_w": 128,
-  "rank_note": "Honest B32 = (G·W)·H has rank(B32) ≤ w (=128 at production). Affine collapse of Extract would reopen a ~n/w Freivalds-style shortcut; see rank_spectral_regression.md."
+  "rank_note": "Honest B32 = (G·W)·H has rank(B32) ≤ w (=128 at production). Affine collapse of Extract would reopen a ~n/w Freivalds-style shortcut; see rank_spectral_regression.md.",
+  "reduction_relevant_finding_notes": {
+    "purpose": "Oracle hints for external reviewers — what would constitute a reduction-relevant / §0.1 FAIL finding. Not a theorem; C-15 remains OPEN.",
+    "packet_refs": [
+      "doc/btx-matmul-v4.4-lt-external-c15-packet.md §0.1 (FAIL criteria)",
+      "doc/btx-matmul-v4.4-lt-external-c15-packet.md §0.2 (BTX-C15-NonCollapse-v1)",
+      "contrib/matmul-c15-reviewer-kit/reduction-attack-checklist.md"
+    ],
+    "what_would_constitute_a_reduction_relevant_finding": [
+      {
+        "id": "high_r2_surrogate",
+        "signal": "High R²",
+        "detail": "An affine or low-degree (deg ≤ 2 primary; deg ≤ 3 checklist) entrywise polynomial surrogate f(B32) matching Extract on ≥ N=10^6 realistic B32 samples with R² ≳ 0.05 (in-tree witness bar) — and especially R² near 1 — that admits a Freivalds-usable rewrite through G,W,H. Toy harness R² ≫ smoke thresholds is a reportable finding; firm FAIL needs the rewrite + cost vs HonestMAC.",
+        "maps_to": "§0.1 FAIL (affine/low-degree surrogate class); C15-A"
+      },
+      {
+        "id": "zero_freivalds_residual",
+        "signal": "Zero Freivalds residual",
+        "detail": "A systematic zero (or Freivalds-soundness-bounded) residual rᵀ(B̂−B̂')s on dense samples for a cheap surrogate B̂' — i.e. the surrogate equals Extract on the probe with Adv ≥ ε — while exact-int MAC cost stays ≤ (1−δ)·HonestMAC(n). A single lucky zero on tiny toy-n is noise; systematic zeros with accepting sketches are FAIL.",
+        "maps_to": "§0.1 FAIL (Adv ≥ ε at half-cost); C15-B"
+      },
+      {
+        "id": "truncated_salt_equivalence_class",
+        "signal": "Truncated salt equivalence class",
+        "detail": "Any truncation / tiling / low-bit collapse of position salts (i,j) that creates a large equivalence class of cells sharing the same ChaCha Nonce96 high half (or otherwise reusable keystream), reopening a ~n/w ≈ 32× thin-panel / shared-φ shortcut. Normative encoding REQUIRES full-width 32-bit i and j in nonce_second; a finding that consensus twins truncate, or that an adversary forces an effective truncation class with Adv ≥ ε at ≤ (1−δ)·HonestMAC, is FAIL.",
+        "maps_to": "§0.1 FAIL; §0.2 attack-surface #6; matexpand_position_salt_differential"
+      }
+    ],
+    "non_findings": [
+      "Green goldens / AccelReplica parity alone",
+      "IdealExtract 23-value alphabet or P(v=0)≈1/11 (by design)",
+      "Low toy R² without a Freivalds-usable rewrite",
+      "ChaCha20 looking like a PRF in isolation (does not imply MatExpand work lower bound)"
+    ]
+  }
 }
