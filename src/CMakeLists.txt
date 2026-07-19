@@ -109,16 +109,16 @@ endif()
 # AMD ROCm/HIP backend for the MatMul v4 digest (src/hip/matmul_v4_accel.hip).
 # Mirrors the experimental CUDA backend above but targets AMD CDNA (MFMA)
 # accelerators via hipcc. Requires an explicit AMD GPU arch list (e.g. gfx942
-# for MI300, gfx90a for MI200, gfx908 for MI100).
+# for MI300, gfx950 for MI350, gfx90a for MI200, gfx908 for MI100).
 option(BTX_ENABLE_HIP "Enable experimental AMD ROCm/HIP MatMul v4 backend (requires ROCm/hipcc)" OFF)
-set(BTX_HIP_ARCHITECTURES "" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942)")
+set(BTX_HIP_ARCHITECTURES "" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942;gfx950)")
 
 if(BTX_ENABLE_HIP)
   if(BTX_HIP_ARCHITECTURES STREQUAL "" AND DEFINED CMAKE_HIP_ARCHITECTURES AND NOT CMAKE_HIP_ARCHITECTURES STREQUAL "")
-    set(BTX_HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942)" FORCE)
+    set(BTX_HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942;gfx950)" FORCE)
   endif()
   if(BTX_HIP_ARCHITECTURES STREQUAL "")
-    message(FATAL_ERROR "BTX_ENABLE_HIP=ON requires BTX_HIP_ARCHITECTURES to be set explicitly (for example gfx942).")
+    message(FATAL_ERROR "BTX_ENABLE_HIP=ON requires BTX_HIP_ARCHITECTURES to be set explicitly (for example gfx942;gfx950).")
   endif()
   set(CMAKE_HIP_ARCHITECTURES "${BTX_HIP_ARCHITECTURES}" CACHE STRING "AMD GPU architectures for BTX HIP targets" FORCE)
   enable_language(HIP)

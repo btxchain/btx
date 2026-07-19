@@ -83,9 +83,11 @@ vendor-tensor-kernel swap that only *replaces* an already-exact software path:
 3. **Device FP8 five-limb** behind planner + qualification; fail-closed launch +
    `ComputeCombineFp8FiveLimbDeviceOrCpu` CPU fallback is complete today.
 4. **LT ExactGemm tensor preference** — **CUDA IMMA wired** (cuBLASLt `CUBLAS_COMPUTE_32I`
-   in `LaunchGemm*` + resident MatExpand s8xs8). MFMA (hipBLASLt|rocBLAS) /
-   Metal TensorOps Try* hooks remain decline-until-self-qual. HIP scalar tiles
-   are `IsLtDeviceAluGemmAvailable` only — never advertised as MFMA.
+   in `LaunchGemm*` + resident MatExpand s8xs8). **HIP MFMA wired** (hipBLASLt
+   `HIPBLAS_COMPUTE_32I` | rocBLAS `gemm_ex`, multi-shape self-qual including
+   MatExpand panel, device-pointer resident path). Metal TensorOps Try* hooks
+   remain decline-until-self-qual. HIP scalar tiles are `IsLtDeviceAluGemmAvailable`
+   only — never advertised as MFMA.
 5. **AMD native block-scaled MXFP4** (HIP tier (a)) — gated off pending real MI300/
    MI355 + ROCm; the INT8 MFMA tier (b) is fully implemented and bit-exact.
 6. B200 / H200 / 5090 / MI350 soak + cost/nonce accounting (measurement, not code).
@@ -100,5 +102,7 @@ vendor-tensor-kernel swap that only *replaces* an already-exact software path:
 - `src/cuda/matmul_v4_lt_tensor_gemm.cu` — LT cuBLASLt IMMA ExactGemm + arch probe
 - `src/cuda/matmul_v4_lt_accel.cu` — LT resident MatExpand (IMMA s8xs8 + scalar s32xs8)
 - `src/hip/matmul_v4_bmx4_accel.hip` — HIP device backend (INT8 MFMA tier complete; native MXFP4 tier hardware-gated)
+- `src/hip/matmul_v4_lt_tensor_gemm.hip` — LT hipBLASLt/rocBLAS MFMA ExactGemm
+- `src/hip/matmul_v4_lt_accel.hip` — LT resident MatExpand (MFMA s8xs8 + scalar s32xs8)
 - `src/metal/matmul_v4_bmx4_accel.mm` — Metal device backend (ALU + M5 tensor-ops GEMM, self-test gated)
 - `matmul_v4_bmx4_cutlass_mxfp4.h` — complete portable exact scale-partitioned grouped MXFP4 projection (`LaunchGroupedMxfp4Projection`); CUTLASS tensor kernel is the hardware-gated swap

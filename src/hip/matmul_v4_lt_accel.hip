@@ -27,9 +27,13 @@
 // ===========================================================================
 // AMD ROCm/HIP backend for MatMul v4.4 ENC-DR-LT (MatExpand).
 //
- // Hot path: persistent device-resident MatExpand→Extract→project→combine with
- // hipGraph replay of stable GEMM stages (structural twin of the CUDA LT
- // accel). Host ExactGemm / WindowSketchMinerLT is fail-closed fallback only.
+// Hot path: persistent device-resident MatExpand→Extract→project→combine.
+//   When IsLtMfmaGemmAvailable(), s8xs8 stages (G*W, U*Ahat, Bhat*V) use
+//   TryLaunchLtMfmaGemmS8S8Device on persistent buffers; Y*H (s32xs8) stays
+//   scalar DeviceGemmS32S8Tiled (no dedicated MFMA recipe — never claimed).
+//   When MFMA declines, scalar tiled DeviceGemm* + hipGraph replay serve.
+// Host ExactGemm / WindowSketchMinerLT is fail-closed fallback only.
+// Target: gfx942 (MI300) / gfx950 (MI350) via BTX_HIP_ARCHITECTURES.
 // ===========================================================================
 
 namespace matmul_v4::hip {
@@ -253,6 +257,7 @@ struct LtHipResidentPool {
     uint256 template_hash{};
     bool template_bound{false};
     bool graphs_ready{false};
+    bool mfma_s8s8{false};
 
     int8_t *dG{nullptr}, *dH{nullptr}, *dU{nullptr}, *dV{nullptr}, *dAhat{nullptr};
     int32_t* dP{nullptr};
@@ -290,6 +295,7 @@ struct LtHipResidentPool {
         gemm_s8l_bytes = gemm_s8r_bytes = gemm_s32l_bytes = gemm_out_bytes = 0;
         if (stream) { hipStreamDestroy(stream); stream = nullptr; }
         template_bound = false;
+        mfma_s8s8 = false;
         n = m = w = 0;
     }
 
@@ -343,7 +349,7 @@ struct LtHipResidentPool {
         return true;
     }
 
-    [[nodiscard]] bool CaptureGraphs()
+    [[nodiscard]] bool CaptureGraphsScalar()
     {
         ReleaseGraphs();
         const dim3 block(16, 16, 1);
@@ -387,11 +393,35 @@ struct LtHipResidentPool {
         return true;
     }
 
+    [[nodiscard]] bool LaunchMatExpandMfma()
+    {
+        if (!TryLaunchLtMfmaGemmS8S8Device(dG, dW, dY, n, w, n, stream)) return false;
+        const dim3 block(16, 16, 1);
+        const dim3 grid_b((n + block.x - 1) / block.x, (n + block.y - 1) / block.y, 1);
+        hipLaunchKernelGGL(DeviceGemmS32S8Tiled, grid_b, block, 0, stream,
+                           dY, dH, dB32, static_cast<int>(n), static_cast<int>(n), static_cast<int>(w));
+        return hipGetLastError() == hipSuccess;
+    }
+
+    [[nodiscard]] bool LaunchProjectRightMfma()
+    {
+        return TryLaunchLtMfmaGemmS8S8Device(dBhat, dV, dQ, n, m, n, stream);
+    }
+
+    [[nodiscard]] bool LaunchProjectLeftMfma()
+    {
+        return TryLaunchLtMfmaGemmS8S8Device(dU, dAhat, dP, m, n, n, stream);
+    }
+
     [[nodiscard]] bool BindTemplate(const CBlockHeader& tmpl, uint32_t n_in, uint32_t m_in)
     {
         if (!EnsureDims(n_in, m_in)) return false;
         const uint256 th = matmul::v4::ComputeTemplateHash(tmpl);
-        if (template_bound && template_hash == th && graphs_ready) return true;
+        const bool want_mfma = IsLtMfmaGemmAvailable();
+        if (template_bound && template_hash == th && mfma_s8s8 == want_mfma &&
+            (mfma_s8s8 || graphs_ready)) {
+            return true;
+        }
 
         namespace bx = matmul::v4::bmx4;
         const uint256 seed_g = DeriveTaggedSeed(kMatExpandGTag, sizeof(kMatExpandGTag) - 1, th);
@@ -414,8 +444,20 @@ struct LtHipResidentPool {
         if (hipMemcpyAsync(dW, W_a.data(), nw, hipMemcpyHostToDevice, stream) != hipSuccess) return false;
         if (hipMemcpyAsync(dU, U.data(), mn, hipMemcpyHostToDevice, stream) != hipSuccess) return false;
         if (hipMemcpyAsync(dV, V.data(), nm, hipMemcpyHostToDevice, stream) != hipSuccess) return false;
-        if (!CaptureGraphs()) return false;
-        if (hipGraphLaunch(matexpand_exec, stream) != hipSuccess) return false;
+
+        mfma_s8s8 = want_mfma;
+        if (mfma_s8s8) {
+            ReleaseGraphs();
+            if (!LaunchMatExpandMfma()) {
+                mfma_s8s8 = false;
+                if (!CaptureGraphsScalar()) return false;
+                if (hipGraphLaunch(matexpand_exec, stream) != hipSuccess) return false;
+            }
+        } else {
+            if (!CaptureGraphsScalar()) return false;
+            if (hipGraphLaunch(matexpand_exec, stream) != hipSuccess) return false;
+        }
+
         const uint256 prf_a = matmul::v4::lt::DeriveMatExpandPrfKey(seed_wa);
         uint32_t kw[8];
         for (int t = 0; t < 8; ++t) kw[t] = ReadLE32(prf_a.data() + static_cast<size_t>(t) * 4);
@@ -424,11 +466,26 @@ struct LtHipResidentPool {
         hipLaunchKernelGGL(DeviceExtractDequantMatExpand, dim3(eb), dim3(et), 0, stream,
                            dB32, dAhat, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
         if (hipGetLastError() != hipSuccess) return false;
-        const dim3 block(16, 16, 1);
-        const dim3 grid_p((n + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
-        hipLaunchKernelGGL(DeviceGemmS8S8Tiled, grid_p, block, 0, stream,
-                           dU, dAhat, dP, static_cast<int>(m), static_cast<int>(n), static_cast<int>(n));
-        if (hipGetLastError() != hipSuccess) return false;
+
+        if (mfma_s8s8) {
+            if (!LaunchProjectLeftMfma()) {
+                mfma_s8s8 = false;
+                const dim3 block(16, 16, 1);
+                const dim3 grid_p((n + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
+                hipLaunchKernelGGL(DeviceGemmS8S8Tiled, grid_p, block, 0, stream,
+                                   dU, dAhat, dP, static_cast<int>(m), static_cast<int>(n),
+                                   static_cast<int>(n));
+                if (hipGetLastError() != hipSuccess) return false;
+                if (!graphs_ready && !CaptureGraphsScalar()) return false;
+            }
+        } else {
+            const dim3 block(16, 16, 1);
+            const dim3 grid_p((n + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
+            hipLaunchKernelGGL(DeviceGemmS8S8Tiled, grid_p, block, 0, stream,
+                               dU, dAhat, dP, static_cast<int>(m), static_cast<int>(n),
+                               static_cast<int>(n));
+            if (hipGetLastError() != hipSuccess) return false;
+        }
         if (hipStreamSynchronize(stream) != hipSuccess) return false;
         template_hash = th;
         template_bound = true;
@@ -438,14 +495,21 @@ struct LtHipResidentPool {
     [[nodiscard]] bool MineOneNonce(const CBlockHeader& header,
                                     std::vector<matmul::int8_field::Fq>& chat_out)
     {
-        if (!template_bound || !graphs_ready) return false;
+        if (!template_bound) return false;
+        if (!mfma_s8s8 && !graphs_ready) return false;
         if (matmul::v4::ComputeTemplateHash(header) != template_hash) return false;
         const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
         const uint256 seed_w = DeriveTaggedSeed(kMatExpandWTag, sizeof(kMatExpandWTag) - 1, header_hash);
         const std::vector<int8_t> W = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_w, n, w);
         const size_t nw = static_cast<size_t>(n) * w;
         if (hipMemcpyAsync(dW, W.data(), nw, hipMemcpyHostToDevice, stream) != hipSuccess) return false;
-        if (hipGraphLaunch(matexpand_exec, stream) != hipSuccess) return false;
+
+        if (mfma_s8s8) {
+            if (!LaunchMatExpandMfma()) return false;
+        } else {
+            if (hipGraphLaunch(matexpand_exec, stream) != hipSuccess) return false;
+        }
+
         const uint256 prf = matmul::v4::lt::DeriveMatExpandPrfKey(seed_w);
         uint32_t kw[8];
         for (int t = 0; t < 8; ++t) kw[t] = ReadLE32(prf.data() + static_cast<size_t>(t) * 4);
@@ -455,7 +519,13 @@ struct LtHipResidentPool {
         hipLaunchKernelGGL(DeviceExtractDequantMatExpand, dim3(eb), dim3(et), 0, stream,
                            dB32, dBhat, n, kw[0], kw[1], kw[2], kw[3], kw[4], kw[5], kw[6], kw[7]);
         if (hipGetLastError() != hipSuccess) return false;
-        if (hipGraphLaunch(project_right_exec, stream) != hipSuccess) return false;
+
+        if (mfma_s8s8) {
+            if (!LaunchProjectRightMfma()) return false;
+        } else {
+            if (hipGraphLaunch(project_right_exec, stream) != hipSuccess) return false;
+        }
+
         const dim3 block(16, 16, 1);
         const dim3 grid_c((m + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
         hipLaunchKernelGGL(DeviceCombineModQ, grid_c, block, 0, stream,
@@ -476,18 +546,10 @@ LtHipResidentPool& Pool()
     return pool;
 }
 
-[[nodiscard]] bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
-                                  uint32_t rows, uint32_t k, uint32_t cols,
-                                  std::vector<int32_t>& out)
+[[nodiscard]] bool HipOkLaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
+                                       uint32_t rows, uint32_t k, uint32_t cols,
+                                       std::vector<int32_t>& out)
 {
-    // Prefer real hipBLASLt/rocBLAS MFMA-class path; then honest device ALU;
-    // then this TU's pooled scalar tile (also device ALU, never labeled MFMA).
-    if (TryLaunchLtMfmaGemmS8S8(left, right, rows, k, cols, out)) {
-        return true;
-    }
-    if (TryLaunchLtDeviceAluGemmS8S8(left, right, rows, k, cols, out)) {
-        return true;
-    }
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
     const size_t lhs_bytes = static_cast<size_t>(rows) * k * sizeof(int8_t);
     const size_t rhs_bytes = static_cast<size_t>(k) * cols * sizeof(int8_t);
@@ -508,16 +570,10 @@ LtHipResidentPool& Pool()
     return hipMemcpy(out.data(), pool.dGemmOut, out_bytes, hipMemcpyDeviceToHost) == hipSuccess;
 }
 
-[[nodiscard]] bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
-                                   uint32_t rows, uint32_t k, uint32_t cols,
-                                   std::vector<int32_t>& out)
+[[nodiscard]] bool HipOkLaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
+                                        uint32_t rows, uint32_t k, uint32_t cols,
+                                        std::vector<int32_t>& out)
 {
-    if (TryLaunchLtMfmaGemmS32S8(left, right, rows, k, cols, out)) {
-        return true;
-    }
-    if (TryLaunchLtDeviceAluGemmS32S8(left, right, rows, k, cols, out)) {
-        return true;
-    }
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
     const size_t lhs_bytes = static_cast<size_t>(rows) * k * sizeof(int32_t);
     const size_t rhs_bytes = static_cast<size_t>(k) * cols * sizeof(int8_t);
@@ -538,6 +594,33 @@ LtHipResidentPool& Pool()
     return hipMemcpy(out.data(), pool.dGemmOut, out_bytes, hipMemcpyDeviceToHost) == hipSuccess;
 }
 
+thread_local bool g_lt_device_gemm_failed = false;
+thread_local bool g_lt_last_s8s8_mfma = false;
+
+bool BackendGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                     uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
+{
+    if (TryLaunchLtMfmaGemmS8S8(L, R, rows, inner, cols, out)) {
+        g_lt_last_s8s8_mfma = true;
+        return true;
+    }
+    g_lt_last_s8s8_mfma = false;
+    if (TryLaunchLtDeviceAluGemmS8S8(L, R, rows, inner, cols, out)) return true;
+    if (HipOkLaunchGemmS8S8(L, R, rows, inner, cols, out)) return true;
+    g_lt_device_gemm_failed = true;
+    return false;
+}
+
+bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
+                      uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
+{
+    if (TryLaunchLtMfmaGemmS32S8(L, R, rows, inner, cols, out)) return true;
+    if (TryLaunchLtDeviceAluGemmS32S8(L, R, rows, inner, cols, out)) return true;
+    if (HipOkLaunchGemmS32S8(L, R, rows, inner, cols, out)) return true;
+    g_lt_device_gemm_failed = true;
+    return false;
+}
+
 [[nodiscard]] bool SelfTestGemmKernelsOnce()
 {
     static std::once_flag once;
@@ -554,10 +637,16 @@ LtHipResidentPool& Pool()
         }
         const auto cpu8 = matmul::v4::lt::ExactGemmS8S8(left, right, kDim, kDim, kDim);
         std::vector<int32_t> gpu8;
-        if (!LaunchGemmS8S8(left, right, kDim, kDim, kDim, gpu8) || gpu8 != cpu8) return;
+        bool s8_ok = false;
+        if (IsLtMfmaGemmAvailable()) {
+            s8_ok = TryLaunchLtMfmaGemmS8S8(left, right, kDim, kDim, kDim, gpu8) && gpu8 == cpu8;
+        }
+        if (!s8_ok) {
+            if (!HipOkLaunchGemmS8S8(left, right, kDim, kDim, kDim, gpu8) || gpu8 != cpu8) return;
+        }
         const auto cpu32 = matmul::v4::lt::ExactGemmS32S8(mid, right, kDim, kDim, kDim);
         std::vector<int32_t> gpu32;
-        if (!LaunchGemmS32S8(mid, right, kDim, kDim, kDim, gpu32) || gpu32 != cpu32) return;
+        if (!HipOkLaunchGemmS32S8(mid, right, kDim, kDim, kDim, gpu32) || gpu32 != cpu32) return;
 
         constexpr uint32_t kN = 64;
         uint32_t m = 0;
@@ -597,24 +686,6 @@ LtHipResidentPool& Pool()
     return hipGetDeviceCount(&count) == hipSuccess && count > 0;
 }
 
-thread_local bool g_lt_device_gemm_failed = false;
-
-bool HipGemmS8S8Fn(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
-                   uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
-{
-    if (LaunchGemmS8S8(L, R, rows, inner, cols, out)) return true;
-    g_lt_device_gemm_failed = true;
-    return false;
-}
-
-bool HipGemmS32S8Fn(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
-                    uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
-{
-    if (LaunchGemmS32S8(L, R, rows, inner, cols, out)) return true;
-    g_lt_device_gemm_failed = true;
-    return false;
-}
-
 [[nodiscard]] bool MineDeviceResident(const CBlockHeader& tmpl, uint32_t n, uint32_t m,
                                       const uint64_t* nonces, size_t count,
                                       std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
@@ -647,8 +718,8 @@ bool HipGemmS32S8Fn(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
 {
     matmul::v4::lt::ExactGemmBackend backend;
     if (try_device_gemms) {
-        backend.gemm_s8s8 = &HipGemmS8S8Fn;
-        backend.gemm_s32s8 = &HipGemmS32S8Fn;
+        backend.gemm_s8s8 = &BackendGemmS8S8;
+        backend.gemm_s32s8 = &BackendGemmS32S8;
     }
     g_lt_device_gemm_failed = false;
     matmul::v4::lt::WindowSketchMinerLT miner(tmpl, n, backend);
@@ -670,6 +741,33 @@ bool HipGemmS32S8Fn(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
 }
 
 } // namespace
+
+bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
+                    uint32_t rows, uint32_t k, uint32_t cols,
+                    std::vector<int32_t>& out)
+{
+    if (TryLaunchLtMfmaGemmS8S8(left, right, rows, k, cols, out)) {
+        g_lt_last_s8s8_mfma = true;
+        return true;
+    }
+    g_lt_last_s8s8_mfma = false;
+    if (TryLaunchLtDeviceAluGemmS8S8(left, right, rows, k, cols, out)) return true;
+    return HipOkLaunchGemmS8S8(left, right, rows, k, cols, out);
+}
+
+bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
+                     uint32_t rows, uint32_t k, uint32_t cols,
+                     std::vector<int32_t>& out)
+{
+    if (TryLaunchLtMfmaGemmS32S8(left, right, rows, k, cols, out)) return true;
+    if (TryLaunchLtDeviceAluGemmS32S8(left, right, rows, k, cols, out)) return true;
+    return HipOkLaunchGemmS32S8(left, right, rows, k, cols, out);
+}
+
+bool LtLastS8S8UsedMfma()
+{
+    return g_lt_last_s8s8_mfma;
+}
 
 bool IsMatMulLTHipAvailable()
 {

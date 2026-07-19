@@ -249,14 +249,24 @@ cmake --build build-hip -j"$(nproc)" --target test_btx
 Notes:
 - Build only the gfx targets you will certify; ROCm feature suffixes
   (`:sramecc+:xnack-`) are handled by the eligibility classifier.
-- The v4 kernel path must use MFMA integer intrinsics
-  (`v_mfma_i32_16x16x32_i8`-family / `__builtin_amdgcn_mfma_i32_*`, or
-  rocBLAS/hipBLASLt with `HIPBLAS_COMPUTE_32I`). No FP path, no XDLOPS-FP16.
+- **Production ExactGemm (v4.4 LT):** prefer hipBLASLt with
+  `HIPBLAS_COMPUTE_32I` (s8×s8→s32); fall back to rocBLAS `gemm_ex`
+  i8×i8→i32. `IsLtMfmaGemmAvailable()` is true only after bit-exact match vs
+  `ExactGemmS8S8` on square + MatExpand panel shapes. Device scalar tiles are
+  `IsLtDeviceAluGemmAvailable` only — never labeled MFMA.
+- **Arch list:** `gfx942` (MI300) and `gfx950` (MI350) are the primary CDNA
+  targets for PR #89; include older CDNA (`gfx90a` / `gfx908`) when certifying
+  instruction-generation coverage. Example:
+  `-DBTX_HIP_ARCHITECTURES="gfx942;gfx950"`.
+- The v4 BMX4-C kernel path may also use MFMA integer intrinsics
+  (`v_mfma_i32_16x16x32_i8`-family / `__builtin_amdgcn_mfma_i32_*`). No FP path,
+  no XDLOPS-FP16 for ExactGemm.
 - RDNA cards (gfx10xx/11xx/12xx) are **not** certifiable for mining even if
   the backend happens to run on them: the classifier reports
   `rdna_wmma_not_qualified_verification_only` and `ResolveBackend("hip")`
   falls back to CPU. Qualifying RDNA WMMA would require extending §S.1 plus a
   full golden-vector pass — a spec change, not a runbook change.
+- When `BTX_ENABLE_HIP` is OFF, all HIP ExactGemm symbols fail closed (stub).
 
 ### Verify on hardware
 
