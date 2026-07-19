@@ -5134,7 +5134,12 @@ bool SolveMatMulParallel(CBlockHeader& block,
 // (MatExpand + deep-m). Winning candidates are resealed via ComputeDigestBMX4CLT
 // (Phase A) or ComputeSealDigestBMX4CLT (Phase B seal-as-PoW when active).
 // Non-CPU ResolveBackend injects MakeResolvedExactGemmBackend; Phase A prefers
-// ComputeDigestsBMX4CLTDispatched; winners always CPU-reseal.
+// ComputeDigestsBMX4CLTDispatched. NOTE: a winning candidate is NOT re-sealed on CPU
+// here -- Phase B seals with the injected ExactGemm backend and broadcasts. Determinism
+// safety comes from the ARBITER, not a reseal: the miner's own ProcessNewBlock runs the
+// epsilon=0 CPU recompute (RecomputeMatMulV4SketchReference) and self-rejects a block
+// whose device seal diverges from the CPU reference, so a divergent backend costs the
+// miner a lost block, never a chain split.
 static bool SolveMatMulV4LT(CBlockHeader& block,
                             const Consensus::Params& params,
                             uint64_t& max_tries,

@@ -201,7 +201,10 @@ arith_uint256 GetTrustAdjustedChainWork(const CBlockIndex& block, unsigned int u
 {
     // Invariant maintained by UpdateAuthenticatedChainWork: authenticated work
     // never exceeds claimed work (each block contributes GetBlockProof or 0).
-    const arith_uint256 unauth{block.nChainWork - block.nAuthenticatedChainWork};
+    // Clamp the subtraction anyway (defense-in-depth): if that invariant were ever
+    // broken, an unsigned arith_uint256 underflow would wrap to ~2^256 and, via the
+    // std::min below, mis-rank an unauthenticated chain UPWARD. std::min pins it to 0.
+    const arith_uint256 unauth{block.nChainWork - std::min(block.nChainWork, block.nAuthenticatedChainWork)};
     // The allowance uses the (possibly forged) tip's own nBits; the nBits
     // transition validity is enforced upstream (CalculateClaimedHeadersWork),
     // so the allowance is bounded by unauth_allowance_blocks blocks of

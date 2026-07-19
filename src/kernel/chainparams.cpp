@@ -286,6 +286,12 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         assert(consensus.nMatMulDRLTHeight != std::numeric_limits<int32_t>::max());
         assert(consensus.nMatMulConsensusQStar == 64 || consensus.nMatMulConsensusQStar == 128);
         assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+        // Seal-as-PoW carries the lottery object in the DIGEST_RECOMPUTE profile;
+        // flat-sketch-replay forces the legacy FLAT_SKETCH_INBLOCK profile. With both
+        // set the miner produces a window-seal digest while the validator takes the
+        // in-block product-commitment branch and rejects every seal block
+        // (reject-all). They are mutually exclusive even on regtest.
+        assert(!consensus.fMatMulV4FlatSketchReplay);
     }
 }
 

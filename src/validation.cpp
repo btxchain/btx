@@ -10256,9 +10256,17 @@ ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block) const
     if (const CBlockIndex* existing = m_blockman.LookupBlockIndex(block.GetHash())) {
         // Already have the data: AcceptBlock short-circuits before the seam.
         if (existing->nStatus & BLOCK_HAVE_DATA) return std::nullopt;
+        // Known-invalid: AcceptBlockHeader rejects it for free as "duplicate-invalid".
+        // A failed block stores no data (BLOCK_HAVE_DATA stays unset), so without this
+        // a re-delivered bad block would be enqueued and fully re-recomputed on EVERY
+        // delivery (DoS). Route it synchronous — it fails cheaply, no worker slot spent.
+        if (existing->nStatus & BLOCK_FAILED_MASK) return std::nullopt;
         // Assumevalid-buried: the seam skips the recompute entirely.
         if (IsMatMulRecomputeAssumeValidTrusted(existing, nHeight)) return std::nullopt;
     }
+    // A verdict for this exact block is already memoized: the seam will reuse it
+    // without recomputing, so don't occupy a worker slot re-deriving the same answer.
+    if (LookupMatMulEncDrVerdict(block.GetHash()).has_value()) return std::nullopt;
     return MatMulEncDrClassifyResult{nHeight, prev->GetMedianTimePast()};
 }
 
@@ -11886,6 +11894,13 @@ void ChainstateManager::CheckBlockIndex()
         assert((pindexFirstNotTransactionsValid == nullptr || pindex == snap_base) == pindex->HaveNumChainTxs());
         assert(pindex->nHeight == nHeight); // nHeight must be consistent.
         assert(pindex->pprev == nullptr || pindex->nChainWork >= pindex->pprev->nChainWork); // For every block except the genesis block, the chainwork must be larger than the parent's.
+        // Authenticated-chainwork invariants (audit: contiguous authenticated prefix).
+        // Authenticated work is a monotone sub-total of claimed work: it never exceeds
+        // nChainWork (the GetTrustAdjustedChainWork subtraction relies on this) and never
+        // decreases parent->child. UpdateAuthenticatedChainWork maintains both; asserting
+        // here surfaces any future desync (e.g. a stale value) in tests/regtest.
+        assert(pindex->nAuthenticatedChainWork <= pindex->nChainWork);
+        assert(pindex->pprev == nullptr || pindex->nAuthenticatedChainWork >= pindex->pprev->nAuthenticatedChainWork);
         assert(nHeight < 2 || (pindex->pskip && (pindex->pskip->nHeight < nHeight))); // The pskip pointer must point back for all but the first 2 blocks.
         assert(pindexFirstNotTreeValid == nullptr); // All m_blockman.m_block_index entries must at least be TREE valid
         if ((pindex->nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_TREE) assert(pindexFirstNotTreeValid == nullptr); // TREE valid implies all parents are TREE valid

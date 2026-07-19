@@ -6608,7 +6608,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     ++it;
                 }
             }
-            if (!m_matmul_sketch_requested.count(block_hash)) {
+            // SOLICITED-ONLY and from THE peer we asked: match both the hash and the
+            // stored NodeId. Without the NodeId check any connected peer could answer a
+            // request we made to a DIFFERENT peer -- inducing a redundant ~8 MiB auth
+            // hash and, worse, racing a bogus sketch whose auth failure frees the
+            // in-flight slot so the genuine owner's later reply is dropped as
+            // unsolicited. A non-owning peer is dropped here, before the slot is touched.
+            auto req_it = m_matmul_sketch_requested.find(block_hash);
+            if (req_it == m_matmul_sketch_requested.end() || req_it->second.first != pfrom.GetId()) {
                 LogDebug(BCLog::NET, "Ignoring unsolicited mmsketch %s from peer=%d\n",
                          block_hash.ToString(), pfrom.GetId());
                 return;

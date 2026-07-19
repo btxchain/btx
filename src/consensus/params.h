@@ -779,7 +779,15 @@ struct Params {
      *  and only consulted for < nMatMulV4Height (spec §G.3). */
     bool IsMatMulV4Active(int32_t height) const
     {
-        return height >= 0 && height >= nMatMulV4Height;
+        // Self-guard the disabled sentinel exactly as IsBMX4CActive/IsDRLTActive do:
+        // without this, IsMatMulV4Active(INT32_MAX) returns true on a disabled network
+        // (INT32_MAX >= INT32_MAX), so a sentinel/"unknown" height would be treated as
+        // v4-active. Real block heights never approach INT32_MAX, so this is byte-
+        // identical for every real height; it just moves the guard callers hand-write
+        // (IsDisabledHeight / != INT32_MAX) into the predicate itself.
+        return height >= 0 &&
+               nMatMulV4Height != std::numeric_limits<int32_t>::max() &&
+               height >= nMatMulV4Height;
     }
     /** True at and above the v4.2 ENC-BMX4C encoding-profile hard fork.
      *  Mirrors IsMatMulV4Active; additionally requires v4 to be active,
