@@ -38,15 +38,20 @@ Living implementation notes for miner-local ExactGemm backends. Consensus remain
 Sources (Chinese CANN ecosystem):
 
 - asc-devkit Matmul high-level API samples (Ascend 950PR/DT, `dav-3510`, CANN ≥ 9.1.0)
-- `aclnnMatmul` / `aclnnMm` / `aclnnMatmulWeightNz` (ops-nn); INT8 weights via `aclnnTransMatmulWeight`
-- Cube unit: configure `MatmulType` with `int8_t` A/B and INT32/FP32 C carefully — **only advertise exact if accumulator proven exact vs CPU**
+- `aclnnMatmul` / `aclnnMm` / `aclnnMatmulWeightNz` (ops-nn); INT8 weights via
+  `aclnnCalculateMatmulWeightSize(+V2)` + `aclnnTransMatmulWeight`
+- Cube unit: `int8_t` A/B → INT32 C; **KEEP_DTYPE only** — never HF32 / down-precision
+- **only advertise exact if accumulator proven exact vs CPU** (`IsAscendExactGemmAvailable`)
 
-**Implement now without SDK in CI:**
+**Shipped (fail-closed without SDK in CI):**
 
-1. `BTX_ENABLE_ASCEND` CMake option.
-2. `src/ascend/` host ExactGemm backend: real path `#ifdef BTX_HAVE_CANN` calling aclnn; else stub returns false.
-3. Register as accel `Kind::ASCEND` (or capability string `ascend`) fail-closed in `ResolveBackend`.
-4. Document qualification: odd-accumulator / max-|entry| tests before `used_cube_path=true`.
+1. `BTX_ENABLE_ASCEND` CMake option; `BTX_HAVE_CANN` when `include/acl/acl.h` found.
+2. `src/ascend/` host ExactGemm: real TU under `BTX_HAVE_CANN` (two-phase aclnn + optional
+   TransMatmulWeight); else stub returns false.
+3. Accel / backend `Kind::ASCEND` (`"ascend"` / `huawei` / `npu`) — `ResolveBackend` selects
+   only when compiled + CANN + ExactGemmS8S8 self-qual (odd-K + max-|entry|).
+4. `used_cube_path` / ExactGemmBackend adapters require that gate. S32S8 declines.
+5. Doc checklist + known limits: `doc/btx-matmul-v4.4-ascend-950-cann-backend.md`.
 
 ## Apple Metal
 
