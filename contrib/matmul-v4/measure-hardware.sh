@@ -57,16 +57,29 @@
 #   contrib/matmul-v4/measure-hardware.sh cuda --profile bmx4c-lt --n 4096 --window 256
 #   contrib/matmul-v4/measure-hardware.sh cpu  --profile bmx4c-lt --n 256 --window 8   # smoke
 #
-# Emits schema_version 3 JSON with MatExpand/Q* stage boundaries. It reports a
-# numeric device_nonce_per_s only when backend_used_device=true,
-# device_rate_valid=true, execution_path="device-assisted-end-to-end", and
-# lt.device_assisted_path_exact=true; otherwise that field stays null. These
-# facts prove the measured device-assisted path, not full device residency or a
-# native kernel: native_path_eligible/device_execution_certified and
-# lt.device_native_kernel_wired may honestly remain false. G1 consumes
-# tensor_share_pct; tensor_util_pct and the optional
-# v3_hashrate/asert_rescale_num_den_suggestion are calibration evidence, while
-# G2/G3 consume the finite positive measured device_nonce_per_s. Aggregate:
+# Fast resident-path telemetry when production n=4096 CPU reference work would
+# delay the device probe. This deliberately skips exactness/stage gates and its
+# telemetry_device_nonce_per_s MUST NOT be used for readiness, ASERT, or G1-G3:
+#
+#   contrib/matmul-v4/measure-hardware.sh cuda --profile bmx4c-lt \
+#       --n 4096 --window 256 --telemetry-only
+#
+# Emits schema_version 3 JSON with MatExpand/Q* stage boundaries. CUDA/HIP now
+# use a full-header batch entry that preserves every nonce-bound seed, generates
+# W and hashes Chat on-device, and synchronizes once at the batch boundary.
+# Legacy/fallback paths remain host_orchestrated_nonce_per_s diagnostics.
+# G2/G3 and ASERT accept a rate only when the backend reports
+# device_rate_valid=true, silicon_rate_valid=true,
+# execution_path="device-resident-qstar-batched", and proves all of:
+# lt.qstar_is_consensus, lt.qstar_device_batched, lt.device_w_generation,
+# lt.device_digest, and lt.per_nonce_sync_absent.
+# `cpu_reference_tensor_share_pct` is only CPU-reference stage composition.
+# Reports record `sha256_implementation`; discard older CPU timing/share
+# results from tools that did not initialize SHA256AutoDetect before timing.
+# G1 additionally requires
+# native_path_eligible=true, device_tensor_timing_valid=true,
+# device_tensor_counters_valid=true, timing domain
+# `device-kernel-timing-and-counters`, and device_tensor_share_pct > 50.
 #
 #   contrib/matmul-v4/lt-gate.py <dir-of-json> --manifest parts.tsv
 #
@@ -100,9 +113,11 @@ esac
 # separate build step is needed -- matmul_v4_bmx4.cpp is already part of the
 # common library linked into matmul-v4-report for every backend).
 PROFILE="v41"
+TELEMETRY_ONLY=0
 prev=""
 for a in "$@"; do
   if [ "$prev" = "--profile" ]; then PROFILE="$a"; fi
+  if [ "$a" = "--telemetry-only" ]; then TELEMETRY_ONLY=1; fi
   prev="$a"
 done
 
@@ -142,9 +157,14 @@ echo ""
 if [ -n "$JSON" ]; then
   echo "JSON report: $JSON"
   if [ "$PROFILE" = "bmx4c-lt" ]; then
-    echo "Send this file back — schema_version 3 / profile bmx4c-lt (MatExpand+Q* stages)."
-    echo "Aggregate Rank-1 GO/NO-GO (fail-closed; no invented rates) with:"
-    echo "  contrib/matmul-v4/lt-gate.py <dir-of-json> --manifest parts.tsv"
+    if [ "$TELEMETRY_ONLY" -eq 1 ]; then
+      echo "Send this telemetry file back for path diagnosis only. It is not readiness/ASERT evidence"
+      echo "and must not be aggregated by lt-gate.py. Rerun without --telemetry-only for gates."
+    else
+      echo "Send this file back — schema_version 3 / profile bmx4c-lt (MatExpand+Q* stages)."
+      echo "Aggregate Rank-1 GO/NO-GO (fail-closed; no invented rates) with:"
+      echo "  contrib/matmul-v4/lt-gate.py <dir-of-json> --manifest parts.tsv"
+    fi
   elif [ "$PROFILE" = "bmx4c" ]; then
     echo "Send this file back — it carries the M-t24 verdict (mt24_pass / proven_accumulator_bits /"
     echo "native_path_eligible). ENC-BMX4C activation needs M-t24 PASS on >= 2 independent vendors'"
@@ -159,12 +179,16 @@ else
 fi
 
 if [ "$PROFILE" = "bmx4c-lt" ]; then
-  if [ "$CODE" -eq 0 ]; then
-    echo "RESULT: ENC-DR-LT device-certified PASS ($BACKEND) — see JSON / DEVICE_BMX4CLT_PASS."
+  if [ "$TELEMETRY_ONLY" -eq 1 ] && [ "$CODE" -eq 0 ]; then
+    echo "RESULT: resident Q* TELEMETRY obtained ($BACKEND); no certification/readiness claim."
+  elif [ "$TELEMETRY_ONLY" -eq 1 ]; then
+    echo "RESULT: resident Q* TELEMETRY unavailable ($BACKEND); inspect telemetry_note."
+  elif [ "$CODE" -eq 0 ]; then
+    echo "RESULT: ENC-DR-LT silicon-rate PASS ($BACKEND) — see JSON / DEVICE_BMX4CLT_RATE_PASS."
   else
     echo "RESULT: FAIL or NOT-FULLY-NATIVE-CERTIFIED ($BACKEND) — inspect the JSON before discarding it;"
-    echo "device_rate_valid=true with the complete device-assisted provenance tuple is valid lt-gate.py"
-    echo "rate evidence even when native eligibility remains false. CPU timers never count."
+    echo "host_orchestrated_nonce_per_s is diagnostic only. lt-gate.py requires one resident Q*"
+    echo "batch with device W generation + digest and no per-nonce sync; CPU timers never count."
   fi
 elif [ "$PROFILE" = "bmx4c" ]; then
   if [ "$CODE" -eq 0 ]; then

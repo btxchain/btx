@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <bit>
 #include <cstdint>
 
 namespace matmul::v4 {
@@ -544,10 +545,22 @@ uint256 ComputeSketchDigestFromFq(const uint256& sigma, const std::vector<Fq>& s
     CSHA256 outer;
     outer.Write(reinterpret_cast<const unsigned char*>(kSketchDigestTag), sizeof(kSketchDigestTag) - 1);
     outer.Write(sigma.data(), uint256::size());
-    uint8_t word_le[8];
-    for (Fq w : sketch) {
-        WriteLE64(word_le, w);
-        outer.Write(word_le, sizeof(word_le));
+    if constexpr (std::endian::native == std::endian::little) {
+        // Fq is uint64_t, so its little-endian object representation is exactly
+        // the consensus LE64 stream. Feed the whole sketch in one call instead
+        // of paying one CSHA256::Write per word (65,536 calls at m=256).
+        static_assert(sizeof(Fq) == sizeof(uint64_t));
+        if (!sketch.empty()) {
+            outer.Write(reinterpret_cast<const unsigned char*>(sketch.data()),
+                        sketch.size() * sizeof(Fq));
+        }
+    } else {
+        // Keep the canonical serialization explicit on a big-endian host.
+        uint8_t word_le[sizeof(uint64_t)];
+        for (Fq w : sketch) {
+            WriteLE64(word_le, w);
+            outer.Write(word_le, sizeof(word_le));
+        }
     }
     uint8_t mid[CSHA256::OUTPUT_SIZE];
     outer.Finalize(mid);

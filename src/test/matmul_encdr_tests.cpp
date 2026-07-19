@@ -33,6 +33,7 @@
 
 #include <arith_uint256.h>
 #include <consensus/params.h>
+#include <matmul/int8_field.h>
 #include <matmul/matmul_sketch_cache.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/pow_v4.h>
@@ -311,6 +312,44 @@ BOOST_AUTO_TEST_CASE(encdr_tampered_cache_falls_back_to_recompute_and_accepts)
     std::vector<unsigned char> truncated(miner_sketch.begin(), miner_sketch.end() - 8);
     matmul::GetMatMulSketchCache().Put(hash, truncated);
     BOOST_CHECK(CheckMatMulProofOfWork_V4EncDr(block, p, kHeight));
+}
+
+BOOST_AUTO_TEST_CASE(encdr_authenticated_unusable_cache_entry_is_erased)
+{
+    SketchCacheReset guard;
+    const Consensus::Params p = MakeEncDrParams();
+
+    std::vector<unsigned char> honest;
+    const CBlock reference = MineDigestOnlyBlock(p, honest);
+
+    const auto check_erased = [&](std::vector<unsigned char> payload) {
+        CBlock committed = reference;
+        committed.matmul_digest = matmul::v4::ComputeSketchDigest(
+            matmul::v4::DeriveSigma(committed), payload);
+        const uint256 hash{committed.GetHash()};
+        BOOST_REQUIRE(matmul_v4::PayloadMatchesCommitment(committed, payload));
+        matmul::GetMatMulSketchCache().Put(hash, payload);
+
+        // The cache bytes authenticate, but the exact recompute disagrees with
+        // their digest. Verification must reject the block and evict the
+        // unusable cache entry rather than retaining it for every retry.
+        BOOST_CHECK(!CheckMatMulProofOfWork_V4EncDr(committed, p, kHeight));
+        BOOST_CHECK(!matmul::GetMatMulSketchCache().Have(hash));
+    };
+
+    // Canonical shape but a non-canonical Fq word: ParseSketch rejects.
+    std::vector<unsigned char> noncanonical = honest;
+    const uint64_t q{matmul::int8_field::kFieldPrime};
+    for (size_t i = 0; i < sizeof(q); ++i) {
+        noncanonical[i] = static_cast<unsigned char>(q >> (8 * i));
+    }
+    check_erased(std::move(noncanonical));
+
+    // Canonical words and shape, but wrong product: Freivalds rejects.
+    std::vector<matmul::v4::Fq> sketch;
+    BOOST_REQUIRE(matmul::v4::ParseSketch(honest, kTestDim / matmul_v4::kTileB, sketch));
+    sketch[0] = matmul::int8_field::FqAdd(sketch[0], 1);
+    check_erased(matmul::v4::SerializeSketch(sketch));
 }
 
 // --- miner handoff ----------------------------------------------------------

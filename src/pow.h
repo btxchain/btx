@@ -177,7 +177,7 @@ bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32
  *  when a runtime ASERT invariant is breached, so an invalid config can never
  *  weaken (fail open to powLimit) current difficulty. */
 unsigned int MatMulAsertFailClosedBits();
-/** Header-PoW spam gate (audit F1). Returns true iff H(GetHash() || nNonce)
+/** Dormant/test-only Header-PoW experiment. Returns true iff H(GetHash() || nNonce)
  *  meets DeriveMatMulHeaderPoWGateTarget(...). nNonce is decoupled from
  *  GetHash / ComputeMatMulHeaderHash and is NOT on the P2P wire — enabling this
  *  gate on a public net remains a hard NO-GO until a safe height-contextual

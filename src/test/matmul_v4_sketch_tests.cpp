@@ -123,6 +123,36 @@ HonestProof ComputeHonestProof(uint64_t nonce = 1,
 
 BOOST_FIXTURE_TEST_SUITE(matmul_v4_sketch_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(streaming_digest_uses_canonical_le64_image)
+{
+    const uint256 sigma = ParseUint256("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    const std::vector<matmul::int8_field::Fq> sketch{
+        0,
+        1,
+        UINT64_C(0x0102030405060708),
+        UINT64_C(0x0011223344556677),
+        matmul::int8_field::kFieldPrime - 1,
+    };
+
+    // Pin the payload independently, byte by byte, so the fast contiguous
+    // little-endian hash path cannot silently change the consensus image.
+    const std::vector<unsigned char> payload = matmul::v4::SerializeSketch(sketch);
+    BOOST_REQUIRE_EQUAL(payload.size(), sketch.size() * sizeof(uint64_t));
+    for (size_t word = 0; word < sketch.size(); ++word) {
+        for (size_t byte = 0; byte < sizeof(uint64_t); ++byte) {
+            BOOST_CHECK_EQUAL(payload[word * sizeof(uint64_t) + byte],
+                              static_cast<unsigned char>(sketch[word] >> (8 * byte)));
+        }
+    }
+    BOOST_CHECK(matmul::v4::ComputeSketchDigestFromFq(sigma, sketch) ==
+                matmul::v4::ComputeSketchDigest(sigma, payload));
+
+    // Also cover the guarded empty-vector path (no null-pointer arithmetic).
+    const std::vector<matmul::int8_field::Fq> empty;
+    BOOST_CHECK(matmul::v4::ComputeSketchDigestFromFq(sigma, empty) ==
+                matmul::v4::ComputeSketchDigest(sigma, {}));
+}
+
 // --- Wide counter-mode XOF (§A.2, Appendix C-12; PR #89 review fix) ---------
 
 BOOST_AUTO_TEST_CASE(wide_xof_stream_matches_normative_construction)

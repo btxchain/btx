@@ -60,6 +60,9 @@ class BTXMatMulDRLTSealAsPoW(BitcoinTestFramework):
         self.num_nodes = 2
         self.setup_clean_chain = True
         common = [
+            # Exercise production-equivalent strict header/dimension/seal
+            # validation on the independently validating peer.
+            "-test=matmulstrict",
             "-test=matmuldgw",
             f"-regtestmatmulbindingheight={V3_BINDING_HEIGHT}",
             f"-regtestmatmulproductdigestheight={V3_BINDING_HEIGHT}",
@@ -77,9 +80,11 @@ class BTXMatMulDRLTSealAsPoW(BitcoinTestFramework):
         node0, node1 = self.nodes
 
         joined = " ".join(self.extra_args[0])
-        if "-regtestdrltheight" not in joined or "-regtestmatmulltsealaspow" not in joined:
+        if ("-regtestdrltheight" not in joined or
+                "-regtestmatmulltsealaspow" not in joined or
+                "-test=matmulstrict" not in joined):
             raise AssertionError(
-                "test setup error: seal-as-PoW knobs missing from extra_args")
+                "test setup error: strict seal-as-PoW rehearsal flags missing")
 
         self.connect_nodes(0, 1)
         self.wait_until(

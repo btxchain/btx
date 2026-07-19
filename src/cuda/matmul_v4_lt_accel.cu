@@ -22,9 +22,11 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -45,8 +47,9 @@
  //   uses nine base-64 Karatsuba products. TryLaunchLtImmaGemmS32S8 itself
  //   still honestly declines because cuBLASLt has no direct s32xs8 recipe.
  //   When IMMA declines, scalar tiled DeviceGemm* + CUDA-graph replay serve
- //   the same buffers — never labeled IMMA. Digest hashing stays on host after
- //   Chat D2H (honest gap: device-side SHA256d of Chat is not wired yet).
+ //   the same buffers — never labeled IMMA. Consensus-seeded Q* calls also
+ //   generate W via the exact counter-mode SHA XOF on device and hash bounded
+ //   chunks of Chat in parallel; only 32-byte digests cross to the host.
  //
  // Fail-closed fallback:
  //   host ExactGemm* / WindowSketchMinerLT (bit-exact MX scale-partitioned
@@ -65,6 +68,7 @@ constexpr char kMatExpandGTag[] = "BTX_MATEXPAND_G_V44LT";
 constexpr char kMatExpandHTag[] = "BTX_MATEXPAND_H_V44LT";
 constexpr char kMatExpandWTag[] = "BTX_MATEXPAND_W_V44LT";
 constexpr char kMatExpandWATag[] = "BTX_MATEXPAND_WA_V44LT";
+constexpr size_t kDigestBytes = 32;
 
 // The exact logical-MX lowering below schedules four dense INT8 GEMMs. Keep it
 // as a qualification/benchmark lane until silicon data shows it beating the
@@ -85,6 +89,97 @@ uint256 DeriveTaggedSeed(const char* tag, size_t taglen, const uint256& hash)
     uint8_t out[CSHA256::OUTPUT_SIZE];
     hasher.Finalize(out);
     return uint256{Span<const unsigned char>{out, sizeof(out)}};
+}
+
+// Minimal device SHA-256 used by the nonce-bound W XOF and by the final
+// SHA256d(tag || sigma || LE64(Chat...)). Keeping both users on one primitive
+// makes the batch self-test cover byte order, padding, and digest emission.
+__device__ __constant__ uint32_t kDeviceSha256K[64] = {
+    0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U,
+    0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U,
+    0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U,
+    0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U, 0xc19bf174U,
+    0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU,
+    0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU,
+    0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U,
+    0xc6e00bf3U, 0xd5a79147U, 0x06ca6351U, 0x14292967U,
+    0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU, 0x53380d13U,
+    0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U,
+    0xa2bfe8a1U, 0xa81a664bU, 0xc24b8b70U, 0xc76c51a3U,
+    0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U,
+    0x19a4c116U, 0x1e376c08U, 0x2748774cU, 0x34b0bcb5U,
+    0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU, 0x682e6ff3U,
+    0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U,
+    0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U,
+};
+
+__device__ __forceinline__ uint32_t DeviceShaRotr(uint32_t x, uint32_t n)
+{
+    return (x >> n) | (x << (32U - n));
+}
+
+__device__ __forceinline__ void DeviceSha256Init(uint32_t state[8])
+{
+    state[0] = 0x6a09e667U; state[1] = 0xbb67ae85U;
+    state[2] = 0x3c6ef372U; state[3] = 0xa54ff53aU;
+    state[4] = 0x510e527fU; state[5] = 0x9b05688cU;
+    state[6] = 0x1f83d9abU; state[7] = 0x5be0cd19U;
+}
+
+__device__ __forceinline__ void DeviceSha256Compress(uint32_t state[8],
+                                                      const uint8_t block[64])
+{
+    // Sixteen-word circular schedule keeps the parallel W-XOF kernel in
+    // registers. A 64-word local array spills to local memory on SM100/120 and
+    // turns projector generation into a memory lane rather than SHA compute.
+    uint32_t wv[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        const int p = i * 4;
+        wv[i] = (static_cast<uint32_t>(block[p]) << 24) |
+                (static_cast<uint32_t>(block[p + 1]) << 16) |
+                (static_cast<uint32_t>(block[p + 2]) << 8) |
+                static_cast<uint32_t>(block[p + 3]);
+    }
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
+    uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
+#pragma unroll
+    for (int i = 0; i < 64; ++i) {
+        if (i >= 16) {
+            const uint32_t x = wv[(i + 1) & 15];  // W[i-15]
+            const uint32_t y = wv[(i + 14) & 15]; // W[i-2]
+            const uint32_t ss0 = DeviceShaRotr(x, 7) ^ DeviceShaRotr(x, 18) ^ (x >> 3);
+            const uint32_t ss1 = DeviceShaRotr(y, 17) ^ DeviceShaRotr(y, 19) ^ (y >> 10);
+            wv[i & 15] = wv[i & 15] + ss0 + wv[(i + 9) & 15] + ss1;
+        }
+        const uint32_t wi = wv[i & 15];
+        const uint32_t s1 = DeviceShaRotr(e, 6) ^ DeviceShaRotr(e, 11) ^ DeviceShaRotr(e, 25);
+        const uint32_t ch = (e & f) ^ (~e & g);
+        const uint32_t t1 = h + s1 + ch + kDeviceSha256K[i] + wi;
+        const uint32_t s0 = DeviceShaRotr(a, 2) ^ DeviceShaRotr(a, 13) ^ DeviceShaRotr(a, 22);
+        const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        const uint32_t t2 = s0 + maj;
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+    }
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+}
+
+__device__ __forceinline__ uint8_t DeviceWordByte(const uint32_t words[8], uint32_t i)
+{
+    return static_cast<uint8_t>((words[i / 4] >> (8U * (i % 4))) & 0xffU);
+}
+
+__device__ __forceinline__ void DeviceShaStateBytes(const uint32_t state[8], uint8_t out[32])
+{
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        out[4 * i] = static_cast<uint8_t>(state[i] >> 24);
+        out[4 * i + 1] = static_cast<uint8_t>(state[i] >> 16);
+        out[4 * i + 2] = static_cast<uint8_t>(state[i] >> 8);
+        out[4 * i + 3] = static_cast<uint8_t>(state[i]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +301,180 @@ __device__ __forceinline__ int8_t DeviceSampleMantissaNibble(uint8_t nibble, boo
     }
     accepted = true;
     return static_cast<int8_t>(sign ? -mag : mag);
+}
+
+// One SHA-256 block exactly matching ExpandMantissaStream:
+// SHA256(reverse(seed bytes) || 'm' || LE64(counter)). The 41-byte message and
+// its padding fit one compression block.
+__device__ __forceinline__ void DeviceMantissaXofBlock(const uint32_t seed_words[8],
+                                                       uint64_t counter, uint8_t out[32])
+{
+    uint8_t block[64];
+#pragma unroll
+    for (int i = 0; i < 64; ++i) block[i] = 0;
+#pragma unroll
+    for (uint32_t i = 0; i < 32; ++i) {
+        block[i] = DeviceWordByte(seed_words, 31U - i);
+    }
+    block[32] = 0x6d; // BMX4C mantissa XOF domain 'm'
+#pragma unroll
+    for (uint32_t i = 0; i < 8; ++i) {
+        block[33 + i] = static_cast<uint8_t>(counter >> (8U * i));
+    }
+    block[41] = 0x80;
+    constexpr uint64_t kBitLength = 41U * 8U;
+#pragma unroll
+    for (uint32_t i = 0; i < 8; ++i) {
+        block[56 + i] = static_cast<uint8_t>(kBitLength >> (8U * (7U - i)));
+    }
+    uint32_t state[8];
+    DeviceSha256Init(state);
+    DeviceSha256Compress(state, block);
+    DeviceShaStateBytes(state, out);
+}
+
+__global__ void DeviceGenerateMantissaXofBlocks(uint8_t* __restrict__ hashes,
+                                                uint32_t* __restrict__ accepted,
+                                                size_t blocks,
+                                                uint32_t s0, uint32_t s1, uint32_t s2,
+                                                uint32_t s3, uint32_t s4, uint32_t s5,
+                                                uint32_t s6, uint32_t s7)
+{
+    const size_t block_index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (block_index >= blocks) return;
+    const uint32_t seed_words[8] = {s0, s1, s2, s3, s4, s5, s6, s7};
+    uint8_t digest[32];
+    DeviceMantissaXofBlock(seed_words, static_cast<uint64_t>(block_index), digest);
+    uint32_t count = 0;
+#pragma unroll
+    for (int i = 0; i < 32; ++i) {
+        hashes[block_index * 32 + i] = digest[i];
+        bool ok = false;
+        (void)DeviceSampleMantissaNibble(digest[i] & 0x0f, ok);
+        count += ok ? 1U : 0U;
+        (void)DeviceSampleMantissaNibble(digest[i] >> 4, ok);
+        count += ok ? 1U : 0U;
+    }
+    accepted[block_index] = count;
+}
+
+// The scan is deliberately deterministic and tiny relative to MatExpand. It
+// runs on-device, so no candidate incurs a host readback or synchronization.
+__global__ void DeviceScanMantissaCounts(const uint32_t* __restrict__ accepted,
+                                         uint32_t* __restrict__ offsets,
+                                         size_t blocks, size_t required,
+                                         int* __restrict__ status)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    size_t prefix = 0;
+    for (size_t i = 0; i < blocks; ++i) {
+        offsets[i] = static_cast<uint32_t>(prefix);
+        prefix += accepted[i];
+    }
+    *status = prefix >= required ? 1 : 0;
+}
+
+__global__ void DeviceScatterMantissaXof(const uint8_t* __restrict__ hashes,
+                                         const uint32_t* __restrict__ offsets,
+                                         size_t blocks, size_t required,
+                                         const int* __restrict__ status,
+                                         int8_t* __restrict__ out)
+{
+    const size_t block_index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (block_index >= blocks || *status == 0) return;
+    size_t pos = offsets[block_index];
+#pragma unroll
+    for (int i = 0; i < 32; ++i) {
+        const uint8_t byte = hashes[block_index * 32 + i];
+        bool ok = false;
+        int8_t value = DeviceSampleMantissaNibble(byte & 0x0f, ok);
+        if (ok) {
+            if (pos < required) out[pos] = value;
+            ++pos;
+        }
+        value = DeviceSampleMantissaNibble(byte >> 4, ok);
+        if (ok) {
+            if (pos < required) out[pos] = value;
+            ++pos;
+        }
+    }
+}
+
+__device__ __noinline__ void DeviceSha256dSketchOne(const uint64_t* __restrict__ chat,
+                                                     size_t words,
+                                                     uint32_t s0, uint32_t s1, uint32_t s2,
+                                                     uint32_t s3, uint32_t s4, uint32_t s5,
+                                                     uint32_t s6, uint32_t s7,
+                                                     uint8_t* __restrict__ digest_out)
+{
+    constexpr uint8_t kTag[13] = {'B', 'T', 'X', '_', 'M', 'A', 'T',
+                                  'M', 'U', 'L', '_', 'V', '4'};
+    constexpr size_t kPrefixBytes = sizeof(kTag) + 32;
+    const uint32_t sigma_words[8] = {s0, s1, s2, s3, s4, s5, s6, s7};
+    const auto* chat_bytes = reinterpret_cast<const uint8_t*>(chat);
+    const size_t message_bytes = kPrefixBytes + words * sizeof(uint64_t);
+    const size_t padded_bytes = (message_bytes + 9U + 63U) & ~size_t{63};
+    const uint64_t message_bits = static_cast<uint64_t>(message_bytes) * 8U;
+
+    uint32_t state[8];
+    DeviceSha256Init(state);
+    for (size_t base = 0; base < padded_bytes; base += 64) {
+        uint8_t block[64];
+#pragma unroll
+        for (uint32_t j = 0; j < 64; ++j) {
+            const size_t p = base + j;
+            uint8_t byte = 0;
+            if (p < sizeof(kTag)) {
+                byte = kTag[p];
+            } else if (p < kPrefixBytes) {
+                byte = DeviceWordByte(sigma_words, static_cast<uint32_t>(p - sizeof(kTag)));
+            } else if (p < message_bytes) {
+                byte = chat_bytes[p - kPrefixBytes];
+            } else if (p == message_bytes) {
+                byte = 0x80;
+            } else if (p >= padded_bytes - 8U) {
+                byte = static_cast<uint8_t>(message_bits >> (8U * (padded_bytes - 1U - p)));
+            }
+            block[j] = byte;
+        }
+        DeviceSha256Compress(state, block);
+    }
+
+    uint8_t middle[32];
+    DeviceShaStateBytes(state, middle);
+    uint8_t final_block[64];
+#pragma unroll
+    for (uint32_t i = 0; i < 64; ++i) final_block[i] = 0;
+#pragma unroll
+    for (uint32_t i = 0; i < 32; ++i) final_block[i] = middle[i];
+    final_block[32] = 0x80;
+    final_block[62] = 0x01; // 32 bytes == 256 bits
+    DeviceSha256Init(state);
+    DeviceSha256Compress(state, final_block);
+    DeviceShaStateBytes(state, digest_out);
+}
+
+__global__ void DeviceSha256dSketchBatch(const uint64_t* __restrict__ chats,
+                                         size_t words_per_chat,
+                                         const uint8_t* __restrict__ sigmas,
+                                         size_t count,
+                                         uint8_t* __restrict__ digests)
+{
+    const size_t candidate = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (candidate >= count) return;
+    const uint8_t* sigma = sigmas + candidate * kDigestBytes;
+    uint32_t sw[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const size_t p = static_cast<size_t>(i) * 4;
+        sw[i] = static_cast<uint32_t>(sigma[p]) |
+                (static_cast<uint32_t>(sigma[p + 1]) << 8) |
+                (static_cast<uint32_t>(sigma[p + 2]) << 16) |
+                (static_cast<uint32_t>(sigma[p + 3]) << 24);
+    }
+    DeviceSha256dSketchOne(chats + candidate * words_per_chat, words_per_chat,
+                           sw[0], sw[1], sw[2], sw[3], sw[4], sw[5], sw[6], sw[7],
+                           digests + candidate * kDigestBytes);
 }
 
 // Lever-B MX Extract: one thread per (i, bj) tile. The E8M0 scale is derived
@@ -542,6 +811,19 @@ struct LtCudaResidentPool {
     int32_t* dQ{nullptr};
     uint64_t* dChat{nullptr};
 
+    // Device W-XOF staging is dimension-scoped. Batch outputs remain only
+    // 32-byte digests plus one fail-closed status word per candidate.
+    uint8_t* dWHashes{nullptr};
+    uint32_t* dWAccepted{nullptr};
+    uint32_t* dWOffsets{nullptr};
+    size_t w_xof_blocks{0};
+    uint8_t* dBatchDigests{nullptr};
+    uint8_t* dBatchSigmas{nullptr};
+    int* dBatchStatus{nullptr};
+    uint64_t* dChatBatch{nullptr};
+    size_t chat_batch_slots{0};
+    size_t batch_capacity{0};
+
     // Generic LaunchGemm scratch (cross-call reuse; minimizes alloc churn)
     int8_t* dGemmS8L{nullptr};
     int8_t* dGemmS8R{nullptr};
@@ -577,6 +859,9 @@ struct LtCudaResidentPool {
         free_p(dG); free_p(dH); free_p(dU); free_p(dV); free_p(dAhat); free_p(dP);
         free_p(dW); free_p(dY); free_p(dB32); free_p(dBhat); free_p(dQ); free_p(dChat);
         free_p(dScales);
+        free_p(dWHashes); free_p(dWAccepted); free_p(dWOffsets);
+        free_p(dBatchDigests); free_p(dBatchSigmas); free_p(dBatchStatus); free_p(dChatBatch);
+        w_xof_blocks = chat_batch_slots = batch_capacity = 0;
         free_p(dGemmS8L); free_p(dGemmS8R); free_p(dGemmS32L); free_p(dGemmOut);
         gemm_s8l_bytes = gemm_s8r_bytes = gemm_s32l_bytes = gemm_out_bytes = 0;
         if (stream) { cudaStreamDestroy(stream); stream = nullptr; }
@@ -601,6 +886,39 @@ struct LtCudaResidentPool {
                grow(dGemmS8R, gemm_s8r_bytes, s8r) &&
                grow(dGemmS32L, gemm_s32l_bytes, s32l) &&
                grow(dGemmOut, gemm_out_bytes, out);
+    }
+
+    [[nodiscard]] bool EnsureBatchCapacity(size_t count)
+    {
+        if (count <= batch_capacity) return true;
+        if (dBatchDigests) { cudaFree(dBatchDigests); dBatchDigests = nullptr; }
+        if (dBatchSigmas) { cudaFree(dBatchSigmas); dBatchSigmas = nullptr; }
+        if (dBatchStatus) { cudaFree(dBatchStatus); dBatchStatus = nullptr; }
+        if (dChatBatch) { cudaFree(dChatBatch); dChatBatch = nullptr; }
+        chat_batch_slots = 0;
+        batch_capacity = 0;
+        const size_t chat_bytes = static_cast<size_t>(m) * m * sizeof(uint64_t);
+        size_t free_bytes = 0;
+        size_t total_bytes = 0;
+        if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess || chat_bytes == 0) return false;
+        constexpr size_t kMaxChatBatchBytes = size_t{128} << 20;
+        const size_t budget = std::min(kMaxChatBatchBytes,
+                                       std::min(free_bytes / 8U, total_bytes / 16U));
+        chat_batch_slots = std::min(count, std::max<size_t>(1, budget / chat_bytes));
+        if (chat_batch_slots > std::numeric_limits<size_t>::max() / chat_bytes) return false;
+        if (cudaMalloc(reinterpret_cast<void**>(&dBatchDigests), count * kDigestBytes) != cudaSuccess ||
+            cudaMalloc(reinterpret_cast<void**>(&dBatchSigmas), count * kDigestBytes) != cudaSuccess ||
+            cudaMalloc(reinterpret_cast<void**>(&dBatchStatus), count * sizeof(int)) != cudaSuccess ||
+            cudaMalloc(reinterpret_cast<void**>(&dChatBatch), chat_batch_slots * chat_bytes) != cudaSuccess) {
+            if (dBatchDigests) { cudaFree(dBatchDigests); dBatchDigests = nullptr; }
+            if (dBatchSigmas) { cudaFree(dBatchSigmas); dBatchSigmas = nullptr; }
+            if (dBatchStatus) { cudaFree(dBatchStatus); dBatchStatus = nullptr; }
+            if (dChatBatch) { cudaFree(dChatBatch); dChatBatch = nullptr; }
+            chat_batch_slots = 0;
+            return false;
+        }
+        batch_capacity = count;
+        return true;
     }
 
     [[nodiscard]] bool EnsureDims(uint32_t n_in, uint32_t m_in)
@@ -639,6 +957,11 @@ struct LtCudaResidentPool {
         const size_t mn = static_cast<size_t>(m) * n;
         const size_t nm = static_cast<size_t>(n) * m;
         const size_t mm = static_cast<size_t>(m) * m;
+        // Each counter block supplies at most 64 and on average 44 accepted
+        // mantissas. One block per 32 required outputs is a conservative fixed
+        // budget; a device status word makes the vanishingly unlikely short
+        // prefix an explicit fail-closed decline.
+        w_xof_blocks = (nw + 31U) / 32U;
         const size_t nscales = static_cast<size_t>(n) *
             (n / matmul::v4::lt::kMatExpandMxBlockLen);
 
@@ -657,11 +980,50 @@ struct LtCudaResidentPool {
             !mall(reinterpret_cast<void**>(&dBhat), nn) ||
             !mall(reinterpret_cast<void**>(&dQ), nm * sizeof(int32_t)) ||
             !mall(reinterpret_cast<void**>(&dChat), mm * sizeof(uint64_t)) ||
-            !mall(reinterpret_cast<void**>(&dScales), mx_partitioned ? nscales : 0)) {
+            !mall(reinterpret_cast<void**>(&dScales), mx_partitioned ? nscales : 0) ||
+            !mall(reinterpret_cast<void**>(&dWHashes), w_xof_blocks * 32U) ||
+            !mall(reinterpret_cast<void**>(&dWAccepted), w_xof_blocks * sizeof(uint32_t)) ||
+            !mall(reinterpret_cast<void**>(&dWOffsets), w_xof_blocks * sizeof(uint32_t))) {
             Release();
             return false;
         }
         return true;
+    }
+
+    [[nodiscard]] bool LaunchDeviceW(const uint256& seed_w, int* status)
+    {
+        const size_t required = static_cast<size_t>(n) * w;
+        uint32_t sw[8];
+        for (int i = 0; i < 8; ++i) {
+            sw[i] = ReadLE32(seed_w.data() + static_cast<size_t>(i) * 4);
+        }
+        constexpr unsigned kThreads = 256;
+        const unsigned blocks = static_cast<unsigned>((w_xof_blocks + kThreads - 1) / kThreads);
+        DeviceGenerateMantissaXofBlocks<<<blocks, kThreads, 0, stream>>>(
+            dWHashes, dWAccepted, w_xof_blocks,
+            sw[0], sw[1], sw[2], sw[3], sw[4], sw[5], sw[6], sw[7]);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        DeviceScanMantissaCounts<<<1, 1, 0, stream>>>(
+            dWAccepted, dWOffsets, w_xof_blocks, required, status);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        DeviceScatterMantissaXof<<<blocks, kThreads, 0, stream>>>(
+            dWHashes, dWOffsets, w_xof_blocks, required, status, dW);
+        return cudaGetLastError() == cudaSuccess;
+    }
+
+    [[nodiscard]] bool LaunchDeviceDigestBatch(size_t count,
+                                               const uint8_t* sigmas,
+                                               uint8_t* digests)
+    {
+        if (count == 0 || count > chat_batch_slots) return false;
+        // SHA-256 is serial within one Chat transcript, but candidates are
+        // independent. One thread per staged candidate lets a bounded chunk
+        // occupy the GPU instead of serializing Q* single-thread kernels.
+        constexpr unsigned kThreads = 64;
+        const unsigned blocks = static_cast<unsigned>((count + kThreads - 1) / kThreads);
+        DeviceSha256dSketchBatch<<<blocks, kThreads, 0, stream>>>(
+            dChatBatch, static_cast<size_t>(m) * m, sigmas, count, digests);
+        return cudaGetLastError() == cudaSuccess;
     }
 
     [[nodiscard]] bool LaunchMxExtract(int8_t* dDenseOut, int8_t* dMuOut,
@@ -874,8 +1236,7 @@ struct LtCudaResidentPool {
         return true;
     }
 
-    [[nodiscard]] bool MineOneNonce(const CBlockHeader& header,
-                                    std::vector<matmul::int8_field::Fq>& chat_out)
+    [[nodiscard]] bool EnqueueOneHeader(const CBlockHeader& header, int* status)
     {
         if (!template_bound) return false;
         if (!imma_s8s8 && !graphs_ready) return false;
@@ -883,9 +1244,7 @@ struct LtCudaResidentPool {
 
         const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
         const uint256 seed_w = DeriveTaggedSeed(kMatExpandWTag, sizeof(kMatExpandWTag) - 1, header_hash);
-        const std::vector<int8_t> W = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_w, n, w);
-        const size_t nw = static_cast<size_t>(n) * w;
-        if (cudaMemcpyAsync(dW, W.data(), nw, cudaMemcpyHostToDevice, stream) != cudaSuccess) return false;
+        if (!LaunchDeviceW(seed_w, status)) return false;
 
         if (imma_s8s8) {
             if (!LaunchMatExpandImma()) return false;
@@ -919,13 +1278,7 @@ struct LtCudaResidentPool {
             if (cudaGetLastError() != cudaSuccess) return false;
         }
 
-        // D2H overwrites the complete buffer. resize() retains capacity across
-        // a Q* window and avoids both per-nonce allocation and a pointless host
-        // zero-fill (32 MiB at n=4096, m=2048).
-        chat_out.resize(static_cast<size_t>(m) * m);
-        if (cudaMemcpyAsync(chat_out.data(), dChat, static_cast<size_t>(m) * m * sizeof(uint64_t),
-                            cudaMemcpyDeviceToHost, stream) != cudaSuccess) return false;
-        return cudaStreamSynchronize(stream) == cudaSuccess;
+        return true;
     }
 };
 
@@ -1057,7 +1410,9 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
             return;
         }
 
-        // Full-pipeline bit-identity: one device-resident digest vs CPU reference.
+        // Full-pipeline bit-identity: a real two-header batch with distinct
+        // nonce-bound seeds. This catches the legacy template+nonce bug as
+        // well as device W-XOF, Chat SHA256d, and batch ordering drift.
         constexpr uint32_t kN = 64;
         uint32_t m = 0;
         if (!matmul::v4::lt::ValidateDimsBMX4CLT(kN, m)) return;
@@ -1077,58 +1432,163 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
             header.seed_b.data()[i] = static_cast<unsigned char>(0x22);
         }
 
-        uint256 cpu_digest;
-        std::vector<unsigned char> cpu_payload;
-        if (!matmul::v4::lt::ComputeDigestBMX4CLT(header, kN, cpu_digest, cpu_payload)) return;
+        std::array<CBlockHeader, 2> headers{header, header};
+        headers[1].nNonce64 = 43;
+        headers[1].nNonce = 43;
+        for (int i = 0; i < 32; ++i) {
+            headers[1].seed_a.data()[i] = static_cast<unsigned char>(0x33 + (i & 7));
+            headers[1].seed_b.data()[i] = static_cast<unsigned char>(0x44 + (i & 7));
+        }
+        std::array<uint256, 2> cpu_digests{};
+        for (size_t i = 0; i < headers.size(); ++i) {
+            std::vector<unsigned char> cpu_payload;
+            if (!matmul::v4::lt::ComputeDigestBMX4CLT(
+                    headers[i], kN, cpu_digests[i], cpu_payload)) {
+                return;
+            }
+        }
 
         auto& pool = Pool();
         std::lock_guard<std::mutex> lock(pool.mu);
-        if (!pool.BindTemplate(header, kN, m)) return;
-        std::vector<matmul::int8_field::Fq> chat;
-        if (!pool.MineOneNonce(header, chat)) return;
-        const uint256 sigma = matmul::v4::DeriveSigma(header);
-        const uint256 gpu_digest = matmul::v4::ComputeSketchDigestFromFq(sigma, chat);
-        if (gpu_digest != cpu_digest) return;
+        if (!pool.BindTemplate(header, kN, m) ||
+            !pool.EnsureBatchCapacity(headers.size())) {
+            if (pool.stream != nullptr) (void)cudaStreamSynchronize(pool.stream);
+            return;
+        }
+        auto drain = [&]() {
+            if (pool.stream != nullptr) (void)cudaStreamSynchronize(pool.stream);
+        };
+        std::array<std::array<unsigned char, kDigestBytes>, 2> sigmas{};
+        for (size_t i = 0; i < headers.size(); ++i) {
+            const uint256 sigma = matmul::v4::DeriveSigma(headers[i]);
+            std::copy(sigma.data(), sigma.data() + kDigestBytes, sigmas[i].begin());
+        }
+        const size_t chat_words = static_cast<size_t>(m) * m;
+        if (cudaMemcpyAsync(pool.dBatchSigmas, sigmas.data(), sizeof(sigmas),
+                            cudaMemcpyHostToDevice, pool.stream) != cudaSuccess) {
+            drain();
+            return;
+        }
+        for (size_t i = 0; i < headers.size(); ++i) {
+            if (!pool.EnqueueOneHeader(headers[i], pool.dBatchStatus + i) ||
+                cudaMemcpyAsync(pool.dChatBatch + i * chat_words, pool.dChat,
+                                chat_words * sizeof(uint64_t), cudaMemcpyDeviceToDevice,
+                                pool.stream) != cudaSuccess) {
+                drain();
+                return;
+            }
+        }
+        if (!pool.LaunchDeviceDigestBatch(headers.size(), pool.dBatchSigmas,
+                                          pool.dBatchDigests)) {
+            drain();
+            return;
+        }
+        std::array<std::array<unsigned char, kDigestBytes>, 2> digest_bytes{};
+        std::array<int, 2> device_status{};
+        if (cudaMemcpyAsync(digest_bytes.data(), pool.dBatchDigests, sizeof(digest_bytes),
+                            cudaMemcpyDeviceToHost, pool.stream) != cudaSuccess ||
+            cudaMemcpyAsync(device_status.data(), pool.dBatchStatus, sizeof(device_status),
+                            cudaMemcpyDeviceToHost, pool.stream) != cudaSuccess ||
+            cudaStreamSynchronize(pool.stream) != cudaSuccess) {
+            drain();
+            return;
+        }
+        for (size_t i = 0; i < headers.size(); ++i) {
+            if (device_status[i] != 1 ||
+                uint256{Span<const unsigned char>{digest_bytes[i].data(), kDigestBytes}} !=
+                    cpu_digests[i]) {
+                return;
+            }
+        }
 
         ok = true;
     });
     return ok;
 }
 
-[[nodiscard]] bool MineDeviceResident(const CBlockHeader& tmpl, uint32_t n, uint32_t m,
-                                      const uint64_t* nonces, size_t count,
+[[nodiscard]] bool MineDeviceResident(const std::vector<CBlockHeader>& headers,
+                                      uint32_t n, uint32_t m,
                                       std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
 {
+    if (headers.empty()) return false;
     auto& pool = Pool();
     std::lock_guard<std::mutex> lock(pool.mu);
-    if (!pool.BindTemplate(tmpl, n, m)) return false;
+    if (!pool.BindTemplate(headers.front(), n, m) ||
+        !pool.EnsureBatchCapacity(headers.size())) {
+        if (pool.stream != nullptr) (void)cudaStreamSynchronize(pool.stream);
+        return false;
+    }
+    auto drain_and_fail = [&]() {
+        // A declined enqueue may leave earlier kernels/copies in the nonblocking
+        // pool stream. Drain them before host fallback reuses pool scratch on
+        // the default stream; this is a failure-only synchronization.
+        if (pool.stream != nullptr) (void)cudaStreamSynchronize(pool.stream);
+        out.clear();
+        return false;
+    };
 
-    out.resize(count);
-    std::vector<matmul::int8_field::Fq> chat;
-    chat.reserve(static_cast<size_t>(m) * m);
-    for (size_t i = 0; i < count; ++i) {
-        CBlockHeader header = tmpl;
-        header.nNonce64 = nonces[i];
-        header.nNonce = static_cast<uint32_t>(nonces[i]);
+    std::vector<std::array<unsigned char, kDigestBytes>> sigma_bytes(headers.size());
+    for (size_t i = 0; i < headers.size(); ++i) {
+        const uint256 sigma = matmul::v4::DeriveSigma(headers[i]);
+        std::copy(sigma.data(), sigma.data() + kDigestBytes, sigma_bytes[i].begin());
+    }
+    if (cudaMemcpyAsync(pool.dBatchSigmas, sigma_bytes.data(),
+                        headers.size() * kDigestBytes, cudaMemcpyHostToDevice,
+                        pool.stream) != cudaSuccess) {
+        return drain_and_fail();
+    }
 
-        if (!pool.MineOneNonce(header, chat)) {
-            out.clear();
-            return false;
+    const size_t chat_words = static_cast<size_t>(m) * m;
+    const size_t chat_bytes = chat_words * sizeof(uint64_t);
+    for (size_t base = 0; base < headers.size(); base += pool.chat_batch_slots) {
+        const size_t chunk = std::min(pool.chat_batch_slots, headers.size() - base);
+        for (size_t slot = 0; slot < chunk; ++slot) {
+            const size_t i = base + slot;
+            if (!pool.EnqueueOneHeader(headers[i], pool.dBatchStatus + i) ||
+                cudaMemcpyAsync(pool.dChatBatch + slot * chat_words, pool.dChat, chat_bytes,
+                                cudaMemcpyDeviceToDevice, pool.stream) != cudaSuccess) {
+                return drain_and_fail();
+            }
         }
-        const uint256 sigma = matmul::v4::DeriveSigma(header);
-        out[i].nonce = nonces[i];
-        out[i].digest = matmul::v4::ComputeSketchDigestFromFq(sigma, chat);
+        if (!pool.LaunchDeviceDigestBatch(
+                chunk, pool.dBatchSigmas + base * kDigestBytes,
+                pool.dBatchDigests + base * kDigestBytes)) {
+            return drain_and_fail();
+        }
+    }
+
+    std::vector<std::array<unsigned char, kDigestBytes>> digest_bytes(headers.size());
+    std::vector<int> status(headers.size(), 0);
+    if (cudaMemcpyAsync(digest_bytes.data(), pool.dBatchDigests,
+                        headers.size() * kDigestBytes, cudaMemcpyDeviceToHost,
+                        pool.stream) != cudaSuccess ||
+        cudaMemcpyAsync(status.data(), pool.dBatchStatus,
+                        headers.size() * sizeof(int), cudaMemcpyDeviceToHost,
+                        pool.stream) != cudaSuccess ||
+        cudaStreamSynchronize(pool.stream) != cudaSuccess) {
+        return drain_and_fail();
+    }
+
+    out.resize(headers.size());
+    for (size_t i = 0; i < headers.size(); ++i) {
+        if (status[i] != 1) {
+            return drain_and_fail();
+        }
+        out[i].nonce = headers[i].nNonce64;
+        out[i].digest = uint256{Span<const unsigned char>{
+            digest_bytes[i].data(), digest_bytes[i].size()}};
         out[i].target_match = false;
         out[i].backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
     }
     return true;
 }
 
-[[nodiscard]] bool MineHostExactFallback(const CBlockHeader& tmpl, uint32_t n,
-                                         const uint64_t* nonces, size_t count,
+[[nodiscard]] bool MineHostExactFallback(const std::vector<CBlockHeader>& headers,
+                                         uint32_t n,
                                          bool try_device_gemms,
                                          std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
 {
+    if (headers.empty()) return false;
     matmul::v4::lt::ExactGemmBackend backend;
     if (try_device_gemms) {
         backend.gemm_s8s8 = &BackendGemmS8S8;
@@ -1136,13 +1596,12 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     }
     g_lt_device_gemm_failed = false;
 
-    matmul::v4::lt::WindowSketchMinerLT miner(tmpl, n, backend);
+    matmul::v4::lt::WindowSketchMinerLT miner(headers.front(), n, backend);
     if (!miner.Valid()) return false;
 
-    const std::vector<uint64_t> nonce_vec(nonces, nonces + count);
     const uint256 kNoTarget = ArithToUint256(~arith_uint256{});
     std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
-    if (!miner.Mine(nonce_vec, kNoTarget, results, nullptr)) return false;
+    if (!miner.MineWindow(headers, kNoTarget, results)) return false;
 
     const bool device_served =
         try_device_gemms && miner.UsingDeviceGemms() && !g_lt_device_gemm_failed;
@@ -1199,24 +1658,53 @@ bool ComputeDigestsOnlyLTCuda(const CBlockHeader& tmpl, uint32_t n,
         return false;
     }
 
+    std::vector<CBlockHeader> headers(count, tmpl);
+    for (size_t i = 0; i < count; ++i) {
+        headers[i].nNonce64 = nonces[i];
+        headers[i].nNonce = static_cast<uint32_t>(nonces[i]);
+    }
+    return ComputeDigestsOnlyLTCuda(headers, n, out, nullptr);
+}
+
+bool ComputeDigestsOnlyLTCuda(
+    const std::vector<CBlockHeader>& headers, uint32_t n,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    LtCudaBatchProvenance* provenance)
+{
+    out.clear();
+    if (provenance != nullptr) *provenance = {};
+    if (headers.empty()) return false;
+
     uint32_t m = 0;
-    if (!matmul::v4::lt::ValidateDimsBMX4CLT(n, m)) {
+    if (!matmul::v4::lt::ValidateDimsBMX4CLT(n, m)) return false;
+    const uint256 template_hash = matmul::v4::ComputeTemplateHash(headers.front());
+    if (!std::all_of(headers.begin(), headers.end(), [&](const CBlockHeader& header) {
+            return matmul::v4::ComputeTemplateHash(header) == template_hash;
+        })) {
         return false;
     }
 
     // Prefer the persistent device-resident MatExpand→project→combine loop
-    // (CUDA-graph replay of stable GEMMs). Host ExactGemm / WindowSketchMinerLT
-    // is fail-closed fallback only — not the complete accelerator.
+    // over the complete consensus-seeded candidate vector. The resident path
+    // does not materialize Q*m^2 Chat storage: each Chat is hashed before its
+    // working buffer is reused, and all 32-byte digests cross at one boundary.
+    // Host ExactGemm / WindowSketchMinerLT is fail-closed fallback only.
     if (IsMatMulLTCudaAvailable()) {
-        if (MineDeviceResident(tmpl, n, m, nonces, count, out)) {
+        if (MineDeviceResident(headers, n, m, out)) {
+            if (provenance != nullptr) {
+                provenance->qstar_device_batched = headers.size() > 1;
+                provenance->device_w_generation = true;
+                provenance->device_digest = true;
+                provenance->per_nonce_sync_absent = true;
+            }
             return true;
         }
         // Device-resident path declined at runtime: fall back to host ExactGemm
         // (optionally still using per-call device GEMMs via ExactGemmBackend).
-        return MineHostExactFallback(tmpl, n, nonces, count, /*try_device_gemms=*/true, out);
+        return MineHostExactFallback(headers, n, /*try_device_gemms=*/true, out);
     }
 
-    return MineHostExactFallback(tmpl, n, nonces, count, /*try_device_gemms=*/false, out);
+    return MineHostExactFallback(headers, n, /*try_device_gemms=*/false, out);
 }
 
 bool LtLastS8S8UsedImma()

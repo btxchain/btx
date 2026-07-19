@@ -44,6 +44,16 @@ bool ComputeDigestsOnlyLTCuda(const CBlockHeader& /*tmpl*/, uint32_t /*n*/,
     return false;
 }
 
+bool ComputeDigestsOnlyLTCuda(
+    const std::vector<CBlockHeader>& /*headers*/, uint32_t /*n*/,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    LtCudaBatchProvenance* provenance)
+{
+    out.clear();
+    if (provenance != nullptr) *provenance = {};
+    return false;
+}
+
 bool LtLastS8S8UsedImma()
 {
     return false;

@@ -1498,6 +1498,27 @@ BOOST_AUTO_TEST_CASE(lt_accel_entry_bit_identity_or_stub_decline)
     BOOST_CHECK(!payload.empty());
 }
 
+#if !defined(BTX_ENABLE_HIP)
+BOOST_AUTO_TEST_CASE(hip_full_header_batch_stub_clears_provenance)
+{
+    std::vector<CBlockHeader> headers{MakeLTHeader(11, kTestDim),
+                                      MakeLTHeader(12, kTestDim)};
+    std::vector<lt::DigestOnlyResultLT> out(1);
+    matmul_v4::hip::LtHipBatchProvenance provenance;
+    provenance.qstar_device_batched = true;
+    provenance.device_w_generation = true;
+    provenance.device_digest = true;
+    provenance.per_nonce_sync_absent = true;
+    BOOST_CHECK(!matmul_v4::hip::ComputeDigestsOnlyLTHip(
+        headers, kTestDim, out, &provenance));
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!provenance.qstar_device_batched);
+    BOOST_CHECK(!provenance.device_w_generation);
+    BOOST_CHECK(!provenance.device_digest);
+    BOOST_CHECK(!provenance.per_nonce_sync_absent);
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(matexpand_extract_r2_nonapproximability)
 {
     // C15-A quantitative witness (dual pre-review): best LS affine and

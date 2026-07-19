@@ -31,6 +31,8 @@ Asserts:
     cached (the node then serves it back). Targeting an *uncached* block is what
     makes this deterministic: for a cached block the receive handler short-
     circuits on Have() before authentication, so the penalty path never runs.
+  * a solicited short mmsketch is rejected by the exact 8*m^2 size gate before
+    commitment hashing and never enters the cache;
   * liveness is independent of the cache throughout (no node ever stalls
     waiting for sketch bytes).
 
@@ -87,6 +89,9 @@ class BTXMatMulEncDrSketchCache(BitcoinTestFramework):
         self.num_nodes = 3
         self.setup_clean_chain = True
         common = [
+            # Cache carriage is meaningful only when the independently syncing
+            # peers also execute strict MatMul proof/header validation.
+            "-test=matmulstrict",
             "-test=matmuldgw",
             f"-regtestmatmulbindingheight={V3_BINDING_HEIGHT}",
             f"-regtestmatmulproductdigestheight={V3_BINDING_HEIGHT}",
@@ -246,9 +251,30 @@ class BTXMatMulEncDrSketchCache(BitcoinTestFramework):
         self.wait_until(
             lambda: node2.getbestblockhash() == solicited_hex, timeout=240)
 
+        self.log.info("RECEIVE: non-canonical mmsketch size is rejected before authentication")
+        self.disconnect_nodes(0, 2)
+        self.generate(node0, 1, sync_fun=self.no_op)
+        wrong_size_hex = node0.getbestblockhash()
+        wrong_size_hash = int(wrong_size_hex, 16)
+        peer.send_message(msg_getmmsketch(block_hash=wrong_size_hash))
+        self.wait_until(lambda: wrong_size_hash in peer.sketches, timeout=60)
+        wrong_size_sketch = peer.sketches[wrong_size_hash]
+        assert_equal(len(wrong_size_sketch), SKETCH_BYTES)
+
+        size_attacker = node2.add_p2p_connection(SketchPeer())
+        header = from_hex(CBlockHeader(), node0.getblockheader(wrong_size_hex, False))
+        size_attacker.send_message(msg_headers(headers=[header]))
+        self.wait_until(lambda: wrong_size_hash in size_attacker.sketch_requests, timeout=60)
+        with node2.assert_debug_log(["mmsketch non-canonical size"]):
+            size_attacker.send_message(msg_mmsketch(
+                block_hash=wrong_size_hash, sketch=wrong_size_sketch[:-1]))
+            size_attacker.wait_for_disconnect(timeout=60)
+        self.connect_nodes(0, 2)
+        self.wait_until(lambda: node2.getbestblockhash() == wrong_size_hex, timeout=240)
+
         self.log.info("Chain keeps extending regardless of cache state (liveness)")
         self.generate(node0, 1, sync_fun=self.no_op)
-        final_height = target_height + 2
+        final_height = target_height + 3
         for node in (node1, node2):
             self.wait_until(
                 lambda n=node: n.getblockcount() == final_height

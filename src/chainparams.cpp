@@ -368,6 +368,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     if (args.IsArgSet("-regtestmatmulltsealaspow")) {
         options.matmul_lt_seal_as_pow = args.GetBoolArg("-regtestmatmulltsealaspow", true);
     }
+    if (args.IsArgSet("-regtestmatmulltmaxpending")) {
+        options.matmul_lt_max_pending_verifications =
+            ParseRegTestPositiveUInt32Arg(args, "-regtestmatmulltmaxpending");
+    }
     options.matmul_flat_sketch_replay = args.GetBoolArg("-regtestmatmulflatsketchreplay", false);
     // Audit dead-code deletion: the -regtestmatmulproofprunedepth parse was removed
     // along with the dead nMatMulProofPruneDepth field / matmul_proof_prune_depth

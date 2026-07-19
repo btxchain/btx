@@ -622,7 +622,6 @@ struct CNodeState {
 class ScopedMatMulPendingVerification final
 {
 public:
-    ScopedMatMulPendingVerification() = default;
     explicit ScopedMatMulPendingVerification(std::atomic<uint32_t>& counter, uint32_t work_units = 1)
         : m_counter(&counter), m_work_units(work_units) {}
     ScopedMatMulPendingVerification(const ScopedMatMulPendingVerification&) = delete;
@@ -632,19 +631,6 @@ public:
     {
         other.m_counter = nullptr;
         other.m_work_units = 0;
-    }
-    ScopedMatMulPendingVerification& operator=(ScopedMatMulPendingVerification&& other) noexcept
-    {
-        if (this != &other) {
-            if (m_counter != nullptr && m_work_units != 0) {
-                m_counter->fetch_sub(m_work_units);
-            }
-            m_counter = other.m_counter;
-            m_work_units = other.m_work_units;
-            other.m_counter = nullptr;
-            other.m_work_units = 0;
-        }
-        return *this;
     }
     ~ScopedMatMulPendingVerification()
     {
@@ -1236,9 +1222,10 @@ private:
      *  Otherwise the historical, fully synchronous body runs.
      *
      *  @param[in] matmul_slot   Pending-verification slot the caller already
-     *                           holds for this block (BLOCK/cmpctblock paths);
-     *                           the dispatcher self-reserves one when absent
-     *                           (BLOCKTXN path holds none today). Every async
+     *                           holds for this complete block (BLOCK,
+     *                           reconstructed CMPCTBLOCK, or BLOCKTXN paths);
+     *                           the dispatcher self-reserves defensively when
+     *                           an internal caller has none. Every async
      *                           dispatch owns a slot for recompute + re-entry.
      *  @param[in] post_process  Housekeeping to run after validation completed
      *                           (sync: before returning; async: on the worker
@@ -1246,6 +1233,21 @@ private:
     void ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked,
                       std::optional<ScopedMatMulPendingVerification> matmul_slot = std::nullopt,
                       std::function<void()> post_process = nullptr);
+
+    /** Admit one complete block to an expensive MatMul verification path.
+     *
+     * Compact-block announcements call this only after reconstruction has
+     * produced a complete CBlock. This keeps an incomplete CMPCTBLOCK from
+     * consuming a finite rate-budget unit, and ensures the resulting pending
+     * slot is the same slot handed to ProcessBlock (rather than reserving a
+     * second one inside the async dispatcher). */
+    bool AdmitMatMulBlockVerification(CNode& node, const Peer& peer,
+                                      const uint256& block_hash,
+                                      bool requires_expensive_verification,
+                                      bool is_ibd,
+                                      int32_t reference_height,
+                                      const char* source,
+                                      std::optional<ScopedMatMulPendingVerification>& slot);
 
     /** The historical synchronous body of ProcessBlock, made node-lifetime-safe
      *  so it can also run on a worker thread after the peer vanished. `node` is
@@ -4547,12 +4549,11 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             WITH_LOCK(cs_main, return m_chainman.ClassifyMatMulEncDrRecompute(*block))};
         if (encdr) {
             // Every async recompute must hold a pending-verification slot (the
-            // message thread no longer serializes them). The BLOCK/cmpctblock
-            // callers pass theirs in; the BLOCKTXN reconstruction path holds
-            // none today — self-reserve here, and fall back to the synchronous
-            // path (implicitly bounded by the single message thread) when the
-            // cap is reached. Height-select the LT tip-verify pending cap when
-            // DRLT is live (seal recompute is ~Q*× a single EncDr).
+            // message thread no longer serializes them). Network block-delivery
+            // callers pass theirs in after admitting a complete block. Keep a
+            // defensive self-reserve for any internal caller that has none.
+            // Height-select the LT tip-verify pending cap when DRLT is live
+            // (seal recompute is ~Q*× a single EncDr).
             if (!matmul_slot &&
                 ReserveMatMulVerificationSlot(m_matmul_pending_verifications, m_chainparams.GetConsensus(),
                                               encdr->height)) {
@@ -4612,6 +4613,61 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
     ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
 }
 
+bool PeerManagerImpl::AdmitMatMulBlockVerification(
+    CNode& node,
+    const Peer& peer,
+    const uint256& block_hash,
+    bool requires_expensive_verification,
+    bool is_ibd,
+    int32_t reference_height,
+    const char* source,
+    std::optional<ScopedMatMulPendingVerification>& slot)
+{
+    if (!requires_expensive_verification) return true;
+    const bool already_have_block_data{WITH_LOCK(cs_main, {
+        const CBlockIndex* existing{m_chainman.m_blockman.LookupBlockIndex(block_hash)};
+        return existing != nullptr && (existing->nStatus & BLOCK_HAVE_DATA);
+    })};
+    // BLOCK_HAVE_DATA is monotonic. ProcessBlock's async classifier checks the
+    // same bit and returns null, so this replay fast path cannot fall through
+    // to its defensive self-reservation after we intentionally skip admission.
+    if (already_have_block_data) return true;
+
+    const Consensus::Params& params{m_chainparams.GetConsensus()};
+    const uint32_t work{MatMulEncDrWorkUnits(params, reference_height)};
+    if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, params,
+                                       reference_height, work)) {
+        LogDebug(BCLog::NET,
+                 "Disconnecting peer=%d: MatMul pending verification cap reached (%s)\n",
+                 node.GetId(), source);
+        node.fDisconnect = true;
+        return false;
+    }
+    slot.emplace(m_matmul_pending_verifications, work);
+
+    bool global_exhausted{false};
+    if (!node.HasPermission(NetPermissionFlags::NoBan) &&
+        !ConsumeMatMulVerificationBudgetForPeer(
+            peer, params, /*verification_count=*/work,
+            std::chrono::steady_clock::now(), is_ibd, reference_height,
+            global_exhausted)) {
+        if (global_exhausted) {
+            // Shared exhaustion is not the delivering peer's fault. The slot
+            // is released by the caller's optional on return.
+            LogDebug(BCLog::NET,
+                     "Deferring %s from peer=%d: global MatMul verification budget exhausted\n",
+                     source, node.GetId());
+            return false;
+        }
+        LogDebug(BCLog::NET,
+                 "Disconnecting peer=%d: MatMul per-peer verification budget exhausted (%s)\n",
+                 node.GetId(), source);
+        node.fDisconnect = true;
+        return false;
+    }
+    return true;
+}
+
 void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::shared_ptr<const CBlock>& block,
                                        bool force_processing, bool min_pow_checked,
                                        const std::function<void()>& post_process)
@@ -4645,6 +4701,9 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
 {
     std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
     bool fBlockRead{false};
+    bool requires_matmul_verification{false};
+    bool is_ibd{false};
+    int32_t matmul_reference_height{std::numeric_limits<int32_t>::max()};
     {
         LOCK(cs_main);
 
@@ -4683,6 +4742,25 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
 
         // We should not have gotten this far in compact block processing unless it's attached to a known header
         const CBlockIndex* prev_block{Assume(m_chainman.m_blockman.LookupBlockIndex(partialBlock.header.hashPrevBlock))};
+        const Consensus::Params& consensus_params{m_chainparams.GetConsensus()};
+        const int32_t best_known_height{m_chainman.m_best_header != nullptr
+            ? m_chainman.m_best_header->nHeight
+            : prev_block->nHeight};
+        is_ibd = m_chainman.IsInitialBlockDownload();
+        if (!is_ibd && m_chainman.ActiveHeight() + 10 < best_known_height) {
+            is_ibd = true;
+        }
+        requires_matmul_verification = CountMatMulExpensiveVerifyChecks(
+            static_cast<int64_t>(prev_block->nHeight) + 1,
+            /*header_count=*/1,
+            best_known_height,
+            consensus_params,
+            m_chainman.GetMatMulValidationMode() == kernel::MatMulValidationMode::CONSENSUS,
+            is_ibd) > 0;
+        matmul_reference_height =
+            prev_block->nHeight == std::numeric_limits<int>::max()
+                ? std::numeric_limits<int32_t>::max()
+                : prev_block->nHeight + 1;
         ReadStatus status = partialBlock.FillBlock(*pblock, block_transactions.txn,
                                                    /*segwit_active=*/DeploymentActiveAfter(prev_block, m_chainman, Consensus::DEPLOYMENT_SEGWIT));
         if (status == READ_STATUS_INVALID) {
@@ -4707,23 +4785,34 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
             // Block is okay for further processing
             RemoveBlockRequest(block_transactions.blockhash, pfrom.GetId()); // it is now an empty pointer
             fBlockRead = true;
-            // mapBlockSource is used for potentially punishing peers and
-            // updating which peers send us compact blocks, so the race
-            // between here and cs_main in ProcessNewBlock is fine.
-            // BIP 152 permits peers to relay compact blocks after validating
-            // the header only; we should not punish peers if the block turns
-            // out to be invalid.
-            mapBlockSource.emplace(block_transactions.blockhash, std::make_pair(pfrom.GetId(), false));
         }
     } // Don't hold cs_main when we call into ProcessNewBlock
     if (fBlockRead) {
+        std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
+        if (!AdmitMatMulBlockVerification(
+                pfrom, peer, block_transactions.blockhash,
+                requires_matmul_verification, is_ibd, matmul_reference_height,
+                /*source=*/"blocktxn", pending_matmul_slot)) {
+            return;
+        }
+        {
+            LOCK(cs_main);
+            // mapBlockSource is used for potentially punishing peers and
+            // updating which peers send us compact blocks, so the race
+            // between here and cs_main in ProcessNewBlock is fine. BIP 152
+            // permits peers to relay compact blocks after validating the
+            // header only; do not punish them for an invalid body.
+            mapBlockSource.emplace(block_transactions.blockhash,
+                                   std::make_pair(pfrom.GetId(), false));
+        }
         // Since we requested this block (it was in mapBlocksInFlight), force it to be processed,
         // even if it would not be a candidate for new tip (missing previous block, chain not long enough, etc)
         // This bypasses some anti-DoS logic in AcceptBlock (eg to prevent
         // disk-space attacks), but this should be safe due to the
         // protections in the compact block handler -- see related comment
         // in compact block optimistic reconstruction handling.
-        ProcessBlock(pfrom, pblock, /*force_processing=*/true, /*min_pow_checked=*/true);
+        ProcessBlock(pfrom, pblock, /*force_processing=*/true, /*min_pow_checked=*/true,
+                     std::move(pending_matmul_slot));
     }
     return;
 }
@@ -6106,8 +6195,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         bool requires_matmul_phase2{false};
         bool is_ibd{false};
         int32_t matmul_reference_height{0};
-        // DoS-F2: whether we already hold full block DATA for this compact block.
-        bool already_have_block_data{false};
 
         {
         LOCK(cs_main);
@@ -6153,63 +6240,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 ? std::numeric_limits<int32_t>::max()
                 : prev_block->nHeight + 1;
 
-        if (const CBlockIndex* existing = m_chainman.m_blockman.LookupBlockIndex(blockhash)) {
-            already_have_block_data = existing->nStatus & BLOCK_HAVE_DATA;
-        } else {
+        if (!m_chainman.m_blockman.LookupBlockIndex(blockhash)) {
             received_new_header = true;
         }
         }
 
-        std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
-        // WP-8 / H1: at a v4 height whose params require the Freivalds product
-        // payload, this handler NEVER verifies anything expensive — it accepts
-        // the header and immediately re-fetches the full block via GETDATA (see
-        // the payload-required bail below), and the arriving BLOCK message is
-        // charged in its own handler. Charging here too double-charged every
-        // fresh block (slot + per-peer budget) for one recompute. So neither
-        // the slot nor the budget belongs to this handler on that path.
-        // GATED on IsMatMulV4Active so behavior while the v4 fork is disabled
-        // (nMatMulV4Height == INT32_MAX, where v3 phase2/product-digest charges
-        // are live at mainnet heights) is byte-identical to before.
-        const bool matmul_v4_payload_refetch{
-            consensus_params.fMatMulPOW && consensus_params.fMatMulFreivaldsEnabled &&
-            matmul_reference_height != std::numeric_limits<int32_t>::max() &&
-            consensus_params.IsMatMulV4Active(matmul_reference_height) &&
-            consensus_params.IsMatMulProductPayloadRequired(matmul_reference_height)};
-        // DoS-F2: skip the budget/slot machinery for a redundant relay of a block
-        // we already have with data — it will not re-trigger the expensive
-        // recompute, so a Sybil replaying the current tip must not be able to
-        // drain the shared budget with it.
-        if (requires_matmul_phase2 && !already_have_block_data && !matmul_v4_payload_refetch) {
-            const uint32_t work = MatMulEncDrWorkUnits(consensus_params, matmul_reference_height);
-            if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, consensus_params,
-                                              matmul_reference_height, work)) {
-                LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul pending verification cap reached (cmpctblock)\n", pfrom.GetId());
-                pfrom.fDisconnect = true;
-                return;
-            }
-            pending_matmul_slot.emplace(m_matmul_pending_verifications, work);
-            bool global_exhausted{false};
-            if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && !ConsumeMatMulVerificationBudgetForPeer(
-                    *peer,
-                    consensus_params,
-                    /*verification_count=*/work,
-                    std::chrono::steady_clock::now(),
-                    is_ibd,
-                    matmul_reference_height,
-                    global_exhausted)) {
-                if (global_exhausted) {
-                    // DoS-F2: shared global budget exhausted — defer (do not
-                    // disconnect an honest peer for others' spend). The reserved
-                    // slot is released by pending_matmul_slot on return.
-                    LogDebug(BCLog::NET, "Deferring cmpctblock from peer=%d: global MatMul verification budget exhausted\n", pfrom.GetId());
-                    return;
-                }
-                LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul per-peer verification budget exhausted (cmpctblock)\n", pfrom.GetId());
-                pfrom.fDisconnect = true;
-                return;
-            }
-        }
+        // A CMPCTBLOCK header or partial reconstruction does not itself run
+        // the expensive block predicate. Admission is deliberately deferred
+        // until reconstruction produces a complete CBlock. This avoids
+        // burning a finite per-peer/global budget unit when BLOCKTXN later
+        // fails and falls back to a full BLOCK, and it avoids holding one
+        // pending slot while ProcessBlock tries to reserve a second.
 
         const CBlockIndex *pindex = nullptr;
         BlockValidationState state;
@@ -6423,6 +6464,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (fBlockReconstructed) {
             // If we got here, we were able to optimistically reconstruct a
             // block that is in flight from some other peer.
+            std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
+            if (!AdmitMatMulBlockVerification(
+                    pfrom, *peer, pblock->GetHash(), requires_matmul_phase2,
+                    is_ibd, matmul_reference_height,
+                    /*source=*/"cmpctblock", pending_matmul_slot)) {
+                return;
+            }
             {
                 LOCK(cs_main);
                 mapBlockSource.emplace(pblock->GetHash(), std::make_pair(pfrom.GetId(), false));
@@ -6744,12 +6792,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             WITH_LOCK(cs_main, m_matmul_sketch_requested.erase(block_hash));
             return;
         }
-        // Size cap = the profile 8·m² bound (anti-amplification / pre-hash DoS
-        // gate; the exact-size check lives in ParseSketch on the verify path).
-        if (sketch_bytes.size() > profile.SketchCacheBytes()) {
+        // IPI: the only canonical cache object is exactly m*m little-endian Fq
+        // words = 8*m^2 bytes. Reject both short and long payloads BEFORE the
+        // commitment hash so a solicited malformed frame cannot buy an up-to-8
+        // MiB SHA pass or enter the cache. ParseSketch repeats this invariant on
+        // the eventual verify path as defense in depth.
+        const uint64_t expected_sketch_bytes{profile.SketchCacheBytes()};
+        if (sketch_bytes.size() != expected_sketch_bytes) {
             WITH_LOCK(cs_main, m_matmul_sketch_requested.erase(block_hash));
-            Misbehaving(*peer, strprintf("mmsketch oversize (%u > %u bytes)",
-                                         sketch_bytes.size(), profile.SketchCacheBytes()));
+            Misbehaving(*peer, strprintf("mmsketch non-canonical size (%u != %u bytes)",
+                                         sketch_bytes.size(), expected_sketch_bytes));
             return;
         }
         // ONE-hash authentication against the header commitment.
@@ -6849,8 +6901,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         bool requires_matmul_phase2{false};
         bool is_ibd{false};
         int32_t budget_reference_height{std::numeric_limits<int32_t>::max()};
-        // DoS-F2: whether we already hold full block DATA for this block.
-        bool already_have_block_data{false};
         const Consensus::Params& consensus_params = m_chainparams.GetConsensus();
         std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
         {
@@ -6863,10 +6913,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // which peers send us compact blocks, so the race between here and
             // cs_main in ProcessNewBlock is fine.
             mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
-
-            if (const CBlockIndex* existing = m_chainman.m_blockman.LookupBlockIndex(hash)) {
-                already_have_block_data = existing->nStatus & BLOCK_HAVE_DATA;
-            }
 
             // Check claimed work on this block against our anti-dos thresholds.
             if (prev_block) {
@@ -6900,49 +6946,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
         }
 
-        // DoS-F2: skip the budget/slot machinery for a redundant relay of a
-        // block we already have with data — AcceptBlock short-circuits on
-        // BLOCK_HAVE_DATA before the O(n^3) recompute, so it must not be allowed
-        // to drain the shared budget (Sybil tip-replay protection).
-        if (requires_matmul_phase2 && !already_have_block_data) {
-            // Recompute-budget concurrency (item 6): ReserveMatMulVerificationSlot
-            // atomically bumps m_matmul_pending_verifications by EncDr work units
-            // (Q* for seal-as-PoW) and fails once the configured leaf-unit cap is
-            // reached; the ScopedMatMulPendingVerification held in
-            // pending_matmul_slot keeps those units occupied for the whole lifetime
-            // of this block's verification (through the cs_main-released O(n^3)
-            // recompute inside ProcessBlock -> ... -> CheckMatMulProofOfWork_V4EncDr)
-            // and releases them on scope exit.
-            const uint32_t work = MatMulEncDrWorkUnits(consensus_params, budget_reference_height);
-            if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, consensus_params,
-                                              budget_reference_height, work)) {
-                LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul pending verification cap reached (block)\n", pfrom.GetId());
-                pfrom.fDisconnect = true;
-                return;
-            }
-            pending_matmul_slot.emplace(m_matmul_pending_verifications, work);
-            bool global_exhausted{false};
-            if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && !ConsumeMatMulVerificationBudgetForPeer(
-                    *peer,
-                    consensus_params,
-                    /*verification_count=*/work,
-                    std::chrono::steady_clock::now(),
-                    is_ibd,
-                    budget_reference_height,
-                    global_exhausted)) {
-                if (global_exhausted) {
-                    // DoS-F2: shared global budget exhausted — defer this block
-                    // (do not disconnect an honest peer for others' spend). The
-                    // reserved slot is released by pending_matmul_slot on return;
-                    // the block request was already removed above, so the block
-                    // can be re-requested/re-announced later.
-                    LogDebug(BCLog::NET, "Deferring block from peer=%d: global MatMul verification budget exhausted (block)\n", pfrom.GetId());
-                    return;
-                }
-                LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul per-peer verification budget exhausted (block)\n", pfrom.GetId());
-                pfrom.fDisconnect = true;
-                return;
-            }
+        if (!AdmitMatMulBlockVerification(
+                pfrom, *peer, hash, requires_matmul_phase2,
+                is_ibd, budget_reference_height,
+                /*source=*/"block", pending_matmul_slot)) {
+            return;
         }
 
         // WP-7: hand the reserved verification slot (if any) to the dispatcher

@@ -67,10 +67,10 @@
 #
 # Builds matmul-v4-report and runs `--profile bmx4c-lt`. PASS requires the
 # honest on-device marker
-#     DEVICE_BMX4CLT_PASS:<backend>:<device-reason>
-# emitted only when a real LT MatExpand device window was accepted with
-# tensor-majority. Exit 0 without that marker is treated as FAIL (no invented
-# silicon certification). Aggregate measurement JSONs with lt-gate.py.
+#     DEVICE_BMX4CLT_RATE_PASS:<backend>:<device-reason>
+# emitted only for a silicon-eligible device-resident consensus-Q* rate. Exit
+# 0 without that marker is treated as FAIL (no invented silicon certification).
+# Aggregate measurement JSONs with lt-gate.py.
 
 set -euo pipefail
 BACKEND="${1:-}"
@@ -118,12 +118,14 @@ if [ "$PROFILE" = "bmx4c-lt" ]; then
   set -e
   echo "$OUT"
 
-  MARKER="$(echo "$OUT" | grep -oE "DEVICE_BMX4CLT_PASS:${BACKEND}:[^[:space:]]*" | head -1)"
+  # `grep` finding no marker is an expected FAIL case handled below. Under
+  # set -euo pipefail it must not terminate the script inside the assignment.
+  MARKER="$(printf '%s\n' "$OUT" | grep -oE "DEVICE_BMX4CLT_RATE_PASS:${BACKEND}:[^[:space:]]*" | head -1 || true)"
   if [ "$CODE" -eq 0 ] && [ -n "$MARKER" ]; then
     echo "RESULT: PASS ($BACKEND) -- ENC-DR-LT bit-exact + device LT window accepted ($MARKER)."
     echo "Record the JSON for lt-gate.py. This does NOT close Rank-1 GO/NO-GO by itself."
   elif [ "$CODE" -eq 0 ] && [ -z "$MARKER" ]; then
-    echo "RESULT: FAIL ($BACKEND) -- exit 0 but no DEVICE_BMX4CLT_PASS:${BACKEND}: marker."
+    echo "RESULT: FAIL ($BACKEND) -- exit 0 but no DEVICE_BMX4CLT_RATE_PASS:${BACKEND}: marker."
     CODE=1
   else
     echo "RESULT: FAIL ($BACKEND) -- ENC-DR-LT bit-exactness, stage divergence, or no device window;"

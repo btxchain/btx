@@ -65,6 +65,10 @@ class BTXMatMulDRLTActivation(BitcoinTestFramework):
         self.num_nodes = 2
         self.setup_clean_chain = True
         common = [
+            # Do not let regtest's default fSkipMatMulValidation turn this into
+            # a version/profile-only sync test. The receiving peer must execute
+            # the same strict header/dimension/digest checks as production.
+            "-test=matmulstrict",
             "-test=matmuldgw",
             f"-regtestmatmulbindingheight={V3_BINDING_HEIGHT}",
             f"-regtestmatmulproductdigestheight={V3_BINDING_HEIGHT}",
@@ -80,8 +84,9 @@ class BTXMatMulDRLTActivation(BitcoinTestFramework):
     def run_test(self):
         node0, node1 = self.nodes
 
-        if "-regtestdrltheight" not in " ".join(self.extra_args[0]):
-            raise AssertionError("test setup error: -regtestdrltheight missing from extra_args")
+        joined = " ".join(self.extra_args[0])
+        if "-regtestdrltheight" not in joined or "-test=matmulstrict" not in joined:
+            raise AssertionError("test setup error: strict DRLT rehearsal flags missing")
 
         self.connect_nodes(0, 1)
         self.wait_until(

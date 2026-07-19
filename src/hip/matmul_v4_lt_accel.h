@@ -32,6 +32,13 @@ class CBlockHeader;
 
 namespace matmul_v4::hip {
 
+struct LtHipBatchProvenance {
+    bool qstar_device_batched{false};
+    bool device_w_generation{false};
+    bool device_digest{false};
+    bool per_nonce_sync_absent{false};
+};
+
 /** True iff HIP is enabled, an AMD GPU is present, and the one-time
  *  device bit-identity self-test passed. */
 [[nodiscard]] bool IsMatMulLTHipAvailable();
@@ -55,6 +62,16 @@ namespace matmul_v4::hip {
 [[nodiscard]] bool ComputeDigestsOnlyLTHip(const CBlockHeader& tmpl, uint32_t n,
                                           const uint64_t* nonces, size_t count,
                                           std::vector<matmul::v4::lt::DigestOnlyResultLT>& out);
+
+/** Consensus-seed-complete Q* batch entry. Unlike the legacy template+nonce
+ *  ABI, each slot carries its own seed_a/seed_b. All headers must have the
+ *  same ComputeTemplateHash. The resident HIP path queues the complete batch,
+ *  hashes each Chat on device, then performs one digest/status transfer and
+ *  one stream synchronization. */
+[[nodiscard]] bool ComputeDigestsOnlyLTHip(
+    const std::vector<CBlockHeader>& headers, uint32_t n,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    LtHipBatchProvenance* provenance = nullptr);
 
 /** True iff most recent LaunchGemmS8S8 used hipBLASLt/rocBLAS MFMA. */
 [[nodiscard]] bool LtLastS8S8UsedMfma();

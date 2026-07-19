@@ -23,13 +23,24 @@ class CBlockHeader;
 // passes, ComputeDigestsOnlyLTCuda runs a persistent device-resident loop:
 //   MatExpand (G*W, Y*H) → ExtractDequant → project (Bhat*V) → F_q combine,
 // s8xs8 prefers cuBLASLt IMMA when self-qualified; s32xs8 / IMMA decline use
-// scalar DeviceGemm* (never labeled IMMA). Host ExactGemm is fail-closed
-// fallback. Digest hashing remains host-side after Chat D2H.
+// scalar DeviceGemm* (never labeled IMMA). Full-header batches generate W and
+// SHA256d(Chat) on device and return only digests; Host ExactGemm is the
+// fail-closed fallback.
 //
 // Linker stub when BTX_ENABLE_CUDA is off.
 // ---------------------------------------------------------------------------
 
 namespace matmul_v4::cuda {
+
+/** Provenance for the full-header Q* entry. Every field is true only when the
+ *  successful call used that property for every candidate; callers must not
+ *  infer silicon throughput from DigestOnlyBackendStatus alone. */
+struct LtCudaBatchProvenance {
+    bool qstar_device_batched{false};
+    bool device_w_generation{false};
+    bool device_digest{false};
+    bool per_nonce_sync_absent{false};
+};
 
 /** True iff this build was compiled with CUDA (BTX_ENABLE_CUDA_EXPERIMENTAL),
  *  a CUDA device is present, and the one-time device bit-identity self-test
@@ -67,6 +78,17 @@ namespace matmul_v4::cuda {
 [[nodiscard]] bool ComputeDigestsOnlyLTCuda(const CBlockHeader& tmpl, uint32_t n,
                                             const uint64_t* nonces, size_t count,
                                             std::vector<matmul::v4::lt::DigestOnlyResultLT>& out);
+
+/** Consensus-seeded Q* entry. Unlike the legacy template+nonce ABI, this
+ *  preserves every candidate's nonce-bound seed_a/seed_b. A successful CUDA
+ *  resident call generates W and SHA256d(Chat) on device, returns only one
+ *  32-byte digest per candidate, and has one stream synchronization at the
+ *  batch boundary. Host fallback remains bit-exact but reports all provenance
+ *  fields false. Every header must have the same ComputeTemplateHash. */
+[[nodiscard]] bool ComputeDigestsOnlyLTCuda(
+    const std::vector<CBlockHeader>& headers, uint32_t n,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    LtCudaBatchProvenance* provenance = nullptr);
 
 /** True iff most recent LaunchGemmS8S8 / BackendGemmS8S8 used cuBLASLt IMMA. */
 [[nodiscard]] bool LtLastS8S8UsedImma();

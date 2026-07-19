@@ -82,11 +82,13 @@ def check_inert() -> list[str]:
             errors.append("normative MatExpand Extract must use in-tree ChaCha20 PRF")
         if "BTX_MATEXPAND_PRF_V44LT" not in lt_body:
             errors.append("missing MatExpand PRF domain tag BTX_MATEXPAND_PRF_V44LT")
-        if re.search(r"MatExpandCore[\s\S]*?FoldInt32ToEmax48\s*\(", lt_body):
-            core = re.search(r"MatExpandCore\s*\([\s\S]*?\n\}\s*\n", lt_body)
-            if core and "FoldInt32ToEmax48" in core.group(0):
-                errors.append("MatExpandCore still uses FoldInt32ToEmax48 (affine fold)")
-        if re.search(r"MatExpandCore[\s\S]*?ExtractDequantMatExpandSplitMix\s*\(", lt_body):
+        # Restrict legacy-call checks to MatExpandCore's definition. Searching
+        # from its name through the whole file falsely matched the intentionally
+        # retained differential-only SplitMix definition later in the source.
+        core = re.search(r"MatExpandCore\s*\([\s\S]*?\n\}\s*\n", lt_body)
+        if core and "FoldInt32ToEmax48" in core.group(0):
+            errors.append("MatExpandCore still uses FoldInt32ToEmax48 (affine fold)")
+        if core and re.search(r"\bExtractDequantMatExpandSplitMix\s*\(", core.group(0)):
             errors.append("MatExpandCore must not call legacy SplitMix Extract")
 
     accel = (ROOT / "src/matmul/accel_v4.cpp").read_text(encoding="utf-8")
@@ -113,9 +115,9 @@ def check_inert() -> list[str]:
 
 def print_gates() -> None:
     gates = [
-        "G1 Tensor wall-time majority on B200 and 5090 at Rank-1 unit",
-        "G2 B200/5090 nonce/s >= ~4x on fat MatExpand+Q* miner schedule",
-        "G3 Nonce/$ proxies: B200 >= 5090 (rental + purchase) — operator-supplied costs only",
+        "G1 Native tensor execution majority on B200+5090 from device timing/counters",
+        "G2 B200/5090 silicon nonce/s >= ~4x from resident consensus-Q* batches",
+        "G3 Nonce/$ proxies from silicon-eligible rates: B200 >= 5090 — operator costs only",
         "G4 MI350 FER / OCP MX exactness PASS",
         "G5 MatExpand adversarial review (ChaCha20-PRF+M11 candidate; external C-15 OPEN — not closed; orthogonal to FMM/ASERT)",
         "G6 Tip verify budget with sketch-cache within policy",
@@ -232,7 +234,41 @@ def report_metric(rep: dict, key: str) -> float | None:
 
 
 def tensor_share(rep: dict) -> float | None:
-    return report_metric(rep, "tensor_share_pct")
+    """CPU-reference stage composition; never device execution evidence."""
+    value = report_metric(rep, "cpu_reference_tensor_share_pct")
+    if value is None:
+        # Legacy schema-3 reports used this ambiguous name. Preserve it only as
+        # a diagnostic CPU composition value; it can never satisfy G1.
+        value = report_metric(rep, "tensor_share_pct")
+    return value
+
+
+def device_tensor_share(rep: dict) -> float | None:
+    """Counter/timer-backed native device tensor share, when certified."""
+    value = report_metric(rep, "device_tensor_share_pct")
+    if value is None or value < 0 or value > 100:
+        return None
+    return value
+
+
+def device_tensor_majority_verified(rep: dict) -> bool:
+    """Require native capability plus independent device timing/counters.
+
+    A CPU stage timer can say that GEMM-shaped reference work dominates the
+    reference composition.  It cannot say that a device executed tensor
+    instructions or spent a majority of its time there.  Keep G1 fail-closed
+    until the backend publishes both facts explicitly.
+    """
+    share = device_tensor_share(rep)
+    return (
+        rep.get("backend") != "cpu"
+        and rep.get("native_path_eligible") is True
+        and rep.get("device_tensor_timing_valid") is True
+        and rep.get("device_tensor_counters_valid") is True
+        and rep.get("device_tensor_timing_domain") == "device-kernel-timing-and-counters"
+        and share is not None
+        and share > 50.0
+    )
 
 
 def tensor_util(rep: dict) -> float | None:
@@ -275,20 +311,43 @@ def expected_asert_suggestion(rep: dict) -> str | None:
     return "%d/%d" % (num // divisor, den // divisor)
 
 
+def silicon_rate_provenance(rep: dict) -> bool:
+    """Require a consensus-Q* device-resident batch before ranking silicon.
+
+    Exact device participation is not sufficient: the former raw report loop
+    issued one seed-complete call per nonce and was dominated by host W
+    expansion, launches, copies, synchronization, and host digesting.
+    """
+    lt = rep.get("lt") or {}
+    return (
+        lt.get("qstar_is_consensus") is True
+        and lt.get("qstar_device_batched") is True
+        and lt.get("device_w_generation") is True
+        and lt.get("device_digest") is True
+        and lt.get("per_nonce_sync_absent") is True
+        and lt.get("rate_provenance") == "device-resident-qstar-batched"
+    )
+
+
 def device_measured(rep: dict) -> bool:
-    """True only when a DEVICE nonce/s is present — never promote CPU timers."""
+    """True only for a silicon-comparable batched DEVICE nonce/s."""
     if rep.get("backend") == "cpu":
         return False
     lt = rep.get("lt") or {}
-    # This exact tuple is the report's honest device-assisted provenance. It is
-    # deliberately separate from fully resident/native-path certification.
+    # This exact tuple is deliberately separate from native tensor-instruction
+    # certification, but it must prove resident Q* scheduling rather than mere
+    # device participation in a host-orchestrated per-nonce loop.
     if rep.get("backend_used_device") is not True:
         return False
     if rep.get("device_rate_valid") is not True:
         return False
-    if rep.get("execution_path") != "device-assisted-end-to-end":
+    if rep.get("silicon_rate_valid") is not True:
+        return False
+    if rep.get("execution_path") != "device-resident-qstar-batched":
         return False
     if lt.get("device_assisted_path_exact") is not True:
+        return False
+    if not silicon_rate_provenance(rep):
         return False
     # Null/missing/zero/negative/non-finite values and CPU-reference fields do
     # not count. A measured device rate is necessarily finite and positive.
@@ -299,6 +358,11 @@ def device_nps(rep: dict) -> float | None:
     if not device_measured(rep):
         return None
     return positive_number(rep.get("device_nonce_per_s"))
+
+
+def host_orchestrated_nps(rep: dict) -> float | None:
+    """Diagnostic wall rate; never usable by G2/G3 or ASERT."""
+    return positive_number(rep.get("host_orchestrated_nonce_per_s"))
 
 
 def parse_cost_args(cost_args: list[str] | None) -> dict[str, float]:
@@ -341,6 +405,8 @@ def evaluate(
         is_lt = rep.get("schema_version") == 3 and rep.get("profile") == "bmx4c-lt"
         be = bool(rep.get("bit_exact", False)) and stage_bit_exact(rep)
         tsp = tensor_share(rep)
+        device_tsp = device_tensor_share(rep)
+        device_tensor_verified = device_tensor_majority_verified(rep)
         tup = tensor_util(rep)
         npe = bool(rep.get("native_path_eligible", False))
         measured_nps = device_nps(rep)
@@ -357,13 +423,22 @@ def evaluate(
             "bit_exact": be,
             "native_path_eligible": npe,
             "tensor_share_pct": tsp,
+            "cpu_reference_tensor_share_pct": tsp,
+            "device_tensor_share_pct": device_tsp,
+            "device_tensor_majority_verified": device_tensor_verified,
+            "device_tensor_timing_valid": rep.get("device_tensor_timing_valid") is True,
+            "device_tensor_counters_valid": rep.get("device_tensor_counters_valid") is True,
+            "device_tensor_timing_domain": rep.get("device_tensor_timing_domain"),
             "tensor_util_pct": tup,
             "backend_used_device": rep.get("backend_used_device") is True,
             "device_rate_valid": rep.get("device_rate_valid") is True,
+            "silicon_rate_valid": rep.get("silicon_rate_valid") is True,
             "execution_path": rep.get("execution_path"),
             "device_assisted_path_exact": (rep.get("lt") or {}).get("device_assisted_path_exact") is True,
+            "silicon_rate_provenance": silicon_rate_provenance(rep),
             "device_measured": device_measured(rep),
             "nps": measured_nps,
+            "host_orchestrated_nps": host_orchestrated_nps(rep),
             "cpu_nps": None,
             "v3_hashrate": positive_number(rep.get("v3_hashrate")),
             "asert_suggestion": reported_asert,
@@ -381,6 +456,19 @@ def evaluate(
         except (TypeError, ValueError):
             row["cpu_nps"] = None
         rows.append(row)
+
+        if row["host_orchestrated_nps"] is not None and measured_nps is None:
+            notes.append(
+                "%s reports %.3g host-orchestrated nonce/s; diagnostic only — excluded "
+                "from G2, G3, tensor utilization, and ASERT calibration."
+                % (rep["_file"], row["host_orchestrated_nps"])
+            )
+
+        if reported_asert is not None and measured_nps is None:
+            notes.append(
+                "%s carries an ASERT suggestion without a silicon-eligible batched Q* rate; "
+                "exclude it from calibration." % rep["_file"]
+            )
 
         if is_lt and measured_nps is not None and row["v3_hashrate"] is not None:
             if reported_asert is None:
@@ -413,10 +501,6 @@ def evaluate(
                     % (rep["_file"], rep.get("schema_version"), rep.get("profile"))
                 )
             continue
-        if tsp is None:
-            reasons.append(
-                "G1 tensor-majority: %s carries no tensor_share_pct (fail closed)." % rep["_file"]
-            )
         if rep.get("backend") == "cpu":
             notes.append(
                 "%s is a CPU-reference run — certifies the harness, never frontier silicon."
@@ -440,24 +524,31 @@ def evaluate(
             continue
         frontier.append(row)
 
-    # G1 — tensor majority on every labeled frontier LT report that has a share.
-    g1_fail = [r for r in frontier if r["tensor_share_pct"] is not None and r["tensor_share_pct"] <= 50.0]
-    g1_missing = [r for r in frontier if r["tensor_share_pct"] is None]
+    # G1 — native tensor execution must be a measured majority on every labeled
+    # frontier part. CPU-reference stage composition is diagnostic only.
+    g1_fail = [r for r in frontier if not r["device_tensor_majority_verified"]]
     # Also require at least one datacenter and one consumer frontier report present.
     has_b200ish = any(r["class"] == "datacenter" for r in frontier)
     has_5090ish = any(r["class"] == "consumer" for r in frontier)
     g1 = (
         len(frontier) > 0
         and not g1_fail
-        and not g1_missing
         and has_b200ish
         and has_5090ish
         and all(r["bit_exact"] for r in frontier)
     )
     for r in g1_fail:
         reasons.append(
-            "G1 tensor-majority FAIL on %s: tensor_share_pct=%.1f%% <= 50%%."
-            % (r["file"], r["tensor_share_pct"])
+            "G1 native tensor-majority FAIL on %s: device share=%s; require >50%% "
+            "from device-side timing/counters plus native_path_eligible=true. "
+            "cpu_reference_tensor_share_pct=%s does not count."
+            % (
+                r["file"],
+                "unknown" if r["device_tensor_share_pct"] is None
+                else "%.1f%%" % r["device_tensor_share_pct"],
+                "unknown" if r["cpu_reference_tensor_share_pct"] is None
+                else "%.1f%%" % r["cpu_reference_tensor_share_pct"],
+            )
         )
     if frontier and not has_b200ish:
         reasons.append(
@@ -473,7 +564,9 @@ def evaluate(
             "`measure-hardware.sh <cuda|metal|hip> --profile bmx4c-lt` JSON)."
         )
 
-    # G2 — B200/5090 device nonce/s ratio >= ~4x. Fail closed if rates missing.
+    # G2 — B200/5090 silicon nonce/s ratio >= ~4x. Fail closed unless each rate
+    # is a consensus-Q* device-resident batch with W generation and digest on
+    # device and no per-nonce synchronization.
     dc = [r for r in frontier if r["class"] == "datacenter" and r["nps"] is not None]
     cons = [r for r in frontier if r["class"] == "consumer" and r["nps"] is not None]
     g2 = False
@@ -487,8 +580,9 @@ def evaluate(
     if not dc or not cons:
         reasons.append(
             "G2 B200/5090 ratio: UNVERIFIED — need a finite positive device_nonce_per_s "
-            "with the exact device-assisted provenance tuple on at least one datacenter and "
-            "one consumer LT report (cpu_reference_nonce_per_s does not count)."
+            "from a device-resident consensus-Q* batch (device W generation + digest; no "
+            "per-nonce sync) on at least one datacenter and one consumer LT report. "
+            "CPU and host-orchestrated rates do not count."
         )
     else:
         best_dc = max(dc, key=lambda r: r["nps"])
@@ -528,7 +622,7 @@ def evaluate(
         if not dc_s or not c_s:
             reasons.append(
                 "G3 nonce/$: UNVERIFIED — need --cost for both datacenter and consumer "
-                "parts that also carry device_nonce_per_s."
+                "parts that also carry silicon-eligible batched device_nonce_per_s."
             )
         else:
             best_dc_s = max(dc_s, key=lambda x: x[1])
@@ -608,6 +702,7 @@ def evaluate(
                 "file": r["file"],
                 "v3_hashrate": r["v3_hashrate"],
                 "device_nonce_per_s": r["nps"],
+                "silicon_rate_eligible": r["device_measured"],
                 "reported_suggestion": r["asert_suggestion"],
                 "expected_suggestion": r["asert_expected"],
                 "consistent": r["asert_consistent"],
@@ -619,31 +714,35 @@ def evaluate(
 
 
 def print_human(go: bool, gates: dict, rows: list, reasons: list[str], notes: list[str], extra: dict) -> None:
-    W = 122
+    W = 145
     print("=" * W)
     print("MatMul ENC-DR-LT — Rank-1 GO/NO-GO aggregate verdict")
     print("=" * W)
-    hdr = "%-22s %-8s %-9s %-11s %-6s %-7s %-8s %-7s %-10s %s" % (
+    hdr = "%-22s %-8s %-9s %-11s %-6s %-7s %-9s %-9s %-7s %-10s %-10s %s" % (
         "file",
         "backend",
         "vendor",
         "class",
         "bitex",
         "npe",
-        "share%",
+        "cpuShare%",
+        "devShare%",
         "util%",
         "dev n/s",
+        "diag n/s",
         "ASERT",
     )
     print(hdr)
     print("-" * W)
     for r in rows:
-        tsp = "%.1f" % r["tensor_share_pct"] if r["tensor_share_pct"] is not None else "-"
+        tsp = "%.1f" % r["cpu_reference_tensor_share_pct"] if r["cpu_reference_tensor_share_pct"] is not None else "-"
+        device_tsp = "%.1f" % r["device_tensor_share_pct"] if r["device_tensor_share_pct"] is not None else "-"
         tup = "%.1f" % r["tensor_util_pct"] if r["tensor_util_pct"] is not None else "-"
         nps = ("%.3g" % r["nps"]) if r["nps"] is not None else "-"
+        diag_nps = ("%.3g" % r["host_orchestrated_nps"]) if r["host_orchestrated_nps"] is not None else "-"
         asert = r["asert_suggestion"] or "-"
         print(
-            "%-22s %-8s %-9s %-11s %-6s %-7s %-8s %-7s %-10s %s"
+            "%-22s %-8s %-9s %-11s %-6s %-7s %-9s %-9s %-7s %-10s %-10s %s"
             % (
                 r["file"][:22],
                 r["backend"],
@@ -652,18 +751,21 @@ def print_human(go: bool, gates: dict, rows: list, reasons: list[str], notes: li
                 "YES" if r["bit_exact"] else "NO",
                 "YES" if r["native_path_eligible"] else "no",
                 tsp,
+                device_tsp,
                 tup,
                 nps,
+                diag_nps,
                 asert,
             )
         )
     print("-" * W)
-    print("  (device n/s requires exact device-assisted provenance + finite positive device_nonce_per_s; CPU timers never count)")
-    print("  (G1 uses share%; util% and ASERT are calibration diagnostics; G2 uses only the measured device-rate ratio)")
+    print("  (dev n/s requires a device-resident consensus-Q* batch, device W/digest, no per-nonce sync, and a finite positive rate)")
+    print("  (diag n/s is host-orchestrated wall rate and never counts for G2/G3, tensor utilization, or ASERT)")
+    print("  (cpuShare% is reference composition only; G1 requires devShare% > 50 from device timing/counters and a native tensor path)")
     print()
     print("Gate results:")
     labels = {
-        "G1_tensor_majority": "G1 tensor majority on labeled B200+5090-class LT reports",
+        "G1_tensor_majority": "G1 native tensor majority from device timing/counters on B200+5090",
         "G2_b200_5090_ratio": "G2 datacenter/consumer device nonce/s >= ~4x",
         "G3_nonce_per_dollar": "G3 nonce/$ (operator --cost only; no invented prices)",
         "G4_mi350_exactness": "G4 MI350/AMD datacenter native_path_eligible",

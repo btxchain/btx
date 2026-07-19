@@ -75,12 +75,20 @@
 // stage boundaries (I1' amortized template MatExpand-A + U/V/P; per-nonce
 // MatExpand-B; Bhat*V; combine; digest; optional Q* commit-only S5 sample —
 // S5 is not a full ComputeSealDigestBMX4CLT rate). Emits
-// schema_version 3 JSON. Does NOT invent on-silicon rates: CUDA/HIP publish a
-// device-assisted end-to-end digest-only rate only after production-seeded raw
-// results match CPU and every timed slot reports backend_status=Ok. Metal/
-// Ascend remain null because their current status cannot exclude host fallback.
-// Aggregate with contrib/matmul-v4/lt-gate.py (fail-closed on missing fields).
+// schema_version 3 JSON. CUDA/HIP can publish device_nonce_per_s only when the
+// full consensus-seeded Q* is accepted by their full-header API with W
+// generation + digest on-device and no per-nonce synchronization. Legacy or
+// fallback paths remain diagnostic/null. Metal/Ascend remain null because their
+// status cannot exclude host orchestration. Aggregate with
+// contrib/matmul-v4/lt-gate.py.
+//
+// `--telemetry-only` is a deliberately separate CUDA/HIP production-shape
+// probe. It skips the prohibitively expensive n=4096 CPU reference/stage pass
+// and publishes only telemetry_device_nonce_per_s plus resident provenance.
+// It never publishes device_nonce_per_s, ASERT, tensor-majority, bit-exact, or
+// readiness evidence and its JSON must not be aggregated by lt-gate.py.
 
+#include <crypto/sha256.h>
 #include <matmul/accel_v4.h>
 #include <matmul/backend_capabilities_v4.h>
 #include <matmul/int8_field.h>
@@ -119,6 +127,8 @@
 const TranslateFn G_TRANSLATION_FUN{nullptr};
 
 namespace {
+
+std::string g_sha256_implementation{"uninitialized"};
 
 using Clock = std::chrono::steady_clock;
 namespace mv4 = matmul::v4;
@@ -371,6 +381,7 @@ struct Args {
     std::string profile{"v41"};      // "v41" | "bmx4c" | "bmx4c-lt"
     bool mt24{false};                 // run the M-t24 boundary-vector suite (forced on for bmx4c)
     bool window_explicit{false};      // true if --window / env set the window
+    bool telemetry_only{false};       // raw LT device timing; no CPU/reference/readiness gates
 };
 
 void PrintUsage(std::ostream& os)
@@ -382,8 +393,10 @@ void PrintUsage(std::ostream& os)
        << "  --mt24                           run the M-t24 accumulator-exactness boundary-vector suite\n"
        << "                                   (§5.3/C-1'; always on under --profile bmx4c)\n"
        << "  --n <dim>                        matrix dimension (default 4096; env BTX_MATMUL_V4_REPORT_N)\n"
-       << "  --window <Q>                     nonce window (default 32; 64 under bmx4c-lt unless set;\n"
+       << "  --window <Q>                     nonce window (default 32; consensus Q*=256 under bmx4c-lt;\n"
        << "                                   env BTX_MATMUL_V4_REPORT_WINDOW)\n"
+       << "  --telemetry-only                 bmx4c-lt CUDA/HIP raw timing only; skips CPU reference/stages\n"
+       << "                                   and never publishes a certified/readiness/ASERT rate\n"
        << "  --rounds <R>                     Freivalds rounds for the verify gate (default 3)\n"
        << "  --quick                          also run a fast n=256 and n=512 lane (v4.1 profile only)\n"
        << "  --device-peak-int8-tops <TOPS>   advertised INT8 TOPS, for the tensor-utilization estimate\n"
@@ -411,6 +424,7 @@ bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
             }
         }
         else if (a == "--mt24") { args.mt24 = true; }
+        else if (a == "--telemetry-only") { args.telemetry_only = true; }
         else if (a == "--n") { const char* v = need(i); if (!v) return false; args.n = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
         else if (a == "--window") {
             const char* v = need(i); if (!v) return false;
@@ -444,6 +458,10 @@ bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
     // measurement window to kConsensusQStarDefault (256) when not overridden.
     if (args.profile == "bmx4c-lt" && !args.window_explicit) {
         args.window = matmul::v4::lt::kConsensusQStarDefault;
+    }
+    if (args.telemetry_only && args.profile != "bmx4c-lt") {
+        err = "--telemetry-only requires --profile bmx4c-lt";
+        return false;
     }
     return true;
 }
@@ -1033,6 +1051,7 @@ int RunBmx4cProfile(const Args& args, const std::string& host, matmul_v4::accel:
     root.pushKV("schema_version", 2);
     root.pushKV("host", host);
     root.pushKV("host_cpu_arch", HostCpuArch());
+    root.pushKV("sha256_implementation", g_sha256_implementation);
     root.pushKV("backend", backend_name);
     UniValue elig_obj(UniValue::VOBJ);
     elig_obj.pushKV("compiled", elig.compiled);
@@ -1119,43 +1138,113 @@ LtDigestOnlyFn RawLtDigestFnFor(matmul_v4::accel::Kind kind)
 {
     using K = matmul_v4::accel::Kind;
     switch (kind) {
-    case K::CUDA:   return &matmul_v4::cuda::ComputeDigestsOnlyLTCuda;
-    case K::METAL:  return &matmul_v4::metal::ComputeDigestsOnlyLTMetal;
-    case K::HIP:    return &matmul_v4::hip::ComputeDigestsOnlyLTHip;
-    case K::ASCEND: return &matmul_v4::ascend::ComputeDigestsOnlyLTAscend;
+    case K::CUDA:   return static_cast<LtDigestOnlyFn>(&matmul_v4::cuda::ComputeDigestsOnlyLTCuda);
+    case K::METAL:  return static_cast<LtDigestOnlyFn>(&matmul_v4::metal::ComputeDigestsOnlyLTMetal);
+    case K::HIP:    return static_cast<LtDigestOnlyFn>(&matmul_v4::hip::ComputeDigestsOnlyLTHip);
+    case K::ASCEND: return static_cast<LtDigestOnlyFn>(&matmul_v4::ascend::ComputeDigestsOnlyLTAscend);
     case K::CPU:    return nullptr;
     }
     return nullptr;
 }
 
+struct LtRawBatchProvenance {
+    bool qstar_device_batched{false};
+    bool device_w_generation{false};
+    bool device_digest{false};
+    bool per_nonce_sync_absent{false};
+};
+
+bool RunRawLtHeaderBatch(matmul_v4::accel::Kind kind,
+                         const std::vector<CBlockHeader>& headers, uint32_t n,
+                         std::vector<lt::DigestOnlyResultLT>& out,
+                         LtRawBatchProvenance* provenance = nullptr)
+{
+    out.clear();
+    if (provenance != nullptr) *provenance = {};
+    if (headers.empty()) return false;
+
+    using K = matmul_v4::accel::Kind;
+    if (kind == K::CUDA) {
+        matmul_v4::cuda::LtCudaBatchProvenance p;
+        const bool ok = matmul_v4::cuda::ComputeDigestsOnlyLTCuda(headers, n, out, &p);
+        if (provenance != nullptr) {
+            provenance->qstar_device_batched = p.qstar_device_batched;
+            provenance->device_w_generation = p.device_w_generation;
+            provenance->device_digest = p.device_digest;
+            provenance->per_nonce_sync_absent = p.per_nonce_sync_absent;
+        }
+        return ok;
+    }
+    if (kind == K::HIP) {
+        matmul_v4::hip::LtHipBatchProvenance p;
+        const bool ok = matmul_v4::hip::ComputeDigestsOnlyLTHip(headers, n, out, &p);
+        if (provenance != nullptr) {
+            provenance->qstar_device_batched = p.qstar_device_batched;
+            provenance->device_w_generation = p.device_w_generation;
+            provenance->device_digest = p.device_digest;
+            provenance->per_nonce_sync_absent = p.per_nonce_sync_absent;
+        }
+        return ok;
+    }
+
+    // Legacy backends cannot carry nonce-bound seed_a/seed_b in a multi-nonce
+    // call. Preserve exactness coverage by issuing complete headers one at a
+    // time, but never attach resident-batch provenance to this path.
+    const LtDigestOnlyFn fn = RawLtDigestFnFor(kind);
+    if (fn == nullptr) return false;
+    out.resize(headers.size());
+    for (size_t i = 0; i < headers.size(); ++i) {
+        const uint64_t nonce = headers[i].nNonce64;
+        std::vector<lt::DigestOnlyResultLT> one;
+        if (!fn(headers[i], n, &nonce, 1, one) || one.size() != 1) {
+            out.clear();
+            return false;
+        }
+        out[i] = std::move(one.front());
+    }
+    return true;
+}
+
 struct LtThroughputResult {
+    // Wall rate observed around the selected raw ABI. This is a useful
+    // end-to-end diagnostic, but it is not silicon throughput unless the
+    // provenance flags below prove a batched, device-resident Q* execution.
     double device_nonce_per_s{0};
     double elapsed_s{0};
     uint32_t windows{0};
     uint64_t slots{0};
     bool used_device{false};
     bool rate_valid{false};
+    bool qstar_is_consensus{false};
+    bool qstar_device_batched{false};
+    bool device_w_generation{false};
+    bool device_digest{false};
+    bool per_nonce_sync_absent{false};
     std::string execution_path{"unavailable"};
     std::string note;
 };
 
-// Time only the raw LT digest-only entry. ComputeDigestsBMX4CLTDispatched is
-// intentionally not used here: its host payload reconstruction/reference
-// verification would turn this into a CPU rate. CUDA/HIP expose enough status
-// to identify a device-assisted end-to-end path (which may be resident or may
-// be host-orchestrated device GEMMs); it must not be labeled device-resident.
-// Metal/Ascend status is not granular enough to exclude host work, so their
-// rate remains null until richer provenance telemetry lands.
-//
-// Each raw call receives one complete, nonce-seeded header because the legacy
-// raw ABI can vary only nNonce64 inside a multi-element call. Passing Q headers
-// in one call would therefore reuse stale seed_a/seed_b and benchmark a
-// non-consensus MatExpand transcript. A timed window is still exactly Q* slots;
-// it is simply issued as Q seed-complete calls.
+bool HasLtSiliconRateProvenance(const LtThroughputResult& r)
+{
+    return r.used_device && r.qstar_is_consensus && r.qstar_device_batched && r.device_w_generation &&
+        r.device_digest && r.per_nonce_sync_absent && r.device_nonce_per_s > 0;
+}
+
+// Time only the raw LT full-header batch entry. The dispatched API is omitted
+// because it reference-reseals potential winners by design. CUDA/HIP telemetry
+// must prove that every consensus-seeded Q* candidate stayed in one resident
+// batch with W generation and digest on-device and no per-nonce synchronization;
+// otherwise the observed wall rate remains ineligible for silicon ratios/ASERT.
 LtThroughputResult MeasureLtDeviceNoncePerSec(matmul_v4::accel::Kind kind, uint32_t n,
-                                              uint32_t window, bool raw_probe_exact)
+                                              uint32_t window, bool raw_probe_exact,
+                                              bool require_reference_probe = true)
 {
     LtThroughputResult r;
+    r.qstar_is_consensus = lt::IsValidConsensusQStar(window);
+    if (!r.qstar_is_consensus) {
+        r.note = "non-consensus Q*: device rate withheld (use --window 128, 256, or 512)";
+        return r;
+    }
     if (kind == matmul_v4::accel::Kind::CPU) {
         r.note = "CPU reference is not a device nonce/s measurement";
         return r;
@@ -1165,20 +1254,10 @@ LtThroughputResult MeasureLtDeviceNoncePerSec(matmul_v4::accel::Kind kind, uint3
                  "device rate withheld";
         return r;
     }
-    if (!lt::IsValidConsensusQStar(window)) {
-        r.note = "non-consensus Q*: device rate withheld (use --window 128, 256, or 512)";
-        return r;
-    }
-    if (!raw_probe_exact) {
+    if (require_reference_probe && !raw_probe_exact) {
         r.note = "raw LT device path did not pass the separate CPU exactness/provenance probe";
         return r;
     }
-    const LtDigestOnlyFn fn = RawLtDigestFnFor(kind);
-    if (fn == nullptr) {
-        r.note = "resolved backend has no raw LT digest-only entry";
-        return r;
-    }
-
     // A zero win target models the overwhelmingly common losing-slot path:
     // digest-only work is timed, while a (practically impossible) digest==0
     // potential winner makes the sample fail closed instead of omitting the
@@ -1190,24 +1269,37 @@ LtThroughputResult MeasureLtDeviceNoncePerSec(matmul_v4::accel::Kind kind, uint3
     const auto t0 = Clock::now();
     for (uint32_t w = 0; w < MAX_TIMED_WINDOWS; ++w) {
         const std::vector<CBlockHeader> candidates = WindowHeadersLT(n, window, base_nonce);
-        for (const CBlockHeader& candidate : candidates) {
-            const uint64_t nonce = candidate.nNonce64;
-            std::vector<lt::DigestOnlyResultLT> out;
-            bool ok = false;
-            try {
-                ok = fn(candidate, n, &nonce, 1, out);
-            } catch (...) {
-                ok = false;
-            }
-            if (!ok || out.size() != 1 ||
-                out[0].backend_status != matmul::v4::bmx4::DigestOnlyBackendStatus::Ok) {
-                r.note = "raw LT timed window declined or used host fallback; device rate withheld";
-                return r;
-            }
-            if (out[0].digest == win_target) {
+        std::vector<lt::DigestOnlyResultLT> out;
+        LtRawBatchProvenance p;
+        bool ok = false;
+        try {
+            ok = RunRawLtHeaderBatch(kind, candidates, n, out, &p);
+        } catch (...) {
+            ok = false;
+        }
+        if (!ok || out.size() != candidates.size() ||
+            !std::all_of(out.begin(), out.end(), [](const auto& result) {
+                return result.backend_status == matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
+            })) {
+            r.note = "raw LT timed window declined or used host fallback; device rate withheld";
+            return r;
+        }
+        for (const auto& result : out) {
+            if (result.digest == win_target) {
                 r.note = "timed sample contained a potential winner at win_target=0; rate withheld";
                 return r;
             }
+        }
+        if (r.windows == 0) {
+            r.qstar_device_batched = p.qstar_device_batched;
+            r.device_w_generation = p.device_w_generation;
+            r.device_digest = p.device_digest;
+            r.per_nonce_sync_absent = p.per_nonce_sync_absent;
+        } else {
+            r.qstar_device_batched = r.qstar_device_batched && p.qstar_device_batched;
+            r.device_w_generation = r.device_w_generation && p.device_w_generation;
+            r.device_digest = r.device_digest && p.device_digest;
+            r.per_nonce_sync_absent = r.per_nonce_sync_absent && p.per_nonce_sync_absent;
         }
         ++r.windows;
         r.slots += window;
@@ -1223,10 +1315,16 @@ LtThroughputResult MeasureLtDeviceNoncePerSec(matmul_v4::accel::Kind kind, uint3
     }
     r.device_nonce_per_s = static_cast<double>(r.slots) / r.elapsed_s;
     r.used_device = true;
-    r.rate_valid = true;
-    r.execution_path = "device-assisted-end-to-end";
-    r.note = "raw LT digest-only rate over production-seeded Q* windows; win_target=0, "
-             "all CUDA/HIP per-slot statuses=Ok; residency is not claimed";
+    r.rate_valid = HasLtSiliconRateProvenance(r);
+    if (r.rate_valid) {
+        r.execution_path = "device-resident-qstar-batched";
+        r.note = "silicon-comparable rate from a device-resident consensus-Q* batch";
+    } else {
+        r.execution_path = "device-assisted-insufficient-provenance";
+        r.note = "diagnostic wall rate over production-seeded Q* windows; one or more resident "
+                 "batch/W/digest/no-per-nonce-sync facts were not proven, so silicon throughput "
+                 "and ASERT eligibility are withheld";
+    }
     return r;
 }
 
@@ -1298,11 +1396,9 @@ StageResultLT MeasureStagesLT(uint32_t n, uint32_t window, uint64_t base_nonce)
         }
     }
 
-    // S5: Q* seal sample over the measured window (Phase-B cost signal;
-    // Phase-A lottery remains per-nonce). Uses CommitWindowSlotLeaf +
-    // SealWindowCommit with the measured window size even if it is not a
-    // consensus Q* — operators should pass --window 128|256|512 for production
-    // Rank-1 shapes.
+    // S5: commit-only microbenchmark over the measured digest list. It does
+    // not bind the consensus slot seeds/full slot IDs and does not execute or
+    // byte-compare ComputeSealDigestBMX4CLT, so it is not a Phase-B rate.
     auto cs0 = Clock::now();
     const uint256 sigma_anchor = mv4::DeriveSigma(headers[0]);
     std::vector<uint256> leaves;
@@ -1325,7 +1421,7 @@ StageResultLT MeasureStagesLT(uint32_t n, uint32_t window, uint64_t base_nonce)
 }
 
 UniValue StageJsonLT(const StageResultLT& r, double device_peak_tops, double backend_nps,
-                     double& tensor_share_pct_out, double& tensor_util_pct_out)
+                     double& cpu_tensor_share_pct_out, double& implied_tensor_util_pct_out)
 {
     UniValue o(UniValue::VOBJ);
     // These explicit stage clocks execute the portable reference primitives.
@@ -1337,16 +1433,17 @@ UniValue StageJsonLT(const StageResultLT& r, double device_peak_tops, double bac
     const double marginal = r.s1_matexpand_b + r.s2_bhat_v + r.s3_combine + r.s4_digest;
     // Tensor stages under LT: MatExpand-B (dense G*W / Y*H) + Bhat*V.
     const double tensor_time = r.s1_matexpand_b + r.s2_bhat_v;
-    tensor_share_pct_out = marginal > 0 ? 100.0 * tensor_time / marginal : 0;
+    cpu_tensor_share_pct_out = marginal > 0 ? 100.0 * tensor_time / marginal : 0;
 
     const double w = static_cast<double>(lt::kMatExpandPanelW);
     const double marginal_tensor_macs =
         2.0 * static_cast<double>(r.n) * r.n * w + // MatExpand G*W + Y*H
         static_cast<double>(r.n) * r.n * r.m;      // Bhat*V
     const double marginal_tensor_ops = 2.0 * marginal_tensor_macs;
-    tensor_util_pct_out = -1;
+    implied_tensor_util_pct_out = -1;
     if (device_peak_tops > 0 && backend_nps > 0) {
-        tensor_util_pct_out = 100.0 * marginal_tensor_ops * backend_nps / (device_peak_tops * 1e12);
+        implied_tensor_util_pct_out =
+            100.0 * marginal_tensor_ops * backend_nps / (device_peak_tops * 1e12);
     }
 
     o.pushKV("n", static_cast<uint64_t>(r.n));
@@ -1360,17 +1457,20 @@ UniValue StageJsonLT(const StageResultLT& r, double device_peak_tops, double bac
     o.pushKV("s2_bhat_v_ms", r.s2_bhat_v * 1e3);
     o.pushKV("s3_combine_ms", r.s3_combine * 1e3);
     o.pushKV("s4_digest_ms", r.s4_digest * 1e3);
-    o.pushKV("s5_qstar_seal_ms", r.s5_qstar_seal * 1e3);
+    o.pushKV("s5_commit_only_microbench_ms", r.s5_qstar_seal * 1e3);
     o.pushKV("marginal_per_nonce_ms", r.window ? (marginal * 1e3 / r.window) : 0);
     o.pushKV("cpu_reference_nonce_per_s", marginal > 0 ? (r.window / marginal) : 0);
     o.pushKV("marginal_tensor_macs_per_nonce", marginal_tensor_macs);
     o.pushKV("marginal_tensor_ops_per_nonce", marginal_tensor_ops);
-    o.pushKV("tensor_share_pct", tensor_share_pct_out);
-    if (tensor_util_pct_out >= 0) {
-        o.pushKV("tensor_util_pct", tensor_util_pct_out);
+    o.pushKV("cpu_reference_tensor_share_pct", cpu_tensor_share_pct_out);
+    o.pushKV("device_tensor_share_pct", UniValue(UniValue::VNULL));
+    if (implied_tensor_util_pct_out >= 0) {
+        o.pushKV("implied_tensor_util_pct", implied_tensor_util_pct_out);
     } else {
-        o.pushKV("tensor_util_pct", UniValue(UniValue::VNULL));
+        o.pushKV("implied_tensor_util_pct", UniValue(UniValue::VNULL));
     }
+    o.pushKV("device_tensor_timing_valid", false);
+    o.pushKV("device_tensor_counters_valid", false);
     UniValue util_inputs(UniValue::VOBJ);
     util_inputs.pushKV("marginal_tensor_ops_per_nonce", marginal_tensor_ops);
     if (backend_nps > 0) util_inputs.pushKV("device_nonce_per_s", backend_nps);
@@ -1381,9 +1481,168 @@ UniValue StageJsonLT(const StageResultLT& r, double device_peak_tops, double bac
     return o;
 }
 
+// Production n=4096 CPU reference/stage work is intentionally expensive. This
+// mode exists so an operator can first determine whether the resident CUDA/HIP
+// Q* path is usable, without waiting for B1 or CPU stage composition. Its rate
+// is telemetry only: no CPU byte-exact comparison ran, so it must never enter
+// device_nonce_per_s, ASERT, tensor-majority, certification, or readiness gates.
+int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
+                            matmul_v4::accel::Kind backend,
+                            const std::string& backend_name,
+                            const matmul_v4::backend::Eligibility& elig)
+{
+    uint32_t m_check = 0;
+    if (!lt::ValidateDimsBMX4CLT(args.n, m_check)) {
+        std::cerr << "error: invalid dimension n=" << args.n
+                  << " for --profile bmx4c-lt (need n%32==0, b=2 | n, ENC-BMX4C dim gates)\n";
+        return 2;
+    }
+
+    std::cout << "\n[TELEMETRY-ONLY] skipping CPU exactness and stage timing\n"
+                 "  This mode cannot certify bit-exactness, tensor majority, readiness, ASERT, "
+                 "or a silicon-comparable activation rate.\n";
+
+    LtThroughputResult throughput;
+    if (!lt::IsValidConsensusQStar(args.window)) {
+        throughput.note =
+            "telemetry requires consensus Q* (--window 128, 256, or 512)";
+    } else if (backend != matmul_v4::accel::Kind::CUDA &&
+               backend != matmul_v4::accel::Kind::HIP) {
+        throughput.qstar_is_consensus = true;
+        throughput.note =
+            "telemetry-only resident Q* timing is implemented only for CUDA/HIP";
+    } else {
+        // Deliberately bypass only the CPU-reference prerequisite. The raw
+        // timer still fails closed unless every slot reports device status Ok
+        // and the backend proves one Q* batch, device W generation + digest,
+        // and no per-nonce synchronization.
+        throughput = MeasureLtDeviceNoncePerSec(
+            backend, args.n, args.window, /*raw_probe_exact=*/false,
+            /*require_reference_probe=*/false);
+    }
+    const bool telemetry_obtained = throughput.rate_valid;
+    if (telemetry_obtained) {
+        throughput.execution_path = "telemetry-only-device-resident-qstar-batched";
+        throughput.note =
+            "resident consensus-Q* device telemetry obtained; CPU exactness/stage gates were skipped";
+    }
+
+    std::cout << "  resident Q* telemetry nonce/s : ";
+    if (telemetry_obtained) std::cout << throughput.device_nonce_per_s;
+    else std::cout << "unavailable";
+    std::cout << "  (" << throughput.note << ")\n";
+    std::cout << "  certification/readiness rate  : withheld\n";
+
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("tool", "matmul-v4-report");
+    root.pushKV("schema_version", 3);
+    root.pushKV("host", host);
+    root.pushKV("host_cpu_arch", HostCpuArch());
+    root.pushKV("sha256_implementation", g_sha256_implementation);
+    root.pushKV("backend", backend_name);
+    UniValue elig_obj(UniValue::VOBJ);
+    elig_obj.pushKV("compiled", elig.compiled);
+    elig_obj.pushKV("available", elig.available);
+    elig_obj.pushKV("admissible", elig.admissible);
+    elig_obj.pushKV("reason", elig.reason);
+    root.pushKV("device", std::move(elig_obj));
+    root.pushKV("n", static_cast<uint64_t>(args.n));
+    root.pushKV("b", static_cast<uint64_t>(lt::kTileBLT));
+    root.pushKV("window", static_cast<uint64_t>(args.window));
+    root.pushKV("rounds", static_cast<uint64_t>(args.rounds));
+    root.pushKV("profile", "bmx4c-lt");
+    root.pushKV("measurement_mode", "telemetry-only-device-resident-qstar");
+    root.pushKV("telemetry_only", true);
+    root.pushKV("rate_unit", "digest_nonces_per_s");
+    root.pushKV("telemetry_rate_valid", telemetry_obtained);
+    if (telemetry_obtained) {
+        root.pushKV("telemetry_device_nonce_per_s", throughput.device_nonce_per_s);
+    } else {
+        root.pushKV("telemetry_device_nonce_per_s", UniValue(UniValue::VNULL));
+    }
+    root.pushKV("telemetry_note", throughput.note);
+    root.pushKV("backend_used_device", throughput.used_device);
+    root.pushKV("execution_path", throughput.execution_path);
+    root.pushKV("throughput_measurement_windows", static_cast<uint64_t>(throughput.windows));
+    root.pushKV("throughput_measurement_slots", throughput.slots);
+    root.pushKV("throughput_measurement_seconds", throughput.elapsed_s);
+
+    // These fields are consumed by activation/readiness tooling. Keep every
+    // one explicitly ineligible even when telemetry itself succeeded.
+    root.pushKV("device_nonce_per_s", UniValue(UniValue::VNULL));
+    root.pushKV("backend_nonce_per_s", UniValue(UniValue::VNULL));
+    root.pushKV("host_orchestrated_nonce_per_s", UniValue(UniValue::VNULL));
+    root.pushKV("cpu_reference_nonce_per_s", UniValue(UniValue::VNULL));
+    root.pushKV("device_rate_valid", false);
+    root.pushKV("silicon_rate_valid", false);
+    root.pushKV("device_rate_certified", false);
+    root.pushKV("device_execution_certified", false);
+    root.pushKV("native_path_eligible", false);
+    root.pushKV("harness_self_test_pass", UniValue(UniValue::VNULL));
+    root.pushKV("bit_exact", UniValue(UniValue::VNULL));
+    root.pushKV("stages", UniValue(UniValue::VNULL));
+    root.pushKV("stage_timing_domain", "not-measured-telemetry-only");
+    root.pushKV("cpu_reference_tensor_share_pct", UniValue(UniValue::VNULL));
+    root.pushKV("tensor_share_pct", UniValue(UniValue::VNULL));
+    root.pushKV("device_tensor_share_pct", UniValue(UniValue::VNULL));
+    root.pushKV("device_tensor_timing_valid", false);
+    root.pushKV("device_tensor_counters_valid", false);
+    root.pushKV("device_tensor_timing_domain", "not-measured-telemetry-only");
+    root.pushKV("tensor_execution_majority_verified", false);
+    root.pushKV("tensor_util_pct", UniValue(UniValue::VNULL));
+    root.pushKV("implied_tensor_util_pct", UniValue(UniValue::VNULL));
+    root.pushKV("v3_hashrate", args.v3_hashrate);
+    root.pushKV("asert_rescale_num_den_suggestion", UniValue(UniValue::VNULL));
+    root.pushKV("phase_b_seal_rate_valid", false);
+    root.pushKV("phase_b_consensus_equivalent", false);
+    root.pushKV("phase_b_seed_binding_exercised", false);
+    root.pushKV("phase_b_full_slot_ids_bound", false);
+    root.pushKV("phase_b_compute_seal_digest_matched", false);
+
+    UniValue lt_obj(UniValue::VOBJ);
+    lt_obj.pushKV("qstar_window", static_cast<uint64_t>(args.window));
+    lt_obj.pushKV("qstar_is_consensus", throughput.qstar_is_consensus);
+    lt_obj.pushKV("qstar_device_batched", throughput.qstar_device_batched);
+    lt_obj.pushKV("device_w_generation", throughput.device_w_generation);
+    lt_obj.pushKV("device_digest", throughput.device_digest);
+    lt_obj.pushKV("per_nonce_sync_absent", throughput.per_nonce_sync_absent);
+    lt_obj.pushKV("device_assisted_path_exact", false);
+    lt_obj.pushKV("raw_probe_exact", false);
+    lt_obj.pushKV("rate_provenance",
+                  telemetry_obtained ? "telemetry-only-device-resident-qstar-batched"
+                                     : "telemetry-unavailable");
+    root.pushKV("lt", std::move(lt_obj));
+    root.pushKV("verdict",
+                telemetry_obtained
+                    ? "TELEMETRY-ONLY: resident Q* timing obtained; all certification, readiness, "
+                      "tensor-majority, and ASERT claims are withheld"
+                    : "TELEMETRY-ONLY UNAVAILABLE: no resident CUDA/HIP Q* timing was obtained");
+    root.pushKV("gates", [] {
+        UniValue g(UniValue::VOBJ);
+        g.pushKV("Telemetry", "resident Q* status/provenance only");
+        g.pushKV("Certification", "not run; CPU exactness and stage gates skipped");
+        return g;
+    }());
+
+    std::ofstream ofs(args.out_path, std::ios::trunc);
+    if (!ofs) {
+        std::cerr << "error: cannot write JSON to " << args.out_path << "\n";
+        return 1;
+    }
+    ofs << root.write(2) << "\n";
+    ofs.close();
+    std::cout << "JSON telemetry written: " << args.out_path << "\n"
+                 "Do not feed telemetry-only JSON to readiness/ASERT gates; rerun without "
+                 "--telemetry-only for certification evidence.\n";
+    return telemetry_obtained ? 0 : 1;
+}
+
 int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::accel::Kind backend,
                       const std::string& backend_name, const matmul_v4::backend::Eligibility& elig)
 {
+    if (args.telemetry_only) {
+        return RunBmx4cLtTelemetryOnly(args, host, backend, backend_name, elig);
+    }
     uint32_t m_check = 0;
     if (!lt::ValidateDimsBMX4CLT(args.n, m_check)) {
         std::cerr << "error: invalid dimension n=" << args.n
@@ -1423,13 +1682,9 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     }
 
     // ---- Raw device-assisted provenance + exactness probe -----------------
-    // Do not use the dispatched API for performance provenance: it reconstructs
-    // CPU payloads as part of its safety contract. The raw LT API reports an
-    // backend status for every slot. On CUDA/HIP an all-Ok exact probe is enough
-    // to label the path device-assisted, but not device-resident/native; on
-    // Metal/Ascend even that fallback provenance is currently ambiguous. Each
-    // seed-complete candidate is issued separately because the raw ABI's
-    // multi-nonce form cannot regenerate nonce-bound seed_a/seed_b.
+    // The full-header raw entry preserves every nonce-bound seed and returns a
+    // status for every slot. CUDA/HIP additionally report resident-batch
+    // provenance; this proves the execution shape, not native tensor-op use.
     bool device_native_kernel_wired = false;
     bool device_assisted_path_exact = false;
     bool raw_probe_exact = false;
@@ -1439,23 +1694,18 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
         native_path_reason =
             "CPU reference path; certifies the harness only — never counts as frontier silicon.";
     } else {
-        const LtDigestOnlyFn fn = RawLtDigestFnFor(backend);
-        raw_probe_exact = lt_bit_exact && fn != nullptr;
+        std::vector<lt::DigestOnlyResultLT> out;
+        LtRawBatchProvenance p;
+        bool ok = false;
+        try {
+            ok = RunRawLtHeaderBatch(backend, headers, args.n, out, &p);
+        } catch (...) {
+            ok = false;
+        }
+        raw_probe_exact = lt_bit_exact && ok && out.size() == args.window;
         for (uint32_t i = 0; raw_probe_exact && i < args.window; ++i) {
-            const uint64_t nonce = headers[i].nNonce64;
-            std::vector<lt::DigestOnlyResultLT> out;
-            bool ok = false;
-            try {
-                ok = fn(headers[i], args.n, &nonce, 1, out);
-            } catch (...) {
-                ok = false;
-            }
-            if (!ok || out.size() != 1 ||
-                out[0].backend_status != matmul::v4::bmx4::DigestOnlyBackendStatus::Ok) {
-                raw_probe_exact = false;
-                break;
-            }
-            if (out[0].digest != reference_digests[i]) {
+            if (out[i].backend_status != matmul::v4::bmx4::DigestOnlyBackendStatus::Ok ||
+                out[i].digest != reference_digests[i]) {
                 raw_probe_exact = false;
                 lt_bit_exact = false;
                 break;
@@ -1467,9 +1717,13 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
             (backend == matmul_v4::accel::Kind::CUDA ||
              backend == matmul_v4::accel::Kind::HIP);
         if (device_assisted_path_exact) {
-            native_path_reason =
-                "raw " + backend_name + " LT results matched CPU with backend_status=Ok; "
-                "device-assisted execution is proven, but resident/native provenance is not.";
+            const bool resident_batch = p.qstar_device_batched && p.device_w_generation &&
+                p.device_digest && p.per_nonce_sync_absent;
+            native_path_reason = "raw " + backend_name +
+                " LT results matched CPU with backend_status=Ok; " +
+                (resident_batch
+                     ? "resident Q* execution is proven, but native tensor-instruction timing/counters are not."
+                     : "device participation is proven, but resident/native provenance is incomplete.");
         } else if (all_raw_slots_exact) {
             native_path_reason =
                 "raw " + backend_name + " LT results matched CPU, but backend status cannot "
@@ -1485,7 +1739,7 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     std::cout << "\n[B2g-analogue] CPU-reference ENC-DR-LT MatExpand+Q* stage boundaries (n=" << args.n
               << ", window Q=" << args.window << ", b=" << lt::kTileBLT << ")\n";
     const StageResultLT stage = MeasureStagesLT(args.n, args.window, 42);
-    double tensor_share_pct = 0, tensor_util_pct = -1;
+    double cpu_tensor_share_pct = 0, implied_tensor_util_pct = -1;
     UniValue stage_json(UniValue::VOBJ);
     double cpu_nps = 0;
     if (stage.valid) {
@@ -1494,26 +1748,26 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
         auto pct = [&](double x) { return marginal > 0 ? 100.0 * x / marginal : 0.0; };
         std::printf("  S0  template MatExpand-A + U,V + P (I1' amortized): %9.3f ms\n",
                     stage.s0_template * 1e3);
-        std::printf("  S1  per-nonce MatExpand-B     (tensor) : %9.3f ms  %5.1f%%\n",
+        std::printf("  S1  per-nonce MatExpand-B (CPU GEMM-shaped): %9.3f ms  %5.1f%%\n",
                     stage.s1_matexpand_b * 1e3 / args.window, pct(stage.s1_matexpand_b));
-        std::printf("  S2  per-nonce GEMM Bhat*V     (tensor) : %9.3f ms  %5.1f%%\n",
+        std::printf("  S2  per-nonce GEMM Bhat*V (CPU reference) : %9.3f ms  %5.1f%%\n",
                     stage.s2_bhat_v * 1e3 / args.window, pct(stage.s2_bhat_v));
         std::printf("  S3  combine P*Q               (int)    : %9.3f ms  %5.1f%%\n",
                     stage.s3_combine * 1e3 / args.window, pct(stage.s3_combine));
         std::printf("  S4  serialize + digest        (SHA/int): %9.3f ms  %5.1f%%\n",
                     stage.s4_digest * 1e3 / args.window, pct(stage.s4_digest));
-        std::printf("  S5  Q* Merkle+SealWindowCommit (window): %9.3f ms\n",
+        std::printf("  S5  commit-only microbenchmark (NOT Phase B): %9.3f ms\n",
                     stage.s5_qstar_seal * 1e3);
         std::printf("  per-nonce MARGINAL total (S0 amortized): %9.3f ms   stage-bit-exact=%s\n",
                     marginal * 1e3 / args.window, stage.stage_bit_exact ? "YES" : "NO -- STAGE DIVERGED, TIMES VOID");
         stage_json = StageJsonLT(stage, args.device_peak_int8_tops, 0.0,
-                                 tensor_share_pct, tensor_util_pct);
+                                 cpu_tensor_share_pct, implied_tensor_util_pct);
         cpu_nps = marginal > 0 ? (args.window / marginal) : 0;
     } else {
         std::cout << "  (stage measurement unavailable for this dimension)\n";
     }
-    std::cout << "  tensor-stage share (MatExpand-B + Bhat*V majority gate): ";
-    if (stage.valid) std::printf("%.1f%%\n", tensor_share_pct); else std::cout << "n/a\n";
+    std::cout << "  CPU-reference GEMM-labeled composition (not device tensor execution): ";
+    if (stage.valid) std::printf("%.1f%%\n", cpu_tensor_share_pct); else std::cout << "n/a\n";
     std::cout << "  timing domain                  : CPU reference composition only; "
                  "raw device nonce/s below is the CUDA/HIP end-to-end metric\n";
 
@@ -1527,25 +1781,30 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     }
     if (stage.valid) {
         stage_json = StageJsonLT(stage, args.device_peak_int8_tops,
-                                 throughput.device_nonce_per_s,
-                                 tensor_share_pct, tensor_util_pct);
+                                 throughput.rate_valid ? throughput.device_nonce_per_s : 0.0,
+                                 cpu_tensor_share_pct, implied_tensor_util_pct);
     }
 
-    std::cout << "\n[B2b-analogue] sustained LT Phase-A digest throughput (ASERT calibration input)\n";
-    std::cout << "  device marginal nonce/s : ";
-    if (throughput.used_device) std::cout << throughput.device_nonce_per_s;
+    std::cout << "\n[B2b-analogue] LT Phase-A throughput provenance\n";
+    std::cout << "  silicon-comparable device nonce/s    : ";
+    if (throughput.rate_valid) std::cout << throughput.device_nonce_per_s;
     else std::cout << "unavailable";
     std::cout << "  (" << throughput.note << ")\n";
-    std::cout << "  implied INT8 tensor utilization vs peak: ";
-    if (tensor_util_pct >= 0) {
-        std::printf("%.1f%% (peak %.0f TOPS)\n", tensor_util_pct, args.device_peak_int8_tops);
+    if (throughput.used_device && !throughput.rate_valid) {
+        std::cout << "  insufficient-provenance diagnostic n/s: "
+                  << throughput.device_nonce_per_s << "\n";
+    }
+    std::cout << "  arithmetic-implied tensor utilization: ";
+    if (implied_tensor_util_pct >= 0) {
+        std::printf("%.4f%% (not a device counter; peak %.0f TOPS)\n",
+                    implied_tensor_util_pct, args.device_peak_int8_tops);
     } else {
-        std::cout << "unknown (requires device rate and --device-peak-int8-tops)\n";
+        std::cout << "unknown (requires silicon rate and --device-peak-int8-tops)\n";
     }
 
     bool has_asert_suggestion = false;
     std::string asert_suggestion;
-    if (args.v3_hashrate > 0 && throughput.used_device) {
+    if (args.v3_hashrate > 0 && throughput.rate_valid) {
         // For LT this legacy CLI input is the pre-DRLT sustained baseline. The
         // DRLT target re-anchor uses prior/new throughput, exactly as the v4
         // rescale does, but writes nMatMulDRLTAsertRescaleNum/Den.
@@ -1562,53 +1821,43 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     std::cout << "  device native kernel wired    : " << (device_native_kernel_wired ? "yes" : "no") << "\n";
     std::cout << "  reason                         : " << native_path_reason << "\n";
 
-    const bool native_path_eligible =
-        lt_bit_exact && stage.valid && stage.stage_bit_exact && device_native_kernel_wired &&
-        tensor_share_pct > 50.0 && backend != matmul_v4::accel::Kind::CPU;
+    // This report has no backend stage timers or hardware counters yet. CPU
+    // reference composition and an operations/peak estimate cannot establish
+    // that tensor instructions dominate device execution.
+    const bool device_tensor_timing_valid = false;
+    const bool device_tensor_counters_valid = false;
+    const bool tensor_execution_majority_verified = false;
+    const bool native_path_eligible = false;
 
     std::string verdict;
     if (!lt_bit_exact) {
         verdict = "NO-GO: ENC-DR-LT bit-exact determinism FAILED (consensus split)";
     } else if (!stage.valid || !stage.stage_bit_exact) {
         verdict = "NO-GO: ENC-DR-LT stage outputs diverged (measurement void)";
-    } else if (tensor_share_pct <= 50.0) {
-        verdict = "NO-GO(this machine's stage profile): MatExpand+Bhat*V tensor share is NOT a "
-                  "strict majority (" + std::to_string(static_cast<int>(tensor_share_pct + 0.5)) + "%)";
     } else if (backend == matmul_v4::accel::Kind::CPU) {
-        verdict = "GO-CANDIDATE(harness-only): bit-exact + tensor-majority on the CPU reference; "
-                  "CPU never counts as frontier silicon for Rank-1 GO/NO-GO";
-    } else if (!device_native_kernel_wired) {
-        verdict = throughput.rate_valid
-            ? "GO-CANDIDATE(device-assisted only): bit-exact + tensor-majority and an honest "
-              "device-assisted rate were measured, but resident/native provenance is unavailable; "
-              "native_path_eligible remains false"
-            : "GO-CANDIDATE(harness-only): bit-exact + tensor-majority on CPU timings, but no "
-              "rate with sufficient device provenance was available for backend '" + backend_name +
-              "' — native_path_eligible is UNVERIFIED (no invented silicon numbers)";
+        verdict = "HARNESS-ONLY: CPU bit-exactness/composition passed; no device tensor-execution "
+                  "or readiness claim is made";
+    } else if (!throughput.rate_valid) {
+        verdict = "UNVERIFIED: exact harness passed, but no silicon-eligible resident Q* rate was "
+                  "available for backend '" + backend_name + "'";
     } else {
-        verdict = "GO-CANDIDATE(device path exercised): bit-exact PASS, tensor-stage majority (" +
-                  std::to_string(static_cast<int>(tensor_share_pct + 0.5)) +
-                  "%), device LT window accepted — aggregate with lt-gate.py across B200/5090 "
-                  "(this tool does not close Rank-1 GO/NO-GO)";
+        verdict = "RATE-CANDIDATE: bit-exact resident Q* rate measured; device tensor majority "
+                  "remains UNVERIFIED until backend kernel timings and hardware counters are supplied";
     }
     std::cout << "\n[GO/NO-GO candidate §LT stages] " << verdict << "\n";
 
     const bool harness_self_test_ok = lt_bit_exact && stage.valid && stage.stage_bit_exact;
     const bool ran_on_device = (backend != matmul_v4::accel::Kind::CPU);
-    // Rate certification is intentionally separate from native_path_eligible:
-    // CUDA/HIP can honestly certify an exact, fallback-free device-assisted
-    // Phase-A digest rate even though current telemetry cannot prove that the
-    // whole path was device-resident/native.
-    const bool device_certified = ran_on_device && harness_self_test_ok &&
-        device_assisted_path_exact && throughput.rate_valid && tensor_share_pct > 50.0;
-    if (device_certified) {
+    const bool device_rate_certified = ran_on_device && harness_self_test_ok &&
+        device_assisted_path_exact && throughput.rate_valid;
+    if (device_rate_certified) {
         std::cout << "DEVICE_BMX4CLT_RATE_PASS:" << backend_name << ":" << elig.reason << "\n";
     } else {
         std::cout << "\n[CERTIFICATION] LT Phase-A device rate NOT-CERTIFIED on this host "
                      "(resolved backend=" << backend_name << "). Harness self-test "
                   << (harness_self_test_ok ? "PASSED" : "FAILED")
-                  << "; exiting non-zero unless an exact, fallback-free CUDA/HIP rate was measured "
-                     "with tensor majority. Native eligibility remains a separate gate. JSON is "
+                  << "; exiting non-zero unless an exact, resident-batched CUDA/HIP rate was measured. "
+                     "Tensor execution/native eligibility remain separate gates. JSON is "
                      "still written for lt-gate.py aggregation.\n";
     }
 
@@ -1617,6 +1866,7 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     root.pushKV("schema_version", 3);
     root.pushKV("host", host);
     root.pushKV("host_cpu_arch", HostCpuArch());
+    root.pushKV("sha256_implementation", g_sha256_implementation);
     root.pushKV("backend", backend_name);
     UniValue elig_obj(UniValue::VOBJ);
     elig_obj.pushKV("compiled", elig.compiled);
@@ -1633,20 +1883,38 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     root.pushKV("rate_unit", "digest_nonces_per_s");
     root.pushKV("stage_timing_domain", "cpu-reference");
     root.pushKV("phase_b_seal_rate_valid", false);
+    root.pushKV("phase_b_consensus_equivalent", false);
+    root.pushKV("phase_b_seed_binding_exercised", false);
+    root.pushKV("phase_b_full_slot_ids_bound", false);
+    root.pushKV("phase_b_compute_seal_digest_matched", false);
     root.pushKV("phase_b_seal_note",
-                "S5 is Merkle+SealWindowCommit timing only; this report does not time "
-                "ComputeSealDigestBMX4CLT and publishes no Phase-B seal rate.");
+                "S5 is a commit-only microbenchmark over ordinary sequential headers. It does "
+                "not bind consensus slot seeds/full slot IDs, call ComputeSealDigestBMX4CLT, "
+                "or publish a consensus-equivalent Phase-B rate.");
     root.pushKV("native_path_eligible", native_path_eligible);
-    root.pushKV("device_execution_certified", device_certified);
+    root.pushKV("device_execution_certified", false);
+    root.pushKV("device_rate_certified", device_rate_certified);
     root.pushKV("backend_used_device", throughput.used_device);
     root.pushKV("device_rate_valid", throughput.rate_valid);
+    root.pushKV("silicon_rate_valid", throughput.rate_valid);
     root.pushKV("execution_path", throughput.execution_path);
     root.pushKV("harness_self_test_pass", harness_self_test_ok);
     root.pushKV("bit_exact", lt_bit_exact);
     root.pushKV("stages", stage_json);
-    root.pushKV("tensor_share_pct", stage.valid ? tensor_share_pct : UniValue(UniValue::VNULL));
-    if (tensor_util_pct >= 0) root.pushKV("tensor_util_pct", tensor_util_pct);
-    else root.pushKV("tensor_util_pct", UniValue(UniValue::VNULL));
+    root.pushKV("cpu_reference_tensor_share_pct",
+                stage.valid ? cpu_tensor_share_pct : UniValue(UniValue::VNULL));
+    root.pushKV("tensor_share_pct", UniValue(UniValue::VNULL));
+    root.pushKV("device_tensor_share_pct", UniValue(UniValue::VNULL));
+    root.pushKV("device_tensor_timing_valid", device_tensor_timing_valid);
+    root.pushKV("device_tensor_counters_valid", device_tensor_counters_valid);
+    root.pushKV("device_tensor_timing_domain", "cpu-reference-no-device-counters");
+    root.pushKV("tensor_execution_majority_verified", tensor_execution_majority_verified);
+    root.pushKV("tensor_util_pct", UniValue(UniValue::VNULL));
+    if (implied_tensor_util_pct >= 0) {
+        root.pushKV("implied_tensor_util_pct", implied_tensor_util_pct);
+    } else {
+        root.pushKV("implied_tensor_util_pct", UniValue(UniValue::VNULL));
+    }
     root.pushKV("device_peak_int8_tops", args.device_peak_int8_tops);
     if (throughput.rate_valid) {
         root.pushKV("device_nonce_per_s", throughput.device_nonce_per_s);
@@ -1654,6 +1922,11 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     } else {
         root.pushKV("device_nonce_per_s", UniValue(UniValue::VNULL));
         root.pushKV("backend_nonce_per_s", UniValue(UniValue::VNULL));
+    }
+    if (throughput.used_device && !throughput.rate_valid && throughput.device_nonce_per_s > 0) {
+        root.pushKV("host_orchestrated_nonce_per_s", throughput.device_nonce_per_s);
+    } else {
+        root.pushKV("host_orchestrated_nonce_per_s", UniValue(UniValue::VNULL));
     }
     root.pushKV("throughput_measurement_windows", static_cast<uint64_t>(throughput.windows));
     root.pushKV("throughput_measurement_slots", throughput.slots);
@@ -1681,19 +1954,25 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     lt_obj.pushKV("tile_b", static_cast<uint64_t>(lt::kTileBLT));
     lt_obj.pushKV("matexpand_panel_w", static_cast<uint64_t>(lt::kMatExpandPanelW));
     lt_obj.pushKV("qstar_window", static_cast<uint64_t>(args.window));
-    lt_obj.pushKV("qstar_is_consensus", lt::IsValidConsensusQStar(args.window));
+    lt_obj.pushKV("qstar_is_consensus", throughput.qstar_is_consensus);
+    lt_obj.pushKV("qstar_device_batched", throughput.qstar_device_batched);
+    lt_obj.pushKV("device_w_generation", throughput.device_w_generation);
+    lt_obj.pushKV("device_digest", throughput.device_digest);
+    lt_obj.pushKV("per_nonce_sync_absent", throughput.per_nonce_sync_absent);
     lt_obj.pushKV("rate_provenance",
-                  throughput.rate_valid ? "cuda/hip-device-assisted-status-ok"
-                                        : "insufficient-for-device-rate");
+                  throughput.rate_valid ? "device-resident-qstar-batched"
+                                        : (throughput.used_device
+                                               ? "device-assisted-insufficient-provenance"
+                                               : "insufficient-for-device-rate"));
     root.pushKV("lt", lt_obj);
     root.pushKV("verdict", verdict);
     root.pushKV("gates", [] {
         UniValue g(UniValue::VOBJ);
         g.pushKV("B1_analogue", "bit_exact (ENC-DR-LT determinism + verifier round-trip)");
-        g.pushKV("B2b_analogue", "device_rate_valid + device_nonce_per_s + DRLT ASERT suggestion");
-        g.pushKV("B2g_analogue", "CPU-reference tensor_share_pct (MatExpand-B + Bhat*V majority)");
-        g.pushKV("Qstar", "s5_qstar_seal_ms + qstar_is_consensus");
-        g.pushKV("Device", "execution_path + device_rate_valid; native provenance remains separate");
+        g.pushKV("B2b_analogue", "silicon_rate_valid + device-resident Q* provenance + device_nonce_per_s");
+        g.pushKV("B2g_analogue", "device kernel timing + hardware counters required; CPU composition never passes G1");
+        g.pushKV("Qstar", "S5 is commit-only telemetry; no Phase-B gate is claimed");
+        g.pushKV("Device", "Q* batching + device W/digest + no per-nonce sync; native provenance remains separate");
         return g;
     }());
 
@@ -1709,13 +1988,17 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
                  "  contrib/matmul-v4/lt-gate.py <dir-of-json> --manifest parts.tsv\n"
                  "This tool does not raise nMatMulDRLTHeight and does not close GO/NO-GO.\n";
 
-    return device_certified ? 0 : 1;
+    return device_rate_certified ? 0 : 1;
 }
 
 } // namespace
 
 int main(int argc, char* argv[])
 {
+    // Standalone tools do not construct kernel::Context, so select the best
+    // host SHA-256 implementation before any reference timing or digest work.
+    g_sha256_implementation = SHA256AutoDetect();
+
     Args args;
     std::string err;
     if (!ParseArgs(argc, argv, args, err)) {
@@ -1929,6 +2212,7 @@ int main(int argc, char* argv[])
     root.pushKV("schema_version", 1);
     root.pushKV("host", host);
     root.pushKV("host_cpu_arch", HostCpuArch());
+    root.pushKV("sha256_implementation", g_sha256_implementation);
     root.pushKV("backend", backend_name);
     root.pushKV("backend_used_device", used_device);
     // H8: did an ACTUAL device tensor path execute and get accepted? (Gates exit 0.)

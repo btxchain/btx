@@ -3844,6 +3844,12 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
                 // (b)+(c)+(d): ParseSketch canonicality + R Freivalds rounds +
                 // digest/target — the v4.3 verifier byte-identical.
                 return finish(true);
+            } else {
+                // Authentication alone only binds bytes to the header. If the
+                // committed bytes are non-canonical or fail Freivalds, they are
+                // unusable cache state: erase before the exact recompute path.
+                // A cache failure still never decides block invalidity.
+                matmul::GetMatMulSketchCache().Erase(block_hash);
             }
             // An AUTHENTICATED payload failing Freivalds implies (whp) the
             // miner committed Chat' != Chat_true, so the recompute path below

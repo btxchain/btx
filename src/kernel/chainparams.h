@@ -227,6 +227,9 @@ public:
         //! v4.4-LT Q* Phase B seal-as-PoW mode override. Regtest defaults to
         //! enabled; an explicit false selects Phase A for differential tests.
         std::optional<bool> matmul_lt_seal_as_pow{};
+        //! Test-only pending-job cap override used to exercise exact admission
+        //! boundaries (for example compact-block reservation transfer).
+        std::optional<uint32_t> matmul_lt_max_pending_verifications{};
         bool matmul_flat_sketch_replay{false};
         std::optional<uint32_t> matmul_proof_assumevalid_min_age{};
         bool fastprune{false};

@@ -4873,14 +4873,14 @@ BOOST_AUTO_TEST_CASE(MatMulBMX4C_mine_validate_round_trip_enforcing)
     }
 }
 
-BOOST_AUTO_TEST_CASE(MatMulHeaderPoWSpamGate_grindable_decoupled_and_enforced)
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_withdrawn_test_only_grind_is_decoupled)
 {
-    // Audit F1: the header-PoW spam gate must be (a) satisfiable by grinding the
+    // Withdrawn/test-only mechanism: the header-PoW spam gate is (a) satisfiable by grinding the
     // DECOUPLED nNonce (cheap, no matmul recompute), (b) height-gated + disabled
     // by default, and (c) a real filter (most nNonces fail an easy-but-nonzero
-    // target). This tests the gate LOGIC directly; wiring nNonce onto the P2P
-    // header wire (so peers receive the grinder) is the activation-blocking step
-    // documented in doc/btx-matmul-v4.2-header-pow-gate.md.
+    // target). This tests the dormant gate logic only. nNonce is absent from the
+    // fixed 182-byte P2P header, so the mechanism cannot be activated publicly;
+    // the former bit-26 variable wire was withdrawn.
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
@@ -5084,7 +5084,7 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_wire_fixed_182_ignores_bit26_and_nonce)
     }
 }
 
-BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_activation_boundary_and_malformed_wire)
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_fixed_wire_has_no_bit26_activation_boundary)
 {
     // Mixed peers always exchange 182-byte headers — bit 26 does not extend wire.
     CBlockHeader legacy{};
@@ -5108,8 +5108,8 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_activation_boundary_and_malformed_wire)
     BOOST_CHECK(out_b.HasHeaderPoWCommitment());
     BOOST_CHECK_EQUAL(out_b.nNonce, 0U); // stripped on deserialize
 
-    // Consensus height gate still exists for MatMul v4; HeaderPoW commitment
-    // wire activation remains a hard NO-GO until a height-contextual design.
+    // This is only the independent MatMul v4 profile boundary. It does not
+    // activate a HeaderPoW wire; all headers remain the same fixed shape.
     Consensus::Params p{};
     p.fMatMulPOW = true;
     p.nMatMulV4Height = 100;
@@ -5118,7 +5118,7 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_activation_boundary_and_malformed_wire)
     BOOST_CHECK(p.IsMatMulV4Active(100));
 }
 
-BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_commitment_gate_changes_gethash)
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_withdrawn_nonce_grind_leaves_gethash_stable)
 {
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;

@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -49,6 +50,7 @@ constexpr char kMatExpandGTag[] = "BTX_MATEXPAND_G_V44LT";
 constexpr char kMatExpandHTag[] = "BTX_MATEXPAND_H_V44LT";
 constexpr char kMatExpandWTag[] = "BTX_MATEXPAND_W_V44LT";
 constexpr char kMatExpandWATag[] = "BTX_MATEXPAND_WA_V44LT";
+constexpr size_t kDigestRingSlots = 8;
 
 // The exact logical-MX lowering below schedules four dense INT8 GEMMs. Keep it
 // as a qualification/benchmark lane until silicon data shows it beating the
@@ -69,6 +71,18 @@ uint256 DeriveTaggedSeed(const char* tag, size_t taglen, const uint256& hash)
     uint8_t out[CSHA256::OUTPUT_SIZE];
     hasher.Finalize(out);
     return uint256{Span<const unsigned char>{out, sizeof(out)}};
+}
+
+void Bmx4SeedStreamWords(const uint256& seed, uint32_t (&words)[8])
+{
+    // ExpandMantissaStream hashes SeedBytesLE(seed), which is the reverse of
+    // uint256::data(). Pack that exact byte sequence for the device XOF.
+    for (uint32_t w = 0; w < 8; ++w) {
+        words[w] = 0;
+        for (uint32_t p = 0; p < 4; ++p) {
+            words[w] |= static_cast<uint32_t>(seed.data()[31U - (w * 4U + p)]) << (8U * p);
+        }
+    }
 }
 
 __global__ void DeviceGemmS8S8Tiled(const int8_t* __restrict__ A,
@@ -208,6 +222,191 @@ __device__ __forceinline__ int8_t DeviceSampleMantissaNibble(uint8_t nibble, boo
     }
     accepted = true;
     return static_cast<int8_t>(sign ? -mag : mag);
+}
+
+// Compact device/host result image for a Q* batch.  The hot path never copies
+// the m*m Chat field back to the host: each slot writes its SHA256d digest here
+// and the whole batch is returned by one D2H transfer after all queued work.
+struct alignas(4) DeviceDigestStatusLT {
+    uint8_t digest[32];
+    uint32_t ok;
+};
+static_assert(sizeof(DeviceDigestStatusLT) == 36);
+
+__device__ __forceinline__ void DeviceBmx4MantissaBlock(
+    const uint32_t seed_words[8], uint64_t counter, uint8_t digest[32])
+{
+    // SHA256(seed_bytes_le || 'm' || counter_LE64), exactly matching
+    // ExpandMantissaStream.  The 41-byte message fits in one SHA block.
+    uint32_t state[8];
+    uint32_t block[16] = {};
+    matmul_v4::lt_device::ShaInit(state);
+#pragma unroll
+    for (uint32_t p = 0; p < 32; ++p) {
+        matmul_v4::lt_device::ShaSetByte(
+            block, p, (seed_words[p >> 2U] >> (8U * (p & 3U))) & 0xffU);
+    }
+    matmul_v4::lt_device::ShaSetByte(block, 32, 0x6dU);
+#pragma unroll
+    for (uint32_t p = 0; p < 8; ++p) {
+        matmul_v4::lt_device::ShaSetByte(block, 33 + p,
+                                        (counter >> (8U * p)) & 0xffU);
+    }
+    matmul_v4::lt_device::ShaSetByte(block, 41, 0x80U);
+    block[15] = 41U * 8U;
+    matmul_v4::lt_device::ShaCompress(state, block);
+#pragma unroll
+    for (uint32_t w = 0; w < 8; ++w) {
+        digest[w * 4 + 0] = static_cast<uint8_t>(state[w] >> 24U);
+        digest[w * 4 + 1] = static_cast<uint8_t>(state[w] >> 16U);
+        digest[w * 4 + 2] = static_cast<uint8_t>(state[w] >> 8U);
+        digest[w * 4 + 3] = static_cast<uint8_t>(state[w]);
+    }
+}
+
+__global__ void DeviceGenerateProjectorBlocks(uint8_t* __restrict__ hashes,
+                                              uint8_t* __restrict__ counts,
+                                              uint32_t blocks,
+                                              uint32_t k0, uint32_t k1,
+                                              uint32_t k2, uint32_t k3,
+                                              uint32_t k4, uint32_t k5,
+                                              uint32_t k6, uint32_t k7)
+{
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= blocks) return;
+    const uint32_t seed[8] = {k0, k1, k2, k3, k4, k5, k6, k7};
+    uint8_t digest[32];
+    DeviceBmx4MantissaBlock(seed, idx, digest);
+    uint8_t accepted_count = 0;
+#pragma unroll
+    for (uint32_t b = 0; b < 32; ++b) {
+        hashes[static_cast<size_t>(idx) * 32 + b] = digest[b];
+        bool accepted = false;
+        (void)DeviceSampleMantissaNibble(digest[b] & 0x0fU, accepted);
+        accepted_count += accepted ? 1U : 0U;
+        (void)DeviceSampleMantissaNibble(digest[b] >> 4U, accepted);
+        accepted_count += accepted ? 1U : 0U;
+    }
+    counts[idx] = accepted_count;
+}
+
+// A single deterministic prefix thread is intentional.  At n=4096 this is
+// only ~105k byte loads/adds, small beside MatExpand, and it avoids a rocPRIM
+// dependency while pinning byte order exactly to the CPU streaming oracle.
+__global__ void DevicePrefixProjectorBlocks(const uint8_t* __restrict__ counts,
+                                            uint32_t* __restrict__ offsets,
+                                            uint32_t blocks, size_t wanted,
+                                            DeviceDigestStatusLT* result)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < blocks; ++i) {
+        offsets[i] = sum;
+        sum += counts[i];
+    }
+    result->ok = static_cast<size_t>(sum) >= wanted ? 1U : 0U;
+}
+
+__global__ void DeviceScatterProjectorBlocks(const uint8_t* __restrict__ hashes,
+                                             const uint32_t* __restrict__ offsets,
+                                             uint32_t blocks, size_t wanted,
+                                             const DeviceDigestStatusLT* result,
+                                             int8_t* __restrict__ out)
+{
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= blocks || result->ok == 0) return;
+    size_t pos = offsets[idx];
+    const uint8_t* hash = hashes + static_cast<size_t>(idx) * 32;
+#pragma unroll
+    for (uint32_t b = 0; b < 32; ++b) {
+        const uint8_t nibs[2] = {static_cast<uint8_t>(hash[b] & 0x0fU),
+                                 static_cast<uint8_t>(hash[b] >> 4U)};
+#pragma unroll
+        for (uint32_t half = 0; half < 2; ++half) {
+            bool accepted = false;
+            const int8_t value = DeviceSampleMantissaNibble(nibs[half], accepted);
+            if (accepted) {
+                if (pos < wanted) out[pos] = value;
+                ++pos;
+            }
+        }
+    }
+}
+
+__global__ void DeviceDigestChatSha256d(const uint64_t* __restrict__ chat,
+                                        size_t words, DeviceDigestStatusLT* result,
+                                        uint32_t s0, uint32_t s1, uint32_t s2,
+                                        uint32_t s3, uint32_t s4, uint32_t s5,
+                                        uint32_t s6, uint32_t s7)
+{
+    // SHA-256's compression chain is serial for one message, so one thread
+    // owns one candidate. The pool overlaps up to kDigestRingSlots independent
+    // candidates on separate streams with bounded Chat staging. This removes
+    // the Q*m^2 host transfer but is not a claim that digest is tensor-bound;
+    // a wavefront-cooperative SHA implementation remains a silicon benchmark
+    // candidate if this stage dominates.
+    if (blockIdx.x != 0 || threadIdx.x != 0 || result->ok == 0) return;
+    constexpr char kTag[] = "BTX_MATMUL_V4";
+    constexpr size_t kTagLen = sizeof(kTag) - 1;
+    const uint32_t sigma[8] = {s0, s1, s2, s3, s4, s5, s6, s7};
+    const size_t message_len = kTagLen + 32 + words * sizeof(uint64_t);
+    const size_t sha_blocks = (message_len + 1 + 8 + 63) / 64;
+    uint32_t state[8];
+    matmul_v4::lt_device::ShaInit(state);
+    for (size_t bi = 0; bi < sha_blocks; ++bi) {
+        uint32_t block[16] = {};
+#pragma unroll
+        for (uint32_t p = 0; p < 64; ++p) {
+            const size_t at = bi * 64 + p;
+            uint8_t byte = 0;
+            bool set = false;
+            if (at < kTagLen) {
+                byte = static_cast<uint8_t>(kTag[at]);
+                set = true;
+            } else if (at < kTagLen + 32) {
+                const size_t q = at - kTagLen;
+                byte = static_cast<uint8_t>((sigma[q >> 2U] >> (8U * (q & 3U))) & 0xffU);
+                set = true;
+            } else if (at < message_len) {
+                const size_t q = at - kTagLen - 32;
+                byte = static_cast<uint8_t>(chat[q >> 3U] >> (8U * (q & 7U)));
+                set = true;
+            } else if (at == message_len) {
+                byte = 0x80U;
+                set = true;
+            }
+            if (set) matmul_v4::lt_device::ShaSetByte(block, p, byte);
+        }
+        if (bi + 1 == sha_blocks) {
+            const uint64_t bit_len = static_cast<uint64_t>(message_len) * 8U;
+            block[14] = static_cast<uint32_t>(bit_len >> 32U);
+            block[15] = static_cast<uint32_t>(bit_len);
+        }
+        matmul_v4::lt_device::ShaCompress(state, block);
+    }
+
+    // Second SHA-256 over the 32-byte first digest.
+    uint32_t inner[8];
+    uint32_t block[16] = {};
+    matmul_v4::lt_device::ShaInit(inner);
+#pragma unroll
+    for (uint32_t w = 0; w < 8; ++w) {
+#pragma unroll
+        for (uint32_t p = 0; p < 4; ++p) {
+            matmul_v4::lt_device::ShaSetByte(
+                block, w * 4 + p, (state[w] >> (24U - 8U * p)) & 0xffU);
+        }
+    }
+    matmul_v4::lt_device::ShaSetByte(block, 32, 0x80U);
+    block[15] = 32U * 8U;
+    matmul_v4::lt_device::ShaCompress(inner, block);
+#pragma unroll
+    for (uint32_t w = 0; w < 8; ++w) {
+        result->digest[w * 4 + 0] = static_cast<uint8_t>(inner[w] >> 24U);
+        result->digest[w * 4 + 1] = static_cast<uint8_t>(inner[w] >> 16U);
+        result->digest[w * 4 + 2] = static_cast<uint8_t>(inner[w] >> 8U);
+        result->digest[w * 4 + 3] = static_cast<uint8_t>(inner[w]);
+    }
 }
 
 // Scale SHA-256 runs beside tile ChaCha on-device; no per-nonce host scale
@@ -487,7 +686,17 @@ struct LtHipResidentPool {
     int8_t *dW{nullptr}, *dBhat{nullptr}; // dense scalar Bhat or MFMA MX mantissa μ
     int32_t *dY{nullptr}, *dB32{nullptr}, *dQ{nullptr};
     uint64_t* dChat{nullptr};
+    uint64_t* dDigestChatRing{nullptr};
     uint8_t* dScales{nullptr};
+    uint8_t *dWXofHashes{nullptr}, *dWXofCounts{nullptr};
+    uint32_t* dWXofOffsets{nullptr};
+    uint32_t w_xof_blocks{0};
+    DeviceDigestStatusLT* dBatchResults{nullptr};
+    size_t batch_result_capacity{0};
+    hipStream_t digest_streams[kDigestRingSlots]{};
+    hipEvent_t digest_ready[kDigestRingSlots]{};
+    hipEvent_t digest_done[kDigestRingSlots]{};
+    bool digest_inflight[kDigestRingSlots]{};
 
     int8_t *dGemmS8L{nullptr}, *dGemmS8R{nullptr};
     int32_t *dGemmS32L{nullptr}, *dGemmOut{nullptr};
@@ -512,10 +721,21 @@ struct LtHipResidentPool {
     void Release()
     {
         ReleaseGraphs();
+        for (size_t i = 0; i < kDigestRingSlots; ++i) {
+            if (digest_streams[i]) { hipStreamDestroy(digest_streams[i]); digest_streams[i] = nullptr; }
+            if (digest_ready[i]) { hipEventDestroy(digest_ready[i]); digest_ready[i] = nullptr; }
+            if (digest_done[i]) { hipEventDestroy(digest_done[i]); digest_done[i] = nullptr; }
+            digest_inflight[i] = false;
+        }
         auto free_p = [](auto*& p) { if (p) { hipFree(p); p = nullptr; } };
         free_p(dG); free_p(dH); free_p(dU); free_p(dV); free_p(dAhat); free_p(dP);
         free_p(dW); free_p(dY); free_p(dB32); free_p(dBhat); free_p(dQ); free_p(dChat);
+        free_p(dDigestChatRing);
         free_p(dScales);
+        free_p(dWXofHashes); free_p(dWXofCounts); free_p(dWXofOffsets);
+        free_p(dBatchResults);
+        w_xof_blocks = 0;
+        batch_result_capacity = 0;
         free_p(dGemmS8L); free_p(dGemmS8R); free_p(dGemmS32L); free_p(dGemmOut);
         gemm_s8l_bytes = gemm_s8r_bytes = gemm_s32l_bytes = gemm_out_bytes = 0;
         if (stream) { hipStreamDestroy(stream); stream = nullptr; }
@@ -541,12 +761,36 @@ struct LtHipResidentPool {
                grow(dGemmOut, gemm_out_bytes, out);
     }
 
+    [[nodiscard]] bool EnsureBatchResults(size_t count)
+    {
+        if (count <= batch_result_capacity) return true;
+        if (dBatchResults) {
+            if (hipFree(dBatchResults) != hipSuccess) return false;
+            dBatchResults = nullptr;
+            batch_result_capacity = 0;
+        }
+        if (hipMalloc(reinterpret_cast<void**>(&dBatchResults),
+                      count * sizeof(DeviceDigestStatusLT)) != hipSuccess) {
+            return false;
+        }
+        batch_result_capacity = count;
+        return true;
+    }
+
     [[nodiscard]] bool EnsureDims(uint32_t n_in, uint32_t m_in)
     {
         const uint32_t w_in = matmul::v4::lt::kMatExpandPanelW;
         if (stream && n == n_in && m == m_in && w == w_in) return true;
         Release();
         if (hipStreamCreateWithFlags(&stream, hipStreamNonBlocking) != hipSuccess) return false;
+        for (size_t i = 0; i < kDigestRingSlots; ++i) {
+            if (hipStreamCreateWithFlags(&digest_streams[i], hipStreamNonBlocking) != hipSuccess ||
+                hipEventCreateWithFlags(&digest_ready[i], hipEventDisableTiming) != hipSuccess ||
+                hipEventCreateWithFlags(&digest_done[i], hipEventDisableTiming) != hipSuccess) {
+                Release();
+                return false;
+            }
+        }
         int device = 0;
         hipDeviceProp_t props{};
         if (hipGetDevice(&device) == hipSuccess &&
@@ -565,6 +809,15 @@ struct LtHipResidentPool {
         const size_t mm = static_cast<size_t>(m) * m;
         const size_t nscales = static_cast<size_t>(n) *
             (n / matmul::v4::lt::kMatExpandMxBlockLen);
+        // 40 accepted mantissas/hash is below the 44/hash expectation.  The
+        // 256-block reserve makes exhaustion negligible, while `ok` is still
+        // checked after the batch so any short stream fails closed.
+        const size_t xof_blocks_sz = (nw + 39U) / 40U + 256U;
+        if (xof_blocks_sz > std::numeric_limits<uint32_t>::max()) {
+            Release();
+            return false;
+        }
+        w_xof_blocks = static_cast<uint32_t>(xof_blocks_sz);
         auto mall = [](void** p, size_t bytes) {
             return bytes == 0 || hipMalloc(p, bytes) == hipSuccess;
         };
@@ -580,11 +833,88 @@ struct LtHipResidentPool {
             !mall(reinterpret_cast<void**>(&dBhat), nn) ||
             !mall(reinterpret_cast<void**>(&dQ), nm * sizeof(int32_t)) ||
             !mall(reinterpret_cast<void**>(&dChat), mm * sizeof(uint64_t)) ||
-            !mall(reinterpret_cast<void**>(&dScales), mx_partitioned ? nscales : 0)) {
+            !mall(reinterpret_cast<void**>(&dDigestChatRing),
+                  kDigestRingSlots * mm * sizeof(uint64_t)) ||
+            !mall(reinterpret_cast<void**>(&dScales), mx_partitioned ? nscales : 0) ||
+            !mall(reinterpret_cast<void**>(&dWXofHashes), xof_blocks_sz * 32U) ||
+            !mall(reinterpret_cast<void**>(&dWXofCounts), xof_blocks_sz) ||
+            !mall(reinterpret_cast<void**>(&dWXofOffsets), xof_blocks_sz * sizeof(uint32_t))) {
             Release();
             return false;
         }
         return true;
+    }
+
+    [[nodiscard]] bool LaunchProjectorW(const uint256& seed_w,
+                                        DeviceDigestStatusLT* result)
+    {
+        uint32_t sw[8];
+        Bmx4SeedStreamWords(seed_w, sw);
+        constexpr uint32_t threads = 256;
+        const uint32_t blocks = (w_xof_blocks + threads - 1U) / threads;
+        hipLaunchKernelGGL(DeviceGenerateProjectorBlocks,
+                           dim3(blocks), dim3(threads), 0, stream,
+                           dWXofHashes, dWXofCounts, w_xof_blocks,
+                           sw[0], sw[1], sw[2], sw[3], sw[4], sw[5], sw[6], sw[7]);
+        if (hipGetLastError() != hipSuccess) return false;
+        hipLaunchKernelGGL(DevicePrefixProjectorBlocks,
+                           dim3(1), dim3(1), 0, stream,
+                           dWXofCounts, dWXofOffsets, w_xof_blocks,
+                           static_cast<size_t>(n) * w, result);
+        if (hipGetLastError() != hipSuccess) return false;
+        hipLaunchKernelGGL(DeviceScatterProjectorBlocks,
+                           dim3(blocks), dim3(threads), 0, stream,
+                           dWXofHashes, dWXofOffsets, w_xof_blocks,
+                           static_cast<size_t>(n) * w, result, dW);
+        return hipGetLastError() == hipSuccess;
+    }
+
+    [[nodiscard]] bool LaunchChatDigest(const uint256& sigma,
+                                        DeviceDigestStatusLT* result,
+                                        size_t batch_index)
+    {
+        const size_t ring = batch_index % kDigestRingSlots;
+        const size_t chat_words = static_cast<size_t>(m) * m;
+        if (digest_inflight[ring] &&
+            hipStreamWaitEvent(stream, digest_done[ring], 0) != hipSuccess) {
+            return false;
+        }
+        uint64_t* staged_chat = dDigestChatRing + ring * chat_words;
+        if (hipMemcpyAsync(staged_chat, dChat, chat_words * sizeof(uint64_t),
+                           hipMemcpyDeviceToDevice, stream) != hipSuccess ||
+            hipEventRecord(digest_ready[ring], stream) != hipSuccess ||
+            hipStreamWaitEvent(digest_streams[ring], digest_ready[ring], 0) != hipSuccess) {
+            return false;
+        }
+        uint32_t sw[8];
+        for (uint32_t t = 0; t < 8; ++t) {
+            sw[t] = ReadLE32(sigma.data() + static_cast<size_t>(t) * 4);
+        }
+        hipLaunchKernelGGL(DeviceDigestChatSha256d,
+                           dim3(1), dim3(1), 0, digest_streams[ring],
+                           staged_chat, chat_words, result,
+                           sw[0], sw[1], sw[2], sw[3], sw[4], sw[5], sw[6], sw[7]);
+        if (hipGetLastError() != hipSuccess ||
+            hipEventRecord(digest_done[ring], digest_streams[ring]) != hipSuccess) {
+            return false;
+        }
+        digest_inflight[ring] = true;
+        return true;
+    }
+
+    [[nodiscard]] bool JoinDigestStreams()
+    {
+        for (size_t i = 0; i < kDigestRingSlots; ++i) {
+            if (digest_inflight[i] && hipStreamWaitEvent(stream, digest_done[i], 0) != hipSuccess) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void ResetDigestRing()
+    {
+        for (bool& inflight : digest_inflight) inflight = false;
     }
 
     [[nodiscard]] bool LaunchMxExtract(int8_t* dDenseOut, int8_t* dMuOut,
@@ -831,17 +1161,16 @@ struct LtHipResidentPool {
         return true;
     }
 
-    [[nodiscard]] bool MineOneNonce(const CBlockHeader& header,
-                                    std::vector<matmul::int8_field::Fq>& chat_out)
+    [[nodiscard]] bool EnqueueOneHeader(const CBlockHeader& header,
+                                        DeviceDigestStatusLT* result,
+                                        size_t batch_index)
     {
-        if (!template_bound) return false;
+        if (!template_bound || result == nullptr) return false;
         if (!mfma_s8s8 && !graphs_ready) return false;
         if (matmul::v4::ComputeTemplateHash(header) != template_hash) return false;
         const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
         const uint256 seed_w = DeriveTaggedSeed(kMatExpandWTag, sizeof(kMatExpandWTag) - 1, header_hash);
-        const std::vector<int8_t> W = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_w, n, w);
-        const size_t nw = static_cast<size_t>(n) * w;
-        if (hipMemcpyAsync(dW, W.data(), nw, hipMemcpyHostToDevice, stream) != hipSuccess) return false;
+        if (!LaunchProjectorW(seed_w, result)) return false;
 
         if (mfma_s8s8) {
             if (!LaunchMatExpandMfma()) return false;
@@ -875,14 +1204,7 @@ struct LtHipResidentPool {
                                dP, dQ, dChat, static_cast<int>(n), static_cast<int>(m));
             if (hipGetLastError() != hipSuccess) return false;
         }
-        // The device copy overwrites every word. Preserve capacity across the
-        // Q* window and avoid a redundant host zero-fill per nonce.
-        chat_out.resize(static_cast<size_t>(m) * m);
-        if (hipMemcpyAsync(chat_out.data(), dChat, static_cast<size_t>(m) * m * sizeof(uint64_t),
-                           hipMemcpyDeviceToHost, stream) != hipSuccess) {
-            return false;
-        }
-        return hipStreamSynchronize(stream) == hipSuccess;
+        return LaunchChatDigest(matmul::v4::DeriveSigma(header), result, batch_index);
     }
 };
 
@@ -1010,17 +1332,34 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
             header.seed_a.data()[i] = static_cast<unsigned char>(0x11);
             header.seed_b.data()[i] = static_cast<unsigned char>(0x22);
         }
-        uint256 cpu_digest;
+        CBlockHeader header2 = header;
+        header2.nNonce64 = 43;
+        header2.nNonce = 43;
+        header2.seed_a.data()[0] ^= 0x5aU;
+        header2.seed_b.data()[31] ^= 0xa5U;
+        uint256 cpu_digest, cpu_digest2;
         std::vector<unsigned char> cpu_payload;
         if (!matmul::v4::lt::ComputeDigestBMX4CLT(header, kN, cpu_digest, cpu_payload)) return;
+        if (!matmul::v4::lt::ComputeDigestBMX4CLT(header2, kN, cpu_digest2, cpu_payload)) return;
         auto& pool = Pool();
         std::lock_guard<std::mutex> lock(pool.mu);
         if (!pool.BindTemplate(header, kN, m)) return;
-        std::vector<matmul::int8_field::Fq> chat;
-        if (!pool.MineOneNonce(header, chat)) return;
-        if (matmul::v4::ComputeSketchDigestFromFq(matmul::v4::DeriveSigma(header), chat) != cpu_digest) {
+        if (!pool.EnsureBatchResults(2)) return;
+        if (hipMemsetAsync(pool.dBatchResults, 0, 2 * sizeof(DeviceDigestStatusLT), pool.stream) !=
+            hipSuccess) return;
+        if (!pool.EnqueueOneHeader(header, pool.dBatchResults, 0)) return;
+        if (!pool.EnqueueOneHeader(header2, pool.dBatchResults + 1, 1)) return;
+        if (!pool.JoinDigestStreams()) return;
+        DeviceDigestStatusLT gpu[2]{};
+        if (hipMemcpyAsync(gpu, pool.dBatchResults, sizeof(gpu), hipMemcpyDeviceToHost,
+                           pool.stream) != hipSuccess) return;
+        if (hipStreamSynchronize(pool.stream) != hipSuccess || gpu[0].ok != 1U || gpu[1].ok != 1U) {
             return;
         }
+        pool.ResetDigestRing();
+        const uint256 gpu_digest{Span<const unsigned char>{gpu[0].digest, sizeof(gpu[0].digest)}};
+        const uint256 gpu_digest2{Span<const unsigned char>{gpu[1].digest, sizeof(gpu[1].digest)}};
+        if (gpu_digest != cpu_digest || gpu_digest2 != cpu_digest2) return;
         ok = true;
     });
     return ok;
@@ -1032,30 +1371,85 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     return hipGetDeviceCount(&count) == hipSuccess && count > 0;
 }
 
+[[nodiscard]] bool MineHeadersDeviceResident(
+    const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t m,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    matmul_v4::hip::LtHipBatchProvenance* provenance)
+{
+    constexpr size_t kMaxConsensusBatch{512};
+    if (headers.empty() || headers.size() > kMaxConsensusBatch) return false;
+    const uint256 template_hash = matmul::v4::ComputeTemplateHash(headers.front());
+    for (const CBlockHeader& header : headers) {
+        if (matmul::v4::ComputeTemplateHash(header) != template_hash) return false;
+    }
+
+    auto& pool = Pool();
+    std::lock_guard<std::mutex> lock(pool.mu);
+    if (!pool.BindTemplate(headers.front(), n, m) ||
+        !pool.EnsureBatchResults(headers.size())) return false;
+    if (hipMemsetAsync(pool.dBatchResults, 0,
+                       headers.size() * sizeof(DeviceDigestStatusLT), pool.stream) != hipSuccess) {
+        return false;
+    }
+    for (size_t i = 0; i < headers.size(); ++i) {
+        if (!pool.EnqueueOneHeader(headers[i], pool.dBatchResults + i, i)) {
+            (void)pool.JoinDigestStreams();
+            (void)hipStreamSynchronize(pool.stream);
+            pool.ResetDigestRing();
+            out.clear();
+            return false;
+        }
+    }
+
+    if (!pool.JoinDigestStreams()) {
+        (void)hipStreamSynchronize(pool.stream);
+        pool.ResetDigestRing();
+        out.clear();
+        return false;
+    }
+
+    std::vector<DeviceDigestStatusLT> device_results(headers.size());
+    if (hipMemcpyAsync(device_results.data(), pool.dBatchResults,
+                       device_results.size() * sizeof(DeviceDigestStatusLT),
+        hipMemcpyDeviceToHost, pool.stream) != hipSuccess ||
+        hipStreamSynchronize(pool.stream) != hipSuccess) {
+        (void)hipStreamSynchronize(pool.stream);
+        pool.ResetDigestRing();
+        out.clear();
+        return false;
+    }
+    pool.ResetDigestRing();
+    out.resize(headers.size());
+    for (size_t i = 0; i < headers.size(); ++i) {
+        if (device_results[i].ok != 1U) {
+            out.clear();
+            return false;
+        }
+        out[i].nonce = headers[i].nNonce64;
+        out[i].digest = uint256{Span<const unsigned char>{device_results[i].digest,
+                                                         sizeof(device_results[i].digest)}};
+        out[i].target_match = false;
+        out[i].backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
+    }
+    if (provenance) {
+        provenance->qstar_device_batched = headers.size() > 1;
+        provenance->device_w_generation = true;
+        provenance->device_digest = true;
+        provenance->per_nonce_sync_absent = true;
+    }
+    return true;
+}
+
 [[nodiscard]] bool MineDeviceResident(const CBlockHeader& tmpl, uint32_t n, uint32_t m,
                                       const uint64_t* nonces, size_t count,
                                       std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
 {
-    auto& pool = Pool();
-    std::lock_guard<std::mutex> lock(pool.mu);
-    if (!pool.BindTemplate(tmpl, n, m)) return false;
-    out.resize(count);
-    std::vector<matmul::int8_field::Fq> chat;
-    chat.reserve(static_cast<size_t>(m) * m);
+    std::vector<CBlockHeader> headers(count, tmpl);
     for (size_t i = 0; i < count; ++i) {
-        CBlockHeader header = tmpl;
-        header.nNonce64 = nonces[i];
-        header.nNonce = static_cast<uint32_t>(nonces[i]);
-        if (!pool.MineOneNonce(header, chat)) {
-            out.clear();
-            return false;
-        }
-        out[i].nonce = nonces[i];
-        out[i].digest = matmul::v4::ComputeSketchDigestFromFq(matmul::v4::DeriveSigma(header), chat);
-        out[i].target_match = false;
-        out[i].backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
+        headers[i].nNonce64 = nonces[i];
+        headers[i].nNonce = static_cast<uint32_t>(nonces[i]);
     }
-    return true;
+    return MineHeadersDeviceResident(headers, n, m, out, nullptr);
 }
 
 [[nodiscard]] bool MineHostExactFallback(const CBlockHeader& tmpl, uint32_t n,
@@ -1082,6 +1476,34 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     for (auto& r : results) {
         r.target_match = false;
         r.backend_status = status;
+    }
+    out = std::move(results);
+    return true;
+}
+
+[[nodiscard]] bool MineHostExactFallbackHeaders(
+    const std::vector<CBlockHeader>& headers, uint32_t n, bool try_device_gemms,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
+{
+    if (headers.empty()) return false;
+    matmul::v4::lt::ExactGemmBackend backend;
+    if (try_device_gemms) {
+        backend.gemm_s8s8 = &BackendGemmS8S8;
+        backend.gemm_s32s8 = &BackendGemmS32S8;
+    }
+    g_lt_device_gemm_failed = false;
+    matmul::v4::lt::WindowSketchMinerLT miner(headers.front(), n, backend);
+    if (!miner.Valid()) return false;
+    const uint256 kNoTarget = ArithToUint256(~arith_uint256{});
+    std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
+    if (!miner.MineWindow(headers, kNoTarget, results)) return false;
+    const bool device_served =
+        try_device_gemms && miner.UsingDeviceGemms() && !g_lt_device_gemm_failed;
+    const auto status = device_served ? matmul::v4::bmx4::DigestOnlyBackendStatus::Ok
+                                      : matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
+    for (auto& result : results) {
+        result.target_match = false;
+        result.backend_status = status;
     }
     out = std::move(results);
     return true;
@@ -1136,6 +1558,25 @@ bool ComputeDigestsOnlyLTHip(const CBlockHeader& tmpl, uint32_t n,
         return MineHostExactFallback(tmpl, n, nonces, count, /*try_device_gemms=*/true, out);
     }
     return MineHostExactFallback(tmpl, n, nonces, count, /*try_device_gemms=*/false, out);
+}
+
+bool ComputeDigestsOnlyLTHip(
+    const std::vector<CBlockHeader>& headers, uint32_t n,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    LtHipBatchProvenance* provenance)
+{
+    out.clear();
+    if (provenance) *provenance = {};
+    if (headers.empty()) return false;
+    uint32_t m = 0;
+    if (!matmul::v4::lt::ValidateDimsBMX4CLT(n, m)) return false;
+
+    if (IsMatMulLTHipAvailable()) {
+        if (MineHeadersDeviceResident(headers, n, m, out, provenance)) return true;
+        if (provenance) *provenance = {};
+        return MineHostExactFallbackHeaders(headers, n, /*try_device_gemms=*/true, out);
+    }
+    return MineHostExactFallbackHeaders(headers, n, /*try_device_gemms=*/false, out);
 }
 
 } // namespace matmul_v4::hip

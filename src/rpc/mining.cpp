@@ -4983,9 +4983,10 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
                 Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
             OffloadMatMulV4SketchToCache(block);
         }
-        // HeaderPoW spam gate (audit F1): after the matmul seal is fixed, grind
-        // nNonce. No-op when nMatMulHeaderPoWDiscountBits == UINT32_MAX. At v4 the
-        // commitment version bit puts nNonce on the wire and in GetHash().
+        // Withdrawn HeaderPoW experiment: the helper is a no-op under every
+        // shipped network's UINT32_MAX sentinel. nNonce is NOT in the fixed
+        // 182-byte wire or GetHash; bit 26 is only a historical marker. Do not
+        // enable this path publicly without a new height-contextual design.
         if (consensus.IsMatMulV4Active(next_height) &&
             !GrindMatMulHeaderSpamNonce(block, consensus, max_tries)) {
             cleanup_watcher();

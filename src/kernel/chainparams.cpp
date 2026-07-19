@@ -1582,6 +1582,10 @@ public:
         if (opts.matmul_lt_seal_as_pow.has_value()) {
             consensus.fMatMulLTSealAsPoW = *opts.matmul_lt_seal_as_pow;
         }
+        if (opts.matmul_lt_max_pending_verifications.has_value()) {
+            consensus.nMatMulLTMaxPendingVerifications =
+                *opts.matmul_lt_max_pending_verifications;
+        }
         if (opts.matmul_flat_sketch_replay) {
             // v4.4 ENC-DR regtest-only differential switch: re-select the legacy
             // FLAT_SKETCH_INBLOCK carriage so golden-vector replay tests can

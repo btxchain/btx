@@ -104,6 +104,26 @@ EncDr verify recomputes the seal with parent MTP (`CheckMatMulProofOfWork_V4EncD
 Phase-A `H(σ‖Chat)==matmul_digest` cache auth / MMSKETCH are skipped in seal mode.
 Regtest opt-in: `-regtestmatmulltsealaspow` (requires live `-regtestdrltheight`).
 
+### Report measurement contract
+
+`matmul-v4-report --profile bmx4c-lt` keeps two distinct evidence domains:
+
+- `cpu_reference_tensor_share_pct` is computed from portable CPU-reference
+  stage clocks. It describes reference composition only. The legacy ambiguous
+  `tensor_share_pct` field is null in new reports. Neither proves IMMA/MFMA
+  execution, device tensor residency, saturation, or G1 readiness.
+- G1 requires `native_path_eligible=true`, independent device kernel timing,
+  hardware-counter evidence, and a strict-majority
+  `device_tensor_share_pct`. Missing device telemetry fails closed.
+- the report's S5 Merkle + `SealWindowCommit` clock is a commit-only
+  microbenchmark. Ordinary sequential headers, digest-only seed derivation, or
+  a non-consensus Q cannot be called a Phase-B measurement. Phase-B evidence
+  must prepare real slot IDs/nonces, bind the full slot ID into both seeds, use
+  `Q* in {128,256,512}`, and match `ComputeSealDigestBMX4CLT` byte-for-byte.
+
+Consequently, a commit-only S5 value never closes the Phase-B seal gate or
+supports a throughput/readiness claim.
+
 ## Activation
 
 | Param | Default |
@@ -147,13 +167,20 @@ Linker `*_stub.cpp` files remain only for builds with the corresponding `BTX_ENA
 
 ## GO/NO-GO (before raising height)
 
-1. Tensor wall-time majority on B200 and 5090
-2. B200/5090 nonce/s ≥ ~4× on fat shape
-3. Nonce/$ proxies: B200 ≥ 5090 (honest: fleets may still invert)
+1. Native tensor execution strict majority on B200 and 5090, proven by a
+   qualified native path plus independent device-side timing and hardware
+   counters. CPU-reference stage composition is diagnostic only and does not
+   pass this gate.
+2. B200/5090 nonce/s ≥ ~4× on a **single device-resident consensus-Q* batch**;
+   require device nonce-fresh W generation, device digest, and no per-nonce
+   synchronization. Host-orchestrated single-nonce wall rates do not count.
+3. Nonce/$ proxies: B200 ≥ 5090 using only the same silicon-eligible batched
+   rates (honest: fleets may still invert)
 4. MI350 FER / OCP MX exactness PASS
 5. MatExpand adversarial review: Lever-B MX-block Extract selected (internal
    non-affinity + golden vectors); external C-15 still required — not closed;
-   re-measure B200/5090 after Lever B — **do not claim ≥4×** without new JSON
+   re-measure B200/5090 after Lever B — **do not claim ≥4×** without JSON whose
+   Q* batching/device-W/device-digest/no-per-nonce-sync provenance passes
 6. Tip verify budget with sketch-cache
 7. Header-PoW + authenticated chainwork blockers unchanged
 8. Phase B seal-as-PoW tip-verify budget soak + seal-binding review if Rank-1

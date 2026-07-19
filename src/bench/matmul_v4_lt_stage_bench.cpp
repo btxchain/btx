@@ -6,14 +6,17 @@
 // Mirrors matmul_v4_stage_bench.cpp / matmul-v4-report --profile bmx4c-lt:
 //
 //   S0  template MatExpand-A + U,V + P=U*A (I1' amortized)
-//   S1  per-nonce MatExpand-B              (tensor)
-//   S2  per-nonce Bhat*V                   (tensor)
+//   S1  per-nonce MatExpand-B              (CPU Extract + GEMM-shaped work)
+//   S2  per-nonce Bhat*V                   (CPU GEMM-shaped work)
 //   S3  combine P*Q                        (int)
 //   S4  serialize + digest                 (SHA/int)
-//   S5  Q* Merkle + SealWindowCommit       (window-level sample)
+//   S5  Merkle + SealWindowCommit(Q=1)     (commit-only helper microbench)
 //
 // Production silicon: prefer contrib/matmul-v4/measure-hardware.sh --profile
 // bmx4c-lt (schema_version 3 JSON). This bench is a local CPU stage probe.
+// Its S1+S2 ratio is CPU-reference composition, not device tensor execution.
+// S5 is not a consensus Q*, does not bind Phase-B slot IDs into seeds, and is
+// not a ComputeSealDigestBMX4CLT throughput/readiness measurement.
 //   BTX_V4_LT_STAGE_BENCH_DIM=4096 ./bench_btx -filter=MatMulV4LTStageEnvDim
 
 #include <bench/bench.h>
@@ -112,22 +115,22 @@ LTStageTimes RunStagedLTNonce(uint32_t n)
 void PrintLT(uint32_t n, const LTStageTimes& t)
 {
     const double marginal = t.s1 + t.s2 + t.s3 + t.s4;
-    const double tensor = t.s1 + t.s2;
+    const double gemm_labeled = t.s1 + t.s2;
     std::printf("\n[matmul_v4_lt_stage_bench] n=%u b=%u m=%u\n", n, lt::kTileBLT, n / lt::kTileBLT);
     std::printf("  S0  MatExpand-A + U,V + P (I1' amortized): %9.3f ms\n", t.s0 * 1e3);
-    std::printf("  S1  MatExpand-B                 (tensor) : %9.3f ms  %5.1f%%\n",
+    std::printf("  S1  MatExpand-B       (CPU Extract+GEMM): %9.3f ms  %5.1f%%\n",
                 t.s1 * 1e3, marginal > 0 ? 100 * t.s1 / marginal : 0);
-    std::printf("  S2  Bhat*V                      (tensor) : %9.3f ms  %5.1f%%\n",
+    std::printf("  S2  Bhat*V            (CPU GEMM-shaped) : %9.3f ms  %5.1f%%\n",
                 t.s2 * 1e3, marginal > 0 ? 100 * t.s2 / marginal : 0);
     std::printf("  S3  combine P*Q                 (int)    : %9.3f ms  %5.1f%%\n",
                 t.s3 * 1e3, marginal > 0 ? 100 * t.s3 / marginal : 0);
     std::printf("  S4  digest                      (SHA/int): %9.3f ms  %5.1f%%\n",
                 t.s4 * 1e3, marginal > 0 ? 100 * t.s4 / marginal : 0);
-    std::printf("  S5  seal sample (Q=1)                    : %9.3f ms\n", t.s5 * 1e3);
+    std::printf("  S5  commit-only helper (Q=1; NOT Phase B): %9.3f ms\n", t.s5 * 1e3);
     std::printf("  marginal total                           : %9.3f ms  bit-exact=%s\n",
                 marginal * 1e3, t.bit_exact ? "YES" : "NO");
-    std::printf("  tensor share (S1+S2)                     : %5.1f%%\n",
-                marginal > 0 ? 100 * tensor / marginal : 0);
+    std::printf("  CPU GEMM-labeled composition (not device tensor use): %5.1f%%\n",
+                marginal > 0 ? 100 * gemm_labeled / marginal : 0);
 }
 
 void MatMulV4LTStagesAtDim(benchmark::Bench& bench, uint32_t n)

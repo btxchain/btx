@@ -1,8 +1,19 @@
-# Native ExactGemm tensor status (2026-07-19)
+# Native ExactGemm tensor status (2026-07-19; updated 2026-07-20)
 
-PR tip: `claude/matmul-v4-design-spec-af23sj` @ `315d6ec` (parallel SHAs on `feat/bmx4c-exact-accel-lanes` @ `1896fc0`).
+PR snapshot: `claude/matmul-v4-design-spec-af23sj` @ `1ca87fb`. This is a
+status snapshot, not a claim that the named SHA remains the moving PR tip.
 
 Consensus remains the **CPU integer transcript**. Public activation stays **`INT32_MAX`**. Winners are always **CPU-resealed**. Native tensor paths are miner-local only and must self-qualify vs `ExactGemmS8S8` before advertising IMMA / MFMA / Cube / TensorOps.
+
+“Native” below describes qualified GEMM kernels, not an end-to-end resident
+miner. At `1ca87fb`, Q* was still issued as individual calls with host W
+generation/digest and per-nonce synchronization; those wall rates do not rank
+silicon and cannot calibrate ASERT.
+
+Post-snapshot branch work adds complete-header CUDA/HIP Q* entries with device
+W generation, device SHA256d(Chat), digest/status-only D2H, and one batch sync.
+That changes the measurement path, not the native-instruction table below; it
+still requires CUDA/ROCm compilation and fresh B200/5090/MI350 silicon data.
 
 ## Shipped production paths (SDK + silicon + self-qual)
 

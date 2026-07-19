@@ -66,6 +66,47 @@ the 4× gate and, under the contributor-supplied ~15× rental-price assumption,
 would still favor the 5090 per dollar. Rental prices are operator inputs, not a
 pinned protocol fact.
 
+### 1ca87fb Q*=128 trace: a host/launch measurement, not a silicon ratio
+
+Byte-exact reports collected at commit `1ca87fb` (`n=512`, consensus `Q*=128`)
+initially printed RTX 5090 **77.08**, B200 **118.92**, and CPU-reference **2.24 / 4.35**
+nonce/s. With operator-supplied VAST rates of $0.50/h and $7.00/h, the old gate
+therefore printed a 1.54× B200:5090 ratio and a 9.1× consumer nonce/$ advantage.
+Those arithmetic results describe the report's wall timer, not the GPUs.
+
+An `nsys` trace on a 5060 Ti found about **11.2 ms wall time per nonce** but only
+**169 us of GPU kernels (1.5%)**, approximately **53 serialized launches per
+nonce**, and 13,406 launches / 43 ms total GPU execution over the run. At
+`1ca87fb`, the raw ABI could not batch seed-complete headers: it invoked each Q*
+separately, expands nonce-fresh W on one host thread, transfers it, launches and
+synchronizes the device work, copies the sketch back, then digests on the host.
+An indicative locally instrumented 5060 Ti rate of **95.68 nonce/s** exceeding
+the 5090 by 24% is consistent with host/NUMA and launch latency dominating.
+
+Accordingly, **118.92 / 77.08 must not be called a B200:5090 silicon ratio and
+must not calibrate ASERT**. Current gating treats reports with that historical
+provenance only as `host_orchestrated_nonce_per_s`; `device_nonce_per_s` remains
+null and `device_rate_valid=false`. The newer CUDA/HIP full-header entry can
+publish a rate only after it proves a single device-resident consensus-Q*
+batch with nonce-fresh W generation and digest on-device and no per-nonce
+synchronization. `cpu_reference_tensor_share_pct` (called `tensor_share_pct` in
+the historical report) remains a CPU-reference composition metric,
+not evidence of tensor-core utilization and not a G1 pass. G1 requires a
+qualified native tensor path plus independent device-side timing and hardware
+counters with `device_tensor_share_pct > 50`; absent any part of that tuple it
+fails closed. The reported 0.0032% B200 utilization
+was likewise an ops/wall-rate diagnostic and is no longer published as device
+tensor utilization without silicon-rate provenance.
+
+There was also a separate standalone-harness defect in every pre-fix CPU
+number: `matmul-v4-report` did not construct `kernel::Context` or call
+`SHA256AutoDetect()`, so its host digests used the portable SHA implementation.
+Those CPU nonce/s, S0–S4 timings, derived composition shares, and Lever-B stage
+ratios must all be re-measured. Digest bytes remain valid. The tool now selects
+SHA before timing, records `sha256_implementation`, and hashes a little-endian
+`vector<Fq>` as one contiguous LE64 stream (with an explicit portable endian
+fallback) instead of one eight-byte `CSHA256::Write` per word.
+
 ### Have we hit a design ceiling?
 
 **Not a consensus ceiling — a utilization ceiling.** Consensus cannot force “AI chips win”; it can only make the committed work **map onto the ops those chips accelerate** while staying exact. The remaining gap is almost entirely **miner-local schedule**, not the integer rule.
@@ -74,7 +115,7 @@ pinned protocol fact.
 |---|---|---|
 | Larger dense batched GEMMs (Q, stacked combine) | Moves along the 2×→4–6× B200/5090 axis | Available; needs sustained large Q |
 | Karatsuba-9 (−35% combine MAC) | Helps both; slightly more on H200 (tensor-heavier share) | **Done** |
-| Remove host XOF / H2D / loser payload / alloc | Attacks the **non-tensor floor** (the part that flattens $/nonce) | **Partial**: CUDA/HIP retain template projectors and device scratch, derive MX Extract on-device, and avoid loser payload serialization. Nonce-fresh W still uses host SHA/rejection expansion plus H2D, and Chat still returns to the host for digesting. |
+| Remove host XOF / H2D / loser payload / alloc | Attacks the **non-tensor floor** (the part that flattens $/nonce) | **Implemented, silicon re-measure pending**: CUDA/HIP accept complete seed-bound Q* headers, generate W and SHA256d(Chat) on-device, return digest/status only, and synchronize once per batch. CUDA bounds Chat staging to 128 MiB; HIP overlaps an eight-slot ring. Per-candidate GEMM launches and serial SHA/prefix work remain profiling targets. |
 | Logical scale partition | Exposes committed mantissa/scale tensors without dense dequantization | Exact CPU path plus opt-in frontier CUDA/HIP four-pass INT8 lowering complete; default stays one dense GEMM until measured; CUTLASS/tcgen05 native kernel hardware-gated |
 | FP8 five-limb (Rubin) | Future INT8 drought hedge | CPU exact; no Rubin silicon yet |
 | One nonce / multi-GPU | Spec correctly rejects — NVLink does not help EPP search | Policy |

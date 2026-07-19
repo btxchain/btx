@@ -169,14 +169,19 @@ BOOST_AUTO_TEST_CASE(unified_chainparams_construction_survives)
     CChainParams::RegTestOptions opts{};
     opts.matmul_v4_height = 100;
     opts.matmul_bmx4c_height = 100; // unified flag day
+    // This test pins the original v3 -> ENC-BMX4C unified transition. Regtest
+    // now enables DRLT + seal-as-PoW at height 100 by default, so disable that
+    // later profile explicitly instead of making a stale height-100 assertion.
+    opts.matmul_drlt_height = std::numeric_limits<int32_t>::max();
+    opts.matmul_lt_seal_as_pow = false;
     const auto params = CChainParams::RegTest(opts);
     BOOST_REQUIRE(params != nullptr);
     BOOST_CHECK(params->GetConsensus().GetMatMulEncodingProfile(100) ==
                 Consensus::MatMulEncodingProfile::ENC_BMX4C);
 }
 
-// (F) Header-PoW commitment version bit rides the unified v4 flag day via
-// ComputeBlockVersion: required at/above fork, absent below.
+// (F) The withdrawn HeaderPoW bit is never forced by ComputeBlockVersion,
+// before, at, or after the unified v4 flag day.
 BOOST_AUTO_TEST_CASE(unified_header_pow_commit_bit_not_forced_in_block_version)
 {
     // WITHDRAWN: ComputeBlockVersion must NOT OR bit 26 (pre-activation wire split).

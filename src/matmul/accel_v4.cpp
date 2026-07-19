@@ -352,6 +352,7 @@ bool ComputeBatchCpuReferenceBMX4CLT(const std::vector<CBlockHeader>& headers, u
 }
 
 bool TryDeviceDigestsBMX4CLT(Kind backend, const std::vector<CBlockHeader>& headers, uint32_t n,
+                             const uint256& win_target,
                              std::vector<uint256>& digests_out,
                              std::vector<std::vector<unsigned char>>& payloads_out)
 {
@@ -359,11 +360,10 @@ bool TryDeviceDigestsBMX4CLT(Kind backend, const std::vector<CBlockHeader>& head
     payloads_out.clear();
     if (headers.empty()) return false;
 
-    // Device entry points historically accepted (tmpl, nonce[]) and rebuilt
-    // candidates by mutating only nNonce64. That discards per-candidate
-    // seed_a/seed_b that SetDeterministicMatMulSeeds pins. Batch the nonce
-    // list only when every candidate matches headers.front() beyond
-    // nNonce/nNonce64; otherwise run one complete header per device call.
+    // CUDA/HIP accept the complete consensus-seeded header vector, so W
+    // generation, digesting and the batch boundary remain on-device without
+    // discarding nonce-bound seed_a/seed_b. Metal/Ascend retain the legacy
+    // template+nonce ABI and therefore may batch only identical seed inputs.
     const CBlockHeader& tmpl = headers.front();
     auto same_consensus_inputs = [&](const CBlockHeader& h) {
         return h.seed_a == tmpl.seed_a && h.seed_b == tmpl.seed_b &&
@@ -375,17 +375,15 @@ bool TryDeviceDigestsBMX4CLT(Kind backend, const std::vector<CBlockHeader>& head
     const bool nonce_only_batch =
         std::all_of(headers.begin(), headers.end(), same_consensus_inputs);
 
-    auto run_device = [&](const CBlockHeader& header, const uint64_t* nonces, size_t count,
-                          std::vector<matmul::v4::lt::DigestOnlyResultLT>& out) -> bool {
+    auto run_legacy_device = [&](const CBlockHeader& header, const uint64_t* nonces, size_t count,
+                                 std::vector<matmul::v4::lt::DigestOnlyResultLT>& out) -> bool {
         switch (backend) {
-        case Kind::CUDA:
-            return matmul_v4::cuda::ComputeDigestsOnlyLTCuda(header, n, nonces, count, out);
         case Kind::METAL:
             return matmul_v4::metal::ComputeDigestsOnlyLTMetal(header, n, nonces, count, out);
-        case Kind::HIP:
-            return matmul_v4::hip::ComputeDigestsOnlyLTHip(header, n, nonces, count, out);
         case Kind::ASCEND:
             return matmul_v4::ascend::ComputeDigestsOnlyLTAscend(header, n, nonces, count, out);
+        case Kind::CUDA:
+        case Kind::HIP:
         case Kind::CPU:
             return false;
         }
@@ -393,12 +391,16 @@ bool TryDeviceDigestsBMX4CLT(Kind backend, const std::vector<CBlockHeader>& head
     };
 
     std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
-    if (nonce_only_batch) {
+    if (backend == Kind::CUDA) {
+        if (!matmul_v4::cuda::ComputeDigestsOnlyLTCuda(headers, n, results)) return false;
+    } else if (backend == Kind::HIP) {
+        if (!matmul_v4::hip::ComputeDigestsOnlyLTHip(headers, n, results)) return false;
+    } else if (nonce_only_batch) {
         std::vector<uint64_t> nonces(headers.size());
         for (size_t i = 0; i < headers.size(); ++i) {
             nonces[i] = headers[i].nNonce64;
         }
-        if (!run_device(tmpl, nonces.data(), nonces.size(), results) ||
+        if (!run_legacy_device(tmpl, nonces.data(), nonces.size(), results) ||
             results.size() != headers.size()) {
             return false;
         }
@@ -407,21 +409,38 @@ bool TryDeviceDigestsBMX4CLT(Kind backend, const std::vector<CBlockHeader>& head
         for (size_t i = 0; i < headers.size(); ++i) {
             const uint64_t nonce = headers[i].nNonce64;
             std::vector<matmul::v4::lt::DigestOnlyResultLT> one;
-            if (!run_device(headers[i], &nonce, 1, one) || one.size() != 1) {
+            if (!run_legacy_device(headers[i], &nonce, 1, one) || one.size() != 1) {
                 return false;
             }
             results[i] = std::move(one[0]);
         }
     }
 
+    if (results.size() != headers.size() ||
+        !std::all_of(results.begin(), results.end(), [](const auto& result) {
+            return result.backend_status == matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
+        })) {
+        // A backend's internal host fallback is bit-exact, but it is not a
+        // successful device batch. Let the dispatcher's explicit CPU fallback
+        // own that path and its accounting.
+        return false;
+    }
+
+    const arith_uint256 target = UintToArith256(win_target);
     digests_out.resize(headers.size());
     payloads_out.resize(headers.size());
     for (size_t i = 0; i < headers.size(); ++i) {
         digests_out[i] = results[i].digest;
+        if (UintToArith256(results[i].digest) > target) {
+            // Losing slots need only their digest. Reconstructing every Chat on
+            // the host would erase the Q* device-batch speedup; potential
+            // winners are still reference-resealed below before use.
+            continue;
+        }
         uint256 d;
         std::vector<unsigned char> payload;
-        // Host-verify every digest against the COMPLETE candidate header
-        // (including nonce-bound seeds) before handing VerifySketch a sketch.
+        // Host-verify every potential winner against the COMPLETE candidate
+        // header (including nonce-bound seeds) before handing over a sketch.
         if (!matmul::v4::lt::ComputeDigestBMX4CLT(headers[i], n, d, payload) ||
             d != results[i].digest) {
             digests_out.clear();
@@ -850,7 +869,8 @@ bool ComputeDigestsBMX4CLTDispatched(const std::vector<CBlockHeader>& headers, u
     bool device_ok = false;
     std::string error;
     try {
-        device_ok = TryDeviceDigestsBMX4CLT(backend, headers, n, accel_digests, accel_payloads);
+        device_ok = TryDeviceDigestsBMX4CLT(
+            backend, headers, n, win_target, accel_digests, accel_payloads);
         if (!device_ok) {
             error = "device_returned_false_or_unavailable";
         } else if (accel_digests.size() != headers.size() ||

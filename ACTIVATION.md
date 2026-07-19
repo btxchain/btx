@@ -68,23 +68,33 @@ with `nMatMulV4Height` unset.
 
 ## Gate B — mainnet activation
 
-### ⛳ Activation trigger (the go/no-go gate)
+### ⛳ Activation trigger (current verdict: NO-GO)
 
-**Mainnet activation is READY as soon as both `cuda` AND `metal` (Apple
-M-series) return PASS** from the on-hardware determinism verification below.
-CUDA covers datacenter + consumer NVIDIA; Apple M-series covers the retail /
-pooled path — together they are the minimum hardware coverage to activate.
-HIP/ROCm and additional device classes are **follow-on coverage, not blocking**.
+**Mainnet activation is not ready.** The former “CUDA + Metal PASS ⇒ GO” rule is
+superseded: backend determinism is necessary, but it does not close the ENC-DR-LT
+economic, batching, verification-budget, HeaderPoW, or external-review gates.
+All public activation heights remain `INT32_MAX`, and
+`BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` remains false.
 
-- **GO** ⟺ `verify-backend.sh cuda` = PASS **and** `verify-backend.sh metal` = PASS.
-- On GO, execute the staged one-line flip in **§B6**.
-- Everything else in this branch (code, tests, harness, release procedure) is
-  already staged so that GO → activation is mechanical.
+At minimum, a future GO requires all of the following evidence in one reviewed
+release:
 
-> Recommended-but-not-blocking for the CUDA+M-series bar (owner's call, §B3–B4):
-> external audit and testnet burn-in address DoS/edge-case/economic risks that
-> are *separate* from the bit-exact determinism risk the trigger closes. Skipping
-> them trades those risks for speed — record the decision here.
+- bit-exact accelerator qualification on the intended NVIDIA, AMD, and other
+  supported frontier paths;
+- a silicon-comparable B200/5090 measurement from one device-resident consensus
+  Q* batch with W generation and digest on-device and no per-nonce sync; the
+  `1ca87fb` 118.92/77.08 wall rates are host/launch diagnostics, not a ratio or
+  ASERT input;
+- the LT G2/G3 ordering and nonce/$ gates, MI350 qualification, tip-verify soak,
+  and an independently completed C-15 review;
+- a safe fixed/header-contextual HeaderPoW admission design. The bit-26
+  variable-length wire was withdrawn and the dormant nNonce grind helper is not
+  an activatable public protocol;
+- testnet burn-in, external consensus/security audit, calibration, and explicit
+  L0 ratification.
+
+No single backend marker or one-line height flip constitutes authorization to
+activate.
 
 ### B1. GPU backend determinism — on-hardware (the trigger inputs)
 The kernels are written bit-exact-by-construction and compile behind their

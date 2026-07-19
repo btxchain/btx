@@ -468,8 +468,14 @@ matmul-v4-report-*.json   (schema_version 3, profile bmx4c-lt)
 lt-gate.py <dir> --manifest parts.tsv [--cost ...] [--ack-external-c15]
 ```
 
-- Silicon gates G1–G4 consume **measured** JSON only; missing
-  `device_nonce_per_s` / labels / costs ⇒ **NO-GO** (fail closed).
+- Silicon gates G1–G4 consume **measured** JSON only. G1 requires a qualified
+  native tensor path plus independent device kernel timing/counters and
+  `device_tensor_share_pct > 50`; `cpu_reference_tensor_share_pct` (legacy
+  `tensor_share_pct`) is composition-only and never passes G1. G2/G3 accept
+  `device_nonce_per_s` only with a device-resident consensus-Q* batch, device W
+  generation + digest, and no per-nonce synchronization. Historical or fallback
+  `host_orchestrated_nonce_per_s` diagnostics never count; missing eligible
+  rates / labels / costs ⇒ **NO-GO** (fail closed).
 - G5 (`--ack-external-c15`) is the operator attestation that **this packet**
   was completed by an independent cryptanalyst. Ack without that work is a
   process failure, not a math proof. C-15 remains **OPEN** until that review.

@@ -42,6 +42,16 @@ bool ComputeDigestsOnlyLTHip(const CBlockHeader& /*tmpl*/, uint32_t /*n*/,
     return false;
 }
 
+bool ComputeDigestsOnlyLTHip(
+    const std::vector<CBlockHeader>& /*headers*/, uint32_t /*n*/,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    LtHipBatchProvenance* provenance)
+{
+    out.clear();
+    if (provenance) *provenance = {};
+    return false;
+}
+
 bool LtLastS8S8UsedMfma()
 {
     return false;
