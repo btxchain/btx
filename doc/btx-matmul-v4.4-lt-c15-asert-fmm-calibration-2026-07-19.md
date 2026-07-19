@@ -82,9 +82,9 @@ Load-bearing scoping (packet §1.1–§1.2):
 
 - MatExpand ExactGemm is **`O(n²·w)`** with `w = kMatExpandPanelW = 1024`,
   **not** `O(n³)`.
-- At `n=4096`: MatExpand-B ≈ `4n²w ≈ 8.59×10⁹` MACs; `B̂·V` ≈ `2n²m ≈ 6.87×10¹⁰`.
+- At `n=4096`: MatExpand-B ≈ `4n²w ≈ 6.87×10¹⁰` MACs; `B̂·V` ≈ `2n²m ≈ 6.87×10¹⁰`.
 - The **cubic MAC floor** of one marginal nonce unit is deep-`m` sketch work
-  (`B̂·V` + combine), not the thin-panel expand.
+  (`B̂·V` + combine), not the panel expand.
 
 C-15 asks whether Extract prevents **cheaper-than-HonestMAC** Freivalds-linear
 rewrites through `GWH`. It does **not** ask whether MatExpand is cubic. Treating
