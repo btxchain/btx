@@ -402,6 +402,94 @@ BOOST_AUTO_TEST_CASE(adaptive_limb_combine_matches_direct_and_fallback)
     }
 }
 
+BOOST_AUTO_TEST_CASE(adaptive_base256_int8_top_boundaries_are_exact)
+{
+    constexpr uint32_t n = 1;
+    constexpr uint32_t m = 1;
+    const int32_t cases[] = {
+        32'639, 32'640, -32'896, -32'897,
+        8'355'711, 8'355'712, -8'421'504,
+    };
+    for (const int32_t value : cases) {
+        const std::vector<int32_t> P{value};
+        const std::vector<int32_t> Q{1};
+        BOOST_CHECK_MESSAGE(
+            bx::ComputeCombineAdaptiveLimbBMX4C(P, Q, n, m) ==
+                ComputeCombineModQ(P, Q, n, m),
+            "boundary=" << value);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(adaptive_base256_common_four_gemm_path_matches_direct)
+{
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const uint32_t n = 64;
+    const uint32_t m = 16;
+    // Entirely inside the exact two-limb window [-32896,32639].
+    constexpr int32_t bound = 30'000;
+    std::vector<int32_t> P(static_cast<size_t>(m) * n);
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m);
+    for (auto& x : P) x = static_cast<int32_t>(rng.randrange(2 * bound + 1)) - bound;
+    for (auto& x : Q) x = static_cast<int32_t>(rng.randrange(2 * bound + 1)) - bound;
+    P[0] = 32'639;
+    P[1] = -32'896;
+    Q[0] = -32'896;
+    Q[1] = 32'639;
+
+    bx::AdaptiveCombineStatsBMX4C stats;
+    const auto adaptive = bx::ComputeCombineAdaptiveSparseBase256BMX4C(P, Q, n, m, &stats);
+    BOOST_CHECK(adaptive == ComputeCombineModQ(P, Q, n, m));
+    BOOST_CHECK_EQUAL(stats.p_high_nonzero, 0U);
+    BOOST_CHECK_EQUAL(stats.q_high_nonzero, 0U);
+    BOOST_CHECK_EQUAL(stats.dense_gemm_count, 4U);
+    BOOST_CHECK(!stats.used_sparse_high_correction);
+    BOOST_CHECK(!stats.used_direct_fallback);
+}
+
+BOOST_AUTO_TEST_CASE(adaptive_base256_sparse_high_limbs_are_corrected_exactly)
+{
+    const uint32_t n = 8;
+    const uint32_t m = 4;
+    std::vector<int32_t> P(static_cast<size_t>(m) * n, 17);
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m, -23);
+
+    // First values just outside the asymmetric two-limb window, followed by
+    // full BMX4 extrema. Four total high limbs stay on the sparse path.
+    P[0] = 32'640;
+    P[19] = -32'897;
+    // Q[0] shares contraction index k=0 with P[0], pinning the Ph*Qh cross
+    // term in the sparse reconstruction rather than only isolated high limbs.
+    Q[0] = static_cast<int32_t>(bx::kCombineMaxAbs);
+    Q[28] = -static_cast<int32_t>(bx::kCombineMaxAbs);
+
+    bx::AdaptiveCombineStatsBMX4C stats;
+    const auto adaptive = bx::ComputeCombineAdaptiveSparseBase256BMX4C(P, Q, n, m, &stats);
+    BOOST_CHECK(adaptive == ComputeCombineModQ(P, Q, n, m));
+    BOOST_CHECK_EQUAL(stats.p_high_nonzero, 2U);
+    BOOST_CHECK_EQUAL(stats.q_high_nonzero, 2U);
+    BOOST_CHECK_EQUAL(stats.estimated_sparse_correction_macs, 16U);
+    BOOST_CHECK_EQUAL(stats.dense_gemm_count, 4U);
+    BOOST_CHECK(stats.used_sparse_high_correction);
+    BOOST_CHECK(!stats.used_direct_fallback);
+}
+
+BOOST_AUTO_TEST_CASE(adaptive_base256_dense_high_limbs_use_exact_direct_fallback)
+{
+    const uint32_t n = 8;
+    const uint32_t m = 4;
+    std::vector<int32_t> P(static_cast<size_t>(m) * n, 70'000);
+    std::vector<int32_t> Q(static_cast<size_t>(n) * m, -90'000);
+
+    bx::AdaptiveCombineStatsBMX4C stats;
+    const auto adaptive = bx::ComputeCombineAdaptiveSparseBase256BMX4C(P, Q, n, m, &stats);
+    BOOST_CHECK(adaptive == ComputeCombineModQ(P, Q, n, m));
+    BOOST_CHECK_EQUAL(stats.p_high_nonzero, P.size());
+    BOOST_CHECK_EQUAL(stats.q_high_nonzero, Q.size());
+    BOOST_CHECK_EQUAL(stats.dense_gemm_count, 0U);
+    BOOST_CHECK(!stats.used_sparse_high_correction);
+    BOOST_CHECK(stats.used_direct_fallback);
+}
+
 BOOST_AUTO_TEST_CASE(fp8_five_limb_combine_matches_direct)
 {
     FastRandomContext rng{/*fDeterministic=*/true};
