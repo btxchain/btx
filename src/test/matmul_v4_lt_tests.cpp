@@ -1269,7 +1269,7 @@ BOOST_AUTO_TEST_CASE(matexpand_extract_r2_nonapproximability)
     // dense samples across many positions. Degree ≥2 was previously untested.
     // Empirical only — not a PRF reduction.
     const uint256 seed = ParseUint256(
-        "c15a00c15a00c15a00c15a00c15a00c15a00c15a00c15a00c15a00c15a00c15a00");
+        "c15ac15ac15ac15ac15ac15ac15ac15ac15ac15ac15ac15ac15ac15ac15ac15a");
     const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
 
     const std::pair<uint32_t, uint32_t> positions[] = {
