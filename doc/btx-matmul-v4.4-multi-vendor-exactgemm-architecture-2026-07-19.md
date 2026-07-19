@@ -19,13 +19,14 @@ Living implementation notes for miner-local ExactGemm backends. Consensus remain
 
 **Implemented (this branch):**
 
-1. **cuBLASLt `CUBLAS_COMPUTE_32I` IMMA** (`matmul_v4_lt_tensor_gemm.cu`): host + **device-pointer** s8xs8→s32; self-test vs `ExactGemmS8S8` (square + MatExpand panel). `IsLtImmaGemmAvailable()` is true only after that match.
-2. **LT ExactGemmBackend / `LaunchGemmS8S8`**: IMMA first; scalar `DeviceGemmS8S8Tiled` only on decline. `LtLastS8S8UsedImma()` reports which path ran.
-3. **Device-resident MatExpand** (`matmul_v4_lt_accel.cu`): when IMMA available, G\*W / U\*Ahat / Bhat\*V use `TryLaunchLtImmaGemmS8S8Device` on persistent buffers; Y\*H stays scalar s32xs8 (no IMMA recipe — never claimed). Scalar CUDA graphs remain the non-IMMA path.
-4. **Arch probe**: `ProbeLtCudaArch` / `ProbeLtCudaExactGemmCapabilities` → `sm_*` + name class `hopper` / `blackwell_dc` / `blackwell_consumer`.
-5. **Digest-only D2H gap (honest)**: resident path still copies full Chat to host for `ComputeSketchDigestFromFq`. `device_hashing=false` in capabilities. Persistent buffers reused; loser Chat traffic not yet eliminated.
+1. **cuBLASLt `CUBLAS_COMPUTE_32I` IMMA** (`matmul_v4_lt_tensor_gemm.cu`): host + **device-pointer** s8xs8→s32; process-persistent handle/workspace/**A·B·C scratch**. Multi-shape self-qual vs `ExactGemmS8S8`: square 32, thin panel, full `kMatExpandPanelW` G\*W, U\*Ahat (m×n×n), Bhat\*V (n×n×m) — host **and** device-pointer entries. `IsLtImmaGemmAvailable()` is true only after all shapes match.
+2. **LT ExactGemmBackend / `LaunchGemmS8S8`**: IMMA first; scalar `DeviceGemmS8S8Tiled` only on decline. `LtLastS8S8UsedImma()` reports which path ran (never true for scalar).
+3. **S32S8**: `TryLaunchLtImmaGemmS32S8` **always declines** — `CUBLAS_COMPUTE_32I` is s8×s8→s32 only; no proven exact s32×s8→s32 cuBLASLt/CUTLASS recipe self-qualified on sm_90/100/120. Fast scalar `DeviceGemmS32S8Tiled` / CPU `ExactGemmS32S8` stay the path (`exact_partitioned_s32_s8=false`).
+4. **Device-resident MatExpand** (`matmul_v4_lt_accel.cu`): when IMMA available, G\*W / U\*Ahat / Bhat\*V use `TryLaunchLtImmaGemmS8S8Device` on persistent buffers; Y\*H stays scalar s32xs8 (never claimed as IMMA). Scalar CUDA graphs remain the non-IMMA path.
+5. **Arch probe**: `ProbeLtCudaArch` / `ProbeLtCudaExactGemmCapabilities` → `sm_*` + name class `hopper` / `blackwell_dc` / `blackwell_consumer`.
+6. **Digest-only D2H gap (honest)**: resident path still copies full Chat to host for `ComputeSketchDigestFromFq`. `device_hashing=false` in capabilities until a bit-identical device digest exists. Persistent MatExpand + GEMM scratch reused.
 
-**Honest stubs:** CUTLASS MXFP4 / device FP8 remain fail-closed until self-qual on named silicon. Hand-written MXFP4 scalar decode never sets `used_tensor_path`. sm_120a vs sm_100a PTX recipes must not be conflated (see `matmul_v4_bmx4_cutlass_mxfp4.h`).
+**Honest stubs / fail-closed:** CUTLASS MXFP4 tensor kernel + device FP8 remain fail-closed until self-qual on named silicon. Portable exact MXFP4 integer path is always available and **never** sets `used_tensor_path`. sm_120a (consumer `mxf4` PTX) vs sm_100a (datacenter tcgen05) recipes must not be conflated (see `matmul_v4_bmx4_cutlass_mxfp4.h`).
 
 ## AMD ROCm / HIP (MI300 / MI350)
 

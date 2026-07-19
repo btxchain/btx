@@ -52,11 +52,13 @@ struct LtCudaExactGemmCapabilities {
 /** Snapshot of ExactGemm lanes + arch for capabilities reporting. */
 [[nodiscard]] LtCudaExactGemmCapabilities ProbeLtCudaExactGemmCapabilities();
 
-/** True iff cuBLASLt IMMA s8xs8->s32 passed bit-exact self-test vs ExactGemmS8S8.
- *  S32S8 has no dedicated IMMA recipe here — availability does NOT imply s32xs8. */
+/** True iff cuBLASLt IMMA s8xs8->s32 passed multi-shape bit-exact self-test vs
+ *  ExactGemmS8S8 (square + MatExpand G*W / U*Ahat / Bhat*V panels). Does NOT
+ *  imply s32xs8 IMMA — that lane always declines. */
 [[nodiscard]] bool IsLtImmaGemmAvailable();
 
-/** Attempt IMMA ExactGemmS8S8 (host vectors). Returns false → caller MUST use scalar/ALU. */
+/** Attempt IMMA ExactGemmS8S8 (host vectors; persistent A/B/C scratch).
+ *  Returns false → caller MUST use scalar/ALU and MUST NOT claim IMMA. */
 [[nodiscard]] bool TryLaunchLtImmaGemmS8S8(const std::vector<int8_t>& left,
                                            const std::vector<int8_t>& right,
                                            uint32_t rows, uint32_t inner, uint32_t cols,
@@ -69,8 +71,9 @@ struct LtCudaExactGemmCapabilities {
                                                  uint32_t rows, uint32_t cols, uint32_t inner,
                                                  void* stream /* cudaStream_t */);
 
-/** Attempt IMMA-backed ExactGemmS32S8. Currently always declines (no dedicated
- *  IMMA shape) so callers keep scalar ExactGemmS32S8 / DeviceGemmS32S8Tiled. */
+/** Attempt IMMA ExactGemmS32S8. Always declines: cuBLASLt CUBLAS_COMPUTE_32I is
+ *  s8×s8→s32 only; no self-qualified s32×s8→s32 recipe on sm_90/100/120.
+ *  Callers keep ExactGemmS32S8 / DeviceGemmS32S8Tiled (never label as IMMA). */
 [[nodiscard]] bool TryLaunchLtImmaGemmS32S8(const std::vector<int32_t>& left,
                                             const std::vector<int8_t>& right,
                                             uint32_t rows, uint32_t inner, uint32_t cols,

@@ -16,47 +16,48 @@
 #include <vector>
 
 // CUDA IMMA path for LT ExactGemm: cuBLASLt CUBLAS_COMPUTE_32I (s8xs8->s32).
-// Self-tested bit-for-bit against ExactGemmS8S8 before IsLtImmaGemmAvailable
-// returns true. S32S8 declines to scalar (no dedicated IMMA shape here) so we
-// never advertise a tensor path we did not run.
+// Self-tested bit-for-bit against ExactGemmS8S8 across MatExpand shapes before
+// IsLtImmaGemmAvailable returns true. Host and device-pointer launches share a
+// process-persistent cuBLASLt handle + workspace + A/B/C scratch.
+//
+// S32S8: cuBLASLt CUBLAS_COMPUTE_32I is an s8×s8→s32 recipe only. There is no
+// documented exact s32×s8→s32 IMMA/cuBLASLt/CUTLASS path we can self-qualify on
+// sm_90/100/120, so TryLaunchLtImmaGemmS32S8 always declines; callers keep
+// ExactGemmS32S8 / DeviceGemmS32S8Tiled and MUST NOT claim IMMA for that lane.
 //
 // Target arches (PR #89): sm_90 (H100/H200), sm_100 (B200), sm_120 (5090).
 
 namespace matmul_v4::cuda {
 namespace {
 
-struct DeviceBuffer {
-    void* ptr{nullptr};
-    ~DeviceBuffer()
-    {
-        if (ptr) cudaFree(ptr);
-    }
-    [[nodiscard]] bool Alloc(size_t bytes)
-    {
-        if (bytes == 0) {
-            ptr = nullptr;
-            return true;
-        }
-        return cudaMalloc(&ptr, bytes) == cudaSuccess;
-    }
-};
-
 struct ImmaLtPool {
     std::mutex mu;
     cublasLtHandle_t lt{nullptr};
     void* workspace{nullptr};
     size_t workspace_bytes{0};
+    void* dA{nullptr};
+    void* dB{nullptr};
+    void* dC{nullptr};
+    size_t a_bytes{0};
+    size_t b_bytes{0};
+    size_t c_bytes{0};
     bool ready{false};
 
     ~ImmaLtPool() { Release(); }
 
     void Release()
     {
-        if (workspace) {
-            cudaFree(workspace);
-            workspace = nullptr;
-            workspace_bytes = 0;
-        }
+        auto free_p = [](void*& p, size_t& n) {
+            if (p) {
+                cudaFree(p);
+                p = nullptr;
+                n = 0;
+            }
+        };
+        free_p(workspace, workspace_bytes);
+        free_p(dA, a_bytes);
+        free_p(dB, b_bytes);
+        free_p(dC, c_bytes);
         if (lt) {
             cublasLtDestroy(lt);
             lt = nullptr;
@@ -64,7 +65,7 @@ struct ImmaLtPool {
         ready = false;
     }
 
-    [[nodiscard]] bool Ensure(size_t need_workspace)
+    [[nodiscard]] bool EnsureHandle(size_t need_workspace)
     {
         if (!ready) {
             if (cublasLtCreate(&lt) != CUBLAS_STATUS_SUCCESS) {
@@ -84,6 +85,23 @@ struct ImmaLtPool {
         workspace_bytes = need_workspace;
         return true;
     }
+
+    [[nodiscard]] bool EnsureScratch(size_t need_a, size_t need_b, size_t need_c)
+    {
+        auto grow = [](void*& p, size_t& have, size_t need) -> bool {
+            if (need <= have) return true;
+            if (p) {
+                cudaFree(p);
+                p = nullptr;
+                have = 0;
+            }
+            if (need == 0) return true;
+            if (cudaMalloc(&p, need) != cudaSuccess) return false;
+            have = need;
+            return true;
+        };
+        return grow(dA, a_bytes, need_a) && grow(dB, b_bytes, need_b) && grow(dC, c_bytes, need_c);
+    }
 };
 
 ImmaLtPool& ImmaPool()
@@ -92,15 +110,13 @@ ImmaLtPool& ImmaPool()
     return pool;
 }
 
-[[nodiscard]] bool RunCublasLtS8S8(const int8_t* dA, const int8_t* dB, int32_t* dC,
-                                   uint32_t M, uint32_t N, uint32_t K,
-                                   cudaStream_t stream, std::string& error)
+/** Caller MUST hold ImmaPool().mu. */
+[[nodiscard]] bool RunCublasLtS8S8Locked(ImmaLtPool& pool, const int8_t* dA, const int8_t* dB,
+                                         int32_t* dC, uint32_t M, uint32_t N, uint32_t K,
+                                         cudaStream_t stream, std::string& error)
 {
     constexpr size_t kDefaultWorkspace = 8ull << 20;
-
-    auto& pool = ImmaPool();
-    std::lock_guard<std::mutex> lock(pool.mu);
-    if (!pool.Ensure(kDefaultWorkspace)) {
+    if (!pool.EnsureHandle(kDefaultWorkspace)) {
         error = "cublasLtCreate / workspace alloc failed";
         return false;
     }
@@ -131,6 +147,7 @@ ImmaLtPool& ImmaPool()
         cleanup();
         return false;
     }
+    // Row-major ExactGemm layout: A[M×K], B[K×N], C[M×N] with leading dims K,N,N.
     if (cublasLtMatrixLayoutCreate(&a_layout, CUDA_R_8I, M, K, K) != CUBLAS_STATUS_SUCCESS ||
         cublasLtMatrixLayoutCreate(&b_layout, CUDA_R_8I, K, N, N) != CUBLAS_STATUS_SUCCESS ||
         cublasLtMatrixLayoutCreate(&c_layout, CUDA_R_32I, M, N, N) != CUBLAS_STATUS_SUCCESS) {
@@ -172,6 +189,15 @@ ImmaLtPool& ImmaPool()
     return true;
 }
 
+[[nodiscard]] bool RunCublasLtS8S8(const int8_t* dA, const int8_t* dB, int32_t* dC,
+                                   uint32_t M, uint32_t N, uint32_t K,
+                                   cudaStream_t stream, std::string& error)
+{
+    auto& pool = ImmaPool();
+    std::lock_guard<std::mutex> lock(pool.mu);
+    return RunCublasLtS8S8Locked(pool, dA, dB, dC, M, N, K, stream, error);
+}
+
 [[nodiscard]] bool LaunchImmaS8S8Host(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
                                       uint32_t rows, uint32_t k, uint32_t cols, std::vector<int32_t>& out)
 {
@@ -182,18 +208,58 @@ ImmaLtPool& ImmaPool()
     const size_t lhs_bytes = static_cast<size_t>(rows) * k * sizeof(int8_t);
     const size_t rhs_bytes = static_cast<size_t>(k) * cols * sizeof(int8_t);
     const size_t out_bytes = static_cast<size_t>(rows) * cols * sizeof(int32_t);
-    DeviceBuffer dA, dB, dD;
-    if (!dA.Alloc(lhs_bytes) || !dB.Alloc(rhs_bytes) || !dD.Alloc(out_bytes)) return false;
-    if (cudaMemcpy(dA.ptr, left.data(), lhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
-    if (cudaMemcpy(dB.ptr, right.data(), rhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
+
+    auto& pool = ImmaPool();
+    std::lock_guard<std::mutex> lock(pool.mu);
+    if (!pool.EnsureScratch(lhs_bytes, rhs_bytes, out_bytes)) return false;
+    if (cudaMemcpy(pool.dA, left.data(), lhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    if (cudaMemcpy(pool.dB, right.data(), rhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
     std::string error;
-    if (!RunCublasLtS8S8(static_cast<const int8_t*>(dA.ptr), static_cast<const int8_t*>(dB.ptr),
-                         static_cast<int32_t*>(dD.ptr), rows, cols, k, /*stream=*/nullptr, error)) {
+    if (!RunCublasLtS8S8Locked(pool, static_cast<const int8_t*>(pool.dA), static_cast<const int8_t*>(pool.dB),
+                               static_cast<int32_t*>(pool.dC), rows, cols, k, /*stream=*/nullptr, error)) {
         return false;
     }
     if (cudaDeviceSynchronize() != cudaSuccess) return false;
     out.assign(static_cast<size_t>(rows) * cols, 0);
-    return cudaMemcpy(out.data(), dD.ptr, out_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+    return cudaMemcpy(out.data(), pool.dC, out_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+}
+
+[[nodiscard]] bool MatchShapeVsCpu(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
+                                   uint32_t rows, uint32_t inner, uint32_t cols)
+{
+    const auto cpu = matmul::v4::lt::ExactGemmS8S8(left, right, rows, inner, cols);
+    std::vector<int32_t> gpu;
+    if (!LaunchImmaS8S8Host(left, right, rows, inner, cols, gpu) || gpu != cpu) {
+        return false;
+    }
+    // Device-pointer entry on the same persistent scratch must also match.
+    auto& pool = ImmaPool();
+    const size_t lhs_bytes = static_cast<size_t>(rows) * inner * sizeof(int8_t);
+    const size_t rhs_bytes = static_cast<size_t>(inner) * cols * sizeof(int8_t);
+    const size_t out_bytes = static_cast<size_t>(rows) * cols * sizeof(int32_t);
+    std::lock_guard<std::mutex> lock(pool.mu);
+    if (!pool.EnsureScratch(lhs_bytes, rhs_bytes, out_bytes)) return false;
+    if (cudaMemcpy(pool.dA, left.data(), lhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    if (cudaMemcpy(pool.dB, right.data(), rhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    std::string error;
+    if (!RunCublasLtS8S8Locked(pool, static_cast<const int8_t*>(pool.dA), static_cast<const int8_t*>(pool.dB),
+                               static_cast<int32_t*>(pool.dC), rows, cols, inner, /*stream=*/nullptr, error)) {
+        return false;
+    }
+    if (cudaDeviceSynchronize() != cudaSuccess) return false;
+    std::vector<int32_t> gpu_dev(static_cast<size_t>(rows) * cols);
+    if (cudaMemcpy(gpu_dev.data(), pool.dC, out_bytes, cudaMemcpyDeviceToHost) != cudaSuccess) {
+        return false;
+    }
+    return gpu_dev == cpu;
+}
+
+[[nodiscard]] bool FillFolded(std::vector<int8_t>& v, int32_t a, int32_t b)
+{
+    for (size_t i = 0; i < v.size(); ++i) {
+        v[i] = matmul::v4::lt::FoldInt32ToEmax48(static_cast<int32_t>(i) * a + b);
+    }
+    return true;
 }
 
 [[nodiscard]] bool SelfTestImmaOnce()
@@ -201,32 +267,54 @@ ImmaLtPool& ImmaPool()
     static std::once_flag once;
     static bool ok = false;
     std::call_once(once, [] {
-        constexpr uint32_t kDim = 32;
-        std::vector<int8_t> left(static_cast<size_t>(kDim) * kDim);
-        std::vector<int8_t> right(static_cast<size_t>(kDim) * kDim);
-        for (uint32_t i = 0; i < kDim * kDim; ++i) {
-            left[i] = matmul::v4::lt::FoldInt32ToEmax48(static_cast<int32_t>(i) * 7 - 101);
-            right[i] = matmul::v4::lt::FoldInt32ToEmax48(static_cast<int32_t>(i) * 11 + 53);
+        // (1) Square IMMA tile.
+        {
+            constexpr uint32_t kDim = 32;
+            std::vector<int8_t> left(static_cast<size_t>(kDim) * kDim);
+            std::vector<int8_t> right(static_cast<size_t>(kDim) * kDim);
+            FillFolded(left, 7, -101);
+            FillFolded(right, 11, 53);
+            if (!MatchShapeVsCpu(left, right, kDim, kDim, kDim)) return;
         }
-        const auto cpu = matmul::v4::lt::ExactGemmS8S8(left, right, kDim, kDim, kDim);
-        std::vector<int32_t> gpu;
-        if (!LaunchImmaS8S8Host(left, right, kDim, kDim, kDim, gpu) || gpu != cpu) {
-            return;
+        // (2) Thin MatExpand-style panel (G*W with small w).
+        {
+            constexpr uint32_t kN = 64;
+            constexpr uint32_t kW = 16;
+            std::vector<int8_t> G(static_cast<size_t>(kN) * kN);
+            std::vector<int8_t> W(static_cast<size_t>(kN) * kW);
+            FillFolded(G, 3, -17);
+            FillFolded(W, 5, 9);
+            if (!MatchShapeVsCpu(G, W, kN, kN, kW)) return;
         }
-        constexpr uint32_t kN = 64;
-        constexpr uint32_t kW = 16;
-        std::vector<int8_t> G(static_cast<size_t>(kN) * kN);
-        std::vector<int8_t> W(static_cast<size_t>(kN) * kW);
-        for (uint32_t i = 0; i < kN * kN; ++i) {
-            G[i] = matmul::v4::lt::FoldInt32ToEmax48(static_cast<int32_t>(i) * 3 - 17);
+        // (3) Full MatExpand panel width (G*W with kMatExpandPanelW).
+        {
+            constexpr uint32_t kN = 64;
+            constexpr uint32_t kW = matmul::v4::lt::kMatExpandPanelW;
+            std::vector<int8_t> G(static_cast<size_t>(kN) * kN);
+            std::vector<int8_t> W(static_cast<size_t>(kN) * kW);
+            FillFolded(G, 13, -41);
+            FillFolded(W, 17, 23);
+            if (!MatchShapeVsCpu(G, W, kN, kN, kW)) return;
         }
-        for (uint32_t i = 0; i < kN * kW; ++i) {
-            W[i] = matmul::v4::lt::FoldInt32ToEmax48(static_cast<int32_t>(i) * 5 + 9);
+        // (4) U*Ahat style: m×n × n×n → m×n (deep tile m = n/2).
+        {
+            constexpr uint32_t kN = 64;
+            constexpr uint32_t kM = kN / 2;
+            std::vector<int8_t> U(static_cast<size_t>(kM) * kN);
+            std::vector<int8_t> Ahat(static_cast<size_t>(kN) * kN);
+            FillFolded(U, 19, -7);
+            FillFolded(Ahat, 29, 11);
+            if (!MatchShapeVsCpu(U, Ahat, kM, kN, kN)) return;
         }
-        const auto cpu_panel = matmul::v4::lt::ExactGemmS8S8(G, W, kN, kN, kW);
-        std::vector<int32_t> gpu_panel;
-        if (!LaunchImmaS8S8Host(G, W, kN, kN, kW, gpu_panel) || gpu_panel != cpu_panel) {
-            return;
+        // (5) Bhat*V style: n×n × n×m → n×m.
+        {
+            constexpr uint32_t kN = 64;
+            constexpr uint32_t kM = kN / 2;
+            std::vector<int8_t> Bhat(static_cast<size_t>(kN) * kN);
+            std::vector<int8_t> V(static_cast<size_t>(kN) * kM);
+            FillFolded(Bhat, 31, -13);
+            FillFolded(V, 37, 5);
+            if (!MatchShapeVsCpu(Bhat, V, kN, kN, kM)) return;
         }
         ok = true;
     });
@@ -283,8 +371,10 @@ LtCudaExactGemmCapabilities ProbeLtCudaExactGemmCapabilities()
     LtCudaExactGemmCapabilities caps;
     caps.arch = ProbeLtCudaArch();
     caps.exact_s8_s8_s32 = IsLtImmaGemmAvailable();
+    // No self-qualified s32×s8→s32 IMMA recipe (cuBLASLt CUBLAS_COMPUTE_32I is s8×s8).
     caps.exact_partitioned_s32_s8 = false;
     caps.device_scalar_gemm = caps.arch.available;
+    // Digest-only still Chat D2H → ComputeSketchDigestFromFq on host.
     caps.device_hashing = false;
     return caps;
 }
@@ -320,6 +410,8 @@ bool TryLaunchLtImmaGemmS32S8(const std::vector<int32_t>& /*left*/, const std::v
                               uint32_t /*rows*/, uint32_t /*inner*/, uint32_t /*cols*/,
                               std::vector<int32_t>& /*out*/)
 {
+    // Honest decline: no exact s32×s8→s32 cuBLASLt/CUTLASS IMMA recipe is
+    // self-qualified here. DeviceGemmS32S8Tiled / ExactGemmS32S8 remain the path.
     return false;
 }
 
