@@ -34,7 +34,8 @@
  //   persistent device-resident loop over MatExpand → project → combine.
  //   When IsLtImmaGemmAvailable(), s8xs8 stages (G*W, U*Ahat, Bhat*V) use
  //   cuBLASLt CUBLAS_COMPUTE_32I IMMA on resident device pointers; s32xs8
- //   (Y*H) stays scalar DeviceGemmS32S8Tiled (no dedicated IMMA recipe).
+ //   (Y*H) stays scalar DeviceGemmS32S8Tiled — TryLaunchLtImmaGemmS32S8 always
+ //   declines (no exact s32×s8→s32 cuBLASLt recipe); never labeled IMMA.
  //   When IMMA declines, scalar tiled DeviceGemm* + CUDA-graph replay serve
  //   the same buffers — never labeled IMMA. Digest hashing stays on host after
  //   Chat D2H (honest gap: device-side SHA256d of Chat is not wired yet).

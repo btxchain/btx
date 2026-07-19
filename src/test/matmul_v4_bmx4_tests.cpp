@@ -23,6 +23,7 @@
 #include <cuda/matmul_v4_bmx4_cutlass_mxfp4.h>
 #include <cuda/matmul_v4_bmx4_fp8_five_limb.h>
 #include <ascend/matmul_v4_lt_accel.h>
+#include <cuda/matmul_v4_lt_accel.h>
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_v4.h>
@@ -563,15 +564,18 @@ BOOST_AUTO_TEST_CASE(lt_tensor_gemm_availability_and_arch_probe)
 
     const auto caps = matmul_v4::cuda::ProbeLtCudaExactGemmCapabilities();
     BOOST_CHECK_EQUAL(caps.device_hashing, false); // Chat D2H gap documented
-    BOOST_CHECK_EQUAL(caps.exact_partitioned_s32_s8, false);
+    BOOST_CHECK_EQUAL(caps.exact_partitioned_s32_s8, false); // s32xs8 IMMA always declines
+    BOOST_CHECK(!matmul_v4::cuda::LtLastS8S8UsedImma()); // no prior LaunchGemm on this thread
 
 #if !defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
     BOOST_CHECK(!matmul_v4::cuda::IsLtImmaGemmAvailable());
     BOOST_CHECK(!caps.exact_s8_s8_s32);
     BOOST_CHECK_EQUAL(arch.name_class_string, "unknown");
+    BOOST_CHECK(!caps.device_scalar_gemm);
 #else
     if (matmul_v4::cuda::IsLtImmaGemmAvailable()) {
         BOOST_CHECK(caps.exact_s8_s8_s32);
+        BOOST_CHECK(caps.device_scalar_gemm);
         constexpr uint32_t kDim = 32;
         std::vector<int8_t> left(static_cast<size_t>(kDim) * kDim);
         std::vector<int8_t> right(static_cast<size_t>(kDim) * kDim);
@@ -583,6 +587,21 @@ BOOST_AUTO_TEST_CASE(lt_tensor_gemm_availability_and_arch_probe)
         std::vector<int32_t> gpu;
         BOOST_REQUIRE(matmul_v4::cuda::TryLaunchLtImmaGemmS8S8(left, right, kDim, kDim, kDim, gpu));
         BOOST_CHECK(gpu == cpu);
+        // MatExpand thin panel must also match when IMMA is advertised.
+        constexpr uint32_t kN = 64;
+        constexpr uint32_t kW = 16;
+        std::vector<int8_t> G(static_cast<size_t>(kN) * kN);
+        std::vector<int8_t> W(static_cast<size_t>(kN) * kW);
+        for (uint32_t i = 0; i < kN * kN; ++i) {
+            G[i] = static_cast<int8_t>((i * 3u) % 97) - 48;
+        }
+        for (uint32_t i = 0; i < kN * kW; ++i) {
+            W[i] = static_cast<int8_t>((i * 5u) % 97) - 48;
+        }
+        const auto cpu_panel = matmul::v4::lt::ExactGemmS8S8(G, W, kN, kN, kW);
+        std::vector<int32_t> gpu_panel;
+        BOOST_REQUIRE(matmul_v4::cuda::TryLaunchLtImmaGemmS8S8(G, W, kN, kN, kW, gpu_panel));
+        BOOST_CHECK(gpu_panel == cpu_panel);
     } else {
         BOOST_CHECK(!caps.exact_s8_s8_s32);
     }
@@ -605,8 +624,12 @@ BOOST_AUTO_TEST_CASE(lt_tensor_gemm_availability_and_arch_probe)
         BOOST_CHECK(!matmul_v4::metal::TryLaunchLtTensorOpsGemmS8S8(a, b, 4, 4, 4, out));
     }
 
+    // S32S8 IMMA always declines — scalar DeviceGemmS32S8Tiled / CPU ExactGemm remain.
     std::vector<int32_t> mid(16, 3);
     BOOST_CHECK(!matmul_v4::cuda::TryLaunchLtImmaGemmS32S8(mid, b, 4, 4, 4, out));
+#if !defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+    BOOST_CHECK(!matmul_v4::cuda::LtLastS8S8UsedImma());
+#endif
 }
 
 
