@@ -37,15 +37,25 @@ Projectors use `BTX_MATMUL_V44LT_SKETCH_U/V`. Digest = `H(σ ‖ Chat)` with
 
 ## Q* window
 
-**Phase A (normative today):** miner evaluates a window of `Q*` per-nonce digests;
-lottery object remains the per-nonce ENC-DR digest (sketch-cache auth intact).
+**Phase A (default when LT live):** miner evaluates a window of `Q*` per-nonce
+digests; lottery object remains the per-nonce ENC-DR digest (sketch-cache auth
+intact). `fMatMulLTSealAsPoW = false`.
 
-Merkle/seal helpers (for harnesses / Phase B):
+**Phase B (IMPLEMENTED, inert while `nMatMulDRLTHeight = INT32_MAX`):** when
+`IsMatMulLTSealAsPoWActive(height)` the lottery object is the window seal:
 
-`SHA256("BTX_QSTAR_COMMIT_V44LT" ‖ σ_anchor ‖ merkle ‖ Q* LE32)`.
+```
+matmul_digest := SealWindowCommit(σ_anchor, Merkle(slot digests), Q*)
+slot_j.nonce  := DeriveWindowSlotNonce(σ_anchor, j)
+slot_j.seeds  := SetDeterministicMatMulSeeds(slot_j, height, parent_MTP)  # LT-Q2
+slot_j.digest := ComputeDigestBMX4CLT(slot_j)  # H(σ_slot ‖ Chat_slot)
+```
 
-Verifier Freivalds-checks committed sketches and always reseals winners through
-`ComputeDigestBMX4CLT`.
+Seal commit tag: `SHA256("BTX_QSTAR_COMMIT_V44LT" ‖ σ_anchor ‖ merkle ‖ Q* LE32)`.
+
+EncDr verify recomputes the seal with parent MTP (`CheckMatMulProofOfWork_V4EncDr`);
+Phase-A `H(σ‖Chat)==matmul_digest` cache auth / MMSKETCH are skipped in seal mode.
+Regtest opt-in: `-regtestmatmulltsealaspow` (requires live `-regtestdrltheight`).
 
 ## Activation
 
@@ -55,6 +65,7 @@ Verifier Freivalds-checks committed sketches and always reseals winners through
 | `nMatMulConsensusQStar` | `64` |
 | `nMatMulLTTranscriptBlockSize` | `2` |
 | `nMatMulDRLTAsertRescaleNum/Den` | `1/1` (calibrate from silicon) |
+| `fMatMulLTSealAsPoW` | `false` (Phase B mode; inert without live DRLT) |
 
 Profile enum: `ENC_BMX4C_LT = 4`. Live only when `IsDRLTActive(height)`.
 
@@ -81,7 +92,7 @@ Linker `*_stub.cpp` files remain only for builds with the corresponding `BTX_ENA
 5. MatExpand adversarial review closed on Mix+M11 Extract (internal: done; external C-15 still required)
 6. Tip verify budget with sketch-cache
 7. Header-PoW + authenticated chainwork blockers unchanged
-8. Phase B seal-as-PoW only if Rank-1 launch requires consensus-bound windows
+8. Phase B seal-as-PoW tip-verify budget + seal-binding review if Rank-1 launch requires consensus-bound windows (code implemented; measurement/review still required)
 
 ## Source map
 

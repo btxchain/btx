@@ -5,6 +5,9 @@
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/accel_v4.h>
 
+#include <arith_uint256.h>
+#include <consensus/params.h>
+#include <pow.h>
 #include <primitives/block.h>
 #include <span.h>
 #include <test/util/setup_common.h>
@@ -13,6 +16,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <cstdint>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -459,6 +463,64 @@ BOOST_AUTO_TEST_CASE(phase_b_seal_round_trip_and_auth)
     // Wrong Q* rejected.
     uint256 junk;
     BOOST_CHECK(!lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/32, seed_fn, junk));
+}
+
+BOOST_AUTO_TEST_CASE(phase_b_seal_parent_mtp_slot_seeds_and_encdr)
+{
+    // EncDr seal recompute with parent-MTP-threaded V3 seeds (LT-Q2): changing
+    // MTP must change the seal; missing MTP fails closed; digest matches the
+    // library ComputeSealDigestBMX4CLT under the same SlotSeedFn.
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulBMX4CHeight = 1;
+    p.nMatMulDRLTHeight = 1;
+    p.nMatMulV4Dimension = kTestDim;
+    p.nMatMulConsensusQStar = 64;
+    p.nMatMulLTTranscriptBlockSize = 2;
+    p.fMatMulLTSealAsPoW = true;
+    p.nMatMulV4FreivaldsRounds = 8;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 10;
+    constexpr int64_t kMtp = 1'700'000'000;
+    BOOST_REQUIRE(p.IsMatMulLTSealAsPoWActive(kHeight));
+
+    auto anchor = MakeLTHeader(11, kTestDim);
+    anchor.nBits = UintToArith256(p.powLimit).GetCompact();
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(anchor, p, kHeight, kMtp));
+
+    const auto slot_seed = [&](CBlockHeader& h) -> bool {
+        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp);
+    };
+
+    uint256 seal;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 64, slot_seed, seal));
+    anchor.matmul_digest = seal;
+
+    // Library seal == EncDr reference recompute.
+    uint256 recomputed;
+    std::vector<unsigned char> sketch;
+    BOOST_REQUIRE(RecomputeMatMulV4SketchReference(anchor, p, kHeight, recomputed, sketch, kMtp));
+    BOOST_CHECK(recomputed == seal);
+    BOOST_CHECK(sketch.empty()); // seal mode leaves no Phase-A Chat payload
+
+    // Missing MTP fails closed.
+    uint256 no_mtp;
+    BOOST_CHECK(!RecomputeMatMulV4SketchReference(anchor, p, kHeight, no_mtp, sketch, std::nullopt));
+
+    CBlock block;
+    static_cast<CBlockHeader&>(block) = anchor;
+    BOOST_CHECK(CheckMatMulProofOfWork_V4EncDr(block, p, kHeight, kMtp));
+    BOOST_CHECK(!CheckMatMulProofOfWork_V4EncDr(block, p, kHeight, std::nullopt));
+
+    // Different parent MTP ⇒ different sibling seeds ⇒ different seal.
+    const auto slot_seed_other = [&](CBlockHeader& h) -> bool {
+        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp + 1);
+    };
+    uint256 seal_other;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 64, slot_seed_other, seal_other));
+    BOOST_CHECK(seal_other != seal);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

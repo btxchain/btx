@@ -10233,6 +10233,13 @@ std::optional<int32_t> ChainstateManager::ClassifyMatMulEncDrRecompute(const CBl
     if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty() || !block.matrix_c_data.empty()) {
         return std::nullopt;
     }
+    // Phase B seal-as-PoW: tip verify needs parent MTP for sibling-slot V3 seeds
+    // (CheckMatMulProofOfWork_V4EncDr). Keep seal-mode heights on the synchronous
+    // ContextualCheckBlock path (which has pindexPrev->GetMedianTimePast()); the
+    // async worker has no MTP and must not memoize a fail-closed false verdict.
+    if (params.IsMatMulLTSealAsPoWActive(nHeight)) {
+        return std::nullopt;
+    }
     if (const CBlockIndex* existing = m_blockman.LookupBlockIndex(block.GetHash())) {
         // Already have the data: AcceptBlock short-circuits before the seam.
         if (existing->nStatus & BLOCK_HAVE_DATA) return std::nullopt;
@@ -10364,13 +10371,26 @@ static bool ContextualCheckBlock(const CBlock& block,
                     // believes cs_main is held here (the RAII guard is
                     // NO_THREAD_SAFETY_ANALYSIS), so a guarded call would compile
                     // yet run unlocked. Keep it to the single pure recompute.
-                    encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight);
+                    // Parent MTP is a pure scalar from pindexPrev (already
+                    // resolved under cs_main above); Phase B seal-as-PoW needs
+                    // it for sibling-slot V3 seed re-derivation (LT-Q2).
+                    const std::optional<int64_t> parent_mtp =
+                        pindexPrev != nullptr
+                            ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
+                            : std::nullopt;
+                    encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
+                                                              parent_mtp);
                 } else {
                     // E: TestBlockValidity path — keep cs_main held across the
                     // recompute so the caller's Tip()-pinned viewNew/indexDummy
                     // cannot be invalidated by a concurrent tip advance. The
                     // verdict is identical; only the locking discipline differs.
-                    encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight);
+                    const std::optional<int64_t> parent_mtp =
+                        pindexPrev != nullptr
+                            ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
+                            : std::nullopt;
+                    encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
+                                                              parent_mtp);
                 }
                 if (!encdr_ok) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",

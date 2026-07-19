@@ -3679,7 +3679,8 @@ bool RecomputeMatMulV4SketchReference(const CBlockHeader& header,
                                       const Consensus::Params& params,
                                       int32_t block_height,
                                       uint256& digest_out,
-                                      std::vector<unsigned char>& sketch_out)
+                                      std::vector<unsigned char>& sketch_out,
+                                      std::optional<int64_t> parent_median_time_past)
 {
     // v4.4 ENC-DR RECOMPUTE reference (tension-resolution §4.2): the verify-side
     // entry point of the SAME CPU pure-integer reference the miner seals winning
@@ -3699,6 +3700,8 @@ bool RecomputeMatMulV4SketchReference(const CBlockHeader& header,
     // fast-ACCEPT (digest match proves Chat correct under SHA collision
     // resistance); any mismatch must fall back to this reference before a
     // reject is pronounced.
+    digest_out.SetNull();
+    sketch_out.clear();
     const uint32_t n = params.nMatMulV4Dimension;
     const Consensus::MatMulEncodingProfile enc_profile =
         params.GetMatMulEncodingProfile(block_height);
@@ -3707,6 +3710,21 @@ bool RecomputeMatMulV4SketchReference(const CBlockHeader& header,
         if (static_cast<int64_t>(Consensus::BMX4C_BASE_PRODUCT_BOUND_PER_N) * n >
             std::numeric_limits<int32_t>::max()) {
             return false;
+        }
+        // Phase B seal-as-PoW: lottery object is the Q* window seal. Sibling
+        // slots re-derive V3 seeds under the caller-supplied parent MTP
+        // (adversarial LT-Q2). sketch_out stays empty — the seal is not a
+        // single Chat preimage and must not be fed to Phase-A cache auth.
+        if (params.IsMatMulLTSealAsPoWActive(block_height)) {
+            if (!parent_median_time_past.has_value()) return false;
+            uint32_t Qstar = params.nMatMulConsensusQStar;
+            if (!matmul::v4::lt::IsValidConsensusQStar(Qstar)) {
+                Qstar = matmul::v4::lt::kConsensusQStarDefault;
+            }
+            const auto slot_seed = [&](CBlockHeader& h) -> bool {
+                return SetDeterministicMatMulSeeds(h, params, block_height, parent_median_time_past);
+            };
+            return matmul::v4::lt::ComputeSealDigestBMX4CLT(header, n, Qstar, slot_seed, digest_out);
         }
         return matmul::v4::lt::ComputeDigestBMX4CLT(header, n, digest_out, sketch_out);
     }
@@ -3730,7 +3748,8 @@ bool RecomputeMatMulV4SketchReference(const CBlockHeader& header,
 }
 
 bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params& params,
-                                    int32_t block_height)
+                                    int32_t block_height,
+                                    std::optional<int64_t> parent_median_time_past)
 {
     const auto start = std::chrono::steady_clock::now();
     // G.3: default the telemetry bucket to FREIVALDS (the cheap cache/accel fast
@@ -3754,6 +3773,37 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
     if (!bnTarget) return finish(false);
 
     const uint256 block_hash = block.GetHash();
+
+    // --- Phase B seal-as-PoW: lottery object is the Q* window seal. Phase-A
+    // sketch-cache auth (H(sigma||Chat)==matmul_digest) does NOT apply — a
+    // single Chat is not the seal preimage (adversarial LT-Q2 / LT-Q1). The
+    // consensus definition is ε=0 ComputeSealDigestBMX4CLT with parent-MTP-
+    // threaded V3 seeds on every slot. Fail closed without MTP.
+    if (params.IsMatMulLTSealAsPoWActive(block_height)) {
+        if (!parent_median_time_past.has_value()) {
+            return finish(false, MatMulValidationPath::RECOMPUTE);
+        }
+        if (!ConsumeGlobalMatMulPhase2Budget(
+                EffectiveMatMulGlobalVerifyBudgetPerMin(params, block_height), 1,
+                std::chrono::steady_clock::now())) {
+            LogDebug(BCLog::NET, "ENC-DR seal recompute budget exhausted; recomputing block %s anyway (verdict required)\n",
+                     block_hash.ToString());
+        }
+        uint256 recomputed_seal;
+        std::vector<unsigned char> unused_sketch;
+        if (!RecomputeMatMulV4SketchReference(block, params, block_height,
+                                              recomputed_seal, unused_sketch,
+                                              parent_median_time_past)) {
+            return finish(false, MatMulValidationPath::RECOMPUTE);
+        }
+        if (recomputed_seal != block.matmul_digest) {
+            return finish(false, MatMulValidationPath::RECOMPUTE);
+        }
+        if (UintToArith256(recomputed_seal) > *bnTarget) {
+            return finish(false, MatMulValidationPath::RECOMPUTE);
+        }
+        return finish(true, MatMulValidationPath::RECOMPUTE);
+    }
 
     // --- CACHE-ASSISTED fast path (tension-resolution §4.2, an accept-side
     // optimization; epsilon <= 2^-180). Fail-fast and budget-free: a
@@ -3883,7 +3933,8 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
     uint256 recomputed_digest;
     std::vector<unsigned char> recomputed_sketch;
     if (!RecomputeMatMulV4SketchReference(block, params, block_height,
-                                          recomputed_digest, recomputed_sketch)) {
+                                          recomputed_digest, recomputed_sketch,
+                                          parent_median_time_past)) {
         return finish(false, MatMulValidationPath::RECOMPUTE);
     }
     // Exact digest check (epsilon = 0) + target — tension-resolution §4.1
@@ -3924,6 +3975,15 @@ bool FinalizeMatMulSolvedBlock(CBlock& block, const Consensus::Params& params, i
     // predicate is IsMatMulV4Active(height) AND the active commitment scheme is
     // DIGEST_RECOMPUTE; under FLAT_SKETCH_INBLOCK (regtest replay only) the body
     // is left intact.
+    //
+    // Phase B seal-as-PoW: the lottery object is the window seal, not a single
+    // Chat. Never offload a residual slot sketch under the Phase-A
+    // H(sigma||bytes)==matmul_digest cache-auth contract — clear the body and
+    // leave the cache empty (tip verify uses ε=0 seal recompute with MTP).
+    if (params.IsMatMulLTSealAsPoWActive(height)) {
+        block.matrix_c_data.clear();
+        return false;
+    }
     if (params.IsMatMulV4Active(height) &&
         params.GetMatMulProfileParams(height).commitment ==
             Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
@@ -5054,19 +5114,17 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
             }
 
             uint256 seal;
-            std::vector<matmul::v4::lt::WindowSlot> slots;
-            std::vector<std::vector<unsigned char>> payloads;
-            if (!matmul::v4::lt::ComputeSealDigestBMX4CLT(block, n, Qstar, slot_seed, seal,
-                                                          &slots, &payloads)) {
+            if (!matmul::v4::lt::ComputeSealDigestBMX4CLT(block, n, Qstar, slot_seed, seal)) {
                 RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
                 return false;
             }
             if (UintToArith256(seal) <= bnTarget) {
                 block.matmul_digest = seal;
-                // Pack slot-0 sketch for optional Freivalds harnesses; seal mode
-                // does not require in-block sketch carriage under ENC-DR.
-                if (freivalds_payload_out != nullptr && !payloads.empty()) {
-                    *freivalds_payload_out = PackMatMulV4SketchBytesToWords(payloads[0]);
+                // Seal mode: do not pack a single-slot sketch into the Phase-A
+                // cache carriage — H(sigma||Chat) != seal, so Offload would only
+                // poison sketch-cache auth. ENC-DR body stays empty.
+                if (freivalds_payload_out != nullptr) {
+                    freivalds_payload_out->clear();
                 }
                 RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
                 return true;

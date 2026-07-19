@@ -2047,6 +2047,10 @@ void PeerManagerImpl::MaybeRequestMatMulSketch(CNode& pto, const CBlockIndex& in
     if (!consensus.IsMatMulV4Active(index.nHeight)) return;
     const Consensus::MatMulProfileParams profile = consensus.GetMatMulProfileParams(index.nHeight);
     if (profile.commitment != Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) return;
+    // Phase B seal-as-PoW: matmul_digest is the window seal, not H(sigma||Chat).
+    // Single-slot mmsketch cannot authenticate under Phase-A PayloadMatchesCommitment;
+    // tip verify uses ε=0 seal recompute. Do not prefetch.
+    if (consensus.IsMatMulLTSealAsPoWActive(index.nHeight)) return;
     // A profile whose 8·m² exceeds the single-message ceiling is simply not
     // served/requested (peers recompute; the cache is best-effort, §4.3).
     if (profile.SketchCacheBytes() > MAX_MMSKETCH_PAYLOAD_SIZE) return;
@@ -6630,6 +6634,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // rather than caching unauthenticated bytes for it.
         if (profile.commitment != Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
             LogDebug(BCLog::NET, "Ignoring mmsketch %s from peer=%d (not a DIGEST_RECOMPUTE height)\n",
+                     block_hash.ToString(), pfrom.GetId());
+            WITH_LOCK(cs_main, m_matmul_sketch_requested.erase(block_hash));
+            return;
+        }
+        // Phase B seal-as-PoW: ignore single-slot sketches — they cannot auth
+        // against the window seal via PayloadMatchesCommitment (LT-Q2).
+        if (consensus.IsMatMulLTSealAsPoWActive(block_height)) {
+            LogDebug(BCLog::NET, "Ignoring mmsketch %s from peer=%d (LT seal-as-PoW height)\n",
                      block_hash.ToString(), pfrom.GetId());
             WITH_LOCK(cs_main, m_matmul_sketch_requested.erase(block_hash));
             return;

@@ -1173,9 +1173,11 @@ public:
      *  (fMatMulPOW, v4-active DIGEST_RECOMPUTE height, digest-only body, known
      *  prev header, no stored data for this hash, not assumevalid-trusted).
      *  nullopt means the synchronous path is cheap (or would fail cheaply) and
-     *  the block must NOT be dispatched off-thread. Divergence from the seam's
-     *  own logic is fail-safe: it degrades to a recompute, never to a wrong
-     *  verdict (the memoized verdict is a pure function of the header). */
+     *  the block must NOT be dispatched off-thread. Also returns nullopt for
+     *  Phase B seal-as-PoW heights (tip verify needs parent MTP). Divergence
+     *  from the seam's own logic is fail-safe: it degrades to a recompute, never
+     *  to a wrong verdict (the memoized verdict is a pure function of the
+     *  header). */
     std::optional<int32_t> ClassifyMatMulEncDrRecompute(const CBlock& block) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 

@@ -260,24 +260,36 @@ bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consen
  *  Does NOT inspect matrix_c_data (the caller enforces the §4.1 empty-body
  *  rule and its non-permanent MUTATED classification). On success via the
  *  recompute path the recomputed sketch bytes are offered to the local sketch
- *  cache so this node can serve peers (best-effort, non-consensus). */
+ *  cache so this node can serve peers (best-effort, non-consensus).
+ *
+ *  Phase B seal-as-PoW (IsMatMulLTSealAsPoWActive): the lottery object is the
+ *  Q* window seal, not H(sigma||Chat). Phase-A sketch-cache auth is skipped
+ *  (single-slot Chat is not the seal preimage). `parent_median_time_past` MUST
+ *  be supplied so every window slot re-derives V3 seeds under the same parent
+ *  MTP rule as ContextualCheckBlockHeader (adversarial LT-Q2); missing MTP
+ *  fails closed. Async EncDr workers must not enqueue seal-mode heights
+ *  (ClassifyMatMulEncDrRecompute returns nullopt) so validation always has MTP. */
 bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params& params,
-                                    int32_t block_height);
+                                    int32_t block_height,
+                                    std::optional<int64_t> parent_median_time_past = std::nullopt);
 
 /** The ENC-DR CPU pure-integer reference recompute (verify-side entry point of
  *  the SAME code path the miner seals winning blocks with — bit-identical by
  *  construction, tension-resolution §4.2 RECOMPUTE). Dispatches on the active
- *  encoding profile (ENC_BMX4C -> bmx4::ComputeDigestBMX4C; ENC_S8 ->
- *  matmul_v4::ComputeDigest) after re-checking the same structural
- *  combine/accumulator guards the in-block verifier enforces. Returns false on
- *  a structural failure; otherwise fills `digest_out` = H(sigma||Chat_true) and
- *  `sketch_out` = SerializeSketch(Chat_true) (8·m² bytes). Runs no target
- *  check. NEVER dispatches to an accelerated or FP backend (R1). */
+ *  encoding profile (ENC_BMX4C_LT Phase A -> lt::ComputeDigestBMX4CLT;
+ *  ENC_BMX4C -> bmx4::ComputeDigestBMX4C; ENC_S8 -> matmul_v4::ComputeDigest)
+ *  after re-checking the same structural combine/accumulator guards the
+ *  in-block verifier enforces. Under Phase B seal-as-PoW, fills `digest_out`
+ *  with ComputeSealDigestBMX4CLT (requires `parent_median_time_past`) and
+ *  leaves `sketch_out` empty (the seal is not a single Chat preimage). Returns
+ *  false on a structural failure. Runs no target check. NEVER dispatches to an
+ *  accelerated or FP backend (R1). */
 bool RecomputeMatMulV4SketchReference(const CBlockHeader& header,
                                       const Consensus::Params& params,
                                       int32_t block_height,
                                       uint256& digest_out,
-                                      std::vector<unsigned char>& sketch_out);
+                                      std::vector<unsigned char>& sketch_out,
+                                      std::optional<int64_t> parent_median_time_past = std::nullopt);
 
 // H5: process-wide SINGLE-FLIGHT for the ENC-DR digest recompute. The existing
 // per-block WRITE dedup (validation.cpp) and the global recompute budget
