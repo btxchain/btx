@@ -224,11 +224,18 @@ Internal witnesses: `phase_b_seal_round_trip_and_auth`,
 ## 6. Suggested review procedure
 
 1. Read normative + adversarial docs + pre-review synthesis; skim `src/matmul/matmul_v4_lt.{h,cpp}`.
-2. Run internal vectors: `test_btx --run_test=matmul_v4_lt_tests`.
-3. Attempt C15-A/B with a small `n` (e.g. 64) and dense accumulator samples; cost against §0.1.
-4. Attempt I1 / batch-algebra rewrite against the optimal sketch path.
-5. If Phase B is in the launch package, work SB-A..D against seal helpers.
-6. Return a short signed note: **PASS / FAIL / INCONCLUSIVE** per table ID and for the §0.1 game,
+2. **Build-independent kit (preferred first pass):** `contrib/matmul-c15-reviewer-kit/` —
+   `python3 reference_extract.py` then `python3 toy_attack_harness.py --n 8 --w 4`.
+   No node build required. See kit `README.md` + `rank_spectral_regression.md`.
+3. Optional in-tree witnesses (require `test_btx`): `matmul_v4_lt_tests`, especially
+   `matexpand_chacha_prf_golden_vectors`, `matexpand_position_salt_differential`
+   (full-width `(i,j)`), `matexpand_extract_r2_nonapproximability` (affine/deg≤3 R²<0.05),
+   `matexpand_c15b_affine_surrogate_sketch_rejected` (LS surrogate → forged sketch rejected by
+   `VerifySketchBMX4CLT`). These are **witnesses**, not a firm PASS.
+4. Attempt C15-A/B with a small `n` (e.g. 64) and dense accumulator samples; cost against §0.1.
+5. Attempt I1 / batch-algebra rewrite against the optimal sketch path.
+6. If Phase B is in the launch package, work SB-A..D against seal helpers.
+7. Return a short signed note: **PASS / FAIL / INCONCLUSIVE** per table ID and for the §0.1 game,
    with any concrete vectors attached. Do **not** fill silicon nonce/s.
 
 ## 7. How this plugs into the silicon campaign
