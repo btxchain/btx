@@ -282,6 +282,12 @@ in `src/test/matmul_v4_lt_tests.cpp`.
 **Claim under review:** amortizing MatExpand-A / `U` / `V` / `P` once per
 template does not create a cheaper-than-MatExpand-B path for fresh nonces.
 
+**Multi-instance / Q* Phase A shape (Wave 3 Gap #9):** see
+`doc/btx-matmul-v4.4-lt-c15-qstar-i1-amortization-game-2026-07-19.md` for the
+explicit direct-sum *amortization game* (`BTX-I1p-QStar-DirectSum-Heuristic-v1`)
+covering skinny single-nonce grind vs `t`-instance batches. That game is
+**heuristic / unproved** — not a BRSV citation and not a C-15 close.
+
 **Reviewer deliverables:**
 
 | ID | Question | Expected artifact |
@@ -289,6 +295,7 @@ template does not create a cheaper-than-MatExpand-B path for fresh nonces.
 | I1-A | Can an adversary reuse a single MatExpand-B across many templates that share `P`? | Attack or binding argument via `DeriveSigma` / header hash |
 | I1-B | Does fixing `Â` allow solving for `B̂` from sketch equations cheaper than GEMM? | Algebraic degree / MAC lower-bound discussion |
 | I1-C | Confirm marginal priced work remains `{MatExpand-B, B̂·V, combine, digest}` | Stage-boundary checklist vs `matmul-v4-report --profile bmx4c-lt` |
+| I1-D | Multi-instance: does `t` accepting Phase-A digests cost `≈ C_tmpl + t·HonestMAC`? | DS-A..E in the Q*/I1′ amortization-game note (heuristic) |
 
 ## 4. Batch algebra
 
@@ -368,6 +375,8 @@ non-reductions:
 | `doc/btx-matmul-v4.4-lt-c15-reduction-obstructions-2026-07-19.md` | Why standard reductions miss hypotheses |
 | `doc/btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md` | ASERT/FMM efficiency vs HonestMAC hardness (orthogonal) |
 | `doc/btx-matmul-v4.4-lt-c15-related-nonce-reduction-note-2026-07-19.md` | Mant/Scale related-nonce → ExtractStruct |
+| `doc/btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md` | Wave 3 Gap #2: `Extract-Nonlinearity-v1` + PRF hybrid outline (DRAFT; C-15 OPEN) |
+| `doc/btx-matmul-v4.4-lt-c15-qstar-i1-amortization-game-2026-07-19.md` | **Wave 3 Gap #9:** Q*/I1′ direct-sum amortization game (heuristic; not BRSV) |
 
 Leap checklist remains **C-15 OPEN** / public heights **`INT32_MAX`**:
 `doc/btx-matmul-v4.4-lt-leap-checklist.md`.
