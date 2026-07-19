@@ -52,15 +52,22 @@
 #
 # --- v4.4-LT Rank-1 (ENC-DR-LT profile) ---
 #
-# Not yet a first-class `--profile` value here: matmul-v4-report has no LT
-# report schema / DEVICE_*_MT24_PASS marker wired yet (CPU reference + unit
-# tests exist -- src/matmul/matmul_v4_lt.*, src/test/matmul_v4_lt_tests.cpp --
-# but device backends are stubs). `--profile` is forwarded to the tool
-# untouched (see below), so this script will pick up an LT profile value
-# transparently once the tool supports one; until then run
-# `scripts/matmul_lt_readiness.sh` / `contrib/matmul-v4/lt-gate.py --list-gates`
-# for the current inert-scaffolding GO/NO-GO checklist
-# (doc/btx-matmul-v4.4-lt-normative-spec.md).
+# Production-shape measurement (MatExpand + deep-m + Q*):
+#
+#   contrib/matmul-v4/measure-hardware.sh cuda --profile bmx4c-lt --n 4096 --window 64
+#   contrib/matmul-v4/measure-hardware.sh cpu  --profile bmx4c-lt --n 256 --window 8   # smoke
+#
+# Emits schema_version 3 JSON with MatExpand/Q* stage boundaries. Does NOT invent
+# on-silicon rates: device_nonce_per_s stays null until on-device stage timers
+# land; lt-gate.py fails closed on G2/G3 when that field is missing. Aggregate:
+#
+#   contrib/matmul-v4/lt-gate.py <dir-of-json> --manifest parts.tsv
+#
+# Fail-closed if fields are missing. For inert scaffolding only:
+#   scripts/matmul_lt_readiness.sh / lt-gate.py --check-inert
+#
+# External C-15 (math hardness) remains a separate human gate:
+#   doc/btx-matmul-v4.4-lt-external-c15-packet.md
 
 set -euo pipefail
 BACKEND="${1:-}"
@@ -94,6 +101,8 @@ done
 
 if [ "$PROFILE" = "bmx4c" ]; then
   echo "== MatMul v4.2 (ENC-BMX4C) hardware measurement + M-t24: $BACKEND =="
+elif [ "$PROFILE" = "bmx4c-lt" ]; then
+  echo "== MatMul v4.4-LT (ENC-DR-LT MatExpand+Q*) hardware measurement: $BACKEND =="
 else
   echo "== MatMul v4.1 hardware measurement: $BACKEND =="
 fi
@@ -125,7 +134,11 @@ JSON="$(find "$ROOT" -maxdepth 1 -name 'matmul-v4-report-*.json' -newermt '-5 mi
 echo ""
 if [ -n "$JSON" ]; then
   echo "JSON report: $JSON"
-  if [ "$PROFILE" = "bmx4c" ]; then
+  if [ "$PROFILE" = "bmx4c-lt" ]; then
+    echo "Send this file back — schema_version 3 / profile bmx4c-lt (MatExpand+Q* stages)."
+    echo "Aggregate Rank-1 GO/NO-GO (fail-closed; no invented rates) with:"
+    echo "  contrib/matmul-v4/lt-gate.py <dir-of-json> --manifest parts.tsv"
+  elif [ "$PROFILE" = "bmx4c" ]; then
     echo "Send this file back — it carries the M-t24 verdict (mt24_pass / proven_accumulator_bits /"
     echo "native_path_eligible). ENC-BMX4C activation needs M-t24 PASS on >= 2 independent vendors'"
     echo "frontier parts (spec §9 item 1)."
@@ -138,7 +151,14 @@ else
   echo "NOTE: JSON not found in \$ROOT; check the tool's 'JSON report written:' line above."
 fi
 
-if [ "$PROFILE" = "bmx4c" ]; then
+if [ "$PROFILE" = "bmx4c-lt" ]; then
+  if [ "$CODE" -eq 0 ]; then
+    echo "RESULT: ENC-DR-LT device-certified PASS ($BACKEND) — see JSON / DEVICE_BMX4CLT_PASS."
+  else
+    echo "RESULT: FAIL or NOT-CERTIFIED ($BACKEND) — harness may still have written JSON for lt-gate.py;"
+    echo "CPU timers never count as device_nonce_per_s. See output above."
+  fi
+elif [ "$PROFILE" = "bmx4c" ]; then
   if [ "$CODE" -eq 0 ]; then
     echo "RESULT: BMX4-C bit-exact PASS + M-t24 PASS ($BACKEND) — see the JSON's native_path_eligible."
   else

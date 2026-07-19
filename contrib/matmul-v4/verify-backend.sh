@@ -59,22 +59,18 @@
 # Exit: 0 = PASS (bit-exact [+ M-t24 PASS under --profile bmx4c]), 1 =
 # FAIL/mismatch, 2 = usage/build error.
 #
-# --- v4.4-LT Rank-1 (ENC-DR-LT profile) — NOT YET WIRED HERE ---
+# --- v4.4-LT Rank-1 (ENC-DR-LT profile) ---
 #
-# doc/btx-matmul-v4.4-lt-normative-spec.md describes the Rank-1 package
-# (deep-m b=2, MatExpand, consensus Q*) staged strictly after ENC-BMX4C
-# (nMatMulDRLTHeight >= nMatMulBMX4CHeight; INT32_MAX/inert on every public
-# network). Its CPU reference + unit tests exist (src/matmul/matmul_v4_lt.*,
-# src/test/matmul_v4_lt_tests.cpp) and device accel STUBS exist per backend
-# (src/{cuda,metal,hip}/matmul_v4_lt_accel*), but matmul-v4-report has no
-# `--profile bmx4c-lt` mode / DEVICE_*_MT24_PASS marker yet, so this script
-# deliberately does NOT accept that profile value -- fabricating a device
-# certification path ahead of the report tool would contradict the "this
-# script fabricates nothing" rule the bmx4c mode above follows. Once the
-# report tool grows LT support, extend the `--profile` case below the same
-# way `bmx4c` was added. Until then, use `scripts/matmul_lt_readiness.sh` /
-# `contrib/matmul-v4/lt-gate.py` for the current (CPU-reference-only, inert)
-# LT scaffolding status.
+#   contrib/matmul-v4/verify-backend.sh cuda  --profile bmx4c-lt
+#   contrib/matmul-v4/verify-backend.sh metal --profile bmx4c-lt
+#   contrib/matmul-v4/verify-backend.sh hip   --profile bmx4c-lt
+#
+# Builds matmul-v4-report and runs `--profile bmx4c-lt`. PASS requires the
+# honest on-device marker
+#     DEVICE_BMX4CLT_PASS:<backend>:<device-reason>
+# emitted only when a real LT MatExpand device window was accepted with
+# tensor-majority. Exit 0 without that marker is treated as FAIL (no invented
+# silicon certification). Aggregate measurement JSONs with lt-gate.py.
 
 set -euo pipefail
 BACKEND="${1:-}"
@@ -86,8 +82,8 @@ while [ "$#" -gt 0 ]; do
     *) echo "unknown argument: $1"; exit 2 ;;
   esac
 done
-if [ "$PROFILE" != "v41" ] && [ "$PROFILE" != "bmx4c" ]; then
-  echo "unknown --profile (want v41 or bmx4c): $PROFILE"; exit 2
+if [ "$PROFILE" != "v41" ] && [ "$PROFILE" != "bmx4c" ] && [ "$PROFILE" != "bmx4c-lt" ]; then
+  echo "unknown --profile (want v41, bmx4c, or bmx4c-lt): $PROFILE"; exit 2
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -100,8 +96,41 @@ case "$BACKEND" in
   cuda)  CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90;100;120}") ;;
   metal) CMAKE_FLAGS=(-DBTX_ENABLE_METAL=ON) ;;   # Apple; needs Xcode 26+ for the M5 tensor path
   hip)   CMAKE_FLAGS=(-DBTX_ENABLE_HIP=ON "-DBTX_HIP_ARCHITECTURES=${HIP_ARCH:?set HIP_ARCH e.g. gfx942}") ;;
-  *) echo "usage: $0 <cuda|metal|hip> [--profile v41|bmx4c]"; exit 2 ;;
+  *) echo "usage: $0 <cuda|metal|hip> [--profile v41|bmx4c|bmx4c-lt]"; exit 2 ;;
 esac
+
+if [ "$PROFILE" = "bmx4c-lt" ]; then
+  echo "== MatMul v4.4 (ENC-DR-LT) MatExpand+Q* verification: $BACKEND =="
+  echo "-- configuring ($BUILD)"
+  cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF \
+        -DENABLE_WALLET=ON -DWITH_SQLITE=ON -DBUILD_TESTS=OFF -DBUILD_UTIL=ON \
+        "${CMAKE_FLAGS[@]}" >/dev/null || { echo "CONFIGURE FAILED"; exit 2; }
+  echo "-- building matmul-v4-report"
+  cmake --build "$BUILD" --target matmul-v4-report -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \
+    || { echo "BUILD FAILED"; exit 2; }
+  BIN="$(find "$BUILD" -type f -name matmul-v4-report | head -1)"
+  [ -n "$BIN" ] || { echo "could not locate matmul-v4-report binary"; exit 2; }
+
+  echo "-- running $BIN --backend $BACKEND --profile bmx4c-lt"
+  set +e
+  OUT="$("$BIN" --backend "$BACKEND" --profile bmx4c-lt 2>&1)"
+  CODE=$?
+  set -e
+  echo "$OUT"
+
+  MARKER="$(echo "$OUT" | grep -oE "DEVICE_BMX4CLT_PASS:${BACKEND}:[^[:space:]]*" | head -1)"
+  if [ "$CODE" -eq 0 ] && [ -n "$MARKER" ]; then
+    echo "RESULT: PASS ($BACKEND) -- ENC-DR-LT bit-exact + device LT window accepted ($MARKER)."
+    echo "Record the JSON for lt-gate.py. This does NOT close Rank-1 GO/NO-GO by itself."
+  elif [ "$CODE" -eq 0 ] && [ -z "$MARKER" ]; then
+    echo "RESULT: FAIL ($BACKEND) -- exit 0 but no DEVICE_BMX4CLT_PASS:${BACKEND}: marker."
+    CODE=1
+  else
+    echo "RESULT: FAIL ($BACKEND) -- ENC-DR-LT bit-exactness, stage divergence, or no device window;"
+    echo "see output above. JSON may still be present for offline lt-gate aggregation."
+  fi
+  exit "$CODE"
+fi
 
 if [ "$PROFILE" = "bmx4c" ]; then
   echo "== MatMul v4.2 (ENC-BMX4C) M-t24 verification: $BACKEND =="

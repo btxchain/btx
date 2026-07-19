@@ -523,4 +523,74 @@ BOOST_AUTO_TEST_CASE(phase_b_seal_parent_mtp_slot_seeds_and_encdr)
     BOOST_CHECK(seal_other != seal);
 }
 
+BOOST_AUTO_TEST_CASE(matexpand_additivity_noncollapse)
+{
+    // Linear fold satisfies f(x)+f(y) ≈ f(x+y) on a large fraction of samples;
+    // Mix+M11 Extract must break additivity often enough to witness non-collapse.
+    constexpr uint64_t salt = 0xDEADBEEF42ULL;
+    int broken = 0;
+    for (int32_t x = -80; x <= 80; x += 7) {
+        for (int32_t y = -80; y <= 80; y += 11) {
+            const int8_t fx = lt::ExtractDequantMatExpand(x, 2, 3, salt);
+            const int8_t fy = lt::ExtractDequantMatExpand(y, 2, 3, salt);
+            const int8_t fxy = lt::ExtractDequantMatExpand(x + y, 2, 3, salt);
+            const int sum = static_cast<int>(fx) + static_cast<int>(fy);
+            if (sum < -48 || sum > 48 || fxy != static_cast<int8_t>(sum)) {
+                ++broken;
+            }
+        }
+    }
+    BOOST_CHECK(broken > 50);
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_batch_algebra_optimal_equals_full)
+{
+    // Batch algebra: after MatExpand, optimal factoring must equal the full
+    // product sketch (associativity of exact int GEMMs; Extract already applied).
+    auto header = MakeLTHeader(3, kTestDim);
+    uint32_t m = 0;
+    BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(kTestDim, m));
+    const auto Ahat = lt::ExpandOperandAMatExpand(header, kTestDim);
+    const auto Bhat = lt::ExpandOperandBMatExpand(header, kTestDim);
+    const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
+    const auto U = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_u, m, kTestDim);
+    const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, kTestDim, m);
+
+    const auto C = matmul::v4::ComputeExactProduct(Ahat, Bhat, kTestDim);
+    const auto full = matmul::v4::ComputeSketch(U, C, V, kTestDim, m);
+    const auto P = matmul::v4::ComputeProjectedLeft(U, Ahat, kTestDim, m);
+    const auto Q = matmul::v4::ComputeProjectedRight(Bhat, V, kTestDim, m);
+    const auto opt = matmul::v4::ComputeCombineModQ(P, Q, kTestDim, m);
+    BOOST_CHECK(full == opt);
+}
+
+BOOST_AUTO_TEST_CASE(seal_binding_sigma_and_merkle_leaf)
+{
+    // Seal binds (sigma_anchor, merkle_root, Q*): flipping sigma or one leaf
+    // digest must change SealWindowCommit (adversarial seal-binding witness).
+    std::vector<uint256> digests(64);
+    for (size_t i = 0; i < digests.size(); ++i) {
+        unsigned char b[32]{};
+        b[0] = static_cast<unsigned char>(i + 1);
+        b[31] = static_cast<unsigned char>(0xA5 ^ i);
+        digests[i] = uint256{Span<const unsigned char>{b, sizeof(b)}};
+    }
+    const uint256 root = lt::ComputeWindowMerkleRoot(digests);
+    const uint256 sigma = ParseUint256(
+        "3333333333333333333333333333333333333333333333333333333333333333");
+    const uint256 sigma2 = ParseUint256(
+        "4444444444444444444444444444444444444444444444444444444444444444");
+    const uint256 seal = lt::SealWindowCommit(sigma, root, 64);
+    BOOST_CHECK(seal != lt::SealWindowCommit(sigma2, root, 64));
+
+    digests[7] = uint256::ONE;
+    const uint256 root_flip = lt::ComputeWindowMerkleRoot(digests);
+    BOOST_CHECK(root_flip != root);
+    BOOST_CHECK(lt::SealWindowCommit(sigma, root_flip, 64) != seal);
+
+    // Distinct anchors ⇒ disjoint slot-nonce sets (LT-Q1 fat-window binding).
+    BOOST_CHECK(lt::DeriveWindowSlotNonce(sigma, 0) != lt::DeriveWindowSlotNonce(sigma2, 0));
+    BOOST_CHECK(lt::DeriveWindowSlotNonce(sigma, 0) != lt::DeriveWindowSlotNonce(sigma, 1));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

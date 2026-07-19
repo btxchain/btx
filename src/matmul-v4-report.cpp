@@ -67,6 +67,17 @@
 // FP4/MX kernel behind this same vector table is the natural follow-up
 // (tracked in the spec, out of scope for this tool per its own charter of
 // touching only the measurement/tooling layer).
+//
+// ---------------------------------------------------------------------------
+// --profile bmx4c-lt : ENC-DR-LT (Rank-1 MatExpand + deep-m + Q*) measurement.
+//
+// doc/btx-matmul-v4.4-lt-normative-spec.md. Instruments the MatExpand+Q*
+// stage boundaries (I1' amortized template MatExpand-A + U/V/P; per-nonce
+// MatExpand-B; Bhat*V; combine; digest; optional Q* seal sample). Emits
+// schema_version 3 JSON. Does NOT invent on-silicon rates: a non-CPU backend
+// reports device_native_kernel_wired only when ComputeDigestsBMX4CLTDispatched
+// actually accepted a device window (ProbeStats *_batch_ok). Aggregate with
+// contrib/matmul-v4/lt-gate.py (fail-closed if JSON fields are missing).
 
 #include <matmul/accel_v4.h>
 #include <matmul/backend_capabilities_v4.h>
@@ -74,6 +85,7 @@
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_batch.h>
 #include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_lt.h>
 #include <matmul/pow_v4.h>
 #include <primitives/block.h>
 #include <uint256.h>
@@ -331,19 +343,22 @@ struct Args {
     double v3_hashrate{0};           // v3 sustained hashes/s on this box (0 = unset)
     std::string out_path;            // JSON output (default derived from hostname)
     std::string backend_override;    // sets BTX_MATMUL_V4_BACKEND if non-empty
-    std::string profile{"v41"};      // "v41" (ENC-S8, default) or "bmx4c" (ENC-BMX4C, v4.2)
+    std::string profile{"v41"};      // "v41" | "bmx4c" | "bmx4c-lt"
     bool mt24{false};                 // run the M-t24 boundary-vector suite (forced on for bmx4c)
+    bool window_explicit{false};      // true if --window / env set the window
 };
 
 void PrintUsage(std::ostream& os)
 {
     os << "Usage: matmul-v4-report [options]\n"
        << "  --backend <cpu|cuda|metal|hip>   force backend (sets BTX_MATMUL_V4_BACKEND)\n"
-       << "  --profile <v41|bmx4c>            encoding profile: v4.1 ENC-S8 (default) or v4.2 ENC-BMX4C\n"
+       << "  --profile <v41|bmx4c|bmx4c-lt>   encoding profile: v4.1 ENC-S8, v4.2 ENC-BMX4C, or\n"
+       << "                                   v4.4-LT ENC-DR-LT (MatExpand + deep-m + Q*)\n"
        << "  --mt24                           run the M-t24 accumulator-exactness boundary-vector suite\n"
        << "                                   (§5.3/C-1'; always on under --profile bmx4c)\n"
        << "  --n <dim>                        matrix dimension (default 4096; env BTX_MATMUL_V4_REPORT_N)\n"
-       << "  --window <Q>                     nonce window (default 32; env BTX_MATMUL_V4_REPORT_WINDOW)\n"
+       << "  --window <Q>                     nonce window (default 32; 64 under bmx4c-lt unless set;\n"
+       << "                                   env BTX_MATMUL_V4_REPORT_WINDOW)\n"
        << "  --rounds <R>                     Freivalds rounds for the verify gate (default 3)\n"
        << "  --quick                          also run a fast n=256 and n=512 lane (v4.1 profile only)\n"
        << "  --device-peak-int8-tops <TOPS>   advertised INT8 TOPS, for the tensor-utilization estimate\n"
@@ -365,14 +380,18 @@ bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
         else if (a == "--profile") {
             const char* v = need(i); if (!v) return false;
             args.profile = v;
-            if (args.profile != "v41" && args.profile != "bmx4c") {
-                err = "unknown --profile (want v41 or bmx4c): " + args.profile;
+            if (args.profile != "v41" && args.profile != "bmx4c" && args.profile != "bmx4c-lt") {
+                err = "unknown --profile (want v41, bmx4c, or bmx4c-lt): " + args.profile;
                 return false;
             }
         }
         else if (a == "--mt24") { args.mt24 = true; }
         else if (a == "--n") { const char* v = need(i); if (!v) return false; args.n = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
-        else if (a == "--window") { const char* v = need(i); if (!v) return false; args.window = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+        else if (a == "--window") {
+            const char* v = need(i); if (!v) return false;
+            args.window = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+            args.window_explicit = true;
+        }
         else if (a == "--rounds") { const char* v = need(i); if (!v) return false; args.rounds = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
         else if (a == "--quick") { args.quick = true; }
         else if (a == "--device-peak-int8-tops") { const char* v = need(i); if (!v) return false; args.device_peak_int8_tops = std::strtod(v, nullptr); }
@@ -382,16 +401,25 @@ bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
     }
     // Environment overrides (only when the flag was left at default).
     if (const char* e = std::getenv("BTX_MATMUL_V4_REPORT_N")) args.n = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
-    if (const char* e = std::getenv("BTX_MATMUL_V4_REPORT_WINDOW")) args.window = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
+    if (const char* e = std::getenv("BTX_MATMUL_V4_REPORT_WINDOW")) {
+        args.window = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
+        args.window_explicit = true;
+    }
     if (args.window == 0) args.window = 1;
     if (args.rounds == 0) args.rounds = 1;
     // The M-t24 boundary-vector suite is the reason to run --profile bmx4c at
     // all; force it on so an operator cannot forget the flag and mistake a
     // profile-only run for a real M-t24 verdict. Symmetrically, `--mt24`
     // alone (profile left at its default) selects the bmx4c profile, since
-    // M-t24 is meaningless under the v4.1 ENC-S8 profile.
+    // M-t24 is meaningless under the v4.1 ENC-S8 profile. Never auto-select
+    // bmx4c-lt from --mt24 (M-t24 is a BMX4C gate, not an LT gate).
     if (args.profile == "bmx4c") args.mt24 = true;
-    else if (args.mt24) args.profile = "bmx4c";
+    else if (args.mt24 && args.profile != "bmx4c-lt") args.profile = "bmx4c";
+    // Rank-1 LT production windows are consensus Q* ∈ {64,128}; default the
+    // measurement window to 64 when the operator did not override it.
+    if (args.profile == "bmx4c-lt" && !args.window_explicit) {
+        args.window = matmul::v4::lt::kConsensusQStarDefault;
+    }
     return true;
 }
 
@@ -1053,6 +1081,389 @@ int RunBmx4cProfile(const Args& args, const std::string& host, matmul_v4::accel:
     return device_certified ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+// --profile bmx4c-lt : ENC-DR-LT MatExpand+Q* stage measurement (schema v3).
+// ---------------------------------------------------------------------------
+
+namespace lt = matmul::v4::lt;
+
+struct StageResultLT {
+    uint32_t n{0};
+    uint32_t m{0};
+    uint32_t window{0};
+    double s0_template{0};       // MatExpand-A + U,V + P=U*A (I1' amortized)
+    double s1_matexpand_b{0};    // per-nonce MatExpand-B (tensor GEMMs + Extract)
+    double s2_bhat_v{0};         // Bhat*V
+    double s3_combine{0};        // P*Q mod-q (normative LT path)
+    double s4_digest{0};
+    double s5_qstar_seal{0};     // Merkle + SealWindowCommit over the window
+    bool stage_bit_exact{false};
+    bool valid{false};
+};
+
+StageResultLT MeasureStagesLT(uint32_t n, uint32_t window, uint64_t base_nonce)
+{
+    StageResultLT r;
+    r.n = n;
+    r.window = window;
+    uint32_t m = 0;
+    if (!lt::ValidateDimsBMX4CLT(n, m) || window == 0) {
+        return r;
+    }
+    r.m = m;
+    const std::vector<CBlockHeader> headers = WindowHeaders(n, window, base_nonce);
+
+    // S0: template-scoped MatExpand-A + projectors + P (invariant I1').
+    auto c0 = Clock::now();
+    const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(headers[0]);
+    const std::vector<int8_t> Ahat = lt::ExpandOperandAMatExpand(headers[0], n);
+    const std::vector<int8_t> U = bx::ExpandProjectorBMX4C(seed_u, m, n);
+    const std::vector<int8_t> V = bx::ExpandProjectorBMX4C(seed_v, n, m);
+    const std::vector<int32_t> P = mv4::ComputeProjectedLeft(U, Ahat, n, m);
+    auto c1 = Clock::now();
+    r.s0_template = Secs(c0, c1);
+
+    bool all_ok = true;
+    std::vector<uint256> digests;
+    digests.reserve(window);
+    for (uint32_t i = 0; i < window; ++i) {
+        auto ca = Clock::now();
+        const uint256 sigma = mv4::DeriveSigma(headers[i]);
+        const std::vector<int8_t> Bhat = lt::ExpandOperandBMatExpand(headers[i], n);
+        auto cb = Clock::now();
+        r.s1_matexpand_b += Secs(ca, cb);
+
+        const std::vector<int32_t> Q = mv4::ComputeProjectedRight(Bhat, V, n, m);
+        auto cc = Clock::now();
+        r.s2_bhat_v += Secs(cb, cc);
+
+        const auto Chat = mv4::ComputeCombineModQ(P, Q, n, m);
+        auto cd = Clock::now();
+        r.s3_combine += Secs(cc, cd);
+
+        const auto payload = mv4::SerializeSketch(Chat);
+        const uint256 digest = mv4::ComputeSketchDigest(sigma, payload);
+        auto ce = Clock::now();
+        r.s4_digest += Secs(cd, ce);
+        digests.push_back(digest);
+
+        uint256 ref_digest;
+        std::vector<unsigned char> ref_payload;
+        if (!lt::ComputeDigestBMX4CLT(headers[i], n, ref_digest, ref_payload) ||
+            ref_digest != digest || ref_payload != payload) {
+            all_ok = false;
+        }
+    }
+
+    // S5: Q* seal sample over the measured window digests (Phase-B cost signal;
+    // Phase-A lottery remains per-nonce). Uses SealWindowCommit with the
+    // measured window size even if it is not a consensus Q* — operators should
+    // pass --window 64|128 for production Rank-1 shapes.
+    auto cs0 = Clock::now();
+    const uint256 sigma_anchor = mv4::DeriveSigma(headers[0]);
+    const uint256 merkle = lt::ComputeWindowMerkleRoot(digests);
+    const uint256 seal = lt::SealWindowCommit(sigma_anchor, merkle, window);
+    auto cs1 = Clock::now();
+    r.s5_qstar_seal = Secs(cs0, cs1);
+    if (seal.IsNull() && window > 0) {
+        all_ok = false;
+    }
+
+    r.stage_bit_exact = all_ok;
+    r.valid = true;
+    return r;
+}
+
+UniValue StageJsonLT(const StageResultLT& r, double device_peak_tops, double backend_nps,
+                     double& tensor_share_pct_out, double& tensor_util_pct_out)
+{
+    UniValue o(UniValue::VOBJ);
+    // Marginal = MatExpand-B + Bhat*V + combine + digest (S0 amortized; S5 is
+    // a window-level seal sample reported separately, not in per-nonce share).
+    const double marginal = r.s1_matexpand_b + r.s2_bhat_v + r.s3_combine + r.s4_digest;
+    // Tensor stages under LT: MatExpand-B (dense G*W / Y*H) + Bhat*V.
+    const double tensor_time = r.s1_matexpand_b + r.s2_bhat_v;
+    tensor_share_pct_out = marginal > 0 ? 100.0 * tensor_time / marginal : 0;
+
+    const double w = static_cast<double>(lt::kMatExpandPanelW);
+    const double marginal_tensor_macs =
+        2.0 * static_cast<double>(r.n) * r.n * w + // MatExpand G*W + Y*H
+        static_cast<double>(r.n) * r.n * r.m;      // Bhat*V
+    const double marginal_tensor_ops = 2.0 * marginal_tensor_macs;
+    tensor_util_pct_out = -1;
+    if (device_peak_tops > 0 && backend_nps > 0) {
+        tensor_util_pct_out = 100.0 * marginal_tensor_ops * backend_nps / (device_peak_tops * 1e12);
+    }
+
+    o.pushKV("n", static_cast<uint64_t>(r.n));
+    o.pushKV("b", static_cast<uint64_t>(lt::kTileBLT));
+    o.pushKV("m", static_cast<uint64_t>(r.m));
+    o.pushKV("window", static_cast<uint64_t>(r.window));
+    o.pushKV("bit_exact", r.stage_bit_exact);
+    o.pushKV("i1_prime_amortized", true);
+    o.pushKV("s0_template_ms", r.s0_template * 1e3);
+    o.pushKV("s1_matexpand_b_ms", r.s1_matexpand_b * 1e3);
+    o.pushKV("s2_bhat_v_ms", r.s2_bhat_v * 1e3);
+    o.pushKV("s3_combine_ms", r.s3_combine * 1e3);
+    o.pushKV("s4_digest_ms", r.s4_digest * 1e3);
+    o.pushKV("s5_qstar_seal_ms", r.s5_qstar_seal * 1e3);
+    o.pushKV("marginal_per_nonce_ms", r.window ? (marginal * 1e3 / r.window) : 0);
+    o.pushKV("cpu_reference_nonce_per_s", marginal > 0 ? (r.window / marginal) : 0);
+    o.pushKV("marginal_tensor_macs_per_nonce", marginal_tensor_macs);
+    o.pushKV("tensor_share_pct", tensor_share_pct_out);
+    if (tensor_util_pct_out >= 0) {
+        o.pushKV("tensor_util_pct", tensor_util_pct_out);
+    } else {
+        o.pushKV("tensor_util_pct", "unknown");
+    }
+    return o;
+}
+
+int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::accel::Kind backend,
+                      const std::string& backend_name, const matmul_v4::backend::Eligibility& elig)
+{
+    uint32_t m_check = 0;
+    if (!lt::ValidateDimsBMX4CLT(args.n, m_check)) {
+        std::cerr << "error: invalid dimension n=" << args.n
+                  << " for --profile bmx4c-lt (need n%32==0, b=2 | n, ENC-BMX4C dim gates)\n";
+        return 2;
+    }
+    if (!lt::IsValidConsensusQStar(args.window)) {
+        std::cout << "NOTE: --window=" << args.window
+                  << " is not a consensus Q* ({64,128}); stage timings are still valid but "
+                     "Rank-1 production campaigns should use --window 64 or 128.\n";
+    }
+
+    // ---- LT bit-exactness gate (B1 analogue) -------------------------------
+    const std::vector<CBlockHeader> headers = WindowHeaders(args.n, args.window, 42);
+    bool lt_bit_exact = true;
+    for (uint32_t i = 0; i < args.window; ++i) {
+        uint256 d1, d2;
+        std::vector<unsigned char> p1, p2;
+        const bool ok1 = lt::ComputeDigestBMX4CLT(headers[i], args.n, d1, p1);
+        const bool ok2 = lt::ComputeDigestBMX4CLT(headers[i], args.n, d2, p2);
+        if (!ok1 || !ok2 || d1 != d2 || p1 != p2) { lt_bit_exact = false; continue; }
+        CBlockHeader vh = headers[i];
+        vh.matmul_digest = d1;
+        uint256 vout;
+        if (!lt::VerifySketchBMX4CLT(vh, args.n, args.rounds, p1, vout) || vout != d1) {
+            lt_bit_exact = false;
+        }
+    }
+
+    std::cout << "\n[B1-analogue] ENC-DR-LT bit-exact determinism gate\n";
+    std::cout << "  ComputeDigestBMX4CLT determinism + VerifySketchBMX4CLT round-trip over "
+              << args.window << " nonces: " << (lt_bit_exact ? "PASS" : "FAIL") << "\n";
+    if (!lt_bit_exact) {
+        std::cout << "  *** FAIL is a HARD consensus-split signal for the ENC-DR-LT profile ***\n";
+    }
+
+    // ---- Device dispatch probe (honest: only *_batch_ok counts as wired) ---
+    matmul_v4::accel::ResetStats();
+    std::vector<uint256> disp_digests;
+    std::vector<std::vector<unsigned char>> disp_payloads;
+    // All-ones win_target forces host verify of the whole window when a device
+    // path returns (see accel_v4.h contract).
+    uint256 win_all_ones;
+    std::memset(win_all_ones.begin(), 0xff, win_all_ones.size());
+    const bool disp_ok = matmul_v4::accel::ComputeDigestsBMX4CLTDispatched(
+        headers, args.n, args.rounds, win_all_ones, disp_digests, disp_payloads);
+    const auto stats = matmul_v4::accel::ProbeStats();
+    bool device_native_kernel_wired = false;
+    std::string native_path_reason;
+    if (backend == matmul_v4::accel::Kind::CPU) {
+        device_native_kernel_wired = true;
+        native_path_reason =
+            "CPU reference path; certifies the harness only — never counts as frontier silicon.";
+    } else if (backend == matmul_v4::accel::Kind::CUDA) {
+        device_native_kernel_wired = stats.cuda_batch_ok > 0;
+        native_path_reason = device_native_kernel_wired
+            ? "ComputeDigestsBMX4CLTDispatched accepted a CUDA LT window (cuda_batch_ok>0)."
+            : "no CUDA LT device window accepted (cuda_batch_ok==0; CPU fallback or unavailable). "
+              "This run does NOT invent an on-silicon rate.";
+    } else if (backend == matmul_v4::accel::Kind::METAL) {
+        device_native_kernel_wired = stats.metal_batch_ok > 0;
+        native_path_reason = device_native_kernel_wired
+            ? "ComputeDigestsBMX4CLTDispatched accepted a Metal LT window (metal_batch_ok>0)."
+            : "no Metal LT device window accepted (metal_batch_ok==0; CPU fallback or unavailable). "
+              "This run does NOT invent an on-silicon rate.";
+    } else if (backend == matmul_v4::accel::Kind::HIP) {
+        device_native_kernel_wired = stats.hip_batch_ok > 0;
+        native_path_reason = device_native_kernel_wired
+            ? "ComputeDigestsBMX4CLTDispatched accepted a HIP LT window (hip_batch_ok>0)."
+            : "no HIP LT device window accepted (hip_batch_ok==0; CPU fallback or unavailable). "
+              "This run does NOT invent an on-silicon rate.";
+    }
+    if (disp_ok && lt_bit_exact && disp_digests.size() == args.window) {
+        for (uint32_t i = 0; i < args.window; ++i) {
+            uint256 ref;
+            std::vector<unsigned char> ref_p;
+            if (!lt::ComputeDigestBMX4CLT(headers[i], args.n, ref, ref_p) ||
+                ref != disp_digests[i] || ref_p != disp_payloads[i]) {
+                lt_bit_exact = false;
+                break;
+            }
+        }
+    } else if (!disp_ok) {
+        // Dispatch failure is a harness problem only when the CPU reference also fails;
+        // device fallback still returns CPU digests, so !disp_ok means empty/invalid.
+        lt_bit_exact = false;
+    }
+
+    // ---- MatExpand+Q* per-stage marginal wall-time -------------------------
+    std::cout << "\n[B2g-analogue] ENC-DR-LT MatExpand+Q* stage boundaries (n=" << args.n
+              << ", window Q=" << args.window << ", b=" << lt::kTileBLT << ")\n";
+    const StageResultLT stage = MeasureStagesLT(args.n, args.window, 42);
+    double tensor_share_pct = 0, tensor_util_pct = -1;
+    UniValue stage_json(UniValue::VOBJ);
+    double cpu_nps = 0;
+    if (stage.valid) {
+        const double marginal =
+            stage.s1_matexpand_b + stage.s2_bhat_v + stage.s3_combine + stage.s4_digest;
+        auto pct = [&](double x) { return marginal > 0 ? 100.0 * x / marginal : 0.0; };
+        std::printf("  S0  template MatExpand-A + U,V + P (I1' amortized): %9.3f ms\n",
+                    stage.s0_template * 1e3);
+        std::printf("  S1  per-nonce MatExpand-B     (tensor) : %9.3f ms  %5.1f%%\n",
+                    stage.s1_matexpand_b * 1e3 / args.window, pct(stage.s1_matexpand_b));
+        std::printf("  S2  per-nonce GEMM Bhat*V     (tensor) : %9.3f ms  %5.1f%%\n",
+                    stage.s2_bhat_v * 1e3 / args.window, pct(stage.s2_bhat_v));
+        std::printf("  S3  combine P*Q               (int)    : %9.3f ms  %5.1f%%\n",
+                    stage.s3_combine * 1e3 / args.window, pct(stage.s3_combine));
+        std::printf("  S4  serialize + digest        (SHA/int): %9.3f ms  %5.1f%%\n",
+                    stage.s4_digest * 1e3 / args.window, pct(stage.s4_digest));
+        std::printf("  S5  Q* Merkle+SealWindowCommit (window): %9.3f ms\n",
+                    stage.s5_qstar_seal * 1e3);
+        std::printf("  per-nonce MARGINAL total (S0 amortized): %9.3f ms   stage-bit-exact=%s\n",
+                    marginal * 1e3 / args.window, stage.stage_bit_exact ? "YES" : "NO -- STAGE DIVERGED, TIMES VOID");
+        stage_json = StageJsonLT(stage, args.device_peak_int8_tops, 0.0, tensor_share_pct, tensor_util_pct);
+        cpu_nps = marginal > 0 ? (args.window / marginal) : 0;
+    } else {
+        std::cout << "  (stage measurement unavailable for this dimension)\n";
+    }
+    std::cout << "  tensor-stage share (MatExpand-B + Bhat*V majority gate): ";
+    if (stage.valid) std::printf("%.1f%%\n", tensor_share_pct); else std::cout << "n/a\n";
+
+    std::cout << "\n[device] LT native MatExpand GEMM path\n";
+    std::cout << "  device native kernel wired    : " << (device_native_kernel_wired ? "yes" : "no") << "\n";
+    std::cout << "  reason                         : " << native_path_reason << "\n";
+
+    const bool native_path_eligible =
+        lt_bit_exact && stage.valid && stage.stage_bit_exact && device_native_kernel_wired &&
+        tensor_share_pct > 50.0 && backend != matmul_v4::accel::Kind::CPU;
+
+    std::string verdict;
+    if (!lt_bit_exact) {
+        verdict = "NO-GO: ENC-DR-LT bit-exact determinism FAILED (consensus split)";
+    } else if (!stage.valid || !stage.stage_bit_exact) {
+        verdict = "NO-GO: ENC-DR-LT stage outputs diverged (measurement void)";
+    } else if (tensor_share_pct <= 50.0) {
+        verdict = "NO-GO(this machine's stage profile): MatExpand+Bhat*V tensor share is NOT a "
+                  "strict majority (" + std::to_string(static_cast<int>(tensor_share_pct + 0.5)) + "%)";
+    } else if (backend == matmul_v4::accel::Kind::CPU) {
+        verdict = "GO-CANDIDATE(harness-only): bit-exact + tensor-majority on the CPU reference; "
+                  "CPU never counts as frontier silicon for Rank-1 GO/NO-GO";
+    } else if (!device_native_kernel_wired) {
+        verdict = "GO-CANDIDATE(harness-only): bit-exact + tensor-majority on CPU timings, but no "
+                  "on-device LT MatExpand GEMM window was accepted for backend '" + backend_name +
+                  "' — native_path_eligible is UNVERIFIED (no invented silicon numbers)";
+    } else {
+        verdict = "GO-CANDIDATE(device path exercised): bit-exact PASS, tensor-stage majority (" +
+                  std::to_string(static_cast<int>(tensor_share_pct + 0.5)) +
+                  "%), device LT window accepted — aggregate with lt-gate.py across B200/5090 "
+                  "(this tool does not close Rank-1 GO/NO-GO)";
+    }
+    std::cout << "\n[GO/NO-GO candidate §LT stages] " << verdict << "\n";
+
+    const bool ran_on_device = (backend != matmul_v4::accel::Kind::CPU);
+    const bool device_certified = ran_on_device && native_path_eligible;
+    const bool harness_self_test_ok = lt_bit_exact && stage.valid && stage.stage_bit_exact;
+    if (device_certified) {
+        std::cout << "DEVICE_BMX4CLT_PASS:" << backend_name << ":" << elig.reason << "\n";
+    } else {
+        std::cout << "\n[CERTIFICATION] NOT-CERTIFIED as Rank-1 frontier silicon on this host "
+                     "(resolved backend=" << backend_name << "). Harness self-test "
+                  << (harness_self_test_ok ? "PASSED" : "FAILED")
+                  << "; exiting non-zero unless a real device LT window was accepted with "
+                     "tensor majority. JSON is still written for lt-gate.py aggregation.\n";
+    }
+
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("tool", "matmul-v4-report");
+    root.pushKV("schema_version", 3);
+    root.pushKV("host", host);
+    root.pushKV("host_cpu_arch", HostCpuArch());
+    root.pushKV("backend", backend_name);
+    UniValue elig_obj(UniValue::VOBJ);
+    elig_obj.pushKV("compiled", elig.compiled);
+    elig_obj.pushKV("available", elig.available);
+    elig_obj.pushKV("admissible", elig.admissible);
+    elig_obj.pushKV("reason", elig.reason);
+    root.pushKV("device", std::move(elig_obj));
+    root.pushKV("n", static_cast<uint64_t>(args.n));
+    root.pushKV("b", static_cast<uint64_t>(lt::kTileBLT));
+    root.pushKV("window", static_cast<uint64_t>(args.window));
+    root.pushKV("rounds", static_cast<uint64_t>(args.rounds));
+    root.pushKV("profile", "bmx4c-lt");
+    root.pushKV("native_path_eligible", native_path_eligible);
+    root.pushKV("device_execution_certified", device_certified);
+    root.pushKV("harness_self_test_pass", harness_self_test_ok);
+    root.pushKV("bit_exact", lt_bit_exact);
+    root.pushKV("stages", stage_json);
+    root.pushKV("tensor_share_pct", stage.valid ? tensor_share_pct : UniValue(UniValue::VNULL));
+    if (tensor_util_pct >= 0) root.pushKV("tensor_util_pct", tensor_util_pct);
+    else root.pushKV("tensor_util_pct", "unknown");
+    root.pushKV("device_peak_int8_tops", args.device_peak_int8_tops);
+    // Throughput: stage clocks in this tool are CPU-instrumented even when a
+    // device MatExpand GEMM window was accepted. Never promote CPU timers to a
+    // device nonce/s field — lt-gate.py fails closed on G2/G3 when
+    // device_nonce_per_s is missing (no invented silicon numbers).
+    root.pushKV("device_nonce_per_s", UniValue(UniValue::VNULL));
+    root.pushKV("backend_nonce_per_s", UniValue(UniValue::VNULL));
+    if (stage.valid) {
+        root.pushKV("cpu_reference_nonce_per_s", cpu_nps);
+    } else {
+        root.pushKV("cpu_reference_nonce_per_s", UniValue(UniValue::VNULL));
+    }
+    root.pushKV("throughput_note",
+                "cpu_reference_nonce_per_s is host-CPU stage timing only. device_nonce_per_s is "
+                "null until on-device MatExpand+Q* stage timers land; lt-gate MUST NOT invent rates.");
+
+    UniValue lt_obj(UniValue::VOBJ);
+    lt_obj.pushKV("device_native_kernel_wired", device_native_kernel_wired);
+    lt_obj.pushKV("native_path_reason", native_path_reason);
+    lt_obj.pushKV("tile_b", static_cast<uint64_t>(lt::kTileBLT));
+    lt_obj.pushKV("matexpand_panel_w", static_cast<uint64_t>(lt::kMatExpandPanelW));
+    lt_obj.pushKV("qstar_window", static_cast<uint64_t>(args.window));
+    lt_obj.pushKV("qstar_is_consensus", lt::IsValidConsensusQStar(args.window));
+    lt_obj.pushKV("cuda_batch_ok", static_cast<uint64_t>(stats.cuda_batch_ok));
+    lt_obj.pushKV("metal_batch_ok", static_cast<uint64_t>(stats.metal_batch_ok));
+    lt_obj.pushKV("hip_batch_ok", static_cast<uint64_t>(stats.hip_batch_ok));
+    root.pushKV("lt", lt_obj);
+    root.pushKV("verdict", verdict);
+    root.pushKV("gates", [] {
+        UniValue g(UniValue::VOBJ);
+        g.pushKV("B1_analogue", "bit_exact (ENC-DR-LT determinism + verifier round-trip)");
+        g.pushKV("B2g_analogue", "tensor_share_pct (MatExpand-B + Bhat*V majority)");
+        g.pushKV("Qstar", "s5_qstar_seal_ms + qstar_is_consensus");
+        g.pushKV("Device", "lt.device_native_kernel_wired (ProbeStats batch_ok; no invented rates)");
+        return g;
+    }());
+
+    std::ofstream ofs(args.out_path, std::ios::trunc);
+    if (!ofs) {
+        std::cerr << "error: cannot write JSON to " << args.out_path << "\n";
+        return 1;
+    }
+    ofs << root.write(2) << "\n";
+    ofs.close();
+    std::cout << "\nJSON report written: " << args.out_path << "\n";
+    std::cout << "Aggregate Rank-1 measurements with:\n"
+                 "  contrib/matmul-v4/lt-gate.py <dir-of-json> --manifest parts.tsv\n"
+                 "This tool does not raise nMatMulDRLTHeight and does not close GO/NO-GO.\n";
+
+    return device_certified ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -1082,8 +1493,10 @@ int main(int argc, char* argv[])
     const std::string backend_name = matmul_v4::accel::ToString(backend);
     const auto elig = matmul_v4::backend::EligibilityFor(ToEligKind(backend));
 
-    std::cout << "== MatMul v" << (args.profile == "bmx4c" ? "4.2 (ENC-BMX4C)" : "4.1") << " hardware report ("
-              << host << ") ==\n";
+    std::cout << "== MatMul v"
+              << (args.profile == "bmx4c-lt" ? "4.4 (ENC-DR-LT)"
+                                            : (args.profile == "bmx4c" ? "4.2 (ENC-BMX4C)" : "4.1"))
+              << " hardware report (" << host << ") ==\n";
     std::cout << "profile          : " << args.profile << "\n";
     std::cout << "resolved backend : " << backend_name
               << "  [compiled=" << (elig.compiled ? "yes" : "no")
@@ -1091,6 +1504,11 @@ int main(int argc, char* argv[])
               << " admissible=" << (elig.admissible ? "yes" : "no") << "]\n";
     std::cout << "device identity  : " << elig.reason << "\n";
     std::cout << "host cpu arch    : " << HostCpuArch() << "\n";
+    if (args.profile == "bmx4c-lt") {
+        std::cout << "dims             : n=" << args.n << " b=" << matmul::v4::lt::kTileBLT
+                  << " window(Q)=" << args.window << " rounds=" << args.rounds << "\n";
+        return RunBmx4cLtProfile(args, host, backend, backend_name, elig);
+    }
     std::cout << "dims             : n=" << args.n << " b=" << mv4::kTileB
               << " window(Q)=" << args.window << " rounds=" << args.rounds << "\n";
 
