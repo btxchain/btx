@@ -52,8 +52,10 @@ inline constexpr uint32_t kConsensusQStarMax = 128;
                                                      uint64_t salt);
 
 /** Normative MatExpand Extract (ENC_BMX4C_LT): ChaCha20 PRF over
- *  (prf_key, raw, i, j, remix) → M11 rejection + scale e∈{0..3}, μ<<e ∈ [-48,48].
+ *  (prf_key, raw, i, j, remix) → M11 rejection + scale e∈{0..3}, μ·2^e ∈ [-48,48].
  *  `prf_key` MUST be DeriveMatExpandPrfKey(seed_W). NOT affine in `raw`.
+ *  Position salts `i`,`j` are full-width uint32 in nonce_second=(i<<32)|j —
+ *  backends MUST NOT truncate (see doc/btx-matmul-v4.4-lt-matexpand-position-salt.md).
  *  Candidate cryptographic mixer — external C-15 review still required before
  *  any public activation height is raised. */
 [[nodiscard]] int8_t ExtractDequantMatExpand(int32_t raw, uint32_t i, uint32_t j,
@@ -61,7 +63,7 @@ inline constexpr uint32_t kConsensusQStarMax = 128;
 /** Host-callable replica of the CUDA/HIP DeviceExtractDequant ChaCha path.
  *  Must stay bit-identical to ExtractDequantMatExpand and to the device
  *  kernels — runnable parity tests pin this so a kernel edit cannot silently
- *  drift from the CPU goldens. */
+ *  drift from the CPU goldens. Same full-width (i,j) packing as DeviceMatExpandPrfLE64. */
 [[nodiscard]] int8_t ExtractDequantMatExpandAccelReplica(int32_t raw, uint32_t i, uint32_t j,
                                                          const uint256& prf_key);
 
