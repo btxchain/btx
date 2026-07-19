@@ -277,25 +277,17 @@ BOOST_AUTO_TEST_CASE(lt_tip_verify_budget_knobs)
 
     // Phase B seal-as-PoW: each job costs Q* leaf units; pending cap = jobs * Q*.
     params.fMatMulLTSealAsPoW = true;
-<<<<<<< HEAD
-    BOOST_CHECK_EQUAL(MatMulEncDrWorkUnits(params, 100), 64U);
-    BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(params, 100), 128U);
-    // The operator knobs are complete jobs/minute; effective admission is in
-    // leaf work units. Default 1 must admit one honest Q*=64 seal job.
-    BOOST_CHECK_EQUAL(EffectiveMatMulGlobalVerifyBudgetPerMin(params, 100), 64U);
-    BOOST_CHECK_EQUAL(EffectiveMatMulPeerVerifyBudgetPerMin(
-                          params, /*is_ibd=*/false, 100),
-                      64U);
-    BOOST_CHECK(CanStartMatMulVerification(/*pending=*/0, /*work_units=*/64, params, 100));
-    BOOST_CHECK(CanStartMatMulVerification(/*pending=*/64, /*work_units=*/64, params, 100));
-    BOOST_CHECK(!CanStartMatMulVerification(/*pending=*/65, /*work_units=*/64, params, 100));
-=======
     BOOST_CHECK_EQUAL(MatMulEncDrWorkUnits(params, 100), 128U);
     BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(params, 100), 256U);
+    // The operator knobs are complete jobs/minute; effective admission is in
+    // leaf work units. Default 1 must admit one honest Q*=128 seal job.
+    BOOST_CHECK_EQUAL(EffectiveMatMulGlobalVerifyBudgetPerMin(params, 100), 128U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulPeerVerifyBudgetPerMin(
+                          params, /*is_ibd=*/false, 100),
+                      128U);
     BOOST_CHECK(CanStartMatMulVerification(/*pending=*/0, /*work_units=*/128, params, 100));
     BOOST_CHECK(CanStartMatMulVerification(/*pending=*/128, /*work_units=*/128, params, 100));
     BOOST_CHECK(!CanStartMatMulVerification(/*pending=*/129, /*work_units=*/128, params, 100));
->>>>>>> ce8412c (matmul(v4.4-LT): max A-params — w=1024, Q*∈{128,256,512} def 256)
 
     // Unbounded/test values saturate rather than wrapping during unit scaling.
     params.nMatMulLTGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
@@ -307,9 +299,9 @@ BOOST_AUTO_TEST_CASE(lt_tip_verify_budget_knobs)
                       std::numeric_limits<uint32_t>::max());
     params.nMatMulLTMaxPendingVerifications = std::numeric_limits<uint32_t>::max();
     BOOST_CHECK(CanStartMatMulVerification(
-        std::numeric_limits<uint32_t>::max() - 64U, 64U, params, 100));
+        std::numeric_limits<uint32_t>::max() - 128U, 128U, params, 100));
     BOOST_CHECK(!CanStartMatMulVerification(
-        std::numeric_limits<uint32_t>::max() - 63U, 64U, params, 100));
+        std::numeric_limits<uint32_t>::max() - 127U, 128U, params, 100));
 
     // DRLT disabled (INT32_MAX): LT knobs never select, even at high height.
     params.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
