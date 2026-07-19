@@ -110,11 +110,29 @@ std::vector<int8_t> MatExpandCore(const uint256& tmpl, const uint256& seed_w, ui
     const std::vector<int8_t> W = bx::ExpandProjectorBMX4C(seed_w, n, w); // n x w
 
     std::vector<int32_t> Y;
-    if (backend.gemm_s8s8 == nullptr || !backend.gemm_s8s8(G, W, n, n, w, Y)) {
+    bool y_ok = false;
+    if (backend.gemm_s8s8 != nullptr) {
+        try {
+            y_ok = backend.gemm_s8s8(G, W, n, n, w, Y) &&
+                   Y.size() == static_cast<size_t>(n) * w;
+        } catch (...) {
+            y_ok = false;
+        }
+    }
+    if (!y_ok) {
         Y = ExactGemmS8S8(G, W, n, n, w);
     }
     std::vector<int32_t> B32;
-    if (backend.gemm_s32s8 == nullptr || !backend.gemm_s32s8(Y, H, n, w, n, B32)) {
+    bool b32_ok = false;
+    if (backend.gemm_s32s8 != nullptr) {
+        try {
+            b32_ok = backend.gemm_s32s8(Y, H, n, w, n, B32) &&
+                     B32.size() == static_cast<size_t>(n) * n;
+        } catch (...) {
+            b32_ok = false;
+        }
+    }
+    if (!b32_ok) {
         B32 = ExactGemmS32S8(Y, H, n, w, n);
     }
 

@@ -217,8 +217,32 @@ arith_uint256 GetTrustAdjustedChainWork(const CBlockIndex& block, unsigned int u
 bool PreferTrustAdjustedHeader(const CBlockIndex& current, const CBlockIndex& candidate,
                                unsigned int unauth_allowance_blocks)
 {
-    return GetTrustAdjustedChainWork(current, unauth_allowance_blocks) <
-           GetTrustAdjustedChainWork(candidate, unauth_allowance_blocks);
+    const arith_uint256 current_adjusted =
+        GetTrustAdjustedChainWork(current, unauth_allowance_blocks);
+    const arith_uint256 candidate_adjusted =
+        GetTrustAdjustedChainWork(candidate, unauth_allowance_blocks);
+    if (current_adjusted != candidate_adjusted) {
+        return current_adjusted < candidate_adjusted;
+    }
+
+    // A long unauthenticated suffix plateaus once it reaches the allowance.
+    // Never let unordered block-index iteration choose an arbitrary, possibly
+    // millions-of-headers-deep member of that plateau as m_best_header. Keep
+    // legacy/full-body ties unchanged; for a tie involving unauthenticated work,
+    // prefer the most authenticated and then the shallowest claimed suffix.
+    const bool current_has_unauth = current.nAuthenticatedChainWork < current.nChainWork;
+    const bool candidate_has_unauth = candidate.nAuthenticatedChainWork < candidate.nChainWork;
+    if (!current_has_unauth && !candidate_has_unauth) return false;
+    if (current.nAuthenticatedChainWork != candidate.nAuthenticatedChainWork) {
+        return current.nAuthenticatedChainWork < candidate.nAuthenticatedChainWork;
+    }
+    const arith_uint256 current_unauth =
+        current.nChainWork - std::min(current.nChainWork, current.nAuthenticatedChainWork);
+    const arith_uint256 candidate_unauth =
+        candidate.nChainWork - std::min(candidate.nChainWork, candidate.nAuthenticatedChainWork);
+    if (current_unauth != candidate_unauth) return candidate_unauth < current_unauth;
+    if (current.nHeight != candidate.nHeight) return candidate.nHeight < current.nHeight;
+    return candidate.GetBlockHash() < current.GetBlockHash();
 }
 
 void PropagateAuthenticatedChainWorkDescendants(

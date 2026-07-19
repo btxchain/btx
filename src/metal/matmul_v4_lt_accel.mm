@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
+#include <limits>
 #include <mutex>
 #include <vector>
 
@@ -89,6 +90,9 @@ struct MetalGemmContext {
     size_t scratchB_bytes{0};
     size_t scratchD_bytes{0};
     bool ready{false};
+    // Both ALU entry points reuse the same grow-only buffers. The lock must
+    // cover upload through command completion and readback, not just growth.
+    std::mutex launch_mutex;
 
     [[nodiscard]] bool EnsureScratch(size_t a_bytes, size_t b_bytes, size_t d_bytes)
     {
@@ -136,10 +140,16 @@ bool LaunchAluGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t
     if (!ctx.ready) return false;
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
 
-    const size_t lhs_bytes = size_t(rows) * k * sizeof(int8_t);
-    const size_t rhs_bytes = size_t(k) * cols * sizeof(int8_t);
-    const size_t out_bytes = size_t(rows) * cols * sizeof(int32_t);
+    const size_t lhs_elems = size_t(rows) * k;
+    const size_t rhs_elems = size_t(k) * cols;
+    const size_t out_elems = size_t(rows) * cols;
+    if (out_elems > std::numeric_limits<size_t>::max() / sizeof(int32_t) ||
+        left.size() != lhs_elems || right.size() != rhs_elems) return false;
+    const size_t lhs_bytes = lhs_elems * sizeof(int8_t);
+    const size_t rhs_bytes = rhs_elems * sizeof(int8_t);
+    const size_t out_bytes = out_elems * sizeof(int32_t);
 
+    std::lock_guard<std::mutex> launch_lock{ctx.launch_mutex};
     if (!ctx.EnsureScratch(lhs_bytes, rhs_bytes, out_bytes)) return false;
     std::memcpy([ctx.scratchA contents], left.data(), lhs_bytes);
     std::memcpy([ctx.scratchB contents], right.data(), rhs_bytes);
@@ -148,9 +158,12 @@ bool LaunchAluGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t
     id<MTLBuffer> bM = [ctx.device newBufferWithBytes:&M length:sizeof(M) options:MTLResourceStorageModeShared];
     id<MTLBuffer> bN = [ctx.device newBufferWithBytes:&N length:sizeof(N) options:MTLResourceStorageModeShared];
     id<MTLBuffer> bK = [ctx.device newBufferWithBytes:&K length:sizeof(K) options:MTLResourceStorageModeShared];
+    if (bM == nil || bN == nil || bK == nil) return false;
 
     id<MTLCommandBuffer> cmd = [ctx.queue commandBuffer];
+    if (cmd == nil) return false;
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    if (enc == nil) return false;
     [enc setComputePipelineState:ctx.s8s8];
     [enc setBuffer:ctx.scratchA offset:0 atIndex:0];
     [enc setBuffer:ctx.scratchB offset:0 atIndex:1];
@@ -167,7 +180,7 @@ bool LaunchAluGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t
     [cmd waitUntilCompleted];
     if (cmd.status != MTLCommandBufferStatusCompleted) return false;
 
-    out.resize(size_t(rows) * cols);
+    out.resize(out_elems);
     std::memcpy(out.data(), [ctx.scratchD contents], out_bytes);
     return true;
 }
@@ -179,10 +192,17 @@ bool LaunchAluGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8
     if (!ctx.ready) return false;
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
 
-    const size_t lhs_bytes = size_t(rows) * k * sizeof(int32_t);
-    const size_t rhs_bytes = size_t(k) * cols * sizeof(int8_t);
-    const size_t out_bytes = size_t(rows) * cols * sizeof(int32_t);
+    const size_t lhs_elems = size_t(rows) * k;
+    const size_t rhs_elems = size_t(k) * cols;
+    const size_t out_elems = size_t(rows) * cols;
+    if (lhs_elems > std::numeric_limits<size_t>::max() / sizeof(int32_t) ||
+        out_elems > std::numeric_limits<size_t>::max() / sizeof(int32_t) ||
+        left.size() != lhs_elems || right.size() != rhs_elems) return false;
+    const size_t lhs_bytes = lhs_elems * sizeof(int32_t);
+    const size_t rhs_bytes = rhs_elems * sizeof(int8_t);
+    const size_t out_bytes = out_elems * sizeof(int32_t);
 
+    std::lock_guard<std::mutex> launch_lock{ctx.launch_mutex};
     if (!ctx.EnsureScratch(lhs_bytes, rhs_bytes, out_bytes)) return false;
     std::memcpy([ctx.scratchA contents], left.data(), lhs_bytes);
     std::memcpy([ctx.scratchB contents], right.data(), rhs_bytes);
@@ -191,9 +211,12 @@ bool LaunchAluGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8
     id<MTLBuffer> bM = [ctx.device newBufferWithBytes:&M length:sizeof(M) options:MTLResourceStorageModeShared];
     id<MTLBuffer> bN = [ctx.device newBufferWithBytes:&N length:sizeof(N) options:MTLResourceStorageModeShared];
     id<MTLBuffer> bK = [ctx.device newBufferWithBytes:&K length:sizeof(K) options:MTLResourceStorageModeShared];
+    if (bM == nil || bN == nil || bK == nil) return false;
 
     id<MTLCommandBuffer> cmd = [ctx.queue commandBuffer];
+    if (cmd == nil) return false;
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    if (enc == nil) return false;
     [enc setComputePipelineState:ctx.s32s8];
     [enc setBuffer:ctx.scratchA offset:0 atIndex:0];
     [enc setBuffer:ctx.scratchB offset:0 atIndex:1];
@@ -210,7 +233,7 @@ bool LaunchAluGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8
     [cmd waitUntilCompleted];
     if (cmd.status != MTLCommandBufferStatusCompleted) return false;
 
-    out.resize(size_t(rows) * cols);
+    out.resize(out_elems);
     std::memcpy(out.data(), [ctx.scratchD contents], out_bytes);
     return true;
 }

@@ -720,6 +720,13 @@ BOOST_AUTO_TEST_CASE(lt_tensor_gemm_availability_and_arch_probe)
     } else {
         BOOST_CHECK(metal_caps.exact_s8_s8_s32);
     }
+    // Compilation/self-qualification must never rewrite the independently
+    // observed silicon family (Metal 4 MPP also compiles on M4).
+    if (metal_arch.device_name.find("M4") != std::string::npos ||
+        metal_arch.device_name.find("m4") != std::string::npos) {
+        BOOST_CHECK(metal_arch.name_class == matmul_v4::metal::LtMetalArchNameClass::M4Class);
+        BOOST_CHECK_EQUAL(metal_arch.name_class_string, "m4_class");
+    }
 #endif
 
     std::vector<int8_t> a(16, 1), b(16, 2);

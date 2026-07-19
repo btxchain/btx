@@ -105,9 +105,11 @@ Eligibility MetalEligibility()
     // §O.1: only M5-class devices expose Metal 4 INT8 TensorOps (s8xs8->s32).
     // IsLtTensorOpsGemmAvailable is true ONLY after ExactGemmS8S8 self-qual
     // (never from ALU shaders alone). M4-class stays verification-only.
-    const bool has_metal4_int8_tensor_ops = matmul_v4::metal::IsLtTensorOpsGemmAvailable();
-    Eligibility eligibility = ClassifyMetalDevice(has_metal4_int8_tensor_ops);
     const auto arch = matmul_v4::metal::ProbeLtMetalArch();
+    const bool has_metal4_int8_tensor_ops =
+        arch.name_class == matmul_v4::metal::LtMetalArchNameClass::M5Class &&
+        matmul_v4::metal::IsLtTensorOpsGemmAvailable();
+    Eligibility eligibility = ClassifyMetalDevice(has_metal4_int8_tensor_ops);
     eligibility.reason = std::string{eligibility.reason} + ":arch=" + arch.name_class_string;
     return eligibility;
 #else

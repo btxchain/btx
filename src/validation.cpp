@@ -9550,17 +9550,21 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
     // GetBlockProof. Handles the case where pprev is not yet connected (the else
     // branch below); the descendant walk repeats this for every block that becomes
     // connected, in parent-before-child order.
+    const arith_uint256 old_authenticated_work = pindexNew->nAuthenticatedChainWork;
     UpdateAuthenticatedChainWork(*pindexNew, GetConsensus());
-    // Header-only descendants already in the index must inherit the updated
-    // authenticated base; without this walk their nAuthenticatedChainWork
-    // stays stale after a late body promotion on an ancestor.
-    PropagateAuthenticatedChainWorkDescendants(*pindexNew, GetConsensus(),
-        [this](std::function<void(CBlockIndex&)> visit) {
-            for (auto& entry : m_blockman.m_block_index) {
-                visit(entry.second);
-            }
-        });
-    RecalculateBestHeader();
+    if (pindexNew->nAuthenticatedChainWork != old_authenticated_work) {
+        // Header-only descendants already in the index must inherit an updated
+        // authenticated base. Skip the global walk when receipt did not promote
+        // work (the normal pre-v4/disabled-fork case), otherwise ordered IBD and
+        // reindex perform two O(N) index scans per historical body.
+        PropagateAuthenticatedChainWorkDescendants(*pindexNew, GetConsensus(),
+            [this](std::function<void(CBlockIndex&)> visit) {
+                for (auto& entry : m_blockman.m_block_index) {
+                    visit(entry.second);
+                }
+            });
+        RecalculateBestHeader();
+    }
 
     if (pindexNew->pprev == nullptr || pindexNew->pprev->HaveNumChainTxs()) {
         // If pindexNew is the genesis block or all parents are BLOCK_VALID_TRANSACTIONS.
@@ -15372,10 +15376,10 @@ void ChainstateManager::RecalculateBestHeader()
     AssertLockHeld(cs_main);
     m_best_header = ActiveChain().Tip();
     for (auto& entry : m_blockman.m_block_index) {
-        if ((entry.second.nStatus & BLOCK_FAILED_MASK) || m_best_header == nullptr) continue;
+        if (entry.second.nStatus & BLOCK_FAILED_MASK) continue;
         // Trust-adjusted selection: forged header-only branches only receive a
         // bounded unauth lookahead above their last authenticated ancestor.
-        if (PreferTrustAdjustedHeader(*m_best_header, entry.second)) {
+        if (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, entry.second)) {
             m_best_header = &entry.second;
         }
     }

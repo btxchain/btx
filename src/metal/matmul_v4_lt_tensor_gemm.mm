@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -105,6 +106,10 @@ struct TensorOpsContext {
     std::string tensor_path_reason{"uninitialized"};
     bool device_present{false};
     bool compile_ok{false};
+    // scratchA/B/D/Params are shared by every caller. Keep the entire upload,
+    // encode, execute, and readback lifetime serialized; otherwise concurrent
+    // Phase-B slots can overwrite buffers still referenced by a command buffer.
+    std::mutex launch_mutex;
 
     [[nodiscard]] bool EnsureScratch(size_t a_bytes, size_t b_bytes, size_t d_bytes)
     {
@@ -232,10 +237,16 @@ TensorOpsContext& Ctx()
         return true;
     }
 
-    const size_t lhs_bytes = size_t(rows) * k * sizeof(int8_t);
-    const size_t rhs_bytes = size_t(k) * cols * sizeof(int8_t);
-    const size_t out_bytes = size_t(rows) * cols * sizeof(int32_t);
-    if (left.size() < size_t(rows) * k || right.size() < size_t(k) * cols) return false;
+    const size_t lhs_elems = size_t(rows) * k;
+    const size_t rhs_elems = size_t(k) * cols;
+    const size_t out_elems = size_t(rows) * cols;
+    if (out_elems > std::numeric_limits<size_t>::max() / sizeof(int32_t)) return false;
+    const size_t lhs_bytes = lhs_elems * sizeof(int8_t);
+    const size_t rhs_bytes = rhs_elems * sizeof(int8_t);
+    const size_t out_bytes = out_elems * sizeof(int32_t);
+    if (left.size() != lhs_elems || right.size() != rhs_elems) return false;
+
+    std::lock_guard<std::mutex> launch_lock{ctx.launch_mutex};
     if (!ctx.EnsureScratch(lhs_bytes, rhs_bytes, out_bytes)) return false;
 
     std::memcpy([ctx.scratchA contents], left.data(), lhs_bytes);
@@ -261,7 +272,7 @@ TensorOpsContext& Ctx()
     [cmd waitUntilCompleted];
     if (cmd.status != MTLCommandBufferStatusCompleted) return false;
 
-    out.resize(size_t(rows) * cols);
+    out.resize(out_elems);
     std::memcpy(out.data(), [ctx.scratchD contents], out_bytes);
     return true;
 }
@@ -323,14 +334,10 @@ LtMetalArchProbe ProbeLtMetalArch()
     out.device_name = ctx.device_name;
     out.metal4_tensor_ops_compile_ok = ctx.compile_ok;
 
-    if (ctx.compile_ok) {
-        out.name_class = LtMetalArchNameClass::M5Class;
-    } else {
-        out.name_class = ClassifyFromDeviceName(ctx.device_name);
-        if (out.name_class == LtMetalArchNameClass::Unknown) {
-            out.name_class = LtMetalArchNameClass::M4Class;
-        }
-    }
+    // API/shader compilation is not silicon identity. Metal 4 MPP compiles and
+    // passes exactness tests on M4, so treating compile_ok as proof of M5 made an
+    // M4 Max falsely advertise itself as M5-class in qualification reports.
+    out.name_class = ClassifyFromDeviceName(ctx.device_name);
     out.name_class_string = NameClassString(out.name_class);
     return out;
 }

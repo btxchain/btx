@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -88,6 +89,19 @@ bool FailGemmS8S8(const std::vector<int8_t>&, const std::vector<int8_t>&,
                   uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
 {
     return false;
+}
+
+bool WrongSizeGemmS8S8(const std::vector<int8_t>&, const std::vector<int8_t>&,
+                       uint32_t, uint32_t, uint32_t, std::vector<int32_t>& out)
+{
+    out.assign(1, 0);
+    return true;
+}
+
+bool ThrowGemmS32S8(const std::vector<int32_t>&, const std::vector<int8_t>&,
+                    uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
+{
+    throw std::runtime_error{"injected backend failure"};
 }
 
 bool FailGemmS32S8(const std::vector<int32_t>&, const std::vector<int8_t>&,
@@ -502,6 +516,21 @@ BOOST_AUTO_TEST_CASE(exact_gemm_backend_falls_back_on_false)
     lt::ExactGemmBackend backend;
     backend.gemm_s8s8 = &FailGemmS8S8;
     backend.gemm_s32s8 = &FailGemmS32S8;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, backend, fb_d, fb_p));
+    BOOST_CHECK(fb_d == ref_d);
+    BOOST_CHECK(fb_p == ref_p);
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_backend_falls_back_on_bad_shape_or_exception)
+{
+    auto header = MakeLTHeader(45, kTestDim);
+    uint256 ref_d, fb_d;
+    std::vector<unsigned char> ref_p, fb_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref_d, ref_p));
+
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &WrongSizeGemmS8S8;
+    backend.gemm_s32s8 = &ThrowGemmS32S8;
     BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, backend, fb_d, fb_p));
     BOOST_CHECK(fb_d == ref_d);
     BOOST_CHECK(fb_p == ref_p);

@@ -5134,12 +5134,10 @@ bool SolveMatMulParallel(CBlockHeader& block,
 // (MatExpand + deep-m). Winning candidates are resealed via ComputeDigestBMX4CLT
 // (Phase A) or ComputeSealDigestBMX4CLT (Phase B seal-as-PoW when active).
 // Non-CPU ResolveBackend injects MakeResolvedExactGemmBackend; Phase A prefers
-// ComputeDigestsBMX4CLTDispatched. NOTE: a winning candidate is NOT re-sealed on CPU
-// here -- Phase B seals with the injected ExactGemm backend and broadcasts. Determinism
-// safety comes from the ARBITER, not a reseal: the miner's own ProcessNewBlock runs the
-// epsilon=0 CPU recompute (RecomputeMatMulV4SketchReference) and self-rejects a block
-// whose device seal diverges from the CPU reference, so a divergent backend costs the
-// miner a lost block, never a chain split.
+// ComputeDigestsBMX4CLTDispatched. Phase-B device winners are re-sealed through the
+// CPU reference before success is returned. This rare duplicate protects miners from
+// publishing a bad block when an accelerated backend races, corrupts scratch, or
+// returns a same-sized but incorrect result.
 static bool SolveMatMulV4LT(CBlockHeader& block,
                             const Consensus::Params& params,
                             uint64_t& max_tries,
@@ -5204,6 +5202,21 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
                 return false;
             }
             if (UintToArith256(seal) <= bnTarget) {
+                if (accel_kind != matmul_v4::accel::Kind::CPU) {
+                    uint256 cpu_seal;
+                    if (!matmul::v4::lt::ComputeSealDigestBMX4CLT(
+                            block, n, Qstar, slot_seed, cpu_seal,
+                            /*slots_out=*/nullptr,
+                            /*slot_payloads_out=*/nullptr,
+                            matmul::v4::lt::ExactGemmBackend{}) ||
+                        cpu_seal != seal || UintToArith256(cpu_seal) > bnTarget) {
+                        // Treat a divergent winner as a backend failure. Do not
+                        // broadcast it and do not silently count it as another
+                        // lottery attempt under the same anchor.
+                        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                        return false;
+                    }
+                }
                 block.matmul_digest = seal;
                 // Seal mode: do not pack a single-slot sketch into the Phase-A
                 // cache carriage — H(sigma||Chat) != seal, so Offload would only

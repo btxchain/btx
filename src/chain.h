@@ -427,7 +427,9 @@ inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 32;
 
 /** True iff `candidate` should replace `current` as best header under the
  *  trust-adjusted work metric (authenticated work + bounded unauth lookahead).
- *  Pre-MatMul-fork this is identical to comparing nChainWork. */
+ *  Tied unauthenticated plateaus prefer more authenticated work and then the
+ *  shallowest suffix, so an arbitrary deep forged header cannot become the
+ *  raw m_best_header. Pre-MatMul-fork/full-body ties retain legacy behavior. */
 [[nodiscard]] bool PreferTrustAdjustedHeader(const CBlockIndex& current,
                                              const CBlockIndex& candidate,
                                              unsigned int unauth_allowance_blocks = TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS);

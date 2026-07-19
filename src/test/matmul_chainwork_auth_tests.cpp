@@ -410,4 +410,37 @@ BOOST_AUTO_TEST_CASE(prefer_trust_adjusted_header_rejects_forged_long_chain)
     BOOST_CHECK(!PreferTrustAdjustedHeader(*auth_tip, *forged_tip));
 }
 
+BOOST_AUTO_TEST_CASE(prefer_trust_adjusted_header_chooses_shallow_plateau_tip)
+{
+    LOCK(::cs_main);
+    constexpr unsigned int kAllowance{32};
+    const Consensus::Params params = ParamsWithFork(1);
+
+    Chain c;
+    CBlockIndex* base = c.Add(ST_AUTHENTICATED);
+    c.Recompute(params);
+
+    std::deque<CBlockIndex> suffix;
+    CBlockIndex* shallow = nullptr;
+    CBlockIndex* tip = base;
+    for (int i = 1; i <= 100; ++i) {
+        suffix.emplace_back();
+        CBlockIndex& idx = suffix.back();
+        idx.pprev = tip;
+        idx.nHeight = tip->nHeight + 1;
+        idx.nBits = TEST_NBITS;
+        idx.nStatus = ST_HEADER_ONLY;
+        idx.nChainWork = tip->nChainWork + GetBlockProof(idx);
+        UpdateAuthenticatedChainWork(idx, params);
+        tip = &idx;
+        if (i == static_cast<int>(kAllowance)) shallow = tip;
+    }
+
+    BOOST_REQUIRE(shallow != nullptr);
+    BOOST_CHECK_EQUAL(GetTrustAdjustedChainWork(*shallow, kAllowance).GetHex(),
+                      GetTrustAdjustedChainWork(*tip, kAllowance).GetHex());
+    BOOST_CHECK(PreferTrustAdjustedHeader(*tip, *shallow, kAllowance));
+    BOOST_CHECK(!PreferTrustAdjustedHeader(*shallow, *tip, kAllowance));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
