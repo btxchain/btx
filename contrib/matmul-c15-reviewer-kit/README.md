@@ -42,8 +42,14 @@ Full adversarial brief and deliverable tables:
 
 Companions: normative spec + adversarial analysis under `doc/btx-matmul-v4.4-lt-*.md`.
 
-In-tree witnesses (optional; requires a node build):
-`matexpand_chacha_prf_golden_vectors` in `src/test/matmul_v4_lt_tests.cpp`.
+In-tree witnesses (optional; requires a node build) in
+`src/test/matmul_v4_lt_tests.cpp`:
+
+- `matexpand_chacha_prf_golden_vectors`
+- `matexpand_position_salt_differential` (full-width `(i,j)` high-half)
+- `matexpand_extract_r2_nonapproximability` (affine / deg-2/3 R² < 0.05)
+- `matexpand_c15b_affine_surrogate_sketch_rejected` (forged sketch vs
+  `VerifySketchBMX4CLT`)
 
 ## Endianness (consensus-critical)
 

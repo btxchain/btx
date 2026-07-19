@@ -1,23 +1,32 @@
 # C-15 dual-panel pre-review synthesis (2026-07-19)
 
-*Folded from `/tmp/c15_audit_synthesis_grok.md` (Grok panel synthesis).*  
-*Sources: `/tmp/c15_audit_{algebraic,prf_statistical,shortcut_tmto,lattice_spectral,protocol_specgap,prior_art}.md`.*  
+*Grok panel:* `/tmp/c15_audit_synthesis_grok.md` + six lens notes
+`/tmp/c15_audit_{algebraic,prf_statistical,shortcut_tmto,lattice_spectral,protocol_specgap,prior_art}.md`.  
+*Opus panel (separate machine):* six independent cryptanalytic lenses; convergent
+payload folded below. **Both panels: no concrete break; C-15 OPEN; activation NO-GO.**  
 *Do not claim C-15 cryptographically closed. Public activation remains inert (`INT32_MAX`).*
 
 Companion packet (hardened after this synthesis):
-`doc/btx-matmul-v4.4-lt-external-c15-packet.md`.
+`doc/btx-matmul-v4.4-lt-external-c15-packet.md`.  
+Reviewer kit: `contrib/matmul-c15-reviewer-kit/`.
 
 ## Cross-panel consensus
 
 | Question | Consensus |
 |---|---|
-| Raise `nMatMulDRLTHeight`? | **NO-GO** — all panels |
+| Raise `nMatMulDRLTHeight`? | **NO-GO** — all panels (Grok + Opus) |
 | Affine / low-degree Extract surrogates (C15-A)? | **PASS on dense samples** (algebraic + PRF empirics); not a proof |
 | Linear Freivalds rewrite through `GWH` (C15-B)? | **PASS for linear class**; **INCONCLUSIVE** for unrestricted adversaries |
 | Leftover Extract structure (C15-C)? | **Residue documented**; no PoW shortcut shown |
 | ChaCha-as-PRF ⇒ MatExpand work-binding? | **Does not reduce** — novel no-shortcut conjecture (prior-art) |
-| Packet firm-ready (pre-harden)? | **No** (~58/100) — needed security game, oracles, FAIL criteria |
+| Packet firm-ready (pre-harden)? | Pre-harden **No**; post-harden packet has §0.1 game + kit — still needs a human firm |
 | Rank-128 pre-Extract core? | Real and **load-bearing**: without Extract, L1 thin-panel collapse returns (~30–32×) |
+
+### Three pillars (both panels)
+
+1. Position-salted per-cell PRF (`(i,j)` in ChaCha nonce) — load-bearing rank-lift.
+2. Exact `𝔽_q` binding — approximation / surrogates worthless under Freivalds.
+3. Nonce-fresh `W_B` entering twice nonlinearly — blocks TMTO / cross-nonce amortization.
 
 ## Panel one-liners
 
@@ -38,9 +47,23 @@ Companion packet (hardened after this synthesis):
 
 ## Dual-track note
 
-Six Opus agents on another machine were intended to run the same six disciplines.
-When Opus reports arrive, diff: agreements strengthen confidence; contradictions
-become the next experiment list. This fold is the **Grok-panel** synthesis only.
+Opus six-lens pre-review (separate machine) **arrived and agreed** with the Grok
+panel on verdict, pillars, and the actionable harden list (falsifiable claim,
+C15-B LS collapse + deg-2/3 R², rank-128 docs, reviewer kit, encoding pin,
+full-width position salt, scoping / LT-Q1–Q2 labels). Residual disagreements to
+watch in a firm review: cross-lane related-nonce amortization depth; Strassen /
+FMM calibration of ASERT vs naive GEMM.
+
+## Shipped hardenings (post-synthesis)
+
+| Gap | Status |
+|---|---|
+| Falsifiable §0.1 cost-model game | Packet |
+| C15-B LS surrogate + deg≤3 R²<0.05 | `matexpand_c15b_*` / `matexpand_extract_r2_*` |
+| Rank-128 / encoding / pillars | Packet §1.1–§1.4 |
+| Reviewer kit | `contrib/matmul-c15-reviewer-kit/` |
+| Full-width `(i,j)` salt | CPU/CUDA/HIP + AccelReplica + high-half test |
+| LT-Q1/Q2 “review pending”; P(0)≈9.1%; MatExpand `O(n²·w)` | Docs + lt-gate G5 wording |
 
 ## Explicit non-claims
 
