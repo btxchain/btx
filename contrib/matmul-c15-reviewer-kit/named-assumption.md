@@ -3,13 +3,20 @@
 **C-15 remains OPEN.** Do not treat this kit, green goldens, or low toy R² as
 cryptographic closure or permission to raise `nMatMulDRLTHeight`.
 
+> **Aliases (one assumption)**  
+> **Canonical:** `BTX-C15-NonCollapse-v1` (packet §0.2)  
+> **Also used in Wave-1 drafts:** `BTX-MatExpand-NonCollapse-v1`, **MENC** (*MatExpand–Extract Non-Collapse*), *LT-C15 Work-Binding*  
+> Same §0.1 game; names differ only in emphasis. Prefer the packet id in firm SOWs.
+
 ## Where to read
 
 Full formalization (game, parameter pin, non-PRF paragraph, attack-surface
 checklist, witness ≠ proof):
 
 → **[`doc/btx-matmul-v4.4-lt-external-c15-packet.md` §0.2](../../doc/btx-matmul-v4.4-lt-external-c15-packet.md)**  
-→ Falsifiable cost-model game (identical base): **§0.1** of the same packet
+→ Falsifiable cost-model game (identical base): **§0.1** of the same packet  
+→ Wave-1 reduction fold / naming aliases (MENC ≡ this id):  
+  [`doc/btx-matmul-v4.4-lt-c15-reduction-research-synthesis-2026-07-19.md`](../../doc/btx-matmul-v4.4-lt-c15-reduction-research-synthesis-2026-07-19.md)
 
 ## One-line statement
 

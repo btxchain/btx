@@ -36,7 +36,10 @@ python3 toy_attack_harness.py --n 8 --w 4
 python3 toy_attack_harness.py --n 16 --w 4 --seed 7 --degree 3
 ```
 
-Firm attack menu: [`reduction-attack-checklist.md`](reduction-attack-checklist.md).
+Firm pointers (read before filing a finding):
+
+- Named assumption: [`named-assumption.md`](named-assumption.md) → packet **§0.2** `BTX-C15-NonCollapse-v1`
+- Attack menu: [`reduction-attack-checklist.md`](reduction-attack-checklist.md) → §0.1 FAIL surfaces
 
 ## Normative packet (read this)
 
