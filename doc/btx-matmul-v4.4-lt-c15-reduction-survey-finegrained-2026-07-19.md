@@ -58,7 +58,7 @@ B̂[i,j] = ExtractChaCha20PRF(B32[i,j], i, j, prf_key)  # position-salted
 | FG-7 | **Online Matrix-Vector (OMV)** | Henzinger–Krinninger–Nanongkai–Raghavendra 2015 | Online Mv products hard ≈ naive under polynomial preprocessing | **Loose analogy** | OMV is online adaptive queries; BTX Expand is offline public panels + one-shot sketch |
 | FG-8 | **#NSETH / fine-grained PoW (BRSV)** | Ball–Rosen–Sabo–Vasu ePrint 2017/203 → 2018/559 | PoW from OV/3SUM/APSP evaluations | **Historical cousin, not a reduction target** | BRSV prices *evaluation of hard FG problems*; BTX prices deterministic Expand+Extract+sketch — different problem family |
 | FG-9 | **cuPOW batch low-rank equations** (ad-hoc) | Komargodski–Weinstein ePrint 2025/685 | Conjectured hardness of batch low-rank random linear equations under transcript RO | **Same meta-class, different encoding** | Closest PoUW cousin; still **not** a standard FG conjecture; BTX uses Extract+sketch Freivalds not transcript hash |
-| **NEW** | **MENC / LT-C15 Work-Binding** (draft) | *This survey — novel* | See §3 | **This is the needed intermediate** | Explicitly tailored to packet §0.1 game |
+| **NEW** | **`BTX-C15-NonCollapse-v1`** (draft; aliases MENC / MatExpand-NonCollapse) | *Packet §0.2 — novel* | See §3 | **This is the needed intermediate** | Explicitly tailored to packet §0.1 game |
 
 ---
 
@@ -186,12 +186,17 @@ What *is* true:
 
 ### Draft intermediate assumption (novel — not a theorem)
 
-**Name:** **MENC** — *MatExpand–Extract Non-Collapse*  
-*(alias: LT-C15 Work-Binding Conjecture)*
+> **Aliases (one assumption)**  
+> **Canonical:** `BTX-C15-NonCollapse-v1` (packet §0.2)  
+> **Also used in Wave-1 drafts:** `BTX-MatExpand-NonCollapse-v1`, **MENC** (*MatExpand–Extract Non-Collapse*), *LT-C15 Work-Binding*  
+> Same §0.1 game; names differ only in emphasis. Prefer the packet id in firm SOWs.
+
+**Name (canonical):** **`BTX-C15-NonCollapse-v1`**  
+*(Wave-1 short alias: **MENC** — *MatExpand–Extract Non-Collapse*; see aliases box above.)*
 
 **Parameters.** Production pin `(n,w,b,m,q,Extract)=` packet §0.1; thresholds `(δ,ε)` as in the packet game (defaults `δ=1/2`, `ε=2^{-40}` above Freivalds false-accept).
 
-**Assumption (MENC).**  
+**Assumption (`BTX-C15-NonCollapse-v1`).**  
 No classical probabilistic polynomial-time adversary, given public template/nonce seeds and oracle access to honest MatExpand/digest/Freivalds transcripts (poly-many, adaptive), outputs an accepting Phase-A digest (or seal if SB annex in scope) with advantage `≥ ε` over Freivalds false-accept while using exact-int MAC count
 
 ```
@@ -200,24 +205,24 @@ MAC(Adv) ≤ (1 − δ) · HonestMAC(n)
 
 on the priced marginal unit (MatExpand-B + `B̂·V` + combine), except with negligible probability in the security parameter / round count.
 
-**Restricted variant (MENC-Lin) — primary FAIL class in packet.**  
+**Restricted variant (`…-Lin` / MENC-Lin) — primary FAIL class in packet.**  
 Same, but adversary restricted to linear / degree-≤2 entrywise surrogates of Extract and Freivalds-linear rewrites through `G,W,H`.
 
-**Unrestricted variant (MENC-Unres).**  
-No degree restriction — expected **INCONCLUSIVE** for years; do not equate MENC-Lin PASS with MENC-Unres PASS.
+**Unrestricted variant (`…-Unres` / MENC-Unres).**  
+No degree restriction — expected **INCONCLUSIVE** for years; do not equate Lin PASS with Unres PASS.
 
-**Optional sketch-only strengthening (MENC-Cubic).**  
+**Optional sketch-only strengthening (`…-Cubic` / MENC-Cubic).**  
 No shortcut that reduces **`B̂·V`+combine** below `(1−δ)` of honest deep-`m` MAC while keeping Extract ideal — separates MatExpand collapse from sketch-floor collapse.
 
-**Status.** **Draft novel assumption** for external reviewers. Analogous in spirit to cuPOW’s batch low-rank equations conjecture, **not** equivalent, **not** reduced to SETH/OV/APSP.
+**Status.** **Draft novel assumption** for external reviewers (formalized as unreduced in packet §0.2). Analogous in spirit to cuPOW’s batch low-rank equations conjecture, **not** equivalent, **not** reduced to SETH/OV/APSP.
 
 **Ideal closing inequality (aspirational — not proved here):**
 
 ```
-Adv_LT-C15(A) ≤ Adv_PRF^ChaCha(B) + Adv_ExtractStruct(C) + Adv_MENC(D) + negl(Freivalds)
+Adv_LT-C15(A) ≤ Adv_PRF^ChaCha(B) + Adv_ExtractStruct(C) + Adv_NonCollapse(D) + negl(Freivalds)
 ```
 
-with explicit games for B/C/D. **This survey does not establish that inequality.**
+with `Adv_NonCollapse` = advantage against `BTX-C15-NonCollapse-v1`, and explicit games for B/C/D. **This survey does not establish that inequality.**
 
 ---
 
@@ -229,14 +234,14 @@ with explicit games for B/C/D. **This survey does not establish that inequality.
 | Named FG PoW prices the hard problem directly (BRSV) | Do not claim “SETH-hard MatExpand”; price Expand+Extract+sketch honestly |
 | Combinatorial vs algebraic MM is a real distinction | Alphabet/Strassen cryptanalysis ≠ Extract non-collapse |
 | ω < 2.38 exists | Never argue “n³ is information-theoretically mandatory” for bilinear MM |
-| Average-case FG is harder than worst-case | Public PRF instances need MENC average-case language |
+| Average-case FG is harder than worst-case | Public PRF instances need `BTX-C15-NonCollapse-v1` average-case language |
 | Thin / structured MM is often easy | Rank≤w without Extract is the known L1 collapse — Extract is load-bearing |
 
 ---
 
 ## 5. Reduction-feasibility matrix (reviewer quick ref)
 
-| From \ To | MENC-Lin | MENC-Unres | “No MatExpand Θ(n²w) eval” | “No deep-m sketch shortcut” |
+| From \ To | `BTX-C15-NonCollapse-v1`-Lin | `…`-Unres | “No MatExpand Θ(n²w) eval” | “No deep-m sketch shortcut” |
 |---|---|---|---|---|
 | SETH | no known path | no known path | no | no |
 | OV | no known path | no known path | no | no |
@@ -248,6 +253,8 @@ with explicit games for B/C/D. **This survey does not establish that inequality.
 | cuPOW ad-hoc | meta-class cousin | cousin | different encoding | different encoding |
 | ChaCha-PRF alone | supports non-affinity fragment | insufficient | insufficient | insufficient |
 
+*(Column headers: Lin/Unres = restricted/unrestricted variants of the same named assumption; Wave-1 alias MENC-Lin / MENC-Unres.)*
+
 ---
 
 ## 6. Suggested packet hardenings (from this survey)
@@ -255,7 +262,7 @@ with explicit games for B/C/D. **This survey does not establish that inequality.
 *(Also appended to `/tmp/c15_wave1_harden_requests.md`.)*
 
 1. State explicitly in the external packet: **“LT-C15 is not claimed to follow from SETH/OV/APSP/3SUM/combinatorial BMM/ω.”**  
-2. Name **MENC / MENC-Lin** (or equivalent) as the work-binding assumption; separate from ChaCha-PRF fragment.  
+2. Name **`BTX-C15-NonCollapse-v1`** (packet §0.2; alias MENC / MENC-Lin for the primary FAIL class) as the work-binding assumption; separate from ChaCha-PRF fragment.  
 3. Keep cost tables distinguishing **MatExpand Θ(n²w)** vs **sketch cubic floor** in every reduction-shaped claim.  
 4. Require FAIL criteria to exhibit MAC accounting against `HonestMAC`, not merely “subcubic algorithm exists.”  
 5. Add a one-page “non-reduction” annex pointing here, so reviewers do not invent SETH reductions.
@@ -282,4 +289,4 @@ with explicit games for B/C/D. **This survey does not establish that inequality.
 
 ## 8. One-paragraph bottom line
 
-**LT-C15 does not sit under a standard fine-grained conjecture as those conjectures are written today.** SETH/OV/APSP/3SUM/combinatorial BMM/OMV fail on cost model, public thin rank, win condition, and/or Extract nonlinearity; ω cuts the wrong way. The honest path is to treat work-binding as a **named novel assumption (MENC)**, prove or empirically support **MENC-Lin** for the packet’s primary FAIL class, keep ChaCha-PRF as a separate fragment, and leave MENC-Unres open — **without claiming C-15 closed** and without raising `nMatMulDRLTHeight`.
+**LT-C15 does not sit under a standard fine-grained conjecture as those conjectures are written today.** SETH/OV/APSP/3SUM/combinatorial BMM/OMV fail on cost model, public thin rank, win condition, and/or Extract nonlinearity; ω cuts the wrong way. The honest path is to treat work-binding as the **named novel assumption `BTX-C15-NonCollapse-v1`** (aliases: MENC / `BTX-MatExpand-NonCollapse-v1`), prove or empirically support the **Lin** primary FAIL class, keep ChaCha-PRF as a separate fragment, and leave Unres open — **without claiming C-15 closed** and without raising `nMatMulDRLTHeight`.

@@ -26,7 +26,7 @@ tagged **GAP**.
 
 | Rank | Sketch | Why |
 |---|---|---|
-| 1 (least-gappy) | **D** — `BTX-MatExpand-NonCollapse-v1` | First hop is nearly definitional (§0.1 FAIL ⇔ assumption break). Further hops to SETH/OV/KW/PRF remain open. |
+| 1 (least-gappy) | **D** — `BTX-C15-NonCollapse-v1` | First hop is nearly definitional (§0.1 FAIL ⇔ assumption break). Further hops to SETH/OV/KW/PRF remain open. |
 | 2 | **A** — surrogate ⇒ PRF / Extract-nonlinearity | Concrete oracle construction; still needs a formal Extract-nonlinearity lemma and PRF hybrid. |
 | 3 | **B** — Freivalds rewrite ⇒ full-rank heuristic | Relies on an unstated spectral/full-rank heuristic after position salt. |
 | 4 | **C** — KW secret-low-rank | Intentionally a **failure** sketch (shows where KW does not apply). |
@@ -229,20 +229,21 @@ the current public-panel design.
 ---
 
 ## Sketch D — Novel intermediate assumption
-### `BTX-MatExpand-NonCollapse-v1`
+### `BTX-C15-NonCollapse-v1`
 
 ### Name (careful)
 
-**`BTX-MatExpand-NonCollapse-v1`**
+> **Aliases (one assumption)**  
+> **Canonical:** `BTX-C15-NonCollapse-v1` (packet §0.2)  
+> **Also used in Wave-1 drafts:** `BTX-MatExpand-NonCollapse-v1`, **MENC** (*MatExpand–Extract Non-Collapse*), *LT-C15 Work-Binding*  
+> Same §0.1 game; names differ only in emphasis. Prefer the packet id in firm SOWs.
+
+**`BTX-C15-NonCollapse-v1`**
 
 *Not* “ChaCha-NonCollapse” (overclaims primitive). *Not* “C15-Closed”
-(overclaims status). Named for the **MatExpand+Extract+sketch MAC floor**.
-
-**Relation to packet §0.2:** packet names the same game surface
-`BTX-C15-NonCollapse-v1`. Treat these as **aliases for one unreduced
-assumption** in Wave 1 drafts (MatExpand-emphasizing vs C-15-emphasizing).
-Prefer packet §0.2 id in firm SOWs; this sketch keeps the MatExpand name to
-stress that the hardness is *not* “ChaCha alone.”
+(overclaims status). Named for the **C-15 / MatExpand+Extract+sketch MAC floor**.
+The MatExpand-emphasizing alias (`BTX-MatExpand-NonCollapse-v1`) stresses that
+hardness is *not* “ChaCha alone”; it is **not** a second assumption.
 
 ### Game (precise; aligns with packet §0.1)
 
@@ -258,12 +259,12 @@ stress that the hardness is *not* “ChaCha alone.”
 ### Hop 1 — almost definitional
 
 ```
-§0.1 FAIL  ⇒  break of BTX-MatExpand-NonCollapse-v1
+§0.1 FAIL  ⇒  break of BTX-C15-NonCollapse-v1
 ```
 
 **Argument:** The §0.1 FAIL criterion *is* the winning condition of the
 assumption game (same cost model, same ε/δ, same public params). A concrete
-FAIL vector/surrogate **is** a break of `BTX-MatExpand-NonCollapse-v1`.
+FAIL vector/surrogate **is** a break of `BTX-C15-NonCollapse-v1`.
 
 - **GAP-D1 (minor):** Packet FAIL also allows “affine/low-degree surrogate
   matching Extract on ≥ N samples with Freivalds-usable rewrite” without a
@@ -272,7 +273,7 @@ FAIL vector/surrogate **is** a break of `BTX-MatExpand-NonCollapse-v1`.
 
 ### Hop 2 — what would be needed to reduce the assumption further
 
-To reduce `BTX-MatExpand-NonCollapse-v1` to a *named* classical assumption,
+To reduce `BTX-C15-NonCollapse-v1` to a *named* classical assumption,
 a firm write-up would need **all** of the following (none currently exist):
 
 | Target | Needed bridge | Status |
@@ -354,7 +355,7 @@ bound*; Pearl/cuPOW “Freivalds pitfall”).
 ```
 §0.1 FAIL
    │
-   ├─(almost def.)──► break BTX-MatExpand-NonCollapse-v1     [Sketch D]
+   ├─(almost def.)──► break BTX-C15-NonCollapse-v1     [Sketch D]
    │                      │
    │                      ├─?─► ChaCha20-PRF / Extract-Nonlinearity-v1  [A, GAP-D2]
    │                      ├─?─► SETH/OV (BRSV-style embed)               [GAP-D3]
