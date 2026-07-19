@@ -17,6 +17,8 @@ class CBlockHeader;
 // Apple Metal backend for MatMul v4.4 ENC-DR-LT (MatExpand).
 // Digests bit-identical to ComputeDigestBMX4CLT. s8xs8 prefers MPP TensorOps
 // after ExactGemm self-qual; else MSL ALU. Never label ALU as TensorOps.
+// Lever-B MX Extract + scale-partitioned B̂·V run on the host via
+// WindowSketchMinerLT (no Metal Extract twin — fail-closed ExactGemm inject).
 
 namespace matmul_v4::metal {
 

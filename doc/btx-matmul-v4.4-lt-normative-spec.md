@@ -115,8 +115,17 @@ Profile enum: `ENC_BMX4C_LT = 4`. Live only when `IsDRLTActive(height)`.
 | Metal | `ComputeDigestsOnlyLTMetal` | exact MSL integer GEMMs via `ExactGemmBackend` (self-tested); CPU fallback if unavailable |
 | HIP | `ComputeDigestsOnlyLTHip` | exact device GEMMs via `ExactGemmBackend` (self-tested); CPU fallback if unavailable |
 
-Planner: `PlanLTAccel(device_class)`.
-Linker `*_stub.cpp` files remain only for builds with the corresponding `BTX_ENABLE_*=OFF`.
+Planner: `PlanLTAccel(device_class)`. After Lever-B, `ScalePartitionedMxfp4`
+means MX Extract scales `e(i,j/32)` + partitioned `B̂·V` (not BMX4C row-block
+scales). Per-arch reference optimization status:
+
+| Backend | MatExpand Extract | `B̂·V` | Notes |
+|---|---|---|---|
+| CPU | MX-block (normative) | `ComputeProjectedRightMxBlockScaleLT` | Consensus + ExactGemm fallback |
+| CUDA | Device MX twin + host scales | Prefer MX scale-partitioned on Blackwell/sm100/sm120/5090; else dense IMMA/scalar | Re-measure after Lever B |
+| HIP | Device MX twin + host scales | Prefer MX scale-partitioned on MI350/MI355; else dense MFMA/scalar | Re-measure after Lever B |
+| Metal | Host MX via miner/digest | Host scale-partitioned | ExactGemm inject only; no Extract shader |
+| Ascend | Host MX via miner/digest | Host scale-partitioned | ExactGemm Cube self-qual; Fold = GEMM filler only |
 
 ## GO/NO-GO (before raising height)
 

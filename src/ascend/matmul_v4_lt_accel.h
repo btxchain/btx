@@ -25,9 +25,11 @@ class CBlockHeader;
 // ExactGemmS8S8 self-qual (odd-K + max-|entry| corners) AND a Cube/aclnn
 // launch that matched byte-for-byte.
 //
-// Without CANN (default CI / BTX_ENABLE_ASCEND=OFF, or ON without toolkit):
-// stub declines — never pretends Cube ran. Consensus remains the CPU integer
-// transcript. Public activation remains inert (INT32_MAX).
+// Lever-B: MatExpand Extract is normative MX-block on the CPU path
+// (ComputeDigestBMX4CLT / WindowSketchMinerLT). FoldInt32ToEmax48 in self-qual
+// fillers is GEMM shape noise only — not consensus Extract. Digests use host
+// MX scale-partitioned B̂·V. Without CANN: stub declines. Public activation
+// remains inert (INT32_MAX).
 // ---------------------------------------------------------------------------
 
 namespace matmul_v4::ascend {

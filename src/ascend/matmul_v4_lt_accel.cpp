@@ -335,6 +335,7 @@ void FillSelfTestOperands(uint32_t rows, uint32_t inner, uint32_t cols, int32_t 
                           int32_t scale_b, int32_t bias_a, int32_t bias_b,
                           std::vector<int8_t>& left, std::vector<int8_t>& right)
 {
+    // FoldInt32ToEmax48 here is GEMM self-qual filler only — NOT Lever-B MX Extract.
     left.resize(static_cast<size_t>(rows) * inner);
     right.resize(static_cast<size_t>(inner) * cols);
     for (uint32_t i = 0; i < rows * inner; ++i) {

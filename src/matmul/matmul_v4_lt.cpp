@@ -444,7 +444,8 @@ uint64_t MatExpandPrfLaneLE64(const uint256& prf_key, int32_t raw, uint32_t i, u
 int8_t ExtractDequantMatExpandAccelReplica(int32_t raw, uint32_t i, uint32_t j,
                                            const uint256& prf_key)
 {
-    // Must stay bit-identical to normative ExtractDequantMatExpand (MX synthetic tile).
+    // Host twin of CUDA/HIP DeviceExtractDequantMatExpandMx (synthetic tile).
+    // Must stay bit-identical to normative ExtractDequantMatExpand.
     return ExtractDequantMatExpand(raw, i, j, prf_key);
 }
 
@@ -592,16 +593,20 @@ bool ComputeDigestBMX4CLT(const CBlockHeader& header, uint32_t n,
     const auto [seed_u, seed_v] = DeriveProjectorSeedsBMX4CLT(header);
 
     const std::vector<int8_t> Ahat = ExpandOperandAMatExpand(header, n, backend);
-    const std::vector<int8_t> Bhat = ExpandOperandBMatExpand(header, n, backend);
+    std::vector<int8_t> mu_b;
+    std::vector<uint8_t> scales_b;
+    const std::vector<int8_t> Bhat =
+        ExpandOperandBMatExpandMx(header, n, backend, mu_b, scales_b);
+    (void)Bhat;
     const std::vector<int8_t> U = bx::ExpandProjectorBMX4C(seed_u, m, n);
     const std::vector<int8_t> V = bx::ExpandProjectorBMX4C(seed_v, n, m);
 
-    // Optimal factoring Chat = (U*Ahat)(Bhat*V), never forming C. |Ahat|,|Bhat|
-    // <= 48 and |U|,|V| <= 6, so the UNCHANGED v4 projection + direct mod-q
-    // combine consume them exactly (byte-identical to U*(A*B)*V). Deep tile
-    // m = n/2 raises the enforced combine work but touches no accumulator bound.
+    // Optimal factoring Chat = (U*Ahat)(Bhat*V), never forming C. Lever-B:
+    // right projection uses MX scale-partitioned lane (bit-identical to dense
+    // Bhat·V). |Ahat|,|Bhat| <= 48 and |U|,|V| <= 6.
     const std::vector<int32_t> P = matmul::v4::ComputeProjectedLeft(U, Ahat, n, m);
-    const std::vector<int32_t> Q = matmul::v4::ComputeProjectedRight(Bhat, V, n, m);
+    const std::vector<int32_t> Q =
+        ComputeProjectedRightMxBlockScaleLT(mu_b, scales_b, V, n, m);
     const std::vector<Fq> Chat = matmul::v4::ComputeCombineModQ(P, Q, n, m);
 
     payload_out = matmul::v4::SerializeSketch(Chat);
@@ -1011,8 +1016,9 @@ matmul::v4::bmx4::ExactAccelPlan PlanLTAccel(std::string_view device_class)
 {
     // MatExpand replaces the SHA operand XOF with dense exact-int GEMMs; the
     // projection/combine lane choice for the deep-m sketch is the same device
-    // taxonomy as ENC-BMX4C (MXFP4 on Blackwell/MI350, FP8 on Rubin-class, INT8
-    // elsewhere). Consensus never sees these lanes — only the integer Ĉ.
+    // taxonomy as ENC-BMX4C. After Lever-B MX Extract, ScalePartitionedMxfp4
+    // means e(i, j/32) col-block scales + partitioned B̂·V (NOT BMX4C operand-B
+    // row-block e(rb,j) layout). Consensus never sees these lanes — only Ĉ.
     return matmul::v4::bmx4::PlanExactAccelLanes(device_class);
 }
 
