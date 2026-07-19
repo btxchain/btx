@@ -162,14 +162,26 @@ constexpr uint32_t kMatExpandPrfLaneScale = 0x53434C45u; // 'SCLE'
 // One ChaCha20 keystream (≤64 bytes) bound to (raw,i,j,counter,lane).
 // Nonce96 = (raw⊕lane, pack(i,j)); block counter = remix. Matches RFC8439
 // layout used by crypto/chacha20.h — device twins must reproduce bit-exactly.
+//
+// Position salt (i,j) is MANDATORY and FULL-WIDTH uint32:
+//   nonce_second = (uint64_t{i} << 32) | uint64_t{j}
+// i occupies ChaCha nonce bits [63:32], j occupies [31:0]. Device kernels
+// MUST NOT truncate either half (e.g. to 16 bits): that would consensus-split
+// AND reopen a ~32× low-rank shortcut on B32=(G·W)·H. See
+// doc/btx-matmul-v4.4-lt-matexpand-position-salt.md.
 void MatExpandPrfKeystream(const uint256& prf_key, int32_t raw, uint32_t i, uint32_t j,
                            uint32_t remix, uint32_t lane, Span<std::byte> out)
 {
+    static_assert(sizeof(i) == 4 && sizeof(j) == 4,
+                  "MatExpand position salt (i,j) must be full-width uint32");
     std::array<std::byte, ChaCha20::KEYLEN> key_bytes{};
     std::memcpy(key_bytes.data(), prf_key.data(), ChaCha20::KEYLEN);
     ChaCha20 chacha{Span<const std::byte>{key_bytes}};
     const uint32_t nonce_first = static_cast<uint32_t>(raw) ^ lane;
+    // Full 32-bit i and j — do not mask to 0xffff / cast through uint16_t.
     const uint64_t nonce_second = (static_cast<uint64_t>(i) << 32) | static_cast<uint64_t>(j);
+    assert(((nonce_second >> 32) & 0xffffffffull) == static_cast<uint64_t>(i));
+    assert((nonce_second & 0xffffffffull) == static_cast<uint64_t>(j));
     chacha.Seek(ChaCha20::Nonce96{nonce_first, nonce_second}, remix);
     chacha.Keystream(out);
 }
@@ -236,6 +248,14 @@ int8_t ExtractDequantMatExpand(int32_t raw, uint32_t i, uint32_t j, const uint25
     // independent scale lane e∈{0..3}. Domain-separated over (key, raw, i, j,
     // remix). Stronger mixer candidate than SplitMix; C-15 external review still
     // required before activation (do not claim cryptographically closed).
+    //
+    // (i,j) are full-width uint32 position salts packed into ChaCha
+    // nonce_second = (i<<32)|j — mandatory on every backend (CPU / CUDA / HIP /
+    // AccelReplica). Truncating the nonce word consensus-splits and reopens a
+    // ~32× low-rank shortcut. See MatExpandPrfKeystream +
+    // doc/btx-matmul-v4.4-lt-matexpand-position-salt.md.
+    static_assert(sizeof(i) == 4 && sizeof(j) == 4,
+                  "ExtractDequantMatExpand position salt (i,j) must be full-width uint32");
     std::array<std::byte, 8> mant_bytes{};
     std::array<std::byte, 8> scale_bytes{};
     uint32_t remix = 0;
@@ -277,17 +297,23 @@ inline void AccelReplicaChaChaQuarter(uint32_t& a, uint32_t& b, uint32_t& c, uin
     c += d; b = AccelReplicaRotl32(b ^ c, 7);
 }
 
+// Host twin of CUDA/HIP DeviceMatExpandPrfLE64. Same full-width (i,j) packing:
+// nonce_second = (i<<32)|j — MUST NOT truncate either half.
 uint64_t AccelReplicaMatExpandPrfLE64(const uint32_t key[8], int32_t raw, uint32_t i, uint32_t j,
                                       uint32_t remix, uint32_t lane)
 {
+    static_assert(sizeof(i) == 4 && sizeof(j) == 4,
+                  "AccelReplica position salt (i,j) must be full-width uint32");
     uint32_t x0 = 0x61707865u, x1 = 0x3320646eu, x2 = 0x79622d32u, x3 = 0x6b206574u;
     uint32_t x4 = key[0], x5 = key[1], x6 = key[2], x7 = key[3];
     uint32_t x8 = key[4], x9 = key[5], x10 = key[6], x11 = key[7];
     uint32_t x12 = remix;
     uint32_t x13 = static_cast<uint32_t>(raw) ^ lane;
+    // Full 32-bit i → x15, full 32-bit j → x14 (RFC8439 nonce layout).
     const uint64_t nonce_second = (static_cast<uint64_t>(i) << 32) | static_cast<uint64_t>(j);
     uint32_t x14 = static_cast<uint32_t>(nonce_second);
     uint32_t x15 = static_cast<uint32_t>(nonce_second >> 32);
+    assert(x15 == i && x14 == j);
 
     const uint32_t j4 = x4, j5 = x5, j6 = x6, j7 = x7;
     const uint32_t j8 = x8, j9 = x9, j10 = x10, j11 = x11;

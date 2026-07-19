@@ -100,15 +100,23 @@ __device__ __forceinline__ void DeviceChaChaQuarter(uint32_t& a, uint32_t& b, ui
     c += d; b = DeviceRotl32(b ^ c, 7);
 }
 
+// Bit-identical to matmul_v4_lt.cpp MatExpandPrfKeystream first 8 bytes (LE64).
+// Position salt (i,j) MUST be full-width uint32 — never truncate to 16 bits:
+//   nonce_second = (uint64_t{i} << 32) | uint64_t{j}
+// Truncation consensus-splits vs CPU and reopens a ~32× low-rank shortcut.
+// See doc/btx-matmul-v4.4-lt-matexpand-position-salt.md.
 __device__ __forceinline__ uint64_t DeviceMatExpandPrfLE64(const uint32_t key[8], int32_t raw,
                                                           uint32_t i, uint32_t j, uint32_t remix,
                                                           uint32_t lane)
 {
+    static_assert(sizeof(i) == 4 && sizeof(j) == 4,
+                  "DeviceMatExpandPrfLE64: (i,j) must be full-width uint32");
     uint32_t x0 = 0x61707865u, x1 = 0x3320646eu, x2 = 0x79622d32u, x3 = 0x6b206574u;
     uint32_t x4 = key[0], x5 = key[1], x6 = key[2], x7 = key[3];
     uint32_t x8 = key[4], x9 = key[5], x10 = key[6], x11 = key[7];
     uint32_t x12 = remix;
     uint32_t x13 = static_cast<uint32_t>(raw) ^ lane;
+    // Full 32-bit i → x15, full 32-bit j → x14. Do not mask to 0xffff.
     const uint64_t nonce_second = (static_cast<uint64_t>(i) << 32) | static_cast<uint64_t>(j);
     uint32_t x14 = static_cast<uint32_t>(nonce_second);
     uint32_t x15 = static_cast<uint32_t>(nonce_second >> 32);

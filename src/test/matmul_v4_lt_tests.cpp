@@ -3,6 +3,9 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/backend_capabilities_v4.h>
+#include <matmul/matmul_pow.h>
+#include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/accel_v4.h>
 #if defined(BTX_ENABLE_METAL)
@@ -12,6 +15,7 @@
 #include <arith_uint256.h>
 #include <consensus/params.h>
 #include <crypto/common.h>
+#include <crypto/sha256.h>
 #include <cuda/matmul_v4_lt_accel.h>
 #include <ascend/matmul_v4_lt_accel.h>
 #include <hip/matmul_v4_lt_accel.h>
@@ -24,11 +28,16 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace lt = matmul::v4::lt;
@@ -110,6 +119,188 @@ bool FailGemmS32S8(const std::vector<int32_t>&, const std::vector<int8_t>&,
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// C-15 falsification helpers (dual pre-review): least-squares surrogates and
+// MatExpand B32 reconstruction. These are empirical witnesses, not proofs.
+// Bound ε = 0.05 on R² for affine / degree≤3 predictors of Extract(B32).
+// ---------------------------------------------------------------------------
+constexpr double kC15SurrogateR2Eps = 0.05;
+
+uint256 DeriveTaggedSeedSha256(const char* tag, size_t taglen, const uint256& hash)
+{
+    CSHA256 hasher;
+    hasher.Write(reinterpret_cast<const unsigned char*>(tag), taglen);
+    hasher.Write(hash.data(), uint256::size());
+    uint8_t out[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(out);
+    return uint256{Span<const unsigned char>{out, sizeof(out)}};
+}
+
+/** Reconstruct MatExpand B32 = (G*W)*H for nonce-fresh operand B (test-only twin
+ *  of MatExpandCore up to Extract). Tags match src/matmul/matmul_v4_lt.cpp. */
+struct MatExpandB32Bundle {
+    std::vector<int32_t> B32;
+    uint256 prf_key;
+};
+
+MatExpandB32Bundle ExpandOperandBB32ForTest(const CBlockHeader& header, uint32_t n)
+{
+    namespace bx = matmul::v4::bmx4;
+    constexpr char kGTag[] = "BTX_MATEXPAND_G_V44LT";
+    constexpr char kHTag[] = "BTX_MATEXPAND_H_V44LT";
+    constexpr char kWTag[] = "BTX_MATEXPAND_W_V44LT";
+    const uint32_t w = lt::kMatExpandPanelW;
+    const uint256 tmpl = matmul::v4::ComputeTemplateHash(header);
+    const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
+    const uint256 seed_g = DeriveTaggedSeedSha256(kGTag, sizeof(kGTag) - 1, tmpl);
+    const uint256 seed_h = DeriveTaggedSeedSha256(kHTag, sizeof(kHTag) - 1, tmpl);
+    const uint256 seed_w = DeriveTaggedSeedSha256(kWTag, sizeof(kWTag) - 1, header_hash);
+
+    const auto G = bx::ExpandProjectorBMX4C(seed_g, n, n);
+    const auto H = bx::ExpandProjectorBMX4C(seed_h, w, n);
+    const auto W = bx::ExpandProjectorBMX4C(seed_w, n, w);
+    const auto Y = lt::ExactGemmS8S8(G, W, n, n, w);
+    MatExpandB32Bundle out;
+    out.B32 = lt::ExactGemmS32S8(Y, H, n, w, n);
+    out.prf_key = lt::DeriveMatExpandPrfKey(seed_w);
+    return out;
+}
+
+struct PolyFit {
+    int degree{0};
+    double x_mean{0.0};
+    double x_scale{1.0};
+    std::array<double, 4> c{}; // c[0] + c[1] t + ... + c[degree] t^degree
+    double r2{0.0};
+};
+
+bool SolveLinearSystem(std::vector<double>& a, std::vector<double>& b, int n)
+{
+    // In-place Gaussian elimination with partial pivoting on n×n row-major `a`.
+    for (int col = 0; col < n; ++col) {
+        int piv = col;
+        double best = std::fabs(a[static_cast<size_t>(col) * n + col]);
+        for (int r = col + 1; r < n; ++r) {
+            const double v = std::fabs(a[static_cast<size_t>(r) * n + col]);
+            if (v > best) {
+                best = v;
+                piv = r;
+            }
+        }
+        if (best < 1e-18) return false;
+        if (piv != col) {
+            for (int c = 0; c < n; ++c) {
+                std::swap(a[static_cast<size_t>(col) * n + c],
+                          a[static_cast<size_t>(piv) * n + c]);
+            }
+            std::swap(b[col], b[piv]);
+        }
+        const double diag = a[static_cast<size_t>(col) * n + col];
+        for (int r = col + 1; r < n; ++r) {
+            const double f = a[static_cast<size_t>(r) * n + col] / diag;
+            b[r] -= f * b[col];
+            for (int c = col; c < n; ++c) {
+                a[static_cast<size_t>(r) * n + c] -= f * a[static_cast<size_t>(col) * n + c];
+            }
+        }
+    }
+    for (int i = n - 1; i >= 0; --i) {
+        double s = b[i];
+        for (int c = i + 1; c < n; ++c) {
+            s -= a[static_cast<size_t>(i) * n + c] * b[c];
+        }
+        const double diag = a[static_cast<size_t>(i) * n + i];
+        if (std::fabs(diag) < 1e-18) return false;
+        b[i] = s / diag;
+    }
+    return true;
+}
+
+bool FitPolyLS(const std::vector<double>& xs, const std::vector<double>& ys, int degree,
+                PolyFit& out)
+{
+    BOOST_REQUIRE(xs.size() == ys.size());
+    BOOST_REQUIRE(degree >= 1 && degree <= 3);
+    const size_t n = xs.size();
+    BOOST_REQUIRE(n > static_cast<size_t>(degree));
+
+    double mean = 0.0;
+    for (double x : xs) mean += x;
+    mean /= static_cast<double>(n);
+    double var = 0.0;
+    for (double x : xs) {
+        const double d = x - mean;
+        var += d * d;
+    }
+    const double scale = std::sqrt(var / static_cast<double>(n));
+    out.degree = degree;
+    out.x_mean = mean;
+    out.x_scale = (scale > 1e-12) ? scale : 1.0;
+    out.c = {};
+
+    const int dim = degree + 1;
+    std::vector<double> ata(static_cast<size_t>(dim) * dim, 0.0);
+    std::vector<double> aty(dim, 0.0);
+    for (size_t i = 0; i < n; ++i) {
+        const double t = (xs[i] - out.x_mean) / out.x_scale;
+        double pk = 1.0;
+        std::array<double, 4> powers{};
+        for (int k = 0; k < dim; ++k) {
+            powers[k] = pk;
+            pk *= t;
+        }
+        for (int r = 0; r < dim; ++r) {
+            aty[r] += powers[r] * ys[i];
+            for (int c = 0; c < dim; ++c) {
+                ata[static_cast<size_t>(r) * dim + c] += powers[r] * powers[c];
+            }
+        }
+    }
+    if (!SolveLinearSystem(ata, aty, dim)) return false;
+    for (int k = 0; k < dim; ++k) out.c[k] = aty[k];
+
+    double y_mean = 0.0;
+    for (double y : ys) y_mean += y;
+    y_mean /= static_cast<double>(n);
+    double ss_tot = 0.0;
+    double ss_res = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double t = (xs[i] - out.x_mean) / out.x_scale;
+        double pred = 0.0;
+        double pk = 1.0;
+        for (int k = 0; k <= degree; ++k) {
+            pred += out.c[k] * pk;
+            pk *= t;
+        }
+        const double dy = ys[i] - y_mean;
+        const double e = ys[i] - pred;
+        ss_tot += dy * dy;
+        ss_res += e * e;
+    }
+    out.r2 = (ss_tot > 1e-18) ? (1.0 - ss_res / ss_tot) : 0.0;
+    return true;
+}
+
+double EvalPoly(const PolyFit& fit, double x)
+{
+    const double t = (x - fit.x_mean) / fit.x_scale;
+    double pred = 0.0;
+    double pk = 1.0;
+    for (int k = 0; k <= fit.degree; ++k) {
+        pred += fit.c[k] * pk;
+        pk *= t;
+    }
+    return pred;
+}
+
+int8_t ClampPredictInt8(double pred)
+{
+    const long rounded = std::lround(pred);
+    if (rounded > 48) return 48;
+    if (rounded < -48) return -48;
+    return static_cast<int8_t>(rounded);
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(fold_int32_to_emax48_range)
@@ -152,8 +343,10 @@ BOOST_AUTO_TEST_CASE(matexpand_splitmix_extract_signed_dequant_golden)
 
 BOOST_AUTO_TEST_CASE(matexpand_not_affine_in_raw)
 {
-    // Linear fold satisfies f(x+d)-f(x) period structure; ChaCha PRF Extract must
-    // not coincide with Fold on a dense sample (non-collapse witness).
+    // WITNESS (not a proof): Linear fold satisfies f(x+d)-f(x) period structure;
+    // ChaCha PRF Extract must not coincide with Fold on a dense sample
+    // (C15-A non-collapse witness). Dual C-15 pre-review: empirical only —
+    // does not rule out exotic surrogates outside the tested class.
     const uint256 seed = ParseUint256(
         "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5");
     const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
@@ -193,6 +386,9 @@ BOOST_AUTO_TEST_CASE(matexpand_not_affine_in_raw)
 
 BOOST_AUTO_TEST_CASE(matexpand_position_salt_differential)
 {
+    // WITNESS (not a proof): position salts (i,j) and seed_W key change Extract
+    // outputs (dual C-15 / Lemma A position-salt binding). Does not prove
+    // absence of related-nonce amortization beyond per-cell ChaCha.
     const uint256 seed = ParseUint256(
         "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
     const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
@@ -206,6 +402,21 @@ BOOST_AUTO_TEST_CASE(matexpand_position_salt_differential)
     const uint256 prf_key2 = lt::DeriveMatExpandPrfKey(seed2);
     BOOST_CHECK(lt::ExtractDequantMatExpand(raw, 0, 0, prf_key) !=
                 lt::ExtractDequantMatExpand(raw, 0, 0, prf_key2));
+
+    // High-half position salt: flipping only bit 16 of i or j must change
+    // Extract. Proves the full 32-bit halves of nonce_second=(i<<32)|j matter;
+    // truncating to 16 bits would consensus-split and reopen a ~32× low-rank
+    // shortcut. Also pins AccelReplica (host twin of CUDA/HIP kernels).
+    constexpr uint32_t i0 = 0x00001234u;
+    constexpr uint32_t j0 = 0x00005678u;
+    const int8_t base = lt::ExtractDequantMatExpand(raw, i0, j0, prf_key);
+    const int8_t i_hi = lt::ExtractDequantMatExpand(raw, i0 | (1u << 16), j0, prf_key);
+    const int8_t j_hi = lt::ExtractDequantMatExpand(raw, i0, j0 | (1u << 16), prf_key);
+    BOOST_CHECK(base != i_hi);
+    BOOST_CHECK(base != j_hi);
+    BOOST_CHECK_EQUAL(base, lt::ExtractDequantMatExpandAccelReplica(raw, i0, j0, prf_key));
+    BOOST_CHECK_EQUAL(i_hi, lt::ExtractDequantMatExpandAccelReplica(raw, i0 | (1u << 16), j0, prf_key));
+    BOOST_CHECK_EQUAL(j_hi, lt::ExtractDequantMatExpandAccelReplica(raw, i0, j0 | (1u << 16), prf_key));
 
     // Legacy SplitMix position salt still distinct (differential witness).
     constexpr uint64_t salt = 0x1234567890ABCDEFULL;
@@ -862,8 +1073,11 @@ BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q128)
 
 BOOST_AUTO_TEST_CASE(matexpand_additivity_noncollapse)
 {
-    // Linear fold satisfies f(x)+f(y) ≈ f(x+y) on a large fraction of samples;
-    // ChaCha PRF Extract must break additivity often enough to witness non-collapse.
+    // WITNESS (not a proof): Linear fold satisfies f(x)+f(y) ≈ f(x+y) on a large
+    // fraction of samples; ChaCha PRF Extract must break additivity often enough
+    // to witness non-collapse (C15-A). Position salt (Lemma A / dual pre-review)
+    // further blocks shared-φ spectral reuse — this check alone is not a
+    // cryptographic closure of C-15.
     const uint256 seed = ParseUint256(
         "deadbeef42deadbeef42deadbeef42deadbeef42deadbeef42deadbeef42dead");
     const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
@@ -1046,6 +1260,131 @@ BOOST_AUTO_TEST_CASE(lt_accel_entry_bit_identity_or_stub_decline)
     BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(tmpl, kTestDim, d, payload));
     BOOST_CHECK(!d.IsNull());
     BOOST_CHECK(!payload.empty());
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_extract_r2_nonapproximability)
+{
+    // C15-A quantitative witness (dual pre-review): best LS affine and
+    // degree-2/3 polynomial predictors of Extract(raw) have R² < ε=0.05 on
+    // dense samples across many positions. Degree ≥2 was previously untested.
+    // Empirical only — not a PRF reduction.
+    const uint256 seed = ParseUint256(
+        "c15a00c15a00c15a00c15a00c15a00c15a00c15a00c15a00c15a00c15a00c15a00");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
+
+    const std::pair<uint32_t, uint32_t> positions[] = {
+        {0, 0}, {1, 2}, {3, 5}, {7, 11}, {13, 17}, {19, 23}, {29, 31}, {4, 8},
+    };
+
+    for (const auto& [i, j] : positions) {
+        std::vector<double> xs;
+        std::vector<double> ys;
+        xs.reserve(401);
+        ys.reserve(401);
+        for (int32_t raw = -2000; raw <= 2000; raw += 10) {
+            xs.push_back(static_cast<double>(raw));
+            ys.push_back(static_cast<double>(
+                lt::ExtractDequantMatExpand(raw, i, j, prf_key)));
+        }
+        for (int deg = 1; deg <= 3; ++deg) {
+            PolyFit fit;
+            BOOST_REQUIRE(FitPolyLS(xs, ys, deg, fit));
+            BOOST_CHECK_MESSAGE(
+                fit.r2 < kC15SurrogateR2Eps,
+                "pos=(" << i << "," << j << ") deg=" << deg << " R²=" << fit.r2
+                        << " (want < " << kC15SurrogateR2Eps << ")");
+        }
+    }
+
+    // Sanity: LS harness runs on Fold (modular sawtooth). Global affine R² is
+    // not required to exceed ε; we only require the fit to succeed and that
+    // Extract remains below ε (checked above). Local period affinity of Fold
+    // is covered by matexpand_not_affine_in_raw differentials.
+    {
+        std::vector<double> xs, ys;
+        for (int32_t raw = -2000; raw <= 2000; raw += 10) {
+            xs.push_back(static_cast<double>(raw));
+            ys.push_back(static_cast<double>(lt::FoldInt32ToEmax48(raw)));
+        }
+        PolyFit fold_fit;
+        BOOST_REQUIRE(FitPolyLS(xs, ys, 1, fold_fit));
+        BOOST_CHECK(std::isfinite(fold_fit.r2));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_c15b_affine_surrogate_sketch_rejected)
+{
+    // C15-B collapse falsification: fit best global LS affine / deg-2 / deg-3
+    // surrogate Bhat'≈f(B32) on a live MatExpand matrix, forge Ĉ' from Bhat',
+    // and assert VerifySketchBMX4CLT (Freivalds) REJECTS. Witness only —
+    // rules out the linear Freivalds-reassociation class on this sample, not
+    // unrestricted adversaries.
+    constexpr uint32_t n = 32; // small consensus-valid dim (n%32==0, deep tile)
+    auto header = MakeLTHeader(0xc15bULL, n);
+    uint32_t m = 0;
+    BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(n, m));
+
+    const auto bundle = ExpandOperandBB32ForTest(header, n);
+    const auto Bhat = lt::ExpandOperandBMatExpand(header, n);
+    BOOST_REQUIRE_EQUAL(bundle.B32.size(), Bhat.size());
+    // B32→Extract must reproduce honest Bhat (reconstruction sanity).
+    for (size_t idx = 0; idx < Bhat.size(); ++idx) {
+        const uint32_t i = static_cast<uint32_t>(idx / n);
+        const uint32_t j = static_cast<uint32_t>(idx % n);
+        BOOST_REQUIRE_EQUAL(
+            static_cast<int>(lt::ExtractDequantMatExpand(bundle.B32[idx], i, j, bundle.prf_key)),
+            static_cast<int>(Bhat[idx]));
+    }
+
+    std::vector<double> xs(bundle.B32.size()), ys(Bhat.size());
+    for (size_t idx = 0; idx < Bhat.size(); ++idx) {
+        xs[idx] = static_cast<double>(bundle.B32[idx]);
+        ys[idx] = static_cast<double>(Bhat[idx]);
+    }
+
+    const auto Ahat = lt::ExpandOperandAMatExpand(header, n);
+    const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
+    const auto U = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_u, m, n);
+    const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, n, m);
+    const auto P = matmul::v4::ComputeProjectedLeft(U, Ahat, n, m);
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+
+    for (int deg = 1; deg <= 3; ++deg) {
+        PolyFit fit;
+        BOOST_REQUIRE(FitPolyLS(xs, ys, deg, fit));
+        BOOST_CHECK_MESSAGE(
+            fit.r2 < kC15SurrogateR2Eps,
+            "production B32 global deg=" << deg << " R²=" << fit.r2
+                                         << " (want < " << kC15SurrogateR2Eps << ")");
+
+        std::vector<int8_t> Bhat_surr(Bhat.size());
+        size_t disagree = 0;
+        for (size_t idx = 0; idx < Bhat.size(); ++idx) {
+            Bhat_surr[idx] = ClampPredictInt8(EvalPoly(fit, xs[idx]));
+            if (Bhat_surr[idx] != Bhat[idx]) ++disagree;
+        }
+        BOOST_REQUIRE_MESSAGE(disagree > Bhat.size() / 4,
+                              "surrogate deg=" << deg << " agrees too often: disagree="
+                                               << disagree << "/" << Bhat.size());
+
+        const auto Q_surr = matmul::v4::ComputeProjectedRight(Bhat_surr, V, n, m);
+        const auto Chat_surr = matmul::v4::ComputeCombineModQ(P, Q_surr, n, m);
+        std::vector<unsigned char> payload = matmul::v4::SerializeSketch(Chat_surr);
+        CBlockHeader forged = header;
+        forged.matmul_digest = matmul::v4::ComputeSketchDigest(sigma, payload);
+
+        // Digest is sealed to the forged sketch; Freivalds vs honest Bhat must fail.
+        uint256 vout;
+        BOOST_CHECK_MESSAGE(
+            !lt::VerifySketchBMX4CLT(forged, n, /*rounds=*/2, payload, vout),
+            "C15-B: deg-" << deg << " surrogate sketch must be rejected by VerifySketchBMX4CLT");
+
+        // Direct Freivalds also rejects (same soundness core).
+        std::vector<matmul::v4::Fq> sketch;
+        BOOST_REQUIRE(matmul::v4::ParseSketch(payload, m, sketch));
+        BOOST_CHECK(!matmul::v4::SketchFreivalds(Ahat, Bhat, U, V, sketch, sigma, payload, n, m,
+                                                 /*rounds=*/2));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
