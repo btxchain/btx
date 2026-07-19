@@ -508,8 +508,9 @@ matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
         backend.gemm_s32s8 = &matmul_v4::hip::LaunchGemmS32S8;
         break;
     case Kind::METAL:
-        backend.gemm_s8s8 = &matmul_v4::metal::TryLaunchLtTensorOpsGemmS8S8;
-        backend.gemm_s32s8 = &matmul_v4::metal::TryLaunchLtTensorOpsGemmS32S8;
+        // LaunchGemm* prefers MPP TensorOps (ExactGemm self-qual) then ALU.
+        backend.gemm_s8s8 = &matmul_v4::metal::LaunchGemmS8S8;
+        backend.gemm_s32s8 = &matmul_v4::metal::LaunchGemmS32S8;
         break;
     case Kind::ASCEND:
         backend.gemm_s8s8 = &matmul_v4::ascend::TryLaunchLtCubeGemmS8S8;
