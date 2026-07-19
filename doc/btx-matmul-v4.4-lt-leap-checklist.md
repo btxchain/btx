@@ -25,7 +25,19 @@ Branch: `feat/bmx4c-exact-accel-lanes` → PR #89 (`claude/matmul-v4-design-spec
 - “No cheaper exact mathematical path” (**retired** — adaptive limbs / Strassen / LCMA remain open *efficiency* work; public baselines + tournament published; calibrate to fastest known exact)
 - Hardware-dependent per-block subsidy (forbidden; throughput share only)
 
-## Calibration cross-link
+## Calibration cross-link (ASERT vs HonestMAC operator hygiene)
 
-Hardness (C-15 / HonestMAC) vs efficiency (ASERT / Strassen–Winograd ~n^{2.807} on combine/sketch; MatExpand stays `O(n²·w)`):  
+Hardness (C-15 / `HonestMAC` MAC count) vs efficiency (ASERT / Strassen–Winograd
+~n^{2.807} on combine/sketch; MatExpand stays `O(n²·w)`):
 `doc/btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md`.
+
+| Operator rule | Pin |
+|---|---|
+| **Tournament baseline** | **Fastest known exact** identity-PASS path (CPU combine tournament + measured ExactGemm / device lanes) — **not** naive schoolbook GEMM / invented `n³` |
+| **Row 6 (≥4×)** | Measure vs that fastest-exact baseline; invent **no** silicon nonce/s in docs |
+| **Row 7 / G5** | External C-15 packet game — **orthogonal to FMM** efficiency; tournament speedup ≠ C-15 PASS |
+| **C-15 status** | **OPEN**; public heights remain `INT32_MAX` |
+| **Non-reduction** | LT-C15 does **not** follow from SETH/OV/APSP/3SUM/BMM/ω/KW/PRF/Freivalds — packet §0.3 + fold `doc/btx-matmul-v4.4-lt-c15-reduction-research-synthesis-2026-07-19.md` |
+
+> **C-15 prices shortcuts in MAC count; ASERT prices the fastest honest exact
+> wall-clock path.** Do not conflate the two.

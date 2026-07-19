@@ -115,7 +115,7 @@ def print_gates() -> None:
         "G2 B200/5090 nonce/s >= ~4x on fat MatExpand+Q* miner schedule",
         "G3 Nonce/$ proxies: B200 >= 5090 (rental + purchase) — operator-supplied costs only",
         "G4 MI350 FER / OCP MX exactness PASS",
-        "G5 MatExpand adversarial review (ChaCha20-PRF+M11 candidate; external C-15 OPEN — not closed)",
+        "G5 MatExpand adversarial review (ChaCha20-PRF+M11 candidate; external C-15 OPEN — not closed; orthogonal to FMM/ASERT)",
         "G6 Tip verify budget with sketch-cache within policy",
         "G7 Header-PoW + authenticated chainwork blockers still required (bit-26 wire withdrawn)",
         "G8 Phase B seal-as-PoW only if Rank-1 launch requires consensus-bound windows",
@@ -469,13 +469,16 @@ def evaluate(
                 )
 
     # G5 — external C-15: never auto-pass from JSON; require explicit ack.
+    # Orthogonal to FMM / ASERT calibration (tournament = fastest known exact;
+    # G1–G4 consume measured silicon JSON only — invent no rates). C-15 OPEN.
     g5 = bool(ack_external_c15)
     if not g5:
         reasons.append(
             "G5 external C-15: NOT acknowledged — pass --ack-external-c15 only after an "
             "independent cryptanalyst completes doc/btx-matmul-v4.4-lt-external-c15-packet.md "
             "(internal ChaCha20-PRF + non-affinity witnesses are not sufficient; "
-            "C-15 remains OPEN until independent review)."
+            "C-15 remains OPEN until independent review; G5 is orthogonal to FMM/"
+            "ASERT tournament baselines — see lt-c15-asert-fmm-calibration note)."
         )
 
     # G6/G7/G8 — measurement/review blockers; this aggregator cannot invent them.
@@ -673,7 +676,11 @@ def main() -> int:
     ap.add_argument(
         "--ack-external-c15",
         action="store_true",
-        help="Operator asserts independent completion of the external C-15 packet (G5)",
+        help=(
+            "Operator asserts independent completion of the external C-15 packet (G5). "
+            "Orthogonal to FMM/ASERT; does not invent silicon; C-15 remains OPEN until "
+            "that review (see doc/btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md)."
+        ),
     )
     ap.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = ap.parse_args()

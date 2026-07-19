@@ -57,18 +57,30 @@ MatExpand itself. See §1.1–§1.2.
 |---|---|
 | **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=128`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative ChaCha20-PRF+M11 (`ENC_BMX4C_LT`) |
 | **Honest cost** `HonestMAC(n)` | Exact-int MAC count of one marginal nonce unit: **MatExpand-B** (`G·W` + `Y·H`) + **`B̂·V`** + **combine `P·Q`** (I1′: template A / `U`/`V`/`P` excluded from marginal). At `n=4096`: MatExpand-B `4n²w ≈ 8.59×10⁹`; `B̂·V` `2n²m ≈ 6.87×10¹⁰`; combine on `m×m` sketch (see shortcut/TMTO pre-review). |
-| **Adversary class** | Classical PPT relative to `HonestMAC`; may use poly-many adaptive honest MatExpand/digest queries and Freivalds verify transcripts at production EncDr rounds. **Linear / degree-≤2 entrywise surrogates** of Extract are the primary FAIL class; unrestricted adversaries may return INCONCLUSIVE. |
+| **Adversary class** | Classical PPT relative to `HonestMAC`; may use poly-many adaptive honest MatExpand/digest queries and Freivalds verify transcripts at production EncDr rounds. Label the class explicitly (**MENC-Lin** / **MENC-Unres** / optional **MENC-Cubic** — table below). Primary FAIL class = **MENC-Lin** (linear / degree-≤2 entrywise surrogates). **MENC-Unres** may return INCONCLUSIVE. |
 | **Win** | Output an accepting Phase-A digest (or seal if SB annex in scope) with **advantage** `Adv ≥ ε` over Freivalds false-accept, while using exact-int MatExpand+BV+combine MAC count `≤ (1−δ)·HonestMAC(n)`. |
 | **Metric** | Exact-int MAC (multiply-accumulate) count vs `HonestMAC`; optional same-machine wall-time of CPU ExactGemm reference as secondary (must not invent silicon). Wall-time / Strassen wins update **ASERT** baselines only — see FMM calibration note; they do not substitute for a C-15 MAC-count FAIL/PASS. |
 | **Thresholds (review defaults)** | `δ = 1/2` (half-cost); `ε = 2⁻⁴⁰` above Freivalds false-accept for the stated round count. Firm may retune in SOW — **do not silently change**. |
+
+### Adversary-class labels (MENC aliases under `BTX-C15-NonCollapse-v1`)
+
+One named assumption (`BTX-C15-NonCollapse-v1`); three **class labels** so firm notes do not conflate verdicts. Prefer the packet id in SOWs; MENC-* are aliases only (FG survey §3).
+
+| Label | Restriction | Typical firm return | Must not confuse with |
+|---|---|---|---|
+| **MENC-Lin** | Linear / degree-≤2 entrywise Extract surrogates + Freivalds-linear rewrites through `G,W,H` | Primary FAIL/PASS target | — |
+| **MENC-Unres** | No degree restriction (classical PPT) | Often **INCONCLUSIVE** for years | **MENC-Lin PASS ≠ MENC-Unres PASS** |
+| **MENC-Cubic** *(optional strengthening)* | Shortcut that cuts **`B̂·V` + combine** below `(1−δ)` of honest deep-`m` MAC (Extract ideal) | Separate sketch-floor claim | **Not** a MatExpand Θ(n²·w) claim — cubic floor is sketch/combine, not Expand |
+
+**Hard wording rules:** (1) A **PASS** written against **MENC-Lin** does **not** imply a PASS against **MENC-Unres**. (2) Sketch-floor / deep-`m` MAC claims belong under **MENC-Cubic** (or explicit “sketch floor” language) — **do not** attribute them to MatExpand alone. See scoping correction above and §1.1–§1.2.
 
 ### Return criteria
 
 | Verdict | When |
 |---|---|
-| **FAIL** | Concrete vectors + measured cost showing `Adv ≥ ε` at `≤ (1−δ)·HonestMAC`, **or** an affine/low-degree (deg ≤ 2) surrogate matching Extract on ≥ `N=10⁶` realistic `B32` samples with Freivalds-usable rewrite through `G,W,H`. |
-| **PASS** | No such adversary for the stated class; write-up argues why linear/low-degree surrogates fail under the sample regime; residual risks listed and bounded. **Still does not authorize height raise.** |
-| **INCONCLUSIVE** | Neither FAIL nor PASS (e.g. unrestricted class open; bias documented without PoW shortcut; missing oracles). |
+| **FAIL** | Concrete vectors + measured cost showing `Adv ≥ ε` at `≤ (1−δ)·HonestMAC`, **or** an affine/low-degree (deg ≤ 2) surrogate matching Extract on ≥ `N=10⁶` realistic `B32` samples with Freivalds-usable rewrite through `G,W,H`. State which MENC label was broken. |
+| **PASS** | No such adversary for the **stated** MENC class; write-up argues why that class fails under the sample regime; residual risks listed and bounded. **Lin PASS ≠ Unres PASS.** **Still does not authorize height raise.** |
+| **INCONCLUSIVE** | Neither FAIL nor PASS (e.g. **MENC-Unres** open; bias documented without PoW shortcut; missing oracles). |
 
 Internal non-affinity / golden tests are **witnesses**, not a PASS.
 
@@ -96,14 +108,16 @@ scope) at advantage `≥ ε` while paying `≤ (1−δ)·HonestMAC(n)` exact-int
 | Pin | Value |
 |---|---|
 | **Assumption id** | `BTX-C15-NonCollapse-v1` |
+| **Aliases (class labels)** | **MENC-Lin** / **MENC-Unres** / **MENC-Cubic** — adversary-class aliases under this id (§0.1 table). Also: `BTX-MatExpand-NonCollapse-v1`, umbrella **MENC**. Same assumption; labels differ by restriction. |
 | **Public params** | `n ∈ {64,256,4096}` (production `n=4096`), `w=128`, `b=2`, `m=n/2`, `q=2⁶¹−1`, Extract = normative ChaCha20-PRF+M11 (`ENC_BMX4C_LT`) |
-| **Honest cost** | `HonestMAC(n)` as in §0.1 (MatExpand-B + `B̂·V` + combine `P·Q`; I1′ template work excluded from marginal) |
-| **Adversary class** | Classical PPT vs `HonestMAC`; poly-many adaptive MatExpand/digest queries and Freivalds transcripts at production EncDr rounds. Primary FAIL class: **linear / degree-≤2 entrywise** Extract surrogates; deg-≤3 and spectral/TMTO surfaces are mandatory firm checklist items (below). Unrestricted adversaries may return INCONCLUSIVE. |
+| **Honest cost** | `HonestMAC(n)` as in §0.1 (MatExpand-B + `B̂·V` + combine `P·Q`; I1′ template work excluded from marginal). MatExpand = Θ(n²·w); **cubic MAC floor** = deep-`m` sketch (`B̂·V` + combine) — MENC-Cubic scope, not Expand. |
+| **Adversary class** | Classical PPT vs `HonestMAC`; poly-many adaptive MatExpand/digest queries and Freivalds transcripts at production EncDr rounds. Primary FAIL class: **MENC-Lin** (linear / degree-≤2 entrywise Extract surrogates); deg-≤3 and spectral/TMTO surfaces are mandatory firm checklist items (below). **MENC-Unres** may return INCONCLUSIVE. |
 | **δ, ε** | `δ = 1/2`, `ε = 2⁻⁴⁰` above Freivalds false-accept (firm may retune in SOW — do not silently change) |
 | **Win** | Accepting digest/seal with `Adv ≥ ε` at MAC cost `≤ (1−δ)·HonestMAC(n)` |
 
-PASS/FAIL/INCONCLUSIVE return criteria are exactly those of §0.1. A firm
-**PASS** on this named assumption is still **not** a height raise.
+PASS/FAIL/INCONCLUSIVE return criteria are exactly those of §0.1 (state the MENC
+label). A firm **PASS** on **MENC-Lin** is **not** a PASS on **MENC-Unres**, and
+is still **not** a height raise. **C-15 remains OPEN.**
 
 ### Break modes (GAP-D1 pin)
 
@@ -125,6 +139,20 @@ do not meet thresholds remain witnesses / INCONCLUSIVE, not breaks.
 does **not** authorize raising `nMatMulDRLTHeight`, and does **not** invent a
 reduction to a classical named problem.
 
+### Fragment lemma + PRF hybrid (Wave 3 Gap #2 — not a reduction)
+
+Structured-surrogate FAIL is the primary class Sketch A maps toward a
+**fragment** lemma / PRF break — not toward closing NonCollapse. Formalization
+(DRAFT, every step **GAP**-tagged; related-nonce absorbed into
+`Adv_ExtractStruct`, not `Adv_PRF`):
+
+→ **`doc/btx-matmul-v4.4-lt-c15-extract-nonlinearity-v1-2026-07-19.md`**
+(`Extract-Nonlinearity-v1` + MatExpand nonce-packing hybrid outline).
+
+That note does **not** prove the lemma, does **not** discharge Sketch A
+GAP-A2/A3, and does **not** imply “ChaCha is fine ⇒ C-15 closed.” **C-15
+remains OPEN.**
+
 ### Does NOT follow from ChaCha20-PRF alone
 
 ChaCha20 being a secure PRF (in the AEAD sense, or even as an ideal block
@@ -139,6 +167,38 @@ adversary can bypass via an affine fold, related-nonce structure, truncated
 queries while the PoW non-collapse game fails. Therefore
 `BTX-C15-NonCollapse-v1` is a **separate, unreduced** assumption. Do not write
 “ChaCha is fine ⇒ C-15 closed.”
+
+### 0.3 Non-reduction one-pager annex
+
+> **LT-C15 does not follow from SETH / OV / APSP / 3SUM / combinatorial BMM /
+> ω / KW / ChaCha20-PRF / Freivalds.**
+
+This is a **banner for reviewers**, not a proof of hardness. Do not invent a
+SETH→C-15 (or OV/APSP/3SUM/BMM/ω/KW/PRF/Freivalds→C-15) reduction and treat it
+as closing work-binding. The packet game (§0.1) and named assumption (§0.2)
+remain the review target; C-15 remains **OPEN**.
+
+| Tempting citation | Why it does **not** pin LT-C15 |
+|---|---|
+| **SETH** | Exp SAT ≠ poly MAC shortcut; no embedding into Expand/Extract/Freivalds |
+| **OV** | Set-disjointness ≠ thin arithmetic GEMM + PRF Extract |
+| **APSP** | Digests ≠ distance matrices; cubic floor is sketch `B̂·V`, not Expand |
+| **3SUM** | Position salts + nonlinear Extract destroy additive 3-linear structure |
+| **Combinatorial BMM** | Wrong alphabet / axis vs Extract nonlinearity |
+| **ω (MM exponent)** | Upper bounds *weaken* “must pay n³”; algebraic bilinear ≠ Extract∘GWH |
+| **KW secret low-rank** | Premise missing — `G,W,H` / `rank(B32)≤w` are **public** |
+| **ChaCha20-PRF alone** | Distinguisher game ≠ `HonestMAC` lower bound (§0.2) |
+| **Freivalds soundness** | Correctness / integrity ≠ miner MAC lower bound (ε floor only) |
+
+**Fold / index (full Wave-1 map, attempted-target table, ranked gaps):**
+`doc/btx-matmul-v4.4-lt-c15-reduction-research-synthesis-2026-07-19.md`
+(detail: fine-grained survey + crypto survey + obstruction notes + drafts).
+**Does not close C-15. Does not authorize raising `nMatMulDRLTHeight`.**
+
+Operator hygiene (orthogonal track): hardness metric = `HonestMAC` MAC count;
+efficiency / ASERT baselines = **fastest known exact** tournament — see
+`doc/btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md`. Invent no
+silicon. lt-gate **G5** (this packet ack) is orthogonal to FMM calibration.
 
 ### Attack-surface checklist (human firm)
 
@@ -356,6 +416,9 @@ Internal witnesses: `phase_b_seal_round_trip_and_auth`,
 
 ### 6.1 Wave-1 survey / reduction companions (not proofs)
 
+**Non-reduction one-pager (packet §0.3):** LT-C15 does **not** follow from
+SETH/OV/APSP/3SUM/BMM/ω/KW/PRF/Freivalds — banner + citation table; points here.
+
 **Fold / index (start here for reduction research):**
 `doc/btx-matmul-v4.4-lt-c15-reduction-research-synthesis-2026-07-19.md`
 — executive non-reduction verdict, naming alignment
@@ -410,4 +473,5 @@ lt-gate.py <dir> --manifest parts.tsv [--cost ...] [--ack-external-c15]
 - Cryptographic proof that ChaCha20-PRF Extract has no cheaper algebraic shortcut
 - That ChaCha-as-PRF alone is a MatExpand work lower bound
 - That `BTX-C15-NonCollapse-v1` (§0.2) reduces to any standard named problem
-  (SETH/OV/KW/PRF/Freivalds, …) — it is **named and unreduced**
+  (SETH/OV/APSP/3SUM/BMM/ω/KW/PRF/Freivalds, …) — it is **named and unreduced**
+  (see §0.3 one-pager + Wave-1 fold)

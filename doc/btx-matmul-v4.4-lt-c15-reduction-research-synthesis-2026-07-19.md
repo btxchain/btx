@@ -30,17 +30,24 @@ affine surrogates; Freivalds sets ε floor only).
 unreduced assumption below — not “SETH-hard MatExpand” or “ChaCha is a PRF ⇒
 PASS.”
 
-### Naming alignment (one assumption, three labels)
+### Naming alignment (one assumption; MENC class labels)
 
 | Label | Where | Use |
 |---|---|---|
 | **`BTX-C15-NonCollapse-v1`** | Packet §0.2; `named-assumption.md`; firm SOWs | **Canonical** id |
 | **`BTX-MatExpand-NonCollapse-v1`** | Reduction drafts Sketch D | Alias emphasizing MatExpand+Extract+sketch MAC floor (not “ChaCha-NonCollapse”) |
-| **MENC** / **MENC-Lin** / **MENC-Unres** / **MENC-Cubic** | Fine-grained survey §3 | Alias family: MatExpand–Extract Non-Collapse; Lin = primary FAIL class (deg≤2); Unres = unrestricted; Cubic = sketch-floor strengthening |
+| **MENC** (umbrella) | FG survey §3; Wave-1 drafts | Short alias for the same unreduced assumption |
+| **MENC-Lin** | Packet §0.1 table; FG survey §3 | Deg-≤2 / Freivalds-linear primary FAIL class |
+| **MENC-Unres** | Packet §0.1 table; FG survey §3 | Unrestricted PPT — often INCONCLUSIVE |
+| **MENC-Cubic** | Packet §0.1 table; FG survey §3 | Optional **sketch-floor** strengthening (`B̂·V`+combine) — **not** MatExpand |
 
-Treat all three as **aliases for one unreduced work-binding assumption** whose
-game is packet §0.1. Prefer **`BTX-C15-NonCollapse-v1`** in firm SOWs.
-Naming ≠ proof ≠ height raise.
+All are **aliases under one unreduced work-binding assumption** whose game is
+packet §0.1. Prefer **`BTX-C15-NonCollapse-v1`** in firm SOWs.
+
+**Hard rules (Wave 3 Gap #4):** **MENC-Lin PASS ≠ MENC-Unres PASS.** Sketch-floor /
+deep-`m` claims are **MENC-Cubic** (or explicit “sketch floor”) — **do not**
+mis-attribute them to MatExpand Θ(n²·w). Naming ≠ proof ≠ height raise.
+C-15 remains **OPEN**.
 
 **Aspirational inequality (not proved):**
 
@@ -114,11 +121,11 @@ raise height.*
 | **1** | Pin break modes of `BTX-C15-NonCollapse-v1` | Packet wording: structured-surrogate FAIL vs full-digest FAIL both count as assumption breaks | GAP-D1; harden log |
 | **2** | Formalize `Extract-Nonlinearity-v1` + PRF hybrid under MatExpand nonce packing | Stated lemma + hybrid outline (related-nonce absorbed in ExtractStruct); quantitative agreement ⇒ Adv map | GAP-A2/A3; related-nonce note |
 | **3** | Taxonomy of “linear Freivalds rewrite” beyond affine/shared-φ | **Wave-3 DONE (doc):** `contrib/matmul-c15-reviewer-kit/reduction-attack-checklist.md` §LFR (LFR-0..11) + heuristic/theorem marks + oracles; does **not** close C-15 / Sketch B | GAP-B1; A3/A5 checklist |
-| **4** | Separate MENC-Lin vs MENC-Unres vs MENC-Cubic in packet language | Explicit labels so Lin PASS ≠ Unres PASS; sketch-floor claims not mis-attributed to Expand | FG survey §3; harden log |
+| **4** | Separate MENC-Lin vs MENC-Unres vs MENC-Cubic in packet language | **Wave-3 DONE (doc):** packet §0.1/§0.2 class-label table + fold naming; **Lin PASS ≠ Unres PASS**; sketch-floor ≠ MatExpand; C-15 OPEN | FG survey §3; harden log |
 | **5** | Related-nonce firm vector pack | ≥32 identity tuples + B32 Δ-collision negative control on small grid | Related-nonce §4; checklist A7 |
 | **6** | Spectral / approx-`B̂` Freivalds forgery probes | Empirical SVD/CCA / multi-probe residual campaign at `n∈{64,256}`; report only if §0.1 win | GAP-B3; crypto survey §6.3 |
-| **7** | Non-reduction annex polish | Packet one-pager: “LT-C15 does not follow from SETH/OV/APSP/3SUM/BMM/ω/KW/PRF/Freivalds” pointing here | FG survey §6; harden log |
-| **8** | ASERT vs HonestMAC operator hygiene | Tournament baseline = fastest known exact; G5 orthogonal to FMM; no silicon invention | ASERT/FMM calibration |
+| **7** | Non-reduction annex polish | **Wave-3 DONE (doc):** packet §0.3 one-pager “LT-C15 does not follow from SETH/OV/APSP/3SUM/BMM/ω/KW/PRF/Freivalds” → this fold; does **not** close C-15 | FG survey §6; harden log |
+| **8** | ASERT vs HonestMAC operator hygiene | **Wave-3 DONE (doc):** leap checklist calibration table + lt-gate G5 comments — tournament = fastest known exact; G5 ⊥ FMM; no silicon invention; C-15 OPEN | ASERT/FMM calibration |
 | **9** | Multi-instance / I1′ direct-sum *shape* (not BRSV citation) | **DONE (Wave 3):** explicit game in `doc/btx-matmul-v4.4-lt-c15-qstar-i1-amortization-game-2026-07-19.md` — heuristic / unproved; packet §3 I1-D + §6.1 link | Crypto survey §3; GAP-D8 |
 | **10** | Optional consensus redesign (KW/transcript) | **SKIPPED** (Wave 3) — out of scope unless product fork | Sketch C; obstructions §5 |
 
