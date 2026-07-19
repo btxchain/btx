@@ -7,6 +7,9 @@
 
 #include <arith_uint256.h>
 #include <consensus/params.h>
+#include <cuda/matmul_v4_lt_accel.h>
+#include <hip/matmul_v4_lt_accel.h>
+#include <metal/matmul_v4_lt_accel.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <span.h>
@@ -591,6 +594,49 @@ BOOST_AUTO_TEST_CASE(seal_binding_sigma_and_merkle_leaf)
     // Distinct anchors ⇒ disjoint slot-nonce sets (LT-Q1 fat-window binding).
     BOOST_CHECK(lt::DeriveWindowSlotNonce(sigma, 0) != lt::DeriveWindowSlotNonce(sigma2, 0));
     BOOST_CHECK(lt::DeriveWindowSlotNonce(sigma, 0) != lt::DeriveWindowSlotNonce(sigma, 1));
+}
+
+BOOST_AUTO_TEST_CASE(lt_accel_entry_bit_identity_or_stub_decline)
+{
+    // ENABLE=OFF stubs decline; with calibrated GPU, digests must match CPU.
+    auto tmpl = MakeLTHeader(3, kTestDim);
+    const uint64_t nonces[] = {1, 2};
+    std::vector<lt::DigestOnlyResultLT> out;
+
+    auto check_backend = [&](bool available,
+                             bool (*compute)(const CBlockHeader&, uint32_t, const uint64_t*, size_t,
+                                             std::vector<lt::DigestOnlyResultLT>&)) {
+        out.clear();
+        if (!available) {
+            BOOST_CHECK(!compute(tmpl, kTestDim, nonces, 2, out));
+            BOOST_CHECK(out.empty());
+            return;
+        }
+        BOOST_REQUIRE(compute(tmpl, kTestDim, nonces, 2, out));
+        BOOST_REQUIRE_EQUAL(out.size(), 2);
+        for (size_t i = 0; i < 2; ++i) {
+            CBlockHeader h = tmpl;
+            h.nNonce64 = nonces[i];
+            h.nNonce = static_cast<uint32_t>(nonces[i]);
+            uint256 d;
+            std::vector<unsigned char> payload;
+            BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(h, kTestDim, d, payload));
+            BOOST_CHECK(out[i].digest == d);
+        }
+    };
+
+    check_backend(matmul_v4::cuda::IsMatMulLTCudaAvailable(),
+                  &matmul_v4::cuda::ComputeDigestsOnlyLTCuda);
+    check_backend(matmul_v4::hip::IsMatMulLTHipAvailable(),
+                  &matmul_v4::hip::ComputeDigestsOnlyLTHip);
+    check_backend(matmul_v4::metal::IsMatMulLTMetalAvailable(),
+                  &matmul_v4::metal::ComputeDigestsOnlyLTMetal);
+
+    uint256 d;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(tmpl, kTestDim, d, payload));
+    BOOST_CHECK(!d.IsNull());
+    BOOST_CHECK(!payload.empty());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -5,12 +5,16 @@
 #include <cuda/matmul_v4_lt_accel.h>
 
 #include <arith_uint256.h>
+#include <crypto/common.h>
+#include <crypto/sha256.h>
 #include <cuda/cuda_context.h>
-#include <cuda/matmul_v4_lt_tensor_gemm.h>
+#include <matmul/int8_field.h>
+#include <matmul/matmul_pow.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
 #include <primitives/block.h>
+#include <span.h>
 #include <uint256.h>
 
 #include <cuda_runtime.h>
@@ -19,63 +23,51 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 // ===========================================================================
 // NVIDIA backend for MatMul v4.4 ENC-DR-LT ("MatExpand") mining.
 //
-// See matmul_v4_lt_accel.h for the full contract. What this TU does:
-//
-//   * It compiles and ships two genuine, self-tested CUDA kernels
-//     (DeviceGemmS8S8Tiled / DeviceGemmS32S8Tiled) that reproduce
-//     matmul::v4::lt::ExactGemmS8S8 / ExactGemmS32S8 bit-for-bit -- exact
-//     INT8xINT8->INT32 and INT32xINT8->INT32 tiled GEMMs, true integer
-//     accumulation, no float anywhere. These are the two dense MatExpand
-//     operand stages Y = G*W and B32 = Y*H that MatExpandCore runs for every
-//     operand; the surrounding ExpandProjectorBMX4C panels, the nonlinear
-//     ExtractDequantMatExpand, the projected combine and the digest all stay
-//     on shared host code.
-//   * BEFORE either kernel is ever trusted, SelfTestGemmKernelsOnce() runs
-//     both against matmul::v4::lt::ExactGemmS8S8 / ExactGemmS32S8 on a small
-//     deterministic fixture and compares every output byte; the result is
-//     cached for the process. IsMatMulLTCudaAvailable() reports true only if
-//     a CUDA device is present AND that self-test passed.
-//   * When the self-test passes, ComputeDigestsOnlyLTCuda installs the device
-//     GEMMs as a matmul::v4::lt::ExactGemmBackend on
-//     matmul::v4::lt::WindowSketchMinerLT, so the dense MatExpand GEMMs for
-//     the template operand A (paid once) AND every per-nonce operand B
-//     actually execute on device (LaunchGemmS8S8 / LaunchGemmS32S8). Because
-//     only the two GEMM stages are redirected -- every consensus-sensitive
-//     derivation is unchanged host code reused verbatim -- each digest stays
-//     byte-identical to matmul::v4::lt::ComputeDigestBMX4CLT by construction.
-//   * On ANY runtime CUDA fault, MatExpandCore transparently falls back to
-//     the CPU ExactGemm for that stage (still bit-exact); the result is then
-//     reported with backend_status = Fallback. A digest is tagged Ok only
-//     when the device served the GEMMs end-to-end.
+// Hot path (when a calibrated CUDA device is present):
+ //   persistent device-resident loop over MatExpand → project → combine, with
+ //   CUDA-graph replay of the stable GEMM stages (G*W, Y*H, U*A, Bhat*V).
+ //   Cross-call buffer reuse; per-nonce H2D is limited to the thin W panel
+ //   (and a one-shot template upload of G/H/U/V). Digest hashing stays on
+ //   host after a small Chat D2H.
+ //
+ // Fail-closed fallback:
+ //   host ExactGemm* / WindowSketchMinerLT (bit-exact). That host path is the
+ //   safety net when the device declines — it is NOT the complete accelerator.
+ //
+ // Availability requires a one-time bit-identity self-test of the GEMM kernels
+ // AND a one-nonce device-resident digest vs ComputeDigestBMX4CLT.
 // ===========================================================================
 
 namespace matmul_v4::cuda {
 
 namespace {
 
-// RAII device buffer, mirroring the DeviceBuffer helper duplicated across
-// every other v4.x accel TU in this tree (matmul_v4_accel.cu et al.).
-struct DeviceBuffer {
-    void* ptr{nullptr};
-    ~DeviceBuffer() { if (ptr) cudaFree(ptr); }
-    [[nodiscard]] bool Alloc(size_t bytes)
-    {
-        if (bytes == 0) { ptr = nullptr; return true; }
-        return cudaMalloc(&ptr, bytes) == cudaSuccess;
-    }
-};
+// Domain tags MUST match src/matmul/matmul_v4_lt.cpp (anonymous-namespace twins).
+constexpr char kMatExpandGTag[] = "BTX_MATEXPAND_G_V44LT";
+constexpr char kMatExpandHTag[] = "BTX_MATEXPAND_H_V44LT";
+constexpr char kMatExpandWTag[] = "BTX_MATEXPAND_W_V44LT";
+constexpr char kMatExpandWATag[] = "BTX_MATEXPAND_WA_V44LT";
 
-// Exact INT8xINT8->INT32 GEMM D(MxN) = A(MxK) * B(KxN), row-major, true
-// int32 accumulation (portable scalar kernel; every v4.x accel TU in this
-// tree also ships a portable ALU twin alongside its tensor-core path, so a
-// build without IMMA/MFMA/tensor_ops still produces the identical integers).
-// One thread per output element; simple and exact, not latency-tuned -- the
-// bit-exactness self-test is what matters here, not throughput.
+uint256 DeriveTaggedSeed(const char* tag, size_t taglen, const uint256& hash)
+{
+    CSHA256 hasher;
+    hasher.Write(reinterpret_cast<const unsigned char*>(tag), taglen);
+    hasher.Write(hash.data(), uint256::size());
+    uint8_t out[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(out);
+    return uint256{Span<const unsigned char>{out, sizeof(out)}};
+}
+
+// ---------------------------------------------------------------------------
+// Device kernels: exact GEMMs + ExtractDequant + F_q combine.
+// ---------------------------------------------------------------------------
+
 __global__ void DeviceGemmS8S8Tiled(const int8_t* __restrict__ A,
                                     const int8_t* __restrict__ B,
                                     int32_t* __restrict__ D,
@@ -92,14 +84,6 @@ __global__ void DeviceGemmS8S8Tiled(const int8_t* __restrict__ A,
     D[static_cast<size_t>(row) * N + col] = acc;
 }
 
-// Exact INT32xINT8->INT32 GEMM D(MxN) = A(MxK) * B(KxN), row-major. Used for
-// the "B32 = Y*H" stage of the MatExpand fold (Y is the int32 output of an
-// earlier s8xs8 GEMM, H is an int8 mixer panel). Accumulates in int64_t to
-// stay safe against any transient widening the host reference might use
-// internally, then narrows to int32_t -- the narrowing is well-defined
-// truncation and matches the CPU reference's result whenever the true value
-// fits int32 (which every MatExpand fold bound in matmul_v4_lt.h guarantees
-// for valid (n) -- see kMatExpandEmax / ValidateDimsBMX4CLT).
 __global__ void DeviceGemmS32S8Tiled(const int32_t* __restrict__ A,
                                      const int8_t* __restrict__ B,
                                      int32_t* __restrict__ D,
@@ -116,84 +100,494 @@ __global__ void DeviceGemmS32S8Tiled(const int32_t* __restrict__ A,
     D[static_cast<size_t>(row) * N + col] = static_cast<int32_t>(acc);
 }
 
-} // namespace
-
-// Public host launchers (declared in matmul_v4_lt_accel.h): bit-exact device
-// GEMMs for the two dense MatExpand operand stages, usable directly as
-// matmul::v4::lt::ExactGemmBackend callbacks.
-bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
-                    uint32_t rows, uint32_t k, uint32_t cols,
-                    std::vector<int32_t>& out)
+__device__ __forceinline__ uint64_t DeviceMixMatExpandEntry(int32_t raw, uint32_t i, uint32_t j, uint64_t salt)
 {
-    if (TryLaunchLtImmaGemmS8S8(left, right, rows, k, cols, out)) {
+    uint64_t z = static_cast<uint64_t>(static_cast<uint32_t>(raw));
+    z ^= static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL;
+    z ^= static_cast<uint64_t>(j) * 0xBF58476D1CE4E5B9ULL;
+    z ^= salt;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+// Bit-identical to matmul::v4::bmx4::SampleMantissaNibble (E2M1 M11 table).
+__device__ __forceinline__ int8_t DeviceSampleMantissaNibble(uint8_t nibble, bool& accepted)
+{
+    const uint8_t nib = nibble & 0x0F;
+    const uint8_t sign = (nib >> 3) & 1;
+    const uint8_t exp = (nib >> 1) & 3;
+    const uint8_t man = nib & 1;
+    int mag = 0;
+    bool integer = true;
+    switch (exp) {
+    case 0: mag = 0; integer = (man == 0); break;
+    case 1: mag = 1; integer = (man == 0); break;
+    case 2: mag = (man == 0) ? 2 : 3; break;
+    case 3: mag = (man == 0) ? 4 : 6; break;
+    default: break;
+    }
+    if (!integer || (sign && mag == 0)) {
+        accepted = false;
+        return 0;
+    }
+    accepted = true;
+    return static_cast<int8_t>(sign ? -mag : mag);
+}
+
+__device__ __forceinline__ int8_t DeviceExtractDequant(int32_t raw, uint32_t i, uint32_t j, uint64_t salt)
+{
+    uint64_t mixed = DeviceMixMatExpandEntry(raw, i, j, salt);
+    uint64_t remix = 0;
+    for (;;) {
+        for (int shift = 0; shift < 64; shift += 4) {
+            bool accepted = false;
+            const int8_t mu = DeviceSampleMantissaNibble(
+                static_cast<uint8_t>((mixed >> shift) & 0x0F), accepted);
+            if (!accepted) continue;
+            const uint64_t scale_stream = DeviceMixMatExpandEntry(
+                raw, i, j, salt ^ 0xD1B54A32D192ED03ULL ^ (remix << 1));
+            const uint8_t e = static_cast<uint8_t>(scale_stream & 0x3);
+            return static_cast<int8_t>(static_cast<int32_t>(mu) << e);
+        }
+        ++remix;
+        mixed = DeviceMixMatExpandEntry(raw, i, j, salt + remix);
+    }
+}
+
+__global__ void DeviceExtractDequantMatExpand(const int32_t* __restrict__ B32,
+                                              int8_t* __restrict__ Bhat,
+                                              uint32_t n, uint64_t salt)
+{
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t nn = static_cast<size_t>(n) * n;
+    if (idx >= nn) return;
+    const uint32_t i = idx / n;
+    const uint32_t j = idx % n;
+    Bhat[idx] = DeviceExtractDequant(B32[idx], i, j, salt);
+}
+
+// F_q = 2^61-1 helpers (device twin of matmul::int8_field).
+__device__ __forceinline__ uint64_t DeviceFqReduce(unsigned __int128 x)
+{
+    constexpr uint64_t q = (uint64_t{1} << 61) - 1;
+    const uint64_t lo = static_cast<uint64_t>(x & q);
+    const uint64_t hi = static_cast<uint64_t>(x >> 61);
+    uint64_t s = lo + hi;
+    s = (s & q) + (s >> 61);
+    if (s >= q) s -= q;
+    return s;
+}
+
+__device__ __forceinline__ uint64_t DeviceFqAdd(uint64_t a, uint64_t b)
+{
+    constexpr uint64_t q = (uint64_t{1} << 61) - 1;
+    uint64_t s = a + b;
+    if (s >= q) s -= q;
+    return s;
+}
+
+__device__ __forceinline__ uint64_t DeviceFqMul(uint64_t a, uint64_t b)
+{
+    return DeviceFqReduce(static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b));
+}
+
+__device__ __forceinline__ uint64_t DeviceFqFromInt32(int32_t x)
+{
+    constexpr uint64_t q = (uint64_t{1} << 61) - 1;
+    if (x >= 0) {
+        return DeviceFqReduce(static_cast<unsigned __int128>(static_cast<uint64_t>(x)));
+    }
+    const uint64_t magnitude = static_cast<uint64_t>(-(static_cast<int64_t>(x) + 1)) + 1;
+    uint64_t r = DeviceFqReduce(static_cast<unsigned __int128>(magnitude));
+    return r == 0 ? 0 : (q - r);
+}
+
+// Chat[a,c] = sum_k P[a,k]*Q[k,c]  (mod q). One thread per (a,c).
+__global__ void DeviceCombineModQ(const int32_t* __restrict__ P,
+                                  const int32_t* __restrict__ Q,
+                                  uint64_t* __restrict__ Chat,
+                                  int n, int m)
+{
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    const int a = blockIdx.y * blockDim.y + threadIdx.y;
+    if (a >= m || c >= m) return;
+    uint64_t acc = 0;
+    const size_t prow = static_cast<size_t>(a) * n;
+    for (int k = 0; k < n; ++k) {
+        const int32_t p = P[prow + k];
+        if (p == 0) continue;
+        const uint64_t pf = DeviceFqFromInt32(p);
+        const int32_t qv = Q[static_cast<size_t>(k) * m + c];
+        acc = DeviceFqAdd(acc, DeviceFqMul(pf, DeviceFqFromInt32(qv)));
+    }
+    Chat[static_cast<size_t>(a) * m + c] = acc;
+}
+
+// ---------------------------------------------------------------------------
+// Persistent cross-call device pool + CUDA graphs for stable GEMM stages.
+// ---------------------------------------------------------------------------
+
+struct LtCudaResidentPool {
+    std::mutex mu;
+    int device{-1};
+    cudaStream_t stream{nullptr};
+
+    uint32_t n{0};
+    uint32_t m{0};
+    uint32_t w{0};
+    uint256 template_hash{};
+    bool template_bound{false};
+    bool graphs_ready{false};
+
+    // Template-resident
+    int8_t* dG{nullptr};
+    int8_t* dH{nullptr};
+    int8_t* dU{nullptr};
+    int8_t* dV{nullptr};
+    int8_t* dAhat{nullptr};
+    int32_t* dP{nullptr};
+
+    // Per-nonce working set (reused across calls)
+    int8_t* dW{nullptr};
+    int32_t* dY{nullptr};
+    int32_t* dB32{nullptr};
+    int8_t* dBhat{nullptr};
+    int32_t* dQ{nullptr};
+    uint64_t* dChat{nullptr};
+
+    // Generic LaunchGemm scratch (cross-call reuse; minimizes alloc churn)
+    int8_t* dGemmS8L{nullptr};
+    int8_t* dGemmS8R{nullptr};
+    int32_t* dGemmS32L{nullptr};
+    int32_t* dGemmOut{nullptr};
+    size_t gemm_s8l_bytes{0};
+    size_t gemm_s8r_bytes{0};
+    size_t gemm_s32l_bytes{0};
+    size_t gemm_out_bytes{0};
+
+    cudaGraph_t matexpand_graph{nullptr};
+    cudaGraphExec_t matexpand_exec{nullptr};
+    cudaGraph_t project_right_graph{nullptr};
+    cudaGraphExec_t project_right_exec{nullptr};
+
+    ~LtCudaResidentPool() { Release(); }
+
+    void ReleaseGraphs()
+    {
+        if (matexpand_exec) { cudaGraphExecDestroy(matexpand_exec); matexpand_exec = nullptr; }
+        if (matexpand_graph) { cudaGraphDestroy(matexpand_graph); matexpand_graph = nullptr; }
+        if (project_right_exec) { cudaGraphExecDestroy(project_right_exec); project_right_exec = nullptr; }
+        if (project_right_graph) { cudaGraphDestroy(project_right_graph); project_right_graph = nullptr; }
+        graphs_ready = false;
+    }
+
+    void Release()
+    {
+        ReleaseGraphs();
+        auto free_p = [](auto*& p) {
+            if (p) { cudaFree(p); p = nullptr; }
+        };
+        free_p(dG); free_p(dH); free_p(dU); free_p(dV); free_p(dAhat); free_p(dP);
+        free_p(dW); free_p(dY); free_p(dB32); free_p(dBhat); free_p(dQ); free_p(dChat);
+        free_p(dGemmS8L); free_p(dGemmS8R); free_p(dGemmS32L); free_p(dGemmOut);
+        gemm_s8l_bytes = gemm_s8r_bytes = gemm_s32l_bytes = gemm_out_bytes = 0;
+        if (stream) { cudaStreamDestroy(stream); stream = nullptr; }
+        template_bound = false;
+        n = m = w = 0;
+        device = -1;
+    }
+
+    [[nodiscard]] bool EnsureScratch(size_t s8l, size_t s8r, size_t s32l, size_t out)
+    {
+        auto grow = [](auto*& p, size_t& have, size_t need) -> bool {
+            if (need <= have) return true;
+            if (p) { cudaFree(p); p = nullptr; have = 0; }
+            if (need == 0) return true;
+            if (cudaMalloc(reinterpret_cast<void**>(&p), need) != cudaSuccess) return false;
+            have = need;
+            return true;
+        };
+        return grow(dGemmS8L, gemm_s8l_bytes, s8l) &&
+               grow(dGemmS8R, gemm_s8r_bytes, s8r) &&
+               grow(dGemmS32L, gemm_s32l_bytes, s32l) &&
+               grow(dGemmOut, gemm_out_bytes, out);
+    }
+
+    [[nodiscard]] bool EnsureDims(uint32_t n_in, uint32_t m_in)
+    {
+        const uint32_t w_in = matmul::v4::lt::kMatExpandPanelW;
+        if (stream != nullptr && n == n_in && m == m_in && w == w_in) {
+            return true;
+        }
+        Release();
+
+        const btx::cuda::CudaRuntimeProbe runtime = btx::cuda::ProbeCudaRuntime();
+        if (runtime.device_index >= 0) {
+            if (cudaSetDevice(runtime.device_index) != cudaSuccess) return false;
+            device = runtime.device_index;
+        } else {
+            if (cudaGetDevice(&device) != cudaSuccess) return false;
+        }
+        if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) return false;
+
+        n = n_in;
+        m = m_in;
+        w = w_in;
+        const size_t nn = static_cast<size_t>(n) * n;
+        const size_t nw = static_cast<size_t>(n) * w;
+        const size_t wn = static_cast<size_t>(w) * n;
+        const size_t mn = static_cast<size_t>(m) * n;
+        const size_t nm = static_cast<size_t>(n) * m;
+        const size_t mm = static_cast<size_t>(m) * m;
+
+        auto mall = [](void** p, size_t bytes) {
+            return bytes == 0 || cudaMalloc(p, bytes) == cudaSuccess;
+        };
+        if (!mall(reinterpret_cast<void**>(&dG), nn) ||
+            !mall(reinterpret_cast<void**>(&dH), wn) ||
+            !mall(reinterpret_cast<void**>(&dU), mn) ||
+            !mall(reinterpret_cast<void**>(&dV), nm) ||
+            !mall(reinterpret_cast<void**>(&dAhat), nn) ||
+            !mall(reinterpret_cast<void**>(&dP), mn * sizeof(int32_t)) ||
+            !mall(reinterpret_cast<void**>(&dW), nw) ||
+            !mall(reinterpret_cast<void**>(&dY), nw * sizeof(int32_t)) ||
+            !mall(reinterpret_cast<void**>(&dB32), nn * sizeof(int32_t)) ||
+            !mall(reinterpret_cast<void**>(&dBhat), nn) ||
+            !mall(reinterpret_cast<void**>(&dQ), nm * sizeof(int32_t)) ||
+            !mall(reinterpret_cast<void**>(&dChat), mm * sizeof(uint64_t))) {
+            Release();
+            return false;
+        }
         return true;
     }
+
+    [[nodiscard]] bool CaptureGraphs()
+    {
+        ReleaseGraphs();
+        const dim3 block(16, 16, 1);
+        // MatExpand: Y = G(n,n)*W(n,w); B32 = Y(n,w)*H(w,n)
+        {
+            const dim3 grid_y((w + block.x - 1) / block.x, (n + block.y - 1) / block.y, 1);
+            const dim3 grid_b((n + block.x - 1) / block.x, (n + block.y - 1) / block.y, 1);
+            if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal) != cudaSuccess) {
+                return false;
+            }
+            DeviceGemmS8S8Tiled<<<grid_y, block, 0, stream>>>(dG, dW, dY,
+                static_cast<int>(n), static_cast<int>(w), static_cast<int>(n));
+            DeviceGemmS32S8Tiled<<<grid_b, block, 0, stream>>>(dY, dH, dB32,
+                static_cast<int>(n), static_cast<int>(n), static_cast<int>(w));
+            if (cudaStreamEndCapture(stream, &matexpand_graph) != cudaSuccess) {
+                matexpand_graph = nullptr;
+                return false;
+            }
+            if (cudaGraphInstantiate(&matexpand_exec, matexpand_graph, nullptr, nullptr, 0) !=
+                cudaSuccess) {
+                ReleaseGraphs();
+                return false;
+            }
+        }
+        // Project right: Q = Bhat(n,n)*V(n,m)
+        {
+            const dim3 grid_q((m + block.x - 1) / block.x, (n + block.y - 1) / block.y, 1);
+            if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal) != cudaSuccess) {
+                ReleaseGraphs();
+                return false;
+            }
+            DeviceGemmS8S8Tiled<<<grid_q, block, 0, stream>>>(dBhat, dV, dQ,
+                static_cast<int>(n), static_cast<int>(m), static_cast<int>(n));
+            if (cudaStreamEndCapture(stream, &project_right_graph) != cudaSuccess) {
+                project_right_graph = nullptr;
+                ReleaseGraphs();
+                return false;
+            }
+            if (cudaGraphInstantiate(&project_right_exec, project_right_graph, nullptr, nullptr, 0) !=
+                cudaSuccess) {
+                ReleaseGraphs();
+                return false;
+            }
+        }
+        graphs_ready = true;
+        return true;
+    }
+
+    [[nodiscard]] bool BindTemplate(const CBlockHeader& tmpl, uint32_t n_in, uint32_t m_in)
+    {
+        if (!EnsureDims(n_in, m_in)) return false;
+        const uint256 th = matmul::v4::ComputeTemplateHash(tmpl);
+        if (template_bound && template_hash == th && graphs_ready) {
+            return true;
+        }
+
+        namespace bx = matmul::v4::bmx4;
+        const uint256 seed_g = DeriveTaggedSeed(kMatExpandGTag, sizeof(kMatExpandGTag) - 1, th);
+        const uint256 seed_h = DeriveTaggedSeed(kMatExpandHTag, sizeof(kMatExpandHTag) - 1, th);
+        const uint256 seed_wa = DeriveTaggedSeed(kMatExpandWATag, sizeof(kMatExpandWATag) - 1, th);
+        const auto [seed_u, seed_v] = matmul::v4::lt::DeriveProjectorSeedsBMX4CLT(tmpl);
+
+        const std::vector<int8_t> G = bx::ExpandProjectorBMX4C(seed_g, n, n);
+        const std::vector<int8_t> H = bx::ExpandProjectorBMX4C(seed_h, w, n);
+        const std::vector<int8_t> W_a = bx::ExpandProjectorBMX4C(seed_wa, n, w);
+        const std::vector<int8_t> U = bx::ExpandProjectorBMX4C(seed_u, m, n);
+        const std::vector<int8_t> V = bx::ExpandProjectorBMX4C(seed_v, n, m);
+
+        const size_t nn = static_cast<size_t>(n) * n;
+        const size_t nw = static_cast<size_t>(n) * w;
+        const size_t wn = static_cast<size_t>(w) * n;
+        const size_t mn = static_cast<size_t>(m) * n;
+        const size_t nm = static_cast<size_t>(n) * m;
+
+        if (cudaMemcpyAsync(dG, G.data(), nn, cudaMemcpyHostToDevice, stream) != cudaSuccess) return false;
+        if (cudaMemcpyAsync(dH, H.data(), wn, cudaMemcpyHostToDevice, stream) != cudaSuccess) return false;
+        if (cudaMemcpyAsync(dW, W_a.data(), nw, cudaMemcpyHostToDevice, stream) != cudaSuccess) return false;
+        if (cudaMemcpyAsync(dU, U.data(), mn, cudaMemcpyHostToDevice, stream) != cudaSuccess) return false;
+        if (cudaMemcpyAsync(dV, V.data(), nm, cudaMemcpyHostToDevice, stream) != cudaSuccess) return false;
+
+        // Capture graphs AFTER template buffers are allocated (pointer-stable).
+        if (!CaptureGraphs()) return false;
+
+        // MatExpand A on device (graph), Extract → dAhat, then P = U*Ahat.
+        if (cudaGraphLaunch(matexpand_exec, stream) != cudaSuccess) return false;
+        const uint64_t salt_a = ReadLE64(seed_wa.data());
+        const size_t nn_u = nn;
+        const int extract_threads = 256;
+        const int extract_blocks = static_cast<int>((nn_u + extract_threads - 1) / extract_threads);
+        DeviceExtractDequantMatExpand<<<extract_blocks, extract_threads, 0, stream>>>(
+            dB32, dAhat, n, salt_a);
+        if (cudaGetLastError() != cudaSuccess) return false;
+
+        const dim3 block(16, 16, 1);
+        const dim3 grid_p((n + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
+        DeviceGemmS8S8Tiled<<<grid_p, block, 0, stream>>>(dU, dAhat, dP,
+            static_cast<int>(m), static_cast<int>(n), static_cast<int>(n));
+        if (cudaGetLastError() != cudaSuccess) return false;
+        if (cudaStreamSynchronize(stream) != cudaSuccess) return false;
+
+        template_hash = th;
+        template_bound = true;
+        return true;
+    }
+
+    // One nonce: H2D W → MatExpand graph → Extract → project-right graph → combine.
+    // Chat returned on host (digest hashing remains host-side).
+    [[nodiscard]] bool MineOneNonce(const CBlockHeader& header,
+                                    std::vector<matmul::int8_field::Fq>& chat_out)
+    {
+        if (!template_bound || !graphs_ready) return false;
+        if (matmul::v4::ComputeTemplateHash(header) != template_hash) return false;
+
+        const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
+        const uint256 seed_w = DeriveTaggedSeed(kMatExpandWTag, sizeof(kMatExpandWTag) - 1, header_hash);
+        const std::vector<int8_t> W =
+            matmul::v4::bmx4::ExpandProjectorBMX4C(seed_w, n, w);
+        const size_t nw = static_cast<size_t>(n) * w;
+        if (cudaMemcpyAsync(dW, W.data(), nw, cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+            return false;
+        }
+        if (cudaGraphLaunch(matexpand_exec, stream) != cudaSuccess) return false;
+
+        const uint64_t salt = ReadLE64(seed_w.data());
+        const size_t nn = static_cast<size_t>(n) * n;
+        const int extract_threads = 256;
+        const int extract_blocks = static_cast<int>((nn + extract_threads - 1) / extract_threads);
+        DeviceExtractDequantMatExpand<<<extract_blocks, extract_threads, 0, stream>>>(
+            dB32, dBhat, n, salt);
+        if (cudaGetLastError() != cudaSuccess) return false;
+
+        if (cudaGraphLaunch(project_right_exec, stream) != cudaSuccess) return false;
+
+        const dim3 block(16, 16, 1);
+        const dim3 grid_c((m + block.x - 1) / block.x, (m + block.y - 1) / block.y, 1);
+        DeviceCombineModQ<<<grid_c, block, 0, stream>>>(dP, dQ, dChat,
+            static_cast<int>(n), static_cast<int>(m));
+        if (cudaGetLastError() != cudaSuccess) return false;
+
+        chat_out.assign(static_cast<size_t>(m) * m, 0);
+        if (cudaMemcpyAsync(chat_out.data(), dChat,
+                            static_cast<size_t>(m) * m * sizeof(uint64_t),
+                            cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+            return false;
+        }
+        return cudaStreamSynchronize(stream) == cudaSuccess;
+    }
+};
+
+LtCudaResidentPool& Pool()
+{
+    static LtCudaResidentPool pool;
+    return pool;
+}
+
+[[nodiscard]] bool CudaOkLaunchGemmS8S8(const std::vector<int8_t>& left,
+                                        const std::vector<int8_t>& right,
+                                        uint32_t rows, uint32_t k, uint32_t cols,
+                                        std::vector<int32_t>& out)
+{
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
     const size_t lhs_bytes = static_cast<size_t>(rows) * k * sizeof(int8_t);
     const size_t rhs_bytes = static_cast<size_t>(k) * cols * sizeof(int8_t);
     const size_t out_bytes = static_cast<size_t>(rows) * cols * sizeof(int32_t);
 
-    DeviceBuffer dA, dB, dD;
-    if (!dA.Alloc(lhs_bytes) || !dB.Alloc(rhs_bytes) || !dD.Alloc(out_bytes)) return false;
-    if (cudaMemcpy(dA.ptr, left.data(), lhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
-    if (cudaMemcpy(dB.ptr, right.data(), rhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    auto& pool = Pool();
+    std::lock_guard<std::mutex> lock(pool.mu);
+    if (!pool.EnsureScratch(lhs_bytes, rhs_bytes, 0, out_bytes)) return false;
+    if (cudaMemcpy(pool.dGemmS8L, left.data(), lhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+        return false;
+    }
+    if (cudaMemcpy(pool.dGemmS8R, right.data(), rhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+        return false;
+    }
 
     const dim3 block(16, 16, 1);
     const dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y, 1);
-    DeviceGemmS8S8Tiled<<<grid, block>>>(static_cast<const int8_t*>(dA.ptr), static_cast<const int8_t*>(dB.ptr),
-                                         static_cast<int32_t*>(dD.ptr), static_cast<int>(rows),
-                                         static_cast<int>(cols), static_cast<int>(k));
+    DeviceGemmS8S8Tiled<<<grid, block>>>(pool.dGemmS8L, pool.dGemmS8R, pool.dGemmOut,
+                                         static_cast<int>(rows), static_cast<int>(cols),
+                                         static_cast<int>(k));
     if (cudaGetLastError() != cudaSuccess) return false;
     if (cudaDeviceSynchronize() != cudaSuccess) return false;
 
     out.assign(static_cast<size_t>(rows) * cols, 0);
-    return cudaMemcpy(out.data(), dD.ptr, out_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+    return cudaMemcpy(out.data(), pool.dGemmOut, out_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
 }
 
-bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
-                     uint32_t rows, uint32_t k, uint32_t cols,
-                     std::vector<int32_t>& out)
+[[nodiscard]] bool CudaOkLaunchGemmS32S8(const std::vector<int32_t>& left,
+                                         const std::vector<int8_t>& right,
+                                         uint32_t rows, uint32_t k, uint32_t cols,
+                                         std::vector<int32_t>& out)
 {
-    if (TryLaunchLtImmaGemmS32S8(left, right, rows, k, cols, out)) {
-        return true;
-    }
     if (rows == 0 || k == 0 || cols == 0) { out.clear(); return true; }
     const size_t lhs_bytes = static_cast<size_t>(rows) * k * sizeof(int32_t);
     const size_t rhs_bytes = static_cast<size_t>(k) * cols * sizeof(int8_t);
     const size_t out_bytes = static_cast<size_t>(rows) * cols * sizeof(int32_t);
 
-    DeviceBuffer dA, dB, dD;
-    if (!dA.Alloc(lhs_bytes) || !dB.Alloc(rhs_bytes) || !dD.Alloc(out_bytes)) return false;
-    if (cudaMemcpy(dA.ptr, left.data(), lhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
-    if (cudaMemcpy(dB.ptr, right.data(), rhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    auto& pool = Pool();
+    std::lock_guard<std::mutex> lock(pool.mu);
+    if (!pool.EnsureScratch(0, rhs_bytes, lhs_bytes, out_bytes)) return false;
+    if (cudaMemcpy(pool.dGemmS32L, left.data(), lhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+        return false;
+    }
+    if (cudaMemcpy(pool.dGemmS8R, right.data(), rhs_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+        return false;
+    }
 
     const dim3 block(16, 16, 1);
     const dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y, 1);
-    DeviceGemmS32S8Tiled<<<grid, block>>>(static_cast<const int32_t*>(dA.ptr), static_cast<const int8_t*>(dB.ptr),
-                                          static_cast<int32_t*>(dD.ptr), static_cast<int>(rows),
-                                          static_cast<int>(cols), static_cast<int>(k));
+    DeviceGemmS32S8Tiled<<<grid, block>>>(pool.dGemmS32L, pool.dGemmS8R, pool.dGemmOut,
+                                          static_cast<int>(rows), static_cast<int>(cols),
+                                          static_cast<int>(k));
     if (cudaGetLastError() != cudaSuccess) return false;
     if (cudaDeviceSynchronize() != cudaSuccess) return false;
 
     out.assign(static_cast<size_t>(rows) * cols, 0);
-    return cudaMemcpy(out.data(), dD.ptr, out_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+    return cudaMemcpy(out.data(), pool.dGemmOut, out_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
 }
 
-namespace {
-
-// Per-thread flag: set true whenever a device GEMM launch fails and the
-// MatExpand path silently falls back to the CPU ExactGemm. ComputeDigestsOnly
-// LTCuda consumes it to distinguish an Ok (device-served) window from a
-// Fallback (CPU-served) one. Reset at the start of every entry-point call.
 thread_local bool g_lt_device_gemm_failed = false;
 
-// matmul::v4::lt::ExactGemmBackend adapters: run the device GEMM and, on any
-// CUDA fault, record the fallback and return false so MatExpandCore uses the
-// CPU ExactGemm for that stage (keeping the produced digest bit-exact).
 bool BackendGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
                      uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
 {
-    if (LaunchGemmS8S8(L, R, rows, inner, cols, out)) return true;
+    if (CudaOkLaunchGemmS8S8(L, R, rows, inner, cols, out)) return true;
     g_lt_device_gemm_failed = true;
     return false;
 }
@@ -201,22 +595,17 @@ bool BackendGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
 bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
                       uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
 {
-    if (LaunchGemmS32S8(L, R, rows, inner, cols, out)) return true;
+    if (CudaOkLaunchGemmS32S8(L, R, rows, inner, cols, out)) return true;
     g_lt_device_gemm_failed = true;
     return false;
 }
 
-// Deterministic small fixture; independent of any consensus seed so the
-// self-test never depends on (and can never leak information about) header
-// state. Values span the full MatExpand fold range [-48, 48] via
-// FoldInt32ToEmax48 so the fixture exercises the same alphabet the real
-// operands use.
 [[nodiscard]] bool SelfTestGemmKernelsOnce()
 {
     static std::once_flag once;
     static bool ok = false;
     std::call_once(once, [] {
-        constexpr uint32_t kDim = 24; // multiple of a 16x16 block, ragged-safe
+        constexpr uint32_t kDim = 24;
         std::vector<int8_t> left(static_cast<size_t>(kDim) * kDim);
         std::vector<int8_t> right(static_cast<size_t>(kDim) * kDim);
         std::vector<int32_t> mid(static_cast<size_t>(kDim) * kDim);
@@ -228,22 +617,130 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
 
         const std::vector<int32_t> cpu_s8s8 = matmul::v4::lt::ExactGemmS8S8(left, right, kDim, kDim, kDim);
         std::vector<int32_t> gpu_s8s8;
-        if (!LaunchGemmS8S8(left, right, kDim, kDim, kDim, gpu_s8s8) || gpu_s8s8 != cpu_s8s8) {
+        if (!CudaOkLaunchGemmS8S8(left, right, kDim, kDim, kDim, gpu_s8s8) || gpu_s8s8 != cpu_s8s8) {
             return;
         }
 
         const std::vector<int32_t> cpu_s32s8 = matmul::v4::lt::ExactGemmS32S8(mid, right, kDim, kDim, kDim);
         std::vector<int32_t> gpu_s32s8;
-        if (!LaunchGemmS32S8(mid, right, kDim, kDim, kDim, gpu_s32s8) || gpu_s32s8 != cpu_s32s8) {
+        if (!CudaOkLaunchGemmS32S8(mid, right, kDim, kDim, kDim, gpu_s32s8) || gpu_s32s8 != cpu_s32s8) {
             return;
         }
+
+        // Full-pipeline bit-identity: one device-resident digest vs CPU reference.
+        constexpr uint32_t kN = 64;
+        uint32_t m = 0;
+        if (!matmul::v4::lt::ValidateDimsBMX4CLT(kN, m)) return;
+
+        CBlockHeader header;
+        header.nVersion = 0x20000004;
+        header.nTime = 1'770'000'000;
+        header.nBits = 0x207fffff;
+        header.nNonce64 = 42;
+        header.nNonce = 42;
+        header.matmul_dim = static_cast<uint16_t>(kN);
+        // Distinct non-zero seeds so DeriveSigma / projectors are well-defined.
+        for (int i = 0; i < 32; ++i) {
+            header.hashPrevBlock.data()[i] = static_cast<unsigned char>(0x51);
+            header.hashMerkleRoot.data()[i] = static_cast<unsigned char>(0xa3);
+            header.seed_a.data()[i] = static_cast<unsigned char>(0x11);
+            header.seed_b.data()[i] = static_cast<unsigned char>(0x22);
+        }
+
+        uint256 cpu_digest;
+        std::vector<unsigned char> cpu_payload;
+        if (!matmul::v4::lt::ComputeDigestBMX4CLT(header, kN, cpu_digest, cpu_payload)) return;
+
+        auto& pool = Pool();
+        std::lock_guard<std::mutex> lock(pool.mu);
+        if (!pool.BindTemplate(header, kN, m)) return;
+        std::vector<matmul::int8_field::Fq> chat;
+        if (!pool.MineOneNonce(header, chat)) return;
+        const uint256 sigma = matmul::v4::DeriveSigma(header);
+        const uint256 gpu_digest = matmul::v4::ComputeSketchDigestFromFq(sigma, chat);
+        if (gpu_digest != cpu_digest) return;
 
         ok = true;
     });
     return ok;
 }
 
+[[nodiscard]] bool MineDeviceResident(const CBlockHeader& tmpl, uint32_t n, uint32_t m,
+                                      const uint64_t* nonces, size_t count,
+                                      std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
+{
+    auto& pool = Pool();
+    std::lock_guard<std::mutex> lock(pool.mu);
+    if (!pool.BindTemplate(tmpl, n, m)) return false;
+
+    out.resize(count);
+    for (size_t i = 0; i < count; ++i) {
+        CBlockHeader header = tmpl;
+        header.nNonce64 = nonces[i];
+        header.nNonce = static_cast<uint32_t>(nonces[i]);
+
+        std::vector<matmul::int8_field::Fq> chat;
+        if (!pool.MineOneNonce(header, chat)) {
+            out.clear();
+            return false;
+        }
+        const uint256 sigma = matmul::v4::DeriveSigma(header);
+        out[i].nonce = nonces[i];
+        out[i].digest = matmul::v4::ComputeSketchDigestFromFq(sigma, chat);
+        out[i].target_match = false;
+        out[i].backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
+    }
+    return true;
+}
+
+[[nodiscard]] bool MineHostExactFallback(const CBlockHeader& tmpl, uint32_t n,
+                                         const uint64_t* nonces, size_t count,
+                                         bool try_device_gemms,
+                                         std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
+{
+    matmul::v4::lt::ExactGemmBackend backend;
+    if (try_device_gemms) {
+        backend.gemm_s8s8 = &BackendGemmS8S8;
+        backend.gemm_s32s8 = &BackendGemmS32S8;
+    }
+    g_lt_device_gemm_failed = false;
+
+    matmul::v4::lt::WindowSketchMinerLT miner(tmpl, n, backend);
+    if (!miner.Valid()) return false;
+
+    const std::vector<uint64_t> nonce_vec(nonces, nonces + count);
+    const uint256 kNoTarget = ArithToUint256(~arith_uint256{});
+    std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
+    if (!miner.Mine(nonce_vec, kNoTarget, results, nullptr)) return false;
+
+    const bool device_served =
+        try_device_gemms && miner.UsingDeviceGemms() && !g_lt_device_gemm_failed;
+    const auto status = device_served
+                            ? matmul::v4::bmx4::DigestOnlyBackendStatus::Ok
+                            : matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
+    for (auto& r : results) {
+        r.target_match = false;
+        r.backend_status = status;
+    }
+    out = std::move(results);
+    return true;
+}
+
 } // namespace
+
+bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
+                    uint32_t rows, uint32_t k, uint32_t cols,
+                    std::vector<int32_t>& out)
+{
+    return CudaOkLaunchGemmS8S8(left, right, rows, k, cols, out);
+}
+
+bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>& right,
+                     uint32_t rows, uint32_t k, uint32_t cols,
+                     std::vector<int32_t>& out)
+{
+    return CudaOkLaunchGemmS32S8(left, right, rows, k, cols, out);
+}
 
 bool IsMatMulLTCudaAvailable()
 {
@@ -268,56 +765,19 @@ bool ComputeDigestsOnlyLTCuda(const CBlockHeader& tmpl, uint32_t n,
         return false;
     }
 
-    // Template-amortized miner: builds P = U*A once, then per nonce runs
-    // MatExpand-B -> Q -> combine -> digest. When a calibrated CUDA device is
-    // present, install the self-tested device GEMMs as the MatExpand backend so
-    // Y = G*W and B32 = Y*H run on device for operand A (once) AND every
-    // per-nonce operand B; ExpandProjectorBMX4C, ExtractDequantMatExpand, the
-    // projected combine and the digest all stay on shared host code, so every
-    // digest is byte-identical to matmul::v4::lt::ComputeDigestBMX4CLT by
-    // construction (see matmul_v4_lt.h's WindowSketchMinerLT contract).
-    const bool device = IsMatMulLTCudaAvailable();
-    matmul::v4::lt::ExactGemmBackend backend;
-    if (device) {
-        backend.gemm_s8s8 = &BackendGemmS8S8;
-        backend.gemm_s32s8 = &BackendGemmS32S8;
-    }
-    g_lt_device_gemm_failed = false;
-
-    matmul::v4::lt::WindowSketchMinerLT miner(tmpl, n, backend);
-    if (!miner.Valid()) {
-        return false;
+    // Prefer the persistent device-resident MatExpand→project→combine loop
+    // (CUDA-graph replay of stable GEMMs). Host ExactGemm / WindowSketchMinerLT
+    // is fail-closed fallback only — not the complete accelerator.
+    if (IsMatMulLTCudaAvailable()) {
+        if (MineDeviceResident(tmpl, n, m, nonces, count, out)) {
+            return true;
+        }
+        // Device-resident path declined at runtime: fall back to host ExactGemm
+        // (optionally still using per-call device GEMMs via ExactGemmBackend).
+        return MineHostExactFallback(tmpl, n, nonces, count, /*try_device_gemms=*/true, out);
     }
 
-    const std::vector<uint64_t> nonce_vec(nonces, nonces + count);
-    // No target is supplied by this entry point's signature -- pass an
-    // all-ones sentinel (matches the accel_v4.h convention: "~uint256{} to
-    // force verification of the entire window") purely so the miner never
-    // special-cases an all-zero target; target_match is cleared below since it
-    // is meaningless without a caller-supplied target (DigestOnlyResultLT is
-    // miner-local telemetry, never consensus-visible).
-    const uint256 kNoTarget = ArithToUint256(~arith_uint256{});
-    std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
-    if (!miner.Mine(nonce_vec, kNoTarget, results, nullptr)) {
-        return false;
-    }
-
-    // Ok iff the device served the MatExpand GEMMs end-to-end. A runtime CUDA
-    // fault transparently fell back to the CPU ExactGemm inside MatExpandCore
-    // (still bit-exact) and is honestly reported as Fallback, as is a build /
-    // host with no calibrated device.
-    const bool device_served =
-        device && miner.UsingDeviceGemms() && !g_lt_device_gemm_failed;
-    const auto status = device_served
-                            ? matmul::v4::bmx4::DigestOnlyBackendStatus::Ok
-                            : matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
-    for (auto& r : results) {
-        r.target_match = false;
-        r.backend_status = status;
-    }
-
-    out = std::move(results);
-    return true;
+    return MineHostExactFallback(tmpl, n, nonces, count, /*try_device_gemms=*/false, out);
 }
 
 } // namespace matmul_v4::cuda
