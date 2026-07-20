@@ -1,0 +1,25 @@
+{
+  "tool": "c1-production-episode",
+  "tip": "bf36b7d6d95fcb049d7aa5c8aebee614c58a607a",
+  "status": "IN_PROGRESS",
+  "c1a_cuda_mine": {
+    "pid": 8717,
+    "elapsed_s_lower_bound": 8416,
+    "elapsed_human": "02:20:16"
+  },
+  "c1b_exactreplay_cpu": {
+    "pid": 8719,
+    "elapsed_s_lower_bound": 8416,
+    "elapsed_human": "02:20:16"
+  },
+  "stage_i": {
+    "exactreplay_budget_s": 9.0,
+    "interval_s": 90.0,
+    "meet_9s": false,
+    "meet_90s": false,
+    "note": "lower_bound only \u2014 process still running"
+  },
+  "gate_verdict": "NO-GO",
+  "timestamp": "2026-07-20T20:30:49Z",
+  "note": "Harness episode path times CPU ExactReplay (RecomputeResidentCurriculumReference); MineRCEpisode digest parity also run. Full wall pending process exit. Already >> 9s and >> 90s."
+}

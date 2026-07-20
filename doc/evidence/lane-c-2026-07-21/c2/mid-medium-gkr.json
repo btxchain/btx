@@ -1,0 +1,22 @@
+{
+  "tool": "rc-prove-winner-gkr",
+  "stub": false,
+  "e5_direction": "DECIDED",
+  "e5_path": "winner_only_gkr_sumcheck",
+  "soundness": "computational_not_eps0",
+  "consensus_note": "nMatMulRCHeight remains INT32_MAX",
+  "mode": "episode",
+  "toy": false,
+  "medium": true,
+  "ok": true,
+  "proved": true,
+  "digest": "0254081b91f9a4fec56750f9679d78fafea4ee4bfe6364144d4873e3f5769d39",
+  "nonce": 2,
+  "nonces_tried": 3,
+  "mine_s": 0.160394348,
+  "reseal_s": 0.053229286,
+  "prove_s": 1436.096057958,
+  "verify_s": 0.511424339,
+  "proof_bytes": 26402989,
+  "note": "problems arise: prove over budget; HBM GKR PARKED; ExactReplay fallback"
+}

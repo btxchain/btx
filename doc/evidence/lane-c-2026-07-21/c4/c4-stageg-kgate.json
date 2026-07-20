@@ -1,0 +1,26 @@
+{
+  "tool": "c4-stageg-kgate",
+  "device": "RTX 5060 Ti 16GB",
+  "caveat": "Gate k>=1.3 specified for 24GB parts; this is 16GB commodity tail",
+  "medium_k_est": [
+    1.2257,
+    1.22839,
+    1.23055,
+    1.23011,
+    1.23105
+  ],
+  "toy_k_est": [
+    1.27699,
+    1.27546,
+    1.27066,
+    1.27224,
+    1.27251
+  ],
+  "medium_mean": 1.22916,
+  "medium_min": 1.2257,
+  "medium_max": 1.23105,
+  "toy_mean": 1.273572,
+  "gate_target": 1.3,
+  "gate_verdict": "NO-GO",
+  "timestamp": "2026-07-20T18:10:46Z"
+}
