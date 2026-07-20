@@ -482,8 +482,12 @@ uint32_t EffectiveMatMulMaxPendingVerifications(const Consensus::Params& params,
 /** Work units for one EncDr tip-verify job: 1 for a single digest recompute,
  *  consensus Q* when seal-as-PoW is active at `reference_height`. */
 uint32_t MatMulEncDrWorkUnits(const Consensus::Params& params, int32_t reference_height = -1);
-/** One RC admission work-unit ~= 2^40 MACs (~1.1T). Epoch-0 (~53T MAC) ~= 49 units. */
+/** One RC-family admission work-unit ~= 2^40 MACs (~1.1T). Epoch-0 RC (~53T MAC)
+ *  ~= 49 units; toy/medium coupled collapse to 1 unit under the same scale. */
 inline constexpr uint64_t kMatMulRCAdmissionMacUnit = uint64_t{1} << 40;
+/** Tip-verify work units for the RC admission pool. When ENC_RC_COUPLED is
+ *  live, prices TotalRCCoupMacs; else when ENC_RC is live, TotalRCEpisodeMacs;
+ *  else returns 1 (callers must still gate on IsMatMulRCFamilyActive). */
 uint32_t MatMulRCWorkUnits(const Consensus::Params& params, int32_t reference_height = -1);
 uint32_t EffectiveMatMulRCMaxPendingVerifications(const Consensus::Params& params, int32_t reference_height = -1);
 uint32_t EffectiveMatMulRCGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height = -1);

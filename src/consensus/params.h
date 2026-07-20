@@ -506,21 +506,29 @@ struct Params {
     /** Coupled puzzle (ENC_RC_COUPLED) activation height. DEFAULT = INT32_MAX —
      *  disabled on every public network. Regtest may set a finite height to
      *  exercise CheckMatMulProofOfWork_RCCoupled / SolveMatMulV4RCCoupled.
-     *  When live, GetMatMulEncodingProfile prefers ENC_RC_COUPLED over ENC_RC. */
+     *  When live, GetMatMulEncodingProfile prefers ENC_RC_COUPLED over ENC_RC.
+     *  When RC is also configured, Coupled MUST be at or above nMatMulRCHeight
+     *  (AssertBMX4CConstructionInvariants / ValidateMatMulAsertParams). */
     int32_t nMatMulRCCoupledHeight{std::numeric_limits<int32_t>::max()};
+    /** One-time ASERT rescale at nMatMulRCCoupledHeight (calibrate from silicon
+     *  before any public network raises the height). Public nets keep 1/1. */
+    int64_t nMatMulRCCoupledAsertRescaleNum{1};
+    int64_t nMatMulRCCoupledAsertRescaleDen{1};
     /** REGTEST ONLY — when true, coupled checker/miner use MakeToyRCCoupParams()
      *  instead of MakeMediumRCCoupParams(). Public nets MUST keep this false. */
     bool fMatMulRCCoupledUseToyDims{false};
-    /** RC tip-verify concurrency (pending full-episode recomputes). Default 1 --
-     *  a single ~53T-MAC consensus episode must never share the EncDr/v4/LT
-     *  pending counter or allow 16-way parallel recomputes. Cap is expressed in
-     *  RC work units (see MatMulRCWorkUnits). INERT while nMatMulRCHeight ==
-     *  INT32_MAX. Never raise without soak evidence. */
+    /** RC tip-verify concurrency (pending full-episode / coupled recomputes).
+     *  Default 1 -- a single heavy RC-family tip verify must never share the
+     *  EncDr/v4/LT pending counter or allow 16-way parallel recomputes. Cap is
+     *  expressed in RC-family work units (see MatMulRCWorkUnits). INERT while
+     *  both nMatMulRCHeight and nMatMulRCCoupledHeight are INT32_MAX. Never
+     *  raise without soak evidence. */
     uint32_t nMatMulRCMaxPendingVerifications{1};
-    /** RC DoS verify budgets (global / per-peer), in complete tip-verification
-     *  jobs per minute when IsMatMulRCActive. Effective helpers convert these
-     *  to RC work units (MAC-scaled). Defaults admit one honest RC recompute
-     *  per minute. INERT while RC is INT32_MAX. */
+    /** RC-family DoS verify budgets (global / per-peer), in complete tip-
+     *  verification jobs per minute when IsMatMulRCFamilyActive. Effective
+     *  helpers convert these to work units (MAC-scaled; coupled cost when
+     *  ENC_RC_COUPLED governs). Defaults admit one honest recompute per
+     *  minute. INERT while both RC heights are INT32_MAX. */
     uint32_t nMatMulRCGlobalVerifyBudgetPerMin{1};
     uint32_t nMatMulRCPeerVerifyBudgetPerMin{1};
 
@@ -896,6 +904,13 @@ struct Params {
         return IsMatMulV4Active(height)
             && nMatMulRCCoupledHeight != std::numeric_limits<int32_t>::max()
             && height >= nMatMulRCCoupledHeight;
+    }
+    /** True when tip-verify must use the RC admission pool (pending / peer /
+     *  global RC budgets) rather than EncDr/v4/LT: either ENC_RC or
+     *  ENC_RC_COUPLED is live. Coupled does not require IsMatMulRCActive. */
+    bool IsMatMulRCFamilyActive(int32_t height) const
+    {
+        return IsMatMulRCCoupledActive(height) || IsMatMulRCActive(height);
     }
     /** True iff the v4.4-LT Q* Phase B SEAL-AS-PoW mode governs this height: the
      *  LT profile is live AND the seal-as-PoW mode toggle is set. Fail-closed on

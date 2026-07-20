@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace matmul::v4::rc {
@@ -455,6 +456,22 @@ bool RCCoupBarrierLoopComplete(const RCCoupParams& p)
     static_assert(kRCCoupMixPatterns >= 2, "C6: need ≥2 mix patterns");
     static_assert(kRCCoupRounds >= 4 && kRCCoupRounds <= 8, "C5: toy barriers in [4,8]");
     return ValidateRCCoupParams(p) && kRCCoupMixPatterns >= 2;
+}
+
+uint64_t TotalRCCoupMacs(const RCCoupParams& p)
+{
+    // One local lobe GEMM is 1×W · W×W → W² MACs; barriers × lobes of them.
+    if (p.barriers == 0 || p.lobes == 0 || p.lobe_width == 0) return 0;
+    const uint64_t w2 = static_cast<uint64_t>(p.lobe_width) * p.lobe_width;
+    if (w2 == 0) return 0;
+    if (p.lobes > std::numeric_limits<uint64_t>::max() / w2) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    const uint64_t per_barrier = static_cast<uint64_t>(p.lobes) * w2;
+    if (p.barriers > std::numeric_limits<uint64_t>::max() / per_barrier) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return static_cast<uint64_t>(p.barriers) * per_barrier;
 }
 
 uint64_t EstimateRCCoupStreamedPeakBytes(const RCCoupParams& p)

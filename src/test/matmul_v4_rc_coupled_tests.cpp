@@ -10,11 +10,15 @@
 #include <matmul/exact_gemm_resolve.h>
 
 #include <arith_uint256.h>
+#include <chain.h>
+#include <chainparams.h>
+#include <common/args.h>
 #include <consensus/params.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
+#include <util/chaintype.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -110,6 +114,77 @@ BOOST_AUTO_TEST_CASE(rc_coup_inactive_and_constants)
     bad.barriers = 9;
     BOOST_CHECK(!rc::ValidateRCCoupParams(bad));
 }
+
+BOOST_AUTO_TEST_CASE(rc_coup_admission_priced_per_activation_shape)
+{
+    // F1: Coupled-only must not inherit EncDr/v4/LT caps; stacked must price
+    // coupled MACs (not RC episode MACs); RC-only keeps episode pricing.
+    Consensus::Params p;
+    p.nMatMulV4Height = 1;
+    p.nMatMulBMX4CHeight = 1;
+    p.nMatMulDRLTHeight = 1;
+    p.fMatMulLTSealAsPoW = false;
+    p.nMatMulMaxPendingVerifications = 16;
+    p.nMatMulLTMaxPendingVerifications = 2;
+    p.nMatMulRCMaxPendingVerifications = 1;
+    p.nMatMulRCGlobalVerifyBudgetPerMin = 1;
+    p.nMatMulRCPeerVerifyBudgetPerMin = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.fMatMulRCCoupledUseToyDims = true;
+
+    constexpr int32_t kH = 100;
+
+    // --- RC-only ---
+    p.nMatMulRCHeight = 50;
+    p.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+    BOOST_REQUIRE(p.IsMatMulRCActive(kH));
+    BOOST_REQUIRE(!p.IsMatMulRCCoupledActive(kH));
+    BOOST_REQUIRE(p.IsMatMulRCFamilyActive(kH));
+    const uint32_t wu_rc = MatMulRCWorkUnits(p, kH);
+    BOOST_CHECK_EQUAL(wu_rc, 1U); // toy episode → 1 unit
+    BOOST_CHECK_EQUAL(EffectiveMatMulRCMaxPendingVerifications(p, kH), 1U);
+    BOOST_CHECK(CanStartMatMulRCVerification(0, wu_rc, p, kH));
+    BOOST_CHECK(!CanStartMatMulRCVerification(1, wu_rc, p, kH));
+    // EncDr/LT pool stays on its own knobs.
+    BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(p, kH), 2U);
+
+    // --- Coupled-only (RC still INT32_MAX) ---
+    p.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+    p.nMatMulRCCoupledHeight = 50;
+    BOOST_REQUIRE(!p.IsMatMulRCActive(kH));
+    BOOST_REQUIRE(p.IsMatMulRCCoupledActive(kH));
+    BOOST_REQUIRE(p.IsMatMulRCFamilyActive(kH));
+    const auto toy = rc::MakeToyRCCoupParams();
+    BOOST_CHECK_EQUAL(rc::TotalRCCoupMacs(toy),
+                      uint64_t{toy.barriers} * toy.lobes * toy.lobe_width * toy.lobe_width);
+    const uint32_t wu_coup = MatMulRCWorkUnits(p, kH);
+    BOOST_CHECK_EQUAL(wu_coup, 1U); // toy coupled ≪ 2^40 → 1 unit
+    // Must route through RC-family caps (pending=1), NOT EncDr 16 / LT 2.
+    BOOST_CHECK_EQUAL(EffectiveMatMulRCMaxPendingVerifications(p, kH), 1U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulRCGlobalVerifyBudgetPerMin(p, kH), 1U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulRCPeerVerifyBudgetPerMin(p, false, kH), 1U);
+    BOOST_CHECK(CanStartMatMulRCVerification(0, wu_coup, p, kH));
+    BOOST_CHECK(!CanStartMatMulRCVerification(1, wu_coup, p, kH));
+    BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(p, kH), 2U);
+
+    // --- Stacked: both live → profile is Coupled; price coupled, not episode ---
+    p.nMatMulRCHeight = 40;
+    p.nMatMulRCCoupledHeight = 50;
+    p.fMatMulRCUseToyDims = false; // consensus RC dims would be ~49 units if mis-priced
+    Consensus::FillDefaultRCGrowthTables(p);
+    BOOST_REQUIRE(p.IsMatMulRCActive(kH));
+    BOOST_REQUIRE(p.IsMatMulRCCoupledActive(kH));
+    BOOST_CHECK(p.GetMatMulEncodingProfile(kH) ==
+                Consensus::MatMulEncodingProfile::ENC_RC_COUPLED);
+    const uint32_t wu_stacked = MatMulRCWorkUnits(p, kH);
+    BOOST_CHECK_EQUAL(wu_stacked, wu_coup); // coupled cost, not ~49 episode units
+    BOOST_CHECK_LT(wu_stacked, 40U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulRCMaxPendingVerifications(p, kH), wu_stacked);
+    BOOST_CHECK(CanStartMatMulRCVerification(0, wu_stacked, p, kH));
+    BOOST_CHECK(!CanStartMatMulRCVerification(wu_stacked, wu_stacked, p, kH));
+}
+
+
 
 BOOST_AUTO_TEST_CASE(rc_coup_check_pow_regtest_gate)
 {

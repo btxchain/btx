@@ -4788,7 +4788,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             if (!matmul_slot &&
                 matmul_admission.state == MatMulBlockAdmission::State::NOT_PRECHECKED) {
                 const Consensus::Params& cons{m_chainparams.GetConsensus()};
-                const bool rc = cons.IsMatMulRCActive(encdr->height);
+                const bool rc = cons.IsMatMulRCFamilyActive(encdr->height);
                 const uint32_t work = rc ? MatMulRCWorkUnits(cons, encdr->height)
                                         : MatMulEncDrWorkUnits(cons, encdr->height);
                 const bool reserved = rc
@@ -5026,7 +5026,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     }
 
     const Consensus::Params& params{m_chainparams.GetConsensus()};
-    const bool rc_profile = params.IsMatMulRCActive(exact_reference_height);
+    const bool rc_profile = params.IsMatMulRCFamilyActive(exact_reference_height);
     const uint32_t work = rc_profile
                               ? MatMulRCWorkUnits(params, exact_reference_height)
                               : MatMulEncDrWorkUnits(params, exact_reference_height);

@@ -116,6 +116,13 @@ struct RCCoupParams {
 [[nodiscard]] bool RCCoupBarrierLoopComplete(const RCCoupParams& p);
 
 /**
+ * Structural total-MAC count for tip-verify admission pricing.
+ * Per barrier each lobe runs ExactGemm 1×W·W×W (W² MACs) →
+ * barriers × lobes × lobe_width². Nonce-independent.
+ */
+[[nodiscard]] uint64_t TotalRCCoupMacs(const RCCoupParams& p);
+
+/**
  * Soft peak-bytes estimate for Streamed mode (one page + active state + int64
  * accumulator). Not a production HBM proof — used by soft budget / mem-cap tests.
  */

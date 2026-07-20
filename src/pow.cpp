@@ -1108,6 +1108,14 @@ int32_t LatestMatMulAsertPreUpgradeAnchorHeight(const CBlockIndex* pindexLast, c
         params.nMatMulRCHeight > anchor_height) {
         anchor_height = params.nMatMulRCHeight;
     }
+    // MatMul ENC_RC_COUPLED: one-time ASERT re-anchor at nMatMulRCCoupledHeight
+    // (coupled work unit differs from RC episode; Num/Den calibrated from
+    // silicon before any public network raises the height).
+    if (!IsDisabledHeight(params.nMatMulRCCoupledHeight) &&
+        pindexLast->nHeight >= params.nMatMulRCCoupledHeight &&
+        params.nMatMulRCCoupledHeight > anchor_height) {
+        anchor_height = params.nMatMulRCCoupledHeight;
+    }
     return anchor_height;
 }
 
@@ -1298,6 +1306,43 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
                    static_cast<long long>(params.nMatMulRCAsertRescaleDen));
         return false;
     }
+    // ENC_RC_COUPLED ASERT config guards (mirror RC): positive reducible ratio,
+    // fork at/above ASERT. When RC is also configured, Coupled must be at or
+    // above RC (GetMatMulEncodingProfile prefers ENC_RC_COUPLED; a lower Coupled
+    // height would switch profiles without the RC re-anchor applying first).
+    {
+        uint32_t coup_rn, coup_rd;
+        if (!ReduceRescaleRatioToU32(params.nMatMulRCCoupledAsertRescaleNum,
+                                     params.nMatMulRCCoupledAsertRescaleDen, coup_rn, coup_rd)) {
+            LogWarning("MatMulAsert: RC Coupled rescale ratio is invalid (num=%lld den=%lld; must be positive and reduce to a 32-bit rational) at height %d, failing closed\n",
+                       static_cast<long long>(params.nMatMulRCCoupledAsertRescaleNum),
+                       static_cast<long long>(params.nMatMulRCCoupledAsertRescaleDen), next_height);
+            return false;
+        }
+    }
+    if (!IsDisabledHeight(params.nMatMulRCCoupledHeight) &&
+        params.nMatMulRCCoupledHeight < params.nMatMulAsertHeight) {
+        LogWarning("MatMulAsert: RC Coupled height=%d is below ASERT activation=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                   params.nMatMulRCCoupledHeight, params.nMatMulAsertHeight, next_height);
+        return false;
+    }
+    if (!IsDisabledHeight(params.nMatMulRCCoupledHeight) && !IsDisabledHeight(params.nMatMulRCHeight) &&
+        params.nMatMulRCCoupledHeight < params.nMatMulRCHeight) {
+        LogWarning("MatMulAsert: RC Coupled height=%d must be at or above RC height=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                   params.nMatMulRCCoupledHeight, params.nMatMulRCHeight, next_height);
+        return false;
+    }
+    // Unified Coupled==RC: RC branch owns the rescale; Coupled ratio must be 1/1.
+    if (!IsDisabledHeight(params.nMatMulRCCoupledHeight) && !IsDisabledHeight(params.nMatMulRCHeight) &&
+        params.nMatMulRCCoupledHeight == params.nMatMulRCHeight &&
+        params.nMatMulRCCoupledAsertRescaleNum != params.nMatMulRCCoupledAsertRescaleDen) {
+        LogWarning("MatMulAsert: unified activation (coupled==rc=%d) requires the Coupled rescale ratio to be 1/1 "
+                   "(got %lld/%lld); use the RC rescale for the combined shift. Failing closed.\n",
+                   params.nMatMulRCHeight,
+                   static_cast<long long>(params.nMatMulRCCoupledAsertRescaleNum),
+                   static_cast<long long>(params.nMatMulRCCoupledAsertRescaleDen));
+        return false;
+    }
     // Single-activation: BMX4C may fork AT (unified flag day) or above (staged)
     // the v4 height, never strictly below. At equality the MatMulAsert cascade
     // guards the v4-rescale branch out so the BMX4C rescale fires (see above).
@@ -1371,6 +1416,22 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
             LogWarning("MatMulAsert: non-inert RC rescale height=%d collides with an earlier ASERT branch "
                        "(rescale would be silently skipped) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                        params.nMatMulRCHeight, next_height);
+            return false;
+        }
+        if (!IsDisabledHeight(params.nMatMulRCCoupledHeight) &&
+            params.nMatMulRCCoupledAsertRescaleNum != params.nMatMulRCCoupledAsertRescaleDen &&
+            (shadowed_by_earlier(params.nMatMulRCCoupledHeight) ||
+             (!IsDisabledHeight(params.nMatMulV4Height) &&
+              params.nMatMulRCCoupledHeight == params.nMatMulV4Height) ||
+             (!IsDisabledHeight(params.nMatMulBMX4CHeight) &&
+              params.nMatMulRCCoupledHeight == params.nMatMulBMX4CHeight) ||
+             (!IsDisabledHeight(params.nMatMulDRLTHeight) &&
+              params.nMatMulRCCoupledHeight == params.nMatMulDRLTHeight) ||
+             (!IsDisabledHeight(params.nMatMulRCHeight) &&
+              params.nMatMulRCCoupledHeight == params.nMatMulRCHeight))) {
+            LogWarning("MatMulAsert: non-inert RC Coupled rescale height=%d collides with an earlier ASERT branch "
+                       "(rescale would be silently skipped) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                       params.nMatMulRCCoupledHeight, next_height);
             return false;
         }
     }
@@ -2712,6 +2773,22 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         return rc_target.GetCompact();
     }
 
+    // MatMul ENC_RC_COUPLED: one-time ASERT rescale at the coupled fork.
+    // Guard equality with RC: when unified, the RC branch above owns the
+    // rescale and this branch must not double-apply.
+    if (next_height == params.nMatMulRCCoupledHeight &&
+        next_height != params.nMatMulRCHeight) {
+        arith_uint256 parent_target{};
+        parent_target.SetCompact(pindexLast->nBits);
+        uint32_t coup_rn, coup_rd;
+        if (!ReduceRescaleRatioToU32(params.nMatMulRCCoupledAsertRescaleNum,
+                                     params.nMatMulRCCoupledAsertRescaleDen, coup_rn, coup_rd)) {
+            return MatMulAsertFailClosedBits();
+        }
+        arith_uint256 coup_target = ScaleTargetByTimespan(parent_target, coup_rn, coup_rd);
+        coup_target = ClampRetargetResult(coup_target, pow_limit);
+        return coup_target.GetCompact();
+    }
 
     if (next_height == params.nMatMulAsertHalfLifeUpgradeHeight) {
         arith_uint256 parent_target{};
@@ -4641,14 +4718,23 @@ uint32_t MatMulEncDrWorkUnits(const Consensus::Params& params, int32_t reference
 
 uint32_t MatMulRCWorkUnits(const Consensus::Params& params, int32_t reference_height)
 {
-    // P0.4: scale admission cost by episode MAC count. Inert / inactive → 1
-    // (callers must still gate on IsMatMulRCActive / Effective* helpers).
-    if (!params.IsMatMulRCActive(reference_height)) {
+    // P0.4 / F1: scale admission cost by tip-verify MAC count. ENC_RC_COUPLED
+    // takes profile precedence over ENC_RC — when coupled is live, price the
+    // coupled verifier (not the RC episode), even if RC is also active
+    // (stacked). Inert / inactive → 1 (callers must still gate on
+    // IsMatMulRCFamilyActive / Effective* helpers).
+    uint64_t macs = 0;
+    if (params.IsMatMulRCCoupledActive(reference_height)) {
+        const matmul::v4::rc::RCCoupParams cp =
+            matmul::v4::rc::ResolveRCCoupParams(params);
+        macs = matmul::v4::rc::TotalRCCoupMacs(cp);
+    } else if (params.IsMatMulRCActive(reference_height)) {
+        const matmul::v4::rc::RCEpisodeParams ep =
+            matmul::v4::rc::ResolveRCEpisodeParams(params, reference_height);
+        macs = matmul::v4::rc::TotalRCEpisodeMacs(ep);
+    } else {
         return 1;
     }
-    const matmul::v4::rc::RCEpisodeParams ep =
-        matmul::v4::rc::ResolveRCEpisodeParams(params, reference_height);
-    const uint64_t macs = matmul::v4::rc::TotalRCEpisodeMacs(ep);
     if (macs == 0) return 1;
     const uint64_t units =
         (macs + kMatMulRCAdmissionMacUnit - 1) / kMatMulRCAdmissionMacUnit;
@@ -4662,7 +4748,7 @@ uint32_t MatMulRCWorkUnits(const Consensus::Params& params, int32_t reference_he
 uint32_t EffectiveMatMulRCMaxPendingVerifications(const Consensus::Params& params,
                                                   int32_t reference_height)
 {
-    if (!params.IsMatMulRCActive(reference_height)) return 0;
+    if (!params.IsMatMulRCFamilyActive(reference_height)) return 0;
     const uint32_t jobs = params.nMatMulRCMaxPendingVerifications;
     if (jobs == 0) return 0;
     const uint32_t wu = MatMulRCWorkUnits(params, reference_height);
@@ -4676,7 +4762,7 @@ uint32_t EffectiveMatMulRCMaxPendingVerifications(const Consensus::Params& param
 uint32_t EffectiveMatMulRCGlobalVerifyBudgetPerMin(const Consensus::Params& params,
                                                    int32_t reference_height)
 {
-    if (!params.IsMatMulRCActive(reference_height)) return 0;
+    if (!params.IsMatMulRCFamilyActive(reference_height)) return 0;
     const uint32_t jobs = params.nMatMulRCGlobalVerifyBudgetPerMin;
     if (jobs == 0) return 0;
     const uint32_t wu = MatMulRCWorkUnits(params, reference_height);
@@ -4691,7 +4777,7 @@ uint32_t EffectiveMatMulRCPeerVerifyBudgetPerMin(const Consensus::Params& params
                                                  int32_t reference_height)
 {
     (void)is_ibd; // RC peer budget is intentionally strict even during IBD.
-    if (!params.IsMatMulRCActive(reference_height)) return 0;
+    if (!params.IsMatMulRCFamilyActive(reference_height)) return 0;
     const uint32_t jobs = params.nMatMulRCPeerVerifyBudgetPerMin;
     if (jobs == 0) return 0;
     const uint32_t wu = MatMulRCWorkUnits(params, reference_height);
@@ -4748,7 +4834,7 @@ bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count,
 bool CanStartMatMulRCVerification(uint32_t pending_verifications, uint32_t work_units,
                                   const Consensus::Params& params, int32_t reference_height)
 {
-    if (!params.IsMatMulRCActive(reference_height)) return false;
+    if (!params.IsMatMulRCFamilyActive(reference_height)) return false;
     if (work_units == 0) return true;
     const uint32_t cap = EffectiveMatMulRCMaxPendingVerifications(params, reference_height);
     if (cap == 0) return false;
