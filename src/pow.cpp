@@ -4083,6 +4083,7 @@ constexpr size_t MATMUL_ENCDR_VERDICT_MEMO_MAX{64};
 std::mutex g_matmul_encdr_verdict_mutex;
 std::map<uint256, bool> g_matmul_encdr_verdicts;
 std::deque<uint256> g_matmul_encdr_verdict_fifo;
+std::map<uint256, std::pair<bool, uint32_t>> g_matmul_encdr_verdict_pins;
 } // namespace
 
 void CacheMatMulEncDrVerdict(const uint256& block_hash, bool valid)
@@ -4105,9 +4106,41 @@ void CacheMatMulEncDrVerdict(const uint256& block_hash, bool valid)
 std::optional<bool> LookupMatMulEncDrVerdict(const uint256& block_hash)
 {
     std::lock_guard<std::mutex> lock(g_matmul_encdr_verdict_mutex);
+    const auto pinned{g_matmul_encdr_verdict_pins.find(block_hash)};
+    if (pinned != g_matmul_encdr_verdict_pins.end()) return pinned->second.first;
     const auto it = g_matmul_encdr_verdicts.find(block_hash);
     if (it == g_matmul_encdr_verdicts.end()) return std::nullopt;
     return it->second;
+}
+
+std::optional<bool> PinCachedMatMulEncDrVerdict(const uint256& block_hash)
+{
+    std::lock_guard<std::mutex> lock(g_matmul_encdr_verdict_mutex);
+    auto pinned{g_matmul_encdr_verdict_pins.find(block_hash)};
+    if (pinned != g_matmul_encdr_verdict_pins.end()) {
+        ++pinned->second.second;
+        return pinned->second.first;
+    }
+    const auto cached{g_matmul_encdr_verdicts.find(block_hash)};
+    if (cached == g_matmul_encdr_verdicts.end()) return std::nullopt;
+    g_matmul_encdr_verdict_pins.emplace(block_hash, std::make_pair(cached->second, 1U));
+    return cached->second;
+}
+
+void PinMatMulEncDrVerdict(const uint256& block_hash, bool valid)
+{
+    std::lock_guard<std::mutex> lock(g_matmul_encdr_verdict_mutex);
+    auto [it, inserted]{g_matmul_encdr_verdict_pins.emplace(block_hash, std::make_pair(valid, 0U))};
+    if (!inserted) assert(it->second.first == valid);
+    ++it->second.second;
+}
+
+void UnpinMatMulEncDrVerdict(const uint256& block_hash)
+{
+    std::lock_guard<std::mutex> lock(g_matmul_encdr_verdict_mutex);
+    const auto it{g_matmul_encdr_verdict_pins.find(block_hash)};
+    if (it == g_matmul_encdr_verdict_pins.end()) return;
+    if (--it->second.second == 0) g_matmul_encdr_verdict_pins.erase(it);
 }
 
 bool MatMulV4PayloadMatchesCommitment(const CBlock& block)
@@ -4238,7 +4271,15 @@ bool ShouldRunMatMulExpensiveVerification(
     bool phase2_enabled,
     bool is_ibd)
 {
-    if (!params.fMatMulPOW || params.fSkipMatMulValidation) return false;
+    if (!params.fMatMulPOW) return false;
+    // ContextualCheckBlock's v4 cascade is consensus-mandatory and does not
+    // consult the legacy phase2/economic-mode switches. In particular,
+    // DIGEST_RECOMPUTE still executes its exact predicate when
+    // `phase2_enabled` is false. Admission accounting must mirror the work
+    // that validation will actually perform, otherwise an economic-mode node
+    // runs an unbudgeted ENC-DR recomputation for every delivered v4 block.
+    if (params.IsMatMulV4Active(block_height)) return true;
+    if (params.fSkipMatMulValidation) return false;
     // Mirror ContextualCheckBlock's should_run_matmul_validation: the legacy phase2 path OR the
     // post-activation product-committed digest path. The product-committed verification runs
     // unconditionally at/after activation (it is not gated on phase2_enabled), so charge it too.
@@ -4254,7 +4295,7 @@ uint32_t CountMatMulExpensiveVerifyChecks(
     bool phase2_enabled,
     bool is_ibd)
 {
-    if (!params.fMatMulPOW || params.fSkipMatMulValidation) {
+    if (!params.fMatMulPOW) {
         return 0;
     }
     if (header_count == 0) return 0;

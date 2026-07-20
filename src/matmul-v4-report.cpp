@@ -111,13 +111,17 @@
 #include <univalue.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -396,6 +400,7 @@ struct Args {
     std::string backend_override;    // sets BTX_MATMUL_V4_BACKEND if non-empty
     std::string profile{"v41"};      // "v41" | "bmx4c" | "bmx4c-lt"
     bool mt24{false};                 // run the M-t24 boundary-vector suite (forced on for bmx4c)
+    bool n_explicit{false};           // true if --n set the dimension
     bool window_explicit{false};      // true if --window / env set the window
     bool telemetry_only{false};       // raw LT device timing; no CPU/reference/readiness gates
     bool lt_raw_only_alias{false};    // compatibility spelling from the CUDA review harness
@@ -405,7 +410,8 @@ struct Args {
 void PrintUsage(std::ostream& os)
 {
     os << "Usage: matmul-v4-report [options]\n"
-       << "  --backend <cpu|cuda|metal|hip>   force backend (sets BTX_MATMUL_V4_BACKEND)\n"
+       << "  --backend <name>                 force backend: cpu, cuda/nvidia, metal/mlx/apple,\n"
+       << "                                   hip/rocm/amd, or ascend/huawei/npu\n"
        << "  --profile <v41|bmx4c|bmx4c-lt>   encoding profile: v4.1 ENC-S8, v4.2 ENC-BMX4C, or\n"
        << "                                   v4.4-LT ENC-DR-LT (MatExpand + deep-m + Q*)\n"
        << "  --mt24                           run the M-t24 accumulator-exactness boundary-vector suite\n"
@@ -425,6 +431,85 @@ void PrintUsage(std::ostream& os)
        << "  -h, --help                       this help\n";
 }
 
+bool ParsePositiveUint32(const char* value, const std::string& source,
+                         uint32_t& out, std::string& err)
+{
+    // strtoul accepts signs, leading whitespace and prefixes, and silently
+    // wraps when narrowed to uint32_t. Report dimensions are measurement
+    // inputs, so accept only a complete, positive base-10 representation.
+    if (value == nullptr || value[0] == '\0' ||
+        !std::isdigit(static_cast<unsigned char>(value[0]))) {
+        err = "invalid positive integer for " + source + ": " +
+              (value != nullptr ? std::string{value} : std::string{"<null>"});
+        return false;
+    }
+    errno = 0;
+    char* end{nullptr};
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (errno == ERANGE || end == value || *end != '\0' || parsed == 0 ||
+        parsed > std::numeric_limits<uint32_t>::max()) {
+        err = "invalid positive integer for " + source + ": " + value;
+        return false;
+    }
+    out = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+bool ParseNonNegativeFiniteDouble(const char* value, const std::string& source,
+                                  double& out, std::string& err)
+{
+    // Zero is the documented "unknown/unset" value for these two options.
+    // Accept only unsigned decimal/scientific syntax. In particular, strtod's
+    // C hex-float, NaN/Inf and leading-sign extensions are not report inputs.
+    if (value == nullptr || value[0] == '\0' || value[0] == '-' || value[0] == '+' ||
+        std::isspace(static_cast<unsigned char>(value[0]))) {
+        err = "invalid non-negative finite number for " + source + ": " +
+              (value != nullptr ? std::string{value} : std::string{"<null>"});
+        return false;
+    }
+    const char* cursor{value};
+    bool mantissa_digit{false};
+    while (std::isdigit(static_cast<unsigned char>(*cursor))) {
+        mantissa_digit = true;
+        ++cursor;
+    }
+    if (*cursor == '.') {
+        ++cursor;
+        while (std::isdigit(static_cast<unsigned char>(*cursor))) {
+            mantissa_digit = true;
+            ++cursor;
+        }
+    }
+    if (!mantissa_digit) {
+        err = "invalid non-negative finite number for " + source + ": " + value;
+        return false;
+    }
+    if (*cursor == 'e' || *cursor == 'E') {
+        ++cursor;
+        if (*cursor == '+' || *cursor == '-') ++cursor;
+        const char* exponent_start{cursor};
+        while (std::isdigit(static_cast<unsigned char>(*cursor))) ++cursor;
+        if (cursor == exponent_start) {
+            err = "invalid non-negative finite number for " + source + ": " + value;
+            return false;
+        }
+    }
+    if (*cursor != '\0') {
+        err = "invalid non-negative finite number for " + source + ": " + value;
+        return false;
+    }
+    errno = 0;
+    char* end{nullptr};
+    const double parsed = std::strtod(value, &end);
+    if (errno == ERANGE || end == value || *end != '\0' ||
+        !std::isfinite(parsed) || parsed < 0.0) {
+        err = "invalid non-negative finite number for " + source + ": " + value;
+        return false;
+    }
+    out = parsed;
+    return true;
+}
+
 bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
 {
     auto need = [&](int& i) -> const char* {
@@ -434,7 +519,21 @@ bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
     for (int i = 1; i < argc; ++i) {
         const std::string a{argv[i]};
         if (a == "-h" || a == "--help") { PrintUsage(std::cout); std::exit(0); }
-        else if (a == "--backend") { const char* v = need(i); if (!v) return false; args.backend_override = v; }
+        else if (a == "--backend") {
+            const char* v = need(i); if (!v) return false;
+            args.backend_override = v;
+            std::string normalized{args.backend_override};
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const bool known = normalized == "cpu" || normalized == "cuda" || normalized == "nvidia" ||
+                normalized == "metal" || normalized == "mlx" || normalized == "apple" ||
+                normalized == "hip" || normalized == "rocm" || normalized == "amd" ||
+                normalized == "ascend" || normalized == "huawei" || normalized == "npu";
+            if (!known) {
+                err = "unknown --backend: " + args.backend_override;
+                return false;
+            }
+        }
         else if (a == "--profile") {
             const char* v = need(i); if (!v) return false;
             args.profile = v;
@@ -454,27 +553,44 @@ bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
             args.lt_raw_only_alias = true;
             args.lt_raw_full_window_alias = true;
         }
-        else if (a == "--n") { const char* v = need(i); if (!v) return false; args.n = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+        else if (a == "--n") {
+            const char* v = need(i); if (!v) return false;
+            if (!ParsePositiveUint32(v, a, args.n, err)) return false;
+            args.n_explicit = true;
+        }
         else if (a == "--window") {
             const char* v = need(i); if (!v) return false;
-            args.window = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+            if (!ParsePositiveUint32(v, a, args.window, err)) return false;
             args.window_explicit = true;
         }
-        else if (a == "--rounds") { const char* v = need(i); if (!v) return false; args.rounds = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+        else if (a == "--rounds") {
+            const char* v = need(i); if (!v) return false;
+            if (!ParsePositiveUint32(v, a, args.rounds, err)) return false;
+        }
         else if (a == "--quick") { args.quick = true; }
-        else if (a == "--device-peak-int8-tops") { const char* v = need(i); if (!v) return false; args.device_peak_int8_tops = std::strtod(v, nullptr); }
-        else if (a == "--v3-hashrate") { const char* v = need(i); if (!v) return false; args.v3_hashrate = std::strtod(v, nullptr); }
+        else if (a == "--device-peak-int8-tops") {
+            const char* v = need(i); if (!v) return false;
+            if (!ParseNonNegativeFiniteDouble(v, a, args.device_peak_int8_tops, err)) return false;
+        }
+        else if (a == "--v3-hashrate") {
+            const char* v = need(i); if (!v) return false;
+            if (!ParseNonNegativeFiniteDouble(v, a, args.v3_hashrate, err)) return false;
+        }
         else if (a == "--out") { const char* v = need(i); if (!v) return false; args.out_path = v; }
         else { err = "unknown argument: " + a; return false; }
     }
     // Environment overrides (only when the flag was left at default).
-    if (const char* e = std::getenv("BTX_MATMUL_V4_REPORT_N")) args.n = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
-    if (const char* e = std::getenv("BTX_MATMUL_V4_REPORT_WINDOW")) {
-        args.window = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
-        args.window_explicit = true;
+    if (!args.n_explicit) {
+        if (const char* e = std::getenv("BTX_MATMUL_V4_REPORT_N")) {
+            if (!ParsePositiveUint32(e, "BTX_MATMUL_V4_REPORT_N", args.n, err)) return false;
+        }
     }
-    if (args.window == 0) args.window = 1;
-    if (args.rounds == 0) args.rounds = 1;
+    if (!args.window_explicit) {
+        if (const char* e = std::getenv("BTX_MATMUL_V4_REPORT_WINDOW")) {
+            if (!ParsePositiveUint32(e, "BTX_MATMUL_V4_REPORT_WINDOW", args.window, err)) return false;
+            args.window_explicit = true;
+        }
+    }
     // The M-t24 boundary-vector suite is the reason to run --profile bmx4c at
     // all; force it on so an operator cannot forget the flag and mistake a
     // profile-only run for a real M-t24 verdict. Symmetrically, `--mt24`

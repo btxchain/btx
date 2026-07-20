@@ -35,11 +35,13 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -74,6 +76,40 @@ CBlockHeader MakeLTHeader(uint64_t nonce, uint32_t n)
     header.seed_b = ParseUint256("2222222222222222222222222222222222222222222222222222222222222222");
     return header;
 }
+
+#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+class ScopedMatMulV4BackendEnv
+{
+public:
+    explicit ScopedMatMulV4BackendEnv(const char* value)
+    {
+        if (const char* current = std::getenv("BTX_MATMUL_V4_BACKEND")) {
+            m_original = current;
+        }
+        setenv("BTX_MATMUL_V4_BACKEND", value, /*overwrite=*/1);
+    }
+
+    ~ScopedMatMulV4BackendEnv()
+    {
+        if (m_original.has_value()) {
+            setenv("BTX_MATMUL_V4_BACKEND", m_original->c_str(), /*overwrite=*/1);
+        } else {
+            unsetenv("BTX_MATMUL_V4_BACKEND");
+        }
+    }
+
+private:
+    std::optional<std::string> m_original;
+};
+
+bool ExtendedCudaSelfTestRequested()
+{
+    const char* enabled = std::getenv("BTX_MATMUL_V4_LT_CUDA_EXTENDED_SELFTEST");
+    return enabled != nullptr &&
+        (std::strcmp(enabled, "1") == 0 || std::strcmp(enabled, "true") == 0 ||
+         std::strcmp(enabled, "yes") == 0);
+}
+#endif
 
 // Device-backend stand-ins for the MatExpand GEMMs. The "mock" pair wraps the
 // CPU ExactGemm* reference bit-for-bit (a device backend MUST reproduce it), so
@@ -1887,6 +1923,73 @@ BOOST_AUTO_TEST_CASE(lt_accel_entry_bit_identity_or_stub_decline)
     BOOST_CHECK(!d.IsNull());
     BOOST_CHECK(!payload.empty());
 }
+
+#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+BOOST_AUTO_TEST_CASE(cuda_dispatch_winner_and_loser_contract_on_device)
+{
+    if (!ExtendedCudaSelfTestRequested()) {
+        BOOST_TEST_MESSAGE(
+            "skipping forced CUDA dispatch contract; set "
+            "BTX_MATMUL_V4_LT_CUDA_EXTENDED_SELFTEST=1 on a qualification host");
+        return;
+    }
+
+    ScopedMatMulV4BackendEnv force_cuda{"cuda"};
+    BOOST_REQUIRE_MESSAGE(matmul_v4::cuda::IsMatMulLTCudaAvailable(),
+                          "CUDA LT backend unavailable or baseline self-test failed");
+    BOOST_REQUIRE(matmul_v4::accel::ResolveBackend() == matmul_v4::accel::Kind::CUDA);
+
+    std::vector<CBlockHeader> headers{MakeLTHeader(31, kTestDim),
+                                      MakeLTHeader(32, kTestDim)};
+    headers[1].seed_a.data()[0] ^= 0x5aU;
+    headers[1].seed_b.data()[31] ^= 0xa5U;
+    std::vector<uint256> reference_digests(headers.size());
+    std::vector<std::vector<unsigned char>> reference_payloads(headers.size());
+    for (size_t i = 0; i < headers.size(); ++i) {
+        BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(
+            headers[i], kTestDim, reference_digests[i], reference_payloads[i]));
+        BOOST_REQUIRE(!reference_digests[i].IsNull());
+    }
+
+    const uint256 easy_target = ParseUint256(
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    std::vector<uint256> digests;
+    std::vector<std::vector<unsigned char>> payloads;
+    matmul_v4::accel::ResetStats();
+    BOOST_REQUIRE(matmul_v4::accel::ComputeDigestsBMX4CLTDispatched(
+        headers, kTestDim, /*rounds=*/2, easy_target, digests, payloads));
+    BOOST_CHECK(digests == reference_digests);
+    BOOST_CHECK(payloads == reference_payloads);
+    auto stats = matmul_v4::accel::ProbeStats();
+    BOOST_CHECK_EQUAL(stats.cuda_batch_ok, 1U);
+    BOOST_CHECK_EQUAL(stats.cuda_batch_fallback, 0U);
+
+    digests.clear();
+    payloads.clear();
+    matmul_v4::accel::ResetStats();
+    BOOST_REQUIRE(matmul_v4::accel::ComputeDigestsBMX4CLTDispatched(
+        headers, kTestDim, /*rounds=*/2, uint256{}, digests, payloads));
+    BOOST_CHECK(digests == reference_digests);
+    BOOST_REQUIRE_EQUAL(payloads.size(), headers.size());
+    for (const auto& payload : payloads) BOOST_CHECK(payload.empty());
+    stats = matmul_v4::accel::ProbeStats();
+    BOOST_CHECK_EQUAL(stats.cuda_batch_ok, 1U);
+    BOOST_CHECK_EQUAL(stats.cuda_batch_fallback, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_production_full_pipeline_extended_self_test)
+{
+    if (!ExtendedCudaSelfTestRequested()) {
+        BOOST_TEST_MESSAGE(
+            "skipping expensive n=4096 CUDA differential; set "
+            "BTX_MATMUL_V4_LT_CUDA_EXTENDED_SELFTEST=1 on a qualification host");
+        return;
+    }
+
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(matmul_v4::cuda::RunMatMulLTCudaExtendedSelfTest(error), error);
+}
+#endif
 
 #if !defined(BTX_ENABLE_HIP)
 BOOST_AUTO_TEST_CASE(hip_full_header_batch_stub_clears_provenance)

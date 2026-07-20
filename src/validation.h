@@ -1183,7 +1183,27 @@ public:
         int32_t height{0};
         std::optional<int64_t> parent_median_time_past;
     };
-    std::optional<MatMulEncDrClassifyResult> ClassifyMatMulEncDrRecompute(const CBlock& block) const
+    /** If `verdict_pinned` is non-null, a cached verdict is looked up and
+     *  pinned atomically. On return true in `*verdict_pinned`, the caller owns
+     *  one pin and MUST call UnpinMatMulEncDrVerdict after validation consumes
+     *  it. This prevents the bounded FIFO from turning a classified cheap path
+     *  into an unbudgeted recomputation before ProcessNewBlock re-entry. */
+    std::optional<MatMulEncDrClassifyResult> ClassifyMatMulEncDrRecompute(
+        const CBlock& block, bool* verdict_pinned = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Cheap complete-block checks that must pass before P2P admission charges
+     *  an expensive MatMul recomputation. This covers context-free body rules,
+     *  contextual header rules, and contextual body rules, but deliberately
+     *  does not execute the MatMul phase-2/ENC-DR predicate itself. A valid
+     *  previously-unseen header is idempotently accepted/indexed here so its
+     *  nChainWork is available and the same unrequested gates as AcceptBlock
+     *  can be evaluated exactly before admission. */
+    bool CheckMatMulBlockAdmissionPreconditions(const CBlock& block,
+                                                BlockValidationState& state,
+                                                bool force_processing,
+                                                bool min_pow_checked,
+                                                bool& reaches_contextual_check)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**

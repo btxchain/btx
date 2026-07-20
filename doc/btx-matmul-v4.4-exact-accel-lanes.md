@@ -20,8 +20,8 @@ Consensus sees only canonical integer sketch bytes. The optimal design is **one 
 | 1 | Replace 16-GEMM combine with **Karatsuba-9** + fused M61 epilogue | **Done** (CPU + CUDA `Bmx4BuildKaratsubaPlanesKernel` + HIP + Metal) |
 | 2 | **Contraction-aligned MX projection** (one E8M0 code per 32 K elements and output coordinate) | The pre-activation A/B scale-axis correction is implemented in the exact CPU reference, CUDA masked-plane consumers, and portable **integer emulation**, all byte-identical to dense. That makes a future one-pass native MXFP4 projection structurally possible; it does not mean one is wired. CUTLASS/tcgen05 hardware execution remains fail-closed until self-qualified; LT has its own already-contraction-aligned B layout. |
 | 2b | Adaptive base-256 / two-limb exact combine | **Done (miner-local)**: `ComputeCombineAdaptiveLimbBMX4C` + deferred `__int128` `ComputeCombineModQ` + classical oracle; tournament harness under `bench/` |
-| 3 | Entire nonce loop **device-resident** | **Partial**: LT CUDA/HIP use qualified INT8 IMMA/MFMA for direct s8 stages, exact radix-lowered `Y·H`, Karatsuba-9 combine, and an opt-in frontier logical-MX projection. Native MXFP4 is absent. Remaining: device-side digest, stacked Q, native-MX qualification. |
-| 4 | **Stop returning loser payloads** | **Done** — streaming `ComputeSketchDigestFromFq`; no 8 MiB loser alloc; CUDA `ComputeDigestsOnlyBMX4CAccel` drops loser payloads device-side |
+| 3 | Entire nonce loop **device-resident** | **Implemented for the provenance-qualified CUDA/HIP full-header Q* path**: nonce-fresh W generation, direct/radix-lowered GEMMs, Karatsuba-9 combine, and SHA256d(Chat) stay on-device; one digest/status batch is copied at completion with no per-candidate synchronization. Cold template binding and self-tests are outside that steady-state claim. Dense INT8 is the default projection, with opt-in frontier logical-MX partitioning. Metal/Ascend and native MXFP4 do not yet make this resident-Q* claim. |
+| 4 | **Stop returning loser payloads** | **Done** — LT CUDA/HIP full-header batches return digest/status only, and dispatch CPU-reseals payloads solely for target candidates. Losing slots remain payload-empty. The streaming digest also avoids the historical 8 MiB loser allocation. |
 | 5 | Future **FP8 five-limb** combine lane | **CPU reference done (exact)**; planner selects for `"rubin"`. Device path: fail-closed API (`IsDeviceFp8FiveLimbAvailable`, `LaunchDeviceFp8FiveLimbCombine`) with transparent CPU fallback via `ComputeCombineFp8FiveLimbDeviceOrCpu` — no Rubin silicon headers in default builds |
 
 ## Hardware portfolio (planner intent, not runtime evidence)
@@ -115,7 +115,7 @@ fallback) instead of one eight-byte `CSHA256::Write` per word.
 |---|---|---|
 | Larger dense batched GEMMs (Q, stacked combine) | Moves along the 2×→4–6× B200/5090 axis | Available; needs sustained large Q |
 | Karatsuba-9 (−35% combine MAC) | Helps both; slightly more on H200 (tensor-heavier share) | **Done** |
-| Remove host XOF / H2D / loser payload / alloc | Attacks the **non-tensor floor** (the part that flattens $/nonce) | **Implemented, silicon re-measure pending**: CUDA/HIP accept complete seed-bound Q* headers, generate W and SHA256d(Chat) on-device, return digest/status only, and synchronize once per batch. CUDA bounds Chat staging to 128 MiB; HIP overlaps an eight-slot ring. Per-candidate GEMM launches and serial SHA/prefix work remain profiling targets. |
+| Remove host XOF / H2D / loser payload / alloc | Attacks the **non-tensor floor** (the part that flattens $/nonce) | **Implemented, silicon re-measure pending**: CUDA/HIP accept complete seed-bound Q* headers, generate W and SHA256d(Chat) on-device, return digest/status only, and have no per-candidate synchronization. The steady-state call synchronizes at completion; cold binding/self-tests may synchronize separately. CUDA bounds Chat staging to 128 MiB; HIP overlaps an eight-slot ring. Per-candidate GEMM launches and serial SHA/prefix work remain profiling targets. |
 | Logical scale partition | Exposes committed mantissa/scale tensors without dense dequantization | Exact CPU path plus opt-in frontier CUDA/HIP four-pass INT8 lowering complete; default stays one dense GEMM until measured; CUTLASS/tcgen05 native kernel hardware-gated |
 | FP8 five-limb (Rubin) | Future INT8 drought hedge | CPU exact; no Rubin silicon yet |
 | One nonce / multi-GPU | Spec correctly rejects — NVLink does not help EPP search | Policy |
@@ -132,18 +132,20 @@ Even with a perfect device-resident loop:
 **Verdict:** The integer + exact-lane design has **not** exhausted the levers that favor high-end AI silicon, but it **has** hit the limit of what consensus bytes can do. Further DC advantage is almost all:
 
 - sustained large-Q dense GEMMs,
-- device-resident XOF/hash (now scheduled; needs CUDA graph bind),
+- device-resident W generation/hash (implemented for the CUDA/HIP full-header
+  path; further graph/launch fusion is a throughput optimization),
 - real, self-qualified MXFP4 grouped kernels (not planner labels),
 - and fleet economics — not another consensus encoding.
 
 If after those miner-local steps B200 still loses on $/nonce to 5090, that is an **economic** outcome, not a missing consensus feature. Future-proofing (FP8 lane) keeps the workload on whichever exact low-precision unit vendors ship; it cannot guarantee datacenter always beats retail.
 
-## Remaining (silicon-bound — every item has a complete, exact software path today)
+## Remaining (silicon-bound — every item has a complete, exact CPU fallback)
 
-All correctness-bearing device stages are implemented and are the dispatched
-hot path (CUDA/HIP/Metal `ComputeDigestsBMX4CAccel`, per-digest re-verify + CPU
-fail-closed fallback). What remains is either a throughput lever or a
-vendor-tensor-kernel swap that only *replaces* an already-exact software path:
+The LT CUDA/HIP full-header APIs implement the resident digest/status path and
+publish that fact only through per-call provenance. Other vendor lanes remain
+at the explicitly documented scope below, and every decline or mismatch falls
+back to the canonical CPU transcript. The remaining work is qualification,
+measurement, launch amortization, or a vendor-tensor-kernel swap:
 
 1. **CUDA graphs** bound to the device stages — per-launch overhead only; the
    kernels themselves already run on-device.

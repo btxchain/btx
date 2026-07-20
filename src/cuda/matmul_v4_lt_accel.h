@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 class CBlockHeader;
@@ -56,11 +57,11 @@ struct LtCudaBatchProvenance {
 
 /** True iff this build was compiled with CUDA (BTX_ENABLE_CUDA_EXPERIMENTAL),
  *  a CUDA device is present, and the one-time device bit-identity self-test
- *  (GEMMs + MX projection + one full device-resident digest vs
- *  ComputeDigestBMX4CLT) has not permanently failed. Callers should treat
- *  "false" only as "this backend cannot help"; ComputeDigestsOnlyLTCuda still
- *  produces bit-exact results via the host ExactGemm fail-closed fallback when
- *  the device path is unavailable (except the ENABLE=OFF stub, which declines). */
+ *  (GEMMs + multi-shape MX projection + a two-header device-resident digest
+ *  differential) has not permanently failed. Callers should treat "false"
+ *  only as "this backend cannot help"; ComputeDigestsOnlyLTCuda still produces
+ *  bit-exact results via the host ExactGemm fail-closed fallback when the
+ *  device path is unavailable (except the ENABLE=OFF stub, which declines). */
 [[nodiscard]] bool IsMatMulLTCudaAvailable();
 
 /** Bit-exact device GEMMs backing MatExpand / projection stages, exported so
@@ -114,8 +115,10 @@ struct LtCudaBatchProvenance {
 /** Consensus-seeded Q* entry. Unlike the legacy template+nonce ABI, this
  *  preserves every candidate's nonce-bound seed_a/seed_b. A successful CUDA
  *  resident call generates W and SHA256d(Chat) on device, returns only one
- *  32-byte digest per candidate, and has one stream synchronization at the
- *  batch boundary. Host fallback remains bit-exact but reports all provenance
+ *  digest/status record per candidate, and has no per-candidate
+ *  synchronization. The steady-state candidate loop synchronizes at its
+ *  completion boundary; cold template binding and availability self-tests may
+ *  synchronize separately. Host fallback remains bit-exact but reports all provenance
  *  fields false. Every header must have the same ComputeTemplateHash, and the
  *  batch must contain at most kConsensusQStarMax (512) headers; oversized calls
  *  fail before device allocation or host fallback. */
@@ -123,6 +126,15 @@ struct LtCudaBatchProvenance {
     const std::vector<CBlockHeader>& headers, uint32_t n,
     std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
     LtCudaBatchProvenance* provenance = nullptr);
+
+/** Expensive opt-in device validation for release/silicon qualification.
+ *  It compares two full production-shape (n=4096) resident digests with the
+ *  independent CPU reference and separately forces a three-candidate batch
+ *  through two bounded Chat staging chunks. This is intentionally not part of
+ *  IsMatMulLTCudaAvailable(): the production CPU reference is far too costly
+ *  for startup and ordinary CI. On failure, `error` describes the first
+ *  declined/mismatched stage. */
+[[nodiscard]] bool RunMatMulLTCudaExtendedSelfTest(std::string& error);
 
 /** True iff most recent LaunchGemmS8S8 / BackendGemmS8S8 used cuBLASLt IMMA. */
 [[nodiscard]] bool LtLastS8S8UsedImma();

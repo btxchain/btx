@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 class CBlockHeader;
@@ -61,6 +62,12 @@ bool ComputeDigestsOnlyLTCuda(
 {
     out.clear();
     if (provenance != nullptr) *provenance = {};
+    return false;
+}
+
+bool RunMatMulLTCudaExtendedSelfTest(std::string& error)
+{
+    error = "CUDA backend not compiled";
     return false;
 }
 

@@ -200,6 +200,46 @@ BOOST_AUTO_TEST_CASE(encdr_verdict_memo_bounded_fifo)
     BOOST_CHECK(LookupMatMulEncDrVerdict(salted_hash(kInserted - 1)).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(encdr_verdict_pin_survives_fifo_eviction_and_refcounts)
+{
+    const auto salted_hash = [](uint32_t i) {
+        uint256 h;
+        h.data()[0] = 0xA6;
+        h.data()[1] = static_cast<uint8_t>(i);
+        h.data()[2] = static_cast<uint8_t>(i >> 8);
+        h.data()[3] = 0x5C;
+        return h;
+    };
+
+    const uint256 pinned_hash{salted_hash(0)};
+    CacheMatMulEncDrVerdict(pinned_hash, /*valid=*/true);
+    const auto first_pin{PinCachedMatMulEncDrVerdict(pinned_hash)};
+    const auto second_pin{PinCachedMatMulEncDrVerdict(pinned_hash)};
+    BOOST_REQUIRE(first_pin.has_value());
+    BOOST_REQUIRE(second_pin.has_value());
+    BOOST_CHECK(*first_pin);
+    BOOST_CHECK(*second_pin);
+
+    // Evict the ordinary FIFO entry. The independent pin must remain visible
+    // across admission -> validation, even while other workers finish enough
+    // jobs to wrap the bounded memo.
+    for (uint32_t i = 1; i <= 80; ++i) {
+        CacheMatMulEncDrVerdict(salted_hash(i), /*valid=*/false);
+    }
+    auto memo{LookupMatMulEncDrVerdict(pinned_hash)};
+    BOOST_REQUIRE(memo.has_value());
+    BOOST_CHECK(*memo);
+
+    // Nested owners release independently. Only the final unpin exposes that
+    // the backing FIFO entry was evicted.
+    UnpinMatMulEncDrVerdict(pinned_hash);
+    memo = LookupMatMulEncDrVerdict(pinned_hash);
+    BOOST_REQUIRE(memo.has_value());
+    BOOST_CHECK(*memo);
+    UnpinMatMulEncDrVerdict(pinned_hash);
+    BOOST_CHECK(!LookupMatMulEncDrVerdict(pinned_hash).has_value());
+}
+
 // Phase B seal-as-PoW async path: parent MTP on the Job is forwarded into the
 // verify seam (Classify/ProcessBlock supply it under cs_main; EncDr fails
 // closed without it at seal heights).

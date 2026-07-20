@@ -162,6 +162,23 @@ BOOST_AUTO_TEST_CASE(product_digest_activation_disables_phase2_even_in_ibd)
         /*is_ibd=*/true));
 }
 
+BOOST_AUTO_TEST_CASE(v4_expensive_count_matches_mandatory_contextual_validation)
+{
+    auto params = MainParams();
+    params.nMatMulV4Height = 100;
+    params.fSkipMatMulValidation = true;
+
+    // Legacy phase2 policy is disabled, but ContextualCheckBlock's v4
+    // exclusive cascade still performs the profile's verification/recompute.
+    // The admission count must therefore remain nonzero at v4 heights.
+    BOOST_CHECK(ShouldRunMatMulExpensiveVerification(
+        /*block_height=*/100, /*best_known_height=*/100, params,
+        /*phase2_enabled=*/false, /*is_ibd=*/false));
+    BOOST_CHECK_EQUAL(CountMatMulExpensiveVerifyChecks(
+        /*first_height=*/99, /*header_count=*/3, /*best_known_height=*/101,
+        params, /*phase2_enabled=*/false, /*is_ibd=*/false), 2U);
+}
+
 BOOST_AUTO_TEST_CASE(phase2_ibd_batch_count_enforces_budgeting)
 {
     auto params = MainParams();

@@ -1235,6 +1235,21 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, peer.m_getdata_requests_mutex, NetEventsInterface::g_msgproc_mutex)
         LOCKS_EXCLUDED(::cs_main);
 
+    struct MatMulBlockAdmission {
+        enum class State {
+            NOT_PRECHECKED,
+            HEADER_ONLY,
+            NO_RECOMPUTE,
+            RECOMPUTE_RESERVED,
+        } state{State::NOT_PRECHECKED};
+        bool is_ibd{false};
+        bool encdr_profile{false};
+        bool owns_async_marker{false};
+        bool owns_verdict_pin{false};
+        int32_t reference_height{std::numeric_limits<int32_t>::max()};
+        uint32_t work_units{0};
+    };
+
     /** Process a new block. Perform any post-processing housekeeping.
      *
      *  WP-7 / C5: when the async ENC-DR verify worker is active
@@ -1252,10 +1267,16 @@ private:
      *                           dispatch owns a slot for recompute + re-entry.
      *  @param[in] post_process  Housekeeping to run after validation completed
      *                           (sync: before returning; async: on the worker
-     *                           thread after re-entry). */
+     *                           thread after re-entry).
+     *  @param[in] matmul_admission Whether complete-body admission proved
+     *                           recompute unnecessary or reserved it for
+     *                           immediate charging/dispatch;
+     *                           internal/unclassified callers retain the
+     *                           defensive reservation path. */
     void ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked,
-                      std::optional<ScopedMatMulPendingVerification> matmul_slot = std::nullopt,
-                      std::function<void()> post_process = nullptr);
+                      std::optional<ScopedMatMulPendingVerification> matmul_slot,
+                      std::function<void()> post_process,
+                      MatMulBlockAdmission matmul_admission);
 
     /** Admit one complete block to an expensive MatMul verification path.
      *
@@ -1264,13 +1285,16 @@ private:
      * consuming a finite rate-budget unit, and ensures the resulting pending
      * slot is the same slot handed to ProcessBlock (rather than reserving a
      * second one inside the async dispatcher). */
-    bool AdmitMatMulBlockVerification(CNode& node, const Peer& peer,
-                                      const uint256& block_hash,
+    bool AdmitMatMulBlockVerification(CNode& node,
+                                      const CBlock& block,
+                                      bool force_processing,
+                                      bool min_pow_checked,
                                       bool requires_expensive_verification,
                                       bool is_ibd,
                                       int32_t reference_height,
                                       const char* source,
-                                      std::optional<ScopedMatMulPendingVerification>& slot);
+                                      std::optional<ScopedMatMulPendingVerification>& slot,
+                                      MatMulBlockAdmission& admission);
 
     /** The historical synchronous body of ProcessBlock, made node-lifetime-safe
      *  so it can also run on a worker thread after the peer vanished. `node` is
@@ -4570,12 +4594,117 @@ void PeerManagerImpl::ProcessGetCFCheckPt(CNode& node, Peer& peer, DataStream& v
 
 void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked,
                                    std::optional<ScopedMatMulPendingVerification> matmul_slot,
-                                   std::function<void()> post_process)
+                                   std::function<void()> post_process,
+                                   MatMulBlockAdmission matmul_admission)
 {
-    if (m_matmul_verify_worker) {
-        const std::optional<ChainstateManager::MatMulEncDrClassifyResult> encdr{
-            WITH_LOCK(cs_main, return m_chainman.ClassifyMatMulEncDrRecompute(*block))};
-        if (encdr) {
+    const uint256 hash{block->GetHash()};
+    const auto release_admission_marker = [&] {
+        if (matmul_admission.owns_async_marker) {
+            UnmarkMatMulAsyncVerification(hash);
+            matmul_admission.owns_async_marker = false;
+        }
+    };
+    const auto release_verdict_pin = [&] {
+        if (matmul_admission.owns_verdict_pin) {
+            UnpinMatMulEncDrVerdict(hash);
+            matmul_admission.owns_verdict_pin = false;
+        }
+    };
+    const auto finalize_header_only = [&] {
+        BlockValidationState header_state;
+        m_chainman.ProcessNewBlockHeaders(
+            {{block->GetBlockHeader()}}, min_pow_checked, header_state);
+        {
+            LOCK(cs_main);
+            mapBlockSource.erase(hash);
+        }
+        if (post_process) post_process();
+    };
+    const auto consume_reserved_budget = [&] {
+        PeerRef peer{GetPeerRef(node.GetId())};
+        if (!peer || node.HasPermission(NetPermissionFlags::NoBan)) return true;
+        bool global_exhausted{false};
+        if (ConsumeMatMulVerificationBudgetForPeer(
+                *peer, m_chainparams.GetConsensus(), matmul_admission.work_units,
+                std::chrono::steady_clock::now(), matmul_admission.is_ibd,
+                matmul_admission.reference_height, global_exhausted)) {
+            return true;
+        }
+        if (global_exhausted) {
+            LogDebug(BCLog::NET,
+                     "Deferring block from peer=%d: global MatMul verification budget exhausted\n",
+                     node.GetId());
+        } else {
+            LogDebug(BCLog::NET,
+                     "Disconnecting peer=%d: MatMul per-peer verification budget exhausted (block)\n",
+                     node.GetId());
+            node.fDisconnect = true;
+        }
+        return false;
+    };
+
+    if (matmul_admission.state == MatMulBlockAdmission::State::HEADER_ONLY) {
+        // The complete body passed cheap validation, but AcceptBlock's moving
+        // unrequested work/height gates said it must stop after the header.
+        // Re-running full block acceptance here could cross a moving tip/work
+        // gate and start an unbudgeted recomputation. Publish the already
+        // indexed header through the ordinary notification wrapper instead;
+        // block download can request the body later if it becomes relevant.
+        finalize_header_only();
+        release_verdict_pin();
+        return;
+    }
+
+    if (matmul_admission.state == MatMulBlockAdmission::State::NO_RECOMPUTE) {
+        ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
+        release_verdict_pin();
+        return;
+    }
+
+    std::optional<ChainstateManager::MatMulEncDrClassifyResult> encdr;
+    bool verdict_pinned{false};
+    if (m_matmul_verify_worker ||
+        matmul_admission.state == MatMulBlockAdmission::State::RECOMPUTE_RESERVED) {
+        encdr = WITH_LOCK(cs_main, return m_chainman.ClassifyMatMulEncDrRecompute(
+            *block, &verdict_pinned));
+        if (verdict_pinned) matmul_admission.owns_verdict_pin = true;
+    }
+
+    if (matmul_admission.state == MatMulBlockAdmission::State::RECOMPUTE_RESERVED) {
+        // Reclassify immediately before the permanent rate debit. A concurrent
+        // RPC/reindex may have installed block data or a memoized verdict since
+        // admission; in that case no recomputation will run, so release the
+        // temporary slot/single-flight marker without charging either budget.
+        if (matmul_admission.encdr_profile && !encdr) {
+            release_admission_marker();
+            matmul_slot.reset();
+            ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
+            release_verdict_pin();
+            return;
+        }
+        if (!consume_reserved_budget()) {
+            release_admission_marker();
+            matmul_slot.reset();
+            finalize_header_only();
+            release_verdict_pin();
+            return;
+        }
+        // Older synchronous MatMul profiles have no async classifier. Their
+        // coarse admission is still charged here, immediately before ordinary
+        // validation performs the expensive check.
+        if (!matmul_admission.encdr_profile) {
+            ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
+            release_admission_marker();
+            return;
+        }
+        if (!m_matmul_verify_worker) {
+            ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
+            release_admission_marker();
+            return;
+        }
+    }
+
+    if (m_matmul_verify_worker && encdr) {
             // Every async recompute must hold a pending-verification slot (the
             // message thread no longer serializes them). Network block-delivery
             // callers pass theirs in after admitting a complete block. Keep a
@@ -4583,6 +4712,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             // Height-select the LT tip-verify pending cap when DRLT is live
             // (seal recompute is ~Q*× a single EncDr).
             if (!matmul_slot &&
+                matmul_admission.state == MatMulBlockAdmission::State::NOT_PRECHECKED &&
                 ReserveMatMulVerificationSlot(m_matmul_pending_verifications, m_chainparams.GetConsensus(),
                                               encdr->height)) {
                 const uint32_t work = MatMulEncDrWorkUnits(m_chainparams.GetConsensus(), encdr->height);
@@ -4590,7 +4720,6 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             }
             if (matmul_slot) {
                 const NodeId nodeid{node.GetId()};
-                const uint256 hash{block->GetHash()};
                 // A body can arrive through BLOCK, CMPCTBLOCK/BLOCKTXN, or as
                 // a redundant relay.  Collapse all of those delivery paths at
                 // the dispatcher boundary, before they can enqueue duplicate
@@ -4598,7 +4727,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 // same marker so removal of the ordinary download-in-flight
                 // entry does not cause immediate redelivery while this job is
                 // still queued/running.
-                if (!MarkMatMulAsyncVerification(hash)) {
+                if (!matmul_admission.owns_async_marker && !MarkMatMulAsyncVerification(hash)) {
                     if (post_process) post_process();
                     return;
                 }
@@ -4610,20 +4739,24 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 node::MatMulVerifyWorker::Job job{
                     block, encdr->height, encdr->parent_median_time_past,
                     [this, nodeid, block, hash, force_processing, min_pow_checked, slot,
-                     post = std::move(post_process)](bool /*encdr_ok*/) {
+                     post = post_process](bool encdr_ok) {
                         // The verdict reaches validation via the ENC-DR verdict
                         // memo consulted inside ContextualCheckBlock; re-enter
                         // through the ordinary acceptance machinery so the
                         // existing BlockChecked -> MaybePunishNodeForBlock
                         // pipeline handles accept/reject identically to the
                         // synchronous path.
+                        PinMatMulEncDrVerdict(hash, encdr_ok);
                         ProcessBlockSync(nodeid, /*node=*/nullptr, block, force_processing, min_pow_checked, post);
+                        UnpinMatMulEncDrVerdict(hash);
                         UnmarkMatMulAsyncVerification(hash);
                     }};
                 if (m_matmul_verify_worker->Enqueue(job)) return; // message thread freed
-                // Worker is stopping (shutdown race): run the job inline —
-                // exactly the synchronous fallback, slot released with `job`.
-                job.completion(false);
+                // Worker is stopping (shutdown race): no worker verdict exists,
+                // so run canonical validation inline without pinning the
+                // callback's false placeholder as if it were a real result.
+                ProcessBlockSync(nodeid, &node, block, force_processing, min_pow_checked, post_process);
+                UnmarkMatMulAsyncVerification(hash);
                 return;
             }
             // Queue/slot saturated: NEVER fall through to ProcessBlockSync for
@@ -4636,37 +4769,117 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                      block->GetHash().ToString(), node.GetId());
             if (post_process) post_process();
             return;
-        }
     }
+    release_admission_marker();
     ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
+    release_verdict_pin();
 }
 
 bool PeerManagerImpl::AdmitMatMulBlockVerification(
     CNode& node,
-    const Peer& peer,
-    const uint256& block_hash,
+    const CBlock& block,
+    bool force_processing,
+    bool min_pow_checked,
     bool requires_expensive_verification,
     bool is_ibd,
     int32_t reference_height,
     const char* source,
-    std::optional<ScopedMatMulPendingVerification>& slot)
+    std::optional<ScopedMatMulPendingVerification>& slot,
+    MatMulBlockAdmission& admission)
 {
+    // Preserve the zero-cost decision made by CountMatMulExpensiveVerifyChecks
+    // for genuinely pre-v4/non-MatMul blocks. Active v4 commitment schemes are
+    // always counted there, even when legacy skip/economic phase-2 controls are
+    // disabled, because ContextualCheckBlock always enforces them.
     if (!requires_expensive_verification) return true;
-    const bool already_have_block_data{WITH_LOCK(cs_main, {
-        const CBlockIndex* existing{m_chainman.m_blockman.LookupBlockIndex(block_hash)};
-        return existing != nullptr && (existing->nStatus & BLOCK_HAVE_DATA);
-    })};
-    // BLOCK_HAVE_DATA is monotonic. ProcessBlock's async classifier checks the
-    // same bit and returns null, so this replay fast path cannot fall through
-    // to its defensive self-reservation after we intentionally skip admission.
-    if (already_have_block_data) return true;
+    const uint256 block_hash{block.GetHash()};
+
+    // Admission budgets pay specifically for expensive MatMul recomputation,
+    // not for receiving a complete block. Run the context-free body checks
+    // while cs_main serializes CBlock's mutable check caches, then use the
+    // exact ENC-DR classifier to exclude paths that AcceptBlock will decide
+    // without recomputation (known data/invalid, assumevalid trust, a cached
+    // verdict, or forbidden body payloads). ProcessBlockSync still sees every
+    // rejected body so the ordinary BlockChecked/punishment pipeline remains
+    // authoritative; it merely does not get a scarce permanent budget debit.
+    BlockValidationState cheap_state;
+    bool cheap_body_valid{false};
+    bool exact_recompute_required{false};
+    bool exact_encdr_profile{false};
+    bool acceptance_reaches_contextual{false};
+    bool acceptance_stable_early_exit{false};
+    int32_t exact_reference_height{reference_height};
+    {
+        LOCK(cs_main);
+        cheap_body_valid = m_chainman.CheckMatMulBlockAdmissionPreconditions(
+            block, cheap_state, force_processing, min_pow_checked,
+            acceptance_reaches_contextual);
+        if (cheap_body_valid) {
+            const CBlockIndex* indexed{m_chainman.m_blockman.LookupBlockIndex(block_hash)};
+            acceptance_stable_early_exit = indexed != nullptr &&
+                (((indexed->nStatus & BLOCK_HAVE_DATA) != 0) ||
+                 (!force_processing &&
+                  (indexed->nTx != 0 || indexed->nChainWork < m_chainman.MinimumChainWork())));
+            const CBlockIndex* prev{m_chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock)};
+            if (prev != nullptr && prev->nHeight != std::numeric_limits<int>::max()) {
+                exact_reference_height = prev->nHeight + 1;
+                const Consensus::Params& params{m_chainparams.GetConsensus()};
+                exact_encdr_profile = params.IsMatMulV4Active(exact_reference_height) &&
+                    params.GetMatMulProfileParams(exact_reference_height).commitment ==
+                        Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE;
+
+                if (acceptance_reaches_contextual) {
+                    bool verdict_pinned{false};
+                    const auto encdr{m_chainman.ClassifyMatMulEncDrRecompute(block, &verdict_pinned)};
+                    admission.owns_verdict_pin = verdict_pinned;
+                    exact_recompute_required = exact_encdr_profile ? encdr.has_value()
+                                                                   : requires_expensive_verification;
+                }
+            } else {
+                // An unknown parent cannot reach contextual recomputation.
+                exact_recompute_required = false;
+            }
+        }
+    }
+    if (!cheap_body_valid) {
+        LogDebug(BCLog::NET,
+                 "Skipping MatMul verification admission for %s hash=%s from peer=%d: cheap body validation failed (%s)\n",
+                 source, block_hash.ToString(), node.GetId(), cheap_state.ToString());
+        admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
+        return true;
+    }
+    if (!acceptance_reaches_contextual) {
+        if (acceptance_stable_early_exit) {
+            // Historical ProcessNewBlock still calls NotifyHeaderTip and
+            // ActivateBestChain after stable AcceptBlock early exits (data we
+            // already hold, a previously processed/pruned block, or a block
+            // below configured minimum chain work). Preserve that behavior;
+            // only moving active-tip/height gates are pinned header-only.
+            admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
+            return true;
+        }
+        LogDebug(BCLog::NET,
+                 "Skipping full %s processing for hash=%s from peer=%d: exact AcceptBlock gate stopped after header\n",
+                 source, block_hash.ToString(), node.GetId());
+        admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
+        return true;
+    }
+    if (!exact_recompute_required) {
+        if (exact_encdr_profile) {
+            LogDebug(BCLog::NET,
+                     "Skipping MatMul verification admission for %s hash=%s from peer=%d: validated block does not require recomputation\n",
+                     source, block_hash.ToString(), node.GetId());
+            admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
+        }
+        return true;
+    }
 
     // Network message processing is serialized by g_msgproc_mutex. Therefore
     // a marker found here belongs to the one delivery that already reserved a
     // slot and entered the async single-flight path; reject redundant BLOCK,
     // CMPCTBLOCK, or BLOCKTXN completions before charging either admission
     // capacity or the peer/global verification budgets.
-    if (IsMatMulAsyncVerificationPending(block_hash)) {
+    if (exact_encdr_profile && IsMatMulAsyncVerificationPending(block_hash)) {
         LogDebug(BCLog::NET,
                  "Ignoring duplicate %s hash=%s from peer=%d: MatMul verification already pending\n",
                  source, block_hash.ToString(), node.GetId());
@@ -4674,37 +4887,33 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     }
 
     const Consensus::Params& params{m_chainparams.GetConsensus()};
-    const uint32_t work{MatMulEncDrWorkUnits(params, reference_height)};
+    const uint32_t work{MatMulEncDrWorkUnits(params, exact_reference_height)};
+    if (exact_encdr_profile && !MarkMatMulAsyncVerification(block_hash)) {
+        LogDebug(BCLog::NET,
+                 "Ignoring duplicate %s hash=%s from peer=%d: MatMul verification already pending\n",
+                 source, block_hash.ToString(), node.GetId());
+        return false;
+    }
     if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, params,
-                                       reference_height, work)) {
+                                       exact_reference_height, work)) {
+        if (exact_encdr_profile) UnmarkMatMulAsyncVerification(block_hash);
         LogDebug(BCLog::NET,
                  "Disconnecting peer=%d: MatMul pending verification cap reached (%s)\n",
                  node.GetId(), source);
         node.fDisconnect = true;
-        return false;
+        // Admission already indexed this valid header. Let ProcessBlock run
+        // the header-only finalizer so NotifyHeaderTip and mapBlockSource
+        // cleanup are not lost merely because the recompute slot is full.
+        admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
+        return true;
     }
     slot.emplace(m_matmul_pending_verifications, work);
-
-    bool global_exhausted{false};
-    if (!node.HasPermission(NetPermissionFlags::NoBan) &&
-        !ConsumeMatMulVerificationBudgetForPeer(
-            peer, params, /*verification_count=*/work,
-            std::chrono::steady_clock::now(), is_ibd, reference_height,
-            global_exhausted)) {
-        if (global_exhausted) {
-            // Shared exhaustion is not the delivering peer's fault. The slot
-            // is released by the caller's optional on return.
-            LogDebug(BCLog::NET,
-                     "Deferring %s from peer=%d: global MatMul verification budget exhausted\n",
-                     source, node.GetId());
-            return false;
-        }
-        LogDebug(BCLog::NET,
-                 "Disconnecting peer=%d: MatMul per-peer verification budget exhausted (%s)\n",
-                 node.GetId(), source);
-        node.fDisconnect = true;
-        return false;
-    }
+    admission.state = MatMulBlockAdmission::State::RECOMPUTE_RESERVED;
+    admission.is_ibd = is_ibd;
+    admission.encdr_profile = exact_encdr_profile;
+    admission.owns_async_marker = exact_encdr_profile;
+    admission.reference_height = exact_reference_height;
+    admission.work_units = work;
     return true;
 }
 
@@ -4829,10 +5038,12 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
     } // Don't hold cs_main when we call into ProcessNewBlock
     if (fBlockRead) {
         std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
+        MatMulBlockAdmission matmul_admission;
         if (!AdmitMatMulBlockVerification(
-                pfrom, peer, block_transactions.blockhash,
+                pfrom, *pblock,
+                /*force_processing=*/true, /*min_pow_checked=*/true,
                 requires_matmul_verification, is_ibd, matmul_reference_height,
-                /*source=*/"blocktxn", pending_matmul_slot)) {
+                /*source=*/"blocktxn", pending_matmul_slot, matmul_admission)) {
             return;
         }
         {
@@ -4852,7 +5063,8 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         // protections in the compact block handler -- see related comment
         // in compact block optimistic reconstruction handling.
         ProcessBlock(pfrom, pblock, /*force_processing=*/true, /*min_pow_checked=*/true,
-                     std::move(pending_matmul_slot));
+                     std::move(pending_matmul_slot), /*post_process=*/nullptr,
+                     matmul_admission);
     }
     return;
 }
@@ -6505,10 +6717,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // If we got here, we were able to optimistically reconstruct a
             // block that is in flight from some other peer.
             std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
+            MatMulBlockAdmission matmul_admission;
             if (!AdmitMatMulBlockVerification(
-                    pfrom, *peer, pblock->GetHash(), requires_matmul_phase2,
+                    pfrom, *pblock,
+                    /*force_processing=*/true, /*min_pow_checked=*/true,
+                    requires_matmul_phase2,
                     is_ibd, matmul_reference_height,
-                    /*source=*/"cmpctblock", pending_matmul_slot)) {
+                    /*source=*/"cmpctblock", pending_matmul_slot, matmul_admission)) {
                 return;
             }
             {
@@ -6541,7 +6756,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                                  // can't be used to interfere with block relay.
                                  RemoveBlockRequest(hash, std::nullopt);
                              }
-                         });
+                         },
+                         matmul_admission);
         }
         return;
     }
@@ -6949,6 +7165,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         int32_t budget_reference_height{std::numeric_limits<int32_t>::max()};
         const Consensus::Params& consensus_params = m_chainparams.GetConsensus();
         std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
+        MatMulBlockAdmission matmul_admission;
         {
             LOCK(cs_main);
             // Always process the block if we requested it, since we may
@@ -6993,15 +7210,18 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         if (!AdmitMatMulBlockVerification(
-                pfrom, *peer, hash, requires_matmul_phase2,
+                pfrom, *pblock, forceProcessing, min_pow_checked,
+                requires_matmul_phase2,
                 is_ibd, budget_reference_height,
-                /*source=*/"block", pending_matmul_slot)) {
+                /*source=*/"block", pending_matmul_slot, matmul_admission)) {
             return;
         }
 
         // WP-7: hand the reserved verification slot (if any) to the dispatcher
         // so an async recompute keeps it held through re-entry.
-        ProcessBlock(pfrom, pblock, forceProcessing, min_pow_checked, std::move(pending_matmul_slot));
+        ProcessBlock(pfrom, pblock, forceProcessing, min_pow_checked,
+                     std::move(pending_matmul_slot), /*post_process=*/nullptr,
+                     matmul_admission);
         return;
     }
 

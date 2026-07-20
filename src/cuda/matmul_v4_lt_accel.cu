@@ -53,16 +53,15 @@
  //   has no direct s32xs8 recipe. When IMMA declines, scalar tiled DeviceGemm*
  //   + CUDA-graph replay serve the same buffers — never labeled IMMA.
  //   Consensus-seeded Q* calls also generate W via the exact counter-mode SHA
- //   XOF on device and hash bounded chunks of Chat in parallel; only 32-byte
- //   digests cross to the host.
+ //   chunks of Chat in parallel; only digest/status records cross to the host.
  //
  // Fail-closed fallback:
  //   host ExactGemm* / WindowSketchMinerLT (bit-exact MX scale-partitioned
  //   B̂·V on CPU). That host path is the safety net when the device declines.
  //
  // Availability requires a one-time bit-identity self-test of the GEMM kernels
- // AND a one-nonce device-resident digest vs ComputeDigestBMX4CLT, plus MX
- // projection vs ComputeProjectedRightMxBlockScaleLT on n multiple of 32.
+ // AND a two-header device-resident digest differential, plus multi-shape MX
+ // projection checks vs ComputeProjectedRightMxBlockScaleLT.
 // ===========================================================================
 
 namespace matmul_v4::cuda {
@@ -1613,11 +1612,14 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
 
 [[nodiscard]] bool MineDeviceResident(const std::vector<CBlockHeader>& headers,
                                       uint32_t n, uint32_t m,
-                                      std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
+                                      std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+                                      size_t max_chat_chunk_slots =
+                                          std::numeric_limits<size_t>::max(),
+                                      size_t* chunks_out = nullptr)
 {
-    // Bound every allocation before EnsureBatchCapacity. Consensus Q* is at
-    // most 512, so a larger full-header vector is malformed for this ABI and
-    // must fail closed rather than growing device/host staging buffers.
+    if (chunks_out != nullptr) *chunks_out = 0;
+    // Bound every allocation before EnsureBatchCapacity. A vector larger than
+    // consensus Q* is malformed for this ABI and must fail closed.
     if (headers.empty() || headers.size() > kMaxConsensusBatch) return false;
     auto& pool = Pool();
     std::lock_guard<std::mutex> lock(pool.mu);
@@ -1649,8 +1651,11 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
 
     const size_t chat_words = static_cast<size_t>(m) * m;
     const size_t chat_bytes = chat_words * sizeof(uint64_t);
-    for (size_t base = 0; base < headers.size(); base += pool.chat_batch_slots) {
-        const size_t chunk = std::min(pool.chat_batch_slots, headers.size() - base);
+    const size_t chat_chunk_slots = std::min(pool.chat_batch_slots, max_chat_chunk_slots);
+    if (chat_chunk_slots == 0) return drain_and_fail();
+    size_t completed_chunks = 0;
+    for (size_t base = 0; base < headers.size(); base += chat_chunk_slots) {
+        const size_t chunk = std::min(chat_chunk_slots, headers.size() - base);
         for (size_t slot = 0; slot < chunk; ++slot) {
             const size_t i = base + slot;
             if (!pool.EnqueueOneHeader(headers[i], pool.dBatchStatus + i) ||
@@ -1664,6 +1669,7 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
                 pool.dBatchDigests + base * kDigestBytes)) {
             return drain_and_fail();
         }
+        ++completed_chunks;
     }
 
     std::vector<std::array<unsigned char, kDigestBytes>> digest_bytes(headers.size());
@@ -1691,6 +1697,7 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     }
     g_lt_last_mx_prov = pool.mx_prov;
     g_lt_last_mx_prov.exact_mx_scale_partitioned = pool.used_exact_mx_this_batch;
+    if (chunks_out != nullptr) *chunks_out = completed_chunks;
     return true;
 }
 
@@ -1803,7 +1810,8 @@ bool ComputeDigestsOnlyLTCuda(
     // Prefer the persistent device-resident MatExpand→project→combine loop
     // over the complete consensus-seeded candidate vector. The resident path
     // does not materialize Q*m^2 Chat storage: each Chat is hashed before its
-    // working buffer is reused, and all 32-byte digests cross at one boundary.
+    // working buffer is reused, and all digest/status records cross at the
+    // completion boundary.
     // Host ExactGemm / WindowSketchMinerLT is fail-closed fallback only.
     if (IsMatMulLTCudaAvailable()) {
         if (MineDeviceResident(headers, n, m, out)) {
@@ -1822,6 +1830,111 @@ bool ComputeDigestsOnlyLTCuda(
     }
 
     return MineHostExactFallback(headers, n, /*try_device_gemms=*/false, out);
+}
+
+bool RunMatMulLTCudaExtendedSelfTest(std::string& error)
+{
+    error.clear();
+    if (!SelfTestGemmKernelsOnce()) {
+        error = "baseline CUDA LT self-test declined";
+        return false;
+    }
+
+    auto make_header = [](uint32_t n, uint64_t nonce, unsigned char salt) {
+        CBlockHeader header;
+        header.nVersion = 0x20000004;
+        header.nTime = 1'770'000'123;
+        header.nBits = 0x207fffff;
+        header.nNonce64 = nonce;
+        header.nNonce = static_cast<uint32_t>(nonce);
+        header.matmul_dim = static_cast<uint16_t>(n);
+        for (size_t i = 0; i < uint256::size(); ++i) {
+            // Template fields remain identical across a batch. The two seeds
+            // deliberately vary with the nonce to exercise the full-header
+            // device W/projector path instead of the legacy template+nonce ABI.
+            header.hashPrevBlock.data()[i] = static_cast<unsigned char>(0x51U + (i & 3U));
+            header.hashMerkleRoot.data()[i] = static_cast<unsigned char>(0xa3U - (i & 3U));
+            header.seed_a.data()[i] = static_cast<unsigned char>(salt + (i & 7U));
+            header.seed_b.data()[i] = static_cast<unsigned char>(salt + 0x31U + (i & 7U));
+        }
+        return header;
+    };
+
+    auto compare_resident = [&](const std::vector<CBlockHeader>& headers,
+                                uint32_t n, size_t forced_chat_slots,
+                                size_t minimum_chunks, const char* label) {
+        uint32_t m = 0;
+        if (!matmul::v4::lt::ValidateDimsBMX4CLT(n, m)) {
+            error = std::string{label} + ": invalid dimensions";
+            return false;
+        }
+
+        std::vector<uint256> cpu_digests(headers.size());
+        for (size_t i = 0; i < headers.size(); ++i) {
+            std::vector<unsigned char> cpu_payload;
+            if (!matmul::v4::lt::ComputeDigestBMX4CLT(
+                    headers[i], n, cpu_digests[i], cpu_payload)) {
+                error = std::string{label} + ": CPU reference declined";
+                return false;
+            }
+        }
+
+        std::vector<matmul::v4::lt::DigestOnlyResultLT> device_results;
+        size_t chunks = 0;
+        if (!MineDeviceResident(headers, n, m, device_results,
+                                forced_chat_slots, &chunks)) {
+            error = std::string{label} + ": resident CUDA path declined";
+            return false;
+        }
+        if (chunks < minimum_chunks) {
+            error = std::string{label} + ": bounded Chat staging did not roll over";
+            return false;
+        }
+        if (device_results.size() != cpu_digests.size()) {
+            error = std::string{label} + ": result count mismatch";
+            return false;
+        }
+        for (size_t i = 0; i < device_results.size(); ++i) {
+            if (device_results[i].backend_status !=
+                    matmul::v4::bmx4::DigestOnlyBackendStatus::Ok ||
+                device_results[i].digest != cpu_digests[i]) {
+                error = std::string{label} + ": CPU/CUDA digest mismatch at candidate " +
+                    std::to_string(i);
+                return false;
+            }
+        }
+        return true;
+    };
+
+    // Keep the production differential deliberately small. Two n=4096 CPU
+    // references are already expensive enough that this check must remain an
+    // explicit release/silicon qualification step, never a startup gate.
+    constexpr uint32_t kProductionN = 4096;
+    const std::vector<CBlockHeader> production_headers{
+        make_header(kProductionN, 0x409600000001ULL, 0x19),
+        make_header(kProductionN, 0x409600000002ULL, 0x2b)};
+    if (!compare_resident(production_headers, kProductionN,
+                          std::numeric_limits<size_t>::max(), 1,
+                          "production n=4096 differential")) {
+        return false;
+    }
+
+    // Independently force three complete nonce-bound headers through a two-Chat
+    // staging window. This deterministically crosses the chunk rollover even on
+    // devices with enough memory to stage the whole small test batch at once.
+    constexpr uint32_t kRolloverN = 64;
+    std::vector<CBlockHeader> rollover_headers;
+    for (size_t i = 0; i < 3; ++i) {
+        rollover_headers.push_back(make_header(
+            kRolloverN, 0x6400000000ULL + i, static_cast<unsigned char>(0x40U + i * 9U)));
+    }
+    if (!compare_resident(rollover_headers, kRolloverN,
+                          /*forced_chat_slots=*/2, /*minimum_chunks=*/2,
+                          "forced multi-Chat rollover")) {
+        return false;
+    }
+
+    return true;
 }
 
 bool LtLastS8S8UsedImma()

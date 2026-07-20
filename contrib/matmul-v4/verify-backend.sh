@@ -166,7 +166,9 @@ if [ "$PROFILE" = "bmx4c" ]; then
   # native tensor path executed -- NEVER on a CPU-only / emulated run (which now
   # exits non-zero and prints NOT-CERTIFIED). Without this marker a green exit
   # code from a CPU harness self-test can never be mistaken for a device PASS.
-  MARKER="$(echo "$OUT" | grep -oE "DEVICE_BMX4C_MT24_PASS:${BACKEND}:[^[:space:]]*" | head -1)"
+  # A missing marker is an expected, explicitly diagnosed FAIL below. Keep the
+  # negative grep from tripping `set -euo pipefail` before that branch runs.
+  MARKER="$(printf '%s\n' "$OUT" | grep -oE "DEVICE_BMX4C_MT24_PASS:${BACKEND}:[^[:space:]]*" | head -1 || true)"
 
   if [ "$CODE" -eq 0 ] && [ -n "$MARKER" ]; then
     echo "RESULT: PASS ($BACKEND) -- BMX4-C bit-exact vs the CPU reference AND M-t24 PASS: the"
@@ -232,7 +234,9 @@ fi
 # skip / unsupported / ALU-fallback / CPU-fallback / compile-failure -- so its
 # presence is positive proof the SELECTED silicon (not a CPU unit test) covered
 # the accumulator-width regime. A bare high_magnitude_* NAME is NOT accepted.
-MARKER="$(echo "$OUT" | grep -oE "DEVICE_HIGH_MAGNITUDE_PASS:${BACKEND}:[^[:space:]]+" | head -1)"
+# As above, absence is evidence failure rather than an unexpected shell error;
+# let the explicit diagnostic and exit code below own that outcome.
+MARKER="$(printf '%s\n' "$OUT" | grep -oE "DEVICE_HIGH_MAGNITUDE_PASS:${BACKEND}:[^[:space:]]+" | head -1 || true)"
 if [ -z "$MARKER" ]; then
   echo "RESULT: FAIL ($BACKEND) -- no device high-magnitude marker"
   echo "(DEVICE_HIGH_MAGNITUDE_PASS:${BACKEND}:<device-id>) was emitted: the SELECTED device did"

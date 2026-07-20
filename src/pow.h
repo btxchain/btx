@@ -345,6 +345,11 @@ private:
 void CacheMatMulEncDrVerdict(const uint256& block_hash, bool valid);
 /** Look up a memoized ENC-DR verdict for `block_hash` (nullopt if absent). */
 std::optional<bool> LookupMatMulEncDrVerdict(const uint256& block_hash);
+/** Atomically look up and pin a cached/pinned verdict (nullopt if absent). */
+std::optional<bool> PinCachedMatMulEncDrVerdict(const uint256& block_hash);
+/** Pin a verdict already established by an exact recomputation. */
+void PinMatMulEncDrVerdict(const uint256& block_hash, bool valid);
+void UnpinMatMulEncDrVerdict(const uint256& block_hash);
 
 /** Miner handoff for the ENC-DR sketch cache (tension-resolution §4.3): move a
  *  freshly-solved block's in-body sketch (matrix_c_data, word-packed) into the
@@ -404,11 +409,10 @@ uint32_t CountMatMulPhase2Checks(
     const Consensus::Params& params,
     bool phase2_enabled,
     bool is_ibd);
-/** True when consensus will run ANY expensive MatMul verification at this height: either the legacy
- *  phase2/Freivalds path or the post-activation product-committed digest path. Mirrors the disjunction
- *  in ContextualCheckBlock (should_run_phase2 || IsMatMulProductDigestActive). The P2P expensive-
- *  verification budget must be charged for all of these — counting only phase2 (CountMatMulPhase2Checks)
- *  lets post-product-digest blocks bypass the per-peer/global DoS budget. */
+/** True when consensus will run ANY expensive MatMul verification at this height: the mandatory v4
+ *  cascade, the legacy phase2/Freivalds path, or the product-committed digest path. The P2P expensive-
+ *  verification budget must mirror ContextualCheckBlock even when legacy phase2/economic controls are
+ *  disabled; counting only phase2 lets mandatory v4 work bypass the per-peer/global DoS budget. */
 bool ShouldRunMatMulExpensiveVerification(
     int32_t block_height,
     int32_t best_known_height,

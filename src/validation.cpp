@@ -10234,9 +10234,10 @@ bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* p
 }
 
 std::optional<ChainstateManager::MatMulEncDrClassifyResult>
-ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block) const
+ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block, bool* verdict_pinned) const
 {
     AssertLockHeld(::cs_main);
+    if (verdict_pinned != nullptr) *verdict_pinned = false;
     const Consensus::Params& params = GetConsensus();
     if (!params.fMatMulPOW) return std::nullopt;
     const CBlockIndex* prev = m_blockman.LookupBlockIndex(block.hashPrevBlock);
@@ -10270,8 +10271,84 @@ ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block) const
     }
     // A verdict for this exact block is already memoized: the seam will reuse it
     // without recomputing, so don't occupy a worker slot re-deriving the same answer.
-    if (LookupMatMulEncDrVerdict(block.GetHash()).has_value()) return std::nullopt;
+    if (verdict_pinned != nullptr) {
+        if (PinCachedMatMulEncDrVerdict(block.GetHash()).has_value()) {
+            *verdict_pinned = true;
+            return std::nullopt;
+        }
+    } else if (LookupMatMulEncDrVerdict(block.GetHash()).has_value()) {
+        return std::nullopt;
+    }
     return MatMulEncDrClassifyResult{nHeight, prev->GetMedianTimePast()};
+}
+
+static bool ContextualCheckBlockBodyOnly(const CBlock& block,
+                                         BlockValidationState& state,
+                                         const ChainstateManager& chainman,
+                                         const CBlockIndex* pindexPrev)
+{
+    if (pindexPrev != nullptr && pindexPrev->nHeight == std::numeric_limits<int>::max()) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                             "bad-blk-height-overflow", "block height overflow");
+    }
+    const int nHeight{pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1};
+    const Consensus::Params& consensus_params{chainman.GetConsensus()};
+    const bool enforce_mtp{
+        pindexPrev != nullptr && DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_CSV)};
+    const int64_t lock_time_cutoff{enforce_mtp ? pindexPrev->GetMedianTimePast()
+                                               : block.GetBlockTime()};
+
+    for (const auto& tx : block.vtx) {
+        if (!IsFinalTx(*tx, nHeight, lock_time_cutoff)) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-txns-nonfinal", "non-final transaction");
+        }
+    }
+
+    if (DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_HEIGHTINCB)) {
+        const CScript expect{CScript() << nHeight};
+        if (block.vtx[0]->vin[0].scriptSig.size() < expect.size() ||
+            !std::equal(expect.begin(), expect.end(), block.vtx[0]->vin[0].scriptSig.begin())) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-cb-height", "block height mismatch in coinbase");
+        }
+    }
+
+    if (!CheckWitnessMalleation(
+            block, DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_SEGWIT), state)) {
+        return false;
+    }
+    if (GetBlockWeight(block) > static_cast<int64_t>(consensus_params.nMaxBlockWeight)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight",
+                             "ContextualCheckBlock : weight limit failed");
+    }
+    return true;
+}
+
+bool ChainstateManager::CheckMatMulBlockAdmissionPreconditions(
+    const CBlock& block,
+    BlockValidationState& state,
+    bool force_processing,
+    bool min_pow_checked,
+    bool& reaches_contextual_check)
+{
+    AssertLockHeld(::cs_main);
+    reaches_contextual_check = false;
+    if (!CheckBlock(block, state, GetConsensus())) return false;
+
+    CBlockIndex* pindex{nullptr};
+    if (!AcceptBlockHeader(block, state, &pindex, min_pow_checked)) return false;
+    if (pindex == nullptr || !ContextualCheckBlockBodyOnly(block, state, *this, pindex->pprev)) return false;
+
+    if (pindex->nStatus & BLOCK_HAVE_DATA) return true;
+    if (!force_processing) {
+        if (pindex->nTx != 0) return true;
+        if (ActiveTip() != nullptr && pindex->nChainWork < ActiveTip()->nChainWork) return true;
+        if (pindex->nHeight > ActiveHeight() + int(MIN_BLOCKS_TO_KEEP)) return true;
+        if (pindex->nChainWork < MinimumChainWork()) return true;
+    }
+    reaches_contextual_check = true;
+    return true;
 }
 
 /** NOTE: This function is not currently invoked by ConnectBlock(), so we
@@ -10544,57 +10621,7 @@ static bool ContextualCheckBlock(const CBlock& block,
         }
     }
 
-    // Enforce BIP113 (Median Time Past).
-    bool enforce_locktime_median_time_past{false};
-    if (DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_CSV)) {
-        assert(pindexPrev != nullptr);
-        enforce_locktime_median_time_past = true;
-    }
-
-    const int64_t nLockTimeCutoff{enforce_locktime_median_time_past ?
-                                      pindexPrev->GetMedianTimePast() :
-                                      block.GetBlockTime()};
-
-    // Check that all transactions are finalized
-    for (const auto& tx : block.vtx) {
-        if (!IsFinalTx(*tx, nHeight, nLockTimeCutoff)) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-nonfinal", "non-final transaction");
-        }
-    }
-
-    // Enforce rule that the coinbase starts with serialized block height
-    if (DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_HEIGHTINCB))
-    {
-        CScript expect = CScript() << nHeight;
-        if (block.vtx[0]->vin[0].scriptSig.size() < expect.size() ||
-            !std::equal(expect.begin(), expect.end(), block.vtx[0]->vin[0].scriptSig.begin())) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-height", "block height mismatch in coinbase");
-        }
-    }
-
-    // Validation for witness commitments.
-    // * We compute the witness hash (which is the hash including witnesses) of all the block's transactions, except the
-    //   coinbase (where 0x0000....0000 is used instead).
-    // * The coinbase scriptWitness is a stack of a single 32-byte vector, containing a witness reserved value (unconstrained).
-    // * We build a merkle tree with all those witness hashes as leaves (similar to the hashMerkleRoot in the block header).
-    // * There must be at least one output whose scriptPubKey is a single 36-byte push, the first 4 bytes of which are
-    //   {0xaa, 0x21, 0xa9, 0xed}, and the following 32 bytes are SHA256^2(witness root, witness reserved value). In case there are
-    //   multiple, the last one is used.
-    if (!CheckWitnessMalleation(block, DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_SEGWIT), state)) {
-        return false;
-    }
-
-    // After the coinbase witness reserved value and commitment are verified,
-    // we can check if the block weight passes (before we've checked the
-    // coinbase witness, it would be possible for the weight to be too
-    // large by filling up the coinbase witness, which doesn't change
-    // the block hash, so we couldn't mark the block as permanently
-    // failed).
-    if (GetBlockWeight(block) > static_cast<int64_t>(consensusParams.nMaxBlockWeight)) {
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
-    }
-
-    return true;
+    return ContextualCheckBlockBodyOnly(block, state, chainman, pindexPrev);
 }
 
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)
