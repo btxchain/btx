@@ -1,252 +1,162 @@
-# ENC_RC Section-2 — Succinct proof soundness note (2026-07-20)
+# ENC_RC Section-2 — Succinct proof soundness note (AUDIT-READY, M6/M8 + Fable)
 
-*Status: **aspirational formal bound** for the Fp2 + REAL FRI (v2) tip; NOT an
-external audit claim. `nMatMulRCHeight = INT32_MAX`. Reality Guardrail remains
-in force. **M2:** ALL-PHASE real-episode arithmetization (no shrink-to-toy);
-consensus-dim prove may soft-over_budget on CPU (M4 shipping → ExactReplay).*
+*Status: formal derivation for shipped parameters; **NOT** an external audit sign-off.
+`nMatMulRCHeight = INT32_MAX`. Reality Guardrail rejects “production-complete.”
+Arbiter OFF; ExactReplay is consensus.*
 
-Companion code: `matmul_v4_rc_gkr_field_ext.h` (Fp2), `matmul_v4_rc_fri.*`
-(REAL FRI: LDE + multi-layer fold openings), `matmul_v4_rc_gkr.*`
-(ALL-PHASE real-episode arithmetization + round_seeds + shadow wiring).
+Companions: `matmul_v4_rc_fri.h` (M6/Fable params), `matmul_v4_rc_gkr.*` (ALL-PHASE),
+`doc/btx-matmul-v4.5-rc-arithmetization-completeness-2026-07-20.md` (M7),
+`doc/btx-matmul-v4.5-rc-succinct-proof-pcs-alternative-2026-07-20.md` (M10),
+`doc/btx-matmul-v4.5-rc-fri-proximity-gap-m11-2026-07-20.md` (M11).
+
+**Parameter oracle:** an independent Fable verifiable-IOP reference (scratchpad only;
+NOT merged) cross-checked unique-decoding query counts. Shipped numbers below
+match that oracle’s k=40 / Fp2 / blowup-16 tier.
 
 ---
 
 ## 1. Why single Goldilocks is insufficient
 
-Goldilocks prime \(p = 2^{64}-2^{32}+1\) gives \(|\mathbb{F}| \approx 2^{64}\).
-A sumcheck / FRI challenge drawn in \(\mathbb{F}\) contributes soundness error
-\(\approx \deg / |\mathbb{F}|\) per round (ROM / Schwartz–Zippel style).
+\(|\mathbb{F}_p|\approx 2^{64}\) cannot absorb union-bound + PoW grinding for a
+net \(\le 2^{-64}\) target. All FS challenges live in
+\(\mathbb{F}_{p^2}=\mathbb{F}_p[x]/(x^2-7)\) (\(|\mathbb{F}_{p^2}|\approx 2^{128}\)).
 
-After \(R = O(\log N)\) rounds and a union bound over \(C\) claims (GEMM layers,
-LogUp, FRI folds/queries), the total error is on the order of
-
-\[
-\varepsilon_{\mathrm{base}} \;\lesssim\; \frac{R\cdot C\cdot D}{|\mathbb{F}|}
-\;\approx\; 2^{-64}\cdot \mathrm{poly}(\log N).
-\]
-
-PoW grinding lets an adversary try \(G\) block hashes (nonce space) against the
-Fiat–Shamir transcript bound to the winning digest. Subtracting \(\log_2 G\)
-bits from the computational bound leaves **no margin** for a \(\le 2^{-64}\)
-**after-grinding** target when \(|\mathbb{F}|\approx 2^{64}\).
-
-**Conclusion:** all Section-2 Fiat–Shamir challenges MUST live in a degree-2
-(or higher) Goldilocks extension. This tip uses
-
-\[
-\mathbb{F}_{p^2} = \mathbb{F}_p[x]/(x^2-7), \qquad |\mathbb{F}_{p^2}| \approx 2^{128}.
-\]
+**Fp3 lever (unbuilt):** for grinding \(g\ge 64\), the FRI fold-collision term
+\(2N/|E|\) forces a larger extension. Fable: Fp3 (\(v^3-2\), \(|E|\approx 2^{192}\))
+for \(g=64\) (Q=142) / \(g=80\) (Q=159). **Ship decision:** stay on **g=40 / Fp2**;
+do **not** build Fp3 speculatively.
 
 ---
 
-## 2. Target bound (aspirational) — sumcheck / FS algebra
+## 2. M6 — FRI parameter reconciliation (Fable targets)
 
-Let:
+### 2.1 Bugs removed
 
-| Symbol | Meaning | Tip default |
-|---|---|---|
-| \(D\) | max univariate degree in sumcheck/FRI fold | 2 |
-| \(R\) | total challenge rounds (sumcheck + FRI folds) | \(O(\log N)\) |
-| \(C\) | number of independent claims (layers + LogUp + FRI) | \(O(\#\mathrm{layers})\) |
-| \(G\) | PoW grinding budget (adversarial hash tries) | \(\le 2^{64}\) (conservative); FRI accounting uses \(2^{32}\) |
+Prior tip claimed \(\varepsilon\le\rho^{40}=(1/8)^{40}\) and/or “~80 queries.”
+Both are wrong under unique decoding. Conjectured \(\rho^Q\) is gated
+`BTX_RC_FRI_CONJECTURED_BOUND` (default **OFF**, never consensus).
 
-**Base soundness (Fp2, before grinding):**
+### 2.2 Fable composed-error table (authoritative for shipping)
 
-\[
-\varepsilon_{\mathrm{FS}} \;\le\; \frac{R\cdot C\cdot D}{|\mathbb{F}_{p^2}|}
-\;\le\; \frac{R\cdot C\cdot D}{2^{128}}.
-\]
+Target: \(\log_2(T\cdot\varepsilon)\le -64\), \(T=2^g\),
+\(\alpha=(1+\rho)/2\) (proven unique decoding), \(\rho=1/\mathrm{blowup}\),
+\(Q=\lceil(65+g)/(-\log_2\alpha)\rceil\).
 
-For \(R\cdot C\cdot D \le 2^{40}\) (generous for toy→medium traces),
-\(\varepsilon_{\mathrm{FS}} \le 2^{-88}\).
+| Grinding \(g\) | Field | Blowup | Required \(Q\) | \(\log_2(T\cdot\varepsilon)\) | Status |
+|---:|---|---:|---:|---:|---|
+| **40** | **Fp2** | **16** | **116** | **≈ −65.85** (Fable ≈ −65.26) | **SHIPPED** |
+| 64 | Fp3 | 16 | 142 | ~−65 | future lever (needs Fp3) |
+| 80 | Fp3 | 16 | 159 | ~−65 | future lever (needs Fp3) |
 
-**After PoW grinding** (proof FS-bound to `pow_bind = H(digest)` so grinding
-the proof requires redoing PoW):
+### 2.3 Shipped constants (`matmul_v4_rc_fri.h`)
 
-\[
-\varepsilon_{\mathrm{net}} \;\le\; G\cdot \varepsilon_{\mathrm{FS}}
-\;\le\; 2^{64}\cdot 2^{-88} = 2^{-24}
-\]
-
-under the conservative \(G=2^{64}\). Tightening \(G\) to a realistic block-interval
-hash budget (e.g. \(2^{40}\)–\(2^{48}\) for a single winner) recovers
-
-\[
-\varepsilon_{\mathrm{net}} \;\le\; 2^{-40}\ \text{to}\ 2^{-48},
-\]
-
-and with production FRI query counts the **Stage-I requirement**
-\(\varepsilon_{\mathrm{net}} \le 2^{-64}\) is the design target.
-
----
-
-## 3. REAL FRI query accounting (v2)
-
-Code constants (`matmul_v4_rc_fri.h`):
-
-| Constant | Value | Role |
-|---|---|---|
-| `kRCFriBlowup` | 8 | LDE expansion; rate \(\rho = 1/8\) |
-| `kRCFriNumQueries` | 40 | Query count \(k\) |
-| `kRCFriGrindingBits` | 32 | Assumed PoW grinding \(g\) (\(G\le 2^{g}\)) |
-
-### 3.1 What FRI does on this tip
-
-1. **LDE:** input = degree-\(<n\) coefficients (\(n=\mathrm{next\_pow2}(\mathrm{len})\));
-   zero-pad and NTT-evaluate on the size-\(N = 8n\) Goldilocks subgroup
-   (embedded in \(\mathbb{F}_{p^2}\)). Merkle-commit LDE evals (SHA256d).
-2. **Fold:** commit-then-challenge. For \(\beta\in\mathbb{F}_{p^2}\),
-   \(\mathrm{next}[i] = \mathrm{even}[i] + \beta\cdot\mathrm{odd}[i]\) from pair
-   \((2i,2i+1)\). Commit each folded layer.
-3. **Queries:** after all layer roots are absorbed, derive \(k\) indices from FS.
-   For each query, open Merkle paths for the even/odd pair at **every** fold
-   layer, check the fold equation, and check the final constant.
-4. **Grinding bind:** `fs_seed` MUST be SHA256d-bound to the winning digest /
-   `pow_bind` (**caller responsibility in GKR**). FRI also absorbs optional
-   `pow_grind_nonce` and all layer roots (commit-then-challenge).
-
-Proof size is \(O(k\cdot\log N\cdot 32)\) openings — the LDE witness is **not**
-shipped.
-
-### 3.2 Unique-decoding proximity-gap bound (documented claim)
-
-**Assumptions (honest):**
-
-- Reed–Solomon proximity at the **unique-decoding** radius (distance
-  \(> (1-\rho)/2\) from a degree-\(<n\) codeword is rejected whp).
-- Commit-then-challenge Fiat–Shamir in the **random-oracle model**.
-- `fs_seed` already includes the PoW bind; adversary gets at most
-  \(G\le 2^{g}\) grinding tries at that seed.
-
-Under those assumptions a standard conservative per-query bound is the rate:
-
-\[
-\varepsilon_{\mathrm{query}} \;\le\; \rho \;=\; \frac{1}{\mathrm{blowup}} \;=\; \frac{1}{8} \;=\; 2^{-3}.
-\]
-
-Union over \(k\) independent queries:
-
-\[
-\varepsilon_{\mathrm{queries}} \;\le\; \rho^{k} \;=\; 2^{-3k}.
-\]
-
-Fold / algebraic FS error is \(\le R\cdot D/|\mathbb{F}_{p^2}| = O(\log N)\cdot 2^{-128}\),
-negligible beside the query term.
-
-**After grinding subtraction:**
-
-\[
-\varepsilon_{\mathrm{net}} \;\le\; 2^{g}\cdot 2^{-3k}.
-\]
-
-Target \(\varepsilon_{\mathrm{net}}\le 2^{-64}\) requires
-
-\[
-k \;\ge\; \left\lceil\frac{g+64}{3}\right\rceil.
-\]
-
-With \(g=32\): \(k\ge 32\). This tip sets **`kRCFriNumQueries = 40`**:
-
-\[
-\varepsilon_{\mathrm{net}} \;\le\; 2^{32}\cdot 2^{-120} \;=\; 2^{-88} \;\le\; 2^{-64}.
-\]
-
-`FriSoundnessBoundBits()` returns \(3k - g = 88\).
-
-### 3.3 List-decoding caveat (not the claimed bound)
-
-Johnson / list-decoding proximity gaps replace the per-query factor by roughly
-\(\sqrt{\rho}=2^{-1.5}\). Then \(2^{32}\cdot 2^{-1.5\cdot 40}=2^{-28}\), which
-**misses** \(2^{-64}\). Hitting \(2^{-64}\) under that weaker accounting needs
-\(k\approx 80\). The tip’s **written claim** uses unique-decoding (§3.2); a
-production audit should either raise \(k\) or cite a tighter FRI proximity
-theorem (e.g. Ben-Sasson–Bentov–Horesh–Riabzev / ethSTARK-style bounds).
-
----
-
-## 4. What is proven vs aspirational on this tip
-
-| Item | Status |
+| Constant | Value |
 |---|---|
-| Fp2 arithmetic + FS challenges in Fp2 | **Code-complete** |
-| REAL FRI: LDE blowup=8, multi-layer fold openings, \(k=40\) | **Code-complete (v2)** |
-| Real-episode ALL-PHASE arithmetization (Q·Kᵀ, S·V, Fwd, Bwd, Wgrad × rounds + Extract LogUp + round_seeds) | **Code-complete scaffold (M2)** |
-| FRI commit/open without shipping every Extract tile | **Code-complete** |
-| Shadow wiring (`BTX_RC_GKR_SHADOW`, never rejects consensus) | **Code-complete** |
-| Arbiter cutover (`BTX_RC_GKR_ARBITER`, default OFF) | **Wired; OFF; does not raise height** |
-| ε=0 `VerifyBoundedExactReplay` consensus arbiter | **Unchanged** |
-| Formal \(\le 2^{-64}\) after grinding (unique-decoding FRI) | **Documented derivation §3.2** — not an external audit |
-| List-decoding FRI at \(\le 2^{-64}\) | **NOT claimed** at \(k=40\) — see §3.3 |
-| Production / HBM silicon rates | **NOT claimed** — Reality Guardrail |
-| Full consensus-dim episode prove within CPU soft budget | **NOT claimed** — soft `over_budget` → ExactReplay (M4 shipping); arithmetization is **not** shrink-to-toy |
+| `kRCFriBlowup` | 16 |
+| `kRCFriGrindingBits` | 40 |
+| `kRCFriNumQueries` | 116 |
+| `FriSoundnessBoundBits()` | 65 (= \(\lfloor Q\log_2(32/17)-40\rfloor\)) |
+
+Test `fri_constants_and_soundness_bits` asserts bits == 65 and
+`FriClaimedBitsMeetTarget()`.
+
+### 2.4 Theorems (proven vs conjectured)
+
+| Citation | Role | Proven / conjectured |
+|---|---|---|
+| Ben-Sasson–Bentov–Horesh–Riabzev, FRI (2018) | Protocol | Protocol |
+| Ben-Sasson–Kopparty–Saraf (2018) | WC→AC proximity | Proven |
+| **BCIKS20** ePrint 2020/654 | Proximity gaps; FRI \(t\approx 2\lambda/\log(1/\rho)\) for \(q\gg n^2\) | Proven (M11 option) |
+| ethSTARK / Plonky “blowup·Q” tables | Engineering | **Conjectured** — not shipped |
+
+### 2.5 Fold / collision algebraic error (Fp2)
+
+Fold-collision style term \(\le 2N/|\mathbb{F}_{p^2}|\). At \(g=40\) with
+\(|E|\approx 2^{128}\) this stays under budget for toy→medium \(N\) (Fable).
+At \(g\ge 64\), Fp3 is required — see §1.
 
 ---
 
-## 5. Shrink fallback (honest)
+## 3. DEEP / OOD — OPEN exact-evaluation binding
 
-If `proof_bytes > kRCGkrProofBytesBudget` (256 KiB soft) or verify/prove exceeds
-soft CPU budgets, the scaffold sets `over_budget` and recommends
-`VerifyBoundedExactReplay`. **M2:** this is shrink-to-**replayable** for shipping
-— the prover still arithmetizes the **actual** episode params (ALL-PHASE); it does
-**not** replace the episode with a toy-slice proof. Report honestly; do not invent
-silicon numbers. With \(k=40\) multi-layer openings, FRI proofs for medium traces may
-exceed the soft 256 KiB budget; that triggers the ExactReplay recommendation.
+FRI proves a committed word is \(\delta\)-**close** to a low-degree RS codeword.
+It does **not** by itself prove an *exact* polynomial evaluation at a queried
+point. A sound PCS on top of FRI needs **DEEP / out-of-domain (OOD)** sampling
+to bind evaluations.
+
+**Current status:** `matmul_v4_rc_fri.*` does **not** implement OOD/DEEP.
+The construction proves **proximity**. Exact-evaluation binding is an **OPEN**
+item before external audit sign-off. This does **not** block shadow-ON /
+arbiter-OFF (ExactReplay remains consensus). It **does** block treating the
+FRI wrapper as a complete evaluation PCS for arbiter cutover.
 
 ---
 
-## 7. Composed soundness (M3) — GKR + LogUp + FRI end-to-end
-
-All Fiat–Shamir challenges in `matmul_v4_rc_gkr.cpp` / FRI are drawn via
-`ChallengeFp2` / `FromChallengeBytes2` (Fp2). The composed error is:
+## 4. Composed soundness (M8)
 
 \[
 \varepsilon_{\mathrm{total}}
 \;\le\;
 \varepsilon_{\mathrm{sumcheck}}
-\;+\;
++
 \varepsilon_{\mathrm{logup}}
-\;+\;
++
 \varepsilon_{\mathrm{FRI,net}}
++
+\varepsilon_{\mathrm{fold}}.
 \]
 
-| Term | Bound used on this tip | Notes |
+| Term | Bound on this tip | Source |
 |---|---|---|
-| \(\varepsilon_{\mathrm{sumcheck}}\) | \(R_{\mathrm{sc}}\cdot C_{\mathrm{layers}}\cdot D / 2^{128}\) | Deg≤2 product sumcheck; Fp2 |
-| \(\varepsilon_{\mathrm{logup}}\) | \(C_{\mathrm{keys}} / 2^{128}\) | Collision / bad multiset in Fp2 |
-| \(\varepsilon_{\mathrm{FRI,net}}\) | \(2^{g-3k}=2^{-88}\) | §3.2 unique-decoding; \(k=40\), \(g=32\) |
+| \(\varepsilon_{\mathrm{sumcheck}}\) | \(R_{\mathrm{sc}} C_{\mathrm{layers}} D / 2^{128}\) | Deg≤2 product; Fable agrees \(n\cdot\deg/|E|\) |
+| \(\varepsilon_{\mathrm{logup}}\) | \((m+K+5n)/2^{128}\) style | Haböck ePrint 2022/1530; Fable agrees |
+| \(\varepsilon_{\mathrm{FRI,net}}\) | \(2^{40}\cdot(17/32)^{116}\le 2^{-65}\) | §2.2 unique decoding |
+| \(\varepsilon_{\mathrm{fold}}\) | \(O(N)\cdot 2^{-128}\) at g=40/Fp2 | §2.5 |
 
-With toy/medium layer counts \(R_{\mathrm{sc}}C_{\mathrm{layers}}D \ll 2^{40}\), the
-algebraic terms are \(\le 2^{-88}\). Dominating term: FRI queries →
-\(\varepsilon_{\mathrm{total}} \le 2^{-87}\) under §3.2 assumptions **before**
-raising \(G\) to a full \(2^{64}\) PoW grind. Using the FRI-local grind \(g=32\)
-(block-interval class) keeps \(\varepsilon_{\mathrm{total}} \le 2^{-64}\).
+**Dominant term:** FRI queries. Net \(\varepsilon_{\mathrm{total}}\le 2^{-64}\) under
+§2 assumptions **for proximity**. Exact-eval PCS completeness awaits §3.
 
-**Gate M3 status:** derivation written; FRI forge tests pass empirically;
-full list-decoding audit and external review remain OPEN. Do not claim
-"production-complete" until audited.
+**Fiat–Shamir / ROM:** commit layer roots → challenge; `pow_bind = H(digest)`
+absorbed before FRI seed so grinding the proof requires redoing PoW.
 
 ---
 
-## 8. PCS alternative (owner decision — flag only)
+## 5. EXTERNAL AUDITOR CHECKLIST (M8)
 
-Hand-rolled FRI (this tip) vs integrating a **vetted transparent STARK /
-Goldilocks-FRI stack** (e.g. Plonky3-style or Winterfell-style core) as the PCS:
-
-| | Hand-rolled (current) | Vetted STARK core |
-|---|---|---|
-| Consensus dependency | None beyond SHA256d | External crate / subtree |
-| Audited proximity theorems | Owner must audit §3 | Inherit upstream audits (still review binding) |
-| Engineering cost | High (this packet) | Integration + transcript binding to `pow_bind` |
-| Proof size / verify | Tunable via \(k\), blowup | Typically battle-tested defaults |
-
-**Decision left to the owner.** This tip does not pull an external STARK
-dependency; the M1 FRI path remains the in-tree PCS.
+1. [ ] Shipped point is **g=40 / Fp2 / blowup=16 / Q=116** unique decoding
+      (Fable table), not conjectured \(\rho^Q\).
+2. [ ] `kRCFriNumQueries`, `FriSoundnessBoundBits()`, `kRCFriSoundnessStatement`
+      agree (CI test).
+3. [ ] `BTX_RC_FRI_CONJECTURED_BOUND` is OFF in consensus builds.
+4. [ ] Commit-then-challenge ordering; `fs_seed` / `pow_bind` binding.
+5. [ ] Batching: two FRI instances (trace + lookup) — union bound accounted.
+6. [ ] **DEEP/OOD:** confirm proximity-only vs exact-eval; do not sign off PCS
+      completeness without OOD (or equivalent).
+7. [ ] Fp3: confirm “not required at g=40”; do not require Fp3 for this tier.
+8. [ ] Arithmetization completeness (M7): OPEN gaps G1–G5 block arbiter.
+9. [ ] LogUp binds `(extract_in, extract_out)` (C1).
+10. [ ] Shadow ON / arbiter OFF / ExactReplay consensus until checklist signed.
 
 ---
 
-## 9. Guardrails
+## 6. Arithmetization completeness pointer (M7)
+
+See `doc/btx-matmul-v4.5-rc-arithmetization-completeness-2026-07-20.md`.
+**Decision:** ship k=40/Fp2/Q=116; Fp3 documented as future lever only.
+
+---
+
+## 7. Shrink / shipping (M4/M9)
+
+Soft over_budget → ExactReplay. Enable off-CI cost with
+`BTX_RC_GKR_MEASURE_LADDER=1` / `BTX_RC_GKR_MEASURE_MEDIUM=1`.
+
+---
+
+## 8. Guardrails
 
 - `nMatMulRCHeight = INT32_MAX`
-- REJECT “HBM / production-complete” claims (`kRCGkrRealityGuardrail`)
-- Winner-only prove; losers pay zero prove cost
-- ε=0 ExactReplay remains consensus arbiter; proof is SHADOW until audit + arbiter cutover
+- REJECT HBM / production-complete (`kRCGkrRealityGuardrail`)
+- Winner-only prove; losers pay 0
+- ε=0 ExactReplay remains consensus arbiter
+- Fable IOP reference stays **scratchpad only** — never merge as consensus

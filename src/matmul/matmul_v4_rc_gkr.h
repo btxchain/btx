@@ -60,6 +60,9 @@ inline constexpr const char* kRCGkrSoundnessBoundStatement =
     "Winner-only GKR/sumcheck+FRI SCAFFOLD (COMPUTATIONAL aspirational target): "
     "formal <=2^{-64} AFTER PoW grinding is a Stage-I REQUIREMENT. Challenges "
     "live in Goldilocks Fp2 (|F|~2^128); single Goldilocks is insufficient. "
+    "M6/Fable FRI: unique-decoding Q=116, ρ=1/16, g=40, Fp2 → "
+    "FriSoundnessBoundBits()=65. Fp3 only for g>=64 (unbuilt). "
+    "DEEP/OOD exact-eval binding OPEN. "
     "M2: ALL-PHASE layers + round_seeds bound to sigma/round_roots. "
     "See doc/btx-matmul-v4.5-rc-succinct-proof-soundness-2026-07-20.md and "
     "kRCGkrRealityGuardrail. Merkle q=8 is DoS PREFILTER ONLY. "
@@ -106,7 +109,7 @@ using gkr_field::Fp2;
 /** Soft budgets for the Section-2 scaffold (CPU toy/medium). Not silicon. */
 inline constexpr double kRCGkrMediumProveBudgetS = 2.0;
 inline constexpr double kRCGkrVerifyBudgetS = 0.5;
-inline constexpr size_t kRCGkrProofBytesBudget = 256 * 1024; // 256 KiB soft
+inline constexpr size_t kRCGkrProofBytesBudget = 1024 * 1024; // 1 MiB soft (FRI Q=116, B=16)
 
 /** One sumcheck round over Fp2: g(0), g(1), g(2) (deg-2 product). */
 struct RCGkrSumcheckRound {
@@ -260,8 +263,11 @@ struct RCProdVerifyResult {
 [[nodiscard]] size_t RCGkrExpectedLayerCount(const RCEpisodeParams& p);
 
 /**
- * Succinct verify: sumcheck algebra + FRI openings + LogUp aggregate.
- * Does NOT re-run the episode / ExpandSynthOperands full work.
+ * Succinct verify: sumcheck algebra + FRI openings + LogUp aggregate FS bind.
+ * Does NOT re-run the episode / ExpandSynthOperands / Extract recompute.
+ * M7 completeness checks: layer dims, sumcheck round counts, FRI present.
+ * OPEN gaps (A/B PCS, claim↔trace MLE, Extract table): see
+ * doc/btx-matmul-v4.5-rc-arithmetization-completeness-2026-07-20.md.
  */
 [[nodiscard]] bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing = nullptr);
 

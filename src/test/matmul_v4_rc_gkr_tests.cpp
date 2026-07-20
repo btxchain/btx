@@ -186,11 +186,165 @@ BOOST_AUTO_TEST_CASE(gkr_m2_cheat_wrong_round_seed_rejects)
     BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
 }
 
+// --- M7 adversarial under-constraint suite (honest toy → each cheat rejects) ---
+
+namespace {
+
+rc::RCGkrProveResult ProveHonestToy()
+{
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    return rc::ProveWinnerEpisode(header, params, 0, dig);
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(gkr_m7_a_flip_claim_or_sumcheck_rejects)
+{
+    {
+        auto pr = ProveHonestToy();
+        BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+        BOOST_REQUIRE(!pr.proof.layers.empty());
+        pr.proof.layers[0].claim.c0 ^= 1;
+        BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+    }
+    {
+        auto pr = ProveHonestToy();
+        BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+        BOOST_REQUIRE(!pr.proof.layers[0].sumcheck.empty());
+        pr.proof.layers[0].sumcheck[0].eval0.c0 ^= 1;
+        BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m7_b_drop_layer_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(pr.proof.layers.size() > 1);
+    pr.proof.layers.pop_back();
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m7_c_wrong_round_seed_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(!pr.proof.round_seeds.empty());
+    pr.proof.round_seeds[0].data()[1] ^= 0xa5;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m7_d_wrong_pow_bind_or_digest_rejects)
+{
+    {
+        auto pr = ProveHonestToy();
+        BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+        pr.proof.pow_bind.data()[2] ^= 0xff;
+        BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+    }
+    {
+        auto pr = ProveHonestToy();
+        BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+        pr.proof.claimed_digest.data()[3] ^= 0xff;
+        BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m7_e_corrupt_lookup_logup_sum_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    pr.proof.lookup_logup_sum.c0 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m7_f_mutate_trace_fri_rejects)
+{
+    {
+        auto pr = ProveHonestToy();
+        BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+        pr.proof.trace_fri.final_value.c0 ^= 1;
+        BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+    }
+    {
+        auto pr = ProveHonestToy();
+        BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+        BOOST_REQUIRE(!pr.proof.trace_fri.queries.empty());
+        BOOST_REQUIRE(!pr.proof.trace_fri.queries[0].steps.empty());
+        pr.proof.trace_fri.queries[0].steps[0].even.c1 ^= 1;
+        BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m7_g_lookup_fri_extract_proxy_rejects)
+{
+    // Strongest succinct check: wrong LogUp/Extract keys without updating
+    // lookup_fri openings fail FriVerify. Verifier does NOT recompute Extract
+    // from A,B,Y (OPEN gap G3 — see arithmetization completeness note).
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(!pr.proof.lookup_fri.queries.empty());
+    BOOST_REQUIRE(!pr.proof.lookup_fri.queries[0].steps.empty());
+    pr.proof.lookup_fri.queries[0].steps[0].odd.c0 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m7_wrong_layer_dims_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(!pr.proof.layers.empty());
+    pr.proof.layers[0].m ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m7_truncated_sumcheck_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(!pr.proof.layers[0].sumcheck.empty());
+    pr.proof.layers[0].sumcheck.pop_back();
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
 BOOST_AUTO_TEST_CASE(gkr_m2_medium_optional_skip)
 {
     // MakeMediumRCEpisodeParams uses b_seq=8192 — ALL-PHASE GKR prove is not CI-safe.
+    // Off-CI: BTX_RC_GKR_MEASURE_MEDIUM=1 / BTX_RC_GKR_MEASURE_LADDER=1 via
+    // MeasureWinnerGkrToyMedium / MeasureWinnerGkrCurveCsv.
     BOOST_TEST_MESSAGE(
-        "skip medium ALL-PHASE ProveWinnerEpisode (b_seq=8192; not CI-safe)");
+        "skip medium ALL-PHASE ProveWinnerEpisode (b_seq=8192; not CI-safe; "
+        "enable BTX_RC_GKR_MEASURE_MEDIUM=1 off-CI)");
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m9_over_budget_switches_to_exact_replay)
+{
+    // Soft over_budget → ExactReplay shipping path (arbiter never required).
+    unsetenv("BTX_RC_GKR_ARBITER");
+    setenv("BTX_RC_VERIFY_GKR", "1", 1);
+    setenv("BTX_RC_GKR_SHADOW", "1", 1);
+
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    auto pr = rc::ProveWinnerEpisode(header, params, 0, dig);
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+
+    pr.proof.over_budget = true; // soft-budget flag from prover / MarkBudget
+    std::vector<unsigned char> bytes;
+    BOOST_REQUIRE(rc::SerializeRCGkrProof(pr.proof, bytes) > 0);
+
+    CBlockHeader h = header;
+    h.matmul_digest = dig;
+    const auto dual = rc::VerifyRCWinnerOrExactReplay(h, params, 0, nullptr, &bytes);
+    BOOST_CHECK(dual.ok);
+    BOOST_CHECK(dual.path == rc::RCProdVerifyPath::GkrFallbackExactReplay);
+    BOOST_CHECK(dual.gkr.over_budget || pr.proof.over_budget);
+    BOOST_CHECK(std::string(dual.note).find("ExactReplay") != std::string::npos);
+
+    unsetenv("BTX_RC_VERIFY_GKR");
 }
 
 BOOST_AUTO_TEST_CASE(gkr_malformed_proof_rejects)

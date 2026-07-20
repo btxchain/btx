@@ -1,10 +1,13 @@
 # ENC_RC finish-to-production status (2026-07-20)
 
-*Tip: Succinct-proof production-harden M1–M5 on master code-complete base.
+*Tip: Succinct-proof audit-hardening M6–M11 on M1–M5 base (`0bbd060`+).
 *Public activation: **NO-GO** (`nMatMulRCHeight = INT32_MAX`).*
 *Companion: `doc/btx-matmul-v4.5-enc-rc-final-form-spec-2026-07-20.md`.*
 *Soundness: `doc/btx-matmul-v4.5-rc-succinct-proof-soundness-2026-07-20.md`.*
-*PCS alt (owner flag): `doc/btx-matmul-v4.5-rc-succinct-proof-pcs-alternative-2026-07-20.md`.*
+*Arithmetization: `doc/btx-matmul-v4.5-rc-arithmetization-completeness-2026-07-20.md`.*
+*PCS alt: `doc/btx-matmul-v4.5-rc-succinct-proof-pcs-alternative-2026-07-20.md`.*
+*M9 cost: `doc/btx-matmul-v4.5-rc-succinct-proof-cost-m9-2026-07-20.md`.*
+*M11 FRI gap: `doc/btx-matmul-v4.5-rc-fri-proximity-gap-m11-2026-07-20.md`.*
 
 This note tracks Amendments **1.A / 1.B / 1.C / 1.CORRECT / 1.SCOPE / 1.D / GKR guardrail**
 against Stages §§1–5. It does **not** raise height.
@@ -71,16 +74,20 @@ against Stages §§1–5. It does **not** raise height.
 
 ---
 
-## §2 — Succinct proof production-harden (M1–M5)
+## §2 — Succinct proof production-harden (M1–M11)
 
 | Gate | Status |
 |---|---|
-| **M1 REAL FRI** | **DONE (code)** — LDE blowup=8, multi-layer fold openings, `k=40` queries, grind \(g=32\); forge/sibling/fold rejects; `FriSoundnessBoundBits()=88` (unique-decoding). List-decoding at \(k=40\) **not** claimed |
-| **M2 ALL-PHASE** | **DONE (code)** — every round × QKt/SV/Fwd/Bwd/Wgrad + LogUp + `round_seeds`; **no shrink-to-toy**; proof v4. Medium `b_seq=8192` prove skipped in CI (not safe) |
-| **M3 Fp2 + bound** | **DONE (writeup)** — challenges in Fp2 end-to-end; composed bound in soundness note §7; adversarial FRI+GKR cheat tests green. **External audit OPEN** |
-| **M4 cost curve** | **DONE (instrument)** — `MeasureWinnerGkrToyMedium` / bakeoff JSON; toy measured; medium skipped → shipping path = ExactReplay when over_budget. **No invented silicon rates**. Crossover to HBM needs datacenter box |
+| **M1 REAL FRI** | **DONE (code)** — LDE blowup=16, multi-layer fold openings; forge rejects |
+| **M2 ALL-PHASE** | **DONE (code)** — every round × QKt/SV/Fwd/Bwd/Wgrad + LogUp + `round_seeds`; **no shrink-to-toy**; proof v4 |
+| **M3 Fp2 + bound** | **DONE (writeup)** — challenges in Fp2; composed bound in soundness note. **External audit OPEN** |
+| **M4 / M9 cost** | **DONE (instrument)** — `MeasureWinnerGkrToyMedium` / CSV; CI=toy; off-CI `BTX_RC_GKR_MEASURE_LADDER=1` (b_seq=256) + `BTX_RC_GKR_MEASURE_MEDIUM=1` (b_seq=8192). Soft over_budget → ExactReplay (tested). **No invented silicon rates**. Consensus-dim HBM vs shrink needs datacenter GPU (OUT OF SCOPE) |
 | **M5 shadow** | **Intact** — shadow ON, arbiter OFF, ExactReplay decides |
-| PCS alternative | Flagged: `doc/btx-matmul-v4.5-rc-succinct-proof-pcs-alternative-2026-07-20.md` (Plonky3/Winterfell) — owner decides |
+| **M6 FRI params** | **DONE (Fable)** — unique-decoding **Q=116**, blowup=**16**, g=**40**, Fp2; `FriSoundnessBoundBits()=65`; conjectured ρ^Q gated OFF; Fp3 / DEEP-OOD documented as future/OPEN |
+| **M7 under-constraint** | **DONE (audit+tests)** — wire→constraint; LogUp `(in,out)`; adversarial (a)–(g). **OPEN G1–G5** block arbiter. **Decision:** ship k=40/Fp2; Fp3 not built |
+| **M8 soundness note** | **DONE** — Fable table + composed bound + DEEP/OOD OPEN + EXTERNAL AUDITOR CHECKLIST |
+| **M10 PCS alt** | **DONE (recommend)** — hand-rolled-but-audited FRI; no consensus vendor dep |
+| **M11 proximity gap** | **DONE (option)** — BCIKS20 Q≈53 documented; **not** shipped; Q=116 default |
 
 | Item | Detail |
 |---|---|
@@ -88,7 +95,10 @@ against Stages §§1–5. It does **not** raise height.
 | Consensus | ε=0 ExactReplay; `nMatMulRCHeight=INT32_MAX` |
 | Soft budget | over_budget → ExactReplay recommendation (**shipping**), not toy arithmetization |
 
-**Honest residual:** list-decoding FRI may need \(k\approx 80\); consensus-dim prove cost on CPU likely over soft budget (ExactReplay ships until silicon M4); external crypto audit required before arbiter ON.
+**Honest residual:** M7 G1–G5; DEEP/OOD exact-eval binding OPEN; consensus-dim
+prove cost on CPU likely over soft budget (ExactReplay ships until silicon M4);
+**independent human crypto audit** required before arbiter ON (OUT OF SCOPE).
+Fable IOP reference remains scratchpad-only (never merge as consensus).
 
 ---
 
@@ -123,7 +133,7 @@ Independent of parked §R.7 `kRCGrowthScheduleEnabled=false`.
 |---|---|
 | `matmul_v4_rc_tests` | V1 golden, modes, self-qual fail-closed, P1.2 layouts, Stage F inert, **Ozaki native_* lock** |
 | `matmul_v4_rc_coupled_tests` | Toy/medium, modes, device probe skip, **native_* stay false** |
-| `matmul_v4_rc_gkr_tests` | ALL-PHASE toy prove/verify, M2 cheats (extract/lookup, drop layer, wrong seed), no shrink-from-shape, Fp2/FRI, shadow, Reality Guardrail |
+| `matmul_v4_rc_gkr_tests` | ALL-PHASE toy prove/verify; M2+M7 adversarial rejects (claim/sumcheck, drop layer, round_seed, pow_bind/digest, logup_sum, trace_fri, lookup_fri/Extract proxy); no shrink-from-shape; Fp2/FRI; shadow; Reality Guardrail |
 | `matmul_v4_lt_tests` | `DeriveLtPeakMxFlags` ready/deficit invariants |
 | D7 gate | `contrib/matmul-v4/hip-mfma-compile-gate.sh` (ROCm box) |
 | Gates | `contrib/matmul-v4/rc-golden-gate.py`, `rc-gate.py` (offline GO tally ≠ height raise) |

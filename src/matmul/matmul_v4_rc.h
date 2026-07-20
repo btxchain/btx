@@ -179,6 +179,8 @@ struct RCMerkleProof {
 [[nodiscard]] RCEpisodeParams MakeToyRCEpisodeParams();
 /** Medium dims for self-qual: wgrad contraction exceeds 2^24 (b_seq ≥ 8192). */
 [[nodiscard]] RCEpisodeParams MakeMediumRCEpisodeParams();
+/** M9 cost-ladder rung (b_seq=256) between toy and medium — off-CI prove. */
+[[nodiscard]] RCEpisodeParams MakeCostLadderRCEpisodeParams();
 /** Segmentation exercise: n_ctx = kRCSegLen+32 so Phase-1 spans two segments;
  *  Phase-2 stays tiny (b_seq < kRCSegLen → one D segment). */
 [[nodiscard]] RCEpisodeParams MakeSegTestRCEpisodeParams();

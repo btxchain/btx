@@ -36,14 +36,22 @@ std::vector<rc::Fp2> MakeCoeffs(size_t n)
 
 BOOST_AUTO_TEST_CASE(fri_constants_and_soundness_bits)
 {
-    BOOST_CHECK_EQUAL(rc::kRCFriBlowup, 8u);
-    BOOST_CHECK_EQUAL(rc::kRCFriNumQueries, 40u);
-    BOOST_CHECK_EQUAL(rc::kRCFriGrindingBits, 32u);
+    // M6 / Fable oracle: k=40 grinding, Fp2, blowup=16, Q=116 unique-decoding.
+    BOOST_CHECK_EQUAL(rc::kRCFriBlowup, 16u);
+    BOOST_CHECK_EQUAL(rc::kRCFriNumQueries, 116u);
+    BOOST_CHECK_EQUAL(rc::kRCFriGrindingBits, 40u);
     BOOST_CHECK_EQUAL(rc::kRCFriProofVersion, 2u);
-    // Unique-decoding: 3*k - g = 120 - 32 = 88 ≥ 64.
-    BOOST_CHECK_EQUAL(rc::FriSoundnessBoundBits(), 88);
-    BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("2^{-88}") != std::string::npos);
-    BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("2^{-64}") != std::string::npos);
+    BOOST_CHECK(!rc::kRCFriConjecturedBoundEnabled);
+    BOOST_CHECK(rc::FriClaimedBitsMeetTarget());
+    BOOST_CHECK_EQUAL(rc::FriSoundnessBoundBits(), 65); // floor(116*log2(32/17)-40)
+    BOOST_CHECK_GE(rc::FriSoundnessBoundBits(), rc::kRCFriTargetSoundnessBits);
+    BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("Q=116") != std::string::npos);
+    BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("blowup=16") != std::string::npos);
+    BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("UNIQUE-DECODING") !=
+                std::string::npos);
+    BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("NOT conjectured") !=
+                std::string::npos);
+    BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("DEEP/OOD") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(fri_honest_commit_verify)
@@ -122,12 +130,13 @@ BOOST_AUTO_TEST_CASE(fri_query_count_matches_constant)
 
 BOOST_AUTO_TEST_CASE(fri_proof_much_smaller_than_lde_for_large_n)
 {
-    // Large enough that O(k · log² N) openings ≪ N · sizeof(Fp2) LDE witness.
-    const size_t n = 8192;
+    // Large enough that O(Q · log² N) openings ≪ N · blowup · sizeof(Fp2) LDE.
+    // Blowup=16 grows the LDE; n=16384 keeps the check CI-safe.
+    const size_t n = 16384;
     const auto c = rc::FriCommitAndFold(MakeCoeffs(n), MakeSeed(0x66));
     BOOST_REQUIRE(c.ok);
     const size_t lde_bytes = c.lde_evals.size() * sizeof(rc::Fp2);
-    BOOST_CHECK(c.proof_bytes < lde_bytes / 2);
+    BOOST_CHECK_LT(c.proof_bytes, lde_bytes / 2);
     BOOST_CHECK_EQUAL(c.proof.queries.size(), rc::kRCFriNumQueries);
 }
 

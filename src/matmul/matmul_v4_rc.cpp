@@ -797,6 +797,22 @@ RCEpisodeParams MakeMediumRCEpisodeParams()
     return p;
 }
 
+RCEpisodeParams MakeCostLadderRCEpisodeParams()
+{
+    // M9 off-CI ladder rung between toy and medium (b_seq=256). Enable with
+    // BTX_RC_GKR_MEASURE_LADDER=1. Still not consensus.
+    RCEpisodeParams p;
+    p.rounds = 1;
+    p.d_head = 32;
+    p.n_q = 32;
+    p.n_ctx = 64;
+    p.L_lyr = 1;
+    p.d_model = 32;
+    p.b_seq = 256;
+    p.T_leaf = 64;
+    return p;
+}
+
 RCEpisodeParams MakeSegTestRCEpisodeParams()
 {
     // Two Phase-1 segments (n_ctx = kRCSegLen+32); Phase-2 stays single-segment.
