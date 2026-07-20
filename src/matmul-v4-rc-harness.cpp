@@ -520,9 +520,9 @@ int RunCoupledHarness(const Args& args)
     root.pushKV("consensus_note",
                 "nMatMulRCCoupledHeight remains INT32_MAX on public nets; coupled "
                 "profile (ENC_RC_COUPLED) is INERT unless regtest sets a finite height. "
-                "Mining inject uses MakeResolvedExactGemmBackendForRC when active.",
-                "MakeResolvedExactGemmBackendForRC. SIMULATED interconnect is NOT "
-                "Stage-I gate 4 evidence. This harness never raises height.");
+                "Mining inject uses MakeResolvedExactGemmBackendForRC when active. "
+                "SIMULATED interconnect is NOT Stage-I gate 4 evidence. "
+                "This harness never raises height.");
     std::string tip = args.source_revision;
     if (tip.empty()) {
         if (const char* env = std::getenv("BTX_SOURCE_REVISION")) tip = env;

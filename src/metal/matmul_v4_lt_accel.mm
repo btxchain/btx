@@ -51,8 +51,8 @@ static NSString* const kGemmLibrarySource = @R"MSL(
 #include <metal_stdlib>
 using namespace metal;
 
-kernel void gemm_s8s8(device const char* A [[buffer(0)]],
-                      device const char* B [[buffer(1)]],
+kernel void gemm_s8s8(device const signed char* A [[buffer(0)]],
+                      device const signed char* B [[buffer(1)]],
                       device int* D [[buffer(2)]],
                       constant int& M [[buffer(3)]],
                       constant int& N [[buffer(4)]],
@@ -65,13 +65,14 @@ kernel void gemm_s8s8(device const char* A [[buffer(0)]],
     int acc = 0;
     const size_t arow = size_t(row) * size_t(K);
     for (int k = 0; k < K; ++k) {
+        // signed char: never promote 0xFF as +255 (unsigned-char trap).
         acc += int(A[arow + size_t(k)]) * int(B[size_t(k) * size_t(N) + size_t(col)]);
     }
     D[size_t(row) * size_t(N) + size_t(col)] = acc;
 }
 
 kernel void gemm_s32s8(device const int* A [[buffer(0)]],
-                       device const char* B [[buffer(1)]],
+                       device const signed char* B [[buffer(1)]],
                        device int* D [[buffer(2)]],
                        constant int& M [[buffer(3)]],
                        constant int& N [[buffer(4)]],

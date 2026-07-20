@@ -401,8 +401,11 @@ std::vector<int8_t> ForwardLayer(const std::vector<int8_t>& W, const std::vector
                 static_cast<int32_t>(X[static_cast<size_t>(i) * d_model + j]);
         }
     }
-    std::vector<int8_t> out(y.size());
-    ExtractMXMatrixInt32(prf_fwd, y.data(), b_seq, d_model, out.data());
+    // Widen before Extract so mining matches GKR's int64 Extract path bit-for-bit
+    // at current bounds (values still fit int32; avoids a latent int32-trunc fork).
+    std::vector<int64_t> y64(y.begin(), y.end());
+    std::vector<int8_t> out(y64.size());
+    ExtractMXMatrixInt64(prf_fwd, y64.data(), b_seq, d_model, out.data());
     return out;
 }
 
@@ -484,7 +487,10 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
         // G[l+1] is already resident from the previous step (or G[L] seed).
         auto g_acc = GemmWtS8S8Int32(out.W[l], out.G[l + 1], p.d_model, p.b_seq, gemm);
         out.G[l].assign(g_acc.size(), 0);
-        ExtractMXMatrixInt32(prf_bwd[l], g_acc.data(), p.b_seq, p.d_model, out.G[l].data());
+        {
+            std::vector<int64_t> g64(g_acc.begin(), g_acc.end());
+            ExtractMXMatrixInt64(prf_bwd[l], g64.data(), p.b_seq, p.d_model, out.G[l].data());
+        }
         {
             // Free int32 accumulator promptly.
             std::vector<int32_t>().swap(g_acc);

@@ -40,7 +40,7 @@ BOOST_AUTO_TEST_CASE(fri_constants_and_soundness_bits)
     BOOST_CHECK_EQUAL(rc::kRCFriBlowup, 16u);
     BOOST_CHECK_EQUAL(rc::kRCFriNumQueries, 116u);
     BOOST_CHECK_EQUAL(rc::kRCFriGrindingBits, 40u);
-    BOOST_CHECK_EQUAL(rc::kRCFriProofVersion, 3u);
+    BOOST_CHECK_EQUAL(rc::kRCFriProofVersion, 4u);
     BOOST_CHECK(!rc::kRCFriConjecturedBoundEnabled);
     BOOST_CHECK(rc::FriClaimedBitsMeetTarget());
     BOOST_CHECK_EQUAL(rc::FriSoundnessBoundBits(), 65); // floor(116*log2(32/17)-40)

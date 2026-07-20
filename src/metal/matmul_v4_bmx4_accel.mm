@@ -172,14 +172,14 @@ struct GemmParams {
 // ---------------------------------------------------------------------------
 kernel void matmul_v4_bmx4_s8_gemm_s32(
     constant GemmParams& p [[buffer(0)]],
-    device const char* x [[buffer(1)]],
-    device const char* y [[buffer(2)]],
+    device const signed char* x [[buffer(1)]],
+    device const signed char* y [[buffer(2)]],
     device int* d [[buffer(3)]],
     uint2 gid [[thread_position_in_grid]],
     uint2 tid [[thread_position_in_threadgroup]])
 {
-    threadgroup char tile_x[16][16];
-    threadgroup char tile_y[16][16];
+    threadgroup signed char tile_x[16][16];
+    threadgroup signed char tile_y[16][16];
 
     const uint row = gid.y;
     const uint col = gid.x;
@@ -191,10 +191,10 @@ kernel void matmul_v4_bmx4_s8_gemm_s32(
         const uint ky = t * GEMM_TILE + tid.y;
         tile_x[tid.y][tid.x] = (row < p.m_rows && kx < p.k)
             ? x[(ulong)row * p.k + kx]
-            : (char)0;
+            : (signed char)0;
         tile_y[tid.y][tid.x] = (ky < p.k && col < p.n_cols)
             ? y[(ulong)ky * p.n_cols + col]
-            : (char)0;
+            : (signed char)0;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (uint kk = 0; kk < GEMM_TILE; ++kk) {
@@ -242,10 +242,10 @@ struct LimbSplitParams {
 kernel void matmul_v4_bmx4_limb_split(
     constant LimbSplitParams& p [[buffer(0)]],
     device const int* src [[buffer(1)]],
-    device char* plane0 [[buffer(2)]],
-    device char* plane1 [[buffer(3)]],
-    device char* plane2 [[buffer(4)]],
-    device char* plane3 [[buffer(5)]],
+    device signed char* plane0 [[buffer(2)]],
+    device signed char* plane1 [[buffer(3)]],
+    device signed char* plane2 [[buffer(4)]],
+    device signed char* plane3 [[buffer(5)]],
     uint2 gid [[thread_position_in_grid]])
 {
     if (gid.y >= p.rows || gid.x >= p.cols) {
@@ -254,10 +254,10 @@ kernel void matmul_v4_bmx4_limb_split(
     const ulong idx = (ulong)gid.y * p.cols + gid.x;
     int d[4];
     btx_bmx4_limb_digits(src[idx], d);
-    plane0[idx] = (char)d[0];
-    plane1[idx] = (char)d[1];
-    plane2[idx] = (char)d[2];
-    plane3[idx] = (char)d[3];
+    plane0[idx] = (signed char)d[0];
+    plane1[idx] = (signed char)d[1];
+    plane2[idx] = (signed char)d[2];
+    plane3[idx] = (signed char)d[3];
 }
 
 // Qvert ((Q*n) x m, row-major exact s32 -- the output of the stacked GEMM
@@ -276,10 +276,10 @@ struct LimbSplitQParams {
 kernel void matmul_v4_bmx4_limb_split_qstack(
     constant LimbSplitQParams& p [[buffer(0)]],
     device const int* qvert [[buffer(1)]],
-    device char* plane0 [[buffer(2)]],
-    device char* plane1 [[buffer(3)]],
-    device char* plane2 [[buffer(4)]],
-    device char* plane3 [[buffer(5)]],
+    device signed char* plane0 [[buffer(2)]],
+    device signed char* plane1 [[buffer(3)]],
+    device signed char* plane2 [[buffer(4)]],
+    device signed char* plane3 [[buffer(5)]],
     uint2 gid [[thread_position_in_grid]])
 {
     const uint k = gid.y;   // row in [0, n)
@@ -293,10 +293,10 @@ kernel void matmul_v4_bmx4_limb_split_qstack(
     const ulong dst_idx = (ulong)k * p.q_cols + col;
     int d[4];
     btx_bmx4_limb_digits(qvert[src_idx], d);
-    plane0[dst_idx] = (char)d[0];
-    plane1[dst_idx] = (char)d[1];
-    plane2[dst_idx] = (char)d[2];
-    plane3[dst_idx] = (char)d[3];
+    plane0[dst_idx] = (signed char)d[0];
+    plane1[dst_idx] = (signed char)d[1];
+    plane2[dst_idx] = (signed char)d[2];
+    plane3[dst_idx] = (signed char)d[3];
 }
 
 // Shifted mod-q fold of one limb-pair product S_ij into the running Chat:

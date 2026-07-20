@@ -37,8 +37,8 @@ namespace matmul::v4::rc {
 using gkr_field::Fp2;
 
 inline constexpr uint32_t kRCFriProofMagic = 0x46524934u; // 'FRI4'
-inline constexpr uint32_t kRCFriProofVersion = 3;
-inline constexpr char kRCFriDomainTag[] = "BTX_RC_FRI_V3";
+inline constexpr uint32_t kRCFriProofVersion = 4;
+inline constexpr char kRCFriDomainTag[] = "BTX_RC_FRI_V4";
 
 inline constexpr uint32_t kRCFriBlowup = 16;
 inline constexpr uint32_t kRCFriGrindingBits = 40;
@@ -55,9 +55,10 @@ inline constexpr uint32_t kRCFriNumQueriesBciKs20Optional = 53;
 inline constexpr int kRCFriTargetSoundnessBits = 64;
 
 inline constexpr char kRCFriSoundnessStatement[] =
-    "FRI REAL (v3/M6/Fable+DEEP): blowup=16 (ρ=1/16), Q=116, g=40, Fp2; "
+    "FRI REAL (v4/M6/Fable+DEEP): blowup=16 (ρ=1/16), Q=116, g=40, Fp2; "
     "UNIQUE-DECODING α=17/32 ⇒ FriSoundnessBoundBits()=65; "
-    "DEEP/OOD binds P(z) via quotient openings at query sites (ePrint 2019/336). "
+    "DEEP/OOD binds P(z) via quotient openings at query sites (ePrint 2019/336); "
+    "deep_z_forced supports Haböck I(1) at z=1. "
     "NOT conjectured ρ^Q. ROM, commit-then-challenge; fs_seed PoW-bound. "
     "COMPUTATIONAL — not ε=0.";
 

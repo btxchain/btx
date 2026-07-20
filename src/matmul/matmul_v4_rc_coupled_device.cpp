@@ -8,6 +8,7 @@
 #include <hip/matmul_v4_lt_accel.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_lt.h>
+#include <metal/matmul_v4_lt_accel.h>
 
 #include <vector>
 
@@ -68,6 +69,10 @@ RCCoupledDeviceProbe ProbeRCCoupledDevice()
     st.used_tensor_imma_or_mfma = matmul_v4::hip::LtLastS8S8UsedMfma();
     if (st.used_tensor_imma_or_mfma) st.provider = "hip_mfma";
     else st.provider = "hip_or_device";
+#elif defined(BTX_ENABLE_METAL)
+    st.used_tensor_imma_or_mfma = matmul_v4::metal::LtLastS8S8UsedTensorOps();
+    if (st.used_tensor_imma_or_mfma) st.provider = "metal_tensor_ops";
+    else st.provider = "metal_or_device";
 #else
     st.provider = "resolved_device_stub_or_alu";
 #endif

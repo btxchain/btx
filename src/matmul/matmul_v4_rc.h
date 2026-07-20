@@ -51,6 +51,14 @@ inline constexpr uint32_t kRCModelDim = 4096;
 inline constexpr uint32_t kRCBatchSeq = 16'384; // == W_cap/(2*d_model*L_lyr) at epoch 0
 inline constexpr uint32_t kRCTileLeafBytes = 1024; // 32×32 int8 (Class C)
 
+/** Max |s8| operand magnitude on the RC ExactGemm path (balanced M11×2^{e≤3}). */
+inline constexpr int32_t kRCMxOperandAbsMax = 48; // 6 * 2^3
+/** Phase-2 fwd/bwd ExactGemm is s8×s8→int32 before Extract; keep |acc| < 2^31. */
+static_assert(static_cast<uint64_t>(kRCModelDim) *
+                      (static_cast<uint64_t>(kRCMxOperandAbsMax) * kRCMxOperandAbsMax) +
+                  static_cast<uint64_t>(kRCMxOperandAbsMax) < (uint64_t{1} << 31),
+              "Phase-2 int32 GEMM+Extract needs |acc| < 2^31 at epoch-0 d_model");
+
 /** Max K-chunk for wgrad ExactGemm panels: 2304·K < 2^24 (FP32-mantissa ceiling). */
 inline constexpr uint32_t kRCWgradExactChunk = 4096;
 static_assert(static_cast<uint64_t>(kRCWgradExactChunk) * 2304ull < (uint64_t{1} << 24),
