@@ -30,6 +30,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEST_CPP = REPO_ROOT / "src" / "test" / "matmul_v4_rc_tests.cpp"
+COUPLED_TEST_CPP = REPO_ROOT / "src" / "test" / "matmul_v4_rc_coupled_tests.cpp"
 RC_H = REPO_ROOT / "src" / "matmul" / "matmul_v4_rc.h"
 
 # Frozen V1 toy golden (MakeToyRCEpisodeParams + MakeRCHeader(42)).
@@ -37,6 +38,9 @@ RC_H = REPO_ROOT / "src" / "matmul" / "matmul_v4_rc.h"
 FROZEN_V1_HEX = "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a"
 FROZEN_VERSION = 1  # ENC_RC_V1
 
+# Separate frozen digest for Stage C coupled toy (MakeCoupHeader(42) @ height 0).
+# Not an episode transcript version — listed so silent replacement is caught.
+FROZEN_COUPLED_TOY_HEX = "c9ac99d002ba26105ef259bfc09fbc0e2ad57bae14b9558d68b82719fa811363"
 
 def die(msg: str, code: int = 1) -> None:
     sys.stderr.write("rc-golden-gate: FAIL — " + msg + "\n")
@@ -149,12 +153,46 @@ def main() -> int:
         "frozen_toy_golden_v1": expect,
         "v1_golden_hits": len(v1_hits),
         "other_goldens": other,
+        "frozen_coupled_toy_golden": FROZEN_COUPLED_TOY_HEX,
+        "coupled_toy_golden_hits": 0,
         "errors": errors,
         "policy": (
             "Silent golden replacement forbidden. V2 requires new domain tags "
-            "+ BOTH goldens kept. nMatMulRCHeight stays INT32_MAX."
+            "+ BOTH goldens kept. Coupled toy golden is a separate frozen digest. "
+            "nMatMulRCHeight stays INT32_MAX."
         ),
     }
+
+    # Optional section: Stage C coupled toy golden (separate from V1 episode).
+    coupled_hits = 0
+    if COUPLED_TEST_CPP.is_file():
+        coup_text = COUPLED_TEST_CPP.read_text(encoding="utf-8")
+        coup_pin = re.search(
+            r"rc_coup_golden_digest_stable[\s\S]*?"
+            r'BOOST_CHECK_EQUAL\s*\(\s*d1\.GetHex\(\)\s*,\s*"([0-9a-f]{64})"\s*\)',
+            coup_text,
+        )
+        coup_goldens = extract_goldens(coup_text)
+        coupled_hits = sum(
+            1 for g in coup_goldens if g.lower() == FROZEN_COUPLED_TOY_HEX
+        )
+        summary["coupled_toy_golden_hits"] = coupled_hits
+        if coupled_hits == 0:
+            errors.append(
+                f"frozen coupled toy golden {FROZEN_COUPLED_TOY_HEX} not found in "
+                f"{COUPLED_TEST_CPP.name}"
+            )
+        if coup_pin and coup_pin.group(1).lower() != FROZEN_COUPLED_TOY_HEX:
+            errors.append(
+                f"rc_coup toy golden changed to {coup_pin.group(1)} "
+                f"(expected {FROZEN_COUPLED_TOY_HEX})"
+            )
+        elif not coup_pin:
+            errors.append("could not locate rc_coup_golden_digest_stable pin")
+        summary["ok"] = not errors
+        summary["errors"] = errors
+    else:
+        summary["coupled_toy_golden_note"] = "coupled test file absent — skip"
 
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
@@ -168,6 +206,10 @@ def main() -> int:
         print(f"  V1 golden: {expect} ({len(v1_hits)} occurrence(s) in {TEST_CPP.name})")
         if other:
             print(f"  other GetHex goldens present: {len(other)} (ok if V2+)")
+        print(
+            f"  coupled toy golden: {FROZEN_COUPLED_TOY_HEX} "
+            f"({summary.get('coupled_toy_golden_hits', 0)} occurrence(s))"
+        )
         print("  rule: silent golden replacement forbidden; V2 needs new tags + BOTH goldens")
     return 0 if not errors else 1
 

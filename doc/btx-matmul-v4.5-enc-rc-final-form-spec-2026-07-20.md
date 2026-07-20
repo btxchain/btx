@@ -1,7 +1,7 @@
 # BTX MatMul v4.5 (ENC_RC) — FINAL-FORM Specification
 
 *Date: 2026-07-20. Branch: `claude/matmul-v4-design-spec-af23sj` (PR #89).*
-*Status: final-form Stages A–F/H scaffolding + Stage E bake-off landed. **Public activation remains NO-GO** (`nMatMulRCHeight = INT32_MAX`). Stage G is SILICON-GATED; Stage E decision is owner-owned.*
+*Status: final-form Stages A–F/H scaffolding + Stage E bake-off landed; Stage C multi-backend probe + parametric medium scaffolding this wave. **Public activation remains NO-GO** (`nMatMulRCHeight = INT32_MAX`). Stage G: CPU campaigns measured on this box; GPU still SILICON-GATED. Stage E decision is owner-owned.*
 
 This document is the master index for the FINAL-FORM build (Stages A–I). It
 restates the committed design, records what landed this wave, and keeps
@@ -75,19 +75,19 @@ biggest-brain-wins, nobody excluded.
 |---|---|---|
 | **A** — consensus hazards | **PARTIAL** | V1 golden `b339d0ff…` + `kRCTranscriptVersion` / `ENC_RC_V1` (`matmul_v4_rc.h`); segment leaves + §R.7 growth **PARKED**; int64 Extract; golden gate `contrib/matmul-v4/rc-golden-gate.py`. Brake omitted from Stage F three-axis path (F6). |
 | **B** — bounded-memory transcript + planners | **PARTIAL** | `RoundMerkleStream` + `matmul_v4_rc_transcript.{h,cpp}` Resident/Streaming sinks (`matmul_v4_rc_transcript_tests`). Full planner surface may still grow. |
-| **C** — coupled puzzle | **PARTIAL** (toy) | `matmul_v4_rc_coupled.{h,cpp}` + `matmul_v4_rc_coupled_tests` (toy-scale FINAL FORM). **Honest residual:** Stage C toy ≠ HBM-scale production dims. |
+| **C** — coupled puzzle | **PARTIAL** (toy + medium scaffolding) | `matmul_v4_rc_coupled.{h,cpp}` parametric `RCCoupParams` / `MakeMediumRCCoupParams`; modes Sequential/Checkpointed/Streamed/Resident; ExactGemm inject via `MakeResolvedExactGemmBackendForRC` on mining/harness; `ProbeRCCoupledDevice` (`matmul_v4_rc_coupled_device.*`) skip-friendly without GPU. **Honest residual:** Stage C dims ≠ HBM-scale production; GPU coupled path SILICON-GATED. |
 | **D** — distributed bit-exactness | **PARTIAL** | `matmul_v4_rc_distributed.{h,cpp}` + `matmul_v4_rc_distributed_tests` (topology parity scaffold). |
 | **E** — verification bake-off | **PARTIAL** / **owner-owned** | Prototypes: `matmul_v4_rc_verify_bakeoff.*` + P2.1 evidence doc. Decision (shrink vs winner-only) remains **owner-owned**. |
 | **F** — three-axis schedule | **DONE (PROVISIONAL, inert)** | `src/matmul/matmul_v4_rc_scale_axes.{h,cpp}`: dials `W_state`, `C_local`, `X_exchange`; O(1) memoized epoch eval; **no chainwork brake (F6 omitted)**; checked prior-dim fallback (no assert); hard caps; pause-only growth; `kRCThreeAxisScheduleEnabled = false`. **Ratios freeze only after Stage G silicon evidence.** |
-| **G** — numeric hardware gates | **SILICON-GATED** | Needs real B200/MI355X/5090/8 GiB Streamed / NVLink-vs-PCIe campaigns. `contrib/matmul-v4/rc-gate.py` enforces measured thresholds; nonempty reports never PASS without numeric G2/G3/G4. |
+| **G** — numeric hardware gates | **SILICON-GATED** (CPU PARTIAL) | CPU toy/medium/coupled campaign walls measurable on this host (`rc-gate.py` / harness `--coupled`). GPU B200/MI355X/5090 / NVLink-vs-PCIe still **unmeasured** — nonempty reports never PASS without numeric G2/G3/G4 silicon. Net-cost software model is SIMULATED / NOT EVIDENCE. |
 | **H** — required tests | **PARTIAL** (scaffolding) | Extended `src/test/matmul_v4_rc_tests.cpp`: V1 golden; Resident/Checkpointed/Streamed digest equiv; topology pointer → Stage D; soft memory-budget; golden-diff gate (+ `rc-golden-gate.py`). Full production-size / cross-vendor / proof-malformed suites remain OPEN with C/D/E/G. |
 | **I** — activation policy | **DONE (policy)** | `nMatMulRCHeight` remains `INT32_MAX` (`params.h`, chainparams assert). Checklist below — do not encode a finite height until every gate passes. |
 
 ### Honest residuals (do not paper over)
 
-1. **Stage G needs real hardware.** Toy harness PARTIAL ≠ GO; MAC/heuristic curves are NOT EVIDENCE.
+1. **Stage G needs real hardware for GPU / interconnect gates.** CPU campaign walls on this box are PARTIAL evidence only; MAC/heuristic curves and simulated net-cost are NOT EVIDENCE for Stage-I gate 4.
 2. **Stage E decision is owner-owned.** Until shrink vs winner-only proof is chosen, do not unpark segment leaves / growth / three-axis enable, and do not raise height.
-3. **Stage C toy ≠ HBM-scale.** Digest/oracle correctness at toy dims does not prove 8 GiB Streamed production or interconnect separation.
+3. **Stage C toy/medium ≠ HBM-scale.** Digest/oracle correctness at toy or CI medium dims does not prove 8 GiB Streamed production or interconnect separation. GPU ExactGemm for coupled remains SILICON-GATED.
 
 ---
 
@@ -136,7 +136,9 @@ that changed is which hardware can afford the attempts.
 | `src/matmul/matmul_v4_rc_scale_axes.h` | Stage F three-axis dials + enable flag (default false) |
 | `src/matmul/matmul_v4_rc_scale_axes.cpp` | Memoized O(1) epoch eval; checked fallback; no brake |
 | `src/matmul/matmul_v4_rc_transcript.*` | Stage B Resident/Streaming sinks |
-| `src/matmul/matmul_v4_rc_coupled.*` | Stage C toy coupled puzzle |
+| `src/matmul/matmul_v4_rc_coupled.*` | Stage C coupled puzzle (toy + medium params; ExactGemm inject) |
+| `src/matmul/matmul_v4_rc_coupled_device.*` | Stage C `ProbeRCCoupledDevice` (CUDA/HIP/Metal readiness; skip without GPU) |
+| `src/matmul/matmul_v4_rc_coupled_netcost.h` | Stage G software interconnect model (SIMULATED / NOT EVIDENCE) |
 | `src/matmul/matmul_v4_rc_distributed.*` | Stage D distributed bit-exactness scaffold |
 | `src/matmul/matmul_v4_rc_verify_bakeoff.*` | Stage E verification bake-off prototypes |
 | `src/test/matmul_v4_rc_tests.cpp` | Stage H scaffolding cases + Stage F inert checks |
@@ -148,4 +150,4 @@ that changed is which hardware can afford the attempts.
 
 ---
 
-*End of final-form master spec. Tip `3a3fb75` + this wave’s scaffolding; height unchanged.*
+*End of final-form master spec. Tip `91a687b` + this wave’s scaffolding; height unchanged.*

@@ -15,14 +15,20 @@
 #include <crypto/sha256.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_coupled.h>
+#include <matmul/matmul_v4_rc_coupled_netcost.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
+#include <matmul/matmul_v4_rc_transcript.h>
 #include <primitives/block.h>
 #include <uint256.h>
 #include <util/translation.h>
 
 #include <univalue.h>
 
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -33,6 +39,7 @@
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
+#include <sys/resource.h>
 #include <unistd.h>
 #endif
 
@@ -50,11 +57,15 @@ struct Args {
     bool toy{true};
     bool medium{false};
     bool help{false};
+    bool coupled{false};
+    bool coupled_medium{false};
+    bool mode_sweep{false};
     uint32_t rounds{0};   // 0 ⇒ keep params.rounds
     uint32_t episodes{3}; // default for toy
     uint64_t mem_cap{0};  // 0 = unlimited
     std::string backend{"cpu"};
     std::string out_path{"rc-report.json"};
+    std::string source_revision; // optional tip provenance
 };
 
 void PrintUsage(std::ostream& os)
@@ -62,6 +73,9 @@ void PrintUsage(std::ostream& os)
     os << "Usage: matmul-v4-rc-harness [options]\n"
        << "  --toy / --no-toy           tiny dims (default: --toy; CI-safe)\n"
        << "  --medium                   medium dims (wgrad >2^24); implies not toy\n"
+       << "  --coupled                  Stage C coupled-puzzle timing (toy dims)\n"
+       << "  --coupled-medium           Stage C coupled-puzzle timing (medium dims)\n"
+       << "  --mode-sweep               also time Resident/Checkpointed/Streamed\n"
        << "  --rounds N                 override episode rounds (default: params)\n"
        << "  --episodes N               ExtractMX self-qual episode count (default: 3)\n"
        << "  --backend NAME             cpu|cuda|hip|metal|auto (default: cpu).\n"
@@ -69,8 +83,41 @@ void PrintUsage(std::ostream& os)
        << "                             (LT resolve + RC self-qual fail-closed → CPU).\n"
        << "                             Digests are always resealed vs empty-backend CPU.\n"
        << "  --mem-cap BYTES            allocator budget check (0 = unlimited)\n"
+       << "  --source-revision TIP      same-tip provenance for rc-gate\n"
        << "  --out PATH                 JSON output (default: rc-report.json)\n"
        << "  -h, --help                 this help\n";
+}
+
+size_t PeakRssKiB()
+{
+#if defined(__linux__)
+    struct rusage ru {};
+    if (getrusage(RUSAGE_SELF, &ru) == 0) {
+        return static_cast<size_t>(ru.ru_maxrss); // KiB on Linux
+    }
+#elif defined(__APPLE__)
+    struct rusage ru {};
+    if (getrusage(RUSAGE_SELF, &ru) == 0) {
+        return static_cast<size_t>(ru.ru_maxrss / 1024); // bytes → KiB
+    }
+#endif
+    return 0;
+}
+
+double CoeffVar(const std::vector<double>& xs)
+{
+    if (xs.size() < 2) return 0.0;
+    double sum = 0.0;
+    for (double x : xs) sum += x;
+    const double mean = sum / static_cast<double>(xs.size());
+    if (!(mean > 0.0)) return 0.0;
+    double acc = 0.0;
+    for (double x : xs) {
+        const double d = x - mean;
+        acc += d * d;
+    }
+    const double var = acc / static_cast<double>(xs.size() - 1);
+    return std::sqrt(var) / mean;
 }
 
 bool ParseUint32(const char* v, uint32_t& out)
@@ -120,6 +167,13 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
         } else if (a == "--medium") {
             args.medium = true;
             args.toy = false;
+        } else if (a == "--coupled") {
+            args.coupled = true;
+        } else if (a == "--coupled-medium") {
+            args.coupled = true;
+            args.coupled_medium = true;
+        } else if (a == "--mode-sweep") {
+            args.mode_sweep = true;
         } else if (a == "--rounds") {
             const char* v = need("--rounds");
             if (!v || !ParseUint32(v, args.rounds)) {
@@ -142,6 +196,10 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
                 err = "invalid --mem-cap";
                 return false;
             }
+        } else if (a == "--source-revision") {
+            const char* v = need("--source-revision");
+            if (!v) return false;
+            args.source_revision = v;
         } else if (a == "--out") {
             const char* v = need("--out");
             if (!v) return false;
@@ -166,6 +224,34 @@ std::string HostName()
     return "unknown";
 }
 
+size_t CurrentRssKiB()
+{
+#if defined(__linux__)
+    std::ifstream in("/proc/self/status");
+    std::string key;
+    while (in >> key) {
+        if (key == "VmRSS:") {
+            size_t kib = 0;
+            in >> kib;
+            return kib;
+        }
+        std::string rest;
+        std::getline(in, rest);
+    }
+#endif
+#if defined(__unix__) || defined(__APPLE__)
+    struct rusage ru {};
+    if (getrusage(RUSAGE_SELF, &ru) == 0) {
+#if defined(__APPLE__)
+        return static_cast<size_t>(ru.ru_maxrss / 1024);
+#else
+        return static_cast<size_t>(ru.ru_maxrss); // KiB on Linux
+#endif
+    }
+#endif
+    return 0;
+}
+
 CBlockHeader MakeHeader(uint64_t nonce)
 {
     CBlockHeader header;
@@ -181,6 +267,279 @@ CBlockHeader MakeHeader(uint64_t nonce)
         header.seed_b.data()[i] = static_cast<unsigned char>(0x22);
     }
     return header;
+}
+
+UniValue CoupParamsJson(const rc::RCCoupParams& p)
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("barriers", static_cast<uint64_t>(p.barriers));
+    o.pushKV("lobes", static_cast<uint64_t>(p.lobes));
+    o.pushKV("lobe_width", static_cast<uint64_t>(p.lobe_width));
+    o.pushKV("bank_pages", static_cast<uint64_t>(p.bank_pages));
+    o.pushKV("state_bytes", static_cast<uint64_t>(p.StateBytes()));
+    return o;
+}
+
+const char* CoupModeName(rc::RCCoupExecMode m)
+{
+    switch (m) {
+    case rc::RCCoupExecMode::SequentialLobes: return "SequentialLobes";
+    case rc::RCCoupExecMode::Checkpointed: return "Checkpointed";
+    case rc::RCCoupExecMode::Streamed: return "Streamed";
+    case rc::RCCoupExecMode::Resident: return "Resident";
+    }
+    return "unknown";
+}
+
+int RunCoupledHarness(const Args& args)
+{
+    const rc::RCCoupParams params =
+        args.coupled_medium ? rc::MakeMediumRCCoupParams() : rc::MakeToyRCCoupParams();
+    if (!rc::ValidateRCCoupParams(params)) {
+        std::cerr << "error: invalid coupled params\n";
+        return 2;
+    }
+
+    // Mining ExactGemm: MakeResolvedExactGemmBackendForRC → CUDA/HIP/Metal
+    // LaunchGemmS8S8 after RC self-qual; empty → CPU fail-closed.
+    matmul::v4::lt::ExactGemmBackend gemm{};
+    std::string backend_resolved = "cpu";
+    if (args.backend != "cpu") {
+        gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+        if (gemm.gemm_s8s8 != nullptr) {
+            backend_resolved = args.backend;
+        } else {
+            backend_resolved = "cpu-fallback";
+        }
+    }
+    const auto device_probe = rc::ProbeRCCoupledDevice();
+
+    const std::string host = HostName();
+    const std::string device_id = backend_resolved + "-ref:" + host;
+    const auto header = MakeHeader(42);
+    const size_t rss_before = CurrentRssKiB();
+
+    const rc::RCCoupExecMode modes[] = {
+        rc::RCCoupExecMode::SequentialLobes,
+        rc::RCCoupExecMode::Checkpointed,
+        rc::RCCoupExecMode::Streamed,
+        rc::RCCoupExecMode::Resident,
+    };
+
+    UniValue mode_walls(UniValue::VARR);
+    uint256 digest_ref;
+    bool digests_match = true;
+    bool mine_matches = true;
+    rc::RCCoupTiming timed{};
+
+    for (size_t i = 0; i < 4; ++i) {
+        rc::RCCoupOptions opt;
+        opt.mode = modes[i];
+        rc::RCCoupTiming t{};
+        const uint256 d =
+            rc::RecomputeCoupledPuzzleReference(header, /*height=*/0, params, opt, {}, &t);
+        const uint256 d_mine =
+            rc::MineCoupledPuzzle(header, /*height=*/0, params, gemm, opt);
+        if (d != d_mine) mine_matches = false;
+        if (i == 0) {
+            digest_ref = d;
+            timed = t;
+        } else if (d != digest_ref) {
+            digests_match = false;
+        }
+        UniValue mw(UniValue::VOBJ);
+        mw.pushKV("mode", CoupModeName(modes[i]));
+        mw.pushKV("digest", d.GetHex());
+        mw.pushKV("mine_matches_cpu", d == d_mine);
+        mw.pushKV("bank_s", t.bank_s);
+        mw.pushKV("barriers_s", t.barriers_s);
+        mw.pushKV("wall_s", t.total_s);
+        mw.pushKV("total_s", t.total_s);
+        mw.pushKV("nonce_per_s", t.total_s > 0.0 ? (1.0 / t.total_s) : 0.0);
+        mw.pushKV("peak_rss_kib", static_cast<uint64_t>(std::max(rss_before, CurrentRssKiB())));
+        mode_walls.push_back(mw);
+    }
+
+    const size_t rss_after = CurrentRssKiB();
+    const size_t peak_rss = std::max({rss_before, rss_after, PeakRssKiB()});
+
+    // Streamed vs Resident ratio (expect ≥1 when paging costs).
+    double wall_stream = 0.0, wall_resident = 0.0;
+    for (size_t i = 0; i < mode_walls.size(); ++i) {
+        const UniValue& mw = mode_walls[i];
+        const std::string m = mw["mode"].get_str();
+        if (m == "Streamed") wall_stream = mw["wall_s"].get_real();
+        if (m == "Resident") wall_resident = mw["wall_s"].get_real();
+    }
+
+    std::cout << "== MatMul ENC_RC coupled harness (Stage C) ==\n";
+    std::cout << "  device_id:  " << device_id << "\n";
+    std::cout << "  backend:    " << args.backend << " → " << backend_resolved << "\n";
+    std::cout << "  shape:      " << (args.coupled_medium ? "medium" : "toy") << "\n";
+    std::cout << "  barriers:   " << params.barriers << " lobes=" << params.lobes
+              << " width=" << params.lobe_width << " pages=" << params.bank_pages << "\n";
+    std::cout << "  digest:     " << digest_ref.GetHex() << "\n";
+    std::cout << "  modes_ok:   " << (digests_match ? "true" : "false") << "\n";
+    std::cout << "  mine_ok:    " << (mine_matches ? "true" : "false") << "\n";
+    std::cout << "  device_probe: resolved=" << (device_probe.backend_resolved ? 1 : 0)
+              << " provider=" << device_probe.provider << " detail=" << device_probe.detail
+              << "\n";
+    std::cout << "  phase_wall: bank=" << timed.bank_s << "s barriers=" << timed.barriers_s
+              << "s total=" << timed.total_s << "s\n";
+    std::cout << "  rss_kib:    before=" << rss_before << " after=" << rss_after
+              << " peak=" << peak_rss << "\n";
+    if (wall_resident > 0.0) {
+        std::cout << "  stream/res: " << (wall_stream / wall_resident) << "\n";
+    }
+
+    UniValue walls(UniValue::VOBJ);
+    walls.pushKV("bank", timed.bank_s);
+    walls.pushKV("barriers", timed.barriers_s);
+    walls.pushKV("total", timed.total_s);
+    walls.pushKV("provenance", "chrono_steady_clock");
+    walls.pushKV("evidence_kind",
+                 args.coupled_medium ? "chrono_measured" : "toy_chrono_measured");
+
+    UniValue rss(UniValue::VOBJ);
+    rss.pushKV("before_kib", static_cast<uint64_t>(rss_before));
+    rss.pushKV("after_kib", static_cast<uint64_t>(rss_after));
+    rss.pushKV("peak_kib", static_cast<uint64_t>(peak_rss));
+
+    UniValue probe_j(UniValue::VOBJ);
+    probe_j.pushKV("backend_resolved", device_probe.backend_resolved);
+    probe_j.pushKV("device_gemm_returned", device_probe.device_gemm_returned);
+    probe_j.pushKV("matched_cpu_exactgemm", device_probe.matched_cpu_exactgemm);
+    probe_j.pushKV("provider", device_probe.provider);
+    probe_j.pushKV("detail", device_probe.detail);
+
+    // SIMULATED interconnect model — NOT Stage-I gate 4 evidence.
+    const auto net = rc::SimulateCoupledExchangeNetCost(
+        rc::RCCoupNetCostParams{/*fabric_us=*/5.0, /*pcie_us=*/80.0,
+                                /*barriers=*/params.barriers});
+    UniValue netj(UniValue::VOBJ);
+    netj.pushKV("simulated", true);
+    netj.pushKV("stage_i_gate4_evidence", false);
+    netj.pushKV("label", net.label);
+    netj.pushKV("fabric_us_per_barrier", 5.0);
+    netj.pushKV("pcie_us_per_barrier", 80.0);
+    netj.pushKV("barriers", static_cast<uint64_t>(params.barriers));
+    netj.pushKV("fabric_exchange_us", net.fabric_exchange_us);
+    netj.pushKV("pcie_exchange_us", net.pcie_exchange_us);
+    netj.pushKV("exchange_slowdown_factor", net.exchange_slowdown_factor);
+    netj.pushKV("stage_i_gate4_threshold", rc::kStageIGate4NvlinkVsPcieMin);
+    netj.pushKV("stage_i_gate4_pass", false);
+
+    UniValue qual(UniValue::VOBJ);
+    qual.pushKV("status", (digests_match && mine_matches) ? "pass" : "fail");
+    qual.pushKV("episodes", static_cast<uint64_t>(std::max<uint32_t>(1, args.episodes)));
+    qual.pushKV("digests_stable", digests_match);
+    qual.pushKV("mine_matches_cpu", mine_matches);
+
+    UniValue caps(UniValue::VOBJ);
+    caps.pushKV("512MiB", "skip");
+    caps.pushKV("2GiB", "skip");
+    caps.pushKV("8GiB", "skip");
+
+    UniValue residency(UniValue::VARR);
+    {
+        UniValue pt(UniValue::VOBJ);
+        pt.pushKV("working_set_bytes", static_cast<uint64_t>(params.StateBytes()));
+        pt.pushKV("wall_s", timed.total_s);
+        pt.pushKV("dims", args.coupled_medium ? "medium" : "toy");
+        residency.push_back(pt);
+    }
+
+    UniValue k_curve(UniValue::VOBJ);
+    k_curve.pushKV("mode", "toy_synthetic_structure");
+    k_curve.pushKV("digests_match", digests_match);
+    k_curve.pushKV("note", "Coupled campaign placeholder k_curve for rc-gate schema");
+
+    UniValue vf(UniValue::VOBJ);
+    vf.pushKV("measured", false);
+    vf.pushKV("binding", true);
+    vf.pushKV("evidence_kind", "unmeasured");
+
+    UniValue run_variance(UniValue::VOBJ);
+    run_variance.pushKV("episode_cv", 0.0);
+    run_variance.pushKV("n_runs", 1);
+    run_variance.pushKV("note", "Cross-process variance filled by rc-stage-g-campaign.py");
+
+    UniValue coupled(UniValue::VOBJ);
+    coupled.pushKV("shape", args.coupled_medium ? "medium" : "toy");
+    coupled.pushKV("modes", mode_walls);
+    coupled.pushKV("digests_match", digests_match);
+    coupled.pushKV("modes_available", "Sequential,Checkpointed,Streamed,Resident");
+    if (wall_resident > 0.0) {
+        coupled.pushKV("streamed_over_resident", wall_stream / wall_resident);
+    }
+    coupled.pushKV("interconnect_sim", netj);
+
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("tool", "rc-episode-harness");
+    root.pushKV("schema_version", 2);
+    root.pushKV("stub", false);
+    root.pushKV("device_id", device_id);
+    root.pushKV("backend", backend_resolved);
+    root.pushKV("backend_requested", args.backend);
+    root.pushKV("exact_gemm_inject", gemm.gemm_s8s8 != nullptr);
+    root.pushKV("profile", "coupled");
+    root.pushKV("toy", !args.coupled_medium);
+    root.pushKV("medium", args.coupled_medium);
+    root.pushKV("production_dims", false);
+    root.pushKV("evidence_kind",
+                args.coupled_medium ? "chrono_measured" : "toy_chrono_measured");
+    root.pushKV("wall_clock_provenance", "chrono_steady_clock");
+    root.pushKV("device_resident", false);
+    root.pushKV("native_path_eligible", false);
+    root.pushKV("params", CoupParamsJson(params));
+    root.pushKV("digest", digest_ref.GetHex());
+    root.pushKV("modes_digest_match", digests_match);
+    root.pushKV("mine_matches_cpu", mine_matches);
+    root.pushKV("mode_walls", mode_walls);
+    root.pushKV("coupled", coupled);
+    root.pushKV("extractmx_self_qual", qual);
+    root.pushKV("phase_wall_s", walls);
+    root.pushKV("peak_rss_kib", static_cast<uint64_t>(peak_rss));
+    root.pushKV("rss_kib", rss);
+    root.pushKV("run_variance", run_variance);
+    root.pushKV("residency_sweep", residency);
+    root.pushKV("k_curve", k_curve);
+    root.pushKV("allocation_cap_verdicts", caps);
+    root.pushKV("verifier_floor", vf);
+    root.pushKV("device_probe", probe_j);
+    root.pushKV("interconnect_sim", netj);
+    root.pushKV("gpu_campaign_present", false);
+    root.pushKV("nvlink_campaign_present", false);
+    root.pushKV("gpu_status", "SILICON-GATED");
+    root.pushKV("consensus_note",
+                "nMatMulRCHeight remains INT32_MAX; coupled puzzle is INERT "
+                "(not selected by GetMatMulEncodingProfile). Mining inject uses "
+                "MakeResolvedExactGemmBackendForRC. SIMULATED interconnect is NOT "
+                "Stage-I gate 4 evidence. This harness never raises height.");
+    std::string tip = args.source_revision;
+    if (tip.empty()) {
+        if (const char* env = std::getenv("BTX_SOURCE_REVISION")) tip = env;
+    }
+    if (!tip.empty()) {
+        root.pushKV("source_revision", tip);
+        root.pushKV("git_tip", tip);
+    }
+
+    std::ofstream ofs(args.out_path, std::ios::trunc);
+    if (!ofs) {
+        std::cerr << "error: cannot write JSON to " << args.out_path << "\n";
+        return 1;
+    }
+    ofs << root.write(2) << "\n";
+    ofs.close();
+
+    std::cout << "  sim_factor: " << net.exchange_slowdown_factor
+              << " (SIMULATED / NOT Stage-I gate 4 evidence)\n";
+    std::cout << "  wrote:      " << args.out_path << "\n";
+    std::cout << "  consensus:  nMatMulRCHeight=INT32_MAX (NO-GO activation)\n";
+    const bool ok = digests_match && mine_matches;
+    std::cout << (ok ? "RESULT: coupled modes PASS\n" : "RESULT: coupled modes FAIL\n");
+    return ok ? 0 : 1;
 }
 
 /** Conservative working-set byte estimate for int8 tensors held simultaneously. */
@@ -234,6 +593,10 @@ int main(int argc, char* argv[])
     if (args.help) {
         PrintUsage(std::cout);
         return 0;
+    }
+
+    if (args.coupled) {
+        return RunCoupledHarness(args);
     }
 
     if (!args.toy && !args.medium) {
@@ -314,6 +677,9 @@ int main(int argc, char* argv[])
     rc::RCEpisodeTiming timed{};
     bool digests_stable = true;
     double sum_p1 = 0, sum_p2 = 0, sum_p3 = 0, sum_tot = 0;
+    std::vector<double> episode_walls;
+    episode_walls.reserve(args.episodes);
+    const size_t rss_before = PeakRssKiB();
 
     for (uint32_t e = 0; e < args.episodes; ++e) {
         const auto header = MakeHeader(1000 + e);
@@ -333,6 +699,7 @@ int main(int argc, char* argv[])
         sum_p2 += t.phase2_s;
         sum_p3 += t.phase3_s;
         sum_tot += t.total_s;
+        episode_walls.push_back(t.total_s);
     }
 
     // Mean phase walls across episodes (real chrono measurements).
@@ -341,6 +708,8 @@ int main(int argc, char* argv[])
     timed.phase2_s = sum_p2 * inv_ep;
     timed.phase3_s = sum_p3 * inv_ep;
     timed.total_s = sum_tot * inv_ep;
+    const double episode_cv = CoeffVar(episode_walls);
+    const size_t peak_rss_kib = std::max(PeakRssKiB(), rss_before);
 
     // --- G3: k-curve proxy — StoreAll vs StoreOnlyX0 wall ratio (toy) ---
     const auto k_header = MakeHeader(42);
@@ -358,11 +727,59 @@ int main(int argc, char* argv[])
         digests_stable = false; // checkpoint must be digest-invariant
     }
 
+    // Optional Resident / Checkpointed / Streamed mode sweep (RCExecMode).
+    UniValue mode_sweep(UniValue::VOBJ);
+    if (args.mode_sweep) {
+        const auto modes = std::vector<std::pair<const char*, rc::RCExecMode>>{
+            {"Resident", rc::RCExecMode::Resident},
+            {"Checkpointed", rc::RCExecMode::Checkpointed},
+            {"Streamed", rc::RCExecMode::Streamed},
+        };
+        UniValue rows(UniValue::VARR);
+        uint256 dig0;
+        bool first = true;
+        bool modes_match = true;
+        double wall_res = 0.0, wall_stream = 0.0;
+        for (const auto& [name, mode] : modes) {
+            const auto opt = rc::OptionsForExecMode(mode);
+            rc::RCEpisodeTiming tm{};
+            const size_t rss0 = PeakRssKiB();
+            const uint256 d =
+                rc::RecomputeResidentCurriculumReference(k_header, params, 0, opt, nullptr, &tm);
+            const size_t rss1 = PeakRssKiB();
+            if (first) {
+                dig0 = d;
+                first = false;
+            } else if (d != dig0) {
+                modes_match = false;
+                digests_stable = false;
+            }
+            if (std::string(name) == "Resident") wall_res = tm.total_s;
+            if (std::string(name) == "Streamed") wall_stream = tm.total_s;
+            UniValue row(UniValue::VOBJ);
+            row.pushKV("mode", name);
+            row.pushKV("wall_s", tm.total_s);
+            row.pushKV("phase1_s", tm.phase1_s);
+            row.pushKV("phase2_s", tm.phase2_s);
+            row.pushKV("phase3_s", tm.phase3_s);
+            row.pushKV("peak_rss_kib", static_cast<uint64_t>(std::max(rss0, rss1)));
+            row.pushKV("digest", d.GetHex());
+            rows.push_back(row);
+        }
+        mode_sweep.pushKV("digests_match", modes_match);
+        mode_sweep.pushKV("modes", rows);
+        // Forced Streamed vs Resident ratio (paging cost ≥ 1.0 expected).
+        if (wall_res > 0.0) {
+            mode_sweep.pushKV("streamed_over_resident", wall_stream / wall_res);
+        }
+    }
+
     const bool g1_pass = digests_stable && args.episodes > 0;
     std::cout << "  ExtractMX:  " << (g1_pass ? "pass" : "fail")
               << " digests_stable=" << (digests_stable ? "true" : "false") << "\n";
     std::cout << "  phase_wall: p1=" << timed.phase1_s << "s p2=" << timed.phase2_s
               << "s p3=" << timed.phase3_s << "s total=" << timed.total_s << "s\n";
+    std::cout << "  episode_cv: " << episode_cv << " peak_rss_kib=" << peak_rss_kib << "\n";
 
     const double wall_all = t_all.total_s > 0 ? t_all.total_s : timed.total_s;
     const double wall_x0 = t_x0.total_s > 0 ? t_x0.total_s : wall_all;
@@ -401,8 +818,8 @@ int main(int argc, char* argv[])
         UniValue pt(UniValue::VOBJ);
         pt.pushKV("working_set_bytes", footprint);
         pt.pushKV("wall_s", timed.total_s);
-        pt.pushKV("dims", "toy");
-        pt.pushKV("note", "Single toy working-set point; not a 64→256 MB cliff sweep.");
+        pt.pushKV("dims", args.medium ? "medium" : "toy");
+        pt.pushKV("note", "Single working-set point; not a 64→256 MB cliff sweep.");
         residency.push_back(pt);
     }
 
@@ -463,6 +880,18 @@ int main(int argc, char* argv[])
                           "production dims. MAC-count / replay_s_heuristic projections "
                           "are NOT EVIDENCE and must never raise nMatMulRCHeight.");
 
+    UniValue run_variance(UniValue::VOBJ);
+    run_variance.pushKV("episode_cv", episode_cv);
+    run_variance.pushKV("n_runs", static_cast<uint64_t>(args.episodes));
+    run_variance.pushKV("note",
+                        "Coefficient of variation across episode walls in this process. "
+                        "Campaign harness aggregates cross-process variance separately.");
+
+    std::string tip = args.source_revision;
+    if (tip.empty()) {
+        if (const char* env = std::getenv("BTX_SOURCE_REVISION")) tip = env;
+    }
+
     UniValue root(UniValue::VOBJ);
     root.pushKV("tool", "rc-episode-harness");
     root.pushKV("schema_version", 2);
@@ -470,7 +899,7 @@ int main(int argc, char* argv[])
     root.pushKV("device_id", device_id);
     root.pushKV("backend", backend_resolved);
     root.pushKV("backend_requested", args.backend);
-    root.pushKV("profile", "episode");
+    root.pushKV("profile", args.coupled ? "coupled" : "episode");
     root.pushKV("mem_cap_bytes", args.mem_cap);
     root.pushKV("toy", args.toy);
     root.pushKV("medium", args.medium);
@@ -480,6 +909,12 @@ int main(int argc, char* argv[])
     root.pushKV("device_resident", false);
     root.pushKV("native_path_eligible",
                 selfqual.native_mxfp4_qualified || selfqual.native_fp8_qualified);
+    if (!tip.empty()) {
+        root.pushKV("source_revision", tip);
+        root.pushKV("git_tip", tip);
+    }
+    root.pushKV("peak_rss_kib", static_cast<uint64_t>(peak_rss_kib));
+    root.pushKV("run_variance", run_variance);
     root.pushKV("params", ParamsJson(params));
     root.pushKV("working_set_bytes_est", footprint);
     root.pushKV("extractmx_self_qual", qual);
@@ -488,10 +923,14 @@ int main(int argc, char* argv[])
     root.pushKV("residency_sweep", residency);
     root.pushKV("allocation_cap_verdicts", caps);
     root.pushKV("verifier_floor", verifier_floor);
+    if (args.mode_sweep) root.pushKV("exec_mode_sweep", mode_sweep);
+    root.pushKV("gpu_campaign_present", false);
+    root.pushKV("nvlink_campaign_present", false);
     root.pushKV("consensus_note",
                 "nMatMulRCHeight remains INT32_MAX; ENC_RC activation is NO-GO. "
                 "This harness never recommends raising consensus height. "
-                "Projections/MAC estimates are NOT EVIDENCE for rc-gate GO.");
+                "Projections/MAC estimates are NOT EVIDENCE for rc-gate GO. "
+                "Missing GPU/NVLink campaigns are Stage G blockers.");
 
     std::ofstream ofs(args.out_path, std::ios::trunc);
     if (!ofs) {

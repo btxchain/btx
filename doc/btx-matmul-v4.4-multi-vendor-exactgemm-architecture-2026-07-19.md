@@ -130,6 +130,22 @@ The same host proof gate and boundary tests apply. This matches the documented N
 
 **Honest stubs (non-Apple CI):** `matmul_v4_lt_accel_stub.cpp` + tensor_gemm stub under `!BTX_ENABLE_METAL` decline all entry points; tests expect TensorOps unavailable.
 
+## ENC_RC coupled local GEMM (Stage C)
+
+Coupled-puzzle lobe GEMMs (`1×W · W×W → 1×W` int8 ExactGemm) reuse the same
+vendor `LaunchGemmS8S8` slots as Phase-2 RC:
+
+| Path | Behavior |
+|---|---|
+| Consensus REJECT / spot-check | Empty `ExactGemmBackend` → CPU `ExactGemmS8S8` |
+| Mining / `matmul-v4-rc-harness --coupled` | `MakeResolvedExactGemmBackendForRC()` → CUDA/HIP/Metal `LaunchGemmS8S8` after `ProbeRCSelfQual`; fail-closed to CPU |
+| Probe | `ProbeRCCoupledDevice()` (`matmul_v4_rc_coupled_device.*`) — skip-friendly when no GPU; never sets `native_mxfp4` / `native_fp8` |
+
+Vendor stubs (`cuda`/`hip`/`metal` `*_stub.cpp` when the corresponding
+`BTX_ENABLE_*` is OFF) keep `LaunchGemmS8S8` returning false so the resolve
+path selects CPU. GPU throughput for coupled remains **SILICON-GATED**; CPU
+campaign timing is measured separately (Stage G).
+
 ## Production wiring
 
 `SolveMatMulV4LT` now always resolves an `ExactGemmBackend`, including the LT-only TPU/Trainium choice while the full digest backend remains CPU. Full CUDA/HIP/Metal/Ascend backends keep their existing dispatch. Phase-B accelerated winners are re-sealed with the CPU reference; Phase-A winners already receive the unconditional CPU digest reseal.

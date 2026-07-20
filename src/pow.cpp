@@ -5791,6 +5791,19 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Stage C coupled puzzle — NOT wired into mining / GetMatMulEncodingProfile.
+//
+// Public APIs live in matmul/matmul_v4_rc_coupled.h:
+//   RecomputeCoupledPuzzleReference / MineCoupledPuzzle
+// There is no MatMulEncodingProfile enum value for coupled, and
+// nMatMulRCHeight remains INT32_MAX. Do NOT add a SolveMatMulV4RCCoupled
+// dispatch arm here until a deliberate profile cutover exists. A future
+// SolveMatMulV4RCCoupled would grind via MineCoupledPuzzle + CPU reseal
+// (mirroring SolveMatMulV4RC) but must stay unreachable from
+// GetMatMulEncodingProfile.
+// ---------------------------------------------------------------------------
+
 /** ENC_RC / Resident Curriculum miner: grind nonces through MineRCEpisode.
  *  P0.2: CPU-reseal WINNERS only (losers must not pay a second full episode). */
 static bool SolveMatMulV4RC(CBlockHeader& block,

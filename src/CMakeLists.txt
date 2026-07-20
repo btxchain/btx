@@ -370,6 +370,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_lt_mx_exact.cpp
   matmul/matmul_v4_rc.cpp
   matmul/matmul_v4_rc_coupled.cpp
+  matmul/matmul_v4_rc_coupled_device.cpp
   matmul/matmul_v4_rc_distributed.cpp
   matmul/matmul_v4_rc_transcript.cpp
   matmul/matmul_v4_rc_mx_layout.cpp

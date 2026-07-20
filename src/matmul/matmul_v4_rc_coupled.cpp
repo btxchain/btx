@@ -14,6 +14,8 @@
 #include <span.h>
 
 #include <cassert>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -74,13 +76,6 @@ public:
         return v;
     }
 
-    uint64_t NextU64()
-    {
-        const uint64_t lo = NextU32();
-        const uint64_t hi = NextU32();
-        return lo | (hi << 32);
-    }
-
 private:
     void Refill()
     {
@@ -99,10 +94,10 @@ private:
     unsigned char m_block[32]{};
 };
 
-uint256 BarrierRoot(uint32_t barrier, const std::array<int8_t, kRCCoupStateBytes>& state)
+uint256 BarrierRoot(uint32_t barrier, const std::vector<int8_t>& state)
 {
     std::vector<unsigned char> buf;
-    buf.reserve((sizeof(kRCCoupBarrierTag) - 1) + 4 + kRCCoupStateBytes);
+    buf.reserve((sizeof(kRCCoupBarrierTag) - 1) + 4 + state.size());
     buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCCoupBarrierTag),
                reinterpret_cast<const unsigned char*>(kRCCoupBarrierTag) +
                    sizeof(kRCCoupBarrierTag) - 1);
@@ -110,18 +105,38 @@ uint256 BarrierRoot(uint32_t barrier, const std::array<int8_t, kRCCoupStateBytes
     WriteLE32(le, barrier);
     buf.insert(buf.end(), le, le + 4);
     buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(state.data()),
-               reinterpret_cast<const unsigned char*>(state.data()) + kRCCoupStateBytes);
+               reinterpret_cast<const unsigned char*>(state.data()) + state.size());
     return Sha256dBytes(buf.data(), buf.size());
 }
 
-uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages)
+uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages, uint32_t bank_pages,
+                       uint32_t lobe_width)
 {
     CSHA256 outer;
     outer.Write(reinterpret_cast<const unsigned char*>(kRCCoupBankTag),
                 sizeof(kRCCoupBankTag) - 1);
-    for (uint32_t p = 0; p < kRCCoupBankPages; ++p) {
-        assert(pages[p].size() == static_cast<size_t>(kRCCoupLobeWidth) * kRCCoupLobeWidth);
+    const size_t page_bytes = static_cast<size_t>(lobe_width) * lobe_width;
+    for (uint32_t p = 0; p < bank_pages; ++p) {
+        assert(pages[p].size() == page_bytes);
         outer.Write(reinterpret_cast<const unsigned char*>(pages[p].data()), pages[p].size());
+    }
+    uint8_t d1[CSHA256::OUTPUT_SIZE];
+    outer.Finalize(d1);
+    uint8_t d2[CSHA256::OUTPUT_SIZE];
+    CSHA256().Write(d1, sizeof(d1)).Finalize(d2);
+    return uint256{Span<const unsigned char>{d2, sizeof(d2)}};
+}
+
+/** Stream pages into the hasher without retaining the full bank (Streamed). */
+uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
+                                const RCCoupParams& params)
+{
+    CSHA256 outer;
+    outer.Write(reinterpret_cast<const unsigned char*>(kRCCoupBankTag),
+                sizeof(kRCCoupBankTag) - 1);
+    for (uint32_t p = 0; p < params.bank_pages; ++p) {
+        const auto page = DeriveCoupledBankPage(header, height, p, params);
+        outer.Write(reinterpret_cast<const unsigned char*>(page.data()), page.size());
     }
     uint8_t d1[CSHA256::OUTPUT_SIZE];
     outer.Finalize(d1);
@@ -134,11 +149,11 @@ uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages)
  * C6 pattern 0 — hypercube butterfly (ascending strides), int64 sum/diff.
  * Indices are XOR-relabeled by `mask` so the cut is nonce-dependent.
  */
-void MixButterflyAscending(std::array<int64_t, kRCCoupStateBytes>& s, uint32_t mask)
+void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
 {
-    for (uint32_t stage = 0; (uint32_t{1} << stage) < kRCCoupStateBytes; ++stage) {
+    for (uint32_t stage = 0; (uint32_t{1} << stage) < n; ++stage) {
         const uint32_t stride = uint32_t{1} << stage;
-        for (uint32_t i = 0; i < kRCCoupStateBytes; ++i) {
+        for (uint32_t i = 0; i < n; ++i) {
             const uint32_t j = i ^ stride;
             if (i >= j) continue;
             const uint32_t pi = i ^ mask;
@@ -156,20 +171,22 @@ void MixButterflyAscending(std::array<int64_t, kRCCoupStateBytes>& s, uint32_t m
  * with a rotate-relabel so partitions that minimize pattern 0 do not minimize
  * this cut. Integer sums/diffs only.
  */
-void MixButterflyDescending(std::array<int64_t, kRCCoupStateBytes>& s, uint32_t mask)
+void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
 {
-    auto rotl7 = [](uint32_t x, uint32_t r) -> uint32_t {
-        r %= 7; // log2(128)
-        const uint32_t bits = 7;
-        return ((x << r) | (x >> (bits - r))) & (kRCCoupStateBytes - 1);
+    assert(n >= 2 && (n & (n - 1)) == 0);
+    uint32_t bits = 0;
+    for (uint32_t t = n; t > 1; t >>= 1) ++bits;
+    auto rotl = [bits, n](uint32_t x, uint32_t r) -> uint32_t {
+        r %= bits;
+        return ((x << r) | (x >> (bits - r))) & (n - 1);
     };
-    for (int stage = 6; stage >= 0; --stage) {
+    for (int stage = static_cast<int>(bits) - 1; stage >= 0; --stage) {
         const uint32_t stride = uint32_t{1} << static_cast<uint32_t>(stage);
-        for (uint32_t i = 0; i < kRCCoupStateBytes; ++i) {
+        for (uint32_t i = 0; i < n; ++i) {
             const uint32_t j = i ^ stride;
             if (i >= j) continue;
-            const uint32_t pi = rotl7(i ^ mask, 3);
-            const uint32_t pj = rotl7(j ^ mask, 3);
+            const uint32_t pi = rotl(i ^ mask, 3);
+            const uint32_t pj = rotl(j ^ mask, 3);
             const int64_t a = s[pi];
             const int64_t b = s[pj];
             // Distinct linear form from pattern 0 (still exact integer).
@@ -179,100 +196,207 @@ void MixButterflyDescending(std::array<int64_t, kRCCoupStateBytes>& s, uint32_t 
     }
 }
 
-void ApplyAllToAllMix(std::array<int64_t, kRCCoupStateBytes>& s, const uint256& sigma,
-                      uint32_t barrier)
+void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t barrier,
+                      uint32_t n)
 {
     const uint256 mix_seed = Sha256TaggedU32(kRCCoupMixTag, sizeof(kRCCoupMixTag) - 1, sigma, barrier);
     ShaXof xof(mix_seed);
-    const uint32_t mask = xof.NextU32() & (kRCCoupStateBytes - 1);
+    const uint32_t mask = xof.NextU32() & (n - 1);
     const uint32_t pattern = barrier % kRCCoupMixPatterns;
     if (pattern == 0) {
-        MixButterflyAscending(s, mask);
+        MixButterflyAscending(s, mask, n);
     } else {
-        MixButterflyDescending(s, mask);
+        MixButterflyDescending(s, mask, n);
     }
 }
 
-void ApplyBalancedPermutation(std::array<int64_t, kRCCoupStateBytes>& s,
-                              const std::array<uint32_t, kRCCoupStateBytes>& pi)
+void ApplyBalancedPermutation(std::vector<int64_t>& s, const std::vector<uint32_t>& pi)
 {
-    std::array<int64_t, kRCCoupStateBytes> tmp{};
-    for (uint32_t i = 0; i < kRCCoupStateBytes; ++i) {
+    std::vector<int64_t> tmp(s.size());
+    for (uint32_t i = 0; i < static_cast<uint32_t>(s.size()); ++i) {
         tmp[pi[i]] = s[i];
     }
-    s = tmp;
+    s = std::move(tmp);
 }
 
 /**
  * Non-affine Extract (C3.d / C5): ExtractMXTileInt64 per 32-wide tile.
  * Lookup-argument-shaped for Stage E (see header note).
  */
-void ExtractActiveState(const uint256& prf_key, const std::array<int64_t, kRCCoupStateBytes>& raw,
-                        std::array<int8_t, kRCCoupStateBytes>& out)
+void ExtractActiveState(const uint256& prf_key, const std::vector<int64_t>& raw,
+                        std::vector<int8_t>& out)
 {
-    const uint32_t n_tiles = kRCCoupStateBytes / kRCMxBlockLen;
+    assert(raw.size() == out.size());
+    assert(raw.size() % kRCMxBlockLen == 0);
+    const uint32_t n_tiles = static_cast<uint32_t>(raw.size() / kRCMxBlockLen);
     for (uint32_t t = 0; t < n_tiles; ++t) {
         ExtractMXTileInt64(prf_key, /*i=*/0, /*bj=*/t, raw.data() + t * kRCMxBlockLen,
                            out.data() + t * kRCMxBlockLen);
     }
 }
 
-/** Local lobe GEMM: 1×32 · 32×32 → 1×32 int32, widened to int64 (C3.a). */
-void LobeLocalGemm(const int8_t* lobe_row, const std::vector<int8_t>& page,
-                   int64_t* out32)
+/**
+ * Device-first ExactGemmS8S8 (mirrors RC ExactGemmS8S8Dispatched):
+ * successful device output replaces CPU; empty/failing backend → CPU.
+ * Wrong-but-successful backends are NOT silently rescued.
+ */
+std::vector<int32_t> ExactGemmS8S8Dispatched(const lt::ExactGemmBackend& gemm,
+                                             const std::vector<int8_t>& L,
+                                             const std::vector<int8_t>& R, uint32_t rows,
+                                             uint32_t inner, uint32_t cols)
 {
-    std::vector<int8_t> L(lobe_row, lobe_row + kRCCoupLobeWidth);
-    const auto y = lt::ExactGemmS8S8(L, page, /*rows=*/1, kRCCoupLobeWidth, kRCCoupLobeWidth);
-    assert(y.size() == kRCCoupLobeWidth);
-    for (uint32_t c = 0; c < kRCCoupLobeWidth; ++c) {
-        out32[c] = static_cast<int64_t>(y[c]);
+    const auto run_cpu = [&]() {
+        return lt::ExactGemmS8S8(L, R, rows, inner, cols);
+    };
+    if (gemm.gemm_s8s8 == nullptr) {
+        return run_cpu();
+    }
+
+    std::vector<int32_t> device;
+    bool device_ok = false;
+    try {
+        device_ok = gemm.gemm_s8s8(L, R, rows, inner, cols, device) &&
+                    device.size() == static_cast<size_t>(rows) * cols;
+    } catch (...) {
+        device_ok = false;
+    }
+    if (!device_ok) {
+        return run_cpu();
+    }
+
+    static const bool compare =
+        [] {
+            const char* e = std::getenv("BTX_RC_EXACT_GEMM_COMPARE");
+            return e != nullptr && e[0] == '1' && e[1] == '\0';
+        }();
+    if (compare) {
+        const std::vector<int32_t> cpu = run_cpu();
+        if (device != cpu) return cpu;
+    }
+    return device;
+}
+
+/** Local lobe GEMM: 1×W · W×W → 1×W int32, widened to int64 (C3.a). */
+void LobeLocalGemm(const int8_t* lobe_row, const std::vector<int8_t>& page, uint32_t lobe_width,
+                   int64_t* out_w, const lt::ExactGemmBackend& gemm)
+{
+    std::vector<int8_t> L(lobe_row, lobe_row + lobe_width);
+    const auto y = ExactGemmS8S8Dispatched(gemm, L, page, /*rows=*/1, lobe_width, lobe_width);
+    assert(y.size() == lobe_width);
+    for (uint32_t c = 0; c < lobe_width; ++c) {
+        out_w[c] = static_cast<int64_t>(y[c]);
+    }
+}
+
+uint256 BankRootSeed(const CBlockHeader& header, int32_t height)
+{
+    CBlockHeader tmpl = header;
+    tmpl.nNonce64 = 0;
+    tmpl.nNonce = 0;
+    const uint256 tmpl_hash = matmul::ComputeMatMulHeaderHash(tmpl);
+    return Sha256TaggedU32(kRCCoupBankTag, sizeof(kRCCoupBankTag) - 1, tmpl_hash,
+                           static_cast<uint32_t>(height));
+}
+
+void MaybeZeroSkipPage(std::vector<int8_t>& page, uint32_t page_index,
+                       const RCCoupOptions& options)
+{
+    if (options.skip_bank_page && options.skip_page_index == page_index) {
+        std::fill(page.begin(), page.end(), int8_t{0});
     }
 }
 
 } // namespace
 
-std::vector<std::vector<int8_t>> DeriveCoupledBankPages(const CBlockHeader& header, int32_t height)
+bool ValidateRCCoupParams(const RCCoupParams& p)
 {
-    // Template-scoped: header hash with nNonce64 cleared conceptually via the
-    // existing template-hash path when available; toy binds template hash + height.
-    CBlockHeader tmpl = header;
-    tmpl.nNonce64 = 0;
-    tmpl.nNonce = 0;
-    const uint256 tmpl_hash = matmul::ComputeMatMulHeaderHash(tmpl);
-    const uint256 bank_root_seed =
-        Sha256TaggedU32(kRCCoupBankTag, sizeof(kRCCoupBankTag) - 1, tmpl_hash,
-                        static_cast<uint32_t>(height));
+    if (p.barriers == 0 || p.lobes == 0 || p.lobe_width == 0 || p.bank_pages == 0) {
+        return false;
+    }
+    if (p.lobe_width % 32 != 0) return false;
+    const uint32_t n = p.StateBytes();
+    if (n % 32 != 0) return false;
+    if ((n & (n - 1)) != 0) return false; // power of two for butterfly
+    return true;
+}
 
-    std::vector<std::vector<int8_t>> pages(kRCCoupBankPages);
-    for (uint32_t p = 0; p < kRCCoupBankPages; ++p) {
-        const uint256 page_seed = Sha256TaggedU32(kRCCoupBankTag, sizeof(kRCCoupBankTag) - 1,
-                                                  bank_root_seed, p);
-        pages[p] = ExpandMxDequantInt8(page_seed, kRCCoupLobeWidth, kRCCoupLobeWidth);
+RCCoupParams MakeToyRCCoupParams()
+{
+    RCCoupParams p;
+    p.barriers = kRCCoupRounds;
+    p.lobes = kRCCoupLobes;
+    p.lobe_width = kRCCoupLobeWidth;
+    p.bank_pages = kRCCoupBankPages;
+    return p;
+}
+
+RCCoupParams MakeMediumRCCoupParams()
+{
+    RCCoupParams p;
+    p.barriers = 8;
+    p.lobes = 8;
+    p.lobe_width = 64;
+    p.bank_pages = 32;
+    return p;
+}
+
+std::vector<int8_t> DeriveCoupledBankPage(const CBlockHeader& header, int32_t height,
+                                          uint32_t page, const RCCoupParams& params)
+{
+    assert(page < params.bank_pages);
+    const uint256 bank_root_seed = BankRootSeed(header, height);
+    const uint256 page_seed =
+        Sha256TaggedU32(kRCCoupBankTag, sizeof(kRCCoupBankTag) - 1, bank_root_seed, page);
+    return ExpandMxDequantInt8(page_seed, params.lobe_width, params.lobe_width);
+}
+
+std::vector<std::vector<int8_t>> DeriveCoupledBankPages(const CBlockHeader& header,
+                                                        int32_t height,
+                                                        const RCCoupParams& params)
+{
+    std::vector<std::vector<int8_t>> pages(params.bank_pages);
+    for (uint32_t p = 0; p < params.bank_pages; ++p) {
+        pages[p] = DeriveCoupledBankPage(header, height, p, params);
     }
     return pages;
 }
 
-std::array<uint256, kRCCoupLobes> DeriveCoupledLobeSeeds(const uint256& sigma)
+std::vector<std::vector<int8_t>> DeriveCoupledBankPages(const CBlockHeader& header,
+                                                        int32_t height)
 {
-    std::array<uint256, kRCCoupLobes> out{};
-    for (uint32_t ell = 0; ell < kRCCoupLobes; ++ell) {
+    return DeriveCoupledBankPages(header, height, MakeToyRCCoupParams());
+}
+
+std::vector<uint256> DeriveCoupledLobeSeeds(const uint256& sigma, const RCCoupParams& params)
+{
+    std::vector<uint256> out(params.lobes);
+    for (uint32_t ell = 0; ell < params.lobes; ++ell) {
         out[ell] = Sha256TaggedU32(kRCCoupLobeTag, sizeof(kRCCoupLobeTag) - 1, sigma, ell);
     }
     return out;
 }
 
-std::array<uint32_t, kRCCoupStateBytes> DeriveCoupledBalancedPermutation(const uint256& sigma,
-                                                                         uint32_t barrier)
+std::array<uint256, kRCCoupLobes> DeriveCoupledLobeSeeds(const uint256& sigma)
 {
+    const auto v = DeriveCoupledLobeSeeds(sigma, MakeToyRCCoupParams());
+    std::array<uint256, kRCCoupLobes> out{};
+    for (uint32_t i = 0; i < kRCCoupLobes; ++i) out[i] = v[i];
+    return out;
+}
+
+std::vector<uint32_t> DeriveCoupledBalancedPermutation(const uint256& sigma, uint32_t barrier,
+                                                       const RCCoupParams& params)
+{
+    const uint32_t n = params.StateBytes();
     const uint256 perm_seed =
         Sha256TaggedU32(kRCCoupPermTag, sizeof(kRCCoupPermTag) - 1, sigma, barrier);
     ShaXof xof(perm_seed);
-    std::array<uint32_t, kRCCoupStateBytes> pi{};
-    for (uint32_t i = 0; i < kRCCoupStateBytes; ++i) {
+    std::vector<uint32_t> pi(n);
+    for (uint32_t i = 0; i < n; ++i) {
         pi[i] = i;
     }
     // Fisher–Yates: every index hit exactly once; fixed N iterations (C4).
-    for (uint32_t i = kRCCoupStateBytes - 1; i > 0; --i) {
+    for (uint32_t i = n - 1; i > 0; --i) {
         const uint32_t j = xof.NextU32() % (i + 1);
         const uint32_t tmp = pi[i];
         pi[i] = pi[j];
@@ -281,59 +405,114 @@ std::array<uint32_t, kRCCoupStateBytes> DeriveCoupledBalancedPermutation(const u
     return pi;
 }
 
-bool IsBalancedPermutation(const std::array<uint32_t, kRCCoupStateBytes>& pi)
+std::array<uint32_t, kRCCoupStateBytes> DeriveCoupledBalancedPermutation(const uint256& sigma,
+                                                                         uint32_t barrier)
 {
-    std::array<bool, kRCCoupStateBytes> seen{};
-    for (uint32_t i = 0; i < kRCCoupStateBytes; ++i) {
-        if (pi[i] >= kRCCoupStateBytes) return false;
+    const auto v = DeriveCoupledBalancedPermutation(sigma, barrier, MakeToyRCCoupParams());
+    std::array<uint32_t, kRCCoupStateBytes> out{};
+    for (uint32_t i = 0; i < kRCCoupStateBytes; ++i) out[i] = v[i];
+    return out;
+}
+
+bool IsBalancedPermutation(const std::vector<uint32_t>& pi, uint32_t n)
+{
+    if (pi.size() != n) return false;
+    std::vector<bool> seen(n, false);
+    for (uint32_t i = 0; i < n; ++i) {
+        if (pi[i] >= n) return false;
         if (seen[pi[i]]) return false;
         seen[pi[i]] = true;
     }
     return true;
 }
 
+bool IsBalancedPermutation(const std::array<uint32_t, kRCCoupStateBytes>& pi)
+{
+    return IsBalancedPermutation(
+        std::vector<uint32_t>(pi.begin(), pi.end()), kRCCoupStateBytes);
+}
+
 uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t height,
                                         const RCCoupOptions& options)
 {
+    return RecomputeCoupledPuzzleReference(header, height, MakeToyRCCoupParams(), options, {},
+                                           nullptr);
+}
+
+uint256 MineCoupledPuzzle(const CBlockHeader& header, int32_t height,
+                          const RCCoupParams& params, const lt::ExactGemmBackend& gemm,
+                          const RCCoupOptions& options)
+{
+    return RecomputeCoupledPuzzleReference(header, height, params, options, gemm, nullptr);
+}
+
+uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t height,
+                                        const RCCoupParams& params,
+                                        const RCCoupOptions& options,
+                                        const lt::ExactGemmBackend& gemm,
+                                        RCCoupTiming* out_timing)
+{
+    assert(ValidateRCCoupParams(params));
+    const auto t0 = std::chrono::steady_clock::now();
+    const uint32_t n = params.StateBytes();
     const uint256 sigma = matmul::v4::DeriveSigma(header);
 
-    // Bank commitment uses the pristine epoch/template pages (before any
-    // skip_page test mutation) so the episode binds the honest bank.
-    const auto pages_commit = DeriveCoupledBankPages(header, height);
-    const uint256 bank_root = BankCommitment(pages_commit);
-
-    // Resident path keeps pages; Checkpointed re-derives per barrier (paging).
-    std::vector<std::vector<int8_t>> pages;
+    const bool streamed = options.mode == RCCoupExecMode::Streamed;
     const bool checkpointed = options.mode == RCCoupExecMode::Checkpointed;
-    if (!checkpointed) {
-        pages = pages_commit;
-        if (options.skip_bank_page && options.skip_page_index < kRCCoupBankPages) {
-            std::fill(pages[options.skip_page_index].begin(),
-                      pages[options.skip_page_index].end(), int8_t{0});
+    // SequentialLobes and Resident both keep a full bank; Resident additionally
+    // keeps active state across barriers without re-deriving (same as Sequential
+    // for the toy CPU path — digests identical by construction).
+    const bool retain_bank = options.mode == RCCoupExecMode::SequentialLobes ||
+                             options.mode == RCCoupExecMode::Resident;
+
+    // Bank commitment binds the honest epoch/template pages (before any
+    // skip_page test mutation). Streamed hashes pages without retaining them.
+    uint256 bank_root;
+    std::vector<std::vector<int8_t>> pages;
+    {
+        const auto t_bank0 = std::chrono::steady_clock::now();
+        if (streamed) {
+            bank_root = BankCommitmentStreaming(header, height, params);
+        } else {
+            const auto pages_commit = DeriveCoupledBankPages(header, height, params);
+            bank_root = BankCommitment(pages_commit, params.bank_pages, params.lobe_width);
+            if (retain_bank) {
+                pages = pages_commit;
+                if (options.skip_bank_page && options.skip_page_index < params.bank_pages) {
+                    std::fill(pages[options.skip_page_index].begin(),
+                              pages[options.skip_page_index].end(), int8_t{0});
+                }
+            }
+        }
+        if (out_timing) {
+            out_timing->bank_s = std::chrono::duration<double>(
+                                     std::chrono::steady_clock::now() - t_bank0)
+                                     .count();
         }
     }
 
-    const auto lobe_seeds = DeriveCoupledLobeSeeds(sigma);
-    std::array<int8_t, kRCCoupStateBytes> state{};
-    for (uint32_t ell = 0; ell < kRCCoupLobes; ++ell) {
-        // Nonce-fresh lobe activation (C2): first row of a 32×32 MX tile
+    const auto lobe_seeds = DeriveCoupledLobeSeeds(sigma, params);
+    std::vector<int8_t> state(n);
+    for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+        // Nonce-fresh lobe activation (C2): first row of a W×W MX tile
         // (ExpandMxDequantInt8 requires rows % 32 == 0).
         const auto tile =
-            ExpandMxDequantInt8(lobe_seeds[ell], kRCCoupLobeWidth, kRCCoupLobeWidth);
-        assert(tile.size() == static_cast<size_t>(kRCCoupLobeWidth) * kRCCoupLobeWidth);
-        std::memcpy(state.data() + ell * kRCCoupLobeWidth, tile.data(), kRCCoupLobeWidth);
+            ExpandMxDequantInt8(lobe_seeds[ell], params.lobe_width, params.lobe_width);
+        assert(tile.size() == static_cast<size_t>(params.lobe_width) * params.lobe_width);
+        std::memcpy(state.data() + ell * params.lobe_width, tile.data(), params.lobe_width);
     }
 
-    std::array<uint256, kRCCoupRounds> barrier_roots{};
+    std::vector<uint256> barrier_roots(params.barriers);
     // Checkpoint buffer: only Extracted active state survives barrier boundaries.
-    std::array<int8_t, kRCCoupStateBytes> checkpoint = state;
+    std::vector<int8_t> checkpoint = state;
 
-    for (uint32_t b = 0; b < kRCCoupRounds; ++b) {
+    const auto t_bar0 = std::chrono::steady_clock::now();
+    for (uint32_t b = 0; b < params.barriers; ++b) {
         if (checkpointed) {
             // Restore from last barrier checkpoint and re-page the bank.
             state = checkpoint;
-            pages = DeriveCoupledBankPages(header, height);
-            if (options.skip_bank_page && options.skip_page_index < kRCCoupBankPages) {
+            pages = DeriveCoupledBankPages(header, height, params);
+            if (options.skip_bank_page && options.skip_page_index < params.bank_pages) {
                 std::fill(pages[options.skip_page_index].begin(),
                           pages[options.skip_page_index].end(), int8_t{0});
             }
@@ -343,26 +522,38 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
             // Identity pass — shortcut detection must change the digest.
             barrier_roots[b] = BarrierRoot(b, state);
             checkpoint = state;
+            if (checkpointed) {
+                pages.clear();
+                pages.shrink_to_fit();
+            }
             continue;
         }
 
-        std::array<int64_t, kRCCoupStateBytes> acc{};
+        std::vector<int64_t> acc(n, 0);
 
         // C3.a — local exact int8 GEMM per lobe vs epoch bank page (fixed work).
         // Consensus lobe order is always 0..L-1 (scheduling-invariant digest).
-        for (uint32_t ell = 0; ell < kRCCoupLobes; ++ell) {
-            const uint32_t page_id = (b + ell) % kRCCoupBankPages;
-            LobeLocalGemm(state.data() + ell * kRCCoupLobeWidth, pages[page_id],
-                          acc.data() + ell * kRCCoupLobeWidth);
+        for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+            const uint32_t page_id = (b + ell) % params.bank_pages;
+            if (streamed) {
+                auto page = DeriveCoupledBankPage(header, height, page_id, params);
+                MaybeZeroSkipPage(page, page_id, options);
+                LobeLocalGemm(state.data() + ell * params.lobe_width, page, params.lobe_width,
+                              acc.data() + ell * params.lobe_width, gemm);
+                // Drop page immediately (do not retain full bank).
+            } else {
+                LobeLocalGemm(state.data() + ell * params.lobe_width, pages[page_id],
+                              params.lobe_width, acc.data() + ell * params.lobe_width, gemm);
+            }
         }
 
         // C3.b — nonce-derived balanced permutation over full active state.
-        const auto pi = DeriveCoupledBalancedPermutation(sigma, b);
-        assert(IsBalancedPermutation(pi));
+        const auto pi = DeriveCoupledBalancedPermutation(sigma, b, params);
+        assert(IsBalancedPermutation(pi, n));
         ApplyBalancedPermutation(acc, pi);
 
         // C3.c — exact integer all-to-all mix (≥2 nonce-relabeled patterns).
-        ApplyAllToAllMix(acc, sigma, b);
+        ApplyAllToAllMix(acc, sigma, b, n);
 
         // C3.d — non-affine Extract (lookup-argument-shaped for Stage E).
         const uint256 extract_seed =
@@ -376,15 +567,22 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         checkpoint = state;
 
         if (checkpointed) {
-            // Drop resident bank + int64 scratch (already scoped); only checkpoint remains.
+            // Drop resident bank + int64 scratch; only checkpoint remains.
             pages.clear();
             pages.shrink_to_fit();
+            acc.clear();
+            acc.shrink_to_fit();
         }
+    }
+    if (out_timing) {
+        out_timing->barriers_s = std::chrono::duration<double>(
+                                     std::chrono::steady_clock::now() - t_bar0)
+                                     .count();
     }
 
     // episode_digest = SHA256d("BTX_RC_COUP_EPISODE_V1" ‖ bank_root ‖ barrier_roots…)
     std::vector<unsigned char> buf;
-    buf.reserve(sizeof(kRCCoupEpisodeTag) - 1 + 32 + kRCCoupRounds * 32);
+    buf.reserve(sizeof(kRCCoupEpisodeTag) - 1 + 32 + params.barriers * 32);
     buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCCoupEpisodeTag),
                reinterpret_cast<const unsigned char*>(kRCCoupEpisodeTag) +
                    sizeof(kRCCoupEpisodeTag) - 1);
@@ -392,7 +590,12 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
     for (const uint256& root : barrier_roots) {
         buf.insert(buf.end(), root.begin(), root.end());
     }
-    return Sha256dBytes(buf.data(), buf.size());
+    const uint256 digest = Sha256dBytes(buf.data(), buf.size());
+    if (out_timing) {
+        out_timing->total_s =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
+    return digest;
 }
 
 } // namespace matmul::v4::rc

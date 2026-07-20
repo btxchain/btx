@@ -5,6 +5,8 @@
 #ifndef BTX_MATMUL_MATMUL_V4_RC_COUPLED_H
 #define BTX_MATMUL_MATMUL_V4_RC_COUPLED_H
 
+#include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_rc_coupled_device.h>
 #include <primitives/block.h>
 #include <uint256.h>
 
@@ -12,7 +14,7 @@
 #include <cstdint>
 #include <vector>
 
-// ENC_RC FINAL-FORM Stage C — toy-scale coupled puzzle (CPU consensus oracle).
+// ENC_RC FINAL-FORM Stage C — coupled puzzle (CPU consensus oracle).
 //
 // Structural final form of the per-nonce workload:
 //   local exact int8 GEMM per lobe → nonce-derived balanced permutation →
@@ -25,14 +27,14 @@
 //
 // Modes (hardware-neutral; digests identical when consensus lobe order is
 // fixed 0..L-1):
-//   SequentialLobes — Streamed / small-machine path (CPU does lobes in order).
-//   Checkpointed    — barrier-boundary state only; recomputes forward identically.
-// Concurrent lobe execution on a fabric node is the SAME math with the SAME
-// fixed consensus order; single-thread CPU always runs lobes sequentially.
+//   SequentialLobes — keep bank resident; run lobes in order 0..L-1.
+//   Checkpointed    — barrier-boundary Extracted state only; re-page bank.
+//   Streamed        — page bank pages one-at-a-time (do not retain full bank).
+//   Resident        — retain full bank + active lobe state across barriers.
 
 namespace matmul::v4::rc {
 
-/** Toy-scale coupled-puzzle constants (all dims % 32). */
+/** Toy-scale coupled-puzzle constants (frozen; Match MakeToyRCCoupParams()). */
 inline constexpr uint32_t kRCCoupRounds = 4;       // barriers
 inline constexpr uint32_t kRCCoupLobes = 4;        // parallel lobes/heads
 inline constexpr uint32_t kRCCoupLobeWidth = 32;   // fixed width
@@ -55,12 +57,32 @@ inline constexpr char kRCCoupMixTag[] = "BTX_RC_COUP_MIX_V1";
 inline constexpr char kRCCoupExtractTag[] = "BTX_RC_COUP_EXTRACT_V1";
 
 /**
+ * Parametric coupled-puzzle shape. Toy defaults match the frozen constexprs
+ * above (golden digest byte-identical). Medium is CI-safe but larger.
+ */
+struct RCCoupParams {
+    uint32_t barriers{kRCCoupRounds};
+    uint32_t lobes{kRCCoupLobes};
+    uint32_t lobe_width{kRCCoupLobeWidth};
+    uint32_t bank_pages{kRCCoupBankPages};
+
+    [[nodiscard]] uint32_t StateBytes() const { return lobes * lobe_width; }
+};
+
+[[nodiscard]] bool ValidateRCCoupParams(const RCCoupParams& p);
+[[nodiscard]] RCCoupParams MakeToyRCCoupParams();
+/** CI-safe larger shape: barriers=8, lobes=8, lobe_width=64, bank_pages=32. */
+[[nodiscard]] RCCoupParams MakeMediumRCCoupParams();
+
+/**
  * Execution policy — NON-consensus residency/scheduling. Digests MUST match
  * whenever the consensus lobe order 0..L-1 is respected.
  */
 enum class RCCoupExecMode : uint8_t {
-    SequentialLobes = 0, // Streamed / small machine (CPU default)
-    Checkpointed = 1,    // retain barrier Extracted state; recompute forward
+    SequentialLobes = 0, // keep bank; lobes in order (CPU default)
+    Checkpointed = 1,    // retain barrier Extracted state; re-page bank
+    Streamed = 2,        // page bank one-at-a-time; do not retain full bank
+    Resident = 3,        // retain full bank + active lobe state
 };
 
 struct RCCoupOptions {
@@ -73,8 +95,15 @@ struct RCCoupOptions {
     uint32_t skip_page_index{0};
 };
 
+/** Optional wall-clock timing for harness / measurement (not consensus). */
+struct RCCoupTiming {
+    double bank_s{0};
+    double barriers_s{0};
+    double total_s{0};
+};
+
 /**
- * Sole toy consensus ground truth for the coupled puzzle.
+ * Sole consensus ground truth for the coupled puzzle (toy params).
  * sigma = DeriveSigma(header) (SHA256d header path, consistent with RC).
  * Fixed work per barrier — no early exit, no nonce-dependent dimensions (C4).
  */
@@ -82,22 +111,56 @@ struct RCCoupOptions {
                                                       int32_t height = 0,
                                                       const RCCoupOptions& options = {});
 
-/** Epoch/template expert bank: kRCCoupBankPages pages of 32×32 int8 (C1).
- *  Independent of nonce/sigma — conceptually cacheable across attempts. */
+/**
+ * Parametric overload. Optional ExactGemmBackend injects local lobe GEMMs
+ * (empty = CPU ExactGemmS8S8). Device-first via ExactGemmS8S8Dispatched
+ * semantics: successful device output replaces CPU (no silent rescue of a
+ * wrong-but-successful backend). Consensus REJECT passes an empty backend.
+ */
+[[nodiscard]] uint256 RecomputeCoupledPuzzleReference(
+    const CBlockHeader& header, int32_t height, const RCCoupParams& params,
+    const RCCoupOptions& options = {},
+    const matmul::v4::lt::ExactGemmBackend& gemm = {},
+    RCCoupTiming* out_timing = nullptr);
+
+/** Miner entry: same digest as the CPU reference; may inject ExactGemm. */
+[[nodiscard]] uint256 MineCoupledPuzzle(const CBlockHeader& header, int32_t height,
+                                        const RCCoupParams& params,
+                                        const matmul::v4::lt::ExactGemmBackend& gemm = {},
+                                        const RCCoupOptions& options = {});
+
+/** Epoch/template expert bank (toy params). */
 [[nodiscard]] std::vector<std::vector<int8_t>>
 DeriveCoupledBankPages(const CBlockHeader& header, int32_t height);
+
+[[nodiscard]] std::vector<std::vector<int8_t>>
+DeriveCoupledBankPages(const CBlockHeader& header, int32_t height,
+                       const RCCoupParams& params);
+
+/** Single bank page (Streamed path); same seed as DeriveCoupledBankPages[p]. */
+[[nodiscard]] std::vector<int8_t>
+DeriveCoupledBankPage(const CBlockHeader& header, int32_t height, uint32_t page,
+                      const RCCoupParams& params);
 
 /** Nonce-fresh lobe seeds from sigma (C2) — cannot amortize across nonces. */
 [[nodiscard]] std::array<uint256, kRCCoupLobes> DeriveCoupledLobeSeeds(const uint256& sigma);
 
+[[nodiscard]] std::vector<uint256> DeriveCoupledLobeSeeds(const uint256& sigma,
+                                                          const RCCoupParams& params);
+
 /**
- * Nonce-derived balanced permutation π_b over [0, kRCCoupStateBytes).
+ * Nonce-derived balanced permutation π_b over [0, StateBytes).
  * Every output index appears exactly once (bijection). Fixed work — no early exit.
  */
 [[nodiscard]] std::array<uint32_t, kRCCoupStateBytes>
 DeriveCoupledBalancedPermutation(const uint256& sigma, uint32_t barrier);
 
+[[nodiscard]] std::vector<uint32_t>
+DeriveCoupledBalancedPermutation(const uint256& sigma, uint32_t barrier,
+                                 const RCCoupParams& params);
+
 [[nodiscard]] bool IsBalancedPermutation(const std::array<uint32_t, kRCCoupStateBytes>& pi);
+[[nodiscard]] bool IsBalancedPermutation(const std::vector<uint32_t>& pi, uint32_t n);
 
 /**
  * Stage E note — Extract/S-box shape:
@@ -107,6 +170,14 @@ DeriveCoupledBalancedPermutation(const uint256& sigma, uint32_t barrier);
  * a future GKR/sumcheck (linear GEMM + exchange) + lookup column for the
  * Extract transition can treat each (raw64 tile → int8 tile) as a table
  * relation without claiming Freivalds on the Extract itself.
+ */
+
+/**
+ * Multi-backend mining inject (harness / miner-local):
+ *   auto gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+ *   MineCoupledPuzzle(header, height, params, gemm);
+ * CUDA/HIP/Metal LaunchGemmS8S8 when RC self-qual admits; else empty → CPU.
+ * Probe: ProbeRCCoupledDevice() in matmul_v4_rc_coupled_device.h.
  */
 
 } // namespace matmul::v4::rc

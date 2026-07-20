@@ -48,6 +48,8 @@ G4_VERIFY_FRAC_MAX = 0.01
 G4_VARIANCE_MAX = 0.05
 # Kill criteria (doc §8): variance >10% is an automatic fail.
 VARIANCE_KILL = 0.10
+# Stage-I gate 4 (real silicon only): NVLink-vs-PCIe ≥7× on same chips.
+STAGE_I_GATE4_NVLINK_MIN = 7.0
 
 # Evidence kinds / modes that are NEVER admissible for GO.
 _PROJECTION_TOKENS = frozenset(
@@ -111,12 +113,113 @@ def load_reports(paths: list[str]) -> list[dict[str, Any]]:
         except (OSError, ValueError) as e:
             die(f"cannot parse {f}: {e}")
         tool = data.get("tool")
-        if tool not in (None, "rc-episode-harness"):
-            die(f"{f} is not an rc-episode-harness JSON (tool={tool!r})")
+        if tool not in (None, "rc-episode-harness", "rc-stage-g-campaign"):
+            die(f"{f} is not an rc-episode-harness/rc-stage-g-campaign JSON (tool={tool!r})")
+        # Campaign wrappers may embed a child report list — flatten for gating.
+        children = data.get("reports")
+        if tool == "rc-stage-g-campaign" and isinstance(children, list) and children:
+            for i, child in enumerate(children):
+                if not isinstance(child, dict):
+                    continue
+                c = dict(child)
+                c["_file"] = f"{os.path.basename(f)}#child{i}"
+                c["_path"] = f
+                c.setdefault("tool", "rc-episode-harness")
+                # Inherit campaign tip / blockers when child omits them.
+                for key in (
+                    "source_revision",
+                    "git_tip",
+                    "stage_g_blockers",
+                    "gpu_campaign_present",
+                    "nvlink_campaign_present",
+                    "interconnect_sim",
+                    "run_variance",
+                    "device_resident",
+                    "evidence_kind",
+                    "wall_clock_provenance",
+                ):
+                    if key not in c and key in data:
+                        c[key] = data[key]
+                reports.append(c)
+            # Also gate the campaign aggregate itself (walls/variance/residency).
         data["_file"] = os.path.basename(f)
         data["_path"] = f
         reports.append(data)
     return reports
+
+
+def stage_g_campaign_blockers(rep: dict[str, Any]) -> list[str]:
+    """Explicit Stage G blockers (missing GPU / SIMULATED interconnect / etc.)."""
+    blockers: list[str] = []
+    fname = rep["_file"]
+    for b in rep.get("stage_g_blockers") or []:
+        if isinstance(b, str) and b.strip():
+            blockers.append(f"{fname}: {b}")
+    if rep.get("gpu_campaign_present") is False:
+        blockers.append(
+            f"{fname}: GPU campaign absent (device-resident B200/MI355X/5090 walls required)"
+        )
+    if rep.get("nvlink_campaign_present") is False:
+        blockers.append(
+            f"{fname}: NVLink-vs-PCIe silicon campaign absent "
+            f"(Stage-I gate 4 needs ≥{STAGE_I_GATE4_NVLINK_MIN}× on same chips)"
+        )
+    sim = rep.get("interconnect_sim")
+    if isinstance(sim, dict):
+        if sim.get("simulated") is True or sim.get("stage_i_gate4_evidence") is False:
+            factor = _as_float(sim.get("exchange_slowdown_factor"))
+            blockers.append(
+                f"{fname}: interconnect factor={factor!r} is SIMULATED / "
+                "NOT EVIDENCE for Stage-I gate 4 (real silicon still required)"
+            )
+        if sim.get("stage_i_gate4_pass") is True and sim.get("simulated") is True:
+            blockers.append(
+                f"{fname}: HARD-FAIL — simulated interconnect must never claim "
+                "stage_i_gate4_pass=true"
+            )
+    return blockers
+
+
+def require_measured_walls_variance_residency(
+    rep: dict[str, Any], reasons: list[str]
+) -> bool:
+    """Stage G: NEVER GO without measured walls + variance + residency fields."""
+    fname = rep["_file"]
+    ok = True
+    if not _walls_measured(rep.get("phase_wall_s")):
+        reasons.append(
+            f"{fname}: Stage G requires measured phase_wall_s (never GO without walls)"
+        )
+        ok = False
+    var = rep.get("run_variance") or rep.get("variance")
+    if not isinstance(var, dict) or not any(
+        _as_float(var.get(k)) is not None
+        for k in (
+            "episode_cv",
+            "episode_variance",
+            "wall_cv",
+            "wall_variance",
+            "max_cv",
+        )
+    ):
+        reasons.append(
+            f"{fname}: Stage G requires run_variance.* "
+            "(never GO without variance across ≥3 runs)"
+        )
+        ok = False
+    # Residency fields must be present (proof may still fail for CPU-only).
+    if (
+        "device_resident" not in rep
+        and "residency_proof" not in rep
+        and "device_residency" not in rep
+        and "device_residency_proof" not in rep
+    ):
+        reasons.append(
+            f"{fname}: Stage G requires residency field "
+            "(device_resident / residency_proof) — never GO without it"
+        )
+        ok = False
+    return ok
 
 
 def _as_float(v: Any) -> float | None:
@@ -628,6 +731,9 @@ def gate_report(rep: dict[str, Any]) -> dict[str, Any]:
     reasons.extend(proj)
     projection_taint = bool(proj)
 
+    # Stage G campaign blockers (missing GPU / SIMULATED interconnect).
+    reasons.extend(stage_g_campaign_blockers(rep))
+
     # --- G1 ---
     g1 = "fail"
     qual = rep.get("extractmx_self_qual")
@@ -745,6 +851,25 @@ def gate_report(rep: dict[str, Any]) -> dict[str, Any]:
     # Absolute hard-fail: projections never GO.
     if projection_taint:
         full_pass = False
+
+    # Stage G: NEVER GO without measured walls + variance + residency fields.
+    if full_pass and not require_measured_walls_variance_residency(rep, reasons):
+        full_pass = False
+    # Missing GPU / NVLink campaigns can never produce GO.
+    if full_pass and (
+        rep.get("gpu_campaign_present") is False
+        or rep.get("nvlink_campaign_present") is False
+    ):
+        full_pass = False
+        reasons.append(
+            f"{fname}: HARD-FAIL — Stage G GO requires GPU + NVLink silicon campaigns"
+        )
+    sim = rep.get("interconnect_sim")
+    if full_pass and isinstance(sim, dict) and sim.get("simulated") is True:
+        full_pass = False
+        reasons.append(
+            f"{fname}: HARD-FAIL — SIMULATED interconnect is NOT Stage-I gate 4 evidence"
+        )
 
     # Stage G / final-form: nonempty reports never count as PASS without
     # numeric §8 thresholds actually applied (G2 cliff, G3 k@24GB, G4 walls).
@@ -934,6 +1059,15 @@ DECISION_MATRIX = {
     ),
     "nonempty_report_without_numeric_thresholds": (
         "NO-GO (nonempty reports never PASS without G2/G3/G4 numeric thresholds)"
+    ),
+    "stage_g_missing_walls_variance_residency": (
+        "NO-GO (Stage G never GO without measured walls + variance + residency fields)"
+    ),
+    "stage_g_missing_gpu_or_nvlink_campaign": (
+        "NO-GO / blocker (B200/MI355X/5090 + NVLink-vs-PCIe ≥7× still required)"
+    ),
+    "stage_g_simulated_interconnect": (
+        "NOT EVIDENCE for Stage-I gate 4 (SIMULATED factor must not flip GO)"
     ),
 }
 

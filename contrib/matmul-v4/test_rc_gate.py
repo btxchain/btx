@@ -80,6 +80,64 @@ class RCGateNumericThresholdTests(unittest.TestCase):
         self.assertNotEqual(g["g2"], "pass")
         self.assertFalse(g["full_pass"])
 
+    def test_campaign_simulated_interconnect_never_go(self):
+        rep = toy_report(
+            tool="rc-stage-g-campaign",
+            gpu_campaign_present=False,
+            nvlink_campaign_present=False,
+            device_resident=False,
+            run_variance={"episode_cv": 0.01, "n_runs": 5},
+            interconnect_sim={
+                "simulated": True,
+                "stage_i_gate4_evidence": False,
+                "exchange_slowdown_factor": 16.0,
+                "stage_i_gate4_pass": False,
+            },
+            stage_g_blockers=["GPU campaign missing"],
+        )
+        g = rc_gate.gate_report(rep)
+        self.assertFalse(g["full_pass"])
+        blob = " ".join(g["reasons"])
+        self.assertIn("SIMULATED", blob)
+        self.assertIn("GPU", blob)
+
+    def test_load_accepts_campaign_tool(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "c.json"
+            p.write_text(
+                __import__("json").dumps(
+                    {
+                        "tool": "rc-stage-g-campaign",
+                        "stub": False,
+                        "toy": True,
+                        "extractmx_self_qual": {"status": "pass"},
+                        "allocation_cap_verdicts": {
+                            "512MiB": "skip",
+                            "2GiB": "skip",
+                            "8GiB": "skip",
+                        },
+                        "residency_sweep": [
+                            {"working_set_bytes": 128 * 1024 * 1024, "wall_s": 1.0}
+                        ],
+                        "k_curve": {"mode": "toy_synthetic_structure"},
+                        "phase_wall_s": {"total": 1.0},
+                        "wall_clock_provenance": "toy_chrono_measured",
+                        "evidence_kind": "toy_measured_wall_clock",
+                        "device_resident": False,
+                        "run_variance": {"episode_cv": 0.02, "n_runs": 5},
+                        "gpu_campaign_present": False,
+                        "nvlink_campaign_present": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            reps = rc_gate.load_reports([str(p)])
+            self.assertEqual(len(reps), 1)
+            self.assertEqual(reps[0]["tool"], "rc-stage-g-campaign")
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main(verbosity=2))

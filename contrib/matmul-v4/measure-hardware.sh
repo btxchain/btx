@@ -99,6 +99,16 @@
 #
 #   contrib/matmul-v4/measure-hardware.sh cpu rc --toy --out /tmp/rc.json
 #   contrib/matmul-v4/rc-gate.py /tmp/rc.json --out /tmp/rc-summary.json
+#
+# --- Stage G campaign profiles (same-tip, multi-run, rc-gate schema) ---
+#
+#   contrib/matmul-v4/measure-hardware.sh cpu --profile rc-toy
+#   contrib/matmul-v4/measure-hardware.sh cpu --profile rc-medium
+#   contrib/matmul-v4/measure-hardware.sh cpu --profile coupled
+#   contrib/matmul-v4/measure-hardware.sh cpu --profile coupled-medium
+#
+# Emits campaign JSON (evidence_kind, device_resident, tip, walls, RSS,
+# variance across ≥3 runs). Interconnect NVLink factor is SIMULATED only.
 
 set -euo pipefail
 BACKEND="${1:-}"
@@ -108,6 +118,7 @@ BUILD="${BUILD_DIR:-$ROOT/build-measure-$BACKEND}"
 
 # Optional first/extra token `rc` selects the ENC_RC harness instead of matmul-v4-report.
 RC_MODE=0
+STAGE_G_PROFILE=""
 if [ "$BACKEND" = "rc" ]; then
   RC_MODE=1
   BACKEND="${1:-cpu}"
@@ -125,6 +136,20 @@ for a in "$@"; do
   prev="$a"
 done
 set -- "${FILTERED_ARGS[@]+"${FILTERED_ARGS[@]}"}"
+
+# Detect Stage G campaign profiles early (before cmake for report tool).
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--profile" ]; then
+    case "$a" in
+      coupled|coupled-medium|rc-toy|rc-medium)
+        STAGE_G_PROFILE="$a"
+        RC_MODE=1
+        ;;
+    esac
+  fi
+  prev="$a"
+done
 
 case "$BACKEND" in
   cpu)   CMAKE_FLAGS=() ;;
@@ -181,6 +206,44 @@ if [ "$RC_MODE" -eq 1 ]; then
     || { echo "BUILD FAILED (matmul-v4-rc-harness)"; exit 2; }
   BIN="$(find "$BUILD" -type f -name matmul-v4-rc-harness | head -1)"
   if [ -z "$BIN" ]; then echo "could not locate matmul-v4-rc-harness binary"; exit 2; fi
+
+  # Stage G campaign profiles → multi-run same-tip JSON for rc-gate.
+  if [ -n "$STAGE_G_PROFILE" ]; then
+    echo "-- Stage G campaign profile=$STAGE_G_PROFILE (same-tip, ≥3 runs)"
+    export BTX_RC_HARNESS="$BIN"
+    export BTX_SOURCE_REVISION="${BTX_SOURCE_REVISION:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)}"
+    OUT_ARG=""
+    RUNS_ARG=(--runs 5)
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--out" ]; then OUT_ARG="$a"; fi
+      if [ "$prev" = "--runs" ]; then RUNS_ARG=(--runs "$a"); fi
+      prev="$a"
+    done
+    if [ -z "$OUT_ARG" ]; then
+      OUT_ARG="/tmp/stage-g-campaign-${STAGE_G_PROFILE}.json"
+    fi
+    set +e
+    python3 "$ROOT/contrib/matmul-v4/rc-stage-g-campaign.py" \
+      --profile "$STAGE_G_PROFILE" \
+      "${RUNS_ARG[@]}" \
+      --out "$OUT_ARG" \
+      --gate
+    CODE=$?
+    set -e
+    echo ""
+    echo "Stage G campaign JSON: $OUT_ARG"
+    echo "Aggregate with: contrib/matmul-v4/rc-gate.py $OUT_ARG --out summary.json"
+    echo "Toy/CPU campaigns never raise nMatMulRCHeight (stays INT32_MAX)."
+    echo "SIMULATED interconnect factor is NOT Stage-I gate 4 evidence."
+    if [ "$CODE" -eq 0 ]; then
+      echo "RESULT: Stage G campaign harness completed ($BACKEND / $STAGE_G_PROFILE)."
+    else
+      echo "RESULT: Stage G campaign NO-GO/PARTIAL or harness FAIL ($BACKEND / $STAGE_G_PROFILE)."
+    fi
+    exit "$CODE"
+  fi
+
   echo "-- running $BIN $*"
   set +e
   "$BIN" "$@"
