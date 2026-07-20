@@ -24,8 +24,21 @@ namespace matmul_v4::accel {
 
 /** Same provider resolution as MakeResolvedExactGemmBackend, then RC fail-closed
  *  gate (ProbeRCSelfQual). On mining_accelerator_ok failure returns empty
- *  backend (= CPU ExactGemmS8S8). RC callers only — never use for LT mining. */
+ *  backend (= CPU ExactGemmS8S8). RC callers only — never use for LT mining.
+ *
+ *  F5: results are cached by {provider_label, gemm_fn, epoch}. Repeated calls
+ *  reuse the cached backend and do NOT re-enter ProbeRCSelfQual. */
 [[nodiscard]] matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackendForRC();
+
+/** Apply RC self-qual gate to an already-resolved ExactGemm candidate.
+ *  Cached by {provider_label, gemm_s8s8 fn ptr, epoch}. epoch=-1 is the
+ *  default (non-height) probe used by miners. */
+[[nodiscard]] matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQualCached(
+    matmul::v4::lt::ExactGemmBackend backend, const char* provider_label,
+    int32_t epoch = -1);
+
+/** Test hook: clear the F5 resolve/self-qual cache (process-local). */
+void ResetRCExactGemmResolveCacheForTest();
 
 /** Build an injectable ExactMxProjectionBackend for miner-local B̂·V.
  *  ResolveBackend() wires CUDA/HIP LaunchProjectedRightMx, Metal

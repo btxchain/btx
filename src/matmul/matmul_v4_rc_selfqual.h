@@ -54,6 +54,13 @@ void DiagnoseRCSelfQualOnce();
  *  Used by backend ResolveBackend fail-closed gate (§N.3-v style). */
 [[nodiscard]] bool HasPassedRCSelfQual();
 
+/** Test hooks (F5): ProbeRCSelfQual invocation counter + cache reset.
+ *  Production miners must resolve ExactGemm once per {backend,arch,epoch}
+ *  and never re-enter ProbeRCSelfQual on the per-nonce path. */
+[[nodiscard]] uint64_t RCSelfQualProbeInvocationCountForTest();
+void ResetRCSelfQualProbeCountForTest();
+void ResetRCSelfQualCacheForTest();
+
 } // namespace matmul::v4::rc
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_SELFQUAL_H

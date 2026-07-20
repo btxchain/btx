@@ -562,6 +562,44 @@ BOOST_AUTO_TEST_CASE(rc_t9_fail_closed_wrong_exact_gemm_backend)
     BOOST_CHECK(rc::HasPassedRCSelfQual());
 }
 
+BOOST_AUTO_TEST_CASE(rc_f5_selfqual_cached_across_nonce_resolves)
+{
+    // F5: GateExactGemmWithRCSelfQualCached must invoke ProbeRCSelfQual ≤1× per
+    // {provider, gemm_fn, epoch} across an N-nonce-style resolve grind.
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+
+    lt::ExactGemmBackend good;
+    good.gemm_s8s8 = +[](const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                         uint32_t rows, uint32_t inner, uint32_t cols,
+                         std::vector<int32_t>& out) -> bool {
+        out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
+        return true;
+    };
+    good.gemm_s32s8 = +[](const std::vector<int32_t>& L, const std::vector<int8_t>& R,
+                          uint32_t rows, uint32_t inner, uint32_t cols,
+                          std::vector<int32_t>& out) -> bool {
+        out = lt::ExactGemmS32S8(L, R, rows, inner, cols);
+        return true;
+    };
+
+    const uint64_t before = rc::RCSelfQualProbeInvocationCountForTest();
+    constexpr int kNonces = 8;
+    lt::ExactGemmBackend last;
+    for (int i = 0; i < kNonces; ++i) {
+        last = matmul_v4::accel::GateExactGemmWithRCSelfQualCached(good, "test-f5", /*epoch=*/-1);
+    }
+    const uint64_t after = rc::RCSelfQualProbeInvocationCountForTest();
+    BOOST_CHECK_EQUAL(after - before, 1u);
+    BOOST_CHECK(last.gemm_s8s8 != nullptr);
+    BOOST_CHECK(rc::HasPassedRCSelfQual());
+
+    // Distinct epoch key → second probe allowed (new cache entry).
+    (void)matmul_v4::accel::GateExactGemmWithRCSelfQualCached(good, "test-f5", /*epoch=*/7);
+    BOOST_CHECK_EQUAL(rc::RCSelfQualProbeInvocationCountForTest() - before, 2u);
+
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+}
+
 BOOST_AUTO_TEST_CASE(rc_t10_fail_closed_height_sentinel)
 {
     Consensus::Params p;

@@ -5890,6 +5890,10 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
         return false;
     }
 
+    // F5: resolve + RC self-qual ONCE per solve (cached by provider/arch/epoch).
+    // Per-nonce path must never re-enter ProbeRCSelfQual.
+    const auto gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+
     while (max_tries > 0) {
         if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
@@ -5901,7 +5905,6 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
         }
 
         // Mining may inject ExactGemm/native when ProbeRCCoupledDevice admits.
-        const auto gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
         const uint256 mined =
             matmul::v4::rc::MineCoupledPuzzle(block, block_height, params_coup, gemm);
         if (mined.IsNull()) {
@@ -5977,6 +5980,10 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
         return false;
     }
 
+    // F5: resolve + RC self-qual ONCE per solve (cached by provider/arch/epoch).
+    // Per-nonce path must never re-enter ProbeRCSelfQual.
+    const auto gemm_rc = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+
     while (max_tries > 0) {
         if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
@@ -5987,7 +5994,6 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             return false;
         }
 
-        const auto gemm_rc = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
         // P1.2: Phase-2 ExactGemm may run on CUDA/HIP LaunchGemmS8S8 when
         // ProbeRCSelfQual admits the backend; losers skip CPU reseal (P0.2).
         const uint256 mined =

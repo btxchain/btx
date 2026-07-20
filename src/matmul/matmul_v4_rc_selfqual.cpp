@@ -24,6 +24,7 @@ namespace {
 
 std::atomic<bool> g_rc_selfqual_ok{false};
 std::atomic<bool> g_rc_selfqual_diagnosed{false};
+std::atomic<uint64_t> g_rc_selfqual_probe_count{0};
 
 CBlockHeader MakeSelfQualHeader(uint64_t nonce)
 {
@@ -140,6 +141,8 @@ RCSelfQualStatus ProbeRCSelfQual(const matmul::v4::lt::ExactGemmBackend& backend
                                  std::optional<int32_t> height,
                                  const Consensus::Params* params_ref)
 {
+    g_rc_selfqual_probe_count.fetch_add(1, std::memory_order_relaxed);
+
     RCSelfQualStatus st;
     st.cpu_oracle_ok = true;
     st.native_mxfp4_qualified = false;
@@ -243,6 +246,23 @@ bool RCAcceleratorAdmissible(const matmul::v4::lt::ExactGemmBackend& backend)
 bool HasPassedRCSelfQual()
 {
     return g_rc_selfqual_ok.load(std::memory_order_acquire);
+}
+
+uint64_t RCSelfQualProbeInvocationCountForTest()
+{
+    return g_rc_selfqual_probe_count.load(std::memory_order_relaxed);
+}
+
+void ResetRCSelfQualProbeCountForTest()
+{
+    g_rc_selfqual_probe_count.store(0, std::memory_order_relaxed);
+}
+
+void ResetRCSelfQualCacheForTest()
+{
+    g_rc_selfqual_ok.store(false, std::memory_order_release);
+    g_rc_selfqual_diagnosed.store(false, std::memory_order_release);
+    g_rc_selfqual_probe_count.store(0, std::memory_order_relaxed);
 }
 
 } // namespace matmul::v4::rc

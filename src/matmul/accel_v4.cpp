@@ -25,9 +25,14 @@
 #include <atomic>
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <map>
 #include <mutex>
+#include <string>
+#include <tuple>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -636,8 +641,24 @@ ResolvedExactGemm ResolveExactGemmBackendForLT()
 
 /** RC fail-closed gate (R.5.2): device ExactGemm slots may mine RC only after
  *  ProbeRCSelfQual. On failure return an empty backend (CPU ExactGemmS8S8).
- *  Must only be applied on the RC resolve path — never on LT. */
-matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQual(
+ *  Must only be applied on the RC resolve path — never on LT.
+ *
+ *  F5: keyed process-local cache so per-nonce miners never re-probe. Key =
+ *  {provider_label, gemm_s8s8 address, epoch}. */
+struct RCExactGemmCacheKey {
+    std::string label;
+    uintptr_t gemm_fn{0};
+    int32_t epoch{-1};
+    bool operator<(const RCExactGemmCacheKey& o) const
+    {
+        return std::tie(label, gemm_fn, epoch) < std::tie(o.label, o.gemm_fn, o.epoch);
+    }
+};
+
+std::mutex g_rc_exact_gemm_cache_mu;
+std::map<RCExactGemmCacheKey, matmul::v4::lt::ExactGemmBackend> g_rc_exact_gemm_cache;
+
+matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQualUncached(
     matmul::v4::lt::ExactGemmBackend backend, const char* provider_label)
 {
     if (backend.gemm_s8s8 == nullptr) {
@@ -660,6 +681,38 @@ matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQual(
 
 } // namespace
 
+matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQualCached(
+    matmul::v4::lt::ExactGemmBackend backend, const char* provider_label, int32_t epoch)
+{
+    RCExactGemmCacheKey key;
+    key.label = provider_label != nullptr ? provider_label : "device";
+    key.gemm_fn = reinterpret_cast<uintptr_t>(backend.gemm_s8s8);
+    key.epoch = epoch;
+
+    {
+        std::lock_guard<std::mutex> lock(g_rc_exact_gemm_cache_mu);
+        const auto it = g_rc_exact_gemm_cache.find(key);
+        if (it != g_rc_exact_gemm_cache.end()) {
+            return it->second;
+        }
+    }
+
+    const matmul::v4::lt::ExactGemmBackend gated =
+        GateExactGemmWithRCSelfQualUncached(std::move(backend), provider_label);
+
+    std::lock_guard<std::mutex> lock(g_rc_exact_gemm_cache_mu);
+    const auto [it, inserted] = g_rc_exact_gemm_cache.emplace(key, gated);
+    (void)inserted;
+    return it->second;
+}
+
+void ResetRCExactGemmResolveCacheForTest()
+{
+    std::lock_guard<std::mutex> lock(g_rc_exact_gemm_cache_mu);
+    g_rc_exact_gemm_cache.clear();
+    matmul::v4::rc::ResetRCSelfQualCacheForTest();
+}
+
 matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
 {
     // LT mining path: return the LT-qualified ExactGemm inject unchanged.
@@ -670,7 +723,8 @@ matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
 matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackendForRC()
 {
     const ResolvedExactGemm resolved = ResolveExactGemmBackendForLT();
-    return GateExactGemmWithRCSelfQual(resolved.backend, resolved.label);
+    // Arch/provider identity is the resolve label (cuda/hip/metal/cpu/…).
+    return GateExactGemmWithRCSelfQualCached(resolved.backend, resolved.label, /*epoch=*/-1);
 }
 
 matmul::v4::lt::ExactMxProjectionBackend MakeResolvedExactMxProjectionBackend()
