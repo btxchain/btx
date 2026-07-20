@@ -12,11 +12,13 @@
 //   matmul-v4-rc-harness --toy --episodes 3 --backend cpu --out rc-report.json
 //   matmul-v4-rc-harness --help
 
+#include <arith_uint256.h>
 #include <crypto/sha256.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_coupled_netcost.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
 #include <matmul/matmul_v4_rc_transcript.h>
 #include <primitives/block.h>
@@ -60,6 +62,7 @@ struct Args {
     bool coupled{false};
     bool coupled_medium{false};
     bool mode_sweep{false};
+    bool prove_winner_gkr{false};
     uint32_t rounds{0};   // 0 ⇒ keep params.rounds
     uint32_t episodes{3}; // default for toy
     uint64_t mem_cap{0};  // 0 = unlimited
@@ -76,6 +79,7 @@ void PrintUsage(std::ostream& os)
        << "  --coupled                  Stage C coupled-puzzle timing (toy dims)\n"
        << "  --coupled-medium           Stage C coupled-puzzle timing (medium dims)\n"
        << "  --mode-sweep               also time Resident/Checkpointed/Streamed\n"
+       << "  --prove-winner-gkr         Stage E winner-only: mine + reseal + ProveWinner* + verify\n"
        << "  --rounds N                 override episode rounds (default: params)\n"
        << "  --episodes N               ExtractMX self-qual episode count (default: 3)\n"
        << "  --backend NAME             cpu|cuda|hip|metal|auto (default: cpu).\n"
@@ -174,6 +178,8 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
             args.coupled_medium = true;
         } else if (a == "--mode-sweep") {
             args.mode_sweep = true;
+        } else if (a == "--prove-winner-gkr") {
+            args.prove_winner_gkr = true;
         } else if (a == "--rounds") {
             const char* v = need("--rounds");
             if (!v || !ParseUint32(v, args.rounds)) {
@@ -576,6 +582,71 @@ UniValue ParamsJson(const rc::RCEpisodeParams& p)
     return o;
 }
 
+int RunProveWinnerGkrHarness(const Args& args)
+{
+    // Easy target so a winner appears quickly; losers still skip Prove*.
+    arith_uint256 easy;
+    easy.SetCompact(0x207fffff); // matches harness header nBits (regtest-easy)
+
+    CBlockHeader header = MakeHeader(0);
+    rc::WinnerGkrSolveReport rep;
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("tool", "rc-prove-winner-gkr");
+    root.pushKV("stub", false);
+    root.pushKV("e5_direction", "DECIDED");
+    root.pushKV("e5_path", "winner_only_gkr_sumcheck");
+    root.pushKV("soundness", "computational_not_eps0");
+    root.pushKV("consensus_note", "nMatMulRCHeight remains INT32_MAX");
+
+    if (args.coupled) {
+        const rc::RCCoupParams params =
+            args.coupled_medium ? rc::MakeMediumRCCoupParams() : rc::MakeToyRCCoupParams();
+        rep = rc::SolveCoupledProveWinner(header, /*height=*/0, params, easy,
+                                          /*max_tries=*/64, /*do_prove=*/true);
+        root.pushKV("mode", "coupled");
+        root.pushKV("shape", args.coupled_medium ? "medium" : "toy");
+    } else {
+        const rc::RCEpisodeParams params =
+            args.medium ? rc::MakeMediumRCEpisodeParams() : rc::MakeToyRCEpisodeParams();
+        rep = rc::SolveRCEpisodeProveWinner(header, params, /*height=*/0, easy,
+                                            /*max_tries=*/64, /*do_prove=*/true);
+        root.pushKV("mode", "episode");
+        root.pushKV("toy", args.toy);
+        root.pushKV("medium", args.medium);
+    }
+
+    root.pushKV("ok", rep.ok);
+    root.pushKV("proved", rep.proved);
+    root.pushKV("digest", rep.digest.GetHex());
+    root.pushKV("nonce", static_cast<uint64_t>(rep.nonce));
+    root.pushKV("nonces_tried", static_cast<uint64_t>(rep.nonces_tried));
+    root.pushKV("mine_s", rep.mine_s);
+    root.pushKV("reseal_s", rep.reseal_s);
+    root.pushKV("prove_s", rep.prove_s);
+    root.pushKV("verify_s", rep.verify_s);
+    root.pushKV("proof_bytes", static_cast<uint64_t>(rep.proof_bytes));
+    root.pushKV("note", rep.note);
+
+    std::cout << "== MatMul ENC_RC winner-only GKR (== Stage E DECIDED) ==\n";
+    std::cout << "  ok:          " << (rep.ok ? "true" : "false") << "\n";
+    std::cout << "  nonces:      " << rep.nonces_tried << " (losers: zero Prove*)\n";
+    std::cout << "  mine_s:      " << rep.mine_s << "\n";
+    std::cout << "  reseal_s:    " << rep.reseal_s << "\n";
+    std::cout << "  prove_s:     " << rep.prove_s << "\n";
+    std::cout << "  verify_s:    " << rep.verify_s << "\n";
+    std::cout << "  proof_bytes: " << rep.proof_bytes << "\n";
+    std::cout << "  note:        " << rep.note << "\n";
+
+    std::ofstream ofs(args.out_path, std::ios::trunc);
+    if (!ofs) {
+        std::cerr << "error: cannot write JSON to " << args.out_path << "\n";
+        return 1;
+    }
+    ofs << root.write(2) << "\n";
+    std::cout << "  wrote:       " << args.out_path << "\n";
+    return rep.ok ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -593,6 +664,10 @@ int main(int argc, char* argv[])
     if (args.help) {
         PrintUsage(std::cout);
         return 0;
+    }
+
+    if (args.prove_winner_gkr) {
+        return RunProveWinnerGkrHarness(args);
     }
 
     if (args.coupled) {

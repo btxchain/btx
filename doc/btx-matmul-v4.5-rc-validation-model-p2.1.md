@@ -182,6 +182,19 @@ Rationale for the leaning (still provisional):
 
 ---
 
+## Addendum (2026-07-20) — Stage E DECIDED
+
+**Owner decision recorded:** winner-only GKR/sumcheck supersedes the provisional
+leaning above. Fraud-proof is deferred; shrink remains the fallback if GKR
+verify cost fails the Stage-I budget. See:
+
+- `doc/btx-matmul-v4.5-rc-stage-e-winner-gkr-decision-2026-07-20.md`
+- `doc/btx-matmul-v4.5-rc-verify-bakeoff-stage-e.md` (E5 DECIDED)
+
+`nMatMulRCHeight` remains `INT32_MAX`. Decision alone does not raise height.
+
+---
+
 ## 6. Pointers
 
 - Normative episode + PARKED §R.7: `doc/btx-matmul-v4.4-resident-curriculum-unified-proposal-2026-07-20.md`

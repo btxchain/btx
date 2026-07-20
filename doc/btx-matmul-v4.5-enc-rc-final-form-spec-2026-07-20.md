@@ -1,7 +1,7 @@
 # BTX MatMul v4.5 (ENC_RC) — FINAL-FORM Specification
 
 *Date: 2026-07-20. Branch: `claude/matmul-v4-design-spec-af23sj` (PR #89).*
-*Status: final-form Stages A–F/H scaffolding + Stage E bake-off landed; Stage C multi-backend probe + parametric medium scaffolding this wave. **Public activation remains NO-GO** (`nMatMulRCHeight = INT32_MAX`). Stage G: CPU campaigns measured on this box; GPU still SILICON-GATED. Stage E decision is owner-owned.*
+*Status: final-form Stages A–F/H scaffolding + Stage E bake-off landed; Stage C multi-backend probe + parametric medium scaffolding this wave. **Public activation remains NO-GO** (`nMatMulRCHeight = INT32_MAX`). Stage G: CPU campaigns measured on this box; GPU still SILICON-GATED. **Stage E DECIDED: winner-only GKR/sumcheck** (see decision doc).*
 
 This document is the master index for the FINAL-FORM build (Stages A–I). It
 restates the committed design, records what landed this wave, and keeps
@@ -40,7 +40,7 @@ machines **complete** the identical episode by paging / checkpointing /
 streaming — valid, never rejected, just slow and uneconomic; owner-operated
 cheap-power hardware always keeps marginal profitability.
 
-**The one open variable is verification (Stage E),** which sets magnitude:
+**The Stage E direction is locked (winner-only GKR),** which sets magnitude:
 
 | Stage E outcome | Puzzle scale | Separation (order of magnitude) |
 |---|---|---|
@@ -77,7 +77,7 @@ biggest-brain-wins, nobody excluded.
 | **B** — bounded-memory transcript + planners | **PARTIAL** | `RoundMerkleStream` + `matmul_v4_rc_transcript.{h,cpp}` Resident/Streaming sinks (`matmul_v4_rc_transcript_tests`). Full planner surface may still grow. |
 | **C** — coupled puzzle | **PARTIAL** (toy + medium scaffolding) | `matmul_v4_rc_coupled.{h,cpp}` parametric `RCCoupParams` / `MakeMediumRCCoupParams`; modes Sequential/Checkpointed/Streamed/Resident; ExactGemm inject via `MakeResolvedExactGemmBackendForRC` on mining/harness; `ProbeRCCoupledDevice` (`matmul_v4_rc_coupled_device.*`) skip-friendly without GPU. **Honest residual:** Stage C dims ≠ HBM-scale production; GPU coupled path SILICON-GATED. |
 | **D** — distributed bit-exactness | **PARTIAL** | `matmul_v4_rc_distributed.{h,cpp}` + `matmul_v4_rc_distributed_tests` (topology parity scaffold). |
-| **E** — verification bake-off | **PARTIAL** / **owner-owned** | Prototypes: `matmul_v4_rc_verify_bakeoff.*` + P2.1 evidence doc. Decision (shrink vs winner-only) remains **owner-owned**. |
+| **E** — verification bake-off | **DECIDED** | **Winner-only GKR/sumcheck** (`matmul_v4_rc_gkr.*`). Fraud-proof deferred; shrink is fallback if verify fails Stage-I budget. Decision doc: `doc/btx-matmul-v4.5-rc-stage-e-winner-gkr-decision-2026-07-20.md`. Does **not** raise height. |
 | **F** — three-axis schedule | **DONE (PROVISIONAL, inert)** | `src/matmul/matmul_v4_rc_scale_axes.{h,cpp}`: dials `W_state`, `C_local`, `X_exchange`; O(1) memoized epoch eval; **no chainwork brake (F6 omitted)**; checked prior-dim fallback (no assert); hard caps; pause-only growth; `kRCThreeAxisScheduleEnabled = false`. **Ratios freeze only after Stage G silicon evidence.** |
 | **G** — numeric hardware gates | **SILICON-GATED** (CPU PARTIAL) | CPU toy/medium/coupled campaign walls measurable on this host (`rc-gate.py` / harness `--coupled`). GPU B200/MI355X/5090 / NVLink-vs-PCIe still **unmeasured** — nonempty reports never PASS without numeric G2/G3/G4 silicon. Net-cost software model is SIMULATED / NOT EVIDENCE. |
 | **H** — required tests | **PARTIAL** (scaffolding) | Extended `src/test/matmul_v4_rc_tests.cpp`: V1 golden; Resident/Checkpointed/Streamed digest equiv; topology pointer → Stage D; soft memory-budget; golden-diff gate (+ `rc-golden-gate.py`). Full production-size / cross-vendor / proof-malformed suites remain OPEN with C/D/E/G. |
@@ -86,7 +86,7 @@ biggest-brain-wins, nobody excluded.
 ### Honest residuals (do not paper over)
 
 1. **Stage G needs real hardware for GPU / interconnect gates.** CPU campaign walls on this box are PARTIAL evidence only; MAC/heuristic curves and simulated net-cost are NOT EVIDENCE for Stage-I gate 4.
-2. **Stage E decision is owner-owned.** Until shrink vs winner-only proof is chosen, do not unpark segment leaves / growth / three-axis enable, and do not raise height.
+2. **Stage E is DECIDED (winner-only GKR/sumcheck).** Fraud-proof deferred; shrink is fallback if GKR verify fails Stage-I budget. Decision alone does not unpark segment leaves / growth / three-axis enable, and does not raise height — Stage I + G silicon still required.
 3. **Stage C toy/medium ≠ HBM-scale.** Digest/oracle correctness at toy or CI medium dims does not prove 8 GiB Streamed production or interconnect separation. GPU ExactGemm for coupled remains SILICON-GATED.
 
 ---
@@ -103,7 +103,8 @@ Keep `nMatMulRCHeight = INT32_MAX` and all growth / three-axis constants
 4. Coupled communication has a **measured** lower-bound / performance effect
    (Stage G: ≥7× NVLink-vs-PCIe on the same chips).
 5. Verification security **and** cost independently reviewed (**Stage E decision
-   made**).
+   made** — winner-only GKR; still need measured verify ≤ fraction of block
+   interval before treating magnitude as production-ready).
 6. Same-tip silicon + economic gates pass (**Stage G**; `rc-gate.py` GO offline
    tally only — still not an automatic height raise).
 
@@ -141,11 +142,13 @@ that changed is which hardware can afford the attempts.
 | `src/matmul/matmul_v4_rc_coupled_netcost.h` | Stage G software interconnect model (SIMULATED / NOT EVIDENCE) |
 | `src/matmul/matmul_v4_rc_distributed.*` | Stage D distributed bit-exactness scaffold |
 | `src/matmul/matmul_v4_rc_verify_bakeoff.*` | Stage E verification bake-off prototypes |
+| `src/matmul/matmul_v4_rc_gkr.*` | Stage E DECIDED winner-only GKR/sumcheck |
+| `doc/btx-matmul-v4.5-rc-stage-e-winner-gkr-decision-2026-07-20.md` | Stage E BINDING decision |
 | `src/test/matmul_v4_rc_tests.cpp` | Stage H scaffolding cases + Stage F inert checks |
 | `contrib/matmul-v4/rc-golden-gate.py` | Frozen V1 golden-diff gate (A1 / H) |
 | `contrib/matmul-v4/rc-gate.py` | GO/NO-GO; nonempty reports need numeric thresholds |
 | `doc/btx-matmul-v4.4-resident-curriculum-unified-proposal-2026-07-20.md` | §R normative substrate (status table points here) |
-| `doc/btx-matmul-v4.5-rc-validation-model-p2.1.md` | Stage E evidence (owner decides) |
+| `doc/btx-matmul-v4.5-rc-validation-model-p2.1.md` | Stage E evidence + DECIDED addendum |
 | `doc/btx-matmul-v4.5-rc-phase-split-evidence-p2.2.md` | Phase-split measurement evidence |
 
 ---

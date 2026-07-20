@@ -27,6 +27,7 @@
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/noise.h>
 #include <matmul/pow_v4.h>
 #include <matmul/transcript.h>
@@ -5877,6 +5878,17 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
         }
         if (UintToArith256(resealed) <= effective_target) {
             block.matmul_digest = resealed;
+            // Optional winner-only GKR prove (off by default — consensus binary unchanged).
+            // Enable with env BTX_RC_WINNER_GKR=1. Losers above never reach here.
+            if (const char* env = std::getenv("BTX_RC_WINNER_GKR");
+                env != nullptr && env[0] == '1' && env[1] == '\0') {
+                const auto pr = matmul::v4::rc::ProveWinnerEpisode(block, params_rc, block_height,
+                                                                   resealed);
+                LogDebug(BCLog::MINING,
+                         "SolveMatMulV4RC: winner GKR prove_s=%.6f proof_bytes=%zu ok=%d\n",
+                         pr.timing.prove_s, pr.timing.proof_bytes, pr.timing.ok ? 1 : 0);
+                (void)pr;
+            }
             RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
             return true;
         }

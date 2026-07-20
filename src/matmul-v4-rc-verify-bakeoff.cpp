@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_verify_bakeoff.h>
 #include <primitives/block.h>
 #include <uint256.h>
@@ -10,7 +11,7 @@
 
 #include <iostream>
 
-// ENC_RC Stage E bake-off binary — toy measurements only.
+// ENC_RC Stage E bake-off binary — toy measurements + winner-only GKR path.
 // Never raises nMatMulRCHeight. Never wires into consensus validation.
 
 const TranslateFn G_TRANSLATION_FUN{nullptr};
@@ -48,6 +49,8 @@ int main(int argc, char** argv)
     std::cout << matmul::v4::rc::RunBakeoffReport(header, params, seed);
     std::cout << "# E1: " << matmul::v4::rc::kBakeoffE1Statement << "\n";
     std::cout << "# E2: " << matmul::v4::rc::kBakeoffE2Statement << "\n";
+    std::cout << "# E5: " << matmul::v4::rc::kRCGkrE5Decision << "\n";
+    std::cout << "# " << matmul::v4::rc::kRCGkrSoundnessStatement << "\n";
     std::cout << "# nMatMulRCHeight remains INT32_MAX (NO-GO)\n";
     return 0;
 }

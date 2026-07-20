@@ -88,6 +88,7 @@ add_executable(test_btx
   matmul_v4_rc_distributed_tests.cpp
   matmul_v4_rc_transcript_tests.cpp
   matmul_v4_rc_verify_bakeoff_tests.cpp
+  matmul_v4_rc_gkr_tests.cpp
   matmul_encdr_tests.cpp
   matmul_v4_bmx4_batch_tests.cpp
   matmul_v4_exact_float_tests.cpp

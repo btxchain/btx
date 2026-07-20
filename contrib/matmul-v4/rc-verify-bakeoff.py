@@ -65,7 +65,7 @@ def main() -> int:
     ap.add_argument(
         "--print-leaning",
         action="store_true",
-        help="Print E5 provisional leaning reminder to stderr",
+        help="Print E5 DECIDED direction reminder to stderr",
     )
     args = ap.parse_args()
 
@@ -111,21 +111,13 @@ def main() -> int:
     for c in comments:
         print(c, file=sys.stderr)
 
-    if args.print_leaning:
-        print(
-            "E5 provisional (NON-BINDING): keep ε=0 full replay near-term; "
-            "fraud-proof target if preserving RC scale; GKR/STARK research only. "
-            "Owner decides. See doc/btx-matmul-v4.5-rc-validation-model-p2.1.md "
-            "and doc/btx-matmul-v4.5-rc-verify-bakeoff-stage-e.md.",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            "E5 provisional (NON-BINDING): keep ε=0 full replay near-term; "
-            "fraud-proof target if preserving RC scale; GKR/STARK research only. "
-            "Owner decides.",
-            file=sys.stderr,
-        )
+    print(
+        "E5 DECIDED: winner-only GKR/sumcheck. Fraud-proof deferred. "
+        "Shrink is fallback if GKR verify fails Stage-I budget. "
+        "See doc/btx-matmul-v4.5-rc-stage-e-winner-gkr-decision-2026-07-20.md. "
+        "nMatMulRCHeight stays INT32_MAX.",
+        file=sys.stderr,
+    )
     return 0
 
 

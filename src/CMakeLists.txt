@@ -378,6 +378,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_scale_axes.cpp
   matmul/matmul_v4_rc_selfqual.cpp
   matmul/matmul_v4_rc_verify_bakeoff.cpp
+  matmul/matmul_v4_rc_gkr.cpp
   matmul/matmul_sketch_cache.cpp
   matmul/matmul_v4_exact_float.cpp
   matmul/matmul_v4_fast_exact.cpp

@@ -1069,6 +1069,11 @@ DECISION_MATRIX = {
     "stage_g_simulated_interconnect": (
         "NOT EVIDENCE for Stage-I gate 4 (SIMULATED factor must not flip GO)"
     ),
+    "stage_e_decision": (
+        "DECIDED winner-only GKR/sumcheck — unlocks magnitude *direction* toward "
+        "full HBM IF verify ≤ fraction of block interval; still need Stage G silicon. "
+        "Decision alone does NOT raise nMatMulRCHeight (stays INT32_MAX)."
+    ),
 }
 
 

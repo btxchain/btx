@@ -8,6 +8,7 @@
 #include <crypto/sha256.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc_extract.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <sys/resource.h>
 
 #include <algorithm>
@@ -343,10 +344,12 @@ std::string RunBakeoffReport(const CBlockHeader& header, const RCEpisodeParams& 
     os << "    \"fork_required\": true\n";
     os << "  },\n";
 
-    os << "  \"e5_provisional_leaning\": "
-          "\"keep_eps0_replay_near_term__fraud_proof_target_if_preserving_RC_scale__"
-          "GKR_STARK_research_only__owner_decides\",\n";
-    os << "  \"e6\": \"gkr_stark_computational_soundness__fraud_proofs_separate_fork\",\n";
+    os << RunWinnerGkrBakeoffSection(synth_seed, shape);
+    os << ",\n";
+    os << "  \"e5_direction\": \"DECIDED\",\n";
+    os << "  \"e5_path\": \"winner_only_gkr_sumcheck\",\n";
+    os << "  \"e5_decision\": \"" << kRCGkrE5Decision << "\",\n";
+    os << "  \"e6\": \"gkr_computational_soundness__fraud_proofs_deferred__eps0_replay_until_stage_i\",\n";
     os << "  \"production_extrapolation\": \"NOT_EVIDENCE\"\n";
     os << "}\n";
     return os.str();
