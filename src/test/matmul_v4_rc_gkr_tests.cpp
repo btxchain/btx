@@ -65,6 +65,22 @@ BOOST_AUTO_TEST_CASE(gkr_soundness_and_height_inert)
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
 }
 
+BOOST_AUTO_TEST_CASE(gkr_stage_i_verify_budget_gate)
+{
+    BOOST_CHECK_CLOSE(rc::kRCHappyPathVerifyBudgetS, 0.9, 1e-9);
+    BOOST_CHECK_CLOSE(rc::kRCExactReplayVerifyBudgetS, 9.0, 1e-9);
+    BOOST_CHECK_CLOSE(rc::kRCGkrVerifyBudgetS, rc::kRCHappyPathVerifyBudgetS, 1e-9);
+    BOOST_CHECK_CLOSE(rc::RCHappyPathVerifyBudgetS(90), 0.9, 1e-9);
+    BOOST_CHECK_CLOSE(rc::RCExactReplayVerifyBudgetS(90), 9.0, 1e-9);
+
+    std::string why;
+    BOOST_CHECK(rc::VerifyMeetsStageIBudget(0.5, 90, rc::RCVerifyPathKind::HappyPathSuccinct, &why));
+    BOOST_CHECK(!rc::VerifyMeetsStageIBudget(1.0, 90, rc::RCVerifyPathKind::HappyPathSuccinct, &why));
+    BOOST_CHECK(why.find("exceeds") != std::string::npos);
+    BOOST_CHECK(rc::VerifyMeetsStageIBudget(8.0, 90, rc::RCVerifyPathKind::ExactReplay, &why));
+    BOOST_CHECK(!rc::VerifyMeetsStageIBudget(10.0, 90, rc::RCVerifyPathKind::ExactReplay, &why));
+}
+
 BOOST_AUTO_TEST_CASE(gkr_fp2_smoke)
 {
     const gf::Fp2 a = gf::Fp2::FromFp(3);

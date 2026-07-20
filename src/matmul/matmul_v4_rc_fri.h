@@ -63,7 +63,8 @@ inline constexpr char kRCFriSoundnessStatement[] =
     "COMPUTATIONAL — not ε=0.";
 
 inline constexpr size_t kRCFriProofBytesBudget = 1536 * 1024;
-inline constexpr double kRCFriVerifyBudgetS = 2.0;
+/** Stage-I happy-path ceiling (must equal kRCHappyPathVerifyBudgetS @ 90s/100bps). */
+inline constexpr double kRCFriVerifyBudgetS = 90.0 * 100.0 / 10000.0; // 0.9 s
 
 #if defined(BTX_RC_FRI_CONJECTURED_BOUND) && BTX_RC_FRI_CONJECTURED_BOUND
 inline constexpr bool kRCFriConjecturedBoundEnabled = true;

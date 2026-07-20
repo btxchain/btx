@@ -12,6 +12,7 @@
 #include <matmul/matmul_v4_rc_fri.h>
 #include <matmul/matmul_v4_rc_gkr_field.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
+#include <matmul/matmul_v4_rc_verify_budget.h>
 #include <primitives/block.h>
 #include <uint256.h>
 
@@ -107,9 +108,10 @@ inline constexpr const char* kRCGkrShadowStatement =
 using gkr_field::Fp;
 using gkr_field::Fp2;
 
-/** Soft budgets for the Section-2 scaffold (CPU toy/medium). Not silicon. */
+/** Soft budgets for the Section-2 scaffold (CPU toy/medium). Not silicon.
+ *  Verify ceiling is Stage-I interval-fraction (see matmul_v4_rc_verify_budget.h). */
 inline constexpr double kRCGkrMediumProveBudgetS = 2.0;
-inline constexpr double kRCGkrVerifyBudgetS = 0.5;
+inline constexpr double kRCGkrVerifyBudgetS = kRCHappyPathVerifyBudgetS;
 inline constexpr size_t kRCGkrProofBytesBudget = 3 * 1024 * 1024; // 3 MiB soft (DEEP+A/B FRI)
 
 /** One sumcheck round over Fp2: g(0), g(1), g(2) (deg-2 product). */
