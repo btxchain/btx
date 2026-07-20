@@ -51,6 +51,18 @@ single-page rule `(barrier+lobe)%bank_pages`.
 - Production covering: `MakeProductionRCCoupParams()` with full schedule yields
   each of 768 pages exactly once across the episode (helper-tested; height inert)
 
+## Ship-first CUTLASS / capacity defaults (research)
+
+| Knob | Default |
+|---|---|
+| SM100 peak | `KernelTmaWarpSpecialized2SmMxf4Sm100`, cluster `<_4,_4,_1>`, tile `256×256×256`, SFVecSize=32 |
+| SM120 (5060/5090) | `KernelTmaWarpSpecializedMxf4Sm120`, cluster **`<_1,_1,_1>`**, tile `<_128,_128,_128>` |
+| Packed bank | **48 GiB** frozen prod; ladder 40→48→64→96 (≤120 on B200 with Q-stack) |
+| Q enable order | **1 → 8 → 32** (park 128/256 until Stage-G mem-cap) |
+| NVLink state tile | **128** rows (sweep 64/128/256) |
+
+SM100 and SM120 qualify on **separate** `arch_key` latches. Do not copy LT `native_mxfp4_qualified` into RC.
+
 ## Tests
 
 ```

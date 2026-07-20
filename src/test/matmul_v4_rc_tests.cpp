@@ -1399,9 +1399,9 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_exact_panels_qualify_and_match_oracle)
         BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, 8, 8, 8, oz_out));
     }
 
-    // LT native must never be copied into RC self-qual.
+    // Empty ExactGemmBackend probe stays mining-fail-closed; never copies LT native.
     const auto st_cpu = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
-    BOOST_CHECK_EQUAL(st_cpu.native_mxfp4_qualified, rc::IsRcOzakiMxfp4Qualified());
+    BOOST_CHECK(!st_cpu.native_mxfp4_qualified);
     BOOST_CHECK(!st_cpu.native_fp8_qualified);
 }
 
