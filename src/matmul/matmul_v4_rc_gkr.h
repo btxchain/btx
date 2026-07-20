@@ -41,10 +41,10 @@
 
 namespace matmul::v4::rc {
 
-inline constexpr uint32_t kRCGkrProofVersion = 5;
-inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V5";
+inline constexpr uint32_t kRCGkrProofVersion = 6;
+inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V6";
 /** Magic for optional out-of-band / cache carriage (not consensus body). */
-inline constexpr uint32_t kRCGkrProofMagic = 0x524b4735u; // 'RKG5'
+inline constexpr uint32_t kRCGkrProofMagic = 0x524b4736u; // 'RKG6'
 
 inline constexpr const char* kRCGkrRealityGuardrail =
     "REJECT HBM/production-complete GKR claims: succinct scaffold uses Fp2+REAL "
@@ -62,7 +62,8 @@ inline constexpr const char* kRCGkrSoundnessBoundStatement =
     "live in Goldilocks Fp2 (|F|~2^128); single Goldilocks is insufficient. "
     "M6/Fable FRI: unique-decoding Q=116, ρ=1/16, g=40, Fp2 → "
     "FriSoundnessBoundBits()=65. Fp3 only for g>=64 (unbuilt). "
-    "DEEP/OOD exact-eval binding OPEN. "
+    "DEEP/OOD exact-eval binding CLOSED (FRI v3). "
+    "G3 Haböck LogUp + virtual Extract table (proof v6). "
     "M2: ALL-PHASE layers + round_seeds bound to sigma/round_roots. "
     "See doc/btx-matmul-v4.5-rc-succinct-proof-soundness-2026-07-20.md and "
     "kRCGkrRealityGuardrail. Merkle q=8 is DoS PREFILTER ONLY. "
@@ -173,9 +174,24 @@ struct RCGkrProof {
     /** DeriveSigma(header) at prove time — verify re-derives seed[0] from this. */
     uint256 episode_sigma{};
     std::vector<RCGkrLayerClaim> layers;
+    /**
+     * G3 Haböck LogUp (ePrint 2022/1530):
+     *   witness keys w_i = Hash(meta, in, out)
+     *   table keys   t_i = Hash(meta, in, Extract(in))  // virtual Extract table
+     *   Σ 1/(α−w_i) = Σ 1/(α−t_i)  (here enforced by w≡t + inverse column)
+     * lookup_logup_sum = Σ inv_i with inv_i = 1/(α−t_i), proven via I(1) DEEP + R≡0.
+     */
     Fp2 lookup_logup_sum{};
-    /** FRI commit of LogUp wire (keys/multiplicities) — not every tile. */
+    Fp2 lookup_table_sum{}; // must equal lookup_logup_sum
+    Fp2 logup_alpha{};
+    /** Witness LogUp keys FRI. */
     FriProof lookup_fri{};
+    /** Virtual Extract-table keys FRI (must match lookup_fri root/DEEP). */
+    FriProof table_fri{};
+    /** inv_i = 1/(α − t_i); DEEP at z=1 binds sum. */
+    FriProof logup_inv_fri{};
+    /** R_i = inv_i·(α−t_i)−1; must be the zero polynomial. */
+    FriProof logup_r_fri{};
     /** FRI commit of concatenated GEMM output wires (Y_gemm coeffs). */
     FriProof trace_fri{};
     /** G1: FRI commit of concatenated A operands across layers. */

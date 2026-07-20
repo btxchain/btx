@@ -614,8 +614,8 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("round_roots"), 11);
     for (const auto& rt : round_roots) fs.AbsorbUint256(rt);
 
-    // --- G1/G2: commit A, B, Y, LogUp keys BEFORE challenges (commit-then-challenge) ---
-    std::vector<Fp2> a_evals, b_evals, trace_evals, lookup_keys;
+    // --- G1/G2/G3: commit A, B, Y, witness keys, Extract-table keys ---
+    std::vector<Fp2> a_evals, b_evals, trace_evals, witness_keys, table_keys;
     std::vector<uint256> extract_commits;
     extract_commits.reserve(wires.size());
     for (const auto& w : wires) {
@@ -636,9 +636,15 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
                 const size_t base =
                     static_cast<size_t>(i) * w.n + static_cast<size_t>(bj) * kRCMxBlockLen;
                 const uint8_t scale = lt::DeriveMatExpandMxScale(w.extract_prf, i, bj);
-                lookup_keys.push_back(HashLookupKey(i, bj, w.extract_prf, scale,
-                                                    w.extract_in.data() + base,
-                                                    w.extract_out.data() + base));
+                // Witness key binds claimed (in, out).
+                witness_keys.push_back(HashLookupKey(i, bj, w.extract_prf, scale,
+                                                     w.extract_in.data() + base,
+                                                     w.extract_out.data() + base));
+                // Virtual Extract table key: out MUST be ExtractMX(in).
+                int8_t honest_out[kRCMxBlockLen];
+                ExtractMXTileInt64(w.extract_prf, i, bj, w.extract_in.data() + base, honest_out);
+                table_keys.push_back(HashLookupKey(i, bj, w.extract_prf, scale,
+                                                   w.extract_in.data() + base, honest_out));
             }
         }
     }
@@ -655,19 +661,36 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
     auto b_c = FriCommitAndFold(b_evals.empty() ? std::vector<Fp2>{Fp2::Zero()} : b_evals, fri_pre);
     auto trace_c = FriCommitAndFold(trace_evals.empty() ? std::vector<Fp2>{Fp2::Zero()} : trace_evals,
                                     fri_pre);
-    auto lookup_c =
-        FriCommitAndFold(lookup_keys.empty() ? std::vector<Fp2>{Fp2::Zero()} : lookup_keys, fri_pre);
+    auto lookup_c = FriCommitAndFold(
+        witness_keys.empty() ? std::vector<Fp2>{Fp2::Zero()} : witness_keys, fri_pre);
+    auto table_c = FriCommitAndFold(
+        table_keys.empty() ? std::vector<Fp2>{Fp2::Zero()} : table_keys, fri_pre);
     p.a_fri = std::move(a_c.proof);
     p.b_fri = std::move(b_c.proof);
     p.trace_fri = std::move(trace_c.proof);
     p.lookup_fri = std::move(lookup_c.proof);
+    p.table_fri = std::move(table_c.proof);
+    // G3: witness keys must equal Extract-table keys (out = Extract(in)).
+    if (p.lookup_fri.layers.empty() || p.table_fri.layers.empty() ||
+        p.lookup_fri.layers[0].root != p.table_fri.layers[0].root ||
+        (p.lookup_fri.has_deep && p.table_fri.has_deep &&
+         !Eq(p.lookup_fri.deep_eval, p.table_fri.deep_eval))) {
+        out.timing.ok = false;
+        out.timing.note = "G3 Extract table mismatch (witness key != Extract key)";
+        return out;
+    }
     fs.AbsorbUint256(p.a_fri.layers.empty() ? uint256{} : p.a_fri.layers[0].root);
     fs.AbsorbUint256(p.b_fri.layers.empty() ? uint256{} : p.b_fri.layers[0].root);
     fs.AbsorbUint256(p.trace_fri.layers.empty() ? uint256{} : p.trace_fri.layers[0].root);
     fs.AbsorbUint256(p.lookup_fri.layers.empty() ? uint256{} : p.lookup_fri.layers[0].root);
+    fs.AbsorbUint256(p.table_fri.layers.empty() ? uint256{} : p.table_fri.layers[0].root);
     if (p.trace_fri.has_deep) {
         fs.AbsorbFp2(p.trace_fri.deep_z);
         fs.AbsorbFp2(p.trace_fri.deep_eval);
+    }
+    if (p.lookup_fri.has_deep) {
+        fs.AbsorbFp2(p.lookup_fri.deep_z);
+        fs.AbsorbFp2(p.lookup_fri.deep_eval);
     }
 
     uint256 prev_extract_commit{};
@@ -715,26 +738,81 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
         prev_extract_commit = extract_commits[wi];
     }
 
-    // G3: LogUp sum over committed keys (FS-bound; keys in lookup_fri + DEEP).
+    // G3 Haböck LogUp (2022/1530): α, inv_i=1/(α−t_i), S=Σ inv_i = I(1), R≡0.
     const Fp2 alu = fs.ChallengeFp2("logup_alpha");
-    Fp2 logup = Fp2::Zero();
-    for (const auto& key : lookup_keys) {
-        if (Eq(key, alu)) {
+    p.logup_alpha = alu;
+    std::vector<Fp2> inv, resid;
+    inv.reserve(table_keys.size());
+    resid.reserve(table_keys.size());
+    Fp2 sum_t = Fp2::Zero();
+    Fp2 sum_w = Fp2::Zero();
+    for (size_t i = 0; i < table_keys.size(); ++i) {
+        if (Eq(table_keys[i], alu) || Eq(witness_keys[i], alu)) {
             out.timing.ok = false;
             out.timing.note = "logup collide";
             return out;
         }
-        logup = Add(logup, Div(Fp2::One(), Sub(alu, key)));
+        const Fp2 inv_i = Div(Fp2::One(), Sub(alu, table_keys[i]));
+        inv.push_back(inv_i);
+        resid.push_back(Sub(Mul(inv_i, Sub(alu, table_keys[i])), Fp2::One()));
+        sum_t = Add(sum_t, inv_i);
+        sum_w = Add(sum_w, Div(Fp2::One(), Sub(alu, witness_keys[i])));
     }
-    p.lookup_logup_sum = logup;
-    fs.AbsorbFp2(logup);
+    if (!Eq(sum_w, sum_t)) {
+        out.timing.ok = false;
+        out.timing.note = "G3 Haböck sum_w != sum_t";
+        return out;
+    }
+    // R must be identically zero (Extract-honest + correct inverses).
+    for (const auto& r : resid) {
+        if (!IsZero(r)) {
+            out.timing.ok = false;
+            out.timing.note = "G3 LogUp residual nonzero";
+            return out;
+        }
+    }
+    p.lookup_logup_sum = sum_t;
+    p.lookup_table_sum = sum_t;
+    fs.AbsorbFp2(alu);
+    fs.AbsorbFp2(sum_t);
+
+    auto inv_c = FriCommitAndFoldDeepAt(inv.empty() ? std::vector<Fp2>{Fp2::Zero()} : inv, fri_pre,
+                                        Fp2::One());
+    auto r_c = FriCommitAndFold(resid.empty() ? std::vector<Fp2>{Fp2::Zero()} : resid, fri_pre);
+    p.logup_inv_fri = std::move(inv_c.proof);
+    p.logup_r_fri = std::move(r_c.proof);
+    // I(1) = S via forced DEEP.
+    if (!p.logup_inv_fri.has_deep || !p.logup_inv_fri.deep_z_forced ||
+        !Eq(p.logup_inv_fri.deep_z, Fp2::One()) ||
+        !Eq(p.logup_inv_fri.deep_eval, sum_t)) {
+        out.timing.ok = false;
+        out.timing.note = "G3 LogUp I(1) DEEP mismatch";
+        return out;
+    }
+    // R≡0: deep_eval and final must be zero.
+    if (p.logup_r_fri.has_deep && !IsZero(p.logup_r_fri.deep_eval)) {
+        out.timing.ok = false;
+        out.timing.note = "G3 LogUp R deep nonzero";
+        return out;
+    }
+    if (!IsZero(p.logup_r_fri.final_value)) {
+        out.timing.ok = false;
+        out.timing.note = "G3 LogUp R final nonzero";
+        return out;
+    }
+    fs.AbsorbUint256(p.logup_inv_fri.layers.empty() ? uint256{} : p.logup_inv_fri.layers[0].root);
+    fs.AbsorbUint256(p.logup_r_fri.layers.empty() ? uint256{} : p.logup_r_fri.layers[0].root);
+    if (p.logup_inv_fri.has_deep) {
+        fs.AbsorbFp2(p.logup_inv_fri.deep_z);
+        fs.AbsorbFp2(p.logup_inv_fri.deep_eval);
+    }
     p.transcript_hash = fs.Digest();
 
     std::vector<unsigned char> ser;
     out.timing.proof_bytes = SerializeRCGkrProof(p, ser);
     out.timing.prove_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     out.timing.peak_rss_kib = std::max(CurrentRssKiB(), rss0);
-    out.timing.ok = a_c.ok && b_c.ok && trace_c.ok && lookup_c.ok;
+    out.timing.ok = a_c.ok && b_c.ok && trace_c.ok && lookup_c.ok && table_c.ok && inv_c.ok && r_c.ok;
     out.timing.note = path_note ? path_note : kRCGkrSoundnessBoundStatement;
     MarkBudget(out.timing, p);
     return out;
@@ -992,7 +1070,9 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
             return fail("missing ALL-PHASE layer kind");
         }
         if (proof.trace_fri.layers.empty() || proof.lookup_fri.layers.empty() ||
-            proof.a_fri.layers.empty() || proof.b_fri.layers.empty()) {
+            proof.table_fri.layers.empty() || proof.logup_inv_fri.layers.empty() ||
+            proof.logup_r_fri.layers.empty() || proof.a_fri.layers.empty() ||
+            proof.b_fri.layers.empty()) {
             return fail("missing FRI");
         }
     }
@@ -1017,13 +1097,28 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
     if (!FriVerify(proof.b_fri, fri_pre, &fri_why)) return fail(fri_why.c_str());
     if (!FriVerify(proof.trace_fri, fri_pre, &fri_why)) return fail(fri_why.c_str());
     if (!FriVerify(proof.lookup_fri, fri_pre, &fri_why)) return fail(fri_why.c_str());
+    if (!FriVerify(proof.table_fri, fri_pre, &fri_why)) return fail(fri_why.c_str());
+    // G3: witness key commitment must match Extract-table commitment.
+    if (proof.lookup_fri.layers.empty() || proof.table_fri.layers.empty() ||
+        proof.lookup_fri.layers[0].root != proof.table_fri.layers[0].root) {
+        return fail("G3 witness/table root");
+    }
+    if (proof.lookup_fri.has_deep && proof.table_fri.has_deep &&
+        !Eq(proof.lookup_fri.deep_eval, proof.table_fri.deep_eval)) {
+        return fail("G3 witness/table DEEP");
+    }
     fs.AbsorbUint256(proof.a_fri.layers.empty() ? uint256{} : proof.a_fri.layers[0].root);
     fs.AbsorbUint256(proof.b_fri.layers.empty() ? uint256{} : proof.b_fri.layers[0].root);
     fs.AbsorbUint256(proof.trace_fri.layers.empty() ? uint256{} : proof.trace_fri.layers[0].root);
     fs.AbsorbUint256(proof.lookup_fri.layers.empty() ? uint256{} : proof.lookup_fri.layers[0].root);
+    fs.AbsorbUint256(proof.table_fri.layers.empty() ? uint256{} : proof.table_fri.layers[0].root);
     if (proof.trace_fri.has_deep) {
         fs.AbsorbFp2(proof.trace_fri.deep_z);
         fs.AbsorbFp2(proof.trace_fri.deep_eval);
+    }
+    if (proof.lookup_fri.has_deep) {
+        fs.AbsorbFp2(proof.lookup_fri.deep_z);
+        fs.AbsorbFp2(proof.lookup_fri.deep_eval);
     }
 
     uint256 prev_extract_commit{};
@@ -1059,8 +1154,37 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
     }
 
     const Fp2 alu = fs.ChallengeFp2("logup_alpha");
-    (void)alu;
+    if (!Eq(alu, proof.logup_alpha)) return fail("logup_alpha");
+    if (!Eq(proof.lookup_logup_sum, proof.lookup_table_sum)) return fail("G3 sum_w/sum_t");
+    fs.AbsorbFp2(alu);
     fs.AbsorbFp2(proof.lookup_logup_sum);
+
+    if (!FriVerify(proof.logup_inv_fri, fri_pre, &fri_why)) return fail(fri_why.c_str());
+    if (!FriVerify(proof.logup_r_fri, fri_pre, &fri_why)) return fail(fri_why.c_str());
+    if (!proof.logup_inv_fri.has_deep || !proof.logup_inv_fri.deep_z_forced ||
+        !Eq(proof.logup_inv_fri.deep_z, Fp2::One()) ||
+        !Eq(proof.logup_inv_fri.deep_eval, proof.lookup_logup_sum)) {
+        return fail("G3 I(1) DEEP");
+    }
+    if (!IsZero(proof.logup_r_fri.final_value)) return fail("G3 R final");
+    if (proof.logup_r_fri.has_deep && !IsZero(proof.logup_r_fri.deep_eval)) {
+        return fail("G3 R deep");
+    }
+    // Spot-check R openings are zero at every FRI query leaf.
+    for (const auto& q : proof.logup_r_fri.queries) {
+        if (q.steps.empty()) return fail("G3 R empty step");
+        const auto& st = q.steps[0];
+        const Fp2 leaf = (q.index & 1u) ? st.odd : st.even;
+        if (!IsZero(leaf) || !IsZero(st.even) || !IsZero(st.odd)) return fail("G3 R leaf");
+    }
+    fs.AbsorbUint256(proof.logup_inv_fri.layers.empty() ? uint256{}
+                                                         : proof.logup_inv_fri.layers[0].root);
+    fs.AbsorbUint256(proof.logup_r_fri.layers.empty() ? uint256{}
+                                                       : proof.logup_r_fri.layers[0].root);
+    if (proof.logup_inv_fri.has_deep) {
+        fs.AbsorbFp2(proof.logup_inv_fri.deep_z);
+        fs.AbsorbFp2(proof.logup_inv_fri.deep_eval);
+    }
     if (fs.Digest() != proof.transcript_hash) return fail("transcript");
 
     // Succinct path: do NOT re-expand operands / re-run episode / recompute Extract.
@@ -1136,11 +1260,16 @@ size_t SerializeRCGkrProof(const RCGkrProof& proof, std::vector<unsigned char>& 
         AppendFp2(out, lc.final_eval);
     }
     AppendFp2(out, proof.lookup_logup_sum);
-    std::vector<unsigned char> fri_a, fri_b, fri_t, fri_l;
+    AppendFp2(out, proof.lookup_table_sum);
+    AppendFp2(out, proof.logup_alpha);
+    std::vector<unsigned char> fri_a, fri_b, fri_t, fri_l, fri_tab, fri_inv, fri_r;
     (void)SerializeFriProof(proof.a_fri, fri_a);
     (void)SerializeFriProof(proof.b_fri, fri_b);
     (void)SerializeFriProof(proof.trace_fri, fri_t);
     (void)SerializeFriProof(proof.lookup_fri, fri_l);
+    (void)SerializeFriProof(proof.table_fri, fri_tab);
+    (void)SerializeFriProof(proof.logup_inv_fri, fri_inv);
+    (void)SerializeFriProof(proof.logup_r_fri, fri_r);
     AppendLE32(out, static_cast<uint32_t>(fri_a.size()));
     AppendBytes(out, fri_a.data(), fri_a.size());
     AppendLE32(out, static_cast<uint32_t>(fri_b.size()));
@@ -1149,6 +1278,12 @@ size_t SerializeRCGkrProof(const RCGkrProof& proof, std::vector<unsigned char>& 
     AppendBytes(out, fri_t.data(), fri_t.size());
     AppendLE32(out, static_cast<uint32_t>(fri_l.size()));
     AppendBytes(out, fri_l.data(), fri_l.size());
+    AppendLE32(out, static_cast<uint32_t>(fri_tab.size()));
+    AppendBytes(out, fri_tab.data(), fri_tab.size());
+    AppendLE32(out, static_cast<uint32_t>(fri_inv.size()));
+    AppendBytes(out, fri_inv.data(), fri_inv.size());
+    AppendLE32(out, static_cast<uint32_t>(fri_r.size()));
+    AppendBytes(out, fri_r.data(), fri_r.size());
     AppendBytes(out, proof.transcript_hash.data(), 32);
     out.push_back(proof.over_budget ? 1 : 0);
     AppendLE32(out, static_cast<uint32_t>(proof.shrink_note.size()));
@@ -1220,6 +1355,8 @@ std::optional<RCGkrProof> DeserializeRCGkrProof(const std::vector<unsigned char>
         if (!ReadFp2Checked(p, end, lc.final_eval)) return std::nullopt;
     }
     if (!ReadFp2Checked(p, end, proof.lookup_logup_sum)) return std::nullopt;
+    if (!ReadFp2Checked(p, end, proof.lookup_table_sum)) return std::nullopt;
+    if (!ReadFp2Checked(p, end, proof.logup_alpha)) return std::nullopt;
     auto read_fri = [&](FriProof& dest) -> bool {
         uint32_t n = 0;
         if (!ReadLE32Checked(p, end, n) || n > (8u << 20)) return false;
@@ -1231,7 +1368,8 @@ std::optional<RCGkrProof> DeserializeRCGkrProof(const std::vector<unsigned char>
         return true;
     };
     if (!read_fri(proof.a_fri) || !read_fri(proof.b_fri) || !read_fri(proof.trace_fri) ||
-        !read_fri(proof.lookup_fri))
+        !read_fri(proof.lookup_fri) || !read_fri(proof.table_fri) ||
+        !read_fri(proof.logup_inv_fri) || !read_fri(proof.logup_r_fri))
         return std::nullopt;
     if (!ReadBytesChecked(p, end, proof.transcript_hash.data(), 32)) return std::nullopt;
     if (p >= end) return std::nullopt;

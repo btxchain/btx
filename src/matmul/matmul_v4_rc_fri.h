@@ -108,6 +108,8 @@ struct FriProof {
     std::vector<FriQueryOpening> queries;
     /** DEEP/OOD (v3). has_deep=false only for nested quotient FRI. */
     bool has_deep{false};
+    /** If true, deep_z was fixed by the caller (not FS-sampled); verifier absorbs it. */
+    bool deep_z_forced{false};
     Fp2 deep_z{};
     Fp2 deep_eval{};
     uint256 deep_quot_root{};
@@ -129,6 +131,13 @@ struct FriCommitResult {
                                                const uint256& fs_seed,
                                                uint64_t pow_grind_nonce = 0,
                                                bool enable_deep = true);
+
+/** Like FriCommitAndFold but forces DEEP evaluation at a fixed z (e.g. 1 for LogUp Σ). */
+[[nodiscard]] FriCommitResult FriCommitAndFoldDeepAt(const std::vector<Fp2>& coeffs,
+                                                     const uint256& fs_seed, const Fp2& deep_z,
+                                                     uint64_t pow_grind_nonce = 0);
+
+[[nodiscard]] Fp2 FriEvalPoly(const std::vector<Fp2>& coeffs, const Fp2& z);
 
 [[nodiscard]] FriMerklePath FriOpenIndex(const std::vector<Fp2>& evals, uint32_t index);
 

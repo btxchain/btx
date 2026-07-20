@@ -53,20 +53,20 @@ Not ε=0. Not production-complete. Not a substitute for external audit sign-off.
 | F-B4 | HIGH | G4: cross-layer extract wiring prove-only. |
 | F-B5 | HIGH | G5: `Y_acc = Y_gemm + X` not algebraically checked. |
 
-### Remediation landed (proof **v5**)
+### Remediation landed (proof **v5**, Haböck G3 in **v6**)
 
 | Gap | Close |
 |---|---|
 | G1 | Batched `a_fri` / `b_fri` + per-layer `a_root`/`b_root` absorbed **before** `(ri,rj)`. |
 | G2 | Commit-then-challenge: `trace_fri` (+DEEP) absorbed before claims; claims FS-bound to roots. |
-| G3 | LogUp keys FRI+DEEP; `(in,out)` hashed (C1); sum FS-bound. Full Haböck table IOP still aspirational. |
+| G3 | Haböck LogUp: witness keys ≡ virtual Extract-table keys (FRI root/DEEP); α←FS; `inv` FRI with forced DEEP at z=1 binds `I(1)=Σ inv`; `R≡0` FRI; `sum_w=sum_t`. |
 | G4 | `extract_out_commit` chain absorbed across layers. |
 | G5 | Verifier checks `acc_claim = claim + residual_mle`; non-Fwd residual must be 0. |
 
 ### Residual (honest)
 
 - G1: A/B FRI binds concatenations; per-layer eq-fold into `ah`/`bh` still via sumcheck messages (not separate A(r) openings).
-- G3: no fixed Extract lookup table IOP — relation soundness is key commitment + DEEP + HashLookupKey, not full Haböck multiplicity check.
+- G3: virtual Extract table is keyed via `Hash(meta,in,Extract(in))` (not a separately committed MX-output column); multiplicity is 1:1 tile keys (Haböck form without m_i≠1).
 - G4: commit chain binds digests of extract_out, not algebraic equality of SV.A = QKt.extract_out as field vectors inside the PCS.
 
 These residuals **still counsel against arbiter ON** until an external auditor signs the composition.
@@ -81,9 +81,10 @@ These residuals **still counsel against arbiter ON** until an external auditor s
 2. [x] DEEP/OOD present and tested (`fri_deep_ood_tamper_rejects`).
 3. [x] Commit-then-challenge ordering in prove/verify.
 4. [x] G5 residual algebra enforced.
-5. [ ] External human audit sign-off — **OPEN**.
-6. [ ] Consensus-dim prover cost on silicon — **OPEN** (OUT OF SCOPE).
-7. [x] Arbiter OFF; ExactReplay consensus; height INT32_MAX.
+5. [x] G3 Haböck virtual Extract table + I(1)/R≡0 (proof v6; adversarial tests).
+6. [ ] External human audit sign-off — **OPEN**.
+7. [ ] Consensus-dim prover cost on silicon — **OPEN** (OUT OF SCOPE).
+8. [x] Arbiter OFF; ExactReplay consensus; height INT32_MAX.
 
 ### Verdict
 

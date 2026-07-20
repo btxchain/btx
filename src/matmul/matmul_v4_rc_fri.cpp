@@ -399,8 +399,9 @@ bool FriVerifyPath(const FriMerklePath& path, const uint256& root, uint32_t n_le
     return cur == root && si == path.siblings.size();
 }
 
-FriCommitResult FriCommitAndFold(const std::vector<Fp2>& coeffs, const uint256& fs_seed,
-                                 uint64_t pow_grind_nonce, bool enable_deep)
+FriCommitResult FriCommitAndFoldImpl(const std::vector<Fp2>& coeffs, const uint256& fs_seed,
+                                     uint64_t pow_grind_nonce, bool enable_deep,
+                                     const Fp2* forced_deep_z)
 {
     FriCommitResult out;
     if (coeffs.empty()) {
@@ -455,9 +456,16 @@ FriCommitResult FriCommitAndFold(const std::vector<Fp2>& coeffs, const uint256& 
     MerkleTree quot_tree;
     if (enable_deep) {
         out.proof.has_deep = true;
-        out.proof.deep_z = fs.ChallengeFp2("deep_z", 0);
+        if (forced_deep_z) {
+            out.proof.deep_z_forced = true;
+            out.proof.deep_z = *forced_deep_z;
+            fs.AbsorbFp2(out.proof.deep_z); // bind fixed z (no FS sample)
+        } else {
+            out.proof.deep_z_forced = false;
+            out.proof.deep_z = fs.ChallengeFp2("deep_z", 0);
+            fs.AbsorbFp2(out.proof.deep_z);
+        }
         out.proof.deep_eval = EvalPolyCoeffs(coeff_pow2, out.proof.deep_z);
-        fs.AbsorbFp2(out.proof.deep_z);
         fs.AbsorbFp2(out.proof.deep_eval);
 
         std::vector<Fp2> quot = SyntheticQuotient(coeff_pow2, out.proof.deep_z, out.proof.deep_eval);
@@ -551,9 +559,13 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
     }
 
     if (proof.has_deep) {
-        const Fp2 z = fs.ChallengeFp2("deep_z", 0);
-        if (!Eq(z, proof.deep_z)) return fail("deep_z");
-        fs.AbsorbFp2(proof.deep_z);
+        if (proof.deep_z_forced) {
+            fs.AbsorbFp2(proof.deep_z);
+        } else {
+            const Fp2 z = fs.ChallengeFp2("deep_z", 0);
+            if (!Eq(z, proof.deep_z)) return fail("deep_z");
+            fs.AbsorbFp2(proof.deep_z);
+        }
         fs.AbsorbFp2(proof.deep_eval);
         if (!proof.deep_quot_fri) return fail("missing deep quot FRI");
         if (proof.deep_quot_n_leaves == 0) return fail("deep quot leaves");
@@ -678,6 +690,7 @@ size_t SerializeFriProof(const FriProof& proof, std::vector<unsigned char>& out)
         for (const auto& s : q.deep_quot_siblings) AppendBytes(out, s.data(), 32);
     }
     out.push_back(proof.has_deep ? 1 : 0);
+    out.push_back(proof.deep_z_forced ? 1 : 0);
     if (proof.has_deep) {
         AppendFp2(out, proof.deep_z);
         AppendFp2(out, proof.deep_eval);
@@ -753,6 +766,8 @@ std::optional<FriProof> DeserializeFriProof(const std::vector<unsigned char>& in
     }
     if (p >= end) return std::nullopt;
     proof.has_deep = (*p++ != 0);
+    if (p >= end) return std::nullopt;
+    proof.deep_z_forced = (*p++ != 0);
     if (proof.has_deep) {
         if (!ReadFp2Checked(p, end, proof.deep_z)) return std::nullopt;
         if (!ReadFp2Checked(p, end, proof.deep_eval)) return std::nullopt;
@@ -768,6 +783,28 @@ std::optional<FriProof> DeserializeFriProof(const std::vector<unsigned char>& in
     }
     if (p != end) return std::nullopt;
     return proof;
+}
+
+
+FriCommitResult FriCommitAndFold(const std::vector<Fp2>& coeffs, const uint256& fs_seed,
+                                 uint64_t pow_grind_nonce, bool enable_deep)
+{
+    return FriCommitAndFoldImpl(coeffs, fs_seed, pow_grind_nonce, enable_deep, nullptr);
+}
+
+FriCommitResult FriCommitAndFoldDeepAt(const std::vector<Fp2>& coeffs, const uint256& fs_seed,
+                                       const Fp2& deep_z, uint64_t pow_grind_nonce)
+{
+    return FriCommitAndFoldImpl(coeffs, fs_seed, pow_grind_nonce, /*enable_deep=*/true, &deep_z);
+}
+
+Fp2 FriEvalPoly(const std::vector<Fp2>& coeffs, const Fp2& z)
+{
+    Fp2 acc = Fp2::Zero();
+    for (size_t i = coeffs.size(); i-- > 0;) {
+        acc = gkr_field::Add(gkr_field::Mul(acc, z), coeffs[i]);
+    }
+    return acc;
 }
 
 } // namespace matmul::v4::rc

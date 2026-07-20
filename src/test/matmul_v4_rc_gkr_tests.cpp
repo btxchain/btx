@@ -289,6 +289,45 @@ BOOST_AUTO_TEST_CASE(gkr_m7_g_lookup_fri_extract_proxy_rejects)
     BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
 }
 
+BOOST_AUTO_TEST_CASE(gkr_g3_habock_table_root_mismatch_rejects)
+{
+    // Witness key FRI root must equal virtual Extract-table FRI root.
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(!pr.proof.table_fri.layers.empty());
+    pr.proof.table_fri.layers[0].root.begin()[0] ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_g3_habock_logup_sum_tamper_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(pr.proof.logup_inv_fri.has_deep);
+    BOOST_REQUIRE(pr.proof.logup_inv_fri.deep_z_forced);
+    pr.proof.lookup_logup_sum.c0 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_g3_habock_inv_deep_tamper_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(pr.proof.logup_inv_fri.has_deep);
+    pr.proof.logup_inv_fri.deep_eval.c1 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_g3_habock_r_leaf_tamper_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(!pr.proof.logup_r_fri.queries.empty());
+    BOOST_REQUIRE(!pr.proof.logup_r_fri.queries[0].steps.empty());
+    pr.proof.logup_r_fri.queries[0].steps[0].even.c0 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
 BOOST_AUTO_TEST_CASE(gkr_m7_g5_residual_tamper_rejects)
 {
     auto pr = ProveHonestToy();

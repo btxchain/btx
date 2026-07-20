@@ -84,8 +84,9 @@ FRI v3 implements DEEP/OOD (ePrint 2019/336 practice): after committing P, draw
 each query site check `P(x)=Q(x)·(x−z)+v`.
 
 This closes proximity-only PCS for **univariate** evaluation claims. MLE layer
-claims are additionally bound by commit-then-challenge (proof v5). Arbiter remains
-OFF pending external audit of the composition.
+claims are additionally bound by commit-then-challenge (proof v5+). Haböck LogUp
+(G3, proof v6) uses forced DEEP at `z=1` to bind `I(1)=Σ inv_i` and commits
+`R≡0`. Arbiter remains OFF pending external audit of the composition.
 
 
 ---
