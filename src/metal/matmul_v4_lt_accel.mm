@@ -17,6 +17,7 @@
 //   * Native Apple MX·E8M0 / FP8 matmul2d dequant FAIL CLOSED — not proven
 //     exact vs BTX M11×2^{e}. Digests remain bit-identical to the CPU oracle.
 
+#include <logging.h>
 #include <metal/matmul_v4_lt_accel.h>
 
 #include <arith_uint256.h>
@@ -426,6 +427,13 @@ bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>
 
 bool IsMatMulLTMetalAvailable()
 {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        LogPrintf("MatMul-v4.4-LT Metal MX: native MXFP4/FP8 matmul2d dequant is "
+                  "unavailable by design (not proven exact vs BTX M11×2^e). Peak path "
+                  "is exact INT8 scale-partitioned TensorOps/ALU; optimize ExactGemm "
+                  "and Extract-host + project lanes — do not claim native MX rates.\n");
+    });
     return SelfTestGemmKernelsOnce();
 }
 

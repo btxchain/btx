@@ -98,6 +98,7 @@
 #include <matmul/matmul_v4_batch.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_lt_mx_exact.h>
 #include <matmul/pow_v4.h>
 #include <ascend/matmul_v4_lt_accel.h>
 #include <cuda/matmul_v4_lt_accel.h>
@@ -1776,6 +1777,12 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     lt_obj.pushKV("native_fp8_qualified", false);
     lt_obj.pushKV("native_mxfp4_attempted", false);
     lt_obj.pushKV("native_fp8_attempted", false);
+    lt_obj.pushKV("peak_capable", false);
+    lt_obj.pushKV("peak_required", false);
+    lt_obj.pushKV("peak_ready", false);
+    lt_obj.pushKV("blocks_device_resident", false);
+    lt_obj.pushKV("allow_exact_mx_fallback", matmul::v4::lt::AllowLtExactMxFallback());
+    lt_obj.pushKV("deficit_reason", "");
     lt_obj.pushKV("rate_provenance",
                   telemetry_obtained ? "telemetry-only-device-resident-qstar-batched"
                                      : "telemetry-unavailable");
@@ -1990,6 +1997,7 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     std::cout << "  exact_mx_scale_partitioned    : no (fail-closed until device backend reports)\n";
     std::cout << "  native_mxfp4_qualified        : no (fail-closed until wired+proven)\n";
     std::cout << "  native_fp8_qualified          : no (fail-closed until wired+proven)\n";
+    std::cout << "  peak MX path                  : see lt.peak_* JSON (Blackwell/gfx950 require native)\n";
     std::cout << "  reason                         : " << native_path_reason << "\n";
 
     // This report has no backend stage timers or hardware counters yet. CPU
@@ -2144,6 +2152,27 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     lt_obj.pushKV("native_fp8_qualified", report_native_fp8);
     lt_obj.pushKV("native_mxfp4_attempted", mx_report.native_mxfp4_attempted);
     lt_obj.pushKV("native_fp8_attempted", mx_report.native_fp8_attempted);
+
+    matmul::v4::lt::LtPeakMxPathStatus peak{};
+#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+    if (backend == matmul_v4::accel::Kind::CUDA) {
+        peak = matmul_v4::cuda::ProbeLtPeakMxPathStatus();
+        matmul_v4::cuda::DiagnoseLtPeakMxPathOnce();
+    }
+#endif
+#if defined(BTX_ENABLE_HIP)
+    if (backend == matmul_v4::accel::Kind::HIP) {
+        peak = matmul_v4::hip::ProbeLtPeakMxPathStatus();
+        matmul_v4::hip::DiagnoseLtPeakMxPathOnce();
+    }
+#endif
+    lt_obj.pushKV("peak_capable", peak.peak_capable);
+    lt_obj.pushKV("peak_required", peak.peak_required);
+    lt_obj.pushKV("peak_ready", peak.peak_ready);
+    lt_obj.pushKV("blocks_device_resident", peak.blocks_device_resident);
+    lt_obj.pushKV("allow_exact_mx_fallback", peak.allow_exact_mx_fallback);
+    lt_obj.pushKV("deficit_reason", peak.deficit_reason);
+
     lt_obj.pushKV("tile_b", static_cast<uint64_t>(lt::kTileBLT));
     lt_obj.pushKV("matexpand_panel_w", static_cast<uint64_t>(lt::kMatExpandPanelW));
     lt_obj.pushKV("qstar_window", static_cast<uint64_t>(args.window));

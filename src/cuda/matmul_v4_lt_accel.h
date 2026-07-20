@@ -26,10 +26,12 @@ class CBlockHeader;
 // passes, ComputeDigestsOnlyLTCuda runs a persistent device-resident loop:
 //   MatExpand (G*W, Y*H) → ExtractDequant → project (Bhat*V) → F_q combine.
 //
-// B̂·V production default: exact MX scale-partitioned INT8 IMMA/ALU
-// (bit-identical to ComputeProjectedRightMxBlockScaleLT). Dense dequant remains
-// the fallback. Native MXFP4 / FP8 may run only after self-qual vs the CPU
-// oracle (else fail-closed); float accumulate is never labeled ExactGemm.
+// B̂·V peak default on Blackwell (sm_10x/sm_12x): require self-qualified native
+// MXFP4 or MXFP8 (oracle-identical). Exact INT8 MX scale-partitioned remains
+// correct but is NOT the default peak path — set
+// BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK=1 only for debug/A-B. Dense dequant
+// remains BTX_MATMUL_V4_LT_DENSE_BHAT=1. Float accumulate is never labeled
+// ExactGemm without oracle match.
 //
 // s8xs8 prefers cuBLASLt IMMA when self-qualified; s32xs8 / IMMA decline use
 // scalar DeviceGemm* (never labeled IMMA). Full-header batches generate W and

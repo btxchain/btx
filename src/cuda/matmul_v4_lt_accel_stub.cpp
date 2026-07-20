@@ -132,4 +132,23 @@ bool SelfQualifyLtNativeMxLanesOnce()
     return false;
 }
 
+bool IsLtPeakMxCapableDevice()
+{
+    return false;
+}
+
+matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
+{
+    matmul::v4::lt::LtPeakMxPathStatus s;
+    s.allow_exact_mx_fallback = matmul::v4::lt::AllowLtExactMxFallback();
+    return s;
+}
+
+void DiagnoseLtPeakMxPathOnce() {}
+
+bool LtPeakMxBlocksDeviceResident()
+{
+    return false;
+}
+
 } // namespace matmul_v4::cuda

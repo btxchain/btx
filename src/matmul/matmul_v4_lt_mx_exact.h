@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_lt.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 // Shared exact-MX helpers for ENC-DR-LT miner backends.
@@ -85,6 +86,34 @@ static_assert(kLtMxProjAbsBoundAtN4096 < kLtMxFloat32ExactIntegerCeil,
 [[nodiscard]] std::vector<int32_t> SimulateProjectedRightMxFloat32AccumulateLT(
     const std::vector<int8_t>& mu, const std::vector<uint8_t>& scales,
     const std::vector<int8_t>& V, uint32_t n, uint32_t m);
+
+/** True for env values 1/true/yes/on (case-insensitive). Missing → false. */
+[[nodiscard]] bool LtEnvFlagEnabled(const char* name);
+
+/**
+ * Peak-performance policy (default = force native on capable silicon):
+ *   On Blackwell / CDNA4-class GPUs the production resident path REQUIRES a
+ *   self-qualified native MXFP4 or MXFP8 lane. Exact INT8 MX remains correct
+ *   but is NOT the default peak path — operators must fix pack/heuristic/oracle
+ *   until native_*_qualified flips true.
+ *
+ * Escape hatch (debug / A-B only):
+ *   BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK=1
+ *     permits exact INT8 MX on peak-capable devices when native fails.
+ */
+[[nodiscard]] bool AllowLtExactMxFallback();
+
+/** Snapshot used by report JSON + startup diagnostics. */
+struct LtPeakMxPathStatus {
+    bool peak_capable{false};             // sm_100/120 or gfx950-class
+    bool native_mxfp4_qualified{false};
+    bool native_fp8_qualified{false};
+    bool peak_ready{false};               // capable && (mxfp4 || fp8) qualified
+    bool allow_exact_mx_fallback{false};  // env escape hatch
+    bool peak_required{false};            // capable && !allow_exact_mx_fallback
+    bool blocks_device_resident{false};   // peak_required && !peak_ready
+    std::string deficit_reason;           // empty when peak_ready or !peak_capable
+};
 
 } // namespace matmul::v4::lt
 

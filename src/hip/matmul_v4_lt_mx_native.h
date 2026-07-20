@@ -54,6 +54,18 @@ namespace matmul_v4::hip {
     const std::vector<int8_t>& V, uint32_t n, uint32_t m, std::vector<int32_t>& out,
     matmul::v4::lt::MxLaneProvenance* provenance = nullptr);
 
+/** True on CDNA4 gfx950 where peak MXFP4/FP8 is expected. */
+[[nodiscard]] bool IsLtPeakMxCapableDevice();
+
+/** Peak-path status after native self-qual (see matmul::v4::lt::LtPeakMxPathStatus). */
+[[nodiscard]] matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus();
+
+/** One-shot LogPrintf diagnostics: peak ready vs deficit / how to fix. */
+void DiagnoseLtPeakMxPathOnce();
+
+/** True when peak silicon requires native and it is not qualified (blocks resident). */
+[[nodiscard]] bool LtPeakMxBlocksDeviceResident();
+
 } // namespace matmul_v4::hip
 
 #endif // BITCOIN_HIP_MATMUL_V4_LT_MX_NATIVE_H

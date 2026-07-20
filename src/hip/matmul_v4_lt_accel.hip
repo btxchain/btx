@@ -33,12 +33,13 @@
 // AMD ROCm/HIP backend for MatMul v4.4 ENC-DR-LT (MatExpand).
 //
 // Hot path: persistent device-resident MatExpand→Extract→project→combine.
-//   B̂·V production default is exact MX scale-partitioned INT8 (four exponent
-//   planes × MFMA/ALU + exact 2^e accumulate), bit-identical to
-//   ComputeProjectedRightMxBlockScaleLT. Dense dequantized Bhat GEMM is the
-//   fail-closed fallback (opt-in via BTX_MATMUL_V4_LT_DENSE_BHAT=1).
-//   Native hipBLASLt/CDNA4 MXFP4/FP8 is attempted only behind self-qual vs the
-//   CPU MX oracle; unqualified attempts never set native_*_qualified.
+//   B̂·V peak default on CDNA4 gfx950: require self-qualified native MXFP4 or
+//   MXFP8 (oracle-identical). Exact INT8 MX scale-partitioned remains correct
+//   but is NOT the default peak path — set
+//   BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK=1 only for debug/A-B. Dense dequant
+//   remains BTX_MATMUL_V4_LT_DENSE_BHAT=1.
+//   Native hipBLASLt/CDNA4 MXFP4/FP8 is attempted behind self-qual vs the CPU
+//   MX oracle; unqualified attempts never set native_*_qualified.
 //   Y*H uses four radix-256 products and F_q combine uses nine Karatsuba/
 //   base-64 products. These are exact signed-byte MFMA lowerings, never
 //   mislabeled as native MXFP4 or s32xs8 instructions.
@@ -1351,7 +1352,8 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
         return false;
     }
 
-    // Prefer a qualified native path; otherwise exact INT8 scale partitions.
+    // Prefer a qualified native path; otherwise exact INT8 scale partitions
+    // only when peak policy allows (non-gfx950, or ALLOW_EXACT_MX_FALLBACK).
     if (TryLaunchNativeMxfp4ProjectedRight(mu, scales, V, n, m, out, &local) &&
         matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, out)) {
         local.exact_mx_scale_partitioned = false;
@@ -1368,6 +1370,13 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
         return true;
     }
     local = {};
+
+    if (LtPeakMxBlocksDeviceResident()) {
+        if (provenance) *provenance = local;
+        g_lt_last_mx_provenance = local;
+        out.clear();
+        return false;
+    }
 
     matmul::v4::lt::ExactGemmBackend gemm;
     gemm.gemm_s8s8 = &BackendGemmS8S8;
@@ -1463,11 +1472,16 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
             }
             std::vector<int32_t> launched;
             matmul::v4::lt::MxLaneProvenance mx_prov{};
-            if (!LaunchProjectedRightMxImpl(mu, scales, V, kMxN, kMxM, launched, &mx_prov) ||
-                !matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, kMxN, kMxM,
-                                                              launched) ||
-                !(mx_prov.exact_mx_scale_partitioned || mx_prov.native_mxfp4_qualified ||
-                  mx_prov.native_fp8_qualified)) {
+            const bool launched_ok =
+                LaunchProjectedRightMxImpl(mu, scales, V, kMxN, kMxM, launched, &mx_prov);
+            if (launched_ok) {
+                if (!matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, kMxN, kMxM,
+                                                                  launched) ||
+                    !(mx_prov.exact_mx_scale_partitioned || mx_prov.native_mxfp4_qualified ||
+                      mx_prov.native_fp8_qualified)) {
+                    return;
+                }
+            } else if (!LtPeakMxBlocksDeviceResident()) {
                 return;
             }
         }
@@ -1533,6 +1547,10 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     matmul_v4::hip::LtHipBatchProvenance* provenance)
 {
     if (headers.empty() || headers.size() > kMaxConsensusBatch) return false;
+    // Peak-performance default: gfx950 must run qualified native MXFP4/FP8.
+    if (LtPeakMxBlocksDeviceResident()) {
+        return false;
+    }
     const uint256 template_hash = matmul::v4::ComputeTemplateHash(headers.front());
     for (const CBlockHeader& header : headers) {
         if (matmul::v4::ComputeTemplateHash(header) != template_hash) return false;
@@ -1717,6 +1735,7 @@ bool LaunchProjectedRightMx(const std::vector<int8_t>& mu, const std::vector<uin
 bool IsMatMulLTHipAvailable()
 {
     if (!HipDeviceAvailable()) return false;
+    DiagnoseLtPeakMxPathOnce();
     return SelfTestGemmKernelsOnce();
 }
 

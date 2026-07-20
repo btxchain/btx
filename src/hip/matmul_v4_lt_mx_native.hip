@@ -4,6 +4,7 @@
 
 #include <hip/matmul_v4_lt_mx_native.h>
 
+#include <logging.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_lt_mx_exact.h>
 
@@ -652,6 +653,72 @@ bool TryLaunchNativeFp8ProjectedRight(const std::vector<int8_t>& mu,
     }
     if (provenance) provenance->native_fp8_qualified = true;
     return true;
+}
+
+bool IsLtPeakMxCapableDevice()
+{
+    return IsCdna4Gfx950();
+}
+
+matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
+{
+    const auto prov = ProbeLtHipMxNativeProvenance();
+    matmul::v4::lt::LtPeakMxPathStatus s;
+    s.peak_capable = IsLtPeakMxCapableDevice();
+    s.native_mxfp4_qualified = prov.native_mxfp4_qualified;
+    s.native_fp8_qualified = prov.native_fp8_qualified;
+    s.peak_ready = s.peak_capable && (s.native_mxfp4_qualified || s.native_fp8_qualified);
+    s.allow_exact_mx_fallback = matmul::v4::lt::AllowLtExactMxFallback();
+    s.peak_required = s.peak_capable && !s.allow_exact_mx_fallback;
+    s.blocks_device_resident = s.peak_required && !s.peak_ready;
+    if (!s.peak_capable) {
+        s.deficit_reason.clear();
+    } else if (s.peak_ready) {
+        s.deficit_reason.clear();
+    } else if (s.allow_exact_mx_fallback) {
+        s.deficit_reason =
+            "peak-capable GPU (gfx950) but native MXFP4/FP8 not oracle-qualified; "
+            "BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK=1 permits exact INT8 MX "
+            "(sub-peak). Fix hipBLASLt pack+heuristic until native_*_qualified.";
+    } else {
+        s.deficit_reason =
+            "peak-capable GPU (gfx950) requires native MXFP4 or MXFP8 self-qual vs "
+            "ComputeProjectedRightMxBlockScaleLT; resident device LT is blocked. "
+            "Fix pack/scale layout/heuristic (see matmul_v4_lt_mx_native.hip) or set "
+            "BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK=1 for debug-only exact INT8 MX.";
+    }
+    return s;
+}
+
+void DiagnoseLtPeakMxPathOnce()
+{
+    static std::once_flag once;
+    std::call_once(once, [] {
+        const auto s = ProbeLtPeakMxPathStatus();
+        if (!s.peak_capable) {
+            LogPrintf("MatMul-v4.4-LT HIP MX: device is not CDNA4 gfx950; peak MXFP4/FP8 "
+                      "not required. Exact INT8 MX scale-partitioned path remains "
+                      "production default.\n");
+            return;
+        }
+        if (s.peak_ready) {
+            LogPrintf("MatMul-v4.4-LT HIP MX PEAK READY: native_mxfp4_qualified=%d "
+                      "native_fp8_qualified=%d — resident miner will prefer native "
+                      "block-scaled projection.\n",
+                      s.native_mxfp4_qualified ? 1 : 0, s.native_fp8_qualified ? 1 : 0);
+            return;
+        }
+        LogPrintf("MatMul-v4.4-LT HIP MX PEAK DEFICIT: %s\n", s.deficit_reason.c_str());
+        LogPrintf("MatMul-v4.4-LT HIP MX ACTION REQUIRED: optimize/fix native path "
+                  "until ProbeLtHipMxNativeProvenance reports native_*_qualified; "
+                  "do not ship silent INT8-only rates as peak silicon evidence.\n");
+    });
+}
+
+bool LtPeakMxBlocksDeviceResident()
+{
+    DiagnoseLtPeakMxPathOnce();
+    return ProbeLtPeakMxPathStatus().blocks_device_resident;
 }
 
 } // namespace matmul_v4::hip

@@ -756,6 +756,52 @@ BOOST_AUTO_TEST_CASE(lt_mx_projection_fp32_exact_integer_bound)
     BOOST_CHECK(lt::LtMxProjectionFitsFloat32ExactInteger(58254, 1));
 }
 
+BOOST_AUTO_TEST_CASE(lt_peak_mx_allow_exact_fallback_env)
+{
+    // Peak policy escape hatch: absent/off → false; 1/true/yes/on → true.
+    const char* prev = std::getenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    const std::optional<std::string> original =
+        prev != nullptr ? std::optional<std::string>{prev} : std::nullopt;
+
+    unsetenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    BOOST_CHECK(!lt::LtEnvFlagEnabled("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK"));
+    BOOST_CHECK(!lt::AllowLtExactMxFallback());
+
+    setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "0", /*overwrite=*/1);
+    BOOST_CHECK(!lt::AllowLtExactMxFallback());
+    setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "1", /*overwrite=*/1);
+    BOOST_CHECK(lt::AllowLtExactMxFallback());
+    setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "true", /*overwrite=*/1);
+    BOOST_CHECK(lt::AllowLtExactMxFallback());
+    setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "YES", /*overwrite=*/1);
+    BOOST_CHECK(lt::AllowLtExactMxFallback());
+    setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "on", /*overwrite=*/1);
+    BOOST_CHECK(lt::AllowLtExactMxFallback());
+
+    // Stub peak probes (no GPU / non-peak) never block resident.
+    BOOST_CHECK(!matmul_v4::cuda::LtPeakMxBlocksDeviceResident());
+    BOOST_CHECK(!matmul_v4::hip::LtPeakMxBlocksDeviceResident());
+    const auto cuda_peak = matmul_v4::cuda::ProbeLtPeakMxPathStatus();
+    const auto hip_peak = matmul_v4::hip::ProbeLtPeakMxPathStatus();
+    BOOST_CHECK(cuda_peak.allow_exact_mx_fallback);
+    BOOST_CHECK(hip_peak.allow_exact_mx_fallback);
+    // Without a peak-capable device in this process, peak_required stays false.
+    if (!cuda_peak.peak_capable) {
+        BOOST_CHECK(!cuda_peak.peak_required);
+        BOOST_CHECK(!cuda_peak.blocks_device_resident);
+    }
+    if (!hip_peak.peak_capable) {
+        BOOST_CHECK(!hip_peak.peak_required);
+        BOOST_CHECK(!hip_peak.blocks_device_resident);
+    }
+
+    if (original) {
+        setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", original->c_str(), /*overwrite=*/1);
+    } else {
+        unsetenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    }
+}
+
 BOOST_AUTO_TEST_CASE(lt_mx_projection_q_entries_below_fp32_ceil)
 {
     // Header MX projections and adversarial ±6 / e=3 fillings must emit

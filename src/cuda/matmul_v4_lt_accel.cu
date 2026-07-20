@@ -1505,10 +1505,19 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
             }
             std::vector<int32_t> launched;
             matmul::v4::lt::MxLaneProvenance mx_prov{};
-            if (!LaunchProjectedRightMx(mu, scales, V, kMxN, kMxM, launched, &mx_prov) ||
-                !matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, kMxN, kMxM,
-                                                              launched) ||
-                !mx_prov.exact_mx_scale_partitioned) {
+            const bool launched_ok =
+                LaunchProjectedRightMx(mu, scales, V, kMxN, kMxM, launched, &mx_prov);
+            if (launched_ok) {
+                if (!matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, kMxN, kMxM,
+                                                                  launched) ||
+                    !(mx_prov.exact_mx_scale_partitioned || mx_prov.native_mxfp4_qualified ||
+                      mx_prov.native_fp8_qualified)) {
+                    return;
+                }
+            } else if (!LtPeakMxBlocksDeviceResident()) {
+                // Unexpected LaunchProjectedRightMx decline (partitioned path
+                // already matched the oracle above). Peak-required deficit is
+                // the only expected fail-closed case here.
                 return;
             }
         }
@@ -1621,6 +1630,12 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     // Bound every allocation before EnsureBatchCapacity. A vector larger than
     // consensus Q* is malformed for this ABI and must fail closed.
     if (headers.empty() || headers.size() > kMaxConsensusBatch) return false;
+    // Peak-performance default: Blackwell must run qualified native MXFP4/FP8.
+    // Without it, decline resident GPU LT (host ExactGemm fallback) so operators
+    // cannot silently ship sub-peak INT8 rates as silicon evidence.
+    if (LtPeakMxBlocksDeviceResident()) {
+        return false;
+    }
     auto& pool = Pool();
     std::lock_guard<std::mutex> lock(pool.mu);
     pool.used_exact_mx_this_batch = false;
@@ -1766,6 +1781,9 @@ bool IsMatMulLTCudaAvailable()
     if (!probe.compiled || !probe.available) {
         return false;
     }
+    // Always emit peak-path diagnostics once when CUDA is present, even if
+    // ExactGemm self-test later declines (operators must see PEAK DEFICIT).
+    DiagnoseLtPeakMxPathOnce();
     return SelfTestGemmKernelsOnce();
 }
 
@@ -1974,7 +1992,8 @@ bool LaunchProjectedRightMx(const std::vector<int8_t>& mu,
         return false;
     }
 
-    // Prefer a qualified native path; otherwise exact INT8 scale partitions.
+    // Prefer a qualified native path; otherwise exact INT8 scale partitions
+    // only when peak policy allows (non-Blackwell, or ALLOW_EXACT_MX_FALLBACK).
     if (TryLaunchNativeMxfp4ProjectedRight(mu, scales, V, n, m, out, &local) &&
         matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, out)) {
         local.native_mxfp4_qualified = true;
@@ -1993,6 +2012,14 @@ bool LaunchProjectedRightMx(const std::vector<int8_t>& mu,
         return true;
     }
     local = {};
+
+    if (LtPeakMxBlocksDeviceResident()) {
+        // Peak-capable + native unqualified + no fallback escape → decline.
+        if (provenance) *provenance = local;
+        g_lt_last_mx_prov = local;
+        out.clear();
+        return false;
+    }
 
     matmul::v4::lt::ExactGemmBackend gemm;
     gemm.gemm_s8s8 = &LaunchGemmS8S8;

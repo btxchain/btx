@@ -51,6 +51,26 @@ W generation, device SHA256d(Chat), digest/status-only D2H, and one batch sync.
 That changes the measurement path, not the native-instruction table below; it
 still requires CUDA/ROCm compilation and fresh B200/5090/MI350 silicon data.
 
+### Peak-performance default (Blackwell / CDNA4)
+
+On **sm_10x/sm_12x** (CUDA) and **gfx950** (HIP), the resident LT miner
+**requires** a self-qualified native MXFP4 or MXFP8 lane by default. Exact INT8
+MX scale-partitioned remains correct but is **sub-peak**; without native
+qualification, device-resident LT is blocked and startup logs
+`PEAK DEFICIT` / `ACTION REQUIRED`.
+
+Debug escape hatch only:
+
+```text
+BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK=1
+```
+
+Report JSON fields: `lt.peak_capable`, `lt.peak_required`, `lt.peak_ready`,
+`lt.blocks_device_resident`, `lt.allow_exact_mx_fallback`, `lt.deficit_reason`.
+
+Metal: native MXFP4 remains unavailable by design; exact INT8 scale partitions
+are the peak Metal path.
+
 ## Shipped production paths (SDK + silicon + self-qual)
 
 | Vendor | Path | Activates when | Still fail-closed |

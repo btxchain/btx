@@ -6,6 +6,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -157,6 +158,36 @@ std::vector<int32_t> SimulateProjectedRightMxFloat32AccumulateLT(
         }
     }
     return Q;
+}
+
+bool LtEnvFlagEnabled(const char* name)
+{
+    if (name == nullptr || name[0] == '\0') return false;
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::strcmp(value, "1") == 0) return true;
+    // Accept common truthy spellings without pulling locale-heavy helpers.
+    if ((value[0] == 't' || value[0] == 'T') &&
+        (value[1] == 'r' || value[1] == 'R') &&
+        (value[2] == 'u' || value[2] == 'U') &&
+        (value[3] == 'e' || value[3] == 'E') && value[4] == '\0') {
+        return true;
+    }
+    if ((value[0] == 'y' || value[0] == 'Y') &&
+        (value[1] == 'e' || value[1] == 'E') &&
+        (value[2] == 's' || value[2] == 'S') && value[3] == '\0') {
+        return true;
+    }
+    if ((value[0] == 'o' || value[0] == 'O') &&
+        (value[1] == 'n' || value[1] == 'N') && value[2] == '\0') {
+        return true;
+    }
+    return false;
+}
+
+bool AllowLtExactMxFallback()
+{
+    return LtEnvFlagEnabled("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
 }
 
 } // namespace matmul::v4::lt
