@@ -429,6 +429,20 @@ RCCoupParams MakeMediumRCCoupParams()
     return p;
 }
 
+RCCoupParams MakeProductionRCCoupParams()
+{
+    // PROVISIONAL Stage-G economics target (not consensus-active):
+    //   Resident bank = bank_pages × lobe_width² = 768 × 8192² = 48 GiB
+    //   Streamed peak ≈ 64 MiB page + 64 KiB state + 512 KiB int64 acc ≪ 24 GiB
+    // StateBytes = 8 × 8192 = 65536 (pow2 + MX-aligned). Barriers=8 ∈ [4,8].
+    RCCoupParams p;
+    p.barriers = 8;
+    p.lobes = 8;
+    p.lobe_width = 8192;
+    p.bank_pages = 768;
+    return p;
+}
+
 RCCoupParams ResolveRCCoupParams(const Consensus::Params& p)
 {
     return p.fMatMulRCCoupledUseToyDims ? MakeToyRCCoupParams() : MakeMediumRCCoupParams();
@@ -451,6 +465,35 @@ uint64_t EstimateRCCoupStreamedPeakBytes(const RCCoupParams& p)
     const uint64_t acc = state * sizeof(int64_t);
     const uint64_t barrier_roots = static_cast<uint64_t>(p.barriers) * 32;
     return page + state + acc + barrier_roots;
+}
+
+uint64_t EstimateRCCoupResidentPeakBytes(const RCCoupParams& p)
+{
+    const uint64_t page = static_cast<uint64_t>(p.lobe_width) * p.lobe_width;
+    const uint64_t bank = static_cast<uint64_t>(p.bank_pages) * page;
+    const uint64_t state = static_cast<uint64_t>(p.StateBytes());
+    const uint64_t acc = state * sizeof(int64_t);
+    const uint64_t barrier_roots = static_cast<uint64_t>(p.barriers) * 32;
+    return bank + state + acc + barrier_roots;
+}
+
+uint256 FingerprintRCCoupParams(const RCCoupParams& p)
+{
+    std::vector<unsigned char> buf;
+    auto put_u32 = [&](uint32_t v) {
+        buf.push_back(static_cast<unsigned char>(v));
+        buf.push_back(static_cast<unsigned char>(v >> 8));
+        buf.push_back(static_cast<unsigned char>(v >> 16));
+        buf.push_back(static_cast<unsigned char>(v >> 24));
+    };
+    static constexpr char kTag[] = "BTX_RC_COUP_PROD_PARAMS_V1";
+    buf.insert(buf.end(), kTag, kTag + sizeof(kTag) - 1);
+    put_u32(p.barriers);
+    put_u32(p.lobes);
+    put_u32(p.lobe_width);
+    put_u32(p.bank_pages);
+    put_u32(p.StateBytes());
+    return Sha256dBytes(buf.data(), buf.size());
 }
 
 std::vector<int8_t> DeriveCoupledBankPage(const CBlockHeader& header, int32_t height,

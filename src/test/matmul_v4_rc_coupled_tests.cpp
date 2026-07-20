@@ -255,6 +255,37 @@ BOOST_AUTO_TEST_CASE(rc_coup_soft_4gib_streamed_budget)
     }
 }
 
+BOOST_AUTO_TEST_CASE(rc_coup_production_dims_provisional)
+{
+    // PROVISIONAL production coupled shape — CI checks structure + peak formulas only
+    // (does NOT expand the 48 GiB Resident bank). Full puzzle golden is off-CI.
+    const auto prod = rc::MakeProductionRCCoupParams();
+    BOOST_REQUIRE(rc::ValidateRCCoupParams(prod));
+    BOOST_REQUIRE(rc::RCCoupBarrierLoopComplete(prod));
+    BOOST_CHECK_EQUAL(prod.barriers, 8u);
+    BOOST_CHECK_EQUAL(prod.lobes, 8u);
+    BOOST_CHECK_EQUAL(prod.lobe_width, 8192u);
+    BOOST_CHECK_EQUAL(prod.bank_pages, 768u);
+    BOOST_CHECK_EQUAL(prod.StateBytes(), 65536u);
+    BOOST_CHECK_EQUAL(prod.StateBytes() & (prod.StateBytes() - 1), 0u);
+    BOOST_CHECK_EQUAL(prod.StateBytes() % 32, 0u);
+
+    const uint64_t streamed = rc::EstimateRCCoupStreamedPeakBytes(prod);
+    const uint64_t resident = rc::EstimateRCCoupResidentPeakBytes(prod);
+    constexpr uint64_t k24GiB = 24ull << 30;
+    constexpr uint64_t k48GiB = 48ull << 30;
+    constexpr uint64_t k512MiB = 512ull << 20;
+    BOOST_CHECK_LE(streamed, k24GiB);
+    BOOST_CHECK_LE(streamed, k512MiB); // fits soft mem-cap-sweep floor
+    BOOST_CHECK_GE(resident, k48GiB);
+    BOOST_CHECK_LT(resident, k48GiB + (1ull << 20)); // ~48 GiB + small state
+
+    // Frozen param fingerprint (not puzzle digest).
+    BOOST_CHECK_EQUAL(rc::FingerprintRCCoupParams(prod).GetHex(),
+                      "9e5572c7a6d936e35dd68319a59a1d76d1f0762d5c07f441598ebd1c41d04869");
+    BOOST_TEST_MESSAGE("production streamed_peak=" << streamed << " resident_peak=" << resident);
+}
+
 BOOST_AUTO_TEST_CASE(rc_coup_stage_d_distributed_parity)
 {
     // Stage D: lobe segment IDs independent of N; integer-sum reduce; Extract once.

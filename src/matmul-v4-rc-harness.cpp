@@ -16,6 +16,7 @@
 #include <crypto/sha256.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_scale_axes.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_coupled_netcost.h>
 #include <matmul/matmul_v4_rc_gkr.h>
@@ -58,10 +59,13 @@ namespace {
 struct Args {
     bool toy{true};
     bool medium{false};
+    bool production{false};
     bool help{false};
     bool coupled{false};
     bool coupled_medium{false};
+    bool coupled_production{false};
     bool mode_sweep{false};
+    bool mem_cap_sweep{false};
     bool prove_winner_gkr{false};
     uint32_t rounds{0};   // 0 ⇒ keep params.rounds
     uint32_t episodes{3}; // default for toy
@@ -76,8 +80,11 @@ void PrintUsage(std::ostream& os)
     os << "Usage: matmul-v4-rc-harness [options]\n"
        << "  --toy / --no-toy           tiny dims (default: --toy; CI-safe)\n"
        << "  --medium                   medium dims (wgrad >2^24); implies not toy\n"
+       << "  --production               frozen episode dims (n_ctx=786432 …); off-CI\n"
        << "  --coupled                  Stage C coupled-puzzle timing (toy dims)\n"
        << "  --coupled-medium           Stage C coupled-puzzle timing (medium dims)\n"
+       << "  --coupled-production       Stage C provisional HBM coupled dims (off-CI)\n"
+       << "  --mem-cap-sweep            production coupled under 512MiB/2GiB/8GiB caps\n"
        << "  --mode-sweep               also time Resident/Checkpointed/Streamed\n"
        << "  --prove-winner-gkr         Stage E winner-only: mine + reseal + ProveWinner* + verify\n"
        << "  --rounds N                 override episode rounds (default: params)\n"
@@ -86,7 +93,7 @@ void PrintUsage(std::ostream& os)
        << "                             Non-CPU uses MakeResolvedExactGemmBackendForRC\n"
        << "                             (LT resolve + RC self-qual fail-closed → CPU).\n"
        << "                             Digests are always resealed vs empty-backend CPU.\n"
-       << "  --mem-cap BYTES            allocator budget check (0 = unlimited)\n"
+       << "  --mem-cap BYTES            soft RSS/peak budget; auto-Streamed if over (0=off)\n"
        << "  --source-revision TIP      same-tip provenance for rc-gate\n"
        << "  --out PATH                 JSON output (default: rc-report.json)\n"
        << "  -h, --help                 this help\n";
@@ -171,11 +178,25 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
         } else if (a == "--medium") {
             args.medium = true;
             args.toy = false;
+            args.production = false;
+        } else if (a == "--production") {
+            args.production = true;
+            args.toy = false;
+            args.medium = false;
         } else if (a == "--coupled") {
             args.coupled = true;
         } else if (a == "--coupled-medium") {
             args.coupled = true;
             args.coupled_medium = true;
+            args.coupled_production = false;
+        } else if (a == "--coupled-production") {
+            args.coupled = true;
+            args.coupled_production = true;
+            args.coupled_medium = false;
+        } else if (a == "--mem-cap-sweep") {
+            args.mem_cap_sweep = true;
+            args.coupled = true;
+            args.coupled_production = true;
         } else if (a == "--mode-sweep") {
             args.mode_sweep = true;
         } else if (a == "--prove-winner-gkr") {
@@ -297,13 +318,63 @@ const char* CoupModeName(rc::RCCoupExecMode m)
     return "unknown";
 }
 
+
+/** Drive dispatch from --backend; hard-error if env conflicts (no silent mislabel). */
+bool ApplyBackendDispatch(const std::string& backend, std::string& err)
+{
+    const char* env = std::getenv("BTX_MATMUL_V4_BACKEND");
+    const std::string env_s = (env != nullptr) ? std::string(env) : std::string{};
+    auto conflict = [&](const std::string& want) {
+        if (!env_s.empty() && env_s != want && env_s != "auto") {
+            err = "conflict: --backend " + backend + " vs BTX_MATMUL_V4_BACKEND=" + env_s +
+                  " (set them equal, or unset the env)";
+            return true;
+        }
+        return false;
+    };
+    if (backend == "cpu") {
+        if (conflict("cpu")) return false;
+        setenv("BTX_MATMUL_V4_BACKEND", "cpu", 1);
+        return true;
+    }
+    if (backend == "auto") {
+        // Leave env untouched; ResolveBackend picks default/cert registry.
+        return true;
+    }
+    if (backend == "cuda" || backend == "hip" || backend == "metal" || backend == "ascend") {
+        if (conflict(backend)) return false;
+        setenv("BTX_MATMUL_V4_BACKEND", backend.c_str(), 1);
+        return true;
+    }
+    err = "unknown --backend " + backend + " (want cpu|cuda|hip|metal|ascend|auto)";
+    return false;
+}
+
 int RunCoupledHarness(const Args& args)
 {
-    const rc::RCCoupParams params =
-        args.coupled_medium ? rc::MakeMediumRCCoupParams() : rc::MakeToyRCCoupParams();
+    std::string be_err;
+    if (!ApplyBackendDispatch(args.backend, be_err)) {
+        std::cerr << "error: " << be_err << "\n";
+        return 2;
+    }
+
+    const rc::RCCoupParams params = args.coupled_production ? rc::MakeProductionRCCoupParams()
+                                  : args.coupled_medium     ? rc::MakeMediumRCCoupParams()
+                                                            : rc::MakeToyRCCoupParams();
     if (!rc::ValidateRCCoupParams(params)) {
         std::cerr << "error: invalid coupled params\n";
         return 2;
+    }
+
+    const uint64_t streamed_peak = rc::EstimateRCCoupStreamedPeakBytes(params);
+    const uint64_t resident_peak = rc::EstimateRCCoupResidentPeakBytes(params);
+    // Soft mem-cap: TILE to Streamed when resident estimate exceeds cap (never OOM-reject).
+    const bool force_streamed =
+        args.mem_cap != 0 && resident_peak > args.mem_cap;
+    if (force_streamed && streamed_peak > args.mem_cap) {
+        std::cerr << "error: streamed peak " << streamed_peak << " still exceeds --mem-cap "
+                  << args.mem_cap << "\n";
+        return 1;
     }
 
     // Mining ExactGemm: MakeResolvedExactGemmBackendForRC → CUDA/HIP/Metal
@@ -325,12 +396,18 @@ int RunCoupledHarness(const Args& args)
     const auto header = MakeHeader(42);
     const size_t rss_before = CurrentRssKiB();
 
-    const rc::RCCoupExecMode modes[] = {
-        rc::RCCoupExecMode::SequentialLobes,
-        rc::RCCoupExecMode::Checkpointed,
-        rc::RCCoupExecMode::Streamed,
-        rc::RCCoupExecMode::Resident,
-    };
+    std::vector<rc::RCCoupExecMode> modes;
+    const bool allow_resident =
+        std::getenv("BTX_RC_COUP_ALLOW_RESIDENT") != nullptr;
+    if (force_streamed || (args.coupled_production && !allow_resident)) {
+        // Production defaults to Streamed-only (48 GiB Resident is opt-in via env).
+        modes.push_back(rc::RCCoupExecMode::Streamed);
+    } else if (args.coupled_production && allow_resident) {
+        modes = {rc::RCCoupExecMode::Streamed, rc::RCCoupExecMode::Resident};
+    } else {
+        modes = {rc::RCCoupExecMode::SequentialLobes, rc::RCCoupExecMode::Checkpointed,
+                 rc::RCCoupExecMode::Streamed, rc::RCCoupExecMode::Resident};
+    }
 
     UniValue mode_walls(UniValue::VARR);
     uint256 digest_ref;
@@ -338,7 +415,7 @@ int RunCoupledHarness(const Args& args)
     bool mine_matches = true;
     rc::RCCoupTiming timed{};
 
-    for (size_t i = 0; i < 4; ++i) {
+    for (size_t i = 0; i < modes.size(); ++i) {
         rc::RCCoupOptions opt;
         opt.mode = modes[i];
         rc::RCCoupTiming t{};
@@ -381,7 +458,12 @@ int RunCoupledHarness(const Args& args)
     std::cout << "== MatMul ENC_RC coupled harness (Stage C) ==\n";
     std::cout << "  device_id:  " << device_id << "\n";
     std::cout << "  backend:    " << args.backend << " → " << backend_resolved << "\n";
-    std::cout << "  shape:      " << (args.coupled_medium ? "medium" : "toy") << "\n";
+    const char* shape = args.coupled_production ? "production"
+                         : args.coupled_medium     ? "medium"
+                                                   : "toy";
+    std::cout << "  shape:      " << shape << "\n";
+    std::cout << "  peak_est:   streamed=" << streamed_peak << " resident=" << resident_peak
+              << (force_streamed ? " (auto-Streamed by --mem-cap)" : "") << "\n";
     std::cout << "  barriers:   " << params.barriers << " lobes=" << params.lobes
               << " width=" << params.lobe_width << " pages=" << params.bank_pages << "\n";
     std::cout << "  digest:     " << digest_ref.GetHex() << "\n";
@@ -471,7 +553,13 @@ int RunCoupledHarness(const Args& args)
     run_variance.pushKV("note", "Cross-process variance filled by rc-stage-g-campaign.py");
 
     UniValue coupled(UniValue::VOBJ);
-    coupled.pushKV("shape", args.coupled_medium ? "medium" : "toy");
+    coupled.pushKV("shape", shape);
+    coupled.pushKV("streamed_peak_bytes_est", streamed_peak);
+    coupled.pushKV("resident_peak_bytes_est", resident_peak);
+    coupled.pushKV("mem_cap_bytes", args.mem_cap);
+    coupled.pushKV("auto_streamed", force_streamed || (args.coupled_production && !allow_resident));
+    coupled.pushKV("stream_vs_resident_wall_ratio",
+                   wall_resident > 0.0 ? (wall_stream / wall_resident) : 0.0);
     coupled.pushKV("modes", mode_walls);
     coupled.pushKV("digests_match", digests_match);
     coupled.pushKV("modes_available", "Sequential,Checkpointed,Streamed,Resident");
@@ -489,11 +577,16 @@ int RunCoupledHarness(const Args& args)
     root.pushKV("backend_requested", args.backend);
     root.pushKV("exact_gemm_inject", gemm.gemm_s8s8 != nullptr);
     root.pushKV("profile", "coupled");
-    root.pushKV("toy", !args.coupled_medium);
+    root.pushKV("toy", !args.coupled_medium && !args.coupled_production);
     root.pushKV("medium", args.coupled_medium);
-    root.pushKV("production_dims", false);
+    root.pushKV("production_dims", args.coupled_production);
+    root.pushKV("streamed_peak_bytes_est", streamed_peak);
+    root.pushKV("resident_peak_bytes_est", resident_peak);
+    root.pushKV("mem_cap_bytes", args.mem_cap);
     root.pushKV("evidence_kind",
-                args.coupled_medium ? "chrono_measured" : "toy_chrono_measured");
+                args.coupled_production ? "production_chrono_measured"
+                : args.coupled_medium     ? "chrono_measured"
+                                          : "toy_chrono_measured");
     root.pushKV("wall_clock_provenance", "chrono_steady_clock");
     root.pushKV("device_resident", false);
     root.pushKV("native_path_eligible", false);
@@ -671,18 +764,42 @@ int main(int argc, char* argv[])
         return RunProveWinnerGkrHarness(args);
     }
 
+    if (args.mem_cap_sweep) {
+        // Production coupled under fixed soft caps via Streamed (A4).
+        const uint64_t caps[] = {512ull << 20, 2ull << 30, 8ull << 30};
+        int rc_all = 0;
+        for (uint64_t cap : caps) {
+            Args one = args;
+            one.mem_cap_sweep = false;
+            one.coupled = true;
+            one.coupled_production = true;
+            one.mem_cap = cap;
+            one.out_path = args.out_path + ".cap" + std::to_string(cap);
+            std::cout << "== mem-cap-sweep cap=" << cap << " out=" << one.out_path << "==\n";
+            const int rc = RunCoupledHarness(one);
+            if (rc != 0) rc_all = rc;
+        }
+        return rc_all;
+    }
+
     if (args.coupled) {
         return RunCoupledHarness(args);
     }
 
-    if (!args.toy && !args.medium) {
-        std::cerr << "error: --no-toy without --medium refuses consensus dims "
-                     "(n_ctx=786432) in this harness; use --toy or --medium.\n";
+    std::string be_err;
+    if (!ApplyBackendDispatch(args.backend, be_err)) {
+        std::cerr << "error: " << be_err << "\n";
         return 2;
     }
 
-    rc::RCEpisodeParams params =
-        args.medium ? rc::MakeMediumRCEpisodeParams() : rc::MakeToyRCEpisodeParams();
+    if (!args.toy && !args.medium && !args.production) {
+        std::cerr << "error: need --toy, --medium, or --production\n";
+        return 2;
+    }
+
+    rc::RCEpisodeParams params = args.production ? rc::MakeProductionRCEpisodeParams()
+                               : args.medium     ? rc::MakeMediumRCEpisodeParams()
+                                                 : rc::MakeToyRCEpisodeParams();
     if (args.rounds > 0) params.rounds = args.rounds;
     if (!rc::ValidateRCEpisodeParams(params)) {
         std::cerr << "error: invalid RC episode params\n";
@@ -724,11 +841,19 @@ int main(int argc, char* argv[])
     }
 
     const uint64_t footprint = EstimateWorkingSetBytes(params);
+    const uint64_t streamed_ep = rc::EstimateRCStreamedPeakBytes(params);
+    bool episode_streamed_tiling = false;
     if (args.mem_cap != 0 && footprint > args.mem_cap) {
-        std::cerr << "error: estimated working-set " << footprint
-                  << " bytes exceeds --mem-cap " << args.mem_cap << "\n";
-        return 1;
+        if (streamed_ep > args.mem_cap) {
+            std::cerr << "error: working-set " << footprint << " and streamed peak " << streamed_ep
+                      << " both exceed --mem-cap " << args.mem_cap << "\n";
+            return 1;
+        }
+        episode_streamed_tiling = true;
+        std::cout << "note: resident footprint " << footprint << " > mem-cap " << args.mem_cap
+                  << "; proceeding under streamed peak estimate " << streamed_ep << "\n";
     }
+    (void)episode_streamed_tiling;
 
     const std::string host = HostName();
     const std::string device_id = backend_resolved + "-ref:" + host;
@@ -736,8 +861,9 @@ int main(int argc, char* argv[])
     std::cout << "== MatMul ENC_RC harness (real episodes) ==\n";
     std::cout << "  device_id:  " << device_id << "\n";
     std::cout << "  backend:    " << args.backend << " → " << backend_resolved << "\n";
-    std::cout << "  toy/medium: toy=" << (args.toy ? "true" : "false")
-              << " medium=" << (args.medium ? "true" : "false") << "\n";
+    std::cout << "  dims:       toy=" << (args.toy ? "true" : "false")
+              << " medium=" << (args.medium ? "true" : "false")
+              << " production=" << (args.production ? "true" : "false") << "\n";
     std::cout << "  episodes:   " << args.episodes << "\n";
     std::cout << "  rounds:     " << params.rounds << "\n";
     std::cout << "  footprint≈  " << footprint << " bytes\n";
@@ -979,8 +1105,10 @@ int main(int argc, char* argv[])
     root.pushKV("mem_cap_bytes", args.mem_cap);
     root.pushKV("toy", args.toy);
     root.pushKV("medium", args.medium);
-    root.pushKV("production_dims", false);
-    root.pushKV("evidence_kind", args.toy ? "toy_chrono_measured" : "chrono_measured");
+    root.pushKV("production_dims", args.production);
+    root.pushKV("evidence_kind", args.toy ? "toy_chrono_measured"
+                               : args.production ? "production_chrono_measured"
+                                                 : "chrono_measured");
     root.pushKV("wall_clock_provenance", "chrono_steady_clock");
     root.pushKV("device_resident", false);
     root.pushKV("native_path_eligible",

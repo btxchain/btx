@@ -88,6 +88,20 @@ struct RCCoupParams {
 [[nodiscard]] RCCoupParams MakeToyRCCoupParams();
 /** CI-safe larger shape: barriers=8, lobes=8, lobe_width=64, bank_pages=32. */
 [[nodiscard]] RCCoupParams MakeMediumRCCoupParams();
+/**
+ * PROVISIONAL production coupled shape (Stage-G-calibratable; height stays disabled).
+ *
+ * Derivation (document in MakeProductionRCCoupParams + frozen-dims doc):
+ *   lobe_width = 8192 (MX-aligned, power-of-two)
+ *   lobes = 8 → StateBytes = 65536 (power-of-two butterfly + MX-aligned)
+ *   barriers = 8 (C5 upper bound)
+ *   bank_pages = 768 → Resident bank = 768 × 8192² = 48 GiB (datacenter HBM class)
+ *   Streamed peak ≈ one 64 MiB page + state + int64 acc ≪ 24 GiB (commodity tail)
+ *
+ * Freezing ≠ activation. ResolveRCCoupParams still returns toy/medium until a
+ * separate consensus decision wires production into public nets.
+ */
+[[nodiscard]] RCCoupParams MakeProductionRCCoupParams();
 
 /**
  * Consensus checker/miner dims: toy when Params::fMatMulRCCoupledUseToyDims
@@ -103,9 +117,21 @@ struct RCCoupParams {
 
 /**
  * Soft peak-bytes estimate for Streamed mode (one page + active state + int64
- * accumulator). Not a production HBM proof — used by soft 4 GiB budget tests.
+ * accumulator). Not a production HBM proof — used by soft budget / mem-cap tests.
  */
 [[nodiscard]] uint64_t EstimateRCCoupStreamedPeakBytes(const RCCoupParams& p);
+
+/**
+ * Soft peak-bytes estimate for Resident mode (full bank + state + int64 acc).
+ * Production preset targets ~48 GiB bank — measurement-only; never raises height.
+ */
+[[nodiscard]] uint64_t EstimateRCCoupResidentPeakBytes(const RCCoupParams& p);
+
+/**
+ * SHA256d fingerprint of the parametric shape (not a puzzle digest). Used to
+ * pin MakeProductionRCCoupParams() on CI without expanding a 48 GiB bank.
+ */
+[[nodiscard]] uint256 FingerprintRCCoupParams(const RCCoupParams& p);
 
 /**
  * Execution policy — NON-consensus residency/scheduling. Digests MUST match

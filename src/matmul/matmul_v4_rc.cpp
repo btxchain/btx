@@ -803,6 +803,13 @@ RCEpisodeParams MakeMediumRCEpisodeParams()
     return p;
 }
 
+RCEpisodeParams MakeProductionRCEpisodeParams()
+{
+    // PROVISIONAL frozen episode = epoch-0 consensus shape (DefaultConsensus…).
+    // Freezing ≠ activation; nMatMulRCHeight remains INT32_MAX.
+    return DefaultConsensusRCEpisodeParams();
+}
+
 RCEpisodeParams MakeCostLadderRCEpisodeParams()
 {
     // M9 off-CI ladder rung between toy and medium (b_seq=256). Enable with
