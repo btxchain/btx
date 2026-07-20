@@ -605,4 +605,60 @@ BOOST_AUTO_TEST_CASE(gkr_h2_shadow_reuses_prior_exact_replay)
     rc::RCGkrProofCacheClear();
 }
 
+BOOST_AUTO_TEST_CASE(gkr_f3_arbiter_rejects_sigma_or_digest_over_target)
+{
+    // F3: with arbiter forced ON, mismatched sigma / digest>target must reject
+    // (no ExactReplay fallback on the WinnerGkr success path). Heights unchanged.
+    setenv("BTX_RC_GKR_ARBITER", "1", 1);
+    unsetenv("BTX_RC_VERIFY_GKR");
+    BOOST_REQUIRE(rc::EnvRCGkrArbiterEnabled());
+    BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    auto pr = rc::ProveWinnerEpisode(header, params, 0, dig);
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    std::vector<unsigned char> bytes;
+    BOOST_REQUIRE(rc::SerializeRCGkrProof(pr.proof, bytes) > 0);
+
+    // digest > target: honest GKR proof, but target too tight.
+    {
+        CBlockHeader h = header;
+        h.matmul_digest = dig;
+        arith_uint256 tight = UintToArith256(dig);
+        if (tight > 0) --tight; // claimed_digest > tight
+        const auto dual = rc::VerifyRCWinnerOrExactReplay(h, params, 0, &tight, &bytes);
+        BOOST_CHECK(!dual.ok);
+        BOOST_CHECK(dual.path == rc::RCProdVerifyPath::WinnerGkr);
+        BOOST_CHECK(dual.note.find("claimed_digest > target") != std::string::npos);
+    }
+
+    // sigma mismatch: keep claimed digest, change nonce so DeriveSigma differs.
+    {
+        CBlockHeader h = header;
+        h.matmul_digest = dig;
+        h.nNonce64 ^= 0xdeadbeefull;
+        BOOST_REQUIRE(matmul::v4::DeriveSigma(h) != pr.proof.episode_sigma);
+        const auto dual = rc::VerifyRCWinnerOrExactReplay(h, params, 0, nullptr, &bytes);
+        BOOST_CHECK(!dual.ok);
+        BOOST_CHECK(dual.path == rc::RCProdVerifyPath::WinnerGkr);
+        BOOST_CHECK(dual.note.find("episode_sigma") != std::string::npos);
+    }
+
+    // dims mismatch: pass different episode params than proof.episode.
+    {
+        CBlockHeader h = header;
+        h.matmul_digest = dig;
+        auto bad_params = params;
+        bad_params.n_ctx = params.n_ctx + 32;
+        const auto dual = rc::VerifyRCWinnerOrExactReplay(h, bad_params, 0, nullptr, &bytes);
+        BOOST_CHECK(!dual.ok);
+        BOOST_CHECK(dual.path == rc::RCProdVerifyPath::WinnerGkr);
+        BOOST_CHECK(dual.note.find("episode dims") != std::string::npos);
+    }
+
+    unsetenv("BTX_RC_GKR_ARBITER");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
