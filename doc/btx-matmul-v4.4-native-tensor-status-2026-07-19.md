@@ -51,22 +51,34 @@ W generation, device SHA256d(Chat), digest/status-only D2H, and one batch sync.
 That changes the measurement path, not the native-instruction table below; it
 still requires CUDA/ROCm compilation and fresh B200/5090/MI350 silicon data.
 
-### Peak-performance default (Blackwell / CDNA4)
+### Peak-performance qualification (Blackwell / CDNA4)
 
 On **sm_10x/sm_12x** (CUDA) and **gfx950** (HIP), the resident LT miner
-**requires** a self-qualified native MXFP4 or MXFP8 lane by default. Exact INT8
-MX scale-partitioned remains correct but is **sub-peak**; without native
-qualification, device-resident LT is blocked and startup logs
-`PEAK DEFICIT` / `ACTION REQUIRED`.
+keeps the oracle-qualified exact INT8 MX scale-partitioned lane available by
+default. Native MXFP4/MXFP8 capability is reported separately and is not a
+consensus prerequisite. In the current implementation, the native launchers
+serve the host-vector projection surface; the persistent Q* graph still uses
+exact INT8, so `resident_native_mx_wired=false` and `peak_ready=false` even if a
+standalone native projection self-qualifies.
 
-Debug escape hatch only:
+An explicit native-only qualification run can block the resident fallback:
 
 ```text
-BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK=1
+BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX=1
 ```
 
 Report JSON fields: `lt.peak_capable`, `lt.peak_required`, `lt.peak_ready`,
-`lt.blocks_device_resident`, `lt.allow_exact_mx_fallback`, `lt.deficit_reason`.
+`lt.resident_native_mx_wired`, `lt.blocks_device_resident`,
+`lt.allow_exact_mx_fallback`, `lt.deficit_reason`. A `PEAK DEFICIT` log does not
+disable the exact resident miner unless native-only mode was explicitly set.
+
+For the expensive CUDA differential, run the complete suite selector (some
+Boost versions/builds have not resolved the narrower wildcard consistently):
+
+```sh
+BTX_MATMUL_V4_LT_CUDA_EXTENDED_SELFTEST=1 \
+  build-cuda-review/bin/test_btx --run_test=matmul_v4_lt_tests
+```
 
 Metal: native MXFP4 remains unavailable by design; exact INT8 scale partitions
 are the peak Metal path.
@@ -75,7 +87,7 @@ are the peak Metal path.
 
 | Vendor | Path | Activates when | Still fail-closed |
 |---|---|---|---|
-| **NVIDIA** | cuBLASLt `CUBLAS_COMPUTE_32I` IMMA s8×s8→s32 (host + device-ptr); resident MatExpand uses IMMA for G×W / U×Ahat / Bhat×V | CUDA + IMMA self-qual (multi-shape incl. MatExpand panels) | S32×s8 IMMA; MXFP4 tensor; `device_hashing` (Chat still D2H) |
+| **NVIDIA** | cuBLASLt `CUBLAS_COMPUTE_32I` IMMA s8×s8→s32 (host + device-ptr); resident MatExpand uses IMMA for G×W / U×Ahat / Bhat×V and hashes Chat on device | CUDA + IMMA self-qual (multi-shape incl. MatExpand panels) | S32×s8 IMMA; resident MXFP4 tensor |
 | **AMD** | hipBLASLt `HIPBLAS_COMPUTE_32I` / rocBLAS `gemm_ex` i8→i32; device-ptr MFMA; LaunchGemm MFMA→ALU→CPU | HIP + library ExactGemm match | Scalar never labeled MFMA; HIP off → stubs |
 | **Ascend 950** | aclnn Mm/Matmul (+ TransMatmulWeight INT8); KEEP_DTYPE; Cube only after odd-K / ±127 self-qual | `BTX_ENABLE_ASCEND` + CANN headers/libs + self-qual | Default CI stub; S32S8 Cube |
 | **Apple Metal** | MPP `tensor_ops::matmul2d` ExactGemm; M4/M5 arch probe; LaunchGemm TensorOps→ALU | Apple + Metal 4 MPP + self-qual | Non-Apple stubs; S32S8 TensorOps |

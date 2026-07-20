@@ -24,11 +24,10 @@ class CBlockHeader;
 // ComputeDigestsOnlyLTHip runs a persistent device-resident loop
 // (MatExpand → Extract → project → combine).
 //
-// B̂·V peak default on CDNA4 gfx950: require self-qualified native MXFP4 or
-// MXFP8 (oracle-identical). Exact INT8 MX scale-partitioned remains correct
-// but is NOT the default peak path — set
-// BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK=1 only for debug/A-B. Dense dequant
-// remains the fallback via BTX_MATMUL_V4_LT_DENSE_BHAT=1.
+// B̂·V default on CDNA4 gfx950 is the oracle-identical exact INT8 MX resident
+// path. Native MXFP4/MXFP8 qualification is reported separately and becomes
+// mandatory only for explicit BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX=1 qualification
+// runs. Dense dequant remains the fallback via BTX_MATMUL_V4_LT_DENSE_BHAT=1.
 //
 // Native MXFP4 / FP8 (hipBLASLt block-scale / CDNA4 MFMA scale) may be
 // attempted only behind self-qual vs the CPU MX oracle; unqualified attempts

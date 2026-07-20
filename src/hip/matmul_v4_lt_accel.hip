@@ -33,11 +33,10 @@
 // AMD ROCm/HIP backend for MatMul v4.4 ENC-DR-LT (MatExpand).
 //
 // Hot path: persistent device-resident MatExpand→Extract→project→combine.
-//   B̂·V peak default on CDNA4 gfx950: require self-qualified native MXFP4 or
-//   MXFP8 (oracle-identical). Exact INT8 MX scale-partitioned remains correct
-//   but is NOT the default peak path — set
-//   BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK=1 only for debug/A-B. Dense dequant
-//   remains BTX_MATMUL_V4_LT_DENSE_BHAT=1.
+//   B̂·V default on CDNA4 gfx950 remains the oracle-identical exact INT8 MX
+//   resident path. Native MXFP4/MXFP8 qualification is reported separately;
+//   BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX=1 makes it mandatory only for explicit
+//   native-path qualification. Dense dequant remains BTX_MATMUL_V4_LT_DENSE_BHAT=1.
 //   Native hipBLASLt/CDNA4 MXFP4/FP8 is attempted behind self-qual vs the CPU
 //   MX oracle; unqualified attempts never set native_*_qualified.
 //   Y*H uses four radix-256 products and F_q combine uses nine Karatsuba/
@@ -1352,8 +1351,8 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
         return false;
     }
 
-    // Prefer a qualified native path; otherwise exact INT8 scale partitions
-    // only when peak policy allows (non-gfx950, or ALLOW_EXACT_MX_FALLBACK).
+    // Prefer a qualified native path on this host-vector entry; otherwise use
+    // exact INT8 scale partitions unless explicit native-only mode blocks it.
     if (TryLaunchNativeMxfp4ProjectedRight(mu, scales, V, n, m, out, &local) &&
         matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, out)) {
         local.exact_mx_scale_partitioned = false;
@@ -1547,7 +1546,8 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     matmul_v4::hip::LtHipBatchProvenance* provenance)
 {
     if (headers.empty() || headers.size() > kMaxConsensusBatch) return false;
-    // Peak-performance default: gfx950 must run qualified native MXFP4/FP8.
+    // Exact INT8 MX stays resident by default; only explicit native-only
+    // qualification mode blocks an unqualified/unwired native path.
     if (LtPeakMxBlocksDeviceResident()) {
         return false;
     }
@@ -1605,14 +1605,17 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
         out[i].target_match = false;
         out[i].backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
     }
+    // Execution provenance must describe this resident batch, not process-wide
+    // native capability. The resident graph above uses LaunchProjectRightMxExact.
+    matmul::v4::lt::MxLaneProvenance executed_mx{};
+    executed_mx.exact_mx_scale_partitioned = pool.used_exact_mx_this_batch;
+    g_lt_last_mx_provenance = executed_mx;
     if (provenance) {
         provenance->qstar_device_batched = headers.size() > 1;
         provenance->device_w_generation = true;
         provenance->device_digest = true;
         provenance->per_nonce_sync_absent = true;
-        provenance->mx = ProbeLtHipMxNativeProvenance();
-        provenance->mx.exact_mx_scale_partitioned = pool.used_exact_mx_this_batch;
-        g_lt_last_mx_provenance = provenance->mx;
+        provenance->mx = executed_mx;
     }
     return true;
 }

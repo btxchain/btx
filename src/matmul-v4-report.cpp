@@ -1898,12 +1898,16 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     lt_obj.pushKV("native_fp8_qualified", false);
     lt_obj.pushKV("native_mxfp4_attempted", false);
     lt_obj.pushKV("native_fp8_attempted", false);
-    lt_obj.pushKV("peak_capable", false);
-    lt_obj.pushKV("peak_required", false);
-    lt_obj.pushKV("peak_ready", false);
-    lt_obj.pushKV("blocks_device_resident", false);
+    // Telemetry-only deliberately avoids native self-qualification/probing;
+    // false would be a fabricated capability statement on Blackwell/gfx950.
+    lt_obj.pushKV("peak_status_measured", false);
+    lt_obj.pushKV("peak_capable", UniValue(UniValue::VNULL));
+    lt_obj.pushKV("peak_required", UniValue(UniValue::VNULL));
+    lt_obj.pushKV("resident_native_mx_wired", UniValue(UniValue::VNULL));
+    lt_obj.pushKV("peak_ready", UniValue(UniValue::VNULL));
+    lt_obj.pushKV("blocks_device_resident", UniValue(UniValue::VNULL));
     lt_obj.pushKV("allow_exact_mx_fallback", matmul::v4::lt::AllowLtExactMxFallback());
-    lt_obj.pushKV("deficit_reason", "");
+    lt_obj.pushKV("deficit_reason", "telemetry-only: native peak status not measured");
     lt_obj.pushKV("rate_provenance",
                   telemetry_obtained ? "telemetry-only-device-resident-qstar-batched"
                                      : "telemetry-unavailable");
@@ -2124,13 +2128,32 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
                   << (args.v3_hashrate / throughput.device_nonce_per_s) << ")\n";
     }
 
+    matmul::v4::lt::LtPeakMxPathStatus peak{};
+    bool peak_status_measured{false};
+#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+    if (backend == matmul_v4::accel::Kind::CUDA) {
+        peak = matmul_v4::cuda::ProbeLtPeakMxPathStatus();
+        peak_status_measured = true;
+        matmul_v4::cuda::DiagnoseLtPeakMxPathOnce();
+    }
+#endif
+#if defined(BTX_ENABLE_HIP)
+    if (backend == matmul_v4::accel::Kind::HIP) {
+        peak = matmul_v4::hip::ProbeLtPeakMxPathStatus();
+        peak_status_measured = true;
+        matmul_v4::hip::DiagnoseLtPeakMxPathOnce();
+    }
+#endif
+
     std::cout << "\n[device] LT native MatExpand GEMM path\n";
     std::cout << "  device-assisted path exact    : " << (device_assisted_path_exact ? "yes" : "no") << "\n";
     std::cout << "  device native kernel wired    : " << (device_native_kernel_wired ? "yes" : "no") << "\n";
     std::cout << "  exact_mx_scale_partitioned    : no (fail-closed until device backend reports)\n";
     std::cout << "  native_mxfp4_qualified        : no (fail-closed until wired+proven)\n";
     std::cout << "  native_fp8_qualified          : no (fail-closed until wired+proven)\n";
-    std::cout << "  peak MX path                  : see lt.peak_* JSON (Blackwell/gfx950 require native)\n";
+    std::cout << "  resident native MX wired      : "
+              << (peak.resident_native_mx_wired ? "yes" : "no")
+              << " (see lt.peak_*; exact INT8 resident fallback stays available by default)\n";
     std::cout << "  reason                         : " << native_path_reason << "\n";
 
     // This report has no backend stage timers or hardware counters yet. CPU
@@ -2294,21 +2317,10 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     lt_obj.pushKV("native_mxfp4_attempted", mx_report.native_mxfp4_attempted);
     lt_obj.pushKV("native_fp8_attempted", mx_report.native_fp8_attempted);
 
-    matmul::v4::lt::LtPeakMxPathStatus peak{};
-#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
-    if (backend == matmul_v4::accel::Kind::CUDA) {
-        peak = matmul_v4::cuda::ProbeLtPeakMxPathStatus();
-        matmul_v4::cuda::DiagnoseLtPeakMxPathOnce();
-    }
-#endif
-#if defined(BTX_ENABLE_HIP)
-    if (backend == matmul_v4::accel::Kind::HIP) {
-        peak = matmul_v4::hip::ProbeLtPeakMxPathStatus();
-        matmul_v4::hip::DiagnoseLtPeakMxPathOnce();
-    }
-#endif
+    lt_obj.pushKV("peak_status_measured", peak_status_measured);
     lt_obj.pushKV("peak_capable", peak.peak_capable);
     lt_obj.pushKV("peak_required", peak.peak_required);
+    lt_obj.pushKV("resident_native_mx_wired", peak.resident_native_mx_wired);
     lt_obj.pushKV("peak_ready", peak.peak_ready);
     lt_obj.pushKV("blocks_device_resident", peak.blocks_device_resident);
     lt_obj.pushKV("allow_exact_mx_fallback", peak.allow_exact_mx_fallback);

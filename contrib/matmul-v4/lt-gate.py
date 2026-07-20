@@ -484,6 +484,7 @@ def evaluate(
             or measurement_mode == "telemetry-only-device-resident-qstar"
         )
         be = bool(rep.get("bit_exact", False)) and stage_bit_exact(rep)
+        lt_evidence = rep.get("lt") if isinstance(rep.get("lt"), dict) else {}
         tsp = tensor_share(rep)
         device_tsp = device_tensor_share(rep)
         device_tensor_verified = device_tensor_majority_verified(rep)
@@ -521,6 +522,14 @@ def evaluate(
             "silicon_rate_valid": rep.get("silicon_rate_valid") is True,
             "execution_path": rep.get("execution_path"),
             "device_assisted_path_exact": (rep.get("lt") or {}).get("device_assisted_path_exact") is True,
+            "peak_status_measured": lt_evidence.get("peak_status_measured") is True,
+            "peak_capable": lt_evidence.get("peak_capable") is True,
+            "peak_ready": lt_evidence.get("peak_ready") is True,
+            "resident_native_mx_wired": lt_evidence.get("resident_native_mx_wired") is True,
+            "native_mx_qualified": (
+                lt_evidence.get("native_mxfp4_qualified") is True
+                or lt_evidence.get("native_fp8_qualified") is True
+            ),
             "silicon_rate_provenance": silicon_rate_provenance(rep),
             "device_measured": device_measured(rep),
             "nps": measured_nps,
@@ -844,24 +853,39 @@ def evaluate(
                     % (best_dc_s[1], best_c_s[1])
                 )
 
-    # G4 — MI350 / AMD datacenter native_path_eligible (exactness claim).
+    # G4 — MI350 / AMD datacenter resident OCP-MX exactness. Generic MFMA
+    # exactness is insufficient: require a peak-capable, qualified native MX
+    # lane that is actually wired into the resident Q* graph.
     amd_dc = [
         r
         for r in frontier
         if r["class"] == "datacenter"
         and (r["vendor"] or "").lower() in ("amd", "mi350", "amdgpu")
     ]
-    g4 = bool(amd_dc) and all(r["native_path_eligible"] for r in amd_dc)
+    def g4_native_mx_ready(row: dict) -> bool:
+        return bool(
+            row["native_path_eligible"]
+            and row["peak_status_measured"]
+            and row["peak_capable"]
+            and row["peak_ready"]
+            and row["resident_native_mx_wired"]
+            and row["native_mx_qualified"]
+        )
+
+    g4 = bool(amd_dc) and all(g4_native_mx_ready(r) for r in amd_dc)
     if not amd_dc:
         reasons.append(
             "G4 MI350/OCP MX: UNVERIFIED — no labeled amd:datacenter LT report with "
-            "native_path_eligible (fail closed)."
+            "resident native-MX evidence (fail closed)."
         )
     else:
         for r in amd_dc:
-            if not r["native_path_eligible"]:
+            if not g4_native_mx_ready(r):
                 reasons.append(
-                    "G4 MI350 exactness FAIL on %s: native_path_eligible=false." % r["file"]
+                    "G4 MI350/OCP MX FAIL on %s: require native_path_eligible, "
+                    "lt.peak_status_measured, lt.peak_capable, lt.peak_ready, "
+                    "lt.resident_native_mx_wired, "
+                    "and a qualified native MXFP4/FP8 lane." % r["file"]
                 )
 
     # G5 — external C-15: never auto-pass from JSON; require explicit ack.
@@ -978,7 +1002,7 @@ def print_human(go: bool, gates: dict, rows: list, reasons: list[str], notes: li
         "G1_tensor_majority": "G1 native tensor majority from device timing/counters on B200+5090",
         "G2_b200_5090_ratio": "G2 datacenter/consumer device nonce/s >= ~4x",
         "G3_nonce_per_dollar": "G3 nonce/$ (operator --cost only; no invented prices)",
-        "G4_mi350_exactness": "G4 MI350/AMD datacenter native_path_eligible",
+        "G4_mi350_exactness": "G4 MI350 resident qualified native OCP-MX execution",
         "G5_external_c15": "G5 external C-15 packet acknowledged",
         "G6_tip_verify_budget": "G6 tip-verify budget",
         "G7_header_chainwork": "G7 Header-PoW + chainwork blockers",
@@ -1012,7 +1036,7 @@ def check_g4(reports_dir: str | None) -> int:
 
     Without reports: PENDING (exit 0) unless BTX_REQUIRE_GPU_GOLDEN=1 (exit 1).
     With reports: require at least one schema_version=3 / profile=bmx4c-lt JSON
-    labeled or carrying native_path_eligible for an AMD datacenter class — else
+    carrying peak-capable, resident-wired, qualified native-MX evidence — else
     PENDING/FAIL under the same env gate. This helper does not invent labels.
     """
     require = os.environ.get("BTX_REQUIRE_GPU_GOLDEN", "").strip() in ("1", "true", "yes")
@@ -1043,12 +1067,25 @@ def check_g4(reports_dir: str | None) -> int:
             continue
         if data.get("schema_version") != 3 or data.get("profile") != "bmx4c-lt":
             continue
-        if bool(data.get("native_path_eligible", False)):
+        lt_evidence = data.get("lt") if isinstance(data.get("lt"), dict) else {}
+        native_mx_ready = (
+            bool(data.get("native_path_eligible", False))
+            and lt_evidence.get("peak_status_measured") is True
+            and lt_evidence.get("peak_capable") is True
+            and lt_evidence.get("peak_ready") is True
+            and lt_evidence.get("resident_native_mx_wired") is True
+            and (
+                lt_evidence.get("native_mxfp4_qualified") is True
+                or lt_evidence.get("native_fp8_qualified") is True
+            )
+        )
+        if native_mx_ready:
             eligible.append(os.path.basename(f))
 
     if not eligible:
         print(
-            "G4 MI350/OCP MX: PENDING — no bmx4c-lt report with native_path_eligible=true "
+            "G4 MI350/OCP MX: PENDING — no bmx4c-lt report with resident, qualified "
+            "native-MX evidence "
             "in %s (fail closed; no invented PASS)" % reports_dir
         )
         if require:
@@ -1056,7 +1093,7 @@ def check_g4(reports_dir: str | None) -> int:
             return 1
         return 0
 
-    print("G4 MI350/OCP MX: candidate reports with native_path_eligible=true:")
+    print("G4 MI350/OCP MX: candidate reports with resident qualified native-MX:")
     for e in eligible:
         print("  - " + e)
     print(

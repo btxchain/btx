@@ -51,6 +51,12 @@ def report(
     device_rate_timing_domain: object = "device-events-resident-qstar",
     device_execution_certified: object = True,
     device_rate_certified: object = True,
+    peak_status_measured: object = True,
+    peak_capable: object = True,
+    peak_ready: object = True,
+    resident_native_mx_wired: object = True,
+    native_mxfp4_qualified: object = True,
+    native_fp8_qualified: object = False,
     v3_hashrate: object = 0.0,
     asert: object = "n/a (pass --v3-hashrate)",
 ) -> dict:
@@ -112,6 +118,12 @@ def report(
             "device_digest": device_digest,
             "per_nonce_sync_absent": per_nonce_sync_absent,
             "rate_provenance": rate_provenance,
+            "peak_status_measured": peak_status_measured,
+            "peak_capable": peak_capable,
+            "peak_ready": peak_ready,
+            "resident_native_mx_wired": resident_native_mx_wired,
+            "native_mxfp4_qualified": native_mxfp4_qualified,
+            "native_fp8_qualified": native_fp8_qualified,
         },
     }
 
@@ -149,6 +161,34 @@ class LtGateSchemaTest(unittest.TestCase):
             },
         )
         self.assertFalse(any("G2 B200/5090 ratio" in reason for reason in reasons))
+
+    def test_g4_requires_resident_qualified_native_mx(self):
+        labels = {"mi350.json": ("amd", "datacenter", "MI350")}
+        candidate = report("mi350.json", 200.0, backend="hip")
+        _, gates, _, reasons, _, _ = lt_gate.evaluate(
+            [candidate], labels, {}, False
+        )
+        self.assertTrue(gates["G4_mi350_exactness"])
+        self.assertFalse(any("G4 MI350/OCP MX FAIL" in reason for reason in reasons))
+
+        for field in (
+            "peak_status_measured",
+            "peak_capable",
+            "peak_ready",
+            "resident_native_mx_wired",
+            "native_mxfp4_qualified",
+        ):
+            with self.subTest(field=field):
+                deficient = report("mi350.json", 200.0, backend="hip")
+                deficient["lt"][field] = False
+                _, deficient_gates, _, deficient_reasons, _, _ = lt_gate.evaluate(
+                    [deficient], labels, {}, False
+                )
+                self.assertFalse(deficient_gates["G4_mi350_exactness"])
+                self.assertTrue(any(
+                    "G4 MI350/OCP MX FAIL" in reason
+                    for reason in deficient_reasons
+                ))
 
     def test_g2_allows_different_hosts_when_device_timing_is_host_independent(self):
         dc = report(

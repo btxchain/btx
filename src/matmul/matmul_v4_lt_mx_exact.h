@@ -91,26 +91,34 @@ static_assert(kLtMxProjAbsBoundAtN4096 < kLtMxFloat32ExactIntegerCeil,
 [[nodiscard]] bool LtEnvFlagEnabled(const char* name);
 
 /**
- * Peak-performance policy (default = force native on capable silicon):
- *   On Blackwell / CDNA4-class GPUs the production resident path REQUIRES a
- *   self-qualified native MXFP4 or MXFP8 lane. Exact INT8 MX remains correct
- *   but is NOT the default peak path — operators must fix pack/heuristic/oracle
- *   until native_*_qualified flips true.
+ * Peak-performance policy (default = keep the exact resident path available):
+ *   On Blackwell / CDNA4-class GPUs, qualified native MXFP4/MXFP8 is preferred
+ *   and reported separately. If it declines, the bit-exact INT8 MX resident
+ *   path remains enabled; native qualification is a performance/readiness fact,
+ *   not a consensus prerequisite.
  *
- * Escape hatch (debug / A-B only):
- *   BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK=1
- *     permits exact INT8 MX on peak-capable devices when native fails.
+ * Explicit qualification mode:
+ *   BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX=1
+ *     blocks the resident lane on peak-capable devices unless a native lane
+ *     self-qualifies. This is intended for native-path qualification, not
+ *     ordinary mining. The legacy ALLOW_EXACT_MX_FALLBACK=1 flag overrides it.
  */
 [[nodiscard]] bool AllowLtExactMxFallback();
+
+/** Log an already-rendered accelerator diagnostic from an ordinary C++ TU.
+ *  CUDA/HIP compiler frontends must not instantiate logging.h's consteval
+ *  format-string machinery in .cu/.hip translation units. */
+void LogLtMxDiagnostic(const std::string& message);
 
 /** Snapshot used by report JSON + startup diagnostics. */
 struct LtPeakMxPathStatus {
     bool peak_capable{false};             // sm_100/120 or gfx950-class
     bool native_mxfp4_qualified{false};
     bool native_fp8_qualified{false};
-    bool peak_ready{false};               // capable && (mxfp4 || fp8) qualified
-    bool allow_exact_mx_fallback{false};  // env escape hatch
-    bool peak_required{false};            // capable && !allow_exact_mx_fallback
+    bool resident_native_mx_wired{false}; // native lane is in the resident Q* graph
+    bool peak_ready{false};               // capable && qualified && resident-wired
+    bool allow_exact_mx_fallback{true};   // default; false only in native-only mode
+    bool peak_required{false};            // capable && explicit native-only mode
     bool blocks_device_resident{false};   // peak_required && !peak_ready
     std::string deficit_reason;           // empty when peak_ready or !peak_capable
 };

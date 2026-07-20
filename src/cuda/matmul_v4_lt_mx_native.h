@@ -72,10 +72,11 @@ namespace matmul_v4::cuda {
 /** Peak-path status after native self-qual (see matmul::v4::lt::LtPeakMxPathStatus). */
 [[nodiscard]] matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus();
 
-/** One-shot LogPrintf diagnostics: peak ready vs deficit / how to fix. */
+/** One-shot diagnostics: resident-native ready vs deficit / how to fix. */
 void DiagnoseLtPeakMxPathOnce();
 
-/** True when peak silicon requires native and it is not qualified (blocks resident). */
+/** True only when explicit native-only mode was requested but the end-to-end
+ *  resident native path is not wired and oracle-qualified. */
 [[nodiscard]] bool LtPeakMxBlocksDeviceResident();
 
 } // namespace matmul_v4::cuda

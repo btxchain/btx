@@ -4,6 +4,8 @@
 
 #include <matmul/matmul_v4_lt_mx_exact.h>
 
+#include <logging.h>
+
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
@@ -187,7 +189,20 @@ bool LtEnvFlagEnabled(const char* name)
 
 bool AllowLtExactMxFallback()
 {
-    return LtEnvFlagEnabled("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    // Exact INT8 MX is bit-identical to the consensus oracle and is the safe
+    // resident default. Native-only mode is an explicit qualification tool;
+    // retain the old allow flag as an override for existing launch scripts.
+    return !LtEnvFlagEnabled("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX") ||
+           LtEnvFlagEnabled("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+}
+
+void LogLtMxDiagnostic(const std::string& message)
+{
+    // Keep ConstevalFormatString out of CUDA/HIP compiler frontends. This
+    // normal-C++ shim accepts a completed string and calls the logger directly.
+    LogInstance().LogPrintStr(message, std::source_location::current(),
+                              BCLog::LogFlags::ALL, BCLog::Level::Info,
+                              /*should_ratelimit=*/true);
 }
 
 } // namespace matmul::v4::lt

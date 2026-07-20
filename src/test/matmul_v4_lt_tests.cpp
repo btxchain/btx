@@ -102,6 +102,41 @@ private:
     std::optional<std::string> m_original;
 };
 
+class ScopedLtNativePolicyDefault
+{
+public:
+    ScopedLtNativePolicyDefault()
+    {
+        if (const char* value = std::getenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX")) {
+            m_require = value;
+        }
+        if (const char* value = std::getenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK")) {
+            m_allow = value;
+        }
+        unsetenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
+        unsetenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    }
+
+    ~ScopedLtNativePolicyDefault()
+    {
+        Restore("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX", m_require);
+        Restore("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", m_allow);
+    }
+
+private:
+    static void Restore(const char* name, const std::optional<std::string>& value)
+    {
+        if (value) {
+            setenv(name, value->c_str(), /*overwrite=*/1);
+        } else {
+            unsetenv(name);
+        }
+    }
+
+    std::optional<std::string> m_require;
+    std::optional<std::string> m_allow;
+};
+
 bool ExtendedCudaSelfTestRequested()
 {
     const char* enabled = std::getenv("BTX_MATMUL_V4_LT_CUDA_EXTENDED_SELFTEST");
@@ -756,26 +791,27 @@ BOOST_AUTO_TEST_CASE(lt_mx_projection_fp32_exact_integer_bound)
     BOOST_CHECK(lt::LtMxProjectionFitsFloat32ExactInteger(58254, 1));
 }
 
-BOOST_AUTO_TEST_CASE(lt_peak_mx_allow_exact_fallback_env)
+BOOST_AUTO_TEST_CASE(lt_peak_mx_exact_fallback_default_and_native_only_env)
 {
-    // Peak policy escape hatch: absent/off → false; 1/true/yes/on → true.
-    const char* prev = std::getenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
-    const std::optional<std::string> original =
-        prev != nullptr ? std::optional<std::string>{prev} : std::nullopt;
+    const char* prev_allow = std::getenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    const char* prev_require = std::getenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
+    const std::optional<std::string> original_allow =
+        prev_allow != nullptr ? std::optional<std::string>{prev_allow} : std::nullopt;
+    const std::optional<std::string> original_require =
+        prev_require != nullptr ? std::optional<std::string>{prev_require} : std::nullopt;
 
     unsetenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    unsetenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
     BOOST_CHECK(!lt::LtEnvFlagEnabled("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK"));
-    BOOST_CHECK(!lt::AllowLtExactMxFallback());
+    BOOST_CHECK(!lt::LtEnvFlagEnabled("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX"));
+    // Exact INT8 MX is oracle-identical and remains resident by default even
+    // when a peak-capable GPU cannot self-qualify native MX.
+    BOOST_CHECK(lt::AllowLtExactMxFallback());
 
-    setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "0", /*overwrite=*/1);
+    setenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX", "1", /*overwrite=*/1);
     BOOST_CHECK(!lt::AllowLtExactMxFallback());
+    // Keep the legacy allow flag as an explicit override for old scripts.
     setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "1", /*overwrite=*/1);
-    BOOST_CHECK(lt::AllowLtExactMxFallback());
-    setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "true", /*overwrite=*/1);
-    BOOST_CHECK(lt::AllowLtExactMxFallback());
-    setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "YES", /*overwrite=*/1);
-    BOOST_CHECK(lt::AllowLtExactMxFallback());
-    setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "on", /*overwrite=*/1);
     BOOST_CHECK(lt::AllowLtExactMxFallback());
 
     // Stub peak probes (no GPU / non-peak) never block resident.
@@ -789,16 +825,23 @@ BOOST_AUTO_TEST_CASE(lt_peak_mx_allow_exact_fallback_env)
     if (!cuda_peak.peak_capable) {
         BOOST_CHECK(!cuda_peak.peak_required);
         BOOST_CHECK(!cuda_peak.blocks_device_resident);
+        BOOST_CHECK(!cuda_peak.resident_native_mx_wired);
     }
     if (!hip_peak.peak_capable) {
         BOOST_CHECK(!hip_peak.peak_required);
         BOOST_CHECK(!hip_peak.blocks_device_resident);
+        BOOST_CHECK(!hip_peak.resident_native_mx_wired);
     }
 
-    if (original) {
-        setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", original->c_str(), /*overwrite=*/1);
+    if (original_allow) {
+        setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", original_allow->c_str(), /*overwrite=*/1);
     } else {
         unsetenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    }
+    if (original_require) {
+        setenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX", original_require->c_str(), /*overwrite=*/1);
+    } else {
+        unsetenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
     }
 }
 
@@ -1995,6 +2038,38 @@ BOOST_AUTO_TEST_CASE(lt_accel_entry_bit_identity_or_stub_decline)
 }
 
 #if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+BOOST_AUTO_TEST_CASE(cuda_peak_native_deficit_keeps_exact_resident_default)
+{
+    ScopedLtNativePolicyDefault policy_default;
+    if (!matmul_v4::cuda::IsMatMulLTCudaAvailable() ||
+        !matmul_v4::cuda::IsLtPeakMxCapableDevice()) {
+        BOOST_TEST_MESSAGE("skipping Blackwell exact-resident fallback regression");
+        return;
+    }
+
+    const auto status = matmul_v4::cuda::ProbeLtPeakMxPathStatus();
+    BOOST_CHECK(status.allow_exact_mx_fallback);
+    BOOST_CHECK(!status.peak_required);
+    BOOST_CHECK(!status.blocks_device_resident);
+    BOOST_CHECK(!status.resident_native_mx_wired);
+    BOOST_CHECK(!status.peak_ready);
+
+    std::vector<CBlockHeader> headers{MakeLTHeader(0x5090, kTestDim),
+                                      MakeLTHeader(0x5060, kTestDim)};
+    std::vector<lt::DigestOnlyResultLT> results;
+    matmul_v4::cuda::LtCudaBatchProvenance provenance;
+    BOOST_REQUIRE(matmul_v4::cuda::ComputeDigestsOnlyLTCuda(
+        headers, kTestDim, results, &provenance));
+    BOOST_REQUIRE_EQUAL(results.size(), headers.size());
+    BOOST_CHECK(provenance.qstar_device_batched);
+    BOOST_CHECK(provenance.device_w_generation);
+    BOOST_CHECK(provenance.device_digest);
+    BOOST_CHECK(provenance.per_nonce_sync_absent);
+    BOOST_CHECK(provenance.mx.exact_mx_scale_partitioned);
+    BOOST_CHECK(!provenance.mx.native_mxfp4_qualified);
+    BOOST_CHECK(!provenance.mx.native_fp8_qualified);
+}
+
 BOOST_AUTO_TEST_CASE(cuda_dispatch_winner_and_loser_contract_on_device)
 {
     if (!ExtendedCudaSelfTestRequested()) {

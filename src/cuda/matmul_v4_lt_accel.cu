@@ -1624,9 +1624,9 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     // Bound every allocation before EnsureBatchCapacity. A vector larger than
     // consensus Q* is malformed for this ABI and must fail closed.
     if (headers.empty() || headers.size() > kMaxConsensusBatch) return false;
-    // Peak-performance default: Blackwell must run qualified native MXFP4/FP8.
-    // Without it, decline resident GPU LT (host ExactGemm fallback) so operators
-    // cannot silently ship sub-peak INT8 rates as silicon evidence.
+    // Exact INT8 MX remains the resident default on Blackwell. Only an explicit
+    // native-only qualification run blocks when end-to-end native MX is absent;
+    // telemetry still reports the native deficit separately.
     if (LtPeakMxBlocksDeviceResident()) {
         return false;
     }
@@ -1987,8 +1987,8 @@ bool LaunchProjectedRightMx(const std::vector<int8_t>& mu,
         return false;
     }
 
-    // Prefer a qualified native path; otherwise exact INT8 scale partitions
-    // only when peak policy allows (non-Blackwell, or ALLOW_EXACT_MX_FALLBACK).
+    // Prefer a qualified native path on this host-vector entry; otherwise use
+    // exact INT8 scale partitions unless explicit native-only mode blocks it.
     if (TryLaunchNativeMxfp4ProjectedRight(mu, scales, V, n, m, out, &local) &&
         matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, out)) {
         local.native_mxfp4_qualified = true;
