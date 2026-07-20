@@ -83,9 +83,11 @@ against Stages §§1–5. It does **not** raise height.
 | **M3 Fp2 + bound** | **DONE (writeup)** — challenges in Fp2; composed bound in soundness note. **External audit OPEN** |
 | **M4 / M9 cost** | **DONE (instrument)** — `MeasureWinnerGkrToyMedium` / CSV; CI=toy; off-CI `BTX_RC_GKR_MEASURE_LADDER=1` (b_seq=256) + `BTX_RC_GKR_MEASURE_MEDIUM=1` (b_seq=8192). Soft over_budget → ExactReplay (tested). **No invented silicon rates**. Consensus-dim HBM vs shrink needs datacenter GPU (OUT OF SCOPE) |
 | **M5 shadow** | **Intact** — shadow ON, arbiter OFF, ExactReplay decides |
-| **M6 FRI params** | **DONE (Fable)** — unique-decoding **Q=116**, blowup=**16**, g=**40**, Fp2; `FriSoundnessBoundBits()=65`; conjectured ρ^Q gated OFF; Fp3 / DEEP-OOD documented as future/OPEN |
-| **M7 under-constraint** | **DONE (audit+tests)** — wire→constraint; LogUp `(in,out)`; adversarial (a)–(g). **OPEN G1–G5** block arbiter. **Decision:** ship k=40/Fp2; Fp3 not built |
-| **M8 soundness note** | **DONE** — Fable table + composed bound + DEEP/OOD OPEN + EXTERNAL AUDITOR CHECKLIST |
+| **M6 FRI params** | **DONE (Fable)** — Q=116, blowup=16, g=40, Fp2; bits=65 |
+| **M6+ DEEP/OOD** | **DONE (FRI v3)** — quotient identity at query sites |
+| **M7 under-constraint** | **DONE (v5 scaffold)** — G1/G2/G4/G5 closed; G3 partial (Haböck table open) |
+| **M8 soundness note** | **DONE** + emulated multi-persona audit doc |
+| **Emulated audit** | `doc/btx-matmul-v4.5-rc-crypto-audit-emulated-2026-07-21.md` — **not** external sign-off |
 | **M10 PCS alt** | **DONE (recommend)** — hand-rolled-but-audited FRI; no consensus vendor dep |
 | **M11 proximity gap** | **DONE (option)** — BCIKS20 Q≈53 documented; **not** shipped; Q=116 default |
 

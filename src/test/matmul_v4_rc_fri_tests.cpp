@@ -40,7 +40,7 @@ BOOST_AUTO_TEST_CASE(fri_constants_and_soundness_bits)
     BOOST_CHECK_EQUAL(rc::kRCFriBlowup, 16u);
     BOOST_CHECK_EQUAL(rc::kRCFriNumQueries, 116u);
     BOOST_CHECK_EQUAL(rc::kRCFriGrindingBits, 40u);
-    BOOST_CHECK_EQUAL(rc::kRCFriProofVersion, 2u);
+    BOOST_CHECK_EQUAL(rc::kRCFriProofVersion, 3u);
     BOOST_CHECK(!rc::kRCFriConjecturedBoundEnabled);
     BOOST_CHECK(rc::FriClaimedBitsMeetTarget());
     BOOST_CHECK_EQUAL(rc::FriSoundnessBoundBits(), 65); // floor(116*log2(32/17)-40)
@@ -49,9 +49,9 @@ BOOST_AUTO_TEST_CASE(fri_constants_and_soundness_bits)
     BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("blowup=16") != std::string::npos);
     BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("UNIQUE-DECODING") !=
                 std::string::npos);
+    BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("DEEP/OOD") != std::string::npos);
     BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("NOT conjectured") !=
                 std::string::npos);
-    BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("DEEP/OOD") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(fri_honest_commit_verify)
@@ -130,14 +130,25 @@ BOOST_AUTO_TEST_CASE(fri_query_count_matches_constant)
 
 BOOST_AUTO_TEST_CASE(fri_proof_much_smaller_than_lde_for_large_n)
 {
-    // Large enough that O(Q · log² N) openings ≪ N · blowup · sizeof(Fp2) LDE.
-    // Blowup=16 grows the LDE; n=16384 keeps the check CI-safe.
-    const size_t n = 16384;
+    // With DEEP (nested quot FRI) openings grow; still ≪ shipping full LDE at large N.
+    const size_t n = 65536;
     const auto c = rc::FriCommitAndFold(MakeCoeffs(n), MakeSeed(0x66));
     BOOST_REQUIRE(c.ok);
+    BOOST_REQUIRE(c.proof.has_deep);
     const size_t lde_bytes = c.lde_evals.size() * sizeof(rc::Fp2);
-    BOOST_CHECK_LT(c.proof_bytes, lde_bytes / 2);
+    BOOST_CHECK_LT(c.proof_bytes, lde_bytes);
     BOOST_CHECK_EQUAL(c.proof.queries.size(), rc::kRCFriNumQueries);
+}
+
+BOOST_AUTO_TEST_CASE(fri_deep_ood_tamper_rejects)
+{
+    const auto c = rc::FriCommitAndFold(MakeCoeffs(16), MakeSeed(0x71));
+    BOOST_REQUIRE(c.ok);
+    BOOST_REQUIRE(c.proof.has_deep);
+    auto bad = c.proof;
+    bad.deep_eval.c0 ^= 1;
+    std::string why;
+    BOOST_CHECK(!rc::FriVerify(bad, MakeSeed(0x71), &why));
 }
 
 BOOST_AUTO_TEST_CASE(fri_forge_flipped_eval_rejected)

@@ -401,6 +401,8 @@ struct LayerWire {
     std::vector<Fp2> A;
     std::vector<Fp2> B;
     std::vector<Fp2> Y; // GEMM product (Fp2) — sumcheck claim target
+    /** G5: residual X as Fp2 (Fwd only); empty otherwise. */
+    std::vector<Fp2> residual;
     /** Pre-Extract accumulator (int64). Equals Y for non-Fwd; for Fwd includes H5 residual. */
     std::vector<int64_t> extract_in;
     uint256 extract_prf{};
@@ -537,6 +539,7 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
             // Sumcheck proves Y_gemm = A·B; LogUp binds (Y_acc, extract_out) for H5.
             push_wire(RCGkrLayerKind::GemmPhase2Fwd, r, l, p.b_seq, p.d_model, p.d_model, X[l],
                       Wt, Y_gemm, Y_acc, prf_fwd[l], X[l + 1]);
+            out.back().residual = ToFp2I8(X[l]);
         }
 
         std::vector<std::vector<int8_t>> G(p.L_lyr + 1);
@@ -611,35 +614,20 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("round_roots"), 11);
     for (const auto& rt : round_roots) fs.AbsorbUint256(rt);
 
-    std::vector<Fp2> trace_evals;
-    std::vector<Fp2> lookup_keys;
-
+    // --- G1/G2: commit A, B, Y, LogUp keys BEFORE challenges (commit-then-challenge) ---
+    std::vector<Fp2> a_evals, b_evals, trace_evals, lookup_keys;
+    std::vector<uint256> extract_commits;
+    extract_commits.reserve(wires.size());
     for (const auto& w : wires) {
-        const uint32_t nu_i = Log2Exact(RCGkrNextPow2(w.m));
-        const uint32_t nu_j = Log2Exact(RCGkrNextPow2(w.n));
-        std::vector<Fp2> ri(nu_i), rj(nu_j);
-        for (uint32_t t = 0; t < nu_i; ++t) ri[t] = fs.ChallengeFp2("ri");
-        for (uint32_t t = 0; t < nu_j; ++t) rj[t] = fs.ChallengeFp2("rj");
-        const Fp2 yc = MleEvalMatrix(w.Y, w.m, w.n, ri, rj);
-        fs.AbsorbFp2(yc);
-
-        RCGkrLayerClaim lc;
-        lc.kind = w.kind;
-        lc.round = w.round;
-        lc.layer = w.layer;
-        lc.m = w.m;
-        lc.n = w.n;
-        lc.k = w.k;
-        lc.claim = yc;
-        std::vector<Fp2> rk;
-        lc.sumcheck =
-            ProveProductK(w.A, w.m, w.k, w.B, w.n, ri, rj, yc, fs, rk, lc.final_eval);
-        p.layers.push_back(std::move(lc));
-
+        a_evals.insert(a_evals.end(), w.A.begin(), w.A.end());
+        b_evals.insert(b_evals.end(), w.B.begin(), w.B.end());
         trace_evals.insert(trace_evals.end(), w.Y.begin(), w.Y.end());
+        std::vector<unsigned char> outbuf;
+        outbuf.insert(outbuf.end(), reinterpret_cast<const unsigned char*>(w.extract_out.data()),
+                      reinterpret_cast<const unsigned char*>(w.extract_out.data()) +
+                          w.extract_out.size());
+        extract_commits.push_back(Sha256dBytes(outbuf.data(), outbuf.size()));
 
-        // LogUp into Extract (input,output) keys only (NO raw tile ship).
-        // extract_in is the pre-Extract accumulator (H5: includes residual on Fwd).
         const uint32_t n_blocks = w.n / kRCMxBlockLen;
         assert(w.extract_in.size() == static_cast<size_t>(w.m) * w.n);
         assert(w.extract_out.size() == static_cast<size_t>(w.m) * w.n);
@@ -655,6 +643,79 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
         }
     }
 
+    auto wire_root = [](const std::vector<Fp2>& v) {
+        std::vector<unsigned char> buf;
+        for (const auto& x : v) AppendFp2(buf, x);
+        return Sha256dBytes(buf.empty() ? nullptr : buf.data(), buf.size());
+    };
+
+    // FRI commits (DEEP enabled) bind polynomials before sumcheck challenges.
+    const uint256 fri_pre = fs.Challenge("fri_precommit");
+    auto a_c = FriCommitAndFold(a_evals.empty() ? std::vector<Fp2>{Fp2::Zero()} : a_evals, fri_pre);
+    auto b_c = FriCommitAndFold(b_evals.empty() ? std::vector<Fp2>{Fp2::Zero()} : b_evals, fri_pre);
+    auto trace_c = FriCommitAndFold(trace_evals.empty() ? std::vector<Fp2>{Fp2::Zero()} : trace_evals,
+                                    fri_pre);
+    auto lookup_c =
+        FriCommitAndFold(lookup_keys.empty() ? std::vector<Fp2>{Fp2::Zero()} : lookup_keys, fri_pre);
+    p.a_fri = std::move(a_c.proof);
+    p.b_fri = std::move(b_c.proof);
+    p.trace_fri = std::move(trace_c.proof);
+    p.lookup_fri = std::move(lookup_c.proof);
+    fs.AbsorbUint256(p.a_fri.layers.empty() ? uint256{} : p.a_fri.layers[0].root);
+    fs.AbsorbUint256(p.b_fri.layers.empty() ? uint256{} : p.b_fri.layers[0].root);
+    fs.AbsorbUint256(p.trace_fri.layers.empty() ? uint256{} : p.trace_fri.layers[0].root);
+    fs.AbsorbUint256(p.lookup_fri.layers.empty() ? uint256{} : p.lookup_fri.layers[0].root);
+    if (p.trace_fri.has_deep) {
+        fs.AbsorbFp2(p.trace_fri.deep_z);
+        fs.AbsorbFp2(p.trace_fri.deep_eval);
+    }
+
+    uint256 prev_extract_commit{};
+    for (size_t wi = 0; wi < wires.size(); ++wi) {
+        const auto& w = wires[wi];
+        // G4: absorb prior extract_out commit (cross-layer link).
+        fs.AbsorbUint256(prev_extract_commit);
+        fs.AbsorbUint256(extract_commits[wi]);
+
+        const uint32_t nu_i = Log2Exact(RCGkrNextPow2(w.m));
+        const uint32_t nu_j = Log2Exact(RCGkrNextPow2(w.n));
+        std::vector<Fp2> ri(nu_i), rj(nu_j);
+        for (uint32_t t = 0; t < nu_i; ++t) ri[t] = fs.ChallengeFp2("ri");
+        for (uint32_t t = 0; t < nu_j; ++t) rj[t] = fs.ChallengeFp2("rj");
+
+        const Fp2 gemm_claim = MleEvalMatrix(w.Y, w.m, w.n, ri, rj);
+        Fp2 residual_mle = Fp2::Zero();
+        if (!w.residual.empty()) {
+            residual_mle = MleEvalMatrix(w.residual, w.m, w.n, ri, rj);
+        }
+        const Fp2 acc_claim = MleEvalMatrix(ToFp2I64(w.extract_in), w.m, w.n, ri, rj);
+        fs.AbsorbFp2(gemm_claim);
+        fs.AbsorbFp2(residual_mle);
+        fs.AbsorbFp2(acc_claim);
+
+        RCGkrLayerClaim lc;
+        lc.kind = w.kind;
+        lc.round = w.round;
+        lc.layer = w.layer;
+        lc.m = w.m;
+        lc.n = w.n;
+        lc.k = w.k;
+        lc.claim = gemm_claim;
+        lc.residual_mle = residual_mle;
+        lc.acc_claim = acc_claim;
+        lc.extract_out_commit = extract_commits[wi];
+        lc.a_root = wire_root(w.A);
+        lc.b_root = wire_root(w.B);
+        fs.AbsorbUint256(lc.a_root);
+        fs.AbsorbUint256(lc.b_root);
+        std::vector<Fp2> rk;
+        lc.sumcheck =
+            ProveProductK(w.A, w.m, w.k, w.B, w.n, ri, rj, gemm_claim, fs, rk, lc.final_eval);
+        p.layers.push_back(std::move(lc));
+        prev_extract_commit = extract_commits[wi];
+    }
+
+    // G3: LogUp sum over committed keys (FS-bound; keys in lookup_fri + DEEP).
     const Fp2 alu = fs.ChallengeFp2("logup_alpha");
     Fp2 logup = Fp2::Zero();
     for (const auto& key : lookup_keys) {
@@ -667,21 +728,13 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
     }
     p.lookup_logup_sum = logup;
     fs.AbsorbFp2(logup);
-
-    const uint256 fri_seed = fs.Challenge("fri_seed");
-    auto trace_c = FriCommitAndFold(trace_evals, fri_seed);
-    auto lookup_c = FriCommitAndFold(lookup_keys, fri_seed);
-    p.trace_fri = std::move(trace_c.proof);
-    p.lookup_fri = std::move(lookup_c.proof);
-    fs.AbsorbUint256(p.trace_fri.layers.empty() ? uint256{} : p.trace_fri.layers[0].root);
-    fs.AbsorbUint256(p.lookup_fri.layers.empty() ? uint256{} : p.lookup_fri.layers[0].root);
     p.transcript_hash = fs.Digest();
 
     std::vector<unsigned char> ser;
     out.timing.proof_bytes = SerializeRCGkrProof(p, ser);
     out.timing.prove_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     out.timing.peak_rss_kib = std::max(CurrentRssKiB(), rss0);
-    out.timing.ok = trace_c.ok && lookup_c.ok;
+    out.timing.ok = a_c.ok && b_c.ok && trace_c.ok && lookup_c.ok;
     out.timing.note = path_note ? path_note : kRCGkrSoundnessBoundStatement;
     MarkBudget(out.timing, p);
     return out;
@@ -938,7 +991,8 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
         if (!(saw_qkt && saw_sv && saw_fwd && saw_bwd && saw_wg)) {
             return fail("missing ALL-PHASE layer kind");
         }
-        if (proof.trace_fri.layers.empty() || proof.lookup_fri.layers.empty()) {
+        if (proof.trace_fri.layers.empty() || proof.lookup_fri.layers.empty() ||
+            proof.a_fri.layers.empty() || proof.b_fri.layers.empty()) {
             return fail("missing FRI");
         }
     }
@@ -955,35 +1009,58 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("round_roots"), 11);
     for (const auto& rt : proof.round_roots) fs.AbsorbUint256(rt);
 
+    // G1/G2: FRI commits absorbed before per-layer challenges (commit-then-challenge).
+    const uint256 fri_pre = fs.Challenge("fri_precommit");
+    (void)fri_pre;
+    std::string fri_why;
+    if (!FriVerify(proof.a_fri, fri_pre, &fri_why)) return fail(fri_why.c_str());
+    if (!FriVerify(proof.b_fri, fri_pre, &fri_why)) return fail(fri_why.c_str());
+    if (!FriVerify(proof.trace_fri, fri_pre, &fri_why)) return fail(fri_why.c_str());
+    if (!FriVerify(proof.lookup_fri, fri_pre, &fri_why)) return fail(fri_why.c_str());
+    fs.AbsorbUint256(proof.a_fri.layers.empty() ? uint256{} : proof.a_fri.layers[0].root);
+    fs.AbsorbUint256(proof.b_fri.layers.empty() ? uint256{} : proof.b_fri.layers[0].root);
+    fs.AbsorbUint256(proof.trace_fri.layers.empty() ? uint256{} : proof.trace_fri.layers[0].root);
+    fs.AbsorbUint256(proof.lookup_fri.layers.empty() ? uint256{} : proof.lookup_fri.layers[0].root);
+    if (proof.trace_fri.has_deep) {
+        fs.AbsorbFp2(proof.trace_fri.deep_z);
+        fs.AbsorbFp2(proof.trace_fri.deep_eval);
+    }
+
+    uint256 prev_extract_commit{};
     for (const auto& lc : proof.layers) {
         const uint32_t nu_i = Log2Exact(RCGkrNextPow2(lc.m));
         const uint32_t nu_j = Log2Exact(RCGkrNextPow2(lc.n));
         const uint32_t nu_k = Log2Exact(RCGkrNextPow2(lc.k));
-        // M7: sumcheck must cover exactly log2(pad(k)) rounds — no truncated product.
         if (lc.sumcheck.size() != nu_k) return fail("sumcheck round count");
+
+        // G4 cross-layer extract_out commit chain.
+        fs.AbsorbUint256(prev_extract_commit);
+        fs.AbsorbUint256(lc.extract_out_commit);
+
         std::vector<Fp2> ri(nu_i), rj(nu_j);
         for (uint32_t t = 0; t < nu_i; ++t) ri[t] = fs.ChallengeFp2("ri");
         for (uint32_t t = 0; t < nu_j; ++t) rj[t] = fs.ChallengeFp2("rj");
         fs.AbsorbFp2(lc.claim);
+        fs.AbsorbFp2(lc.residual_mle);
+        fs.AbsorbFp2(lc.acc_claim);
+        // G5: acc = gemm + residual (Fwd); non-Fwd residual must be 0.
+        if (!Eq(lc.acc_claim, Add(lc.claim, lc.residual_mle))) return fail("H5 residual");
+        if (lc.kind != RCGkrLayerKind::GemmPhase2Fwd && !IsZero(lc.residual_mle)) {
+            return fail("residual on non-Fwd");
+        }
+        fs.AbsorbUint256(lc.a_root);
+        fs.AbsorbUint256(lc.b_root);
         std::vector<Fp2> rk;
         Fp2 gf;
         if (!VerifyProductK(lc.sumcheck, lc.claim, fs, rk, gf)) return fail("gemm sumcheck");
         if (!Eq(gf, lc.final_eval)) return fail("gemm final");
         if (rk.size() != nu_k) return fail("sumcheck rk size");
+        prev_extract_commit = lc.extract_out_commit;
     }
 
     const Fp2 alu = fs.ChallengeFp2("logup_alpha");
     (void)alu;
-    // lookup_logup_sum is FS-bound (affects fri_seed). Full key recomputation is OPEN
-    // (keys live inside lookup_fri; see arithmetization completeness note).
     fs.AbsorbFp2(proof.lookup_logup_sum);
-
-    const uint256 fri_seed = fs.Challenge("fri_seed");
-    std::string fri_why;
-    if (!FriVerify(proof.trace_fri, fri_seed, &fri_why)) return fail(fri_why.c_str());
-    if (!FriVerify(proof.lookup_fri, fri_seed, &fri_why)) return fail(fri_why.c_str());
-    fs.AbsorbUint256(proof.trace_fri.layers.empty() ? uint256{} : proof.trace_fri.layers[0].root);
-    fs.AbsorbUint256(proof.lookup_fri.layers.empty() ? uint256{} : proof.lookup_fri.layers[0].root);
     if (fs.Digest() != proof.transcript_hash) return fail("transcript");
 
     // Succinct path: do NOT re-expand operands / re-run episode / recompute Extract.
@@ -1045,6 +1122,11 @@ size_t SerializeRCGkrProof(const RCGkrProof& proof, std::vector<unsigned char>& 
         AppendLE32(out, lc.n);
         AppendLE32(out, lc.k);
         AppendFp2(out, lc.claim);
+        AppendFp2(out, lc.residual_mle);
+        AppendFp2(out, lc.acc_claim);
+        AppendBytes(out, lc.extract_out_commit.data(), 32);
+        AppendBytes(out, lc.a_root.data(), 32);
+        AppendBytes(out, lc.b_root.data(), 32);
         AppendLE32(out, static_cast<uint32_t>(lc.sumcheck.size()));
         for (const auto& r : lc.sumcheck) {
             AppendFp2(out, r.eval0);
@@ -1054,9 +1136,15 @@ size_t SerializeRCGkrProof(const RCGkrProof& proof, std::vector<unsigned char>& 
         AppendFp2(out, lc.final_eval);
     }
     AppendFp2(out, proof.lookup_logup_sum);
-    std::vector<unsigned char> fri_t, fri_l;
+    std::vector<unsigned char> fri_a, fri_b, fri_t, fri_l;
+    (void)SerializeFriProof(proof.a_fri, fri_a);
+    (void)SerializeFriProof(proof.b_fri, fri_b);
     (void)SerializeFriProof(proof.trace_fri, fri_t);
     (void)SerializeFriProof(proof.lookup_fri, fri_l);
+    AppendLE32(out, static_cast<uint32_t>(fri_a.size()));
+    AppendBytes(out, fri_a.data(), fri_a.size());
+    AppendLE32(out, static_cast<uint32_t>(fri_b.size()));
+    AppendBytes(out, fri_b.data(), fri_b.size());
     AppendLE32(out, static_cast<uint32_t>(fri_t.size()));
     AppendBytes(out, fri_t.data(), fri_t.size());
     AppendLE32(out, static_cast<uint32_t>(fri_l.size()));
@@ -1116,6 +1204,11 @@ std::optional<RCGkrProof> DeserializeRCGkrProof(const std::vector<unsigned char>
             !ReadLE32Checked(p, end, lc.k))
             return std::nullopt;
         if (!ReadFp2Checked(p, end, lc.claim)) return std::nullopt;
+        if (!ReadFp2Checked(p, end, lc.residual_mle)) return std::nullopt;
+        if (!ReadFp2Checked(p, end, lc.acc_claim)) return std::nullopt;
+        if (!ReadBytesChecked(p, end, lc.extract_out_commit.data(), 32)) return std::nullopt;
+        if (!ReadBytesChecked(p, end, lc.a_root.data(), 32)) return std::nullopt;
+        if (!ReadBytesChecked(p, end, lc.b_root.data(), 32)) return std::nullopt;
         uint32_t sc_n = 0;
         if (!ReadLE32Checked(p, end, sc_n) || sc_n > 256) return std::nullopt;
         lc.sumcheck.resize(sc_n);
@@ -1127,19 +1220,19 @@ std::optional<RCGkrProof> DeserializeRCGkrProof(const std::vector<unsigned char>
         if (!ReadFp2Checked(p, end, lc.final_eval)) return std::nullopt;
     }
     if (!ReadFp2Checked(p, end, proof.lookup_logup_sum)) return std::nullopt;
-    uint32_t fri_t_n = 0, fri_l_n = 0;
-    if (!ReadLE32Checked(p, end, fri_t_n) || fri_t_n > (8u << 20)) return std::nullopt;
-    std::vector<unsigned char> fri_t(fri_t_n);
-    if (!ReadBytesChecked(p, end, fri_t.data(), fri_t_n)) return std::nullopt;
-    auto tp = DeserializeFriProof(fri_t);
-    if (!tp) return std::nullopt;
-    proof.trace_fri = std::move(*tp);
-    if (!ReadLE32Checked(p, end, fri_l_n) || fri_l_n > (8u << 20)) return std::nullopt;
-    std::vector<unsigned char> fri_l(fri_l_n);
-    if (!ReadBytesChecked(p, end, fri_l.data(), fri_l_n)) return std::nullopt;
-    auto lp = DeserializeFriProof(fri_l);
-    if (!lp) return std::nullopt;
-    proof.lookup_fri = std::move(*lp);
+    auto read_fri = [&](FriProof& dest) -> bool {
+        uint32_t n = 0;
+        if (!ReadLE32Checked(p, end, n) || n > (8u << 20)) return false;
+        std::vector<unsigned char> buf(n);
+        if (!ReadBytesChecked(p, end, buf.data(), n)) return false;
+        auto parsed = DeserializeFriProof(buf);
+        if (!parsed) return false;
+        dest = std::move(*parsed);
+        return true;
+    };
+    if (!read_fri(proof.a_fri) || !read_fri(proof.b_fri) || !read_fri(proof.trace_fri) ||
+        !read_fri(proof.lookup_fri))
+        return std::nullopt;
     if (!ReadBytesChecked(p, end, proof.transcript_hash.data(), 32)) return std::nullopt;
     if (p >= end) return std::nullopt;
     proof.over_budget = (*p++ != 0);

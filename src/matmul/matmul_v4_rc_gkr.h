@@ -41,10 +41,10 @@
 
 namespace matmul::v4::rc {
 
-inline constexpr uint32_t kRCGkrProofVersion = 4;
-inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V4";
+inline constexpr uint32_t kRCGkrProofVersion = 5;
+inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V5";
 /** Magic for optional out-of-band / cache carriage (not consensus body). */
-inline constexpr uint32_t kRCGkrProofMagic = 0x524b4734u; // 'RKG4'
+inline constexpr uint32_t kRCGkrProofMagic = 0x524b4735u; // 'RKG5'
 
 inline constexpr const char* kRCGkrRealityGuardrail =
     "REJECT HBM/production-complete GKR claims: succinct scaffold uses Fp2+REAL "
@@ -109,7 +109,7 @@ using gkr_field::Fp2;
 /** Soft budgets for the Section-2 scaffold (CPU toy/medium). Not silicon. */
 inline constexpr double kRCGkrMediumProveBudgetS = 2.0;
 inline constexpr double kRCGkrVerifyBudgetS = 0.5;
-inline constexpr size_t kRCGkrProofBytesBudget = 1024 * 1024; // 1 MiB soft (FRI Q=116, B=16)
+inline constexpr size_t kRCGkrProofBytesBudget = 3 * 1024 * 1024; // 3 MiB soft (DEEP+A/B FRI)
 
 /** One sumcheck round over Fp2: g(0), g(1), g(2) (deg-2 product). */
 struct RCGkrSumcheckRound {
@@ -135,7 +135,19 @@ struct RCGkrLayerClaim {
     uint32_t m{0};
     uint32_t n{0};
     uint32_t k{0};
+    /** Product sumcheck claim = MLE(Y_gemm). */
     Fp2 claim{};
+    /**
+     * G5: for Fwd, MLE(extract_in) must equal claim + residual_mle.
+     * Non-Fwd: residual_mle=0 and acc_claim=claim.
+     */
+    Fp2 residual_mle{};
+    Fp2 acc_claim{};
+    /** G4: SHA256d commitment to extract_out bytes (cross-layer link). */
+    uint256 extract_out_commit{};
+    /** G1: Merkle roots of A and B wires (commit-then-challenge). */
+    uint256 a_root{};
+    uint256 b_root{};
     std::vector<RCGkrSumcheckRound> sumcheck;
     Fp2 final_eval{};
 };
@@ -164,8 +176,12 @@ struct RCGkrProof {
     Fp2 lookup_logup_sum{};
     /** FRI commit of LogUp wire (keys/multiplicities) — not every tile. */
     FriProof lookup_fri{};
-    /** FRI commit of concatenated GEMM output wires (MLE evals). */
+    /** FRI commit of concatenated GEMM output wires (Y_gemm coeffs). */
     FriProof trace_fri{};
+    /** G1: FRI commit of concatenated A operands across layers. */
+    FriProof a_fri{};
+    /** G1: FRI commit of concatenated B operands across layers. */
+    FriProof b_fri{};
     uint256 transcript_hash{};
     /** Soft budget exceeded → recommend ExactReplay (shipping); not toy swap. */
     bool over_budget{false};

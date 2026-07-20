@@ -229,6 +229,7 @@ struct FriFs {
     }
 
     void AbsorbRoot(const uint256& root) { AppendBytes(buf, root.data(), 32); }
+    void AbsorbFp2(const Fp2& v) { AppendFp2(buf, v); }
 
     Fp2 ChallengeFp2(const char* label, uint32_t idx)
     {
@@ -289,6 +290,46 @@ bool VerifyFoldStep(const FriFoldStep& step, const uint256& root, uint32_t n_lea
 
     out_folded = Add(step.even, Mul(beta, step.odd));
     return true;
+}
+
+Fp2 PowFp2(Fp2 base, uint64_t exp)
+{
+    Fp2 result = Fp2::One();
+    while (exp > 0) {
+        if (exp & 1u) result = Mul(result, base);
+        base = Mul(base, base);
+        exp >>= 1;
+    }
+    return result;
+}
+
+Fp2 EvalPolyCoeffs(const std::vector<Fp2>& coeffs, const Fp2& z)
+{
+    Fp2 acc = Fp2::Zero();
+    for (size_t i = coeffs.size(); i-- > 0;) {
+        acc = Add(Mul(acc, z), coeffs[i]);
+    }
+    return acc;
+}
+
+/** Quotient coeffs of (P(X) − v) / (X − z). Requires P(z)=v. */
+std::vector<Fp2> SyntheticQuotient(const std::vector<Fp2>& coeffs, const Fp2& z, const Fp2& v)
+{
+    if (coeffs.size() <= 1) return {};
+    std::vector<Fp2> num = coeffs;
+    num[0] = Sub(num[0], v);
+    const size_t n = num.size();
+    std::vector<Fp2> q(n - 1, Fp2::Zero());
+    q[n - 2] = num[n - 1];
+    for (size_t k = n - 1; k-- > 1;) {
+        q[k - 1] = Add(num[k], Mul(z, q[k]));
+    }
+    return q;
+}
+
+Fp2 DomainPoint(uint32_t n0, uint32_t index)
+{
+    return Fp2::FromFp(PowFp(OmegaForSize(n0), index));
 }
 
 } // namespace
@@ -359,7 +400,7 @@ bool FriVerifyPath(const FriMerklePath& path, const uint256& root, uint32_t n_le
 }
 
 FriCommitResult FriCommitAndFold(const std::vector<Fp2>& coeffs, const uint256& fs_seed,
-                                 uint64_t pow_grind_nonce)
+                                 uint64_t pow_grind_nonce, bool enable_deep)
 {
     FriCommitResult out;
     if (coeffs.empty()) {
@@ -410,6 +451,36 @@ FriCommitResult FriCommitAndFold(const std::vector<Fp2>& coeffs, const uint256& 
         cur = std::move(next);
     }
 
+    std::vector<Fp2> quot_lde;
+    MerkleTree quot_tree;
+    if (enable_deep) {
+        out.proof.has_deep = true;
+        out.proof.deep_z = fs.ChallengeFp2("deep_z", 0);
+        out.proof.deep_eval = EvalPolyCoeffs(coeff_pow2, out.proof.deep_z);
+        fs.AbsorbFp2(out.proof.deep_z);
+        fs.AbsorbFp2(out.proof.deep_eval);
+
+        std::vector<Fp2> quot = SyntheticQuotient(coeff_pow2, out.proof.deep_z, out.proof.deep_eval);
+        if (quot.empty()) quot.push_back(Fp2::Zero());
+        // Pad Q to the same coeff length as P so LDE domains / indices coincide.
+        if (quot.size() < coeff_pow2.size()) quot.resize(coeff_pow2.size(), Fp2::Zero());
+        auto quot_c =
+            FriCommitAndFold(quot, fs_seed, pow_grind_nonce ^ uint64_t{0xD33D}, /*enable_deep=*/false);
+        if (!quot_c.ok) {
+            out.note = "deep quot FRI failed";
+            return out;
+        }
+        out.proof.deep_quot_fri = std::make_shared<FriProof>(std::move(quot_c.proof));
+        quot_lde = std::move(quot_c.lde_evals);
+        quot_tree = BuildMerkleTree(quot_lde);
+        out.proof.deep_quot_root = quot_tree.root;
+        out.proof.deep_quot_n_leaves = static_cast<uint32_t>(quot_lde.size());
+        fs.AbsorbRoot(out.proof.deep_quot_root);
+        if (out.proof.deep_quot_fri && !out.proof.deep_quot_fri->layers.empty()) {
+            fs.AbsorbRoot(out.proof.deep_quot_fri->layers[0].root);
+        }
+    }
+
     const uint32_t n0 = out.proof.layers[0].n_leaves;
     const uint32_t n_folds = static_cast<uint32_t>(out.proof.fold_challenges.size());
     out.proof.queries.reserve(kRCFriNumQueries);
@@ -421,6 +492,15 @@ FriCommitResult FriCommitAndFold(const std::vector<Fp2>& coeffs, const uint256& 
         for (uint32_t L = 0; L < n_folds; ++L) {
             q.steps.push_back(OpenFoldStep(out.layer_evals[L], trees[L], idx));
             idx >>= 1;
+        }
+        if (enable_deep && !quot_lde.empty()) {
+            if (quot_lde.size() != out.lde_evals.size()) {
+                out.note = "deep quot LDE size mismatch";
+                out.ok = false;
+                return out;
+            }
+            q.deep_quot_leaf = quot_lde[q.index];
+            q.deep_quot_siblings = PathFromTree(quot_tree, q.index);
         }
         out.proof.queries.push_back(std::move(q));
     }
@@ -448,7 +528,6 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
     if (proof.layers.back().n_leaves != 1) return fail("final layer not singleton");
     if (proof.queries.size() != kRCFriNumQueries) return fail("query count");
 
-    // Layer sizes must exact-halve until the final singleton.
     for (size_t i = 0; i + 1 < proof.layers.size(); ++i) {
         if (proof.layers[i].n_leaves < 2 || (proof.layers[i].n_leaves % 2) != 0)
             return fail("layer parity");
@@ -464,12 +543,27 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
         }
     }
 
-    // Final layer root must commit the claimed constant.
     {
         FriMerklePath fin;
         fin.index = 0;
         fin.leaf = proof.final_value;
         if (!FriVerifyPath(fin, proof.layers.back().root, 1)) return fail("final root");
+    }
+
+    if (proof.has_deep) {
+        const Fp2 z = fs.ChallengeFp2("deep_z", 0);
+        if (!Eq(z, proof.deep_z)) return fail("deep_z");
+        fs.AbsorbFp2(proof.deep_z);
+        fs.AbsorbFp2(proof.deep_eval);
+        if (!proof.deep_quot_fri) return fail("missing deep quot FRI");
+        if (proof.deep_quot_n_leaves == 0) return fail("deep quot leaves");
+        fs.AbsorbRoot(proof.deep_quot_root);
+        if (proof.deep_quot_fri->layers.empty()) return fail("deep quot empty");
+        fs.AbsorbRoot(proof.deep_quot_fri->layers[0].root);
+        std::string qw;
+        if (!FriVerify(*proof.deep_quot_fri, fs_seed, &qw)) return fail(qw.c_str());
+    } else if (proof.deep_quot_fri) {
+        return fail("unexpected deep quot");
     }
 
     const uint32_t n0 = proof.layers[0].n_leaves;
@@ -484,6 +578,7 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
         uint32_t idx = q.index;
         Fp2 claimed{};
         bool have_claimed = false;
+        Fp2 p_at_x = Fp2::Zero();
 
         for (uint32_t L = 0; L < n_folds; ++L) {
             const FriFoldStep& step = q.steps[L];
@@ -493,7 +588,7 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
                                 proof.fold_challenges[L], idx, folded, &step_why)) {
                 return fail(step_why.c_str());
             }
-            // Consistency with previous fold claim at this layer index.
+            if (L == 0) p_at_x = (idx & 1u) ? step.odd : step.even;
             if (have_claimed) {
                 const Fp2 leaf_here = (idx & 1u) ? step.odd : step.even;
                 if (!Eq(leaf_here, claimed)) return fail("fold path consistency");
@@ -504,6 +599,20 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
         }
 
         if (!have_claimed || !Eq(claimed, proof.final_value)) return fail("final fold value");
+
+        if (proof.has_deep) {
+            FriMerklePath qp;
+            qp.index = q.index;
+            qp.leaf = q.deep_quot_leaf;
+            qp.siblings = q.deep_quot_siblings;
+            if (q.index >= proof.deep_quot_n_leaves) return fail("deep quot index");
+            if (!FriVerifyPath(qp, proof.deep_quot_root, proof.deep_quot_n_leaves)) {
+                return fail("deep quot merkle");
+            }
+            const Fp2 x = DomainPoint(n0, q.index);
+            const Fp2 rhs = Add(Mul(q.deep_quot_leaf, Sub(x, proof.deep_z)), proof.deep_eval);
+            if (!Eq(p_at_x, rhs)) return fail("deep identity");
+        }
     }
 
     if (why) *why = "FriVerify ok";
@@ -564,6 +673,22 @@ size_t SerializeFriProof(const FriProof& proof, std::vector<unsigned char>& out)
             AppendLE32(out, static_cast<uint32_t>(st.odd_siblings.size()));
             for (const auto& s : st.odd_siblings) AppendBytes(out, s.data(), 32);
         }
+        AppendFp2(out, q.deep_quot_leaf);
+        AppendLE32(out, static_cast<uint32_t>(q.deep_quot_siblings.size()));
+        for (const auto& s : q.deep_quot_siblings) AppendBytes(out, s.data(), 32);
+    }
+    out.push_back(proof.has_deep ? 1 : 0);
+    if (proof.has_deep) {
+        AppendFp2(out, proof.deep_z);
+        AppendFp2(out, proof.deep_eval);
+        AppendBytes(out, proof.deep_quot_root.data(), 32);
+        AppendLE32(out, proof.deep_quot_n_leaves);
+        std::vector<unsigned char> nested;
+        if (proof.deep_quot_fri) {
+            (void)SerializeFriProof(*proof.deep_quot_fri, nested);
+        }
+        AppendLE32(out, static_cast<uint32_t>(nested.size()));
+        AppendBytes(out, nested.data(), nested.size());
     }
     return out.size();
 }
@@ -618,6 +743,28 @@ std::optional<FriProof> DeserializeFriProof(const std::vector<unsigned char>& in
                 if (!ReadBytesChecked(p, end, s.data(), 32)) return std::nullopt;
             }
         }
+        if (!ReadFp2Checked(p, end, q.deep_quot_leaf)) return std::nullopt;
+        uint32_t n_ds = 0;
+        if (!ReadLE32Checked(p, end, n_ds) || n_ds > 64) return std::nullopt;
+        q.deep_quot_siblings.resize(n_ds);
+        for (auto& s : q.deep_quot_siblings) {
+            if (!ReadBytesChecked(p, end, s.data(), 32)) return std::nullopt;
+        }
+    }
+    if (p >= end) return std::nullopt;
+    proof.has_deep = (*p++ != 0);
+    if (proof.has_deep) {
+        if (!ReadFp2Checked(p, end, proof.deep_z)) return std::nullopt;
+        if (!ReadFp2Checked(p, end, proof.deep_eval)) return std::nullopt;
+        if (!ReadBytesChecked(p, end, proof.deep_quot_root.data(), 32)) return std::nullopt;
+        if (!ReadLE32Checked(p, end, proof.deep_quot_n_leaves)) return std::nullopt;
+        uint32_t nested_n = 0;
+        if (!ReadLE32Checked(p, end, nested_n) || nested_n > (8u << 20)) return std::nullopt;
+        std::vector<unsigned char> nested(nested_n);
+        if (!ReadBytesChecked(p, end, nested.data(), nested_n)) return std::nullopt;
+        auto quot = DeserializeFriProof(nested);
+        if (!quot) return std::nullopt;
+        proof.deep_quot_fri = std::make_shared<FriProof>(std::move(*quot));
     }
     if (p != end) return std::nullopt;
     return proof;

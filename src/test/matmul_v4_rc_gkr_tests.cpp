@@ -280,14 +280,37 @@ BOOST_AUTO_TEST_CASE(gkr_m7_f_mutate_trace_fri_rejects)
 
 BOOST_AUTO_TEST_CASE(gkr_m7_g_lookup_fri_extract_proxy_rejects)
 {
-    // Strongest succinct check: wrong LogUp/Extract keys without updating
-    // lookup_fri openings fail FriVerify. Verifier does NOT recompute Extract
-    // from A,B,Y (OPEN gap G3 — see arithmetization completeness note).
+    // Wrong LogUp/Extract keys without updating lookup_fri openings fail FriVerify.
     auto pr = ProveHonestToy();
     BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
     BOOST_REQUIRE(!pr.proof.lookup_fri.queries.empty());
     BOOST_REQUIRE(!pr.proof.lookup_fri.queries[0].steps.empty());
     pr.proof.lookup_fri.queries[0].steps[0].odd.c0 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m7_g5_residual_tamper_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    bool flipped = false;
+    for (auto& lc : pr.proof.layers) {
+        if (lc.kind == rc::RCGkrLayerKind::GemmPhase2Fwd) {
+            lc.residual_mle.c0 ^= 1;
+            flipped = true;
+            break;
+        }
+    }
+    BOOST_REQUIRE(flipped);
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_deep_trace_tamper_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(pr.proof.trace_fri.has_deep);
+    pr.proof.trace_fri.deep_eval.c1 ^= 1;
     BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
 }
 
