@@ -17,6 +17,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -63,24 +64,43 @@ uint256 DeriveOperandSeed(const uint256& seed_r, const char* tag)
 
 // --- ExactGemm helpers ------------------------------------------------------
 
-/** Try injectable ExactGemmS8S8; accept only when byte-identical to CPU oracle. */
-std::vector<int32_t> ExactGemmS8S8Verified(const lt::ExactGemmBackend& gemm,
-                                           const std::vector<int8_t>& L,
-                                           const std::vector<int8_t>& R, uint32_t rows,
-                                           uint32_t inner, uint32_t cols)
+/** P0.3: qualified device ExactGemm REPLACES CPU on the hot path.
+ *  CPU runs only when no device backend, device declines/throws/wrong size, or
+ *  BTX_RC_EXACT_GEMM_COMPARE=1 dispute mode (device then CPU compare; mismatch→CPU). */
+std::vector<int32_t> ExactGemmS8S8Dispatched(const lt::ExactGemmBackend& gemm,
+                                             const std::vector<int8_t>& L,
+                                             const std::vector<int8_t>& R, uint32_t rows,
+                                             uint32_t inner, uint32_t cols)
 {
-    const std::vector<int32_t> cpu = lt::ExactGemmS8S8(L, R, rows, inner, cols);
-    if (gemm.gemm_s8s8 == nullptr) return cpu;
+    const auto run_cpu = [&]() {
+        return lt::ExactGemmS8S8(L, R, rows, inner, cols);
+    };
+    if (gemm.gemm_s8s8 == nullptr) {
+        return run_cpu();
+    }
 
     std::vector<int32_t> device;
-    bool ok = false;
+    bool device_ok = false;
     try {
-        ok = gemm.gemm_s8s8(L, R, rows, inner, cols, device) &&
-             device.size() == static_cast<size_t>(rows) * cols && device == cpu;
+        device_ok = gemm.gemm_s8s8(L, R, rows, inner, cols, device) &&
+                    device.size() == static_cast<size_t>(rows) * cols;
     } catch (...) {
-        ok = false;
+        device_ok = false;
     }
-    return ok ? device : cpu;
+    if (!device_ok) {
+        return run_cpu();
+    }
+
+    static const bool compare =
+        [] {
+            const char* e = std::getenv("BTX_RC_EXACT_GEMM_COMPARE");
+            return e != nullptr && e[0] == '1' && e[1] == '\0';
+        }();
+    if (compare) {
+        const std::vector<int32_t> cpu = run_cpu();
+        if (device != cpu) return cpu;
+    }
+    return device;
 }
 
 std::vector<int8_t> TransposeS8(const std::vector<int8_t>& M, uint32_t rows, uint32_t cols)
@@ -104,7 +124,7 @@ std::vector<int32_t> GemmWtS8S8Int32(const std::vector<int8_t>& W, const std::ve
     assert(W.size() == static_cast<size_t>(d_model) * d_model);
     assert(G.size() == static_cast<size_t>(b_seq) * d_model);
     // out[i][k] = Σ_j G[i][j]·W[j][k] = ExactGemmS8S8(G, W, b_seq, d_model, d_model)
-    return ExactGemmS8S8Verified(gemm, G, W, b_seq, d_model, d_model);
+    return ExactGemmS8S8Dispatched(gemm, G, W, b_seq, d_model, d_model);
 }
 
 /** G·Xᵀ without materializing Xᵀ over K-range [k0, k0+len): out[r][c] = Σ_t G[k0+t][r]·X[k0+t][c]. */
@@ -193,7 +213,7 @@ std::vector<int64_t> GemmGXtViaChunkedExact(const std::vector<int8_t>& G,
                     X[static_cast<size_t>(k) * d_model + c];
             }
         }
-        const auto partial = ExactGemmS8S8Verified(gemm, L, R, d_model, len, d_model);
+        const auto partial = ExactGemmS8S8Dispatched(gemm, L, R, d_model, len, d_model);
         for (size_t i = 0; i < out.size(); ++i) {
             out[i] += static_cast<int64_t>(partial[i]);
         }
@@ -257,19 +277,7 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const RCEpisodeParam
         auto flush_s_block = [&]() {
             assert(pending_fill == kRCMxBlockLen);
             int8_t S_tile[kRCMxBlockLen];
-            {
-                int32_t raw32[kRCMxBlockLen];
-                for (uint32_t t = 0; t < kRCMxBlockLen; ++t) {
-                    raw32[t] = ExactInt64ToExtractInt32(pending_raw[t]);
-                }
-                int8_t mu_tile[kRCMxBlockLen];
-                lt::ExtractMatExpandMxTileMantissas(prf_S, i, pending_bj, raw32, mu_tile);
-                const uint8_t e = lt::DeriveMatExpandMxScale(prf_S, i, pending_bj);
-                for (uint32_t t = 0; t < kRCMxBlockLen; ++t) {
-                    S_tile[t] = static_cast<int8_t>(static_cast<int32_t>(mu_tile[t]) *
-                                                    (int32_t{1} << e));
-                }
-            }
+            ExtractMXTileInt64(prf_S, i, pending_bj, pending_raw, S_tile);
             for (uint32_t t_off = 0; t_off < kRCMxBlockLen; ++t_off) {
                 const uint32_t t = block_t0 + t_off;
                 const uint32_t seg = t / kRCSegLen;
@@ -310,29 +318,18 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const RCEpisodeParam
             out.z_segs[cur_seg][static_cast<size_t>(i) * p.d_head + d] = seg_row[d];
         }
 
-        // One ExtractMX on Σ_s Z_seg[s][i] (H1 / H1') — never per segment.
+        // One ExtractMX on sum of Z segs (P0.5 int64, no int32 narrow).
         std::vector<int64_t> acc_Z(p.d_head, 0);
         for (uint32_t s = 0; s < n_seg; ++s) {
             for (uint32_t d = 0; d < p.d_head; ++d) {
                 acc_Z[d] += out.z_segs[s][static_cast<size_t>(i) * p.d_head + d];
             }
         }
-        {
-            std::vector<int32_t> raw32_row(p.d_head);
-            for (uint32_t d = 0; d < p.d_head; ++d) {
-                raw32_row[d] = ExactInt64ToExtractInt32(acc_Z[d]);
-            }
-            const uint32_t nblk = p.d_head / kRCMxBlockLen;
-            for (uint32_t bj = 0; bj < nblk; ++bj) {
-                int8_t mu_tile[kRCMxBlockLen];
-                lt::ExtractMatExpandMxTileMantissas(prf_Z, i, bj, raw32_row.data() + bj * kRCMxBlockLen,
-                                                   mu_tile);
-                const uint8_t e = lt::DeriveMatExpandMxScale(prf_Z, i, bj);
-                for (uint32_t t = 0; t < kRCMxBlockLen; ++t) {
-                    out.Z[static_cast<size_t>(i) * p.d_head + bj * kRCMxBlockLen + t] =
-                        static_cast<int8_t>(static_cast<int32_t>(mu_tile[t]) * (int32_t{1} << e));
-                }
-            }
+        const uint32_t nblk = p.d_head / kRCMxBlockLen;
+        for (uint32_t bj = 0; bj < nblk; ++bj) {
+            ExtractMXTileInt64(prf_Z, i, bj, acc_Z.data() + bj * kRCMxBlockLen,
+                               out.Z.data() + static_cast<size_t>(i) * p.d_head +
+                                   bj * kRCMxBlockLen);
         }
     }
     return out;
@@ -356,7 +353,7 @@ std::vector<int8_t> ForwardLayer(const std::vector<int8_t>& W, const std::vector
     //     = ExactGemmS8S8(X, Wᵀ)[i][j] + X[i][j]
     // Residual is INSIDE the single Extract (H5). Bound < 2^24 at consensus.
     const std::vector<int8_t> Wt = TransposeS8(W, d_model, d_model);
-    std::vector<int32_t> y = ExactGemmS8S8Verified(gemm, X, Wt, b_seq, d_model, d_model);
+    std::vector<int32_t> y = ExactGemmS8S8Dispatched(gemm, X, Wt, b_seq, d_model, d_model);
     assert(y.size() == static_cast<size_t>(b_seq) * d_model);
     for (uint32_t i = 0; i < b_seq; ++i) {
         for (uint32_t j = 0; j < d_model; ++j) {
@@ -455,36 +452,30 @@ void AppendInt64LEMatrix(std::vector<int8_t>& stream, const std::vector<int64_t>
     }
 }
 
-/** R.4.1 round stream with consensus-fixed segment leaves:
- *    concat(
- *      for each Phase-1 Z segment: LE int64 row-major (n_q × d_head),
- *      Z int8 (ExtractMX once on Σ Z segs),
- *      for l = 0..L−1:
- *        X[l+1] int8, G[l] int8,
- *        for each D segment: LE int64 row-major (d_model × d_model),
- *        D[l] int8 (ExtractMX once on Σ D segs)
- *    )
- */
+/** R.4.1 round stream. PARKED segments OFF => pre-segment layout. */
 std::vector<int8_t> SerializeRoundStream(const Phase1Result& p1, const Phase2Tensors& p2,
                                          const RCEpisodeParams& p)
 {
     std::vector<int8_t> stream;
-    const size_t z_seg_bytes = RCSegZBytes(p) * p1.z_segs.size();
-    const size_t d_seg_bytes =
-        p.L_lyr == 0 ? 0
-                     : RCSegDBytes(p) * (p2.d_segs.empty() ? 0 : p2.d_segs[0].size()) * p.L_lyr;
+    size_t z_seg_bytes = 0;
+    size_t d_seg_bytes = 0;
+    if constexpr (kRCSegmentLeavesEnabled) {
+        z_seg_bytes = RCSegZBytes(p) * p1.z_segs.size();
+        d_seg_bytes =
+            p.L_lyr == 0 ? 0
+                         : RCSegDBytes(p) * (p2.d_segs.empty() ? 0 : p2.d_segs[0].size()) * p.L_lyr;
+    }
     stream.reserve(z_seg_bytes + p1.Z.size() + d_seg_bytes +
                    p.L_lyr * (p2.X[1].size() + p2.G[0].size() + p2.D[0].size()));
-
-    for (const auto& seg : p1.z_segs) {
-        AppendInt64LEMatrix(stream, seg);
+    if constexpr (kRCSegmentLeavesEnabled) {
+        for (const auto& seg : p1.z_segs) AppendInt64LEMatrix(stream, seg);
     }
     stream.insert(stream.end(), p1.Z.begin(), p1.Z.end());
     for (uint32_t l = 0; l < p.L_lyr; ++l) {
         stream.insert(stream.end(), p2.X[l + 1].begin(), p2.X[l + 1].end());
         stream.insert(stream.end(), p2.G[l].begin(), p2.G[l].end());
-        for (const auto& seg : p2.d_segs[l]) {
-            AppendInt64LEMatrix(stream, seg);
+        if constexpr (kRCSegmentLeavesEnabled) {
+            for (const auto& seg : p2.d_segs[l]) AppendInt64LEMatrix(stream, seg);
         }
         stream.insert(stream.end(), p2.D[l].begin(), p2.D[l].end());
     }

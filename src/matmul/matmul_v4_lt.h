@@ -73,6 +73,11 @@ void ExtractMatExpandMxTileMantissas(const uint256& prf_key, uint32_t i, uint32_
                                      const int32_t raw32[kMatExpandMxBlockLen],
                                      int8_t mu_out[kMatExpandMxBlockLen]);
 
+/** int64 tile Extract; int32-range values bit-identical to int32 overload. */
+void ExtractMatExpandMxTileMantissas(const uint256& prf_key, uint32_t i, uint32_t bj,
+                                     const int64_t raw64[kMatExpandMxBlockLen],
+                                     int8_t mu_out[kMatExpandMxBlockLen]);
+
 /** First 8 bytes (LE64) of legacy per-cell ChaCha keystream (ChaChaCell twin).
  *  Not used by consensus digests. */
 [[nodiscard]] uint64_t MatExpandPrfLaneLE64(const uint256& prf_key, int32_t raw, uint32_t i,

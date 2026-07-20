@@ -497,8 +497,20 @@ struct Params {
      *  tests while production verify always uses the full episode when this is
      *  false and nMatMulRCHeight is live. */
     bool fMatMulRCUseToyDims{false};
+    /** RC tip-verify concurrency (pending full-episode recomputes). Default 1 --
+     *  a single ~53T-MAC consensus episode must never share the EncDr/v4/LT
+     *  pending counter or allow 16-way parallel recomputes. Cap is expressed in
+     *  RC work units (see MatMulRCWorkUnits). INERT while nMatMulRCHeight ==
+     *  INT32_MAX. Never raise without soak evidence. */
+    uint32_t nMatMulRCMaxPendingVerifications{1};
+    /** RC DoS verify budgets (global / per-peer), in complete tip-verification
+     *  jobs per minute when IsMatMulRCActive. Effective helpers convert these
+     *  to RC work units (MAC-scaled). Defaults admit one honest RC recompute
+     *  per minute. INERT while RC is INT32_MAX. */
+    uint32_t nMatMulRCGlobalVerifyBudgetPerMin{1};
+    uint32_t nMatMulRCPeerVerifyBudgetPerMin{1};
 
-    // --- ENC_RC §R.7 scheduled scaling (PROVISIONAL; inert while nMatMulRCHeight==INT32_MAX) ---
+    // --- ENC_RC §R.7 scheduled scaling (PARKED: kRCGrowthScheduleEnabled=false; also inert while nMatMulRCHeight==INT32_MAX) ---
     // All knobs below are owner-set / monetary-adjacent placeholders. Do NOT treat as final.
     // RCScaleForHeight (separate change) reads these; zero-filled tables must be replaced via
     // FillDefaultRCGrowthTables before any network that might ever activate ENC_RC.

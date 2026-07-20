@@ -331,6 +331,11 @@ std::string g_matmul_gpu_prehash_scan_last_error;
 GlobalMutex g_matmul_global_phase2_mutex;
 uint32_t g_matmul_global_phase2_this_minute GUARDED_BY(g_matmul_global_phase2_mutex){0};
 int64_t g_matmul_global_phase2_window_start_sec GUARDED_BY(g_matmul_global_phase2_mutex){0};
+// P0.4: RC admission uses a separate global window so EncDr/LT traffic cannot
+// share (or be throttled by) the catastrophic RC recompute budget.
+GlobalMutex g_matmul_global_rc_mutex;
+uint32_t g_matmul_global_rc_this_minute GUARDED_BY(g_matmul_global_rc_mutex){0};
+int64_t g_matmul_global_rc_window_start_sec GUARDED_BY(g_matmul_global_rc_mutex){0};
 
 enum class MatMulValidationPath {
     FREIVALDS,
@@ -4563,6 +4568,125 @@ uint32_t MatMulEncDrWorkUnits(const Consensus::Params& params, int32_t reference
     return 1;
 }
 
+uint32_t MatMulRCWorkUnits(const Consensus::Params& params, int32_t reference_height)
+{
+    // P0.4: scale admission cost by episode MAC count. Inert / inactive → 1
+    // (callers must still gate on IsMatMulRCActive / Effective* helpers).
+    if (!params.IsMatMulRCActive(reference_height)) {
+        return 1;
+    }
+    const matmul::v4::rc::RCEpisodeParams ep =
+        matmul::v4::rc::ResolveRCEpisodeParams(params, reference_height);
+    const uint64_t macs = matmul::v4::rc::TotalRCEpisodeMacs(ep);
+    if (macs == 0) return 1;
+    const uint64_t units =
+        (macs + kMatMulRCAdmissionMacUnit - 1) / kMatMulRCAdmissionMacUnit;
+    if (units == 0) return 1;
+    if (units > std::numeric_limits<uint32_t>::max()) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    return static_cast<uint32_t>(units);
+}
+
+uint32_t EffectiveMatMulRCMaxPendingVerifications(const Consensus::Params& params,
+                                                  int32_t reference_height)
+{
+    if (!params.IsMatMulRCActive(reference_height)) return 0;
+    const uint32_t jobs = params.nMatMulRCMaxPendingVerifications;
+    if (jobs == 0) return 0;
+    const uint32_t wu = MatMulRCWorkUnits(params, reference_height);
+    if (wu == 0) return 0;
+    if (jobs > std::numeric_limits<uint32_t>::max() / wu) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    return jobs * wu;
+}
+
+uint32_t EffectiveMatMulRCGlobalVerifyBudgetPerMin(const Consensus::Params& params,
+                                                   int32_t reference_height)
+{
+    if (!params.IsMatMulRCActive(reference_height)) return 0;
+    const uint32_t jobs = params.nMatMulRCGlobalVerifyBudgetPerMin;
+    if (jobs == 0) return 0;
+    const uint32_t wu = MatMulRCWorkUnits(params, reference_height);
+    if (wu == 0) return 0;
+    if (jobs > std::numeric_limits<uint32_t>::max() / wu) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    return jobs * wu;
+}
+
+uint32_t EffectiveMatMulRCPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd,
+                                                 int32_t reference_height)
+{
+    (void)is_ibd; // RC peer budget is intentionally strict even during IBD.
+    if (!params.IsMatMulRCActive(reference_height)) return 0;
+    const uint32_t jobs = params.nMatMulRCPeerVerifyBudgetPerMin;
+    if (jobs == 0) return 0;
+    const uint32_t wu = MatMulRCWorkUnits(params, reference_height);
+    if (wu == 0) return 0;
+    if (jobs > std::numeric_limits<uint32_t>::max() / wu) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    return jobs * wu;
+}
+
+bool ConsumeMatMulRCPeerVerifyBudget(MatMulPeerVerificationBudget& budget,
+                                     const Consensus::Params& params,
+                                     std::chrono::steady_clock::time_point now, bool is_ibd,
+                                     int32_t reference_height)
+{
+    if (budget.rc_window_start == std::chrono::steady_clock::time_point{} ||
+        now - budget.rc_window_start >= std::chrono::minutes{1}) {
+        budget.rc_window_start = now;
+        budget.expensive_rc_verifications_this_minute = 0;
+    }
+    const uint32_t effective_budget =
+        EffectiveMatMulRCPeerVerifyBudgetPerMin(params, is_ibd, reference_height);
+    if (effective_budget == 0) return false;
+    if (budget.expensive_rc_verifications_this_minute >= effective_budget) {
+        return false;
+    }
+    ++budget.expensive_rc_verifications_this_minute;
+    return true;
+}
+
+bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count,
+                                 std::chrono::steady_clock::time_point now)
+{
+    if (count == 0) return true;
+    using namespace std::chrono;
+    const int64_t now_sec = duration_cast<seconds>(now.time_since_epoch()).count();
+
+    LOCK(g_matmul_global_rc_mutex);
+
+    if (now_sec - g_matmul_global_rc_window_start_sec >= 60) {
+        g_matmul_global_rc_window_start_sec = now_sec;
+        g_matmul_global_rc_this_minute = 0;
+    }
+
+    if (max_global_per_minute == 0) return false;
+    if (g_matmul_global_rc_this_minute > max_global_per_minute ||
+        count > max_global_per_minute - g_matmul_global_rc_this_minute) {
+        return false;
+    }
+    g_matmul_global_rc_this_minute += count;
+    return true;
+}
+
+bool CanStartMatMulRCVerification(uint32_t pending_verifications, uint32_t work_units,
+                                  const Consensus::Params& params, int32_t reference_height)
+{
+    if (!params.IsMatMulRCActive(reference_height)) return false;
+    if (work_units == 0) return true;
+    const uint32_t cap = EffectiveMatMulRCMaxPendingVerifications(params, reference_height);
+    if (cap == 0) return false;
+    if (pending_verifications > std::numeric_limits<uint32_t>::max() - work_units) return false;
+    if (cap == std::numeric_limits<uint32_t>::max()) return true;
+    if (work_units > cap) return false;
+    return pending_verifications <= cap - work_units;
+}
+
 uint32_t EffectiveMatMulMaxPendingVerifications(const Consensus::Params& params, int32_t reference_height)
 {
     if (!IsDisabledHeight(params.nMatMulDRLTHeight) && params.IsDRLTActive(reference_height)) {
@@ -5340,14 +5464,14 @@ bool SolveMatMulParallel(CBlockHeader& block,
 // MatMul v4.4-LT Rank-1 solve loop: Q*-sized windows through WindowSketchMinerLT
 // (MatExpand + deep-m). Winning candidates are resealed via ComputeDigestBMX4CLT
 // (Phase A) or ComputeSealDigestBMX4CLT (Phase B seal-as-PoW when active).
-// MakeResolvedExactGemmBackend also admits explicit LT-only TPU/Trainium
-// ExactGemm providers; MakeResolvedExactMxProjectionBackend wires CUDA/HIP/
-// Metal/Ascend MX B̂·V injects (fail-closed via ComputeProjectedRightMxDispatched).
-// providers while the full digest backend remains CPU. Phase A prefers full
-// device dispatch when selected. Every accelerated Phase-B winner is re-sealed
-// through the CPU reference before success is returned. This rare duplicate
-// protects miners from publishing a bad block when a provider races, corrupts
-// scratch, or returns a same-sized but incorrect result.
+// MakeResolvedExactGemmBackend admits explicit LT-only TPU/Trainium ExactGemm
+// providers without RC self-qual (RC gating is MakeResolvedExactGemmBackendForRC
+// only). MakeResolvedExactMxProjectionBackend wires CUDA/HIP/Metal/Ascend MX
+// B̂·V injects (fail-closed via ComputeProjectedRightMxDispatched). Phase A
+// prefers full device dispatch when selected. Every accelerated Phase-B winner
+// is re-sealed through the CPU reference before success is returned. This rare
+// duplicate protects miners from publishing a bad block when a provider races,
+// corrupts scratch, or returns a same-sized but incorrect result.
 static bool SolveMatMulV4LT(CBlockHeader& block,
                             const Consensus::Params& params,
                             uint64_t& max_tries,
@@ -5667,9 +5791,8 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
     return false;
 }
 
-/** ENC_RC / Resident Curriculum miner: grind nonces through MineRCEpisode,
- *  reseal every candidate via RecomputeResidentCurriculumReference (abort on
- *  mismatch). Digest-only — no Freivalds sketch payload. */
+/** ENC_RC / Resident Curriculum miner: grind nonces through MineRCEpisode.
+ *  P0.2: CPU-reseal WINNERS only (losers must not pay a second full episode). */
 static bool SolveMatMulV4RC(CBlockHeader& block,
                             const Consensus::Params& params,
                             uint64_t& max_tries,
@@ -5707,9 +5830,28 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
 
         const uint256 mined =
             matmul::v4::rc::MineRCEpisode(block, params_rc, block_height);
+        if (mined.IsNull()) {
+            LogWarning("SolveMatMulV4RC: MineRCEpisode returned null at nonce=%llu; aborting\n",
+                       static_cast<unsigned long long>(block.nNonce64));
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        // Losers: skip CPU reseal (P0.2).
+        if (UintToArith256(mined) > effective_target) {
+            --max_tries;
+            if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+            ++block.nNonce64;
+            block.nNonce = static_cast<uint32_t>(block.nNonce64);
+            continue;
+        }
+
+        // Winner / share: CPU-reseal for consensus; abort on miner/oracle mismatch.
         const uint256 resealed =
             matmul::v4::rc::RecomputeResidentCurriculumReference(block, params_rc, block_height);
-        if (mined.IsNull() || resealed != mined) {
+        if (resealed != mined) {
             LogWarning("SolveMatMulV4RC: MineRCEpisode diverged from "
                        "RecomputeResidentCurriculumReference at nonce=%llu; aborting solve\n",
                        static_cast<unsigned long long>(block.nNonce64));

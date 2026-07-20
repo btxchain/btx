@@ -21,6 +21,7 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <limits>
 #include <cstring>
 #include <string_view>
 #include <utility>
@@ -296,8 +297,22 @@ uint8_t DeriveMatExpandMxScale(const uint256& prf_key, uint32_t i, uint32_t bj)
     return static_cast<uint8_t>(out[0] & 0x3);
 }
 
+namespace {
+
+inline uint32_t ExtractMixBitsFromInt64(int64_t y)
+{
+    if (y >= static_cast<int64_t>(std::numeric_limits<int32_t>::min()) &&
+        y <= static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+        return static_cast<uint32_t>(static_cast<int32_t>(y));
+    }
+    const uint64_t u = static_cast<uint64_t>(y);
+    return static_cast<uint32_t>(u) ^ static_cast<uint32_t>(u >> 32);
+}
+
+} // namespace
+
 void ExtractMatExpandMxTileMantissas(const uint256& prf_key, uint32_t i, uint32_t bj,
-                                     const int32_t raw32[kMatExpandMxBlockLen],
+                                     const int64_t raw64[kMatExpandMxBlockLen],
                                      int8_t mu_out[kMatExpandMxBlockLen])
 {
     std::array<std::byte, 64> ks{};
@@ -310,8 +325,7 @@ void ExtractMatExpandMxTileMantissas(const uint256& prf_key, uint32_t i, uint32_
             for (uint8_t shift : {0, 4}) {
                 if (filled >= kMatExpandMxBlockLen) break;
                 const uint8_t nibble = static_cast<uint8_t>((byte >> shift) & 0x0F);
-                const uint32_t raw_u = static_cast<uint32_t>(raw32[filled]);
-                // Bind cell to B32: mix raw into the nibble before M11 rejection.
+                const uint32_t raw_u = ExtractMixBitsFromInt64(raw64[filled]);
                 const uint8_t mixed = static_cast<uint8_t>(
                     (nibble ^ static_cast<uint8_t>((raw_u * 0x9E3779B9u) >> 28)) & 0x0F);
                 bool accepted = false;
@@ -323,6 +337,17 @@ void ExtractMatExpandMxTileMantissas(const uint256& prf_key, uint32_t i, uint32_
         }
         ++remix;
     }
+}
+
+void ExtractMatExpandMxTileMantissas(const uint256& prf_key, uint32_t i, uint32_t bj,
+                                     const int32_t raw32[kMatExpandMxBlockLen],
+                                     int8_t mu_out[kMatExpandMxBlockLen])
+{
+    int64_t raw64[kMatExpandMxBlockLen];
+    for (uint32_t t = 0; t < kMatExpandMxBlockLen; ++t) {
+        raw64[t] = raw32[t];
+    }
+    ExtractMatExpandMxTileMantissas(prf_key, i, bj, raw64, mu_out);
 }
 
 uint64_t MixMatExpandEntry(int32_t raw, uint32_t i, uint32_t j, uint64_t salt)

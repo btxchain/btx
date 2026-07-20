@@ -96,7 +96,7 @@ BOOST_AUTO_TEST_CASE(rc_t1_golden_episode_digest_stable)
     BOOST_CHECK(!d1.IsNull());
     BOOST_CHECK(d1 == d2);
     BOOST_CHECK_EQUAL(d1.GetHex(),
-                      "d1f9fc917b94b13532b55e796bed61fdf15e3959899f2735c3064280b82532b5");
+                      "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a");
 }
 
 BOOST_AUTO_TEST_CASE(rc_t2_phase1_tile_size_invariance)
@@ -175,6 +175,21 @@ BOOST_AUTO_TEST_CASE(rc_t4_accumulator_boundary_int64_vs_radix)
     rc::ExtractMXMatrixInt64(prf, y64.data(), 1, 32, o64.data());
     rc::ExtractMXMatrixInt32(prf, y32.data(), 1, 32, o32.data());
     BOOST_CHECK(o64 == o32);
+
+    // P0.5: value > INT32_MAX extracts without int32 truncation.
+    {
+        std::vector<int64_t> wide(32, 0);
+        wide[0] = 3600000000LL;
+        wide[1] = -3600000000LL;
+        std::vector<int8_t> o_wide(32), o_trunc(32);
+        rc::ExtractMXMatrixInt64(prf, wide.data(), 1, 32, o_wide.data());
+        std::vector<int64_t> trunc64(32, 0);
+        trunc64[0] = static_cast<int32_t>(wide[0]);
+        trunc64[1] = static_cast<int32_t>(wide[1]);
+        rc::ExtractMXMatrixInt64(prf, trunc64.data(), 1, 32, o_trunc.data());
+        BOOST_CHECK(o_wide[0] != o_trunc[0] || o_wide[1] != o_trunc[1]);
+        BOOST_CHECK_EQUAL(o_wide[2], o_trunc[2]);
+    }
 
     // Wgrad: int64 oracle == chunked ExactGemm path with K exceeding 2^24.
     constexpr uint32_t b_seq = 8192; // 2304·8192 ≈ 1.89e7 > 2^24
@@ -381,12 +396,13 @@ BOOST_AUTO_TEST_CASE(rc_t9_fail_closed_wrong_exact_gemm_backend)
     BOOST_CHECK(!st.deficit_reason.empty());
     BOOST_CHECK(!rc::RCAcceleratorAdmissible(bad));
 
-    // Episode with the bad backend still matches CPU — per-GEMM verify falls back.
+    // P0.3: bad ExactGemm is used as-is (device replaces CPU). Episode digest
+    // must diverge from the CPU oracle — no silent per-GEMM CPU rescue.
     const auto header = MakeRCHeader(1234);
     const auto params = rc::MakeToyRCEpisodeParams();
     const uint256 cpu = rc::MineRCEpisode(header, params, 0);
     const uint256 with_bad = rc::MineRCEpisode(header, params, 0, nullptr, bad);
-    BOOST_CHECK(cpu == with_bad);
+    BOOST_CHECK(cpu != with_bad);
 
     // Honest wrapping backend must self-qual (native_* stay false).
     lt::ExactGemmBackend good;
@@ -462,93 +478,36 @@ BOOST_AUTO_TEST_CASE(rc_check_pow_toy_dims_mine_and_wrong_digest)
 
 BOOST_AUTO_TEST_CASE(rc_tfp4_segmentation_exactness)
 {
-    // Segment bound freeze (also T-FP5 static side).
     BOOST_CHECK(static_cast<uint64_t>(rc::kRCSegLen) * 2304ull < (uint64_t{1} << 62));
     BOOST_CHECK_EQUAL(rc::kRCSegLen % 32, 0u);
+    BOOST_CHECK(!rc::kRCSegmentLeavesEnabled);
 
-    // n_ctx < kRCSegLen ⇒ single Z segment; digest is deterministic.
     {
         const auto header = MakeRCHeader(42);
         const auto toy = rc::MakeToyRCEpisodeParams();
         BOOST_REQUIRE_LT(toy.n_ctx, rc::kRCSegLen);
-        BOOST_CHECK_EQUAL(rc::RCNumSegs(toy.n_ctx), 1u);
         std::vector<rc::RCRoundTranscript> rounds;
-        const uint256 d =
-            rc::RecomputeResidentCurriculumReference(header, toy, 0, {}, &rounds);
+        const uint256 d = rc::RecomputeResidentCurriculumReference(header, toy, 0, {}, &rounds);
         BOOST_REQUIRE(!rounds.empty());
-        // Stream starts with one Z segment (n_q·d_head·8 LE int64) then Z int8.
-        const size_t z_seg_bytes = rc::RCSegZBytes(toy);
-        BOOST_REQUIRE_GE(rounds[0].stream.size(), z_seg_bytes + toy.n_q * toy.d_head);
-        BOOST_CHECK(d == rc::RecomputeResidentCurriculumReference(header, toy, 0));
+        const size_t z_bytes = static_cast<size_t>(toy.n_q) * toy.d_head;
+        BOOST_REQUIRE_GE(rounds[0].stream.size(), z_bytes);
+        BOOST_CHECK_LT(rounds[0].stream.size(), rc::RCSegZBytes(toy) + z_bytes);
+        BOOST_CHECK_EQUAL(d.GetHex(), "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a");
     }
 
-    // n_ctx > kRCSegLen ⇒ two Z segments; sum-of-partials Extract == monolithic Z.
     {
-        const auto header = MakeRCHeader(77);
-        const auto params = rc::MakeSegTestRCEpisodeParams();
-        BOOST_REQUIRE(rc::ValidateRCEpisodeParams(params));
-        BOOST_REQUIRE_GT(params.n_ctx, rc::kRCSegLen);
-        BOOST_CHECK_EQUAL(rc::RCNumSegs(params.n_ctx), 2u);
-        BOOST_CHECK_EQUAL(rc::RCNumSegs(params.b_seq), 1u);
-
-        std::vector<rc::RCRoundTranscript> rounds;
-        const uint256 digest =
-            rc::RecomputeResidentCurriculumReference(header, params, 0, {}, &rounds);
-        BOOST_REQUIRE_EQUAL(rounds.size(), 1u);
-        const auto& stream = rounds[0].stream;
-
-        const size_t z_seg_bytes = rc::RCSegZBytes(params);
-        const size_t z_bytes = static_cast<size_t>(params.n_q) * params.d_head;
-        BOOST_REQUIRE_GE(stream.size(), 2 * z_seg_bytes + z_bytes);
-
-        // Reconstruct int64 Z from committed segment leaves; segs must sum
-        // consistently (associative int64 — matches a monolithic reduction).
-        std::vector<int64_t> sum(static_cast<size_t>(params.n_q) * params.d_head, 0);
-        for (uint32_t s = 0; s < 2; ++s) {
-            const size_t off = static_cast<size_t>(s) * z_seg_bytes;
-            for (size_t i = 0; i < sum.size(); ++i) {
-                const int64_t v = static_cast<int64_t>(
-                    ReadLE64(reinterpret_cast<const unsigned char*>(stream.data() + off) +
-                             i * sizeof(int64_t)));
-                sum[i] += v;
-            }
+        constexpr uint32_t b_seq = 32800;
+        constexpr uint32_t d_model = 32;
+        std::vector<int8_t> G(static_cast<size_t>(b_seq) * d_model, 3);
+        std::vector<int8_t> X(static_cast<size_t>(b_seq) * d_model, 5);
+        const auto mono = rc::TestHelperGemmGXtInt64(G, X, b_seq, d_model);
+        const auto segs = rc::TestHelperGemmGXtSegmented(G, X, b_seq, d_model);
+        BOOST_REQUIRE_EQUAL(segs.size(), 2u);
+        std::vector<int64_t> acc(mono.size(), 0);
+        for (const auto& seg : segs) {
+            for (size_t i = 0; i < acc.size(); ++i) acc[i] += seg[i];
         }
-        BOOST_CHECK(sum[0] != 0 || sum[1] != 0); // non-trivial contraction
-        // Final Z int8 follows the two segment blobs.
-        const size_t z_off = 2 * z_seg_bytes;
-        bool z_nonzero = false;
-        for (size_t i = 0; i < z_bytes; ++i) {
-            if (stream[z_off + i] != 0) {
-                z_nonzero = true;
-                break;
-            }
-        }
-        BOOST_CHECK(z_nonzero);
-
-        // Wgrad segmentation: segs sum to monolithic int64.
-        {
-            constexpr uint32_t b_seq = 32800; // > kRCSegLen
-            constexpr uint32_t d_model = 32;
-            std::vector<int8_t> G(static_cast<size_t>(b_seq) * d_model, 3);
-            std::vector<int8_t> X(static_cast<size_t>(b_seq) * d_model, 5);
-            const auto mono = rc::TestHelperGemmGXtInt64(G, X, b_seq, d_model);
-            const auto segs = rc::TestHelperGemmGXtSegmented(G, X, b_seq, d_model);
-            BOOST_REQUIRE_EQUAL(segs.size(), 2u);
-            std::vector<int64_t> acc(mono.size(), 0);
-            for (const auto& seg : segs) {
-                BOOST_REQUIRE_EQUAL(seg.size(), mono.size());
-                for (size_t i = 0; i < acc.size(); ++i) acc[i] += seg[i];
-            }
-            BOOST_CHECK(acc == mono);
-        }
-
-        // Corrupt one int64 in the first Z-segment region → challenged leaf fails.
-        BOOST_CHECK(rc::VerifyRCTranscriptSpotCheck(header, params, 0, digest, {0}));
-        std::vector<std::vector<int8_t>> corrupt{stream};
-        corrupt[0][0] = static_cast<int8_t>(static_cast<uint8_t>(corrupt[0][0]) ^ 0xffu);
-        BOOST_CHECK(!rc::VerifyRCTranscriptSpotCheck(header, params, 0, digest, {0}, &corrupt));
-        BOOST_CHECK(
-            !rc::VerifyRCLeafOpening(corrupt[0], params.T_leaf, 0, rounds[0].round_root));
+        BOOST_CHECK(acc == mono);
     }
 }
 
@@ -584,7 +543,7 @@ BOOST_AUTO_TEST_CASE(rc_tfp1_epoch0_reparam_equivalence)
     const auto toy = rc::MakeToyRCEpisodeParams();
     const uint256 d = rc::RecomputeResidentCurriculumReference(header, toy, /*height=*/0);
     BOOST_CHECK_EQUAL(d.GetHex(),
-                      "d1f9fc917b94b13532b55e796bed61fdf15e3959899f2735c3064280b82532b5");
+                      "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a");
 }
 
 BOOST_AUTO_TEST_CASE(rc_tfp2_schedule_monotonic_ratchet)
@@ -593,22 +552,15 @@ BOOST_AUTO_TEST_CASE(rc_tfp2_schedule_monotonic_ratchet)
     Consensus::FillDefaultRCGrowthTables(p);
     p.nMatMulRCHeight = 100;
     p.nRCScaleEpochBlocks = 10;
-
-    uint64_t prev_res = 0;
-    uint64_t prev_cap = 0;
+    BOOST_CHECK(!rc::kRCGrowthScheduleEnabled);
     for (int32_t epoch = 0; epoch < 12; ++epoch) {
         const int32_t h = p.nMatMulRCHeight + epoch * p.nRCScaleEpochBlocks;
         const auto s = rc::RCScaleForHeight(h, p);
-        BOOST_CHECK_GE(s.W_res, prev_res);
-        BOOST_CHECK_GE(s.W_cap, prev_cap);
-        BOOST_CHECK_LE(s.W_res, static_cast<uint64_t>(p.nRCScaleHardCapResBytes));
-        BOOST_CHECK_LE(s.W_cap, static_cast<uint64_t>(p.nRCScaleHardCapCapBytes));
-        if (epoch > 0) {
-            // Applied table step (or hard-cap clamp); never shrinks.
-            BOOST_CHECK(s.W_res >= prev_res && s.W_cap >= prev_cap);
-        }
-        prev_res = s.W_res;
-        prev_cap = s.W_cap;
+        BOOST_CHECK_EQUAL(s.W_res, rc::kRCW0Res);
+        BOOST_CHECK_EQUAL(s.W_cap, rc::kRCW0Cap);
+        const auto ep = rc::ConsensusRCEpisodeParamsForHeight(h, p);
+        BOOST_CHECK_EQUAL(ep.n_ctx, rc::kRCContextLen);
+        BOOST_CHECK_EQUAL(ep.b_seq, rc::kRCBatchSeq);
     }
 }
 
@@ -650,20 +602,15 @@ BOOST_AUTO_TEST_CASE(rc_tfp6_brake_skips_or_applies_growth)
     Consensus::FillDefaultRCGrowthTables(p);
     p.nMatMulRCHeight = 1000;
     p.nRCScaleEpochBlocks = 100;
-
     const auto base = rc::RCScaleForHeight(p.nMatMulRCHeight, p);
-    const int32_t h1 = p.nMatMulRCHeight + p.nRCScaleEpochBlocks; // epoch 1
-
-    // brake false → skip growth (stay at base).
+    const int32_t h1 = p.nMatMulRCHeight + p.nRCScaleEpochBlocks;
+    BOOST_CHECK(!rc::kRCGrowthScheduleEnabled);
     const auto paused = rc::RCScaleForHeight(h1, p, [](int32_t) { return false; });
-    BOOST_CHECK_EQUAL(paused.W_res, base.W_res);
-    BOOST_CHECK_EQUAL(paused.W_cap, base.W_cap);
-
-    // brake true → apply table step.
+    BOOST_CHECK_EQUAL(paused.W_res, rc::kRCW0Res);
+    BOOST_CHECK_EQUAL(paused.W_cap, rc::kRCW0Cap);
     const auto grown = rc::RCScaleForHeight(h1, p, [](int32_t) { return true; });
-    BOOST_CHECK(grown.W_res > base.W_res || grown.W_cap > base.W_cap);
-
-    // nullptr tip → BrakeAllowsStep always true (no pause).
+    BOOST_CHECK_EQUAL(grown.W_res, base.W_res);
+    BOOST_CHECK_EQUAL(grown.W_cap, base.W_cap);
     BOOST_CHECK(rc::BrakeAllowsStep(0, p, nullptr));
 }
 
@@ -734,6 +681,59 @@ BOOST_AUTO_TEST_CASE(rc_tfp9_selfqual_tracks_epoch_shape)
     BOOST_CHECK(st.exact_gemm_backend_ok);
     BOOST_CHECK(!st.native_mxfp4_qualified);
     BOOST_CHECK(!st.native_fp8_qualified);
+}
+
+
+BOOST_AUTO_TEST_CASE(rc_dos_admission_separate_from_v4_lt)
+{
+    // P0.4: RC must not inherit v4's 1-unit / 16-pending / 4-per-min admission.
+    Consensus::Params p;
+    p.nMatMulV4Height = 1;
+    p.nMatMulBMX4CHeight = 1;
+    p.nMatMulDRLTHeight = 1;
+    p.fMatMulLTSealAsPoW = false;
+    p.nMatMulMaxPendingVerifications = 16;
+    p.nMatMulV4GlobalVerifyBudgetPerMin = 4;
+    p.nMatMulV4PeerVerifyBudgetPerMin = 2;
+    p.nMatMulLTMaxPendingVerifications = 2;
+    p.nMatMulLTGlobalVerifyBudgetPerMin = 1;
+    p.nMatMulLTPeerVerifyBudgetPerMin = 1;
+    p.nMatMulRCMaxPendingVerifications = 1;
+    p.nMatMulRCGlobalVerifyBudgetPerMin = 1;
+    p.nMatMulRCPeerVerifyBudgetPerMin = 1;
+
+    // Inert while RC height is INT32_MAX.
+    BOOST_CHECK(!p.IsMatMulRCActive(100));
+    BOOST_CHECK_EQUAL(MatMulRCWorkUnits(p, 100), 1U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulRCMaxPendingVerifications(p, 100), 0U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(p, 100), 2U);
+    BOOST_CHECK_EQUAL(MatMulEncDrWorkUnits(p, 100), 1U);
+
+    // Activate RC with toy dims (MAC unit collapses to 1).
+    p.nMatMulRCHeight = 50;
+    p.fMatMulRCUseToyDims = true;
+    BOOST_REQUIRE(p.IsMatMulRCActive(100));
+    BOOST_CHECK_EQUAL(MatMulRCWorkUnits(p, 100), 1U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulRCMaxPendingVerifications(p, 100), 1U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulRCGlobalVerifyBudgetPerMin(p, 100), 1U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulRCPeerVerifyBudgetPerMin(p, false, 100), 1U);
+    // EncDr/LT pending path stays on its own knobs (not overwritten by RC).
+    BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(p, 100), 2U);
+
+    BOOST_CHECK(CanStartMatMulRCVerification(/*pending=*/0, /*work_units=*/1, p, 100));
+    BOOST_CHECK(!CanStartMatMulRCVerification(/*pending=*/1, /*work_units=*/1, p, 100));
+    BOOST_CHECK(!CanStartMatMulRCVerification(/*pending=*/0, /*work_units=*/1, p, 49));
+
+    // Consensus dims: work units scale by TotalRCEpisodeMacs / 2^40 (~49 at epoch 0).
+    p.fMatMulRCUseToyDims = false;
+    Consensus::FillDefaultRCGrowthTables(p);
+    const uint32_t wu = MatMulRCWorkUnits(p, 100);
+    BOOST_CHECK_GE(wu, 40U);
+    BOOST_CHECK_LE(wu, 64U);
+    BOOST_CHECK_EQUAL(EffectiveMatMulRCMaxPendingVerifications(p, 100), wu);
+    BOOST_CHECK(CanStartMatMulRCVerification(0, wu, p, 100));
+    BOOST_CHECK(!CanStartMatMulRCVerification(1, wu, p, 100));
+    BOOST_CHECK(!CanStartMatMulRCVerification(0, wu + 1, p, 100));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

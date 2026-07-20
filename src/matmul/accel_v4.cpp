@@ -551,8 +551,92 @@ Kind ResolveBackend()
 
 namespace {
 
+struct ResolvedExactGemm {
+    matmul::v4::lt::ExactGemmBackend backend;
+    const char* label{"cpu"};
+};
+
+/** Resolve LT ExactGemm providers only — no RC self-qual. */
+ResolvedExactGemm ResolveExactGemmBackendForLT()
+{
+    ResolvedExactGemm resolved;
+
+    // TPU and Trainium accelerate only LT's bounded-exact S8 GEMM lane, not
+    // the full v4 digest dispatcher. Keep that narrower choice separate from
+    // BTX_MATMUL_V4_BACKEND and explicit: an external provider must register,
+    // attest native tensor execution, satisfy the t=24 proof gate, and pass
+    // CPU byte-parity probes before either function pointer is exposed.
+    if (const char* requested = std::getenv("BTX_MATMUL_LT_EXACT_BACKEND")) {
+        const std::string exact_request{requested};
+        const bool is_tpu = exact_request == "tpu";
+        const bool is_trainium = exact_request == "trainium";
+        bool available{false};
+        if (is_tpu) {
+            available = matmul_v4::tpu::IsTpuPjrtExactGemmAvailable();
+            if (available) {
+                resolved.backend.gemm_s8s8 = &matmul_v4::tpu::TryLaunchLtTpuGemmS8S8;
+                resolved.backend.gemm_s32s8 = &matmul_v4::tpu::TryLaunchLtTpuGemmS32S8;
+            }
+        } else if (is_trainium) {
+            available = matmul_v4::trainium::IsTrainiumExactGemmAvailable();
+            if (available) {
+                resolved.backend.gemm_s8s8 = &matmul_v4::trainium::TryLaunchLtTrainiumGemmS8S8;
+                resolved.backend.gemm_s32s8 = &matmul_v4::trainium::TryLaunchLtTrainiumGemmS32S8;
+            }
+        }
+
+        if (is_tpu || is_trainium) {
+            static std::atomic_bool logged_cloud_exact{false};
+            bool expected{false};
+            if (logged_cloud_exact.compare_exchange_strong(expected, true)) {
+                if (available) {
+                    LogPrintf("MatMul-v4.4-LT exact GEMM provider: %s (native tensor path self-qualified; bounded S32xS8 uses four exact radix-256 tensor GEMMs)\n",
+                              exact_request);
+                } else {
+                    LogPrintf("MatMul-v4.4-LT exact GEMM provider: CPU [WARNING: requested %s but its provider was not compiled, registered, attested, or self-qualified]\n",
+                              exact_request);
+                }
+            }
+            // Keep a stable label for RC gating / logs (string lives for process life
+            // via getenv; copy into a static for the common tpu|trainium names).
+            resolved.label = is_tpu ? "tpu" : "trainium";
+            return resolved;
+        }
+    }
+
+    switch (ResolveBackend()) {
+    case Kind::CUDA:
+        // LaunchGemm* prefers cuBLASLt IMMA then scalar device tiles.
+        resolved.backend.gemm_s8s8 = &matmul_v4::cuda::LaunchGemmS8S8;
+        resolved.backend.gemm_s32s8 = &matmul_v4::cuda::LaunchGemmS32S8;
+        resolved.label = "cuda";
+        break;
+    case Kind::HIP:
+        // LaunchGemm* prefers hipBLASLt/rocBLAS MFMA then device ALU tiles.
+        resolved.backend.gemm_s8s8 = &matmul_v4::hip::LaunchGemmS8S8;
+        resolved.backend.gemm_s32s8 = &matmul_v4::hip::LaunchGemmS32S8;
+        resolved.label = "hip";
+        break;
+    case Kind::METAL:
+        // LaunchGemm* prefers MPP TensorOps (ExactGemm self-qual) then ALU.
+        resolved.backend.gemm_s8s8 = &matmul_v4::metal::LaunchGemmS8S8;
+        resolved.backend.gemm_s32s8 = &matmul_v4::metal::LaunchGemmS32S8;
+        resolved.label = "metal";
+        break;
+    case Kind::ASCEND:
+        resolved.backend.gemm_s8s8 = &matmul_v4::ascend::TryLaunchLtCubeGemmS8S8;
+        resolved.backend.gemm_s32s8 = &matmul_v4::ascend::TryLaunchLtCubeGemmS32S8;
+        resolved.label = "ascend";
+        break;
+    case Kind::CPU:
+        break;
+    }
+    return resolved;
+}
+
 /** RC fail-closed gate (R.5.2): device ExactGemm slots may mine RC only after
- *  ProbeRCSelfQual. On failure return an empty backend (CPU ExactGemmS8S8). */
+ *  ProbeRCSelfQual. On failure return an empty backend (CPU ExactGemmS8S8).
+ *  Must only be applied on the RC resolve path — never on LT. */
 matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQual(
     matmul::v4::lt::ExactGemmBackend backend, const char* provider_label)
 {
@@ -578,79 +662,15 @@ matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQual(
 
 matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
 {
-    matmul::v4::lt::ExactGemmBackend backend;
+    // LT mining path: return the LT-qualified ExactGemm inject unchanged.
+    // RC self-qual must not clear or replace this backend.
+    return ResolveExactGemmBackendForLT().backend;
+}
 
-    // TPU and Trainium accelerate only LT's bounded-exact S8 GEMM lane, not
-    // the full v4 digest dispatcher. Keep that narrower choice separate from
-    // BTX_MATMUL_V4_BACKEND and explicit: an external provider must register,
-    // attest native tensor execution, satisfy the t=24 proof gate, and pass
-    // CPU byte-parity probes before either function pointer is exposed.
-    if (const char* requested = std::getenv("BTX_MATMUL_LT_EXACT_BACKEND")) {
-        const std::string exact_request{requested};
-        const bool is_tpu = exact_request == "tpu";
-        const bool is_trainium = exact_request == "trainium";
-        bool available{false};
-        if (is_tpu) {
-            available = matmul_v4::tpu::IsTpuPjrtExactGemmAvailable();
-            if (available) {
-                backend.gemm_s8s8 = &matmul_v4::tpu::TryLaunchLtTpuGemmS8S8;
-                backend.gemm_s32s8 = &matmul_v4::tpu::TryLaunchLtTpuGemmS32S8;
-            }
-        } else if (is_trainium) {
-            available = matmul_v4::trainium::IsTrainiumExactGemmAvailable();
-            if (available) {
-                backend.gemm_s8s8 = &matmul_v4::trainium::TryLaunchLtTrainiumGemmS8S8;
-                backend.gemm_s32s8 = &matmul_v4::trainium::TryLaunchLtTrainiumGemmS32S8;
-            }
-        }
-
-        if (is_tpu || is_trainium) {
-            static std::atomic_bool logged_cloud_exact{false};
-            bool expected{false};
-            if (logged_cloud_exact.compare_exchange_strong(expected, true)) {
-                if (available) {
-                    LogPrintf("MatMul-v4.4-LT exact GEMM provider: %s (native tensor path self-qualified; bounded S32xS8 uses four exact radix-256 tensor GEMMs)\n",
-                              exact_request);
-                } else {
-                    LogPrintf("MatMul-v4.4-LT exact GEMM provider: CPU [WARNING: requested %s but its provider was not compiled, registered, attested, or self-qualified]\n",
-                              exact_request);
-                }
-            }
-            // Shared ExactGemm substrate: RC self-qual must also pass before
-            // the inject is exposed to RC (and LT) miners.
-            return GateExactGemmWithRCSelfQual(backend, exact_request.c_str());
-        }
-    }
-
-    const char* label = "cpu";
-    switch (ResolveBackend()) {
-    case Kind::CUDA:
-        // LaunchGemm* prefers cuBLASLt IMMA then scalar device tiles.
-        backend.gemm_s8s8 = &matmul_v4::cuda::LaunchGemmS8S8;
-        backend.gemm_s32s8 = &matmul_v4::cuda::LaunchGemmS32S8;
-        label = "cuda";
-        break;
-    case Kind::HIP:
-        // LaunchGemm* prefers hipBLASLt/rocBLAS MFMA then device ALU tiles.
-        backend.gemm_s8s8 = &matmul_v4::hip::LaunchGemmS8S8;
-        backend.gemm_s32s8 = &matmul_v4::hip::LaunchGemmS32S8;
-        label = "hip";
-        break;
-    case Kind::METAL:
-        // LaunchGemm* prefers MPP TensorOps (ExactGemm self-qual) then ALU.
-        backend.gemm_s8s8 = &matmul_v4::metal::LaunchGemmS8S8;
-        backend.gemm_s32s8 = &matmul_v4::metal::LaunchGemmS32S8;
-        label = "metal";
-        break;
-    case Kind::ASCEND:
-        backend.gemm_s8s8 = &matmul_v4::ascend::TryLaunchLtCubeGemmS8S8;
-        backend.gemm_s32s8 = &matmul_v4::ascend::TryLaunchLtCubeGemmS32S8;
-        label = "ascend";
-        break;
-    case Kind::CPU:
-        break;
-    }
-    return GateExactGemmWithRCSelfQual(backend, label);
+matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackendForRC()
+{
+    const ResolvedExactGemm resolved = ResolveExactGemmBackendForLT();
+    return GateExactGemmWithRCSelfQual(resolved.backend, resolved.label);
 }
 
 matmul::v4::lt::ExactMxProjectionBackend MakeResolvedExactMxProjectionBackend()

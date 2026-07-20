@@ -65,9 +65,9 @@ void PrintUsage(std::ostream& os)
        << "  --rounds N                 override episode rounds (default: params)\n"
        << "  --episodes N               ExtractMX self-qual episode count (default: 3)\n"
        << "  --backend NAME             cpu|cuda|hip|metal|auto (default: cpu).\n"
-       << "                             Non-CPU uses MakeResolvedExactGemmBackend +\n"
-       << "                             ProbeRCSelfQual (fail-closed → CPU). Digests\n"
-       << "                             are always resealed vs empty-backend CPU.\n"
+       << "                             Non-CPU uses MakeResolvedExactGemmBackendForRC\n"
+       << "                             (LT resolve + RC self-qual fail-closed → CPU).\n"
+       << "                             Digests are always resealed vs empty-backend CPU.\n"
        << "  --mem-cap BYTES            allocator budget check (0 = unlimited)\n"
        << "  --out PATH                 JSON output (default: rc-report.json)\n"
        << "  -h, --help                 this help\n";
@@ -250,8 +250,9 @@ int main(int argc, char* argv[])
         return 2;
     }
 
-    // Resolve ExactGemm for non-CPU backends (CUDA/HIP/Metal/Ascend via accel).
-    // ProbeRCSelfQual fail-closes to empty backend (= CPU ExactGemmS8S8).
+    // RC-only ExactGemm inject: MakeResolvedExactGemmBackendForRC applies
+    // ProbeRCSelfQual fail-closed (empty = CPU ExactGemmS8S8). The LT resolver
+    // (MakeResolvedExactGemmBackend) intentionally skips this gate.
     matmul::v4::lt::ExactGemmBackend gemm{};
     rc::RCSelfQualStatus selfqual{};
     std::string backend_resolved = "cpu";
@@ -262,13 +263,20 @@ int main(int argc, char* argv[])
         selfqual.deficit_reason.clear();
     } else if (args.backend == "cuda" || args.backend == "hip" || args.backend == "metal" ||
                args.backend == "ascend" || args.backend == "auto") {
-        gemm = matmul_v4::accel::MakeResolvedExactGemmBackend();
-        selfqual = rc::ProbeRCSelfQual(gemm);
-        if (!selfqual.mining_accelerator_ok) {
-            gemm = {};
-            backend_resolved = "cpu-fallback";
-        } else {
+        gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+        if (gemm.gemm_s8s8 != nullptr) {
+            // ForRC already ProbeRCSelfQual'd successfully; avoid a second medium probe.
+            selfqual.cpu_oracle_ok = true;
+            selfqual.exact_gemm_backend_ok = true;
+            selfqual.mining_accelerator_ok = true;
+            selfqual.native_mxfp4_qualified = false;
+            selfqual.native_fp8_qualified = false;
             backend_resolved = args.backend;
+        } else {
+            // RC gate cleared (or no device): probe ungated LT candidate for deficit.
+            const auto candidate = matmul_v4::accel::MakeResolvedExactGemmBackend();
+            selfqual = rc::ProbeRCSelfQual(candidate);
+            backend_resolved = "cpu-fallback";
         }
     } else {
         std::cerr << "error: unknown --backend " << args.backend

@@ -35,7 +35,7 @@ struct RCScale {
     uint64_t W_cap{kRCW0Cap};
 };
 
-/** Round to nearest multiple of 32 (H13). Ties round half-up. Asserts x > 0. */
+/** Round to nearest multiple of 32 (H13). Ties round half-up. Requires x > 0. */
 [[nodiscard]] uint32_t RoundToMultipleOf32(uint64_t x);
 
 /**
@@ -69,7 +69,7 @@ using RCBrakeFn = std::function<bool(int32_t epoch_index)>;
 
 [[nodiscard]] bool CheckRCEpochInvariants(const RCEpisodeParams& p, std::string* reason = nullptr);
 
-/** Full height→params with assert fallback. Pure schedule (no brake) unless brake given. */
+/** Full height→params with invariant-check fallback. Pure schedule (no brake) unless brake given. */
 [[nodiscard]] RCEpisodeParams ConsensusRCEpisodeParamsForHeight(
     int32_t height, const Consensus::Params& p, const RCBrakeFn& brake = {});
 

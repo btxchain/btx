@@ -767,7 +767,8 @@ private:
         std::chrono::steady_clock::time_point now,
         bool is_ibd,
         int32_t reference_height,
-        bool& global_exhausted);
+        bool& global_exhausted,
+        bool rc_recompute = false);
 
     /** Register a MatMul phase2 failure against a reconnect-resistant address budget. */
     MatMulPhase2Punishment RegisterMatMulPhase2FailureForPeer(
@@ -1060,6 +1061,8 @@ private:
     std::atomic<int> m_wtxid_relay_peers{0};
     /** Number of currently active expensive MatMul verification operations. */
     std::atomic<uint32_t> m_matmul_pending_verifications{0};
+    /** ENC_RC full-episode recomputes -- separate from EncDr/LT pending counter. */
+    std::atomic<uint32_t> m_matmul_rc_pending_verifications{0};
     /** WP-7 / C5: bounded off-thread worker pool for the v4.4 ENC-DR reference
      *  recompute. nullptr = feature off (ALWAYS nullptr while nMatMulV4Height ==
      *  INT32_MAX, or with -matmulasyncverify=0), in which case ProcessBlock is
@@ -1252,6 +1255,7 @@ private:
         } state{State::NOT_PRECHECKED};
         bool is_ibd{false};
         bool encdr_profile{false};
+        bool rc_profile{false};
         bool owns_async_marker{false};
         bool owns_verdict_pin{false};
         bool owns_assumevalid_trust_pin{false};
@@ -2413,6 +2417,21 @@ static bool ReserveMatMulVerificationSlot(std::atomic<uint32_t>& pending_verific
     }
 }
 
+static bool ReserveMatMulRCVerificationSlot(std::atomic<uint32_t>& pending_verifications,
+                                            const Consensus::Params& params,
+                                            int32_t reference_height, uint32_t work_units)
+{
+    uint32_t pending = pending_verifications.load();
+    while (true) {
+        if (!CanStartMatMulRCVerification(pending, work_units, params, reference_height)) {
+            return false;
+        }
+        if (pending_verifications.compare_exchange_weak(pending, pending + work_units)) {
+            return true;
+        }
+    }
+}
+
 void PeerManagerImpl::MaybeExpireMatMulAddrBudgets(std::chrono::steady_clock::time_point now)
 {
     for (auto it = m_matmul_addr_budgets.begin(); it != m_matmul_addr_budgets.end();) {
@@ -2431,25 +2450,40 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
     std::chrono::steady_clock::time_point now,
     bool is_ibd,
     int32_t reference_height,
-    bool& global_exhausted)
+    bool& global_exhausted,
+    bool rc_recompute)
 {
     global_exhausted = false;
     if (verification_count == 0) return true;
-
-    // Per-peer budget check FIRST (all-or-nothing) — cheap and doesn't
-    // consume the scarce global budget.  If a single peer is over-requesting,
-    // reject immediately without touching the global counter.
     {
         UniqueLock lock(m_matmul_addr_budget_mutex, "m_matmul_addr_budget_mutex", __FILE__, __LINE__);
         MaybeExpireMatMulAddrBudgets(now);
         auto& budget_state = m_matmul_addr_budgets[peer.m_addr];
         budget_state.last_update = now;
-
-        // Snapshot full rate-limit state before consuming so we can roll
-        // back on failure.  ConsumeMatMulPeerVerifyBudget may reset both
-        // window_start AND the counter when a new minute starts, so both
-        // must be captured to avoid a mismatched (window, count) pair on
-        // rollback that would prematurely throttle the peer.
+        if (rc_recompute) {
+            const auto saved_rc_window = budget_state.budget.rc_window_start;
+            const uint32_t saved_rc_count =
+                budget_state.budget.expensive_rc_verifications_this_minute;
+            for (uint32_t i = 0; i < verification_count; ++i) {
+                if (!ConsumeMatMulRCPeerVerifyBudget(budget_state.budget, params, now, is_ibd,
+                                                     reference_height)) {
+                    budget_state.budget.rc_window_start = saved_rc_window;
+                    budget_state.budget.expensive_rc_verifications_this_minute = saved_rc_count;
+                    return false;
+                }
+            }
+            const uint32_t global_budget =
+                EffectiveMatMulRCGlobalVerifyBudgetPerMin(params, reference_height);
+            if (!ConsumeGlobalMatMulRCBudget(global_budget, verification_count, now)) {
+                budget_state.budget.rc_window_start = saved_rc_window;
+                budget_state.budget.expensive_rc_verifications_this_minute = saved_rc_count;
+                global_exhausted = true;
+                LogDebug(BCLog::NET, "Global RC verify budget exhausted (%u/min), deferring peer %s\n",
+                         global_budget, peer.m_addr.ToStringAddr());
+                return false;
+            }
+            return true;
+        }
         const auto saved_window_start = budget_state.budget.window_start;
         const uint32_t saved_count = budget_state.budget.expensive_verifications_this_minute;
         for (uint32_t i = 0; i < verification_count; ++i) {
@@ -2459,16 +2493,6 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                 return false;
             }
         }
-
-        // Global budget check (all peers combined, all-or-nothing) — prevents
-        // Sybil peers from burning Phase 2 CPU budget before per-peer ban kicks
-        // in. Still inside per-peer lock so we can roll back the full per-peer
-        // rate-limit state if the global budget is exhausted.
-        //
-        // During bootstrap fast phase, allow a higher global ceiling so tip-time
-        // IBD heuristics latching false early cannot starve honest catch-up.
-        // Expensive EncDr/seal recomputes are NEVER unbounded: always charge the
-        // process-wide global leaf-unit budget (IBD previously bypassed it).
         const bool in_fast_phase =
             params.fMatMulPOW &&
             reference_height >= 0 &&
@@ -2477,17 +2501,11 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
             uint32_t global_budget =
                 EffectiveMatMulGlobalVerifyBudgetPerMin(params, reference_height);
             if (is_ibd || in_fast_phase) {
-                // Finite IBD/fast-phase ceiling in leaf units: enough for honest
-                // catch-up bursts, still Sybil-bounded. Seal jobs cost Q* units.
                 global_budget = std::max<uint32_t>(global_budget, 256U);
             }
             if (!ConsumeGlobalMatMulPhase2Budget(global_budget, verification_count, now)) {
                 budget_state.budget.window_start = saved_window_start;
                 budget_state.budget.expensive_verifications_this_minute = saved_count;
-                // DoS-F2: the GLOBAL (shared) budget is the limiter here, not this
-                // peer's per-peer budget. Signal the caller to DEFER this message
-                // (not disconnect) so an honest peer is not punished for others'
-                // spend. The per-peer rate-limit state was rolled back above.
                 global_exhausted = true;
                 LogDebug(BCLog::NET, "Global Phase2 budget exhausted (%u/min), deferring peer %s\n",
                          global_budget, peer.m_addr.ToStringAddr());
@@ -4667,7 +4685,8 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         if (ConsumeMatMulVerificationBudgetForPeer(
                 *peer, m_chainparams.GetConsensus(), matmul_admission.work_units,
                 std::chrono::steady_clock::now(), matmul_admission.is_ibd,
-                matmul_admission.reference_height, global_exhausted)) {
+                matmul_admission.reference_height, global_exhausted,
+                matmul_admission.rc_profile)) {
             return true;
         }
         if (global_exhausted) {
@@ -4767,11 +4786,23 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             // Height-select the LT tip-verify pending cap when DRLT is live
             // (seal recompute is ~Q*× a single EncDr).
             if (!matmul_slot &&
-                matmul_admission.state == MatMulBlockAdmission::State::NOT_PRECHECKED &&
-                ReserveMatMulVerificationSlot(m_matmul_pending_verifications, m_chainparams.GetConsensus(),
-                                              encdr->height)) {
-                const uint32_t work = MatMulEncDrWorkUnits(m_chainparams.GetConsensus(), encdr->height);
-                matmul_slot.emplace(m_matmul_pending_verifications, work);
+                matmul_admission.state == MatMulBlockAdmission::State::NOT_PRECHECKED) {
+                const Consensus::Params& cons{m_chainparams.GetConsensus()};
+                const bool rc = cons.IsMatMulRCActive(encdr->height);
+                const uint32_t work = rc ? MatMulRCWorkUnits(cons, encdr->height)
+                                        : MatMulEncDrWorkUnits(cons, encdr->height);
+                const bool reserved = rc
+                    ? ReserveMatMulRCVerificationSlot(m_matmul_rc_pending_verifications, cons,
+                                                      encdr->height, work)
+                    : ReserveMatMulVerificationSlot(m_matmul_pending_verifications, cons,
+                                                    encdr->height, work);
+                if (reserved) {
+                    matmul_slot.emplace(rc ? m_matmul_rc_pending_verifications
+                                           : m_matmul_pending_verifications,
+                                        work);
+                    matmul_admission.rc_profile = rc;
+                    matmul_admission.work_units = work;
+                }
             }
             if (matmul_slot) {
                 const NodeId nodeid{node.GetId()};
@@ -4995,30 +5026,39 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     }
 
     const Consensus::Params& params{m_chainparams.GetConsensus()};
-    const uint32_t work{MatMulEncDrWorkUnits(params, exact_reference_height)};
+    const bool rc_profile = params.IsMatMulRCActive(exact_reference_height);
+    const uint32_t work = rc_profile
+                              ? MatMulRCWorkUnits(params, exact_reference_height)
+                              : MatMulEncDrWorkUnits(params, exact_reference_height);
     if (exact_encdr_profile && !MarkMatMulAsyncVerification(block_hash)) {
         LogDebug(BCLog::NET,
                  "Ignoring duplicate %s hash=%s from peer=%d: MatMul verification already pending\n",
                  source, block_hash.ToString(), node.GetId());
         return false;
     }
-    if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, params,
-                                       exact_reference_height, work)) {
+    const bool reserved = rc_profile
+        ? ReserveMatMulRCVerificationSlot(m_matmul_rc_pending_verifications, params,
+                                          exact_reference_height, work)
+        : ReserveMatMulVerificationSlot(m_matmul_pending_verifications, params,
+                                        exact_reference_height, work);
+    if (!reserved) {
         if (exact_encdr_profile) UnmarkMatMulAsyncVerification(block_hash);
         LogDebug(BCLog::NET,
                  "Disconnecting peer=%d: MatMul pending verification cap reached (%s)\n",
                  node.GetId(), source);
         node.fDisconnect = true;
-        // Admission already indexed this valid header. Let ProcessBlock run
-        // the header-only finalizer so NotifyHeaderTip and mapBlockSource
-        // cleanup are not lost merely because the recompute slot is full.
         admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
         return true;
     }
-    slot.emplace(m_matmul_pending_verifications, work);
+    if (rc_profile) {
+        slot.emplace(m_matmul_rc_pending_verifications, work);
+    } else {
+        slot.emplace(m_matmul_pending_verifications, work);
+    }
     admission.state = MatMulBlockAdmission::State::RECOMPUTE_RESERVED;
     admission.is_ibd = is_ibd;
     admission.encdr_profile = exact_encdr_profile;
+    admission.rc_profile = rc_profile;
     admission.owns_async_marker = exact_encdr_profile;
     admission.reference_height = exact_reference_height;
     admission.work_units = work;

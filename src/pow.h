@@ -39,6 +39,9 @@ struct MatMulPeerVerificationBudget {
     // Access is externally synchronized in net_processing by peer-specific locks.
     uint32_t expensive_verifications_this_minute{0};
     std::chrono::steady_clock::time_point window_start{};
+    /** ENC_RC recompute units -- independent window/counter from EncDr/LT. */
+    uint32_t expensive_rc_verifications_this_minute{0};
+    std::chrono::steady_clock::time_point rc_window_start{};
     uint32_t phase2_failures{0};
     std::chrono::steady_clock::time_point phase2_first_failure_time{};
 };
@@ -468,7 +471,19 @@ uint32_t EffectiveMatMulMaxPendingVerifications(const Consensus::Params& params,
 /** Work units for one EncDr tip-verify job: 1 for a single digest recompute,
  *  consensus Q* when seal-as-PoW is active at `reference_height`. */
 uint32_t MatMulEncDrWorkUnits(const Consensus::Params& params, int32_t reference_height = -1);
+/** One RC admission work-unit ~= 2^40 MACs (~1.1T). Epoch-0 (~53T MAC) ~= 49 units. */
+inline constexpr uint64_t kMatMulRCAdmissionMacUnit = uint64_t{1} << 40;
+uint32_t MatMulRCWorkUnits(const Consensus::Params& params, int32_t reference_height = -1);
+uint32_t EffectiveMatMulRCMaxPendingVerifications(const Consensus::Params& params, int32_t reference_height = -1);
+uint32_t EffectiveMatMulRCGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height = -1);
+uint32_t EffectiveMatMulRCPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd, int32_t reference_height = -1);
 bool ConsumeMatMulPeerVerifyBudget(
+    MatMulPeerVerificationBudget& budget,
+    const Consensus::Params& params,
+    std::chrono::steady_clock::time_point now,
+    bool is_ibd = false,
+    int32_t reference_height = std::numeric_limits<int32_t>::max());
+bool ConsumeMatMulRCPeerVerifyBudget(
     MatMulPeerVerificationBudget& budget,
     const Consensus::Params& params,
     std::chrono::steady_clock::time_point now,
@@ -476,10 +491,12 @@ bool ConsumeMatMulPeerVerifyBudget(
     int32_t reference_height = std::numeric_limits<int32_t>::max());
 bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus::Params& params,
                                 int32_t reference_height = -1);
-/** True if `pending + work_units` fits under the height-selected leaf-unit cap. */
 bool CanStartMatMulVerification(uint32_t pending_verifications, uint32_t work_units,
                                 const Consensus::Params& params, int32_t reference_height = -1);
+bool CanStartMatMulRCVerification(uint32_t pending_verifications, uint32_t work_units,
+                                  const Consensus::Params& params, int32_t reference_height = -1);
 bool ConsumeGlobalMatMulPhase2Budget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
+bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
 MatMulSolvePipelineStats ProbeMatMulSolvePipelineStats();
 void ResetMatMulSolvePipelineStats();
 MatMulGpuPreHashScanStats ProbeMatMulGpuPreHashScanStats();

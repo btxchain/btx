@@ -23,7 +23,9 @@ struct Params;
 // Consensus ground truth is the int64 CPU reference
 // (RecomputeResidentCurriculumReference with an empty ExactGemmBackend).
 // Accelerated paths may inject ExactGemmBackend for <2^24 s8xs8 stages
-// (forward / backward); on mismatch they fall back to CPU ExactGemmS8S8.
+// (forward / backward); a qualified device path REPLACES CPU on the hot path
+// (P0.3). CPU is fallback when the device is absent/declines, or when
+// BTX_RC_EXACT_GEMM_COMPARE=1 dispute mode detects a mismatch.
 // Phase-1 Z=S·V stays int64-streamed in the reference (bound ≫ 2^24).
 // Phase-2 wgrad G·Xᵀ uses int64 as oracle; an optional chunked ExactGemm
 // path (TestHelperGemmGXtViaChunkedExact) must match byte-for-byte.
@@ -65,6 +67,16 @@ inline constexpr uint32_t kRCSegLen = 32768;
 static_assert(static_cast<uint64_t>(kRCSegLen) * 2304ull < (uint64_t{1} << 62),
               "2304·kRCSegLen must fit in signed int64 headroom (< 2^62)");
 static_assert((kRCSegLen % 32) == 0, "kRCSegLen must be divisible by 32 (MX align)");
+
+
+/** PARKED (§R.7 STOP-AND-STABILIZE): segment-partial leaves stay OFF so the
+ *  committed stream matches pre-segment layout. Do not enable until the
+ *  validation model (P2.1) is decided. */
+inline constexpr bool kRCSegmentLeavesEnabled = false;
+
+/** PARKED (§R.7 STOP-AND-STABILIZE): growth schedule stays OFF — always epoch-0
+ *  dials. Keep reparam/ratios; do not step growth or brake. */
+inline constexpr bool kRCGrowthScheduleEnabled = false;
 
 static_assert(kRCHeadDim % 32 == 0, "kRCHeadDim must be divisible by 32");
 static_assert(kRCQueryRows % 32 == 0, "kRCQueryRows must be divisible by 32");
@@ -151,8 +163,9 @@ struct RCMerkleProof {
 [[nodiscard]] RCEpisodeParams ResolveRCEpisodeParams(const Consensus::Params& p, int32_t height);
 
 /** Sole consensus ground truth (R.5.1). Pure int64 integer by default.
- *  Optional `gemm` may accelerate Phase-2 s8xs8 stages (bound < 2^24) when the
- *  backend matches CPU ExactGemmS8S8; mismatch/false falls back to CPU.
+ *  Optional `gemm` may accelerate Phase-2 s8xs8 stages (bound < 2^24) when a
+ *  device backend is injected (P0.3: device replaces CPU; CPU is fallback /
+ *  dispute via BTX_RC_EXACT_GEMM_COMPARE=1).
  *  Consensus REJECT / spot-check MUST pass an empty backend. */
 [[nodiscard]] uint256 RecomputeResidentCurriculumReference(
     const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,

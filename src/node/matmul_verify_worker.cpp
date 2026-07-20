@@ -16,12 +16,13 @@
 
 namespace node {
 namespace {
-//! Upper bound for the async queue / pool size. LT tip-verify may use a
+//! Upper bound for the async queue / pool size. LT/RC tip-verify may use a
 //! tighter pending cap, but the worker may see mixed heights; take the max so
 //! the Assume never false-fires when the looser (non-LT) cap is in force.
 uint32_t MaxPendingCap(const Consensus::Params& params)
 {
-    return std::max(params.nMatMulMaxPendingVerifications, params.nMatMulLTMaxPendingVerifications);
+    return std::max({params.nMatMulMaxPendingVerifications, params.nMatMulLTMaxPendingVerifications,
+                     params.nMatMulRCMaxPendingVerifications});
 }
 } // namespace
 

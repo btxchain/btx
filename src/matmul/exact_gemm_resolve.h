@@ -12,12 +12,20 @@
 
 namespace matmul_v4::accel {
 
-/** Build an injectable ExactGemmBackend for MatExpand GEMMs. An explicit
+/** Build an injectable ExactGemmBackend for MatExpand / LT mining. An explicit
  *  BTX_MATMUL_LT_EXACT_BACKEND=tpu|trainium selects a registered, self-qualified
  *  bounded-exact cloud provider; otherwise ResolveBackend() wires CUDA, HIP,
  *  Metal, or Ascend. Null slots keep MatExpand on CPU ExactGemm*, and false
- *  provider returns fall back per call. Winners always CPU-reseal. */
+ *  provider returns fall back per call. Winners always CPU-reseal.
+ *
+ *  LT-only: does NOT run ProbeRCSelfQual / clear on RC deficit. RC self-qual
+ *  must never corrupt a valid LT ExactGemm inject while RC is inactive. */
 [[nodiscard]] matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend();
+
+/** Same provider resolution as MakeResolvedExactGemmBackend, then RC fail-closed
+ *  gate (ProbeRCSelfQual). On mining_accelerator_ok failure returns empty
+ *  backend (= CPU ExactGemmS8S8). RC callers only — never use for LT mining. */
+[[nodiscard]] matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackendForRC();
 
 /** Build an injectable ExactMxProjectionBackend for miner-local B̂·V.
  *  ResolveBackend() wires CUDA/HIP LaunchProjectedRightMx, Metal

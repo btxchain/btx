@@ -52,12 +52,12 @@ RCEpisodeParams MakeEpochScaledMedium(const RCEpisodeParams& live)
     const uint32_t live_bs = live.b_seq;
     // Cap for self-qual wall-clock: never exceed medium*2 or live (whichever smaller of caps).
     constexpr uint32_t kSelfQualBSeqCap = 16384;
-    p.b_seq = std::min(kSelfQualBSeqCap, std::max(floor_bs, live_bs > floor_bs ? floor_bs : floor_bs));
-    // If live b_seq is larger than floor, still use at least floor (always >2^24).
-    // Optionally bump toward live when live is modest.
+    p.b_seq = floor_bs;
+    // Optionally bump toward live when live is modest and above the floor.
     if (live_bs > floor_bs && live_bs <= kSelfQualBSeqCap) {
         p.b_seq = live_bs;
     }
+    p.b_seq = std::min(kSelfQualBSeqCap, p.b_seq);
     // Align to 32.
     if (p.b_seq % 32u != 0) {
         p.b_seq = ((p.b_seq + 31u) / 32u) * 32u;

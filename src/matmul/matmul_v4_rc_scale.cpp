@@ -163,15 +163,19 @@ RCEpisodeParams DeriveDims(const RCScale& scale)
 
 uint32_t RoundToMultipleOf32(uint64_t x)
 {
-    assert(x > 0);
+    if (x == 0) return 32;
     uint64_t rounded = ((x + 16) / 32) * 32;
-    if (rounded == 0) rounded = 32; // smallest positive multiple of 32
-    assert(rounded <= UINT32_MAX);
+    if (rounded == 0) rounded = 32;
+    if (rounded > UINT32_MAX) rounded = UINT32_MAX - (UINT32_MAX % 32);
     return static_cast<uint32_t>(rounded);
 }
 
 RCScale RCScaleForHeight(int32_t height, const Consensus::Params& p, const RCBrakeFn& brake)
 {
+    if constexpr (!kRCGrowthScheduleEnabled) {
+        (void)height; (void)p; (void)brake;
+        return RCScale{kRCW0Res, kRCW0Cap};
+    }
     if (height < p.nMatMulRCHeight || p.nRCScaleEpochBlocks <= 0) {
         return RCScale{kRCW0Res, kRCW0Cap};
     }
@@ -224,7 +228,7 @@ RCEpisodeParams EpisodeParamsFromScale(const RCScale& scale, const RCEpisodePara
     if (scale.W_res == 0 || scale.W_cap == 0) {
         if (prior_ok != nullptr) return *prior_ok;
         RCEpisodeParams base = DeriveDims(RCScale{kRCW0Res, kRCW0Cap});
-        assert(ValidateRCEpisodeParams(base));
+        if (!ValidateRCEpisodeParams(base) && prior_ok != nullptr) return *prior_ok;
         return base;
     }
 
@@ -238,16 +242,18 @@ RCEpisodeParams EpisodeParamsFromScale(const RCScale& scale, const RCEpisodePara
     }
     // Best-effort base epoch-0 dims that ValidateRCEpisodeParams accepts.
     RCEpisodeParams base = DeriveDims(RCScale{kRCW0Res, kRCW0Cap});
-    assert(ValidateRCEpisodeParams(base));
+    if (!ValidateRCEpisodeParams(base) && prior_ok != nullptr) return *prior_ok;
     return base;
 }
 
 RCEpisodeParams ConsensusRCEpisodeParamsForHeight(int32_t height, const Consensus::Params& p,
                                                   const RCBrakeFn& brake)
 {
-    // Walk epochs so assert-fallback chains to the last good shape.
     RCEpisodeParams ok = EpisodeParamsFromScale(RCScale{kRCW0Res, kRCW0Cap});
-
+    if constexpr (!kRCGrowthScheduleEnabled) {
+        (void)height; (void)p; (void)brake;
+        return ok;
+    }
     if (height < p.nMatMulRCHeight || p.nRCScaleEpochBlocks <= 0) {
         return ok;
     }
