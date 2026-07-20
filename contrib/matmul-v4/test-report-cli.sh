@@ -23,7 +23,7 @@ expect_rejected()
   output="$("${clean_env[@]}" "$BIN" "$@" 2>&1)"
   code=$?
   set -e
-  if [ "$code" -ne 2 ] || ! grep -Fq "$expected" <<<"$output"; then
+  if [ "$code" -ne 2 ] || ! grep -Fq -- "$expected" <<<"$output"; then
     echo "expected parser rejection containing '$expected': $*" >&2
     echo "exit=$code output=$output" >&2
     exit 1
@@ -42,10 +42,14 @@ done
 for value in 0 -1 +1 1x ' 1' 4294967296 18446744073709551616; do
   expect_rejected "invalid positive integer for --n" --n "$value"
 done
-for option in --window --rounds; do
+for option in --window --rounds --telemetry-campaign-windows; do
   expect_rejected "invalid positive integer for $option" "$option" 0
   expect_rejected "invalid positive integer for $option" "$option" 12tail
 done
+expect_rejected "--telemetry-campaign-windows requires" \
+  --profile bmx4c-lt --telemetry-campaign-windows 2
+expect_rejected "exceeds the 4096-candidate telemetry cap" \
+  --profile bmx4c-lt --telemetry-only --window 512 --telemetry-campaign-windows 9
 for option in --device-peak-int8-tops --v3-hashrate; do
   expect_rejected "invalid non-negative finite number for $option" "$option" -1
   expect_rejected "invalid non-negative finite number for $option" "$option" +1

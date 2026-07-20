@@ -51,6 +51,13 @@ def report(
     device_rate_timing_domain: object = "device-events-resident-qstar",
     device_execution_certified: object = True,
     device_rate_certified: object = True,
+    throughput_scheduler: object = "ringed-device-steady-state",
+    throughput_campaign_windows_requested: object = 8,
+    throughput_ring_depth: object = 8,
+    throughput_chat_staging_slots: object = 4,
+    throughput_chat_staging_chunks: object = 2,
+    throughput_cross_window_overlap: object = True,
+    throughput_saturation_verified: object = True,
     peak_status_measured: object = True,
     peak_capable: object = True,
     peak_ready: object = True,
@@ -83,6 +90,13 @@ def report(
         "native_path_eligible": native_path_eligible,
         "device_execution_certified": device_execution_certified,
         "device_rate_certified": device_rate_certified,
+        "throughput_scheduler": throughput_scheduler,
+        "throughput_campaign_windows_requested": throughput_campaign_windows_requested,
+        "throughput_ring_depth": throughput_ring_depth,
+        "throughput_chat_staging_slots": throughput_chat_staging_slots,
+        "throughput_chat_staging_chunks": throughput_chat_staging_chunks,
+        "throughput_cross_window_overlap": throughput_cross_window_overlap,
+        "throughput_saturation_verified": throughput_saturation_verified,
         "device_rate_timing_valid": device_rate_timing_valid,
         "device_rate_timing_domain": device_rate_timing_domain,
         "host_independence_verified": host_independence_verified,
@@ -158,9 +172,50 @@ class LtGateSchemaTest(unittest.TestCase):
                 "rounds": 3,
                 "measurement_mode": "phase-a-digest",
                 "source_revision": "1ca87fb",
+                "throughput_scheduler": "ringed-device-steady-state",
+                "throughput_campaign_windows_requested": 8,
+                "throughput_cross_window_overlap": True,
             },
         )
         self.assertFalse(any("G2 B200/5090 ratio" in reason for reason in reasons))
+
+    def test_g2_requires_saturated_scheduler_provenance(self):
+        for override in (
+            {"throughput_scheduler": None},
+            {"throughput_ring_depth": None},
+            {"throughput_chat_staging_slots": None},
+            {"throughput_chat_staging_chunks": None},
+            {"throughput_saturation_verified": False},
+        ):
+            dc = report("b200.json", 400.0, **override)
+            consumer = report("5090.json", 100.0)
+            _, gates, rows, reasons, _, _ = self.evaluate_pair(dc, consumer)
+            self.assertFalse(gates["G2_b200_5090_ratio"])
+            self.assertFalse(rows[0]["device_measured"])
+            self.assertTrue(any("G2" in reason and "UNVERIFIED" in reason for reason in reasons))
+
+    def test_g2_matches_scheduler_policy_not_device_capacity(self):
+        dc = report(
+            "b200.json", 400.0,
+            throughput_ring_depth=64,
+            throughput_chat_staging_slots=64,
+            throughput_chat_staging_chunks=2,
+        )
+        consumer = report(
+            "5090.json", 100.0,
+            throughput_ring_depth=8,
+            throughput_chat_staging_slots=8,
+            throughput_chat_staging_chunks=16,
+        )
+        _, gates, _, _, _, summary = self.evaluate_pair(dc, consumer)
+        self.assertTrue(gates["G2_b200_5090_ratio"])
+        self.assertEqual(summary["g2_evidence"]["datacenter_chat_staging_slots"], 64)
+        self.assertEqual(summary["g2_evidence"]["consumer_chat_staging_slots"], 8)
+
+        consumer["throughput_scheduler"] = "sequential-synchronous-qstar"
+        _, gates, _, reasons, _, _ = self.evaluate_pair(dc, consumer)
+        self.assertFalse(gates["G2_b200_5090_ratio"])
+        self.assertTrue(any("no comparable" in reason for reason in reasons))
 
     def test_g4_requires_resident_qualified_native_mx(self):
         labels = {"mi350.json": ("amd", "datacenter", "MI350")}

@@ -356,6 +356,10 @@ def silicon_rate_provenance(rep: dict) -> bool:
     device-event timing domain whose host independence was explicitly checked.
     """
     lt = rep.get("lt") or {}
+    scheduler = rep.get("throughput_scheduler")
+    ring_depth = rep.get("throughput_ring_depth")
+    chat_slots = rep.get("throughput_chat_staging_slots")
+    chat_chunks = rep.get("throughput_chat_staging_chunks")
     return (
         rep.get("native_path_eligible") is True
         and rep.get("device_execution_certified") is True
@@ -364,6 +368,23 @@ def silicon_rate_provenance(rep: dict) -> bool:
         and rep.get("device_rate_timing_domain") == "device-events-resident-qstar"
         and rep.get("host_independence_verified") is True
         and host_cpu_provenance_complete(rep)
+        # A single synchronous Q* call and a capacity-sized cross-window ring
+        # can reverse device ordering.  Certified silicon rates must therefore
+        # identify and saturate their scheduler instead of silently inheriting
+        # an external harness's concurrency policy.
+        and isinstance(scheduler, str)
+        and bool(scheduler.strip())
+        and isinstance(ring_depth, int)
+        and not isinstance(ring_depth, bool)
+        and ring_depth > 0
+        and isinstance(chat_slots, int)
+        and not isinstance(chat_slots, bool)
+        and chat_slots > 0
+        and isinstance(chat_chunks, int)
+        and not isinstance(chat_chunks, bool)
+        and chat_chunks > 0
+        and isinstance(rep.get("throughput_cross_window_overlap"), bool)
+        and rep.get("throughput_saturation_verified") is True
         and lt.get("qstar_is_consensus") is True
         and lt.get("qstar_device_batched") is True
         and lt.get("device_w_generation") is True
@@ -404,7 +425,7 @@ def device_nps(rep: dict) -> float | None:
     return positive_number(rep.get("device_nonce_per_s"))
 
 
-def g2_comparison_config(rep: dict) -> tuple[int, int, int, str, str] | None:
+def g2_comparison_config(rep: dict) -> tuple[int, int, int, str, str, str, int, bool] | None:
     """Return the exact workload/build identity required for a G2 comparison."""
     dimensions: list[int] = []
     for field in ("n", "window", "rounds"):
@@ -414,6 +435,9 @@ def g2_comparison_config(rep: dict) -> tuple[int, int, int, str, str] | None:
         dimensions.append(value)
     measurement_mode = rep.get("measurement_mode")
     source_revision = rep.get("source_revision")
+    scheduler = rep.get("throughput_scheduler")
+    campaign_windows = rep.get("throughput_campaign_windows_requested")
+    cross_window_overlap = rep.get("throughput_cross_window_overlap")
     if not isinstance(measurement_mode, str) or not measurement_mode:
         return None
     if (
@@ -422,7 +446,23 @@ def g2_comparison_config(rep: dict) -> tuple[int, int, int, str, str] | None:
         or source_revision.endswith("-dirty")
     ):
         return None
-    return (*dimensions, measurement_mode, source_revision)
+    if not isinstance(scheduler, str) or not scheduler.strip():
+        return None
+    if (
+        isinstance(campaign_windows, bool)
+        or not isinstance(campaign_windows, int)
+        or campaign_windows <= 0
+        or not isinstance(cross_window_overlap, bool)
+    ):
+        return None
+    return (
+        *dimensions,
+        measurement_mode,
+        source_revision,
+        scheduler,
+        campaign_windows,
+        cross_window_overlap,
+    )
 
 
 def g2_part_matches(row: dict, expected: str) -> bool:
@@ -534,6 +574,9 @@ def evaluate(
             "device_measured": device_measured(rep),
             "nps": measured_nps,
             "g2_comparison_config": comparison_config,
+            "throughput_ring_depth": rep.get("throughput_ring_depth"),
+            "throughput_chat_staging_slots": rep.get("throughput_chat_staging_slots"),
+            "throughput_chat_staging_chunks": rep.get("throughput_chat_staging_chunks"),
             "host_orchestrated_nps": host_orchestrated_nps(rep),
             "cpu_nps": None,
             "v3_hashrate": positive_number(rep.get("v3_hashrate")),
@@ -700,13 +743,20 @@ def evaluate(
         "comparison_config": None,
         "datacenter_host_cpu": None,
         "consumer_host_cpu": None,
+        "datacenter_ring_depth": None,
+        "consumer_ring_depth": None,
+        "datacenter_chat_staging_slots": None,
+        "consumer_chat_staging_slots": None,
+        "datacenter_chat_staging_chunks": None,
+        "consumer_chat_staging_chunks": None,
     }
     if not dc or not cons:
         reasons.append(
             "G2 B200/5090 ratio: UNVERIFIED — need explicitly labeled B200 and RTX 5090 "
             "reports with finite positive device_nonce_per_s from native, device-event-timed "
             "resident consensus-Q* batches. Require device W/digest, no per-nonce sync, "
-            "host_independence_verified, and complete host CPU/affinity provenance. Host CPU "
+            "host_independence_verified, a recorded saturated scheduler/ring/Chat-staging "
+            "configuration, and complete host CPU/affinity provenance. Host CPU "
             "models may differ; CPU/host-wall rates do not count."
         )
     else:
@@ -724,7 +774,8 @@ def evaluate(
                 "G2 B200/5090 ratio: UNVERIFIED — no comparable datacenter/consumer "
                 "production report pair. Both reports must use n=4096 and have identical "
                 "positive integer window and rounds plus identical non-empty "
-                "measurement_mode and identical clean source_revision (-dirty builds are rejected). "
+                "measurement_mode, clean source_revision, scheduler policy, requested campaign "
+                "window count, and cross-window-overlap policy (-dirty builds are rejected). "
                 "CPU models are recorded but deliberately are not a match key."
             )
         else:
@@ -733,7 +784,7 @@ def evaluate(
                 reasons.append(
                     "G2 B200/5090 ratio: UNVERIFIED — multiple comparable production "
                     "campaign configurations were supplied; filter inputs to one exact "
-                    "n/window/rounds/measurement_mode/source_revision campaign."
+                    "n/window/rounds/measurement_mode/source_revision/scheduler campaign."
                 )
             else:
                 config = next(iter(configs))
@@ -742,7 +793,16 @@ def evaluate(
                 best_dc = max(matching_dc, key=lambda r: r["nps"])
                 best_c = max(matching_consumers, key=lambda r: r["nps"])
                 ratio = best_dc["nps"] / best_c["nps"]
-                n, window, rounds, measurement_mode, source_revision = config
+                (
+                    n,
+                    window,
+                    rounds,
+                    measurement_mode,
+                    source_revision,
+                    scheduler,
+                    campaign_windows,
+                    cross_window_overlap,
+                ) = config
                 g2_evidence = {
                     "datacenter_file": best_dc["file"],
                     "consumer_file": best_c["file"],
@@ -751,19 +811,30 @@ def evaluate(
                     "ratio": ratio,
                     "datacenter_host_cpu": best_dc["host_cpu"],
                     "consumer_host_cpu": best_c["host_cpu"],
+                    "datacenter_ring_depth": best_dc["throughput_ring_depth"],
+                    "consumer_ring_depth": best_c["throughput_ring_depth"],
+                    "datacenter_chat_staging_slots": best_dc["throughput_chat_staging_slots"],
+                    "consumer_chat_staging_slots": best_c["throughput_chat_staging_slots"],
+                    "datacenter_chat_staging_chunks": best_dc["throughput_chat_staging_chunks"],
+                    "consumer_chat_staging_chunks": best_c["throughput_chat_staging_chunks"],
                     "comparison_config": {
                         "n": n,
                         "window": window,
                         "rounds": rounds,
                         "measurement_mode": measurement_mode,
                         "source_revision": source_revision,
+                        "throughput_scheduler": scheduler,
+                        "throughput_campaign_windows_requested": campaign_windows,
+                        "throughput_cross_window_overlap": cross_window_overlap,
                     },
                 }
                 g2 = ratio >= 4.0
                 if not g2:
                     reasons.append(
                         "G2 B200/5090 ratio FAIL: %.3g / %.3g = %.2fx < 4x "
-                        "(n=%d window=%d rounds=%d mode=%s revision=%s)."
+                        "(n=%d window=%d rounds=%d mode=%s revision=%s "
+                        "scheduler=%s campaign_windows=%d cross_window_overlap=%s; "
+                        "observed ring/chat slots dc=%s/%s consumer=%s/%s)."
                         % (
                             best_dc["nps"],
                             best_c["nps"],
@@ -773,6 +844,13 @@ def evaluate(
                             rounds,
                             measurement_mode,
                             source_revision,
+                            scheduler,
+                            campaign_windows,
+                            str(cross_window_overlap).lower(),
+                            best_dc["throughput_ring_depth"],
+                            best_dc["throughput_chat_staging_slots"],
+                            best_c["throughput_ring_depth"],
+                            best_c["throughput_chat_staging_slots"],
                         )
                     )
 
@@ -801,6 +879,9 @@ def evaluate(
             selected["rounds"],
             selected["measurement_mode"],
             selected["source_revision"],
+            selected["throughput_scheduler"],
+            selected["throughput_campaign_windows_requested"],
+            selected["throughput_cross_window_overlap"],
         )
         measured = [
             r

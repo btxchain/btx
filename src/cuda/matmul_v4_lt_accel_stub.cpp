@@ -65,6 +65,16 @@ bool ComputeDigestsOnlyLTCuda(
     return false;
 }
 
+bool ComputeDigestsOnlyLTCudaTelemetryCampaign(
+    const std::vector<CBlockHeader>& /*headers*/, uint32_t /*n*/, uint32_t /*qstar*/,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    LtCudaBatchProvenance* provenance)
+{
+    out.clear();
+    if (provenance != nullptr) *provenance = {};
+    return false;
+}
+
 bool RunMatMulLTCudaExtendedSelfTest(std::string& error)
 {
     error = "CUDA backend not compiled";
@@ -82,6 +92,16 @@ matmul::v4::lt::MxLaneProvenance LtLastMxProvenance()
 }
 
 bool IsLtExactMxScalePartitionedAvailable()
+{
+    return false;
+}
+
+uint32_t LtCudaCompiledRuntimeVersion()
+{
+    return 0;
+}
+
+bool IsLtCudaCublasLtBlockScaleApiCompiled()
 {
     return false;
 }

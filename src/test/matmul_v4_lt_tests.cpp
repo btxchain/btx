@@ -1130,6 +1130,19 @@ BOOST_AUTO_TEST_CASE(cuda_mx_selftest_accepts_exact_or_qualified_native_lane)
     BOOST_CHECK(matmul_v4::cuda::HasQualifiedLtCudaMxProjectionLane(provenance));
 }
 
+BOOST_AUTO_TEST_CASE(cuda_native_mx_compile_gate_uses_runtime_header_version)
+{
+    const uint32_t compiled_cudart = matmul_v4::cuda::LtCudaCompiledRuntimeVersion();
+    const bool block_scale_api = matmul_v4::cuda::IsLtCudaCublasLtBlockScaleApiCompiled();
+#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+    BOOST_CHECK_NE(compiled_cudart, 0U);
+    BOOST_CHECK_EQUAL(block_scale_api, compiled_cudart >= 12080U);
+#else
+    BOOST_CHECK_EQUAL(compiled_cudart, 0U);
+    BOOST_CHECK(!block_scale_api);
+#endif
+}
+
 #if !defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
 BOOST_AUTO_TEST_CASE(cuda_native_mx_selfqual_stub_declines)
 {
@@ -2048,6 +2061,17 @@ BOOST_AUTO_TEST_CASE(cuda_peak_native_deficit_keeps_exact_resident_default)
     }
 
     const auto status = matmul_v4::cuda::ProbeLtPeakMxPathStatus();
+    const auto lanes = matmul_v4::cuda::ProbeLtCudaMxNativeProvenance();
+    BOOST_CHECK_EQUAL(status.native_mxfp4_attempted, lanes.native_mxfp4_attempted);
+    BOOST_CHECK_EQUAL(status.native_mxfp4_qualified, lanes.native_mxfp4_qualified);
+    BOOST_CHECK_EQUAL(status.native_fp8_attempted, lanes.native_fp8_attempted);
+    BOOST_CHECK_EQUAL(status.native_fp8_qualified, lanes.native_fp8_qualified);
+    if (matmul_v4::cuda::LtCudaCompiledRuntimeVersion() >= 12080U) {
+        // "attempted" proves that the CUDA 12.8+ block-scale surface reached
+        // the Blackwell self-qual. It does not imply either lane qualified.
+        BOOST_CHECK(lanes.native_mxfp4_attempted);
+        BOOST_CHECK(lanes.native_fp8_attempted);
+    }
     BOOST_CHECK(status.allow_exact_mx_fallback);
     BOOST_CHECK(!status.peak_required);
     BOOST_CHECK(!status.blocks_device_resident);
@@ -2190,6 +2214,48 @@ BOOST_AUTO_TEST_CASE(full_header_batch_rejects_above_consensus_qstar)
     BOOST_CHECK(!hip_provenance.device_w_generation);
     BOOST_CHECK(!hip_provenance.device_digest);
     BOOST_CHECK(!hip_provenance.per_nonce_sync_absent);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_telemetry_campaign_is_bounded_and_window_aligned)
+{
+    const auto header = MakeLTHeader(14, kTestDim);
+    std::vector<lt::DigestOnlyResultLT> out(1);
+    matmul_v4::cuda::LtCudaBatchProvenance provenance;
+    provenance.qstar_device_batched = true;
+    provenance.device_w_generation = true;
+    provenance.device_digest = true;
+    provenance.per_nonce_sync_absent = true;
+    provenance.candidate_slots = 1;
+    provenance.chat_staging_slots = 1;
+    provenance.chat_staging_chunks = 1;
+    provenance.telemetry_windows = 1;
+    provenance.telemetry_campaign = true;
+
+    std::vector<CBlockHeader> oversized(
+        matmul_v4::cuda::kLtCudaTelemetryCampaignMax + 1, header);
+    BOOST_CHECK(!matmul_v4::cuda::ComputeDigestsOnlyLTCudaTelemetryCampaign(
+        oversized, kTestDim, /*qstar=*/128, out, &provenance));
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!provenance.qstar_device_batched);
+    BOOST_CHECK_EQUAL(provenance.candidate_slots, 0U);
+    BOOST_CHECK_EQUAL(provenance.chat_staging_slots, 0U);
+    BOOST_CHECK_EQUAL(provenance.chat_staging_chunks, 0U);
+    BOOST_CHECK_EQUAL(provenance.telemetry_windows, 0U);
+    BOOST_CHECK(!provenance.telemetry_campaign);
+
+    // The wider entry accepts only complete {128,256,512}-slot windows. It is
+    // not a loophole around the consensus Q* call's structural contract.
+    std::vector<CBlockHeader> partial_window(129, header);
+    out.resize(1);
+    BOOST_CHECK(!matmul_v4::cuda::ComputeDigestsOnlyLTCudaTelemetryCampaign(
+        partial_window, kTestDim, /*qstar=*/128, out, &provenance));
+    BOOST_CHECK(out.empty());
+
+    std::vector<CBlockHeader> invalid_qstar(128, header);
+    out.resize(1);
+    BOOST_CHECK(!matmul_v4::cuda::ComputeDigestsOnlyLTCudaTelemetryCampaign(
+        invalid_qstar, kTestDim, /*qstar=*/64, out, &provenance));
+    BOOST_CHECK(out.empty());
 }
 
 BOOST_AUTO_TEST_CASE(matexpand_extract_r2_nonapproximability)

@@ -113,7 +113,9 @@ void LogLtMxDiagnostic(const std::string& message);
 /** Snapshot used by report JSON + startup diagnostics. */
 struct LtPeakMxPathStatus {
     bool peak_capable{false};             // sm_100/120 or gfx950-class
+    bool native_mxfp4_attempted{false};   // self-qual invoked vendor MXFP4 surface
     bool native_mxfp4_qualified{false};
+    bool native_fp8_attempted{false};     // self-qual invoked vendor block-FP8 surface
     bool native_fp8_qualified{false};
     bool resident_native_mx_wired{false}; // native lane is in the resident Q* graph
     bool peak_ready{false};               // capable && qualified && resident-wired

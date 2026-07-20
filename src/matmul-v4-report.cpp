@@ -123,6 +123,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <string>
@@ -496,6 +497,8 @@ struct Args {
     bool telemetry_only{false};       // raw LT device timing; no CPU/reference/readiness gates
     bool lt_raw_only_alias{false};    // compatibility spelling from the CUDA review harness
     bool lt_raw_full_window_alias{false}; // explicit alias; telemetry always runs full Q*
+    uint32_t telemetry_campaign_windows{1}; // explicit non-certifying multi-Q* CUDA campaign
+    bool telemetry_campaign_explicit{false};
 };
 
 void PrintUsage(std::ostream& os)
@@ -514,6 +517,8 @@ void PrintUsage(std::ostream& os)
        << "                                   and never publishes a certified/readiness/ASERT rate\n"
        << "  --lt-raw-only                    compatibility alias for --telemetry-only\n"
        << "  --lt-raw-full-window             implies --lt-raw-only; PR telemetry always times full Q*\n"
+       << "  --telemetry-campaign-windows <N> telemetry-only CUDA campaign with N complete Q* windows\n"
+       << "                                   in one bounded-Chat-staging call (max 4096 candidates)\n"
        << "  --rounds <R>                     Freivalds rounds for the verify gate (default 3)\n"
        << "  --quick                          also run a fast n=256 and n=512 lane (v4.1 profile only)\n"
        << "  --device-peak-int8-tops <TOPS>   advertised INT8 TOPS, for the tensor-utilization estimate\n"
@@ -644,6 +649,11 @@ bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
             args.lt_raw_only_alias = true;
             args.lt_raw_full_window_alias = true;
         }
+        else if (a == "--telemetry-campaign-windows") {
+            const char* v = need(i); if (!v) return false;
+            if (!ParsePositiveUint32(v, a, args.telemetry_campaign_windows, err)) return false;
+            args.telemetry_campaign_explicit = true;
+        }
         else if (a == "--n") {
             const char* v = need(i); if (!v) return false;
             if (!ParsePositiveUint32(v, a, args.n, err)) return false;
@@ -704,6 +714,17 @@ bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
     }
     if (args.telemetry_only && args.profile != "bmx4c-lt") {
         err = "LT raw/telemetry mode requires --profile bmx4c-lt";
+        return false;
+    }
+    if (args.telemetry_campaign_explicit && !args.telemetry_only) {
+        err = "--telemetry-campaign-windows requires --telemetry-only or --lt-raw-only";
+        return false;
+    }
+    if (args.telemetry_campaign_explicit &&
+        (args.window > matmul_v4::cuda::kLtCudaTelemetryCampaignMax ||
+         args.telemetry_campaign_windows >
+             matmul_v4::cuda::kLtCudaTelemetryCampaignMax / args.window)) {
+        err = "--telemetry-campaign-windows exceeds the 4096-candidate telemetry cap";
         return false;
     }
     return true;
@@ -1413,6 +1434,11 @@ struct LtRawBatchProvenance {
     bool device_w_generation{false};
     bool device_digest{false};
     bool per_nonce_sync_absent{false};
+    size_t candidate_slots{0};
+    size_t chat_staging_slots{0};
+    size_t chat_staging_chunks{0};
+    size_t telemetry_windows{0};
+    bool telemetry_campaign{false};
 };
 
 bool RunRawLtHeaderBatch(matmul_v4::accel::Kind kind,
@@ -1433,6 +1459,11 @@ bool RunRawLtHeaderBatch(matmul_v4::accel::Kind kind,
             provenance->device_w_generation = p.device_w_generation;
             provenance->device_digest = p.device_digest;
             provenance->per_nonce_sync_absent = p.per_nonce_sync_absent;
+            provenance->candidate_slots = p.candidate_slots;
+            provenance->chat_staging_slots = p.chat_staging_slots;
+            provenance->chat_staging_chunks = p.chat_staging_chunks;
+            provenance->telemetry_windows = p.telemetry_windows;
+            provenance->telemetry_campaign = p.telemetry_campaign;
         }
         return ok;
     }
@@ -1481,6 +1512,12 @@ struct LtThroughputResult {
     bool device_w_generation{false};
     bool device_digest{false};
     bool per_nonce_sync_absent{false};
+    uint32_t campaign_windows_requested{1};
+    size_t campaign_candidate_slots{0};
+    size_t chat_staging_slots{0};
+    size_t chat_staging_chunks{0};
+    bool telemetry_campaign{false};
+    std::string scheduler{"sequential-synchronous-qstar"};
     std::string execution_path{"unavailable"};
     std::string note;
 };
@@ -1501,9 +1538,16 @@ bool HasLtResidentBatchProvenance(const LtThroughputResult& r)
 // resident call can still contain substantial serial host work.
 LtThroughputResult MeasureLtDeviceNoncePerSec(matmul_v4::accel::Kind kind, uint32_t n,
                                               uint32_t window, bool raw_probe_exact,
-                                              bool require_reference_probe = true)
+                                              bool require_reference_probe = true,
+                                              uint32_t campaign_windows = 1)
 {
     LtThroughputResult r;
+    r.campaign_windows_requested = campaign_windows;
+    r.campaign_candidate_slots = static_cast<size_t>(window) * campaign_windows;
+    if (campaign_windows > 1) {
+        r.scheduler = "sequential-compute-bounded-chat-digest-staging";
+        r.telemetry_campaign = true;
+    }
     r.qstar_is_consensus = lt::IsValidConsensusQStar(window);
     if (!r.qstar_is_consensus) {
         r.note = "non-consensus Q*: device rate withheld (use --window 128, 256, or 512)";
@@ -1516,6 +1560,10 @@ LtThroughputResult MeasureLtDeviceNoncePerSec(matmul_v4::accel::Kind kind, uint3
     if (kind != matmul_v4::accel::Kind::CUDA && kind != matmul_v4::accel::Kind::HIP) {
         r.note = "backend LT status cannot distinguish device work from host fallback; "
                  "device rate withheld";
+        return r;
+    }
+    if (campaign_windows > 1 && kind != matmul_v4::accel::Kind::CUDA) {
+        r.note = "multi-window telemetry campaign is implemented only for CUDA";
         return r;
     }
     if (require_reference_probe && !raw_probe_exact) {
@@ -1532,16 +1580,44 @@ LtThroughputResult MeasureLtDeviceNoncePerSec(matmul_v4::accel::Kind kind, uint3
     uint64_t base_nonce{100'000};
     const auto t0 = Clock::now();
     for (uint32_t w = 0; w < MAX_TIMED_WINDOWS; ++w) {
-        const std::vector<CBlockHeader> candidates = WindowHeadersLT(n, window, base_nonce);
+        std::vector<CBlockHeader> candidates;
+        candidates.reserve(static_cast<size_t>(window) * campaign_windows);
+        for (uint32_t campaign_window = 0; campaign_window < campaign_windows;
+             ++campaign_window) {
+            auto one_window = WindowHeadersLT(n, window, base_nonce);
+            candidates.insert(candidates.end(),
+                              std::make_move_iterator(one_window.begin()),
+                              std::make_move_iterator(one_window.end()));
+            base_nonce += window;
+        }
         std::vector<lt::DigestOnlyResultLT> out;
         LtRawBatchProvenance p;
         bool ok = false;
         try {
-            ok = RunRawLtHeaderBatch(kind, candidates, n, out, &p);
+            if (campaign_windows > 1) {
+                matmul_v4::cuda::LtCudaBatchProvenance cuda_p;
+                ok = matmul_v4::cuda::ComputeDigestsOnlyLTCudaTelemetryCampaign(
+                    candidates, n, window, out, &cuda_p);
+                p.qstar_device_batched = cuda_p.qstar_device_batched;
+                p.device_w_generation = cuda_p.device_w_generation;
+                p.device_digest = cuda_p.device_digest;
+                p.per_nonce_sync_absent = cuda_p.per_nonce_sync_absent;
+                p.candidate_slots = cuda_p.candidate_slots;
+                p.chat_staging_slots = cuda_p.chat_staging_slots;
+                p.chat_staging_chunks = cuda_p.chat_staging_chunks;
+                p.telemetry_windows = cuda_p.telemetry_windows;
+                p.telemetry_campaign = cuda_p.telemetry_campaign;
+            } else {
+                ok = RunRawLtHeaderBatch(kind, candidates, n, out, &p);
+            }
         } catch (...) {
             ok = false;
         }
         if (!ok || out.size() != candidates.size() ||
+            (campaign_windows > 1 &&
+             (!p.telemetry_campaign || p.telemetry_windows != campaign_windows ||
+              p.candidate_slots != candidates.size() || p.chat_staging_slots == 0 ||
+              p.chat_staging_chunks == 0)) ||
             !std::all_of(out.begin(), out.end(), [](const auto& result) {
                 return result.backend_status == matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
             })) {
@@ -1559,15 +1635,20 @@ LtThroughputResult MeasureLtDeviceNoncePerSec(matmul_v4::accel::Kind kind, uint3
             r.device_w_generation = p.device_w_generation;
             r.device_digest = p.device_digest;
             r.per_nonce_sync_absent = p.per_nonce_sync_absent;
+            r.chat_staging_slots = p.chat_staging_slots;
+            r.chat_staging_chunks = p.chat_staging_chunks;
+            r.telemetry_campaign = p.telemetry_campaign;
         } else {
             r.qstar_device_batched = r.qstar_device_batched && p.qstar_device_batched;
             r.device_w_generation = r.device_w_generation && p.device_w_generation;
             r.device_digest = r.device_digest && p.device_digest;
             r.per_nonce_sync_absent = r.per_nonce_sync_absent && p.per_nonce_sync_absent;
+            r.chat_staging_slots = std::min(r.chat_staging_slots, p.chat_staging_slots);
+            r.chat_staging_chunks += p.chat_staging_chunks;
+            r.telemetry_campaign = r.telemetry_campaign && p.telemetry_campaign;
         }
-        ++r.windows;
-        r.slots += window;
-        base_nonce += window;
+        r.windows += campaign_windows;
+        r.slots += candidates.size();
         r.elapsed_s = Secs(t0, Clock::now());
         if (r.elapsed_s >= MIN_SAMPLE_SECONDS) break;
     }
@@ -1787,14 +1868,20 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
         // and no per-nonce synchronization.
         throughput = MeasureLtDeviceNoncePerSec(
             backend, args.n, args.window, /*raw_probe_exact=*/false,
-            /*require_reference_probe=*/false);
+            /*require_reference_probe=*/false, args.telemetry_campaign_windows);
     }
     const bool telemetry_obtained = throughput.rate_valid;
     if (telemetry_obtained) {
-        throughput.execution_path = "telemetry-only-device-resident-qstar-batched";
+        throughput.execution_path = throughput.telemetry_campaign
+            ? "telemetry-only-sequential-compute-bounded-chat-digest-staging"
+            : "telemetry-only-device-resident-qstar-batched";
         throughput.note =
-            "resident consensus-Q* host-wall telemetry obtained; CPU exactness/stage, "
-            "device-event timing, and host-independence gates were skipped";
+            (throughput.telemetry_campaign
+                 ? "multi-window bounded-Chat-staging host-wall telemetry obtained; upstream "
+                   "per-candidate GEMMs still serialize on one working set/stream; "
+                 : "resident consensus-Q* host-wall telemetry obtained; ") +
+            std::string{"CPU exactness/stage, device-event timing, saturation, and "
+                        "host-independence gates were skipped"};
     }
 
     std::cout << "  resident Q* telemetry nonce/s : ";
@@ -1828,6 +1915,8 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     root.pushKV("lt_raw_only_alias", args.lt_raw_only_alias);
     root.pushKV("lt_raw_full_window_alias_requested", args.lt_raw_full_window_alias);
     root.pushKV("lt_raw_full_window", true);
+    root.pushKV("telemetry_campaign_windows_requested",
+                static_cast<uint64_t>(args.telemetry_campaign_windows));
     root.pushKV("rate_unit", "digest_nonces_per_s");
     root.pushKV("telemetry_rate_valid", telemetry_obtained);
     if (telemetry_obtained) {
@@ -1841,6 +1930,29 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     root.pushKV("throughput_measurement_windows", static_cast<uint64_t>(throughput.windows));
     root.pushKV("throughput_measurement_slots", throughput.slots);
     root.pushKV("throughput_measurement_seconds", throughput.elapsed_s);
+    // The campaign may stage several completed Chat transcripts for a digest
+    // launch, but all upstream candidate GEMMs still use one compute working
+    // set/stream.  Do not mislabel Chat staging capacity as compute ring depth.
+    root.pushKV("throughput_scheduler", throughput.scheduler);
+    root.pushKV("throughput_campaign_windows_requested",
+                static_cast<uint64_t>(throughput.campaign_windows_requested));
+    root.pushKV("throughput_campaign_candidate_slots",
+                static_cast<uint64_t>(throughput.campaign_candidate_slots));
+    root.pushKV("throughput_ring_depth", static_cast<uint64_t>(1));
+    root.pushKV("throughput_cross_window_overlap", false);
+    root.pushKV("throughput_saturation_verified", false);
+    if (throughput.chat_staging_slots > 0) {
+        root.pushKV("throughput_chat_staging_slots",
+                    static_cast<uint64_t>(throughput.chat_staging_slots));
+        root.pushKV("throughput_chat_staging_chunks",
+                    static_cast<uint64_t>(throughput.chat_staging_chunks));
+    } else {
+        root.pushKV("throughput_chat_staging_slots", UniValue(UniValue::VNULL));
+        root.pushKV("throughput_chat_staging_chunks", UniValue(UniValue::VNULL));
+    }
+    root.pushKV("chat_transcript_bytes_per_nonce",
+                static_cast<uint64_t>(m_check) * m_check * sizeof(lt::Fq));
+    root.pushKV("resident_working_set_bytes_per_nonce", UniValue(UniValue::VNULL));
 
     // These fields are consumed by activation/readiness tooling. Keep every
     // one explicitly ineligible even when telemetry itself succeeded.
@@ -1898,6 +2010,12 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     lt_obj.pushKV("native_fp8_qualified", false);
     lt_obj.pushKV("native_mxfp4_attempted", false);
     lt_obj.pushKV("native_fp8_attempted", false);
+    lt_obj.pushKV("native_probe_fields_scope", "not-measured-telemetry-only");
+    lt_obj.pushKV("resident_native_mxfp4_attempted", false);
+    lt_obj.pushKV("resident_native_mxfp4_qualified", false);
+    lt_obj.pushKV("resident_native_fp8_attempted", false);
+    lt_obj.pushKV("resident_native_fp8_qualified", false);
+    lt_obj.pushKV("resident_native_fields_scope", "not-certified-telemetry-only");
     // Telemetry-only deliberately avoids native self-qualification/probing;
     // false would be a fabricated capability statement on Blackwell/gfx950.
     lt_obj.pushKV("peak_status_measured", false);
@@ -2129,9 +2247,11 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     }
 
     matmul::v4::lt::LtPeakMxPathStatus peak{};
+    matmul::v4::lt::MxLaneProvenance native_probe{};
     bool peak_status_measured{false};
 #if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
     if (backend == matmul_v4::accel::Kind::CUDA) {
+        native_probe = matmul_v4::cuda::ProbeLtCudaMxNativeProvenance();
         peak = matmul_v4::cuda::ProbeLtPeakMxPathStatus();
         peak_status_measured = true;
         matmul_v4::cuda::DiagnoseLtPeakMxPathOnce();
@@ -2139,18 +2259,46 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
 #endif
 #if defined(BTX_ENABLE_HIP)
     if (backend == matmul_v4::accel::Kind::HIP) {
+        native_probe = matmul_v4::hip::ProbeLtHipMxNativeProvenance();
         peak = matmul_v4::hip::ProbeLtPeakMxPathStatus();
         peak_status_measured = true;
         matmul_v4::hip::DiagnoseLtPeakMxPathOnce();
     }
 #endif
 
+    // This is the provenance of the measured resident batch, not the
+    // standalone native-projection self-qualification probe above.  Keeping
+    // both snapshots prevents resident `attempted=false` from being misread as
+    // "the device self-qualification probe never ran".
+    matmul::v4::lt::MxLaneProvenance resident_mx{};
+#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+    if (backend == matmul_v4::accel::Kind::CUDA && throughput.used_device) {
+        resident_mx = matmul_v4::cuda::LtLastMxProvenance();
+    }
+#endif
+#if defined(BTX_ENABLE_HIP)
+    if (backend == matmul_v4::accel::Kind::HIP && throughput.used_device) {
+        resident_mx = matmul_v4::hip::LtLastMxProvenance();
+    }
+#endif
+
     std::cout << "\n[device] LT native MatExpand GEMM path\n";
     std::cout << "  device-assisted path exact    : " << (device_assisted_path_exact ? "yes" : "no") << "\n";
     std::cout << "  device native kernel wired    : " << (device_native_kernel_wired ? "yes" : "no") << "\n";
-    std::cout << "  exact_mx_scale_partitioned    : no (fail-closed until device backend reports)\n";
-    std::cout << "  native_mxfp4_qualified        : no (fail-closed until wired+proven)\n";
-    std::cout << "  native_fp8_qualified          : no (fail-closed until wired+proven)\n";
+    std::cout << "  exact_mx_scale_partitioned    : "
+              << (resident_mx.exact_mx_scale_partitioned ? "yes" : "no")
+              << " (measured resident batch)\n";
+    std::cout << "  native MXFP4 probe attempted  : "
+              << (native_probe.native_mxfp4_attempted ? "yes" : "no") << "\n";
+    std::cout << "  native MXFP4 probe qualified  : "
+              << (native_probe.native_mxfp4_qualified ? "yes" : "no") << "\n";
+    std::cout << "  native FP8 probe attempted    : "
+              << (native_probe.native_fp8_attempted ? "yes" : "no") << "\n";
+    std::cout << "  native FP8 probe qualified    : "
+              << (native_probe.native_fp8_qualified ? "yes" : "no") << "\n";
+    std::cout << "  resident batch used native MX : "
+              << ((resident_mx.native_mxfp4_qualified || resident_mx.native_fp8_qualified)
+                      ? "yes" : "no") << "\n";
     std::cout << "  resident native MX wired      : "
               << (peak.resident_native_mx_wired ? "yes" : "no")
               << " (see lt.peak_*; exact INT8 resident fallback stays available by default)\n";
@@ -2275,6 +2423,30 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     root.pushKV("throughput_measurement_windows", static_cast<uint64_t>(throughput.windows));
     root.pushKV("throughput_measurement_slots", throughput.slots);
     root.pushKV("throughput_measurement_seconds", throughput.elapsed_s);
+    root.pushKV("throughput_scheduler", throughput.scheduler);
+    root.pushKV("throughput_campaign_windows_requested",
+                static_cast<uint64_t>(throughput.campaign_windows_requested));
+    root.pushKV("throughput_campaign_candidate_slots",
+                static_cast<uint64_t>(throughput.campaign_candidate_slots));
+    if (throughput.chat_staging_slots > 0) {
+        root.pushKV("throughput_ring_depth", static_cast<uint64_t>(1));
+        root.pushKV("throughput_chat_staging_slots",
+                    static_cast<uint64_t>(throughput.chat_staging_slots));
+        root.pushKV("throughput_chat_staging_chunks",
+                    static_cast<uint64_t>(throughput.chat_staging_chunks));
+    } else {
+        root.pushKV("throughput_ring_depth", static_cast<uint64_t>(1));
+        root.pushKV("throughput_chat_staging_slots", UniValue(UniValue::VNULL));
+        root.pushKV("throughput_chat_staging_chunks", UniValue(UniValue::VNULL));
+    }
+    root.pushKV("throughput_cross_window_overlap", false);
+    root.pushKV("throughput_saturation_verified", false);
+    root.pushKV("chat_transcript_bytes_per_nonce",
+                static_cast<uint64_t>(m_check) * m_check * sizeof(lt::Fq));
+    // Chat is only one component of a resident chain (W/Y/B/Q/GEMM scratch and
+    // allocator overhead are separate), so do not turn m^2*8 into a fabricated
+    // whole-chain capacity figure.
+    root.pushKV("resident_working_set_bytes_per_nonce", UniValue(UniValue::VNULL));
     root.pushKV("throughput_win_target", "0");
     if (stage.valid) {
         root.pushKV("cpu_reference_nonce_per_s", cpu_nps);
@@ -2295,27 +2467,20 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     lt_obj.pushKV("raw_probe_exact", raw_probe_exact);
     lt_obj.pushKV("raw_probe_slots_ok", static_cast<uint64_t>(raw_probe_slots_ok));
     lt_obj.pushKV("native_path_reason", native_path_reason);
-    // Exact-MX vs native-MX honesty. Prefer live backend provenance when the
-    // device path ran; otherwise stay fail-closed (never invent qualified=true).
-    matmul::v4::lt::MxLaneProvenance mx_report{};
-#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
-    if (backend == matmul_v4::accel::Kind::CUDA && throughput.used_device) {
-        mx_report = matmul_v4::cuda::LtLastMxProvenance();
-    }
-#endif
-#if defined(BTX_ENABLE_HIP)
-    if (backend == matmul_v4::accel::Kind::HIP && throughput.used_device) {
-        mx_report = matmul_v4::hip::LtLastMxProvenance();
-    }
-#endif
-    const bool report_exact_mx = mx_report.exact_mx_scale_partitioned;
-    const bool report_native_mxfp4 = mx_report.native_mxfp4_qualified;
-    const bool report_native_fp8 = mx_report.native_fp8_qualified;
-    lt_obj.pushKV("exact_mx_scale_partitioned", report_exact_mx);
-    lt_obj.pushKV("native_mxfp4_qualified", report_native_mxfp4);
-    lt_obj.pushKV("native_fp8_qualified", report_native_fp8);
-    lt_obj.pushKV("native_mxfp4_attempted", mx_report.native_mxfp4_attempted);
-    lt_obj.pushKV("native_fp8_attempted", mx_report.native_fp8_attempted);
+    // Unscoped native_* fields retain the public self-qualification meaning.
+    // The resident_* fields answer the distinct question: did the timed Q*
+    // batch actually execute that lane end-to-end?
+    lt_obj.pushKV("exact_mx_scale_partitioned", resident_mx.exact_mx_scale_partitioned);
+    lt_obj.pushKV("native_mxfp4_qualified", native_probe.native_mxfp4_qualified);
+    lt_obj.pushKV("native_fp8_qualified", native_probe.native_fp8_qualified);
+    lt_obj.pushKV("native_mxfp4_attempted", native_probe.native_mxfp4_attempted);
+    lt_obj.pushKV("native_fp8_attempted", native_probe.native_fp8_attempted);
+    lt_obj.pushKV("native_probe_fields_scope", "standalone-projection-selfqual");
+    lt_obj.pushKV("resident_native_mxfp4_attempted", resident_mx.native_mxfp4_attempted);
+    lt_obj.pushKV("resident_native_mxfp4_qualified", resident_mx.native_mxfp4_qualified);
+    lt_obj.pushKV("resident_native_fp8_attempted", resident_mx.native_fp8_attempted);
+    lt_obj.pushKV("resident_native_fp8_qualified", resident_mx.native_fp8_qualified);
+    lt_obj.pushKV("resident_native_fields_scope", "timed-resident-qstar-batch");
 
     lt_obj.pushKV("peak_status_measured", peak_status_measured);
     lt_obj.pushKV("peak_capable", peak.peak_capable);

@@ -664,7 +664,9 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
     const auto prov = ProbeLtHipMxNativeProvenance();
     matmul::v4::lt::LtPeakMxPathStatus s;
     s.peak_capable = IsLtPeakMxCapableDevice();
+    s.native_mxfp4_attempted = prov.native_mxfp4_attempted;
     s.native_mxfp4_qualified = prov.native_mxfp4_qualified;
+    s.native_fp8_attempted = prov.native_fp8_attempted;
     s.native_fp8_qualified = prov.native_fp8_qualified;
     // Native launchers currently serve the host-vector projection surface;
     // the persistent HIP Q* graph still runs exact INT8 scale partitions.

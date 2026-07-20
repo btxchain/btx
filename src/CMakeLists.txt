@@ -654,6 +654,11 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     # remediation doc). Compile-verified only on real CUDA toolchains.
     cuda/matmul_v4_bmx4_accel.cu
     cuda/matmul_v4_lt_accel.cu
+    # Host-side cuBLASLt block-scale orchestration. This TU contains no
+    # architecture-specific PTX, so it intentionally follows the target's
+    # normal CUDA_ARCHITECTURES list (plain 100/120 is sufficient). Native
+    # API availability is gated in-source by CUDART_VERSION >= 12080; actual
+    # MX qualification remains a runtime, oracle-checked operation.
     cuda/matmul_v4_lt_mx_native.cu
     cuda/matmul_v4_lt_tensor_gemm.cu
   )

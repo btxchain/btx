@@ -22,19 +22,25 @@
 #include <vector>
 
 // Optional compile gates: CUDA 12.8 introduced the FP4 data type and the
-// VEC16/VEC32 block-scale modes used below. The CUDA_R_* and
+// VEC16/VEC32 block-scale modes used below. cuda_runtime.h publishes the
+// toolkit header version as CUDART_VERSION; CUDA_VERSION belongs to the driver
+// API headers and is not guaranteed to be visible here. Using CUDA_VERSION
+// silently compiled every native lane out under nvcc 13.x, leaving
+// native_mxfp4_attempted/native_fp8_attempted false even on Blackwell.
+//
+// The CUDA_R_* and
 // CUBLASLT_MATMUL_MATRIX_SCALE_* names are enum constants, not preprocessor
 // macros, so `defined(NAME)` cannot be used to discover them.
-#if defined(CUDA_VERSION) && (CUDA_VERSION >= 12080)
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 12080)
 #include <cublasLt.h>
 #include <cuda_fp8.h>
 #define BTX_LT_CUDA_HAS_FP8_E4M3 1
 #if defined(__has_include)
 #if __has_include(<cuda_fp4.h>)
 #include <cuda_fp4.h>
-#endif
-#endif
 #define BTX_LT_CUDA_HAS_FP4_E2M1 1
+#endif
+#endif
 #define BTX_LT_CUDA_HAS_VEC32_UE8M0 1
 #define BTX_LT_CUDA_HAS_VEC16_UE4M3 1
 #define BTX_LT_CUDA_HAS_MX_SCALE_MODES 1
@@ -661,6 +667,24 @@ void RunNativeSelfQualOnceLocked()
 
 } // namespace
 
+uint32_t LtCudaCompiledRuntimeVersion()
+{
+#if defined(CUDART_VERSION)
+    return CUDART_VERSION;
+#else
+    return 0;
+#endif
+}
+
+bool IsLtCudaCublasLtBlockScaleApiCompiled()
+{
+#if defined(BTX_LT_CUDA_HAS_MX_SCALE_MODES)
+    return true;
+#else
+    return false;
+#endif
+}
+
 matmul::v4::lt::MxLaneProvenance ProbeLtCudaMxNativeProvenance()
 {
     std::lock_guard<std::mutex> lock(g_native_mx_mu);
@@ -795,7 +819,9 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
     const auto prov = ProbeLtCudaMxNativeProvenance();
     matmul::v4::lt::LtPeakMxPathStatus s;
     s.peak_capable = IsLtPeakMxCapableDevice();
+    s.native_mxfp4_attempted = prov.native_mxfp4_attempted;
     s.native_mxfp4_qualified = prov.native_mxfp4_qualified;
+    s.native_fp8_attempted = prov.native_fp8_attempted;
     s.native_fp8_qualified = prov.native_fp8_qualified;
     // The native launchers above currently serve only the host-vector
     // projection surface. LtCudaResidentPool still executes the exact INT8

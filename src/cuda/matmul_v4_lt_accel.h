@@ -42,6 +42,11 @@ class CBlockHeader;
 
 namespace matmul_v4::cuda {
 
+/** Hard safety bound for the non-certifying telemetry campaign entry below.
+ *  This is deliberately separate from the consensus Q* ABI, whose maximum
+ *  remains kConsensusQStarMax (512). */
+inline constexpr size_t kLtCudaTelemetryCampaignMax = 4096;
+
 /** Alias of the shared MX lane honesty bits (report / ExactMxProjectionBackend). */
 using LtCudaMxProvenance = matmul::v4::lt::MxLaneProvenance;
 
@@ -64,6 +69,14 @@ struct LtCudaBatchProvenance {
     bool device_w_generation{false};
     bool device_digest{false};
     bool per_nonce_sync_absent{false};
+    /** Number of candidate results completed by this resident call. */
+    size_t candidate_slots{0};
+    /** Bounded device Chat ring depth and the chunks needed to drain it. */
+    size_t chat_staging_slots{0};
+    size_t chat_staging_chunks{0};
+    /** Non-zero only for the explicitly non-certifying campaign API. */
+    size_t telemetry_windows{0};
+    bool telemetry_campaign{false};
     matmul::v4::lt::MxLaneProvenance mx{};
 };
 
@@ -136,6 +149,21 @@ struct LtCudaBatchProvenance {
  *  fail before device allocation or host fallback. */
 [[nodiscard]] bool ComputeDigestsOnlyLTCuda(
     const std::vector<CBlockHeader>& headers, uint32_t n,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    LtCudaBatchProvenance* provenance = nullptr);
+
+/** Non-certifying, telemetry-only multi-window resident campaign.
+ *
+ *  `headers` must contain an integral number of valid Q* windows, share one
+ *  ComputeTemplateHash, and contain at most kLtCudaTelemetryCampaignMax
+ *  candidates. Unlike the consensus entry above, this function never falls
+ *  back to CPU and must never feed mining acceptance, readiness, ASERT, or a
+ *  consensus seal. It exists only to keep enough independent, byte-exact Chat
+ *  transcripts resident for a meaningful GPU throughput measurement. Device
+ *  memory bounds the Chat staging ring; larger campaigns drain through several
+ *  chunks without changing any digest bytes. */
+[[nodiscard]] bool ComputeDigestsOnlyLTCudaTelemetryCampaign(
+    const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t qstar,
     std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
     LtCudaBatchProvenance* provenance = nullptr);
 

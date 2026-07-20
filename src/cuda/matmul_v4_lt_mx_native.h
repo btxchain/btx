@@ -38,6 +38,14 @@
 
 namespace matmul_v4::cuda {
 
+/** CUDA runtime-header version used to compile the native-MX translation unit
+ *  (for example 13020 for CUDA 13.2), or zero in a non-CUDA build. */
+[[nodiscard]] uint32_t LtCudaCompiledRuntimeVersion();
+
+/** True only when the CUDA 12.8+ cuBLASLt block-scale API surface was compiled
+ *  into this binary. This is compile evidence, not a silicon qualification. */
+[[nodiscard]] bool IsLtCudaCublasLtBlockScaleApiCompiled();
+
 /** Process-local native-lane snapshot (defaults fail-closed). */
 [[nodiscard]] matmul::v4::lt::MxLaneProvenance ProbeLtCudaMxNativeProvenance();
 

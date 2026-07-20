@@ -915,20 +915,38 @@ struct LtCudaResidentPool {
         size_t free_bytes = 0;
         size_t total_bytes = 0;
         if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess || chat_bytes == 0) return false;
-        constexpr size_t kMaxChatBatchBytes = size_t{128} << 20;
-        const size_t budget = std::min(kMaxChatBatchBytes,
-                                       std::min(free_bytes / 8U, total_bytes / 16U));
+        // Each n=4096 Chat is 32 MiB and its SHA-256 transcript is inherently
+        // serial. The old fixed 128 MiB cap therefore exposed only four
+        // independent digest threads, leaving both consumer and datacenter
+        // GPUs almost completely idle. Keep a bounded ring instead: at most
+        // 40% of currently-free VRAM and at most 96 GiB. The remaining 60%
+        // leaves room for the resident working set, cuBLASLt, the display, and
+        // other miners. Allocation below degrades by powers of two on a
+        // fragmented/busy device rather than failing the exact resident path.
+        constexpr size_t kMaxChatBatchBytes = size_t{96} << 30;
+        const size_t free_budget = (free_bytes / 5U) * 2U;
+        const size_t budget = std::min(kMaxChatBatchBytes, free_budget);
         chat_batch_slots = std::min(count, std::max<size_t>(1, budget / chat_bytes));
         if (chat_batch_slots > std::numeric_limits<size_t>::max() / chat_bytes) return false;
         if (cudaMalloc(reinterpret_cast<void**>(&dBatchDigests), count * kDigestBytes) != cudaSuccess ||
             cudaMalloc(reinterpret_cast<void**>(&dBatchSigmas), count * kDigestBytes) != cudaSuccess ||
-            cudaMalloc(reinterpret_cast<void**>(&dBatchStatus), count * sizeof(int)) != cudaSuccess ||
-            cudaMalloc(reinterpret_cast<void**>(&dChatBatch), chat_batch_slots * chat_bytes) != cudaSuccess) {
+            cudaMalloc(reinterpret_cast<void**>(&dBatchStatus), count * sizeof(int)) != cudaSuccess) {
             if (dBatchDigests) { cudaFree(dBatchDigests); dBatchDigests = nullptr; }
             if (dBatchSigmas) { cudaFree(dBatchSigmas); dBatchSigmas = nullptr; }
             if (dBatchStatus) { cudaFree(dBatchStatus); dBatchStatus = nullptr; }
-            if (dChatBatch) { cudaFree(dChatBatch); dChatBatch = nullptr; }
             chat_batch_slots = 0;
+            return false;
+        }
+        while (chat_batch_slots > 0 &&
+               cudaMalloc(reinterpret_cast<void**>(&dChatBatch),
+                          chat_batch_slots * chat_bytes) != cudaSuccess) {
+            dChatBatch = nullptr;
+            chat_batch_slots /= 2U;
+        }
+        if (dChatBatch == nullptr || chat_batch_slots == 0) {
+            cudaFree(dBatchDigests); dBatchDigests = nullptr;
+            cudaFree(dBatchSigmas); dBatchSigmas = nullptr;
+            cudaFree(dBatchStatus); dBatchStatus = nullptr;
             return false;
         }
         batch_capacity = count;
@@ -1616,14 +1634,17 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
 [[nodiscard]] bool MineDeviceResident(const std::vector<CBlockHeader>& headers,
                                       uint32_t n, uint32_t m,
                                       std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+                                      size_t max_candidates = kMaxConsensusBatch,
                                       size_t max_chat_chunk_slots =
                                           std::numeric_limits<size_t>::max(),
-                                      size_t* chunks_out = nullptr)
+                                      size_t* chunks_out = nullptr,
+                                      size_t* staging_slots_out = nullptr)
 {
     if (chunks_out != nullptr) *chunks_out = 0;
+    if (staging_slots_out != nullptr) *staging_slots_out = 0;
     // Bound every allocation before EnsureBatchCapacity. A vector larger than
-    // consensus Q* is malformed for this ABI and must fail closed.
-    if (headers.empty() || headers.size() > kMaxConsensusBatch) return false;
+    // the calling ABI is malformed and must fail closed.
+    if (headers.empty() || headers.size() > max_candidates) return false;
     // Exact INT8 MX remains the resident default on Blackwell. Only an explicit
     // native-only qualification run blocks when end-to-end native MX is absent;
     // telemetry still reports the native deficit separately.
@@ -1708,6 +1729,7 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     g_lt_last_mx_prov = pool.mx_prov;
     g_lt_last_mx_prov.exact_mx_scale_partitioned = pool.used_exact_mx_this_batch;
     if (chunks_out != nullptr) *chunks_out = completed_chunks;
+    if (staging_slots_out != nullptr) *staging_slots_out = chat_chunk_slots;
     return true;
 }
 
@@ -1821,18 +1843,25 @@ bool ComputeDigestsOnlyLTCuda(
     }
 
     // Prefer the persistent device-resident MatExpand→project→combine loop
-    // over the complete consensus-seeded candidate vector. The resident path
-    // does not materialize Q*m^2 Chat storage: each Chat is hashed before its
-    // working buffer is reused, and all digest/status records cross at the
-    // completion boundary.
+    // over the complete consensus-seeded candidate vector. A VRAM-bounded
+    // Chat staging ring keeps independent serial SHA transcripts in flight;
+    // campaigns larger than the ring drain through several chunks. Only
+    // digest/status records cross to the host at the completion boundary.
     // Host ExactGemm / WindowSketchMinerLT is fail-closed fallback only.
     if (IsMatMulLTCudaAvailable()) {
-        if (MineDeviceResident(headers, n, m, out)) {
+        size_t chunks = 0;
+        size_t staging_slots = 0;
+        if (MineDeviceResident(headers, n, m, out, kMaxConsensusBatch,
+                               std::numeric_limits<size_t>::max(), &chunks,
+                               &staging_slots)) {
             if (provenance != nullptr) {
                 provenance->qstar_device_batched = headers.size() > 1;
                 provenance->device_w_generation = true;
                 provenance->device_digest = true;
                 provenance->per_nonce_sync_absent = true;
+                provenance->candidate_slots = headers.size();
+                provenance->chat_staging_slots = staging_slots;
+                provenance->chat_staging_chunks = chunks;
                 provenance->mx = g_lt_last_mx_prov;
             }
             return true;
@@ -1843,6 +1872,57 @@ bool ComputeDigestsOnlyLTCuda(
     }
 
     return MineHostExactFallback(headers, n, /*try_device_gemms=*/false, out);
+}
+
+bool ComputeDigestsOnlyLTCudaTelemetryCampaign(
+    const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t qstar,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    LtCudaBatchProvenance* provenance)
+{
+    out.clear();
+    if (provenance != nullptr) *provenance = {};
+    // This wider ABI is telemetry-only. Requiring complete consensus-sized
+    // windows keeps campaign artifacts auditable while leaving the mining and
+    // consensus entry above hard-bounded to one Q* window.
+    if (!matmul::v4::lt::IsValidConsensusQStar(qstar) || headers.empty() ||
+        headers.size() > kLtCudaTelemetryCampaignMax ||
+        headers.size() % static_cast<size_t>(qstar) != 0) {
+        return false;
+    }
+
+    uint32_t m = 0;
+    if (!matmul::v4::lt::ValidateDimsBMX4CLT(n, m)) return false;
+    const uint256 template_hash = matmul::v4::ComputeTemplateHash(headers.front());
+    if (!std::all_of(headers.begin(), headers.end(), [&](const CBlockHeader& header) {
+            return matmul::v4::ComputeTemplateHash(header) == template_hash;
+        })) {
+        return false;
+    }
+    // No CPU fallback is permitted here: a telemetry campaign that did not run
+    // resident CUDA is unavailable, not a slower source of benchmark numbers.
+    if (!IsMatMulLTCudaAvailable()) return false;
+
+    size_t chunks = 0;
+    size_t staging_slots = 0;
+    if (!MineDeviceResident(headers, n, m, out, kLtCudaTelemetryCampaignMax,
+                            std::numeric_limits<size_t>::max(), &chunks,
+                            &staging_slots)) {
+        out.clear();
+        return false;
+    }
+    if (provenance != nullptr) {
+        provenance->qstar_device_batched = true;
+        provenance->device_w_generation = true;
+        provenance->device_digest = true;
+        provenance->per_nonce_sync_absent = true;
+        provenance->candidate_slots = headers.size();
+        provenance->chat_staging_slots = staging_slots;
+        provenance->chat_staging_chunks = chunks;
+        provenance->telemetry_windows = headers.size() / qstar;
+        provenance->telemetry_campaign = true;
+        provenance->mx = g_lt_last_mx_prov;
+    }
+    return true;
 }
 
 bool RunMatMulLTCudaExtendedSelfTest(std::string& error)
@@ -1895,7 +1975,7 @@ bool RunMatMulLTCudaExtendedSelfTest(std::string& error)
         std::vector<matmul::v4::lt::DigestOnlyResultLT> device_results;
         size_t chunks = 0;
         if (!MineDeviceResident(headers, n, m, device_results,
-                                forced_chat_slots, &chunks)) {
+                                kMaxConsensusBatch, forced_chat_slots, &chunks)) {
             error = std::string{label} + ": resident CUDA path declined";
             return false;
         }
