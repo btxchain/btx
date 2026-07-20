@@ -16,6 +16,7 @@
 #include <matmul/matmul_v4_rc_scale.h>
 #include <matmul/matmul_v4_rc_scale_axes.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <pow.h>
 #include <primitives/block.h>
@@ -648,6 +649,35 @@ BOOST_AUTO_TEST_CASE(rc_check_pow_toy_dims_mine_and_wrong_digest)
     Consensus::Params pub;
     BOOST_CHECK(!pub.IsMatMulRCActive(0));
     BOOST_CHECK(!pub.IsMatMulRCActive(std::numeric_limits<int32_t>::max() - 1));
+}
+
+BOOST_AUTO_TEST_CASE(rc_f4_null_committed_digest_rejected)
+{
+    // F4: RC ExactReplay must REJECT a null header.matmul_digest (coupled already does).
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.nMatMulV4Dimension = 256;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 10;
+    auto header = MakeRCHeader(42);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    const uint256 honest = rc::MineRCEpisode(header, params_rc, kHeight);
+    BOOST_REQUIRE(!honest.IsNull());
+
+    header.matmul_digest = uint256{}; // null committed digest
+    BOOST_REQUIRE(header.matmul_digest.IsNull());
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+
+    const auto bn = UintToArith256(p.powLimit);
+    const auto replay = rc::VerifyBoundedExactReplay(header, params_rc, kHeight, &bn);
+    BOOST_CHECK(!replay.ok);
+    BOOST_CHECK(replay.note.find("null header.matmul_digest") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(rc_tfp4_segmentation_exactness)

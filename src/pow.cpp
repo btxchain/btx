@@ -4100,6 +4100,8 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
     if (!matmul::v4::rc::ValidateRCEpisodeParams(params_rc)) return finish(false);
 
     // Consensus ε=0 ExactReplay (DISPUTE/fallback path; sole validity by default).
+    // F4: reject null committed digest unconditionally (mirrors coupled Check*).
+    if (header.matmul_digest.IsNull()) return finish(false);
     const auto replay = matmul::v4::rc::VerifyBoundedExactReplay(header, params_rc, block_height,
                                                                 &*bnTarget);
     if (!replay.ok) return finish(false);

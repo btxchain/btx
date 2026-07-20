@@ -1495,9 +1495,12 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(const CBlockHeader& header,
         out.note = "ExactReplay: null digest";
         return out;
     }
-    if (!header.matmul_digest.IsNull() && out.digest != header.matmul_digest) {
+    // F4: mirror coupled path — null committed digest is an unconditional REJECT
+    // (coupled: digest.IsNull() || digest != header.matmul_digest).
+    if (header.matmul_digest.IsNull() || out.digest != header.matmul_digest) {
         out.ok = false;
-        out.note = "ExactReplay: digest mismatch vs header.matmul_digest";
+        out.note = header.matmul_digest.IsNull() ? "ExactReplay: null header.matmul_digest"
+                                                 : "ExactReplay: digest mismatch vs header.matmul_digest";
         return out;
     }
     if (target && UintToArith256(out.digest) > *target) {
