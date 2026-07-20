@@ -446,9 +446,26 @@ int main(int argc, char* argv[])
                     : "Toy self-qual: MineRCEpisode(backend) == CPU reference per episode; "
                       "re-run digest stability. Use --medium for >2^24 wgrad.");
 
+    // Honest evidence labels for rc-gate.py (schema v2). Toy chrono walls are
+    // real measurements but NEVER production-dim GO evidence. Verifier-floor
+    // stays unmeasured here — MAC/heuristic projections are NOT EVIDENCE.
+    UniValue walls_out = walls;
+    walls_out.pushKV("provenance", "chrono_steady_clock");
+    walls_out.pushKV("evidence_kind", args.toy ? "toy_chrono_measured" : "chrono_measured");
+
+    UniValue verifier_floor(UniValue::VOBJ);
+    verifier_floor.pushKV("measured", false);
+    verifier_floor.pushKV("binding", true);
+    verifier_floor.pushKV("evidence_kind", "unmeasured");
+    verifier_floor.pushKV("note",
+                          "Verifier-floor is the binding constraint (doc §R.7.6) and "
+                          "MUST be measured full-episode + full-verify wall-clock at "
+                          "production dims. MAC-count / replay_s_heuristic projections "
+                          "are NOT EVIDENCE and must never raise nMatMulRCHeight.");
+
     UniValue root(UniValue::VOBJ);
     root.pushKV("tool", "rc-episode-harness");
-    root.pushKV("schema_version", 1);
+    root.pushKV("schema_version", 2);
     root.pushKV("stub", false);
     root.pushKV("device_id", device_id);
     root.pushKV("backend", backend_resolved);
@@ -457,16 +474,24 @@ int main(int argc, char* argv[])
     root.pushKV("mem_cap_bytes", args.mem_cap);
     root.pushKV("toy", args.toy);
     root.pushKV("medium", args.medium);
+    root.pushKV("production_dims", false);
+    root.pushKV("evidence_kind", args.toy ? "toy_chrono_measured" : "chrono_measured");
+    root.pushKV("wall_clock_provenance", "chrono_steady_clock");
+    root.pushKV("device_resident", false);
+    root.pushKV("native_path_eligible",
+                selfqual.native_mxfp4_qualified || selfqual.native_fp8_qualified);
     root.pushKV("params", ParamsJson(params));
     root.pushKV("working_set_bytes_est", footprint);
     root.pushKV("extractmx_self_qual", qual);
-    root.pushKV("phase_wall_s", walls);
+    root.pushKV("phase_wall_s", walls_out);
     root.pushKV("k_curve", k_curve);
     root.pushKV("residency_sweep", residency);
     root.pushKV("allocation_cap_verdicts", caps);
+    root.pushKV("verifier_floor", verifier_floor);
     root.pushKV("consensus_note",
                 "nMatMulRCHeight remains INT32_MAX; ENC_RC activation is NO-GO. "
-                "This harness never recommends raising consensus height.");
+                "This harness never recommends raising consensus height. "
+                "Projections/MAC estimates are NOT EVIDENCE for rc-gate GO.");
 
     std::ofstream ofs(args.out_path, std::ios::trunc);
     if (!ofs) {

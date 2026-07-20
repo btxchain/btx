@@ -122,6 +122,10 @@ struct RCEpisodeOptions {
         StoreEvery4 = 1,  // recompute missing activations
         StoreOnlyX0 = 2,  // recompute all forward from X[0]
     };
+    /** Checkpoint schedule for Phase-2 activations. StoreOnlyX0 / StoreEvery4
+     *  actually drop non-checkpoint X layers (P1.1) and recompute on demand;
+     *  digests stay identical to StoreAll. Prefer StoreOnlyX0 on memory-tight
+     *  hosts. Default remains StoreAll for peak-throughput reference runs. */
     Checkpoint checkpoint{Checkpoint::StoreAll};
 };
 
@@ -137,7 +141,9 @@ struct RCRoundTranscript {
     uint256 round_root{};
     /** Round byte stream (R.4.1 + §3 segment leaves); filled when collected via
      *  out_rounds. Layout: [Z_seg0..Z_segN LE int64] ‖ Z_int8 ‖ for each layer
-     *  (X[l+1] ‖ G[l] ‖ [D_seg0..D_segM LE int64] ‖ D_int8). */
+     *  (X[l+1] ‖ G[l] ‖ [D_seg0..D_segM LE int64] ‖ D_int8).
+     *  The consensus episode path (out_rounds == nullptr) streams these bytes
+     *  into the Merkle tree without retaining the full buffer (P1.1). */
     std::vector<int8_t> stream{};
 };
 
@@ -204,6 +210,38 @@ struct RCMerkleProof {
 [[nodiscard]] std::vector<uint256> BuildTileTreeLeaves(const std::vector<int8_t>& stream,
                                                        uint32_t t_leaf);
 [[nodiscard]] uint256 BuildTileTreeRoot(const std::vector<int8_t>& stream, uint32_t t_leaf);
+
+/**
+ * Streaming tile-tree absorber (P1.1): hash T_leaf-sized chunks into Merkle
+ * leaves without retaining the full round byte stream. Byte-identical to
+ * BuildTileTreeLeaves / BuildTileTreeRoot over the same concatenation.
+ *
+ * Residual (honest): streaming removes the ~2.25 GiB/round serialized copy and
+ * checkpoint modes no longer rebuild every X before hashing. Production-dim
+ * Phase-2 still holds W + G[0..L-1] + D[0..L-1] (+ GEMM temps) during the
+ * backward pass — measured RSS below is for toy / modest custom params only;
+ * do not treat those numbers as a production-dim 8 GB proof.
+ */
+class RoundMerkleStream {
+public:
+    explicit RoundMerkleStream(uint32_t t_leaf);
+    void Absorb(const int8_t* data, size_t len);
+    void Absorb(const std::vector<int8_t>& v) { Absorb(v.data(), v.size()); }
+    /** Append int64 matrix as little-endian bytes (segment-leaf layout). */
+    void AbsorbInt64LE(const std::vector<int64_t>& M);
+    /** Finalize last partial leaf (zero-pad) + pow2 pad leaves; return leaves. */
+    [[nodiscard]] std::vector<uint256> FinalizeLeaves();
+    [[nodiscard]] uint256 FinalizeRoot();
+    [[nodiscard]] size_t BytesAbsorbed() const { return m_absorbed; }
+
+private:
+    uint32_t m_t_leaf{0};
+    size_t m_absorbed{0};
+    std::vector<unsigned char> m_partial;
+    std::vector<uint256> m_leaves;
+    bool m_finalized{false};
+    void EmitLeaf(const unsigned char* leaf_bytes);
+};
 [[nodiscard]] RCMerkleProof OpenMerkleProof(const std::vector<uint256>& leaves, uint32_t index);
 [[nodiscard]] bool VerifyMerkleProof(const uint256& leaf_hash, uint32_t index,
                                      const RCMerkleProof& proof, const uint256& root);

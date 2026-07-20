@@ -8,8 +8,8 @@
 #include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <matmul/matmul_v4.h>
-#include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_rc_mx_layout.h>
 #include <matmul/matmul_v4_rc_scale.h>
 #include <span.h>
 
@@ -21,11 +21,11 @@
 #include <cstring>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace matmul::v4::rc {
 namespace {
 
-namespace bx = matmul::v4::bmx4;
 namespace lt = matmul::v4::lt;
 
 // --- tagged SHA helpers -----------------------------------------------------
@@ -158,28 +158,32 @@ std::vector<int64_t> GemmGXtInt64(const std::vector<int8_t>& G, const std::vecto
 }
 
 /** Consensus-fixed kRCSegLen partition of wgrad: per-segment int64 partials + sum.
- *  ExtractMX is NOT applied here — caller Extracts once on the sum (H1). */
+ *  ExtractMX is NOT applied here — caller Extracts once on the sum (H1).
+ *  When keep_segs is false (PARKED segment leaves), only `total` is retained. */
 struct SegmentedInt64Gemm {
     std::vector<int64_t> total;                 // sum of segs (same shape)
-    std::vector<std::vector<int64_t>> segs;      // each same shape as total
+    std::vector<std::vector<int64_t>> segs;      // each same shape as total (optional)
 };
 
 SegmentedInt64Gemm AccumulateSegmentedGemmGXt(const std::vector<int8_t>& G,
                                               const std::vector<int8_t>& X, uint32_t b_seq,
-                                              uint32_t d_model)
+                                              uint32_t d_model, bool keep_segs = true)
 {
     assert(G.size() == static_cast<size_t>(b_seq) * d_model);
     assert(X.size() == static_cast<size_t>(b_seq) * d_model);
     SegmentedInt64Gemm out;
     const uint32_t n_seg = RCNumSegs(b_seq);
-    out.segs.resize(n_seg);
+    if (keep_segs) out.segs.resize(n_seg);
     out.total.assign(static_cast<size_t>(d_model) * d_model, 0);
     for (uint32_t s = 0; s < n_seg; ++s) {
         const uint32_t k0 = s * kRCSegLen;
         const uint32_t len = std::min(kRCSegLen, b_seq - k0);
-        out.segs[s] = GemmGXtInt64Range(G, X, k0, len, d_model);
+        auto partial = GemmGXtInt64Range(G, X, k0, len, d_model);
         for (size_t i = 0; i < out.total.size(); ++i) {
-            out.total[i] += out.segs[s][i];
+            out.total[i] += partial[i];
+        }
+        if (keep_segs) {
+            out.segs[s] = std::move(partial);
         }
     }
     return out;
@@ -229,9 +233,14 @@ std::vector<int64_t> GemmGXtViaChunkedExact(const std::vector<int8_t>& G,
 // Consensus-fixed kRCSegLen segments commit exact int64 Z partials; ExtractMX
 // fires once on Σ partials (H1). kRCSegLen % 32 == 0 ⇒ segments align to MX
 // block boundaries.
+//
+// MX layout (P1.2): Q·Kᵀ is row-block–correct on d_head; S·V needs col-block V
+// for native MX (see doc/btx-matmul-v4.5-rc-mx-contraction-layouts-p1.2.md).
+// Oracle still ExpandMxDequantInt8 (row-block) + dense int8 · V.
 
 struct Phase1Result {
     std::vector<int8_t> Z;                      // n_q × d_head after one ExtractMX
+    /** Per-segment int64 partials; empty when kRCSegmentLeavesEnabled is false. */
     std::vector<std::vector<int64_t>> z_segs;    // each n_q × d_head int64 partial
 };
 
@@ -260,9 +269,12 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const RCEpisodeParam
 
     Phase1Result out;
     const uint32_t n_seg = RCNumSegs(p.n_ctx);
-    out.z_segs.resize(n_seg);
-    for (uint32_t s = 0; s < n_seg; ++s) {
-        out.z_segs[s].assign(static_cast<size_t>(p.n_q) * p.d_head, 0);
+    constexpr bool keep_segs = kRCSegmentLeavesEnabled;
+    if constexpr (keep_segs) {
+        out.z_segs.resize(n_seg);
+        for (uint32_t s = 0; s < n_seg; ++s) {
+            out.z_segs[s].assign(static_cast<size_t>(p.n_q) * p.d_head, 0);
+        }
     }
     out.Z.assign(static_cast<size_t>(p.n_q) * p.d_head, 0);
 
@@ -273,6 +285,9 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const RCEpisodeParam
         uint32_t block_t0 = 0; // first t of the MX block being filled
         uint32_t cur_seg = 0;
         std::vector<int64_t> seg_row(p.d_head, 0);
+        // Running sum of segment rows for the single Extract (H1) when segs
+        // are not retained.
+        std::vector<int64_t> acc_Z(p.d_head, 0);
 
         auto flush_s_block = [&]() {
             assert(pending_fill == kRCMxBlockLen);
@@ -283,8 +298,13 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const RCEpisodeParam
                 const uint32_t seg = t / kRCSegLen;
                 if (seg != cur_seg) {
                     // Commit finished segment row (kRCSegLen % 32 == 0 ⇒ aligned).
-                    for (uint32_t d = 0; d < p.d_head; ++d) {
-                        out.z_segs[cur_seg][static_cast<size_t>(i) * p.d_head + d] = seg_row[d];
+                    if constexpr (keep_segs) {
+                        for (uint32_t d = 0; d < p.d_head; ++d) {
+                            out.z_segs[cur_seg][static_cast<size_t>(i) * p.d_head + d] =
+                                seg_row[d];
+                        }
+                    } else {
+                        for (uint32_t d = 0; d < p.d_head; ++d) acc_Z[d] += seg_row[d];
                     }
                     std::fill(seg_row.begin(), seg_row.end(), 0);
                     cur_seg = seg;
@@ -314,17 +334,20 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const RCEpisodeParam
         }
         assert(pending_fill == 0);
         // Commit final segment row.
-        for (uint32_t d = 0; d < p.d_head; ++d) {
-            out.z_segs[cur_seg][static_cast<size_t>(i) * p.d_head + d] = seg_row[d];
+        if constexpr (keep_segs) {
+            for (uint32_t d = 0; d < p.d_head; ++d) {
+                out.z_segs[cur_seg][static_cast<size_t>(i) * p.d_head + d] = seg_row[d];
+            }
+            // One ExtractMX on sum of Z segs (P0.5 int64, no int32 narrow).
+            for (uint32_t s = 0; s < n_seg; ++s) {
+                for (uint32_t d = 0; d < p.d_head; ++d) {
+                    acc_Z[d] += out.z_segs[s][static_cast<size_t>(i) * p.d_head + d];
+                }
+            }
+        } else {
+            for (uint32_t d = 0; d < p.d_head; ++d) acc_Z[d] += seg_row[d];
         }
 
-        // One ExtractMX on sum of Z segs (P0.5 int64, no int32 narrow).
-        std::vector<int64_t> acc_Z(p.d_head, 0);
-        for (uint32_t s = 0; s < n_seg; ++s) {
-            for (uint32_t d = 0; d < p.d_head; ++d) {
-                acc_Z[d] += out.z_segs[s][static_cast<size_t>(i) * p.d_head + d];
-            }
-        }
         const uint32_t nblk = p.d_head / kRCMxBlockLen;
         for (uint32_t bj = 0; bj < nblk; ++bj) {
             ExtractMXTileInt64(prf_Z, i, bj, acc_Z.data() + bj * kRCMxBlockLen,
@@ -336,13 +359,21 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const RCEpisodeParam
 }
 
 // --- Phase 2 ---------------------------------------------------------------
+// MX layout (P1.2): forward X·Wᵀ is contraction-correct after Wᵀ (row-block W).
+// Backward G·W and wgrad Gᵀ·X need col-block scales on W / batch — packed
+// helpers in matmul_v4_rc_mx_layout.*; oracle stays dequant int8 ExactGemm.
 
 struct Phase2Tensors {
     std::vector<std::vector<int8_t>> X; // X[0..L]
     std::vector<std::vector<int8_t>> G; // G[0..L]
     std::vector<std::vector<int8_t>> D; // D[0..L-1] after one ExtractMX per layer
-    /** Per-layer wgrad int64 segment partials (before Extract); R.4.1 leaves. */
+    /** Per-layer wgrad int64 segment partials (before Extract); R.4.1 leaves.
+     *  Empty when kRCSegmentLeavesEnabled is false (P1.1: do not retain). */
     std::vector<std::vector<std::vector<int64_t>>> d_segs; // [L][n_seg][d_model²]
+    /** Forward weights + PRF keys retained so checkpointed X can be recomputed
+     *  during streaming serialization without a full StoreAll rebuild. */
+    std::vector<std::vector<int8_t>> W;
+    std::vector<uint256> prf_fwd;
 };
 
 std::vector<int8_t> ForwardLayer(const std::vector<int8_t>& W, const std::vector<int8_t>& X,
@@ -375,20 +406,21 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
     out.G.resize(p.L_lyr + 1);
     out.D.resize(p.L_lyr);
     out.d_segs.resize(p.L_lyr);
+    out.W.resize(p.L_lyr);
+    out.prf_fwd.resize(p.L_lyr);
 
     const uint256 seed_X0 = DeriveOperandSeed(seed_r, "BTX_RC_X0_V1");
     const uint256 seed_GL = DeriveOperandSeed(seed_r, "BTX_RC_GL_V1");
     out.X[0] = ExpandMxDequantInt8(seed_X0, p.b_seq, p.d_model);
     out.G[p.L_lyr] = ExpandMxDequantInt8(seed_GL, p.b_seq, p.d_model);
 
-    std::vector<std::vector<int8_t>> W(p.L_lyr);
-    std::vector<uint256> prf_fwd(p.L_lyr), prf_bwd(p.L_lyr), prf_wg(p.L_lyr);
+    std::vector<uint256> prf_bwd(p.L_lyr), prf_wg(p.L_lyr);
     for (uint32_t l = 0; l < p.L_lyr; ++l) {
         char tag[32];
         std::snprintf(tag, sizeof(tag), "BTX_RC_W_%u_V1", l);
-        W[l] = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, tag), p.d_model, p.d_model);
+        out.W[l] = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, tag), p.d_model, p.d_model);
         std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_FWD_%u_V1", l);
-        prf_fwd[l] = lt::DeriveMatExpandPrfKey(DeriveOperandSeed(seed_r, tag));
+        out.prf_fwd[l] = lt::DeriveMatExpandPrfKey(DeriveOperandSeed(seed_r, tag));
         std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_BWD_%u_V1", l);
         prf_bwd[l] = lt::DeriveMatExpandPrfKey(DeriveOperandSeed(seed_r, tag));
         std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_WG_%u_V1", l);
@@ -403,13 +435,16 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
 
     // Forward — always compute; then drop non-checkpoint activations.
     for (uint32_t l = 0; l < p.L_lyr; ++l) {
-        out.X[l + 1] = ForwardLayer(W[l], out.X[l], prf_fwd[l], p.b_seq, p.d_model, gemm);
+        out.X[l + 1] = ForwardLayer(out.W[l], out.X[l], out.prf_fwd[l], p.b_seq, p.d_model, gemm);
     }
     if (ckpt != RCEpisodeOptions::Checkpoint::StoreAll) {
-        for (uint32_t l = 1; l < p.L_lyr; ++l) {
-            if (!need_store(l)) out.X[l].clear();
+        for (uint32_t l = 1; l <= p.L_lyr; ++l) {
+            if (!need_store(l)) {
+                out.X[l].clear();
+                out.X[l].shrink_to_fit();
+            }
         }
-        // Always retain X[0] and X[L].
+        // Retain X[0] always; X[L] only if need_store(L).
     }
 
     auto ensure_X = [&](uint32_t layer) {
@@ -418,25 +453,61 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
         while (src > 0 && out.X[src].empty()) --src;
         assert(!out.X[src].empty());
         for (uint32_t m = src; m < layer; ++m) {
-            out.X[m + 1] = ForwardLayer(W[m], out.X[m], prf_fwd[m], p.b_seq, p.d_model, gemm);
+            out.X[m + 1] =
+                ForwardLayer(out.W[m], out.X[m], out.prf_fwd[m], p.b_seq, p.d_model, gemm);
+        }
+        // Drop recompute intermediates that are not checkpoints (keep target + X[0]).
+        for (uint32_t m = src + 1; m < layer; ++m) {
+            if (!need_store(m)) {
+                out.X[m].clear();
+                out.X[m].shrink_to_fit();
+            }
         }
     };
+
+    constexpr bool keep_d_segs = kRCSegmentLeavesEnabled;
 
     // Backward + wgrad (segmented int64 oracle; Extract once on Σ partials).
     for (int32_t l = static_cast<int32_t>(p.L_lyr) - 1; l >= 0; --l) {
         ensure_X(static_cast<uint32_t>(l));
-        ensure_X(static_cast<uint32_t>(l + 1));
-        auto g_acc = GemmWtS8S8Int32(W[l], out.G[l + 1], p.d_model, p.b_seq, gemm);
+        // G[l+1] is already resident from the previous step (or G[L] seed).
+        auto g_acc = GemmWtS8S8Int32(out.W[l], out.G[l + 1], p.d_model, p.b_seq, gemm);
         out.G[l].assign(g_acc.size(), 0);
         ExtractMXMatrixInt32(prf_bwd[l], g_acc.data(), p.b_seq, p.d_model, out.G[l].data());
+        {
+            // Free int32 accumulator promptly.
+            std::vector<int32_t>().swap(g_acc);
+        }
 
-        auto seg = AccumulateSegmentedGemmGXt(out.G[l + 1], out.X[l], p.b_seq, p.d_model);
-        out.d_segs[l] = std::move(seg.segs);
+        auto seg = AccumulateSegmentedGemmGXt(out.G[l + 1], out.X[l], p.b_seq, p.d_model,
+                                              /*keep_segs=*/keep_d_segs);
+        if constexpr (keep_d_segs) {
+            out.d_segs[l] = std::move(seg.segs);
+        }
         out.D[l].assign(seg.total.size(), 0);
         ExtractMXMatrixInt64(prf_wg[l], seg.total.data(), p.d_model, p.d_model, out.D[l].data());
+        {
+            std::vector<int64_t>().swap(seg.total);
+        }
+
+        // Free G[L] after the top backward step consumes it (not in the round
+        // stream). Keep G[0..L-1] until streaming emit absorbs them.
+        if (static_cast<uint32_t>(l + 1) == p.L_lyr) {
+            out.G[l + 1].clear();
+            out.G[l + 1].shrink_to_fit();
+        }
+
+        // Drop X[l] if not a checkpoint (recompute later for stream emit if needed).
+        // X[0] always kept.
+        if (l > 0 && !need_store(static_cast<uint32_t>(l))) {
+            out.X[l].clear();
+            out.X[l].shrink_to_fit();
+        }
     }
 
-    for (uint32_t l = 0; l <= p.L_lyr; ++l) ensure_X(l);
+    // P1.1: do NOT rebuild every missing X here — that defeated checkpoint modes
+    // by materializing the full activation stack before serialization. Streaming
+    // emit recomputes X[l+1] on demand via ensure_X / W / prf_fwd.
     return out;
 }
 
@@ -452,34 +523,128 @@ void AppendInt64LEMatrix(std::vector<int8_t>& stream, const std::vector<int64_t>
     }
 }
 
-/** R.4.1 round stream. PARKED segments OFF => pre-segment layout. */
-std::vector<int8_t> SerializeRoundStream(const Phase1Result& p1, const Phase2Tensors& p2,
-                                         const RCEpisodeParams& p)
+/** Fold leaf hashes to Merkle root (R.4.2). */
+uint256 FoldTileTreeRoot(std::vector<uint256> level)
 {
-    std::vector<int8_t> stream;
-    size_t z_seg_bytes = 0;
-    size_t d_seg_bytes = 0;
-    if constexpr (kRCSegmentLeavesEnabled) {
-        z_seg_bytes = RCSegZBytes(p) * p1.z_segs.size();
-        d_seg_bytes =
-            p.L_lyr == 0 ? 0
-                         : RCSegDBytes(p) * (p2.d_segs.empty() ? 0 : p2.d_segs[0].size()) * p.L_lyr;
-    }
-    stream.reserve(z_seg_bytes + p1.Z.size() + d_seg_bytes +
-                   p.L_lyr * (p2.X[1].size() + p2.G[0].size() + p2.D[0].size()));
-    if constexpr (kRCSegmentLeavesEnabled) {
-        for (const auto& seg : p1.z_segs) AppendInt64LEMatrix(stream, seg);
-    }
-    stream.insert(stream.end(), p1.Z.begin(), p1.Z.end());
-    for (uint32_t l = 0; l < p.L_lyr; ++l) {
-        stream.insert(stream.end(), p2.X[l + 1].begin(), p2.X[l + 1].end());
-        stream.insert(stream.end(), p2.G[l].begin(), p2.G[l].end());
-        if constexpr (kRCSegmentLeavesEnabled) {
-            for (const auto& seg : p2.d_segs[l]) AppendInt64LEMatrix(stream, seg);
+    assert(!level.empty());
+    while (level.size() > 1) {
+        std::vector<uint256> parent;
+        parent.reserve(level.size() / 2);
+        for (size_t i = 0; i < level.size(); i += 2) {
+            unsigned char buf[1 + 64];
+            buf[0] = kRCNodeTag;
+            std::memcpy(buf + 1, level[i].data(), 32);
+            std::memcpy(buf + 1 + 32, level[i + 1].data(), 32);
+            parent.push_back(Sha256dBytes(buf, sizeof(buf)));
         }
-        stream.insert(stream.end(), p2.D[l].begin(), p2.D[l].end());
+        level.swap(parent);
     }
-    return stream;
+    return level.front();
+}
+
+uint256 PadLeafHash()
+{
+    std::vector<unsigned char> pre;
+    pre.push_back(kRCPadLeafTag);
+    pre.insert(pre.end(), reinterpret_cast<const unsigned char*>(kRCPadTag),
+               reinterpret_cast<const unsigned char*>(kRCPadTag) + sizeof(kRCPadTag) - 1);
+    return Sha256dBytes(pre.data(), pre.size());
+}
+
+/** Recompute X[layer] from the nearest resident checkpoint using retained W/prf. */
+void EnsurePhase2X(Phase2Tensors& p2, uint32_t layer, const RCEpisodeParams& p,
+                   RCEpisodeOptions::Checkpoint ckpt, const lt::ExactGemmBackend& gemm)
+{
+    if (!p2.X[layer].empty()) return;
+    auto need_store = [&](uint32_t layer_idx) -> bool {
+        if (ckpt == RCEpisodeOptions::Checkpoint::StoreAll) return true;
+        if (ckpt == RCEpisodeOptions::Checkpoint::StoreOnlyX0) return layer_idx == 0;
+        return (layer_idx % 4) == 0;
+    };
+    uint32_t src = layer;
+    while (src > 0 && p2.X[src].empty()) --src;
+    assert(!p2.X[src].empty());
+    for (uint32_t m = src; m < layer; ++m) {
+        p2.X[m + 1] =
+            ForwardLayer(p2.W[m], p2.X[m], p2.prf_fwd[m], p.b_seq, p.d_model, gemm);
+    }
+    for (uint32_t m = src + 1; m < layer; ++m) {
+        if (!need_store(m)) {
+            p2.X[m].clear();
+            p2.X[m].shrink_to_fit();
+        }
+    }
+}
+
+/**
+ * P1.1: stream R.4.1 bytes into the Merkle absorber (and optionally a retained
+ * transcript buffer) without ever requiring a full pre-serialized copy for the
+ * consensus digest path. Checkpointed X layers are recomputed on demand.
+ */
+uint256 StreamRoundIntoMerkle(Phase1Result& p1, Phase2Tensors& p2, const RCEpisodeParams& p,
+                              RCEpisodeOptions::Checkpoint ckpt,
+                              const lt::ExactGemmBackend& gemm, RoundMerkleStream& merkle,
+                              std::vector<int8_t>* out_stream)
+{
+    auto absorb = [&](const std::vector<int8_t>& bytes) {
+        merkle.Absorb(bytes);
+        if (out_stream) {
+            out_stream->insert(out_stream->end(), bytes.begin(), bytes.end());
+        }
+    };
+    auto absorb_i64 = [&](const std::vector<int64_t>& M) {
+        merkle.AbsorbInt64LE(M);
+        if (out_stream) AppendInt64LEMatrix(*out_stream, M);
+    };
+
+    if constexpr (kRCSegmentLeavesEnabled) {
+        for (const auto& seg : p1.z_segs) absorb_i64(seg);
+    }
+    absorb(p1.Z);
+    // Free Phase-1 tensors once absorbed.
+    {
+        std::vector<int8_t>().swap(p1.Z);
+        p1.z_segs.clear();
+        p1.z_segs.shrink_to_fit();
+    }
+
+    auto need_store = [&](uint32_t layer_idx) -> bool {
+        if (ckpt == RCEpisodeOptions::Checkpoint::StoreAll) return true;
+        if (ckpt == RCEpisodeOptions::Checkpoint::StoreOnlyX0) return layer_idx == 0;
+        return (layer_idx % 4) == 0;
+    };
+
+    for (uint32_t l = 0; l < p.L_lyr; ++l) {
+        EnsurePhase2X(p2, l + 1, p, ckpt, gemm);
+        absorb(p2.X[l + 1]);
+        absorb(p2.G[l]);
+        if constexpr (kRCSegmentLeavesEnabled) {
+            for (const auto& seg : p2.d_segs[l]) absorb_i64(seg);
+        }
+        absorb(p2.D[l]);
+
+        // Release layer tensors after absorb (P1.1 low-mem path).
+        p2.G[l].clear();
+        p2.G[l].shrink_to_fit();
+        p2.D[l].clear();
+        p2.D[l].shrink_to_fit();
+        if constexpr (kRCSegmentLeavesEnabled) {
+            p2.d_segs[l].clear();
+            p2.d_segs[l].shrink_to_fit();
+        }
+        if (!need_store(l + 1)) {
+            p2.X[l + 1].clear();
+            p2.X[l + 1].shrink_to_fit();
+        }
+    }
+
+    // Weights no longer needed after the last X recompute.
+    p2.W.clear();
+    p2.W.shrink_to_fit();
+    p2.prf_fwd.clear();
+    p2.prf_fwd.shrink_to_fit();
+
+    return merkle.FinalizeRoot();
 }
 
 uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
@@ -504,16 +669,23 @@ uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
             seed_r = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, round_roots[r - 1], r);
         }
         const auto t1 = clock::now();
-        const auto p1 = Phase1AssociativeRecall(seed_r, params, options.phase1_tile_delta);
+        auto p1 = Phase1AssociativeRecall(seed_r, params, options.phase1_tile_delta);
         const auto t2 = clock::now();
-        const auto p2 = Phase2MicroTraining(seed_r, params, options.checkpoint, gemm);
+        auto p2 = Phase2MicroTraining(seed_r, params, options.checkpoint, gemm);
         const auto t3 = clock::now();
-        const auto stream = SerializeRoundStream(p1, p2, params);
-        round_roots[r] = BuildTileTreeRoot(stream, params.T_leaf);
+
+        // P1.1: stream leaf hashing — no full-round stream buffer on the
+        // consensus path (out_rounds == nullptr).
+        RoundMerkleStream merkle(params.T_leaf);
+        std::vector<int8_t>* stream_out = nullptr;
+        if (out_rounds) {
+            stream_out = &(*out_rounds)[r].stream;
+        }
+        round_roots[r] =
+            StreamRoundIntoMerkle(p1, p2, params, options.checkpoint, gemm, merkle, stream_out);
         const auto t4 = clock::now();
         if (out_rounds) {
             (*out_rounds)[r].round_root = round_roots[r];
-            (*out_rounds)[r].stream = stream;
         }
         if (out_timing) {
             phase1_s += std::chrono::duration<double>(t2 - t1).count();
@@ -637,85 +809,98 @@ RCEpisodeParams ResolveRCEpisodeParams(const Consensus::Params& p, int32_t heigh
 
 std::vector<int8_t> ExpandMxDequantInt8(const uint256& seed, uint32_t rows, uint32_t cols)
 {
+    // Consensus oracle: row-block E8M0 (LT Extract / MatExpand convention).
+    // Col-block packs for S·V / bwd / wgrad live in matmul_v4_rc_mx_layout.*.
+    assert(rows % kRCMxBlockLen == 0);
     assert(cols % kRCMxBlockLen == 0);
-    const size_t count = static_cast<size_t>(rows) * cols;
-    std::vector<int8_t> mu(count);
-    bx::ExpandMantissaStream(seed, count, mu.data());
-    const uint32_t nblk = cols / kRCMxBlockLen;
-    std::vector<uint8_t> scale(static_cast<size_t>(rows) * nblk);
-    bx::ExpandScaleStream(seed, scale.size(), scale.data());
-    std::vector<int8_t> out(count);
-    for (uint32_t i = 0; i < rows; ++i) {
-        for (uint32_t j = 0; j < cols; ++j) {
-            const size_t idx = static_cast<size_t>(i) * cols + j;
-            const uint8_t e = scale[static_cast<size_t>(i) * nblk + (j / kRCMxBlockLen)];
-            out[idx] = static_cast<int8_t>(static_cast<int32_t>(mu[idx]) * (int32_t{1} << e));
-        }
-    }
-    return out;
+    return DequantMxPacked(ExpandMxPacked(seed, rows, cols, RCMxScaleAxis::RowBlock));
 }
 
 std::vector<uint256> BuildTileTreeLeaves(const std::vector<int8_t>& stream, uint32_t t_leaf)
 {
+    RoundMerkleStream merkle(t_leaf);
+    merkle.Absorb(stream.data(), stream.size());
+    return merkle.FinalizeLeaves();
+}
+
+uint256 BuildTileTreeRoot(const std::vector<int8_t>& stream, uint32_t t_leaf)
+{
+    RoundMerkleStream merkle(t_leaf);
+    merkle.Absorb(stream.data(), stream.size());
+    return merkle.FinalizeRoot();
+}
+
+RoundMerkleStream::RoundMerkleStream(uint32_t t_leaf) : m_t_leaf(t_leaf)
+{
     assert(t_leaf > 0);
-    std::vector<uint256> level;
-    size_t offset = 0;
-    while (offset < stream.size() || level.empty()) {
-        std::vector<unsigned char> leaf(t_leaf, 0);
-        const size_t n = std::min(static_cast<size_t>(t_leaf), stream.size() - offset);
-        if (offset < stream.size()) {
-            std::memcpy(leaf.data(), stream.data() + offset, n);
-            offset += n;
-        } else if (!level.empty()) {
-            break;
+    m_partial.reserve(t_leaf);
+}
+
+void RoundMerkleStream::EmitLeaf(const unsigned char* leaf_bytes)
+{
+    std::vector<unsigned char> pre;
+    pre.reserve(1 + m_t_leaf);
+    pre.push_back(kRCLeafTag);
+    pre.insert(pre.end(), leaf_bytes, leaf_bytes + m_t_leaf);
+    m_leaves.push_back(Sha256dBytes(pre.data(), pre.size()));
+}
+
+void RoundMerkleStream::Absorb(const int8_t* data, size_t len)
+{
+    assert(!m_finalized);
+    if (len == 0) return;
+    m_absorbed += len;
+    size_t off = 0;
+    while (off < len) {
+        const size_t space = static_cast<size_t>(m_t_leaf) - m_partial.size();
+        const size_t n = std::min(space, len - off);
+        m_partial.insert(m_partial.end(), reinterpret_cast<const unsigned char*>(data + off),
+                         reinterpret_cast<const unsigned char*>(data + off) + n);
+        off += n;
+        if (m_partial.size() == m_t_leaf) {
+            EmitLeaf(m_partial.data());
+            m_partial.clear();
         }
-        std::vector<unsigned char> pre;
-        pre.reserve(1 + t_leaf);
-        pre.push_back(kRCLeafTag);
-        pre.insert(pre.end(), leaf.begin(), leaf.end());
-        level.push_back(Sha256dBytes(pre.data(), pre.size()));
-        if (offset >= stream.size()) break;
     }
-    if (level.empty()) {
-        std::vector<unsigned char> leaf(t_leaf, 0);
-        std::vector<unsigned char> pre;
-        pre.push_back(kRCLeafTag);
-        pre.insert(pre.end(), leaf.begin(), leaf.end());
-        level.push_back(Sha256dBytes(pre.data(), pre.size()));
+}
+
+void RoundMerkleStream::AbsorbInt64LE(const std::vector<int64_t>& M)
+{
+    unsigned char buf[8];
+    for (int64_t v : M) {
+        WriteLE64(buf, static_cast<uint64_t>(v));
+        Absorb(reinterpret_cast<const int8_t*>(buf), 8);
+    }
+}
+
+std::vector<uint256> RoundMerkleStream::FinalizeLeaves()
+{
+    assert(!m_finalized);
+    m_finalized = true;
+    // Match BuildTileTreeLeaves: empty stream still emits one zero leaf.
+    if (m_absorbed == 0 && m_leaves.empty()) {
+        std::vector<unsigned char> leaf(m_t_leaf, 0);
+        EmitLeaf(leaf.data());
+    } else if (!m_partial.empty()) {
+        // Zero-pad the final partial leaf to T_leaf.
+        m_partial.resize(m_t_leaf, 0);
+        EmitLeaf(m_partial.data());
+        m_partial.clear();
     }
     auto next_pow2 = [](size_t n) {
         size_t p = 1;
         while (p < n) p <<= 1;
         return p;
     };
-    const size_t target = next_pow2(level.size());
-    const uint256 pad_leaf = [&] {
-        std::vector<unsigned char> pre;
-        pre.push_back(kRCPadLeafTag);
-        pre.insert(pre.end(), reinterpret_cast<const unsigned char*>(kRCPadTag),
-                   reinterpret_cast<const unsigned char*>(kRCPadTag) + sizeof(kRCPadTag) - 1);
-        return Sha256dBytes(pre.data(), pre.size());
-    }();
-    while (level.size() < target) level.push_back(pad_leaf);
-    return level;
+    const size_t target = next_pow2(m_leaves.empty() ? 1 : m_leaves.size());
+    const uint256 pad_leaf = PadLeafHash();
+    while (m_leaves.size() < target) m_leaves.push_back(pad_leaf);
+    return m_leaves;
 }
 
-uint256 BuildTileTreeRoot(const std::vector<int8_t>& stream, uint32_t t_leaf)
+uint256 RoundMerkleStream::FinalizeRoot()
 {
-    std::vector<uint256> level = BuildTileTreeLeaves(stream, t_leaf);
-    while (level.size() > 1) {
-        std::vector<uint256> parent;
-        parent.reserve(level.size() / 2);
-        for (size_t i = 0; i < level.size(); i += 2) {
-            unsigned char buf[1 + 64];
-            buf[0] = kRCNodeTag;
-            std::memcpy(buf + 1, level[i].data(), 32);
-            std::memcpy(buf + 1 + 32, level[i + 1].data(), 32);
-            parent.push_back(Sha256dBytes(buf, sizeof(buf)));
-        }
-        level.swap(parent);
-    }
-    return level.front();
+    return FoldTileTreeRoot(FinalizeLeaves());
 }
 
 RCMerkleProof OpenMerkleProof(const std::vector<uint256>& leaves, uint32_t index)

@@ -12,9 +12,10 @@ Branch tip tracks PR #89 (`claude/matmul-v4-design-spec-af23sj`). **Public activ
 | `ENC_RC=5` + `IsMatMulRCActive` + ASERT rescale fields | **Landed** — inert sentinel |
 | `CheckMatMulProofOfWork_RC` / `SolveMatMulV4RC` / validation dispatch | **Landed** — toy dims via `fMatMulRCUseToyDims` (regtest only) |
 | ExactGemm inject + `ProbeRCSelfQual` fail-closed | **Landed** — `native_mx*` stay false until device RC MX self-qual |
+| P1.2 MX contraction layouts + Phase-2 ExactGemm device wire | **Landed** — `doc/btx-matmul-v4.5-rc-mx-contraction-layouts-p1.2.md` + packed helpers; S·V/bwd/wgrad native MX residual |
 | Merkle spot-check + Fiat–Shamir q=8 | **Landed** — R1 reject still requires full CPU recompute |
 | `matmul-v4-rc-harness` + `rc-gate.py` | **Landed** — real CPU timings; toy → PARTIAL (never raise-height) |
-| Unit tests `matmul_v4_rc_tests` | **12/12** on CPU CI builds |
+| Unit tests `matmul_v4_rc_tests` | **green** on CPU CI builds (incl. P1.2 layout + device-probe skip) |
 | Silicon G2 residency / G3 k≥1.3 @ 24GB / G4 consensus dims | **Open** — measurement-gated before any height |
 
 This document synthesizes a full multi-agent design cycle (six hardware-economics research passes, a grounding critique, a five-design synthesis, and a five-part build fleet) into one next-generation proof-of-work for BTX. It supersedes the framing of the earlier `btx-matmul-v4.4-hardware-economics-inversion-2026-07-20.md` study by carrying its grounded conclusions forward into a concrete, buildable design.

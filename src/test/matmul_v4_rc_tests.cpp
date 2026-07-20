@@ -10,8 +10,10 @@
 #include <matmul/matmul_v4_lt_mx_exact.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_extract.h>
+#include <matmul/matmul_v4_rc_mx_layout.h>
 #include <matmul/matmul_v4_rc_scale.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
+#include <matmul/exact_gemm_resolve.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <span.h>
@@ -22,6 +24,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <vector>
@@ -152,6 +155,126 @@ BOOST_AUTO_TEST_CASE(rc_t3_checkpoint_output_invariance)
     BOOST_CHECK(a == b);
     BOOST_CHECK(b == c);
 }
+
+BOOST_AUTO_TEST_CASE(rc_p11_streaming_merkle_equals_full_buffer)
+{
+    // P1.1: RoundMerkleStream must match BuildTileTreeLeaves/Root byte-for-byte
+    // for identical concatenations (including empty, exact T_leaf multiples, and
+    // partial final leaves).
+    constexpr uint32_t t_leaf = 64;
+    auto check_eq = [&](const std::vector<int8_t>& bytes) {
+        const auto full_leaves = rc::BuildTileTreeLeaves(bytes, t_leaf);
+        const auto full_root = rc::BuildTileTreeRoot(bytes, t_leaf);
+        rc::RoundMerkleStream streamed(t_leaf);
+        // Absorb in uneven chunks to exercise the partial buffer.
+        size_t off = 0;
+        const size_t chunks[] = {1, 7, 13, 32, 64, 100, 3};
+        size_t ci = 0;
+        while (off < bytes.size()) {
+            const size_t n = std::min(chunks[ci % 7], bytes.size() - off);
+            streamed.Absorb(bytes.data() + off, n);
+            off += n;
+            ++ci;
+        }
+        const auto stream_leaves = streamed.FinalizeLeaves();
+        BOOST_REQUIRE_EQUAL(stream_leaves.size(), full_leaves.size());
+        BOOST_CHECK(stream_leaves == full_leaves);
+        rc::RoundMerkleStream streamed2(t_leaf);
+        streamed2.Absorb(bytes);
+        BOOST_CHECK(streamed2.FinalizeRoot() == full_root);
+    };
+
+    check_eq({});
+    check_eq(std::vector<int8_t>(t_leaf, 0x11));
+    check_eq(std::vector<int8_t>(t_leaf * 3, 0x22));
+    check_eq(std::vector<int8_t>(t_leaf * 2 + 17, 0x33));
+
+    // Multi-absorb concatenation equals one-shot over the joined buffer.
+    std::vector<int8_t> a(100, 1), b(200, 2), c(50, 3);
+    std::vector<int8_t> joined = a;
+    joined.insert(joined.end(), b.begin(), b.end());
+    joined.insert(joined.end(), c.begin(), c.end());
+    rc::RoundMerkleStream parts(t_leaf);
+    parts.Absorb(a);
+    parts.Absorb(b);
+    parts.Absorb(c);
+    BOOST_CHECK(parts.FinalizeRoot() == rc::BuildTileTreeRoot(joined, t_leaf));
+}
+
+BOOST_AUTO_TEST_CASE(rc_p11_streaming_episode_matches_collected_stream_root)
+{
+    // Consensus path streams into the Merkle tree; collecting out_rounds must
+    // yield the same round_root as BuildTileTreeRoot(stream).
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    std::vector<rc::RCRoundTranscript> rounds;
+    const uint256 d = rc::RecomputeResidentCurriculumReference(header, params, 0, {}, &rounds);
+    BOOST_REQUIRE(!rounds.empty());
+    BOOST_CHECK_EQUAL(d.GetHex(),
+                      "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a");
+    const uint256 from_buf = rc::BuildTileTreeRoot(rounds[0].stream, params.T_leaf);
+    BOOST_CHECK(from_buf == rounds[0].round_root);
+
+    // Checkpoint low-mem path: same digest, and collected stream still matches root.
+    rc::RCEpisodeOptions only0;
+    only0.checkpoint = rc::RCEpisodeOptions::Checkpoint::StoreOnlyX0;
+    std::vector<rc::RCRoundTranscript> rounds_x0;
+    const uint256 d_x0 =
+        rc::RecomputeResidentCurriculumReference(header, params, 0, only0, &rounds_x0);
+    BOOST_CHECK(d_x0 == d);
+    BOOST_REQUIRE(!rounds_x0.empty());
+    BOOST_CHECK(rounds_x0[0].stream == rounds[0].stream);
+    BOOST_CHECK(rc::BuildTileTreeRoot(rounds_x0[0].stream, params.T_leaf) ==
+                rounds_x0[0].round_root);
+}
+
+#if defined(__linux__)
+BOOST_AUTO_TEST_CASE(rc_p11_toy_peak_rss_bounded)
+{
+    // Soft bound for the toy episode on Linux (VmHWM). Not a production-dim
+    // claim — only guards against accidental multi-GiB retention on toy.
+    auto read_vmhwm_kb = []() -> long {
+        FILE* f = std::fopen("/proc/self/status", "r");
+        if (!f) return -1;
+        char line[256];
+        long kb = -1;
+        while (std::fgets(line, sizeof(line), f)) {
+            if (std::sscanf(line, "VmHWM: %ld", &kb) == 1) break;
+        }
+        std::fclose(f);
+        return kb;
+    };
+
+    const long before = read_vmhwm_kb();
+    const auto header = MakeRCHeader(42);
+    auto params = rc::MakeToyRCEpisodeParams();
+    // Modest custom shape (still tiny vs consensus): a few layers, 128-wide.
+    params.L_lyr = 4;
+    params.d_model = 128;
+    params.b_seq = 128;
+    params.d_head = 64;
+    params.n_q = 64;
+    params.n_ctx = 128;
+    params.T_leaf = 64;
+    BOOST_REQUIRE(rc::ValidateRCEpisodeParams(params));
+
+    rc::RCEpisodeOptions low;
+    low.checkpoint = rc::RCEpisodeOptions::Checkpoint::StoreOnlyX0;
+    const uint256 d =
+        rc::RecomputeResidentCurriculumReference(header, params, 0, low);
+    BOOST_CHECK(!d.IsNull());
+
+    const long after = read_vmhwm_kb();
+    BOOST_REQUIRE(before >= 0);
+    BOOST_REQUIRE(after >= 0);
+    const long delta_kb = after - before;
+    BOOST_TEST_MESSAGE("P1.1 toy+modest StoreOnlyX0 VmHWM delta_kb=" << delta_kb
+                                                                     << " after_kb=" << after);
+    // 512 MiB soft ceiling on delta for this tiny shape — failure means a
+    // multi-GiB stream/tensor retention regression, not a production proof.
+    BOOST_CHECK_LT(delta_kb, 512L * 1024L);
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(rc_t4_accumulator_boundary_int64_vs_radix)
 {
@@ -683,6 +806,61 @@ BOOST_AUTO_TEST_CASE(rc_tfp9_selfqual_tracks_epoch_shape)
     BOOST_CHECK(!st.native_fp8_qualified);
 }
 
+BOOST_AUTO_TEST_CASE(rc_p12_mx_layout_helpers_row_matches_oracle)
+{
+    // Row-block packed dequant must match ExpandMxDequantInt8 (digest oracle).
+    uint256 seed;
+    for (int i = 0; i < 32; ++i) seed.data()[i] = static_cast<unsigned char>(0xA0 + i);
+    constexpr uint32_t rows = 64;
+    constexpr uint32_t cols = 32;
+    const auto oracle = rc::ExpandMxDequantInt8(seed, rows, cols);
+    const auto packed = rc::ExpandMxPacked(seed, rows, cols, rc::RCMxScaleAxis::RowBlock);
+    BOOST_CHECK(rc::DequantMxPacked(packed) == oracle);
+    BOOST_CHECK(packed.axis == rc::RCMxScaleAxis::RowBlock);
+    BOOST_CHECK_EQUAL(packed.scales.size(), static_cast<size_t>(rows) * (cols / 32));
+
+    // Col-block uses a different scale indexing → generally ≠ row-block dequant.
+    const auto col = rc::PrepareMxPackedForValueV(seed, rows, cols);
+    BOOST_CHECK(col.axis == rc::RCMxScaleAxis::ColBlock);
+    BOOST_CHECK_EQUAL(col.scales.size(), static_cast<size_t>(rows / 32) * cols);
+    BOOST_CHECK(rc::DequantMxPacked(col) != oracle);
+
+    BOOST_CHECK(rc::RequiredMxScaleAxis(rc::RCMxGemmStage::Phase1ValueSV, /*left=*/false) ==
+                rc::RCMxScaleAxis::ColBlock);
+    BOOST_CHECK(rc::RequiredMxScaleAxis(rc::RCMxGemmStage::Phase2Backward, /*left=*/false) ==
+                rc::RCMxScaleAxis::ColBlock);
+    BOOST_CHECK(rc::RequiredMxScaleAxis(rc::RCMxGemmStage::Phase2Wgrad, /*left=*/true) ==
+                rc::RCMxScaleAxis::ColBlock);
+
+    // Packed MX device stub stays fail-closed (no native claim).
+    std::vector<int32_t> stub_out;
+    BOOST_CHECK(!rc::TryDeviceMxGemmPackedStub(packed, col, rows, cols, cols, stub_out));
+    BOOST_CHECK(stub_out.empty());
+}
+
+BOOST_AUTO_TEST_CASE(rc_p12_phase2_exactgemm_device_probe)
+{
+    // Exercises MakeResolvedExactGemmBackendForRC → LaunchGemmS8S8 when a GPU
+    // backend is present. Without a device, reports backend_resolved=false and
+    // must not claim native MX. Digests are not at risk (CPU oracle path).
+    const auto probe = rc::ProbeRCPhase2ExactGemmDevice();
+    BOOST_CHECK(!probe.detail.empty());
+    if (!probe.backend_resolved) {
+        BOOST_TEST_MESSAGE("RC Phase-2 ExactGemm device path skipped (no admitted backend): "
+                           << probe.detail);
+        return;
+    }
+    BOOST_REQUIRE(probe.device_gemm_returned);
+    BOOST_CHECK(probe.matched_cpu_exactgemm);
+    BOOST_TEST_MESSAGE("RC Phase-2 ExactGemm device path exercised provider="
+                       << probe.provider
+                       << " tensor_imma_or_mfma=" << (probe.used_tensor_imma_or_mfma ? 1 : 0));
+
+    // native_* stay fail-closed even when ExactGemm device path works.
+    const auto st = rc::ProbeRCSelfQual(matmul_v4::accel::MakeResolvedExactGemmBackendForRC());
+    BOOST_CHECK(!st.native_mxfp4_qualified);
+    BOOST_CHECK(!st.native_fp8_qualified);
+}
 
 BOOST_AUTO_TEST_CASE(rc_dos_admission_separate_from_v4_lt)
 {

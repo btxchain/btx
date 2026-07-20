@@ -5828,8 +5828,11 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             return false;
         }
 
+        const auto gemm_rc = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+        // P1.2: Phase-2 ExactGemm may run on CUDA/HIP LaunchGemmS8S8 when
+        // ProbeRCSelfQual admits the backend; losers skip CPU reseal (P0.2).
         const uint256 mined =
-            matmul::v4::rc::MineRCEpisode(block, params_rc, block_height);
+            matmul::v4::rc::MineRCEpisode(block, params_rc, block_height, nullptr, gemm_rc);
         if (mined.IsNull()) {
             LogWarning("SolveMatMulV4RC: MineRCEpisode returned null at nonce=%llu; aborting\n",
                        static_cast<unsigned long long>(block.nNonce64));
@@ -5848,7 +5851,8 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             continue;
         }
 
-        // Winner / share: CPU-reseal for consensus; abort on miner/oracle mismatch.
+        // Winner / share: CPU-reseal for consensus (empty ExactGemm — never
+        // accelerate REJECT / reseal); abort on miner/oracle mismatch.
         const uint256 resealed =
             matmul::v4::rc::RecomputeResidentCurriculumReference(block, params_rc, block_height);
         if (resealed != mined) {
