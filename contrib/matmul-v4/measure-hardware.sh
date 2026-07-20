@@ -47,6 +47,8 @@
 # JSON `mt24.native_path_reason` field.
 #
 # Env: CUDA_ARCH / HIP_ARCH (arch lists), BUILD_DIR (build path override).
+# HIP also needs HIPCXX (clang that accepts -x hip); if unset the script probes
+# clang++-19/18/17/clang++ and passes -DCMAKE_HIP_COMPILER (Amendment v2 §1.D).
 # Exit: 0 = PASS (bit-exact, and under --profile bmx4c also M-t24 PASS), 1 =
 # FAIL, 2 = usage/build error.
 #
@@ -151,6 +153,51 @@ for a in "$@"; do
   prev="$a"
 done
 
+# Amendment v2 §1.D D1/D6: HIP TUs need a clang that accepts -x hip. Never let
+# CMake fall back to host g++/c++. Probe HIPCXX → clang++-{19,18,17,} and fail
+# loudly. D2 (hip::device isolation) and D3 (__HIP_PLATFORM_AMD__) live in
+# src/CMakeLists.txt (btx_hip_device); this script only ensures the compiler.
+btx_resolve_hipcxx() {
+  local cand ver
+  if [ -n "${HIPCXX:-}" ]; then
+    cand="$HIPCXX"
+  else
+    for cand in clang++-19 clang++-18 clang++-17 clang++; do
+      if command -v "$cand" >/dev/null 2>&1; then
+        break
+      fi
+      cand=""
+    done
+  fi
+  if [ -z "$cand" ]; then
+    echo "HIP ERROR: no clang HIP compiler found. export HIPCXX=clang++-19 (or 18/17)." >&2
+    exit 2
+  fi
+  case "$(basename "$cand")" in
+    g++|c++|gcc|cc|g++-*|c++-*|gcc-*|cc-*)
+      echo "HIP ERROR: HIPCXX='$cand' is a host C++ driver; HIP requires clang." >&2
+      exit 2
+      ;;
+  esac
+  ver="$("$cand" --version 2>&1 || true)"
+  if ! printf '%s\n' "$ver" | grep -qi clang; then
+    echo "HIP ERROR: '$cand' is not clang (HIPCXX must be a ROCm/hip-clang)." >&2
+    echo "$ver" >&2
+    exit 2
+  fi
+  if ! echo 'int main(){return 0;}' | "$cand" -x hip -c -o /dev/null - 2>/dev/null; then
+    echo "HIP ERROR: '$cand' cannot compile HIP (-x hip smoke test failed)." >&2
+    echo "Install ROCm hip-clang and export HIPCXX to that clang." >&2
+    exit 2
+  fi
+  # Absolute path so cmake gets a stable CMAKE_HIP_COMPILER.
+  if command -v "$cand" >/dev/null 2>&1; then
+    cand="$(command -v "$cand")"
+  fi
+  export HIPCXX="$cand"
+  echo "-- HIPCXX=$HIPCXX (Amendment v2 §1.D D1)"
+}
+
 case "$BACKEND" in
   cpu)   CMAKE_FLAGS=() ;;
   # External review (vanities): the default arch list omitted Blackwell, so a
@@ -160,7 +207,17 @@ case "$BACKEND" in
   # cuBLASLt and falls back to INT8 regardless -- see the round-2 remediation doc.)
   cuda)  CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90;100;120}") ;;
   metal) CMAKE_FLAGS=(-DBTX_ENABLE_METAL=ON) ;;
-  hip)   CMAKE_FLAGS=(-DBTX_ENABLE_HIP=ON "-DBTX_HIP_ARCHITECTURES=${HIP_ARCH:?set HIP_ARCH e.g. gfx942}") ;;
+  hip)
+    # HIP_ARCH required (e.g. gfx942 MI300 / gfx1200 RDNA4). D4 MFMA-vs-WMMA
+    # arch guard is a sibling change; this script still demands an explicit arch.
+    : "${HIP_ARCH:?set HIP_ARCH e.g. gfx942 or gfx1200}"
+    btx_resolve_hipcxx
+    CMAKE_FLAGS=(
+      -DBTX_ENABLE_HIP=ON
+      "-DBTX_HIP_ARCHITECTURES=${HIP_ARCH}"
+      "-DCMAKE_HIP_COMPILER=${HIPCXX}"
+    )
+    ;;
   *) echo "usage: $0 <cpu|cuda|metal|hip> [rc] [extra --flags]"; echo "       $0 rc [cpu|cuda|metal|hip] [extra --flags]"; exit 2 ;;
 esac
 

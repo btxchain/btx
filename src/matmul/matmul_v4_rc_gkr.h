@@ -18,24 +18,22 @@
 #include <string>
 #include <vector>
 
-// ENC_RC Stage E → Section 2 PRODUCTION — winner-only GKR/sumcheck + ExactReplay
-// fallback. Beyond bake-off: serializable proof, dual-path verifier, soundness
-// bound after PoW grinding, optional env hooks. Does NOT raise nMatMulRCHeight.
+// ENC_RC Stage E — winner-only GKR/sumcheck scaffold + ExactReplay fallback.
+// Does NOT raise nMatMulRCHeight.
 //
-// Protocol shape (digest-bound synth proxy for full episode / coupled):
-//   - GEMM: Thaler product sumcheck over k (linear GEMMs)
-//   - All-to-all: segment-axis sumcheck over consensus K-segment partials
-//   - LOOKUP: LogUp-style ExtractMXTileInt64 opening for EVERY Extract tile
-//
-// SOUNDNESS (computational, NOT ε=0):
-//   Total error ≤ 2^{-64} AFTER PoW grinding under SHA256d FS (ROM) + Goldilocks
-//   |F|=2^{64}-2^{32}+1, deg≤2 sumcheck, transcript binds matmul_digest.
-//   Merkle q=8 sampling is a DoS PREFILTER ONLY — not part of this bound.
+// GKR REALITY GUARDRAIL (Amendment v2 — enforce always):
+//   The CURRENT winner proof proves a SYNTHETIC 32×32 GEMM bound to the digest,
+//   is NON-SUCCINCT (grows with state), has the verifier RE-RUN the work, and a
+//   SINGLE Goldilocks field CANNOT deliver ≤2^{-64} after PoW grinding alone.
+//   REJECT any "HBM proof production-complete" claim until ALL hold:
+//     (1) proves the ACTUAL episode (not a synth proxy),
+//     (2) is succinct / block-sized,
+//     (3) verifies WITHOUT re-running the work,
+//     (4) carries a formal ≤2^{-64}-after-grinding bound.
+//   Expect shrink-to-bounded-replay (VerifyBoundedExactReplay) to fire otherwise.
 //
 // Consensus today: ε=0 ExactReplay (CheckMatMulProofOfWork_RC). GKR is optional
-// behind BTX_RC_VERIFY_GKR=1 (default OFF). Full STREAMED replay = DISPUTE /
-// fallback when GKR disabled, missing, malformed, or over budget.
-// HBM-scale GKR may be PARKED if medium prove already misses budget.
+// behind BTX_RC_VERIFY_GKR=1 (default OFF).
 
 namespace matmul::v4::rc {
 
@@ -44,14 +42,20 @@ inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V2";
 /** Magic for optional out-of-band / cache carriage (not consensus body). */
 inline constexpr uint32_t kRCGkrProofMagic = 0x524b4732u; // 'RK G2' LE-ish
 
+inline constexpr const char* kRCGkrRealityGuardrail =
+    "REJECT HBM/production-complete GKR claims: current winner proof is a "
+    "synthetic 32x32 GEMM digest-bound proxy, non-succinct, verifier re-runs "
+    "work, and single Goldilocks cannot hit <=2^{-64} after grinding. Require "
+    "actual-episode + succinct/block-sized + no-rerun verify + formal "
+    "<=2^{-64}-after-grinding bound. Otherwise shrink to VerifyBoundedExactReplay. "
+    "NOT production-complete. nMatMulRCHeight=INT32_MAX.";
+
 inline constexpr const char* kRCGkrSoundnessBoundStatement =
-    "Winner-only GKR/sumcheck: COMPUTATIONAL soundness error ≤ 2^{-64} AFTER "
-    "accounting for PoW grinding attempts. Model: SHA256d Fiat–Shamir (domain-"
-    "tagged ROM) with transcript binding of matmul_digest (PoW object) before "
-    "challenges; Goldilocks |F|=2^{64}-2^{32}+1; sumcheck degree ≤ 2; per-round "
-    "error O(deg/|F|). With R_tot rounds ≪ 2^{32} and PoW work dominating "
-    "nonce/digest selection, residual forgery probability after grinding is "
-    "≤ 2^{-64}. NOT ε=0. Merkle q=8 is DoS PREFILTER ONLY (not in this bound). "
+    "Winner-only GKR/sumcheck SCAFFOLD (COMPUTATIONAL aspirational target): "
+    "formal <=2^{-64} AFTER PoW grinding is a Stage-I REQUIREMENT, NOT a claim "
+    "about the current synthetic proof. Current artifact: synth 32x32, "
+    "non-succinct, verify re-runs work; single Goldilocks alone is insufficient. "
+    "See kRCGkrRealityGuardrail. Merkle q=8 is DoS PREFILTER ONLY. "
     "Full STREAMED ExactReplay remains dispute/oracle until Stage-I cutover. "
     "nMatMulRCHeight=INT32_MAX.";
 
@@ -59,18 +63,19 @@ inline constexpr const char* kRCGkrSoundnessStatement = kRCGkrSoundnessBoundStat
 inline constexpr const char* kRCGkrSoundnessNote = kRCGkrSoundnessBoundStatement;
 
 inline constexpr const char* kRCGkrE5Decision =
-    "DECIDED: winner-only GKR/sumcheck. Fraud-proof deferred. Shrink/"
-    "ExactReplay is fallback if GKR verify cost fails Stage-I budget.";
+    "DECIDED: winner-only GKR/sumcheck direction. Fraud-proof deferred. Shrink/"
+    "ExactReplay is the production fallback until Reality Guardrail gates close.";
 
 inline constexpr const char* kRCGkrMerkleQ8PrefilterStatement =
     "kRCSpotCheckQueries=8 Merkle leaf sampling is a bandwidth DoS PREFILTER "
     "ONLY. It is NOT a soundness claim and MUST NOT be sole consensus validity "
-    "(P2.1 f^q grinding). Production soundness is GKR bound ≤ 2^{-64} after "
-    "PoW grinding, or ε=0 ExactReplay dispute/fallback.";
+    "(P2.1 f^q grinding). Production soundness requires Reality Guardrail "
+    "gates or ε=0 ExactReplay dispute/fallback.";
 
 inline constexpr const char* kRCGkrHbmParkStatement =
+    "HBM-scale winner GKR is NOT production-complete under Reality Guardrail. "
     "If medium-shape prove already exceeds a small fraction of block-interval "
-    "budget, HBM-scale winner GKR is PARKED; ship both verifiers (GKR + "
+    "budget, PARK HBM-scale GKR; ship both verifiers (GKR scaffold + "
     "VerifyBoundedExactReplay) and keep ε=0 ExactReplay as consensus default.";
 
 using gkr_field::Fp;

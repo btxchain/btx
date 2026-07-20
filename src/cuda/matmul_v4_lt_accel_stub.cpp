@@ -179,6 +179,7 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
     s.deficit_reason =
         "CUDA LT native TU not linked (stub); resident_native_mx_wired=false "
         "(no device-pointer resident pack)";
+    matmul::v4::lt::DeriveLtPeakMxFlags(s); // peak_ready/blocks stay false
     return s;
 }
 

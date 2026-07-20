@@ -2021,6 +2021,7 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     // Telemetry-only deliberately avoids native self-qualification/probing;
     // false would be a fabricated capability statement on Blackwell/gfx950.
     lt_obj.pushKV("peak_status_measured", false);
+    lt_obj.pushKV("arch_key", UniValue(UniValue::VNULL));
     lt_obj.pushKV("peak_capable", UniValue(UniValue::VNULL));
     lt_obj.pushKV("peak_required", UniValue(UniValue::VNULL));
     lt_obj.pushKV("resident_native_mx_wired", UniValue(UniValue::VNULL));
@@ -2486,6 +2487,7 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     lt_obj.pushKV("resident_native_fields_scope", "timed-resident-qstar-batch");
 
     lt_obj.pushKV("peak_status_measured", peak_status_measured);
+    lt_obj.pushKV("arch_key", peak.arch_key); // Amendment v2 §1.SCOPE — per-arch qual
     lt_obj.pushKV("peak_capable", peak.peak_capable);
     lt_obj.pushKV("peak_required", peak.peak_required);
     lt_obj.pushKV("resident_native_mx_wired", peak.resident_native_mx_wired);

@@ -821,16 +821,41 @@ BOOST_AUTO_TEST_CASE(lt_peak_mx_exact_fallback_default_and_native_only_env)
     const auto hip_peak = matmul_v4::hip::ProbeLtPeakMxPathStatus();
     BOOST_CHECK(cuda_peak.allow_exact_mx_fallback);
     BOOST_CHECK(hip_peak.allow_exact_mx_fallback);
+    // Amendment v2 §1.CORRECT: peak_ready / blocks_device_resident are DERIVED.
+    {
+        matmul::v4::lt::LtPeakMxPathStatus ready{};
+        ready.peak_capable = true;
+        ready.resident_native_mx_wired = true;
+        ready.native_mxfp4_qualified = true;
+        ready.allow_exact_mx_fallback = true;
+        matmul::v4::lt::DeriveLtPeakMxFlags(ready);
+        BOOST_CHECK(ready.peak_ready);
+        BOOST_CHECK(!ready.peak_required);
+        BOOST_CHECK(!ready.blocks_device_resident); // deficit MUST be false on ready path
+    }
+    {
+        matmul::v4::lt::LtPeakMxPathStatus blocked{};
+        blocked.peak_capable = true;
+        blocked.resident_native_mx_wired = false;
+        blocked.native_mxfp4_qualified = true;
+        blocked.allow_exact_mx_fallback = false; // REQUIRE_NATIVE_MX
+        matmul::v4::lt::DeriveLtPeakMxFlags(blocked);
+        BOOST_CHECK(!blocked.peak_ready);
+        BOOST_CHECK(blocked.peak_required);
+        BOOST_CHECK(blocked.blocks_device_resident);
+    }
     // Without a peak-capable device in this process, peak_required stays false.
     if (!cuda_peak.peak_capable) {
         BOOST_CHECK(!cuda_peak.peak_required);
         BOOST_CHECK(!cuda_peak.blocks_device_resident);
         BOOST_CHECK(!cuda_peak.resident_native_mx_wired);
+        BOOST_CHECK(!cuda_peak.peak_ready);
     }
     if (!hip_peak.peak_capable) {
         BOOST_CHECK(!hip_peak.peak_required);
         BOOST_CHECK(!hip_peak.blocks_device_resident);
         BOOST_CHECK(!hip_peak.resident_native_mx_wired);
+        BOOST_CHECK(!hip_peak.peak_ready);
     }
 
     if (original_allow) {

@@ -120,9 +120,13 @@ endif()
 
 # AMD ROCm/HIP backend for the MatMul v4 digest (src/hip/matmul_v4_accel.hip).
 # Mirrors the experimental CUDA backend above but targets AMD CDNA (MFMA)
-# accelerators via hipcc. Requires an explicit AMD GPU arch list (e.g. gfx942
-# for MI300, gfx950 for MI350, gfx90a for MI200, gfx908 for MI100).
-option(BTX_ENABLE_HIP "Enable experimental AMD ROCm/HIP MatMul v4 backend (requires ROCm/hipcc)" OFF)
+# accelerators via a clang HIP compiler. Requires an explicit AMD GPU arch list
+# (e.g. gfx942 for MI300, gfx950 for MI350, gfx90a for MI200, gfx908 for MI100).
+#
+# Amendment v2 §1.D D1: HIP TUs MUST be compiled by clang (HIPCXX / CMAKE_HIP_COMPILER).
+# Never silently fall back to host g++/c++ — Debian/Ubuntu ROCm ships clang++-N
+# as the HIP compiler; export HIPCXX=clang++-19 (or similar) before configure.
+option(BTX_ENABLE_HIP "Enable experimental AMD ROCm/HIP MatMul v4 backend (requires ROCm + clang HIP)" OFF)
 set(BTX_HIP_ARCHITECTURES "" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942;gfx950)")
 
 if(BTX_ENABLE_HIP)
@@ -133,6 +137,79 @@ if(BTX_ENABLE_HIP)
     message(FATAL_ERROR "BTX_ENABLE_HIP=ON requires BTX_HIP_ARCHITECTURES to be set explicitly (for example gfx942;gfx950).")
   endif()
   set(CMAKE_HIP_ARCHITECTURES "${BTX_HIP_ARCHITECTURES}" CACHE STRING "AMD GPU architectures for BTX HIP targets" FORCE)
+
+  # --- D1: resolve CMAKE_HIP_COMPILER to a clang that can compile HIP ----------
+  # Order: HIPCXX env → CMAKE_HIP_COMPILER cache → probe clang++-{19,18,17,}.
+  set(_btx_hipcxx "")
+  if(DEFINED ENV{HIPCXX} AND NOT "$ENV{HIPCXX}" STREQUAL "")
+    set(_btx_hipcxx "$ENV{HIPCXX}")
+  elseif(CMAKE_HIP_COMPILER)
+    set(_btx_hipcxx "${CMAKE_HIP_COMPILER}")
+  else()
+    foreach(_btx_hip_cand IN ITEMS clang++-19 clang++-18 clang++-17 clang++)
+      find_program(_btx_hip_cand_path NAMES "${_btx_hip_cand}")
+      if(_btx_hip_cand_path)
+        set(_btx_hipcxx "${_btx_hip_cand_path}")
+        unset(_btx_hip_cand_path CACHE)
+        break()
+      endif()
+      unset(_btx_hip_cand_path CACHE)
+    endforeach()
+  endif()
+  if(_btx_hipcxx STREQUAL "")
+    message(FATAL_ERROR
+      "BTX_ENABLE_HIP=ON: no HIP clang compiler found.\n"
+      "  Set HIPCXX to a clang that can compile HIP (e.g. export HIPCXX=clang++-19),\n"
+      "  or pass -DCMAKE_HIP_COMPILER=/usr/bin/clang++-19.\n"
+      "  Host g++/c++ must NEVER be used for HIP translation units.")
+  endif()
+  # Reject host g++/c++ and non-clang drivers even if the user exported them as HIPCXX.
+  get_filename_component(_btx_hipcxx_name "${_btx_hipcxx}" NAME)
+  string(TOLOWER "${_btx_hipcxx_name}" _btx_hipcxx_name_l)
+  if(_btx_hipcxx_name_l MATCHES "^(g\\+\\+|c\\+\\+|gcc|cc)(-[0-9]+)?$")
+    message(FATAL_ERROR
+      "BTX_ENABLE_HIP=ON: HIPCXX/CMAKE_HIP_COMPILER resolves to '${_btx_hipcxx}', "
+      "which is a host C++ driver — not allowed for HIP TUs.\n"
+      "  export HIPCXX=clang++-19  # (or clang++-18 / clang++-17 / clang++)")
+  endif()
+  execute_process(
+    COMMAND "${_btx_hipcxx}" --version
+    OUTPUT_VARIABLE _btx_hipcxx_ver
+    ERROR_VARIABLE _btx_hipcxx_ver_err
+    RESULT_VARIABLE _btx_hipcxx_ver_rc
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  if(NOT _btx_hipcxx_ver_rc EQUAL 0)
+    message(FATAL_ERROR
+      "BTX_ENABLE_HIP=ON: cannot run HIP compiler '${_btx_hipcxx}' (--version failed).")
+  endif()
+  string(APPEND _btx_hipcxx_ver "\n${_btx_hipcxx_ver_err}")
+  string(TOLOWER "${_btx_hipcxx_ver}" _btx_hipcxx_ver_l)
+  if(NOT _btx_hipcxx_ver_l MATCHES "clang")
+    message(FATAL_ERROR
+      "BTX_ENABLE_HIP=ON: '${_btx_hipcxx}' is not a clang driver (HIP requires clang).\n"
+      "  --version output:\n${_btx_hipcxx_ver}\n"
+      "  export HIPCXX=clang++-19  # Debian/Ubuntu ROCm clang")
+  endif()
+  # Smoke-check: clang must accept -x hip (ROCm clang / hip-clang). Fail loudly
+  # rather than discovering a non-HIP clang only when compiling .hip sources.
+  set(_btx_hip_smoke "${CMAKE_BINARY_DIR}/CMakeFiles/btx_hip_compiler_smoke.hip")
+  file(WRITE "${_btx_hip_smoke}" "int main(){return 0;}\n")
+  execute_process(
+    COMMAND "${_btx_hipcxx}" -x hip -c "${_btx_hip_smoke}" -o "${_btx_hip_smoke}.o"
+    OUTPUT_VARIABLE _btx_hip_smoke_out
+    ERROR_VARIABLE _btx_hip_smoke_err
+    RESULT_VARIABLE _btx_hip_smoke_rc
+  )
+  if(NOT _btx_hip_smoke_rc EQUAL 0)
+    message(FATAL_ERROR
+      "BTX_ENABLE_HIP=ON: '${_btx_hipcxx}' cannot compile HIP (-x hip smoke test failed).\n"
+      "  Install ROCm hip-clang / hipcc clang and set HIPCXX to that clang.\n"
+      "  smoke stderr:\n${_btx_hip_smoke_err}")
+  endif()
+  set(CMAKE_HIP_COMPILER "${_btx_hipcxx}" CACHE FILEPATH
+    "HIP compiler — must be a clang that accepts -x hip (set HIPCXX or this cache entry)" FORCE)
+  message(STATUS "BTX HIP compiler (D1): ${CMAKE_HIP_COMPILER}")
   enable_language(HIP)
   find_package(hip REQUIRED)
 endif()
@@ -743,7 +820,14 @@ else()
   )
 endif()
 if(BTX_ENABLE_HIP)
-  target_sources(btx_matmul_backend PRIVATE
+  # --- D2: isolate hip::device from g++ TUs ---------------------------------
+  # Debian hip-config-amd.cmake adds `-x hip` to hip::device INTERFACE flags.
+  # Linking hip::device into btx_matmul_backend would poison every g++ C++ TU
+  # on that target (stubs, bitcoin_common consumers, tests). Keep ALL .hip
+  # sources on a clang-only static lib; link hip::device ONLY there (PRIVATE).
+  # Public ABI headers in src/hip/*.h stay free of HIP includes for non-HIP
+  # consumers (stubs unchanged when BTX_ENABLE_HIP=OFF).
+  add_library(btx_hip_device STATIC EXCLUDE_FROM_ALL
     hip/matmul_v4_accel.hip
     # External review (P1.5): the BMX4-C (v4.2) HIP device backend source was
     # never listed, so the strong matmul_v4::hip::ComputeDigestsBMX4CAccel never
@@ -765,36 +849,42 @@ if(BTX_ENABLE_HIP)
     hip/matmul_v4_lt_tensor_gemm.hip
     hip/matmul_v4_lt_mx_native.hip
     PROPERTIES LANGUAGE HIP)
+  # D3: host-side HIP headers need the AMD platform define on every TU that
+  # includes them — prefer a target compile-define over ad-hoc -D flags.
+  target_compile_definitions(btx_hip_device PRIVATE __HIP_PLATFORM_AMD__=1)
+  target_link_libraries(btx_hip_device PRIVATE core_interface hip::device)
   # PUBLIC so the define reaches the backend-determinism test TU (compiled into
   # test_btx), whose HIP determinism row #if-guards on BTX_ENABLE_HIP; PRIVATE
   # would silently drop that row even in a HIP build.
   target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_HIP=1)
-  target_link_libraries(btx_matmul_backend PRIVATE hip::device)
-  # Optional hipBLASLt (preferred) and rocBLAS fallback for LT ExactGemm
+  target_link_libraries(btx_matmul_backend PRIVATE btx_hip_device)
+  # D5: optional hipBLASLt (preferred) and rocBLAS fallback for LT ExactGemm
   # MFMA-class s8×s8→s32. Discover them independently so an installed
   # hipBLASLt that declines a shape can fall through to rocBLAS I8II.
+  # HINTS include /usr (+ lib suffixes) so Debian/Ubuntu ROCm packages work
+  # without /opt/rocm; keep ENV ROCM_PATH / HIP_PATH /opt/rocm as well.
   find_path(BTX_HIPBLASLT_INCLUDE_DIR hipblaslt/hipblaslt.h
-    HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
+    HINTS ENV ROCM_PATH ENV HIP_PATH /usr /opt/rocm
     PATH_SUFFIXES include)
   find_library(BTX_HIPBLASLT_LIBRARY NAMES hipblaslt
-    HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
-    PATH_SUFFIXES lib lib64)
+    HINTS ENV ROCM_PATH ENV HIP_PATH /usr /usr/lib /opt/rocm
+    PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
   if(BTX_HIPBLASLT_INCLUDE_DIR AND BTX_HIPBLASLT_LIBRARY)
-    target_compile_definitions(btx_matmul_backend PRIVATE BTX_HAVE_HIPBLASLT=1)
-    target_include_directories(btx_matmul_backend PRIVATE "${BTX_HIPBLASLT_INCLUDE_DIR}")
-    target_link_libraries(btx_matmul_backend PRIVATE "${BTX_HIPBLASLT_LIBRARY}")
+    target_compile_definitions(btx_hip_device PRIVATE BTX_HAVE_HIPBLASLT=1)
+    target_include_directories(btx_hip_device PRIVATE "${BTX_HIPBLASLT_INCLUDE_DIR}")
+    target_link_libraries(btx_hip_device PRIVATE "${BTX_HIPBLASLT_LIBRARY}")
     message(STATUS "BTX HIP LT ExactGemm: hipBLASLt linked (MFMA path)")
   endif()
   find_path(BTX_ROCBLAS_INCLUDE_DIR rocblas/rocblas.h
-    HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
+    HINTS ENV ROCM_PATH ENV HIP_PATH /usr /opt/rocm
     PATH_SUFFIXES include)
   find_library(BTX_ROCBLAS_LIBRARY NAMES rocblas
-    HINTS ENV ROCM_PATH ENV HIP_PATH /opt/rocm
-    PATH_SUFFIXES lib lib64)
+    HINTS ENV ROCM_PATH ENV HIP_PATH /usr /usr/lib /opt/rocm
+    PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
   if(BTX_ROCBLAS_INCLUDE_DIR AND BTX_ROCBLAS_LIBRARY)
-    target_compile_definitions(btx_matmul_backend PRIVATE BTX_HAVE_ROCBLAS=1)
-    target_include_directories(btx_matmul_backend PRIVATE "${BTX_ROCBLAS_INCLUDE_DIR}")
-    target_link_libraries(btx_matmul_backend PRIVATE "${BTX_ROCBLAS_LIBRARY}")
+    target_compile_definitions(btx_hip_device PRIVATE BTX_HAVE_ROCBLAS=1)
+    target_include_directories(btx_hip_device PRIVATE "${BTX_ROCBLAS_INCLUDE_DIR}")
+    target_link_libraries(btx_hip_device PRIVATE "${BTX_ROCBLAS_LIBRARY}")
     message(STATUS "BTX HIP LT ExactGemm: rocBLAS linked (MFMA fallback)")
   endif()
   if(NOT (BTX_HIPBLASLT_INCLUDE_DIR AND BTX_HIPBLASLT_LIBRARY) AND
@@ -804,11 +894,11 @@ if(BTX_ENABLE_HIP)
   # The HIP backend reuses the shared matmul::v4 host reference (operand
   # expansion, serialization, digest) from bitcoin_common so its output is
   # bit-identical to the CPU by construction. bitcoin_common PUBLIC-links
-  # btx_matmul_backend, so this closes a STATIC<->STATIC cycle that CMake
-  # resolves by repeating the archives at final link. The cycle only exists
-  # when BTX_ENABLE_HIP=ON (the stub path stays self-contained).
-  target_link_libraries(btx_matmul_backend PRIVATE bitcoin_common)
-  set_target_properties(btx_matmul_backend PROPERTIES
+  # btx_matmul_backend → btx_hip_device, so this closes a STATIC cycle that
+  # CMake resolves by repeating the archives at final link. The cycle only
+  # exists when BTX_ENABLE_HIP=ON (the stub path stays self-contained).
+  target_link_libraries(btx_hip_device PRIVATE bitcoin_common)
+  set_target_properties(btx_hip_device PROPERTIES
     HIP_ARCHITECTURES "${BTX_HIP_ARCHITECTURES}"
     HIP_STANDARD 20
     HIP_STANDARD_REQUIRED ON
@@ -946,6 +1036,11 @@ set(BTX_BASE_ARCHIVES
   leveldb
   crc32c
 )
+# D2: HIP device archive participates in the static cycle group when enabled
+# (btx_hip_device ↔ bitcoin_common via btx_matmul_backend).
+if(BTX_ENABLE_HIP AND TARGET btx_hip_device)
+  list(APPEND BTX_BASE_ARCHIVES btx_hip_device)
+endif()
 
 set(BTX_NODE_ARCHIVES
   bitcoin_node

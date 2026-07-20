@@ -71,6 +71,7 @@ bool g_native_fp8_qualified{false};
 bool g_native_qual_ran{false};
 bool g_resident_native_mx_wired{false};
 bool g_resident_native_mx_attempted{false};
+std::string g_qual_arch_key; // Amendment v2 §1.SCOPE — per-arch (gfx942 ≠ gfx1200)
 std::string g_resident_deficit_detail;
 
 struct DeviceBuffer {
@@ -107,20 +108,26 @@ struct DeviceBuffer {
 #endif
 }
 
-[[nodiscard]] bool IsCdna4Gfx950()
+[[nodiscard]] std::string HipDeviceArchKey()
 {
     int device = 0;
     hipDeviceProp_t props{};
     if (hipGetDevice(&device) != hipSuccess ||
         hipGetDeviceProperties(&props, device) != hipSuccess) {
-        return false;
+        return {};
     }
     std::string arch{props.gcnArchName};
     if (const size_t suffix = arch.find(':'); suffix != std::string::npos) {
         arch.resize(suffix);
     }
+    return arch;
+}
+
+[[nodiscard]] bool IsCdna4Gfx950()
+{
     // CDNA4 MXFP4/MXFP8 MFMA scale is documented for gfx950 (MI350/MI355).
-    return arch == "gfx950";
+    // gfx942 (CDNA3) and gfx1200 (RDNA4) are separate arches (§1.SCOPE / D4).
+    return HipDeviceArchKey() == "gfx950";
 }
 
 /** Inverse of SampleMantissaNibble: M11 int → OCP E2M1 nibble bit pattern. */
@@ -516,6 +523,7 @@ void RunNativeSelfQualOnceLocked()
 
     int count = 0;
     if (hipGetDeviceCount(&count) != hipSuccess || count <= 0) return;
+    g_qual_arch_key = HipDeviceArchKey();
     if (!IsCdna4Gfx950()) return;
     if (!ToolkitDeclaresMxfp4() && !ToolkitDeclaresMxfp8()) return;
 
@@ -712,12 +720,11 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
     {
         std::lock_guard<std::mutex> lock(g_native_mx_mu);
         s.resident_native_mx_wired = g_resident_native_mx_wired;
+        s.arch_key = g_qual_arch_key.empty() ? HipDeviceArchKey() : g_qual_arch_key;
     }
-    s.peak_ready = s.peak_capable && s.resident_native_mx_wired &&
-                   (s.native_mxfp4_qualified || s.native_fp8_qualified);
     s.allow_exact_mx_fallback = matmul::v4::lt::AllowLtExactMxFallback();
-    s.peak_required = s.peak_capable && !s.allow_exact_mx_fallback;
-    s.blocks_device_resident = s.peak_required && !s.peak_ready;
+    // Amendment v2 §1.CORRECT: DERIVE peak_ready / blocks_device_resident only.
+    matmul::v4::lt::DeriveLtPeakMxFlags(s);
     if (!s.peak_capable) {
         s.deficit_reason.clear();
     } else if (s.peak_ready) {
@@ -730,6 +737,9 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
         if (!g_resident_deficit_detail.empty()) {
             s.deficit_reason += " detail: " + g_resident_deficit_detail;
         }
+        if (!s.arch_key.empty()) {
+            s.deficit_reason += " arch=" + s.arch_key;
+        }
     } else {
         s.deficit_reason =
             "BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX=1 requested an end-to-end resident "
@@ -737,6 +747,9 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
             "resident LT is intentionally blocked for this qualification run.";
         if (!g_resident_deficit_detail.empty()) {
             s.deficit_reason += " detail: " + g_resident_deficit_detail;
+        }
+        if (!s.arch_key.empty()) {
+            s.deficit_reason += " arch=" + s.arch_key;
         }
     }
     return s;

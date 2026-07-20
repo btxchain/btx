@@ -59,12 +59,20 @@ bool g_native_qual_ran{false};
 // End-to-end resident Q* graph uses native projection (device μ/e/V → dQ).
 bool g_resident_native_mx_wired{false};
 bool g_resident_native_mx_attempted{false};
+std::string g_qual_arch_key; // Amendment v2 §1.SCOPE — per-arch, not per-card
 std::string g_resident_deficit_detail;
 
 [[nodiscard]] bool IsBlackwellSm(int major, int minor)
 {
     (void)minor;
+    // Peak-capable class: consumer sm_12x and datacenter sm_10x. Qualification
+    // is PER-ARCH (Amendment v2 §1.SCOPE) — sm_120 ≠ sm_100.
     return (major == 10) || (major == 12);
+}
+
+[[nodiscard]] std::string FormatCudaArchKey(int major, int minor)
+{
+    return "sm_" + std::to_string(major * 10 + minor);
 }
 
 [[nodiscard]] bool ToolkitDeclaresFp4()
@@ -1205,6 +1213,7 @@ void RunNativeSelfQualOnceLocked()
         g_resident_deficit_detail = "cudaGetDeviceProperties failed";
         return;
     }
+    g_qual_arch_key = FormatCudaArchKey(props.major, props.minor);
 
     const bool cutlass_compiled = lt_cutlass_mxfp4::IsLtCutlassMxfp4Compiled();
     g_native_mxfp4_attempted =
@@ -1213,9 +1222,12 @@ void RunNativeSelfQualOnceLocked()
 
     // Blackwell is where stock MX heuristics live; non-Blackwell stays attempted
     // but not qualified unless a path actually matches the suite.
+    // §1.SCOPE: sm_120 class (5090/5060 Ti) ≠ sm_100 (B200) — separate qual.
     if (!IsBlackwellSm(props.major, props.minor)) {
         g_resident_deficit_detail =
-            "device is not Blackwell-class (sm_10x/sm_12x); resident native MX stays unwired";
+            "device is not Blackwell-class (sm_10x/sm_12x); resident native MX stays unwired "
+            "(arch=" +
+            g_qual_arch_key + ")";
         return;
     }
     if (cudaSetDevice(runtime.device_index) != cudaSuccess) {
@@ -1490,12 +1502,11 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
     {
         std::lock_guard<std::mutex> lock(g_native_mx_mu);
         s.resident_native_mx_wired = g_resident_native_mx_wired;
+        s.arch_key = g_qual_arch_key;
     }
-    s.peak_ready = s.peak_capable && s.resident_native_mx_wired &&
-                   (s.native_mxfp4_qualified || s.native_fp8_qualified);
     s.allow_exact_mx_fallback = matmul::v4::lt::AllowLtExactMxFallback();
-    s.peak_required = s.peak_capable && !s.allow_exact_mx_fallback;
-    s.blocks_device_resident = s.peak_required && !s.peak_ready;
+    // Amendment v2 §1.CORRECT: DERIVE peak_ready / blocks_device_resident only.
+    matmul::v4::lt::DeriveLtPeakMxFlags(s);
     if (!s.peak_capable) {
         s.deficit_reason.clear();
     } else if (s.peak_ready) {
@@ -1508,6 +1519,9 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
         if (!g_resident_deficit_detail.empty()) {
             s.deficit_reason += " detail: " + g_resident_deficit_detail;
         }
+        if (!s.arch_key.empty()) {
+            s.deficit_reason += " arch=" + s.arch_key;
+        }
     } else {
         s.deficit_reason =
             "BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX=1 requested an end-to-end resident "
@@ -1515,6 +1529,9 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
             "resident LT is intentionally blocked for this qualification run.";
         if (!g_resident_deficit_detail.empty()) {
             s.deficit_reason += " detail: " + g_resident_deficit_detail;
+        }
+        if (!s.arch_key.empty()) {
+            s.deficit_reason += " arch=" + s.arch_key;
         }
     }
     return s;

@@ -110,20 +110,42 @@ static_assert(kLtMxProjAbsBoundAtN4096 < kLtMxFloat32ExactIntegerCeil,
  *  format-string machinery in .cu/.hip translation units. */
 void LogLtMxDiagnostic(const std::string& message);
 
-/** Snapshot used by report JSON + startup diagnostics. */
+/** Snapshot used by report JSON + startup diagnostics.
+ *
+ * Amendment v2 §1.CORRECT — DERIVE ONLY (never hand-set):
+ *   peak_ready = peak_capable && resident_native_mx_wired &&
+ *                (native_mxfp4_qualified || native_fp8_qualified);
+ *   blocks_device_resident = peak_required && !peak_ready;
+ * On a QUALIFIED/ready path, blocks_device_resident MUST be false (it is a
+ * DEFICIT flag). After an end-to-end resident oracle pass, set ONLY
+ * resident_native_mx_wired (+ resident-scope qual flags); let these two derive.
+ *
+ * Amendment v2 §1.SCOPE — native-MX qualification is PER-ARCH (arch_key), not
+ * per-card. sm_120 (consumer Blackwell) ≠ sm_100 (B200); gfx942 ≠ gfx1200.
+ */
 struct LtPeakMxPathStatus {
-    bool peak_capable{false};             // sm_100/120 or gfx950-class
+    std::string arch_key;                 // e.g. "sm_120", "sm_100", "gfx950"
+    bool peak_capable{false};             // arch class may host native MX
     bool native_mxfp4_attempted{false};   // self-qual invoked vendor MXFP4 surface
-    bool native_mxfp4_qualified{false};
+    bool native_mxfp4_qualified{false};   // for arch_key only
     bool native_fp8_attempted{false};     // self-qual invoked vendor block-FP8 surface
-    bool native_fp8_qualified{false};
-    bool resident_native_mx_wired{false}; // native lane is in the resident Q* graph
-    bool peak_ready{false};               // capable && qualified && resident-wired
+    bool native_fp8_qualified{false};     // for arch_key only
+    bool resident_native_mx_wired{false}; // set ONLY after resident device-ptr oracle pass
+    bool peak_ready{false};               // DERIVED — see formula above
     bool allow_exact_mx_fallback{true};   // default; false only in native-only mode
     bool peak_required{false};            // capable && explicit native-only mode
-    bool blocks_device_resident{false};   // peak_required && !peak_ready
+    bool blocks_device_resident{false};   // DERIVED deficit: peak_required && !peak_ready
     std::string deficit_reason;           // empty when peak_ready or !peak_capable
 };
+
+/** Amendment v2 §1.CORRECT: fill DERIVED peak_ready / blocks_device_resident. */
+inline void DeriveLtPeakMxFlags(LtPeakMxPathStatus& s)
+{
+    s.peak_ready = s.peak_capable && s.resident_native_mx_wired &&
+                   (s.native_mxfp4_qualified || s.native_fp8_qualified);
+    s.peak_required = s.peak_capable && !s.allow_exact_mx_fallback;
+    s.blocks_device_resident = s.peak_required && !s.peak_ready;
+}
 
 } // namespace matmul::v4::lt
 

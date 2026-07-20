@@ -91,12 +91,66 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD="${BUILD_DIR:-$ROOT/build-verify-$BACKEND}"
 SUITE="matmul_v4_backend_determinism_tests"
 
+# Amendment v2 §1.D D1/D6: HIP TUs need a clang that accepts -x hip. Never let
+# CMake fall back to host g++/c++. Probe HIPCXX → clang++-{19,18,17,} and fail
+# loudly. D2 (hip::device isolation) and D3 (__HIP_PLATFORM_AMD__) live in
+# src/CMakeLists.txt (btx_hip_device); this script only ensures the compiler.
+btx_resolve_hipcxx() {
+  local cand ver
+  if [ -n "${HIPCXX:-}" ]; then
+    cand="$HIPCXX"
+  else
+    for cand in clang++-19 clang++-18 clang++-17 clang++; do
+      if command -v "$cand" >/dev/null 2>&1; then
+        break
+      fi
+      cand=""
+    done
+  fi
+  if [ -z "$cand" ]; then
+    echo "HIP ERROR: no clang HIP compiler found. export HIPCXX=clang++-19 (or 18/17)." >&2
+    exit 2
+  fi
+  case "$(basename "$cand")" in
+    g++|c++|gcc|cc|g++-*|c++-*|gcc-*|cc-*)
+      echo "HIP ERROR: HIPCXX='$cand' is a host C++ driver; HIP requires clang." >&2
+      exit 2
+      ;;
+  esac
+  ver="$("$cand" --version 2>&1 || true)"
+  if ! printf '%s\n' "$ver" | grep -qi clang; then
+    echo "HIP ERROR: '$cand' is not clang (HIPCXX must be a ROCm/hip-clang)." >&2
+    echo "$ver" >&2
+    exit 2
+  fi
+  if ! echo 'int main(){return 0;}' | "$cand" -x hip -c -o /dev/null - 2>/dev/null; then
+    echo "HIP ERROR: '$cand' cannot compile HIP (-x hip smoke test failed)." >&2
+    echo "Install ROCm hip-clang and export HIPCXX to that clang." >&2
+    exit 2
+  fi
+  if command -v "$cand" >/dev/null 2>&1; then
+    cand="$(command -v "$cand")"
+  fi
+  export HIPCXX="$cand"
+  echo "-- HIPCXX=$HIPCXX (Amendment v2 §1.D D1)"
+}
+
 case "$BACKEND" in
   # External review: include Blackwell (sm_100/sm_120) so a 5090/B200 builds
   # native code instead of JIT'd sm_90 (mirrors measure-hardware.sh).
   cuda)  CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90;100;120}") ;;
   metal) CMAKE_FLAGS=(-DBTX_ENABLE_METAL=ON) ;;   # Apple; needs Xcode 26+ for the M5 tensor path
-  hip)   CMAKE_FLAGS=(-DBTX_ENABLE_HIP=ON "-DBTX_HIP_ARCHITECTURES=${HIP_ARCH:?set HIP_ARCH e.g. gfx942}") ;;
+  hip)
+    # HIP_ARCH required (e.g. gfx942 MI300 / gfx1200 RDNA4). D4 MFMA-vs-WMMA
+    # arch guard is a sibling change; this script still demands an explicit arch.
+    : "${HIP_ARCH:?set HIP_ARCH e.g. gfx942 or gfx1200}"
+    btx_resolve_hipcxx
+    CMAKE_FLAGS=(
+      -DBTX_ENABLE_HIP=ON
+      "-DBTX_HIP_ARCHITECTURES=${HIP_ARCH}"
+      "-DCMAKE_HIP_COMPILER=${HIPCXX}"
+    )
+    ;;
   *) echo "usage: $0 <cuda|metal|hip> [--profile v41|bmx4c|bmx4c-lt]"; exit 2 ;;
 esac
 

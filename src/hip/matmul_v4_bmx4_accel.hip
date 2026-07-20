@@ -130,18 +130,8 @@ __device__ __forceinline__ Fq DevFqFromSigned(int64_t x)
     return reduced == 0 ? 0 : q - reduced; // DevFqNeg inlined (unused standalone here)
 }
 
-// CDNA Matrix Cores expose the integer MFMA only on gfx9 (CDNA) targets, plus
-// gfx950 (CDNA4, e.g. MI355X -- also the tier (a) native-MXFP4 target, see
-// SelectComputeTier). When compiling device code for such an arch, use the
-// intrinsic; otherwise fall back to a scalar-integer accumulation with the
-// identical tiled layout so the kernel still exists and stays bit-exact
-// (non-CDNA device builds / host-side syntax passes only -- production
-// targets are gfx908/90a/942/950).
-#if defined(__HIP_DEVICE_COMPILE__) &&                                         \
-    (defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx940__) ||      \
-     defined(__gfx941__) || defined(__gfx942__) || defined(__gfx950__))
-#define BTX_HIP_BMX4C_HAVE_MFMA 1
-#endif
+// Amendment v2 §1.D D4: MFMA only on CDNA; never emit MFMA for gfx1200/RDNA4.
+#include <hip/btx_hip_mfma_guard.h>
 
 using int32x4 = int32_t __attribute__((ext_vector_type(4)));
 
