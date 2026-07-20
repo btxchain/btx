@@ -315,6 +315,14 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         assert(consensus.nMatMulRCHeight >= consensus.nMatMulV4Height);
         assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
     }
+    // §R.7 scheduled-scaling tables must be non-zero once filled by constructors.
+    // (FillDefaultRCGrowthTables is called before this assert on every network.)
+    assert(consensus.nRCScaleEpochBlocks > 0);
+    assert(consensus.nRCBrakeDeltaPct >= 0 && consensus.nRCBrakeDeltaPct <= 100);
+    assert(consensus.nRCScaleHardCapResBytes > 0);
+    assert(consensus.nRCScaleHardCapCapBytes > 0);
+    assert(consensus.nRCGrowthResTableQ16[0] > 0);
+    assert(consensus.nRCGrowthCapTableQ16[0] > 0);
 }
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
@@ -616,6 +624,7 @@ public:
         // network (no-op while BMX4C is unset here -- nMatMulBMX4CHeight ==
         // INT32_MAX -- so a future mainnet activation that sets only the height
         // cannot ship without the fork-ordering / dim / rescale-positivity guards).
+        Consensus::FillDefaultRCGrowthTables(consensus);
         AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
 
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,25);
@@ -1005,6 +1014,7 @@ public:
         consensus.hashGenesisBlock = genesis.GetHash();
         assert(consensus.hashGenesisBlock == uint256{"f2bc3fb2eca6aa6059c4d0178b56efe038d46aa440d406905ef752179aa0e1a4"});
         assert(genesis.hashMerkleRoot == uint256{"94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a"});
+        Consensus::FillDefaultRCGrowthTables(consensus);
         AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
 
         // Testnet DNS seeds mirror mainnet domains; fixed seeds provide fallback.
@@ -1187,6 +1197,7 @@ public:
         assert(consensus.hashGenesisBlock == uint256{"f2bc3fb2eca6aa6059c4d0178b56efe038d46aa440d406905ef752179aa0e1a4"});
         assert(genesis.hashMerkleRoot == uint256{"94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a"});
         // Audit W-2 / ASERT-F1: BMX4C construction invariants (no-op while unset).
+        Consensus::FillDefaultRCGrowthTables(consensus);
         AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
 
         vSeeds.clear();
@@ -1416,6 +1427,7 @@ public:
         // networks -- H2 header-PoW discount range, D1 ASERT-schedule validity,
         // I1 tile size, and the BMX4C profile checks. (No-op today: signet leaves
         // v4/bmx4c disabled and the discount at the UINT32_MAX default.)
+        Consensus::FillDefaultRCGrowthTables(consensus);
         AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
     }
 };
@@ -1650,6 +1662,7 @@ public:
         // regtest -regtest* overrides (v4 height/dim and BMX4C height) so a bad
         // combination (e.g. a BMX4C height at/below the overridden v4 height)
         // fails loudly at startup. No-op when BMX4C is disabled.
+        Consensus::FillDefaultRCGrowthTables(consensus);
         AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/true);
         if (opts.matmul_transcript_block_size.has_value()) {
             consensus.nMatMulTranscriptBlockSize = *opts.matmul_transcript_block_size;
@@ -2087,6 +2100,7 @@ public:
         // so enforce the same construction invariants (H2 discount range, D1 ASERT
         // schedule validity, I1 tile size, BMX4C profile) as the other MatMul
         // networks. No-op today (v4/bmx4c disabled, discount at default).
+        Consensus::FillDefaultRCGrowthTables(consensus);
         AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
     }
 };

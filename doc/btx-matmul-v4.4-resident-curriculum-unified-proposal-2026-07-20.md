@@ -207,6 +207,47 @@ Wgrad:    D[l]   = ExtractMX( G[l+1]·X[l]ᵀ )         # contract b_seq
 | H13 | Block misalignment | all dims %32==0 asserted (R.0) |
 | — | Accelerator rejects a good block | R1 + reseal (R.5) |
 
+### R.7 Scheduled Scaling (future-proofing)
+
+**Status.** PROVISIONAL control law + parameter surface. All growth constants below are **PROVISIONAL** (owner-set; monetary-adjacent) and MUST NOT be treated as final. Public activation remains **NO-GO** (`nMatMulRCHeight = INT32_MAX`). This section future-proofs the consensus shape so ENC_RC can track the durable AI resource profile for ~a decade without periodic governance size-refreshes; it does not schedule activation.
+
+**R.7.1 Two scale dials + frozen ratios.** Split every absolute size from §R.0 into three classes:
+
+| Class | Role | Members |
+|---|---|---|
+| **A — scheduled dials** | the *only* growing quantities | `W_res` (resident KV mantissa bytes; base ≈192 MiB), `W_cap` (activation bytes; base ≈2 GiB) |
+| **B — frozen ratios/shape** | never scale | `d_head=128`, `L_lyr=16`, `d_model=4096`, `R=4`, `n_q/d_head=4`, phase-share targets (~30/65/<5%), C/G floor, `f3≤5%` |
+| **C — eternal constants** | never scale, freeze forever | `L=32`, `T_LEAF=1024`, Fiat–Shamir `q=8`, all tags, SHA256d, soundness `2⁻⁶⁴`, **`kRCSegLen=32768`** (§R.7.4) |
+
+Derived dims (recomputed from the dials each height; `round32` = nearest multiple of 32, then `%32==0` asserted — H13):
+
+```
+n_ctx = round32( W_res / (2 · d_head) )
+b_seq = round32( W_cap / (2 · d_model · L_lyr) )
+n_q   = 4 · d_head
+```
+
+At epoch 0 (`height == nMatMulRCHeight`) the dials equal the §R.0 base footprints, so the derived dims are bit-identical to today's frozen table (regression gate for any implementer).
+
+**R.7.2 Pure schedule + ratchet + one-sided brake.** Growth is a deterministic pure function of the header chain up to `height` (like ASERT) — never of the nonce (C4). Per-epoch multipliers live in pre-committed Q16 tables (`nRCGrowthResTableQ16` / `nRCGrowthCapTableQ16`); they are **not** live floats. Control law sketch:
+
+1. `epoch = (height − nMatMulRCHeight) / nRCScaleEpochBlocks` (inert while height unset / below activation).
+2. Start from `(W_res, W_cap) = (W₀_res, W₀_cap)`; for each prior epoch `e`, multiply by the table entry **iff** the brake allows the step, then clamp to absolute hard caps (`nRCScaleHardCapResBytes` / `nRCScaleHardCapCapBytes`).
+3. **Ratchet:** `W` is non-decreasing — a skipped (braked) step leaves the dials unchanged; dials never shrink.
+4. **One-sided brake (pause-only):** compare smoothed chainwork-per-block over the closing epoch (`D_now`) to the trailing ~1 yr max (`D_ref`). Allow the step iff `D_now ≥ (1 − δ)·D_ref` with `δ = nRCBrakeDeltaPct` (PROVISIONAL default 20%). Growth can **only be paused**, never accelerated and never reversed. A miner cannot force growth (schedule is a hard cap) and can only pause it by withholding >δ of global hashrate for a full epoch — huge cost, pause-only payoff that *helps* small machines. No committee, no oracle, no miner-reported telemetry.
+
+PROVISIONAL schedule knobs (inert while `nMatMulRCHeight==INT32_MAX`): epoch length ≈90 d at 144 blk/day (`nRCScaleEpochBlocks=12960`); decaying geometric starting ~`g_res≈1.40/yr`, `g_cap≈1.25/yr`, stepping down ~0.02 every 12 epochs (~3 yr); hard caps 4 GiB KV / 16 GiB activations; table length 40 (~10 yr of quarterly epochs).
+
+**R.7.3 Format-blind ladder.** Consensus names **no** hardware format (FP4 appears nowhere; only the M11×E8M0 alphabet + int64 accumulator + one Extract/stage). Any future format (FP2 / MXFP-next / ternary) needs **zero governance**: write a backend, pass fail-closed byte-exact self-qual at the *live epoch* dims, mine faster. Do not narrow the committed M11 alphabet here (would fork + thin operand entropy + pressure C-16).
+
+**R.7.4 Fixed segmentation (`kRCSegLen=32768`).** For every long reduction whose contraction grows with a dial — Phase-1 `Z=S·V` (`K=n_ctx`) and Phase-2 wgrad `G·Xᵀ` (`K=b_seq`) — partition into consensus-FIXED segments of length `kRCSegLen`. Each segment's exact int64 partial is committed as additional tile-tree leaves (append to the round byte stream before the final tensor; R.4.1 order). Final value = int64 sum of committed partials (associative/exact). The H1 single-Extract rule is **unchanged**: Extract still fires once on the completed sum; segmentation is consensus-fixed, never miner-chosen.
+
+Effects: a Fiat–Shamir spot-check recomputes **one** segment — `O(kRCSegLen · d_head)`, **constant forever** regardless of `n_ctx`/`b_seq` growth (verification O(1) as a DoS pre-filter). Per-partial bound freezes at `2304·kRCSegLen ≈ 2^26.2` (still needs int64 / limb; assert `< 2^62`). Tree depth grows `O(log W)`; `T_LEAF` stays 1024. A REJECT still needs full CPU recompute (R1), which grows linearly with `W` — that is the verifier-floor limit (§R.7.6).
+
+**R.7.5 Epoch asserts + fallback.** After deriving dims, machine-check every §R invariant (dims `%32==0`, `2304·kRCSegLen < 2^62`, C/G reuse-factor ≥ 64, `f3 ≤ 5%`, nonce-independence of dials). On **any** failure: fall back to the **previous epoch's** dims (skip the step) — never fudge values, never crash consensus. Unattended growth is safe iff every epoch that would break an invariant is simply not applied.
+
+**R.7.6 Honest residual (verifier floor).** The question "can the smallest honest full node still replay one episode within a block interval as `W` grows?" is **not** trustlessly observable on-chain. It needs a ~4–5 yr human curve-fit review, and it is the load-bearing reason the **growth ceiling stays human-set** (`nRCScaleHardCap*`). The schedule tracks the durable resource profile mechanically; it does not remove that one human check, by design. All growth constants remain **PROVISIONAL** until that review (and an explicit owner ratification) lands.
+
 ---
 
 ## 4. Threat model, hardness, and soundness blockers

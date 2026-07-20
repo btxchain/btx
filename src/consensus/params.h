@@ -9,6 +9,7 @@
 #include <consensus/amount.h>
 #include <uint256.h>
 
+#include <array>
 #include <chrono>
 #include <limits>
 #include <map>
@@ -496,6 +497,26 @@ struct Params {
      *  tests while production verify always uses the full episode when this is
      *  false and nMatMulRCHeight is live. */
     bool fMatMulRCUseToyDims{false};
+
+    // --- ENC_RC §R.7 scheduled scaling (PROVISIONAL; inert while nMatMulRCHeight==INT32_MAX) ---
+    // All knobs below are owner-set / monetary-adjacent placeholders. Do NOT treat as final.
+    // RCScaleForHeight (separate change) reads these; zero-filled tables must be replaced via
+    // FillDefaultRCGrowthTables before any network that might ever activate ENC_RC.
+    /** Blocks per scale epoch. ~90d at 144 blk/day (90s spacing). PROVISIONAL. */
+    int32_t nRCScaleEpochBlocks{12960};
+    /** ~10yr of quarterly epochs. Table length is consensus-pinned. */
+    static constexpr size_t kRCGrowthTableLen = 40;
+    /** Per-epoch Q16 multipliers (1.0 = 65536). Decaying geometric; PROVISIONAL.
+     *  Defaults filled by FillDefaultRCGrowthTables (zero = misconfigured / no growth). */
+    std::array<int64_t, kRCGrowthTableLen> nRCGrowthResTableQ16{};
+    std::array<int64_t, kRCGrowthTableLen> nRCGrowthCapTableQ16{};
+    /** Absolute ceiling on resident KV dial W_res (4 GiB). PROVISIONAL. */
+    int64_t nRCScaleHardCapResBytes{1LL << 32};
+    /** Absolute ceiling on activation dial W_cap (16 GiB). PROVISIONAL. */
+    int64_t nRCScaleHardCapCapBytes{1LL << 34};
+    /** One-sided brake: pause growth if closing-epoch work fell > this % vs trailing max.
+     *  Pause-only — never accelerates or shrinks. PROVISIONAL. */
+    int32_t nRCBrakeDeltaPct{20};
     /** v4.4-LT Q* Phase B — SEAL-AS-PoW mode (doc/btx-matmul-v4.4-lt-normative-spec.md
      *  "Q* window", doc/btx-matmul-v4.4-lt-adversarial-analysis.md "Phase B").
      *  When true AND DRLT is live, the header's matmul_digest is no longer the
@@ -1105,6 +1126,29 @@ struct Params {
         return std::numeric_limits<int>::max();
     }
 };
+
+/**
+ * Fill nRCGrowth{Res,Cap}TableQ16 with the PROVISIONAL decaying-geometric schedule
+ * from doc §R.7: annual g_res starts ~1.40, g_cap ~1.25; every 12 epochs reduce
+ * annual g by ~0.02 then recompute the quarterly Q16 multiplier
+ * (Q16 = round(g_annual^(1/4) * 65536)). Band-0 values ≈71300 / ≈69300.
+ *
+ * Must be called from every CChainParams constructor so tables are never left
+ * zero-filled. Inert while nMatMulRCHeight==INT32_MAX (public nets keep that).
+ */
+inline void FillDefaultRCGrowthTables(Params& p)
+{
+    // Precomputed Q16 quarterly factors — no runtime float in consensus paths.
+    // bands: epochs [0,12), [12,24), [24,36), [36,40)
+    static constexpr int64_t kResQ16[4] = {71287, 71031, 70773, 70511}; // ≈71300,...
+    static constexpr int64_t kCapQ16[4] = {69296, 69017, 68735, 68449}; // ≈69300,...
+    static_assert(Params::kRCGrowthTableLen == 40);
+    for (size_t e = 0; e < Params::kRCGrowthTableLen; ++e) {
+        const size_t band = (e / 12) < 3 ? (e / 12) : 3;
+        p.nRCGrowthResTableQ16[e] = kResQ16[band];
+        p.nRCGrowthCapTableQ16[e] = kCapQ16[band];
+    }
+}
 
 } // namespace Consensus
 

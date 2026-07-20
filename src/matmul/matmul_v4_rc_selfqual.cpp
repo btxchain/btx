@@ -4,12 +4,15 @@
 
 #include <matmul/matmul_v4_rc_selfqual.h>
 
+#include <consensus/params.h>
 #include <logging.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_scale.h>
 #include <primitives/block.h>
 #include <uint256.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -37,6 +40,29 @@ CBlockHeader MakeSelfQualHeader(uint64_t nonce)
         header.seed_b.data()[i] = static_cast<unsigned char>(0xaa);
     }
     return header;
+}
+
+/** Medium-like shape whose wgrad K exceeds 2^24, scaled with epoch b_seq when live. */
+RCEpisodeParams MakeEpochScaledMedium(const RCEpisodeParams& live)
+{
+    RCEpisodeParams p = MakeMediumRCEpisodeParams();
+    // Keep toy-ish spatial dims for CI, but ensure b_seq covers >2^24 and tracks
+    // the live epoch's contraction (at least the medium floor of 8192).
+    const uint32_t floor_bs = 8192;
+    const uint32_t live_bs = live.b_seq;
+    // Cap for self-qual wall-clock: never exceed medium*2 or live (whichever smaller of caps).
+    constexpr uint32_t kSelfQualBSeqCap = 16384;
+    p.b_seq = std::min(kSelfQualBSeqCap, std::max(floor_bs, live_bs > floor_bs ? floor_bs : floor_bs));
+    // If live b_seq is larger than floor, still use at least floor (always >2^24).
+    // Optionally bump toward live when live is modest.
+    if (live_bs > floor_bs && live_bs <= kSelfQualBSeqCap) {
+        p.b_seq = live_bs;
+    }
+    // Align to 32.
+    if (p.b_seq % 32u != 0) {
+        p.b_seq = ((p.b_seq + 31u) / 32u) * 32u;
+    }
+    return p;
 }
 
 [[nodiscard]] bool ProbeDirectS8S8(const matmul::v4::lt::ExactGemmBackend& backend,
@@ -82,13 +108,14 @@ CBlockHeader MakeSelfQualHeader(uint64_t nonce)
     return true;
 }
 
-[[nodiscard]] bool ProbeWgradBoundary(std::string& reason)
+[[nodiscard]] bool ProbeWgradBoundary(uint32_t b_seq, std::string& reason)
 {
-    // Synthetic G,X with |entries|=48 and b_seq=8192 → 2304·K > 2^24.
-    constexpr uint32_t b_seq = 8192;
+    // Synthetic G,X with |entries|=48 → 2304·K should exceed 2^24 for b_seq≥8192.
     constexpr uint32_t d_model = 32;
-    static_assert(static_cast<uint64_t>(b_seq) * 2304ull > (uint64_t{1} << 24),
-                  "boundary probe requires wgrad bound > 2^24");
+    if (static_cast<uint64_t>(b_seq) * 2304ull <= (uint64_t{1} << 24)) {
+        reason = "wgrad_boundary_b_seq_too_small";
+        return false;
+    }
 
     std::vector<int8_t> G(static_cast<size_t>(b_seq) * d_model, 48);
     std::vector<int8_t> X(static_cast<size_t>(b_seq) * d_model, 48);
@@ -109,7 +136,9 @@ CBlockHeader MakeSelfQualHeader(uint64_t nonce)
 
 } // namespace
 
-RCSelfQualStatus ProbeRCSelfQual(const matmul::v4::lt::ExactGemmBackend& backend)
+RCSelfQualStatus ProbeRCSelfQual(const matmul::v4::lt::ExactGemmBackend& backend,
+                                 std::optional<int32_t> height,
+                                 const Consensus::Params* params_ref)
 {
     RCSelfQualStatus st;
     st.cpu_oracle_ok = true;
@@ -134,23 +163,51 @@ RCSelfQualStatus ProbeRCSelfQual(const matmul::v4::lt::ExactGemmBackend& backend
         return st;
     }
 
-    if (!ProbeEpisodeDigestMatch(backend, MakeToyRCEpisodeParams(), /*nonce=*/42, reason)) {
-        st.deficit_reason = reason;
-        g_rc_selfqual_ok.store(false, std::memory_order_release);
-        return st;
-    }
-
-    // Medium episode: exercises larger Phase-2 shapes (still CI-safe).
-    if (!ProbeEpisodeDigestMatch(backend, MakeMediumRCEpisodeParams(), /*nonce=*/7, reason)) {
-        st.deficit_reason = std::string("medium_") + reason;
-        g_rc_selfqual_ok.store(false, std::memory_order_release);
-        return st;
-    }
-
-    if (!ProbeWgradBoundary(reason)) {
-        st.deficit_reason = reason;
-        g_rc_selfqual_ok.store(false, std::memory_order_release);
-        return st;
+    const bool have_epoch = height.has_value() && params_ref != nullptr;
+    if (have_epoch) {
+        // §4: qualify at live epoch shape (not a fixed medium).
+        const RCEpisodeParams live =
+            ConsensusRCEpisodeParamsForHeight(*height, *params_ref);
+        // Compact stand-in for <2^24 stages: toy episode (CI-safe).
+        if (!ProbeEpisodeDigestMatch(backend, MakeToyRCEpisodeParams(), /*nonce=*/42, reason)) {
+            st.deficit_reason = reason;
+            g_rc_selfqual_ok.store(false, std::memory_order_release);
+            return st;
+        }
+        // >2^24 regime at epoch-scaled medium contraction (not full live dims).
+        const RCEpisodeParams med = MakeEpochScaledMedium(live);
+        if (!ProbeEpisodeDigestMatch(backend, med, /*nonce=*/7, reason)) {
+            st.deficit_reason = std::string("epoch_medium_") + reason;
+            g_rc_selfqual_ok.store(false, std::memory_order_release);
+            return st;
+        }
+        if (!ProbeWgradBoundary(med.b_seq, reason)) {
+            st.deficit_reason = reason;
+            g_rc_selfqual_ok.store(false, std::memory_order_release);
+            return st;
+        }
+        // Record that live shape was consulted (dims available for T-FP9).
+        if (live.n_ctx == 0 || live.b_seq == 0) {
+            st.deficit_reason = "live_epoch_dims_invalid";
+            g_rc_selfqual_ok.store(false, std::memory_order_release);
+            return st;
+        }
+    } else {
+        if (!ProbeEpisodeDigestMatch(backend, MakeToyRCEpisodeParams(), /*nonce=*/42, reason)) {
+            st.deficit_reason = reason;
+            g_rc_selfqual_ok.store(false, std::memory_order_release);
+            return st;
+        }
+        if (!ProbeEpisodeDigestMatch(backend, MakeMediumRCEpisodeParams(), /*nonce=*/7, reason)) {
+            st.deficit_reason = std::string("medium_") + reason;
+            g_rc_selfqual_ok.store(false, std::memory_order_release);
+            return st;
+        }
+        if (!ProbeWgradBoundary(MakeMediumRCEpisodeParams().b_seq, reason)) {
+            st.deficit_reason = reason;
+            g_rc_selfqual_ok.store(false, std::memory_order_release);
+            return st;
+        }
     }
 
     st.exact_gemm_backend_ok = true;

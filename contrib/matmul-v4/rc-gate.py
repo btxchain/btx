@@ -305,16 +305,119 @@ def print_human(summary: dict[str, Any]) -> None:
         )
 
 
+# --- §R.7 projected scale curve (PROVISIONAL; never a raise-height signal) ---
+
+# Mirrors Consensus::FillDefaultRCGrowthTables / RCScaleForHeight (Q16).
+_K_RC_W0_RES = 192 * 1024 * 1024
+_K_RC_W0_CAP = 2 * 1024 * 1024 * 1024
+_K_RC_HEAD = 128
+_K_RC_LAYERS = 16
+_K_RC_MODEL = 4096
+_K_RC_ROUNDS = 4
+_HARD_CAP_RES = 1 << 32
+_HARD_CAP_CAP = 1 << 34
+_RES_Q16 = (71287, 71031, 70773, 70511)
+_CAP_Q16 = (69296, 69017, 68735, 68449)
+
+
+def _round32_bytes(x: int) -> int:
+    if x <= 0:
+        return 0
+    return ((x + 16) // 32) * 32
+
+
+def _mul_q16_round32(w: int, g_q16: int) -> int:
+    if g_q16 <= 0:
+        return w
+    scaled = (w * g_q16 + (1 << 15)) >> 16
+    return _round32_bytes(scaled)
+
+
+def _growth_q16(epoch: int) -> tuple[int, int]:
+    band = min(epoch // 12, 3)
+    return _RES_Q16[band], _CAP_Q16[band]
+
+
+def total_rc_episode_macs(n_q: int, n_ctx: int, d_head: int, L: int, d_model: int, b_seq: int,
+                          rounds: int = _K_RC_ROUNDS) -> int:
+    """Mirror matmul::v4::rc::TotalRCEpisodeMacs."""
+    p1 = 2 * n_q * n_ctx * d_head
+    p2 = 3 * L * b_seq * d_model * d_model
+    return rounds * (p1 + p2)
+
+
+def project_scale_curve(n_epochs: int = 40) -> list[dict[str, Any]]:
+    """Projected W_res/W_cap and verifier-floor estimate for epochs 0..n_epochs-1."""
+    w_res, w_cap = _K_RC_W0_RES, _K_RC_W0_CAP
+    rows: list[dict[str, Any]] = []
+    for e in range(n_epochs):
+        n_ctx = _round32_bytes(w_res // (2 * _K_RC_HEAD)) // 1
+        # RoundToMultipleOf32 on the quotient (not bytes): match C++ DeriveDims.
+        n_ctx = ((w_res // (2 * _K_RC_HEAD) + 16) // 32) * 32
+        b_seq = ((w_cap // (2 * _K_RC_MODEL * _K_RC_LAYERS) + 16) // 32) * 32
+        n_q = 4 * _K_RC_HEAD
+        macs = total_rc_episode_macs(n_q, n_ctx, _K_RC_HEAD, _K_RC_LAYERS, _K_RC_MODEL, b_seq)
+        # Heuristic: 1e9 MAC/s single-thread CPU replay floor.
+        replay_s = macs / 1e9
+        rows.append(
+            {
+                "epoch": e,
+                "W_res": w_res,
+                "W_cap": w_cap,
+                "n_ctx": n_ctx,
+                "b_seq": b_seq,
+                "MACs": macs,
+                "replay_s_heuristic": replay_s,
+            }
+        )
+        if e + 1 < n_epochs:
+            g_res, g_cap = _growth_q16(e)
+            w_res = min(_mul_q16_round32(w_res, g_res), _HARD_CAP_RES)
+            w_cap = min(_mul_q16_round32(w_cap, g_cap), _HARD_CAP_CAP)
+    return rows
+
+
+def print_scale_curve(n_epochs: int, constants: dict[str, Any] | None = None) -> None:
+    print("ENC_RC §R.7 projected scale curve (PROVISIONAL Q16 table)")
+    print("  NOTE: never a signal to raise nMatMulRCHeight (stays INT32_MAX).")
+    if constants:
+        print(f"  harness constants: {sorted(constants.keys())}")
+    rows = project_scale_curve(n_epochs)
+    print(
+        f"  {'epoch':>5}  {'W_res':>14}  {'W_cap':>14}  {'n_ctx':>10}  "
+        f"{'b_seq':>8}  {'MACs':>16}  {'replay_s~':>10}"
+    )
+    for r in rows:
+        print(
+            f"  {r['epoch']:5d}  {r['W_res']:14d}  {r['W_cap']:14d}  "
+            f"{r['n_ctx']:10d}  {r['b_seq']:8d}  {r['MACs']:16d}  "
+            f"{r['replay_s_heuristic']:10.2f}"
+        )
+    print(
+        "  verifier-floor: replay_s ≈ MACs / 1e9 (single-thread heuristic). "
+        "Human curve-fit review remains the load-bearing ceiling check."
+    )
+
+
+def _load_curve_constants(reports: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for rep in reports:
+        c = rep.get("rc_scale_constants") or rep.get("scale_constants")
+        if isinstance(c, dict) and c:
+            return c
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=(
             "Aggregate ENC_RC rc-episode-harness JSONs into a fail-closed "
-            "GO/PARTIAL/NO-GO verdict (doc §8 / §R)."
+            "GO/PARTIAL/NO-GO verdict (doc §8 / §R). Optionally print §R.7 "
+            "projected W_res/W_cap curve."
         ),
     )
     ap.add_argument(
         "inputs",
-        nargs="+",
+        nargs="*",
         metavar="PATH",
         help="JSON file(s) and/or directories containing *.json reports",
     )
@@ -324,11 +427,37 @@ def main() -> int:
         metavar="PATH",
         help="Write machine-readable summary JSON (default: summary.json)",
     )
+    ap.add_argument(
+        "--curve-epochs",
+        type=int,
+        default=16,
+        metavar="N",
+        help="Print projected W_res/W_cap for epochs 0..N-1 (default: 16)",
+    )
+    ap.add_argument(
+        "--curve-only",
+        action="store_true",
+        help="Only print the scale curve (no JSON reports required)",
+    )
     args = ap.parse_args()
+
+    if args.curve_only:
+        print_scale_curve(max(1, args.curve_epochs))
+        return 0
+
+    if not args.inputs:
+        die("no JSON reports found (pass paths, or use --curve-only)")
 
     reports = load_reports(args.inputs)
     summary = aggregate(reports)
     print_human(summary)
+    print_scale_curve(max(1, args.curve_epochs), _load_curve_constants(reports))
+    summary["scale_curve"] = project_scale_curve(max(1, args.curve_epochs))
+    summary["consensus_note"] = (
+        "nMatMulRCHeight remains INT32_MAX; ENC_RC activation is NO-GO. "
+        "Offline tally never wires consensus and never recommends raising "
+        "height from toy measurements (doc §8 / §9 / §R.7)."
+    )
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

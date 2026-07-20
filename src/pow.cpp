@@ -4088,7 +4088,8 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
     auto bnTarget{DeriveTarget(header.nBits, params.powLimit)};
     if (!bnTarget) return finish(false);
 
-    const matmul::v4::rc::RCEpisodeParams params_rc = matmul::v4::rc::ResolveRCEpisodeParams(params);
+    const matmul::v4::rc::RCEpisodeParams params_rc =
+        matmul::v4::rc::ResolveRCEpisodeParams(params, block_height);
     if (!matmul::v4::rc::ValidateRCEpisodeParams(params_rc)) return finish(false);
 
     const uint256 digest =
@@ -5687,7 +5688,8 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
         freivalds_payload_out->clear();
     }
 
-    const matmul::v4::rc::RCEpisodeParams params_rc = matmul::v4::rc::ResolveRCEpisodeParams(params);
+    const matmul::v4::rc::RCEpisodeParams params_rc =
+        matmul::v4::rc::ResolveRCEpisodeParams(params, block_height);
     if (!matmul::v4::rc::ValidateRCEpisodeParams(params_rc)) {
         RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
         return false;

@@ -34,20 +34,37 @@ struct Params;
 
 namespace matmul::v4::rc {
 
-/** Consensus structural parameters (R.0) — fixed by height, identical per nonce. */
+/**
+ * Consensus structural parameters (R.0) — epoch-0 / Class B frozen bases.
+ * Equal to EpisodeParamsFromScale({kRCW0Res, kRCW0Cap}) in matmul_v4_rc_scale.h.
+ * Class A dials (W_res/W_cap) may grow with height; these literals stay the
+ * epoch-0 shape and the frozen ratios (d_head, L_lyr, d_model, rounds, T_leaf).
+ */
 inline constexpr uint32_t kRCRounds = 4;
 inline constexpr uint32_t kRCHeadDim = 128;
-inline constexpr uint32_t kRCQueryRows = 512;
-inline constexpr uint32_t kRCContextLen = 786'432; // 0.75 Mi
+inline constexpr uint32_t kRCQueryRows = 512;       // == 4 * kRCHeadDim
+inline constexpr uint32_t kRCContextLen = 786'432; // 0.75 Mi; == W_res/(2*d_head) at epoch 0
 inline constexpr uint32_t kRCLayers = 16;
 inline constexpr uint32_t kRCModelDim = 4096;
-inline constexpr uint32_t kRCBatchSeq = 16'384;
-inline constexpr uint32_t kRCTileLeafBytes = 1024; // 32×32 int8
+inline constexpr uint32_t kRCBatchSeq = 16'384; // == W_cap/(2*d_model*L_lyr) at epoch 0
+inline constexpr uint32_t kRCTileLeafBytes = 1024; // 32×32 int8 (Class C)
 
 /** Max K-chunk for wgrad ExactGemm panels: 2304·K < 2^24 (FP32-mantissa ceiling). */
 inline constexpr uint32_t kRCWgradExactChunk = 4096;
 static_assert(static_cast<uint64_t>(kRCWgradExactChunk) * 2304ull < (uint64_t{1} << 24),
               "wgrad ExactGemm chunk must stay under the 2^24 FP32-exact ceiling");
+
+/** Fixed consensus K-segment length for Phase-1 Z=S·V and Phase-2 wgrad G·Xᵀ
+ *  (§R.7 / §3). Never scales with epoch dials. Each segment's exact int64
+ *  partial is committed as additional tile-tree leaves (LE int64 row-major)
+ *  before the final Extracted int8 tensor. ExtractMX still fires once on the
+ *  sum of partials (H1). Per-segment bound 2304·kRCSegLen ≈ 2^26.2 still
+ *  needs int64 (or kRCWgradExactChunk sub-chunking inside a segment for
+ *  FP32 backends). Class C eternal — also exported for scale schedule. */
+inline constexpr uint32_t kRCSegLen = 32768;
+static_assert(static_cast<uint64_t>(kRCSegLen) * 2304ull < (uint64_t{1} << 62),
+              "2304·kRCSegLen must fit in signed int64 headroom (< 2^62)");
+static_assert((kRCSegLen % 32) == 0, "kRCSegLen must be divisible by 32 (MX align)");
 
 static_assert(kRCHeadDim % 32 == 0, "kRCHeadDim must be divisible by 32");
 static_assert(kRCQueryRows % 32 == 0, "kRCQueryRows must be divisible by 32");
@@ -106,7 +123,9 @@ struct RCEpisodeTiming {
 
 struct RCRoundTranscript {
     uint256 round_root{};
-    /** Round byte stream (R.4.1); filled when collected via out_rounds. */
+    /** Round byte stream (R.4.1 + §3 segment leaves); filled when collected via
+     *  out_rounds. Layout: [Z_seg0..Z_segN LE int64] ‖ Z_int8 ‖ for each layer
+     *  (X[l+1] ‖ G[l] ‖ [D_seg0..D_segM LE int64] ‖ D_int8). */
     std::vector<int8_t> stream{};
 };
 
@@ -117,14 +136,19 @@ struct RCMerkleProof {
 
 [[nodiscard]] bool ValidateRCEpisodeParams(const RCEpisodeParams& p);
 
+/** Epoch-0 consensus dims: EpisodeParamsFromScale({kRCW0Res, kRCW0Cap}). */
 [[nodiscard]] RCEpisodeParams DefaultConsensusRCEpisodeParams();
 /** Tiny dims for unit tests — every matrix dim divisible by 32 (H13). */
 [[nodiscard]] RCEpisodeParams MakeToyRCEpisodeParams();
 /** Medium dims for self-qual: wgrad contraction exceeds 2^24 (b_seq ≥ 8192). */
 [[nodiscard]] RCEpisodeParams MakeMediumRCEpisodeParams();
+/** Segmentation exercise: n_ctx = kRCSegLen+32 so Phase-1 spans two segments;
+ *  Phase-2 stays tiny (b_seq < kRCSegLen → one D segment). */
+[[nodiscard]] RCEpisodeParams MakeSegTestRCEpisodeParams();
 /** Consensus checker/miner dims: toy when Params::fMatMulRCUseToyDims (regtest
- *  only), else DefaultConsensusRCEpisodeParams(). */
-[[nodiscard]] RCEpisodeParams ResolveRCEpisodeParams(const Consensus::Params& p);
+ *  only), else ConsensusRCEpisodeParamsForHeight(height, p) — see
+ *  matmul_v4_rc_scale.h for the height-selected schedule API. */
+[[nodiscard]] RCEpisodeParams ResolveRCEpisodeParams(const Consensus::Params& p, int32_t height);
 
 /** Sole consensus ground truth (R.5.1). Pure int64 integer by default.
  *  Optional `gemm` may accelerate Phase-2 s8xs8 stages (bound < 2^24) when the
@@ -186,6 +210,27 @@ struct RCMerkleProof {
 [[nodiscard]] std::vector<int64_t> TestHelperGemmGXtViaChunkedExact(
     const std::vector<int8_t>& G, const std::vector<int8_t>& X, uint32_t b_seq,
     uint32_t d_model, const matmul::v4::lt::ExactGemmBackend& gemm = {});
+
+/** Segmented wgrad: returns per-kRCSegLen int64 partials whose sum equals
+ *  TestHelperGemmGXtInt64. */
+[[nodiscard]] std::vector<std::vector<int64_t>> TestHelperGemmGXtSegmented(
+    const std::vector<int8_t>& G, const std::vector<int8_t>& X, uint32_t b_seq,
+    uint32_t d_model);
+
+/** Bytes of one Phase-1 Z segment partial (n_q × d_head int64 LE). */
+[[nodiscard]] inline size_t RCSegZBytes(const RCEpisodeParams& p)
+{
+    return static_cast<size_t>(p.n_q) * p.d_head * sizeof(int64_t);
+}
+/** Bytes of one Phase-2 D segment partial (d_model × d_model int64 LE). */
+[[nodiscard]] inline size_t RCSegDBytes(const RCEpisodeParams& p)
+{
+    return static_cast<size_t>(p.d_model) * p.d_model * sizeof(int64_t);
+}
+[[nodiscard]] inline uint32_t RCNumSegs(uint32_t k_len)
+{
+    return k_len == 0 ? 0u : (k_len + kRCSegLen - 1u) / kRCSegLen;
+}
 
 } // namespace matmul::v4::rc
 

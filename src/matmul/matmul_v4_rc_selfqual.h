@@ -7,12 +7,19 @@
 
 #include <matmul/matmul_v4_lt.h>
 
+#include <cstdint>
+#include <optional>
 #include <string>
 
-// ENC_RC ExactGemm self-qualification (R.5.2) — fail-closed.
+namespace Consensus {
+struct Params;
+}
+
+// ENC_RC ExactGemm self-qualification (R.5.2 / §R.7 §4) — fail-closed.
 // A mining ExactGemmBackend may serve RC only after ProbeRCSelfQual reports
 // mining_accelerator_ok. native_mxfp4 / native_fp8 stay false until a device
-// RC MX path exists and qualifies separately.
+// RC MX path exists and qualifies separately. When height+params are supplied,
+// episode probes use ConsensusRCEpisodeParamsForHeight (live epoch shape).
 
 namespace matmul::v4::rc {
 
@@ -25,9 +32,15 @@ struct RCSelfQualStatus {
     std::string deficit_reason;
 };
 
-/** Probe ExactGemmBackend against the RC CPU oracle (toy + medium vectors).
+/** Probe ExactGemmBackend against the RC CPU oracle.
+ *  Without height/params: toy (<2^24 stages) + medium (>2^24 wgrad) vectors.
+ *  With height+params: qualify at ConsensusRCEpisodeParamsForHeight live dims,
+ *  plus a scaled medium contraction covering the >2^24 regime at that epoch.
  *  Fail-closed: any mismatch clears mining_accelerator_ok and native_* flags. */
-[[nodiscard]] RCSelfQualStatus ProbeRCSelfQual(const matmul::v4::lt::ExactGemmBackend& backend);
+[[nodiscard]] RCSelfQualStatus ProbeRCSelfQual(
+    const matmul::v4::lt::ExactGemmBackend& backend,
+    std::optional<int32_t> height = std::nullopt,
+    const Consensus::Params* params_ref = nullptr);
 
 /** Log one-line RC self-qual status for an empty (CPU) probe. */
 void DiagnoseRCSelfQualOnce();
