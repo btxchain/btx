@@ -11,6 +11,7 @@
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_datacenter.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <span.h>
 
@@ -335,7 +336,9 @@ DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, i
     }
 
     for (uint32_t ell = 0; ell < params.lobes; ++ell) {
-        const uint32_t page_id = (barrier + ell) % params.bank_pages;
+        // Distributed path stays on legacy single-page schedule (digest-stable).
+        const uint32_t page_id =
+            SelectCoupledBankPageIds(barrier, ell, params, sigma, /*full=*/false).front();
         auto page = DeriveCoupledBankPage(header, height, page_id, params);
         std::vector<int64_t> row(params.lobe_width, 0);
         LobeLocalGemm(state.data() + ell * params.lobe_width, page, params.lobe_width, row.data(),
@@ -605,6 +608,45 @@ bool IsBalancedPermutation(const std::array<uint32_t, kRCCoupStateBytes>& pi)
         std::vector<uint32_t>(pi.begin(), pi.end()), kRCCoupStateBytes);
 }
 
+std::vector<uint32_t> SelectCoupledBankPageIds(uint32_t barrier, uint32_t lobe,
+                                               const RCCoupParams& params, const uint256& sigma,
+                                               bool full_bank_schedule)
+{
+    assert(params.bank_pages > 0);
+    assert(barrier < params.barriers || params.barriers == 0);
+    assert(lobe < params.lobes || params.lobes == 0);
+    if (!full_bank_schedule) {
+        return {static_cast<uint32_t>((barrier + lobe) % params.bank_pages)};
+    }
+
+    // Frozen episode-global balanced permutation of [0, bank_pages).
+    // Slot (barrier, lobe, k) → perm[(barrier*lobes+lobe)*P + k] (mod bank_pages).
+    // Production: 8×8×12 = 768 covers every page exactly once when
+    // bank_pages == 768.
+    const uint32_t P = dc::kRCCoupPagesPerBarrierLobe;
+    const uint256 perm_seed =
+        Sha256TaggedU32(kRCCoupFullBankTag, sizeof(kRCCoupFullBankTag) - 1, sigma,
+                        params.bank_pages);
+    ShaXof xof(perm_seed);
+    std::vector<uint32_t> perm(params.bank_pages);
+    for (uint32_t i = 0; i < params.bank_pages; ++i) {
+        perm[i] = i;
+    }
+    for (uint32_t i = params.bank_pages - 1; i > 0; --i) {
+        const uint32_t j = xof.NextU32() % (i + 1);
+        const uint32_t tmp = perm[i];
+        perm[i] = perm[j];
+        perm[j] = tmp;
+    }
+    const uint64_t base =
+        (static_cast<uint64_t>(barrier) * params.lobes + lobe) * static_cast<uint64_t>(P);
+    std::vector<uint32_t> out(P);
+    for (uint32_t k = 0; k < P; ++k) {
+        out[k] = perm[static_cast<size_t>((base + k) % params.bank_pages)];
+    }
+    return out;
+}
+
 uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t height,
                                         const RCCoupOptions& options)
 {
@@ -704,19 +746,31 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
 
         std::vector<int64_t> acc(n, 0);
 
-        // C3.a — local exact int8 GEMM per lobe vs epoch bank page (fixed work).
+        // C3.a — local exact int8 GEMM per lobe vs epoch bank page(s).
         // Consensus lobe order is always 0..L-1 (scheduling-invariant digest).
+        // Legacy: one page (barrier+lobe)%bank_pages. Full schedule (gated OFF):
+        // accumulate int64 contributions over P pages, then Extract once below.
+        const bool full_sched =
+            options.full_bank_schedule || dc::RCCoupFullBankScheduleActive();
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
-            const uint32_t page_id = (b + ell) % params.bank_pages;
-            if (streamed) {
-                auto page = DeriveCoupledBankPage(header, height, page_id, params);
-                MaybeZeroSkipPage(page, page_id, options);
-                LobeLocalGemm(state.data() + ell * params.lobe_width, page, params.lobe_width,
-                              acc.data() + ell * params.lobe_width, gemm);
-                // Drop page immediately (do not retain full bank).
-            } else {
-                LobeLocalGemm(state.data() + ell * params.lobe_width, pages[page_id],
-                              params.lobe_width, acc.data() + ell * params.lobe_width, gemm);
+            const auto page_ids =
+                SelectCoupledBankPageIds(b, ell, params, sigma, full_sched);
+            int64_t* dest = acc.data() + ell * params.lobe_width;
+            for (uint32_t page_id : page_ids) {
+                std::vector<int64_t> partial(params.lobe_width, 0);
+                if (streamed) {
+                    auto page = DeriveCoupledBankPage(header, height, page_id, params);
+                    MaybeZeroSkipPage(page, page_id, options);
+                    LobeLocalGemm(state.data() + ell * params.lobe_width, page,
+                                  params.lobe_width, partial.data(), gemm);
+                    // Drop page immediately (do not retain full bank).
+                } else {
+                    LobeLocalGemm(state.data() + ell * params.lobe_width, pages[page_id],
+                                  params.lobe_width, partial.data(), gemm);
+                }
+                for (uint32_t c = 0; c < params.lobe_width; ++c) {
+                    dest[c] += partial[c];
+                }
             }
         }
 

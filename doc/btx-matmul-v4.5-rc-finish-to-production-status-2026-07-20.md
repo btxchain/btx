@@ -49,8 +49,8 @@ against Stages §§1–5. It does **not** raise height.
 |---|---|
 | Why | LT bounds &lt; 2^24 do **not** transfer to RC Z≈2^30.76 / wgrad on **any** vendor |
 | Plan | `doc/btx-matmul-v4.5-rc-native-fp4-ozaki-plan-2026-07-20.md` |
-| Scaffold | `src/matmul/matmul_v4_rc_mx_ozaki.{h,cpp}` — fail-closed; `IsRcOzakiMxfp4Qualified() == false` |
-| Status | **PARKED / scaffolded** — no RC `native_mxfp4` flip until Ozaki quals vs int64 at consensus dims |
+| Scaffold | `src/matmul/matmul_v4_rc_mx_ozaki.{h,cpp}` + `src/cuda/matmul_v4_rc_mx_ozaki_native.{h,cu,link.cpp}` — ExactGemm panels vs native MXFP4 honesty split |
+| Status | **IMPLEMENTING** — Exact panels may qualify for mining accel; `native_mxfp4_qualified` only after block-scaled MXFP4 device path (`mxfp4_blockscaled_device`) quals vs int64 (SM100/SM120 separate latches). Heights stay `INT32_MAX`. |
 
 ### 1.C — Staging telemetry diagnosis
 
@@ -151,7 +151,7 @@ Independent of parked §R.7 `kRCGrowthScheduleEnabled=false`.
 | LT device-pointer MX (CUDA) | **code-complete**; peak_ready fail-closed until resident oracle at prod dims |
 | HIP D1–D7 + D-MFMA | **code-complete**; native-MX fail-closed until compile-gate + oracle |
 | Metal resident MX | **fail-closed** stub entry |
-| RC Ozaki | **scaffolded / fail-closed** until consensus-dim qual |
+| RC Ozaki | **IMPLEMENTING** — Exact panels vs MXFP4 honesty split; native_* only after device MXFP4 qual |
 | Succinct proof (Fp2+FRI+LogUp+real episode+shadow+shrink) | **code-complete scaffold**; NOT production-complete / NOT audited |
 | Coupled + Stage F | **inert / provisional** behind INT32_MAX / `kRCThreeAxisScheduleEnabled=false` |
 | Stage H CPU suites | **green** (115 cases in RC/GKR/coupled/LT aggregate run) |

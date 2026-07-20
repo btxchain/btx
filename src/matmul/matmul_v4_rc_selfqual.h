@@ -26,7 +26,8 @@ namespace matmul::v4::rc {
 struct RCSelfQualStatus {
     bool cpu_oracle_ok{true};
     bool exact_gemm_backend_ok{false};
-    // Always false until Ozaki MXFP4 quals (Amendment 1.B) — LT native does not carry.
+    // True only when IsRcOzakiMxfp4Qualified() (real MXFP4 device path). ExactGemm
+    // Ozaki panels alone never set this. LT native does not carry.
     bool native_mxfp4_qualified{false};
     bool native_fp8_qualified{false};
     bool mining_accelerator_ok{false}; // true only if exact_gemm_backend_ok

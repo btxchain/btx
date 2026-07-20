@@ -150,12 +150,18 @@ class BTXMatMulRCActivation(BitcoinTestFramework):
         stale_tip = tip_hash
         node0.invalidateblock(stale_tip)
         assert_equal(node0.getblockcount(), tip_height - 1)
+        # ENC_RC_COUPLED mining is seed-deterministic from (prev, time, …). Without
+        # advancing time, remine rebuilds the identical invalidated tip →
+        # ProcessNewBlock duplicate-invalid. Advance mocktime past MTP.
+        parent = node0.getblock(node0.getbestblockhash())
+        node0.setmocktime(parent["time"] + 600)
         self.generate(node0, 2, sync_fun=self.no_op)
         self._wait_peer_tip(tip_height + 1)
         assert node0.getbestblockhash() != stale_tip
         assert_equal(node0.getbestblockhash(), node1.getbestblockhash())
         challenge = node1.getmatmulchallenge()
         assert_equal(challenge["matmul"]["encoding_profile"], "ENC-RC-COUPLED")
+        node0.setmocktime(0)
 
         self.log.info("Restart validating peer; tip and ENC-RC-COUPLED profile persist")
         tip_after_reorg = node0.getbestblockhash()

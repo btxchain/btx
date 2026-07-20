@@ -619,10 +619,10 @@ BOOST_AUTO_TEST_CASE(rc_coup_device_probe_skip_without_gpu)
         BOOST_TEST_MESSAGE("RC coupled ExactGemm device path provider=" << probe.provider);
     }
 
-    // Amendment 1.B: coupled ExactGemm never implies RC native MXFP4 / Ozaki.
-    BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
+    // Amendment 1.B: coupled ExactGemm never implies RC native MXFP4 without
+    // a qualified Ozaki MXFP4 device path (separate from ExactGemm panels).
     const auto st = rc::ProbeRCSelfQual(matmul_v4::accel::MakeResolvedExactGemmBackendForRC());
-    BOOST_CHECK(!st.native_mxfp4_qualified);
+    BOOST_CHECK_EQUAL(st.native_mxfp4_qualified, rc::IsRcOzakiMxfp4Qualified());
     BOOST_CHECK(!st.native_fp8_qualified);
 }
 

@@ -448,6 +448,8 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc.cpp
   matmul/matmul_v4_rc_coupled.cpp
   matmul/matmul_v4_rc_coupled_device.cpp
+  matmul/matmul_v4_rc_batch.cpp
+  matmul/matmul_v4_rc_datacenter.cpp
   matmul/matmul_v4_rc_distributed.cpp
   matmul/matmul_v4_rc_transcript.cpp
   matmul/matmul_v4_rc_mx_layout.cpp
@@ -527,6 +529,12 @@ if(NOT (BTX_BMX4C_CUTLASS_MXFP4 AND BTX_ENABLE_CUDA_EXPERIMENTAL))
 endif()
 if(NOT (BTX_BUILD_LT_CUTLASS_MXFP4 AND BTX_ENABLE_CUDA_EXPERIMENTAL))
   target_sources(bitcoin_common PRIVATE cuda/matmul_v4_lt_cutlass_mxfp4_link.cpp)
+endif()
+# RC Ozaki CUDA panels: honesty stub when CUDA experimental is OFF. The real
+# TU (matmul_v4_rc_mx_ozaki_native.cu) is added to btx_matmul_backend below.
+if(NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
+  target_sources(bitcoin_common PRIVATE cuda/matmul_v4_rc_mx_ozaki_native_link.cpp)
+  target_sources(bitcoin_common PRIVATE cuda/matmul_v4_rc_episode_context_link.cpp)
 endif()
 target_link_libraries(bitcoin_common
   PUBLIC
@@ -751,6 +759,12 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     # MX qualification remains a runtime, oracle-checked operation.
     cuda/matmul_v4_lt_mx_native.cu
     cuda/matmul_v4_lt_tensor_gemm.cu
+    # ENC_RC Amendment 1.B — Ozaki K-panel ExactGemm (LaunchGemmS8S8) → int64.
+    # Replaces cuda/matmul_v4_rc_mx_ozaki_native_link.cpp (not added when CUDA ON).
+    cuda/matmul_v4_rc_mx_ozaki_native.cu
+    # ENC_RC datacenter episode arena (cudaMallocAsync + Graphs scaffold).
+    # Replaces cuda/matmul_v4_rc_episode_context_link.cpp when CUDA ON.
+    cuda/matmul_v4_rc_episode_context.cu
   )
   if(BTX_BMX4C_CUTLASS_MXFP4 OR BTX_BUILD_LT_CUTLASS_MXFP4)
     set(_btx_cutlass_inc "")

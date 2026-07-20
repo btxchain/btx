@@ -3564,6 +3564,13 @@ bool ShouldIncludeMatMulFreivaldsPayloadForMining(int32_t block_height, const Co
     // the seal from the header. Asking the solver for a v4 product payload here
     // makes GenerateBlock reject its own valid Phase-B winner as "missing".
     if (params.IsMatMulLTSealAsPoWActive(block_height)) return false;
+    // ENC_RC / ENC_RC_COUPLED are DIGEST_RECOMPUTE with NO Freivalds sketch at
+    // all (episode / coupled-puzzle digest only). Unlike ENC-DR Phase A, the
+    // RC solvers never write matrix_c_data — requiring a payload here makes
+    // GenerateBlock reject its own valid RC/coupled winner (F6 regtest path).
+    if (params.IsMatMulRCCoupledActive(block_height) || params.IsMatMulRCActive(block_height)) {
+        return false;
+    }
     // MatMul v4 (spec §G.3): v4 blocks are always product-committed and the
     // C payload is always required, independent of the legacy
     // fMatMulFreivaldsEnabled / fMatMulRequireProductPayload flags.

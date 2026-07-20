@@ -1335,56 +1335,146 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_production_boundary_ci_safe)
     }
 }
 
-BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_fail_closed_until_wired)
+BOOST_AUTO_TEST_CASE(rc_ozaki_exact_panels_qualify_and_match_oracle)
 {
-    // Amendment 1.B: RC native MXFP4 stays false until Ozaki qualifies.
-    // Existing ProbeRCSelfQual / coupled ExactGemm paths are already fail-closed
-    // for native_*; this asserts the Ozaki scaffold + probe stay locked.
-    BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
-    const auto oz = rc::ProbeRcOzakiMxfp4Status();
-    BOOST_CHECK(!oz.qualified);
-    BOOST_CHECK(!oz.attempted);
-    BOOST_CHECK(!oz.deficit_reason.empty());
+    // ExactGemm K-panel Ozaki must qualify on CPU (and CUDA IMMA when present).
+    rc::ResetRcOzakiQualForTest();
+    BOOST_REQUIRE(rc::SelfQualifyRcOzakiExactPanelsOnce());
+    BOOST_CHECK(rc::IsRcOzakiExactPanelsQualified());
 
-    std::vector<int8_t> L(64, 1), R(64, 1);
-    std::vector<int64_t> oz_out;
-    BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, 8, 8, 8, oz_out));
-    BOOST_CHECK(oz_out.empty());
-
-    // CPU limb-split reference matches dense int64 on a small panel.
-    constexpr uint32_t rows = 8, inner = 64, cols = 8;
-    L.assign(static_cast<size_t>(rows) * inner, 0);
-    R.assign(static_cast<size_t>(inner) * cols, 0);
-    for (uint32_t i = 0; i < rows * inner; ++i) {
-        L[i] = static_cast<int8_t>((static_cast<int32_t>(i) % 13) - 6);
-    }
-    for (uint32_t i = 0; i < inner * cols; ++i) {
-        R[i] = static_cast<int8_t>((static_cast<int32_t>(i * 5) % 11) - 5);
-    }
-    std::vector<int64_t> dense(static_cast<size_t>(rows) * cols, 0);
-    for (uint32_t r = 0; r < rows; ++r) {
-        for (uint32_t c = 0; c < cols; ++c) {
-            int64_t acc = 0;
-            for (uint32_t k = 0; k < inner; ++k) {
-                acc += static_cast<int64_t>(L[static_cast<size_t>(r) * inner + k]) *
-                       static_cast<int64_t>(R[static_cast<size_t>(k) * cols + c]);
+    auto DenseOracle = [](const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                          uint32_t rows, uint32_t inner, uint32_t cols) {
+        std::vector<int64_t> dense(static_cast<size_t>(rows) * cols, 0);
+        for (uint32_t r = 0; r < rows; ++r) {
+            for (uint32_t c = 0; c < cols; ++c) {
+                int64_t acc = 0;
+                for (uint32_t k = 0; k < inner; ++k) {
+                    acc += static_cast<int64_t>(L[static_cast<size_t>(r) * inner + k]) *
+                           static_cast<int64_t>(R[static_cast<size_t>(k) * cols + c]);
+                }
+                dense[static_cast<size_t>(r) * cols + c] = acc;
             }
-            dense[static_cast<size_t>(r) * cols + c] = acc;
+        }
+        return dense;
+    };
+
+    constexpr uint32_t rows = 8, cols = 8;
+    for (uint32_t inner : {8u, 4095u, 4096u, 4097u, 8192u}) {
+        std::vector<int8_t> L(static_cast<size_t>(rows) * inner);
+        std::vector<int8_t> R(static_cast<size_t>(inner) * cols);
+        for (uint32_t i = 0; i < rows * inner; ++i) {
+            L[i] = static_cast<int8_t>((static_cast<int32_t>(i) % 13) - 6);
+        }
+        for (uint32_t i = 0; i < inner * cols; ++i) {
+            R[i] = static_cast<int8_t>((static_cast<int32_t>(i * 5) % 11) - 5);
+        }
+        std::vector<int64_t> out;
+        BOOST_REQUIRE(rc::TryRcOzakiExactPanelsGemmS8S8Int64(L, R, rows, inner, cols, out));
+        BOOST_CHECK(out == DenseOracle(L, R, rows, inner, cols));
+    }
+
+    // Adversarial max ±M11/E8M0 vectors (always, including CPU Exact panels).
+    for (uint8_t e : {uint8_t{0}, uint8_t{1}, uint8_t{2}, uint8_t{3}}) {
+        const int32_t mag = 6 * (1 << e);
+        std::vector<int8_t> L(static_cast<size_t>(rows) * 4096u);
+        std::vector<int8_t> R(static_cast<size_t>(4096u) * cols);
+        for (size_t i = 0; i < L.size(); ++i) {
+            L[i] = static_cast<int8_t>(((i + e) & 1u) ? -mag : mag);
+        }
+        for (size_t i = 0; i < R.size(); ++i) {
+            R[i] = static_cast<int8_t>(((i * 3u + e) & 1u) ? -mag : mag);
+        }
+        std::vector<int64_t> out;
+        BOOST_REQUIRE(rc::TryRcOzakiExactPanelsGemmS8S8Int64(L, R, rows, 4096u, cols, out));
+        BOOST_CHECK(out == DenseOracle(L, R, rows, 4096u, cols));
+    }
+
+    // Exact panels must not imply native MXFP4 without a real MX device path.
+    const auto oz = rc::ProbeRcOzakiMxfp4Status();
+    BOOST_CHECK(oz.exact_panels_qualified);
+    if (!oz.qualified) {
+        BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
+        std::vector<int8_t> L(64, 1), R(64, 1);
+        std::vector<int64_t> oz_out;
+        BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, 8, 8, 8, oz_out));
+    }
+
+    // LT native must never be copied into RC self-qual.
+    const auto st_cpu = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
+    BOOST_CHECK_EQUAL(st_cpu.native_mxfp4_qualified, rc::IsRcOzakiMxfp4Qualified());
+    BOOST_CHECK(!st_cpu.native_fp8_qualified);
+}
+
+BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_native_gate)
+{
+    // Native MXFP4: only true after block-scaled device path quals (SM100/SM120).
+    // CI without Blackwell keeps native_* false; ExactGemm Ozaki may still be on.
+    rc::ResetRcOzakiQualForTest();
+    const auto oz = rc::ProbeRcOzakiMxfp4Status();
+    if (!rc::IsRcOzakiMxfp4Qualified()) {
+        BOOST_CHECK(!oz.qualified);
+        BOOST_CHECK(oz.attempted);
+        BOOST_CHECK(!oz.deficit_reason.empty());
+        std::vector<int8_t> L(64, 6), R(64, -6);
+        std::vector<int64_t> oz_out;
+        BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, 8, 8, 8, oz_out));
+        BOOST_CHECK(oz_out.empty());
+        const auto st_cpu = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
+        BOOST_CHECK(!st_cpu.native_mxfp4_qualified);
+        BOOST_CHECK(!st_cpu.native_fp8_qualified);
+        return;
+    }
+    BOOST_CHECK(oz.attempted);
+    BOOST_CHECK(oz.qualified);
+    BOOST_CHECK(oz.backend.find("mxfp4") != std::string::npos);
+    BOOST_CHECK(oz.backend.find("exactgemm") == std::string::npos);
+    BOOST_CHECK(oz.arch_key.find("sm_10") != std::string::npos ||
+                oz.arch_key.find("sm_12") != std::string::npos);
+
+    constexpr uint32_t rows = 8, cols = 8;
+    static constexpr int8_t kM11[] = {0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6};
+    for (uint32_t inner : {8u, 4095u, 4096u, 4097u, 8192u}) {
+        std::vector<int8_t> L(static_cast<size_t>(rows) * inner);
+        std::vector<int8_t> R(static_cast<size_t>(inner) * cols);
+        for (uint32_t r = 0; r < rows; ++r) {
+            for (uint32_t k = 0; k < inner; ++k) {
+                const uint8_t e = static_cast<uint8_t>((k / 32u) % 4);
+                L[static_cast<size_t>(r) * inner + k] =
+                    static_cast<int8_t>(kM11[(r + k) % 11] * (1 << e));
+            }
+        }
+        for (uint32_t k = 0; k < inner; ++k) {
+            for (uint32_t c = 0; c < cols; ++c) {
+                const uint8_t e = static_cast<uint8_t>((k / 32u + 1) % 4);
+                R[static_cast<size_t>(k) * cols + c] =
+                    static_cast<int8_t>(kM11[(c + k) % 11] * (1 << e));
+            }
+        }
+        std::vector<int64_t> dense(static_cast<size_t>(rows) * cols, 0);
+        for (uint32_t r = 0; r < rows; ++r) {
+            for (uint32_t c = 0; c < cols; ++c) {
+                int64_t acc = 0;
+                for (uint32_t k = 0; k < inner; ++k) {
+                    acc += static_cast<int64_t>(L[static_cast<size_t>(r) * inner + k]) *
+                           static_cast<int64_t>(R[static_cast<size_t>(k) * cols + c]);
+                }
+                dense[static_cast<size_t>(r) * cols + c] = acc;
+            }
+        }
+        std::vector<int64_t> out;
+        BOOST_REQUIRE(rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, rows, inner, cols, out));
+        BOOST_CHECK(out == dense);
+        // Corrupted device output must fail the equality gate.
+        if (!out.empty()) {
+            auto bad = out;
+            bad[0] += 1;
+            BOOST_CHECK(bad != dense);
         }
     }
-    std::vector<int64_t> limb;
-    BOOST_REQUIRE(rc::RcOzakiCpuLimbSplitGemmS8S8Int64(L, R, rows, inner, cols, limb));
-    BOOST_CHECK(limb == dense);
-    // Limb split must not flip native / Ozaki qualification.
-    BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
 
-    const auto st_cpu = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
-    BOOST_CHECK(!st_cpu.native_mxfp4_qualified);
-    BOOST_CHECK(!st_cpu.native_fp8_qualified);
-
-    const auto st_res = rc::ProbeRCSelfQual(matmul_v4::accel::MakeResolvedExactGemmBackendForRC());
-    BOOST_CHECK(!st_res.native_mxfp4_qualified);
-    BOOST_CHECK(!st_res.native_fp8_qualified);
+    const auto st = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
+    BOOST_CHECK(st.native_mxfp4_qualified);
+    BOOST_CHECK(!st.native_fp8_qualified);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

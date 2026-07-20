@@ -117,6 +117,17 @@ BOOST_AUTO_TEST_CASE(matmul_freivalds_payload_mining_policy_matches_network_poli
     seal_mode.nMatMulDRLTHeight = 1;
     seal_mode.fMatMulLTSealAsPoW = true;
     BOOST_CHECK(!ShouldIncludeMatMulFreivaldsPayloadForMining(1, seal_mode));
+
+    // F6: ENC_RC / ENC_RC_COUPLED never carry a Freivalds product sketch.
+    auto rc_mode = regtest_consensus;
+    rc_mode.nMatMulV4Height = 1;
+    rc_mode.nMatMulBMX4CHeight = 1;
+    rc_mode.nMatMulRCHeight = 1;
+    rc_mode.fMatMulRCUseToyDims = true;
+    BOOST_CHECK(!ShouldIncludeMatMulFreivaldsPayloadForMining(1, rc_mode));
+    rc_mode.nMatMulRCCoupledHeight = 1;
+    rc_mode.fMatMulRCCoupledUseToyDims = true;
+    BOOST_CHECK(!ShouldIncludeMatMulFreivaldsPayloadForMining(1, rc_mode));
 }
 
 BOOST_AUTO_TEST_CASE(matmul_params_regtest)

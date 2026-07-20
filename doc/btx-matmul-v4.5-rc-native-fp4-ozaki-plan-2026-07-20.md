@@ -1,6 +1,6 @@
 # ENC_RC — Native FP4 via Ozaki / limb split (Amendment 1.B)
 
-*Date: 2026-07-20. Tip: `ea9b167` + WIP. Status: **PARKED / scaffolded**.*
+*Date: 2026-07-20. Tip: WIP. Status: **IMPLEMENTING** (honesty split ExactGemm panels ≠ native MXFP4).*
 *`nMatMulRCHeight` remains `INT32_MAX`. This document does not raise height.*
 
 ## Why LT native FP4 does not carry to RC
@@ -29,42 +29,36 @@ Reuse the exact-integer idea behind `ExactGemmS32S8ViaRadix256`
 **bounded** sub-GEMMs whose partials fit ExactGemm’s &lt; 2^24 contract, then
 **recombine with exact integer weights** (no rounding).
 
-### Sketch
+### Honesty split (required)
 
-1. **Partition the contraction axis** (and/or digit limbs of scaled operands)
-   so each sub-product satisfies `2304 · K_chunk < 2^24`
-   (same floor as `kRCWgradExactChunk = 4096`).
-2. Run each sub-GEMM on a **native MXFP4** (or ExactGemm s8×s8) path that is
-   already self-qualified for that small bound — yielding exact int32 partials.
-3. **Recombine** into int64 (segment leaves optional) with integer limb weights
-   / panel sums — byte-identical to `GemmGXtInt64` / Phase-1 streamed int64 Z.
-4. Apply **ExtractMX once** on Σ partials (H1), never per-limb Extract.
+1. **ExactGemm K-panel Ozaki** (`IsRcOzakiExactPanelsQualified` /
+   `TryRcOzakiExactPanelsGemmS8S8Int64`) — CPU ExactGemm or CUDA `LaunchGemmS8S8`
+   IMMA panels. May accelerate mining. **Does NOT** set
+   `ProbeRCSelfQual.native_mxfp4_qualified`.
+2. **Native block-scaled MXFP4 Ozaki** (`IsRcOzakiMxfp4Qualified` /
+   `TryRcOzakiMxfp4GemmS8S8Int64`) — only after a real device path that factors
+   MX-dequant int8 → E2M1+UE8M0 and launches `rc_ozaki_mxfp4_panel_gemm`
+   (backend `mxfp4_blockscaled_device`). **Must not** call `LaunchGemmS8S8` or
+   fall back to CPU inside the native claim. SM120 and SM100 use separate
+   qual latches (`g_qual_sm120` / `g_qual_sm100`).
 
-Col-block V / W / batch packs from P1.2
-(`doc/btx-matmul-v4.5-rc-mx-contraction-layouts-p1.2.md`) are prerequisites for
-native MX operand layout; Ozaki does not replace that work.
+### Qualification gate (before flipping RC `native_mxfp4`)
 
-### Qualification gate (before flipping any RC `native_*` bit)
-
-- Match the **int64 CPU oracle** at:
-  - CI-safe toy / medium shapes, **and**
-  - consensus epoch-0 dims (`kRCContextLen`, `kRCBatchSeq`, …) or a documented
-    production-representative subset that covers the &gt; 2^24 and ~2^30.76 regimes.
-- Self-qual entry must be the **same** Ozaki device path miners will call
-  (no host D2H pack detour claiming “native”).
+- Match the **int64 CPU oracle** at K ∈ {4095,4096,4097,8192} + thin production-K,
+  max ±M11/E8M0 vectors, multi-seed; corrupted device output must fail equality.
+- Toy/medium episode digests already match in `ProbeRCSelfQual` before the
+  native bit is consulted.
 - Until that gate passes: `ProbeRCSelfQual` keeps
-  `native_mxfp4_qualified = false` / `native_fp8_qualified = false`.
+  `native_mxfp4_qualified = IsRcOzakiMxfp4Qualified()` (false without device).
 
-## Scaffolding (this landing)
+## Artifacts
 
 | Artifact | Role |
 |---|---|
-| `src/matmul/matmul_v4_rc_mx_ozaki.h` (+ `.cpp`) | `TryRcOzakiMxfp4Gemm*` fail-closed; CPU limb-split reference; `IsRcOzakiMxfp4Qualified() == false` |
-| Comments in `matmul_v4_rc.cpp` | Phase-1 Z / wgrad point here |
-| Tests | Assert RC / coupled native MXFP4 flags stay false until Ozaki qualifies |
-
-Device kernels, cuBLASLt/hipBLASLt FP4 limb launches, and RC self-qual flips
-are **out of scope** for this scaffold.
+| `src/matmul/matmul_v4_rc_mx_ozaki.h` (+ `.cpp`) | Exact panels vs MXFP4 APIs; CPU limb-split oracle |
+| `src/cuda/matmul_v4_rc_mx_ozaki_native.{h,cu}` | Device ExactPanels + MXFP4 block-scaled kernel |
+| `src/cuda/matmul_v4_rc_mx_ozaki_native_link.cpp` | Stub when `BTX_ENABLE_CUDA_EXPERIMENTAL=OFF` |
+| Tests | `rc_ozaki_exact_panels_qualify_and_match_oracle`, `rc_ozaki_mxfp4_native_gate` |
 
 ## Explicit non-goals
 
@@ -72,6 +66,7 @@ are **out of scope** for this scaffold.
   wgrad.
 - Do not raise `nMatMulRCHeight`.
 - Do not claim silicon rates from toy CPU campaigns.
+- Do not enable a GKR arbiter from this workstream.
 
 ## Pointers
 

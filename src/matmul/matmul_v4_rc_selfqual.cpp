@@ -8,6 +8,7 @@
 #include <logging.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_mx_ozaki.h>
 #include <matmul/matmul_v4_rc_scale.h>
 #include <primitives/block.h>
 #include <uint256.h>
@@ -216,9 +217,12 @@ RCSelfQualStatus ProbeRCSelfQual(const matmul::v4::lt::ExactGemmBackend& backend
     st.exact_gemm_backend_ok = true;
     st.mining_accelerator_ok = true;
     st.deficit_reason.clear();
-    // native_* remain false until Ozaki MXFP4 quals vs int64 (Amendment 1.B).
+    // Amendment 1.B: native MXFP4 only after Ozaki MXFP4 device path quals.
+    // ExactGemm panels may qualify separately and must NOT flip native_*.
     // LT native_mxfp4_qualified must never be copied here.
-    st.native_mxfp4_qualified = false;
+    (void)SelfQualifyRcOzakiExactPanelsOnce();
+    (void)SelfQualifyRcOzakiMxfp4Once();
+    st.native_mxfp4_qualified = IsRcOzakiMxfp4Qualified();
     st.native_fp8_qualified = false;
     g_rc_selfqual_ok.store(true, std::memory_order_release);
     return st;

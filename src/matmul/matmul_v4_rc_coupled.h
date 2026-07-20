@@ -70,6 +70,7 @@ inline constexpr char kRCCoupBarrierTag[] = "BTX_RC_COUP_BARRIER_V1";
 inline constexpr char kRCCoupPermTag[] = "BTX_RC_COUP_PERM_V1";
 inline constexpr char kRCCoupMixTag[] = "BTX_RC_COUP_MIX_V1";
 inline constexpr char kRCCoupExtractTag[] = "BTX_RC_COUP_EXTRACT_V1";
+inline constexpr char kRCCoupFullBankTag[] = "BTX_RC_COUP_FULL_BANK_V1";
 
 /**
  * Parametric coupled-puzzle shape. Toy defaults match the frozen constexprs
@@ -159,6 +160,13 @@ struct RCCoupOptions {
     uint32_t skip_barrier_index{0};
     bool skip_bank_page{false};
     uint32_t skip_page_index{0};
+
+    /**
+     * Test/research override for full-bank page schedule. Consensus path leaves
+     * false. Production also requires dc::kRCCoupFullBankScheduleEnabled (OFF)
+     * or BTX_RC_COUP_FULL_BANK_SCHEDULE=1 — digest-breaking vs legacy.
+     */
+    bool full_bank_schedule{false};
 };
 
 /** Optional wall-clock timing for harness / measurement (not consensus). */
@@ -256,6 +264,21 @@ DeriveCoupledBalancedPermutation(const uint256& sigma, uint32_t barrier,
     const CBlockHeader& header, int32_t height, const RCCoupParams& params,
     uint32_t barrier, uint32_t n_devices, DistReduceOrder order,
     const matmul::v4::lt::ExactGemmBackend& gemm = {});
+
+/**
+ * Bank page IDs for one (barrier, lobe).
+ *
+ * Legacy (full_bank_schedule=false): single page (barrier+lobe)%bank_pages —
+ * current consensus behavior, digest-stable.
+ *
+ * Full schedule (true): dc::kRCCoupPagesPerBarrierLobe page IDs from a frozen
+ * balanced permutation of [0, bank_pages). At production dims
+ * 8×8×12 covers all 768 pages exactly once across the episode. Digest-breaking
+ * vs legacy — keep OFF on live params (see dc::kRCCoupFullBankScheduleEnabled).
+ */
+[[nodiscard]] std::vector<uint32_t> SelectCoupledBankPageIds(
+    uint32_t barrier, uint32_t lobe, const RCCoupParams& params, const uint256& sigma,
+    bool full_bank_schedule = false);
 
 } // namespace matmul::v4::rc
 

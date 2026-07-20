@@ -1,0 +1,59 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <matmul/matmul_v4_rc_datacenter.h>
+
+#include <cuda/matmul_v4_rc_episode_context.h>
+
+#include <cstdlib>
+#include <limits>
+
+namespace matmul::v4::rc::dc {
+
+bool RCCoupFullBankScheduleActive()
+{
+    if (kRCCoupFullBankScheduleEnabled) return true;
+    const char* e = std::getenv("BTX_RC_COUP_FULL_BANK_SCHEDULE");
+    return e != nullptr && e[0] == '1' && e[1] == '\0';
+}
+
+bool RCCoupMaterialExchangeActive()
+{
+    if (kRCCoupMaterialExchangeEnabled) return true;
+    const char* e = std::getenv("BTX_RC_COUP_MATERIAL_EXCHANGE");
+    return e != nullptr && e[0] == '1' && e[1] == '\0';
+}
+
+RCDcStatus ProbeRCDcStatus()
+{
+    RCDcStatus st;
+    st.full_bank_schedule = RCCoupFullBankScheduleActive();
+    st.material_exchange = RCCoupMaterialExchangeActive();
+    st.three_axis_wire = kRCThreeAxisScheduleWireEnabled;
+    st.miner_batch_q_default_on = true;
+    st.miner_batch_q = kRCMinerBatchQDefault;
+    st.exchange_rows_default = kRCCoupExchangeRowsDefault;
+    st.gkr_arbiter = false;
+    st.cuda_episode_compiled = matmul_v4::cuda::IsRcEpisodeCudaCompiled();
+    st.arch_key = matmul_v4::cuda::RcEpisodeCudaArchKey();
+    st.cuda_episode_ready = false;
+    st.deficit = "consensus_dc_levers_default_off; episode_graph_unwired";
+    return st;
+}
+
+uint32_t BankPagesForPackedGiB(double gib, uint32_t lobe_width)
+{
+    if (gib <= 0.0 || lobe_width == 0) return 0;
+    const double page_bytes =
+        static_cast<double>(lobe_width) * static_cast<double>(lobe_width) * kRCMxPackedBytesPerElem;
+    const double target = gib * (1024.0 * 1024.0 * 1024.0);
+    const double pages = target / page_bytes;
+    if (pages >= static_cast<double>(std::numeric_limits<uint32_t>::max())) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    const auto n = static_cast<uint32_t>(pages + 0.999);
+    return n == 0 ? 1 : n;
+}
+
+} // namespace matmul::v4::rc::dc
