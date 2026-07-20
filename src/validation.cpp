@@ -10493,8 +10493,12 @@ static bool ContextualCheckBlock(const CBlock& block,
                         pindexPrev != nullptr
                             ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
                             : std::nullopt;
-                    encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
-                                                              parent_mtp);
+                    if (consensusParams.IsMatMulRCActive(nHeight)) {
+                        encdr_ok = CheckMatMulProofOfWork_RC(block, consensusParams, nHeight);
+                    } else {
+                        encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
+                                                                  parent_mtp);
+                    }
                 } else {
                     // E: TestBlockValidity path — keep cs_main held across the
                     // recompute so the caller's Tip()-pinned viewNew/indexDummy
@@ -10504,8 +10508,12 @@ static bool ContextualCheckBlock(const CBlock& block,
                         pindexPrev != nullptr
                             ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
                             : std::nullopt;
-                    encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
-                                                              parent_mtp);
+                    if (consensusParams.IsMatMulRCActive(nHeight)) {
+                        encdr_ok = CheckMatMulProofOfWork_RC(block, consensusParams, nHeight);
+                    } else {
+                        encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
+                                                                  parent_mtp);
+                    }
                 }
                 if (!encdr_ok) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",

@@ -300,6 +300,18 @@ std::vector<std::pair<Kind, Eligibility>> AllEligibility()
     };
 }
 
+bool HasPassedDeterminismSelfTest(Kind kind)
+{
+    if (kind == Kind::CPU) {
+        return true; // consensus reference — no self-test against itself
+    }
+    // Device ExactGemm self-qualification is folded into EligibilityFor
+    // (CUDA IMMA / HIP MFMA / Metal TensorOps / Ascend Cube). A kind that
+    // claims admissible without that probe would fail this gate.
+    const Eligibility eligibility = EligibilityFor(kind);
+    return eligibility.available && eligibility.admissible;
+}
+
 Selection ResolveBackend(const std::string& requested)
 {
     Selection selection;
@@ -327,6 +339,16 @@ Selection ResolveBackend(const std::string& requested)
         // exact s8xs8->s32 path cannot reproduce the consensus digest).
         selection.active = Kind::CPU;
         selection.reason = ToString(selection.requested) + "_inadmissible_fallback_to_cpu:" + eligibility.reason;
+        return selection;
+    }
+
+    // §N.3-v fail-closed: self_test_required backends must have passed the
+    // determinism / ExactGemm self-test. Previously this was comment-only;
+    // HasPassedDeterminismSelfTest closes the gate at resolve time.
+    if (eligibility.self_test_required && !HasPassedDeterminismSelfTest(selection.requested)) {
+        selection.active = Kind::CPU;
+        selection.reason = ToString(selection.requested) +
+                           "_self_test_required_not_passed_fallback_to_cpu:" + eligibility.reason;
         return selection;
     }
 

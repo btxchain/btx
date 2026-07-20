@@ -14,6 +14,7 @@
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_rc_selfqual.h>
 #include <matmul/pow_v4.h>
 #include <metal/matmul_v4_lt_accel.h>
 #include <primitives/block.h>
@@ -548,6 +549,33 @@ Kind ResolveBackend()
 }
 
 
+namespace {
+
+/** RC fail-closed gate (R.5.2): device ExactGemm slots may mine RC only after
+ *  ProbeRCSelfQual. On failure return an empty backend (CPU ExactGemmS8S8). */
+matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQual(
+    matmul::v4::lt::ExactGemmBackend backend, const char* provider_label)
+{
+    if (backend.gemm_s8s8 == nullptr) {
+        return backend;
+    }
+    const matmul::v4::rc::RCSelfQualStatus st = matmul::v4::rc::ProbeRCSelfQual(backend);
+    if (st.mining_accelerator_ok) {
+        return backend;
+    }
+    static std::atomic_bool logged_rc_gate{false};
+    bool expected{false};
+    if (logged_rc_gate.compare_exchange_strong(expected, true)) {
+        LogPrintf("MatMul-v4.4-RC ExactGemm: CPU [WARNING: provider=%s RC self-qual failed (%s); "
+                  "clearing ExactGemmBackend]\n",
+                  provider_label != nullptr ? provider_label : "device",
+                  st.deficit_reason.empty() ? "unknown" : st.deficit_reason.c_str());
+    }
+    return matmul::v4::lt::ExactGemmBackend{};
+}
+
+} // namespace
+
 matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
 {
     matmul::v4::lt::ExactGemmBackend backend;
@@ -588,34 +616,41 @@ matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
                               exact_request);
                 }
             }
-            return backend;
+            // Shared ExactGemm substrate: RC self-qual must also pass before
+            // the inject is exposed to RC (and LT) miners.
+            return GateExactGemmWithRCSelfQual(backend, exact_request.c_str());
         }
     }
 
+    const char* label = "cpu";
     switch (ResolveBackend()) {
     case Kind::CUDA:
         // LaunchGemm* prefers cuBLASLt IMMA then scalar device tiles.
         backend.gemm_s8s8 = &matmul_v4::cuda::LaunchGemmS8S8;
         backend.gemm_s32s8 = &matmul_v4::cuda::LaunchGemmS32S8;
+        label = "cuda";
         break;
     case Kind::HIP:
         // LaunchGemm* prefers hipBLASLt/rocBLAS MFMA then device ALU tiles.
         backend.gemm_s8s8 = &matmul_v4::hip::LaunchGemmS8S8;
         backend.gemm_s32s8 = &matmul_v4::hip::LaunchGemmS32S8;
+        label = "hip";
         break;
     case Kind::METAL:
         // LaunchGemm* prefers MPP TensorOps (ExactGemm self-qual) then ALU.
         backend.gemm_s8s8 = &matmul_v4::metal::LaunchGemmS8S8;
         backend.gemm_s32s8 = &matmul_v4::metal::LaunchGemmS32S8;
+        label = "metal";
         break;
     case Kind::ASCEND:
         backend.gemm_s8s8 = &matmul_v4::ascend::TryLaunchLtCubeGemmS8S8;
         backend.gemm_s32s8 = &matmul_v4::ascend::TryLaunchLtCubeGemmS32S8;
+        label = "ascend";
         break;
     case Kind::CPU:
         break;
     }
-    return backend;
+    return GateExactGemmWithRCSelfQual(backend, label);
 }
 
 matmul::v4::lt::ExactMxProjectionBackend MakeResolvedExactMxProjectionBackend()

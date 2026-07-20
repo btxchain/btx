@@ -297,6 +297,24 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         // (reject-all). They are mutually exclusive even on regtest.
         assert(!consensus.fMatMulV4FlatSketchReplay);
     }
+
+    // ENC_RC / Resident Curriculum (doc/btx-matmul-v4.4-resident-curriculum-unified-proposal).
+    // Public nets stay fail-closed: height INT32_MAX, no toy dims, ASERT rescale 1/1.
+    // Regtest may leave RC disabled; when enabled, toy dims are allowed for CI.
+    assert(!consensus.fMatMulRCUseToyDims || is_regtest);
+    assert(consensus.nMatMulRCAsertRescaleNum > 0);
+    assert(consensus.nMatMulRCAsertRescaleDen > 0);
+    if (!is_regtest) {
+        assert(consensus.nMatMulRCHeight == std::numeric_limits<int32_t>::max());
+        assert(!consensus.fMatMulRCUseToyDims);
+        assert(consensus.nMatMulRCAsertRescaleNum == 1);
+        assert(consensus.nMatMulRCAsertRescaleDen == 1);
+    }
+    if (consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max()) {
+        assert(consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max());
+        assert(consensus.nMatMulRCHeight >= consensus.nMatMulV4Height);
+        assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+    }
 }
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,

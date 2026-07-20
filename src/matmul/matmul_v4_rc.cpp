@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc.h>
 
+#include <consensus/params.h>
 #include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <matmul/matmul_v4.h>
@@ -13,6 +14,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -58,30 +60,55 @@ uint256 DeriveOperandSeed(const uint256& seed_r, const char* tag)
     return Sha256Tagged(tag, std::strlen(tag), seed_r.data(), 32);
 }
 
-// --- GEMM helpers (exact int accumulation) ----------------------------------
+// --- ExactGemm helpers ------------------------------------------------------
 
-/** Backward feature grad: G_prev[i][k] = Σ_j W[j][k]·G[i][j] (H12 index form). */
+/** Try injectable ExactGemmS8S8; accept only when byte-identical to CPU oracle. */
+std::vector<int32_t> ExactGemmS8S8Verified(const lt::ExactGemmBackend& gemm,
+                                           const std::vector<int8_t>& L,
+                                           const std::vector<int8_t>& R, uint32_t rows,
+                                           uint32_t inner, uint32_t cols)
+{
+    const std::vector<int32_t> cpu = lt::ExactGemmS8S8(L, R, rows, inner, cols);
+    if (gemm.gemm_s8s8 == nullptr) return cpu;
+
+    std::vector<int32_t> device;
+    bool ok = false;
+    try {
+        ok = gemm.gemm_s8s8(L, R, rows, inner, cols, device) &&
+             device.size() == static_cast<size_t>(rows) * cols && device == cpu;
+    } catch (...) {
+        ok = false;
+    }
+    return ok ? device : cpu;
+}
+
+std::vector<int8_t> TransposeS8(const std::vector<int8_t>& M, uint32_t rows, uint32_t cols)
+{
+    assert(M.size() == static_cast<size_t>(rows) * cols);
+    std::vector<int8_t> T(static_cast<size_t>(cols) * rows);
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t c = 0; c < cols; ++c) {
+            T[static_cast<size_t>(c) * rows + r] = M[static_cast<size_t>(r) * cols + c];
+        }
+    }
+    return T;
+}
+
+/** Backward feature grad via ExactGemm: G_prev = G · W  (row-major).
+ *  Bound 2304·d_model < 2^24 at consensus d_model=4096 → s8xs8 ExactGemm OK. */
 std::vector<int32_t> GemmWtS8S8Int32(const std::vector<int8_t>& W, const std::vector<int8_t>& G,
-                                     uint32_t d_model, uint32_t b_seq)
+                                     uint32_t d_model, uint32_t b_seq,
+                                     const lt::ExactGemmBackend& gemm)
 {
     assert(W.size() == static_cast<size_t>(d_model) * d_model);
     assert(G.size() == static_cast<size_t>(b_seq) * d_model);
-    std::vector<int32_t> out(static_cast<size_t>(b_seq) * d_model, 0);
-    for (uint32_t i = 0; i < b_seq; ++i) {
-        for (uint32_t k = 0; k < d_model; ++k) {
-            int32_t acc = 0;
-            for (uint32_t j = 0; j < d_model; ++j) {
-                acc += static_cast<int32_t>(W[static_cast<size_t>(j) * d_model + k]) *
-                       static_cast<int32_t>(G[static_cast<size_t>(i) * d_model + j]);
-            }
-            out[static_cast<size_t>(i) * d_model + k] = acc;
-        }
-    }
-    return out;
+    // out[i][k] = Σ_j G[i][j]·W[j][k] = ExactGemmS8S8(G, W, b_seq, d_model, d_model)
+    return ExactGemmS8S8Verified(gemm, G, W, b_seq, d_model, d_model);
 }
 
 /** G·Xᵀ without materializing Xᵀ: out[r][c] = Σ_k G[k][r]·X[k][c]
- *  (wgrad D is d_model × d_model; contraction is b_seq). */
+ *  (wgrad D is d_model × d_model; contraction is b_seq). Bound may exceed 2^24
+ *  → int64 oracle only in the episode path. */
 std::vector<int64_t> GemmGXtInt64(const std::vector<int8_t>& G, const std::vector<int8_t>& X,
                                   uint32_t b_seq, uint32_t d_model)
 {
@@ -101,7 +128,46 @@ std::vector<int64_t> GemmGXtInt64(const std::vector<int8_t>& G, const std::vecto
     return out;
 }
 
+/** Chunked ExactGemm wgrad: split K=b_seq into panels with 2304·chunk < 2^24,
+ *  run ExactGemmS8S8(Gᵀ_chunk, X_chunk) → int32, accumulate into int64.
+ *  Byte-identical to GemmGXtInt64. */
+std::vector<int64_t> GemmGXtViaChunkedExact(const std::vector<int8_t>& G,
+                                            const std::vector<int8_t>& X, uint32_t b_seq,
+                                            uint32_t d_model, const lt::ExactGemmBackend& gemm)
+{
+    assert(G.size() == static_cast<size_t>(b_seq) * d_model);
+    assert(X.size() == static_cast<size_t>(b_seq) * d_model);
+    std::vector<int64_t> out(static_cast<size_t>(d_model) * d_model, 0);
+
+    for (uint32_t k0 = 0; k0 < b_seq; k0 += kRCWgradExactChunk) {
+        const uint32_t len = std::min(kRCWgradExactChunk, b_seq - k0);
+        // L[r][t] = G[k0+t][r]  (d_model × len) — Gᵀ panel
+        // R[t][c] = X[k0+t][c]  (len × d_model)
+        std::vector<int8_t> L(static_cast<size_t>(d_model) * len);
+        std::vector<int8_t> R(static_cast<size_t>(len) * d_model);
+        for (uint32_t t = 0; t < len; ++t) {
+            const uint32_t k = k0 + t;
+            for (uint32_t r = 0; r < d_model; ++r) {
+                L[static_cast<size_t>(r) * len + t] =
+                    G[static_cast<size_t>(k) * d_model + r];
+            }
+            for (uint32_t c = 0; c < d_model; ++c) {
+                R[static_cast<size_t>(t) * d_model + c] =
+                    X[static_cast<size_t>(k) * d_model + c];
+            }
+        }
+        const auto partial = ExactGemmS8S8Verified(gemm, L, R, d_model, len, d_model);
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] += static_cast<int64_t>(partial[i]);
+        }
+    }
+    return out;
+}
+
 // --- Phase 1 ---------------------------------------------------------------
+// Phase-1 Z=S·V bound is 2304·n_ctx ≫ 2^24 — streamed int64 only in reference.
+// Optional ExactGemmS32S8ViaRadix256 is not used here; miners may limb-promote
+// offline but must match this int64 stream byte-for-byte.
 
 std::vector<int8_t> Phase1AssociativeRecall(const uint256& seed_r, const RCEpisodeParams& p,
                                             uint32_t tile_delta)
@@ -118,57 +184,66 @@ std::vector<int8_t> Phase1AssociativeRecall(const uint256& seed_r, const RCEpiso
     const auto K = ExpandMxDequantInt8(seed_K, p.n_ctx, p.d_head);
     const auto V = ExpandMxDequantInt8(seed_V, p.n_ctx, p.d_head);
 
-    uint32_t delta = tile_delta == 0 ? p.n_ctx : tile_delta;
-    // Tile-size invariance holds for any partition; require ΔT % 32 == 0 so each
-    // ExtractMX S-tile completes inside a window (simplifies streaming without
-    // cross-window pending buffers). Arbitrary ΔT remains future work.
-    assert(delta % kRCMxBlockLen == 0);
-    assert(p.n_ctx % delta == 0);
+    // Any positive ΔT partitioning [0,n_ctx) is allowed (§R.2.2). Incomplete
+    // MX 32-blocks are held in a pending buffer across tile windows so Extract
+    // always fires on bj = ⌊t/32⌋ boundaries (n_ctx % 32 == 0 by construction).
+    const uint32_t delta = tile_delta == 0 ? p.n_ctx : tile_delta;
+    assert(delta > 0);
+    assert(p.n_ctx % kRCMxBlockLen == 0);
 
     std::vector<int8_t> Z(static_cast<size_t>(p.n_q) * p.d_head);
     std::vector<int64_t> acc_Z(p.d_head);
 
     for (uint32_t i = 0; i < p.n_q; ++i) {
         std::fill(acc_Z.begin(), acc_Z.end(), 0);
-        for (uint32_t t0 = 0; t0 < p.n_ctx; t0 += delta) {
-            const uint32_t t1 = t0 + delta;
-            for (uint32_t bj_base = t0; bj_base < t1; bj_base += kRCMxBlockLen) {
-                const uint32_t bj = bj_base / kRCMxBlockLen;
-                int64_t S_raw[kRCMxBlockLen];
-                for (uint32_t t_off = 0; t_off < kRCMxBlockLen; ++t_off) {
-                    const uint32_t t = bj_base + t_off;
-                    int64_t acc = 0;
-                    for (uint32_t d = 0; d < p.d_head; ++d) {
-                        acc += static_cast<int64_t>(Q[static_cast<size_t>(i) * p.d_head + d]) *
-                               static_cast<int64_t>(K[static_cast<size_t>(t) * p.d_head + d]);
-                    }
-                    S_raw[t_off] = acc;
+        int64_t pending_raw[kRCMxBlockLen];
+        uint32_t pending_fill = 0;
+        uint32_t pending_bj = 0;
+        uint32_t block_t0 = 0; // first t of the MX block being filled
+
+        auto flush_s_block = [&]() {
+            assert(pending_fill == kRCMxBlockLen);
+            int8_t S_tile[kRCMxBlockLen];
+            {
+                int32_t raw32[kRCMxBlockLen];
+                for (uint32_t t = 0; t < kRCMxBlockLen; ++t) {
+                    raw32[t] = ExactInt64ToExtractInt32(pending_raw[t]);
                 }
-                // S is n_q × n_ctx: Extract at (row i, block bj).
-                int8_t S_tile[kRCMxBlockLen];
-                {
-                    int32_t raw32[kRCMxBlockLen];
-                    for (uint32_t t = 0; t < kRCMxBlockLen; ++t) {
-                        raw32[t] = ExactInt64ToExtractInt32(S_raw[t]);
-                    }
-                    int8_t mu_tile[kRCMxBlockLen];
-                    lt::ExtractMatExpandMxTileMantissas(prf_S, i, bj, raw32, mu_tile);
-                    const uint8_t e = lt::DeriveMatExpandMxScale(prf_S, i, bj);
-                    for (uint32_t t = 0; t < kRCMxBlockLen; ++t) {
-                        S_tile[t] = static_cast<int8_t>(static_cast<int32_t>(mu_tile[t]) *
-                                                        (int32_t{1} << e));
-                    }
-                }
-                for (uint32_t t_off = 0; t_off < kRCMxBlockLen; ++t_off) {
-                    const uint32_t t = bj_base + t_off;
-                    const int8_t s = S_tile[t_off];
-                    for (uint32_t d = 0; d < p.d_head; ++d) {
-                        acc_Z[d] += static_cast<int64_t>(s) *
-                                    static_cast<int64_t>(V[static_cast<size_t>(t) * p.d_head + d]);
-                    }
+                int8_t mu_tile[kRCMxBlockLen];
+                lt::ExtractMatExpandMxTileMantissas(prf_S, i, pending_bj, raw32, mu_tile);
+                const uint8_t e = lt::DeriveMatExpandMxScale(prf_S, i, pending_bj);
+                for (uint32_t t = 0; t < kRCMxBlockLen; ++t) {
+                    S_tile[t] = static_cast<int8_t>(static_cast<int32_t>(mu_tile[t]) *
+                                                    (int32_t{1} << e));
                 }
             }
+            for (uint32_t t_off = 0; t_off < kRCMxBlockLen; ++t_off) {
+                const uint32_t t = block_t0 + t_off;
+                const int8_t s = S_tile[t_off];
+                for (uint32_t d = 0; d < p.d_head; ++d) {
+                    acc_Z[d] += static_cast<int64_t>(s) *
+                                static_cast<int64_t>(V[static_cast<size_t>(t) * p.d_head + d]);
+                }
+            }
+            pending_fill = 0;
+            ++pending_bj;
+            block_t0 += kRCMxBlockLen;
+        };
+
+        for (uint32_t t0 = 0; t0 < p.n_ctx; t0 += delta) {
+            const uint32_t t1 = std::min(t0 + delta, p.n_ctx);
+            for (uint32_t t = t0; t < t1; ++t) {
+                int64_t acc = 0;
+                for (uint32_t d = 0; d < p.d_head; ++d) {
+                    acc += static_cast<int64_t>(Q[static_cast<size_t>(i) * p.d_head + d]) *
+                           static_cast<int64_t>(K[static_cast<size_t>(t) * p.d_head + d]);
+                }
+                pending_raw[pending_fill++] = acc;
+                if (pending_fill == kRCMxBlockLen) flush_s_block();
+            }
         }
+        assert(pending_fill == 0);
+
         // Z is n_q × d_head: one final ExtractMX on completed acc_Z (H1').
         {
             std::vector<int32_t> raw32_row(p.d_head);
@@ -201,20 +276,19 @@ struct Phase2Tensors {
 };
 
 std::vector<int8_t> ForwardLayer(const std::vector<int8_t>& W, const std::vector<int8_t>& X,
-                                 const uint256& prf_fwd, uint32_t b_seq, uint32_t d_model)
+                                 const uint256& prf_fwd, uint32_t b_seq, uint32_t d_model,
+                                 const lt::ExactGemmBackend& gemm)
 {
-    // Pin: acc[i][j] = Σ_k W[j][k]·X[i][k] + X[i][j]  (row feature transform + residual).
-    // Residual is INSIDE the single Extract (H5).
-    std::vector<int32_t> y(static_cast<size_t>(b_seq) * d_model, 0);
+    // Pin: acc[i][j] = Σ_k W[j][k]·X[i][k] + X[i][j]
+    //     = ExactGemmS8S8(X, Wᵀ)[i][j] + X[i][j]
+    // Residual is INSIDE the single Extract (H5). Bound < 2^24 at consensus.
+    const std::vector<int8_t> Wt = TransposeS8(W, d_model, d_model);
+    std::vector<int32_t> y = ExactGemmS8S8Verified(gemm, X, Wt, b_seq, d_model, d_model);
+    assert(y.size() == static_cast<size_t>(b_seq) * d_model);
     for (uint32_t i = 0; i < b_seq; ++i) {
         for (uint32_t j = 0; j < d_model; ++j) {
-            int32_t sum = 0;
-            for (uint32_t k = 0; k < d_model; ++k) {
-                sum += static_cast<int32_t>(W[static_cast<size_t>(j) * d_model + k]) *
-                       static_cast<int32_t>(X[static_cast<size_t>(i) * d_model + k]);
-            }
-            sum += static_cast<int32_t>(X[static_cast<size_t>(i) * d_model + j]);
-            y[static_cast<size_t>(i) * d_model + j] = sum;
+            y[static_cast<size_t>(i) * d_model + j] +=
+                static_cast<int32_t>(X[static_cast<size_t>(i) * d_model + j]);
         }
     }
     std::vector<int8_t> out(y.size());
@@ -223,7 +297,8 @@ std::vector<int8_t> ForwardLayer(const std::vector<int8_t>& W, const std::vector
 }
 
 Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& p,
-                                  RCEpisodeOptions::Checkpoint ckpt)
+                                  RCEpisodeOptions::Checkpoint ckpt,
+                                  const lt::ExactGemmBackend& gemm)
 {
     Phase2Tensors out;
     out.X.resize(p.L_lyr + 1);
@@ -257,7 +332,7 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
 
     // Forward — always compute; then drop non-checkpoint activations.
     for (uint32_t l = 0; l < p.L_lyr; ++l) {
-        out.X[l + 1] = ForwardLayer(W[l], out.X[l], prf_fwd[l], p.b_seq, p.d_model);
+        out.X[l + 1] = ForwardLayer(W[l], out.X[l], prf_fwd[l], p.b_seq, p.d_model, gemm);
     }
     if (ckpt != RCEpisodeOptions::Checkpoint::StoreAll) {
         for (uint32_t l = 1; l < p.L_lyr; ++l) {
@@ -272,15 +347,15 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
         while (src > 0 && out.X[src].empty()) --src;
         assert(!out.X[src].empty());
         for (uint32_t m = src; m < layer; ++m) {
-            out.X[m + 1] = ForwardLayer(W[m], out.X[m], prf_fwd[m], p.b_seq, p.d_model);
+            out.X[m + 1] = ForwardLayer(W[m], out.X[m], prf_fwd[m], p.b_seq, p.d_model, gemm);
         }
     };
 
-    // Backward + wgrad
+    // Backward + wgrad (wgrad stays int64 oracle; bound may exceed 2^24).
     for (int32_t l = static_cast<int32_t>(p.L_lyr) - 1; l >= 0; --l) {
         ensure_X(static_cast<uint32_t>(l));
         ensure_X(static_cast<uint32_t>(l + 1));
-        auto g_acc = GemmWtS8S8Int32(W[l], out.G[l + 1], p.d_model, p.b_seq);
+        auto g_acc = GemmWtS8S8Int32(W[l], out.G[l + 1], p.d_model, p.b_seq, gemm);
         out.G[l].assign(g_acc.size(), 0);
         ExtractMXMatrixInt32(prf_bwd[l], g_acc.data(), p.b_seq, p.d_model, out.G[l].data());
 
@@ -310,9 +385,14 @@ std::vector<int8_t> SerializeRoundStream(const std::vector<int8_t>& Z, const Pha
 }
 
 uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
-                   const RCEpisodeOptions& options, std::vector<RCRoundTranscript>* out_rounds)
+                   const RCEpisodeOptions& options, std::vector<RCRoundTranscript>* out_rounds,
+                   RCEpisodeTiming* out_timing, const lt::ExactGemmBackend& gemm)
 {
     assert(ValidateRCEpisodeParams(params));
+    using clock = std::chrono::steady_clock;
+    const auto t_episode0 = clock::now();
+    double phase1_s = 0.0, phase2_s = 0.0, phase3_s = 0.0;
+
     const uint256 sigma = matmul::v4::DeriveSigma(header);
     uint256 seed_r = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0);
 
@@ -325,11 +405,23 @@ uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
         if (r > 0) {
             seed_r = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, round_roots[r - 1], r);
         }
+        const auto t1 = clock::now();
         const auto Z = Phase1AssociativeRecall(seed_r, params, options.phase1_tile_delta);
-        const auto p2 = Phase2MicroTraining(seed_r, params, options.checkpoint);
+        const auto t2 = clock::now();
+        const auto p2 = Phase2MicroTraining(seed_r, params, options.checkpoint, gemm);
+        const auto t3 = clock::now();
         const auto stream = SerializeRoundStream(Z, p2, params);
         round_roots[r] = BuildTileTreeRoot(stream, params.T_leaf);
-        if (out_rounds) (*out_rounds)[r].round_root = round_roots[r];
+        const auto t4 = clock::now();
+        if (out_rounds) {
+            (*out_rounds)[r].round_root = round_roots[r];
+            (*out_rounds)[r].stream = stream;
+        }
+        if (out_timing) {
+            phase1_s += std::chrono::duration<double>(t2 - t1).count();
+            phase2_s += std::chrono::duration<double>(t3 - t2).count();
+            phase3_s += std::chrono::duration<double>(t4 - t3).count();
+        }
     }
 
     // episode_digest = SHA256d("BTX_RC_EPISODE_V1" ‖ roots…)
@@ -340,7 +432,39 @@ uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
     for (const uint256& root : round_roots) {
         buf.insert(buf.end(), root.begin(), root.end());
     }
-    return Sha256dBytes(buf.data(), buf.size());
+    const uint256 digest = Sha256dBytes(buf.data(), buf.size());
+    if (out_timing) {
+        out_timing->phase1_s = phase1_s;
+        out_timing->phase2_s = phase2_s;
+        out_timing->phase3_s = phase3_s;
+        out_timing->total_s = std::chrono::duration<double>(clock::now() - t_episode0).count();
+    }
+    return digest;
+}
+
+/** Fiat–Shamir: q flat leaf indices from SHA256d("BTX_RC_FS_V1"‖sigma‖digest‖le32(i)). */
+std::vector<uint32_t> DeriveFSChallenges(const uint256& sigma, const uint256& claimed_digest,
+                                         uint32_t n_rounds, uint32_t n_leaves_per_round)
+{
+    std::vector<uint32_t> out;
+    const uint64_t total = static_cast<uint64_t>(n_rounds) * n_leaves_per_round;
+    if (total == 0) return out;
+    out.reserve(kRCSpotCheckQueries);
+    for (uint32_t q = 0; q < kRCSpotCheckQueries; ++q) {
+        unsigned char buf[sizeof(kRCFsTag) - 1 + 32 + 32 + 4];
+        size_t off = 0;
+        std::memcpy(buf + off, kRCFsTag, sizeof(kRCFsTag) - 1);
+        off += sizeof(kRCFsTag) - 1;
+        std::memcpy(buf + off, sigma.data(), 32);
+        off += 32;
+        std::memcpy(buf + off, claimed_digest.data(), 32);
+        off += 32;
+        WriteLE32(buf + off, q);
+        off += 4;
+        const uint256 h = Sha256dBytes(buf, off);
+        out.push_back(static_cast<uint32_t>(ReadLE32(h.data()) % total));
+    }
+    return out;
 }
 
 } // namespace
@@ -377,6 +501,26 @@ RCEpisodeParams MakeToyRCEpisodeParams()
     return p;
 }
 
+RCEpisodeParams MakeMediumRCEpisodeParams()
+{
+    // Medium self-qual: wgrad K=b_seq=8192 → 2304·8192 ≈ 1.89e7 > 2^24.
+    RCEpisodeParams p;
+    p.rounds = 1;
+    p.d_head = 32;
+    p.n_q = 32;
+    p.n_ctx = 64;
+    p.L_lyr = 1;
+    p.d_model = 32;
+    p.b_seq = 8192;
+    p.T_leaf = 64;
+    return p;
+}
+
+RCEpisodeParams ResolveRCEpisodeParams(const Consensus::Params& p)
+{
+    return p.fMatMulRCUseToyDims ? MakeToyRCEpisodeParams() : DefaultConsensusRCEpisodeParams();
+}
+
 std::vector<int8_t> ExpandMxDequantInt8(const uint256& seed, uint32_t rows, uint32_t cols)
 {
     assert(cols % kRCMxBlockLen == 0);
@@ -397,7 +541,7 @@ std::vector<int8_t> ExpandMxDequantInt8(const uint256& seed, uint32_t rows, uint
     return out;
 }
 
-uint256 BuildTileTreeRoot(const std::vector<int8_t>& stream, uint32_t t_leaf)
+std::vector<uint256> BuildTileTreeLeaves(const std::vector<int8_t>& stream, uint32_t t_leaf)
 {
     assert(t_leaf > 0);
     std::vector<uint256> level;
@@ -419,14 +563,12 @@ uint256 BuildTileTreeRoot(const std::vector<int8_t>& stream, uint32_t t_leaf)
         if (offset >= stream.size()) break;
     }
     if (level.empty()) {
-        // Empty stream → one zero leaf.
         std::vector<unsigned char> leaf(t_leaf, 0);
         std::vector<unsigned char> pre;
         pre.push_back(kRCLeafTag);
         pre.insert(pre.end(), leaf.begin(), leaf.end());
         level.push_back(Sha256dBytes(pre.data(), pre.size()));
     }
-    // Pad to next power of two with sentinel leaves.
     auto next_pow2 = [](size_t n) {
         size_t p = 1;
         while (p < n) p <<= 1;
@@ -441,7 +583,12 @@ uint256 BuildTileTreeRoot(const std::vector<int8_t>& stream, uint32_t t_leaf)
         return Sha256dBytes(pre.data(), pre.size());
     }();
     while (level.size() < target) level.push_back(pad_leaf);
+    return level;
+}
 
+uint256 BuildTileTreeRoot(const std::vector<int8_t>& stream, uint32_t t_leaf)
+{
+    std::vector<uint256> level = BuildTileTreeLeaves(stream, t_leaf);
     while (level.size() > 1) {
         std::vector<uint256> parent;
         parent.reserve(level.size() / 2);
@@ -457,34 +604,148 @@ uint256 BuildTileTreeRoot(const std::vector<int8_t>& stream, uint32_t t_leaf)
     return level.front();
 }
 
+RCMerkleProof OpenMerkleProof(const std::vector<uint256>& leaves, uint32_t index)
+{
+    assert(!leaves.empty());
+    assert((leaves.size() & (leaves.size() - 1)) == 0);
+    assert(index < leaves.size());
+    RCMerkleProof proof;
+    std::vector<uint256> level = leaves;
+    size_t idx = index;
+    while (level.size() > 1) {
+        proof.siblings.push_back(level[idx ^ 1]);
+        std::vector<uint256> parent;
+        parent.reserve(level.size() / 2);
+        for (size_t i = 0; i < level.size(); i += 2) {
+            unsigned char buf[1 + 64];
+            buf[0] = kRCNodeTag;
+            std::memcpy(buf + 1, level[i].data(), 32);
+            std::memcpy(buf + 1 + 32, level[i + 1].data(), 32);
+            parent.push_back(Sha256dBytes(buf, sizeof(buf)));
+        }
+        level.swap(parent);
+        idx >>= 1;
+    }
+    return proof;
+}
+
+bool VerifyMerkleProof(const uint256& leaf_hash, uint32_t index, const RCMerkleProof& proof,
+                       const uint256& root)
+{
+    uint256 cur = leaf_hash;
+    uint32_t idx = index;
+    for (const uint256& sib : proof.siblings) {
+        unsigned char buf[1 + 64];
+        buf[0] = kRCNodeTag;
+        if ((idx & 1u) == 0) {
+            std::memcpy(buf + 1, cur.data(), 32);
+            std::memcpy(buf + 1 + 32, sib.data(), 32);
+        } else {
+            std::memcpy(buf + 1, sib.data(), 32);
+            std::memcpy(buf + 1 + 32, cur.data(), 32);
+        }
+        cur = Sha256dBytes(buf, sizeof(buf));
+        idx >>= 1;
+    }
+    return cur == root;
+}
+
+bool VerifyRCLeafOpening(const std::vector<int8_t>& stream, uint32_t t_leaf, uint32_t leaf_index,
+                         const uint256& round_root)
+{
+    const std::vector<uint256> leaves = BuildTileTreeLeaves(stream, t_leaf);
+    if (leaf_index >= leaves.size()) return false;
+    const RCMerkleProof proof = OpenMerkleProof(leaves, leaf_index);
+    return VerifyMerkleProof(leaves[leaf_index], leaf_index, proof, round_root);
+}
+
+uint64_t TotalRCEpisodeMacs(const RCEpisodeParams& p)
+{
+    const uint64_t p1 = 2ull * p.n_q * p.n_ctx * p.d_head;
+    const uint64_t p2 = 3ull * p.L_lyr * static_cast<uint64_t>(p.b_seq) * p.d_model * p.d_model;
+    return static_cast<uint64_t>(p.rounds) * (p1 + p2);
+}
+
 uint256 RecomputeResidentCurriculumReference(const CBlockHeader& header,
                                              const RCEpisodeParams& params, int32_t /*height*/,
                                              const RCEpisodeOptions& options,
-                                             std::vector<RCRoundTranscript>* out_rounds)
+                                             std::vector<RCRoundTranscript>* out_rounds,
+                                             RCEpisodeTiming* out_timing,
+                                             const lt::ExactGemmBackend& gemm)
 {
     // height reserved for future height-selected structural variants; currently
     // the structural set is constant (R.0 / R.4.4).
-    return RunEpisode(header, params, options, out_rounds);
+    return RunEpisode(header, params, options, out_rounds, out_timing, gemm);
 }
 
 uint256 MineRCEpisode(const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
-                      std::vector<RCRoundTranscript>* out_rounds)
+                      std::vector<RCRoundTranscript>* out_rounds,
+                      const lt::ExactGemmBackend& gemm)
 {
-    // Miner path reseals through the same CPU oracle (R.5.3).
-    return RecomputeResidentCurriculumReference(header, params, height, {}, out_rounds);
+    // Miner path reseals through the same oracle; optional ExactGemm inject
+    // (after RC self-qual) must still match CPU when verified per-GEMM.
+    return RecomputeResidentCurriculumReference(header, params, height, {}, out_rounds,
+                                                /*out_timing=*/nullptr, gemm);
 }
 
 bool VerifyRCTranscriptSpotCheck(const CBlockHeader& header, const RCEpisodeParams& params,
                                  int32_t height, const uint256& claimed_digest,
-                                 const std::vector<uint32_t>& challenged_leaves)
+                                 const std::vector<uint32_t>& challenged_leaves,
+                                 const std::vector<std::vector<int8_t>>* stream_override)
 {
-    // Optimistic pre-filter: recompute full reference for now (toy-safe). A
-    // reject still requires this CPU path (R1). Leaf openings are validated by
-    // recomputing the episode and checking the digest; challenged_leaves is
-    // reserved for a future partial-recompute implementation.
-    (void)challenged_leaves;
-    const uint256 got = RecomputeResidentCurriculumReference(header, params, height);
-    return got == claimed_digest && !got.IsNull();
+    // Optimistic accept-fast pre-filter (R.5.3 / R1):
+    //   - recompute full CPU episode (empty ExactGemm — never accelerate here)
+    //   - open challenged Merkle leaves against recomputed round_roots
+    // Returning true is ONLY an optimistic accept. Consensus INVALID still
+    // requires the full int64 recompute in CheckMatMulProofOfWork_RC.
+    if (claimed_digest.IsNull()) return false;
+    if (!ValidateRCEpisodeParams(params)) return false;
+
+    std::vector<RCRoundTranscript> rounds;
+    const uint256 got =
+        RecomputeResidentCurriculumReference(header, params, height, {}, &rounds, nullptr, {});
+    if (got != claimed_digest) return false;
+    if (rounds.empty()) return false;
+
+    const std::vector<uint256> leaves0 = BuildTileTreeLeaves(rounds[0].stream, params.T_leaf);
+    const uint32_t n_leaves = static_cast<uint32_t>(leaves0.size());
+    if (n_leaves == 0) return false;
+
+    std::vector<uint32_t> challenges = challenged_leaves;
+    if (challenges.empty()) {
+        const uint256 sigma = matmul::v4::DeriveSigma(header);
+        challenges = DeriveFSChallenges(sigma, claimed_digest, params.rounds, n_leaves);
+    }
+
+    for (uint32_t flat : challenges) {
+        const uint32_t r = flat / n_leaves;
+        const uint32_t leaf = flat % n_leaves;
+        if (r >= params.rounds || r >= rounds.size()) return false;
+        const std::vector<int8_t>* stream = &rounds[r].stream;
+        if (stream_override) {
+            if (r >= stream_override->size()) return false;
+            stream = &(*stream_override)[r];
+        }
+        if (!VerifyRCLeafOpening(*stream, params.T_leaf, leaf, rounds[r].round_root)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<int64_t> TestHelperGemmGXtInt64(const std::vector<int8_t>& G,
+                                            const std::vector<int8_t>& X, uint32_t b_seq,
+                                            uint32_t d_model)
+{
+    return GemmGXtInt64(G, X, b_seq, d_model);
+}
+
+std::vector<int64_t> TestHelperGemmGXtViaChunkedExact(const std::vector<int8_t>& G,
+                                                     const std::vector<int8_t>& X,
+                                                     uint32_t b_seq, uint32_t d_model,
+                                                     const lt::ExactGemmBackend& gemm)
+{
+    return GemmGXtViaChunkedExact(G, X, b_seq, d_model, gemm);
 }
 
 } // namespace matmul::v4::rc

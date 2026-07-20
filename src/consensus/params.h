@@ -489,6 +489,13 @@ struct Params {
     /** One-time ASERT rescale at nMatMulRCHeight (calibrate from silicon). */
     int64_t nMatMulRCAsertRescaleNum{1};
     int64_t nMatMulRCAsertRescaleDen{1};
+    /** REGTEST ONLY — when true, CheckMatMulProofOfWork_RC / SolveMatMulV4 ENC_RC
+     *  use MakeToyRCEpisodeParams() instead of DefaultConsensusRCEpisodeParams().
+     *  Public nets MUST keep this false (AssertBMX4CConstructionInvariants).
+     *  Consensus dims (n_ctx=786432) are not CI-runnable; toy dims enable unit
+     *  tests while production verify always uses the full episode when this is
+     *  false and nMatMulRCHeight is live. */
+    bool fMatMulRCUseToyDims{false};
     /** v4.4-LT Q* Phase B — SEAL-AS-PoW mode (doc/btx-matmul-v4.4-lt-normative-spec.md
      *  "Q* window", doc/btx-matmul-v4.4-lt-adversarial-analysis.md "Phase B").
      *  When true AND DRLT is live, the header's matmul_digest is no longer the
@@ -822,12 +829,13 @@ struct Params {
             nMatMulDRLTHeight != std::numeric_limits<int32_t>::max() &&
             height >= nMatMulDRLTHeight;
     }
-    /** True at and above the Resident Curriculum (ENC_RC) height. Self-guards
-     *  the INT32_MAX disabled sentinel (mirrors IsMatMulV4Active). Public nets
-     *  keep nMatMulRCHeight = INT32_MAX until a deliberate clean cutover. */
+    /** True at and above the Resident Curriculum (ENC_RC) height. Requires the
+     *  MatMul v4 PoW path (IsMatMulV4Active) so RC only runs inside the MatMul
+     *  cascade. Self-guards the INT32_MAX disabled sentinel. Public nets keep
+     *  nMatMulRCHeight = INT32_MAX until a deliberate clean cutover. */
     bool IsMatMulRCActive(int32_t height) const
     {
-        return height >= 0
+        return IsMatMulV4Active(height)
             && nMatMulRCHeight != std::numeric_limits<int32_t>::max()
             && height >= nMatMulRCHeight;
     }

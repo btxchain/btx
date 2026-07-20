@@ -90,12 +90,41 @@
 #
 # External C-15 (math hardness) remains a separate human gate:
 #   doc/btx-matmul-v4.4-lt-external-c15-packet.md
+#
+# --- ENC_RC (Resident Curriculum) ---
+#
+# Real CPU episode harness (toy dims by default). Builds matmul-v4-rc-harness
+# when present and runs it; aggregate with rc-gate.py (PARTIAL for toy, never
+# raises nMatMulRCHeight):
+#
+#   contrib/matmul-v4/measure-hardware.sh cpu rc --toy --out /tmp/rc.json
+#   contrib/matmul-v4/rc-gate.py /tmp/rc.json --out /tmp/rc-summary.json
 
 set -euo pipefail
 BACKEND="${1:-}"
 shift || true
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD="${BUILD_DIR:-$ROOT/build-measure-$BACKEND}"
+
+# Optional first/extra token `rc` selects the ENC_RC harness instead of matmul-v4-report.
+RC_MODE=0
+if [ "$BACKEND" = "rc" ]; then
+  RC_MODE=1
+  BACKEND="${1:-cpu}"
+  shift || true
+fi
+# Also accept `rc` anywhere in remaining args (e.g. measure-hardware.sh cpu rc --toy).
+FILTERED_ARGS=()
+prev=""
+for a in "$@"; do
+  if [ "$a" = "rc" ] && [ "$prev" != "--profile" ]; then
+    RC_MODE=1
+  else
+    FILTERED_ARGS+=("$a")
+  fi
+  prev="$a"
+done
+set -- "${FILTERED_ARGS[@]+"${FILTERED_ARGS[@]}"}"
 
 case "$BACKEND" in
   cpu)   CMAKE_FLAGS=() ;;
@@ -107,7 +136,7 @@ case "$BACKEND" in
   cuda)  CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90;100;120}") ;;
   metal) CMAKE_FLAGS=(-DBTX_ENABLE_METAL=ON) ;;
   hip)   CMAKE_FLAGS=(-DBTX_ENABLE_HIP=ON "-DBTX_HIP_ARCHITECTURES=${HIP_ARCH:?set HIP_ARCH e.g. gfx942}") ;;
-  *) echo "usage: $0 <cpu|cuda|metal|hip> [extra --flags for matmul-v4-report]"; exit 2 ;;
+  *) echo "usage: $0 <cpu|cuda|metal|hip> [rc] [extra --flags]"; echo "       $0 rc [cpu|cuda|metal|hip] [extra --flags]"; exit 2 ;;
 esac
 
 # Detect the requested profile purely to make the echoed messages accurate;
@@ -127,7 +156,9 @@ for a in "$@"; do
   prev="$a"
 done
 
-if [ "$PROFILE" = "bmx4c" ]; then
+if [ "$RC_MODE" -eq 1 ]; then
+  echo "== MatMul ENC_RC (Resident Curriculum) harness: $BACKEND =="
+elif [ "$PROFILE" = "bmx4c" ]; then
   echo "== MatMul v4.2 (ENC-BMX4C) hardware measurement + M-t24: $BACKEND =="
 elif [ "$PROFILE" = "bmx4c-lt" ]; then
   echo "== MatMul v4.4-LT (ENC-DR-LT MatExpand+Q*) hardware measurement: $BACKEND =="
@@ -143,6 +174,29 @@ echo "-- configuring ($BUILD)"
 cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF \
       -DENABLE_WALLET=ON -DWITH_SQLITE=ON -DBUILD_TESTS=OFF -DBUILD_UTIL=ON \
       "${CMAKE_FLAGS[@]}" >/dev/null || { echo "CONFIGURE FAILED"; exit 2; }
+
+if [ "$RC_MODE" -eq 1 ]; then
+  echo "-- building matmul-v4-rc-harness"
+  cmake --build "$BUILD" --target matmul-v4-rc-harness -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \
+    || { echo "BUILD FAILED (matmul-v4-rc-harness)"; exit 2; }
+  BIN="$(find "$BUILD" -type f -name matmul-v4-rc-harness | head -1)"
+  if [ -z "$BIN" ]; then echo "could not locate matmul-v4-rc-harness binary"; exit 2; fi
+  echo "-- running $BIN $*"
+  set +e
+  "$BIN" "$@"
+  CODE=$?
+  set -e
+  echo ""
+  echo "Aggregate ENC_RC GO/PARTIAL/NO-GO with:"
+  echo "  contrib/matmul-v4/rc-gate.py <rc-json> --out summary.json"
+  echo "Toy runs never raise nMatMulRCHeight (stays INT32_MAX)."
+  if [ "$CODE" -eq 0 ]; then
+    echo "RESULT: ENC_RC harness ExtractMX self-qual PASS ($BACKEND)."
+  else
+    echo "RESULT: ENC_RC harness FAIL ($BACKEND) — see output above."
+  fi
+  exit "$CODE"
+fi
 
 echo "-- building matmul-v4-report"
 cmake --build "$BUILD" --target matmul-v4-report -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \

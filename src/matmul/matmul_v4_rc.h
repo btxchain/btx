@@ -5,6 +5,7 @@
 #ifndef BTX_MATMUL_MATMUL_V4_RC_H
 #define BTX_MATMUL_MATMUL_V4_RC_H
 
+#include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <primitives/block.h>
 #include <uint256.h>
@@ -12,12 +13,22 @@
 #include <cstdint>
 #include <vector>
 
+namespace Consensus {
+struct Params;
+}
+
 // ENC_RC / Resident Curriculum — 3-phase cognitive-workout episode.
 // Normative: doc/btx-matmul-v4.4-resident-curriculum-unified-proposal-2026-07-20.md §R
 //
 // Consensus ground truth is the int64 CPU reference
-// (RecomputeResidentCurriculumReference). Accelerated paths must prove
-// byte-identity before mining use; only the CPU reference may pronounce INVALID.
+// (RecomputeResidentCurriculumReference with an empty ExactGemmBackend).
+// Accelerated paths may inject ExactGemmBackend for <2^24 s8xs8 stages
+// (forward / backward); on mismatch they fall back to CPU ExactGemmS8S8.
+// Phase-1 Z=S·V stays int64-streamed in the reference (bound ≫ 2^24).
+// Phase-2 wgrad G·Xᵀ uses int64 as oracle; an optional chunked ExactGemm
+// path (TestHelperGemmGXtViaChunkedExact) must match byte-for-byte.
+//
+// REJECT / spot-check MUST use the CPU reference only (never accelerated).
 //
 // Activation: Consensus::Params::nMatMulRCHeight (default INT32_MAX).
 
@@ -33,6 +44,11 @@ inline constexpr uint32_t kRCModelDim = 4096;
 inline constexpr uint32_t kRCBatchSeq = 16'384;
 inline constexpr uint32_t kRCTileLeafBytes = 1024; // 32×32 int8
 
+/** Max K-chunk for wgrad ExactGemm panels: 2304·K < 2^24 (FP32-mantissa ceiling). */
+inline constexpr uint32_t kRCWgradExactChunk = 4096;
+static_assert(static_cast<uint64_t>(kRCWgradExactChunk) * 2304ull < (uint64_t{1} << 24),
+              "wgrad ExactGemm chunk must stay under the 2^24 FP32-exact ceiling");
+
 static_assert(kRCHeadDim % 32 == 0, "kRCHeadDim must be divisible by 32");
 static_assert(kRCQueryRows % 32 == 0, "kRCQueryRows must be divisible by 32");
 static_assert(kRCContextLen % 32 == 0, "kRCContextLen must be divisible by 32");
@@ -47,9 +63,12 @@ static_assert(static_cast<uint64_t>(kRCContextLen) * 2304ull < (uint64_t{1} << 6
 inline constexpr char kRCRoundTag[] = "BTX_RC_ROUND_V1";
 inline constexpr char kRCEpisodeTag[] = "BTX_RC_EPISODE_V1";
 inline constexpr char kRCPadTag[] = "BTX_RC_PAD";
+inline constexpr char kRCFsTag[] = "BTX_RC_FS_V1";
 inline constexpr uint8_t kRCLeafTag = 0x00;
 inline constexpr uint8_t kRCNodeTag = 0x01;
 inline constexpr uint8_t kRCPadLeafTag = 0x02;
+/** Fiat–Shamir spot-check query count (optimistic accept-fast pre-filter). */
+inline constexpr uint32_t kRCSpotCheckQueries = 8;
 
 /** Per-episode shape (consensus constants or toy dims for tests / harness). */
 struct RCEpisodeParams {
@@ -65,8 +84,9 @@ struct RCEpisodeParams {
 
 /** Optional execution knobs that MUST NOT change digests (R.2.2 / R.3.3). */
 struct RCEpisodeOptions {
-    /** Phase-1 n_ctx tile length. 0 ⇒ whole context. Any positive ΔT that
-     *  partitions [0,n_ctx) yields identical Z (tile-size invariance). */
+    /** Phase-1 n_ctx tile length. 0 ⇒ whole context. Any positive ΔT is
+     *  allowed (§R.2.2): incomplete MX 32-blocks are buffered across tile
+     *  windows so Extract boundaries stay on bj = ⌊t/32⌋. */
     uint32_t phase1_tile_delta{0};
     enum class Checkpoint : uint8_t {
         StoreAll = 0,     // reference default
@@ -76,8 +96,23 @@ struct RCEpisodeOptions {
     Checkpoint checkpoint{Checkpoint::StoreAll};
 };
 
+/** Optional wall-clock timing for harness / measurement (not consensus). */
+struct RCEpisodeTiming {
+    double phase1_s{0};
+    double phase2_s{0};
+    double phase3_s{0};
+    double total_s{0};
+};
+
 struct RCRoundTranscript {
     uint256 round_root{};
+    /** Round byte stream (R.4.1); filled when collected via out_rounds. */
+    std::vector<int8_t> stream{};
+};
+
+/** Merkle opening: siblings from leaf toward root (index parity selects side). */
+struct RCMerkleProof {
+    std::vector<uint256> siblings{};
 };
 
 [[nodiscard]] bool ValidateRCEpisodeParams(const RCEpisodeParams& p);
@@ -85,29 +120,72 @@ struct RCRoundTranscript {
 [[nodiscard]] RCEpisodeParams DefaultConsensusRCEpisodeParams();
 /** Tiny dims for unit tests — every matrix dim divisible by 32 (H13). */
 [[nodiscard]] RCEpisodeParams MakeToyRCEpisodeParams();
+/** Medium dims for self-qual: wgrad contraction exceeds 2^24 (b_seq ≥ 8192). */
+[[nodiscard]] RCEpisodeParams MakeMediumRCEpisodeParams();
+/** Consensus checker/miner dims: toy when Params::fMatMulRCUseToyDims (regtest
+ *  only), else DefaultConsensusRCEpisodeParams(). */
+[[nodiscard]] RCEpisodeParams ResolveRCEpisodeParams(const Consensus::Params& p);
 
-/** Sole consensus ground truth (R.5.1). Pure int64 integer; MUST NOT dispatch
- *  to any accelerated/FP backend. Returns the 32-byte episode digest. */
+/** Sole consensus ground truth (R.5.1). Pure int64 integer by default.
+ *  Optional `gemm` may accelerate Phase-2 s8xs8 stages (bound < 2^24) when the
+ *  backend matches CPU ExactGemmS8S8; mismatch/false falls back to CPU.
+ *  Consensus REJECT / spot-check MUST pass an empty backend. */
 [[nodiscard]] uint256 RecomputeResidentCurriculumReference(
     const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
     const RCEpisodeOptions& options = {},
-    std::vector<RCRoundTranscript>* out_rounds = nullptr);
+    std::vector<RCRoundTranscript>* out_rounds = nullptr,
+    RCEpisodeTiming* out_timing = nullptr,
+    const matmul::v4::lt::ExactGemmBackend& gemm = {});
 
-/** Miner entry: same digest as the CPU reference (reseal path). */
+/** Miner entry: same digest as the CPU reference. May inject ExactGemmBackend
+ *  after RC self-qualification (fail-closed → empty backend = CPU). */
 [[nodiscard]] uint256 MineRCEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
                                     int32_t height,
-                                    std::vector<RCRoundTranscript>* out_rounds = nullptr);
+                                    std::vector<RCRoundTranscript>* out_rounds = nullptr,
+                                    const matmul::v4::lt::ExactGemmBackend& gemm = {});
 
-/** Spot-check verifier: recompute challenged Merkle leaves' stages.
- *  Accept-fast only — a REJECT requires full CPU recompute (R1). */
+/** Spot-check verifier (R.5.3): recompute episode streams, open challenged
+ *  Merkle leaves against round_roots. If challenged_leaves is empty, derive
+ *  q=kRCSpotCheckQueries flat leaf indices via Fiat–Shamir
+ *  SHA256d("BTX_RC_FS_V1"‖sigma‖claimed_digest‖le32(q)).
+ *
+ *  Returns false on any leaf failure (accept-fast fail). Returns true only as
+ *  an optimistic accept — consensus INVALID still requires the full int64
+ *  recompute in CheckMatMulProofOfWork_RC (R1). NEVER dispatches accelerators.
+ *
+ *  stream_override: optional per-round streams for leaf bytes (tests / openings);
+ *  paths are checked against the recomputed round_roots. */
 [[nodiscard]] bool VerifyRCTranscriptSpotCheck(
     const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
-    const uint256& claimed_digest, const std::vector<uint32_t>& challenged_leaves);
+    const uint256& claimed_digest, const std::vector<uint32_t>& challenged_leaves,
+    const std::vector<std::vector<int8_t>>* stream_override = nullptr);
 
 /** Test/harness helpers (not consensus entry points). */
 [[nodiscard]] std::vector<int8_t> ExpandMxDequantInt8(const uint256& seed, uint32_t rows,
                                                       uint32_t cols);
+/** Padded-pow2 leaf hashes for a round stream (R.4.2). */
+[[nodiscard]] std::vector<uint256> BuildTileTreeLeaves(const std::vector<int8_t>& stream,
+                                                       uint32_t t_leaf);
 [[nodiscard]] uint256 BuildTileTreeRoot(const std::vector<int8_t>& stream, uint32_t t_leaf);
+[[nodiscard]] RCMerkleProof OpenMerkleProof(const std::vector<uint256>& leaves, uint32_t index);
+[[nodiscard]] bool VerifyMerkleProof(const uint256& leaf_hash, uint32_t index,
+                                     const RCMerkleProof& proof, const uint256& root);
+/** Hash leaf bytes from stream[index] and verify the Merkle path to round_root. */
+[[nodiscard]] bool VerifyRCLeafOpening(const std::vector<int8_t>& stream, uint32_t t_leaf,
+                                       uint32_t leaf_index, const uint256& round_root);
+/** Structural total-MAC count (R.4.4) — nonce-independent. */
+[[nodiscard]] uint64_t TotalRCEpisodeMacs(const RCEpisodeParams& p);
+
+/** Oracle wgrad: G·Xᵀ → int64 (d_model × d_model). */
+[[nodiscard]] std::vector<int64_t> TestHelperGemmGXtInt64(const std::vector<int8_t>& G,
+                                                         const std::vector<int8_t>& X,
+                                                         uint32_t b_seq, uint32_t d_model);
+
+/** Chunked ExactGemmS8S8 wgrad path (panels of kRCWgradExactChunk). Must match
+ *  TestHelperGemmGXtInt64 byte-for-byte. Optional `gemm` verified vs CPU. */
+[[nodiscard]] std::vector<int64_t> TestHelperGemmGXtViaChunkedExact(
+    const std::vector<int8_t>& G, const std::vector<int8_t>& X, uint32_t b_seq,
+    uint32_t d_model, const matmul::v4::lt::ExactGemmBackend& gemm = {});
 
 } // namespace matmul::v4::rc
 

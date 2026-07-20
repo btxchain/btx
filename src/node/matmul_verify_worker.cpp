@@ -116,15 +116,23 @@ void MatMulVerifyWorker::WorkerLoop()
             // the guard is not taken re-entrantly with two different scopes.
             MatMulRecomputeSingleFlight sf(hash);
             if (sf.IsLeader()) {
-                ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height,
-                                                    job.parent_median_time_past);
+                if (m_params.IsMatMulRCActive(job.height)) {
+                    ok = CheckMatMulProofOfWork_RC(*job.block, m_params, job.height);
+                } else {
+                    ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height,
+                                                        job.parent_median_time_past);
+                }
                 sf.SetResult(ok); // publish before ~sf releases waiters
             } else if (const auto leader_result{sf.LeaderResult()}) {
                 ok = *leader_result; // sketch already Put() on an accepted block
             } else {
                 // Leader exited without publishing: decide ourselves.
-                ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height,
-                                                    job.parent_median_time_past);
+                if (m_params.IsMatMulRCActive(job.height)) {
+                    ok = CheckMatMulProofOfWork_RC(*job.block, m_params, job.height);
+                } else {
+                    ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height,
+                                                        job.parent_median_time_past);
+                }
             }
             CacheMatMulEncDrVerdict(hash, ok);
             LogDebug(BCLog::NET, "matmul async verify: block %s height %d encdr_ok=%d\n",

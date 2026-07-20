@@ -26,6 +26,7 @@
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_rc.h>
 #include <matmul/noise.h>
 #include <matmul/pow_v4.h>
 #include <matmul/transcript.h>
@@ -1092,6 +1093,14 @@ int32_t LatestMatMulAsertPreUpgradeAnchorHeight(const CBlockIndex* pindexLast, c
         params.nMatMulDRLTHeight > anchor_height) {
         anchor_height = params.nMatMulDRLTHeight;
     }
+    // MatMul ENC_RC / Resident Curriculum: one-time ASERT re-anchor at
+    // nMatMulRCHeight (episode work unit differs from LT/BMX4C; Num/Den
+    // calibrated from silicon before any public network raises the height).
+    if (!IsDisabledHeight(params.nMatMulRCHeight) &&
+        pindexLast->nHeight >= params.nMatMulRCHeight &&
+        params.nMatMulRCHeight > anchor_height) {
+        anchor_height = params.nMatMulRCHeight;
+    }
     return anchor_height;
 }
 
@@ -1248,6 +1257,40 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
                    static_cast<long long>(params.nMatMulDRLTAsertRescaleDen));
         return false;
     }
+    // ENC_RC ASERT config guards (mirror DRLT): positive reducible ratio, fork
+    // at/above ASERT. When DRLT is also configured, RC must be at or above it
+    // (GetMatMulEncodingProfile prefers ENC_RC; a lower RC height would shadow).
+    {
+        uint32_t rc_rn, rc_rd;
+        if (!ReduceRescaleRatioToU32(params.nMatMulRCAsertRescaleNum, params.nMatMulRCAsertRescaleDen, rc_rn, rc_rd)) {
+            LogWarning("MatMulAsert: RC rescale ratio is invalid (num=%lld den=%lld; must be positive and reduce to a 32-bit rational) at height %d, failing closed\n",
+                       static_cast<long long>(params.nMatMulRCAsertRescaleNum),
+                       static_cast<long long>(params.nMatMulRCAsertRescaleDen), next_height);
+            return false;
+        }
+    }
+    if (!IsDisabledHeight(params.nMatMulRCHeight) && params.nMatMulRCHeight < params.nMatMulAsertHeight) {
+        LogWarning("MatMulAsert: RC height=%d is below ASERT activation=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                   params.nMatMulRCHeight, params.nMatMulAsertHeight, next_height);
+        return false;
+    }
+    if (!IsDisabledHeight(params.nMatMulRCHeight) && !IsDisabledHeight(params.nMatMulDRLTHeight) &&
+        params.nMatMulRCHeight < params.nMatMulDRLTHeight) {
+        LogWarning("MatMulAsert: RC height=%d must be at or above DRLT height=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                   params.nMatMulRCHeight, params.nMatMulDRLTHeight, next_height);
+        return false;
+    }
+    // Unified RC==DRLT: DRLT branch owns the rescale; RC ratio must be 1/1.
+    if (!IsDisabledHeight(params.nMatMulRCHeight) && !IsDisabledHeight(params.nMatMulDRLTHeight) &&
+        params.nMatMulRCHeight == params.nMatMulDRLTHeight &&
+        params.nMatMulRCAsertRescaleNum != params.nMatMulRCAsertRescaleDen) {
+        LogWarning("MatMulAsert: unified activation (rc==drlt=%d) requires the RC rescale ratio to be 1/1 "
+                   "(got %lld/%lld); use the DRLT rescale for the combined shift. Failing closed.\n",
+                   params.nMatMulDRLTHeight,
+                   static_cast<long long>(params.nMatMulRCAsertRescaleNum),
+                   static_cast<long long>(params.nMatMulRCAsertRescaleDen));
+        return false;
+    }
     // Single-activation: BMX4C may fork AT (unified flag day) or above (staged)
     // the v4 height, never strictly below. At equality the MatMulAsert cascade
     // guards the v4-rescale branch out so the BMX4C rescale fires (see above).
@@ -1310,6 +1353,17 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
             LogWarning("MatMulAsert: non-inert DRLT rescale height=%d collides with an earlier ASERT branch "
                        "(rescale would be silently skipped) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                        params.nMatMulDRLTHeight, next_height);
+            return false;
+        }
+        if (!IsDisabledHeight(params.nMatMulRCHeight) &&
+            params.nMatMulRCAsertRescaleNum != params.nMatMulRCAsertRescaleDen &&
+            (shadowed_by_earlier(params.nMatMulRCHeight) ||
+             (!IsDisabledHeight(params.nMatMulV4Height) && params.nMatMulRCHeight == params.nMatMulV4Height) ||
+             (!IsDisabledHeight(params.nMatMulBMX4CHeight) && params.nMatMulRCHeight == params.nMatMulBMX4CHeight) ||
+             (!IsDisabledHeight(params.nMatMulDRLTHeight) && params.nMatMulRCHeight == params.nMatMulDRLTHeight))) {
+            LogWarning("MatMulAsert: non-inert RC rescale height=%d collides with an earlier ASERT branch "
+                       "(rescale would be silently skipped) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                       params.nMatMulRCHeight, next_height);
             return false;
         }
     }
@@ -2633,6 +2687,22 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         arith_uint256 lt_target = ScaleTargetByTimespan(parent_target, lt_rn, lt_rd);
         lt_target = ClampRetargetResult(lt_target, pow_limit);
         return lt_target.GetCompact();
+    }
+
+    // MatMul ENC_RC / Resident Curriculum: one-time ASERT rescale at the RC
+    // fork. Guard equality with DRLT the same way DRLT is guarded against
+    // BMX4C: when a network unifies RC with DRLT, the DRLT branch above owns
+    // the rescale and this branch must not double-apply.
+    if (next_height == params.nMatMulRCHeight && next_height != params.nMatMulDRLTHeight) {
+        arith_uint256 parent_target{};
+        parent_target.SetCompact(pindexLast->nBits);
+        uint32_t rc_rn, rc_rd;
+        if (!ReduceRescaleRatioToU32(params.nMatMulRCAsertRescaleNum, params.nMatMulRCAsertRescaleDen, rc_rn, rc_rd)) {
+            return MatMulAsertFailClosedBits();
+        }
+        arith_uint256 rc_target = ScaleTargetByTimespan(parent_target, rc_rn, rc_rd);
+        rc_target = ClampRetargetResult(rc_target, pow_limit);
+        return rc_target.GetCompact();
     }
 
 
@@ -3997,6 +4067,35 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
     // may serve them to CPU peers (best-effort, non-consensus, §4.3).
     matmul::GetMatMulSketchCache().Put(block_hash, std::move(recomputed_sketch));
     return finish(true, MatMulValidationPath::RECOMPUTE);
+}
+
+bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Params& params,
+                               int32_t block_height)
+{
+    const auto start = std::chrono::steady_clock::now();
+    const auto finish = [&](bool passed) {
+        RegisterMatMulValidationRuntimeSample(
+            MatMulValidationPath::RECOMPUTE,
+            passed,
+            std::chrono::steady_clock::now() - start);
+        return passed;
+    };
+
+    if (!params.IsMatMulRCActive(block_height)) return finish(false);
+    if (header.matmul_dim != params.nMatMulV4Dimension) return finish(false);
+    if (header.seed_a.IsNull() || header.seed_b.IsNull()) return finish(false);
+
+    auto bnTarget{DeriveTarget(header.nBits, params.powLimit)};
+    if (!bnTarget) return finish(false);
+
+    const matmul::v4::rc::RCEpisodeParams params_rc = matmul::v4::rc::ResolveRCEpisodeParams(params);
+    if (!matmul::v4::rc::ValidateRCEpisodeParams(params_rc)) return finish(false);
+
+    const uint256 digest =
+        matmul::v4::rc::RecomputeResidentCurriculumReference(header, params_rc, block_height);
+    if (digest.IsNull() || digest != header.matmul_digest) return finish(false);
+    if (UintToArith256(digest) > *bnTarget) return finish(false);
+    return finish(true);
 }
 
 bool OffloadMatMulV4SketchToCache(CBlock& block)
@@ -5567,6 +5666,72 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
     return false;
 }
 
+/** ENC_RC / Resident Curriculum miner: grind nonces through MineRCEpisode,
+ *  reseal every candidate via RecomputeResidentCurriculumReference (abort on
+ *  mismatch). Digest-only — no Freivalds sketch payload. */
+static bool SolveMatMulV4RC(CBlockHeader& block,
+                            const Consensus::Params& params,
+                            uint64_t& max_tries,
+                            int32_t block_height,
+                            const std::atomic<bool>* abort_flag,
+                            std::vector<uint32_t>* freivalds_payload_out,
+                            std::optional<int64_t> parent_median_time_past,
+                            const arith_uint256& effective_target,
+                            std::chrono::steady_clock::time_point start)
+{
+    if (!parent_median_time_past.has_value()) {
+        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+        return false;
+    }
+    if (freivalds_payload_out != nullptr) {
+        freivalds_payload_out->clear();
+    }
+
+    const matmul::v4::rc::RCEpisodeParams params_rc = matmul::v4::rc::ResolveRCEpisodeParams(params);
+    if (!matmul::v4::rc::ValidateRCEpisodeParams(params_rc)) {
+        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+        return false;
+    }
+
+    while (max_tries > 0) {
+        if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        if (!SetDeterministicMatMulSeeds(block, params, block_height, parent_median_time_past)) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+
+        const uint256 mined =
+            matmul::v4::rc::MineRCEpisode(block, params_rc, block_height);
+        const uint256 resealed =
+            matmul::v4::rc::RecomputeResidentCurriculumReference(block, params_rc, block_height);
+        if (mined.IsNull() || resealed != mined) {
+            LogWarning("SolveMatMulV4RC: MineRCEpisode diverged from "
+                       "RecomputeResidentCurriculumReference at nonce=%llu; aborting solve\n",
+                       static_cast<unsigned long long>(block.nNonce64));
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        if (UintToArith256(resealed) <= effective_target) {
+            block.matmul_digest = resealed;
+            RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
+            return true;
+        }
+
+        --max_tries;
+        if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        ++block.nNonce64;
+        block.nNonce = static_cast<uint32_t>(block.nNonce64);
+    }
+    RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+    return false;
+}
+
 
 static bool SolveMatMulV4(CBlockHeader& block,
                           const Consensus::Params& params,
@@ -5606,6 +5771,10 @@ static bool SolveMatMulV4(CBlockHeader& block,
     // is the SINGLE selector. At BMX4C heights the whole solve routes to the
     // ENC-BMX4C loop; the ENC-S8 path below is unchanged.
     const Consensus::MatMulEncodingProfile solve_profile = params.GetMatMulEncodingProfile(block_height);
+    if (solve_profile == Consensus::MatMulEncodingProfile::ENC_RC) {
+        return SolveMatMulV4RC(block, params, max_tries, block_height, abort_flag,
+                               freivalds_payload_out, parent_median_time_past, effective_target, start);
+    }
     if (solve_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C_LT) {
         // Pass effective_target (share override when present) so LT Phase A/B
         // pool shares are not silently dropped — mirrors ENC-BMX4C H6.

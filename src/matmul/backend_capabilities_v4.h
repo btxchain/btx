@@ -115,7 +115,16 @@ std::vector<std::pair<Kind, Eligibility>> AllEligibility();
 //! Unknown, unavailable, or INADMISSIBLE (verification-only, §S.1) requests
 //! fall back to CPU with a machine-readable reason. This is the hook
 //! matmul_v4::accel::ResolveBackend delegates to.
+//! Non-CPU selections with `self_test_required` additionally require
+//! HasPassedDeterminismSelfTest (fail-closed §N.3-v).
 Selection ResolveBackend(const std::string& requested);
+
+//! §N.3-v determinism / ExactGemm self-test latch. CPU is always true (it is
+//! the reference). Non-CPU kinds return true only when EligibilityFor reports
+//! admissible — device ExactGemm self-qual (IMMA / MFMA / TensorOps / Cube) is
+//! folded into that predicate. RC mining ExactGemm inject is gated separately
+//! by matmul::v4::rc::HasPassedRCSelfQual / ProbeRCSelfQual.
+[[nodiscard]] bool HasPassedDeterminismSelfTest(Kind kind);
 
 // -- Pure classification rules (unit-testable without hardware) -------------
 // Each classifier encodes the §S.1 admissibility rule for one vendor. The

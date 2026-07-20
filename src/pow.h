@@ -273,6 +273,13 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
                                     int32_t block_height,
                                     std::optional<int64_t> parent_median_time_past = std::nullopt);
 
+/** ENC_RC / Resident Curriculum DIGEST_RECOMPUTE checker. Requires
+ *  IsMatMulRCActive(block_height). Recomputes the episode digest via
+ *  RecomputeResidentCurriculumReference (ResolveRCEpisodeParams dims) and
+ *  checks digest == header.matmul_digest and digest ≤ nBits target. */
+bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Params& params,
+                               int32_t block_height);
+
 /** The ENC-DR CPU pure-integer reference recompute (verify-side entry point of
  *  the SAME code path the miner seals winning blocks with — bit-identical by
  *  construction, tension-resolution §4.2 RECOMPUTE). Dispatches on the active

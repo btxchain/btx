@@ -369,6 +369,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_lt.cpp
   matmul/matmul_v4_lt_mx_exact.cpp
   matmul/matmul_v4_rc.cpp
+  matmul/matmul_v4_rc_selfqual.cpp
   matmul/matmul_sketch_cache.cpp
   matmul/matmul_v4_exact_float.cpp
   matmul/matmul_v4_fast_exact.cpp
@@ -1310,6 +1311,24 @@ if(BUILD_UTIL)
     )
   endif()
   install_binary_component(matmul-v4-report)
+
+  # ENC_RC (Resident Curriculum) real CPU measurement harness — feeds rc-gate.py.
+  # Toy dims by default; never raises nMatMulRCHeight.
+  add_executable(matmul-v4-rc-harness matmul-v4-rc-harness.cpp)
+  target_include_directories(matmul-v4-rc-harness PRIVATE
+    $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
+  )
+  target_link_libraries(matmul-v4-rc-harness
+    core_interface
+  )
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(matmul-v4-rc-harness ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(matmul-v4-rc-harness
+      bitcoin_shielded
+    )
+  endif()
+  install_binary_component(matmul-v4-rc-harness)
 
   add_executable(btx-genesis btx-genesis.cpp)
   target_link_libraries(btx-genesis
