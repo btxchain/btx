@@ -566,4 +566,43 @@ BOOST_AUTO_TEST_CASE(gkr_bakeoff_b_educational_still_present)
     BOOST_CHECK(b.verify.ok);
 }
 
+BOOST_AUTO_TEST_CASE(gkr_h2_shadow_reuses_prior_exact_replay)
+{
+    // With shadow ON + cached proof, CheckMatMulProofOfWork_RC must invoke
+    // VerifyBoundedExactReplay exactly once (shadow reuses prior_replay).
+    unsetenv("BTX_RC_GKR_ARBITER");
+    unsetenv("BTX_RC_VERIFY_GKR");
+    setenv("BTX_RC_GKR_SHADOW", "1", 1);
+
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.nMatMulV4Dimension = 256;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 10;
+    auto header = MakeRCHeader(42);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+
+    const auto pr =
+        rc::ProveWinnerEpisode(header, params_rc, kHeight, header.matmul_digest);
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    std::vector<unsigned char> bytes;
+    BOOST_REQUIRE(rc::SerializeRCGkrProof(pr.proof, bytes) > 0);
+    rc::RCGkrProofCachePut(header.GetHash(), bytes);
+
+    rc::ResetExactReplayInvocationCountForTest();
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
+    BOOST_CHECK_EQUAL(rc::ExactReplayInvocationCountForTest(), 1u);
+
+    unsetenv("BTX_RC_GKR_SHADOW");
+    rc::RCGkrProofCacheClear();
+}
+
 BOOST_AUTO_TEST_SUITE_END()
