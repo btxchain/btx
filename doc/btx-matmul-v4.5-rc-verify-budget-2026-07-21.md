@@ -33,12 +33,15 @@ happy-path ceiling (previously hardcoded 0.5 / 2.0).
 wall exceeds the interval-fraction budget. Unit tests pin 0.9 / 9.0 and
 pass/fail thresholds.
 
-## Measured table (Lane C placeholder)
+## Measured table (Lane C — 5060 Ti / tip cf7d056)
 
-| Profile | Dim | `gkr_verify_s` | `fri_verify_s` | `exactreplay_verify_s` | peak_rss | Stage-I |
-|---|---|---|---|---|---|---|
-| floor | production | TBD | TBD | TBD | TBD | TBD |
-| mid | production | TBD | TBD | TBD | TBD | TBD |
-| dc | production | TBD | TBD | TBD | TBD | TBD |
+| Profile | Dim | Path | measured | Stage-I budget | Meet? |
+|---|---|---|---|---|---|
+| toy | episode | happy-path GKR verify | **0.279 s** | 0.9 s | YES |
+| toy | episode | GKR prove (soft) | 10.9 s | soft 2 s prove | over (ExactReplay fallback) |
+| floor/mid/dc | production ExactReplay | — | **TBD** (full production Mine multi-hour on this preset) | 9.0 s | TBD |
 
-Fill from `~/Documents/macpro-rack/pr89-results/` after Lane C.
+Production coupled Streamed Mine (768×64 MiB page expands) was **not** wall-clocked
+end-to-end in Lane C; peak-byte **estimates** and mem-cap compliance are in
+`~/Documents/macpro-rack/pr89-results/rc-production-estimates.json`.
+Gate verdict remains **NO-GO** for height.

@@ -115,8 +115,13 @@ claims are additionally bound by commit-then-challenge (proof v5+). Haböck LogU
 **Dominant term:** FRI queries. Net \(\varepsilon_{\mathrm{total}}\le 2^{-64}\) under
 §2 assumptions **for proximity**. Exact-eval PCS completeness awaits §3.
 
-**Fiat–Shamir / ROM:** commit layer roots → challenge; `pow_bind = H(digest)`
-absorbed before FRI seed so grinding the proof requires redoing PoW.
+**Fiat–Shamir / ROM / PoW grinding:** challenges are bind to committed layer
+roots (commit-then-challenge). The durable PoW anchor is the
+`round_roots → claimed_digest` SHA256d check together with the
+`round_seed` chain (`seed[0]` from episode σ, then `seed[r]` from prior
+`round_roots`). The field `pow_bind = tagged_hash(claimed_digest)` is only an
+additional FS tag absorbed before FRI seed — it is **not** by itself the
+grinding binding an auditor should chase.
 
 ---
 
@@ -127,7 +132,8 @@ absorbed before FRI seed so grinding the proof requires redoing PoW.
 2. [ ] `kRCFriNumQueries`, `FriSoundnessBoundBits()`, `kRCFriSoundnessStatement`
       agree (CI test).
 3. [ ] `BTX_RC_FRI_CONJECTURED_BOUND` is OFF in consensus builds.
-4. [ ] Commit-then-challenge ordering; `fs_seed` / `pow_bind` binding.
+4. [ ] Commit-then-challenge ordering; `round_roots`/`round_seed` digest anchor
+      (plus optional `pow_bind` FS tag — not the sole grinding binding).
 5. [ ] Batching: two FRI instances (trace + lookup) — union bound accounted.
 6. [ ] **DEEP/OOD:** confirm proximity-only vs exact-eval; do not sign off PCS
       completeness without OOD (or equivalent).
