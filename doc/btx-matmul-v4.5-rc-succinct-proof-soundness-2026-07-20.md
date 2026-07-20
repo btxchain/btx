@@ -77,18 +77,16 @@ At \(g\ge 64\), Fp3 is required — see §1.
 
 ---
 
-## 3. DEEP / OOD — OPEN exact-evaluation binding
+## 3. DEEP / OOD — exact-evaluation binding (CLOSED in FRI v3)
 
-FRI proves a committed word is \(\delta\)-**close** to a low-degree RS codeword.
-It does **not** by itself prove an *exact* polynomial evaluation at a queried
-point. A sound PCS on top of FRI needs **DEEP / out-of-domain (OOD)** sampling
-to bind evaluations.
+FRI v3 implements DEEP/OOD (ePrint 2019/336 practice): after committing P, draw
+`z`, claim `v=P(z)`, FRI-commit `Q=(P−v)/(X−z)` on the same LDE domain, and at
+each query site check `P(x)=Q(x)·(x−z)+v`.
 
-**Current status:** `matmul_v4_rc_fri.*` does **not** implement OOD/DEEP.
-The construction proves **proximity**. Exact-evaluation binding is an **OPEN**
-item before external audit sign-off. This does **not** block shadow-ON /
-arbiter-OFF (ExactReplay remains consensus). It **does** block treating the
-FRI wrapper as a complete evaluation PCS for arbiter cutover.
+This closes proximity-only PCS for **univariate** evaluation claims. MLE layer
+claims are additionally bound by commit-then-challenge (proof v5). Arbiter remains
+OFF pending external audit of the composition.
+
 
 ---
 
