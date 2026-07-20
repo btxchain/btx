@@ -121,7 +121,7 @@ if [ "$PROFILE" = "bmx4c-lt" ]; then
 
   # `grep` finding no marker is an expected FAIL case handled below. Under
   # set -euo pipefail it must not terminate the script inside the assignment.
-  MARKER="$(printf '%s\n' "$OUT" | grep -oE "DEVICE_BMX4CLT_RATE_PASS:${BACKEND}:[^[:space:]]*" | head -1 || true)"
+  MARKER="$(printf '%s\n' "$OUT" | grep -oE "DEVICE_BMX4CLT_RATE_PASS:${BACKEND}:[^[:space:]]+" | head -1 || true)"
   if [ "$CODE" -eq 0 ] && [ -n "$MARKER" ]; then
     echo "RESULT: PASS ($BACKEND) -- ENC-DR-LT bit-exact + device LT window accepted ($MARKER)."
     echo "Record the JSON for lt-gate.py. This does NOT close Rank-1 GO/NO-GO by itself."
@@ -168,7 +168,7 @@ if [ "$PROFILE" = "bmx4c" ]; then
   # code from a CPU harness self-test can never be mistaken for a device PASS.
   # A missing marker is an expected, explicitly diagnosed FAIL below. Keep the
   # negative grep from tripping `set -euo pipefail` before that branch runs.
-  MARKER="$(printf '%s\n' "$OUT" | grep -oE "DEVICE_BMX4C_MT24_PASS:${BACKEND}:[^[:space:]]*" | head -1 || true)"
+  MARKER="$(printf '%s\n' "$OUT" | grep -oE "DEVICE_BMX4C_MT24_PASS:${BACKEND}:[^[:space:]]+" | head -1 || true)"
 
   if [ "$CODE" -eq 0 ] && [ -n "$MARKER" ]; then
     echo "RESULT: PASS ($BACKEND) -- BMX4-C bit-exact vs the CPU reference AND M-t24 PASS: the"

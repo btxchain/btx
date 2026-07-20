@@ -1070,6 +1070,30 @@ BOOST_AUTO_TEST_CASE(plan_lt_accel_labels_intent_not_runtime_native)
     BOOST_CHECK(!blank.native_fp8_qualified);
 }
 
+BOOST_AUTO_TEST_CASE(cuda_mx_selftest_accepts_exact_or_qualified_native_lane)
+{
+    // The CUDA baseline self-test independently checks output identity. Its
+    // provenance gate must accept the exact INT8 lane and either qualified
+    // native lane; otherwise native self-qualification would disable CUDA.
+    matmul_v4::cuda::LtCudaMxProvenance provenance{};
+    BOOST_CHECK(!matmul_v4::cuda::HasQualifiedLtCudaMxProjectionLane(provenance));
+    provenance.exact_mx_scale_partitioned = true;
+    BOOST_CHECK(matmul_v4::cuda::HasQualifiedLtCudaMxProjectionLane(provenance));
+    provenance = {};
+    provenance.native_mxfp4_qualified = true;
+    BOOST_CHECK(matmul_v4::cuda::HasQualifiedLtCudaMxProjectionLane(provenance));
+    provenance = {};
+    provenance.native_fp8_qualified = true;
+    BOOST_CHECK(matmul_v4::cuda::HasQualifiedLtCudaMxProjectionLane(provenance));
+}
+
+#if !defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+BOOST_AUTO_TEST_CASE(cuda_native_mx_selfqual_stub_declines)
+{
+    BOOST_CHECK(!matmul_v4::cuda::SelfQualifyLtNativeMxLanesOnce());
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(accel_dispatch_matches_reference)
 {
     auto header = MakeLTHeader(21, kTestDim);

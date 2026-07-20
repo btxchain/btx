@@ -5,6 +5,7 @@
 #include <chainparams.h>
 #include <common/args.h>
 #include <pow.h>
+#include <primitives/block.h>
 #include <test/util/setup_common.h>
 #include <util/chaintype.h>
 
@@ -177,6 +178,52 @@ BOOST_AUTO_TEST_CASE(v4_expensive_count_matches_mandatory_contextual_validation)
     BOOST_CHECK_EQUAL(CountMatMulExpensiveVerifyChecks(
         /*first_height=*/99, /*header_count=*/3, /*best_known_height=*/101,
         params, /*phase2_enabled=*/false, /*is_ibd=*/false), 2U);
+}
+
+BOOST_AUTO_TEST_CASE(expensive_body_admission_excludes_cheap_payload_rejects)
+{
+    auto params = MainParams();
+    params.nMatMulV4Height = 100;
+    params.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    params.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+    params.nMatMulV4Dimension = 64;
+    params.nMatMulV4MinDimension = 64;
+    params.nMatMulV4MaxDimension = 64;
+
+    CBlock block;
+    block.matmul_dim = 64;
+
+    // Production ENC-DR reaches its predicate only with an empty A/B/C body.
+    BOOST_CHECK(MatMulBodyReachesExpensiveVerification(block, params, 100));
+    block.matrix_c_data.assign(1, 0);
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 100));
+    block.matrix_c_data.clear();
+    block.matrix_a_data.assign(1, 0);
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 100));
+
+    // Regtest flat-sketch replay rejects missing/oversized payloads before
+    // its verifier, while a bounded non-empty sketch reaches that predicate.
+    block.matrix_a_data.clear();
+    params.fMatMulV4FlatSketchReplay = true;
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 100));
+    block.matrix_c_data.assign(1, 0);
+    BOOST_CHECK(MatMulBodyReachesExpensiveVerification(block, params, 100));
+    const uint64_t m{params.nMatMulV4Dimension / params.nMatMulV4TranscriptBlockSize};
+    block.matrix_c_data.assign(2 * m * m + 1, 0);
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 100));
+
+    // Legacy required-product and malformed-product branches likewise return
+    // before Freivalds/full-transcript work.
+    params.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    params.fMatMulV4FlatSketchReplay = false;
+    params.fMatMulFreivaldsEnabled = true;
+    params.fMatMulRequireProductPayload = true;
+    block.matrix_c_data.clear();
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 99));
+    block.matrix_c_data.assign(1, 0);
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 99));
+    block.matrix_c_data.assign(static_cast<size_t>(block.matmul_dim) * block.matmul_dim, 0);
+    BOOST_CHECK(MatMulBodyReachesExpensiveVerification(block, params, 99));
 }
 
 BOOST_AUTO_TEST_CASE(phase2_ibd_batch_count_enforces_budgeting)

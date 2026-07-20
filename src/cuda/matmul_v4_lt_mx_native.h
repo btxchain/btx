@@ -62,7 +62,8 @@ namespace matmul_v4::cuda {
     const std::vector<int8_t>& V, uint32_t n, uint32_t m, std::vector<int32_t>& out,
     matmul::v4::lt::MxLaneProvenance* provenance = nullptr);
 
-/** Run (or re-run) process-local native self-qual. Safe to call repeatedly. */
+/** Run the process-local one-time native self-qual. Calls are idempotent; true
+ *  means at least one native MX lane qualified against the CPU oracle. */
 [[nodiscard]] bool SelfQualifyLtNativeMxLanesOnce();
 
 /** True on Blackwell-class GPUs (sm_10x / sm_12x) where peak MXFP4/FP8 is expected. */

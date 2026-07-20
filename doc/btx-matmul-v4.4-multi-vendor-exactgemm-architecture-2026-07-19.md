@@ -14,13 +14,16 @@ Living implementation notes for miner-local ExactGemm backends. Consensus remain
 Lever-B exposes exact M11 mantissas and E8M0-like power-of-two scales in a
 32-column logical layout. That makes a future OCP-MXFP4 encoding possible; it
 does not establish that a backend executed MXFP4. The optimized CPU projection
-consumes these components without materializing dense `Bhat`. LT CUDA/HIP use a
-dense INT8 projection by default. On qualified frontier parts,
-`BTX_MATMUL_V4_LT_LOGICAL_MX=1` instead consumes the logical mantissa/scale
-components through four exact exponent-partitioned INT8 IMMA/MFMA GEMMs. That
-opt-in path is real tensor execution but is still not a native MXFP4
-instruction. Static `ProjectionLane::ScalePartitionedMxfp4` planner labels are
-design intent only and are not runtime qualification evidence.
+consumes these components without materializing dense `Bhat`. LT CUDA/HIP now
+use the same exact logical components by default, lowered through four
+exponent-partitioned INT8 IMMA/MFMA (or exact device-ALU fallback) GEMMs.
+`BTX_MATMUL_V4_LT_DENSE_BHAT=1` selects the one-dense-GEMM diagnostic/A-B lane;
+the older `BTX_MATMUL_V4_LT_LOGICAL_MX=1` spelling is a compatibility no-op.
+The default exact lowering is real integer tensor execution when IMMA/MFMA
+serves it, but it is still not a native MXFP4 instruction. Static
+`ProjectionLane::ScalePartitionedMxfp4` planner labels are design intent only,
+and per-call `exact_mx_scale_partitioned` provenance is distinct from the
+`native_mxfp4_qualified` / `native_fp8_qualified` admission facts.
 
 ## NVIDIA CUDA (5090 / H200 / B200)
 
@@ -35,7 +38,7 @@ design intent only and are not runtime qualification evidence.
 1. **cuBLASLt `CUBLAS_COMPUTE_32I` IMMA** (`matmul_v4_lt_tensor_gemm.cu`): host + **device-pointer** s8xs8→s32; process-persistent handle, NVIDIA-recommended **32 MiB workspace**, A/B/C scratch, and descriptors/heuristic result cached by `(M,N,K)`. Up to 16 heuristic candidates are inspected and only an algorithm whose numerical flags attest **IMMA + signed INT8 inputs + INT32 accumulator** is admitted. Multi-shape self-qual uses 128/256-scale square and panel cases, host and device pointers, then requires current Rank-1 geometries including `w=1024` MatExpand panels and deep-`m` projections.
 2. **LT ExactGemmBackend / `LaunchGemmS8S8`**: IMMA first; scalar `DeviceGemmS8S8Tiled` only on decline. `LtLastS8S8UsedImma()` reports which path ran (never true for scalar).
 3. **S32S8**: the direct `TryLaunchLtImmaGemmS32S8` API still honestly declines because cuBLASLt has no direct s32×s8 recipe. The LT resident MatExpand path now decomposes `Y` into four exact signed-byte radix-256 planes and runs four qualified IMMA products plus the column-bias correction. Do not report this lowering as a native s32×s8 instruction.
-4. **Device-resident LT path** (`matmul_v4_lt_accel.cu`): qualified IMMA runs `G·W`, radix-lowered `Y·H`, `U·Ahat`, the default dense-INT8 `Bhat·V`, and nine exact Karatsuba combine products. On qualified SM100/SM120-class parts, `BTX_MATMUL_V4_LT_LOGICAL_MX=1` replaces the dense projection with four exact scale-partitioned INT8 GEMMs; it does not issue native MXFP4. The full-header Q* entry generates W and SHA256d(Chat) on-device and copies only digest/status records at completion, with no per-candidate synchronization. Cold template binding and self-tests are outside that steady-state claim. Scalar CUDA graphs remain the non-IMMA path.
+4. **Device-resident LT path** (`matmul_v4_lt_accel.cu`): qualified IMMA runs `G·W`, radix-lowered `Y·H`, `U·Ahat`, the default four-pass exact scale-partitioned `Bhat·V`, and nine exact Karatsuba combine products. `BTX_MATMUL_V4_LT_DENSE_BHAT=1` replaces that projection with the one-dense-INT8-GEMM diagnostic lane; `BTX_MATMUL_V4_LT_LOGICAL_MX=1` is a legacy no-op. Neither lane issues native MXFP4. The full-header Q* entry generates W and SHA256d(Chat) on-device and copies only digest/status records at completion, with no per-candidate synchronization. Cold template binding and self-tests are outside that steady-state claim. Scalar CUDA graphs remain the non-IMMA path.
 5. **Arch probe**: `ProbeLtCudaArch` / `ProbeLtCudaExactGemmCapabilities` → `sm_*` + name class `hopper` / `blackwell_dc` / `blackwell_consumer`.
 6. **Capability-scope caveat**: `ProbeLtCudaExactGemmCapabilities().device_hashing` remains false because that narrow standalone tensor-GEMM capability object does not own hashing. The full-header accelerator API has separate per-call provenance and sets `device_digest=true` only after its bit-exact resident path succeeds. Persistent MatExpand + GEMM scratch is reused; Chat staging is bounded rather than Q*×m².
 
@@ -56,9 +59,19 @@ datacenter tcgen05 recipes must not be conflated.
 
 1. **hipBLASLt when its installed release supplies a qualifying integer heuristic, then rocBLAS `gemm_ex` I8II** (`matmul_v4_lt_tensor_gemm.hip`): both libraries can be linked simultaneously, descriptors/algorithms are cached by shape, and a failed hipBLASLt shape falls through to rocBLAS. Host and device-pointer s8xs8→s32 are self-tested against `ExactGemmS8S8`; `IsLtMfmaGemmAvailable()` is true only after that match. CDNA architecture naming alone is no longer sufficient for mining admission.
 2. **LT ExactGemmBackend / `LaunchGemmS8S8`**: MFMA first; device ALU / pooled scalar tile on decline. `LtLastS8S8UsedMfma()` reports which path ran. `MakeResolvedExactGemmBackend` injects `LaunchGemm*` (not MFMA-only Try*).
-3. **Device-resident LT path** (`matmul_v4_lt_accel.hip`): G\*W / U\*Ahat / the default dense Bhat\*V use the qualified INT8 library path. On qualified gfx950 parts, `BTX_MATMUL_V4_LT_LOGICAL_MX=1` replaces the dense projection with four exact scale-partitioned INT8 MFMA GEMMs; it is not native MXFP4. Y\*H is exactly radix-lowered into four signed-byte GEMMs plus a column-bias correction, and the Fq combine uses nine exact balanced-base-64/Karatsuba INT8 GEMMs. The full-header Q* entry performs nonce-fresh W generation and SHA256d(Chat) on-device, returns digest/status records, and has no per-candidate synchronization; cold binding/self-tests are outside that steady-state claim. Scalar fallback GEMMs remain honestly labeled ALU.
+3. **Device-resident LT path** (`matmul_v4_lt_accel.hip`): G\*W / U\*Ahat and the default four-pass exact scale-partitioned Bhat\*V use the qualified INT8 library path. `BTX_MATMUL_V4_LT_DENSE_BHAT=1` selects the one-dense-INT8-GEMM diagnostic lane; `BTX_MATMUL_V4_LT_LOGICAL_MX=1` is a legacy no-op. Neither lane is native MXFP4. Y\*H is exactly radix-lowered into four signed-byte GEMMs plus a column-bias correction, and the Fq combine uses nine exact balanced-base-64/Karatsuba INT8 GEMMs. The full-header Q* entry performs nonce-fresh W generation and SHA256d(Chat) on-device, returns digest/status records, and has no per-candidate synchronization; cold binding/self-tests are outside that steady-state claim. Scalar fallback GEMMs remain honestly labeled ALU.
+
 4. **CMake**: `BTX_ENABLE_HIP=ON` requires explicit `BTX_HIP_ARCHITECTURES` (e.g. `gfx942;gfx950`). hipBLASLt and rocBLAS are probed independently; without a library path, the registry rejects MFMA mining even if scalar HIP ALU kernels work.
 5. **Fail closed when HIP off**: stubs keep `IsLtMfmaGemmAvailable` / `IsLtDeviceAluGemmAvailable` / `LaunchGemm*` false.
+
+For an A/B benchmark, run the ordinary command with no projection environment
+variable for the exact logical-MX default, then repeat with
+`BTX_MATMUL_V4_LT_DENSE_BHAT=1` for the dense diagnostic. A certifying report's
+`lt.exact_mx_scale_partitioned` says whether the exact four-pass lowering served
+the measured call. Native use requires the independent `lt.native_*_qualified`
+facts. `--telemetry-only` deliberately withholds exact/native qualification, so
+its rate can diagnose the resident schedule but cannot by itself label either
+projection lane.
 
 **Honest stubs:** native block-scaled MXFP4 on MI300/MI350/MI355 remains hardware-gated. Consensus remains CPU; activation stays `INT32_MAX`.
 

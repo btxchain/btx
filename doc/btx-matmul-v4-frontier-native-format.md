@@ -5,9 +5,12 @@
 > are conditional hardware models. The current portable grouped path is exact
 > integer emulation; tested cuBLASLt B200/5090 configurations expose no OCP
 > MXFP4 algorithm, and the branch has no admitted tcgen05/CUTLASS or CDNA
-> native kernel. LT's frontier CUDA/HIP path now keeps logical MX components
-> and lowers them exactly through four exponent-partitioned INT8 IMMA/MFMA
-> GEMMs; H200/MI300 retain one dense INT8 GEMM. Neither is native MXFP4.
+> native kernel. LT's CUDA/HIP path now keeps logical MX components by default
+> and lowers them exactly through four exponent-partitioned INT8 IMMA/MFMA (or
+> exact device-ALU fallback) GEMMs on every supported architecture, including
+> H200/MI300. `BTX_MATMUL_V4_LT_DENSE_BHAT=1` selects the one-dense-GEMM
+> diagnostic lane; `BTX_MATMUL_V4_LT_LOGICAL_MX=1` is a legacy no-op. Neither
+> exact-integer lane is native MXFP4.
 > Static planner labels are not execution proof.
 
 *Status: STUDY + DETERMINATION deliverable (design doc). NOT a code change, NOT an

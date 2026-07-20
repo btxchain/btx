@@ -1187,9 +1187,13 @@ public:
      *  pinned atomically. On return true in `*verdict_pinned`, the caller owns
      *  one pin and MUST call UnpinMatMulEncDrVerdict after validation consumes
      *  it. This prevents the bounded FIFO from turning a classified cheap path
-     *  into an unbudgeted recomputation before ProcessNewBlock re-entry. */
+     *  into an unbudgeted recomputation before ProcessNewBlock re-entry.
+     *  `assumevalid_trusted` identifies the other moving no-recompute result;
+     *  admission must scope that trust decision across its ProcessNewBlock
+     *  re-entry rather than letting a best-header race change the work. */
     std::optional<MatMulEncDrClassifyResult> ClassifyMatMulEncDrRecompute(
-        const CBlock& block, bool* verdict_pinned = nullptr) const
+        const CBlock& block, bool* verdict_pinned = nullptr,
+        bool* assumevalid_trusted = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Cheap complete-block checks that must pass before P2P admission charges

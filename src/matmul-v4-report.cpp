@@ -75,12 +75,13 @@
 // stage boundaries (I1' amortized template MatExpand-A + U/V/P; per-nonce
 // MatExpand-B; Bhat*V; combine; digest; optional Q* commit-only S5 sample —
 // S5 is not a full ComputeSealDigestBMX4CLT rate). Emits
-// schema_version 3 JSON. CUDA/HIP can publish device_nonce_per_s only when the
-// full consensus-seeded Q* is accepted by their full-header API with W
-// generation + digest on-device and no per-nonce synchronization. Legacy or
-// fallback paths remain diagnostic/null. Metal/Ascend remain null because their
-// status cannot exclude host orchestration. Aggregate with
-// contrib/matmul-v4/lt-gate.py.
+// schema_version 3 JSON. A resident full-header Q* with device W/digest and no
+// per-nonce synchronization is necessary, but recent 5060 Ti/5090 runs show it
+// is not sufficient for a silicon rate: the enclosing wall clock can still
+// track host single-thread performance. Such runs publish only
+// resident_batch_wall_nonce_per_s. device_nonce_per_s remains null until the
+// backend also supplies native-path qualification, device-event timing, and a
+// host-independence check. Aggregate with contrib/matmul-v4/lt-gate.py.
 //
 // `--telemetry-only` is a deliberately separate CUDA/HIP production-shape
 // probe. It skips the prohibitively expensive n=4096 CPU reference/stage pass
@@ -125,10 +126,14 @@
 #include <limits>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
+#endif
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
 #endif
 
 const TranslateFn G_TRANSLATION_FUN{nullptr};
@@ -184,6 +189,91 @@ std::string HostCpuArch()
 #else
     return "unknown";
 #endif
+}
+
+std::string TrimHostField(std::string value)
+{
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+std::string LinuxProcStatusField(const std::string& key)
+{
+#if defined(__linux__)
+    std::ifstream in{"/proc/self/status"};
+    std::string line;
+    const std::string prefix = key + ":";
+    while (std::getline(in, line)) {
+        if (line.rfind(prefix, 0) == 0) return TrimHostField(line.substr(prefix.size()));
+    }
+#else
+    (void)key;
+#endif
+    return "unavailable";
+}
+
+std::string HostCpuModel()
+{
+#if defined(__linux__)
+    std::ifstream in{"/proc/cpuinfo"};
+    std::string line;
+    for (const char* key : {"model name", "Hardware", "Processor"}) {
+        in.clear();
+        in.seekg(0);
+        const std::string prefix = std::string{key} + ":";
+        while (std::getline(in, line)) {
+            if (line.rfind(prefix, 0) == 0) {
+                const std::string value = TrimHostField(line.substr(prefix.size()));
+                if (!value.empty()) return value;
+            }
+        }
+    }
+#elif defined(__APPLE__)
+    size_t size{0};
+    if (sysctlbyname("machdep.cpu.brand_string", nullptr, &size, nullptr, 0) == 0 && size > 1) {
+        std::vector<char> model(size, '\0');
+        if (sysctlbyname("machdep.cpu.brand_string", model.data(), &size, nullptr, 0) == 0) {
+            const std::string value = TrimHostField(model.data());
+            if (!value.empty()) return value;
+        }
+    }
+#endif
+    return "unknown";
+}
+
+UniValue HostCpuProvenance(bool& complete_out)
+{
+    const std::string architecture = HostCpuArch();
+    const std::string model = HostCpuModel();
+    const unsigned int logical_cpus = std::thread::hardware_concurrency();
+    std::string cpu_affinity = LinuxProcStatusField("Cpus_allowed_list");
+    std::string memory_nodes = LinuxProcStatusField("Mems_allowed_list");
+#if defined(__APPLE__)
+    // Darwin has no Linux-style list in /proc.  Keep the field explicit; this
+    // is diagnostic context and must never be mistaken for a proof that a
+    // host-wall rate is independent of the CPU.
+    cpu_affinity = "all-logical-cpus";
+    memory_nodes = "platform-managed";
+#endif
+    complete_out = architecture != "unknown" && model != "unknown" &&
+        logical_cpus > 0 && cpu_affinity != "unavailable";
+
+    UniValue cpu(UniValue::VOBJ);
+    cpu.pushKV("architecture", architecture);
+    cpu.pushKV("model", model);
+    cpu.pushKV("logical_cpus", static_cast<uint64_t>(logical_cpus));
+    cpu.pushKV("cpu_affinity_list", cpu_affinity);
+    cpu.pushKV("memory_node_affinity_list", memory_nodes);
+    return cpu;
+}
+
+void AddHostCpuProvenance(UniValue& root)
+{
+    bool complete{false};
+    root.pushKV("host_cpu", HostCpuProvenance(complete));
+    root.pushKV("host_cpu_provenance_complete", complete);
 }
 
 // A fixed synthetic template header (same constants as the stage bench so
@@ -576,6 +666,13 @@ bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
         else if (a == "--v3-hashrate") {
             const char* v = need(i); if (!v) return false;
             if (!ParseNonNegativeFiniteDouble(v, a, args.v3_hashrate, err)) return false;
+            // ReducedRatio rounds this value into int64_t. Keep the accepted
+            // domain strictly below 2^63 so that conversion is always defined.
+            if (args.v3_hashrate >=
+                static_cast<double>(std::numeric_limits<int64_t>::max())) {
+                err = "invalid non-negative finite number for " + a + ": " + v;
+                return false;
+            }
         }
         else if (a == "--out") { const char* v = need(i); if (!v) return false; args.out_path = v; }
         else { err = "unknown argument: " + a; return false; }
@@ -713,7 +810,15 @@ UniValue StageJson(const StageResult& r, double device_peak_tops, double backend
 
 std::string ReducedRatio(double num, double den)
 {
-    if (num <= 0 || den <= 0) return "n/a";
+    // Callers normally pass parser-validated rates, but the measured
+    // denominator is not a CLI value. Guard both conversions independently so
+    // an extreme/invalid measurement can never reach floating-to-int UB.
+    const double int64_exclusive_max =
+        static_cast<double>(std::numeric_limits<int64_t>::max());
+    if (!std::isfinite(num) || !std::isfinite(den) || num <= 0 || den <= 0 ||
+        num >= int64_exclusive_max || den >= int64_exclusive_max) {
+        return "n/a";
+    }
     // Scale to integers with ~6 significant digits then reduce.
     const int64_t N = static_cast<int64_t>(num + 0.5);
     const int64_t D = static_cast<int64_t>(den + 0.5);
@@ -1198,6 +1303,7 @@ int RunBmx4cProfile(const Args& args, const std::string& host, matmul_v4::accel:
     root.pushKV("source_revision", ReportSourceRevision());
     root.pushKV("host", host);
     root.pushKV("host_cpu_arch", HostCpuArch());
+    AddHostCpuProvenance(root);
     root.pushKV("sha256_implementation", g_sha256_implementation);
     root.pushKV("backend", backend_name);
     UniValue elig_obj(UniValue::VOBJ);
@@ -1379,7 +1485,7 @@ struct LtThroughputResult {
     std::string note;
 };
 
-bool HasLtSiliconRateProvenance(const LtThroughputResult& r)
+bool HasLtResidentBatchProvenance(const LtThroughputResult& r)
 {
     return r.used_device && r.qstar_is_consensus && r.qstar_device_batched && r.device_w_generation &&
         r.device_digest && r.per_nonce_sync_absent && r.device_nonce_per_s > 0;
@@ -1389,7 +1495,10 @@ bool HasLtSiliconRateProvenance(const LtThroughputResult& r)
 // because it reference-reseals potential winners by design. CUDA/HIP telemetry
 // must prove that every consensus-seeded Q* candidate stayed in one resident
 // batch with W generation and digest on-device and no per-nonce synchronization;
-// otherwise the observed wall rate remains ineligible for silicon ratios/ASERT.
+// otherwise the observed wall rate remains ineligible even as resident-batch
+// telemetry.  These flags do not by themselves prove a silicon-only timing
+// domain: host-clock-correlated 5060 Ti/5090 measurements demonstrated that a
+// resident call can still contain substantial serial host work.
 LtThroughputResult MeasureLtDeviceNoncePerSec(matmul_v4::accel::Kind kind, uint32_t n,
                                               uint32_t window, bool raw_probe_exact,
                                               bool require_reference_probe = true)
@@ -1470,10 +1579,11 @@ LtThroughputResult MeasureLtDeviceNoncePerSec(matmul_v4::accel::Kind kind, uint3
     }
     r.device_nonce_per_s = static_cast<double>(r.slots) / r.elapsed_s;
     r.used_device = true;
-    r.rate_valid = HasLtSiliconRateProvenance(r);
+    r.rate_valid = HasLtResidentBatchProvenance(r);
     if (r.rate_valid) {
         r.execution_path = "device-resident-qstar-batched";
-        r.note = "silicon-comparable rate from a device-resident consensus-Q* batch";
+        r.note = "resident consensus-Q* batch wall rate; host independence and device-event "
+                 "timing are not proven, so this is diagnostic rather than silicon-comparable";
     } else {
         r.execution_path = "device-assisted-insufficient-provenance";
         r.note = "diagnostic wall rate over production-seeded Q* windows; one or more resident "
@@ -1683,7 +1793,8 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     if (telemetry_obtained) {
         throughput.execution_path = "telemetry-only-device-resident-qstar-batched";
         throughput.note =
-            "resident consensus-Q* device telemetry obtained; CPU exactness/stage gates were skipped";
+            "resident consensus-Q* host-wall telemetry obtained; CPU exactness/stage, "
+            "device-event timing, and host-independence gates were skipped";
     }
 
     std::cout << "  resident Q* telemetry nonce/s : ";
@@ -1698,6 +1809,7 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     root.pushKV("source_revision", ReportSourceRevision());
     root.pushKV("host", host);
     root.pushKV("host_cpu_arch", HostCpuArch());
+    AddHostCpuProvenance(root);
     root.pushKV("sha256_implementation", g_sha256_implementation);
     root.pushKV("backend", backend_name);
     UniValue elig_obj(UniValue::VOBJ);
@@ -1740,6 +1852,15 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     root.pushKV("silicon_rate_valid", false);
     root.pushKV("device_rate_certified", false);
     root.pushKV("device_execution_certified", false);
+    root.pushKV("device_rate_timing_valid", false);
+    root.pushKV("device_rate_timing_domain", "host-wall-resident-batch");
+    root.pushKV("host_independence_verified", false);
+    root.pushKV("resident_batch_rate_valid", telemetry_obtained);
+    if (telemetry_obtained) {
+        root.pushKV("resident_batch_wall_nonce_per_s", throughput.device_nonce_per_s);
+    } else {
+        root.pushKV("resident_batch_wall_nonce_per_s", UniValue(UniValue::VNULL));
+    }
     root.pushKV("native_path_eligible", false);
     root.pushKV("harness_self_test_pass", UniValue(UniValue::VNULL));
     root.pushKV("bit_exact", UniValue(UniValue::VNULL));
@@ -1789,8 +1910,8 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     root.pushKV("lt", std::move(lt_obj));
     root.pushKV("verdict",
                 telemetry_obtained
-                    ? "TELEMETRY-ONLY: resident Q* timing obtained; all certification, readiness, "
-                      "tensor-majority, and ASERT claims are withheld"
+                    ? "TELEMETRY-ONLY: resident Q* host-wall timing obtained; all silicon-rate, "
+                      "certification, readiness, tensor-majority, and ASERT claims are withheld"
                     : "TELEMETRY-ONLY UNAVAILABLE: no resident CUDA/HIP Q* timing was obtained");
     root.pushKV("gates", [] {
         UniValue g(UniValue::VOBJ);
@@ -1955,13 +2076,24 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
         throughput.note = "LT exactness/stage gate failed; device rate withheld";
     }
     if (stage.valid) {
+        // The raw timer surrounds the entire resident call.  It is not a
+        // device-event timer and observed rates still correlate with host CPU
+        // clock, so it cannot support an implied silicon-utilization value.
         stage_json = StageJsonLT(stage, args.device_peak_int8_tops,
-                                 throughput.rate_valid ? throughput.device_nonce_per_s : 0.0,
+                                 0.0,
                                  cpu_tensor_share_pct, implied_tensor_util_pct);
     }
 
+    // No backend currently publishes device-event elapsed time or a controlled
+    // host-sensitivity check.  Resident Q* provenance proves execution shape,
+    // not that the enclosing wall rate ranks GPU silicon.  Keep all G2/G3 and
+    // ASERT fields closed until that independent evidence is added.
+    const bool device_rate_timing_valid = false;
+    const bool host_independence_verified = false;
+    const bool silicon_rate_valid = false;
+
     std::cout << "\n[B2b-analogue] LT Phase-A throughput provenance\n";
-    std::cout << "  silicon-comparable device nonce/s    : ";
+    std::cout << "  resident-batch host-wall nonce/s     : ";
     if (throughput.rate_valid) std::cout << throughput.device_nonce_per_s;
     else std::cout << "unavailable";
     std::cout << "  (" << throughput.note << ")\n";
@@ -1974,12 +2106,13 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
         std::printf("%.4f%% (not a device counter; peak %.0f TOPS)\n",
                     implied_tensor_util_pct, args.device_peak_int8_tops);
     } else {
-        std::cout << "unknown (requires silicon rate and --device-peak-int8-tops)\n";
+        std::cout << "withheld (requires a host-independent device-event rate and "
+                     "--device-peak-int8-tops)\n";
     }
 
     bool has_asert_suggestion = false;
     std::string asert_suggestion;
-    if (args.v3_hashrate > 0 && throughput.rate_valid) {
+    if (args.v3_hashrate > 0 && silicon_rate_valid) {
         // For LT this legacy CLI input is the pre-DRLT sustained baseline. The
         // DRLT target re-anchor uses prior/new throughput, exactly as the v4
         // rescale does, but writes nMatMulDRLTAsertRescaleNum/Den.
@@ -2016,9 +2149,10 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     } else if (backend == matmul_v4::accel::Kind::CPU) {
         verdict = "HARNESS-ONLY: CPU bit-exactness/composition passed; no device tensor-execution "
                   "or readiness claim is made";
-    } else if (!throughput.rate_valid) {
-        verdict = "UNVERIFIED: exact harness passed, but no silicon-eligible resident Q* rate was "
-                  "available for backend '" + backend_name + "'";
+    } else if (!silicon_rate_valid) {
+        verdict = "UNVERIFIED: exact resident Q* host-wall throughput was measured, but native "
+                  "device-event timing and host independence are not established for backend '" +
+                  backend_name + "'";
     } else {
         verdict = "RATE-CANDIDATE: bit-exact resident Q* rate measured; device tensor majority "
                   "remains UNVERIFIED until backend kernel timings and hardware counters are supplied";
@@ -2028,15 +2162,15 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     const bool harness_self_test_ok = lt_bit_exact && stage.valid && stage.stage_bit_exact;
     const bool ran_on_device = (backend != matmul_v4::accel::Kind::CPU);
     const bool device_rate_certified = ran_on_device && harness_self_test_ok &&
-        device_assisted_path_exact && throughput.rate_valid;
+        device_assisted_path_exact && silicon_rate_valid;
     if (device_rate_certified) {
         std::cout << "DEVICE_BMX4CLT_RATE_PASS:" << backend_name << ":" << elig.reason << "\n";
     } else {
         std::cout << "\n[CERTIFICATION] LT Phase-A device rate NOT-CERTIFIED on this host "
                      "(resolved backend=" << backend_name << "). Harness self-test "
                   << (harness_self_test_ok ? "PASSED" : "FAILED")
-                  << "; exiting non-zero unless an exact, resident-batched CUDA/HIP rate was measured. "
-                     "Tensor execution/native eligibility remain separate gates. JSON is "
+                  << "; exiting non-zero unless a native, host-independent device-event CUDA/HIP "
+                     "rate was measured. Resident host-wall throughput remains diagnostic. JSON is "
                      "still written for lt-gate.py aggregation.\n";
     }
 
@@ -2046,6 +2180,7 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     root.pushKV("source_revision", ReportSourceRevision());
     root.pushKV("host", host);
     root.pushKV("host_cpu_arch", HostCpuArch());
+    AddHostCpuProvenance(root);
     root.pushKV("sha256_implementation", g_sha256_implementation);
     root.pushKV("backend", backend_name);
     UniValue elig_obj(UniValue::VOBJ);
@@ -2075,8 +2210,12 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     root.pushKV("device_execution_certified", false);
     root.pushKV("device_rate_certified", device_rate_certified);
     root.pushKV("backend_used_device", throughput.used_device);
-    root.pushKV("device_rate_valid", throughput.rate_valid);
-    root.pushKV("silicon_rate_valid", throughput.rate_valid);
+    root.pushKV("device_rate_valid", silicon_rate_valid);
+    root.pushKV("silicon_rate_valid", silicon_rate_valid);
+    root.pushKV("device_rate_timing_valid", device_rate_timing_valid);
+    root.pushKV("device_rate_timing_domain", "host-wall-resident-batch");
+    root.pushKV("host_independence_verified", host_independence_verified);
+    root.pushKV("resident_batch_rate_valid", throughput.rate_valid);
     root.pushKV("execution_path", throughput.execution_path);
     root.pushKV("harness_self_test_pass", harness_self_test_ok);
     root.pushKV("bit_exact", lt_bit_exact);
@@ -2096,17 +2235,19 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
         root.pushKV("implied_tensor_util_pct", UniValue(UniValue::VNULL));
     }
     root.pushKV("device_peak_int8_tops", args.device_peak_int8_tops);
-    if (throughput.rate_valid) {
+    if (silicon_rate_valid) {
         root.pushKV("device_nonce_per_s", throughput.device_nonce_per_s);
         root.pushKV("backend_nonce_per_s", throughput.device_nonce_per_s);
     } else {
         root.pushKV("device_nonce_per_s", UniValue(UniValue::VNULL));
         root.pushKV("backend_nonce_per_s", UniValue(UniValue::VNULL));
     }
-    if (throughput.used_device && !throughput.rate_valid && throughput.device_nonce_per_s > 0) {
+    if (throughput.used_device && throughput.device_nonce_per_s > 0) {
         root.pushKV("host_orchestrated_nonce_per_s", throughput.device_nonce_per_s);
+        root.pushKV("resident_batch_wall_nonce_per_s", throughput.device_nonce_per_s);
     } else {
         root.pushKV("host_orchestrated_nonce_per_s", UniValue(UniValue::VNULL));
+        root.pushKV("resident_batch_wall_nonce_per_s", UniValue(UniValue::VNULL));
     }
     root.pushKV("throughput_measurement_windows", static_cast<uint64_t>(throughput.windows));
     root.pushKV("throughput_measurement_slots", throughput.slots);
@@ -2182,7 +2323,7 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     lt_obj.pushKV("device_digest", throughput.device_digest);
     lt_obj.pushKV("per_nonce_sync_absent", throughput.per_nonce_sync_absent);
     lt_obj.pushKV("rate_provenance",
-                  throughput.rate_valid ? "device-resident-qstar-batched"
+                  throughput.rate_valid ? "resident-batch-host-wall-diagnostic"
                                         : (throughput.used_device
                                                ? "device-assisted-insufficient-provenance"
                                                : "insufficient-for-device-rate"));
@@ -2191,10 +2332,10 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     root.pushKV("gates", [] {
         UniValue g(UniValue::VOBJ);
         g.pushKV("B1_analogue", "bit_exact (ENC-DR-LT determinism + verifier round-trip)");
-        g.pushKV("B2b_analogue", "silicon_rate_valid + device-resident Q* provenance + device_nonce_per_s");
+        g.pushKV("B2b_analogue", "native device-event timing + host independence + resident Q* provenance + device_nonce_per_s");
         g.pushKV("B2g_analogue", "device kernel timing + hardware counters required; CPU composition never passes G1");
         g.pushKV("Qstar", "S5 is commit-only telemetry; no Phase-B gate is claimed");
-        g.pushKV("Device", "Q* batching + device W/digest + no per-nonce sync; native provenance remains separate");
+        g.pushKV("Device", "Q* batching + device W/digest + no per-nonce sync is resident telemetry only until device-event timing proves host independence");
         return g;
     }());
 
@@ -2435,6 +2576,7 @@ int main(int argc, char* argv[])
     root.pushKV("source_revision", ReportSourceRevision());
     root.pushKV("host", host);
     root.pushKV("host_cpu_arch", HostCpuArch());
+    AddHostCpuProvenance(root);
     root.pushKV("sha256_implementation", g_sha256_implementation);
     root.pushKV("backend", backend_name);
     root.pushKV("backend_used_device", used_device);

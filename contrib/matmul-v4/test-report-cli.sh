@@ -55,6 +55,12 @@ for option in --device-peak-int8-tops --v3-hashrate; do
   expect_rejected "invalid non-negative finite number for $option" "$option" 1tail
   expect_rejected "invalid non-negative finite number for $option" "$option" 1e9999
 done
+# Finite is not sufficient for the ASERT ratio input: ReducedRatio converts the
+# rounded rate to int64_t, so values at/above 2^63 must fail during parsing.
+expect_rejected "invalid non-negative finite number for --v3-hashrate" \
+  --v3-hashrate 9223372036854775808
+expect_rejected "invalid non-negative finite number for --v3-hashrate" \
+  --v3-hashrate 1e100
 
 expect_env_rejected()
 {

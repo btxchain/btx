@@ -350,6 +350,12 @@ std::optional<bool> PinCachedMatMulEncDrVerdict(const uint256& block_hash);
 /** Pin a verdict already established by an exact recomputation. */
 void PinMatMulEncDrVerdict(const uint256& block_hash, bool valid);
 void UnpinMatMulEncDrVerdict(const uint256& block_hash);
+/** Scope one assumevalid-trust decision across admission -> validation. Unlike
+ *  a verdict pin this does not claim an exact recomputation occurred; it only
+ *  preserves the trust decision the block would have consumed atomically. */
+void PinMatMulEncDrAssumeValidTrust(const uint256& block_hash);
+bool IsMatMulEncDrAssumeValidTrustPinned(const uint256& block_hash);
+void UnpinMatMulEncDrAssumeValidTrust(const uint256& block_hash);
 
 /** Miner handoff for the ENC-DR sketch cache (tension-resolution §4.3): move a
  *  freshly-solved block's in-body sketch (matrix_c_data, word-packed) into the
@@ -390,6 +396,12 @@ bool HasMatMulV2Payload(const CBlock& block);
 bool HasMatMulFreivaldsPayload(const CBlock& block);
 bool IsMatMulV2PayloadSizeValid(const CBlock& block, const Consensus::Params& params);
 bool IsMatMulFreivaldsPayloadSizeValid(const CBlock& block, const Consensus::Params& params);
+/** True iff the body reaches an expensive MatMul predicate after the cheap
+ *  payload-shape/required-payload checks at `block_height`. Policy decides
+ *  separately whether validation is enabled at that height. */
+bool MatMulBodyReachesExpensiveVerification(const CBlock& block,
+                                            const Consensus::Params& params,
+                                            int32_t block_height);
 /** After mining solves a block, compute the product matrix C' = A'B' and
  *  populate block.matrix_c_data for O(n^2) Freivalds verification. */
 void PopulateFreivaldsPayload(CBlock& block, const Consensus::Params& params);

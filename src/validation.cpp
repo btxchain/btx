@@ -10234,10 +10234,13 @@ bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* p
 }
 
 std::optional<ChainstateManager::MatMulEncDrClassifyResult>
-ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block, bool* verdict_pinned) const
+ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block,
+                                                bool* verdict_pinned,
+                                                bool* assumevalid_trusted) const
 {
     AssertLockHeld(::cs_main);
     if (verdict_pinned != nullptr) *verdict_pinned = false;
+    if (assumevalid_trusted != nullptr) *assumevalid_trusted = false;
     const Consensus::Params& params = GetConsensus();
     if (!params.fMatMulPOW) return std::nullopt;
     const CBlockIndex* prev = m_blockman.LookupBlockIndex(block.hashPrevBlock);
@@ -10267,7 +10270,10 @@ ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block, bool* verdi
         // delivery (DoS). Route it synchronous — it fails cheaply, no worker slot spent.
         if (existing->nStatus & BLOCK_FAILED_MASK) return std::nullopt;
         // Assumevalid-buried: the seam skips the recompute entirely.
-        if (IsMatMulRecomputeAssumeValidTrusted(existing, nHeight)) return std::nullopt;
+        if (IsMatMulRecomputeAssumeValidTrusted(existing, nHeight)) {
+            if (assumevalid_trusted != nullptr) *assumevalid_trusted = true;
+            return std::nullopt;
+        }
     }
     // A verdict for this exact block is already memoized: the seam will reuse it
     // without recomputing, so don't occupy a worker slot re-deriving the same answer.
@@ -10437,7 +10443,14 @@ static bool ContextualCheckBlock(const CBlock& block,
             // guard share this single implementation; behavior unchanged.)
             const bool recompute_assumevalid_trusted =
                 chainman.IsMatMulRecomputeAssumeValidTrusted(
-                    chainman.m_blockman.LookupBlockIndex(block.GetHash()), nHeight);
+                    chainman.m_blockman.LookupBlockIndex(block.GetHash()), nHeight) ||
+                // P2P admission may have made the same trust decision under
+                // cs_main immediately before this call. Keep that decision
+                // scoped across ProcessNewBlock so a concurrent best-header
+                // branch change cannot turn the cheap path into an unbudgeted
+                // recomputation. The pin is not an exact-verdict memo and is
+                // released as soon as this validation re-entry completes.
+                IsMatMulEncDrAssumeValidTrustPinned(block.GetHash());
             // (3) Above assumevalid (or -assumevalid=0): decide the §4.1
             // predicate. Any failure is a header-level PERMANENT consensus
             // fault: with an empty body there are no proof bytes to mutate, so

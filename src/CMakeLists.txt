@@ -702,8 +702,6 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   # cuBLASLt provides the exact INT8->INT32 (CUDA_R_8I -> CUDA_R_32I,
   # CUBLAS_COMPUTE_32I) tensor-core GEMMs used by the MatMul v4 backend.
   target_link_libraries(btx_matmul_backend PRIVATE CUDA::cublasLt)
-  # cublasSgemm backs the LT MX FP32-dequant native admission path (exact under 2^24).
-  target_link_libraries(btx_matmul_backend PRIVATE CUDA::cublas)
   # matmul_v4_accel.cu reuses the exact CPU derivation / serialization / digest
   # routines (matmul::v4::*, defined in bitcoin_common) to guarantee bit-exact
   # operands and digest. Both are STATIC libraries and bitcoin_common already

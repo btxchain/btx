@@ -284,6 +284,38 @@ def positive_number(value: object) -> float | None:
     return result if result is not None and result > 0 else None
 
 
+def host_cpu_provenance_complete(rep: dict) -> bool:
+    """Require diagnostic host identity without requiring hosts to match.
+
+    A device-event rate should be independent of the CPU model, but retaining
+    the model and process-affinity context is essential for detecting a broken
+    timing domain.  In particular, two different CPUs are valid G2 inputs when
+    both reports independently prove device-domain timing.
+    """
+    cpu = rep.get("host_cpu")
+    if not isinstance(cpu, dict):
+        return False
+    architecture = cpu.get("architecture")
+    model = cpu.get("model")
+    logical_cpus = cpu.get("logical_cpus")
+    affinity = cpu.get("cpu_affinity_list")
+    return (
+        rep.get("host_cpu_provenance_complete") is True
+        and isinstance(architecture, str)
+        and bool(architecture.strip())
+        and architecture not in ("unknown", "unavailable")
+        and isinstance(model, str)
+        and bool(model.strip())
+        and model not in ("unknown", "unavailable")
+        and isinstance(logical_cpus, int)
+        and not isinstance(logical_cpus, bool)
+        and logical_cpus > 0
+        and isinstance(affinity, str)
+        and bool(affinity.strip())
+        and affinity not in ("unknown", "unavailable")
+    )
+
+
 def asert_suggestion(rep: dict) -> str | None:
     """Return a well-formed, reduced positive Num/Den suggestion, if present."""
     value = rep.get("asert_rescale_num_den_suggestion")
@@ -313,15 +345,26 @@ def expected_asert_suggestion(rep: dict) -> str | None:
 
 
 def silicon_rate_provenance(rep: dict) -> bool:
-    """Require a consensus-Q* device-resident batch before ranking silicon.
+    """Require a device-timed native consensus-Q* batch before ranking silicon.
 
     Exact device participation is not sufficient: the former raw report loop
     issued one seed-complete call per nonce and was dominated by host W
-    expansion, launches, copies, synchronization, and host digesting.
+    expansion, launches, copies, synchronization, and host digesting.  The
+    newer resident window removed that per-nonce loop, but observed 5060 Ti /
+    5090 rates still tracked host single-thread clocks.  Resident provenance is
+    therefore necessary but not sufficient: G2/G3 require a native path and a
+    device-event timing domain whose host independence was explicitly checked.
     """
     lt = rep.get("lt") or {}
     return (
-        lt.get("qstar_is_consensus") is True
+        rep.get("native_path_eligible") is True
+        and rep.get("device_execution_certified") is True
+        and rep.get("device_rate_certified") is True
+        and rep.get("device_rate_timing_valid") is True
+        and rep.get("device_rate_timing_domain") == "device-events-resident-qstar"
+        and rep.get("host_independence_verified") is True
+        and host_cpu_provenance_complete(rep)
+        and lt.get("qstar_is_consensus") is True
         and lt.get("qstar_device_batched") is True
         and lt.get("device_w_generation") is True
         and lt.get("device_digest") is True
@@ -335,9 +378,9 @@ def device_measured(rep: dict) -> bool:
     if rep.get("backend") == "cpu":
         return False
     lt = rep.get("lt") or {}
-    # This exact tuple is deliberately separate from native tensor-instruction
-    # certification, but it must prove resident Q* scheduling rather than mere
-    # device participation in a host-orchestrated per-nonce loop.
+    # Exact device participation is not enough.  The accepted tuple must prove
+    # both resident scheduling and a native/device-event timing domain so host
+    # launch or serial preparation cannot masquerade as silicon throughput.
     if rep.get("backend_used_device") is not True:
         return False
     if rep.get("device_rate_valid") is not True:
@@ -390,7 +433,11 @@ def g2_part_matches(row: dict, expected: str) -> bool:
 
 def host_orchestrated_nps(rep: dict) -> float | None:
     """Diagnostic wall rate; never usable by G2/G3 or ASERT."""
-    return positive_number(rep.get("host_orchestrated_nonce_per_s"))
+    for key in ("resident_batch_wall_nonce_per_s", "host_orchestrated_nonce_per_s"):
+        value = positive_number(rep.get(key))
+        if value is not None:
+            return value
+    return None
 
 
 def parse_cost_args(cost_args: list[str] | None) -> dict[str, float]:
@@ -431,6 +478,11 @@ def evaluate(
     for rep in reports:
         vendor, cls, part = label_for(rep, labels)
         is_lt = rep.get("schema_version") == 3 and rep.get("profile") == "bmx4c-lt"
+        measurement_mode = rep.get("measurement_mode")
+        telemetry_only = (
+            rep.get("telemetry_only") is True
+            or measurement_mode == "telemetry-only-device-resident-qstar"
+        )
         be = bool(rep.get("bit_exact", False)) and stage_bit_exact(rep)
         tsp = tensor_share(rep)
         device_tsp = device_tensor_share(rep)
@@ -459,6 +511,11 @@ def evaluate(
             "device_tensor_counters_valid": rep.get("device_tensor_counters_valid") is True,
             "device_tensor_timing_domain": rep.get("device_tensor_timing_domain"),
             "tensor_util_pct": tup,
+            "host_cpu": rep.get("host_cpu"),
+            "host_cpu_provenance_complete": host_cpu_provenance_complete(rep),
+            "host_independence_verified": rep.get("host_independence_verified") is True,
+            "device_rate_timing_valid": rep.get("device_rate_timing_valid") is True,
+            "device_rate_timing_domain": rep.get("device_rate_timing_domain"),
             "backend_used_device": rep.get("backend_used_device") is True,
             "device_rate_valid": rep.get("device_rate_valid") is True,
             "silicon_rate_valid": rep.get("silicon_rate_valid") is True,
@@ -499,6 +556,17 @@ def evaluate(
                 "%s carries an ASERT suggestion without a silicon-eligible batched Q* rate; "
                 "exclude it from calibration." % rep["_file"]
             )
+
+        # Telemetry-only reports intentionally omit CPU exactness, device
+        # tensor counters, and certifying rates. Keep them visible as diagnostic
+        # rows, but exclude them before bit-exact/frontier scoring so a missing
+        # bit_exact value cannot be mislabeled as a consensus split.
+        if telemetry_only:
+            notes.append(
+                "%s is telemetry-only/non-certifying — excluded from G1-G8, "
+                "ASERT, and frontier scoring." % rep["_file"]
+            )
+            continue
 
         if is_lt and measured_nps is not None and row["v3_hashrate"] is not None:
             if reported_asert is None:
@@ -595,9 +663,10 @@ def evaluate(
         )
 
     # G2 — B200/5090 silicon nonce/s ratio >= ~4x. Fail closed unless each rate
-    # is a consensus-Q* device-resident batch with W generation and digest on
-    # device and no per-nonce synchronization. Reports are comparable only
-    # when workload, measurement mode, and source revision match exactly.
+    # is device-event timed on a qualified native consensus-Q* path, records
+    # host CPU/affinity provenance, and establishes host independence. Host
+    # models need not match: the timing-domain proof is what makes the rates
+    # comparable. Workload, measurement mode, and source revision still match.
     dc = [
         r
         for r in frontier
@@ -620,13 +689,16 @@ def evaluate(
         "consumer_nonce_per_s": None,
         "ratio": None,
         "comparison_config": None,
+        "datacenter_host_cpu": None,
+        "consumer_host_cpu": None,
     }
     if not dc or not cons:
         reasons.append(
             "G2 B200/5090 ratio: UNVERIFIED — need explicitly labeled B200 and RTX 5090 "
-            "reports with finite positive device_nonce_per_s from resident consensus-Q* "
-            "batches (device W generation + digest; no per-nonce sync). Other parts, CPU "
-            "rates, and host-orchestrated rates do not count."
+            "reports with finite positive device_nonce_per_s from native, device-event-timed "
+            "resident consensus-Q* batches. Require device W/digest, no per-nonce sync, "
+            "host_independence_verified, and complete host CPU/affinity provenance. Host CPU "
+            "models may differ; CPU/host-wall rates do not count."
         )
     else:
         comparable: list[tuple[dict, dict]] = []
@@ -643,7 +715,8 @@ def evaluate(
                 "G2 B200/5090 ratio: UNVERIFIED — no comparable datacenter/consumer "
                 "production report pair. Both reports must use n=4096 and have identical "
                 "positive integer window and rounds plus identical non-empty "
-                "measurement_mode and identical clean source_revision (-dirty builds are rejected)."
+                "measurement_mode and identical clean source_revision (-dirty builds are rejected). "
+                "CPU models are recorded but deliberately are not a match key."
             )
         else:
             configs = {dc_row["g2_comparison_config"] for dc_row, _ in comparable}
@@ -667,6 +740,8 @@ def evaluate(
                     "datacenter_nonce_per_s": best_dc["nps"],
                     "consumer_nonce_per_s": best_c["nps"],
                     "ratio": ratio,
+                    "datacenter_host_cpu": best_dc["host_cpu"],
+                    "consumer_host_cpu": best_c["host_cpu"],
                     "comparison_config": {
                         "n": n,
                         "window": window,
@@ -744,7 +819,8 @@ def evaluate(
             reasons.append(
                 "G3 nonce/$: UNVERIFIED — need --cost for a comparable datacenter/consumer "
                 "n=4096 pair with identical window, rounds, measurement_mode, and "
-                "clean source_revision that also carries silicon-eligible device_nonce_per_s."
+                "clean source_revision that also carries native, host-independent, device-event "
+                "timed device_nonce_per_s."
             )
         elif len(costed_configs) != 1:
             reasons.append(
@@ -893,8 +969,8 @@ def print_human(go: bool, gates: dict, rows: list, reasons: list[str], notes: li
             )
         )
     print("-" * W)
-    print("  (dev n/s requires a device-resident consensus-Q* batch, device W/digest, no per-nonce sync, and a finite positive rate)")
-    print("  (diag n/s is host-orchestrated wall rate and never counts for G2/G3, tensor utilization, or ASERT)")
+    print("  (dev n/s requires native device-event timing, verified host independence, host CPU provenance, and resident consensus-Q*)")
+    print("  (diag n/s is resident-batch/host-wall throughput and never counts for G2/G3, tensor utilization, or ASERT)")
     print("  (cpuShare% is reference composition only; G1 requires devShare% > 50 from device timing/counters and a native tensor path)")
     print()
     print("Gate results:")

@@ -3431,6 +3431,38 @@ bool IsMatMulFreivaldsPayloadSizeValid(const CBlock& block, const Consensus::Par
     return block.matrix_c_data.size() == expected_words;
 }
 
+bool MatMulBodyReachesExpensiveVerification(const CBlock& block,
+                                            const Consensus::Params& params,
+                                            int32_t block_height)
+{
+    if (!params.fMatMulPOW) return false;
+
+    if (params.IsMatMulV4Active(block_height)) {
+        // ContextualCheckBlock rejects every v4 A/B body before either the
+        // ENC-DR recompute or the flat-sketch verifier. ENC-DR additionally
+        // requires an empty C body; the regtest replay profile requires a
+        // present, size-valid flat sketch before its expensive predicate.
+        if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty()) return false;
+        if (params.GetMatMulProfileParams(block_height).commitment ==
+            Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
+            return block.matrix_c_data.empty();
+        }
+        return !block.matrix_c_data.empty() && IsMatMulV4PayloadSizeValid(block, params);
+    }
+
+    const bool has_product_payload{HasMatMulFreivaldsPayload(block)};
+    const bool payload_size_valid{
+        has_product_payload && IsMatMulFreivaldsPayloadSizeValid(block, params)};
+    // These two branches return before ProductCommitted/Freivalds/full
+    // transcript verification in ContextualCheckBlock.
+    if (!has_product_payload && params.fMatMulFreivaldsEnabled &&
+        params.IsMatMulProductPayloadRequired(block_height)) {
+        return false;
+    }
+    if (has_product_payload && !payload_size_valid) return false;
+    return true;
+}
+
 bool CheckMatMulProofOfWork_Freivalds(const CBlock& block, const Consensus::Params& params, int32_t block_height)
 {
     const auto start = std::chrono::steady_clock::now();
@@ -4084,6 +4116,7 @@ std::mutex g_matmul_encdr_verdict_mutex;
 std::map<uint256, bool> g_matmul_encdr_verdicts;
 std::deque<uint256> g_matmul_encdr_verdict_fifo;
 std::map<uint256, std::pair<bool, uint32_t>> g_matmul_encdr_verdict_pins;
+std::map<uint256, uint32_t> g_matmul_encdr_assumevalid_trust_pins;
 } // namespace
 
 void CacheMatMulEncDrVerdict(const uint256& block_hash, bool valid)
@@ -4141,6 +4174,26 @@ void UnpinMatMulEncDrVerdict(const uint256& block_hash)
     const auto it{g_matmul_encdr_verdict_pins.find(block_hash)};
     if (it == g_matmul_encdr_verdict_pins.end()) return;
     if (--it->second.second == 0) g_matmul_encdr_verdict_pins.erase(it);
+}
+
+void PinMatMulEncDrAssumeValidTrust(const uint256& block_hash)
+{
+    std::lock_guard<std::mutex> lock(g_matmul_encdr_verdict_mutex);
+    ++g_matmul_encdr_assumevalid_trust_pins[block_hash];
+}
+
+bool IsMatMulEncDrAssumeValidTrustPinned(const uint256& block_hash)
+{
+    std::lock_guard<std::mutex> lock(g_matmul_encdr_verdict_mutex);
+    return g_matmul_encdr_assumevalid_trust_pins.contains(block_hash);
+}
+
+void UnpinMatMulEncDrAssumeValidTrust(const uint256& block_hash)
+{
+    std::lock_guard<std::mutex> lock(g_matmul_encdr_verdict_mutex);
+    const auto it{g_matmul_encdr_assumevalid_trust_pins.find(block_hash)};
+    if (it == g_matmul_encdr_assumevalid_trust_pins.end()) return;
+    if (--it->second == 0) g_matmul_encdr_assumevalid_trust_pins.erase(it);
 }
 
 bool MatMulV4PayloadMatchesCommitment(const CBlock& block)

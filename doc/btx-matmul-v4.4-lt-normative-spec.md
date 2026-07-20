@@ -53,15 +53,19 @@ stays `INT32_MAX`. C-15 stays **OPEN**.
 describes an exact integer representation: M11 mantissas plus shared powers of
 two on 32-column blocks. It does not mean that CUDA or HIP issued an OCP-MXFP4
 instruction. The CPU miner consumes those components directly and avoids a
-dense `Bhat` allocation. CUDA/HIP default to the single dense-INT8 projection
-on every architecture. SM100/SM120 and gfx950 retain a qualification-only
-`BTX_MATMUL_V4_LT_LOGICAL_MX=1` lane that keeps `(mu, scale/32)` and computes
-`Bhat·V` with four exponent-masked INT8 IMMA/MFMA GEMMs plus exact `2^e`
-accumulation. That lane is not the default because, absent native block-scale
-instructions or measured sparse acceleration, it schedules four dense GEMMs.
-Neither path is native MXFP4; a CUTLASS/tcgen05 or ROCm MXFP4 kernel remains
-unimplemented and fail-closed. `PlanLTAccel` reports design intent, not runtime
-capability evidence.
+dense `Bhat` allocation. CUDA/HIP likewise default to the exact logical-MX
+projection: `(mu, scale/32)` is lowered through four exponent-masked INT8
+IMMA/MFMA (or exact device-ALU fallback) GEMMs plus exact `2^e` accumulation.
+`BTX_MATMUL_V4_LT_DENSE_BHAT=1` is the diagnostic/A-B opt-out that instead
+materializes dense `Bhat` and runs one INT8 projection GEMM;
+`BTX_MATMUL_V4_LT_LOGICAL_MX=1` is retained only as a legacy no-op because
+logical MX is already the default. Neither exact-integer path is native MXFP4;
+a CUTLASS/tcgen05 or ROCm MXFP4 kernel remains unimplemented and fail-closed.
+`PlanLTAccel` reports design intent, not runtime capability evidence. Likewise,
+an `exact_mx_scale_partitioned` per-call report proves that the four-pass exact
+lowering served that call, while `native_mxfp4_qualified` / `native_fp8_qualified`
+are the separate native-instruction admission facts. Telemetry-only reports
+withhold those qualification claims and cannot attribute a dense-vs-MX lane.
 
 **Scoping:** MatExpand is `O(n²·w)`; the honest cubic-ish MAC floor is deep-`m`
 `B̂·V` / combine (`m=n/2`). Linearized Extract would reopen ~`n/w≈4×` panel
@@ -115,6 +119,12 @@ Regtest opt-in: `-regtestmatmulltsealaspow` (requires live `-regtestdrltheight`)
 - G1 requires `native_path_eligible=true`, independent device kernel timing,
   hardware-counter evidence, and a strict-majority
   `device_tensor_share_pct`. Missing device telemetry fails closed.
+- A resident Q* wall timer is diagnostic until it also has native-path
+  qualification, device-event timing, and an explicit host-independence check.
+  Reports record CPU model, logical CPU count, CPU-affinity list, and memory-node
+  affinity so residual host coupling is visible. G2 does **not** require B200
+  and 5090 machines to use the same CPU; it requires each rate to be measured in
+  a device timing domain that is independently insensitive to its host.
 - the report's S5 Merkle + `SealWindowCommit` clock is a commit-only
   microbenchmark. Ordinary sequential headers, digest-only seed derivation, or
   a non-consensus Q cannot be called a Phase-B measurement. Phase-B evidence
@@ -145,9 +155,9 @@ Profile enum: `ENC_BMX4C_LT = 4`. Live only when `IsDRLTActive(height)`.
 | CPU reference | `matmul::v4::lt::*` | **normative** |
 | Dispatch | `ComputeDigestsBMX4CLTDispatched` | host-verified |
 | Injectable GEMMs | `ExactGemmBackend` | device splice for MatExpand `G*W` / `(G*W)*H` |
-| CUDA | `ComputeDigestsOnlyLTCuda` | qualified INT8 IMMA: direct s8 stages, four-radix `Y·H`, Karatsuba-9 combine; dense INT8 `Bhat·V` by default; SM100/120 logical-MX four-pass lane is opt-in; no native MXFP4 |
+| CUDA | `ComputeDigestsOnlyLTCuda` | qualified INT8 IMMA: direct s8 stages, four-radix `Y·H`, Karatsuba-9 combine; exact logical-MX four-pass `Bhat·V` by default, dense INT8 only with `BTX_MATMUL_V4_LT_DENSE_BHAT=1`; no native MXFP4 |
 | Metal | `ComputeDigestsOnlyLTMetal` | exact MSL integer GEMMs via `ExactGemmBackend` (self-tested); CPU fallback if unavailable |
-| HIP | `ComputeDigestsOnlyLTHip` | qualified INT8 MFMA: direct s8 stages, four-radix `Y·H`, Karatsuba-9 combine; dense INT8 `Bhat·V` by default; gfx950 logical-MX four-pass lane is opt-in; no native MXFP4 |
+| HIP | `ComputeDigestsOnlyLTHip` | qualified INT8 MFMA: direct s8 stages, four-radix `Y·H`, Karatsuba-9 combine; exact logical-MX four-pass `Bhat·V` by default, dense INT8 only with `BTX_MATMUL_V4_LT_DENSE_BHAT=1`; no native MXFP4 |
 
 Planner: `PlanLTAccel(device_class)` reports intended lane taxonomy only; it
 does not probe, dispatch, qualify, or attest native execution. After the BMX4C
@@ -158,8 +168,8 @@ separate. Per-architecture implementation status:
 | Backend | MatExpand Extract | `B̂·V` | Notes |
 |---|---|---|---|
 | CPU | MX-block (normative) | `ComputeProjectedRightMxBlockScaleLT` | Consensus + ExactGemm fallback |
-| CUDA | Device MX twin + device scales | Dense IMMA/scalar by default; four exact exponent-masked INT8 IMMA passes on sm100/sm120 only with `BTX_MATMUL_V4_LT_LOGICAL_MX=1` | Qualification lane, not native MXFP4; re-measure |
-| HIP | Device MX twin + device scales | Dense MFMA/scalar by default; four exact exponent-masked INT8 MFMA passes on gfx950 only with `BTX_MATMUL_V4_LT_LOGICAL_MX=1` | Qualification lane, not native MXFP4; re-measure |
+| CUDA | Device MX twin + device scales | Four exact exponent-masked INT8 IMMA/device-ALU passes by default; dense IMMA/scalar diagnostic with `BTX_MATMUL_V4_LT_DENSE_BHAT=1` | Exact logical MX, not native MXFP4; re-measure |
+| HIP | Device MX twin + device scales | Four exact exponent-masked INT8 MFMA/device-ALU passes by default; dense MFMA/scalar diagnostic with `BTX_MATMUL_V4_LT_DENSE_BHAT=1` | Exact logical MX, not native MXFP4; re-measure |
 | Metal | Host MX via miner/digest | Host scale-partitioned | ExactGemm inject only; no Extract shader |
 | Ascend | Host MX via miner/digest | Host scale-partitioned | ExactGemm Cube self-qual; Fold = GEMM filler only |
 
@@ -171,9 +181,12 @@ Linker `*_stub.cpp` files remain only for builds with the corresponding `BTX_ENA
    qualified native path plus independent device-side timing and hardware
    counters. CPU-reference stage composition is diagnostic only and does not
    pass this gate.
-2. B200/5090 nonce/s ≥ ~4× on a **single device-resident consensus-Q* batch**;
-   require device nonce-fresh W generation, device digest, and no per-nonce
-   synchronization. Host-orchestrated single-nonce wall rates do not count.
+2. B200/5090 nonce/s ≥ ~4× on a **native, device-event-timed, device-resident
+   consensus-Q* batch**; require device nonce-fresh W generation, device digest,
+   no per-nonce synchronization, complete host CPU/affinity provenance, and a
+   passed host-independence check. Different host CPU models are allowed because
+   the accepted rate is device-timed. Per-nonce and resident-batch host-wall
+   rates do not count.
 3. Nonce/$ proxies: B200 ≥ 5090 using only the same silicon-eligible batched
    rates (honest: fleets may still invert)
 4. MI350 FER / OCP MX exactness PASS

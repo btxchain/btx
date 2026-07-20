@@ -45,9 +45,10 @@
  //   When IsLtImmaGemmAvailable(), direct s8xs8 stages use cuBLASLt IMMA;
  //   Bhat*V prefers exact MX scale-partitioned INT8 (four exponent-masked
  //   GEMMs, bit-identical to ComputeProjectedRightMxBlockScaleLT). Dense
- //   dequant INT8 is the fallback. Native MXFP8 (VEC32_UE8M0) / MXFP4 may run
- //   only after multi-shape self-qual vs the CPU oracle (else fail-closed);
- //   float accumulate is never labeled ExactGemm. Y*H uses four radix-256
+ //   dequant INT8 is the fallback. The host-vector projection entry may try
+ //   native MXFP8 / MXFP4 only after multi-shape self-qual vs the CPU oracle;
+ //   the resident Q* loop reports only the exact INT8 lane it actually runs.
+ //   Float accumulate is never labeled ExactGemm. Y*H uses four radix-256
  //   IMMA products, and combine uses nine base-64 Karatsuba products.
  //   TryLaunchLtImmaGemmS32S8 itself still honestly declines because cuBLASLt
  //   has no direct s32xs8 recipe. When IMMA declines, scalar tiled DeviceGemm*
@@ -957,7 +958,9 @@ struct LtCudaResidentPool {
         mx_partitioned = (n_in % matmul::v4::lt::kMatExpandMxBlockLen == 0) &&
                          !ForceDenseBhatProjection();
         used_exact_mx_this_batch = false;
-        mx_prov = ProbeLtCudaMxNativeProvenance();
+        // Resident provenance describes execution, not process-wide native-lane
+        // capability. EnqueueOneHeader sets the exact lane it actually uses.
+        mx_prov = {};
 
         n = n_in;
         m = m_in;
@@ -1505,19 +1508,10 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
             }
             std::vector<int32_t> launched;
             matmul::v4::lt::MxLaneProvenance mx_prov{};
-            const bool launched_ok =
-                LaunchProjectedRightMx(mu, scales, V, kMxN, kMxM, launched, &mx_prov);
-            if (launched_ok) {
-                if (!matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, kMxN, kMxM,
-                                                                  launched) ||
-                    !(mx_prov.exact_mx_scale_partitioned || mx_prov.native_mxfp4_qualified ||
-                      mx_prov.native_fp8_qualified)) {
-                    return;
-                }
-            } else if (!LtPeakMxBlocksDeviceResident()) {
-                // Unexpected LaunchProjectedRightMx decline (partitioned path
-                // already matched the oracle above). Peak-required deficit is
-                // the only expected fail-closed case here.
+            if (!LaunchProjectedRightMx(mu, scales, V, kMxN, kMxM, launched, &mx_prov) ||
+                !matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, kMxN, kMxM,
+                                                              launched) ||
+                !HasQualifiedLtCudaMxProjectionLane(mx_prov)) {
                 return;
             }
         }
@@ -1639,6 +1633,7 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     auto& pool = Pool();
     std::lock_guard<std::mutex> lock(pool.mu);
     pool.used_exact_mx_this_batch = false;
+    pool.mx_prov = {};
     if (!pool.BindTemplate(headers.front(), n, m) ||
         !pool.EnsureBatchCapacity(headers.size())) {
         if (pool.stream != nullptr) (void)cudaStreamSynchronize(pool.stream);

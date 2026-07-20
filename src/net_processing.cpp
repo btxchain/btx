@@ -1050,6 +1050,11 @@ private:
      * punished if the block is invalid.
      */
     std::map<uint256, std::pair<NodeId, bool>> mapBlockSource GUARDED_BY(cs_main);
+    /** Async MatMul jobs own their block-source entry through validation
+     *  re-entry. Same-hash mutated/header-only relays may be processed while a
+     *  job is pending, but must not erase the source used to punish the job's
+     *  original sender. */
+    std::map<uint256, uint32_t> m_matmul_block_source_pins GUARDED_BY(cs_main);
 
     /** Number of peers with wtxid relay. */
     std::atomic<int> m_wtxid_relay_peers{0};
@@ -1071,6 +1076,9 @@ private:
     bool MarkMatMulAsyncVerification(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     void UnmarkMatMulAsyncVerification(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     bool IsMatMulAsyncVerificationPending(const uint256& hash) const NO_THREAD_SAFETY_ANALYSIS;
+    void PinMatMulBlockSource(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void UnpinMatMulBlockSource(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
+    void EraseMatMulBlockSourceIfUnpinned(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     struct MatMulAddrBudgetState {
         MatMulPeerVerificationBudget budget;
         std::chrono::steady_clock::time_point last_update{};
@@ -1246,6 +1254,7 @@ private:
         bool encdr_profile{false};
         bool owns_async_marker{false};
         bool owns_verdict_pin{false};
+        bool owns_assumevalid_trust_pin{false};
         int32_t reference_height{std::numeric_limits<int32_t>::max()};
         uint32_t work_units{0};
     };
@@ -1549,6 +1558,30 @@ bool PeerManagerImpl::IsMatMulAsyncVerificationPending(const uint256& hash) cons
 {
     LOCK(m_matmul_async_verify_mutex);
     return m_matmul_async_verifying.count(hash) != 0;
+}
+
+void PeerManagerImpl::PinMatMulBlockSource(const uint256& hash)
+{
+    AssertLockHeld(cs_main);
+    ++m_matmul_block_source_pins[hash];
+}
+
+void PeerManagerImpl::UnpinMatMulBlockSource(const uint256& hash)
+{
+    LOCK(cs_main);
+    const auto pin{m_matmul_block_source_pins.find(hash)};
+    Assume(pin != m_matmul_block_source_pins.end());
+    Assume(pin->second > 0);
+    if (--pin->second == 0) {
+        m_matmul_block_source_pins.erase(pin);
+        mapBlockSource.erase(hash);
+    }
+}
+
+void PeerManagerImpl::EraseMatMulBlockSourceIfUnpinned(const uint256& hash)
+{
+    AssertLockHeld(cs_main);
+    if (!m_matmul_block_source_pins.contains(hash)) mapBlockSource.erase(hash);
 }
 
 void PeerManagerImpl::RemoveBlockRequest(const uint256& hash, std::optional<NodeId> from_peer)
@@ -3041,8 +3074,9 @@ void PeerManagerImpl::BlockChecked(const CBlock& block, const BlockValidationSta
             MaybeSetPeerAsAnnouncingHeaderAndIDs(it->second.first);
         }
     }
-    if (it != mapBlockSource.end())
-        mapBlockSource.erase(it);
+    if (it != mapBlockSource.end()) {
+        EraseMatMulBlockSourceIfUnpinned(hash);
+    }
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -4610,13 +4644,19 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             matmul_admission.owns_verdict_pin = false;
         }
     };
+    const auto release_assumevalid_trust_pin = [&] {
+        if (matmul_admission.owns_assumevalid_trust_pin) {
+            UnpinMatMulEncDrAssumeValidTrust(hash);
+            matmul_admission.owns_assumevalid_trust_pin = false;
+        }
+    };
     const auto finalize_header_only = [&] {
         BlockValidationState header_state;
         m_chainman.ProcessNewBlockHeaders(
             {{block->GetBlockHeader()}}, min_pow_checked, header_state);
         {
             LOCK(cs_main);
-            mapBlockSource.erase(hash);
+            EraseMatMulBlockSourceIfUnpinned(hash);
         }
         if (post_process) post_process();
     };
@@ -4652,22 +4692,35 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         // block download can request the body later if it becomes relevant.
         finalize_header_only();
         release_verdict_pin();
+        release_assumevalid_trust_pin();
         return;
     }
 
     if (matmul_admission.state == MatMulBlockAdmission::State::NO_RECOMPUTE) {
         ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
         release_verdict_pin();
+        release_assumevalid_trust_pin();
         return;
     }
 
     std::optional<ChainstateManager::MatMulEncDrClassifyResult> encdr;
     bool verdict_pinned{false};
+    bool assumevalid_trusted{false};
     if (m_matmul_verify_worker ||
         matmul_admission.state == MatMulBlockAdmission::State::RECOMPUTE_RESERVED) {
-        encdr = WITH_LOCK(cs_main, return m_chainman.ClassifyMatMulEncDrRecompute(
-            *block, &verdict_pinned));
+        LOCK(cs_main);
+        encdr = m_chainman.ClassifyMatMulEncDrRecompute(
+            *block, &verdict_pinned, &assumevalid_trusted);
         if (verdict_pinned) matmul_admission.owns_verdict_pin = true;
+        if (assumevalid_trusted && !matmul_admission.owns_assumevalid_trust_pin) {
+            // Trust may become true after admission but before this final
+            // classifier. Pin it while cs_main still protects the decision;
+            // otherwise a second branch change before ContextualCheckBlock
+            // could turn the uncharged null-classification path into a full
+            // recomputation.
+            PinMatMulEncDrAssumeValidTrust(hash);
+            matmul_admission.owns_assumevalid_trust_pin = true;
+        }
     }
 
     if (matmul_admission.state == MatMulBlockAdmission::State::RECOMPUTE_RESERVED) {
@@ -4680,6 +4733,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             matmul_slot.reset();
             ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
             release_verdict_pin();
+            release_assumevalid_trust_pin();
             return;
         }
         if (!consume_reserved_budget()) {
@@ -4687,6 +4741,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             matmul_slot.reset();
             finalize_header_only();
             release_verdict_pin();
+            release_assumevalid_trust_pin();
             return;
         }
         // Older synchronous MatMul profiles have no async classifier. Their
@@ -4731,6 +4786,21 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                     if (post_process) post_process();
                     return;
                 }
+                // Keep punishment/source attribution owned by this job even
+                // if a same-hash mutated or header-only delivery is handled
+                // before the worker completes. The shared owner also releases
+                // correctly when Stop() destroys a queued job without invoking
+                // its completion.
+                {
+                    LOCK(cs_main);
+                    PinMatMulBlockSource(hash);
+                }
+                auto source_pin = std::shared_ptr<uint256>(
+                    new uint256(hash),
+                    [this](uint256* pinned_hash) {
+                        UnpinMatMulBlockSource(*pinned_hash);
+                        delete pinned_hash;
+                    });
                 // std::function requires a copyable callable: box the move-only
                 // slot in a shared_ptr. It is released when the last closure
                 // copy is destroyed — i.e. after recompute AND re-entry, or on
@@ -4739,7 +4809,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 node::MatMulVerifyWorker::Job job{
                     block, encdr->height, encdr->parent_median_time_past,
                     [this, nodeid, block, hash, force_processing, min_pow_checked, slot,
-                     post = post_process](bool encdr_ok) {
+                     source_pin = std::move(source_pin), post = post_process](bool encdr_ok) mutable {
                         // The verdict reaches validation via the ENC-DR verdict
                         // memo consulted inside ContextualCheckBlock; re-enter
                         // through the ordinary acceptance machinery so the
@@ -4749,6 +4819,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         PinMatMulEncDrVerdict(hash, encdr_ok);
                         ProcessBlockSync(nodeid, /*node=*/nullptr, block, force_processing, min_pow_checked, post);
                         UnpinMatMulEncDrVerdict(hash);
+                        source_pin.reset();
                         UnmarkMatMulAsyncVerification(hash);
                     }};
                 if (m_matmul_verify_worker->Enqueue(job)) return; // message thread freed
@@ -4773,6 +4844,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
     release_admission_marker();
     ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
     release_verdict_pin();
+    release_assumevalid_trust_pin();
 }
 
 bool PeerManagerImpl::AdmitMatMulBlockVerification(
@@ -4787,12 +4859,33 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     std::optional<ScopedMatMulPendingVerification>& slot,
     MatMulBlockAdmission& admission)
 {
+    const uint256 block_hash{block.GetHash()};
+    // A pending exact job owns both the hash's validation attempt and its
+    // source attribution. Drop every redundant same-hash body before any
+    // NO_RECOMPUTE/HEADER_ONLY classification can call BlockChecked against
+    // the original sender's mapBlockSource entry. This also prevents a peer
+    // from attaching a malformed non-hashed body to another peer's header and
+    // causing punishment to be charged to the job owner.
+    if (IsMatMulAsyncVerificationPending(block_hash)) {
+        LogDebug(BCLog::NET,
+                 "Ignoring duplicate %s hash=%s from peer=%d: MatMul verification already pending\n",
+                 source, block_hash.ToString(), node.GetId());
+        // BLOCK inserted its source just before admission. Preserve the
+        // original job's pinned entry, but erase this delivery's entry if the
+        // worker dropped its source pin just before clearing the pending
+        // marker. Without this conditional cleanup that completion interval
+        // could leave an unowned mapBlockSource entry indefinitely.
+        {
+            LOCK(cs_main);
+            EraseMatMulBlockSourceIfUnpinned(block_hash);
+        }
+        return false;
+    }
     // Preserve the zero-cost decision made by CountMatMulExpensiveVerifyChecks
     // for genuinely pre-v4/non-MatMul blocks. Active v4 commitment schemes are
     // always counted there, even when legacy skip/economic phase-2 controls are
     // disabled, because ContextualCheckBlock always enforces them.
     if (!requires_expensive_verification) return true;
-    const uint256 block_hash{block.GetHash()};
 
     // Admission budgets pay specifically for expensive MatMul recomputation,
     // not for receiving a complete block. Run the context-free body checks
@@ -4830,10 +4923,25 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
 
                 if (acceptance_reaches_contextual) {
                     bool verdict_pinned{false};
-                    const auto encdr{m_chainman.ClassifyMatMulEncDrRecompute(block, &verdict_pinned)};
+                    bool assumevalid_trusted{false};
+                    const auto encdr{m_chainman.ClassifyMatMulEncDrRecompute(
+                        block, &verdict_pinned, &assumevalid_trusted)};
                     admission.owns_verdict_pin = verdict_pinned;
-                    exact_recompute_required = exact_encdr_profile ? encdr.has_value()
-                                                                   : requires_expensive_verification;
+                    const bool body_reaches_expensive{
+                        MatMulBodyReachesExpensiveVerification(
+                            block, params, exact_reference_height)};
+                    if (exact_encdr_profile && body_reaches_expensive && assumevalid_trusted) {
+                        // Scope the trust decision made under cs_main through
+                        // ProcessNewBlock. Without this pin a concurrent
+                        // best-header branch change could make validation
+                        // recompute after admission intentionally skipped both
+                        // the slot and permanent budget.
+                        PinMatMulEncDrAssumeValidTrust(block_hash);
+                        admission.owns_assumevalid_trust_pin = true;
+                    }
+                    exact_recompute_required = exact_encdr_profile
+                        ? body_reaches_expensive && encdr.has_value()
+                        : requires_expensive_verification && body_reaches_expensive;
                 }
             } else {
                 // An unknown parent cannot reach contextual recomputation.
@@ -4941,7 +5049,7 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
         RemoveBlockRequest(block->GetHash(), std::nullopt);
     } else {
         LOCK(cs_main);
-        mapBlockSource.erase(block->GetHash());
+        EraseMatMulBlockSourceIfUnpinned(block->GetHash());
     }
     if (post_process) post_process();
 }
@@ -7172,11 +7280,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // need it even when it's not a candidate for a new best tip.
             forceProcessing = IsBlockRequested(hash);
             RemoveBlockRequest(hash, pfrom.GetId());
-            // mapBlockSource is only used for punishing peers and setting
-            // which peers send us compact blocks, so the race between here and
-            // cs_main in ProcessNewBlock is fine.
-            mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
-
             // Check claimed work on this block against our anti-dos thresholds.
             if (prev_block) {
                 const auto claimed_work = CalculateClaimedHeadersWork(*prev_block, {{pblock->GetBlockHeader()}}, consensus_params);
@@ -7207,6 +7310,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                         ? std::numeric_limits<int32_t>::max()
                         : prev_block->nHeight + 1;
             }
+            // Do not publish a source entry until every early-return check
+            // above has passed. In particular, a bad claimed-work block is
+            // disconnected without reaching ProcessNewBlock/BlockChecked and
+            // therefore has no later lifecycle hook that could erase it.
+            mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
         }
 
         if (!AdmitMatMulBlockVerification(

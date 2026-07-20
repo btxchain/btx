@@ -3,9 +3,11 @@
 Status: **portable exact integer / software fallback paths are in tree**.
 “MXFP4” in a portable path or planner enum describes grouping/layout intent,
 not an issued native instruction. Native CUTLASS/tcgen05 MXFP4 and device FP8
-remain hardware-gated or fail-closed. Frontier LT CUDA/HIP can consume logical MX
-components through four exact INT8 IMMA/MFMA partitions; H200/MI300 use one
-dense INT8 projection. Mainnet activation remains **inert**.
+remain hardware-gated or fail-closed. LT CUDA/HIP consume logical MX components
+through four exact INT8 IMMA/MFMA (or exact device-ALU fallback) partitions by
+default on every supported architecture. A one-GEMM dense INT8 projection is a
+diagnostic opt-out, not the production default. Mainnet activation remains
+**inert**.
 
 **Economic rule:** more capable AI hardware earns greater *expected* share via exact seal throughput only; per-block subsidy is hardware-independent.
 
@@ -20,7 +22,7 @@ Consensus sees only canonical integer sketch bytes. The optimal design is **one 
 | 1 | Replace 16-GEMM combine with **Karatsuba-9** + fused M61 epilogue | **Done** (CPU + CUDA `Bmx4BuildKaratsubaPlanesKernel` + HIP + Metal) |
 | 2 | **Contraction-aligned MX projection** (one E8M0 code per 32 K elements and output coordinate) | The pre-activation A/B scale-axis correction is implemented in the exact CPU reference, CUDA masked-plane consumers, and portable **integer emulation**, all byte-identical to dense. That makes a future one-pass native MXFP4 projection structurally possible; it does not mean one is wired. CUTLASS/tcgen05 hardware execution remains fail-closed until self-qualified; LT has its own already-contraction-aligned B layout. |
 | 2b | Adaptive base-256 / two-limb exact combine | **Done (miner-local)**: `ComputeCombineAdaptiveLimbBMX4C` + deferred `__int128` `ComputeCombineModQ` + classical oracle; tournament harness under `bench/` |
-| 3 | Entire nonce loop **device-resident** | **Implemented for the provenance-qualified CUDA/HIP full-header Q* path**: nonce-fresh W generation, direct/radix-lowered GEMMs, Karatsuba-9 combine, and SHA256d(Chat) stay on-device; one digest/status batch is copied at completion with no per-candidate synchronization. Cold template binding and self-tests are outside that steady-state claim. Dense INT8 is the default projection, with opt-in frontier logical-MX partitioning. Metal/Ascend and native MXFP4 do not yet make this resident-Q* claim. |
+| 3 | Entire nonce loop **device-resident** | **Implemented for the provenance-qualified CUDA/HIP full-header Q* path**: nonce-fresh W generation, direct/radix-lowered GEMMs, Karatsuba-9 combine, and SHA256d(Chat) stay on-device; one digest/status batch is copied at completion with no per-candidate synchronization. Cold template binding and self-tests are outside that steady-state claim. Exact logical-MX partitioning is the default projection; `BTX_MATMUL_V4_LT_DENSE_BHAT=1` is the one-GEMM dense diagnostic. Metal/Ascend and native MXFP4 do not yet make this resident-Q* claim. |
 | 4 | **Stop returning loser payloads** | **Done** — LT CUDA/HIP full-header batches return digest/status only, and dispatch CPU-reseals payloads solely for target candidates. Losing slots remain payload-empty. The streaming digest also avoids the historical 8 MiB loser allocation. |
 | 5 | Future **FP8 five-limb** combine lane | **CPU reference done (exact)**; planner selects for `"rubin"`. Device path: fail-closed API (`IsDeviceFp8FiveLimbAvailable`, `LaunchDeviceFp8FiveLimbCombine`) with transparent CPU fallback via `ComputeCombineFp8FiveLimbDeviceOrCpu` — no Rubin silicon headers in default builds |
 
@@ -28,8 +30,7 @@ Consensus sees only canonical integer sketch bytes. The optimal design is **one 
 
 | Hardware | Projection | Combine |
 |---|---|---|
-| H200 / default | Canonical INT8 | Karatsuba-9 INT8 |
-| B200 / SM120 / MI350 | Dense INT8 by default; logical MX lowered through four exact INT8 tensor GEMMs only with `BTX_MATMUL_V4_LT_LOGICAL_MX=1`; native MXFP4 remains intent | Karatsuba-9 INT8 |
+| H200 / B200 / SM120 / MI300 / MI350 | Logical MX lowered through four exact INT8 tensor/device-ALU GEMMs by default; one dense INT8 GEMM only with `BTX_MATMUL_V4_LT_DENSE_BHAT=1`; native MXFP4 remains intent | Karatsuba-9 INT8 |
 | Rubin-class | Exact FP8 | Five-limb FP8 |
 | CPU | Canonical INT8 | Canonical integer |
 
@@ -87,9 +88,14 @@ Accordingly, **118.92 / 77.08 must not be called a B200:5090 silicon ratio and
 must not calibrate ASERT**. Current gating treats reports with that historical
 provenance only as `host_orchestrated_nonce_per_s`; `device_nonce_per_s` remains
 null and `device_rate_valid=false`. The newer CUDA/HIP full-header entry can
-publish a rate only after it proves a single device-resident consensus-Q*
-batch with nonce-fresh W generation and digest on-device and no per-nonce
-synchronization. `cpu_reference_tensor_share_pct` (called `tensor_share_pct` in
+establish resident-batch telemetry after it proves a single device-resident
+consensus-Q* batch with nonce-fresh W generation and digest on-device and no
+per-nonce synchronization. It can publish `device_nonce_per_s` for G2/G3 only
+after it additionally proves a qualified native path, device-event timing, and
+host independence. Reports record CPU model and CPU/NUMA affinity for diagnosis,
+but G2 deliberately does not require the GPU classes to use identical CPUs: an
+accepted device-domain rate must not depend on the host model.
+`cpu_reference_tensor_share_pct` (called `tensor_share_pct` in
 the historical report) remains a CPU-reference composition metric,
 not evidence of tensor-core utilization and not a G1 pass. G1 requires a
 qualified native tensor path plus independent device-side timing and hardware
@@ -97,6 +103,20 @@ counters with `device_tensor_share_pct > 50`; absent any part of that tuple it
 fails closed. The reported 0.0032% B200 utilization
 was likewise an ops/wall-rate diagnostic and is no longer published as device
 tensor utilization without silicon-rate provenance.
+
+### d4f5577 resident-window trace: batching alone did not isolate silicon
+
+Same-tip production-shape (`n=4096`, `Q*=256`) host-wall telemetry measured an
+RTX 5090 at 1.70 nonce/s with daemons active, 2.21 with them paused, and about
+2.36 when NUMA-pinned. A separate RTX 5060 Ti host measured about 3.50 nonce/s.
+The 5060 Ti host's 3.70 GHz single-thread clock versus the dual-socket 5090
+host's 2.25 GHz clock tracked the 1.48× throughput inversion closely. This is
+strong evidence that the resident API removed the old per-nonce orchestration
+but not all serial per-window host sensitivity. These values are now
+`resident_batch_wall_nonce_per_s` diagnostics, not a consumer-GPU silicon
+ranking, B200/5090 G2 evidence, or ASERT input. Device events around the actual
+GPU work plus a controlled host-sensitivity check are required before the
+silicon-rate fields become valid.
 
 There was also a separate standalone-harness defect in every pre-fix CPU
 number: `matmul-v4-report` did not construct `kernel::Context` or call
@@ -116,7 +136,7 @@ fallback) instead of one eight-byte `CSHA256::Write` per word.
 | Larger dense batched GEMMs (Q, stacked combine) | Moves along the 2×→4–6× B200/5090 axis | Available; needs sustained large Q |
 | Karatsuba-9 (−35% combine MAC) | Helps both; slightly more on H200 (tensor-heavier share) | **Done** |
 | Remove host XOF / H2D / loser payload / alloc | Attacks the **non-tensor floor** (the part that flattens $/nonce) | **Implemented, silicon re-measure pending**: CUDA/HIP accept complete seed-bound Q* headers, generate W and SHA256d(Chat) on-device, return digest/status only, and have no per-candidate synchronization. The steady-state call synchronizes at completion; cold binding/self-tests may synchronize separately. CUDA bounds Chat staging to 128 MiB; HIP overlaps an eight-slot ring. Per-candidate GEMM launches and serial SHA/prefix work remain profiling targets. |
-| Logical scale partition | Exposes committed mantissa/scale tensors without dense dequantization | Exact CPU path plus opt-in frontier CUDA/HIP four-pass INT8 lowering complete; default stays one dense GEMM until measured; CUTLASS/tcgen05 native kernel hardware-gated |
+| Logical scale partition | Exposes committed mantissa/scale tensors without dense dequantization | Exact CPU path plus default CUDA/HIP four-pass INT8 lowering complete; `BTX_MATMUL_V4_LT_DENSE_BHAT=1` retains the one-GEMM A/B diagnostic; CUTLASS/tcgen05 native kernel hardware-gated |
 | FP8 five-limb (Rubin) | Future INT8 drought hedge | CPU exact; no Rubin silicon yet |
 | One nonce / multi-GPU | Spec correctly rejects — NVLink does not help EPP search | Policy |
 
@@ -156,7 +176,7 @@ measurement, launch amortization, or a vendor-tensor-kernel swap:
    `ComputeCombineFp8FiveLimbDeviceOrCpu` CPU fallback is complete today.
 4. **LT ExactGemm tensor preference** — CUDA IMMA and HIP MFMA are wired for
    direct s8 stages, radix-lowered `Y·H`, and Karatsuba-9 combine. Frontier
-   opt-in qualification projection consumes logical MX components through four exponent partitions;
+   default exact projection consumes logical MX components through four exponent partitions;
    this is real INT8 tensor execution, not native MXFP4. Metal TensorOps remains
    self-qualification gated.
 5. **AMD native block-scaled MXFP4** (HIP tier (a)) — gated off pending real MI300/
@@ -171,9 +191,9 @@ measurement, launch amortization, or a vendor-tensor-kernel swap:
 - `ComputeCombineKaratsuba9BMX4C` / CUDA Karatsuba-9 combine
 - `src/cuda/matmul_v4_bmx4_accel.cu` — CUDA device backend (INT8 + portable/native-FP4 tiers; native admission separately gated)
 - `src/cuda/matmul_v4_lt_tensor_gemm.cu` — LT cuBLASLt IMMA ExactGemm + arch probe
-- `src/cuda/matmul_v4_lt_accel.cu` — LT resident IMMA path (dense default, opt-in frontier logical-MX partition, plus direct/radix/Karatsuba stages; no native MXFP4)
+- `src/cuda/matmul_v4_lt_accel.cu` — LT resident IMMA path (exact logical-MX partition by default, dense diagnostic opt-out, plus direct/radix/Karatsuba stages; no native MXFP4)
 - `src/hip/matmul_v4_bmx4_accel.hip` — HIP device backend (INT8 MFMA tier complete; native MXFP4 tier hardware-gated)
 - `src/hip/matmul_v4_lt_tensor_gemm.hip` — LT hipBLASLt/rocBLAS MFMA ExactGemm
-- `src/hip/matmul_v4_lt_accel.hip` — LT resident MFMA path (dense default, opt-in gfx950 logical-MX partition, plus direct/radix/Karatsuba stages; no native MXFP4)
+- `src/hip/matmul_v4_lt_accel.hip` — LT resident MFMA path (exact logical-MX partition by default, dense diagnostic opt-out, plus direct/radix/Karatsuba stages; no native MXFP4)
 - `src/metal/matmul_v4_bmx4_accel.mm` — Metal device backend (ALU + M5 tensor-ops GEMM, self-test gated)
 - `matmul_v4_bmx4_cutlass_mxfp4.h` — portable exact grouped integer emulation behind MXFP4-shaped APIs; CUTLASS tensor kernel is a separate hardware-gated swap

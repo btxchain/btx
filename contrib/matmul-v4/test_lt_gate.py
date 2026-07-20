@@ -44,6 +44,13 @@ def report(
     rounds: object = 3,
     measurement_mode: object = "phase-a-digest",
     source_revision: object = "1ca87fb",
+    host_cpu_model: object | None = None,
+    host_cpu_provenance_complete: object = True,
+    host_independence_verified: object = True,
+    device_rate_timing_valid: object = True,
+    device_rate_timing_domain: object = "device-events-resident-qstar",
+    device_execution_certified: object = True,
+    device_rate_certified: object = True,
     v3_hashrate: object = 0.0,
     asert: object = "n/a (pass --v3-hashrate)",
 ) -> dict:
@@ -53,6 +60,14 @@ def report(
         "schema_version": 3,
         "profile": "bmx4c-lt",
         "host": name.removesuffix(".json"),
+        "host_cpu": {
+            "architecture": "x86_64",
+            "model": host_cpu_model or ("test CPU for " + name),
+            "logical_cpus": 32,
+            "cpu_affinity_list": "0-31",
+            "memory_node_affinity_list": "0",
+        },
+        "host_cpu_provenance_complete": host_cpu_provenance_complete,
         "backend": backend,
         "n": n,
         "window": window,
@@ -60,7 +75,11 @@ def report(
         "measurement_mode": measurement_mode,
         "source_revision": source_revision,
         "native_path_eligible": native_path_eligible,
-        "device_execution_certified": False,
+        "device_execution_certified": device_execution_certified,
+        "device_rate_certified": device_rate_certified,
+        "device_rate_timing_valid": device_rate_timing_valid,
+        "device_rate_timing_domain": device_rate_timing_domain,
+        "host_independence_verified": host_independence_verified,
         "device_tensor_timing_valid": device_tensor_timing_valid,
         "device_tensor_counters_valid": device_tensor_counters_valid,
         "device_tensor_timing_domain": device_tensor_timing_domain,
@@ -85,7 +104,7 @@ def report(
         "v3_hashrate": v3_hashrate,
         "asert_rescale_num_den_suggestion": asert,
         "lt": {
-            "device_native_kernel_wired": False,
+            "device_native_kernel_wired": native_path_eligible,
             "device_assisted_path_exact": assisted_exact,
             "qstar_is_consensus": qstar_is_consensus,
             "qstar_device_batched": qstar_device_batched,
@@ -131,12 +150,71 @@ class LtGateSchemaTest(unittest.TestCase):
         )
         self.assertFalse(any("G2 B200/5090 ratio" in reason for reason in reasons))
 
+    def test_g2_allows_different_hosts_when_device_timing_is_host_independent(self):
+        dc = report(
+            "b200.json", 400.0,
+            host_cpu_model="NVIDIA Grace",
+        )
+        consumer = report(
+            "5090.json", 100.0,
+            host_cpu_model="AMD EPYC 7742",
+        )
+        dc["host_cpu"]["cpu_affinity_list"] = "0-71"
+        dc["host_cpu"]["logical_cpus"] = 72
+        consumer["host_cpu"]["cpu_affinity_list"] = "128-255"
+        consumer["host_cpu"]["logical_cpus"] = 256
+
+        _, gates, _, _, _, summary = self.evaluate_pair(dc, consumer)
+
+        self.assertTrue(gates["G2_b200_5090_ratio"])
+        self.assertEqual(summary["g2_evidence"]["datacenter_host_cpu"]["model"],
+                         "NVIDIA Grace")
+        self.assertEqual(summary["g2_evidence"]["consumer_host_cpu"]["model"],
+                         "AMD EPYC 7742")
+
+    def test_g2_rejects_resident_host_wall_rate_without_host_independence(self):
+        for field, value in (
+            ("host_independence_verified", False),
+            ("device_rate_timing_valid", False),
+            ("device_rate_timing_domain", "host-wall-resident-batch"),
+            ("native_path_eligible", False),
+            ("device_execution_certified", False),
+            ("device_rate_certified", False),
+        ):
+            with self.subTest(field=field):
+                dc = report("b200.json", 400.0, **{field: value})
+                dc["resident_batch_wall_nonce_per_s"] = 400.0
+                _, gates, rows, reasons, _, _ = self.evaluate_pair(
+                    dc, report("5090.json", 100.0)
+                )
+                self.assertFalse(gates["G2_b200_5090_ratio"])
+                self.assertIsNone(rows[0]["nps"])
+                self.assertEqual(rows[0]["host_orchestrated_nps"], 400.0)
+                self.assertTrue(any("UNVERIFIED" in reason for reason in reasons))
+
+    def test_g2_rejects_missing_host_cpu_provenance(self):
+        for mutation in (
+            lambda candidate: candidate.pop("host_cpu"),
+            lambda candidate: candidate["host_cpu"].update({"model": "unknown"}),
+            lambda candidate: candidate["host_cpu"].update({"cpu_affinity_list": "unavailable"}),
+            lambda candidate: candidate.update({"host_cpu_provenance_complete": False}),
+        ):
+            with self.subTest(mutation=mutation):
+                dc = report("b200.json", 400.0)
+                mutation(dc)
+                _, gates, rows, _, _, _ = self.evaluate_pair(
+                    dc, report("5090.json", 100.0)
+                )
+                self.assertFalse(gates["G2_b200_5090_ratio"])
+                self.assertFalse(rows[0]["host_cpu_provenance_complete"])
+                self.assertIsNone(rows[0]["nps"])
+
     def test_g2_rejects_incomparable_workload_mode_or_revision(self):
         mismatches = {
             "n": 64,
             "window": 256,
             "rounds": 5,
-            "measurement_mode": "telemetry-only-device-resident-qstar",
+            "measurement_mode": "phase-b-seal",
             "source_revision": "new-tip",
         }
         for field, value in mismatches.items():
@@ -282,13 +360,13 @@ class LtGateSchemaTest(unittest.TestCase):
 
     def test_g2_silicon_rate_does_not_substitute_for_g1_native_counters(self):
         dc = report(
-            "b200.json", 400.0, native_path_eligible=False,
+            "b200.json", 400.0, native_path_eligible=True,
             device_tensor_timing_valid=False, device_tensor_counters_valid=False,
             device_tensor_timing_domain="cpu-reference", device_tensor_share_pct=None,
             tensor_share_pct=97.2,
         )
         consumer = report(
-            "5090.json", 100.0, native_path_eligible=False,
+            "5090.json", 100.0, native_path_eligible=True,
             device_tensor_timing_valid=False, device_tensor_counters_valid=False,
             device_tensor_timing_domain="cpu-reference", device_tensor_share_pct=None,
             tensor_share_pct=97.2,
@@ -422,6 +500,71 @@ class LtGateSchemaTest(unittest.TestCase):
         self.assertTrue(any("G3" in reason and "UNVERIFIED" in reason for reason in reasons))
         self.assertTrue(any("diagnostic only" in note for note in notes))
         self.assertTrue(any("exclude it from calibration" in note for note in notes))
+
+    def test_telemetry_only_report_is_diagnostic_not_consensus_failure(self):
+        telemetry = report(
+            "telemetry.json",
+            None,
+            device_rate_valid=False,
+            silicon_rate_valid=False,
+            execution_path="telemetry-only-device-resident-qstar-batched",
+            assisted_exact=False,
+            rate_provenance="telemetry-only-device-resident-qstar-batched",
+            native_path_eligible=False,
+            device_tensor_timing_valid=False,
+            device_tensor_counters_valid=False,
+            device_tensor_timing_domain="not-measured-telemetry-only",
+            device_tensor_share_pct=None,
+            measurement_mode="telemetry-only-device-resident-qstar",
+        )
+        telemetry["telemetry_only"] = True
+        telemetry["bit_exact"] = None
+        telemetry["stages"] = None
+        telemetry["telemetry_device_nonce_per_s"] = 3.5
+
+        labels = {
+            **LABELS,
+            "telemetry.json": ("nvidia", "datacenter", "B200 telemetry"),
+        }
+        _, gates, rows, reasons, notes, summary = lt_gate.evaluate(
+            [report("b200.json", 400.0), report("5090.json", 100.0), telemetry],
+            labels,
+            {},
+            False,
+        )
+
+        self.assertTrue(gates["G1_tensor_majority"])
+        self.assertTrue(gates["G2_b200_5090_ratio"])
+        self.assertEqual(summary["g2_evidence"]["ratio"], 4.0)
+        self.assertEqual(len(rows), 3)
+        self.assertFalse(any("telemetry.json" in reason for reason in reasons))
+        self.assertTrue(any("telemetry-only/non-certifying" in note for note in notes))
+
+    def test_telemetry_measurement_mode_overrides_contradictory_rate_claim(self):
+        telemetry = report(
+            "telemetry-contradictory.json",
+            1000.0,
+            device_rate_valid=True,
+            silicon_rate_valid=True,
+            measurement_mode="telemetry-only-device-resident-qstar",
+        )
+        telemetry["telemetry_only"] = False
+        labels = {
+            **LABELS,
+            "telemetry-contradictory.json": ("nvidia", "datacenter", "B200 telemetry"),
+        }
+
+        _, gates, _, reasons, notes, summary = lt_gate.evaluate(
+            [report("b200.json", 400.0), report("5090.json", 100.0), telemetry],
+            labels,
+            {},
+            False,
+        )
+
+        self.assertTrue(gates["G2_b200_5090_ratio"])
+        self.assertEqual(summary["g2_evidence"]["ratio"], 4.0)
+        self.assertFalse(any("telemetry-contradictory.json" in reason for reason in reasons))
+        self.assertTrue(any("telemetry-only/non-certifying" in note for note in notes))
 
     def test_tensor_util_is_diagnostic_not_g1_input(self):
         dc = report("b200.json", 400.0, tensor_util_pct="unknown")

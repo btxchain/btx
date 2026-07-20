@@ -240,6 +240,22 @@ BOOST_AUTO_TEST_CASE(encdr_verdict_pin_survives_fifo_eviction_and_refcounts)
     BOOST_CHECK(!LookupMatMulEncDrVerdict(pinned_hash).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(encdr_assumevalid_trust_pin_refcounts)
+{
+    uint256 hash;
+    hash.data()[0] = 0xB7;
+    hash.data()[1] = 0x41;
+
+    BOOST_CHECK(!IsMatMulEncDrAssumeValidTrustPinned(hash));
+    PinMatMulEncDrAssumeValidTrust(hash);
+    PinMatMulEncDrAssumeValidTrust(hash);
+    BOOST_CHECK(IsMatMulEncDrAssumeValidTrustPinned(hash));
+    UnpinMatMulEncDrAssumeValidTrust(hash);
+    BOOST_CHECK(IsMatMulEncDrAssumeValidTrustPinned(hash));
+    UnpinMatMulEncDrAssumeValidTrust(hash);
+    BOOST_CHECK(!IsMatMulEncDrAssumeValidTrustPinned(hash));
+}
+
 // Phase B seal-as-PoW async path: parent MTP on the Job is forwarded into the
 // verify seam (Classify/ProcessBlock supply it under cs_main; EncDr fails
 // closed without it at seal heights).

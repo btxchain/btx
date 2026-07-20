@@ -22,31 +22,23 @@
 #include <utility>
 #include <vector>
 
-// Optional compile gates: toolkit must declare the microscaled types before we
-// even attempt a vendor matmul. Absence ⇒ permanent fail-closed for *qualified.
+// Optional compile gates: CUDA 12.8 introduced the FP4 data type and the
+// VEC16/VEC32 block-scale modes used below. The CUDA_R_* and
+// CUBLASLT_MATMUL_MATRIX_SCALE_* names are enum constants, not preprocessor
+// macros, so `defined(NAME)` cannot be used to discover them.
 #if defined(CUDA_VERSION) && (CUDA_VERSION >= 12080)
 #include <cublasLt.h>
-#if defined(CUDA_R_8F_E4M3)
 #include <cuda_fp8.h>
 #define BTX_LT_CUDA_HAS_FP8_E4M3 1
-#endif
-#if defined(CUDA_R_4F_E2M1)
 #if defined(__has_include)
 #if __has_include(<cuda_fp4.h>)
 #include <cuda_fp4.h>
 #endif
 #endif
 #define BTX_LT_CUDA_HAS_FP4_E2M1 1
-#endif
-#if defined(CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0)
 #define BTX_LT_CUDA_HAS_VEC32_UE8M0 1
-#endif
-#if defined(CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3)
 #define BTX_LT_CUDA_HAS_VEC16_UE4M3 1
-#endif
-#if defined(BTX_LT_CUDA_HAS_VEC32_UE8M0) || defined(BTX_LT_CUDA_HAS_VEC16_UE4M3)
 #define BTX_LT_CUDA_HAS_MX_SCALE_MODES 1
-#endif
 #endif
 
 namespace matmul_v4::cuda {
@@ -694,6 +686,13 @@ bool IsLtNativeFp8Qualified()
     std::lock_guard<std::mutex> lock(g_native_mx_mu);
     RunNativeSelfQualOnceLocked();
     return g_native_fp8_qualified;
+}
+
+bool SelfQualifyLtNativeMxLanesOnce()
+{
+    std::lock_guard<std::mutex> lock(g_native_mx_mu);
+    RunNativeSelfQualOnceLocked();
+    return g_native_mxfp4_qualified || g_native_fp8_qualified;
 }
 
 bool TryLaunchNativeMxfp4ProjectedRight(const std::vector<int8_t>& mu,
