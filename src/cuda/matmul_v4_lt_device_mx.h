@@ -5,6 +5,16 @@
 #ifndef BITCOIN_CUDA_MATMUL_V4_LT_DEVICE_MX_H
 #define BITCOIN_CUDA_MATMUL_V4_LT_DEVICE_MX_H
 
+// Amendment v3 §1.D D5: self-contained for CUDA and CMake-native HIP. hipcc's
+// prelude may inject runtime decls, but matmul_v4_lt_accel.hip includes this
+// header before hip_runtime.h — without this gate, __device__/__forceinline__/
+// __constant__ are undeclared under the native HIP language path.
+#if defined(__HIPCC__) || defined(__HIP_PLATFORM_AMD__)
+#  include <hip/hip_runtime.h>
+#elif defined(__CUDACC__)
+#  include <cuda_runtime.h>
+#endif
+
 #include <cstdint>
 
 // Small CUDA/HIP common helpers used by the LT resident miners.  Keep these

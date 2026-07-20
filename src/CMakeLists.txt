@@ -457,6 +457,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_selfqual.cpp
   matmul/matmul_v4_rc_verify_bakeoff.cpp
   matmul/matmul_v4_rc_gkr.cpp
+  matmul/matmul_v4_rc_fri.cpp
   matmul/matmul_sketch_cache.cpp
   matmul/matmul_v4_exact_float.cpp
   matmul/matmul_v4_fast_exact.cpp
@@ -849,16 +850,26 @@ if(BTX_ENABLE_HIP)
     hip/matmul_v4_lt_tensor_gemm.hip
     hip/matmul_v4_lt_mx_native.hip
     PROPERTIES LANGUAGE HIP)
-  # D3: host-side HIP headers need the AMD platform define on every TU that
-  # includes them — prefer a target compile-define over ad-hoc -D flags.
-  target_compile_definitions(btx_hip_device PRIVATE __HIP_PLATFORM_AMD__=1)
+  # Amendment v3 §1.D D4: __HIP_PLATFORM_AMD__ must reach every TU that includes
+  # HIP or shared device headers used by HIP. PUBLIC on btx_hip_device covers
+  # the device lib; PUBLIC on btx_matmul_backend propagates to bitcoin_common
+  # (e.g. backend_capabilities_v4.cpp includes hip_runtime.h under
+  # BTX_ENABLE_HIP). Gated on BTX_ENABLE_HIP so non-HIP builds stay unpoisoned.
+  target_compile_definitions(btx_hip_device PUBLIC __HIP_PLATFORM_AMD__=1)
   target_link_libraries(btx_hip_device PRIVATE core_interface hip::device)
+  # Amendment v3 §1.D D3: hardening_interface (via core_interface) injects
+  # -fcf-protection=full. That flag is host CET and breaks amdgcn device
+  # compiles. Override for HIP language only; CXX host TUs keep full hardening.
+  # (HIP-off builds never create this target, so the override is HIP-gated.)
+  target_compile_options(btx_hip_device PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:-fcf-protection=none>)
   # PUBLIC so the define reaches the backend-determinism test TU (compiled into
   # test_btx), whose HIP determinism row #if-guards on BTX_ENABLE_HIP; PRIVATE
   # would silently drop that row even in a HIP build.
   target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_HIP=1)
+  target_compile_definitions(btx_matmul_backend PUBLIC __HIP_PLATFORM_AMD__=1)
   target_link_libraries(btx_matmul_backend PRIVATE btx_hip_device)
-  # D5: optional hipBLASLt (preferred) and rocBLAS fallback for LT ExactGemm
+  # Optional hipBLASLt (preferred) and rocBLAS fallback for LT ExactGemm
   # MFMA-class s8×s8→s32. Discover them independently so an installed
   # hipBLASLt that declines a shape can fall through to rocBLAS I8II.
   # HINTS include /usr (+ lib suffixes) so Debian/Ubuntu ROCm packages work

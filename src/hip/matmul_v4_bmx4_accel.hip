@@ -130,181 +130,35 @@ __device__ __forceinline__ Fq DevFqFromSigned(int64_t x)
     return reduced == 0 ? 0 : q - reduced; // DevFqNeg inlined (unused standalone here)
 }
 
-// Amendment v2 §1.D D4: MFMA only on CDNA; never emit MFMA for gfx1200/RDNA4.
-#include <hip/btx_hip_mfma_guard.h>
+// Amendment v3 §1.D-MFMA: per-arch K16/K32/scalar via shared helper.
+#include <hip/btx_hip_mfma_i8_gemm.h>
 
-using int32x4 = int32_t __attribute__((ext_vector_type(4)));
-
-// Pack this lane's four consecutive-K int8 operands into one 32-bit register
-// (byte p holds K index kBase+p, lowest K in the least-significant byte -- the
-// standard CDNA A/B packing along K). Identical convention to the v4.1 file.
-__device__ __forceinline__ int PackI8x4(int8_t v0, int8_t v1, int8_t v2, int8_t v3)
-{
-    return static_cast<int>((static_cast<uint32_t>(static_cast<uint8_t>(v0))) |
-                            (static_cast<uint32_t>(static_cast<uint8_t>(v1)) << 8) |
-                            (static_cast<uint32_t>(static_cast<uint8_t>(v2)) << 16) |
-                            (static_cast<uint32_t>(static_cast<uint8_t>(v3)) << 24));
-}
-
-// Exact INT8xINT8 -> INT32 GEMM D(MxN) = A(MxK) * B(KxN), all row-major, exact
-// integer accumulate. Verbatim-duplicated body from matmul_v4_accel.hip's
-// I8GemmTiled (own translation unit, own anonymous namespace -- no link
-// clash): one wavefront (blockDim = {16,4,1}) computes one 16x16 output tile;
-// grid = {ceil(N/16), ceil(M/16)}. Ragged M/N/K are zero-padded (int8 zero
-// contributes nothing, exact). This is tier (b)'s workhorse for both
-// P = U*Ahat and Q_i = Bhat_i*V and the 16 limb-pair S_ij products -- all four
-// GEMM shapes this backend needs share this one kernel.
+// Exact INT8xINT8 -> INT32 GEMM D(MxN) = A(MxK) * B(KxN). Shared MFMA/scalar path.
 __global__ void I8GemmTiled(const int8_t* __restrict__ A,
                             const int8_t* __restrict__ B,
                             int32_t* __restrict__ D,
                             int M, int N, int K)
 {
-    const int lx = static_cast<int>(threadIdx.x); // 0..15
-    const int ly = static_cast<int>(threadIdx.y); // 0..3
+    const int lx = static_cast<int>(threadIdx.x);
+    const int ly = static_cast<int>(threadIdx.y);
     const int tileRow = static_cast<int>(blockIdx.y) * 16;
     const int tileCol = static_cast<int>(blockIdx.x) * 16;
-    const int kTiles = (K + 15) / 16;
-
-#if defined(BTX_HIP_BMX4C_HAVE_MFMA)
-    int32x4 acc = {0, 0, 0, 0};
-    const int aRow = tileRow + lx;
-    const int bCol = tileCol + lx;
-    for (int kt = 0; kt < kTiles; ++kt) {
-        const int kBase = kt * 16 + ly * 4;
-
-        int8_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
-        if (aRow < M) {
-            const size_t base = static_cast<size_t>(aRow) * K;
-            const int k0 = kBase, k1 = kBase + 1, k2 = kBase + 2, k3 = kBase + 3;
-            if (k0 < K) a0 = A[base + k0];
-            if (k1 < K) a1 = A[base + k1];
-            if (k2 < K) a2 = A[base + k2];
-            if (k3 < K) a3 = A[base + k3];
-        }
-        int8_t b0 = 0, b1 = 0, b2 = 0, b3 = 0;
-        if (bCol < N) {
-            const int k0 = kBase, k1 = kBase + 1, k2 = kBase + 2, k3 = kBase + 3;
-            if (k0 < K) b0 = B[static_cast<size_t>(k0) * N + bCol];
-            if (k1 < K) b1 = B[static_cast<size_t>(k1) * N + bCol];
-            if (k2 < K) b2 = B[static_cast<size_t>(k2) * N + bCol];
-            if (k3 < K) b3 = B[static_cast<size_t>(k3) * N + bCol];
-        }
-
-        const int a_pack = PackI8x4(a0, a1, a2, a3);
-        const int b_pack = PackI8x4(b0, b1, b2, b3);
-        acc = __builtin_amdgcn_mfma_i32_16x16x16i8(a_pack, b_pack, acc, 0, 0, 0);
-    }
-    for (int i = 0; i < 4; ++i) {
-        const int row = tileRow + ly * 4 + i;
-        const int col = tileCol + lx;
-        if (row < M && col < N) {
-            D[static_cast<size_t>(row) * N + col] = acc[i];
-        }
-    }
-#else
-    // Portable scalar-integer twin producing the identical integer result.
-    const int col = tileCol + lx;
-    int32_t acc[4] = {0, 0, 0, 0};
-    if (col < N) {
-        for (int i = 0; i < 4; ++i) {
-            const int row = tileRow + ly * 4 + i;
-            if (row >= M) continue;
-            int32_t s = 0;
-            const size_t arow = static_cast<size_t>(row) * K;
-            for (int k = 0; k < K; ++k) {
-                s += static_cast<int32_t>(A[arow + k]) *
-                     static_cast<int32_t>(B[static_cast<size_t>(k) * N + col]);
-            }
-            acc[i] = s;
-        }
-        for (int i = 0; i < 4; ++i) {
-            const int row = tileRow + ly * 4 + i;
-            if (row < M) {
-                D[static_cast<size_t>(row) * N + col] = acc[i];
-            }
-        }
-    }
-    (void)kTiles;
-#endif
+    BtxI8GemmTileAccum(A, B, D, M, N, K, tileRow, tileCol, lx, ly, /*ldD=*/N,
+                       /*colOffset=*/0);
 }
 
-// Same GEMM math as I8GemmTiled, but the MxN output tile is written at
-// row-stride `ldD` starting at column `colOffset` -- lets Q_i = Bhat_i*V land
-// directly in its column block [colOffset, colOffset+m) of the horizontal
-// stack Qstack (n x count*m, ldD = count*m), no separate copy/reshape kernel.
-// Verbatim-duplicated shape from matmul_v4_accel.hip's I8GemmTiledOffset.
+// Same GEMM math with ldD/colOffset for stacked Q layouts.
 __global__ void I8GemmTiledOffset(const int8_t* __restrict__ A,
                                   const int8_t* __restrict__ B,
                                   int32_t* __restrict__ D,
                                   int M, int N, int K,
                                   int ldD, int colOffset)
 {
-    const int lx = static_cast<int>(threadIdx.x); // 0..15
-    const int ly = static_cast<int>(threadIdx.y); // 0..3
+    const int lx = static_cast<int>(threadIdx.x);
+    const int ly = static_cast<int>(threadIdx.y);
     const int tileRow = static_cast<int>(blockIdx.y) * 16;
     const int tileCol = static_cast<int>(blockIdx.x) * 16;
-    const int kTiles = (K + 15) / 16;
-
-#if defined(BTX_HIP_BMX4C_HAVE_MFMA)
-    int32x4 acc = {0, 0, 0, 0};
-    const int aRow = tileRow + lx;
-    const int bCol = tileCol + lx;
-    for (int kt = 0; kt < kTiles; ++kt) {
-        const int kBase = kt * 16 + ly * 4;
-
-        int8_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
-        if (aRow < M) {
-            const size_t base = static_cast<size_t>(aRow) * K;
-            const int k0 = kBase, k1 = kBase + 1, k2 = kBase + 2, k3 = kBase + 3;
-            if (k0 < K) a0 = A[base + k0];
-            if (k1 < K) a1 = A[base + k1];
-            if (k2 < K) a2 = A[base + k2];
-            if (k3 < K) a3 = A[base + k3];
-        }
-        int8_t b0 = 0, b1 = 0, b2 = 0, b3 = 0;
-        if (bCol < N) {
-            const int k0 = kBase, k1 = kBase + 1, k2 = kBase + 2, k3 = kBase + 3;
-            if (k0 < K) b0 = B[static_cast<size_t>(k0) * N + bCol];
-            if (k1 < K) b1 = B[static_cast<size_t>(k1) * N + bCol];
-            if (k2 < K) b2 = B[static_cast<size_t>(k2) * N + bCol];
-            if (k3 < K) b3 = B[static_cast<size_t>(k3) * N + bCol];
-        }
-
-        const int a_pack = PackI8x4(a0, a1, a2, a3);
-        const int b_pack = PackI8x4(b0, b1, b2, b3);
-        acc = __builtin_amdgcn_mfma_i32_16x16x16i8(a_pack, b_pack, acc, 0, 0, 0);
-    }
-    for (int i = 0; i < 4; ++i) {
-        const int row = tileRow + ly * 4 + i;
-        const int col = tileCol + lx;
-        if (row < M && col < N) {
-            D[static_cast<size_t>(row) * ldD + colOffset + col] = acc[i];
-        }
-    }
-#else
-    const int col = tileCol + lx;
-    int32_t acc[4] = {0, 0, 0, 0};
-    if (col < N) {
-        for (int i = 0; i < 4; ++i) {
-            const int row = tileRow + ly * 4 + i;
-            if (row >= M) continue;
-            int32_t s = 0;
-            const size_t arow = static_cast<size_t>(row) * K;
-            for (int k = 0; k < K; ++k) {
-                s += static_cast<int32_t>(A[arow + k]) *
-                     static_cast<int32_t>(B[static_cast<size_t>(k) * N + col]);
-            }
-            acc[i] = s;
-        }
-        for (int i = 0; i < 4; ++i) {
-            const int row = tileRow + ly * 4 + i;
-            if (row < M) {
-                D[static_cast<size_t>(row) * ldD + colOffset + col] = acc[i];
-            }
-        }
-    }
-    (void)kTiles;
-#endif
+    BtxI8GemmTileAccum(A, B, D, M, N, K, tileRow, tileCol, lx, ly, ldD, colOffset);
 }
 
 static_assert(matmul::v4::bmx4::kCombineLimbs == 4 && matmul::v4::bmx4::kCombineLimbBase == 64,

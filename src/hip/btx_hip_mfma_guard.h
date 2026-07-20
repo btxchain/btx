@@ -5,38 +5,50 @@
 #ifndef BITCOIN_HIP_BTX_HIP_MFMA_GUARD_H
 #define BITCOIN_HIP_BTX_HIP_MFMA_GUARD_H
 
-// Amendment v2 §1.D D4 — MFMA vs RDNA4/WMMA arch fence.
+// Amendment v3 §1.D-MFMA — per-CDNA-generation int8 MFMA selection.
 //
-// CDNA MFMA intrinsics (__builtin_amdgcn_mfma_*) are ONLY legal on CDNA
-// targets (gfx908/90a/940/941/942/950). RDNA4 (gfx1200/gfx1201, …) uses WMMA,
-// not MFMA. Emitting MFMA for gfx1200 is a build break or wrong result —
-// the AMD analogue of sm_100 vs sm_120 (separate codegen/qual).
+// Intrinsic is NOT one blanket CDNA path:
+//   gfx908 / gfx90a (CDNA1/2): __builtin_amdgcn_mfma_i32_16x16x16i8  (K=16, i32 packs)
+//   gfx940 / gfx941 / gfx942 / gfx950 (CDNA3/4): 
+//       __builtin_amdgcn_mfma_i32_16x16x32_i8 (K=32, i64 packs of 8×i8)
+//       K=16 int8 MFMA was REMOVED on these arches — compiling K=16 for MI300/MI355
+//       is a build break / wrong path.
+//   gfx1200+ (RDNA4): NO MFMA → scalar exact-INT8 (or future WMMA). Never emit MFMA.
 //
-// Include this header from HIP device TUs before any MFMA intrinsic use.
-// When BTX_HIP_HAVE_MFMA is unset, callers MUST use exact INT8 scalar/streamed
-// tiles (or a future WMMA path) and MUST NOT label the path MFMA/native-MX.
+// Include from HIP device TUs before any MFMA use. When neither K16 nor K32 is
+// defined, callers MUST use the scalar twin and MUST NOT label the path MFMA.
 
 #if defined(__HIP_DEVICE_COMPILE__)
 
-// RDNA4 / gfx12xx — WMMA class; never MFMA.
 #if defined(__gfx1200__) || defined(__gfx1201__) || defined(__gfx1230__) || \
     defined(__gfx1235__) || defined(__gfx1250__) || defined(__GFX12__)
 #define BTX_HIP_IS_RDNA4_WMMA 1
 #endif
 
-// CDNA MFMA class (integer MFMA i8→i32 substrate).
-#if defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx940__) || \
-    defined(__gfx941__) || defined(__gfx942__) || defined(__gfx950__)
-#define BTX_HIP_IS_CDNA_MFMA 1
-#endif
-
-#if defined(BTX_HIP_IS_CDNA_MFMA) && defined(BTX_HIP_IS_RDNA4_WMMA)
-#error "BTX HIP MFMA guard: CDNA MFMA and RDNA4/WMMA both defined — arch fence broken"
-#endif
-
-#if defined(BTX_HIP_IS_CDNA_MFMA) && !defined(BTX_HIP_IS_RDNA4_WMMA)
+// CDNA1/2 — K=16 int8 MFMA (4 packed i8 / lane pack).
+#if defined(__gfx908__) || defined(__gfx90a__)
+#define BTX_HIP_MFMA_I8_K16 1
 #define BTX_HIP_HAVE_MFMA 1
 #define BTX_HIP_BMX4C_HAVE_MFMA 1
+#define BTX_HIP_MFMA_K_TILE 16
+#endif
+
+// CDNA3/4 — K=32 int8 MFMA (8 packed i8 → i64 packs). gfx940+.
+#if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) || \
+    defined(__gfx950__)
+#define BTX_HIP_MFMA_I8_K32 1
+#define BTX_HIP_HAVE_MFMA 1
+#define BTX_HIP_BMX4C_HAVE_MFMA 1
+#define BTX_HIP_MFMA_K_TILE 32
+#endif
+
+#if defined(BTX_HIP_MFMA_I8_K16) && defined(BTX_HIP_MFMA_I8_K32)
+#error "BTX HIP MFMA guard: both K16 and K32 MFMA classes defined — arch fence broken"
+#endif
+
+#if (defined(BTX_HIP_MFMA_I8_K16) || defined(BTX_HIP_MFMA_I8_K32)) && \
+    defined(BTX_HIP_IS_RDNA4_WMMA)
+#error "BTX HIP MFMA guard: CDNA MFMA and RDNA4/WMMA both defined — arch fence broken"
 #endif
 
 #endif // __HIP_DEVICE_COMPILE__

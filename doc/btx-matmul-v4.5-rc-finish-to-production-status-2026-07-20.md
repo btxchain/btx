@@ -1,8 +1,9 @@
 # ENC_RC finish-to-production status (2026-07-20)
 
-*Tip: Amendment **v2** (§1.CORRECT / SCOPE / 1.D / GKR Reality Guardrail) on finish-to-production tip.
+*Tip: MASTER finish-to-code-complete packet (Amendment v3 + succinct proof scaffold).
 *Public activation: **NO-GO** (`nMatMulRCHeight = INT32_MAX`).*
 *Companion: `doc/btx-matmul-v4.5-enc-rc-final-form-spec-2026-07-20.md`.*
+*Soundness: `doc/btx-matmul-v4.5-rc-succinct-proof-soundness-2026-07-20.md`.*
 
 This note tracks Amendments **1.A / 1.B / 1.C / 1.CORRECT / 1.SCOPE / 1.D / GKR guardrail**
 against Stages §§1–5. It does **not** raise height.
@@ -53,29 +54,42 @@ against Stages §§1–5. It does **not** raise height.
 |---|---|
 | Emit | ROOT keys already present; nulls ⇒ artifact/revision mismatch — **no new emit keys** |
 
-### 1.D — AMD / HIP build + guard correctness (Amendment v2)
+### 1.D — AMD / HIP build + guard correctness (Amendment v3)
 
 | Item | Status |
 |---|---|
 | **D1** HIPCXX = clang | **DONE** — resolve before `enable_language(HIP)`; reject g++ |
 | **D2** Isolate `hip::device` | **DONE** — `btx_hip_device` only; no `-x hip` on g++ TUs |
-| **D3** `__HIP_PLATFORM_AMD__` | **DONE** — target define on `btx_hip_device` |
-| **D4** MFMA vs WMMA | **DONE** — `src/hip/btx_hip_mfma_guard.h`; MFMA only on CDNA; RDNA4/gfx1200 → scalar/INT8 (WMMA path future); `#error` if both classes defined |
-| **D5** Library discovery | **DONE** — distro `/usr` hints; ExactGemm MFMA chain intact |
-| **D6** Scripts | **DONE** — `measure-hardware.sh` + `verify-backend.sh` |
-| **D7** Fail-closed | **Standing** — never label unqualified AMD path native-MX / peak-ready |
+| **D3** Strip host CET from amdgcn | **DONE** — `btx_hip_device` overrides `-fcf-protection=none` for `COMPILE_LANGUAGE:HIP` (hardening stays on CXX host TUs) |
+| **D4** `__HIP_PLATFORM_AMD__` reach | **DONE** — PUBLIC on `btx_hip_device` + `btx_matmul_backend` when HIP on (reaches bitcoin_common HIP includes); non-HIP builds unpoisoned |
+| **D5** Self-contained `device_mx.h` | **DONE** — `matmul_v4_lt_device_mx.h` includes `hip_runtime.h` / `cuda_runtime.h` under platform guards |
+| **D-MFMA** K16 / K32 / RDNA4 | **DONE (code)** — `btx_hip_mfma_guard.h` + `btx_hip_mfma_i8_gemm.h`; gfx908/90a → `mfma_i32_16x16x16i8`; gfx940/941/942/950 → `mfma_i32_16x16x32_i8` (K=16 removed on CDNA3/4); gfx1200 → scalar. Kernels in `matmul_v4_accel.hip` / `bmx4` call shared helper. **Silicon compile-gate** via D7 still required on ROCm box |
+| **D6** Scripts + library discovery | **DONE** — `measure-hardware.sh` + `verify-backend.sh`; distro `/usr` hipBLASLt/rocBLAS hints |
+| **D7** Isolated MFMA compile-gate | **DONE** — `contrib/matmul-v4/hip-mfma-compile-gate.sh` (PASS/FAIL per arch; COMPILE ≠ gfx1200 runtime qual) |
+| Fail-closed | **Standing** — never label unqualified AMD path native-MX / peak-ready |
 
 ---
 
-## §2 — GKR + Reality Guardrail
+## §2 — Succinct proof scaffold (MASTER PACKET §2)
 
 | Item | Status |
 |---|---|
-| Decision | Winner-only **direction** locked; scaffold is **NOT** production-complete |
-| Reality Guardrail | `kRCGkrRealityGuardrail` — REJECT HBM/production-complete until actual-episode + succinct + no-rerun verify + formal ≤2^{-64}-after-grinding. Current: synth 32×32, non-succinct, verify re-runs, single Goldilocks insufficient |
-| Fallback | `VerifyBoundedExactReplay` / ExactReplay (expect this to fire) |
-| Consensus today | ExactReplay; GKR env-gated OFF by default |
+| Decision | Winner-only **direction** locked; tip is **code-complete scaffold**, **NOT** production-complete |
+| Fp2 | `matmul_v4_rc_gkr_field_ext.h` — Goldilocks² (`x²−7`); all FS challenges in Fp2 |
+| FRI PCS | `matmul_v4_rc_fri.{h,cpp}` — SHA256 Merkle fold; commit evals, open O(log n); **no** per-tile witness ship |
+| Real episode | `ProveWinnerEpisode` arithmetizes Q·Kᵀ / S·V / fwd GEMM + Extract **LogUp aggregate** (toy OK for CI) |
+| Synth proxy | `ProveWinnerSynth` **DEPRECATED** test helper (still succinct-format) |
+| Soundness note | `doc/btx-matmul-v4.5-rc-succinct-proof-soundness-2026-07-20.md` — ≤2^{-64}-after-grinding **aspirational**; scaffold ≠ audited FRI |
+| Reality Guardrail | `kRCGkrRealityGuardrail` — REJECT HBM/production-complete claims |
+| Shadow | `BTX_RC_GKR_SHADOW` **default ON** — generate+verify; mismatch `LogWarning`; **never** rejects `CheckMatMulProofOfWork_RC` |
+| Arbiter | `BTX_RC_GKR_ARBITER` **OFF by default**; does **not** raise height; ExactReplay decides when OFF |
+| Fallback | over-budget → shrink-to-`VerifyBoundedExactReplay` / toy slice; report honestly |
+| Consensus today | ε=0 ExactReplay |
 | Height | `INT32_MAX` |
+
+**Scaffold vs silicon-gated:** CPU-green toy path + formal bound writeup are scaffold.
+Production-dim prove/verify budgets, audited FRI proximity, and HBM rates remain **OPEN /
+silicon-gated**. Do not invent production numbers from toy runs.
 
 ---
 
@@ -110,27 +124,33 @@ Independent of parked §R.7 `kRCGrowthScheduleEnabled=false`.
 |---|---|
 | `matmul_v4_rc_tests` | V1 golden, modes, self-qual fail-closed, P1.2 layouts, Stage F inert, **Ozaki native_* lock** |
 | `matmul_v4_rc_coupled_tests` | Toy/medium, modes, device probe skip, **native_* stay false** |
-| `matmul_v4_rc_gkr_tests` | Winner GKR / ExactReplay dual path + Reality Guardrail strings |
+| `matmul_v4_rc_gkr_tests` | Real-episode toy prove/verify, Fp2/FRI, malformed/wrong-witness/pow_bind, shadow, Reality Guardrail |
 | `matmul_v4_lt_tests` | `DeriveLtPeakMxFlags` ready/deficit invariants |
+| D7 gate | `contrib/matmul-v4/hip-mfma-compile-gate.sh` (ROCm box) |
 | Gates | `contrib/matmul-v4/rc-golden-gate.py`, `rc-gate.py` (offline GO tally ≠ height raise) |
-
-Full production-size / cross-vendor / malformed-proof / silicon suites remain OPEN.
 
 ---
 
-## Remaining silicon / audit gates
+## Definition of CODE-COMPLETE (this tip) vs OPEN-by-nature
 
-Keep `nMatMulRCHeight = INT32_MAX` until **all** hold:
+### CODE-COMPLETE (achieved on tip — CPU-green; fail-closed where not silicon-qualified)
 
-1. **1.A silicon** — CUDA device-pointer path is code-complete; re-qual on peak silicon **per arch** (`sm_120` vs `sm_100`); HIP/Metal fail-closed until twins land.
-2. **1.B closed** — RC Ozaki MXFP4 quals vs int64 at consensus dims before any RC `native_mxfp4_qualified` (every vendor).
-3. **1.D D4 silicon** — gfx1200 build compiles clean with MFMA fenced; CDNA MFMA path oracle-qualifies separately.
-4. Stage A hazards closed (goldens versioned; no half-wired growth/brake).
-5. 8 GiB Streamed/Checkpointed identical-episode completion.
-6. Native accel without CPU masking (A5 / C / D).
-7. Stage G measured interconnect (≥7× NVLink-vs-PCIe) + GPU rates — CPU campaigns alone are NOT EVIDENCE.
-8. GKR Reality Guardrail gates closed (or ExactReplay retained as consensus).
-9. Same-tip economic / audit review; clean flag-day cutover only.
+| Path | Status |
+|---|---|
+| LT device-pointer MX (CUDA) | **code-complete**; peak_ready fail-closed until resident oracle at prod dims |
+| HIP D1–D7 + D-MFMA | **code-complete**; native-MX fail-closed until compile-gate + oracle |
+| Metal resident MX | **fail-closed** stub entry |
+| RC Ozaki | **scaffolded / fail-closed** until consensus-dim qual |
+| Succinct proof (Fp2+FRI+LogUp+real episode+shadow+shrink) | **code-complete scaffold**; NOT production-complete / NOT audited |
+| Coupled + Stage F | **inert / provisional** behind INT32_MAX / `kRCThreeAxisScheduleEnabled=false` |
+| Stage H CPU suites | **green** (115 cases in RC/GKR/coupled/LT aggregate run) |
+
+### STILL OPEN BY NATURE (do not claim done)
+
+1. Production-scale prover cost on datacenter silicon → HBM vs shrink decision
+2. Native FP4 + RC Ozaki qualification on real 5090/B200/MI300/MI355X/RDNA4
+3. Independent cryptographic AUDIT before proof-as-arbiter cutover
+4. Stage G economic + PCIe-vs-NVLink campaign; activation-height decision
 
 **Do not** invent silicon rates from toy runs. **Do not** copy LT native flags into RC.
 **Do not** claim HBM GKR production-complete under the Reality Guardrail.

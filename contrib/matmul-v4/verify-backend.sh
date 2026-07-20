@@ -91,10 +91,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD="${BUILD_DIR:-$ROOT/build-verify-$BACKEND}"
 SUITE="matmul_v4_backend_determinism_tests"
 
-# Amendment v2 §1.D D1/D6: HIP TUs need a clang that accepts -x hip. Never let
+# Amendment v2/v3 §1.D: HIP TUs need a clang that accepts -x hip. Never let
 # CMake fall back to host g++/c++. Probe HIPCXX → clang++-{19,18,17,} and fail
-# loudly. D2 (hip::device isolation) and D3 (__HIP_PLATFORM_AMD__) live in
-# src/CMakeLists.txt (btx_hip_device); this script only ensures the compiler.
+# loudly. D2 (hip::device isolation), D3 (strip -fcf-protection on HIP), and D4
+# (__HIP_PLATFORM_AMD__ PUBLIC reach) live in src/CMakeLists.txt (btx_hip_device).
+# D7 isolated MFMA compile-gate: contrib/matmul-v4/hip-mfma-compile-gate.sh
+# (COMPILE PASS required for native-eligibility; gfx1200 runtime needs a card).
 btx_resolve_hipcxx() {
   local cand ver
   if [ -n "${HIPCXX:-}" ]; then

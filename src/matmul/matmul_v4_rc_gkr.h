@@ -9,7 +9,9 @@
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_distributed.h>
+#include <matmul/matmul_v4_rc_fri.h>
 #include <matmul/matmul_v4_rc_gkr_field.h>
+#include <matmul/matmul_v4_rc_gkr_field_ext.h>
 #include <primitives/block.h>
 #include <uint256.h>
 
@@ -18,44 +20,45 @@
 #include <string>
 #include <vector>
 
-// ENC_RC Stage E — winner-only GKR/sumcheck scaffold + ExactReplay fallback.
+// ENC_RC Section-2 — winner-only succinct GKR/sumcheck + FRI scaffold.
 // Does NOT raise nMatMulRCHeight.
 //
 // GKR REALITY GUARDRAIL (Amendment v2 — enforce always):
-//   The CURRENT winner proof proves a SYNTHETIC 32×32 GEMM bound to the digest,
-//   is NON-SUCCINCT (grows with state), has the verifier RE-RUN the work, and a
-//   SINGLE Goldilocks field CANNOT deliver ≤2^{-64} after PoW grinding alone.
 //   REJECT any "HBM proof production-complete" claim until ALL hold:
 //     (1) proves the ACTUAL episode (not a synth proxy),
 //     (2) is succinct / block-sized,
 //     (3) verifies WITHOUT re-running the work,
 //     (4) carries a formal ≤2^{-64}-after-grinding bound.
-//   Expect shrink-to-bounded-replay (VerifyBoundedExactReplay) to fire otherwise.
+//   This tip is a CODE-COMPLETE SCAFFOLD (Fp2 + FRI + real-episode toy path +
+//   shadow wiring). It is NOT production-complete / NOT silicon-qualified.
+//   Expect shrink-to-bounded-replay (VerifyBoundedExactReplay) when over budget.
 //
-// Consensus today: ε=0 ExactReplay (CheckMatMulProofOfWork_RC). GKR is optional
-// behind BTX_RC_VERIFY_GKR=1 (default OFF).
+// Consensus today: ε=0 ExactReplay (CheckMatMulProofOfWork_RC) is the arbiter.
+// Shadow: BTX_RC_GKR_SHADOW=1 (default) generate+verify, log mismatches, never
+// reject. Arbiter cutover BTX_RC_GKR_ARBITER=1 is OFF by default and does NOT
+// raise height.
 
 namespace matmul::v4::rc {
 
-inline constexpr uint32_t kRCGkrProofVersion = 2;
-inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V2";
+inline constexpr uint32_t kRCGkrProofVersion = 3;
+inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V3";
 /** Magic for optional out-of-band / cache carriage (not consensus body). */
-inline constexpr uint32_t kRCGkrProofMagic = 0x524b4732u; // 'RK G2' LE-ish
+inline constexpr uint32_t kRCGkrProofMagic = 0x524b4733u; // 'RKG3'
 
 inline constexpr const char* kRCGkrRealityGuardrail =
-    "REJECT HBM/production-complete GKR claims: current winner proof is a "
-    "synthetic 32x32 GEMM digest-bound proxy, non-succinct, verifier re-runs "
-    "work, and single Goldilocks cannot hit <=2^{-64} after grinding. Require "
-    "actual-episode + succinct/block-sized + no-rerun verify + formal "
-    "<=2^{-64}-after-grinding bound. Otherwise shrink to VerifyBoundedExactReplay. "
+    "REJECT HBM/production-complete GKR claims: succinct scaffold uses Fp2+FRI "
+    "and real-episode toy arithmetization, but is NOT production-complete — "
+    "require actual-episode at consensus dims + succinct/block-sized + no-rerun "
+    "verify + formal <=2^{-64}-after-grinding bound (see soundness note). "
+    "Otherwise shrink to VerifyBoundedExactReplay. "
     "NOT production-complete. nMatMulRCHeight=INT32_MAX.";
 
 inline constexpr const char* kRCGkrSoundnessBoundStatement =
-    "Winner-only GKR/sumcheck SCAFFOLD (COMPUTATIONAL aspirational target): "
-    "formal <=2^{-64} AFTER PoW grinding is a Stage-I REQUIREMENT, NOT a claim "
-    "about the current synthetic proof. Current artifact: synth 32x32, "
-    "non-succinct, verify re-runs work; single Goldilocks alone is insufficient. "
-    "See kRCGkrRealityGuardrail. Merkle q=8 is DoS PREFILTER ONLY. "
+    "Winner-only GKR/sumcheck+FRI SCAFFOLD (COMPUTATIONAL aspirational target): "
+    "formal <=2^{-64} AFTER PoW grinding is a Stage-I REQUIREMENT. Challenges "
+    "live in Goldilocks Fp2 (|F|~2^128); single Goldilocks is insufficient. "
+    "See doc/btx-matmul-v4.5-rc-succinct-proof-soundness-2026-07-20.md and "
+    "kRCGkrRealityGuardrail. Merkle q=8 is DoS PREFILTER ONLY. "
     "Full STREAMED ExactReplay remains dispute/oracle until Stage-I cutover. "
     "nMatMulRCHeight=INT32_MAX.";
 
@@ -78,40 +81,79 @@ inline constexpr const char* kRCGkrHbmParkStatement =
     "budget, PARK HBM-scale GKR; ship both verifiers (GKR scaffold + "
     "VerifyBoundedExactReplay) and keep ε=0 ExactReplay as consensus default.";
 
+inline constexpr const char* kRCGkrShadowStatement =
+    "BTX_RC_GKR_SHADOW=1 (default): generate+verify winner proof in shadow; "
+    "mismatch LogWarning; NEVER rejects CheckMatMulProofOfWork_RC. "
+    "BTX_RC_GKR_ARBITER=1 cutover is OFF by default and does NOT raise height; "
+    "when OFF, ExactReplay decides.";
+
 using gkr_field::Fp;
+using gkr_field::Fp2;
 
-/** One sumcheck round: g(0), g(1), g(2) (deg-2 product; deg-1 uses eval2=0). */
+/** Soft budgets for the Section-2 scaffold (CPU toy/medium). Not silicon. */
+inline constexpr double kRCGkrMediumProveBudgetS = 2.0;
+inline constexpr double kRCGkrVerifyBudgetS = 0.5;
+inline constexpr size_t kRCGkrProofBytesBudget = 256 * 1024; // 256 KiB soft
+
+/** One sumcheck round over Fp2: g(0), g(1), g(2) (deg-2 product). */
 struct RCGkrSumcheckRound {
-    Fp eval0{0};
-    Fp eval1{0};
-    Fp eval2{0};
+    Fp2 eval0{};
+    Fp2 eval1{};
+    Fp2 eval2{};
 };
 
-/** Extract tile opening (LogUp-shaped membership via ExtractMXTileInt64). */
-struct RCGkrLookupOpening {
-    uint32_t row{0};
-    uint32_t block{0};
-    std::vector<int64_t> raw64;
-    std::vector<int8_t> out8;
-    uint8_t scale{0};
-    uint64_t multiplicity{1};
+/** Layer kind in the real-episode arithmetization (toy shape for CI). */
+enum class RCGkrLayerKind : uint32_t {
+    GemmPhase1QKt = 1, // Q·Kᵀ product layer
+    GemmPhase1SV = 2,  // S·V product layer
+    GemmPhase2Fwd = 3, // forward residual GEMM
+    GemmPhase2Bwd = 4, // backward GEMM
+    GemmPhase2Wgrad = 5,
+    SynthGemmDeprecated = 100, // DEPRECATED synth proxy only
 };
 
+struct RCGkrLayerClaim {
+    RCGkrLayerKind kind{RCGkrLayerKind::GemmPhase1QKt};
+    uint32_t round{0};
+    uint32_t layer{0};
+    uint32_t m{0};
+    uint32_t n{0};
+    uint32_t k{0};
+    Fp2 claim{};
+    std::vector<RCGkrSumcheckRound> sumcheck;
+    Fp2 final_eval{};
+};
+
+/**
+ * Succinct proof: NO per-tile Extract raw payloads.
+ * LogUp aggregate + FRI openings only.
+ */
 struct RCGkrProof {
     uint32_t version{kRCGkrProofVersion};
     uint256 claimed_digest{};
+    /** PoW-grinding resistance: FS absorbs this PoW-bind tag after digest. */
+    uint256 pow_bind{};
+    /** Episode shape public inputs (toy OK for CI). */
+    RCEpisodeParams episode{};
+    std::vector<RCGkrLayerClaim> layers;
+    Fp2 lookup_logup_sum{};
+    /** FRI commit of LogUp wire (keys/multiplicities) — not every tile. */
+    FriProof lookup_fri{};
+    /** FRI commit of concatenated GEMM output wires (MLE evals). */
+    FriProof trace_fri{};
+    uint256 transcript_hash{};
+    /** Set when prove/verify exceeded soft budget → shrink-to-replay. */
+    bool over_budget{false};
+    std::string shrink_note;
+
+    // --- DEPRECATED synth-only fields (empty on real-episode path) ---
     DistSynthShape shape{};
     std::vector<int64_t> claimed_Y;
     std::vector<int8_t> claimed_extract;
-    std::vector<RCGkrSumcheckRound> sumcheck;      // all-to-all / segment-axis
-    std::vector<RCGkrSumcheckRound> gemm_sumcheck; // GEMM product over k
-    Fp final_eval{0};
-    Fp gemm_final_eval{0};
-    Fp lookup_logup_sum{0};
-    std::vector<RCGkrLookupOpening> lookups; // every Extract tile
-    uint256 transcript_hash{};
-    /** PoW-grinding resistance: FS absorbs this PoW-bind tag after digest. */
-    uint256 pow_bind{};
+    std::vector<RCGkrSumcheckRound> sumcheck;
+    std::vector<RCGkrSumcheckRound> gemm_sumcheck;
+    Fp2 final_eval{};
+    Fp2 gemm_final_eval{};
 };
 
 struct RCGkrTiming {
@@ -121,6 +163,7 @@ struct RCGkrTiming {
     size_t peak_rss_kib{0};
     bool ok{false};
     bool over_budget{false};
+    bool used_shrink_fallback{false};
     std::string note;
 };
 
@@ -129,13 +172,11 @@ struct RCGkrProveResult {
     RCGkrTiming timing;
 };
 
-/** Soft prove budget for medium (fraction of ~10 min block); park signal. */
-inline constexpr double kRCGkrMediumProveBudgetS = 2.0;
-
 enum class RCProdVerifyPath : uint8_t {
     ExactReplay = 0,
     WinnerGkr = 1,
     GkrFallbackExactReplay = 2,
+    ShadowGkr = 3,
 };
 
 struct ExactReplayVerifyResult {
@@ -157,18 +198,27 @@ struct RCProdVerifyResult {
 
 [[nodiscard]] bool EnvRCWinnerGkrEnabled();
 [[nodiscard]] bool EnvRCVerifyGkrEnabled();
+/** Shadow mode: default ON unless BTX_RC_GKR_SHADOW=0. Never rejects consensus. */
+[[nodiscard]] bool EnvRCGkrShadowEnabled();
+/** Arbiter cutover: OFF by default. When ON still does not raise height. */
+[[nodiscard]] bool EnvRCGkrArbiterEnabled();
 
 [[nodiscard]] DistSynthShape RCGkrShapeForEpisode(const RCEpisodeParams& params);
 [[nodiscard]] DistSynthShape RCGkrShapeForCoupled(const RCCoupParams& params);
+
+/**
+ * DEPRECATED test-only: synth 32×32 proxy path. Prefer ProveWinnerEpisode.
+ * Still emits succinct (FRI+LogUp) format — does not ship every tile.
+ */
+[[nodiscard]] RCGkrProveResult ProveWinnerSynth(const uint256& seed, const DistSynthShape& shape,
+                                                const uint256& claimed_digest);
 
 [[nodiscard]] RCGkrProveResult ProveWinnerFromSegments(
     const uint256& claimed_digest, const DistSynthShape& shape,
     const std::vector<std::vector<int64_t>>& segs, const uint256& extract_seed,
     const std::vector<int8_t>* A = nullptr, const std::vector<int8_t>* B = nullptr);
 
-[[nodiscard]] RCGkrProveResult ProveWinnerSynth(const uint256& seed, const DistSynthShape& shape,
-                                                const uint256& claimed_digest);
-
+/** Production API: arithmetize REAL episode layers (toy shape OK for CI). */
 [[nodiscard]] RCGkrProveResult ProveWinnerEpisode(const CBlockHeader& header,
                                                  const RCEpisodeParams& params, int32_t height,
                                                  const uint256& resealed_digest);
@@ -177,48 +227,51 @@ struct RCProdVerifyResult {
                                                  const RCCoupParams& params,
                                                  const uint256& resealed_digest);
 
-[[nodiscard]] bool VerifyWinnerProof(const RCGkrProof& proof, const DistSynthShape& shape,
-                                     const std::vector<std::vector<int64_t>>& segs,
-                                     const uint256& extract_seed,
-                                     RCGkrTiming* out_timing = nullptr);
+/**
+ * Succinct verify: sumcheck algebra + FRI openings + LogUp aggregate.
+ * Does NOT re-run the episode / ExpandSynthOperands full work.
+ */
+[[nodiscard]] bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing = nullptr);
 
+/**
+ * Public verify bound to seed+shape (DEPRECATED synth helper path). Prefer
+ * VerifyWinnerProof for v3 succinct proofs.
+ */
 [[nodiscard]] bool VerifyWinnerProofPublic(const RCGkrProof& proof, const uint256& seed,
                                            const DistSynthShape& shape,
                                            RCGkrTiming* out_timing = nullptr);
 
-/** Serialize proof bytes (block/cache carriage). Returns byte count. */
 [[nodiscard]] size_t SerializeRCGkrProof(const RCGkrProof& proof,
                                          std::vector<unsigned char>& out);
-
-/** Deserialize; returns nullopt on malformed / truncated / bad version. */
 [[nodiscard]] std::optional<RCGkrProof> DeserializeRCGkrProof(
     const std::vector<unsigned char>& in);
 
 [[nodiscard]] uint32_t RCGkrNextPow2(uint32_t n);
 [[nodiscard]] Fp RCGkrMleEval1D(const std::vector<Fp>& evals_pow2, const std::vector<Fp>& r);
+[[nodiscard]] Fp2 RCGkrMleEval1D2(const std::vector<Fp2>& evals_pow2, const std::vector<Fp2>& r);
 
 /**
- * FALLBACK / DISPUTE verifier: ε=0 bounded exact STREAMED replay via
- * RecomputeResidentCurriculumReference. Used when GKR disabled, missing,
- * malformed, over budget, or as ultimate oracle.
+ * FALLBACK / DISPUTE verifier: ε=0 bounded exact STREAMED replay.
+ * CONSENSUS arbiter while BTX_RC_GKR_ARBITER is OFF.
  */
 [[nodiscard]] ExactReplayVerifyResult VerifyBoundedExactReplay(
     const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
     const arith_uint256* target = nullptr);
 
 /**
- * Production dual-path: if BTX_RC_VERIFY_GKR=1 and optional_proof deserializes
- * and verifies, return WinnerGkr; else ExactReplay (and
- * GkrFallbackExactReplay when GKR was attempted and failed).
- * Consensus CheckMatMulProofOfWork_RC still requires ExactReplay unless the
- * env hook elects GKR-first with replay fallback (see pow.cpp).
+ * Dual-path helper. Shadow never fails consensus; arbiter OFF ⇒ ExactReplay
+ * decides. Over-budget GKR invokes shrink-to-ExactReplay.
  */
 [[nodiscard]] RCProdVerifyResult VerifyRCWinnerOrExactReplay(
     const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
     const arith_uint256* target = nullptr,
     const std::vector<unsigned char>* optional_gkr_proof = nullptr);
 
-/** Process-local optional proof cache (empty-body DIGEST_RECOMPUTE safe). */
+/** Shadow hook for CheckMatMulProofOfWork_RC: never changes the bool result. */
+void RCGkrShadowObserve(const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
+                        const arith_uint256* target,
+                        const std::vector<unsigned char>* optional_gkr_proof);
+
 void RCGkrProofCachePut(const uint256& block_hash, std::vector<unsigned char> proof_bytes);
 [[nodiscard]] bool RCGkrProofCacheGet(const uint256& block_hash,
                                       std::vector<unsigned char>& out_proof_bytes);
@@ -237,6 +290,7 @@ struct WinnerGkrSolveReport {
     bool ok{false};
     bool proved{false};
     bool hbm_parked{false};
+    bool used_shrink_fallback{false};
     std::string note;
     RCGkrProof proof;
 };
@@ -252,8 +306,11 @@ struct WinnerGkrSolveReport {
 [[nodiscard]] std::string RunWinnerGkrBakeoffSection(const uint256& synth_seed,
                                                      const DistSynthShape& shape);
 
-/** Instrumented toy+medium measurement blob (JSON fragment). */
+/** Instrumented toy+medium measurement blob (JSON). Real-episode path. */
 [[nodiscard]] std::string MeasureWinnerGkrToyMedium(const uint256& seed);
+
+/** CSV-friendly curve helper for STATUS / selfqual hooks. */
+[[nodiscard]] std::string MeasureWinnerGkrCurveCsv(const CBlockHeader& header);
 
 } // namespace matmul::v4::rc
 

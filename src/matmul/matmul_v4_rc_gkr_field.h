@@ -10,10 +10,12 @@
 // ENC_RC Stage E — Goldilocks prime field for winner-only GKR/sumcheck.
 //
 // p = 2^64 - 2^32 + 1 = 0xFFFFFFFF00000001 (Goldilocks).
-// Used ONLY for Fiat–Shamir challenges and sumcheck/LogUp arithmetic.
-// Does NOT replace the int64 compute path or Freivalds q = 2^61-1.
+// Used for int64→Fp wire embedding. Fiat–Shamir challenges for the Section-2
+// succinct scaffold live in the degree-2 extension Fp2
+// (matmul_v4_rc_gkr_field_ext.h) — single Goldilocks is insufficient for
+// ≤2^{-64} after PoW grinding.
 //
-// SOUNDNESS HONESTY: computational under SHA256d FS + this field (ROM/SZ-style
+// SOUNDNESS HONESTY: computational under SHA256d FS + Fp2 (ROM/SZ-style
 // bounds deg/|F| per round). NOT ε=0. Full STREAMED replay remains available
 // as dispute/oracle until Stage I cutover. nMatMulRCHeight stays INT32_MAX.
 

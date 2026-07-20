@@ -4104,23 +4104,37 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
                                                                 &*bnTarget);
     if (!replay.ok) return finish(false);
 
-    // Optional Section-2 GKR hook (BTX_RC_VERIFY_GKR=1, default OFF). Does NOT
-    // replace consensus ExactReplay; measures/validates cached winner proof if
-    // present (empty-body DIGEST_RECOMPUTE — proof rides process-local cache).
-    if (matmul::v4::rc::EnvRCVerifyGkrEnabled()) {
+    // Section-2 shadow (BTX_RC_GKR_SHADOW default ON): generate+verify observe only;
+    // mismatch logs; NEVER rejects consensus. Arbiter BTX_RC_GKR_ARBITER=1 is OFF
+    // by default and does NOT raise nMatMulRCHeight.
+    {
+        std::vector<unsigned char> proof_bytes;
+        const std::vector<unsigned char>* opt = nullptr;
+        if (matmul::v4::rc::RCGkrProofCacheGet(header.GetHash(), proof_bytes)) {
+            opt = &proof_bytes;
+        }
+        matmul::v4::rc::RCGkrShadowObserve(header, params_rc, block_height, &*bnTarget, opt);
+    }
+
+    // Optional explicit GKR measure hook (BTX_RC_VERIFY_GKR=1). Still does NOT
+    // replace ExactReplay unless BTX_RC_GKR_ARBITER=1 (kept OFF).
+    if (matmul::v4::rc::EnvRCVerifyGkrEnabled() || matmul::v4::rc::EnvRCGkrArbiterEnabled()) {
         std::vector<unsigned char> proof_bytes;
         if (matmul::v4::rc::RCGkrProofCacheGet(header.GetHash(), proof_bytes)) {
             const auto dual = matmul::v4::rc::VerifyRCWinnerOrExactReplay(
                 header, params_rc, block_height, &*bnTarget, &proof_bytes);
             LogDebug(BCLog::VALIDATION,
-                     "CheckMatMulProofOfWork_RC: BTX_RC_VERIFY_GKR path=%d gkr_ok=%d "
-                     "replay_ok=%d note=%s\n",
+                     "CheckMatMulProofOfWork_RC: GKR path=%d gkr_ok=%d "
+                     "replay_ok=%d arbiter=%d note=%s\n",
                      static_cast<int>(dual.path), dual.gkr.ok ? 1 : 0, dual.replay.ok ? 1 : 0,
-                     dual.note.c_str());
+                     matmul::v4::rc::EnvRCGkrArbiterEnabled() ? 1 : 0, dual.note.c_str());
+            // Arbiter OFF (default): ExactReplay already passed above — ignore dual.ok.
+            // Arbiter ON: still require ExactReplay above; arbiter path is measurement
+            // until Stage-I audit. Never flip finish(false) from GKR here.
             (void)dual;
         } else {
             LogDebug(BCLog::VALIDATION,
-                     "CheckMatMulProofOfWork_RC: BTX_RC_VERIFY_GKR set but no cached proof; "
+                     "CheckMatMulProofOfWork_RC: GKR env set but no cached proof; "
                      "ExactReplay remains consensus\n");
         }
     }
