@@ -339,15 +339,29 @@ struct RCProdVerifyResult {
     const arith_uint256* target = nullptr,
     const std::vector<unsigned char>* optional_gkr_proof = nullptr);
 
-/** Shadow hook for CheckMatMulProofOfWork_RC: never changes the bool result. */
+/**
+ * Shadow hook for CheckMatMulProofOfWork_RC: never changes the bool result.
+ * When prior_replay is non-null, reuse it instead of calling
+ * VerifyBoundedExactReplay again (H2 memoization).
+ */
 void RCGkrShadowObserve(const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
                         const arith_uint256* target,
-                        const std::vector<unsigned char>* optional_gkr_proof);
+                        const std::vector<unsigned char>* optional_gkr_proof,
+                        const ExactReplayVerifyResult* prior_replay = nullptr);
+
+/** H1: bounded proof cache — max entries + TTL (LRU eviction on Put). */
+inline constexpr size_t kRCGkrProofCacheMaxEntries = 64;
+inline constexpr int64_t kRCGkrProofCacheTtlSeconds = 600;
 
 void RCGkrProofCachePut(const uint256& block_hash, std::vector<unsigned char> proof_bytes);
 [[nodiscard]] bool RCGkrProofCacheGet(const uint256& block_hash,
                                       std::vector<unsigned char>& out_proof_bytes);
 void RCGkrProofCacheClear();
+[[nodiscard]] size_t RCGkrProofCacheSizeForTest();
+
+/** H2: ExactReplay call-count probe (incremented in VerifyBoundedExactReplay). */
+[[nodiscard]] uint64_t ExactReplayInvocationCountForTest();
+void ResetExactReplayInvocationCountForTest();
 
 struct WinnerGkrSolveReport {
     uint256 digest{};

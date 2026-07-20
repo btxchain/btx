@@ -2,12 +2,15 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <arith_uint256.h>
 #include <consensus/params.h>
+#include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_fri.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
 #include <matmul/matmul_v4_rc_verify_bakeoff.h>
+#include <pow.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -17,6 +20,7 @@
 #include <cstdlib>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace rc = matmul::v4::rc;
 namespace gf = matmul::v4::rc::gkr_field;
@@ -63,6 +67,8 @@ BOOST_AUTO_TEST_CASE(gkr_soundness_and_height_inert)
     BOOST_CHECK(std::string(rc::kRCGkrE5Decision).find("winner-only") != std::string::npos);
     BOOST_CHECK(std::string(rc::kRCGkrShadowStatement).find("SHADOW") != std::string::npos);
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    unsetenv("BTX_RC_GKR_ARBITER");
+    BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled()); // default OFF; do not raise height
 }
 
 BOOST_AUTO_TEST_CASE(gkr_stage_i_verify_budget_gate)
@@ -510,6 +516,35 @@ BOOST_AUTO_TEST_CASE(gkr_shadow_never_blocks_consensus)
     unsetenv("BTX_RC_GKR_SHADOW");
     rc::RCGkrProofCacheClear();
 }
+
+BOOST_AUTO_TEST_CASE(gkr_h1_proof_cache_evicts_over_cap)
+{
+    rc::RCGkrProofCacheClear();
+    BOOST_REQUIRE_EQUAL(rc::RCGkrProofCacheSizeForTest(), 0u);
+
+    const size_t max_n = rc::kRCGkrProofCacheMaxEntries;
+    std::vector<unsigned char> bytes(8, 0x11);
+    for (size_t i = 0; i < max_n + 1; ++i) {
+        uint256 key;
+        key.data()[0] = static_cast<unsigned char>(i & 0xff);
+        key.data()[1] = static_cast<unsigned char>((i >> 8) & 0xff);
+        key.data()[2] = static_cast<unsigned char>(0xc0);
+        bytes[0] = static_cast<unsigned char>(i & 0xff);
+        rc::RCGkrProofCachePut(key, bytes);
+        BOOST_CHECK_LE(rc::RCGkrProofCacheSizeForTest(), max_n);
+    }
+    BOOST_CHECK_EQUAL(rc::RCGkrProofCacheSizeForTest(), max_n);
+    // Oldest (key with i=0) should have been LRU-evicted.
+    uint256 oldest;
+    oldest.data()[0] = 0;
+    oldest.data()[1] = 0;
+    oldest.data()[2] = 0xc0;
+    std::vector<unsigned char> out;
+    BOOST_CHECK(!rc::RCGkrProofCacheGet(oldest, out));
+    rc::RCGkrProofCacheClear();
+    BOOST_CHECK_EQUAL(rc::RCGkrProofCacheSizeForTest(), 0u);
+}
+
 
 BOOST_AUTO_TEST_CASE(gkr_deprecated_synth_still_succinct)
 {

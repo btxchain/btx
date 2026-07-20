@@ -4115,7 +4115,8 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
         if (matmul::v4::rc::RCGkrProofCacheGet(header.GetHash(), proof_bytes)) {
             opt = &proof_bytes;
         }
-        matmul::v4::rc::RCGkrShadowObserve(header, params_rc, block_height, &*bnTarget, opt);
+        matmul::v4::rc::RCGkrShadowObserve(header, params_rc, block_height, &*bnTarget, opt,
+                                           &replay);
     }
 
     // Optional explicit GKR measure hook (BTX_RC_VERIFY_GKR=1). Still does NOT

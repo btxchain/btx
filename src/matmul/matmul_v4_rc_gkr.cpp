@@ -14,11 +14,13 @@
 #include <sys/resource.h>
 
 #include <cassert>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <list>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -96,7 +98,45 @@ bool ReadFp2Checked(const unsigned char*& p, const unsigned char* end, Fp2& out)
 }
 
 std::mutex g_rc_gkr_cache_mu;
-std::map<uint256, std::vector<unsigned char>> g_rc_gkr_proof_cache;
+/** H1: LRU+TTL proof cache (key → bytes + expiry; list front = most recently used). */
+struct RCGkrProofCacheEntry {
+    std::vector<unsigned char> bytes;
+    std::chrono::steady_clock::time_point expires_at;
+    std::list<uint256>::iterator lru_it;
+};
+std::list<uint256> g_rc_gkr_proof_lru;
+std::map<uint256, RCGkrProofCacheEntry> g_rc_gkr_proof_cache;
+
+std::atomic<uint64_t> g_exact_replay_invoke_count{0};
+
+bool RCEpisodeParamsEqual(const RCEpisodeParams& a, const RCEpisodeParams& b)
+{
+    return a.rounds == b.rounds && a.d_head == b.d_head && a.n_q == b.n_q && a.n_ctx == b.n_ctx &&
+           a.L_lyr == b.L_lyr && a.d_model == b.d_model && a.b_seq == b.b_seq &&
+           a.T_leaf == b.T_leaf;
+}
+
+void RCGkrProofCacheEvictExpiredLocked(const std::chrono::steady_clock::time_point now)
+{
+    for (auto it = g_rc_gkr_proof_cache.begin(); it != g_rc_gkr_proof_cache.end();) {
+        if (it->second.expires_at <= now) {
+            g_rc_gkr_proof_lru.erase(it->second.lru_it);
+            it = g_rc_gkr_proof_cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void RCGkrProofCacheEvictLruLocked()
+{
+    while (g_rc_gkr_proof_cache.size() > kRCGkrProofCacheMaxEntries) {
+        assert(!g_rc_gkr_proof_lru.empty());
+        const uint256 oldest = g_rc_gkr_proof_lru.back();
+        g_rc_gkr_proof_lru.pop_back();
+        g_rc_gkr_proof_cache.erase(oldest);
+    }
+}
 
 uint256 Sha256dBytes(const unsigned char* data, size_t len)
 {
@@ -847,15 +887,45 @@ DistSynthShape RCGkrShapeForCoupled(const RCCoupParams& params)
 void RCGkrProofCachePut(const uint256& block_hash, std::vector<unsigned char> proof_bytes)
 {
     std::lock_guard<std::mutex> lock(g_rc_gkr_cache_mu);
-    g_rc_gkr_proof_cache[block_hash] = std::move(proof_bytes);
+    const auto now = std::chrono::steady_clock::now();
+    RCGkrProofCacheEvictExpiredLocked(now);
+    const auto expires =
+        now + std::chrono::seconds(kRCGkrProofCacheTtlSeconds);
+
+    auto it = g_rc_gkr_proof_cache.find(block_hash);
+    if (it != g_rc_gkr_proof_cache.end()) {
+        g_rc_gkr_proof_lru.erase(it->second.lru_it);
+        g_rc_gkr_proof_lru.push_front(block_hash);
+        it->second.bytes = std::move(proof_bytes);
+        it->second.expires_at = expires;
+        it->second.lru_it = g_rc_gkr_proof_lru.begin();
+    } else {
+        g_rc_gkr_proof_lru.push_front(block_hash);
+        RCGkrProofCacheEntry entry;
+        entry.bytes = std::move(proof_bytes);
+        entry.expires_at = expires;
+        entry.lru_it = g_rc_gkr_proof_lru.begin();
+        g_rc_gkr_proof_cache.emplace(block_hash, std::move(entry));
+    }
+    RCGkrProofCacheEvictLruLocked();
 }
 
 bool RCGkrProofCacheGet(const uint256& block_hash, std::vector<unsigned char>& out_proof_bytes)
 {
     std::lock_guard<std::mutex> lock(g_rc_gkr_cache_mu);
-    const auto it = g_rc_gkr_proof_cache.find(block_hash);
+    const auto now = std::chrono::steady_clock::now();
+    auto it = g_rc_gkr_proof_cache.find(block_hash);
     if (it == g_rc_gkr_proof_cache.end()) return false;
-    out_proof_bytes = it->second;
+    if (it->second.expires_at <= now) {
+        g_rc_gkr_proof_lru.erase(it->second.lru_it);
+        g_rc_gkr_proof_cache.erase(it);
+        return false;
+    }
+    // Touch LRU (most-recently used → front).
+    g_rc_gkr_proof_lru.erase(it->second.lru_it);
+    g_rc_gkr_proof_lru.push_front(block_hash);
+    it->second.lru_it = g_rc_gkr_proof_lru.begin();
+    out_proof_bytes = it->second.bytes;
     return true;
 }
 
@@ -863,6 +933,24 @@ void RCGkrProofCacheClear()
 {
     std::lock_guard<std::mutex> lock(g_rc_gkr_cache_mu);
     g_rc_gkr_proof_cache.clear();
+    g_rc_gkr_proof_lru.clear();
+}
+
+size_t RCGkrProofCacheSizeForTest()
+{
+    std::lock_guard<std::mutex> lock(g_rc_gkr_cache_mu);
+    RCGkrProofCacheEvictExpiredLocked(std::chrono::steady_clock::now());
+    return g_rc_gkr_proof_cache.size();
+}
+
+uint64_t ExactReplayInvocationCountForTest()
+{
+    return g_exact_replay_invoke_count.load(std::memory_order_relaxed);
+}
+
+void ResetExactReplayInvocationCountForTest()
+{
+    g_exact_replay_invoke_count.store(0, std::memory_order_relaxed);
 }
 
 uint32_t RCGkrNextPow2(uint32_t n)
@@ -1483,6 +1571,7 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(const CBlockHeader& header,
                                                  const RCEpisodeParams& params, int32_t height,
                                                  const arith_uint256* target)
 {
+    g_exact_replay_invoke_count.fetch_add(1, std::memory_order_relaxed);
     ExactReplayVerifyResult out;
     const size_t rss0 = CurrentRssKiB();
     const auto t0 = std::chrono::steady_clock::now();
@@ -1544,11 +1633,35 @@ RCProdVerifyResult VerifyRCWinnerOrExactReplay(const CBlockHeader& header,
             return out;
         }
         const bool gkr_ok = VerifyWinnerProof(*parsed, &out.gkr);
-        if (gkr_ok && !out.gkr.over_budget && EnvRCGkrArbiterEnabled()) {
-            out.path = RCProdVerifyPath::WinnerGkr;
-            out.ok = true;
-            out.note = "WinnerGkr arbiter ok (ExactReplay reserved for DISPUTE)";
-            return out;
+        if (gkr_ok && EnvRCGkrArbiterEnabled()) {
+            // F3: bind sigma / episode dims / PoW target before accepting WinnerGkr.
+            // Failures reject (no ExactReplay fallback). Soft over_budget still
+            // falls through to ExactReplay after these bindings pass.
+            const uint256 sigma = matmul::v4::DeriveSigma(header);
+            if (parsed->episode_sigma != sigma) {
+                out.path = RCProdVerifyPath::WinnerGkr;
+                out.ok = false;
+                out.note = "WinnerGkr arbiter reject: episode_sigma != DeriveSigma(header)";
+                return out;
+            }
+            if (!RCEpisodeParamsEqual(parsed->episode, params)) {
+                out.path = RCProdVerifyPath::WinnerGkr;
+                out.ok = false;
+                out.note = "WinnerGkr arbiter reject: episode dims != ResolveRCEpisodeParams";
+                return out;
+            }
+            if (target && UintToArith256(parsed->claimed_digest) > *target) {
+                out.path = RCProdVerifyPath::WinnerGkr;
+                out.ok = false;
+                out.note = "WinnerGkr arbiter reject: claimed_digest > target";
+                return out;
+            }
+            if (!out.gkr.over_budget) {
+                out.path = RCProdVerifyPath::WinnerGkr;
+                out.ok = true;
+                out.note = "WinnerGkr arbiter ok (ExactReplay reserved for DISPUTE)";
+                return out;
+            }
         }
         out.replay = VerifyBoundedExactReplay(header, params, height, target);
         out.path = RCProdVerifyPath::GkrFallbackExactReplay;
@@ -1568,7 +1681,8 @@ RCProdVerifyResult VerifyRCWinnerOrExactReplay(const CBlockHeader& header,
 
 void RCGkrShadowObserve(const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
                         const arith_uint256* target,
-                        const std::vector<unsigned char>* optional_gkr_proof)
+                        const std::vector<unsigned char>* optional_gkr_proof,
+                        const ExactReplayVerifyResult* prior_replay)
 {
     if (!EnvRCGkrShadowEnabled()) return;
     std::vector<unsigned char> cached;
@@ -1586,11 +1700,17 @@ void RCGkrShadowObserve(const CBlockHeader& header, const RCEpisodeParams& param
     }
     RCGkrTiming vt;
     const bool gkr_ok = VerifyWinnerProof(*parsed, &vt);
-    const auto replay = VerifyBoundedExactReplay(header, params, height, target);
-    if (!gkr_ok || (replay.ok && parsed->claimed_digest != replay.digest)) {
+    // H2: reuse prior ExactReplay when the caller already computed it.
+    ExactReplayVerifyResult replay_local;
+    const ExactReplayVerifyResult* replay = prior_replay;
+    if (replay == nullptr) {
+        replay_local = VerifyBoundedExactReplay(header, params, height, target);
+        replay = &replay_local;
+    }
+    if (!gkr_ok || (replay->ok && parsed->claimed_digest != replay->digest)) {
         LogWarning("RC GKR shadow mismatch: gkr_ok=%d replay_ok=%d proof_bytes=%zu "
                    "verify_s=%.6f (ExactReplay remains consensus arbiter; never rejects)\n",
-                   gkr_ok ? 1 : 0, replay.ok ? 1 : 0, vt.proof_bytes, vt.verify_s);
+                   gkr_ok ? 1 : 0, replay->ok ? 1 : 0, vt.proof_bytes, vt.verify_s);
     } else {
         LogDebug(BCLog::VALIDATION,
                  "RC GKR shadow ok: proof_bytes=%zu verify_s=%.6f over_budget=%d\n",
