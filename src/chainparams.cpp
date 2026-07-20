@@ -365,6 +365,21 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_drlt_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestdrltheight");
     }
+    if (args.IsArgSet("-regtestrcheight")) {
+        options.matmul_rc_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestrcheight");
+    }
+    if (args.IsArgSet("-regtestrccoupledheight")) {
+        options.matmul_rc_coupled_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestrccoupledheight");
+    }
+    if (args.IsArgSet("-regtestrctoydims")) {
+        options.matmul_rc_use_toy_dims = args.GetBoolArg("-regtestrctoydims", false);
+    }
+    if (args.IsArgSet("-regtestrccoupledtoydims")) {
+        options.matmul_rc_coupled_use_toy_dims =
+            args.GetBoolArg("-regtestrccoupledtoydims", false);
+    }
     if (args.IsArgSet("-regtestmatmulltsealaspow")) {
         options.matmul_lt_seal_as_pow = args.GetBoolArg("-regtestmatmulltsealaspow", true);
     }

@@ -1340,6 +1340,43 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation_override_args)
     BOOST_CHECK(consensus.IsMatMulNonceSeedActive(9));
 }
 
+BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_rc_coupled_activation_override_args)
+{
+    // F6: -regtestrc* / -regtestrccoupled* CLI overrides must reach consensus
+    // params (unit-level mirror of the functional activation rehearsal). Public
+    // nets are untouched — this only exercises CreateChainParams(REGTEST).
+    ArgsManager args;
+    args.ForceSetArg("-test", "matmulstrict");
+    args.ForceSetArg("-regtestmatmulv4height", "6");
+    args.ForceSetArg("-regtestbmx4cheight", "6");
+    args.ForceSetArg("-regtestdrltheight", "6");
+    args.ForceSetArg("-regtestmatmulltsealaspow", "0");
+    args.ForceSetArg("-regtestrcheight", "9");
+    args.ForceSetArg("-regtestrccoupledheight", "12");
+    args.ForceSetArg("-regtestrctoydims", "1");
+    args.ForceSetArg("-regtestrccoupledtoydims", "1");
+
+    const auto consensus = CreateChainParams(args, ChainType::REGTEST)->GetConsensus();
+    BOOST_CHECK_EQUAL(consensus.nMatMulV4Height, 6);
+    BOOST_CHECK_EQUAL(consensus.nMatMulBMX4CHeight, 6);
+    BOOST_CHECK_EQUAL(consensus.nMatMulDRLTHeight, 6);
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCHeight, 9);
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledHeight, 12);
+    BOOST_CHECK(consensus.fMatMulRCUseToyDims);
+    BOOST_CHECK(consensus.fMatMulRCCoupledUseToyDims);
+    BOOST_CHECK(!consensus.fSkipMatMulValidation);
+    BOOST_CHECK(!consensus.IsMatMulRCActive(8));
+    BOOST_CHECK(consensus.IsMatMulRCActive(9));
+    BOOST_CHECK(consensus.GetMatMulEncodingProfile(9) == Consensus::MatMulEncodingProfile::ENC_RC);
+    BOOST_CHECK(!consensus.IsMatMulRCCoupledActive(11));
+    BOOST_CHECK(consensus.IsMatMulRCCoupledActive(12));
+    BOOST_CHECK(consensus.GetMatMulEncodingProfile(12) ==
+                Consensus::MatMulEncodingProfile::ENC_RC_COUPLED);
+    // Live RC/coupled on regtest unthrottles tip-verify budgets.
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCMaxPendingVerifications,
+                      std::numeric_limits<uint32_t>::max());
+}
+
 BOOST_AUTO_TEST_CASE(MatMulPreHashEpsilonBits_resolve_upgrade_at_boundary)
 {
     Consensus::Params params{};
