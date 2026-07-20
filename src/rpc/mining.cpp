@@ -1579,6 +1579,8 @@ static const char* ResolveMatMulEncodingProfileName(
     const Consensus::Params& consensus, int32_t height)
 {
     switch (consensus.GetMatMulEncodingProfile(height)) {
+    case Consensus::MatMulEncodingProfile::ENC_RC:
+        return "ENC-RC";
     case Consensus::MatMulEncodingProfile::ENC_BMX4C_LT:
         return "ENC-BMX4C-LT";
     case Consensus::MatMulEncodingProfile::ENC_BMX4C:

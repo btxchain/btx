@@ -117,6 +117,9 @@ enum class MatMulEncodingProfile : uint8_t {
     //! consensus-bound Q* window. STAGED: nMatMulDRLTHeight defaults to
     //! INT32_MAX on every public network.
     ENC_BMX4C_LT = 4,
+    //! Resident Curriculum (3-phase episode). STAGED: nMatMulRCHeight defaults
+    //! to INT32_MAX on every public network (clean cutover later).
+    ENC_RC = 5,
 };
 
 /**
@@ -479,6 +482,13 @@ struct Params {
     /** One-time ASERT rescale at nMatMulDRLTHeight (calibrate from silicon). */
     int64_t nMatMulDRLTAsertRescaleNum{1};
     int64_t nMatMulDRLTAsertRescaleDen{1};
+    /** Resident Curriculum (ENC_RC) activation height. DEFAULT = INT32_MAX =
+     *  disabled on every public network until a deliberate clean cutover.
+     *  When live, GetMatMulEncodingProfile prefers ENC_RC over DRLT/BMX4C. */
+    int32_t nMatMulRCHeight{std::numeric_limits<int32_t>::max()};
+    /** One-time ASERT rescale at nMatMulRCHeight (calibrate from silicon). */
+    int64_t nMatMulRCAsertRescaleNum{1};
+    int64_t nMatMulRCAsertRescaleDen{1};
     /** v4.4-LT Q* Phase B — SEAL-AS-PoW mode (doc/btx-matmul-v4.4-lt-normative-spec.md
      *  "Q* window", doc/btx-matmul-v4.4-lt-adversarial-analysis.md "Phase B").
      *  When true AND DRLT is live, the header's matmul_digest is no longer the
@@ -812,6 +822,15 @@ struct Params {
             nMatMulDRLTHeight != std::numeric_limits<int32_t>::max() &&
             height >= nMatMulDRLTHeight;
     }
+    /** True at and above the Resident Curriculum (ENC_RC) height. Self-guards
+     *  the INT32_MAX disabled sentinel (mirrors IsMatMulV4Active). Public nets
+     *  keep nMatMulRCHeight = INT32_MAX until a deliberate clean cutover. */
+    bool IsMatMulRCActive(int32_t height) const
+    {
+        return height >= 0
+            && nMatMulRCHeight != std::numeric_limits<int32_t>::max()
+            && height >= nMatMulRCHeight;
+    }
     /** True iff the v4.4-LT Q* Phase B SEAL-AS-PoW mode governs this height: the
      *  LT profile is live AND the seal-as-PoW mode toggle is set. Fail-closed on
      *  every public network: IsDRLTActive is false while nMatMulDRLTHeight ==
@@ -856,6 +875,9 @@ struct Params {
      *  (spec §8.2). */
     MatMulEncodingProfile GetMatMulEncodingProfile(int32_t height) const
     {
+        // ENC_RC takes precedence: public nets keep nMatMulRCHeight=INT32_MAX
+        // (clean cutover later). When RC is live it supersedes DRLT/BMX4C.
+        if (IsMatMulRCActive(height)) return MatMulEncodingProfile::ENC_RC;
         if (IsDRLTActive(height)) return MatMulEncodingProfile::ENC_BMX4C_LT;
         return IsBMX4CActive(height) ? MatMulEncodingProfile::ENC_BMX4C
                                      : MatMulEncodingProfile::ENC_S8;
@@ -872,6 +894,17 @@ struct Params {
      *  fMatMulV4FlatSketchReplay differential-testing switch. */
     MatMulProfileParams GetMatMulProfileParams(int32_t height) const
     {
+        if (IsMatMulRCActive(height)) {
+            // ENC_RC is digest-only (DIGEST_RECOMPUTE). tile_b / sketch_rank_m
+            // are placeholders reused from LT until RC-specific shape knobs land;
+            // RC episodes do not carry a Freivalds sketch.
+            return MatMulProfileParams{
+                MatMulEncodingProfile::ENC_RC,
+                MatMulCommitmentScheme::DIGEST_RECOMPUTE,
+                /*tile_b=*/nMatMulLTTranscriptBlockSize,
+                /*sketch_rank_m=*/BMX4C_LT_SKETCH_RANK_M,
+            };
+        }
         if (IsDRLTActive(height)) {
             return MatMulProfileParams{
                 MatMulEncodingProfile::ENC_BMX4C_LT,
