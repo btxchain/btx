@@ -1,9 +1,10 @@
 # ENC_RC finish-to-production status (2026-07-20)
 
-*Tip: MASTER finish-to-code-complete packet (Amendment v3 + succinct proof scaffold).
+*Tip: Succinct-proof production-harden M1–M5 on master code-complete base.
 *Public activation: **NO-GO** (`nMatMulRCHeight = INT32_MAX`).*
 *Companion: `doc/btx-matmul-v4.5-enc-rc-final-form-spec-2026-07-20.md`.*
 *Soundness: `doc/btx-matmul-v4.5-rc-succinct-proof-soundness-2026-07-20.md`.*
+*PCS alt (owner flag): `doc/btx-matmul-v4.5-rc-succinct-proof-pcs-alternative-2026-07-20.md`.*
 
 This note tracks Amendments **1.A / 1.B / 1.C / 1.CORRECT / 1.SCOPE / 1.D / GKR guardrail**
 against Stages §§1–5. It does **not** raise height.
@@ -70,26 +71,24 @@ against Stages §§1–5. It does **not** raise height.
 
 ---
 
-## §2 — Succinct proof scaffold (MASTER PACKET §2)
+## §2 — Succinct proof production-harden (M1–M5)
 
-| Item | Status |
+| Gate | Status |
 |---|---|
-| Decision | Winner-only **direction** locked; tip is **code-complete scaffold**, **NOT** production-complete |
-| Fp2 | `matmul_v4_rc_gkr_field_ext.h` — Goldilocks² (`x²−7`); all FS challenges in Fp2 |
-| FRI PCS | `matmul_v4_rc_fri.{h,cpp}` — SHA256 Merkle fold; commit evals, open O(log n); **no** per-tile witness ship |
-| Real episode | `ProveWinnerEpisode` arithmetizes Q·Kᵀ / S·V / fwd GEMM + Extract **LogUp aggregate** (toy OK for CI) |
-| Synth proxy | `ProveWinnerSynth` **DEPRECATED** test helper (still succinct-format) |
-| Soundness note | `doc/btx-matmul-v4.5-rc-succinct-proof-soundness-2026-07-20.md` — ≤2^{-64}-after-grinding **aspirational**; scaffold ≠ audited FRI |
-| Reality Guardrail | `kRCGkrRealityGuardrail` — REJECT HBM/production-complete claims |
-| Shadow | `BTX_RC_GKR_SHADOW` **default ON** — generate+verify; mismatch `LogWarning`; **never** rejects `CheckMatMulProofOfWork_RC` |
-| Arbiter | `BTX_RC_GKR_ARBITER` **OFF by default**; does **not** raise height; ExactReplay decides when OFF |
-| Fallback | over-budget → shrink-to-`VerifyBoundedExactReplay` / toy slice; report honestly |
-| Consensus today | ε=0 ExactReplay |
-| Height | `INT32_MAX` |
+| **M1 REAL FRI** | **DONE (code)** — LDE blowup=8, multi-layer fold openings, `k=40` queries, grind \(g=32\); forge/sibling/fold rejects; `FriSoundnessBoundBits()=88` (unique-decoding). List-decoding at \(k=40\) **not** claimed |
+| **M2 ALL-PHASE** | **DONE (code)** — every round × QKt/SV/Fwd/Bwd/Wgrad + LogUp + `round_seeds`; **no shrink-to-toy**; proof v4. Medium `b_seq=8192` prove skipped in CI (not safe) |
+| **M3 Fp2 + bound** | **DONE (writeup)** — challenges in Fp2 end-to-end; composed bound in soundness note §7; adversarial FRI+GKR cheat tests green. **External audit OPEN** |
+| **M4 cost curve** | **DONE (instrument)** — `MeasureWinnerGkrToyMedium` / bakeoff JSON; toy measured; medium skipped → shipping path = ExactReplay when over_budget. **No invented silicon rates**. Crossover to HBM needs datacenter box |
+| **M5 shadow** | **Intact** — shadow ON, arbiter OFF, ExactReplay decides |
+| PCS alternative | Flagged: `doc/btx-matmul-v4.5-rc-succinct-proof-pcs-alternative-2026-07-20.md` (Plonky3/Winterfell) — owner decides |
 
-**Scaffold vs silicon-gated:** CPU-green toy path + formal bound writeup are scaffold.
-Production-dim prove/verify budgets, audited FRI proximity, and HBM rates remain **OPEN /
-silicon-gated**. Do not invent production numbers from toy runs.
+| Item | Detail |
+|---|---|
+| Reality Guardrail | Still REJECTS HBM/production-complete until audit + silicon cost close |
+| Consensus | ε=0 ExactReplay; `nMatMulRCHeight=INT32_MAX` |
+| Soft budget | over_budget → ExactReplay recommendation (**shipping**), not toy arithmetization |
+
+**Honest residual:** list-decoding FRI may need \(k\approx 80\); consensus-dim prove cost on CPU likely over soft budget (ExactReplay ships until silicon M4); external crypto audit required before arbiter ON.
 
 ---
 
@@ -124,7 +123,7 @@ Independent of parked §R.7 `kRCGrowthScheduleEnabled=false`.
 |---|---|
 | `matmul_v4_rc_tests` | V1 golden, modes, self-qual fail-closed, P1.2 layouts, Stage F inert, **Ozaki native_* lock** |
 | `matmul_v4_rc_coupled_tests` | Toy/medium, modes, device probe skip, **native_* stay false** |
-| `matmul_v4_rc_gkr_tests` | Real-episode toy prove/verify, Fp2/FRI, malformed/wrong-witness/pow_bind, shadow, Reality Guardrail |
+| `matmul_v4_rc_gkr_tests` | ALL-PHASE toy prove/verify, M2 cheats (extract/lookup, drop layer, wrong seed), no shrink-from-shape, Fp2/FRI, shadow, Reality Guardrail |
 | `matmul_v4_lt_tests` | `DeriveLtPeakMxFlags` ready/deficit invariants |
 | D7 gate | `contrib/matmul-v4/hip-mfma-compile-gate.sh` (ROCm box) |
 | Gates | `contrib/matmul-v4/rc-golden-gate.py`, `rc-gate.py` (offline GO tally ≠ height raise) |

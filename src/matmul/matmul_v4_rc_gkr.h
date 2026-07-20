@@ -29,9 +29,10 @@
 //     (2) is succinct / block-sized,
 //     (3) verifies WITHOUT re-running the work,
 //     (4) carries a formal ≤2^{-64}-after-grinding bound.
-//   This tip is a CODE-COMPLETE SCAFFOLD (Fp2 + FRI + real-episode toy path +
-//   shadow wiring). It is NOT production-complete / NOT silicon-qualified.
-//   Expect shrink-to-bounded-replay (VerifyBoundedExactReplay) when over budget.
+//   This tip is a CODE-COMPLETE SCAFFOLD (Fp2 + REAL FRI + ALL-PHASE real-episode
+//   arithmetization + shadow wiring). It is NOT production-complete / NOT
+//   silicon-qualified. Soft over_budget may recommend ExactReplay (M4 shipping)
+//   but MUST NOT replace the episode with toy-slice arithmetization.
 //
 // Consensus today: ε=0 ExactReplay (CheckMatMulProofOfWork_RC) is the arbiter.
 // Shadow: BTX_RC_GKR_SHADOW=1 (default) generate+verify, log mismatches, never
@@ -40,23 +41,26 @@
 
 namespace matmul::v4::rc {
 
-inline constexpr uint32_t kRCGkrProofVersion = 3;
-inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V3";
+inline constexpr uint32_t kRCGkrProofVersion = 4;
+inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V4";
 /** Magic for optional out-of-band / cache carriage (not consensus body). */
-inline constexpr uint32_t kRCGkrProofMagic = 0x524b4733u; // 'RKG3'
+inline constexpr uint32_t kRCGkrProofMagic = 0x524b4734u; // 'RKG4'
 
 inline constexpr const char* kRCGkrRealityGuardrail =
-    "REJECT HBM/production-complete GKR claims: succinct scaffold uses Fp2+FRI "
-    "and real-episode toy arithmetization, but is NOT production-complete — "
-    "require actual-episode at consensus dims + succinct/block-sized + no-rerun "
+    "REJECT HBM/production-complete GKR claims: succinct scaffold uses Fp2+REAL "
+    "FRI and ALL-PHASE real-episode arithmetization (QKt/SV/Fwd/Bwd/Wgrad × "
+    "rounds; no shrink-to-toy), but is NOT production-complete — require "
+    "consensus-dim prove within budget + succinct/block-sized + no-rerun "
     "verify + formal <=2^{-64}-after-grinding bound (see soundness note). "
-    "Otherwise shrink to VerifyBoundedExactReplay. "
+    "Soft over_budget → VerifyBoundedExactReplay is shrink-to-replayable for "
+    "shipping (M4), not shrink-to-toy arithmetization. "
     "NOT production-complete. nMatMulRCHeight=INT32_MAX.";
 
 inline constexpr const char* kRCGkrSoundnessBoundStatement =
     "Winner-only GKR/sumcheck+FRI SCAFFOLD (COMPUTATIONAL aspirational target): "
     "formal <=2^{-64} AFTER PoW grinding is a Stage-I REQUIREMENT. Challenges "
     "live in Goldilocks Fp2 (|F|~2^128); single Goldilocks is insufficient. "
+    "M2: ALL-PHASE layers + round_seeds bound to sigma/round_roots. "
     "See doc/btx-matmul-v4.5-rc-succinct-proof-soundness-2026-07-20.md and "
     "kRCGkrRealityGuardrail. Merkle q=8 is DoS PREFILTER ONLY. "
     "Full STREAMED ExactReplay remains dispute/oracle until Stage-I cutover. "
@@ -77,9 +81,18 @@ inline constexpr const char* kRCGkrMerkleQ8PrefilterStatement =
 
 inline constexpr const char* kRCGkrHbmParkStatement =
     "HBM-scale winner GKR is NOT production-complete under Reality Guardrail. "
-    "If medium-shape prove already exceeds a small fraction of block-interval "
-    "budget, PARK HBM-scale GKR; ship both verifiers (GKR scaffold + "
-    "VerifyBoundedExactReplay) and keep ε=0 ExactReplay as consensus default.";
+    "Consensus-dim ALL-PHASE prove may soft-over_budget on CPU (M4 shipping → "
+    "ExactReplay); that is shrink-to-replayable, not shrink-to-toy. PARK HBM "
+    "GKR as production arbiter until budgets close; ship both verifiers and "
+    "keep ε=0 ExactReplay as consensus default.";
+
+/** Coupled path: barrier all-to-all product layers are not separately
+ *  arithmetized; ProveWinnerCoupled reuses ALL-PHASE episode layers (same kinds
+ *  as ProveWinnerEpisode) without shrink-to-toy. ExactReplay covers coup mix. */
+inline constexpr const char* kRCGkrCoupledArithStatement =
+    "ProveWinnerCoupled: ALL-PHASE episode-layer stand-in (no shrink-to-toy); "
+    "coupled barrier all-to-all mix remains ExactReplay-covered until dedicated "
+    "coup product layers land.";
 
 inline constexpr const char* kRCGkrShadowStatement =
     "BTX_RC_GKR_SHADOW=1 (default): generate+verify winner proof in shadow; "
@@ -102,7 +115,7 @@ struct RCGkrSumcheckRound {
     Fp2 eval2{};
 };
 
-/** Layer kind in the real-episode arithmetization (toy shape for CI). */
+/** Layer kind in the ALL-PHASE real-episode arithmetization. */
 enum class RCGkrLayerKind : uint32_t {
     GemmPhase1QKt = 1, // Q·Kᵀ product layer
     GemmPhase1SV = 2,  // S·V product layer
@@ -133,8 +146,17 @@ struct RCGkrProof {
     uint256 claimed_digest{};
     /** PoW-grinding resistance: FS absorbs this PoW-bind tag after digest. */
     uint256 pow_bind{};
-    /** Episode shape public inputs (toy OK for CI). */
+    /** Episode shape public inputs (actual params; no shrink-to-toy). */
     RCEpisodeParams episode{};
+    /**
+     * Round seeds matching RunEpisode: seed[0]=Sha256TaggedU32(ROUND,sigma,0);
+     * seed[r]=Sha256TaggedU32(ROUND, round_roots[r-1], r).
+     */
+    std::vector<uint256> round_seeds;
+    /** Round merkle roots (tile-tree); digest = SHA256d(EPISODE ‖ roots…). */
+    std::vector<uint256> round_roots;
+    /** DeriveSigma(header) at prove time — verify re-derives seed[0] from this. */
+    uint256 episode_sigma{};
     std::vector<RCGkrLayerClaim> layers;
     Fp2 lookup_logup_sum{};
     /** FRI commit of LogUp wire (keys/multiplicities) — not every tile. */
@@ -142,7 +164,7 @@ struct RCGkrProof {
     /** FRI commit of concatenated GEMM output wires (MLE evals). */
     FriProof trace_fri{};
     uint256 transcript_hash{};
-    /** Set when prove/verify exceeded soft budget → shrink-to-replay. */
+    /** Soft budget exceeded → recommend ExactReplay (shipping); not toy swap. */
     bool over_budget{false};
     std::string shrink_note;
 
@@ -218,14 +240,24 @@ struct RCProdVerifyResult {
     const std::vector<std::vector<int64_t>>& segs, const uint256& extract_seed,
     const std::vector<int8_t>* A = nullptr, const std::vector<int8_t>* B = nullptr);
 
-/** Production API: arithmetize REAL episode layers (toy shape OK for CI). */
+/**
+ * Production API: ALL-PHASE arithmetization of the ACTUAL `params` (no
+ * shrink-to-toy). Soft over_budget may still flag ExactReplay fallback.
+ */
 [[nodiscard]] RCGkrProveResult ProveWinnerEpisode(const CBlockHeader& header,
                                                  const RCEpisodeParams& params, int32_t height,
                                                  const uint256& resealed_digest);
 
+/**
+ * Coupled winner prove: reuses ALL-PHASE episode layers (see
+ * kRCGkrCoupledArithStatement); does not shrink coup work to a toy slice.
+ */
 [[nodiscard]] RCGkrProveResult ProveWinnerCoupled(const CBlockHeader& header, int32_t height,
                                                  const RCCoupParams& params,
                                                  const uint256& resealed_digest);
+
+/** Expected ALL-PHASE layer count: rounds * (2 + 3*L_lyr). */
+[[nodiscard]] size_t RCGkrExpectedLayerCount(const RCEpisodeParams& p);
 
 /**
  * Succinct verify: sumcheck algebra + FRI openings + LogUp aggregate.

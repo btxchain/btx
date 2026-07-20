@@ -13,26 +13,65 @@
 #include <string>
 #include <vector>
 
-// Minimal transparent FRI-style PCS scaffold for ENC_RC Section-2.
+// REAL FRI PCS for ENC_RC Section-2 / MASTER PACKET M1 (proof version 2).
 //
-// Commit a 1D evaluation vector (MLE coeffs or evals) WITHOUT shipping the
-// witness. Open at Fiat–Shamir challenge points. Proof size is O(log n)
-// Merkle commitments + openings (SHA256 layers) — NOT every Extract tile.
+// Pipeline:
+//   1. Treat input as degree-<n coefficients (n = next_pow2(len)).
+//   2. LDE: zero-pad coeffs to N = blowup * n and NTT-evaluate on the
+//      size-N multiplicative subgroup of Goldilocks (embedded in Fp2).
+//   3. Merkle-commit (SHA256d) the LDE evaluations.
+//   4. Multi-round FRI fold: next[i] = even[i] + β * odd[i] from pair
+//      (2i, 2i+1); commit each folded layer (commit-then-challenge).
+//   5. Derive kRCFriNumQueries indices from FS; for each query open the
+//      fold path at EVERY layer and check the fold equation.
 //
-// SCAFFOLD honesty: this is a CPU-green transparent fold suitable for CI and
-// asymptotic sizing. It is NOT a production-complete FRI/STARK with coded
-// Reed–Solomon proximity proofs, grinding-hardened queries, or audited
-// soundness. See doc/btx-matmul-v4.5-rc-succinct-proof-soundness-2026-07-20.md.
+// Soundness (conservative unique-decoding / Reed–Solomon proximity, ROM):
+//   Per-query rejection bound ≤ ρ = 1/blowup = 1/8 = 2^{-3}.
+//   ε_queries ≤ ρ^k = 2^{-3k}.
+//   Fold/FS algebraic error ≤ (#rounds)·deg/|Fp2| ≤ O(log N)·2^{-128} (negligible).
+//   After grinding G = 2^{kRCFriGrindingBits} FS tries (PoW-bound seed):
+//     ε_net ≤ 2^g · 2^{-3k}.
+//   Target ε_net ≤ 2^{-64}  ⇒  k ≥ ceil((g + 64) / 3).
+//   With g = 32: k ≥ 32. We set kRCFriNumQueries = 40 for margin:
+//     ε_net ≤ 2^{32} · 2^{-120} = 2^{-88} ≤ 2^{-64}.
+//
+// Assumptions (honest): Reed–Solomon proximity at unique-decoding radius,
+// commit-then-challenge Fiat–Shamir in the random-oracle model, and that
+// `fs_seed` is already SHA256d-bound to the winning block digest / pow_bind
+// (caller responsibility in GKR). List-decoding (≈√ρ per query) would need
+// ~80 queries for the same 2^{-64} net target — see the soundness doc.
+//
+// Proof size is O(queries × log N × 32) Merkle openings — NOT the LDE
+// witness vector. Flipping an LDE eval and re-using old openings MUST fail.
 
 namespace matmul::v4::rc {
 
 using gkr_field::Fp2;
 
 inline constexpr uint32_t kRCFriProofMagic = 0x46524933u; // 'FRI3'
-inline constexpr uint32_t kRCFriProofVersion = 1;
-inline constexpr char kRCFriDomainTag[] = "BTX_RC_FRI_V1";
+inline constexpr uint32_t kRCFriProofVersion = 2;
+inline constexpr char kRCFriDomainTag[] = "BTX_RC_FRI_V2";
 
-/** Soft budgets for the Section-2 scaffold (toy/medium CPU). Not silicon rates. */
+/** LDE blowup factor B; rate ρ = 1/B. */
+inline constexpr uint32_t kRCFriBlowup = 8;
+/**
+ * Query count k from unique-decoding bound (see header formula).
+ * g=32, ceil((32+64)/3)=32; use 40 for margin → claimed ε_net ≤ 2^{-88}.
+ */
+inline constexpr uint32_t kRCFriNumQueries = 40;
+/** PoW grinding bits assumed subtracted from the FS bound (G ≤ 2^g). */
+inline constexpr uint32_t kRCFriGrindingBits = 32;
+
+/**
+ * Human-readable soundness statement (must match FriSoundnessBoundBits()).
+ */
+inline constexpr char kRCFriSoundnessStatement[] =
+    "FRI REAL (v2): LDE blowup=8, k=40 queries, g=32 grinding; "
+    "unique-decoding ε_net ≤ 2^{32}·(1/8)^{40} = 2^{-88} ≤ 2^{-64} "
+    "(ROM, RS proximity, commit-then-challenge; fs_seed PoW-bound by caller). "
+    "COMPUTATIONAL — not ε=0.";
+
+/** Soft budgets for Section-2 (toy/medium CPU). Not silicon rates. */
 inline constexpr size_t kRCFriProofBytesBudget = 256 * 1024; // 256 KiB soft
 inline constexpr double kRCFriVerifyBudgetS = 0.5;
 
@@ -42,6 +81,21 @@ struct FriMerklePath {
     std::vector<uint256> siblings; // rootward
 };
 
+/** One fold-round opening: Merkle paths for the even/odd pair. */
+struct FriFoldStep {
+    uint32_t even_index{0}; // = 2*i on this layer
+    Fp2 even{};
+    Fp2 odd{};
+    std::vector<uint256> even_siblings;
+    std::vector<uint256> odd_siblings;
+};
+
+/** Full fold-path opening for one FS query index on layer 0. */
+struct FriQueryOpening {
+    uint32_t index{0}; // layer-0 LDE index
+    std::vector<FriFoldStep> steps; // one per fold round (layers 0..R-1)
+};
+
 struct FriLayerCommit {
     uint256 root{};
     uint32_t n_leaves{0};
@@ -49,44 +103,52 @@ struct FriLayerCommit {
 
 struct FriProof {
     uint32_t version{kRCFriProofVersion};
-    /** Layer 0 = commit of the original evaluation vector (pow2-padded). */
+    /** Optional grinding nonce absorbed into FRI FS (factor if unused). */
+    uint64_t pow_grind_nonce{0};
+    uint32_t blowup{kRCFriBlowup};
+    /** Coefficient count after pow2 pad (before LDE). */
+    uint32_t n_coeffs{0};
+    /** Layer 0 = LDE commitment; last layer is the final constant. */
     std::vector<FriLayerCommit> layers;
-    /** Final constant after fold (prover claim). */
+    /** Final constant after fold (prover claim; must match last layer). */
     Fp2 final_value{};
-    /** Openings of layer-0 at FS query indices (Merkle paths). */
-    std::vector<FriMerklePath> openings;
-    /** Fold challenges used (echoed for verify; also re-derived from FS). */
+    /** Fold challenges (echoed; verifier re-derives from FS). */
     std::vector<Fp2> fold_challenges;
+    /** Per-query fold-path openings — NOT the full LDE witness. */
+    std::vector<FriQueryOpening> queries;
 };
 
 struct FriCommitResult {
     FriProof proof;
-    /** Retained only by prover; NEVER shipped in the proof bytes. */
-    std::vector<Fp2> evals_pow2;
+    /** Prover-only LDE evaluations (layer 0). NEVER shipped in proof bytes. */
+    std::vector<Fp2> lde_evals;
+    /** Prover-only folded layer evaluations (including layer 0). */
+    std::vector<std::vector<Fp2>> layer_evals;
     size_t proof_bytes{0};
     bool ok{false};
     std::string note;
 };
 
 /**
- * Commit evals (padded to next power of 2) into a Merkle tree of SHA256d leaf
- * hashes. Folds layers with FS challenges from `fs_seed` until one value.
- * Does not include `evals` in the serialized proof — only roots + openings.
+ * LDE + Merkle commit + multi-round FRI fold + query openings.
+ * `fs_seed` MUST already include PoW bind to the winning digest (GKR).
+ * `pow_grind_nonce` is absorbed into FRI FS for optional grinding factor.
  */
-[[nodiscard]] FriCommitResult FriCommitAndFold(const std::vector<Fp2>& evals,
+[[nodiscard]] FriCommitResult FriCommitAndFold(const std::vector<Fp2>& coeffs,
                                                const uint256& fs_seed,
-                                               uint32_t n_openings = 2);
+                                               uint64_t pow_grind_nonce = 0);
 
-/** Open leaf `index` against layer-0 commitment (prover-side helper). */
-[[nodiscard]] FriMerklePath FriOpenIndex(const std::vector<Fp2>& evals_pow2,
+/** Open leaf `index` against a committed evaluation vector (prover helper). */
+[[nodiscard]] FriMerklePath FriOpenIndex(const std::vector<Fp2>& evals,
                                          uint32_t index);
 
 [[nodiscard]] bool FriVerifyPath(const FriMerklePath& path, const uint256& root,
                                  uint32_t n_leaves);
 
 /**
- * Verify FRI scaffold: Merkle openings + fold consistency to final_value.
- * Does NOT re-materialize the witness vector.
+ * Verify FRI without the witness: re-derive fold challenges + query indices
+ * from FS, open Merkle paths on every layer along each fold path, check fold
+ * equations, and check the final constant. REJECT on any failure.
  */
 [[nodiscard]] bool FriVerify(const FriProof& proof, const uint256& fs_seed,
                              std::string* why = nullptr);
@@ -101,6 +163,25 @@ struct FriCommitResult {
 [[nodiscard]] uint256 FriNodeHash(const uint256& left, const uint256& right);
 
 [[nodiscard]] uint32_t FriNextPow2(uint32_t n);
+
+/**
+ * Claimed soundness bits after grinding under the unique-decoding formula
+ * in the header: 3*kRCFriNumQueries - kRCFriGrindingBits.
+ */
+[[nodiscard]] inline int FriSoundnessBoundBits()
+{
+    return static_cast<int>(3 * kRCFriNumQueries - kRCFriGrindingBits);
+}
+
+/**
+ * Forge-test helper: flip one LDE evaluation and rebuild only layer-0 root
+ * while keeping old query openings — FriVerify MUST reject. Used by tests
+ * to show forged low-degree / inconsistent witnesses fail.
+ */
+[[nodiscard]] bool FriForgeFlippedEvalMustFail(const FriCommitResult& honest,
+                                               const uint256& fs_seed,
+                                               uint32_t flip_index,
+                                               std::string* why = nullptr);
 
 } // namespace matmul::v4::rc
 

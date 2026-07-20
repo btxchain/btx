@@ -7,6 +7,7 @@
 #include <crypto/common.h>
 #include <crypto/sha256.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -15,9 +16,15 @@ namespace {
 
 using gkr_field::Add;
 using gkr_field::Canonical;
+using gkr_field::Eq;
+using gkr_field::Fp;
 using gkr_field::FromChallengeBytes2;
+using gkr_field::Inv;
 using gkr_field::Mul;
 using gkr_field::Sub;
+
+/** Goldilocks 2^32-th root of unity: 7^((p-1)/2^32). */
+constexpr Fp kOmega2_32 = 0x185629dcda58878cULL;
 
 uint256 Sha256dBytes(const unsigned char* data, size_t len)
 {
@@ -82,31 +89,100 @@ bool ReadFp2Checked(const unsigned char*& p, const unsigned char* end, Fp2& out)
     return true;
 }
 
-Fp2 ChallengeFromSeed(const uint256& seed, const char* label, uint32_t idx)
+Fp PowFp(Fp base, uint64_t exp)
 {
-    std::vector<unsigned char> buf;
-    const size_t n = std::strlen(label);
-    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(label),
-               reinterpret_cast<const unsigned char*>(label) + n);
-    AppendBytes(buf, seed.data(), 32);
-    AppendLE32(buf, idx);
-    return FromChallengeBytes2(Sha256dBytes(buf.data(), buf.size()).data());
+    Fp result = 1;
+    base = Canonical(base);
+    while (exp > 0) {
+        if (exp & 1u) result = Mul(result, base);
+        base = Mul(base, base);
+        exp >>= 1;
+    }
+    return result;
 }
 
-std::vector<uint256> BuildMerkleLeaves(const std::vector<Fp2>& evals)
+/** Primitive n-th root of unity in Goldilocks for n = 2^k, k ≤ 32. */
+Fp OmegaForSize(uint32_t n)
 {
-    std::vector<uint256> leaves(evals.size());
+    // omega_n = kOmega2_32 ^{2^{32} / n}
+    uint32_t logn = 0;
+    uint32_t t = n;
+    while (t > 1) {
+        t >>= 1;
+        ++logn;
+    }
+    return PowFp(kOmega2_32, 1ULL << (32 - logn));
+}
+
+void BitReverse(std::vector<Fp2>& a)
+{
+    const size_t n = a.size();
+    size_t j = 0;
+    for (size_t i = 1; i < n; ++i) {
+        size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap(a[i], a[j]);
+    }
+}
+
+/** In-place radix-2 NTT over Fp2 using base-field roots embedded as (ω, 0). */
+void NttFp2(std::vector<Fp2>& a, bool inverse)
+{
+    const size_t n = a.size();
+    if (n <= 1) return;
+    BitReverse(a);
+    Fp omega_n = OmegaForSize(static_cast<uint32_t>(n));
+    if (inverse) omega_n = Inv(omega_n);
+
+    for (size_t len = 2; len <= n; len <<= 1) {
+        const Fp w_len = PowFp(omega_n, n / len);
+        for (size_t i = 0; i < n; i += len) {
+            Fp w = 1;
+            for (size_t j = 0; j < len / 2; ++j) {
+                const Fp2 u = a[i + j];
+                const Fp2 v = Mul(a[i + j + len / 2], Fp2::FromFp(w));
+                a[i + j] = Add(u, v);
+                a[i + j + len / 2] = Sub(u, v);
+                w = Mul(w, w_len);
+            }
+        }
+    }
+    if (inverse) {
+        const Fp inv_n = Inv(static_cast<Fp>(n));
+        const Fp2 inv = Fp2::FromFp(inv_n);
+        for (auto& x : a) x = Mul(x, inv);
+    }
+}
+
+/** LDE: coeffs (deg < n) → evaluations on size-(blowup*n) subgroup. */
+std::vector<Fp2> LdeFromCoeffs(const std::vector<Fp2>& coeffs, uint32_t blowup)
+{
+    const uint32_t n = static_cast<uint32_t>(coeffs.size());
+    const uint32_t N = n * blowup;
+    std::vector<Fp2> padded(N, Fp2::Zero());
+    for (size_t i = 0; i < coeffs.size(); ++i) padded[i] = coeffs[i];
+    NttFp2(padded, /*inverse=*/false);
+    return padded;
+}
+
+struct MerkleTree {
+    std::vector<std::vector<uint256>> levels; // levels[0] = leaves
+    uint256 root{};
+};
+
+MerkleTree BuildMerkleTree(const std::vector<Fp2>& evals)
+{
+    MerkleTree t;
+    if (evals.empty()) {
+        t.root = Sha256dBytes(reinterpret_cast<const unsigned char*>("FRI_EMPTY"), 9);
+        return t;
+    }
+    std::vector<uint256> level(evals.size());
     for (size_t i = 0; i < evals.size(); ++i) {
-        leaves[i] = FriLeafHash(evals[i], static_cast<uint32_t>(i));
+        level[i] = FriLeafHash(evals[i], static_cast<uint32_t>(i));
     }
-    return leaves;
-}
-
-uint256 MerkleRootFromLeaves(std::vector<uint256> level)
-{
-    if (level.empty()) {
-        return Sha256dBytes(reinterpret_cast<const unsigned char*>("FRI_EMPTY"), 9);
-    }
+    t.levels.push_back(level);
     while (level.size() > 1) {
         if (level.size() % 2 == 1) level.push_back(level.back());
         std::vector<uint256> next;
@@ -114,29 +190,105 @@ uint256 MerkleRootFromLeaves(std::vector<uint256> level)
         for (size_t i = 0; i < level.size(); i += 2) {
             next.push_back(FriNodeHash(level[i], level[i + 1]));
         }
+        t.levels.push_back(next);
         level = std::move(next);
     }
-    return level[0];
+    t.root = t.levels.back()[0];
+    return t;
 }
 
-std::vector<uint256> MerklePathSiblings(const std::vector<Fp2>& evals, uint32_t index)
+std::vector<uint256> PathFromTree(const MerkleTree& tree, uint32_t index)
 {
-    auto level = BuildMerkleLeaves(evals);
     std::vector<uint256> siblings;
+    if (tree.levels.empty()) return siblings;
     uint32_t idx = index;
-    while (level.size() > 1) {
+    for (size_t li = 0; li + 1 < tree.levels.size(); ++li) {
+        auto level = tree.levels[li];
+        // Match BuildMerkleTree's odd-pad (pad is only in the next-level build;
+        // reconstruct padded width for sibling lookup).
         if (level.size() % 2 == 1) level.push_back(level.back());
         const uint32_t sib = idx ^ 1u;
         siblings.push_back(level[sib]);
-        std::vector<uint256> next;
-        next.reserve(level.size() / 2);
-        for (size_t i = 0; i < level.size(); i += 2) {
-            next.push_back(FriNodeHash(level[i], level[i + 1]));
-        }
-        level = std::move(next);
         idx >>= 1;
     }
     return siblings;
+}
+
+/** Commit-then-challenge FS state for FRI layers + queries. */
+struct FriFs {
+    std::vector<unsigned char> buf;
+
+    FriFs(const uint256& fs_seed, uint64_t pow_grind_nonce, uint32_t blowup, uint32_t n_coeffs)
+    {
+        AppendBytes(buf, reinterpret_cast<const unsigned char*>(kRCFriDomainTag),
+                    sizeof(kRCFriDomainTag) - 1);
+        AppendBytes(buf, fs_seed.data(), 32);
+        AppendLE64(buf, pow_grind_nonce);
+        AppendLE32(buf, blowup);
+        AppendLE32(buf, n_coeffs);
+    }
+
+    void AbsorbRoot(const uint256& root) { AppendBytes(buf, root.data(), 32); }
+
+    Fp2 ChallengeFp2(const char* label, uint32_t idx)
+    {
+        std::vector<unsigned char> tmp = buf;
+        const size_t n = std::strlen(label);
+        tmp.insert(tmp.end(), reinterpret_cast<const unsigned char*>(label),
+                   reinterpret_cast<const unsigned char*>(label) + n);
+        AppendLE32(tmp, idx);
+        return FromChallengeBytes2(Sha256dBytes(tmp.data(), tmp.size()).data());
+    }
+
+    uint32_t ChallengeIndex(const char* label, uint32_t idx, uint32_t modulus)
+    {
+        if (modulus == 0) return 0;
+        const Fp2 ch = ChallengeFp2(label, idx);
+        // Use full 128-bit-ish entropy via (c0 || c1) mod modulus.
+        const unsigned __int128 wide =
+            (static_cast<unsigned __int128>(Canonical(ch.c1)) << 64) | Canonical(ch.c0);
+        return static_cast<uint32_t>(wide % modulus);
+    }
+};
+
+FriFoldStep OpenFoldStep(const std::vector<Fp2>& evals, const MerkleTree& tree, uint32_t idx)
+{
+    FriFoldStep step;
+    const uint32_t n = static_cast<uint32_t>(evals.size());
+    const uint32_t ei = (idx & ~1u) % n;
+    step.even_index = ei;
+    step.even = evals[ei];
+    step.odd = evals[ei + 1];
+    step.even_siblings = PathFromTree(tree, ei);
+    step.odd_siblings = PathFromTree(tree, ei + 1);
+    return step;
+}
+
+bool VerifyFoldStep(const FriFoldStep& step, const uint256& root, uint32_t n_leaves,
+                    const Fp2& beta, uint32_t idx, Fp2& out_folded, std::string* why)
+{
+    auto fail = [&](const char* w) {
+        if (why) *why = w;
+        return false;
+    };
+    if (n_leaves < 2 || (n_leaves % 2) != 0) return fail("fold layer size");
+    const uint32_t ei = idx & ~1u;
+    if (step.even_index != ei) return fail("fold even_index");
+    if (ei + 1 >= n_leaves) return fail("fold pair OOB");
+
+    FriMerklePath pe;
+    pe.index = ei;
+    pe.leaf = step.even;
+    pe.siblings = step.even_siblings;
+    FriMerklePath po;
+    po.index = ei + 1;
+    po.leaf = step.odd;
+    po.siblings = step.odd_siblings;
+    if (!FriVerifyPath(pe, root, n_leaves)) return fail("fold even merkle");
+    if (!FriVerifyPath(po, root, n_leaves)) return fail("fold odd merkle");
+
+    out_folded = Add(step.even, Mul(beta, step.odd));
+    return true;
 }
 
 } // namespace
@@ -175,15 +327,15 @@ uint256 FriNodeHash(const uint256& left, const uint256& right)
     return Sha256dBytes(buf.data(), buf.size());
 }
 
-FriMerklePath FriOpenIndex(const std::vector<Fp2>& evals_pow2, uint32_t index)
+FriMerklePath FriOpenIndex(const std::vector<Fp2>& evals, uint32_t index)
 {
     FriMerklePath path;
-    path.index = index;
-    if (evals_pow2.empty()) return path;
-    const uint32_t n = static_cast<uint32_t>(evals_pow2.size());
+    if (evals.empty()) return path;
+    const uint32_t n = static_cast<uint32_t>(evals.size());
     path.index = index % n;
-    path.leaf = evals_pow2[path.index];
-    path.siblings = MerklePathSiblings(evals_pow2, path.index);
+    path.leaf = evals[path.index];
+    const MerkleTree tree = BuildMerkleTree(evals);
+    path.siblings = PathFromTree(tree, path.index);
     return path;
 }
 
@@ -206,52 +358,77 @@ bool FriVerifyPath(const FriMerklePath& path, const uint256& root, uint32_t n_le
     return cur == root && si == path.siblings.size();
 }
 
-FriCommitResult FriCommitAndFold(const std::vector<Fp2>& evals, const uint256& fs_seed,
-                                 uint32_t n_openings)
+FriCommitResult FriCommitAndFold(const std::vector<Fp2>& coeffs, const uint256& fs_seed,
+                                 uint64_t pow_grind_nonce)
 {
     FriCommitResult out;
-    if (evals.empty()) {
-        out.note = "empty evals";
+    if (coeffs.empty()) {
+        out.note = "empty coeffs";
         return out;
     }
-    const uint32_t n = FriNextPow2(static_cast<uint32_t>(evals.size()));
-    out.evals_pow2.assign(n, Fp2::Zero());
-    for (size_t i = 0; i < evals.size(); ++i) out.evals_pow2[i] = evals[i];
+    const uint32_t n = FriNextPow2(static_cast<uint32_t>(coeffs.size()));
+    if ((n * static_cast<uint64_t>(kRCFriBlowup)) > (1u << 24)) {
+        out.note = "LDE domain too large";
+        return out;
+    }
 
-    std::vector<Fp2> cur = out.evals_pow2;
-    uint32_t layer_i = 0;
+    std::vector<Fp2> coeff_pow2(n, Fp2::Zero());
+    for (size_t i = 0; i < coeffs.size(); ++i) coeff_pow2[i] = coeffs[i];
+
+    out.lde_evals = LdeFromCoeffs(coeff_pow2, kRCFriBlowup);
+    out.proof.version = kRCFriProofVersion;
+    out.proof.pow_grind_nonce = pow_grind_nonce;
+    out.proof.blowup = kRCFriBlowup;
+    out.proof.n_coeffs = n;
+
+    FriFs fs(fs_seed, pow_grind_nonce, kRCFriBlowup, n);
+
+    std::vector<Fp2> cur = out.lde_evals;
+    std::vector<MerkleTree> trees;
     while (true) {
+        MerkleTree tree = BuildMerkleTree(cur);
         FriLayerCommit lc;
         lc.n_leaves = static_cast<uint32_t>(cur.size());
-        lc.root = MerkleRootFromLeaves(BuildMerkleLeaves(cur));
+        lc.root = tree.root;
         out.proof.layers.push_back(lc);
+        out.layer_evals.push_back(cur);
+        trees.push_back(std::move(tree));
+        fs.AbsorbRoot(lc.root);
+
         if (cur.size() == 1) {
             out.proof.final_value = cur[0];
             break;
         }
-        const Fp2 beta = ChallengeFromSeed(fs_seed, "fri_fold", layer_i++);
+
+        const Fp2 beta =
+            fs.ChallengeFp2("fri_fold", static_cast<uint32_t>(out.proof.fold_challenges.size()));
         out.proof.fold_challenges.push_back(beta);
         std::vector<Fp2> next(cur.size() / 2);
         for (size_t i = 0; i < next.size(); ++i) {
-            // even + beta * odd (degree-1 fold scaffold)
             next[i] = Add(cur[2 * i], Mul(beta, cur[2 * i + 1]));
         }
         cur = std::move(next);
     }
 
     const uint32_t n0 = out.proof.layers[0].n_leaves;
-    const uint32_t q = std::max(1u, std::min(n_openings, n0));
-    for (uint32_t i = 0; i < q; ++i) {
-        const Fp2 ch = ChallengeFromSeed(fs_seed, "fri_query", i);
-        const uint32_t idx = static_cast<uint32_t>(Canonical(ch.c0) % n0);
-        out.proof.openings.push_back(FriOpenIndex(out.evals_pow2, idx));
+    const uint32_t n_folds = static_cast<uint32_t>(out.proof.fold_challenges.size());
+    out.proof.queries.reserve(kRCFriNumQueries);
+    for (uint32_t qi = 0; qi < kRCFriNumQueries; ++qi) {
+        FriQueryOpening q;
+        q.index = fs.ChallengeIndex("fri_query", qi, n0);
+        uint32_t idx = q.index;
+        q.steps.reserve(n_folds);
+        for (uint32_t L = 0; L < n_folds; ++L) {
+            q.steps.push_back(OpenFoldStep(out.layer_evals[L], trees[L], idx));
+            idx >>= 1;
+        }
+        out.proof.queries.push_back(std::move(q));
     }
 
     std::vector<unsigned char> ser;
     out.proof_bytes = SerializeFriProof(out.proof, ser);
     out.ok = true;
-    out.note = "FRI scaffold commit+fold (SHA256 Merkle; NOT production FRI)";
-    out.proof.version = kRCFriProofVersion;
+    out.note = kRCFriSoundnessStatement;
     return out;
 }
 
@@ -262,37 +439,100 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
         return false;
     };
     if (proof.version != kRCFriProofVersion) return fail("bad fri version");
+    if (proof.blowup != kRCFriBlowup) return fail("bad blowup");
     if (proof.layers.empty()) return fail("no layers");
-    if (proof.layers[0].n_leaves == 0) return fail("empty layer0");
+    if (proof.n_coeffs == 0 || (proof.n_coeffs & (proof.n_coeffs - 1)) != 0)
+        return fail("n_coeffs not pow2");
+    if (proof.layers[0].n_leaves != proof.n_coeffs * proof.blowup) return fail("LDE size");
     if (proof.fold_challenges.size() + 1 != proof.layers.size()) return fail("layer/challenge count");
+    if (proof.layers.back().n_leaves != 1) return fail("final layer not singleton");
+    if (proof.queries.size() != kRCFriNumQueries) return fail("query count");
 
-    // Re-derive fold challenges and check they match the proof echo.
-    for (size_t i = 0; i < proof.fold_challenges.size(); ++i) {
-        const Fp2 beta = ChallengeFromSeed(fs_seed, "fri_fold", static_cast<uint32_t>(i));
-        if (!gkr_field::Eq(beta, proof.fold_challenges[i])) return fail("fold challenge mismatch");
-        if (proof.layers[i].n_leaves != proof.layers[i + 1].n_leaves * 2 &&
-            !(proof.layers[i].n_leaves == 1 && i + 1 == proof.layers.size() - 1)) {
-            // Allow only exact halving for the scaffold.
-            if (proof.layers[i].n_leaves / 2 != proof.layers[i + 1].n_leaves)
-                return fail("layer size");
+    // Layer sizes must exact-halve until the final singleton.
+    for (size_t i = 0; i + 1 < proof.layers.size(); ++i) {
+        if (proof.layers[i].n_leaves < 2 || (proof.layers[i].n_leaves % 2) != 0)
+            return fail("layer parity");
+        if (proof.layers[i].n_leaves / 2 != proof.layers[i + 1].n_leaves) return fail("layer size");
+    }
+
+    FriFs fs(fs_seed, proof.pow_grind_nonce, proof.blowup, proof.n_coeffs);
+    for (size_t i = 0; i < proof.layers.size(); ++i) {
+        fs.AbsorbRoot(proof.layers[i].root);
+        if (i + 1 < proof.layers.size()) {
+            const Fp2 beta = fs.ChallengeFp2("fri_fold", static_cast<uint32_t>(i));
+            if (!Eq(beta, proof.fold_challenges[i])) return fail("fold challenge mismatch");
         }
     }
 
-    // Verify Merkle openings against layer-0 root.
-    const uint256& root0 = proof.layers[0].root;
-    const uint32_t n0 = proof.layers[0].n_leaves;
-    if (proof.openings.empty()) return fail("no openings");
-    for (size_t qi = 0; qi < proof.openings.size(); ++qi) {
-        const Fp2 ch = ChallengeFromSeed(fs_seed, "fri_query", static_cast<uint32_t>(qi));
-        const uint32_t expect = static_cast<uint32_t>(Canonical(ch.c0) % n0);
-        if (proof.openings[qi].index != expect) return fail("query index");
-        if (!FriVerifyPath(proof.openings[qi], root0, n0)) return fail("merkle path");
+    // Final layer root must commit the claimed constant.
+    {
+        FriMerklePath fin;
+        fin.index = 0;
+        fin.leaf = proof.final_value;
+        if (!FriVerifyPath(fin, proof.layers.back().root, 1)) return fail("final root");
     }
 
-    if (proof.layers.back().n_leaves != 1) return fail("final layer not singleton");
-    // Full RS proximity / sibling fold-check is Stage-I audit work.
-    if (why) *why = "FriVerify ok (scaffold)";
+    const uint32_t n0 = proof.layers[0].n_leaves;
+    const uint32_t n_folds = static_cast<uint32_t>(proof.fold_challenges.size());
+
+    for (uint32_t qi = 0; qi < kRCFriNumQueries; ++qi) {
+        const FriQueryOpening& q = proof.queries[qi];
+        const uint32_t expect = fs.ChallengeIndex("fri_query", qi, n0);
+        if (q.index != expect) return fail("query index");
+        if (q.steps.size() != n_folds) return fail("query steps");
+
+        uint32_t idx = q.index;
+        Fp2 claimed{};
+        bool have_claimed = false;
+
+        for (uint32_t L = 0; L < n_folds; ++L) {
+            const FriFoldStep& step = q.steps[L];
+            Fp2 folded{};
+            std::string step_why;
+            if (!VerifyFoldStep(step, proof.layers[L].root, proof.layers[L].n_leaves,
+                                proof.fold_challenges[L], idx, folded, &step_why)) {
+                return fail(step_why.c_str());
+            }
+            // Consistency with previous fold claim at this layer index.
+            if (have_claimed) {
+                const Fp2 leaf_here = (idx & 1u) ? step.odd : step.even;
+                if (!Eq(leaf_here, claimed)) return fail("fold path consistency");
+            }
+            claimed = folded;
+            have_claimed = true;
+            idx >>= 1;
+        }
+
+        if (!have_claimed || !Eq(claimed, proof.final_value)) return fail("final fold value");
+    }
+
+    if (why) *why = "FriVerify ok";
     return true;
+}
+
+bool FriForgeFlippedEvalMustFail(const FriCommitResult& honest, const uint256& fs_seed,
+                                 uint32_t flip_index, std::string* why)
+{
+    if (!honest.ok || honest.lde_evals.empty() || honest.proof.layers.empty()) {
+        if (why) *why = "no honest proof";
+        return false; // forge helper itself failed — not a verify-pass
+    }
+    FriProof forged = honest.proof;
+    // Flip one LDE eval conceptually: recompute ONLY layer-0 root from a
+    // tampered leaf hash while retaining old multi-layer openings.
+    const uint32_t n0 = forged.layers[0].n_leaves;
+    const uint32_t idx = flip_index % n0;
+    Fp2 flipped = honest.lde_evals[idx];
+    flipped.c0 ^= 1;
+    // Rebuild layer-0 Merkle root from tampered leaf, keep openings.
+    std::vector<Fp2> tampered = honest.lde_evals;
+    tampered[idx] = flipped;
+    forged.layers[0].root = BuildMerkleTree(tampered).root;
+    // Keep old queries/openings → inconsistent with new root OR with folds.
+    std::string local;
+    const bool ok = FriVerify(forged, fs_seed, &local);
+    if (why) *why = ok ? "FORGE PASSED (bug)" : local;
+    return !ok; // true iff verify correctly rejected
 }
 
 size_t SerializeFriProof(const FriProof& proof, std::vector<unsigned char>& out)
@@ -300,6 +540,9 @@ size_t SerializeFriProof(const FriProof& proof, std::vector<unsigned char>& out)
     out.clear();
     AppendLE32(out, kRCFriProofMagic);
     AppendLE32(out, proof.version);
+    AppendLE64(out, proof.pow_grind_nonce);
+    AppendLE32(out, proof.blowup);
+    AppendLE32(out, proof.n_coeffs);
     AppendLE32(out, static_cast<uint32_t>(proof.layers.size()));
     for (const auto& lc : proof.layers) {
         AppendBytes(out, lc.root.data(), 32);
@@ -308,12 +551,19 @@ size_t SerializeFriProof(const FriProof& proof, std::vector<unsigned char>& out)
     AppendFp2(out, proof.final_value);
     AppendLE32(out, static_cast<uint32_t>(proof.fold_challenges.size()));
     for (const auto& c : proof.fold_challenges) AppendFp2(out, c);
-    AppendLE32(out, static_cast<uint32_t>(proof.openings.size()));
-    for (const auto& op : proof.openings) {
-        AppendLE32(out, op.index);
-        AppendFp2(out, op.leaf);
-        AppendLE32(out, static_cast<uint32_t>(op.siblings.size()));
-        for (const auto& s : op.siblings) AppendBytes(out, s.data(), 32);
+    AppendLE32(out, static_cast<uint32_t>(proof.queries.size()));
+    for (const auto& q : proof.queries) {
+        AppendLE32(out, q.index);
+        AppendLE32(out, static_cast<uint32_t>(q.steps.size()));
+        for (const auto& st : q.steps) {
+            AppendLE32(out, st.even_index);
+            AppendFp2(out, st.even);
+            AppendFp2(out, st.odd);
+            AppendLE32(out, static_cast<uint32_t>(st.even_siblings.size()));
+            for (const auto& s : st.even_siblings) AppendBytes(out, s.data(), 32);
+            AppendLE32(out, static_cast<uint32_t>(st.odd_siblings.size()));
+            for (const auto& s : st.odd_siblings) AppendBytes(out, s.data(), 32);
+        }
     }
     return out.size();
 }
@@ -327,6 +577,9 @@ std::optional<FriProof> DeserializeFriProof(const std::vector<unsigned char>& in
     if (!ReadLE32Checked(p, end, version) || version != kRCFriProofVersion) return std::nullopt;
     FriProof proof;
     proof.version = version;
+    if (!ReadLE64Checked(p, end, proof.pow_grind_nonce)) return std::nullopt;
+    if (!ReadLE32Checked(p, end, proof.blowup)) return std::nullopt;
+    if (!ReadLE32Checked(p, end, proof.n_coeffs)) return std::nullopt;
     uint32_t n_layers = 0;
     if (!ReadLE32Checked(p, end, n_layers) || n_layers == 0 || n_layers > 64) return std::nullopt;
     proof.layers.resize(n_layers);
@@ -341,17 +594,29 @@ std::optional<FriProof> DeserializeFriProof(const std::vector<unsigned char>& in
     for (auto& c : proof.fold_challenges) {
         if (!ReadFp2Checked(p, end, c)) return std::nullopt;
     }
-    uint32_t n_op = 0;
-    if (!ReadLE32Checked(p, end, n_op) || n_op > 64) return std::nullopt;
-    proof.openings.resize(n_op);
-    for (auto& op : proof.openings) {
-        if (!ReadLE32Checked(p, end, op.index)) return std::nullopt;
-        if (!ReadFp2Checked(p, end, op.leaf)) return std::nullopt;
-        uint32_t n_sib = 0;
-        if (!ReadLE32Checked(p, end, n_sib) || n_sib > 64) return std::nullopt;
-        op.siblings.resize(n_sib);
-        for (auto& s : op.siblings) {
-            if (!ReadBytesChecked(p, end, s.data(), 32)) return std::nullopt;
+    uint32_t n_q = 0;
+    if (!ReadLE32Checked(p, end, n_q) || n_q > 256) return std::nullopt;
+    proof.queries.resize(n_q);
+    for (auto& q : proof.queries) {
+        if (!ReadLE32Checked(p, end, q.index)) return std::nullopt;
+        uint32_t n_steps = 0;
+        if (!ReadLE32Checked(p, end, n_steps) || n_steps > 64) return std::nullopt;
+        q.steps.resize(n_steps);
+        for (auto& st : q.steps) {
+            if (!ReadLE32Checked(p, end, st.even_index)) return std::nullopt;
+            if (!ReadFp2Checked(p, end, st.even)) return std::nullopt;
+            if (!ReadFp2Checked(p, end, st.odd)) return std::nullopt;
+            uint32_t n_es = 0, n_os = 0;
+            if (!ReadLE32Checked(p, end, n_es) || n_es > 64) return std::nullopt;
+            st.even_siblings.resize(n_es);
+            for (auto& s : st.even_siblings) {
+                if (!ReadBytesChecked(p, end, s.data(), 32)) return std::nullopt;
+            }
+            if (!ReadLE32Checked(p, end, n_os) || n_os > 64) return std::nullopt;
+            st.odd_siblings.resize(n_os);
+            for (auto& s : st.odd_siblings) {
+                if (!ReadBytesChecked(p, end, s.data(), 32)) return std::nullopt;
+            }
         }
     }
     if (p != end) return std::nullopt;

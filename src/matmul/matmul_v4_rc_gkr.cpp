@@ -15,12 +15,14 @@
 
 #include <cassert>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
 #include <mutex>
 #include <sstream>
+#include <string>
 #include <utility>
 
 namespace matmul::v4::rc {
@@ -305,7 +307,47 @@ void AbsorbEpisode(FsTranscript& fs, const RCEpisodeParams& p)
 
 uint256 DerivePowBind(const uint256& claimed_digest)
 {
-    return DeriveTagged(claimed_digest, "BTX_RC_GKR_POW_BIND_V3");
+    return DeriveTagged(claimed_digest, "BTX_RC_GKR_POW_BIND_V4");
+}
+
+uint256 Sha256Tagged(const char* tag, size_t taglen, const unsigned char* data, size_t len)
+{
+    CSHA256 hasher;
+    hasher.Write(reinterpret_cast<const unsigned char*>(tag), taglen);
+    if (len > 0) hasher.Write(data, len);
+    uint8_t out[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(out);
+    return uint256{Span<const unsigned char>{out, sizeof(out)}};
+}
+
+uint256 Sha256TaggedU32(const char* tag, size_t taglen, const uint256& a, uint32_t le32)
+{
+    unsigned char buf[32 + 4];
+    std::memcpy(buf, a.data(), 32);
+    WriteLE32(buf + 32, le32);
+    return Sha256Tagged(tag, taglen, buf, sizeof(buf));
+}
+
+uint256 DeriveOperandSeedLocal(const uint256& seed_r, const char* tag)
+{
+    return Sha256Tagged(tag, std::strlen(tag), seed_r.data(), 32);
+}
+
+uint256 EpisodeDigestFromRoots(const std::vector<uint256>& round_roots)
+{
+    std::vector<unsigned char> buf;
+    buf.reserve(sizeof(kRCEpisodeTag) - 1 + round_roots.size() * 32);
+    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCEpisodeTag),
+               reinterpret_cast<const unsigned char*>(kRCEpisodeTag) + sizeof(kRCEpisodeTag) - 1);
+    for (const uint256& root : round_roots) {
+        buf.insert(buf.end(), root.begin(), root.end());
+    }
+    return Sha256dBytes(buf.data(), buf.size());
+}
+
+size_t ExpectedLayerCount(const RCEpisodeParams& p)
+{
+    return static_cast<size_t>(p.rounds) * (2u + 3u * static_cast<size_t>(p.L_lyr));
 }
 
 void AbsorbPowBind(FsTranscript& fs, const uint256& claimed_digest, uint256& out_bind)
@@ -325,18 +367,6 @@ bool EnvFlagIsZero(const char* name)
 {
     const char* e = std::getenv(name);
     return e != nullptr && e[0] == '0' && e[1] == '\0';
-}
-
-/** Scaffold slice: full toy OK; larger shapes shrink to toy and flag budget. */
-RCEpisodeParams ArithEpisodeShape(const RCEpisodeParams& params, bool& shrunk)
-{
-    shrunk = false;
-    if (params.n_ctx <= 64 && params.b_seq <= 64 && params.d_model <= 64 &&
-        params.n_q <= 64 && params.d_head <= 64) {
-        return params;
-    }
-    shrunk = true;
-    return MakeToyRCEpisodeParams();
 }
 
 Fp2 MleEvalMatrix(const std::vector<Fp2>& mat, uint32_t rows, uint32_t cols,
@@ -380,124 +410,143 @@ void ExactInt64Gemm(const std::vector<int8_t>& A, uint32_t m, uint32_t k,
 }
 
 /**
- * Build REAL-episode layer wires (toy-shaped). Phase-1 Q·Kᵀ and S·V plus one
- * Phase-2 forward residual GEMM — matching the consensus episode structure,
- * not a digest-bound 32×32 synth proxy.
+ * Build ALL-PHASE real-episode layer wires for every round and every Phase-1 /
+ * Phase-2 GEMM present in the consensus episode (Q·Kᵀ, S·V, Fwd, Bwd, Wgrad).
+ * Round seeds match RunEpisode via Sha256TaggedU32 + round_roots.
  */
 std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
-                                              const RCEpisodeParams& p)
+                                              const RCEpisodeParams& p,
+                                              const std::vector<uint256>& round_roots,
+                                              std::vector<uint256>& out_seeds)
 {
+    assert(ValidateRCEpisodeParams(p));
+    assert(round_roots.size() == p.rounds);
     std::vector<LayerWire> out;
-    const uint256 sigma = matmul::v4::DeriveSigma(header);
-    uint256 seed_r = DeriveTagged(sigma, kRCRoundTag); // round-0 domain via tagged sigma
-    // Match RunEpisode round-0: Sha256TaggedU32(kRCRoundTag, sigma, 0) — approximate
-    // with DeriveTagged for scaffold binding (public seed_r still FS-bound to digest).
-    {
-        std::vector<unsigned char> buf;
-        buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCRoundTag),
-                   reinterpret_cast<const unsigned char*>(kRCRoundTag) + sizeof(kRCRoundTag) - 1);
-        buf.insert(buf.end(), sigma.begin(), sigma.end());
-        unsigned char le[4];
-        WriteLE32(le, 0);
-        buf.insert(buf.end(), le, le + 4);
-        seed_r = Sha256dBytes(buf.data(), buf.size());
-    }
+    out.reserve(ExpectedLayerCount(p));
+    out_seeds.clear();
+    out_seeds.reserve(p.rounds);
 
-    // Match DeriveOperandSeed: SHA256(tag ‖ seed_r) — single hash, not SHA256d.
-    auto operand = [&](const char* tag) {
-        uint8_t out[CSHA256::OUTPUT_SIZE];
-        CSHA256()
-            .Write(reinterpret_cast<const unsigned char*>(tag), std::strlen(tag))
-            .Write(seed_r.data(), 32)
-            .Finalize(out);
-        return uint256{Span<const unsigned char>{out, sizeof(out)}};
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+
+    auto push_wire = [&](RCGkrLayerKind kind, uint32_t round, uint32_t layer, uint32_t m,
+                         uint32_t n, uint32_t k, std::vector<int8_t> A, std::vector<int8_t> B,
+                         std::vector<int64_t> Y, uint256 prf, std::vector<int8_t> extract) {
+        LayerWire w;
+        w.kind = kind;
+        w.round = round;
+        w.layer = layer;
+        w.m = m;
+        w.n = n;
+        w.k = k;
+        w.A = ToFp2I8(A);
+        w.B = ToFp2I8(B);
+        w.Y = ToFp2I64(Y);
+        w.extract_prf = prf;
+        w.extract_out = std::move(extract);
+        out.push_back(std::move(w));
     };
 
-    // Phase-1: Q·Kᵀ  (n_q × n_ctx, contract d_head) — GEMM native product layer.
-    {
-        const auto Q = ExpandMxDequantInt8(operand("BTX_RC_Q_V1"), p.n_q, p.d_head);
-        const auto K = ExpandMxDequantInt8(operand("BTX_RC_KV_K_V1"), p.n_ctx, p.d_head);
-        // B for Q·Kᵀ is Kᵀ conceptually: we form B as d_head × n_ctx from K rows.
-        std::vector<int8_t> Kt(static_cast<size_t>(p.d_head) * p.n_ctx);
-        for (uint32_t t = 0; t < p.n_ctx; ++t)
-            for (uint32_t d = 0; d < p.d_head; ++d)
-                Kt[static_cast<size_t>(d) * p.n_ctx + t] =
-                    K[static_cast<size_t>(t) * p.d_head + d];
-        std::vector<int64_t> Y;
-        ExactInt64Gemm(Q, p.n_q, p.d_head, Kt, p.n_ctx, Y);
-        const uint256 prf_S =
-            lt::DeriveMatExpandPrfKey(operand("BTX_RC_PRF_S_V1"));
-        std::vector<int8_t> Sout(Y.size());
-        ExtractMXMatrixInt64(prf_S, Y.data(), p.n_q, p.n_ctx, Sout.data());
-        LayerWire w;
-        w.kind = RCGkrLayerKind::GemmPhase1QKt;
-        w.m = p.n_q;
-        w.n = p.n_ctx;
-        w.k = p.d_head;
-        w.A = ToFp2I8(Q);
-        w.B = ToFp2I8(Kt);
-        w.Y = ToFp2I64(Y);
-        w.extract_prf = prf_S;
-        w.extract_out = std::move(Sout);
-        out.push_back(std::move(w));
-    }
+    for (uint32_t r = 0; r < p.rounds; ++r) {
+        uint256 seed_r;
+        if (r == 0) {
+            seed_r = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0);
+        } else {
+            seed_r = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, round_roots[r - 1], r);
+        }
+        out_seeds.push_back(seed_r);
 
-    // Phase-1: S·V using extracted S and V (n_q × d_head, contract n_ctx).
-    {
-        const auto& S = out.back().extract_out;
-        const auto V = ExpandMxDequantInt8(operand("BTX_RC_KV_V_V1"), p.n_ctx, p.d_head);
-        std::vector<int64_t> Y;
-        ExactInt64Gemm(S, p.n_q, p.n_ctx, V, p.d_head, Y);
-        const uint256 prf_Z =
-            lt::DeriveMatExpandPrfKey(operand("BTX_RC_PRF_Z_V1"));
-        std::vector<int8_t> Zout(Y.size());
-        ExtractMXMatrixInt64(prf_Z, Y.data(), p.n_q, p.d_head, Zout.data());
-        LayerWire w;
-        w.kind = RCGkrLayerKind::GemmPhase1SV;
-        w.m = p.n_q;
-        w.n = p.d_head;
-        w.k = p.n_ctx;
-        w.A = ToFp2I8(S);
-        w.B = ToFp2I8(V);
-        w.Y = ToFp2I64(Y);
-        w.extract_prf = prf_Z;
-        w.extract_out = std::move(Zout);
-        out.push_back(std::move(w));
-    }
+        auto operand = [&](const char* tag) { return DeriveOperandSeedLocal(seed_r, tag); };
 
-    // Phase-2 forward layer 0: X·Wᵀ + residual (bound via int64 then Extract).
-    {
-        const auto X0 = ExpandMxDequantInt8(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model);
-        const auto W = ExpandMxDequantInt8(operand("BTX_RC_W_0_V1"), p.d_model, p.d_model);
-        std::vector<int8_t> Wt(static_cast<size_t>(p.d_model) * p.d_model);
-        for (uint32_t i = 0; i < p.d_model; ++i)
-            for (uint32_t j = 0; j < p.d_model; ++j)
-                Wt[static_cast<size_t>(j) * p.d_model + i] =
-                    W[static_cast<size_t>(i) * p.d_model + j];
-        // Product layer claims X·Wᵀ only; residual is added pre-Extract (H5).
-        std::vector<int64_t> Y_gemm;
-        ExactInt64Gemm(X0, p.b_seq, p.d_model, Wt, p.d_model, Y_gemm);
-        std::vector<int64_t> Y_acc = Y_gemm;
-        for (uint32_t i = 0; i < p.b_seq; ++i)
-            for (uint32_t j = 0; j < p.d_model; ++j)
-                Y_acc[static_cast<size_t>(i) * p.d_model + j] +=
-                    X0[static_cast<size_t>(i) * p.d_model + j];
-        const uint256 prf =
-            lt::DeriveMatExpandPrfKey(operand("BTX_RC_PRF_FWD_0_V1"));
-        std::vector<int8_t> X1(Y_acc.size());
-        ExtractMXMatrixInt64(prf, Y_acc.data(), p.b_seq, p.d_model, X1.data());
-        LayerWire w;
-        w.kind = RCGkrLayerKind::GemmPhase2Fwd;
-        w.layer = 0;
-        w.m = p.b_seq;
-        w.n = p.d_model;
-        w.k = p.d_model;
-        w.A = ToFp2I8(X0);
-        w.B = ToFp2I8(Wt);
-        w.Y = ToFp2I64(Y_gemm); // product claim = GEMM only
-        w.extract_prf = prf;
-        w.extract_out = std::move(X1);
-        out.push_back(std::move(w));
+        // Phase-1: Q·Kᵀ then Extract S; S·V then Extract Z.
+        std::vector<int8_t> S_mat;
+        {
+            const auto Q = ExpandMxDequantInt8(operand("BTX_RC_Q_V1"), p.n_q, p.d_head);
+            const auto K = ExpandMxDequantInt8(operand("BTX_RC_KV_K_V1"), p.n_ctx, p.d_head);
+            std::vector<int8_t> Kt(static_cast<size_t>(p.d_head) * p.n_ctx);
+            for (uint32_t t = 0; t < p.n_ctx; ++t)
+                for (uint32_t d = 0; d < p.d_head; ++d)
+                    Kt[static_cast<size_t>(d) * p.n_ctx + t] =
+                        K[static_cast<size_t>(t) * p.d_head + d];
+            std::vector<int64_t> Y;
+            ExactInt64Gemm(Q, p.n_q, p.d_head, Kt, p.n_ctx, Y);
+            const uint256 prf_S = lt::DeriveMatExpandPrfKey(operand("BTX_RC_PRF_S_V1"));
+            S_mat.assign(Y.size(), 0);
+            ExtractMXMatrixInt64(prf_S, Y.data(), p.n_q, p.n_ctx, S_mat.data());
+            push_wire(RCGkrLayerKind::GemmPhase1QKt, r, 0, p.n_q, p.n_ctx, p.d_head, Q, Kt, Y,
+                      prf_S, S_mat);
+        }
+        {
+            const auto V = ExpandMxDequantInt8(operand("BTX_RC_KV_V_V1"), p.n_ctx, p.d_head);
+            std::vector<int64_t> Y;
+            ExactInt64Gemm(S_mat, p.n_q, p.n_ctx, V, p.d_head, Y);
+            const uint256 prf_Z = lt::DeriveMatExpandPrfKey(operand("BTX_RC_PRF_Z_V1"));
+            std::vector<int8_t> Zout(Y.size());
+            ExtractMXMatrixInt64(prf_Z, Y.data(), p.n_q, p.d_head, Zout.data());
+            push_wire(RCGkrLayerKind::GemmPhase1SV, r, 0, p.n_q, p.d_head, p.n_ctx, S_mat, V, Y,
+                      prf_Z, std::move(Zout));
+        }
+
+        // Phase-2: all forward layers, then bwd+wgrad from L-1 down to 0.
+        std::vector<std::vector<int8_t>> X(p.L_lyr + 1);
+        std::vector<std::vector<int8_t>> W(p.L_lyr);
+        std::vector<uint256> prf_fwd(p.L_lyr), prf_bwd(p.L_lyr), prf_wg(p.L_lyr);
+        X[0] = ExpandMxDequantInt8(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model);
+        for (uint32_t l = 0; l < p.L_lyr; ++l) {
+            char tag[40];
+            std::snprintf(tag, sizeof(tag), "BTX_RC_W_%u_V1", l);
+            W[l] = ExpandMxDequantInt8(operand(tag), p.d_model, p.d_model);
+            std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_FWD_%u_V1", l);
+            prf_fwd[l] = lt::DeriveMatExpandPrfKey(operand(tag));
+            std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_BWD_%u_V1", l);
+            prf_bwd[l] = lt::DeriveMatExpandPrfKey(operand(tag));
+            std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_WG_%u_V1", l);
+            prf_wg[l] = lt::DeriveMatExpandPrfKey(operand(tag));
+        }
+
+        for (uint32_t l = 0; l < p.L_lyr; ++l) {
+            std::vector<int8_t> Wt(static_cast<size_t>(p.d_model) * p.d_model);
+            for (uint32_t i = 0; i < p.d_model; ++i)
+                for (uint32_t j = 0; j < p.d_model; ++j)
+                    Wt[static_cast<size_t>(j) * p.d_model + i] =
+                        W[l][static_cast<size_t>(i) * p.d_model + j];
+            std::vector<int64_t> Y_gemm;
+            ExactInt64Gemm(X[l], p.b_seq, p.d_model, Wt, p.d_model, Y_gemm);
+            std::vector<int64_t> Y_acc = Y_gemm;
+            for (uint32_t i = 0; i < p.b_seq; ++i)
+                for (uint32_t j = 0; j < p.d_model; ++j)
+                    Y_acc[static_cast<size_t>(i) * p.d_model + j] +=
+                        X[l][static_cast<size_t>(i) * p.d_model + j];
+            X[l + 1].assign(Y_acc.size(), 0);
+            ExtractMXMatrixInt64(prf_fwd[l], Y_acc.data(), p.b_seq, p.d_model, X[l + 1].data());
+            push_wire(RCGkrLayerKind::GemmPhase2Fwd, r, l, p.b_seq, p.d_model, p.d_model, X[l],
+                      Wt, Y_gemm, prf_fwd[l], X[l + 1]);
+        }
+
+        std::vector<std::vector<int8_t>> G(p.L_lyr + 1);
+        G[p.L_lyr] = ExpandMxDequantInt8(operand("BTX_RC_GL_V1"), p.b_seq, p.d_model);
+        for (int32_t li = static_cast<int32_t>(p.L_lyr) - 1; li >= 0; --li) {
+            const uint32_t l = static_cast<uint32_t>(li);
+            // Bwd: G[l] = Extract(G[l+1] · W[l]) — ExactGemm(G, W).
+            std::vector<int64_t> Y_bwd;
+            ExactInt64Gemm(G[l + 1], p.b_seq, p.d_model, W[l], p.d_model, Y_bwd);
+            G[l].assign(Y_bwd.size(), 0);
+            ExtractMXMatrixInt64(prf_bwd[l], Y_bwd.data(), p.b_seq, p.d_model, G[l].data());
+            push_wire(RCGkrLayerKind::GemmPhase2Bwd, r, l, p.b_seq, p.d_model, p.d_model,
+                      G[l + 1], W[l], Y_bwd, prf_bwd[l], G[l]);
+
+            // Wgrad: D = Extract(Gᵀ · X) via ExactInt64Gemm(Gt, X).
+            std::vector<int8_t> Gt(static_cast<size_t>(p.d_model) * p.b_seq);
+            for (uint32_t t = 0; t < p.b_seq; ++t)
+                for (uint32_t row = 0; row < p.d_model; ++row)
+                    Gt[static_cast<size_t>(row) * p.b_seq + t] =
+                        G[l + 1][static_cast<size_t>(t) * p.d_model + row];
+            std::vector<int64_t> Y_wg;
+            ExactInt64Gemm(Gt, p.d_model, p.b_seq, X[l], p.d_model, Y_wg);
+            std::vector<int8_t> Dout(Y_wg.size());
+            ExtractMXMatrixInt64(prf_wg[l], Y_wg.data(), p.d_model, p.d_model, Dout.data());
+            push_wire(RCGkrLayerKind::GemmPhase2Wgrad, r, l, p.d_model, p.d_model, p.b_seq, Gt,
+                      X[l], Y_wg, prf_wg[l], std::move(Dout));
+        }
     }
 
     return out;
@@ -510,7 +559,8 @@ void MarkBudget(RCGkrTiming& t, RCGkrProof& p)
     p.over_budget = t.over_budget;
     if (t.over_budget) {
         p.shrink_note =
-            "over soft budget → shrink-to-VerifyBoundedExactReplay (ε=0). "
+            "over soft budget → shrink-to-VerifyBoundedExactReplay (ε=0 shipping "
+            "fallback). ALL-PHASE arithmetization retained (no shrink-to-toy). "
             "NOT inventing production silicon numbers. HBM GKR PARKED.";
         t.used_shrink_fallback = true;
         t.note = p.shrink_note;
@@ -518,7 +568,10 @@ void MarkBudget(RCGkrTiming& t, RCGkrProof& p)
 }
 
 RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeParams& episode,
-                                 const std::vector<LayerWire>& wires, const char* path_note)
+                                 const std::vector<LayerWire>& wires,
+                                 const std::vector<uint256>& round_seeds,
+                                 const std::vector<uint256>& round_roots,
+                                 const uint256& episode_sigma, const char* path_note)
 {
     RCGkrProveResult out;
     const size_t rss0 = CurrentRssKiB();
@@ -527,11 +580,19 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
     p.version = kRCGkrProofVersion;
     p.claimed_digest = claimed_digest;
     p.episode = episode;
+    p.round_seeds = round_seeds;
+    p.round_roots = round_roots;
+    p.episode_sigma = episode_sigma;
 
     FsTranscript fs(kRCGkrDomainTag);
     AbsorbEpisode(fs, episode);
     fs.AbsorbUint256(claimed_digest);
     AbsorbPowBind(fs, claimed_digest, p.pow_bind);
+    fs.AbsorbUint256(episode_sigma);
+    fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("round_seeds"), 11);
+    for (const auto& s : round_seeds) fs.AbsorbUint256(s);
+    fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("round_roots"), 11);
+    for (const auto& rt : round_roots) fs.AbsorbUint256(rt);
 
     std::vector<Fp2> trace_evals;
     std::vector<Fp2> lookup_keys;
@@ -587,8 +648,8 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
     fs.AbsorbFp2(logup);
 
     const uint256 fri_seed = fs.Challenge("fri_seed");
-    auto trace_c = FriCommitAndFold(trace_evals, fri_seed, /*n_openings=*/2);
-    auto lookup_c = FriCommitAndFold(lookup_keys, fri_seed, /*n_openings=*/2);
+    auto trace_c = FriCommitAndFold(trace_evals, fri_seed);
+    auto lookup_c = FriCommitAndFold(lookup_keys, fri_seed);
     p.trace_fri = std::move(trace_c.proof);
     p.lookup_fri = std::move(lookup_c.proof);
     fs.AbsorbUint256(p.trace_fri.layers.empty() ? uint256{} : p.trace_fri.layers[0].root);
@@ -606,6 +667,11 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
 }
 
 } // namespace
+
+size_t RCGkrExpectedLayerCount(const RCEpisodeParams& p)
+{
+    return static_cast<size_t>(p.rounds) * (2u + 3u * static_cast<size_t>(p.L_lyr));
+}
 
 bool EnvRCWinnerGkrEnabled() { return EnvFlagIsOne("BTX_RC_WINNER_GKR"); }
 bool EnvRCVerifyGkrEnabled() { return EnvFlagIsOne("BTX_RC_VERIFY_GKR"); }
@@ -709,7 +775,8 @@ RCGkrProveResult ProveWinnerFromSegments(const uint256& claimed_digest, const Di
     ep.n_q = shape.m;
     ep.n_ctx = shape.n;
     ep.d_head = shape.k >= 32 ? 32 : shape.k;
-    auto r = ProveFromLayers(claimed_digest, ep, {w},
+    auto r = ProveFromLayers(claimed_digest, ep, {w}, /*round_seeds=*/{}, /*round_roots=*/{},
+                             /*episode_sigma=*/uint256{},
                              "DEPRECATED ProveWinnerFromSegments synth→succinct");
     r.proof.shape = shape;
     return r;
@@ -728,35 +795,39 @@ RCGkrProveResult ProveWinnerSynth(const uint256& seed, const DistSynthShape& sha
 RCGkrProveResult ProveWinnerEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
                                     int32_t height, const uint256& resealed_digest)
 {
-    (void)height;
-    bool shrunk = false;
-    const RCEpisodeParams ep = ArithEpisodeShape(params, shrunk);
-    const auto wires = BuildRealEpisodeLayers(header, ep);
-    auto r = ProveFromLayers(resealed_digest, ep, wires,
-                             "ProveWinnerEpisode: REAL episode GEMM+Extract LogUp+FRI");
-    if (shrunk) {
-        r.proof.over_budget = true;
-        r.proof.shrink_note =
-            "episode params exceeded scaffold slice → shrink-to-toy arithmetization + "
-            "VerifyBoundedExactReplay for consensus. NOT production-complete.";
-        r.timing.over_budget = true;
-        r.timing.used_shrink_fallback = true;
-        r.timing.note = r.proof.shrink_note;
+    // M2: ALWAYS arithmetize the actual params — no shrink-to-toy.
+    std::vector<RCRoundTranscript> transcripts;
+    const uint256 dig =
+        RecomputeResidentCurriculumReference(header, params, height, {}, &transcripts);
+    (void)dig;
+    std::vector<uint256> roots(params.rounds);
+    for (uint32_t r = 0; r < params.rounds; ++r) {
+        roots[r] = transcripts[r].round_root;
     }
-    return r;
+    std::vector<uint256> seeds;
+    const auto wires = BuildRealEpisodeLayers(header, params, roots, seeds);
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    return ProveFromLayers(resealed_digest, params, wires, seeds, roots, sigma,
+                           "ProveWinnerEpisode: ALL-PHASE GEMM+Extract LogUp+FRI (no shrink-to-toy)");
 }
 
 RCGkrProveResult ProveWinnerCoupled(const CBlockHeader& header, int32_t height,
                                     const RCCoupParams& params, const uint256& resealed_digest)
 {
-    (void)height;
     (void)params;
-    // Coupled: reuse toy real-episode shape as scaffold stand-in; mark note.
+    // M2: Coupled barrier all-to-all product layers are not separately arithmetized.
+    // Reuse ALL-PHASE episode layers (same kinds) without shrink-to-toy substitution.
+    // Callers needing non-toy episode proofs use ProveWinnerEpisode(real params).
     const auto ep = MakeToyRCEpisodeParams();
-    const auto wires = BuildRealEpisodeLayers(header, ep);
-    auto r = ProveFromLayers(resealed_digest, ep, wires,
-                             "ProveWinnerCoupled: scaffold via real-episode toy layers");
-    return r;
+    std::vector<RCRoundTranscript> transcripts;
+    (void)RecomputeResidentCurriculumReference(header, ep, height, {}, &transcripts);
+    std::vector<uint256> roots(ep.rounds);
+    for (uint32_t r = 0; r < ep.rounds; ++r) roots[r] = transcripts[r].round_root;
+    std::vector<uint256> seeds;
+    const auto wires = BuildRealEpisodeLayers(header, ep, roots, seeds);
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    return ProveFromLayers(resealed_digest, ep, wires, seeds, roots, sigma,
+                           kRCGkrCoupledArithStatement);
 }
 
 bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
@@ -784,12 +855,54 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
     if (proof.layers.empty()) return fail("no layers");
     if (proof.pow_bind != DerivePowBind(proof.claimed_digest)) return fail("pow_bind");
 
+    // Round-seed / tile-tree consistency (skip for DEPRECATED synth path with empty roots).
+    if (!proof.round_roots.empty() || !proof.round_seeds.empty()) {
+        if (proof.round_roots.size() != proof.episode.rounds) return fail("round_roots size");
+        if (proof.round_seeds.size() != proof.episode.rounds) return fail("round_seeds size");
+        if (EpisodeDigestFromRoots(proof.round_roots) != proof.claimed_digest) {
+            return fail("episode digest vs round_roots");
+        }
+        for (uint32_t r = 0; r < proof.episode.rounds; ++r) {
+            uint256 expect;
+            if (r == 0) {
+                expect = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1,
+                                         proof.episode_sigma, 0);
+            } else {
+                expect = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1,
+                                         proof.round_roots[r - 1], r);
+            }
+            if (expect != proof.round_seeds[r]) return fail("round_seed chain");
+        }
+        if (proof.layers.size() != ExpectedLayerCount(proof.episode)) {
+            return fail("layer count");
+        }
+        bool saw_qkt = false, saw_sv = false, saw_fwd = false, saw_bwd = false, saw_wg = false;
+        for (const auto& lc : proof.layers) {
+            switch (lc.kind) {
+            case RCGkrLayerKind::GemmPhase1QKt: saw_qkt = true; break;
+            case RCGkrLayerKind::GemmPhase1SV: saw_sv = true; break;
+            case RCGkrLayerKind::GemmPhase2Fwd: saw_fwd = true; break;
+            case RCGkrLayerKind::GemmPhase2Bwd: saw_bwd = true; break;
+            case RCGkrLayerKind::GemmPhase2Wgrad: saw_wg = true; break;
+            default: break;
+            }
+        }
+        if (!(saw_qkt && saw_sv && saw_fwd && saw_bwd && saw_wg)) {
+            return fail("missing ALL-PHASE layer kind");
+        }
+    }
+
     FsTranscript fs(kRCGkrDomainTag);
     AbsorbEpisode(fs, proof.episode);
     fs.AbsorbUint256(proof.claimed_digest);
     uint256 bind{};
     AbsorbPowBind(fs, proof.claimed_digest, bind);
     if (bind != proof.pow_bind) return fail("pow_bind fs");
+    fs.AbsorbUint256(proof.episode_sigma);
+    fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("round_seeds"), 11);
+    for (const auto& s : proof.round_seeds) fs.AbsorbUint256(s);
+    fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("round_roots"), 11);
+    for (const auto& rt : proof.round_roots) fs.AbsorbUint256(rt);
 
     for (const auto& lc : proof.layers) {
         const uint32_t nu_i = Log2Exact(RCGkrNextPow2(lc.m));
@@ -861,6 +974,11 @@ size_t SerializeRCGkrProof(const RCGkrProof& proof, std::vector<unsigned char>& 
     AppendLE32(out, proof.episode.d_model);
     AppendLE32(out, proof.episode.b_seq);
     AppendLE32(out, proof.episode.T_leaf);
+    AppendLE32(out, static_cast<uint32_t>(proof.round_seeds.size()));
+    for (const auto& s : proof.round_seeds) AppendBytes(out, s.data(), 32);
+    AppendLE32(out, static_cast<uint32_t>(proof.round_roots.size()));
+    for (const auto& rt : proof.round_roots) AppendBytes(out, rt.data(), 32);
+    AppendBytes(out, proof.episode_sigma.data(), 32);
     AppendLE32(out, static_cast<uint32_t>(proof.layers.size()));
     for (const auto& lc : proof.layers) {
         AppendLE32(out, static_cast<uint32_t>(lc.kind));
@@ -915,8 +1033,21 @@ std::optional<RCGkrProof> DeserializeRCGkrProof(const std::vector<unsigned char>
     if (!ReadLE32Checked(p, end, proof.episode.b_seq)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.episode.T_leaf)) return std::nullopt;
 
+    uint32_t n_seeds = 0, n_roots = 0;
+    if (!ReadLE32Checked(p, end, n_seeds) || n_seeds > 64) return std::nullopt;
+    proof.round_seeds.resize(n_seeds);
+    for (auto& s : proof.round_seeds) {
+        if (!ReadBytesChecked(p, end, s.data(), 32)) return std::nullopt;
+    }
+    if (!ReadLE32Checked(p, end, n_roots) || n_roots > 64) return std::nullopt;
+    proof.round_roots.resize(n_roots);
+    for (auto& rt : proof.round_roots) {
+        if (!ReadBytesChecked(p, end, rt.data(), 32)) return std::nullopt;
+    }
+    if (!ReadBytesChecked(p, end, proof.episode_sigma.data(), 32)) return std::nullopt;
+
     uint32_t n_layers = 0;
-    if (!ReadLE32Checked(p, end, n_layers) || n_layers == 0 || n_layers > 64) return std::nullopt;
+    if (!ReadLE32Checked(p, end, n_layers) || n_layers == 0 || n_layers > 1024) return std::nullopt;
     proof.layers.resize(n_layers);
     for (auto& lc : proof.layers) {
         uint32_t kind = 0;
@@ -1213,7 +1344,17 @@ std::string MeasureWinnerGkrToyMedium(const uint256& seed)
         header.seed_b.data()[i] = static_cast<unsigned char>(0x22);
     }
 
-    auto one = [&](const RCEpisodeParams& params, const char* label) {
+    auto one = [&](const RCEpisodeParams& params, const char* label, bool do_prove) {
+        if (!do_prove) {
+            std::ostringstream os;
+            os << "  \"" << label << "\": {\n"
+               << "    \"n_ctx\": " << params.n_ctx << ", \"b_seq\": " << params.b_seq << ",\n"
+               << "    \"skipped\": true,\n"
+               << "    \"note\": \"M2: medium b_seq ALL-PHASE GKR not CI-safe; ExactReplay for shipping\",\n"
+               << "    \"ok\": false\n"
+               << "  }";
+            return os.str();
+        }
         const uint256 dig = RecomputeResidentCurriculumReference(header, params, 0);
         const auto pr = ProveWinnerEpisode(header, params, 0, dig);
         RCGkrTiming vt;
@@ -1239,8 +1380,8 @@ std::string MeasureWinnerGkrToyMedium(const uint256& seed)
        << "  \"soundness\": \"" << kRCGkrSoundnessBoundStatement << "\",\n"
        << "  \"reality_guardrail\": \"" << kRCGkrRealityGuardrail << "\",\n"
        << "  \"shadow\": \"" << kRCGkrShadowStatement << "\",\n"
-       << one(MakeToyRCEpisodeParams(), "toy") << ",\n"
-       << one(MakeMediumRCEpisodeParams(), "medium") << "\n"
+       << one(MakeToyRCEpisodeParams(), "toy", /*do_prove=*/true) << ",\n"
+       << one(MakeMediumRCEpisodeParams(), "medium", /*do_prove=*/false) << "\n"
        << "}\n";
     return os.str();
 }
@@ -1249,19 +1390,18 @@ std::string MeasureWinnerGkrCurveCsv(const CBlockHeader& header)
 {
     std::ostringstream os;
     os << "label,n_ctx,b_seq,prove_s,verify_s,proof_bytes,peak_rss_kib,over_budget,ok\n";
-    const RCEpisodeParams shapes[2] = {MakeToyRCEpisodeParams(), MakeMediumRCEpisodeParams()};
-    const char* labels[2] = {"toy", "medium"};
-    for (int i = 0; i < 2; ++i) {
-        const auto& params = shapes[i];
-        const uint256 dig = RecomputeResidentCurriculumReference(header, params, 0);
-        const auto pr = ProveWinnerEpisode(header, params, 0, dig);
-        RCGkrTiming vt;
-        const bool ok = VerifyWinnerProof(pr.proof, &vt);
-        os << labels[i] << "," << params.n_ctx << "," << params.b_seq << "," << pr.timing.prove_s
-           << "," << vt.verify_s << "," << pr.timing.proof_bytes << ","
-           << std::max(pr.timing.peak_rss_kib, vt.peak_rss_kib) << ","
-           << (pr.timing.over_budget ? 1 : 0) << "," << (ok ? 1 : 0) << "\n";
-    }
+    // Toy only — medium b_seq=8192 ALL-PHASE GKR is not CI-safe (M2).
+    const RCEpisodeParams params = MakeToyRCEpisodeParams();
+    const uint256 dig = RecomputeResidentCurriculumReference(header, params, 0);
+    const auto pr = ProveWinnerEpisode(header, params, 0, dig);
+    RCGkrTiming vt;
+    const bool ok = VerifyWinnerProof(pr.proof, &vt);
+    os << "toy," << params.n_ctx << "," << params.b_seq << "," << pr.timing.prove_s << ","
+       << vt.verify_s << "," << pr.timing.proof_bytes << ","
+       << std::max(pr.timing.peak_rss_kib, vt.peak_rss_kib) << ","
+       << (pr.timing.over_budget ? 1 : 0) << "," << (ok ? 1 : 0) << "\n";
+    os << "medium," << MakeMediumRCEpisodeParams().n_ctx << "," << MakeMediumRCEpisodeParams().b_seq
+       << ",,,0,0,1,0\n";
     return os.str();
 }
 

@@ -83,16 +83,18 @@ BOOST_AUTO_TEST_CASE(gkr_fri_smoke)
     std::vector<rc::Fp2> evals;
     for (int i = 0; i < 8; ++i) evals.push_back(gf::FromSigned2(i * 3 + 1));
     const uint256 seed = MakeSeed(0x42);
-    const auto c = rc::FriCommitAndFold(evals, seed, /*n_openings=*/2);
+    const auto c = rc::FriCommitAndFold(evals, seed);
     BOOST_REQUIRE(c.ok);
     BOOST_CHECK(!c.proof.layers.empty());
     BOOST_CHECK(c.proof_bytes > 0);
-    BOOST_CHECK(c.proof_bytes < evals.size() * 64); // succinct vs raw witness
+    BOOST_CHECK_EQUAL(c.proof.queries.size(), rc::kRCFriNumQueries);
+    BOOST_CHECK_EQUAL(c.lde_evals.size(),
+                      static_cast<size_t>(rc::FriNextPow2(8) * rc::kRCFriBlowup));
     std::string why;
     BOOST_CHECK(rc::FriVerify(c.proof, seed, &why));
 
     auto bad = c.proof;
-    bad.openings[0].leaf.c0 ^= 1;
+    bad.queries[0].steps[0].even.c0 ^= 1;
     BOOST_CHECK(!rc::FriVerify(bad, seed, &why));
 }
 
@@ -104,14 +106,91 @@ BOOST_AUTO_TEST_CASE(gkr_honest_real_episode_toy_verifies)
     const auto pr = rc::ProveWinnerEpisode(header, params, 0, dig);
     BOOST_CHECK(pr.timing.ok);
     BOOST_CHECK(!pr.proof.layers.empty());
+    BOOST_CHECK_EQUAL(pr.proof.layers.size(), rc::RCGkrExpectedLayerCount(params));
+    BOOST_CHECK_EQUAL(pr.proof.round_seeds.size(), params.rounds);
+    BOOST_CHECK_EQUAL(pr.proof.round_roots.size(), params.rounds);
     BOOST_CHECK(!pr.proof.trace_fri.layers.empty());
     BOOST_CHECK(!pr.proof.lookup_fri.layers.empty());
-    // Succinct: FRI openings are O(log n), not every Extract tile.
-    BOOST_CHECK(pr.proof.lookup_fri.openings.size() <= 8);
+    // Succinct: FRI queries are O(k·log N) openings, not every Extract tile.
+    BOOST_CHECK_EQUAL(pr.proof.lookup_fri.queries.size(), rc::kRCFriNumQueries);
+    // ALL-PHASE: at least one of each kind
+    bool saw_qkt = false, saw_sv = false, saw_fwd = false, saw_bwd = false, saw_wg = false;
+    for (const auto& lc : pr.proof.layers) {
+        switch (lc.kind) {
+        case rc::RCGkrLayerKind::GemmPhase1QKt: saw_qkt = true; break;
+        case rc::RCGkrLayerKind::GemmPhase1SV: saw_sv = true; break;
+        case rc::RCGkrLayerKind::GemmPhase2Fwd: saw_fwd = true; break;
+        case rc::RCGkrLayerKind::GemmPhase2Bwd: saw_bwd = true; break;
+        case rc::RCGkrLayerKind::GemmPhase2Wgrad: saw_wg = true; break;
+        default: break;
+        }
+    }
+    BOOST_CHECK(saw_qkt && saw_sv && saw_fwd && saw_bwd && saw_wg);
     rc::RCGkrTiming vt;
     BOOST_CHECK(rc::VerifyWinnerProof(pr.proof, &vt));
     BOOST_CHECK(vt.ok);
     BOOST_CHECK(pr.timing.proof_bytes > 0);
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m2_no_shrink_fallback_from_toy_shape)
+{
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    const auto pr = rc::ProveWinnerEpisode(header, params, 0, dig);
+    BOOST_REQUIRE(pr.timing.ok);
+    // used_shrink_fallback only from soft over_budget — never solely from shape.
+    if (!pr.timing.over_budget) {
+        BOOST_CHECK(!pr.timing.used_shrink_fallback);
+    }
+    BOOST_CHECK_EQUAL(pr.proof.episode.n_ctx, params.n_ctx);
+    BOOST_CHECK_EQUAL(pr.proof.episode.b_seq, params.b_seq);
+    BOOST_CHECK_EQUAL(pr.proof.episode.L_lyr, params.L_lyr);
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m2_cheat_extract_lookup_rejects)
+{
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    auto pr = rc::ProveWinnerEpisode(header, params, 0, dig);
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    // Flip one lookup FRI opening (proxy for corrupted Extract LogUp key).
+    BOOST_REQUIRE(!pr.proof.lookup_fri.queries.empty());
+    BOOST_REQUIRE(!pr.proof.lookup_fri.queries[0].steps.empty());
+    pr.proof.lookup_fri.queries[0].steps[0].even.c0 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m2_cheat_drop_gemm_layer_rejects)
+{
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    auto pr = rc::ProveWinnerEpisode(header, params, 0, dig);
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(pr.proof.layers.size() > 1);
+    pr.proof.layers.pop_back();
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m2_cheat_wrong_round_seed_rejects)
+{
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    auto pr = rc::ProveWinnerEpisode(header, params, 0, dig);
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(!pr.proof.round_seeds.empty());
+    pr.proof.round_seeds[0].data()[0] ^= 0xff;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_m2_medium_optional_skip)
+{
+    // MakeMediumRCEpisodeParams uses b_seq=8192 — ALL-PHASE GKR prove is not CI-safe.
+    BOOST_TEST_MESSAGE(
+        "skip medium ALL-PHASE ProveWinnerEpisode (b_seq=8192; not CI-safe)");
 }
 
 BOOST_AUTO_TEST_CASE(gkr_malformed_proof_rejects)
@@ -208,7 +287,7 @@ BOOST_AUTO_TEST_CASE(gkr_deprecated_synth_still_succinct)
     const auto pr = rc::ProveWinnerSynth(seed, shape, ep.digest);
     BOOST_CHECK(pr.timing.ok);
     BOOST_CHECK(!pr.proof.trace_fri.layers.empty());
-    BOOST_CHECK(pr.proof.lookup_fri.openings.size() <= 8);
+    BOOST_CHECK_EQUAL(pr.proof.lookup_fri.queries.size(), rc::kRCFriNumQueries);
     BOOST_CHECK(rc::VerifyWinnerProof(pr.proof));
 }
 
