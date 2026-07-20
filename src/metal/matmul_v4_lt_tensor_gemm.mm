@@ -14,6 +14,11 @@
 //   * Never claim TensorOps when the plain ALU shader ran.
 //   * S32S8 declines (no dedicated TensorOps shape) — callers keep ALU/CPU.
 //   * M4-class vs M5-class capability strings stay separate.
+//   * MXFP4 / FP8 / MX·E8M0 block-scale matmul2d is NOT used here. Apple may
+//     expose those for ML dequant, but they are not self-qualified as exact
+//     vs ComputeProjectedRightMxBlockScaleLT. MX B̂·V lives in
+//     matmul_v4_lt_accel.mm as four exact INT8 partitions (never labeled
+//     native MXFP4).
 
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 

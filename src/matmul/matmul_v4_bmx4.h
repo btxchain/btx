@@ -289,22 +289,35 @@ inline constexpr size_t kAdaptiveHighLimbFallbackDivisor = 16;
     const std::vector<int32_t>& P, const std::vector<int32_t>& Q,
     uint32_t n, uint32_t m, AdaptiveCombineStatsBMX4C* stats = nullptr);
 
-/** Five-limb exact FP8-alphabet combine (Rubin-class lane): decompose P/Q into
- *  five balanced base-32 digits in [-16,15] (every digit exactly representable
- *  in E4M3), evaluate the 25 digit-pair products as exact s8xs8->s32 GEMMs
- *  (CPU reference; device lanes may group them), convert to INT32, then fold
- *  with weights 32^(i+j) mod q. BYTE-IDENTICAL to ComputeCombineModQ. Per-pair
- *  accumulators are bounded by 256*n < 2^22 at n <= 8192. Miner-local only —
- *  no separate activation height. */
+/** Five-limb exact FP8-alphabet combine (Rubin-class ENC-BMX4C lane only).
+ *
+ *  LT vs BMX4C — do NOT conflate consensus alphabets:
+ *    ENC-BMX4C / ENC-DR-LT operands: M11×E8M0 dequantized into [-48,48]
+ *      (kEmax / kMatExpandEmax). That [-48,48] bound is the consensus alphabet
+ *      and MUST NOT change.
+ *    This FP8-fold helper: miner-local combine of P/Q into five balanced
+ *      base-32 digits in [-16,15] (E4M3-representable). It is a combine-lane
+ *      optimization for ENC-BMX4C Adaptive/ExactFp8 planners — NOT an LT
+ *      MatExpand Extract alphabet, NOT a native MXFP4 claim, and NOT a
+ *      license to widen LT Extract beyond [-48,48].
+ *
+ *  Decompose P/Q into five balanced base-32 digits in [-16,15], evaluate the
+ *  25 digit-pair products as exact s8xs8->s32 GEMMs (CPU reference; device
+ *  lanes may group them), convert to INT32, then fold with weights 32^(i+j)
+ *  mod q. BYTE-IDENTICAL to ComputeCombineModQ. Per-pair accumulators are
+ *  bounded by 256*n < 2^22 at n <= 8192. Miner-local only — no separate
+ *  activation height. */
 [[nodiscard]] std::vector<Fq> ComputeCombineFp8FiveLimbBMX4C(const std::vector<int32_t>& P,
                                                              const std::vector<int32_t>& Q,
                                                              uint32_t n, uint32_t m);
 
-/** MX-block-scaled projections. The committed E8M0 scale is constant on each
- *  32-element block of the contraction axis K, exactly matching the OCP MX
- *  operand convention. Each K block is accumulated as an integer mantissa dot
- *  and then multiplied by its exact power-of-two scale. BYTE-IDENTICAL to the
- *  dense dequantized GEMM and used as the CPU reference for native MXFP4 lanes. */
+/** MX-block-scaled projections (ENC-BMX4C operand lane). The committed E8M0
+ *  scale is constant on each 32-element block of the contraction axis K,
+ *  matching the OCP MX operand convention. BYTE-IDENTICAL to the dense
+ *  dequantized GEMM. For ENC-DR-LT the normative sibling oracle is
+ *  lt::ComputeProjectedRightMxBlockScaleLT (same exact-integer identity;
+ *  LT Extract still emits [-48,48]). Neither routine alone qualifies native
+ *  MXFP4 silicon — see MxLaneProvenance / report native_*_qualified. */
 [[nodiscard]] std::vector<int32_t> ComputeProjectedLeftScalePartitionedBMX4C(
     const std::vector<int8_t>& U, const std::vector<int8_t>& mu_a,
     const std::vector<uint8_t>& scale_a, uint32_t n, uint32_t m);
@@ -334,17 +347,19 @@ struct DigestOnlyResultBMX4C {
 };
 
 /** Capability-driven exact-accelerator planner (miner-local). Selects
- *  projection and combine lanes without changing consensus bytes. */
+ *  projection and combine lanes without changing consensus bytes.
+ *  These are INTENT labels only — PlanExactAccelLanes / PlanLTAccel never
+ *  prove on-silicon native MXFP4 or FP8 execution. */
 enum class ProjectionLane : uint8_t {
     CanonicalInt8 = 0,           // one INT8->INT32 GEMM on pre-shifted operands
-    ScalePartitionedMxfp4 = 1,   // logical lane intent; native use needs runtime qualification
-    ExactFp8 = 2,                // future Rubin-class exact FP8 projection
+    ScalePartitionedMxfp4 = 1,   // exact-MX INT8 partitions; native MXFP4 needs self-qual
+    ExactFp8 = 2,                // future Rubin-class exact FP8 projection (BMX4C combine alphabet, not LT Extract)
 };
 
 enum class CombineLane : uint8_t {
     CanonicalInteger = 0,        // direct mod-q / schoolbook reference
     Karatsuba9Int8 = 1,          // nine INT8 GEMMs + fused M61 epilogue
-    ExactFp8FiveLimb = 2,        // five-limb E4M3-alphabet combine
+    ExactFp8FiveLimb = 2,        // five-limb E4M3-alphabet combine (BMX4C only; ≠ LT [-48,48])
     AdaptiveLimb = 3,            // two-limb / base-256 adaptive + exact fallback
 };
 

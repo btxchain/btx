@@ -10,6 +10,7 @@
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <hip/matmul_v4_lt_accel.h>
 #include <matmul/backend_capabilities_v4.h>
+#include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/matmul_v4_lt.h>
@@ -315,7 +316,9 @@ bool ComputeBatchCpuReferenceBMX4CLT(const std::vector<CBlockHeader>& headers, u
     digests_out.assign(count, uint256{});
     payloads_out.assign(count, std::vector<unsigned char>{});
 
-    const matmul::v4::lt::WindowSketchMinerLT miner{headers.front(), n};
+    const matmul::v4::lt::WindowSketchMinerLT miner{
+        headers.front(), n, MakeResolvedExactGemmBackend(),
+        MakeResolvedExactMxProjectionBackend()};
     if (miner.Valid()) {
         const uint256 kNoTarget = ArithToUint256(~arith_uint256{});
         std::vector<matmul::v4::lt::DigestOnlyResultLT> results;
@@ -608,6 +611,39 @@ matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
     case Kind::ASCEND:
         backend.gemm_s8s8 = &matmul_v4::ascend::TryLaunchLtCubeGemmS8S8;
         backend.gemm_s32s8 = &matmul_v4::ascend::TryLaunchLtCubeGemmS32S8;
+        break;
+    case Kind::CPU:
+        break;
+    }
+    return backend;
+}
+
+matmul::v4::lt::ExactMxProjectionBackend MakeResolvedExactMxProjectionBackend()
+{
+    matmul::v4::lt::ExactMxProjectionBackend backend;
+
+    // TPU/Trainium ExactGemm providers do not expose an MX projection inject;
+    // leave project_right null so ComputeProjectedRightMxDispatched uses the
+    // CPU oracle (same fail-closed contract as an unset GEMM slot).
+    if (const char* requested = std::getenv("BTX_MATMUL_LT_EXACT_BACKEND")) {
+        const std::string exact_request{requested};
+        if (exact_request == "tpu" || exact_request == "trainium") {
+            return backend;
+        }
+    }
+
+    switch (ResolveBackend()) {
+    case Kind::CUDA:
+        backend.project_right = &matmul_v4::cuda::LaunchProjectedRightMx;
+        break;
+    case Kind::HIP:
+        backend.project_right = &matmul_v4::hip::LaunchProjectedRightMx;
+        break;
+    case Kind::METAL:
+        backend = matmul_v4::metal::MakeMetalExactMxProjectionBackend();
+        break;
+    case Kind::ASCEND:
+        backend.project_right = &matmul_v4::ascend::TryLaunchLtCubeMxProjectRight;
         break;
     case Kind::CPU:
         break;

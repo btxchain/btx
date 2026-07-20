@@ -8,17 +8,23 @@
 // passes. Injected via ExactGemmBackend into WindowSketchMinerLT (fail-closed
 // host ExactGemm when Metal declines). Never label ALU shaders as TensorOps.
 //
-// Lever-B: normative MX Extract stays on the host (WindowSketchMinerLT /
-// ComputeDigestBMX4CLT — ExpandOperandBMatExpandMx + scale-partitioned B̂·V).
-// No Metal MX Extract shader; fuller MatExpand→project→combine residency is
-// CUDA/HIP. Digests remain bit-identical to the CPU reference.
+// Lever-B MX twin (this TU):
+//   * Extract stays HOST-side (ExtractMatExpandMxTileMantissas /
+//     DeriveMatExpandMxScale via MatExpandCorePrepared). No Metal Extract twin.
+//   * B̂·V uses exact e∈{0..3} INT8 scale partitions via
+//     ComputeProjectedRightMxScalePartitionedGemmLT + Metal ExactGemmS8S8
+//     (TensorOps or ALU). Byte-identical to ComputeProjectedRightMxBlockScaleLT.
+//   * Native Apple MX·E8M0 / FP8 matmul2d dequant FAIL CLOSED — not proven
+//     exact vs BTX M11×2^{e}. Digests remain bit-identical to the CPU oracle.
 
 #include <metal/matmul_v4_lt_accel.h>
 
 #include <arith_uint256.h>
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_lt_mx_exact.h>
 #include <primitives/block.h>
 #include <uint256.h>
 
@@ -37,6 +43,8 @@ namespace matmul_v4::metal {
 namespace {
 
 std::atomic_bool g_lt_last_s8s8_tensor_ops{false};
+std::mutex g_mx_prov_mutex;
+LtMetalMxProvenance g_lt_last_mx_provenance{};
 
 static NSString* const kGemmLibrarySource = @R"MSL(
 #include <metal_stdlib>
@@ -315,6 +323,93 @@ matmul::v4::lt::ExactGemmBackend MakeMetalExactGemmBackend()
     return backend;
 }
 
+void StoreLastMxProvenance(const LtMetalMxProvenance& p)
+{
+    std::lock_guard<std::mutex> lock{g_mx_prov_mutex};
+    g_lt_last_mx_provenance = p;
+}
+
+bool SelfTestMxProjectionOnce()
+{
+    static std::once_flag once;
+    static bool ok = false;
+    std::call_once(once, [] {
+        if (!SelfTestGemmKernelsOnce()) return;
+
+        // n must be a multiple of kMatExpandMxBlockLen (32). Keep small for
+        // process-local self-qual against the CPU MX oracle.
+        constexpr uint32_t kN = 32;
+        constexpr uint32_t kM = 16; // deep-m analogue (n/2 for production dims)
+        const uint32_t nblk = kN / matmul::v4::lt::kMatExpandMxBlockLen;
+        std::vector<int8_t> mu(size_t(kN) * kN);
+        std::vector<uint8_t> scales(size_t(kN) * nblk);
+        std::vector<int8_t> V(size_t(kN) * kM);
+        for (uint32_t i = 0; i < kN * kN; ++i) {
+            mu[i] = matmul::v4::lt::FoldInt32ToEmax48(int32_t(i) * 13 - 41);
+        }
+        for (uint32_t i = 0; i < kN * nblk; ++i) {
+            scales[i] = static_cast<uint8_t>(i & 0x3u); // e ∈ {0,1,2,3}
+        }
+        for (uint32_t i = 0; i < kN * kM; ++i) {
+            V[i] = matmul::v4::lt::FoldInt32ToEmax48(int32_t(i) * 17 + 7);
+        }
+
+        const matmul::v4::lt::ExactGemmBackend gemm = MakeMetalExactGemmBackend();
+        const std::vector<int32_t> got =
+            matmul::v4::lt::ComputeProjectedRightMxScalePartitionedGemmLT(mu, scales, V, kN, kM,
+                                                                         gemm);
+        if (got.empty() ||
+            !matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, kN, kM, got)) {
+            return;
+        }
+        ok = true;
+    });
+    return ok;
+}
+
+bool LaunchProjectedRightMxInternal(const std::vector<int8_t>& mu,
+                                    const std::vector<uint8_t>& scales,
+                                    const std::vector<int8_t>& V, uint32_t n, uint32_t m,
+                                    std::vector<int32_t>& out, LtMetalMxProvenance* provenance)
+{
+    out.clear();
+    LtMetalMxProvenance local{};
+    local.host_mx_extract = true;
+    // Native Apple MX·E8M0 / FP8 dequant is never claimed here.
+    local.mx.native_mxfp4_attempted = false;
+    local.mx.native_mxfp4_qualified = false;
+    local.mx.native_fp8_attempted = false;
+    local.mx.native_fp8_qualified = false;
+
+    if (!SelfTestMxProjectionOnce()) {
+        if (provenance) *provenance = local;
+        return false;
+    }
+    if (n == 0 || m == 0 || (n % matmul::v4::lt::kMatExpandMxBlockLen) != 0) {
+        if (provenance) *provenance = local;
+        return false;
+    }
+
+    // Clear so projection_used_tensor_ops reflects only this call's GEMMs.
+    g_lt_last_s8s8_tensor_ops.store(false, std::memory_order_relaxed);
+    const matmul::v4::lt::ExactGemmBackend gemm = MakeMetalExactGemmBackend();
+    std::vector<int32_t> Q =
+        matmul::v4::lt::ComputeProjectedRightMxScalePartitionedGemmLT(mu, scales, V, n, m, gemm);
+    if (Q.empty() || Q.size() != size_t(n) * m) {
+        if (provenance) *provenance = local;
+        return false;
+    }
+
+    local.mx.exact_mx_scale_partitioned = true;
+    local.metal_exact_gemm_projection = true;
+    local.projection_used_tensor_ops =
+        g_lt_last_s8s8_tensor_ops.load(std::memory_order_relaxed);
+    out = std::move(Q);
+    if (provenance) *provenance = local;
+    StoreLastMxProvenance(local);
+    return true;
+}
+
 } // namespace
 
 bool LaunchGemmS8S8(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
@@ -334,6 +429,66 @@ bool IsMatMulLTMetalAvailable()
     return SelfTestGemmKernelsOnce();
 }
 
+bool IsMatMulLTMetalMxProjectionAvailable()
+{
+    return SelfTestMxProjectionOnce();
+}
+
+bool LaunchProjectedRightMxBlockScaleLT(const std::vector<int8_t>& mu,
+                                        const std::vector<uint8_t>& scales,
+                                        const std::vector<int8_t>& V, uint32_t n, uint32_t m,
+                                        std::vector<int32_t>& out,
+                                        LtMetalMxProvenance* provenance)
+{
+    return LaunchProjectedRightMxInternal(mu, scales, V, n, m, out, provenance);
+}
+
+bool TryLaunchLtMetalMxProjectRight(const std::vector<int8_t>& mu,
+                                    const std::vector<uint8_t>& scales,
+                                    const std::vector<int8_t>& V, uint32_t n, uint32_t m,
+                                    std::vector<int32_t>& out,
+                                    matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    LtMetalMxProvenance metal_prov{};
+    if (!LaunchProjectedRightMxInternal(mu, scales, V, n, m, out, &metal_prov)) {
+        if (provenance) *provenance = {};
+        return false;
+    }
+    if (provenance) *provenance = metal_prov.mx;
+    return true;
+}
+
+matmul::v4::lt::ExactMxProjectionBackend MakeMetalExactMxProjectionBackend()
+{
+    matmul::v4::lt::ExactMxProjectionBackend backend;
+    if (IsMatMulLTMetalMxProjectionAvailable()) {
+        backend.project_right = &TryLaunchLtMetalMxProjectRight;
+    }
+    return backend;
+}
+
+bool TryLaunchNativeMxfp4ProjectedRightLT(const std::vector<int8_t>& /*mu*/,
+                                          const std::vector<uint8_t>& /*scales*/,
+                                          const std::vector<int8_t>& /*V*/, uint32_t /*n*/,
+                                          uint32_t /*m*/, std::vector<int32_t>& out,
+                                          LtMetalMxProvenance* provenance)
+{
+    // FAIL CLOSED: Apple MPP documents FP8 / MX·E8M0 block-scale planes for
+    // ML dequant inside matmul2d. That is not a self-qualified exact integer
+    // match for BTX Lever-B (M11 mantissas × 2^e, e∈{0..3}). Until an exact
+    // path exists, never advertise native MXFP4/FP8.
+    out.clear();
+    LtMetalMxProvenance local{};
+    local.host_mx_extract = true;
+    local.mx.native_mxfp4_attempted = false;
+    local.mx.native_mxfp4_qualified = false;
+    local.mx.native_fp8_attempted = false;
+    local.mx.native_fp8_qualified = false;
+    if (provenance) *provenance = local;
+    StoreLastMxProvenance(local);
+    return false;
+}
+
 bool ComputeDigestsOnlyLTMetal(const CBlockHeader& tmpl, uint32_t n,
                                const uint64_t* nonces, size_t count,
                                std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
@@ -348,9 +503,61 @@ bool ComputeDigestsOnlyLTMetal(const CBlockHeader& tmpl, uint32_t n,
         return false;
     }
 
-    const bool device_ok = IsMatMulLTMetalAvailable();
-    matmul::v4::lt::WindowSketchMinerLT miner(
-        tmpl, n, device_ok ? MakeMetalExactGemmBackend() : matmul::v4::lt::ExactGemmBackend{});
+    const bool gemm_ok = IsMatMulLTMetalAvailable();
+    const bool mx_ok = IsMatMulLTMetalMxProjectionAvailable();
+    const matmul::v4::lt::ExactGemmBackend gemm =
+        gemm_ok ? MakeMetalExactGemmBackend() : matmul::v4::lt::ExactGemmBackend{};
+    const matmul::v4::lt::ExactMxProjectionBackend mx_proj =
+        mx_ok ? MakeMetalExactMxProjectionBackend() : matmul::v4::lt::ExactMxProjectionBackend{};
+
+    // Prefer Metal ExactGemm MatExpand + Metal MX projection when both lanes
+    // self-qual. Extract remains host-side (ExpandOperandBMatExpandMxComponents).
+    // WindowSketchMinerLT also accepts ExactMxProjectionBackend; this loop keeps
+    // the prepared A/U/V/P factors resident across the nonce window.
+    if (gemm_ok && mx_ok) {
+        namespace lt = matmul::v4::lt;
+        namespace bx = matmul::v4::bmx4;
+        const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(tmpl);
+        const std::vector<int8_t> A = lt::ExpandOperandAMatExpand(tmpl, n, gemm);
+        const std::vector<int8_t> U = bx::ExpandProjectorBMX4C(seed_u, m, n);
+        const std::vector<int8_t> V = bx::ExpandProjectorBMX4C(seed_v, n, m);
+        const std::vector<int32_t> P = matmul::v4::ComputeProjectedLeft(U, A, n, m);
+
+        out.reserve(count);
+        LtMetalMxProvenance last_prov{};
+        for (size_t i = 0; i < count; ++i) {
+            CBlockHeader header = tmpl;
+            header.nNonce64 = nonces[i];
+            header.nNonce = static_cast<uint32_t>(nonces[i]);
+
+            std::vector<int8_t> mu;
+            std::vector<uint8_t> scales;
+            lt::ExpandOperandBMatExpandMxComponents(header, n, gemm, mu, scales);
+
+            std::vector<int32_t> Q;
+            LtMetalMxProvenance prov{};
+            if (!LaunchProjectedRightMxBlockScaleLT(mu, scales, V, n, m, Q, &prov)) {
+                out.clear();
+                return false;
+            }
+            last_prov = prov;
+            const std::vector<matmul::v4::Fq> Chat = matmul::v4::ComputeCombineModQ(P, Q, n, m);
+            const uint256 sigma = matmul::v4::DeriveSigma(header);
+
+            matmul::v4::lt::DigestOnlyResultLT res;
+            res.nonce = nonces[i];
+            res.digest = matmul::v4::ComputeSketchDigestFromFq(sigma, Chat);
+            res.target_match = false;
+            res.backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
+            out.push_back(std::move(res));
+        }
+        StoreLastMxProvenance(last_prov);
+        return true;
+    }
+
+    // Fail-closed GEMM / MX: inject available Metal lanes into WindowSketchMinerLT
+    // (ComputeProjectedRightMxDispatched fails closed to the CPU oracle).
+    matmul::v4::lt::WindowSketchMinerLT miner(tmpl, n, gemm, mx_proj);
     if (!miner.Valid()) {
         return false;
     }
@@ -361,14 +568,24 @@ bool ComputeDigestsOnlyLTMetal(const CBlockHeader& tmpl, uint32_t n,
     if (!miner.Mine(nonce_vec, kNoTarget, results, nullptr)) {
         return false;
     }
-    const auto status = device_ok ? matmul::v4::bmx4::DigestOnlyBackendStatus::Ok
-                                  : matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
+    const auto status = gemm_ok ? matmul::v4::bmx4::DigestOnlyBackendStatus::Ok
+                                : matmul::v4::bmx4::DigestOnlyBackendStatus::Fallback;
     for (auto& r : results) {
         r.target_match = false;
         r.backend_status = status;
     }
+    LtMetalMxProvenance fallback_prov{};
+    fallback_prov.host_mx_extract = true;
+    fallback_prov.mx.exact_mx_scale_partitioned = true; // CPU oracle path
+    StoreLastMxProvenance(fallback_prov);
     out = std::move(results);
     return true;
+}
+
+LtMetalMxProvenance LtLastMetalMxProvenance()
+{
+    std::lock_guard<std::mutex> lock{g_mx_prov_mutex};
+    return g_lt_last_mx_provenance;
 }
 
 bool LtLastS8S8UsedTensorOps()

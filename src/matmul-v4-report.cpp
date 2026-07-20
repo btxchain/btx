@@ -1164,6 +1164,14 @@ namespace lt = matmul::v4::lt;
 using LtDigestOnlyFn = bool (*)(const CBlockHeader&, uint32_t, const uint64_t*, size_t,
                                 std::vector<lt::DigestOnlyResultLT>&);
 
+bool AscendDigestOnlyAdapter(const CBlockHeader& tmpl, uint32_t n, const uint64_t* nonces,
+                             size_t count, std::vector<lt::DigestOnlyResultLT>& out)
+{
+    // Ascend entry carries an optional provenance*; keep the shared 5-arg
+    // digest-only function-pointer type stable for CUDA/HIP/Metal/report.
+    return matmul_v4::ascend::ComputeDigestsOnlyLTAscend(tmpl, n, nonces, count, out, nullptr);
+}
+
 LtDigestOnlyFn RawLtDigestFnFor(matmul_v4::accel::Kind kind)
 {
     using K = matmul_v4::accel::Kind;
@@ -1171,7 +1179,7 @@ LtDigestOnlyFn RawLtDigestFnFor(matmul_v4::accel::Kind kind)
     case K::CUDA:   return static_cast<LtDigestOnlyFn>(&matmul_v4::cuda::ComputeDigestsOnlyLTCuda);
     case K::METAL:  return static_cast<LtDigestOnlyFn>(&matmul_v4::metal::ComputeDigestsOnlyLTMetal);
     case K::HIP:    return static_cast<LtDigestOnlyFn>(&matmul_v4::hip::ComputeDigestsOnlyLTHip);
-    case K::ASCEND: return static_cast<LtDigestOnlyFn>(&matmul_v4::ascend::ComputeDigestsOnlyLTAscend);
+    case K::ASCEND: return &AscendDigestOnlyAdapter;
     case K::CPU:    return nullptr;
     }
     return nullptr;
@@ -1646,6 +1654,12 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     lt_obj.pushKV("per_nonce_sync_absent", throughput.per_nonce_sync_absent);
     lt_obj.pushKV("device_assisted_path_exact", false);
     lt_obj.pushKV("raw_probe_exact", false);
+    // Telemetry-only never certifies exact-MX / native-MX / native-FP8.
+    lt_obj.pushKV("exact_mx_scale_partitioned", false);
+    lt_obj.pushKV("native_mxfp4_qualified", false);
+    lt_obj.pushKV("native_fp8_qualified", false);
+    lt_obj.pushKV("native_mxfp4_attempted", false);
+    lt_obj.pushKV("native_fp8_attempted", false);
     lt_obj.pushKV("rate_provenance",
                   telemetry_obtained ? "telemetry-only-device-resident-qstar-batched"
                                      : "telemetry-unavailable");
@@ -1857,6 +1871,9 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     std::cout << "\n[device] LT native MatExpand GEMM path\n";
     std::cout << "  device-assisted path exact    : " << (device_assisted_path_exact ? "yes" : "no") << "\n";
     std::cout << "  device native kernel wired    : " << (device_native_kernel_wired ? "yes" : "no") << "\n";
+    std::cout << "  exact_mx_scale_partitioned    : no (fail-closed until device backend reports)\n";
+    std::cout << "  native_mxfp4_qualified        : no (fail-closed until wired+proven)\n";
+    std::cout << "  native_fp8_qualified          : no (fail-closed until wired+proven)\n";
     std::cout << "  reason                         : " << native_path_reason << "\n";
 
     // This report has no backend stage timers or hardware counters yet. CPU
@@ -1990,6 +2007,27 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
     lt_obj.pushKV("raw_probe_exact", raw_probe_exact);
     lt_obj.pushKV("raw_probe_slots_ok", static_cast<uint64_t>(raw_probe_slots_ok));
     lt_obj.pushKV("native_path_reason", native_path_reason);
+    // Exact-MX vs native-MX honesty. Prefer live backend provenance when the
+    // device path ran; otherwise stay fail-closed (never invent qualified=true).
+    matmul::v4::lt::MxLaneProvenance mx_report{};
+#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+    if (backend == matmul_v4::accel::Kind::CUDA && throughput.used_device) {
+        mx_report = matmul_v4::cuda::LtLastMxProvenance();
+    }
+#endif
+#if defined(BTX_ENABLE_HIP)
+    if (backend == matmul_v4::accel::Kind::HIP && throughput.used_device) {
+        mx_report = matmul_v4::hip::LtLastMxProvenance();
+    }
+#endif
+    const bool report_exact_mx = mx_report.exact_mx_scale_partitioned;
+    const bool report_native_mxfp4 = mx_report.native_mxfp4_qualified;
+    const bool report_native_fp8 = mx_report.native_fp8_qualified;
+    lt_obj.pushKV("exact_mx_scale_partitioned", report_exact_mx);
+    lt_obj.pushKV("native_mxfp4_qualified", report_native_mxfp4);
+    lt_obj.pushKV("native_fp8_qualified", report_native_fp8);
+    lt_obj.pushKV("native_mxfp4_attempted", mx_report.native_mxfp4_attempted);
+    lt_obj.pushKV("native_fp8_attempted", mx_report.native_fp8_attempted);
     lt_obj.pushKV("tile_b", static_cast<uint64_t>(lt::kTileBLT));
     lt_obj.pushKV("matexpand_panel_w", static_cast<uint64_t>(lt::kMatExpandPanelW));
     lt_obj.pushKV("qstar_window", static_cast<uint64_t>(args.window));

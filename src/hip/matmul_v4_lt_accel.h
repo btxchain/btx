@@ -5,7 +5,9 @@
 #ifndef BITCOIN_HIP_MATMUL_V4_LT_ACCEL_H
 #define BITCOIN_HIP_MATMUL_V4_LT_ACCEL_H
 
+#include <hip/matmul_v4_lt_mx_native.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_lt_mx_exact.h>
 #include <uint256.h>
 
 #include <cstddef>
@@ -20,11 +22,22 @@ class CBlockHeader;
 // Digests are bit-identical to matmul::v4::lt::ComputeDigestBMX4CLT.
 // When an AMD GPU is present and the one-time bit-identity self-test passes,
 // ComputeDigestsOnlyLTHip runs a persistent device-resident loop
-// (MatExpand → Extract → project → combine). s8xs8 prefers the
-// self-qualified rocBLAS/hipBLASLt MFMA lane. On that lane, MatExpand's s32xs8
-// stage is exactly radix-lowered into four INT8 GEMMs and combine uses nine
-// exact Karatsuba/base-64 INT8 GEMMs; scalar DeviceGemm* remains the fail-closed
-// fallback and is never labeled MFMA. Host ExactGemm is the final fallback.
+// (MatExpand → Extract → project → combine).
+//
+// B̂·V production default: exact MX scale-partitioned INT8 MFMA/ALU
+// (bit-identical to ComputeProjectedRightMxBlockScaleLT) whenever MX
+// mantissa/scale components are retained on device. Dense dequantized Bhat
+// GEMM remains the fail-closed fallback when that lane declines.
+//
+// Native MXFP4 / FP8 (hipBLASLt block-scale / CDNA4 MFMA scale) may be
+// attempted only behind self-qual vs the CPU MX oracle; unqualified attempts
+// stay fail-closed and never set native_*_qualified.
+//
+// s8xs8 prefers the self-qualified rocBLAS/hipBLASLt MFMA lane. On that lane,
+// MatExpand's s32xs8 stage is exactly radix-lowered into four INT8 GEMMs and
+// combine uses nine exact Karatsuba/base-64 INT8 GEMMs; scalar DeviceGemm*
+// remains the fail-closed fallback and is never labeled MFMA. Host ExactGemm
+// is the final fallback.
 //
 // Target arches: gfx942 (MI300), gfx950 (MI350/MI355) via BTX_HIP_ARCHITECTURES.
 // Linker stub when BTX_ENABLE_HIP is off.
@@ -32,11 +45,16 @@ class CBlockHeader;
 
 namespace matmul_v4::hip {
 
+/** Provenance for the full-header Q* entry. Batch residency fields are true
+ *  only when the successful call used that property for every candidate.
+ *  `mx` reports MX lane honesty (exact scale-partitioned vs native attempt).
+ *  Callers must not infer silicon throughput from DigestOnlyBackendStatus. */
 struct LtHipBatchProvenance {
     bool qstar_device_batched{false};
     bool device_w_generation{false};
     bool device_digest{false};
     bool per_nonce_sync_absent{false};
+    matmul::v4::lt::MxLaneProvenance mx{};
 };
 
 /** True iff HIP is enabled, an AMD GPU is present, and the one-time
@@ -55,6 +73,16 @@ struct LtHipBatchProvenance {
                                    const std::vector<int8_t>& right,
                                    uint32_t rows, uint32_t inner, uint32_t cols,
                                    std::vector<int32_t>& out);
+
+/** Host-callable exact MX scale-partitioned B̂·V (device GEMMs when available).
+ *  On success `out` is byte-identical to ComputeProjectedRightMxBlockScaleLT
+ *  and provenance.exact_mx_scale_partitioned is set (unless a qualified native
+ *  path served the call). Suitable for ExactMxProjectionBackend::project_right. */
+[[nodiscard]] bool LaunchProjectedRightMx(const std::vector<int8_t>& mu,
+                                          const std::vector<uint8_t>& scales,
+                                          const std::vector<int8_t>& V, uint32_t n,
+                                          uint32_t m, std::vector<int32_t>& out,
+                                          matmul::v4::lt::MxLaneProvenance* provenance = nullptr);
 
 /** Digest-only ENC-DR-LT mining entry. Prefers the persistent device-resident
  *  loop; falls back to host ExactGemm on decline. Digests are byte-identical
@@ -78,6 +106,9 @@ struct LtHipBatchProvenance {
 
 /** True iff most recent LaunchGemmS8S8 used hipBLASLt/rocBLAS MFMA. */
 [[nodiscard]] bool LtLastS8S8UsedMfma();
+
+/** Latest process-local MX lane snapshot (exact / native attempt / qualified). */
+[[nodiscard]] matmul::v4::lt::MxLaneProvenance LtLastMxProvenance();
 
 } // namespace matmul_v4::hip
 

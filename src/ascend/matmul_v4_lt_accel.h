@@ -29,14 +29,27 @@ class CBlockHeader;
 // matched byte-for-byte. Ordinary aclnnMm/Matmul is deliberately not used:
 // released public dtype contracts do not document it as INT8->INT32.
 //
-// Lever-B: MatExpand Extract is normative MX-block on the CPU path
-// (ComputeDigestBMX4CLT / WindowSketchMinerLT). FoldInt32ToEmax48 in self-qual
-// fillers is GEMM shape noise only — not consensus Extract. Digests use host
-// MX scale-partitioned B̂·V. Without CANN: stub declines. Public activation
-// remains inert (INT32_MAX).
+// Lever-B MX twin:
+//   Exact MX B̂·V is the four Cube ExactGemm scale partition (e∈{0..3}, shift,
+//   sum), self-qualified byte-identical to ComputeProjectedRightMxBlockScaleLT.
+//   MatExpand Extract remains host ExpandOperandBMatExpandMxComponents (Cube
+//   ExactGemm inject for G*W / (G*W)*H). FoldInt32ToEmax48 in self-qual fillers
+//   is GEMM shape noise only — not consensus Extract. native_mx_qualified stays
+//   false unless a CANN FP8/MX op proves bit-identity (none admitted today).
+// Without CANN: stub declines. Public activation remains inert (INT32_MAX).
 // ---------------------------------------------------------------------------
 
 namespace matmul_v4::ascend {
+
+/** Per-call / last-success provenance for Ascend LT digests. Fields are true
+ *  only when the successful path actually used that property; stub and any
+ *  decline clear them. `native_mx_qualified` is never true without a proven
+ *  CANN FP8/MX kernel vs the CPU oracle (currently always false). */
+struct LtAscendDigestProvenance {
+    bool used_cube_path{false};
+    bool exact_mx_scale_partitioned{false};
+    bool native_mx_qualified{false};
+};
 
 /** Initializes the backend-owned AscendCL runtime once and returns the actual
  *  SoC string reported by aclrtGetSocName. False is fail-closed; no environment
@@ -47,6 +60,10 @@ namespace matmul_v4::ascend {
  *  ExactGemmS8S8 self-qualification (incl. odd-accumulator / max-|entry|
  *  probes) passed on the Cube/aclnn path. */
 [[nodiscard]] bool IsAscendExactGemmAvailable();
+
+/** True iff Cube ExactGemm is available AND the four-pass MX B̂·V path has
+ *  self-qualified byte-identical to ComputeProjectedRightMxBlockScaleLT. */
+[[nodiscard]] bool IsAscendExactMxProjectionAvailable();
 
 /** Host ExactGemmS8S8 via Ascend Cube/aclnn when available. On success `out`
  *  is byte-identical to matmul::v4::lt::ExactGemmS8S8. If `used_cube_path` is
@@ -75,11 +92,34 @@ namespace matmul_v4::ascend {
                                             uint32_t rows, uint32_t inner, uint32_t cols,
                                             std::vector<int32_t>& out);
 
-/** Digest-only ENC-DR-LT entry. Declines unless IsAscendExactGemmAvailable().
- *  Injects the exact Cube S8S8 and radix-lowered S32S8 paths. */
+/** Exact MX scale-partitioned B̂·V via four Cube ExactGemm passes (e∈{0..3}).
+ *  On success `out` is byte-identical to ComputeProjectedRightMxBlockScaleLT.
+ *  Sets provenance flags when non-null. Fail-closed without Cube + MX self-qual. */
+[[nodiscard]] bool ComputeProjectedRightMxBlockScaleLTAscend(
+    const std::vector<int8_t>& mu, const std::vector<uint8_t>& scales,
+    const std::vector<int8_t>& V, uint32_t n, uint32_t m, std::vector<int32_t>& out,
+    LtAscendDigestProvenance* provenance = nullptr);
+
+/** ExactMxProjectionBackend::Fn adapter — Cube four-pass MX B̂·V.
+ *  Sets MxLaneProvenance::exact_mx_scale_partitioned on success; never sets
+ *  native_mxfp4_* / native_fp8_* without a proven CANN native path. */
+[[nodiscard]] bool TryLaunchLtCubeMxProjectRight(
+    const std::vector<int8_t>& mu, const std::vector<uint8_t>& scales,
+    const std::vector<int8_t>& V, uint32_t n, uint32_t m, std::vector<int32_t>& out,
+    matmul::v4::lt::MxLaneProvenance* provenance);
+
+/** Digest-only ENC-DR-LT entry. Declines unless Cube ExactGemm and the exact
+ *  MX scale-partitioned projection are available. Injects Cube S8S8/S32S8 into
+ *  MatExpand and runs Cube four-pass MX B̂·V. Digests are byte-identical to
+ *  ComputeDigestBMX4CLT. Optional `provenance` reports the successful lane. */
 [[nodiscard]] bool ComputeDigestsOnlyLTAscend(
     const CBlockHeader& tmpl, uint32_t n, const uint64_t* nonces, size_t count,
-    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out);
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    LtAscendDigestProvenance* provenance = nullptr);
+
+/** Last successful ComputeDigestsOnlyLTAscend / MX projection provenance
+ *  (process-local). Cleared on decline. */
+[[nodiscard]] LtAscendDigestProvenance LastAscendDigestProvenance();
 
 } // namespace matmul_v4::ascend
 

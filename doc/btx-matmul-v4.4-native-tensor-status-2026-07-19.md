@@ -5,6 +5,42 @@ status snapshot, not a claim that the named SHA remains the moving PR tip.
 
 Consensus remains the **CPU integer transcript**. Public activation stays **`INT32_MAX`**. Winners are always **CPU-resealed**. Native tensor paths are miner-local only and must self-qualify vs `ExactGemmS8S8` before advertising IMMA / MFMA / Cube / TensorOps.
 
+## Exact-MX vs native-MX (ENC-DR-LT)
+
+| Term | Meaning | Report honesty |
+|---|---|---|
+| **exact-MX** | Bit-identical to `ComputeProjectedRightMxBlockScaleLT` (dense `Bhat·V` with `Bhat[i,j]=μ[i,j]<<e[i,j/32]`). INT8 scale-partitioned GEMM lowerings count. | `lt.exact_mx_scale_partitioned` may be true only when a **device** backend reports it after matching the CPU oracle. CPU-only report runs stay **false**. |
+| **native-MX / native-FP8** | On-silicon MXFP4 or FP8 tensor kernel, wired + self-qualified vs the CPU oracle. | `lt.native_mxfp4_qualified` / `lt.native_fp8_qualified` default **false**. Never set from `PlanLTAccel` intent labels or CPU-only runs. |
+
+Shared API: `ExactMxProjectionBackend` + `ComputeProjectedRightMxDispatched` in
+`matmul_v4_lt.h` / `matmul_v4_lt_mx_exact.h`. C-15 remains **OPEN**.
+
+### FP32-exact window for LT MX projection
+
+Eligibility math only — **not** a claim that silicon passed self-qual.
+
+| Pin | Value |
+|---|---|
+| M11 alphabet | `{0,±1,±2,±3,±4,±6}` — **11 symbols**, max `\|μ\|=\|V\|=6` (not ≤11) |
+| E8M0 `e` | `{0,1,2,3}` → max `2^e = 8` |
+| Per-MAC | `6·8·6 = 288` (`kLtMxProjPerMac`) |
+| `\|Q\|_max` at `n=4096` | `288·4096 = 1,179,648` |
+| IEEE FP32 exact integers | all `\|x\| ≤ 2^24`; gate uses strict `< 2^24 = 16,777,216` |
+
+So `LtMxProjectionFitsFloat32ExactInteger(n,m)` is true throughout the production
+`n≤4096` (and `n≤8192`) envelope: every integer `Q` entry and every partial sum
+is exactly representable in FP32. Native MXFP4/FP8 FP32-accumulate attempts may
+use this bound as a **precondition**, then must still pass
+`MxProjectionMatchesCpuOracle` before setting `native_*_qualified`. Report JSON
+keeps those flags **false** until a device backend reports them.
+
+Helper: `LtMxProjectionFitsFloat32ExactInteger` /
+`SimulateProjectedRightMxFloat32AccumulateLT` in `matmul_v4_lt_mx_exact.h`.
+
+LT Extract consensus alphabet stays **[-48,48]**. BMX4C `ComputeCombineFp8FiveLimbBMX4C`
+(E4M3 five-limb combine) is a **different** miner-local combine alphabet — do not
+conflate it with LT MatExpand Extract.
+
 “Native” below describes qualified GEMM kernels, not an end-to-end resident
 miner. At `1ca87fb`, Q* was still issued as individual calls with host W
 generation/digest and per-nonce synchronization; those wall rates do not rank
@@ -28,6 +64,8 @@ still requires CUDA/ROCm compilation and fresh B200/5090/MI350 silicon data.
 
 - Never label scalar ALU as IMMA / MFMA / Cube / TensorOps.
 - `IsLt*Available` / `used_*_path` false until ExactGemm match.
+- exact-MX ≠ native-MX: matching `ComputeProjectedRightMxBlockScaleLT` does not qualify MXFP4 silicon.
+- `PlanLTAccel` / `ProjectionLane::ScalePartitionedMxfp4` is intent only — not `native_path_eligible`.
 - CPU-only CI stays green with all native flags declining.
 
 ## Commits (this push wave)

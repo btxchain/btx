@@ -36,6 +36,16 @@ bool LaunchGemmS32S8(const std::vector<int32_t>&, const std::vector<int8_t>&,
     return false;
 }
 
+bool LaunchProjectedRightMx(const std::vector<int8_t>&, const std::vector<uint8_t>&,
+                            const std::vector<int8_t>&, uint32_t, uint32_t,
+                            std::vector<int32_t>& out,
+                            matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    out.clear();
+    if (provenance != nullptr) *provenance = {};
+    return false;
+}
+
 bool ComputeDigestsOnlyLTCuda(const CBlockHeader& /*tmpl*/, uint32_t /*n*/,
                               const uint64_t* /*nonces*/, size_t /*count*/,
                               std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
@@ -55,6 +65,62 @@ bool ComputeDigestsOnlyLTCuda(
 }
 
 bool LtLastS8S8UsedImma()
+{
+    return false;
+}
+
+matmul::v4::lt::MxLaneProvenance LtLastMxProvenance()
+{
+    return {};
+}
+
+bool IsLtExactMxScalePartitionedAvailable()
+{
+    return false;
+}
+
+matmul::v4::lt::MxLaneProvenance ProbeLtCudaMxNativeProvenance()
+{
+    return {};
+}
+
+bool IsLtNativeMxfp4Qualified()
+{
+    return false;
+}
+
+bool IsLtNativeFp8Qualified()
+{
+    return false;
+}
+
+bool TryLaunchNativeMxfp4ProjectedRight(const std::vector<int8_t>&, const std::vector<uint8_t>&,
+                                        const std::vector<int8_t>&, uint32_t, uint32_t,
+                                        std::vector<int32_t>& out,
+                                        matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    out.clear();
+    if (provenance != nullptr) {
+        *provenance = {};
+        provenance->native_mxfp4_attempted = true;
+    }
+    return false;
+}
+
+bool TryLaunchNativeFp8ProjectedRight(const std::vector<int8_t>&, const std::vector<uint8_t>&,
+                                      const std::vector<int8_t>&, uint32_t, uint32_t,
+                                      std::vector<int32_t>& out,
+                                      matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    out.clear();
+    if (provenance != nullptr) {
+        *provenance = {};
+        provenance->native_fp8_attempted = true;
+    }
+    return false;
+}
+
+bool SelfQualifyLtNativeMxLanesOnce()
 {
     return false;
 }

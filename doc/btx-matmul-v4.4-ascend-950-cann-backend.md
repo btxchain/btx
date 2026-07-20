@@ -127,9 +127,17 @@ been qualified on the target toolkit.
   must not be inferred from a marketing name.
 - `msprof`/operator traces should be retained as production evidence that the
   exact V5+NZ path ran on Cube on the target CANN/SoC combination.
-- S32×S8 remains CPU-only.
-- This is host ExactGemm injection, not a fully device-resident LT transcript;
-  host round trips between stages will cap end-to-end throughput.
+- S32×S8 remains CPU-only (radix-256 over Cube S8×S8 when ExactGemm qualifies).
+- Exact MX B̂·V is the four Cube ExactGemm scale partition (`e∈{0..3}`, shift,
+  sum), self-qualified byte-identical to `ComputeProjectedRightMxBlockScaleLT`.
+  MatExpand Extract stays host `ExpandOperandBMatExpandMxComponents` with Cube
+  ExactGemm inject for `G*W` / `(G*W)*H`. Provenance:
+  `used_cube_path`, `exact_mx_scale_partitioned`, `native_mx_qualified`
+  (always false until a documented CANN FP8/MX ExactGemm path is oracle-proven;
+  none is admitted today).
+- This is host-orchestrated ExactGemm + MX projection, not a fully
+  device-resident LT transcript; host round trips between stages will cap
+  end-to-end throughput.
 - Manual repeatable-executor caching and multi-stream double buffering should
   be enabled only after the selected CANN release proves the V5/NZ executor is
   repeatable and each stream has disjoint buffers/workspace.

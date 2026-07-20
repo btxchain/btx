@@ -14,6 +14,8 @@ class CBlockHeader;
 // matmul_v4::hip LT symbols present so a caller can link unconditionally;
 // the backend declines and callers use the host ExactGemm /
 // WindowSketchMinerLT fail-closed path (not a complete device accelerator).
+// Native MXFP4/FP8 remain fail-closed (never qualified without a real device
+// self-test against ComputeProjectedRightMxBlockScaleLT).
 
 namespace matmul_v4::hip {
 
@@ -31,6 +33,14 @@ bool LaunchGemmS8S8(const std::vector<int8_t>&, const std::vector<int8_t>&,
 bool LaunchGemmS32S8(const std::vector<int32_t>&, const std::vector<int8_t>&,
                      uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
 {
+    return false;
+}
+
+bool LaunchProjectedRightMx(const std::vector<int8_t>&, const std::vector<uint8_t>&,
+                            const std::vector<int8_t>&, uint32_t, uint32_t,
+                            std::vector<int32_t>&, matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    if (provenance) *provenance = {};
     return false;
 }
 
@@ -54,6 +64,50 @@ bool ComputeDigestsOnlyLTHip(
 
 bool LtLastS8S8UsedMfma()
 {
+    return false;
+}
+
+matmul::v4::lt::MxLaneProvenance LtLastMxProvenance()
+{
+    return {};
+}
+
+matmul::v4::lt::MxLaneProvenance ProbeLtHipMxNativeProvenance()
+{
+    return {};
+}
+
+bool IsLtNativeMxfp4Qualified()
+{
+    return false;
+}
+
+bool IsLtNativeFp8Qualified()
+{
+    return false;
+}
+
+bool TryLaunchNativeMxfp4ProjectedRight(const std::vector<int8_t>&, const std::vector<uint8_t>&,
+                                        const std::vector<int8_t>&, uint32_t, uint32_t,
+                                        std::vector<int32_t>&,
+                                        matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    if (provenance) {
+        *provenance = {};
+        provenance->native_mxfp4_attempted = false;
+    }
+    return false;
+}
+
+bool TryLaunchNativeFp8ProjectedRight(const std::vector<int8_t>&, const std::vector<uint8_t>&,
+                                      const std::vector<int8_t>&, uint32_t, uint32_t,
+                                      std::vector<int32_t>&,
+                                      matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    if (provenance) {
+        *provenance = {};
+        provenance->native_fp8_attempted = false;
+    }
     return false;
 }
 

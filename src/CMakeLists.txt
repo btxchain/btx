@@ -65,11 +65,18 @@ if(BTX_ENABLE_HEADER_NONCE_ON_WIRE)
   add_compile_definitions(BTX_ENABLE_HEADER_NONCE_ON_WIRE=1)
   message(STATUS "BTX_ENABLE_HEADER_NONCE_ON_WIRE=ON (deprecated build tag; wire format unchanged)")
 endif()
-# CUTLASS grouped MXFP4 tensor TU (default OFF). When ON and CUTLASS headers are
-# found, compile the tensor TU; IsGroupedMxfp4TensorKernelLinked() stays false
-# until process-local self-qual passes. Portable exact MXFP4 remains the fallback.
+# CUTLASS MXFP4 tensor TUs (default OFF): BMX4C grouped + optional LT SM120 OCP.
+# When ON and CUTLASS headers are found, compile the selected TUs;
+# IsGroupedMxfp4TensorKernelLinked / IsLtCutlassMxfp4Linked stay false until
+# process-local self-qual passes. Portable / INT8 exact paths remain the fallback.
 option(BTX_BMX4C_CUTLASS_MXFP4 "Compile CUTLASS grouped MXFP4 tensor TU (requires CUDA + CUTLASS headers)" OFF)
+option(BTX_LT_CUTLASS_MXFP4 "Compile LT SM120 OCP MXFP4 CUTLASS TU (also implied by BTX_BMX4C_CUTLASS_MXFP4)" OFF)
 set(BTX_CUTLASS_INCLUDE_DIR "" CACHE PATH "CUTLASS include root (directory containing cutlass/cutlass.h)")
+# Shared enable: either explicit LT flag or the BMX4C CUTLASS gate pulls LT in.
+set(BTX_BUILD_LT_CUTLASS_MXFP4 OFF)
+if(BTX_LT_CUTLASS_MXFP4 OR BTX_BMX4C_CUTLASS_MXFP4)
+  set(BTX_BUILD_LT_CUTLASS_MXFP4 ON)
+endif()
 option(BTX_ENABLE_CUDA_EXPERIMENTAL "Enable experimental CUDA backend scaffolding for BTX miner integration" OFF)
 set(BTX_CUDA_ARCHITECTURES "" CACHE STRING "Semicolon-separated CUDA SM architectures for the experimental MatMul backend (for example 120)")
 # Cloud TPU is served through a separately built, version-pinned PJRT/libtpu
@@ -360,6 +367,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_bmx4_batch.cpp
   matmul/matmul_v4_bmx4_pipeline.cpp
   matmul/matmul_v4_lt.cpp
+  matmul/matmul_v4_lt_mx_exact.cpp
   matmul/matmul_sketch_cache.cpp
   matmul/matmul_v4_exact_float.cpp
   matmul/matmul_v4_fast_exact.cpp
@@ -418,11 +426,17 @@ endif()
 if(BTX_BMX4C_CUTLASS_MXFP4 AND NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
   message(FATAL_ERROR "BTX_BMX4C_CUTLASS_MXFP4=ON requires BTX_ENABLE_CUDA_EXPERIMENTAL=ON")
 endif()
+if(BTX_BUILD_LT_CUTLASS_MXFP4 AND NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
+  message(FATAL_ERROR "BTX_LT_CUTLASS_MXFP4/BTX_BMX4C_CUTLASS_MXFP4=ON requires BTX_ENABLE_CUDA_EXPERIMENTAL=ON")
+endif()
 
-# MXFP4 CUTLASS tensor: default honesty stub (Linked=false). Replaced by the
-# CUDA TU when BTX_BMX4C_CUTLASS_MXFP4=ON and CUDA experimental is enabled.
+# MXFP4 CUTLASS tensor: default honesty stubs (Linked=false). Replaced by CUDA
+# TUs when the matching option is ON and CUDA experimental is enabled.
 if(NOT (BTX_BMX4C_CUTLASS_MXFP4 AND BTX_ENABLE_CUDA_EXPERIMENTAL))
   target_sources(bitcoin_common PRIVATE cuda/matmul_v4_bmx4_cutlass_mxfp4_link.cpp)
+endif()
+if(NOT (BTX_BUILD_LT_CUTLASS_MXFP4 AND BTX_ENABLE_CUDA_EXPERIMENTAL))
+  target_sources(bitcoin_common PRIVATE cuda/matmul_v4_lt_cutlass_mxfp4_link.cpp)
 endif()
 target_link_libraries(bitcoin_common
   PUBLIC
@@ -640,9 +654,10 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     # remediation doc). Compile-verified only on real CUDA toolchains.
     cuda/matmul_v4_bmx4_accel.cu
     cuda/matmul_v4_lt_accel.cu
+    cuda/matmul_v4_lt_mx_native.cu
     cuda/matmul_v4_lt_tensor_gemm.cu
   )
-  if(BTX_BMX4C_CUTLASS_MXFP4)
+  if(BTX_BMX4C_CUTLASS_MXFP4 OR BTX_BUILD_LT_CUTLASS_MXFP4)
     set(_btx_cutlass_inc "")
     if(BTX_CUTLASS_INCLUDE_DIR AND EXISTS "${BTX_CUTLASS_INCLUDE_DIR}/cutlass/cutlass.h")
       set(_btx_cutlass_inc "${BTX_CUTLASS_INCLUDE_DIR}")
@@ -654,12 +669,18 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     if(_btx_cutlass_inc)
       target_include_directories(btx_matmul_backend PRIVATE "${_btx_cutlass_inc}")
       target_compile_definitions(btx_matmul_backend PRIVATE BTX_BMX4C_CUTLASS_HEADERS=1)
-      message(STATUS "BTX_BMX4C_CUTLASS_MXFP4=ON (CUTLASS headers at ${_btx_cutlass_inc})")
+      message(STATUS "CUTLASS MXFP4 headers at ${_btx_cutlass_inc} (BMX4C=${BTX_BMX4C_CUTLASS_MXFP4} LT=${BTX_BUILD_LT_CUTLASS_MXFP4})")
     else()
-      message(WARNING "BTX_BMX4C_CUTLASS_MXFP4=ON but CUTLASS headers not found; tensor TU fail-closed (IsGroupedMxfp4TensorKernelLinked stays false)")
+      message(WARNING "CUTLASS MXFP4 option(s) ON but headers not found; tensor TUs fail-closed")
     endif()
+  endif()
+  if(BTX_BMX4C_CUTLASS_MXFP4)
     target_sources(btx_matmul_backend PRIVATE cuda/matmul_v4_bmx4_cutlass_mxfp4.cu)
     target_compile_definitions(btx_matmul_backend PRIVATE BTX_BMX4C_CUTLASS_MXFP4=1)
+  endif()
+  if(BTX_BUILD_LT_CUTLASS_MXFP4)
+    target_sources(btx_matmul_backend PRIVATE cuda/matmul_v4_lt_cutlass_mxfp4.cu)
+    target_compile_definitions(btx_matmul_backend PRIVATE BTX_LT_CUTLASS_MXFP4=1)
   endif()
   # PUBLIC so the define propagates to every consumer of btx_matmul_backend.
   # This subsumes the eligibility-classifier fix: CudaEligibility() lives in
@@ -681,6 +702,8 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   # cuBLASLt provides the exact INT8->INT32 (CUDA_R_8I -> CUDA_R_32I,
   # CUBLAS_COMPUTE_32I) tensor-core GEMMs used by the MatMul v4 backend.
   target_link_libraries(btx_matmul_backend PRIVATE CUDA::cublasLt)
+  # cublasSgemm backs the LT MX FP32-dequant native admission path (exact under 2^24).
+  target_link_libraries(btx_matmul_backend PRIVATE CUDA::cublas)
   # matmul_v4_accel.cu reuses the exact CPU derivation / serialization / digest
   # routines (matmul::v4::*, defined in bitcoin_common) to guarantee bit-exact
   # operands and digest. Both are STATIC libraries and bitcoin_common already
@@ -716,12 +739,16 @@ if(BTX_ENABLE_HIP)
     # WindowSketchMinerLT via ExactGemmBackend (see matmul_v4_lt_accel.h/.hip).
     hip/matmul_v4_lt_accel.hip
     hip/matmul_v4_lt_tensor_gemm.hip
+    # Native MXFP4/MXFP8 hipBLASLt block-scale attempt + self-qual (fail-closed
+    # until oracle-identical on gfx950 with toolkit MX enums).
+    hip/matmul_v4_lt_mx_native.hip
   )
   set_source_files_properties(
     hip/matmul_v4_accel.hip
     hip/matmul_v4_bmx4_accel.hip
     hip/matmul_v4_lt_accel.hip
     hip/matmul_v4_lt_tensor_gemm.hip
+    hip/matmul_v4_lt_mx_native.hip
     PROPERTIES LANGUAGE HIP)
   # PUBLIC so the define reaches the backend-determinism test TU (compiled into
   # test_btx), whose HIP determinism row #if-guards on BTX_ENABLE_HIP; PRIVATE

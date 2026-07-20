@@ -7,6 +7,7 @@
 #include <matmul/matmul_pow.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_lt_mx_exact.h>
 
 #include <arith_uint256.h>
 #include <crypto/chacha20.h>
@@ -835,7 +836,7 @@ bool ComputeSealDigestBMX4CLT(const CBlockHeader& anchor, uint32_t n, uint32_t Q
                               const SlotSeedFn& slot_seed_fn, uint256& seal_out,
                               std::vector<WindowSlot>* slots_out,
                               std::vector<std::vector<unsigned char>>* slot_payloads_out,
-                              ExactGemmBackend backend)
+                              ExactGemmBackend backend, ExactMxProjectionBackend mx_proj)
 {
     seal_out.SetNull();
     if (slots_out) slots_out->clear();
@@ -846,9 +847,9 @@ bool ComputeSealDigestBMX4CLT(const CBlockHeader& anchor, uint32_t n, uint32_t Q
 
     // Prepare template-invariant A/U/V/P once. Slots share the template hash
     // (seed_a/seed_b are nulled in ComputeTemplateHash); only B/Q/Chat vary.
-    // Injectable ExactGemmBackend accelerates MatExpand GEMMs on this prepared
-    // miner; callers that omit it keep CPU ExactGemm*.
-    WindowSketchMinerLT prepared{anchor, n, std::move(backend)};
+    // Injectable ExactGemm + ExactMx backends accelerate MatExpand / B̂·V;
+    // callers that omit them keep CPU ExactGemm* / MX oracle.
+    WindowSketchMinerLT prepared{anchor, n, std::move(backend), std::move(mx_proj)};
     if (!prepared.Valid()) return false;
 
     const uint256 sigma_anchor = matmul::v4::DeriveSigma(anchor);
@@ -985,8 +986,9 @@ bool SealWindowProofMatchesCommitment(const CBlockHeader& anchor, uint32_t n, ui
 }
 
 WindowSketchMinerLT::WindowSketchMinerLT(const CBlockHeader& header, uint32_t n,
-                                         ExactGemmBackend backend)
-    : m_template{header}, m_n{n}, m_backend{backend}
+                                         ExactGemmBackend backend,
+                                         ExactMxProjectionBackend mx_proj)
+    : m_template{header}, m_n{n}, m_backend{backend}, m_mx_proj{mx_proj}
 {
     uint32_t m = 0;
     if (!ValidateDimsBMX4CLT(n, m)) return;
@@ -1056,8 +1058,10 @@ bool WindowSketchMinerLT::MineSlot(const CBlockHeader& header, uint256& digest_o
     std::vector<uint8_t> scales;
     (void)MatExpandCorePrepared(seed_w, m_n, m_G, m_H, m_backend, &mu, &scales,
                                 /*materialize_dense=*/false);
-    const std::vector<int32_t> Q =
-        ComputeProjectedRightMxBlockScaleLT(mu, scales, m_V, m_n, m_m);
+    // Device ExactMxProjectionBackend when set; mismatched results fail closed
+    // to ComputeProjectedRightMxBlockScaleLT (byte-identical digests).
+    const std::vector<int32_t> Q = ComputeProjectedRightMxDispatched(
+        mu, scales, m_V, m_n, m_m, m_mx_proj, /*provenance=*/nullptr);
     const std::vector<Fq> Chat = matmul::v4::ComputeCombineModQ(m_P, Q, m_n, m_m);
     digest_out = matmul::v4::ComputeSketchDigestFromFq(sigma, Chat);
     if (payload_out) {
@@ -1106,10 +1110,12 @@ bool WindowSketchMinerLT::Mine(const std::vector<uint64_t>& nonces, const uint25
 
 matmul::v4::bmx4::ExactAccelPlan PlanLTAccel(std::string_view device_class)
 {
-    // This is a static lane-intent taxonomy shared with ENC-BMX4C, not runtime
-    // proof that a native instruction executed. The current frontier LT path
-    // consumes logical MX components through an exact INT8 IMMA/MFMA lowering;
-    // native MXFP4 remains separately hardware-gated. Consensus sees only Ĉ.
+    // Static lane-intent taxonomy only (same as ENC-BMX4C PlanExactAccelLanes).
+    // Never claim runtime native MXFP4/FP8 from this planner: no silicon probe,
+    // no self-qual, no kernel wiring. Logical ScalePartitionedMxfp4 means the
+    // miner SHOULD match ComputeProjectedRightMxBlockScaleLT (exact-integer MX);
+    // native_*_qualified stays false until a backend reports proven bits.
+    // Consensus sees only Ĉ. C-15 OPEN; public heights INT32_MAX.
     return matmul::v4::bmx4::PlanExactAccelLanes(device_class);
 }
 

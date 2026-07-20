@@ -9,12 +9,14 @@
 #include <crypto/sha256.h>
 #include <cuda/cuda_context.h>
 #include <cuda/matmul_v4_lt_device_mx.h>
+#include <cuda/matmul_v4_lt_mx_native.h>
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_pow.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_lt_mx_exact.h>
 #include <primitives/block.h>
 #include <span.h>
 #include <uint256.h>
@@ -41,22 +43,26 @@
 // Hot path (when a calibrated CUDA device is present):
  //   persistent device-resident loop over MatExpand → project → combine.
  //   When IsLtImmaGemmAvailable(), direct s8xs8 stages use cuBLASLt IMMA;
- //   Bhat*V defaults to one dense INT8 GEMM, with an opt-in qualification lane
- //   consuming MX mantissas/scales through four exponent partitions (not native
- //   MXFP4). Y*H uses four radix-256 IMMA products, and combine
- //   uses nine base-64 Karatsuba products. TryLaunchLtImmaGemmS32S8 itself
- //   still honestly declines because cuBLASLt has no direct s32xs8 recipe.
- //   When IMMA declines, scalar tiled DeviceGemm* + CUDA-graph replay serve
- //   the same buffers — never labeled IMMA. Consensus-seeded Q* calls also
- //   generate W via the exact counter-mode SHA XOF on device and hash bounded
- //   chunks of Chat in parallel; only 32-byte digests cross to the host.
+ //   Bhat*V prefers exact MX scale-partitioned INT8 (four exponent-masked
+ //   GEMMs, bit-identical to ComputeProjectedRightMxBlockScaleLT). Dense
+ //   dequant INT8 is the fallback. Native MXFP8 (VEC32_UE8M0) / MXFP4 may run
+ //   only after multi-shape self-qual vs the CPU oracle (else fail-closed);
+ //   float accumulate is never labeled ExactGemm. Y*H uses four radix-256
+ //   IMMA products, and combine uses nine base-64 Karatsuba products.
+ //   TryLaunchLtImmaGemmS32S8 itself still honestly declines because cuBLASLt
+ //   has no direct s32xs8 recipe. When IMMA declines, scalar tiled DeviceGemm*
+ //   + CUDA-graph replay serve the same buffers — never labeled IMMA.
+ //   Consensus-seeded Q* calls also generate W via the exact counter-mode SHA
+ //   XOF on device and hash bounded chunks of Chat in parallel; only 32-byte
+ //   digests cross to the host.
  //
  // Fail-closed fallback:
  //   host ExactGemm* / WindowSketchMinerLT (bit-exact MX scale-partitioned
  //   B̂·V on CPU). That host path is the safety net when the device declines.
  //
  // Availability requires a one-time bit-identity self-test of the GEMM kernels
- // AND a one-nonce device-resident digest vs ComputeDigestBMX4CLT.
+ // AND a one-nonce device-resident digest vs ComputeDigestBMX4CLT, plus MX
+ // projection vs ComputeProjectedRightMxBlockScaleLT on n multiple of 32.
 // ===========================================================================
 
 namespace matmul_v4::cuda {
@@ -71,16 +77,18 @@ constexpr char kMatExpandWATag[] = "BTX_MATEXPAND_WA_V44LT";
 constexpr size_t kDigestBytes = 32;
 constexpr size_t kMaxConsensusBatch = matmul::v4::lt::kConsensusQStarMax;
 
-// The exact logical-MX lowering below schedules four dense INT8 GEMMs. Keep it
-// as a qualification/benchmark lane until silicon data shows it beating the
-// single dense-INT8 projection or a native block-scaled kernel replaces it.
-bool LogicalMxQualificationEnabled()
+// Optional force-dense Bhat·V (disables production exact-MX preference).
+// Legacy BTX_MATMUL_V4_LT_LOGICAL_MX=1 is accepted as a no-op (MX is default).
+bool ForceDenseBhatProjection()
 {
-    const char* value = std::getenv("BTX_MATMUL_V4_LT_LOGICAL_MX");
+    const char* value = std::getenv("BTX_MATMUL_V4_LT_DENSE_BHAT");
     return value != nullptr &&
            (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 ||
             std::strcmp(value, "yes") == 0);
 }
+
+thread_local matmul::v4::lt::MxLaneProvenance g_lt_last_mx_prov{};
+thread_local bool g_lt_exact_mx_selftest_ok = false;
 
 uint256 DeriveTaggedSeed(const char* tag, size_t taglen, const uint256& hash)
 {
@@ -793,7 +801,10 @@ struct LtCudaResidentPool {
     bool template_bound{false};
     bool graphs_ready{false};
     bool imma_s8s8{false};
+    // Prefer exact MX scale-partitioned B̂·V (μ + E8M0) over dense dequant.
     bool mx_partitioned{false};
+    bool used_exact_mx_this_batch{false};
+    matmul::v4::lt::MxLaneProvenance mx_prov{};
 
     // Template-resident
     int8_t* dG{nullptr};
@@ -807,8 +818,8 @@ struct LtCudaResidentPool {
     int8_t* dW{nullptr};
     int32_t* dY{nullptr};
     int32_t* dB32{nullptr};
-    int8_t* dBhat{nullptr}; // dense Bhat, or MX mantissa μ on the frontier IMMA path
-    uint8_t* dScales{nullptr}; // n*(n/32) E8M0 codes for frontier MX projection
+    int8_t* dBhat{nullptr}; // MX mantissa μ when mx_partitioned; else dense Bhat
+    uint8_t* dScales{nullptr}; // n*(n/32) E8M0 codes for exact MX projection
     int32_t* dQ{nullptr};
     uint64_t* dChat{nullptr};
 
@@ -869,6 +880,8 @@ struct LtCudaResidentPool {
         template_bound = false;
         imma_s8s8 = false;
         mx_partitioned = false;
+        used_exact_mx_this_batch = false;
+        mx_prov = {};
         n = m = w = 0;
         device = -1;
     }
@@ -939,15 +952,13 @@ struct LtCudaResidentPool {
         }
         if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) return false;
 
-        cudaDeviceProp props{};
-        if (cudaGetDeviceProperties(&props, device) == cudaSuccess) {
-            // SM100/SM120 may exercise the exact four-pass logical-MX lane,
-            // but it is opt-in because it schedules 4x dense projection MACs.
-            // This deliberately does not advertise native MXFP4.
-            const bool frontier_mx = (props.major == 10 && props.minor == 0) ||
-                                     (props.major == 12 && props.minor == 0);
-            mx_partitioned = frontier_mx && LogicalMxQualificationEnabled();
-        }
+        // Production default: exact MX scale-partitioned B̂·V (CPU-oracle
+        // identical). Opt out with BTX_MATMUL_V4_LT_DENSE_BHAT=1. Native MXFP8/
+        // MXFP4 may qualify only after matmul_v4_lt_mx_native.cu self-qual.
+        mx_partitioned = (n_in % matmul::v4::lt::kMatExpandMxBlockLen == 0) &&
+                         !ForceDenseBhatProjection();
+        used_exact_mx_this_batch = false;
+        mx_prov = ProbeLtCudaMxNativeProvenance();
 
         n = n_in;
         m = m_in;
@@ -1104,31 +1115,52 @@ struct LtCudaResidentPool {
         return TryLaunchLtImmaGemmS8S8Device(dBhat, dV, dQ, n, m, n, stream);
     }
 
-    [[nodiscard]] bool LaunchProjectRightMxImma()
+    // Exact MX-layout lowering: four exponent-masked M11 planes × s8xs8 GEMM
+    // + exact 2^e accumulate. Bit-identical to
+    // ComputeProjectedRightMxBlockScaleLT / ComputeProjectedRightMxScalePartitionedGemmLT.
+    // Prefer IMMA library GEMMs; fall back to tiled DeviceGemmS8S8.
+    [[nodiscard]] bool LaunchProjectRightMxExact()
     {
         const size_t nn = static_cast<size_t>(n) * n;
         const size_t nm = static_cast<size_t>(n) * m;
-        if (!EnsureScratch(nn, 0, 0, nm * sizeof(int32_t))) return false;
+        if (dScales == nullptr || !EnsureScratch(nn, 0, 0, nm * sizeof(int32_t))) {
+            return false;
+        }
 
         constexpr unsigned kElemThreads = 256;
         const unsigned plane_blocks = static_cast<unsigned>((nn + kElemThreads - 1) /
                                                              kElemThreads);
         const unsigned out_blocks = static_cast<unsigned>((nm + kElemThreads - 1) /
                                                            kElemThreads);
+        const dim3 gemm_block(16, 16, 1);
+        const dim3 gemm_grid((m + gemm_block.x - 1) / gemm_block.x,
+                             (n + gemm_block.y - 1) / gemm_block.y, 1);
         for (uint32_t exponent = 0;
              exponent < matmul::v4::bmx4::kNumScaleCodes; ++exponent) {
             DeviceBuildMxExponentPlane<<<plane_blocks, kElemThreads, 0, stream>>>(
                 dBhat, dScales, dGemmS8L, nn, n, exponent);
             if (cudaGetLastError() != cudaSuccess) return false;
-            if (!TryLaunchLtImmaGemmS8S8Device(dGemmS8L, dV, dGemmOut,
-                                               n, m, n, stream)) {
-                return false;
+            bool gemm_ok = false;
+            if (imma_s8s8) {
+                gemm_ok = TryLaunchLtImmaGemmS8S8Device(dGemmS8L, dV, dGemmOut,
+                                                        n, m, n, stream);
+            }
+            if (!gemm_ok) {
+                DeviceGemmS8S8Tiled<<<gemm_grid, gemm_block, 0, stream>>>(
+                    dGemmS8L, dV, dGemmOut, static_cast<int>(n), static_cast<int>(m),
+                    static_cast<int>(n));
+                if (cudaGetLastError() != cudaSuccess) return false;
             }
             DeviceAccumulateMxProjection<<<out_blocks, kElemThreads, 0, stream>>>(
                 dGemmOut, dQ, nm, exponent);
             if (cudaGetLastError() != cudaSuccess) return false;
         }
         return true;
+    }
+
+    [[nodiscard]] bool LaunchProjectRightMxImma()
+    {
+        return LaunchProjectRightMxExact();
     }
 
     [[nodiscard]] bool LaunchProjectLeftImma()
@@ -1254,18 +1286,22 @@ struct LtCudaResidentPool {
         }
 
         const uint256 prf = matmul::v4::lt::DeriveMatExpandPrfKey(seed_w);
-        if (imma_s8s8 && mx_partitioned) {
+        // Production default: extract MX components and project via exact
+        // scale-partitioned INT8. Dense dequant + single GEMM only when forced
+        // or when the MX buffers were not allocated.
+        const bool use_mx = mx_partitioned && dScales != nullptr;
+        if (use_mx) {
             if (!LaunchMxExtract(nullptr, dBhat, dScales, prf)) return false;
         } else {
             if (!LaunchMxExtract(dBhat, nullptr, nullptr, prf)) return false;
         }
 
-        if (imma_s8s8) {
-            if (mx_partitioned) {
-                if (!LaunchProjectRightMxImma()) return false;
-            } else if (!LaunchProjectRightDenseImma()) {
-                return false;
-            }
+        if (use_mx) {
+            if (!LaunchProjectRightMxExact()) return false;
+            used_exact_mx_this_batch = true;
+            mx_prov.exact_mx_scale_partitioned = true;
+        } else if (imma_s8s8) {
+            if (!LaunchProjectRightDenseImma()) return false;
         } else {
             if (cudaGraphLaunch(project_right_exec, stream) != cudaSuccess) return false;
         }
@@ -1411,6 +1447,73 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
             return;
         }
 
+        // Exact MX scale-partitioned B̂·V vs CPU oracle on n multiple of 32.
+        {
+            constexpr uint32_t kMxN = 32;
+            constexpr uint32_t kMxM = 16;
+            const uint32_t nblk = kMxN / matmul::v4::lt::kMatExpandMxBlockLen;
+            std::vector<int8_t> mu(static_cast<size_t>(kMxN) * kMxN);
+            std::vector<uint8_t> scales(static_cast<size_t>(kMxN) * nblk);
+            std::vector<int8_t> V(static_cast<size_t>(kMxN) * kMxM);
+            for (uint32_t i = 0; i < kMxN * kMxN; ++i) {
+                static constexpr int8_t kM11[] = {0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6};
+                mu[i] = kM11[i % 11];
+            }
+            for (uint32_t i = 0; i < kMxN * nblk; ++i) {
+                scales[i] = static_cast<uint8_t>(i & 3U);
+            }
+            for (uint32_t i = 0; i < kMxN * kMxM; ++i) {
+                V[i] = matmul::v4::lt::FoldInt32ToEmax48(static_cast<int32_t>(i) * 3 - 17);
+            }
+            // Native lanes may succeed only when globally self-qualified and
+            // oracle-identical. A qualified claim without oracle match aborts.
+            {
+                std::vector<int32_t> native_out;
+                matmul::v4::lt::MxLaneProvenance native_prov{};
+                if (TryLaunchNativeMxfp4ProjectedRight(mu, scales, V, kMxN, kMxM, native_out,
+                                                       &native_prov)) {
+                    if (!native_prov.native_mxfp4_qualified ||
+                        !matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, kMxN, kMxM,
+                                                                      native_out)) {
+                        return;
+                    }
+                } else if (native_prov.native_mxfp4_qualified) {
+                    return;
+                }
+                native_out.clear();
+                native_prov = {};
+                if (TryLaunchNativeFp8ProjectedRight(mu, scales, V, kMxN, kMxM, native_out,
+                                                     &native_prov)) {
+                    if (!native_prov.native_fp8_qualified ||
+                        !matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, kMxN, kMxM,
+                                                                      native_out)) {
+                        return;
+                    }
+                } else if (native_prov.native_fp8_qualified) {
+                    return;
+                }
+            }
+            matmul::v4::lt::ExactGemmBackend gemm;
+            gemm.gemm_s8s8 = &BackendGemmS8S8;
+            gemm.gemm_s32s8 = &BackendGemmS32S8;
+            const auto partitioned =
+                matmul::v4::lt::ComputeProjectedRightMxScalePartitionedGemmLT(
+                    mu, scales, V, kMxN, kMxM, gemm);
+            if (partitioned.empty() ||
+                !matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, kMxN, kMxM,
+                                                              partitioned)) {
+                return;
+            }
+            std::vector<int32_t> launched;
+            matmul::v4::lt::MxLaneProvenance mx_prov{};
+            if (!LaunchProjectedRightMx(mu, scales, V, kMxN, kMxM, launched, &mx_prov) ||
+                !matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, kMxN, kMxM,
+                                                              launched) ||
+                !mx_prov.exact_mx_scale_partitioned) {
+                return;
+            }
+        }
+
         // Full-pipeline bit-identity: a real two-header batch with distinct
         // nonce-bound seeds. This catches the legacy template+nonce bug as
         // well as device W-XOF, Chat SHA256d, and batch ordering drift.
@@ -1503,6 +1606,7 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
         }
 
         ok = true;
+        g_lt_exact_mx_selftest_ok = true;
     });
     return ok;
 }
@@ -1517,6 +1621,7 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
     if (headers.empty() || headers.size() > kMaxConsensusBatch) return false;
     auto& pool = Pool();
     std::lock_guard<std::mutex> lock(pool.mu);
+    pool.used_exact_mx_this_batch = false;
     if (!pool.BindTemplate(headers.front(), n, m) ||
         !pool.EnsureBatchCapacity(headers.size())) {
         if (pool.stream != nullptr) (void)cudaStreamSynchronize(pool.stream);
@@ -1584,6 +1689,8 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
         out[i].target_match = false;
         out[i].backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
     }
+    g_lt_last_mx_prov = pool.mx_prov;
+    g_lt_last_mx_prov.exact_mx_scale_partitioned = pool.used_exact_mx_this_batch;
     return true;
 }
 
@@ -1594,13 +1701,15 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
 {
     if (headers.empty()) return false;
     matmul::v4::lt::ExactGemmBackend backend;
+    matmul::v4::lt::ExactMxProjectionBackend mx_proj;
     if (try_device_gemms) {
         backend.gemm_s8s8 = &BackendGemmS8S8;
         backend.gemm_s32s8 = &BackendGemmS32S8;
+        mx_proj.project_right = &LaunchProjectedRightMx;
     }
     g_lt_device_gemm_failed = false;
 
-    matmul::v4::lt::WindowSketchMinerLT miner(headers.front(), n, backend);
+    matmul::v4::lt::WindowSketchMinerLT miner(headers.front(), n, backend, mx_proj);
     if (!miner.Valid()) return false;
 
     const uint256 kNoTarget = ArithToUint256(~arith_uint256{});
@@ -1703,6 +1812,7 @@ bool ComputeDigestsOnlyLTCuda(
                 provenance->device_w_generation = true;
                 provenance->device_digest = true;
                 provenance->per_nonce_sync_absent = true;
+                provenance->mx = g_lt_last_mx_prov;
             }
             return true;
         }
@@ -1717,6 +1827,72 @@ bool ComputeDigestsOnlyLTCuda(
 bool LtLastS8S8UsedImma()
 {
     return g_lt_last_s8s8_imma;
+}
+
+matmul::v4::lt::MxLaneProvenance LtLastMxProvenance()
+{
+    return g_lt_last_mx_prov;
+}
+
+bool IsLtExactMxScalePartitionedAvailable()
+{
+    return IsMatMulLTCudaAvailable() && g_lt_exact_mx_selftest_ok;
+}
+
+bool LaunchProjectedRightMx(const std::vector<int8_t>& mu,
+                            const std::vector<uint8_t>& scales,
+                            const std::vector<int8_t>& V, uint32_t n, uint32_t m,
+                            std::vector<int32_t>& out,
+                            matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    matmul::v4::lt::MxLaneProvenance local{};
+    out.clear();
+    if (n == 0 || m == 0 || (n % matmul::v4::lt::kMatExpandMxBlockLen) != 0) {
+        if (provenance) *provenance = local;
+        g_lt_last_mx_prov = local;
+        return false;
+    }
+    const uint32_t nblk = n / matmul::v4::lt::kMatExpandMxBlockLen;
+    if (mu.size() != static_cast<size_t>(n) * n ||
+        scales.size() != static_cast<size_t>(n) * nblk ||
+        V.size() != static_cast<size_t>(n) * m) {
+        if (provenance) *provenance = local;
+        g_lt_last_mx_prov = local;
+        return false;
+    }
+
+    // Prefer a qualified native path; otherwise exact INT8 scale partitions.
+    if (TryLaunchNativeMxfp4ProjectedRight(mu, scales, V, n, m, out, &local) &&
+        matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, out)) {
+        local.native_mxfp4_qualified = true;
+        local.exact_mx_scale_partitioned = false;
+        if (provenance) *provenance = local;
+        g_lt_last_mx_prov = local;
+        return true;
+    }
+    local = {};
+    if (TryLaunchNativeFp8ProjectedRight(mu, scales, V, n, m, out, &local) &&
+        matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, out)) {
+        local.native_fp8_qualified = true;
+        local.exact_mx_scale_partitioned = false;
+        if (provenance) *provenance = local;
+        g_lt_last_mx_prov = local;
+        return true;
+    }
+    local = {};
+
+    matmul::v4::lt::ExactGemmBackend gemm;
+    gemm.gemm_s8s8 = &LaunchGemmS8S8;
+    gemm.gemm_s32s8 = &LaunchGemmS32S8;
+    out = matmul::v4::lt::ComputeProjectedRightMxScalePartitionedGemmLT(mu, scales, V, n, m, gemm);
+    if (out.empty() ||
+        !matmul::v4::lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, out)) {
+        out = matmul::v4::lt::ComputeProjectedRightMxBlockScaleLT(mu, scales, V, n, m);
+    }
+    local.exact_mx_scale_partitioned = true;
+    if (provenance) *provenance = local;
+    g_lt_last_mx_prov = local;
+    return !out.empty();
 }
 
 } // namespace matmul_v4::cuda

@@ -139,6 +139,34 @@ struct ExactGemmBackend {
     }
 };
 
+/** Honesty/provenance bits for an MX right-projection attempt (miner-local).
+ *  All defaults are fail-closed. Report JSON (`lt.exact_mx_scale_partitioned`,
+ *  `lt.native_mxfp4_qualified`, `lt.native_fp8_qualified`) MUST stay false on
+ *  CPU-only runs and MUST NOT be set true without a wired kernel + proven bits.
+ *  Helpers: matmul_v4_lt_mx_exact.h (`ComputeProjectedRightMxDispatched`). */
+struct MxLaneProvenance {
+    bool exact_mx_scale_partitioned{false}; // used exact e∈{0..3} INT8 partitions
+    bool native_mxfp4_attempted{false};     // invoked vendor MXFP4 / block-scale API
+    bool native_mxfp4_qualified{false};     // bit-identical to CPU oracle on self-qual
+    bool native_fp8_attempted{false};
+    bool native_fp8_qualified{false};
+};
+
+/** Optional inject for miner-local MX B̂·V (scale-partitioned).
+ *  Null ⇒ CPU ComputeProjectedRightMxBlockScaleLT (consensus oracle).
+ *  Non-null MUST be byte-identical to that oracle (self-test first).
+ *  Production miner MX paths MUST match the oracle; native MXFP4/FP8 tensor
+ *  instructions are optional accelerations behind qualification only.
+ *  Dispatch: ComputeProjectedRightMxDispatched in matmul_v4_lt_mx_exact.h. */
+struct ExactMxProjectionBackend {
+    using Fn = bool (*)(const std::vector<int8_t>& mu, const std::vector<uint8_t>& scales,
+                        const std::vector<int8_t>& V, uint32_t n, uint32_t m,
+                        std::vector<int32_t>& out, MxLaneProvenance* provenance);
+    Fn project_right{nullptr};
+
+    [[nodiscard]] bool HasDeviceProjection() const { return project_right != nullptr; }
+};
+
 [[nodiscard]] std::vector<int8_t> ExpandOperandAMatExpand(const CBlockHeader& header, uint32_t n);
 [[nodiscard]] std::vector<int8_t> ExpandOperandAMatExpand(const CBlockHeader& header, uint32_t n,
                                                           const ExactGemmBackend& backend);
@@ -161,7 +189,15 @@ void ExpandOperandBMatExpandMxComponents(const CBlockHeader& header, uint32_t n,
                                          std::vector<uint8_t>& scales_out);
 
 /** Q = (μ · 2^e) · V with e shared on 32-col blocks per row (Lever-B MX layout).
- *  Bit-identical to ComputeProjectedRight(Bhat, V) when Bhat[i,j]=μ[i,j]<<e[i,j/32]. */
+ *  Bit-identical to ComputeProjectedRight(Bhat, V) when Bhat[i,j]=μ[i,j]<<e[i,j/32].
+ *
+ *  CONSENSUS / PRODUCTION ORACLE for the LT MX right projection. Every miner
+ *  backend (CPU scale-partitioned GEMM lowering, device IMMA/MFMA/Cube INT8
+ *  partitions, or future native MXFP4) MUST match this routine bit-for-bit.
+ *  Optional device inject: ExactMxProjectionBackend + ComputeProjectedRightMxDispatched
+ *  (matmul_v4_lt_mx_exact.h). This is exact-integer MX semantics — NOT a claim
+ *  that a native MXFP4 tensor instruction executed. C-15 remains OPEN;
+ *  public heights stay INT32_MAX. */
 [[nodiscard]] std::vector<int32_t> ComputeProjectedRightMxBlockScaleLT(
     const std::vector<int8_t>& mu, const std::vector<uint8_t>& scales,
     const std::vector<int8_t>& V, uint32_t n, uint32_t m);
@@ -262,15 +298,18 @@ using SlotSeedFn = std::function<bool(CBlockHeader&)>;
  *  records in window order, and `slot_payloads_out` (if non-null) receives each
  *  slot's serialized sketch bytes (for the Freivalds seal-auth path /
  *  harnesses). Returns false if any slot fails (bad dims, slot_seed_fn failure,
- *  duplicate slot_id). Optional `backend` injects device ExactGemm for MatExpand
- *  GEMMs on the prepared WindowSketchMinerLT (miners pass
- *  MakeResolvedExactGemmBackend()); default {} keeps CPU ExactGemm*. */
+ *  duplicate slot_id). Optional `backend` / `mx_proj` inject device ExactGemm
+ *  (MatExpand) and ExactMxProjectionBackend (B̂·V via
+ *  ComputeProjectedRightMxDispatched) on the prepared WindowSketchMinerLT
+ *  (miners pass MakeResolvedExactGemmBackend +
+ *  MakeResolvedExactMxProjectionBackend); defaults {} keep CPU ExactGemm* /
+ *  ComputeProjectedRightMxBlockScaleLT. */
 [[nodiscard]] bool ComputeSealDigestBMX4CLT(
     const CBlockHeader& anchor, uint32_t n, uint32_t Qstar,
     const SlotSeedFn& slot_seed_fn, uint256& seal_out,
     std::vector<WindowSlot>* slots_out = nullptr,
     std::vector<std::vector<unsigned char>>* slot_payloads_out = nullptr,
-    ExactGemmBackend backend = {});
+    ExactGemmBackend backend = {}, ExactMxProjectionBackend mx_proj = {});
 
 /** SEAL-AUTH FAST PATH (accept-side; per-slot Freivalds, ε ≤ 2^-180). Given the
  *  window proof `slot_payloads` (exactly Q* per-slot serialized sketches), re-
@@ -300,6 +339,10 @@ using SlotSeedFn = std::function<bool(CBlockHeader&)>;
     const SlotSeedFn& slot_seed_fn,
     const std::vector<std::vector<unsigned char>>& slot_payloads);
 
+/** Static lane-intent taxonomy (shared with ENC-BMX4C PlanExactAccelLanes).
+ *  Does NOT probe silicon, does NOT prove a native MXFP4/FP8 instruction ran,
+ *  and MUST NOT be treated as native_path_eligible / native_*_qualified.
+ *  ProjectionLane::ScalePartitionedMxfp4 means logical exact-MX partitions only. */
 [[nodiscard]] matmul::v4::bmx4::ExactAccelPlan PlanLTAccel(std::string_view device_class);
 
 struct DigestOnlyResultLT {
@@ -314,18 +357,23 @@ class WindowSketchMinerLT
 {
 public:
     explicit WindowSketchMinerLT(const CBlockHeader& header, uint32_t n,
-                                 ExactGemmBackend backend = {});
+                                 ExactGemmBackend backend = {},
+                                 ExactMxProjectionBackend mx_proj = {});
 
     [[nodiscard]] bool Valid() const { return m_valid; }
     [[nodiscard]] uint32_t SketchDim() const { return m_m; }
     [[nodiscard]] const uint256& TemplateHash() const { return m_template_hash; }
     [[nodiscard]] bool UsingDeviceGemms() const { return m_backend.HasDeviceGemms(); }
+    [[nodiscard]] bool UsingDeviceMxProjection() const
+    {
+        return m_mx_proj.HasDeviceProjection();
+    }
 
     [[nodiscard]] bool MineWindow(const std::vector<CBlockHeader>& headers,
                                   const uint256& target,
                                   std::vector<DigestOnlyResultLT>& out) const;
 
-[[nodiscard]] bool MineSlot(const CBlockHeader& header,
+    [[nodiscard]] bool MineSlot(const CBlockHeader& header,
                                 uint256& digest_out,
                                 std::vector<unsigned char>* payload_out = nullptr) const;
 
@@ -340,6 +388,7 @@ private:
     uint32_t m_m{0};
     bool m_valid{false};
     ExactGemmBackend m_backend{};
+    ExactMxProjectionBackend m_mx_proj{};
     // Template-scoped MatExpand projectors. Keeping them in the prepared miner
     // avoids regenerating n*n + kMatExpandPanelW*n M11 bytes per nonce on the
     // CPU/per-call accelerator fallback; resident CUDA/HIP pools mirror this.

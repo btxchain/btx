@@ -11,7 +11,8 @@
 class CBlockHeader;
 
 // Stub when BTX_ENABLE_ASCEND is OFF, or ON without a detected CANN toolkit.
-// Always fail-closed — never claims Cube / ExactGemm without CANN + self-qual.
+// Always fail-closed — never claims Cube / ExactGemm / MX twin without CANN +
+// self-qual. Provenance fields stay false.
 
 namespace matmul_v4::ascend {
 
@@ -22,6 +23,11 @@ bool GetAscendRuntimeSocName(std::string& out)
 }
 
 bool IsAscendExactGemmAvailable()
+{
+    return false;
+}
+
+bool IsAscendExactMxProjectionAvailable()
 {
     return false;
 }
@@ -60,11 +66,39 @@ bool TryLaunchLtCubeGemmS32S8(const std::vector<int32_t>&, const std::vector<int
     return false;
 }
 
-bool ComputeDigestsOnlyLTAscend(const CBlockHeader& /*tmpl*/, uint32_t /*n*/,
-                                const uint64_t* /*nonces*/, size_t /*count*/,
-                                std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
+bool ComputeProjectedRightMxBlockScaleLTAscend(
+    const std::vector<int8_t>& /*mu*/, const std::vector<uint8_t>& /*scales*/,
+    const std::vector<int8_t>& /*V*/, uint32_t /*n*/, uint32_t /*m*/,
+    std::vector<int32_t>& out, LtAscendDigestProvenance* provenance)
 {
     out.clear();
+    if (provenance) *provenance = {};
+    return false;
+}
+
+bool TryLaunchLtCubeMxProjectRight(const std::vector<int8_t>& /*mu*/,
+                                   const std::vector<uint8_t>& /*scales*/,
+                                   const std::vector<int8_t>& /*V*/, uint32_t /*n*/,
+                                   uint32_t /*m*/, std::vector<int32_t>& out,
+                                   matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    out.clear();
+    if (provenance) *provenance = {};
+    return false;
+}
+
+LtAscendDigestProvenance LastAscendDigestProvenance()
+{
+    return {};
+}
+
+bool ComputeDigestsOnlyLTAscend(const CBlockHeader& /*tmpl*/, uint32_t /*n*/,
+                                const uint64_t* /*nonces*/, size_t /*count*/,
+                                std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+                                LtAscendDigestProvenance* provenance)
+{
+    out.clear();
+    if (provenance) *provenance = {};
     return false;
 }
 

@@ -5147,6 +5147,8 @@ bool SolveMatMulParallel(CBlockHeader& block,
 // (MatExpand + deep-m). Winning candidates are resealed via ComputeDigestBMX4CLT
 // (Phase A) or ComputeSealDigestBMX4CLT (Phase B seal-as-PoW when active).
 // MakeResolvedExactGemmBackend also admits explicit LT-only TPU/Trainium
+// ExactGemm providers; MakeResolvedExactMxProjectionBackend wires CUDA/HIP/
+// Metal/Ascend MX B̂·V injects (fail-closed via ComputeProjectedRightMxDispatched).
 // providers while the full digest backend remains CPU. Phase A prefers full
 // device dispatch when selected. Every accelerated Phase-B winner is re-sealed
 // through the CPU reference before success is returned. This rare duplicate
@@ -5176,8 +5178,11 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
     const matmul_v4::accel::Kind accel_kind = matmul_v4::accel::ResolveBackend();
     const matmul::v4::lt::ExactGemmBackend exact_gemm =
         matmul_v4::accel::MakeResolvedExactGemmBackend();
+    const matmul::v4::lt::ExactMxProjectionBackend exact_mx =
+        matmul_v4::accel::MakeResolvedExactMxProjectionBackend();
     const bool accelerated_exact_gemm =
         exact_gemm.gemm_s8s8 != nullptr || exact_gemm.gemm_s32s8 != nullptr;
+    const bool accelerated_exact_mx = exact_mx.HasDeviceProjection();
 
     // Phase B: seal-as-PoW — lottery object is the Q* window seal. Each attempt
     // evaluates one full seal (exactly consensus_Qstar digests); max_tries
@@ -5208,18 +5213,20 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
             if (!matmul::v4::lt::ComputeSealDigestBMX4CLT(block, n, Qstar, slot_seed, seal,
                                                           /*slots_out=*/nullptr,
                                                           /*slot_payloads_out=*/nullptr,
-                                                          exact_gemm)) {
+                                                          exact_gemm, exact_mx)) {
                 RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
                 return false;
             }
             if (UintToArith256(seal) <= bnTarget) {
-                if (accel_kind != matmul_v4::accel::Kind::CPU || accelerated_exact_gemm) {
+                if (accel_kind != matmul_v4::accel::Kind::CPU || accelerated_exact_gemm ||
+                    accelerated_exact_mx) {
                     uint256 cpu_seal;
                     if (!matmul::v4::lt::ComputeSealDigestBMX4CLT(
                             block, n, Qstar, slot_seed, cpu_seal,
                             /*slots_out=*/nullptr,
                             /*slot_payloads_out=*/nullptr,
-                            matmul::v4::lt::ExactGemmBackend{}) ||
+                            matmul::v4::lt::ExactGemmBackend{},
+                            matmul::v4::lt::ExactMxProjectionBackend{}) ||
                         cpu_seal != seal || UintToArith256(cpu_seal) > bnTarget) {
                         // Treat a divergent winner as a backend failure. Do not
                         // broadcast it and do not silently count it as another
@@ -5246,7 +5253,7 @@ static bool SolveMatMulV4LT(CBlockHeader& block,
         return false;
     }
 
-    matmul::v4::lt::WindowSketchMinerLT miner{block, n, exact_gemm};
+    matmul::v4::lt::WindowSketchMinerLT miner{block, n, exact_gemm, exact_mx};
     if (!miner.Valid()) {
         RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
         return false;

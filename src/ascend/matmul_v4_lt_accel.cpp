@@ -5,9 +5,11 @@
 #include <ascend/matmul_v4_lt_accel.h>
 
 #include <matmul/exact_gemm_radix.h>
+#include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_lt_mx_exact.h>
 
-#include <arith_uint256.h>
 #include <primitives/block.h>
 
 #include <algorithm>
@@ -538,7 +540,113 @@ void FillCornerOperands(uint32_t rows, uint32_t inner, uint32_t cols,
     return EnsureAclRuntimeLocked(&stream);
 }
 
+// ---------------------------------------------------------------------------
+// Exact MX scale-partitioned B̂·V: four Cube ExactGemm passes via the shared
+// ComputeProjectedRightMxScalePartitionedGemmLT helper (e∈{0..3}, shift, sum).
+// Bit-identical to ComputeProjectedRightMxBlockScaleLT under Lever-B.
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] bool LaunchCubeMxScalePartitioned(const std::vector<int8_t>& mu,
+                                                const std::vector<uint8_t>& scales,
+                                                const std::vector<int8_t>& V, uint32_t n,
+                                                uint32_t m, std::vector<int32_t>& out)
+{
+    out.clear();
+    if (n == 0 || m == 0 || (n % matmul::v4::lt::kMatExpandMxBlockLen) != 0) return false;
+
+    matmul::v4::lt::ExactGemmBackend gemm;
+    // Direct Cube launch: caller has already gated ExactGemm + MX self-qual.
+    gemm.gemm_s8s8 = [](const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                        uint32_t rows, uint32_t inner, uint32_t cols,
+                        std::vector<int32_t>& product) -> bool {
+        return LaunchCubeS8S8(L, R, rows, inner, cols, product);
+    };
+
+    out = matmul::v4::lt::ComputeProjectedRightMxScalePartitionedGemmLT(mu, scales, V, n, m,
+                                                                        gemm);
+    if (out.size() != static_cast<size_t>(n) * m) {
+        out.clear();
+        return false;
+    }
+    return true;
+}
+
+void FillMxSelfTestOperands(uint32_t n, uint32_t m, std::vector<int8_t>& mu,
+                            std::vector<uint8_t>& scales, std::vector<int8_t>& V)
+{
+    const uint32_t nblk = n / matmul::v4::lt::kMatExpandMxBlockLen;
+    mu.resize(static_cast<size_t>(n) * n);
+    scales.resize(static_cast<size_t>(n) * nblk);
+    V.resize(static_cast<size_t>(n) * m);
+    // M11-ish mantissas in [-6,6] and e∈{0..3} — Lever-B alphabet shape only.
+    for (size_t i = 0; i < mu.size(); ++i) {
+        mu[i] = static_cast<int8_t>((static_cast<int32_t>(i) % 13) - 6);
+    }
+    for (size_t i = 0; i < scales.size(); ++i) {
+        scales[i] = static_cast<uint8_t>(i & 0x3U);
+    }
+    for (size_t i = 0; i < V.size(); ++i) {
+        V[i] = static_cast<int8_t>((static_cast<int32_t>(i) % 11) - 5);
+    }
+}
+
+[[nodiscard]] bool MatchMxCubeVsCpu(const std::vector<int8_t>& mu,
+                                    const std::vector<uint8_t>& scales,
+                                    const std::vector<int8_t>& V, uint32_t n, uint32_t m)
+{
+    const auto cpu =
+        matmul::v4::lt::ComputeProjectedRightMxBlockScaleLT(mu, scales, V, n, m);
+    std::vector<int32_t> npu;
+    return LaunchCubeMxScalePartitioned(mu, scales, V, n, m, npu) && npu == cpu;
+}
+
+[[nodiscard]] bool SelfQualifyMxProjectionOnce()
+{
+    static std::once_flag once;
+    static bool ok = false;
+    std::call_once(once, [] {
+        if (!SelfQualifyCubeOnce()) return;
+        // Cover one MX-block axis, a rectangular deep-m panel, and a denser
+        // 64×32 case. Exactness is byte-for-byte vs the CPU oracle.
+        const struct {
+            uint32_t n, m;
+        } cases[] = {{32, 16}, {32, 32}, {64, 32}};
+        for (const auto& c : cases) {
+            std::vector<int8_t> mu, V;
+            std::vector<uint8_t> scales;
+            FillMxSelfTestOperands(c.n, c.m, mu, scales, V);
+            if (!MatchMxCubeVsCpu(mu, scales, V, c.n, c.m)) return;
+        }
+        ok = true;
+    });
+    return ok;
+}
+
+// Attempt to detect a native CANN FP8/MX matmul header. Presence alone does
+// NOT qualify — native_mx_qualified stays false until an ExactGemm/oracle
+// self-qual path is wired. This probe only documents that we looked.
+[[nodiscard]] bool CannNativeMxHeadersPresent()
+{
+#if __has_include(<aclnnop/aclnn_quant_matmul_v5.h>)
+    // No released public CANN API is admitted here as OCP-MX / committed-E8M0
+    // ExactGemm for Lever-B. Keep the probe compile-clean and fail-closed.
+    return false;
+#else
+    return false;
+#endif
+}
+
+[[nodiscard]] bool TryNativeMxProjection()
+{
+    // Optional FP8/MX CANN ops: refused until a documented raw-integer contract
+    // plus CPU-oracle self-qual exists. Never label a float path as native MX.
+    (void)CannNativeMxHeadersPresent();
+    return false;
+}
+
 #endif // BTX_HAVE_CANN
+
+LtAscendDigestProvenance g_last_provenance{};
 
 } // namespace
 
@@ -644,27 +752,149 @@ bool TryLaunchLtCubeGemmS32S8(const std::vector<int32_t>& left,
     return ExactGemmS32S8Ascend(left, right, rows, inner, cols, out, &used_cube) && used_cube;
 }
 
-bool ComputeDigestsOnlyLTAscend(const CBlockHeader& tmpl, uint32_t n,
-                                const uint64_t* nonces, size_t count,
-                                std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)
+bool IsAscendExactMxProjectionAvailable()
+{
+#if defined(BTX_HAVE_CANN)
+    return IsAscendExactGemmAvailable() && SelfQualifyMxProjectionOnce();
+#else
+    return false;
+#endif
+}
+
+bool ComputeProjectedRightMxBlockScaleLTAscend(
+    const std::vector<int8_t>& mu, const std::vector<uint8_t>& scales,
+    const std::vector<int8_t>& V, uint32_t n, uint32_t m, std::vector<int32_t>& out,
+    LtAscendDigestProvenance* provenance)
 {
     out.clear();
-    if (!IsAscendExactGemmAvailable() || nonces == nullptr || count == 0) return false;
+    if (provenance) *provenance = {};
+    g_last_provenance = {};
+#if defined(BTX_HAVE_CANN)
+    // Prefer a proven native MX/FP8 CANN op only after ExactGemm+oracle qual.
+    // None is admitted today — TryNativeMxProjection always returns false.
+    if (TryNativeMxProjection()) {
+        // Unreachable until a native lane is wired and self-qualified.
+        return false;
+    }
+    if (!IsAscendExactMxProjectionAvailable() ||
+        !LaunchCubeMxScalePartitioned(mu, scales, V, n, m, out)) {
+        out.clear();
+        return false;
+    }
+    LtAscendDigestProvenance p;
+    p.used_cube_path = true;
+    p.exact_mx_scale_partitioned = true;
+    p.native_mx_qualified = false;
+    g_last_provenance = p;
+    if (provenance) *provenance = p;
+    return true;
+#else
+    (void)mu;
+    (void)scales;
+    (void)V;
+    (void)n;
+    (void)m;
+    return false;
+#endif
+}
+
+bool TryLaunchLtCubeMxProjectRight(const std::vector<int8_t>& mu,
+                                   const std::vector<uint8_t>& scales,
+                                   const std::vector<int8_t>& V, uint32_t n, uint32_t m,
+                                   std::vector<int32_t>& out,
+                                   matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    out.clear();
+    if (provenance) *provenance = {};
+    LtAscendDigestProvenance ascend_prov;
+    if (!ComputeProjectedRightMxBlockScaleLTAscend(mu, scales, V, n, m, out, &ascend_prov)) {
+        return false;
+    }
+    if (provenance) {
+        provenance->exact_mx_scale_partitioned = ascend_prov.exact_mx_scale_partitioned;
+        provenance->native_mxfp4_attempted = false;
+        provenance->native_mxfp4_qualified = false;
+        provenance->native_fp8_attempted = false;
+        provenance->native_fp8_qualified = false;
+    }
+    return true;
+}
+
+LtAscendDigestProvenance LastAscendDigestProvenance()
+{
+    return g_last_provenance;
+}
+
+bool ComputeDigestsOnlyLTAscend(const CBlockHeader& tmpl, uint32_t n,
+                                const uint64_t* nonces, size_t count,
+                                std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+                                LtAscendDigestProvenance* provenance)
+{
+    out.clear();
+    if (provenance) *provenance = {};
+    g_last_provenance = {};
+    if (!IsAscendExactMxProjectionAvailable() || nonces == nullptr || count == 0) {
+        return false;
+    }
+
+#if defined(BTX_HAVE_CANN)
+    uint32_t m = 0;
+    if (!matmul::v4::lt::ValidateDimsBMX4CLT(n, m)) return false;
 
     matmul::v4::lt::ExactGemmBackend backend;
     backend.gemm_s8s8 = &TryLaunchLtCubeGemmS8S8;
     backend.gemm_s32s8 = &TryLaunchLtCubeGemmS32S8;
 
-    const matmul::v4::lt::WindowSketchMinerLT miner{tmpl, n, backend};
-    if (!miner.Valid()) return false;
+    // Template-scoped A/U/V/P once (same structure as WindowSketchMinerLT),
+    // with Cube ExactGemm inject for MatExpand G*W / (G*W)*H.
+    const std::vector<int8_t> A =
+        matmul::v4::lt::ExpandOperandAMatExpand(tmpl, n, backend);
+    if (A.size() != static_cast<size_t>(n) * n) return false;
+    const auto [seed_u, seed_v] = matmul::v4::lt::DeriveProjectorSeedsBMX4CLT(tmpl);
+    const std::vector<int8_t> U = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_u, m, n);
+    const std::vector<int8_t> V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, n, m);
+    const std::vector<int32_t> P = matmul::v4::ComputeProjectedLeft(U, A, n, m);
 
-    std::vector<uint64_t> nonce_vec(nonces, nonces + count);
-    const uint256 kNoTarget = ArithToUint256(~arith_uint256{});
-    if (!miner.Mine(nonce_vec, kNoTarget, out) || out.size() != count) {
-        out.clear();
-        return false;
+    out.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        CBlockHeader header = tmpl;
+        header.nNonce64 = nonces[i];
+        header.nNonce = static_cast<uint32_t>(nonces[i]);
+
+        std::vector<int8_t> mu;
+        std::vector<uint8_t> scales;
+        matmul::v4::lt::ExpandOperandBMatExpandMxComponents(header, n, backend, mu, scales);
+
+        std::vector<int32_t> Q;
+        if (!LaunchCubeMxScalePartitioned(mu, scales, V, n, m, Q)) {
+            out.clear();
+            g_last_provenance = {};
+            if (provenance) *provenance = {};
+            return false;
+        }
+
+        const uint256 sigma = matmul::v4::DeriveSigma(header);
+        const auto Chat = matmul::v4::ComputeCombineModQ(P, Q, n, m);
+        matmul::v4::lt::DigestOnlyResultLT res;
+        res.nonce = nonces[i];
+        res.digest = matmul::v4::ComputeSketchDigestFromFq(sigma, Chat);
+        res.target_match = false;
+        res.backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
+        out.push_back(std::move(res));
     }
-    return true;
+
+    LtAscendDigestProvenance p;
+    p.used_cube_path = true;
+    p.exact_mx_scale_partitioned = true;
+    p.native_mx_qualified = false; // no CANN FP8/MX ExactGemm admitted
+    g_last_provenance = p;
+    if (provenance) *provenance = p;
+    return out.size() == count;
+#else
+    (void)tmpl;
+    (void)n;
+    return false;
+#endif
 }
 
 } // namespace matmul_v4::ascend

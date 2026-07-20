@@ -19,6 +19,14 @@ namespace matmul_v4::accel {
  *  provider returns fall back per call. Winners always CPU-reseal. */
 [[nodiscard]] matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend();
 
+/** Build an injectable ExactMxProjectionBackend for miner-local B̂·V.
+ *  ResolveBackend() wires CUDA/HIP LaunchProjectedRightMx, Metal
+ *  TryLaunchLtMetalMxProjectRight, or Ascend TryLaunchLtCubeMxProjectRight.
+ *  TPU/Trainium ExactGemm providers do not expose MX; those requests leave
+ *  project_right null (CPU oracle via ComputeProjectedRightMxDispatched).
+ *  Mismatched device results fail closed to ComputeProjectedRightMxBlockScaleLT. */
+[[nodiscard]] matmul::v4::lt::ExactMxProjectionBackend MakeResolvedExactMxProjectionBackend();
+
 } // namespace matmul_v4::accel
 
 #endif // BTX_MATMUL_EXACT_GEMM_RESOLVE_H

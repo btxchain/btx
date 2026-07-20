@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_lt_mx_exact.h>
 #include <matmul/accel_v4.h>
 #if defined(BTX_ENABLE_METAL)
 #include <metal/matmul_v4_lt_accel.h>
@@ -645,41 +646,346 @@ BOOST_AUTO_TEST_CASE(matexpand_chacha_prf_golden_vectors)
 BOOST_AUTO_TEST_CASE(matexpand_mx_scale_partitioned_right_matches_dense)
 {
     // Logical Lever-B exact-integer lane: Q from (mu,e) must match dense
-    // Bhat*V. This CPU test proves representation identity only; it does not
-    // execute or qualify a native MXFP4 GPU instruction.
-    auto header = MakeLTHeader(0x4d584237ULL, kTestDim);
+    // Bhat*V for every consensus-valid n in {32,64,128}. This CPU test proves
+    // representation identity only; it does not execute or qualify a native
+    // MXFP4 GPU instruction.
+    for (uint32_t n : {uint32_t{32}, uint32_t{64}, uint32_t{128}}) {
+        auto header = MakeLTHeader(0x4d584237ULL ^ n, n);
+        std::vector<int8_t> mu;
+        std::vector<uint8_t> scales;
+        const auto Bhat =
+            lt::ExpandOperandBMatExpandMx(header, n, lt::ExactGemmBackend{}, mu, scales);
+        const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
+        (void)seed_u;
+        uint32_t m = 0;
+        BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(n, m));
+        const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, n, m);
+        const auto Q_dense = matmul::v4::ComputeProjectedRight(Bhat, V, n, m);
+        const auto Q_mx = lt::ComputeProjectedRightMxBlockScaleLT(mu, scales, V, n, m);
+        BOOST_CHECK_MESSAGE(Q_dense == Q_mx, "BlockScale vs dense mismatch at n=" << n);
+
+        // GEMM-shaped e-partition lowering (device IMMA/MFMA template) == oracle.
+        const auto Q_gemm =
+            lt::ComputeProjectedRightMxScalePartitionedGemmLT(mu, scales, V, n, m);
+        BOOST_CHECK_MESSAGE(Q_gemm == Q_mx, "ScalePartitionedGemm vs BlockScale at n=" << n);
+        BOOST_CHECK(lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, Q_gemm));
+
+        // The hot miner path skips the otherwise-unused dense Bhat allocation.
+        std::vector<int8_t> mu_components;
+        std::vector<uint8_t> scale_components;
+        lt::ExpandOperandBMatExpandMxComponents(header, n, lt::ExactGemmBackend{},
+                                                mu_components, scale_components);
+        BOOST_CHECK(mu_components == mu);
+        BOOST_CHECK(scale_components == scales);
+        BOOST_CHECK(lt::ComputeProjectedRightMxBlockScaleLT(
+                        mu_components, scale_components, V, n, m) == Q_dense);
+
+        // Null ExactMxProjectionBackend ⇒ CPU oracle; miner provenance may mark
+        // exact_mx_scale_partitioned, but that is NOT a native_*_qualified claim.
+        lt::MxLaneProvenance prov{};
+        const auto Q_disp =
+            lt::ComputeProjectedRightMxDispatched(mu, scales, V, n, m, {}, &prov);
+        BOOST_CHECK(Q_disp == Q_mx);
+        BOOST_CHECK(prov.exact_mx_scale_partitioned);
+        BOOST_CHECK(!prov.native_mxfp4_attempted);
+        BOOST_CHECK(!prov.native_mxfp4_qualified);
+        BOOST_CHECK(!prov.native_fp8_attempted);
+        BOOST_CHECK(!prov.native_fp8_qualified);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(lt_mx_projection_fp32_exact_integer_bound)
+{
+    // Breakthrough eligibility math: ENC-DR-LT Q = (μ·2^e)·V with M11×E8M0
+    // stays strictly below 2^24 at production n, so FP32 accumulate can be
+    // exact. This does NOT qualify native MXFP4/FP8 silicon.
+    namespace bx = matmul::v4::bmx4;
+    BOOST_CHECK_EQUAL(lt::kLtMxMantissaMaxAbs, bx::kMantissaMaxAbs);
+    BOOST_CHECK_EQUAL(lt::kLtMxMantissaMaxAbs, 6);
+    BOOST_CHECK_EQUAL(bx::kAlphabetM11.size(), 11U);
+    for (int8_t mu : bx::kAlphabetM11) {
+        BOOST_CHECK(std::abs(static_cast<int>(mu)) <= lt::kLtMxMantissaMaxAbs);
+    }
+    BOOST_CHECK_EQUAL(lt::kLtMxScalePow2Max, 1 << bx::kScaleS);
+    BOOST_CHECK_EQUAL(lt::kLtMxProjPerMac, bx::kProjPerMac);
+    BOOST_CHECK_EQUAL(lt::kLtMxProjPerMac, 288);
+    BOOST_CHECK_EQUAL(lt::LtMxProjectionAbsBound(4096), lt::kLtMxProjAbsBoundAtN4096);
+    BOOST_CHECK_EQUAL(lt::kLtMxProjAbsBoundAtN4096, 1'179'648);
+    BOOST_CHECK_LT(lt::kLtMxProjAbsBoundAtN4096, lt::kLtMxFloat32ExactIntegerCeil);
+    BOOST_CHECK(lt::LtMxProjectionFitsFloat32ExactInteger(4096, 1024));
+    BOOST_CHECK(lt::LtMxProjectionFitsFloat32ExactInteger(8192, 2048));
+    BOOST_CHECK(!lt::LtMxProjectionFitsFloat32ExactInteger(0, 0));
+    // First n where 288·n ≥ 2^24: ceil(2^24 / 288) = 58255.
+    BOOST_CHECK(!lt::LtMxProjectionFitsFloat32ExactInteger(58255, 1));
+    BOOST_CHECK(lt::LtMxProjectionFitsFloat32ExactInteger(58254, 1));
+}
+
+BOOST_AUTO_TEST_CASE(lt_mx_projection_q_entries_below_fp32_ceil)
+{
+    // Header MX projections and adversarial ±6 / e=3 fillings must emit
+    // integer Q with |q| < 2^24 (and ≤ the analytic 288·n envelope).
+    FastRandomContext rng{/*fDeterministic=*/true};
+    for (uint32_t n : {uint32_t{32}, uint32_t{64}, uint32_t{128}}) {
+        BOOST_REQUIRE(lt::LtMxProjectionFitsFloat32ExactInteger(n, /*m=*/n / 2));
+        const int64_t abs_bound = lt::LtMxProjectionAbsBound(n);
+
+        auto header = MakeLTHeader(0x46503332ULL ^ n, n); // 'FP32'
+        std::vector<int8_t> mu;
+        std::vector<uint8_t> scales;
+        lt::ExpandOperandBMatExpandMxComponents(header, n, lt::ExactGemmBackend{}, mu, scales);
+        uint32_t m = 0;
+        BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(n, m));
+        const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
+        (void)seed_u;
+        const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, n, m);
+        const auto Q = lt::ComputeProjectedRightMxBlockScaleLT(mu, scales, V, n, m);
+        BOOST_REQUIRE_EQUAL(Q.size(), static_cast<size_t>(n) * m);
+        for (int32_t q : Q) {
+            BOOST_CHECK_LT(std::llabs(static_cast<long long>(q)),
+                           lt::kLtMxFloat32ExactIntegerCeil);
+            BOOST_CHECK_LE(std::llabs(static_cast<long long>(q)), abs_bound);
+        }
+
+        // Worst-case aligned signs: |μ|=6, e=3, |V|=6 → |Q|_ij can hit 288·n.
+        std::vector<int8_t> mu_hi(static_cast<size_t>(n) * n, 6);
+        std::vector<uint8_t> scales_hi(static_cast<size_t>(n) * (n / lt::kMatExpandMxBlockLen), 3);
+        std::vector<int8_t> V_hi(static_cast<size_t>(n) * m, 6);
+        for (size_t i = 0; i < mu_hi.size(); ++i) {
+            if (rng.randbool()) mu_hi[i] = static_cast<int8_t>(-6);
+        }
+        for (size_t i = 0; i < V_hi.size(); ++i) {
+            if (rng.randbool()) V_hi[i] = static_cast<int8_t>(-6);
+        }
+        const auto Q_hi =
+            lt::ComputeProjectedRightMxBlockScaleLT(mu_hi, scales_hi, V_hi, n, m);
+        BOOST_REQUIRE_EQUAL(Q_hi.size(), static_cast<size_t>(n) * m);
+        for (int32_t q : Q_hi) {
+            BOOST_CHECK_LT(std::llabs(static_cast<long long>(q)),
+                           lt::kLtMxFloat32ExactIntegerCeil);
+            BOOST_CHECK_LE(std::llabs(static_cast<long long>(q)), abs_bound);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(lt_mx_projection_fp32_accumulate_matches_int32_oracle)
+{
+    // Optional CPU float32 left-to-right accumulate must match the int32
+    // oracle inside the proven window (double path as a second witness).
+    for (uint32_t n : {uint32_t{32}, uint32_t{64}, uint32_t{128}}) {
+        auto header = MakeLTHeader(0x46503341ULL ^ n, n); // 'FP3A'
+        std::vector<int8_t> mu;
+        std::vector<uint8_t> scales;
+        lt::ExpandOperandBMatExpandMxComponents(header, n, lt::ExactGemmBackend{}, mu, scales);
+        uint32_t m = 0;
+        BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(n, m));
+        BOOST_REQUIRE(lt::LtMxProjectionFitsFloat32ExactInteger(n, m));
+        const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
+        (void)seed_u;
+        const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, n, m);
+
+        const auto Q_i32 = lt::ComputeProjectedRightMxBlockScaleLT(mu, scales, V, n, m);
+        const auto Q_f32 =
+            lt::SimulateProjectedRightMxFloat32AccumulateLT(mu, scales, V, n, m);
+        BOOST_REQUIRE_EQUAL(Q_f32.size(), Q_i32.size());
+        BOOST_CHECK(Q_f32 == Q_i32);
+
+        // Double accumulate (reference witness) must also match.
+        const uint32_t nblk = n / lt::kMatExpandMxBlockLen;
+        for (uint32_t i = 0; i < n; ++i) {
+            for (uint32_t c = 0; c < m; ++c) {
+                double acc = 0.0;
+                for (uint32_t bj = 0; bj < nblk; ++bj) {
+                    const uint8_t e = scales[static_cast<size_t>(i) * nblk + bj];
+                    const double scale = static_cast<double>(int32_t{1} << e);
+                    const size_t mu_base = static_cast<size_t>(i) * n +
+                                           static_cast<size_t>(bj) * lt::kMatExpandMxBlockLen;
+                    for (uint32_t t = 0; t < lt::kMatExpandMxBlockLen; ++t) {
+                        const uint32_t k = bj * lt::kMatExpandMxBlockLen + t;
+                        acc += static_cast<double>(mu[mu_base + t]) * scale *
+                               static_cast<double>(V[static_cast<size_t>(k) * m + c]);
+                    }
+                }
+                BOOST_CHECK_EQUAL(static_cast<int64_t>(acc),
+                                  static_cast<int64_t>(Q_i32[static_cast<size_t>(i) * m + c]));
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_mx_tile_extract_matches_components)
+{
+    // Tile ChaCha Extract over real B32 tiles must reproduce ExpandOperandB
+    // MatExpandMxComponents (mu, e) and the dense Bhat dequant.
+    constexpr uint32_t n = 64;
+    auto header = MakeLTHeader(0xc15bULL, n);
+    const auto bundle = ExpandOperandBB32ForTest(header, n);
     std::vector<int8_t> mu;
     std::vector<uint8_t> scales;
-    const auto Bhat = lt::ExpandOperandBMatExpandMx(header, kTestDim, lt::ExactGemmBackend{}, mu,
-                                                    scales);
+    const auto Bhat =
+        lt::ExpandOperandBMatExpandMx(header, n, lt::ExactGemmBackend{}, mu, scales);
+    BOOST_REQUIRE_EQUAL(bundle.B32.size(), Bhat.size());
+    BOOST_REQUIRE_EQUAL(mu.size(), Bhat.size());
+    const uint32_t nblk = n / lt::kMatExpandMxBlockLen;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        for (uint32_t bj = 0; bj < nblk; ++bj) {
+            int32_t raw32[lt::kMatExpandMxBlockLen];
+            int8_t mu_tile[lt::kMatExpandMxBlockLen];
+            for (uint32_t t = 0; t < lt::kMatExpandMxBlockLen; ++t) {
+                raw32[t] = bundle.B32[static_cast<size_t>(i) * n +
+                                      static_cast<size_t>(bj) * lt::kMatExpandMxBlockLen + t];
+            }
+            lt::ExtractMatExpandMxTileMantissas(bundle.prf_key, i, bj, raw32, mu_tile);
+            const uint8_t e = lt::DeriveMatExpandMxScale(bundle.prf_key, i, bj);
+            BOOST_CHECK_EQUAL(static_cast<unsigned>(e),
+                              static_cast<unsigned>(scales[static_cast<size_t>(i) * nblk + bj]));
+            for (uint32_t t = 0; t < lt::kMatExpandMxBlockLen; ++t) {
+                const size_t idx = static_cast<size_t>(i) * n +
+                                   static_cast<size_t>(bj) * lt::kMatExpandMxBlockLen + t;
+                BOOST_CHECK_EQUAL(static_cast<int>(mu_tile[t]), static_cast<int>(mu[idx]));
+                const int8_t dequant =
+                    static_cast<int8_t>(static_cast<int32_t>(mu_tile[t]) * (int32_t{1} << e));
+                BOOST_CHECK_EQUAL(static_cast<int>(dequant), static_cast<int>(Bhat[idx]));
+                BOOST_CHECK_EQUAL(
+                    static_cast<int>(lt::ExtractDequantMatExpandAt(bundle.B32.data(), n, i,
+                                                                   bj * lt::kMatExpandMxBlockLen + t,
+                                                                   bundle.prf_key)),
+                    static_cast<int>(Bhat[idx]));
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(exact_mx_projection_backend_inject_matches_oracle)
+{
+    // Mock ExactMxProjectionBackend wrapping the CPU GEMM-partitioned lowering;
+    // dispatch must accept it only when bit-identical (and may carry exact_mx).
+    constexpr uint32_t n = 32;
+    auto header = MakeLTHeader(0x4d584245ULL, n); // 'MXBE'
+    std::vector<int8_t> mu;
+    std::vector<uint8_t> scales;
+    lt::ExpandOperandBMatExpandMxComponents(header, n, lt::ExactGemmBackend{}, mu, scales);
+    uint32_t m = 0;
+    BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(n, m));
     const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
     (void)seed_u;
-    uint32_t m = 0;
-    BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(kTestDim, m));
-    const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, kTestDim, m);
-    const auto Q_dense = matmul::v4::ComputeProjectedRight(Bhat, V, kTestDim, m);
-    const auto Q_mx = lt::ComputeProjectedRightMxBlockScaleLT(mu, scales, V, kTestDim, m);
-    BOOST_CHECK(Q_dense == Q_mx);
+    const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, n, m);
 
-    // The hot miner path skips the otherwise-unused dense Bhat allocation.
-    std::vector<int8_t> mu_components;
-    std::vector<uint8_t> scale_components;
-    lt::ExpandOperandBMatExpandMxComponents(header, kTestDim, lt::ExactGemmBackend{},
-                                            mu_components, scale_components);
-    BOOST_CHECK(mu_components == mu);
-    BOOST_CHECK(scale_components == scales);
-    BOOST_CHECK(lt::ComputeProjectedRightMxBlockScaleLT(
-                    mu_components, scale_components, V, kTestDim, m) == Q_dense);
+    static int g_mx_calls = 0;
+    g_mx_calls = 0;
+    lt::ExactMxProjectionBackend backend;
+    backend.project_right = [](const std::vector<int8_t>& mu_in,
+                               const std::vector<uint8_t>& scales_in,
+                               const std::vector<int8_t>& V_in, uint32_t nn, uint32_t mm,
+                               std::vector<int32_t>& out,
+                               lt::MxLaneProvenance* provenance) -> bool {
+        ++g_mx_calls;
+        out = lt::ComputeProjectedRightMxScalePartitionedGemmLT(mu_in, scales_in, V_in, nn, mm);
+        if (provenance) {
+            provenance->exact_mx_scale_partitioned = true;
+            // Deliberately leave native_* false — exact-MX ≠ native-MX.
+        }
+        return !out.empty();
+    };
+
+    lt::MxLaneProvenance prov{};
+    const auto Q = lt::ComputeProjectedRightMxDispatched(mu, scales, V, n, m, backend, &prov);
+    BOOST_CHECK_EQUAL(g_mx_calls, 1);
+    BOOST_CHECK(lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, Q));
+    BOOST_CHECK(prov.exact_mx_scale_partitioned);
+    BOOST_CHECK(!prov.native_mxfp4_qualified);
+    BOOST_CHECK(!prov.native_fp8_qualified);
+
+    // Divergent backend must fall back to CPU and clear native qualification.
+    backend.project_right = [](const std::vector<int8_t>&, const std::vector<uint8_t>&,
+                               const std::vector<int8_t>&, uint32_t nn, uint32_t mm,
+                               std::vector<int32_t>& out,
+                               lt::MxLaneProvenance* provenance) -> bool {
+        out.assign(static_cast<size_t>(nn) * mm, 7); // wrong on purpose
+        if (provenance) {
+            provenance->native_mxfp4_attempted = true;
+            provenance->native_mxfp4_qualified = true; // lie — dispatch must not trust
+        }
+        return true;
+    };
+    prov = {};
+    const auto Q_fb = lt::ComputeProjectedRightMxDispatched(mu, scales, V, n, m, backend, &prov);
+    BOOST_CHECK(lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, Q_fb));
+    BOOST_CHECK(prov.exact_mx_scale_partitioned);
+    BOOST_CHECK(!prov.native_mxfp4_attempted);
+    BOOST_CHECK(!prov.native_mxfp4_qualified);
+}
+
+BOOST_AUTO_TEST_CASE(window_miner_mx_projection_backend_matches_reference)
+{
+    // WindowSketchMinerLT must invoke an injected ExactMxProjectionBackend and
+    // still produce digests byte-identical to ComputeDigestBMX4CLT. A divergent
+    // mock falls closed through ComputeProjectedRightMxDispatched.
+    auto tmpl = MakeLTHeader(0x4d584d4eULL, kTestDim); // 'MXMN'
+    uint256 cpu_d;
+    std::vector<unsigned char> cpu_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(tmpl, kTestDim, cpu_d, cpu_p));
+
+    static int g_miner_mx_calls = 0;
+    g_miner_mx_calls = 0;
+    lt::ExactMxProjectionBackend good_mx;
+    good_mx.project_right = [](const std::vector<int8_t>& mu_in,
+                               const std::vector<uint8_t>& scales_in,
+                               const std::vector<int8_t>& V_in, uint32_t nn, uint32_t mm,
+                               std::vector<int32_t>& out,
+                               lt::MxLaneProvenance* provenance) -> bool {
+        ++g_miner_mx_calls;
+        out = lt::ComputeProjectedRightMxScalePartitionedGemmLT(mu_in, scales_in, V_in, nn, mm);
+        if (provenance) provenance->exact_mx_scale_partitioned = true;
+        return !out.empty();
+    };
+
+    lt::WindowSketchMinerLT good_miner{tmpl, kTestDim, {}, good_mx};
+    BOOST_REQUIRE(good_miner.Valid());
+    BOOST_CHECK(good_miner.UsingDeviceMxProjection());
+    uint256 good_d;
+    std::vector<unsigned char> good_p;
+    BOOST_REQUIRE(good_miner.MineSlot(tmpl, good_d, &good_p));
+    BOOST_CHECK_EQUAL(g_miner_mx_calls, 1);
+    BOOST_CHECK(good_d == cpu_d);
+    BOOST_CHECK(good_p == cpu_p);
+
+    lt::ExactMxProjectionBackend bad_mx;
+    bad_mx.project_right = [](const std::vector<int8_t>&, const std::vector<uint8_t>&,
+                              const std::vector<int8_t>&, uint32_t nn, uint32_t mm,
+                              std::vector<int32_t>& out,
+                              lt::MxLaneProvenance* provenance) -> bool {
+        out.assign(static_cast<size_t>(nn) * mm, 42);
+        if (provenance) {
+            provenance->native_mxfp4_qualified = true; // lie — dispatch clears
+        }
+        return true;
+    };
+    lt::WindowSketchMinerLT bad_miner{tmpl, kTestDim, {}, bad_mx};
+    BOOST_REQUIRE(bad_miner.Valid());
+    uint256 bad_d;
+    std::vector<unsigned char> bad_p;
+    BOOST_REQUIRE(bad_miner.MineSlot(tmpl, bad_d, &bad_p));
+    BOOST_CHECK(bad_d == cpu_d);
+    BOOST_CHECK(bad_p == cpu_p);
 }
 
 BOOST_AUTO_TEST_CASE(plan_lt_accel_labels_intent_not_runtime_native)
 {
     // String-to-taxonomy design hint inherited from BMX4. PlanLTAccel neither
-    // probes hardware nor proves that LT dispatched native MXFP4.
+    // probes hardware nor proves that LT dispatched native MXFP4 / FP8.
     const auto b200 = lt::PlanLTAccel("b200");
     BOOST_CHECK(b200.projection == matmul::v4::bmx4::ProjectionLane::ScalePartitionedMxfp4);
     const auto cpu = lt::PlanLTAccel("cpu");
     BOOST_CHECK(cpu.projection == matmul::v4::bmx4::ProjectionLane::CanonicalInt8);
+    const auto rubin = lt::PlanLTAccel("rubin");
+    BOOST_CHECK(rubin.projection == matmul::v4::bmx4::ProjectionLane::ExactFp8);
+    BOOST_CHECK(rubin.combine == matmul::v4::bmx4::CombineLane::ExactFp8FiveLimb);
+    // Fail-closed defaults: provenance structs never start qualified.
+    lt::MxLaneProvenance blank{};
+    BOOST_CHECK(!blank.exact_mx_scale_partitioned);
+    BOOST_CHECK(!blank.native_mxfp4_qualified);
+    BOOST_CHECK(!blank.native_fp8_qualified);
 }
 
 BOOST_AUTO_TEST_CASE(accel_dispatch_matches_reference)
@@ -1448,8 +1754,9 @@ BOOST_AUTO_TEST_CASE(slot_id_seed_and_leaf_binding)
 
 BOOST_AUTO_TEST_CASE(ascend_exactgemm_stub_inert_default_build)
 {
-    // Default CI / no CANN: Ascend ExactGemm must stay fail-closed.
+    // Default CI / no CANN: Ascend ExactGemm + MX twin must stay fail-closed.
     BOOST_CHECK(!matmul_v4::ascend::IsAscendExactGemmAvailable());
+    BOOST_CHECK(!matmul_v4::ascend::IsAscendExactMxProjectionAvailable());
     std::vector<int8_t> a(16, 1), b(16, 2);
     std::vector<int32_t> out;
     bool used_cube = true;
@@ -1463,11 +1770,46 @@ BOOST_AUTO_TEST_CASE(ascend_exactgemm_stub_inert_default_build)
     BOOST_CHECK(!used_cube);
     BOOST_CHECK(!matmul_v4::ascend::TryLaunchLtCubeGemmS32S8(
         std::vector<int32_t>(16, 1), a, 4, 4, 4, out));
+
+    std::vector<int8_t> mu(32 * 32, 1), V(32 * 16, 1);
+    std::vector<uint8_t> scales(32, 0);
+    matmul_v4::ascend::LtAscendDigestProvenance mx_prov;
+    mx_prov.used_cube_path = true;
+    mx_prov.exact_mx_scale_partitioned = true;
+    mx_prov.native_mx_qualified = true;
+    BOOST_CHECK(!matmul_v4::ascend::ComputeProjectedRightMxBlockScaleLTAscend(
+        mu, scales, V, 32, 16, out, &mx_prov));
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!mx_prov.used_cube_path);
+    BOOST_CHECK(!mx_prov.exact_mx_scale_partitioned);
+    BOOST_CHECK(!mx_prov.native_mx_qualified);
+    matmul::v4::lt::MxLaneProvenance shared_prov;
+    shared_prov.exact_mx_scale_partitioned = true;
+    shared_prov.native_mxfp4_qualified = true;
+    BOOST_CHECK(!matmul_v4::ascend::TryLaunchLtCubeMxProjectRight(
+        mu, scales, V, 32, 16, out, &shared_prov));
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!shared_prov.exact_mx_scale_partitioned);
+    BOOST_CHECK(!shared_prov.native_mxfp4_qualified);
+
     std::vector<matmul::v4::lt::DigestOnlyResultLT> digests;
     const uint64_t nonce = 1;
     CBlockHeader hdr;
-    BOOST_CHECK(!matmul_v4::ascend::ComputeDigestsOnlyLTAscend(hdr, 64, &nonce, 1, digests));
+    matmul_v4::ascend::LtAscendDigestProvenance dig_prov;
+    dig_prov.used_cube_path = true;
+    dig_prov.exact_mx_scale_partitioned = true;
+    dig_prov.native_mx_qualified = true;
+    BOOST_CHECK(!matmul_v4::ascend::ComputeDigestsOnlyLTAscend(
+        hdr, 64, &nonce, 1, digests, &dig_prov));
     BOOST_CHECK(digests.empty());
+    BOOST_CHECK(!dig_prov.used_cube_path);
+    BOOST_CHECK(!dig_prov.exact_mx_scale_partitioned);
+    BOOST_CHECK(!dig_prov.native_mx_qualified);
+    const auto last = matmul_v4::ascend::LastAscendDigestProvenance();
+    BOOST_CHECK(!last.used_cube_path);
+    BOOST_CHECK(!last.exact_mx_scale_partitioned);
+    BOOST_CHECK(!last.native_mx_qualified);
+
     const auto elig = matmul_v4::backend::EligibilityFor(matmul_v4::backend::Kind::ASCEND);
     BOOST_CHECK(!elig.admissible);
     BOOST_CHECK(matmul_v4::backend::ResolveBackend("ascend").active == matmul_v4::backend::Kind::CPU);
@@ -1509,8 +1851,35 @@ BOOST_AUTO_TEST_CASE(lt_accel_entry_bit_identity_or_stub_decline)
                   &matmul_v4::hip::ComputeDigestsOnlyLTHip);
     check_backend(matmul_v4::metal::IsMatMulLTMetalAvailable(),
                   &matmul_v4::metal::ComputeDigestsOnlyLTMetal);
-    check_backend(matmul_v4::ascend::IsAscendExactGemmAvailable(),
-                  &matmul_v4::ascend::ComputeDigestsOnlyLTAscend);
+    // Ascend entry takes an optional provenance* (default nullptr); wrap so the
+    // shared 5-arg checker type still applies. Digests require Cube ExactGemm
+    // AND the four-pass MX projection self-qual.
+    {
+        out.clear();
+        const bool available = matmul_v4::ascend::IsAscendExactMxProjectionAvailable();
+        if (!available) {
+            BOOST_CHECK(!matmul_v4::ascend::ComputeDigestsOnlyLTAscend(
+                tmpl, kTestDim, nonces, 2, out, nullptr));
+            BOOST_CHECK(out.empty());
+        } else {
+            matmul_v4::ascend::LtAscendDigestProvenance prov;
+            BOOST_REQUIRE(matmul_v4::ascend::ComputeDigestsOnlyLTAscend(
+                tmpl, kTestDim, nonces, 2, out, &prov));
+            BOOST_REQUIRE_EQUAL(out.size(), 2);
+            BOOST_CHECK(prov.used_cube_path);
+            BOOST_CHECK(prov.exact_mx_scale_partitioned);
+            BOOST_CHECK(!prov.native_mx_qualified);
+            for (size_t i = 0; i < 2; ++i) {
+                CBlockHeader h = tmpl;
+                h.nNonce64 = nonces[i];
+                h.nNonce = static_cast<uint32_t>(nonces[i]);
+                uint256 d;
+                std::vector<unsigned char> payload;
+                BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(h, kTestDim, d, payload));
+                BOOST_CHECK(out[i].digest == d);
+            }
+        }
+    }
 
     uint256 d;
     std::vector<unsigned char> payload;
