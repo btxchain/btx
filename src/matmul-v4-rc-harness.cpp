@@ -39,6 +39,9 @@
 // Standalone util: no GUI translation table.
 const TranslateFn G_TRANSLATION_FUN{nullptr};
 
+// Match matmul-v4-report: some SHA helpers expect this process-local label.
+std::string g_sha256_implementation{"uninitialized"};
+
 namespace rc = matmul::v4::rc;
 
 namespace {
@@ -219,8 +222,7 @@ UniValue ParamsJson(const rc::RCEpisodeParams& p)
 int main(int argc, char* argv[])
 {
     // Standalone tools do not construct kernel::Context — select SHA-256 impl.
-    const std::string sha256_impl = SHA256AutoDetect();
-    (void)sha256_impl;
+    g_sha256_implementation = SHA256AutoDetect();
 
     Args args;
     std::string err;
