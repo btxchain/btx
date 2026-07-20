@@ -148,7 +148,11 @@ std::vector<int64_t> GemmGXtInt64Range(const std::vector<int8_t>& G, const std::
 
 /** G·Xᵀ without materializing Xᵀ: out[r][c] = Σ_k G[k][r]·X[k][c]
  *  (wgrad D is d_model × d_model; contraction is b_seq). Bound may exceed 2^24
- *  → int64 oracle only in the episode path. */
+ *  → int64 oracle only in the episode path.
+ *  Amendment 1.B: plain LT native FP4 (bounds <2^24) does NOT apply; future
+ *  device MX must use Ozaki/limb split
+ *  (doc/btx-matmul-v4.5-rc-native-fp4-ozaki-plan-2026-07-20.md,
+ *  matmul_v4_rc_mx_ozaki.h) before any RC native_mxfp4_qualified flip. */
 std::vector<int64_t> GemmGXtInt64(const std::vector<int8_t>& G, const std::vector<int8_t>& X,
                                   uint32_t b_seq, uint32_t d_model)
 {
@@ -226,9 +230,14 @@ std::vector<int64_t> GemmGXtViaChunkedExact(const std::vector<int8_t>& G,
 }
 
 // --- Phase 1 ---------------------------------------------------------------
-// Phase-1 Z=S·V bound is 2304·n_ctx ≫ 2^24 — streamed int64 only in reference.
+// Phase-1 Z=S·V bound is 2304·n_ctx ≫ 2^24 (~2^30.76 at consensus n_ctx) —
+// streamed int64 only in reference. Plain native FP4 (LT 5090 / <2^24 qual)
+// does NOT carry here (Amendment 1.B).
 // Optional ExactGemmS32S8ViaRadix256 is not used here; miners may limb-promote
-// offline but must match this int64 stream byte-for-byte.
+// offline but must match this int64 stream byte-for-byte. Device MXFP4 for Z
+// requires Ozaki/limb split with partials <2^24 + exact integer recombine —
+// see doc/btx-matmul-v4.5-rc-native-fp4-ozaki-plan-2026-07-20.md and
+// matmul_v4_rc_mx_ozaki.h (TryRcOzakiMxfp4* fail-closed until qualified).
 //
 // Consensus-fixed kRCSegLen segments commit exact int64 Z partials; ExtractMX
 // fires once on Σ partials (H1). kRCSegLen % 32 == 0 ⇒ segments align to MX
@@ -468,6 +477,8 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
     constexpr bool keep_d_segs = kRCSegmentLeavesEnabled;
 
     // Backward + wgrad (segmented int64 oracle; Extract once on Σ partials).
+    // Amendment 1.B: wgrad K=b_seq >2^24 at consensus — Ozaki limb path only
+    // (matmul_v4_rc_mx_ozaki.h); never plain LT native FP4.
     for (int32_t l = static_cast<int32_t>(p.L_lyr) - 1; l >= 0; --l) {
         ensure_X(static_cast<uint32_t>(l));
         // G[l+1] is already resident from the previous step (or G[L] seed).

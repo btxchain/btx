@@ -32,6 +32,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TEST_CPP = REPO_ROOT / "src" / "test" / "matmul_v4_rc_tests.cpp"
 COUPLED_TEST_CPP = REPO_ROOT / "src" / "test" / "matmul_v4_rc_coupled_tests.cpp"
 RC_H = REPO_ROOT / "src" / "matmul" / "matmul_v4_rc.h"
+SCALE_AXES_H = REPO_ROOT / "src" / "matmul" / "matmul_v4_rc_scale_axes.h"
+PARAMS_H = REPO_ROOT / "src" / "consensus" / "params.h"
 
 # Frozen V1 toy golden (MakeToyRCEpisodeParams + MakeRCHeader(42)).
 # V1 stream; kRCSegmentLeavesEnabled = false.
@@ -103,6 +105,34 @@ def main() -> int:
             "(enabling segment leaves changes the stream and the toy golden)"
         )
 
+    # Stage F / 4.3: three-axis schedule must stay inert; ratios PROVISIONAL.
+    if SCALE_AXES_H.is_file():
+        axes = SCALE_AXES_H.read_text(encoding="utf-8")
+        if not re.search(
+            r"inline\s+constexpr\s+bool\s+kRCThreeAxisScheduleEnabled\s*=\s*false\s*;",
+            axes,
+        ):
+            errors.append(
+                "kRCThreeAxisScheduleEnabled must remain false until Stage I "
+                "(ratios PROVISIONAL; epoch-0 golden must stay inert)"
+            )
+    else:
+        errors.append(f"missing {SCALE_AXES_H}")
+
+    # Activation sentinel: nMatMulRCHeight stays INT32_MAX on the Params default.
+    if PARAMS_H.is_file():
+        params = PARAMS_H.read_text(encoding="utf-8")
+        if not re.search(
+            r"int32_t\s+nMatMulRCHeight\s*\{\s*std::numeric_limits<int32_t>::max\(\)\s*\}",
+            params,
+        ):
+            errors.append(
+                "nMatMulRCHeight must default to std::numeric_limits<int32_t>::max() "
+                "(activation NO-GO)"
+            )
+    else:
+        errors.append(f"missing {PARAMS_H}")
+
     goldens = extract_goldens(text)
     if not goldens:
         errors.append(f"no GetHex() golden literals found in {TEST_CPP.name}")
@@ -156,9 +186,11 @@ def main() -> int:
         "frozen_coupled_toy_golden": FROZEN_COUPLED_TOY_HEX,
         "coupled_toy_golden_hits": 0,
         "errors": errors,
+        "kRCThreeAxisScheduleEnabled": False,
         "policy": (
             "Silent golden replacement forbidden. V2 requires new domain tags "
             "+ BOTH goldens kept. Coupled toy golden is a separate frozen digest. "
+            "kRCThreeAxisScheduleEnabled=false (ratios PROVISIONAL). "
             "nMatMulRCHeight stays INT32_MAX."
         ),
     }

@@ -7,12 +7,17 @@
 
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc_coupled_device.h>
+#include <matmul/matmul_v4_rc_distributed.h>
 #include <primitives/block.h>
 #include <uint256.h>
 
 #include <array>
 #include <cstdint>
 #include <vector>
+
+namespace Consensus {
+struct Params;
+}
 
 // ENC_RC FINAL-FORM Stage C — coupled puzzle (CPU consensus oracle).
 //
@@ -21,9 +26,19 @@
 //   exact integer butterfly/reduce-scatter all-to-all → non-affine Extract →
 //   feed-forward into the next barrier.
 //
-// INERT: not selected by GetMatMulEncodingProfile at any height.
-// nMatMulRCHeight remains INT32_MAX. Optional MatMulEncodingProfile stub
-// comment only — do not add a live profile enum value here.
+// Consensus wiring (STILL INERT on public nets):
+//   MatMulEncodingProfile::ENC_RC_COUPLED selected only when
+//   IsMatMulRCCoupledActive(height) — requires finite nMatMulRCCoupledHeight
+//   (public nets assert INT32_MAX). Regtest enables via explicit height +
+//   optional fMatMulRCCoupledUseToyDims.
+//
+// Production barrier-loop completeness (C1–C6; see RCCoupBarrierLoopComplete):
+//   C1 bank cacheable (epoch/template-committed pages)
+//   C2 nonce-fresh lobes (sigma-seeded)
+//   C3 balanced perm + all-to-all + Extract between linear stages + feed-forward
+//   C4 fixed work (no early exit / nonce-dependent dims)
+//   C5 barriers ∈ [4, 8]
+//   C6 ≥2 independently nonce-relabeled mix patterns
 //
 // Modes (hardware-neutral; digests identical when consensus lobe order is
 // fixed 0..L-1):
@@ -73,6 +88,24 @@ struct RCCoupParams {
 [[nodiscard]] RCCoupParams MakeToyRCCoupParams();
 /** CI-safe larger shape: barriers=8, lobes=8, lobe_width=64, bank_pages=32. */
 [[nodiscard]] RCCoupParams MakeMediumRCCoupParams();
+
+/**
+ * Consensus checker/miner dims: toy when Params::fMatMulRCCoupledUseToyDims
+ * (regtest), else medium (CI-safe stand-in until HBM production dims land).
+ */
+[[nodiscard]] RCCoupParams ResolveRCCoupParams(const Consensus::Params& p);
+
+/**
+ * Production barrier-loop completeness (C1–C6). True iff ValidateRCCoupParams
+ * and barriers ∈ [4, 8] and kRCCoupMixPatterns ≥ 2.
+ */
+[[nodiscard]] bool RCCoupBarrierLoopComplete(const RCCoupParams& p);
+
+/**
+ * Soft peak-bytes estimate for Streamed mode (one page + active state + int64
+ * accumulator). Not a production HBM proof — used by soft 4 GiB budget tests.
+ */
+[[nodiscard]] uint64_t EstimateRCCoupStreamedPeakBytes(const RCCoupParams& p);
 
 /**
  * Execution policy — NON-consensus residency/scheduling. Digests MUST match
@@ -179,6 +212,17 @@ DeriveCoupledBalancedPermutation(const uint256& sigma, uint32_t barrier,
  * CUDA/HIP/Metal LaunchGemmS8S8 when RC self-qual admits; else empty → CPU.
  * Probe: ProbeRCCoupledDevice() in matmul_v4_rc_coupled_device.h.
  */
+
+/**
+ * Stage D parity over one barrier's lobe GEMM partials: consensus segment_id =
+ * lobe index (independent of device count). Integer-sum reduce across devices;
+ * Extract fires once on the concatenated pre-Extract state. Digests identical
+ * across N and DistReduceOrder (mirrors RunSyntheticDistributed discipline).
+ */
+[[nodiscard]] DistEpisodeResult RunCoupledBarrierDistributed(
+    const CBlockHeader& header, int32_t height, const RCCoupParams& params,
+    uint32_t barrier, uint32_t n_devices, DistReduceOrder order,
+    const matmul::v4::lt::ExactGemmBackend& gemm = {});
 
 } // namespace matmul::v4::rc
 

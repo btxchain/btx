@@ -277,11 +277,22 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
                                     std::optional<int64_t> parent_median_time_past = std::nullopt);
 
 /** ENC_RC / Resident Curriculum DIGEST_RECOMPUTE checker. Requires
- *  IsMatMulRCActive(block_height). Recomputes the episode digest via
- *  RecomputeResidentCurriculumReference (ResolveRCEpisodeParams dims) and
- *  checks digest == header.matmul_digest and digest ≤ nBits target. */
+ *  IsMatMulRCActive(block_height). Consensus path is ε=0
+ *  VerifyBoundedExactReplay (RecomputeResidentCurriculumReference) checking
+ *  digest == header.matmul_digest and digest ≤ nBits target.
+ *  Optional BTX_RC_VERIFY_GKR=1 hook validates a process-cached winner GKR
+ *  proof when present; it does NOT replace ExactReplay and does NOT raise
+ *  nMatMulRCHeight. */
 bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Params& params,
                                int32_t block_height);
+
+/** ENC_RC_COUPLED DIGEST_RECOMPUTE checker. Requires
+ *  IsMatMulRCCoupledActive(block_height). Recomputes via
+ *  RecomputeCoupledPuzzleReference (ResolveRCCoupParams dims; CPU ExactGemm)
+ *  and checks digest == header.matmul_digest and digest ≤ nBits target.
+ *  Public nets keep nMatMulRCCoupledHeight = INT32_MAX (unreachable). */
+bool CheckMatMulProofOfWork_RCCoupled(const CBlockHeader& header, const Consensus::Params& params,
+                                      int32_t block_height);
 
 /** The ENC-DR CPU pure-integer reference recompute (verify-side entry point of
  *  the SAME code path the miner seals winning blocks with — bit-identical by

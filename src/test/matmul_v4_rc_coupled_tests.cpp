@@ -5,8 +5,13 @@
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc_coupled.h>
+#include <matmul/matmul_v4_rc_mx_ozaki.h>
+#include <matmul/matmul_v4_rc_selfqual.h>
+#include <matmul/exact_gemm_resolve.h>
 
+#include <arith_uint256.h>
 #include <consensus/params.h>
+#include <pow.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -62,17 +67,24 @@ BOOST_AUTO_TEST_CASE(rc_coup_inactive_and_constants)
 {
     Consensus::Params consensus;
     BOOST_CHECK_EQUAL(consensus.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!consensus.fMatMulRCCoupledUseToyDims);
     BOOST_CHECK(!consensus.IsMatMulRCActive(0));
+    BOOST_CHECK(!consensus.IsMatMulRCCoupledActive(0));
+    BOOST_CHECK(consensus.GetMatMulEncodingProfile(0) !=
+                Consensus::MatMulEncodingProfile::ENC_RC_COUPLED);
     BOOST_CHECK_EQUAL(rc::kRCCoupRounds, 4u);
     BOOST_CHECK_EQUAL(rc::kRCCoupLobes, 4u);
     BOOST_CHECK_EQUAL(rc::kRCCoupLobeWidth, 32u);
     BOOST_CHECK_EQUAL(rc::kRCCoupStateBytes, 128u);
     BOOST_CHECK_EQUAL(rc::kRCCoupBankPages, 8u);
+    BOOST_CHECK_EQUAL(rc::kRCCoupMixPatterns, 2u);
     BOOST_CHECK_EQUAL(rc::kRCCoupLobeWidth % 32, 0u);
     BOOST_CHECK_EQUAL(rc::kRCCoupStateBytes % 32, 0u);
 
     const auto toy = rc::MakeToyRCCoupParams();
     BOOST_CHECK(rc::ValidateRCCoupParams(toy));
+    BOOST_CHECK(rc::RCCoupBarrierLoopComplete(toy));
     BOOST_CHECK_EQUAL(toy.barriers, rc::kRCCoupRounds);
     BOOST_CHECK_EQUAL(toy.lobes, rc::kRCCoupLobes);
     BOOST_CHECK_EQUAL(toy.lobe_width, rc::kRCCoupLobeWidth);
@@ -81,6 +93,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_inactive_and_constants)
 
     const auto med = rc::MakeMediumRCCoupParams();
     BOOST_CHECK(rc::ValidateRCCoupParams(med));
+    BOOST_CHECK(rc::RCCoupBarrierLoopComplete(med));
     BOOST_CHECK_EQUAL(med.barriers, 8u);
     BOOST_CHECK_EQUAL(med.lobes, 8u);
     BOOST_CHECK_EQUAL(med.lobe_width, 64u);
@@ -89,6 +102,55 @@ BOOST_AUTO_TEST_CASE(rc_coup_inactive_and_constants)
     BOOST_CHECK_EQUAL(med.lobe_width % 32, 0u);
     BOOST_CHECK_EQUAL(med.StateBytes() % 32, 0u);
     BOOST_CHECK_EQUAL(med.StateBytes() & (med.StateBytes() - 1), 0u);
+
+    // C5: barriers outside [4,8] are rejected.
+    rc::RCCoupParams bad = toy;
+    bad.barriers = 3;
+    BOOST_CHECK(!rc::ValidateRCCoupParams(bad));
+    bad.barriers = 9;
+    BOOST_CHECK(!rc::ValidateRCCoupParams(bad));
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_check_pow_regtest_gate)
+{
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCCoupledHeight = 1;
+    p.fMatMulRCCoupledUseToyDims = true;
+    p.nMatMulV4Dimension = 256;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 10;
+    BOOST_REQUIRE(p.IsMatMulRCCoupledActive(kHeight));
+    BOOST_REQUIRE(p.GetMatMulEncodingProfile(kHeight) ==
+                  Consensus::MatMulEncodingProfile::ENC_RC_COUPLED);
+    // Coupled supersedes ENC_RC when both would be live.
+    p.nMatMulRCHeight = 1;
+    BOOST_CHECK(p.GetMatMulEncodingProfile(kHeight) ==
+                Consensus::MatMulEncodingProfile::ENC_RC_COUPLED);
+
+    auto header = MakeCoupHeader(42);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+
+    const auto params_coup = rc::ResolveRCCoupParams(p);
+    BOOST_REQUIRE(p.fMatMulRCCoupledUseToyDims);
+    BOOST_CHECK_EQUAL(params_coup.barriers, rc::MakeToyRCCoupParams().barriers);
+    BOOST_CHECK(rc::RCCoupBarrierLoopComplete(params_coup));
+
+    header.matmul_digest = rc::MineCoupledPuzzle(header, kHeight, params_coup);
+    BOOST_CHECK(!header.matmul_digest.IsNull());
+    BOOST_CHECK(CheckMatMulProofOfWork_RCCoupled(header, p, kHeight));
+
+    CBlockHeader bad = header;
+    bad.matmul_digest = uint256::ONE;
+    BOOST_CHECK(!CheckMatMulProofOfWork_RCCoupled(bad, p, kHeight));
+
+    Consensus::Params pub;
+    BOOST_CHECK_EQUAL(pub.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!pub.IsMatMulRCCoupledActive(0));
+    BOOST_CHECK(!pub.IsMatMulRCCoupledActive(std::numeric_limits<int32_t>::max() - 1));
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_golden_digest_stable)
@@ -133,7 +195,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_mode_equivalence_all_four)
         rc::RCCoupExecMode::Resident,
     };
 
-    // Toy
+    // Toy — all four modes share ONE byte-identical golden.
     uint256 toy_ref;
     for (size_t i = 0; i < 4; ++i) {
         rc::RCCoupOptions opt;
@@ -154,6 +216,88 @@ BOOST_AUTO_TEST_CASE(rc_coup_mode_equivalence_all_four)
         else BOOST_CHECK(d == med_ref);
     }
     BOOST_CHECK(toy_ref != med_ref);
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_modes_match_frozen_golden)
+{
+    // Resident / Checkpointed / Streamed / Sequential ≡ frozen toy golden.
+    const auto header = MakeCoupHeader(42);
+    constexpr const char* kToy =
+        "c9ac99d002ba26105ef259bfc09fbc0e2ad57bae14b9558d68b82719fa811363";
+    const rc::RCCoupExecMode modes[] = {
+        rc::RCCoupExecMode::SequentialLobes,
+        rc::RCCoupExecMode::Checkpointed,
+        rc::RCCoupExecMode::Streamed,
+        rc::RCCoupExecMode::Resident,
+    };
+    for (auto mode : modes) {
+        rc::RCCoupOptions opt;
+        opt.mode = mode;
+        BOOST_CHECK_EQUAL(rc::RecomputeCoupledPuzzleReference(header, 0, opt).GetHex(), kToy);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_soft_4gib_streamed_budget)
+{
+    // Soft 4 GiB Streamed peak estimate (toy + medium). Not a production HBM proof.
+    constexpr uint64_t kSoft4GiB = 4ull << 30;
+    for (const auto& params : {rc::MakeToyRCCoupParams(), rc::MakeMediumRCCoupParams()}) {
+        BOOST_REQUIRE(rc::RCCoupBarrierLoopComplete(params));
+        const uint64_t peak = rc::EstimateRCCoupStreamedPeakBytes(params);
+        BOOST_CHECK_LT(peak, kSoft4GiB);
+        // Force Streamed completion under the soft cap.
+        const auto header = MakeCoupHeader(13);
+        rc::RCCoupOptions streamed;
+        streamed.mode = rc::RCCoupExecMode::Streamed;
+        const uint256 d = rc::RecomputeCoupledPuzzleReference(header, 0, params, streamed);
+        BOOST_CHECK(!d.IsNull());
+        BOOST_TEST_MESSAGE("Streamed peak_bytes=" << peak << " barriers=" << params.barriers);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_stage_d_distributed_parity)
+{
+    // Stage D: lobe segment IDs independent of N; integer-sum reduce; Extract once.
+    const auto header = MakeCoupHeader(21);
+    const auto params = rc::MakeToyRCCoupParams();
+    const auto orders = {rc::DistReduceOrder::TreeLeftToRight,
+                         rc::DistReduceOrder::TreeRightToLeft,
+                         rc::DistReduceOrder::PairwiseButterfly};
+
+    rc::DistEpisodeResult baseline;
+    bool have_baseline = false;
+    for (uint32_t N : {1u, 2u, 4u}) {
+        for (auto order : orders) {
+            if (order == rc::DistReduceOrder::PairwiseButterfly && (N & (N - 1)) != 0) {
+                continue;
+            }
+            const auto r =
+                rc::RunCoupledBarrierDistributed(header, /*height=*/0, params, /*barrier=*/0, N,
+                                                 order);
+            BOOST_CHECK_EQUAL(r.n_segs, params.lobes);
+            BOOST_CHECK_EQUAL(r.n_devices, N);
+            BOOST_CHECK(!r.digest.IsNull());
+            BOOST_CHECK_EQUAL(r.pre_extract_sum.size(), params.StateBytes());
+            BOOST_CHECK_EQUAL(r.extracted.size(), params.StateBytes());
+            if (!have_baseline) {
+                baseline = r;
+                have_baseline = true;
+            } else {
+                BOOST_CHECK(r.pre_extract_sum == baseline.pre_extract_sum);
+                BOOST_CHECK(r.extracted == baseline.extracted);
+                BOOST_CHECK(r.digest == baseline.digest);
+            }
+        }
+    }
+    BOOST_REQUIRE(have_baseline);
+
+    // Segment ownership is round-robin on lobe id (independent of N).
+    for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+        BOOST_CHECK_EQUAL(rc::ConsensusSegmentId(ell, /*seg_len=*/1), ell);
+        for (uint32_t N : {1u, 2u, 4u}) {
+            BOOST_CHECK_EQUAL(rc::DeviceForSegment(ell, N), ell % N);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_shortcut_skip_barrier_changes_digest)
@@ -218,11 +362,17 @@ BOOST_AUTO_TEST_CASE(rc_coup_device_probe_skip_without_gpu)
     if (!probe.backend_resolved) {
         BOOST_CHECK_EQUAL(probe.provider, "cpu");
         BOOST_TEST_MESSAGE("RC coupled ExactGemm device path skipped: " << probe.detail);
-        return;
+    } else {
+        BOOST_REQUIRE(probe.device_gemm_returned);
+        BOOST_CHECK(probe.matched_cpu_exactgemm);
+        BOOST_TEST_MESSAGE("RC coupled ExactGemm device path provider=" << probe.provider);
     }
-    BOOST_REQUIRE(probe.device_gemm_returned);
-    BOOST_CHECK(probe.matched_cpu_exactgemm);
-    BOOST_TEST_MESSAGE("RC coupled ExactGemm device path provider=" << probe.provider);
+
+    // Amendment 1.B: coupled ExactGemm never implies RC native MXFP4 / Ozaki.
+    BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
+    const auto st = rc::ProbeRCSelfQual(matmul_v4::accel::MakeResolvedExactGemmBackendForRC());
+    BOOST_CHECK(!st.native_mxfp4_qualified);
+    BOOST_CHECK(!st.native_fp8_qualified);
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_balanced_perm_hits_every_index_once)

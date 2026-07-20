@@ -65,6 +65,19 @@ bool TryLaunchNativeMxfp4ProjectedRightLT(const std::vector<int8_t>&, const std:
     return false;
 }
 
+bool TryLaunchResidentNativeMxProjectedRightDeviceLT(const int8_t*, const uint8_t*, const int8_t*,
+                                                     int32_t*, uint32_t, uint32_t, void*,
+                                                     LtMetalMxProvenance* provenance)
+{
+    // Amendment 1.A: fail closed — device-pointer resident pack not wired on Metal.
+    if (provenance) {
+        *provenance = {};
+        provenance->mx.native_mxfp4_attempted = false;
+        provenance->mx.native_mxfp4_qualified = false;
+    }
+    return false;
+}
+
 bool ComputeDigestsOnlyLTMetal(const CBlockHeader&, uint32_t,
                                const uint64_t*, size_t,
                                std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)

@@ -581,6 +581,17 @@ endfunction()
 
 add_all_test_targets()
 
+# ENC_RC Stage H / A1: golden-diff CI gate — fails build on silent V1 golden drift
+# without a kRCTranscriptVersion bump (contrib/matmul-v4/rc-golden-gate.py).
+if(Python3_EXECUTABLE)
+  add_test(
+    NAME rc_golden_gate
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/contrib/matmul-v4/rc-golden-gate.py
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+  )
+  set_property(TEST rc_golden_gate PROPERTY LABELS "rc;golden;matmul_v4")
+endif()
+
 # Timing-variance checks are sensitive to host contention; run this suite
 # without concurrent ctest jobs to avoid false negatives under -j.
 set_tests_properties(pq_timing_tests PROPERTIES RUN_SERIAL TRUE)

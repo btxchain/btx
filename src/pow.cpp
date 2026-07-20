@@ -27,6 +27,7 @@
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/noise.h>
 #include <matmul/pow_v4.h>
@@ -4098,8 +4099,60 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
         matmul::v4::rc::ResolveRCEpisodeParams(params, block_height);
     if (!matmul::v4::rc::ValidateRCEpisodeParams(params_rc)) return finish(false);
 
+    // Consensus ε=0 ExactReplay (DISPUTE/fallback path; sole validity by default).
+    const auto replay = matmul::v4::rc::VerifyBoundedExactReplay(header, params_rc, block_height,
+                                                                &*bnTarget);
+    if (!replay.ok) return finish(false);
+
+    // Optional Section-2 GKR hook (BTX_RC_VERIFY_GKR=1, default OFF). Does NOT
+    // replace consensus ExactReplay; measures/validates cached winner proof if
+    // present (empty-body DIGEST_RECOMPUTE — proof rides process-local cache).
+    if (matmul::v4::rc::EnvRCVerifyGkrEnabled()) {
+        std::vector<unsigned char> proof_bytes;
+        if (matmul::v4::rc::RCGkrProofCacheGet(header.GetHash(), proof_bytes)) {
+            const auto dual = matmul::v4::rc::VerifyRCWinnerOrExactReplay(
+                header, params_rc, block_height, &*bnTarget, &proof_bytes);
+            LogDebug(BCLog::VALIDATION,
+                     "CheckMatMulProofOfWork_RC: BTX_RC_VERIFY_GKR path=%d gkr_ok=%d "
+                     "replay_ok=%d note=%s\n",
+                     static_cast<int>(dual.path), dual.gkr.ok ? 1 : 0, dual.replay.ok ? 1 : 0,
+                     dual.note.c_str());
+            (void)dual;
+        } else {
+            LogDebug(BCLog::VALIDATION,
+                     "CheckMatMulProofOfWork_RC: BTX_RC_VERIFY_GKR set but no cached proof; "
+                     "ExactReplay remains consensus\n");
+        }
+    }
+    return finish(true);
+}
+
+bool CheckMatMulProofOfWork_RCCoupled(const CBlockHeader& header, const Consensus::Params& params,
+                                      int32_t block_height)
+{
+    const auto start = std::chrono::steady_clock::now();
+    const auto finish = [&](bool passed) {
+        RegisterMatMulValidationRuntimeSample(
+            MatMulValidationPath::RECOMPUTE,
+            passed,
+            std::chrono::steady_clock::now() - start);
+        return passed;
+    };
+
+    if (!params.IsMatMulRCCoupledActive(block_height)) return finish(false);
+    if (header.matmul_dim != params.nMatMulV4Dimension) return finish(false);
+    if (header.seed_a.IsNull() || header.seed_b.IsNull()) return finish(false);
+
+    auto bnTarget{DeriveTarget(header.nBits, params.powLimit)};
+    if (!bnTarget) return finish(false);
+
+    const matmul::v4::rc::RCCoupParams params_coup =
+        matmul::v4::rc::ResolveRCCoupParams(params);
+    if (!matmul::v4::rc::RCCoupBarrierLoopComplete(params_coup)) return finish(false);
+
+    // Consensus REJECT: empty ExactGemm (CPU-only; R1).
     const uint256 digest =
-        matmul::v4::rc::RecomputeResidentCurriculumReference(header, params_rc, block_height);
+        matmul::v4::rc::RecomputeCoupledPuzzleReference(header, block_height, params_coup);
     if (digest.IsNull() || digest != header.matmul_digest) return finish(false);
     if (UintToArith256(digest) > *bnTarget) return finish(false);
     return finish(true);
@@ -5793,17 +5846,95 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
 }
 
 // ---------------------------------------------------------------------------
-// Stage C coupled puzzle — NOT wired into mining / GetMatMulEncodingProfile.
-//
-// Public APIs live in matmul/matmul_v4_rc_coupled.h:
-//   RecomputeCoupledPuzzleReference / MineCoupledPuzzle
-// There is no MatMulEncodingProfile enum value for coupled, and
-// nMatMulRCHeight remains INT32_MAX. Do NOT add a SolveMatMulV4RCCoupled
-// dispatch arm here until a deliberate profile cutover exists. A future
-// SolveMatMulV4RCCoupled would grind via MineCoupledPuzzle + CPU reseal
-// (mirroring SolveMatMulV4RC) but must stay unreachable from
-// GetMatMulEncodingProfile.
+// ENC_RC_COUPLED miner — selected ONLY when IsMatMulRCCoupledActive.
+// Public nets keep nMatMulRCCoupledHeight = INT32_MAX (unreachable).
 // ---------------------------------------------------------------------------
+
+/** Coupled-puzzle miner: grind nonces through MineCoupledPuzzle + CPU reseal. */
+static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
+                                   const Consensus::Params& params,
+                                   uint64_t& max_tries,
+                                   int32_t block_height,
+                                   const std::atomic<bool>* abort_flag,
+                                   std::vector<uint32_t>* freivalds_payload_out,
+                                   std::optional<int64_t> parent_median_time_past,
+                                   const arith_uint256& effective_target,
+                                   std::chrono::steady_clock::time_point start)
+{
+    if (!parent_median_time_past.has_value()) {
+        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+        return false;
+    }
+    if (freivalds_payload_out != nullptr) {
+        freivalds_payload_out->clear();
+    }
+
+    const matmul::v4::rc::RCCoupParams params_coup =
+        matmul::v4::rc::ResolveRCCoupParams(params);
+    if (!matmul::v4::rc::RCCoupBarrierLoopComplete(params_coup)) {
+        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+        return false;
+    }
+
+    while (max_tries > 0) {
+        if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        if (!SetDeterministicMatMulSeeds(block, params, block_height, parent_median_time_past)) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+
+        // Mining may inject ExactGemm/native when ProbeRCCoupledDevice admits.
+        const auto gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+        const uint256 mined =
+            matmul::v4::rc::MineCoupledPuzzle(block, block_height, params_coup, gemm);
+        if (mined.IsNull()) {
+            LogWarning("SolveMatMulV4RCCoupled: MineCoupledPuzzle returned null at nonce=%llu; "
+                       "aborting\n",
+                       static_cast<unsigned long long>(block.nNonce64));
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        if (UintToArith256(mined) > effective_target) {
+            --max_tries;
+            if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+            ++block.nNonce64;
+            block.nNonce = static_cast<uint32_t>(block.nNonce64);
+            continue;
+        }
+
+        // Winner: CPU reseal (empty ExactGemm — never accelerate REJECT / reseal).
+        const uint256 resealed =
+            matmul::v4::rc::RecomputeCoupledPuzzleReference(block, block_height, params_coup);
+        if (resealed != mined) {
+            LogWarning("SolveMatMulV4RCCoupled: MineCoupledPuzzle diverged from "
+                       "RecomputeCoupledPuzzleReference at nonce=%llu; aborting solve\n",
+                       static_cast<unsigned long long>(block.nNonce64));
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        if (UintToArith256(resealed) <= effective_target) {
+            block.matmul_digest = resealed;
+            RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
+            return true;
+        }
+
+        --max_tries;
+        if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) {
+            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+            return false;
+        }
+        ++block.nNonce64;
+        block.nNonce = static_cast<uint32_t>(block.nNonce64);
+    }
+    RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+    return false;
+}
 
 /** ENC_RC / Resident Curriculum miner: grind nonces through MineRCEpisode.
  *  P0.2: CPU-reseal WINNERS only (losers must not pay a second full episode). */
@@ -5880,14 +6011,23 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             block.matmul_digest = resealed;
             // Optional winner-only GKR prove (off by default — consensus binary unchanged).
             // Enable with env BTX_RC_WINNER_GKR=1. Losers above never reach here.
-            if (const char* env = std::getenv("BTX_RC_WINNER_GKR");
-                env != nullptr && env[0] == '1' && env[1] == '\0') {
+            // Proof bytes are cached process-locally (empty-body DIGEST_RECOMPUTE);
+            // BTX_RC_VERIFY_GKR=1 may validate them without raising height.
+            if (matmul::v4::rc::EnvRCWinnerGkrEnabled()) {
                 const auto pr = matmul::v4::rc::ProveWinnerEpisode(block, params_rc, block_height,
                                                                    resealed);
+                std::vector<unsigned char> ser;
+                (void)matmul::v4::rc::SerializeRCGkrProof(pr.proof, ser);
+                matmul::v4::rc::RCGkrProofCachePut(block.GetHash(), std::move(ser));
                 LogDebug(BCLog::MINING,
-                         "SolveMatMulV4RC: winner GKR prove_s=%.6f proof_bytes=%zu ok=%d\n",
-                         pr.timing.prove_s, pr.timing.proof_bytes, pr.timing.ok ? 1 : 0);
-                (void)pr;
+                         "SolveMatMulV4RC: winner GKR prove_s=%.6f proof_bytes=%zu rss_kib=%zu "
+                         "over_budget=%d ok=%d\n",
+                         pr.timing.prove_s, pr.timing.proof_bytes, pr.timing.peak_rss_kib,
+                         pr.timing.over_budget ? 1 : 0, pr.timing.ok ? 1 : 0);
+                if (pr.timing.over_budget) {
+                    LogWarning("SolveMatMulV4RC: problems arise — GKR prove over budget; "
+                               "HBM-scale GKR PARKED; ExactReplay remains consensus\n");
+                }
             }
             RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
             return true;
@@ -5944,6 +6084,11 @@ static bool SolveMatMulV4(CBlockHeader& block,
     // is the SINGLE selector. At BMX4C heights the whole solve routes to the
     // ENC-BMX4C loop; the ENC-S8 path below is unchanged.
     const Consensus::MatMulEncodingProfile solve_profile = params.GetMatMulEncodingProfile(block_height);
+    if (solve_profile == Consensus::MatMulEncodingProfile::ENC_RC_COUPLED) {
+        return SolveMatMulV4RCCoupled(block, params, max_tries, block_height, abort_flag,
+                                      freivalds_payload_out, parent_median_time_past,
+                                      effective_target, start);
+    }
     if (solve_profile == Consensus::MatMulEncodingProfile::ENC_RC) {
         return SolveMatMulV4RC(block, params, max_tries, block_height, abort_flag,
                                freivalds_payload_out, parent_median_time_past, effective_target, start);

@@ -45,9 +45,8 @@
  //   When IsLtImmaGemmAvailable(), direct s8xs8 stages use cuBLASLt IMMA;
  //   Bhat*V prefers exact MX scale-partitioned INT8 (four exponent-masked
  //   GEMMs, bit-identical to ComputeProjectedRightMxBlockScaleLT). Dense
- //   dequant INT8 is the fallback. The host-vector projection entry may try
- //   native MXFP8 / MXFP4 only after multi-shape self-qual vs the CPU oracle;
- //   the resident Q* loop reports only the exact INT8 lane it actually runs.
+ //   dequant INT8 is the fallback. After resident native self-qual, the Q*
+ //   loop may serve MXFP4/FP8 projection into dQ; otherwise exact INT8.
  //   Float accumulate is never labeled ExactGemm. Y*H uses four radix-256
  //   IMMA products, and combine uses nine base-64 Karatsuba products.
  //   TryLaunchLtImmaGemmS32S8 itself still honestly declines because cuBLASLt
@@ -1317,9 +1316,23 @@ struct LtCudaResidentPool {
         }
 
         if (use_mx) {
-            if (!LaunchProjectRightMxExact()) return false;
-            used_exact_mx_this_batch = true;
-            mx_prov.exact_mx_scale_partitioned = true;
+            // Prefer oracle-qualified resident native MX (MXFP4||FP8) when wired.
+            // Never label the INT8 exact fallback as native-MX.
+            matmul::v4::lt::MxLaneProvenance native_local{};
+            if (IsLtResidentNativeMxWired() &&
+                TryLaunchResidentNativeMxProjectedRightDevice(
+                    dBhat, dScales, dV, dQ, n, m, stream, &native_local) &&
+                (native_local.native_mxfp4_qualified || native_local.native_fp8_qualified) &&
+                !native_local.exact_mx_scale_partitioned) {
+                mx_prov = native_local;
+                used_exact_mx_this_batch = false;
+            } else if (LaunchProjectRightMxExact()) {
+                used_exact_mx_this_batch = true;
+                mx_prov = {};
+                mx_prov.exact_mx_scale_partitioned = true;
+            } else {
+                return false;
+            }
         } else if (imma_s8s8) {
             if (!LaunchProjectRightDenseImma()) return false;
         } else {
@@ -1727,7 +1740,12 @@ bool BackendGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& 
         out[i].backend_status = matmul::v4::bmx4::DigestOnlyBackendStatus::Ok;
     }
     g_lt_last_mx_prov = pool.mx_prov;
-    g_lt_last_mx_prov.exact_mx_scale_partitioned = pool.used_exact_mx_this_batch;
+    // Honesty: if the batch used exact INT8, clear any stale native bits.
+    if (pool.used_exact_mx_this_batch) {
+        g_lt_last_mx_prov.exact_mx_scale_partitioned = true;
+        g_lt_last_mx_prov.native_mxfp4_qualified = false;
+        g_lt_last_mx_prov.native_fp8_qualified = false;
+    }
     if (chunks_out != nullptr) *chunks_out = completed_chunks;
     if (staging_slots_out != nullptr) *staging_slots_out = chat_chunk_slots;
     return true;

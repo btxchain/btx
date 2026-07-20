@@ -1941,6 +1941,8 @@ int RunBmx4cLtTelemetryOnly(const Args& args, const std::string& host,
     root.pushKV("throughput_ring_depth", static_cast<uint64_t>(1));
     root.pushKV("throughput_cross_window_overlap", false);
     root.pushKV("throughput_saturation_verified", false);
+    // Amendment 1.C: ROOT keys already emitted here. JSON null means the
+    // campaign left chat_staging_slots==0 (provenance/artifact), not missing emit.
     if (throughput.chat_staging_slots > 0) {
         root.pushKV("throughput_chat_staging_slots",
                     static_cast<uint64_t>(throughput.chat_staging_slots));
@@ -2428,6 +2430,7 @@ int RunBmx4cLtProfile(const Args& args, const std::string& host, matmul_v4::acce
                 static_cast<uint64_t>(throughput.campaign_windows_requested));
     root.pushKV("throughput_campaign_candidate_slots",
                 static_cast<uint64_t>(throughput.campaign_candidate_slots));
+    // Amendment 1.C: ROOT emit present; null ⇒ staging unused / artifact mismatch.
     if (throughput.chat_staging_slots > 0) {
         root.pushKV("throughput_ring_depth", static_cast<uint64_t>(1));
         root.pushKV("throughput_chat_staging_slots",

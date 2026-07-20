@@ -9,8 +9,10 @@
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_lt_mx_exact.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_mx_layout.h>
+#include <matmul/matmul_v4_rc_mx_ozaki.h>
 #include <matmul/matmul_v4_rc_scale.h>
 #include <matmul/matmul_v4_rc_scale_axes.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
@@ -23,6 +25,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -30,6 +33,10 @@
 #include <limits>
 #include <string>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/wait.h>
+#endif
 
 namespace rc = matmul::v4::rc;
 namespace lt = matmul::v4::lt;
@@ -1024,46 +1031,54 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_memory_budget_soft_streamed)
 
 BOOST_AUTO_TEST_CASE(rc_stage_h_golden_diff_gate)
 {
-    // H: Golden-diff gate — C++ frozen-hex check + optional python gate script.
+    // H: Golden-diff gate — C++ frozen-hex check + required python gate script.
+    // CMake also registers `ctest -R rc_golden_gate` so drift fails the build.
     constexpr const char* kV1 =
         "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a";
     const auto header = MakeRCHeader(42);
     const auto params = rc::MakeToyRCEpisodeParams();
     BOOST_CHECK_EQUAL(
         rc::RecomputeResidentCurriculumReference(header, params, 0).GetHex(), kV1);
+    BOOST_CHECK(!rc::kRCThreeAxisScheduleEnabled);
 
-    // Invoke contrib/matmul-v4/rc-golden-gate.py when present (CI / local tree).
-    const char* roots[] = {
-        "contrib/matmul-v4/rc-golden-gate.py",
-        "../contrib/matmul-v4/rc-golden-gate.py",
-        "../../contrib/matmul-v4/rc-golden-gate.py",
-    };
-    int ran = 0;
-    for (const char* script : roots) {
-        std::string cmd = std::string("python3 ") + script + " --expect " + kV1 +
-                          " >/dev/null 2>&1";
-        const int rc_code = std::system(cmd.c_str());
-        if (rc_code == 0) {
-            ++ran;
-            break;
-        }
-        // Script missing from this cwd → try next; non-zero from found script fails.
-        if (rc_code != 127 && rc_code != -1) {
-            // Encoded wait status: prefer reporting failure if python ran and failed.
-            const int status = rc_code;
+    // Prefer absolute path via env (set by CI) then relative tree roots.
+    const char* env_script = std::getenv("BTX_RC_GOLDEN_GATE");
+    std::vector<std::string> candidates;
+    if (env_script && env_script[0] != '\0') {
+        candidates.emplace_back(env_script);
+    }
+    candidates.insert(candidates.end(),
+                      {"contrib/matmul-v4/rc-golden-gate.py",
+                       "../contrib/matmul-v4/rc-golden-gate.py",
+                       "../../contrib/matmul-v4/rc-golden-gate.py",
+                       "../../../contrib/matmul-v4/rc-golden-gate.py"});
+
+    bool ran = false;
+    int last_status = -1;
+    for (const auto& script : candidates) {
+        // Existence probe via fopen — avoid treating "missing" as drift FAIL.
+        FILE* f = std::fopen(script.c_str(), "r");
+        if (!f) continue;
+        std::fclose(f);
+        const std::string cmd =
+            std::string("python3 ") + script + " --expect " + kV1;
+        last_status = std::system(cmd.c_str());
+        ran = true;
+        break;
+    }
+    BOOST_REQUIRE_MESSAGE(ran, "rc-golden-gate.py not found relative to cwd; "
+                               "set BTX_RC_GOLDEN_GATE or run from repo root / "
+                               "use ctest -R rc_golden_gate");
 #if defined(WIFEXITED) && defined(WEXITSTATUS)
-            // Not portable across all hosts; treat any non-zero as soft miss if
-            // the file was not found. Re-check via fopen-style path below.
-#endif
-            (void)status;
-        }
-    }
-    if (ran == 0) {
-        BOOST_TEST_MESSAGE(
-            "rc-golden-gate.py not executed from this cwd; C++ frozen-hex check still enforced");
+    if (WIFEXITED(last_status)) {
+        BOOST_CHECK_EQUAL(WEXITSTATUS(last_status), 0);
     } else {
-        BOOST_CHECK_EQUAL(ran, 1);
+        BOOST_CHECK_MESSAGE(last_status == 0,
+                            "rc-golden-gate.py exited abnormally");
     }
+#else
+    BOOST_CHECK_EQUAL(last_status, 0);
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(rc_stage_f_three_axis_schedule_inert)
@@ -1092,9 +1107,216 @@ BOOST_AUTO_TEST_CASE(rc_stage_f_three_axis_schedule_inert)
     BOOST_CHECK_EQUAL(fell.n_ctx, prior.n_ctx);
     BOOST_CHECK_EQUAL(fell.b_seq, prior.b_seq);
 
+    // Epoch asserts pass on epoch-0 (accumulator / transcript / Streamed peak /
+    // fixed work / hard caps).
+    std::string reason;
+    BOOST_CHECK(rc::CheckRCThreeAxisInvariants(s0, prior, &reason));
+    BOOST_CHECK(reason.empty());
+    BOOST_CHECK_LT(rc::EstimateRCStreamedPeakBytes(prior), rc::kRCAxisStreamedPeakHardCap);
+
+    // Absurd over-cap dials → invariants fail → prior fallback.
+    rc::RCThreeAxisScale over = s0;
+    over.W_state = rc::kRCAxisHardCapState + 1;
+    BOOST_CHECK(!rc::CheckRCThreeAxisInvariants(over, prior, &reason));
+    BOOST_CHECK(!reason.empty());
+    const auto fell_cap = rc::EpisodeParamsFromThreeAxis(over, &prior);
+    BOOST_CHECK_EQUAL(fell_cap.n_ctx, prior.n_ctx);
+
     const auto ep = rc::ConsensusRCThreeAxisParamsForHeight(1000, p);
     BOOST_CHECK_EQUAL(ep.n_ctx, rc::kRCContextLen);
     BOOST_CHECK_EQUAL(ep.b_seq, rc::kRCBatchSeq);
+
+    // Epoch-0 golden still matches while schedule inert (4.3).
+    const auto header = MakeRCHeader(42);
+    const auto toy = rc::MakeToyRCEpisodeParams();
+    BOOST_CHECK_EQUAL(
+        rc::RecomputeResidentCurriculumReference(header, toy, 0).GetHex(),
+        "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a");
+}
+
+BOOST_AUTO_TEST_CASE(rc_stage_h_extract_extremes_int64)
+{
+    // H: int64 Extract extreme + negative vectors (no int32 narrow).
+    const uint256 key = uint256::FromHex(
+                             "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+                             .value();
+    const uint256 prf = lt::DeriveMatExpandPrfKey(key);
+
+    std::vector<int64_t> extremes(32, 0);
+    extremes[0] = std::numeric_limits<int64_t>::max();
+    extremes[1] = std::numeric_limits<int64_t>::min();
+    extremes[2] = -1;
+    extremes[3] = 1;
+    extremes[4] = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+    extremes[5] = static_cast<int64_t>(std::numeric_limits<int32_t>::min()) - 1;
+    extremes[6] = -(1LL << 40);
+    extremes[7] = (1LL << 40);
+
+    std::vector<int8_t> out(32);
+    rc::ExtractMXMatrixInt64(prf, extremes.data(), 1, 32, out.data());
+    // Deterministic + non-all-zero for extreme inputs (mantissas mixed).
+    BOOST_CHECK(std::any_of(out.begin(), out.end(), [](int8_t v) { return v != 0; }));
+
+    // Truncating to int32 before Extract changes at least one extreme lane.
+    std::vector<int64_t> trunc(32, 0);
+    for (size_t i = 0; i < 32; ++i) {
+        trunc[i] = static_cast<int32_t>(extremes[i]);
+    }
+    std::vector<int8_t> out_trunc(32);
+    rc::ExtractMXMatrixInt64(prf, trunc.data(), 1, 32, out_trunc.data());
+    BOOST_CHECK(out != out_trunc);
+}
+
+BOOST_AUTO_TEST_CASE(rc_stage_h_device_fault_reseal)
+{
+    // H: device-fault / corrupted ExactGemm → digest diverges; CPU reseal
+    // (empty backend) restores the reference oracle.
+    lt::ExactGemmBackend bad;
+    bad.gemm_s8s8 = &WrongGemmS8S8;
+    bad.gemm_s32s8 = &WrongGemmS32S8;
+    BOOST_REQUIRE(bad.HasDeviceGemms());
+
+    const auto header = MakeRCHeader(4242);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 cpu = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    const uint256 mined_cpu = rc::MineRCEpisode(header, params, 0);
+    BOOST_CHECK(cpu == mined_cpu);
+
+    const uint256 mined_bad = rc::MineRCEpisode(header, params, 0, nullptr, bad);
+    BOOST_CHECK(mined_bad != cpu); // device fault / corruption visible
+
+    // Reseal path: empty backend recomputes the honest digest (miner must
+    // compare before sealing — see SolveMatMulV4RC).
+    const uint256 resealed = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    BOOST_CHECK(resealed == cpu);
+    BOOST_CHECK(resealed != mined_bad);
+}
+
+BOOST_AUTO_TEST_CASE(rc_stage_h_production_boundary_ci_safe)
+{
+    // H: production-size *boundary* tests at CI-safe sizes — segment, MX block,
+    // 2^24 chunk rollover, multi-barrier. Not full HBM dims.
+    BOOST_CHECK_EQUAL(rc::kRCSegLen % 32, 0u);
+    BOOST_CHECK_EQUAL(rc::kRCMxBlockLen, 32u);
+    BOOST_CHECK(static_cast<uint64_t>(rc::kRCSegLen) * 2304ull > (uint64_t{1} << 24));
+    BOOST_CHECK(static_cast<uint64_t>(rc::kRCWgradExactChunk) * 2304ull < (uint64_t{1} << 24));
+
+    // Segment boundary: n_ctx exactly one / two segments (mod32).
+    {
+        auto p = rc::MakeToyRCEpisodeParams();
+        p.n_ctx = rc::kRCSegLen;
+        BOOST_REQUIRE(rc::ValidateRCEpisodeParams(p));
+        BOOST_CHECK_EQUAL(rc::RCNumSegs(p.n_ctx), 1u);
+        p.n_ctx = rc::kRCSegLen * 2;
+        BOOST_REQUIRE(rc::ValidateRCEpisodeParams(p));
+        BOOST_CHECK_EQUAL(rc::RCNumSegs(p.n_ctx), 2u);
+        const auto header = MakeRCHeader(77);
+        const uint256 d1 = rc::RecomputeResidentCurriculumReference(header, p, 0);
+        BOOST_CHECK(!d1.IsNull());
+    }
+
+    // MX scale-block boundary: cols = 32 and 64 Extract tiles.
+    {
+        const uint256 key = uint256::FromHex(
+                                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                 .value();
+        const uint256 prf = lt::DeriveMatExpandPrfKey(key);
+        for (uint32_t cols : {32u, 64u}) {
+            std::vector<int64_t> y(cols, -123456789LL);
+            std::vector<int8_t> o(cols);
+            rc::ExtractMXMatrixInt64(prf, y.data(), 1, cols, o.data());
+            BOOST_CHECK_EQUAL(cols % rc::kRCMxBlockLen, 0u);
+            BOOST_CHECK(std::any_of(o.begin(), o.end(), [](int8_t v) { return v != 0; }));
+        }
+    }
+
+    // 2^24 panel edge via chunked ExactGemm (CI-safe). kRCWgradExactChunk keeps
+    // 2304·chunk < 2^24; medium b_seq=8192 (self-qual) is the >2^24 case.
+    {
+        constexpr uint32_t b_seq = rc::kRCWgradExactChunk;
+        constexpr uint32_t d_model = 32;
+        BOOST_CHECK_LT(static_cast<uint64_t>(b_seq) * 2304ull, uint64_t{1} << 24);
+        std::vector<int8_t> G(static_cast<size_t>(b_seq) * d_model, 7);
+        std::vector<int8_t> X(static_cast<size_t>(b_seq) * d_model, 9);
+        const auto i64 = rc::TestHelperGemmGXtInt64(G, X, b_seq, d_model);
+        const auto chunked = rc::TestHelperGemmGXtViaChunkedExact(G, X, b_seq, d_model);
+        BOOST_CHECK(i64 == chunked);
+    }
+
+    // Multi-barrier: coupled toy has ≥4 barriers; modes stay digest-equivalent.
+    {
+        BOOST_CHECK_GE(rc::kRCCoupRounds, 4u);
+        CBlockHeader ch;
+        ch.nVersion = 0x20000004;
+        ch.nTime = 1'770'000'000;
+        ch.nBits = 0x207fffff;
+        ch.nNonce64 = 88;
+        ch.nNonce = 88;
+        for (int i = 0; i < 32; ++i) {
+            ch.hashPrevBlock.data()[i] = static_cast<unsigned char>(0x51);
+            ch.hashMerkleRoot.data()[i] = static_cast<unsigned char>(0xa3);
+            ch.seed_a.data()[i] = static_cast<unsigned char>(0x11);
+            ch.seed_b.data()[i] = static_cast<unsigned char>(0x22);
+        }
+        const uint256 a = rc::RecomputeCoupledPuzzleReference(ch, 0);
+        rc::RCCoupOptions streamed;
+        streamed.mode = rc::RCCoupExecMode::Streamed;
+        const uint256 b = rc::RecomputeCoupledPuzzleReference(ch, 0, streamed);
+        BOOST_CHECK(a == b);
+        BOOST_CHECK_GE(rc::MakeToyRCCoupParams().barriers, 4u);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_fail_closed_until_wired)
+{
+    // Amendment 1.B: RC native MXFP4 stays false until Ozaki qualifies.
+    // Existing ProbeRCSelfQual / coupled ExactGemm paths are already fail-closed
+    // for native_*; this asserts the Ozaki scaffold + probe stay locked.
+    BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
+    const auto oz = rc::ProbeRcOzakiMxfp4Status();
+    BOOST_CHECK(!oz.qualified);
+    BOOST_CHECK(!oz.attempted);
+    BOOST_CHECK(!oz.deficit_reason.empty());
+
+    std::vector<int8_t> L(64, 1), R(64, 1);
+    std::vector<int64_t> oz_out;
+    BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, 8, 8, 8, oz_out));
+    BOOST_CHECK(oz_out.empty());
+
+    // CPU limb-split reference matches dense int64 on a small panel.
+    constexpr uint32_t rows = 8, inner = 64, cols = 8;
+    L.assign(static_cast<size_t>(rows) * inner, 0);
+    R.assign(static_cast<size_t>(inner) * cols, 0);
+    for (uint32_t i = 0; i < rows * inner; ++i) {
+        L[i] = static_cast<int8_t>((static_cast<int32_t>(i) % 13) - 6);
+    }
+    for (uint32_t i = 0; i < inner * cols; ++i) {
+        R[i] = static_cast<int8_t>((static_cast<int32_t>(i * 5) % 11) - 5);
+    }
+    std::vector<int64_t> dense(static_cast<size_t>(rows) * cols, 0);
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t c = 0; c < cols; ++c) {
+            int64_t acc = 0;
+            for (uint32_t k = 0; k < inner; ++k) {
+                acc += static_cast<int64_t>(L[static_cast<size_t>(r) * inner + k]) *
+                       static_cast<int64_t>(R[static_cast<size_t>(k) * cols + c]);
+            }
+            dense[static_cast<size_t>(r) * cols + c] = acc;
+        }
+    }
+    std::vector<int64_t> limb;
+    BOOST_REQUIRE(rc::RcOzakiCpuLimbSplitGemmS8S8Int64(L, R, rows, inner, cols, limb));
+    BOOST_CHECK(limb == dense);
+    // Limb split must not flip native / Ozaki qualification.
+    BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
+
+    const auto st_cpu = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
+    BOOST_CHECK(!st_cpu.native_mxfp4_qualified);
+    BOOST_CHECK(!st_cpu.native_fp8_qualified);
+
+    const auto st_res = rc::ProbeRCSelfQual(matmul_v4::accel::MakeResolvedExactGemmBackendForRC());
+    BOOST_CHECK(!st_res.native_mxfp4_qualified);
+    BOOST_CHECK(!st_res.native_fp8_qualified);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -114,6 +114,34 @@ BOOST_AUTO_TEST_CASE(gkr_toy_and_medium_timings)
     BOOST_CHECK(pr_med.timing.proof_bytes > pr_toy.timing.proof_bytes);
 }
 
+BOOST_AUTO_TEST_CASE(gkr_malformed_deserialize_fails)
+{
+    // Empty / truncated / bad-magic payloads must not deserialize.
+    BOOST_CHECK(!rc::DeserializeRCGkrProof({}).has_value());
+    BOOST_CHECK(!rc::DeserializeRCGkrProof(std::vector<unsigned char>(7, 0x00)).has_value());
+    std::vector<unsigned char> junk(64, 0xff);
+    BOOST_CHECK(!rc::DeserializeRCGkrProof(junk).has_value());
+
+    // Honest proof round-trips; flipping a mid-byte breaks deserialize or verify.
+    const uint256 seed = MakeSeed(0x5a);
+    rc::DistSynthShape shape{32, 32, 128, 32};
+    const auto ep = rc::RunSyntheticDistributed(seed, shape, 1, rc::DistReduceOrder::TreeLeftToRight);
+    const auto pr = rc::ProveWinnerSynth(seed, shape, ep.digest);
+    std::vector<unsigned char> bytes;
+    BOOST_REQUIRE(rc::SerializeRCGkrProof(pr.proof, bytes) > 0);
+    const auto back = rc::DeserializeRCGkrProof(bytes);
+    BOOST_REQUIRE(back.has_value());
+    BOOST_CHECK(rc::VerifyWinnerProofPublic(*back, seed, shape));
+
+    bytes[bytes.size() / 2] ^= 0x5a;
+    const auto broken = rc::DeserializeRCGkrProof(bytes);
+    if (broken.has_value()) {
+        BOOST_CHECK(!rc::VerifyWinnerProofPublic(*broken, seed, shape));
+    } else {
+        BOOST_CHECK(!broken.has_value());
+    }
+}
+
 BOOST_AUTO_TEST_CASE(gkr_bakeoff_b_educational_still_present)
 {
     const uint256 seed = MakeSeed(0x5a);

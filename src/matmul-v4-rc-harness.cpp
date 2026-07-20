@@ -518,8 +518,9 @@ int RunCoupledHarness(const Args& args)
     root.pushKV("nvlink_campaign_present", false);
     root.pushKV("gpu_status", "SILICON-GATED");
     root.pushKV("consensus_note",
-                "nMatMulRCHeight remains INT32_MAX; coupled puzzle is INERT "
-                "(not selected by GetMatMulEncodingProfile). Mining inject uses "
+                "nMatMulRCCoupledHeight remains INT32_MAX on public nets; coupled "
+                "profile (ENC_RC_COUPLED) is INERT unless regtest sets a finite height. "
+                "Mining inject uses MakeResolvedExactGemmBackendForRC when active.",
                 "MakeResolvedExactGemmBackendForRC. SIMULATED interconnect is NOT "
                 "Stage-I gate 4 evidence. This harness never raises height.");
     std::string tip = args.source_revision;

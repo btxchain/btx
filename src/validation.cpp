@@ -10493,7 +10493,9 @@ static bool ContextualCheckBlock(const CBlock& block,
                         pindexPrev != nullptr
                             ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
                             : std::nullopt;
-                    if (consensusParams.IsMatMulRCActive(nHeight)) {
+                    if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
+                        encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
+                    } else if (consensusParams.IsMatMulRCActive(nHeight)) {
                         encdr_ok = CheckMatMulProofOfWork_RC(block, consensusParams, nHeight);
                     } else {
                         encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
@@ -10508,7 +10510,9 @@ static bool ContextualCheckBlock(const CBlock& block,
                         pindexPrev != nullptr
                             ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
                             : std::nullopt;
-                    if (consensusParams.IsMatMulRCActive(nHeight)) {
+                    if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
+                        encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
+                    } else if (consensusParams.IsMatMulRCActive(nHeight)) {
                         encdr_ok = CheckMatMulProofOfWork_RC(block, consensusParams, nHeight);
                     } else {
                         encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,

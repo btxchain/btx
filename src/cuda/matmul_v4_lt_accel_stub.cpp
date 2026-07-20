@@ -152,6 +152,21 @@ bool SelfQualifyLtNativeMxLanesOnce()
     return false;
 }
 
+bool IsLtResidentNativeMxWired()
+{
+    return false;
+}
+
+bool TryLaunchResidentNativeMxProjectedRightDevice(const int8_t*, const uint8_t*, const int8_t*,
+                                                   int32_t*, uint32_t, uint32_t, void*,
+                                                   matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    if (provenance != nullptr) {
+        *provenance = {};
+    }
+    return false;
+}
+
 bool IsLtPeakMxCapableDevice()
 {
     return false;
@@ -161,6 +176,9 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
 {
     matmul::v4::lt::LtPeakMxPathStatus s;
     s.allow_exact_mx_fallback = matmul::v4::lt::AllowLtExactMxFallback();
+    s.deficit_reason =
+        "CUDA LT native TU not linked (stub); resident_native_mx_wired=false "
+        "(no device-pointer resident pack)";
     return s;
 }
 

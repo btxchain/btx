@@ -51,6 +51,20 @@ inline constexpr uint64_t kRCAxisHardCapState = 1ull << 33;     // 8 GiB
 inline constexpr uint64_t kRCAxisHardCapLocal = 1ull << 46;     // MAC proxy ceiling
 inline constexpr uint64_t kRCAxisHardCapExchange = 1ull << 34;  // 16 GiB exchange budget
 
+/**
+ * Streamed-mode peak-memory hard cap (PROVISIONAL, F4). Growth that would
+ * push the structural Streamed peak estimate above this MUST fallback to
+ * prior dims (checked path — never assert).
+ */
+inline constexpr uint64_t kRCAxisStreamedPeakHardCap = 8ull << 30; // 8 GiB
+
+/**
+ * Structural proof/transcript byte budget (PROVISIONAL, F4). Uses the
+ * serialized transcript estimate (leaf_count × T_leaf), not a silicon
+ * wall-time claim. Fail → prior-dim fallback.
+ */
+inline constexpr uint64_t kRCAxisTranscriptHardCapBytes = 1ull << 36; // 64 GiB
+
 /** Q16 identity (1.0). Used when the epoch index is past the growth table. */
 inline constexpr int64_t kRCAxisQ16One = 65536;
 
@@ -107,9 +121,21 @@ struct RCThreeAxisScale {
 [[nodiscard]] RCEpisodeParams EpisodeParamsFromThreeAxis(
     const RCThreeAxisScale& scale, const RCEpisodeParams* prior_ok = nullptr);
 
+/**
+ * Per-step epoch asserts (F4) — checked, never assert():
+ *   accumulator bounds, transcript/proof-size, Streamed peak mem estimate,
+ *   fixed work (MAC formula), hard caps → caller falls back to prior dims.
+ */
 [[nodiscard]] bool CheckRCThreeAxisInvariants(const RCThreeAxisScale& scale,
                                               const RCEpisodeParams& derived,
                                               std::string* reason = nullptr);
+
+/**
+ * Structural Streamed-mode peak-resident byte estimate (F4). Not measured RSS;
+ * used only as a growth-step sanity gate so schedules cannot mint an episode
+ * that excludes the bounded-memory path by construction.
+ */
+[[nodiscard]] uint64_t EstimateRCStreamedPeakBytes(const RCEpisodeParams& p);
 
 /**
  * Full height→params with checked prior-dim fallback. Inert while

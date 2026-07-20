@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc_coupled.h>
 
+#include <consensus/params.h>
 #include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <matmul/matmul_pow.h>
@@ -306,6 +307,92 @@ void MaybeZeroSkipPage(std::vector<int8_t>& page, uint32_t page_index,
     }
 }
 
+DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, int32_t height,
+                                                   const RCCoupParams& params, uint32_t barrier,
+                                                   uint32_t n_devices, DistReduceOrder order,
+                                                   const lt::ExactGemmBackend& gemm)
+{
+    assert(ValidateRCCoupParams(params));
+    assert(barrier < params.barriers);
+    assert(n_devices >= 1);
+
+    const uint32_t n = params.StateBytes();
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    const auto lobe_seeds = DeriveCoupledLobeSeeds(sigma, params);
+
+    std::vector<int8_t> state(n);
+    for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+        const auto tile =
+            ExpandMxDequantInt8(lobe_seeds[ell], params.lobe_width, params.lobe_width);
+        std::memcpy(state.data() + ell * params.lobe_width, tile.data(), params.lobe_width);
+    }
+
+    std::vector<std::vector<int64_t>> segs(params.lobes);
+    std::vector<std::vector<int64_t>> per_device(n_devices);
+    for (uint32_t d = 0; d < n_devices; ++d) {
+        per_device[d].assign(params.lobe_width, 0);
+    }
+
+    for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+        const uint32_t page_id = (barrier + ell) % params.bank_pages;
+        auto page = DeriveCoupledBankPage(header, height, page_id, params);
+        std::vector<int64_t> row(params.lobe_width, 0);
+        LobeLocalGemm(state.data() + ell * params.lobe_width, page, params.lobe_width, row.data(),
+                      gemm);
+        segs[ell] = row;
+        const uint32_t owner = DeviceForSegment(ell, n_devices);
+        for (uint32_t c = 0; c < params.lobe_width; ++c) {
+            per_device[owner][c] += row[c];
+        }
+    }
+
+    std::vector<int64_t> lobe_sum(params.lobe_width, 0);
+    for (const auto& seg : segs) {
+        for (uint32_t c = 0; c < params.lobe_width; ++c) lobe_sum[c] += seg[c];
+    }
+    const auto reduced = ReduceDevicePartials(per_device, order);
+    assert(reduced == lobe_sum);
+
+    std::vector<int64_t> acc(n, 0);
+    for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+        std::memcpy(acc.data() + ell * params.lobe_width, segs[ell].data(),
+                    params.lobe_width * sizeof(int64_t));
+    }
+    const auto pi = DeriveCoupledBalancedPermutation(sigma, barrier, params);
+    ApplyBalancedPermutation(acc, pi);
+    ApplyAllToAllMix(acc, sigma, barrier, n);
+
+    const uint256 extract_seed =
+        Sha256TaggedU32U32(kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigma, barrier,
+                           /*unused=*/0);
+    std::vector<int8_t> extracted(n);
+    ExtractActiveState(lt::DeriveMatExpandPrfKey(extract_seed), acc, extracted);
+
+    DistEpisodeResult out;
+    out.pre_extract_sum = std::move(acc);
+    out.extracted = std::move(extracted);
+    out.n_segs = params.lobes;
+    out.n_devices = n_devices;
+    out.order = order;
+    {
+        std::vector<unsigned char> buf;
+        buf.reserve(32 + out.pre_extract_sum.size() * 8 + out.extracted.size());
+        const char tag[] = "BTX_RC_COUP_DIST_V1";
+        buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(tag),
+                   reinterpret_cast<const unsigned char*>(tag) + sizeof(tag) - 1);
+        for (int64_t v : out.pre_extract_sum) {
+            unsigned char le[8];
+            WriteLE64(le, static_cast<uint64_t>(v));
+            buf.insert(buf.end(), le, le + 8);
+        }
+        buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(out.extracted.data()),
+                   reinterpret_cast<const unsigned char*>(out.extracted.data()) +
+                       out.extracted.size());
+        out.digest = Sha256dBytes(buf.data(), buf.size());
+    }
+    return out;
+}
+
 } // namespace
 
 bool ValidateRCCoupParams(const RCCoupParams& p)
@@ -313,6 +400,8 @@ bool ValidateRCCoupParams(const RCCoupParams& p)
     if (p.barriers == 0 || p.lobes == 0 || p.lobe_width == 0 || p.bank_pages == 0) {
         return false;
     }
+    // C5: production barrier count is 4–8 (toy=4, medium=8).
+    if (p.barriers < 4 || p.barriers > 8) return false;
     if (p.lobe_width % 32 != 0) return false;
     const uint32_t n = p.StateBytes();
     if (n % 32 != 0) return false;
@@ -338,6 +427,30 @@ RCCoupParams MakeMediumRCCoupParams()
     p.lobe_width = 64;
     p.bank_pages = 32;
     return p;
+}
+
+RCCoupParams ResolveRCCoupParams(const Consensus::Params& p)
+{
+    return p.fMatMulRCCoupledUseToyDims ? MakeToyRCCoupParams() : MakeMediumRCCoupParams();
+}
+
+bool RCCoupBarrierLoopComplete(const RCCoupParams& p)
+{
+    // C1–C6 structural checklist (see header). Mix-pattern count is a compile-
+    // time constant; ValidateRCCoupParams covers bank/lobe/perm/Extract shape.
+    static_assert(kRCCoupMixPatterns >= 2, "C6: need ≥2 mix patterns");
+    static_assert(kRCCoupRounds >= 4 && kRCCoupRounds <= 8, "C5: toy barriers in [4,8]");
+    return ValidateRCCoupParams(p) && kRCCoupMixPatterns >= 2;
+}
+
+uint64_t EstimateRCCoupStreamedPeakBytes(const RCCoupParams& p)
+{
+    // Streamed retains one bank page + active int8 state + int64 accumulator.
+    const uint64_t page = static_cast<uint64_t>(p.lobe_width) * p.lobe_width;
+    const uint64_t state = static_cast<uint64_t>(p.StateBytes());
+    const uint64_t acc = state * sizeof(int64_t);
+    const uint64_t barrier_roots = static_cast<uint64_t>(p.barriers) * 32;
+    return page + state + acc + barrier_roots;
 }
 
 std::vector<int8_t> DeriveCoupledBankPage(const CBlockHeader& header, int32_t height,
@@ -596,6 +709,15 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     }
     return digest;
+}
+
+DistEpisodeResult RunCoupledBarrierDistributed(const CBlockHeader& header, int32_t height,
+                                               const RCCoupParams& params, uint32_t barrier,
+                                               uint32_t n_devices, DistReduceOrder order,
+                                               const lt::ExactGemmBackend& gemm)
+{
+    return RunCoupledBarrierDistributedImpl(header, height, params, barrier, n_devices, order,
+                                            gemm);
 }
 
 } // namespace matmul::v4::rc

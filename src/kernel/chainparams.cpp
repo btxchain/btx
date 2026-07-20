@@ -315,6 +315,18 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         assert(consensus.nMatMulRCHeight >= consensus.nMatMulV4Height);
         assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
     }
+    // ENC_RC_COUPLED (Stage C coupled puzzle): public nets stay fail-closed at
+    // INT32_MAX. Regtest may set a finite height + toy dims for end-to-end CI.
+    assert(!consensus.fMatMulRCCoupledUseToyDims || is_regtest);
+    if (!is_regtest) {
+        assert(consensus.nMatMulRCCoupledHeight == std::numeric_limits<int32_t>::max());
+        assert(!consensus.fMatMulRCCoupledUseToyDims);
+    }
+    if (consensus.nMatMulRCCoupledHeight != std::numeric_limits<int32_t>::max()) {
+        assert(consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max());
+        assert(consensus.nMatMulRCCoupledHeight >= consensus.nMatMulV4Height);
+        assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+    }
     // §R.7 scheduled-scaling tables must be non-zero once filled by constructors.
     // (FillDefaultRCGrowthTables is called before this assert on every network.)
     assert(consensus.nRCScaleEpochBlocks > 0);

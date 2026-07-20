@@ -1221,8 +1221,24 @@ struct LtHipResidentPool {
         }
 
         if (use_mx) {
-            if (!LaunchProjectRightMxExact()) return false;
-            used_exact_mx_this_batch = true;
+            // Prefer oracle-qualified resident native MX when wired (1.A).
+            // HIP device-pointer pack is not wired yet — this declines and
+            // falls through to INT8 exact. Never label INT8 as native-MX.
+            matmul::v4::lt::MxLaneProvenance native_local{};
+            if (IsLtResidentNativeMxWired() &&
+                TryLaunchResidentNativeMxProjectedRightDevice(
+                    dBhat, dScales, dV, dQ, n, m, stream, &native_local) &&
+                (native_local.native_mxfp4_qualified || native_local.native_fp8_qualified) &&
+                !native_local.exact_mx_scale_partitioned) {
+                g_lt_last_mx_provenance = native_local;
+                used_exact_mx_this_batch = false;
+            } else if (LaunchProjectRightMxExact()) {
+                used_exact_mx_this_batch = true;
+                g_lt_last_mx_provenance = {};
+                g_lt_last_mx_provenance.exact_mx_scale_partitioned = true;
+            } else {
+                return false;
+            }
         } else if (mfma_s8s8) {
             if (!LaunchProjectRightDenseMfma()) return false;
         } else {

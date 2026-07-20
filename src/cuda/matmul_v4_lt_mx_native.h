@@ -74,6 +74,27 @@ namespace matmul_v4::cuda {
  *  means at least one native MX lane qualified against the CPU oracle. */
 [[nodiscard]] bool SelfQualifyLtNativeMxLanesOnce();
 
+/**
+ * True only after the resident Q* projection path (device μ/scales/V → dQ)
+ * self-qualified bit-identical to the CPU MX oracle across the resident suite.
+ * Never true from standalone host-vector qualification alone.
+ */
+[[nodiscard]] bool IsLtResidentNativeMxWired();
+
+/**
+ * Device-resident native MX projection for LtCudaResidentPool (amendment 1.A).
+ * `cuda_stream` is a `cudaStream_t` (void* to keep this header CUDA-free).
+ * Device-side pack → cuBLASLt on the same stream → device FP32→int32 convert.
+ * No full-tensor D2H/H2D. Requires IsLtResidentNativeMxWired(); otherwise
+ * returns false without writing d_Q. On success provenance marks the native
+ * lane that served — never exact_mx_scale_partitioned / never labels INT8
+ * as native-MX. Never routes through TryLaunchNativeMxfp4ProjectedRight.
+ */
+[[nodiscard]] bool TryLaunchResidentNativeMxProjectedRightDevice(
+    const int8_t* d_mu, const uint8_t* d_scales, const int8_t* d_V, int32_t* d_Q,
+    uint32_t n, uint32_t m, void* cuda_stream,
+    matmul::v4::lt::MxLaneProvenance* provenance = nullptr);
+
 /** True on Blackwell-class GPUs (sm_10x / sm_12x) where peak MXFP4/FP8 is expected. */
 [[nodiscard]] bool IsLtPeakMxCapableDevice();
 

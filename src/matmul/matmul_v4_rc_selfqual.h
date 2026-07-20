@@ -26,7 +26,8 @@ namespace matmul::v4::rc {
 struct RCSelfQualStatus {
     bool cpu_oracle_ok{true};
     bool exact_gemm_backend_ok{false};
-    bool native_mxfp4_qualified{false}; // always false until device RC MX path exists
+    // Always false until Ozaki MXFP4 quals (Amendment 1.B) — LT native does not carry.
+    bool native_mxfp4_qualified{false};
     bool native_fp8_qualified{false};
     bool mining_accelerator_ok{false}; // true only if exact_gemm_backend_ok
     std::string deficit_reason;

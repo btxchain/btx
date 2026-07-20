@@ -111,6 +111,21 @@ bool TryLaunchNativeFp8ProjectedRight(const std::vector<int8_t>&, const std::vec
     return false;
 }
 
+bool IsLtResidentNativeMxWired()
+{
+    return false;
+}
+
+bool TryLaunchResidentNativeMxProjectedRightDevice(const int8_t*, const uint8_t*, const int8_t*,
+                                                   int32_t*, uint32_t, uint32_t, void*,
+                                                   matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    if (provenance) {
+        *provenance = {};
+    }
+    return false;
+}
+
 bool IsLtPeakMxCapableDevice()
 {
     return false;
@@ -120,6 +135,7 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
 {
     matmul::v4::lt::LtPeakMxPathStatus s;
     s.allow_exact_mx_fallback = matmul::v4::lt::AllowLtExactMxFallback();
+    s.deficit_reason = "HIP LT native TU not linked (stub); device-pointer resident pack not wired";
     return s;
 }
 

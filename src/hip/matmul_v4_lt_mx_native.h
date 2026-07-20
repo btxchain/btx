@@ -54,6 +54,23 @@ namespace matmul_v4::hip {
     const std::vector<int8_t>& V, uint32_t n, uint32_t m, std::vector<int32_t>& out,
     matmul::v4::lt::MxLaneProvenance* provenance = nullptr);
 
+/**
+ * True only after the resident HIP Q* projection path self-qualified vs the
+ * CPU MX oracle. Standalone host-vector qualification alone is insufficient.
+ */
+[[nodiscard]] bool IsLtResidentNativeMxWired();
+
+/**
+ * Device-resident native MX projection for LtHipResidentPool (amendment 1.A).
+ * `hip_stream` is a `hipStream_t` (void* to keep this header HIP-free).
+ * Requires IsLtResidentNativeMxWired(); otherwise returns false.
+ * Currently fail-closed: device-pointer resident pack not wired on HIP.
+ */
+[[nodiscard]] bool TryLaunchResidentNativeMxProjectedRightDevice(
+    const int8_t* d_mu, const uint8_t* d_scales, const int8_t* d_V, int32_t* d_Q,
+    uint32_t n, uint32_t m, void* hip_stream,
+    matmul::v4::lt::MxLaneProvenance* provenance = nullptr);
+
 /** True on CDNA4 gfx950 where peak MXFP4/FP8 is expected. */
 [[nodiscard]] bool IsLtPeakMxCapableDevice();
 

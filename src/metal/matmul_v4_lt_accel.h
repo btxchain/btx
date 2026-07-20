@@ -103,6 +103,16 @@ struct LtMetalMxProvenance {
     const std::vector<int8_t>& V, uint32_t n, uint32_t m, std::vector<int32_t>& out,
     LtMetalMxProvenance* provenance = nullptr);
 
+/**
+ * Amendment 1.A: device-pointer resident MX entry (Metal twin of CUDA/HIP).
+ * FAIL CLOSED — Metal has no oracle-qualified on-device FP4/UE8M0 pack into a
+ * resident pool stream yet. Never routes through host packing as "native-MX".
+ */
+[[nodiscard]] bool TryLaunchResidentNativeMxProjectedRightDeviceLT(
+    const int8_t* d_mu, const uint8_t* d_scales, const int8_t* d_V, int32_t* d_Q,
+    uint32_t n, uint32_t m, void* metal_command_buffer,
+    LtMetalMxProvenance* provenance = nullptr);
+
 [[nodiscard]] bool ComputeDigestsOnlyLTMetal(const CBlockHeader& tmpl, uint32_t n,
                                              const uint64_t* nonces, size_t count,
                                              std::vector<matmul::v4::lt::DigestOnlyResultLT>& out);

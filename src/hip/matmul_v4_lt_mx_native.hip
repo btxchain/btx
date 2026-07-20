@@ -69,6 +69,9 @@ bool g_native_mxfp4_qualified{false};
 bool g_native_fp8_attempted{false};
 bool g_native_fp8_qualified{false};
 bool g_native_qual_ran{false};
+bool g_resident_native_mx_wired{false};
+bool g_resident_native_mx_attempted{false};
+std::string g_resident_deficit_detail;
 
 struct DeviceBuffer {
     void* ptr{nullptr};
@@ -567,6 +570,20 @@ void RunNativeSelfQualOnceLocked()
     }
     g_native_mxfp4_qualified = mxfp4_ok;
     g_native_fp8_qualified = fp8_ok;
+
+    // Resident E2E (amendment 1.A): require device-pointer resident pack into
+    // hipBLASLt FP4/FP8 + UE8M0 on-device. That path is not wired on HIP yet —
+    // fail closed. Do NOT promote host-vector native launchers to
+    // g_resident_native_mx_wired (same class of bug as CUDA D2H pack).
+    g_resident_native_mx_attempted = true;
+    g_resident_native_mx_wired = false;
+    g_resident_deficit_detail.clear();
+    if (!mxfp4_ok && !fp8_ok) {
+        g_resident_deficit_detail =
+            "standalone native MXFP4/FP8 did not byte-qualify vs CPU oracle";
+        return;
+    }
+    g_resident_deficit_detail = "device-pointer resident pack not wired";
 }
 
 } // namespace
@@ -595,6 +612,30 @@ bool IsLtNativeFp8Qualified()
     std::lock_guard<std::mutex> lock(g_native_mx_mu);
     RunNativeSelfQualOnceLocked();
     return g_native_fp8_qualified;
+}
+
+bool IsLtResidentNativeMxWired()
+{
+    std::lock_guard<std::mutex> lock(g_native_mx_mu);
+    RunNativeSelfQualOnceLocked();
+    return g_resident_native_mx_wired;
+}
+
+bool TryLaunchResidentNativeMxProjectedRightDevice(
+    const int8_t* /*d_mu*/, const uint8_t* /*d_scales*/, const int8_t* /*d_V*/, int32_t* /*d_Q*/,
+    uint32_t /*n*/, uint32_t /*m*/, void* /*hip_stream*/,
+    matmul::v4::lt::MxLaneProvenance* provenance)
+{
+    std::lock_guard<std::mutex> lock(g_native_mx_mu);
+    RunNativeSelfQualOnceLocked();
+    if (provenance) {
+        *provenance = {};
+        provenance->native_mxfp4_attempted = g_resident_native_mx_attempted;
+        provenance->native_fp8_attempted = g_resident_native_mx_attempted;
+    }
+    // Amendment 1.A: fail closed — device-pointer resident pack not wired on HIP.
+    // Never call TryLaunchNativeMxfp4ProjectedRight (host pack) from resident pool.
+    return false;
 }
 
 bool TryLaunchNativeMxfp4ProjectedRight(const std::vector<int8_t>& mu,
@@ -668,9 +709,10 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
     s.native_mxfp4_qualified = prov.native_mxfp4_qualified;
     s.native_fp8_attempted = prov.native_fp8_attempted;
     s.native_fp8_qualified = prov.native_fp8_qualified;
-    // Native launchers currently serve the host-vector projection surface;
-    // the persistent HIP Q* graph still runs exact INT8 scale partitions.
-    s.resident_native_mx_wired = false;
+    {
+        std::lock_guard<std::mutex> lock(g_native_mx_mu);
+        s.resident_native_mx_wired = g_resident_native_mx_wired;
+    }
     s.peak_ready = s.peak_capable && s.resident_native_mx_wired &&
                    (s.native_mxfp4_qualified || s.native_fp8_qualified);
     s.allow_exact_mx_fallback = matmul::v4::lt::AllowLtExactMxFallback();
@@ -685,11 +727,17 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
             "peak-capable GPU (gfx950) does not have an end-to-end resident native "
             "MX path; the oracle-qualified exact INT8 MX resident path remains "
             "enabled. Do not label its rate native-MX or peak-ready.";
+        if (!g_resident_deficit_detail.empty()) {
+            s.deficit_reason += " detail: " + g_resident_deficit_detail;
+        }
     } else {
         s.deficit_reason =
             "BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX=1 requested an end-to-end resident "
             "native MXFP4/MXFP8 path, but it is not wired and oracle-qualified; "
             "resident LT is intentionally blocked for this qualification run.";
+        if (!g_resident_deficit_detail.empty()) {
+            s.deficit_reason += " detail: " + g_resident_deficit_detail;
+        }
     }
     return s;
 }

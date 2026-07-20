@@ -117,7 +117,9 @@ void MatMulVerifyWorker::WorkerLoop()
             // the guard is not taken re-entrantly with two different scopes.
             MatMulRecomputeSingleFlight sf(hash);
             if (sf.IsLeader()) {
-                if (m_params.IsMatMulRCActive(job.height)) {
+                if (m_params.IsMatMulRCCoupledActive(job.height)) {
+                    ok = CheckMatMulProofOfWork_RCCoupled(*job.block, m_params, job.height);
+                } else if (m_params.IsMatMulRCActive(job.height)) {
                     ok = CheckMatMulProofOfWork_RC(*job.block, m_params, job.height);
                 } else {
                     ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height,
@@ -128,7 +130,9 @@ void MatMulVerifyWorker::WorkerLoop()
                 ok = *leader_result; // sketch already Put() on an accepted block
             } else {
                 // Leader exited without publishing: decide ourselves.
-                if (m_params.IsMatMulRCActive(job.height)) {
+                if (m_params.IsMatMulRCCoupledActive(job.height)) {
+                    ok = CheckMatMulProofOfWork_RCCoupled(*job.block, m_params, job.height);
+                } else if (m_params.IsMatMulRCActive(job.height)) {
                     ok = CheckMatMulProofOfWork_RC(*job.block, m_params, job.height);
                 } else {
                     ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height,

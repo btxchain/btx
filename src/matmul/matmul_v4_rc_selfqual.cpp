@@ -213,7 +213,8 @@ RCSelfQualStatus ProbeRCSelfQual(const matmul::v4::lt::ExactGemmBackend& backend
     st.exact_gemm_backend_ok = true;
     st.mining_accelerator_ok = true;
     st.deficit_reason.clear();
-    // native_* remain false until a device RC MX path exists.
+    // native_* remain false until Ozaki MXFP4 quals vs int64 (Amendment 1.B).
+    // LT native_mxfp4_qualified must never be copied here.
     st.native_mxfp4_qualified = false;
     st.native_fp8_qualified = false;
     g_rc_selfqual_ok.store(true, std::memory_order_release);

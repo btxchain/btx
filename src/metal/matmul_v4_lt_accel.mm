@@ -497,6 +497,25 @@ bool TryLaunchNativeMxfp4ProjectedRightLT(const std::vector<int8_t>& /*mu*/,
     return false;
 }
 
+bool TryLaunchResidentNativeMxProjectedRightDeviceLT(const int8_t* /*d_mu*/,
+                                                     const uint8_t* /*d_scales*/,
+                                                     const int8_t* /*d_V*/, int32_t* /*d_Q*/,
+                                                     uint32_t /*n*/, uint32_t /*m*/,
+                                                     void* /*metal_command_buffer*/,
+                                                     LtMetalMxProvenance* provenance)
+{
+    // Amendment 1.A: fail closed — no on-device FP4/UE8M0 resident pack on Metal.
+    // Never call host TryLaunchNativeMxfp4ProjectedRightLT as a resident stand-in.
+    LtMetalMxProvenance local{};
+    local.host_mx_extract = true;
+    local.mx.native_mxfp4_attempted = false;
+    local.mx.native_mxfp4_qualified = false;
+    local.mx.native_fp8_attempted = false;
+    local.mx.native_fp8_qualified = false;
+    if (provenance) *provenance = local;
+    return false;
+}
+
 bool ComputeDigestsOnlyLTMetal(const CBlockHeader& tmpl, uint32_t n,
                                const uint64_t* nonces, size_t count,
                                std::vector<matmul::v4::lt::DigestOnlyResultLT>& out)

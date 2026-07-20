@@ -120,10 +120,13 @@ enum class MatMulEncodingProfile : uint8_t {
     ENC_BMX4C_LT = 4,
     //! Resident Curriculum (3-phase episode). STAGED: nMatMulRCHeight defaults
     //! to INT32_MAX on every public network (clean cutover later).
-    //! FINAL-FORM Stage C coupled puzzle (matmul_v4_rc_coupled.*) is the
-    //! structural successor workload — toy CPU oracle only today; NOT selected
-    //! by GetMatMulEncodingProfile at any height (no new enum value yet).
     ENC_RC = 5,
+    //! FINAL-FORM Stage C coupled puzzle (matmul_v4_rc_coupled.*). STAGED:
+    //! nMatMulRCCoupledHeight defaults to INT32_MAX on every public network.
+    //! Regtest may set a finite height + fMatMulRCCoupledUseToyDims to exercise
+    //! CheckMatMulProofOfWork_RCCoupled / SolveMatMulV4RCCoupled end-to-end.
+    //! When live, GetMatMulEncodingProfile prefers ENC_RC_COUPLED over ENC_RC.
+    ENC_RC_COUPLED = 6,
 };
 
 /**
@@ -500,6 +503,14 @@ struct Params {
      *  tests while production verify always uses the full episode when this is
      *  false and nMatMulRCHeight is live. */
     bool fMatMulRCUseToyDims{false};
+    /** Coupled puzzle (ENC_RC_COUPLED) activation height. DEFAULT = INT32_MAX —
+     *  disabled on every public network. Regtest may set a finite height to
+     *  exercise CheckMatMulProofOfWork_RCCoupled / SolveMatMulV4RCCoupled.
+     *  When live, GetMatMulEncodingProfile prefers ENC_RC_COUPLED over ENC_RC. */
+    int32_t nMatMulRCCoupledHeight{std::numeric_limits<int32_t>::max()};
+    /** REGTEST ONLY — when true, coupled checker/miner use MakeToyRCCoupParams()
+     *  instead of MakeMediumRCCoupParams(). Public nets MUST keep this false. */
+    bool fMatMulRCCoupledUseToyDims{false};
     /** RC tip-verify concurrency (pending full-episode recomputes). Default 1 --
      *  a single ~53T-MAC consensus episode must never share the EncDr/v4/LT
      *  pending counter or allow 16-way parallel recomputes. Cap is expressed in
@@ -875,6 +886,17 @@ struct Params {
             && nMatMulRCHeight != std::numeric_limits<int32_t>::max()
             && height >= nMatMulRCHeight;
     }
+    /** True at and above the coupled-puzzle (ENC_RC_COUPLED) height. Requires
+     *  MatMul v4. Self-guards INT32_MAX. Public nets keep
+     *  nMatMulRCCoupledHeight = INT32_MAX (AssertBMX4CConstructionInvariants).
+     *  Regtest enables via an explicit finite height (optionally with
+     *  fMatMulRCCoupledUseToyDims for CI-scale dims). */
+    bool IsMatMulRCCoupledActive(int32_t height) const
+    {
+        return IsMatMulV4Active(height)
+            && nMatMulRCCoupledHeight != std::numeric_limits<int32_t>::max()
+            && height >= nMatMulRCCoupledHeight;
+    }
     /** True iff the v4.4-LT Q* Phase B SEAL-AS-PoW mode governs this height: the
      *  LT profile is live AND the seal-as-PoW mode toggle is set. Fail-closed on
      *  every public network: IsDRLTActive is false while nMatMulDRLTHeight ==
@@ -919,8 +941,10 @@ struct Params {
      *  (spec §8.2). */
     MatMulEncodingProfile GetMatMulEncodingProfile(int32_t height) const
     {
-        // ENC_RC takes precedence: public nets keep nMatMulRCHeight=INT32_MAX
-        // (clean cutover later). When RC is live it supersedes DRLT/BMX4C.
+        // ENC_RC_COUPLED takes precedence over ENC_RC (structural successor).
+        // Public nets keep both heights at INT32_MAX.
+        if (IsMatMulRCCoupledActive(height)) return MatMulEncodingProfile::ENC_RC_COUPLED;
+        // ENC_RC takes precedence over DRLT/BMX4C when live.
         if (IsMatMulRCActive(height)) return MatMulEncodingProfile::ENC_RC;
         if (IsDRLTActive(height)) return MatMulEncodingProfile::ENC_BMX4C_LT;
         return IsBMX4CActive(height) ? MatMulEncodingProfile::ENC_BMX4C
@@ -938,6 +962,15 @@ struct Params {
      *  fMatMulV4FlatSketchReplay differential-testing switch. */
     MatMulProfileParams GetMatMulProfileParams(int32_t height) const
     {
+        if (IsMatMulRCCoupledActive(height)) {
+            // ENC_RC_COUPLED is digest-only (DIGEST_RECOMPUTE). No Freivalds sketch.
+            return MatMulProfileParams{
+                MatMulEncodingProfile::ENC_RC_COUPLED,
+                MatMulCommitmentScheme::DIGEST_RECOMPUTE,
+                /*tile_b=*/nMatMulLTTranscriptBlockSize,
+                /*sketch_rank_m=*/BMX4C_LT_SKETCH_RANK_M,
+            };
+        }
         if (IsMatMulRCActive(height)) {
             // ENC_RC is digest-only (DIGEST_RECOMPUTE). tile_b / sketch_rank_m
             // are placeholders reused from LT until RC-specific shape knobs land;
