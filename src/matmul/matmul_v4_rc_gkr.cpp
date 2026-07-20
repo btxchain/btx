@@ -1623,12 +1623,14 @@ RCProdVerifyResult VerifyRCWinnerOrExactReplay(const CBlockHeader& header,
             out.note = out.gkr.note;
             return out;
         }
-        if (!header.matmul_digest.IsNull() && parsed->claimed_digest != header.matmul_digest) {
+        if (header.matmul_digest.IsNull() || parsed->claimed_digest != header.matmul_digest) {
             out.replay = VerifyBoundedExactReplay(header, params, height, target);
             out.path = RCProdVerifyPath::GkrFallbackExactReplay;
             out.ok = out.replay.ok;
             out.gkr.ok = false;
-            out.gkr.note = "wrong digest in proof -> ExactReplay fallback";
+            out.gkr.note = header.matmul_digest.IsNull()
+                               ? "null header.matmul_digest -> ExactReplay fallback"
+                               : "wrong digest in proof -> ExactReplay fallback";
             out.note = out.gkr.note;
             return out;
         }
