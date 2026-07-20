@@ -317,14 +317,27 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     }
     // ENC_RC_COUPLED (Stage C coupled puzzle): public nets stay fail-closed at
     // INT32_MAX. Regtest may set a finite height + toy dims for end-to-end CI.
+    // Ordering: when RC is also configured, Coupled must follow RC (>=) so the
+    // profile succession matches ASERT re-anchor order. Public rescale stays 1/1.
     assert(!consensus.fMatMulRCCoupledUseToyDims || is_regtest);
+    assert(consensus.nMatMulRCCoupledAsertRescaleNum > 0);
+    assert(consensus.nMatMulRCCoupledAsertRescaleDen > 0);
     if (!is_regtest) {
         assert(consensus.nMatMulRCCoupledHeight == std::numeric_limits<int32_t>::max());
         assert(!consensus.fMatMulRCCoupledUseToyDims);
+        assert(consensus.nMatMulRCCoupledAsertRescaleNum == 1);
+        assert(consensus.nMatMulRCCoupledAsertRescaleDen == 1);
     }
     if (consensus.nMatMulRCCoupledHeight != std::numeric_limits<int32_t>::max()) {
         assert(consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max());
         assert(consensus.nMatMulRCCoupledHeight >= consensus.nMatMulV4Height);
+        // Coupled supersedes ENC_RC in GetMatMulEncodingProfile. When both are
+        // configured live, coupled must not precede RC (otherwise RC never
+        // surfaces and any RC ASERT rescale at a later height would fire while
+        // the coupled workload is already active). Fail-closed at construction.
+        if (consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max()) {
+            assert(consensus.nMatMulRCCoupledHeight >= consensus.nMatMulRCHeight);
+        }
         assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
     }
     // §R.7 scheduled-scaling tables must be non-zero once filled by constructors.
@@ -1618,6 +1631,32 @@ public:
         if (opts.matmul_drlt_height.has_value()) {
             consensus.nMatMulDRLTHeight = *opts.matmul_drlt_height;
         }
+        // ENC_RC / ENC_RC_COUPLED: regtest-only height + toy-dim overrides so
+        // functional tests can exercise mine → relay → ExactReplay without
+        // raising public-network heights (those stay INT32_MAX). Applied AFTER
+        // DRLT so a lone -regtestrcheight lands on top of the unified
+        // v4/BMX4C/DRLT schedule. Toy dims are REQUIRED for CI-scale mining
+        // (consensus n_ctx is not runnable in functional tests).
+        if (opts.matmul_rc_height.has_value()) {
+            consensus.nMatMulRCHeight = *opts.matmul_rc_height;
+        }
+        if (opts.matmul_rc_coupled_height.has_value()) {
+            consensus.nMatMulRCCoupledHeight = *opts.matmul_rc_coupled_height;
+        }
+        if (opts.matmul_rc_use_toy_dims.has_value()) {
+            consensus.fMatMulRCUseToyDims = *opts.matmul_rc_use_toy_dims;
+        }
+        if (opts.matmul_rc_coupled_use_toy_dims.has_value()) {
+            consensus.fMatMulRCCoupledUseToyDims = *opts.matmul_rc_coupled_use_toy_dims;
+        }
+        // When RC (or coupled) is live on regtest, unthrottle tip-verify budgets
+        // so -regtestrc* functional tests are not paced (mirrors LT above).
+        if (consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max() ||
+            consensus.nMatMulRCCoupledHeight != std::numeric_limits<int32_t>::max()) {
+            consensus.nMatMulRCMaxPendingVerifications = std::numeric_limits<uint32_t>::max();
+            consensus.nMatMulRCGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+            consensus.nMatMulRCPeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+        }
         // v4.4-LT Q* Phase B: explicit regtest override in either direction.
         // Regtest defaults to seal mode, while =0 retains a Phase-A fixture.
         // Enabling remains meaningful only together with a live DRLT height.
@@ -1832,6 +1871,10 @@ public:
             opts.matmul_v4_max_dimension.has_value() ||
             opts.matmul_bmx4c_height.has_value() ||
             opts.matmul_drlt_height.has_value() ||
+            opts.matmul_rc_height.has_value() ||
+            opts.matmul_rc_coupled_height.has_value() ||
+            opts.matmul_rc_use_toy_dims.has_value() ||
+            opts.matmul_rc_coupled_use_toy_dims.has_value() ||
             opts.matmul_lt_seal_as_pow.has_value() ||
             opts.matmul_flat_sketch_replay ||
             opts.shielded_tx_binding_activation_height.has_value() ||

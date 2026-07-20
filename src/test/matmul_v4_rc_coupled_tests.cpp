@@ -186,6 +186,151 @@ BOOST_AUTO_TEST_CASE(rc_coup_admission_priced_per_activation_shape)
 
 
 
+BOOST_AUTO_TEST_CASE(rc_coup_asert_unsafe_ordering_rejected_at_construction)
+{
+    // F2: ValidateMatMulAsertParams (invoked from AssertBMX4CConstructionInvariants)
+    // must fail-closed on Coupled < RC, Coupled below ASERT, or unified Coupled==RC
+    // with a non-inert Coupled rescale (would double-apply / shadow without recalibration).
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nPowTargetSpacing = 90;
+    p.nMatMulAsertHeight = 10;
+    p.nMatMulAsertHalfLife = 14'400;
+    p.nMatMulAsertBootstrapFactor = 1;
+    p.nMatMulV4Height = 20;
+    p.nMatMulBMX4CHeight = 20;
+    p.nMatMulDRLTHeight = 20;
+    p.nMatMulV4AsertRescaleNum = 1;
+    p.nMatMulV4AsertRescaleDen = 1;
+    p.nMatMulBMX4CAsertRescaleNum = 1;
+    p.nMatMulBMX4CAsertRescaleDen = 1;
+    p.nMatMulDRLTAsertRescaleNum = 1;
+    p.nMatMulDRLTAsertRescaleDen = 1;
+    p.nMatMulRCAsertRescaleNum = 1;
+    p.nMatMulRCAsertRescaleDen = 1;
+    p.nMatMulRCCoupledAsertRescaleNum = 1;
+    p.nMatMulRCCoupledAsertRescaleDen = 1;
+
+    // Legal: Coupled follows RC.
+    p.nMatMulRCHeight = 30;
+    p.nMatMulRCCoupledHeight = 40;
+    BOOST_CHECK(ValidateMatMulAsertParams(p, p.nMatMulAsertHeight));
+
+    // Unsafe: Coupled precedes RC.
+    p.nMatMulRCCoupledHeight = 25;
+    BOOST_CHECK(!ValidateMatMulAsertParams(p, p.nMatMulAsertHeight));
+
+    // Unsafe: Coupled below ASERT activation.
+    p.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+    p.nMatMulRCCoupledHeight = 5;
+    BOOST_CHECK(!ValidateMatMulAsertParams(p, p.nMatMulAsertHeight));
+
+    // Unsafe: unified Coupled==RC with non-inert Coupled rescale (RC owns the shift).
+    p.nMatMulRCHeight = 30;
+    p.nMatMulRCCoupledHeight = 30;
+    p.nMatMulRCCoupledAsertRescaleNum = 2;
+    p.nMatMulRCCoupledAsertRescaleDen = 1;
+    BOOST_CHECK(!ValidateMatMulAsertParams(p, p.nMatMulAsertHeight));
+
+    // Legal again: unified with Coupled rescale 1/1.
+    p.nMatMulRCCoupledAsertRescaleNum = 1;
+    p.nMatMulRCCoupledAsertRescaleDen = 1;
+    BOOST_CHECK(ValidateMatMulAsertParams(p, p.nMatMulAsertHeight));
+
+    // Public mainnet heights stay unreachable (guardrail).
+    const auto main = CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
+    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(main.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(main.nMatMulRCCoupledAsertRescaleNum, 1);
+    BOOST_CHECK_EQUAL(main.nMatMulRCCoupledAsertRescaleDen, 1);
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_asert_transition_reanchors_at_coupled_height)
+{
+    // F2: at nMatMulRCCoupledHeight a 1/1 rescale keeps the parent target, then
+    // ASERT re-anchors so mutating a pre-boundary parent does not perturb the
+    // post-boundary target (mirrors asert_bmx4c_rescale_mechanism_applies_at_height).
+    Consensus::Params params =
+        CreateChainParams(ArgsManager{}, ChainType::REGTEST)->GetConsensus();
+    params.fMatMulPOW = true;
+    params.fPowNoRetargeting = false;
+    params.fPowAllowMinDifficultyBlocks = false;
+    params.nPowTargetSpacingFastMs = 90'000;
+    params.nPowTargetSpacingNormal = 90;
+    params.nFastMineDifficultyScale = 1;
+    params.nFastMineHeight = 361;
+    params.nMatMulAsertHeight = 361;
+    params.nMatMulAsertHalfLife = 14'400;
+    params.nMatMulAsertBootstrapFactor = 40;
+    params.nMatMulV4Height = 362;
+    params.nMatMulBMX4CHeight = 362;
+    params.nMatMulDRLTHeight = 362;
+    params.nMatMulV4AsertRescaleNum = 1;
+    params.nMatMulV4AsertRescaleDen = 1;
+    params.nMatMulBMX4CAsertRescaleNum = 1;
+    params.nMatMulBMX4CAsertRescaleDen = 1;
+    params.nMatMulDRLTAsertRescaleNum = 1;
+    params.nMatMulDRLTAsertRescaleDen = 1;
+    params.nMatMulRCHeight = 364;
+    params.nMatMulRCAsertRescaleNum = 1;
+    params.nMatMulRCAsertRescaleDen = 1;
+    params.nMatMulRCCoupledHeight = 366;
+    params.nMatMulRCCoupledAsertRescaleNum = 1;
+    params.nMatMulRCCoupledAsertRescaleDen = 1;
+    params.fMatMulRCUseToyDims = true;
+    params.fMatMulRCCoupledUseToyDims = true;
+    BOOST_REQUIRE(ValidateMatMulAsertParams(params, params.nMatMulAsertHeight));
+
+    std::vector<CBlockIndex> blocks(367);
+    const uint32_t seed_bits = 0x1f00ffffU;
+    const int64_t start_time = 1'700'000'000;
+    const int64_t spacing = 90;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        blocks[i].nHeight = static_cast<int>(i);
+        blocks[i].nBits = seed_bits;
+        blocks[i].nTime = start_time + static_cast<int64_t>(i) * spacing;
+        blocks[i].pprev = (i == 0) ? nullptr : &blocks[i - 1];
+    }
+
+    CBlockHeader activation{};
+    activation.nTime = blocks[360].GetBlockTime() + 1;
+    blocks[361].nHeight = 361;
+    blocks[361].nBits = GetNextWorkRequired(&blocks[360], &activation, params);
+    blocks[361].nTime = activation.nTime;
+    blocks[361].pprev = &blocks[360];
+    for (int h = 362; h <= 365; ++h) {
+        CBlockIndex& prev = blocks[h - 1];
+        CBlockHeader next{};
+        next.nTime = prev.GetBlockTime() + spacing;
+        blocks[h].nHeight = h;
+        blocks[h].nBits = GetNextWorkRequired(&prev, &next, params);
+        blocks[h].nTime = next.nTime;
+        blocks[h].pprev = &prev;
+    }
+
+    CBlockHeader coup_next{};
+    coup_next.nTime = blocks[365].GetBlockTime() + spacing;
+    const uint32_t coup_bits = GetNextWorkRequired(&blocks[365], &coup_next, params);
+    BOOST_CHECK_EQUAL(coup_bits, blocks[365].nBits); // 1/1 continuity
+
+    blocks[366].nHeight = 366;
+    blocks[366].nBits = coup_bits;
+    blocks[366].nTime = coup_next.nTime;
+    blocks[366].pprev = &blocks[365];
+
+    const auto info = GetMatMulAsertHalfLifeInfo(&blocks[366], params);
+    BOOST_CHECK_EQUAL(info.current_anchor_height, 366);
+
+    CBlockHeader after{};
+    after.nTime = blocks[366].GetBlockTime() + spacing;
+    const uint32_t target_367 = GetNextWorkRequired(&blocks[366], &after, params);
+    const uint32_t saved_365 = blocks[365].nBits;
+    blocks[365].nBits = 0x1b0404cbU;
+    const uint32_t target_367_mut = GetNextWorkRequired(&blocks[366], &after, params);
+    blocks[365].nBits = saved_365;
+    BOOST_CHECK_EQUAL(target_367_mut, target_367);
+}
+
 BOOST_AUTO_TEST_CASE(rc_coup_check_pow_regtest_gate)
 {
     Consensus::Params p;
