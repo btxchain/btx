@@ -88,7 +88,23 @@ static_assert(kRCMxBlockLen == 32, "MX block length is fixed at 32");
 static_assert(static_cast<uint64_t>(kRCContextLen) * 2304ull < (uint64_t{1} << 62),
               "2304·n_ctx must fit in signed int64 headroom (< 2^62)");
 
-/** Domain-separation tags (frozen byte strings — R.4). */
+/**
+ * Transcript serialization version (FINAL-FORM A1).
+ * ENC_RC_V1 = current V1 stream layout with kRCSegmentLeavesEnabled=false.
+ * Frozen toy golden: b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a
+ * (MakeToyRCEpisodeParams + MakeRCHeader(42)).
+ *
+ * Silent golden replacement is FORBIDDEN. Bumping this constant is REQUIRED
+ * before any frozen digest may change. A V2 transition must introduce new
+ * domain tags (BTX_RC_*_V2) and KEEP BOTH V1 and V2 goldens in tests / CI
+ * (see contrib/matmul-v4/rc-golden-gate.py).
+ */
+inline constexpr uint32_t kRCTranscriptVersion = 1;
+inline constexpr uint32_t ENC_RC_V1 = 1;
+static_assert(kRCTranscriptVersion == ENC_RC_V1,
+              "kRCTranscriptVersion must equal ENC_RC_V1 while V1 is active");
+
+/** Domain-separation tags (frozen byte strings — R.4). ENC_RC_V1 tags. */
 inline constexpr char kRCRoundTag[] = "BTX_RC_ROUND_V1";
 inline constexpr char kRCEpisodeTag[] = "BTX_RC_EPISODE_V1";
 inline constexpr char kRCPadTag[] = "BTX_RC_PAD";
@@ -111,16 +127,19 @@ struct RCEpisodeParams {
     uint32_t T_leaf{kRCTileLeafBytes};
 };
 
-/** Optional execution knobs that MUST NOT change digests (R.2.2 / R.3.3). */
+/** Optional execution knobs that MUST NOT change digests (R.2.2 / R.3.3).
+ *  Stage B planners (RCExecMode in matmul_v4_rc_transcript.h) map onto these
+ *  via OptionsForExecMode — Resident/Checkpointed/Streamed MUST NOT change
+ *  digests. */
 struct RCEpisodeOptions {
     /** Phase-1 n_ctx tile length. 0 ⇒ whole context. Any positive ΔT is
      *  allowed (§R.2.2): incomplete MX 32-blocks are buffered across tile
      *  windows so Extract boundaries stay on bj = ⌊t/32⌋. */
     uint32_t phase1_tile_delta{0};
     enum class Checkpoint : uint8_t {
-        StoreAll = 0,     // reference default
-        StoreEvery4 = 1,  // recompute missing activations
-        StoreOnlyX0 = 2,  // recompute all forward from X[0]
+        StoreAll = 0,     // reference default / RCExecMode::Resident
+        StoreEvery4 = 1,  // recompute missing activations / Checkpointed
+        StoreOnlyX0 = 2,  // recompute all forward from X[0] / Streamed
     };
     /** Checkpoint schedule for Phase-2 activations. StoreOnlyX0 / StoreEvery4
      *  actually drop non-checkpoint X layers (P1.1) and recompute on demand;

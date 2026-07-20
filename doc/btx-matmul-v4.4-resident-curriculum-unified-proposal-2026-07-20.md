@@ -6,6 +6,10 @@
 
 Branch tip tracks PR #89 (`claude/matmul-v4-design-spec-af23sj`). **Public activation remains NO-GO** (`nMatMulRCHeight = INT32_MAX`).
 
+**Final-form index:** Stages A–I status, activation checklist, and Definition of Done live in
+`doc/btx-matmul-v4.5-enc-rc-final-form-spec-2026-07-20.md` (three-axis Stage F scaffolding inert;
+Stage G silicon-gated; Stage E owner-owned). Do not raise height from this proposal alone.
+
 | Surface | Status |
 |---|---|
 | §R CPU int64 episode oracle (`matmul_v4_rc.*`) | **Landed** — Phase 1–3 + tile-tree + ExtractMX |
@@ -15,8 +19,9 @@ Branch tip tracks PR #89 (`claude/matmul-v4-design-spec-af23sj`). **Public activ
 | P1.2 MX contraction layouts + Phase-2 ExactGemm device wire | **Landed** — `doc/btx-matmul-v4.5-rc-mx-contraction-layouts-p1.2.md` + packed helpers; S·V/bwd/wgrad native MX residual |
 | Merkle spot-check + Fiat–Shamir q=8 | **Landed** — R1 reject still requires full CPU recompute |
 | P2.1 validation model (shrink vs fraud-proof) | **Evidence** — `doc/btx-matmul-v4.5-rc-validation-model-p2.1.md` (owner decides; segments/growth stay PARKED) |
+| FINAL-FORM Stages F/H/I + master spec | **Landed (inert)** — `doc/btx-matmul-v4.5-enc-rc-final-form-spec-2026-07-20.md`; `matmul_v4_rc_scale_axes.*` (`kRCThreeAxisScheduleEnabled=false`); Stage H test scaffolds |
 | `matmul-v4-rc-harness` + `rc-gate.py` | **Landed** — real CPU timings; toy → PARTIAL (never raise-height) |
-| Unit tests `matmul_v4_rc_tests` | **green** on CPU CI builds (incl. P1.2 layout + device-probe skip) |
+| Unit tests `matmul_v4_rc_tests` | **green** on CPU CI builds (incl. P1.2 layout + device-probe skip + Stage H scaffolds) |
 | Silicon G2 residency / G3 k≥1.3 @ 24GB / G4 consensus dims | **Open** — measurement-gated before any height |
 
 This document synthesizes a full multi-agent design cycle (six hardware-economics research passes, a grounding critique, a five-design synthesis, and a five-part build fleet) into one next-generation proof-of-work for BTX. It supersedes the framing of the earlier `btx-matmul-v4.4-hardware-economics-inversion-2026-07-20.md` study by carrying its grounded conclusions forward into a concrete, buildable design.
@@ -237,6 +242,8 @@ At epoch 0 (`height == nMatMulRCHeight`) the dials equal the §R.0 base footprin
 2. Start from `(W_res, W_cap) = (W₀_res, W₀_cap)`; for each prior epoch `e`, multiply by the table entry **iff** the brake allows the step, then clamp to absolute hard caps (`nRCScaleHardCapResBytes` / `nRCScaleHardCapCapBytes`).
 3. **Ratchet:** `W` is non-decreasing — a skipped (braked) step leaves the dials unchanged; dials never shrink.
 4. **One-sided brake (pause-only):** compare smoothed chainwork-per-block over the closing epoch (`D_now`) to the trailing ~1 yr max (`D_ref`). Allow the step iff `D_now ≥ (1 − δ)·D_ref` with `δ = nRCBrakeDeltaPct` (PROVISIONAL default 20%). Growth can **only be paused**, never accelerated and never reversed. A miner cannot force growth (schedule is a hard cap) and can only pause it by withholding >δ of global hashrate for a full epoch — huge cost, pause-only payoff that *helps* small machines. No committee, no oracle, no miner-reported telemetry.
+
+**OMITTED (FINAL-FORM Stage F6 / A3):** the chainwork brake is **not** active in code. `BrakeAllowsStep` always returns true; `ConsensusRCEpisodeParamsForHeight(..., CBlockIndex*)` ignores `pprev`. Growth is already parked via `kRCGrowthScheduleEnabled=false`. Reintroduce the brake only with full `CBlockIndex` threading + reorg-safe epoch-boundary caching — never half-wire.
 
 PROVISIONAL schedule knobs (inert while `nMatMulRCHeight==INT32_MAX`): epoch length ≈90 d at 144 blk/day (`nRCScaleEpochBlocks=12960`); decaying geometric starting ~`g_res≈1.40/yr`, `g_cap≈1.25/yr`, stepping down ~0.02 every 12 epochs (~3 yr); hard caps 4 GiB KV / 16 GiB activations; table length 40 (~10 yr of quarterly epochs).
 

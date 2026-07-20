@@ -437,7 +437,12 @@ def measured_verifier_floor_ok(rep: dict[str, Any], reasons: list[str]) -> bool:
 
 
 def g2_threshold_pass(rep: dict[str, Any], reasons: list[str], *, for_go: bool) -> str:
-    """G2 residency: cliff ≥1.5× in 96–256 MB; optional STREAM util ≥40%."""
+    """G2 residency: cliff ≥1.5× in 96–256 MB; optional STREAM util ≥40%.
+
+    Stage G / final-form: a nonempty report must never receive status ``pass``
+    without actually applying these numeric thresholds. Empty/null sweeps fail
+    closed; toy/partial paths may use ``toy-pass`` / ``partial`` only.
+    """
     fname = rep["_file"]
     sweep = rep.get("residency_sweep")
     if sweep in (None, {}, []):
@@ -446,8 +451,6 @@ def g2_threshold_pass(rep: dict[str, Any], reasons: list[str], *, for_go: bool) 
             "(Phase-1 Associative Recall Maze not measured)"
         )
         return "fail"
-    if not for_go:
-        return "toy-pass" if rep.get("toy") else "partial"
 
     points: list[dict[str, Any]] = []
     if isinstance(sweep, list):
@@ -483,6 +486,14 @@ def g2_threshold_pass(rep: dict[str, Any], reasons: list[str], *, for_go: bool) 
         walls_sorted = sorted(w for _, w in in_band)
         if walls_sorted[0] > 0:
             cliff = walls_sorted[-1] / walls_sorted[0]
+
+    # Non-GO paths: nonempty sweep alone is never "pass" — only toy-pass/partial
+    # after a soft presence check (numeric pass reserved for for_go).
+    if not for_go:
+        if cliff is None and not in_band and not points:
+            reasons.append(f"{fname}: G2 residency_sweep nonempty but no numeric points")
+            return "fail"
+        return "toy-pass" if rep.get("toy") else "partial"
 
     if cliff is None or cliff < G2_CLIFF_MIN:
         reasons.append(
@@ -735,6 +746,33 @@ def gate_report(rep: dict[str, Any]) -> dict[str, Any]:
     if projection_taint:
         full_pass = False
 
+    # Stage G / final-form: nonempty reports never count as PASS without
+    # numeric §8 thresholds actually applied (G2 cliff, G3 k@24GB, G4 walls).
+    if full_pass and not evaluate_go_thresholds:
+        full_pass = False
+        reasons.append(
+            f"{fname}: HARD-FAIL — nonempty report cannot PASS without "
+            "numeric G2/G3/G4 threshold evaluation"
+        )
+    if g2 == "pass" and not evaluate_go_thresholds:
+        g2 = "fail"
+        reasons.append(
+            f"{fname}: G2 status demoted — 'pass' requires numeric thresholds"
+        )
+        full_pass = False
+    if g3 == "pass" and not evaluate_go_thresholds:
+        g3 = "fail"
+        reasons.append(
+            f"{fname}: G3 status demoted — 'pass' requires numeric thresholds"
+        )
+        full_pass = False
+    if g4 == "pass" and not evaluate_go_thresholds:
+        g4 = "fail"
+        reasons.append(
+            f"{fname}: G4 status demoted — 'pass' requires numeric thresholds"
+        )
+        full_pass = False
+
     toy_partial = (
         g1 == "pass"
         and g2 == "toy-pass"
@@ -893,6 +931,9 @@ DECISION_MATRIX = {
     "non_toy_missing_tip_residency_variance_native_or_measured_verifier_floor": "NO-GO",
     "production_dims_measured_g1g4_thresholds_met": (
         "GO offline tally only; nMatMulRCHeight stays INT32_MAX"
+    ),
+    "nonempty_report_without_numeric_thresholds": (
+        "NO-GO (nonempty reports never PASS without G2/G3/G4 numeric thresholds)"
     ),
 }
 

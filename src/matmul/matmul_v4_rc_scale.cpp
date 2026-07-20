@@ -4,15 +4,12 @@
 
 #include <matmul/matmul_v4_rc_scale.h>
 
-#include <arith_uint256.h>
-#include <chain.h>
 #include <consensus/params.h>
 
-#include <algorithm>
 #include <cassert>
 #include <cstdint>
-#include <limits>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 namespace matmul::v4::rc {
@@ -110,31 +107,80 @@ RCScale ComputeScaleForEpoch(int32_t epoch, const Consensus::Params& p, const RC
     return s;
 }
 
-/** Estimate Phase-3 hash work vs MAC work: f3 ≈ (leaves * kHashPerLeaf) / MACs. */
-bool CheckF3Bound(const RCEpisodeParams& p, std::string* reason)
+/**
+ * Committed round-stream byte count for one episode (all rounds).
+ * Layout matches RunEpisode / RoundMerkleStream (R.4.1):
+ *   per round: Z_int8 ‖ Σ_layer (X ‖ G ‖ D_int8)
+ * plus, only when kRCSegmentLeavesEnabled, the LE int64 Z/D segment partials.
+ * STOP-AND-STABILIZE parks segment leaves OFF — this estimate respects that.
+ */
+uint64_t EstimateRCTranscriptStreamBytes(const RCEpisodeParams& p)
 {
-    // Round stream (R.4.1): Z || per-layer (X[l+1] || G[l] || D[l]).
     const uint64_t z_bytes = static_cast<uint64_t>(p.n_q) * p.d_head;
     const uint64_t x_bytes = static_cast<uint64_t>(p.b_seq) * p.d_model;
     const uint64_t g_bytes = static_cast<uint64_t>(p.b_seq) * p.d_model;
     const uint64_t d_bytes = static_cast<uint64_t>(p.d_model) * p.d_model;
-    const uint64_t stream_per_round =
+    uint64_t per_round =
         z_bytes + static_cast<uint64_t>(p.L_lyr) * (x_bytes + g_bytes + d_bytes);
-    const uint64_t stream_bytes = static_cast<uint64_t>(p.rounds) * stream_per_round;
-    const uint32_t t_leaf = p.T_leaf == 0 ? 1u : p.T_leaf;
-    const uint64_t leaf_count = (stream_bytes + t_leaf - 1) / t_leaf;
 
-    // Cheap SHA256d-per-leaf proxy in "MAC equivalents" (order-of-magnitude).
-    constexpr uint64_t kHashWorkPerLeaf = 256;
-    const uint64_t hash_work = leaf_count * kHashWorkPerLeaf;
+    if constexpr (kRCSegmentLeavesEnabled) {
+        const uint64_t z_seg_bytes =
+            static_cast<uint64_t>(RCNumSegs(p.n_ctx)) * RCSegZBytes(p);
+        const uint64_t d_seg_bytes =
+            static_cast<uint64_t>(RCNumSegs(p.b_seq)) * RCSegDBytes(p) *
+            static_cast<uint64_t>(p.L_lyr);
+        per_round += z_seg_bytes + d_seg_bytes;
+    }
+
+    return static_cast<uint64_t>(p.rounds) * per_round;
+}
+
+/**
+ * Epoch assert f3 ≤ 5% (R.7.5 / B5).
+ *
+ * Uses the ACTUAL serialized transcript byte estimate (leaf_count × T_leaf),
+ * including the parked-off segment-leaf policy above. Then forms an estimated
+ * hash wall-share from that leaf count and TotalRCEpisodeMacs.
+ *
+ * This is NOT measured wall time. Do not treat the relative-cost constant as a
+ * "MAC equivalent" and do not claim the ratio is a wall-clock measurement —
+ * real phase3_s / (phase1+phase2+phase3) comes from matmul-v4-rc-harness /
+ * phase-split evidence. This gate is only a structural sanity check so growth
+ * cannot mint an episode whose Merkle transcript dominates MAC work.
+ */
+bool CheckF3Bound(const RCEpisodeParams& p, std::string* reason)
+{
+    const uint64_t stream_bytes = EstimateRCTranscriptStreamBytes(p);
+    const uint32_t t_leaf = p.T_leaf == 0 ? 1u : p.T_leaf;
+    const uint64_t leaf_count =
+        stream_bytes == 0 ? 0 : (stream_bytes + t_leaf - 1) / t_leaf;
+    // Padded Merkle budget: every leaf commits T_leaf bytes (partial final leaf
+    // is zero-padded). This is the serialized transcript byte estimate.
+    const uint64_t transcript_bytes = leaf_count * static_cast<uint64_t>(t_leaf);
+
     const uint64_t macs = TotalRCEpisodeMacs(p);
     if (macs == 0) {
         if (reason) *reason = "TotalRCEpisodeMacs==0";
         return false;
     }
-    // f3 > 5% ⇔ 100 * hash_work > 5 * macs ⇔ 20 * hash_work > macs
-    if (hash_work > macs / 20) {
-        if (reason) *reason = "f3 hash/MAC ratio exceeds 5%";
+
+    // Relative cost units for one SHA256d leaf hash vs one int8 MAC on the
+    // reference miner class. ESTIMATE only — not silicon rates, not wall ns,
+    // not "MAC equivalents" pretending to be time.
+    constexpr uint64_t kHashRelativeCostPerLeaf = 256;
+    const uint64_t hash_cost = leaf_count * kHashRelativeCostPerLeaf;
+    // Estimated share = hash_cost / (hash_cost + macs). Fail if share > 5%:
+    //   hash_cost / (hash_cost + macs) > 1/20
+    // ⇔ 20 * hash_cost > hash_cost + macs
+    // ⇔ 19 * hash_cost > macs
+    // (equivalent check used below avoids overflow on hash_cost + macs).
+    if (hash_cost > macs / 19) {
+        if (reason) {
+            *reason = "estimated f3 hash wall-share exceeds 5% (transcript_bytes=" +
+                      std::to_string(transcript_bytes) + ", leaves=" +
+                      std::to_string(leaf_count) + ", macs=" + std::to_string(macs) +
+                      "; not measured wall time)";
+        }
         return false;
     }
     return true;
@@ -267,88 +313,25 @@ RCEpisodeParams ConsensusRCEpisodeParamsForHeight(int32_t height, const Consensu
     return ok;
 }
 
-namespace {
-
-/** Mean GetBlockProof over [h_lo, h_hi] inclusive, walking tip→ancestors.
- *  Returns 0 if the window is empty or tip does not cover it. */
-arith_uint256 MeanWorkInHeightRange(const CBlockIndex* tip, int32_t h_lo, int32_t h_hi)
-{
-    if (tip == nullptr || h_hi < h_lo) return arith_uint256{0};
-    if (tip->nHeight < h_hi) return arith_uint256{0};
-
-    const CBlockIndex* end = tip->GetAncestor(h_hi);
-    if (end == nullptr) return arith_uint256{0};
-
-    arith_uint256 sum{0};
-    uint64_t count = 0;
-    for (const CBlockIndex* p = end; p != nullptr && p->nHeight >= h_lo; p = p->pprev) {
-        sum += GetBlockProof(*p);
-        ++count;
-        if (p->nHeight == h_lo) break;
-    }
-    if (count == 0) return arith_uint256{0};
-    return sum / count;
-}
-
-/** Trailing ~1 year of blocks at 144 blk/day (90s spacing). */
-constexpr int32_t kRCBrakeTrailBlocks = 365 * 144; // 52560
-
-} // namespace
-
 bool BrakeAllowsStep(int32_t epoch_index, const Consensus::Params& p, const CBlockIndex* tip)
 {
-    // Step-1 / unit tests: no chain → never pause.
-    if (tip == nullptr) return true;
-    if (p.nRCScaleEpochBlocks <= 0) return true;
-    if (p.nMatMulRCHeight == std::numeric_limits<int32_t>::max()) return true;
-    if (!p.IsMatMulRCActive(tip->nHeight)) return true;
-    if (epoch_index < 0) return true;
-
-    const int32_t E = p.nRCScaleEpochBlocks;
-    // Closing window for step e: heights [H0 + e*E, H0 + (e+1)*E - 1].
-    const int32_t h_lo = p.nMatMulRCHeight + epoch_index * E;
-    const int32_t h_hi = h_lo + E - 1;
-    if (tip->nHeight < h_hi) {
-        // Incomplete closing window — do not pause (insufficient signal).
-        return true;
-    }
-
-    const arith_uint256 D_now = MeanWorkInHeightRange(tip, h_lo, h_hi);
-    if (D_now == 0) return true;
-
-    // Trailing ~1yr of completed epoch means ending at epoch_index.
-    const int32_t trail_epochs =
-        std::max(1, (kRCBrakeTrailBlocks + E - 1) / E);
-    arith_uint256 D_ref{0};
-    for (int32_t k = 0; k < trail_epochs; ++k) {
-        const int32_t e = epoch_index - k;
-        if (e < 0) break;
-        const int32_t lo = p.nMatMulRCHeight + e * E;
-        const int32_t hi = lo + E - 1;
-        const arith_uint256 D = MeanWorkInHeightRange(tip, lo, hi);
-        if (D > D_ref) D_ref = D;
-    }
-    if (D_ref == 0) return true;
-
-    // Allow growth iff D_now >= (1 - δ/100) * D_ref.
-    int32_t delta = p.nRCBrakeDeltaPct;
-    if (delta < 0) delta = 0;
-    if (delta > 100) delta = 100;
-    // threshold = D_ref * (100 - delta) / 100
-    const arith_uint256 threshold = (D_ref * (100 - static_cast<uint32_t>(delta))) / 100;
-    return D_now >= threshold;
+    // FINAL-FORM A3 / Stage F6: chainwork brake is OMITTED.
+    // Growth is already parked via kRCGrowthScheduleEnabled=false. Never
+    // half-wire CBlockIndex into one path only — always allow (no pause).
+    // Prior mean-GetBlockProof implementation lived here; reintroduce only with
+    // full CBlockIndex threading + reorg-safe epoch-boundary cache (F6).
+    (void)epoch_index;
+    (void)p;
+    (void)tip;
+    return true;
 }
 
 RCEpisodeParams ConsensusRCEpisodeParamsForHeight(int32_t height, const Consensus::Params& p,
                                                   const CBlockIndex* pprev)
 {
-    RCBrakeFn brake;
-    if (pprev != nullptr) {
-        brake = [&p, pprev](int32_t epoch_index) -> bool {
-            return BrakeAllowsStep(epoch_index, p, pprev);
-        };
-    }
-    return ConsensusRCEpisodeParamsForHeight(height, p, brake);
+    // A3 / F6: do not wire the OMITTED chainwork brake through pprev.
+    (void)pprev;
+    return ConsensusRCEpisodeParamsForHeight(height, p, RCBrakeFn{});
 }
 
 } // namespace matmul::v4::rc

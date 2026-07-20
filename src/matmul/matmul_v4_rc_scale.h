@@ -49,11 +49,10 @@ using RCBrakeFn = std::function<bool(int32_t epoch_index)>;
                                        const RCBrakeFn& brake = {});
 
 /**
- * §2a one-sided brake (pause-only — never accelerates or shrinks).
- * tip==nullptr OR RC inactive at tip → true (no pause) for Step-1 tests.
- * With tip: D_now = mean GetBlockProof over epoch e's closing window;
- * D_ref = max trailing ~1yr of per-epoch means; allow iff
- * D_now >= (1 - nRCBrakeDeltaPct/100) * D_ref. Pure: same tip → same bool.
+ * Chainwork brake — OMITTED (FINAL-FORM A3 / Stage F6).
+ * Always returns true (never pauses). Growth already parked via
+ * kRCGrowthScheduleEnabled=false. Do not half-wire CBlockIndex; reintroduce
+ * only with full tip threading + reorg-safe epoch-boundary cache.
  */
 [[nodiscard]] bool BrakeAllowsStep(int32_t epoch_index, const Consensus::Params& p,
                                    const CBlockIndex* tip /* may be nullptr */);
@@ -73,7 +72,7 @@ using RCBrakeFn = std::function<bool(int32_t epoch_index)>;
 [[nodiscard]] RCEpisodeParams ConsensusRCEpisodeParamsForHeight(
     int32_t height, const Consensus::Params& p, const RCBrakeFn& brake = {});
 
-/** Height→params with §2a brake wired from chain tip (pprev may be nullptr → no pause). */
+/** Height→params. pprev is ignored — chainwork brake OMITTED (A3 / F6). */
 [[nodiscard]] RCEpisodeParams ConsensusRCEpisodeParamsForHeight(
     int32_t height, const Consensus::Params& p, const CBlockIndex* pprev);
 

@@ -120,6 +120,9 @@ enum class MatMulEncodingProfile : uint8_t {
     ENC_BMX4C_LT = 4,
     //! Resident Curriculum (3-phase episode). STAGED: nMatMulRCHeight defaults
     //! to INT32_MAX on every public network (clean cutover later).
+    //! FINAL-FORM Stage C coupled puzzle (matmul_v4_rc_coupled.*) is the
+    //! structural successor workload — toy CPU oracle only today; NOT selected
+    //! by GetMatMulEncodingProfile at any height (no new enum value yet).
     ENC_RC = 5,
 };
 

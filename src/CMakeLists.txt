@@ -369,9 +369,14 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_lt.cpp
   matmul/matmul_v4_lt_mx_exact.cpp
   matmul/matmul_v4_rc.cpp
+  matmul/matmul_v4_rc_coupled.cpp
+  matmul/matmul_v4_rc_distributed.cpp
+  matmul/matmul_v4_rc_transcript.cpp
   matmul/matmul_v4_rc_mx_layout.cpp
   matmul/matmul_v4_rc_scale.cpp
+  matmul/matmul_v4_rc_scale_axes.cpp
   matmul/matmul_v4_rc_selfqual.cpp
+  matmul/matmul_v4_rc_verify_bakeoff.cpp
   matmul/matmul_sketch_cache.cpp
   matmul/matmul_v4_exact_float.cpp
   matmul/matmul_v4_fast_exact.cpp
@@ -1331,6 +1336,23 @@ if(BUILD_UTIL)
     )
   endif()
   install_binary_component(matmul-v4-rc-harness)
+
+  # ENC_RC Stage E verification bake-off (toy prototypes only; not consensus).
+  add_executable(matmul-v4-rc-verify-bakeoff matmul-v4-rc-verify-bakeoff.cpp)
+  target_include_directories(matmul-v4-rc-verify-bakeoff PRIVATE
+    $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
+  )
+  target_link_libraries(matmul-v4-rc-verify-bakeoff
+    core_interface
+  )
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(matmul-v4-rc-verify-bakeoff ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(matmul-v4-rc-verify-bakeoff
+      bitcoin_shielded
+    )
+  endif()
+  install_binary_component(matmul-v4-rc-verify-bakeoff)
 
   add_executable(btx-genesis btx-genesis.cpp)
   target_link_libraries(btx-genesis
