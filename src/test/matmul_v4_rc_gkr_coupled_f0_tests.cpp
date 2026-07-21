@@ -115,8 +115,8 @@ rc::RCGkrCoupledProofV7 FabricateProof(const CBlockHeader& header, const rc::RCC
     p.bank_root = FillDigest(0xB1);            // arbitrary
     p.barrier_roots.assign(params.barriers, FillDigest(0xC2)); // correct COUNT, fake values
     p.lobes.assign(rc::RCGkrCoupledExpectedLobeCount(params), rc::RCGkrCoupledLobeClaimV7{});
-    p.perm_evals.assign(params.barriers, Fp2::Zero());
-    p.mix_evals.assign(params.barriers, Fp2::Zero());
+    p.perm_evals.assign(params.barriers, rc::Fp2::Zero());
+    p.mix_evals.assign(params.barriers, rc::Fp2::Zero());
     // batch / eval / transcript left default (fake). We do not expect to reach
     // them — the reference-digest wall stops the forgery long before.
     p.transcript_hash = FillDigest(0xD3);
