@@ -21,13 +21,14 @@
 
 include_guard(GLOBAL)
 
-# Keep as one cache string. Prefer SHELL: when attaching via
-# target_compile_options / COMPILE_OPTIONS so commas are not list-split.
 set(BTX_CUDA_SM120A_GENCODE_FLAG "-gencode=arch=compute_120a,code=sm_120a"
     CACHE INTERNAL "NVCC gencode for feature-qualified sm_120a MXFP4 MMA")
+# Comma-safe compile option for target_compile_options / SOURCE COMPILE_OPTIONS.
+# Do NOT use a bare SHELL: string on SOURCE properties — CMake may pass it
+# literally to nvcc ("A single input file is required...").
 set(BTX_CUDA_SM120A_GENCODE_COMPILE_OPTION
-    "SHELL:-gencode=arch=compute_120a,code=sm_120a"
-    CACHE INTERNAL "Compile-option form of sm_120a gencode (comma-safe)")
+    "$<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_120a$<COMMA>code=sm_120a>"
+    CACHE INTERNAL "Compile-option genex for sm_120a gencode (comma-safe)")
 
 set(BTX_CUDA_SM120A_NATIVE_TU "cuda/matmul_v4_rc_mx_ozaki_native_sm120a.cu"
     CACHE INTERNAL "Dedicated sm_120a native MXFP4 TU (Agent A)")
@@ -133,7 +134,7 @@ function(btx_cuda_add_sm120a_mxfp4_native_object PARENT_TARGET)
     POSITION_INDEPENDENT_CODE ON
   )
   target_compile_options(btx_cuda_sm120a_mxfp4 PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:${BTX_CUDA_SM120A_GENCODE_COMPILE_OPTION}>
+    ${BTX_CUDA_SM120A_GENCODE_COMPILE_OPTION}
   )
   target_compile_definitions(btx_cuda_sm120a_mxfp4 PRIVATE
     BTX_CUDA_SM120_MXFP4_NATIVE=1
