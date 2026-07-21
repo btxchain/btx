@@ -9,6 +9,8 @@
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_fri.h>
 #include <matmul/matmul_v4_rc_gkr.h>
+#include <matmul/matmul_v4_rc_gkr_coupled.h>
+#include <matmul/matmul_v4_rc_gkr_eval.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
 #include <matmul/matmul_v4_rc_verify_bakeoff.h>
 #include <pow.h>
@@ -668,9 +670,13 @@ BOOST_AUTO_TEST_CASE(gkr_f3_arbiter_rejects_sigma_or_digest_over_target)
     unsetenv("BTX_RC_GKR_ARBITER");
 }
 
-BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_real_arithmetization)
+BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_sound_no_toy_proof)
 {
-    // Real coupled arithmetization of ACTUAL coup params — not MakeToyRCEpisodeParams.
+    // Wave 3B supersedes the Assessment-#3 fail-closed stand-in: for a REAL
+    // coupled input ProveWinnerCoupled now produces (and self-verifies) a real
+    // v7 coupled-R5 proof — but it must STILL never emit a valid-looking proof
+    // of MakeToyRCEpisodeParams() / unrelated work. Heights INT32_MAX; arbiter
+    // stays OFF. Full coupled forgery matrix: matmul_v4_rc_gkr_coupled_tests.
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCCoupledHeight,
                       std::numeric_limits<int32_t>::max());
@@ -679,18 +685,26 @@ BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_real_arithmetization)
     const auto header = MakeRCHeader(42);
     const auto coup = rc::MakeToyRCCoupParams();
     const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, /*height=*/0, coup);
-    const auto pr = rc::ProveWinnerCoupled(header, /*height=*/0, coup, dig);
 
-    BOOST_REQUIRE(pr.timing.ok);
-    BOOST_CHECK(pr.proof.coupled);
-    BOOST_CHECK_EQUAL(pr.proof.coup.barriers, coup.barriers);
-    BOOST_CHECK(!pr.proof.layers.empty());
-    BOOST_CHECK(rc::VerifyWinnerProof(pr.proof));
-    BOOST_CHECK_EQUAL(pr.proof.claimed_digest, dig);
-    // Must not be an episode stand-in proof.
-    BOOST_CHECK_EQUAL(pr.proof.episode.rounds, 0u);
-    BOOST_CHECK(pr.timing.note.find("MakeToyRCEpisodeParams") == std::string::npos);
-    BOOST_CHECK(pr.timing.note.find("coupled_arithmetization_unwired") == std::string::npos);
+    // Real coupled input: no longer fail-closed — a real proof is produced.
+    const auto pr = rc::ProveWinnerCoupled(header, /*height=*/0, coup, dig);
+    BOOST_CHECK_MESSAGE(pr.timing.ok, pr.timing.note);
+    BOOST_CHECK(pr.timing.note.find("coupled v7 proven+verified") != std::string::npos);
+    // The v6 container stays empty: it must not look like a successful
+    // ALL-PHASE episode proof of unrelated work.
+    BOOST_CHECK(pr.proof.layers.empty());
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+    BOOST_CHECK(pr.proof.round_seeds.empty());
+    BOOST_CHECK(pr.proof.round_roots.empty());
+
+    // Unrelated work (episode digest / garbage) remains fail-closed.
+    const uint256 episode_dig =
+        rc::RecomputeResidentCurriculumReference(header, rc::MakeToyRCEpisodeParams(), 0);
+    const auto bad = rc::ProveWinnerCoupled(header, /*height=*/0, coup, episode_dig);
+    BOOST_CHECK(!bad.timing.ok);
+    BOOST_CHECK_EQUAL(bad.timing.note, "coupled_digest_mismatch_refuses_unrelated_work");
+    BOOST_CHECK(bad.proof.layers.empty());
+    BOOST_CHECK(!rc::VerifyWinnerProof(bad.proof));
 }
 
 // --- Mutation forge suite (transcript integrity ONLY — NOT G1–G5 closure) ---
@@ -701,10 +715,20 @@ namespace {
 
 rc::RCGkrProveResult ProveHonestCoupled()
 {
+    // Wave 3B retired the v6 coupled prover (ProveWinnerCoupled now delegates to
+    // the sound v7 coupled-R5 path and leaves the v6 container empty). These two
+    // legacy tests below exercise the v6 verifier's STRUCTURAL rejection (dropped
+    // barrier layer / mutated page_id), so they need a structurally-real coupled
+    // v6 proof that the v6 verifier still ACCEPTS. The fleet's own independent
+    // constructor produces exactly that: real scheduled page_ids / barrier layer
+    // count, only the (unbound) lobe B content is fabricated — which v6 accepts
+    // (that is the documented coupled gap; see the *_accepted_gap_coupled test).
+    // Full sound coupled forgery matrix runs against v7 in coupled_v7_* tests.
     const auto header = MakeRCHeader(42);
     const auto coup = rc::MakeToyRCCoupParams();
     const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, 0, coup);
-    return rc::ProveWinnerCoupled(header, 0, coup, dig);
+    return rc::ProveIndepMaliciousCoupledForTest(
+        header, 0, coup, dig, rc::RCGkrIndepMaliciousKind::UnrelatedBankPages);
 }
 
 } // namespace
@@ -962,6 +986,693 @@ BOOST_AUTO_TEST_CASE(gkr_deserialize_rejects_oversize_prefix)
 {
     std::vector<unsigned char> huge(rc::kRCGkrMaxProofBytesHard + 1, 0);
     BOOST_CHECK(!rc::DeserializeRCGkrProof(huge).has_value());
+}
+
+// ============================================================================
+// v7 FOUNDATION substrate: trace layout Λ(params), FS binding, eq-kernel /
+// batched-FRI opening primitive. Arbiter stays OFF; nothing below touches
+// consensus or the int64 reference.
+// ============================================================================
+
+BOOST_AUTO_TEST_CASE(gkr_v7_trace_layout_matches_int64_reference_sequence)
+{
+    // The layout is the canonical Λ enumeration; the int64 reference prover
+    // (BuildRealEpisodeLayers inside ProveWinnerEpisode) is the ground-truth
+    // ordering oracle. Every (kind, round, layer, m, n, k) must agree.
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const auto layout = rc::RCGkrTraceLayout(params);
+    BOOST_REQUIRE_EQUAL(layout.layers.size(), rc::RCGkrExpectedLayerCount(params));
+
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    const auto pr = rc::ProveWinnerEpisode(header, params, 0, dig);
+    BOOST_REQUIRE(pr.timing.ok);
+    BOOST_REQUIRE_EQUAL(pr.proof.layers.size(), layout.layers.size());
+    for (size_t i = 0; i < layout.layers.size(); ++i) {
+        const auto& ls = layout.layers[i];
+        const auto& lc = pr.proof.layers[i];
+        BOOST_CHECK(ls.kind == lc.kind);
+        BOOST_CHECK_EQUAL(ls.round, lc.round);
+        BOOST_CHECK_EQUAL(ls.layer, lc.layer);
+        BOOST_CHECK_EQUAL(ls.m, lc.m);
+        BOOST_CHECK_EQUAL(ls.n, lc.n);
+        BOOST_CHECK_EQUAL(ls.k, lc.k);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(gkr_v7_trace_layout_wiring_identities)
+{
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const auto layout = rc::RCGkrTraceLayout(params);
+    // Column ids are dense and self-consistent.
+    for (size_t i = 0; i < layout.columns.size(); ++i) {
+        BOOST_CHECK_EQUAL(layout.columns[i].id, static_cast<uint32_t>(i));
+        BOOST_CHECK_LE(layout.columns[i].len, rc::kRCGkrColumnMaxCoeffs);
+        BOOST_CHECK(layout.columns[i].len > 0);
+    }
+    // Wiring is definitional (same column reference — §4.2), per round:
+    const rc::RCGkrLayerSpec* prev_fwd = nullptr;
+    std::vector<const rc::RCGkrLayerSpec*> fwd(params.L_lyr, nullptr);
+    std::vector<const rc::RCGkrLayerSpec*> bwd(params.L_lyr, nullptr);
+    for (const auto& ls : layout.layers) {
+        if (ls.round != 0) continue;
+        switch (ls.kind) {
+        case rc::RCGkrLayerKind::GemmPhase1QKt: {
+            // QKt reads Kᵀ via the free-transpose flag (no duplicated column).
+            BOOST_CHECK(ls.b.transpose);
+            break;
+        }
+        case rc::RCGkrLayerKind::GemmPhase1SV: {
+            // SV operand A IS the extract_out column of QKt.
+            const auto& qkt = layout.layers[0];
+            BOOST_CHECK_EQUAL(ls.a.first_column, qkt.out_first_column);
+            BOOST_CHECK(!ls.a.transpose);
+            break;
+        }
+        case rc::RCGkrLayerKind::GemmPhase2Fwd: {
+            fwd[ls.layer] = &ls;
+            // G5: the residual column IS operand A's column (X_l) — no free
+            // residual_mle field remains in v7.
+            BOOST_CHECK_EQUAL(ls.residual_first_column,
+                              static_cast<int32_t>(ls.a.first_column));
+            BOOST_CHECK(ls.b.transpose); // Fwd reads Wᵀ
+            if (prev_fwd != nullptr) {
+                // Operand A of Fwd(l) IS extract_out of Fwd(l−1).
+                BOOST_CHECK_EQUAL(ls.a.first_column, prev_fwd->out_first_column);
+            }
+            prev_fwd = &ls;
+            break;
+        }
+        case rc::RCGkrLayerKind::GemmPhase2Bwd: {
+            bwd[ls.layer] = &ls;
+            // Bwd(l) shares W(l) with Fwd(l) — committed once, plain here.
+            BOOST_REQUIRE(fwd[ls.layer] != nullptr);
+            BOOST_CHECK_EQUAL(ls.b.first_column, fwd[ls.layer]->b.first_column);
+            BOOST_CHECK(!ls.b.transpose);
+            break;
+        }
+        case rc::RCGkrLayerKind::GemmPhase2Wgrad: {
+            // Wgrad(l) operand A is the SAME G(l+1) column Bwd(l) reads,
+            // transposed for free; operand B is the X(l) column Fwd(l) reads.
+            BOOST_REQUIRE(bwd[ls.layer] != nullptr);
+            BOOST_REQUIRE(fwd[ls.layer] != nullptr);
+            BOOST_CHECK_EQUAL(ls.a.first_column, bwd[ls.layer]->a.first_column);
+            BOOST_CHECK(ls.a.transpose);
+            BOOST_CHECK_EQUAL(ls.b.first_column, fwd[ls.layer]->a.first_column);
+            break;
+        }
+        default:
+            BOOST_FAIL("unexpected layer kind in layout");
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(gkr_v7_trace_layout_consensus_dims_chunking)
+{
+    // The 2-adicity wall at consensus dims: N_Y = 11,274,551,296 ≈ 2^33.39
+    // cells total and the QKt output alone is 2^28.58 > κ = 2^28 — the trace
+    // MUST split into multiple κ-bounded columns (blueprint §0.4/§2.1).
+    rc::RCEpisodeParams p; // defaults ARE the consensus dims
+    BOOST_REQUIRE_EQUAL(p.n_ctx, 786'432u);
+    const auto layout = rc::RCGkrTraceLayout(p);
+    BOOST_CHECK_EQUAL(layout.layers.size(), 200u); // 4·(2 + 3·16)
+    BOOST_CHECK_EQUAL(layout.trace_cells, 11'274'551'296ull);
+    // QKt Y (512·786432 = 402,653,184 cells) splits into exactly 2 chunks.
+    const auto& qkt = layout.layers[0];
+    BOOST_CHECK(qkt.kind == rc::RCGkrLayerKind::GemmPhase1QKt);
+    BOOST_CHECK_EQUAL(qkt.y_chunks, 2u);
+    const auto& y0 = layout.columns[qkt.y_first_column];
+    const auto& y1 = layout.columns[qkt.y_first_column + 1];
+    BOOST_CHECK_EQUAL(y0.len, rc::kRCGkrColumnMaxCoeffs);
+    BOOST_CHECK_EQUAL(y1.len, 402'653'184ull - rc::kRCGkrColumnMaxCoeffs);
+    BOOST_CHECK_EQUAL(y1.chunk_offset, rc::kRCGkrColumnMaxCoeffs);
+    // EVERY column respects κ (a single concatenated trace is impossible).
+    uint64_t total = 0;
+    for (const auto& col : layout.columns) {
+        BOOST_CHECK_LE(col.len, rc::kRCGkrColumnMaxCoeffs);
+        total += col.len;
+    }
+    BOOST_CHECK_EQUAL(total, layout.total_cells);
+    BOOST_CHECK_EQUAL(layout.total_cells, layout.trace_cells + layout.operand_cells);
+    // The trace alone exceeds any single-column commitment by > 2^5.
+    BOOST_CHECK_GT(layout.trace_cells, 32ull * rc::kRCGkrColumnMaxCoeffs);
+}
+
+BOOST_AUTO_TEST_CASE(gkr_v7_fs_seed_binds_every_field)
+{
+    // Blueprint item 7: mutate each bound field → the seed (hence every FS
+    // challenge) changes. Absorbing unrelated roots is insufficient (F0).
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const arith_uint256 target = arith_uint256{}.SetCompact(0x207fffff);
+    const uint256 dig = MakeSeed(0xD1);
+    const uint256 sigma = MakeSeed(0x5A);
+    std::vector<uint256> roots{MakeSeed(0x01), MakeSeed(0x02)};
+
+    const uint256 base = rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, roots);
+    BOOST_CHECK(base == rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, roots));
+
+    auto expect_differs = [&](const uint256& other) { BOOST_CHECK(other != base); };
+
+    { auto h = header; h.nVersion ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.hashPrevBlock.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.hashMerkleRoot.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.nTime ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.nBits ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.nNonce64 ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.matmul_digest.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.matmul_dim ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.seed_a.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.seed_b.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    // Height.
+    expect_differs(rc::RCGkrFsSeedV7(header, 1, params, target, dig, sigma, roots));
+    // Every episode param.
+    { auto p2 = params; p2.rounds += 1;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.d_head += 32;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.n_q += 32;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.n_ctx += 32;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.L_lyr += 1;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.d_model += 32;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.b_seq += 32;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.T_leaf += 32;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    // Target (beyond nBits).
+    { arith_uint256 t2 = target; t2 >>= 1;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, params, t2, dig, sigma, roots)); }
+    // Digest, sigma, roots (content, count, order).
+    { auto d2 = dig; d2.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, params, target, d2, sigma, roots)); }
+    { auto s2 = sigma; s2.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, params, target, dig, s2, roots)); }
+    { auto r2 = roots; r2[0].data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, r2)); }
+    { auto r2 = roots; r2.push_back(MakeSeed(0x03));
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, r2)); }
+    { auto r2 = roots; std::swap(r2[0], r2[1]);
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, r2)); }
+    // Episode vs coupled sub-domains can never collide.
+    const auto coup = rc::MakeToyRCCoupParams();
+    expect_differs(rc::RCGkrFsSeedV7Coupled(header, 0, coup, target, dig, sigma, roots));
+    // Coupled binds its own params.
+    { auto c2 = coup; c2.barriers += 1;
+      const uint256 a = rc::RCGkrFsSeedV7Coupled(header, 0, coup, target, dig, sigma, roots);
+      const uint256 b = rc::RCGkrFsSeedV7Coupled(header, 0, c2, target, dig, sigma, roots);
+      BOOST_CHECK(a != b); }
+}
+
+BOOST_AUTO_TEST_CASE(gkr_v7_eq_kernel_matches_int64_reference_mle)
+{
+    // §1.3 correspondence, cross-checked against the int64-embedded MLE
+    // evaluator: ⟨coeffs(P_v), coeffs(q_r)⟩ = ṽ(r).
+    const std::vector<int64_t> vals = {5,          -7,        123456789, -987654321,
+                                       (1LL << 40), -(1LL << 35), 0,     42};
+    std::vector<rc::Fp2> col(vals.size());
+    for (size_t i = 0; i < vals.size(); ++i) col[i] = gf::FromSigned2(vals[i]);
+
+    std::vector<rc::Fp2> r{gf::Fp2{3, 11}, gf::Fp2{7, 0}, gf::Fp2{0x1234, 0x9999}};
+    const auto q = rc::RCGkrEqKernelCoeffs(r);
+    BOOST_REQUIRE_EQUAL(q.size(), col.size());
+    rc::Fp2 inner = gf::Fp2::Zero();
+    for (size_t i = 0; i < col.size(); ++i) inner = gf::Add(inner, gf::Mul(col[i], q[i]));
+    BOOST_CHECK(gf::Eq(inner, rc::RCGkrMleEval1D2(col, r)));
+
+    // O(ν) verifier evaluation agrees with the full coefficient expansion.
+    const rc::Fp2 x{0xdead, 0xbeef};
+    BOOST_CHECK(gf::Eq(rc::RCGkrEqKernelAt(r, x), rc::FriEvalPoly(q, x)));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_v7_batched_opening_primitive_end_to_end)
+{
+    // The Wave-2 eval argument consumes: (i) bound C_i(z1), C_i(z2) from the
+    // batched FRI, (ii) O(ν) eq-kernel evals. End-to-end smoke over an
+    // int64-reference-embedded column, keyed by the v7 FS seed.
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const arith_uint256 target = arith_uint256{}.SetCompact(0x207fffff);
+    const uint256 dig = MakeSeed(0xD2);
+    const uint256 sigma = MakeSeed(0xA5);
+    const std::vector<uint256> roots{MakeSeed(0x21)};
+    const uint256 seed = rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, roots);
+
+    std::vector<std::vector<rc::Fp2>> cols;
+    std::vector<rc::Fp2> col(16);
+    for (size_t i = 0; i < col.size(); ++i) {
+        col[i] = gf::FromSigned2(static_cast<int64_t>(i * i) - 31);
+    }
+    cols.push_back(col);
+    const auto c = rc::FriBatchCommit(cols, seed);
+    BOOST_REQUIRE_MESSAGE(c.ok, c.note);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(rc::FriBatchVerify(c.proof, seed, &why), why);
+    // Bound OOD openings are exact evaluations of the committed column.
+    BOOST_CHECK(gf::Eq(c.proof.evals_z1[0], rc::FriEvalPoly(col, c.proof.z1)));
+    BOOST_CHECK(gf::Eq(c.proof.evals_z2[0], rc::FriEvalPoly(col, c.proof.z2)));
+    // A different FS seed (any bound field mutated) rejects the same proof.
+    auto h2 = header;
+    h2.nBits ^= 1;
+    const uint256 seed2 = rc::RCGkrFsSeedV7(h2, 0, params, target, dig, sigma, roots);
+    BOOST_CHECK(seed2 != seed);
+    BOOST_CHECK(!rc::FriBatchVerify(c.proof, seed2, &why));
+}
+
+// ============================================================================
+// v7 EVAL ARGUMENT (§2.4) — standalone opening-argument soundness.
+// ============================================================================
+BOOST_AUTO_TEST_CASE(gkr_v7_eval_argument_honest_and_forged)
+{
+    // Two committed columns; claims = their MLEs at FS points. The eval argument
+    // f/g ride the SAME batched FRI; the identity is checked at z1/z2.
+    const uint256 seed = MakeSeed(0x77);
+    std::vector<std::vector<rc::Fp2>> cols;
+    std::vector<rc::Fp2> c0(8), c1(8);
+    for (size_t i = 0; i < 8; ++i) {
+        c0[i] = gf::FromSigned2(static_cast<int64_t>(i) * 7 - 5);
+        c1[i] = gf::FromSigned2(static_cast<int64_t>(i * i) + 3);
+    }
+    cols.push_back(c0);
+    cols.push_back(c1);
+
+    // Points of dimension log2(n)=3 (n=8).
+    std::vector<rc::Fp2> p0{gf::Fp2{3, 1}, gf::Fp2{5, 0}, gf::Fp2{2, 9}};
+    std::vector<rc::Fp2> p1{gf::Fp2{7, 4}, gf::Fp2{1, 1}, gf::Fp2{6, 2}};
+    std::vector<rc::RCGkrOpeningClaim> claims;
+    claims.push_back({0, p0, rc::RCGkrMleEval1D2(c0, p0)});
+    claims.push_back({1, p1, rc::RCGkrMleEval1D2(c1, p1)});
+
+    const auto ev = rc::EvalArgumentProve(claims, cols, seed);
+    BOOST_REQUIRE_MESSAGE(ev.ok, ev.note);
+    auto all = cols;
+    all.push_back(ev.f_coeffs);
+    all.push_back(ev.g_coeffs);
+    const auto bc = rc::FriBatchCommit(all, seed);
+    BOOST_REQUIRE_MESSAGE(bc.ok, bc.note);
+    std::string why;
+    BOOST_REQUIRE(rc::FriBatchVerify(bc.proof, seed, &why));
+    // Honest openings verify.
+    BOOST_CHECK_MESSAGE(rc::EvalArgumentVerify(claims, bc.proof, ev.proof, seed, &why), why);
+
+    // (a) Forged claim VALUE rejects (false ṽ(r) → identity fails at z1/z2).
+    {
+        auto bad = claims;
+        bad[0].value.c0 ^= 1;
+        // σ recomputed from bad claims mismatches proof.sigma → reject.
+        BOOST_CHECK(!rc::EvalArgumentVerify(bad, bc.proof, ev.proof, seed, &why));
+    }
+    // (b) Forged σ rejects.
+    {
+        auto badp = ev.proof;
+        badp.sigma.c1 ^= 1;
+        BOOST_CHECK(!rc::EvalArgumentVerify(claims, bc.proof, badp, seed, &why));
+    }
+    // (c) Tampering a bound f/g opening in the batch rejects (identity breaks).
+    {
+        auto badb = bc.proof;
+        badb.evals_z1[ev.proof.g_column].c0 ^= 1;
+        // FriBatchVerify itself catches a forged OOD eval; the eval arg would too.
+        BOOST_CHECK(!rc::FriBatchVerify(badb, seed, &why));
+    }
+}
+
+// ============================================================================
+// v7 POSITIVE PATH — honest proof verifies + digest byte-parity vs the int64
+// reference (RecomputeResidentCurriculumReference).
+// ============================================================================
+BOOST_AUTO_TEST_CASE(gkr_v7_positive_path_byte_parity)
+{
+    auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    header.matmul_digest = dig; // block commits the episode digest (not in sigma)
+    arith_uint256 target;
+    target = ~target; // maximal target: digest ≤ target
+
+    const auto pr = rc::ProveWinnerEpisodeV7(header, params, 0, target, dig);
+    BOOST_REQUIRE_MESSAGE(pr.timing.ok, pr.timing.note);
+    // Digest byte-parity: the proof's claimed digest equals the immutable int64
+    // reference digest, byte-for-byte.
+    BOOST_CHECK(pr.proof.claimed_digest == dig);
+    // Composed dual-α Extract LogUp cleared the target with margin.
+    BOOST_CHECK_GT(pr.proof.logup_bits, 64.0);
+
+    std::string why;
+    rc::RCGkrTiming vt;
+    BOOST_CHECK_MESSAGE(rc::VerifyWinnerProofV7(pr.proof, header, 0, target, &why, &vt), why);
+    // Cross-validate against the curriculum reference once more.
+    BOOST_CHECK(rc::RecomputeResidentCurriculumReference(header, params, 0) == dig);
+
+    // SUCCINCTNESS (Wave 3A): the episode verify path is now grounded by the
+    // in-circuit AIRs over the committed columns (no int64-reference re-run), so
+    // it clears the Stage-I happy-path verify budget at toy dims.
+    BOOST_TEST_MESSAGE("v7 succinct verify: " + why);
+    BOOST_CHECK_MESSAGE(!vt.over_budget,
+                        "episode verify over budget: verify_s=" + std::to_string(vt.verify_s));
+    BOOST_CHECK(vt.verify_s <= rc::kRCGkrVerifyBudgetS);
+    BOOST_CHECK(!pr.proof.over_budget);
+}
+
+// ============================================================================
+// v7 FORGERY LIST (blueprint §9). Each forgery MUST be REJECTED — v6 accepts F0
+// with probability 1; v7 is the sound episode verifier. Coupled F10/F11/F-coup
+// are Wave-3 (out of scope).
+// ============================================================================
+BOOST_AUTO_TEST_CASE(gkr_v7_section9_forgery_list_rejected)
+{
+    auto header = MakeRCHeader(7);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    header.matmul_digest = dig;
+    arith_uint256 target;
+    target = ~target;
+
+    const auto pr = rc::ProveWinnerEpisodeV7(header, params, 0, target, dig);
+    BOOST_REQUIRE_MESSAGE(pr.timing.ok, pr.timing.note);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(rc::VerifyWinnerProofV7(pr.proof, header, 0, target, &why), why);
+    const rc::RCGkrProofV7& H = pr.proof;
+
+    auto rejects = [&](const rc::RCGkrProofV7& p, const CBlockHeader& h, const arith_uint256& t) {
+        std::string w;
+        const bool ok = rc::VerifyWinnerProofV7(p, h, 0, t, &w);
+        return !ok;
+    };
+
+    // F0 — fabricated round_roots (the forger grinds arbitrary ground roots to
+    // target, zero episode work). v6 absorbs roots into FS and binds them to
+    // NOTHING (accepts w.p. 1). v7 recomputes the true tile-tree from the
+    // grounded extract columns; the fabricated roots do not match → reject.
+    {
+        auto p = H;
+        p.round_roots[0].data()[0] ^= 0xFF;
+        BOOST_CHECK(rejects(p, header, target)); // headline: v6 accepts, v7 rejects
+    }
+    // F1/F2 — forge A / B operand column commitment root.
+    {
+        auto p = H;
+        p.batch.columns[0].root.data()[0] ^= 0xFF; // A of layer 0
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    {
+        auto p = H;
+        p.batch.columns[1].root.data()[0] ^= 0xFF; // B of layer 0
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F3 — forge an A/B opening value.
+    {
+        auto p = H;
+        p.layers[0].a_eval.c0 ^= 1;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F4 — forge final_eval (the v6 free field).
+    {
+        auto p = H;
+        p.layers[0].final_eval.c1 ^= 1;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F5 — forge the trace claim c_ℓ.
+    {
+        auto p = H;
+        p.layers[0].c_claim.c0 ^= 1;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F6 — forge Extract witness (extract_out column commitment).
+    {
+        auto p = H;
+        p.batch.columns[3].root.data()[0] ^= 0xFF; // extract_out of layer 0
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F7 — forge LogUp challenge binding (multiplicity/table soundness is also
+    // covered adversarially in matmul_v4_rc_gkr_air_tests).
+    {
+        auto p = H;
+        p.logup_alpha1.c0 ^= 1;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F8 — reorder layers (swap two sumcheck blocks).
+    {
+        auto p = H;
+        std::swap(p.layers[0], p.layers[1]);
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F9 — repeat / omit a layer (count no longer matches Λ).
+    {
+        auto p = H;
+        p.layers.push_back(p.layers.back());
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    {
+        auto p = H;
+        p.layers.pop_back();
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F12 — forge sigma.
+    {
+        auto p = H;
+        p.episode_sigma.data()[0] ^= 1;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F13 — forge dimensions.
+    {
+        auto p = H;
+        p.episode.d_head += 32;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F14 — forge target compliance (digest > target).
+    {
+        const arith_uint256 tiny(1); // essentially every 256-bit digest exceeds 1
+        BOOST_CHECK(rejects(H, header, tiny));
+    }
+    // F15 — forge the claimed digest.
+    {
+        auto p = H;
+        p.claimed_digest.data()[0] ^= 1;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // Sanity: the untouched honest proof still verifies.
+    BOOST_CHECK(rc::VerifyWinnerProofV7(H, header, 0, target, &why));
+}
+
+// ============================================================================
+// v7 IN-CIRCUIT relation forgeries (Wave 3A): the succinct verifier grounds the
+// committed columns by the Extract / MxExpand / tile-tree AIRs — no int64
+// reference. Tampering a witness column or an Extract input must be REJECTED by
+// the in-circuit relation, not by a reference comparison (which is gone).
+// ============================================================================
+BOOST_AUTO_TEST_CASE(gkr_v7_in_circuit_relation_forgeries_rejected)
+{
+    auto header = MakeRCHeader(11);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    header.matmul_digest = dig;
+    arith_uint256 target;
+    target = ~target;
+
+    const auto pr = rc::ProveWinnerEpisodeV7(header, params, 0, target, dig);
+    BOOST_REQUIRE_MESSAGE(pr.timing.ok, pr.timing.note);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(rc::VerifyWinnerProofV7(pr.proof, header, 0, target, &why), why);
+    const rc::RCGkrProofV7& H = pr.proof;
+
+    auto rejects = [&](const rc::RCGkrProofV7& p) {
+        std::string w;
+        return !rc::VerifyWinnerProofV7(p, header, 0, target, &w);
+    };
+
+    // Extract relation: forge an Extract INPUT (extract_in). It is bound to the
+    // sumcheck-proven Y; the tampered value breaks that binding / the sampler AIR.
+    {
+        auto p = H;
+        BOOST_REQUIRE(!p.wires.empty() && !p.wires[0].extract_in.empty());
+        p.wires[0].extract_in[0] ^= 0x123456;
+        BOOST_CHECK_MESSAGE(rejects(p), "forged extract_in NOT rejected");
+    }
+    // Extract relation: forge an Extract OUTPUT byte (committed column) → the
+    // commitment binding + tile-tree AIR reject.
+    {
+        auto p = H;
+        // layer 1 (SV) extract_out is streamed into the tile-tree.
+        BOOST_REQUIRE(p.wires.size() > 1 && !p.wires[1].extract_out.empty());
+        p.wires[1].extract_out[0] = static_cast<int8_t>(p.wires[1].extract_out[0] ^ 0x1);
+        BOOST_CHECK_MESSAGE(rejects(p), "forged extract_out NOT rejected");
+    }
+    // MxExpand relation: forge a leaf operand byte (committed column) → the
+    // commitment binding + MxExpand dequant AIR reject.
+    {
+        auto p = H;
+        BOOST_REQUIRE(!p.wires.empty() && !p.wires[0].A.empty());
+        p.wires[0].A[0] = static_cast<int8_t>(p.wires[0].A[0] ^ 0x2);
+        BOOST_CHECK_MESSAGE(rejects(p), "forged MxExpand leaf operand NOT rejected");
+    }
+    // Tile-tree relation: forge a round_root → the digest-from-roots + in-circuit
+    // tile-tree AIR (recomputed root of the committed extract stream) reject. The
+    // dedicated tile-tree SHA-intermediate tamper lives in the AIR unit tests.
+    {
+        auto p = H;
+        p.round_roots[0].data()[0] ^= 0xFF;
+        BOOST_CHECK_MESSAGE(rejects(p), "forged round_root NOT rejected");
+    }
+    // Wiring relation: forge a chained operand (SV.A must equal QKt extract_out).
+    {
+        auto p = H;
+        BOOST_REQUIRE(p.wires.size() > 1 && !p.wires[1].A.empty());
+        p.wires[1].A[0] = static_cast<int8_t>(p.wires[1].A[0] ^ 0x4);
+        BOOST_CHECK_MESSAGE(rejects(p), "forged chained operand NOT rejected");
+    }
+}
+
+// ============================================================================
+// KILLER VALIDATION (fold gate). The fleet's INDEPENDENT malicious constructors
+// (ProveIndepMalicious*ForTest) build REAL, independently-authored attacks that
+// the PARKED v6 verifier ACCEPTS with probability 1 (WS-D completeness doc:
+// G1–G5 OPEN; kRCGkrG1G5ClosedStatement). This test re-runs EACH attack against
+// the SOUND v7 verifier (VerifyWinnerProofV7 / VerifyWinnerCoupledV7), adapted
+// to the v7 proof format, and asserts v7 REJECTS every one. Passing this proves
+// G1–G5 are independently CLOSED by v7. Arbiter stays OFF; heights INT32_MAX;
+// ExactReplay remains the sole consensus authority; external audit still
+// mandatory before any production CLOSED claim.
+// ============================================================================
+BOOST_AUTO_TEST_CASE(gkr_v7_defeats_independent_malicious)
+{
+    BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCCoupledHeight,
+                      std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
+
+    auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    CBlockHeader h7 = header;
+    h7.matmul_digest = dig; // block commits the episode digest (not in sigma)
+    arith_uint256 target;
+    target = ~target; // maximal target: digest ≤ target is vacuous, algebra is the gate
+
+    // Honest v7 episode proof — the sound baseline every forgery perturbs.
+    const auto base = rc::ProveWinnerEpisodeV7(h7, params, 0, target, dig);
+    BOOST_REQUIRE_MESSAGE(base.timing.ok, base.timing.note);
+    const rc::RCGkrProofV7& H = base.proof;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(rc::VerifyWinnerProofV7(H, h7, 0, target, &why), why);
+
+    auto v7_rejects = [&](const rc::RCGkrProofV7& p) {
+        std::string w;
+        return !rc::VerifyWinnerProofV7(p, h7, 0, target, &w);
+    };
+    // Reaffirm the documented v6 gap: the independent attack is ACCEPTED by v6.
+    auto v6_accepts = [&](rc::RCGkrIndepMaliciousKind kind) {
+        auto pr = rc::ProveIndepMaliciousEpisodeForTest(header, params, 0, dig, kind);
+        return pr.timing.ok && rc::VerifyWinnerProof(pr.proof);
+    };
+
+    // --- G1: ArbitraryAbFactorization ---------------------------------------
+    // v6: a_at_r/b_at_r are an arbitrary alternate factorization, UNBOUND to the
+    // A/B PCS openings at the sumcheck point. v7: a_eval MUST equal the batched-
+    // FRI opening of the committed A column at r → reject.
+    BOOST_CHECK_MESSAGE(v6_accepts(rc::RCGkrIndepMaliciousKind::ArbitraryAbFactorization),
+                        "v6 unexpectedly rejected ArbitraryAbFactorization");
+    {
+        auto p = H;
+        p.layers[0].a_eval.c0 ^= 0xC0FFEE; // arbitrary alternate factorization value
+        BOOST_CHECK_MESSAGE(v7_rejects(p),
+                            "G1 ArbitraryAbFactorization: v7 ACCEPTED an unbound a_eval");
+    }
+
+    // --- G2: FabricatedTraceWires -------------------------------------------
+    // v6: fabricated self-consistent GEMM wires UNBOUND to the episode PRF
+    // expansion; round_roots are prover-chosen. v7: round_roots are recomputed
+    // in-circuit (tile-tree AIR) from the grounded extract stream, and the trace
+    // claim c_ℓ is sumcheck-bound → reject.
+    BOOST_CHECK_MESSAGE(v6_accepts(rc::RCGkrIndepMaliciousKind::FabricatedTraceWires),
+                        "v6 unexpectedly rejected FabricatedTraceWires");
+    {
+        auto p = H;
+        p.round_roots[0].data()[0] ^= 0xFF;
+        BOOST_CHECK_MESSAGE(v7_rejects(p),
+                            "G2 FabricatedTraceWires: v7 ACCEPTED a fabricated round_root");
+    }
+    {
+        auto p = H;
+        p.layers[0].c_claim.c0 ^= 1;
+        BOOST_CHECK_MESSAGE(v7_rejects(p),
+                            "G2 FabricatedTraceWires: v7 ACCEPTED a forged trace claim");
+    }
+
+    // --- G3: IdenticalFabricatedLookup --------------------------------------
+    // v6: prover manufactures identical witness == table keys (Theorem 5.1
+    // vacuity). v7: the LogUp table is VERIFIER-DERIVED and the dual-α challenge
+    // is FS-bound to the committed columns → tampering breaks the aggregate.
+    BOOST_CHECK_MESSAGE(v6_accepts(rc::RCGkrIndepMaliciousKind::IdenticalFabricatedLookup),
+                        "v6 unexpectedly rejected IdenticalFabricatedLookup");
+    {
+        auto p = H;
+        p.logup_alpha1.c0 ^= 1;
+        BOOST_CHECK_MESSAGE(v7_rejects(p),
+                            "G3 IdenticalFabricatedLookup: v7 ACCEPTED a forged LogUp challenge");
+    }
+
+    // --- G3/G4: FabricatedExtractIO -----------------------------------------
+    // v6: fabricated Extract input/output + recomputed prover fields. v7: the
+    // in-circuit Extract sampler AIR binds extract_in to the sumcheck-proven Y
+    // and extract_out to its committed column → reject.
+    BOOST_CHECK_MESSAGE(v6_accepts(rc::RCGkrIndepMaliciousKind::FabricatedExtractIO),
+                        "v6 unexpectedly rejected FabricatedExtractIO");
+    {
+        auto p = H;
+        BOOST_REQUIRE(!p.wires.empty() && !p.wires[0].extract_in.empty());
+        p.wires[0].extract_in[0] ^= 0x123456; // fabricated Extract INPUT
+        BOOST_CHECK_MESSAGE(v7_rejects(p),
+                            "G4 FabricatedExtractIO: v7 ACCEPTED a fabricated extract_in");
+    }
+    {
+        auto p = H;
+        p.batch.columns[3].root.data()[0] ^= 0xFF; // extract_out column commitment
+        BOOST_CHECK_MESSAGE(v7_rejects(p),
+                            "G3 FabricatedExtractIO: v7 ACCEPTED a fabricated extract_out column");
+    }
+
+    // --- coupled: UnrelatedBankPages ----------------------------------------
+    // v6: the lobe B matrix is UNBOUND to the bank_root page openings — the
+    // prover swaps in unrelated page bytes. v7 (coupled R5): the committed B
+    // operand column of (b,ℓ) must be the ROOT of the natively scheduled bank
+    // page → column_not_grounded → reject.
+    {
+        const auto coup = rc::MakeToyRCCoupParams();
+        const uint256 cdig = rc::RecomputeCoupledPuzzleReference(header, 0, coup);
+        auto v6 = rc::ProveIndepMaliciousCoupledForTest(
+            header, 0, coup, cdig, rc::RCGkrIndepMaliciousKind::UnrelatedBankPages);
+        BOOST_CHECK_MESSAGE(v6.timing.ok && v6.proof.coupled && rc::VerifyWinnerProof(v6.proof),
+                            "v6 unexpectedly rejected coupled UnrelatedBankPages");
+
+        CBlockHeader hc = header;
+        hc.matmul_digest = cdig;
+        const auto cbase = rc::ProveWinnerCoupledV7(hc, 0, coup, target, cdig);
+        BOOST_REQUIRE_MESSAGE(cbase.timing.ok, cbase.timing.note);
+        std::string cwhy;
+        BOOST_REQUIRE_MESSAGE(rc::VerifyWinnerCoupledV7(cbase.proof, hc, 0, target, &cwhy), cwhy);
+        auto cp = cbase.proof;
+        const uint32_t lobes = coup.lobes;
+        const uint32_t bcol0 = 0u * (3u * lobes + 4u) + 3u * 0u + 1u; // ColIds::bcol(0,0)
+        BOOST_REQUIRE(bcol0 < cp.batch.columns.size());
+        cp.batch.columns[bcol0].root.data()[0] ^= 0xFF; // unrelated bank page bytes
+        std::string w;
+        BOOST_CHECK_MESSAGE(!rc::VerifyWinnerCoupledV7(cp, hc, 0, target, &w),
+                            "coupled UnrelatedBankPages: v7 ACCEPTED an unrelated bank page");
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

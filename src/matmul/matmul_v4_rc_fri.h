@@ -168,6 +168,178 @@ struct FriCommitResult {
                                                const uint256& fs_seed, uint32_t flip_index,
                                                std::string* why = nullptr);
 
+// ============================================================================
+// BATCHED FRI (proof v7 FOUNDATION substrate) — ONE instance for ALL columns.
+// Blueprint: doc/btx-matmul-v4.5-rc-gkr-arithmetization-construction.md §2.1–2.3
+// + companion soundness table 2026-07-21.
+//
+// WHY BATCHING IS MANDATORY (not cosmetic): the v6 proof carries 7 independent
+// FRI instances (a/b/trace/lookup/table/inv/r). Each is 2^-65.85 post-grinding;
+// the adversary attacks the weakest of its choice, so the union bound is
+// ≥ 7·2^-65.85 ≈ 2^-63.05 — FAILING the 2^-64 target. A single batched
+// instance over the FS random linear combination λ of all columns restores a
+// single query term.
+//
+// QUERY COUNT: Q = 116 clears 2^-64 with < 1 bit of margin (65.85 bits).
+// Per the blueprint's pre-cutover hardening recommendation the batched
+// instance ships Q = kRCFriBatchNumQueries = 128:
+//   128·log2(32/17) = 116.80 bits pre-grinding − 40 grinding = 76 bits.
+//
+// DUAL-OOD DEEP: a single OOD point z over Fp2 caps the bindable column
+// degree at 2^(128−40−64) = 2^24 coefficients; consensus columns reach
+// κ = 2^28. Two independent OOD points z1 ≠ z2 give
+// (2κ/(|Fp2|−|D|))² ≈ 2^-196 pre-grinding (soundness table row "dual-OOD").
+// Every column's claimed evaluations at BOTH z1 and z2 ride in the proof and
+// are bound by the batched DEEP identity at each query site — these bound
+// (C_i(z1), C_i(z2)) pairs ARE the opening primitive the §2.4 evaluation
+// argument consumes.
+//
+// 2-ADICITY WALL (κ): Goldilocks F_p^× has 2-adicity 32; with blowup 16 a
+// single column caps at 2^28 coefficients (LDE 16·2^28 = 2^32). The consensus
+// trace (2^33.4 cells) therefore CANNOT be one concatenated vector — see
+// RCGkrTraceLayout (matmul_v4_rc_gkr.h) for the forced multi-column split.
+//
+// CONSTRUCTION (per §2.2, reusing the shipped fold/query machinery verbatim):
+//  1. Per-column LDE over the COMMON domain D of size N·16 (N = max padded
+//     column length); Merkle root per column; all roots absorbed before any
+//     challenge.
+//  2. FS λ; U := Σ_i λ^{i−1}·X^{N−len_i}·P_i  (degree-shift = maximal-degree
+//     enforcement: U low-degree ⇒ deg P_i < len_i for every i).
+//  3. FS z1, z2 ∉ D (dual OOD); prover ships every column's evaluations at
+//     z1, z2; FS weights w1, w2; DEEP composition
+//     G := w1·(U − U(z1))/(X − z1) + w2·(U − U(z2))/(X − z2), where U(z_s) is
+//     recomputed by the VERIFIER from the per-column claims (this is what
+//     binds them).
+//  4. Fold-commit G exactly as FriCommitAndFold folds; Q = 128 FS queries;
+//     each query opens every column at the query index (Merkle path into the
+//     column root) plus G's fold path, and checks the DEEP identity
+//     G(x)·1 = w1(U(x)−v1)/(x−z1) + w2(U(x)−v2)/(x−z2) with
+//     U(x) = Σ λ^{i−1} x^{N−len_i}·C_i(x) from the column openings.
+//
+// Soundness (Theorem 2.1): ε ≤ 2^-76.8 (queries, post-grind) +
+// 2^40·[(W+2)/|Fp2| + (2κ/(|Fp2|−2^32))²] ≤ 2^-76 for W ≤ 2^11 columns.
+// The legacy 7-instance layout and FriCommitAndFold remain byte-identical
+// (epoch-0 golden unchanged); FriCommitAndFold stays for preprocessed-table
+// roots only.
+// ============================================================================
+
+inline constexpr uint32_t kRCFriBatchProofMagic = 0x42495246u; // 'FRIB'
+inline constexpr uint32_t kRCFriBatchProofVersion = 1;
+inline constexpr char kRCFriBatchDomainTag[] = "BTX_RC_FRIB_V1";
+/** Batched-instance query count. NAMED CONSTANT (soundness table): Q=116
+ *  clears 2^-64 with <1 bit margin; Q=128 is the recommended hardening →
+ *  floor(128·log2(32/17)) − 40 = 76 bits post-grinding. */
+inline constexpr uint32_t kRCFriBatchNumQueries = 128;
+/** RLC width cap W ≤ 2^12 keeps the (W+2)/|Fp2| batching term ≥ 76 bits post-grind. */
+inline constexpr uint32_t kRCFriBatchMaxColumns = 1u << 12;
+/** κ: max coefficients per committed column. LDE 16·2^28 = 2^32 = the largest
+ *  power-of-two subgroup of Goldilocks F_p^× (2-adicity 32). HARD protocol cap. */
+inline constexpr uint32_t kRCFriMaxColumnLog2 = 28;
+static_assert((uint64_t{16} << kRCFriMaxColumnLog2) == (uint64_t{1} << 32),
+              "blowup·κ must equal the Goldilocks 2-adicity cap 2^32");
+
+[[nodiscard]] inline int FriBatchSoundnessBoundBits()
+{
+    constexpr uint64_t kLog2_32_17_Q32 = 3919317253ull; // log2(32/17) in Q32
+    const uint64_t prod = static_cast<uint64_t>(kRCFriBatchNumQueries) * kLog2_32_17_Q32;
+    return static_cast<int>(prod >> 32) - static_cast<int>(kRCFriGrindingBits);
+}
+
+inline constexpr char kRCFriBatchSoundnessStatement[] =
+    "BATCHED FRI (v7 substrate): ONE instance over ALL committed columns "
+    "(7 separate instances union to 2^-63.05 — FAILS 2^-64; batching restores "
+    "a single query term). Q=128, blowup=16, g=40, Fp2, UNIQUE-DECODING "
+    "alpha=17/32 => FriBatchSoundnessBoundBits()=76. DUAL-OOD DEEP (z1,z2): "
+    "single OOD caps column degree at 2^24 < kappa=2^28; dual gives "
+    "(2k/|Fp2|)^2 ~ 2^-196 pre-grind. Degree-shift RLC enforces per-column "
+    "maximal degree. COMPUTATIONAL — not eps=0. Arbiter OFF.";
+
+/** Per-query opening of one committed column at the query index. */
+struct FriBatchColumnOpening {
+    Fp2 value{};
+    std::vector<uint256> siblings;
+};
+
+struct FriBatchQuery {
+    uint32_t index{0};
+    /** One opening per committed column, in column order. */
+    std::vector<FriBatchColumnOpening> columns;
+    /** Fold-path openings of the DEEP composition G (same shape as FriProof). */
+    std::vector<FriFoldStep> steps;
+};
+
+struct FriBatchProof {
+    uint32_t version{kRCFriBatchProofVersion};
+    uint64_t pow_grind_nonce{0};
+    uint32_t blowup{kRCFriBlowup};
+    /** Common padded column length N (power of two); LDE domain = N·blowup. */
+    uint32_t n_coeffs{0};
+    /** Per-column Merkle commitments over the common LDE domain. */
+    std::vector<FriLayerCommit> columns;
+    /** Logical (pre-padding) length ℓ_i of each column = enforced degree bound. */
+    std::vector<uint32_t> column_len;
+    /** FS RLC challenge (recomputed and checked by the verifier). */
+    Fp2 lambda{};
+    /** Dual OOD points (FS, both ∉ D, z1 ≠ z2). */
+    Fp2 z1{};
+    Fp2 z2{};
+    /** Claimed per-column evaluations at z1/z2 — THE bound opening primitive. */
+    std::vector<Fp2> evals_z1;
+    std::vector<Fp2> evals_z2;
+    /** FS DEEP batching weights (recomputed and checked). */
+    Fp2 w1{};
+    Fp2 w2{};
+    /** Fold-commit layers of the DEEP composition G. */
+    std::vector<FriLayerCommit> fold_layers;
+    Fp2 final_value{};
+    std::vector<Fp2> fold_challenges;
+    std::vector<FriBatchQuery> queries;
+};
+
+struct FriBatchCommitResult {
+    FriBatchProof proof;
+    /** Per-column LDE over the common domain (prover-side; NEVER shipped). */
+    std::vector<std::vector<Fp2>> column_lde;
+    size_t proof_bytes{0};
+    bool ok{false};
+    std::string note;
+};
+
+/**
+ * Commit-and-prove: ONE batched FRI instance over all columns.
+ * columns[i] = coefficient vector (= wire values in the coefficient-basis
+ * commitment of blueprint §1.3); size = logical length ℓ_i ≥ 1.
+ * fs_seed MUST already bind everything the caller committed to (see
+ * RCGkrFsSeedV7) — commit-then-challenge.
+ */
+[[nodiscard]] FriBatchCommitResult FriBatchCommit(const std::vector<std::vector<Fp2>>& columns,
+                                                  const uint256& fs_seed,
+                                                  uint64_t pow_grind_nonce = 0);
+
+[[nodiscard]] bool FriBatchVerify(const FriBatchProof& proof, const uint256& fs_seed,
+                                  std::string* why = nullptr);
+
+/**
+ * Standalone column-root helper (two-epoch discipline): the Merkle root of a
+ * column's LDE over the common domain of padded size n_coeffs. Byte-identical
+ * to the root FriBatchCommit produces for the same (column, n_coeffs), so an
+ * outer transcript can absorb epoch-1 roots before later-epoch columns
+ * (eval-argument f/g) exist. Returns the null hash on invalid input.
+ */
+[[nodiscard]] uint256 FriBatchColumnRoot(const std::vector<Fp2>& column, uint32_t n_coeffs);
+
+[[nodiscard]] size_t SerializeFriBatchProof(const FriBatchProof& proof,
+                                            std::vector<unsigned char>& out);
+[[nodiscard]] std::optional<FriBatchProof> DeserializeFriBatchProof(
+    const std::vector<unsigned char>& in);
+
+[[nodiscard]] inline bool FriBatchClaimedBitsMeetTarget()
+{
+    return FriBatchSoundnessBoundBits() >= kRCFriTargetSoundnessBits &&
+           kRCFriBatchNumQueries >= 116u && kRCFriBlowup == 16u &&
+           kRCFriGrindingBits == 40u && !kRCFriConjecturedBoundEnabled;
+}
+
 [[nodiscard]] inline bool FriClaimedBitsMeetTarget()
 {
     return FriSoundnessBoundBits() >= kRCFriTargetSoundnessBits &&

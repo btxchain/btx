@@ -10,6 +10,7 @@
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_distributed.h>
 #include <matmul/matmul_v4_rc_fri.h>
+#include <matmul/matmul_v4_rc_gkr_eval.h>
 #include <matmul/matmul_v4_rc_gkr_field.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
 #include <matmul/matmul_v4_rc_verify_budget.h>
@@ -94,15 +95,19 @@ inline constexpr const char* kRCGkrHbmParkStatement =
     "GKR as production arbiter until budgets close; ship both verifiers and "
     "keep ε=0 ExactReplay as consensus default.";
 
-/** Coupled path: real lobe-GEMM + barrier-Extract format of ACTUAL
- *  RCCoupParams work (no MakeToyRCEpisodeParams stand-in). Bindings to
- *  bank_root / page bytes / Extract AIR remain OPEN. Arbiter OFF. */
+/** Coupled path (Wave 3B, superseding the fail-closed stand-in): the sound
+ *  coupled-R5 arithmetization lives in matmul_v4_rc_gkr_coupled.{h,cpp}
+ *  (ProveWinnerCoupledV7 / VerifyWinnerCoupledV7). ProveWinnerCoupled now
+ *  delegates there; it still NEVER proves toy/unrelated work (the bridge
+ *  refuses any digest that is not the int64 coupled reference digest).
+ *  Arbiter stays OFF; ExactReplay remains the consensus authority. */
 inline constexpr const char* kRCGkrCoupledArithStatement =
-    "ProveWinnerCoupled: REAL coupled layer FORMAT (lobe GEMM + barrier "
-    "Extract LogUp+FRI) over actual RCCoupParams / barrier_roots / bank_root. "
-    "G1–G5 OPEN/PARKED (no PCS page openings; vacuous Extract LogUp). "
-    "BTX_RC_GKR_ARBITER stays OFF; ExactReplay decides consensus. "
-    "nMatMulRCHeight=nMatMulRCCoupledHeight=INT32_MAX. External audit mandatory.";
+    "ProveWinnerCoupled: delegates to the sound coupled-R5 v7 prover "
+    "(matmul_v4_rc_gkr_coupled). GEMM succinct via batched-FRI sumcheck + "
+    "eval argument; page-selection/exchange/perm/mix/Extract/roots grounded "
+    "natively vs the immutable int64 reference (SOUND, over_budget). Never "
+    "emits a toy/episode stand-in proof of unrelated work. "
+    "BTX_RC_GKR_ARBITER stays OFF.";
 
 /**
  * Honest G1–G5 status — CLOSED only after independent malicious proofs REJECT
@@ -130,6 +135,158 @@ inline constexpr const char* kRCGkrShadowStatement =
 using gkr_field::Fp;
 using gkr_field::Fp2;
 
+/** Layer kind in the ALL-PHASE real-episode / coupled arithmetization. */
+enum class RCGkrLayerKind : uint32_t {
+    GemmPhase1QKt = 1, // Q·Kᵀ product layer
+    GemmPhase1SV = 2,  // S·V product layer
+    GemmPhase2Fwd = 3, // forward residual GEMM
+    GemmPhase2Bwd = 4, // backward GEMM
+    GemmPhase2Wgrad = 5,
+    /** Coupled: lobe row × bank page ExactGemm (1×W)·(W×W). */
+    CoupLobeGemm = 10,
+    /** Coupled: barrier non-affine Extract on full active state (LogUp only). */
+    CoupBarrierExtract = 11,
+    SynthGemmDeprecated = 100, // DEPRECATED synth proxy only
+};
+
+// ============================================================================
+// v7 FOUNDATION substrate (blueprint §2–4, §6.3; arbiter stays OFF).
+// The v6 proof/verifier below remains for the shadow scaffold until the
+// integration wave lands ProveFromLayout / layout-driven VerifyWinnerProof.
+// ============================================================================
+
+inline constexpr uint32_t kRCGkrProofVersionV7 = 7;
+inline constexpr char kRCGkrDomainTagV7[] = "BTX_RC_GKR_WINNER_V7";
+/** Bumped whenever the FS absorption schedule changes shape. Bound into the
+ *  transcript BEFORE any challenge (blueprint item 7). */
+inline constexpr uint32_t kRCGkrFsProfileVersionV7 = 1;
+
+/**
+ * κ — the 2-adicity wall. Goldilocks F_p^× has max power-of-two subgroup 2^32;
+ * with FRI blowup 16 a single committed column caps at 2^28 coefficients
+ * (LDE 16·2^28 = 2^32). The consensus trace is 2^33.39 cells, and a single
+ * QKt output alone is 2^28.58, so the trace MUST be split into multiple
+ * columns — a single concatenated trace vector cannot even be committed.
+ */
+inline constexpr uint32_t kRCGkrColumnMaxLog2 = 28;
+inline constexpr uint64_t kRCGkrColumnMaxCoeffs = uint64_t{1} << kRCGkrColumnMaxLog2;
+static_assert((uint64_t{16} << kRCGkrColumnMaxLog2) == (uint64_t{1} << 32),
+              "blowup*kappa must equal the Goldilocks 2-adicity cap 2^32");
+
+/** Distinct tensor identities of the canonical layout Λ(params) (§4.1).
+ *  Operand/extract tensors are committed ONCE and referenced per use
+ *  (transposed uses read the same column via the free-transpose fact §1.2). */
+enum class RCGkrTensor : uint8_t {
+    Q = 0,   // expanded operand, per round: n_q × d_head
+    K = 1,   // expanded operand, per round: n_ctx × d_head (QKt reads Kᵀ)
+    V = 2,   // expanded operand, per round: n_ctx × d_head
+    S = 3,   // extract_out of QKt, per round: n_q × n_ctx
+    Z = 4,   // extract_out of SV, per round: n_q × d_head
+    X = 5,   // layer 0 expanded; layer l+1 = extract_out of Fwd(l): b_seq × d_model
+    W = 6,   // expanded operand, per (round, l): d_model × d_model
+    G = 7,   // layer L expanded; layer l = extract_out of Bwd(l): b_seq × d_model
+    D = 8,   // extract_out of Wgrad(l): d_model × d_model
+    YQKt = 9,  // int64 GEMM output (T-column), n_q × n_ctx
+    YSV = 10,  // int64 GEMM output, n_q × d_head
+    YFwd = 11, // int64 GEMM output (pre-residual), b_seq × d_model
+    YBwd = 12, // int64 GEMM output, b_seq × d_model
+    YWgrad = 13, // int64 GEMM output, d_model × d_model
+};
+
+/** One committed column = one κ-bounded chunk of one tensor. */
+struct RCGkrColumnInfo {
+    uint32_t id{0};
+    RCGkrTensor tensor{RCGkrTensor::Q};
+    uint32_t round{0};
+    /** Layer index for X/W/G/D/Y*-tensors (X: 0..L, G: 0..L, W/D: 0..L−1); 0 otherwise. */
+    uint32_t layer{0};
+    /** Logical row-major matrix dims of the FULL tensor this chunk belongs to. */
+    uint32_t rows{0};
+    uint32_t cols{0};
+    /** Chunk split at κ = kRCGkrColumnMaxCoeffs (ceil(cells/κ) chunks). */
+    uint32_t chunk{0};
+    uint32_t n_chunks{1};
+    uint64_t chunk_offset{0}; // first cell covered (row-major)
+    uint64_t len{0};          // logical cells in this chunk (= FRI degree bound)
+    /** true: int64 GEMM output cells (T-column); false: int8 cells (O-column). */
+    bool int64_cells{false};
+};
+
+/** Reference to a tensor's column range as a GEMM operand (§1.2: transpose is
+ *  free — M̃ᵀ(r,s) = M̃(s,r) — so transposed uses carry a flag, not a copy). */
+struct RCGkrOperandRef {
+    uint32_t first_column{0};
+    uint32_t n_chunks{1};
+    bool transpose{false};
+};
+
+/** One layer of the canonical sequence Λ(params). The VERIFIER enumerates
+ *  these (§4.1): (kind, round, layer, m, n, k) and all operand identities are
+ *  OUTPUTS of the layout, never prover data — order forgeries (F8/F9) are
+ *  unexpressible. */
+struct RCGkrLayerSpec {
+    RCGkrLayerKind kind{RCGkrLayerKind::GemmPhase1QKt};
+    uint32_t round{0};
+    uint32_t layer{0};
+    uint32_t m{0};
+    uint32_t n{0};
+    uint32_t k{0};
+    RCGkrOperandRef a{};
+    RCGkrOperandRef b{};
+    /** GEMM output Y chunk columns (int64 T-columns). */
+    uint32_t y_first_column{0};
+    uint32_t y_chunks{1};
+    /** extract_out tensor columns (int8 O-columns) produced by this layer. */
+    uint32_t out_first_column{0};
+    uint32_t out_chunks{1};
+    /** Fwd only: residual operand column range (== a; G5: acc = Y + X_l at
+     *  evaluation points, no separately committed extract_in). −1 otherwise. */
+    int32_t residual_first_column{-1};
+};
+
+struct RCGkrLayout {
+    RCEpisodeParams params{};
+    std::vector<RCGkrColumnInfo> columns;
+    std::vector<RCGkrLayerSpec> layers;
+    uint64_t trace_cells{0};   // Σ Y cells (N_Y; 11,274,551,296 at consensus dims)
+    uint64_t operand_cells{0}; // Σ O-column cells (expanded operands + extract outs)
+    uint64_t total_cells{0};
+};
+
+/**
+ * Canonical, verifier-computable trace layout Λ(params) (§4.1, §6.3):
+ * enumerates the exact layer sequence QKt → SV → Fwd(0..L−1) →
+ * [Bwd(l), Wgrad(l)] for l = L−1..0, per round, and assigns every distinct
+ * tensor exactly one committed column range (chunked at κ = 2^28).
+ * Requires ValidateRCEpisodeParams(params).
+ */
+[[nodiscard]] RCGkrLayout RCGkrTraceLayout(const RCEpisodeParams& params);
+
+/**
+ * v7 Fiat–Shamir seed (blueprint item 7): binds proof version + domain tag +
+ * FS profile version, the FULL header (every wire field + GetHash()), the
+ * nonce-bound sigma, height, the exact episode params, target AND nBits,
+ * claimed digest + pow_bind, and all round roots — BEFORE any challenge is
+ * drawn. Use as the fs_seed of FriBatchCommit / the v7 transcript. Absorbing
+ * unrelated roots is insufficient (§4.3 insufficiency lemma / forgery F0).
+ */
+[[nodiscard]] uint256 RCGkrFsSeedV7(const CBlockHeader& header, int32_t height,
+                                    const RCEpisodeParams& params,
+                                    const arith_uint256& target,
+                                    const uint256& claimed_digest,
+                                    const uint256& episode_sigma,
+                                    const std::vector<uint256>& round_roots);
+
+/** Coupled-puzzle variant: binds the exact RCCoupParams + barrier roots under
+ *  a distinct sub-domain label (episode/coupled transcripts can never collide). */
+[[nodiscard]] uint256 RCGkrFsSeedV7Coupled(const CBlockHeader& header, int32_t height,
+                                           const RCCoupParams& params,
+                                           const arith_uint256& target,
+                                           const uint256& claimed_digest,
+                                           const uint256& sigma,
+                                           const std::vector<uint256>& barrier_roots);
+
+
 /** Soft budgets for the Section-2 scaffold (CPU toy/medium). Not silicon.
  *  Verify ceiling is Stage-I interval-fraction (see matmul_v4_rc_verify_budget.h). */
 inline constexpr double kRCGkrMediumProveBudgetS = 2.0;
@@ -149,20 +306,6 @@ struct RCGkrSumcheckRound {
     Fp2 eval0{};
     Fp2 eval1{};
     Fp2 eval2{};
-};
-
-/** Layer kind in the ALL-PHASE real-episode / coupled arithmetization. */
-enum class RCGkrLayerKind : uint32_t {
-    GemmPhase1QKt = 1, // Q·Kᵀ product layer
-    GemmPhase1SV = 2,  // S·V product layer
-    GemmPhase2Fwd = 3, // forward residual GEMM
-    GemmPhase2Bwd = 4, // backward GEMM
-    GemmPhase2Wgrad = 5,
-    /** Coupled: lobe row × bank page ExactGemm (1×W)·(W×W). */
-    CoupLobeGemm = 10,
-    /** Coupled: barrier non-affine Extract on full active state (LogUp only). */
-    CoupBarrierExtract = 11,
-    SynthGemmDeprecated = 100, // DEPRECATED synth proxy only
 };
 
 struct RCGkrLayerClaim {
@@ -288,6 +431,131 @@ struct RCGkrProveResult {
     RCGkrTiming timing;
 };
 
+// ============================================================================
+// v7 PROOF + LAYOUT-DRIVEN VERIFIER (blueprint §10; arbiter stays OFF).
+//
+// The v7 verifier composes the Wave-1 substrate into a SOUND episode verifier
+// that REJECTS the §9 forgery list (v6 accepts F0 w.p. 1). Composition:
+//   R1  A/B opening → final_eval: per-layer Thaler product sumcheck
+//       (VerifyProductK) with the chain-end gf bound by final_eval = a·b, where
+//       a_eval=Ã(r_i,r_k), b_eval=B̃(r_k,r_j) are openings of the COMMITTED
+//       operand columns via the batched-FRI eval argument (§2.4). A prover-
+//       supplied final_eval with no opening cannot pass (Thm 3.1).
+//   R2  claim-to-trace: c_ℓ = Ỹ(r_i,r_j) is an opening of the committed Y
+//       column (never a free proof field); wiring is Λ-definitional.
+//   R3  Extract: dual-α LogUp aggregate over the tile sub-relations
+//       (LogUpDualAlphaVerify), plus native byte-exactness vs the immutable
+//       ExtractMXTileInt64 reference (the §5.7/§6.3 in-circuit ChaCha/SHA/
+//       tile-tree AIRs are the PARKED succinctness gap — see the report).
+//   R4  canonical sequence: the VERIFIER enumerates Λ(params) itself; the proof
+//       carries no per-layer (kind,round,dims) — reorder/repeat/omit forgeries
+//       are unexpressible (Thm 4.2), deterministic reject.
+//   §6.3 round-root binding: round_roots are recomputed by the RoundMerkleStream
+//       tile-tree over the (ground-truth-grounded) committed extract columns and
+//       must equal the proof's — this is what closes the F0 headline that v6
+//       leaves open (per-layer root absorption binds nothing, §4.3).
+//
+// SUCCINCTNESS (Wave 3A): the operand-expansion / Extract / tile-tree GROUNDING
+// is now done by IN-CIRCUIT AIRs over the committed columns — MxExpandAir
+// (§5.7), the Extract sampler AIR over ALL tiles (§5.4) + dual-α LogUp (§5.6),
+// and the tile-tree SHA AIR (§6.3) — NOT by re-running the int64 reference. The
+// verifier derives only the PUBLIC seeds / prf keys natively (§4.2/§6.1). At toy
+// dims this clears the Stage-I happy-path verify budget (over_budget=false). The
+// witness columns are materialized (carried + FRI-bound); the residual toward
+// verifier-sublinearity is the DEEP/quotient opening of the AIR constraint
+// polynomial (open at Q points instead of every row) — at consensus dims the
+// LogUp is ≈2^43 rows and stays PARKED (§11). Arbiter stays OFF,
+// nMatMulRCHeight=INT32_MAX, ExactReplay remains sole authority.
+// ============================================================================
+
+/** One layer's v7 sumcheck block. NO (kind,round,dims) — those are Λ outputs. */
+struct RCGkrLayerClaimV7 {
+    std::vector<RCGkrSumcheckRound> sumcheck;
+    /** c_ℓ = Ỹ(r_i,r_j) — bound to the committed Y column by the eval argument. */
+    Fp2 c_claim{};
+    /** a_ℓ = Ã(r_i,r_k) — opening of the committed A column. */
+    Fp2 a_eval{};
+    /** b_ℓ = B̃(r_k,r_j) — opening of the committed B column. */
+    Fp2 b_eval{};
+    /** sumcheck chain-end gf; MUST equal a_eval·b_eval (Thm 3.1). */
+    Fp2 final_eval{};
+};
+
+/**
+ * Committed per-layer witness columns (§2.1 A-columns), carried so the SUCCINCT
+ * verifier can run the in-circuit AIRs (Extract / MxExpand / tile-tree) over the
+ * committed data WITHOUT re-running the int64 reference. Each column is bound to
+ * its batched-FRI root (FriBatchColumnRoot); a tampered witness column fails the
+ * commitment binding, and a *consistent* forged column fails the AIR that
+ * constrains it (Extract sampler / dequant / tile-tree). Field-embedded int8/
+ * int64 values keep byte-exactness with the reference oracle.
+ */
+struct RCGkrV7WireWitness {
+    RCGkrLayerKind kind{};
+    uint32_t round{0};
+    uint32_t layer{0};
+    uint32_t m{0}, n{0}, k{0};
+    std::vector<int8_t> A;            // operand A (int8), m×k
+    std::vector<int8_t> B;            // operand B (int8), k×n
+    std::vector<int64_t> Y;           // GEMM product (int64), m×n
+    std::vector<int64_t> extract_in;  // pre-Extract accumulator (int64), m×n
+    std::vector<int8_t> extract_out;  // Extract output (int8), m×n
+};
+
+struct RCGkrProofV7 {
+    uint32_t version{kRCGkrProofVersionV7};
+    RCEpisodeParams episode{};
+    int32_t height{0};
+    uint256 claimed_digest{};
+    uint256 pow_bind{};
+    uint256 episode_sigma{};
+    std::vector<uint256> round_seeds;
+    std::vector<uint256> round_roots;
+    /** ONE batched FRI over ALL columns (per-layer A,B,Y,extract) + eval-arg f,g. */
+    FriBatchProof batch{};
+    std::vector<RCGkrLayerClaimV7> layers;
+    /** Committed witness columns for the in-circuit AIRs (bound to `batch`). */
+    std::vector<RCGkrV7WireWitness> wires;
+    RCGkrEvalArgumentProof eval{};
+    /** Dual-α Extract LogUp challenges (FS-bound; §5.6). */
+    Fp2 logup_alpha1{};
+    Fp2 logup_alpha2{};
+    double logup_bits{0.0};
+    /** SUCCINCT episode-verify wall (in-circuit AIRs, no reference re-run). */
+    double verify_s{0.0};
+    uint256 transcript_hash{};
+    bool over_budget{true};
+    std::string note;
+};
+
+struct RCGkrProveResultV7 {
+    RCGkrProofV7 proof;
+    RCGkrTiming timing;
+};
+
+/**
+ * v7 prover: ALL-PHASE arithmetization of the ACTUAL episode, composed into the
+ * batched FRI + per-layer sumcheck + eval argument + dual-α LogUp. PARKED /
+ * over_budget; does NOT touch consensus. `target` binds the §6.1 target check.
+ */
+[[nodiscard]] RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header,
+                                                      const RCEpisodeParams& params, int32_t height,
+                                                      const arith_uint256& target,
+                                                      const uint256& claimed_digest);
+
+/**
+ * v7 layout-driven verifier (behind the OFF arbiter). Enumerates Λ(params),
+ * verifies the batched FRI, binds every committed column to the immutable
+ * reference, checks the per-layer sumcheck + eval-argument openings + gf=a·b,
+ * the dual-α Extract LogUp, and the RoundMerkleStream round-root binding.
+ * REJECTS the entire §9 forgery list (v6 accepts F0). `why` names the first
+ * failing relation. NEVER consensus; ExactReplay stays the arbiter.
+ */
+[[nodiscard]] bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header,
+                                       int32_t height, const arith_uint256& target,
+                                       std::string* why = nullptr,
+                                       RCGkrTiming* out_timing = nullptr);
+
 enum class RCProdVerifyPath : uint8_t {
     ExactReplay = 0,
     WinnerGkr = 1,
@@ -343,9 +611,11 @@ struct RCProdVerifyResult {
                                                  const uint256& resealed_digest);
 
 /**
- * Coupled winner prove: REAL arithmetization of ACTUAL coupled puzzle work
- * (BuildCoupledLayers mirrors RecomputeCoupledPuzzleReference). Never proves
- * MakeToyRCEpisodeParams() / unrelated episode work.
+ * Coupled winner prove (Wave 3B): delegates to the sound coupled-R5 v7 prover
+ * (matmul_v4_rc_gkr_coupled.h). timing.ok=true iff a real, self-verified
+ * coupled proof was produced (the proof itself is v7-format; the v6 container
+ * stays empty). Must never prove MakeToyRCEpisodeParams() / unrelated work:
+ * fails closed unless resealed_digest equals the int64 coupled reference.
  */
 [[nodiscard]] RCGkrProveResult ProveWinnerCoupled(const CBlockHeader& header, int32_t height,
                                                  const RCCoupParams& params,
