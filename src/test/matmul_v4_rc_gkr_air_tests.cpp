@@ -198,6 +198,56 @@ BOOST_AUTO_TEST_CASE(air_logup_dual_alpha_honest)
 }
 
 // ---------------------------------------------------------------------------
+// ADVERSARIAL: alpha collides with a LogUp key (denominator zero). The
+// log-derivative sum Sum 1/(alpha - key) has a pole there; computing through
+// gkr_field::Inv(0)==0 would silently drop the term and could mask a false
+// membership. The verifier MUST fail-closed (reject), not compute through it.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(air_logup_alpha_collides_key_rejects)
+{
+    // Synthetic instance: witness {5,9} is a valid sub-multiset of table
+    // {5,9,13} with multiplicities {1,1,0}. At a non-colliding alpha it holds.
+    air::LogUpInstance inst;
+    inst.name = "collide";
+    inst.witness = {gf::Fp2{5, 0}, gf::Fp2{9, 0}};
+    inst.table = {gf::Fp2{5, 0}, gf::Fp2{9, 0}, gf::Fp2{13, 0}};
+    inst.table_mult = {1, 1, 0};
+    const std::vector<air::LogUpInstance> insts = {inst};
+
+    const gf::Fp2 safe1{101, 3};
+    const gf::Fp2 safe2{202, 5};
+
+    // Control: neither alpha collides -> the honest membership verifies.
+    {
+        air::LogUpVerifyResult r = air::LogUpDualAlphaVerify(insts, safe1, safe2);
+        BOOST_CHECK_MESSAGE(r.ok, "non-colliding honest membership failed: " << r.failure);
+    }
+    // alpha1 == a WITNESS key (5) -> pole in the witness sum. Reject fail-closed.
+    {
+        air::LogUpVerifyResult r = air::LogUpDualAlphaVerify(insts, gf::Fp2{5, 0}, safe2);
+        BOOST_CHECK_MESSAGE(!r.ok, "alpha == witness key was NOT rejected");
+        BOOST_CHECK(!r.sum_ok_a1);
+        BOOST_CHECK_EQUAL(r.failure, "collide:alpha_collides_witness_key");
+    }
+    // alpha1 == a TABLE-ONLY key (13, not in witness) -> pole in the table sum
+    // only; witness sum is defined. Reject fail-closed on the table branch.
+    {
+        air::LogUpVerifyResult r = air::LogUpDualAlphaVerify(insts, gf::Fp2{13, 0}, safe2);
+        BOOST_CHECK_MESSAGE(!r.ok, "alpha == table-only key was NOT rejected");
+        BOOST_CHECK(!r.sum_ok_a1);
+        BOOST_CHECK_EQUAL(r.failure, "collide:alpha_collides_table_key");
+    }
+    // Collision on the SECOND alpha only is likewise fatal (both must hold).
+    {
+        air::LogUpVerifyResult r = air::LogUpDualAlphaVerify(insts, safe1, gf::Fp2{9, 0});
+        BOOST_CHECK_MESSAGE(!r.ok, "alpha2 == witness key was NOT rejected");
+        BOOST_CHECK(r.sum_ok_a1);
+        BOOST_CHECK(!r.sum_ok_a2);
+        BOOST_CHECK_EQUAL(r.failure, "collide:alpha_collides_witness_key");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ADVERSARIAL (a): forge an Extract witness inconsistent with its input.
 // MUST reject.
 // ---------------------------------------------------------------------------

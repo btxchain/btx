@@ -85,7 +85,7 @@ against Stages §§1–5. It does **not** raise height.
 | **M5 shadow** | **Intact** — shadow ON, arbiter OFF, ExactReplay decides |
 | **M6 FRI params** | **DONE (Fable)** — Q=116, blowup=16, g=40, Fp2; bits=65 |
 | **M6+ DEEP/OOD** | **DONE (FRI v3)** — quotient identity at query sites |
-| **M7 under-constraint** | **CLOSED (proof v7 + forge suite)** — G1–G5 forge rejects; real `ProveWinnerCoupled`; **arbiter stays OFF** |
+| **M7 under-constraint** | **IMPROVED, NOT CLOSED** — v7 defeats the independent fabricated-witness constructors (arbitrary A/B, unrelated roots, fabricated trace/lookup/Extract, unrelated bank pages) by grounding against the immutable int64 reference (witness-carried verification / native re-execution), NOT by a compact in-circuit AIR. Succinctness (in-circuit ChaCha/SHA/tile-tree + committed openings) is **PARKED**; **arbiter stays OFF**; external audit OPEN |
 | **M8 soundness note** | **DONE** + emulated multi-persona audit doc |
 | **Emulated audit** | `doc/btx-matmul-v4.5-rc-crypto-audit-emulated-2026-07-21.md` — **not** external sign-off |
 | **M10 PCS alt** | **DONE (recommend)** — hand-rolled-but-audited FRI; no consensus vendor dep |
@@ -97,7 +97,11 @@ against Stages §§1–5. It does **not** raise height.
 | Consensus | ε=0 ExactReplay; `nMatMulRCHeight=INT32_MAX` |
 | Soft budget | over_budget → ExactReplay recommendation (**shipping**), not toy arithmetization |
 
-**Honest residual:** G1–G5 CLOSED under forge suite (proof v7); DEEP is
+**Honest residual:** v7 defeats the independent fabricated-witness
+constructors, but by native re-derivation against the immutable int64
+reference (witness-carried verification for the episode path; full
+re-execution for the coupled path), NOT by a succinct in-circuit proof — the
+AIR/committed-opening succinctness of §5.7/§6.2/§6.3 remains PARKED. DEEP is
 FRI-backed. Consensus-dim prove cost on CPU may soft-over_budget
 (ExactReplay ships until silicon M4); **independent human crypto audit**
 required before arbiter ON (OUT OF SCOPE). Fable IOP reference remains

@@ -233,10 +233,23 @@ inline constexpr uint32_t kRCFriBatchNumQueries = 128;
 /** RLC width cap W ≤ 2^12 keeps the (W+2)/|Fp2| batching term ≥ 76 bits post-grind. */
 inline constexpr uint32_t kRCFriBatchMaxColumns = 1u << 12;
 /** κ: max coefficients per committed column. LDE 16·2^28 = 2^32 = the largest
- *  power-of-two subgroup of Goldilocks F_p^× (2-adicity 32). HARD protocol cap. */
+ *  power-of-two subgroup of Goldilocks F_p^× (2-adicity 32). HARD protocol cap.
+ *
+ *  EXECUTABLE CEILING IS MUCH LOWER. The CPU prover/verifier additionally
+ *  reject any column whose LDE exceeds 2^24 (kRCFriMaxLdeLog2 below) — i.e.
+ *  n_coeffs·blowup > 2^24, so ≤ 2^20 coefficients/column in practice. That is
+ *  a deliberate memory guard, not the protocol bound: consensus-dimension
+ *  columns (trace ≈ 2^33 cells) exceed it and route to over_budget →
+ *  ExactReplay (arbiter OFF). A production FRI over the full 2^28/2^32 domain,
+ *  OR a formally-aggregated split into ≤2^20 chunks, is a PARKED work item.
+ *  Do NOT read kRCFriMaxColumnLog2 as "the executable handles 2^28 columns." */
 inline constexpr uint32_t kRCFriMaxColumnLog2 = 28;
 static_assert((uint64_t{16} << kRCFriMaxColumnLog2) == (uint64_t{1} << 32),
               "blowup·κ must equal the Goldilocks 2-adicity cap 2^32");
+/** Executable LDE ceiling: the CPU guard rejects any committed column whose
+ *  LDE domain (n_coeffs·blowup) exceeds 2^kRCFriMaxLdeLog2. Named so the guard
+ *  sites and this constant cannot drift apart. */
+inline constexpr uint32_t kRCFriMaxLdeLog2 = 24;
 
 [[nodiscard]] inline int FriBatchSoundnessBoundBits()
 {

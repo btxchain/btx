@@ -411,31 +411,51 @@ bool SelfCheckTables()
 
 namespace {
 
-// Sum over a multiset of 1/(alpha - w_i).
-Fp2 FracSum(const std::vector<Fp2>& fps, Fp2 alpha)
+// Sum over a multiset of 1/(alpha - w_i). FAIL-CLOSED: the log-derivative
+// identity has a pole wherever alpha == w_i (denominator zero). At a pole the
+// summand is undefined and the multiset-equality guarantee is voided, so we
+// MUST reject rather than compute through gkr_field::Inv(0)==0 (which silently
+// drops the term and could mask a false membership). Returns false iff any
+// denominator is zero; `out` holds the sum on success.
+[[nodiscard]] bool FracSum(const std::vector<Fp2>& fps, Fp2 alpha, Fp2& out)
 {
     Fp2 acc = Fp2::Zero();
     for (const Fp2& w : fps) {
-        acc = gkr_field::Add(acc, gkr_field::Inv(gkr_field::Sub(alpha, w)));
+        const Fp2 denom = gkr_field::Sub(alpha, w);
+        if (gkr_field::IsZero(denom)) return false; // alpha collides with a key
+        acc = gkr_field::Add(acc, gkr_field::Inv(denom));
     }
-    return acc;
+    out = acc;
+    return true;
 }
 
-// Sum over table of m_j/(alpha - t_j).
-Fp2 FracSumMult(const std::vector<Fp2>& fps, const std::vector<uint64_t>& mult, Fp2 alpha)
+// Sum over table of m_j/(alpha - t_j). FAIL-CLOSED on a zero denominator for
+// the same reason as FracSum.
+[[nodiscard]] bool FracSumMult(const std::vector<Fp2>& fps, const std::vector<uint64_t>& mult,
+                               Fp2 alpha, Fp2& out)
 {
     Fp2 acc = Fp2::Zero();
     for (size_t j = 0; j < fps.size(); ++j) {
+        const Fp2 denom = gkr_field::Sub(alpha, fps[j]);
+        if (gkr_field::IsZero(denom)) return false; // alpha collides with a table key
         const Fp2 num = Fp2::FromFp(gkr_field::FromU64(mult[j]));
-        acc = gkr_field::Add(acc, gkr_field::Div(num, gkr_field::Sub(alpha, fps[j])));
+        acc = gkr_field::Add(acc, gkr_field::Div(num, denom));
     }
-    return acc;
+    out = acc;
+    return true;
 }
 
 bool InstanceHoldsAt(const LogUpInstance& in, Fp2 alpha, std::string& why)
 {
-    const Fp2 lhs = FracSum(in.witness, alpha);
-    const Fp2 rhs = FracSumMult(in.table, in.table_mult, alpha);
+    Fp2 lhs, rhs;
+    if (!FracSum(in.witness, alpha, lhs)) {
+        why = in.name + ":alpha_collides_witness_key";
+        return false;
+    }
+    if (!FracSumMult(in.table, in.table_mult, alpha, rhs)) {
+        why = in.name + ":alpha_collides_table_key";
+        return false;
+    }
     if (!gkr_field::Eq(lhs, rhs)) { why = in.name + ":sum_mismatch"; return false; }
     return true;
 }

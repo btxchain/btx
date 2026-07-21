@@ -409,7 +409,7 @@ FriCommitResult FriCommitAndFoldImpl(const std::vector<Fp2>& coeffs, const uint2
         return out;
     }
     const uint32_t n = FriNextPow2(static_cast<uint32_t>(coeffs.size()));
-    if ((n * static_cast<uint64_t>(kRCFriBlowup)) > (1u << 24)) {
+    if ((n * static_cast<uint64_t>(kRCFriBlowup)) > (uint64_t{1} << kRCFriMaxLdeLog2)) {
         out.note = "LDE domain too large";
         return out;
     }
@@ -875,7 +875,7 @@ uint256 FriBatchColumnRoot(const std::vector<Fp2>& column, uint32_t n_coeffs)
 {
     if (column.empty() || n_coeffs == 0 || (n_coeffs & (n_coeffs - 1)) != 0 ||
         column.size() > n_coeffs ||
-        static_cast<uint64_t>(n_coeffs) * kRCFriBlowup > (1u << 24)) {
+        static_cast<uint64_t>(n_coeffs) * kRCFriBlowup > (uint64_t{1} << kRCFriMaxLdeLog2)) {
         return uint256{};
     }
     std::vector<Fp2> padded(n_coeffs, Fp2::Zero());
@@ -905,7 +905,7 @@ FriBatchCommitResult FriBatchCommit(const std::vector<std::vector<Fp2>>& columns
         max_len = std::max<uint32_t>(max_len, static_cast<uint32_t>(c.size()));
     }
     const uint32_t n = FriNextPow2(max_len);
-    if (static_cast<uint64_t>(n) * kRCFriBlowup > (1u << 24)) {
+    if (static_cast<uint64_t>(n) * kRCFriBlowup > (uint64_t{1} << kRCFriMaxLdeLog2)) {
         // CPU soft guard (matches FriCommitAndFold). The PROTOCOL cap is
         // κ=2^28 / LDE 2^32; consensus-dim proving stays over_budget/PARKED.
         out.note = "LDE domain too large (CPU guard)";
@@ -1056,7 +1056,7 @@ bool FriBatchVerify(const FriBatchProof& proof, const uint256& fs_seed, std::str
     const uint32_t n = proof.n_coeffs;
     if (n == 0 || (n & (n - 1)) != 0) return fail("n_coeffs not pow2");
     if (n > (uint64_t{1} << kRCFriMaxColumnLog2)) return fail("n_coeffs exceeds kappa");
-    if (static_cast<uint64_t>(n) * kRCFriBlowup > (1u << 24)) return fail("LDE guard");
+    if (static_cast<uint64_t>(n) * kRCFriBlowup > (uint64_t{1} << kRCFriMaxLdeLog2)) return fail("LDE guard");
     const uint32_t n_lde = n * kRCFriBlowup;
     const uint32_t W = static_cast<uint32_t>(proof.columns.size());
     if (W == 0 || W > kRCFriBatchMaxColumns) return fail("bad column count");
