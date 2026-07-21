@@ -110,6 +110,153 @@ inline constexpr const char* kRCGkrShadowStatement =
 using gkr_field::Fp;
 using gkr_field::Fp2;
 
+/** Layer kind in the ALL-PHASE real-episode arithmetization. */
+enum class RCGkrLayerKind : uint32_t {
+    GemmPhase1QKt = 1, // Q·Kᵀ product layer
+    GemmPhase1SV = 2,  // S·V product layer
+    GemmPhase2Fwd = 3, // forward residual GEMM
+    GemmPhase2Bwd = 4, // backward GEMM
+    GemmPhase2Wgrad = 5,
+    SynthGemmDeprecated = 100, // DEPRECATED synth proxy only
+};
+
+// ============================================================================
+// v7 FOUNDATION substrate (blueprint §2–4, §6.3; arbiter stays OFF).
+// The v6 proof/verifier below remains for the shadow scaffold until the
+// integration wave lands ProveFromLayout / layout-driven VerifyWinnerProof.
+// ============================================================================
+
+inline constexpr uint32_t kRCGkrProofVersionV7 = 7;
+inline constexpr char kRCGkrDomainTagV7[] = "BTX_RC_GKR_WINNER_V7";
+/** Bumped whenever the FS absorption schedule changes shape. Bound into the
+ *  transcript BEFORE any challenge (blueprint item 7). */
+inline constexpr uint32_t kRCGkrFsProfileVersionV7 = 1;
+
+/**
+ * κ — the 2-adicity wall. Goldilocks F_p^× has max power-of-two subgroup 2^32;
+ * with FRI blowup 16 a single committed column caps at 2^28 coefficients
+ * (LDE 16·2^28 = 2^32). The consensus trace is 2^33.39 cells, and a single
+ * QKt output alone is 2^28.58, so the trace MUST be split into multiple
+ * columns — a single concatenated trace vector cannot even be committed.
+ */
+inline constexpr uint32_t kRCGkrColumnMaxLog2 = 28;
+inline constexpr uint64_t kRCGkrColumnMaxCoeffs = uint64_t{1} << kRCGkrColumnMaxLog2;
+static_assert((uint64_t{16} << kRCGkrColumnMaxLog2) == (uint64_t{1} << 32),
+              "blowup*kappa must equal the Goldilocks 2-adicity cap 2^32");
+
+/** Distinct tensor identities of the canonical layout Λ(params) (§4.1).
+ *  Operand/extract tensors are committed ONCE and referenced per use
+ *  (transposed uses read the same column via the free-transpose fact §1.2). */
+enum class RCGkrTensor : uint8_t {
+    Q = 0,   // expanded operand, per round: n_q × d_head
+    K = 1,   // expanded operand, per round: n_ctx × d_head (QKt reads Kᵀ)
+    V = 2,   // expanded operand, per round: n_ctx × d_head
+    S = 3,   // extract_out of QKt, per round: n_q × n_ctx
+    Z = 4,   // extract_out of SV, per round: n_q × d_head
+    X = 5,   // layer 0 expanded; layer l+1 = extract_out of Fwd(l): b_seq × d_model
+    W = 6,   // expanded operand, per (round, l): d_model × d_model
+    G = 7,   // layer L expanded; layer l = extract_out of Bwd(l): b_seq × d_model
+    D = 8,   // extract_out of Wgrad(l): d_model × d_model
+    YQKt = 9,  // int64 GEMM output (T-column), n_q × n_ctx
+    YSV = 10,  // int64 GEMM output, n_q × d_head
+    YFwd = 11, // int64 GEMM output (pre-residual), b_seq × d_model
+    YBwd = 12, // int64 GEMM output, b_seq × d_model
+    YWgrad = 13, // int64 GEMM output, d_model × d_model
+};
+
+/** One committed column = one κ-bounded chunk of one tensor. */
+struct RCGkrColumnInfo {
+    uint32_t id{0};
+    RCGkrTensor tensor{RCGkrTensor::Q};
+    uint32_t round{0};
+    /** Layer index for X/W/G/D/Y*-tensors (X: 0..L, G: 0..L, W/D: 0..L−1); 0 otherwise. */
+    uint32_t layer{0};
+    /** Logical row-major matrix dims of the FULL tensor this chunk belongs to. */
+    uint32_t rows{0};
+    uint32_t cols{0};
+    /** Chunk split at κ = kRCGkrColumnMaxCoeffs (ceil(cells/κ) chunks). */
+    uint32_t chunk{0};
+    uint32_t n_chunks{1};
+    uint64_t chunk_offset{0}; // first cell covered (row-major)
+    uint64_t len{0};          // logical cells in this chunk (= FRI degree bound)
+    /** true: int64 GEMM output cells (T-column); false: int8 cells (O-column). */
+    bool int64_cells{false};
+};
+
+/** Reference to a tensor's column range as a GEMM operand (§1.2: transpose is
+ *  free — M̃ᵀ(r,s) = M̃(s,r) — so transposed uses carry a flag, not a copy). */
+struct RCGkrOperandRef {
+    uint32_t first_column{0};
+    uint32_t n_chunks{1};
+    bool transpose{false};
+};
+
+/** One layer of the canonical sequence Λ(params). The VERIFIER enumerates
+ *  these (§4.1): (kind, round, layer, m, n, k) and all operand identities are
+ *  OUTPUTS of the layout, never prover data — order forgeries (F8/F9) are
+ *  unexpressible. */
+struct RCGkrLayerSpec {
+    RCGkrLayerKind kind{RCGkrLayerKind::GemmPhase1QKt};
+    uint32_t round{0};
+    uint32_t layer{0};
+    uint32_t m{0};
+    uint32_t n{0};
+    uint32_t k{0};
+    RCGkrOperandRef a{};
+    RCGkrOperandRef b{};
+    /** GEMM output Y chunk columns (int64 T-columns). */
+    uint32_t y_first_column{0};
+    uint32_t y_chunks{1};
+    /** extract_out tensor columns (int8 O-columns) produced by this layer. */
+    uint32_t out_first_column{0};
+    uint32_t out_chunks{1};
+    /** Fwd only: residual operand column range (== a; G5: acc = Y + X_l at
+     *  evaluation points, no separately committed extract_in). −1 otherwise. */
+    int32_t residual_first_column{-1};
+};
+
+struct RCGkrLayout {
+    RCEpisodeParams params{};
+    std::vector<RCGkrColumnInfo> columns;
+    std::vector<RCGkrLayerSpec> layers;
+    uint64_t trace_cells{0};   // Σ Y cells (N_Y; 11,274,551,296 at consensus dims)
+    uint64_t operand_cells{0}; // Σ O-column cells (expanded operands + extract outs)
+    uint64_t total_cells{0};
+};
+
+/**
+ * Canonical, verifier-computable trace layout Λ(params) (§4.1, §6.3):
+ * enumerates the exact layer sequence QKt → SV → Fwd(0..L−1) →
+ * [Bwd(l), Wgrad(l)] for l = L−1..0, per round, and assigns every distinct
+ * tensor exactly one committed column range (chunked at κ = 2^28).
+ * Requires ValidateRCEpisodeParams(params).
+ */
+[[nodiscard]] RCGkrLayout RCGkrTraceLayout(const RCEpisodeParams& params);
+
+/**
+ * v7 Fiat–Shamir seed (blueprint item 7): binds proof version + domain tag +
+ * FS profile version, the FULL header (every wire field + GetHash()), the
+ * nonce-bound sigma, height, the exact episode params, target AND nBits,
+ * claimed digest + pow_bind, and all round roots — BEFORE any challenge is
+ * drawn. Use as the fs_seed of FriBatchCommit / the v7 transcript. Absorbing
+ * unrelated roots is insufficient (§4.3 insufficiency lemma / forgery F0).
+ */
+[[nodiscard]] uint256 RCGkrFsSeedV7(const CBlockHeader& header, int32_t height,
+                                    const RCEpisodeParams& params,
+                                    const arith_uint256& target,
+                                    const uint256& claimed_digest,
+                                    const uint256& episode_sigma,
+                                    const std::vector<uint256>& round_roots);
+
+/** Coupled-puzzle variant: binds the exact RCCoupParams + barrier roots under
+ *  a distinct sub-domain label (episode/coupled transcripts can never collide). */
+[[nodiscard]] uint256 RCGkrFsSeedV7Coupled(const CBlockHeader& header, int32_t height,
+                                           const RCCoupParams& params,
+                                           const arith_uint256& target,
+                                           const uint256& claimed_digest,
+                                           const uint256& sigma,
+                                           const std::vector<uint256>& barrier_roots);
+
 /** Soft budgets for the Section-2 scaffold (CPU toy/medium). Not silicon.
  *  Verify ceiling is Stage-I interval-fraction (see matmul_v4_rc_verify_budget.h). */
 inline constexpr double kRCGkrMediumProveBudgetS = 2.0;
@@ -121,16 +268,6 @@ struct RCGkrSumcheckRound {
     Fp2 eval0{};
     Fp2 eval1{};
     Fp2 eval2{};
-};
-
-/** Layer kind in the ALL-PHASE real-episode arithmetization. */
-enum class RCGkrLayerKind : uint32_t {
-    GemmPhase1QKt = 1, // Q·Kᵀ product layer
-    GemmPhase1SV = 2,  // S·V product layer
-    GemmPhase2Fwd = 3, // forward residual GEMM
-    GemmPhase2Bwd = 4, // backward GEMM
-    GemmPhase2Wgrad = 5,
-    SynthGemmDeprecated = 100, // DEPRECATED synth proxy only
 };
 
 struct RCGkrLayerClaim {

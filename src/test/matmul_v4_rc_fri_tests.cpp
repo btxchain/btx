@@ -168,4 +168,157 @@ BOOST_AUTO_TEST_CASE(fri_bad_seed_rejected)
     BOOST_CHECK(!rc::FriVerify(c.proof, MakeSeed(0x99), &why));
 }
 
+// ============================================================================
+// Batched FRI (v7 substrate): single instance + dual-OOD DEEP.
+// ============================================================================
+
+namespace {
+
+std::vector<std::vector<rc::Fp2>> MakeBatchColumns()
+{
+    // Mixed lengths incl. non-pow2 (5) and a singleton — exercises the
+    // degree-shift (maximal-degree enforcement) path.
+    std::vector<std::vector<rc::Fp2>> cols;
+    cols.push_back(MakeCoeffs(16));
+    std::vector<rc::Fp2> c2(5);
+    for (size_t i = 0; i < c2.size(); ++i) c2[i] = gf::FromSigned2(-static_cast<int64_t>(i) - 9);
+    cols.push_back(std::move(c2));
+    cols.push_back(MakeCoeffs(32));
+    cols.push_back({gf::FromSigned2(424242)});
+    return cols;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(frib_constants_and_soundness_bits)
+{
+    // Soundness table 2026-07-21: the 7 separate v6 FRI instances union to
+    // 7·2^-65.85 ≈ 2^-63.05 — FAILING the 2^-64 target. One batched instance
+    // is mandatory. ceil(log2 7) = 3 bits of union loss documents the failure:
+    BOOST_CHECK_LT(rc::FriSoundnessBoundBits() - 3, rc::kRCFriTargetSoundnessBits);
+    // Named batched query constant: Q=128 (blueprint hardening; Q=116 clears
+    // 2^-64 with <1 bit margin, 128 gives floor(128·log2(32/17))−40 = 76).
+    BOOST_CHECK_EQUAL(rc::kRCFriBatchNumQueries, 128u);
+    BOOST_CHECK_EQUAL(rc::FriBatchSoundnessBoundBits(), 76);
+    BOOST_CHECK_GE(rc::FriBatchSoundnessBoundBits(), rc::kRCFriTargetSoundnessBits);
+    BOOST_CHECK(rc::FriBatchClaimedBitsMeetTarget());
+    // κ: 2-adicity wall — blowup·κ = 2^32 = max power-of-two subgroup of Fp^×.
+    BOOST_CHECK_EQUAL(rc::kRCFriMaxColumnLog2, 28u);
+    BOOST_CHECK(std::string(rc::kRCFriBatchSoundnessStatement).find("Q=128") !=
+                std::string::npos);
+    BOOST_CHECK(std::string(rc::kRCFriBatchSoundnessStatement).find("DUAL-OOD") !=
+                std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(frib_honest_commit_verify_serde_byte_exact)
+{
+    const auto cols = MakeBatchColumns();
+    const uint256 seed = MakeSeed(0xB1);
+    const auto c = rc::FriBatchCommit(cols, seed, /*pow_grind_nonce=*/11);
+    BOOST_REQUIRE_MESSAGE(c.ok, c.note);
+    const auto& p = c.proof;
+    BOOST_CHECK_EQUAL(p.n_coeffs, 32u); // max column len 32 (canonical pow2)
+    BOOST_CHECK_EQUAL(p.queries.size(), rc::kRCFriBatchNumQueries);
+    BOOST_CHECK_EQUAL(p.columns.size(), cols.size());
+    // Dual OOD: two distinct points, both off the LDE domain (c1 != 0 suffices
+    // for off-domain; distinctness is checked structurally by the verifier).
+    BOOST_CHECK(!gf::Eq(p.z1, p.z2));
+    std::string why;
+    BOOST_CHECK_MESSAGE(rc::FriBatchVerify(p, seed, &why), why);
+
+    // The opening primitive: bound per-column evaluations at BOTH OOD points
+    // are byte-exact against direct polynomial evaluation.
+    for (size_t i = 0; i < cols.size(); ++i) {
+        BOOST_CHECK(gf::Eq(p.evals_z1[i], rc::FriEvalPoly(cols[i], p.z1)));
+        BOOST_CHECK(gf::Eq(p.evals_z2[i], rc::FriEvalPoly(cols[i], p.z2)));
+    }
+
+    // Column-root helper (two-epoch discipline) matches the committed roots.
+    for (size_t i = 0; i < cols.size(); ++i) {
+        BOOST_CHECK(rc::FriBatchColumnRoot(cols[i], p.n_coeffs) == p.columns[i].root);
+    }
+
+    // Serialization is byte-exact round-trip and still verifies.
+    std::vector<unsigned char> bytes;
+    BOOST_REQUIRE(rc::SerializeFriBatchProof(p, bytes) > 0);
+    const auto back = rc::DeserializeFriBatchProof(bytes);
+    BOOST_REQUIRE(back.has_value());
+    std::vector<unsigned char> bytes2;
+    BOOST_REQUIRE(rc::SerializeFriBatchProof(*back, bytes2) > 0);
+    BOOST_CHECK(bytes == bytes2);
+    BOOST_CHECK(rc::FriBatchVerify(*back, seed, &why));
+}
+
+BOOST_AUTO_TEST_CASE(frib_forged_ood_opening_rejected)
+{
+    // (b) A forged column opening at an OOD point must be rejected: the
+    // dual-OOD DEEP identity at the query sites catches it.
+    const auto cols = MakeBatchColumns();
+    const uint256 seed = MakeSeed(0xB2);
+    const auto c = rc::FriBatchCommit(cols, seed);
+    BOOST_REQUIRE(c.ok);
+    std::string why;
+    auto bad = c.proof;
+    bad.evals_z1[1].c0 ^= 1;
+    BOOST_CHECK(!rc::FriBatchVerify(bad, seed, &why));
+    auto bad2 = c.proof;
+    bad2.evals_z2[2].c1 ^= 1;
+    BOOST_CHECK(!rc::FriBatchVerify(bad2, seed, &why));
+}
+
+BOOST_AUTO_TEST_CASE(frib_forged_column_or_path_rejected)
+{
+    const auto cols = MakeBatchColumns();
+    const uint256 seed = MakeSeed(0xB3);
+    const auto c = rc::FriBatchCommit(cols, seed);
+    BOOST_REQUIRE(c.ok);
+    std::string why;
+
+    auto bad = c.proof; // query-site column value forged
+    bad.queries[0].columns[0].value.c0 ^= 1;
+    BOOST_CHECK(!rc::FriBatchVerify(bad, seed, &why));
+
+    auto bad2 = c.proof; // Merkle sibling forged
+    BOOST_REQUIRE(!bad2.queries[0].columns[0].siblings.empty());
+    bad2.queries[0].columns[0].siblings[0].data()[0] ^= 0xff;
+    BOOST_CHECK(!rc::FriBatchVerify(bad2, seed, &why));
+
+    auto bad3 = c.proof; // column commitment forged → FS challenges shift
+    bad3.columns[0].root.data()[0] ^= 0xff;
+    BOOST_CHECK(!rc::FriBatchVerify(bad3, seed, &why));
+
+    auto bad4 = c.proof; // fold challenge forged
+    BOOST_REQUIRE(!bad4.fold_challenges.empty());
+    bad4.fold_challenges[0].c0 ^= 1;
+    BOOST_CHECK(!rc::FriBatchVerify(bad4, seed, &why));
+
+    auto bad5 = c.proof; // final value forged
+    bad5.final_value.c0 ^= 1;
+    BOOST_CHECK(!rc::FriBatchVerify(bad5, seed, &why));
+
+    auto bad6 = c.proof; // truncated queries
+    bad6.queries.pop_back();
+    BOOST_CHECK(!rc::FriBatchVerify(bad6, seed, &why));
+
+    auto bad7 = c.proof; // degree-bound (len) forged → shift/v recompute breaks
+    bad7.column_len[1] = 4;
+    BOOST_CHECK(!rc::FriBatchVerify(bad7, seed, &why));
+
+    // Wrong FS seed → every challenge differs.
+    BOOST_CHECK(!rc::FriBatchVerify(c.proof, MakeSeed(0xB4), &why));
+}
+
+BOOST_AUTO_TEST_CASE(frib_column_exceeding_kappa_or_empty_rejected)
+{
+    const uint256 seed = MakeSeed(0xB5);
+    // Empty column list / empty column rejected.
+    BOOST_CHECK(!rc::FriBatchCommit({}, seed).ok);
+    BOOST_CHECK(!rc::FriBatchCommit({std::vector<rc::Fp2>{}}, seed).ok);
+    // CPU LDE guard (protocol κ cap is 2^28; CPU soft guard is LDE 2^24).
+    std::vector<std::vector<rc::Fp2>> big;
+    big.push_back(std::vector<rc::Fp2>((1u << 20) + 1, gf::FromSigned2(1)));
+    const auto r = rc::FriBatchCommit(big, seed);
+    BOOST_CHECK(!r.ok);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

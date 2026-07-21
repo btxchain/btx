@@ -860,6 +860,227 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
 
 } // namespace
 
+// ============================================================================
+// v7 FOUNDATION substrate: canonical trace layout Λ(params) + FS binding.
+// ============================================================================
+
+RCGkrLayout RCGkrTraceLayout(const RCEpisodeParams& p)
+{
+    assert(ValidateRCEpisodeParams(p));
+    RCGkrLayout out;
+    out.params = p;
+
+    // Register one tensor = ceil(cells/κ) chunk columns; return (first, n_chunks).
+    auto add_tensor = [&](RCGkrTensor tensor, uint32_t round, uint32_t layer, uint32_t rows,
+                          uint32_t cols, bool int64_cells) -> RCGkrOperandRef {
+        const uint64_t cells = static_cast<uint64_t>(rows) * cols;
+        const uint32_t n_chunks = static_cast<uint32_t>(
+            (cells + kRCGkrColumnMaxCoeffs - 1) >> kRCGkrColumnMaxLog2);
+        const uint32_t first = static_cast<uint32_t>(out.columns.size());
+        for (uint32_t c = 0; c < n_chunks; ++c) {
+            RCGkrColumnInfo ci;
+            ci.id = first + c;
+            ci.tensor = tensor;
+            ci.round = round;
+            ci.layer = layer;
+            ci.rows = rows;
+            ci.cols = cols;
+            ci.chunk = c;
+            ci.n_chunks = n_chunks;
+            ci.chunk_offset = static_cast<uint64_t>(c) << kRCGkrColumnMaxLog2;
+            ci.len = std::min<uint64_t>(kRCGkrColumnMaxCoeffs, cells - ci.chunk_offset);
+            ci.int64_cells = int64_cells;
+            out.columns.push_back(ci);
+        }
+        if (int64_cells) {
+            out.trace_cells += cells;
+        } else {
+            out.operand_cells += cells;
+        }
+        out.total_cells += cells;
+        return RCGkrOperandRef{first, n_chunks, /*transpose=*/false};
+    };
+    auto transposed = [](RCGkrOperandRef ref) {
+        ref.transpose = true;
+        return ref;
+    };
+    auto add_layer = [&](RCGkrLayerKind kind, uint32_t round, uint32_t layer, uint32_t m,
+                         uint32_t n, uint32_t k, const RCGkrOperandRef& a,
+                         const RCGkrOperandRef& b, RCGkrTensor y_tensor,
+                         RCGkrTensor out_tensor, uint32_t out_rows, uint32_t out_cols,
+                         int32_t residual_first) {
+        RCGkrLayerSpec ls;
+        ls.kind = kind;
+        ls.round = round;
+        ls.layer = layer;
+        ls.m = m;
+        ls.n = n;
+        ls.k = k;
+        ls.a = a;
+        ls.b = b;
+        const RCGkrOperandRef y = add_tensor(y_tensor, round, layer, m, n, /*int64=*/true);
+        ls.y_first_column = y.first_column;
+        ls.y_chunks = y.n_chunks;
+        const RCGkrOperandRef o =
+            add_tensor(out_tensor, round, layer, out_rows, out_cols, /*int64=*/false);
+        ls.out_first_column = o.first_column;
+        ls.out_chunks = o.n_chunks;
+        ls.residual_first_column = residual_first;
+        out.layers.push_back(ls);
+        return o;
+    };
+
+    out.columns.reserve(static_cast<size_t>(p.rounds) * (8u + 5u * p.L_lyr));
+    out.layers.reserve(RCGkrExpectedLayerCount(p));
+
+    for (uint32_t r = 0; r < p.rounds; ++r) {
+        // Phase 1. QKt: A = Q, B = Kᵀ (free transpose of the single K column).
+        const auto q_ref = add_tensor(RCGkrTensor::Q, r, 0, p.n_q, p.d_head, false);
+        const auto k_ref = add_tensor(RCGkrTensor::K, r, 0, p.n_ctx, p.d_head, false);
+        const auto s_ref =
+            add_layer(RCGkrLayerKind::GemmPhase1QKt, r, 0, p.n_q, p.n_ctx, p.d_head, q_ref,
+                      transposed(k_ref), RCGkrTensor::YQKt, RCGkrTensor::S, p.n_q, p.n_ctx, -1);
+        // SV: A = S (= extract_out of QKt, SAME column — wiring is definitional).
+        const auto v_ref = add_tensor(RCGkrTensor::V, r, 0, p.n_ctx, p.d_head, false);
+        (void)add_layer(RCGkrLayerKind::GemmPhase1SV, r, 0, p.n_q, p.d_head, p.n_ctx, s_ref,
+                        v_ref, RCGkrTensor::YSV, RCGkrTensor::Z, p.n_q, p.d_head, -1);
+
+        // Phase 2 forward. X(r,0) expanded; W(r,l) committed once and shared
+        // between Fwd (transposed) and Bwd (plain).
+        std::vector<RCGkrOperandRef> x_refs(p.L_lyr + 1);
+        std::vector<RCGkrOperandRef> w_refs(p.L_lyr);
+        x_refs[0] = add_tensor(RCGkrTensor::X, r, 0, p.b_seq, p.d_model, false);
+        for (uint32_t l = 0; l < p.L_lyr; ++l) {
+            w_refs[l] = add_tensor(RCGkrTensor::W, r, l, p.d_model, p.d_model, false);
+            x_refs[l + 1] = add_layer(
+                RCGkrLayerKind::GemmPhase2Fwd, r, l, p.b_seq, p.d_model, p.d_model, x_refs[l],
+                transposed(w_refs[l]), RCGkrTensor::YFwd, RCGkrTensor::X, p.b_seq, p.d_model,
+                static_cast<int32_t>(x_refs[l].first_column));
+        }
+
+        // Phase 2 backward: G(r,L) expanded; G(r,l+1) shared between Bwd (plain
+        // A) and Wgrad (transposed A).
+        std::vector<RCGkrOperandRef> g_refs(p.L_lyr + 1);
+        g_refs[p.L_lyr] = add_tensor(RCGkrTensor::G, r, p.L_lyr, p.b_seq, p.d_model, false);
+        for (int32_t li = static_cast<int32_t>(p.L_lyr) - 1; li >= 0; --li) {
+            const uint32_t l = static_cast<uint32_t>(li);
+            g_refs[l] = add_layer(RCGkrLayerKind::GemmPhase2Bwd, r, l, p.b_seq, p.d_model,
+                                  p.d_model, g_refs[l + 1], w_refs[l], RCGkrTensor::YBwd,
+                                  RCGkrTensor::G, p.b_seq, p.d_model, -1);
+            (void)add_layer(RCGkrLayerKind::GemmPhase2Wgrad, r, l, p.d_model, p.d_model,
+                            p.b_seq, transposed(g_refs[l + 1]), x_refs[l], RCGkrTensor::YWgrad,
+                            RCGkrTensor::D, p.d_model, p.d_model, -1);
+        }
+    }
+    assert(out.layers.size() == RCGkrExpectedLayerCount(p));
+    return out;
+}
+
+uint256 RCGkrFsSeedV7(const CBlockHeader& header, int32_t height, const RCEpisodeParams& params,
+                      const arith_uint256& target, const uint256& claimed_digest,
+                      const uint256& episode_sigma, const std::vector<uint256>& round_roots)
+{
+    std::vector<unsigned char> buf;
+    // Domain + versions FIRST (blueprint item 7): proof version, domain tag,
+    // transcript/FS profile version — all bound before any challenge.
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>(kRCGkrDomainTagV7),
+                sizeof(kRCGkrDomainTagV7) - 1);
+    AppendLE32(buf, kRCGkrProofVersionV7);
+    AppendLE32(buf, kRCGkrFsProfileVersionV7);
+    // Full header/template binding: EVERY wire field plus the header hash.
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("hdr"), 3);
+    AppendLE32(buf, static_cast<uint32_t>(header.nVersion));
+    AppendBytes(buf, header.hashPrevBlock.data(), 32);
+    AppendBytes(buf, header.hashMerkleRoot.data(), 32);
+    AppendLE32(buf, header.nTime);
+    AppendLE32(buf, header.nBits);
+    AppendLE64(buf, header.nNonce64);
+    AppendBytes(buf, header.matmul_digest.data(), 32);
+    AppendLE32(buf, header.matmul_dim);
+    AppendBytes(buf, header.seed_a.data(), 32);
+    AppendBytes(buf, header.seed_b.data(), 32);
+    const uint256 hh = header.GetHash();
+    AppendBytes(buf, hh.data(), 32);
+    // Height.
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("hgt"), 3);
+    AppendLE32(buf, static_cast<uint32_t>(height));
+    // Exact episode params (all 8 fields — F13-style dims binding).
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("eps"), 3);
+    AppendLE32(buf, params.rounds);
+    AppendLE32(buf, params.d_head);
+    AppendLE32(buf, params.n_q);
+    AppendLE32(buf, params.n_ctx);
+    AppendLE32(buf, params.L_lyr);
+    AppendLE32(buf, params.d_model);
+    AppendLE32(buf, params.b_seq);
+    AppendLE32(buf, params.T_leaf);
+    // Target AND nBits (nBits already in the header block above; target is the
+    // expanded work bound actually enforced).
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("tgt"), 3);
+    const uint256 tgt = ArithToUint256(target);
+    AppendBytes(buf, tgt.data(), 32);
+    // Claimed digest + nonce-bound pow_bind + nonce-bound sigma.
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("dig"), 3);
+    AppendBytes(buf, claimed_digest.data(), 32);
+    const uint256 bind = DerivePowBind(claimed_digest);
+    AppendBytes(buf, bind.data(), 32);
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("sig"), 3);
+    AppendBytes(buf, episode_sigma.data(), 32);
+    // All round roots (count-prefixed).
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("rts"), 3);
+    AppendLE32(buf, static_cast<uint32_t>(round_roots.size()));
+    for (const auto& rt : round_roots) AppendBytes(buf, rt.data(), 32);
+    return Sha256dBytes(buf.data(), buf.size());
+}
+
+uint256 RCGkrFsSeedV7Coupled(const CBlockHeader& header, int32_t height,
+                             const RCCoupParams& params, const arith_uint256& target,
+                             const uint256& claimed_digest, const uint256& sigma,
+                             const std::vector<uint256>& barrier_roots)
+{
+    std::vector<unsigned char> buf;
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>(kRCGkrDomainTagV7),
+                sizeof(kRCGkrDomainTagV7) - 1);
+    // Distinct sub-domain: coupled transcripts can never collide with episode.
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("coupled"), 7);
+    AppendLE32(buf, kRCGkrProofVersionV7);
+    AppendLE32(buf, kRCGkrFsProfileVersionV7);
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("hdr"), 3);
+    AppendLE32(buf, static_cast<uint32_t>(header.nVersion));
+    AppendBytes(buf, header.hashPrevBlock.data(), 32);
+    AppendBytes(buf, header.hashMerkleRoot.data(), 32);
+    AppendLE32(buf, header.nTime);
+    AppendLE32(buf, header.nBits);
+    AppendLE64(buf, header.nNonce64);
+    AppendBytes(buf, header.matmul_digest.data(), 32);
+    AppendLE32(buf, header.matmul_dim);
+    AppendBytes(buf, header.seed_a.data(), 32);
+    AppendBytes(buf, header.seed_b.data(), 32);
+    const uint256 hh = header.GetHash();
+    AppendBytes(buf, hh.data(), 32);
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("hgt"), 3);
+    AppendLE32(buf, static_cast<uint32_t>(height));
+    // Exact coupled params.
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("cps"), 3);
+    AppendLE32(buf, params.barriers);
+    AppendLE32(buf, params.lobes);
+    AppendLE32(buf, params.lobe_width);
+    AppendLE32(buf, params.bank_pages);
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("tgt"), 3);
+    const uint256 tgt = ArithToUint256(target);
+    AppendBytes(buf, tgt.data(), 32);
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("dig"), 3);
+    AppendBytes(buf, claimed_digest.data(), 32);
+    const uint256 bind = DerivePowBind(claimed_digest);
+    AppendBytes(buf, bind.data(), 32);
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("sig"), 3);
+    AppendBytes(buf, sigma.data(), 32);
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("rts"), 3);
+    AppendLE32(buf, static_cast<uint32_t>(barrier_roots.size()));
+    for (const auto& rt : barrier_roots) AppendBytes(buf, rt.data(), 32);
+    return Sha256dBytes(buf.data(), buf.size());
+}
+
 size_t RCGkrExpectedLayerCount(const RCEpisodeParams& p)
 {
     return static_cast<size_t>(p.rounds) * (2u + 3u * static_cast<size_t>(p.L_lyr));

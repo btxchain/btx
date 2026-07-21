@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_fri.h>
 #include <matmul/matmul_v4_rc_gkr.h>
+#include <matmul/matmul_v4_rc_gkr_eval.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
 #include <matmul/matmul_v4_rc_verify_bakeoff.h>
 #include <pow.h>
@@ -685,6 +686,270 @@ BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_fail_closed_no_toy_proof)
     // Must not look like a successful ALL-PHASE episode proof.
     BOOST_CHECK(pr.proof.round_seeds.empty());
     BOOST_CHECK(pr.proof.round_roots.empty());
+}
+
+// ============================================================================
+// v7 FOUNDATION substrate: trace layout Λ(params), FS binding, eq-kernel /
+// batched-FRI opening primitive. Arbiter stays OFF; nothing below touches
+// consensus or the int64 reference.
+// ============================================================================
+
+BOOST_AUTO_TEST_CASE(gkr_v7_trace_layout_matches_int64_reference_sequence)
+{
+    // The layout is the canonical Λ enumeration; the int64 reference prover
+    // (BuildRealEpisodeLayers inside ProveWinnerEpisode) is the ground-truth
+    // ordering oracle. Every (kind, round, layer, m, n, k) must agree.
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const auto layout = rc::RCGkrTraceLayout(params);
+    BOOST_REQUIRE_EQUAL(layout.layers.size(), rc::RCGkrExpectedLayerCount(params));
+
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    const auto pr = rc::ProveWinnerEpisode(header, params, 0, dig);
+    BOOST_REQUIRE(pr.timing.ok);
+    BOOST_REQUIRE_EQUAL(pr.proof.layers.size(), layout.layers.size());
+    for (size_t i = 0; i < layout.layers.size(); ++i) {
+        const auto& ls = layout.layers[i];
+        const auto& lc = pr.proof.layers[i];
+        BOOST_CHECK(ls.kind == lc.kind);
+        BOOST_CHECK_EQUAL(ls.round, lc.round);
+        BOOST_CHECK_EQUAL(ls.layer, lc.layer);
+        BOOST_CHECK_EQUAL(ls.m, lc.m);
+        BOOST_CHECK_EQUAL(ls.n, lc.n);
+        BOOST_CHECK_EQUAL(ls.k, lc.k);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(gkr_v7_trace_layout_wiring_identities)
+{
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const auto layout = rc::RCGkrTraceLayout(params);
+    // Column ids are dense and self-consistent.
+    for (size_t i = 0; i < layout.columns.size(); ++i) {
+        BOOST_CHECK_EQUAL(layout.columns[i].id, static_cast<uint32_t>(i));
+        BOOST_CHECK_LE(layout.columns[i].len, rc::kRCGkrColumnMaxCoeffs);
+        BOOST_CHECK(layout.columns[i].len > 0);
+    }
+    // Wiring is definitional (same column reference — §4.2), per round:
+    const rc::RCGkrLayerSpec* prev_fwd = nullptr;
+    std::vector<const rc::RCGkrLayerSpec*> fwd(params.L_lyr, nullptr);
+    std::vector<const rc::RCGkrLayerSpec*> bwd(params.L_lyr, nullptr);
+    for (const auto& ls : layout.layers) {
+        if (ls.round != 0) continue;
+        switch (ls.kind) {
+        case rc::RCGkrLayerKind::GemmPhase1QKt: {
+            // QKt reads Kᵀ via the free-transpose flag (no duplicated column).
+            BOOST_CHECK(ls.b.transpose);
+            break;
+        }
+        case rc::RCGkrLayerKind::GemmPhase1SV: {
+            // SV operand A IS the extract_out column of QKt.
+            const auto& qkt = layout.layers[0];
+            BOOST_CHECK_EQUAL(ls.a.first_column, qkt.out_first_column);
+            BOOST_CHECK(!ls.a.transpose);
+            break;
+        }
+        case rc::RCGkrLayerKind::GemmPhase2Fwd: {
+            fwd[ls.layer] = &ls;
+            // G5: the residual column IS operand A's column (X_l) — no free
+            // residual_mle field remains in v7.
+            BOOST_CHECK_EQUAL(ls.residual_first_column,
+                              static_cast<int32_t>(ls.a.first_column));
+            BOOST_CHECK(ls.b.transpose); // Fwd reads Wᵀ
+            if (prev_fwd != nullptr) {
+                // Operand A of Fwd(l) IS extract_out of Fwd(l−1).
+                BOOST_CHECK_EQUAL(ls.a.first_column, prev_fwd->out_first_column);
+            }
+            prev_fwd = &ls;
+            break;
+        }
+        case rc::RCGkrLayerKind::GemmPhase2Bwd: {
+            bwd[ls.layer] = &ls;
+            // Bwd(l) shares W(l) with Fwd(l) — committed once, plain here.
+            BOOST_REQUIRE(fwd[ls.layer] != nullptr);
+            BOOST_CHECK_EQUAL(ls.b.first_column, fwd[ls.layer]->b.first_column);
+            BOOST_CHECK(!ls.b.transpose);
+            break;
+        }
+        case rc::RCGkrLayerKind::GemmPhase2Wgrad: {
+            // Wgrad(l) operand A is the SAME G(l+1) column Bwd(l) reads,
+            // transposed for free; operand B is the X(l) column Fwd(l) reads.
+            BOOST_REQUIRE(bwd[ls.layer] != nullptr);
+            BOOST_REQUIRE(fwd[ls.layer] != nullptr);
+            BOOST_CHECK_EQUAL(ls.a.first_column, bwd[ls.layer]->a.first_column);
+            BOOST_CHECK(ls.a.transpose);
+            BOOST_CHECK_EQUAL(ls.b.first_column, fwd[ls.layer]->a.first_column);
+            break;
+        }
+        default:
+            BOOST_FAIL("unexpected layer kind in layout");
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(gkr_v7_trace_layout_consensus_dims_chunking)
+{
+    // The 2-adicity wall at consensus dims: N_Y = 11,274,551,296 ≈ 2^33.39
+    // cells total and the QKt output alone is 2^28.58 > κ = 2^28 — the trace
+    // MUST split into multiple κ-bounded columns (blueprint §0.4/§2.1).
+    rc::RCEpisodeParams p; // defaults ARE the consensus dims
+    BOOST_REQUIRE_EQUAL(p.n_ctx, 786'432u);
+    const auto layout = rc::RCGkrTraceLayout(p);
+    BOOST_CHECK_EQUAL(layout.layers.size(), 200u); // 4·(2 + 3·16)
+    BOOST_CHECK_EQUAL(layout.trace_cells, 11'274'551'296ull);
+    // QKt Y (512·786432 = 402,653,184 cells) splits into exactly 2 chunks.
+    const auto& qkt = layout.layers[0];
+    BOOST_CHECK(qkt.kind == rc::RCGkrLayerKind::GemmPhase1QKt);
+    BOOST_CHECK_EQUAL(qkt.y_chunks, 2u);
+    const auto& y0 = layout.columns[qkt.y_first_column];
+    const auto& y1 = layout.columns[qkt.y_first_column + 1];
+    BOOST_CHECK_EQUAL(y0.len, rc::kRCGkrColumnMaxCoeffs);
+    BOOST_CHECK_EQUAL(y1.len, 402'653'184ull - rc::kRCGkrColumnMaxCoeffs);
+    BOOST_CHECK_EQUAL(y1.chunk_offset, rc::kRCGkrColumnMaxCoeffs);
+    // EVERY column respects κ (a single concatenated trace is impossible).
+    uint64_t total = 0;
+    for (const auto& col : layout.columns) {
+        BOOST_CHECK_LE(col.len, rc::kRCGkrColumnMaxCoeffs);
+        total += col.len;
+    }
+    BOOST_CHECK_EQUAL(total, layout.total_cells);
+    BOOST_CHECK_EQUAL(layout.total_cells, layout.trace_cells + layout.operand_cells);
+    // The trace alone exceeds any single-column commitment by > 2^5.
+    BOOST_CHECK_GT(layout.trace_cells, 32ull * rc::kRCGkrColumnMaxCoeffs);
+}
+
+BOOST_AUTO_TEST_CASE(gkr_v7_fs_seed_binds_every_field)
+{
+    // Blueprint item 7: mutate each bound field → the seed (hence every FS
+    // challenge) changes. Absorbing unrelated roots is insufficient (F0).
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const arith_uint256 target = arith_uint256{}.SetCompact(0x207fffff);
+    const uint256 dig = MakeSeed(0xD1);
+    const uint256 sigma = MakeSeed(0x5A);
+    std::vector<uint256> roots{MakeSeed(0x01), MakeSeed(0x02)};
+
+    const uint256 base = rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, roots);
+    BOOST_CHECK(base == rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, roots));
+
+    auto expect_differs = [&](const uint256& other) { BOOST_CHECK(other != base); };
+
+    { auto h = header; h.nVersion ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.hashPrevBlock.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.hashMerkleRoot.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.nTime ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.nBits ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.nNonce64 ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.matmul_digest.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.matmul_dim ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.seed_a.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    { auto h = header; h.seed_b.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(h, 0, params, target, dig, sigma, roots)); }
+    // Height.
+    expect_differs(rc::RCGkrFsSeedV7(header, 1, params, target, dig, sigma, roots));
+    // Every episode param.
+    { auto p2 = params; p2.rounds += 1;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.d_head += 32;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.n_q += 32;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.n_ctx += 32;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.L_lyr += 1;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.d_model += 32;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.b_seq += 32;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    { auto p2 = params; p2.T_leaf += 32;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, p2, target, dig, sigma, roots)); }
+    // Target (beyond nBits).
+    { arith_uint256 t2 = target; t2 >>= 1;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, params, t2, dig, sigma, roots)); }
+    // Digest, sigma, roots (content, count, order).
+    { auto d2 = dig; d2.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, params, target, d2, sigma, roots)); }
+    { auto s2 = sigma; s2.data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, params, target, dig, s2, roots)); }
+    { auto r2 = roots; r2[0].data()[0] ^= 1;
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, r2)); }
+    { auto r2 = roots; r2.push_back(MakeSeed(0x03));
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, r2)); }
+    { auto r2 = roots; std::swap(r2[0], r2[1]);
+      expect_differs(rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, r2)); }
+    // Episode vs coupled sub-domains can never collide.
+    const auto coup = rc::MakeToyRCCoupParams();
+    expect_differs(rc::RCGkrFsSeedV7Coupled(header, 0, coup, target, dig, sigma, roots));
+    // Coupled binds its own params.
+    { auto c2 = coup; c2.barriers += 1;
+      const uint256 a = rc::RCGkrFsSeedV7Coupled(header, 0, coup, target, dig, sigma, roots);
+      const uint256 b = rc::RCGkrFsSeedV7Coupled(header, 0, c2, target, dig, sigma, roots);
+      BOOST_CHECK(a != b); }
+}
+
+BOOST_AUTO_TEST_CASE(gkr_v7_eq_kernel_matches_int64_reference_mle)
+{
+    // §1.3 correspondence, cross-checked against the int64-embedded MLE
+    // evaluator: ⟨coeffs(P_v), coeffs(q_r)⟩ = ṽ(r).
+    const std::vector<int64_t> vals = {5,          -7,        123456789, -987654321,
+                                       (1LL << 40), -(1LL << 35), 0,     42};
+    std::vector<rc::Fp2> col(vals.size());
+    for (size_t i = 0; i < vals.size(); ++i) col[i] = gf::FromSigned2(vals[i]);
+
+    std::vector<rc::Fp2> r{gf::Fp2{3, 11}, gf::Fp2{7, 0}, gf::Fp2{0x1234, 0x9999}};
+    const auto q = rc::RCGkrEqKernelCoeffs(r);
+    BOOST_REQUIRE_EQUAL(q.size(), col.size());
+    rc::Fp2 inner = gf::Fp2::Zero();
+    for (size_t i = 0; i < col.size(); ++i) inner = gf::Add(inner, gf::Mul(col[i], q[i]));
+    BOOST_CHECK(gf::Eq(inner, rc::RCGkrMleEval1D2(col, r)));
+
+    // O(ν) verifier evaluation agrees with the full coefficient expansion.
+    const rc::Fp2 x{0xdead, 0xbeef};
+    BOOST_CHECK(gf::Eq(rc::RCGkrEqKernelAt(r, x), rc::FriEvalPoly(q, x)));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_v7_batched_opening_primitive_end_to_end)
+{
+    // The Wave-2 eval argument consumes: (i) bound C_i(z1), C_i(z2) from the
+    // batched FRI, (ii) O(ν) eq-kernel evals. End-to-end smoke over an
+    // int64-reference-embedded column, keyed by the v7 FS seed.
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const arith_uint256 target = arith_uint256{}.SetCompact(0x207fffff);
+    const uint256 dig = MakeSeed(0xD2);
+    const uint256 sigma = MakeSeed(0xA5);
+    const std::vector<uint256> roots{MakeSeed(0x21)};
+    const uint256 seed = rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, roots);
+
+    std::vector<std::vector<rc::Fp2>> cols;
+    std::vector<rc::Fp2> col(16);
+    for (size_t i = 0; i < col.size(); ++i) {
+        col[i] = gf::FromSigned2(static_cast<int64_t>(i * i) - 31);
+    }
+    cols.push_back(col);
+    const auto c = rc::FriBatchCommit(cols, seed);
+    BOOST_REQUIRE_MESSAGE(c.ok, c.note);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(rc::FriBatchVerify(c.proof, seed, &why), why);
+    // Bound OOD openings are exact evaluations of the committed column.
+    BOOST_CHECK(gf::Eq(c.proof.evals_z1[0], rc::FriEvalPoly(col, c.proof.z1)));
+    BOOST_CHECK(gf::Eq(c.proof.evals_z2[0], rc::FriEvalPoly(col, c.proof.z2)));
+    // A different FS seed (any bound field mutated) rejects the same proof.
+    auto h2 = header;
+    h2.nBits ^= 1;
+    const uint256 seed2 = rc::RCGkrFsSeedV7(h2, 0, params, target, dig, sigma, roots);
+    BOOST_CHECK(seed2 != seed);
+    BOOST_CHECK(!rc::FriBatchVerify(c.proof, seed2, &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
