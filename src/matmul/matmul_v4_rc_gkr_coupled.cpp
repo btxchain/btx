@@ -419,10 +419,23 @@ void MixButterflyDescendingLocal(std::vector<int64_t>& s, uint32_t mask, uint32_
 }
 
 void ApplyAllToAllMixLocal(std::vector<int64_t>& s, const uint256& sigma, uint32_t barrier,
-                           uint32_t n)
+                           uint32_t n,
+                           bool material_exchange = dc::kRCCoupMaterialExchangeEnabled,
+                           uint32_t exchange_rows = dc::kRCCoupExchangeRowsDefault)
 {
-    const uint256 mix_seed =
-        Sha256TaggedU32(kRCCoupMixTag, sizeof(kRCCoupMixTag) - 1, sigma, barrier);
+    // Mirror of the reference ApplyAllToAllMix mix-seed selection: when material
+    // exchange is ON the exchange_rows tile is absorbed into the mix domain via
+    // kRCCoupMaterialExchangeTag; otherwise the legacy kRCCoupMixTag seed. Kept
+    // byte-identical to RecomputeCoupledPuzzleReference so the digest matches.
+    uint256 mix_seed;
+    if (material_exchange) {
+        const uint32_t rows = exchange_rows == 0 ? dc::kRCCoupExchangeRowsDefault : exchange_rows;
+        mix_seed = Sha256TaggedU32U32(kRCCoupMaterialExchangeTag,
+                                      sizeof(kRCCoupMaterialExchangeTag) - 1, sigma, barrier,
+                                      rows);
+    } else {
+        mix_seed = Sha256TaggedU32(kRCCoupMixTag, sizeof(kRCCoupMixTag) - 1, sigma, barrier);
+    }
     ShaXof xof(mix_seed);
     const uint32_t mask = xof.NextU32() & (n - 1);
     const uint32_t pattern = barrier % kRCCoupMixPatterns;
@@ -533,32 +546,48 @@ CoupledWires BuildCoupledWires(const CBlockHeader& header, int32_t height,
         bw.exchange.assign(n, 0);
         bw.lobes.resize(p.lobes);
 
-        // C3.a per-lobe GEMM vs the NATIVELY SCHEDULED page (legacy consensus
-        // schedule; §7.1 — a forged page ID is unexpressible because the
-        // verifier grounds B against this very schedule).
+        // C3.a per-lobe GEMM vs the NATIVELY SCHEDULED pages (canonical full-bank
+        // schedule; §7.1 — forged page IDs are unexpressible because the verifier
+        // grounds B against this very schedule). The int64 reference accumulates
+        // Σ_page GEMM(A_ℓ, page); since A_ℓ is fixed for the (b,ℓ) slot this equals
+        // GEMM(A_ℓ, Σ_page page) (GEMM is linear in the page argument). We commit
+        // the folded page-sum as the single B column and Yacc as Y so that
+        // Y = A·B stays one grounded product AND bw.exchange (= acc) reproduces the
+        // full-bank reference digest byte-for-byte. Schedule/mix defaults come from
+        // dc:: — the SAME source RecomputeCoupledPuzzleReference grounds against.
         for (uint32_t ell = 0; ell < p.lobes; ++ell) {
             CoupledLobeWire& lw = bw.lobes[ell];
             lw.barrier = b;
             lw.lobe = ell;
-            const auto page_ids =
-                SelectCoupledBankPageIds(b, ell, p, w.sigma, /*full=*/false);
-            lw.page_id = page_ids.front();
-            const std::vector<int8_t> arow(state.begin() + static_cast<size_t>(ell) * W,
-                                           state.begin() + static_cast<size_t>(ell + 1) * W);
-            const auto y32 = lt::ExactGemmS8S8(arow, pages[lw.page_id], 1, W, W);
-            if (y32.size() != W) {
-                w.note = "gemm shape";
+            const auto page_ids = SelectCoupledBankPageIds(
+                b, ell, p, w.sigma, dc::kRCCoupFullBankScheduleEnabled);
+            if (page_ids.empty()) {
+                w.note = "page schedule";
                 return w;
             }
-            std::vector<int64_t> yrow(W);
-            for (uint32_t c = 0; c < W; ++c) yrow[c] = static_cast<int64_t>(y32[c]);
+            lw.page_id = page_ids.front(); // representative (schedule head)
+            const std::vector<int8_t> arow(state.begin() + static_cast<size_t>(ell) * W,
+                                           state.begin() + static_cast<size_t>(ell + 1) * W);
+            std::vector<int64_t> bsum(static_cast<size_t>(W) * W, 0);
+            std::vector<int64_t> yacc(W, 0);
+            for (uint32_t page_id : page_ids) {
+                const std::vector<int8_t>& page = pages[page_id];
+                const auto y32 = lt::ExactGemmS8S8(arow, page, 1, W, W);
+                if (y32.size() != W) {
+                    w.note = "gemm shape";
+                    return w;
+                }
+                for (uint32_t c = 0; c < W; ++c) yacc[c] += static_cast<int64_t>(y32[c]);
+                for (size_t idx = 0; idx < bsum.size(); ++idx)
+                    bsum[idx] += static_cast<int64_t>(page[idx]);
+            }
             // C3.a' material exchange: consensus segment_id = lobe index →
             // FIXED offset ℓ·W in the exchange column.
             for (uint32_t c = 0; c < W; ++c)
-                bw.exchange[static_cast<size_t>(ell) * W + c] = yrow[c];
+                bw.exchange[static_cast<size_t>(ell) * W + c] = yacc[c];
             lw.A = ToFp2I8(arow);
-            lw.B = ToFp2I8(pages[lw.page_id]);
-            lw.Y = ToFp2I64(yrow);
+            lw.B = ToFp2I64(bsum);
+            lw.Y = ToFp2I64(yacc);
         }
 
         // C3.b public balanced permutation.
@@ -571,8 +600,11 @@ CoupledWires BuildCoupledWires(const CBlockHeader& header, int32_t height,
         ApplyBalancedPermutationLocal(bw.post_perm, pi);
 
         // C3.c butterfly mix (mirror; digest-checked against the reference).
+        // Canonical material-exchange domain (dc::) — same config the reference
+        // grounds with under RCCoupOptions{} defaults.
         bw.post_mix = bw.post_perm;
-        ApplyAllToAllMixLocal(bw.post_mix, w.sigma, b, n);
+        ApplyAllToAllMixLocal(bw.post_mix, w.sigma, b, n, dc::kRCCoupMaterialExchangeEnabled,
+                              dc::kRCCoupExchangeRowsDefault);
 
         // C3.d Extract.
         const uint256 extract_seed = Sha256TaggedU32U32(
