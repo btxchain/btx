@@ -7,6 +7,7 @@
 
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc_coupled_device.h>
+#include <matmul/matmul_v4_rc_datacenter.h>
 #include <matmul/matmul_v4_rc_distributed.h>
 #include <primitives/block.h>
 #include <uint256.h>
@@ -71,6 +72,8 @@ inline constexpr char kRCCoupPermTag[] = "BTX_RC_COUP_PERM_V1";
 inline constexpr char kRCCoupMixTag[] = "BTX_RC_COUP_MIX_V1";
 inline constexpr char kRCCoupExtractTag[] = "BTX_RC_COUP_EXTRACT_V1";
 inline constexpr char kRCCoupFullBankTag[] = "BTX_RC_COUP_FULL_BANK_V1";
+/** Domain tag when material exchange is active (absorbs exchange_rows). */
+inline constexpr char kRCCoupMaterialExchangeTag[] = "BTX_RC_COUP_MAT_XCHG_V1";
 
 /**
  * Parametric coupled-puzzle shape. Toy defaults match the frozen constexprs
@@ -162,11 +165,18 @@ struct RCCoupOptions {
     uint32_t skip_page_index{0};
 
     /**
-     * Test/research override for full-bank page schedule. Consensus path leaves
-     * false. Production also requires dc::kRCCoupFullBankScheduleEnabled (OFF)
-     * or BTX_RC_COUP_FULL_BANK_SCHEDULE=1 — digest-breaking vs legacy.
+     * Full-bank page schedule. Defaults to dc::kRCCoupFullBankScheduleEnabled
+     * (ON — HBM / datacenter thesis). Set false explicitly only for legacy
+     * golden / differential harnesses. Digest-breaking vs single-page legacy.
      */
-    bool full_bank_schedule{false};
+    bool full_bank_schedule{dc::kRCCoupFullBankScheduleEnabled};
+
+    /**
+     * Material-exchange domain in the all-to-all mix. Defaults to
+     * dc::kRCCoupMaterialExchangeEnabled (ON). Digests absorb exchange_rows.
+     */
+    bool material_exchange{dc::kRCCoupMaterialExchangeEnabled};
+    uint32_t exchange_rows{dc::kRCCoupExchangeRowsDefault};
 };
 
 /** Optional wall-clock timing for harness / measurement (not consensus). */

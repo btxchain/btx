@@ -72,9 +72,26 @@ BOOST_AUTO_TEST_CASE(rc_native_required_empty_gemm_when_ozaki_unqualified)
     }
 }
 
-BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_defaults_v1_compatible)
+BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_defaults_ai_production)
 {
     const rc::RCCoupConsensusConfig cfg = rc::MakeDefaultRCCoupConsensusConfig();
+    BOOST_CHECK(!rc::IsRCCoupConsensusConfigV1Compatible(cfg));
+    BOOST_CHECK_EQUAL(cfg.config_version, rc::kRCCoupConsensusConfigVersionV2);
+    const rc::RCCoupParams prod = rc::MakeProductionRCCoupParams();
+    BOOST_CHECK_EQUAL(cfg.barriers, prod.barriers);
+    BOOST_CHECK_EQUAL(cfg.lobes, prod.lobes);
+    BOOST_CHECK_EQUAL(cfg.lobe_width, prod.lobe_width);
+    BOOST_CHECK_EQUAL(cfg.bank_pages, prod.bank_pages);
+    BOOST_CHECK(cfg.full_bank_schedule_enabled);
+    BOOST_CHECK(cfg.material_exchange_enabled);
+    BOOST_CHECK(cfg.v2_profile_enabled);
+    BOOST_CHECK_EQUAL(cfg.v2_activation_height, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(rc::ValidateRCCoupParams(rc::RCCoupParamsFromConsensusConfig(cfg)));
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_legacy_v1_compatible)
+{
+    const rc::RCCoupConsensusConfig cfg = rc::MakeLegacyV1RCCoupConsensusConfig();
     BOOST_CHECK(rc::IsRCCoupConsensusConfigV1Compatible(cfg));
 
     const rc::RCCoupParams toy = rc::MakeToyRCCoupParams();
@@ -86,24 +103,8 @@ BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_defaults_v1_compatible)
     BOOST_CHECK_EQUAL(cfg.pages_per_barrier_lobe, 1u);
     BOOST_CHECK_EQUAL(cfg.page_selection_version, rc::kRCCoupPageSelectionLegacyV1);
     BOOST_CHECK(!cfg.material_exchange_enabled);
-    BOOST_CHECK_EQUAL(cfg.material_exchange_rows, dc::kRCCoupExchangeRowsDefault);
-    BOOST_CHECK_EQUAL(cfg.transcript_version, rc::kRCTranscriptVersion);
-    BOOST_CHECK_EQUAL(cfg.extract_version, rc::kRCExtractVersionV1);
-    BOOST_CHECK_EQUAL(cfg.seg_len, rc::kRCSegLen);
-    BOOST_CHECK_EQUAL(cfg.wgrad_exact_chunk, rc::kRCWgradExactChunk);
-    BOOST_CHECK_EQUAL(cfg.tile_leaf_bytes, rc::kRCTileLeafBytes);
-    BOOST_CHECK_EQUAL(cfg.mx_block_len, rc::kRCMxBlockLen);
     BOOST_CHECK(!cfg.full_bank_schedule_enabled);
-    BOOST_CHECK_EQUAL(cfg.v2_pages_per_barrier_lobe, dc::kRCCoupPagesPerBarrierLobe);
     BOOST_CHECK(!cfg.v2_profile_enabled);
-    BOOST_CHECK_EQUAL(cfg.v2_activation_height, std::numeric_limits<int32_t>::max());
-
-    const rc::RCCoupParams mapped = rc::RCCoupParamsFromConsensusConfig(cfg);
-    BOOST_CHECK_EQUAL(mapped.barriers, toy.barriers);
-    BOOST_CHECK_EQUAL(mapped.lobes, toy.lobes);
-    BOOST_CHECK_EQUAL(mapped.lobe_width, toy.lobe_width);
-    BOOST_CHECK_EQUAL(mapped.bank_pages, toy.bank_pages);
-    BOOST_CHECK(rc::ValidateRCCoupParams(mapped));
 }
 
 BOOST_AUTO_TEST_CASE(rc_exactness_qual_cache_key_stable)

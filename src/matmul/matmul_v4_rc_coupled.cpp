@@ -203,9 +203,20 @@ void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
 }
 
 void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t barrier,
-                      uint32_t n)
+                      uint32_t n, bool material_exchange = false,
+                      uint32_t exchange_rows = dc::kRCCoupExchangeRowsDefault)
 {
-    const uint256 mix_seed = Sha256TaggedU32(kRCCoupMixTag, sizeof(kRCCoupMixTag) - 1, sigma, barrier);
+    // When material exchange is ON, absorb rows into the mix domain so fabric
+    // pressure is digest-visible (NVLink-shaped thesis). Legacy path unchanged.
+    uint256 mix_seed;
+    if (material_exchange) {
+        const uint32_t rows = exchange_rows == 0 ? dc::kRCCoupExchangeRowsDefault : exchange_rows;
+        mix_seed = Sha256TaggedU32U32(kRCCoupMaterialExchangeTag,
+                                      sizeof(kRCCoupMaterialExchangeTag) - 1, sigma, barrier,
+                                      rows);
+    } else {
+        mix_seed = Sha256TaggedU32(kRCCoupMixTag, sizeof(kRCCoupMixTag) - 1, sigma, barrier);
+    }
     ShaXof xof(mix_seed);
     const uint32_t mask = xof.NextU32() & (n - 1);
     const uint32_t pattern = barrier % kRCCoupMixPatterns;
@@ -372,7 +383,8 @@ DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, i
     }
     const auto pi = DeriveCoupledBalancedPermutation(sigma, barrier, params);
     ApplyBalancedPermutation(acc, pi);
-    ApplyAllToAllMix(acc, sigma, barrier, n);
+    ApplyAllToAllMix(acc, sigma, barrier, n, dc::RCCoupMaterialExchangeActive(),
+                     dc::kRCCoupExchangeRowsDefault);
 
     const uint256 extract_seed =
         Sha256TaggedU32U32(kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigma, barrier,
@@ -466,10 +478,11 @@ RCCoupParams MakeMediumRCCoupParams()
 
 RCCoupParams MakeProductionRCCoupParams()
 {
-    // PROVISIONAL Stage-G economics target (not consensus-active):
+    // Configured AI datacenter floor (heights still INT32_MAX):
     //   Resident bank = bank_pages × lobe_width² = 768 × 8192² = 48 GiB
-    //   Streamed peak ≈ 64 MiB page + 64 KiB state + 512 KiB int64 acc ≪ 24 GiB
-    // StateBytes = 8 × 8192 = 65536 (pow2 + MX-aligned). Barriers=8 ∈ [4,8].
+    //   Full-bank schedule (12 pages/lobe) + material exchange ON by default.
+    //   Streamed peak ≈ 64 MiB — cheap cards remain valid but uneconomic.
+    // Analysis: B200:5090 ≈2.3× thruput vs ≈15× rent → HBM levers required.
     RCCoupParams p;
     p.barriers = 8;
     p.lobes = 8;
@@ -795,9 +808,8 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
 
         // C3.a — local exact int8 GEMM per lobe vs epoch bank page(s).
         // Consensus lobe order is always 0..L-1 (scheduling-invariant digest).
-        // Legacy: one page (barrier+lobe)%bank_pages. Full schedule ONLY via
-        // RCCoupOptions::full_bank_schedule (harness/tests) — never getenv.
-        // Compile-time kRCCoupFullBankScheduleEnabled stays false until Stage G.
+        // Legacy: one page (barrier+lobe)%bank_pages. Full schedule defaults ON
+        // via RCCoupOptions (dc::kRCCoupFullBankScheduleEnabled).
         const bool full_sched = options.full_bank_schedule;
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
             const auto page_ids =
@@ -842,7 +854,8 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         ApplyBalancedPermutation(acc, pi);
 
         // C3.c — exact integer all-to-all mix (≥2 nonce-relabeled patterns).
-        ApplyAllToAllMix(acc, sigma, b, n);
+        // Material exchange (default ON) absorbs exchange_rows into the mix domain.
+        ApplyAllToAllMix(acc, sigma, b, n, options.material_exchange, options.exchange_rows);
 
         // C3.d — non-affine Extract (lookup-argument-shaped for Stage E).
         const uint256 extract_seed =
@@ -919,7 +932,8 @@ bool ApplyCoupledBarrierTail(const uint256& sigma, uint32_t barrier, const RCCou
     const auto pi = DeriveCoupledBalancedPermutation(sigma, barrier, params);
     if (!IsBalancedPermutation(pi, n)) return false;
     ApplyBalancedPermutation(acc, pi);
-    ApplyAllToAllMix(acc, sigma, barrier, n);
+    ApplyAllToAllMix(acc, sigma, barrier, n, dc::RCCoupMaterialExchangeActive(),
+                     dc::kRCCoupExchangeRowsDefault);
     const uint256 extract_seed =
         Sha256TaggedU32U32(kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigma, barrier,
                            /*unused=*/0);

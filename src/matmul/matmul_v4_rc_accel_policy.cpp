@@ -5,6 +5,7 @@
 #include <matmul/matmul_v4_rc_accel_policy.h>
 
 #include <cstdlib>
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -12,25 +13,49 @@ namespace matmul::v4::rc {
 
 RCCoupConsensusConfig MakeDefaultRCCoupConsensusConfig()
 {
+    // Aggregate default-initialized production / AI-lever config.
     return RCCoupConsensusConfig{};
+}
+
+RCCoupConsensusConfig MakeLegacyV1RCCoupConsensusConfig()
+{
+    RCCoupConsensusConfig cfg;
+    cfg.config_version = kRCCoupConsensusConfigVersionV1;
+    const RCCoupParams toy = MakeToyRCCoupParams();
+    cfg.barriers = toy.barriers;
+    cfg.lobes = toy.lobes;
+    cfg.lobe_width = toy.lobe_width;
+    cfg.bank_pages = toy.bank_pages;
+    cfg.pages_per_barrier_lobe = 1;
+    cfg.page_selection_version = kRCCoupPageSelectionLegacyV1;
+    cfg.material_exchange_enabled = false;
+    cfg.material_exchange_rows = dc::kRCCoupExchangeRowsDefault;
+    cfg.material_exchange_cols = kRCCoupLobeWidth;
+    cfg.full_bank_schedule_enabled = false;
+    cfg.v2_pages_per_barrier_lobe = dc::kRCCoupPagesPerBarrierLobe;
+    cfg.v2_profile_enabled = false;
+    cfg.v2_activation_height = std::numeric_limits<int32_t>::max();
+    return cfg;
 }
 
 bool IsRCCoupConsensusConfigV1Compatible(const RCCoupConsensusConfig& cfg)
 {
-    const RCCoupParams toy = MakeToyRCCoupParams();
-    return cfg.config_version == kRCCoupConsensusConfigVersionV1 &&
-           cfg.barriers == toy.barriers && cfg.lobes == toy.lobes &&
-           cfg.lobe_width == toy.lobe_width && cfg.bank_pages == toy.bank_pages &&
-           cfg.pages_per_barrier_lobe == 1u &&
-           cfg.page_selection_version == kRCCoupPageSelectionLegacyV1 &&
-           !cfg.material_exchange_enabled &&
-           cfg.transcript_version == kRCTranscriptVersion &&
-           cfg.extract_version == kRCExtractVersionV1 && cfg.seg_len == kRCSegLen &&
-           cfg.wgrad_exact_chunk == kRCWgradExactChunk &&
-           cfg.tile_leaf_bytes == kRCTileLeafBytes && cfg.mx_block_len == kRCMxBlockLen &&
-           cfg.mx_packed_layout_version == kRCMxPackedLayoutVersionV1 &&
-           !cfg.full_bank_schedule_enabled && !cfg.v2_profile_enabled &&
-           cfg.v2_activation_height == std::numeric_limits<int32_t>::max();
+    const RCCoupConsensusConfig legacy = MakeLegacyV1RCCoupConsensusConfig();
+    return cfg.config_version == legacy.config_version &&
+           cfg.barriers == legacy.barriers && cfg.lobes == legacy.lobes &&
+           cfg.lobe_width == legacy.lobe_width && cfg.bank_pages == legacy.bank_pages &&
+           cfg.pages_per_barrier_lobe == legacy.pages_per_barrier_lobe &&
+           cfg.page_selection_version == legacy.page_selection_version &&
+           cfg.material_exchange_enabled == legacy.material_exchange_enabled &&
+           cfg.transcript_version == legacy.transcript_version &&
+           cfg.extract_version == legacy.extract_version && cfg.seg_len == legacy.seg_len &&
+           cfg.wgrad_exact_chunk == legacy.wgrad_exact_chunk &&
+           cfg.tile_leaf_bytes == legacy.tile_leaf_bytes &&
+           cfg.mx_block_len == legacy.mx_block_len &&
+           cfg.mx_packed_layout_version == legacy.mx_packed_layout_version &&
+           cfg.full_bank_schedule_enabled == legacy.full_bank_schedule_enabled &&
+           cfg.v2_profile_enabled == legacy.v2_profile_enabled &&
+           cfg.v2_activation_height == legacy.v2_activation_height;
 }
 
 RCCoupParams RCCoupParamsFromConsensusConfig(const RCCoupConsensusConfig& cfg)

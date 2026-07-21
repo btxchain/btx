@@ -19,45 +19,56 @@ struct Params;
 namespace matmul::v4::rc {
 
 /**
- * Stage F — three-axis scheduled scaling (PROVISIONAL, inert).
+ * Stage F — three-axis scheduled scaling.
  *
  * Dials (final-form build spec Stage F1):
- *   W_state    — resident expert/state bytes
+ *   W_state    — resident expert/state / packed-bank bytes (HBM floor)
  *   C_local    — exact local tensor work units per barrier (proxy: MAC count)
- *   X_exchange — bytes exchanged per barrier × barrier count
+ *   X_exchange — bytes exchanged per barrier × barrier count (fabric)
  *
- * PROVISIONAL: all growth constants and dimensionless ratios are placeholders.
- * Ratios freeze ONLY after Stage G silicon evidence shows that local tensor
- * work, HBM traffic, and coherent-fabric exchange are each material and that
- * none dominates enough to make the other two decorative (F2).
+ * Analysis lock (2026-07-21): B200:5090 ≈2.3× thruput vs ≈15× rent after
+ * Lever-B MX Extract @ w=1024 — tensor params alone leave consumer ahead on
+ * blocks/$. Epoch-0 dials are therefore HBM + fabric class (48 GiB / 4 GiB),
+ * not the old 192 MiB / 256 MiB scaffolding zeros.
  *
- * F6: chainwork brake OMITTED — schedule is height/epoch-only (not chain
- * history / reorg dependent). Do not reintroduce BrakeAllowsStep here.
+ * Growth-table ratios remain PROVISIONAL (F2) until multi-vendor silicon
+ * freezes them. F6: chainwork brake OMITTED.
  *
- * Default: kRCThreeAxisScheduleEnabled = false → always epoch-0 dials.
- * Independent of (and does not enable) kRCGrowthScheduleEnabled (§R.7 two-dial).
+ * Master enable ON: epoch-0 dials are the live configured defaults. Public
+ * nets still inert while nMatMulRCHeight=INT32_MAX. Independent of
+ * kRCGrowthScheduleEnabled (§R.7 two-dial).
  */
 
-/** Master enable for the three-axis schedule. Keep false until Stage I. */
-inline constexpr bool kRCThreeAxisScheduleEnabled = false;
-
-/** Epoch-0 / Class A base dials (PROVISIONAL — mirror §R.0 footprints). */
-inline constexpr uint64_t kRCAxisW0State = 192ull * 1024 * 1024; // ~KV / expert bank
-inline constexpr uint64_t kRCAxisC0Local = 1ull << 40;           // ~1 Ti MAC proxy / barrier-set
-inline constexpr uint64_t kRCAxisX0Exchange = 256ull * 1024 * 1024; // ~256 MiB exchange budget
-
-/** Absolute hard caps (PROVISIONAL). Growth pauses at the cap — never wraps. */
-inline constexpr uint64_t kRCAxisHardCapState = 1ull << 33;     // 8 GiB
-inline constexpr uint64_t kRCAxisHardCapLocal = 1ull << 46;     // MAC proxy ceiling
-inline constexpr uint64_t kRCAxisHardCapExchange = 1ull << 34;  // 16 GiB exchange budget
+/** Master enable for the three-axis schedule (epoch-0 live; growth height-gated). */
+inline constexpr bool kRCThreeAxisScheduleEnabled = true;
 
 /**
- * Streamed-mode peak-memory hard cap (PROVISIONAL, F4). Growth that would
- * push the structural Streamed peak estimate above this MUST fallback to
- * prior dims (checked path — never assert).
+ * Epoch-0 / Class A base dials — LLM datacenter floor.
+ * W_state matches MakeProductionRCCoupParams resident bank (768×8192² = 48 GiB)
+ * so 32 GiB consumer cards cannot hold Resident and must Stream.
+ */
+inline constexpr uint64_t kRCAxisW0State = 48ull << 30;          // 48 GiB HBM bank
+inline constexpr uint64_t kRCAxisC0Local = 12ull << 40;          // ~12 Ti MAC (× full-bank pages)
+inline constexpr uint64_t kRCAxisX0Exchange = 4ull << 30;        // 4 GiB fabric exchange
+
+/** Absolute hard caps. Growth pauses at the cap — never wraps. */
+inline constexpr uint64_t kRCAxisHardCapState = 96ull << 30;     // 96 GiB (B200-class ladder)
+inline constexpr uint64_t kRCAxisHardCapLocal = 1ull << 46;      // MAC proxy ceiling
+inline constexpr uint64_t kRCAxisHardCapExchange = 16ull << 30;  // 16 GiB exchange budget
+
+/**
+ * Episode n_ctx proxy cap: W_state is the HBM bank target; RC episode matrix
+ * dims stay within the frozen production episode footprint until Stage C
+ * wires coupled bank sizing from W_state directly.
+ */
+inline constexpr uint64_t kRCAxisEpisodeCtxBytesCap = 192ull * 1024 * 1024;
+
+/**
+ * Streamed-mode peak-memory hard cap (F4). Growth that would push the
+ * structural Streamed peak estimate above this MUST fallback to prior dims.
+ * Kept at 8 GiB so cheap cards retain a viable Streamed path.
  */
 inline constexpr uint64_t kRCAxisStreamedPeakHardCap = 8ull << 30; // 8 GiB
-
 /**
  * Structural proof/transcript byte budget (PROVISIONAL, F4). Uses the
  * serialized transcript estimate (leaf_count × T_leaf), not a silicon

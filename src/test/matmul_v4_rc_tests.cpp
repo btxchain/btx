@@ -1120,7 +1120,7 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_golden_diff_gate)
     const auto params = rc::MakeToyRCEpisodeParams();
     BOOST_CHECK_EQUAL(
         rc::RecomputeResidentCurriculumReference(header, params, 0).GetHex(), kV1);
-    BOOST_CHECK(!rc::kRCThreeAxisScheduleEnabled);
+    BOOST_CHECK(rc::kRCThreeAxisScheduleEnabled);
 
     // Prefer absolute path via env (set by CI) then relative tree roots.
     const char* env_script = std::getenv("BTX_RC_GOLDEN_GATE");
@@ -1162,10 +1162,12 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_golden_diff_gate)
 #endif
 }
 
-BOOST_AUTO_TEST_CASE(rc_stage_f_three_axis_schedule_inert)
+BOOST_AUTO_TEST_CASE(rc_stage_f_three_axis_schedule_configured)
 {
-    // Stage F scaffolding: three dials exist, schedule disabled, no brake.
-    BOOST_CHECK(!rc::kRCThreeAxisScheduleEnabled);
+    // Stage F: HBM/fabric dials configured; schedule ON (public height still INT32_MAX).
+    BOOST_CHECK(rc::kRCThreeAxisScheduleEnabled);
+    BOOST_CHECK_EQUAL(rc::kRCAxisW0State, 48ull << 30);
+    BOOST_CHECK_EQUAL(rc::kRCAxisX0Exchange, 4ull << 30);
     Consensus::Params p;
     Consensus::FillDefaultRCGrowthTables(p);
     p.nMatMulRCHeight = 100;
@@ -1176,11 +1178,14 @@ BOOST_AUTO_TEST_CASE(rc_stage_f_three_axis_schedule_inert)
     BOOST_CHECK_EQUAL(s0.C_local, rc::kRCAxisC0Local);
     BOOST_CHECK_EQUAL(s0.X_exchange, rc::kRCAxisX0Exchange);
 
-    // Far-future height still epoch-0 while disabled (inert).
+    // Pre-activation → epoch-0.
+    const auto s_pre = rc::RCThreeAxisScaleForHeight(99, p);
+    BOOST_CHECK_EQUAL(s_pre.W_state, rc::kRCAxisW0State);
+
+    // Later epochs may grow (pause-only); never shrink below epoch-0.
     const auto s_far = rc::RCThreeAxisScaleForHeight(100 + 39 * 10, p);
-    BOOST_CHECK_EQUAL(s_far.W_state, rc::kRCAxisW0State);
-    BOOST_CHECK_EQUAL(s_far.C_local, rc::kRCAxisC0Local);
-    BOOST_CHECK_EQUAL(s_far.X_exchange, rc::kRCAxisX0Exchange);
+    BOOST_CHECK_GE(s_far.W_state, rc::kRCAxisW0State);
+    BOOST_CHECK_LE(s_far.W_state, rc::kRCAxisHardCapState);
 
     // Checked fallback: zero dials → prior_ok, never assert.
     const auto prior = rc::EpisodeParamsFromThreeAxis(s0);
@@ -1188,14 +1193,11 @@ BOOST_AUTO_TEST_CASE(rc_stage_f_three_axis_schedule_inert)
     BOOST_CHECK_EQUAL(fell.n_ctx, prior.n_ctx);
     BOOST_CHECK_EQUAL(fell.b_seq, prior.b_seq);
 
-    // Epoch asserts pass on epoch-0 (accumulator / transcript / Streamed peak /
-    // fixed work / hard caps).
     std::string reason;
     BOOST_CHECK(rc::CheckRCThreeAxisInvariants(s0, prior, &reason));
     BOOST_CHECK(reason.empty());
     BOOST_CHECK_LT(rc::EstimateRCStreamedPeakBytes(prior), rc::kRCAxisStreamedPeakHardCap);
 
-    // Absurd over-cap dials → invariants fail → prior fallback.
     rc::RCThreeAxisScale over = s0;
     over.W_state = rc::kRCAxisHardCapState + 1;
     BOOST_CHECK(!rc::CheckRCThreeAxisInvariants(over, prior, &reason));
@@ -1203,11 +1205,13 @@ BOOST_AUTO_TEST_CASE(rc_stage_f_three_axis_schedule_inert)
     const auto fell_cap = rc::EpisodeParamsFromThreeAxis(over, &prior);
     BOOST_CHECK_EQUAL(fell_cap.n_ctx, prior.n_ctx);
 
+    // Episode n_ctx stays on the capped proxy (== Class-A context) even when
+    // W_state is multi-GiB (HBM bank target ≠ episode matrix inflate).
     const auto ep = rc::ConsensusRCThreeAxisParamsForHeight(1000, p);
     BOOST_CHECK_EQUAL(ep.n_ctx, rc::kRCContextLen);
     BOOST_CHECK_EQUAL(ep.b_seq, rc::kRCBatchSeq);
 
-    // Epoch-0 golden still matches while schedule inert (4.3).
+    // Toy episode golden unchanged (curriculum path independent of coupled levers).
     const auto header = MakeRCHeader(42);
     const auto toy = rc::MakeToyRCEpisodeParams();
     BOOST_CHECK_EQUAL(

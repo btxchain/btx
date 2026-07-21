@@ -98,28 +98,27 @@ inline constexpr uint32_t kRCCoupConsensusConfigVersionV2 = 2;
 /**
  * Versioned coupled consensus configuration — every digest-affecting knob.
  *
- * Defaults match current V1 toy/legacy behavior (single page per barrier/lobe,
- * full-bank OFF, material-exchange OFF, transcript V1, Extract V1).
- * V2 fields are present but inert: enable flags false, activation height
- * INT32_MAX.
+ * Default = AI datacenter thesis (production shape + full-bank + material
+ * exchange). Legacy toy V1 remains available via MakeLegacyV1RCCoupConsensusConfig.
+ * Public activation still requires finite nMatMulRCCoupledHeight (INT32_MAX today).
  */
 struct RCCoupConsensusConfig {
-    uint32_t config_version{kRCCoupConsensusConfigVersionV1};
+    uint32_t config_version{kRCCoupConsensusConfigVersionV2};
 
-    // Shape (toy V1 defaults — Match MakeToyRCCoupParams()).
-    uint32_t barriers{kRCCoupRounds};
-    uint32_t lobes{kRCCoupLobes};
-    uint32_t lobe_width{kRCCoupLobeWidth};
-    uint32_t bank_pages{kRCCoupBankPages};
+    // Shape — matches MakeProductionRCCoupParams() (48 GiB resident bank).
+    uint32_t barriers{8};
+    uint32_t lobes{8};
+    uint32_t lobe_width{8192};
+    uint32_t bank_pages{768};
 
-    // Page schedule. V1 legacy consumes exactly one page per (barrier, lobe).
-    uint32_t pages_per_barrier_lobe{1};
-    uint32_t page_selection_version{kRCCoupPageSelectionLegacyV1};
+    // Page schedule — full bank (12 pages / barrier×lobe).
+    uint32_t pages_per_barrier_lobe{dc::kRCCoupPagesPerBarrierLobe};
+    uint32_t page_selection_version{kRCCoupPageSelectionFullBankV2};
 
-    // Material exchange (V2 inert — dims recorded, enable false).
-    bool material_exchange_enabled{false};
+    // Material exchange ON — fabric domain in mix.
+    bool material_exchange_enabled{dc::kRCCoupMaterialExchangeEnabled};
     uint32_t material_exchange_rows{dc::kRCCoupExchangeRowsDefault};
-    uint32_t material_exchange_cols{kRCCoupLobeWidth};
+    uint32_t material_exchange_cols{8192};
 
     // Transcript / Extract / segmentation.
     uint32_t transcript_version{kRCTranscriptVersion};
@@ -130,18 +129,20 @@ struct RCCoupConsensusConfig {
     uint32_t mx_block_len{kRCMxBlockLen};
     uint32_t mx_packed_layout_version{kRCMxPackedLayoutVersionV1};
 
-    // Full-bank schedule (digest-breaking vs legacy) — OFF on V1.
-    bool full_bank_schedule_enabled{false};
-    /** Staged V2 pages-per-lobe (12); inert while full_bank_schedule_enabled=false. */
+    // Full-bank schedule ON.
+    bool full_bank_schedule_enabled{dc::kRCCoupFullBankScheduleEnabled};
     uint32_t v2_pages_per_barrier_lobe{dc::kRCCoupPagesPerBarrierLobe};
 
-    // V2 profile activation — inert.
-    bool v2_profile_enabled{false};
+    // V2 profile selected; activation height stays INT32_MAX (public inert).
+    bool v2_profile_enabled{true};
     int32_t v2_activation_height{std::numeric_limits<int32_t>::max()};
 };
 
-/** Default V1-compatible consensus config (toy/legacy coupled path). */
+/** Default consensus config — AI datacenter levers (production + full-bank). */
 [[nodiscard]] RCCoupConsensusConfig MakeDefaultRCCoupConsensusConfig();
+
+/** Frozen toy/legacy V1 config (single-page, exchange off) for golden diffs. */
+[[nodiscard]] RCCoupConsensusConfig MakeLegacyV1RCCoupConsensusConfig();
 
 /**
  * True iff cfg matches the frozen V1 toy/legacy digest-affecting defaults

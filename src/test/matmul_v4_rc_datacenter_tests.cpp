@@ -87,11 +87,12 @@ BOOST_AUTO_TEST_CASE(rc_dc_heights_remain_int32_max)
 
 BOOST_AUTO_TEST_CASE(rc_dc_consensus_flags_default_off)
 {
-    BOOST_CHECK(!dc::kRCCoupFullBankScheduleEnabled);
-    BOOST_CHECK(!dc::kRCCoupMaterialExchangeEnabled);
-    BOOST_CHECK(!dc::kRCThreeAxisScheduleWireEnabled);
+    BOOST_CHECK(dc::kRCCoupFullBankScheduleEnabled);
+    BOOST_CHECK(dc::kRCCoupMaterialExchangeEnabled);
+    BOOST_CHECK(dc::kRCThreeAxisScheduleWireEnabled);
     BOOST_CHECK_EQUAL(dc::kRCCoupPagesPerBarrierLobe, 12u);
     BOOST_CHECK_EQUAL(dc::kRCCoupExchangeRowsDefault, 128u);
+    BOOST_CHECK_EQUAL(dc::kRCPackedBankPrimaryGiB, 48.0);
     BOOST_CHECK_EQUAL(dc::kRCMinerBatchQDefault, 32u);
     BOOST_CHECK_EQUAL(dc::kRCMinerBatchQMax, 256u);
     BOOST_CHECK_EQUAL(dc::kRCPackedBankTargetGiBCount, 4u);
@@ -101,9 +102,9 @@ BOOST_AUTO_TEST_CASE(rc_dc_consensus_flags_default_off)
 BOOST_AUTO_TEST_CASE(rc_dc_probe_status_smoke)
 {
     const dc::RCDcStatus st = dc::ProbeRCDcStatus();
-    BOOST_CHECK(!st.full_bank_schedule);
-    BOOST_CHECK(!st.material_exchange);
-    BOOST_CHECK(!st.three_axis_wire);
+    BOOST_CHECK(st.full_bank_schedule);
+    BOOST_CHECK(st.material_exchange);
+    BOOST_CHECK(st.three_axis_wire);
     BOOST_CHECK(st.miner_batch_q_default_on);
     BOOST_CHECK_EQUAL(st.miner_batch_q, dc::kRCMinerBatchQDefault);
     BOOST_CHECK(!st.gkr_arbiter);
@@ -177,33 +178,38 @@ BOOST_AUTO_TEST_CASE(rc_dc_select_coupled_bank_page_ids_full_covers_production)
     BOOST_CHECK_EQUAL(legacy[0], (3u + 5u) % params.bank_pages);
 }
 
-BOOST_AUTO_TEST_CASE(rc_dc_full_schedule_flag_off_keeps_legacy_digest)
+BOOST_AUTO_TEST_CASE(rc_dc_full_schedule_default_on_differs_from_legacy)
 {
     const auto params = rc::MakeToyRCCoupParams();
     const auto header = MakeCoupHeader(99);
-    rc::RCCoupOptions opts;
-    opts.full_bank_schedule = false;
-    const uint256 d0 = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts);
-    const uint256 d1 = rc::MineRCCoupledEpisode(header, 0, params);
-    BOOST_CHECK(d0 == d1);
+    rc::RCCoupOptions legacy;
+    legacy.full_bank_schedule = false;
+    legacy.material_exchange = false;
+    const uint256 d_legacy = rc::RecomputeCoupledPuzzleReference(header, 0, params, legacy);
 
-    // Explicit full_schedule override changes the digest (research path).
-    opts.full_bank_schedule = true;
-    const uint256 d_full = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts);
-    BOOST_CHECK(d_full != d0);
+    // Default options follow dc levers (full-bank + material exchange ON).
+    const uint256 d_default = rc::MineRCCoupledEpisode(header, 0, params);
+    BOOST_CHECK(d_default != d_legacy);
+
+    rc::RCCoupOptions opts; // defaults ON
+    BOOST_CHECK(opts.full_bank_schedule);
+    BOOST_CHECK(opts.material_exchange);
+    const uint256 d_opts = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts);
+    BOOST_CHECK(d_opts == d_default);
 }
 
 BOOST_AUTO_TEST_CASE(rc_dc_getenv_cannot_flip_consensus_digest)
 {
-    // P0: BTX_RC_COUP_FULL_BANK_SCHEDULE / MATERIAL_EXCHANGE must not change digests.
+    // P0: BTX_RC_COUP_FULL_BANK_SCHEDULE / MATERIAL_EXCHANGE env must not change
+    // digests — levers are compile-time only (defaults ON for AI thesis).
     const auto params = rc::MakeToyRCCoupParams();
     const auto header = MakeCoupHeader(12345);
-    rc::RCCoupOptions opts; // full_bank_schedule defaults false
+    rc::RCCoupOptions opts; // defaults follow dc levers
 
-    ::setenv("BTX_RC_COUP_FULL_BANK_SCHEDULE", "1", /*overwrite=*/1);
-    ::setenv("BTX_RC_COUP_MATERIAL_EXCHANGE", "1", /*overwrite=*/1);
-    BOOST_CHECK(!dc::RCCoupFullBankScheduleActive());
-    BOOST_CHECK(!dc::RCCoupMaterialExchangeActive());
+    ::setenv("BTX_RC_COUP_FULL_BANK_SCHEDULE", "0", /*overwrite=*/1);
+    ::setenv("BTX_RC_COUP_MATERIAL_EXCHANGE", "0", /*overwrite=*/1);
+    BOOST_CHECK(dc::RCCoupFullBankScheduleActive());
+    BOOST_CHECK(dc::RCCoupMaterialExchangeActive());
     const uint256 with_env = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts);
 
     ::unsetenv("BTX_RC_COUP_FULL_BANK_SCHEDULE");
@@ -680,7 +686,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_golden_transcript_version_bump_requirement)
     const auto header = MakeCoupHeader(42);
     const uint256 d = rc::RecomputeCoupledPuzzleReference(header, 0);
     BOOST_CHECK_EQUAL(d.GetHex(),
-                      "71c40b7b28bf12926282912bf694b3ac699ec728fcb5fe2123b43af7346e731b");
+                      "7a7ce1065c7881aa2bd2295c26778ebf88c22432e91326f98d098c11885579ee");
 }
 
 /** Public activation heights + parked datacenter switches stay off. */
@@ -692,17 +698,19 @@ BOOST_AUTO_TEST_CASE(rc_dc_public_heights_and_parked_switches_inert)
     BOOST_CHECK(!mainnet.IsMatMulRCActive(0));
     BOOST_CHECK(!mainnet.IsMatMulRCActive(std::numeric_limits<int32_t>::max() - 1));
 
-    BOOST_CHECK(!dc::kRCCoupFullBankScheduleEnabled);
-    BOOST_CHECK(!dc::kRCCoupMaterialExchangeEnabled);
-    BOOST_CHECK(!dc::kRCThreeAxisScheduleWireEnabled);
-    BOOST_CHECK(!dc::RCCoupFullBankScheduleActive());
-    BOOST_CHECK(!dc::RCCoupMaterialExchangeActive());
-    BOOST_CHECK(!rc::kRCThreeAxisScheduleEnabled);
+    BOOST_CHECK(dc::kRCCoupFullBankScheduleEnabled);
+    BOOST_CHECK(dc::kRCCoupMaterialExchangeEnabled);
+    BOOST_CHECK(dc::kRCThreeAxisScheduleWireEnabled);
+    BOOST_CHECK(dc::RCCoupFullBankScheduleActive());
+    BOOST_CHECK(dc::RCCoupMaterialExchangeActive());
+    BOOST_CHECK(rc::kRCThreeAxisScheduleEnabled);
+    BOOST_CHECK_EQUAL(rc::kRCAxisW0State, 48ull << 30);
+    BOOST_CHECK_EQUAL(rc::kRCAxisX0Exchange, 4ull << 30);
 
     const dc::RCDcStatus st = dc::ProbeRCDcStatus();
-    BOOST_CHECK(!st.full_bank_schedule);
-    BOOST_CHECK(!st.material_exchange);
-    BOOST_CHECK(!st.three_axis_wire);
+    BOOST_CHECK(st.full_bank_schedule);
+    BOOST_CHECK(st.material_exchange);
+    BOOST_CHECK(st.three_axis_wire);
     BOOST_CHECK(!st.gkr_arbiter);
 }
 
