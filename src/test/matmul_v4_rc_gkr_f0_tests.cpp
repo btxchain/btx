@@ -120,10 +120,13 @@ BOOST_AUTO_TEST_CASE(f0_pure_fabrication_zero_work_rejected)
 
     const std::string v = VerdictWhy(p, header, target);
     BOOST_TEST_MESSAGE("f0(a) pure fabrication -> " << v);
-    // Must reject; the forgery dies at the recomputed-reference digest binding,
-    // NOT at any self-consistency field the attacker controls.
+    // Must reject. Re-derivation verifier dies at digest_mismatch_reference; the
+    // succinct verifier binds the digest to the committed roots/columns and rejects
+    // earlier (digest_from_roots / column_not_grounded). Any sound relation is fine.
     BOOST_CHECK(v != "ACCEPT");
-    BOOST_CHECK(v.find("digest_mismatch_reference") != std::string::npos);
+    BOOST_CHECK(v.find("digest_mismatch_reference") != std::string::npos ||
+                v.find("digest_from_roots") != std::string::npos ||
+                v.find("column_not_grounded") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -152,9 +155,12 @@ BOOST_AUTO_TEST_CASE(f0_grind_small_digest_defeats_tight_target_rejected)
     const std::string v = VerdictWhy(p, header, tiny);
     BOOST_TEST_MESSAGE("f0(a') grind-to-tight-target -> " << v);
     BOOST_CHECK(v != "ACCEPT");
-    // Recomputed true digest != forged 0 -> digest_mismatch_reference (target
-    // test is downstream and equally fatal). Grinding the embedded digest is moot.
-    BOOST_CHECK(v.find("digest_mismatch_reference") != std::string::npos);
+    // Re-derivation: digest_mismatch_reference. Succinct: the digest is bound to the
+    // committed roots/columns, so a forged digest dies at digest_from_roots /
+    // column_not_grounded. Grinding the embedded digest is moot either way.
+    BOOST_CHECK(v.find("digest_mismatch_reference") != std::string::npos ||
+                v.find("digest_from_roots") != std::string::npos ||
+                v.find("column_not_grounded") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -224,8 +230,12 @@ BOOST_AUTO_TEST_CASE(f0_dimension_relabel_rejected)
     const std::string v = VerdictWhy(p, header, target);
     BOOST_TEST_MESSAGE("f0(c) dimension relabel small->big -> " << v);
     BOOST_CHECK(v != "ACCEPT");
-    // Recompute(header, big) != dig_small -> reject at the reference binding.
-    BOOST_CHECK(v.find("digest_mismatch_reference") != std::string::npos);
+    // Re-derivation: Recompute(header, big) != dig_small -> digest_mismatch_reference.
+    // Succinct: the relabeled dims don't match the committed layout ->
+    // layout_layer_mismatch / digest_from_roots. Any sound relation is fine.
+    BOOST_CHECK(v.find("digest_mismatch_reference") != std::string::npos ||
+                v.find("layout_layer_mismatch") != std::string::npos ||
+                v.find("digest_from_roots") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
