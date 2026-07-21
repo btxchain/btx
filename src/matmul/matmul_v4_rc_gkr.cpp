@@ -15,6 +15,7 @@
 
 #include <cassert>
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -236,7 +237,8 @@ std::vector<RCGkrSumcheckRound> ProveProductK(const std::vector<Fp2>& A, uint32_
                                               const std::vector<Fp2>& B, uint32_t n,
                                               const std::vector<Fp2>& ri, const std::vector<Fp2>& rj,
                                               const Fp2& claim, FsTranscript& fs,
-                                              std::vector<Fp2>& out_r, Fp2& out_final)
+                                              std::vector<Fp2>& out_r, Fp2& out_final,
+                                              Fp2& out_a_at_r, Fp2& out_b_at_r)
 {
     const uint32_t k_pad = RCGkrNextPow2(k_dim);
     std::vector<Fp2> wi(RCGkrNextPow2(m), Fp2::Zero()), wj(RCGkrNextPow2(n), Fp2::Zero());
@@ -286,7 +288,9 @@ std::vector<RCGkrSumcheckRound> ProveProductK(const std::vector<Fp2>& A, uint32_
         rounds.push_back(msg);
         (void)expected;
     }
-    out_final = (ca.empty() || cb.empty()) ? Fp2::Zero() : Mul(ca[0], cb[0]);
+    out_a_at_r = ca.empty() ? Fp2::Zero() : ca[0];
+    out_b_at_r = cb.empty() ? Fp2::Zero() : cb[0];
+    out_final = Mul(out_a_at_r, out_b_at_r);
     return rounds;
 }
 
@@ -354,6 +358,31 @@ void AbsorbEpisode(FsTranscript& fs, const RCEpisodeParams& p)
     fs.AbsorbU32(p.d_model);
     fs.AbsorbU32(p.b_seq);
     fs.AbsorbU32(p.T_leaf);
+}
+
+void AbsorbCoup(FsTranscript& fs, const RCCoupParams& p, const uint256& bank_root)
+{
+    fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("coup_v1"), 7);
+    fs.AbsorbU32(p.barriers);
+    fs.AbsorbU32(p.lobes);
+    fs.AbsorbU32(p.lobe_width);
+    fs.AbsorbU32(p.bank_pages);
+    fs.AbsorbUint256(bank_root);
+}
+
+uint256 CoupledDigestFromBankAndBarriers(const uint256& bank_root,
+                                         const std::vector<uint256>& barrier_roots)
+{
+    std::vector<unsigned char> buf;
+    buf.reserve(sizeof(kRCCoupEpisodeTag) - 1 + 32 + barrier_roots.size() * 32);
+    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCCoupEpisodeTag),
+               reinterpret_cast<const unsigned char*>(kRCCoupEpisodeTag) +
+                   sizeof(kRCCoupEpisodeTag) - 1);
+    buf.insert(buf.end(), bank_root.begin(), bank_root.end());
+    for (const uint256& root : barrier_roots) {
+        buf.insert(buf.end(), root.begin(), root.end());
+    }
+    return Sha256dBytes(buf.data(), buf.size());
 }
 
 uint256 DerivePowBind(const uint256& claimed_digest)
@@ -438,6 +467,7 @@ struct LayerWire {
     uint32_t round{0};
     uint32_t layer{0};
     uint32_t m{0}, n{0}, k{0};
+    uint32_t page_id{0};
     std::vector<Fp2> A;
     std::vector<Fp2> B;
     std::vector<Fp2> Y; // GEMM product (Fp2) — sumcheck claim target
@@ -447,6 +477,8 @@ struct LayerWire {
     std::vector<int64_t> extract_in;
     uint256 extract_prf{};
     std::vector<int8_t> extract_out;
+    /** When true, skip product sumcheck (Extract-only coupled barrier layer). */
+    bool extract_only{false};
 };
 
 void ExactInt64Gemm(const std::vector<int8_t>& A, uint32_t m, uint32_t k,
@@ -631,7 +663,9 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
                                  const std::vector<LayerWire>& wires,
                                  const std::vector<uint256>& round_seeds,
                                  const std::vector<uint256>& round_roots,
-                                 const uint256& episode_sigma, const char* path_note)
+                                 const uint256& episode_sigma, const char* path_note,
+                                 bool coupled = false, const RCCoupParams& coup = {},
+                                 const uint256& bank_root = {})
 {
     RCGkrProveResult out;
     const size_t rss0 = CurrentRssKiB();
@@ -640,15 +674,24 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
     p.version = kRCGkrProofVersion;
     p.claimed_digest = claimed_digest;
     p.episode = episode;
+    p.coupled = coupled;
+    p.coup = coup;
+    p.bank_root = bank_root;
     p.round_seeds = round_seeds;
     p.round_roots = round_roots;
     p.episode_sigma = episode_sigma;
+    p.table_multiplicity = 1;
 
     FsTranscript fs(kRCGkrDomainTag);
-    AbsorbEpisode(fs, episode);
+    if (coupled) {
+        AbsorbCoup(fs, coup, bank_root);
+    } else {
+        AbsorbEpisode(fs, episode);
+    }
     fs.AbsorbUint256(claimed_digest);
     AbsorbPowBind(fs, claimed_digest, p.pow_bind);
     fs.AbsorbUint256(episode_sigma);
+    fs.AbsorbU32(p.table_multiplicity);
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("round_seeds"), 11);
     for (const auto& s : round_seeds) fs.AbsorbUint256(s);
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("round_roots"), 11);
@@ -666,25 +709,40 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
         outbuf.insert(outbuf.end(), reinterpret_cast<const unsigned char*>(w.extract_out.data()),
                       reinterpret_cast<const unsigned char*>(w.extract_out.data()) +
                           w.extract_out.size());
-        extract_commits.push_back(Sha256dBytes(outbuf.data(), outbuf.size()));
+        extract_commits.push_back(Sha256dBytes(outbuf.empty() ? nullptr : outbuf.data(), outbuf.size()));
 
-        const uint32_t n_blocks = w.n / kRCMxBlockLen;
+        if (w.extract_out.empty() || w.extract_in.empty()) continue;
         assert(w.extract_in.size() == static_cast<size_t>(w.m) * w.n);
         assert(w.extract_out.size() == static_cast<size_t>(w.m) * w.n);
+        assert(w.n % kRCMxBlockLen == 0);
+        const uint32_t n_blocks = w.n / kRCMxBlockLen;
         for (uint32_t i = 0; i < w.m; ++i) {
             for (uint32_t bj = 0; bj < n_blocks; ++bj) {
                 const size_t base =
                     static_cast<size_t>(i) * w.n + static_cast<size_t>(bj) * kRCMxBlockLen;
                 const uint8_t scale = lt::DeriveMatExpandMxScale(w.extract_prf, i, bj);
-                // Witness key binds claimed (in, out).
                 witness_keys.push_back(HashLookupKey(i, bj, w.extract_prf, scale,
                                                      w.extract_in.data() + base,
                                                      w.extract_out.data() + base));
-                // Virtual Extract table key: out MUST be ExtractMX(in).
                 int8_t honest_out[kRCMxBlockLen];
                 ExtractMXTileInt64(w.extract_prf, i, bj, w.extract_in.data() + base, honest_out);
                 table_keys.push_back(HashLookupKey(i, bj, w.extract_prf, scale,
                                                    w.extract_in.data() + base, honest_out));
+            }
+        }
+    }
+    // G3 multiplicity=1: every table key must be unique.
+    {
+        std::vector<Fp2> sorted = table_keys;
+        std::sort(sorted.begin(), sorted.end(), [](const Fp2& x, const Fp2& y) {
+            if (x.c0 != y.c0) return x.c0 < y.c0;
+            return x.c1 < y.c1;
+        });
+        for (size_t i = 1; i < sorted.size(); ++i) {
+            if (Eq(sorted[i], sorted[i - 1])) {
+                out.timing.ok = false;
+                out.timing.note = "G3 table multiplicity > 1";
+                return out;
             }
         }
     }
@@ -695,7 +753,6 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
         return Sha256dBytes(buf.empty() ? nullptr : buf.data(), buf.size());
     };
 
-    // FRI commits (DEEP enabled) bind polynomials before sumcheck challenges.
     const uint256 fri_pre = fs.Challenge("fri_precommit");
     auto a_c = FriCommitAndFold(a_evals.empty() ? std::vector<Fp2>{Fp2::Zero()} : a_evals, fri_pre);
     auto b_c = FriCommitAndFold(b_evals.empty() ? std::vector<Fp2>{Fp2::Zero()} : b_evals, fri_pre);
@@ -710,7 +767,6 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
     p.trace_fri = std::move(trace_c.proof);
     p.lookup_fri = std::move(lookup_c.proof);
     p.table_fri = std::move(table_c.proof);
-    // G3: witness keys must equal Extract-table keys (out = Extract(in)).
     if (p.lookup_fri.layers.empty() || p.table_fri.layers.empty() ||
         p.lookup_fri.layers[0].root != p.table_fri.layers[0].root ||
         (p.lookup_fri.has_deep && p.table_fri.has_deep &&
@@ -736,12 +792,13 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
     uint256 prev_extract_commit{};
     for (size_t wi = 0; wi < wires.size(); ++wi) {
         const auto& w = wires[wi];
-        // G4: absorb prior extract_out commit (cross-layer link).
         fs.AbsorbUint256(prev_extract_commit);
         fs.AbsorbUint256(extract_commits[wi]);
+        fs.AbsorbU32(w.page_id);
+        fs.AbsorbU32(/*multiplicity*/ 1);
 
-        const uint32_t nu_i = Log2Exact(RCGkrNextPow2(w.m));
-        const uint32_t nu_j = Log2Exact(RCGkrNextPow2(w.n));
+        const uint32_t nu_i = Log2Exact(RCGkrNextPow2(std::max(w.m, 1u)));
+        const uint32_t nu_j = Log2Exact(RCGkrNextPow2(std::max(w.n, 1u)));
         std::vector<Fp2> ri(nu_i), rj(nu_j);
         for (uint32_t t = 0; t < nu_i; ++t) ri[t] = fs.ChallengeFp2("ri");
         for (uint32_t t = 0; t < nu_j; ++t) rj[t] = fs.ChallengeFp2("rj");
@@ -751,7 +808,10 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
         if (!w.residual.empty()) {
             residual_mle = MleEvalMatrix(w.residual, w.m, w.n, ri, rj);
         }
-        const Fp2 acc_claim = MleEvalMatrix(ToFp2I64(w.extract_in), w.m, w.n, ri, rj);
+        Fp2 acc_claim = gemm_claim;
+        if (!w.extract_in.empty()) {
+            acc_claim = MleEvalMatrix(ToFp2I64(w.extract_in), w.m, w.n, ri, rj);
+        }
         fs.AbsorbFp2(gemm_claim);
         fs.AbsorbFp2(residual_mle);
         fs.AbsorbFp2(acc_claim);
@@ -763,22 +823,38 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
         lc.m = w.m;
         lc.n = w.n;
         lc.k = w.k;
+        lc.page_id = w.page_id;
+        lc.table_multiplicity = 1;
         lc.claim = gemm_claim;
         lc.residual_mle = residual_mle;
         lc.acc_claim = acc_claim;
         lc.extract_out_commit = extract_commits[wi];
         lc.a_root = wire_root(w.A);
         lc.b_root = wire_root(w.B);
+        lc.y_root = wire_root(w.Y);
         fs.AbsorbUint256(lc.a_root);
         fs.AbsorbUint256(lc.b_root);
+        fs.AbsorbUint256(lc.y_root);
+
         std::vector<Fp2> rk;
-        lc.sumcheck =
-            ProveProductK(w.A, w.m, w.k, w.B, w.n, ri, rj, gemm_claim, fs, rk, lc.final_eval);
+        if (w.extract_only || w.k == 0 || w.A.empty() || w.B.empty()) {
+            // Extract-only: claim binds Y=extract_in; a_at_r=1, b_at_r=claim.
+            lc.a_at_r = Fp2::One();
+            lc.b_at_r = gemm_claim;
+            lc.final_eval = gemm_claim;
+            fs.AbsorbFp2(lc.a_at_r);
+            fs.AbsorbFp2(lc.b_at_r);
+            fs.AbsorbFp2(lc.final_eval);
+        } else {
+            lc.sumcheck = ProveProductK(w.A, w.m, w.k, w.B, w.n, ri, rj, gemm_claim, fs, rk,
+                                        lc.final_eval, lc.a_at_r, lc.b_at_r);
+            fs.AbsorbFp2(lc.a_at_r);
+            fs.AbsorbFp2(lc.b_at_r);
+        }
         p.layers.push_back(std::move(lc));
         prev_extract_commit = extract_commits[wi];
     }
 
-    // G3 Haböck LogUp (2022/1530): α, inv_i=1/(α−t_i), S=Σ inv_i = I(1), R≡0.
     const Fp2 alu = fs.ChallengeFp2("logup_alpha");
     p.logup_alpha = alu;
     std::vector<Fp2> inv, resid;
@@ -803,7 +879,6 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
         out.timing.note = "G3 Haböck sum_w != sum_t";
         return out;
     }
-    // R must be identically zero (Extract-honest + correct inverses).
     for (const auto& r : resid) {
         if (!IsZero(r)) {
             out.timing.ok = false;
@@ -821,7 +896,6 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
     auto r_c = FriCommitAndFold(resid.empty() ? std::vector<Fp2>{Fp2::Zero()} : resid, fri_pre);
     p.logup_inv_fri = std::move(inv_c.proof);
     p.logup_r_fri = std::move(r_c.proof);
-    // I(1) = S via forced DEEP.
     if (!p.logup_inv_fri.has_deep || !p.logup_inv_fri.deep_z_forced ||
         !Eq(p.logup_inv_fri.deep_z, Fp2::One()) ||
         !Eq(p.logup_inv_fri.deep_eval, sum_t)) {
@@ -829,7 +903,6 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
         out.timing.note = "G3 LogUp I(1) DEEP mismatch";
         return out;
     }
-    // R≡0: deep_eval and final must be zero.
     if (p.logup_r_fri.has_deep && !IsZero(p.logup_r_fri.deep_eval)) {
         out.timing.ok = false;
         out.timing.note = "G3 LogUp R deep nonzero";
@@ -847,6 +920,7 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
         fs.AbsorbFp2(p.logup_inv_fri.deep_eval);
     }
     p.transcript_hash = fs.Digest();
+    p.shrink_note = kRCGkrG1G5ClosedStatement;
 
     std::vector<unsigned char> ser;
     out.timing.proof_bytes = SerializeRCGkrProof(p, ser);
@@ -863,6 +937,23 @@ RCGkrProveResult ProveFromLayers(const uint256& claimed_digest, const RCEpisodeP
 size_t RCGkrExpectedLayerCount(const RCEpisodeParams& p)
 {
     return static_cast<size_t>(p.rounds) * (2u + 3u * static_cast<size_t>(p.L_lyr));
+}
+
+size_t RCGkrExpectedCoupledLayerCount(const RCCoupParams& p, bool full_bank_schedule)
+{
+    // Legacy: 1 page per (barrier, lobe). Full schedule: pages_per = bank_pages/(barriers*lobes)
+    // when evenly divisible; SelectCoupledBankPageIds returns that many ids.
+    size_t pages_per = 1;
+    if (full_bank_schedule && p.barriers > 0 && p.lobes > 0) {
+        // Mirror dc pages-per when full schedule; otherwise fall back to 1.
+        pages_per = std::max<size_t>(1, static_cast<size_t>(p.bank_pages) /
+                                            (static_cast<size_t>(p.barriers) * p.lobes));
+        if (pages_per * static_cast<size_t>(p.barriers) * p.lobes != p.bank_pages) {
+            pages_per = 1; // non-uniform — count from Select at prove time
+        }
+    }
+    return static_cast<size_t>(p.barriers) *
+           (static_cast<size_t>(p.lobes) * pages_per + 1u /*Extract*/);
 }
 
 bool EnvRCWinnerGkrEnabled() { return EnvFlagIsOne("BTX_RC_WINNER_GKR"); }
@@ -1055,20 +1146,81 @@ RCGkrProveResult ProveWinnerEpisode(const CBlockHeader& header, const RCEpisodeP
 RCGkrProveResult ProveWinnerCoupled(const CBlockHeader& header, int32_t height,
                                     const RCCoupParams& params, const uint256& resealed_digest)
 {
-    (void)header;
-    (void)height;
-    (void)params;
-    (void)resealed_digest;
-    // Assessment Wave A #3: previously discarded params and proved
-    // MakeToyRCEpisodeParams() — a valid-looking proof of unrelated work.
-    // Fail closed until real coupled-product arithmetization lands.
-    // Shadow/arbiter stay OFF; heights INT32_MAX; ExactReplay decides.
-    RCGkrProveResult out;
-    out.proof = {};
-    out.proof.shrink_note = kRCGkrCoupledArithStatement;
-    out.timing.ok = false;
-    out.timing.note = "coupled_arithmetization_unwired";
-    return out;
+    RCCoupEpisodeTranscript tx;
+    const uint256 dig =
+        RecomputeCoupledPuzzleReference(header, height, params, {}, {}, nullptr, &tx);
+    (void)dig;
+
+    std::vector<LayerWire> wires;
+    wires.reserve(tx.gemms.size() + tx.extracts.size());
+    size_t gi = 0;
+    for (uint32_t b = 0; b < params.barriers; ++b) {
+        while (gi < tx.gemms.size() && tx.gemms[gi].barrier == b) {
+            const auto& g = tx.gemms[gi++];
+            LayerWire w;
+            w.kind = RCGkrLayerKind::CoupLobeGemm;
+            w.round = g.barrier;
+            w.layer = g.lobe;
+            w.page_id = g.page_id;
+            w.m = 1;
+            w.n = params.lobe_width;
+            w.k = params.lobe_width;
+            w.A = ToFp2I8(g.A);
+            w.B = ToFp2I8(g.B);
+            w.Y = ToFp2I64(g.Y);
+            // GEMM-only: LogUp deferred to barrier Extract layer.
+            w.extract_in.clear();
+            w.extract_out.clear();
+            w.extract_only = false;
+            wires.push_back(std::move(w));
+        }
+        // Matching Extract for this barrier.
+        const RCCoupExtractTranscript* et = nullptr;
+        for (const auto& e : tx.extracts) {
+            if (e.barrier == b) {
+                et = &e;
+                break;
+            }
+        }
+        if (!et) {
+            RCGkrProveResult fail;
+            fail.timing.ok = false;
+            fail.timing.note = "coupled extract transcript missing barrier";
+            return fail;
+        }
+        LayerWire w;
+        w.kind = RCGkrLayerKind::CoupBarrierExtract;
+        w.round = b;
+        w.layer = 0;
+        w.page_id = 0;
+        w.m = 1;
+        w.n = params.StateBytes();
+        w.k = 0;
+        w.Y = ToFp2I64(et->extract_in);
+        w.extract_in = et->extract_in;
+        w.extract_out = et->extract_out;
+        w.extract_prf = et->extract_prf;
+        w.extract_only = true;
+        wires.push_back(std::move(w));
+    }
+
+    std::vector<uint256> seeds(params.barriers);
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    for (uint32_t b = 0; b < params.barriers; ++b) {
+        seeds[b] = Sha256TaggedU32(kRCCoupBarrierTag, sizeof(kRCCoupBarrierTag) - 1, sigma, b);
+    }
+    RCEpisodeParams empty_ep{};
+    empty_ep.rounds = 0;
+    empty_ep.d_head = 0;
+    empty_ep.n_q = 0;
+    empty_ep.n_ctx = 0;
+    empty_ep.L_lyr = 0;
+    empty_ep.d_model = 0;
+    empty_ep.b_seq = 0;
+    empty_ep.T_leaf = 0;
+    return ProveFromLayers(resealed_digest, empty_ep, wires, seeds, tx.barrier_roots, sigma,
+                           "ProveWinnerCoupled: real lobe-GEMM + barrier-Extract LogUp+FRI",
+                           /*coupled=*/true, params, tx.bank_root);
 }
 
 bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
@@ -1095,67 +1247,112 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
     if (proof.version != kRCGkrProofVersion) return fail("bad version");
     if (proof.layers.empty()) return fail("no layers");
     if (proof.pow_bind != DerivePowBind(proof.claimed_digest)) return fail("pow_bind");
+    if (proof.table_multiplicity != 1) return fail("G3 table multiplicity");
 
-    // Round-seed / tile-tree consistency (skip for DEPRECATED synth path with empty roots).
+    // Round-seed / tile-tree / barrier consistency (skip DEPRECATED synth empty roots).
     if (!proof.round_roots.empty() || !proof.round_seeds.empty()) {
-        if (proof.round_roots.size() != proof.episode.rounds) return fail("round_roots size");
-        if (proof.round_seeds.size() != proof.episode.rounds) return fail("round_seeds size");
-        if (EpisodeDigestFromRoots(proof.round_roots) != proof.claimed_digest) {
-            return fail("episode digest vs round_roots");
-        }
-        for (uint32_t r = 0; r < proof.episode.rounds; ++r) {
-            uint256 expect;
-            if (r == 0) {
-                expect = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1,
-                                         proof.episode_sigma, 0);
-            } else {
-                expect = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1,
-                                         proof.round_roots[r - 1], r);
+        if (proof.coupled) {
+            if (!ValidateRCCoupParams(proof.coup)) return fail("coup params");
+            if (proof.round_roots.size() != proof.coup.barriers) return fail("barrier_roots size");
+            if (proof.round_seeds.size() != proof.coup.barriers) return fail("barrier_seeds size");
+            if (CoupledDigestFromBankAndBarriers(proof.bank_root, proof.round_roots) !=
+                proof.claimed_digest) {
+                return fail("coupled digest vs bank/barrier roots");
             }
-            if (expect != proof.round_seeds[r]) return fail("round_seed chain");
-        }
-        if (proof.layers.size() != ExpectedLayerCount(proof.episode)) {
-            return fail("layer count");
-        }
-        bool saw_qkt = false, saw_sv = false, saw_fwd = false, saw_bwd = false, saw_wg = false;
-        for (const auto& lc : proof.layers) {
-            // M7: layer dims must match public episode params (no free m/n/k).
-            const auto& ep = proof.episode;
-            bool dims_ok = false;
-            switch (lc.kind) {
-            case RCGkrLayerKind::GemmPhase1QKt:
+            for (uint32_t b = 0; b < proof.coup.barriers; ++b) {
+                const uint256 expect =
+                    Sha256TaggedU32(kRCCoupBarrierTag, sizeof(kRCCoupBarrierTag) - 1,
+                                    proof.episode_sigma, b);
+                if (expect != proof.round_seeds[b]) return fail("barrier_seed");
+            }
+            // Canonical sequencing: per barrier, lobe GEMMs then Extract; no repeats/omissions.
+            size_t idx = 0;
+            for (uint32_t b = 0; b < proof.coup.barriers; ++b) {
+                for (uint32_t ell = 0; ell < proof.coup.lobes; ++ell) {
+                    const auto expect_pages =
+                        SelectCoupledBankPageIds(b, ell, proof.coup, proof.episode_sigma,
+                                                 /*full_bank_schedule=*/false);
+                    for (uint32_t page_id : expect_pages) {
+                        if (idx >= proof.layers.size()) return fail("omitted barrier/layer");
+                        const auto& lc = proof.layers[idx++];
+                        if (lc.kind != RCGkrLayerKind::CoupLobeGemm) return fail("layer order");
+                        if (lc.round != b || lc.layer != ell) return fail("layer order");
+                        if (lc.page_id != page_id) return fail("page ID");
+                        if (lc.m != 1 || lc.n != proof.coup.lobe_width ||
+                            lc.k != proof.coup.lobe_width) {
+                            return fail("layer dims vs coup");
+                        }
+                        if (lc.table_multiplicity != 1) return fail("G3 layer multiplicity");
+                    }
+                }
+                if (idx >= proof.layers.size()) return fail("omitted barrier");
+                const auto& ex = proof.layers[idx++];
+                if (ex.kind != RCGkrLayerKind::CoupBarrierExtract) return fail("layer order");
+                if (ex.round != b) return fail("layer order");
+                if (ex.m != 1 || ex.n != proof.coup.StateBytes() || ex.k != 0) {
+                    return fail("layer dims vs coup");
+                }
+            }
+            if (idx != proof.layers.size()) return fail("repeated layer");
+        } else {
+            if (proof.round_roots.size() != proof.episode.rounds) return fail("round_roots size");
+            if (proof.round_seeds.size() != proof.episode.rounds) return fail("round_seeds size");
+            if (EpisodeDigestFromRoots(proof.round_roots) != proof.claimed_digest) {
+                return fail("episode digest vs round_roots");
+            }
+            for (uint32_t r = 0; r < proof.episode.rounds; ++r) {
+                uint256 expect;
+                if (r == 0) {
+                    expect = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1,
+                                             proof.episode_sigma, 0);
+                } else {
+                    expect = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1,
+                                             proof.round_roots[r - 1], r);
+                }
+                if (expect != proof.round_seeds[r]) return fail("round_seed chain");
+            }
+            if (proof.layers.size() != ExpectedLayerCount(proof.episode)) {
+                return fail("layer count");
+            }
+            // Canonical (round, kind) order: QKt, SV, then L×(Fwd), then L×(Bwd,Wgrad) descending.
+            size_t idx = 0;
+            bool saw_qkt = false, saw_sv = false, saw_fwd = false, saw_bwd = false, saw_wg = false;
+            for (uint32_t r = 0; r < proof.episode.rounds; ++r) {
+                auto need = [&](RCGkrLayerKind kind, uint32_t layer, uint32_t m, uint32_t n,
+                                uint32_t k) -> bool {
+                    if (idx >= proof.layers.size()) return false;
+                    const auto& lc = proof.layers[idx++];
+                    if (lc.kind != kind || lc.round != r || lc.layer != layer) return false;
+                    if (lc.m != m || lc.n != n || lc.k != k) return false;
+                    if (lc.table_multiplicity != 1) return false;
+                    return true;
+                };
+                const auto& ep = proof.episode;
+                if (!need(RCGkrLayerKind::GemmPhase1QKt, 0, ep.n_q, ep.n_ctx, ep.d_head))
+                    return fail("layer order");
                 saw_qkt = true;
-                dims_ok = lc.m == ep.n_q && lc.n == ep.n_ctx && lc.k == ep.d_head;
-                break;
-            case RCGkrLayerKind::GemmPhase1SV:
+                if (!need(RCGkrLayerKind::GemmPhase1SV, 0, ep.n_q, ep.d_head, ep.n_ctx))
+                    return fail("layer order");
                 saw_sv = true;
-                dims_ok = lc.m == ep.n_q && lc.n == ep.d_head && lc.k == ep.n_ctx;
-                break;
-            case RCGkrLayerKind::GemmPhase2Fwd:
-                saw_fwd = true;
-                dims_ok = lc.m == ep.b_seq && lc.n == ep.d_model && lc.k == ep.d_model;
-                break;
-            case RCGkrLayerKind::GemmPhase2Bwd:
-                saw_bwd = true;
-                dims_ok = lc.m == ep.b_seq && lc.n == ep.d_model && lc.k == ep.d_model;
-                break;
-            case RCGkrLayerKind::GemmPhase2Wgrad:
-                saw_wg = true;
-                dims_ok = lc.m == ep.d_model && lc.n == ep.d_model && lc.k == ep.b_seq;
-                break;
-            default:
-                return fail("unexpected layer kind");
+                for (uint32_t l = 0; l < ep.L_lyr; ++l) {
+                    if (!need(RCGkrLayerKind::GemmPhase2Fwd, l, ep.b_seq, ep.d_model, ep.d_model))
+                        return fail("layer order");
+                    saw_fwd = true;
+                }
+                for (int32_t li = static_cast<int32_t>(ep.L_lyr) - 1; li >= 0; --li) {
+                    const uint32_t l = static_cast<uint32_t>(li);
+                    if (!need(RCGkrLayerKind::GemmPhase2Bwd, l, ep.b_seq, ep.d_model, ep.d_model))
+                        return fail("layer order");
+                    saw_bwd = true;
+                    if (!need(RCGkrLayerKind::GemmPhase2Wgrad, l, ep.d_model, ep.d_model, ep.b_seq))
+                        return fail("layer order");
+                    saw_wg = true;
+                }
             }
-            if (!dims_ok) return fail("layer dims vs episode");
-            if (lc.layer >= ep.L_lyr && (lc.kind == RCGkrLayerKind::GemmPhase2Fwd ||
-                                         lc.kind == RCGkrLayerKind::GemmPhase2Bwd ||
-                                         lc.kind == RCGkrLayerKind::GemmPhase2Wgrad)) {
-                return fail("layer index");
+            if (idx != proof.layers.size()) return fail("repeated layer");
+            if (!(saw_qkt && saw_sv && saw_fwd && saw_bwd && saw_wg)) {
+                return fail("missing ALL-PHASE layer kind");
             }
-            if (lc.round >= ep.rounds) return fail("round index");
-        }
-        if (!(saw_qkt && saw_sv && saw_fwd && saw_bwd && saw_wg)) {
-            return fail("missing ALL-PHASE layer kind");
         }
         if (proof.trace_fri.layers.empty() || proof.lookup_fri.layers.empty() ||
             proof.table_fri.layers.empty() || proof.logup_inv_fri.layers.empty() ||
@@ -1166,12 +1363,17 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
     }
 
     FsTranscript fs(kRCGkrDomainTag);
-    AbsorbEpisode(fs, proof.episode);
+    if (proof.coupled) {
+        AbsorbCoup(fs, proof.coup, proof.bank_root);
+    } else {
+        AbsorbEpisode(fs, proof.episode);
+    }
     fs.AbsorbUint256(proof.claimed_digest);
     uint256 bind{};
     AbsorbPowBind(fs, proof.claimed_digest, bind);
     if (bind != proof.pow_bind) return fail("pow_bind fs");
     fs.AbsorbUint256(proof.episode_sigma);
+    fs.AbsorbU32(proof.table_multiplicity);
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("round_seeds"), 11);
     for (const auto& s : proof.round_seeds) fs.AbsorbUint256(s);
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("round_roots"), 11);
@@ -1211,14 +1413,19 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
 
     uint256 prev_extract_commit{};
     for (const auto& lc : proof.layers) {
-        const uint32_t nu_i = Log2Exact(RCGkrNextPow2(lc.m));
-        const uint32_t nu_j = Log2Exact(RCGkrNextPow2(lc.n));
-        const uint32_t nu_k = Log2Exact(RCGkrNextPow2(lc.k));
-        if (lc.sumcheck.size() != nu_k) return fail("sumcheck round count");
+        const uint32_t nu_i = Log2Exact(RCGkrNextPow2(std::max(lc.m, 1u)));
+        const uint32_t nu_j = Log2Exact(RCGkrNextPow2(std::max(lc.n, 1u)));
+        const bool extract_only =
+            lc.kind == RCGkrLayerKind::CoupBarrierExtract || lc.k == 0 || lc.sumcheck.empty();
+        const uint32_t nu_k = extract_only ? 0 : Log2Exact(RCGkrNextPow2(lc.k));
+        if (!extract_only && lc.sumcheck.size() != nu_k) return fail("sumcheck round count");
 
         // G4 cross-layer extract_out commit chain.
         fs.AbsorbUint256(prev_extract_commit);
         fs.AbsorbUint256(lc.extract_out_commit);
+        fs.AbsorbU32(lc.page_id);
+        fs.AbsorbU32(lc.table_multiplicity);
+        if (lc.table_multiplicity != 1) return fail("G3 layer multiplicity");
 
         std::vector<Fp2> ri(nu_i), rj(nu_j);
         for (uint32_t t = 0; t < nu_i; ++t) ri[t] = fs.ChallengeFp2("ri");
@@ -1233,11 +1440,27 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
         }
         fs.AbsorbUint256(lc.a_root);
         fs.AbsorbUint256(lc.b_root);
-        std::vector<Fp2> rk;
-        Fp2 gf;
-        if (!VerifyProductK(lc.sumcheck, lc.claim, fs, rk, gf)) return fail("gemm sumcheck");
-        if (!Eq(gf, lc.final_eval)) return fail("gemm final");
-        if (rk.size() != nu_k) return fail("sumcheck rk size");
+        fs.AbsorbUint256(lc.y_root);
+        if (extract_only) {
+            fs.AbsorbFp2(lc.a_at_r);
+            fs.AbsorbFp2(lc.b_at_r);
+            fs.AbsorbFp2(lc.final_eval);
+            if (!Eq(lc.a_at_r, Fp2::One()) || !Eq(lc.b_at_r, lc.claim) ||
+                !Eq(lc.final_eval, lc.claim)) {
+                return fail("extract-only final");
+            }
+            if (!Eq(lc.final_eval, Mul(lc.a_at_r, lc.b_at_r))) return fail("G1 a*b!=final");
+        } else {
+            std::vector<Fp2> rk;
+            Fp2 gf;
+            if (!VerifyProductK(lc.sumcheck, lc.claim, fs, rk, gf)) return fail("gemm sumcheck");
+            if (!Eq(gf, lc.final_eval)) return fail("gemm final");
+            if (rk.size() != nu_k) return fail("sumcheck rk size");
+            fs.AbsorbFp2(lc.a_at_r);
+            fs.AbsorbFp2(lc.b_at_r);
+            // G1: A/B openings at sumcheck point bound to final_eval.
+            if (!Eq(lc.final_eval, Mul(lc.a_at_r, lc.b_at_r))) return fail("G1 a*b!=final");
+        }
         prev_extract_commit = lc.extract_out_commit;
     }
 
@@ -1320,6 +1543,13 @@ size_t SerializeRCGkrProof(const RCGkrProof& proof, std::vector<unsigned char>& 
     AppendLE32(out, proof.episode.d_model);
     AppendLE32(out, proof.episode.b_seq);
     AppendLE32(out, proof.episode.T_leaf);
+    out.push_back(proof.coupled ? 1 : 0);
+    AppendLE32(out, proof.coup.barriers);
+    AppendLE32(out, proof.coup.lobes);
+    AppendLE32(out, proof.coup.lobe_width);
+    AppendLE32(out, proof.coup.bank_pages);
+    AppendBytes(out, proof.bank_root.data(), 32);
+    AppendLE32(out, proof.table_multiplicity);
     AppendLE32(out, static_cast<uint32_t>(proof.round_seeds.size()));
     for (const auto& s : proof.round_seeds) AppendBytes(out, s.data(), 32);
     AppendLE32(out, static_cast<uint32_t>(proof.round_roots.size()));
@@ -1339,6 +1569,11 @@ size_t SerializeRCGkrProof(const RCGkrProof& proof, std::vector<unsigned char>& 
         AppendBytes(out, lc.extract_out_commit.data(), 32);
         AppendBytes(out, lc.a_root.data(), 32);
         AppendBytes(out, lc.b_root.data(), 32);
+        AppendBytes(out, lc.y_root.data(), 32);
+        AppendFp2(out, lc.a_at_r);
+        AppendFp2(out, lc.b_at_r);
+        AppendLE32(out, lc.page_id);
+        AppendLE32(out, lc.table_multiplicity);
         AppendLE32(out, static_cast<uint32_t>(lc.sumcheck.size()));
         for (const auto& r : lc.sumcheck) {
             AppendFp2(out, r.eval0);
@@ -1400,6 +1635,14 @@ std::optional<RCGkrProof> DeserializeRCGkrProof(const std::vector<unsigned char>
     if (!ReadLE32Checked(p, end, proof.episode.d_model)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.episode.b_seq)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.episode.T_leaf)) return std::nullopt;
+    if (p >= end) return std::nullopt;
+    proof.coupled = (*p++ != 0);
+    if (!ReadLE32Checked(p, end, proof.coup.barriers)) return std::nullopt;
+    if (!ReadLE32Checked(p, end, proof.coup.lobes)) return std::nullopt;
+    if (!ReadLE32Checked(p, end, proof.coup.lobe_width)) return std::nullopt;
+    if (!ReadLE32Checked(p, end, proof.coup.bank_pages)) return std::nullopt;
+    if (!ReadBytesChecked(p, end, proof.bank_root.data(), 32)) return std::nullopt;
+    if (!ReadLE32Checked(p, end, proof.table_multiplicity)) return std::nullopt;
 
     uint32_t n_seeds = 0, n_roots = 0;
     if (!ReadLE32Checked(p, end, n_seeds) || n_seeds > 64) return std::nullopt;
@@ -1432,6 +1675,11 @@ std::optional<RCGkrProof> DeserializeRCGkrProof(const std::vector<unsigned char>
         if (!ReadBytesChecked(p, end, lc.extract_out_commit.data(), 32)) return std::nullopt;
         if (!ReadBytesChecked(p, end, lc.a_root.data(), 32)) return std::nullopt;
         if (!ReadBytesChecked(p, end, lc.b_root.data(), 32)) return std::nullopt;
+        if (!ReadBytesChecked(p, end, lc.y_root.data(), 32)) return std::nullopt;
+        if (!ReadFp2Checked(p, end, lc.a_at_r)) return std::nullopt;
+        if (!ReadFp2Checked(p, end, lc.b_at_r)) return std::nullopt;
+        if (!ReadLE32Checked(p, end, lc.page_id)) return std::nullopt;
+        if (!ReadLE32Checked(p, end, lc.table_multiplicity)) return std::nullopt;
         uint32_t sc_n = 0;
         if (!ReadLE32Checked(p, end, sc_n) || sc_n > 256) return std::nullopt;
         lc.sumcheck.resize(sc_n);
@@ -1555,7 +1803,7 @@ WinnerGkrSolveReport SolveCoupledProveWinner(CBlockHeader header, int32_t height
             if (!pr.timing.ok) {
                 rep.proved = false;
                 rep.ok = true; // mining/reseal succeeded; prove is unsupported
-                rep.note = pr.timing.note.empty() ? "coupled_arithmetization_unwired" : pr.timing.note;
+                rep.note = pr.timing.note.empty() ? "coupled prove failed" : pr.timing.note;
             } else {
                 RCGkrTiming vt;
                 rep.proved = VerifyWinnerProof(rep.proof, &vt);

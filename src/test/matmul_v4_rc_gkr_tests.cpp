@@ -662,11 +662,9 @@ BOOST_AUTO_TEST_CASE(gkr_f3_arbiter_rejects_sigma_or_digest_over_target)
     unsetenv("BTX_RC_GKR_ARBITER");
 }
 
-BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_fail_closed_no_toy_proof)
+BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_real_arithmetization)
 {
-    // Assessment #3: ProveWinnerCoupled must not emit a valid-looking proof of
-    // MakeToyRCEpisodeParams() / unrelated work. Fail closed with a clear deficit.
-    // Heights INT32_MAX; arbiter stays OFF.
+    // Real coupled arithmetization of ACTUAL coup params — not MakeToyRCEpisodeParams.
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCCoupledHeight,
                       std::numeric_limits<int32_t>::max());
@@ -677,14 +675,185 @@ BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_fail_closed_no_toy_proof)
     const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, /*height=*/0, coup);
     const auto pr = rc::ProveWinnerCoupled(header, /*height=*/0, coup, dig);
 
-    BOOST_CHECK(!pr.timing.ok);
-    BOOST_CHECK_EQUAL(pr.timing.note, "coupled_arithmetization_unwired");
-    BOOST_CHECK(pr.proof.layers.empty());
+    BOOST_REQUIRE(pr.timing.ok);
+    BOOST_CHECK(pr.proof.coupled);
+    BOOST_CHECK_EQUAL(pr.proof.coup.barriers, coup.barriers);
+    BOOST_CHECK(!pr.proof.layers.empty());
+    BOOST_CHECK(rc::VerifyWinnerProof(pr.proof));
+    BOOST_CHECK_EQUAL(pr.proof.claimed_digest, dig);
+    // Must not be an episode stand-in proof.
+    BOOST_CHECK_EQUAL(pr.proof.episode.rounds, 0u);
+    BOOST_CHECK(pr.timing.note.find("MakeToyRCEpisodeParams") == std::string::npos);
+    BOOST_CHECK(pr.timing.note.find("coupled_arithmetization_unwired") == std::string::npos);
+}
+
+// --- G1–G5 adversarial forge suite (each forgery independently REJECTED) ---
+
+namespace {
+
+rc::RCGkrProveResult ProveHonestCoupled()
+{
+    const auto header = MakeRCHeader(42);
+    const auto coup = rc::MakeToyRCCoupParams();
+    const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, 0, coup);
+    return rc::ProveWinnerCoupled(header, 0, coup, dig);
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(gkr_forge_a_root_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    pr.proof.layers[0].a_root.begin()[0] ^= 1;
     BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
-    BOOST_CHECK(pr.proof.shrink_note.find("coupled_arithmetization_unwired") != std::string::npos);
-    // Must not look like a successful ALL-PHASE episode proof.
-    BOOST_CHECK(pr.proof.round_seeds.empty());
-    BOOST_CHECK(pr.proof.round_roots.empty());
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_b_root_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    pr.proof.layers[0].b_root.begin()[1] ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_ab_opening_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    pr.proof.layers[0].a_at_r.c0 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+    pr = ProveHonestToy();
+    pr.proof.layers[0].b_at_r.c1 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_final_eval_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    pr.proof.layers[0].final_eval.c0 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_trace_opening_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(pr.proof.trace_fri.has_deep);
+    pr.proof.trace_fri.deep_eval.c0 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_extract_witness_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(!pr.proof.lookup_fri.queries.empty());
+    pr.proof.lookup_fri.queries[0].steps[0].even.c0 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_table_multiplicity_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    pr.proof.table_multiplicity = 2;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+    pr = ProveHonestToy();
+    pr.proof.layers[0].table_multiplicity = 2;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_layer_order_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    BOOST_REQUIRE(pr.proof.layers.size() >= 2);
+    std::swap(pr.proof.layers[0], pr.proof.layers[1]);
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_repeated_layer_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    pr.proof.layers.push_back(pr.proof.layers.back());
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_omitted_barrier_rejects)
+{
+    auto pr = ProveHonestCoupled();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    // Drop the last barrier Extract (+ its preceding lobe GEMMs would also break order).
+    // Omitting the final Extract layer alone is enough.
+    BOOST_REQUIRE(!pr.proof.layers.empty());
+    pr.proof.layers.pop_back();
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_page_id_rejects)
+{
+    auto pr = ProveHonestCoupled();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    bool flipped = false;
+    for (auto& lc : pr.proof.layers) {
+        if (lc.kind == rc::RCGkrLayerKind::CoupLobeGemm) {
+            lc.page_id ^= 1u;
+            flipped = true;
+            break;
+        }
+    }
+    BOOST_REQUIRE(flipped);
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_sigma_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    pr.proof.episode_sigma.begin()[0] ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_dims_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    pr.proof.layers[0].m ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_claimed_digest_rejects)
+{
+    auto pr = ProveHonestToy();
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    pr.proof.claimed_digest.begin()[4] ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_forge_target_rejects_under_arbiter)
+{
+    // Target forge: honest GKR proof with digest > target must reject on arbiter path.
+    // Arbiter stays OFF by default; this test forces ON only for the forge check.
+    setenv("BTX_RC_GKR_ARBITER", "1", 1);
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    auto pr = rc::ProveWinnerEpisode(header, params, 0, dig);
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+    std::vector<unsigned char> bytes;
+    BOOST_REQUIRE(rc::SerializeRCGkrProof(pr.proof, bytes) > 0);
+    CBlockHeader h = header;
+    h.matmul_digest = dig;
+    arith_uint256 tight = UintToArith256(dig);
+    if (tight > 0) --tight;
+    const auto dual = rc::VerifyRCWinnerOrExactReplay(h, params, 0, &tight, &bytes);
+    BOOST_CHECK(!dual.ok);
+    BOOST_CHECK(dual.note.find("claimed_digest > target") != std::string::npos);
+    unsetenv("BTX_RC_GKR_ARBITER");
+    BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

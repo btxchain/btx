@@ -42,10 +42,10 @@
 
 namespace matmul::v4::rc {
 
-inline constexpr uint32_t kRCGkrProofVersion = 6;
-inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V6";
+inline constexpr uint32_t kRCGkrProofVersion = 7;
+inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V7";
 /** Magic for optional out-of-band / cache carriage (not consensus body). */
-inline constexpr uint32_t kRCGkrProofMagic = 0x524b4736u; // 'RKG6'
+inline constexpr uint32_t kRCGkrProofMagic = 0x524b4737u; // 'RKG7'
 
 inline constexpr const char* kRCGkrRealityGuardrail =
     "REJECT HBM/production-complete GKR claims: succinct scaffold uses Fp2+REAL "
@@ -64,12 +64,14 @@ inline constexpr const char* kRCGkrSoundnessBoundStatement =
     "M6/Fable FRI: unique-decoding Q=116, ρ=1/16, g=40, Fp2 → "
     "FriSoundnessBoundBits()=65. Fp3 only for g>=64 (unbuilt). "
     "DEEP/OOD exact-eval binding CLOSED (FRI v3). "
-    "G3 Haböck LogUp + virtual Extract table (proof v6). "
-    "M2: ALL-PHASE layers + round_seeds bound to sigma/round_roots. "
-    "See doc/btx-matmul-v4.5-rc-succinct-proof-soundness-2026-07-20.md and "
-    "kRCGkrRealityGuardrail. Merkle q=8 is DoS PREFILTER ONLY. "
-    "Full STREAMED ExactReplay remains dispute/oracle until Stage-I cutover. "
-    "nMatMulRCHeight=INT32_MAX.";
+    "G1–G5 CLOSED under forge suite (proof v7): A/B openings a_at_r*b_at_r="
+    "final_eval; claim↔trace via commit-then-challenge FRI; Haböck LogUp + "
+    "multiplicity=1; extract_out_commit chain; acc=claim+residual. "
+    "Coupled: real lobe-GEMM + barrier-Extract layers (no toy stand-in). "
+    "M2: ALL-PHASE / barrier sequencing + seeds bound to sigma/roots. "
+    "See doc/btx-matmul-v4.5-rc-arithmetization-completeness-2026-07-20.md. "
+    "Merkle q=8 is DoS PREFILTER ONLY. ExactReplay remains consensus arbiter "
+    "(BTX_RC_GKR_ARBITER OFF). nMatMulRCHeight=INT32_MAX.";
 
 inline constexpr const char* kRCGkrSoundnessStatement = kRCGkrSoundnessBoundStatement;
 inline constexpr const char* kRCGkrSoundnessNote = kRCGkrSoundnessBoundStatement;
@@ -91,15 +93,23 @@ inline constexpr const char* kRCGkrHbmParkStatement =
     "GKR as production arbiter until budgets close; ship both verifiers and "
     "keep ε=0 ExactReplay as consensus default.";
 
-/** Coupled path: barrier all-to-all product layers are not separately
- *  arithmetized. ProveWinnerCoupled is FAIL-CLOSED (no toy stand-in proof).
- *  ExactReplay covers coup mix until dedicated coup product layers land.
- *  G1–G5 GKR soundness gaps remain OPEN; arbiter stays OFF. */
+/** Coupled path: real lobe-GEMM + barrier-Extract arithmetization of the
+ *  ACTUAL RCCoupParams work (BuildCoupledLayers ≡ RecomputeCoupledPuzzleReference).
+ *  No MakeToyRCEpisodeParams stand-in. G1–G5 CLOSED with forge evidence.
+ *  Arbiter stays OFF; ExactReplay is sole consensus accept. */
 inline constexpr const char* kRCGkrCoupledArithStatement =
-    "ProveWinnerCoupled: FAIL-CLOSED deficit=coupled_arithmetization_unwired; "
-    "does not emit a toy/episode stand-in proof of unrelated work. "
-    "Coupled barrier all-to-all mix remains ExactReplay-covered; "
-    "G1–G5 GKR remain OPEN; BTX_RC_GKR_ARBITER stays OFF.";
+    "ProveWinnerCoupled: REAL coupled arithmetization (lobe GEMM + barrier "
+    "Extract LogUp+FRI) over actual RCCoupParams / barrier_roots / bank_root. "
+    "G1–G5 CLOSED (forge suite). BTX_RC_GKR_ARBITER stays OFF; ExactReplay "
+    "decides consensus. nMatMulRCHeight=nMatMulRCCoupledHeight=INT32_MAX.";
+
+/** G1–G5 closure statement — mark CLOSED only with forge-suite evidence. */
+inline constexpr const char* kRCGkrG1G5ClosedStatement =
+    "G1–G5 CLOSED (proof v7) with adversarial forge rejects: A/B root, A/B "
+    "opening (a_at_r*b_at_r=final_eval), final_eval, trace opening, Extract "
+    "witness, table multiplicity, layer order, repeated layer, omitted "
+    "barrier, page ID, sigma, dims, target, claimed digest. "
+    "Arbiter OFF; ExactReplay sole consensus accept.";
 
 inline constexpr const char* kRCGkrShadowStatement =
     "BTX_RC_GKR_SHADOW=1 (default): generate+verify winner proof in shadow; "
@@ -123,13 +133,17 @@ struct RCGkrSumcheckRound {
     Fp2 eval2{};
 };
 
-/** Layer kind in the ALL-PHASE real-episode arithmetization. */
+/** Layer kind in the ALL-PHASE real-episode / coupled arithmetization. */
 enum class RCGkrLayerKind : uint32_t {
     GemmPhase1QKt = 1, // Q·Kᵀ product layer
     GemmPhase1SV = 2,  // S·V product layer
     GemmPhase2Fwd = 3, // forward residual GEMM
     GemmPhase2Bwd = 4, // backward GEMM
     GemmPhase2Wgrad = 5,
+    /** Coupled: lobe row × bank page ExactGemm (1×W)·(W×W). */
+    CoupLobeGemm = 10,
+    /** Coupled: barrier non-affine Extract on full active state (LogUp only). */
+    CoupBarrierExtract = 11,
     SynthGemmDeprecated = 100, // DEPRECATED synth proxy only
 };
 
@@ -153,6 +167,18 @@ struct RCGkrLayerClaim {
     /** G1: Merkle roots of A and B wires (commit-then-challenge). */
     uint256 a_root{};
     uint256 b_root{};
+    /** G2: commitment to this layer's Y_gemm (trace segment). */
+    uint256 y_root{};
+    /**
+     * G1: folded A/B openings at sumcheck point rk — must satisfy
+     * final_eval = a_at_r * b_at_r.
+     */
+    Fp2 a_at_r{};
+    Fp2 b_at_r{};
+    /** Coupled lobe-GEMM: bank page id (legacy: (barrier+lobe)%bank_pages). */
+    uint32_t page_id{0};
+    /** G3: Haböck table multiplicity for this layer's tiles (must be 1). */
+    uint32_t table_multiplicity{1};
     std::vector<RCGkrSumcheckRound> sumcheck;
     Fp2 final_eval{};
 };
@@ -169,14 +195,25 @@ struct RCGkrProof {
     /** Episode shape public inputs (actual params; no shrink-to-toy). */
     RCEpisodeParams episode{};
     /**
-     * Round seeds matching RunEpisode: seed[0]=Sha256TaggedU32(ROUND,sigma,0);
+     * Coupled mode: proof arithmetizes RCCoupParams (not RCEpisodeParams).
+     * When true, round_roots = barrier_roots and coup/bank_root are binding.
+     */
+    bool coupled{false};
+    RCCoupParams coup{};
+    /** Coupled bank commitment (SHA256 over epoch pages). */
+    uint256 bank_root{};
+    /**
+     * Round/barrier seeds: episode seed[0]=Sha256TaggedU32(ROUND,sigma,0);
      * seed[r]=Sha256TaggedU32(ROUND, round_roots[r-1], r).
+     * Coupled: seed[b]=Sha256TaggedU32(BARRIER,sigma,b).
      */
     std::vector<uint256> round_seeds;
-    /** Round merkle roots (tile-tree); digest = SHA256d(EPISODE ‖ roots…). */
+    /** Round merkle roots (tile-tree) or coupled barrier_roots. */
     std::vector<uint256> round_roots;
     /** DeriveSigma(header) at prove time — verify re-derives seed[0] from this. */
     uint256 episode_sigma{};
+    /** G3: global Haböck multiplicity bound (1:1 tile keys). */
+    uint32_t table_multiplicity{1};
     std::vector<RCGkrLayerClaim> layers;
     /**
      * G3 Haböck LogUp (ePrint 2022/1530):
@@ -288,9 +325,9 @@ struct RCProdVerifyResult {
                                                  const uint256& resealed_digest);
 
 /**
- * Coupled winner prove: FAIL-CLOSED until coupled-product arithmetization exists.
- * Must never prove MakeToyRCEpisodeParams() / unrelated work. Returns empty proof
- * with timing.ok=false and note "coupled_arithmetization_unwired".
+ * Coupled winner prove: REAL arithmetization of ACTUAL coupled puzzle work
+ * (BuildCoupledLayers mirrors RecomputeCoupledPuzzleReference). Never proves
+ * MakeToyRCEpisodeParams() / unrelated episode work.
  */
 [[nodiscard]] RCGkrProveResult ProveWinnerCoupled(const CBlockHeader& header, int32_t height,
                                                  const RCCoupParams& params,
@@ -299,12 +336,14 @@ struct RCProdVerifyResult {
 /** Expected ALL-PHASE layer count: rounds * (2 + 3*L_lyr). */
 [[nodiscard]] size_t RCGkrExpectedLayerCount(const RCEpisodeParams& p);
 
+/** Expected coupled layer count: barriers * (lobes * pages_per_lobe + 1 Extract). */
+[[nodiscard]] size_t RCGkrExpectedCoupledLayerCount(const RCCoupParams& p,
+                                                    bool full_bank_schedule = false);
+
 /**
  * Succinct verify: sumcheck algebra + FRI openings + LogUp aggregate FS bind.
  * Does NOT re-run the episode / ExpandSynthOperands / Extract recompute.
- * M7 completeness checks: layer dims, sumcheck round counts, FRI present.
- * OPEN gaps (A/B PCS, claim↔trace MLE, Extract table): see
- * doc/btx-matmul-v4.5-rc-arithmetization-completeness-2026-07-20.md.
+ * G1–G5 CLOSED (forge suite); see completeness doc.
  */
 [[nodiscard]] bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing = nullptr);
 

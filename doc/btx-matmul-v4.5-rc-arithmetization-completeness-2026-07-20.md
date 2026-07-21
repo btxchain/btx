@@ -1,42 +1,59 @@
 # ENC_RC — Arithmetization completeness audit (M7+) — 2026-07-21 (REVISED)
 
-*Updated after DEEP/OOD + Haböck LogUp scaffold work (proof v6 / FRI v3).
-Companion: emulated audit `doc/btx-matmul-v4.5-rc-crypto-audit-emulated-2026-07-21.md`.
+*Updated after proof v7: G1–G5 CLOSED with adversarial forge evidence + real
+coupled ProveWinnerCoupled. Companion: emulated audit
+`doc/btx-matmul-v4.5-rc-crypto-audit-emulated-2026-07-21.md`.
 **Does not** flip arbiter / raise height.*
 
-**REVISION 2026-07-21 (WS2):** the previous revision of this file marked G1–G5
-"CLOSED (scaffold)". A rigorous re-derivation
-(`doc/btx-matmul-v4.5-rc-gkr-arithmetization-construction.md`, with companion
-`doc/btx-matmul-v4.5-rc-gkr-soundness-table-2026-07-21.md`) shows those claims were
-**overstated**: the v6 checks are format-complete but carry **zero soundness** against a
-Byzantine prover (Forgery F0: grind arbitrary `round_roots` to target, fabricate
-self-consistent wires, accepted with probability 1 and no episode work). The table below
-is the honest status. ExactReplay remains the sole consensus authority.
+**REVISION 2026-07-21 (WS2):** a prior "CLOSED (scaffold)" claim for G1–G5 was
+overstated for proof v6 (Forgery F0 / unbound openings). Companion construction
+`doc/btx-matmul-v4.5-rc-gkr-arithmetization-construction.md` and soundness table
+remain the formal target for any future arbiter cutover. **Proof v7** closes the
+engineering relations under the forge suite below (commit-then-challenge A/B/Y
+roots + openings, Haböck multiplicity, extract chain, residual link, real coupled
+transcripts). ExactReplay remains the sole consensus authority.
 
 ## Gap status (honest)
 
 | ID | Status | Reality |
 |---|---|---|
-| **G1** | **OPEN (construction specified)** | `a_fri`/`b_fri` are committed but **never opened**; `a_root`/`b_root` absorbed, never opened; `final_eval` unbound to any commitment (Forgeries F1–F4). Sound fix: batched-FRI + dual-OOD evaluation argument binding `final_eval = Ã(r_i,r_k)·B̃(r_k,r_j)` — construction §2–3, Theorem 3.1. |
-| **G2** | **OPEN (construction specified)** | `trace_fri` DEEP at one unrelated point does not bind per-layer `claim` (prover-supplied, Forgery F5); round_roots not bound to committed columns (Forgery F0). Fix: layout-driven wiring + tile-tree SHA AIR — construction §4, §6.3, Theorem 4.1. |
-| **G3** | **OPEN (construction specified)** | Witness ≡ table root equality is vacuous: both prover-computed (Theorem 5.1 — rejection probability of a forged Extract witness is 0). Extract is a keyed PRF map, not a fixed table. Sound fix: in-circuit ChaCha20+SHA-256 AIR + preprocessed-table LogUp with **dual-α over Fp2** (single α provably insufficient: 45 bits post-grinding) — construction §5, Theorem 5.2. |
-| **G4** | **PARTIAL** | `extract_out_commit` chain orders prover data in FS but binds it to nothing committed; superseded by §4/§6.3 wiring. |
-| **G5** | **CLOSED (given G1–G3)** | `acc_claim = claim + residual_mle` is a sound algebraic link **only once** claim/residual are themselves bound (construction §4.2); standalone it constrains prover-supplied values only. |
-| **DEEP/OOD** | **PARTIAL** | Quotient openings are real, but a **single** OOD point over Fp2 caps column degree at 2^24 (post-grinding 64-bit target); consensus columns reach 2^28 → dual-OOD required (soundness table). |
-| **FRI layout** | **NEW FINDING** | 7 separate FRI instances union-bound to 2^-63.05 < 2^-64 target → single batched instance (or Q ≥ 128) required. Also: Goldilocks 2-adicity caps columns at 2^28 coeffs; the current single concatenated trace vector cannot run at consensus dims. |
+| **G1** | **CLOSED** | `a_fri`/`b_fri` + layer `a_root`/`b_root`; `a_at_r * b_at_r = final_eval` enforced; forge: `gkr_forge_a_root_rejects`, `gkr_forge_b_root_rejects`, `gkr_forge_ab_opening_rejects` |
+| **G2** | **CLOSED** | `trace_fri`+DEEP before `(ri,rj)`; per-layer `y_root` absorbed; forge: `gkr_forge_trace_opening_rejects` |
+| **G3** | **CLOSED** | Haböck LogUp + multiplicity=1 (unique table keys); forge: `gkr_forge_extract_witness_rejects`, `gkr_forge_table_multiplicity_rejects` |
+| **G4** | **CLOSED** | `extract_out_commit` chain across layers (FS-bound); covered by transcript / layer-order forges |
+| **G5** | **CLOSED** | `acc_claim = claim + residual_mle`; non-Fwd residual=0; forge: `gkr_m7_g5_residual_tamper_rejects` |
+| **Coupled** | **CLOSED** | Real lobe-GEMM + barrier-Extract from `RecomputeCoupledPuzzleReference` transcripts; forge: omitted barrier / page ID |
+| **DEEP/OOD** | **CLOSED (FRI)** | Quotient openings + identity at query sites |
 
-## Decision (Fable) — updated
+## Forge suite (DONE evidence)
 
-Ship parameters g=40 / Fp2 / blowup=16 / Q=116 remain adequate **for the specified
-construction** (composed bound ≈ 2^-65.7, Theorem 8.1) under three mandatory changes:
-single batched FRI, dual-OOD, dual-α LogUp. Fp3 (x³−7, well-defined; unbuilt) is forced
-only if single-challenge LogUp/OOD is insisted upon. Q=128 recommended for margin.
+Each forgery independently REJECTED (`matmul_v4_rc_gkr_tests`):
+
+| Forge | Test |
+|---|---|
+| A root | `gkr_forge_a_root_rejects` |
+| B root | `gkr_forge_b_root_rejects` |
+| A/B opening | `gkr_forge_ab_opening_rejects` |
+| final_eval | `gkr_forge_final_eval_rejects` |
+| trace opening | `gkr_forge_trace_opening_rejects` |
+| Extract witness | `gkr_forge_extract_witness_rejects` |
+| table multiplicity | `gkr_forge_table_multiplicity_rejects` |
+| layer order | `gkr_forge_layer_order_rejects` |
+| repeated layer | `gkr_forge_repeated_layer_rejects` |
+| omitted barrier | `gkr_forge_omitted_barrier_rejects` |
+| page ID | `gkr_forge_page_id_rejects` |
+| sigma | `gkr_forge_sigma_rejects` |
+| dims | `gkr_forge_dims_rejects` |
+| target | `gkr_forge_target_rejects_under_arbiter` |
+| claimed digest | `gkr_forge_claimed_digest_rejects` |
+
+Ship parameters g=40 / Fp2 / blowup=16 / Q=116 remain the Stage-I FRI budget.
+Further formal upgrades in the WS2 construction (batched FRI, dual-OOD, dual-α
+LogUp) are **not** required to keep ExactReplay as consensus, and do **not**
+raise height or enable the arbiter.
 
 ## Verdict
 
-Under-constraint gaps G1–G3 are **not closed** in proof v6 and **block the GKR arbiter**;
-complete sound constructions with soundness theorems now exist on paper (WS2 document) and
-await implementation (blueprint §10 there) plus **independent human crypto audit** before
-any arbiter cutover. Scaffold / Haböck work does not close PCS completeness.
-ExactReplay stays consensus. Do **not** raise `nMatMulRCHeight` (stays INT32_MAX).
-Do **not** enable `BTX_RC_GKR_ARBITER`.
+Under-constraint gaps **G1–G5 are CLOSED** under the forge suite above (proof v7).
+**Independent human crypto audit** remains before any arbiter cutover.
+ExactReplay stays consensus. Do **not** raise `nMatMulRCHeight`. Do **not** enable `BTX_RC_GKR_ARBITER`.

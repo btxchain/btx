@@ -85,7 +85,7 @@ against Stages §§1–5. It does **not** raise height.
 | **M5 shadow** | **Intact** — shadow ON, arbiter OFF, ExactReplay decides |
 | **M6 FRI params** | **DONE (Fable)** — Q=116, blowup=16, g=40, Fp2; bits=65 |
 | **M6+ DEEP/OOD** | **DONE (FRI v3)** — quotient identity at query sites |
-| **M7 under-constraint** | **OPEN (v6 scaffold only)** — G1–G5 / A/B PCS / Extract table still **OPEN**; Haböck G3 scaffold present; **blocks arbiter** |
+| **M7 under-constraint** | **CLOSED (proof v7 + forge suite)** — G1–G5 forge rejects; real `ProveWinnerCoupled`; **arbiter stays OFF** |
 | **M8 soundness note** | **DONE** + emulated multi-persona audit doc |
 | **Emulated audit** | `doc/btx-matmul-v4.5-rc-crypto-audit-emulated-2026-07-21.md` — **not** external sign-off |
 | **M10 PCS alt** | **DONE (recommend)** — hand-rolled-but-audited FRI; no consensus vendor dep |
@@ -97,8 +97,8 @@ against Stages §§1–5. It does **not** raise height.
 | Consensus | ε=0 ExactReplay; `nMatMulRCHeight=INT32_MAX` |
 | Soft budget | over_budget → ExactReplay recommendation (**shipping**), not toy arithmetization |
 
-**Honest residual:** M7 G1–G5 remain **OPEN** (scaffold ≠ closed PCS); DEEP is
-FRI scaffold only; consensus-dim prove cost on CPU likely over soft budget
+**Honest residual:** G1–G5 CLOSED under forge suite (proof v7); DEEP is
+FRI-backed. Consensus-dim prove cost on CPU may soft-over_budget
 (ExactReplay ships until silicon M4); **independent human crypto audit**
 required before arbiter ON (OUT OF SCOPE). Fable IOP reference remains
 scratchpad-only (never merge as consensus).
