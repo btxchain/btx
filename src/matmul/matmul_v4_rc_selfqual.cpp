@@ -151,7 +151,13 @@ RCSelfQualStatus ProbeRCSelfQual(const matmul::v4::lt::ExactGemmBackend& backend
     st.exact_gemm_backend_ok = false;
     st.mining_accelerator_ok = false;
 
-    // CPU-only path: oracle is always available; no accelerator to admit.
+    // Always surface Ozaki MXFP4 / ExactPanels latches (independent of ExactGemm).
+    (void)SelfQualifyRcOzakiExactPanelsOnce();
+    (void)SelfQualifyRcOzakiMxfp4Once();
+    st.native_mxfp4_qualified = IsRcOzakiMxfp4Qualified();
+    st.native_fp8_qualified = false;
+
+    // CPU-only path: oracle is always available; no ExactGemm accelerator to admit.
     if (backend.gemm_s8s8 == nullptr) {
         st.deficit_reason = "cpu_exactgemm_no_device_backend";
         g_rc_selfqual_ok.store(false, std::memory_order_release);
@@ -220,8 +226,7 @@ RCSelfQualStatus ProbeRCSelfQual(const matmul::v4::lt::ExactGemmBackend& backend
     // Amendment 1.B: native MXFP4 only after Ozaki MXFP4 device path quals.
     // ExactGemm panels may qualify separately and must NOT flip native_*.
     // LT native_mxfp4_qualified must never be copied here.
-    (void)SelfQualifyRcOzakiExactPanelsOnce();
-    (void)SelfQualifyRcOzakiMxfp4Once();
+    // (Ozaki latches already refreshed at probe entry.)
     st.native_mxfp4_qualified = IsRcOzakiMxfp4Qualified();
     st.native_fp8_qualified = false;
     g_rc_selfqual_ok.store(true, std::memory_order_release);

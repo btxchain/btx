@@ -35,7 +35,8 @@ struct RCOzakiMxfp4Status {
     bool attempted{false};
     bool qualified{false}; // native MXFP4 tensor only
     bool exact_panels_qualified{false};
-    /** "mxfp4_cutlass_sm120" | "mxfp4_cutlass_sm100" |
+    /** "mxfp4_cublaslt_sm120" | "mxfp4_cublaslt_sm100" |
+     *  "mxfp4_cutlass_sm120" | "mxfp4_cutlass_sm100" |
      *  "mxfp4_blockscaled_device_scalar-decode" | "" */
     std::string backend;
     std::string arch_key; // e.g. sm_120 / sm_100

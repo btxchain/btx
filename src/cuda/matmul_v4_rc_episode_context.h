@@ -6,28 +6,21 @@
 #define BTX_CUDA_MATMUL_V4_RC_EPISODE_CONTEXT_H
 
 #include <matmul/matmul_v4_rc_coupled.h>
+#include <primitives/block.h>
+#include <uint256.h>
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
-// ENC_RC / ENC_RC_COUPLED miner-local CUDA episode context (scaffolding).
+// ENC_RC / ENC_RC_COUPLED miner-local CUDA episode context.
 //
 // Goal: keep bank pages + active state + int64 accumulators resident in a
 // persistent device arena across barriers, then amortize launch overhead with
-// CUDA Graphs (cudaGraphLaunch) once the barrier DAG is captured.
-//
-// Arena allocation prefers cudaMallocAsync on a per-device memory pool when
-// BTX_ENABLE_CUDA_EXPERIMENTAL is ON; the honesty stub (no CUDA) reports
-// IsRcEpisodeCudaCompiled()==false and all methods fail closed.
-//
-// Digests MUST remain byte-identical to the CPU consensus oracle
-// (RecomputeCoupledPuzzleReference). This context never raises
-// nMatMulRCHeight / nMatMulRCCoupledHeight and never enables the GKR arbiter.
-//
-// Status: Init / LoadBank / Destroy are structured; RunBarrierGraph returns
-// false with error "graph_unavailable:not_wired" until device GEMM + Extract
-// are wired (never implies CUDA Graph capture succeeded).
+// CUDA Graphs (cudaStreamBeginCapture → GEMM/Extract DAG → instantiate →
+// cudaGraphLaunch). Digests MUST remain byte-identical to
+// RecomputeCoupledPuzzleReference. Never raises nMatMulRCHeight /
+// nMatMulRCCoupledHeight and never enables the GKR arbiter.
 
 namespace matmul_v4::cuda {
 
@@ -74,11 +67,35 @@ public:
                                 std::string* error = nullptr);
 
     /**
+     * Bind the episode header/height used by RunBarrierGraph for lobe seeds,
+     * bank commitment, and digest assembly. Also seeds active lobe state from
+     * DeriveCoupledLobeSeeds (same as RecomputeCoupledPuzzleReference).
+     */
+    [[nodiscard]] bool BindEpisode(const CBlockHeader& header, int32_t height,
+                                   std::string* error = nullptr);
+
+    /**
+     * Upload active lobe state (StateBytes() int8) into the resident arena.
+     * Optional override after BindEpisode; size must match lobes×lobe_width.
+     */
+    [[nodiscard]] bool SetActiveState(const std::vector<int8_t>& state,
+                                      std::string* error = nullptr);
+
+    /** Download resident active state after a successful graph run (or Set). */
+    [[nodiscard]] bool DownloadActiveState(std::vector<int8_t>& out,
+                                           std::string* error = nullptr) const;
+
+    /**
      * Capture/launch the barrier DAG as a CUDA Graph (amortized launches).
-     * Currently returns false with error "graph_unavailable:not_wired" —
-     * device GEMM + Extract not wired; do not treat as a successful capture.
+     * CUDA ON: cudaStreamBeginCapture → bank lookup + lobe GEMMs + permute/mix
+     * + Extract host-node + barrier-root material → instantiate → launch per
+     * barrier; digest == RecomputeCoupledPuzzleReference.
+     * Stub: returns false with "graph_unavailable:not_wired".
      */
     [[nodiscard]] bool RunBarrierGraph(std::string* error = nullptr);
+
+    /** Episode digest from the last successful RunBarrierGraph; null if none. */
+    [[nodiscard]] const uint256* LastDigest() const;
 
     /** Release device arena (cudaFreeAsync / destroy graph). Idempotent. */
     void Destroy();
@@ -90,8 +107,22 @@ private:
     RCCudaEpisodeShape m_shape{};
     bool m_ready{false};
     bool m_bank_loaded{false};
+    bool m_episode_bound{false};
+    bool m_have_digest{false};
+    bool m_state_ready{false};
     void* m_arena{nullptr}; // device ptr when CUDA ON; always null on stub
     size_t m_arena_bytes{0};
+    CBlockHeader m_header{};
+    int32_t m_height{0};
+    uint256 m_last_digest{};
+    // Host mirror of bank pages (digest / Extract path).
+    std::vector<std::vector<int8_t>> m_pages;
+    // Host mirror of active state (Set / Bind / post-Extract).
+    std::vector<int8_t> m_state;
+    // CUDA graph / stream (opaque; only used in .cu).
+    void* m_stream{nullptr};
+    void* m_graph{nullptr};
+    void* m_graph_exec{nullptr};
 };
 
 } // namespace matmul_v4::cuda

@@ -41,8 +41,12 @@ bool RCCudaEpisodeContext::Init(const RCCudaEpisodeShape& shape, std::string* er
     m_shape = shape;
     m_ready = true;
     m_bank_loaded = false;
+    m_episode_bound = false;
+    m_have_digest = false;
+    m_state_ready = false;
     m_arena = nullptr;
     m_arena_bytes = 0;
+    m_state.assign(static_cast<size_t>(shape.lobes) * shape.lobe_width, 0);
     if (error) error->clear();
     return true;
 }
@@ -78,7 +82,54 @@ bool RCCudaEpisodeContext::LoadBank(const std::vector<std::vector<int8_t>>& page
             return false;
         }
     }
+    m_pages = pages;
     m_bank_loaded = true;
+    if (error) error->clear();
+    return true;
+}
+
+bool RCCudaEpisodeContext::BindEpisode(const CBlockHeader& header, int32_t height,
+                                       std::string* error)
+{
+    if (!m_ready) {
+        if (error) *error = "RCCudaEpisodeContext stub: Init required";
+        return false;
+    }
+    m_header = header;
+    m_height = height;
+    m_episode_bound = true;
+    m_have_digest = false;
+    m_state_ready = true;
+    if (error) error->clear();
+    return true;
+}
+
+bool RCCudaEpisodeContext::SetActiveState(const std::vector<int8_t>& state, std::string* error)
+{
+    if (!m_ready) {
+        if (error) *error = "RCCudaEpisodeContext stub: Init required";
+        return false;
+    }
+    const size_t n = static_cast<size_t>(m_shape.lobes) * m_shape.lobe_width;
+    if (state.size() != n) {
+        if (error) *error = "RCCudaEpisodeContext stub: SetActiveState size mismatch";
+        return false;
+    }
+    m_state = state;
+    m_state_ready = true;
+    m_have_digest = false;
+    if (error) error->clear();
+    return true;
+}
+
+bool RCCudaEpisodeContext::DownloadActiveState(std::vector<int8_t>& out,
+                                               std::string* error) const
+{
+    if (!m_ready || !m_state_ready) {
+        if (error) *error = "RCCudaEpisodeContext stub: state not ready";
+        return false;
+    }
+    out = m_state;
     if (error) error->clear();
     return true;
 }
@@ -86,20 +137,35 @@ bool RCCudaEpisodeContext::LoadBank(const std::vector<std::vector<int8_t>>& page
 bool RCCudaEpisodeContext::RunBarrierGraph(std::string* error)
 {
     if (error) {
-        // Honesty tokens: graph_unavailable / not_wired — never imply capture
-        // succeeded. Digests stay on the CPU oracle until a real device path lands.
+        // Honesty tokens: graph_unavailable / not_wired — CUDA TU not linked.
         *error = "graph_unavailable:not_wired";
     }
+    (void)m_bank_loaded;
+    (void)m_episode_bound;
     return false;
+}
+
+const uint256* RCCudaEpisodeContext::LastDigest() const
+{
+    return nullptr;
 }
 
 void RCCudaEpisodeContext::Destroy()
 {
     m_ready = false;
     m_bank_loaded = false;
+    m_episode_bound = false;
+    m_have_digest = false;
+    m_state_ready = false;
     m_arena = nullptr;
     m_arena_bytes = 0;
     m_shape = {};
+    m_pages.clear();
+    m_state.clear();
+    m_last_digest = uint256{};
+    m_stream = nullptr;
+    m_graph = nullptr;
+    m_graph_exec = nullptr;
 }
 
 } // namespace matmul_v4::cuda

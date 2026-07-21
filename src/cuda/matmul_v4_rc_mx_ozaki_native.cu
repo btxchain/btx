@@ -13,9 +13,24 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
+
+// cuBLASLt block-scaled FP4 (same toolkit gate as LT matmul_v4_lt_mx_native.cu).
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 12080)
+#include <cublasLt.h>
+#if defined(__has_include)
+#if __has_include(<cuda_fp4.h>)
+#include <cuda_fp4.h>
+#define BTX_RC_OZAKI_HAS_FP4_E2M1 1
+#endif
+#endif
+#define BTX_RC_OZAKI_HAS_VEC32_UE8M0 1
+#define BTX_RC_OZAKI_HAS_MX_SCALE_MODES 1
+#endif
 
 namespace matmul_v4::cuda {
 namespace {
@@ -241,6 +256,105 @@ __global__ void rc_ozaki_mxfp4_panel_gemm(const uint8_t* a_e2m1, const uint8_t* 
     out[static_cast<size_t>(r) * cols + c] = acc;
 }
 
+/**
+ * SM120a native MXFP4 TC: mma.sync kind::mxf8f6f4.block_scale m16n8k32 e2m1×e2m1.
+ * A: M×K row-major, one e2m1 per byte in bits 5-2 (nibble<<2). B: K×N row-major.
+ * SFA/SFB: UE8M0 per (row/col, K/32). Empirically-validated fragment layout (QMMA.SF).
+ */
+__device__ __forceinline__ void RcOzakiMmaMxfp4M16N8K32(float& d0, float& d1, float& d2, float& d3,
+                                                         uint32_t a0, uint32_t a1, uint32_t a2,
+                                                         uint32_t a3, uint32_t b0, uint32_t b1,
+                                                         uint32_t sfa, uint32_t sfb)
+{
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1200)
+    uint16_t z = 0;
+    asm volatile(
+        "mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e2m1.e2m1.f32.ue8m0 "
+        "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13},{%14},{%15,%16},{%17},{%18,%19};\n"
+        : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2), "f"(d3),
+          "r"(sfa), "h"(z), "h"(z), "r"(sfb), "h"(z), "h"(z));
+#else
+    (void)a0;
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)b0;
+    (void)b1;
+    (void)sfa;
+    (void)sfb;
+    d0 = d1 = d2 = d3 = 0.f;
+#endif
+}
+
+__device__ __forceinline__ uint32_t RcOzakiPack4Bytes(const uint8_t* p)
+{
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+}
+
+__global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uint8_t* __restrict__ B,
+                                        const uint8_t* __restrict__ SFa,
+                                        const uint8_t* __restrict__ SFb, float* __restrict__ C,
+                                        int M, int N, int K, int kblocks)
+{
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const int bm = static_cast<int>(blockIdx.y) * 16;
+    const int bn = static_cast<int>(blockIdx.x) * 8;
+    const int row0 = lane / 4;
+    const int ksub = lane % 4;
+
+    float d0 = 0.f, d1 = 0.f, d2 = 0.f, d3 = 0.f;
+    for (int kb = 0; kb < kblocks; ++kb) {
+        const int k0 = kb * 32;
+        auto loadA = [&](int row, int kbase) -> uint32_t {
+            if (bm + row >= M) return 0u;
+            return RcOzakiPack4Bytes(A + static_cast<size_t>(bm + row) * static_cast<size_t>(K) +
+                                     static_cast<size_t>(k0 + kbase));
+        };
+        const uint32_t a0 = loadA(row0, ksub * 4);
+        const uint32_t a1 = loadA(row0 + 8, ksub * 4);
+        const uint32_t a2 = loadA(row0, 16 + ksub * 4);
+        const uint32_t a3 = loadA(row0 + 8, 16 + ksub * 4);
+
+        auto loadB = [&](int col, int kbase) -> uint32_t {
+            if (bn + col >= N) return 0u;
+            uint8_t tmp[4];
+            for (int i = 0; i < 4; ++i) {
+                tmp[i] = B[static_cast<size_t>(k0 + kbase + i) * static_cast<size_t>(N) +
+                           static_cast<size_t>(bn + col)];
+            }
+            return RcOzakiPack4Bytes(tmp);
+        };
+        const uint32_t b0 = loadB(row0, ksub * 4);
+        const uint32_t b1 = loadB(row0, 16 + ksub * 4);
+
+        uint32_t sfa = 127u, sfb = 127u;
+        if ((lane % 4) == 0) {
+            const int r = bm + row0;
+            if (r < M) sfa = SFa[static_cast<size_t>(r) * static_cast<size_t>(kblocks) + kb];
+            const int c = bn + row0;
+            if (c < N) sfb = SFb[static_cast<size_t>(c) * static_cast<size_t>(kblocks) + kb];
+        } else if ((lane % 4) == 1) {
+            const int r = bm + row0 + 8;
+            if (r < M) sfa = SFa[static_cast<size_t>(r) * static_cast<size_t>(kblocks) + kb];
+        }
+        RcOzakiMmaMxfp4M16N8K32(d0, d1, d2, d3, a0, a1, a2, a3, b0, b1, sfa, sfb);
+    }
+
+    const int col0 = (lane % 4) * 2;
+    auto store = [&](int row, int col, float v) {
+        if (bm + row < M && bn + col < N) {
+            C[static_cast<size_t>(bm + row) * static_cast<size_t>(N) + static_cast<size_t>(bn + col)] =
+                v;
+        }
+    };
+    store(row0, col0, d0);
+    store(row0, col0 + 1, d1);
+    store(row0 + 8, col0, d2);
+    store(row0 + 8, col0 + 1, d3);
+}
+
 [[nodiscard]] bool LaunchOzakiExactPanels(const std::vector<int8_t>& left,
                                           const std::vector<int8_t>& right, uint32_t rows,
                                           uint32_t inner, uint32_t cols, std::vector<int64_t>& out,
@@ -295,11 +409,496 @@ __global__ void rc_ozaki_mxfp4_panel_gemm(const uint8_t* a_e2m1, const uint8_t* 
     return true;
 }
 
-/** One MXFP4 panel (K ≤ kRCOzakiExactChunk): factor → device E2M1 GEMM → int32. */
-[[nodiscard]] bool LaunchMxfp4OnePanel(const std::vector<int8_t>& Lpanel,
-                                       const std::vector<int8_t>& Rpanel, uint32_t rows,
-                                       uint32_t len, uint32_t cols, std::vector<int32_t>& partial,
-                                       std::string* error)
+/** cuBLASLt 1D block-scale layout (VEC32_UE8M0) — mirrors LT native packer. */
+[[nodiscard]] size_t BlockScaleTensorBytes(size_t outer, size_t K, size_t vec)
+{
+    const size_t rows = ((outer + 127u) / 128u) * 128u;
+    const size_t kblocks = (K + vec - 1u) / vec;
+    const size_t cols = ((kblocks + 3u) / 4u) * 4u;
+    return rows * cols;
+}
+
+[[nodiscard]] size_t BlockScaleOffset(size_t r, size_t c, size_t K, size_t vec)
+{
+    const size_t kblocks = (K + vec - 1u) / vec;
+    const size_t cols = ((kblocks + 3u) / 4u) * 4u;
+    const size_t n_k_tiles = cols / 4u;
+    return (r % 32u) * 16u + ((r % 128u) / 32u) * 4u + (c % 4u) + (c / 4u) * 512u +
+           (r / 128u) * 512u * n_k_tiles;
+}
+
+[[nodiscard]] uint32_t AlignUp(uint32_t v, uint32_t a)
+{
+    return (v + a - 1u) / a * a;
+}
+
+/**
+ * Factor int8 panels → M11 μ + BTX e∈{0..3}, then pack cuBLASLt TN:
+ *   A: K×M E2M1 (ld=K), B: K×N E2M1 (ld=K), SFA/SFB: VEC32_UE8M0 swizzle.
+ * Pads K/M/N to multiples of 32 so VEC32 + Blackwell heuristics admit.
+ */
+[[nodiscard]] bool PackOzakiPanelsCublasLtFp4(const std::vector<int8_t>& Lpanel,
+                                              const std::vector<int8_t>& Rpanel, uint32_t rows,
+                                              uint32_t K, uint32_t cols,
+                                              std::vector<uint8_t>& A_pack,
+                                              std::vector<uint8_t>& B_pack,
+                                              std::vector<uint8_t>& SFa,
+                                              std::vector<uint8_t>& SFb, uint32_t& Mpad,
+                                              uint32_t& Npad, uint32_t& Kpad, std::string* error)
+{
+    if (rows == 0 || K == 0 || cols == 0) {
+        if (error) *error = "PackOzakiPanelsCublasLtFp4: degenerate";
+        return false;
+    }
+    Mpad = AlignUp(rows, kMxBlk);
+    Npad = AlignUp(cols, kMxBlk);
+    Kpad = AlignUp(K, kMxBlk);
+    const uint32_t kblocks = Kpad / kMxBlk;
+
+    A_pack.assign((static_cast<size_t>(Kpad) * Mpad + 1u) / 2u, 0);
+    B_pack.assign((static_cast<size_t>(Kpad) * Npad + 1u) / 2u, 0);
+    SFa.assign(BlockScaleTensorBytes(Mpad, Kpad, kMxBlk), kUe8m0Bias);
+    SFb.assign(BlockScaleTensorBytes(Npad, Kpad, kMxBlk), kUe8m0Bias);
+
+    int8_t mu_tmp[kMxBlk];
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t bj = 0; bj < kblocks; ++bj) {
+            const uint32_t k0 = bj * kMxBlk;
+            const uint32_t n = (k0 >= K) ? 0u : std::min(kMxBlk, K - k0);
+            int8_t block[kMxBlk] = {};
+            for (uint32_t t = 0; t < n; ++t) {
+                block[t] = Lpanel[static_cast<size_t>(r) * K + (k0 + t)];
+            }
+            uint8_t e = 0;
+            if (n > 0) {
+                if (!FactorBlockToMx(block, n, e, mu_tmp)) {
+                    if (error) *error = "PackOzakiPanelsCublasLtFp4: left not MX-factorable";
+                    return false;
+                }
+            } else {
+                std::memset(mu_tmp, 0, sizeof(mu_tmp));
+            }
+            SFa[BlockScaleOffset(r, bj, Kpad, kMxBlk)] = EncodeUe8m0FromBtXScale(e);
+            for (uint32_t t = 0; t < kMxBlk; ++t) {
+                const int8_t mu = (t < n) ? mu_tmp[t] : int8_t{0};
+                const uint8_t nib = EncodeE2M1Nibble(mu);
+                if (nib > 0x0F) {
+                    if (error) *error = "PackOzakiPanelsCublasLtFp4: left mu not E2M1";
+                    return false;
+                }
+                PackNibble(A_pack.data(), static_cast<size_t>(k0 + t) + static_cast<size_t>(r) * Kpad,
+                           nib);
+            }
+        }
+    }
+    for (uint32_t c = 0; c < cols; ++c) {
+        for (uint32_t bj = 0; bj < kblocks; ++bj) {
+            const uint32_t k0 = bj * kMxBlk;
+            const uint32_t n = (k0 >= K) ? 0u : std::min(kMxBlk, K - k0);
+            int8_t block[kMxBlk] = {};
+            for (uint32_t t = 0; t < n; ++t) {
+                block[t] = Rpanel[static_cast<size_t>(k0 + t) * cols + c];
+            }
+            uint8_t e = 0;
+            if (n > 0) {
+                if (!FactorBlockToMx(block, n, e, mu_tmp)) {
+                    if (error) *error = "PackOzakiPanelsCublasLtFp4: right not MX-factorable";
+                    return false;
+                }
+            } else {
+                std::memset(mu_tmp, 0, sizeof(mu_tmp));
+            }
+            SFb[BlockScaleOffset(c, bj, Kpad, kMxBlk)] = EncodeUe8m0FromBtXScale(e);
+            for (uint32_t t = 0; t < kMxBlk; ++t) {
+                const int8_t mu = (t < n) ? mu_tmp[t] : int8_t{0};
+                const uint8_t nib = EncodeE2M1Nibble(mu);
+                if (nib > 0x0F) {
+                    if (error) *error = "PackOzakiPanelsCublasLtFp4: right mu not E2M1";
+                    return false;
+                }
+                PackNibble(B_pack.data(), static_cast<size_t>(k0 + t) + static_cast<size_t>(c) * Kpad,
+                           nib);
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool Fp32ColMajorToExactInt32RowMajor(const std::vector<float>& D, uint32_t M,
+                                                    uint32_t N, uint32_t rows, uint32_t cols,
+                                                    std::vector<int32_t>& out)
+{
+    if (D.size() != static_cast<size_t>(M) * N || rows > M || cols > N) return false;
+    out.resize(static_cast<size_t>(rows) * cols);
+    for (uint32_t c = 0; c < cols; ++c) {
+        for (uint32_t r = 0; r < rows; ++r) {
+            const float f = D[static_cast<size_t>(c) * M + r];
+            if (!std::isfinite(f)) return false;
+            const float rounded = nearbyintf(f);
+            if (rounded != f) return false;
+            if (rounded < static_cast<float>(std::numeric_limits<int32_t>::min()) ||
+                rounded > static_cast<float>(std::numeric_limits<int32_t>::max())) {
+                return false;
+            }
+            out[static_cast<size_t>(r) * cols + c] = static_cast<int32_t>(rounded);
+        }
+    }
+    return true;
+}
+
+#if defined(BTX_RC_OZAKI_HAS_FP4_E2M1) && defined(BTX_RC_OZAKI_HAS_MX_SCALE_MODES)
+
+[[nodiscard]] bool RunCublasLtBlockScaledTnOzaki(const void* dA, const void* dB, const void* dSFa,
+                                                 const void* dSFb, float* dD, uint32_t M,
+                                                 uint32_t N, uint32_t K, void* workspace,
+                                                 size_t workspace_bytes)
+{
+    cublasLtHandle_t lt = nullptr;
+    cublasLtMatmulDesc_t op = nullptr;
+    cublasLtMatrixLayout_t a_layout = nullptr;
+    cublasLtMatrixLayout_t b_layout = nullptr;
+    cublasLtMatrixLayout_t d_layout = nullptr;
+    cublasLtMatmulPreference_t pref = nullptr;
+    bool ok = false;
+
+    if (cublasLtCreate(&lt) != CUBLAS_STATUS_SUCCESS) return false;
+
+    do {
+        if (cublasLtMatmulDescCreate(&op, CUBLAS_COMPUTE_32F, CUDA_R_32F) != CUBLAS_STATUS_SUCCESS) {
+            break;
+        }
+        const cublasOperation_t op_t = CUBLAS_OP_T;
+        const cublasOperation_t op_n = CUBLAS_OP_N;
+        if (cublasLtMatmulDescSetAttribute(op, CUBLASLT_MATMUL_DESC_TRANSA, &op_t, sizeof(op_t)) !=
+                CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatmulDescSetAttribute(op, CUBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n)) !=
+                CUBLAS_STATUS_SUCCESS) {
+            break;
+        }
+        const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+        if (cublasLtMatmulDescSetAttribute(op, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode,
+                                           sizeof(scale_mode)) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatmulDescSetAttribute(op, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode,
+                                           sizeof(scale_mode)) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatmulDescSetAttribute(op, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &dSFa,
+                                           sizeof(dSFa)) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatmulDescSetAttribute(op, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &dSFb,
+                                           sizeof(dSFb)) != CUBLAS_STATUS_SUCCESS) {
+            break;
+        }
+
+        if (cublasLtMatrixLayoutCreate(&a_layout, CUDA_R_4F_E2M1, K, M, K) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatrixLayoutCreate(&b_layout, CUDA_R_4F_E2M1, K, N, K) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatrixLayoutCreate(&d_layout, CUDA_R_32F, M, N, M) != CUBLAS_STATUS_SUCCESS) {
+            break;
+        }
+
+        if (cublasLtMatmulPreferenceCreate(&pref) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                                 &workspace_bytes,
+                                                 sizeof(workspace_bytes)) != CUBLAS_STATUS_SUCCESS) {
+            break;
+        }
+
+        cublasLtMatmulHeuristicResult_t heuristic{};
+        int returned = 0;
+        if (cublasLtMatmulAlgoGetHeuristic(lt, op, a_layout, b_layout, d_layout, d_layout, pref, 1,
+                                           &heuristic, &returned) != CUBLAS_STATUS_SUCCESS ||
+            returned == 0) {
+            break;
+        }
+
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+        if (cublasLtMatmul(lt, op, &alpha, dA, a_layout, dB, b_layout, &beta, dD, d_layout, dD,
+                           d_layout, &heuristic.algo, workspace, workspace_bytes,
+                           /*stream=*/nullptr) != CUBLAS_STATUS_SUCCESS) {
+            break;
+        }
+        if (cudaDeviceSynchronize() != cudaSuccess) break;
+        ok = true;
+    } while (false);
+
+    if (pref) cublasLtMatmulPreferenceDestroy(pref);
+    if (d_layout) cublasLtMatrixLayoutDestroy(d_layout);
+    if (b_layout) cublasLtMatrixLayoutDestroy(b_layout);
+    if (a_layout) cublasLtMatrixLayoutDestroy(a_layout);
+    if (op) cublasLtMatmulDescDestroy(op);
+    if (lt) cublasLtDestroy(lt);
+    return ok;
+}
+
+/** Real TC: factor → cuBLASLt CUDA_R_4F_E2M1 + VEC32_UE8M0 → exact int32. */
+[[nodiscard]] bool LaunchMxfp4OnePanelCublasLt(const std::vector<int8_t>& Lpanel,
+                                               const std::vector<int8_t>& Rpanel, uint32_t rows,
+                                               uint32_t len, uint32_t cols,
+                                               std::vector<int32_t>& partial, std::string* error)
+{
+    std::vector<uint8_t> A_pack, B_pack, SFa, SFb;
+    uint32_t Mpad = 0, Npad = 0, Kpad = 0;
+    if (!PackOzakiPanelsCublasLtFp4(Lpanel, Rpanel, rows, len, cols, A_pack, B_pack, SFa, SFb, Mpad,
+                                    Npad, Kpad, error)) {
+        return false;
+    }
+
+    void *dA = nullptr, *dB = nullptr, *dSFa = nullptr, *dSFb = nullptr, *dD = nullptr,
+         *dWS = nullptr;
+    constexpr size_t kWorkspace = 32ull * 1024ull * 1024ull;
+    auto fail = [&](const char* msg) {
+        if (error) *error = msg;
+        cudaFree(dA);
+        cudaFree(dB);
+        cudaFree(dSFa);
+        cudaFree(dSFb);
+        cudaFree(dD);
+        cudaFree(dWS);
+        return false;
+    };
+
+    if (cudaMalloc(&dA, A_pack.size()) != cudaSuccess ||
+        cudaMalloc(&dB, B_pack.size()) != cudaSuccess ||
+        cudaMalloc(&dSFa, SFa.size()) != cudaSuccess ||
+        cudaMalloc(&dSFb, SFb.size()) != cudaSuccess ||
+        cudaMalloc(&dD, static_cast<size_t>(Mpad) * Npad * sizeof(float)) != cudaSuccess ||
+        cudaMalloc(&dWS, kWorkspace) != cudaSuccess) {
+        return fail("rc_ozaki_mxfp4_cublaslt cudaMalloc failed");
+    }
+    if (cudaMemcpy(dA, A_pack.data(), A_pack.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dB, B_pack.data(), B_pack.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dSFa, SFa.data(), SFa.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dSFb, SFb.data(), SFb.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemset(dD, 0, static_cast<size_t>(Mpad) * Npad * sizeof(float)) != cudaSuccess) {
+        return fail("rc_ozaki_mxfp4_cublaslt H2D failed");
+    }
+
+    if (!RunCublasLtBlockScaledTnOzaki(dA, dB, dSFa, dSFb, static_cast<float*>(dD), Mpad, Npad,
+                                       Kpad, dWS, kWorkspace)) {
+        return fail("rc_ozaki_mxfp4_cublaslt matmul/heuristic failed");
+    }
+
+    std::vector<float> host_d(static_cast<size_t>(Mpad) * Npad);
+    if (cudaMemcpy(host_d.data(), dD, host_d.size() * sizeof(float), cudaMemcpyDeviceToHost) !=
+        cudaSuccess) {
+        return fail("rc_ozaki_mxfp4_cublaslt D2H failed");
+    }
+    cudaFree(dA);
+    cudaFree(dB);
+    cudaFree(dSFa);
+    cudaFree(dSFb);
+    cudaFree(dD);
+    cudaFree(dWS);
+
+    if (!Fp32ColMajorToExactInt32RowMajor(host_d, Mpad, Npad, rows, cols, partial)) {
+        if (error) *error = "rc_ozaki_mxfp4_cublaslt FP32→int32 non-exact";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Pack for SM120 QMMA.SF: one e2m1 per byte in bits 5-2 (EncodeE2M1Nibble << 2).
+ * A: M×K row-major, B: K×N row-major, SFA/SFB: UE8M0 [outer × kblocks].
+ */
+[[nodiscard]] bool PackOzakiPanelsMmaFp4(const std::vector<int8_t>& Lpanel,
+                                         const std::vector<int8_t>& Rpanel, uint32_t rows,
+                                         uint32_t K, uint32_t cols, std::vector<uint8_t>& A_pack,
+                                         std::vector<uint8_t>& B_pack, std::vector<uint8_t>& SFa,
+                                         std::vector<uint8_t>& SFb, uint32_t& Mpad, uint32_t& Npad,
+                                         uint32_t& Kpad, std::string* error)
+{
+    if (rows == 0 || K == 0 || cols == 0) {
+        if (error) *error = "PackOzakiPanelsMmaFp4: degenerate";
+        return false;
+    }
+    Mpad = AlignUp(rows, 16u);
+    Npad = AlignUp(cols, 8u);
+    Kpad = AlignUp(K, kMxBlk);
+    const uint32_t kblocks = Kpad / kMxBlk;
+    A_pack.assign(static_cast<size_t>(Mpad) * Kpad, 0);
+    B_pack.assign(static_cast<size_t>(Kpad) * Npad, 0);
+    SFa.assign(static_cast<size_t>(Mpad) * kblocks, kUe8m0Bias);
+    SFb.assign(static_cast<size_t>(Npad) * kblocks, kUe8m0Bias);
+
+    int8_t mu_tmp[kMxBlk];
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t bj = 0; bj < kblocks; ++bj) {
+            const uint32_t k0 = bj * kMxBlk;
+            const uint32_t n = (k0 >= K) ? 0u : std::min(kMxBlk, K - k0);
+            int8_t block[kMxBlk] = {};
+            for (uint32_t t = 0; t < n; ++t) {
+                block[t] = Lpanel[static_cast<size_t>(r) * K + (k0 + t)];
+            }
+            uint8_t e = 0;
+            if (n > 0) {
+                if (!FactorBlockToMx(block, n, e, mu_tmp)) {
+                    if (error) *error = "PackOzakiPanelsMmaFp4: left not MX-factorable";
+                    return false;
+                }
+            } else {
+                std::memset(mu_tmp, 0, sizeof(mu_tmp));
+            }
+            SFa[static_cast<size_t>(r) * kblocks + bj] = EncodeUe8m0FromBtXScale(e);
+            for (uint32_t t = 0; t < kMxBlk; ++t) {
+                const int8_t mu = (t < n) ? mu_tmp[t] : int8_t{0};
+                const uint8_t nib = EncodeE2M1Nibble(mu);
+                if (nib > 0x0F) {
+                    if (error) *error = "PackOzakiPanelsMmaFp4: left mu not E2M1";
+                    return false;
+                }
+                A_pack[static_cast<size_t>(r) * Kpad + (k0 + t)] =
+                    static_cast<uint8_t>(nib << 2);
+            }
+        }
+    }
+    for (uint32_t c = 0; c < cols; ++c) {
+        for (uint32_t bj = 0; bj < kblocks; ++bj) {
+            const uint32_t k0 = bj * kMxBlk;
+            const uint32_t n = (k0 >= K) ? 0u : std::min(kMxBlk, K - k0);
+            int8_t block[kMxBlk] = {};
+            for (uint32_t t = 0; t < n; ++t) {
+                block[t] = Rpanel[static_cast<size_t>(k0 + t) * cols + c];
+            }
+            uint8_t e = 0;
+            if (n > 0) {
+                if (!FactorBlockToMx(block, n, e, mu_tmp)) {
+                    if (error) *error = "PackOzakiPanelsMmaFp4: right not MX-factorable";
+                    return false;
+                }
+            } else {
+                std::memset(mu_tmp, 0, sizeof(mu_tmp));
+            }
+            SFb[static_cast<size_t>(c) * kblocks + bj] = EncodeUe8m0FromBtXScale(e);
+            for (uint32_t t = 0; t < kMxBlk; ++t) {
+                const int8_t mu = (t < n) ? mu_tmp[t] : int8_t{0};
+                const uint8_t nib = EncodeE2M1Nibble(mu);
+                if (nib > 0x0F) {
+                    if (error) *error = "PackOzakiPanelsMmaFp4: right mu not E2M1";
+                    return false;
+                }
+                B_pack[static_cast<size_t>(k0 + t) * Npad + c] = static_cast<uint8_t>(nib << 2);
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool Fp32RowMajorToExactInt32RowMajor(const std::vector<float>& D, uint32_t M,
+                                                    uint32_t N, uint32_t rows, uint32_t cols,
+                                                    std::vector<int32_t>& out)
+{
+    if (D.size() != static_cast<size_t>(M) * N || rows > M || cols > N) return false;
+    out.resize(static_cast<size_t>(rows) * cols);
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t c = 0; c < cols; ++c) {
+            const float f = D[static_cast<size_t>(r) * N + c];
+            if (!std::isfinite(f)) return false;
+            const float rounded = nearbyintf(f);
+            if (rounded != f) return false;
+            if (rounded < static_cast<float>(std::numeric_limits<int32_t>::min()) ||
+                rounded > static_cast<float>(std::numeric_limits<int32_t>::max())) {
+                return false;
+            }
+            out[static_cast<size_t>(r) * cols + c] = static_cast<int32_t>(rounded);
+        }
+    }
+    return true;
+}
+
+/** Real TC: factor → QMMA.SF m16n8k32 e2m1 block_scale → exact int32. */
+[[nodiscard]] bool LaunchMxfp4OnePanelMma(const std::vector<int8_t>& Lpanel,
+                                          const std::vector<int8_t>& Rpanel, uint32_t rows,
+                                          uint32_t len, uint32_t cols,
+                                          std::vector<int32_t>& partial, std::string* error)
+{
+    std::vector<uint8_t> A_pack, B_pack, SFa, SFb;
+    uint32_t Mpad = 0, Npad = 0, Kpad = 0;
+    if (!PackOzakiPanelsMmaFp4(Lpanel, Rpanel, rows, len, cols, A_pack, B_pack, SFa, SFb, Mpad, Npad,
+                               Kpad, error)) {
+        return false;
+    }
+    const uint32_t kblocks = Kpad / kMxBlk;
+
+    void *dA = nullptr, *dB = nullptr, *dSFa = nullptr, *dSFb = nullptr, *dD = nullptr;
+    auto fail = [&](const char* msg) {
+        if (error) *error = msg;
+        cudaFree(dA);
+        cudaFree(dB);
+        cudaFree(dSFa);
+        cudaFree(dSFb);
+        cudaFree(dD);
+        return false;
+    };
+
+    if (cudaMalloc(&dA, A_pack.size()) != cudaSuccess ||
+        cudaMalloc(&dB, B_pack.size()) != cudaSuccess ||
+        cudaMalloc(&dSFa, SFa.size()) != cudaSuccess ||
+        cudaMalloc(&dSFb, SFb.size()) != cudaSuccess ||
+        cudaMalloc(&dD, static_cast<size_t>(Mpad) * Npad * sizeof(float)) != cudaSuccess) {
+        return fail("rc_ozaki_mxfp4_mma cudaMalloc failed");
+    }
+    if (cudaMemcpy(dA, A_pack.data(), A_pack.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dB, B_pack.data(), B_pack.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dSFa, SFa.data(), SFa.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dSFb, SFb.data(), SFb.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemset(dD, 0, static_cast<size_t>(Mpad) * Npad * sizeof(float)) != cudaSuccess) {
+        return fail("rc_ozaki_mxfp4_mma H2D failed");
+    }
+
+    dim3 grid(Npad / 8u, Mpad / 16u);
+    rc_ozaki_mxfp4_mma_gemm<<<grid, 32>>>(static_cast<const uint8_t*>(dA),
+                                          static_cast<const uint8_t*>(dB),
+                                          static_cast<const uint8_t*>(dSFa),
+                                          static_cast<const uint8_t*>(dSFb),
+                                          static_cast<float*>(dD), static_cast<int>(Mpad),
+                                          static_cast<int>(Npad), static_cast<int>(Kpad),
+                                          static_cast<int>(kblocks));
+    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+        return fail("rc_ozaki_mxfp4_mma kernel launch failed");
+    }
+
+    std::vector<float> host_d(static_cast<size_t>(Mpad) * Npad);
+    if (cudaMemcpy(host_d.data(), dD, host_d.size() * sizeof(float), cudaMemcpyDeviceToHost) !=
+        cudaSuccess) {
+        return fail("rc_ozaki_mxfp4_mma D2H failed");
+    }
+    cudaFree(dA);
+    cudaFree(dB);
+    cudaFree(dSFa);
+    cudaFree(dSFb);
+    cudaFree(dD);
+
+    if (!Fp32RowMajorToExactInt32RowMajor(host_d, Mpad, Npad, rows, cols, partial)) {
+        if (error) *error = "rc_ozaki_mxfp4_mma FP32→int32 non-exact";
+        return false;
+    }
+    return true;
+}
+
+#else // no FP4 toolkit
+
+[[nodiscard]] bool LaunchMxfp4OnePanelMma(const std::vector<int8_t>&, const std::vector<int8_t>&,
+                                          uint32_t, uint32_t, uint32_t, std::vector<int32_t>&,
+                                          std::string* error)
+{
+    if (error) *error = "rc_ozaki_mxfp4_mma: toolkit lacks FP4 helpers";
+    return false;
+}
+
+[[nodiscard]] bool LaunchMxfp4OnePanelCublasLt(const std::vector<int8_t>&, const std::vector<int8_t>&,
+                                               uint32_t, uint32_t, uint32_t, std::vector<int32_t>&,
+                                               std::string* error)
+{
+    if (error) *error = "rc_ozaki_mxfp4_cublaslt: toolkit lacks FP4/VEC32";
+    return false;
+}
+
+#endif
+
+/** Scalar-decode MXFP4 panel (E2M1 nibble decode + FP32 accumulate) — NOT native. */
+[[nodiscard]] bool LaunchMxfp4OnePanelScalar(const std::vector<int8_t>& Lpanel,
+                                             const std::vector<int8_t>& Rpanel, uint32_t rows,
+                                             uint32_t len, uint32_t cols,
+                                             std::vector<int32_t>& partial, std::string* error)
 {
     std::vector<uint8_t> a_e2m1, b_e2m1, sfa, sfb;
     uint32_t kblocks = 0;
@@ -367,10 +966,10 @@ __global__ void rc_ozaki_mxfp4_panel_gemm(const uint8_t* a_e2m1, const uint8_t* 
  * Exactness/reference accelerator only — NEVER flips native MXFP4 latches.
  * CRITICAL: must not call LaunchGemmS8S8. Backend marker includes scalar-decode.
  */
-[[nodiscard]] bool LaunchOzakiMxfp4Panels(const std::vector<int8_t>& left,
-                                          const std::vector<int8_t>& right, uint32_t rows,
-                                          uint32_t inner, uint32_t cols, std::vector<int64_t>& out,
-                                          std::string* error)
+[[nodiscard]] bool LaunchOzakiMxfp4PanelsScalar(const std::vector<int8_t>& left,
+                                                const std::vector<int8_t>& right, uint32_t rows,
+                                                uint32_t inner, uint32_t cols,
+                                                std::vector<int64_t>& out, std::string* error)
 {
     out.clear();
     if (rows == 0 || inner == 0 || cols == 0) {
@@ -403,7 +1002,105 @@ __global__ void rc_ozaki_mxfp4_panel_gemm(const uint8_t* a_e2m1, const uint8_t* 
         }
 
         std::vector<int32_t> partial;
-        if (!LaunchMxfp4OnePanel(Lpanel, Rpanel, rows, len, cols, partial, error) ||
+        if (!LaunchMxfp4OnePanelScalar(Lpanel, Rpanel, rows, len, cols, partial, error) ||
+            partial.size() != out.size()) {
+            out.clear();
+            return false;
+        }
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] += static_cast<int64_t>(partial[i]);
+        }
+    }
+    return true;
+}
+
+/** Real TC Ozaki panels via cuBLASLt block-scaled E2M1 (native claim path). */
+[[nodiscard]] bool LaunchOzakiMxfp4PanelsCublasLt(const std::vector<int8_t>& left,
+                                                  const std::vector<int8_t>& right, uint32_t rows,
+                                                  uint32_t inner, uint32_t cols,
+                                                  std::vector<int64_t>& out, std::string* error)
+{
+    out.clear();
+    if (rows == 0 || inner == 0 || cols == 0) {
+        if (error) *error = "Ozaki MXFP4 TC degenerate shape";
+        return false;
+    }
+    if (left.size() != static_cast<size_t>(rows) * inner ||
+        right.size() != static_cast<size_t>(inner) * cols) {
+        if (error) *error = "Ozaki MXFP4 TC operand size mismatch";
+        return false;
+    }
+
+    using matmul::v4::rc::kRCOzakiExactChunk;
+    out.assign(static_cast<size_t>(rows) * cols, 0);
+    for (uint32_t k0 = 0; k0 < inner; k0 += kRCOzakiExactChunk) {
+        const uint32_t len = std::min(kRCOzakiExactChunk, inner - k0);
+        std::vector<int8_t> Lpanel(static_cast<size_t>(rows) * len);
+        std::vector<int8_t> Rpanel(static_cast<size_t>(len) * cols);
+        for (uint32_t r = 0; r < rows; ++r) {
+            for (uint32_t t = 0; t < len; ++t) {
+                Lpanel[static_cast<size_t>(r) * len + t] =
+                    left[static_cast<size_t>(r) * inner + (k0 + t)];
+            }
+        }
+        for (uint32_t t = 0; t < len; ++t) {
+            for (uint32_t c = 0; c < cols; ++c) {
+                Rpanel[static_cast<size_t>(t) * cols + c] =
+                    right[static_cast<size_t>(k0 + t) * cols + c];
+            }
+        }
+
+        std::vector<int32_t> partial;
+        if (!LaunchMxfp4OnePanelCublasLt(Lpanel, Rpanel, rows, len, cols, partial, error) ||
+            partial.size() != out.size()) {
+            out.clear();
+            return false;
+        }
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] += static_cast<int64_t>(partial[i]);
+        }
+    }
+    return true;
+}
+
+/** Real TC Ozaki panels via SM120 QMMA.SF m16n8k32 e2m1 block_scale (native claim path). */
+[[nodiscard]] bool LaunchOzakiMxfp4PanelsMma(const std::vector<int8_t>& left,
+                                             const std::vector<int8_t>& right, uint32_t rows,
+                                             uint32_t inner, uint32_t cols,
+                                             std::vector<int64_t>& out, std::string* error)
+{
+    out.clear();
+    if (rows == 0 || inner == 0 || cols == 0) {
+        if (error) *error = "Ozaki MXFP4 MMA degenerate shape";
+        return false;
+    }
+    if (left.size() != static_cast<size_t>(rows) * inner ||
+        right.size() != static_cast<size_t>(inner) * cols) {
+        if (error) *error = "Ozaki MXFP4 MMA operand size mismatch";
+        return false;
+    }
+
+    using matmul::v4::rc::kRCOzakiExactChunk;
+    out.assign(static_cast<size_t>(rows) * cols, 0);
+    for (uint32_t k0 = 0; k0 < inner; k0 += kRCOzakiExactChunk) {
+        const uint32_t len = std::min(kRCOzakiExactChunk, inner - k0);
+        std::vector<int8_t> Lpanel(static_cast<size_t>(rows) * len);
+        std::vector<int8_t> Rpanel(static_cast<size_t>(len) * cols);
+        for (uint32_t r = 0; r < rows; ++r) {
+            for (uint32_t t = 0; t < len; ++t) {
+                Lpanel[static_cast<size_t>(r) * len + t] =
+                    left[static_cast<size_t>(r) * inner + (k0 + t)];
+            }
+        }
+        for (uint32_t t = 0; t < len; ++t) {
+            for (uint32_t c = 0; c < cols; ++c) {
+                Rpanel[static_cast<size_t>(t) * cols + c] =
+                    right[static_cast<size_t>(k0 + t) * cols + c];
+            }
+        }
+
+        std::vector<int32_t> partial;
+        if (!LaunchMxfp4OnePanelMma(Lpanel, Rpanel, rows, len, cols, partial, error) ||
             partial.size() != out.size()) {
             out.clear();
             return false;
@@ -504,8 +1201,13 @@ void FillMxSeeded(std::vector<int8_t>& L, std::vector<int8_t>& R, uint32_t rows,
     return true;
 }
 
+using Mxfp4PanelLauncher = bool (*)(const std::vector<int8_t>&, const std::vector<int8_t>&,
+                                    uint32_t, uint32_t, uint32_t, std::vector<int64_t>&,
+                                    std::string*);
+
 [[nodiscard]] bool Mxfp4ShapeMatches(uint32_t rows, uint32_t inner, uint32_t cols, uint32_t seed,
-                                     bool max_corner, uint8_t e, std::string* error)
+                                     bool max_corner, uint8_t e, Mxfp4PanelLauncher launch,
+                                     std::string* error)
 {
     std::vector<int8_t> left, right;
     if (max_corner) {
@@ -516,7 +1218,7 @@ void FillMxSeeded(std::vector<int8_t>& L, std::vector<int8_t>& R, uint32_t rows,
     std::vector<int64_t> cpu;
     DenseInt64(left, right, rows, inner, cols, cpu);
     std::vector<int64_t> gpu;
-    if (!LaunchOzakiMxfp4Panels(left, right, rows, inner, cols, gpu, error)) return false;
+    if (!launch(left, right, rows, inner, cols, gpu, error)) return false;
     if (gpu != cpu) {
         if (error) *error = "CUDA MXFP4 panels != int64 oracle";
         return false;
@@ -531,6 +1233,38 @@ void FillMxSeeded(std::vector<int8_t>& L, std::vector<int8_t>& R, uint32_t rows,
         }
     }
     return true;
+}
+
+[[nodiscard]] bool Mxfp4TensorSuiteMatches(std::string* error)
+{
+    // Prefer real QMMA.SF MMA path; fall back to cuBLASLt if MMA unavailable.
+    std::string mma_err;
+    auto launch_mma = &LaunchOzakiMxfp4PanelsMma;
+    if (Mxfp4ShapeMatches(4, 8, 4, /*seed=*/1, /*max=*/false, 0, launch_mma, &mma_err) &&
+        Mxfp4ShapeMatches(4, 4095, 4, /*seed=*/2, /*max=*/true, /*e=*/3, launch_mma, &mma_err) &&
+        Mxfp4ShapeMatches(4, 4096, 4, /*seed=*/3, /*max=*/true, /*e=*/3, launch_mma, &mma_err) &&
+        Mxfp4ShapeMatches(4, 4097, 4, /*seed=*/5, /*max=*/true, /*e=*/2, launch_mma, &mma_err) &&
+        Mxfp4ShapeMatches(4, 8192, 4, /*seed=*/7, /*max=*/false, 0, launch_mma, &mma_err) &&
+        Mxfp4ShapeMatches(8, 4096, 8, /*seed=*/11, /*max=*/true, /*e=*/1, launch_mma, &mma_err) &&
+        Mxfp4ShapeMatches(4, 16384, 4, /*seed=*/13, /*max=*/false, 0, launch_mma, &mma_err) &&
+        Mxfp4ShapeMatches(32, 4096, 32, /*seed=*/17, /*max=*/true, /*e=*/3, launch_mma, &mma_err)) {
+        return true;
+    }
+    auto launch_lt = &LaunchOzakiMxfp4PanelsCublasLt;
+    std::string lt_err;
+    const bool lt_ok =
+        Mxfp4ShapeMatches(4, 8, 4, /*seed=*/1, /*max=*/false, 0, launch_lt, &lt_err) &&
+        Mxfp4ShapeMatches(4, 4095, 4, /*seed=*/2, /*max=*/true, /*e=*/3, launch_lt, &lt_err) &&
+        Mxfp4ShapeMatches(4, 4096, 4, /*seed=*/3, /*max=*/true, /*e=*/3, launch_lt, &lt_err) &&
+        Mxfp4ShapeMatches(4, 4097, 4, /*seed=*/5, /*max=*/true, /*e=*/2, launch_lt, &lt_err) &&
+        Mxfp4ShapeMatches(4, 8192, 4, /*seed=*/7, /*max=*/false, 0, launch_lt, &lt_err) &&
+        Mxfp4ShapeMatches(8, 4096, 8, /*seed=*/11, /*max=*/true, /*e=*/1, launch_lt, &lt_err) &&
+        Mxfp4ShapeMatches(4, 16384, 4, /*seed=*/13, /*max=*/false, 0, launch_lt, &lt_err) &&
+        Mxfp4ShapeMatches(32, 4096, 32, /*seed=*/17, /*max=*/true, /*e=*/3, launch_lt, &lt_err);
+    if (!lt_ok && error) {
+        *error = "mma_failed:" + mma_err + "; cublaslt_failed:" + lt_err;
+    }
+    return lt_ok;
 }
 
 } // namespace
@@ -608,6 +1342,7 @@ bool SelfQualifyRcOzakiCudaMxfp4Once()
     cudaDeviceProp prop{};
     std::string err;
     bool scalar_ok = false;
+    bool tensor_ok = false;
     {
         int device = 0;
         if (cudaGetDevice(&device) != cudaSuccess ||
@@ -616,26 +1351,48 @@ bool SelfQualifyRcOzakiCudaMxfp4Once()
         }
     }
 
+    const bool is_sm120 = DeviceLooksSm120(prop.major, prop.minor);
+    const bool is_sm100 = DeviceLooksSm100(prop.major, prop.minor);
+
     // Scalar-decode exactness probe (reference accelerator). Matches int64 oracle
     // but is NOT a tensor-core path — must never flip g_qual_sm120 / g_qual_sm100.
     if (err.empty()) {
-        scalar_ok = Mxfp4ShapeMatches(4, 8, 4, /*seed=*/1, /*max=*/false, 0, &err) &&
-                    Mxfp4ShapeMatches(4, 4095, 4, /*seed=*/2, /*max=*/true, /*e=*/3, &err) &&
-                    Mxfp4ShapeMatches(4, 4096, 4, /*seed=*/3, /*max=*/true, /*e=*/3, &err) &&
-                    Mxfp4ShapeMatches(4, 4097, 4, /*seed=*/5, /*max=*/true, /*e=*/2, &err) &&
-                    Mxfp4ShapeMatches(4, 8192, 4, /*seed=*/7, /*max=*/false, 0, &err) &&
-                    Mxfp4ShapeMatches(8, 4096, 8, /*seed=*/11, /*max=*/true, /*e=*/1, &err) &&
-                    Mxfp4ShapeMatches(4, 16384, 4, /*seed=*/13, /*max=*/false, 0, &err);
+        auto scalar = &LaunchOzakiMxfp4PanelsScalar;
+        scalar_ok = Mxfp4ShapeMatches(4, 8, 4, /*seed=*/1, /*max=*/false, 0, scalar, &err) &&
+                    Mxfp4ShapeMatches(4, 4095, 4, /*seed=*/2, /*max=*/true, /*e=*/3, scalar, &err) &&
+                    Mxfp4ShapeMatches(4, 4096, 4, /*seed=*/3, /*max=*/true, /*e=*/3, scalar, &err) &&
+                    Mxfp4ShapeMatches(4, 4097, 4, /*seed=*/5, /*max=*/true, /*e=*/2, scalar, &err) &&
+                    Mxfp4ShapeMatches(4, 8192, 4, /*seed=*/7, /*max=*/false, 0, scalar, &err) &&
+                    Mxfp4ShapeMatches(8, 4096, 8, /*seed=*/11, /*max=*/true, /*e=*/1, scalar, &err) &&
+                    Mxfp4ShapeMatches(4, 16384, 4, /*seed=*/13, /*max=*/false, 0, scalar, &err);
     }
 
-    // Real CUTLASS/cuBLASLt RC Ozaki panel tensor path does not exist yet.
-    // When one lands, qualify here on separate sm_120 / sm_100 latches only after
-    // that TC path matches the int64 oracle — never from scalar-decode.
-    const bool is_sm120 = DeviceLooksSm120(prop.major, prop.minor);
-    const bool is_sm100 = DeviceLooksSm100(prop.major, prop.minor);
-    const bool tensor_ok = false; // future: real TC launch && (is_sm120 || is_sm100)
-    (void)is_sm120;
-    (void)is_sm100;
+    // Real TC path (QMMA.SF MMA preferred; cuBLASLt Plan B). Only this may flip
+    // native latches — and only on sm_120 / sm_100 separately.
+    std::string tc_err;
+    std::string tc_backend;
+    if (err.empty() && (is_sm120 || is_sm100)) {
+        // Detect which backend matched by probing MMA first.
+        std::string mma_probe;
+        if (Mxfp4ShapeMatches(4, 8, 4, 1, false, 0, &LaunchOzakiMxfp4PanelsMma, &mma_probe) &&
+            Mxfp4TensorSuiteMatches(&tc_err)) {
+            // Re-check: if MMA tiny shape works and full suite passed, prefer MMA name.
+            // Suite tries MMA first then Lt — if MMA failed suite wouldn't set via MMA.
+            // Distinguish: if LaunchOzakiMxfp4PanelsMma matches K=4096 corner, it's MMA.
+            std::string mma_full;
+            if (Mxfp4ShapeMatches(4, 4096, 4, 3, true, 3, &LaunchOzakiMxfp4PanelsMma, &mma_full)) {
+                tensor_ok = true;
+                tc_backend = is_sm120 ? "mxfp4_mma_sm120" : "mxfp4_mma_sm100";
+            } else {
+                tensor_ok = true;
+                tc_backend = is_sm120 ? "mxfp4_cublaslt_sm120" : "mxfp4_cublaslt_sm100";
+            }
+        } else {
+            tensor_ok = false;
+            if (!tc_err.empty()) err = tc_err;
+            else if (!mma_probe.empty()) err = mma_probe;
+        }
+    }
 
     std::lock_guard<std::mutex> lock(g_ozaki_mu);
     if (!g_mx_ran) {
@@ -643,15 +1400,22 @@ bool SelfQualifyRcOzakiCudaMxfp4Once()
         g_mx_arch_key = FormatCudaArchKey(prop.major, prop.minor);
         g_qual_sm120 = false;
         g_qual_sm100 = false;
-        if (tensor_ok) {
-            // Reserved: future mxfp4_cutlass_sm120 / mxfp4_cutlass_sm100 admit.
-            g_mx_backend.clear();
+        if (tensor_ok && is_sm120) {
+            g_qual_sm120 = true;
+            g_mx_backend = tc_backend.empty() ? "mxfp4_mma_sm120" : tc_backend;
+            g_mx_deficit.clear();
+        } else if (tensor_ok && is_sm100) {
+            g_qual_sm100 = true;
+            g_mx_backend = tc_backend.empty() ? "mxfp4_mma_sm100" : tc_backend;
             g_mx_deficit.clear();
         } else if (scalar_ok) {
             // BMX4C honesty: distinct scalar-decode marker; native stays false.
             g_mx_backend = "mxfp4_blockscaled_device_scalar-decode";
             g_mx_deficit =
                 "rc_ozaki_mxfp4_scalar-decode_exact_but_not_native_tensor";
+            if (!tc_err.empty()) {
+                g_mx_deficit += "; tc_failed:" + tc_err;
+            }
         } else {
             g_mx_backend.clear();
             g_mx_deficit = err.empty() ? "mxfp4_selfqual_failed" : err;
@@ -666,8 +1430,7 @@ bool TryLaunchRcOzakiMxfp4GemmS8S8Int64(const std::vector<int8_t>& left,
                                        std::string* error)
 {
     out.clear();
-    // Native claim only: real CUTLASS/cuBLASLt TC. Scalar-decode must not serve
-    // this entry (kept for self-qual / reference via LaunchOzakiMxfp4Panels).
+    // Native claim only: real TC (MMA or cuBLASLt). Scalar-decode must not serve this entry.
     if (!IsRcOzakiCudaMxfp4Qualified()) {
         if (error) {
             *error = "RC Ozaki MXFP4 native tensor path not qualified "
@@ -675,15 +1438,11 @@ bool TryLaunchRcOzakiMxfp4GemmS8S8Int64(const std::vector<int8_t>& left,
         }
         return false;
     }
-    (void)left;
-    (void)right;
-    (void)rows;
-    (void)inner;
-    (void)cols;
-    if (error) {
-        *error = "RC Ozaki MXFP4 CUTLASS/cuBLASLt tensor path not implemented";
+    // Prefer MMA; fall back to cuBLASLt if MMA declines a production shape.
+    if (LaunchOzakiMxfp4PanelsMma(left, right, rows, inner, cols, out, error)) {
+        return true;
     }
-    return false;
+    return LaunchOzakiMxfp4PanelsCublasLt(left, right, rows, inner, cols, out, error);
 }
 
 void ResetRcOzakiCudaQualForTest()

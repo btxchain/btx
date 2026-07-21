@@ -531,7 +531,7 @@ BOOST_AUTO_TEST_CASE(rc_t9_fail_closed_wrong_exact_gemm_backend)
     const rc::RCSelfQualStatus st = rc::ProbeRCSelfQual(bad);
     BOOST_CHECK(!st.mining_accelerator_ok);
     BOOST_CHECK(!st.exact_gemm_backend_ok);
-    BOOST_CHECK(!st.native_mxfp4_qualified);
+    BOOST_CHECK_EQUAL(st.native_mxfp4_qualified, rc::IsRcOzakiMxfp4Qualified());
     BOOST_CHECK(!st.native_fp8_qualified);
     BOOST_CHECK(!st.deficit_reason.empty());
     BOOST_CHECK(!rc::RCAcceleratorAdmissible(bad));
@@ -561,7 +561,7 @@ BOOST_AUTO_TEST_CASE(rc_t9_fail_closed_wrong_exact_gemm_backend)
     const rc::RCSelfQualStatus good_st = rc::ProbeRCSelfQual(good);
     BOOST_CHECK(good_st.mining_accelerator_ok);
     BOOST_CHECK(good_st.exact_gemm_backend_ok);
-    BOOST_CHECK(!good_st.native_mxfp4_qualified);
+    BOOST_CHECK_EQUAL(good_st.native_mxfp4_qualified, rc::IsRcOzakiMxfp4Qualified());
     BOOST_CHECK(!good_st.native_fp8_qualified);
     BOOST_CHECK(rc::HasPassedRCSelfQual());
 }
@@ -866,10 +866,10 @@ BOOST_AUTO_TEST_CASE(rc_tfp9_selfqual_tracks_epoch_shape)
     const auto live = rc::ConsensusRCEpisodeParamsForHeight(1, p);
     BOOST_CHECK_EQUAL(live.n_ctx, rc::kRCContextLen);
 
-    // Empty backend fail-closes (no device).
+    // Empty backend fail-closes mining (no device ExactGemm).
     const auto st_cpu = rc::ProbeRCSelfQual(lt::ExactGemmBackend{}, /*height=*/1, &p);
     BOOST_CHECK(!st_cpu.mining_accelerator_ok);
-    BOOST_CHECK(!st_cpu.native_mxfp4_qualified);
+    BOOST_CHECK_EQUAL(st_cpu.native_mxfp4_qualified, rc::IsRcOzakiMxfp4Qualified());
     BOOST_CHECK(!st_cpu.native_fp8_qualified);
 
     lt::ExactGemmBackend good;
@@ -888,7 +888,7 @@ BOOST_AUTO_TEST_CASE(rc_tfp9_selfqual_tracks_epoch_shape)
     const auto st = rc::ProbeRCSelfQual(good, /*height=*/1, &p);
     BOOST_CHECK(st.mining_accelerator_ok);
     BOOST_CHECK(st.exact_gemm_backend_ok);
-    BOOST_CHECK(!st.native_mxfp4_qualified);
+    BOOST_CHECK_EQUAL(st.native_mxfp4_qualified, rc::IsRcOzakiMxfp4Qualified());
     BOOST_CHECK(!st.native_fp8_qualified);
 }
 
@@ -951,9 +951,9 @@ BOOST_AUTO_TEST_CASE(rc_p12_phase2_exactgemm_device_probe)
                        << probe.provider
                        << " tensor_imma_or_mfma=" << (probe.used_tensor_imma_or_mfma ? 1 : 0));
 
-    // native_* stay fail-closed even when ExactGemm device path works.
+    // ExactGemm device path alone must not invent native FP8; MXFP4 follows Ozaki latch.
     const auto st = rc::ProbeRCSelfQual(matmul_v4::accel::MakeResolvedExactGemmBackendForRC());
-    BOOST_CHECK(!st.native_mxfp4_qualified);
+    BOOST_CHECK_EQUAL(st.native_mxfp4_qualified, rc::IsRcOzakiMxfp4Qualified());
     BOOST_CHECK(!st.native_fp8_qualified);
 }
 
@@ -1411,9 +1411,11 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_exact_panels_qualify_and_match_oracle)
         BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, 8, 8, 8, oz_out));
     }
 
-    // Empty ExactGemmBackend probe stays mining-fail-closed; never copies LT native.
+    // Empty ExactGemmBackend probe: mining stay fail-closed, but native_mxfp4
+    // still reflects Ozaki TC latch when a real device path qualified.
     const auto st_cpu = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
-    BOOST_CHECK(!st_cpu.native_mxfp4_qualified);
+    BOOST_CHECK(!st_cpu.mining_accelerator_ok);
+    BOOST_CHECK_EQUAL(st_cpu.native_mxfp4_qualified, oz.qualified);
     BOOST_CHECK(!st_cpu.native_fp8_qualified);
 }
 
@@ -1439,7 +1441,7 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_native_gate)
         BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, 8, 8, 8, oz_out));
         BOOST_CHECK(oz_out.empty());
         const auto st_cpu = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
-        BOOST_CHECK(!st_cpu.native_mxfp4_qualified);
+        BOOST_CHECK_EQUAL(st_cpu.native_mxfp4_qualified, false);
         BOOST_CHECK(!st_cpu.native_fp8_qualified);
         return;
     }
@@ -1526,7 +1528,8 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_scalar_decode_never_sets_native)
         BOOST_CHECK(rc::IsRcOzakiMxfp4Qualified());
         BOOST_CHECK(oz.backend.find("scalar-decode") == std::string::npos);
         BOOST_CHECK(oz.backend.find("cublaslt") != std::string::npos ||
-                    oz.backend.find("cutlass") != std::string::npos);
+                    oz.backend.find("cutlass") != std::string::npos ||
+                    oz.backend.find("mma") != std::string::npos);
         return;
     }
 

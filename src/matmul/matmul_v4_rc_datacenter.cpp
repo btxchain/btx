@@ -37,8 +37,12 @@ RCDcStatus ProbeRCDcStatus()
     st.gkr_arbiter = false;
     st.cuda_episode_compiled = matmul_v4::cuda::IsRcEpisodeCudaCompiled();
     st.arch_key = matmul_v4::cuda::RcEpisodeCudaArchKey();
-    st.cuda_episode_ready = false;
-    st.deficit = "consensus_dc_levers_default_off; episode_graph_unwired";
+    // Ready means the CUDA episode TU is linked (graph path callable). Consensus
+    // DC levers remain OFF; heights stay INT32_MAX.
+    st.cuda_episode_ready = st.cuda_episode_compiled;
+    st.deficit = st.cuda_episode_compiled
+                     ? "consensus_dc_levers_default_off"
+                     : "consensus_dc_levers_default_off; episode_graph_unwired";
     return st;
 }
 

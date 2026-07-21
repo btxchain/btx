@@ -26,7 +26,8 @@ namespace matmul_v4::cuda {
 // --- Block-scaled MXFP4 ---
 // Scalar-decode E2M1+FP32 may probe exactness (backend contains "scalar-decode")
 // but must NEVER flip IsRcOzakiCudaMxfp4Qualified. Native latches require a real
-// CUTLASS/cuBLASLt tensor path (none wired yet → qualified stays false).
+// cuBLASLt (CUDA_R_4F_E2M1 + VEC32_UE8M0) or CUTLASS tensor path matching the
+// int64 oracle on separate sm_120 / sm_100 latches.
 [[nodiscard]] bool IsRcOzakiCudaMxfp4Qualified();
 [[nodiscard]] std::string RcOzakiCudaMxfp4ArchKey();
 [[nodiscard]] std::string RcOzakiCudaMxfp4Backend();

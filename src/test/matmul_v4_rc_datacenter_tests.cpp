@@ -80,9 +80,9 @@ BOOST_AUTO_TEST_CASE(rc_dc_probe_status_smoke)
     BOOST_CHECK_EQUAL(st.miner_batch_q, dc::kRCMinerBatchQDefault);
     BOOST_CHECK(!st.gkr_arbiter);
     BOOST_CHECK(!st.deficit.empty());
-    // Without CUDA experimental, episode TU is the honesty stub.
     BOOST_CHECK_EQUAL(st.cuda_episode_compiled, matmul_v4::cuda::IsRcEpisodeCudaCompiled());
-    BOOST_CHECK(!st.cuda_episode_ready);
+    // Ready tracks whether the CUDA episode TU is linked (graph path callable).
+    BOOST_CHECK_EQUAL(st.cuda_episode_ready, st.cuda_episode_compiled);
 }
 
 BOOST_AUTO_TEST_CASE(rc_dc_bank_pages_for_packed_gib)
@@ -289,15 +289,56 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_stub)
 {
     matmul_v4::cuda::RCCudaEpisodeContext ctx;
     std::string err;
-    BOOST_CHECK(ctx.Init(rc::MakeToyRCCoupParams(), /*batch_q=*/dc::kRCMinerBatchQDefault, &err));
+    const auto params = rc::MakeToyRCCoupParams();
+    const CBlockHeader header = MakeCoupHeader(1);
+    BOOST_REQUIRE(ctx.Init(params, /*batch_q=*/dc::kRCMinerBatchQDefault, &err));
     BOOST_CHECK(ctx.Ready());
-    const auto pages = rc::DeriveCoupledBankPages(MakeCoupHeader(1), 0, rc::MakeToyRCCoupParams());
-    BOOST_CHECK(ctx.LoadBank(pages, &err));
+    const auto pages = rc::DeriveCoupledBankPages(header, 0, params);
+    BOOST_REQUIRE(ctx.LoadBank(pages, &err));
+    // Without BindEpisode the graph must refuse (no lobe seed / digest binding).
     BOOST_CHECK(!ctx.RunBarrierGraph(&err));
-    BOOST_CHECK(err.find("graph_unavailable") != std::string::npos);
-    BOOST_CHECK(err.find("not_wired") != std::string::npos);
+    BOOST_CHECK(err.find("BindEpisode") != std::string::npos);
+
+    if (!matmul_v4::cuda::IsRcEpisodeCudaCompiled()) {
+        // CPU/stub build: graph stays unavailable.
+        BOOST_CHECK(err.find("graph_unavailable") != std::string::npos ||
+                    err.find("BindEpisode") != std::string::npos);
+        ctx.Destroy();
+        BOOST_CHECK(!ctx.Ready());
+        return;
+    }
+
+    BOOST_REQUIRE_MESSAGE(ctx.BindEpisode(header, 0, &err), err);
+    BOOST_REQUIRE_MESSAGE(ctx.RunBarrierGraph(&err), err);
+    const uint256 cpu = rc::RecomputeCoupledPuzzleReference(header, 0, params);
+    BOOST_REQUIRE(ctx.LastDigest() != nullptr);
+    BOOST_CHECK_MESSAGE(*ctx.LastDigest() == cpu,
+                        "toy graph digest " << ctx.LastDigest()->GetHex()
+                                            << " != cpu " << cpu.GetHex());
     ctx.Destroy();
     BOOST_CHECK(!ctx.Ready());
+}
+
+BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_medium_digest)
+{
+    if (!matmul_v4::cuda::IsRcEpisodeCudaCompiled()) {
+        return;
+    }
+    matmul_v4::cuda::RCCudaEpisodeContext ctx;
+    std::string err;
+    const auto params = rc::MakeMediumRCCoupParams();
+    const CBlockHeader header = MakeCoupHeader(42);
+    BOOST_REQUIRE_MESSAGE(ctx.Init(params, /*batch_q=*/1, &err), err);
+    const auto pages = rc::DeriveCoupledBankPages(header, 0, params);
+    BOOST_REQUIRE_MESSAGE(ctx.LoadBank(pages, &err), err);
+    BOOST_REQUIRE_MESSAGE(ctx.BindEpisode(header, 0, &err), err);
+    BOOST_REQUIRE_MESSAGE(ctx.RunBarrierGraph(&err), err);
+    const uint256 cpu = rc::RecomputeCoupledPuzzleReference(header, 0, params);
+    BOOST_REQUIRE(ctx.LastDigest() != nullptr);
+    BOOST_CHECK_MESSAGE(*ctx.LastDigest() == cpu,
+                        "medium graph digest " << ctx.LastDigest()->GetHex()
+                                               << " != cpu " << cpu.GetHex());
+    ctx.Destroy();
 }
 
 BOOST_AUTO_TEST_SUITE_END()
