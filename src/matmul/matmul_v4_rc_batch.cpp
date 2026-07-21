@@ -12,6 +12,7 @@
 #include <matmul/matmul_v4_rc_extract.h>
 #include <span.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <vector>
@@ -67,6 +68,12 @@ public:
         const uint32_t v = ReadLE32(m_block + m_pos);
         m_pos += 4;
         return v;
+    }
+    uint64_t NextU64()
+    {
+        const uint64_t lo = NextU32();
+        const uint64_t hi = NextU32();
+        return lo | (hi << 32);
     }
 
 private:
@@ -183,6 +190,72 @@ void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t ba
     }
 }
 
+uint64_t AccXorFold(const std::vector<int64_t>& s)
+{
+    uint64_t fold = 0;
+    for (int64_t v : s) fold ^= static_cast<uint64_t>(v);
+    return fold;
+}
+
+uint256 ExchangeRoundSeed(const uint256& sigma, uint32_t barrier, uint32_t round, uint64_t fold)
+{
+    unsigned char buf[32 + 4 + 4 + 8];
+    std::memcpy(buf, sigma.data(), 32);
+    WriteLE32(buf + 32, barrier);
+    WriteLE32(buf + 36, round);
+    WriteLE64(buf + 40, fold);
+    std::vector<unsigned char> pre;
+    pre.reserve((sizeof(kRCCoupMaterialExchangeRoundsTag) - 1) + sizeof(buf));
+    pre.insert(pre.end(),
+               reinterpret_cast<const unsigned char*>(kRCCoupMaterialExchangeRoundsTag),
+               reinterpret_cast<const unsigned char*>(kRCCoupMaterialExchangeRoundsTag) +
+                   sizeof(kRCCoupMaterialExchangeRoundsTag) - 1);
+    pre.insert(pre.end(), buf, buf + sizeof(buf));
+    return Sha256dBytes(pre.data(), pre.size());
+}
+
+void ApplyXorKeystream(std::vector<int64_t>& s, ShaXof& xof)
+{
+    for (int64_t& lane : s) {
+        const uint64_t k = xof.NextU64();
+        lane = static_cast<int64_t>(static_cast<uint64_t>(lane) ^ k);
+    }
+}
+
+void ApplyBalancedPermutationFromSeed(std::vector<int64_t>& s, const uint256& seed)
+{
+    const uint32_t n = static_cast<uint32_t>(s.size());
+    if (n == 0) return;
+    ShaXof xof(seed);
+    std::vector<uint32_t> pi(n);
+    for (uint32_t i = 0; i < n; ++i) pi[i] = i;
+    for (uint32_t i = n - 1; i > 0; --i) {
+        const uint32_t j = xof.NextU32() % (i + 1);
+        const uint32_t tmp = pi[i];
+        pi[i] = pi[j];
+        pi[j] = tmp;
+    }
+    std::vector<int64_t> tmp(n);
+    for (uint32_t i = 0; i < n; ++i) tmp[pi[i]] = s[i];
+    s = std::move(tmp);
+}
+
+void ApplyMaterialExchangeRounds(std::vector<int64_t>& s, const uint256& sigma, uint32_t barrier,
+                                 const RCCoupOptions& options)
+{
+    if (!options.material_exchange || options.exchange_rounds == 0) return;
+    if (s.empty()) return;
+    for (uint32_t r = 0; r < options.exchange_rounds; ++r) {
+        const uint64_t fold = AccXorFold(s);
+        const uint256 seed = ExchangeRoundSeed(sigma, barrier, r, fold);
+        {
+            ShaXof xof(seed);
+            ApplyXorKeystream(s, xof);
+        }
+        ApplyBalancedPermutationFromSeed(s, seed);
+    }
+}
+
 void ApplyBalancedPermutation(std::vector<int64_t>& s, const std::vector<uint32_t>& pi)
 {
     std::vector<int64_t> tmp(s.size());
@@ -237,20 +310,18 @@ bool HeadersShareBankTemplate(const std::vector<CBlockHeader>& headers)
     return true;
 }
 
-} // namespace
-
-bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t height,
-                           const RCCoupParams& params, std::vector<uint256>& digests_out,
-                           const RCMinerBatchConfig& cfg, const lt::ExactGemmBackend& gemm,
-                           const RCCoupOptions& options)
+/**
+ * Core Q-batch: independent per-nonce state (sigma, lobes, barrier roots).
+ * q_limit is the accepted headers.size() ceiling (miner max or harness max).
+ */
+bool MineRCCoupledBatchIndependent(const std::vector<CBlockHeader>& headers, int32_t height,
+                                   const RCCoupParams& params, std::vector<uint256>& digests_out,
+                                   uint32_t q_limit, bool use_resident_bank,
+                                   const lt::ExactGemmBackend& gemm, const RCCoupOptions& options)
 {
     digests_out.clear();
     if (headers.empty() || !ValidateRCCoupParams(params)) return false;
-    if (cfg.Q == 0 || cfg.Q > dc::kRCMinerBatchQMax) return false;
-    if (headers.size() > cfg.Q && cfg.Q < headers.size()) {
-        // Allow Q as a hint; actual batch size is headers.size() capped by max.
-    }
-    if (headers.size() > dc::kRCMinerBatchQMax) return false;
+    if (q_limit == 0 || headers.size() > q_limit) return false;
     if (!HeadersShareBankTemplate(headers)) return false;
 
     // Full-bank / material-exchange follow RCCoupOptions defaults (dc levers ON).
@@ -265,8 +336,9 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
     const auto pages =
         DeriveCoupledBankPages(ProjectRCBankTemplateHeader(headers[0]), height, params);
     const uint256 bank_root = BankCommitment(pages, params.bank_pages, params.lobe_width);
-    (void)cfg.use_resident_bank; // CPU reference always retains pages for the batch.
+    (void)use_resident_bank; // CPU reference always retains pages for the batch.
 
+    // Independent per-nonce state — never reuse / overwrite a shared slot 0.
     std::vector<uint256> sigmas(Q);
     std::vector<std::vector<int8_t>> states(Q, std::vector<int8_t>(n));
     for (uint32_t q = 0; q < Q; ++q) {
@@ -289,22 +361,21 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
             continue;
         }
 
-        // Per lobe: stack Q rows → ExactGemm Q×W · W×W → split.
+        // Per lobe: stack Q rows → ExactGemm Q×W · W×W → split into per-q accs.
         std::vector<std::vector<int64_t>> accs(Q, std::vector<int64_t>(n, 0));
         // Digest-affecting schedule from opts (defaults = dc levers).
         const bool full_sched = opts.full_bank_schedule;
 
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
             // Page schedule is sigma-dependent under full_bank_schedule; when
-            // that flag is OFF (default), all headers share the same page_id.
-            // Under full schedule, fall back to per-header GEMMs (still correct).
+            // that flag is OFF, all headers share the same page_id.
+            // Under full schedule, per-header GEMMs (still independent state).
             if (full_sched) {
                 for (uint32_t q = 0; q < Q; ++q) {
                     const auto page_ids =
                         SelectCoupledBankPageIds(b, ell, params, sigmas[q], true);
                     int64_t* dest = accs[q].data() + ell * W;
                     for (uint32_t page_id : page_ids) {
-                        std::vector<int64_t> partial(W, 0);
                         std::vector<int8_t> L(states[q].data() + ell * W,
                                               states[q].data() + ell * W + W);
                         const auto y =
@@ -339,6 +410,7 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
             assert(IsBalancedPermutation(pi, n));
             ApplyBalancedPermutation(acc, pi);
             ApplyAllToAllMix(acc, sigmas[q], b, n, opts.material_exchange, opts.exchange_rows);
+            ApplyMaterialExchangeRounds(acc, sigmas[q], b, opts);
             const uint256 extract_seed = Sha256TaggedU32U32(
                 kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigmas[q], b, 0);
             ExtractActiveState(lt::DeriveMatExpandPrfKey(extract_seed), acc, states[q]);
@@ -360,6 +432,31 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
         digests_out[q] = Sha256dBytes(buf.data(), buf.size());
     }
     return true;
+}
+
+} // namespace
+
+bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t height,
+                           const RCCoupParams& params, std::vector<uint256>& digests_out,
+                           const RCMinerBatchConfig& cfg, const lt::ExactGemmBackend& gemm,
+                           const RCCoupOptions& options)
+{
+    if (cfg.Q == 0 || cfg.Q > dc::kRCMinerBatchQMax) return false;
+    return MineRCCoupledBatchIndependent(headers, height, params, digests_out,
+                                         dc::kRCMinerBatchQMax, cfg.use_resident_bank, gemm,
+                                         options);
+}
+
+bool RunCoupledQSweep(const std::vector<CBlockHeader>& headers, int32_t height,
+                      const RCCoupParams& params, std::vector<uint256>& digests_out,
+                      uint32_t q_cap, const lt::ExactGemmBackend& gemm,
+                      const RCCoupOptions& options)
+{
+    const uint32_t limit =
+        q_cap == 0 ? kRCCoupledQSweepHarnessMax
+                   : std::min(q_cap, kRCCoupledQSweepHarnessMax);
+    return MineRCCoupledBatchIndependent(headers, height, params, digests_out, limit,
+                                         /*use_resident_bank=*/true, gemm, options);
 }
 
 } // namespace matmul::v4::rc

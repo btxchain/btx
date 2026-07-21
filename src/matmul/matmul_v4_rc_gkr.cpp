@@ -362,11 +362,19 @@ void AbsorbEpisode(FsTranscript& fs, const RCEpisodeParams& p)
 
 void AbsorbCoup(FsTranscript& fs, const RCCoupParams& p, const uint256& bank_root)
 {
-    fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("coup_v1"), 7);
+    // coup_v3: bind V3 shape fields + canonical dc schedule/exchange domain.
+    // Verifier absorbs the SAME dc constants (not prover-chosen), so FS challenges
+    // depend on the consensus schedule/exchange config.
+    fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("coup_v3"), 7);
     fs.AbsorbU32(p.barriers);
     fs.AbsorbU32(p.lobes);
     fs.AbsorbU32(p.lobe_width);
     fs.AbsorbU32(p.bank_pages);
+    fs.AbsorbU32(p.rows_per_lobe);
+    fs.AbsorbU32(p.pages_per_barrier_lobe);
+    fs.AbsorbU32(dc::kRCCoupFullBankScheduleEnabled ? 1u : 0u);
+    fs.AbsorbU32(dc::kRCCoupMaterialExchangeEnabled ? 1u : 0u);
+    fs.AbsorbU32(dc::kRCCoupExchangeRowsDefault);
     fs.AbsorbUint256(bank_root);
 }
 
@@ -968,17 +976,14 @@ size_t RCGkrExpectedLayerCount(const RCEpisodeParams& p)
 
 size_t RCGkrExpectedCoupledLayerCount(const RCCoupParams& p, bool full_bank_schedule)
 {
-    // Legacy: 1 page per (barrier, lobe). Full schedule: pages_per = bank_pages/(barriers*lobes)
-    // when evenly divisible; SelectCoupledBankPageIds returns that many ids.
-    size_t pages_per = 1;
-    if (full_bank_schedule && p.barriers > 0 && p.lobes > 0) {
-        // Mirror dc pages-per when full schedule; otherwise fall back to 1.
-        pages_per = std::max<size_t>(1, static_cast<size_t>(p.bank_pages) /
-                                            (static_cast<size_t>(p.barriers) * p.lobes));
-        if (pages_per * static_cast<size_t>(p.barriers) * p.lobes != p.bank_pages) {
-            pages_per = 1; // non-uniform — count from Select at prove time
-        }
-    }
+    // Legacy: 1 page per (barrier, lobe). Full schedule: pages_per_barrier_lobe
+    // (SelectCoupledBankPageIds returns that many ids; may wrap bank_pages).
+    const size_t pages_per =
+        full_bank_schedule
+            ? std::max<size_t>(1, static_cast<size_t>(p.pages_per_barrier_lobe == 0
+                                                          ? dc::kRCCoupPagesPerBarrierLobe
+                                                          : p.pages_per_barrier_lobe))
+            : 1u;
     return static_cast<size_t>(p.barriers) *
            (static_cast<size_t>(p.lobes) * pages_per + 1u /*Extract*/);
 }
@@ -1180,6 +1185,7 @@ RCGkrProveResult ProveWinnerCoupled(const CBlockHeader& header, int32_t height,
 
     std::vector<LayerWire> wires;
     wires.reserve(tx.gemms.size() + tx.extracts.size());
+    const uint32_t M = params.rows_per_lobe == 0 ? 1 : params.rows_per_lobe;
     size_t gi = 0;
     for (uint32_t b = 0; b < params.barriers; ++b) {
         while (gi < tx.gemms.size() && tx.gemms[gi].barrier == b) {
@@ -1189,7 +1195,7 @@ RCGkrProveResult ProveWinnerCoupled(const CBlockHeader& header, int32_t height,
             w.round = g.barrier;
             w.layer = g.lobe;
             w.page_id = g.page_id;
-            w.m = 1;
+            w.m = M;
             w.n = params.lobe_width;
             w.k = params.lobe_width;
             w.A = ToFp2I8(g.A);
@@ -1212,7 +1218,7 @@ RCGkrProveResult ProveWinnerCoupled(const CBlockHeader& header, int32_t height,
         if (!et) {
             RCGkrProveResult fail;
             fail.timing.ok = false;
-            fail.timing.note = "coupled extract transcript missing barrier";
+            fail.timing.note = "coupled:extract_transcript_missing";
             return fail;
         }
         LayerWire w;
@@ -1254,19 +1260,29 @@ const char* RCGkrIndepMaliciousGapNote(RCGkrIndepMaliciousKind kind)
 {
     switch (kind) {
     case RCGkrIndepMaliciousKind::ArbitraryAbFactorization:
-        return "GAP G1 OPEN: a_at_r/b_at_r unbound to a_fri/b_fri PCS openings at sumcheck point";
+        return "OPEN-GKR-G1: a_at_r/b_at_r unbound to a_fri/b_fri PCS openings at sumcheck point";
     case RCGkrIndepMaliciousKind::UnrelatedLayerRoots:
-        return "GAP G1/G2 OPEN: layer a_root/b_root/y_root unbound to global FRI commitments";
+        return "OPEN-GKR-G1G2: layer a_root/b_root/y_root unbound to global FRI commitments";
     case RCGkrIndepMaliciousKind::FabricatedTraceWires:
-        return "GAP G2 OPEN: claim/Y unbound to episode PRF expansion; trace_fri only self-consistent";
+        return "OPEN-GKR-G2: claim/Y unbound to episode PRF expansion; trace_fri only self-consistent";
     case RCGkrIndepMaliciousKind::IdenticalFabricatedLookup:
-        return "GAP G3 OPEN: prover manufactures identical witness/table (Theorem 5.1 vacuity)";
+        return "OPEN-GKR-G3: prover manufactures identical witness/table (Theorem 5.1 vacuity)";
     case RCGkrIndepMaliciousKind::FabricatedExtractIO:
-        return "GAP G3/G4 OPEN: fabricated Extract I/O + recomputed prover fields accepted";
+        return "OPEN-GKR-G3G4: fabricated Extract I/O + recomputed prover fields accepted";
     case RCGkrIndepMaliciousKind::UnrelatedBankPages:
-        return "GAP coupled OPEN: lobe B matrix unbound to bank_root page openings";
+        return "OPEN-GKR-BANK: lobe B matrix unbound to bank_root page openings";
+    case RCGkrIndepMaliciousKind::OmittedPages:
+        return "coupled:omitted_page (layout rejects missing scheduled page GEMM)";
+    case RCGkrIndepMaliciousKind::DuplicatedPages:
+        return "coupled:duplicated_layer (layout rejects extra page GEMM)";
+    case RCGkrIndepMaliciousKind::WrongM:
+        return "coupled:wrong_m (layer.m must equal coup.rows_per_lobe)";
+    case RCGkrIndepMaliciousKind::WrongExchangeTranscript:
+        return "OPEN-GKR-XCHG: mix/exchange domain not re-derived in VerifyWinnerProof scaffold";
+    case RCGkrIndepMaliciousKind::CrossVersionReplay:
+        return "v7:version (proof.version must equal kRCGkrProofVersion)";
     }
-    return "GAP OPEN";
+    return "OPEN-GKR";
 }
 
 namespace {
@@ -1337,6 +1353,14 @@ RCGkrProveResult ProveIndepMaliciousEpisodeForTest(const CBlockHeader& header,
         // Episode-only API; treat as fabricated trace.
         for (auto& w : wires) FabricateConsistentGemm(w, /*a_fill=*/1, /*b_fill=*/-1);
         break;
+    case RCGkrIndepMaliciousKind::OmittedPages:
+    case RCGkrIndepMaliciousKind::DuplicatedPages:
+    case RCGkrIndepMaliciousKind::WrongM:
+    case RCGkrIndepMaliciousKind::WrongExchangeTranscript:
+    case RCGkrIndepMaliciousKind::CrossVersionReplay:
+        // Coupled-oriented kinds: episode path falls back to fabricated wires.
+        for (auto& w : wires) FabricateConsistentGemm(w, /*a_fill=*/1, /*b_fill=*/-1);
+        break;
     }
 
     auto out = ProveFromLayers(claimed_digest, params, wires, seeds, roots, sigma,
@@ -1358,6 +1382,7 @@ RCGkrProveResult ProveIndepMaliciousCoupledForTest(const CBlockHeader& header, i
 
     std::vector<LayerWire> wires;
     wires.reserve(tx.gemms.size() + tx.extracts.size());
+    const uint32_t M = params.rows_per_lobe == 0 ? 1 : params.rows_per_lobe;
     size_t gi = 0;
     for (uint32_t b = 0; b < params.barriers; ++b) {
         while (gi < tx.gemms.size() && tx.gemms[gi].barrier == b) {
@@ -1367,7 +1392,7 @@ RCGkrProveResult ProveIndepMaliciousCoupledForTest(const CBlockHeader& header, i
             w.round = g.barrier;
             w.layer = g.lobe;
             w.page_id = g.page_id;
-            w.m = 1;
+            w.m = M;
             w.n = params.lobe_width;
             w.k = params.lobe_width;
             w.A = ToFp2I8(g.A);
@@ -1388,7 +1413,7 @@ RCGkrProveResult ProveIndepMaliciousCoupledForTest(const CBlockHeader& header, i
         if (!et) {
             RCGkrProveResult fail;
             fail.timing.ok = false;
-            fail.timing.note = "coupled extract transcript missing barrier";
+            fail.timing.note = "coupled:extract_transcript_missing";
             return fail;
         }
         LayerWire w;
@@ -1432,6 +1457,46 @@ RCGkrProveResult ProveIndepMaliciousCoupledForTest(const CBlockHeader& header, i
         }
         forge.fabricated_identical_lookup = true;
         break;
+    case RCGkrIndepMaliciousKind::OmittedPages:
+        // Drop one scheduled lobe-GEMM page (first GEMM) — layout must reject.
+        for (size_t i = 0; i < wires.size(); ++i) {
+            if (wires[i].kind == RCGkrLayerKind::CoupLobeGemm) {
+                wires.erase(wires.begin() + static_cast<std::ptrdiff_t>(i));
+                break;
+            }
+        }
+        break;
+    case RCGkrIndepMaliciousKind::DuplicatedPages:
+        // Duplicate the first lobe-GEMM page — layout must reject.
+        for (size_t i = 0; i < wires.size(); ++i) {
+            if (wires[i].kind == RCGkrLayerKind::CoupLobeGemm) {
+                wires.insert(wires.begin() + static_cast<std::ptrdiff_t>(i), wires[i]);
+                break;
+            }
+        }
+        break;
+    case RCGkrIndepMaliciousKind::WrongM:
+        for (auto& w : wires) {
+            if (w.kind == RCGkrLayerKind::CoupLobeGemm) {
+                w.m = M + 1;
+                // Keep A/Y shapes consistent with the forged m so sumcheck can run;
+                // layout check must still reject before algebra if dims≠coup.
+                FabricateConsistentGemm(w, /*a_fill=*/4, /*b_fill=*/3);
+            }
+        }
+        break;
+    case RCGkrIndepMaliciousKind::WrongExchangeTranscript:
+        // Scaffold cannot re-derive mix/exchange — fabricate Extract I/O as a stand-in
+        // witness divergence under an honest barrier-root commitment (OPEN gap).
+        for (auto& w : wires) {
+            if (w.kind == RCGkrLayerKind::CoupBarrierExtract) {
+                FabricateExtractOut(w, /*fill=*/13);
+            }
+        }
+        forge.fabricated_identical_lookup = true;
+        break;
+    case RCGkrIndepMaliciousKind::CrossVersionReplay:
+        break; // handled after ProveFromLayers
     }
 
     std::vector<uint256> seeds(params.barriers);
@@ -1444,7 +1509,14 @@ RCGkrProveResult ProveIndepMaliciousCoupledForTest(const CBlockHeader& header, i
         ProveFromLayers(claimed_digest, empty_ep, wires, seeds, tx.barrier_roots, sigma,
                         RCGkrIndepMaliciousGapNote(kind), /*coupled=*/true, params, tx.bank_root,
                         forge);
-    if (out.timing.ok) {
+    if (kind == RCGkrIndepMaliciousKind::CrossVersionReplay && out.timing.ok) {
+        out.proof.version = kRCGkrProofVersion - 1; // replay older format bytes
+    }
+    if (out.timing.ok || kind == RCGkrIndepMaliciousKind::OmittedPages ||
+        kind == RCGkrIndepMaliciousKind::DuplicatedPages ||
+        kind == RCGkrIndepMaliciousKind::WrongM ||
+        kind == RCGkrIndepMaliciousKind::CrossVersionReplay) {
+        // Layout-breaking kinds may still produce a proof object; surface the relation id.
         out.timing.note = RCGkrIndepMaliciousGapNote(kind);
         out.proof.shrink_note = out.timing.note;
     }
@@ -1472,70 +1544,83 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
         return false;
     };
 
-    if (proof.version != kRCGkrProofVersion) return fail("bad version");
-    if (proof.layers.empty()) return fail("no layers");
-    if (proof.layers.size() > kRCGkrMaxLayersHard) return fail("max layers");
+    if (proof.version != kRCGkrProofVersion) return fail("v7:version");
+    if (proof.layers.empty()) return fail("v7:no_layers");
+    if (proof.layers.size() > kRCGkrMaxLayersHard) return fail("v7:max_layers");
     // Reject oversized proofs before FRI work (canonical size via serialize).
     {
         std::vector<unsigned char> ser;
         const size_t nbytes = SerializeRCGkrProof(proof, ser);
-        if (nbytes == 0 || nbytes > kRCGkrMaxProofBytesHard) return fail("max proof size");
+        if (nbytes == 0 || nbytes > kRCGkrMaxProofBytesHard) return fail("v7:max_proof_size");
     }
     for (const auto& lc : proof.layers) {
-        if (lc.sumcheck.size() > kRCGkrMaxSumcheckRoundsHard) return fail("max sumcheck rounds");
+        if (lc.sumcheck.size() > kRCGkrMaxSumcheckRoundsHard) return fail("v7:max_sumcheck_rounds");
     }
     if (proof.round_seeds.size() > kRCGkrMaxRoundSeedsHard ||
         proof.round_roots.size() > kRCGkrMaxRoundSeedsHard) {
-        return fail("max round seeds/roots");
+        return fail("v7:max_round_seeds");
     }
-    if (proof.pow_bind != DerivePowBind(proof.claimed_digest)) return fail("pow_bind");
-    if (proof.table_multiplicity != 1) return fail("G3 table multiplicity");
+    if (proof.pow_bind != DerivePowBind(proof.claimed_digest)) return fail("v7:pow_bind");
+    if (proof.table_multiplicity != 1) return fail("v7:logup:table_multiplicity");
 
     // Round-seed / tile-tree / barrier consistency (skip DEPRECATED synth empty roots).
     if (!proof.round_roots.empty() || !proof.round_seeds.empty()) {
         if (proof.coupled) {
-            if (!ValidateRCCoupParams(proof.coup)) return fail("coup params");
-            if (proof.round_roots.size() != proof.coup.barriers) return fail("barrier_roots size");
-            if (proof.round_seeds.size() != proof.coup.barriers) return fail("barrier_seeds size");
+            if (!ValidateRCCoupParams(proof.coup)) return fail("coupled:coup_params");
+            if (proof.round_roots.size() != proof.coup.barriers) {
+                return fail("coupled:barrier_roots_size");
+            }
+            if (proof.round_seeds.size() != proof.coup.barriers) {
+                return fail("coupled:barrier_seeds_size");
+            }
             if (CoupledDigestFromBankAndBarriers(proof.bank_root, proof.round_roots) !=
                 proof.claimed_digest) {
-                return fail("coupled digest vs bank/barrier roots");
+                return fail("coupled:digest_from_bank_barriers");
             }
             for (uint32_t b = 0; b < proof.coup.barriers; ++b) {
                 const uint256 expect =
                     Sha256TaggedU32(kRCCoupBarrierTag, sizeof(kRCCoupBarrierTag) - 1,
                                     proof.episode_sigma, b);
-                if (expect != proof.round_seeds[b]) return fail("barrier_seed");
+                if (expect != proof.round_seeds[b]) return fail("coupled:barrier_seed");
             }
             // Canonical sequencing: per barrier, lobe GEMMs then Extract; no repeats/omissions.
+            // Page schedule MUST match RecomputeCoupledPuzzleReference (dc full-bank default).
             size_t idx = 0;
+            const uint32_t expect_m =
+                proof.coup.rows_per_lobe == 0 ? 1 : proof.coup.rows_per_lobe;
             for (uint32_t b = 0; b < proof.coup.barriers; ++b) {
                 for (uint32_t ell = 0; ell < proof.coup.lobes; ++ell) {
                     const auto expect_pages =
                         SelectCoupledBankPageIds(b, ell, proof.coup, proof.episode_sigma,
-                                                 /*full_bank_schedule=*/false);
+                                                 dc::kRCCoupFullBankScheduleEnabled);
                     for (uint32_t page_id : expect_pages) {
-                        if (idx >= proof.layers.size()) return fail("omitted barrier/layer");
+                        if (idx >= proof.layers.size()) return fail("coupled:omitted_page");
                         const auto& lc = proof.layers[idx++];
-                        if (lc.kind != RCGkrLayerKind::CoupLobeGemm) return fail("layer order");
-                        if (lc.round != b || lc.layer != ell) return fail("layer order");
-                        if (lc.page_id != page_id) return fail("page ID");
-                        if (lc.m != 1 || lc.n != proof.coup.lobe_width ||
-                            lc.k != proof.coup.lobe_width) {
-                            return fail("layer dims vs coup");
+                        if (lc.kind != RCGkrLayerKind::CoupLobeGemm) {
+                            return fail("coupled:layer_order");
                         }
-                        if (lc.table_multiplicity != 1) return fail("G3 layer multiplicity");
+                        if (lc.round != b || lc.layer != ell) return fail("coupled:layer_order");
+                        if (lc.page_id != page_id) return fail("coupled:page_id");
+                        if (lc.m != expect_m) return fail("coupled:wrong_m");
+                        if (lc.n != proof.coup.lobe_width || lc.k != proof.coup.lobe_width) {
+                            return fail("coupled:layer_dims");
+                        }
+                        if (lc.table_multiplicity != 1) {
+                            return fail("v7:logup:layer_multiplicity");
+                        }
                     }
                 }
-                if (idx >= proof.layers.size()) return fail("omitted barrier");
+                if (idx >= proof.layers.size()) return fail("coupled:omitted_barrier");
                 const auto& ex = proof.layers[idx++];
-                if (ex.kind != RCGkrLayerKind::CoupBarrierExtract) return fail("layer order");
-                if (ex.round != b) return fail("layer order");
+                if (ex.kind != RCGkrLayerKind::CoupBarrierExtract) {
+                    return fail("coupled:layer_order");
+                }
+                if (ex.round != b) return fail("coupled:layer_order");
                 if (ex.m != 1 || ex.n != proof.coup.StateBytes() || ex.k != 0) {
-                    return fail("layer dims vs coup");
+                    return fail("coupled:layer_dims");
                 }
             }
-            if (idx != proof.layers.size()) return fail("repeated layer");
+            if (idx != proof.layers.size()) return fail("coupled:duplicated_layer");
         } else {
             if (proof.round_roots.size() != proof.episode.rounds) return fail("round_roots size");
             if (proof.round_seeds.size() != proof.episode.rounds) return fail("round_seeds size");
@@ -1790,6 +1875,8 @@ size_t SerializeRCGkrProof(const RCGkrProof& proof, std::vector<unsigned char>& 
     AppendLE32(out, proof.coup.lobes);
     AppendLE32(out, proof.coup.lobe_width);
     AppendLE32(out, proof.coup.bank_pages);
+    AppendLE32(out, proof.coup.rows_per_lobe);
+    AppendLE32(out, proof.coup.pages_per_barrier_lobe);
     AppendBytes(out, proof.bank_root.data(), 32);
     AppendLE32(out, proof.table_multiplicity);
     AppendLE32(out, static_cast<uint32_t>(proof.round_seeds.size()));
@@ -1884,6 +1971,8 @@ std::optional<RCGkrProof> DeserializeRCGkrProof(const std::vector<unsigned char>
     if (!ReadLE32Checked(p, end, proof.coup.lobes)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.coup.lobe_width)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.coup.bank_pages)) return std::nullopt;
+    if (!ReadLE32Checked(p, end, proof.coup.rows_per_lobe)) return std::nullopt;
+    if (!ReadLE32Checked(p, end, proof.coup.pages_per_barrier_lobe)) return std::nullopt;
     if (!ReadBytesChecked(p, end, proof.bank_root.data(), 32)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.table_multiplicity)) return std::nullopt;
 

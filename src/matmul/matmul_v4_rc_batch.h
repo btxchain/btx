@@ -16,15 +16,25 @@
 
 // Miner-local Q-batch API for ENC_RC_COUPLED.
 //
-// Stacks Q independent nonce headers' lobe rows into one Q×W · W×W ExactGemm
-// per (barrier, lobe). Consensus digests remain one digest per header via the
-// same oracle math as MineCoupledPuzzle / RecomputeCoupledPuzzleReference —
-// batching is a throughput lever only (digests byte-identical).
+// Each Q candidate owns independent sigma / lobe state / barrier roots /
+// episode digest. Shared across the window: template-scoped bank pages only.
+// There is no slot-0 serialization — digests_out[i] is computed from
+// headers[i]'s private state alone and must match
+// RecomputeCoupledPuzzleReference(headers[i], ...) byte-for-byte.
+//
+// Optional ExactGemm stacking (Q×W · W×W) is a throughput lever when the page
+// schedule is shared; under full_bank_schedule each header still runs its own
+// GEMMs. Consensus digests are unchanged either way.
 //
 // Does not raise heights. Does not enable full-bank schedule / material
-// exchange / GKR arbiter.
+// exchange / GKR arbiter beyond RCCoupOptions defaults.
 
 namespace matmul::v4::rc {
+
+/** Soft harness ceiling for RunCoupledQSweep (measurement / tests). Not a
+ *  consensus constant; miner TryMineRCCoupledBatch still caps at
+ *  dc::kRCMinerBatchQMax. */
+inline constexpr uint32_t kRCCoupledQSweepHarnessMax = 4096;
 
 struct RCMinerBatchConfig {
     uint32_t Q{dc::kRCMinerBatchQDefault};
@@ -57,10 +67,25 @@ struct RCMinerBatchConfig {
  * do not share a bank template (RCBankTemplateHash / ComputeTemplateHash).
  * On success digests_out.size() == headers.size() and digests_out[i] equals
  * MineCoupledPuzzle(headers[i], ...) / RecomputeCoupledPuzzleReference byte-for-byte.
+ *
+ * Caps headers.size() at dc::kRCMinerBatchQMax (miner opt, not consensus).
  */
 [[nodiscard]] bool TryMineRCCoupledBatch(
     const std::vector<CBlockHeader>& headers, int32_t height, const RCCoupParams& params,
     std::vector<uint256>& digests_out, const RCMinerBatchConfig& cfg = {},
+    const matmul::v4::lt::ExactGemmBackend& gemm = {},
+    const RCCoupOptions& options = {});
+
+/**
+ * Harness / measurement Q-sweep: same independent-state oracle as
+ * TryMineRCCoupledBatch, but allows Q beyond dc::kRCMinerBatchQMax up to
+ * kRCCoupledQSweepHarnessMax (or q_cap if non-zero and smaller).
+ * Digests remain consensus-identical to solo RecomputeCoupledPuzzleReference.
+ * Never raises heights.
+ */
+[[nodiscard]] bool RunCoupledQSweep(
+    const std::vector<CBlockHeader>& headers, int32_t height, const RCCoupParams& params,
+    std::vector<uint256>& digests_out, uint32_t q_cap = 0,
     const matmul::v4::lt::ExactGemmBackend& gemm = {},
     const RCCoupOptions& options = {});
 

@@ -54,6 +54,14 @@ uint256 MakeSeed(uint8_t fill)
     return seed;
 }
 
+/** CI-safe coupled shape: full-bank schedule path with pages_per=1 (not production 12/24). */
+rc::RCCoupParams MakeGkrToyCoupParams()
+{
+    auto coup = rc::MakeToyRCCoupParams();
+    coup.pages_per_barrier_lobe = 1;
+    return coup;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(gkr_soundness_and_height_inert)
@@ -671,21 +679,28 @@ BOOST_AUTO_TEST_CASE(gkr_f3_arbiter_rejects_sigma_or_digest_over_target)
 BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_real_arithmetization)
 {
     // Real coupled arithmetization of ACTUAL coup params — not MakeToyRCEpisodeParams.
+    // Must match dc full-bank schedule (fleet flipped defaults; verify must agree).
+    // pages_per_barrier_lobe=1 keeps CI tractable while still exercising full-bank Select.
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCCoupledHeight,
                       std::numeric_limits<int32_t>::max());
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
 
     const auto header = MakeRCHeader(42);
-    const auto coup = rc::MakeToyRCCoupParams();
+    const auto coup = MakeGkrToyCoupParams();
     const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, /*height=*/0, coup);
     const auto pr = rc::ProveWinnerCoupled(header, /*height=*/0, coup, dig);
 
-    BOOST_REQUIRE(pr.timing.ok);
+    BOOST_REQUIRE_MESSAGE(pr.timing.ok, pr.timing.note);
     BOOST_CHECK(pr.proof.coupled);
     BOOST_CHECK_EQUAL(pr.proof.coup.barriers, coup.barriers);
+    BOOST_CHECK_EQUAL(pr.proof.coup.rows_per_lobe, coup.rows_per_lobe);
+    BOOST_CHECK_EQUAL(pr.proof.coup.pages_per_barrier_lobe, coup.pages_per_barrier_lobe);
     BOOST_CHECK(!pr.proof.layers.empty());
-    BOOST_CHECK(rc::VerifyWinnerProof(pr.proof));
+    BOOST_CHECK_EQUAL(pr.proof.layers.size(),
+                      rc::RCGkrExpectedCoupledLayerCount(coup, /*full_bank_schedule=*/true));
+    rc::RCGkrTiming vt;
+    BOOST_CHECK_MESSAGE(rc::VerifyWinnerProof(pr.proof, &vt), vt.note);
     BOOST_CHECK_EQUAL(pr.proof.claimed_digest, dig);
     // Must not be an episode stand-in proof.
     BOOST_CHECK_EQUAL(pr.proof.episode.rounds, 0u);
@@ -702,7 +717,7 @@ namespace {
 rc::RCGkrProveResult ProveHonestCoupled()
 {
     const auto header = MakeRCHeader(42);
-    const auto coup = rc::MakeToyRCCoupParams();
+    const auto coup = MakeGkrToyCoupParams();
     const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, 0, coup);
     return rc::ProveWinnerCoupled(header, 0, coup, dig);
 }
@@ -947,15 +962,189 @@ BOOST_AUTO_TEST_CASE(gkr_indep_malicious_fabricated_extract_io_accepted_gap_g3g4
 BOOST_AUTO_TEST_CASE(gkr_indep_malicious_unrelated_bank_pages_accepted_gap_coupled)
 {
     const auto header = MakeRCHeader(42);
-    const auto coup = rc::MakeToyRCCoupParams();
+    const auto coup = MakeGkrToyCoupParams();
     const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, 0, coup);
     auto pr = rc::ProveIndepMaliciousCoupledForTest(
         header, 0, coup, dig, rc::RCGkrIndepMaliciousKind::UnrelatedBankPages);
     BOOST_REQUIRE(pr.timing.ok);
     BOOST_CHECK(pr.proof.coupled);
+    // OPEN-GKR-BANK: scaffold has no PCS page openings under bank_root.
     BOOST_CHECK_MESSAGE(rc::VerifyWinnerProof(pr.proof),
                         rc::RCGkrIndepMaliciousGapNote(
                             rc::RCGkrIndepMaliciousKind::UnrelatedBankPages));
+}
+
+namespace {
+
+bool WhyStartsWith(const std::string& why, const char* prefix)
+{
+    return why.rfind(prefix, 0) == 0;
+}
+
+std::string VerifyWhy(const rc::RCGkrProof& proof)
+{
+    rc::RCGkrTiming t;
+    (void)rc::VerifyWinnerProof(proof, &t);
+    return t.note;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(gkr_fabricated_omitted_pages_rejects_named_relation)
+{
+    BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
+    const auto header = MakeRCHeader(42);
+    const auto coup = MakeGkrToyCoupParams();
+    const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, 0, coup);
+    auto pr = rc::ProveIndepMaliciousCoupledForTest(
+        header, 0, coup, dig, rc::RCGkrIndepMaliciousKind::OmittedPages);
+    BOOST_REQUIRE(!pr.proof.layers.empty());
+    const std::string why = VerifyWhy(pr.proof);
+    BOOST_CHECK_MESSAGE(!rc::VerifyWinnerProof(pr.proof), why);
+    BOOST_CHECK_MESSAGE(WhyStartsWith(why, "coupled:omitted_page") ||
+                            WhyStartsWith(why, "coupled:layer_order") ||
+                            WhyStartsWith(why, "coupled:omitted_barrier"),
+                        "expected coupled:omitted_* / layer_order, got: " + why);
+}
+
+BOOST_AUTO_TEST_CASE(gkr_fabricated_duplicated_pages_rejects_named_relation)
+{
+    const auto header = MakeRCHeader(42);
+    const auto coup = MakeGkrToyCoupParams();
+    const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, 0, coup);
+    auto pr = rc::ProveIndepMaliciousCoupledForTest(
+        header, 0, coup, dig, rc::RCGkrIndepMaliciousKind::DuplicatedPages);
+    BOOST_REQUIRE(!pr.proof.layers.empty());
+    const std::string why = VerifyWhy(pr.proof);
+    BOOST_CHECK_MESSAGE(!rc::VerifyWinnerProof(pr.proof), why);
+    BOOST_CHECK_MESSAGE(WhyStartsWith(why, "coupled:duplicated_layer") ||
+                            WhyStartsWith(why, "coupled:layer_order") ||
+                            WhyStartsWith(why, "coupled:page_id"),
+                        "expected coupled:duplicated_layer (or order/page_id), got: " + why);
+}
+
+BOOST_AUTO_TEST_CASE(gkr_fabricated_wrong_m_rejects_named_relation)
+{
+    const auto header = MakeRCHeader(42);
+    const auto coup = MakeGkrToyCoupParams();
+    const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, 0, coup);
+    auto pr = rc::ProveIndepMaliciousCoupledForTest(
+        header, 0, coup, dig, rc::RCGkrIndepMaliciousKind::WrongM);
+    BOOST_REQUIRE(!pr.proof.layers.empty());
+    const std::string why = VerifyWhy(pr.proof);
+    BOOST_CHECK_MESSAGE(!rc::VerifyWinnerProof(pr.proof), why);
+    BOOST_CHECK_MESSAGE(WhyStartsWith(why, "coupled:wrong_m"),
+                        "expected coupled:wrong_m, got: " + why);
+}
+
+BOOST_AUTO_TEST_CASE(gkr_fabricated_wrong_exchange_transcript_open_gkr_xchg)
+{
+    // PARKED OPEN-GKR-XCHG: mix/exchange is absorbed as dc constants into FS, but
+    // VerifyWinnerProof does not re-derive the mix column — fabricated Extract I/O
+    // under honest barrier roots still verifies (same class as G3/G4 vacuity).
+    const auto header = MakeRCHeader(42);
+    const auto coup = MakeGkrToyCoupParams();
+    const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, 0, coup);
+    auto pr = rc::ProveIndepMaliciousCoupledForTest(
+        header, 0, coup, dig, rc::RCGkrIndepMaliciousKind::WrongExchangeTranscript);
+    BOOST_REQUIRE(pr.timing.ok);
+    BOOST_CHECK_MESSAGE(rc::VerifyWinnerProof(pr.proof),
+                        rc::RCGkrIndepMaliciousGapNote(
+                            rc::RCGkrIndepMaliciousKind::WrongExchangeTranscript));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_fabricated_cross_version_replay_rejects_named_relation)
+{
+    const auto header = MakeRCHeader(42);
+    const auto coup = MakeGkrToyCoupParams();
+    const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, 0, coup);
+    auto pr = rc::ProveIndepMaliciousCoupledForTest(
+        header, 0, coup, dig, rc::RCGkrIndepMaliciousKind::CrossVersionReplay);
+    BOOST_REQUIRE(pr.timing.ok);
+    BOOST_CHECK_NE(pr.proof.version, rc::kRCGkrProofVersion);
+    const std::string why = VerifyWhy(pr.proof);
+    BOOST_CHECK_MESSAGE(!rc::VerifyWinnerProof(pr.proof), why);
+    BOOST_CHECK_MESSAGE(WhyStartsWith(why, "v7:version"),
+                        "expected v7:version, got: " + why);
+}
+
+BOOST_AUTO_TEST_CASE(gkr_arbiter_env_cannot_change_consensus_exactreplay_bytes)
+{
+    // Heights inert; toggling BTX_RC_GKR_ARBITER must not change ExactReplay digest
+    // or acceptance for the same header (consensus bytes independent of arbiter env).
+    BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCCoupledHeight,
+                      std::numeric_limits<int32_t>::max());
+
+    const auto header0 = MakeRCHeader(77);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    CBlockHeader header = header0;
+    header.matmul_digest = rc::RecomputeResidentCurriculumReference(header, params, 0);
+
+    unsetenv("BTX_RC_GKR_ARBITER");
+    unsetenv("BTX_RC_VERIFY_GKR");
+    BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
+    const auto off = rc::VerifyBoundedExactReplay(header, params, 0, nullptr);
+    BOOST_REQUIRE(off.ok);
+
+    setenv("BTX_RC_GKR_ARBITER", "1", 1);
+    BOOST_REQUIRE(rc::EnvRCGkrArbiterEnabled());
+    const auto on = rc::VerifyBoundedExactReplay(header, params, 0, nullptr);
+    BOOST_CHECK(on.ok);
+    BOOST_CHECK_EQUAL(on.digest, off.digest);
+    BOOST_CHECK_EQUAL(on.ok, off.ok);
+
+    // Dual-path without a GKR proof blob: still ExactReplay; ok/digest unchanged.
+    const auto dual_on = rc::VerifyRCWinnerOrExactReplay(header, params, 0, nullptr, nullptr);
+    BOOST_CHECK(dual_on.ok);
+    BOOST_CHECK_EQUAL(dual_on.replay.digest, off.digest);
+
+    unsetenv("BTX_RC_GKR_ARBITER");
+    BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
+    const auto dual_off = rc::VerifyRCWinnerOrExactReplay(header, params, 0, nullptr, nullptr);
+    BOOST_CHECK(dual_off.ok);
+    BOOST_CHECK_EQUAL(dual_off.replay.digest, off.digest);
+}
+
+BOOST_AUTO_TEST_CASE(gkr_v3_coup_fields_bound_in_transcript_and_wire)
+{
+    const auto header = MakeRCHeader(42);
+    const auto coup = MakeGkrToyCoupParams();
+    const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, 0, coup);
+    auto pr = rc::ProveWinnerCoupled(header, 0, coup, dig);
+    BOOST_REQUIRE(pr.timing.ok);
+    BOOST_REQUIRE(rc::VerifyWinnerProof(pr.proof));
+
+    // Mutating V3 shape fields must break FS transcript (not merely final digest).
+    auto bad_m = pr.proof;
+    bad_m.coup.rows_per_lobe = coup.rows_per_lobe + 1;
+    const std::string why_m = VerifyWhy(bad_m);
+    BOOST_CHECK(!rc::VerifyWinnerProof(bad_m));
+    BOOST_CHECK_MESSAGE(WhyStartsWith(why_m, "coupled:wrong_m") ||
+                            WhyStartsWith(why_m, "coupled:layer_dims") ||
+                            WhyStartsWith(why_m, "coupled:coup_params") ||
+                            why_m.find("transcript") != std::string::npos,
+                        "rows_per_lobe forge: " + why_m);
+
+    auto bad_p = pr.proof;
+    bad_p.coup.pages_per_barrier_lobe = coup.pages_per_barrier_lobe + 1;
+    // full-bank Select uses pages_per_barrier_lobe → omitted/duplicated layout fail.
+    const std::string why_p = VerifyWhy(bad_p);
+    BOOST_CHECK(!rc::VerifyWinnerProof(bad_p));
+    BOOST_CHECK_MESSAGE(WhyStartsWith(why_p, "coupled:omitted_page") ||
+                            WhyStartsWith(why_p, "coupled:duplicated_layer") ||
+                            WhyStartsWith(why_p, "coupled:page_id") ||
+                            WhyStartsWith(why_p, "coupled:layer_order") ||
+                            why_p.find("transcript") != std::string::npos,
+                        "pages_per_barrier_lobe forge: " + why_p);
+
+    std::vector<unsigned char> bytes;
+    BOOST_REQUIRE(rc::SerializeRCGkrProof(pr.proof, bytes) > 0);
+    auto round = rc::DeserializeRCGkrProof(bytes);
+    BOOST_REQUIRE(round.has_value());
+    BOOST_CHECK_EQUAL(round->coup.rows_per_lobe, coup.rows_per_lobe);
+    BOOST_CHECK_EQUAL(round->coup.pages_per_barrier_lobe, coup.pages_per_barrier_lobe);
+    BOOST_CHECK(rc::VerifyWinnerProof(*round));
 }
 
 BOOST_AUTO_TEST_CASE(gkr_deserialize_rejects_oversize_prefix)

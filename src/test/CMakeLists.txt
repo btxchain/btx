@@ -85,6 +85,7 @@ add_executable(test_btx
   matmul_v4_lt_tests.cpp
   matmul_v4_rc_tests.cpp
   matmul_v4_rc_sm120_native_capability_tests.cpp
+  matmul_v4_rc_sm100_isolation_tests.cpp
   matmul_v4_rc_accel_policy_tests.cpp
   matmul_v4_rc_coupled_tests.cpp
   matmul_v4_rc_packed_bank_tests.cpp

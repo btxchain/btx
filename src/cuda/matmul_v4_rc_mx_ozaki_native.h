@@ -43,6 +43,11 @@
 //     cuobjdump -sass <libbtx_matmul_backend.so> | rg -n 'QMMA|mma\.|E2M1|mxf8f6f4'
 //     ncu --devices 0 --set full ./src/test/test_btx -t rc_ozaki_mxfp4_native_gate
 // SM100/B200 is a separate latch (SM100_CUBLASLT); never infer from SM120.
+// SM100 path MUST refuse to compile/dispatch SM120 MMA:
+//   - Compile: __CUDA_ARCH_SPECIFIC__==1200 only (sm_100 slices compile OUT).
+//   - Runtime: LaunchOzakiMxfp4PanelsMma refuses DeviceLooksSm100; self-qual
+//     on SM100 only attempts cuBLASLt (never MMA). BTX_CUDA_SM100_NATIVE is a
+//     fail-closed packaging probe stub without B200 — see BTXCudaSm120a.cmake.
 
 namespace matmul_v4::cuda {
 
@@ -61,6 +66,14 @@ enum class RcOzakiMxfp4SelectedBackend : uint8_t {
  * advertising SM120_MMA.
  */
 [[nodiscard]] bool RcOzakiMxfp4Sm120aKernelLinked();
+
+/**
+ * Optional SM100/B200 native packaging latch (Agent E+I).
+ * Always false without BTX_CUDA_SM100_NATIVE + B200 probe evidence — the
+ * configure probe is fail-closed, so this stays false in this tree. Never
+ * implies SM120_MMA; never flips SelectedBackend by itself.
+ */
+[[nodiscard]] bool RcOzakiMxfp4Sm100NativeLinked();
 
 [[nodiscard]] bool IsRcOzakiCudaCompiled();
 

@@ -74,6 +74,8 @@ struct RCDcStatus {
     bool gkr_arbiter{false};
     bool cuda_episode_compiled{false};
     bool cuda_episode_ready{false};
+    /** Derived via DeriveRCPeakReady — never set from compiled alone. */
+    bool peak_ready{false};
     std::string arch_key;
     std::string deficit;
 };

@@ -44,15 +44,18 @@ inline constexpr bool kRCThreeAxisScheduleEnabled = true;
 
 /**
  * Epoch-0 / Class A base dials — LLM datacenter floor.
- * W_state matches MakeProductionRCCoupParams resident bank (768×8192² = 48 GiB)
- * so 32 GiB consumer cards cannot hold Resident and must Stream.
+ * W_state = TotalRCCoupExpandedBytes(MakeProductionRCCoupParams()) = 48 GiB
+ *   so 32 GiB consumer cards cannot hold Resident and must Stream.
+ * C_local = TotalRCCoupMacs(MakeProductionV3RCCoupParams()) = 12 TiMAC
+ *   (V3 work dial; see RCThreeAxisEpoch0FromCoupHelpers / tests).
+ * Hard cap W = TotalRCCoupExpandedBytes(MakeProductionV3RCCoupParams()) = 96 GiB.
  */
-inline constexpr uint64_t kRCAxisW0State = 48ull << 30;          // 48 GiB HBM bank
-inline constexpr uint64_t kRCAxisC0Local = 12ull << 40;          // ~12 Ti MAC (× full-bank pages)
+inline constexpr uint64_t kRCAxisW0State = 48ull << 30;          // 48 GiB HBM bank (V2 expanded)
+inline constexpr uint64_t kRCAxisC0Local = 12ull << 40;          // 12 Ti MAC (V3 TotalRCCoupMacs)
 inline constexpr uint64_t kRCAxisX0Exchange = 4ull << 30;        // 4 GiB fabric exchange
 
 /** Absolute hard caps. Growth pauses at the cap — never wraps. */
-inline constexpr uint64_t kRCAxisHardCapState = 96ull << 30;     // 96 GiB (B200-class ladder)
+inline constexpr uint64_t kRCAxisHardCapState = 96ull << 30;     // 96 GiB (V3 expanded)
 inline constexpr uint64_t kRCAxisHardCapLocal = 1ull << 46;      // MAC proxy ceiling
 inline constexpr uint64_t kRCAxisHardCapExchange = 16ull << 30;  // 16 GiB exchange budget
 
@@ -154,6 +157,22 @@ struct RCThreeAxisScale {
  */
 [[nodiscard]] RCEpisodeParams ConsensusRCThreeAxisParamsForHeight(
     int32_t height, const Consensus::Params& p, const CBlockIndex* tip = nullptr);
+
+/**
+ * Wire Stage-F W/C dials to coupled TotalRCCoup* helpers (runtime check).
+ * Epoch-0 pins:
+ *   W_state  == TotalRCCoupExpandedBytes(MakeProductionRCCoupParams())   // 48 GiB
+ *   C_local  == TotalRCCoupMacs(MakeProductionV3RCCoupParams())           // 12 TiMAC
+ *   hard W   == TotalRCCoupExpandedBytes(MakeProductionV3RCCoupParams())  // 96 GiB
+ * Returns false (reason set) if any pin drifts — never asserts.
+ */
+[[nodiscard]] bool CheckRCThreeAxisCoupledWire(std::string* reason = nullptr);
+
+/**
+ * Epoch-0 three-axis dials derived from TotalRCCoup* (same numeric pins as
+ * kRCAxisW0State / kRCAxisC0Local / kRCAxisX0Exchange when wire check passes).
+ */
+[[nodiscard]] RCThreeAxisScale RCThreeAxisEpoch0FromCoupHelpers();
 
 } // namespace matmul::v4::rc
 

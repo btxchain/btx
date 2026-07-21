@@ -78,6 +78,14 @@ public:
         return v;
     }
 
+    uint64_t NextU64()
+    {
+        // Two LE u32 halves — avoids needing 8-byte alignment in the XOF window.
+        const uint64_t lo = NextU32();
+        const uint64_t hi = NextU32();
+        return lo | (hi << 32);
+    }
+
 private:
     void Refill()
     {
@@ -151,10 +159,15 @@ uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
 }
 
 /**
- * C6 pattern 0 — hypercube butterfly (ascending strides), int64 sum/diff.
+ * C6 pattern 0 — hypercube butterfly (ascending strides), sum/diff.
  * Indices are XOR-relabeled by `mask` so the cut is nonce-dependent.
+ *
+ * u64_wrap=false: signed int64 arithmetic (V2 / M=1 digest-stable path).
+ * u64_wrap=true:  explicit uint64 two's-complement wrap (V3 M≥32) — defined
+ * modular ring, identical bit pattern to wrapping signed add on two's-complement
+ * hosts but without signed-overflow UB.
  */
-void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
+void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n, bool u64_wrap)
 {
     for (uint32_t stage = 0; (uint32_t{1} << stage) < n; ++stage) {
         const uint32_t stride = uint32_t{1} << stage;
@@ -163,10 +176,17 @@ void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
             if (i >= j) continue;
             const uint32_t pi = i ^ mask;
             const uint32_t pj = j ^ mask;
-            const int64_t a = s[pi];
-            const int64_t b = s[pj];
-            s[pi] = a + b;
-            s[pj] = a - b;
+            if (u64_wrap) {
+                const uint64_t a = static_cast<uint64_t>(s[pi]);
+                const uint64_t b = static_cast<uint64_t>(s[pj]);
+                s[pi] = static_cast<int64_t>(a + b);
+                s[pj] = static_cast<int64_t>(a - b);
+            } else {
+                const int64_t a = s[pi];
+                const int64_t b = s[pj];
+                s[pi] = a + b;
+                s[pj] = a - b;
+            }
         }
     }
 }
@@ -174,9 +194,9 @@ void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
 /**
  * C6 pattern 1 — reverse-stride reduce-scatter style fold (descending strides)
  * with a rotate-relabel so partitions that minimize pattern 0 do not minimize
- * this cut. Integer sums/diffs only.
+ * this cut. Integer sums/diffs only (see MixButterflyAscending for wrap policy).
  */
-void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
+void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n, bool u64_wrap)
 {
     // Entry guard: non-pow2 / tiny n is a reject path (ValidateRCCoupParams).
     if (n < 2 || (n & (n - 1)) != 0) return;
@@ -193,18 +213,26 @@ void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
             if (i >= j) continue;
             const uint32_t pi = rotl(i ^ mask, 3);
             const uint32_t pj = rotl(j ^ mask, 3);
-            const int64_t a = s[pi];
-            const int64_t b = s[pj];
-            // Distinct linear form from pattern 0 (still exact integer).
-            s[pi] = a + b;
-            s[pj] = b - a;
+            if (u64_wrap) {
+                const uint64_t a = static_cast<uint64_t>(s[pi]);
+                const uint64_t b = static_cast<uint64_t>(s[pj]);
+                s[pi] = static_cast<int64_t>(a + b);
+                s[pj] = static_cast<int64_t>(b - a);
+            } else {
+                const int64_t a = s[pi];
+                const int64_t b = s[pj];
+                // Distinct linear form from pattern 0 (still exact integer).
+                s[pi] = a + b;
+                s[pj] = b - a;
+            }
         }
     }
 }
 
 void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t barrier,
                       uint32_t n, bool material_exchange = false,
-                      uint32_t exchange_rows = dc::kRCCoupExchangeRowsDefault)
+                      uint32_t exchange_rows = dc::kRCCoupExchangeRowsDefault,
+                      bool u64_wrap = false)
 {
     // When material exchange is ON, absorb rows into the mix domain so fabric
     // pressure is digest-visible (NVLink-shaped thesis). Legacy path unchanged.
@@ -221,9 +249,93 @@ void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t ba
     const uint32_t mask = xof.NextU32() & (n - 1);
     const uint32_t pattern = barrier % kRCCoupMixPatterns;
     if (pattern == 0) {
-        MixButterflyAscending(s, mask, n);
+        MixButterflyAscending(s, mask, n, u64_wrap);
     } else {
-        MixButterflyDescending(s, mask, n);
+        MixButterflyDescending(s, mask, n, u64_wrap);
+    }
+}
+
+/** Overflow-safe XOR-fold of int64 lanes (uint64 view). */
+uint64_t AccXorFold(const std::vector<int64_t>& s)
+{
+    uint64_t fold = 0;
+    for (int64_t v : s) {
+        fold ^= static_cast<uint64_t>(v);
+    }
+    return fold;
+}
+
+/**
+ * Round seed = SHA256d(tag ‖ sigma ‖ barrier ‖ round ‖ 8-byte fold).
+ * Dependency-linked: fold binds prior accumulator state into the seed.
+ */
+uint256 ExchangeRoundSeed(const uint256& sigma, uint32_t barrier, uint32_t round,
+                          uint64_t fold)
+{
+    unsigned char buf[32 + 4 + 4 + 8];
+    std::memcpy(buf, sigma.data(), 32);
+    WriteLE32(buf + 32, barrier);
+    WriteLE32(buf + 36, round);
+    WriteLE64(buf + 40, fold);
+    std::vector<unsigned char> pre;
+    pre.reserve((sizeof(kRCCoupMaterialExchangeRoundsTag) - 1) + sizeof(buf));
+    pre.insert(pre.end(),
+               reinterpret_cast<const unsigned char*>(kRCCoupMaterialExchangeRoundsTag),
+               reinterpret_cast<const unsigned char*>(kRCCoupMaterialExchangeRoundsTag) +
+                   sizeof(kRCCoupMaterialExchangeRoundsTag) - 1);
+    pre.insert(pre.end(), buf, buf + sizeof(buf));
+    return Sha256dBytes(pre.data(), pre.size());
+}
+
+/** Bijective XOR of all lanes with an XOF keystream (uint64 view — no signed UB). */
+void ApplyXorKeystream(std::vector<int64_t>& s, ShaXof& xof)
+{
+    for (int64_t& lane : s) {
+        const uint64_t k = xof.NextU64();
+        lane = static_cast<int64_t>(static_cast<uint64_t>(lane) ^ k);
+    }
+}
+
+/** Fisher–Yates balanced permutation derived from an arbitrary seed. */
+void ApplyBalancedPermutationFromSeed(std::vector<int64_t>& s, const uint256& seed)
+{
+    const uint32_t n = static_cast<uint32_t>(s.size());
+    if (n == 0) return;
+    ShaXof xof(seed);
+    std::vector<uint32_t> pi(n);
+    for (uint32_t i = 0; i < n; ++i) pi[i] = i;
+    for (uint32_t i = n - 1; i > 0; --i) {
+        const uint32_t j = xof.NextU32() % (i + 1);
+        const uint32_t tmp = pi[i];
+        pi[i] = pi[j];
+        pi[j] = tmp;
+    }
+    std::vector<int64_t> tmp(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        tmp[pi[i]] = s[i];
+    }
+    s = std::move(tmp);
+}
+
+/**
+ * After ApplyAllToAllMix: when material_exchange && exchange_rounds>0, run that
+ * many dependency-linked XOR+permute rounds (V3). No-op when rounds==0.
+ */
+void ApplyMaterialExchangeRounds(std::vector<int64_t>& s, const uint256& sigma,
+                                 uint32_t barrier, const RCCoupOptions& options)
+{
+    if (!options.material_exchange || options.exchange_rounds == 0) return;
+    if (s.empty()) return;
+    for (uint32_t r = 0; r < options.exchange_rounds; ++r) {
+        const uint64_t fold = AccXorFold(s);
+        const uint256 seed = ExchangeRoundSeed(sigma, barrier, r, fold);
+        {
+            ShaXof xof(seed);
+            ApplyXorKeystream(s, xof);
+        }
+        // Fresh XOF from the same seed for the balanced permutation (independent
+        // of keystream consumption above).
+        ApplyBalancedPermutationFromSeed(s, seed);
     }
 }
 
@@ -385,7 +497,7 @@ DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, i
     const auto pi = DeriveCoupledBalancedPermutation(sigma, barrier, params);
     ApplyBalancedPermutation(acc, pi);
     ApplyAllToAllMix(acc, sigma, barrier, n, dc::RCCoupMaterialExchangeActive(),
-                     dc::kRCCoupExchangeRowsDefault);
+                     dc::kRCCoupExchangeRowsDefault, RCCoupUseMixU64Wrap(params));
 
     const uint256 extract_seed =
         Sha256TaggedU32U32(kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigma, barrier,
@@ -503,6 +615,8 @@ RCCoupParams MakeProductionV3RCCoupParams()
     // V3 hypothesis (heights INT32_MAX; TMTO audit may NO-GO):
     //   M=128, W=8192, pages=1536, pages/slot=24
     //   packed ≈ 51 GiB, int8 96 GiB, MACs = 12 TiMAC, coverage 1536
+    // Pair with MakeV3RCCoupOptions() (exchange_rounds=4 → 4 GiB digest-affecting
+    // material exchange). Params alone do not set exchange_rounds.
     RCCoupParams p;
     p.barriers = 8;
     p.lobes = 8;
@@ -513,9 +627,69 @@ RCCoupParams MakeProductionV3RCCoupParams()
     return p;
 }
 
+RCCoupOptions MakeV3RCCoupOptions()
+{
+    RCCoupOptions o;
+    o.material_exchange = true;
+    o.exchange_rows = 128;
+    o.exchange_rounds = 4;
+    return o;
+}
+
+RCCoupParams MakeMediumV3RCCoupParams()
+{
+    // Ratio-preserving CI toy for V3 (coverage + Mix u64-wrap path):
+    //   4×4×4 = 64 pages; M=32 ≥ 32 → uint64 wrap Mix; W=64 MX-aligned.
+    RCCoupParams p;
+    p.barriers = 4;
+    p.lobes = 4;
+    p.lobe_width = 64;
+    p.bank_pages = 64;
+    p.rows_per_lobe = 32;
+    p.pages_per_barrier_lobe = 4;
+    return p;
+}
+
 RCCoupParams ResolveRCCoupParams(const Consensus::Params& p)
 {
     return p.fMatMulRCCoupledUseToyDims ? MakeToyRCCoupParams() : MakeMediumRCCoupParams();
+}
+
+uint64_t MaxRCCoupPageSumAbsBound(const RCCoupParams& p)
+{
+    // |acc| ≤ P · W · 127² after P page-sums (int8±127 ExactGemm lanes).
+    if (p.pages_per_barrier_lobe == 0 || p.lobe_width == 0) return 0;
+    const uint64_t pw = static_cast<uint64_t>(p.pages_per_barrier_lobe) * p.lobe_width;
+    constexpr uint64_t kProd = static_cast<uint64_t>(kRCCoupInt8ProdAbsMax);
+    if (pw > std::numeric_limits<uint64_t>::max() / kProd) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return pw * kProd;
+}
+
+uint64_t MaxRCCoupPostMixAbsBound(const RCCoupParams& p)
+{
+    // Conservative: unnormalized butterfly grows by at most StateBytes() = n.
+    const uint64_t page_bound = MaxRCCoupPageSumAbsBound(p);
+    const uint64_t n = p.StateBytes();
+    if (page_bound == 0 || n == 0) return 0;
+    if (page_bound > std::numeric_limits<uint64_t>::max() / n) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return page_bound * n;
+}
+
+bool RCCoupPostMixFitsInt64(const RCCoupParams& p)
+{
+    return MaxRCCoupPostMixAbsBound(p) <=
+           static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+}
+
+bool RCCoupUseMixU64Wrap(const RCCoupParams& p, bool force_signed)
+{
+    if (force_signed) return false;
+    // V3 shapes (M≥32): explicit uint64 wrap. V2 M=1 stays signed int64.
+    return p.rows_per_lobe >= 32;
 }
 
 bool RCCoupBarrierLoopComplete(const RCCoupParams& p)
@@ -574,6 +748,25 @@ uint64_t TotalRCCoupExpandedBytes(const RCCoupParams& p)
         return std::numeric_limits<uint64_t>::max();
     }
     return static_cast<uint64_t>(p.bank_pages) * w2;
+}
+
+uint64_t TotalRCCoupExchangeBytes(const RCCoupParams& p, const RCCoupOptions& options)
+{
+    // exchange_rounds × barriers × StateBytes() × sizeof(int64_t) × 2 (R+W)
+    if (!options.material_exchange || options.exchange_rounds == 0) return 0;
+    if (p.barriers == 0 || p.StateBytes() == 0) return 0;
+    auto mul_sat = [](uint64_t a, uint64_t b) -> uint64_t {
+        if (a == 0 || b == 0) return 0;
+        if (a > std::numeric_limits<uint64_t>::max() / b) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        return a * b;
+    };
+    uint64_t acc = mul_sat(static_cast<uint64_t>(options.exchange_rounds),
+                           static_cast<uint64_t>(p.barriers));
+    acc = mul_sat(acc, static_cast<uint64_t>(p.StateBytes()));
+    acc = mul_sat(acc, static_cast<uint64_t>(sizeof(int64_t)));
+    return mul_sat(acc, 2ull);
 }
 
 uint64_t EstimateRCCoupStreamedPeakBytes(const RCCoupParams& p)
@@ -919,7 +1112,10 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
 
         // C3.c — exact integer all-to-all mix (≥2 nonce-relabeled patterns).
         // Material exchange (default ON) absorbs exchange_rows into the mix domain.
-        ApplyAllToAllMix(acc, sigma, b, n, options.material_exchange, options.exchange_rows);
+        ApplyAllToAllMix(acc, sigma, b, n, options.material_exchange, options.exchange_rows,
+                         RCCoupUseMixU64Wrap(params, options.force_signed_mix));
+        // V3: digest-affecting XOR+permute rounds (no-op when exchange_rounds==0).
+        ApplyMaterialExchangeRounds(acc, sigma, b, options);
 
         // C3.d — non-affine Extract (lookup-argument-shaped for Stage E).
         const uint256 extract_seed =
@@ -988,7 +1184,7 @@ DistEpisodeResult RunCoupledBarrierDistributed(const CBlockHeader& header, int32
 
 bool ApplyCoupledBarrierTail(const uint256& sigma, uint32_t barrier, const RCCoupParams& params,
                              std::vector<int64_t>& acc, std::vector<int8_t>& state_out,
-                             uint256* barrier_root_out)
+                             uint256* barrier_root_out, const RCCoupOptions& options)
 {
     if (!ValidateRCCoupParams(params) || barrier >= params.barriers) return false;
     const uint32_t n = params.StateBytes();
@@ -996,8 +1192,9 @@ bool ApplyCoupledBarrierTail(const uint256& sigma, uint32_t barrier, const RCCou
     const auto pi = DeriveCoupledBalancedPermutation(sigma, barrier, params);
     if (!IsBalancedPermutation(pi, n)) return false;
     ApplyBalancedPermutation(acc, pi);
-    ApplyAllToAllMix(acc, sigma, barrier, n, dc::RCCoupMaterialExchangeActive(),
-                     dc::kRCCoupExchangeRowsDefault);
+    ApplyAllToAllMix(acc, sigma, barrier, n, options.material_exchange, options.exchange_rows,
+                     RCCoupUseMixU64Wrap(params, options.force_signed_mix));
+    ApplyMaterialExchangeRounds(acc, sigma, barrier, options);
     const uint256 extract_seed =
         Sha256TaggedU32U32(kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigma, barrier,
                            /*unused=*/0);

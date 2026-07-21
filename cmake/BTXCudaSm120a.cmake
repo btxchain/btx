@@ -10,6 +10,16 @@
 # architecture-accelerated PTX (mma.sync kind::mxf8f6f4.block_scale) needs
 # an isolated object target with explicit nvcc -gencode flags instead.
 #
+# SM100 / B200 isolation (Agent E+I):
+#   * SM120_MMA (this file) and SM100_CUBLASLT are SEPARATE latches.
+#   * Never put 100a / 120a into BTX_CUDA_ARCHITECTURES.
+#   * Never compile SM120 block_scale MMA into an sm_100 fatbin slice —
+#     the MMA body is gated by __CUDA_ARCH_SPECIFIC__==1200 in
+#     matmul_v4_rc_mx_ozaki_native.cu (plain sm_100 / sm_120 compile OUT).
+#   * BTX_CUDA_SM100_NATIVE is an OPTIONAL fail-closed probe stub: without
+#     B200 silicon evidence it MUST remain OFF / probe FALSE. It does NOT
+#     replace or weaken BTX_CUDA_SM120_MXFP4_NATIVE packaging.
+#
 # Exact NVCC flags (verified against CUDA 13.x / NVIDIA docs; do NOT use
 # bare -arch=sm_120a alone — ptxas can still target plain sm_120):
 #   -gencode=arch=compute_120a,code=sm_120a
@@ -148,4 +158,17 @@ function(btx_cuda_add_sm120a_mxfp4_native_object PARENT_TARGET)
   message(STATUS
     "BTX sm_120a native MXFP4: compiling ${_tu_rel} with "
     "${BTX_CUDA_SM120A_GENCODE_FLAG} (isolated from BTX_CUDA_ARCHITECTURES)")
+endfunction()
+
+# Optional SM100 / B200 native probe stub (Agent E+I).
+# Fail-closed: without B200 / sm_100 MX evidence in this tree the probe is
+# ALWAYS FALSE. Enabling BTX_CUDA_SM100_NATIVE must not silently succeed or
+# advertise SM100_CUBLASLT / SM120_MMA. Does not touch SM120 packaging.
+function(btx_cuda_probe_sm100_native OUT_VAR)
+  set(${OUT_VAR} FALSE PARENT_SCOPE)
+  set(BTX_CUDA_SM100_PROBE_LOG
+    "BTX_CUDA_SM100_NATIVE probe stub: fail-closed (no B200 evidence in this tree). "
+    "SM100 stays on the separate SM100_CUBLASLT runtime latch; SM120_MMA remains "
+    "behind BTX_CUDA_SM120_MXFP4_NATIVE + sm_120a object only."
+    PARENT_SCOPE)
 endfunction()

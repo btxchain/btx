@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
 #include <matmul/matmul_v4_rc_scale_axes.h>
+#include <matmul/matmul_v4_rc_streamed_strategy.h>
 #include <matmul/matmul_v4_rc_transcript.h>
 
 #include <consensus/params.h>
@@ -295,6 +296,79 @@ BOOST_AUTO_TEST_CASE(rc_dc_q_batch_digest_identity)
     }
 }
 
+/** Q=1,8,32 independent-state parity vs solo RecomputeCoupledPuzzleReference. */
+BOOST_AUTO_TEST_CASE(rc_dc_q_batch_toy_parity_q1_q8_q32)
+{
+    const auto params = rc::MakeToyRCCoupParams();
+    for (uint32_t Q : {1u, 8u, 32u}) {
+        const CBlockHeader base = MakeCoupHeader(42000 + Q);
+        const auto window = rc::BuildRCCoupledMinerNonceWindow(base, Q);
+        std::vector<uint256> batch;
+        rc::RCMinerBatchConfig cfg;
+        cfg.Q = Q;
+        BOOST_REQUIRE_MESSAGE(rc::TryMineRCCoupledBatch(window, 0, params, batch, cfg),
+                              "TryMineRCCoupledBatch failed at Q=" << Q);
+        BOOST_REQUIRE_EQUAL(batch.size(), Q);
+        for (uint32_t i = 0; i < Q; ++i) {
+            const uint256 solo =
+                rc::RecomputeCoupledPuzzleReference(window[i], 0, params);
+            BOOST_CHECK_MESSAGE(batch[i] == solo,
+                                "independent Q-batch != solo at Q=" << Q << " i=" << i);
+            BOOST_CHECK(!batch[i].IsNull());
+        }
+        // Slot isolation: Q=1 re-mine of each header matches the multi-Q slot.
+        for (uint32_t i = 0; i < Q; ++i) {
+            std::vector<uint256> one;
+            cfg.Q = 1;
+            BOOST_REQUIRE(rc::TryMineRCCoupledBatch({window[i]}, 0, params, one, cfg));
+            BOOST_CHECK(one[0] == batch[i]);
+        }
+    }
+}
+
+/** Harness Q-sweep may exceed kRCMinerBatchQMax; digests still match solo. */
+BOOST_AUTO_TEST_CASE(rc_dc_coupled_q_sweep_beyond_miner_max)
+{
+    const auto params = rc::MakeToyRCCoupParams();
+    constexpr uint32_t Q = dc::kRCMinerBatchQMax + 1; // beyond miner cap
+    BOOST_REQUIRE(Q <= rc::kRCCoupledQSweepHarnessMax);
+    const CBlockHeader base = MakeCoupHeader(99001);
+    const auto window = rc::BuildRCCoupledMinerNonceWindow(base, Q);
+
+    // Legacy single-page schedule keeps CI wall time bounded for Q=257.
+    rc::RCCoupOptions opts;
+    opts.full_bank_schedule = false;
+    opts.material_exchange = false;
+
+    std::vector<uint256> rejected;
+    rc::RCMinerBatchConfig cfg;
+    cfg.Q = Q; // > kRCMinerBatchQMax → TryMine must refuse
+    BOOST_CHECK(!rc::TryMineRCCoupledBatch(window, 0, params, rejected, cfg, {}, opts));
+
+    std::vector<uint256> sweep;
+    BOOST_REQUIRE(rc::RunCoupledQSweep(window, 0, params, sweep, /*q_cap=*/0, {}, opts));
+    BOOST_REQUIRE_EQUAL(sweep.size(), Q);
+    for (uint32_t i : {0u, 1u, Q / 2, Q - 1}) {
+        const uint256 solo =
+            rc::RecomputeCoupledPuzzleReference(window[i], 0, params, opts);
+        BOOST_CHECK_MESSAGE(sweep[i] == solo, "Q-sweep != solo at i=" << i);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(rc_dc_streamed_strategy_enum_names)
+{
+    BOOST_CHECK_EQUAL(rc::RCStreamedStrategyName(rc::RCStreamedStrategy::Hot32GiBCache),
+                      "hot_32gib_cache");
+    BOOST_CHECK_EQUAL(rc::RCStreamedStrategyName(rc::RCStreamedStrategy::PinnedHost),
+                      "pinned_host");
+    BOOST_CHECK_EQUAL(rc::RCStreamedStrategyName(rc::RCStreamedStrategy::DoubleBuffer),
+                      "double_buffer");
+    BOOST_CHECK_EQUAL(rc::RCStreamedStrategyName(rc::RCStreamedStrategy::SeedRegen),
+                      "seed_regen");
+    BOOST_CHECK_EQUAL(rc::RCStreamedStrategyName(rc::RCStreamedStrategy::MultiGpuShard),
+                      "multi_gpu_shard");
+}
+
 /** Miner SolveMatMulV4RCCoupled path: BuildRCCoupledMinerNonceWindow + Q>1 batch
  *  must match per-header MineCoupledPuzzle (CPU ExactGemm). */
 BOOST_AUTO_TEST_CASE(rc_dc_miner_q_window_batch_matches_coupled_puzzle)
@@ -550,7 +624,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_stub)
     BOOST_CHECK_GE(prov.graph_replay_count, params.barriers);
     BOOST_CHECK(!prov.peak_ready);
     BOOST_CHECK(!prov.device_digest);
-    BOOST_CHECK_EQUAL(prov.permute_extract_label, "parked_host_barrier_tail");
+    BOOST_CHECK_EQUAL(prov.permute_extract_label, "device_barrier_tail");
     BOOST_CHECK(prov.gemm_path_label.find("portable") != std::string::npos ||
                 prov.gemm_path_label.find("wsB") != std::string::npos);
 
@@ -605,15 +679,19 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_nonce_window_and_probe)
 {
     const auto probe = rc::ProbeRCCudaEpisodeResident();
     BOOST_CHECK(probe.host_bridge_removed);
-    BOOST_CHECK(probe.permute_extract_parked);
     BOOST_CHECK(!probe.peak_ready);
     BOOST_CHECK(!probe.device_digest);
 
     if (!matmul_v4::cuda::IsRcEpisodeCudaCompiled()) {
         BOOST_CHECK(!probe.cuda_episode_compiled);
+        BOOST_CHECK(probe.permute_extract_parked);
         BOOST_CHECK_EQUAL(probe.parked_reason, "graph_unavailable:not_wired");
         return;
     }
+
+    // CUDA TU: device_barrier_tail unparks permute/mix/Extract; digest still host.
+    BOOST_CHECK(!probe.permute_extract_parked);
+    BOOST_CHECK(probe.detail.find("device_barrier_tail") != std::string::npos);
 
     matmul_v4::cuda::RCCudaEpisodeContext ctx;
     std::string err;
@@ -628,10 +706,10 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_nonce_window_and_probe)
     BOOST_REQUIRE_MESSAGE(ctx.RunNonceWindow(window, 0, digests, &err), err);
     BOOST_REQUIRE_EQUAL(digests.size(), Q);
     BOOST_CHECK(ctx.Provenance().qstar_device_batched);
+    BOOST_CHECK(ctx.Provenance().independent_q_slots);
     BOOST_CHECK(ctx.Provenance().per_nonce_sync_absent);
     BOOST_CHECK_EQUAL(ctx.Provenance().digest_batch_slots, Q);
-    // Capture once across the window.
-    BOOST_CHECK_EQUAL(ctx.Provenance().graph_capture_count, 1);
+    // Window path uses CPU independent Q-batch (no graph capture required).
     for (uint32_t i = 0; i < Q; ++i) {
         const uint256 cpu = rc::RecomputeCoupledPuzzleReference(window[i], 0, params);
         BOOST_CHECK_MESSAGE(digests[i] == cpu, "window digest mismatch at i=" << i);

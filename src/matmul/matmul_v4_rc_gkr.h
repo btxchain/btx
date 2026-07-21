@@ -476,6 +476,16 @@ enum class RCGkrIndepMaliciousKind : uint32_t {
     FabricatedExtractIO = 5,
     /** Coupled: lobe B matrix unrelated to bank page under bank_root. */
     UnrelatedBankPages = 6,
+    /** Coupled: omit a scheduled page GEMM from the layer list. */
+    OmittedPages = 7,
+    /** Coupled: duplicate a scheduled page GEMM in the layer list. */
+    DuplicatedPages = 8,
+    /** Coupled: layer.m ≠ coup.rows_per_lobe (Wrong M). */
+    WrongM = 9,
+    /** Coupled: witness as if exchange/mix domain differed (scaffold gap). */
+    WrongExchangeTranscript = 10,
+    /** Replay a proof under a different proof.version. */
+    CrossVersionReplay = 11,
 };
 
 [[nodiscard]] const char* RCGkrIndepMaliciousGapNote(RCGkrIndepMaliciousKind kind);

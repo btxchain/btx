@@ -6,11 +6,13 @@
 #include <matmul/matmul_v4_rc_datacenter.h>
 #include <matmul/matmul_v4_rc_packed_bank.h>
 #include <matmul/matmul_v4_rc_peak_ready.h>
+#include <matmul/matmul_v4_rc_scale_axes.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(matmul_v4_rc_packed_bank_tests, BasicTestingSetup)
@@ -74,6 +76,35 @@ BOOST_AUTO_TEST_CASE(rc_peak_ready_never_manual_true)
     BOOST_CHECK(!st.peak_ready);
     BOOST_CHECK(!st.production_qualified);
     BOOST_CHECK(!st.deficit.empty());
+}
+
+BOOST_AUTO_TEST_CASE(rc_scale_axes_wired_to_total_rccoup_helpers)
+{
+    namespace rc = matmul::v4::rc;
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(rc::CheckRCThreeAxisCoupledWire(&reason), reason);
+    const auto epoch0 = rc::RCThreeAxisEpoch0FromCoupHelpers();
+    BOOST_CHECK_EQUAL(epoch0.W_state, rc::kRCAxisW0State);
+    BOOST_CHECK_EQUAL(epoch0.C_local, rc::kRCAxisC0Local);
+    BOOST_CHECK_EQUAL(epoch0.W_state,
+                      rc::TotalRCCoupExpandedBytes(rc::MakeProductionRCCoupParams()));
+    BOOST_CHECK_EQUAL(epoch0.C_local, rc::TotalRCCoupMacs(rc::MakeProductionV3RCCoupParams()));
+    BOOST_CHECK_EQUAL(rc::kRCAxisHardCapState,
+                      rc::TotalRCCoupExpandedBytes(rc::MakeProductionV3RCCoupParams()));
+    BOOST_CHECK_EQUAL(rc::TotalRCCoupPackedBytes(rc::MakeProductionV3RCCoupParams()),
+                      rc::PackedBytesForBank(1536, 8192));
+}
+
+BOOST_AUTO_TEST_CASE(rc_medium_v3_packed_macs_scale)
+{
+    namespace rc = matmul::v4::rc;
+    const auto med = rc::MakeMediumV3RCCoupParams();
+    BOOST_CHECK_EQUAL(rc::TotalRCCoupExpandedBytes(med),
+                      64ull * 64ull * 64ull);
+    BOOST_CHECK_EQUAL(rc::TotalRCCoupPackedBytes(med),
+                      (64ull * 64ull * 64ull * 17ull) / 32ull);
+    BOOST_CHECK_EQUAL(rc::TotalRCCoupMacs(med),
+                      32ull * 4ull * 4ull * 4ull * 64ull * 64ull);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
