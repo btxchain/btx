@@ -446,6 +446,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_lt.cpp
   matmul/matmul_v4_lt_mx_exact.cpp
   matmul/matmul_v4_rc.cpp
+  matmul/matmul_v4_rc_accel_policy.cpp
   matmul/matmul_v4_rc_coupled.cpp
   matmul/matmul_v4_rc_coupled_device.cpp
   matmul/matmul_v4_rc_batch.cpp
@@ -899,6 +900,58 @@ if(BTX_ENABLE_HIP)
     target_include_directories(btx_hip_device PRIVATE "${BTX_HIPBLASLT_INCLUDE_DIR}")
     target_link_libraries(btx_hip_device PRIVATE "${BTX_HIPBLASLT_LIBRARY}")
     message(STATUS "BTX HIP LT ExactGemm: hipBLASLt linked (MFMA path)")
+    # MXFP4/MXFP8 enums are int constants, not macros — do not use defined(ENUM).
+    # Mirror CUDA's CUDART_VERSION gate: probe whether the installed hipBLASLt
+    # headers expose HIP_R_4F_E2M1 + VEC32 UE8M0 scale, then set BTX_HIP_MXFP4_TYPES.
+    include(CheckCXXSourceCompiles)
+    set(_btx_hip_mx_saved_includes "${CMAKE_REQUIRED_INCLUDES}")
+    set(_btx_hip_mx_saved_flags "${CMAKE_REQUIRED_FLAGS}")
+    set(CMAKE_REQUIRED_INCLUDES "${BTX_HIPBLASLT_INCLUDE_DIR}")
+    # Prefer HIP language flags when available; otherwise plain CXX with includes.
+    check_cxx_source_compiles("
+      #include <hipblaslt/hipblaslt.h>
+      int main() {
+        hipDataType a = HIP_R_4F_E2M1;
+        hipblasLtMatmulMatrixScale_t s = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+        (void)a; (void)s;
+        return 0;
+      }
+    " BTX_HIPBLASLT_HAS_MXFP4_TYPES)
+    set(CMAKE_REQUIRED_INCLUDES "${_btx_hip_mx_saved_includes}")
+    set(CMAKE_REQUIRED_FLAGS "${_btx_hip_mx_saved_flags}")
+    if(BTX_HIPBLASLT_HAS_MXFP4_TYPES)
+      target_compile_definitions(btx_hip_device PRIVATE BTX_HIP_MXFP4_TYPES=1)
+      message(STATUS "BTX HIP LT native MX: MXFP4 types present (BTX_HIP_MXFP4_TYPES=1)")
+      check_cxx_source_compiles("
+        #include <hipblaslt/hipblaslt.h>
+        int main() {
+          hipDataType a = HIP_R_8F_E4M3;
+          hipblasLtMatmulMatrixScale_t s = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+          (void)a; (void)s;
+          return 0;
+        }
+      " BTX_HIPBLASLT_HAS_MXFP8_TYPES)
+      if(BTX_HIPBLASLT_HAS_MXFP8_TYPES)
+        target_compile_definitions(btx_hip_device PRIVATE BTX_HIP_MXFP8_TYPES=1)
+      endif()
+      # Optional BLK32 EXT scale — probe separately; absence is fine.
+      check_cxx_source_compiles("
+        #include <hipblaslt/hipblaslt.h>
+        int main() {
+          hipblasLtMatmulMatrixScale_t s =
+              HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT;
+          (void)s;
+          return 0;
+        }
+      " BTX_HIPBLASLT_HAS_MXFP8_SCALE_BLK32_EXT)
+      if(BTX_HIPBLASLT_HAS_MXFP8_SCALE_BLK32_EXT)
+        target_compile_definitions(btx_hip_device PRIVATE BTX_HIP_MXFP8_SCALE_BLK32_EXT=1)
+      endif()
+    else()
+      message(STATUS
+        "BTX HIP LT native MX: toolkit lacks MXFP4 enums — fail-closed "
+        "(no BTX_HIP_MXFP4_TYPES; #if defined(ENUM) is never used)")
+    endif()
   endif()
   find_path(BTX_ROCBLAS_INCLUDE_DIR rocblas/rocblas.h
     HINTS ENV ROCM_PATH ENV HIP_PATH /usr /opt/rocm

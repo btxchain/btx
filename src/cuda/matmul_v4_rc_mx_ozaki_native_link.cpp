@@ -51,6 +51,11 @@ std::string RcOzakiCudaMxfp4Backend()
     return {};
 }
 
+std::string RcOzakiCudaMxfp4Deficit()
+{
+    return "rc_ozaki_mxfp4_cuda_tu_not_linked";
+}
+
 bool SelfQualifyRcOzakiCudaMxfp4Once()
 {
     return false;

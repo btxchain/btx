@@ -63,18 +63,17 @@ RCCoupledDeviceProbe ProbeRCCoupledDevice()
     }
 #if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
     st.used_tensor_imma_or_mfma = matmul_v4::cuda::LtLastS8S8UsedImma();
-    if (st.used_tensor_imma_or_mfma) st.provider = "cuda_imma";
-    else st.provider = "cuda_or_device";
+    // Honesty: never report cuda_imma / mfma / tensor when the path was ALU.
+    st.provider = st.used_tensor_imma_or_mfma ? "cuda_imma" : "cuda_alu";
 #elif defined(BTX_ENABLE_HIP)
     st.used_tensor_imma_or_mfma = matmul_v4::hip::LtLastS8S8UsedMfma();
-    if (st.used_tensor_imma_or_mfma) st.provider = "hip_mfma";
-    else st.provider = "hip_or_device";
+    st.provider = st.used_tensor_imma_or_mfma ? "hip_mfma" : "hip_alu";
 #elif defined(BTX_ENABLE_METAL)
     st.used_tensor_imma_or_mfma = matmul_v4::metal::LtLastS8S8UsedTensorOps();
-    if (st.used_tensor_imma_or_mfma) st.provider = "metal_tensor_ops";
-    else st.provider = "metal_or_device";
+    st.provider = st.used_tensor_imma_or_mfma ? "metal_tensor_ops" : "metal_alu";
 #else
-    st.provider = "resolved_device_stub_or_alu";
+    st.used_tensor_imma_or_mfma = false;
+    st.provider = "alu_or_stub";
 #endif
     st.detail = "ok";
     return st;

@@ -118,7 +118,8 @@ bool TryDeviceMxGemmPackedStub(const RCMxPacked& /*left*/, const RCMxPacked& /*r
                                uint32_t /*rows*/, uint32_t /*inner*/, uint32_t /*cols*/,
                                std::vector<int32_t>& out)
 {
-    // P1.2: no native block-scaled MX episode kernel. Fail closed.
+    // Fail-closed stub: no native block-scaled MX episode kernel. Cleared
+    // output + false ⇒ callers must not treat this as tensor-device success.
     out.clear();
     return false;
 }
@@ -164,18 +165,17 @@ RCPhase2ExactGemmDeviceProbe ProbeRCPhase2ExactGemmDevice()
     }
 #if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
     st.used_tensor_imma_or_mfma = matmul_v4::cuda::LtLastS8S8UsedImma();
-    if (st.used_tensor_imma_or_mfma) st.provider = "cuda_imma";
-    else st.provider = "cuda_or_device";
+    // Honesty: only claim cuda_imma when IMMA actually ran; else alu/stub.
+    st.provider = st.used_tensor_imma_or_mfma ? "cuda_imma" : "cuda_alu";
 #elif defined(BTX_ENABLE_HIP)
     st.used_tensor_imma_or_mfma = matmul_v4::hip::LtLastS8S8UsedMfma();
-    if (st.used_tensor_imma_or_mfma) st.provider = "hip_mfma";
-    else st.provider = "hip_or_device";
+    st.provider = st.used_tensor_imma_or_mfma ? "hip_mfma" : "hip_alu";
 #elif defined(BTX_ENABLE_METAL)
     st.used_tensor_imma_or_mfma = matmul_v4::metal::LtLastS8S8UsedTensorOps();
-    if (st.used_tensor_imma_or_mfma) st.provider = "metal_tensor_ops";
-    else st.provider = "metal_or_device";
+    st.provider = st.used_tensor_imma_or_mfma ? "metal_tensor_ops" : "metal_alu";
 #else
-    st.provider = "resolved_device_stub_or_alu";
+    st.used_tensor_imma_or_mfma = false;
+    st.provider = "alu_or_stub";
 #endif
     st.detail = "ok";
     return st;

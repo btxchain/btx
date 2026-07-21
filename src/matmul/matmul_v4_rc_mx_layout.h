@@ -98,9 +98,12 @@ struct RCMxPacked {
                                                   uint32_t d_model);
 
 /**
- * Stub entry for a future device MX GEMM on packed operands.
- * Always returns false in P1.2 (no native_* claim). Keeps the API surface so
- * Phase-1 S·V / Phase-2 bwd / wgrad can call a single hook later.
+ * Fail-closed stub — NOT a device/tensor MX GEMM success path.
+ * Always returns false and clears `out` (P1.2: no native block-scaled MX
+ * episode kernel). Callers MUST treat false as "no tensor result" and fall
+ * back to the CPU oracle; never interpret a call as cuda_imma / mfma success.
+ * Name retains *Stub so the API surface stays obvious until a real device
+ * hook lands.
  */
 [[nodiscard]] bool TryDeviceMxGemmPackedStub(const RCMxPacked& left, const RCMxPacked& right,
                                              uint32_t rows, uint32_t inner, uint32_t cols,

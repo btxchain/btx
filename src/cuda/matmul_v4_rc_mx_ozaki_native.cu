@@ -363,8 +363,9 @@ __global__ void rc_ozaki_mxfp4_panel_gemm(const uint8_t* a_e2m1, const uint8_t* 
 }
 
 /**
- * Native MXFP4 Ozaki panels. CRITICAL: must not call LaunchGemmS8S8.
- * Backend label: mxfp4_blockscaled_device.
+ * Scalar-decode MXFP4 Ozaki panels (E2M1 nibble decode + FP32 accumulate).
+ * Exactness/reference accelerator only — NEVER flips native MXFP4 latches.
+ * CRITICAL: must not call LaunchGemmS8S8. Backend marker includes scalar-decode.
  */
 [[nodiscard]] bool LaunchOzakiMxfp4Panels(const std::vector<int8_t>& left,
                                           const std::vector<int8_t>& right, uint32_t rows,
@@ -574,6 +575,8 @@ bool TryLaunchRcOzakiExactPanelsGemmS8S8Int64(const std::vector<int8_t>& left,
 bool IsRcOzakiCudaMxfp4Qualified()
 {
     std::lock_guard<std::mutex> lock(g_ozaki_mu);
+    // True only after a real CUTLASS/cuBLASLt tensor path quals — never from
+    // the scalar-decode E2M1+FP32 kernel (BMX4C C6 honesty).
     return g_qual_sm120 || g_qual_sm100;
 }
 
@@ -589,6 +592,12 @@ std::string RcOzakiCudaMxfp4Backend()
     return g_mx_backend;
 }
 
+std::string RcOzakiCudaMxfp4Deficit()
+{
+    std::lock_guard<std::mutex> lock(g_ozaki_mu);
+    return g_mx_deficit;
+}
+
 bool SelfQualifyRcOzakiCudaMxfp4Once()
 {
     {
@@ -598,60 +607,54 @@ bool SelfQualifyRcOzakiCudaMxfp4Once()
 
     cudaDeviceProp prop{};
     std::string err;
-    bool ok = false;
-    bool is_sm120 = false;
-    bool is_sm100 = false;
+    bool scalar_ok = false;
     {
         int device = 0;
-        if (cudaGetDevice(&device) == cudaSuccess &&
-            cudaGetDeviceProperties(&prop, device) == cudaSuccess) {
-            is_sm120 = DeviceLooksSm120(prop.major, prop.minor);
-            is_sm100 = DeviceLooksSm100(prop.major, prop.minor);
-        } else {
+        if (cudaGetDevice(&device) != cudaSuccess ||
+            cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
             err = "cudaGetDeviceProperties failed for MXFP4 self-qual";
         }
     }
 
-    // Qual vectors: K edges around ExactGemm chunk + thin multi-seed / max M11.
+    // Scalar-decode exactness probe (reference accelerator). Matches int64 oracle
+    // but is NOT a tensor-core path — must never flip g_qual_sm120 / g_qual_sm100.
     if (err.empty()) {
-        ok = Mxfp4ShapeMatches(4, 8, 4, /*seed=*/1, /*max=*/false, 0, &err) &&
-             Mxfp4ShapeMatches(4, 4095, 4, /*seed=*/2, /*max=*/true, /*e=*/3, &err) &&
-             Mxfp4ShapeMatches(4, 4096, 4, /*seed=*/3, /*max=*/true, /*e=*/3, &err) &&
-             Mxfp4ShapeMatches(4, 4097, 4, /*seed=*/5, /*max=*/true, /*e=*/2, &err) &&
-             Mxfp4ShapeMatches(4, 8192, 4, /*seed=*/7, /*max=*/false, 0, &err) &&
-             Mxfp4ShapeMatches(8, 4096, 8, /*seed=*/11, /*max=*/true, /*e=*/1, &err) &&
-             Mxfp4ShapeMatches(4, 16384, 4, /*seed=*/13, /*max=*/false, 0, &err); // thin prod-K
+        scalar_ok = Mxfp4ShapeMatches(4, 8, 4, /*seed=*/1, /*max=*/false, 0, &err) &&
+                    Mxfp4ShapeMatches(4, 4095, 4, /*seed=*/2, /*max=*/true, /*e=*/3, &err) &&
+                    Mxfp4ShapeMatches(4, 4096, 4, /*seed=*/3, /*max=*/true, /*e=*/3, &err) &&
+                    Mxfp4ShapeMatches(4, 4097, 4, /*seed=*/5, /*max=*/true, /*e=*/2, &err) &&
+                    Mxfp4ShapeMatches(4, 8192, 4, /*seed=*/7, /*max=*/false, 0, &err) &&
+                    Mxfp4ShapeMatches(8, 4096, 8, /*seed=*/11, /*max=*/true, /*e=*/1, &err) &&
+                    Mxfp4ShapeMatches(4, 16384, 4, /*seed=*/13, /*max=*/false, 0, &err);
     }
+
+    // Real CUTLASS/cuBLASLt RC Ozaki panel tensor path does not exist yet.
+    // When one lands, qualify here on separate sm_120 / sm_100 latches only after
+    // that TC path matches the int64 oracle — never from scalar-decode.
+    const bool is_sm120 = DeviceLooksSm120(prop.major, prop.minor);
+    const bool is_sm100 = DeviceLooksSm100(prop.major, prop.minor);
+    const bool tensor_ok = false; // future: real TC launch && (is_sm120 || is_sm100)
+    (void)is_sm120;
+    (void)is_sm100;
 
     std::lock_guard<std::mutex> lock(g_ozaki_mu);
     if (!g_mx_ran) {
         g_mx_ran = true;
         g_mx_arch_key = FormatCudaArchKey(prop.major, prop.minor);
-        g_mx_deficit = ok ? std::string{} : (err.empty() ? "mxfp4_selfqual_failed" : err);
-        if (ok) {
-            g_mx_backend = "mxfp4_blockscaled_device";
-            // Arch-specific latches: B200 (sm_100) must not inherit sm_120 qual.
-            g_qual_sm120 = is_sm120;
-            g_qual_sm100 = is_sm100;
-            // Non-Blackwell: still admit the honest device kernel if oracle matched
-            // (datatype path, not TC peak). Record under the live arch_key.
-            if (!is_sm120 && !is_sm100) {
-                // Keep qualified via arch_key backend but leave sm latches false;
-                // host IsRcOzakiCudaMxfp4Qualified requires a latch — set the
-                // nearer class false and use a soft admit via both false + ok?
-                // Spec: separate g_qual_sm120 / g_qual_sm100. For other arches that
-                // still ran the device kernel successfully, set neither and fail
-                // IsRcOzakiCudaMxfp4Qualified unless we add g_qual_other.
-                // Prefer: qualify only on sm_10x/sm_12x (Blackwell class).
-                g_mx_backend.clear();
-                g_mx_deficit = "rc_ozaki_mxfp4_requires_sm100_or_sm120_arch_latch";
-                ok = false;
-            }
-        }
-        if (!ok) {
-            g_qual_sm120 = false;
-            g_qual_sm100 = false;
+        g_qual_sm120 = false;
+        g_qual_sm100 = false;
+        if (tensor_ok) {
+            // Reserved: future mxfp4_cutlass_sm120 / mxfp4_cutlass_sm100 admit.
             g_mx_backend.clear();
+            g_mx_deficit.clear();
+        } else if (scalar_ok) {
+            // BMX4C honesty: distinct scalar-decode marker; native stays false.
+            g_mx_backend = "mxfp4_blockscaled_device_scalar-decode";
+            g_mx_deficit =
+                "rc_ozaki_mxfp4_scalar-decode_exact_but_not_native_tensor";
+        } else {
+            g_mx_backend.clear();
+            g_mx_deficit = err.empty() ? "mxfp4_selfqual_failed" : err;
         }
     }
     return g_qual_sm120 || g_qual_sm100;
@@ -662,13 +665,25 @@ bool TryLaunchRcOzakiMxfp4GemmS8S8Int64(const std::vector<int8_t>& left,
                                        uint32_t inner, uint32_t cols, std::vector<int64_t>& out,
                                        std::string* error)
 {
-    // Honesty: never fall back to LaunchGemmS8S8 / ExactGemm INT8 here.
-    if (!LaunchOzakiMxfp4Panels(left, right, rows, inner, cols, out, error)) {
+    out.clear();
+    // Native claim only: real CUTLASS/cuBLASLt TC. Scalar-decode must not serve
+    // this entry (kept for self-qual / reference via LaunchOzakiMxfp4Panels).
+    if (!IsRcOzakiCudaMxfp4Qualified()) {
+        if (error) {
+            *error = "RC Ozaki MXFP4 native tensor path not qualified "
+                     "(scalar-decode is not native)";
+        }
         return false;
     }
-    std::lock_guard<std::mutex> lock(g_ozaki_mu);
-    if (g_mx_backend.empty()) g_mx_backend = "mxfp4_blockscaled_device";
-    return true;
+    (void)left;
+    (void)right;
+    (void)rows;
+    (void)inner;
+    (void)cols;
+    if (error) {
+        *error = "RC Ozaki MXFP4 CUTLASS/cuBLASLt tensor path not implemented";
+    }
+    return false;
 }
 
 void ResetRcOzakiCudaQualForTest()

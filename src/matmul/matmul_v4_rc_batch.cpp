@@ -258,10 +258,10 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
     if (headers.size() > dc::kRCMinerBatchQMax) return false;
     if (!HeadersShareBankTemplate(headers)) return false;
 
-    // Full-bank / material-exchange remain OFF on the consensus-shaped path;
-    // batching must not silently flip digest-breaking flags.
+    // Full-bank remains OFF unless the caller set RCCoupOptions::full_bank_schedule
+    // explicitly (harness only). Never getenv / Active() for digests.
     RCCoupOptions opts = options;
-    if (!opts.full_bank_schedule && !dc::RCCoupFullBankScheduleActive()) {
+    if (!opts.full_bank_schedule) {
         opts.full_bank_schedule = false;
     }
 
@@ -298,8 +298,8 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
 
         // Per lobe: stack Q rows → ExactGemm Q×W · W×W → split.
         std::vector<std::vector<int64_t>> accs(Q, std::vector<int64_t>(n, 0));
-        const bool full_sched =
-            opts.full_bank_schedule || dc::RCCoupFullBankScheduleActive();
+        // Digest-affecting schedule ONLY from explicit opts (never getenv / Active()).
+        const bool full_sched = opts.full_bank_schedule;
 
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
             // Page schedule is sigma-dependent under full_bank_schedule; when

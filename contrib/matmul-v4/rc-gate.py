@@ -149,20 +149,30 @@ def load_reports(paths: list[str]) -> list[dict[str, Any]]:
 
 
 def stage_g_campaign_blockers(rep: dict[str, Any]) -> list[str]:
-    """Explicit Stage G blockers (missing GPU / SIMULATED interconnect / etc.)."""
+    """Explicit Stage G blockers (missing GPU / SIMULATED interconnect / etc.).
+
+    Explicit False always blocks. Omitted/empty campaign fields block non-toy
+    reports (assessment #6: missing≠pass). Toy PARTIAL may omit campaigns.
+    """
     blockers: list[str] = []
     fname = rep["_file"]
+    toy = bool(rep.get("toy"))
     for b in rep.get("stage_g_blockers") or []:
         if isinstance(b, str) and b.strip():
             blockers.append(f"{fname}: {b}")
-    if rep.get("gpu_campaign_present") is False:
+    gpu = rep.get("gpu_campaign_present")
+    nvlink = rep.get("nvlink_campaign_present")
+    if gpu is False or (not toy and gpu is not True):
         blockers.append(
-            f"{fname}: GPU campaign absent (device-resident B200/MI355X/5090 walls required)"
+            f"{fname}: GPU campaign absent/omitted "
+            "(device-resident B200/MI355X/5090 walls required; "
+            "gpu_campaign_present must be true — missing≠pass)"
         )
-    if rep.get("nvlink_campaign_present") is False:
+    if nvlink is False or (not toy and nvlink is not True):
         blockers.append(
-            f"{fname}: NVLink-vs-PCIe silicon campaign absent "
-            f"(Stage-I gate 4 needs ≥{STAGE_I_GATE4_NVLINK_MIN}× on same chips)"
+            f"{fname}: NVLink-vs-PCIe silicon campaign absent/omitted "
+            f"(Stage-I gate 4 needs ≥{STAGE_I_GATE4_NVLINK_MIN}× on same chips; "
+            "nvlink_campaign_present must be true — missing≠pass)"
         )
     sim = rep.get("interconnect_sim")
     if isinstance(sim, dict):
@@ -183,12 +193,17 @@ def stage_g_campaign_blockers(rep: dict[str, Any]) -> list[str]:
 def require_measured_walls_variance_residency(
     rep: dict[str, Any], reasons: list[str]
 ) -> bool:
-    """Stage G: NEVER GO without measured walls + variance + residency fields."""
+    """Stage G: NEVER GO without measured walls + variance + residency fields.
+
+    Missing/empty fields → NO-GO. Nonempty string values are not numeric pass.
+    """
     fname = rep["_file"]
     ok = True
-    if not _walls_measured(rep.get("phase_wall_s")):
+    walls = rep.get("phase_wall_s")
+    if not _walls_measured(walls):
         reasons.append(
-            f"{fname}: Stage G requires measured phase_wall_s (never GO without walls)"
+            f"{fname}: Stage G requires measured phase_wall_s "
+            "(never GO without numeric walls; nonempty string≠pass)"
         )
         ok = False
     var = rep.get("run_variance") or rep.get("variance")
@@ -203,20 +218,18 @@ def require_measured_walls_variance_residency(
         )
     ):
         reasons.append(
-            f"{fname}: Stage G requires run_variance.* "
-            "(never GO without variance across ≥3 runs)"
+            f"{fname}: Stage G requires numeric run_variance.* "
+            "(never GO without variance across ≥3 runs; "
+            "missing/empty/non-numeric≠pass)"
         )
         ok = False
-    # Residency fields must be present (proof may still fail for CPU-only).
-    if (
-        "device_resident" not in rep
-        and "residency_proof" not in rep
-        and "device_residency" not in rep
-        and "device_residency_proof" not in rep
-    ):
+    # Residency must be an explicit boolean True (or proof.ok True) — not a
+    # nonempty string / placeholder key.
+    if not device_residency_ok(rep):
         reasons.append(
-            f"{fname}: Stage G requires residency field "
-            "(device_resident / residency_proof) — never GO without it"
+            f"{fname}: Stage G requires residency proof "
+            "(device_resident=true / residency_proof.ok=true — "
+            "missing/empty/non-true≠pass)"
         )
         ok = False
     return ok
@@ -855,14 +868,16 @@ def gate_report(rep: dict[str, Any]) -> dict[str, Any]:
     # Stage G: NEVER GO without measured walls + variance + residency fields.
     if full_pass and not require_measured_walls_variance_residency(rep, reasons):
         full_pass = False
-    # Missing GPU / NVLink campaigns can never produce GO.
+    # Missing/omitted/False GPU / NVLink campaigns can never produce GO.
+    # Only explicit True counts (assessment #6: omitted ≠ pass).
     if full_pass and (
-        rep.get("gpu_campaign_present") is False
-        or rep.get("nvlink_campaign_present") is False
+        rep.get("gpu_campaign_present") is not True
+        or rep.get("nvlink_campaign_present") is not True
     ):
         full_pass = False
         reasons.append(
-            f"{fname}: HARD-FAIL — Stage G GO requires GPU + NVLink silicon campaigns"
+            f"{fname}: HARD-FAIL — Stage G GO requires gpu_campaign_present=true "
+            "AND nvlink_campaign_present=true (missing/empty/False≠pass)"
         )
     sim = rep.get("interconnect_sim")
     if full_pass and isinstance(sim, dict) and sim.get("simulated") is True:
@@ -1061,10 +1076,13 @@ DECISION_MATRIX = {
         "NO-GO (nonempty reports never PASS without G2/G3/G4 numeric thresholds)"
     ),
     "stage_g_missing_walls_variance_residency": (
-        "NO-GO (Stage G never GO without measured walls + variance + residency fields)"
+        "NO-GO (Stage G never GO without measured numeric walls + variance + "
+        "residency=true; nonempty string≠pass; missing≠pass)"
     ),
     "stage_g_missing_gpu_or_nvlink_campaign": (
-        "NO-GO / blocker (B200/MI355X/5090 + NVLink-vs-PCIe ≥7× still required)"
+        "NO-GO / blocker (gpu_campaign_present=true AND "
+        "nvlink_campaign_present=true required; omitted/False≠pass; "
+        "B200/MI355X/5090 + NVLink-vs-PCIe ≥7× still required)"
     ),
     "stage_g_simulated_interconnect": (
         "NOT EVIDENCE for Stage-I gate 4 (SIMULATED factor must not flip GO)"

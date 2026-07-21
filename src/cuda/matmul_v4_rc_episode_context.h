@@ -26,7 +26,8 @@
 // nMatMulRCHeight / nMatMulRCCoupledHeight and never enables the GKR arbiter.
 //
 // Status: Init / LoadBank / Destroy are structured; RunBarrierGraph returns
-// false until the device GEMM + Extract path is wired.
+// false with error "graph_unavailable:not_wired" until device GEMM + Extract
+// are wired (never implies CUDA Graph capture succeeded).
 
 namespace matmul_v4::cuda {
 
@@ -74,7 +75,8 @@ public:
 
     /**
      * Capture/launch the barrier DAG as a CUDA Graph (amortized launches).
-     * Currently returns false — device GEMM + Extract not wired.
+     * Currently returns false with error "graph_unavailable:not_wired" —
+     * device GEMM + Extract not wired; do not treat as a successful capture.
      */
     [[nodiscard]] bool RunBarrierGraph(std::string* error = nullptr);
 

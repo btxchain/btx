@@ -34,6 +34,12 @@ ROOT = Path(__file__).resolve().parents[2]
 VALID_CLASSES = {"datacenter", "consumer", "apple", "other", "cpu-ref"}
 FRONTIER_CLASSES = {"datacenter", "consumer", "other"}
 LT_PRODUCTION_N = 4096
+# Normative Rank-1 silicon parts (doc/btx-matmul-v4.4-lt-normative-spec.md).
+# G1/G3/G4 must not accept arbitrary datacenter/consumer/AMD labels without
+# an explicit --ack-non-normative-gpu override.
+NORMATIVE_DATACENTER_PART = "b200"
+NORMATIVE_CONSUMER_PART = "5090"
+NORMATIVE_AMD_PART = "mi350"
 
 
 def die(msg: str, code: int = 2) -> None:
@@ -466,9 +472,16 @@ def g2_comparison_config(rep: dict) -> tuple[int, int, int, str, str, str, int, 
 
 
 def g2_part_matches(row: dict, expected: str) -> bool:
-    """Require the explicitly labeled silicon named by the B200/5090 gate."""
+    """Require the explicitly labeled silicon named by the B200/5090/MI350 gate."""
     part = re.sub(r"[^a-z0-9]", "", (row.get("part") or "").lower())
     return expected in part
+
+
+def normative_gpu_ok(row: dict, expected: str, *, ack_non_normative: bool) -> bool:
+    """Normative part match, or explicit loud override for non-normative GPUs."""
+    if g2_part_matches(row, expected):
+        return True
+    return bool(ack_non_normative)
 
 
 def host_orchestrated_nps(rep: dict) -> float | None:
@@ -509,11 +522,20 @@ def evaluate(
     labels: dict,
     costs: dict[str, float],
     ack_external_c15: bool,
+    ack_non_normative_gpu: bool = False,
 ) -> tuple[bool, dict, list, list[str], list[str], dict]:
     rows: list[dict] = []
     reasons: list[str] = []
     notes: list[str] = []
     frontier: list[dict] = []
+
+    if ack_non_normative_gpu:
+        notes.append(
+            "ACK-NON-NORMATIVE-GPU: operator passed --ack-non-normative-gpu. "
+            "G1/G3/G4 may accept labeled frontier parts outside the normative "
+            "B200 / RTX 5090 / MI350 class. This is NOT silent — record the ack "
+            "in any offline GO tally review."
+        )
 
     for rep in reports:
         vendor, cls, part = label_for(rep, labels)
@@ -675,11 +697,20 @@ def evaluate(
         frontier.append(row)
 
     # G1 — native tensor execution must be a measured majority on every labeled
-    # frontier part. CPU-reference stage composition is diagnostic only.
+    # frontier part. Normatively require B200 + 5090 class parts (not any
+    # datacenter/consumer label) unless --ack-non-normative-gpu. CPU-reference
+    # stage composition is diagnostic only.
     g1_fail = [r for r in frontier if not r["device_tensor_majority_verified"]]
-    # Also require at least one datacenter and one consumer frontier report present.
-    has_b200ish = any(r["class"] == "datacenter" for r in frontier)
-    has_5090ish = any(r["class"] == "consumer" for r in frontier)
+    has_b200ish = any(
+        r["class"] == "datacenter"
+        and normative_gpu_ok(r, NORMATIVE_DATACENTER_PART, ack_non_normative=ack_non_normative_gpu)
+        for r in frontier
+    )
+    has_5090ish = any(
+        r["class"] == "consumer"
+        and normative_gpu_ok(r, NORMATIVE_CONSUMER_PART, ack_non_normative=ack_non_normative_gpu)
+        for r in frontier
+    )
     g1 = (
         len(frontier) > 0
         and not g1_fail
@@ -702,11 +733,13 @@ def evaluate(
         )
     if frontier and not has_b200ish:
         reasons.append(
-            "G1: no labeled datacenter-class LT report in the set (need B200-class)."
+            "G1: no labeled normative B200-class LT report in the set "
+            "(need part containing 'B200', or pass --ack-non-normative-gpu)."
         )
     if frontier and not has_5090ish:
         reasons.append(
-            "G1: no labeled consumer-class LT report in the set (need 5090-class)."
+            "G1: no labeled normative 5090-class LT report in the set "
+            "(need part containing '5090', or pass --ack-non-normative-gpu)."
         )
     if not frontier:
         reasons.append(
@@ -723,14 +756,14 @@ def evaluate(
         r
         for r in frontier
         if r["class"] == "datacenter"
-        and g2_part_matches(r, "b200")
+        and g2_part_matches(r, NORMATIVE_DATACENTER_PART)
         and r["nps"] is not None
     ]
     cons = [
         r
         for r in frontier
         if r["class"] == "consumer"
-        and g2_part_matches(r, "5090")
+        and g2_part_matches(r, NORMATIVE_CONSUMER_PART)
         and r["nps"] is not None
     ]
     g2 = False
@@ -894,8 +927,24 @@ def evaluate(
             if c is None or c <= 0:
                 continue
             scored.append((r, r["nps"] / c))
-        dc_s = [s for s in scored if s[0]["class"] == "datacenter"]
-        c_s = [s for s in scored if s[0]["class"] == "consumer"]
+        # Assessment #7: G3 must use normative B200/5090 parts (not any
+        # datacenter/consumer), unless --ack-non-normative-gpu.
+        dc_s = [
+            s
+            for s in scored
+            if s[0]["class"] == "datacenter"
+            and normative_gpu_ok(
+                s[0], NORMATIVE_DATACENTER_PART, ack_non_normative=ack_non_normative_gpu
+            )
+        ]
+        c_s = [
+            s
+            for s in scored
+            if s[0]["class"] == "consumer"
+            and normative_gpu_ok(
+                s[0], NORMATIVE_CONSUMER_PART, ack_non_normative=ack_non_normative_gpu
+            )
+        ]
         costed_configs = {
             dc_score[0]["g2_comparison_config"]
             for dc_score in dc_s
@@ -936,12 +985,14 @@ def evaluate(
 
     # G4 — MI350 / AMD datacenter resident OCP-MX exactness. Generic MFMA
     # exactness is insufficient: require a peak-capable, qualified native MX
-    # lane that is actually wired into the resident Q* graph.
+    # lane that is actually wired into the resident Q* graph. Normatively the
+    # part must be MI350-class unless --ack-non-normative-gpu.
     amd_dc = [
         r
         for r in frontier
         if r["class"] == "datacenter"
         and (r["vendor"] or "").lower() in ("amd", "mi350", "amdgpu")
+        and normative_gpu_ok(r, NORMATIVE_AMD_PART, ack_non_normative=ack_non_normative_gpu)
     ]
     def g4_native_mx_ready(row: dict) -> bool:
         return bool(
@@ -956,8 +1007,9 @@ def evaluate(
     g4 = bool(amd_dc) and all(g4_native_mx_ready(r) for r in amd_dc)
     if not amd_dc:
         reasons.append(
-            "G4 MI350/OCP MX: UNVERIFIED — no labeled amd:datacenter LT report with "
-            "resident native-MX evidence (fail closed)."
+            "G4 MI350/OCP MX: UNVERIFIED — no labeled amd:datacenter MI350-class "
+            "LT report with resident native-MX evidence (fail closed; "
+            "need part containing 'MI350', or pass --ack-non-normative-gpu)."
         )
     else:
         for r in amd_dc:
@@ -1011,6 +1063,7 @@ def evaluate(
         "frontier_count": len(frontier),
         "has_datacenter": has_b200ish,
         "has_consumer": has_5090ish,
+        "ack_non_normative_gpu": bool(ack_non_normative_gpu),
         "g2_evidence": g2_evidence,
         "asert_calibration": [
             {
@@ -1224,6 +1277,15 @@ def main() -> int:
             "that review (see doc/btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md)."
         ),
     )
+    ap.add_argument(
+        "--ack-non-normative-gpu",
+        action="store_true",
+        help=(
+            "LOUD OVERRIDE: allow G1/G3/G4 to accept labeled frontier parts outside "
+            "the normative B200 / RTX 5090 / MI350 class. Cannot be silent — emits an "
+            "ACK-NON-NORMATIVE-GPU note. Default is fail-closed on non-normative parts."
+        ),
+    )
     ap.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = ap.parse_args()
 
@@ -1267,7 +1329,7 @@ def main() -> int:
     labels = parse_labels(args.manifest, args.label)
     costs = parse_cost_args(args.cost)
     go, gates, rows, reasons, notes, extra = evaluate(
-        reports, labels, costs, args.ack_external_c15
+        reports, labels, costs, args.ack_external_c15, args.ack_non_normative_gpu
     )
 
     if args.json:

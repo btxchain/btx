@@ -23,12 +23,16 @@ namespace matmul_v4::cuda {
     const std::vector<int8_t>& left, const std::vector<int8_t>& right, uint32_t rows,
     uint32_t inner, uint32_t cols, std::vector<int64_t>& out, std::string* error = nullptr);
 
-// --- Native block-scaled MXFP4 (SM120 / SM100 separate latches) ---
+// --- Block-scaled MXFP4 ---
+// Scalar-decode E2M1+FP32 may probe exactness (backend contains "scalar-decode")
+// but must NEVER flip IsRcOzakiCudaMxfp4Qualified. Native latches require a real
+// CUTLASS/cuBLASLt tensor path (none wired yet → qualified stays false).
 [[nodiscard]] bool IsRcOzakiCudaMxfp4Qualified();
 [[nodiscard]] std::string RcOzakiCudaMxfp4ArchKey();
 [[nodiscard]] std::string RcOzakiCudaMxfp4Backend();
+[[nodiscard]] std::string RcOzakiCudaMxfp4Deficit();
 [[nodiscard]] bool SelfQualifyRcOzakiCudaMxfp4Once();
-/** Real MXFP4 device path only — must not fall back to LaunchGemmS8S8. */
+/** Succeeds only when IsRcOzakiCudaMxfp4Qualified() (real TC path). */
 [[nodiscard]] bool TryLaunchRcOzakiMxfp4GemmS8S8Int64(
     const std::vector<int8_t>& left, const std::vector<int8_t>& right, uint32_t rows,
     uint32_t inner, uint32_t cols, std::vector<int64_t>& out, std::string* error = nullptr);

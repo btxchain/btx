@@ -6,23 +6,23 @@
 
 #include <cuda/matmul_v4_rc_episode_context.h>
 
-#include <cstdlib>
 #include <limits>
 
 namespace matmul::v4::rc::dc {
 
 bool RCCoupFullBankScheduleActive()
 {
-    if (kRCCoupFullBankScheduleEnabled) return true;
-    const char* e = std::getenv("BTX_RC_COUP_FULL_BANK_SCHEDULE");
-    return e != nullptr && e[0] == '1' && e[1] == '\0';
+    // Compile-time only. NEVER read getenv here — these flags flow into
+    // RecomputeCoupledPuzzleReference and change digests (latent chain split).
+    // Research/harness opt-in: RCCoupOptions::full_bank_schedule only.
+    return kRCCoupFullBankScheduleEnabled;
 }
 
 bool RCCoupMaterialExchangeActive()
 {
-    if (kRCCoupMaterialExchangeEnabled) return true;
-    const char* e = std::getenv("BTX_RC_COUP_MATERIAL_EXCHANGE");
-    return e != nullptr && e[0] == '1' && e[1] == '\0';
+    // Compile-time only. Env must not touch consensus (see full-bank note).
+    // Material exchange is not wired into the reference path yet; keep false.
+    return kRCCoupMaterialExchangeEnabled;
 }
 
 RCDcStatus ProbeRCDcStatus()

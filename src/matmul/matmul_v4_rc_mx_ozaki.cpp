@@ -176,15 +176,20 @@ struct Mxfp4QualResult {
         r.deficit = "rc_ozaki_mxfp4_cuda_tu_not_linked";
         return r;
     }
-    if (!matmul_v4::cuda::SelfQualifyRcOzakiCudaMxfp4Once() ||
-        !matmul_v4::cuda::IsRcOzakiCudaMxfp4Qualified()) {
-        r.deficit = "rc_ozaki_mxfp4_device_selfqual_failed";
-        return r;
-    }
-    r.qualified = true;
+    // Probe scalar-decode exactness (and any future TC path). Native latches
+    // flip only inside the CUDA TU for a real CUTLASS/cuBLASLt path.
+    (void)matmul_v4::cuda::SelfQualifyRcOzakiCudaMxfp4Once();
     r.backend = matmul_v4::cuda::RcOzakiCudaMxfp4Backend();
     r.arch_key = matmul_v4::cuda::RcOzakiCudaMxfp4ArchKey();
-    if (r.backend.empty()) r.backend = "mxfp4_blockscaled_device";
+    r.qualified = matmul_v4::cuda::IsRcOzakiCudaMxfp4Qualified();
+    if (!r.qualified) {
+        r.deficit = matmul_v4::cuda::RcOzakiCudaMxfp4Deficit();
+        if (r.deficit.empty()) {
+            r.deficit = "rc_ozaki_mxfp4_no_native_tensor_path";
+        }
+        return r;
+    }
+    if (r.backend.empty()) r.backend = "mxfp4_cutlass_unlabeled";
     return r;
 }
 

@@ -92,12 +92,14 @@ inline constexpr const char* kRCGkrHbmParkStatement =
     "keep ε=0 ExactReplay as consensus default.";
 
 /** Coupled path: barrier all-to-all product layers are not separately
- *  arithmetized; ProveWinnerCoupled reuses ALL-PHASE episode layers (same kinds
- *  as ProveWinnerEpisode) without shrink-to-toy. ExactReplay covers coup mix. */
+ *  arithmetized. ProveWinnerCoupled is FAIL-CLOSED (no toy stand-in proof).
+ *  ExactReplay covers coup mix until dedicated coup product layers land.
+ *  G1–G5 GKR soundness gaps remain OPEN; arbiter stays OFF. */
 inline constexpr const char* kRCGkrCoupledArithStatement =
-    "ProveWinnerCoupled: ALL-PHASE episode-layer stand-in (no shrink-to-toy); "
-    "coupled barrier all-to-all mix remains ExactReplay-covered until dedicated "
-    "coup product layers land.";
+    "ProveWinnerCoupled: FAIL-CLOSED deficit=coupled_arithmetization_unwired; "
+    "does not emit a toy/episode stand-in proof of unrelated work. "
+    "Coupled barrier all-to-all mix remains ExactReplay-covered; "
+    "G1–G5 GKR remain OPEN; BTX_RC_GKR_ARBITER stays OFF.";
 
 inline constexpr const char* kRCGkrShadowStatement =
     "BTX_RC_GKR_SHADOW=1 (default): generate+verify winner proof in shadow; "
@@ -286,8 +288,9 @@ struct RCProdVerifyResult {
                                                  const uint256& resealed_digest);
 
 /**
- * Coupled winner prove: reuses ALL-PHASE episode layers (see
- * kRCGkrCoupledArithStatement); does not shrink coup work to a toy slice.
+ * Coupled winner prove: FAIL-CLOSED until coupled-product arithmetization exists.
+ * Must never prove MakeToyRCEpisodeParams() / unrelated work. Returns empty proof
+ * with timing.ok=false and note "coupled_arithmetization_unwired".
  */
 [[nodiscard]] RCGkrProveResult ProveWinnerCoupled(const CBlockHeader& header, int32_t height,
                                                  const RCCoupParams& params,

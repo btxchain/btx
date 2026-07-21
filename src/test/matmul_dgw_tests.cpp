@@ -49,17 +49,23 @@ Consensus::Params MatMulRetargetParams()
     params.nMatMulAsertHeight = 0;
     params.nMatMulAsertHalfLife = 14'400;
     params.nMatMulAsertBootstrapFactor = 1;
-    // These are pure-ASERT retargeting tests that predate the v4 / ENC-BMX4C
-    // hard forks and freely raise nMatMulAsertHeight (e.g. to 361/500/541)
-    // above the regtest v4/BMX4-C fork heights (100/150). The consensus ASERT
-    // ordering guard (ValidateMatMulAsertParams) fails closed to powLimit
-    // whenever nMatMulV4Height / nMatMulBMX4CHeight sit below ASERT activation,
-    // so the inherited regtest fork heights would otherwise make every such
-    // test fail closed. Disable both forks here so the ASERT mechanics are
-    // exercised in isolation; the focused v4/BMX4-C rescale tests set these
-    // heights explicitly on top of this baseline.
+    // These are pure-ASERT retargeting tests that predate the v4 / ENC-BMX4C /
+    // DRLT / RC hard forks and freely raise nMatMulAsertHeight (e.g. to
+    // 361/500/541) above the regtest fork heights (v4/BMX4C/DRLT=100). The
+    // consensus ASERT ordering guard (ValidateMatMulAsertParams) fails closed
+    // whenever any live fork height sits below ASERT activation, so inherited
+    // regtest heights would otherwise make every such test fail closed.
+    // Disable all staged MatMul forks here so ASERT mechanics are exercised in
+    // isolation; focused v4/BMX4C/DRLT/RC rescale tests set heights explicitly
+    // on top of this baseline. Do not raise heights or enable the GKR arbiter.
     params.nMatMulV4Height = std::numeric_limits<int32_t>::max();
     params.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+    params.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    params.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+    params.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+    params.fMatMulLTSealAsPoW = false;
+    params.fMatMulRCUseToyDims = false;
+    params.fMatMulRCCoupledUseToyDims = false;
     return params;
 }
 

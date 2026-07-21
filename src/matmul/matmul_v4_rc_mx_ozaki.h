@@ -18,9 +18,12 @@
 // Two distinct admissions (do not conflate):
 //   1) ExactGemm K-panel Ozaki (IMMA/CPU) — mining accelerator; NEVER sets
 //      ProbeRCSelfQual.native_mxfp4_qualified.
-//   2) Native block-scaled MXFP4 Ozaki — only after a real MXFP4 device kernel
-//      matches the int64 oracle (no hidden LaunchGemmS8S8 / CPU fallback in the
-//      native claim). SM120 and SM100 qualify on separate arch_key latches.
+//   2) Native block-scaled MXFP4 Ozaki — only after a real CUTLASS/cuBLASLt
+//      tensor path matches the int64 oracle (no scalar E2M1+FP32 decode, no
+//      LaunchGemmS8S8 / CPU fallback in the native claim). SM120 and SM100
+//      qualify on separate arch_key latches. The scalar-decode device kernel may
+//      probe exactness and record backend "...scalar-decode" but must leave
+//      IsRcOzakiMxfp4Qualified() / native_mxfp4_qualified false.
 //
 // Never copy LT native_mxfp4_qualified. Never raise nMatMulRCHeight.
 
@@ -30,9 +33,10 @@ inline constexpr uint32_t kRCOzakiExactChunk = kRCWgradExactChunk;
 
 struct RCOzakiMxfp4Status {
     bool attempted{false};
-    bool qualified{false}; // native MXFP4 only
+    bool qualified{false}; // native MXFP4 tensor only
     bool exact_panels_qualified{false};
-    /** "mxfp4_blockscaled_device" | "mxfp4_cutlass_sm120" | "mxfp4_cutlass_sm100" | "" */
+    /** "mxfp4_cutlass_sm120" | "mxfp4_cutlass_sm100" |
+     *  "mxfp4_blockscaled_device_scalar-decode" | "" */
     std::string backend;
     std::string arch_key; // e.g. sm_120 / sm_100
     std::string deficit_reason;
@@ -48,7 +52,7 @@ struct RCOzakiMxfp4Status {
 
 /**
  * Native MXFP4 Ozaki → int64. Succeeds only when IsRcOzakiMxfp4Qualified()
- * (real block-scaled MXFP4 device path; no INT8 ExactGemm inside this entry).
+ * (real CUTLASS/cuBLASLt tensor path; scalar-decode must not serve this entry).
  */
 [[nodiscard]] bool TryRcOzakiMxfp4GemmS8S8Int64(
     const std::vector<int8_t>& left, const std::vector<int8_t>& right, uint32_t rows,

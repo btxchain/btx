@@ -101,6 +101,81 @@ class RCGateNumericThresholdTests(unittest.TestCase):
         self.assertIn("SIMULATED", blob)
         self.assertIn("GPU", blob)
 
+    def test_omitted_campaign_fields_never_go(self):
+        """Assessment #6: missing campaign evidence must not GO (only True passes)."""
+        rep = {
+            "_file": "prod.json",
+            "tool": "rc-episode-harness",
+            "stub": False,
+            "toy": False,
+            "production_dims": True,
+            "source_revision": "deadbeef",
+            "device_resident": True,
+            "native_path_eligible": True,
+            "wall_clock_provenance": "chrono_measured",
+            "evidence_kind": "measured",
+            "extractmx_self_qual": {"status": "pass", "native_mxfp4_qualified": True},
+            "allocation_cap_verdicts": {
+                "512MiB": "pass",
+                "2GiB": "pass",
+                "8GiB": "pass",
+            },
+            "residency_sweep": {
+                "cliff_ratio": 2.0,
+                "stream_util_frac": 0.5,
+                "points": [
+                    {"working_set_bytes": 128 * 1024 * 1024, "wall_s": 2.0},
+                    {"working_set_bytes": 200 * 1024 * 1024, "wall_s": 1.0},
+                ],
+            },
+            "k_curve": {
+                "mode": "measured",
+                "digests_match": True,
+                "k_at_24gb": 1.5,
+                "k_variance": 0.01,
+            },
+            "phase_wall_s": {"total": 10.0, "verify": 0.05},
+            "verifier_floor": {
+                "measured": True,
+                "full_episode_wall_s": 10.0,
+                "full_verify_wall_s": 0.05,
+            },
+            "run_variance": {"episode_cv": 0.02, "max_cv": 0.02},
+            # Intentionally omit gpu_campaign_present / nvlink_campaign_present.
+        }
+        g = rc_gate.gate_report(rep)
+        self.assertFalse(g["full_pass"])
+        blob = " ".join(g["reasons"])
+        self.assertIn("gpu_campaign_present", blob)
+        self.assertIn("nvlink_campaign_present", blob)
+
+    def test_nonempty_string_walls_not_numeric_pass(self):
+        """Nonempty string wall/variance values are not a numeric GO pass."""
+        rep = toy_report(
+            toy=False,
+            production_dims=True,
+            source_revision="deadbeef",
+            device_resident=True,
+            native_path_eligible=True,
+            wall_clock_provenance="chrono_measured",
+            extractmx_self_qual={"status": "pass", "native_mxfp4_qualified": True},
+            allocation_cap_verdicts={
+                "512MiB": "pass",
+                "2GiB": "pass",
+                "8GiB": "pass",
+            },
+            phase_wall_s={"total": "fast", "verify": "ok"},
+            run_variance={"episode_cv": "low"},
+            residency_sweep=[{"note": "present"}],
+            k_curve={"mode": "measured"},
+            gpu_campaign_present=True,
+            nvlink_campaign_present=True,
+        )
+        g = rc_gate.gate_report(rep)
+        self.assertFalse(g["full_pass"])
+        self.assertNotEqual(g["g4"], "pass")
+        self.assertFalse(rc_gate._walls_measured(rep["phase_wall_s"]))
+
     def test_load_accepts_campaign_tool(self):
         import tempfile
         from pathlib import Path

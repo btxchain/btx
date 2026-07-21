@@ -381,6 +381,50 @@ class LtGateSchemaTest(unittest.TestCase):
         self.assertEqual(summary["g2_evidence"]["datacenter_file"], "b200.json")
         self.assertEqual(summary["g2_evidence"]["consumer_file"], "5090.json")
 
+    def test_g1_rejects_non_normative_datacenter_consumer_without_ack(self):
+        """Assessment #7: G1 must not accept arbitrary datacenter/consumer parts."""
+        labels = {
+            "h200.json": ("nvidia", "datacenter", "H200"),
+            "5060.json": ("nvidia", "consumer", "RTX 5060 Ti"),
+        }
+        _, gates, _, reasons, notes, summary = lt_gate.evaluate(
+            [report("h200.json", 400.0), report("5060.json", 100.0)],
+            labels,
+            {},
+            False,
+        )
+        self.assertFalse(gates["G1_tensor_majority"])
+        self.assertFalse(summary.get("ack_non_normative_gpu"))
+        self.assertTrue(any("B200" in r for r in reasons))
+        self.assertTrue(any("5090" in r for r in reasons))
+        self.assertFalse(any("ACK-NON-NORMATIVE-GPU" in n for n in notes))
+
+        _, gates_ack, _, _, notes_ack, summary_ack = lt_gate.evaluate(
+            [report("h200.json", 400.0), report("5060.json", 100.0)],
+            labels,
+            {},
+            False,
+            ack_non_normative_gpu=True,
+        )
+        self.assertTrue(gates_ack["G1_tensor_majority"])
+        self.assertTrue(summary_ack.get("ack_non_normative_gpu"))
+        self.assertTrue(any("ACK-NON-NORMATIVE-GPU" in n for n in notes_ack))
+
+    def test_g4_rejects_non_mi350_amd_without_ack(self):
+        labels = {"mi300.json": ("amd", "datacenter", "MI300X")}
+        candidate = report("mi300.json", 200.0, backend="hip")
+        _, gates, _, reasons, _, _ = lt_gate.evaluate(
+            [candidate], labels, {}, False
+        )
+        self.assertFalse(gates["G4_mi350_exactness"])
+        self.assertTrue(any("MI350" in r for r in reasons))
+
+        _, gates_ack, _, _, notes_ack, _ = lt_gate.evaluate(
+            [candidate], labels, {}, False, ack_non_normative_gpu=True
+        )
+        self.assertTrue(gates_ack["G4_mi350_exactness"])
+        self.assertTrue(any("ACK-NON-NORMATIVE-GPU" in n for n in notes_ack))
+
     def test_g2_rejects_multiple_compatible_campaigns_without_cherry_picking(self):
         reports = [
             report("b200.json", 400.0),

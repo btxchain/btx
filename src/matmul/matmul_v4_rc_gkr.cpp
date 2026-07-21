@@ -1055,20 +1055,20 @@ RCGkrProveResult ProveWinnerEpisode(const CBlockHeader& header, const RCEpisodeP
 RCGkrProveResult ProveWinnerCoupled(const CBlockHeader& header, int32_t height,
                                     const RCCoupParams& params, const uint256& resealed_digest)
 {
+    (void)header;
+    (void)height;
     (void)params;
-    // M2: Coupled barrier all-to-all product layers are not separately arithmetized.
-    // Reuse ALL-PHASE episode layers (same kinds) without shrink-to-toy substitution.
-    // Callers needing non-toy episode proofs use ProveWinnerEpisode(real params).
-    const auto ep = MakeToyRCEpisodeParams();
-    std::vector<RCRoundTranscript> transcripts;
-    (void)RecomputeResidentCurriculumReference(header, ep, height, {}, &transcripts);
-    std::vector<uint256> roots(ep.rounds);
-    for (uint32_t r = 0; r < ep.rounds; ++r) roots[r] = transcripts[r].round_root;
-    std::vector<uint256> seeds;
-    const auto wires = BuildRealEpisodeLayers(header, ep, roots, seeds);
-    const uint256 sigma = matmul::v4::DeriveSigma(header);
-    return ProveFromLayers(resealed_digest, ep, wires, seeds, roots, sigma,
-                           kRCGkrCoupledArithStatement);
+    (void)resealed_digest;
+    // Assessment Wave A #3: previously discarded params and proved
+    // MakeToyRCEpisodeParams() — a valid-looking proof of unrelated work.
+    // Fail closed until real coupled-product arithmetization lands.
+    // Shadow/arbiter stay OFF; heights INT32_MAX; ExactReplay decides.
+    RCGkrProveResult out;
+    out.proof = {};
+    out.proof.shrink_note = kRCGkrCoupledArithStatement;
+    out.timing.ok = false;
+    out.timing.note = "coupled_arithmetization_unwired";
+    return out;
 }
 
 bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
@@ -1552,11 +1552,17 @@ WinnerGkrSolveReport SolveCoupledProveWinner(CBlockHeader header, int32_t height
             rep.proof_bytes = pr.timing.proof_bytes;
             rep.peak_rss_kib = pr.timing.peak_rss_kib;
             rep.hbm_parked = pr.timing.over_budget;
-            RCGkrTiming vt;
-            rep.proved = VerifyWinnerProof(rep.proof, &vt);
-            rep.verify_s = vt.verify_s;
-            rep.ok = rep.proved;
-            rep.note = rep.proved ? "coupled winner proved" : "coupled prove/verify failed";
+            if (!pr.timing.ok) {
+                rep.proved = false;
+                rep.ok = true; // mining/reseal succeeded; prove is unsupported
+                rep.note = pr.timing.note.empty() ? "coupled_arithmetization_unwired" : pr.timing.note;
+            } else {
+                RCGkrTiming vt;
+                rep.proved = VerifyWinnerProof(rep.proof, &vt);
+                rep.verify_s = vt.verify_s;
+                rep.ok = rep.proved;
+                rep.note = rep.proved ? "coupled winner proved" : "coupled prove/verify failed";
+            }
         } else {
             rep.note = "coupled winner; prove skipped";
         }

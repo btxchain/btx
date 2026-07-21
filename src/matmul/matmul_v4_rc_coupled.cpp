@@ -748,10 +748,10 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
 
         // C3.a — local exact int8 GEMM per lobe vs epoch bank page(s).
         // Consensus lobe order is always 0..L-1 (scheduling-invariant digest).
-        // Legacy: one page (barrier+lobe)%bank_pages. Full schedule (gated OFF):
-        // accumulate int64 contributions over P pages, then Extract once below.
-        const bool full_sched =
-            options.full_bank_schedule || dc::RCCoupFullBankScheduleActive();
+        // Legacy: one page (barrier+lobe)%bank_pages. Full schedule ONLY via
+        // RCCoupOptions::full_bank_schedule (harness/tests) — never getenv.
+        // Compile-time kRCCoupFullBankScheduleEnabled stays false until Stage G.
+        const bool full_sched = options.full_bank_schedule;
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
             const auto page_ids =
                 SelectCoupledBankPageIds(b, ell, params, sigma, full_sched);

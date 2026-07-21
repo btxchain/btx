@@ -1407,14 +1407,21 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_exact_panels_qualify_and_match_oracle)
 
 BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_native_gate)
 {
-    // Native MXFP4: only true after block-scaled device path quals (SM100/SM120).
-    // CI without Blackwell keeps native_* false; ExactGemm Ozaki may still be on.
+    // Native MXFP4: only after a real CUTLASS/cuBLASLt tensor path quals.
+    // Scalar-decode E2M1+FP32 may probe exactness but must leave native_* false.
+    // CI without a TC path keeps native_* false; ExactGemm Ozaki may still be on.
     rc::ResetRcOzakiQualForTest();
     const auto oz = rc::ProbeRcOzakiMxfp4Status();
     if (!rc::IsRcOzakiMxfp4Qualified()) {
         BOOST_CHECK(!oz.qualified);
         BOOST_CHECK(oz.attempted);
         BOOST_CHECK(!oz.deficit_reason.empty());
+        // When the scalar-decode reference path matched, probe must say so
+        // honestly (BMX4C-style) and must not claim native.
+        if (oz.backend.find("scalar-decode") != std::string::npos) {
+            BOOST_CHECK(oz.deficit_reason.find("scalar-decode") != std::string::npos ||
+                        oz.deficit_reason.find("not_native") != std::string::npos);
+        }
         std::vector<int8_t> L(64, 6), R(64, -6);
         std::vector<int64_t> oz_out;
         BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, 8, 8, 8, oz_out));
@@ -1428,6 +1435,7 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_native_gate)
     BOOST_CHECK(oz.qualified);
     BOOST_CHECK(oz.backend.find("mxfp4") != std::string::npos);
     BOOST_CHECK(oz.backend.find("exactgemm") == std::string::npos);
+    BOOST_CHECK(oz.backend.find("scalar-decode") == std::string::npos);
     BOOST_CHECK(oz.arch_key.find("sm_10") != std::string::npos ||
                 oz.arch_key.find("sm_12") != std::string::npos);
 
@@ -1475,6 +1483,32 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_native_gate)
     const auto st = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
     BOOST_CHECK(st.native_mxfp4_qualified);
     BOOST_CHECK(!st.native_fp8_qualified);
+}
+
+BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_scalar_decode_never_sets_native)
+{
+    // Assessment #4: scalar-decode block-scaled path must not set
+    // native_mxfp4_qualified / IsRcOzakiMxfp4Qualified (BMX4C C6 honesty).
+    rc::ResetRcOzakiQualForTest();
+    const auto oz = rc::ProbeRcOzakiMxfp4Status();
+    BOOST_CHECK(oz.attempted);
+    BOOST_CHECK(!oz.qualified);
+    BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
+    BOOST_CHECK(!oz.deficit_reason.empty());
+
+    if (oz.backend.find("scalar-decode") != std::string::npos) {
+        BOOST_CHECK(oz.deficit_reason.find("scalar-decode") != std::string::npos ||
+                    oz.deficit_reason.find("not_native_tensor") != std::string::npos);
+    }
+
+    const auto st = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
+    BOOST_CHECK(!st.native_mxfp4_qualified);
+    BOOST_CHECK(!st.native_fp8_qualified);
+
+    std::vector<int8_t> L(64, 1), R(64, 1);
+    std::vector<int64_t> out;
+    BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, 8, 8, 8, out));
+    BOOST_CHECK(out.empty());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

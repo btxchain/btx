@@ -86,8 +86,9 @@ bool RCCudaEpisodeContext::LoadBank(const std::vector<std::vector<int8_t>>& page
 bool RCCudaEpisodeContext::RunBarrierGraph(std::string* error)
 {
     if (error) {
-        *error = "RCCudaEpisodeContext: RunBarrierGraph not wired "
-                 "(CUDA Graphs amortization pending; digests stay on CPU oracle)";
+        // Honesty tokens: graph_unavailable / not_wired — never imply capture
+        // succeeded. Digests stay on the CPU oracle until a real device path lands.
+        *error = "graph_unavailable:not_wired";
     }
     return false;
 }

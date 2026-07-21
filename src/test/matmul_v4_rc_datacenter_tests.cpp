@@ -17,6 +17,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <set>
 #include <string>
@@ -163,6 +164,26 @@ BOOST_AUTO_TEST_CASE(rc_dc_full_schedule_flag_off_keeps_legacy_digest)
     BOOST_CHECK(d_full != d0);
 }
 
+BOOST_AUTO_TEST_CASE(rc_dc_getenv_cannot_flip_consensus_digest)
+{
+    // P0: BTX_RC_COUP_FULL_BANK_SCHEDULE / MATERIAL_EXCHANGE must not change digests.
+    const auto params = rc::MakeToyRCCoupParams();
+    const auto header = MakeCoupHeader(12345);
+    rc::RCCoupOptions opts; // full_bank_schedule defaults false
+
+    ::setenv("BTX_RC_COUP_FULL_BANK_SCHEDULE", "1", /*overwrite=*/1);
+    ::setenv("BTX_RC_COUP_MATERIAL_EXCHANGE", "1", /*overwrite=*/1);
+    BOOST_CHECK(!dc::RCCoupFullBankScheduleActive());
+    BOOST_CHECK(!dc::RCCoupMaterialExchangeActive());
+    const uint256 with_env = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts);
+
+    ::unsetenv("BTX_RC_COUP_FULL_BANK_SCHEDULE");
+    ::unsetenv("BTX_RC_COUP_MATERIAL_EXCHANGE");
+    const uint256 without_env = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts);
+    BOOST_CHECK(with_env == without_env);
+    BOOST_CHECK(with_env == rc::MineRCCoupledEpisode(header, 0, params));
+}
+
 BOOST_AUTO_TEST_CASE(rc_dc_q_batch_digest_identity)
 {
     const auto params = rc::MakeToyRCCoupParams();
@@ -194,7 +215,8 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_stub)
     const auto pages = rc::DeriveCoupledBankPages(MakeCoupHeader(1), 0, rc::MakeToyRCCoupParams());
     BOOST_CHECK(ctx.LoadBank(pages, &err));
     BOOST_CHECK(!ctx.RunBarrierGraph(&err));
-    BOOST_CHECK(!err.empty());
+    BOOST_CHECK(err.find("graph_unavailable") != std::string::npos);
+    BOOST_CHECK(err.find("not_wired") != std::string::npos);
     ctx.Destroy();
     BOOST_CHECK(!ctx.Ready());
 }

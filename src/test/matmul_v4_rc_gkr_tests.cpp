@@ -6,6 +6,7 @@
 #include <consensus/params.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_fri.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
@@ -659,6 +660,31 @@ BOOST_AUTO_TEST_CASE(gkr_f3_arbiter_rejects_sigma_or_digest_over_target)
     }
 
     unsetenv("BTX_RC_GKR_ARBITER");
+}
+
+BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_fail_closed_no_toy_proof)
+{
+    // Assessment #3: ProveWinnerCoupled must not emit a valid-looking proof of
+    // MakeToyRCEpisodeParams() / unrelated work. Fail closed with a clear deficit.
+    // Heights INT32_MAX; arbiter stays OFF.
+    BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCCoupledHeight,
+                      std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
+
+    const auto header = MakeRCHeader(42);
+    const auto coup = rc::MakeToyRCCoupParams();
+    const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, /*height=*/0, coup);
+    const auto pr = rc::ProveWinnerCoupled(header, /*height=*/0, coup, dig);
+
+    BOOST_CHECK(!pr.timing.ok);
+    BOOST_CHECK_EQUAL(pr.timing.note, "coupled_arithmetization_unwired");
+    BOOST_CHECK(pr.proof.layers.empty());
+    BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
+    BOOST_CHECK(pr.proof.shrink_note.find("coupled_arithmetization_unwired") != std::string::npos);
+    // Must not look like a successful ALL-PHASE episode proof.
+    BOOST_CHECK(pr.proof.round_seeds.empty());
+    BOOST_CHECK(pr.proof.round_roots.empty());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

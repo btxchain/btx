@@ -22,8 +22,9 @@ Source of truth: `src/matmul/matmul_v4_rc_datacenter.h` (`matmul::v4::rc::dc`).
 
 Env research toggles (still digest-breaking; default unset):
 
-- `BTX_RC_COUP_FULL_BANK_SCHEDULE=1`
-- `BTX_RC_COUP_MATERIAL_EXCHANGE=1`
+- ~~`BTX_RC_COUP_FULL_BANK_SCHEDULE=1`~~ **REMOVED** — env must not touch consensus.
+  Use `RCCoupOptions::full_bank_schedule` in harness/tests only.
+- ~~`BTX_RC_COUP_MATERIAL_EXCHANGE=1`~~ **REMOVED** — same rule.
 
 ## Miner-local vs consensus-gated
 

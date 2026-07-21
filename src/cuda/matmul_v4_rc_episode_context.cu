@@ -154,8 +154,9 @@ bool RCCudaEpisodeContext::LoadBank(const std::vector<std::vector<int8_t>>& page
 bool RCCudaEpisodeContext::RunBarrierGraph(std::string* error)
 {
     if (error) {
-        *error = "RCCudaEpisodeContext: RunBarrierGraph not wired "
-                 "(capture CUDA Graph over barrier GEMM+Extract when device path lands)";
+        // Honesty tokens: graph_unavailable / not_wired — never imply capture
+        // succeeded. Digests stay on the CPU oracle until device GEMM+Extract land.
+        *error = "graph_unavailable:not_wired";
     }
     (void)m_bank_loaded;
     return false;

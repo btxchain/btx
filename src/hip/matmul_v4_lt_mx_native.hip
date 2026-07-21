@@ -20,11 +20,19 @@
 #include <vector>
 
 // Optional hipBLASLt MX block-scale path (CDNA4 / gfx950).
+//
+// HIP_R_4F_E2M1 / HIPBLASLT_MATMUL_MATRIX_SCALE_* are enum / int constants in
+// hipblaslt headers — NOT preprocessor macros. `#if defined(HIP_R_4F_E2M1)` is
+// always false (same class of bug as CUDA's defined(CUDA_R_*)). Mirror the
+// CUDA path (CUDART_VERSION >= 12080): gate on a real compile-time capability
+// flag set by CMake when the toolkit headers actually expose MXFP4 + VEC32
+// scale (BTX_HIP_MXFP4_TYPES), not on defined(ENUM).
+//
+// Without BTX_HIP_MXFP4_TYPES the native MX lanes stay honestly fail-closed.
 // Researched scale enums (ROCm hipBLASLt 1.1+/1.4 develop):
 //   HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0
 //   HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT  (pre-swizzled 32×8)
 // Element types: HIP_R_4F_E2M1 (MXFP4), HIP_R_8F_E4M3 (MXFP8), HIP_R_8F_UE8M0.
-// Absence of headers/enums ⇒ permanent fail-closed for *qualified.
 
 #if defined(BTX_HAVE_HIPBLASLT)
 #if defined(__has_include) && __has_include(<hipblaslt/hipblaslt.h>)
@@ -33,30 +41,19 @@
 #endif
 #endif
 
-#if defined(BTX_HIP_MX_HAVE_HIPBLASLT)
-#if defined(HIP_R_4F_E2M1)
+// BTX_HIP_MXFP4_TYPES is set by CMake (check_cxx_source_compiles against
+// hipblaslt.h) when HIP_R_4F_E2M1 + HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0
+// are usable as constants. Never use defined(ENUM) here.
+#if defined(BTX_HIP_MX_HAVE_HIPBLASLT) && defined(BTX_HIP_MXFP4_TYPES)
 #define BTX_HIP_MX_FP4_TYPE HIP_R_4F_E2M1
-#elif defined(HIP_R_4F_E2M1_EXT)
-#define BTX_HIP_MX_FP4_TYPE HIP_R_4F_E2M1_EXT
-#endif
-#if defined(HIP_R_8F_E4M3)
-#define BTX_HIP_MX_FP8_TYPE HIP_R_8F_E4M3
-#elif defined(HIP_R_8F_E4M3_FNUZ)
-#define BTX_HIP_MX_FP8_TYPE HIP_R_8F_E4M3_FNUZ
-#elif defined(HIP_R_8F_E4M3_EXT)
-#define BTX_HIP_MX_FP8_TYPE HIP_R_8F_E4M3_EXT
-#endif
-#if defined(HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0)
 #define BTX_HIP_MX_SCALE_VEC32 HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0
-#endif
-#if defined(HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT)
-#define BTX_HIP_MX_SCALE_BLK32_EXT HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT
-#endif
-#if defined(BTX_HIP_MX_FP4_TYPE) && defined(BTX_HIP_MX_SCALE_VEC32)
 #define BTX_HIP_MX_HAS_MXFP4_PATH 1
-#endif
-#if defined(BTX_HIP_MX_FP8_TYPE) && defined(BTX_HIP_MX_SCALE_VEC32)
+#if defined(BTX_HIP_MXFP8_TYPES)
+#define BTX_HIP_MX_FP8_TYPE HIP_R_8F_E4M3
 #define BTX_HIP_MX_HAS_MXFP8_PATH 1
+#endif
+#if defined(BTX_HIP_MXFP8_SCALE_BLK32_EXT)
+#define BTX_HIP_MX_SCALE_BLK32_EXT HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT
 #endif
 #endif
 

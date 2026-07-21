@@ -29,6 +29,7 @@ inline constexpr size_t kRCPackedBankTargetGiBCount = 4;
 
 [[nodiscard]] bool RCCoupFullBankScheduleActive();
 [[nodiscard]] bool RCCoupMaterialExchangeActive();
+/** Compile-time only — NEVER reads getenv (consensus digest purity). */
 
 struct RCDcStatus {
     bool full_bank_schedule{false};
