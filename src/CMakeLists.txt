@@ -884,7 +884,7 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     # defines SPECIFIC, so also attach an sm_120a fatbin slice to that TU only
     # (do not put 120a into CMAKE_CUDA_ARCHITECTURES for the whole target).
     set_property(SOURCE cuda/matmul_v4_rc_mx_ozaki_native.cu APPEND PROPERTY
-      COMPILE_OPTIONS $<$<COMPILE_LANGUAGE:CUDA>:${BTX_CUDA_SM120A_GENCODE_COMPILE_OPTION}>
+      COMPILE_OPTIONS ${BTX_CUDA_SM120A_GENCODE_COMPILE_OPTION}
     )
   endif()
 else()
