@@ -139,6 +139,36 @@ python3 contrib/faststart/btx-agent-setup.py \
   --datadir="$HOME/.btx-service"
 ```
 
+For a self-custody miner, installation, verified snapshot bootstrap, wallet
+provisioning, and live-mining supervisor startup can be handed off in one
+command:
+
+```bash
+python3 contrib/faststart/btx-agent-setup.py \
+  --repo btxchain/btx \
+  --release-tag v0.33.1 \
+  --preset miner \
+  --datadir="$HOME/.btx" \
+  --start-mining
+```
+
+`--start-mining` is accepted only with `--preset=miner`. It starts the bundled
+`contrib/mining/start-live-mining.sh` after fast-start succeeds, so the same
+wallet provisioning, backend enforcement, peer recovery, PID files, and logs
+used by the standalone helper remain authoritative. Use
+`--mining-wallet=NAME`, `--mining-results-dir=PATH`, or repeated
+`--mining-arg=VALUE` options for operator overrides. Values beginning with
+`--` must use the `--mining-arg=--option=value` form. Core handoff arguments
+(`datadir`, config, chain, binary paths, wallet, and results directory) cannot
+be replaced through `--mining-arg`; use the corresponding installer option so
+the generated start and stop commands remain consistent.
+
+The installer rejects `--start-mining` together with `--no-start-daemon` or
+`--follow`: the supervisor requires the daemon, and a followed bootstrap does
+not return to perform the mining handoff. In `--json` mode, bootstrap and
+supervisor output stay on stderr while the final summary reports
+`"mining_started": true` and the exact start/stop command arrays.
+
 That flow:
 
 1. downloads `btx-release-manifest.json`,

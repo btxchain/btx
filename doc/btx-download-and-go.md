@@ -29,6 +29,24 @@ python3 contrib/faststart/btx-agent-setup.py \
   --datadir="$HOME/.btx"
 ```
 
+Add `--start-mining` when the same command should also provision the mining
+wallet/address and start the bundled live-mining supervisor after the verified
+fast-start bootstrap succeeds:
+
+```bash
+python3 contrib/faststart/btx-agent-setup.py \
+  --repo btxchain/btx \
+  --release-tag v0.33.1 \
+  --preset miner \
+  --datadir="$HOME/.btx" \
+  --start-mining
+```
+
+The handoff remains fail-closed: an installer or supervisor error makes the
+one-shot command fail, and Apple Silicon keeps the supervisor's strict Metal
+backend and zero-fallback defaults. Omit `--start-mining` when an external
+service manager should consume the generated command arrays instead.
+
 That one command installs the correct platform archive from the published
 `btx-release-manifest.json`, verifies the manifest/archive/snapshot-manifest
 against `SHA256SUMS` and `SHA256SUMS.asc` for remote releases, downloads the

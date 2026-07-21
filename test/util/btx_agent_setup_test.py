@@ -475,6 +475,100 @@ class BTXAgentSetupTest(unittest.TestCase):
                 ],
             )
 
+    def test_start_mining_runs_supervisor_after_bootstrap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            archive_path = self._build_fake_archive(root)
+            manifest_path = self._write_manifest(root, archive_path)
+            install_dir = root / "install"
+            datadir = root / "datadir"
+            results_dir = root / "operator" / "mining"
+            recorded: list[tuple[list[str], dict[str, object]]] = []
+
+            original_run = self.module.subprocess.run
+            try:
+                def fake_run(cmd, check, **kwargs):
+                    recorded.append((list(cmd), {"check": check, **kwargs}))
+                    class Result:
+                        returncode = 0
+                        stdout = "command output\n"
+                        stderr = ""
+                    return Result()
+
+                self.module.subprocess.run = fake_run
+                output = io.StringIO()
+                errors = io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    exit_code = self.module.main(
+                        [
+                            "--release-manifest",
+                            str(manifest_path),
+                            "--platform",
+                            "linux-x86_64",
+                            "--install-dir",
+                            str(install_dir),
+                            "--preset",
+                            "miner",
+                            "--chain",
+                            "regtest",
+                            "--datadir",
+                            str(datadir),
+                            "--start-mining",
+                            "--mining-wallet",
+                            "worker",
+                            "--mining-results-dir",
+                            str(results_dir),
+                            "--mining-arg=--rpcport=19000",
+                            "--json",
+                        ]
+                    )
+            finally:
+                self.module.subprocess.run = original_run
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(recorded), 2)
+            faststart_command, faststart_kwargs = recorded[0]
+            mining_command, mining_kwargs = recorded[1]
+            self.assertIn("btx-faststart.py", faststart_command[1])
+            self.assertTrue(faststart_kwargs["capture_output"])
+            self.assertEqual(
+                mining_command,
+                [
+                    str(ROOT / "contrib" / "mining" / "start-live-mining.sh"),
+                    f"--datadir={datadir}",
+                    f"--conf={datadir / 'faststart' / 'faststart.conf'}",
+                    "--chain=regtest",
+                    f"--cli={pathlib.Path(install_dir / 'btx-29.2' / 'bin' / 'btx-cli')}",
+                    f"--daemon={pathlib.Path(install_dir / 'btx-29.2' / 'bin' / 'btxd')}",
+                    "--wallet=worker",
+                    f"--results-dir={results_dir}",
+                    "--rpcport=19000",
+                ],
+            )
+            self.assertTrue(mining_kwargs["capture_output"])
+            summary = json.loads(output.getvalue())
+            self.assertTrue(summary["mining_started"])
+            self.assertEqual(summary["start_live_mining_command"], mining_command)
+            self.assertEqual(summary["mining_results_dir"], str(results_dir))
+            self.assertEqual(errors.getvalue(), "command output\ncommand output\n")
+
+    def test_start_mining_rejects_incompatible_modes(self):
+        cases = (
+            ["--start-mining"],
+            ["--preset=service", "--start-mining"],
+            ["--preset=miner", "--start-mining", "--no-start-daemon"],
+            ["--preset=miner", "--start-mining", "--follow"],
+            ["--preset=service", "--mining-arg=--rpcport=19000"],
+            ["--preset=service", "--mining-wallet=worker"],
+            ["--preset=miner", "--mining-arg=--results-dir=/tmp/mining"],
+            ["--preset=miner", "--mining-arg=--wallet=worker"],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    self.module.main(list(argv))
+                self.assertEqual(raised.exception.code, 2)
+
     def test_remote_release_requires_signature_unless_overridden(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)

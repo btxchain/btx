@@ -9,7 +9,8 @@ This script is the "download a binary and go" companion to btx-faststart.py:
 - fetch `btx-release-manifest.json` from a published release (or local path),
 - select the matching binary archive for the current platform,
 - verify and extract it,
-- optionally invoke `btx-faststart.py` with the installed binaries.
+- optionally invoke `btx-faststart.py` with the installed binaries,
+- optionally hand a miner preset off to the live-mining supervisor.
 """
 
 from __future__ import annotations
@@ -455,7 +456,7 @@ def find_binary(install_dir: Path, names: tuple[str, ...]) -> Path:
     raise FileNotFoundError(f"could not find any of {', '.join(names)} under {install_dir}")
 
 
-def run_bootstrap_subprocess(cmd: list[str], *, json_mode: bool) -> None:
+def run_logged_subprocess(cmd: list[str], *, json_mode: bool) -> None:
     if not json_mode:
         subprocess.run(cmd, check=True)
         return
@@ -537,6 +538,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--daemon-arg", action="append", default=[], help="Extra argument passed to btxd during bootstrap.")
     parser.add_argument("--cli-arg", action="append", default=[], help="Extra argument passed to btx-cli during bootstrap.")
     parser.add_argument(
+        "--start-mining",
+        action="store_true",
+        help="After a successful --preset=miner bootstrap, start the live-mining supervisor.",
+    )
+    parser.add_argument(
+        "--mining-wallet",
+        default="miner",
+        help="Wallet used by --start-mining (default: miner).",
+    )
+    parser.add_argument(
+        "--mining-results-dir",
+        help="Mining supervisor state/log directory (default: <datadir>/mining-ops).",
+    )
+    parser.add_argument(
+        "--mining-arg",
+        action="append",
+        default=[],
+        help="Extra argument passed to start-live-mining.sh; repeat as needed.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print a machine-readable JSON summary; bootstrap progress is written to stderr.",
@@ -545,7 +566,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str]) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.start_mining and args.preset != "miner":
+        parser.error("--start-mining requires --preset=miner")
+    if args.start_mining and args.no_start_daemon:
+        parser.error("--start-mining cannot be combined with --no-start-daemon")
+    if args.start_mining and args.follow:
+        parser.error("--start-mining cannot be combined with --follow because bootstrap would not return")
+    if (args.mining_wallet != "miner" or args.mining_results_dir or args.mining_arg) and args.preset != "miner":
+        parser.error("--mining-wallet, --mining-results-dir, and --mining-arg require --preset=miner")
+    managed_mining_args = ("--datadir", "--conf", "--chain", "--cli", "--daemon", "--wallet", "--results-dir")
+    for mining_arg in args.mining_arg:
+        if any(mining_arg == option or mining_arg.startswith(f"{option}=") for option in managed_mining_args):
+            parser.error(
+                f"--mining-arg cannot override installer-managed option {mining_arg.split('=', 1)[0]}"
+            )
 
     manifest_reference_source = args.release_manifest or default_release_manifest_source(
         args.repo,
@@ -688,7 +725,11 @@ def main(argv: list[str]) -> int:
         summary["faststart_conf"] = str(faststart_conf)
         summary["faststart_command"] = faststart_cmd
         if args.preset == "miner":
-            results_dir = datadir / "mining-ops"
+            results_dir = (
+                Path(args.mining_results_dir).expanduser()
+                if args.mining_results_dir
+                else datadir / "mining-ops"
+            )
             summary["mining_results_dir"] = str(results_dir)
             summary["start_live_mining_command"] = [
                 str(SCRIPT_DIR.parent / "mining" / "start-live-mining.sh"),
@@ -697,14 +738,18 @@ def main(argv: list[str]) -> int:
                 f"--chain={args.chain}",
                 f"--cli={btx_cli_path}",
                 f"--daemon={btxd_path}",
-                "--wallet=miner",
+                f"--wallet={args.mining_wallet}",
                 f"--results-dir={results_dir}",
+                *args.mining_arg,
             ]
             summary["stop_live_mining_command"] = [
                 str(SCRIPT_DIR.parent / "mining" / "stop-live-mining.sh"),
                 f"--results-dir={results_dir}",
             ]
-        run_bootstrap_subprocess(faststart_cmd, json_mode=args.json)
+        run_logged_subprocess(faststart_cmd, json_mode=args.json)
+        if args.start_mining:
+            run_logged_subprocess(summary["start_live_mining_command"], json_mode=args.json)
+            summary["mining_started"] = True
 
     if args.json:
         print(json.dumps(summary, indent=2))
@@ -716,6 +761,8 @@ def main(argv: list[str]) -> int:
             print(f"snapshot manifest: {snapshot_manifest_path}")
         if args.preset:
             print(f"bootstrapped preset: {args.preset}")
+        if args.start_mining:
+            print("started live mining supervisor")
     return 0
 
 

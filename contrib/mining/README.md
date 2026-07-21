@@ -103,6 +103,27 @@ Best practices:
 
 Quick start:
 
+For a new release-based installation, the complete verified install,
+AssumeUTXO bootstrap, mining-wallet provisioning, and supervisor handoff is one
+command:
+
+```bash
+python3 contrib/faststart/btx-agent-setup.py \
+  --repo btxchain/btx \
+  --release-tag v0.33.1 \
+  --preset miner \
+  --datadir="$HOME/.btx" \
+  --start-mining
+```
+
+The command returns only after the fast-start bootstrap succeeds and
+`start-live-mining.sh` passes its initial startup check. It does not duplicate
+the supervisor: repeated runs keep the existing PID-file idempotency. Pass
+additional supervisor options with repeated `--mining-arg=VALUE` arguments.
+
+For scripts that need to inspect or modify the generated handoff instead, omit
+`--start-mining` and consume the JSON command arrays:
+
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
