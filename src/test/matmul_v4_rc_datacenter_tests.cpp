@@ -4,9 +4,12 @@
 
 #include <cuda/matmul_v4_rc_episode_context.h>
 #include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_batch.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
+#include <matmul/matmul_v4_rc_scale_axes.h>
+#include <matmul/matmul_v4_rc_transcript.h>
 
 #include <consensus/params.h>
 #include <pow.h>
@@ -496,10 +499,13 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_stub)
     const auto pages = rc::DeriveCoupledBankPages(header, 0, params);
     BOOST_REQUIRE(ctx.LoadBank(pages, &err));
 
+    // Order matters (WS-F):
+    //  - non-CUDA stub → honesty token graph_unavailable (BindEpisode not required)
+    //  - CUDA impl without BindEpisode → BindEpisode required
     if (!matmul_v4::cuda::IsRcEpisodeCudaCompiled()) {
-        // CPU/stub build: graph stays unavailable regardless of BindEpisode.
         BOOST_CHECK(!ctx.RunBarrierGraph(&err));
-        BOOST_CHECK_MESSAGE(err.find("graph_unavailable") != std::string::npos, err);
+        BOOST_CHECK_MESSAGE(err.find("graph_unavailable") != std::string::npos,
+                            "non-CUDA stub must refuse with graph_unavailable; got: " << err);
         BOOST_CHECK(!ctx.Provenance().peak_ready);
         BOOST_CHECK_EQUAL(ctx.Provenance().gemm_path_label, "stub_not_wired");
         ctx.Destroy();
@@ -507,9 +513,10 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_stub)
         return;
     }
 
-    // CUDA build: without BindEpisode the graph must refuse.
     BOOST_CHECK(!ctx.RunBarrierGraph(&err));
-    BOOST_CHECK(err.find("BindEpisode") != std::string::npos);
+    BOOST_CHECK_MESSAGE(err.find("BindEpisode") != std::string::npos,
+                        "CUDA RunBarrierGraph without BindEpisode must require it; got: "
+                            << err);
 
     BOOST_REQUIRE_MESSAGE(ctx.BindEpisode(header, 0, &err), err);
     std::vector<int8_t> seed_state;
@@ -657,6 +664,46 @@ BOOST_AUTO_TEST_CASE(rc_dc_coupled_barrier_tail_helpers)
 
     std::vector<uint256> roots = tx.barrier_roots;
     BOOST_CHECK(rc::AssembleCoupledEpisodeDigest(tx.bank_root, roots) == dig);
+}
+
+/** Golden / transcript version bump requirement (silent replacement forbidden). */
+BOOST_AUTO_TEST_CASE(rc_dc_golden_transcript_version_bump_requirement)
+{
+    BOOST_CHECK_EQUAL(rc::kRCTranscriptVersion, rc::ENC_RC_V1);
+    BOOST_CHECK_EQUAL(rc::kRCTranscriptVersion, 1u);
+    BOOST_CHECK_EQUAL(rc::kRCTranscriptVersionV1, 1u);
+    BOOST_CHECK(rc::kRCTranscriptVersionV1 != rc::kRCTranscriptVersionV2);
+    // Coupled toy golden must remain pinned; any digest change requires an
+    // explicit kRCTranscriptVersion / ENC_RC_V* bump and dual-golden retention
+    // (see rc_coup_golden_digest_stable + contrib/matmul-v4/rc-golden-gate.py).
+    // Post WS-A bank-template projection (null §H.4 seeds):
+    const auto header = MakeCoupHeader(42);
+    const uint256 d = rc::RecomputeCoupledPuzzleReference(header, 0);
+    BOOST_CHECK_EQUAL(d.GetHex(),
+                      "71c40b7b28bf12926282912bf694b3ac699ec728fcb5fe2123b43af7346e731b");
+}
+
+/** Public activation heights + parked datacenter switches stay off. */
+BOOST_AUTO_TEST_CASE(rc_dc_public_heights_and_parked_switches_inert)
+{
+    Consensus::Params mainnet;
+    BOOST_CHECK_EQUAL(mainnet.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(mainnet.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!mainnet.IsMatMulRCActive(0));
+    BOOST_CHECK(!mainnet.IsMatMulRCActive(std::numeric_limits<int32_t>::max() - 1));
+
+    BOOST_CHECK(!dc::kRCCoupFullBankScheduleEnabled);
+    BOOST_CHECK(!dc::kRCCoupMaterialExchangeEnabled);
+    BOOST_CHECK(!dc::kRCThreeAxisScheduleWireEnabled);
+    BOOST_CHECK(!dc::RCCoupFullBankScheduleActive());
+    BOOST_CHECK(!dc::RCCoupMaterialExchangeActive());
+    BOOST_CHECK(!rc::kRCThreeAxisScheduleEnabled);
+
+    const dc::RCDcStatus st = dc::ProbeRCDcStatus();
+    BOOST_CHECK(!st.full_bank_schedule);
+    BOOST_CHECK(!st.material_exchange);
+    BOOST_CHECK(!st.three_axis_wire);
+    BOOST_CHECK(!st.gkr_arbiter);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

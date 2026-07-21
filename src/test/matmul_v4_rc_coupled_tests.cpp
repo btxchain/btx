@@ -376,7 +376,9 @@ BOOST_AUTO_TEST_CASE(rc_coup_check_pow_regtest_gate)
 BOOST_AUTO_TEST_CASE(rc_coup_golden_digest_stable)
 {
     // FREEZE toy golden for MakeCoupHeader(42) @ height 0.
-    // If the coupled algorithm changes, update this hex deliberately (no silent replace).
+    // If the coupled algorithm changes, update this hex deliberately (no silent
+    // replace) AND bump kRCTranscriptVersion / ENC_RC_V* while retaining prior
+    // goldens in contrib/matmul-v4/rc-golden-gate.py (WS-F invariant).
     const auto header = MakeCoupHeader(42);
     const uint256 d1 = rc::RecomputeCoupledPuzzleReference(header, /*height=*/0);
     const uint256 d2 = rc::RecomputeCoupledPuzzleReference(header, /*height=*/0);
