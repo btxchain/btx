@@ -588,10 +588,12 @@ def evaluate(
             "peak_capable": lt_evidence.get("peak_capable") is True,
             "peak_ready": lt_evidence.get("peak_ready") is True,
             "resident_native_mx_wired": lt_evidence.get("resident_native_mx_wired") is True,
+            "production_shape_qualified": lt_evidence.get("production_shape_qualified") is True,
             "native_mx_qualified": (
                 lt_evidence.get("native_mxfp4_qualified") is True
                 or lt_evidence.get("native_fp8_qualified") is True
             ),
+            "mx_backend": str(lt_evidence.get("mx_backend") or rep.get("mx_backend") or ""),
             "silicon_rate_provenance": silicon_rate_provenance(rep),
             "device_measured": device_measured(rep),
             "nps": measured_nps,
@@ -995,12 +997,19 @@ def evaluate(
         and normative_gpu_ok(r, NORMATIVE_AMD_PART, ack_non_normative=ack_non_normative_gpu)
     ]
     def g4_native_mx_ready(row: dict) -> bool:
+        # production_shape_qualified is REQUIRED — fabricating peak_ready without
+        # it (or omitting it) must fail closed. Scalar-decode backends cannot
+        # count as native MXFP4 even if native_mxfp4_qualified is fabricated.
+        backend = (row.get("mx_backend") or "").lower()
+        if "scalar-decode" in backend or "scalar_fp4" in backend:
+            return False
         return bool(
             row["native_path_eligible"]
             and row["peak_status_measured"]
             and row["peak_capable"]
             and row["peak_ready"]
             and row["resident_native_mx_wired"]
+            and row.get("production_shape_qualified") is True
             and row["native_mx_qualified"]
         )
 
@@ -1017,8 +1026,9 @@ def evaluate(
                 reasons.append(
                     "G4 MI350/OCP MX FAIL on %s: require native_path_eligible, "
                     "lt.peak_status_measured, lt.peak_capable, lt.peak_ready, "
-                    "lt.resident_native_mx_wired, "
-                    "and a qualified native MXFP4/FP8 lane." % r["file"]
+                    "lt.resident_native_mx_wired, lt.production_shape_qualified, "
+                    "and a qualified native MXFP4/FP8 lane (not scalar-decode)."
+                    % r["file"]
                 )
 
     # G5 — external C-15: never auto-pass from JSON; require explicit ack.
@@ -1208,10 +1218,12 @@ def check_g4(reports_dir: str | None) -> int:
             and lt_evidence.get("peak_capable") is True
             and lt_evidence.get("peak_ready") is True
             and lt_evidence.get("resident_native_mx_wired") is True
+            and lt_evidence.get("production_shape_qualified") is True
             and (
                 lt_evidence.get("native_mxfp4_qualified") is True
                 or lt_evidence.get("native_fp8_qualified") is True
             )
+            and "scalar-decode" not in str(lt_evidence.get("mx_backend") or "").lower()
         )
         if native_mx_ready:
             eligible.append(os.path.basename(f))

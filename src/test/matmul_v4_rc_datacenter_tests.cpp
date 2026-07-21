@@ -21,6 +21,7 @@
 #include <limits>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace rc = matmul::v4::rc;
@@ -182,6 +183,59 @@ BOOST_AUTO_TEST_CASE(rc_dc_getenv_cannot_flip_consensus_digest)
     const uint256 without_env = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts);
     BOOST_CHECK(with_env == without_env);
     BOOST_CHECK(with_env == rc::MineRCCoupledEpisode(header, 0, params));
+}
+
+
+/** ExactGemmCompare + GKR env flags must not flip RecomputeCoupledPuzzleReference
+ *  digests on the empty-backend consensus path. Two threads with contradictory
+ *  policies must still agree (hetero / ASAN-safe). */
+BOOST_AUTO_TEST_CASE(rc_dc_hetero_exactgemm_gkr_env_cannot_flip_digest)
+{
+    const auto params = rc::MakeToyRCCoupParams();
+    const auto header = MakeCoupHeader(424242);
+    rc::RCCoupOptions opts;
+
+    ::unsetenv("BTX_RC_EXACT_GEMM_COMPARE");
+    ::unsetenv("BTX_RC_GKR_SHADOW");
+    ::unsetenv("BTX_RC_GKR_ARBITER");
+    ::unsetenv("BTX_RC_GKR_MEASURE_LADDER");
+    ::unsetenv("BTX_RC_GKR_MEASURE_MEDIUM");
+    const uint256 baseline =
+        rc::RecomputeCoupledPuzzleReference(header, 0, params, opts, /*gemm=*/{});
+    BOOST_REQUIRE(!baseline.IsNull());
+
+    ::setenv("BTX_RC_EXACT_GEMM_COMPARE", "1", /*overwrite=*/1);
+    ::setenv("BTX_RC_GKR_SHADOW", "1", /*overwrite=*/1);
+    ::setenv("BTX_RC_GKR_ARBITER", "1", /*overwrite=*/1);
+    ::setenv("BTX_RC_GKR_MEASURE_LADDER", "1", /*overwrite=*/1);
+    ::setenv("BTX_RC_GKR_MEASURE_MEDIUM", "1", /*overwrite=*/1);
+    const uint256 with_flags =
+        rc::RecomputeCoupledPuzzleReference(header, 0, params, opts, /*gemm=*/{});
+    BOOST_CHECK(with_flags == baseline);
+
+    uint256 t_on{};
+    uint256 t_off{};
+    std::thread a([&]() {
+        ::setenv("BTX_RC_EXACT_GEMM_COMPARE", "1", /*overwrite=*/1);
+        ::setenv("BTX_RC_GKR_ARBITER", "1", /*overwrite=*/1);
+        t_on = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts, /*gemm=*/{});
+    });
+    std::thread b([&]() {
+        ::unsetenv("BTX_RC_EXACT_GEMM_COMPARE");
+        ::unsetenv("BTX_RC_GKR_ARBITER");
+        t_off = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts, /*gemm=*/{});
+    });
+    a.join();
+    b.join();
+    BOOST_CHECK(t_on == baseline);
+    BOOST_CHECK(t_off == baseline);
+    BOOST_CHECK(t_on == t_off);
+
+    ::unsetenv("BTX_RC_EXACT_GEMM_COMPARE");
+    ::unsetenv("BTX_RC_GKR_SHADOW");
+    ::unsetenv("BTX_RC_GKR_ARBITER");
+    ::unsetenv("BTX_RC_GKR_MEASURE_LADDER");
+    ::unsetenv("BTX_RC_GKR_MEASURE_MEDIUM");
 }
 
 BOOST_AUTO_TEST_CASE(rc_dc_q_batch_digest_identity)

@@ -155,11 +155,15 @@ RCPhase2ExactGemmDeviceProbe ProbeRCPhase2ExactGemmDevice()
     }
     st.device_gemm_returned = ok;
     if (!ok) {
+        // Honesty: never leave provider="device" on decline.
+        st.provider.clear();
         st.detail = "device_gemm_declined";
         return st;
     }
     st.matched_cpu_exactgemm = (device == cpu);
     if (!st.matched_cpu_exactgemm) {
+        // Honesty: never leave provider="device" on mismatch.
+        st.provider.clear();
         st.detail = "device_gemm_mismatch_vs_cpu";
         return st;
     }

@@ -213,6 +213,89 @@ class RCGateNumericThresholdTests(unittest.TestCase):
             self.assertEqual(len(reps), 1)
             self.assertEqual(reps[0]["tool"], "rc-stage-g-campaign")
 
+    def test_scalar_fp4_native_claim_never_go(self):
+        """Scalar-decode MXFP4 labeled as native_mxfp4_qualified must not GO."""
+        rep = toy_report(
+            toy=False,
+            production_dims=True,
+            source_revision="deadbeef",
+            device_resident=True,
+            native_path_eligible=True,
+            wall_clock_provenance="chrono_measured",
+            evidence_kind="measured",
+            extractmx_self_qual={
+                "status": "pass",
+                "native_mxfp4_qualified": True,  # fabricated
+                "mx_backend": "mxfp4_blockscaled_device_scalar-decode",
+            },
+            allocation_cap_verdicts={
+                "512MiB": "pass",
+                "2GiB": "pass",
+                "8GiB": "pass",
+            },
+            phase_wall_s={"total": 10.0, "verify": 0.05},
+            run_variance={"episode_cv": 0.02},
+            residency_sweep={
+                "cliff_ratio": 2.0,
+                "stream_util_frac": 0.5,
+                "points": [
+                    {"working_set_bytes": 128 * 1024 * 1024, "wall_s": 2.0},
+                    {"working_set_bytes": 200 * 1024 * 1024, "wall_s": 1.0},
+                ],
+            },
+            k_curve={
+                "mode": "measured",
+                "digests_match": True,
+                "k_at_24gb": 1.5,
+                "k_variance": 0.01,
+            },
+            verifier_floor={
+                "measured": True,
+                "full_episode_wall_s": 10.0,
+                "full_verify_wall_s": 0.05,
+            },
+            gpu_campaign_present=True,
+            nvlink_campaign_present=True,
+        )
+        g = rc_gate.gate_report(rep)
+        self.assertFalse(g["full_pass"])
+        blob = " ".join(g["reasons"])
+        self.assertTrue(
+            "scalar" in blob.lower() or "native" in blob.lower() or g["g1"] != "pass",
+            msg=blob,
+        )
+
+    def test_fabricated_projection_label_never_go(self):
+        """Fabricated evidence_kind that is projected/MAC must hard-fail GO."""
+        rep = toy_report(
+            toy=False,
+            production_dims=True,
+            source_revision="deadbeef",
+            device_resident=True,
+            native_path_eligible=True,
+            wall_clock_provenance="chrono_measured",
+            evidence_kind="projected_mac_count",  # fabricated projection label
+            extractmx_self_qual={"status": "pass", "native_mxfp4_qualified": True},
+            allocation_cap_verdicts={
+                "512MiB": "pass",
+                "2GiB": "pass",
+                "8GiB": "pass",
+            },
+            phase_wall_s={"total": 10.0, "verify": 0.05},
+            run_variance={"episode_cv": 0.02},
+            residency_sweep=[{"working_set_bytes": 128 * 1024 * 1024, "wall_s": 1.0}],
+            k_curve={"mode": "measured", "digests_match": True},
+            gpu_campaign_present=True,
+            nvlink_campaign_present=True,
+        )
+        g = rc_gate.gate_report(rep)
+        self.assertFalse(g["full_pass"])
+        blob = " ".join(g["reasons"])
+        self.assertTrue(
+            "REFUSE" in blob or "projected" in blob.lower() or "mac" in blob.lower(),
+            msg=blob,
+        )
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main(verbosity=2))

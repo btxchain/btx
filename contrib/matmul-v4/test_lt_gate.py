@@ -136,6 +136,7 @@ def report(
             "peak_capable": peak_capable,
             "peak_ready": peak_ready,
             "resident_native_mx_wired": resident_native_mx_wired,
+            "production_shape_qualified": True,
             "native_mxfp4_qualified": native_mxfp4_qualified,
             "native_fp8_qualified": native_fp8_qualified,
         },
@@ -231,6 +232,7 @@ class LtGateSchemaTest(unittest.TestCase):
             "peak_capable",
             "peak_ready",
             "resident_native_mx_wired",
+            "production_shape_qualified",
             "native_mxfp4_qualified",
         ):
             with self.subTest(field=field):
@@ -244,6 +246,39 @@ class LtGateSchemaTest(unittest.TestCase):
                     "G4 MI350/OCP MX FAIL" in reason
                     for reason in deficient_reasons
                 ))
+
+    def test_g4_rejects_production_shape_omitted_even_if_peak_ready_fabricated(self):
+        """Omitted production_shape_qualified must fail even when peak_ready is True."""
+        labels = {"mi350.json": ("amd", "datacenter", "MI350")}
+        fabricated = report("mi350.json", 200.0, backend="hip")
+        fabricated["lt"].pop("production_shape_qualified", None)
+        fabricated["lt"]["peak_ready"] = True
+        _, gates, _, reasons, _, _ = lt_gate.evaluate(
+            [fabricated], labels, {}, False
+        )
+        self.assertFalse(gates["G4_mi350_exactness"])
+        self.assertTrue(any("production_shape_qualified" in r for r in reasons))
+
+    def test_g4_rejects_scalar_fp4_backend_as_native(self):
+        """Scalar-decode MXFP4 must never pass as native-qualified G4 evidence."""
+        labels = {"mi350.json": ("amd", "datacenter", "MI350")}
+        scalar = report("mi350.json", 200.0, backend="hip")
+        scalar["lt"]["mx_backend"] = "mxfp4_blockscaled_device_scalar-decode"
+        scalar["lt"]["native_mxfp4_qualified"] = True  # fabricated claim
+        _, gates, _, reasons, _, _ = lt_gate.evaluate(
+            [scalar], labels, {}, False
+        )
+        self.assertFalse(gates["G4_mi350_exactness"])
+        self.assertTrue(any("scalar-decode" in r or "G4 MI350" in r for r in reasons))
+
+    def test_g1_rejects_fabricated_normative_label_without_matching_part(self):
+        """Fabricated B200 label on a non-B200 part must fail G1 without ack."""
+        labels = {"h100.json": ("nvidia", "datacenter", "H100")}
+        _, gates, _, reasons, _, _ = lt_gate.evaluate(
+            [report("h100.json", 400.0)], labels, {}, False
+        )
+        self.assertFalse(gates["G1_tensor_majority"])
+        self.assertTrue(any("B200" in r for r in reasons))
 
     def test_g2_allows_different_hosts_when_device_timing_is_host_independent(self):
         dc = report(

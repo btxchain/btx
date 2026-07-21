@@ -177,6 +177,34 @@ struct RCCoupTiming {
 };
 
 /**
+ * Optional capture of real coupled GEMM + Extract wires for GKR ProveWinnerCoupled.
+ * Digests are identical whether or not this is populated (observe-only).
+ */
+struct RCCoupGemmTranscript {
+    uint32_t barrier{0};
+    uint32_t lobe{0};
+    uint32_t page_id{0};
+    std::vector<int8_t> A; // 1×W lobe row
+    std::vector<int8_t> B; // W×W bank page
+    std::vector<int64_t> Y; // 1×W partial
+};
+
+struct RCCoupExtractTranscript {
+    uint32_t barrier{0};
+    uint256 extract_prf{};
+    std::vector<int64_t> extract_in; // post perm+mix
+    std::vector<int8_t> extract_out; // active state after Extract
+    uint256 barrier_root{};
+};
+
+struct RCCoupEpisodeTranscript {
+    uint256 bank_root{};
+    std::vector<uint256> barrier_roots;
+    std::vector<RCCoupGemmTranscript> gemms;
+    std::vector<RCCoupExtractTranscript> extracts;
+};
+
+/**
  * Sole consensus ground truth for the coupled puzzle (toy params).
  * sigma = DeriveSigma(header) (SHA256d header path, consistent with RC).
  * Fixed work per barrier — no early exit, no nonce-dependent dimensions (C4).
@@ -190,12 +218,15 @@ struct RCCoupTiming {
  * (empty = CPU ExactGemmS8S8). Device-first via ExactGemmS8S8Dispatched
  * semantics: successful device output replaces CPU (no silent rescue of a
  * wrong-but-successful backend). Consensus REJECT passes an empty backend.
+ * Optional out_tx captures real layer wires for GKR (does not change digest).
+ * Malformed params (ValidateRCCoupParams false) → null digest (reject, no assert).
  */
 [[nodiscard]] uint256 RecomputeCoupledPuzzleReference(
     const CBlockHeader& header, int32_t height, const RCCoupParams& params,
     const RCCoupOptions& options = {},
     const matmul::v4::lt::ExactGemmBackend& gemm = {},
-    RCCoupTiming* out_timing = nullptr);
+    RCCoupTiming* out_timing = nullptr,
+    RCCoupEpisodeTranscript* out_tx = nullptr);
 
 /** Miner entry: same digest as the CPU reference; may inject ExactGemm. */
 [[nodiscard]] uint256 MineCoupledPuzzle(const CBlockHeader& header, int32_t height,

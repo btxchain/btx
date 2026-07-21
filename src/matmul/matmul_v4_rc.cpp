@@ -668,7 +668,11 @@ uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
                    const RCEpisodeOptions& options, std::vector<RCRoundTranscript>* out_rounds,
                    RCEpisodeTiming* out_timing, const lt::ExactGemmBackend& gemm)
 {
-    assert(ValidateRCEpisodeParams(params));
+    // Consensus-reachable: malformed dims → REJECT (null digest), never assert/crash.
+    if (!ValidateRCEpisodeParams(params)) {
+        if (out_rounds) out_rounds->clear();
+        return uint256{};
+    }
     using clock = std::chrono::steady_clock;
     const auto t_episode0 = clock::now();
     double phase1_s = 0.0, phase2_s = 0.0, phase3_s = 0.0;

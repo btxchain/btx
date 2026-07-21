@@ -204,7 +204,8 @@ struct RCMerkleProof {
  *  Optional `gemm` may accelerate Phase-2 s8xs8 stages (bound < 2^24) when a
  *  device backend is injected (P0.3: device replaces CPU; CPU is fallback /
  *  dispute via BTX_RC_EXACT_GEMM_COMPARE=1).
- *  Consensus REJECT / spot-check MUST pass an empty backend. */
+ *  Consensus REJECT / spot-check MUST pass an empty backend.
+ *  Malformed params (ValidateRCEpisodeParams false) → null digest (reject, no assert). */
 [[nodiscard]] uint256 RecomputeResidentCurriculumReference(
     const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
     const RCEpisodeOptions& options = {},

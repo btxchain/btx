@@ -120,7 +120,8 @@ uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages, uint32_t b
                 sizeof(kRCCoupBankTag) - 1);
     const size_t page_bytes = static_cast<size_t>(lobe_width) * lobe_width;
     for (uint32_t p = 0; p < bank_pages; ++p) {
-        assert(pages[p].size() == page_bytes);
+        // Malformed page size → null commitment (caller treats as reject).
+        if (pages[p].size() != page_bytes) return uint256{};
         outer.Write(reinterpret_cast<const unsigned char*>(pages[p].data()), pages[p].size());
     }
     uint8_t d1[CSHA256::OUTPUT_SIZE];
@@ -137,8 +138,10 @@ uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
     CSHA256 outer;
     outer.Write(reinterpret_cast<const unsigned char*>(kRCCoupBankTag),
                 sizeof(kRCCoupBankTag) - 1);
+    const size_t page_bytes = static_cast<size_t>(params.lobe_width) * params.lobe_width;
     for (uint32_t p = 0; p < params.bank_pages; ++p) {
         const auto page = DeriveCoupledBankPage(header, height, p, params);
+        if (page.size() != page_bytes) return uint256{};
         outer.Write(reinterpret_cast<const unsigned char*>(page.data()), page.size());
     }
     uint8_t d1[CSHA256::OUTPUT_SIZE];
@@ -176,7 +179,8 @@ void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
  */
 void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
 {
-    assert(n >= 2 && (n & (n - 1)) == 0);
+    // Entry guard: non-pow2 / tiny n is a reject path (ValidateRCCoupParams).
+    if (n < 2 || (n & (n - 1)) != 0) return;
     uint32_t bits = 0;
     for (uint32_t t = n; t > 1; t >>= 1) ++bits;
     auto rotl = [bits, n](uint32_t x, uint32_t r) -> uint32_t {
@@ -226,16 +230,16 @@ void ApplyBalancedPermutation(std::vector<int64_t>& s, const std::vector<uint32_
  * Non-affine Extract (C3.d / C5): ExtractMXTileInt64 per 32-wide tile.
  * Lookup-argument-shaped for Stage E (see header note).
  */
-void ExtractActiveState(const uint256& prf_key, const std::vector<int64_t>& raw,
-                        std::vector<int8_t>& out)
+[[nodiscard]] bool ExtractActiveState(const uint256& prf_key, const std::vector<int64_t>& raw,
+                                       std::vector<int8_t>& out)
 {
-    assert(raw.size() == out.size());
-    assert(raw.size() % kRCMxBlockLen == 0);
+    if (raw.size() != out.size() || raw.size() % kRCMxBlockLen != 0) return false;
     const uint32_t n_tiles = static_cast<uint32_t>(raw.size() / kRCMxBlockLen);
     for (uint32_t t = 0; t < n_tiles; ++t) {
         ExtractMXTileInt64(prf_key, /*i=*/0, /*bj=*/t, raw.data() + t * kRCMxBlockLen,
                            out.data() + t * kRCMxBlockLen);
     }
+    return true;
 }
 
 /**
@@ -285,7 +289,11 @@ void LobeLocalGemm(const int8_t* lobe_row, const std::vector<int8_t>& page, uint
 {
     std::vector<int8_t> L(lobe_row, lobe_row + lobe_width);
     const auto y = ExactGemmS8S8Dispatched(gemm, L, page, /*rows=*/1, lobe_width, lobe_width);
-    assert(y.size() == lobe_width);
+    if (y.size() != lobe_width) {
+        // Size mismatch → zero partials (caller digest path rejects on bad params).
+        for (uint32_t c = 0; c < lobe_width; ++c) out_w[c] = 0;
+        return;
+    }
     for (uint32_t c = 0; c < lobe_width; ++c) {
         out_w[c] = static_cast<int64_t>(y[c]);
     }
@@ -314,9 +322,13 @@ DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, i
                                                    uint32_t n_devices, DistReduceOrder order,
                                                    const lt::ExactGemmBackend& gemm)
 {
-    assert(ValidateRCCoupParams(params));
-    assert(barrier < params.barriers);
-    assert(n_devices >= 1);
+    // Malformed dims / barrier / device count → REJECT (null digest), never assert.
+    if (!ValidateRCCoupParams(params) || barrier >= params.barriers || n_devices < 1) {
+        DistEpisodeResult bad;
+        bad.n_devices = n_devices;
+        bad.order = order;
+        return bad;
+    }
 
     const uint32_t n = params.StateBytes();
     const uint256 sigma = matmul::v4::DeriveSigma(header);
@@ -355,7 +367,12 @@ DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, i
         for (uint32_t c = 0; c < params.lobe_width; ++c) lobe_sum[c] += seg[c];
     }
     const auto reduced = ReduceDevicePartials(per_device, order);
-    assert(reduced == lobe_sum);
+    if (reduced != lobe_sum) {
+        DistEpisodeResult bad;
+        bad.n_devices = n_devices;
+        bad.order = order;
+        return bad;
+    }
 
     std::vector<int64_t> acc(n, 0);
     for (uint32_t ell = 0; ell < params.lobes; ++ell) {
@@ -370,7 +387,12 @@ DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, i
         Sha256TaggedU32U32(kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigma, barrier,
                            /*unused=*/0);
     std::vector<int8_t> extracted(n);
-    ExtractActiveState(lt::DeriveMatExpandPrfKey(extract_seed), acc, extracted);
+    if (!ExtractActiveState(lt::DeriveMatExpandPrfKey(extract_seed), acc, extracted)) {
+        DistEpisodeResult bad;
+        bad.n_devices = n_devices;
+        bad.order = order;
+        return bad;
+    }
 
     DistEpisodeResult out;
     out.pre_extract_sum = std::move(acc);
@@ -519,7 +541,9 @@ uint256 FingerprintRCCoupParams(const RCCoupParams& p)
 std::vector<int8_t> DeriveCoupledBankPage(const CBlockHeader& header, int32_t height,
                                           uint32_t page, const RCCoupParams& params)
 {
-    assert(page < params.bank_pages);
+    // Out-of-range page → empty (reject), never assert/crash.
+    if (params.bank_pages == 0 || page >= params.bank_pages) return {};
+    if (params.lobe_width == 0 || (params.lobe_width % 32) != 0) return {};
     const uint256 bank_root_seed = BankRootSeed(header, height);
     const uint256 page_seed =
         Sha256TaggedU32(kRCCoupBankTag, sizeof(kRCCoupBankTag) - 1, bank_root_seed, page);
@@ -612,9 +636,10 @@ std::vector<uint32_t> SelectCoupledBankPageIds(uint32_t barrier, uint32_t lobe,
                                                const RCCoupParams& params, const uint256& sigma,
                                                bool full_bank_schedule)
 {
-    assert(params.bank_pages > 0);
-    assert(barrier < params.barriers || params.barriers == 0);
-    assert(lobe < params.lobes || params.lobes == 0);
+    // Malformed entry → empty page list (caller rejects), never assert/crash.
+    if (params.bank_pages == 0) return {};
+    if (params.barriers != 0 && barrier >= params.barriers) return {};
+    if (params.lobes != 0 && lobe >= params.lobes) return {};
     if (!full_bank_schedule) {
         return {static_cast<uint32_t>((barrier + lobe) % params.bank_pages)};
     }
@@ -651,26 +676,35 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                                         const RCCoupOptions& options)
 {
     return RecomputeCoupledPuzzleReference(header, height, MakeToyRCCoupParams(), options, {},
-                                           nullptr);
+                                           nullptr, nullptr);
 }
 
 uint256 MineCoupledPuzzle(const CBlockHeader& header, int32_t height,
                           const RCCoupParams& params, const lt::ExactGemmBackend& gemm,
                           const RCCoupOptions& options)
 {
-    return RecomputeCoupledPuzzleReference(header, height, params, options, gemm, nullptr);
+    return RecomputeCoupledPuzzleReference(header, height, params, options, gemm, nullptr,
+                                           nullptr);
 }
 
 uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t height,
                                         const RCCoupParams& params,
                                         const RCCoupOptions& options,
                                         const lt::ExactGemmBackend& gemm,
-                                        RCCoupTiming* out_timing)
+                                        RCCoupTiming* out_timing,
+                                        RCCoupEpisodeTranscript* out_tx)
 {
-    assert(ValidateRCCoupParams(params));
+    // Consensus-reachable: malformed dims → REJECT (null digest), never assert/crash.
+    if (!ValidateRCCoupParams(params)) {
+        if (out_tx) *out_tx = RCCoupEpisodeTranscript{};
+        return uint256{};
+    }
     const auto t0 = std::chrono::steady_clock::now();
     const uint32_t n = params.StateBytes();
     const uint256 sigma = matmul::v4::DeriveSigma(header);
+    if (out_tx) {
+        *out_tx = RCCoupEpisodeTranscript{};
+    }
 
     const bool streamed = options.mode == RCCoupExecMode::Streamed;
     const bool checkpointed = options.mode == RCCoupExecMode::Checkpointed;
@@ -699,6 +733,8 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                 }
             }
         }
+        if (bank_root.IsNull()) return uint256{};
+        if (out_tx) out_tx->bank_root = bank_root;
         if (out_timing) {
             out_timing->bank_s = std::chrono::duration<double>(
                                      std::chrono::steady_clock::now() - t_bank0)
@@ -713,7 +749,9 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         // (ExpandMxDequantInt8 requires rows % 32 == 0).
         const auto tile =
             ExpandMxDequantInt8(lobe_seeds[ell], params.lobe_width, params.lobe_width);
-        assert(tile.size() == static_cast<size_t>(params.lobe_width) * params.lobe_width);
+        if (tile.size() != static_cast<size_t>(params.lobe_width) * params.lobe_width) {
+            return uint256{};
+        }
         std::memcpy(state.data() + ell * params.lobe_width, tile.data(), params.lobe_width);
     }
 
@@ -755,18 +793,33 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
             const auto page_ids =
                 SelectCoupledBankPageIds(b, ell, params, sigma, full_sched);
+            if (page_ids.empty()) return uint256{};
             int64_t* dest = acc.data() + ell * params.lobe_width;
             for (uint32_t page_id : page_ids) {
                 std::vector<int64_t> partial(params.lobe_width, 0);
+                std::vector<int8_t> page_for_tx;
                 if (streamed) {
                     auto page = DeriveCoupledBankPage(header, height, page_id, params);
                     MaybeZeroSkipPage(page, page_id, options);
+                    if (out_tx) page_for_tx = page;
                     LobeLocalGemm(state.data() + ell * params.lobe_width, page,
                                   params.lobe_width, partial.data(), gemm);
                     // Drop page immediately (do not retain full bank).
                 } else {
+                    if (out_tx) page_for_tx = pages[page_id];
                     LobeLocalGemm(state.data() + ell * params.lobe_width, pages[page_id],
                                   params.lobe_width, partial.data(), gemm);
+                }
+                if (out_tx) {
+                    RCCoupGemmTranscript gt;
+                    gt.barrier = b;
+                    gt.lobe = ell;
+                    gt.page_id = page_id;
+                    gt.A.assign(state.data() + ell * params.lobe_width,
+                                state.data() + ell * params.lobe_width + params.lobe_width);
+                    gt.B = std::move(page_for_tx);
+                    gt.Y = partial;
+                    out_tx->gemms.push_back(std::move(gt));
                 }
                 for (uint32_t c = 0; c < params.lobe_width; ++c) {
                     dest[c] += partial[c];
@@ -776,7 +829,7 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
 
         // C3.b — nonce-derived balanced permutation over full active state.
         const auto pi = DeriveCoupledBalancedPermutation(sigma, b, params);
-        assert(IsBalancedPermutation(pi, n));
+        if (!IsBalancedPermutation(pi, n)) return uint256{};
         ApplyBalancedPermutation(acc, pi);
 
         // C3.c — exact integer all-to-all mix (≥2 nonce-relabeled patterns).
@@ -787,10 +840,19 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
             Sha256TaggedU32U32(kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigma, b,
                                /*unused=*/0);
         const uint256 prf_key = lt::DeriveMatExpandPrfKey(extract_seed);
-        ExtractActiveState(prf_key, acc, state);
+        if (!ExtractActiveState(prf_key, acc, state)) return uint256{};
 
         // C3.e — feed-forward: next barrier reads this Extracted state.
         barrier_roots[b] = BarrierRoot(b, state);
+        if (out_tx) {
+            RCCoupExtractTranscript et;
+            et.barrier = b;
+            et.extract_prf = prf_key;
+            et.extract_in = acc;
+            et.extract_out = state;
+            et.barrier_root = barrier_roots[b];
+            out_tx->extracts.push_back(std::move(et));
+        }
         checkpoint = state;
 
         if (checkpointed) {
@@ -818,6 +880,10 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         buf.insert(buf.end(), root.begin(), root.end());
     }
     const uint256 digest = Sha256dBytes(buf.data(), buf.size());
+    if (out_tx) {
+        out_tx->barrier_roots = barrier_roots;
+        out_tx->bank_root = bank_root;
+    }
     if (out_timing) {
         out_timing->total_s =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

@@ -71,7 +71,9 @@ _PROJECTION_TOKENS = frozenset(
         "replay_heuristic",
         "replay_s_heuristic",
         "not_evidence",
-        "composition",
+        # Also accept top-level projected_mac_count style fabricated labels.
+        "projected_mac",
+        "projected_mac_count",
     }
 )
 
@@ -412,6 +414,27 @@ def native_path_ok(rep: dict[str, Any]) -> bool:
     return False
 
 
+def scalar_fp4_native_claim_blockers(rep: dict[str, Any]) -> list[str]:
+    """Refuse fabricated native_mxfp4 claims on scalar-decode backends."""
+    blockers: list[str] = []
+    fname = rep.get("_file", "?")
+    candidates: list[dict[str, Any]] = []
+    for key in ("extractmx_self_qual", "ozaki_mxfp4", "mx_self_qual", "lt"):
+        obj = rep.get(key)
+        if isinstance(obj, dict):
+            candidates.append(obj)
+    for obj in candidates:
+        backend = str(obj.get("mx_backend") or obj.get("backend") or "").lower()
+        if "scalar-decode" not in backend and "scalar_fp4" not in backend:
+            continue
+        if obj.get("native_mxfp4_qualified") is True or obj.get("native_fp8_qualified") is True:
+            blockers.append(
+                f"{fname}: REFUSE scalar-decode MXFP4 labeled native_*_qualified "
+                f"(backend={backend!r}; scalar-decode is not native tensor)"
+            )
+    return blockers
+
+
 def variance_ok(rep: dict[str, Any], reasons: list[str], *, for_go: bool) -> bool:
     """Run-to-run variance bounds (G3/G4 ≤5%; >10% kill)."""
     fname = rep["_file"]
@@ -743,6 +766,12 @@ def gate_report(rep: dict[str, Any]) -> dict[str, Any]:
     proj = projection_blockers(rep)
     reasons.extend(proj)
     projection_taint = bool(proj)
+
+    # Scalar-decode MXFP4 labeled as native_* must never produce GO.
+    scalar_blockers = scalar_fp4_native_claim_blockers(rep)
+    reasons.extend(scalar_blockers)
+    if scalar_blockers:
+        projection_taint = True
 
     # Stage G campaign blockers (missing GPU / SIMULATED interconnect).
     reasons.extend(stage_g_campaign_blockers(rep))

@@ -362,8 +362,11 @@ BOOST_AUTO_TEST_CASE(rc_t5_anti_grinding_shape_nonce_independent)
     const uint256 d1 = rc::RecomputeResidentCurriculumReference(h1, p, 0);
     const uint256 d2 = rc::RecomputeResidentCurriculumReference(h2, p, 0);
     BOOST_CHECK(d1 != d2); // nonce changes values
+    BOOST_CHECK(!d1.IsNull());
     p.n_ctx = 33;
     BOOST_CHECK(!rc::ValidateRCEpisodeParams(p));
+    // Malformed dims → REJECT (null digest), never assert/crash.
+    BOOST_CHECK(rc::RecomputeResidentCurriculumReference(h1, p, 0).IsNull());
 }
 
 BOOST_AUTO_TEST_CASE(rc_t6_extractmx_non_affine_c16)
@@ -929,12 +932,21 @@ BOOST_AUTO_TEST_CASE(rc_p12_phase2_exactgemm_device_probe)
     const auto probe = rc::ProbeRCPhase2ExactGemmDevice();
     BOOST_CHECK(!probe.detail.empty());
     if (!probe.backend_resolved) {
+        BOOST_CHECK_EQUAL(probe.provider, "cpu");
         BOOST_TEST_MESSAGE("RC Phase-2 ExactGemm device path skipped (no admitted backend): "
                            << probe.detail);
         return;
     }
+    if (!probe.device_gemm_returned || !probe.matched_cpu_exactgemm) {
+        // Honesty: decline/mismatch must CLEAR provider (never leave "device").
+        BOOST_CHECK(probe.provider != "device");
+        BOOST_CHECK(probe.provider.empty());
+        BOOST_TEST_MESSAGE("RC Phase-2 ExactGemm declined/mismatched: " << probe.detail);
+        return;
+    }
     BOOST_REQUIRE(probe.device_gemm_returned);
     BOOST_CHECK(probe.matched_cpu_exactgemm);
+    BOOST_CHECK(probe.provider != "device");
     BOOST_TEST_MESSAGE("RC Phase-2 ExactGemm device path exercised provider="
                        << probe.provider
                        << " tensor_imma_or_mfma=" << (probe.used_tensor_imma_or_mfma ? 1 : 0));
@@ -1489,26 +1501,37 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_scalar_decode_never_sets_native)
 {
     // Assessment #4: scalar-decode block-scaled path must not set
     // native_mxfp4_qualified / IsRcOzakiMxfp4Qualified (BMX4C C6 honesty).
+    // When a real cuBLASLt/CUTLASS TC path quals, backend must not be scalar-decode.
     rc::ResetRcOzakiQualForTest();
     const auto oz = rc::ProbeRcOzakiMxfp4Status();
     BOOST_CHECK(oz.attempted);
-    BOOST_CHECK(!oz.qualified);
-    BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
-    BOOST_CHECK(!oz.deficit_reason.empty());
 
     if (oz.backend.find("scalar-decode") != std::string::npos) {
+        BOOST_CHECK(!oz.qualified);
+        BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
+        BOOST_CHECK(!oz.deficit_reason.empty());
         BOOST_CHECK(oz.deficit_reason.find("scalar-decode") != std::string::npos ||
                     oz.deficit_reason.find("not_native_tensor") != std::string::npos);
+        const auto st = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
+        BOOST_CHECK(!st.native_mxfp4_qualified);
+        BOOST_CHECK(!st.native_fp8_qualified);
+        std::vector<int8_t> L(64, 1), R(64, 1);
+        std::vector<int64_t> out;
+        BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, 8, 8, 8, out));
+        BOOST_CHECK(out.empty());
+        return;
     }
 
-    const auto st = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
-    BOOST_CHECK(!st.native_mxfp4_qualified);
-    BOOST_CHECK(!st.native_fp8_qualified);
+    if (oz.qualified) {
+        BOOST_CHECK(rc::IsRcOzakiMxfp4Qualified());
+        BOOST_CHECK(oz.backend.find("scalar-decode") == std::string::npos);
+        BOOST_CHECK(oz.backend.find("cublaslt") != std::string::npos ||
+                    oz.backend.find("cutlass") != std::string::npos);
+        return;
+    }
 
-    std::vector<int8_t> L(64, 1), R(64, 1);
-    std::vector<int64_t> out;
-    BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, 8, 8, 8, out));
-    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
+    BOOST_CHECK(!oz.deficit_reason.empty());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

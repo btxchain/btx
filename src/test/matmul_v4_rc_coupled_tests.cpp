@@ -613,9 +613,15 @@ BOOST_AUTO_TEST_CASE(rc_coup_device_probe_skip_without_gpu)
     if (!probe.backend_resolved) {
         BOOST_CHECK_EQUAL(probe.provider, "cpu");
         BOOST_TEST_MESSAGE("RC coupled ExactGemm device path skipped: " << probe.detail);
+    } else if (!probe.device_gemm_returned || !probe.matched_cpu_exactgemm) {
+        // Honesty: decline/mismatch must CLEAR provider (never leave "device").
+        BOOST_CHECK(probe.provider != "device");
+        BOOST_CHECK(probe.provider.empty());
+        BOOST_TEST_MESSAGE("RC coupled ExactGemm declined/mismatched: " << probe.detail);
     } else {
         BOOST_REQUIRE(probe.device_gemm_returned);
         BOOST_CHECK(probe.matched_cpu_exactgemm);
+        BOOST_CHECK(probe.provider != "device");
         BOOST_TEST_MESSAGE("RC coupled ExactGemm device path provider=" << probe.provider);
     }
 
@@ -624,6 +630,41 @@ BOOST_AUTO_TEST_CASE(rc_coup_device_probe_skip_without_gpu)
     const auto st = rc::ProbeRCSelfQual(matmul_v4::accel::MakeResolvedExactGemmBackendForRC());
     BOOST_CHECK_EQUAL(st.native_mxfp4_qualified, rc::IsRcOzakiMxfp4Qualified());
     BOOST_CHECK(!st.native_fp8_qualified);
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_malformed_params_reject_null_digest)
+{
+    // V1/V9: malformed dims → REJECT (null digest), never assert/crash (ASAN-safe).
+    const auto header = MakeCoupHeader(7);
+    const auto good = rc::MakeToyRCCoupParams();
+    BOOST_REQUIRE(rc::ValidateRCCoupParams(good));
+    const uint256 honest = rc::RecomputeCoupledPuzzleReference(header, 0, good);
+    BOOST_CHECK(!honest.IsNull());
+
+    rc::RCCoupParams bad = good;
+    bad.barriers = 3; // outside [4,8]
+    BOOST_REQUIRE(!rc::ValidateRCCoupParams(bad));
+    BOOST_CHECK(rc::RecomputeCoupledPuzzleReference(header, 0, bad).IsNull());
+
+    bad = good;
+    bad.lobe_width = 31; // not MX-aligned
+    BOOST_REQUIRE(!rc::ValidateRCCoupParams(bad));
+    BOOST_CHECK(rc::RecomputeCoupledPuzzleReference(header, 0, bad).IsNull());
+
+    bad = good;
+    bad.lobes = 0;
+    BOOST_REQUIRE(!rc::ValidateRCCoupParams(bad));
+    BOOST_CHECK(rc::RecomputeCoupledPuzzleReference(header, 0, bad).IsNull());
+
+    // Distributed helper: bad barrier / n_devices → null digest, no crash.
+    const auto dist_bad =
+        rc::RunCoupledBarrierDistributed(header, 0, good, /*barrier=*/99, /*n_devices=*/2,
+                                         rc::DistReduceOrder::TreeLeftToRight);
+    BOOST_CHECK(dist_bad.digest.IsNull());
+    const auto dist_bad_n =
+        rc::RunCoupledBarrierDistributed(header, 0, good, /*barrier=*/0, /*n_devices=*/0,
+                                         rc::DistReduceOrder::TreeLeftToRight);
+    BOOST_CHECK(dist_bad_n.digest.IsNull());
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_balanced_perm_hits_every_index_once)
