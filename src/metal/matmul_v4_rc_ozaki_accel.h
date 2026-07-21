@@ -42,7 +42,12 @@ namespace matmul_v4::metal {
     uint32_t inner, uint32_t cols, std::vector<int64_t>& out, std::string* error = nullptr);
 
 // --- ExactGemm panels (Metal TensorOps / ALU when available) ---
+/** True after SelfQualify attempted a Metal ExactGemm surface. */
+[[nodiscard]] bool IsRcOzakiMetalExactPanelsAttempted();
 [[nodiscard]] bool IsRcOzakiMetalExactPanelsQualified();
+/** Honest execution label: "metal_int8_mpp_tensorops" | "metal_int8_msl_alu" | "".
+ *  Never "OCP MXFP4". */
+[[nodiscard]] std::string RcOzakiMetalExactPanelsBackend();
 [[nodiscard]] bool SelfQualifyRcOzakiMetalExactPanelsOnce();
 [[nodiscard]] bool TryLaunchRcOzakiMetalExactPanelsGemmS8S8Int64(
     const std::vector<int8_t>& left, const std::vector<int8_t>& right, uint32_t rows,

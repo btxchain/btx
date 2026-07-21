@@ -73,10 +73,21 @@ bool HostReferenceRcOzakiExactPanelsGemmS8S8Int64(const std::vector<int8_t>& lef
     return true;
 }
 
+bool IsRcOzakiMetalExactPanelsAttempted()
+{
+    std::lock_guard<std::mutex> lock(g_mu);
+    return g_exact_ran;
+}
+
 bool IsRcOzakiMetalExactPanelsQualified()
 {
     std::lock_guard<std::mutex> lock(g_mu);
     return g_exact_qualified;
+}
+
+std::string RcOzakiMetalExactPanelsBackend()
+{
+    return {};
 }
 
 bool SelfQualifyRcOzakiMetalExactPanelsOnce()

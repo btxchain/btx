@@ -55,6 +55,8 @@ struct TpuPjrtRcEpisodeProviderV1 {
 void ResetTpuPjrtRcEpisodeProviderForTesting();
 
 [[nodiscard]] bool IsRcTpuCompiled();
+/** True after a registered provider's self-qual surface was invoked. */
+[[nodiscard]] bool IsRcTpuAttempted();
 [[nodiscard]] std::string RcTpuDeficit(); // "requires PJRT+TPU" when unqualified
 
 /** Host reference: MineRCCoupledEpisode digests — always unit-byte-exact. */

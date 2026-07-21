@@ -80,6 +80,13 @@ bool IsRcTrainiumCompiled()
 #endif
 }
 
+bool IsRcTrainiumAttempted()
+{
+    auto& state = State();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    return state.qualification != Qualification::UNTESTED;
+}
+
 std::string RcTrainiumDeficit()
 {
     if (IsTrainiumNeuronRcEpisodeAvailable()) return {};

@@ -12,6 +12,11 @@
 #include <vector>
 
 namespace matmul_v4::ascend {
+namespace {
+
+bool g_ascend_attempted{false};
+
+} // namespace
 
 bool IsRcAscendCompiled()
 {
@@ -20,6 +25,11 @@ bool IsRcAscendCompiled()
 #else
     return false;
 #endif
+}
+
+bool IsRcAscendAttempted()
+{
+    return g_ascend_attempted;
 }
 
 std::string RcAscendDeficit()
@@ -49,14 +59,20 @@ bool TryLaunchRcAscendGemmS8S8(const std::vector<int8_t>& left, const std::vecto
                                uint32_t rows, uint32_t inner, uint32_t cols,
                                std::vector<int32_t>& out, bool* used_cube_path)
 {
+    g_ascend_attempted = true;
     // Reuse LT Cube ExactGemm — INT8 path only; never claim native MX.
     return ExactGemmS8S8Ascend(left, right, rows, inner, cols, out, used_cube_path);
 }
 
 bool IsAscendRcEpisodeAvailable()
 {
+#if defined(BTX_HAVE_CANN)
+    g_ascend_attempted = true;
     // Cube ExactGemm must self-qualify; native MX stays false.
     return IsAscendExactGemmAvailable();
+#else
+    return false;
+#endif
 }
 
 bool RCAscendEpisodeContext::Init(const RCAscendEpisodeShape& shape, std::string* error)
