@@ -198,7 +198,7 @@ BOOST_AUTO_TEST_CASE(rc_sm120_heights_arbiter_levers_unchanged_1ea2a63)
     BOOST_CHECK(dc::kRCThreeAxisScheduleWireEnabled);
     BOOST_CHECK_EQUAL(dc::kRCCoupPagesPerBarrierLobe, 12u);
     BOOST_CHECK_EQUAL(dc::kRCCoupExchangeRowsDefault, 128u);
-    BOOST_CHECK_EQUAL(dc::kRCPackedBankPrimaryGiB, 48.0);
+    BOOST_CHECK_EQUAL(dc::kRCPackedBankPrimaryGiB, 51.0);
     BOOST_CHECK_EQUAL(dc::kRCMinerBatchQDefault, 32u);
     BOOST_CHECK_EQUAL(dc::kRCMinerBatchQMax, 256u);
 

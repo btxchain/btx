@@ -484,6 +484,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc.cpp
   matmul/matmul_v4_rc_accel_policy.cpp
   matmul/matmul_v4_rc_coupled.cpp
+  matmul/matmul_v4_rc_packed_bank.cpp
   matmul/matmul_v4_rc_coupled_device.cpp
   matmul/matmul_v4_rc_batch.cpp
   matmul/matmul_v4_rc_datacenter.cpp

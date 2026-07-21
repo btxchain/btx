@@ -111,7 +111,7 @@ __global__ void rc_resident_lobes_gemm(const int8_t* __restrict__ bank, size_t p
         sum += static_cast<int32_t>(A[k]) *
                static_cast<int32_t>(B[static_cast<size_t>(k) * static_cast<size_t>(W) + c]);
     }
-    acc[static_cast<size_t>(ell) * W + c] = static_cast<int64_t>(sum);
+    acc[static_cast<size_t>(ell) * W + c] += static_cast<int64_t>(sum);
 }
 
 void SeedLobeStateHost(const CBlockHeader& header, const rc::RCCoupParams& params,
@@ -579,31 +579,43 @@ bool RCCudaEpisodeContext::RunBarrierGraph(std::string* error)
     std::vector<uint32_t> page_ids(params.lobes);
     uint64_t window_h2d = 0;
     uint64_t window_d2h = 0;
+    const bool full_sched = rc::dc::kRCCoupFullBankScheduleEnabled;
+    const uint32_t P =
+        full_sched ? (params.pages_per_barrier_lobe == 0 ? rc::dc::kRCCoupPagesPerBarrierLobe
+                                                        : params.pages_per_barrier_lobe)
+                   : 1u;
 
-    // Timed resident loop — no per-GEMM H2D/D2H, no per-nonce stream sync,
-    // no global mutex, no MineCoupledPuzzle.
+    // Timed resident loop — accumulate every scheduled page (CPU parity).
     for (uint32_t b = 0; b < params.barriers; ++b) {
-        for (uint32_t ell = 0; ell < params.lobes; ++ell) {
-            const auto ids =
-                rc::SelectCoupledBankPageIds(b, ell, params, sigma, /*full=*/false);
-            if (ids.empty()) {
-                if (error) *error = "RCCudaEpisodeContext: empty page_ids";
+        // Zero accumulator before page accumulation (kernel uses +=).
+        if (!CudaOk(cudaMemsetAsync(L.d_acc, 0, n * sizeof(int64_t), stream), error,
+                    "acc memset")) {
+            return false;
+        }
+
+        for (uint32_t k = 0; k < P; ++k) {
+            for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+                const auto ids =
+                    rc::SelectCoupledBankPageIds(b, ell, params, sigma, full_sched);
+                if (ids.empty() || k >= ids.size()) {
+                    if (error) *error = "RCCudaEpisodeContext: empty/short page_ids";
+                    return false;
+                }
+                page_ids[ell] = ids[k];
+            }
+            const size_t page_bytes = page_ids.size() * sizeof(uint32_t);
+            if (!CudaOk(cudaMemcpyAsync(L.d_page_ids, page_ids.data(), page_bytes,
+                                        cudaMemcpyHostToDevice, stream),
+                        error, "page_ids H2D")) {
                 return false;
             }
-            page_ids[ell] = ids.front();
-        }
-        const size_t page_bytes = page_ids.size() * sizeof(uint32_t);
-        if (!CudaOk(cudaMemcpyAsync(L.d_page_ids, page_ids.data(), page_bytes,
-                                    cudaMemcpyHostToDevice, stream),
-                    error, "page_ids H2D")) {
-            return false;
-        }
-        window_h2d += page_bytes;
+            window_h2d += page_bytes;
 
-        if (!CudaOk(cudaGraphLaunch(exec, stream), error, "cudaGraphLaunch")) {
-            return false;
+            if (!CudaOk(cudaGraphLaunch(exec, stream), error, "cudaGraphLaunch")) {
+                return false;
+            }
+            ++m_prov.graph_replay_count;
         }
-        ++m_prov.graph_replay_count;
 
         // One D2H of full int64 accumulator per barrier (PARKED Extract path).
         if (!CudaOk(cudaMemcpyAsync(acc.data(), L.d_acc, n * sizeof(int64_t),
@@ -611,24 +623,19 @@ bool RCCudaEpisodeContext::RunBarrierGraph(std::string* error)
                     error, "acc D2H")) {
             return false;
         }
-        // Single sync per barrier for host tail — NOT per-GEMM / per-nonce.
         if (!CudaOk(cudaStreamSynchronize(stream), error, "barrier sync")) {
             return false;
         }
         window_d2h += n * sizeof(int64_t);
 
-        // Optional WS-B device-ptr GEMM hook is NOT used inside the captured
-        // graph yet (cudaGraph + cuBLASLt/MMA nodes pending). Record honesty.
         if (g_device_gemm_hook != nullptr) {
             m_prov.resident_native_mxfp4_attempted = true;
-            // Hook present but graph still uses portable ALU — do not claim qualified run.
         }
 
         if (!rc::ApplyCoupledBarrierTail(sigma, b, params, acc, m_state, &barrier_roots[b])) {
             if (error) *error = "RCCudaEpisodeContext: barrier tail failed";
             return false;
         }
-        // Feed-forward: Extracted state back to device for next barrier GEMMs.
         if (!CudaOk(cudaMemcpyAsync(L.d_state, m_state.data(), n, cudaMemcpyHostToDevice,
                                     stream),
                     error, "state H2D feed-forward")) {

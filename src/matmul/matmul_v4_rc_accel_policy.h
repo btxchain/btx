@@ -90,26 +90,29 @@ inline constexpr uint32_t kRCExtractVersion = kRCExtractVersionV1;
 
 /** Page-selection algorithm versions (coupled bank). */
 inline constexpr uint32_t kRCCoupPageSelectionLegacyV1 = 1; // (barrier+lobe)%bank_pages
-inline constexpr uint32_t kRCCoupPageSelectionFullBankV2 = 2; // inert until profile V2
+inline constexpr uint32_t kRCCoupPageSelectionFullBankV2 = 2;
+inline constexpr uint32_t kRCCoupPageSelectionFullBankV3 = 3; // 24 pages/slot, M=128
 
 inline constexpr uint32_t kRCCoupConsensusConfigVersionV1 = 1;
 inline constexpr uint32_t kRCCoupConsensusConfigVersionV2 = 2;
+inline constexpr uint32_t kRCCoupConsensusConfigVersionV3 = 3;
 
 /**
  * Versioned coupled consensus configuration — every digest-affecting knob.
  *
- * Default = AI datacenter thesis (production shape + full-bank + material
- * exchange). Legacy toy V1 remains available via MakeLegacyV1RCCoupConsensusConfig.
- * Public activation still requires finite nMatMulRCCoupledHeight (INT32_MAX today).
+ * Default = V2 AI datacenter thesis (768 pages; packed ≈25.5 GiB / int8 48 GiB).
+ * V3 hypothesis (1536/24/M=128, packed ≈51 GiB) is MakeProductionV3RCCoupParams —
+ * not the default until TMTO audit + goldens land. Heights stay INT32_MAX.
  */
 struct RCCoupConsensusConfig {
     uint32_t config_version{kRCCoupConsensusConfigVersionV2};
 
-    // Shape — matches MakeProductionRCCoupParams() (48 GiB resident bank).
+    // Shape — V2 MakeProductionRCCoupParams() (int8 48 GiB / packed 25.5 GiB).
     uint32_t barriers{8};
     uint32_t lobes{8};
     uint32_t lobe_width{8192};
     uint32_t bank_pages{768};
+    uint32_t rows_per_lobe{1};
 
     // Page schedule — full bank (12 pages / barrier×lobe).
     uint32_t pages_per_barrier_lobe{dc::kRCCoupPagesPerBarrierLobe};

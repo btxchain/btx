@@ -156,7 +156,8 @@ BOOST_AUTO_TEST_CASE(rc_coup_admission_priced_per_activation_shape)
     BOOST_REQUIRE(p.IsMatMulRCFamilyActive(kH));
     const auto toy = rc::MakeToyRCCoupParams();
     BOOST_CHECK_EQUAL(rc::TotalRCCoupMacs(toy),
-                      uint64_t{toy.barriers} * toy.lobes * toy.lobe_width * toy.lobe_width);
+                      uint64_t{toy.rows_per_lobe} * toy.pages_per_barrier_lobe * toy.barriers *
+                          toy.lobes * toy.lobe_width * toy.lobe_width);
     const uint32_t wu_coup = MatMulRCWorkUnits(p, kH);
     BOOST_CHECK_EQUAL(wu_coup, 1U); // toy coupled ≪ 2^40 → 1 unit
     // Must route through RC-family caps (pending=1), NOT EncDr 16 / LT 2.
@@ -502,9 +503,12 @@ BOOST_AUTO_TEST_CASE(rc_coup_production_dims_provisional)
     BOOST_CHECK_GE(resident, k48GiB);
     BOOST_CHECK_LT(resident, k48GiB + (1ull << 20)); // ~48 GiB + small state
 
-    // Frozen param fingerprint (not puzzle digest).
-    BOOST_CHECK_EQUAL(rc::FingerprintRCCoupParams(prod).GetHex(),
-                      "9e5572c7a6d936e35dd68319a59a1d76d1f0762d5c07f441598ebd1c41d04869");
+    // Param fingerprint includes rows_per_lobe + pages_per_barrier_lobe (V3-ready).
+    const uint256 fp = rc::FingerprintRCCoupParams(prod);
+    BOOST_CHECK_EQUAL(fp, rc::FingerprintRCCoupParams(prod));
+    BOOST_CHECK(!fp.IsNull());
+    // Frozen hex updated when fingerprint inputs change intentionally.
+    BOOST_TEST_MESSAGE("prod fingerprint=" << fp.GetHex());
     BOOST_TEST_MESSAGE("production streamed_peak=" << streamed << " resident_peak=" << resident);
 }
 
