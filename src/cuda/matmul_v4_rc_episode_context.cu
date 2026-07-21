@@ -68,8 +68,6 @@ struct ArenaLayout {
     size_t prf_key_bytes{0};
     size_t page_ids_all_bytes{0};
     size_t barrier_roots_bytes{0};
-    size_t bank_root_bytes{0};
-    size_t digest_bytes{0};
     size_t sha_scratch_bytes{0};
     size_t total{0};
 
@@ -83,8 +81,6 @@ struct ArenaLayout {
     uint32_t* d_prf_key{nullptr}; // [barriers][8]
     uint32_t* d_page_ids_all{nullptr};
     uint8_t* d_barrier_roots{nullptr};
-    uint8_t* d_bank_root{nullptr};
-    uint8_t* d_digest{nullptr};
     uint8_t* d_sha_scratch{nullptr};
 };
 
@@ -115,16 +111,11 @@ ArenaLayout LayoutFor(const RCCudaEpisodeShape& shape, void* arena)
     L.page_ids_all_bytes =
         static_cast<size_t>(shape.barriers) * P * shape.lobes * sizeof(uint32_t);
     L.barrier_roots_bytes = static_cast<size_t>(shape.barriers) * 32;
-    L.bank_root_bytes = 32;
-    L.digest_bytes = 32;
-    // BarrierRoot message = tag + LE32 + state; episode digest fits in same scratch.
-    L.sha_scratch_bytes =
-        (sizeof(rc::kRCCoupBarrierTag) - 1) + 4 + state + 64 +
-        (sizeof(rc::kRCCoupEpisodeTag) - 1) + 32 + static_cast<size_t>(shape.barriers) * 32;
+    // BarrierRoot message = tag + LE32 + state.
+    L.sha_scratch_bytes = (sizeof(rc::kRCCoupBarrierTag) - 1) + 4 + state + 64;
     L.total = L.bank_bytes + L.state_q_bytes + L.acc_q_bytes + L.page_ids_launch_bytes +
               L.acc_scratch_bytes + L.pi_all_bytes + L.mix_mask_bytes + L.prf_key_bytes +
-              L.page_ids_all_bytes + L.barrier_roots_bytes + L.bank_root_bytes + L.digest_bytes +
-              L.sha_scratch_bytes + 256;
+              L.page_ids_all_bytes + L.barrier_roots_bytes + L.sha_scratch_bytes + 256;
 
     if (arena != nullptr) {
         auto* base = static_cast<unsigned char*>(arena);
@@ -144,8 +135,6 @@ ArenaLayout LayoutFor(const RCCudaEpisodeShape& shape, void* arena)
         L.d_prf_key = reinterpret_cast<uint32_t*>(take(L.prf_key_bytes));
         L.d_page_ids_all = reinterpret_cast<uint32_t*>(take(L.page_ids_all_bytes));
         L.d_barrier_roots = take(L.barrier_roots_bytes);
-        L.d_bank_root = take(L.bank_root_bytes);
-        L.d_digest = take(L.digest_bytes);
         L.d_sha_scratch = take(L.sha_scratch_bytes);
     }
     return L;
@@ -466,25 +455,6 @@ __global__ void rc_barrier_root(const int8_t* __restrict__ state, uint32_t n, ui
     RcSha256d(msg, kTagLen + 4 + n, out32);
 }
 
-/** episode_digest = SHA256d(tag ‖ bank_root ‖ barrier_roots…). */
-__global__ void rc_assemble_episode_digest(const uint8_t* __restrict__ bank_root,
-                                           const uint8_t* __restrict__ barrier_roots,
-                                           uint32_t barriers, uint8_t* __restrict__ scratch,
-                                           uint8_t* __restrict__ out32)
-{
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;
-    constexpr char kTag[] = "BTX_RC_COUP_EPISODE_V1";
-    constexpr uint32_t kTagLen = sizeof(kTag) - 1;
-    uint8_t* msg = scratch;
-    for (uint32_t i = 0; i < kTagLen; ++i) msg[i] = static_cast<uint8_t>(kTag[i]);
-    for (uint32_t i = 0; i < 32; ++i) msg[kTagLen + i] = bank_root[i];
-    for (uint32_t b = 0; b < barriers; ++b) {
-        for (uint32_t i = 0; i < 32; ++i) {
-            msg[kTagLen + 32 + b * 32 + i] = barrier_roots[b * 32 + i];
-        }
-    }
-    RcSha256d(msg, kTagLen + 32 + barriers * 32, out32);
-}
 
 // --- Host-side seed packing (byte-identical to ApplyCoupledBarrierTail) ---
 
