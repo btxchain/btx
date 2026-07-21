@@ -283,6 +283,23 @@ void FinalizeTableMultiplicities(LogUpInstance& inst_tm, LogUpInstance& inst_tx,
 [[nodiscard]] bool ByteExactVsReference(const TilePublic& pub,
                                         const std::array<int64_t, kRCMxBlockLen>& input);
 
+// ---------------------------------------------------------------------------
+// 5. AIR-level intermediate tamper hooks (adversarial self-test).
+//
+// The ChaCha20 / SHA-256 intermediate columns (quarter-round add results,
+// working-variable words) live in the internal trace structs. These hooks
+// build an honest in-circuit trace, tamper ONE intermediate cell, and return
+// true iff the AIR constraint checker (CheckChaChaBlock / CheckShaCompress)
+// REJECTS the tampered trace — proving intermediate swaps are caught at the
+// arithmetic-constraint level, not merely at the output boundary.
+// ---------------------------------------------------------------------------
+
+/** true iff tampering a ChaCha20 quarter-round add result is rejected. */
+[[nodiscard]] bool ChaChaIntermediateTamperRejected();
+
+/** true iff tampering a SHA-256 round working variable is rejected. */
+[[nodiscard]] bool ShaIntermediateTamperRejected();
+
 } // namespace matmul::v4::rc::gkr_air
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_GKR_AIR_H

@@ -784,4 +784,37 @@ bool ByteExactVsReference(const TilePublic& pub,
     return true;
 }
 
+// ===========================================================================
+// AIR-level intermediate tamper hooks.
+// ===========================================================================
+
+bool ChaChaIntermediateTamperRejected()
+{
+    std::array<uint32_t, 16> init{};
+    init[0] = 0x61707865; init[1] = 0x3320646e; init[2] = 0x79622d32; init[3] = 0x6b206574;
+    for (int k = 0; k < 8; ++k) init[4 + k] = 0x11111111u * (k + 1);
+    init[12] = 7; init[13] = 0xDEADBEEFu; init[14] = 0x01234567u; init[15] = 0x89ABCDEFu;
+
+    ChaChaBlockTrace t = ChaChaBlockInCircuit(init);
+    std::string fail;
+    if (!CheckChaChaBlock(t, fail)) return false;  // honest trace must pass
+    // Tamper a mid-round quarter-round add result (a committed ARX cell).
+    if (t.adds.size() < 40) return false;
+    t.adds[37].r ^= 0x00010000u;  // flip a bit of an intermediate add output
+    return !CheckChaChaBlock(t, fail);  // must now be rejected
+}
+
+bool ShaIntermediateTamperRejected()
+{
+    std::array<uint32_t, 8> h = kSHA_H0;
+    std::array<uint32_t, 16> blk{};
+    for (int w = 0; w < 16; ++w) blk[w] = 0x2468ACE0u + w * 0x01010101u;
+    ShaCompressTrace t = ShaCompressInCircuit(h, blk);
+    std::string fail;
+    if (!CheckShaCompress(t, fail)) return false;  // honest trace must pass
+    // Tamper a mid-schedule working variable 'a' (a committed round cell).
+    t.vars[30][0] ^= 0x00000010u;
+    return !CheckShaCompress(t, fail);  // must now be rejected
+}
+
 } // namespace matmul::v4::rc::gkr_air

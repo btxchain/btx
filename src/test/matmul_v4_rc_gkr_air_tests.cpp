@@ -334,6 +334,13 @@ BOOST_AUTO_TEST_CASE(air_forgery_swap_chacha_sha_intermediate)
         air::TileCheckResult r = air::CheckTileConstraints(w, tm, tx);
         BOOST_CHECK_MESSAGE(!r.ok, "forged scale e NOT rejected");
     }
+    // AIR-level intermediate swaps: tamper a ChaCha quarter-round add result
+    // and a SHA round working variable — both must be rejected by the ARX
+    // constraint checker directly (not just at the output boundary).
+    BOOST_CHECK_MESSAGE(air::ChaChaIntermediateTamperRejected(),
+                        "tampered ChaCha20 intermediate NOT rejected");
+    BOOST_CHECK_MESSAGE(air::ShaIntermediateTamperRejected(),
+                        "tampered SHA-256 intermediate NOT rejected");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
