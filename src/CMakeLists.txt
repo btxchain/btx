@@ -468,7 +468,9 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   # version-pinned external bridge registers and passes native tensor-engine
   # attestation plus the bounded-exactness self-qualification.
   tpu/matmul_v4_lt_accel.cpp
+  tpu/matmul_v4_rc_accel.cpp
   trainium/matmul_v4_lt_accel.cpp
+  trainium/matmul_v4_rc_accel.cpp
   matmul/accel_v4.cpp
   matmul/backend_capabilities_v4.cpp
   matmul/noise.cpp
@@ -642,6 +644,8 @@ if(APPLE AND BTX_ENABLE_METAL)
     # ExactGemmBackend (see matmul_v4_lt_accel.h/.mm).
     metal/matmul_v4_lt_accel.mm
     metal/matmul_v4_lt_tensor_gemm.mm
+    # ENC_RC Ozaki ExactPanels on Metal (simdgroup / MPP TensorOps + ALU).
+    metal/matmul_v4_rc_ozaki_accel.mm
     metal/nonce_accel.mm
     metal/oracle_accel.mm
   )
@@ -736,6 +740,8 @@ else()
     metal/matmul_v4_accel_stub.cpp
     metal/matmul_v4_bmx4_accel_stub.cpp
     metal/matmul_v4_lt_accel_stub.cpp
+    # Host / non-Darwin: unit-byte-exact RC Ozaki reference + HARD BLOCKER latch.
+    metal/matmul_v4_rc_ozaki_accel.cpp
     metal/nonce_accel_stub.cpp
     metal/oracle_accel_stub.cpp
   )
@@ -857,6 +863,8 @@ if(BTX_ENABLE_HIP)
     # Native MXFP4/MXFP8 hipBLASLt block-scale attempt + self-qual (fail-closed
     # until oracle-identical on gfx950 with toolkit MX enums).
     hip/matmul_v4_lt_mx_native.hip
+    # ENC_RC Ozaki HIP MXFP4 (opA=T opB=N VEC32) — latch pending gfx950.
+    hip/matmul_v4_rc_mx_ozaki_native.hip
   )
   set_source_files_properties(
     hip/matmul_v4_accel.hip
@@ -864,6 +872,7 @@ if(BTX_ENABLE_HIP)
     hip/matmul_v4_lt_accel.hip
     hip/matmul_v4_lt_tensor_gemm.hip
     hip/matmul_v4_lt_mx_native.hip
+    hip/matmul_v4_rc_mx_ozaki_native.hip
     PROPERTIES LANGUAGE HIP)
   # Amendment v3 §1.D D4: __HIP_PLATFORM_AMD__ must reach every TU that includes
   # HIP or shared device headers used by HIP. PUBLIC on btx_hip_device covers
@@ -986,11 +995,14 @@ else()
     hip/matmul_v4_accel_stub.cpp
     hip/matmul_v4_bmx4_accel_stub.cpp
     hip/matmul_v4_lt_accel_stub.cpp
+    # Host pack unit-exact + HARD BLOCKER "requires gfx950 silicon".
+    hip/matmul_v4_rc_mx_ozaki_native_stub.cpp
   )
 endif()
 if(BTX_ENABLE_ASCEND AND BTX_HAVE_CANN)
   target_sources(btx_matmul_backend PRIVATE
     ascend/matmul_v4_lt_accel.cpp
+    ascend/matmul_v4_rc_accel.cpp
   )
   target_include_directories(btx_matmul_backend PRIVATE
     "${BTX_CANN_ROOT}/include"
@@ -1032,6 +1044,8 @@ if(BTX_ENABLE_ASCEND AND BTX_HAVE_CANN)
 else()
   target_sources(btx_matmul_backend PRIVATE
     ascend/matmul_v4_lt_accel_stub.cpp
+    # Host reference + fail-closed Cube episode (deficit: requires CANN+Ascend).
+    ascend/matmul_v4_rc_accel.cpp
   )
   if(BTX_ENABLE_ASCEND)
     target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_ASCEND=1)

@@ -5,6 +5,8 @@
 #include <matmul/matmul_v4_rc_mx_ozaki.h>
 
 #include <cuda/matmul_v4_rc_mx_ozaki_native.h>
+#include <hip/matmul_v4_rc_mx_ozaki_native.h>
+#include <metal/matmul_v4_rc_ozaki_accel.h>
 
 #include <algorithm>
 #include <mutex>
@@ -117,6 +119,24 @@ void FillPseudoPanel(std::vector<int8_t>& L, std::vector<int8_t>& R, uint32_t ro
         }
         // Fall through to portable ExactGemm panels if CUDA declines.
     }
+    if (matmul_v4::metal::IsRcOzakiMetalCompiled()) {
+        std::vector<int64_t> device;
+        std::string err;
+        if (matmul_v4::metal::TryLaunchRcOzakiMetalExactPanelsGemmS8S8Int64(
+                L, R, rows, inner, cols, device, &err) &&
+            device == oracle) {
+            return true;
+        }
+    }
+    if (matmul_v4::hip::IsRcOzakiHipCompiled()) {
+        std::vector<int64_t> device;
+        std::string err;
+        if (matmul_v4::hip::TryLaunchRcOzakiHipExactPanelsGemmS8S8Int64(
+                L, R, rows, inner, cols, device, &err) &&
+            device == oracle) {
+            return true;
+        }
+    }
 
     std::vector<int64_t> limb;
     if (!RcOzakiCpuLimbSplitGemmS8S8Int64(L, R, rows, inner, cols, limb)) {
@@ -141,6 +161,18 @@ struct ExactPanelsQualResult {
     if (matmul_v4::cuda::IsRcOzakiCudaCompiled() &&
         matmul_v4::cuda::SelfQualifyRcOzakiCudaExactPanelsOnce() &&
         matmul_v4::cuda::IsRcOzakiCudaExactPanelsQualified()) {
+        r.qualified = true;
+        return r;
+    }
+    if (matmul_v4::metal::IsRcOzakiMetalCompiled() &&
+        matmul_v4::metal::SelfQualifyRcOzakiMetalExactPanelsOnce() &&
+        matmul_v4::metal::IsRcOzakiMetalExactPanelsQualified()) {
+        r.qualified = true;
+        return r;
+    }
+    if (matmul_v4::hip::IsRcOzakiHipCompiled() &&
+        matmul_v4::hip::SelfQualifyRcOzakiHipExactPanelsOnce() &&
+        matmul_v4::hip::IsRcOzakiHipExactPanelsQualified()) {
         r.qualified = true;
         return r;
     }
@@ -172,18 +204,46 @@ struct Mxfp4QualResult {
 {
     Mxfp4QualResult r;
     r.attempted = true;
-    if (!matmul_v4::cuda::IsRcOzakiCudaCompiled()) {
-        r.deficit = "rc_ozaki_mxfp4_cuda_tu_not_linked";
+
+    // Prefer CUDA → HIP → Metal. Each vendor keeps separate honesty: native
+    // latch only after a real block-scaled tensor path (never INT8 / scalar).
+    if (matmul_v4::cuda::IsRcOzakiCudaCompiled()) {
+        (void)matmul_v4::cuda::SelfQualifyRcOzakiCudaMxfp4Once();
+        r.backend = matmul_v4::cuda::RcOzakiCudaMxfp4Backend();
+        r.arch_key = matmul_v4::cuda::RcOzakiCudaMxfp4ArchKey();
+        r.qualified = matmul_v4::cuda::IsRcOzakiCudaMxfp4Qualified();
+        if (r.qualified) return r;
+        r.deficit = matmul_v4::cuda::RcOzakiCudaMxfp4Deficit();
+    }
+    if (matmul_v4::hip::IsRcOzakiHipCompiled()) {
+        (void)matmul_v4::hip::SelfQualifyRcOzakiHipMxfp4Once();
+        if (matmul_v4::hip::IsRcOzakiHipMxfp4Qualified()) {
+            r.backend = matmul_v4::hip::RcOzakiHipMxfp4Backend();
+            r.arch_key = matmul_v4::hip::RcOzakiHipMxfp4ArchKey();
+            r.qualified = true;
+            r.deficit.clear();
+            return r;
+        }
+        if (r.deficit.empty()) {
+            r.deficit = matmul_v4::hip::RcOzakiHipMxfp4Deficit();
+            r.backend = matmul_v4::hip::RcOzakiHipMxfp4Backend();
+            r.arch_key = matmul_v4::hip::RcOzakiHipMxfp4ArchKey();
+        }
+    }
+    if (matmul_v4::metal::IsRcOzakiMetalCompiled()) {
+        (void)matmul_v4::metal::SelfQualifyRcOzakiMetalMxfp4Once();
+        // Metal never admits OCP MXFP4 for RC — record deficit only.
+        if (r.deficit.empty()) {
+            r.deficit = matmul_v4::metal::RcOzakiMetalDeficit();
+        }
+    }
+
+    if (!matmul_v4::cuda::IsRcOzakiCudaCompiled() && !matmul_v4::hip::IsRcOzakiHipCompiled() &&
+        !matmul_v4::metal::IsRcOzakiMetalCompiled()) {
+        r.deficit = "rc_ozaki_mxfp4_no_vendor_tu_linked";
         return r;
     }
-    // Probe scalar-decode exactness (and any future TC path). Native latches
-    // flip only inside the CUDA TU for a real CUTLASS/cuBLASLt path.
-    (void)matmul_v4::cuda::SelfQualifyRcOzakiCudaMxfp4Once();
-    r.backend = matmul_v4::cuda::RcOzakiCudaMxfp4Backend();
-    r.arch_key = matmul_v4::cuda::RcOzakiCudaMxfp4ArchKey();
-    r.qualified = matmul_v4::cuda::IsRcOzakiCudaMxfp4Qualified();
     if (!r.qualified) {
-        r.deficit = matmul_v4::cuda::RcOzakiCudaMxfp4Deficit();
         if (r.deficit.empty()) {
             r.deficit = "rc_ozaki_mxfp4_no_native_tensor_path";
         }
@@ -272,8 +332,16 @@ bool TryRcOzakiMxfp4GemmS8S8Int64(const std::vector<int8_t>& left, const std::ve
     }
     // Honesty: native claim must use the MXFP4 device path only — never ExactGemm.
     std::string err;
-    return matmul_v4::cuda::TryLaunchRcOzakiMxfp4GemmS8S8Int64(left, right, rows, inner, cols, out,
-                                                                &err);
+    if (matmul_v4::cuda::IsRcOzakiCudaCompiled() &&
+        matmul_v4::cuda::IsRcOzakiCudaMxfp4Qualified()) {
+        return matmul_v4::cuda::TryLaunchRcOzakiMxfp4GemmS8S8Int64(left, right, rows, inner, cols,
+                                                                    out, &err);
+    }
+    if (matmul_v4::hip::IsRcOzakiHipCompiled() && matmul_v4::hip::IsRcOzakiHipMxfp4Qualified()) {
+        return matmul_v4::hip::TryLaunchRcOzakiHipMxfp4GemmS8S8Int64(left, right, rows, inner, cols,
+                                                                      out, &err);
+    }
+    return false;
 }
 
 bool TryRcOzakiExactPanelsGemmS8S8Int64(const std::vector<int8_t>& left,
@@ -289,6 +357,20 @@ bool TryRcOzakiExactPanelsGemmS8S8Int64(const std::vector<int8_t>& left,
         std::string err;
         if (matmul_v4::cuda::TryLaunchRcOzakiExactPanelsGemmS8S8Int64(left, right, rows, inner,
                                                                       cols, out, &err)) {
+            return true;
+        }
+    }
+    if (matmul_v4::metal::IsRcOzakiMetalCompiled()) {
+        std::string err;
+        if (matmul_v4::metal::TryLaunchRcOzakiMetalExactPanelsGemmS8S8Int64(
+                left, right, rows, inner, cols, out, &err)) {
+            return true;
+        }
+    }
+    if (matmul_v4::hip::IsRcOzakiHipCompiled()) {
+        std::string err;
+        if (matmul_v4::hip::TryLaunchRcOzakiHipExactPanelsGemmS8S8Int64(
+                left, right, rows, inner, cols, out, &err)) {
             return true;
         }
     }
@@ -352,6 +434,8 @@ void ResetRcOzakiQualForTest()
     g_mx_arch_key.clear();
     g_mx_deficit.clear();
     matmul_v4::cuda::ResetRcOzakiCudaQualForTest();
+    matmul_v4::metal::ResetRcOzakiMetalQualForTest();
+    matmul_v4::hip::ResetRcOzakiHipQualForTest();
 }
 
 } // namespace matmul::v4::rc
