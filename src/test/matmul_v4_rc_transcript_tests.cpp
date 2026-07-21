@@ -57,6 +57,10 @@ BOOST_AUTO_TEST_CASE(rc_transcript_version_defaults_v1)
 {
     BOOST_CHECK_EQUAL(rc::kRCTranscriptVersion, static_cast<uint32_t>(rc::kRCTranscriptVersionV1));
     BOOST_CHECK(rc::kRCTranscriptVersionV1 != rc::kRCTranscriptVersionV2);
+    // Silent golden replacement is forbidden: any consensus-digest change must
+    // bump kRCTranscriptVersion / ENC_RC_V* and retain prior goldens in
+    // contrib/matmul-v4/rc-golden-gate.py (WS-F / Stage H invariant).
+    BOOST_CHECK_EQUAL(rc::kRCTranscriptVersion, 1u);
 }
 
 BOOST_AUTO_TEST_CASE(rc_streaming_vs_resident_identical_root_toy)

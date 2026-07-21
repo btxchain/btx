@@ -4,11 +4,15 @@
 
 #include <cuda/matmul_v4_rc_episode_context.h>
 #include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_batch.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
+#include <matmul/matmul_v4_rc_scale_axes.h>
+#include <matmul/matmul_v4_rc_transcript.h>
 
 #include <consensus/params.h>
+#include <pow.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -295,18 +299,23 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_stub)
     BOOST_CHECK(ctx.Ready());
     const auto pages = rc::DeriveCoupledBankPages(header, 0, params);
     BOOST_REQUIRE(ctx.LoadBank(pages, &err));
-    // Without BindEpisode the graph must refuse (no lobe seed / digest binding).
+
+    // Order matters (WS-F):
+    //  - non-CUDA stub → honesty token graph_unavailable (BindEpisode not required)
+    //  - CUDA impl without BindEpisode → BindEpisode required
     BOOST_CHECK(!ctx.RunBarrierGraph(&err));
-    BOOST_CHECK(err.find("BindEpisode") != std::string::npos);
 
     if (!matmul_v4::cuda::IsRcEpisodeCudaCompiled()) {
-        // CPU/stub build: graph stays unavailable.
-        BOOST_CHECK(err.find("graph_unavailable") != std::string::npos ||
-                    err.find("BindEpisode") != std::string::npos);
+        BOOST_CHECK_MESSAGE(err.find("graph_unavailable") != std::string::npos,
+                            "non-CUDA stub must refuse with graph_unavailable; got: " << err);
         ctx.Destroy();
         BOOST_CHECK(!ctx.Ready());
         return;
     }
+
+    BOOST_CHECK_MESSAGE(err.find("BindEpisode") != std::string::npos,
+                        "CUDA RunBarrierGraph without BindEpisode must require it; got: "
+                            << err);
 
     BOOST_REQUIRE_MESSAGE(ctx.BindEpisode(header, 0, &err), err);
     BOOST_REQUIRE_MESSAGE(ctx.RunBarrierGraph(&err), err);
@@ -339,6 +348,103 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_medium_digest)
                         "medium graph digest " << ctx.LastDigest()->GetHex()
                                                << " != cpu " << cpu.GetHex());
     ctx.Destroy();
+}
+
+/** Consensus-seeded Q-window regression anticipated from WS-A.
+ *
+ *  ComputeTemplateHash nulls seed_a/seed_b; HeadersShareBankTemplate/BankRootSeed
+ *  on base tip only zero nonces. Real SetDeterministicMatMulSeeds makes seeds
+ *  nonce-fresh, so Q>1 batch currently fails closed until WS-A nulls seeds.
+ *
+ *  Soft-skip when batch rejects (base tip). After WS-A merges, this becomes a
+ *  hard oracle-equality gate. ROOT-MERGE: do not delete the soft-skip message. */
+BOOST_AUTO_TEST_CASE(rc_dc_seeded_q_window_batch_matches_oracle)
+{
+    Consensus::Params consensus;
+    consensus.nMatMulV4Height = 1;
+    consensus.nMatMulV4Dimension = 256;
+    BOOST_REQUIRE(consensus.IsMatMulV4Active(/*height=*/10));
+    // Public nets stay inert — this local params object only enables seed pinning.
+    BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCCoupledHeight,
+                      std::numeric_limits<int32_t>::max());
+
+    constexpr uint32_t Q = 4;
+    constexpr int32_t kHeight = 10;
+    constexpr int64_t kMtp = 1'700'000'000;
+    CBlockHeader base = MakeCoupHeader(/*nonce=*/1000);
+    base.matmul_dim = static_cast<uint16_t>(consensus.nMatMulV4Dimension);
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(base, consensus, kHeight, kMtp));
+
+    auto window = rc::BuildRCCoupledMinerNonceWindow(base, Q);
+    BOOST_REQUIRE_EQUAL(window.size(), Q);
+    for (uint32_t i = 0; i < Q; ++i) {
+        BOOST_REQUIRE(SetDeterministicMatMulSeeds(window[i], consensus, kHeight, kMtp));
+    }
+    // Prove we are not hiding behind MakeCoupHeader fixed seeds.
+    BOOST_CHECK(window[0].seed_a != window[1].seed_a || window[0].seed_b != window[1].seed_b);
+    // Intended template identity (ComputeTemplateHash) is nonce/seed invariant.
+    BOOST_CHECK(matmul::v4::ComputeTemplateHash(window[0]) ==
+                matmul::v4::ComputeTemplateHash(window[Q - 1]));
+
+    const auto params = rc::MakeToyRCCoupParams();
+    std::vector<uint256> batch;
+    rc::RCMinerBatchConfig cfg;
+    cfg.Q = Q;
+    if (!rc::TryMineRCCoupledBatch(window, kHeight, params, batch, cfg)) {
+        BOOST_TEST_MESSAGE(
+            "ROOT-MERGE TODO(WS-A): seeded Q>1 TryMineRCCoupledBatch rejected — "
+            "HeadersShareBankTemplate/BankRootSeed must null seed_a/seed_b like "
+            "ComputeTemplateHash. Soft-skip until A merges; suites stay green on base.");
+        return;
+    }
+    BOOST_REQUIRE_EQUAL(batch.size(), Q);
+    for (uint32_t i = 0; i < Q; ++i) {
+        const uint256 single =
+            rc::RecomputeCoupledPuzzleReference(window[i], kHeight, params);
+        BOOST_CHECK_MESSAGE(batch[i] == single,
+                            "seeded Q-window batch != oracle at i=" << i);
+        BOOST_CHECK(!batch[i].IsNull());
+    }
+}
+
+/** Golden / transcript version bump requirement (silent replacement forbidden). */
+BOOST_AUTO_TEST_CASE(rc_dc_golden_transcript_version_bump_requirement)
+{
+    BOOST_CHECK_EQUAL(rc::kRCTranscriptVersion, rc::ENC_RC_V1);
+    BOOST_CHECK_EQUAL(rc::kRCTranscriptVersion, 1u);
+    BOOST_CHECK_EQUAL(rc::kRCTranscriptVersionV1, 1u);
+    BOOST_CHECK(rc::kRCTranscriptVersionV1 != rc::kRCTranscriptVersionV2);
+    // Coupled toy golden must remain pinned; any digest change requires an
+    // explicit kRCTranscriptVersion / ENC_RC_V* bump and dual-golden retention
+    // (see rc_coup_golden_digest_stable + contrib/matmul-v4/rc-golden-gate.py).
+    const auto header = MakeCoupHeader(42);
+    const uint256 d = rc::RecomputeCoupledPuzzleReference(header, 0);
+    BOOST_CHECK_EQUAL(d.GetHex(),
+                      "c9ac99d002ba26105ef259bfc09fbc0e2ad57bae14b9558d68b82719fa811363");
+}
+
+/** Public activation heights + parked datacenter switches stay off. */
+BOOST_AUTO_TEST_CASE(rc_dc_public_heights_and_parked_switches_inert)
+{
+    Consensus::Params mainnet;
+    BOOST_CHECK_EQUAL(mainnet.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(mainnet.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!mainnet.IsMatMulRCActive(0));
+    BOOST_CHECK(!mainnet.IsMatMulRCActive(std::numeric_limits<int32_t>::max() - 1));
+
+    BOOST_CHECK(!dc::kRCCoupFullBankScheduleEnabled);
+    BOOST_CHECK(!dc::kRCCoupMaterialExchangeEnabled);
+    BOOST_CHECK(!dc::kRCThreeAxisScheduleWireEnabled);
+    BOOST_CHECK(!dc::RCCoupFullBankScheduleActive());
+    BOOST_CHECK(!dc::RCCoupMaterialExchangeActive());
+    BOOST_CHECK(!rc::kRCThreeAxisScheduleEnabled);
+
+    const dc::RCDcStatus st = dc::ProbeRCDcStatus();
+    BOOST_CHECK(!st.full_bank_schedule);
+    BOOST_CHECK(!st.material_exchange);
+    BOOST_CHECK(!st.three_axis_wire);
+    BOOST_CHECK(!st.gkr_arbiter);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

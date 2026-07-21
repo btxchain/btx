@@ -296,6 +296,67 @@ class RCGateNumericThresholdTests(unittest.TestCase):
             msg=blob,
         )
 
+    def test_empty_reports_never_go(self):
+        """Missing evidence aggregate: empty report list is NO-GO, never GO."""
+        summary = rc_gate.aggregate([])
+        self.assertNotEqual(summary["verdict"], "GO")
+        self.assertFalse(summary["go"])
+        self.assertEqual(summary["verdict"], "NO-GO")
+
+    def test_dirty_tip_never_go(self):
+        """Dirty source_revision must not produce GO (hardware tip binding)."""
+        rep = toy_report(
+            toy=False,
+            production_dims=True,
+            source_revision="deadbeef-dirty",
+            device_resident=True,
+            native_path_eligible=True,
+            wall_clock_provenance="chrono_measured",
+            evidence_kind="measured",
+            extractmx_self_qual={"status": "pass", "native_mxfp4_qualified": True},
+            allocation_cap_verdicts={
+                "512MiB": "pass",
+                "2GiB": "pass",
+                "8GiB": "pass",
+            },
+            phase_wall_s={"total": 10.0, "verify": 0.05},
+            run_variance={"episode_cv": 0.02},
+            residency_sweep={
+                "cliff_ratio": 2.0,
+                "stream_util_frac": 0.5,
+                "points": [
+                    {"working_set_bytes": 128 * 1024 * 1024, "wall_s": 2.0},
+                    {"working_set_bytes": 200 * 1024 * 1024, "wall_s": 1.0},
+                ],
+            },
+            k_curve={
+                "mode": "measured",
+                "digests_match": True,
+                "k_at_24gb": 1.5,
+                "k_variance": 0.01,
+            },
+            verifier_floor={
+                "measured": True,
+                "full_episode_wall_s": 10.0,
+                "full_verify_wall_s": 0.05,
+            },
+            gpu_campaign_present=True,
+            nvlink_campaign_present=True,
+            device_id="GPU-TEST-UUID",
+        )
+        summary = rc_gate.aggregate([rep])
+        self.assertNotEqual(summary["verdict"], "GO")
+        self.assertFalse(summary["go"])
+        self.assertIsNone(rc_gate.tip_id(rep))
+
+    def test_aggregate_binds_device_id_to_per_report_row(self):
+        """Hardware identity must travel with each report row in the summary."""
+        rep = toy_report(device_id="pci:0000:01:00.0", backend="cuda")
+        summary = rc_gate.aggregate([rep])
+        self.assertEqual(summary["reports"][0]["device_id"], "pci:0000:01:00.0")
+        self.assertEqual(summary["reports"][0]["backend"], "cuda")
+        self.assertNotEqual(summary["verdict"], "GO")
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main(verbosity=2))
