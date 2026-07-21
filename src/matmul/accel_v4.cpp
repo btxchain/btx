@@ -14,6 +14,8 @@
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_rc_accel_policy.h>
+#include <matmul/matmul_v4_rc_mx_ozaki.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
 #include <matmul/pow_v4.h>
 #include <metal/matmul_v4_lt_accel.h>
@@ -28,12 +30,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <string>
 #include <tuple>
 #include <utility>
-#include <string>
 #include <vector>
 
 namespace matmul_v4::accel {
@@ -720,10 +722,61 @@ matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
     return ResolveExactGemmBackendForLT().backend;
 }
 
+namespace {
+
+/** ExactGemmBackend::S8S8Fn adapter for qualified RC Ozaki MXFP4 tensor path. */
+bool RcOzakiNativeMxfp4GemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                                uint32_t rows, uint32_t inner, uint32_t cols,
+                                std::vector<int32_t>& out)
+{
+    std::vector<int64_t> wide;
+    if (!matmul::v4::rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, rows, inner, cols, wide) ||
+        wide.size() != static_cast<size_t>(rows) * cols) {
+        out.clear();
+        return false;
+    }
+    out.resize(wide.size());
+    for (size_t i = 0; i < wide.size(); ++i) {
+        const int64_t v = wide[i];
+        if (v < std::numeric_limits<int32_t>::min() || v > std::numeric_limits<int32_t>::max()) {
+            out.clear();
+            return false;
+        }
+        out[i] = static_cast<int32_t>(v);
+    }
+    return true;
+}
+
+} // namespace
+
 matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackendForRC()
 {
+    using matmul::v4::rc::RCAccelerationPolicy;
+    const RCAccelerationPolicy policy = matmul::v4::rc::ResolveRCAccelerationPolicy();
+
+    // NativeRequired (default): never fall through to dense device INT8
+    // (LaunchGemmS8S8) when a native MXFP4 lane is unavailable. Empty backend
+    // ⇒ CPU ExactGemm oracle (portable math, not advertised as native).
+    if (policy == RCAccelerationPolicy::NativeRequired) {
+        if (!matmul::v4::rc::IsRcOzakiMxfp4Qualified()) {
+            static std::atomic_bool logged_native_req{false};
+            bool expected{false};
+            if (logged_native_req.compare_exchange_strong(expected, true)) {
+                LogPrintf("MatMul-v4.4-RC ExactGemm: NativeRequired — native MXFP4 "
+                          "unqualified; declining device INT8 inject (CPU ExactGemm)\n");
+            }
+            return matmul::v4::lt::ExactGemmBackend{};
+        }
+        // Native MXFP4 qualified: inject Ozaki tensor path — never dense INT8.
+        matmul::v4::lt::ExactGemmBackend native;
+        native.gemm_s8s8 = &RcOzakiNativeMxfp4GemmS8S8;
+        // S32S8 not used by coupled lobe GEMMs; leave null so HasDeviceGemms is
+        // false for LT-style checks — RC Dispatch only needs gemm_s8s8.
+        return GateExactGemmWithRCSelfQualCached(native, "rc_ozaki_mxfp4", /*epoch=*/-1);
+    }
+
+    // PortableExplicit: legacy device ExactGemm (INT8 IMMA/etc.) after RC self-qual.
     const ResolvedExactGemm resolved = ResolveExactGemmBackendForLT();
-    // Arch/provider identity is the resolve label (cuda/hip/metal/cpu/…).
     return GateExactGemmWithRCSelfQualCached(resolved.backend, resolved.label, /*epoch=*/-1);
 }
 

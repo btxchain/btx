@@ -719,6 +719,9 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
         s.resident_native_mx_wired = g_resident_native_mx_wired;
         s.arch_key = g_qual_arch_key.empty() ? HipDeviceArchKey() : g_qual_arch_key;
     }
+    // HIP has no production-dim (≥4096) native self-qual latch yet — never
+    // inherit a stale true; peak_ready requires production_shape_qualified.
+    s.production_shape_qualified = false;
     s.allow_exact_mx_fallback = matmul::v4::lt::AllowLtExactMxFallback();
     // Amendment v2 §1.CORRECT: DERIVE peak_ready / blocks_device_resident only.
     matmul::v4::lt::DeriveLtPeakMxFlags(s);

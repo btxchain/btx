@@ -4,7 +4,9 @@
 
 #include <matmul/matmul_v4_rc_accel_policy.h>
 
+#include <cstdlib>
 #include <sstream>
+#include <string>
 
 namespace matmul::v4::rc {
 
@@ -95,6 +97,18 @@ const char* ToString(RCAccelResidencyMode mode)
         return "Streamed";
     }
     return "Unknown";
+}
+
+RCAccelerationPolicy ResolveRCAccelerationPolicy()
+{
+    const char* e = std::getenv("BTX_RC_ACCEL_POLICY");
+    if (e != nullptr) {
+        const std::string v{e};
+        if (v == "portable" || v == "PortableExplicit" || v == "PORTABLE") {
+            return RCAccelerationPolicy::PortableExplicit;
+        }
+    }
+    return kRCAccelerationPolicyDefault;
 }
 
 } // namespace matmul::v4::rc

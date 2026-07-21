@@ -27,7 +27,9 @@
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_batch.h>
 #include <matmul/matmul_v4_rc_coupled.h>
+#include <matmul/matmul_v4_rc_datacenter.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/noise.h>
 #include <matmul/pow_v4.h>
@@ -5960,7 +5962,7 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
 // Public nets keep nMatMulRCCoupledHeight = INT32_MAX (unreachable).
 // ---------------------------------------------------------------------------
 
-/** Coupled-puzzle miner: grind nonces through MineCoupledPuzzle + CPU reseal. */
+/** Coupled-puzzle miner: Q-batch Mine via TryMineRCCoupledBatch + CPU reseal. */
 static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
                                    const Consensus::Params& params,
                                    uint64_t& max_tries,
@@ -6000,49 +6002,75 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
             return false;
         }
 
-        // Mining may inject ExactGemm/native when ProbeRCCoupledDevice admits.
-        const uint256 mined =
-            matmul::v4::rc::MineCoupledPuzzle(block, block_height, params_coup, gemm);
-        if (mined.IsNull()) {
-            LogWarning("SolveMatMulV4RCCoupled: MineCoupledPuzzle returned null at nonce=%llu; "
+        // Q-batch: stack nonces that share the bank template into one
+        // TryMineRCCoupledBatch (QxW · W×W ExactGemm per lobe) — not per-nonce GEMV.
+        const uint32_t q_want = std::min<uint32_t>(
+            matmul::v4::rc::dc::kRCMinerBatchQDefault,
+            static_cast<uint32_t>(std::min<uint64_t>(max_tries, matmul::v4::rc::dc::kRCMinerBatchQMax)));
+        const uint32_t Q = std::max(1u, q_want);
+
+        std::vector<CBlockHeader> window =
+            matmul::v4::rc::BuildRCCoupledMinerNonceWindow(block, Q);
+        for (CBlockHeader& h : window) {
+            if (!SetDeterministicMatMulSeeds(h, params, block_height, parent_median_time_past)) {
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+        }
+
+        matmul::v4::rc::RCMinerBatchConfig cfg;
+        cfg.Q = Q;
+        std::vector<uint256> digests;
+        if (!matmul::v4::rc::TryMineRCCoupledBatch(window, block_height, params_coup, digests, cfg,
+                                                   gemm) ||
+            digests.size() != window.size()) {
+            LogWarning("SolveMatMulV4RCCoupled: TryMineRCCoupledBatch failed at nonce=%llu; "
                        "aborting\n",
                        static_cast<unsigned long long>(block.nNonce64));
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;
         }
-        if (UintToArith256(mined) > effective_target) {
-            --max_tries;
-            if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) {
+
+        for (uint32_t i = 0; i < Q; ++i) {
+            if (max_tries == 0) break;
+            const uint256& mined = digests[i];
+            if (mined.IsNull()) {
+                LogWarning("SolveMatMulV4RCCoupled: null batch digest at nonce=%llu; aborting\n",
+                           static_cast<unsigned long long>(block.nNonce64 + i));
                 RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
                 return false;
             }
-            ++block.nNonce64;
-            block.nNonce = static_cast<uint32_t>(block.nNonce64);
-            continue;
+            if (UintToArith256(mined) > effective_target) {
+                --max_tries;
+                continue;
+            }
+
+            // Winner candidate: CPU reseal (empty ExactGemm).
+            CBlockHeader cand = window[i];
+            const uint256 resealed =
+                matmul::v4::rc::RecomputeCoupledPuzzleReference(cand, block_height, params_coup);
+            if (resealed != mined) {
+                LogWarning("SolveMatMulV4RCCoupled: TryMineRCCoupledBatch diverged from "
+                           "RecomputeCoupledPuzzleReference at nonce=%llu; aborting solve\n",
+                           static_cast<unsigned long long>(cand.nNonce64));
+                RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+            if (UintToArith256(resealed) <= effective_target) {
+                block = cand;
+                block.matmul_digest = resealed;
+                RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
+                return true;
+            }
+            --max_tries;
         }
 
-        // Winner: CPU reseal (empty ExactGemm — never accelerate REJECT / reseal).
-        const uint256 resealed =
-            matmul::v4::rc::RecomputeCoupledPuzzleReference(block, block_height, params_coup);
-        if (resealed != mined) {
-            LogWarning("SolveMatMulV4RCCoupled: MineCoupledPuzzle diverged from "
-                       "RecomputeCoupledPuzzleReference at nonce=%llu; aborting solve\n",
-                       static_cast<unsigned long long>(block.nNonce64));
+        // Advance past the window.
+        if (block.nNonce64 > std::numeric_limits<uint64_t>::max() - Q) {
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;
         }
-        if (UintToArith256(resealed) <= effective_target) {
-            block.matmul_digest = resealed;
-            RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
-            return true;
-        }
-
-        --max_tries;
-        if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) {
-            RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
-            return false;
-        }
-        ++block.nNonce64;
+        block.nNonce64 += Q;
         block.nNonce = static_cast<uint32_t>(block.nNonce64);
     }
     RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);

@@ -2,14 +2,17 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc_accel_policy.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
+#include <matmul/matmul_v4_rc_mx_ozaki.h>
 
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <cstdlib>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -29,6 +32,44 @@ BOOST_AUTO_TEST_CASE(rc_accel_policy_native_required_neq_portable_explicit)
                       "NativeRequired");
     BOOST_CHECK_EQUAL(std::string{rc::ToString(rc::RCAccelerationPolicy::PortableExplicit)},
                       "PortableExplicit");
+}
+
+BOOST_AUTO_TEST_CASE(rc_accel_policy_resolve_default_native_required)
+{
+    const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
+    unsetenv("BTX_RC_ACCEL_POLICY");
+    BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
+                      static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
+    if (prev != nullptr) {
+        setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+    }
+}
+
+/** NativeRequired must not fall through to dense device INT8 when Ozaki MXFP4
+ *  is unqualified (typical on CPU-only boxes). Empty gemm_s8s8 ⇒ CPU ExactGemm. */
+BOOST_AUTO_TEST_CASE(rc_native_required_empty_gemm_when_ozaki_unqualified)
+{
+    const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
+    unsetenv("BTX_RC_ACCEL_POLICY");
+    BOOST_REQUIRE_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
+                        static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
+
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+
+    // Default on this CPU box: Ozaki native MXFP4 is not qualified.
+    BOOST_REQUIRE_MESSAGE(!rc::IsRcOzakiMxfp4Qualified(),
+                          "expected Ozaki MXFP4 unqualified on CPU-only host");
+
+    const auto backend = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+    BOOST_CHECK_MESSAGE(backend.gemm_s8s8 == nullptr,
+                        "NativeRequired must decline dense INT8 inject when Ozaki "
+                        "unqualified (empty ExactGemmBackend)");
+
+    if (prev != nullptr) {
+        setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+    } else {
+        unsetenv("BTX_RC_ACCEL_POLICY");
+    }
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_defaults_v1_compatible)

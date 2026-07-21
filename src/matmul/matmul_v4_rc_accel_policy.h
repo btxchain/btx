@@ -171,6 +171,15 @@ struct RCCoupConsensusConfig {
 [[nodiscard]] const char* ToString(RCComputeLaneId lane);
 [[nodiscard]] const char* ToString(RCAccelResidencyMode mode);
 
+/**
+ * Resolve mining acceleration policy.
+ * Default: NativeRequired (kRCAccelerationPolicyDefault).
+ * Opt-in portable/legacy INT8 inject: BTX_RC_ACCEL_POLICY=portable|PortableExplicit.
+ * Under NativeRequired the central ExactGemm resolver must NOT fall through to
+ * dense device INT8 when native MX is unavailable.
+ */
+[[nodiscard]] RCAccelerationPolicy ResolveRCAccelerationPolicy();
+
 } // namespace matmul::v4::rc
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_ACCEL_POLICY_H

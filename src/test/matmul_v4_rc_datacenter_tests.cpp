@@ -206,6 +206,31 @@ BOOST_AUTO_TEST_CASE(rc_dc_q_batch_digest_identity)
     }
 }
 
+/** Miner SolveMatMulV4RCCoupled path: BuildRCCoupledMinerNonceWindow + Q>1 batch
+ *  must match per-header MineCoupledPuzzle (CPU ExactGemm). */
+BOOST_AUTO_TEST_CASE(rc_dc_miner_q_window_batch_matches_coupled_puzzle)
+{
+    const auto params = rc::MakeToyRCCoupParams();
+    const CBlockHeader base = MakeCoupHeader(7777);
+    constexpr uint32_t Q = 4;
+    const auto window = rc::BuildRCCoupledMinerNonceWindow(base, Q);
+    BOOST_REQUIRE_EQUAL(window.size(), Q);
+    BOOST_CHECK_EQUAL(window[0].nNonce64, base.nNonce64);
+    BOOST_CHECK_EQUAL(window[Q - 1].nNonce64, base.nNonce64 + (Q - 1));
+
+    std::vector<uint256> batch;
+    rc::RCMinerBatchConfig cfg;
+    cfg.Q = Q;
+    BOOST_REQUIRE(rc::TryMineRCCoupledBatch(window, 0, params, batch, cfg));
+    BOOST_REQUIRE_EQUAL(batch.size(), Q);
+    for (uint32_t i = 0; i < Q; ++i) {
+        const uint256 single = rc::MineCoupledPuzzle(window[i], 0, params);
+        BOOST_CHECK_MESSAGE(batch[i] == single,
+                            "miner Q-window batch != MineCoupledPuzzle at i=" << i);
+        BOOST_CHECK(!batch[i].IsNull());
+    }
+}
+
 BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_stub)
 {
     matmul_v4::cuda::RCCudaEpisodeContext ctx;

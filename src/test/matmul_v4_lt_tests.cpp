@@ -822,11 +822,23 @@ BOOST_AUTO_TEST_CASE(lt_peak_mx_exact_fallback_default_and_native_only_env)
     BOOST_CHECK(cuda_peak.allow_exact_mx_fallback);
     BOOST_CHECK(hip_peak.allow_exact_mx_fallback);
     // Amendment v2 §1.CORRECT: peak_ready / blocks_device_resident are DERIVED.
+    // production_shape_qualified is REQUIRED — n≤256 suite alone cannot peak_ready.
+    {
+        matmul::v4::lt::LtPeakMxPathStatus ci_only{};
+        ci_only.peak_capable = true;
+        ci_only.resident_native_mx_wired = true;
+        ci_only.native_mxfp4_qualified = true;
+        ci_only.production_shape_qualified = false; // CI/n≤256 only
+        ci_only.allow_exact_mx_fallback = true;
+        matmul::v4::lt::DeriveLtPeakMxFlags(ci_only);
+        BOOST_CHECK(!ci_only.peak_ready);
+    }
     {
         matmul::v4::lt::LtPeakMxPathStatus ready{};
         ready.peak_capable = true;
         ready.resident_native_mx_wired = true;
         ready.native_mxfp4_qualified = true;
+        ready.production_shape_qualified = true;
         ready.allow_exact_mx_fallback = true;
         matmul::v4::lt::DeriveLtPeakMxFlags(ready);
         BOOST_CHECK(ready.peak_ready);

@@ -59,6 +59,8 @@ bool g_native_qual_ran{false};
 // End-to-end resident Q* graph uses native projection (device μ/e/V → dQ).
 bool g_resident_native_mx_wired{false};
 bool g_resident_native_mx_attempted{false};
+/** True only after a native oracle pass at n ≥ kLtProductionShapeMinDim (4096). */
+bool g_production_shape_qualified{false};
 std::string g_qual_arch_key; // Amendment v2 §1.SCOPE — per-arch, not per-card
 std::string g_resident_deficit_detail;
 
@@ -1169,18 +1171,28 @@ void RunResidentNativeSelfQualLocked(cudaStream_t stream)
         return;
     }
 
-    // CI-safe / medium shapes via the device-pointer entry. peak_ready additionally
-    // requires production dims + actual resident layouts on silicon (1.B note:
-    // RC Ozaki is a separate surface — this suite does not admit RC native FP4).
+    // CI/medium shapes via the device-pointer entry. production_shape_qualified
+    // (and thus peak_ready) additionally requires n ≥ kLtProductionShapeMinDim.
+    // RC Ozaki remains a separate surface — this suite does not admit RC native FP4.
     struct Shape {
         uint32_t n;
         uint32_t m;
         bool max_corner;
     };
-    const std::vector<Shape> shapes = {
+    std::vector<Shape> shapes = {
         {32, 16, false}, {32, 16, true}, {64, 32, false}, {128, 64, false},
-        {128, 64, true}, {256, 64, false}, // medium / CI-safe stand-in for n=4096
+        {128, 64, true}, {256, 64, false},
     };
+    // Production latch: require real 4096-class shape when HBM allows (~mu+V+Q footprint).
+    size_t free_b = 0, total_b = 0;
+    const bool mem_ok =
+        cudaMemGetInfo(&free_b, &total_b) == cudaSuccess &&
+        free_b >= (6ull << 30); // ~6 GiB free headroom for n=4096 fixtures
+    if (mem_ok) {
+        shapes.push_back({matmul::v4::lt::kLtProductionShapeMinDim, 64, false});
+        shapes.push_back({matmul::v4::lt::kLtProductionShapeMinDim, 64, true});
+    }
+    bool saw_production = false;
     for (const auto& sh : shapes) {
         std::vector<int8_t> mu, V;
         std::vector<uint8_t> scales;
@@ -1188,14 +1200,24 @@ void RunResidentNativeSelfQualLocked(cudaStream_t stream)
         if (!ResidentDeviceProjectionMatchesOracle(mu, scales, V, sh.n, sh.m, stream)) {
             g_resident_deficit_detail =
                 "resident device-pointer native projection mismatched CPU oracle at n=" +
-                std::to_string(sh.n) +
-                "; peak_ready still requires production dims + resident layouts";
+                std::to_string(sh.n);
             g_resident_native_mx_wired = false;
+            g_production_shape_qualified = false;
             return;
         }
+        if (sh.n >= matmul::v4::lt::kLtProductionShapeMinDim) saw_production = true;
     }
     g_resident_native_mx_wired = true;
-    g_resident_deficit_detail.clear();
+    g_production_shape_qualified = saw_production;
+    if (!saw_production) {
+        g_resident_deficit_detail =
+            "resident wired on CI/medium shapes only; production_shape_qualified "
+            "requires n>=" +
+            std::to_string(matmul::v4::lt::kLtProductionShapeMinDim) +
+            " (insufficient free VRAM or skipped)";
+    } else {
+        g_resident_deficit_detail.clear();
+    }
 }
 
 void RunNativeSelfQualOnceLocked()
@@ -1502,6 +1524,7 @@ matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
     {
         std::lock_guard<std::mutex> lock(g_native_mx_mu);
         s.resident_native_mx_wired = g_resident_native_mx_wired;
+        s.production_shape_qualified = g_production_shape_qualified;
         s.arch_key = g_qual_arch_key;
     }
     s.allow_exact_mx_fallback = matmul::v4::lt::AllowLtExactMxFallback();

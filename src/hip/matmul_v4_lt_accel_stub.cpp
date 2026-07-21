@@ -134,6 +134,7 @@ bool IsLtPeakMxCapableDevice()
 matmul::v4::lt::LtPeakMxPathStatus ProbeLtPeakMxPathStatus()
 {
     matmul::v4::lt::LtPeakMxPathStatus s;
+    s.production_shape_qualified = false;
     s.allow_exact_mx_fallback = matmul::v4::lt::AllowLtExactMxFallback();
     s.deficit_reason = "HIP LT native TU not linked (stub); device-pointer resident pack not wired";
     matmul::v4::lt::DeriveLtPeakMxFlags(s);

@@ -114,6 +114,7 @@ void LogLtMxDiagnostic(const std::string& message);
  *
  * Amendment v2 §1.CORRECT — DERIVE ONLY (never hand-set):
  *   peak_ready = peak_capable && resident_native_mx_wired &&
+ *                production_shape_qualified &&
  *                (native_mxfp4_qualified || native_fp8_qualified);
  *   blocks_device_resident = peak_required && !peak_ready;
  * On a QUALIFIED/ready path, blocks_device_resident MUST be false (it is a
@@ -122,7 +123,13 @@ void LogLtMxDiagnostic(const std::string& message);
  *
  * Amendment v2 §1.SCOPE — native-MX qualification is PER-ARCH (arch_key), not
  * per-card. sm_120 (consumer Blackwell) ≠ sm_100 (B200); gfx942 ≠ gfx1200.
+ *
+ * production_shape_qualified: true ONLY after a native self-qual that exercised
+ * at least one shape with inner/K (or square n) ≥ kLtProductionShapeMinDim
+ * (4096). The CI/n≤256 suite alone MUST NOT set this latch or peak_ready.
  */
+inline constexpr uint32_t kLtProductionShapeMinDim = 4096;
+
 struct LtPeakMxPathStatus {
     std::string arch_key;                 // e.g. "sm_120", "sm_100", "gfx950"
     bool peak_capable{false};             // arch class may host native MX
@@ -131,6 +138,8 @@ struct LtPeakMxPathStatus {
     bool native_fp8_attempted{false};     // self-qual invoked vendor block-FP8 surface
     bool native_fp8_qualified{false};     // for arch_key only
     bool resident_native_mx_wired{false}; // set ONLY after resident device-ptr oracle pass
+    /** True only after production-dim (≥4096) native oracle pass — never from n≤256. */
+    bool production_shape_qualified{false};
     bool peak_ready{false};               // DERIVED — see formula above
     bool allow_exact_mx_fallback{true};   // default; false only in native-only mode
     bool peak_required{false};            // capable && explicit native-only mode
@@ -142,6 +151,7 @@ struct LtPeakMxPathStatus {
 inline void DeriveLtPeakMxFlags(LtPeakMxPathStatus& s)
 {
     s.peak_ready = s.peak_capable && s.resident_native_mx_wired &&
+                   s.production_shape_qualified &&
                    (s.native_mxfp4_qualified || s.native_fp8_qualified);
     s.peak_required = s.peak_capable && !s.allow_exact_mx_fallback;
     s.blocks_device_resident = s.peak_required && !s.peak_ready;
