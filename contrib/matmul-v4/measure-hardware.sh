@@ -208,10 +208,12 @@ case "$BACKEND" in
   #
   # Two CUDA recipes (PR #89 plain sm_120 vs feature-qualified sm_120a):
   #   1) Plain packaging (default here) — native block_scale MMA compiled OUT:
-  #        -DBTX_CUDA_ARCHITECTURES=100;120   # never 120a
-  #   2) Rack SM120_MMA — dedicated sm_120a object TU (cmake/BTXCudaSm120a.cmake):
-  #        -DBTX_CUDA_ARCHITECTURES=120 -DBTX_CUDA_SM120_MXFP4_NATIVE=ON
-  #      NVCC flag on that TU only: -gencode=arch=compute_120a,code=sm_120a
+  #        -DBTX_CUDA_ARCHITECTURES=100;120   # never 120a in this list
+  #      Exact INT8 / streamed path; native_mxfp4=false / no SM120_MMA claim.
+  #   2) Rack SM120_MMA — BTX_CUDA_ARCHITECTURES=120 + BTX_CUDA_SM120_MXFP4_NATIVE=ON
+  #      (cmake/BTXCudaSm120a.cmake): marker TU + sm_120a fatbin slice on
+  #      matmul_v4_rc_mx_ozaki_native.cu (-gencode=arch=compute_120a,code=sm_120a).
+  #      Do NOT put 120a in BTX_CUDA_ARCHITECTURES. CUTLASS MXFP4 stays scaffolding.
   #      Set BTX_CUDA_SM120_MXFP4_NATIVE=1 in the environment to enable recipe 2.
   cuda)
     CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90;100;120}")
