@@ -754,6 +754,14 @@ void SetRcResidentDeviceGemmHook(RcResidentDeviceGemmHook hook)
     g_device_gemm_hook = hook;
 }
 
+void RCCudaEpisodeContext::RefreshPeakReadyDerived()
+{
+    // Re-run the fail-closed derivation against current provenance. No qualified
+    // native-MX device tail is wired here, so device_tail_ok is false and
+    // peak_ready stays false — the derivation never forces it true.
+    SetPeakReadyDerived(m_prov, /*device_tail_ok=*/false);
+}
+
 RcResidentDeviceGemmHook GetRcResidentDeviceGemmHook()
 {
     return g_device_gemm_hook;

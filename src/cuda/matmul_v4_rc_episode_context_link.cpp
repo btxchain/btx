@@ -76,6 +76,12 @@ bool RCCudaEpisodeContext::Init(const RCCudaEpisodeShape& shape, std::string* er
     return true;
 }
 
+void RCCudaEpisodeContext::RefreshPeakReadyDerived()
+{
+    // Host stub: no device path is wired, so the derivation is fail-closed false.
+    m_prov.peak_ready = false;
+}
+
 bool RCCudaEpisodeContext::Init(const matmul::v4::rc::RCCoupParams& params, uint32_t batch_q,
                                 std::string* error)
 {

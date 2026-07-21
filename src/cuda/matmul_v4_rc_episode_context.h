@@ -172,6 +172,13 @@ public:
     [[nodiscard]] const RCCudaEpisodeProvenance& Provenance() const { return m_prov; }
 
     /**
+     * Re-run the DeriveRCPeakReady derivation against the current context state
+     * and update m_prov.peak_ready. Fail-closed: peak_ready is only ever set by
+     * the derivation (never forced true); an unqualified context stays false.
+     */
+    void RefreshPeakReadyDerived();
+
+    /**
      * Explicit differential vs RecomputeCoupledPuzzleReference (self-qual /
      * tests only — not on the mining hot path).
      */
