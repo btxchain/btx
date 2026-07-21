@@ -804,16 +804,28 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
     return true;
 }
 
-/** Real TC: factor → QMMA.SF m16n8k32 e2m1 block_scale → exact int32. */
+/**
+ * Real TC: factor → QMMA.SF m16n8k32 e2m1 block_scale → exact int32.
+ * K must be a multiple of 32 — never zero-pad inside a tile (sm_120 block-scale
+ * e2m1 is wrong for partial-K MMA tiles). Callers hybridize remainder via scalar.
+ */
 [[nodiscard]] bool LaunchMxfp4OnePanelMma(const std::vector<int8_t>& Lpanel,
                                           const std::vector<int8_t>& Rpanel, uint32_t rows,
                                           uint32_t len, uint32_t cols,
                                           std::vector<int32_t>& partial, std::string* error)
 {
+    if (len == 0 || (len % kMxBlk) != 0) {
+        if (error) *error = "rc_ozaki_mxfp4_mma: K not multiple of 32";
+        return false;
+    }
     std::vector<uint8_t> A_pack, B_pack, SFa, SFb;
     uint32_t Mpad = 0, Npad = 0, Kpad = 0;
     if (!PackOzakiPanelsMmaFp4(Lpanel, Rpanel, rows, len, cols, A_pack, B_pack, SFa, SFb, Mpad, Npad,
                                Kpad, error)) {
+        return false;
+    }
+    if (Kpad != len) {
+        if (error) *error = "rc_ozaki_mxfp4_mma: unexpected K pad";
         return false;
     }
     const uint32_t kblocks = Kpad / kMxBlk;
@@ -1063,7 +1075,9 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
     return true;
 }
 
-/** Real TC Ozaki panels via SM120 QMMA.SF m16n8k32 e2m1 block_scale (native claim path). */
+/** Real TC Ozaki panels via SM120 QMMA.SF m16n8k32 e2m1 block_scale (native claim path).
+ * Full K/32 tiles → MMA; K%32 remainder → scalar-decode (exactness). Never zero-pads
+ * inside an MMA tile. */
 [[nodiscard]] bool LaunchOzakiMxfp4PanelsMma(const std::vector<int8_t>& left,
                                              const std::vector<int8_t>& right, uint32_t rows,
                                              uint32_t inner, uint32_t cols,
@@ -1080,10 +1094,23 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
         return false;
     }
 
-    using matmul::v4::rc::kRCOzakiExactChunk;
     out.assign(static_cast<size_t>(rows) * cols, 0);
-    for (uint32_t k0 = 0; k0 < inner; k0 += kRCOzakiExactChunk) {
-        const uint32_t len = std::min(kRCOzakiExactChunk, inner - k0);
+    const uint32_t k_full = (inner / kMxBlk) * kMxBlk;
+    const uint32_t k_rem = inner - k_full;
+
+    auto add_partial = [&](const std::vector<int32_t>& partial) -> bool {
+        if (partial.size() != out.size()) return false;
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] += static_cast<int64_t>(partial[i]);
+        }
+        return true;
+    };
+
+    using matmul::v4::rc::kRCOzakiExactChunk;
+    for (uint32_t k0 = 0; k0 < k_full; k0 += kRCOzakiExactChunk) {
+        uint32_t len = std::min(kRCOzakiExactChunk, k_full - k0);
+        len = (len / kMxBlk) * kMxBlk; // keep MMA tiles dense
+        if (len == 0) continue;
         std::vector<int8_t> Lpanel(static_cast<size_t>(rows) * len);
         std::vector<int8_t> Rpanel(static_cast<size_t>(len) * cols);
         for (uint32_t r = 0; r < rows; ++r) {
@@ -1098,15 +1125,34 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
                     right[static_cast<size_t>(k0 + t) * cols + c];
             }
         }
-
         std::vector<int32_t> partial;
         if (!LaunchMxfp4OnePanelMma(Lpanel, Rpanel, rows, len, cols, partial, error) ||
-            partial.size() != out.size()) {
+            !add_partial(partial)) {
             out.clear();
             return false;
         }
-        for (size_t i = 0; i < out.size(); ++i) {
-            out[i] += static_cast<int64_t>(partial[i]);
+    }
+
+    if (k_rem > 0) {
+        std::vector<int8_t> Lpanel(static_cast<size_t>(rows) * k_rem);
+        std::vector<int8_t> Rpanel(static_cast<size_t>(k_rem) * cols);
+        for (uint32_t r = 0; r < rows; ++r) {
+            for (uint32_t t = 0; t < k_rem; ++t) {
+                Lpanel[static_cast<size_t>(r) * k_rem + t] =
+                    left[static_cast<size_t>(r) * inner + (k_full + t)];
+            }
+        }
+        for (uint32_t t = 0; t < k_rem; ++t) {
+            for (uint32_t c = 0; c < cols; ++c) {
+                Rpanel[static_cast<size_t>(t) * cols + c] =
+                    right[static_cast<size_t>(k_full + t) * cols + c];
+            }
+        }
+        std::vector<int32_t> partial;
+        if (!LaunchMxfp4OnePanelScalar(Lpanel, Rpanel, rows, k_rem, cols, partial, error) ||
+            !add_partial(partial)) {
+            out.clear();
+            return false;
         }
     }
     return true;
@@ -1378,9 +1424,10 @@ bool SelfQualifyRcOzakiCudaMxfp4Once()
             Mxfp4TensorSuiteMatches(&tc_err)) {
             // Re-check: if MMA tiny shape works and full suite passed, prefer MMA name.
             // Suite tries MMA first then Lt — if MMA failed suite wouldn't set via MMA.
-            // Distinguish: if LaunchOzakiMxfp4PanelsMma matches K=4096 corner, it's MMA.
+            // Pure-K MMA (no scalar remainder) must match for cutlass/MMA native claim.
             std::string mma_full;
-            if (Mxfp4ShapeMatches(4, 4096, 4, 3, true, 3, &LaunchOzakiMxfp4PanelsMma, &mma_full)) {
+            if (Mxfp4ShapeMatches(4, 4096, 4, 3, true, 3, &LaunchOzakiMxfp4PanelsMma, &mma_full) &&
+                Mxfp4ShapeMatches(4, 32, 4, 9, true, 2, &LaunchOzakiMxfp4PanelsMma, &mma_full)) {
                 tensor_ok = true;
                 tc_backend = is_sm120 ? "mxfp4_mma_sm120" : "mxfp4_mma_sm100";
             } else {
