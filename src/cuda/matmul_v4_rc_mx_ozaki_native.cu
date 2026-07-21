@@ -1155,6 +1155,20 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
                                              std::vector<int64_t>& out, std::string* error)
 {
     out.clear();
+    // SM100 isolation: never dispatch SM120 MMA on Blackwell sm_100 / B200.
+    // SM100 uses SM100_CUBLASLT only; MMA body is also compile-gated to sm_120a.
+    {
+        int device = 0;
+        cudaDeviceProp prop{};
+        if (cudaGetDevice(&device) == cudaSuccess &&
+            cudaGetDeviceProperties(&prop, device) == cudaSuccess &&
+            DeviceLooksSm100(prop.major, prop.minor)) {
+            if (error) {
+                *error = "SM100 refuse SM120_MMA: use SM100_CUBLASLT (no MMA dispatch)";
+            }
+            return false;
+        }
+    }
     if (rows == 0 || inner == 0 || cols == 0) {
         if (error) *error = "Ozaki MXFP4 MMA degenerate shape";
         return false;
@@ -1446,6 +1460,13 @@ __attribute__((weak)) bool RcOzakiMxfp4Sm120aKernelLinked()
     return false;
 }
 
+// Weak default: BTX_CUDA_SM100_NATIVE probe is fail-closed without B200 —
+// no strong override TU exists in this tree, so this always returns false.
+__attribute__((weak)) bool RcOzakiMxfp4Sm100NativeLinked()
+{
+    return false;
+}
+
 bool IsRcOzakiCudaCompiled()
 {
     return true;
@@ -1620,6 +1641,10 @@ bool SelfQualifyRcOzakiCudaMxfp4Once()
             err = tc_err;
         }
     } else if (err.empty() && is_sm100) {
+        // SM100 / B200: CUBLASLT only. Never call LaunchOzakiMxfp4PanelsMma here
+        // (runtime refuse + compile-out). BTX_CUDA_SM100_NATIVE packaging probe
+        // stays fail-closed without B200 — does not gate this runtime latch.
+        (void)RcOzakiMxfp4Sm100NativeLinked(); // documented fail-closed probe
         std::string lt_err;
         if (Mxfp4CompleteSuiteForLauncher(&LaunchOzakiMxfp4PanelsCublasLt, &lt_err)) {
             selected = RcOzakiMxfp4SelectedBackend::SM100_CUBLASLT;

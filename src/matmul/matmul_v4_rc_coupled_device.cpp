@@ -92,18 +92,22 @@ RCCudaEpisodeResidentProbe ProbeRCCudaEpisodeResident()
     st.graph_capture_once_api = true;
     st.host_bridge_removed = true; // MineCoupledPuzzle ExactGemm bridge gone
     st.peak_ready = false;
-    st.device_digest = false;
-    st.permute_extract_parked = true;
+    st.device_digest = false; // AssembleCoupledEpisodeDigest remains on host
     if (!st.cuda_episode_compiled) {
+        st.permute_extract_parked = true;
         st.gemm_path_label = "stub_not_wired";
         st.parked_reason = "graph_unavailable:not_wired";
         st.detail = "cpu_stub_build";
         return st;
     }
+    // CUDA TU: device_barrier_tail (permute/mix/Extract/BarrierRoot) is wired;
+    // episode digest + native MXFP4 remain residual → peak_ready stays false.
+    st.permute_extract_parked = false;
     st.gemm_path_label = "portable_device_alu";
     st.parked_reason =
-        "device_permute_mix_extract_digest_PARKED; native_mxfp4_device_ptr_awaiting_wsB";
-    st.detail = "resident_gemm_graph_api_ready; peak_ready=false";
+        "AssembleCoupledEpisodeDigest_on_host; native_mxfp4_device_ptr_awaiting_wsB; "
+        "peak_ready=false";
+    st.detail = "device_barrier_tail; resident_gemm_graph_api_ready; peak_ready=false";
     return st;
 }
 

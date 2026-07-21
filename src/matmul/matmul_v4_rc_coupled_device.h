@@ -14,9 +14,11 @@
 //   gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
 //   MineCoupledPuzzle(header, height, params, gemm);
 //
-// Resident CUDA episode path (Workstream C):
-//   RCCudaEpisodeContext — bank/state resident + once-captured GEMM graph.
-//   ProbeRCCudaEpisodeResident() reports honest residency / parked stages.
+// Resident CUDA episode path (Workstream C / D-tail):
+//   RCCudaEpisodeContext — bank/state resident + once-captured GEMM graph +
+//   device_barrier_tail (permute/mix/Extract/BarrierRoot). Episode digest is
+//   assembled on host (device_digest=false). ProbeRCCudaEpisodeResident()
+//   reports honest residency / parked residuals.
 //
 // MakeResolvedExactGemmBackendForRC wires CUDA/HIP/Metal LaunchGemmS8S8 (or
 // Ascend/TPU when admitted) only after ProbeRCSelfQual. Empty backend ⇒ CPU
@@ -44,9 +46,10 @@ struct RCCoupledDeviceProbe {
 [[nodiscard]] RCCoupledDeviceProbe ProbeRCCoupledDevice();
 
 /**
- * Honest snapshot of the CUDA resident episode path (Workstream C).
- * peak_ready / device_digest remain false until device Extract + qualified
- * native MXFP4 device-ptr GEMMs are wired end-to-end.
+ * Honest snapshot of the CUDA resident episode path (Workstream C / D-tail).
+ * peak_ready / device_digest remain false until qualified native MXFP4
+ * device-ptr GEMMs + device-assembled episode digest are wired end-to-end.
+ * permute_extract_parked is false when the CUDA TU ships device_barrier_tail.
  */
 struct RCCudaEpisodeResidentProbe {
     bool cuda_episode_compiled{false};

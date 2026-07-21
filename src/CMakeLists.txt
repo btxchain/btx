@@ -95,6 +95,13 @@ set(BTX_CUDA_ARCHITECTURES "" CACHE STRING "Semicolon-separated CUDA SM architec
 option(BTX_CUDA_SM120_MXFP4_NATIVE
   "Compile dedicated sm_120a object TU for native block-scaled MXFP4 MMA (requires toolkit that accepts compute_120a)"
   OFF)
+# Optional SM100 / B200 native packaging probe (Agent E+I). Default OFF.
+# The configure probe is intentionally fail-closed without B200 evidence —
+# enabling this option FATAL_ERRORs until a real sm_100 MX probe lands.
+# Independent of BTX_CUDA_SM120_MXFP4_NATIVE (SM120 packaging preserved).
+option(BTX_CUDA_SM100_NATIVE
+  "OPTIONAL fail-closed SM100/B200 native probe (stays OFF without B200 evidence)"
+  OFF)
 # Cloud TPU is served through a separately built, version-pinned PJRT/libtpu
 # bridge that registers the narrow provider ABI in src/tpu. The core never
 # links OpenXLA directly. OFF keeps registration and all launches fail-closed.
@@ -110,6 +117,9 @@ set_property(CACHE BTX_CUDA_RUNTIME_LIBRARY PROPERTY STRINGS Shared Static)
 
 if(BTX_CUDA_SM120_MXFP4_NATIVE AND NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
   message(FATAL_ERROR "BTX_CUDA_SM120_MXFP4_NATIVE=ON requires BTX_ENABLE_CUDA_EXPERIMENTAL=ON")
+endif()
+if(BTX_CUDA_SM100_NATIVE AND NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
+  message(FATAL_ERROR "BTX_CUDA_SM100_NATIVE=ON requires BTX_ENABLE_CUDA_EXPERIMENTAL=ON")
 endif()
 
 if(BTX_ENABLE_CUDA_EXPERIMENTAL)
@@ -151,6 +161,20 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
         "Probe log:\n${BTX_CUDA_SM120A_PROBE_LOG}")
     endif()
     message(STATUS "BTX sm_120a MXFP4 probe OK (${BTX_CUDA_SM120A_GENCODE_FLAG})")
+  endif()
+  # SM100 / B200: fail-closed probe stub (never enables without B200 evidence).
+  # Independent of SM120 packaging above.
+  if(BTX_CUDA_SM100_NATIVE)
+    btx_cuda_probe_sm100_native(BTX_CUDA_SM100_NATIVE_PROBE_OK)
+    if(NOT BTX_CUDA_SM100_NATIVE_PROBE_OK)
+      unset(BTX_CUDA_SM100_NATIVE CACHE)
+      message(FATAL_ERROR
+        "BTX_CUDA_SM100_NATIVE=ON but the configure-time SM100/B200 probe is "
+        "fail-closed (no B200 evidence in this tree).\n"
+        "Leave BTX_CUDA_SM100_NATIVE=OFF. SM100 runtime stays on the separate "
+        "SM100_CUBLASLT latch; SM120_MMA packaging is BTX_CUDA_SM120_MXFP4_NATIVE.\n"
+        "Probe log:\n${BTX_CUDA_SM100_PROBE_LOG}")
+    endif()
   endif()
 endif()
 

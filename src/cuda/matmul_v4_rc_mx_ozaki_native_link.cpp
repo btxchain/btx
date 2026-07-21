@@ -15,6 +15,12 @@ bool RcOzakiMxfp4Sm120aKernelLinked()
     return false;
 }
 
+bool RcOzakiMxfp4Sm100NativeLinked()
+{
+    // Fail-closed without B200 / BTX_CUDA_SM100_NATIVE probe evidence.
+    return false;
+}
+
 bool IsRcOzakiCudaCompiled()
 {
     return false;

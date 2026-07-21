@@ -732,4 +732,143 @@ BOOST_AUTO_TEST_CASE(rc_coup_exact_gemm_inject)
     BOOST_CHECK(cpu != with_bad);
 }
 
+BOOST_AUTO_TEST_CASE(rc_coup_exchange_rounds_v3_digest_and_bytes)
+{
+    // Default exchange_rounds=0 must preserve frozen V1/V2 goldens.
+    constexpr const char* kToy =
+        "7a7ce1065c7881aa2bd2295c26778ebf88c22432e91326f98d098c11885579ee";
+    constexpr const char* kMed =
+        "349175d557eba373cd59ea4cb5431d5710481cc8e7e121e90c2a0775df8b5f4c";
+    const auto header = MakeCoupHeader(42);
+    rc::RCCoupOptions zero_rounds;
+    BOOST_CHECK_EQUAL(zero_rounds.exchange_rounds, 0u);
+    BOOST_CHECK_EQUAL(
+        rc::RecomputeCoupledPuzzleReference(header, 0, zero_rounds).GetHex(), kToy);
+    BOOST_CHECK_EQUAL(
+        rc::RecomputeCoupledPuzzleReference(header, 0, rc::MakeMediumRCCoupParams(), zero_rounds)
+            .GetHex(),
+        kMed);
+
+    // exchange_rounds>0 changes the toy digest (V3 domain tag path).
+    rc::RCCoupOptions with_rounds;
+    with_rounds.exchange_rounds = 2;
+    const uint256 d2 =
+        rc::RecomputeCoupledPuzzleReference(header, 0, rc::MakeToyRCCoupParams(), with_rounds);
+    BOOST_CHECK(!d2.IsNull());
+    BOOST_CHECK(d2.GetHex() != kToy);
+
+    rc::RCCoupOptions with_four = with_rounds;
+    with_four.exchange_rounds = 4;
+    const uint256 d4 =
+        rc::RecomputeCoupledPuzzleReference(header, 0, rc::MakeToyRCCoupParams(), with_four);
+    BOOST_CHECK(d2 != d4);
+
+    // Dependency: corrupt a bank page mid-episode → fold-linked exchange seed
+    // diverges → digest changes vs honest rounds path.
+    rc::RCCoupOptions corrupt = with_rounds;
+    corrupt.skip_bank_page = true;
+    corrupt.skip_page_index = 0;
+    const uint256 d_bad =
+        rc::RecomputeCoupledPuzzleReference(header, 0, rc::MakeToyRCCoupParams(), corrupt);
+    BOOST_CHECK(d_bad != d2);
+
+    // material_exchange OFF → rounds ignored (mix-seed legacy / no V3 rounds).
+    rc::RCCoupOptions no_mat = with_rounds;
+    no_mat.material_exchange = false;
+    const uint256 d_nomat =
+        rc::RecomputeCoupledPuzzleReference(header, 0, rc::MakeToyRCCoupParams(), no_mat);
+    // Decorative-off mix seed differs from default-ON decorative path; still ≠ d2.
+    BOOST_CHECK(d_nomat != d2);
+
+    // V3 options + production params → exactly 4 GiB exchange R/W estimate.
+    const auto v3p = rc::MakeProductionV3RCCoupParams();
+    const auto v3o = rc::MakeV3RCCoupOptions();
+    BOOST_CHECK_EQUAL(v3o.exchange_rounds, 4u);
+    BOOST_CHECK_EQUAL(v3o.exchange_rows, 128u);
+    BOOST_CHECK(v3o.material_exchange);
+    BOOST_CHECK_EQUAL(rc::TotalRCCoupExchangeBytes(v3p, v3o), 4ull << 30);
+    BOOST_CHECK_EQUAL(rc::TotalRCCoupExchangeBytes(v3p, zero_rounds), 0ull);
+
+    // Extreme int64 lanes through barrier tail + exchange rounds (XOR path, no UB).
+    const auto toy = rc::MakeToyRCCoupParams();
+    std::vector<int64_t> acc(toy.StateBytes(), 0);
+    acc[0] = std::numeric_limits<int64_t>::min();
+    acc[1] = std::numeric_limits<int64_t>::max();
+    if (acc.size() > 2) acc[2] = -1;
+    std::vector<int8_t> state(toy.StateBytes());
+    uint256 root;
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    BOOST_REQUIRE(
+        rc::ApplyCoupledBarrierTail(sigma, /*barrier=*/0, toy, acc, state, &root, with_rounds));
+    BOOST_CHECK(!root.IsNull());
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_medium_v3_golden_digest_stable)
+{
+    // FREEZE medium-V3 golden (ratio-preserving CI shape; uint64-wrap Mix).
+    const auto header = MakeCoupHeader(42);
+    const auto params = rc::MakeMediumV3RCCoupParams();
+    BOOST_REQUIRE(rc::ValidateRCCoupParams(params));
+    BOOST_REQUIRE(rc::RCCoupUseMixU64Wrap(params));
+    const uint256 d1 = rc::RecomputeCoupledPuzzleReference(header, 0, params);
+    const uint256 d2 = rc::RecomputeCoupledPuzzleReference(header, 0, params);
+    BOOST_CHECK(!d1.IsNull());
+    BOOST_CHECK(d1 == d2);
+    // Pin filled after first honest CI run (Agent C); do not silently replace.
+    BOOST_CHECK_EQUAL(d1.GetHex(),
+                      "744fd3dfda6a58ddcd95474a9895cd2c6b17c2f1c2591848fc631eed78dea6a9");
+}
+
+
+BOOST_AUTO_TEST_CASE(rc_coup_full_schedule_page_coverage_unique)
+{
+    // When bank_pages == barriers×lobes×P, full-schedule page IDs over the
+    // episode are unique and cover [0, bank_pages) exactly once.
+    const uint256 sigma = matmul::v4::DeriveSigma(MakeCoupHeader(42));
+    for (const auto& params :
+         {rc::MakeProductionRCCoupParams(), rc::MakeProductionV3RCCoupParams(),
+          rc::MakeMediumV3RCCoupParams()}) {
+        const uint64_t slots = static_cast<uint64_t>(params.barriers) * params.lobes *
+                               params.pages_per_barrier_lobe;
+        BOOST_REQUIRE_EQUAL(slots, params.bank_pages);
+        std::vector<uint32_t> counts(params.bank_pages, 0);
+        for (uint32_t b = 0; b < params.barriers; ++b) {
+            for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+                const auto ids =
+                    rc::SelectCoupledBankPageIds(b, ell, params, sigma, /*full=*/true);
+                BOOST_REQUIRE_EQUAL(ids.size(), params.pages_per_barrier_lobe);
+                for (uint32_t id : ids) {
+                    BOOST_REQUIRE(id < params.bank_pages);
+                    counts[id] += 1;
+                }
+            }
+        }
+        for (uint32_t c : counts) {
+            BOOST_CHECK_EQUAL(c, 1u);
+        }
+    }
+}
+
+
+BOOST_AUTO_TEST_CASE(rc_coup_accumulator_overflow_bounds)
+{
+    // Documented bound: |acc| ≤ P·W·127² after page sums; ×StateBytes post-mix.
+    for (const auto& params :
+         {rc::MakeToyRCCoupParams(), rc::MakeMediumRCCoupParams(),
+          rc::MakeMediumV3RCCoupParams(), rc::MakeProductionRCCoupParams(),
+          rc::MakeProductionV3RCCoupParams()}) {
+        const uint64_t page_bound = rc::MaxRCCoupPageSumAbsBound(params);
+        const uint64_t expect_page =
+            static_cast<uint64_t>(params.pages_per_barrier_lobe) * params.lobe_width *
+            static_cast<uint64_t>(rc::kRCCoupInt8ProdAbsMax);
+        BOOST_CHECK_EQUAL(page_bound, expect_page);
+        const uint64_t post = rc::MaxRCCoupPostMixAbsBound(params);
+        BOOST_CHECK_EQUAL(post, page_bound * params.StateBytes());
+        BOOST_CHECK(rc::RCCoupPostMixFitsInt64(params));
+        // V2 M=1: signed mix. V3 M≥32: uint64 wrap (even though magnitude fits).
+        BOOST_CHECK_EQUAL(rc::RCCoupUseMixU64Wrap(params), params.rows_per_lobe >= 32);
+    }
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

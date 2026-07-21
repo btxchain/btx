@@ -9,6 +9,8 @@
 #include <string>
 
 // Derived peak_ready — never set manually by callers.
+// cuda_episode_ready / provenance.peak_ready MUST come from DeriveRCPeakReady;
+// never equate `compiled == ready`.
 
 namespace matmul::v4::rc {
 
@@ -73,6 +75,46 @@ struct RCPeakReadyStatus {
         st.deficit = "peak_ready_prerequisites_incomplete";
     }
     return st;
+}
+
+/**
+ * Episode / datacenter helper: map honest residency bits into peak inputs.
+ * Callers MUST assign peak_ready = DeriveRCPeakReady(...).peak_ready — never
+ * invent true. Missing production bits stay false (fail-closed).
+ */
+struct RCEpisodePeakBits {
+    bool cuda_episode_compiled{false};
+    bool device_bank_resident{false};
+    bool device_state_resident{false};
+    bool resident_native_mxfp4_qualified{false};
+    bool resident_native_mxfp4_attempted{false};
+    bool device_digest{false};
+    bool full_device_pipeline{false}; // permute/mix/Extract/digest on device
+    bool no_per_barrier_host_sync{false};
+    bool cpu_gpu_byte_exact{false};
+    bool full_page_schedule{false};
+    bool v3_config_selected{false};
+    bool production_dimensions{false};
+};
+
+[[nodiscard]] inline RCPeakReadyInputs MakeRCPeakReadyInputsFromEpisode(
+    const RCEpisodePeakBits& b)
+{
+    RCPeakReadyInputs in;
+    in.v3_config_selected = b.v3_config_selected;
+    in.production_dimensions = b.production_dimensions;
+    in.full_page_schedule = b.full_page_schedule;
+    in.native_provider_linked = b.cuda_episode_compiled;
+    in.arch_backend_selected = b.resident_native_mxfp4_qualified;
+    in.exactness_selfqual_ok = b.resident_native_mxfp4_qualified;
+    in.bank_genuinely_resident = b.device_bank_resident && b.device_state_resident;
+    in.native_tensor_executed =
+        b.resident_native_mxfp4_attempted && b.resident_native_mxfp4_qualified;
+    in.full_device_pipeline = b.full_device_pipeline && b.device_digest;
+    in.no_per_barrier_host_sync = b.no_per_barrier_host_sync;
+    in.cpu_gpu_byte_exact = b.cpu_gpu_byte_exact;
+    // Remaining production readiness latches stay false until campaigns land.
+    return in;
 }
 
 } // namespace matmul::v4::rc
