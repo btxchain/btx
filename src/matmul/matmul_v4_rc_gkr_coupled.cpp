@@ -620,7 +620,8 @@ struct CoupColIds {
     uint32_t e(uint32_t b) const { return base(b) + 3 * lobes; }
     uint32_t p(uint32_t b) const { return base(b) + 3 * lobes + 1; }
     uint32_t x(uint32_t b) const { return base(b) + 3 * lobes + 2; }
-    uint32_t s(uint32_t b) const { return base(b) + 3 * lobes + 3; }
+    // Column base(b)+3*lobes+3 is the state-out slot (part of the 3*lobes+4
+    // per-barrier width); no accessor is needed by the current claim wiring.
 
 private:
     uint32_t base(uint32_t b) const { return b * (3 * lobes + 4); }

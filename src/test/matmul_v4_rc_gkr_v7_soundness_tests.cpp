@@ -11,26 +11,49 @@
 // grounding AIRs. It never proves v7 defeats an INTERNALLY-CONSISTENT forgery
 // that survives the trivial gates and REACHES the deep mechanism.
 //
-// This test closes that hole. For each malicious kind we build an
-// internally-consistent v7-format forgery via ProveMaliciousEpisodeV7ForTest,
-// which runs the FULL honest v7 prover machinery (batched-FRI + per-layer
-// sumcheck + eval-argument + dual-α LogUp + transcript) over a FABRICATED
-// witness. The resulting RCGkrProofV7 passes EVERY trivial/algebraic gate of
-// VerifyWinnerProofV7 (pow_bind, header/digest/sigma binding, digest_from_roots,
-// round-seed chain, Λ layout, column_not_grounded, FriBatchVerify, per-layer
-// sumcheck, final_eval endpoint/product, eval-argument, FS-bound LogUp α's).
-// It can therefore only be rejected by the DEEP security mechanism: the
-// §5.4/§5.7/§6.3 in-circuit MxExpand / Extract-sampler / tile-tree grounding AIRs
-// (why prefix "v7:ground:") or the dual-α LogUp aggregate (why prefix
-// "v7:logup:"). We assert the EXACT rejecting relation is one of those and NOT a
-// trivial gate.
+// This test closes that hole. SCOPE — do not overstate: exactly the FIVE
+// EPISODE kinds below are genuine full-malicious-prover, SNARK-sound attacks
+// that reach the deep security mechanism. The coupled UnrelatedBankPages case
+// (bottom of file) is NOT a full fabricated-witness proof and is NOT in that
+// class — see its own banner for why (re-execution-soundness, not SNARK-
+// soundness).
 //
-// HONESTY: for the committed-witness kinds (arbitrary A/B factorization,
-// fabricated trace, fabricated extract_out) reaching the mechanism REQUIRES
-// running the honest prover over the fabricated witness — the attacker cannot
-// forge these cheaply. The one exception is the non-committed pre-Extract
-// accumulator extract_in, which a cheap honest-proof mutation can perturb to
-// reach extract_in:binding with zero prover work; we exercise that too.
+// The five EPISODE kinds (ArbitraryAbFactorization, FabricatedTraceWires,
+// IdenticalFabricatedLookup, FabricatedExtractIO, UnrelatedLayerRoots) each
+// build an internally-consistent v7-format forgery via
+// ProveMaliciousEpisodeV7ForTest, which runs the FULL honest v7 prover
+// machinery (batched-FRI + per-layer sumcheck + eval-argument + dual-α LogUp +
+// transcript) over a FABRICATED witness. The resulting RCGkrProofV7 passes
+// EVERY trivial/algebraic gate of VerifyWinnerProofV7 (pow_bind,
+// header/digest/sigma binding, digest_from_roots, round-seed chain, Λ layout,
+// column_not_grounded, FriBatchVerify, per-layer sumcheck, final_eval
+// endpoint/product, eval-argument, FS-bound LogUp α's). It can therefore only
+// be rejected by the DEEP security mechanism: the §5.4/§5.7/§6.3 in-circuit
+// MxExpand / Extract-sampler / tile-tree grounding AIRs (why prefix
+// "v7:ground:") or the dual-α LogUp aggregate (why prefix "v7:logup:"). We
+// assert the EXACT rejecting relation is one of those and NOT a trivial gate.
+// This is genuine SNARK-soundness: the episode verifier accepts a proof only if
+// the in-circuit AIRs bind, so a fabricated-witness proof that survives the
+// trivial gates is the correct threat model.
+//
+// HONESTY: for the committed-witness episode kinds (arbitrary A/B
+// factorization, fabricated trace, fabricated extract_out) reaching the
+// mechanism REQUIRES running the honest prover over the fabricated witness —
+// the attacker cannot forge these cheaply. The one exception is the
+// non-committed pre-Extract accumulator extract_in, which a cheap honest-proof
+// mutation can perturb to reach extract_in:binding with zero prover work; we
+// exercise that too.
+//
+// COUPLED (UnrelatedBankPages) — SCOPE CAVEAT: the coupled verifier is
+// re-execution-sound, NOT SNARK-sound. ProveWinnerCoupledV7 is sole-authority:
+// it re-derives the entire trace and refuses any digest that is not the
+// immutable int64 coupled reference, so a full internally-consistent coupled
+// forgery is NOT constructible at all. The coupled case therefore reaches its
+// intended F11 page-selection binding (coupled:column_not_grounded) via an
+// honest-proof column-root mutation BY NECESSITY — not because we chose the
+// weaker attack, but because the sole-authority re-execution admits no
+// stronger one. Full coupled SNARK-soundness (a fabricated-witness coupled
+// proof reaching an in-circuit AIR) is the AIR follow-on, not claimed here.
 //
 // HARD RULES honored: int64 reference immutable; VerifyWinnerProofV7 /
 // VerifyWinnerCoupledV7 NOT modified; arbiter OFF; heights INT32_MAX.
@@ -228,15 +251,22 @@ BOOST_AUTO_TEST_CASE(gkr_v7_extract_in_binding_is_reached_without_prover_work)
 }
 
 // ============================================================================
-// COUPLED: UnrelatedBankPages. The coupled prover (ProveWinnerCoupledV7) is
-// SOLE-AUTHORITY — it re-derives the entire trace and refuses any digest that is
-// not the immutable int64 coupled reference, so an unrelated bank page cannot be
-// proven at all. The page binding IS the deepest B-operand mechanism in the
-// coupled verifier: coupled:column_not_grounded (F11) checks every committed B
-// column against the natively scheduled bank page BEFORE the FRI/sumcheck. We
-// substitute a genuine-but-UNRELATED real bank page (another lobe's committed
-// page root) into slot (b=0,ℓ=0); it survives all prior gates and dies at the
-// page-selection grounding.
+// COUPLED: UnrelatedBankPages. NOT a full fabricated-witness proof and NOT
+// SNARK-sound — this is an honest-proof column-root mutation, and it is the
+// STRONGEST attack the coupled path admits. The coupled prover
+// (ProveWinnerCoupledV7) is SOLE-AUTHORITY / RE-EXECUTION-SOUND: it re-derives
+// the entire trace and refuses any digest that is not the immutable int64
+// coupled reference, so a full internally-consistent coupled forgery is not
+// constructible at all. We therefore take an honest coupled proof and mutate a
+// single committed B column root — substituting a genuine-but-UNRELATED real
+// bank page (another lobe's committed page root) into slot (b=0,ℓ=0). This
+// reaches, BY NECESSITY, the intended F11 page-selection binding:
+// coupled:column_not_grounded checks every committed B column against the
+// natively scheduled bank page BEFORE the FRI/sumcheck, so the mutation
+// survives all prior header/digest/reference/root/layout gates and dies there.
+// Full coupled SNARK-soundness (a fabricated-witness coupled proof reaching an
+// in-circuit AIR the way the five episode kinds do) is the AIR follow-on, not
+// claimed by this test.
 // ============================================================================
 BOOST_AUTO_TEST_CASE(gkr_v7_genuine_defeats_coupled_unrelated_bank_pages)
 {

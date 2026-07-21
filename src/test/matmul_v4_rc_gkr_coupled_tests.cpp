@@ -63,7 +63,7 @@ struct ColIds {
     uint32_t base(uint32_t b) const { return b * (3 * lobes + 4); }
     uint32_t a(uint32_t b, uint32_t ell) const { return base(b) + 3 * ell; }
     uint32_t bcol(uint32_t b, uint32_t ell) const { return base(b) + 3 * ell + 1; }
-    uint32_t y(uint32_t b, uint32_t ell) const { return base(b) + 3 * ell + 2; }
+    // Y column is base(b)+3*ell+2 (not mutated by these root-tamper cases).
     uint32_t e(uint32_t b) const { return base(b) + 3 * lobes; }
     uint32_t p(uint32_t b) const { return base(b) + 3 * lobes + 1; }
     uint32_t x(uint32_t b) const { return base(b) + 3 * lobes + 2; }
