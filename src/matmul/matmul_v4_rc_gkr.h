@@ -10,6 +10,7 @@
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_distributed.h>
 #include <matmul/matmul_v4_rc_fri.h>
+#include <matmul/matmul_v4_rc_gkr_eval.h>
 #include <matmul/matmul_v4_rc_gkr_field.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
 #include <matmul/matmul_v4_rc_verify_budget.h>
@@ -257,6 +258,7 @@ struct RCGkrLayout {
                                            const uint256& sigma,
                                            const std::vector<uint256>& barrier_roots);
 
+
 /** Soft budgets for the Section-2 scaffold (CPU toy/medium). Not silicon.
  *  Verify ceiling is Stage-I interval-fraction (see matmul_v4_rc_verify_budget.h). */
 inline constexpr double kRCGkrMediumProveBudgetS = 2.0;
@@ -369,6 +371,100 @@ struct RCGkrProveResult {
     RCGkrProof proof;
     RCGkrTiming timing;
 };
+
+// ============================================================================
+// v7 PROOF + LAYOUT-DRIVEN VERIFIER (blueprint §10; arbiter stays OFF).
+//
+// The v7 verifier composes the Wave-1 substrate into a SOUND episode verifier
+// that REJECTS the §9 forgery list (v6 accepts F0 w.p. 1). Composition:
+//   R1  A/B opening → final_eval: per-layer Thaler product sumcheck
+//       (VerifyProductK) with the chain-end gf bound by final_eval = a·b, where
+//       a_eval=Ã(r_i,r_k), b_eval=B̃(r_k,r_j) are openings of the COMMITTED
+//       operand columns via the batched-FRI eval argument (§2.4). A prover-
+//       supplied final_eval with no opening cannot pass (Thm 3.1).
+//   R2  claim-to-trace: c_ℓ = Ỹ(r_i,r_j) is an opening of the committed Y
+//       column (never a free proof field); wiring is Λ-definitional.
+//   R3  Extract: dual-α LogUp aggregate over the tile sub-relations
+//       (LogUpDualAlphaVerify), plus native byte-exactness vs the immutable
+//       ExtractMXTileInt64 reference (the §5.7/§6.3 in-circuit ChaCha/SHA/
+//       tile-tree AIRs are the PARKED succinctness gap — see the report).
+//   R4  canonical sequence: the VERIFIER enumerates Λ(params) itself; the proof
+//       carries no per-layer (kind,round,dims) — reorder/repeat/omit forgeries
+//       are unexpressible (Thm 4.2), deterministic reject.
+//   §6.3 round-root binding: round_roots are recomputed by the RoundMerkleStream
+//       tile-tree over the (ground-truth-grounded) committed extract columns and
+//       must equal the proof's — this is what closes the F0 headline that v6
+//       leaves open (per-layer root absorption binds nothing, §4.3).
+//
+// HONESTY: the operand-expansion / Extract / tile-tree GROUNDING is done by
+// NATIVE re-derivation against the immutable int64 reference (§5.7/§6.2/§6.3
+// AIRs are heavy and parked, §11); the GEMM relation is verified SUCCINCTLY via
+// sumcheck + eval-argument openings bound to the single batched-FRI commitment.
+// The verifier is therefore SOUND but NOT succinct (over_budget=true); arbiter
+// stays OFF, nMatMulRCHeight=INT32_MAX, ExactReplay remains sole authority.
+// ============================================================================
+
+/** One layer's v7 sumcheck block. NO (kind,round,dims) — those are Λ outputs. */
+struct RCGkrLayerClaimV7 {
+    std::vector<RCGkrSumcheckRound> sumcheck;
+    /** c_ℓ = Ỹ(r_i,r_j) — bound to the committed Y column by the eval argument. */
+    Fp2 c_claim{};
+    /** a_ℓ = Ã(r_i,r_k) — opening of the committed A column. */
+    Fp2 a_eval{};
+    /** b_ℓ = B̃(r_k,r_j) — opening of the committed B column. */
+    Fp2 b_eval{};
+    /** sumcheck chain-end gf; MUST equal a_eval·b_eval (Thm 3.1). */
+    Fp2 final_eval{};
+};
+
+struct RCGkrProofV7 {
+    uint32_t version{kRCGkrProofVersionV7};
+    RCEpisodeParams episode{};
+    int32_t height{0};
+    uint256 claimed_digest{};
+    uint256 pow_bind{};
+    uint256 episode_sigma{};
+    std::vector<uint256> round_seeds;
+    std::vector<uint256> round_roots;
+    /** ONE batched FRI over ALL columns (per-layer A,B,Y,extract) + eval-arg f,g. */
+    FriBatchProof batch{};
+    std::vector<RCGkrLayerClaimV7> layers;
+    RCGkrEvalArgumentProof eval{};
+    /** Dual-α Extract LogUp challenges (FS-bound; §5.6). */
+    Fp2 logup_alpha1{};
+    Fp2 logup_alpha2{};
+    double logup_bits{0.0};
+    uint256 transcript_hash{};
+    bool over_budget{true};
+    std::string note;
+};
+
+struct RCGkrProveResultV7 {
+    RCGkrProofV7 proof;
+    RCGkrTiming timing;
+};
+
+/**
+ * v7 prover: ALL-PHASE arithmetization of the ACTUAL episode, composed into the
+ * batched FRI + per-layer sumcheck + eval argument + dual-α LogUp. PARKED /
+ * over_budget; does NOT touch consensus. `target` binds the §6.1 target check.
+ */
+[[nodiscard]] RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header,
+                                                      const RCEpisodeParams& params, int32_t height,
+                                                      const arith_uint256& target,
+                                                      const uint256& claimed_digest);
+
+/**
+ * v7 layout-driven verifier (behind the OFF arbiter). Enumerates Λ(params),
+ * verifies the batched FRI, binds every committed column to the immutable
+ * reference, checks the per-layer sumcheck + eval-argument openings + gf=a·b,
+ * the dual-α Extract LogUp, and the RoundMerkleStream round-root binding.
+ * REJECTS the entire §9 forgery list (v6 accepts F0). `why` names the first
+ * failing relation. NEVER consensus; ExactReplay stays the arbiter.
+ */
+[[nodiscard]] bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header,
+                                       int32_t height, const arith_uint256& target,
+                                       std::string* why = nullptr);
 
 enum class RCProdVerifyPath : uint8_t {
     ExactReplay = 0,

@@ -952,4 +952,211 @@ BOOST_AUTO_TEST_CASE(gkr_v7_batched_opening_primitive_end_to_end)
     BOOST_CHECK(!rc::FriBatchVerify(c.proof, seed2, &why));
 }
 
+// ============================================================================
+// v7 EVAL ARGUMENT (§2.4) — standalone opening-argument soundness.
+// ============================================================================
+BOOST_AUTO_TEST_CASE(gkr_v7_eval_argument_honest_and_forged)
+{
+    // Two committed columns; claims = their MLEs at FS points. The eval argument
+    // f/g ride the SAME batched FRI; the identity is checked at z1/z2.
+    const uint256 seed = MakeSeed(0x77);
+    std::vector<std::vector<rc::Fp2>> cols;
+    std::vector<rc::Fp2> c0(8), c1(8);
+    for (size_t i = 0; i < 8; ++i) {
+        c0[i] = gf::FromSigned2(static_cast<int64_t>(i) * 7 - 5);
+        c1[i] = gf::FromSigned2(static_cast<int64_t>(i * i) + 3);
+    }
+    cols.push_back(c0);
+    cols.push_back(c1);
+
+    // Points of dimension log2(n)=3 (n=8).
+    std::vector<rc::Fp2> p0{gf::Fp2{3, 1}, gf::Fp2{5, 0}, gf::Fp2{2, 9}};
+    std::vector<rc::Fp2> p1{gf::Fp2{7, 4}, gf::Fp2{1, 1}, gf::Fp2{6, 2}};
+    std::vector<rc::RCGkrOpeningClaim> claims;
+    claims.push_back({0, p0, rc::RCGkrMleEval1D2(c0, p0)});
+    claims.push_back({1, p1, rc::RCGkrMleEval1D2(c1, p1)});
+
+    const auto ev = rc::EvalArgumentProve(claims, cols, seed);
+    BOOST_REQUIRE_MESSAGE(ev.ok, ev.note);
+    auto all = cols;
+    all.push_back(ev.f_coeffs);
+    all.push_back(ev.g_coeffs);
+    const auto bc = rc::FriBatchCommit(all, seed);
+    BOOST_REQUIRE_MESSAGE(bc.ok, bc.note);
+    std::string why;
+    BOOST_REQUIRE(rc::FriBatchVerify(bc.proof, seed, &why));
+    // Honest openings verify.
+    BOOST_CHECK_MESSAGE(rc::EvalArgumentVerify(claims, bc.proof, ev.proof, seed, &why), why);
+
+    // (a) Forged claim VALUE rejects (false ṽ(r) → identity fails at z1/z2).
+    {
+        auto bad = claims;
+        bad[0].value.c0 ^= 1;
+        // σ recomputed from bad claims mismatches proof.sigma → reject.
+        BOOST_CHECK(!rc::EvalArgumentVerify(bad, bc.proof, ev.proof, seed, &why));
+    }
+    // (b) Forged σ rejects.
+    {
+        auto badp = ev.proof;
+        badp.sigma.c1 ^= 1;
+        BOOST_CHECK(!rc::EvalArgumentVerify(claims, bc.proof, badp, seed, &why));
+    }
+    // (c) Tampering a bound f/g opening in the batch rejects (identity breaks).
+    {
+        auto badb = bc.proof;
+        badb.evals_z1[ev.proof.g_column].c0 ^= 1;
+        // FriBatchVerify itself catches a forged OOD eval; the eval arg would too.
+        BOOST_CHECK(!rc::FriBatchVerify(badb, seed, &why));
+    }
+}
+
+// ============================================================================
+// v7 POSITIVE PATH — honest proof verifies + digest byte-parity vs the int64
+// reference (RecomputeResidentCurriculumReference).
+// ============================================================================
+BOOST_AUTO_TEST_CASE(gkr_v7_positive_path_byte_parity)
+{
+    auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    header.matmul_digest = dig; // block commits the episode digest (not in sigma)
+    arith_uint256 target;
+    target = ~target; // maximal target: digest ≤ target
+
+    const auto pr = rc::ProveWinnerEpisodeV7(header, params, 0, target, dig);
+    BOOST_REQUIRE_MESSAGE(pr.timing.ok, pr.timing.note);
+    // Digest byte-parity: the proof's claimed digest equals the immutable int64
+    // reference digest, byte-for-byte.
+    BOOST_CHECK(pr.proof.claimed_digest == dig);
+    // Composed dual-α Extract LogUp cleared the target with margin.
+    BOOST_CHECK_GT(pr.proof.logup_bits, 64.0);
+
+    std::string why;
+    BOOST_CHECK_MESSAGE(rc::VerifyWinnerProofV7(pr.proof, header, 0, target, &why), why);
+    // Cross-validate against the curriculum reference once more.
+    BOOST_CHECK(rc::RecomputeResidentCurriculumReference(header, params, 0) == dig);
+}
+
+// ============================================================================
+// v7 FORGERY LIST (blueprint §9). Each forgery MUST be REJECTED — v6 accepts F0
+// with probability 1; v7 is the sound episode verifier. Coupled F10/F11/F-coup
+// are Wave-3 (out of scope).
+// ============================================================================
+BOOST_AUTO_TEST_CASE(gkr_v7_section9_forgery_list_rejected)
+{
+    auto header = MakeRCHeader(7);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    header.matmul_digest = dig;
+    arith_uint256 target;
+    target = ~target;
+
+    const auto pr = rc::ProveWinnerEpisodeV7(header, params, 0, target, dig);
+    BOOST_REQUIRE_MESSAGE(pr.timing.ok, pr.timing.note);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(rc::VerifyWinnerProofV7(pr.proof, header, 0, target, &why), why);
+    const rc::RCGkrProofV7& H = pr.proof;
+
+    auto rejects = [&](const rc::RCGkrProofV7& p, const CBlockHeader& h, const arith_uint256& t) {
+        std::string w;
+        const bool ok = rc::VerifyWinnerProofV7(p, h, 0, t, &w);
+        return !ok;
+    };
+
+    // F0 — fabricated round_roots (the forger grinds arbitrary ground roots to
+    // target, zero episode work). v6 absorbs roots into FS and binds them to
+    // NOTHING (accepts w.p. 1). v7 recomputes the true tile-tree from the
+    // grounded extract columns; the fabricated roots do not match → reject.
+    {
+        auto p = H;
+        p.round_roots[0].data()[0] ^= 0xFF;
+        BOOST_CHECK(rejects(p, header, target)); // headline: v6 accepts, v7 rejects
+    }
+    // F1/F2 — forge A / B operand column commitment root.
+    {
+        auto p = H;
+        p.batch.columns[0].root.data()[0] ^= 0xFF; // A of layer 0
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    {
+        auto p = H;
+        p.batch.columns[1].root.data()[0] ^= 0xFF; // B of layer 0
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F3 — forge an A/B opening value.
+    {
+        auto p = H;
+        p.layers[0].a_eval.c0 ^= 1;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F4 — forge final_eval (the v6 free field).
+    {
+        auto p = H;
+        p.layers[0].final_eval.c1 ^= 1;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F5 — forge the trace claim c_ℓ.
+    {
+        auto p = H;
+        p.layers[0].c_claim.c0 ^= 1;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F6 — forge Extract witness (extract_out column commitment).
+    {
+        auto p = H;
+        p.batch.columns[3].root.data()[0] ^= 0xFF; // extract_out of layer 0
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F7 — forge LogUp challenge binding (multiplicity/table soundness is also
+    // covered adversarially in matmul_v4_rc_gkr_air_tests).
+    {
+        auto p = H;
+        p.logup_alpha1.c0 ^= 1;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F8 — reorder layers (swap two sumcheck blocks).
+    {
+        auto p = H;
+        std::swap(p.layers[0], p.layers[1]);
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F9 — repeat / omit a layer (count no longer matches Λ).
+    {
+        auto p = H;
+        p.layers.push_back(p.layers.back());
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    {
+        auto p = H;
+        p.layers.pop_back();
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F12 — forge sigma.
+    {
+        auto p = H;
+        p.episode_sigma.data()[0] ^= 1;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F13 — forge dimensions.
+    {
+        auto p = H;
+        p.episode.d_head += 32;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // F14 — forge target compliance (digest > target).
+    {
+        arith_uint256 tiny;
+        tiny = tiny + 1; // 1: essentially every digest exceeds it
+        BOOST_CHECK(rejects(H, header, tiny));
+    }
+    // F15 — forge the claimed digest.
+    {
+        auto p = H;
+        p.claimed_digest.data()[0] ^= 1;
+        BOOST_CHECK(rejects(p, header, target));
+    }
+    // Sanity: the untouched honest proof still verifies.
+    BOOST_CHECK(rc::VerifyWinnerProofV7(H, header, 0, target, &why));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

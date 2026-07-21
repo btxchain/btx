@@ -10,6 +10,7 @@
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc_extract.h>
+#include <matmul/matmul_v4_rc_gkr_air.h>
 #include <span.h>
 #include <sys/resource.h>
 
@@ -1084,6 +1085,379 @@ uint256 RCGkrFsSeedV7Coupled(const CBlockHeader& header, int32_t height,
 size_t RCGkrExpectedLayerCount(const RCEpisodeParams& p)
 {
     return static_cast<size_t>(p.rounds) * (2u + 3u * static_cast<size_t>(p.L_lyr));
+}
+
+// ============================================================================
+// v7 layout-driven prover / verifier (blueprint §10). Composes the batched FRI
+// + per-layer Thaler sumcheck + §2.4 eval argument + dual-α Extract LogUp +
+// §6.3 tile-tree round-root binding. SOUND but not succinct (grounding is
+// native re-derivation against the immutable int64 reference; the in-circuit
+// ChaCha/SHA/tile-tree AIRs of §5.7/§6.2/§6.3 are the parked succinctness gap).
+// Arbiter OFF; nMatMulRCHeight=INT32_MAX; ExactReplay remains sole authority.
+// ============================================================================
+namespace {
+
+// Little-endian log2 point layout: index = high·2^|low| + low, so the LOW
+// coordinate parts occupy the least-significant bits (matches EqFactor /
+// MleEvalMatrix). Concatenate low-first, then zero-extend to `nu` (the padded
+// batch dimension) — appending 0-coordinates selects the length-preserving
+// sub-cube of a zero-padded column (§1.3), so ṽ_padded(point,0…0)=ṽ_logical.
+std::vector<Fp2> PointConcatExtend(const std::vector<Fp2>& low, const std::vector<Fp2>& high,
+                                   uint32_t nu)
+{
+    std::vector<Fp2> p;
+    p.reserve(nu);
+    p.insert(p.end(), low.begin(), low.end());
+    p.insert(p.end(), high.begin(), high.end());
+    while (p.size() < nu) p.push_back(Fp2::Zero());
+    return p;
+}
+
+// SHA256d(base ‖ every epoch-1 column root) — the eval-argument transcript seed
+// (two-epoch discipline: binds all epoch-1 commitments before μ is drawn).
+uint256 EvalArgSeed(const uint256& base, const std::vector<FriLayerCommit>& columns,
+                    size_t epoch1_count)
+{
+    std::vector<unsigned char> buf;
+    buf.insert(buf.end(), base.begin(), base.end());
+    for (size_t i = 0; i < epoch1_count && i < columns.size(); ++i)
+        AppendBytes(buf, columns[i].root.data(), 32);
+    return Sha256dBytes(buf.data(), buf.size());
+}
+
+// Reconstruct one round's tile-tree root from the committed extract columns, in
+// the frozen V1 stream order (Z ‖ per-layer X_{l+1} ‖ G_l ‖ D_l), via the exact
+// RoundMerkleStream the consensus reference uses. This is the §6.3 binding: a
+// forged round_root cannot match the tile-tree of the grounded extract columns.
+uint256 ReconstructRoundRoot(const std::vector<LayerWire>& wires, uint32_t round,
+                             const RCEpisodeParams& p)
+{
+    const size_t lpr = 2u + 3u * static_cast<size_t>(p.L_lyr);
+    const size_t base = static_cast<size_t>(round) * lpr;
+    const std::vector<int8_t>* z = nullptr;
+    std::vector<const std::vector<int8_t>*> fwd(p.L_lyr, nullptr), bwd(p.L_lyr, nullptr),
+        wg(p.L_lyr, nullptr);
+    for (size_t li = 0; li < lpr; ++li) {
+        const LayerWire& w = wires[base + li];
+        switch (w.kind) {
+        case RCGkrLayerKind::GemmPhase1SV: z = &w.extract_out; break;
+        case RCGkrLayerKind::GemmPhase2Fwd: fwd[w.layer] = &w.extract_out; break;
+        case RCGkrLayerKind::GemmPhase2Bwd: bwd[w.layer] = &w.extract_out; break;
+        case RCGkrLayerKind::GemmPhase2Wgrad: wg[w.layer] = &w.extract_out; break;
+        default: break; // QKt extract (S) is not streamed.
+        }
+    }
+    RoundMerkleStream merkle(p.T_leaf);
+    if (z) merkle.Absorb(*z);
+    for (uint32_t l = 0; l < p.L_lyr; ++l) {
+        if (fwd[l]) merkle.Absorb(*fwd[l]);
+        if (bwd[l]) merkle.Absorb(*bwd[l]);
+        if (wg[l]) merkle.Absorb(*wg[l]);
+    }
+    return merkle.FinalizeRoot();
+}
+
+// Build the flat column list (per layer: A, B, Y, extract_out), matching both
+// prover and verifier deterministically from the ground-truth wires.
+std::vector<std::vector<Fp2>> BuildV7Columns(const std::vector<LayerWire>& wires)
+{
+    std::vector<std::vector<Fp2>> cols;
+    cols.reserve(wires.size() * 4);
+    for (const LayerWire& w : wires) {
+        cols.push_back(w.A);
+        cols.push_back(w.B);
+        cols.push_back(w.Y);
+        cols.push_back(ToFp2I8(w.extract_out));
+    }
+    return cols;
+}
+
+// Dual-α Extract LogUp over a bounded sample of real episode tiles (§5.5/§5.6).
+// Demonstrates the R3 aggregate on the actual tile lookups and reports the
+// Thm-5.2 achieved bits. (Full per-tile coverage + the r16 range instance are
+// exercised by matmul_v4_rc_gkr_air_tests; the byte-exactness binding of every
+// tile to the immutable reference is enforced separately.)
+gkr_air::LogUpVerifyResult ExtractLogUpSample(const std::vector<LayerWire>& wires, Fp2 gamma,
+                                              Fp2 alpha1, Fp2 alpha2, uint32_t max_tiles)
+{
+    gkr_air::TableTM tm_tab;
+    gkr_air::TableTX tx_tab;
+    gkr_air::LogUpInstance inst_tm, inst_tx, inst_r16;
+    uint32_t used = 0;
+    for (const LayerWire& w : wires) {
+        if (used >= max_tiles) break;
+        const uint32_t n_blocks = w.n / kRCMxBlockLen;
+        for (uint32_t i = 0; i < w.m && used < max_tiles; ++i) {
+            for (uint32_t bj = 0; bj < n_blocks && used < max_tiles; ++bj) {
+                gkr_air::TilePublic pub;
+                pub.prf_key = w.extract_prf;
+                pub.i = i;
+                pub.bj = bj;
+                std::array<int64_t, kRCMxBlockLen> in{};
+                const size_t off = static_cast<size_t>(i) * w.n + bj * kRCMxBlockLen;
+                for (uint32_t t = 0; t < kRCMxBlockLen; ++t) in[t] = w.extract_in[off + t];
+                const gkr_air::TileWitness tw = gkr_air::TraceTile(pub, in);
+                gkr_air::AppendTileLookups(tw, tm_tab, tx_tab, gamma, inst_tm, inst_tx, inst_r16);
+                ++used;
+            }
+        }
+    }
+    // Manual multiplicities for the small tables (avoids the 2^16 r16 blowup;
+    // r16 range membership is checked structurally in CheckTileConstraints).
+    auto build_mult = [](gkr_air::LogUpInstance& in) {
+        in.table_mult.assign(in.table.size(), 0);
+        for (const Fp2& wt : in.witness)
+            for (size_t j = 0; j < in.table.size(); ++j)
+                if (gkr_field::Eq(wt, in.table[j])) {
+                    in.table_mult[j] += 1;
+                    break;
+                }
+    };
+    build_mult(inst_tm);
+    build_mult(inst_tx);
+    std::vector<gkr_air::LogUpInstance> insts{inst_tm, inst_tx};
+    return gkr_air::LogUpDualAlphaVerify(insts, alpha1, alpha2);
+}
+
+} // namespace
+
+RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header, const RCEpisodeParams& params,
+                                        int32_t height, const arith_uint256& target,
+                                        const uint256& claimed_digest)
+{
+    RCGkrProveResultV7 res;
+    RCGkrProofV7& proof = res.proof;
+    const auto t0 = std::chrono::steady_clock::now();
+
+    if (!ValidateRCEpisodeParams(params)) {
+        res.timing.ok = false;
+        res.timing.note = "invalid params";
+        return res;
+    }
+
+    // Ground truth: run the immutable int64 reference for round roots + digest.
+    std::vector<RCRoundTranscript> transcripts;
+    const uint256 true_digest =
+        RecomputeResidentCurriculumReference(header, params, height, {}, &transcripts);
+    std::vector<uint256> roots(params.rounds);
+    for (uint32_t r = 0; r < params.rounds; ++r) roots[r] = transcripts[r].round_root;
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    std::vector<uint256> seeds;
+    const std::vector<LayerWire> wires = BuildRealEpisodeLayers(header, params, roots, seeds);
+
+    proof.version = kRCGkrProofVersionV7;
+    proof.episode = params;
+    proof.height = height;
+    proof.claimed_digest = claimed_digest;
+    proof.pow_bind = DerivePowBind(claimed_digest);
+    proof.episode_sigma = sigma;
+    proof.round_seeds = seeds;
+    proof.round_roots = roots;
+
+    const uint256 base_seed =
+        RCGkrFsSeedV7(header, height, params, target, claimed_digest, sigma, roots);
+
+    // Epoch-1 columns and the batch degree (all toy tensors are single-chunk).
+    std::vector<std::vector<Fp2>> columns = BuildV7Columns(wires);
+    size_t max_len = 0;
+    for (const auto& c : columns) max_len = std::max(max_len, c.size());
+    const uint32_t batch_n = FriNextPow2(static_cast<uint32_t>(max_len));
+    const uint32_t nu = Log2Exact(batch_n);
+
+    // Per-layer Thaler product sumcheck + collect opening claims.
+    FsTranscript fs(kRCGkrDomainTagV7);
+    fs.AbsorbUint256(base_seed);
+    std::vector<RCGkrOpeningClaim> claims;
+    proof.layers.resize(wires.size());
+    for (size_t li = 0; li < wires.size(); ++li) {
+        const LayerWire& w = wires[li];
+        fs.AbsorbU32(static_cast<uint32_t>(li));
+        const uint32_t nu_i = Log2Exact(RCGkrNextPow2(w.m));
+        const uint32_t nu_j = Log2Exact(RCGkrNextPow2(w.n));
+        std::vector<Fp2> ri(nu_i), rj(nu_j);
+        for (uint32_t b = 0; b < nu_i; ++b) ri[b] = fs.ChallengeFp2("v7_ri");
+        for (uint32_t b = 0; b < nu_j; ++b) rj[b] = fs.ChallengeFp2("v7_rj");
+
+        const Fp2 c_claim = MleEvalMatrix(w.Y, w.m, w.n, ri, rj);
+        std::vector<Fp2> rk;
+        Fp2 gf;
+        RCGkrLayerClaimV7& lc = proof.layers[li];
+        lc.sumcheck = ProveProductK(w.A, w.m, w.k, w.B, w.n, ri, rj, c_claim, fs, rk, gf);
+        lc.c_claim = c_claim;
+        lc.a_eval = MleEvalMatrix(w.A, w.m, w.k, ri, rk);
+        lc.b_eval = MleEvalMatrix(w.B, w.k, w.n, rk, rj);
+        lc.final_eval = gf; // == a_eval·b_eval for honest wires
+
+        const uint32_t a_col = static_cast<uint32_t>(4 * li);
+        const uint32_t b_col = a_col + 1;
+        const uint32_t y_col = a_col + 2;
+        claims.push_back({y_col, PointConcatExtend(rj, ri, nu), c_claim});
+        claims.push_back({a_col, PointConcatExtend(rk, ri, nu), lc.a_eval});
+        claims.push_back({b_col, PointConcatExtend(rj, rk, nu), lc.b_eval});
+    }
+
+    // §2.4 eval argument: f,g committed inside the SAME batched FRI.
+    std::vector<FriLayerCommit> epoch1_roots(columns.size());
+    for (size_t i = 0; i < columns.size(); ++i)
+        epoch1_roots[i].root = FriBatchColumnRoot(columns[i], batch_n);
+    const uint256 eval_seed = EvalArgSeed(base_seed, epoch1_roots, columns.size());
+    const auto ev = EvalArgumentProve(claims, columns, eval_seed);
+    if (!ev.ok) {
+        res.timing.ok = false;
+        res.timing.note = "eval arg prove: " + ev.note;
+        return res;
+    }
+    proof.eval = ev.proof;
+    columns.push_back(ev.f_coeffs);
+    columns.push_back(ev.g_coeffs);
+
+    const auto bc = FriBatchCommit(columns, base_seed);
+    if (!bc.ok) {
+        res.timing.ok = false;
+        res.timing.note = "batch commit: " + bc.note;
+        return res;
+    }
+    proof.batch = bc.proof;
+
+    // Dual-α Extract LogUp (FS-bound challenges).
+    fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("logup"), 5);
+    const Fp2 gamma = fs.ChallengeFp2("v7_gamma");
+    proof.logup_alpha1 = fs.ChallengeFp2("v7_alpha1");
+    proof.logup_alpha2 = fs.ChallengeFp2("v7_alpha2");
+    const auto lr = ExtractLogUpSample(wires, gamma, proof.logup_alpha1, proof.logup_alpha2,
+                                       /*max_tiles=*/16);
+    proof.logup_bits = lr.achieved_bits;
+
+    proof.transcript_hash = fs.Digest();
+    proof.note = "v7 ALL-PHASE: batched FRI + sumcheck + eval-arg + dual-α LogUp + tile-tree; "
+                 "SOUND, not succinct (native grounding; ChaCha/SHA/tile-tree AIRs parked)";
+    (void)true_digest;
+
+    const auto t1 = std::chrono::steady_clock::now();
+    res.timing.prove_s = std::chrono::duration<double>(t1 - t0).count();
+    res.timing.ok = true;
+    res.timing.over_budget = true; // not succinct — PARKED
+    proof.over_budget = true;
+    res.timing.note = proof.note;
+    return res;
+}
+
+bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, int32_t height,
+                         const arith_uint256& target, std::string* why)
+{
+    auto fail = [&](const std::string& m) {
+        if (why) *why = m;
+        return false;
+    };
+    if (proof.version != kRCGkrProofVersionV7) return fail("v7:version");
+    if (!ValidateRCEpisodeParams(proof.episode)) return fail("v7:params_invalid");
+    if (proof.height != height) return fail("v7:height");
+
+    // §6.1 native: pow_bind, claimed digest bound to the header, target check.
+    if (proof.pow_bind != DerivePowBind(proof.claimed_digest)) return fail("v7:pow_bind");
+    if (proof.claimed_digest != header.matmul_digest) return fail("v7:digest_not_header_bound");
+    if (proof.episode_sigma != matmul::v4::DeriveSigma(header)) return fail("v7:sigma");
+
+    // Ground truth from the immutable reference (native §5.7/§6.2/§6.3 grounding).
+    std::vector<RCRoundTranscript> transcripts;
+    const uint256 true_digest =
+        RecomputeResidentCurriculumReference(header, proof.episode, height, {}, &transcripts);
+    if (proof.claimed_digest != true_digest) return fail("v7:digest_mismatch_reference");
+    if (UintToArith256(true_digest) > target) return fail("v7:target");
+
+    std::vector<uint256> roots(proof.episode.rounds);
+    for (uint32_t r = 0; r < proof.episode.rounds; ++r) roots[r] = transcripts[r].round_root;
+    if (proof.round_roots != roots) return fail("v7:round_roots_forged"); // F0/F15
+    if (EpisodeDigestFromRoots(roots) != proof.claimed_digest) return fail("v7:digest_from_roots");
+
+    std::vector<uint256> seeds;
+    const std::vector<LayerWire> wires = BuildRealEpisodeLayers(header, proof.episode, roots, seeds);
+    if (seeds != proof.round_seeds) return fail("v7:round_seeds");
+
+    // R4: the verifier drives Λ(params); layer count and dims are Λ outputs.
+    const RCGkrLayout layout = RCGkrTraceLayout(proof.episode);
+    if (layout.layers.size() != wires.size()) return fail("v7:layout_count");
+    if (proof.layers.size() != wires.size()) return fail("v7:layer_count"); // F8/F9
+    for (size_t li = 0; li < wires.size(); ++li) {
+        const auto& ls = layout.layers[li];
+        const auto& w = wires[li];
+        if (!(ls.kind == w.kind && ls.round == w.round && ls.layer == w.layer && ls.m == w.m &&
+              ls.n == w.n && ls.k == w.k))
+            return fail("v7:layout_layer_mismatch"); // F13 dims / F8 order
+    }
+
+    // §6.3: round roots must be the tile-tree of the grounded extract columns.
+    for (uint32_t r = 0; r < proof.episode.rounds; ++r)
+        if (ReconstructRoundRoot(wires, r, proof.episode) != proof.round_roots[r])
+            return fail("v7:tile_tree_root"); // F0 closure
+
+    // Rebuild the columns and BIND the commitment to ground truth (F0/F1/F2/F6/F7):
+    // every committed column root must equal the ground-truth column root.
+    std::vector<std::vector<Fp2>> columns = BuildV7Columns(wires);
+    const uint32_t batch_n = proof.batch.n_coeffs;
+    if (batch_n == 0 || (batch_n & (batch_n - 1)) != 0) return fail("v7:batch_n");
+    const uint32_t nu = Log2Exact(batch_n);
+    if (proof.batch.columns.size() != columns.size() + 2) return fail("v7:batch_col_count");
+    for (size_t i = 0; i < columns.size(); ++i)
+        if (FriBatchColumnRoot(columns[i], batch_n) != proof.batch.columns[i].root)
+            return fail("v7:column_not_grounded"); // F1/F2 operand/trace/extract forgery
+
+    // Thm 2.1: batched FRI binds every committed column to a low-degree poly.
+    const uint256 base_seed = RCGkrFsSeedV7(header, height, proof.episode, target,
+                                            proof.claimed_digest, proof.episode_sigma, roots);
+    std::string fri_why;
+    if (!FriBatchVerify(proof.batch, base_seed, &fri_why)) return fail("v7:fri:" + fri_why);
+
+    // Per-layer sumcheck (R1) + collect opening claims (R2), Λ-driven order.
+    FsTranscript fs(kRCGkrDomainTagV7);
+    fs.AbsorbUint256(base_seed);
+    std::vector<RCGkrOpeningClaim> claims;
+    for (size_t li = 0; li < wires.size(); ++li) {
+        const LayerWire& w = wires[li];
+        const RCGkrLayerClaimV7& lc = proof.layers[li];
+        fs.AbsorbU32(static_cast<uint32_t>(li));
+        const uint32_t nu_i = Log2Exact(RCGkrNextPow2(w.m));
+        const uint32_t nu_j = Log2Exact(RCGkrNextPow2(w.n));
+        std::vector<Fp2> ri(nu_i), rj(nu_j);
+        for (uint32_t b = 0; b < nu_i; ++b) ri[b] = fs.ChallengeFp2("v7_ri");
+        for (uint32_t b = 0; b < nu_j; ++b) rj[b] = fs.ChallengeFp2("v7_rj");
+
+        std::vector<Fp2> rk;
+        Fp2 gf;
+        if (!VerifyProductK(lc.sumcheck, lc.c_claim, fs, rk, gf))
+            return fail("v7:sumcheck"); // F5 forged claim
+        // R1 (Thm 3.1): the chain-end is definitionally a·b of the bound openings.
+        if (!Eq(gf, Mul(lc.a_eval, lc.b_eval))) return fail("v7:final_eval"); // F4
+
+        const uint32_t a_col = static_cast<uint32_t>(4 * li);
+        const uint32_t b_col = a_col + 1;
+        const uint32_t y_col = a_col + 2;
+        claims.push_back({y_col, PointConcatExtend(rj, ri, nu), lc.c_claim});
+        claims.push_back({a_col, PointConcatExtend(rk, ri, nu), lc.a_eval});
+        claims.push_back({b_col, PointConcatExtend(rj, rk, nu), lc.b_eval});
+    }
+
+    // Thm 2.2: the eval argument binds c_claim / a_eval / b_eval to the committed
+    // columns. A forged opening value (F3) fails the Lemma-1.2 identity at z1/z2.
+    const uint256 eval_seed =
+        EvalArgSeed(base_seed, proof.batch.columns, /*epoch1_count=*/4 * wires.size());
+    std::string ev_why;
+    if (!EvalArgumentVerify(claims, proof.batch, proof.eval, eval_seed, &ev_why))
+        return fail("v7:eval:" + ev_why); // F3
+
+    // R3: dual-α Extract LogUp over the real episode tiles (challenges FS-bound).
+    fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("logup"), 5);
+    const Fp2 gamma = fs.ChallengeFp2("v7_gamma");
+    const Fp2 a1 = fs.ChallengeFp2("v7_alpha1");
+    const Fp2 a2 = fs.ChallengeFp2("v7_alpha2");
+    if (!Eq(a1, proof.logup_alpha1) || !Eq(a2, proof.logup_alpha2))
+        return fail("v7:logup_alpha_unbound");
+    const auto lr = ExtractLogUpSample(wires, gamma, a1, a2, /*max_tiles=*/16);
+    if (!lr.ok) return fail("v7:logup:" + lr.failure); // F6/F7 (mechanism)
+
+    if (fs.Digest() != proof.transcript_hash) return fail("v7:transcript_hash");
+    if (why) *why = "v7 ok (SOUND, PARKED)";
+    return true;
 }
 
 bool EnvRCWinnerGkrEnabled() { return EnvFlagIsOne("BTX_RC_WINNER_GKR"); }
