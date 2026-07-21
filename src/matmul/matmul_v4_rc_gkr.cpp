@@ -2590,12 +2590,19 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
                 if (expect != proof.round_seeds[b]) return fail("barrier_seed");
             }
             // Canonical sequencing: per barrier, lobe GEMMs then Extract; no repeats/omissions.
+            // The page schedule MUST match the config RecomputeCoupledPuzzleReference (and the
+            // coupled trace constructor that grounds against it) uses. Fleet commit 1ea2a63
+            // flipped the coupled reference default to the full-bank schedule
+            // (dc::kRCCoupFullBankScheduleEnabled=true) but left this verify-side page selection
+            // pinned to the legacy single-page schedule, so the reference-derived coupled proof
+            // (barriers·lobes·pages_per GEMM layers) no longer matched the verifier's expected
+            // barriers·lobes single-page sequence. Ground against the SAME canonical schedule.
             size_t idx = 0;
             for (uint32_t b = 0; b < proof.coup.barriers; ++b) {
                 for (uint32_t ell = 0; ell < proof.coup.lobes; ++ell) {
                     const auto expect_pages =
                         SelectCoupledBankPageIds(b, ell, proof.coup, proof.episode_sigma,
-                                                 /*full_bank_schedule=*/false);
+                                                 dc::kRCCoupFullBankScheduleEnabled);
                     for (uint32_t page_id : expect_pages) {
                         if (idx >= proof.layers.size()) return fail("omitted barrier/layer");
                         const auto& lc = proof.layers[idx++];
