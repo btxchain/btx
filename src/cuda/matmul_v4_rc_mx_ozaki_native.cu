@@ -1429,7 +1429,7 @@ bool SelfQualifyRcOzakiCudaMxfp4Once()
             if (Mxfp4ShapeMatches(4, 4096, 4, 3, true, 3, &LaunchOzakiMxfp4PanelsMma, &mma_full) &&
                 Mxfp4ShapeMatches(4, 32, 4, 9, true, 2, &LaunchOzakiMxfp4PanelsMma, &mma_full)) {
                 tensor_ok = true;
-                tc_backend = is_sm120 ? "mxfp4_mma_sm120" : "mxfp4_mma_sm100";
+                tc_backend = is_sm120 ? "mxfp4_cutlass_sm120" : "mxfp4_cutlass_sm100";
             } else {
                 tensor_ok = true;
                 tc_backend = is_sm120 ? "mxfp4_cublaslt_sm120" : "mxfp4_cublaslt_sm100";
@@ -1449,11 +1449,11 @@ bool SelfQualifyRcOzakiCudaMxfp4Once()
         g_qual_sm100 = false;
         if (tensor_ok && is_sm120) {
             g_qual_sm120 = true;
-            g_mx_backend = tc_backend.empty() ? "mxfp4_mma_sm120" : tc_backend;
+            g_mx_backend = tc_backend.empty() ? "mxfp4_cutlass_sm120" : tc_backend;
             g_mx_deficit.clear();
         } else if (tensor_ok && is_sm100) {
             g_qual_sm100 = true;
-            g_mx_backend = tc_backend.empty() ? "mxfp4_mma_sm100" : tc_backend;
+            g_mx_backend = tc_backend.empty() ? "mxfp4_cutlass_sm100" : tc_backend;
             g_mx_deficit.clear();
         } else if (scalar_ok) {
             // BMX4C honesty: distinct scalar-decode marker; native stays false.
