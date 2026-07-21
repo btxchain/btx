@@ -124,8 +124,9 @@ function(btx_cuda_add_sm120a_mxfp4_native_object PARENT_TARGET)
 
   add_library(btx_cuda_sm120a_mxfp4 OBJECT "${_tu_rel}")
   # Isolate from CMAKE_CUDA_ARCHITECTURES / parent fatbin list.
+  # Must be OFF (not ""), or CMake generate fails with "CUDA_ARCHITECTURES is empty".
   set_target_properties(btx_cuda_sm120a_mxfp4 PROPERTIES
-    CUDA_ARCHITECTURES ""
+    CUDA_ARCHITECTURES OFF
     CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON
     CUDA_RUNTIME_LIBRARY "${BTX_CUDA_RUNTIME_LIBRARY}"
