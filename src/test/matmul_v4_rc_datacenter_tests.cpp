@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc_datacenter.h>
 
 #include <consensus/params.h>
+#include <pow.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -19,6 +20,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -45,6 +47,29 @@ CBlockHeader MakeCoupHeader(uint64_t nonce)
         header.seed_a.data()[i] = static_cast<unsigned char>(0x11);
         header.seed_b.data()[i] = static_cast<unsigned char>(0x22);
     }
+    return header;
+}
+
+/** Consensus::Params with MatMul v4 active so SetDeterministicMatMulSeeds binds
+ *  seed_a/seed_b to nNonce64 (exposes the Q-batch bank-template seed bug). */
+Consensus::Params MakeV4SeedParams()
+{
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulV4Dimension = 64;
+    return p;
+}
+
+CBlockHeader MakeSeededCoupHeader(uint64_t nonce, const Consensus::Params& consensus,
+                                  int32_t height, int64_t parent_mtp)
+{
+    CBlockHeader header = MakeCoupHeader(nonce);
+    header.seed_a.SetNull();
+    header.seed_b.SetNull();
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(header, consensus, height, parent_mtp));
+    BOOST_REQUIRE(!header.seed_a.IsNull());
+    BOOST_REQUIRE(!header.seed_b.IsNull());
     return header;
 }
 
@@ -285,6 +310,181 @@ BOOST_AUTO_TEST_CASE(rc_dc_miner_q_window_batch_matches_coupled_puzzle)
     }
 }
 
+/**
+ * REGRESSION (094b169 / e75aec): real §H.4 seeds + Q>=4 must share one bank
+ * template. MakeCoupHeader's FIXED 0x11/0x22 seeds hide the bug — after
+ * SetDeterministicMatMulSeeds, seed_a/seed_b differ per nNonce64, so a
+ * nonce-only bank projection rejects the window and SolveMatMulV4RCCoupled aborts.
+ */
+BOOST_AUTO_TEST_CASE(rc_dc_seeded_q_batch_shares_bank_and_matches_reference)
+{
+    const auto consensus = MakeV4SeedParams();
+    constexpr int32_t kHeight = 100;
+    constexpr int64_t kMtp = 1'700'000'000;
+    constexpr uint32_t Q = 4;
+    const auto params = rc::MakeToyRCCoupParams();
+
+    std::vector<CBlockHeader> window;
+    window.reserve(Q);
+    for (uint32_t i = 0; i < Q; ++i) {
+        window.push_back(MakeSeededCoupHeader(9000 + i, consensus, kHeight, kMtp));
+    }
+    // Distinct nonce-bound seeds (the bug trigger).
+    BOOST_REQUIRE(window[0].seed_a != window[1].seed_a);
+    BOOST_REQUIRE(window[0].seed_b != window[1].seed_b);
+    BOOST_REQUIRE(window[0].nNonce64 != window[1].nNonce64);
+
+    // Canonical template projection mirrors ComputeTemplateHash (null seeds).
+    const uint256 tmpl0 = rc::RCBankTemplateHash(window[0]);
+    BOOST_CHECK(tmpl0 == matmul::v4::ComputeTemplateHash(window[0]));
+    for (uint32_t i = 1; i < Q; ++i) {
+        BOOST_CHECK(rc::RCBankTemplateHash(window[i]) == tmpl0);
+    }
+
+    // Bank pages identical across the seeded window (epoch/template reusable).
+    const auto bank0 = rc::DeriveCoupledBankPages(window[0], kHeight, params);
+    const auto bank1 = rc::DeriveCoupledBankPages(window[1], kHeight, params);
+    BOOST_REQUIRE_EQUAL(bank0.size(), bank1.size());
+    for (size_t p = 0; p < bank0.size(); ++p) {
+        BOOST_CHECK(bank0[p] == bank1[p]);
+    }
+
+    // Per-nonce sigma / digest still unique.
+    BOOST_CHECK(matmul::v4::DeriveSigma(window[0]) != matmul::v4::DeriveSigma(window[1]));
+    const uint256 ref0 = rc::RecomputeCoupledPuzzleReference(window[0], kHeight, params);
+    const uint256 ref1 = rc::RecomputeCoupledPuzzleReference(window[1], kHeight, params);
+    BOOST_CHECK(!ref0.IsNull());
+    BOOST_CHECK(!ref1.IsNull());
+    BOOST_CHECK(ref0 != ref1);
+
+    std::vector<uint256> batch;
+    rc::RCMinerBatchConfig cfg;
+    cfg.Q = Q;
+    BOOST_REQUIRE_MESSAGE(rc::TryMineRCCoupledBatch(window, kHeight, params, batch, cfg),
+                          "TryMineRCCoupledBatch must accept real-seeded Q>=4 window");
+    BOOST_REQUIRE_EQUAL(batch.size(), Q);
+    for (uint32_t i = 0; i < Q; ++i) {
+        const uint256 single =
+            rc::RecomputeCoupledPuzzleReference(window[i], kHeight, params);
+        BOOST_CHECK_MESSAGE(batch[i] == single,
+                            "seeded Q-batch != per-header reference at i=" << i);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(rc_dc_bank_template_identity_separates_nonce_and_epoch)
+{
+    const auto consensus = MakeV4SeedParams();
+    constexpr int32_t kHeight = 100;
+    constexpr int64_t kMtp = 1'700'000'000;
+    auto h0 = MakeSeededCoupHeader(42, consensus, kHeight, kMtp);
+    auto h1 = MakeSeededCoupHeader(43, consensus, kHeight, kMtp);
+    BOOST_REQUIRE(h0.seed_a != h1.seed_a);
+
+    // Changing nonce/seeds must NOT change template bank identity.
+    BOOST_CHECK(rc::RCBankTemplateHash(h0) == rc::RCBankTemplateHash(h1));
+    const auto proj0 = rc::ProjectRCBankTemplateHeader(h0);
+    BOOST_CHECK_EQUAL(proj0.nNonce64, 0u);
+    BOOST_CHECK_EQUAL(proj0.nNonce, 0u);
+    BOOST_CHECK(proj0.seed_a.IsNull());
+    BOOST_CHECK(proj0.seed_b.IsNull());
+    BOOST_CHECK(proj0.matmul_digest.IsNull());
+
+    // Changing a template field MUST change bank identity.
+    auto h_epoch = h0;
+    h_epoch.hashMerkleRoot.data()[0] ^= 0xff;
+    BOOST_CHECK(rc::RCBankTemplateHash(h_epoch) != rc::RCBankTemplateHash(h0));
+    const auto bank_a = rc::DeriveCoupledBankPages(h0, kHeight, rc::MakeToyRCCoupParams());
+    const auto bank_b =
+        rc::DeriveCoupledBankPages(h_epoch, kHeight, rc::MakeToyRCCoupParams());
+    BOOST_CHECK(bank_a[0] != bank_b[0]);
+
+    // Result field must not affect bank identity.
+    h0.matmul_digest = uint256::ONE;
+    BOOST_CHECK(rc::RCBankTemplateHash(h0) == rc::RCBankTemplateHash(h1));
+}
+
+BOOST_AUTO_TEST_CASE(rc_dc_seeded_q_batch_slot_isolation_and_q1_parity)
+{
+    const auto consensus = MakeV4SeedParams();
+    constexpr int32_t kHeight = 100;
+    constexpr int64_t kMtp = 1'700'000'000;
+    constexpr uint32_t Q = 4;
+    const auto params = rc::MakeToyRCCoupParams();
+
+    std::vector<CBlockHeader> window;
+    for (uint32_t i = 0; i < Q; ++i) {
+        window.push_back(MakeSeededCoupHeader(5000 + i, consensus, kHeight, kMtp));
+    }
+
+    std::vector<uint256> batch_q;
+    rc::RCMinerBatchConfig cfg;
+    cfg.Q = Q;
+    BOOST_REQUIRE(rc::TryMineRCCoupledBatch(window, kHeight, params, batch_q, cfg));
+
+    // Q=1 parity: each singleton batch matches the Q>1 slot.
+    for (uint32_t i = 0; i < Q; ++i) {
+        std::vector<uint256> batch1;
+        cfg.Q = 1;
+        BOOST_REQUIRE(rc::TryMineRCCoupledBatch({window[i]}, kHeight, params, batch1, cfg));
+        BOOST_REQUIRE_EQUAL(batch1.size(), 1u);
+        BOOST_CHECK(batch1[0] == batch_q[i]);
+        BOOST_CHECK(batch1[0] ==
+                    rc::RecomputeCoupledPuzzleReference(window[i], kHeight, params));
+    }
+
+    // One corrupted slot cannot contaminate another: corrupt seeds on slot 1 only.
+    auto corrupted = window;
+    corrupted[1].seed_a.data()[0] ^= 0xaa;
+    BOOST_REQUIRE(rc::RCBankTemplateHash(corrupted[0]) == rc::RCBankTemplateHash(window[0]));
+    // Still same bank template → batch accepted; only slot 1 digest diverges.
+    std::vector<uint256> batch_bad;
+    cfg.Q = Q;
+    BOOST_REQUIRE(rc::TryMineRCCoupledBatch(corrupted, kHeight, params, batch_bad, cfg));
+    BOOST_CHECK(batch_bad[0] == batch_q[0]);
+    BOOST_CHECK(batch_bad[2] == batch_q[2]);
+    BOOST_CHECK(batch_bad[3] == batch_q[3]);
+    BOOST_CHECK(batch_bad[1] != batch_q[1]);
+}
+
+BOOST_AUTO_TEST_CASE(rc_dc_seeded_winner_reseal_and_losing_digest_only)
+{
+    // Mirrors SolveMatMulV4RCCoupled: batch digests for all slots; winner gets
+    // CPU reseal (empty ExactGemm) that must match; losers keep digest-only.
+    const auto consensus = MakeV4SeedParams();
+    constexpr int32_t kHeight = 100;
+    constexpr int64_t kMtp = 1'700'000'000;
+    constexpr uint32_t Q = 4;
+    const auto params = rc::MakeToyRCCoupParams();
+
+    CBlockHeader base = MakeSeededCoupHeader(6000, consensus, kHeight, kMtp);
+    auto window = rc::BuildRCCoupledMinerNonceWindow(base, Q);
+    for (CBlockHeader& h : window) {
+        BOOST_REQUIRE(SetDeterministicMatMulSeeds(h, consensus, kHeight, kMtp));
+    }
+
+    std::vector<uint256> batch;
+    rc::RCMinerBatchConfig cfg;
+    cfg.Q = Q;
+    BOOST_REQUIRE(rc::TryMineRCCoupledBatch(window, kHeight, params, batch, cfg));
+
+    // Pick the numerically smallest digest as a stand-in "winner".
+    size_t winner = 0;
+    for (size_t i = 1; i < batch.size(); ++i) {
+        if (batch[i] < batch[winner]) winner = i;
+    }
+    const uint256 resealed =
+        rc::RecomputeCoupledPuzzleReference(window[winner], kHeight, params);
+    BOOST_CHECK_MESSAGE(resealed == batch[winner], "winner CPU reseal must match batch");
+
+    // Losing slots: digest-only — no header mutation of matmul_digest required.
+    for (size_t i = 0; i < batch.size(); ++i) {
+        if (i == winner) continue;
+        BOOST_CHECK(window[i].matmul_digest.IsNull());
+        BOOST_CHECK(batch[i] ==
+                    rc::RecomputeCoupledPuzzleReference(window[i], kHeight, params));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_stub)
 {
     matmul_v4::cuda::RCCudaEpisodeContext ctx;
@@ -297,10 +497,10 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_stub)
     BOOST_REQUIRE(ctx.LoadBank(pages, &err));
     // Without BindEpisode the graph must refuse (no lobe seed / digest binding).
     BOOST_CHECK(!ctx.RunBarrierGraph(&err));
-    BOOST_CHECK(err.find("BindEpisode") != std::string::npos);
-
-    if (!matmul_v4::cuda::IsRcEpisodeCudaCompiled()) {
-        // CPU/stub build: graph stays unavailable.
+    if (matmul_v4::cuda::IsRcEpisodeCudaCompiled()) {
+        BOOST_CHECK(err.find("BindEpisode") != std::string::npos);
+    } else {
+        // CPU/stub link: honesty token before BindEpisode gating.
         BOOST_CHECK(err.find("graph_unavailable") != std::string::npos ||
                     err.find("BindEpisode") != std::string::npos);
         ctx.Destroy();

@@ -14,7 +14,6 @@
 
 #include <cassert>
 #include <cstring>
-#include <cstdlib>
 #include <vector>
 
 namespace matmul::v4::rc {
@@ -215,29 +214,17 @@ std::vector<int32_t> ExactGemmS8S8Dispatched(const lt::ExactGemmBackend& gemm,
         device_ok = false;
     }
     if (!device_ok) return run_cpu();
-    static const bool compare = [] {
-        const char* e = std::getenv("BTX_RC_EXACT_GEMM_COMPARE");
-        return e != nullptr && e[0] == '1' && e[1] == '\0';
-    }();
-    if (compare) {
-        const std::vector<int32_t> cpu = run_cpu();
-        if (device != cpu) return cpu;
-    }
+    // Device-first: digests must not depend on getenv (compare env is harness-only).
     return device;
 }
 
 bool HeadersShareBankTemplate(const std::vector<CBlockHeader>& headers)
 {
     if (headers.empty()) return false;
-    CBlockHeader tmpl = headers[0];
-    tmpl.nNonce64 = 0;
-    tmpl.nNonce = 0;
-    const uint256 th = matmul::ComputeMatMulHeaderHash(tmpl);
+    // Same projection as BankRootSeed / ComputeTemplateHash (null seeds).
+    const uint256 th = RCBankTemplateHash(headers[0]);
     for (size_t i = 1; i < headers.size(); ++i) {
-        CBlockHeader t = headers[i];
-        t.nNonce64 = 0;
-        t.nNonce = 0;
-        if (matmul::ComputeMatMulHeaderHash(t) != th) return false;
+        if (RCBankTemplateHash(headers[i]) != th) return false;
     }
     return true;
 }
@@ -269,8 +256,9 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
     const uint32_t n = params.StateBytes();
     const uint32_t W = params.lobe_width;
 
-    // Bank is template-scoped — derive once.
-    const auto pages = DeriveCoupledBankPages(headers[0], height, params);
+    // Bank is template-scoped — derive once from the canonical projection.
+    const auto pages =
+        DeriveCoupledBankPages(ProjectRCBankTemplateHeader(headers[0]), height, params);
     const uint256 bank_root = BankCommitment(pages, params.bank_pages, params.lobe_width);
     (void)cfg.use_resident_bank; // CPU reference always retains pages for the batch.
 

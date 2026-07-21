@@ -17,7 +17,6 @@
 
 #include <cassert>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -270,16 +269,8 @@ std::vector<int32_t> ExactGemmS8S8Dispatched(const lt::ExactGemmBackend& gemm,
     if (!device_ok) {
         return run_cpu();
     }
-
-    static const bool compare =
-        [] {
-            const char* e = std::getenv("BTX_RC_EXACT_GEMM_COMPARE");
-            return e != nullptr && e[0] == '1' && e[1] == '\0';
-        }();
-    if (compare) {
-        const std::vector<int32_t> cpu = run_cpu();
-        if (device != cpu) return cpu;
-    }
+    // Device-first: never gate digests on getenv (BTX_RC_EXACT_GEMM_COMPARE
+    // and friends are miner/harness diagnostics only).
     return device;
 }
 
@@ -301,10 +292,10 @@ void LobeLocalGemm(const int8_t* lobe_row, const std::vector<int8_t>& page, uint
 
 uint256 BankRootSeed(const CBlockHeader& header, int32_t height)
 {
-    CBlockHeader tmpl = header;
-    tmpl.nNonce64 = 0;
-    tmpl.nNonce = 0;
-    const uint256 tmpl_hash = matmul::ComputeMatMulHeaderHash(tmpl);
+    // Template-scoped: same projection as ComputeTemplateHash (null seeds +
+    // zero nonces). Leaving §H.4 seeds in would make the bank vary per nonce
+    // and break Q>1 HeadersShareBankTemplate / TryMineRCCoupledBatch.
+    const uint256 tmpl_hash = RCBankTemplateHash(header);
     return Sha256TaggedU32(kRCCoupBankTag, sizeof(kRCCoupBankTag) - 1, tmpl_hash,
                            static_cast<uint32_t>(height));
 }
@@ -420,6 +411,24 @@ DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, i
 }
 
 } // namespace
+
+CBlockHeader ProjectRCBankTemplateHeader(const CBlockHeader& header)
+{
+    CBlockHeader tmpl{header};
+    tmpl.nNonce64 = 0;
+    tmpl.nNonce = 0;
+    tmpl.seed_a.SetNull();
+    tmpl.seed_b.SetNull();
+    tmpl.matmul_digest.SetNull();
+    return tmpl;
+}
+
+uint256 RCBankTemplateHash(const CBlockHeader& header)
+{
+    // Equivalent to ComputeTemplateHash: null seeds + zero nonces into
+    // ComputeMatMulHeaderHash (matmul_digest is not part of that preimage).
+    return matmul::ComputeMatMulHeaderHash(ProjectRCBankTemplateHeader(header));
+}
 
 bool ValidateRCCoupParams(const RCCoupParams& p)
 {

@@ -234,6 +234,22 @@ struct RCCoupEpisodeTranscript {
                                         const matmul::v4::lt::ExactGemmBackend& gemm = {},
                                         const RCCoupOptions& options = {});
 
+/**
+ * Canonical RC bank-template projection — mirrors ComputeTemplateHash.
+ *
+ * Separates header fields into three roles:
+ *   - Template/epoch identity (kept): nVersion, hashPrevBlock, hashMerkleRoot,
+ *     nTime, nBits, matmul_dim — resident bank identity across a nonce window.
+ *   - Nonce-bound attempt fields (cleared): nNonce, nNonce64, seed_a, seed_b
+ *     (§H.4 seeds bind nNonce64; lobes/sigma use the FULL header via DeriveSigma).
+ *   - Result fields (cleared for clarity; not in ComputeMatMulHeaderHash):
+ *     matmul_digest — must not affect bank identity.
+ *
+ * RCBankTemplateHash(h) == ComputeTemplateHash(h).
+ */
+[[nodiscard]] CBlockHeader ProjectRCBankTemplateHeader(const CBlockHeader& header);
+[[nodiscard]] uint256 RCBankTemplateHash(const CBlockHeader& header);
+
 /** Epoch/template expert bank (toy params). */
 [[nodiscard]] std::vector<std::vector<int8_t>>
 DeriveCoupledBankPages(const CBlockHeader& header, int32_t height);

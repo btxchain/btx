@@ -33,8 +33,9 @@ struct RCMinerBatchConfig {
 
 /**
  * Consecutive-nonce window as SolveMatMulV4RCCoupled builds before
- * TryMineRCCoupledBatch. Seeds / bank template are caller's responsibility;
- * this only clones base and advances nNonce64 / nNonce by [0, Q).
+ * TryMineRCCoupledBatch. Caller must re-pin §H.4 seed_a/seed_b per nonce
+ * (SetDeterministicMatMulSeeds); bank identity uses RCBankTemplateHash
+ * (nonce/seeds cleared). This only clones base and advances nNonce64/nNonce.
  */
 [[nodiscard]] inline std::vector<CBlockHeader> BuildRCCoupledMinerNonceWindow(
     const CBlockHeader& base, uint32_t Q)
@@ -53,9 +54,9 @@ struct RCMinerBatchConfig {
 /**
  * Mine digests for a window of headers with the same RCCoupParams.
  * Returns false if headers empty, Q out of range, params invalid, or headers
- * do not share a bank template (nonce-zeroed header hash).
+ * do not share a bank template (RCBankTemplateHash / ComputeTemplateHash).
  * On success digests_out.size() == headers.size() and digests_out[i] equals
- * MineCoupledPuzzle(headers[i], ...).
+ * MineCoupledPuzzle(headers[i], ...) / RecomputeCoupledPuzzleReference byte-for-byte.
  */
 [[nodiscard]] bool TryMineRCCoupledBatch(
     const std::vector<CBlockHeader>& headers, int32_t height, const RCCoupParams& params,
