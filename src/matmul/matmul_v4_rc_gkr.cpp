@@ -1426,8 +1426,11 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
         Fp2 gf;
         if (!VerifyProductK(lc.sumcheck, lc.c_claim, fs, rk, gf))
             return fail("v7:sumcheck"); // F5 forged claim
-        // R1 (Thm 3.1): the chain-end is definitionally a·b of the bound openings.
-        if (!Eq(gf, Mul(lc.a_eval, lc.b_eval))) return fail("v7:final_eval"); // F4
+        // R1 (Thm 3.1): the carried final_eval must equal BOTH the sumcheck
+        // chain-end AND the product of the two bound openings — it is no longer
+        // a free proof field (v6's F4 hole).
+        if (!Eq(lc.final_eval, gf)) return fail("v7:final_eval_endpoint"); // F4
+        if (!Eq(lc.final_eval, Mul(lc.a_eval, lc.b_eval))) return fail("v7:final_eval"); // F4
 
         const uint32_t a_col = static_cast<uint32_t>(4 * li);
         const uint32_t b_col = a_col + 1;
