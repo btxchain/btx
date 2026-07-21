@@ -1145,8 +1145,7 @@ BOOST_AUTO_TEST_CASE(gkr_v7_section9_forgery_list_rejected)
     }
     // F14 — forge target compliance (digest > target).
     {
-        arith_uint256 tiny;
-        tiny = tiny + 1; // 1: essentially every digest exceeds it
+        const arith_uint256 tiny(1); // essentially every 256-bit digest exceeds 1
         BOOST_CHECK(rejects(H, header, tiny));
     }
     // F15 — forge the claimed digest.
