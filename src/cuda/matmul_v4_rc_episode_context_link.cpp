@@ -4,12 +4,29 @@
 
 #include <cuda/matmul_v4_rc_episode_context.h>
 
+#include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_coupled.h>
+
+#include <cstring>
 
 // Default / no-CUDA-experimental build: RC episode CUDA TU is not linked.
 // Host miners keep CPU / ExactGemm backends; digests unchanged.
 
 namespace matmul_v4::cuda {
+namespace {
+RcResidentDeviceGemmHook g_stub_hook{nullptr};
+} // namespace
+
+void SetRcResidentDeviceGemmHook(RcResidentDeviceGemmHook hook)
+{
+    g_stub_hook = hook;
+}
+
+RcResidentDeviceGemmHook GetRcResidentDeviceGemmHook()
+{
+    return g_stub_hook;
+}
 
 bool IsRcEpisodeCudaCompiled()
 {
@@ -44,9 +61,16 @@ bool RCCudaEpisodeContext::Init(const RCCudaEpisodeShape& shape, std::string* er
     m_episode_bound = false;
     m_have_digest = false;
     m_state_ready = false;
+    m_graph_captured = false;
+    m_fault_corrupt_digest = false;
     m_arena = nullptr;
     m_arena_bytes = 0;
     m_state.assign(static_cast<size_t>(shape.lobes) * shape.lobe_width, 0);
+    m_prov = {};
+    m_prov.gemm_path_label = "stub_not_wired";
+    m_prov.permute_extract_label = "stub_not_wired";
+    m_prov.parked_reason = "graph_unavailable:not_wired";
+    m_prov.peak_ready = false;
     if (error) error->clear();
     return true;
 }
@@ -83,7 +107,14 @@ bool RCCudaEpisodeContext::LoadBank(const std::vector<std::vector<int8_t>>& page
         }
     }
     m_pages = pages;
+    matmul::v4::rc::RCCoupParams params;
+    params.barriers = m_shape.barriers;
+    params.lobes = m_shape.lobes;
+    params.lobe_width = m_shape.lobe_width;
+    params.bank_pages = m_shape.bank_pages;
+    m_bank_root = matmul::v4::rc::CommitCoupledBankPages(m_pages, params);
     m_bank_loaded = true;
+    m_prov.device_bank_resident = false; // stub: host mirror only
     if (error) error->clear();
     return true;
 }
@@ -99,7 +130,22 @@ bool RCCudaEpisodeContext::BindEpisode(const CBlockHeader& header, int32_t heigh
     m_height = height;
     m_episode_bound = true;
     m_have_digest = false;
+    matmul::v4::rc::RCCoupParams params;
+    params.barriers = m_shape.barriers;
+    params.lobes = m_shape.lobes;
+    params.lobe_width = m_shape.lobe_width;
+    params.bank_pages = m_shape.bank_pages;
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    const auto lobe_seeds = matmul::v4::rc::DeriveCoupledLobeSeeds(sigma, params);
+    const uint32_t n = params.StateBytes();
+    m_state.assign(n, 0);
+    for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+        const auto tile = matmul::v4::rc::ExpandMxDequantInt8(lobe_seeds[ell], params.lobe_width,
+                                                              params.lobe_width);
+        std::memcpy(m_state.data() + ell * params.lobe_width, tile.data(), params.lobe_width);
+    }
     m_state_ready = true;
+    m_prov.device_state_resident = false;
     if (error) error->clear();
     return true;
 }
@@ -137,12 +183,39 @@ bool RCCudaEpisodeContext::DownloadActiveState(std::vector<int8_t>& out,
 bool RCCudaEpisodeContext::RunBarrierGraph(std::string* error)
 {
     if (error) {
-        // Honesty tokens: graph_unavailable / not_wired — CUDA TU not linked.
         *error = "graph_unavailable:not_wired";
     }
     (void)m_bank_loaded;
     (void)m_episode_bound;
     return false;
+}
+
+bool RCCudaEpisodeContext::RunNonceWindow(const std::vector<CBlockHeader>& headers,
+                                          int32_t height, std::vector<uint256>& digests_out,
+                                          std::string* error)
+{
+    (void)headers;
+    (void)height;
+    digests_out.clear();
+    if (error) *error = "graph_unavailable:not_wired";
+    return false;
+}
+
+bool RCCudaEpisodeContext::CompareWithCpuOracle(std::string* error) const
+{
+    if (error) *error = "graph_unavailable:not_wired";
+    return false;
+}
+
+bool RCCudaEpisodeContext::ResealAgainstCpuOracle(std::string* error)
+{
+    if (error) *error = "graph_unavailable:not_wired";
+    return false;
+}
+
+void RCCudaEpisodeContext::FaultInjectCorruptDigest(bool enable)
+{
+    m_fault_corrupt_digest = enable;
 }
 
 const uint256* RCCudaEpisodeContext::LastDigest() const
@@ -157,12 +230,16 @@ void RCCudaEpisodeContext::Destroy()
     m_episode_bound = false;
     m_have_digest = false;
     m_state_ready = false;
+    m_graph_captured = false;
+    m_fault_corrupt_digest = false;
     m_arena = nullptr;
     m_arena_bytes = 0;
     m_shape = {};
     m_pages.clear();
     m_state.clear();
     m_last_digest = uint256{};
+    m_bank_root = uint256{};
+    m_prov = {};
     m_stream = nullptr;
     m_graph = nullptr;
     m_graph_exec = nullptr;

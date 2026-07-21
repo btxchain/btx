@@ -495,26 +495,68 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_stub)
     BOOST_CHECK(ctx.Ready());
     const auto pages = rc::DeriveCoupledBankPages(header, 0, params);
     BOOST_REQUIRE(ctx.LoadBank(pages, &err));
-    // Without BindEpisode the graph must refuse (no lobe seed / digest binding).
-    BOOST_CHECK(!ctx.RunBarrierGraph(&err));
-    if (matmul_v4::cuda::IsRcEpisodeCudaCompiled()) {
-        BOOST_CHECK(err.find("BindEpisode") != std::string::npos);
-    } else {
-        // CPU/stub link: honesty token before BindEpisode gating.
-        BOOST_CHECK(err.find("graph_unavailable") != std::string::npos ||
-                    err.find("BindEpisode") != std::string::npos);
+
+    if (!matmul_v4::cuda::IsRcEpisodeCudaCompiled()) {
+        // CPU/stub build: graph stays unavailable regardless of BindEpisode.
+        BOOST_CHECK(!ctx.RunBarrierGraph(&err));
+        BOOST_CHECK_MESSAGE(err.find("graph_unavailable") != std::string::npos, err);
+        BOOST_CHECK(!ctx.Provenance().peak_ready);
+        BOOST_CHECK_EQUAL(ctx.Provenance().gemm_path_label, "stub_not_wired");
         ctx.Destroy();
         BOOST_CHECK(!ctx.Ready());
         return;
     }
 
+    // CUDA build: without BindEpisode the graph must refuse.
+    BOOST_CHECK(!ctx.RunBarrierGraph(&err));
+    BOOST_CHECK(err.find("BindEpisode") != std::string::npos);
+
     BOOST_REQUIRE_MESSAGE(ctx.BindEpisode(header, 0, &err), err);
+    std::vector<int8_t> seed_state;
+    BOOST_REQUIRE(ctx.DownloadActiveState(seed_state, &err));
+
     BOOST_REQUIRE_MESSAGE(ctx.RunBarrierGraph(&err), err);
     const uint256 cpu = rc::RecomputeCoupledPuzzleReference(header, 0, params);
     BOOST_REQUIRE(ctx.LastDigest() != nullptr);
     BOOST_CHECK_MESSAGE(*ctx.LastDigest() == cpu,
                         "toy graph digest " << ctx.LastDigest()->GetHex()
                                             << " != cpu " << cpu.GetHex());
+    BOOST_REQUIRE_MESSAGE(ctx.CompareWithCpuOracle(&err), err);
+
+    // DownloadActiveState must return FINAL Extracted state, not BindEpisode seed.
+    std::vector<int8_t> final_state;
+    BOOST_REQUIRE(ctx.DownloadActiveState(final_state, &err));
+    BOOST_CHECK(final_state != seed_state);
+    BOOST_CHECK_EQUAL(final_state.size(), params.StateBytes());
+
+    const auto& prov = ctx.Provenance();
+    BOOST_CHECK(prov.device_bank_resident);
+    BOOST_CHECK(prov.device_state_resident);
+    BOOST_CHECK_GE(prov.graph_capture_count, 1);
+    BOOST_CHECK_GE(prov.graph_replay_count, params.barriers);
+    BOOST_CHECK(!prov.peak_ready);
+    BOOST_CHECK(!prov.device_digest);
+    BOOST_CHECK_EQUAL(prov.permute_extract_label, "parked_host_barrier_tail");
+    BOOST_CHECK(prov.gemm_path_label.find("portable") != std::string::npos ||
+                prov.gemm_path_label.find("wsB") != std::string::npos);
+
+    // Second run must REPLAY (no second capture).
+    const uint64_t caps = prov.graph_capture_count;
+    BOOST_REQUIRE_MESSAGE(ctx.BindEpisode(header, 0, &err), err);
+    BOOST_REQUIRE_MESSAGE(ctx.RunBarrierGraph(&err), err);
+    BOOST_CHECK_EQUAL(ctx.Provenance().graph_capture_count, caps);
+
+    // Fault injection: corrupted digest rejected + resealed to CPU.
+    ctx.FaultInjectCorruptDigest(true);
+    BOOST_REQUIRE_MESSAGE(ctx.BindEpisode(header, 0, &err), err);
+    BOOST_REQUIRE_MESSAGE(ctx.RunBarrierGraph(&err), err);
+    BOOST_REQUIRE(ctx.LastDigest() != nullptr);
+    BOOST_CHECK(*ctx.LastDigest() != cpu);
+    BOOST_CHECK(!ctx.ResealAgainstCpuOracle(&err));
+    BOOST_CHECK(err.find("resealed") != std::string::npos);
+    BOOST_CHECK(*ctx.LastDigest() == cpu);
+    ctx.FaultInjectCorruptDigest(false);
+
     ctx.Destroy();
     BOOST_CHECK(!ctx.Ready());
 }
@@ -538,7 +580,83 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_medium_digest)
     BOOST_CHECK_MESSAGE(*ctx.LastDigest() == cpu,
                         "medium graph digest " << ctx.LastDigest()->GetHex()
                                                << " != cpu " << cpu.GetHex());
+
+    std::vector<int8_t> final_state;
+    BOOST_REQUIRE(ctx.DownloadActiveState(final_state, &err));
+    BOOST_CHECK_EQUAL(final_state.size(), params.StateBytes());
     ctx.Destroy();
+}
+
+BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_nonce_window_and_probe)
+{
+    const auto probe = rc::ProbeRCCudaEpisodeResident();
+    BOOST_CHECK(probe.host_bridge_removed);
+    BOOST_CHECK(probe.permute_extract_parked);
+    BOOST_CHECK(!probe.peak_ready);
+    BOOST_CHECK(!probe.device_digest);
+
+    if (!matmul_v4::cuda::IsRcEpisodeCudaCompiled()) {
+        BOOST_CHECK(!probe.cuda_episode_compiled);
+        BOOST_CHECK_EQUAL(probe.parked_reason, "graph_unavailable:not_wired");
+        return;
+    }
+
+    matmul_v4::cuda::RCCudaEpisodeContext ctx;
+    std::string err;
+    const auto params = rc::MakeToyRCCoupParams();
+    constexpr uint32_t Q = 4;
+    BOOST_REQUIRE(ctx.Init(params, Q, &err));
+    const CBlockHeader base = MakeCoupHeader(9001);
+    const auto pages = rc::DeriveCoupledBankPages(base, 0, params);
+    BOOST_REQUIRE(ctx.LoadBank(pages, &err));
+    const auto window = rc::BuildRCCoupledMinerNonceWindow(base, Q);
+    std::vector<uint256> digests;
+    BOOST_REQUIRE_MESSAGE(ctx.RunNonceWindow(window, 0, digests, &err), err);
+    BOOST_REQUIRE_EQUAL(digests.size(), Q);
+    BOOST_CHECK(ctx.Provenance().qstar_device_batched);
+    BOOST_CHECK(ctx.Provenance().per_nonce_sync_absent);
+    BOOST_CHECK_EQUAL(ctx.Provenance().digest_batch_slots, Q);
+    // Capture once across the window.
+    BOOST_CHECK_EQUAL(ctx.Provenance().graph_capture_count, 1);
+    for (uint32_t i = 0; i < Q; ++i) {
+        const uint256 cpu = rc::RecomputeCoupledPuzzleReference(window[i], 0, params);
+        BOOST_CHECK_MESSAGE(digests[i] == cpu, "window digest mismatch at i=" << i);
+    }
+    ctx.Destroy();
+}
+
+BOOST_AUTO_TEST_CASE(rc_dc_coupled_barrier_tail_helpers)
+{
+    const auto params = rc::MakeToyRCCoupParams();
+    const CBlockHeader header = MakeCoupHeader(3);
+    const auto pages = rc::DeriveCoupledBankPages(header, 0, params);
+    const uint256 bank_root = rc::CommitCoupledBankPages(pages, params);
+    BOOST_CHECK(!bank_root.IsNull());
+
+    // Tail helpers must match a single barrier of the CPU oracle transcript.
+    rc::RCCoupEpisodeTranscript tx;
+    const uint256 dig =
+        rc::RecomputeCoupledPuzzleReference(header, 0, params, {}, {}, nullptr, &tx);
+    BOOST_REQUIRE(!dig.IsNull());
+    BOOST_REQUIRE(!tx.gemms.empty());
+    BOOST_REQUIRE(!tx.extracts.empty());
+
+    std::vector<int64_t> acc(params.StateBytes(), 0);
+    for (const auto& g : tx.gemms) {
+        if (g.barrier != 0) continue;
+        for (uint32_t c = 0; c < params.lobe_width; ++c) {
+            acc[g.lobe * params.lobe_width + c] += g.Y[c];
+        }
+    }
+    std::vector<int8_t> state(params.StateBytes());
+    uint256 root;
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    BOOST_REQUIRE(rc::ApplyCoupledBarrierTail(sigma, /*barrier=*/0, params, acc, state, &root));
+    BOOST_CHECK(root == tx.extracts[0].barrier_root);
+    BOOST_CHECK(state == tx.extracts[0].extract_out);
+
+    std::vector<uint256> roots = tx.barrier_roots;
+    BOOST_CHECK(rc::AssembleCoupledEpisodeDigest(tx.bank_root, roots) == dig);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

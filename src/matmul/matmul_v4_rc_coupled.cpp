@@ -909,4 +909,45 @@ DistEpisodeResult RunCoupledBarrierDistributed(const CBlockHeader& header, int32
                                             gemm);
 }
 
+bool ApplyCoupledBarrierTail(const uint256& sigma, uint32_t barrier, const RCCoupParams& params,
+                             std::vector<int64_t>& acc, std::vector<int8_t>& state_out,
+                             uint256* barrier_root_out)
+{
+    if (!ValidateRCCoupParams(params) || barrier >= params.barriers) return false;
+    const uint32_t n = params.StateBytes();
+    if (acc.size() != n || state_out.size() != n) return false;
+    const auto pi = DeriveCoupledBalancedPermutation(sigma, barrier, params);
+    if (!IsBalancedPermutation(pi, n)) return false;
+    ApplyBalancedPermutation(acc, pi);
+    ApplyAllToAllMix(acc, sigma, barrier, n);
+    const uint256 extract_seed =
+        Sha256TaggedU32U32(kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigma, barrier,
+                           /*unused=*/0);
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(extract_seed);
+    if (!ExtractActiveState(prf_key, acc, state_out)) return false;
+    if (barrier_root_out) *barrier_root_out = BarrierRoot(barrier, state_out);
+    return true;
+}
+
+uint256 AssembleCoupledEpisodeDigest(const uint256& bank_root,
+                                     const std::vector<uint256>& barrier_roots)
+{
+    std::vector<unsigned char> buf;
+    buf.reserve(sizeof(kRCCoupEpisodeTag) - 1 + 32 + barrier_roots.size() * 32);
+    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCCoupEpisodeTag),
+               reinterpret_cast<const unsigned char*>(kRCCoupEpisodeTag) +
+                   sizeof(kRCCoupEpisodeTag) - 1);
+    buf.insert(buf.end(), bank_root.begin(), bank_root.end());
+    for (const uint256& root : barrier_roots) {
+        buf.insert(buf.end(), root.begin(), root.end());
+    }
+    return Sha256dBytes(buf.data(), buf.size());
+}
+
+uint256 CommitCoupledBankPages(const std::vector<std::vector<int8_t>>& pages,
+                               const RCCoupParams& params)
+{
+    return BankCommitment(pages, params.bank_pages, params.lobe_width);
+}
+
 } // namespace matmul::v4::rc

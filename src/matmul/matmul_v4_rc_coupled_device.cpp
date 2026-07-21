@@ -5,6 +5,7 @@
 #include <matmul/matmul_v4_rc_coupled_device.h>
 
 #include <cuda/matmul_v4_lt_accel.h>
+#include <cuda/matmul_v4_rc_episode_context.h>
 #include <hip/matmul_v4_lt_accel.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_lt.h>
@@ -80,6 +81,29 @@ RCCoupledDeviceProbe ProbeRCCoupledDevice()
     st.provider = "alu_or_stub";
 #endif
     st.detail = "ok";
+    return st;
+}
+
+RCCudaEpisodeResidentProbe ProbeRCCudaEpisodeResident()
+{
+    RCCudaEpisodeResidentProbe st;
+    st.cuda_episode_compiled = matmul_v4::cuda::IsRcEpisodeCudaCompiled();
+    st.device_bank_resident_api = true;
+    st.graph_capture_once_api = true;
+    st.host_bridge_removed = true; // MineCoupledPuzzle ExactGemm bridge gone
+    st.peak_ready = false;
+    st.device_digest = false;
+    st.permute_extract_parked = true;
+    if (!st.cuda_episode_compiled) {
+        st.gemm_path_label = "stub_not_wired";
+        st.parked_reason = "graph_unavailable:not_wired";
+        st.detail = "cpu_stub_build";
+        return st;
+    }
+    st.gemm_path_label = "portable_device_alu";
+    st.parked_reason =
+        "device_permute_mix_extract_digest_PARKED; native_mxfp4_device_ptr_awaiting_wsB";
+    st.detail = "resident_gemm_graph_api_ready; peak_ready=false";
     return st;
 }
 
