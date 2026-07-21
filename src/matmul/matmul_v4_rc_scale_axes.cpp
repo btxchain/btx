@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc_scale_axes.h>
 
+#include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_scale.h>
 
 #include <consensus/params.h>
@@ -81,7 +82,8 @@ std::unordered_map<AxisCacheKey, RCThreeAxisScale, AxisCacheKeyHash> g_axis_cach
  */
 RCThreeAxisScale ComputeAxesForEpoch(int32_t epoch)
 {
-    RCThreeAxisScale s{kRCAxisW0State, kRCAxisC0Local, kRCAxisX0Exchange};
+    // Epoch-0 dials come from TotalRCCoup* (W=V2 expanded, C=V3 MACs).
+    RCThreeAxisScale s = RCThreeAxisEpoch0FromCoupHelpers();
     if (epoch <= 0) return s;
 
     for (int32_t e = 0; e < epoch; ++e) {
@@ -123,6 +125,7 @@ RCEpisodeParams DeriveDimsFromAxes(const RCThreeAxisScale& scale)
 
     // C_local / X_exchange recorded as economic dials; matrix reshape lands
     // when Stage C wires them into committed coupled dims (ratios PROVISIONAL).
+    // C_local epoch-0 is TotalRCCoupMacs(V3) via RCThreeAxisEpoch0FromCoupHelpers.
     out.b_seq = kRCBatchSeq;
     (void)scale.C_local;
     (void)scale.X_exchange;
@@ -173,10 +176,10 @@ RCThreeAxisScale RCThreeAxisScaleForHeight(int32_t height, const Consensus::Para
     if constexpr (!kRCThreeAxisScheduleEnabled) {
         (void)height;
         (void)p;
-        return RCThreeAxisScale{kRCAxisW0State, kRCAxisC0Local, kRCAxisX0Exchange};
+        return RCThreeAxisEpoch0FromCoupHelpers();
     }
     if (height < p.nMatMulRCHeight || p.nRCScaleEpochBlocks <= 0) {
-        return RCThreeAxisScale{kRCAxisW0State, kRCAxisC0Local, kRCAxisX0Exchange};
+        return RCThreeAxisEpoch0FromCoupHelpers();
     }
 
     const int32_t epoch = (height - p.nMatMulRCHeight) / p.nRCScaleEpochBlocks;
@@ -275,16 +278,14 @@ RCEpisodeParams EpisodeParamsFromThreeAxis(const RCThreeAxisScale& scale,
     }
     // Checked fallback to previous dims (F4/F5) — never assert.
     if (prior_ok != nullptr) return *prior_ok;
-    RCEpisodeParams base = DeriveDimsFromAxes(
-        RCThreeAxisScale{kRCAxisW0State, kRCAxisC0Local, kRCAxisX0Exchange});
+    RCEpisodeParams base = DeriveDimsFromAxes(RCThreeAxisEpoch0FromCoupHelpers());
     return base;
 }
 
 RCEpisodeParams ConsensusRCThreeAxisParamsForHeight(int32_t height, const Consensus::Params& p,
                                                     const CBlockIndex* tip)
 {
-    RCEpisodeParams ok = EpisodeParamsFromThreeAxis(
-        RCThreeAxisScale{kRCAxisW0State, kRCAxisC0Local, kRCAxisX0Exchange});
+    RCEpisodeParams ok = EpisodeParamsFromThreeAxis(RCThreeAxisEpoch0FromCoupHelpers());
     if constexpr (!kRCThreeAxisScheduleEnabled) {
         (void)height;
         (void)p;
@@ -302,6 +303,52 @@ RCEpisodeParams ConsensusRCThreeAxisParamsForHeight(int32_t height, const Consen
         ok = EpisodeParamsFromThreeAxis(s, &ok);
     }
     return ok;
+}
+
+RCThreeAxisScale RCThreeAxisEpoch0FromCoupHelpers()
+{
+    RCThreeAxisScale s;
+    s.W_state = TotalRCCoupExpandedBytes(MakeProductionRCCoupParams());
+    s.C_local = TotalRCCoupMacs(MakeProductionV3RCCoupParams());
+    s.X_exchange = kRCAxisX0Exchange;
+    return s;
+}
+
+bool CheckRCThreeAxisCoupledWire(std::string* reason)
+{
+    const auto from_helpers = RCThreeAxisEpoch0FromCoupHelpers();
+    if (from_helpers.W_state != kRCAxisW0State) {
+        if (reason) {
+            *reason = "W_state pin != TotalRCCoupExpandedBytes(V2 production) (" +
+                      std::to_string(from_helpers.W_state) + " vs " +
+                      std::to_string(kRCAxisW0State) + ")";
+        }
+        return false;
+    }
+    if (from_helpers.C_local != kRCAxisC0Local) {
+        if (reason) {
+            *reason = "C_local pin != TotalRCCoupMacs(V3 production) (" +
+                      std::to_string(from_helpers.C_local) + " vs " +
+                      std::to_string(kRCAxisC0Local) + ")";
+        }
+        return false;
+    }
+    const uint64_t v3_expanded = TotalRCCoupExpandedBytes(MakeProductionV3RCCoupParams());
+    if (v3_expanded != kRCAxisHardCapState) {
+        if (reason) {
+            *reason = "hard-cap W != TotalRCCoupExpandedBytes(V3 production) (" +
+                      std::to_string(v3_expanded) + " vs " +
+                      std::to_string(kRCAxisHardCapState) + ")";
+        }
+        return false;
+    }
+    // Packed V3 floor is informational for HBM thesis (51 GiB); not an axis dial.
+    const uint64_t v3_packed = TotalRCCoupPackedBytes(MakeProductionV3RCCoupParams());
+    if (v3_packed == 0 || v3_packed >= v3_expanded) {
+        if (reason) *reason = "V3 packed bytes malformed vs expanded";
+        return false;
+    }
+    return true;
 }
 
 } // namespace matmul::v4::rc

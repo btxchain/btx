@@ -30,8 +30,8 @@ against Stages §§1–5. It does **not** raise height.
 | Item | Status |
 |---|---|
 | Rule | Record qual under `arch_key` (`sm_120`, `sm_100`, `gfx950`, …) — not per-card |
-| Observed (consumer Blackwell) | MXFP4 standalone may qualify across **sm_120** generally (5090 + 5060 Ti); FP8 declines; **resident-native unwired** on all → §1.A is class-wide consumer-Blackwell work |
-| B200 | **sm_100** needs its **own** qualification (≠ sm_120) |
+| Observed (consumer Blackwell) | Plain **sm_120** packaging is not native block-scaled MMA evidence. RC/LT **SM120_MMA** / block-scaled MXFP4 is **sm_120a feature-qualified** only (dedicated object + self-qual; 5090 + 5060 Ti class). FP8 declines; **resident-native unwired** on all → §1.A is class-wide consumer-Blackwell work |
+| B200 | **sm_100** needs its **own** qualification (≠ sm_120 / ≠ sm_120a) |
 | Report | `lt.arch_key` emitted in `matmul-v4-report.cpp` |
 
 ### 1.A — LT resident native MX device-pointer path
@@ -50,7 +50,7 @@ against Stages §§1–5. It does **not** raise height.
 | Why | LT bounds &lt; 2^24 do **not** transfer to RC Z≈2^30.76 / wgrad on **any** vendor |
 | Plan | `doc/btx-matmul-v4.5-rc-native-fp4-ozaki-plan-2026-07-20.md` |
 | Scaffold | `src/matmul/matmul_v4_rc_mx_ozaki.{h,cpp}` + `src/cuda/matmul_v4_rc_mx_ozaki_native.{h,cu,link.cpp}` — ExactGemm panels vs native MXFP4 honesty split |
-| Status | **IMPLEMENTING** — Exact panels may qualify for mining accel; `native_mxfp4_qualified` only after block-scaled MXFP4 device path (`mxfp4_blockscaled_device`) quals vs int64 (SM100/SM120 separate latches). Heights stay `INT32_MAX`. |
+| Status | **IMPLEMENTING** — Exact panels may qualify for mining accel; `native_mxfp4_qualified` only after **sm_120a feature-qualified** (or SM100) block-scaled MXFP4 device path quals vs int64 (SM100/SM120 separate latches; plain sm_120 packaging ≠ native MMA). Heights stay `INT32_MAX`. |
 
 ### 1.C — Staging telemetry diagnosis
 

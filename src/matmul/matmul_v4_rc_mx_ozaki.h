@@ -24,6 +24,11 @@
 //      / LaunchGemmS8S8 never set the native latch. SM120 and SM100 qualify
 //      on separate arch_key latches — never infer one from the other.
 //
+// SM120_MMA additionally requires matmul_v4::cuda::RcOzakiMxfp4Sm120aKernelLinked()
+// (dedicated sm_120a object). Plain sm_120 builds without that object report
+// Unqualified + deficit "not_linked" and native_mxfp4_qualified=false.
+// BTX_LT_CUTLASS_MXFP4 is NOT a consumer native admission path (fail-closed).
+//
 // Never copy LT native_mxfp4_qualified. Never raise nMatMulRCHeight.
 
 namespace matmul::v4::rc {
@@ -41,16 +46,21 @@ struct RCOzakiMxfp4Status {
     bool attempted{false};
     bool qualified{false}; // native MXFP4 tensor only
     bool exact_panels_qualified{false};
+    /** True when the dedicated sm_120a kernel object is linked (packaging). */
+    bool sm120a_kernel_linked{false};
     RCOzakiMxfp4SelectedBackend selected{RCOzakiMxfp4SelectedBackend::Unqualified};
     /** "SM120_MMA" | "SM100_CUBLASLT" | "Unqualified" |
      *  "mxfp4_blockscaled_device_scalar-decode" | "" */
     std::string backend;
     std::string arch_key; // e.g. sm_120 / sm_100 — never cross-inferred
+    /** Primary tokens: not_linked | unsupported_arch | selfqual_failed | … */
     std::string deficit_reason;
 };
 
 [[nodiscard]] bool IsRcOzakiExactPanelsQualified();
 [[nodiscard]] bool IsRcOzakiMxfp4Qualified();
+/** Packaging probe: wraps matmul_v4::cuda::RcOzakiMxfp4Sm120aKernelLinked(). */
+[[nodiscard]] bool IsRcOzakiMxfp4Sm120aKernelLinked();
 
 [[nodiscard]] RCOzakiMxfp4Status ProbeRcOzakiMxfp4Status();
 

@@ -79,6 +79,29 @@ if(BTX_LT_CUTLASS_MXFP4 OR BTX_BMX4C_CUTLASS_MXFP4)
 endif()
 option(BTX_ENABLE_CUDA_EXPERIMENTAL "Enable experimental CUDA backend scaffolding for BTX miner integration" OFF)
 set(BTX_CUDA_ARCHITECTURES "" CACHE STRING "Semicolon-separated CUDA SM architectures for the experimental MatMul backend (for example 120)")
+# Feature-qualified sm_120a native MXFP4 (block_scale mxf8f6f4 / QMMA.SF).
+# Default OFF so plain packaging (-DBTX_CUDA_ARCHITECTURES=120 / Guix
+# 120-real;120-virtual) builds with the native MMA body compiled OUT.
+#
+# Two recipes (do NOT put 120a in BTX_CUDA_ARCHITECTURES — CMake 3.28 may
+# reject it; use the isolated object TU instead):
+#   1) Plain / Guix packaging (native MMA OUT):
+#        -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=120
+#   2) Rack feature-qualified SM120_MMA (native MMA IN via sm_120a gencode):
+#        -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=120
+#        -DBTX_CUDA_SM120_MXFP4_NATIVE=ON
+#      → compiles cuda/matmul_v4_rc_mx_ozaki_native_sm120a.cu with
+#        -gencode=arch=compute_120a,code=sm_120a (see cmake/BTXCudaSm120a.cmake).
+option(BTX_CUDA_SM120_MXFP4_NATIVE
+  "Compile dedicated sm_120a object TU for native block-scaled MXFP4 MMA (requires toolkit that accepts compute_120a)"
+  OFF)
+# Optional SM100 / B200 native packaging probe (Agent E+I). Default OFF.
+# The configure probe is intentionally fail-closed without B200 evidence —
+# enabling this option FATAL_ERRORs until a real sm_100 MX probe lands.
+# Independent of BTX_CUDA_SM120_MXFP4_NATIVE (SM120 packaging preserved).
+option(BTX_CUDA_SM100_NATIVE
+  "OPTIONAL fail-closed SM100/B200 native probe (stays OFF without B200 evidence)"
+  OFF)
 # Cloud TPU is served through a separately built, version-pinned PJRT/libtpu
 # bridge that registers the narrow provider ABI in src/tpu. The core never
 # links OpenXLA directly. OFF keeps registration and all launches fail-closed.
@@ -92,6 +115,13 @@ set(BTX_CUDA_RUNTIME_LIBRARY_ALLOWED_VALUES Shared Static)
 set(BTX_CUDA_RUNTIME_LIBRARY "${BTX_CUDA_RUNTIME_LIBRARY_DEFAULT}" CACHE STRING "CUDA runtime library linkage for the experimental CUDA backend: Shared or Static")
 set_property(CACHE BTX_CUDA_RUNTIME_LIBRARY PROPERTY STRINGS Shared Static)
 
+if(BTX_CUDA_SM120_MXFP4_NATIVE AND NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
+  message(FATAL_ERROR "BTX_CUDA_SM120_MXFP4_NATIVE=ON requires BTX_ENABLE_CUDA_EXPERIMENTAL=ON")
+endif()
+if(BTX_CUDA_SM100_NATIVE AND NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
+  message(FATAL_ERROR "BTX_CUDA_SM100_NATIVE=ON requires BTX_ENABLE_CUDA_EXPERIMENTAL=ON")
+endif()
+
 if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   if(BTX_CUDA_ARCHITECTURES STREQUAL "" AND DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "")
     set(BTX_CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}" CACHE STRING "Semicolon-separated CUDA SM architectures for the experimental MatMul backend (for example 120)" FORCE)
@@ -99,6 +129,8 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   if(BTX_CUDA_ARCHITECTURES STREQUAL "")
     message(FATAL_ERROR "BTX_ENABLE_CUDA_EXPERIMENTAL=ON requires BTX_CUDA_ARCHITECTURES to be set explicitly.")
   endif()
+  include(${PROJECT_SOURCE_DIR}/cmake/BTXCudaSm120a.cmake)
+  btx_cuda_reject_feature_qualified_archs(BTX_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES "${BTX_CUDA_ARCHITECTURES}" CACHE STRING "CUDA architectures for compiler detection and BTX CUDA targets" FORCE)
   if(NOT BTX_CUDA_RUNTIME_LIBRARY IN_LIST BTX_CUDA_RUNTIME_LIBRARY_ALLOWED_VALUES)
     message(FATAL_ERROR "BTX_CUDA_RUNTIME_LIBRARY must be Shared or Static")
@@ -115,6 +147,34 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   find_package(CUDAToolkit REQUIRED)
   if(BTX_CUDA_RUNTIME_LIBRARY STREQUAL "Static" AND NOT TARGET CUDA::cudart_static)
     message(FATAL_ERROR "BTX_CUDA_RUNTIME_LIBRARY=Static requires CUDA::cudart_static from the selected CUDA toolkit.")
+  endif()
+  if(BTX_CUDA_SM120_MXFP4_NATIVE)
+    btx_cuda_probe_sm120a_mxfp4(BTX_CUDA_SM120A_MXFP4_PROBE_OK)
+    if(NOT BTX_CUDA_SM120A_MXFP4_PROBE_OK)
+      unset(BTX_CUDA_SM120_MXFP4_NATIVE CACHE)
+      message(FATAL_ERROR
+        "BTX_CUDA_SM120_MXFP4_NATIVE=ON but the configure-time sm_120a probe failed.\n"
+        "Need an NVCC that accepts ${BTX_CUDA_SM120A_GENCODE_FLAG} and can assemble "
+        "mma.sync kind::mxf8f6f4.block_scale (architecture-accelerated MXFP4).\n"
+        "Plain packaging still works with BTX_CUDA_SM120_MXFP4_NATIVE=OFF and "
+        "BTX_CUDA_ARCHITECTURES=120 (or Guix 120-real;120-virtual).\n"
+        "Probe log:\n${BTX_CUDA_SM120A_PROBE_LOG}")
+    endif()
+    message(STATUS "BTX sm_120a MXFP4 probe OK (${BTX_CUDA_SM120A_GENCODE_FLAG})")
+  endif()
+  # SM100 / B200: fail-closed probe stub (never enables without B200 evidence).
+  # Independent of SM120 packaging above.
+  if(BTX_CUDA_SM100_NATIVE)
+    btx_cuda_probe_sm100_native(BTX_CUDA_SM100_NATIVE_PROBE_OK)
+    if(NOT BTX_CUDA_SM100_NATIVE_PROBE_OK)
+      unset(BTX_CUDA_SM100_NATIVE CACHE)
+      message(FATAL_ERROR
+        "BTX_CUDA_SM100_NATIVE=ON but the configure-time SM100/B200 probe is "
+        "fail-closed (no B200 evidence in this tree).\n"
+        "Leave BTX_CUDA_SM100_NATIVE=OFF. SM100 runtime stays on the separate "
+        "SM100_CUBLASLT latch; SM120_MMA packaging is BTX_CUDA_SM120_MXFP4_NATIVE.\n"
+        "Probe log:\n${BTX_CUDA_SM100_PROBE_LOG}")
+    endif()
   endif()
 endif()
 
@@ -448,6 +508,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc.cpp
   matmul/matmul_v4_rc_accel_policy.cpp
   matmul/matmul_v4_rc_coupled.cpp
+  matmul/matmul_v4_rc_packed_bank.cpp
   matmul/matmul_v4_rc_coupled_device.cpp
   matmul/matmul_v4_rc_batch.cpp
   matmul/matmul_v4_rc_datacenter.cpp
@@ -772,9 +833,11 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     cuda/matmul_v4_lt_tensor_gemm.cu
     # ENC_RC Amendment 1.B — Ozaki MXFP4 (SM120_MMA / SM100_CUBLASLT) + ExactPanels.
     # Replaces cuda/matmul_v4_rc_mx_ozaki_native_link.cpp (not added when CUDA ON).
-    # sm_120/sm_120a: hand QMMA.SF PTX compiles IN only for __CUDA_ARCH__ 12xx;
-    # other fatbin targets compile OUT (no assembler failure). Prefer
-    # BTX_CUDA_ARCHITECTURES containing 120a on CUDA 13.2 racks (Workstream G).
+    # Plain BTX_CUDA_ARCHITECTURES=120 / Guix 120-real;120-virtual: this TU must
+    # compile with native block_scale MMA compiled OUT (Agent A). Feature-
+    # qualified SM120_MMA lives in a SEPARATE object target when
+    # BTX_CUDA_SM120_MXFP4_NATIVE=ON (see cmake/BTXCudaSm120a.cmake) —
+    # never put 120a into CMAKE_CUDA_ARCHITECTURES.
     cuda/matmul_v4_rc_mx_ozaki_native.cu
     # ENC_RC datacenter episode arena (cudaMallocAsync + Graphs scaffold).
     # Replaces cuda/matmul_v4_rc_episode_context_link.cpp when CUDA ON.
@@ -839,6 +902,19 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON
   )
+  if(BTX_CUDA_SM120_MXFP4_NATIVE)
+    # Dedicated OBJECT lib: CUDA_ARCHITECTURES cleared; explicit
+    # -gencode=arch=compute_120a,code=sm_120a on Agent A marker TU
+    # cuda/matmul_v4_rc_mx_ozaki_native_sm120a.cu (RcOzakiMxfp4Sm120aKernelLinked=true).
+    btx_cuda_add_sm120a_mxfp4_native_object(btx_matmul_backend)
+    # The block-scaled MMA body lives in matmul_v4_rc_mx_ozaki_native.cu under
+    # __CUDA_ARCH_SPECIFIC__==1200. Plain BTX_CUDA_ARCHITECTURES=120 never
+    # defines SPECIFIC, so also attach an sm_120a fatbin slice to that TU only
+    # (do not put 120a into CMAKE_CUDA_ARCHITECTURES for the whole target).
+    set_property(SOURCE cuda/matmul_v4_rc_mx_ozaki_native.cu APPEND PROPERTY
+      COMPILE_OPTIONS ${BTX_CUDA_SM120A_GENCODE_COMPILE_OPTION}
+    )
+  endif()
 else()
   target_sources(btx_matmul_backend PRIVATE
     cuda/matmul_accel_stub.cpp

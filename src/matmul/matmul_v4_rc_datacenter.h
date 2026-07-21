@@ -22,10 +22,13 @@
 
 namespace matmul::v4::rc::dc {
 
-/** Full-bank page schedule (12 pages / barrier×lobe). Digest-breaking vs legacy
- *  single-page. ON — required for ~12× bank traffic vs consumer Streamed. */
+/** Full-bank page schedule (V2: 12 pages / barrier×lobe). Digest-breaking vs
+ *  legacy single-page. ON — bank traffic vs consumer Streamed. V3 uses 24 via
+ *  RCCoupParams::pages_per_barrier_lobe (see MakeProductionV3RCCoupParams). */
 inline constexpr bool kRCCoupFullBankScheduleEnabled = true;
 inline constexpr uint32_t kRCCoupPagesPerBarrierLobe = 12;
+/** V3 hypothesis: 24 pages/slot → 8×8×24 = 1536 page coverage. */
+inline constexpr uint32_t kRCCoupPagesPerBarrierLobeV3 = 24;
 
 /** NVLink-shaped multi-row exchange domain in the all-to-all mix. ON — fabric
  *  pressure; digests absorb exchange_rows when Active(). */
@@ -41,13 +44,21 @@ inline constexpr uint32_t kRCMinerBatchQDefault = 32;
 inline constexpr uint32_t kRCMinerBatchQMax = 256;
 inline constexpr double kRCMxPackedBytesPerElem = 0.53125;
 
-/** Packed-MX resident bank targets (GiB). Floor 48 matches MakeProduction
- *  768×8192²; 64 clears 5090 32 GiB; 80/96 are B200-class ladders. */
+/**
+ * Packed-MX resident bank *targets* (GiB) for sweeps — NOT the V2 768-page size.
+ * V2 768×8192² int8 = 48 GiB expanded, but packed (×17/32) ≈ 25.5 GiB.
+ * V3 1536 pages packed ≈ 51 GiB (preferred hypothesis). Ladder remains for
+ * measurement campaigns near 48/64/80/96 packed GiB.
+ */
 inline constexpr double kRCPackedBankTargetGiB[] = {48.0, 64.0, 80.0, 96.0};
 inline constexpr size_t kRCPackedBankTargetGiBCount = 4;
 
-/** Primary packed-bank floor used by Probe / docs (GiB). */
-inline constexpr double kRCPackedBankPrimaryGiB = 48.0;
+/** Primary *packed* floor for V3 hypothesis docs / Probe labelling (GiB). */
+inline constexpr double kRCPackedBankPrimaryGiB = 51.0;
+/** Exact V2 768-page packed size (GiB): 768 × 8192² × 17/32 / 2^30 = 25.5. */
+inline constexpr double kRCPackedBankV2GiB = 25.5;
+/** Exact V2 768-page expanded int8 size (GiB). */
+inline constexpr double kRCExpandedBankV2GiB = 48.0;
 
 [[nodiscard]] bool RCCoupFullBankScheduleActive();
 [[nodiscard]] bool RCCoupMaterialExchangeActive();
@@ -63,6 +74,8 @@ struct RCDcStatus {
     bool gkr_arbiter{false};
     bool cuda_episode_compiled{false};
     bool cuda_episode_ready{false};
+    /** Derived via DeriveRCPeakReady — never set from compiled alone. */
+    bool peak_ready{false};
     std::string arch_key;
     std::string deficit;
 };

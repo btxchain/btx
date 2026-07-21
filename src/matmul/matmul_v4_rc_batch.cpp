@@ -12,6 +12,7 @@
 #include <matmul/matmul_v4_rc_extract.h>
 #include <span.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <vector>
@@ -68,6 +69,12 @@ public:
         m_pos += 4;
         return v;
     }
+    uint64_t NextU64()
+    {
+        const uint64_t lo = NextU32();
+        const uint64_t hi = NextU32();
+        return lo | (hi << 32);
+    }
 
 private:
     void Refill()
@@ -119,7 +126,7 @@ uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages, uint32_t b
     return uint256{Span<const unsigned char>{d2, sizeof(d2)}};
 }
 
-void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
+void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n, bool u64_wrap)
 {
     for (uint32_t stage = 0; (uint32_t{1} << stage) < n; ++stage) {
         const uint32_t stride = uint32_t{1} << stage;
@@ -128,15 +135,22 @@ void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
             if (i >= j) continue;
             const uint32_t pi = i ^ mask;
             const uint32_t pj = j ^ mask;
-            const int64_t a = s[pi];
-            const int64_t b = s[pj];
-            s[pi] = a + b;
-            s[pj] = a - b;
+            if (u64_wrap) {
+                const uint64_t a = static_cast<uint64_t>(s[pi]);
+                const uint64_t b = static_cast<uint64_t>(s[pj]);
+                s[pi] = static_cast<int64_t>(a + b);
+                s[pj] = static_cast<int64_t>(a - b);
+            } else {
+                const int64_t a = s[pi];
+                const int64_t b = s[pj];
+                s[pi] = a + b;
+                s[pj] = a - b;
+            }
         }
     }
 }
 
-void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
+void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n, bool u64_wrap)
 {
     assert(n >= 2 && (n & (n - 1)) == 0);
     uint32_t bits = 0;
@@ -152,17 +166,25 @@ void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
             if (i >= j) continue;
             const uint32_t pi = rotl(i ^ mask, 3);
             const uint32_t pj = rotl(j ^ mask, 3);
-            const int64_t a = s[pi];
-            const int64_t b = s[pj];
-            s[pi] = a + b;
-            s[pj] = b - a;
+            if (u64_wrap) {
+                const uint64_t a = static_cast<uint64_t>(s[pi]);
+                const uint64_t b = static_cast<uint64_t>(s[pj]);
+                s[pi] = static_cast<int64_t>(a + b);
+                s[pj] = static_cast<int64_t>(b - a);
+            } else {
+                const int64_t a = s[pi];
+                const int64_t b = s[pj];
+                s[pi] = a + b;
+                s[pj] = b - a;
+            }
         }
     }
 }
 
 void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t barrier,
                       uint32_t n, bool material_exchange = false,
-                      uint32_t exchange_rows = dc::kRCCoupExchangeRowsDefault)
+                      uint32_t exchange_rows = dc::kRCCoupExchangeRowsDefault,
+                      bool u64_wrap = false)
 {
     uint256 mix_seed;
     if (material_exchange) {
@@ -177,9 +199,75 @@ void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t ba
     const uint32_t mask = xof.NextU32() & (n - 1);
     const uint32_t pattern = barrier % kRCCoupMixPatterns;
     if (pattern == 0) {
-        MixButterflyAscending(s, mask, n);
+        MixButterflyAscending(s, mask, n, u64_wrap);
     } else {
-        MixButterflyDescending(s, mask, n);
+        MixButterflyDescending(s, mask, n, u64_wrap);
+    }
+}
+
+uint64_t AccXorFold(const std::vector<int64_t>& s)
+{
+    uint64_t fold = 0;
+    for (int64_t v : s) fold ^= static_cast<uint64_t>(v);
+    return fold;
+}
+
+uint256 ExchangeRoundSeed(const uint256& sigma, uint32_t barrier, uint32_t round, uint64_t fold)
+{
+    unsigned char buf[32 + 4 + 4 + 8];
+    std::memcpy(buf, sigma.data(), 32);
+    WriteLE32(buf + 32, barrier);
+    WriteLE32(buf + 36, round);
+    WriteLE64(buf + 40, fold);
+    std::vector<unsigned char> pre;
+    pre.reserve((sizeof(kRCCoupMaterialExchangeRoundsTag) - 1) + sizeof(buf));
+    pre.insert(pre.end(),
+               reinterpret_cast<const unsigned char*>(kRCCoupMaterialExchangeRoundsTag),
+               reinterpret_cast<const unsigned char*>(kRCCoupMaterialExchangeRoundsTag) +
+                   sizeof(kRCCoupMaterialExchangeRoundsTag) - 1);
+    pre.insert(pre.end(), buf, buf + sizeof(buf));
+    return Sha256dBytes(pre.data(), pre.size());
+}
+
+void ApplyXorKeystream(std::vector<int64_t>& s, ShaXof& xof)
+{
+    for (int64_t& lane : s) {
+        const uint64_t k = xof.NextU64();
+        lane = static_cast<int64_t>(static_cast<uint64_t>(lane) ^ k);
+    }
+}
+
+void ApplyBalancedPermutationFromSeed(std::vector<int64_t>& s, const uint256& seed)
+{
+    const uint32_t n = static_cast<uint32_t>(s.size());
+    if (n == 0) return;
+    ShaXof xof(seed);
+    std::vector<uint32_t> pi(n);
+    for (uint32_t i = 0; i < n; ++i) pi[i] = i;
+    for (uint32_t i = n - 1; i > 0; --i) {
+        const uint32_t j = xof.NextU32() % (i + 1);
+        const uint32_t tmp = pi[i];
+        pi[i] = pi[j];
+        pi[j] = tmp;
+    }
+    std::vector<int64_t> tmp(n);
+    for (uint32_t i = 0; i < n; ++i) tmp[pi[i]] = s[i];
+    s = std::move(tmp);
+}
+
+void ApplyMaterialExchangeRounds(std::vector<int64_t>& s, const uint256& sigma, uint32_t barrier,
+                                 const RCCoupOptions& options)
+{
+    if (!options.material_exchange || options.exchange_rounds == 0) return;
+    if (s.empty()) return;
+    for (uint32_t r = 0; r < options.exchange_rounds; ++r) {
+        const uint64_t fold = AccXorFold(s);
+        const uint256 seed = ExchangeRoundSeed(sigma, barrier, r, fold);
+        {
+            ShaXof xof(seed);
+            ApplyXorKeystream(s, xof);
+        }
+        ApplyBalancedPermutationFromSeed(s, seed);
     }
 }
 
@@ -237,20 +325,18 @@ bool HeadersShareBankTemplate(const std::vector<CBlockHeader>& headers)
     return true;
 }
 
-} // namespace
-
-bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t height,
-                           const RCCoupParams& params, std::vector<uint256>& digests_out,
-                           const RCMinerBatchConfig& cfg, const lt::ExactGemmBackend& gemm,
-                           const RCCoupOptions& options)
+/**
+ * Core Q-batch: independent per-nonce state (sigma, lobes, barrier roots).
+ * q_limit is the accepted headers.size() ceiling (miner max or harness max).
+ */
+bool MineRCCoupledBatchIndependent(const std::vector<CBlockHeader>& headers, int32_t height,
+                                   const RCCoupParams& params, std::vector<uint256>& digests_out,
+                                   uint32_t q_limit, bool use_resident_bank,
+                                   const lt::ExactGemmBackend& gemm, const RCCoupOptions& options)
 {
     digests_out.clear();
     if (headers.empty() || !ValidateRCCoupParams(params)) return false;
-    if (cfg.Q == 0 || cfg.Q > dc::kRCMinerBatchQMax) return false;
-    if (headers.size() > cfg.Q && cfg.Q < headers.size()) {
-        // Allow Q as a hint; actual batch size is headers.size() capped by max.
-    }
-    if (headers.size() > dc::kRCMinerBatchQMax) return false;
+    if (q_limit == 0 || headers.size() > q_limit) return false;
     if (!HeadersShareBankTemplate(headers)) return false;
 
     // Full-bank / material-exchange follow RCCoupOptions defaults (dc levers ON).
@@ -260,26 +346,35 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
     const uint32_t Q = static_cast<uint32_t>(headers.size());
     const uint32_t n = params.StateBytes();
     const uint32_t W = params.lobe_width;
+    const uint32_t M = params.rows_per_lobe == 0 ? 1 : params.rows_per_lobe;
+    const uint32_t lobe_stride = M * W;
+    if (n != params.lobes * lobe_stride) return false;
 
     // Bank is template-scoped — derive once from the canonical projection.
     const auto pages =
         DeriveCoupledBankPages(ProjectRCBankTemplateHeader(headers[0]), height, params);
     const uint256 bank_root = BankCommitment(pages, params.bank_pages, params.lobe_width);
-    (void)cfg.use_resident_bank; // CPU reference always retains pages for the batch.
+    (void)use_resident_bank; // CPU reference always retains pages for the batch.
 
+    // Independent per-nonce state — never reuse / overwrite a shared slot 0.
+    // Lobe fill matches RecomputeCoupledPuzzleReference: first M rows of W×W MX tile.
     std::vector<uint256> sigmas(Q);
     std::vector<std::vector<int8_t>> states(Q, std::vector<int8_t>(n));
     for (uint32_t q = 0; q < Q; ++q) {
         sigmas[q] = matmul::v4::DeriveSigma(headers[q]);
         const auto lobe_seeds = DeriveCoupledLobeSeeds(sigmas[q], params);
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
-            const auto tile =
-                ExpandMxDequantInt8(lobe_seeds[ell], params.lobe_width, params.lobe_width);
-            std::memcpy(states[q].data() + ell * W, tile.data(), W);
+            const auto tile = ExpandMxDequantInt8(lobe_seeds[ell], W, W);
+            if (tile.size() != static_cast<size_t>(W) * W || lobe_stride > tile.size()) {
+                return false;
+            }
+            std::memcpy(states[q].data() + static_cast<size_t>(ell) * lobe_stride, tile.data(),
+                        lobe_stride);
         }
     }
 
     std::vector<std::vector<uint256>> barrier_roots(Q, std::vector<uint256>(params.barriers));
+    const bool mix_u64 = RCCoupUseMixU64Wrap(params, opts.force_signed_mix);
 
     for (uint32_t b = 0; b < params.barriers; ++b) {
         if (opts.skip_barrier && opts.skip_barrier_index == b) {
@@ -289,46 +384,48 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
             continue;
         }
 
-        // Per lobe: stack Q rows → ExactGemm Q×W · W×W → split.
         std::vector<std::vector<int64_t>> accs(Q, std::vector<int64_t>(n, 0));
-        // Digest-affecting schedule from opts (defaults = dc levers).
         const bool full_sched = opts.full_bank_schedule;
 
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
-            // Page schedule is sigma-dependent under full_bank_schedule; when
-            // that flag is OFF (default), all headers share the same page_id.
-            // Under full schedule, fall back to per-header GEMMs (still correct).
+            // Full schedule: per-header page lists (sigma-dependent) + M-row GEMMs.
             if (full_sched) {
                 for (uint32_t q = 0; q < Q; ++q) {
                     const auto page_ids =
                         SelectCoupledBankPageIds(b, ell, params, sigmas[q], true);
-                    int64_t* dest = accs[q].data() + ell * W;
+                    if (page_ids.empty()) return false;
+                    int64_t* dest = accs[q].data() + static_cast<size_t>(ell) * lobe_stride;
                     for (uint32_t page_id : page_ids) {
-                        std::vector<int64_t> partial(W, 0);
-                        std::vector<int8_t> L(states[q].data() + ell * W,
-                                              states[q].data() + ell * W + W);
+                        std::vector<int8_t> L(
+                            states[q].data() + static_cast<size_t>(ell) * lobe_stride,
+                            states[q].data() + static_cast<size_t>(ell) * lobe_stride +
+                                lobe_stride);
                         const auto y =
-                            ExactGemmS8S8Dispatched(gemm, L, pages[page_id], 1, W, W);
-                        for (uint32_t c = 0; c < W; ++c) {
-                            dest[c] += static_cast<int64_t>(y[c]);
+                            ExactGemmS8S8Dispatched(gemm, L, pages[page_id], M, W, W);
+                        if (y.size() != lobe_stride) return false;
+                        for (uint32_t i = 0; i < lobe_stride; ++i) {
+                            dest[i] += static_cast<int64_t>(y[i]);
                         }
                     }
                 }
                 continue;
             }
 
+            // Stacked / non-full: shared page_id; ExactGemm (Q*M)×W · W×W.
             const uint32_t page_id =
                 SelectCoupledBankPageIds(b, ell, params, sigmas[0], false).front();
-            std::vector<int8_t> Lstacked(static_cast<size_t>(Q) * W);
+            std::vector<int8_t> Lstacked(static_cast<size_t>(Q) * lobe_stride);
             for (uint32_t q = 0; q < Q; ++q) {
-                std::memcpy(Lstacked.data() + q * W, states[q].data() + ell * W, W);
+                std::memcpy(Lstacked.data() + static_cast<size_t>(q) * lobe_stride,
+                            states[q].data() + static_cast<size_t>(ell) * lobe_stride,
+                            lobe_stride);
             }
-            const auto Y =
-                ExactGemmS8S8Dispatched(gemm, Lstacked, pages[page_id], Q, W, W);
-            assert(Y.size() == static_cast<size_t>(Q) * W);
+            const auto Y = ExactGemmS8S8Dispatched(gemm, Lstacked, pages[page_id], Q * M, W, W);
+            if (Y.size() != static_cast<size_t>(Q) * lobe_stride) return false;
             for (uint32_t q = 0; q < Q; ++q) {
-                for (uint32_t c = 0; c < W; ++c) {
-                    accs[q][ell * W + c] = static_cast<int64_t>(Y[q * W + c]);
+                for (uint32_t i = 0; i < lobe_stride; ++i) {
+                    accs[q][static_cast<size_t>(ell) * lobe_stride + i] =
+                        static_cast<int64_t>(Y[static_cast<size_t>(q) * lobe_stride + i]);
                 }
             }
         }
@@ -338,7 +435,9 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
             const auto pi = DeriveCoupledBalancedPermutation(sigmas[q], b, params);
             assert(IsBalancedPermutation(pi, n));
             ApplyBalancedPermutation(acc, pi);
-            ApplyAllToAllMix(acc, sigmas[q], b, n, opts.material_exchange, opts.exchange_rows);
+            ApplyAllToAllMix(acc, sigmas[q], b, n, opts.material_exchange, opts.exchange_rows,
+                             mix_u64);
+            ApplyMaterialExchangeRounds(acc, sigmas[q], b, opts);
             const uint256 extract_seed = Sha256TaggedU32U32(
                 kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigmas[q], b, 0);
             ExtractActiveState(lt::DeriveMatExpandPrfKey(extract_seed), acc, states[q]);
@@ -360,6 +459,31 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
         digests_out[q] = Sha256dBytes(buf.data(), buf.size());
     }
     return true;
+}
+
+} // namespace
+
+bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t height,
+                           const RCCoupParams& params, std::vector<uint256>& digests_out,
+                           const RCMinerBatchConfig& cfg, const lt::ExactGemmBackend& gemm,
+                           const RCCoupOptions& options)
+{
+    if (cfg.Q == 0 || cfg.Q > dc::kRCMinerBatchQMax) return false;
+    return MineRCCoupledBatchIndependent(headers, height, params, digests_out,
+                                         dc::kRCMinerBatchQMax, cfg.use_resident_bank, gemm,
+                                         options);
+}
+
+bool RunCoupledQSweep(const std::vector<CBlockHeader>& headers, int32_t height,
+                      const RCCoupParams& params, std::vector<uint256>& digests_out,
+                      uint32_t q_cap, const lt::ExactGemmBackend& gemm,
+                      const RCCoupOptions& options)
+{
+    const uint32_t limit =
+        q_cap == 0 ? kRCCoupledQSweepHarnessMax
+                   : std::min(q_cap, kRCCoupledQSweepHarnessMax);
+    return MineRCCoupledBatchIndependent(headers, height, params, digests_out, limit,
+                                         /*use_resident_bank=*/true, gemm, options);
 }
 
 } // namespace matmul::v4::rc

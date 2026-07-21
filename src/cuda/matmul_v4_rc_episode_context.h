@@ -15,17 +15,21 @@
 
 // ENC_RC / ENC_RC_COUPLED miner-local CUDA episode context.
 //
-// Persistent arena: bank pages + active state + int64 accumulators.
-// Barrier lobe GEMMs: capture once, replay from resident device pointers
-// (no per-GEMM H2D/D2H/sync, no global bridge mutex).
+// Persistent arena: bank pages + active state + int64 accumulators +
+// BindEpisode-precomputed per-barrier pi / mix mask / Extract prf_key /
+// page_ids schedule.
 //
-// PARKED (honest, fail-closed — do NOT claim device-only / peak_ready):
-//   - device-native balanced permute / all-to-all / Extract / barrier-root SHA
-//   - native MXFP4 lobe GEMMs via Workstream-B device-pointer API (hook below)
-//   - device-assembled episode digest
-// Host barrier tail (ApplyCoupledBarrierTail) runs once per barrier after a
-// single D2H of the int64 accumulator; Extract fires once after reduction.
+// Timed path (device barrier tail):
+//   LoadBank once → BindEpisode (host seed pack + one H2D of barrier tables) →
+//   barrier loop: page_ids already resident → cudaGraphLaunch →
+//   device permute + mix + ExtractMX + BarrierRoot SHA →
+//   NO cudaStreamSynchronize until episode end →
+//   one D2H of barrier_roots → AssembleCoupledEpisodeDigest on host.
 //
+// Still PARKED / fail-closed (do NOT claim peak_ready):
+//   - native MXFP4 lobe GEMMs via Workstream-B device-pointer API
+//   - full DeriveRCPeakReady production prerequisites (honest deficit)
+// Host ApplyCoupledBarrierTail remains the fallback if device tail fails.
 // Digests MUST remain byte-identical to RecomputeCoupledPuzzleReference when
 // GEMM partials match ExactGemmS8S8. Never raises nMatMulRCHeight /
 // nMatMulRCCoupledHeight and never enables the GKR arbiter.
@@ -44,12 +48,13 @@ struct RCCudaEpisodeShape {
     uint32_t lobe_width{0};
     uint32_t bank_pages{0};
     uint32_t batch_q{1};
+    /** Pages accumulated per barrier×lobe under full schedule (V2=12). */
+    uint32_t pages_per_barrier_lobe{12};
 };
 
 /**
  * Provenance for the resident episode path. Defaults are fail-closed.
- * peak_ready stays false until device Extract + qualified native MXFP4 are
- * wired end-to-end (not claimed by this workstream alone).
+ * peak_ready is ONLY set via DeriveRCPeakReady (never forced true).
  */
 struct RCCudaEpisodeProvenance {
     bool qstar_device_batched{false};
@@ -69,11 +74,14 @@ struct RCCudaEpisodeProvenance {
     uint64_t digest_batch_slots{0};
     /** Honest GEMM label: portable_device_alu | parked_awaiting_wsB_mxfp4_device_ptr */
     std::string gemm_path_label{"uninitialized"};
-    /** Honest barrier-tail label. */
-    std::string permute_extract_label{"parked_host_barrier_tail"};
+    /** Honest barrier-tail label: device_barrier_tail | parked_host_barrier_tail. */
+    std::string permute_extract_label{"uninitialized"};
+    /** True only when episode digest is assembled on device (currently false). */
     bool device_digest{false};
     bool peak_ready{false};
     std::string parked_reason;
+    /** True when RunNonceWindow used independent per-Q arena slots (no slot-0 serialize). */
+    bool independent_q_slots{false};
 };
 
 /**
@@ -99,7 +107,7 @@ public:
 
     /**
      * Allocate (or resize) the persistent arena for `shape`.
-     * CUDA ON: cudaMalloc for bank / Q states / accumulators.
+     * CUDA ON: cudaMalloc for bank / Q states / accumulators / barrier tables.
      * Stub: records shape; device pointers stay null.
      */
     [[nodiscard]] bool Init(const RCCudaEpisodeShape& shape, std::string* error = nullptr);
@@ -117,8 +125,9 @@ public:
 
     /**
      * Bind the episode header/height used by RunBarrierGraph for lobe seeds,
-     * bank commitment, and digest assembly. Also seeds active lobe state from
-     * DeriveCoupledLobeSeeds (same as RecomputeCoupledPuzzleReference).
+     * bank commitment, and digest assembly. Seeds active lobe state and
+     * precomputes per-barrier pi / mix mask / Extract prf_key / page_ids
+     * (host) then H2D once — no per-barrier seed H2D in the timed loop.
      */
     [[nodiscard]] bool BindEpisode(const CBlockHeader& header, int32_t height,
                                    std::string* error = nullptr);
@@ -139,8 +148,10 @@ public:
                                            std::string* error = nullptr) const;
 
     /**
-     * Capture (once) + replay the resident barrier GEMM DAG; host barrier tail
-     * for PARKED permute/mix/Extract; assemble digest on host.
+     * Capture (once) + replay the resident barrier GEMM DAG; device barrier
+     * tail (permute/mix/Extract/BarrierRoot); AssembleCoupledEpisodeDigest on
+     * host after one D2H of barrier_roots. Falls back to ApplyCoupledBarrierTail
+     * if device tail launch fails.
      * Does NOT call MineCoupledPuzzle for every nonce (CPU full replay is
      * CompareWithCpuOracle / ResealAgainstCpuOracle only).
      */
@@ -189,6 +200,7 @@ private:
     bool m_have_digest{false};
     bool m_state_ready{false};
     bool m_graph_captured{false};
+    bool m_barrier_tables_ready{false};
     bool m_fault_corrupt_digest{false};
     void* m_arena{nullptr}; // device ptr when CUDA ON; always null on stub
     size_t m_arena_bytes{0};

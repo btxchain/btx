@@ -52,18 +52,36 @@ Reuse the exact-integer idea behind `ExactGemmS32S8ViaRadix256`
   must fail equality. Scalar-tail (K%32) is tracked separately and is **not**
   MMA evidence (`native_tensor_launches` must be > 0 for `SM120_MMA`).
 
-### Rack commands (Workstream G — sm_120a / CUDA 13.2)
+### Rack commands (Workstream G — plain sm_120 vs sm_120a feature-qualified)
+
+Two recipes (also documented in `contrib/matmul-v4/measure-hardware.sh`):
 
 ```bash
-# Build with architecture-specific consumer Blackwell target:
-cmake -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=120a ...
+# Recipe 1 — plain sm_120 packaging (native SM120_MMA OFF / fail-closed):
+cmake -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON \
+      -DBTX_CUDA_ARCHITECTURES=120 \
+      -DBTX_CUDA_SM120_MXFP4_NATIVE=OFF ...
 ninja test_btx
-./src/test/test_btx -t rc_ozaki_mxfp4_native_gate,rc_ozaki_mxfp4_selected_backend_honesty
+./src/test/test_btx -t matmul_v4_rc_sm120_native_capability_tests
 
-# After SM120_MMA qualifies, confirm SASS contains QMMA.SF E2M1:
+# Recipe 2 — sm_120a feature-qualified native MXFP4 MMA (dedicated object):
+cmake -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON \
+      -DBTX_CUDA_ARCHITECTURES=120 \
+      -DBTX_CUDA_SM120_MXFP4_NATIVE=ON ...
+# (Agent B: isolated -gencode=arch=compute_120a,code=sm_120a on
+#  matmul_v4_rc_mx_ozaki_native_sm120a.cu — do NOT put 120a in ARCHITECTURES)
+ninja test_btx
+./src/test/test_btx -t rc_ozaki_mxfp4_native_gate,rc_ozaki_mxfp4_selected_backend_honesty,matmul_v4_rc_sm120_native_capability_tests
+
+# After SM120_MMA qualifies on Recipe 2, confirm SASS contains QMMA.SF E2M1:
 cuobjdump -sass src/libbtx_matmul_backend.so | rg -n 'QMMA|mma\.|E2M1|mxf8f6f4'
 ncu --devices 0 --set full ./src/test/test_btx -t rc_ozaki_mxfp4_native_gate
 ```
+
+Do **not** write “sm_120 qualified” for block-scaled MMA — that latch is
+**sm_120a feature-qualified** (linked dedicated object + complete suite).
+Plain Recipe 1 fatbins must keep `SelectedBackend=Unqualified` for SM120_MMA.
+
 - Toy/medium episode digests already match in `ProbeRCSelfQual` before the
   native bit is consulted.
 - Until that gate passes: `ProbeRCSelfQual` keeps
@@ -76,7 +94,7 @@ ncu --devices 0 --set full ./src/test/test_btx -t rc_ozaki_mxfp4_native_gate
 | `src/matmul/matmul_v4_rc_mx_ozaki.h` (+ `.cpp`) | Exact panels vs MXFP4 APIs; CPU limb-split oracle |
 | `src/cuda/matmul_v4_rc_mx_ozaki_native.{h,cu}` | Device ExactPanels + MXFP4 block-scaled kernel |
 | `src/cuda/matmul_v4_rc_mx_ozaki_native_link.cpp` | Stub when `BTX_ENABLE_CUDA_EXPERIMENTAL=OFF` |
-| Tests | `rc_ozaki_exact_panels_qualify_and_match_oracle`, `rc_ozaki_mxfp4_native_gate` |
+| Tests | `rc_ozaki_exact_panels_qualify_and_match_oracle`, `rc_ozaki_mxfp4_native_gate`, `matmul_v4_rc_sm120_native_capability_tests` (plain sm_120 vs sm_120a honesty) |
 
 ## Explicit non-goals
 

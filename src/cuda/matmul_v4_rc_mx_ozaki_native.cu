@@ -330,11 +330,21 @@ __global__ void rc_ozaki_mxfp4_panel_gemm(const uint8_t* a_e2m1, const uint8_t* 
 }
 
 /**
- * SM120 / SM120a native MXFP4 TC: mma.sync kind::mxf8f6f4.block_scale m16n8k32
- * e2m1×e2m1. Inline PTX is compiled IN only when __CUDA_ARCH__ is in the
- * consumer Blackwell 12x family (1200–1299). On all other targets in a multi-arch
- * fatbin (sm_90 / sm_100 / …) the body compiles OUT to zeros — no assembler
- * failure. Runtime still requires SelectedBackend==SM120_MMA after full suite.
+ * SM120a native MXFP4 TC: mma.sync kind::mxf8f6f4.block_scale m16n8k32 e2m1×e2m1.
+ *
+ * Block-scaled MXF8F6F4 PTX requires feature-qualified sm_120a. Plain sm_120 and
+ * sm_120a both report __CUDA_ARCH__==1200, so a family range gate
+ * (__CUDA_ARCH__ >= 1200 && < 1300) is too broad and fails ptxas on sm_120.
+ * Do NOT use (__CUDA_ARCH__ >= 1000 && < 1100) — that can compile SM120 bodies
+ * into sm_100 slices. Do NOT use __CUDA_ARCH_FAMILY_SPECIFIC__ here until an
+ * sm_120f toolchain is verified locally.
+ *
+ * Compile IN only under:
+ *   defined(__CUDA_ARCH_SPECIFIC__) && (__CUDA_ARCH_SPECIFIC__ == 1200)
+ * i.e. the sm_120a device slice. Plain sm_120 (__CUDA_ARCH__==1200 without
+ * SPECIFIC) and all other fatbin targets (sm_90 / sm_100 / …) compile OUT to
+ * zeros — no assembler failure. SM100 stays on the separate CUBLASLT path.
+ * Runtime still requires SelectedBackend==SM120_MMA after full suite.
  * Rack G: expect SASS QMMA.SF E2M1 under CUDA 13.2 + sm_120a.
  */
 __device__ __forceinline__ void RcOzakiMmaMxfp4M16N8K32(float& d0, float& d1, float& d2, float& d3,
@@ -342,7 +352,7 @@ __device__ __forceinline__ void RcOzakiMmaMxfp4M16N8K32(float& d0, float& d1, fl
                                                          uint32_t a3, uint32_t b0, uint32_t b1,
                                                          uint32_t sfa, uint32_t sfb)
 {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1200) && (__CUDA_ARCH__ < 1300)
+#if defined(__CUDA_ARCH_SPECIFIC__) && (__CUDA_ARCH_SPECIFIC__ == 1200)
     uint16_t z = 0;
     asm volatile(
         "mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e2m1.e2m1.f32.ue8m0 "
@@ -1145,6 +1155,20 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
                                              std::vector<int64_t>& out, std::string* error)
 {
     out.clear();
+    // SM100 isolation: never dispatch SM120 MMA on Blackwell sm_100 / B200.
+    // SM100 uses SM100_CUBLASLT only; MMA body is also compile-gated to sm_120a.
+    {
+        int device = 0;
+        cudaDeviceProp prop{};
+        if (cudaGetDevice(&device) == cudaSuccess &&
+            cudaGetDeviceProperties(&prop, device) == cudaSuccess &&
+            DeviceLooksSm100(prop.major, prop.minor)) {
+            if (error) {
+                *error = "SM100 refuse SM120_MMA: use SM100_CUBLASLT (no MMA dispatch)";
+            }
+            return false;
+        }
+    }
     if (rows == 0 || inner == 0 || cols == 0) {
         if (error) *error = "Ozaki MXFP4 MMA degenerate shape";
         return false;
@@ -1428,6 +1452,21 @@ using Mxfp4PanelLauncher = bool (*)(const std::vector<int8_t>&, const std::vecto
 
 } // namespace
 
+// Weak default: plain sm_120 / multi-arch builds without the sm_120a marker TU
+// report false. Strong definition in matmul_v4_rc_mx_ozaki_native_sm120a.cu
+// overrides when Agent B links that TU (compiled for sm_120a).
+__attribute__((weak)) bool RcOzakiMxfp4Sm120aKernelLinked()
+{
+    return false;
+}
+
+// Weak default: BTX_CUDA_SM100_NATIVE probe is fail-closed without B200 —
+// no strong override TU exists in this tree, so this always returns false.
+__attribute__((weak)) bool RcOzakiMxfp4Sm100NativeLinked()
+{
+    return false;
+}
+
 bool IsRcOzakiCudaCompiled()
 {
     return true;
@@ -1468,12 +1507,24 @@ bool TryLaunchRcOzakiExactPanelsGemmS8S8Int64(const std::vector<int8_t>& left,
 bool IsRcOzakiCudaMxfp4Qualified()
 {
     std::lock_guard<std::mutex> lock(g_ozaki_mu);
-    return g_mx_selected != RcOzakiMxfp4SelectedBackend::Unqualified;
+    if (g_mx_selected == RcOzakiMxfp4SelectedBackend::Unqualified) {
+        return false;
+    }
+    // Belt-and-suspenders: never advertise SM120_MMA without the sm_120a object.
+    if (g_mx_selected == RcOzakiMxfp4SelectedBackend::SM120_MMA &&
+        !RcOzakiMxfp4Sm120aKernelLinked()) {
+        return false;
+    }
+    return true;
 }
 
 RcOzakiMxfp4SelectedBackend RcOzakiCudaMxfp4SelectedBackend()
 {
     std::lock_guard<std::mutex> lock(g_ozaki_mu);
+    if (g_mx_selected == RcOzakiMxfp4SelectedBackend::SM120_MMA &&
+        !RcOzakiMxfp4Sm120aKernelLinked()) {
+        return RcOzakiMxfp4SelectedBackend::Unqualified;
+    }
     return g_mx_selected;
 }
 
@@ -1486,12 +1537,24 @@ std::string RcOzakiCudaMxfp4ArchKey()
 std::string RcOzakiCudaMxfp4Backend()
 {
     std::lock_guard<std::mutex> lock(g_ozaki_mu);
+    if (g_mx_selected == RcOzakiMxfp4SelectedBackend::SM120_MMA &&
+        !RcOzakiMxfp4Sm120aKernelLinked()) {
+        // Honesty: never report SM120_MMA when the sm_120a object is absent.
+        if (g_mx_backend.find("scalar-decode") != std::string::npos) {
+            return g_mx_backend;
+        }
+        return SelectedBackendName(RcOzakiMxfp4SelectedBackend::Unqualified);
+    }
     return g_mx_backend;
 }
 
 std::string RcOzakiCudaMxfp4Deficit()
 {
     std::lock_guard<std::mutex> lock(g_ozaki_mu);
+    if (g_mx_selected == RcOzakiMxfp4SelectedBackend::SM120_MMA &&
+        !RcOzakiMxfp4Sm120aKernelLinked()) {
+        return "not_linked";
+    }
     return g_mx_deficit;
 }
 
@@ -1509,7 +1572,15 @@ bool SelfQualifyRcOzakiCudaMxfp4Once()
 {
     {
         std::lock_guard<std::mutex> lock(g_ozaki_mu);
-        if (g_mx_ran) return g_mx_selected != RcOzakiMxfp4SelectedBackend::Unqualified;
+        if (g_mx_ran) {
+            // Evaluate without re-entering IsRcOzakiCudaMxfp4Qualified (mutex).
+            if (g_mx_selected == RcOzakiMxfp4SelectedBackend::Unqualified) return false;
+            if (g_mx_selected == RcOzakiMxfp4SelectedBackend::SM120_MMA &&
+                !RcOzakiMxfp4Sm120aKernelLinked()) {
+                return false;
+            }
+            return true;
+        }
     }
 
     cudaDeviceProp prop{};
@@ -1517,16 +1588,20 @@ bool SelfQualifyRcOzakiCudaMxfp4Once()
     bool scalar_ok = false;
     RcOzakiMxfp4SelectedBackend selected = RcOzakiMxfp4SelectedBackend::Unqualified;
     std::string tc_err;
+    bool device_ok = false;
     {
         int device = 0;
         if (cudaGetDevice(&device) != cudaSuccess ||
             cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
-            err = "cudaGetDeviceProperties failed for MXFP4 self-qual";
+            err = "device_unavailable";
+        } else {
+            device_ok = true;
         }
     }
 
-    const bool is_sm120 = DeviceLooksSm120(prop.major, prop.minor);
-    const bool is_sm100 = DeviceLooksSm100(prop.major, prop.minor);
+    const bool is_sm120 = device_ok && DeviceLooksSm120(prop.major, prop.minor);
+    const bool is_sm100 = device_ok && DeviceLooksSm100(prop.major, prop.minor);
+    const bool sm120a_linked = RcOzakiMxfp4Sm120aKernelLinked();
 
     // Scalar-decode exactness probe — NEVER flips SelectedBackend.
     std::string scalar_err;
@@ -1537,67 +1612,92 @@ bool SelfQualifyRcOzakiCudaMxfp4Once()
 
     // Per-backend COMPLETE suite. Never combine MMA partial with cuBLASLt.
     // Never infer SM120 from SM100 or vice versa. Independent of scalar probe.
+    // SM120_MMA requires the dedicated sm_120a kernel object (Agent A/B).
     if (err.empty() && is_sm120) {
-        const uint64_t native_before = g_native_tensor_launches.load(std::memory_order_relaxed);
-        std::string mma_err;
-        if (Mxfp4CompleteSuiteForLauncher(&LaunchOzakiMxfp4PanelsMma, &mma_err)) {
-            const uint64_t native_after = g_native_tensor_launches.load(std::memory_order_relaxed);
-            // Scalar-tail alone is NOT evidence MMA executed.
-            if (native_after > native_before) {
-                selected = RcOzakiMxfp4SelectedBackend::SM120_MMA;
-                tc_err.clear();
-            } else {
-                tc_err = "SM120_MMA suite matched but native_tensor_launches==0 "
-                         "(scalar-tail only — not MMA)";
-            }
+        if (!sm120a_linked) {
+            // Plain sm_120 build / missing sm_120a object: fail-closed.
+            tc_err = "not_linked";
         } else {
-            tc_err = mma_err;
-            // Do NOT fall through to cuBLASLt and mislabel as SM120_MMA / cutlass.
+            const uint64_t native_before =
+                g_native_tensor_launches.load(std::memory_order_relaxed);
+            std::string mma_err;
+            if (Mxfp4CompleteSuiteForLauncher(&LaunchOzakiMxfp4PanelsMma, &mma_err)) {
+                const uint64_t native_after =
+                    g_native_tensor_launches.load(std::memory_order_relaxed);
+                // Scalar-tail alone is NOT evidence MMA executed.
+                if (native_after > native_before) {
+                    selected = RcOzakiMxfp4SelectedBackend::SM120_MMA;
+                    tc_err.clear();
+                } else {
+                    tc_err = "selfqual_failed:native_tensor_launches==0 "
+                             "(scalar-tail only — not MMA)";
+                }
+            } else {
+                tc_err = mma_err.empty() ? "selfqual_failed" : ("selfqual_failed:" + mma_err);
+                // Do NOT fall through to cuBLASLt and mislabel as SM120_MMA / cutlass.
+            }
         }
         if (selected == RcOzakiMxfp4SelectedBackend::Unqualified && err.empty()) {
             err = tc_err;
         }
     } else if (err.empty() && is_sm100) {
+        // SM100 / B200: CUBLASLT only. Never call LaunchOzakiMxfp4PanelsMma here
+        // (runtime refuse + compile-out). BTX_CUDA_SM100_NATIVE packaging probe
+        // stays fail-closed without B200 — does not gate this runtime latch.
+        (void)RcOzakiMxfp4Sm100NativeLinked(); // documented fail-closed probe
         std::string lt_err;
         if (Mxfp4CompleteSuiteForLauncher(&LaunchOzakiMxfp4PanelsCublasLt, &lt_err)) {
             selected = RcOzakiMxfp4SelectedBackend::SM100_CUBLASLT;
             tc_err.clear();
         } else {
-            tc_err = lt_err;
+            tc_err = lt_err.empty() ? "selfqual_failed" : ("selfqual_failed:" + lt_err);
         }
         if (selected == RcOzakiMxfp4SelectedBackend::Unqualified && err.empty()) {
             err = tc_err;
         }
     } else if (err.empty()) {
-        err = "rc_ozaki_mxfp4_arch_not_sm120_or_sm100";
+        err = "unsupported_arch";
     }
 
-    std::lock_guard<std::mutex> lock(g_ozaki_mu);
-    if (!g_mx_ran) {
-        g_mx_ran = true;
-        g_mx_arch_key = FormatCudaArchKey(prop.major, prop.minor);
-        g_mx_selected = selected;
-        if (selected != RcOzakiMxfp4SelectedBackend::Unqualified) {
-            g_mx_backend = SelectedBackendName(selected);
-            g_mx_deficit.clear();
-        } else if (scalar_ok) {
-            g_mx_backend = "mxfp4_blockscaled_device_scalar-decode";
-            g_mx_deficit = "rc_ozaki_mxfp4_scalar-decode_exact_but_not_native_tensor";
-            if (!tc_err.empty()) g_mx_deficit += "; tc_failed:" + tc_err;
-        } else {
-            g_mx_backend = SelectedBackendName(RcOzakiMxfp4SelectedBackend::Unqualified);
-            if (!err.empty()) {
-                g_mx_deficit = err;
-            } else if (!tc_err.empty()) {
-                g_mx_deficit = tc_err;
-            } else if (!scalar_err.empty()) {
-                g_mx_deficit = "scalar_and_tc_failed:" + scalar_err;
+    bool qualified = false;
+    {
+        std::lock_guard<std::mutex> lock(g_ozaki_mu);
+        if (!g_mx_ran) {
+            g_mx_ran = true;
+            g_mx_arch_key =
+                device_ok ? FormatCudaArchKey(prop.major, prop.minor) : std::string{};
+            // Final honesty clamp: SM120_MMA requires linked sm_120a object.
+            if (selected == RcOzakiMxfp4SelectedBackend::SM120_MMA && !sm120a_linked) {
+                selected = RcOzakiMxfp4SelectedBackend::Unqualified;
+                if (err.empty()) err = "not_linked";
+            }
+            g_mx_selected = selected;
+            if (selected != RcOzakiMxfp4SelectedBackend::Unqualified) {
+                g_mx_backend = SelectedBackendName(selected);
+                g_mx_deficit.clear();
+            } else if (scalar_ok) {
+                g_mx_backend = "mxfp4_blockscaled_device_scalar-decode";
+                g_mx_deficit = "scalar-decode_exact_but_not_native_tensor";
+                if (!tc_err.empty()) g_mx_deficit += "; tc_failed:" + tc_err;
+                else if (!err.empty()) g_mx_deficit += "; " + err;
             } else {
-                g_mx_deficit = "mxfp4_selfqual_failed";
+                g_mx_backend = SelectedBackendName(RcOzakiMxfp4SelectedBackend::Unqualified);
+                if (!err.empty()) {
+                    g_mx_deficit = err;
+                } else if (!tc_err.empty()) {
+                    g_mx_deficit = tc_err;
+                } else if (!scalar_err.empty()) {
+                    g_mx_deficit = "selfqual_failed:" + scalar_err;
+                } else {
+                    g_mx_deficit = "selfqual_failed";
+                }
             }
         }
+        qualified = (g_mx_selected != RcOzakiMxfp4SelectedBackend::Unqualified) &&
+                    !(g_mx_selected == RcOzakiMxfp4SelectedBackend::SM120_MMA &&
+                      !RcOzakiMxfp4Sm120aKernelLinked());
     }
-    return g_mx_selected != RcOzakiMxfp4SelectedBackend::Unqualified;
+    return qualified;
 }
 
 bool TryLaunchRcOzakiMxfp4GemmS8S8Int64(const std::vector<int8_t>& left,
@@ -1616,6 +1716,10 @@ bool TryLaunchRcOzakiMxfp4GemmS8S8Int64(const std::vector<int8_t>& left,
     }
     // Fail-closed: call ONLY the backend that passed full qual — no silent switch.
     if (sel == RcOzakiMxfp4SelectedBackend::SM120_MMA) {
+        if (!RcOzakiMxfp4Sm120aKernelLinked()) {
+            if (error) *error = "not_linked";
+            return false;
+        }
         if (!LaunchOzakiMxfp4PanelsMma(left, right, rows, inner, cols, out, error)) {
             out.clear();
             if (error && error->empty()) {
@@ -1677,6 +1781,10 @@ bool TryLaunchRcOzakiMxfp4GemmS8S8Int64Device(const int8_t* d_left, const int8_t
     std::string err;
     bool ok = false;
     if (sel == RcOzakiMxfp4SelectedBackend::SM120_MMA) {
+        if (!RcOzakiMxfp4Sm120aKernelLinked()) {
+            if (error) *error = "not_linked";
+            return false;
+        }
         ok = LaunchOzakiMxfp4PanelsMma(left, right, rows, inner, cols, host_out, &err);
     } else if (sel == RcOzakiMxfp4SelectedBackend::SM100_CUBLASLT) {
         ok = LaunchOzakiMxfp4PanelsCublasLt(left, right, rows, inner, cols, host_out, &err);

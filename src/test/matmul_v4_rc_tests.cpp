@@ -1582,4 +1582,35 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_selected_backend_honesty)
 #endif
 }
 
+BOOST_AUTO_TEST_CASE(rc_ozaki_sm120_native_capability_cpu_stub)
+{
+    // PR #89: plain packaging / CPU stub must not advertise SM120_MMA native.
+    // Full adversarial suite: matmul_v4_rc_sm120_native_capability_tests.
+    rc::ResetRcOzakiQualForTest();
+#if !defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+    BOOST_CHECK(!matmul_v4::cuda::IsRcOzakiCudaCompiled());
+    BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
+    BOOST_CHECK_EQUAL(
+        static_cast<int>(matmul_v4::cuda::RcOzakiCudaMxfp4SelectedBackend()),
+        static_cast<int>(matmul_v4::cuda::RcOzakiMxfp4SelectedBackend::Unqualified));
+    const auto st = rc::ProbeRCSelfQual(lt::ExactGemmBackend{});
+    BOOST_CHECK(!st.native_mxfp4_qualified);
+    BOOST_CHECK(!st.native_fp8_qualified);
+#endif
+#if !defined(BTX_CUDA_SM120_MXFP4_NATIVE)
+    // Without the dedicated sm_120a object option, native SM120_MMA is not a
+    // packaging claim — see measure-hardware.sh two-recipe docs.
+    const auto oz = rc::ProbeRcOzakiMxfp4Status();
+    if (oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM120_MMA) {
+        BOOST_CHECK(oz.qualified); // latch only after full suite
+    } else if (!oz.qualified) {
+        BOOST_CHECK_EQUAL(static_cast<int>(oz.selected),
+                          static_cast<int>(rc::RCOzakiMxfp4SelectedBackend::Unqualified));
+    }
+#endif
+    Consensus::Params p;
+    BOOST_CHECK_EQUAL(p.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -29,7 +29,7 @@ and per-call `exact_mx_scale_partitioned` provenance is distinct from the
 
 | Arch | SM | Notes from PR #89 silicon |
 |---|---|---|
-| RTX 5090 | sm_120 | INT8 cuBLASLt available; MXFP4 via cuBLASLt **no algorithm**; hand PTX `mxf4` on sm_120a |
+| RTX 5090 | sm_120 | INT8 cuBLASLt available; MXFP4 via cuBLASLt **no algorithm**; hand PTX block-scaled MMA is **sm_120a feature-qualified** only (plain sm_120 packaging ≠ native MMA) |
 | H100/H200 | sm_90 | INT8 available; no MXFP4 MMA |
 | B200 | sm_100 | INT8 available; cuBLASLt MXFP4 no algorithm; sm_100a rejects consumer mxf4 PTX |
 

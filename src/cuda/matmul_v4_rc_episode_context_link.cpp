@@ -62,6 +62,7 @@ bool RCCudaEpisodeContext::Init(const RCCudaEpisodeShape& shape, std::string* er
     m_have_digest = false;
     m_state_ready = false;
     m_graph_captured = false;
+    m_barrier_tables_ready = false;
     m_fault_corrupt_digest = false;
     m_arena = nullptr;
     m_arena_bytes = 0;
@@ -84,6 +85,7 @@ bool RCCudaEpisodeContext::Init(const matmul::v4::rc::RCCoupParams& params, uint
     shape.lobe_width = params.lobe_width;
     shape.bank_pages = params.bank_pages;
     shape.batch_q = batch_q == 0 ? 1 : batch_q;
+    shape.pages_per_barrier_lobe = params.pages_per_barrier_lobe;
     return Init(shape, error);
 }
 
@@ -231,6 +233,7 @@ void RCCudaEpisodeContext::Destroy()
     m_have_digest = false;
     m_state_ready = false;
     m_graph_captured = false;
+    m_barrier_tables_ready = false;
     m_fault_corrupt_digest = false;
     m_arena = nullptr;
     m_arena_bytes = 0;

@@ -74,6 +74,13 @@ inline constexpr char kRCCoupExtractTag[] = "BTX_RC_COUP_EXTRACT_V1";
 inline constexpr char kRCCoupFullBankTag[] = "BTX_RC_COUP_FULL_BANK_V1";
 /** Domain tag when material exchange is active (absorbs exchange_rows). */
 inline constexpr char kRCCoupMaterialExchangeTag[] = "BTX_RC_COUP_MAT_XCHG_V1";
+/**
+ * Domain tag for digest-affecting V3 material-exchange rounds (XOR keystream +
+ * balanced lane permutation). Used only when exchange_rounds > 0; V1/V2 paths
+ * with exchange_rounds=0 never touch this tag (goldens preserved).
+ */
+inline constexpr char kRCCoupMaterialExchangeRoundsTag[] =
+    "BTX_RC_COUP_MAT_XCHG_ROUNDS_V3";
 
 /**
  * Parametric coupled-puzzle shape. Toy defaults match the frozen constexprs
@@ -84,8 +91,16 @@ struct RCCoupParams {
     uint32_t lobes{kRCCoupLobes};
     uint32_t lobe_width{kRCCoupLobeWidth};
     uint32_t bank_pages{kRCCoupBankPages};
+    /** Rows per lobe (GEMM M). V1/V2 = 1; V3 production = 128. */
+    uint32_t rows_per_lobe{1};
+    /** Pages accumulated per barrier×lobe under full schedule. V2=12; V3=24. */
+    uint32_t pages_per_barrier_lobe{dc::kRCCoupPagesPerBarrierLobe};
 
-    [[nodiscard]] uint32_t StateBytes() const { return lobes * lobe_width; }
+    /** Active state bytes: lobes × rows_per_lobe × lobe_width (int8). */
+    [[nodiscard]] uint32_t StateBytes() const
+    {
+        return lobes * rows_per_lobe * lobe_width;
+    }
 };
 
 [[nodiscard]] bool ValidateRCCoupParams(const RCCoupParams& p);
@@ -93,19 +108,52 @@ struct RCCoupParams {
 /** CI-safe larger shape: barriers=8, lobes=8, lobe_width=64, bank_pages=32. */
 [[nodiscard]] RCCoupParams MakeMediumRCCoupParams();
 /**
- * PROVISIONAL production coupled shape (Stage-G-calibratable; height stays disabled).
- *
- * Derivation (document in MakeProductionRCCoupParams + frozen-dims doc):
- *   lobe_width = 8192 (MX-aligned, power-of-two)
- *   lobes = 8 → StateBytes = 65536 (power-of-two butterfly + MX-aligned)
- *   barriers = 8 (C5 upper bound)
- *   bank_pages = 768 → Resident bank = 768 × 8192² = 48 GiB (datacenter HBM class)
- *   Streamed peak ≈ one 64 MiB page + state + int64 acc ≪ 24 GiB (commodity tail)
- *
- * Freezing ≠ activation. ResolveRCCoupParams still returns toy/medium until a
- * separate consensus decision wires production into public nets.
+ * V2 production shape (heights INT32_MAX). Honest sizes:
+ *   bank_pages=768, W=8192 → int8 expanded 48 GiB; packed (×17/32) ≈ 25.5 GiB.
+ *   rows_per_lobe=1, pages_per_barrier_lobe=12 → 8×8×12 covers 768 once.
+ * Do NOT call this a 48 GiB packed floor — consumer 32 GiB can hold packed V2.
  */
 [[nodiscard]] RCCoupParams MakeProductionRCCoupParams();
+
+/**
+ * V3 production hypothesis (heights INT32_MAX; new domain tags/goldens required
+ * before any activation discussion):
+ *   M=rows_per_lobe=128, W=8192, bank_pages=1536, pages/slot=24
+ *   packed ≈ 51 GiB, int8 expanded 96 GiB, MACs/nonce = 12 TiMAC
+ *   coverage 8×8×24 = 1536. Pending TMTO/regeneration audit (may NO-GO).
+ */
+[[nodiscard]] RCCoupParams MakeProductionV3RCCoupParams();
+
+/**
+ * CI-safe ratio-preserving V3 toy (frozen golden separate from V2 medium):
+ *   barriers=4, lobes=4, W=64, M=32, bank_pages=64, P=4
+ *   coverage 4×4×4 = 64. StateBytes = 8192 (pow2, MX-aligned).
+ * Mix uses uint64 wrap (rows_per_lobe ≥ 32) — V2 M=1 digests unchanged.
+ */
+[[nodiscard]] RCCoupParams MakeMediumV3RCCoupParams();
+
+/**
+ * Accumulator overflow bounds (int8 ±127 inputs).
+ *
+ * After P page-sums of ExactGemmS8S8 (before butterfly), each lane satisfies:
+ *   |acc| ≤ P · W · 127²
+ * Unnormalized sum/diff butterfly (log₂(n) stages, n=StateBytes) grows by at
+ * most n, so a conservative post-mix bound is:
+ *   |acc| ≤ P · W · 127² · StateBytes()
+ * Documented ring: when rows_per_lobe ≥ 32 the Mix* path uses explicit uint64
+ * two's-complement wrap (defined modular arithmetic, no signed int64 UB).
+ * V2 (M=1) keeps signed int64 Mix* for digest stability.
+ */
+inline constexpr int64_t kRCCoupInt8AbsMax = 127;
+inline constexpr int64_t kRCCoupInt8ProdAbsMax =
+    kRCCoupInt8AbsMax * kRCCoupInt8AbsMax; // 16129
+
+[[nodiscard]] uint64_t MaxRCCoupPageSumAbsBound(const RCCoupParams& p);
+[[nodiscard]] uint64_t MaxRCCoupPostMixAbsBound(const RCCoupParams& p);
+/** True iff MaxRCCoupPostMixAbsBound(p) ≤ INT64_MAX (magnitude fits signed int64). */
+[[nodiscard]] bool RCCoupPostMixFitsInt64(const RCCoupParams& p);
+/** V3 mix policy: uint64 wrap when rows_per_lobe ≥ 32 (unless forced off). */
+[[nodiscard]] bool RCCoupUseMixU64Wrap(const RCCoupParams& p, bool force_signed = false);
 
 /**
  * Consensus checker/miner dims: toy when Params::fMatMulRCCoupledUseToyDims
@@ -120,11 +168,16 @@ struct RCCoupParams {
 [[nodiscard]] bool RCCoupBarrierLoopComplete(const RCCoupParams& p);
 
 /**
- * Structural total-MAC count for tip-verify admission pricing.
- * Per barrier each lobe runs ExactGemm 1×W·W×W (W² MACs) →
- * barriers × lobes × lobe_width². Nonce-independent.
+ * Structural total-MAC count (nonce-independent):
+ *   rows_per_lobe × pages_per_barrier_lobe × barriers × lobes × W²
+ * Checked saturating arithmetic. V3 dims → exactly 12 TiMAC.
  */
 [[nodiscard]] uint64_t TotalRCCoupMacs(const RCCoupParams& p);
+
+/** Canonical packed bank bytes: bank_pages × W² × 17/32 (no provider padding). */
+[[nodiscard]] uint64_t TotalRCCoupPackedBytes(const RCCoupParams& p);
+/** Expanded int8 bank bytes: bank_pages × W². */
+[[nodiscard]] uint64_t TotalRCCoupExpandedBytes(const RCCoupParams& p);
 
 /**
  * Soft peak-bytes estimate for Streamed mode (one page + active state + int64
@@ -133,8 +186,8 @@ struct RCCoupParams {
 [[nodiscard]] uint64_t EstimateRCCoupStreamedPeakBytes(const RCCoupParams& p);
 
 /**
- * Soft peak-bytes estimate for Resident mode (full bank + state + int64 acc).
- * Production preset targets ~48 GiB bank — measurement-only; never raises height.
+ * Soft peak-bytes estimate for Resident mode (full *expanded int8* bank + state
+ * + int64 acc). Prefer TotalRCCoupPackedBytes for the consensus memory floor.
  */
 [[nodiscard]] uint64_t EstimateRCCoupResidentPeakBytes(const RCCoupParams& p);
 
@@ -174,10 +227,38 @@ struct RCCoupOptions {
     /**
      * Material-exchange domain in the all-to-all mix. Defaults to
      * dc::kRCCoupMaterialExchangeEnabled (ON). Digests absorb exchange_rows.
+     * When exchange_rounds==0 this remains a mix-seed tag only (V1/V2 goldens).
      */
     bool material_exchange{dc::kRCCoupMaterialExchangeEnabled};
     uint32_t exchange_rows{dc::kRCCoupExchangeRowsDefault};
+
+    /**
+     * Digest-affecting material-exchange rounds after the all-to-all mix.
+     * Default 0 preserves V1/V2 goldens. When >0 AND material_exchange, each
+     * barrier runs that many rounds of: SHA256d round-seed → XOR keystream
+     * over int64 lanes → balanced lane permutation (see
+     * kRCCoupMaterialExchangeRoundsTag). V3 uses MakeV3RCCoupOptions() (=4).
+     */
+    uint32_t exchange_rounds{0};
+    /** When true, force signed int64 Mix even if rows_per_lobe≥32 (tests). */
+    bool force_signed_mix{false};
 };
+
+/**
+ * V3 execution options: material_exchange ON, exchange_rows=128,
+ * exchange_rounds=4 (digest-affecting ~4 GiB R/W at production state size).
+ * Pair with MakeProductionV3RCCoupParams(); does not raise heights.
+ */
+[[nodiscard]] RCCoupOptions MakeV3RCCoupOptions();
+
+/**
+ * Digest-affecting material-exchange traffic estimate (read+write):
+ *   exchange_rounds × barriers × StateBytes() × sizeof(int64_t) × 2
+ * Zero when exchange_rounds==0 or material_exchange is off (V1/V2 path).
+ * At V3 production dims + MakeV3RCCoupOptions() → exactly 4 GiB.
+ */
+[[nodiscard]] uint64_t TotalRCCoupExchangeBytes(const RCCoupParams& p,
+                                                const RCCoupOptions& options);
 
 /** Optional wall-clock timing for harness / measurement (not consensus). */
 struct RCCoupTiming {
@@ -339,17 +420,20 @@ DeriveCoupledBalancedPermutation(const uint256& sigma, uint32_t barrier,
 
 /**
  * Host barrier tail after lobe GEMM partials fill `acc` (int64, StateBytes()).
- * Applies balanced permutation + exact integer all-to-all mix + Extract once,
- * writing Extracted active state to `state_out` and optional barrier root.
+ * Applies balanced permutation + exact integer all-to-all mix + optional
+ * material-exchange rounds + Extract once, writing Extracted active state to
+ * `state_out` and optional barrier root.
  * Used by the CUDA resident episode path for PARKED permute/mix/Extract stages
  * (device-native Extract remains unwired). Digests match the CPU oracle when
- * `acc` matches ExactGemmS8S8 lobe partials.
+ * `acc` matches ExactGemmS8S8 lobe partials. Default options keep
+ * exchange_rounds=0 (V1/V2 golden-stable).
  */
 [[nodiscard]] bool ApplyCoupledBarrierTail(const uint256& sigma, uint32_t barrier,
                                            const RCCoupParams& params,
                                            std::vector<int64_t>& acc,
                                            std::vector<int8_t>& state_out,
-                                           uint256* barrier_root_out = nullptr);
+                                           uint256* barrier_root_out = nullptr,
+                                           const RCCoupOptions& options = {});
 
 /** SHA256d("BTX_RC_COUP_EPISODE_V1" ‖ bank_root ‖ barrier_roots…). */
 [[nodiscard]] uint256 AssembleCoupledEpisodeDigest(

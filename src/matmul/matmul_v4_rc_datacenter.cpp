@@ -5,6 +5,7 @@
 #include <matmul/matmul_v4_rc_datacenter.h>
 
 #include <cuda/matmul_v4_rc_episode_context.h>
+#include <matmul/matmul_v4_rc_peak_ready.h>
 
 #include <limits>
 
@@ -37,12 +38,25 @@ RCDcStatus ProbeRCDcStatus()
     st.gkr_arbiter = false;
     st.cuda_episode_compiled = matmul_v4::cuda::IsRcEpisodeCudaCompiled();
     st.arch_key = matmul_v4::cuda::RcEpisodeCudaArchKey();
-    st.cuda_episode_ready = st.cuda_episode_compiled;
+
+    // Derive cuda_episode_ready / peak_ready — never `compiled == ready`.
+    RCEpisodePeakBits bits;
+    bits.cuda_episode_compiled = st.cuda_episode_compiled;
+    bits.full_page_schedule = st.full_bank_schedule;
+    // Production dims / native / full device pipeline remain false until
+    // silicon campaigns + Agent D/E latches land (fail-closed).
+    const RCPeakReadyStatus peak = DeriveRCPeakReady(MakeRCPeakReadyInputsFromEpisode(bits));
+    st.peak_ready = peak.peak_ready;
+    st.cuda_episode_ready = peak.peak_ready;
+
     // Heights remain INT32_MAX — levers are configured but publicly inert.
     if (!st.cuda_episode_compiled) {
         st.deficit = "episode_graph_unwired; heights_int32_max";
     } else if (!st.full_bank_schedule || !st.material_exchange || !st.three_axis_wire) {
         st.deficit = "dc_lever_incomplete";
+    } else if (!st.peak_ready) {
+        st.deficit = peak.deficit.empty() ? "heights_int32_max;peak_ready_prerequisites_incomplete"
+                                          : (peak.deficit + "; heights_int32_max");
     } else {
         st.deficit = "heights_int32_max";
     }
