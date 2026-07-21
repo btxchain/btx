@@ -204,10 +204,21 @@ case "$BACKEND" in
   cpu)   CMAKE_FLAGS=() ;;
   # External review (vanities): the default arch list omitted Blackwell, so a
   # 5090 (sm_120) / B200 (sm_100) ran JIT'd sm_90 instead of native code. Include
-  # 100;120 so the INT8 tensor path is built for Blackwell. (The MXFP4 native GEMM
-  # additionally needs the compute_120a variant, but it is currently unserved by
-  # cuBLASLt and falls back to INT8 regardless -- see the round-2 remediation doc.)
-  cuda)  CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90;100;120}") ;;
+  # 100;120 so the INT8 tensor path is built for Blackwell.
+  #
+  # Two CUDA recipes (PR #89 plain sm_120 vs feature-qualified sm_120a):
+  #   1) Plain packaging (default here) — native block_scale MMA compiled OUT:
+  #        -DBTX_CUDA_ARCHITECTURES=100;120   # never 120a
+  #   2) Rack SM120_MMA — dedicated sm_120a object TU (cmake/BTXCudaSm120a.cmake):
+  #        -DBTX_CUDA_ARCHITECTURES=120 -DBTX_CUDA_SM120_MXFP4_NATIVE=ON
+  #      NVCC flag on that TU only: -gencode=arch=compute_120a,code=sm_120a
+  #      Set BTX_CUDA_SM120_MXFP4_NATIVE=1 in the environment to enable recipe 2.
+  cuda)
+    CMAKE_FLAGS=(-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON "-DBTX_CUDA_ARCHITECTURES=${CUDA_ARCH:-75;80;89;90;100;120}")
+    if [ "${BTX_CUDA_SM120_MXFP4_NATIVE:-0}" = "1" ] || [ "${BTX_CUDA_SM120_MXFP4_NATIVE:-OFF}" = "ON" ]; then
+      CMAKE_FLAGS+=(-DBTX_CUDA_SM120_MXFP4_NATIVE=ON)
+    fi
+    ;;
   metal) CMAKE_FLAGS=(-DBTX_ENABLE_METAL=ON) ;;
   hip)
     # HIP_ARCH required (e.g. gfx942 MI300 / gfx1200 RDNA4). D4 MFMA-vs-WMMA
