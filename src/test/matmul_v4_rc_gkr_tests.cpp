@@ -60,6 +60,12 @@ BOOST_AUTO_TEST_CASE(gkr_soundness_and_height_inert)
 {
     BOOST_CHECK(std::string(rc::kRCGkrSoundnessStatement).find("COMPUTATIONAL") !=
                 std::string::npos);
+    BOOST_CHECK(std::string(rc::kRCGkrSoundnessStatement).find("OPEN/PARKED") !=
+                std::string::npos);
+    BOOST_CHECK(std::string(rc::kRCGkrG1G5StatusStatement).find("OPEN/PARKED") !=
+                std::string::npos);
+    BOOST_CHECK(std::string(rc::kRCGkrG1G5StatusStatement).find("CLOSED (proof v7)") ==
+                std::string::npos);
     BOOST_CHECK(std::string(rc::kRCGkrRealityGuardrail).find("REJECT") != std::string::npos);
     BOOST_CHECK(std::string(rc::kRCGkrRealityGuardrail).find("NOT production-complete") !=
                 std::string::npos);
@@ -687,7 +693,9 @@ BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_real_arithmetization)
     BOOST_CHECK(pr.timing.note.find("coupled_arithmetization_unwired") == std::string::npos);
 }
 
-// --- G1–G5 adversarial forge suite (each forgery independently REJECTED) ---
+// --- Mutation forge suite (transcript integrity ONLY — NOT G1–G5 closure) ---
+// These flip bits on an honest proof. Rejection shows FS binding of carried
+// fields, not that openings/Extract are sound. See ProveIndepMalicious* below.
 
 namespace {
 
@@ -854,6 +862,106 @@ BOOST_AUTO_TEST_CASE(gkr_forge_target_rejects_under_arbiter)
     BOOST_CHECK(dual.note.find("claimed_digest > target") != std::string::npos);
     unsetenv("BTX_RC_GKR_ARBITER");
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
+}
+
+// --- Independent malicious constructors (gap evidence; ACCEPT ⇒ G* OPEN) ---
+// Rebuild full transcripts from fabricated witnesses. NOT honest-proof mutations.
+// Flip to BOOST_CHECK(!Verify...) only after PCS openings + Extract AIR land.
+
+BOOST_AUTO_TEST_CASE(gkr_indep_malicious_ab_factorization_accepted_gap_g1)
+{
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    auto pr = rc::ProveIndepMaliciousEpisodeForTest(
+        header, params, 0, dig, rc::RCGkrIndepMaliciousKind::ArbitraryAbFactorization);
+    BOOST_REQUIRE(pr.timing.ok);
+    BOOST_REQUIRE(!pr.proof.layers.empty());
+    // Different factorization than honest fold, product preserved.
+    BOOST_CHECK(pr.proof.layers[0].a_at_r.c0 == 0xC0FFEE);
+    BOOST_CHECK_MESSAGE(rc::VerifyWinnerProof(pr.proof),
+                        rc::RCGkrIndepMaliciousGapNote(
+                            rc::RCGkrIndepMaliciousKind::ArbitraryAbFactorization));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_indep_malicious_unrelated_roots_accepted_gap_g1g2)
+{
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    auto pr = rc::ProveIndepMaliciousEpisodeForTest(
+        header, params, 0, dig, rc::RCGkrIndepMaliciousKind::UnrelatedLayerRoots);
+    BOOST_REQUIRE(pr.timing.ok);
+    BOOST_CHECK_EQUAL(pr.proof.layers[0].a_root.data()[0], 0xA0);
+    BOOST_CHECK_MESSAGE(rc::VerifyWinnerProof(pr.proof),
+                        rc::RCGkrIndepMaliciousGapNote(
+                            rc::RCGkrIndepMaliciousKind::UnrelatedLayerRoots));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_indep_malicious_fabricated_trace_accepted_gap_g2)
+{
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    auto honest = rc::ProveWinnerEpisode(header, params, 0, dig);
+    BOOST_REQUIRE(rc::VerifyWinnerProof(honest.proof));
+    auto pr = rc::ProveIndepMaliciousEpisodeForTest(
+        header, params, 0, dig, rc::RCGkrIndepMaliciousKind::FabricatedTraceWires);
+    BOOST_REQUIRE(pr.timing.ok);
+    // Fabricated wires ⇒ different FRI roots than honest episode trace.
+    BOOST_CHECK(pr.proof.trace_fri.layers[0].root != honest.proof.trace_fri.layers[0].root);
+    BOOST_CHECK_MESSAGE(rc::VerifyWinnerProof(pr.proof),
+                        rc::RCGkrIndepMaliciousGapNote(
+                            rc::RCGkrIndepMaliciousKind::FabricatedTraceWires));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_indep_malicious_identical_lookup_accepted_gap_g3)
+{
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    auto pr = rc::ProveIndepMaliciousEpisodeForTest(
+        header, params, 0, dig, rc::RCGkrIndepMaliciousKind::IdenticalFabricatedLookup);
+    BOOST_REQUIRE(pr.timing.ok);
+    BOOST_REQUIRE(!pr.proof.lookup_fri.layers.empty());
+    BOOST_REQUIRE(!pr.proof.table_fri.layers.empty());
+    BOOST_CHECK(pr.proof.lookup_fri.layers[0].root == pr.proof.table_fri.layers[0].root);
+    BOOST_CHECK_MESSAGE(rc::VerifyWinnerProof(pr.proof),
+                        rc::RCGkrIndepMaliciousGapNote(
+                            rc::RCGkrIndepMaliciousKind::IdenticalFabricatedLookup));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_indep_malicious_fabricated_extract_io_accepted_gap_g3g4)
+{
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    auto pr = rc::ProveIndepMaliciousEpisodeForTest(
+        header, params, 0, dig, rc::RCGkrIndepMaliciousKind::FabricatedExtractIO);
+    BOOST_REQUIRE(pr.timing.ok);
+    BOOST_CHECK_MESSAGE(rc::VerifyWinnerProof(pr.proof),
+                        rc::RCGkrIndepMaliciousGapNote(
+                            rc::RCGkrIndepMaliciousKind::FabricatedExtractIO));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_indep_malicious_unrelated_bank_pages_accepted_gap_coupled)
+{
+    const auto header = MakeRCHeader(42);
+    const auto coup = rc::MakeToyRCCoupParams();
+    const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, 0, coup);
+    auto pr = rc::ProveIndepMaliciousCoupledForTest(
+        header, 0, coup, dig, rc::RCGkrIndepMaliciousKind::UnrelatedBankPages);
+    BOOST_REQUIRE(pr.timing.ok);
+    BOOST_CHECK(pr.proof.coupled);
+    BOOST_CHECK_MESSAGE(rc::VerifyWinnerProof(pr.proof),
+                        rc::RCGkrIndepMaliciousGapNote(
+                            rc::RCGkrIndepMaliciousKind::UnrelatedBankPages));
+}
+
+BOOST_AUTO_TEST_CASE(gkr_deserialize_rejects_oversize_prefix)
+{
+    std::vector<unsigned char> huge(rc::kRCGkrMaxProofBytesHard + 1, 0);
+    BOOST_CHECK(!rc::DeserializeRCGkrProof(huge).has_value());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
