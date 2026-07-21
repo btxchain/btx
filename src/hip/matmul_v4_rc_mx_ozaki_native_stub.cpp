@@ -147,8 +147,9 @@ bool PackRcOzakiHipMxfp4OpATOpBN(const std::vector<int8_t>& left, const std::vec
         if (error) *error = "PackRcOzakiHipMxfp4: degenerate shape";
         return false;
     }
-    if ((K % kRcOzakiHipMxBlk) != 0 && (K % 2u) != 0) {
-        // K must be even for nibble packing; prefer multiples of 32 for VEC32.
+    if ((K % kRcOzakiHipMxBlk) != 0) {
+        if (error) *error = "PackRcOzakiHipMxfp4: K must be multiple of 32 for VEC32 UE8M0";
+        return false;
     }
     if ((K % 2u) != 0) {
         if (error) *error = "PackRcOzakiHipMxfp4: K must be even for E2M1 packing";
@@ -288,6 +289,11 @@ bool TryLaunchRcOzakiHipExactPanelsGemmS8S8Int64(const std::vector<int8_t>& /*le
 }
 
 bool IsRcOzakiHipMxfp4Qualified()
+{
+    return false;
+}
+
+bool IsRcOzakiHipMxfp4Attempted()
 {
     return false;
 }

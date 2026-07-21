@@ -49,6 +49,8 @@ struct TrainiumNeuronRcEpisodeProviderV1 {
 void ResetTrainiumNeuronRcEpisodeProviderForTesting();
 
 [[nodiscard]] bool IsRcTrainiumCompiled();
+/** True after a registered provider's self-qual surface was invoked. */
+[[nodiscard]] bool IsRcTrainiumAttempted();
 [[nodiscard]] std::string RcTrainiumDeficit(); // "requires Neuron+Trainium"
 
 [[nodiscard]] bool HostReferenceRcTrainiumCoupledEpisode(

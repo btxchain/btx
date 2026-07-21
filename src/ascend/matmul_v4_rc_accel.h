@@ -31,6 +31,8 @@ struct RCAscendEpisodeShape {
 };
 
 [[nodiscard]] bool IsRcAscendCompiled();
+/** True after Cube ExactGemm / episode availability was probed. */
+[[nodiscard]] bool IsRcAscendAttempted();
 [[nodiscard]] std::string RcAscendDeficit(); // "requires CANN+Ascend"
 
 [[nodiscard]] bool HostReferenceRcAscendCoupledEpisode(

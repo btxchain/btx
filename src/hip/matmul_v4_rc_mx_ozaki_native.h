@@ -67,7 +67,10 @@ struct RcOzakiHipMxPack {
     const std::vector<int8_t>& left, const std::vector<int8_t>& right, uint32_t rows,
     uint32_t inner, uint32_t cols, std::vector<int64_t>& out, std::string* error = nullptr);
 
-// --- Native block-scaled MXFP4 (gfx950 only after oracle self-qual) ---
+// --- Native block-scaled MXFP4 (gfx950/MI350X/MI355X only after oracle self-qual) ---
+/** True after SelfQualify invoked a real hipBLASLt / pack surface (or recorded
+ *  a scalar-decode exactness probe). Never true from arch name alone. */
+[[nodiscard]] bool IsRcOzakiHipMxfp4Attempted();
 [[nodiscard]] bool IsRcOzakiHipMxfp4Qualified();
 [[nodiscard]] std::string RcOzakiHipMxfp4ArchKey();
 [[nodiscard]] std::string RcOzakiHipMxfp4Backend();

@@ -82,6 +82,14 @@ bool IsRcTpuCompiled()
 #endif
 }
 
+bool IsRcTpuAttempted()
+{
+    auto& state = State();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    // Attempted only after a real self-qual invocation (not arch/getenv).
+    return state.qualification != Qualification::UNTESTED;
+}
+
 std::string RcTpuDeficit()
 {
     if (IsTpuPjrtRcEpisodeAvailable()) return {};

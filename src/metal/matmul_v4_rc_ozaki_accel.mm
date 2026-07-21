@@ -30,6 +30,7 @@ bool g_exact_ran{false};
 bool g_exact_qualified{false};
 bool g_mx_ran{false};
 bool g_last_used_tensor_ops{false};
+std::string g_exact_backend;
 
 [[nodiscard]] bool DenseInt64(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
                               uint32_t rows, uint32_t inner, uint32_t cols,
@@ -166,10 +167,23 @@ bool HostReferenceRcOzakiExactPanelsGemmS8S8Int64(const std::vector<int8_t>& lef
     return true;
 }
 
+bool IsRcOzakiMetalExactPanelsAttempted()
+{
+    std::lock_guard<std::mutex> lock(g_mu);
+    return g_exact_ran;
+}
+
 bool IsRcOzakiMetalExactPanelsQualified()
 {
     std::lock_guard<std::mutex> lock(g_mu);
     return g_exact_qualified;
+}
+
+std::string RcOzakiMetalExactPanelsBackend()
+{
+    std::lock_guard<std::mutex> lock(g_mu);
+    // Honest INT8 labels only — never OCP MXFP4.
+    return g_exact_backend;
 }
 
 bool SelfQualifyRcOzakiMetalExactPanelsOnce()
@@ -186,6 +200,13 @@ bool SelfQualifyRcOzakiMetalExactPanelsOnce()
     if (!g_exact_ran) {
         g_exact_ran = true;
         g_exact_qualified = ok;
+        if (ok) {
+            // Prefer last launch provenance; fall back to TensorOps-capable label.
+            g_exact_backend = g_last_used_tensor_ops ? "metal_int8_mpp_tensorops"
+                                                    : "metal_int8_msl_alu";
+        } else {
+            g_exact_backend.clear();
+        }
     }
     return g_exact_qualified;
 }
@@ -247,6 +268,7 @@ void ResetRcOzakiMetalQualForTest()
     g_exact_qualified = false;
     g_mx_ran = false;
     g_last_used_tensor_ops = false;
+    g_exact_backend.clear();
 }
 
 } // namespace matmul_v4::metal

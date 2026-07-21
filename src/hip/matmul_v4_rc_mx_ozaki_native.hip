@@ -39,6 +39,7 @@ std::mutex g_mu;
 bool g_exact_ran{false};
 bool g_exact_qualified{false};
 bool g_mx_ran{false};
+bool g_mx_attempted{false};
 bool g_mx_qualified{false};
 std::string g_mx_arch;
 std::string g_mx_backend;
@@ -131,7 +132,8 @@ struct DeviceBuffer {
 };
 
 /** Attempt hipBLASLt block-scaled MXFP4 with opA=T opB=N VEC32.
- *  Returns false unless BTX_HIP_MXFP4_TYPES + gfx950 + oracle match. */
+ *  Returns false unless BTX_HIP_MXFP4_TYPES + gfx950 + K%32==0.
+ *  Caller must still byte-compare against the int64 oracle before qualifying. */
 [[nodiscard]] bool AttemptHipBlasLtRcOzakiMxfp4(const RcOzakiHipMxPack& pack, uint32_t rows,
                                                uint32_t K, uint32_t cols,
                                                std::vector<int64_t>& out, std::string* error)
@@ -141,6 +143,13 @@ struct DeviceBuffer {
     if (error) *error = "BTX_HIP_MXFP4_TYPES not set (toolkit lacks HIP_R_4F_E2M1+VEC32)";
     return false;
 #else
+    // VEC32 UE8M0 scales along K blocks of 32 — never launch partial-K as native.
+    if ((K % kRcOzakiHipMxBlk) != 0) {
+        if (error) *error = "hipBLASLt VEC32 requires K multiple of 32";
+        return false;
+    }
+    // gfx950 covers MI350X / MI355X CDNA4. Arch gate selects the attempt surface
+    // only — qualification still requires oracle byte-match (never arch alone).
     if (!IsGfx950()) {
         if (error) *error = "requires gfx950 silicon";
         return false;
@@ -360,6 +369,10 @@ bool PackRcOzakiHipMxfp4OpATOpBN(const std::vector<int8_t>& left, const std::vec
         if (error) *error = "PackRcOzakiHipMxfp4: degenerate shape";
         return false;
     }
+    if ((K % kRcOzakiHipMxBlk) != 0) {
+        if (error) *error = "PackRcOzakiHipMxfp4: K must be multiple of 32 for VEC32 UE8M0";
+        return false;
+    }
     if ((K % 2u) != 0) {
         if (error) *error = "PackRcOzakiHipMxfp4: K must be even for E2M1 packing";
         return false;
@@ -515,6 +528,12 @@ bool IsRcOzakiHipMxfp4Qualified()
     return g_mx_qualified;
 }
 
+bool IsRcOzakiHipMxfp4Attempted()
+{
+    std::lock_guard<std::mutex> lock(g_mu);
+    return g_mx_attempted;
+}
+
 std::string RcOzakiHipMxfp4ArchKey()
 {
     std::lock_guard<std::mutex> lock(g_mu);
@@ -543,12 +562,14 @@ bool SelfQualifyRcOzakiHipMxfp4Once()
     const std::string arch = HipArchKey();
     std::string err;
     bool qualified = false;
+    bool attempted = false;
     std::string backend;
     std::string deficit = "requires gfx950 silicon";
 
 #if defined(BTX_RC_HIP_HAS_MXFP4_PATH)
     if (IsGfx950()) {
         // Build MX-factorable panels and attempt hipBLASLt; require int64 match.
+        // gfx950 selects the attempt surface only — never qualify from arch name.
         constexpr uint32_t rows = 4, cols = 4, K = 64;
         std::vector<int8_t> L(static_cast<size_t>(rows) * K);
         std::vector<int8_t> R(static_cast<size_t>(K) * cols);
@@ -579,17 +600,32 @@ bool SelfQualifyRcOzakiHipMxfp4Once()
                 dense[static_cast<size_t>(r) * cols + c] = acc;
             }
         }
+        attempted = true;
         std::vector<int64_t> device;
-        if (PackRcOzakiHipMxfp4OpATOpBN(L, R, rows, K, cols, pack, &err) &&
-            AttemptHipBlasLtRcOzakiMxfp4(pack, rows, K, cols, device, &err) &&
-            device == dense) {
+        const bool pack_ok = PackRcOzakiHipMxfp4OpATOpBN(L, R, rows, K, cols, pack, &err);
+        const bool device_ok =
+            pack_ok && AttemptHipBlasLtRcOzakiMxfp4(pack, rows, K, cols, device, &err) &&
+            device == dense;
+        if (device_ok) {
             qualified = true;
             backend = "mxfp4_hipblaslt_gfx950_opAT_opBN_VEC32";
             deficit.clear();
         } else {
-            deficit = err.empty() ? "requires gfx950 silicon" : err;
-            // Host pack may still be exact — never claim native from scalar decode.
-            backend = "mxfp4_host_pack_scalar-decode";
+            // Soft exactness probe via host scalar decode — never qualifies.
+            std::vector<int64_t> from_pack;
+            if (pack_ok &&
+                HostReferenceRcOzakiHipMxfp4GemmFromPack(pack, rows, K, cols, from_pack,
+                                                         &err) &&
+                from_pack == dense) {
+                backend = "mxfp4_host_pack_scalar-decode";
+                deficit =
+                    "rc_ozaki_hip_mxfp4_scalar-decode_exact_but_not_native_tensor";
+                if (!err.empty()) deficit += "; hipblaslt_failed:" + err;
+            } else {
+                backend.clear();
+                deficit = err.empty() ? "requires gfx950 silicon" : err;
+            }
+            qualified = false;
         }
     } else if (IsGfx942()) {
         deficit = "requires gfx942 silicon"; // FP8 lane not admitted here
@@ -606,6 +642,7 @@ bool SelfQualifyRcOzakiHipMxfp4Once()
     std::lock_guard<std::mutex> lock(g_mu);
     if (!g_mx_ran) {
         g_mx_ran = true;
+        g_mx_attempted = attempted;
         g_mx_qualified = qualified;
         g_mx_arch = arch;
         g_mx_backend = backend;
@@ -635,6 +672,7 @@ void ResetRcOzakiHipQualForTest()
     g_exact_ran = false;
     g_exact_qualified = false;
     g_mx_ran = false;
+    g_mx_attempted = false;
     g_mx_qualified = false;
     g_mx_arch.clear();
     g_mx_backend.clear();
