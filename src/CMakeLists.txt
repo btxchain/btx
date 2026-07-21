@@ -766,8 +766,11 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     # MX qualification remains a runtime, oracle-checked operation.
     cuda/matmul_v4_lt_mx_native.cu
     cuda/matmul_v4_lt_tensor_gemm.cu
-    # ENC_RC Amendment 1.B — Ozaki K-panel ExactGemm (LaunchGemmS8S8) → int64.
+    # ENC_RC Amendment 1.B — Ozaki MXFP4 (SM120_MMA / SM100_CUBLASLT) + ExactPanels.
     # Replaces cuda/matmul_v4_rc_mx_ozaki_native_link.cpp (not added when CUDA ON).
+    # sm_120/sm_120a: hand QMMA.SF PTX compiles IN only for __CUDA_ARCH__ 12xx;
+    # other fatbin targets compile OUT (no assembler failure). Prefer
+    # BTX_CUDA_ARCHITECTURES containing 120a on CUDA 13.2 racks (Workstream G).
     cuda/matmul_v4_rc_mx_ozaki_native.cu
     # ENC_RC datacenter episode arena (cudaMallocAsync + Graphs scaffold).
     # Replaces cuda/matmul_v4_rc_episode_context_link.cpp when CUDA ON.

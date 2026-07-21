@@ -11,8 +11,29 @@
 
 // ENC_RC Ozaki device backends (Amendment 1.B).
 // ExactGemm panels ≠ native MXFP4. Native path must not call LaunchGemmS8S8.
+//
+// Selected backend honesty (PR #89 Workstream B):
+//   Unqualified | SM120_MMA | SM100_CUBLASLT
+// A backend latches ONLY after THAT same backend passes the COMPLETE suite.
+// Never combine partial MMA evidence with cuBLASLt and mislabel as MMA/cutlass.
+// Never report dense INT8 / scalar-decode as native MXFP4.
+//
+// SASS expectation for rack Workstream G (sm_120 / sm_120a, CUDA 13.2):
+//   After SM120_MMA qualifies, capture SASS and confirm QMMA.SF E2M1
+//   (mma.sync kind::mxf8f6f4.block_scale … e2m1.e2m1 … ue8m0) appears in the
+//   rc_ozaki_mxfp4_mma_gemm kernel. Suggested:
+//     cuobjdump -sass <libbtx_matmul_backend.so> | rg -n 'QMMA|mma\.|E2M1|mxf8f6f4'
+//     ncu --devices 0 --set full ./src/test/test_btx -t rc_ozaki_mxfp4_native_gate
+// SM100/B200 is a separate latch (SM100_CUBLASLT); never infer from SM120.
 
 namespace matmul_v4::cuda {
+
+/** Honest selected native MXFP4 backend after full-suite self-qual. */
+enum class RcOzakiMxfp4SelectedBackend : uint8_t {
+    Unqualified = 0,
+    SM120_MMA = 1,       // hand QMMA.SF m16n8k32 e2m1 block_scale (not CUTLASS)
+    SM100_CUBLASLT = 2,  // cuBLASLt CUDA_R_4F_E2M1 + VEC32_UE8M0 on sm_100
+};
 
 [[nodiscard]] bool IsRcOzakiCudaCompiled();
 
@@ -25,18 +46,45 @@ namespace matmul_v4::cuda {
 
 // --- Block-scaled MXFP4 ---
 // Scalar-decode E2M1+FP32 may probe exactness (backend contains "scalar-decode")
-// but must NEVER flip IsRcOzakiCudaMxfp4Qualified. Native latches require a real
-// cuBLASLt (CUDA_R_4F_E2M1 + VEC32_UE8M0) or CUTLASS tensor path matching the
-// int64 oracle on separate sm_120 / sm_100 latches.
+// but must NEVER flip IsRcOzakiCudaMxfp4Qualified / SelectedBackend.
 [[nodiscard]] bool IsRcOzakiCudaMxfp4Qualified();
+[[nodiscard]] RcOzakiMxfp4SelectedBackend RcOzakiCudaMxfp4SelectedBackend();
 [[nodiscard]] std::string RcOzakiCudaMxfp4ArchKey();
+/** "Unqualified" | "SM120_MMA" | "SM100_CUBLASLT" |
+ *  "mxfp4_blockscaled_device_scalar-decode" (exactness only; native false). */
 [[nodiscard]] std::string RcOzakiCudaMxfp4Backend();
 [[nodiscard]] std::string RcOzakiCudaMxfp4Deficit();
+/** Native QMMA/cuBLASLt panel launches (excludes scalar-tail K%32 remainder). */
+[[nodiscard]] uint64_t RcOzakiCudaMxfp4NativeTensorLaunchCount();
+/** Scalar-decode tail launches (K remainder); never counts as MMA evidence. */
+[[nodiscard]] uint64_t RcOzakiCudaMxfp4ScalarTailLaunchCount();
 [[nodiscard]] bool SelfQualifyRcOzakiCudaMxfp4Once();
-/** Succeeds only when IsRcOzakiCudaMxfp4Qualified() (real TC path). */
+
+/**
+ * Succeeds only when SelectedBackend is SM120_MMA or SM100_CUBLASLT.
+ * Dispatches ONLY that backend — no silent fallback to the other or to
+ * scalar-decode / dense INT8.
+ */
 [[nodiscard]] bool TryLaunchRcOzakiMxfp4GemmS8S8Int64(
     const std::vector<int8_t>& left, const std::vector<int8_t>& right, uint32_t rows,
     uint32_t inner, uint32_t cols, std::vector<int64_t>& out, std::string* error = nullptr);
+
+/**
+ * Device-pointer entry for resident solvers (Workstream C).
+ * d_left: rows×inner int8 row-major; d_right: inner×cols int8 row-major;
+ * d_out: rows×cols int64. `cuda_stream` is cudaStream_t (void* keeps header
+ * CUDA-free). Uses reusable process arenas; does not cudaDeviceSynchronize —
+ * caller owns stream ordering. Fail-closed unless SelectedBackend is set and
+ * THAT backend serves the launch.
+ */
+[[nodiscard]] bool TryLaunchRcOzakiMxfp4GemmS8S8Int64Device(
+    const int8_t* d_left, const int8_t* d_right, int64_t* d_out, uint32_t rows,
+    uint32_t inner, uint32_t cols, void* cuda_stream, std::string* error = nullptr);
+
+/** Grow-only scratch ensure for external resident pools (optional pre-warm). */
+[[nodiscard]] bool EnsureRcOzakiMxfp4DeviceArena(size_t a_bytes, size_t b_bytes, size_t sfa_bytes,
+                                                 size_t sfb_bytes, size_t d_elems,
+                                                 size_t workspace_bytes = 0);
 
 void ResetRcOzakiCudaQualForTest();
 

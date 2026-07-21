@@ -23,6 +23,7 @@ std::string g_exact_deficit;
 bool g_mx_ran{false};
 bool g_mx_attempted{false};
 bool g_mx_qualified{false};
+RCOzakiMxfp4SelectedBackend g_mx_selected{RCOzakiMxfp4SelectedBackend::Unqualified};
 std::string g_mx_backend;
 std::string g_mx_arch_key;
 std::string g_mx_deficit;
@@ -195,10 +196,26 @@ struct ExactPanelsQualResult {
 struct Mxfp4QualResult {
     bool attempted{false};
     bool qualified{false};
+    RCOzakiMxfp4SelectedBackend selected{RCOzakiMxfp4SelectedBackend::Unqualified};
     std::string backend;
     std::string arch_key;
     std::string deficit;
 };
+
+[[nodiscard]] RCOzakiMxfp4SelectedBackend MapCudaSelected(
+    matmul_v4::cuda::RcOzakiMxfp4SelectedBackend s)
+{
+    using CS = matmul_v4::cuda::RcOzakiMxfp4SelectedBackend;
+    switch (s) {
+    case CS::SM120_MMA:
+        return RCOzakiMxfp4SelectedBackend::SM120_MMA;
+    case CS::SM100_CUBLASLT:
+        return RCOzakiMxfp4SelectedBackend::SM100_CUBLASLT;
+    case CS::Unqualified:
+    default:
+        return RCOzakiMxfp4SelectedBackend::Unqualified;
+    }
+}
 
 [[nodiscard]] Mxfp4QualResult RunMxfp4SelfQualBody()
 {
@@ -206,11 +223,13 @@ struct Mxfp4QualResult {
     r.attempted = true;
 
     // Prefer CUDA → HIP → Metal. Each vendor keeps separate honesty: native
-    // latch only after a real block-scaled tensor path (never INT8 / scalar).
+    // latch only after THAT backend's COMPLETE suite (never INT8 / scalar /
+    // mixed MMA+cuBLASLt mislabeled as cutlass).
     if (matmul_v4::cuda::IsRcOzakiCudaCompiled()) {
         (void)matmul_v4::cuda::SelfQualifyRcOzakiCudaMxfp4Once();
         r.backend = matmul_v4::cuda::RcOzakiCudaMxfp4Backend();
         r.arch_key = matmul_v4::cuda::RcOzakiCudaMxfp4ArchKey();
+        r.selected = MapCudaSelected(matmul_v4::cuda::RcOzakiCudaMxfp4SelectedBackend());
         r.qualified = matmul_v4::cuda::IsRcOzakiCudaMxfp4Qualified();
         if (r.qualified) return r;
         r.deficit = matmul_v4::cuda::RcOzakiCudaMxfp4Deficit();
@@ -220,6 +239,8 @@ struct Mxfp4QualResult {
         if (matmul_v4::hip::IsRcOzakiHipMxfp4Qualified()) {
             r.backend = matmul_v4::hip::RcOzakiHipMxfp4Backend();
             r.arch_key = matmul_v4::hip::RcOzakiHipMxfp4ArchKey();
+            // HIP gfx950 path is vendor-specific; keep selected Unqualified at
+            // the CUDA enum layer and rely on backend string + qualified bit.
             r.qualified = true;
             r.deficit.clear();
             return r;
@@ -241,15 +262,18 @@ struct Mxfp4QualResult {
     if (!matmul_v4::cuda::IsRcOzakiCudaCompiled() && !matmul_v4::hip::IsRcOzakiHipCompiled() &&
         !matmul_v4::metal::IsRcOzakiMetalCompiled()) {
         r.deficit = "rc_ozaki_mxfp4_no_vendor_tu_linked";
+        r.backend = "Unqualified";
         return r;
     }
     if (!r.qualified) {
         if (r.deficit.empty()) {
             r.deficit = "rc_ozaki_mxfp4_no_native_tensor_path";
         }
+        if (r.backend.empty()) r.backend = "Unqualified";
+        r.selected = RCOzakiMxfp4SelectedBackend::Unqualified;
         return r;
     }
-    if (r.backend.empty()) r.backend = "mxfp4_cutlass_unlabeled";
+    if (r.backend.empty()) r.backend = "Unqualified";
     return r;
 }
 
@@ -276,6 +300,7 @@ RCOzakiMxfp4Status ProbeRcOzakiMxfp4Status()
     st.attempted = g_mx_attempted;
     st.qualified = g_mx_qualified;
     st.exact_panels_qualified = g_exact_qualified;
+    st.selected = g_mx_selected;
     st.backend = g_mx_backend;
     st.arch_key = g_mx_arch_key;
     if (g_mx_qualified) {
@@ -316,6 +341,7 @@ bool SelfQualifyRcOzakiMxfp4Once()
     std::lock_guard<std::mutex> lock(g_host_mu);
     g_mx_attempted = r.attempted;
     g_mx_qualified = r.qualified;
+    g_mx_selected = r.selected;
     g_mx_backend = r.backend;
     g_mx_arch_key = r.arch_key;
     g_mx_deficit = r.deficit;
@@ -430,6 +456,7 @@ void ResetRcOzakiQualForTest()
     g_mx_ran = false;
     g_mx_attempted = false;
     g_mx_qualified = false;
+    g_mx_selected = RCOzakiMxfp4SelectedBackend::Unqualified;
     g_mx_backend.clear();
     g_mx_arch_key.clear();
     g_mx_deficit.clear();

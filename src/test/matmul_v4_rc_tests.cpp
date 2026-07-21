@@ -13,6 +13,7 @@
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_mx_layout.h>
 #include <matmul/matmul_v4_rc_mx_ozaki.h>
+#include <cuda/matmul_v4_rc_mx_ozaki_native.h>
 #include <matmul/matmul_v4_rc_scale.h>
 #include <matmul/matmul_v4_rc_scale_axes.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
@@ -1421,21 +1422,22 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_exact_panels_qualify_and_match_oracle)
 
 BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_native_gate)
 {
-    // Native MXFP4: only after a real CUTLASS/cuBLASLt tensor path quals.
-    // Scalar-decode E2M1+FP32 may probe exactness but must leave native_* false.
-    // CI without a TC path keeps native_* false; ExactGemm Ozaki may still be on.
+    // Native MXFP4: only after THAT backend's COMPLETE suite quals.
+    // Selected backend is Unqualified | SM120_MMA | SM100_CUBLASLT — never
+    // mislabeled cutlass from hand-MMA, never scalar-decode / dense INT8.
     rc::ResetRcOzakiQualForTest();
     const auto oz = rc::ProbeRcOzakiMxfp4Status();
     if (!rc::IsRcOzakiMxfp4Qualified()) {
         BOOST_CHECK(!oz.qualified);
         BOOST_CHECK(oz.attempted);
+        BOOST_CHECK_EQUAL(static_cast<int>(oz.selected),
+                          static_cast<int>(rc::RCOzakiMxfp4SelectedBackend::Unqualified));
         BOOST_CHECK(!oz.deficit_reason.empty());
-        // When the scalar-decode reference path matched, probe must say so
-        // honestly (BMX4C-style) and must not claim native.
         if (oz.backend.find("scalar-decode") != std::string::npos) {
             BOOST_CHECK(oz.deficit_reason.find("scalar-decode") != std::string::npos ||
                         oz.deficit_reason.find("not_native") != std::string::npos);
         }
+        BOOST_CHECK(oz.backend.find("cutlass") == std::string::npos);
         std::vector<int8_t> L(64, 6), R(64, -6);
         std::vector<int64_t> oz_out;
         BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, 8, 8, 8, oz_out));
@@ -1447,15 +1449,26 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_native_gate)
     }
     BOOST_CHECK(oz.attempted);
     BOOST_CHECK(oz.qualified);
-    BOOST_CHECK(oz.backend.find("mxfp4") != std::string::npos);
+    BOOST_CHECK(oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM120_MMA ||
+                oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM100_CUBLASLT);
+    BOOST_CHECK(oz.backend == "SM120_MMA" || oz.backend == "SM100_CUBLASLT");
     BOOST_CHECK(oz.backend.find("exactgemm") == std::string::npos);
     BOOST_CHECK(oz.backend.find("scalar-decode") == std::string::npos);
+    BOOST_CHECK(oz.backend.find("cutlass") == std::string::npos);
     BOOST_CHECK(oz.arch_key.find("sm_10") != std::string::npos ||
                 oz.arch_key.find("sm_12") != std::string::npos);
+    if (oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM120_MMA) {
+        BOOST_CHECK(oz.arch_key.find("sm_12") != std::string::npos);
+        BOOST_CHECK(oz.backend == "SM120_MMA");
+    }
+    if (oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM100_CUBLASLT) {
+        BOOST_CHECK(oz.arch_key.find("sm_10") != std::string::npos);
+        BOOST_CHECK(oz.backend == "SM100_CUBLASLT");
+    }
 
     constexpr uint32_t rows = 8, cols = 8;
     static constexpr int8_t kM11[] = {0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6};
-    for (uint32_t inner : {8u, 4095u, 4096u, 4097u, 8192u}) {
+    for (uint32_t inner : {1u, 8u, 31u, 32u, 33u, 4095u, 4096u, 4097u, 8192u, 16384u}) {
         std::vector<int8_t> L(static_cast<size_t>(rows) * inner);
         std::vector<int8_t> R(static_cast<size_t>(inner) * cols);
         for (uint32_t r = 0; r < rows; ++r) {
@@ -1486,7 +1499,6 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_native_gate)
         std::vector<int64_t> out;
         BOOST_REQUIRE(rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, rows, inner, cols, out));
         BOOST_CHECK(out == dense);
-        // Corrupted device output must fail the equality gate.
         if (!out.empty()) {
             auto bad = out;
             bad[0] += 1;
@@ -1503,7 +1515,8 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_scalar_decode_never_sets_native)
 {
     // Assessment #4: scalar-decode block-scaled path must not set
     // native_mxfp4_qualified / IsRcOzakiMxfp4Qualified (BMX4C C6 honesty).
-    // When a real cuBLASLt/CUTLASS TC path quals, backend must not be scalar-decode.
+    // When a real SM120_MMA / SM100_CUBLASLT path quals, backend must not be
+    // scalar-decode and must not claim cutlass for hand MMA.
     rc::ResetRcOzakiQualForTest();
     const auto oz = rc::ProbeRcOzakiMxfp4Status();
     BOOST_CHECK(oz.attempted);
@@ -1511,6 +1524,8 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_scalar_decode_never_sets_native)
     if (oz.backend.find("scalar-decode") != std::string::npos) {
         BOOST_CHECK(!oz.qualified);
         BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
+        BOOST_CHECK_EQUAL(static_cast<int>(oz.selected),
+                          static_cast<int>(rc::RCOzakiMxfp4SelectedBackend::Unqualified));
         BOOST_CHECK(!oz.deficit_reason.empty());
         BOOST_CHECK(oz.deficit_reason.find("scalar-decode") != std::string::npos ||
                     oz.deficit_reason.find("not_native_tensor") != std::string::npos);
@@ -1527,14 +1542,40 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_scalar_decode_never_sets_native)
     if (oz.qualified) {
         BOOST_CHECK(rc::IsRcOzakiMxfp4Qualified());
         BOOST_CHECK(oz.backend.find("scalar-decode") == std::string::npos);
-        BOOST_CHECK(oz.backend.find("cublaslt") != std::string::npos ||
-                    oz.backend.find("cutlass") != std::string::npos ||
-                    oz.backend.find("mma") != std::string::npos);
+        BOOST_CHECK(oz.backend == "SM120_MMA" || oz.backend == "SM100_CUBLASLT");
+        BOOST_CHECK(oz.backend.find("cutlass") == std::string::npos);
         return;
     }
 
     BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
     BOOST_CHECK(!oz.deficit_reason.empty());
+}
+
+BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_selected_backend_honesty)
+{
+    // Unqualified reporting: deficit present; never cutlass mislabel; never
+    // dense INT8 as native MXFP4. Device-pointer / arena APIs fail-closed on stub.
+    rc::ResetRcOzakiQualForTest();
+    const auto oz = rc::ProbeRcOzakiMxfp4Status();
+    BOOST_CHECK(oz.attempted);
+    if (!oz.qualified) {
+        BOOST_CHECK(oz.selected == rc::RCOzakiMxfp4SelectedBackend::Unqualified);
+        BOOST_CHECK(oz.backend.find("cutlass") == std::string::npos);
+        BOOST_CHECK(oz.backend.find("exactgemm") == std::string::npos);
+    }
+#if !defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+    BOOST_CHECK(!matmul_v4::cuda::IsRcOzakiCudaCompiled());
+    BOOST_CHECK_EQUAL(
+        static_cast<int>(matmul_v4::cuda::RcOzakiCudaMxfp4SelectedBackend()),
+        static_cast<int>(matmul_v4::cuda::RcOzakiMxfp4SelectedBackend::Unqualified));
+    BOOST_CHECK_EQUAL(matmul_v4::cuda::RcOzakiCudaMxfp4NativeTensorLaunchCount(), 0u);
+    BOOST_CHECK_EQUAL(matmul_v4::cuda::RcOzakiCudaMxfp4ScalarTailLaunchCount(), 0u);
+    std::string err;
+    BOOST_CHECK(!matmul_v4::cuda::EnsureRcOzakiMxfp4DeviceArena(64, 64, 8, 8, 16));
+    BOOST_CHECK(!matmul_v4::cuda::TryLaunchRcOzakiMxfp4GemmS8S8Int64Device(
+        nullptr, nullptr, nullptr, 4, 4, 4, nullptr, &err));
+    BOOST_CHECK(!err.empty());
+#endif
 }
 
 BOOST_AUTO_TEST_SUITE_END()
