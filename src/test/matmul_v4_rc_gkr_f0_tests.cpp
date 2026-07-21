@@ -188,8 +188,12 @@ BOOST_AUTO_TEST_CASE(f0_cross_header_replay_rejected)
     const std::string v = VerdictWhy(pr_a.proof, header_b, target);
     BOOST_TEST_MESSAGE("f0(b) cross-header replay -> " << v);
     BOOST_CHECK(v != "ACCEPT");
-    // header_B's recomputed reference digest != dig_a -> reject.
-    BOOST_CHECK(v.find("digest_mismatch_reference") != std::string::npos);
+    // Rejected because header_B has no valid work for it. Either sound relation is
+    // acceptable: swapping A->B changes the FS-derived sigma (caught first at
+    // v7:sigma), and independently header_B's recomputed reference digest != dig_a
+    // (v7:digest_mismatch_reference). The attack is defeated by whichever fires first.
+    BOOST_CHECK(v.find("sigma") != std::string::npos ||
+                v.find("digest_mismatch_reference") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
