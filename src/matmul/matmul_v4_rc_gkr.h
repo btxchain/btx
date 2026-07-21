@@ -92,15 +92,19 @@ inline constexpr const char* kRCGkrHbmParkStatement =
     "GKR as production arbiter until budgets close; ship both verifiers and "
     "keep ε=0 ExactReplay as consensus default.";
 
-/** Coupled path: barrier all-to-all product layers are not separately
- *  arithmetized. ProveWinnerCoupled is FAIL-CLOSED (no toy stand-in proof).
- *  ExactReplay covers coup mix until dedicated coup product layers land.
- *  G1–G5 GKR soundness gaps remain OPEN; arbiter stays OFF. */
+/** Coupled path (Wave 3B, superseding the fail-closed stand-in): the sound
+ *  coupled-R5 arithmetization lives in matmul_v4_rc_gkr_coupled.{h,cpp}
+ *  (ProveWinnerCoupledV7 / VerifyWinnerCoupledV7). ProveWinnerCoupled now
+ *  delegates there; it still NEVER proves toy/unrelated work (the bridge
+ *  refuses any digest that is not the int64 coupled reference digest).
+ *  Arbiter stays OFF; ExactReplay remains the consensus authority. */
 inline constexpr const char* kRCGkrCoupledArithStatement =
-    "ProveWinnerCoupled: FAIL-CLOSED deficit=coupled_arithmetization_unwired; "
-    "does not emit a toy/episode stand-in proof of unrelated work. "
-    "Coupled barrier all-to-all mix remains ExactReplay-covered; "
-    "G1–G5 GKR remain OPEN; BTX_RC_GKR_ARBITER stays OFF.";
+    "ProveWinnerCoupled: delegates to the sound coupled-R5 v7 prover "
+    "(matmul_v4_rc_gkr_coupled). GEMM succinct via batched-FRI sumcheck + "
+    "eval argument; page-selection/exchange/perm/mix/Extract/roots grounded "
+    "natively vs the immutable int64 reference (SOUND, over_budget). Never "
+    "emits a toy/episode stand-in proof of unrelated work. "
+    "BTX_RC_GKR_ARBITER stays OFF.";
 
 inline constexpr const char* kRCGkrShadowStatement =
     "BTX_RC_GKR_SHADOW=1 (default): generate+verify winner proof in shadow; "
@@ -552,9 +556,11 @@ struct RCProdVerifyResult {
                                                  const uint256& resealed_digest);
 
 /**
- * Coupled winner prove: FAIL-CLOSED until coupled-product arithmetization exists.
- * Must never prove MakeToyRCEpisodeParams() / unrelated work. Returns empty proof
- * with timing.ok=false and note "coupled_arithmetization_unwired".
+ * Coupled winner prove (Wave 3B): delegates to the sound coupled-R5 v7 prover
+ * (matmul_v4_rc_gkr_coupled.h). timing.ok=true iff a real, self-verified
+ * coupled proof was produced (the proof itself is v7-format; the v6 container
+ * stays empty). Must never prove MakeToyRCEpisodeParams() / unrelated work:
+ * fails closed unless resealed_digest equals the int64 coupled reference.
  */
 [[nodiscard]] RCGkrProveResult ProveWinnerCoupled(const CBlockHeader& header, int32_t height,
                                                  const RCCoupParams& params,

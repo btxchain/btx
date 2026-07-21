@@ -663,11 +663,13 @@ BOOST_AUTO_TEST_CASE(gkr_f3_arbiter_rejects_sigma_or_digest_over_target)
     unsetenv("BTX_RC_GKR_ARBITER");
 }
 
-BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_fail_closed_no_toy_proof)
+BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_sound_no_toy_proof)
 {
-    // Assessment #3: ProveWinnerCoupled must not emit a valid-looking proof of
-    // MakeToyRCEpisodeParams() / unrelated work. Fail closed with a clear deficit.
-    // Heights INT32_MAX; arbiter stays OFF.
+    // Wave 3B supersedes the Assessment-#3 fail-closed stand-in: for a REAL
+    // coupled input ProveWinnerCoupled now produces (and self-verifies) a real
+    // v7 coupled-R5 proof — but it must STILL never emit a valid-looking proof
+    // of MakeToyRCEpisodeParams() / unrelated work. Heights INT32_MAX; arbiter
+    // stays OFF. Full coupled forgery matrix: matmul_v4_rc_gkr_coupled_tests.
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCCoupledHeight,
                       std::numeric_limits<int32_t>::max());
@@ -676,16 +678,26 @@ BOOST_AUTO_TEST_CASE(gkr_prove_winner_coupled_fail_closed_no_toy_proof)
     const auto header = MakeRCHeader(42);
     const auto coup = rc::MakeToyRCCoupParams();
     const uint256 dig = rc::RecomputeCoupledPuzzleReference(header, /*height=*/0, coup);
-    const auto pr = rc::ProveWinnerCoupled(header, /*height=*/0, coup, dig);
 
-    BOOST_CHECK(!pr.timing.ok);
-    BOOST_CHECK_EQUAL(pr.timing.note, "coupled_arithmetization_unwired");
+    // Real coupled input: no longer fail-closed — a real proof is produced.
+    const auto pr = rc::ProveWinnerCoupled(header, /*height=*/0, coup, dig);
+    BOOST_CHECK_MESSAGE(pr.timing.ok, pr.timing.note);
+    BOOST_CHECK(pr.timing.note.find("coupled v7 proven+verified") != std::string::npos);
+    // The v6 container stays empty: it must not look like a successful
+    // ALL-PHASE episode proof of unrelated work.
     BOOST_CHECK(pr.proof.layers.empty());
     BOOST_CHECK(!rc::VerifyWinnerProof(pr.proof));
-    BOOST_CHECK(pr.proof.shrink_note.find("coupled_arithmetization_unwired") != std::string::npos);
-    // Must not look like a successful ALL-PHASE episode proof.
     BOOST_CHECK(pr.proof.round_seeds.empty());
     BOOST_CHECK(pr.proof.round_roots.empty());
+
+    // Unrelated work (episode digest / garbage) remains fail-closed.
+    const uint256 episode_dig =
+        rc::RecomputeResidentCurriculumReference(header, rc::MakeToyRCEpisodeParams(), 0);
+    const auto bad = rc::ProveWinnerCoupled(header, /*height=*/0, coup, episode_dig);
+    BOOST_CHECK(!bad.timing.ok);
+    BOOST_CHECK_EQUAL(bad.timing.note, "coupled_digest_mismatch_refuses_unrelated_work");
+    BOOST_CHECK(bad.proof.layers.empty());
+    BOOST_CHECK(!rc::VerifyWinnerProof(bad.proof));
 }
 
 // ============================================================================

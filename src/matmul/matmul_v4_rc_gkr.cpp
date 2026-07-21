@@ -11,6 +11,7 @@
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_gkr_air.h>
+#include <matmul/matmul_v4_rc_gkr_coupled.h>
 #include <span.h>
 #include <sys/resource.h>
 
@@ -2005,20 +2006,13 @@ RCGkrProveResult ProveWinnerEpisode(const CBlockHeader& header, const RCEpisodeP
 RCGkrProveResult ProveWinnerCoupled(const CBlockHeader& header, int32_t height,
                                     const RCCoupParams& params, const uint256& resealed_digest)
 {
-    (void)header;
-    (void)height;
-    (void)params;
-    (void)resealed_digest;
-    // Assessment Wave A #3: previously discarded params and proved
-    // MakeToyRCEpisodeParams() — a valid-looking proof of unrelated work.
-    // Fail closed until real coupled-product arithmetization lands.
-    // Shadow/arbiter stay OFF; heights INT32_MAX; ExactReplay decides.
-    RCGkrProveResult out;
-    out.proof = {};
-    out.proof.shrink_note = kRCGkrCoupledArithStatement;
-    out.timing.ok = false;
-    out.timing.note = "coupled_arithmetization_unwired";
-    return out;
+    // Wave 3B: the sound coupled-R5 arithmetization lives in
+    // matmul_v4_rc_gkr_coupled.cpp (ProveWinnerCoupledV7/VerifyWinnerCoupledV7).
+    // This legacy entry no longer fail-closes for a REAL coupled input; it
+    // still never proves toy/unrelated work — the bridge refuses any digest
+    // that is not the immutable int64 coupled reference for (header, height,
+    // params). Shadow/arbiter stay OFF; heights INT32_MAX; ExactReplay decides.
+    return ProveWinnerCoupledLegacyBridge(header, height, params, resealed_digest);
 }
 
 bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
@@ -2504,14 +2498,15 @@ WinnerGkrSolveReport SolveCoupledProveWinner(CBlockHeader header, int32_t height
             rep.hbm_parked = pr.timing.over_budget;
             if (!pr.timing.ok) {
                 rep.proved = false;
-                rep.ok = true; // mining/reseal succeeded; prove is unsupported
-                rep.note = pr.timing.note.empty() ? "coupled_arithmetization_unwired" : pr.timing.note;
+                rep.ok = true; // mining/reseal succeeded; prove failed/refused
+                rep.note = pr.timing.note.empty() ? "coupled prove failed" : pr.timing.note;
             } else {
-                RCGkrTiming vt;
-                rep.proved = VerifyWinnerProof(rep.proof, &vt);
-                rep.verify_s = vt.verify_s;
-                rep.ok = rep.proved;
-                rep.note = rep.proved ? "coupled winner proved" : "coupled prove/verify failed";
+                // Wave 3B: the coupled proof is v7-format and self-verified by
+                // the bridge (VerifyWinnerCoupledV7); the v6 container carries
+                // no layers, so VerifyWinnerProof does not apply here.
+                rep.proved = true;
+                rep.ok = true;
+                rep.note = "coupled winner proved (v7 coupled R5; sound, over_budget)";
             }
         } else {
             rep.note = "coupled winner; prove skipped";
