@@ -311,6 +311,28 @@ DeriveCoupledBalancedPermutation(const uint256& sigma, uint32_t barrier,
     uint32_t barrier, uint32_t lobe, const RCCoupParams& params, const uint256& sigma,
     bool full_bank_schedule = false);
 
+/**
+ * Host barrier tail after lobe GEMM partials fill `acc` (int64, StateBytes()).
+ * Applies balanced permutation + exact integer all-to-all mix + Extract once,
+ * writing Extracted active state to `state_out` and optional barrier root.
+ * Used by the CUDA resident episode path for PARKED permute/mix/Extract stages
+ * (device-native Extract remains unwired). Digests match the CPU oracle when
+ * `acc` matches ExactGemmS8S8 lobe partials.
+ */
+[[nodiscard]] bool ApplyCoupledBarrierTail(const uint256& sigma, uint32_t barrier,
+                                           const RCCoupParams& params,
+                                           std::vector<int64_t>& acc,
+                                           std::vector<int8_t>& state_out,
+                                           uint256* barrier_root_out = nullptr);
+
+/** SHA256d("BTX_RC_COUP_EPISODE_V1" ‖ bank_root ‖ barrier_roots…). */
+[[nodiscard]] uint256 AssembleCoupledEpisodeDigest(
+    const uint256& bank_root, const std::vector<uint256>& barrier_roots);
+
+/** Bank commitment over retained pages (same as Sequential/Resident oracle). */
+[[nodiscard]] uint256 CommitCoupledBankPages(const std::vector<std::vector<int8_t>>& pages,
+                                             const RCCoupParams& params);
+
 } // namespace matmul::v4::rc
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_COUPLED_H

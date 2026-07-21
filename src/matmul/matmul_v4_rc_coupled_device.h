@@ -14,6 +14,10 @@
 //   gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
 //   MineCoupledPuzzle(header, height, params, gemm);
 //
+// Resident CUDA episode path (Workstream C):
+//   RCCudaEpisodeContext — bank/state resident + once-captured GEMM graph.
+//   ProbeRCCudaEpisodeResident() reports honest residency / parked stages.
+//
 // MakeResolvedExactGemmBackendForRC wires CUDA/HIP/Metal LaunchGemmS8S8 (or
 // Ascend/TPU when admitted) only after ProbeRCSelfQual. Empty backend ⇒ CPU
 // ExactGemmS8S8 (fail-closed). Consensus REJECT always passes an empty backend.
@@ -38,6 +42,26 @@ struct RCCoupledDeviceProbe {
 };
 
 [[nodiscard]] RCCoupledDeviceProbe ProbeRCCoupledDevice();
+
+/**
+ * Honest snapshot of the CUDA resident episode path (Workstream C).
+ * peak_ready / device_digest remain false until device Extract + qualified
+ * native MXFP4 device-ptr GEMMs are wired end-to-end.
+ */
+struct RCCudaEpisodeResidentProbe {
+    bool cuda_episode_compiled{false};
+    bool device_bank_resident_api{false};
+    bool graph_capture_once_api{false};
+    bool host_bridge_removed{false};
+    bool peak_ready{false};
+    bool device_digest{false};
+    bool permute_extract_parked{true};
+    std::string gemm_path_label;
+    std::string parked_reason;
+    std::string detail;
+};
+
+[[nodiscard]] RCCudaEpisodeResidentProbe ProbeRCCudaEpisodeResident();
 
 } // namespace matmul::v4::rc
 
