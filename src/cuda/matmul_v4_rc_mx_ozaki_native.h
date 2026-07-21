@@ -12,13 +12,30 @@
 // ENC_RC Ozaki device backends (Amendment 1.B).
 // ExactGemm panels ≠ native MXFP4. Native path must not call LaunchGemmS8S8.
 //
-// Selected backend honesty (PR #89 Workstream B):
+// Selected backend honesty (PR #89 Workstream B / Agent C dispatch):
 //   Unqualified | SM120_MMA | SM100_CUBLASLT
 // A backend latches ONLY after THAT same backend passes the COMPLETE suite.
 // Never combine partial MMA evidence with cuBLASLt and mislabel as MMA/cutlass.
 // Never report dense INT8 / scalar-decode as native MXFP4.
 //
-// SASS expectation for rack Workstream G (sm_120 / sm_120a, CUDA 13.2):
+// SM120_MMA / native MXFP4 may be advertised ONLY if ALL of:
+//   1) Compatible SM120 device present
+//   2) RcOzakiMxfp4Sm120aKernelLinked() == true (dedicated sm_120a object linked;
+//      plain -arch=sm_120 fatbins without that object stay fail-closed)
+//   3) Self-qualification success (complete suite for THAT backend)
+//   4) Exact CPU differential (suite vs int64 oracle) pass
+//   5) Existing project SASS/instruction quals if any (rack Workstream G)
+// Any miss → SelectedBackend=Unqualified, qualified=false, deficit token below.
+//
+// Deficit tokens (primary; detail may follow after ':'):
+//   not_linked | unsupported_arch | selfqual_failed | device_unavailable |
+//   scalar-decode_exact_but_not_native_tensor | …
+//
+// BTX_LT_CUTLASS_MXFP4 / lt_cutlass_mxfp4 remains a separate fail-closed stub —
+// it is NOT a working consumer SM120 native admission path; do not mislabel it
+// as SM120_MMA.
+//
+// SASS expectation for rack Workstream G (sm_120a, CUDA 13.2):
 //   After SM120_MMA qualifies, capture SASS and confirm QMMA.SF E2M1
 //   (mma.sync kind::mxf8f6f4.block_scale … e2m1.e2m1 … ue8m0) appears in the
 //   rc_ozaki_mxfp4_mma_gemm kernel. Suggested:
@@ -34,6 +51,14 @@ enum class RcOzakiMxfp4SelectedBackend : uint8_t {
     SM120_MMA = 1,       // hand QMMA.SF m16n8k32 e2m1 block_scale (not CUTLASS)
     SM100_CUBLASLT = 2,  // cuBLASLt CUDA_R_4F_E2M1 + VEC32_UE8M0 on sm_100
 };
+
+/**
+ * Link-time / packaging capability: true only when a dedicated sm_120a native
+ * MXFP4 kernel object was compiled into this binary (Agent A TU + Agent B
+ * BTX_CUDA_SM120_MXFP4_NATIVE / BTX_RC_OZAKI_SM120A_KERNEL_LINKED).
+ * Default / plain-sm_120 / stub builds return false — never advertise SM120_MMA.
+ */
+[[nodiscard]] bool RcOzakiMxfp4Sm120aKernelLinked();
 
 [[nodiscard]] bool IsRcOzakiCudaCompiled();
 
@@ -53,6 +78,7 @@ enum class RcOzakiMxfp4SelectedBackend : uint8_t {
 /** "Unqualified" | "SM120_MMA" | "SM100_CUBLASLT" |
  *  "mxfp4_blockscaled_device_scalar-decode" (exactness only; native false). */
 [[nodiscard]] std::string RcOzakiCudaMxfp4Backend();
+/** Machine-readable deficit; empty when SelectedBackend is SM120_MMA/SM100_CUBLASLT. */
 [[nodiscard]] std::string RcOzakiCudaMxfp4Deficit();
 /** Native QMMA/cuBLASLt panel launches (excludes scalar-tail K%32 remainder). */
 [[nodiscard]] uint64_t RcOzakiCudaMxfp4NativeTensorLaunchCount();

@@ -5,8 +5,15 @@
 #include <cuda/matmul_v4_rc_mx_ozaki_native.h>
 
 // Default / no-CUDA-experimental build: RC Ozaki CUDA TU is not linked.
+// Plain sm_120 packaging without a dedicated sm_120a object also stays here
+// for the host link stub path — Sm120aKernelLinked is always false.
 
 namespace matmul_v4::cuda {
+
+bool RcOzakiMxfp4Sm120aKernelLinked()
+{
+    return false;
+}
 
 bool IsRcOzakiCudaCompiled()
 {
@@ -58,7 +65,7 @@ std::string RcOzakiCudaMxfp4Backend()
 
 std::string RcOzakiCudaMxfp4Deficit()
 {
-    return "rc_ozaki_mxfp4_cuda_tu_not_linked";
+    return "not_linked";
 }
 
 uint64_t RcOzakiCudaMxfp4NativeTensorLaunchCount()

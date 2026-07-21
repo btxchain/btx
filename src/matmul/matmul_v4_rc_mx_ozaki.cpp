@@ -217,6 +217,11 @@ struct Mxfp4QualResult {
     }
 }
 
+[[nodiscard]] bool DeviceLooksLikeSm120Hint(const std::string& arch_key)
+{
+    return arch_key.find("sm_12") != std::string::npos;
+}
+
 [[nodiscard]] Mxfp4QualResult RunMxfp4SelfQualBody()
 {
     Mxfp4QualResult r;
@@ -231,8 +236,22 @@ struct Mxfp4QualResult {
         r.arch_key = matmul_v4::cuda::RcOzakiCudaMxfp4ArchKey();
         r.selected = MapCudaSelected(matmul_v4::cuda::RcOzakiCudaMxfp4SelectedBackend());
         r.qualified = matmul_v4::cuda::IsRcOzakiCudaMxfp4Qualified();
+        // Host clamp: SM120_MMA requires sm_120a kernel object (Agent A/B).
+        if (r.selected == RCOzakiMxfp4SelectedBackend::SM120_MMA &&
+            !matmul_v4::cuda::RcOzakiMxfp4Sm120aKernelLinked()) {
+            r.qualified = false;
+            r.selected = RCOzakiMxfp4SelectedBackend::Unqualified;
+            if (r.backend.find("scalar-decode") == std::string::npos) {
+                r.backend = "Unqualified";
+            }
+            r.deficit = "not_linked";
+        }
         if (r.qualified) return r;
         r.deficit = matmul_v4::cuda::RcOzakiCudaMxfp4Deficit();
+        if (r.deficit.empty() && !matmul_v4::cuda::RcOzakiMxfp4Sm120aKernelLinked() &&
+            DeviceLooksLikeSm120Hint(r.arch_key)) {
+            r.deficit = "not_linked";
+        }
     }
     if (matmul_v4::hip::IsRcOzakiHipCompiled()) {
         (void)matmul_v4::hip::SelfQualifyRcOzakiHipMxfp4Once();
@@ -261,13 +280,13 @@ struct Mxfp4QualResult {
 
     if (!matmul_v4::cuda::IsRcOzakiCudaCompiled() && !matmul_v4::hip::IsRcOzakiHipCompiled() &&
         !matmul_v4::metal::IsRcOzakiMetalCompiled()) {
-        r.deficit = "rc_ozaki_mxfp4_no_vendor_tu_linked";
+        r.deficit = "not_linked";
         r.backend = "Unqualified";
         return r;
     }
     if (!r.qualified) {
         if (r.deficit.empty()) {
-            r.deficit = "rc_ozaki_mxfp4_no_native_tensor_path";
+            r.deficit = "selfqual_failed";
         }
         if (r.backend.empty()) r.backend = "Unqualified";
         r.selected = RCOzakiMxfp4SelectedBackend::Unqualified;
@@ -288,7 +307,17 @@ bool IsRcOzakiExactPanelsQualified()
 bool IsRcOzakiMxfp4Qualified()
 {
     std::lock_guard<std::mutex> lock(g_host_mu);
-    return g_mx_qualified;
+    if (!g_mx_qualified) return false;
+    if (g_mx_selected == RCOzakiMxfp4SelectedBackend::SM120_MMA &&
+        !matmul_v4::cuda::RcOzakiMxfp4Sm120aKernelLinked()) {
+        return false;
+    }
+    return true;
+}
+
+bool IsRcOzakiMxfp4Sm120aKernelLinked()
+{
+    return matmul_v4::cuda::RcOzakiMxfp4Sm120aKernelLinked();
 }
 
 RCOzakiMxfp4Status ProbeRcOzakiMxfp4Status()
@@ -300,17 +329,28 @@ RCOzakiMxfp4Status ProbeRcOzakiMxfp4Status()
     st.attempted = g_mx_attempted;
     st.qualified = g_mx_qualified;
     st.exact_panels_qualified = g_exact_qualified;
+    st.sm120a_kernel_linked = matmul_v4::cuda::RcOzakiMxfp4Sm120aKernelLinked();
     st.selected = g_mx_selected;
     st.backend = g_mx_backend;
     st.arch_key = g_mx_arch_key;
-    if (g_mx_qualified) {
+    // Final honesty: never report SM120_MMA without the sm_120a object.
+    if (st.selected == RCOzakiMxfp4SelectedBackend::SM120_MMA && !st.sm120a_kernel_linked) {
+        st.qualified = false;
+        st.selected = RCOzakiMxfp4SelectedBackend::Unqualified;
+        if (st.backend.find("scalar-decode") == std::string::npos) {
+            st.backend = "Unqualified";
+        }
+        st.deficit_reason = "not_linked";
+        return st;
+    }
+    if (st.qualified) {
         st.deficit_reason.clear();
     } else if (!g_mx_deficit.empty()) {
         st.deficit_reason = g_mx_deficit;
     } else if (!g_mx_attempted) {
         st.deficit_reason = "ozaki_mxfp4_not_probed";
     } else {
-        st.deficit_reason = "ozaki_mxfp4_not_qualified";
+        st.deficit_reason = "selfqual_failed";
     }
     return st;
 }
@@ -360,6 +400,12 @@ bool TryRcOzakiMxfp4GemmS8S8Int64(const std::vector<int8_t>& left, const std::ve
     std::string err;
     if (matmul_v4::cuda::IsRcOzakiCudaCompiled() &&
         matmul_v4::cuda::IsRcOzakiCudaMxfp4Qualified()) {
+        // SM120_MMA requires packaging capability; otherwise decline (fail-closed).
+        if (matmul_v4::cuda::RcOzakiCudaMxfp4SelectedBackend() ==
+                matmul_v4::cuda::RcOzakiMxfp4SelectedBackend::SM120_MMA &&
+            !matmul_v4::cuda::RcOzakiMxfp4Sm120aKernelLinked()) {
+            return false;
+        }
         return matmul_v4::cuda::TryLaunchRcOzakiMxfp4GemmS8S8Int64(left, right, rows, inner, cols,
                                                                     out, &err);
     }
