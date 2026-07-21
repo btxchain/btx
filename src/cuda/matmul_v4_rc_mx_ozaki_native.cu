@@ -330,11 +330,21 @@ __global__ void rc_ozaki_mxfp4_panel_gemm(const uint8_t* a_e2m1, const uint8_t* 
 }
 
 /**
- * SM120 / SM120a native MXFP4 TC: mma.sync kind::mxf8f6f4.block_scale m16n8k32
- * e2m1×e2m1. Inline PTX is compiled IN only when __CUDA_ARCH__ is in the
- * consumer Blackwell 12x family (1200–1299). On all other targets in a multi-arch
- * fatbin (sm_90 / sm_100 / …) the body compiles OUT to zeros — no assembler
- * failure. Runtime still requires SelectedBackend==SM120_MMA after full suite.
+ * SM120a native MXFP4 TC: mma.sync kind::mxf8f6f4.block_scale m16n8k32 e2m1×e2m1.
+ *
+ * Block-scaled MXF8F6F4 PTX requires feature-qualified sm_120a. Plain sm_120 and
+ * sm_120a both report __CUDA_ARCH__==1200, so a family range gate
+ * (__CUDA_ARCH__ >= 1200 && < 1300) is too broad and fails ptxas on sm_120.
+ * Do NOT use (__CUDA_ARCH__ >= 1000 && < 1100) — that can compile SM120 bodies
+ * into sm_100 slices. Do NOT use __CUDA_ARCH_FAMILY_SPECIFIC__ here until an
+ * sm_120f toolchain is verified locally.
+ *
+ * Compile IN only under:
+ *   defined(__CUDA_ARCH_SPECIFIC__) && (__CUDA_ARCH_SPECIFIC__ == 1200)
+ * i.e. the sm_120a device slice. Plain sm_120 (__CUDA_ARCH__==1200 without
+ * SPECIFIC) and all other fatbin targets (sm_90 / sm_100 / …) compile OUT to
+ * zeros — no assembler failure. SM100 stays on the separate CUBLASLT path.
+ * Runtime still requires SelectedBackend==SM120_MMA after full suite.
  * Rack G: expect SASS QMMA.SF E2M1 under CUDA 13.2 + sm_120a.
  */
 __device__ __forceinline__ void RcOzakiMmaMxfp4M16N8K32(float& d0, float& d1, float& d2, float& d3,
@@ -342,7 +352,7 @@ __device__ __forceinline__ void RcOzakiMmaMxfp4M16N8K32(float& d0, float& d1, fl
                                                          uint32_t a3, uint32_t b0, uint32_t b1,
                                                          uint32_t sfa, uint32_t sfb)
 {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1200) && (__CUDA_ARCH__ < 1300)
+#if defined(__CUDA_ARCH_SPECIFIC__) && (__CUDA_ARCH_SPECIFIC__ == 1200)
     uint16_t z = 0;
     asm volatile(
         "mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e2m1.e2m1.f32.ue8m0 "
@@ -1427,6 +1437,14 @@ using Mxfp4PanelLauncher = bool (*)(const std::vector<int8_t>&, const std::vecto
 }
 
 } // namespace
+
+// Weak default: plain sm_120 / multi-arch builds without the sm_120a marker TU
+// report false. Strong definition in matmul_v4_rc_mx_ozaki_native_sm120a.cu
+// overrides when Agent B links that TU (compiled for sm_120a).
+__attribute__((weak)) bool RcOzakiMxfp4Sm120aKernelLinked()
+{
+    return false;
+}
 
 bool IsRcOzakiCudaCompiled()
 {
