@@ -8,6 +8,11 @@
 
 namespace matmul_v4::cuda {
 
+bool RcOzakiMxfp4Sm120aKernelLinked()
+{
+    return false;
+}
+
 bool IsRcOzakiCudaCompiled()
 {
     return false;

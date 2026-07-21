@@ -18,7 +18,9 @@
 // Never combine partial MMA evidence with cuBLASLt and mislabel as MMA/cutlass.
 // Never report dense INT8 / scalar-decode as native MXFP4.
 //
-// SASS expectation for rack Workstream G (sm_120 / sm_120a, CUDA 13.2):
+// SASS expectation for rack Workstream G (sm_120a, CUDA 13.2):
+//   Block-scaled mxf8f6f4 PTX is compiled IN only under
+//   __CUDA_ARCH_SPECIFIC__==1200 (feature-qualified sm_120a), not plain sm_120.
 //   After SM120_MMA qualifies, capture SASS and confirm QMMA.SF E2M1
 //   (mma.sync kind::mxf8f6f4.block_scale … e2m1.e2m1 … ue8m0) appears in the
 //   rc_ozaki_mxfp4_mma_gemm kernel. Suggested:
@@ -34,6 +36,14 @@ enum class RcOzakiMxfp4SelectedBackend : uint8_t {
     SM120_MMA = 1,       // hand QMMA.SF m16n8k32 e2m1 block_scale (not CUTLASS)
     SM100_CUBLASLT = 2,  // cuBLASLt CUDA_R_4F_E2M1 + VEC32_UE8M0 on sm_100
 };
+
+/**
+ * Link-time capability: true only when the sm_120a marker TU
+ * (matmul_v4_rc_mx_ozaki_native_sm120a.cu) is linked. Weak stub returns false
+ * when that TU is absent (plain sm_120 / no-CUDA builds). Agent C / self-qual
+ * should consult this before advertising SM120_MMA as build-capable.
+ */
+[[nodiscard]] bool RcOzakiMxfp4Sm120aKernelLinked();
 
 [[nodiscard]] bool IsRcOzakiCudaCompiled();
 
