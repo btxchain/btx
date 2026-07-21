@@ -11,6 +11,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -50,13 +51,72 @@ std::mutex g_ozaki_mu;
 bool g_exact_ran{false};
 bool g_exact_qualified{false};
 
-// Native MXFP4 — separate arch latches (sm_120 ≠ sm_100).
+// Native MXFP4 — separate arch latches (sm_120 ≠ sm_100). Never cross-infer.
 bool g_mx_ran{false};
-bool g_qual_sm120{false};
-bool g_qual_sm100{false};
+RcOzakiMxfp4SelectedBackend g_mx_selected{RcOzakiMxfp4SelectedBackend::Unqualified};
 std::string g_mx_arch_key;
 std::string g_mx_backend;
 std::string g_mx_deficit;
+std::atomic<uint64_t> g_native_tensor_launches{0};
+std::atomic<uint64_t> g_scalar_tail_launches{0};
+
+/** Grow-only process scratch — replaces per-panel cudaMalloc/cudaFree. */
+struct OzakiDeviceBuf {
+    void* p{nullptr};
+    size_t bytes{0};
+    [[nodiscard]] bool Ensure(size_t need)
+    {
+        if (need == 0) return true;
+        if (p != nullptr && bytes >= need) return true;
+        void* np = nullptr;
+        if (cudaMalloc(&np, need) != cudaSuccess) return false;
+        if (p) cudaFree(p);
+        p = np;
+        bytes = need;
+        return true;
+    }
+    void Release()
+    {
+        if (p) {
+            cudaFree(p);
+            p = nullptr;
+            bytes = 0;
+        }
+    }
+};
+
+struct OzakiDeviceArena {
+    OzakiDeviceBuf dA;
+    OzakiDeviceBuf dB;
+    OzakiDeviceBuf dSFa;
+    OzakiDeviceBuf dSFb;
+    OzakiDeviceBuf dD;
+    OzakiDeviceBuf dWS;
+    OzakiDeviceBuf dOutI64;
+    OzakiDeviceBuf dHostStage; // staging for device-pointer int8 factor path
+    cudaStream_t stream{nullptr};
+
+    [[nodiscard]] bool EnsureStream()
+    {
+        if (stream != nullptr) return true;
+        return cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) == cudaSuccess;
+    }
+
+    [[nodiscard]] bool Ensure(size_t a, size_t b, size_t sfa, size_t sfb, size_t d_elems,
+                             size_t ws = 0)
+    {
+        constexpr size_t kDefaultWs = 32ull * 1024ull * 1024ull;
+        const size_t need_ws = ws == 0 ? kDefaultWs : ws;
+        return EnsureStream() && dA.Ensure(a) && dB.Ensure(b) && dSFa.Ensure(sfa) &&
+               dSFb.Ensure(sfb) && dD.Ensure(d_elems * sizeof(float)) && dWS.Ensure(need_ws);
+    }
+};
+
+OzakiDeviceArena& Arena()
+{
+    static OzakiDeviceArena a;
+    return a;
+}
 
 [[nodiscard]] bool DeviceLooksSm120(int major, int /*minor*/)
 {
@@ -71,6 +131,19 @@ std::string g_mx_deficit;
 [[nodiscard]] std::string FormatCudaArchKey(int major, int minor)
 {
     return "sm_" + std::to_string(major) + std::to_string(minor);
+}
+
+[[nodiscard]] const char* SelectedBackendName(RcOzakiMxfp4SelectedBackend b)
+{
+    switch (b) {
+    case RcOzakiMxfp4SelectedBackend::SM120_MMA:
+        return "SM120_MMA";
+    case RcOzakiMxfp4SelectedBackend::SM100_CUBLASLT:
+        return "SM100_CUBLASLT";
+    case RcOzakiMxfp4SelectedBackend::Unqualified:
+    default:
+        return "Unqualified";
+    }
 }
 
 [[nodiscard]] bool IsM11(int32_t mu)
@@ -257,16 +330,19 @@ __global__ void rc_ozaki_mxfp4_panel_gemm(const uint8_t* a_e2m1, const uint8_t* 
 }
 
 /**
- * SM120a native MXFP4 TC: mma.sync kind::mxf8f6f4.block_scale m16n8k32 e2m1×e2m1.
- * A: M×K row-major, one e2m1 per byte in bits 5-2 (nibble<<2). B: K×N row-major.
- * SFA/SFB: UE8M0 per (row/col, K/32). Empirically-validated fragment layout (QMMA.SF).
+ * SM120 / SM120a native MXFP4 TC: mma.sync kind::mxf8f6f4.block_scale m16n8k32
+ * e2m1×e2m1. Inline PTX is compiled IN only when __CUDA_ARCH__ is in the
+ * consumer Blackwell 12x family (1200–1299). On all other targets in a multi-arch
+ * fatbin (sm_90 / sm_100 / …) the body compiles OUT to zeros — no assembler
+ * failure. Runtime still requires SelectedBackend==SM120_MMA after full suite.
+ * Rack G: expect SASS QMMA.SF E2M1 under CUDA 13.2 + sm_120a.
  */
 __device__ __forceinline__ void RcOzakiMmaMxfp4M16N8K32(float& d0, float& d1, float& d2, float& d3,
                                                          uint32_t a0, uint32_t a1, uint32_t a2,
                                                          uint32_t a3, uint32_t b0, uint32_t b1,
                                                          uint32_t sfa, uint32_t sfb)
 {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1200)
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1200) && (__CUDA_ARCH__ < 1300)
     uint16_t z = 0;
     asm volatile(
         "mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e2m1.e2m1.f32.ue8m0 "
@@ -551,7 +627,7 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
 [[nodiscard]] bool RunCublasLtBlockScaledTnOzaki(const void* dA, const void* dB, const void* dSFa,
                                                  const void* dSFb, float* dD, uint32_t M,
                                                  uint32_t N, uint32_t K, void* workspace,
-                                                 size_t workspace_bytes)
+                                                 size_t workspace_bytes, cudaStream_t stream)
 {
     cublasLtHandle_t lt = nullptr;
     cublasLtMatmulDesc_t op = nullptr;
@@ -611,11 +687,10 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
         const float alpha = 1.0f;
         const float beta = 0.0f;
         if (cublasLtMatmul(lt, op, &alpha, dA, a_layout, dB, b_layout, &beta, dD, d_layout, dD,
-                           d_layout, &heuristic.algo, workspace, workspace_bytes,
-                           /*stream=*/nullptr) != CUBLAS_STATUS_SUCCESS) {
+                           d_layout, &heuristic.algo, workspace, workspace_bytes, stream) !=
+            CUBLAS_STATUS_SUCCESS) {
             break;
         }
-        if (cudaDeviceSynchronize() != cudaSuccess) break;
         ok = true;
     } while (false);
 
@@ -628,11 +703,12 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
     return ok;
 }
 
-/** Real TC: factor → cuBLASLt CUDA_R_4F_E2M1 + VEC32_UE8M0 → exact int32. */
+/** Real TC: factor → cuBLASLt CUDA_R_4F_E2M1 + VEC32_UE8M0 → exact int32 (arena). */
 [[nodiscard]] bool LaunchMxfp4OnePanelCublasLt(const std::vector<int8_t>& Lpanel,
                                                const std::vector<int8_t>& Rpanel, uint32_t rows,
                                                uint32_t len, uint32_t cols,
-                                               std::vector<int32_t>& partial, std::string* error)
+                                               std::vector<int32_t>& partial, std::string* error,
+                                               cudaStream_t stream = nullptr)
 {
     std::vector<uint8_t> A_pack, B_pack, SFa, SFb;
     uint32_t Mpad = 0, Npad = 0, Kpad = 0;
@@ -641,52 +717,45 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
         return false;
     }
 
-    void *dA = nullptr, *dB = nullptr, *dSFa = nullptr, *dSFb = nullptr, *dD = nullptr,
-         *dWS = nullptr;
+    auto& arena = Arena();
     constexpr size_t kWorkspace = 32ull * 1024ull * 1024ull;
-    auto fail = [&](const char* msg) {
-        if (error) *error = msg;
-        cudaFree(dA);
-        cudaFree(dB);
-        cudaFree(dSFa);
-        cudaFree(dSFb);
-        cudaFree(dD);
-        cudaFree(dWS);
+    if (!arena.Ensure(A_pack.size(), B_pack.size(), SFa.size(), SFb.size(),
+                      static_cast<size_t>(Mpad) * Npad, kWorkspace)) {
+        if (error) *error = "rc_ozaki_mxfp4_cublaslt arena ensure failed";
         return false;
-    };
-
-    if (cudaMalloc(&dA, A_pack.size()) != cudaSuccess ||
-        cudaMalloc(&dB, B_pack.size()) != cudaSuccess ||
-        cudaMalloc(&dSFa, SFa.size()) != cudaSuccess ||
-        cudaMalloc(&dSFb, SFb.size()) != cudaSuccess ||
-        cudaMalloc(&dD, static_cast<size_t>(Mpad) * Npad * sizeof(float)) != cudaSuccess ||
-        cudaMalloc(&dWS, kWorkspace) != cudaSuccess) {
-        return fail("rc_ozaki_mxfp4_cublaslt cudaMalloc failed");
     }
-    if (cudaMemcpy(dA, A_pack.data(), A_pack.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(dB, B_pack.data(), B_pack.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(dSFa, SFa.data(), SFa.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(dSFb, SFb.data(), SFb.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemset(dD, 0, static_cast<size_t>(Mpad) * Npad * sizeof(float)) != cudaSuccess) {
-        return fail("rc_ozaki_mxfp4_cublaslt H2D failed");
+    cudaStream_t s = stream != nullptr ? stream : arena.stream;
+
+    if (cudaMemcpyAsync(arena.dA.p, A_pack.data(), A_pack.size(), cudaMemcpyHostToDevice, s) !=
+            cudaSuccess ||
+        cudaMemcpyAsync(arena.dB.p, B_pack.data(), B_pack.size(), cudaMemcpyHostToDevice, s) !=
+            cudaSuccess ||
+        cudaMemcpyAsync(arena.dSFa.p, SFa.data(), SFa.size(), cudaMemcpyHostToDevice, s) !=
+            cudaSuccess ||
+        cudaMemcpyAsync(arena.dSFb.p, SFb.data(), SFb.size(), cudaMemcpyHostToDevice, s) !=
+            cudaSuccess ||
+        cudaMemsetAsync(arena.dD.p, 0, static_cast<size_t>(Mpad) * Npad * sizeof(float), s) !=
+            cudaSuccess) {
+        if (error) *error = "rc_ozaki_mxfp4_cublaslt H2D failed";
+        return false;
     }
 
-    if (!RunCublasLtBlockScaledTnOzaki(dA, dB, dSFa, dSFb, static_cast<float*>(dD), Mpad, Npad,
-                                       Kpad, dWS, kWorkspace)) {
-        return fail("rc_ozaki_mxfp4_cublaslt matmul/heuristic failed");
+    if (!RunCublasLtBlockScaledTnOzaki(arena.dA.p, arena.dB.p, arena.dSFa.p, arena.dSFb.p,
+                                       static_cast<float*>(arena.dD.p), Mpad, Npad, Kpad,
+                                       arena.dWS.p, kWorkspace, s)) {
+        if (error) *error = "rc_ozaki_mxfp4_cublaslt matmul/heuristic failed";
+        return false;
     }
 
     std::vector<float> host_d(static_cast<size_t>(Mpad) * Npad);
-    if (cudaMemcpy(host_d.data(), dD, host_d.size() * sizeof(float), cudaMemcpyDeviceToHost) !=
-        cudaSuccess) {
-        return fail("rc_ozaki_mxfp4_cublaslt D2H failed");
+    if (cudaMemcpyAsync(host_d.data(), arena.dD.p, host_d.size() * sizeof(float),
+                        cudaMemcpyDeviceToHost, s) != cudaSuccess ||
+        cudaStreamSynchronize(s) != cudaSuccess) {
+        if (error) *error = "rc_ozaki_mxfp4_cublaslt D2H failed";
+        return false;
     }
-    cudaFree(dA);
-    cudaFree(dB);
-    cudaFree(dSFa);
-    cudaFree(dSFb);
-    cudaFree(dD);
-    cudaFree(dWS);
+
+    g_native_tensor_launches.fetch_add(1, std::memory_order_relaxed);
 
     if (!Fp32ColMajorToExactInt32RowMajor(host_d, Mpad, Npad, rows, cols, partial)) {
         if (error) *error = "rc_ozaki_mxfp4_cublaslt FP32→int32 non-exact";
@@ -805,14 +874,15 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
 }
 
 /**
- * Real TC: factor → QMMA.SF m16n8k32 e2m1 block_scale → exact int32.
- * K must be a multiple of 32 — never zero-pad inside a tile (sm_120 block-scale
- * e2m1 is wrong for partial-K MMA tiles). Callers hybridize remainder via scalar.
+ * Real TC: factor → QMMA.SF m16n8k32 e2m1 block_scale → exact int32 (arena).
+ * K must be a multiple of 32 — never zero-pad inside a tile. Callers hybridize
+ * remainder via scalar-tail (counted separately; not MMA evidence).
  */
 [[nodiscard]] bool LaunchMxfp4OnePanelMma(const std::vector<int8_t>& Lpanel,
                                           const std::vector<int8_t>& Rpanel, uint32_t rows,
                                           uint32_t len, uint32_t cols,
-                                          std::vector<int32_t>& partial, std::string* error)
+                                          std::vector<int32_t>& partial, std::string* error,
+                                          cudaStream_t stream = nullptr)
 {
     if (len == 0 || (len % kMxBlk) != 0) {
         if (error) *error = "rc_ozaki_mxfp4_mma: K not multiple of 32";
@@ -830,54 +900,49 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
     }
     const uint32_t kblocks = Kpad / kMxBlk;
 
-    void *dA = nullptr, *dB = nullptr, *dSFa = nullptr, *dSFb = nullptr, *dD = nullptr;
-    auto fail = [&](const char* msg) {
-        if (error) *error = msg;
-        cudaFree(dA);
-        cudaFree(dB);
-        cudaFree(dSFa);
-        cudaFree(dSFb);
-        cudaFree(dD);
+    auto& arena = Arena();
+    if (!arena.Ensure(A_pack.size(), B_pack.size(), SFa.size(), SFb.size(),
+                      static_cast<size_t>(Mpad) * Npad)) {
+        if (error) *error = "rc_ozaki_mxfp4_mma arena ensure failed";
         return false;
-    };
-
-    if (cudaMalloc(&dA, A_pack.size()) != cudaSuccess ||
-        cudaMalloc(&dB, B_pack.size()) != cudaSuccess ||
-        cudaMalloc(&dSFa, SFa.size()) != cudaSuccess ||
-        cudaMalloc(&dSFb, SFb.size()) != cudaSuccess ||
-        cudaMalloc(&dD, static_cast<size_t>(Mpad) * Npad * sizeof(float)) != cudaSuccess) {
-        return fail("rc_ozaki_mxfp4_mma cudaMalloc failed");
     }
-    if (cudaMemcpy(dA, A_pack.data(), A_pack.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(dB, B_pack.data(), B_pack.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(dSFa, SFa.data(), SFa.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(dSFb, SFb.data(), SFb.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemset(dD, 0, static_cast<size_t>(Mpad) * Npad * sizeof(float)) != cudaSuccess) {
-        return fail("rc_ozaki_mxfp4_mma H2D failed");
+    cudaStream_t s = stream != nullptr ? stream : arena.stream;
+
+    if (cudaMemcpyAsync(arena.dA.p, A_pack.data(), A_pack.size(), cudaMemcpyHostToDevice, s) !=
+            cudaSuccess ||
+        cudaMemcpyAsync(arena.dB.p, B_pack.data(), B_pack.size(), cudaMemcpyHostToDevice, s) !=
+            cudaSuccess ||
+        cudaMemcpyAsync(arena.dSFa.p, SFa.data(), SFa.size(), cudaMemcpyHostToDevice, s) !=
+            cudaSuccess ||
+        cudaMemcpyAsync(arena.dSFb.p, SFb.data(), SFb.size(), cudaMemcpyHostToDevice, s) !=
+            cudaSuccess ||
+        cudaMemsetAsync(arena.dD.p, 0, static_cast<size_t>(Mpad) * Npad * sizeof(float), s) !=
+            cudaSuccess) {
+        if (error) *error = "rc_ozaki_mxfp4_mma H2D failed";
+        return false;
     }
 
     dim3 grid(Npad / 8u, Mpad / 16u);
-    rc_ozaki_mxfp4_mma_gemm<<<grid, 32>>>(static_cast<const uint8_t*>(dA),
-                                          static_cast<const uint8_t*>(dB),
-                                          static_cast<const uint8_t*>(dSFa),
-                                          static_cast<const uint8_t*>(dSFb),
-                                          static_cast<float*>(dD), static_cast<int>(Mpad),
-                                          static_cast<int>(Npad), static_cast<int>(Kpad),
-                                          static_cast<int>(kblocks));
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
-        return fail("rc_ozaki_mxfp4_mma kernel launch failed");
+    rc_ozaki_mxfp4_mma_gemm<<<grid, 32, 0, s>>>(
+        static_cast<const uint8_t*>(arena.dA.p), static_cast<const uint8_t*>(arena.dB.p),
+        static_cast<const uint8_t*>(arena.dSFa.p), static_cast<const uint8_t*>(arena.dSFb.p),
+        static_cast<float*>(arena.dD.p), static_cast<int>(Mpad), static_cast<int>(Npad),
+        static_cast<int>(Kpad), static_cast<int>(kblocks));
+    if (cudaGetLastError() != cudaSuccess) {
+        if (error) *error = "rc_ozaki_mxfp4_mma kernel launch failed";
+        return false;
     }
 
     std::vector<float> host_d(static_cast<size_t>(Mpad) * Npad);
-    if (cudaMemcpy(host_d.data(), dD, host_d.size() * sizeof(float), cudaMemcpyDeviceToHost) !=
-        cudaSuccess) {
-        return fail("rc_ozaki_mxfp4_mma D2H failed");
+    if (cudaMemcpyAsync(host_d.data(), arena.dD.p, host_d.size() * sizeof(float),
+                        cudaMemcpyDeviceToHost, s) != cudaSuccess ||
+        cudaStreamSynchronize(s) != cudaSuccess) {
+        if (error) *error = "rc_ozaki_mxfp4_mma D2H failed";
+        return false;
     }
-    cudaFree(dA);
-    cudaFree(dB);
-    cudaFree(dSFa);
-    cudaFree(dSFb);
-    cudaFree(dD);
+
+    // Count only after successful launch+sync — scalar-tail never increments this.
+    g_native_tensor_launches.fetch_add(1, std::memory_order_relaxed);
 
     if (!Fp32RowMajorToExactInt32RowMajor(host_d, Mpad, Npad, rows, cols, partial)) {
         if (error) *error = "rc_ozaki_mxfp4_mma FP32→int32 non-exact";
@@ -890,7 +955,7 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
 
 [[nodiscard]] bool LaunchMxfp4OnePanelMma(const std::vector<int8_t>&, const std::vector<int8_t>&,
                                           uint32_t, uint32_t, uint32_t, std::vector<int32_t>&,
-                                          std::string* error)
+                                          std::string* error, cudaStream_t = nullptr)
 {
     if (error) *error = "rc_ozaki_mxfp4_mma: toolkit lacks FP4 helpers";
     return false;
@@ -898,7 +963,7 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
 
 [[nodiscard]] bool LaunchMxfp4OnePanelCublasLt(const std::vector<int8_t>&, const std::vector<int8_t>&,
                                                uint32_t, uint32_t, uint32_t, std::vector<int32_t>&,
-                                               std::string* error)
+                                               std::string* error, cudaStream_t = nullptr)
 {
     if (error) *error = "rc_ozaki_mxfp4_cublaslt: toolkit lacks FP4/VEC32";
     return false;
@@ -910,7 +975,8 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
 [[nodiscard]] bool LaunchMxfp4OnePanelScalar(const std::vector<int8_t>& Lpanel,
                                              const std::vector<int8_t>& Rpanel, uint32_t rows,
                                              uint32_t len, uint32_t cols,
-                                             std::vector<int32_t>& partial, std::string* error)
+                                             std::vector<int32_t>& partial, std::string* error,
+                                             cudaStream_t stream = nullptr)
 {
     std::vector<uint8_t> a_e2m1, b_e2m1, sfa, sfb;
     uint32_t kblocks = 0;
@@ -919,51 +985,46 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
         return false;
     }
 
-    uint8_t *d_a = nullptr, *d_b = nullptr, *d_sfa = nullptr, *d_sfb = nullptr;
-    float* d_out = nullptr;
+    auto& arena = Arena();
     const size_t out_n = static_cast<size_t>(rows) * cols;
-    auto fail = [&](const char* msg) {
-        if (error) *error = msg;
-        cudaFree(d_a);
-        cudaFree(d_b);
-        cudaFree(d_sfa);
-        cudaFree(d_sfb);
-        cudaFree(d_out);
+    if (!arena.Ensure(a_e2m1.size(), b_e2m1.size(), sfa.size(), sfb.size(), out_n)) {
+        if (error) *error = "rc_ozaki_mxfp4 scalar arena ensure failed";
         return false;
-    };
-
-    if (cudaMalloc(&d_a, a_e2m1.size()) != cudaSuccess ||
-        cudaMalloc(&d_b, b_e2m1.size()) != cudaSuccess ||
-        cudaMalloc(&d_sfa, sfa.size()) != cudaSuccess ||
-        cudaMalloc(&d_sfb, sfb.size()) != cudaSuccess ||
-        cudaMalloc(&d_out, out_n * sizeof(float)) != cudaSuccess) {
-        return fail("rc_ozaki_mxfp4 cudaMalloc failed");
     }
-    if (cudaMemcpy(d_a, a_e2m1.data(), a_e2m1.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(d_b, b_e2m1.data(), b_e2m1.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(d_sfa, sfa.data(), sfa.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(d_sfb, sfb.data(), sfb.size(), cudaMemcpyHostToDevice) != cudaSuccess) {
-        return fail("rc_ozaki_mxfp4 H2D failed");
+    cudaStream_t s = stream != nullptr ? stream : arena.stream;
+
+    if (cudaMemcpyAsync(arena.dA.p, a_e2m1.data(), a_e2m1.size(), cudaMemcpyHostToDevice, s) !=
+            cudaSuccess ||
+        cudaMemcpyAsync(arena.dB.p, b_e2m1.data(), b_e2m1.size(), cudaMemcpyHostToDevice, s) !=
+            cudaSuccess ||
+        cudaMemcpyAsync(arena.dSFa.p, sfa.data(), sfa.size(), cudaMemcpyHostToDevice, s) !=
+            cudaSuccess ||
+        cudaMemcpyAsync(arena.dSFb.p, sfb.data(), sfb.size(), cudaMemcpyHostToDevice, s) !=
+            cudaSuccess) {
+        if (error) *error = "rc_ozaki_mxfp4 H2D failed";
+        return false;
     }
 
     dim3 block(16, 16);
     dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
-    rc_ozaki_mxfp4_panel_gemm<<<grid, block>>>(d_a, d_b, d_sfa, d_sfb, d_out, rows, len, cols,
-                                               kblocks);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
-        return fail("rc_ozaki_mxfp4_panel_gemm launch failed");
+    rc_ozaki_mxfp4_panel_gemm<<<grid, block, 0, s>>>(
+        static_cast<const uint8_t*>(arena.dA.p), static_cast<const uint8_t*>(arena.dB.p),
+        static_cast<const uint8_t*>(arena.dSFa.p), static_cast<const uint8_t*>(arena.dSFb.p),
+        static_cast<float*>(arena.dD.p), rows, len, cols, kblocks);
+    if (cudaGetLastError() != cudaSuccess) {
+        if (error) *error = "rc_ozaki_mxfp4_panel_gemm launch failed";
+        return false;
     }
 
     std::vector<float> host_fp(out_n);
-    if (cudaMemcpy(host_fp.data(), d_out, out_n * sizeof(float), cudaMemcpyDeviceToHost) !=
-        cudaSuccess) {
-        return fail("rc_ozaki_mxfp4 D2H failed");
+    if (cudaMemcpyAsync(host_fp.data(), arena.dD.p, out_n * sizeof(float), cudaMemcpyDeviceToHost,
+                        s) != cudaSuccess ||
+        cudaStreamSynchronize(s) != cudaSuccess) {
+        if (error) *error = "rc_ozaki_mxfp4 D2H failed";
+        return false;
     }
-    cudaFree(d_a);
-    cudaFree(d_b);
-    cudaFree(d_sfa);
-    cudaFree(d_sfb);
-    cudaFree(d_out);
+
+    g_scalar_tail_launches.fetch_add(1, std::memory_order_relaxed);
 
     std::string conv_err;
     if (!Fp32OutputToExactInt32(host_fp.data(), out_n, partial, conv_err)) {
@@ -1203,6 +1264,32 @@ void FillMxSeeded(std::vector<int8_t>& L, std::vector<int8_t>& R, uint32_t rows,
     }
 }
 
+/** Abrupt E8M0 scale transitions at every K-block boundary (negatives included). */
+void FillScaleTransitions(std::vector<int8_t>& L, std::vector<int8_t>& R, uint32_t rows,
+                          uint32_t inner, uint32_t cols, uint32_t seed)
+{
+    static constexpr int8_t kM11[] = {0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6};
+    L.assign(static_cast<size_t>(rows) * inner, 0);
+    R.assign(static_cast<size_t>(inner) * cols, 0);
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t k = 0; k < inner; ++k) {
+            const uint8_t e = static_cast<uint8_t>((k / kMxBlk) & 3u);
+            const int8_t mu = kM11[(r * 7u + k + seed) % 11];
+            L[static_cast<size_t>(r) * inner + k] =
+                static_cast<int8_t>(static_cast<int32_t>(mu) * (1 << e));
+        }
+    }
+    for (uint32_t k = 0; k < inner; ++k) {
+        for (uint32_t c = 0; c < cols; ++c) {
+            // Opposite phase so products stress scale×scale transitions.
+            const uint8_t e = static_cast<uint8_t>((3u - ((k / kMxBlk) & 3u)) & 3u);
+            const int8_t mu = kM11[(c * 3u + k + seed * 5u) % 11];
+            R[static_cast<size_t>(k) * cols + c] =
+                static_cast<int8_t>(static_cast<int32_t>(mu) * (1 << e));
+        }
+    }
+}
+
 [[nodiscard]] bool DenseInt64(const std::vector<int8_t>& left, const std::vector<int8_t>& right,
                               uint32_t rows, uint32_t inner, uint32_t cols,
                               std::vector<int64_t>& out)
@@ -1247,19 +1334,28 @@ void FillMxSeeded(std::vector<int8_t>& L, std::vector<int8_t>& R, uint32_t rows,
     return true;
 }
 
+enum class MxFillKind : uint8_t { Seeded = 0, MaxCorner = 1, ScaleTransition = 2 };
+
 using Mxfp4PanelLauncher = bool (*)(const std::vector<int8_t>&, const std::vector<int8_t>&,
                                     uint32_t, uint32_t, uint32_t, std::vector<int64_t>&,
                                     std::string*);
 
 [[nodiscard]] bool Mxfp4ShapeMatches(uint32_t rows, uint32_t inner, uint32_t cols, uint32_t seed,
-                                     bool max_corner, uint8_t e, Mxfp4PanelLauncher launch,
+                                     MxFillKind fill, uint8_t e, Mxfp4PanelLauncher launch,
                                      std::string* error)
 {
     std::vector<int8_t> left, right;
-    if (max_corner) {
+    switch (fill) {
+    case MxFillKind::MaxCorner:
         FillM11E8M0Max(left, right, rows, inner, cols, seed, e);
-    } else {
+        break;
+    case MxFillKind::ScaleTransition:
+        FillScaleTransitions(left, right, rows, inner, cols, seed);
+        break;
+    case MxFillKind::Seeded:
+    default:
         FillMxSeeded(left, right, rows, inner, cols, seed);
+        break;
     }
     std::vector<int64_t> cpu;
     DenseInt64(left, right, rows, inner, cols, cpu);
@@ -1281,36 +1377,53 @@ using Mxfp4PanelLauncher = bool (*)(const std::vector<int8_t>&, const std::vecto
     return true;
 }
 
-[[nodiscard]] bool Mxfp4TensorSuiteMatches(std::string* error)
+/**
+ * COMPLETE suite for ONE launcher. Never mix MMA + cuBLASLt evidence.
+ * Boundary K={1,8,31,32,33,4095,4096,4097,8192,16384}; production-ish M/N;
+ * M11/E8M0 corners; scale transitions; both sides of 2^24 (via K=4096 vs 8192+).
+ */
+[[nodiscard]] bool Mxfp4CompleteSuiteForLauncher(Mxfp4PanelLauncher launch, std::string* error)
 {
-    // Prefer real QMMA.SF MMA path; fall back to cuBLASLt if MMA unavailable.
-    std::string mma_err;
-    auto launch_mma = &LaunchOzakiMxfp4PanelsMma;
-    if (Mxfp4ShapeMatches(4, 8, 4, /*seed=*/1, /*max=*/false, 0, launch_mma, &mma_err) &&
-        Mxfp4ShapeMatches(4, 4095, 4, /*seed=*/2, /*max=*/true, /*e=*/3, launch_mma, &mma_err) &&
-        Mxfp4ShapeMatches(4, 4096, 4, /*seed=*/3, /*max=*/true, /*e=*/3, launch_mma, &mma_err) &&
-        Mxfp4ShapeMatches(4, 4097, 4, /*seed=*/5, /*max=*/true, /*e=*/2, launch_mma, &mma_err) &&
-        Mxfp4ShapeMatches(4, 8192, 4, /*seed=*/7, /*max=*/false, 0, launch_mma, &mma_err) &&
-        Mxfp4ShapeMatches(8, 4096, 8, /*seed=*/11, /*max=*/true, /*e=*/1, launch_mma, &mma_err) &&
-        Mxfp4ShapeMatches(4, 16384, 4, /*seed=*/13, /*max=*/false, 0, launch_mma, &mma_err) &&
-        Mxfp4ShapeMatches(32, 4096, 32, /*seed=*/17, /*max=*/true, /*e=*/3, launch_mma, &mma_err)) {
-        return true;
+    struct Case {
+        uint32_t rows, inner, cols, seed;
+        MxFillKind fill;
+        uint8_t e;
+    };
+    static constexpr Case kCases[] = {
+        // Thin / remainder-K (scalar-tail for MMA hybrid; still must be exact).
+        {4, 1, 4, 1, MxFillKind::Seeded, 0},
+        {4, 8, 4, 2, MxFillKind::Seeded, 0},
+        {4, 31, 4, 3, MxFillKind::MaxCorner, 3},
+        {4, 32, 4, 5, MxFillKind::MaxCorner, 2},
+        {4, 33, 4, 7, MxFillKind::Seeded, 0},
+        // 2^24 neighborhood (2304·K): 4096 below, 8192/16384 above for max M11.
+        {4, 4095, 4, 11, MxFillKind::MaxCorner, 3},
+        {4, 4096, 4, 13, MxFillKind::MaxCorner, 3},
+        {4, 4097, 4, 17, MxFillKind::MaxCorner, 2},
+        {4, 8192, 4, 19, MxFillKind::Seeded, 0},
+        {4, 16384, 4, 23, MxFillKind::ScaleTransition, 0},
+        // Production-relevant M/N beyond 4×4 / 32×32.
+        {8, 4096, 8, 29, MxFillKind::MaxCorner, 1},
+        {16, 4096, 16, 31, MxFillKind::ScaleTransition, 0},
+        {64, 32, 64, 37, MxFillKind::MaxCorner, 3},
+        {128, 64, 16, 41, MxFillKind::Seeded, 0},
+        {16, 128, 128, 43, MxFillKind::ScaleTransition, 0},
+        {32, 4096, 32, 47, MxFillKind::MaxCorner, 3},
+        // Negatives + e=0..3 corners.
+        {8, 256, 8, 53, MxFillKind::MaxCorner, 0},
+        {8, 256, 8, 59, MxFillKind::MaxCorner, 3},
+    };
+    for (const auto& c : kCases) {
+        std::string local;
+        if (!Mxfp4ShapeMatches(c.rows, c.inner, c.cols, c.seed, c.fill, c.e, launch, &local)) {
+            if (error) {
+                *error = "suite_fail M=" + std::to_string(c.rows) + " K=" + std::to_string(c.inner) +
+                         " N=" + std::to_string(c.cols) + ": " + local;
+            }
+            return false;
+        }
     }
-    auto launch_lt = &LaunchOzakiMxfp4PanelsCublasLt;
-    std::string lt_err;
-    const bool lt_ok =
-        Mxfp4ShapeMatches(4, 8, 4, /*seed=*/1, /*max=*/false, 0, launch_lt, &lt_err) &&
-        Mxfp4ShapeMatches(4, 4095, 4, /*seed=*/2, /*max=*/true, /*e=*/3, launch_lt, &lt_err) &&
-        Mxfp4ShapeMatches(4, 4096, 4, /*seed=*/3, /*max=*/true, /*e=*/3, launch_lt, &lt_err) &&
-        Mxfp4ShapeMatches(4, 4097, 4, /*seed=*/5, /*max=*/true, /*e=*/2, launch_lt, &lt_err) &&
-        Mxfp4ShapeMatches(4, 8192, 4, /*seed=*/7, /*max=*/false, 0, launch_lt, &lt_err) &&
-        Mxfp4ShapeMatches(8, 4096, 8, /*seed=*/11, /*max=*/true, /*e=*/1, launch_lt, &lt_err) &&
-        Mxfp4ShapeMatches(4, 16384, 4, /*seed=*/13, /*max=*/false, 0, launch_lt, &lt_err) &&
-        Mxfp4ShapeMatches(32, 4096, 32, /*seed=*/17, /*max=*/true, /*e=*/3, launch_lt, &lt_err);
-    if (!lt_ok && error) {
-        *error = "mma_failed:" + mma_err + "; cublaslt_failed:" + lt_err;
-    }
-    return lt_ok;
+    return true;
 }
 
 } // namespace
@@ -1355,9 +1468,13 @@ bool TryLaunchRcOzakiExactPanelsGemmS8S8Int64(const std::vector<int8_t>& left,
 bool IsRcOzakiCudaMxfp4Qualified()
 {
     std::lock_guard<std::mutex> lock(g_ozaki_mu);
-    // True only after a real CUTLASS/cuBLASLt tensor path quals — never from
-    // the scalar-decode E2M1+FP32 kernel (BMX4C C6 honesty).
-    return g_qual_sm120 || g_qual_sm100;
+    return g_mx_selected != RcOzakiMxfp4SelectedBackend::Unqualified;
+}
+
+RcOzakiMxfp4SelectedBackend RcOzakiCudaMxfp4SelectedBackend()
+{
+    std::lock_guard<std::mutex> lock(g_ozaki_mu);
+    return g_mx_selected;
 }
 
 std::string RcOzakiCudaMxfp4ArchKey()
@@ -1378,17 +1495,28 @@ std::string RcOzakiCudaMxfp4Deficit()
     return g_mx_deficit;
 }
 
+uint64_t RcOzakiCudaMxfp4NativeTensorLaunchCount()
+{
+    return g_native_tensor_launches.load(std::memory_order_relaxed);
+}
+
+uint64_t RcOzakiCudaMxfp4ScalarTailLaunchCount()
+{
+    return g_scalar_tail_launches.load(std::memory_order_relaxed);
+}
+
 bool SelfQualifyRcOzakiCudaMxfp4Once()
 {
     {
         std::lock_guard<std::mutex> lock(g_ozaki_mu);
-        if (g_mx_ran) return g_qual_sm120 || g_qual_sm100;
+        if (g_mx_ran) return g_mx_selected != RcOzakiMxfp4SelectedBackend::Unqualified;
     }
 
     cudaDeviceProp prop{};
     std::string err;
     bool scalar_ok = false;
-    bool tensor_ok = false;
+    RcOzakiMxfp4SelectedBackend selected = RcOzakiMxfp4SelectedBackend::Unqualified;
+    std::string tc_err;
     {
         int device = 0;
         if (cudaGetDevice(&device) != cudaSuccess ||
@@ -1400,75 +1528,76 @@ bool SelfQualifyRcOzakiCudaMxfp4Once()
     const bool is_sm120 = DeviceLooksSm120(prop.major, prop.minor);
     const bool is_sm100 = DeviceLooksSm100(prop.major, prop.minor);
 
-    // Scalar-decode exactness probe (reference accelerator). Matches int64 oracle
-    // but is NOT a tensor-core path — must never flip g_qual_sm120 / g_qual_sm100.
+    // Scalar-decode exactness probe — NEVER flips SelectedBackend.
+    std::string scalar_err;
     if (err.empty()) {
         auto scalar = &LaunchOzakiMxfp4PanelsScalar;
-        scalar_ok = Mxfp4ShapeMatches(4, 8, 4, /*seed=*/1, /*max=*/false, 0, scalar, &err) &&
-                    Mxfp4ShapeMatches(4, 4095, 4, /*seed=*/2, /*max=*/true, /*e=*/3, scalar, &err) &&
-                    Mxfp4ShapeMatches(4, 4096, 4, /*seed=*/3, /*max=*/true, /*e=*/3, scalar, &err) &&
-                    Mxfp4ShapeMatches(4, 4097, 4, /*seed=*/5, /*max=*/true, /*e=*/2, scalar, &err) &&
-                    Mxfp4ShapeMatches(4, 8192, 4, /*seed=*/7, /*max=*/false, 0, scalar, &err) &&
-                    Mxfp4ShapeMatches(8, 4096, 8, /*seed=*/11, /*max=*/true, /*e=*/1, scalar, &err) &&
-                    Mxfp4ShapeMatches(4, 16384, 4, /*seed=*/13, /*max=*/false, 0, scalar, &err);
+        scalar_ok = Mxfp4CompleteSuiteForLauncher(scalar, &scalar_err);
     }
 
-    // Real TC path (QMMA.SF MMA preferred; cuBLASLt Plan B). Only this may flip
-    // native latches — and only on sm_120 / sm_100 separately.
-    std::string tc_err;
-    std::string tc_backend;
-    if (err.empty() && (is_sm120 || is_sm100)) {
-        // Detect which backend matched by probing MMA first.
-        std::string mma_probe;
-        if (Mxfp4ShapeMatches(4, 8, 4, 1, false, 0, &LaunchOzakiMxfp4PanelsMma, &mma_probe) &&
-            Mxfp4TensorSuiteMatches(&tc_err)) {
-            // Re-check: if MMA tiny shape works and full suite passed, prefer MMA name.
-            // Suite tries MMA first then Lt — if MMA failed suite wouldn't set via MMA.
-            // Pure-K MMA (no scalar remainder) must match for cutlass/MMA native claim.
-            std::string mma_full;
-            if (Mxfp4ShapeMatches(4, 4096, 4, 3, true, 3, &LaunchOzakiMxfp4PanelsMma, &mma_full) &&
-                Mxfp4ShapeMatches(4, 32, 4, 9, true, 2, &LaunchOzakiMxfp4PanelsMma, &mma_full)) {
-                tensor_ok = true;
-                tc_backend = is_sm120 ? "mxfp4_cutlass_sm120" : "mxfp4_cutlass_sm100";
+    // Per-backend COMPLETE suite. Never combine MMA partial with cuBLASLt.
+    // Never infer SM120 from SM100 or vice versa. Independent of scalar probe.
+    if (err.empty() && is_sm120) {
+        const uint64_t native_before = g_native_tensor_launches.load(std::memory_order_relaxed);
+        std::string mma_err;
+        if (Mxfp4CompleteSuiteForLauncher(&LaunchOzakiMxfp4PanelsMma, &mma_err)) {
+            const uint64_t native_after = g_native_tensor_launches.load(std::memory_order_relaxed);
+            // Scalar-tail alone is NOT evidence MMA executed.
+            if (native_after > native_before) {
+                selected = RcOzakiMxfp4SelectedBackend::SM120_MMA;
+                tc_err.clear();
             } else {
-                tensor_ok = true;
-                tc_backend = is_sm120 ? "mxfp4_cublaslt_sm120" : "mxfp4_cublaslt_sm100";
+                tc_err = "SM120_MMA suite matched but native_tensor_launches==0 "
+                         "(scalar-tail only — not MMA)";
             }
         } else {
-            tensor_ok = false;
-            if (!tc_err.empty()) err = tc_err;
-            else if (!mma_probe.empty()) err = mma_probe;
+            tc_err = mma_err;
+            // Do NOT fall through to cuBLASLt and mislabel as SM120_MMA / cutlass.
         }
+        if (selected == RcOzakiMxfp4SelectedBackend::Unqualified && err.empty()) {
+            err = tc_err;
+        }
+    } else if (err.empty() && is_sm100) {
+        std::string lt_err;
+        if (Mxfp4CompleteSuiteForLauncher(&LaunchOzakiMxfp4PanelsCublasLt, &lt_err)) {
+            selected = RcOzakiMxfp4SelectedBackend::SM100_CUBLASLT;
+            tc_err.clear();
+        } else {
+            tc_err = lt_err;
+        }
+        if (selected == RcOzakiMxfp4SelectedBackend::Unqualified && err.empty()) {
+            err = tc_err;
+        }
+    } else if (err.empty()) {
+        err = "rc_ozaki_mxfp4_arch_not_sm120_or_sm100";
     }
 
     std::lock_guard<std::mutex> lock(g_ozaki_mu);
     if (!g_mx_ran) {
         g_mx_ran = true;
         g_mx_arch_key = FormatCudaArchKey(prop.major, prop.minor);
-        g_qual_sm120 = false;
-        g_qual_sm100 = false;
-        if (tensor_ok && is_sm120) {
-            g_qual_sm120 = true;
-            g_mx_backend = tc_backend.empty() ? "mxfp4_cutlass_sm120" : tc_backend;
-            g_mx_deficit.clear();
-        } else if (tensor_ok && is_sm100) {
-            g_qual_sm100 = true;
-            g_mx_backend = tc_backend.empty() ? "mxfp4_cutlass_sm100" : tc_backend;
+        g_mx_selected = selected;
+        if (selected != RcOzakiMxfp4SelectedBackend::Unqualified) {
+            g_mx_backend = SelectedBackendName(selected);
             g_mx_deficit.clear();
         } else if (scalar_ok) {
-            // BMX4C honesty: distinct scalar-decode marker; native stays false.
             g_mx_backend = "mxfp4_blockscaled_device_scalar-decode";
-            g_mx_deficit =
-                "rc_ozaki_mxfp4_scalar-decode_exact_but_not_native_tensor";
-            if (!tc_err.empty()) {
-                g_mx_deficit += "; tc_failed:" + tc_err;
-            }
+            g_mx_deficit = "rc_ozaki_mxfp4_scalar-decode_exact_but_not_native_tensor";
+            if (!tc_err.empty()) g_mx_deficit += "; tc_failed:" + tc_err;
         } else {
-            g_mx_backend.clear();
-            g_mx_deficit = err.empty() ? "mxfp4_selfqual_failed" : err;
+            g_mx_backend = SelectedBackendName(RcOzakiMxfp4SelectedBackend::Unqualified);
+            if (!err.empty()) {
+                g_mx_deficit = err;
+            } else if (!tc_err.empty()) {
+                g_mx_deficit = tc_err;
+            } else if (!scalar_err.empty()) {
+                g_mx_deficit = "scalar_and_tc_failed:" + scalar_err;
+            } else {
+                g_mx_deficit = "mxfp4_selfqual_failed";
+            }
         }
     }
-    return g_qual_sm120 || g_qual_sm100;
+    return g_mx_selected != RcOzakiMxfp4SelectedBackend::Unqualified;
 }
 
 bool TryLaunchRcOzakiMxfp4GemmS8S8Int64(const std::vector<int8_t>& left,
@@ -1477,19 +1606,91 @@ bool TryLaunchRcOzakiMxfp4GemmS8S8Int64(const std::vector<int8_t>& left,
                                        std::string* error)
 {
     out.clear();
-    // Native claim only: real TC (MMA or cuBLASLt). Scalar-decode must not serve this entry.
-    if (!IsRcOzakiCudaMxfp4Qualified()) {
+    const RcOzakiMxfp4SelectedBackend sel = RcOzakiCudaMxfp4SelectedBackend();
+    if (sel == RcOzakiMxfp4SelectedBackend::Unqualified) {
         if (error) {
             *error = "RC Ozaki MXFP4 native tensor path not qualified "
-                     "(scalar-decode is not native)";
+                     "(scalar-decode / dense INT8 are not native)";
         }
         return false;
     }
-    // Prefer MMA; fall back to cuBLASLt if MMA declines a production shape.
-    if (LaunchOzakiMxfp4PanelsMma(left, right, rows, inner, cols, out, error)) {
+    // Fail-closed: call ONLY the backend that passed full qual — no silent switch.
+    if (sel == RcOzakiMxfp4SelectedBackend::SM120_MMA) {
+        if (!LaunchOzakiMxfp4PanelsMma(left, right, rows, inner, cols, out, error)) {
+            out.clear();
+            if (error && error->empty()) {
+                *error = "SM120_MMA launch failed (fail-closed; no cuBLASLt fallback)";
+            }
+            return false;
+        }
         return true;
     }
-    return LaunchOzakiMxfp4PanelsCublasLt(left, right, rows, inner, cols, out, error);
+    if (sel == RcOzakiMxfp4SelectedBackend::SM100_CUBLASLT) {
+        if (!LaunchOzakiMxfp4PanelsCublasLt(left, right, rows, inner, cols, out, error)) {
+            out.clear();
+            if (error && error->empty()) {
+                *error = "SM100_CUBLASLT launch failed (fail-closed; no MMA fallback)";
+            }
+            return false;
+        }
+        return true;
+    }
+    if (error) *error = "RC Ozaki MXFP4 unknown selected backend";
+    return false;
+}
+
+bool EnsureRcOzakiMxfp4DeviceArena(size_t a_bytes, size_t b_bytes, size_t sfa_bytes,
+                                   size_t sfb_bytes, size_t d_elems, size_t workspace_bytes)
+{
+    return Arena().Ensure(a_bytes, b_bytes, sfa_bytes, sfb_bytes, d_elems, workspace_bytes);
+}
+
+bool TryLaunchRcOzakiMxfp4GemmS8S8Int64Device(const int8_t* d_left, const int8_t* d_right,
+                                             int64_t* d_out, uint32_t rows, uint32_t inner,
+                                             uint32_t cols, void* cuda_stream, std::string* error)
+{
+    // Resident entry (Workstream C): stage device int8 → host factor → arena launch
+    // on caller's stream. API shape is stable; full on-device FactorBlockToMx is a
+    // follow-on. Still fail-closed on SelectedBackend and never switches backends.
+    if (d_left == nullptr || d_right == nullptr || d_out == nullptr || rows == 0 || inner == 0 ||
+        cols == 0) {
+        if (error) *error = "Ozaki MXFP4 device: null/degenerate";
+        return false;
+    }
+    const RcOzakiMxfp4SelectedBackend sel = RcOzakiCudaMxfp4SelectedBackend();
+    if (sel == RcOzakiMxfp4SelectedBackend::Unqualified) {
+        if (error) *error = "Ozaki MXFP4 device: Unqualified selected backend";
+        return false;
+    }
+    auto* stream = static_cast<cudaStream_t>(cuda_stream);
+    std::vector<int8_t> left(static_cast<size_t>(rows) * inner);
+    std::vector<int8_t> right(static_cast<size_t>(inner) * cols);
+    if (cudaMemcpyAsync(left.data(), d_left, left.size(), cudaMemcpyDeviceToHost, stream) !=
+            cudaSuccess ||
+        cudaMemcpyAsync(right.data(), d_right, right.size(), cudaMemcpyDeviceToHost, stream) !=
+            cudaSuccess ||
+        cudaStreamSynchronize(stream) != cudaSuccess) {
+        if (error) *error = "Ozaki MXFP4 device: D2H stage failed";
+        return false;
+    }
+    std::vector<int64_t> host_out;
+    std::string err;
+    bool ok = false;
+    if (sel == RcOzakiMxfp4SelectedBackend::SM120_MMA) {
+        ok = LaunchOzakiMxfp4PanelsMma(left, right, rows, inner, cols, host_out, &err);
+    } else if (sel == RcOzakiMxfp4SelectedBackend::SM100_CUBLASLT) {
+        ok = LaunchOzakiMxfp4PanelsCublasLt(left, right, rows, inner, cols, host_out, &err);
+    }
+    if (!ok) {
+        if (error) *error = err.empty() ? "Ozaki MXFP4 device: selected backend declined" : err;
+        return false;
+    }
+    if (cudaMemcpyAsync(d_out, host_out.data(), host_out.size() * sizeof(int64_t),
+                        cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+        if (error) *error = "Ozaki MXFP4 device: H2D out failed";
+        return false;
+    }
+    return true;
 }
 
 void ResetRcOzakiCudaQualForTest()
@@ -1498,11 +1699,12 @@ void ResetRcOzakiCudaQualForTest()
     g_exact_ran = false;
     g_exact_qualified = false;
     g_mx_ran = false;
-    g_qual_sm120 = false;
-    g_qual_sm100 = false;
+    g_mx_selected = RcOzakiMxfp4SelectedBackend::Unqualified;
     g_mx_arch_key.clear();
     g_mx_backend.clear();
     g_mx_deficit.clear();
+    g_native_tensor_launches.store(0, std::memory_order_relaxed);
+    g_scalar_tail_launches.store(0, std::memory_order_relaxed);
 }
 
 } // namespace matmul_v4::cuda

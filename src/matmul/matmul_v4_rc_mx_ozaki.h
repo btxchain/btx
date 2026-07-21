@@ -18,12 +18,11 @@
 // Two distinct admissions (do not conflate):
 //   1) ExactGemm K-panel Ozaki (IMMA/CPU) — mining accelerator; NEVER sets
 //      ProbeRCSelfQual.native_mxfp4_qualified.
-//   2) Native block-scaled MXFP4 Ozaki — only after a real CUTLASS/cuBLASLt
-//      tensor path matches the int64 oracle (no scalar E2M1+FP32 decode, no
-//      LaunchGemmS8S8 / CPU fallback in the native claim). SM120 and SM100
-//      qualify on separate arch_key latches. The scalar-decode device kernel may
-//      probe exactness and record backend "...scalar-decode" but must leave
-//      IsRcOzakiMxfp4Qualified() / native_mxfp4_qualified false.
+//   2) Native block-scaled MXFP4 Ozaki — only after a real tensor backend
+//      (SM120_MMA or SM100_CUBLASLT) matches the int64 oracle on a COMPLETE
+//      suite for THAT backend alone. Scalar E2M1+FP32 decode and dense INT8
+//      / LaunchGemmS8S8 never set the native latch. SM120 and SM100 qualify
+//      on separate arch_key latches — never infer one from the other.
 //
 // Never copy LT native_mxfp4_qualified. Never raise nMatMulRCHeight.
 
@@ -31,15 +30,22 @@ namespace matmul::v4::rc {
 
 inline constexpr uint32_t kRCOzakiExactChunk = kRCWgradExactChunk;
 
+/** Mirrors matmul_v4::cuda::RcOzakiMxfp4SelectedBackend for host probes. */
+enum class RCOzakiMxfp4SelectedBackend : uint8_t {
+    Unqualified = 0,
+    SM120_MMA = 1,
+    SM100_CUBLASLT = 2,
+};
+
 struct RCOzakiMxfp4Status {
     bool attempted{false};
     bool qualified{false}; // native MXFP4 tensor only
     bool exact_panels_qualified{false};
-    /** "mxfp4_cublaslt_sm120" | "mxfp4_cublaslt_sm100" |
-     *  "mxfp4_cutlass_sm120" | "mxfp4_cutlass_sm100" |
+    RCOzakiMxfp4SelectedBackend selected{RCOzakiMxfp4SelectedBackend::Unqualified};
+    /** "SM120_MMA" | "SM100_CUBLASLT" | "Unqualified" |
      *  "mxfp4_blockscaled_device_scalar-decode" | "" */
     std::string backend;
-    std::string arch_key; // e.g. sm_120 / sm_100
+    std::string arch_key; // e.g. sm_120 / sm_100 — never cross-inferred
     std::string deficit_reason;
 };
 
@@ -53,7 +59,7 @@ struct RCOzakiMxfp4Status {
 
 /**
  * Native MXFP4 Ozaki → int64. Succeeds only when IsRcOzakiMxfp4Qualified()
- * (real CUTLASS/cuBLASLt tensor path; scalar-decode must not serve this entry).
+ * and the selected backend serves the call (no silent backend switch).
  */
 [[nodiscard]] bool TryRcOzakiMxfp4GemmS8S8Int64(
     const std::vector<int8_t>& left, const std::vector<int8_t>& right, uint32_t rows,

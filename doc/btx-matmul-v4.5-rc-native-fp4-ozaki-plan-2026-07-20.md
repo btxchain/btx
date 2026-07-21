@@ -36,16 +36,34 @@ Reuse the exact-integer idea behind `ExactGemmS32S8ViaRadix256`
    IMMA panels. May accelerate mining. **Does NOT** set
    `ProbeRCSelfQual.native_mxfp4_qualified`.
 2. **Native block-scaled MXFP4 Ozaki** (`IsRcOzakiMxfp4Qualified` /
-   `TryRcOzakiMxfp4GemmS8S8Int64`) — only after a real device path that factors
-   MX-dequant int8 → E2M1+UE8M0 and launches `rc_ozaki_mxfp4_panel_gemm`
-   (backend `mxfp4_blockscaled_device`). **Must not** call `LaunchGemmS8S8` or
-   fall back to CPU inside the native claim. SM120 and SM100 use separate
-   qual latches (`g_qual_sm120` / `g_qual_sm100`).
+   `TryRcOzakiMxfp4GemmS8S8Int64`) — only after **one** selected backend passes
+   its **complete** suite alone:
+   - `SM120_MMA` — hand QMMA.SF m16n8k32 e2m1 (never labeled cutlass)
+   - `SM100_CUBLASLT` — cuBLASLt `CUDA_R_4F_E2M1` + `VEC32_UE8M0`
+   Scalar-decode (`mxfp4_blockscaled_device_scalar-decode`) and dense INT8
+   **Must not** flip the native latch. SM120 ≠ SM100 — never cross-infer.
+   Runtime dispatches **only** the selected backend (fail-closed).
 
 ### Qualification gate (before flipping RC `native_mxfp4`)
 
-- Match the **int64 CPU oracle** at K ∈ {4095,4096,4097,8192} + thin production-K,
-  max ±M11/E8M0 vectors, multi-seed; corrupted device output must fail equality.
+- Match the **int64 CPU oracle** at
+  K ∈ {1,8,31,32,33,4095,4096,4097,8192,16384}, production-ish M/N,
+  M11/E8M0 corners, scale transitions, both sides of 2^24; corrupted output
+  must fail equality. Scalar-tail (K%32) is tracked separately and is **not**
+  MMA evidence (`native_tensor_launches` must be > 0 for `SM120_MMA`).
+
+### Rack commands (Workstream G — sm_120a / CUDA 13.2)
+
+```bash
+# Build with architecture-specific consumer Blackwell target:
+cmake -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=120a ...
+ninja test_btx
+./src/test/test_btx -t rc_ozaki_mxfp4_native_gate,rc_ozaki_mxfp4_selected_backend_honesty
+
+# After SM120_MMA qualifies, confirm SASS contains QMMA.SF E2M1:
+cuobjdump -sass src/libbtx_matmul_backend.so | rg -n 'QMMA|mma\.|E2M1|mxf8f6f4'
+ncu --devices 0 --set full ./src/test/test_btx -t rc_ozaki_mxfp4_native_gate
+```
 - Toy/medium episode digests already match in `ProbeRCSelfQual` before the
   native bit is consulted.
 - Until that gate passes: `ProbeRCSelfQual` keeps
