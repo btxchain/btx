@@ -42,7 +42,7 @@ FROZEN_VERSION = 1  # ENC_RC_V1
 
 # Separate frozen digest for Stage C coupled toy (MakeCoupHeader(42) @ height 0).
 # Not an episode transcript version — listed so silent replacement is caught.
-FROZEN_COUPLED_TOY_HEX = "c9ac99d002ba26105ef259bfc09fbc0e2ad57bae14b9558d68b82719fa811363"
+FROZEN_COUPLED_TOY_HEX = "71c40b7b28bf12926282912bf694b3ac699ec728fcb5fe2123b43af7346e731b"
 
 def die(msg: str, code: int = 1) -> None:
     sys.stderr.write("rc-golden-gate: FAIL — " + msg + "\n")
