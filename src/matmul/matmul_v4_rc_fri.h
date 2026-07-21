@@ -66,6 +66,13 @@ inline constexpr size_t kRCFriProofBytesBudget = 1536 * 1024;
 /** Stage-I happy-path ceiling (must equal kRCHappyPathVerifyBudgetS @ 90s/100bps). */
 inline constexpr double kRCFriVerifyBudgetS = 90.0 * 100.0 / 10000.0; // 0.9 s
 
+/** Hard deserialize / pre-verify caps (reject before fold/query work). */
+inline constexpr uint32_t kRCFriMaxFoldLayersHard = 32;
+inline constexpr uint32_t kRCFriMaxQueriesHard = 128; // >= kRCFriNumQueries
+inline constexpr uint32_t kRCFriMaxCoeffsHard = 1u << 20;
+inline constexpr uint32_t kRCFriMaxNestedDeepHard = 2;
+inline constexpr size_t kRCFriMaxProofBytesHard = 16 * 1024 * 1024;
+
 #if defined(BTX_RC_FRI_CONJECTURED_BOUND) && BTX_RC_FRI_CONJECTURED_BOUND
 inline constexpr bool kRCFriConjecturedBoundEnabled = true;
 #else

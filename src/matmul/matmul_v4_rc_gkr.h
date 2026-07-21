@@ -63,13 +63,14 @@ inline constexpr const char* kRCGkrSoundnessBoundStatement =
     "live in Goldilocks Fp2 (|F|~2^128); single Goldilocks is insufficient. "
     "M6/Fable FRI: unique-decoding Q=116, ρ=1/16, g=40, Fp2 → "
     "FriSoundnessBoundBits()=65. Fp3 only for g>=64 (unbuilt). "
-    "DEEP/OOD exact-eval binding CLOSED (FRI v3). "
-    "G1–G5 CLOSED under forge suite (proof v7): A/B openings a_at_r*b_at_r="
-    "final_eval; claim↔trace via commit-then-challenge FRI; Haböck LogUp + "
-    "multiplicity=1; extract_out_commit chain; acc=claim+residual. "
-    "Coupled: real lobe-GEMM + barrier-Extract layers (no toy stand-in). "
-    "M2: ALL-PHASE / barrier sequencing + seeds bound to sigma/roots. "
-    "See doc/btx-matmul-v4.5-rc-arithmetization-completeness-2026-07-20.md. "
+    "DEEP/OOD exact-eval binding CLOSED (FRI v4). "
+    "G1–G5 OPEN/PARKED (proof v7): mutation-of-honest forges are NOT soundness "
+    "evidence. Missing: PCS openings of A/B/Y at sumcheck points; layer roots "
+    "tied to a_fri/b_fri/trace_fri segments; verifier-defined Extract AIR "
+    "(vacuous w≡t LogUp); bank page openings under bank_root. Independent "
+    "malicious constructors currently ACCEPT (see ProveIndepMalicious*). "
+    "Coupled: real lobe-GEMM + barrier-Extract format (no toy stand-in) but "
+    "bindings incomplete. External crypto audit MANDATORY before arbiter. "
     "Merkle q=8 is DoS PREFILTER ONLY. ExactReplay remains consensus arbiter "
     "(BTX_RC_GKR_ARBITER OFF). nMatMulRCHeight=INT32_MAX.";
 
@@ -93,23 +94,32 @@ inline constexpr const char* kRCGkrHbmParkStatement =
     "GKR as production arbiter until budgets close; ship both verifiers and "
     "keep ε=0 ExactReplay as consensus default.";
 
-/** Coupled path: real lobe-GEMM + barrier-Extract arithmetization of the
- *  ACTUAL RCCoupParams work (BuildCoupledLayers ≡ RecomputeCoupledPuzzleReference).
- *  No MakeToyRCEpisodeParams stand-in. G1–G5 CLOSED with forge evidence.
- *  Arbiter stays OFF; ExactReplay is sole consensus accept. */
+/** Coupled path: real lobe-GEMM + barrier-Extract format of ACTUAL
+ *  RCCoupParams work (no MakeToyRCEpisodeParams stand-in). Bindings to
+ *  bank_root / page bytes / Extract AIR remain OPEN. Arbiter OFF. */
 inline constexpr const char* kRCGkrCoupledArithStatement =
-    "ProveWinnerCoupled: REAL coupled arithmetization (lobe GEMM + barrier "
+    "ProveWinnerCoupled: REAL coupled layer FORMAT (lobe GEMM + barrier "
     "Extract LogUp+FRI) over actual RCCoupParams / barrier_roots / bank_root. "
-    "G1–G5 CLOSED (forge suite). BTX_RC_GKR_ARBITER stays OFF; ExactReplay "
-    "decides consensus. nMatMulRCHeight=nMatMulRCCoupledHeight=INT32_MAX.";
+    "G1–G5 OPEN/PARKED (no PCS page openings; vacuous Extract LogUp). "
+    "BTX_RC_GKR_ARBITER stays OFF; ExactReplay decides consensus. "
+    "nMatMulRCHeight=nMatMulRCCoupledHeight=INT32_MAX. External audit mandatory.";
 
-/** G1–G5 closure statement — mark CLOSED only with forge-suite evidence. */
+/**
+ * Honest G1–G5 status — CLOSED only after independent malicious proofs REJECT
+ * under PCS openings + verifier-defined Extract (see construction doc).
+ * Mutation-of-honest suites prove transcript integrity only.
+ */
 inline constexpr const char* kRCGkrG1G5ClosedStatement =
-    "G1–G5 CLOSED (proof v7) with adversarial forge rejects: A/B root, A/B "
-    "opening (a_at_r*b_at_r=final_eval), final_eval, trace opening, Extract "
-    "witness, table multiplicity, layer order, repeated layer, omitted "
-    "barrier, page ID, sigma, dims, target, claimed digest. "
-    "Arbiter OFF; ExactReplay sole consensus accept.";
+    "G1–G5 OPEN/PARKED (proof v7): mutation forges ≠ soundness. Missing "
+    "relations: (G1) a_at_r/b_at_r unbound to a_fri/b_fri at sumcheck point; "
+    "(G2) claim/y_root unbound to trace_fri segment openings; (G3) prover "
+    "manufactures identical witness/table keys (Theorem 5.1 vacuity); "
+    "(G4) extract_out_commit is FS-only; (G5) residual algebra without column "
+    "wiring. Arbiter OFF; ExactReplay sole consensus accept. "
+    "External crypto audit mandatory before any CLOSED claim.";
+
+/** Alias kept for call sites that still name the closed statement. */
+inline constexpr const char* kRCGkrG1G5StatusStatement = kRCGkrG1G5ClosedStatement;
 
 inline constexpr const char* kRCGkrShadowStatement =
     "BTX_RC_GKR_SHADOW=1 (default): generate+verify winner proof in shadow; "
@@ -125,6 +135,14 @@ using gkr_field::Fp2;
 inline constexpr double kRCGkrMediumProveBudgetS = 2.0;
 inline constexpr double kRCGkrVerifyBudgetS = kRCHappyPathVerifyBudgetS;
 inline constexpr size_t kRCGkrProofBytesBudget = 3 * 1024 * 1024; // 3 MiB soft (DEEP+A/B FRI)
+
+/** Hard reject-before-work limits (DoS). Soft budget remains kRCGkrProofBytesBudget.
+ *  Toy ALL-PHASE proofs with DEEP+A/B FRI are ~14 MiB today; hard cap must sit above
+ *  that while still bounding allocation. */
+inline constexpr size_t kRCGkrMaxProofBytesHard = 32 * 1024 * 1024; // 32 MiB
+inline constexpr uint32_t kRCGkrMaxLayersHard = 256;
+inline constexpr uint32_t kRCGkrMaxSumcheckRoundsHard = 64;
+inline constexpr uint32_t kRCGkrMaxRoundSeedsHard = 64;
 
 /** One sumcheck round over Fp2: g(0), g(1), g(2) (deg-2 product). */
 struct RCGkrSumcheckRound {
@@ -343,7 +361,7 @@ struct RCProdVerifyResult {
 /**
  * Succinct verify: sumcheck algebra + FRI openings + LogUp aggregate FS bind.
  * Does NOT re-run the episode / ExpandSynthOperands / Extract recompute.
- * G1–G5 CLOSED (forge suite); see completeness doc.
+ * G1–G5 OPEN/PARKED — see kRCGkrG1G5StatusStatement + completeness doc.
  */
 [[nodiscard]] bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing = nullptr);
 
@@ -439,6 +457,36 @@ struct WinnerGkrSolveReport {
 
 /** CSV-friendly curve helper for STATUS / selfqual hooks. */
 [[nodiscard]] std::string MeasureWinnerGkrCurveCsv(const CBlockHeader& header);
+
+/**
+ * Independent malicious proof constructors (test / audit only).
+ * These rebuild a full transcript from fabricated witnesses — NOT bit-flips of
+ * an honest proof. Where a gap is OPEN, VerifyWinnerProof currently ACCEPTS.
+ */
+enum class RCGkrIndepMaliciousKind : uint32_t {
+    /** G1: any a_at_r,b_at_r with a*b=final_eval (no PCS opening). */
+    ArbitraryAbFactorization = 1,
+    /** G1/G2: layer a_root/b_root/y_root unrelated to a_fri/b_fri/trace_fri. */
+    UnrelatedLayerRoots = 2,
+    /** G2: A/B/Y wires unrelated to episode PRF expansion / round seeds. */
+    FabricatedTraceWires = 3,
+    /** G3: identical fabricated witness/table keys (no Extract relation). */
+    IdenticalFabricatedLookup = 4,
+    /** G3/G4: fabricated Extract I/O; prover recomputes all prover-owned fields. */
+    FabricatedExtractIO = 5,
+    /** Coupled: lobe B matrix unrelated to bank page under bank_root. */
+    UnrelatedBankPages = 6,
+};
+
+[[nodiscard]] const char* RCGkrIndepMaliciousGapNote(RCGkrIndepMaliciousKind kind);
+
+[[nodiscard]] RCGkrProveResult ProveIndepMaliciousEpisodeForTest(
+    const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
+    const uint256& claimed_digest, RCGkrIndepMaliciousKind kind);
+
+[[nodiscard]] RCGkrProveResult ProveIndepMaliciousCoupledForTest(
+    const CBlockHeader& header, int32_t height, const RCCoupParams& params,
+    const uint256& claimed_digest, RCGkrIndepMaliciousKind kind);
 
 } // namespace matmul::v4::rc
 

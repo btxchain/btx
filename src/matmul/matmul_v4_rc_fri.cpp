@@ -529,12 +529,15 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
     if (proof.version != kRCFriProofVersion) return fail("bad fri version");
     if (proof.blowup != kRCFriBlowup) return fail("bad blowup");
     if (proof.layers.empty()) return fail("no layers");
-    if (proof.n_coeffs == 0 || (proof.n_coeffs & (proof.n_coeffs - 1)) != 0)
+    if (proof.layers.size() > kRCFriMaxFoldLayersHard) return fail("FRI depth");
+    if (proof.n_coeffs == 0 || proof.n_coeffs > kRCFriMaxCoeffsHard ||
+        (proof.n_coeffs & (proof.n_coeffs - 1)) != 0)
         return fail("n_coeffs not pow2");
     if (proof.layers[0].n_leaves != proof.n_coeffs * proof.blowup) return fail("LDE size");
     if (proof.fold_challenges.size() + 1 != proof.layers.size()) return fail("layer/challenge count");
     if (proof.layers.back().n_leaves != 1) return fail("final layer not singleton");
     if (proof.queries.size() != kRCFriNumQueries) return fail("query count");
+    if (proof.queries.size() > kRCFriMaxQueriesHard) return fail("query count hard");
 
     for (size_t i = 0; i + 1 < proof.layers.size(); ++i) {
         if (proof.layers[i].n_leaves < 2 || (proof.layers[i].n_leaves % 2) != 0)
@@ -706,8 +709,18 @@ size_t SerializeFriProof(const FriProof& proof, std::vector<unsigned char>& out)
     return out.size();
 }
 
+std::optional<FriProof> DeserializeFriProofDepth(const std::vector<unsigned char>& in,
+                                                 uint32_t depth);
+
 std::optional<FriProof> DeserializeFriProof(const std::vector<unsigned char>& in)
 {
+    return DeserializeFriProofDepth(in, /*depth=*/0);
+}
+
+std::optional<FriProof> DeserializeFriProofDepth(const std::vector<unsigned char>& in, uint32_t depth)
+{
+    if (in.size() > kRCFriMaxProofBytesHard) return std::nullopt;
+    if (depth > kRCFriMaxNestedDeepHard) return std::nullopt;
     const unsigned char* p = in.data();
     const unsigned char* end = in.data() + in.size();
     uint32_t magic = 0, version = 0;
@@ -718,39 +731,46 @@ std::optional<FriProof> DeserializeFriProof(const std::vector<unsigned char>& in
     if (!ReadLE64Checked(p, end, proof.pow_grind_nonce)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.blowup)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.n_coeffs)) return std::nullopt;
+    if (proof.n_coeffs == 0 || proof.n_coeffs > kRCFriMaxCoeffsHard) return std::nullopt;
     uint32_t n_layers = 0;
-    if (!ReadLE32Checked(p, end, n_layers) || n_layers == 0 || n_layers > 64) return std::nullopt;
+    if (!ReadLE32Checked(p, end, n_layers) || n_layers == 0 ||
+        n_layers > kRCFriMaxFoldLayersHard)
+        return std::nullopt;
     proof.layers.resize(n_layers);
     for (auto& lc : proof.layers) {
         if (!ReadBytesChecked(p, end, lc.root.data(), 32)) return std::nullopt;
         if (!ReadLE32Checked(p, end, lc.n_leaves)) return std::nullopt;
+        if (lc.n_leaves > kRCFriMaxCoeffsHard * kRCFriBlowup) return std::nullopt;
     }
     if (!ReadFp2Checked(p, end, proof.final_value)) return std::nullopt;
     uint32_t n_ch = 0;
-    if (!ReadLE32Checked(p, end, n_ch) || n_ch > 64) return std::nullopt;
+    if (!ReadLE32Checked(p, end, n_ch) || n_ch > kRCFriMaxFoldLayersHard) return std::nullopt;
     proof.fold_challenges.resize(n_ch);
     for (auto& c : proof.fold_challenges) {
         if (!ReadFp2Checked(p, end, c)) return std::nullopt;
     }
     uint32_t n_q = 0;
-    if (!ReadLE32Checked(p, end, n_q) || n_q > 256) return std::nullopt;
+    if (!ReadLE32Checked(p, end, n_q) || n_q > kRCFriMaxQueriesHard) return std::nullopt;
     proof.queries.resize(n_q);
     for (auto& q : proof.queries) {
         if (!ReadLE32Checked(p, end, q.index)) return std::nullopt;
         uint32_t n_steps = 0;
-        if (!ReadLE32Checked(p, end, n_steps) || n_steps > 64) return std::nullopt;
+        if (!ReadLE32Checked(p, end, n_steps) || n_steps > kRCFriMaxFoldLayersHard)
+            return std::nullopt;
         q.steps.resize(n_steps);
         for (auto& st : q.steps) {
             if (!ReadLE32Checked(p, end, st.even_index)) return std::nullopt;
             if (!ReadFp2Checked(p, end, st.even)) return std::nullopt;
             if (!ReadFp2Checked(p, end, st.odd)) return std::nullopt;
             uint32_t n_es = 0, n_os = 0;
-            if (!ReadLE32Checked(p, end, n_es) || n_es > 64) return std::nullopt;
+            if (!ReadLE32Checked(p, end, n_es) || n_es > kRCFriMaxFoldLayersHard)
+                return std::nullopt;
             st.even_siblings.resize(n_es);
             for (auto& s : st.even_siblings) {
                 if (!ReadBytesChecked(p, end, s.data(), 32)) return std::nullopt;
             }
-            if (!ReadLE32Checked(p, end, n_os) || n_os > 64) return std::nullopt;
+            if (!ReadLE32Checked(p, end, n_os) || n_os > kRCFriMaxFoldLayersHard)
+                return std::nullopt;
             st.odd_siblings.resize(n_os);
             for (auto& s : st.odd_siblings) {
                 if (!ReadBytesChecked(p, end, s.data(), 32)) return std::nullopt;
@@ -758,7 +778,7 @@ std::optional<FriProof> DeserializeFriProof(const std::vector<unsigned char>& in
         }
         if (!ReadFp2Checked(p, end, q.deep_quot_leaf)) return std::nullopt;
         uint32_t n_ds = 0;
-        if (!ReadLE32Checked(p, end, n_ds) || n_ds > 64) return std::nullopt;
+        if (!ReadLE32Checked(p, end, n_ds) || n_ds > kRCFriMaxFoldLayersHard) return std::nullopt;
         q.deep_quot_siblings.resize(n_ds);
         for (auto& s : q.deep_quot_siblings) {
             if (!ReadBytesChecked(p, end, s.data(), 32)) return std::nullopt;
@@ -774,10 +794,11 @@ std::optional<FriProof> DeserializeFriProof(const std::vector<unsigned char>& in
         if (!ReadBytesChecked(p, end, proof.deep_quot_root.data(), 32)) return std::nullopt;
         if (!ReadLE32Checked(p, end, proof.deep_quot_n_leaves)) return std::nullopt;
         uint32_t nested_n = 0;
-        if (!ReadLE32Checked(p, end, nested_n) || nested_n > (8u << 20)) return std::nullopt;
+        if (!ReadLE32Checked(p, end, nested_n) || nested_n > kRCFriMaxProofBytesHard)
+            return std::nullopt;
         std::vector<unsigned char> nested(nested_n);
         if (!ReadBytesChecked(p, end, nested.data(), nested_n)) return std::nullopt;
-        auto quot = DeserializeFriProof(nested);
+        auto quot = DeserializeFriProofDepth(nested, depth + 1);
         if (!quot) return std::nullopt;
         proof.deep_quot_fri = std::make_shared<FriProof>(std::move(*quot));
     }
