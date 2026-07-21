@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_gkr_air.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
@@ -341,6 +342,70 @@ BOOST_AUTO_TEST_CASE(air_forgery_swap_chacha_sha_intermediate)
                         "tampered ChaCha20 intermediate NOT rejected");
     BOOST_CHECK_MESSAGE(air::ShaIntermediateTamperRejected(),
                         "tampered SHA-256 intermediate NOT rejected");
+}
+
+// ---------------------------------------------------------------------------
+// MxExpand operand-expansion AIR (§5.7): byte-exact vs ExpandMxDequantInt8 and
+// SHA-intermediate tamper rejection.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(air_mxexpand_byte_exact_and_tamper)
+{
+    // Byte-exact binding vs the immutable reference over several seeds/dims.
+    for (uint8_t s = 1; s <= 5; ++s) {
+        const uint256 seed = MakePrf(s);
+        BOOST_CHECK_MESSAGE(air::MxExpandByteExactVsReference(seed, 32, 32),
+                            "MxExpand AIR not byte-exact vs ExpandMxDequantInt8 (32x32)");
+        BOOST_CHECK_MESSAGE(air::MxExpandByteExactVsReference(seed, 32, 64),
+                            "MxExpand AIR not byte-exact vs ExpandMxDequantInt8 (32x64)");
+    }
+    // A tampered mantissa-XOF SHA intermediate must be rejected.
+    BOOST_CHECK_MESSAGE(air::MxExpandIntermediateTamperRejected(),
+                        "tampered MxExpand SHA intermediate NOT rejected");
+    // A forged operand column (one byte flipped) must fail the dequant binding.
+    {
+        const uint256 seed = MakePrf(9);
+        std::vector<int8_t> col = matmul::v4::rc::ExpandMxDequantInt8(seed, 32, 32);
+        col[17] = static_cast<int8_t>(col[17] ^ 0x02);
+        air::TableTM tm;
+        air::LogUpInstance inst_tm;
+        const air::MxExpandVerifyResult r =
+            air::VerifyMxExpandColumn(seed, 32, 32, col, tm, Gamma(), inst_tm);
+        BOOST_CHECK_MESSAGE(!r.ok, "forged MxExpand operand byte NOT rejected");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tile-tree AIR (§6.3): recomputes the RoundMerkleStream root in-circuit,
+// matches the reference, and rejects a forged root / tampered SHA intermediate.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(air_tiletree_binding_and_tamper)
+{
+    // Build a stream and check the in-circuit root equals BuildTileTreeRoot.
+    std::vector<int8_t> stream(1000);
+    Lcg rng(0xBEEF);
+    for (auto& v : stream) v = static_cast<int8_t>(rng.next());
+    const uint32_t t_leaf = 64;
+    const uint256 root = matmul::v4::rc::BuildTileTreeRoot(stream, t_leaf);
+
+    air::TileTreeCheckResult ok = air::CheckTileTreeInCircuit(stream, t_leaf, root);
+    BOOST_CHECK_MESSAGE(ok.ok, "in-circuit tile-tree root != reference: " + ok.failure);
+    BOOST_CHECK(ok.root == root);
+
+    // A forged root must be rejected.
+    uint256 bad = root;
+    bad.data()[0] ^= 0xFF;
+    air::TileTreeCheckResult r = air::CheckTileTreeInCircuit(stream, t_leaf, bad);
+    BOOST_CHECK_MESSAGE(!r.ok, "forged tile-tree root NOT rejected");
+
+    // A tampered stream byte changes the root → reject against the honest root.
+    std::vector<int8_t> tampered = stream;
+    tampered[123] = static_cast<int8_t>(tampered[123] ^ 0x40);
+    air::TileTreeCheckResult r2 = air::CheckTileTreeInCircuit(tampered, t_leaf, root);
+    BOOST_CHECK_MESSAGE(!r2.ok, "tampered tile-tree stream NOT rejected");
+
+    // A tampered SHA intermediate inside a tile-tree hash must be rejected.
+    BOOST_CHECK_MESSAGE(air::TileTreeIntermediateTamperRejected(),
+                        "tampered tile-tree SHA intermediate NOT rejected");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

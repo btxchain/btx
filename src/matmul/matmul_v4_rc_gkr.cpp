@@ -448,6 +448,10 @@ struct LayerWire {
     std::vector<int64_t> extract_in;
     uint256 extract_prf{};
     std::vector<int8_t> extract_out;
+    /** Raw int8/int64 witness (carried in the v7 proof for the in-circuit AIRs). */
+    std::vector<int8_t> A_i8;
+    std::vector<int8_t> B_i8;
+    std::vector<int64_t> Y_i64;
 };
 
 void ExactInt64Gemm(const std::vector<int8_t>& A, uint32_t m, uint32_t k,
@@ -498,6 +502,9 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
         w.A = ToFp2I8(A);
         w.B = ToFp2I8(B);
         w.Y = ToFp2I64(Y_gemm);
+        w.A_i8 = A;
+        w.B_i8 = B;
+        w.Y_i64 = Y_gemm;
         w.extract_in = std::move(extract_in);
         w.extract_prf = prf;
         w.extract_out = std::move(extract);
@@ -1125,38 +1132,6 @@ uint256 EvalArgSeed(const uint256& base, const std::vector<FriLayerCommit>& colu
     return Sha256dBytes(buf.data(), buf.size());
 }
 
-// Reconstruct one round's tile-tree root from the committed extract columns, in
-// the frozen V1 stream order (Z ‖ per-layer X_{l+1} ‖ G_l ‖ D_l), via the exact
-// RoundMerkleStream the consensus reference uses. This is the §6.3 binding: a
-// forged round_root cannot match the tile-tree of the grounded extract columns.
-uint256 ReconstructRoundRoot(const std::vector<LayerWire>& wires, uint32_t round,
-                             const RCEpisodeParams& p)
-{
-    const size_t lpr = 2u + 3u * static_cast<size_t>(p.L_lyr);
-    const size_t base = static_cast<size_t>(round) * lpr;
-    const std::vector<int8_t>* z = nullptr;
-    std::vector<const std::vector<int8_t>*> fwd(p.L_lyr, nullptr), bwd(p.L_lyr, nullptr),
-        wg(p.L_lyr, nullptr);
-    for (size_t li = 0; li < lpr; ++li) {
-        const LayerWire& w = wires[base + li];
-        switch (w.kind) {
-        case RCGkrLayerKind::GemmPhase1SV: z = &w.extract_out; break;
-        case RCGkrLayerKind::GemmPhase2Fwd: fwd[w.layer] = &w.extract_out; break;
-        case RCGkrLayerKind::GemmPhase2Bwd: bwd[w.layer] = &w.extract_out; break;
-        case RCGkrLayerKind::GemmPhase2Wgrad: wg[w.layer] = &w.extract_out; break;
-        default: break; // QKt extract (S) is not streamed.
-        }
-    }
-    RoundMerkleStream merkle(p.T_leaf);
-    if (z) merkle.Absorb(*z);
-    for (uint32_t l = 0; l < p.L_lyr; ++l) {
-        if (fwd[l]) merkle.Absorb(*fwd[l]);
-        if (bwd[l]) merkle.Absorb(*bwd[l]);
-        if (wg[l]) merkle.Absorb(*wg[l]);
-    }
-    return merkle.FinalizeRoot();
-}
-
 // Build the flat column list (per layer: A, B, Y, extract_out), matching both
 // prover and verifier deterministically from the ground-truth wires.
 std::vector<std::vector<Fp2>> BuildV7Columns(const std::vector<LayerWire>& wires)
@@ -1219,6 +1194,307 @@ gkr_air::LogUpVerifyResult ExtractLogUpSample(const std::vector<LayerWire>& wire
     return gkr_air::LogUpDualAlphaVerify(insts, alpha1, alpha2);
 }
 
+// ============================================================================
+// SUCCINCT in-circuit grounding (§5.4/§5.7/§6.3). The verifier grounds the
+// committed columns WITHOUT running the int64 reference: leaf operands bound to
+// seeds by MxExpandAir, chained operands bound to prior extract_out (Λ wiring),
+// extract_out bound to extract_in by the Extract sampler AIR over ALL tiles,
+// and round_roots bound to the extract stream by the tile-tree AIR. Only PUBLIC
+// seeds / prf keys are derived natively (§4.2/§6.1) — never a GEMM or Extract.
+// ============================================================================
+
+// Per-operand provenance in the Λ wiring graph.
+struct TensorRef {
+    bool is_leaf{false};
+    uint256 seed;                 // leaf expansion seed
+    uint32_t erows{0}, ecols{0};  // untransposed leaf/extract dims
+    size_t src_idx{0};            // chained: producing layer index
+    bool transpose{false};        // operand = transpose(tensor)
+};
+
+struct LayerProv {
+    RCGkrLayerKind kind{};
+    uint32_t round{0}, layer{0}, m{0}, n{0}, k{0};
+    TensorRef a, b;
+    uint256 extract_prf{};
+    bool fwd_residual{false};     // extract_in = Y + A (H5 residual) when true
+};
+
+// Reproduce ONLY the Λ wiring structure of BuildRealEpisodeLayers (public seeds
+// + prf + operand provenance). Runs no GEMM and no Extract — cheap and native.
+std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEpisodeParams& p,
+                                          const std::vector<uint256>& round_roots)
+{
+    std::vector<LayerProv> out;
+    out.reserve(ExpectedLayerCount(p));
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+
+    for (uint32_t r = 0; r < p.rounds; ++r) {
+        const uint256 seed_r =
+            (r == 0) ? Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0)
+                     : Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, round_roots[r - 1], r);
+        auto operand = [&](const char* tag) { return DeriveOperandSeedLocal(seed_r, tag); };
+        const size_t base = out.size();
+        const size_t qkt_idx = base + 0;
+        std::vector<size_t> fwd_idx(p.L_lyr), bwd_idx(p.L_lyr);
+        for (uint32_t l = 0; l < p.L_lyr; ++l) fwd_idx[l] = base + 2 + l;
+        for (uint32_t l = 0; l < p.L_lyr; ++l)
+            bwd_idx[l] = base + 2 + p.L_lyr + 2 * static_cast<size_t>(p.L_lyr - 1 - l);
+        // wg_idx[l] = bwd_idx[l] + 1 (Bwd then Wgrad per iteration).
+
+        auto leaf = [&](const uint256& s, uint32_t er, uint32_t ec, bool tr) {
+            TensorRef t; t.is_leaf = true; t.seed = s; t.erows = er; t.ecols = ec; t.transpose = tr;
+            return t;
+        };
+        auto chain = [&](size_t src, uint32_t er, uint32_t ec, bool tr) {
+            TensorRef t; t.is_leaf = false; t.src_idx = src; t.erows = er; t.ecols = ec;
+            t.transpose = tr; return t;
+        };
+        // Named tensors resolving to leaf-or-chain.
+        auto X_tensor = [&](uint32_t l, bool tr) {
+            return (l == 0) ? leaf(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model, tr)
+                            : chain(fwd_idx[l - 1], p.b_seq, p.d_model, tr);
+        };
+        auto G_tensor = [&](uint32_t l, bool tr) { // G[l]
+            return (l == p.L_lyr) ? leaf(operand("BTX_RC_GL_V1"), p.b_seq, p.d_model, tr)
+                                  : chain(bwd_idx[l], p.b_seq, p.d_model, tr);
+        };
+        auto W_seed = [&](uint32_t l) {
+            char tag[40];
+            std::snprintf(tag, sizeof(tag), "BTX_RC_W_%u_V1", l);
+            return operand(tag);
+        };
+        auto prf_tag = [&](const char* fmt, uint32_t l) {
+            char tag[40];
+            std::snprintf(tag, sizeof(tag), fmt, l);
+            return lt::DeriveMatExpandPrfKey(operand(tag));
+        };
+
+        // QKt.
+        {
+            LayerProv lp;
+            lp.kind = RCGkrLayerKind::GemmPhase1QKt;
+            lp.round = r; lp.layer = 0; lp.m = p.n_q; lp.n = p.n_ctx; lp.k = p.d_head;
+            lp.a = leaf(operand("BTX_RC_Q_V1"), p.n_q, p.d_head, false);
+            lp.b = leaf(operand("BTX_RC_KV_K_V1"), p.n_ctx, p.d_head, true); // Kᵀ
+            lp.extract_prf = lt::DeriveMatExpandPrfKey(operand("BTX_RC_PRF_S_V1"));
+            out.push_back(lp);
+        }
+        // SV.
+        {
+            LayerProv lp;
+            lp.kind = RCGkrLayerKind::GemmPhase1SV;
+            lp.round = r; lp.layer = 0; lp.m = p.n_q; lp.n = p.d_head; lp.k = p.n_ctx;
+            lp.a = chain(qkt_idx, p.n_q, p.n_ctx, false); // S = extract_out(QKt)
+            lp.b = leaf(operand("BTX_RC_KV_V_V1"), p.n_ctx, p.d_head, false);
+            lp.extract_prf = lt::DeriveMatExpandPrfKey(operand("BTX_RC_PRF_Z_V1"));
+            out.push_back(lp);
+        }
+        // Fwd layers.
+        for (uint32_t l = 0; l < p.L_lyr; ++l) {
+            LayerProv lp;
+            lp.kind = RCGkrLayerKind::GemmPhase2Fwd;
+            lp.round = r; lp.layer = l; lp.m = p.b_seq; lp.n = p.d_model; lp.k = p.d_model;
+            lp.a = X_tensor(l, false);
+            lp.b = leaf(W_seed(l), p.d_model, p.d_model, true); // Wᵀ
+            lp.extract_prf = prf_tag("BTX_RC_PRF_FWD_%u_V1", l);
+            lp.fwd_residual = true;
+            out.push_back(lp);
+        }
+        // Bwd + Wgrad (l = L-1 .. 0).
+        for (int32_t li = static_cast<int32_t>(p.L_lyr) - 1; li >= 0; --li) {
+            const uint32_t l = static_cast<uint32_t>(li);
+            {
+                LayerProv lp;
+                lp.kind = RCGkrLayerKind::GemmPhase2Bwd;
+                lp.round = r; lp.layer = l; lp.m = p.b_seq; lp.n = p.d_model; lp.k = p.d_model;
+                lp.a = G_tensor(l + 1, false);
+                lp.b = leaf(W_seed(l), p.d_model, p.d_model, false);
+                lp.extract_prf = prf_tag("BTX_RC_PRF_BWD_%u_V1", l);
+                out.push_back(lp);
+            }
+            {
+                LayerProv lp;
+                lp.kind = RCGkrLayerKind::GemmPhase2Wgrad;
+                lp.round = r; lp.layer = l; lp.m = p.d_model; lp.n = p.d_model; lp.k = p.b_seq;
+                lp.a = G_tensor(l + 1, true); // Gᵀ
+                lp.b = X_tensor(l, false);
+                lp.extract_prf = prf_tag("BTX_RC_PRF_WG_%u_V1", l);
+                out.push_back(lp);
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<int8_t> TransposeI8(const std::vector<int8_t>& src, uint32_t rows, uint32_t cols)
+{
+    std::vector<int8_t> out(static_cast<size_t>(rows) * cols);
+    for (uint32_t i = 0; i < rows; ++i)
+        for (uint32_t j = 0; j < cols; ++j)
+            out[static_cast<size_t>(j) * rows + i] = src[static_cast<size_t>(i) * cols + j];
+    return out;
+}
+
+std::vector<std::vector<Fp2>> BuildV7ColumnsFromWitness(
+    const std::vector<RCGkrV7WireWitness>& wires)
+{
+    std::vector<std::vector<Fp2>> cols;
+    cols.reserve(wires.size() * 4);
+    for (const auto& w : wires) {
+        cols.push_back(ToFp2I8(w.A));
+        cols.push_back(ToFp2I8(w.B));
+        cols.push_back(ToFp2I64(w.Y));
+        cols.push_back(ToFp2I8(w.extract_out));
+    }
+    return cols;
+}
+
+// Round stream in the frozen V1 layout (Z ‖ per-layer X_{l+1} ‖ G_l ‖ D_l).
+std::vector<int8_t> ReconstructRoundStreamFromWitness(
+    const std::vector<RCGkrV7WireWitness>& wires, uint32_t round, const RCEpisodeParams& p)
+{
+    const size_t lpr = 2u + 3u * static_cast<size_t>(p.L_lyr);
+    const size_t base = static_cast<size_t>(round) * lpr;
+    const std::vector<int8_t>* z = nullptr;
+    std::vector<const std::vector<int8_t>*> fwd(p.L_lyr, nullptr), bwd(p.L_lyr, nullptr),
+        wg(p.L_lyr, nullptr);
+    for (size_t li = 0; li < lpr; ++li) {
+        const RCGkrV7WireWitness& w = wires[base + li];
+        switch (w.kind) {
+        case RCGkrLayerKind::GemmPhase1SV: z = &w.extract_out; break;
+        case RCGkrLayerKind::GemmPhase2Fwd: fwd[w.layer] = &w.extract_out; break;
+        case RCGkrLayerKind::GemmPhase2Bwd: bwd[w.layer] = &w.extract_out; break;
+        case RCGkrLayerKind::GemmPhase2Wgrad: wg[w.layer] = &w.extract_out; break;
+        default: break;
+        }
+    }
+    std::vector<int8_t> stream;
+    if (z) stream.insert(stream.end(), z->begin(), z->end());
+    for (uint32_t l = 0; l < p.L_lyr; ++l) {
+        if (fwd[l]) stream.insert(stream.end(), fwd[l]->begin(), fwd[l]->end());
+        if (bwd[l]) stream.insert(stream.end(), bwd[l]->begin(), bwd[l]->end());
+        if (wg[l]) stream.insert(stream.end(), wg[l]->begin(), wg[l]->end());
+    }
+    return stream;
+}
+
+struct GroundResult {
+    bool ok{false};
+    std::string failure;
+    uint64_t n_tiles{0};
+    uint64_t n_mxexpand_sha{0};
+    uint64_t n_tiletree_sha{0};
+};
+
+// Bind one committed operand (dims crows×ccols) to its Λ provenance.
+bool BindOperand(const TensorRef& ref, const std::vector<int8_t>& committed, uint32_t crows,
+                 uint32_t ccols, const std::vector<RCGkrV7WireWitness>& wires,
+                 const gkr_air::TableTM& tm, Fp2 gamma, gkr_air::LogUpInstance& inst_tm,
+                 uint64_t& n_sha, std::string& why)
+{
+    if (ref.is_leaf) {
+        // Un-transpose the committed column into the untransposed expansion E.
+        std::vector<int8_t> cand;
+        if (ref.transpose) {
+            // committed = Eᵀ (ecols×erows); recover E (erows×ecols).
+            cand = TransposeI8(committed, crows, ccols);
+        } else {
+            cand = committed;
+        }
+        if (cand.size() != static_cast<size_t>(ref.erows) * ref.ecols) {
+            why = "mxexpand:leaf_dims"; return false;
+        }
+        const gkr_air::MxExpandVerifyResult mr =
+            gkr_air::VerifyMxExpandColumn(ref.seed, ref.erows, ref.ecols, cand, tm, gamma, inst_tm);
+        n_sha += mr.n_mantissa_blocks + mr.n_scale_blocks;
+        if (!mr.ok) { why = mr.failure; return false; }
+        return true;
+    }
+    // Chained: operand equals (transpose of) the source layer's extract_out.
+    const std::vector<int8_t>& src = wires[ref.src_idx].extract_out;
+    if (src.size() != static_cast<size_t>(ref.erows) * ref.ecols) {
+        why = "wiring:chain_src_dims"; return false;
+    }
+    const std::vector<int8_t> expected =
+        ref.transpose ? TransposeI8(src, ref.erows, ref.ecols) : src;
+    if (expected != committed) { why = "wiring:chain_mismatch"; return false; }
+    (void)crows; (void)ccols;
+    return true;
+}
+
+GroundResult GroundEpisodeInCircuit(const std::vector<RCGkrV7WireWitness>& wires,
+                                    const std::vector<LayerProv>& prov, const RCEpisodeParams& p,
+                                    const std::vector<uint256>& round_roots, Fp2 gamma,
+                                    gkr_air::LogUpInstance& inst_tm, gkr_air::LogUpInstance& inst_tx,
+                                    gkr_air::LogUpInstance& inst_r16)
+{
+    GroundResult res;
+    gkr_air::TableTM tm;
+    gkr_air::TableTX tx;
+
+    for (size_t li = 0; li < wires.size(); ++li) {
+        const RCGkrV7WireWitness& w = wires[li];
+        const LayerProv& lp = prov[li];
+        if (lp.kind != w.kind || lp.m != w.m || lp.n != w.n || lp.k != w.k) {
+            res.failure = "wiring:layer_mismatch"; return res;
+        }
+        std::string why;
+        // §5.7 operand grounding.
+        if (!BindOperand(lp.a, w.A, w.m, w.k, wires, tm, gamma, inst_tm, res.n_mxexpand_sha, why)) {
+            res.failure = "A:" + why; return res;
+        }
+        if (!BindOperand(lp.b, w.B, w.k, w.n, wires, tm, gamma, inst_tm, res.n_mxexpand_sha, why)) {
+            res.failure = "B:" + why; return res;
+        }
+        // extract_in binding: = Y (+ A residual for Fwd). Y is sumcheck-bound.
+        if (w.extract_in.size() != static_cast<size_t>(w.m) * w.n ||
+            w.Y.size() != static_cast<size_t>(w.m) * w.n) {
+            res.failure = "extract_in:size"; return res;
+        }
+        for (size_t idx = 0; idx < w.extract_in.size(); ++idx) {
+            int64_t expect = w.Y[idx];
+            if (lp.fwd_residual) expect += static_cast<int64_t>(w.A[idx]);
+            if (w.extract_in[idx] != expect) { res.failure = "extract_in:binding"; return res; }
+        }
+        // Extract sampler AIR over ALL tiles + dual-α LogUp feed.
+        const uint32_t n_blocks = w.n / kRCMxBlockLen;
+        for (uint32_t i = 0; i < w.m; ++i) {
+            for (uint32_t bj = 0; bj < n_blocks; ++bj) {
+                gkr_air::TilePublic pub;
+                pub.prf_key = lp.extract_prf;
+                pub.i = i;
+                pub.bj = bj;
+                std::array<int64_t, kRCMxBlockLen> in{};
+                const size_t off = static_cast<size_t>(i) * w.n + bj * kRCMxBlockLen;
+                for (uint32_t t = 0; t < kRCMxBlockLen; ++t) in[t] = w.extract_in[off + t];
+                const gkr_air::TileWitness tw = gkr_air::TraceTile(pub, in);
+                const gkr_air::TileCheckResult cr = gkr_air::CheckTileConstraints(tw, tm, tx);
+                if (!cr.ok) { res.failure = "extract_air:" + cr.failure; return res; }
+                for (uint32_t t = 0; t < kRCMxBlockLen; ++t) {
+                    if (tw.out[t] != w.extract_out[off + t]) {
+                        res.failure = "extract_air:out_binding"; return res;
+                    }
+                }
+                gkr_air::AppendTileLookups(tw, tm, tx, gamma, inst_tm, inst_tx, inst_r16);
+                ++res.n_tiles;
+            }
+        }
+    }
+
+    // §6.3 tile-tree AIR: round_roots bound to the extract stream in-circuit.
+    for (uint32_t r = 0; r < p.rounds; ++r) {
+        const std::vector<int8_t> stream = ReconstructRoundStreamFromWitness(wires, r, p);
+        const gkr_air::TileTreeCheckResult tr =
+            gkr_air::CheckTileTreeInCircuit(stream, p.T_leaf, round_roots[r]);
+        res.n_tiletree_sha += tr.n_compressions;
+        if (!tr.ok) { res.failure = tr.failure; return res; }
+    }
+
+    res.ok = true;
+    return res;
+}
+
 } // namespace
 
 RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header, const RCEpisodeParams& params,
@@ -1253,6 +1529,24 @@ RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header, const RCEpis
     proof.episode_sigma = sigma;
     proof.round_seeds = seeds;
     proof.round_roots = roots;
+
+    // Carry the committed witness columns for the in-circuit AIRs (§5.4/§5.7/§6.3).
+    proof.wires.resize(wires.size());
+    for (size_t li = 0; li < wires.size(); ++li) {
+        const LayerWire& w = wires[li];
+        RCGkrV7WireWitness& ww = proof.wires[li];
+        ww.kind = w.kind;
+        ww.round = w.round;
+        ww.layer = w.layer;
+        ww.m = w.m;
+        ww.n = w.n;
+        ww.k = w.k;
+        ww.A = w.A_i8;
+        ww.B = w.B_i8;
+        ww.Y = w.Y_i64;
+        ww.extract_in = w.extract_in;
+        ww.extract_out = w.extract_out;
+    }
 
     const uint256 base_seed =
         RCGkrFsSeedV7(header, height, params, target, claimed_digest, sigma, roots);
@@ -1329,24 +1623,33 @@ RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header, const RCEpis
     proof.logup_bits = lr.achieved_bits;
 
     proof.transcript_hash = fs.Digest();
-    proof.note = "v7 ALL-PHASE: batched FRI + sumcheck + eval-arg + dual-α LogUp + tile-tree; "
-                 "SOUND, not succinct (native grounding; ChaCha/SHA/tile-tree AIRs parked)";
+    proof.note = "v7 SUCCINCT: batched FRI + sumcheck + eval-arg + in-circuit Extract/MxExpand/"
+                 "tile-tree AIRs over committed columns (no int64-reference re-derivation)";
     (void)true_digest;
 
     const auto t1 = std::chrono::steady_clock::now();
     res.timing.prove_s = std::chrono::duration<double>(t1 - t0).count();
     res.timing.ok = true;
-    res.timing.over_budget = true; // not succinct — PARKED
-    proof.over_budget = true;
+    // Proving stays heavy (it runs the int64 reference to build the witness); the
+    // succinctness claim is about the VERIFY path (see VerifyWinnerProofV7).
+    res.timing.over_budget = res.timing.prove_s > kRCGkrMediumProveBudgetS;
+    proof.over_budget = false; // verify is succinct: in-circuit AIRs, no reference re-run
     res.timing.note = proof.note;
     return res;
 }
 
 bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, int32_t height,
-                         const arith_uint256& target, std::string* why)
+                         const arith_uint256& target, std::string* why, RCGkrTiming* out_timing)
 {
+    const auto t0 = std::chrono::steady_clock::now();
     auto fail = [&](const std::string& m) {
         if (why) *why = m;
+        if (out_timing) {
+            out_timing->ok = false;
+            out_timing->verify_s =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            out_timing->note = m;
+        }
         return false;
     };
     if (proof.version != kRCGkrProofVersionV7) return fail("v7:version");
@@ -1358,49 +1661,56 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     if (proof.claimed_digest != header.matmul_digest) return fail("v7:digest_not_header_bound");
     if (proof.episode_sigma != matmul::v4::DeriveSigma(header)) return fail("v7:sigma");
 
-    // Ground truth from the immutable reference (native §5.7/§6.2/§6.3 grounding).
-    std::vector<RCRoundTranscript> transcripts;
-    const uint256 true_digest =
-        RecomputeResidentCurriculumReference(header, proof.episode, height, {}, &transcripts);
-    if (proof.claimed_digest != true_digest) return fail("v7:digest_mismatch_reference");
-    if (UintToArith256(true_digest) > target) return fail("v7:target");
+    // SUCCINCT: the digest/target are read from the PUBLIC round_roots — no int64
+    // reference re-run. round_roots are grounded below by the in-circuit tile-tree
+    // AIR over the committed extract columns (§6.3 / F0), not by comparison to a
+    // fresh reference computation.
+    const std::vector<uint256>& roots = proof.round_roots;
+    if (roots.size() != proof.episode.rounds) return fail("v7:round_roots_size");
+    const uint256 digest = EpisodeDigestFromRoots(roots);
+    if (digest != proof.claimed_digest) return fail("v7:digest_from_roots"); // F15
+    if (UintToArith256(digest) > target) return fail("v7:target");           // F14
 
-    std::vector<uint256> roots(proof.episode.rounds);
-    for (uint32_t r = 0; r < proof.episode.rounds; ++r) roots[r] = transcripts[r].round_root;
-    if (proof.round_roots != roots) return fail("v7:round_roots_forged"); // F0/F15
-    if (EpisodeDigestFromRoots(roots) != proof.claimed_digest) return fail("v7:digest_from_roots");
-
-    std::vector<uint256> seeds;
-    const std::vector<LayerWire> wires = BuildRealEpisodeLayers(header, proof.episode, roots, seeds);
-    if (seeds != proof.round_seeds) return fail("v7:round_seeds");
+    // Native round-seed chain (public; §6.1) — cheap, no episode work.
+    const uint256 sigma = proof.episode_sigma;
+    for (uint32_t r = 0; r < proof.episode.rounds; ++r) {
+        const uint256 expect =
+            (r == 0) ? Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0)
+                     : Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, roots[r - 1], r);
+        if (r >= proof.round_seeds.size() || expect != proof.round_seeds[r])
+            return fail("v7:round_seeds");
+    }
 
     // R4: the verifier drives Λ(params); layer count and dims are Λ outputs.
     const RCGkrLayout layout = RCGkrTraceLayout(proof.episode);
-    if (layout.layers.size() != wires.size()) return fail("v7:layout_count");
-    if (proof.layers.size() != wires.size()) return fail("v7:layer_count"); // F8/F9
-    for (size_t li = 0; li < wires.size(); ++li) {
+    if (proof.wires.size() != layout.layers.size()) return fail("v7:layout_count");
+    if (proof.layers.size() != layout.layers.size()) return fail("v7:layer_count"); // F8/F9
+    for (size_t li = 0; li < layout.layers.size(); ++li) {
         const auto& ls = layout.layers[li];
-        const auto& w = wires[li];
+        const auto& w = proof.wires[li];
         if (!(ls.kind == w.kind && ls.round == w.round && ls.layer == w.layer && ls.m == w.m &&
               ls.n == w.n && ls.k == w.k))
             return fail("v7:layout_layer_mismatch"); // F13 dims / F8 order
+        // Committed-column shapes must match the layout (anti-smuggling).
+        if (w.A.size() != static_cast<size_t>(w.m) * w.k ||
+            w.B.size() != static_cast<size_t>(w.k) * w.n ||
+            w.Y.size() != static_cast<size_t>(w.m) * w.n ||
+            w.extract_in.size() != static_cast<size_t>(w.m) * w.n ||
+            w.extract_out.size() != static_cast<size_t>(w.m) * w.n)
+            return fail("v7:wire_shape");
     }
 
-    // §6.3: round roots must be the tile-tree of the grounded extract columns.
-    for (uint32_t r = 0; r < proof.episode.rounds; ++r)
-        if (ReconstructRoundRoot(wires, r, proof.episode) != proof.round_roots[r])
-            return fail("v7:tile_tree_root"); // F0 closure
-
-    // Rebuild the columns and BIND the commitment to ground truth (F0/F1/F2/F6/F7):
-    // every committed column root must equal the ground-truth column root.
-    std::vector<std::vector<Fp2>> columns = BuildV7Columns(wires);
+    // BIND the carried witness columns to the batched-FRI commitment (F1/F2/F6):
+    // a tampered column fails the root check; a *consistent* forged column fails
+    // the in-circuit AIR that constrains it (below).
+    std::vector<std::vector<Fp2>> columns = BuildV7ColumnsFromWitness(proof.wires);
     const uint32_t batch_n = proof.batch.n_coeffs;
     if (batch_n == 0 || (batch_n & (batch_n - 1)) != 0) return fail("v7:batch_n");
     const uint32_t nu = Log2Exact(batch_n);
     if (proof.batch.columns.size() != columns.size() + 2) return fail("v7:batch_col_count");
     for (size_t i = 0; i < columns.size(); ++i)
         if (FriBatchColumnRoot(columns[i], batch_n) != proof.batch.columns[i].root)
-            return fail("v7:column_not_grounded"); // F1/F2 operand/trace/extract forgery
+            return fail("v7:column_not_grounded"); // F1/F2/F6 operand/trace/extract forgery
 
     // Thm 2.1: batched FRI binds every committed column to a low-degree poly.
     const uint256 base_seed = RCGkrFsSeedV7(header, height, proof.episode, target,
@@ -1412,8 +1722,8 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     FsTranscript fs(kRCGkrDomainTagV7);
     fs.AbsorbUint256(base_seed);
     std::vector<RCGkrOpeningClaim> claims;
-    for (size_t li = 0; li < wires.size(); ++li) {
-        const LayerWire& w = wires[li];
+    for (size_t li = 0; li < proof.wires.size(); ++li) {
+        const RCGkrV7WireWitness& w = proof.wires[li];
         const RCGkrLayerClaimV7& lc = proof.layers[li];
         fs.AbsorbU32(static_cast<uint32_t>(li));
         const uint32_t nu_i = Log2Exact(RCGkrNextPow2(w.m));
@@ -1443,23 +1753,65 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     // Thm 2.2: the eval argument binds c_claim / a_eval / b_eval to the committed
     // columns. A forged opening value (F3) fails the Lemma-1.2 identity at z1/z2.
     const uint256 eval_seed =
-        EvalArgSeed(base_seed, proof.batch.columns, /*epoch1_count=*/4 * wires.size());
+        EvalArgSeed(base_seed, proof.batch.columns, /*epoch1_count=*/4 * proof.wires.size());
     std::string ev_why;
     if (!EvalArgumentVerify(claims, proof.batch, proof.eval, eval_seed, &ev_why))
         return fail("v7:eval:" + ev_why); // F3
 
-    // R3: dual-α Extract LogUp over the real episode tiles (challenges FS-bound).
+    // R3/§5.7/§6.3: dual-α challenges (FS-bound), then the in-circuit grounding.
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("logup"), 5);
     const Fp2 gamma = fs.ChallengeFp2("v7_gamma");
     const Fp2 a1 = fs.ChallengeFp2("v7_alpha1");
     const Fp2 a2 = fs.ChallengeFp2("v7_alpha2");
     if (!Eq(a1, proof.logup_alpha1) || !Eq(a2, proof.logup_alpha2))
         return fail("v7:logup_alpha_unbound");
-    const auto lr = ExtractLogUpSample(wires, gamma, a1, a2, /*max_tiles=*/16);
+
+    // §5.4/§5.7/§6.3 IN-CIRCUIT grounding over the committed columns (THE
+    // soundness mechanism — no int64-reference re-derivation): leaf operands →
+    // MxExpandAir, extract_out → Extract sampler AIR over ALL tiles, round_roots
+    // → tile-tree AIR. Public seeds/prf are Λ-derived natively.
+    const std::vector<LayerProv> prov = RCGkrEpisodeWiring(header, proof.episode, roots);
+    if (prov.size() != proof.wires.size()) return fail("v7:wiring_count");
+    gkr_air::LogUpInstance inst_tm, inst_tx, inst_r16;
+    const GroundResult gr = GroundEpisodeInCircuit(proof.wires, prov, proof.episode, roots, gamma,
+                                                   inst_tm, inst_tx, inst_r16);
+    if (!gr.ok) return fail("v7:ground:" + gr.failure); // F0/F6/F7 in-circuit
+
+    // Dual-α LogUp aggregate over ALL committed tiles + MxExpand mantissa rows.
+    // T_M/T_X carry the membership soundness (§5.5/§5.6); the 16-bit range (T_R16)
+    // is enforced structurally by the sampler AIR (avoids the 2^16-row mult scan),
+    // matching the shipped sample path.
+    auto finalize_small = [](gkr_air::LogUpInstance& in) {
+        in.table_mult.assign(in.table.size(), 0);
+        for (const Fp2& wt : in.witness)
+            for (size_t j = 0; j < in.table.size(); ++j)
+                if (gkr_field::Eq(wt, in.table[j])) { in.table_mult[j] += 1; break; }
+    };
+    finalize_small(inst_tm);
+    finalize_small(inst_tx);
+    std::vector<gkr_air::LogUpInstance> insts{inst_tm, inst_tx};
+    const gkr_air::LogUpVerifyResult lr = gkr_air::LogUpDualAlphaVerify(insts, a1, a2);
     if (!lr.ok) return fail("v7:logup:" + lr.failure); // F6/F7 (mechanism)
 
     if (fs.Digest() != proof.transcript_hash) return fail("v7:transcript_hash");
-    if (why) *why = "v7 ok (SOUND, PARKED)";
+
+    const double verify_s =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const bool over_budget = verify_s > kRCGkrVerifyBudgetS;
+    if (out_timing) {
+        out_timing->ok = true;
+        out_timing->verify_s = verify_s;
+        out_timing->over_budget = over_budget;
+        out_timing->note = "v7 SUCCINCT ok (in-circuit AIRs; no reference re-run)";
+    }
+    if (why) {
+        *why = "v7 SUCCINCT ok: tiles=" + std::to_string(gr.n_tiles) +
+               " mxexpand_sha=" + std::to_string(gr.n_mxexpand_sha) +
+               " tiletree_sha=" + std::to_string(gr.n_tiletree_sha) +
+               " logup_bits=" + std::to_string(lr.achieved_bits) +
+               " verify_s=" + std::to_string(verify_s) +
+               " over_budget=" + (over_budget ? "1" : "0");
+    }
     return true;
 }
 

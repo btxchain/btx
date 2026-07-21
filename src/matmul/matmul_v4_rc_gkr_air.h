@@ -300,6 +300,83 @@ void FinalizeTableMultiplicities(LogUpInstance& inst_tm, LogUpInstance& inst_tx,
 /** true iff tampering a SHA-256 round working variable is rejected. */
 [[nodiscard]] bool ShaIntermediateTamperRejected();
 
+// ---------------------------------------------------------------------------
+// 6. MxExpand operand-expansion AIR (§5.7 — "grounding the induction").
+//
+// The leaf operands Q/K/V/X0/W_l/G_L are produced by ExpandMxDequantInt8, i.e.
+// the SHA-256 counter-mode mantissa XOF (E2M1 rejection into M11) + the E8M0
+// scale XOF, then out[i,j] = mu[i,j]·2^e. This AIR recomputes both XOF streams
+// in-circuit (SHA-256 compressions constraint-checked by CheckShaCompress),
+// binds each accepted nibble to the (nib,acc,mu) T_M row via the SAME dual-α
+// LogUp used by Extract, and binds the committed operand column to the seed by
+// the dequant identity. Without this, A/B openings ground out in committed-but-
+// unconstrained leaf operands (Forgery F0 again). The int64 reference
+// (ExpandMxDequantInt8) stays the sole oracle; this AIR never redefines it.
+// ---------------------------------------------------------------------------
+
+/** Result of binding one committed operand column to its expansion seed. */
+struct MxExpandVerifyResult {
+    bool ok{false};
+    std::string failure;
+    uint64_t n_mantissa_blocks{0}; // SHA XOF compressions for the mantissa stream
+    uint64_t n_scale_blocks{0};    // SHA XOF compressions for the scale stream
+};
+
+/**
+ * In-circuit MxExpand: recompute the mantissa/scale XOF for `seed` at (rows,cols)
+ * with every SHA-256 compression constraint-checked, assert the dequantized
+ * output equals `committed_out` byte-for-byte, and append the (nib,acc,mu) T_M
+ * lookups to `inst_tm` for the dual-α aggregate. RowBlock scale axis (the
+ * consensus ExpandMxDequantInt8 convention). Returns ok=false with the first
+ * failing constraint id on any deviation.
+ */
+[[nodiscard]] MxExpandVerifyResult VerifyMxExpandColumn(const uint256& seed, uint32_t rows,
+                                                        uint32_t cols,
+                                                        const std::vector<int8_t>& committed_out,
+                                                        const TableTM& tm, Fp2 gamma,
+                                                        LogUpInstance& inst_tm);
+
+/** Run VerifyMxExpandColumn then compare to ExpandMxDequantInt8 (the reference). */
+[[nodiscard]] bool MxExpandByteExactVsReference(const uint256& seed, uint32_t rows, uint32_t cols);
+
+/** true iff tampering a SHA-256 intermediate inside the mantissa XOF is rejected. */
+[[nodiscard]] bool MxExpandIntermediateTamperRejected();
+
+// ---------------------------------------------------------------------------
+// 7. Tile-tree AIR (§6.3 — round-root binding to the committed extract stream).
+//
+// The Phase-3 round stream (Z ‖ per-layer X_{l+1} ‖ G_l ‖ D_l as int8 bytes in
+// the frozen V1 layout) is hashed by a SHA256d Merkle tile-tree
+// (RoundMerkleStream) whose root is the public round_root. This AIR recomputes
+// the SAME tree with every SHA-256 compression constraint-checked
+// (CheckShaCompress), so a tampered hash intermediate is caught by the ARX
+// identity, not merely at the root boundary. It returns the recomputed root; the
+// verifier asserts root == round_root. This is the only sound way for the
+// succinct verifier to know the PoW-winning roots commit the same bytes the
+// sumcheck layers talk about (Thm 5.1 / Forgery F0). RoundMerkleStream is the
+// sole oracle; this AIR never redefines the tree layout.
+// ---------------------------------------------------------------------------
+
+struct TileTreeCheckResult {
+    bool ok{false};
+    std::string failure;
+    uint256 root;                // recomputed root
+    uint64_t n_compressions{0};  // SHA-256 compressions checked
+};
+
+/**
+ * Recompute the RoundMerkleStream root of `stream` (leaf size `t_leaf`) with
+ * in-circuit, constraint-checked SHA-256 compressions and assert it equals
+ * `claimed_root`. ok=false + failure id if any compression constraint is
+ * violated or the recomputed root differs from `claimed_root`.
+ */
+[[nodiscard]] TileTreeCheckResult CheckTileTreeInCircuit(const std::vector<int8_t>& stream,
+                                                         uint32_t t_leaf,
+                                                         const uint256& claimed_root);
+
+/** true iff tampering a SHA-256 intermediate inside a tile-tree hash is rejected. */
+[[nodiscard]] bool TileTreeIntermediateTamperRejected();
+
 } // namespace matmul::v4::rc::gkr_air
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_GKR_AIR_H

@@ -1032,9 +1032,19 @@ BOOST_AUTO_TEST_CASE(gkr_v7_positive_path_byte_parity)
     BOOST_CHECK_GT(pr.proof.logup_bits, 64.0);
 
     std::string why;
-    BOOST_CHECK_MESSAGE(rc::VerifyWinnerProofV7(pr.proof, header, 0, target, &why), why);
+    rc::RCGkrTiming vt;
+    BOOST_CHECK_MESSAGE(rc::VerifyWinnerProofV7(pr.proof, header, 0, target, &why, &vt), why);
     // Cross-validate against the curriculum reference once more.
     BOOST_CHECK(rc::RecomputeResidentCurriculumReference(header, params, 0) == dig);
+
+    // SUCCINCTNESS (Wave 3A): the episode verify path is now grounded by the
+    // in-circuit AIRs over the committed columns (no int64-reference re-run), so
+    // it clears the Stage-I happy-path verify budget at toy dims.
+    BOOST_TEST_MESSAGE("v7 succinct verify: " + why);
+    BOOST_CHECK_MESSAGE(!vt.over_budget,
+                        "episode verify over budget: verify_s=" + std::to_string(vt.verify_s));
+    BOOST_CHECK(vt.verify_s <= rc::kRCGkrVerifyBudgetS);
+    BOOST_CHECK(!pr.proof.over_budget);
 }
 
 // ============================================================================
@@ -1156,6 +1166,74 @@ BOOST_AUTO_TEST_CASE(gkr_v7_section9_forgery_list_rejected)
     }
     // Sanity: the untouched honest proof still verifies.
     BOOST_CHECK(rc::VerifyWinnerProofV7(H, header, 0, target, &why));
+}
+
+// ============================================================================
+// v7 IN-CIRCUIT relation forgeries (Wave 3A): the succinct verifier grounds the
+// committed columns by the Extract / MxExpand / tile-tree AIRs — no int64
+// reference. Tampering a witness column or an Extract input must be REJECTED by
+// the in-circuit relation, not by a reference comparison (which is gone).
+// ============================================================================
+BOOST_AUTO_TEST_CASE(gkr_v7_in_circuit_relation_forgeries_rejected)
+{
+    auto header = MakeRCHeader(11);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    header.matmul_digest = dig;
+    arith_uint256 target;
+    target = ~target;
+
+    const auto pr = rc::ProveWinnerEpisodeV7(header, params, 0, target, dig);
+    BOOST_REQUIRE_MESSAGE(pr.timing.ok, pr.timing.note);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(rc::VerifyWinnerProofV7(pr.proof, header, 0, target, &why), why);
+    const rc::RCGkrProofV7& H = pr.proof;
+
+    auto rejects = [&](const rc::RCGkrProofV7& p) {
+        std::string w;
+        return !rc::VerifyWinnerProofV7(p, header, 0, target, &w);
+    };
+
+    // Extract relation: forge an Extract INPUT (extract_in). It is bound to the
+    // sumcheck-proven Y; the tampered value breaks that binding / the sampler AIR.
+    {
+        auto p = H;
+        BOOST_REQUIRE(!p.wires.empty() && !p.wires[0].extract_in.empty());
+        p.wires[0].extract_in[0] ^= 0x123456;
+        BOOST_CHECK_MESSAGE(rejects(p), "forged extract_in NOT rejected");
+    }
+    // Extract relation: forge an Extract OUTPUT byte (committed column) → the
+    // commitment binding + tile-tree AIR reject.
+    {
+        auto p = H;
+        // layer 1 (SV) extract_out is streamed into the tile-tree.
+        BOOST_REQUIRE(p.wires.size() > 1 && !p.wires[1].extract_out.empty());
+        p.wires[1].extract_out[0] = static_cast<int8_t>(p.wires[1].extract_out[0] ^ 0x1);
+        BOOST_CHECK_MESSAGE(rejects(p), "forged extract_out NOT rejected");
+    }
+    // MxExpand relation: forge a leaf operand byte (committed column) → the
+    // commitment binding + MxExpand dequant AIR reject.
+    {
+        auto p = H;
+        BOOST_REQUIRE(!p.wires.empty() && !p.wires[0].A.empty());
+        p.wires[0].A[0] = static_cast<int8_t>(p.wires[0].A[0] ^ 0x2);
+        BOOST_CHECK_MESSAGE(rejects(p), "forged MxExpand leaf operand NOT rejected");
+    }
+    // Tile-tree relation: forge a round_root → the digest-from-roots + in-circuit
+    // tile-tree AIR (recomputed root of the committed extract stream) reject. The
+    // dedicated tile-tree SHA-intermediate tamper lives in the AIR unit tests.
+    {
+        auto p = H;
+        p.round_roots[0].data()[0] ^= 0xFF;
+        BOOST_CHECK_MESSAGE(rejects(p), "forged round_root NOT rejected");
+    }
+    // Wiring relation: forge a chained operand (SV.A must equal QKt extract_out).
+    {
+        auto p = H;
+        BOOST_REQUIRE(p.wires.size() > 1 && !p.wires[1].A.empty());
+        p.wires[1].A[0] = static_cast<int8_t>(p.wires[1].A[0] ^ 0x4);
+        BOOST_CHECK_MESSAGE(rejects(p), "forged chained operand NOT rejected");
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -6,6 +6,7 @@
 
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_rc.h>
 #include <crypto/chacha20.h>
 #include <crypto/common.h>
 #include <crypto/sha256.h>
@@ -815,6 +816,319 @@ bool ShaIntermediateTamperRejected()
     // Tamper a mid-schedule working variable 'a' (a committed round cell).
     t.vars[30][0] ^= 0x00000010u;
     return !CheckShaCompress(t, fail);  // must now be rejected
+}
+
+// ===========================================================================
+// Generic in-circuit SHA-256 / SHA-256d over arbitrary-length messages.
+// Every 64-byte compression is a ShaCompressTrace whose ARX/round/feed-forward
+// identities are checked by CheckShaCompress (so an internal-cell tamper is
+// rejected by the arithmetic constraints, not merely at the digest boundary).
+// Shared by MxExpandAir (§5.7) and TileTreeAir (§6.3). Byte-exact to CSHA256.
+// ===========================================================================
+namespace {
+
+std::array<uint8_t, 32> SeedBytesLE(const uint256& seed)
+{
+    std::array<uint8_t, 32> out{};
+    for (size_t i = 0; i < 32; ++i) out[i] = seed.data()[31 - i];
+    return out;
+}
+
+// Big-endian byte image of the 8-word digest (matches CSHA256::Finalize).
+std::array<uint8_t, 32> DigestBytes(const std::array<uint32_t, 8>& h)
+{
+    std::array<uint8_t, 32> b{};
+    for (int k = 0; k < 8; ++k) {
+        b[4 * k + 0] = static_cast<uint8_t>(h[k] >> 24);
+        b[4 * k + 1] = static_cast<uint8_t>(h[k] >> 16);
+        b[4 * k + 2] = static_cast<uint8_t>(h[k] >> 8);
+        b[4 * k + 3] = static_cast<uint8_t>(h[k]);
+    }
+    return b;
+}
+
+// SHA-256 of an arbitrary message; pushes every compression trace and returns
+// the 8-word digest.
+std::array<uint32_t, 8> Sha256InCircuit(const uint8_t* msg, size_t len,
+                                        std::vector<ShaCompressTrace>& traces)
+{
+    std::vector<uint8_t> padded(msg, msg + len);
+    const uint64_t bitlen = static_cast<uint64_t>(len) * 8;
+    padded.push_back(0x80);
+    while (padded.size() % 64 != 56) padded.push_back(0x00);
+    for (int s = 7; s >= 0; --s) padded.push_back(static_cast<uint8_t>(bitlen >> (8 * s)));
+
+    std::array<uint32_t, 8> h = kSHA_H0;
+    for (size_t off = 0; off < padded.size(); off += 64) {
+        std::array<uint32_t, 16> blk{};
+        for (int w = 0; w < 16; ++w) {
+            blk[w] = (static_cast<uint32_t>(padded[off + 4 * w]) << 24) |
+                     (static_cast<uint32_t>(padded[off + 4 * w + 1]) << 16) |
+                     (static_cast<uint32_t>(padded[off + 4 * w + 2]) << 8) |
+                     (static_cast<uint32_t>(padded[off + 4 * w + 3]));
+        }
+        ShaCompressTrace ct = ShaCompressInCircuit(h, blk);
+        h = ct.h_out;
+        traces.push_back(std::move(ct));
+    }
+    return h;
+}
+
+// SHA-256d = SHA-256(SHA-256(msg)); pushes every compression trace.
+std::array<uint8_t, 32> Sha256dInCircuit(const uint8_t* msg, size_t len,
+                                         std::vector<ShaCompressTrace>& traces)
+{
+    const std::array<uint32_t, 8> h1 = Sha256InCircuit(msg, len, traces);
+    const std::array<uint8_t, 32> d1 = DigestBytes(h1);
+    const std::array<uint32_t, 8> h2 = Sha256InCircuit(d1.data(), d1.size(), traces);
+    return DigestBytes(h2);
+}
+
+uint256 ToUint256(const std::array<uint8_t, 32>& b)
+{
+    return uint256{Span<const unsigned char>{b.data(), b.size()}};
+}
+
+// Consensus XOF domain bytes (mirror matmul_v4_bmx4.cpp — kept in sync by the
+// byte-exactness assertion vs ExpandMxDequantInt8).
+constexpr uint8_t kMantissaStreamDomain = 0x6D; // 'm'
+constexpr uint8_t kScaleStreamDomain = 0x65;    // 'e'
+
+// One XOF block message: seed_bytes(32) ‖ domain(1) ‖ le64(block_counter).
+std::array<uint8_t, 41> XofMessage(const std::array<uint8_t, 32>& seed_bytes, uint8_t domain,
+                                   uint64_t block)
+{
+    std::array<uint8_t, 41> m{};
+    std::memcpy(m.data(), seed_bytes.data(), 32);
+    m[32] = domain;
+    WriteLE64(m.data() + 33, block);
+    return m;
+}
+
+} // namespace
+
+// ===========================================================================
+// MxExpand operand-expansion AIR (§5.7).
+// ===========================================================================
+
+MxExpandVerifyResult VerifyMxExpandColumn(const uint256& seed, uint32_t rows, uint32_t cols,
+                                          const std::vector<int8_t>& committed_out,
+                                          const TableTM& tm, Fp2 gamma, LogUpInstance& inst_tm)
+{
+    MxExpandVerifyResult r;
+    if ((rows % kRCMxBlockLen) != 0 || (cols % kRCMxBlockLen) != 0 || rows == 0 || cols == 0) {
+        r.failure = "mxexpand:dims";
+        return r;
+    }
+    const size_t count = static_cast<size_t>(rows) * cols;
+    if (committed_out.size() != count) {
+        r.failure = "mxexpand:committed_size";
+        return r;
+    }
+
+    // Ensure the T_M table side is populated once (idempotent by size check).
+    inst_tm.name = "T_M";
+    if (inst_tm.table.empty()) {
+        for (uint16_t n = 0; n < 16; ++n)
+            inst_tm.table.push_back(Fingerprint({n, tm.acc[n],
+                static_cast<uint64_t>(static_cast<uint8_t>(tm.mu[n]))}, gamma));
+    }
+
+    const std::array<uint8_t, 32> seed_bytes = SeedBytesLE(seed);
+
+    // ---- Mantissa XOF: SHA-256 counter blocks, E2M1 rejection into M11. ----
+    std::vector<int8_t> mu_stream;
+    mu_stream.reserve(count);
+    uint64_t block = 0;
+    while (mu_stream.size() < count) {
+        const std::array<uint8_t, 41> msg = XofMessage(seed_bytes, kMantissaStreamDomain, block);
+        std::vector<ShaCompressTrace> traces;
+        const std::array<uint32_t, 8> h = Sha256InCircuit(msg.data(), msg.size(), traces);
+        std::string fail;
+        for (const auto& ct : traces) {
+            ++r.n_mantissa_blocks;
+            if (!CheckShaCompress(ct, fail)) { r.failure = "mxexpand:" + fail; return r; }
+        }
+        const std::array<uint8_t, 32> digest = DigestBytes(h);
+        for (size_t i = 0; i < 32 && mu_stream.size() < count; ++i) {
+            const uint8_t nibs[2] = {static_cast<uint8_t>(digest[i] & 0x0F),
+                                     static_cast<uint8_t>((digest[i] >> 4) & 0x0F)};
+            for (uint8_t nib : nibs) {
+                const uint8_t acc = tm.acc[nib];
+                const int8_t mu = tm.mu[nib];
+                // (nib,acc,mu) T_M lookup — same aggregate as Extract's inst_tm.
+                inst_tm.witness.push_back(Fingerprint(
+                    {nib, acc, static_cast<uint64_t>(static_cast<uint8_t>(mu))}, gamma));
+                if (acc) {
+                    mu_stream.push_back(mu);
+                    if (mu_stream.size() == count) break;
+                }
+            }
+        }
+        ++block;
+    }
+
+    // ---- Scale XOF: SHA-256 counter blocks, 2 bits/code, rejection-free. ----
+    const size_t scale_count = static_cast<size_t>(rows) * (cols / kRCMxBlockLen);
+    std::vector<uint8_t> scale;
+    scale.reserve(scale_count);
+    block = 0;
+    while (scale.size() < scale_count) {
+        const std::array<uint8_t, 41> msg = XofMessage(seed_bytes, kScaleStreamDomain, block);
+        std::vector<ShaCompressTrace> traces;
+        const std::array<uint32_t, 8> h = Sha256InCircuit(msg.data(), msg.size(), traces);
+        std::string fail;
+        for (const auto& ct : traces) {
+            ++r.n_scale_blocks;
+            if (!CheckShaCompress(ct, fail)) { r.failure = "mxexpand:" + fail; return r; }
+        }
+        const std::array<uint8_t, 32> digest = DigestBytes(h);
+        for (size_t i = 0; i < 32 && scale.size() < scale_count; ++i) {
+            for (int shift = 0; shift < 8 && scale.size() < scale_count; shift += 2) {
+                const uint8_t code = static_cast<uint8_t>((digest[i] >> shift) & 0x03);
+                if (code > 3) { r.failure = "mxexpand:scale_code_range"; return r; }
+                scale.push_back(code);
+            }
+        }
+        ++block;
+    }
+
+    // ---- Dequant identity: out[i,j] = mu[i,j] · 2^{e[i, j/32]} == committed. ----
+    const uint32_t nblk = cols / kRCMxBlockLen;
+    for (uint32_t i = 0; i < rows; ++i) {
+        for (uint32_t j = 0; j < cols; ++j) {
+            const size_t idx = static_cast<size_t>(i) * cols + j;
+            const uint8_t e = scale[static_cast<size_t>(i) * nblk + (j / kRCMxBlockLen)];
+            const int32_t dq = static_cast<int32_t>(mu_stream[idx]) * (int32_t{1} << e);
+            if (committed_out[idx] != static_cast<int8_t>(dq)) {
+                r.failure = "mxexpand:dequant_binding";
+                return r;
+            }
+        }
+    }
+
+    r.ok = true;
+    return r;
+}
+
+bool MxExpandByteExactVsReference(const uint256& seed, uint32_t rows, uint32_t cols)
+{
+    const std::vector<int8_t> ref = ExpandMxDequantInt8(seed, rows, cols);
+    TableTM tm;
+    LogUpInstance inst_tm;
+    const Fp2 gamma = Fp2{0x00000000DEADBEEFull, 0x00000000FEEDFACEull};
+    const MxExpandVerifyResult r = VerifyMxExpandColumn(seed, rows, cols, ref, tm, gamma, inst_tm);
+    return r.ok;
+}
+
+bool MxExpandIntermediateTamperRejected()
+{
+    // Trace a real mantissa XOF block, confirm it passes, then tamper a SHA
+    // round working variable and confirm CheckShaCompress rejects it.
+    std::array<uint8_t, 32> sb{};
+    for (int i = 0; i < 32; ++i) sb[i] = static_cast<uint8_t>(0x11 * (i + 1));
+    const std::array<uint8_t, 41> msg = XofMessage(sb, kMantissaStreamDomain, 0);
+    std::vector<ShaCompressTrace> traces;
+    (void)Sha256InCircuit(msg.data(), msg.size(), traces);
+    if (traces.empty()) return false;
+    std::string fail;
+    if (!CheckShaCompress(traces[0], fail)) return false; // honest must pass
+    traces[0].vars[20][0] ^= 0x00000040u;                 // tamper working var 'a'
+    return !CheckShaCompress(traces[0], fail);            // must now reject
+}
+
+// ===========================================================================
+// Tile-tree AIR (§6.3): in-circuit SHA256d Merkle tile-tree over the committed
+// extract byte-stream. Byte-exact to RoundMerkleStream / BuildTileTreeRoot.
+// ===========================================================================
+
+namespace {
+
+// SHA256d(tag_byte ‖ payload) in-circuit; pushes compression traces.
+uint256 TaggedSha256dInCircuit(uint8_t tag, const uint8_t* payload, size_t len,
+                               std::vector<ShaCompressTrace>& traces)
+{
+    std::vector<uint8_t> pre;
+    pre.reserve(1 + len);
+    pre.push_back(tag);
+    pre.insert(pre.end(), payload, payload + len);
+    return ToUint256(Sha256dInCircuit(pre.data(), pre.size(), traces));
+}
+
+} // namespace
+
+TileTreeCheckResult CheckTileTreeInCircuit(const std::vector<int8_t>& stream, uint32_t t_leaf,
+                                           const uint256& claimed_root)
+{
+    TileTreeCheckResult r;
+    if (t_leaf == 0) { r.failure = "tiletree:t_leaf"; return r; }
+    std::vector<ShaCompressTrace> traces;
+    std::string fail;
+
+    // Leaves: SHA256d(kRCLeafTag ‖ t_leaf bytes), last partial zero-padded;
+    // an empty stream still emits one zero leaf (matches RoundMerkleStream).
+    std::vector<uint256> leaves;
+    const size_t n = stream.size();
+    if (n == 0) {
+        std::vector<uint8_t> zero(t_leaf, 0);
+        leaves.push_back(TaggedSha256dInCircuit(kRCLeafTag, zero.data(), zero.size(), traces));
+    } else {
+        for (size_t off = 0; off < n; off += t_leaf) {
+            std::vector<uint8_t> leaf(t_leaf, 0);
+            const size_t take = std::min<size_t>(t_leaf, n - off);
+            for (size_t b = 0; b < take; ++b)
+                leaf[b] = static_cast<uint8_t>(stream[off + b]);
+            leaves.push_back(TaggedSha256dInCircuit(kRCLeafTag, leaf.data(), leaf.size(), traces));
+        }
+    }
+
+    // Pad to next power of two with the canonical pad-leaf hash.
+    auto next_pow2 = [](size_t v) { size_t p = 1; while (p < v) p <<= 1; return p; };
+    const size_t target = next_pow2(leaves.empty() ? 1 : leaves.size());
+    if (leaves.size() < target) {
+        std::vector<uint8_t> pad(kRCPadTag, kRCPadTag + sizeof(kRCPadTag) - 1);
+        const uint256 pad_leaf =
+            TaggedSha256dInCircuit(kRCPadLeafTag, pad.data(), pad.size(), traces);
+        while (leaves.size() < target) leaves.push_back(pad_leaf);
+    }
+
+    // Fold: parent = SHA256d(kRCNodeTag ‖ L ‖ R).
+    while (leaves.size() > 1) {
+        std::vector<uint256> parent;
+        parent.reserve(leaves.size() / 2);
+        for (size_t i = 0; i < leaves.size(); i += 2) {
+            std::array<uint8_t, 64> lr{};
+            std::memcpy(lr.data(), leaves[i].data(), 32);
+            std::memcpy(lr.data() + 32, leaves[i + 1].data(), 32);
+            parent.push_back(TaggedSha256dInCircuit(kRCNodeTag, lr.data(), lr.size(), traces));
+        }
+        leaves.swap(parent);
+    }
+
+    // Constraint-check every SHA-256 compression in the whole tree.
+    for (const auto& ct : traces) {
+        ++r.n_compressions;
+        if (!CheckShaCompress(ct, fail)) { r.failure = "tiletree:" + fail; return r; }
+    }
+
+    r.root = leaves.front();
+    if (r.root != claimed_root) { r.failure = "tiletree:root_mismatch"; return r; }
+    r.ok = true;
+    return r;
+}
+
+bool TileTreeIntermediateTamperRejected()
+{
+    // Build a small stream, hash a leaf in-circuit, tamper a SHA intermediate.
+    std::vector<uint8_t> leaf(64, 0);
+    for (int i = 0; i < 64; ++i) leaf[i] = static_cast<uint8_t>(3 * i + 1);
+    std::vector<ShaCompressTrace> traces;
+    (void)TaggedSha256dInCircuit(kRCLeafTag, leaf.data(), leaf.size(), traces);
+    if (traces.empty()) return false;
+    std::string fail;
+    if (!CheckShaCompress(traces[0], fail)) return false; // honest must pass
+    traces[0].w[20] ^= 0x00000004u;                       // tamper a schedule word
+    return !CheckShaCompress(traces[0], fail);            // must now reject
 }
 
 } // namespace matmul::v4::rc::gkr_air

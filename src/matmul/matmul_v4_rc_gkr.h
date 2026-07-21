@@ -396,12 +396,17 @@ struct RCGkrProveResult {
 //       must equal the proof's — this is what closes the F0 headline that v6
 //       leaves open (per-layer root absorption binds nothing, §4.3).
 //
-// HONESTY: the operand-expansion / Extract / tile-tree GROUNDING is done by
-// NATIVE re-derivation against the immutable int64 reference (§5.7/§6.2/§6.3
-// AIRs are heavy and parked, §11); the GEMM relation is verified SUCCINCTLY via
-// sumcheck + eval-argument openings bound to the single batched-FRI commitment.
-// The verifier is therefore SOUND but NOT succinct (over_budget=true); arbiter
-// stays OFF, nMatMulRCHeight=INT32_MAX, ExactReplay remains sole authority.
+// SUCCINCTNESS (Wave 3A): the operand-expansion / Extract / tile-tree GROUNDING
+// is now done by IN-CIRCUIT AIRs over the committed columns — MxExpandAir
+// (§5.7), the Extract sampler AIR over ALL tiles (§5.4) + dual-α LogUp (§5.6),
+// and the tile-tree SHA AIR (§6.3) — NOT by re-running the int64 reference. The
+// verifier derives only the PUBLIC seeds / prf keys natively (§4.2/§6.1). At toy
+// dims this clears the Stage-I happy-path verify budget (over_budget=false). The
+// witness columns are materialized (carried + FRI-bound); the residual toward
+// verifier-sublinearity is the DEEP/quotient opening of the AIR constraint
+// polynomial (open at Q points instead of every row) — at consensus dims the
+// LogUp is ≈2^43 rows and stays PARKED (§11). Arbiter stays OFF,
+// nMatMulRCHeight=INT32_MAX, ExactReplay remains sole authority.
 // ============================================================================
 
 /** One layer's v7 sumcheck block. NO (kind,round,dims) — those are Λ outputs. */
@@ -417,6 +422,27 @@ struct RCGkrLayerClaimV7 {
     Fp2 final_eval{};
 };
 
+/**
+ * Committed per-layer witness columns (§2.1 A-columns), carried so the SUCCINCT
+ * verifier can run the in-circuit AIRs (Extract / MxExpand / tile-tree) over the
+ * committed data WITHOUT re-running the int64 reference. Each column is bound to
+ * its batched-FRI root (FriBatchColumnRoot); a tampered witness column fails the
+ * commitment binding, and a *consistent* forged column fails the AIR that
+ * constrains it (Extract sampler / dequant / tile-tree). Field-embedded int8/
+ * int64 values keep byte-exactness with the reference oracle.
+ */
+struct RCGkrV7WireWitness {
+    RCGkrLayerKind kind{};
+    uint32_t round{0};
+    uint32_t layer{0};
+    uint32_t m{0}, n{0}, k{0};
+    std::vector<int8_t> A;            // operand A (int8), m×k
+    std::vector<int8_t> B;            // operand B (int8), k×n
+    std::vector<int64_t> Y;           // GEMM product (int64), m×n
+    std::vector<int64_t> extract_in;  // pre-Extract accumulator (int64), m×n
+    std::vector<int8_t> extract_out;  // Extract output (int8), m×n
+};
+
 struct RCGkrProofV7 {
     uint32_t version{kRCGkrProofVersionV7};
     RCEpisodeParams episode{};
@@ -429,11 +455,15 @@ struct RCGkrProofV7 {
     /** ONE batched FRI over ALL columns (per-layer A,B,Y,extract) + eval-arg f,g. */
     FriBatchProof batch{};
     std::vector<RCGkrLayerClaimV7> layers;
+    /** Committed witness columns for the in-circuit AIRs (bound to `batch`). */
+    std::vector<RCGkrV7WireWitness> wires;
     RCGkrEvalArgumentProof eval{};
     /** Dual-α Extract LogUp challenges (FS-bound; §5.6). */
     Fp2 logup_alpha1{};
     Fp2 logup_alpha2{};
     double logup_bits{0.0};
+    /** SUCCINCT episode-verify wall (in-circuit AIRs, no reference re-run). */
+    double verify_s{0.0};
     uint256 transcript_hash{};
     bool over_budget{true};
     std::string note;
@@ -464,7 +494,8 @@ struct RCGkrProveResultV7 {
  */
 [[nodiscard]] bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header,
                                        int32_t height, const arith_uint256& target,
-                                       std::string* why = nullptr);
+                                       std::string* why = nullptr,
+                                       RCGkrTiming* out_timing = nullptr);
 
 enum class RCProdVerifyPath : uint8_t {
     ExactReplay = 0,
