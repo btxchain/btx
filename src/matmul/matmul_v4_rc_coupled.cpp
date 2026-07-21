@@ -285,19 +285,20 @@ std::vector<int32_t> ExactGemmS8S8Dispatched(const lt::ExactGemmBackend& gemm,
     return device;
 }
 
-/** Local lobe GEMM: 1×W · W×W → 1×W int32, widened to int64 (C3.a). */
-void LobeLocalGemm(const int8_t* lobe_row, const std::vector<int8_t>& page, uint32_t lobe_width,
-                   int64_t* out_w, const lt::ExactGemmBackend& gemm)
+/** Local lobe GEMM: M×W · W×W → M×W int32, widened to int64 (C3.a). */
+void LobeLocalGemm(const int8_t* lobe_rows, const std::vector<int8_t>& page, uint32_t rows,
+                   uint32_t lobe_width, int64_t* out_w, const lt::ExactGemmBackend& gemm)
 {
-    std::vector<int8_t> L(lobe_row, lobe_row + lobe_width);
-    const auto y = ExactGemmS8S8Dispatched(gemm, L, page, /*rows=*/1, lobe_width, lobe_width);
-    if (y.size() != lobe_width) {
-        // Size mismatch → zero partials (caller digest path rejects on bad params).
-        for (uint32_t c = 0; c < lobe_width; ++c) out_w[c] = 0;
+    const size_t nL = static_cast<size_t>(rows) * lobe_width;
+    std::vector<int8_t> L(lobe_rows, lobe_rows + nL);
+    const auto y =
+        ExactGemmS8S8Dispatched(gemm, L, page, /*rows=*/rows, lobe_width, lobe_width);
+    if (y.size() != nL) {
+        for (size_t i = 0; i < nL; ++i) out_w[i] = 0;
         return;
     }
-    for (uint32_t c = 0; c < lobe_width; ++c) {
-        out_w[c] = static_cast<int64_t>(y[c]);
+    for (size_t i = 0; i < nL; ++i) {
+        out_w[i] = static_cast<int64_t>(y[i]);
     }
 }
 
@@ -355,8 +356,8 @@ DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, i
             SelectCoupledBankPageIds(barrier, ell, params, sigma, /*full=*/false).front();
         auto page = DeriveCoupledBankPage(header, height, page_id, params);
         std::vector<int64_t> row(params.lobe_width, 0);
-        LobeLocalGemm(state.data() + ell * params.lobe_width, page, params.lobe_width, row.data(),
-                      gemm);
+        LobeLocalGemm(state.data() + ell * params.lobe_width, page, /*rows=*/1,
+                      params.lobe_width, row.data(), gemm);
         segs[ell] = row;
         const uint32_t owner = DeviceForSegment(ell, n_devices);
         for (uint32_t c = 0; c < params.lobe_width; ++c) {
@@ -447,6 +448,7 @@ bool ValidateRCCoupParams(const RCCoupParams& p)
     if (p.barriers == 0 || p.lobes == 0 || p.lobe_width == 0 || p.bank_pages == 0) {
         return false;
     }
+    if (p.rows_per_lobe == 0 || p.pages_per_barrier_lobe == 0) return false;
     // C5: production barrier count is 4–8 (toy=4, medium=8).
     if (p.barriers < 4 || p.barriers > 8) return false;
     if (p.lobe_width % 32 != 0) return false;
@@ -463,6 +465,8 @@ RCCoupParams MakeToyRCCoupParams()
     p.lobes = kRCCoupLobes;
     p.lobe_width = kRCCoupLobeWidth;
     p.bank_pages = kRCCoupBankPages;
+    p.rows_per_lobe = 1;
+    p.pages_per_barrier_lobe = dc::kRCCoupPagesPerBarrierLobe;
     return p;
 }
 
@@ -473,21 +477,39 @@ RCCoupParams MakeMediumRCCoupParams()
     p.lobes = 8;
     p.lobe_width = 64;
     p.bank_pages = 32;
+    p.rows_per_lobe = 1;
+    p.pages_per_barrier_lobe = dc::kRCCoupPagesPerBarrierLobe;
     return p;
 }
 
 RCCoupParams MakeProductionRCCoupParams()
 {
-    // Configured AI datacenter floor (heights still INT32_MAX):
-    //   Resident bank = bank_pages × lobe_width² = 768 × 8192² = 48 GiB
-    //   Full-bank schedule (12 pages/lobe) + material exchange ON by default.
-    //   Streamed peak ≈ 64 MiB — cheap cards remain valid but uneconomic.
-    // Analysis: B200:5090 ≈2.3× thruput vs ≈15× rent → HBM levers required.
+    // V2 production (heights INT32_MAX):
+    //   int8 expanded = 768 × 8192² = 48 GiB
+    //   packed (×17/32) ≈ 25.5 GiB — fits a 32 GiB consumer card
+    //   M=1, pages/slot=12 → 8×8×12 covers 768 once
     RCCoupParams p;
     p.barriers = 8;
     p.lobes = 8;
     p.lobe_width = 8192;
     p.bank_pages = 768;
+    p.rows_per_lobe = 1;
+    p.pages_per_barrier_lobe = dc::kRCCoupPagesPerBarrierLobe;
+    return p;
+}
+
+RCCoupParams MakeProductionV3RCCoupParams()
+{
+    // V3 hypothesis (heights INT32_MAX; TMTO audit may NO-GO):
+    //   M=128, W=8192, pages=1536, pages/slot=24
+    //   packed ≈ 51 GiB, int8 96 GiB, MACs = 12 TiMAC, coverage 1536
+    RCCoupParams p;
+    p.barriers = 8;
+    p.lobes = 8;
+    p.lobe_width = 8192;
+    p.bank_pages = 1536;
+    p.rows_per_lobe = 128;
+    p.pages_per_barrier_lobe = dc::kRCCoupPagesPerBarrierLobeV3;
     return p;
 }
 
@@ -507,18 +529,51 @@ bool RCCoupBarrierLoopComplete(const RCCoupParams& p)
 
 uint64_t TotalRCCoupMacs(const RCCoupParams& p)
 {
-    // One local lobe GEMM is 1×W · W×W → W² MACs; barriers × lobes of them.
-    if (p.barriers == 0 || p.lobes == 0 || p.lobe_width == 0) return 0;
+    // M × pages/slot × barriers × lobes × W²  (saturating).
+    if (p.barriers == 0 || p.lobes == 0 || p.lobe_width == 0 || p.rows_per_lobe == 0 ||
+        p.pages_per_barrier_lobe == 0) {
+        return 0;
+    }
     const uint64_t w2 = static_cast<uint64_t>(p.lobe_width) * p.lobe_width;
     if (w2 == 0) return 0;
-    if (p.lobes > std::numeric_limits<uint64_t>::max() / w2) {
+    auto mul_sat = [](uint64_t a, uint64_t b) -> uint64_t {
+        if (a == 0 || b == 0) return 0;
+        if (a > std::numeric_limits<uint64_t>::max() / b) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        return a * b;
+    };
+    uint64_t acc = mul_sat(static_cast<uint64_t>(p.rows_per_lobe),
+                           static_cast<uint64_t>(p.pages_per_barrier_lobe));
+    acc = mul_sat(acc, static_cast<uint64_t>(p.barriers));
+    acc = mul_sat(acc, static_cast<uint64_t>(p.lobes));
+    return mul_sat(acc, w2);
+}
+
+uint64_t TotalRCCoupPackedBytes(const RCCoupParams& p)
+{
+    // pages × W² × 17/32 — integer form: pages × W² × 17 / 32
+    if (p.bank_pages == 0 || p.lobe_width == 0) return 0;
+    const uint64_t w2 = static_cast<uint64_t>(p.lobe_width) * p.lobe_width;
+    if (p.bank_pages > std::numeric_limits<uint64_t>::max() / w2) {
         return std::numeric_limits<uint64_t>::max();
     }
-    const uint64_t per_barrier = static_cast<uint64_t>(p.lobes) * w2;
-    if (p.barriers > std::numeric_limits<uint64_t>::max() / per_barrier) {
+    const uint64_t elems = static_cast<uint64_t>(p.bank_pages) * w2;
+    // elems * 17 may overflow; check before multiply.
+    if (elems > std::numeric_limits<uint64_t>::max() / 17ull) {
         return std::numeric_limits<uint64_t>::max();
     }
-    return static_cast<uint64_t>(p.barriers) * per_barrier;
+    return (elems * 17ull) / 32ull;
+}
+
+uint64_t TotalRCCoupExpandedBytes(const RCCoupParams& p)
+{
+    if (p.bank_pages == 0 || p.lobe_width == 0) return 0;
+    const uint64_t w2 = static_cast<uint64_t>(p.lobe_width) * p.lobe_width;
+    if (p.bank_pages > std::numeric_limits<uint64_t>::max() / w2) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return static_cast<uint64_t>(p.bank_pages) * w2;
 }
 
 uint64_t EstimateRCCoupStreamedPeakBytes(const RCCoupParams& p)
@@ -556,6 +611,8 @@ uint256 FingerprintRCCoupParams(const RCCoupParams& p)
     put_u32(p.lobes);
     put_u32(p.lobe_width);
     put_u32(p.bank_pages);
+    put_u32(p.rows_per_lobe);
+    put_u32(p.pages_per_barrier_lobe);
     put_u32(p.StateBytes());
     return Sha256dBytes(buf.data(), buf.size());
 }
@@ -668,9 +725,9 @@ std::vector<uint32_t> SelectCoupledBankPageIds(uint32_t barrier, uint32_t lobe,
 
     // Frozen episode-global balanced permutation of [0, bank_pages).
     // Slot (barrier, lobe, k) → perm[(barrier*lobes+lobe)*P + k] (mod bank_pages).
-    // Production: 8×8×12 = 768 covers every page exactly once when
-    // bank_pages == 768.
-    const uint32_t P = dc::kRCCoupPagesPerBarrierLobe;
+    // V2: 8×8×12 = 768; V3: 8×8×24 = 1536 when bank_pages matches.
+    const uint32_t P = params.pages_per_barrier_lobe == 0 ? dc::kRCCoupPagesPerBarrierLobe
+                                                          : params.pages_per_barrier_lobe;
     const uint256 perm_seed =
         Sha256TaggedU32(kRCCoupFullBankTag, sizeof(kRCCoupFullBankTag) - 1, sigma,
                         params.bank_pages);
@@ -766,15 +823,19 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
 
     const auto lobe_seeds = DeriveCoupledLobeSeeds(sigma, params);
     std::vector<int8_t> state(n);
+    const uint32_t M0 = params.rows_per_lobe == 0 ? 1 : params.rows_per_lobe;
+    const uint32_t W0 = params.lobe_width;
+    const uint32_t lobe_stride0 = M0 * W0;
     for (uint32_t ell = 0; ell < params.lobes; ++ell) {
-        // Nonce-fresh lobe activation (C2): first row of a W×W MX tile
-        // (ExpandMxDequantInt8 requires rows % 32 == 0).
-        const auto tile =
-            ExpandMxDequantInt8(lobe_seeds[ell], params.lobe_width, params.lobe_width);
-        if (tile.size() != static_cast<size_t>(params.lobe_width) * params.lobe_width) {
+        // Nonce-fresh lobe activation (C2): first M rows of a W×W MX tile
+        // (ExpandMxDequantInt8 requires rows % 32 == 0 when M>=32; M=1 takes row 0).
+        const auto tile = ExpandMxDequantInt8(lobe_seeds[ell], W0, W0);
+        if (tile.size() != static_cast<size_t>(W0) * W0) {
             return uint256{};
         }
-        std::memcpy(state.data() + ell * params.lobe_width, tile.data(), params.lobe_width);
+        if (lobe_stride0 > tile.size()) return uint256{};
+        std::memcpy(state.data() + static_cast<size_t>(ell) * lobe_stride0, tile.data(),
+                    lobe_stride0);
     }
 
     std::vector<uint256> barrier_roots(params.barriers);
@@ -811,39 +872,42 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         // Legacy: one page (barrier+lobe)%bank_pages. Full schedule defaults ON
         // via RCCoupOptions (dc::kRCCoupFullBankScheduleEnabled).
         const bool full_sched = options.full_bank_schedule;
+        const uint32_t M = params.rows_per_lobe == 0 ? 1 : params.rows_per_lobe;
+        const uint32_t W = params.lobe_width;
+        const uint32_t lobe_stride = M * W;
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
             const auto page_ids =
                 SelectCoupledBankPageIds(b, ell, params, sigma, full_sched);
             if (page_ids.empty()) return uint256{};
-            int64_t* dest = acc.data() + ell * params.lobe_width;
+            int64_t* dest = acc.data() + static_cast<size_t>(ell) * lobe_stride;
             for (uint32_t page_id : page_ids) {
-                std::vector<int64_t> partial(params.lobe_width, 0);
+                std::vector<int64_t> partial(static_cast<size_t>(lobe_stride), 0);
                 std::vector<int8_t> page_for_tx;
                 if (streamed) {
                     auto page = DeriveCoupledBankPage(header, height, page_id, params);
                     MaybeZeroSkipPage(page, page_id, options);
                     if (out_tx) page_for_tx = page;
-                    LobeLocalGemm(state.data() + ell * params.lobe_width, page,
-                                  params.lobe_width, partial.data(), gemm);
-                    // Drop page immediately (do not retain full bank).
+                    LobeLocalGemm(state.data() + static_cast<size_t>(ell) * lobe_stride, page, M,
+                                  W, partial.data(), gemm);
                 } else {
                     if (out_tx) page_for_tx = pages[page_id];
-                    LobeLocalGemm(state.data() + ell * params.lobe_width, pages[page_id],
-                                  params.lobe_width, partial.data(), gemm);
+                    LobeLocalGemm(state.data() + static_cast<size_t>(ell) * lobe_stride,
+                                  pages[page_id], M, W, partial.data(), gemm);
                 }
                 if (out_tx) {
                     RCCoupGemmTranscript gt;
                     gt.barrier = b;
                     gt.lobe = ell;
                     gt.page_id = page_id;
-                    gt.A.assign(state.data() + ell * params.lobe_width,
-                                state.data() + ell * params.lobe_width + params.lobe_width);
+                    gt.A.assign(state.data() + static_cast<size_t>(ell) * lobe_stride,
+                                state.data() + static_cast<size_t>(ell) * lobe_stride +
+                                    lobe_stride);
                     gt.B = std::move(page_for_tx);
                     gt.Y = partial;
                     out_tx->gemms.push_back(std::move(gt));
                 }
-                for (uint32_t c = 0; c < params.lobe_width; ++c) {
-                    dest[c] += partial[c];
+                for (uint32_t i = 0; i < lobe_stride; ++i) {
+                    dest[i] += partial[i];
                 }
             }
         }

@@ -92,7 +92,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_consensus_flags_default_off)
     BOOST_CHECK(dc::kRCThreeAxisScheduleWireEnabled);
     BOOST_CHECK_EQUAL(dc::kRCCoupPagesPerBarrierLobe, 12u);
     BOOST_CHECK_EQUAL(dc::kRCCoupExchangeRowsDefault, 128u);
-    BOOST_CHECK_EQUAL(dc::kRCPackedBankPrimaryGiB, 48.0);
+    BOOST_CHECK_EQUAL(dc::kRCPackedBankPrimaryGiB, 51.0);
     BOOST_CHECK_EQUAL(dc::kRCMinerBatchQDefault, 32u);
     BOOST_CHECK_EQUAL(dc::kRCMinerBatchQMax, 256u);
     BOOST_CHECK_EQUAL(dc::kRCPackedBankTargetGiBCount, 4u);
@@ -111,7 +111,8 @@ BOOST_AUTO_TEST_CASE(rc_dc_probe_status_smoke)
     BOOST_CHECK(!st.deficit.empty());
     BOOST_CHECK_EQUAL(st.cuda_episode_compiled, matmul_v4::cuda::IsRcEpisodeCudaCompiled());
     // Ready tracks whether the CUDA episode TU is linked (graph path callable).
-    BOOST_CHECK_EQUAL(st.cuda_episode_ready, st.cuda_episode_compiled);
+    BOOST_CHECK(!st.cuda_episode_ready); // compiled ≠ ready
+    BOOST_CHECK_EQUAL(st.cuda_episode_ready, false);
 }
 
 BOOST_AUTO_TEST_CASE(rc_dc_bank_pages_for_packed_gib)

@@ -37,7 +37,8 @@ RCDcStatus ProbeRCDcStatus()
     st.gkr_arbiter = false;
     st.cuda_episode_compiled = matmul_v4::cuda::IsRcEpisodeCudaCompiled();
     st.arch_key = matmul_v4::cuda::RcEpisodeCudaArchKey();
-    st.cuda_episode_ready = st.cuda_episode_compiled;
+    // compiled ≠ ready / peak_ready (see matmul_v4_rc_peak_ready.h).
+    st.cuda_episode_ready = false;
     // Heights remain INT32_MAX — levers are configured but publicly inert.
     if (!st.cuda_episode_compiled) {
         st.deficit = "episode_graph_unwired; heights_int32_max";

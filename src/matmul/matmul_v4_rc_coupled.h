@@ -84,8 +84,16 @@ struct RCCoupParams {
     uint32_t lobes{kRCCoupLobes};
     uint32_t lobe_width{kRCCoupLobeWidth};
     uint32_t bank_pages{kRCCoupBankPages};
+    /** Rows per lobe (GEMM M). V1/V2 = 1; V3 production = 128. */
+    uint32_t rows_per_lobe{1};
+    /** Pages accumulated per barrier×lobe under full schedule. V2=12; V3=24. */
+    uint32_t pages_per_barrier_lobe{dc::kRCCoupPagesPerBarrierLobe};
 
-    [[nodiscard]] uint32_t StateBytes() const { return lobes * lobe_width; }
+    /** Active state bytes: lobes × rows_per_lobe × lobe_width (int8). */
+    [[nodiscard]] uint32_t StateBytes() const
+    {
+        return lobes * rows_per_lobe * lobe_width;
+    }
 };
 
 [[nodiscard]] bool ValidateRCCoupParams(const RCCoupParams& p);
@@ -93,19 +101,21 @@ struct RCCoupParams {
 /** CI-safe larger shape: barriers=8, lobes=8, lobe_width=64, bank_pages=32. */
 [[nodiscard]] RCCoupParams MakeMediumRCCoupParams();
 /**
- * PROVISIONAL production coupled shape (Stage-G-calibratable; height stays disabled).
- *
- * Derivation (document in MakeProductionRCCoupParams + frozen-dims doc):
- *   lobe_width = 8192 (MX-aligned, power-of-two)
- *   lobes = 8 → StateBytes = 65536 (power-of-two butterfly + MX-aligned)
- *   barriers = 8 (C5 upper bound)
- *   bank_pages = 768 → Resident bank = 768 × 8192² = 48 GiB (datacenter HBM class)
- *   Streamed peak ≈ one 64 MiB page + state + int64 acc ≪ 24 GiB (commodity tail)
- *
- * Freezing ≠ activation. ResolveRCCoupParams still returns toy/medium until a
- * separate consensus decision wires production into public nets.
+ * V2 production shape (heights INT32_MAX). Honest sizes:
+ *   bank_pages=768, W=8192 → int8 expanded 48 GiB; packed (×17/32) ≈ 25.5 GiB.
+ *   rows_per_lobe=1, pages_per_barrier_lobe=12 → 8×8×12 covers 768 once.
+ * Do NOT call this a 48 GiB packed floor — consumer 32 GiB can hold packed V2.
  */
 [[nodiscard]] RCCoupParams MakeProductionRCCoupParams();
+
+/**
+ * V3 production hypothesis (heights INT32_MAX; new domain tags/goldens required
+ * before any activation discussion):
+ *   M=rows_per_lobe=128, W=8192, bank_pages=1536, pages/slot=24
+ *   packed ≈ 51 GiB, int8 expanded 96 GiB, MACs/nonce = 12 TiMAC
+ *   coverage 8×8×24 = 1536. Pending TMTO/regeneration audit (may NO-GO).
+ */
+[[nodiscard]] RCCoupParams MakeProductionV3RCCoupParams();
 
 /**
  * Consensus checker/miner dims: toy when Params::fMatMulRCCoupledUseToyDims
@@ -120,11 +130,16 @@ struct RCCoupParams {
 [[nodiscard]] bool RCCoupBarrierLoopComplete(const RCCoupParams& p);
 
 /**
- * Structural total-MAC count for tip-verify admission pricing.
- * Per barrier each lobe runs ExactGemm 1×W·W×W (W² MACs) →
- * barriers × lobes × lobe_width². Nonce-independent.
+ * Structural total-MAC count (nonce-independent):
+ *   rows_per_lobe × pages_per_barrier_lobe × barriers × lobes × W²
+ * Checked saturating arithmetic. V3 dims → exactly 12 TiMAC.
  */
 [[nodiscard]] uint64_t TotalRCCoupMacs(const RCCoupParams& p);
+
+/** Canonical packed bank bytes: bank_pages × W² × 17/32 (no provider padding). */
+[[nodiscard]] uint64_t TotalRCCoupPackedBytes(const RCCoupParams& p);
+/** Expanded int8 bank bytes: bank_pages × W². */
+[[nodiscard]] uint64_t TotalRCCoupExpandedBytes(const RCCoupParams& p);
 
 /**
  * Soft peak-bytes estimate for Streamed mode (one page + active state + int64
@@ -133,8 +148,8 @@ struct RCCoupParams {
 [[nodiscard]] uint64_t EstimateRCCoupStreamedPeakBytes(const RCCoupParams& p);
 
 /**
- * Soft peak-bytes estimate for Resident mode (full bank + state + int64 acc).
- * Production preset targets ~48 GiB bank — measurement-only; never raises height.
+ * Soft peak-bytes estimate for Resident mode (full *expanded int8* bank + state
+ * + int64 acc). Prefer TotalRCCoupPackedBytes for the consensus memory floor.
  */
 [[nodiscard]] uint64_t EstimateRCCoupResidentPeakBytes(const RCCoupParams& p);
 
