@@ -793,4 +793,51 @@ BOOST_AUTO_TEST_CASE(rc_dc_public_heights_and_parked_switches_inert)
     BOOST_CHECK(!st.gkr_arbiter);
 }
 
+BOOST_AUTO_TEST_CASE(rc_dc_batch_vs_reference_rows_per_lobe)
+{
+    // Production blocker regression: TryMineRCCoupledBatch must match
+    // RecomputeCoupledPuzzleReference for rows_per_lobe > 1 (V3 M=128).
+    // Vary only M on MakeMediumRCCoupParams; exercise full-schedule and stacked.
+    constexpr uint32_t kMs[] = {1u, 2u, 4u, 32u, 64u};
+    constexpr uint32_t Q = 4;
+    const CBlockHeader base = MakeCoupHeader(4242);
+
+    for (uint32_t M : kMs) {
+        auto params = rc::MakeMediumRCCoupParams();
+        params.rows_per_lobe = M;
+        BOOST_REQUIRE_MESSAGE(rc::ValidateRCCoupParams(params),
+                              "invalid medium params at M=" << M);
+        BOOST_CHECK_EQUAL(params.StateBytes(), params.lobes * M * params.lobe_width);
+
+        const auto window = rc::BuildRCCoupledMinerNonceWindow(base, Q);
+        rc::RCMinerBatchConfig cfg;
+        cfg.Q = Q;
+
+        for (bool full : {true, false}) {
+            rc::RCCoupOptions opts;
+            opts.full_bank_schedule = full;
+
+            std::vector<uint256> batch;
+            BOOST_REQUIRE_MESSAGE(
+                rc::TryMineRCCoupledBatch(window, 0, params, batch, cfg, {}, opts),
+                "batch failed M=" << M << " full=" << full);
+            BOOST_REQUIRE_EQUAL(batch.size(), Q);
+
+            for (uint32_t i = 0; i < Q; ++i) {
+                const uint256 ref =
+                    rc::RecomputeCoupledPuzzleReference(window[i], 0, params, opts);
+                BOOST_CHECK_MESSAGE(
+                    batch[i] == ref,
+                    "batch≠ref M=" << M << " full=" << full << " i=" << i
+                                   << " batch=" << batch[i].GetHex()
+                                   << " ref=" << ref.GetHex());
+            }
+        }
+    }
+
+    // V3 production M must not be silently reduced to 1.
+    BOOST_CHECK_EQUAL(rc::MakeProductionV3RCCoupParams().rows_per_lobe, 128u);
+    BOOST_CHECK_EQUAL(rc::MakeMediumV3RCCoupParams().rows_per_lobe, 32u);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

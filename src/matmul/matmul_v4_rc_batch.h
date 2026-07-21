@@ -22,9 +22,10 @@
 // headers[i]'s private state alone and must match
 // RecomputeCoupledPuzzleReference(headers[i], ...) byte-for-byte.
 //
-// Optional ExactGemm stacking (Q×W · W×W) is a throughput lever when the page
-// schedule is shared; under full_bank_schedule each header still runs its own
-// GEMMs. Consensus digests are unchanged either way.
+// Optional ExactGemm stacking ((Q*M)×W · W×W) is a throughput lever when the
+// page schedule is shared; under full_bank_schedule each header still runs its
+// own M-row GEMMs. Digests must match RecomputeCoupledPuzzleReference for any
+// rows_per_lobe (including V3 M=128) — never treat a lobe as a single W-byte row.
 //
 // Does not raise heights. Does not enable full-bank schedule / material
 // exchange / GKR arbiter beyond RCCoupOptions defaults.

@@ -126,7 +126,7 @@ uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages, uint32_t b
     return uint256{Span<const unsigned char>{d2, sizeof(d2)}};
 }
 
-void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
+void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n, bool u64_wrap)
 {
     for (uint32_t stage = 0; (uint32_t{1} << stage) < n; ++stage) {
         const uint32_t stride = uint32_t{1} << stage;
@@ -135,15 +135,22 @@ void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
             if (i >= j) continue;
             const uint32_t pi = i ^ mask;
             const uint32_t pj = j ^ mask;
-            const int64_t a = s[pi];
-            const int64_t b = s[pj];
-            s[pi] = a + b;
-            s[pj] = a - b;
+            if (u64_wrap) {
+                const uint64_t a = static_cast<uint64_t>(s[pi]);
+                const uint64_t b = static_cast<uint64_t>(s[pj]);
+                s[pi] = static_cast<int64_t>(a + b);
+                s[pj] = static_cast<int64_t>(a - b);
+            } else {
+                const int64_t a = s[pi];
+                const int64_t b = s[pj];
+                s[pi] = a + b;
+                s[pj] = a - b;
+            }
         }
     }
 }
 
-void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
+void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n, bool u64_wrap)
 {
     assert(n >= 2 && (n & (n - 1)) == 0);
     uint32_t bits = 0;
@@ -159,17 +166,25 @@ void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
             if (i >= j) continue;
             const uint32_t pi = rotl(i ^ mask, 3);
             const uint32_t pj = rotl(j ^ mask, 3);
-            const int64_t a = s[pi];
-            const int64_t b = s[pj];
-            s[pi] = a + b;
-            s[pj] = b - a;
+            if (u64_wrap) {
+                const uint64_t a = static_cast<uint64_t>(s[pi]);
+                const uint64_t b = static_cast<uint64_t>(s[pj]);
+                s[pi] = static_cast<int64_t>(a + b);
+                s[pj] = static_cast<int64_t>(b - a);
+            } else {
+                const int64_t a = s[pi];
+                const int64_t b = s[pj];
+                s[pi] = a + b;
+                s[pj] = b - a;
+            }
         }
     }
 }
 
 void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t barrier,
                       uint32_t n, bool material_exchange = false,
-                      uint32_t exchange_rows = dc::kRCCoupExchangeRowsDefault)
+                      uint32_t exchange_rows = dc::kRCCoupExchangeRowsDefault,
+                      bool u64_wrap = false)
 {
     uint256 mix_seed;
     if (material_exchange) {
@@ -184,9 +199,9 @@ void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t ba
     const uint32_t mask = xof.NextU32() & (n - 1);
     const uint32_t pattern = barrier % kRCCoupMixPatterns;
     if (pattern == 0) {
-        MixButterflyAscending(s, mask, n);
+        MixButterflyAscending(s, mask, n, u64_wrap);
     } else {
-        MixButterflyDescending(s, mask, n);
+        MixButterflyDescending(s, mask, n, u64_wrap);
     }
 }
 
@@ -331,6 +346,9 @@ bool MineRCCoupledBatchIndependent(const std::vector<CBlockHeader>& headers, int
     const uint32_t Q = static_cast<uint32_t>(headers.size());
     const uint32_t n = params.StateBytes();
     const uint32_t W = params.lobe_width;
+    const uint32_t M = params.rows_per_lobe == 0 ? 1 : params.rows_per_lobe;
+    const uint32_t lobe_stride = M * W;
+    if (n != params.lobes * lobe_stride) return false;
 
     // Bank is template-scoped — derive once from the canonical projection.
     const auto pages =
@@ -339,19 +357,24 @@ bool MineRCCoupledBatchIndependent(const std::vector<CBlockHeader>& headers, int
     (void)use_resident_bank; // CPU reference always retains pages for the batch.
 
     // Independent per-nonce state — never reuse / overwrite a shared slot 0.
+    // Lobe fill matches RecomputeCoupledPuzzleReference: first M rows of W×W MX tile.
     std::vector<uint256> sigmas(Q);
     std::vector<std::vector<int8_t>> states(Q, std::vector<int8_t>(n));
     for (uint32_t q = 0; q < Q; ++q) {
         sigmas[q] = matmul::v4::DeriveSigma(headers[q]);
         const auto lobe_seeds = DeriveCoupledLobeSeeds(sigmas[q], params);
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
-            const auto tile =
-                ExpandMxDequantInt8(lobe_seeds[ell], params.lobe_width, params.lobe_width);
-            std::memcpy(states[q].data() + ell * W, tile.data(), W);
+            const auto tile = ExpandMxDequantInt8(lobe_seeds[ell], W, W);
+            if (tile.size() != static_cast<size_t>(W) * W || lobe_stride > tile.size()) {
+                return false;
+            }
+            std::memcpy(states[q].data() + static_cast<size_t>(ell) * lobe_stride, tile.data(),
+                        lobe_stride);
         }
     }
 
     std::vector<std::vector<uint256>> barrier_roots(Q, std::vector<uint256>(params.barriers));
+    const bool mix_u64 = RCCoupUseMixU64Wrap(params, opts.force_signed_mix);
 
     for (uint32_t b = 0; b < params.barriers; ++b) {
         if (opts.skip_barrier && opts.skip_barrier_index == b) {
@@ -361,45 +384,48 @@ bool MineRCCoupledBatchIndependent(const std::vector<CBlockHeader>& headers, int
             continue;
         }
 
-        // Per lobe: stack Q rows → ExactGemm Q×W · W×W → split into per-q accs.
         std::vector<std::vector<int64_t>> accs(Q, std::vector<int64_t>(n, 0));
-        // Digest-affecting schedule from opts (defaults = dc levers).
         const bool full_sched = opts.full_bank_schedule;
 
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
-            // Page schedule is sigma-dependent under full_bank_schedule; when
-            // that flag is OFF, all headers share the same page_id.
-            // Under full schedule, per-header GEMMs (still independent state).
+            // Full schedule: per-header page lists (sigma-dependent) + M-row GEMMs.
             if (full_sched) {
                 for (uint32_t q = 0; q < Q; ++q) {
                     const auto page_ids =
                         SelectCoupledBankPageIds(b, ell, params, sigmas[q], true);
-                    int64_t* dest = accs[q].data() + ell * W;
+                    if (page_ids.empty()) return false;
+                    int64_t* dest = accs[q].data() + static_cast<size_t>(ell) * lobe_stride;
                     for (uint32_t page_id : page_ids) {
-                        std::vector<int8_t> L(states[q].data() + ell * W,
-                                              states[q].data() + ell * W + W);
+                        std::vector<int8_t> L(
+                            states[q].data() + static_cast<size_t>(ell) * lobe_stride,
+                            states[q].data() + static_cast<size_t>(ell) * lobe_stride +
+                                lobe_stride);
                         const auto y =
-                            ExactGemmS8S8Dispatched(gemm, L, pages[page_id], 1, W, W);
-                        for (uint32_t c = 0; c < W; ++c) {
-                            dest[c] += static_cast<int64_t>(y[c]);
+                            ExactGemmS8S8Dispatched(gemm, L, pages[page_id], M, W, W);
+                        if (y.size() != lobe_stride) return false;
+                        for (uint32_t i = 0; i < lobe_stride; ++i) {
+                            dest[i] += static_cast<int64_t>(y[i]);
                         }
                     }
                 }
                 continue;
             }
 
+            // Stacked / non-full: shared page_id; ExactGemm (Q*M)×W · W×W.
             const uint32_t page_id =
                 SelectCoupledBankPageIds(b, ell, params, sigmas[0], false).front();
-            std::vector<int8_t> Lstacked(static_cast<size_t>(Q) * W);
+            std::vector<int8_t> Lstacked(static_cast<size_t>(Q) * lobe_stride);
             for (uint32_t q = 0; q < Q; ++q) {
-                std::memcpy(Lstacked.data() + q * W, states[q].data() + ell * W, W);
+                std::memcpy(Lstacked.data() + static_cast<size_t>(q) * lobe_stride,
+                            states[q].data() + static_cast<size_t>(ell) * lobe_stride,
+                            lobe_stride);
             }
-            const auto Y =
-                ExactGemmS8S8Dispatched(gemm, Lstacked, pages[page_id], Q, W, W);
-            assert(Y.size() == static_cast<size_t>(Q) * W);
+            const auto Y = ExactGemmS8S8Dispatched(gemm, Lstacked, pages[page_id], Q * M, W, W);
+            if (Y.size() != static_cast<size_t>(Q) * lobe_stride) return false;
             for (uint32_t q = 0; q < Q; ++q) {
-                for (uint32_t c = 0; c < W; ++c) {
-                    accs[q][ell * W + c] = static_cast<int64_t>(Y[q * W + c]);
+                for (uint32_t i = 0; i < lobe_stride; ++i) {
+                    accs[q][static_cast<size_t>(ell) * lobe_stride + i] =
+                        static_cast<int64_t>(Y[static_cast<size_t>(q) * lobe_stride + i]);
                 }
             }
         }
@@ -409,7 +435,8 @@ bool MineRCCoupledBatchIndependent(const std::vector<CBlockHeader>& headers, int
             const auto pi = DeriveCoupledBalancedPermutation(sigmas[q], b, params);
             assert(IsBalancedPermutation(pi, n));
             ApplyBalancedPermutation(acc, pi);
-            ApplyAllToAllMix(acc, sigmas[q], b, n, opts.material_exchange, opts.exchange_rows);
+            ApplyAllToAllMix(acc, sigmas[q], b, n, opts.material_exchange, opts.exchange_rows,
+                             mix_u64);
             ApplyMaterialExchangeRounds(acc, sigmas[q], b, opts);
             const uint256 extract_seed = Sha256TaggedU32U32(
                 kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigmas[q], b, 0);
