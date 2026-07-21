@@ -385,7 +385,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_golden_digest_stable)
     BOOST_CHECK(!d1.IsNull());
     BOOST_CHECK(d1 == d2);
     BOOST_CHECK_EQUAL(d1.GetHex(),
-                      "71c40b7b28bf12926282912bf694b3ac699ec728fcb5fe2123b43af7346e731b");
+                      "7a7ce1065c7881aa2bd2295c26778ebf88c22432e91326f98d098c11885579ee");
 
     // Toy params overload must stay byte-identical to the no-params path.
     const uint256 d_params =
@@ -404,7 +404,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_medium_golden_digest_stable)
     BOOST_CHECK(d1 == d2);
     // Placeholder — replaced after first honest run below if mismatched.
     BOOST_CHECK_EQUAL(d1.GetHex(),
-                      "2ead0dc98831621980286ad2b70af12317dea99a42156db750478c26e001871c");
+                      "349175d557eba373cd59ea4cb5431d5710481cc8e7e121e90c2a0775df8b5f4c");
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_mode_equivalence_all_four)
@@ -445,7 +445,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_modes_match_frozen_golden)
     // Resident / Checkpointed / Streamed / Sequential ≡ frozen toy golden.
     const auto header = MakeCoupHeader(42);
     constexpr const char* kToy =
-        "71c40b7b28bf12926282912bf694b3ac699ec728fcb5fe2123b43af7346e731b";
+        "7a7ce1065c7881aa2bd2295c26778ebf88c22432e91326f98d098c11885579ee";
     const rc::RCCoupExecMode modes[] = {
         rc::RCCoupExecMode::SequentialLobes,
         rc::RCCoupExecMode::Checkpointed,

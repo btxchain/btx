@@ -42,7 +42,7 @@ FROZEN_VERSION = 1  # ENC_RC_V1
 
 # Separate frozen digest for Stage C coupled toy (MakeCoupHeader(42) @ height 0).
 # Not an episode transcript version — listed so silent replacement is caught.
-FROZEN_COUPLED_TOY_HEX = "71c40b7b28bf12926282912bf694b3ac699ec728fcb5fe2123b43af7346e731b"
+FROZEN_COUPLED_TOY_HEX = "7a7ce1065c7881aa2bd2295c26778ebf88c22432e91326f98d098c11885579ee"
 
 def die(msg: str, code: int = 1) -> None:
     sys.stderr.write("rc-golden-gate: FAIL — " + msg + "\n")
@@ -105,17 +105,24 @@ def main() -> int:
             "(enabling segment leaves changes the stream and the toy golden)"
         )
 
-    # Stage F / 4.3: three-axis schedule must stay inert; ratios PROVISIONAL.
+    # Stage F: three-axis schedule ON with AI HBM/fabric epoch-0 dials.
+    # Public activation still NO-GO (nMatMulRCHeight=INT32_MAX). Growth ratios
+    # remain PROVISIONAL; episode n_ctx is capped so toy V1 golden stays stable.
     if SCALE_AXES_H.is_file():
         axes = SCALE_AXES_H.read_text(encoding="utf-8")
         if not re.search(
-            r"inline\s+constexpr\s+bool\s+kRCThreeAxisScheduleEnabled\s*=\s*false\s*;",
+            r"inline\s+constexpr\s+bool\s+kRCThreeAxisScheduleEnabled\s*=\s*true\s*;",
             axes,
         ):
             errors.append(
-                "kRCThreeAxisScheduleEnabled must remain false until Stage I "
-                "(ratios PROVISIONAL; epoch-0 golden must stay inert)"
+                "kRCThreeAxisScheduleEnabled must be true (AI datacenter levers configured; "
+                "public height remains INT32_MAX)"
             )
+        if not re.search(
+            r"kRCAxisW0State\s*=\s*48ull\s*<<\s*30",
+            axes,
+        ):
+            errors.append("kRCAxisW0State must be 48 GiB (MakeProduction resident bank floor)")
     else:
         errors.append(f"missing {SCALE_AXES_H}")
 
@@ -186,12 +193,12 @@ def main() -> int:
         "frozen_coupled_toy_golden": FROZEN_COUPLED_TOY_HEX,
         "coupled_toy_golden_hits": 0,
         "errors": errors,
-        "kRCThreeAxisScheduleEnabled": False,
+        "kRCThreeAxisScheduleEnabled": True,
         "policy": (
             "Silent golden replacement forbidden. V2 requires new domain tags "
             "+ BOTH goldens kept. Coupled toy golden is a separate frozen digest. "
-            "kRCThreeAxisScheduleEnabled=false (ratios PROVISIONAL). "
-            "nMatMulRCHeight stays INT32_MAX."
+            "kRCThreeAxisScheduleEnabled=true with 48 GiB W0 / 4 GiB X0 "
+            "(AI datacenter levers); nMatMulRCHeight stays INT32_MAX."
         ),
     }
 

@@ -113,13 +113,16 @@ RCEpisodeParams DeriveDimsFromAxes(const RCThreeAxisScale& scale)
     out.T_leaf = kRCTileLeafBytes;
     out.n_q = kRCQueryPerHead * out.d_head;
 
-    // W_state → n_ctx proxy (same formula as W_res / (2 * d_head)).
-    const uint64_t n_ctx_raw = scale.W_state / (2ull * out.d_head);
+    // W_state is the HBM / packed-bank floor (often multi-GiB). Episode n_ctx
+    // uses a capped proxy so ExactReplay episode dims stay viable; coupled
+    // Resident sizing consumes the full W_state via production bank params.
+    const uint64_t w_for_ctx =
+        scale.W_state < kRCAxisEpisodeCtxBytesCap ? scale.W_state : kRCAxisEpisodeCtxBytesCap;
+    const uint64_t n_ctx_raw = w_for_ctx / (2ull * out.d_head);
     out.n_ctx = RoundToMultipleOf32(n_ctx_raw == 0 ? 1 : n_ctx_raw);
 
-    // C_local does not yet resize matrices; keep b_seq at epoch-0 until Stage C
-    // exposes a local-work dial. X_exchange similarly recorded-only while
-    // kRCThreeAxisScheduleEnabled is false / ratios PROVISIONAL.
+    // C_local / X_exchange recorded as economic dials; matrix reshape lands
+    // when Stage C wires them into committed coupled dims (ratios PROVISIONAL).
     out.b_seq = kRCBatchSeq;
     (void)scale.C_local;
     (void)scale.X_exchange;

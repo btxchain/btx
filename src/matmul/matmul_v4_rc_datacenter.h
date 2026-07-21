@@ -9,23 +9,45 @@
 #include <string>
 
 // ENC_RC / ENC_RC_COUPLED datacenter-advantage levers (B200/H200 vs 5090).
-// Research defaults 2026-07-21. Consensus-breaking flags stay FALSE until Stage G.
-// Page selection: matmul_v4_rc_coupled.h SelectCoupledBankPageIds.
-// Heights remain INT32_MAX; GKR arbiter stays OFF.
+//
+// Analysis lock (2026-07-21, Lever-B MX Extract, MatExpand w=1024 model):
+//   B200:5090 throughput ≈ 2.3× (was ≈1.2× under ChaCha-cell Extract).
+//   B200 rent ≈ 15× a 5090 → tensor-only leaves consumer ahead on blocks/$.
+//   Do NOT claim ≥4× from GEMM width / Extract params alone.
+//
+// Correct default levers therefore push HBM + full-bank traffic + fabric
+// exchange so Resident LLM-class nodes win economically while Streamed
+// cheap cards remain consensus-valid but uneconomic. Heights stay INT32_MAX;
+// GKR arbiter stays OFF. Env must never flip these (digest purity).
 
 namespace matmul::v4::rc::dc {
 
-inline constexpr bool kRCCoupFullBankScheduleEnabled = false;
+/** Full-bank page schedule (12 pages / barrier×lobe). Digest-breaking vs legacy
+ *  single-page. ON — required for ~12× bank traffic vs consumer Streamed. */
+inline constexpr bool kRCCoupFullBankScheduleEnabled = true;
 inline constexpr uint32_t kRCCoupPagesPerBarrierLobe = 12;
-inline constexpr bool kRCCoupMaterialExchangeEnabled = false;
+
+/** NVLink-shaped multi-row exchange domain in the all-to-all mix. ON — fabric
+ *  pressure; digests absorb exchange_rows when Active(). */
+inline constexpr bool kRCCoupMaterialExchangeEnabled = true;
+/** Row tile for material exchange (sweep 64 / 128 / 256). */
 inline constexpr uint32_t kRCCoupExchangeRowsDefault = 128;
-inline constexpr bool kRCThreeAxisScheduleWireEnabled = false;
+
+/** Wire Stage F three-axis dials as the live scale surface (epoch-0 until
+ *  nMatMulRCHeight; public height remains INT32_MAX). */
+inline constexpr bool kRCThreeAxisScheduleWireEnabled = true;
 
 inline constexpr uint32_t kRCMinerBatchQDefault = 32;
 inline constexpr uint32_t kRCMinerBatchQMax = 256;
 inline constexpr double kRCMxPackedBytesPerElem = 0.53125;
-inline constexpr double kRCPackedBankTargetGiB[] = {40.0, 56.0, 72.0, 96.0};
+
+/** Packed-MX resident bank targets (GiB). Floor 48 matches MakeProduction
+ *  768×8192²; 64 clears 5090 32 GiB; 80/96 are B200-class ladders. */
+inline constexpr double kRCPackedBankTargetGiB[] = {48.0, 64.0, 80.0, 96.0};
 inline constexpr size_t kRCPackedBankTargetGiBCount = 4;
+
+/** Primary packed-bank floor used by Probe / docs (GiB). */
+inline constexpr double kRCPackedBankPrimaryGiB = 48.0;
 
 [[nodiscard]] bool RCCoupFullBankScheduleActive();
 [[nodiscard]] bool RCCoupMaterialExchangeActive();

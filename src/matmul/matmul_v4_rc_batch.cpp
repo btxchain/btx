@@ -161,10 +161,18 @@ void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
 }
 
 void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t barrier,
-                      uint32_t n)
+                      uint32_t n, bool material_exchange = false,
+                      uint32_t exchange_rows = dc::kRCCoupExchangeRowsDefault)
 {
-    const uint256 mix_seed =
-        Sha256TaggedU32(kRCCoupMixTag, sizeof(kRCCoupMixTag) - 1, sigma, barrier);
+    uint256 mix_seed;
+    if (material_exchange) {
+        const uint32_t rows = exchange_rows == 0 ? dc::kRCCoupExchangeRowsDefault : exchange_rows;
+        mix_seed = Sha256TaggedU32U32(kRCCoupMaterialExchangeTag,
+                                      sizeof(kRCCoupMaterialExchangeTag) - 1, sigma, barrier,
+                                      rows);
+    } else {
+        mix_seed = Sha256TaggedU32(kRCCoupMixTag, sizeof(kRCCoupMixTag) - 1, sigma, barrier);
+    }
     ShaXof xof(mix_seed);
     const uint32_t mask = xof.NextU32() & (n - 1);
     const uint32_t pattern = barrier % kRCCoupMixPatterns;
@@ -245,12 +253,9 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
     if (headers.size() > dc::kRCMinerBatchQMax) return false;
     if (!HeadersShareBankTemplate(headers)) return false;
 
-    // Full-bank remains OFF unless the caller set RCCoupOptions::full_bank_schedule
-    // explicitly (harness only). Never getenv / Active() for digests.
+    // Full-bank / material-exchange follow RCCoupOptions defaults (dc levers ON).
+    // Never getenv. Callers may set options.full_bank_schedule=false for legacy.
     RCCoupOptions opts = options;
-    if (!opts.full_bank_schedule) {
-        opts.full_bank_schedule = false;
-    }
 
     const uint32_t Q = static_cast<uint32_t>(headers.size());
     const uint32_t n = params.StateBytes();
@@ -286,7 +291,7 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
 
         // Per lobe: stack Q rows → ExactGemm Q×W · W×W → split.
         std::vector<std::vector<int64_t>> accs(Q, std::vector<int64_t>(n, 0));
-        // Digest-affecting schedule ONLY from explicit opts (never getenv / Active()).
+        // Digest-affecting schedule from opts (defaults = dc levers).
         const bool full_sched = opts.full_bank_schedule;
 
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
@@ -333,7 +338,7 @@ bool TryMineRCCoupledBatch(const std::vector<CBlockHeader>& headers, int32_t hei
             const auto pi = DeriveCoupledBalancedPermutation(sigmas[q], b, params);
             assert(IsBalancedPermutation(pi, n));
             ApplyBalancedPermutation(acc, pi);
-            ApplyAllToAllMix(acc, sigmas[q], b, n);
+            ApplyAllToAllMix(acc, sigmas[q], b, n, opts.material_exchange, opts.exchange_rows);
             const uint256 extract_seed = Sha256TaggedU32U32(
                 kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigmas[q], b, 0);
             ExtractActiveState(lt::DeriveMatExpandPrfKey(extract_seed), acc, states[q]);

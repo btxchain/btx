@@ -14,14 +14,14 @@ bool RCCoupFullBankScheduleActive()
 {
     // Compile-time only. NEVER read getenv here — these flags flow into
     // RecomputeCoupledPuzzleReference and change digests (latent chain split).
-    // Research/harness opt-in: RCCoupOptions::full_bank_schedule only.
+    // Harness may still force legacy via RCCoupOptions::full_bank_schedule=false
+    // only when the caller constructs options explicitly after defaulting.
     return kRCCoupFullBankScheduleEnabled;
 }
 
 bool RCCoupMaterialExchangeActive()
 {
     // Compile-time only. Env must not touch consensus (see full-bank note).
-    // Material exchange is not wired into the reference path yet; keep false.
     return kRCCoupMaterialExchangeEnabled;
 }
 
@@ -37,12 +37,15 @@ RCDcStatus ProbeRCDcStatus()
     st.gkr_arbiter = false;
     st.cuda_episode_compiled = matmul_v4::cuda::IsRcEpisodeCudaCompiled();
     st.arch_key = matmul_v4::cuda::RcEpisodeCudaArchKey();
-    // Ready means the CUDA episode TU is linked (graph path callable). Consensus
-    // DC levers remain OFF; heights stay INT32_MAX.
     st.cuda_episode_ready = st.cuda_episode_compiled;
-    st.deficit = st.cuda_episode_compiled
-                     ? "consensus_dc_levers_default_off"
-                     : "consensus_dc_levers_default_off; episode_graph_unwired";
+    // Heights remain INT32_MAX — levers are configured but publicly inert.
+    if (!st.cuda_episode_compiled) {
+        st.deficit = "episode_graph_unwired; heights_int32_max";
+    } else if (!st.full_bank_schedule || !st.material_exchange || !st.three_axis_wire) {
+        st.deficit = "dc_lever_incomplete";
+    } else {
+        st.deficit = "heights_int32_max";
+    }
     return st;
 }
 
