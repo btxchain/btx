@@ -758,6 +758,23 @@ enum class RCGkrIndepMaliciousKind : uint32_t {
     const CBlockHeader& header, int32_t height, const RCCoupParams& params,
     const uint256& claimed_digest, RCGkrIndepMaliciousKind kind);
 
+/**
+ * Test/audit-only INTERNALLY-CONSISTENT v7 forgery constructor. Runs the FULL
+ * honest v7 prover machinery over a FABRICATED witness (per `kind`), producing
+ * an RCGkrProofV7 that PASSES every trivial/algebraic gate of VerifyWinnerProofV7
+ * (pow_bind, header/digest/sigma binding, digest_from_roots, round-seed chain, Λ
+ * layout, column_not_grounded, batched FRI, per-layer sumcheck, final_eval,
+ * eval-argument, FS-bound LogUp α's) and can therefore be rejected ONLY by the
+ * deep in-circuit grounding AIRs (MxExpand / Extract-sampler / tile-tree). Use to
+ * prove v7 defeats independent forgeries at the SECURITY MECHANISM, not at a
+ * trivial consistency gate. For UnrelatedLayerRoots the returned proof re-seals
+ * claimed_digest to the forged roots (bind header.matmul_digest to it before
+ * verifying). UnrelatedBankPages is coupled-only (episode API has no bank pages).
+ */
+[[nodiscard]] RCGkrProveResultV7 ProveMaliciousEpisodeV7ForTest(
+    const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
+    const arith_uint256& target, const uint256& claimed_digest, RCGkrIndepMaliciousKind kind);
+
 } // namespace matmul::v4::rc
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_GKR_H

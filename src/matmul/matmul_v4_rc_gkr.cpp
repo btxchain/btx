@@ -1629,31 +1629,23 @@ GroundResult GroundEpisodeInCircuit(const std::vector<RCGkrV7WireWitness>& wires
     return res;
 }
 
-} // namespace
-
-RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header, const RCEpisodeParams& params,
-                                        int32_t height, const arith_uint256& target,
-                                        const uint256& claimed_digest)
+// Shared v7 prover core: composes the batched FRI + per-layer sumcheck + eval
+// argument + dual-α LogUp over the SUPPLIED wires/roots/seeds/digest. Both the
+// honest prover (ProveWinnerEpisodeV7) and the internally-consistent-forgery
+// helper (ProveMaliciousEpisodeV7ForTest) call this with identical FS ordering,
+// so a forgery differs from an honest proof ONLY in the witness it commits — it
+// still passes every trivial/algebraic gate and only fails the deep in-circuit
+// grounding AIRs (§5.4/§5.7/§6.3) inside VerifyWinnerProofV7.
+RCGkrProveResultV7 ProveV7Core(const CBlockHeader& header, const RCEpisodeParams& params,
+                               int32_t height, const arith_uint256& target,
+                               const uint256& claimed_digest, const uint256& sigma,
+                               const std::vector<uint256>& roots,
+                               const std::vector<uint256>& seeds,
+                               const std::vector<LayerWire>& wires, const char* note)
 {
     RCGkrProveResultV7 res;
     RCGkrProofV7& proof = res.proof;
     const auto t0 = std::chrono::steady_clock::now();
-
-    if (!ValidateRCEpisodeParams(params)) {
-        res.timing.ok = false;
-        res.timing.note = "invalid params";
-        return res;
-    }
-
-    // Ground truth: run the immutable int64 reference for round roots + digest.
-    std::vector<RCRoundTranscript> transcripts;
-    const uint256 true_digest =
-        RecomputeResidentCurriculumReference(header, params, height, {}, &transcripts);
-    std::vector<uint256> roots(params.rounds);
-    for (uint32_t r = 0; r < params.rounds; ++r) roots[r] = transcripts[r].round_root;
-    const uint256 sigma = matmul::v4::DeriveSigma(header);
-    std::vector<uint256> seeds;
-    const std::vector<LayerWire> wires = BuildRealEpisodeLayers(header, params, roots, seeds);
 
     proof.version = kRCGkrProofVersionV7;
     proof.episode = params;
@@ -1714,7 +1706,7 @@ RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header, const RCEpis
         lc.c_claim = c_claim;
         lc.a_eval = MleEvalMatrix(w.A, w.m, w.k, ri, rk);
         lc.b_eval = MleEvalMatrix(w.B, w.k, w.n, rk, rj);
-        lc.final_eval = gf; // == a_eval·b_eval for honest wires
+        lc.final_eval = gf; // == a_eval·b_eval for A·B==Y wires (honest OR forged)
 
         const uint32_t a_col = static_cast<uint32_t>(4 * li);
         const uint32_t b_col = a_col + 1;
@@ -1757,18 +1749,210 @@ RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header, const RCEpis
     proof.logup_bits = lr.achieved_bits;
 
     proof.transcript_hash = fs.Digest();
-    proof.note = "v7 SUCCINCT: batched FRI + sumcheck + eval-arg + in-circuit Extract/MxExpand/"
-                 "tile-tree AIRs over committed columns (no int64-reference re-derivation)";
-    (void)true_digest;
+    proof.note = note;
 
     const auto t1 = std::chrono::steady_clock::now();
     res.timing.prove_s = std::chrono::duration<double>(t1 - t0).count();
     res.timing.ok = true;
-    // Proving stays heavy (it runs the int64 reference to build the witness); the
-    // succinctness claim is about the VERIFY path (see VerifyWinnerProofV7).
     res.timing.over_budget = res.timing.prove_s > kRCGkrMediumProveBudgetS;
     proof.over_budget = false; // verify is succinct: in-circuit AIRs, no reference re-run
     res.timing.note = proof.note;
+    return res;
+}
+
+} // namespace
+
+RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header, const RCEpisodeParams& params,
+                                        int32_t height, const arith_uint256& target,
+                                        const uint256& claimed_digest)
+{
+    if (!ValidateRCEpisodeParams(params)) {
+        RCGkrProveResultV7 res;
+        res.timing.ok = false;
+        res.timing.note = "invalid params";
+        return res;
+    }
+
+    // Ground truth: run the immutable int64 reference for round roots + digest.
+    std::vector<RCRoundTranscript> transcripts;
+    const uint256 true_digest =
+        RecomputeResidentCurriculumReference(header, params, height, {}, &transcripts);
+    (void)true_digest;
+    std::vector<uint256> roots(params.rounds);
+    for (uint32_t r = 0; r < params.rounds; ++r) roots[r] = transcripts[r].round_root;
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    std::vector<uint256> seeds;
+    const std::vector<LayerWire> wires = BuildRealEpisodeLayers(header, params, roots, seeds);
+
+    return ProveV7Core(
+        header, params, height, target, claimed_digest, sigma, roots, seeds, wires,
+        "v7 SUCCINCT: batched FRI + sumcheck + eval-arg + in-circuit Extract/MxExpand/"
+        "tile-tree AIRs over committed columns (no int64-reference re-derivation)");
+}
+
+namespace {
+
+// Rebuild a LayerWire's Fp2 mirrors from its int8/int64 witness after a forge.
+void ResyncV7WireFp2(LayerWire& w)
+{
+    w.A = ToFp2I8(w.A_i8);
+    w.B = ToFp2I8(w.B_i8);
+    w.Y = ToFp2I64(w.Y_i64);
+}
+
+bool IsForgeableGemm(const LayerWire& w)
+{
+    return !w.extract_only && w.k > 0 && !w.A_i8.empty() && !w.B_i8.empty() && !w.Y_i64.empty();
+}
+
+} // namespace
+
+// Test/audit-only INTERNALLY-CONSISTENT v7 forgery constructor. Unlike the v6
+// ProveIndepMalicious*ForTest (which target the PARKED v6 verifier) and unlike a
+// bit-flip of an honest proof (which dies at a trivial consistency gate), this
+// runs the FULL honest v7 prover machinery (ProveV7Core: columns → sumcheck →
+// eval-arg → batched FRI → LogUp → transcript) over a FABRICATED witness. The
+// resulting RCGkrProofV7 is internally consistent: it passes pow_bind, the
+// header/digest/sigma binding, digest_from_roots, the round-seed chain, the Λ
+// layout, column_not_grounded, FriBatchVerify, the per-layer sumcheck,
+// final_eval endpoint/product, the eval argument, and the FS-bound LogUp α's.
+// It can therefore only be rejected by the DEEP security mechanism — the
+// in-circuit MxExpand / Extract-sampler / tile-tree grounding AIRs. Reaching
+// that mechanism for the committed-witness kinds REQUIRES running the honest
+// prover here (doing the work): the attacker cannot forge these cheaply.
+RCGkrProveResultV7 ProveMaliciousEpisodeV7ForTest(const CBlockHeader& header,
+                                                  const RCEpisodeParams& params, int32_t height,
+                                                  const arith_uint256& target,
+                                                  const uint256& claimed_digest,
+                                                  RCGkrIndepMaliciousKind kind)
+{
+    if (!ValidateRCEpisodeParams(params)) {
+        RCGkrProveResultV7 res;
+        res.timing.ok = false;
+        res.timing.note = "invalid params";
+        return res;
+    }
+
+    std::vector<RCRoundTranscript> transcripts;
+    (void)RecomputeResidentCurriculumReference(header, params, height, {}, &transcripts);
+    std::vector<uint256> roots(params.rounds);
+    for (uint32_t r = 0; r < params.rounds; ++r) roots[r] = transcripts[r].round_root;
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    std::vector<uint256> seeds;
+    std::vector<LayerWire> wires = BuildRealEpisodeLayers(header, params, roots, seeds);
+    uint256 digest = claimed_digest; // == EpisodeDigestFromRoots(real roots)
+
+    switch (kind) {
+    case RCGkrIndepMaliciousKind::ArbitraryAbFactorization: {
+        // Present an ALTERNATE exact factorization of the SAME product Y at ONE
+        // GEMM layer: swap columns (c0,c1) of A and rows (c0,c1) of B. A·B is
+        // unchanged (the k-sum is reordered), so the GEMM sumcheck, c_claim,
+        // final_eval and the eval argument all stay consistent, AND Y / extract
+        // / round_roots / tile-tree are byte-identical to the honest episode. The
+        // ONLY thing that changed is the committed operand factorization — which
+        // is NOT the Λ MxExpand expansion. Must die at the operand grounding AIR.
+        bool done = false;
+        for (auto& w : wires) {
+            if (!IsForgeableGemm(w) || w.k < 2) continue;
+            for (uint32_t c1 = 1; c1 < w.k && !done; ++c1) {
+                // Try to find a column pair (0,c1) that actually differs.
+                bool differs = false;
+                for (uint32_t i = 0; i < w.m; ++i)
+                    if (w.A_i8[static_cast<size_t>(i) * w.k + 0] !=
+                        w.A_i8[static_cast<size_t>(i) * w.k + c1]) { differs = true; break; }
+                if (!differs) continue;
+                for (uint32_t i = 0; i < w.m; ++i)
+                    std::swap(w.A_i8[static_cast<size_t>(i) * w.k + 0],
+                              w.A_i8[static_cast<size_t>(i) * w.k + c1]);
+                for (uint32_t j = 0; j < w.n; ++j)
+                    std::swap(w.B_i8[static_cast<size_t>(0) * w.n + j],
+                              w.B_i8[static_cast<size_t>(c1) * w.n + j]);
+                ResyncV7WireFp2(w);
+                done = true;
+            }
+            if (done) break;
+        }
+        break;
+    }
+    case RCGkrIndepMaliciousKind::FabricatedTraceWires: {
+        // Self-consistent GEMM wires (constant fills) UNBOUND to the episode PRF
+        // expansion: Y = A·B is recomputed so the sumcheck is valid, but the
+        // operands are not the Λ leaf expansion. Must die at operand grounding.
+        for (auto& w : wires) {
+            if (!IsForgeableGemm(w)) continue;
+            w.A_i8.assign(static_cast<size_t>(w.m) * w.k, 3);
+            w.B_i8.assign(static_cast<size_t>(w.k) * w.n, 5);
+            ExactInt64Gemm(w.A_i8, w.m, w.k, w.B_i8, w.n, w.Y_i64);
+            w.extract_in = w.Y_i64; // sizes preserved; grounding fails earlier at A
+            ResyncV7WireFp2(w);
+        }
+        break;
+    }
+    case RCGkrIndepMaliciousKind::IdenticalFabricatedLookup: {
+        // Operands + Y are the REAL episode (so operand grounding + extract_in
+        // binding pass), but extract_out is a prover-chosen constant witness. The
+        // verifier-defined Extract sampler AIR recomputes TraceTile(extract_in)
+        // and must reject the fabricated output → extract_air:out_binding.
+        for (auto& w : wires) {
+            if (w.extract_out.empty()) continue;
+            w.extract_out.assign(w.extract_out.size(), 7);
+        }
+        break;
+    }
+    case RCGkrIndepMaliciousKind::FabricatedExtractIO: {
+        // Fabricate the (non-committed) pre-Extract accumulator extract_in. It is
+        // NOT a committed column, so every algebraic gate still passes; the
+        // §5.7 binding extract_in == Y (+ Fwd residual) is the mechanism that
+        // rejects → extract_in:binding.
+        for (auto& w : wires) {
+            if (w.extract_in.empty()) continue;
+            w.extract_in[0] += 123456; // unbind from the sumcheck-proven Y
+            break;
+        }
+        break;
+    }
+    case RCGkrIndepMaliciousKind::UnrelatedLayerRoots: {
+        // Prover-chosen round_roots UNRELATED to the committed extract stream.
+        // Forge the LAST round root (no operand seed depends on roots[last]), then
+        // re-seal claimed_digest = EpisodeDigestFromRoots(forged) and re-chain the
+        // round seeds so digest_from_roots + the seed chain still pass. Operands
+        // still ground (round-0 seeds derive from sigma); the §6.3 tile-tree AIR
+        // that binds round_roots to the extract stream is the mechanism → dies at
+        // the tile-tree grounding.
+        const uint32_t last = params.rounds - 1;
+        roots[last] = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, roots[last], 0xBADBAD);
+        digest = EpisodeDigestFromRoots(roots);
+        for (uint32_t r = 0; r < params.rounds; ++r) {
+            seeds[r] = (r == 0)
+                           ? Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0)
+                           : Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, roots[r - 1], r);
+        }
+        break;
+    }
+    case RCGkrIndepMaliciousKind::UnrelatedBankPages:
+        // Coupled-only; the episode API has no bank pages. Fall through to the
+        // fabricated-trace behaviour so the helper is total.
+        for (auto& w : wires) {
+            if (!IsForgeableGemm(w)) continue;
+            w.A_i8.assign(static_cast<size_t>(w.m) * w.k, 1);
+            w.B_i8.assign(static_cast<size_t>(w.k) * w.n, -1);
+            ExactInt64Gemm(w.A_i8, w.m, w.k, w.B_i8, w.n, w.Y_i64);
+            w.extract_in = w.Y_i64;
+            ResyncV7WireFp2(w);
+        }
+        break;
+    }
+
+    // The FS seed binds header.matmul_digest (RCGkrFsSeedV7). Prove under a header
+    // that commits the (possibly re-sealed) digest so the verifier — which the
+    // test calls with header.matmul_digest == proof.claimed_digest — recomputes
+    // the identical base_seed. matmul_digest is NOT part of sigma/roots, so this
+    // does not perturb the episode wiring or the round roots.
+    CBlockHeader hdr = header;
+    hdr.matmul_digest = digest;
+    auto res = ProveV7Core(hdr, params, height, target, digest, sigma, roots, seeds, wires,
+                           RCGkrIndepMaliciousGapNote(kind));
+    if (res.timing.ok) res.timing.note = RCGkrIndepMaliciousGapNote(kind);
     return res;
 }
 
