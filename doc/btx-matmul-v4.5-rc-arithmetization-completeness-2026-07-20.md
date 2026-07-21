@@ -24,7 +24,6 @@ is the honest status. ExactReplay remains the sole consensus authority.
 | **G5** | **CLOSED (given G1–G3)** | `acc_claim = claim + residual_mle` is a sound algebraic link **only once** claim/residual are themselves bound (construction §4.2); standalone it constrains prover-supplied values only. |
 | **DEEP/OOD** | **PARTIAL** | Quotient openings are real, but a **single** OOD point over Fp2 caps column degree at 2^24 (post-grinding 64-bit target); consensus columns reach 2^28 → dual-OOD required (soundness table). |
 | **FRI layout** | **NEW FINDING** | 7 separate FRI instances union-bound to 2^-63.05 < 2^-64 target → single batched instance (or Q ≥ 128) required. Also: Goldilocks 2-adicity caps columns at 2^28 coeffs; the current single concatenated trace vector cannot run at consensus dims. |
->>>>>>> 5859d72 (doc(ENC_RC): WS2 rigorous GKR arithmetization construction + honest G1-G5 revert)
 
 ## Decision (Fable) — updated
 
