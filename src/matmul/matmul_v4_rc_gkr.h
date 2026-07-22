@@ -580,6 +580,14 @@ struct RCGkrProveResultV7 {
                                        std::string* why = nullptr,
                                        RCGkrTiming* out_timing = nullptr);
 
+/**
+ * F3: bounded wire/payload accounting for the witness-carried v7 scaffold.
+ * Returns kRCGkrMaxProofBytesHard+1 when a structural cap or the hard byte cap
+ * is exceeded (reject-before-work). Saturating; the carried A/B/Y/extract
+ * witness dominates. Admission estimate until a canonical v7 serializer lands.
+ */
+[[nodiscard]] size_t EstimateRCGkrProofV7PayloadBytes(const RCGkrProofV7& proof);
+
 // ============================================================================
 // G1–G5 IN-CIRCUIT RELATIONS (integration wave, 2026-07-22).
 //
