@@ -1042,3 +1042,98 @@ plus the pre-existing tamper suites.
 - T_R16 range obligations (limbs, and the `(G − q)` canonicity row) are membership
   relations routed through Construction III, not identities; the deterministic
   structural guards in `CheckTileConstraints` mirror them 1:1.
+
+## Appendix W — Construction IV: copy / permutation wiring constraints (implemented, 2026-07-22)
+
+*Implementation: `src/matmul/matmul_v4_rc_gkr_wiring.{h,cpp}`; tests:
+`src/test/matmul_v4_rc_gkr_wiring_tests.cpp`. Framing: this appendix is
+finite-field algebra over F_p (Goldilocks) and its quadratic extension Fp2 —
+polynomial identities that force two vectors to be equal, or to be related by
+a fixed public permutation π, as identities over the whole Boolean hypercube
+(never a Fiat–Shamir hash chain; cf. the §4.3 insufficiency lemma).*
+
+### W.1 Equality (copy) identity
+
+For vectors u, u' ∈ F^(2^ℓ) (canonically extract_out(L) and input(L+1)):
+u = u' ⟺ the difference multilinear d̃ = ũ − ũ' is the zero polynomial. The
+checking routine draws ρ ∈ Fp2^ℓ (FS-derived after both vectors are
+committed) and tests ũ(ρ) = ũ'(ρ) — two MLE opening claims at a shared point
+with a shared value (`WiringEqualityOpeningClaims` emits them for the §2.4
+evaluation argument; the direct whole-hypercube form evaluates both MLEs over
+the raw vectors, as the unit tests do).
+
+- **Completeness:** exact. u = u' ⇒ identical MLEs ⇒ the identity holds at
+  every ρ, with probability 1.
+- **Separation probability** (S2, Schwartz–Zippel): an invalid assignment
+  (u ≠ u' in ≥ 1 entry) makes d̃ a nonzero ℓ-variate multilinear (total
+  degree ≤ ℓ); it vanishes at uniform ρ ∈ Fp2^ℓ with probability ≤ ℓ/|Fp2|.
+  Numbers at the κ = 2^28 column cap (ℓ = 28, log2|Fp2| = 127.99999999932):
+  **2^-123.19 pre-grinding, 2^-83.19 after the 2^40 grinding budget** —
+  clears the 2^-64 target with ≥ 19 bits of margin. Unequal logical lengths
+  are a structural mismatch: deterministic reject (probability-0 event).
+- Zero-padding both sides to the common 2^ℓ preserves the identity (pads are
+  equal by construction); pad smuggling is separately closed by §2.5.
+
+### W.2 Permutation identity (grand product, Plonk-style)
+
+Claim: u'_j = u_{π(j)} for a fixed public bijection π (e.g. the materialized
+transpose remap `MakeTransposePermutation`; the free-transpose fact of §1.2
+makes this unnecessary for the canonical layout, where transposed reuse is a
+point manipulation on one commitment). For FS challenges β, γ ∈ Fp2 drawn
+after commitment, the running-product column z enforces
+
+  z_0 = 1,  z_{i+1}·(u'_i + β·π(i) + γ) = z_i·(u_i + β·i + γ),  z_N = 1,
+
+i.e. Π_i (u_i + β·i + γ) = Π_j (u'_j + β·π(j) + γ).
+
+- **Completeness:** exact. u'_j = u_{π(j)} makes right factor j equal left
+  factor π(j) (same value, same index tag), so the factor multisets coincide
+  and z telescopes to 1 for every (β, γ) with no zero factor.
+- **Separation probability:** by unique factorization in Fp2[β,γ] (the
+  factors are monic in γ and pairwise non-associate for distinct (tag, value)
+  pairs; index tags are injective since N ≤ 2^28 < p), the two products agree
+  as polynomials iff the multisets {(i, u_i)} and {(π(j), u'_j)} coincide —
+  which, π being a bijection, holds iff u'_j = u_{π(j)} for all j. Otherwise
+  the difference is a nonzero polynomial of total degree ≤ N and S2 gives
+  acceptance probability ≤ N/|Fp2| per challenge pair. Numbers:
+  - single (β, γ), N = 2^28: **2^-100.0 pre-grinding, 2^-60.0 post — BELOW
+    the 2^-64 target**; single-challenge ceiling is N ≤ 2^23
+    (`kRCGkrWiringSingleChallengeMaxN`: 2^-105 pre / 2^-65 post).
+  - **dual (β, γ)** (two independent pairs from one FS round, the same
+    amplification pattern as the dual-α LogUp of §5.6): (N/|Fp2|)² =
+    **2^-200.0 pre-grinding, 2^-160.0 post** at N = 2^28 — the shipping form
+    at κ-sized columns.
+- **Zero factors fail closed** (same posture as the LogUp denominators): any
+  vanishing factor rejects with a resample reason (completeness resample
+  probability ≤ 2N/|Fp2| per pair); it is never an accept path.
+
+### W.3 Cross-layer binding helper
+
+`BindAdjacentLayerWires(wires)` binds extract_out(L) to the shape-designated
+input of layer L+1 for every adjacent pair in Λ order (direct copy → W.1;
+transposed copy → W.2 with the transpose π; no shape-compatible input →
+reported "Λ-definitional", i.e. the pair shares a column reference per §4.2
+and needs no copy constraint). `VerifyLayerBindings(bindings, fs_seed)`
+checks every emitted constraint with FS-derived challenges. The choice of
+consumer operand is by SHAPE only — values are never consulted, so a value
+mismatch always surfaces as a failed identity, never a silent re-route.
+
+### W.4 Acceptance obligations (tested)
+
+- (a) Completeness: honest equality and honest permutation instances pass
+  EXACTLY (multiple independent challenge points/pairs per test).
+- (b) Separation bounds: the numbers of W.1/W.2 are asserted by
+  `wiring_separation_bound_numbers`, including the explicit check that the
+  single-challenge grand product at N = 2^28 is below target (the dual
+  mandate) and the dual form clears it at 2^-160.
+- (c) Counterexamples (invalid assignments): a one-entry difference fails
+  equality (difference-MLE nonzero at ρ); a non-permutation fails the grand
+  product three ways (faithful z from wrong data ⇒ z_N ≠ 1; boundary
+  overwritten to 1 ⇒ a step identity fails; interior z perturbed ⇒ a
+  neighboring step fails); position swaps with an unchanged value multiset
+  fail (index tags bind positions); non-bijective π and zero factors reject
+  structurally / fail closed.
+
+Consensus posture unchanged: arbiter OFF, heights INT32_MAX, the int64
+reference (`RecomputeResidentCurriculumReference`,
+`RecomputeCoupledPuzzleReference`) untouched and authoritative.

@@ -524,6 +524,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_gkr.cpp
   matmul/matmul_v4_rc_gkr_air.cpp
   matmul/matmul_v4_rc_gkr_eval.cpp
+  matmul/matmul_v4_rc_gkr_wiring.cpp
   matmul/matmul_v4_rc_gkr_coupled.cpp
   matmul/matmul_v4_rc_fri.cpp
   matmul/matmul_sketch_cache.cpp
