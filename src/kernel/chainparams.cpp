@@ -325,7 +325,10 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     if (!is_regtest) {
         assert(consensus.nMatMulRCCoupledHeight == std::numeric_limits<int32_t>::max());
         assert(!consensus.fMatMulRCCoupledUseToyDims);
-        assert(consensus.nMatMulRCCoupledProfile == 2);
+        // V3 production is the public / coupled default: a finite coupled height
+        // alone selects V3 (no hidden override). Height stays INT32_MAX above, so
+        // this only fixes WHAT would activate, not that anything activates now.
+        assert(consensus.nMatMulRCCoupledProfile == 3);
         assert(consensus.nMatMulRCCoupledAsertRescaleNum == 1);
         assert(consensus.nMatMulRCCoupledAsertRescaleDen == 1);
     }

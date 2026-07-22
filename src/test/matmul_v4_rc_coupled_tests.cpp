@@ -74,7 +74,9 @@ BOOST_AUTO_TEST_CASE(rc_coup_inactive_and_constants)
     BOOST_CHECK_EQUAL(consensus.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK(!consensus.fMatMulRCCoupledUseToyDims);
-    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledProfile, 2u);
+    // Default profile is V3 (3): a finite coupled height alone selects V3
+    // production. Profile 2 (V2) survives only under explicit selection below.
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledProfile, 3u);
     BOOST_CHECK(!consensus.IsMatMulRCActive(0));
     BOOST_CHECK(!consensus.IsMatMulRCCoupledActive(0));
     BOOST_CHECK(consensus.GetMatMulEncodingProfile(0) !=
@@ -402,6 +404,10 @@ BOOST_AUTO_TEST_CASE(rc_coup_check_pow_regtest_gate)
     p.nMatMulV4Height = 1;
     p.nMatMulRCCoupledHeight = 1;
     p.fMatMulRCCoupledUseToyDims = true;
+    // Explicit V2 (profile 2) regression: pin the toy V2 miner↔checker gate under
+    // explicit selection now that the default profile is V3 (3). Keeps V1-domain
+    // toy goldens exercised end-to-end; miner options {} match ResolveRCCoupOptions.
+    p.nMatMulRCCoupledProfile = 2;
     p.nMatMulV4Dimension = 256;
     p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
@@ -446,10 +452,10 @@ BOOST_AUTO_TEST_CASE(rc_coup_public_activation_resolves_v3_production_profile)
     p.nMatMulV4Height = 1;
     p.nMatMulRCCoupledHeight = 1;
     p.fMatMulRCCoupledUseToyDims = false;
-    // F8 fold: V3 production is the profile-3 family. The default profile stays
-    // 2 (V2 medium, CI-safe stand-in; mainnet asserts profile==2), so a public
-    // V3 activation MUST select profile 3 to resolve to production V3 dims +
-    // 4-round material exchange (heights remain INT32_MAX regardless).
+    // F8 fold: V3 production is the profile-3 family AND the default (mainnet
+    // asserts profile==3), so a finite coupled height alone resolves to
+    // production V3 dims + 4-round material exchange. Set explicitly here to keep
+    // this coverage independent of the default (heights remain INT32_MAX).
     p.nMatMulRCCoupledProfile = 3;
 
     constexpr int32_t kHeight = 10;

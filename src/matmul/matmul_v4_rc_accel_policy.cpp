@@ -107,6 +107,10 @@ RCCoupParams RCCoupParamsFromConsensusConfig(const RCCoupConsensusConfig& cfg)
 RCCoupOptions RCCoupOptionsFromConsensusConfig(const RCCoupConsensusConfig& cfg)
 {
     RCCoupOptions o;
+    // Map EVERY digest-affecting field so a V3 config resolves to V3 options with
+    // no field left at a V1/V2 value. transcript_version carries the coupled
+    // domain family (COUP_*_V3 tags) — omitting it silently kept V1 domains.
+    o.transcript_version = cfg.transcript_version;
     o.full_bank_schedule = cfg.full_bank_schedule_enabled;
     o.material_exchange = cfg.material_exchange_enabled;
     o.exchange_rows = cfg.material_exchange_rows;

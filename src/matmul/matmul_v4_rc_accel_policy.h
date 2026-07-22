@@ -132,7 +132,11 @@ struct RCCoupConsensusConfig {
     uint32_t material_exchange_cols{8192};
 
     // Transcript / Extract / segmentation.
-    uint32_t transcript_version{kRCTranscriptVersion};
+    // V3 coupled domain family (ENC_RC_V3) so the aggregate default {} is fully
+    // V3 — no digest-affecting field left at a V1/V2 value. RCCoupOptionsFrom-
+    // ConsensusConfig maps this onto RCCoupOptions::transcript_version (COUP_*_V3
+    // tags). MakeLegacyV1RCCoupConsensusConfig() overrides it back to ENC_RC_V1.
+    uint32_t transcript_version{ENC_RC_V3};
     uint32_t extract_version{kRCExtractVersionV1};
     uint32_t seg_len{kRCSegLen};
     uint32_t wgrad_exact_chunk{kRCWgradExactChunk};

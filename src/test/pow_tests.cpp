@@ -1365,7 +1365,7 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_rc_coupled_activation_override_args)
     BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledHeight, 12);
     BOOST_CHECK(consensus.fMatMulRCUseToyDims);
     BOOST_CHECK(consensus.fMatMulRCCoupledUseToyDims);
-    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledProfile, 2u); // default V2
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledProfile, 3u); // default V3
     BOOST_CHECK(!consensus.fSkipMatMulValidation);
     BOOST_CHECK(!consensus.IsMatMulRCActive(8));
     BOOST_CHECK(consensus.IsMatMulRCActive(9));

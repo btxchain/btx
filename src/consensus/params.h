@@ -523,10 +523,15 @@ struct Params {
      *   2 = V2 shape family (toy ↔ medium via fMatMulRCCoupledUseToyDims)
      *   3 = V3 shape family (medium-V3 CI ↔ production-V3)
      * Any other value → ResolveRCCoupParams returns zeroed params (fail closed).
-     * Public nets MUST keep 2 (AssertBMX4CConstructionInvariants). Default 2
-     * preserves pre-selector V2 behaviour. Heights stay INT32_MAX.
+     * DEFAULT 3 = V3 production is the public / coupled path: setting a finite
+     * nMatMulRCCoupledHeight ALONE selects V3 production (ResolveRCCoupParams →
+     * MakeProductionV3RCCoupParams, ResolveRCCoupOptions → MakeV3RCCoupOptions)
+     * with NO hidden profile override. Mainnet param validation asserts this
+     * default is 3. Profile 2 (V2) is retained ONLY for explicit regression
+     * coverage. Heights stay INT32_MAX, so nothing activates here — this selects
+     * WHAT activates once a height is deliberately made finite, not WHETHER.
      */
-    uint32_t nMatMulRCCoupledProfile{2};
+    uint32_t nMatMulRCCoupledProfile{3};
     /** RC tip-verify concurrency (pending full-episode / coupled recomputes).
      *  Default 1 -- a single heavy RC-family tip verify must never share the
      *  EncDr/v4/LT pending counter or allow 16-way parallel recomputes. Cap is

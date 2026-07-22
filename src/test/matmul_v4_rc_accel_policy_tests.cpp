@@ -131,6 +131,8 @@ BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_defaults_ai_production)
     BOOST_CHECK_EQUAL(cfg.material_exchange_rounds, rc::MakeV3RCCoupOptions().exchange_rounds);
     BOOST_CHECK(cfg.v3_profile_enabled);
     BOOST_CHECK_EQUAL(cfg.v3_activation_height, std::numeric_limits<int32_t>::max());
+    // Aggregate default {} is fully V3, incl. the coupled domain family.
+    BOOST_CHECK_EQUAL(cfg.transcript_version, rc::ENC_RC_V3);
 
     const rc::RCCoupParams mapped = rc::RCCoupParamsFromConsensusConfig(cfg);
     BOOST_CHECK(rc::ValidateRCCoupParams(mapped));
@@ -142,6 +144,8 @@ BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_defaults_ai_production)
     BOOST_CHECK(options.material_exchange);
     BOOST_CHECK_EQUAL(options.exchange_rows, 128u);
     BOOST_CHECK_EQUAL(options.exchange_rounds, 4u);
+    // V3 config maps the V3 coupled domain tags (no V1/V2 field left behind).
+    BOOST_CHECK_EQUAL(options.transcript_version, rc::ENC_RC_V3);
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_legacy_v1_compatible)
