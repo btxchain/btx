@@ -10,9 +10,11 @@
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_distributed.h>
 #include <matmul/matmul_v4_rc_fri.h>
+#include <matmul/matmul_v4_rc_fri_ext3.h>
 #include <matmul/matmul_v4_rc_gkr_eval.h>
 #include <matmul/matmul_v4_rc_gkr_field.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
+#include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <matmul/matmul_v4_rc_verify_budget.h>
 #include <primitives/block.h>
 #include <uint256.h>
@@ -31,8 +33,9 @@
 //     (2) is succinct / block-sized,
 //     (3) verifies WITHOUT re-running the work,
 //     (4) carries a formal ≤2^{-64}-after-grinding bound.
-//   This tip is a CODE-COMPLETE SCAFFOLD (Fp2 + REAL FRI + ALL-PHASE real-episode
-//   arithmetization + shadow wiring). It is NOT production-complete / NOT
+//   This tip is a CODE-COMPLETE SCAFFOLD (Fp3 episode-v7 + REAL FRI + ALL-PHASE
+//   real-episode arithmetization + shadow wiring; legacy v6/coupled remain
+//   Fp2). It is NOT production-complete / NOT
 //   silicon-qualified. Soft over_budget may recommend ExactReplay (M4 shipping)
 //   but MUST NOT replace the episode with toy-slice arithmetization.
 //
@@ -64,8 +67,9 @@ inline constexpr uint32_t kRCGkrProofMagic = 0x524b4737u; // 'RKG7'
 inline constexpr bool kRCGkrFormalSoundnessReady = false;
 
 inline constexpr const char* kRCGkrRealityGuardrail =
-    "REJECT HBM/production-complete GKR claims: succinct scaffold uses Fp2+REAL "
-    "FRI and ALL-PHASE real-episode arithmetization (QKt/SV/Fwd/Bwd/Wgrad × "
+    "REJECT HBM/production-complete GKR claims: succinct scaffold uses Fp3+REAL "
+    "FRI (episode-v7; legacy v6/coupled remain Fp2) and ALL-PHASE real-episode "
+    "arithmetization (QKt/SV/Fwd/Bwd/Wgrad × "
     "rounds; no shrink-to-toy), but is NOT production-complete — require "
     "consensus-dim prove within budget + succinct/block-sized + no-rerun "
     "verify + formal <=2^{-64}-after-grinding bound (see soundness note). "
@@ -75,15 +79,17 @@ inline constexpr const char* kRCGkrRealityGuardrail =
 
 inline constexpr const char* kRCGkrSoundnessBoundStatement =
     "Winner-only GKR/sumcheck+FRI SCAFFOLD (COMPUTATIONAL aspirational target): "
-    "formal <=2^{-64} AFTER PoW grinding is a Stage-I REQUIREMENT. Challenges "
-    "live in Goldilocks Fp2 (|F|~2^128); single Goldilocks is insufficient. "
-    "MARGIN RESTORATION 2026-07-22 (SHIPPED): fold Q=116->128 (field-"
-    "independent) lifts the composed bound to ~71.9 (margin ~7.9 over 64, "
-    "adequate); the FS subtotal (72, Fp2) is the binding floor. Fp3 challenges "
-    "(|K|~2^192, composed ~76.8) are a DEFERRED follow-on, blocked on the Fp3-"
-    "codeword-FRI decision (see INTEGRATION_REPORT.md challenge sites). "
-    "M6/Fable FRI: unique-decoding Q=128, ρ=1/16, g=40, Fp2 → "
-    "FriSoundnessBoundBits()=76. "
+    "formal <=2^{-64} AFTER PoW grinding is a Stage-I REQUIREMENT. EPISODE-v7 "
+    "challenges live in Goldilocks Fp3 (|F|=p^3~2^192; Fp3-codeword FRI, "
+    "matmul_v4_rc_fri_ext3); legacy v6/coupled paths remain Fp2 (|F|~2^128); "
+    "single Goldilocks is insufficient. MARGIN RESTORATION 2026-07-22 "
+    "(SHIPPED): fold Q=116->128 (field-independent) lifted the FRI floor to "
+    "76.80; the Fp3 challenge cutover lifts the FS subtotal 72->135.5, so the "
+    "composed bound is FRI-query-dominated at ~76.8 (margin ~12.8 over 64, "
+    "adequate; clears the 74-bit restored-margin bar). GF(p^2) is NOT a "
+    "subfield of GF(p^3): the v7 algebraic layer is uniformly Fp3. "
+    "M6/Fable FRI: unique-decoding Q=128, ρ=1/16, g=40 → "
+    "Fri3SoundnessBoundBits()=76 (Fp2 stack unchanged for v6/coupled). "
     "DEEP/OOD exact-eval binding CLOSED (FRI v4). "
     "G1–G5 OPEN/PARKED (proof v7): mutation-of-honest forges are NOT soundness "
     "evidence. Missing: PCS openings of A/B/Y at sumcheck points; layer roots "
@@ -156,6 +162,7 @@ inline constexpr const char* kRCGkrShadowStatement =
 
 using gkr_field::Fp;
 using gkr_field::Fp2;
+using gkr_field::Fp3;
 
 /** Layer kind in the ALL-PHASE real-episode / coupled arithmetization. */
 enum class RCGkrLayerKind : uint32_t {
@@ -180,8 +187,11 @@ enum class RCGkrLayerKind : uint32_t {
 inline constexpr uint32_t kRCGkrProofVersionV7 = 7;
 inline constexpr char kRCGkrDomainTagV7[] = "BTX_RC_GKR_WINNER_V7";
 /** Bumped whenever the FS absorption schedule changes shape. Bound into the
- *  transcript BEFORE any challenge (blueprint item 7). */
-inline constexpr uint32_t kRCGkrFsProfileVersionV7 = 1;
+ *  transcript BEFORE any challenge (blueprint item 7).
+ *  v2 (2026-07-22): episode-v7 challenge field Fp2 → Fp3 — every v7 FS
+ *  absorb/challenge is now 24-byte Fp3, so all episode-v7 transcripts and
+ *  digests deliberately diverge from the v1 (Fp2) goldens. */
+inline constexpr uint32_t kRCGkrFsProfileVersionV7 = 2;
 
 /**
  * κ — the 2-adicity wall. Goldilocks F_p^× has max power-of-two subgroup 2^32;
@@ -324,11 +334,19 @@ inline constexpr uint32_t kRCGkrMaxLayersHard = 256;
 inline constexpr uint32_t kRCGkrMaxSumcheckRoundsHard = 64;
 inline constexpr uint32_t kRCGkrMaxRoundSeedsHard = 64;
 
-/** One sumcheck round over Fp2: g(0), g(1), g(2) (deg-2 product). */
+/** One sumcheck round over Fp2: g(0), g(1), g(2) (deg-2 product). Legacy
+ *  v6/coupled paths only — the episode-v7 path uses RCGkrSumcheckRound3. */
 struct RCGkrSumcheckRound {
     Fp2 eval0{};
     Fp2 eval1{};
     Fp2 eval2{};
+};
+
+/** One sumcheck round over Fp3 (episode-v7 path; |F| = p^3 ≈ 2^192). */
+struct RCGkrSumcheckRound3 {
+    Fp3 eval0{};
+    Fp3 eval1{};
+    Fp3 eval2{};
 };
 
 struct RCGkrLayerClaim {
@@ -492,17 +510,20 @@ struct RCGkrProveResult {
 // nMatMulRCHeight=INT32_MAX, ExactReplay remains sole authority.
 // ============================================================================
 
-/** One layer's v7 sumcheck block. NO (kind,round,dims) — those are Λ outputs. */
+/** One layer's v7 sumcheck block. NO (kind,round,dims) — those are Λ outputs.
+ *  UNIFORMLY Fp3 (2026-07-22 cutover): every claim/opening on this path is
+ *  combined with the Fri3 codeword algebra, and GF(p^2) is NOT a subfield of
+ *  GF(p^3) — mixed-field terms are unexpressible, so the whole layer is Fp3. */
 struct RCGkrLayerClaimV7 {
-    std::vector<RCGkrSumcheckRound> sumcheck;
+    std::vector<RCGkrSumcheckRound3> sumcheck;
     /** c_ℓ = Ỹ(r_i,r_j) — bound to the committed Y column by the eval argument. */
-    Fp2 c_claim{};
+    Fp3 c_claim{};
     /** a_ℓ = Ã(r_i,r_k) — opening of the committed A column. */
-    Fp2 a_eval{};
+    Fp3 a_eval{};
     /** b_ℓ = B̃(r_k,r_j) — opening of the committed B column. */
-    Fp2 b_eval{};
+    Fp3 b_eval{};
     /** sumcheck chain-end gf; MUST equal a_eval·b_eval (Thm 3.1). */
-    Fp2 final_eval{};
+    Fp3 final_eval{};
 };
 
 /**
@@ -535,15 +556,17 @@ struct RCGkrProofV7 {
     uint256 episode_sigma{};
     std::vector<uint256> round_seeds;
     std::vector<uint256> round_roots;
-    /** ONE batched FRI over ALL columns (per-layer A,B,Y,extract) + eval-arg f,g. */
-    FriBatchProof batch{};
+    /** ONE batched Fp3 FRI over ALL columns (per-layer A,B,Y,extract) +
+     *  eval-arg f,g. The integer witness embeds into Fp3 as c0=value,
+     *  c1=c2=0; challenges live in |F| = p^3 ≈ 2^192. */
+    Fri3BatchProof batch{};
     std::vector<RCGkrLayerClaimV7> layers;
     /** Committed witness columns for the in-circuit AIRs (bound to `batch`). */
     std::vector<RCGkrV7WireWitness> wires;
-    RCGkrEvalArgumentProof eval{};
-    /** Dual-α Extract LogUp challenges (FS-bound; §5.6). */
-    Fp2 logup_alpha1{};
-    Fp2 logup_alpha2{};
+    RCGkrEvalArgumentProof3 eval{};
+    /** Dual-α Extract LogUp challenges (FS-bound; §5.6), drawn from Fp3. */
+    Fp3 logup_alpha1{};
+    Fp3 logup_alpha2{};
     double logup_bits{0.0};
     /** SUCCINCT episode-verify wall (in-circuit AIRs, no reference re-run). */
     double verify_s{0.0};
@@ -659,74 +682,77 @@ struct RCGkrRelationsResult {
 // (integration accounting, PARAMETRIC in the FRI proximity bound). All values
 // are −log2(acceptance probability), post the g = 40 grinding convention.
 //
-// 2026-07-22 MARGIN RESTORATION — SHIPPED STATE (Q = 128, Fp2 challenges).
-// The FRI fold rides Q = kRCFriNumQueries = 128 (raised from 116); this is
-// the LIVE, field-INDEPENDENT lever and it lifts the composed bound from the
-// inadequate ≈ 65.8 (Q = 116) to ≈ 71.9, clearing 2^-64 by ≈ 7.9 bits.
+// 2026-07-22 Fp3 CHALLENGE CUTOVER — SHIPPED STATE (Q = 128, Fp3 challenges
+// on the EPISODE-v7 path). The Q = 116 → 128 lift (field-independent) had
+// already raised the FRI floor to 76.80; this wave completes the margin
+// restoration by moving the ENTIRE episode-v7 algebraic layer to the Fp3
+// codeword FRI (matmul_v4_rc_fri_ext3.{h,cpp}) — batch RLC λ / DEEP weights
+// w1,w2 / OOD z1,z2 / eval μ / sumcheck r,ri,rj / LogUp α / wiring ρ,β,γ all
+// draw from |F| = p^3 ≈ 2^192. The FS subtotal lifts ≈ 72 → ≈ 135.5, so the
+// composed bound becomes FRI-QUERY-dominated at ≈ 76.8 (margin ≈ 12.8 over
+// 2^-64, clearing the ≥ 74-bit restored-margin bar).
 //
-// The FS/algebraic terms below stay at their F_{p^2} values (|F| ≈ 2^128)
-// because the challenges are STILL drawn from Fp2 in this tree. The Fp3 lift
-// of the FS subtotal to ≈ 76.8 was investigated and DEFERRED as a scoped
-// follow-on: every "algebraic" challenge that would move (LogUp α, the batch
-// RLC λ / DEEP weights w1,w2, the eval μ/γ, the OOD point z) is codeword-
-// entangled with a committed FRI instance (logup_inv_fri / logup_r_fri for α;
-// the batched-eval / DEEP-quotient codeword for λ/w/μ/γ/z), so drawing them
-// from Fp3 forces an Fp3-codeword FRI — a protocol decision out of scope for a
-// challenge-field swap. See INTEGRATION_REPORT.md "Fp3 challenge cutover".
-// The Fp3 target values are recorded per-constant below for the follow-on.
+// GF(p^2) is NOT a subfield of GF(p^3) (2 ∤ 3): no Fp2 value may be combined
+// with an Fp3 value, which is why the cutover is uniform across the v7
+// episode layer. The legacy v6 (RCGkrProof) and coupled-V7 paths still run
+// Fp2 (their FS terms keep the F_{p^2} values recorded per-constant below);
+// they are a scoped follow-on.
 // ---------------------------------------------------------------------------
 
-/** log2 of the SHIPPED challenge field K = F_{p^2}: 2·log2(p), p = 2^64−2^32+1. */
-inline constexpr double kRCGkrChallengeFieldBits = 127.99999999932;
-/** Fp3 follow-on target challenge-field bits (3·log2 p ≈ 192), for the record. */
-inline constexpr double kRCGkrChallengeFieldBitsFp3 = 191.99999999899;
-/** Construction II composition polynomial (n_slots ≤ 256): 2·log2 p − 8 − 40
- *  = 80 (Fp3 follow-on target: 144). */
-inline constexpr double kRCGkrCompositionSepBits = 80.0;
-/** Construction III dual-α fixed-reference-vector membership over Fp2 (§5.6):
- *  128 (Fp3 follow-on target: 256). */
-inline constexpr double kRCGkrLookupSepBits = 128.0;
-/** Construction IV equality (copy) at the κ = 2^28 column cap: 128 − log2(28)
- *  − 40 = 83.19 (Fp3 follow-on target: 147.19). */
-inline constexpr double kRCGkrWiringEqualitySepBits = 83.19;
-/** Construction IV grand product, DUAL challenge, N = 2^28: 2·(128−28) − 40
- *  = 160 (Fp3 follow-on target: 288). */
-inline constexpr double kRCGkrWiringPermutationDualSepBits = 160.0;
-/** Construction IV grand product, SINGLE challenge, N = 2^28: (128−28) − 40 =
- *  60 — BELOW the 64-bit target; the single form is FORBIDDEN on the ship path
- *  (dual is mandatory, structurally enforced by G4). Pinned here so the test
- *  can assert it is < 64. (Fp3 follow-on value would be 124, but the dual
- *  mandate is structural and is NOT relaxed by any field lift.) */
-inline constexpr double kRCGkrWiringPermutationSingleSepBits = 60.0;
+/** log2 of the SHIPPED episode-v7 challenge field K = F_{p^3}: 3·log2(p),
+ *  p = 2^64−2^32+1. */
+inline constexpr double kRCGkrChallengeFieldBits = 191.99999999899;
+/** Legacy Fp2 challenge-field bits (v6 / coupled paths), for the record. */
+inline constexpr double kRCGkrChallengeFieldBitsFp2 = 127.99999999932;
+/** Alias retained from the deferred-follow-on era (now the shipped value). */
+inline constexpr double kRCGkrChallengeFieldBitsFp3 = kRCGkrChallengeFieldBits;
+/** Construction II composition polynomial (n_slots ≤ 256): 3·log2 p − 8 − 40
+ *  = 144 (legacy Fp2 value: 80). */
+inline constexpr double kRCGkrCompositionSepBits = 144.0;
+/** Construction III dual-α fixed-reference-vector membership over Fp3 (§5.6):
+ *  256 (legacy Fp2 value: 128). */
+inline constexpr double kRCGkrLookupSepBits = 256.0;
+/** Construction IV equality (copy) at the κ = 2^28 column cap: 192 − log2(28)
+ *  − 40 = 147.19 (legacy Fp2 value: 83.19). */
+inline constexpr double kRCGkrWiringEqualitySepBits = 147.19;
+/** Construction IV grand product, DUAL challenge, N = 2^28: 2·(192−28) − 40
+ *  = 288 (legacy Fp2 value: 160). */
+inline constexpr double kRCGkrWiringPermutationDualSepBits = 288.0;
+/** Construction IV grand product, SINGLE challenge, N = 2^28: (192−28) − 40 =
+ *  124 over Fp3. Over Fp2 this was 60 — BELOW the 64-bit target — which is
+ *  the origin of the dual mandate. The single form REMAINS FORBIDDEN on the
+ *  ship path (dual is mandatory, structurally enforced by G4): the mandate is
+ *  structural and is NOT relaxed by the field lift. */
+inline constexpr double kRCGkrWiringPermutationSingleSepBits = 124.0;
 /** Whole-protocol Fiat–Shamir subtotal × 2^40 grinding (all sumcheck rounds +
- *  RLC/DEEP weights; Theorem 8.1 line over |F_{p^2}| ≈ 2^128): pre-grind
- *  Σ ≈ 2^-114.4 ⇒ 72 post-grind. With Q = 128 this (72) is the composed-bound
- *  floor. (Fp3 follow-on target: 135.5 — see the header note on why it is
- *  deferred.) */
-inline constexpr double kRCGkrFsSubtotalSepBits = 72.0;
+ *  RLC/DEEP weights; Theorem 8.1 line over |F_{p^3}| ≈ 2^192): pre-grind
+ *  Σ ≈ 2^-175.5 ⇒ 135.5 post-grind — now ≈ 59 bits ABOVE the 76.80 FRI query
+ *  floor, so it is no longer the binding term. (Legacy Fp2 value: 72, which
+ *  capped the composed bound at ≈ 71.9.) */
+inline constexpr double kRCGkrFsSubtotalSepBits = 135.5;
 /** SHA256d Merkle/transcript bindings vs a 2^40-query adversary
  *  (computational; field-independent). */
 inline constexpr double kRCGkrShaSepBits = 88.0;
 /** FRI proximity term. The integration rides the SOUND v5 half-domain fold; at
  *  Q = kRCFriNumQueries = 128 the fold's own proximity soundness is
- *  128·log2(32/17) − 40 = 76.80 (= `FriSoundnessBoundBits()` real value; the
+ *  128·log2(32/17) − 40 = 76.80 (= `Fri3SoundnessBoundBits()` real value; the
  *  integer helper floors to 76). This term is FIELD-INDEPENDENT (query
- *  repetitions), which is why raising Q was the mandatory first lever: at
- *  Q = 128 it sits ABOVE the Fp2 FS subtotal (72), so the FS subtotal becomes
- *  the composed floor (≈ 71.9). Historical Q = 116 value: 65.85. */
+ *  repetitions). With the Fp3 FS subtotal (135.5) far above it, this 76.80 is
+ *  now the composed-bound floor (fri_dominated). Historical Q = 116 value:
+ *  65.85. */
 inline constexpr double kRCGkrFriProximityBitsV5 = 76.80;
 /** Deprecated alias (the base is now v5, not v4). */
 inline constexpr double kRCGkrFriProximityBitsV4 = kRCGkrFriProximityBitsV5;
 /** Margin over the 64-bit target below which the composed bound is flagged
  *  INADEQUATE for consensus authority (audit gate; arbiter stays hard-disabled).
- *  At Q = 128 / Fp2 the margin is ≈ 7.9 bits ⇒ adequate (inadequate_margin
+ *  At Q = 128 / Fp3 the margin is ≈ 12.8 bits ⇒ adequate (inadequate_margin
  *  false). */
 inline constexpr double kRCGkrAdequateMarginBits = 2.0;
-/** The ≥ 74-bit "restored-margin" acceptance bar TARGETED by the full Q = 128
- *  + Fp3 margin restoration. The shipped Q = 128 / Fp2 bound (≈ 71.9) clears
- *  64 with adequate margin but does NOT reach this bar; reaching it needs the
- *  deferred Fp3 challenge cutover (INTEGRATION_REPORT.md). Retained as the
- *  documented follow-on target. */
+/** The ≥ 74-bit "restored-margin" acceptance bar of the full Q = 128 + Fp3
+ *  margin restoration — REACHED by the shipped Q = 128 / Fp3 composed bound
+ *  (≈ 76.8). (The intermediate Q = 128 / Fp2 state landed at ≈ 71.9, below
+ *  this bar; the Fp2-challenge record is retained in the per-constant
+ *  comments above.) */
 inline constexpr double kRCGkrComposedTargetBits = 74.0;
 
 struct RCGkrComposedBound {
@@ -735,9 +761,9 @@ struct RCGkrComposedBound {
     double construction_iii_bits{0.0}; // lookup membership (dual-α)
     double construction_iv_bits{0.0};  // wiring (min of equality / dual permutation)
     double wiring_single_bits{0.0};    // excluded single-challenge path (dual mandate;
-                                       // Fp2 record 60 < 64)
-    double fri_proximity_bits{0.0};    // parametric FRI term (76.80 at Q=128; above
-                                       // the Fp2 FS floor, so NOT the binding term)
+                                       // Fp3 124, historical Fp2 record 60 < 64)
+    double fri_proximity_bits{0.0};    // parametric FRI term (76.80 at Q=128; the
+                                       // binding floor under the Fp3 FS subtotal)
     double sha_bits{0.0};              // SHA256d computational
     double composed_bits{0.0};         // −log2(Σ 2^-term) over all of the above
     double margin_bits{0.0};           // composed_bits − 64
@@ -751,17 +777,18 @@ struct RCGkrComposedBound {
 [[nodiscard]] RCGkrComposedBound RCGkrComposedSeparation(double fri_proximity_bits);
 
 /** The composed separation bound (−log2 ε_total). SHIPPED STATE: SOUND v5
- *  fold at Q = 128 with Fp2 challenges — NON-VACUOUS and FS-subtotal-dominated
- *  at ≈ 71.9 bits (ε_total ≤ 2^-71.9), clearing the 2^-64 target by ≈ 7.9 bits
+ *  fold at Q = 128 with Fp3 challenges on the episode-v7 path — NON-VACUOUS
+ *  and FRI-QUERY-dominated at ≈ 76.8 bits (ε_total ≤ 2^-76.8), clearing the
+ *  2^-64 target by ≈ 12.8 bits and the ≥ 74-bit restored-margin bar
  *  (adequate: inadequate_margin false). Raising Q from 116 to 128 lifted the
- *  FRI floor (65.85 → 76.80) above the Fp2 FS subtotal (72), which is now the
- *  binding term. Reaching the ≥ 74-bit "restored-margin" bar (≈ 76.8) requires
- *  the DEFERRED Fp3 challenge cutover (INTEGRATION_REPORT.md), which is blocked
- *  on the Fp3-codeword-FRI decision. (Historical Q = 116 / Fp2 value: ≈ 65.8,
- *  an INADEQUATE < 2-bit margin.) The arbiter stays hard-disabled
- *  (`kRCGkrFormalSoundnessReady`) regardless — this bound is audit accounting,
- *  not a consensus switch. The parametric overload lets callers plug any FRI
- *  proximity term (e.g. the integer `FriBatchSoundnessBoundBits()` = 76). */
+ *  FRI floor (65.85 → 76.80); the Fp3 challenge cutover lifted the FS
+ *  subtotal (72 → 135.5) above it, so the field-independent query term is now
+ *  the binding floor. (Historical states: Q = 128 / Fp2 ≈ 71.9 FS-dominated;
+ *  Q = 116 / Fp2 ≈ 65.8, an INADEQUATE < 2-bit margin.) The arbiter stays
+ *  hard-disabled (`kRCGkrFormalSoundnessReady`) regardless — this bound is
+ *  audit accounting, not a consensus switch. The parametric overload lets
+ *  callers plug any FRI proximity term (e.g. the integer
+ *  `Fri3BatchSoundnessBoundBits()` = 76). */
 [[nodiscard]] double RCGkrComposedSeparationBits(double fri_proximity_bits);
 [[nodiscard]] double RCGkrComposedSeparationBits();
 
@@ -863,6 +890,8 @@ struct RCProdVerifyResult {
 [[nodiscard]] uint32_t RCGkrNextPow2(uint32_t n);
 [[nodiscard]] Fp RCGkrMleEval1D(const std::vector<Fp>& evals_pow2, const std::vector<Fp>& r);
 [[nodiscard]] Fp2 RCGkrMleEval1D2(const std::vector<Fp2>& evals_pow2, const std::vector<Fp2>& r);
+/** Fp3 sibling (episode-v7 path / Fp3 wiring constraints). */
+[[nodiscard]] Fp3 RCGkrMleEval1D3(const std::vector<Fp3>& evals_pow2, const std::vector<Fp3>& r);
 
 /**
  * FALLBACK / DISPUTE verifier: ε=0 bounded exact STREAMED replay.

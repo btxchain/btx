@@ -17,17 +17,17 @@
 //
 //  (2) The COMPOSED separation bound across the four constructions + the batched-
 //      FRI backend is pinned term-by-term and in total, PARAMETRIC in the FRI
-//      proximity bound. SHIPPED STATE (2026-07-22 margin restoration): fold
-//      Q = 116 → 128 (the field-INDEPENDENT lever, LIVE) with Fp2 challenges.
-//      Raising Q lifts the FRI floor 65.85 → 76.80 ABOVE the Fp2 FS subtotal
-//      (72), so the composed bound is NON-VACUOUS and FS-SUBTOTAL-dominated at
-//      ≈ 71.9 bits (ε_total ≤ 2^-71.9) — clearing 2^-64 by ≈ 7.9 bits
-//      (ADEQUATE), though below the ≥ 74-bit bar that the DEFERRED Fp3
-//      challenge cutover would reach (blocked on the Fp3-codeword-FRI
-//      decision; see INTEGRATION_REPORT.md). (Historical Q=116/Fp2: ≈ 65.8
-//      with an inadequate < 2-bit margin.) The single-challenge wiring path is
-//      excluded by the standing dual mandate (60 bits, BELOW 64). The arbiter
-//      stays hard-disabled (kRCGkrFormalSoundnessReady).
+//      proximity bound. SHIPPED STATE (2026-07-22 Fp3 challenge cutover): fold
+//      Q = 128 with Fp3 challenges on the episode-v7 path (Fri3 codeword FRI).
+//      The FS subtotal lifts 72 → 135.5 (|F| = p³ ≈ 2^192), so the composed
+//      bound is NON-VACUOUS and FRI-QUERY-dominated at ≈ 76.8 bits
+//      (ε_total ≤ 2^-76.8) — clearing 2^-64 by ≈ 12.8 bits (ADEQUATE) and the
+//      ≥ 74-bit restored-margin bar. (Historical: Q=128/Fp2 ≈ 71.9
+//      FS-dominated; Q=116/Fp2 ≈ 65.8 with an inadequate < 2-bit margin.)
+//      The single-challenge wiring path remains excluded by the standing dual
+//      mandate (structural; its Fp2 record 60 < 64 is the origin — the Fp3
+//      value 124 does NOT relax the mandate). The arbiter stays hard-disabled
+//      (kRCGkrFormalSoundnessReady).
 //
 // HARD RULES honored: int64 reference immutable; arbiter OFF; heights INT32_MAX;
 // no existing adversarial test weakened (this suite only ADDS coverage).
@@ -180,69 +180,70 @@ BOOST_AUTO_TEST_CASE(gkr_integration_composed_separation_bound)
         rc::RCGkrComposedSeparation(rc::kRCGkrFriProximityBitsV5);
 
     // Per-construction terms (post-grind, −log2 acceptance). SHIPPED STATE:
-    // Q = 128 fold (field-independent lever, LIVE) + Fp2 challenge field
-    // (|F| ≈ 2^128). The Fp3 lift of the algebraic terms is a DEFERRED
-    // follow-on (blocked on the Fp3-codeword-FRI decision — see the report and
-    // matmul_v4_rc_gkr.h); its target values appear in trailing comments.
-    BOOST_CHECK_CLOSE(b.construction_ii_bits, 80.0, 1e-6);   // composition   (Fp3 target 144)
-    BOOST_CHECK_CLOSE(b.construction_iii_bits, 128.0, 1e-6); // dual-α membership (Fp3 target 256)
-    BOOST_CHECK_CLOSE(b.construction_iv_bits, 83.19, 1e-3);  // wiring = min(eq, dual) (Fp3 147.19)
-    BOOST_CHECK_CLOSE(b.wiring_single_bits, 60.0, 1e-6);     // excluded single path (Fp3 124)
+    // Q = 128 fold + Fp3 challenge field on the episode-v7 path
+    // (|F| = p³ ≈ 2^192, Fri3 codeword FRI). Legacy Fp2 values in trailing
+    // comments (v6/coupled paths, which remain Fp2).
+    BOOST_CHECK_CLOSE(b.construction_ii_bits, 144.0, 1e-6);  // composition   (Fp2 was 80)
+    BOOST_CHECK_CLOSE(b.construction_iii_bits, 256.0, 1e-6); // dual-α membership (Fp2 was 128)
+    BOOST_CHECK_CLOSE(b.construction_iv_bits, 147.19, 1e-3); // wiring = min(eq, dual) (Fp2 83.19)
+    BOOST_CHECK_CLOSE(b.wiring_single_bits, 124.0, 1e-6);    // excluded single path (Fp2 was 60)
     BOOST_CHECK_CLOSE(b.sha_bits, 88.0, 1e-6);               // field-independent
     BOOST_CHECK_CLOSE(b.fri_proximity_bits, 76.80, 1e-6);    // Q=128 fold (was 65.85 at Q=116)
-    // Construction I standalone sub-bound (absorbed into the FS subtotal).
-    BOOST_CHECK_CLOSE(b.construction_i_bits, 74.0, 1e-6);    // (Fp3 target 76)
-    // The FS subtotal itself (Fp2, |F| ≈ 2^128) — the binding floor at Q=128.
-    BOOST_CHECK_CLOSE(rc::kRCGkrFsSubtotalSepBits, 72.0, 1e-6); // (Fp3 target 135.5)
+    // Construction I standalone sub-bound (floored by the same FRI query term).
+    BOOST_CHECK_CLOSE(b.construction_i_bits, 76.0, 1e-6);    // (Fp2 was 74)
+    // The FS subtotal itself (Fp3, |F| ≈ 2^192) — now far ABOVE the FRI floor.
+    BOOST_CHECK_CLOSE(rc::kRCGkrFsSubtotalSepBits, 135.5, 1e-6); // (Fp2 was 72)
 
-    // The dual-challenge wiring MUST be used: the single-challenge grand
-    // product is below the 64-bit target (60 bits over Fp2) — this is the
-    // structural mandate (G4 enforces dual), NOT relaxed by any field lift.
-    BOOST_CHECK_LT(b.wiring_single_bits, 64.0); // 60: the dual-mandate origin
+    // The dual-challenge wiring MUST be used: the mandate is STRUCTURAL (G4
+    // enforces dual). Its origin is the Fp2 single-challenge record (60 < 64);
+    // over Fp3 the single form is 124 — above target — but the field lift does
+    // NOT relax the mandate.
+    BOOST_CHECK_GE(b.wiring_single_bits, 64.0); // Fp3 single form: 124
     BOOST_CHECK_GE(rc::kRCGkrWiringPermutationDualSepBits, 64.0);
     BOOST_CHECK_GT(rc::kRCGkrWiringPermutationDualSepBits, b.wiring_single_bits);
 
-    // Composed total on the SOUND v5 fold at Q = 128 (Fp2 challenges): raising
-    // Q lifted the FRI floor (65.85 → 76.80) ABOVE the Fp2 FS subtotal (72),
-    // so the bound is now FS-SUBTOTAL-dominated (NOT FRI-dominated) at ≈ 71.9,
-    // clearing 2^-64 by ≈ 7.9 bits — ADEQUATE, but BELOW the 74-bit bar that
-    // the deferred Fp3 cutover would reach.
-    BOOST_CHECK(!b.fri_dominated);           // FS subtotal (72) is the floor, not FRI (76.80)
+    // Composed total on the SOUND v5 fold at Q = 128 (Fp3 challenges): the FS
+    // subtotal (135.5) sits ≈ 59 bits above the FRI floor (76.80), so the
+    // bound is FRI-QUERY-dominated at ≈ 76.8, clearing 2^-64 by ≈ 12.8 bits —
+    // ADEQUATE, and ABOVE the 74-bit restored-margin bar.
+    BOOST_CHECK(b.fri_dominated);            // FRI (76.80) is the floor, not FS (135.5)
     BOOST_CHECK_GT(b.composed_bits, 64.0);   // clears the target (non-vacuous)
-    BOOST_CHECK_GT(b.composed_bits, 71.0);   // actual value ≈ 71.94
-    BOOST_CHECK_LT(b.composed_bits, 72.0);   // ...just under the FS floor (log-sum-exp)
-    BOOST_CHECK_LT(b.composed_bits, rc::kRCGkrComposedTargetBits); // below the 74-bit Fp3 bar
+    BOOST_CHECK_GT(b.composed_bits, 76.7);   // actual value ≈ 76.80
+    BOOST_CHECK_LT(b.composed_bits, 76.81);  // ...just under the FRI floor (log-sum-exp)
+    BOOST_CHECK_GE(b.composed_bits, rc::kRCGkrComposedTargetBits); // ≥ the 74-bit Fp3 bar
     BOOST_CHECK(b.clears_target);
-    BOOST_CHECK(!b.inadequate_margin);       // margin ≈ 7.9 ≥ 2 bits: adequacy gate passes
-    BOOST_CHECK_GT(b.margin_bits, 7.0);      // actual margin ≈ 7.94 bits
-    BOOST_CHECK_LT(b.margin_bits, 8.0);
-    // Composed ≤ the smallest INCLUDED term (the Fp2 FS subtotal, 72), and
-    // within a fraction of a bit of it (log-sum-exp of the larger terms).
-    BOOST_CHECK_LE(b.composed_bits, rc::kRCGkrFsSubtotalSepBits + 1e-9);
-    BOOST_CHECK_GT(b.composed_bits, rc::kRCGkrFsSubtotalSepBits - 0.5);
-    // No INCLUDED term is below target (the below-64 path is the EXCLUDED
-    // single wiring form, tracked separately in wiring_single_bits).
+    BOOST_CHECK(!b.inadequate_margin);       // margin ≈ 12.8 ≥ 2 bits: adequacy gate passes
+    BOOST_CHECK_GT(b.margin_bits, 12.7);     // actual margin ≈ 12.80 bits
+    BOOST_CHECK_LT(b.margin_bits, 12.9);
+    // Composed ≤ the smallest INCLUDED term (the FRI proximity floor, 76.80),
+    // and within a fraction of a bit of it (log-sum-exp of the larger terms).
+    BOOST_CHECK_LE(b.composed_bits, b.fri_proximity_bits + 1e-9);
+    BOOST_CHECK_GT(b.composed_bits, b.fri_proximity_bits - 0.5);
+    // No INCLUDED term is below target (wiring_single_bits is tracked
+    // separately and — over Fp3 — is itself above 64).
     BOOST_CHECK(!b.any_term_below_target);
 
     // The convenience accessor equals the parametric value at the v5 fold floor.
     BOOST_CHECK_CLOSE(rc::RCGkrComposedSeparationBits(), b.composed_bits, 1e-6);
 
-    // Plugging the conservative integer FRI helper (76) still lands FS-bound
-    // at ≈ 71.9 — the composed floor is the Fp2 FS subtotal, independent of the
-    // fractional 0.80, and does NOT reach the 74-bit bar without the Fp3 lift.
+    // Plugging the conservative integer FRI helper (76 — identical for the
+    // Fp2 and Fp3 stacks, field-independent) still lands query-dominated just
+    // under 76 and above the 74-bit bar.
     const double integer_view =
-        rc::RCGkrComposedSeparationBits(static_cast<double>(rc::FriBatchSoundnessBoundBits()));
-    BOOST_CHECK_GT(integer_view, 71.0);
-    BOOST_CHECK_LT(integer_view, 72.0);
-    BOOST_CHECK_LT(integer_view, rc::kRCGkrComposedTargetBits); // still below 74 (Fp3 needed)
+        rc::RCGkrComposedSeparationBits(static_cast<double>(rc::Fri3BatchSoundnessBoundBits()));
+    BOOST_CHECK_GT(integer_view, 75.9);
+    BOOST_CHECK_LT(integer_view, 76.0);
+    BOOST_CHECK_GE(integer_view, rc::kRCGkrComposedTargetBits); // ≥ 74 (Fp3 regime)
+    BOOST_CHECK_EQUAL(rc::Fri3BatchSoundnessBoundBits(), rc::FriBatchSoundnessBoundBits());
     // Historical record: at the Q=116 fold floor (65.85) the composed bound
-    // was ≈ 65.8 with an INADEQUATE (< 2-bit) margin — the state Q=128 fixes.
+    // was ≈ 65.8 with an INADEQUATE (< 2-bit) margin — the state Q=128 fixed
+    // (and the Fp3 cutover then lifted the FS subtotal off the floor).
     const rc::RCGkrComposedBound old_b = rc::RCGkrComposedSeparation(65.85);
     BOOST_CHECK_LT(old_b.composed_bits, 66.0);
     BOOST_CHECK_GT(old_b.composed_bits, 65.7);
     BOOST_CHECK(old_b.inadequate_margin);
     BOOST_CHECK(old_b.fri_dominated);        // at Q=116 the FRI floor (65.85) WAS the min
-    BOOST_TEST_MESSAGE("composed (SHIPPED: v5 fold, Q=128, Fp2) = " +
+    BOOST_TEST_MESSAGE("composed (SHIPPED: v5 fold, Q=128, Fp3) = " +
                        std::to_string(b.composed_bits) +
                        " ; margin over 64 = " + std::to_string(b.margin_bits) +
                        " ; integer-FRI view = " + std::to_string(integer_view) +

@@ -40,7 +40,9 @@ using gkr_field::Canonical;
 using gkr_field::Div;
 using gkr_field::Eq;
 using gkr_field::FromChallengeBytes2;
+using gkr_field::FromChallengeBytes3;
 using gkr_field::FromSigned2;
+using gkr_field::FromSigned3;
 using gkr_field::Inv;
 using gkr_field::IsZero;
 using gkr_field::Mul;
@@ -99,6 +101,19 @@ bool ReadFp2Checked(const unsigned char*& p, const unsigned char* end, Fp2& out)
     uint64_t a = 0, b = 0;
     if (!ReadLE64Checked(p, end, a) || !ReadLE64Checked(p, end, b)) return false;
     out = Fp2{a, b};
+    return true;
+}
+
+/** 24-byte Fp3 codec sibling (non-breaking addition; the future canonical v7
+ *  serializer reads three LE64 limbs c0‖c1‖c2). */
+[[maybe_unused]] bool ReadFp3Checked(const unsigned char*& p, const unsigned char* end, Fp3& out)
+{
+    uint64_t a = 0, b = 0, c = 0;
+    if (!ReadLE64Checked(p, end, a) || !ReadLE64Checked(p, end, b) ||
+        !ReadLE64Checked(p, end, c)) {
+        return false;
+    }
+    out = Fp3{a, b, c};
     return true;
 }
 
@@ -181,6 +196,13 @@ void AppendFp2(std::vector<unsigned char>& buf, const Fp2& v)
     AppendLE64(buf, Canonical(v.c0));
     AppendLE64(buf, Canonical(v.c1));
 }
+/** 24-byte Fp3 codec sibling (c0‖c1‖c2, canonical LE64 limbs). */
+void AppendFp3(std::vector<unsigned char>& buf, const Fp3& v)
+{
+    AppendLE64(buf, Canonical(v.c0));
+    AppendLE64(buf, Canonical(v.c1));
+    AppendLE64(buf, Canonical(v.c2));
+}
 void AppendBytes(std::vector<unsigned char>& buf, const unsigned char* p, size_t n)
 {
     buf.insert(buf.end(), p, p + n);
@@ -197,6 +219,8 @@ public:
     void AbsorbBytes(const unsigned char* p, size_t n) { AppendBytes(m_buf, p, n); }
     void AbsorbU32(uint32_t v) { AppendLE32(m_buf, v); }
     void AbsorbFp2(const Fp2& v) { AppendFp2(m_buf, v); }
+    /** Fp3 sibling: absorbs 24 bytes (c0‖c1‖c2). Non-breaking addition. */
+    void AbsorbFp3(const Fp3& v) { AppendFp3(m_buf, v); }
     void AbsorbUint256(const uint256& h) { AppendBytes(m_buf, h.data(), 32); }
     uint256 Challenge(const char* label)
     {
@@ -206,6 +230,9 @@ public:
         return h;
     }
     Fp2 ChallengeFp2(const char* label) { return FromChallengeBytes2(Challenge(label).data()); }
+    /** Fp3 sibling: consumes 24 of the 32 digest bytes (~192 bits, matching
+     *  |F_{p^3}| ≈ 2^192 — the lever that lifts the FS union bound). */
+    Fp3 ChallengeFp3(const char* label) { return FromChallengeBytes3(Challenge(label).data()); }
     [[nodiscard]] uint256 Digest() const { return Sha256dBytes(m_buf.data(), m_buf.size()); }
 
 private:
@@ -218,6 +245,15 @@ uint32_t Log2Exact(uint32_t n)
     uint32_t l = 0;
     while ((1u << l) < n) ++l;
     return l;
+}
+
+Fp2 EvalEqBit(const Fp2& r, uint32_t bit) { return bit ? r : Sub(Fp2::One(), r); }
+
+Fp2 EqFactor(const std::vector<Fp2>& r, uint32_t index)
+{
+    Fp2 acc = Fp2::One();
+    for (size_t i = 0; i < r.size(); ++i) acc = Mul(acc, EvalEqBit(r[i], (index >> i) & 1u));
+    return acc;
 }
 
 Fp2 EvalDeg2(const Fp2& g0, const Fp2& g1, const Fp2& g2, const Fp2& x)
@@ -236,8 +272,9 @@ std::vector<RCGkrSumcheckRound> ProveProductK(const std::vector<Fp2>& A, uint32_
                                               Fp2& out_a_at_r, Fp2& out_b_at_r)
 {
     const uint32_t k_pad = RCGkrNextPow2(k_dim);
-    const std::vector<Fp2> wi = RCGkrEqKernelCoeffs(ri);
-    const std::vector<Fp2> wj = RCGkrEqKernelCoeffs(rj);
+    std::vector<Fp2> wi(RCGkrNextPow2(m), Fp2::Zero()), wj(RCGkrNextPow2(n), Fp2::Zero());
+    for (uint32_t i = 0; i < m; ++i) wi[i] = EqFactor(ri, i);
+    for (uint32_t j = 0; j < n; ++j) wj[j] = EqFactor(rj, j);
     std::vector<Fp2> ah(k_pad, Fp2::Zero()), bh(k_pad, Fp2::Zero());
     for (uint32_t t = 0; t < k_dim; ++t) {
         Fp2 sa = Fp2::Zero(), sb = Fp2::Zero();
@@ -288,21 +325,6 @@ std::vector<RCGkrSumcheckRound> ProveProductK(const std::vector<Fp2>& A, uint32_
     return rounds;
 }
 
-// v7 overload: the sound v7 path does NOT consume prover-supplied a_at_r/b_at_r
-// (those v6 free fields are the G1 gap). v7 binds a_eval/b_eval to the committed
-// operand columns via the batched-FRI eval argument (§2.4), so the sumcheck only
-// needs the fold points and the chain-end gf (=a·b). Discard the two openings.
-std::vector<RCGkrSumcheckRound> ProveProductK(const std::vector<Fp2>& A, uint32_t m, uint32_t k_dim,
-                                              const std::vector<Fp2>& B, uint32_t n,
-                                              const std::vector<Fp2>& ri, const std::vector<Fp2>& rj,
-                                              const Fp2& claim, FsTranscript& fs,
-                                              std::vector<Fp2>& out_r, Fp2& out_final)
-{
-    Fp2 discard_a{}, discard_b{};
-    return ProveProductK(A, m, k_dim, B, n, ri, rj, claim, fs, out_r, out_final, discard_a,
-                         discard_b);
-}
-
 bool VerifyProductK(const std::vector<RCGkrSumcheckRound>& rounds, const Fp2& claim,
                     FsTranscript& fs, std::vector<Fp2>& out_r, Fp2& out_final)
 {
@@ -314,6 +336,110 @@ bool VerifyProductK(const std::vector<RCGkrSumcheckRound>& rounds, const Fp2& cl
         fs.AbsorbFp2(m.eval1);
         fs.AbsorbFp2(m.eval2);
         const Fp2 r = fs.ChallengeFp2("prod_sumcheck_r");
+        out_r.push_back(r);
+        expected = EvalDeg2(m.eval0, m.eval1, m.eval2, r);
+    }
+    out_final = expected;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Fp3 siblings of the sumcheck/MLE helpers (EPISODE-v7 path; |F| = p^3).
+// The legacy v6/coupled Fp2 helpers above are untouched — GF(p^2) ⊄ GF(p^3),
+// the two pipelines never mix field values.
+// ---------------------------------------------------------------------------
+
+Fp3 EvalEqBit3(const Fp3& r, uint32_t bit) { return bit ? r : Sub(Fp3::One(), r); }
+
+Fp3 EqFactor3(const std::vector<Fp3>& r, uint32_t index)
+{
+    Fp3 acc = Fp3::One();
+    for (size_t i = 0; i < r.size(); ++i) acc = Mul(acc, EvalEqBit3(r[i], (index >> i) & 1u));
+    return acc;
+}
+
+Fp3 EvalDeg2(const Fp3& g0, const Fp3& g1, const Fp3& g2, const Fp3& x)
+{
+    const Fp3 inv2 = Inv(Fp3::FromFp(2));
+    return Add(Add(Mul(Mul(g0, Mul(Sub(Fp3::One(), x), Sub(Fp3::FromFp(2), x))), inv2),
+                   Mul(g1, Mul(x, Sub(Fp3::FromFp(2), x)))),
+               Mul(Mul(g2, Mul(x, Sub(x, Fp3::One()))), inv2));
+}
+
+/** v7 Thaler product sumcheck over Fp3. The sound v7 path does NOT consume
+ *  prover-supplied a_at_r/b_at_r (the v6 free-field G1 gap) — it only needs
+ *  the fold points and the chain-end gf (= a·b). */
+std::vector<RCGkrSumcheckRound3> ProveProductK3(const std::vector<Fp3>& A, uint32_t m,
+                                                uint32_t k_dim, const std::vector<Fp3>& B,
+                                                uint32_t n, const std::vector<Fp3>& ri,
+                                                const std::vector<Fp3>& rj, const Fp3& claim,
+                                                FsTranscript& fs, std::vector<Fp3>& out_r,
+                                                Fp3& out_final)
+{
+    (void)claim; // bound into FS by the caller's absorb schedule; the honest
+                 // prover needs only the fold points + chain end.
+    const uint32_t k_pad = RCGkrNextPow2(k_dim);
+    std::vector<Fp3> wi(RCGkrNextPow2(m), Fp3::Zero()), wj(RCGkrNextPow2(n), Fp3::Zero());
+    for (uint32_t i = 0; i < m; ++i) wi[i] = EqFactor3(ri, i);
+    for (uint32_t j = 0; j < n; ++j) wj[j] = EqFactor3(rj, j);
+    std::vector<Fp3> ah(k_pad, Fp3::Zero()), bh(k_pad, Fp3::Zero());
+    for (uint32_t t = 0; t < k_dim; ++t) {
+        Fp3 sa = Fp3::Zero(), sb = Fp3::Zero();
+        for (uint32_t i = 0; i < m; ++i)
+            sa = Add(sa, Mul(wi[i], A[static_cast<size_t>(i) * k_dim + t]));
+        for (uint32_t j = 0; j < n; ++j)
+            sb = Add(sb, Mul(B[static_cast<size_t>(t) * n + j], wj[j]));
+        ah[t] = sa;
+        bh[t] = sb;
+    }
+    std::vector<RCGkrSumcheckRound3> rounds;
+    out_r.clear();
+    const uint32_t nu = Log2Exact(k_pad);
+    std::vector<Fp3> ca = ah, cb = bh;
+    for (uint32_t round = 0; round < nu; ++round) {
+        Fp3 g0 = Fp3::Zero(), g1 = Fp3::Zero(), g2 = Fp3::Zero();
+        for (size_t idx = 0; idx < ca.size(); idx += 2) {
+            const Fp3 a0 = ca[idx], a1 = ca[idx + 1];
+            const Fp3 b0 = cb[idx], b1 = cb[idx + 1];
+            g0 = Add(g0, Mul(a0, b0));
+            g1 = Add(g1, Mul(a1, b1));
+            // g(2) = (2a1-a0)(2b1-b0)
+            const Fp3 a2 = Sub(Mul(a1, Fp3::FromFp(2)), a0);
+            const Fp3 b2 = Sub(Mul(b1, Fp3::FromFp(2)), b0);
+            g2 = Add(g2, Mul(a2, b2));
+        }
+        RCGkrSumcheckRound3 msg{g0, g1, g2};
+        fs.AbsorbFp3(msg.eval0);
+        fs.AbsorbFp3(msg.eval1);
+        fs.AbsorbFp3(msg.eval2);
+        const Fp3 r = fs.ChallengeFp3("prod_sumcheck_r");
+        out_r.push_back(r);
+        std::vector<Fp3> na(ca.size() / 2), nb(cb.size() / 2);
+        for (size_t i = 0; i < na.size(); ++i) {
+            na[i] = Add(Mul(ca[2 * i], Sub(Fp3::One(), r)), Mul(ca[2 * i + 1], r));
+            nb[i] = Add(Mul(cb[2 * i], Sub(Fp3::One(), r)), Mul(cb[2 * i + 1], r));
+        }
+        ca = std::move(na);
+        cb = std::move(nb);
+        rounds.push_back(msg);
+    }
+    const Fp3 a_at_r = ca.empty() ? Fp3::Zero() : ca[0];
+    const Fp3 b_at_r = cb.empty() ? Fp3::Zero() : cb[0];
+    out_final = Mul(a_at_r, b_at_r);
+    return rounds;
+}
+
+bool VerifyProductK3(const std::vector<RCGkrSumcheckRound3>& rounds, const Fp3& claim,
+                     FsTranscript& fs, std::vector<Fp3>& out_r, Fp3& out_final)
+{
+    Fp3 expected = claim;
+    out_r.clear();
+    for (const auto& m : rounds) {
+        if (!Eq(Add(m.eval0, m.eval1), expected)) return false;
+        fs.AbsorbFp3(m.eval0);
+        fs.AbsorbFp3(m.eval1);
+        fs.AbsorbFp3(m.eval2);
+        const Fp3 r = fs.ChallengeFp3("prod_sumcheck_r");
         out_r.push_back(r);
         expected = EvalDeg2(m.eval0, m.eval1, m.eval2, r);
     }
@@ -354,6 +480,19 @@ std::vector<Fp2> ToFp2I64(const std::vector<int64_t>& v)
 {
     std::vector<Fp2> o(v.size());
     for (size_t i = 0; i < v.size(); ++i) o[i] = FromSigned2(v[i]);
+    return o;
+}
+/** Fp3 embeddings of the integer witness (c0 = value, c1 = c2 = 0). */
+std::vector<Fp3> ToFp3I8(const std::vector<int8_t>& v)
+{
+    std::vector<Fp3> o(v.size());
+    for (size_t i = 0; i < v.size(); ++i) o[i] = FromSigned3(v[i]);
+    return o;
+}
+std::vector<Fp3> ToFp3I64(const std::vector<int64_t>& v)
+{
+    std::vector<Fp3> o(v.size());
+    for (size_t i = 0; i < v.size(); ++i) o[i] = FromSigned3(v[i]);
     return o;
 }
 
@@ -466,38 +605,32 @@ bool EnvFlagIsZero(const char* name)
     return e != nullptr && e[0] == '0' && e[1] == '\0';
 }
 
-Fp2 MleEval1D2Raw(const Fp2* vals, size_t vals_len, const std::vector<Fp2>& r)
-{
-    if (r.empty()) return vals_len == 0 ? Fp2::Zero() : vals[0];
-    if (r.size() >= 31) return Fp2::Zero();
-    const size_t n = size_t{1} << r.size();
-    std::vector<Fp2> cur(n, Fp2::Zero());
-    const size_t copy_n = std::min(vals_len, n);
-    for (size_t i = 0; i < copy_n; ++i) cur[i] = vals[i];
-    size_t len = n;
-    for (size_t b = 0; b < r.size(); ++b) {
-        const Fp2 one_minus = Sub(Fp2::One(), r[b]);
-        const Fp2& rb = r[b];
-        for (size_t i = 0; i < len / 2; ++i) {
-            cur[i] = Add(Mul(cur[2 * i], one_minus), Mul(cur[2 * i + 1], rb));
-        }
-        len >>= 1;
-    }
-    return cur[0];
-}
-
 Fp2 MleEvalMatrix(const std::vector<Fp2>& mat, uint32_t rows, uint32_t cols,
                   const std::vector<Fp2>& r_row, const std::vector<Fp2>& r_col)
 {
-    if (rows == 0 || cols == 0 || mat.empty()) return Fp2::Zero();
-    std::vector<Fp2> row_evals(rows, Fp2::Zero());
+    Fp2 acc = Fp2::Zero();
     for (uint32_t i = 0; i < rows; ++i) {
-        const size_t off = static_cast<size_t>(i) * cols;
-        const size_t end = std::min(off + cols, mat.size());
-        if (off >= end) break;
-        row_evals[i] = MleEval1D2Raw(mat.data() + off, end - off, r_col);
+        const Fp2 ei = EqFactor(r_row, i);
+        for (uint32_t j = 0; j < cols; ++j) {
+            acc = Add(acc, Mul(Mul(mat[static_cast<size_t>(i) * cols + j], ei), EqFactor(r_col, j)));
+        }
     }
-    return MleEval1D2Raw(row_evals.data(), row_evals.size(), r_row);
+    return acc;
+}
+
+/** Fp3 sibling of MleEvalMatrix (episode-v7 path). */
+Fp3 MleEvalMatrix3(const std::vector<Fp3>& mat, uint32_t rows, uint32_t cols,
+                   const std::vector<Fp3>& r_row, const std::vector<Fp3>& r_col)
+{
+    Fp3 acc = Fp3::Zero();
+    for (uint32_t i = 0; i < rows; ++i) {
+        const Fp3 ei = EqFactor3(r_row, i);
+        for (uint32_t j = 0; j < cols; ++j) {
+            acc = Add(acc,
+                      Mul(Mul(mat[static_cast<size_t>(i) * cols + j], ei), EqFactor3(r_col, j)));
+        }
+    }
+    return acc;
 }
 
 struct LayerWire {
@@ -1181,8 +1314,8 @@ uint256 RCGkrFsSeedV7(const CBlockHeader& header, int32_t height, const RCEpisod
 
 uint256 RCGkrFsSeedV7Coupled(const CBlockHeader& header, int32_t height,
                              const RCCoupParams& params, const RCCoupOptions& options,
-                             const arith_uint256& target, const uint256& claimed_digest,
-                             const uint256& sigma,
+                             const arith_uint256& target,
+                             const uint256& claimed_digest, const uint256& sigma,
                              const std::vector<uint256>& barrier_roots)
 {
     std::vector<unsigned char> buf;
@@ -1215,6 +1348,8 @@ uint256 RCGkrFsSeedV7Coupled(const CBlockHeader& header, int32_t height,
     AppendLE32(buf, params.bank_pages);
     AppendLE32(buf, params.rows_per_lobe);
     AppendLE32(buf, params.pages_per_barrier_lobe);
+    // Exact coupled options. These are consensus/digest-affecting execution
+    // knobs and must not be relabelable across the coupled transcript.
     AppendBytes(buf, reinterpret_cast<const unsigned char*>("cop"), 3);
     AppendLE32(buf, static_cast<uint32_t>(options.mode));
     AppendLE32(buf, options.transcript_version);
@@ -1276,14 +1411,14 @@ namespace {
 // MleEvalMatrix). Concatenate low-first, then zero-extend to `nu` (the padded
 // batch dimension) — appending 0-coordinates selects the length-preserving
 // sub-cube of a zero-padded column (§1.3), so ṽ_padded(point,0…0)=ṽ_logical.
-std::vector<Fp2> PointConcatExtend(const std::vector<Fp2>& low, const std::vector<Fp2>& high,
-                                   uint32_t nu)
+std::vector<Fp3> PointConcatExtend3(const std::vector<Fp3>& low, const std::vector<Fp3>& high,
+                                    uint32_t nu)
 {
-    std::vector<Fp2> p;
+    std::vector<Fp3> p;
     p.reserve(nu);
     p.insert(p.end(), low.begin(), low.end());
     p.insert(p.end(), high.begin(), high.end());
-    while (p.size() < nu) p.push_back(Fp2::Zero());
+    while (p.size() < nu) p.push_back(Fp3::Zero());
     return p;
 }
 
@@ -1299,17 +1434,18 @@ uint256 EvalArgSeed(const uint256& base, const std::vector<FriLayerCommit>& colu
     return Sha256dBytes(buf.data(), buf.size());
 }
 
-// Build the flat column list (per layer: A, B, Y, extract_out), matching both
-// prover and verifier deterministically from the ground-truth wires.
-std::vector<std::vector<Fp2>> BuildV7Columns(const std::vector<LayerWire>& wires)
+// Build the flat Fp3 column list (per layer: A, B, Y, extract_out), matching
+// both prover and verifier deterministically from the ground-truth wires. The
+// int8/int64 witness embeds into Fp3 as c0=value, c1=c2=0.
+std::vector<std::vector<Fp3>> BuildV7Columns(const std::vector<LayerWire>& wires)
 {
-    std::vector<std::vector<Fp2>> cols;
+    std::vector<std::vector<Fp3>> cols;
     cols.reserve(wires.size() * 4);
     for (const LayerWire& w : wires) {
-        cols.push_back(w.A);
-        cols.push_back(w.B);
-        cols.push_back(w.Y);
-        cols.push_back(ToFp2I8(w.extract_out));
+        cols.push_back(ToFp3I8(w.A_i8));
+        cols.push_back(ToFp3I8(w.B_i8));
+        cols.push_back(ToFp3I64(w.Y_i64));
+        cols.push_back(ToFp3I8(w.extract_out));
     }
     return cols;
 }
@@ -1319,12 +1455,12 @@ std::vector<std::vector<Fp2>> BuildV7Columns(const std::vector<LayerWire>& wires
 // Thm-5.2 achieved bits. (Full per-tile coverage + the r16 range instance are
 // exercised by matmul_v4_rc_gkr_air_tests; the byte-exactness binding of every
 // tile to the immutable reference is enforced separately.)
-gkr_air::LogUpVerifyResult ExtractLogUpSample(const std::vector<LayerWire>& wires, Fp2 gamma,
-                                              Fp2 alpha1, Fp2 alpha2, uint32_t max_tiles)
+gkr_air::LogUpVerifyResult ExtractLogUpSample(const std::vector<LayerWire>& wires, Fp3 gamma,
+                                              Fp3 alpha1, Fp3 alpha2, uint32_t max_tiles)
 {
     gkr_air::TableTM tm_tab;
     gkr_air::TableTX tx_tab;
-    gkr_air::LogUpInstance inst_tm, inst_tx;
+    gkr_air::LogUpInstance3 inst_tm, inst_tx, inst_r16;
     uint32_t used = 0;
     for (const LayerWire& w : wires) {
         if (used >= max_tiles) break;
@@ -1339,16 +1475,16 @@ gkr_air::LogUpVerifyResult ExtractLogUpSample(const std::vector<LayerWire>& wire
                 const size_t off = static_cast<size_t>(i) * w.n + bj * kRCMxBlockLen;
                 for (uint32_t t = 0; t < kRCMxBlockLen; ++t) in[t] = w.extract_in[off + t];
                 const gkr_air::TileWitness tw = gkr_air::TraceTile(pub, in);
-                gkr_air::AppendTileLookupsTmTxOnly(tw, tm_tab, tx_tab, gamma, inst_tm, inst_tx);
+                gkr_air::AppendTileLookups(tw, tm_tab, tx_tab, gamma, inst_tm, inst_tx, inst_r16);
                 ++used;
             }
         }
     }
     // Manual multiplicities for the small tables (avoids the 2^16 r16 blowup;
     // r16 range membership is checked structurally in CheckTileConstraints).
-    auto build_mult = [](gkr_air::LogUpInstance& in) {
+    auto build_mult = [](gkr_air::LogUpInstance3& in) {
         in.table_mult.assign(in.table.size(), 0);
-        for (const Fp2& wt : in.witness)
+        for (const Fp3& wt : in.witness)
             for (size_t j = 0; j < in.table.size(); ++j)
                 if (gkr_field::Eq(wt, in.table[j])) {
                     in.table_mult[j] += 1;
@@ -1357,7 +1493,7 @@ gkr_air::LogUpVerifyResult ExtractLogUpSample(const std::vector<LayerWire>& wire
     };
     build_mult(inst_tm);
     build_mult(inst_tx);
-    std::vector<gkr_air::LogUpInstance> insts{inst_tm, inst_tx};
+    std::vector<gkr_air::LogUpInstance3> insts{inst_tm, inst_tx};
     return gkr_air::LogUpDualAlphaVerify(insts, alpha1, alpha2);
 }
 
@@ -1503,16 +1639,16 @@ std::vector<int8_t> TransposeI8(const std::vector<int8_t>& src, uint32_t rows, u
     return out;
 }
 
-std::vector<std::vector<Fp2>> BuildV7ColumnsFromWitness(
+std::vector<std::vector<Fp3>> BuildV7ColumnsFromWitness(
     const std::vector<RCGkrV7WireWitness>& wires)
 {
-    std::vector<std::vector<Fp2>> cols;
+    std::vector<std::vector<Fp3>> cols;
     cols.reserve(wires.size() * 4);
     for (const auto& w : wires) {
-        cols.push_back(ToFp2I8(w.A));
-        cols.push_back(ToFp2I8(w.B));
-        cols.push_back(ToFp2I64(w.Y));
-        cols.push_back(ToFp2I8(w.extract_out));
+        cols.push_back(ToFp3I8(w.A));
+        cols.push_back(ToFp3I8(w.B));
+        cols.push_back(ToFp3I64(w.Y));
+        cols.push_back(ToFp3I8(w.extract_out));
     }
     return cols;
 }
@@ -1557,7 +1693,7 @@ struct GroundResult {
 // Bind one committed operand (dims crows×ccols) to its Λ provenance.
 bool BindOperand(const TensorRef& ref, const std::vector<int8_t>& committed, uint32_t crows,
                  uint32_t ccols, const std::vector<RCGkrV7WireWitness>& wires,
-                 const gkr_air::TableTM& tm, Fp2 gamma, gkr_air::LogUpInstance& inst_tm,
+                 const gkr_air::TableTM& tm, Fp3 gamma, gkr_air::LogUpInstance3& inst_tm,
                  uint64_t& n_sha, std::string& why)
 {
     if (ref.is_leaf) {
@@ -1592,8 +1728,10 @@ bool BindOperand(const TensorRef& ref, const std::vector<int8_t>& committed, uin
 
 GroundResult GroundEpisodeInCircuit(const std::vector<RCGkrV7WireWitness>& wires,
                                     const std::vector<LayerProv>& prov, const RCEpisodeParams& p,
-                                    const std::vector<uint256>& round_roots, Fp2 gamma,
-                                    gkr_air::LogUpInstance& inst_tm, gkr_air::LogUpInstance& inst_tx)
+                                    const std::vector<uint256>& round_roots, Fp3 gamma,
+                                    gkr_air::LogUpInstance3& inst_tm,
+                                    gkr_air::LogUpInstance3& inst_tx,
+                                    gkr_air::LogUpInstance3& inst_r16)
 {
     GroundResult res;
     gkr_air::TableTM tm;
@@ -1642,7 +1780,7 @@ GroundResult GroundEpisodeInCircuit(const std::vector<RCGkrV7WireWitness>& wires
                         res.failure = "extract_air:out_binding"; return res;
                     }
                 }
-                gkr_air::AppendTileLookupsTmTxOnly(tw, tm, tx, gamma, inst_tm, inst_tx);
+                gkr_air::AppendTileLookups(tw, tm, tx, gamma, inst_tm, inst_tx, inst_r16);
                 ++res.n_tiles;
             }
         }
@@ -1709,51 +1847,56 @@ RCGkrProveResultV7 ProveV7Core(const CBlockHeader& header, const RCEpisodeParams
     const uint256 base_seed =
         RCGkrFsSeedV7(header, height, params, target, claimed_digest, sigma, roots);
 
-    // Epoch-1 columns and the batch degree (all toy tensors are single-chunk).
-    std::vector<std::vector<Fp2>> columns = BuildV7Columns(wires);
+    // Epoch-1 columns (Fp3-embedded integer witness) and the batch degree
+    // (all toy tensors are single-chunk).
+    std::vector<std::vector<Fp3>> columns = BuildV7Columns(wires);
     size_t max_len = 0;
     for (const auto& c : columns) max_len = std::max(max_len, c.size());
     const uint32_t batch_n = FriNextPow2(static_cast<uint32_t>(max_len));
     const uint32_t nu = Log2Exact(batch_n);
 
-    // Per-layer Thaler product sumcheck + collect opening claims.
+    // Per-layer Thaler product sumcheck + collect opening claims (all Fp3).
     FsTranscript fs(kRCGkrDomainTagV7);
     fs.AbsorbUint256(base_seed);
-    std::vector<RCGkrOpeningClaim> claims;
+    std::vector<RCGkrOpeningClaim3> claims;
     proof.layers.resize(wires.size());
     for (size_t li = 0; li < wires.size(); ++li) {
         const LayerWire& w = wires[li];
+        // Fp3 views of the committed columns (A, B, Y) for this layer.
+        const std::vector<Fp3>& a3 = columns[4 * li + 0];
+        const std::vector<Fp3>& b3 = columns[4 * li + 1];
+        const std::vector<Fp3>& y3 = columns[4 * li + 2];
         fs.AbsorbU32(static_cast<uint32_t>(li));
         const uint32_t nu_i = Log2Exact(RCGkrNextPow2(w.m));
         const uint32_t nu_j = Log2Exact(RCGkrNextPow2(w.n));
-        std::vector<Fp2> ri(nu_i), rj(nu_j);
-        for (uint32_t b = 0; b < nu_i; ++b) ri[b] = fs.ChallengeFp2("v7_ri");
-        for (uint32_t b = 0; b < nu_j; ++b) rj[b] = fs.ChallengeFp2("v7_rj");
+        std::vector<Fp3> ri(nu_i), rj(nu_j);
+        for (uint32_t b = 0; b < nu_i; ++b) ri[b] = fs.ChallengeFp3("v7_ri");
+        for (uint32_t b = 0; b < nu_j; ++b) rj[b] = fs.ChallengeFp3("v7_rj");
 
-        const Fp2 c_claim = MleEvalMatrix(w.Y, w.m, w.n, ri, rj);
-        std::vector<Fp2> rk;
-        Fp2 gf;
+        const Fp3 c_claim = MleEvalMatrix3(y3, w.m, w.n, ri, rj);
+        std::vector<Fp3> rk;
+        Fp3 gf;
         RCGkrLayerClaimV7& lc = proof.layers[li];
-        lc.sumcheck = ProveProductK(w.A, w.m, w.k, w.B, w.n, ri, rj, c_claim, fs, rk, gf);
+        lc.sumcheck = ProveProductK3(a3, w.m, w.k, b3, w.n, ri, rj, c_claim, fs, rk, gf);
         lc.c_claim = c_claim;
-        lc.a_eval = MleEvalMatrix(w.A, w.m, w.k, ri, rk);
-        lc.b_eval = MleEvalMatrix(w.B, w.k, w.n, rk, rj);
+        lc.a_eval = MleEvalMatrix3(a3, w.m, w.k, ri, rk);
+        lc.b_eval = MleEvalMatrix3(b3, w.k, w.n, rk, rj);
         lc.final_eval = gf; // == a_eval·b_eval for A·B==Y wires (honest OR forged)
 
         const uint32_t a_col = static_cast<uint32_t>(4 * li);
         const uint32_t b_col = a_col + 1;
         const uint32_t y_col = a_col + 2;
-        claims.push_back({y_col, PointConcatExtend(rj, ri, nu), c_claim});
-        claims.push_back({a_col, PointConcatExtend(rk, ri, nu), lc.a_eval});
-        claims.push_back({b_col, PointConcatExtend(rj, rk, nu), lc.b_eval});
+        claims.push_back({y_col, PointConcatExtend3(rj, ri, nu), c_claim});
+        claims.push_back({a_col, PointConcatExtend3(rk, ri, nu), lc.a_eval});
+        claims.push_back({b_col, PointConcatExtend3(rj, rk, nu), lc.b_eval});
     }
 
-    // §2.4 eval argument: f,g committed inside the SAME batched FRI.
+    // §2.4 eval argument: f,g committed inside the SAME batched Fp3 FRI.
     std::vector<FriLayerCommit> epoch1_roots(columns.size());
     for (size_t i = 0; i < columns.size(); ++i)
-        epoch1_roots[i].root = FriBatchColumnRoot(columns[i], batch_n);
+        epoch1_roots[i].root = Fri3BatchColumnRoot(columns[i], batch_n);
     const uint256 eval_seed = EvalArgSeed(base_seed, epoch1_roots, columns.size());
-    const auto ev = EvalArgumentProve(claims, columns, eval_seed);
+    const auto ev = EvalArgumentProve3(claims, columns, eval_seed);
     if (!ev.ok) {
         res.timing.ok = false;
         res.timing.note = "eval arg prove: " + ev.note;
@@ -1763,7 +1906,7 @@ RCGkrProveResultV7 ProveV7Core(const CBlockHeader& header, const RCEpisodeParams
     columns.push_back(ev.f_coeffs);
     columns.push_back(ev.g_coeffs);
 
-    const auto bc = FriBatchCommit(columns, base_seed);
+    const auto bc = Fri3BatchCommit(columns, base_seed);
     if (!bc.ok) {
         res.timing.ok = false;
         res.timing.note = "batch commit: " + bc.note;
@@ -1771,11 +1914,11 @@ RCGkrProveResultV7 ProveV7Core(const CBlockHeader& header, const RCEpisodeParams
     }
     proof.batch = bc.proof;
 
-    // Dual-α Extract LogUp (FS-bound challenges).
+    // Dual-α Extract LogUp (FS-bound Fp3 challenges).
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("logup"), 5);
-    const Fp2 gamma = fs.ChallengeFp2("v7_gamma");
-    proof.logup_alpha1 = fs.ChallengeFp2("v7_alpha1");
-    proof.logup_alpha2 = fs.ChallengeFp2("v7_alpha2");
+    const Fp3 gamma = fs.ChallengeFp3("v7_gamma");
+    proof.logup_alpha1 = fs.ChallengeFp3("v7_alpha1");
+    proof.logup_alpha2 = fs.ChallengeFp3("v7_alpha2");
     const auto lr = ExtractLogUpSample(wires, gamma, proof.logup_alpha1, proof.logup_alpha2,
                                        /*max_tiles=*/16);
     proof.logup_bits = lr.achieved_bits;
@@ -1873,7 +2016,7 @@ size_t EstimateRCGkrProofV7PayloadBytes(const RCGkrProofV7& proof)
         return bytes;
     };
 
-    const FriBatchProof& batch = proof.batch;
+    const Fri3BatchProof& batch = proof.batch;
     if (proof.round_seeds.size() > kRCGkrMaxRoundSeedsHard ||
         proof.round_roots.size() > kRCGkrMaxRoundSeedsHard ||
         proof.layers.size() > kRCGkrMaxLayersHard ||
@@ -1889,43 +2032,44 @@ size_t EstimateRCGkrProofV7PayloadBytes(const RCGkrProofV7& proof)
     }
 
     // Fixed envelope + count-prefixed public vectors + diagnostic note.
-    if (!add(4 + 4 + 4 + 3 * 32 + 3 * 16 + 8 + 1 + 4) ||
+    // (Fp3 field elements are 24 bytes: c0‖c1‖c2 LE64 limbs.)
+    if (!add(4 + 4 + 4 + 3 * 32 + 3 * 24 + 8 + 1 + 4) ||
         !add(proof.round_seeds.size() + proof.round_roots.size(), 32) ||
         !add(proof.note.size())) {
         return kTooLarge;
     }
 
-    // Batched-FRI payload (roots 32B + n_leaves 4B per layer; Fp2 = 16B).
+    // Batched-FRI payload (roots 32B + n_leaves 4B per layer; Fp3 = 24B).
     if (!add(batch.columns.size(), 36) || !add(batch.column_len.size(), 4) ||
-        !add(batch.evals_z1.size() + batch.evals_z2.size(), 16) ||
-        !add(batch.fold_layers.size(), 36) || !add(batch.fold_challenges.size(), 16)) {
+        !add(batch.evals_z1.size() + batch.evals_z2.size(), 24) ||
+        !add(batch.fold_layers.size(), 36) || !add(batch.fold_challenges.size(), 24)) {
         return kTooLarge;
     }
-    for (const FriBatchQuery& q : batch.queries) {
+    for (const Fri3BatchQuery& q : batch.queries) {
         if (q.columns.size() > kRCFriBatchMaxColumns ||
             q.steps.size() > kRCFriMaxFoldLayersHard) {
             return malformed();
         }
-        for (const FriBatchColumnOpening& col : q.columns) {
+        for (const Fri3BatchColumnOpening& col : q.columns) {
             if (col.siblings.size() > kRCFriMaxFoldLayersHard) return malformed();
-            if (!add(16 + 4) || !add(col.siblings.size(), 32)) return kTooLarge;
+            if (!add(24 + 4) || !add(col.siblings.size(), 32)) return kTooLarge;
         }
-        for (const FriFoldStep& step : q.steps) {
+        for (const Fri3FoldStep& step : q.steps) {
             if (step.even_siblings.size() > kRCFriMaxFoldLayersHard ||
                 step.odd_siblings.size() > kRCFriMaxFoldLayersHard) {
                 return malformed();
             }
-            if (!add(4 + 16 + 16) ||
+            if (!add(4 + 24 + 24) ||
                 !add(step.even_siblings.size() + step.odd_siblings.size(), 32)) {
                 return kTooLarge;
             }
         }
     }
 
-    // Sumcheck/eval-argument payload (each round ~3 Fp2; per-layer 4 Fp2 claims).
+    // Sumcheck/eval-argument payload (each round ~3 Fp3; per-layer 4 Fp3 claims).
     for (const RCGkrLayerClaimV7& layer : proof.layers) {
         if (layer.sumcheck.size() > kRCGkrMaxSumcheckRoundsHard) return malformed();
-        if (!add(layer.sumcheck.size(), 3 * 16) || !add(4, 16)) return kTooLarge;
+        if (!add(layer.sumcheck.size(), 3 * 24) || !add(4, 24)) return kTooLarge;
     }
 
     // The critical previously-unaccounted term: the carried witness columns.
@@ -1963,7 +2107,7 @@ bool IsForgeableGemm(const LayerWire& w)
 // eval-arg → batched FRI → LogUp → transcript) over a FABRICATED witness. The
 // resulting RCGkrProofV7 is internally consistent: it passes pow_bind, the
 // header/digest/sigma binding, digest_from_roots, the round-seed chain, the Λ
-// layout, column_not_grounded, FriBatchVerify, the per-layer sumcheck,
+// layout, column_not_grounded, Fri3BatchVerify, the per-layer sumcheck,
 // final_eval endpoint/product, the eval argument, and the FS-bound LogUp α's.
 // It can therefore only be rejected by the DEEP security mechanism — the
 // in-circuit MxExpand / Extract-sampler / tile-tree grounding AIRs. Reaching
@@ -2127,8 +2271,7 @@ inline constexpr char kRCGkrRelDomainTagV7[] = "BTX_RC_GKR_RELV7";
 
 RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
                                                     const CBlockHeader& header, int32_t height,
-                                                    const arith_uint256& target,
-                                                    bool assume_grounded)
+                                                    const arith_uint256& target)
 {
     RCGkrRelationsResult r;
     auto fail = [&](RCGkrRelation rel, const std::string& detail) {
@@ -2154,22 +2297,22 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
     // Module-local challenges (independent of the main transcript; soundness only
     // needs uniform-random draws — the FS-binding of the shipped α's is a
     // separate gate in VerifyWinnerProofV7). eta: G3 composition; gamma: G3
-    // fingerprint; alpha1/alpha2: G3 dual-α membership.
+    // fingerprint; alpha1/alpha2: G3 dual-α membership. ALL Fp3 (episode-v7).
     FsTranscript rel_fs(kRCGkrRelDomainTagV7);
     rel_fs.AbsorbUint256(base_seed);
-    const Fp2 eta = rel_fs.ChallengeFp2("g3_eta");
-    const Fp2 gamma = rel_fs.ChallengeFp2("g3_gamma");
-    const Fp2 alpha1 = rel_fs.ChallengeFp2("g3_alpha1");
-    const Fp2 alpha2 = rel_fs.ChallengeFp2("g3_alpha2");
+    const Fp3 eta = rel_fs.ChallengeFp3("g3_eta");
+    const Fp3 gamma = rel_fs.ChallengeFp3("g3_gamma");
+    const Fp3 alpha1 = rel_fs.ChallengeFp3("g3_alpha1");
+    const Fp3 alpha2 = rel_fs.ChallengeFp3("g3_alpha2");
 
     gkr_air::TableTM tm_tab;
     gkr_air::TableTX tx_tab;
     // G3 membership instances — populated ONLY by AppendTileLookups so their table
     // sides are exactly the canonical fixed reference vectors (Construction III).
-    gkr_air::LogUpInstance inst_tm, inst_tx;
+    gkr_air::LogUpInstance3 inst_tm, inst_tx, inst_r16;
     // G1 operand grounding uses VerifyMxExpandColumn only for its in-circuit bool;
     // its LogUp feed goes to a throwaway so it never perturbs the G3 instances.
-    gkr_air::LogUpInstance g1_mx_scratch;
+    gkr_air::LogUpInstance3 g1_mx_scratch;
 
     // ---- Per-layer sumcheck-point relations: G1 (operands), G2 (claim), G5. ----
     FsTranscript fs(kRCGkrDomainTagV7);
@@ -2181,20 +2324,20 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
         fs.AbsorbU32(static_cast<uint32_t>(li));
         const uint32_t nu_i = Log2Exact(RCGkrNextPow2(std::max(w.m, 1u)));
         const uint32_t nu_j = Log2Exact(RCGkrNextPow2(std::max(w.n, 1u)));
-        std::vector<Fp2> ri(nu_i), rj(nu_j);
-        for (uint32_t b = 0; b < nu_i; ++b) ri[b] = fs.ChallengeFp2("v7_ri");
-        for (uint32_t b = 0; b < nu_j; ++b) rj[b] = fs.ChallengeFp2("v7_rj");
-        std::vector<Fp2> rk;
-        Fp2 gf;
-        if (!VerifyProductK(lc.sumcheck, lc.c_claim, fs, rk, gf))
+        std::vector<Fp3> ri(nu_i), rj(nu_j);
+        for (uint32_t b = 0; b < nu_i; ++b) ri[b] = fs.ChallengeFp3("v7_ri");
+        for (uint32_t b = 0; b < nu_j; ++b) rj[b] = fs.ChallengeFp3("v7_rj");
+        std::vector<Fp3> rk;
+        Fp3 gf;
+        if (!VerifyProductK3(lc.sumcheck, lc.c_claim, fs, rk, gf))
             return fail(RCGkrRelation::G1, "sumcheck_endpoint"); // cannot re-derive the point
 
         // -- G1: bind a_at_r/b_at_r to the committed A/B columns (Construction I
         //    matrix-opening claim points) + the final-eval binding (Thm 3.1). --
-        const std::vector<Fp2> a_col = ToFp2I8(w.A);
-        const std::vector<Fp2> b_col = ToFp2I8(w.B);
-        const Fp2 a_at_r = MleEvalMatrix(a_col, w.m, w.k, ri, rk);
-        const Fp2 b_at_r = MleEvalMatrix(b_col, w.k, w.n, rk, rj);
+        const std::vector<Fp3> a_col = ToFp3I8(w.A);
+        const std::vector<Fp3> b_col = ToFp3I8(w.B);
+        const Fp3 a_at_r = MleEvalMatrix3(a_col, w.m, w.k, ri, rk);
+        const Fp3 b_at_r = MleEvalMatrix3(b_col, w.k, w.n, rk, rj);
         if (!Eq(a_at_r, lc.a_eval)) return fail(RCGkrRelation::G1, "a_open");
         if (!Eq(b_at_r, lc.b_eval)) return fail(RCGkrRelation::G1, "b_open");
         if (!RCGkrCheckFinalEvalBinding(gf, a_at_r, b_at_r))
@@ -2202,14 +2345,8 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
 
         // -- G1 (operand→PRF): each LEAF operand column bound to its Λ MxExpand
         //    expansion (an alternate factorization / fabricated leaf is not the
-        //    PRF expansion). Chained operands are G4.
-        //
-        // VerifyWinnerProofV7 already ran GroundEpisodeInCircuit immediately
-        // before this relation pass. In that verified-grounded path, re-running
-        // leaf MxExpand here only duplicates SHA/AIR work and cannot add a new
-        // accept/reject condition. Keep the full work in the standalone relation
-        // checker used by tests/audits.
-        if (!assume_grounded) {
+        //    PRF expansion). Chained operands are G4. --
+        {
             uint64_t n_sha = 0;
             std::string why;
             if (lp.a.is_leaf &&
@@ -2224,18 +2361,18 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
 
         // -- G2: layer claim c_ℓ bound to the committed Y trace-column segment
         //    (Construction I segment point; single segment ⇒ index 0). --
-        const std::vector<Fp2> y_col = ToFp2I64(w.Y);
-        const Fp2 c_at_r = MleEvalMatrix(y_col, w.m, w.n, ri, rj);
+        const std::vector<Fp3> y_col = ToFp3I64(w.Y);
+        const Fp3 c_at_r = MleEvalMatrix3(y_col, w.m, w.n, ri, rj);
         if (!Eq(c_at_r, lc.c_claim)) return fail(RCGkrRelation::G2, "claim_segment");
 
         // -- G5: residual accumulator binding acc = claim + X̃(pt) (Fwd), or
         //    extract_in == Y for the non-residual layers (Construction I residual
         //    binder). Only where the committed accumulator exists. --
         if (w.extract_in.size() == static_cast<size_t>(w.m) * w.n) {
-            const Fp2 acc_at_r = MleEvalMatrix(ToFp2I64(w.extract_in), w.m, w.n, ri, rj);
+            const Fp3 acc_at_r = MleEvalMatrix3(ToFp3I64(w.extract_in), w.m, w.n, ri, rj);
             if (lp.fwd_residual) {
                 // X̃ is the SAME committed operand A used as the Fwd input (k == n).
-                const Fp2 x_at_r = MleEvalMatrix(a_col, w.m, w.n, ri, rj);
+                const Fp3 x_at_r = MleEvalMatrix3(a_col, w.m, w.n, ri, rj);
                 if (!RCGkrCheckResidualAcc(acc_at_r, c_at_r, x_at_r))
                     return fail(RCGkrRelation::G5, "residual_acc");
             } else if (!Eq(acc_at_r, c_at_r)) {
@@ -2246,8 +2383,7 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
         // -- G3 (per tile): Construction II Extract composition polynomial ==0 and
         //    the verifier-defined sampler out-binding, plus feed Construction III
         //    membership witnesses. --
-        if (!assume_grounded && w.n % kRCMxBlockLen == 0 &&
-            w.extract_out.size() == static_cast<size_t>(w.m) * w.n &&
+        if (w.n % kRCMxBlockLen == 0 && w.extract_out.size() == static_cast<size_t>(w.m) * w.n &&
             w.extract_in.size() == static_cast<size_t>(w.m) * w.n) {
             const uint32_t n_blocks = w.n / kRCMxBlockLen;
             for (uint32_t i = 0; i < w.m; ++i) {
@@ -2271,8 +2407,7 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
                         if (tw.out[t] != w.extract_out[off + t])
                             return fail(RCGkrRelation::G3, "extract_out_binding");
                     }
-                    gkr_air::AppendTileLookupsTmTxOnly(tw, tm_tab, tx_tab, gamma, inst_tm,
-                                                       inst_tx);
+                    gkr_air::AppendTileLookups(tw, tm_tab, tx_tab, gamma, inst_tm, inst_tx, inst_r16);
                     ++r.n_tiles;
                 }
             }
@@ -2285,21 +2420,19 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
     //    fingerprints emitted above. T_R16 range is carried structurally by the
     //    composition (matches the shipped sample path), so membership runs over
     //    {T_M, T_X}. --
-    if (!assume_grounded) {
-        auto finalize = [](gkr_air::LogUpInstance& in) {
-            in.table_mult.assign(in.table.size(), 0);
-            for (const Fp2& wt : in.witness)
-                for (size_t j = 0; j < in.table.size(); ++j)
-                    if (gkr_field::Eq(wt, in.table[j])) { in.table_mult[j] += 1; break; }
-        };
-        finalize(inst_tm);
-        finalize(inst_tx);
-        {
-            std::vector<gkr_air::LogUpInstance> insts{inst_tm, inst_tx};
-            const gkr_air::LookupBindResult lr =
-                gkr_air::VerifyLookupAgainstPreprocessed(insts, gamma, alpha1, alpha2);
-            if (!lr.ok) return fail(RCGkrRelation::G3, "membership:" + lr.failure);
-        }
+    auto finalize = [](gkr_air::LogUpInstance3& in) {
+        in.table_mult.assign(in.table.size(), 0);
+        for (const Fp3& wt : in.witness)
+            for (size_t j = 0; j < in.table.size(); ++j)
+                if (gkr_field::Eq(wt, in.table[j])) { in.table_mult[j] += 1; break; }
+    };
+    finalize(inst_tm);
+    finalize(inst_tx);
+    {
+        std::vector<gkr_air::LogUpInstance3> insts{inst_tm, inst_tx};
+        const gkr_air::LookupBindResult lr =
+            gkr_air::VerifyLookupAgainstPreprocessed(insts, gamma, alpha1, alpha2);
+        if (!lr.ok) return fail(RCGkrRelation::G3, "membership:" + lr.failure);
     }
 
     // -- G4: extract_out(L) == input(L+1) copy/permutation wiring (Construction
@@ -2316,47 +2449,44 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
         if (src.size() != static_cast<size_t>(ref.erows) * ref.ecols) { why = "chain_src_dims"; return false; }
         ++r.n_chain_wirings;
         if (!ref.transpose) {
-            // Direct copy: committed == src.
-            const WiringEqualityConstraint c = WiringEqualityFromInt8(src, committed);
+            // Direct copy: committed == src (Fp3 equality constraint).
+            const WiringEqualityConstraint3 c = WiringEquality3FromInt8(src, committed);
             const WiringVerifyResult vr = VerifyWiringEquality(c, base_seed, idx);
             if (!vr.ok) { why = "equality:" + vr.reason; return false; }
             return true;
         }
         // Transposed copy: committed == Transpose(src). DUAL grand product with
-        // the materialized transpose permutation (mandatory — single-challenge is
-        // 60 bits at κ, below target).
-        const std::vector<Fp2> u = ToFp2I8(src);
-        const std::vector<Fp2> v = ToFp2I8(committed);
+        // the materialized transpose permutation (mandatory — the dual mandate
+        // is structural; over Fp2 the single form was 60 bits at κ, below
+        // target, and the Fp3 lift does not relax the mandate).
+        const std::vector<Fp3> u = ToFp3I8(src);
+        const std::vector<Fp3> v = ToFp3I8(committed);
         const std::vector<uint64_t> pi = MakeTransposePermutation(ref.erows, ref.ecols);
         if (v.size() != u.size() || pi.size() != u.size()) { why = "transpose_shape"; return false; }
-        const WiringPermutationDual d = BuildWiringPermutationDual(u, v, pi, base_seed, idx);
+        const WiringPermutationDual3 d = BuildWiringPermutationDual3(u, v, pi, base_seed, idx);
         const WiringVerifyResult vr = VerifyWiringPermutationDual(d);
         if (!vr.ok) { why = "permutation_dual:" + vr.reason; return false; }
         return true;
     };
-    if (!assume_grounded) {
-        for (size_t li = 0; li < proof.wires.size(); ++li) {
-            const RCGkrV7WireWitness& w = proof.wires[li];
-            const LayerProv& lp = prov[li];
-            std::string why;
-            if (!bind_chain(lp.a, w.A, w.m, w.k, static_cast<uint32_t>(4 * li + 0), why))
-                return fail(RCGkrRelation::G4, "A:" + why);
-            if (!bind_chain(lp.b, w.B, w.k, w.n, static_cast<uint32_t>(4 * li + 1), why))
-                return fail(RCGkrRelation::G4, "B:" + why);
-        }
+    for (size_t li = 0; li < proof.wires.size(); ++li) {
+        const RCGkrV7WireWitness& w = proof.wires[li];
+        const LayerProv& lp = prov[li];
+        std::string why;
+        if (!bind_chain(lp.a, w.A, w.m, w.k, static_cast<uint32_t>(4 * li + 0), why))
+            return fail(RCGkrRelation::G4, "A:" + why);
+        if (!bind_chain(lp.b, w.B, w.k, w.n, static_cast<uint32_t>(4 * li + 1), why))
+            return fail(RCGkrRelation::G4, "B:" + why);
     }
 
     // -- G4 (§6.3 companion): the round_roots must be the tile-tree commitment of
     //    the reconstructed extract stream (a Construction-IV-style binding of the
     //    per-round stream to its public root). Catches prover-chosen roots. --
-    if (!assume_grounded) {
-        for (uint32_t rr = 0; rr < proof.episode.rounds; ++rr) {
-            const std::vector<int8_t> stream =
-                ReconstructRoundStreamFromWitness(proof.wires, rr, proof.episode);
-            const gkr_air::TileTreeCheckResult tr =
-                gkr_air::CheckTileTreeInCircuit(stream, proof.episode.T_leaf, roots[rr]);
-            if (!tr.ok) return fail(RCGkrRelation::G4, "tiletree:" + tr.failure);
-        }
+    for (uint32_t rr = 0; rr < proof.episode.rounds; ++rr) {
+        const std::vector<int8_t> stream =
+            ReconstructRoundStreamFromWitness(proof.wires, rr, proof.episode);
+        const gkr_air::TileTreeCheckResult tr =
+            gkr_air::CheckTileTreeInCircuit(stream, proof.episode.T_leaf, roots[rr]);
+        if (!tr.ok) return fail(RCGkrRelation::G4, "tiletree:" + tr.failure);
     }
 
     r.ok = true;
@@ -2394,17 +2524,7 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7(const RCGkrProofV7& proof,
             return r;
         }
     }
-    return CheckWinnerProofRelationsV7Impl(proof, header, height, target,
-                                          /*assume_grounded=*/false);
-}
-
-RCGkrRelationsResult CheckWinnerProofRelationsV7AfterGrounding(const RCGkrProofV7& proof,
-                                                               const CBlockHeader& header,
-                                                               int32_t height,
-                                                               const arith_uint256& target)
-{
-    return CheckWinnerProofRelationsV7Impl(proof, header, height, target,
-                                          /*assume_grounded=*/true);
+    return CheckWinnerProofRelationsV7Impl(proof, header, height, target);
 }
 
 bool VerifyWinnerRelationsV7ForTest(const RCGkrProofV7& proof, const CBlockHeader& header,
@@ -2420,19 +2540,20 @@ bool VerifyWinnerRelationsV7ForTest(const RCGkrProofV7& proof, const CBlockHeade
 RCGkrComposedBound RCGkrComposedSeparation(double fri_proximity_bits)
 {
     RCGkrComposedBound b;
-    b.construction_i_bits = static_cast<double>(RCGkrConstructionISeparationBits()); // 74
-    b.construction_ii_bits = kRCGkrCompositionSepBits;                                // 80
-    b.construction_iii_bits = kRCGkrLookupSepBits;                                    // 128
+    b.construction_i_bits = static_cast<double>(RCGkrConstructionISeparationBits()); // 76
+    b.construction_ii_bits = kRCGkrCompositionSepBits;                                // 144
+    b.construction_iii_bits = kRCGkrLookupSepBits;                                    // 256
     b.construction_iv_bits =
-        std::min(kRCGkrWiringEqualitySepBits, kRCGkrWiringPermutationDualSepBits);    // 83.19
-    b.wiring_single_bits = kRCGkrWiringPermutationSingleSepBits;                      // 60
+        std::min(kRCGkrWiringEqualitySepBits, kRCGkrWiringPermutationDualSepBits);    // 147.19
+    b.wiring_single_bits = kRCGkrWiringPermutationSingleSepBits;                      // 124
     b.fri_proximity_bits = fri_proximity_bits;
     b.sha_bits = kRCGkrShaSepBits;                                                    // 88
 
     // ε_total = Σ 2^-term ; composed = −log2(ε_total) via a stable log-sum-exp.
-    // Construction I (its FS-side sub-bound, 74) is ABSORBED into the whole-
-    // protocol FS subtotal (kRCGkrFsSubtotalSepBits = 72; the eval opening
-    // rides the same sumcheck rows), so it is reported but not summed twice.
+    // Construction I (its own composed sub-bound, 76 — floored by the SAME
+    // batched-FRI query term) is ABSORBED into the FS subtotal + FRI terms
+    // below (the eval opening rides the same sumcheck rows and the same
+    // query phase), so it is reported but not summed twice.
     const double terms[] = {kRCGkrFsSubtotalSepBits, b.construction_ii_bits,
                             b.construction_iii_bits, b.construction_iv_bits,
                             b.fri_proximity_bits,    b.sha_bits};
@@ -2445,12 +2566,13 @@ RCGkrComposedBound RCGkrComposedSeparation(double fri_proximity_bits)
     b.margin_bits = b.composed_bits - static_cast<double>(kRCFriTargetSoundnessBits);
     b.clears_target = b.composed_bits >= static_cast<double>(kRCFriTargetSoundnessBits);
     // FRI-dominated iff the (parametric) FRI proximity term is the smallest.
-    // At Q=128 / Fp2 it is NOT: the FS subtotal (72) sits below the FRI floor
-    // (76.80), so the composed bound is FS-dominated at ≈ 71.9.
+    // At Q=128 / Fp3 it IS: the Fp3 FS subtotal (135.5) sits far above the
+    // FRI floor (76.80), so the composed bound is query-dominated at ≈ 76.8.
     b.fri_dominated = (lo == b.fri_proximity_bits);
     // INADEQUATE for consensus authority if the margin over 64 is < 2 bits.
-    // At Q=128 / Fp2 the margin is ≈ 7.9 bits ⇒ adequate (it was ≈ 1.8 at
-    // Q=116/Fp2 — inadequate). Arbiter stays hard-disabled regardless.
+    // At Q=128 / Fp3 the margin is ≈ 12.8 bits ⇒ adequate (Q=128/Fp2 was
+    // ≈ 7.9; Q=116/Fp2 was ≈ 1.8 — inadequate). Arbiter stays hard-disabled
+    // regardless.
     b.inadequate_margin = b.margin_bits < kRCGkrAdequateMarginBits;
     b.any_term_below_target = false;
     for (double t : terms)
@@ -2465,13 +2587,13 @@ double RCGkrComposedSeparationBits(double fri_proximity_bits)
 
 double RCGkrComposedSeparationBits()
 {
-    // SHIPPED: sound v5 fold, Q=128, Fp2 challenges. Raising Q to 128 lifted
-    // the FRI floor (65.85 → 76.80, field-independent) ABOVE the Fp2 FS
-    // subtotal (72), so the composed bound is now FS-dominated at ≈ 71.9 bits
-    // (ε_total ≤ 2^-71.9), clearing the 2^-64 target by ≈ 7.9 bits (adequate).
-    // Reaching the 74-bit bar (≈ 76.8) needs the DEFERRED Fp3 challenge
-    // cutover (INTEGRATION_REPORT.md); see the header note. (Historical
-    // Q=116/Fp2: ≈ 65.8, inadequate.)
+    // SHIPPED: sound v5 fold, Q=128, Fp3 challenges (episode-v7). Raising Q
+    // to 128 lifted the FRI floor (65.85 → 76.80, field-independent); the Fp3
+    // challenge cutover lifted the FS subtotal (72 → 135.5) above it, so the
+    // composed bound is FRI-query-dominated at ≈ 76.8 bits (ε_total ≤
+    // 2^-76.8), clearing 2^-64 by ≈ 12.8 bits and the 74-bit restored-margin
+    // bar. (Historical: Q=128/Fp2 ≈ 71.9 FS-dominated; Q=116/Fp2 ≈ 65.8,
+    // inadequate.)
     return RCGkrComposedSeparationBits(kRCGkrFriProximityBitsV5);
 }
 
@@ -2545,39 +2667,40 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
 
     // BIND the carried witness columns to the batched-FRI commitment (F1/F2/F6):
     // a tampered column fails the root check; a *consistent* forged column fails
-    // the in-circuit AIR that constrains it (below).
-    std::vector<std::vector<Fp2>> columns = BuildV7ColumnsFromWitness(proof.wires);
+    // the in-circuit AIR that constrains it (below). Columns are the Fp3
+    // embedding of the integer witness (c0=value, c1=c2=0).
+    std::vector<std::vector<Fp3>> columns = BuildV7ColumnsFromWitness(proof.wires);
     const uint32_t batch_n = proof.batch.n_coeffs;
     if (batch_n == 0 || (batch_n & (batch_n - 1)) != 0) return fail("v7:batch_n");
     const uint32_t nu = Log2Exact(batch_n);
     if (proof.batch.columns.size() != columns.size() + 2) return fail("v7:batch_col_count");
     for (size_t i = 0; i < columns.size(); ++i)
-        if (FriBatchColumnRoot(columns[i], batch_n) != proof.batch.columns[i].root)
+        if (Fri3BatchColumnRoot(columns[i], batch_n) != proof.batch.columns[i].root)
             return fail("v7:column_not_grounded"); // F1/F2/F6 operand/trace/extract forgery
 
-    // Thm 2.1: batched FRI binds every committed column to a low-degree poly.
+    // Thm 2.1: batched Fp3 FRI binds every committed column to a low-degree poly.
     const uint256 base_seed = RCGkrFsSeedV7(header, height, proof.episode, target,
                                             proof.claimed_digest, proof.episode_sigma, roots);
     std::string fri_why;
-    if (!FriBatchVerify(proof.batch, base_seed, &fri_why)) return fail("v7:fri:" + fri_why);
+    if (!Fri3BatchVerify(proof.batch, base_seed, &fri_why)) return fail("v7:fri:" + fri_why);
 
     // Per-layer sumcheck (R1) + collect opening claims (R2), Λ-driven order.
     FsTranscript fs(kRCGkrDomainTagV7);
     fs.AbsorbUint256(base_seed);
-    std::vector<RCGkrOpeningClaim> claims;
+    std::vector<RCGkrOpeningClaim3> claims;
     for (size_t li = 0; li < proof.wires.size(); ++li) {
         const RCGkrV7WireWitness& w = proof.wires[li];
         const RCGkrLayerClaimV7& lc = proof.layers[li];
         fs.AbsorbU32(static_cast<uint32_t>(li));
         const uint32_t nu_i = Log2Exact(RCGkrNextPow2(w.m));
         const uint32_t nu_j = Log2Exact(RCGkrNextPow2(w.n));
-        std::vector<Fp2> ri(nu_i), rj(nu_j);
-        for (uint32_t b = 0; b < nu_i; ++b) ri[b] = fs.ChallengeFp2("v7_ri");
-        for (uint32_t b = 0; b < nu_j; ++b) rj[b] = fs.ChallengeFp2("v7_rj");
+        std::vector<Fp3> ri(nu_i), rj(nu_j);
+        for (uint32_t b = 0; b < nu_i; ++b) ri[b] = fs.ChallengeFp3("v7_ri");
+        for (uint32_t b = 0; b < nu_j; ++b) rj[b] = fs.ChallengeFp3("v7_rj");
 
-        std::vector<Fp2> rk;
-        Fp2 gf;
-        if (!VerifyProductK(lc.sumcheck, lc.c_claim, fs, rk, gf))
+        std::vector<Fp3> rk;
+        Fp3 gf;
+        if (!VerifyProductK3(lc.sumcheck, lc.c_claim, fs, rk, gf))
             return fail("v7:sumcheck"); // F5 forged claim
         // R1 (Thm 3.1): the carried final_eval must equal BOTH the sumcheck
         // chain-end AND the product of the two bound openings — it is no longer
@@ -2588,9 +2711,9 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
         const uint32_t a_col = static_cast<uint32_t>(4 * li);
         const uint32_t b_col = a_col + 1;
         const uint32_t y_col = a_col + 2;
-        claims.push_back({y_col, PointConcatExtend(rj, ri, nu), lc.c_claim});
-        claims.push_back({a_col, PointConcatExtend(rk, ri, nu), lc.a_eval});
-        claims.push_back({b_col, PointConcatExtend(rj, rk, nu), lc.b_eval});
+        claims.push_back({y_col, PointConcatExtend3(rj, ri, nu), lc.c_claim});
+        claims.push_back({a_col, PointConcatExtend3(rk, ri, nu), lc.a_eval});
+        claims.push_back({b_col, PointConcatExtend3(rj, rk, nu), lc.b_eval});
     }
 
     // Thm 2.2: the eval argument binds c_claim / a_eval / b_eval to the committed
@@ -2598,14 +2721,15 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     const uint256 eval_seed =
         EvalArgSeed(base_seed, proof.batch.columns, /*epoch1_count=*/4 * proof.wires.size());
     std::string ev_why;
-    if (!EvalArgumentVerify(claims, proof.batch, proof.eval, eval_seed, &ev_why))
+    if (!EvalArgumentVerify3(claims, proof.batch, proof.eval, eval_seed, &ev_why))
         return fail("v7:eval:" + ev_why); // F3
 
-    // R3/§5.7/§6.3: dual-α challenges (FS-bound), then the in-circuit grounding.
+    // R3/§5.7/§6.3: dual-α challenges (FS-bound, Fp3), then the in-circuit
+    // grounding.
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("logup"), 5);
-    const Fp2 gamma = fs.ChallengeFp2("v7_gamma");
-    const Fp2 a1 = fs.ChallengeFp2("v7_alpha1");
-    const Fp2 a2 = fs.ChallengeFp2("v7_alpha2");
+    const Fp3 gamma = fs.ChallengeFp3("v7_gamma");
+    const Fp3 a1 = fs.ChallengeFp3("v7_alpha1");
+    const Fp3 a2 = fs.ChallengeFp3("v7_alpha2");
     if (!Eq(a1, proof.logup_alpha1) || !Eq(a2, proof.logup_alpha2))
         return fail("v7:logup_alpha_unbound");
 
@@ -2615,24 +2739,24 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     // → tile-tree AIR. Public seeds/prf are Λ-derived natively.
     const std::vector<LayerProv> prov = RCGkrEpisodeWiring(header, proof.episode, roots);
     if (prov.size() != proof.wires.size()) return fail("v7:wiring_count");
-    gkr_air::LogUpInstance inst_tm, inst_tx;
+    gkr_air::LogUpInstance3 inst_tm, inst_tx, inst_r16;
     const GroundResult gr = GroundEpisodeInCircuit(proof.wires, prov, proof.episode, roots, gamma,
-                                                   inst_tm, inst_tx);
+                                                   inst_tm, inst_tx, inst_r16);
     if (!gr.ok) return fail("v7:ground:" + gr.failure); // F0/F6/F7 in-circuit
 
     // Dual-α LogUp aggregate over ALL committed tiles + MxExpand mantissa rows.
     // T_M/T_X carry the membership soundness (§5.5/§5.6); the 16-bit range (T_R16)
     // is enforced structurally by the sampler AIR (avoids the 2^16-row mult scan),
     // matching the shipped sample path.
-    auto finalize_small = [](gkr_air::LogUpInstance& in) {
+    auto finalize_small = [](gkr_air::LogUpInstance3& in) {
         in.table_mult.assign(in.table.size(), 0);
-        for (const Fp2& wt : in.witness)
+        for (const Fp3& wt : in.witness)
             for (size_t j = 0; j < in.table.size(); ++j)
                 if (gkr_field::Eq(wt, in.table[j])) { in.table_mult[j] += 1; break; }
     };
     finalize_small(inst_tm);
     finalize_small(inst_tx);
-    std::vector<gkr_air::LogUpInstance> insts{inst_tm, inst_tx};
+    std::vector<gkr_air::LogUpInstance3> insts{inst_tm, inst_tx};
     const gkr_air::LogUpVerifyResult lr = gkr_air::LogUpDualAlphaVerify(insts, a1, a2);
     if (!lr.ok) return fail("v7:logup:" + lr.failure); // F6/F7 (mechanism)
 
@@ -2642,7 +2766,7 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     // relation), while binding every winner-proof relation by a construction
     // identity. Honest proofs satisfy all of G1–G5. Behind the OFF arbiter.
     const RCGkrRelationsResult rel =
-        CheckWinnerProofRelationsV7AfterGrounding(proof, header, height, target);
+        CheckWinnerProofRelationsV7(proof, header, height, target);
     if (!rel.ok) return fail(rel.failure); // v7:g1..g5 in-circuit relation
 
     if (fs.Digest() != proof.transcript_hash) return fail("v7:transcript_hash");
@@ -2781,47 +2905,34 @@ uint32_t RCGkrNextPow2(uint32_t n)
 
 Fp RCGkrMleEval1D(const std::vector<Fp>& evals_pow2, const std::vector<Fp>& r)
 {
-    if (r.empty()) return evals_pow2.empty() ? 0 : evals_pow2[0];
-    if (r.size() >= 31) return 0; // unsupported caller shape; fail closed.
-
-    const size_t n = size_t{1} << r.size();
-    std::vector<Fp> cur(n, 0);
-    const size_t copy_n = std::min(evals_pow2.size(), n);
-    for (size_t i = 0; i < copy_n; ++i) cur[i] = evals_pow2[i];
-
-    size_t len = n;
-    for (size_t b = 0; b < r.size(); ++b) {
-        const Fp one_minus = gkr_field::Sub(1, r[b]);
-        const Fp rb = r[b];
-        for (size_t i = 0; i < len / 2; ++i) {
-            cur[i] = gkr_field::Add(gkr_field::Mul(cur[2 * i], one_minus),
-                                    gkr_field::Mul(cur[2 * i + 1], rb));
+    Fp acc = 0;
+    for (size_t i = 0; i < evals_pow2.size(); ++i) {
+        Fp eq = 1;
+        for (size_t b = 0; b < r.size(); ++b) {
+            const Fp bit = ((i >> b) & 1u) ? r[b] : gkr_field::Sub(1, r[b]);
+            eq = gkr_field::Mul(eq, bit);
         }
-        len >>= 1;
+        acc = gkr_field::Add(acc, gkr_field::Mul(evals_pow2[i], eq));
     }
-    return cur[0];
+    return acc;
 }
 
 Fp2 RCGkrMleEval1D2(const std::vector<Fp2>& evals_pow2, const std::vector<Fp2>& r)
 {
-    if (r.empty()) return evals_pow2.empty() ? Fp2::Zero() : evals_pow2[0];
-    if (r.size() >= 31) return Fp2::Zero(); // unsupported caller shape; fail closed.
-
-    const size_t n = size_t{1} << r.size();
-    std::vector<Fp2> cur(n, Fp2::Zero());
-    const size_t copy_n = std::min(evals_pow2.size(), n);
-    for (size_t i = 0; i < copy_n; ++i) cur[i] = evals_pow2[i];
-
-    size_t len = n;
-    for (size_t b = 0; b < r.size(); ++b) {
-        const Fp2 one_minus = Sub(Fp2::One(), r[b]);
-        const Fp2& rb = r[b];
-        for (size_t i = 0; i < len / 2; ++i) {
-            cur[i] = Add(Mul(cur[2 * i], one_minus), Mul(cur[2 * i + 1], rb));
-        }
-        len >>= 1;
+    Fp2 acc = Fp2::Zero();
+    for (size_t i = 0; i < evals_pow2.size(); ++i) {
+        acc = Add(acc, Mul(evals_pow2[i], EqFactor(r, static_cast<uint32_t>(i))));
     }
-    return cur[0];
+    return acc;
+}
+
+Fp3 RCGkrMleEval1D3(const std::vector<Fp3>& evals_pow2, const std::vector<Fp3>& r)
+{
+    Fp3 acc = Fp3::Zero();
+    for (size_t i = 0; i < evals_pow2.size(); ++i) {
+        acc = Add(acc, Mul(evals_pow2[i], EqFactor3(r, static_cast<uint32_t>(i))));
+    }
+    return acc;
 }
 
 RCGkrProveResult ProveWinnerFromSegments(const uint256& claimed_digest, const DistSynthShape& shape,

@@ -536,4 +536,226 @@ WiringVerifyResult VerifyLayerBindings(const std::vector<WiringLayerBinding>& bi
               " unbound-definitional)");
 }
 
+// ============================================================================
+// Fp3 SIBLINGS (v7 EPISODE path). Structure-for-structure mirror of the Fp2
+// constraints above over |F| = p^3 ≈ 2^192, under a DISTINCT FS domain tag.
+// GF(p^2) ⊄ GF(p^3): the two pipelines never mix field values.
+// ============================================================================
+
+namespace {
+
+using Fp3 = gkr_field::Fp3;
+
+constexpr char kRCGkrWiring3DomainTag[] = "BTX_RC_GKR_WIRING3_V1";
+
+std::vector<Fp3> ToFp3FromI8(const std::vector<int8_t>& v)
+{
+    std::vector<Fp3> out;
+    out.reserve(v.size());
+    for (const int8_t x : v) out.push_back(Fp3::FromFp(FromSigned(x)));
+    return out;
+}
+
+std::vector<Fp3> ToFp3FromI64(const std::vector<int64_t>& v)
+{
+    std::vector<Fp3> out;
+    out.reserve(v.size());
+    for (const int64_t x : v) out.push_back(Fp3::FromFp(FromSigned(x)));
+    return out;
+}
+
+/** Index tag i ↦ Fp3 embedding. Injective for i < p (columns cap at 2^28). */
+Fp3 IndexTag3(uint64_t i) { return Fp3::FromFp(FromU64(i)); }
+
+} // namespace
+
+Fp3 WiringChallengeFp3(const uint256& fs_seed, const char* label, uint32_t idx, uint32_t sub)
+{
+    std::vector<unsigned char> buf;
+    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCGkrWiring3DomainTag),
+               reinterpret_cast<const unsigned char*>(kRCGkrWiring3DomainTag) +
+                   sizeof(kRCGkrWiring3DomainTag) - 1);
+    buf.insert(buf.end(), fs_seed.data(), fs_seed.data() + 32);
+    const size_t label_len = std::strlen(label);
+    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(label),
+               reinterpret_cast<const unsigned char*>(label) + label_len);
+    AppendLE32(buf, idx);
+    AppendLE32(buf, sub);
+    // 24 challenge bytes (~192 bits): SHA256d(buf) ‖ SHA256d(buf ‖ "x") — take
+    // the first digest whole plus 0 bytes of the second is NOT enough (32 ≥ 24:
+    // one digest suffices; FromChallengeBytes3 consumes bytes [0, 24)).
+    const auto h = Sha256dBytes(buf.data(), buf.size());
+    return gkr_field::FromChallengeBytes3(h.data());
+}
+
+std::vector<Fp3> WiringChallengePoint3(const uint256& fs_seed, const char* label, uint32_t idx,
+                                       uint32_t ell)
+{
+    std::vector<Fp3> rho;
+    rho.reserve(ell);
+    for (uint32_t b = 0; b < ell; ++b) rho.push_back(WiringChallengeFp3(fs_seed, label, idx, b));
+    return rho;
+}
+
+WiringEqualityConstraint3 WiringEquality3FromFp3(std::vector<Fp3> u, std::vector<Fp3> v)
+{
+    WiringEqualityConstraint3 c;
+    c.len_u = u.size();
+    c.len_v = v.size();
+    const uint64_t logical_max = c.len_u > c.len_v ? c.len_u : c.len_v;
+    c.ell = Log2Ceil(logical_max);
+    const size_t padded = size_t{1} << c.ell;
+    u.resize(padded, Fp3::Zero());
+    v.resize(padded, Fp3::Zero());
+    c.u = std::move(u);
+    c.v = std::move(v);
+    return c;
+}
+
+WiringEqualityConstraint3 WiringEquality3FromInt8(const std::vector<int8_t>& u,
+                                                  const std::vector<int8_t>& v)
+{
+    return WiringEquality3FromFp3(ToFp3FromI8(u), ToFp3FromI8(v));
+}
+
+WiringEqualityConstraint3 WiringEquality3FromInt64(const std::vector<int64_t>& u,
+                                                   const std::vector<int64_t>& v)
+{
+    return WiringEquality3FromFp3(ToFp3FromI64(u), ToFp3FromI64(v));
+}
+
+WiringVerifyResult VerifyWiringEquality(const WiringEqualityConstraint3& c,
+                                        const std::vector<Fp3>& rho)
+{
+    if (c.len_u != c.len_v) return Fail("wiring equality: logical length mismatch (structural)");
+    if (rho.size() != c.ell) return Fail("wiring equality: rho arity != ell");
+    const size_t padded = size_t{1} << c.ell;
+    if (c.u.size() != padded || c.v.size() != padded) {
+        return Fail("wiring equality: column not padded to 2^ell");
+    }
+    // d̃(ρ) = ũ(ρ) − ṽ(ρ); accept iff 0. SEPARATION (S2 over Fp3):
+    // ℓ/|Fp3| — ℓ = 28 ⇒ 2^-187.19 pre-grinding, 2^-147.19 after 2^40.
+    const Fp3 eu = RCGkrMleEval1D3(c.u, rho);
+    const Fp3 ev = RCGkrMleEval1D3(c.v, rho);
+    if (!Eq(eu, ev)) return Fail("wiring equality: d~(rho) != 0 (u~ != u'~ at rho)");
+    return Ok();
+}
+
+WiringVerifyResult VerifyWiringEquality(const WiringEqualityConstraint3& c, const uint256& fs_seed,
+                                        uint32_t claim_index)
+{
+    return VerifyWiringEquality(c,
+                                WiringChallengePoint3(fs_seed, "wire_eq_rho", claim_index, c.ell));
+}
+
+WiringPermutationConstraint3 BuildWiringPermutation3(std::vector<Fp3> u, std::vector<Fp3> v,
+                                                     std::vector<uint64_t> pi, const Fp3& beta,
+                                                     const Fp3& gamma)
+{
+    WiringPermutationConstraint3 c;
+    c.n = u.size();
+    c.beta = beta;
+    c.gamma = gamma;
+    if (v.size() != c.n || pi.size() != c.n) {
+        c.u = std::move(u);
+        c.v = std::move(v);
+        c.pi = std::move(pi);
+        c.build_ok = false;
+        c.build_note = "wiring permutation build: size mismatch";
+        return c;
+    }
+    std::string why;
+    if (!IsBijection(pi, c.n, &why)) {
+        c.u = std::move(u);
+        c.v = std::move(v);
+        c.pi = std::move(pi);
+        c.build_ok = false;
+        c.build_note = "wiring permutation build: " + why;
+        return c;
+    }
+    c.u = std::move(u);
+    c.v = std::move(v);
+    c.pi = std::move(pi);
+    // z_0 = 1; z_{i+1} = z_i · (u_i + β·i + γ) / (v_i + β·π(i) + γ);
+    // FAIL-CLOSED on any zero factor (resample β/γ) — see the Fp2 body.
+    c.z.assign(c.n + 1, Fp3::Zero());
+    c.z[0] = Fp3::One();
+    for (uint64_t i = 0; i < c.n; ++i) {
+        const Fp3 num = Add(c.u[i], Add(Mul(c.beta, IndexTag3(i)), c.gamma));
+        const Fp3 den = Add(c.v[i], Add(Mul(c.beta, IndexTag3(c.pi[i])), c.gamma));
+        if (IsZero(num) || IsZero(den)) {
+            c.build_ok = false;
+            c.build_note = "wiring permutation build: zero factor at row " + std::to_string(i) +
+                           " (resample beta/gamma)";
+            return c;
+        }
+        c.z[i + 1] = Mul(c.z[i], Mul(num, Inv(den)));
+    }
+    c.build_ok = true;
+    c.build_note = "ok";
+    return c;
+}
+
+WiringVerifyResult VerifyWiringPermutation(const WiringPermutationConstraint3& c)
+{
+    if (!c.build_ok) return Fail("wiring permutation: build failed: " + c.build_note);
+    if (c.u.size() != c.n || c.v.size() != c.n) return Fail("wiring permutation: size mismatch");
+    std::string why;
+    if (!IsBijection(c.pi, c.n, &why)) return Fail("wiring permutation: " + why);
+    if (c.z.size() != c.n + 1) return Fail("wiring permutation: z size != n+1");
+    if (!Eq(c.z[0], Fp3::One())) return Fail("wiring permutation: z_0 != 1");
+    for (uint64_t i = 0; i < c.n; ++i) {
+        const Fp3 num = Add(c.u[i], Add(Mul(c.beta, IndexTag3(i)), c.gamma));
+        const Fp3 den = Add(c.v[i], Add(Mul(c.beta, IndexTag3(c.pi[i])), c.gamma));
+        if (IsZero(num) || IsZero(den)) {
+            return Fail("wiring permutation: zero factor at row " + std::to_string(i) +
+                        " (fail-closed; resample beta/gamma)");
+        }
+        if (!Eq(Mul(c.z[i + 1], den), Mul(c.z[i], num))) {
+            return Fail("wiring permutation: step identity failed at row " + std::to_string(i));
+        }
+    }
+    // SEPARATION over Fp3: n/|Fp3| per (β, γ) pair — n = 2^28: 2^-164 pre,
+    // 2^-124 post-grind (single pair; the DUAL mandate remains structural).
+    if (!Eq(c.z[c.n], Fp3::One())) {
+        return Fail("wiring permutation: grand product != 1 (z_n != 1: u' is not pi(u))");
+    }
+    return Ok();
+}
+
+WiringPermutationDual3 BuildWiringPermutationDual3(const std::vector<Fp3>& u,
+                                                   const std::vector<Fp3>& v,
+                                                   const std::vector<uint64_t>& pi,
+                                                   const uint256& fs_seed, uint32_t pair_index)
+{
+    WiringPermutationDual3 d;
+    const Fp3 b1 = WiringChallengeFp3(fs_seed, "wire_perm_beta", pair_index, 0);
+    const Fp3 g1 = WiringChallengeFp3(fs_seed, "wire_perm_gamma", pair_index, 0);
+    const Fp3 b2 = WiringChallengeFp3(fs_seed, "wire_perm_beta", pair_index, 1);
+    const Fp3 g2 = WiringChallengeFp3(fs_seed, "wire_perm_gamma", pair_index, 1);
+    d.inst1 = BuildWiringPermutation3(u, v, pi, b1, g1);
+    d.inst2 = BuildWiringPermutation3(u, v, pi, b2, g2);
+    return d;
+}
+
+WiringVerifyResult VerifyWiringPermutationDual(const WiringPermutationDual3& d)
+{
+    // (n/|Fp3|)²: n = 2^28 ⇒ 2^-328 pre-grinding, 2^-288 after the single FS
+    // round's 2^40 budget (the Fp3 lift of the §5.6 dual-α argument).
+    const WiringVerifyResult r1 = VerifyWiringPermutation(d.inst1);
+    if (!r1.ok) return Fail("dual instance 1: " + r1.reason);
+    const WiringVerifyResult r2 = VerifyWiringPermutation(d.inst2);
+    if (!r2.ok) return Fail("dual instance 2: " + r2.reason);
+    if (d.inst1.n != d.inst2.n) {
+        return Fail("dual instances disagree on n");
+    }
+    for (uint64_t i = 0; i < d.inst1.n; ++i) {
+        if (!Eq(d.inst1.u[i], d.inst2.u[i]) || !Eq(d.inst1.v[i], d.inst2.v[i]) ||
+            d.inst1.pi[i] != d.inst2.pi[i]) {
+            return Fail("dual instances bound to different columns/pi");
+        }
+    }
+    return Ok();
+}
+
 } // namespace matmul::v4::rc

@@ -17,7 +17,6 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
-#include <unordered_map>
 
 // ENC_RC Extract AIR — implementation. See header for the high-level map and
 // the blueprint references (§5, Thm 5.2). The int64 reference in
@@ -432,17 +431,28 @@ MixBitsWitness MixBitsInCircuit(int64_t y)
 }
 
 // ---------- LogUp tuple fingerprints ----------
-// Compress a tuple of small integer coordinates into Fp2 via gamma-powers.
-Fp2 Fingerprint(std::initializer_list<uint64_t> coords, Fp2 gamma)
+// Compress a tuple of small integer coordinates into the challenge field via
+// gamma-powers. Templated so the SAME fingerprinting runs over Fp2 (legacy
+// v6/coupled paths) and Fp3 (v7 episode path) — the fields never mix.
+template <typename F>
+F Fingerprint(std::initializer_list<uint64_t> coords, F gamma)
 {
-    Fp2 acc = Fp2::Zero();
-    Fp2 gpow = Fp2::One();
+    F acc = F::Zero();
+    F gpow = F::One();
     for (uint64_t c : coords) {
-        acc = gkr_field::Add(acc, gkr_field::Mul(gpow, Fp2::FromFp(gkr_field::FromU64(c))));
+        acc = gkr_field::Add(acc, gkr_field::Mul(gpow, F::FromFp(gkr_field::FromU64(c))));
         gpow = gkr_field::Mul(gpow, gamma);
     }
     return acc;
 }
+
+/** log2 |F| of the LogUp challenge field (Goldilocks p ≈ 2^64). */
+template <typename F>
+constexpr double LogUpFieldBits();
+template <>
+constexpr double LogUpFieldBits<Fp2>() { return 128.0; }
+template <>
+constexpr double LogUpFieldBits<Fp3>() { return 192.0; }
 
 } // namespace
 
@@ -503,11 +513,12 @@ namespace {
 // MUST reject rather than compute through gkr_field::Inv(0)==0 (which silently
 // drops the term and could mask a false membership). Returns false iff any
 // denominator is zero; `out` holds the sum on success.
-[[nodiscard]] bool FracSum(const std::vector<Fp2>& fps, Fp2 alpha, Fp2& out)
+template <typename F>
+[[nodiscard]] bool FracSum(const std::vector<F>& fps, F alpha, F& out)
 {
-    Fp2 acc = Fp2::Zero();
-    for (const Fp2& w : fps) {
-        const Fp2 denom = gkr_field::Sub(alpha, w);
+    F acc = F::Zero();
+    for (const F& w : fps) {
+        const F denom = gkr_field::Sub(alpha, w);
         if (gkr_field::IsZero(denom)) return false; // alpha collides with a key
         acc = gkr_field::Add(acc, gkr_field::Inv(denom));
     }
@@ -517,23 +528,25 @@ namespace {
 
 // Sum over table of m_j/(alpha - t_j). FAIL-CLOSED on a zero denominator for
 // the same reason as FracSum.
-[[nodiscard]] bool FracSumMult(const std::vector<Fp2>& fps, const std::vector<uint64_t>& mult,
-                               Fp2 alpha, Fp2& out)
+template <typename F>
+[[nodiscard]] bool FracSumMult(const std::vector<F>& fps, const std::vector<uint64_t>& mult,
+                               F alpha, F& out)
 {
-    Fp2 acc = Fp2::Zero();
+    F acc = F::Zero();
     for (size_t j = 0; j < fps.size(); ++j) {
-        const Fp2 denom = gkr_field::Sub(alpha, fps[j]);
+        const F denom = gkr_field::Sub(alpha, fps[j]);
         if (gkr_field::IsZero(denom)) return false; // alpha collides with a table key
-        const Fp2 num = Fp2::FromFp(gkr_field::FromU64(mult[j]));
+        const F num = F::FromFp(gkr_field::FromU64(mult[j]));
         acc = gkr_field::Add(acc, gkr_field::Div(num, denom));
     }
     out = acc;
     return true;
 }
 
-bool InstanceHoldsAt(const LogUpInstance& in, Fp2 alpha, std::string& why)
+template <typename F>
+bool InstanceHoldsAt(const LogUpInstanceT<F>& in, F alpha, std::string& why)
 {
-    Fp2 lhs, rhs;
+    F lhs, rhs;
     if (!FracSum(in.witness, alpha, lhs)) {
         why = in.name + ":alpha_collides_witness_key";
         return false;
@@ -546,10 +559,9 @@ bool InstanceHoldsAt(const LogUpInstance& in, Fp2 alpha, std::string& why)
     return true;
 }
 
-} // namespace
-
-LogUpVerifyResult LogUpDualAlphaVerify(const std::vector<LogUpInstance>& instances,
-                                       Fp2 alpha1, Fp2 alpha2)
+template <typename F>
+LogUpVerifyResult LogUpDualAlphaVerifyT(const std::vector<LogUpInstanceT<F>>& instances,
+                                        F alpha1, F alpha2)
 {
     LogUpVerifyResult r;
     uint64_t nw = 0, nt = 0;
@@ -574,13 +586,29 @@ LogUpVerifyResult LogUpDualAlphaVerify(const std::vector<LogUpInstance>& instanc
     r.ok = r.sum_ok_a1 && r.sum_ok_a2;
     if (!r.ok) r.failure = r.sum_ok_a1 ? why2 : why1;
 
-    // Thm 5.2 alpha-collision soundness over Fp2^2: acceptance of a FALSE
-    // membership <= ((N_w+N_t)/|Fp2|)^2. Bits = 2*(128 - log2(N_w+N_t)),
-    // post-grind subtracts g=40.
+    // Thm 5.2 alpha-collision soundness over |F|^2: acceptance of a FALSE
+    // membership <= ((N_w+N_t)/|F|)^2. Bits = 2*(log2|F| - log2(N_w+N_t)),
+    // post-grind subtracts g=40. log2|F| = 128 (Fp2) / 192 (Fp3 — the v7
+    // episode substrate).
+    const double fbits = LogUpFieldBits<F>();
     const double n = static_cast<double>(nw + nt);
-    const double pre = (n > 0) ? 2.0 * (128.0 - std::log2(n)) : 256.0;
+    const double pre = (n > 0) ? 2.0 * (fbits - std::log2(n)) : 2.0 * fbits;
     r.achieved_bits = pre - 40.0;
     return r;
+}
+
+} // namespace
+
+LogUpVerifyResult LogUpDualAlphaVerify(const std::vector<LogUpInstance>& instances,
+                                       Fp2 alpha1, Fp2 alpha2)
+{
+    return LogUpDualAlphaVerifyT<Fp2>(instances, alpha1, alpha2);
+}
+
+LogUpVerifyResult LogUpDualAlphaVerify(const std::vector<LogUpInstance3>& instances,
+                                       Fp3 alpha1, Fp3 alpha2)
+{
+    return LogUpDualAlphaVerifyT<Fp3>(instances, alpha1, alpha2);
 }
 
 // ===========================================================================
@@ -869,66 +897,59 @@ namespace {
 // and are the SINGLE source of the fingerprints for both the emitting side
 // (AppendTileLookups) and the regenerating verifier
 // (BuildPreprocessedLogUpTables), so the two agree bit-for-bit.
-void PopulateCanonicalTM(LogUpInstance& inst, const TableTM& tm, Fp2 gamma)
+template <typename F>
+void PopulateCanonicalTM(LogUpInstanceT<F>& inst, const TableTM& tm, F gamma)
 {
     inst.name = "T_M";
     if (!inst.table.empty()) return;
     for (uint16_t n = 0; n < 16; ++n)
-        inst.table.push_back(Fingerprint({n, tm.acc[n],
+        inst.table.push_back(Fingerprint<F>({n, tm.acc[n],
             static_cast<uint64_t>(static_cast<uint8_t>(tm.mu[n]))}, gamma));
 }
 
-void PopulateCanonicalTX(LogUpInstance& inst, const TableTX& tx, Fp2 gamma)
+template <typename F>
+void PopulateCanonicalTX(LogUpInstanceT<F>& inst, const TableTX& tx, F gamma)
 {
     inst.name = "T_X";
     if (!inst.table.empty()) return;
     for (int a = 0; a < 16; ++a)
         for (int b = 0; b < 16; ++b)
-            inst.table.push_back(Fingerprint(
+            inst.table.push_back(Fingerprint<F>(
                 {static_cast<uint64_t>(a), static_cast<uint64_t>(b),
                  tx.axorb[a * 16 + b]}, gamma));
 }
 
-void PopulateCanonicalR16(LogUpInstance& inst, Fp2 gamma)
+template <typename F>
+void PopulateCanonicalR16(LogUpInstanceT<F>& inst, F gamma)
 {
     inst.name = "T_R16";
     if (!inst.table.empty()) return;
     for (uint32_t v = 0; v < (1u << 16); ++v)
-        inst.table.push_back(Fingerprint({v}, gamma));
+        inst.table.push_back(Fingerprint<F>({v}, gamma));
 }
 
-void AppendTileLookupsTmTxRows(const TileWitness& w, const TableTM& tm, const TableTX& tx,
-                               Fp2 gamma, LogUpInstance& inst_tm, LogUpInstance& inst_tx)
+template <typename F>
+void AppendTileLookupsT(const TileWitness& w, const TableTM& tm, const TableTX& tx,
+                        F gamma,
+                        LogUpInstanceT<F>& inst_tm, LogUpInstanceT<F>& inst_tx,
+                        LogUpInstanceT<F>& inst_r16)
 {
     // Reference-vector sides: canonical, idempotent (see Construction III).
     PopulateCanonicalTM(inst_tm, tm, gamma);
     PopulateCanonicalTX(inst_tx, tx, gamma);
-
-    for (const auto& c : w.cands) {
-        // T_M lookup: (mixed, acc, mu).
-        inst_tm.witness.push_back(Fingerprint(
-            {c.mixed, c.acc, static_cast<uint64_t>(static_cast<uint8_t>(c.mu))}, gamma));
-        // T_X lookup for mixed = kappa ^ h.
-        inst_tx.witness.push_back(Fingerprint({c.kappa, c.h, c.mixed}, gamma));
-    }
-}
-
-} // namespace
-
-void AppendTileLookups(const TileWitness& w, const TableTM& tm, const TableTX& tx,
-                       Fp2 gamma,
-                       LogUpInstance& inst_tm, LogUpInstance& inst_tx,
-                       LogUpInstance& inst_r16)
-{
-    AppendTileLookupsTmTxRows(w, tm, tx, gamma, inst_tm, inst_tx);
     PopulateCanonicalR16(inst_r16, gamma);
 
     auto emit_r16 = [&](uint32_t v32) {
-        inst_r16.witness.push_back(Fingerprint({v32 & 0xFFFF}, gamma));
-        inst_r16.witness.push_back(Fingerprint({(v32 >> 16) & 0xFFFF}, gamma));
+        inst_r16.witness.push_back(Fingerprint<F>({v32 & 0xFFFF}, gamma));
+        inst_r16.witness.push_back(Fingerprint<F>({(v32 >> 16) & 0xFFFF}, gamma));
     };
 
     for (const auto& c : w.cands) {
+        // T_M lookup: (mixed, acc, mu).
+        inst_tm.witness.push_back(Fingerprint<F>(
+            {c.mixed, c.acc, static_cast<uint64_t>(static_cast<uint8_t>(c.mu))}, gamma));
+        // T_X lookup for mixed = kappa ^ h.
+        inst_tx.witness.push_back(Fingerprint<F>({c.kappa, c.h, c.mixed}, gamma));
         // T_R16 range lookups for the MixBits 32-bit limbs.
         emit_r16(c.y_lo);
         emit_r16(c.y_hi);
@@ -940,44 +961,33 @@ void AppendTileLookups(const TileWitness& w, const TableTM& tm, const TableTX& t
     }
 }
 
-void AppendTileLookupsTmTxOnly(const TileWitness& w, const TableTM& tm, const TableTX& tx,
-                               Fp2 gamma, LogUpInstance& inst_tm, LogUpInstance& inst_tx)
+} // namespace
+
+void AppendTileLookups(const TileWitness& w, const TableTM& tm, const TableTX& tx,
+                       Fp2 gamma,
+                       LogUpInstance& inst_tm, LogUpInstance& inst_tx,
+                       LogUpInstance& inst_r16)
 {
-    AppendTileLookupsTmTxRows(w, tm, tx, gamma, inst_tm, inst_tx);
+    AppendTileLookupsT<Fp2>(w, tm, tx, gamma, inst_tm, inst_tx, inst_r16);
+}
+
+void AppendTileLookups(const TileWitness& w, const TableTM& tm, const TableTX& tx,
+                       Fp3 gamma,
+                       LogUpInstance3& inst_tm, LogUpInstance3& inst_tx,
+                       LogUpInstance3& inst_r16)
+{
+    AppendTileLookupsT<Fp3>(w, tm, tx, gamma, inst_tm, inst_tx, inst_r16);
 }
 
 void FinalizeTableMultiplicities(LogUpInstance& inst_tm, LogUpInstance& inst_tx,
                                  LogUpInstance& inst_r16)
 {
     // Multiplicity m_j = number of witness rows equal to table row j.
-    // This must be linear-ish in the witness size: coupled all-tile Extract
-    // coverage emits thousands of rows even for toy shapes, and production
-    // shapes are orders larger. The old nested witness×table scan was fine for
-    // single-tile unit tests but becomes the verifier bottleneck as soon as the
-    // 16-tile cap is removed.
     auto build_mult = [](LogUpInstance& in) {
         in.table_mult.assign(in.table.size(), 0);
-        struct PairHash {
-            size_t operator()(const std::array<uint64_t, 2>& x) const
-            {
-                uint64_t h = x[0] ^ (x[1] + 0x9e3779b97f4a7c15ull + (x[0] << 6) + (x[0] >> 2));
-                h ^= h >> 33;
-                h *= 0xff51afd7ed558ccdULL;
-                h ^= h >> 33;
-                h *= 0xc4ceb9fe1a85ec53ULL;
-                h ^= h >> 33;
-                return static_cast<size_t>(h);
-            }
-        };
-        std::unordered_map<std::array<uint64_t, 2>, size_t, PairHash> table_index;
-        table_index.reserve(in.table.size());
-        for (size_t j = 0; j < in.table.size(); ++j) {
-            table_index.emplace(gkr_field::ToU64Pair(in.table[j]), j);
-        }
         for (const Fp2& wt : in.witness) {
-            const auto it = table_index.find(gkr_field::ToU64Pair(wt));
-            if (it != table_index.end()) {
-                in.table_mult[it->second] += 1;
+            for (size_t j = 0; j < in.table.size(); ++j) {
+                if (gkr_field::Eq(wt, in.table[j])) { in.table_mult[j] += 1; break; }
             }
         }
     };
@@ -1412,24 +1422,27 @@ RCAirConstraintSet EmitTileConstraints(const TileWitness& w)
     return cs;
 }
 
-CompositionResult ComposeConstraints(const RCAirConstraintSet& cs, Fp2 eta)
+namespace {
+
+template <typename F>
+CompositionResult ComposeConstraintsT(const RCAirConstraintSet& cs, F eta)
 {
     CompositionResult res;
     res.n_rows = cs.n_rows;
     res.n_slots = cs.n_slots;
     res.n_constraints = cs.entries.size();
 
-    std::vector<Fp2> pow(cs.n_slots == 0 ? 1 : cs.n_slots);
-    pow[0] = Fp2::One();
+    std::vector<F> pow(cs.n_slots == 0 ? 1 : cs.n_slots);
+    pow[0] = F::One();
     for (size_t i = 1; i < pow.size(); ++i) pow[i] = gkr_field::Mul(pow[i - 1], eta);
 
     // Comp(x) = sum_slot eta^slot * C_slot(x), accumulated per row; the check
     // is that Comp vanishes on the ENTIRE domain (all rows).
-    std::vector<Fp2> comp(res.n_rows, Fp2::Zero());
+    std::vector<F> comp(res.n_rows, F::Zero());
     for (const auto& en : cs.entries) {
         if (gkr_field::Canonical(en.value) == 0) continue;
         comp[en.row] = gkr_field::Add(comp[en.row],
-                                      gkr_field::Mul(pow[en.slot], Fp2::FromFp(en.value)));
+                                      gkr_field::Mul(pow[en.slot], F::FromFp(en.value)));
     }
     res.ok = true;
     for (uint64_t x = 0; x < res.n_rows; ++x) {
@@ -1445,10 +1458,24 @@ CompositionResult ComposeConstraints(const RCAirConstraintSet& cs, Fp2 eta)
             break;
         }
     }
-    const double log2p2 = 2.0 * std::log2(static_cast<double>(gkr_field::kP));
+    // log2|F| − log2(n_slots−1) − g: 128-scale over Fp2, 192-scale over Fp3.
+    const double log2f = (LogUpFieldBits<F>() / 128.0) * 2.0 *
+                         std::log2(static_cast<double>(gkr_field::kP));
     const double k = std::max<double>(1.0, static_cast<double>(res.n_slots) - 1.0);
-    res.soundness_bits = log2p2 - std::log2(k) - 40.0;
+    res.soundness_bits = log2f - std::log2(k) - 40.0;
     return res;
+}
+
+} // namespace
+
+CompositionResult ComposeConstraints(const RCAirConstraintSet& cs, Fp2 eta)
+{
+    return ComposeConstraintsT<Fp2>(cs, eta);
+}
+
+CompositionResult ComposeConstraints(const RCAirConstraintSet& cs, Fp3 eta)
+{
+    return ComposeConstraintsT<Fp3>(cs, eta);
 }
 
 SeparationBound ComputeSeparationBound(uint32_t n_slots, uint64_t n_logup_rows)
@@ -1483,16 +1510,30 @@ RCAirPreprocessedTables BuildPreprocessedLogUpTables(Fp2 gamma)
     return p;
 }
 
-LookupBindResult VerifyLookupAgainstPreprocessed(const std::vector<LogUpInstance>& instances,
-                                                 Fp2 gamma, Fp2 alpha1, Fp2 alpha2)
+RCAirPreprocessedTables3 BuildPreprocessedLogUpTables3(Fp3 gamma)
+{
+    RCAirPreprocessedTables3 p;
+    const TableTM tm;
+    const TableTX tx;
+    PopulateCanonicalTM(p.tm, tm, gamma);
+    PopulateCanonicalTX(p.tx, tx, gamma);
+    PopulateCanonicalR16(p.r16, gamma);
+    return p;
+}
+
+namespace {
+
+template <typename F>
+LookupBindResult VerifyLookupAgainstPreprocessedT(
+    const std::vector<LogUpInstanceT<F>>& instances, const LogUpInstanceT<F>& canon_tm,
+    const LogUpInstanceT<F>& canon_tx, const LogUpInstanceT<F>& canon_r16, F alpha1, F alpha2)
 {
     LookupBindResult out;
-    const RCAirPreprocessedTables canon = BuildPreprocessedLogUpTables(gamma);
     for (const auto& in : instances) {
-        const LogUpInstance* c = nullptr;
-        if (in.name == "T_M") c = &canon.tm;
-        else if (in.name == "T_X") c = &canon.tx;
-        else if (in.name == "T_R16") c = &canon.r16;
+        const LogUpInstanceT<F>* c = nullptr;
+        if (in.name == "T_M") c = &canon_tm;
+        else if (in.name == "T_X") c = &canon_tx;
+        else if (in.name == "T_R16") c = &canon_r16;
         if (c == nullptr) {
             out.failure = in.name + ":unknown_table";
             return out;
@@ -1535,13 +1576,31 @@ LookupBindResult VerifyLookupAgainstPreprocessed(const std::vector<LogUpInstance
     }
     // (iii) Dual-alpha log-derivative identity; FAIL-CLOSED on any pole
     // (alpha colliding with a key) via FracSum/FracSumMult.
-    out.logup = LogUpDualAlphaVerify(instances, alpha1, alpha2);
+    out.logup = LogUpDualAlphaVerifyT<F>(instances, alpha1, alpha2);
     if (!out.logup.ok) {
         out.failure = out.logup.failure;
         return out;
     }
     out.ok = true;
     return out;
+}
+
+} // namespace
+
+LookupBindResult VerifyLookupAgainstPreprocessed(const std::vector<LogUpInstance>& instances,
+                                                 Fp2 gamma, Fp2 alpha1, Fp2 alpha2)
+{
+    const RCAirPreprocessedTables canon = BuildPreprocessedLogUpTables(gamma);
+    return VerifyLookupAgainstPreprocessedT<Fp2>(instances, canon.tm, canon.tx, canon.r16,
+                                                 alpha1, alpha2);
+}
+
+LookupBindResult VerifyLookupAgainstPreprocessed(const std::vector<LogUpInstance3>& instances,
+                                                 Fp3 gamma, Fp3 alpha1, Fp3 alpha2)
+{
+    const RCAirPreprocessedTables3 canon = BuildPreprocessedLogUpTables3(gamma);
+    return VerifyLookupAgainstPreprocessedT<Fp3>(instances, canon.tm, canon.tx, canon.r16,
+                                                 alpha1, alpha2);
 }
 
 // ===========================================================================
@@ -1683,12 +1742,46 @@ std::array<uint8_t, 41> XofMessage(const std::array<uint8_t, 32>& seed_bytes, ui
 } // namespace
 
 // ===========================================================================
+// Generic direct SHA256d AIR closure.
+// ===========================================================================
+
+Sha256dCheckResult CheckSha256dInCircuit(const std::vector<uint8_t>& preimage,
+                                         const uint256& claimed_digest)
+{
+    Sha256dCheckResult r;
+    std::vector<ShaCompressTrace> traces;
+    const auto digest_bytes = Sha256dInCircuit(preimage.data(), preimage.size(), traces);
+    r.digest = ToUint256(digest_bytes);
+
+    std::string fail;
+    for (const auto& ct : traces) {
+        ++r.n_compressions;
+        if (!CheckShaCompress(ct, fail)) {
+            r.failure = "sha256d:" + fail;
+            return r;
+        }
+    }
+
+    if (r.digest != claimed_digest) {
+        r.failure = "sha256d:digest_mismatch";
+        return r;
+    }
+
+    r.ok = true;
+    return r;
+}
+
+// ===========================================================================
 // MxExpand operand-expansion AIR (§5.7).
 // ===========================================================================
 
-MxExpandVerifyResult VerifyMxExpandColumn(const uint256& seed, uint32_t rows, uint32_t cols,
-                                          const std::vector<int8_t>& committed_out,
-                                          const TableTM& tm, Fp2 gamma, LogUpInstance& inst_tm)
+namespace {
+
+template <typename F>
+MxExpandVerifyResult VerifyMxExpandColumnT(const uint256& seed, uint32_t rows, uint32_t cols,
+                                           const std::vector<int8_t>& committed_out,
+                                           const TableTM& tm, F gamma,
+                                           LogUpInstanceT<F>& inst_tm)
 {
     MxExpandVerifyResult r;
     if ((rows % kRCMxBlockLen) != 0 || (cols % kRCMxBlockLen) != 0 || rows == 0 || cols == 0) {
@@ -1705,7 +1798,7 @@ MxExpandVerifyResult VerifyMxExpandColumn(const uint256& seed, uint32_t rows, ui
     inst_tm.name = "T_M";
     if (inst_tm.table.empty()) {
         for (uint16_t n = 0; n < 16; ++n)
-            inst_tm.table.push_back(Fingerprint({n, tm.acc[n],
+            inst_tm.table.push_back(Fingerprint<F>({n, tm.acc[n],
                 static_cast<uint64_t>(static_cast<uint8_t>(tm.mu[n]))}, gamma));
     }
 
@@ -1732,7 +1825,7 @@ MxExpandVerifyResult VerifyMxExpandColumn(const uint256& seed, uint32_t rows, ui
                 const uint8_t acc = tm.acc[nib];
                 const int8_t mu = tm.mu[nib];
                 // (nib,acc,mu) T_M lookup — same aggregate as Extract's inst_tm.
-                inst_tm.witness.push_back(Fingerprint(
+                inst_tm.witness.push_back(Fingerprint<F>(
                     {nib, acc, static_cast<uint64_t>(static_cast<uint8_t>(mu))}, gamma));
                 if (acc) {
                     mu_stream.push_back(mu);
@@ -1786,6 +1879,22 @@ MxExpandVerifyResult VerifyMxExpandColumn(const uint256& seed, uint32_t rows, ui
     return r;
 }
 
+} // namespace
+
+MxExpandVerifyResult VerifyMxExpandColumn(const uint256& seed, uint32_t rows, uint32_t cols,
+                                          const std::vector<int8_t>& committed_out,
+                                          const TableTM& tm, Fp2 gamma, LogUpInstance& inst_tm)
+{
+    return VerifyMxExpandColumnT<Fp2>(seed, rows, cols, committed_out, tm, gamma, inst_tm);
+}
+
+MxExpandVerifyResult VerifyMxExpandColumn(const uint256& seed, uint32_t rows, uint32_t cols,
+                                          const std::vector<int8_t>& committed_out,
+                                          const TableTM& tm, Fp3 gamma, LogUpInstance3& inst_tm)
+{
+    return VerifyMxExpandColumnT<Fp3>(seed, rows, cols, committed_out, tm, gamma, inst_tm);
+}
+
 bool MxExpandByteExactVsReference(const uint256& seed, uint32_t rows, uint32_t cols)
 {
     const std::vector<int8_t> ref = ExpandMxDequantInt8(seed, rows, cols);
@@ -1816,29 +1925,6 @@ bool MxExpandIntermediateTamperRejected()
 // Tile-tree AIR (§6.3): in-circuit SHA256d Merkle tile-tree over the committed
 // extract byte-stream. Byte-exact to RoundMerkleStream / BuildTileTreeRoot.
 // ===========================================================================
-
-Sha256dCheckResult CheckSha256dInCircuit(const std::vector<uint8_t>& preimage,
-                                         const uint256& claimed_digest)
-{
-    Sha256dCheckResult r;
-    std::vector<ShaCompressTrace> traces;
-    const uint256 digest = ToUint256(Sha256dInCircuit(preimage.data(), preimage.size(), traces));
-    std::string fail;
-    for (const auto& ct : traces) {
-        ++r.n_compressions;
-        if (!CheckShaCompress(ct, fail)) {
-            r.failure = "sha256d:" + fail;
-            return r;
-        }
-    }
-    r.digest = digest;
-    if (r.digest != claimed_digest) {
-        r.failure = "sha256d:digest_mismatch";
-        return r;
-    }
-    r.ok = true;
-    return r;
-}
 
 namespace {
 

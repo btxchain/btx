@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_gkr_field.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
+#include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <uint256.h>
 
 #include <array>
@@ -43,6 +44,7 @@ namespace matmul::v4::rc::gkr_air {
 
 using gkr_field::Fp;
 using gkr_field::Fp2;
+using gkr_field::Fp3;
 
 // ---------------------------------------------------------------------------
 // 0. Abstract trace-column interface (documented column indices).
@@ -156,13 +158,20 @@ struct LogUpTuple {
     Fp2 fp;       // FS-compressed field fingerprint of the tuple coordinates
 };
 
-/** A LogUp instance: witness multiset (mult 1 each) + table multiset (m_j). */
-struct LogUpInstance {
+/** A LogUp instance: witness multiset (mult 1 each) + table multiset (m_j).
+ *  Parameterized on the challenge field so the v7 episode path can run the
+ *  SAME aggregate over Fp3 (|F| ≈ 2^192) while the legacy v6/coupled paths
+ *  stay on Fp2 — the two fields never mix (GF(p^2) ⊄ GF(p^3)). */
+template <typename F>
+struct LogUpInstanceT {
     std::string name;
-    std::vector<Fp2> witness;         // one fingerprint per witness row
-    std::vector<Fp2> table;           // one fingerprint per table row
+    std::vector<F> witness;           // one fingerprint per witness row
+    std::vector<F> table;             // one fingerprint per table row
     std::vector<uint64_t> table_mult; // committed multiplicity m_j per table row
 };
+using LogUpInstance = LogUpInstanceT<Fp2>;
+/** Fp3 sibling (v7 episode path; dual-α bits ≈ 2·(192−log2 N)−40). */
+using LogUpInstance3 = LogUpInstanceT<Fp3>;
 
 /** Result of a dual-alpha aggregate verification. */
 struct LogUpVerifyResult {
@@ -184,6 +193,11 @@ struct LogUpVerifyResult {
  */
 [[nodiscard]] LogUpVerifyResult LogUpDualAlphaVerify(
     const std::vector<LogUpInstance>& instances, Fp2 alpha1, Fp2 alpha2);
+
+/** Fp3 sibling (v7 episode path): identical aggregate over |F| ≈ 2^192;
+ *  achieved_bits reports 2·(192 − log2(N_w+N_t)) − 40. */
+[[nodiscard]] LogUpVerifyResult LogUpDualAlphaVerify(
+    const std::vector<LogUpInstance3>& instances, Fp3 alpha1, Fp3 alpha2);
 
 // ---------------------------------------------------------------------------
 // 2b. Committed AIR trace cells (Construction II).
@@ -320,14 +334,11 @@ void AppendTileLookups(const TileWitness& w, const TableTM& tm, const TableTX& t
                        LogUpInstance& inst_tm, LogUpInstance& inst_tx,
                        LogUpInstance& inst_r16);
 
-/**
- * Verifier happy-path lookup feed when T_R16 is enforced structurally by the
- * sampler AIR rather than by the dual-alpha LogUp aggregate. This deliberately
- * does not populate the 2^16-row T_R16 table or its witnesses.
- */
-void AppendTileLookupsTmTxOnly(const TileWitness& w, const TableTM& tm, const TableTX& tx,
-                               Fp2 gamma,
-                               LogUpInstance& inst_tm, LogUpInstance& inst_tx);
+/** Fp3 sibling (v7 episode path). */
+void AppendTileLookups(const TileWitness& w, const TableTM& tm, const TableTX& tx,
+                       Fp3 gamma,
+                       LogUpInstance3& inst_tm, LogUpInstance3& inst_tx,
+                       LogUpInstance3& inst_r16);
 
 /** Finalize table multiplicities for the three shared instances. */
 void FinalizeTableMultiplicities(LogUpInstance& inst_tm, LogUpInstance& inst_tx,
@@ -399,6 +410,13 @@ struct MxExpandVerifyResult {
                                                         const TableTM& tm, Fp2 gamma,
                                                         LogUpInstance& inst_tm);
 
+/** Fp3 sibling (v7 episode path). */
+[[nodiscard]] MxExpandVerifyResult VerifyMxExpandColumn(const uint256& seed, uint32_t rows,
+                                                        uint32_t cols,
+                                                        const std::vector<int8_t>& committed_out,
+                                                        const TableTM& tm, Fp3 gamma,
+                                                        LogUpInstance3& inst_tm);
+
 /** Run VerifyMxExpandColumn then compare to ExpandMxDequantInt8 (the reference). */
 [[nodiscard]] bool MxExpandByteExactVsReference(const uint256& seed, uint32_t rows, uint32_t cols);
 
@@ -430,18 +448,19 @@ struct TileTreeCheckResult {
 struct Sha256dCheckResult {
     bool ok{false};
     std::string failure;
-    uint256 digest;
-    uint64_t n_compressions{0};
+    uint256 digest;              // recomputed SHA256d(preimage)
+    uint64_t n_compressions{0};  // SHA-256 compressions checked
 };
 
 /**
- * Recompute SHA256d(preimage) with in-circuit, constraint-checked SHA-256
- * compressions and assert it equals claimed_digest. This is the generic hash
- * closure primitive for coupled barrier roots and digest-from-roots relations
- * whose consensus format is a direct SHA256d preimage, not a tile tree.
+ * Recompute direct SHA256d(preimage) with in-circuit, constraint-checked
+ * SHA-256 compressions and assert it equals `claimed_digest`. This is the
+ * generic hash-closure primitive for coupled barrier roots and
+ * digest-from-roots relations whose consensus format is a direct SHA256d
+ * preimage, not a RoundMerkleStream tile tree.
  */
-[[nodiscard]] Sha256dCheckResult CheckSha256dInCircuit(const std::vector<uint8_t>& preimage,
-                                                       const uint256& claimed_digest);
+[[nodiscard]] Sha256dCheckResult CheckSha256dInCircuit(
+    const std::vector<uint8_t>& preimage, const uint256& claimed_digest);
 
 /**
  * Recompute the RoundMerkleStream root of `stream` (leaf size `t_leaf`) with
@@ -560,6 +579,10 @@ struct CompositionResult {
  */
 [[nodiscard]] CompositionResult ComposeConstraints(const RCAirConstraintSet& cs, Fp2 eta);
 
+/** Fp3 sibling (v7 episode path): soundness_bits = 3·log2(p) − log2(n_slots−1)
+ *  − 40 ≈ 144 at the 2^8 slot budget. */
+[[nodiscard]] CompositionResult ComposeConstraints(const RCAirConstraintSet& cs, Fp3 eta);
+
 /** Composed Construction-II + Construction-III separation bound (bits). */
 struct SeparationBound {
     double composition_bits{0.0};  // 2*log2(p) - log2(n_slots-1) - 40
@@ -603,11 +626,21 @@ struct RCAirPreprocessedTables {
     LogUpInstance r16;  // T_R16: 65536 rows (v)
 };
 
+/** Fp3 sibling of the fixed reference vectors (v7 episode path). */
+struct RCAirPreprocessedTables3 {
+    LogUpInstance3 tm;
+    LogUpInstance3 tx;
+    LogUpInstance3 r16;
+};
+
 /**
  * Regenerate the canonical reference vectors from consensus constants only.
  * Deterministic in gamma; contains no witness rows and no multiplicities.
  */
 [[nodiscard]] RCAirPreprocessedTables BuildPreprocessedLogUpTables(Fp2 gamma);
+
+/** Fp3 sibling (v7 episode path). */
+[[nodiscard]] RCAirPreprocessedTables3 BuildPreprocessedLogUpTables3(Fp3 gamma);
 
 /** Result of the Construction-III membership verification. */
 struct LookupBindResult {
@@ -625,6 +658,10 @@ struct LookupBindResult {
  */
 [[nodiscard]] LookupBindResult VerifyLookupAgainstPreprocessed(
     const std::vector<LogUpInstance>& instances, Fp2 gamma, Fp2 alpha1, Fp2 alpha2);
+
+/** Fp3 sibling (v7 episode path). */
+[[nodiscard]] LookupBindResult VerifyLookupAgainstPreprocessed(
+    const std::vector<LogUpInstance3>& instances, Fp3 gamma, Fp3 alpha1, Fp3 alpha2);
 
 } // namespace matmul::v4::rc::gkr_air
 
