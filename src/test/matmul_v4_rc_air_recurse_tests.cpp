@@ -265,10 +265,10 @@ aq::AirConstraintSystem<Fp3> ToyChildCS()
     return cs;
 }
 
-aq::AirConstraintSystem<Fp3> WideBoolChildCS(uint32_t w)
+aq::AirConstraintSystem<Fp3> WideBoolChildCS(uint32_t w, uint32_t n_rows = 2)
 {
     aq::AirConstraintSystem<Fp3> cs;
-    cs.n_rows = 2;
+    cs.n_rows = n_rows;
     cs.n_columns = w;
     for (uint32_t col = 0; col < w; ++col) {
         aq::AirConstraint<Fp3> b;
@@ -281,6 +281,17 @@ aq::AirConstraintSystem<Fp3> WideBoolChildCS(uint32_t w)
         cs.constraints.push_back(std::move(b));
     }
     return cs;
+}
+
+std::vector<std::vector<Fp3>> BoolColumns(uint32_t w, uint32_t n_rows)
+{
+    std::vector<std::vector<Fp3>> cols(w, std::vector<Fp3>(n_rows, Fp3::Zero()));
+    for (uint32_t c = 0; c < w; ++c) {
+        for (uint32_t r = 0; r < n_rows; ++r) {
+            cols[c][r] = Fp3::FromFp((r + c) & 1u);
+        }
+    }
+    return cols;
 }
 
 uint256 SeedByte(unsigned char v)
@@ -665,6 +676,182 @@ BOOST_AUTO_TEST_CASE(piece5_real_fri_roundtrip_and_current_blockers)
     BOOST_TEST_MESSAGE("child_prove_total_s=" << child_prove_s
                                               << " level1_root_verify_budget_s=" << v0_s
                                               << " target_budget_s=0.9");
+}
+
+// Stage C — single-level production-width aggregation measurement.
+// Gated because it runs the real ALG FRI over a W=26, N=2^16 child proof and
+// then proves one aggregate node at k=2 and k=4. This intentionally does NOT
+// attempt two-level recursion; the current handoff says the self-similar fixed
+// point is still open and width would explode by design.
+BOOST_AUTO_TEST_CASE(stage_c_single_level_production_width_measurement)
+{
+    const char* env = std::getenv("BTX_RC_AIR_RECURSE_SINGLE_LEVEL_MEASURE");
+    if (env == nullptr || std::string(env) != "1") {
+        BOOST_TEST_MESSAGE("stage_c_single_level_production_width_measurement skipped "
+                           "(BTX_RC_AIR_RECURSE_SINGLE_LEVEL_MEASURE!=1)");
+        return;
+    }
+
+    constexpr uint32_t kProdW = 26;             // episode shard trace width
+    constexpr uint32_t kProdRows = 1u << 16;    // production shard height
+    constexpr double kStageIBudgetS = 0.9;
+    const uint256 child_seed = SeedByte(61);
+    const uint256 agg2_seed = SeedByte(71);
+    const uint256 agg4_seed = SeedByte(81);
+    const ar::VerifierAirFamilies fam; // full mirror: row + fold + deep + per-point
+
+    const aq::AirConstraintSystem<Fp3> child_cs = WideBoolChildCS(kProdW, kProdRows);
+    const auto child_cols = BoolColumns(kProdW, kProdRows);
+
+    const auto child_t0 = std::chrono::steady_clock::now();
+    auto child_pr = aq::AirQuotientProve<Fp3, AlgB3>(child_cs, child_cols, child_seed, {});
+    const double child_prove_s = Since(child_t0);
+    BOOST_REQUIRE_MESSAGE(child_pr.ok && child_pr.division_exact, child_pr.note);
+    std::string child_why;
+    const auto child_v0 = std::chrono::steady_clock::now();
+    BOOST_REQUIRE_MESSAGE((aq::AirQuotientVerify<Fp3, AlgB3>(child_cs, child_pr.proof,
+                                                             child_seed, &child_why)),
+                          child_why);
+    const double child_verify_s = Since(child_v0);
+    const ar::ChildPublicInputs sh =
+        ar::ExtractChildPublicInputs(child_cs, child_pr.proof, child_seed);
+    BOOST_TEST_MESSAGE("child ALG proof: W=" << kProdW << " N=" << kProdRows
+                                             << " n_coeffs=" << sh.child_n_coeffs
+                                             << " n_lde=" << sh.child_n_lde
+                                             << " merkle_depth=" << sh.merkle_depth
+                                             << " folds=" << sh.n_folds
+                                             << " prove_s=" << child_prove_s
+                                             << " native_verify_s=" << child_verify_s
+                                             << " proof_bytes="
+                                             << EstimateAlgAirProofBytes(child_pr.proof));
+    BOOST_CHECK_EQUAL(sh.child_w, kProdW);
+    BOOST_CHECK_EQUAL(sh.child_n_rows, kProdRows);
+
+    const ar::VerifierAirMeasurement m1 = ar::MeasureVerifierAIR(1, {sh}, fam);
+    const ar::VerifierAirMeasurement m2 = ar::MeasureVerifierAIR(2, {sh, sh}, fam);
+    const ar::VerifierAirMeasurement m4 = ar::MeasureVerifierAIR(4, {sh, sh, sh, sh}, fam);
+    BOOST_TEST_MESSAGE("fast V_CS measurement k=1: cells=" << m1.cell_count
+                                                           << " cols=" << m1.n_columns
+                                                           << " rows=" << m1.n_rows
+                                                           << " constraints="
+                                                           << m1.n_constraints
+                                                           << " quotient_len="
+                                                           << m1.quotient_len);
+    BOOST_TEST_MESSAGE("fast V_CS measurement k=2: cells=" << m2.cell_count
+                                                           << " cols=" << m2.n_columns
+                                                           << " rows=" << m2.n_rows
+                                                           << " constraints="
+                                                           << m2.n_constraints
+                                                           << " quotient_len="
+                                                           << m2.quotient_len);
+    BOOST_TEST_MESSAGE("fast V_CS measurement k=4: cells=" << m4.cell_count
+                                                           << " cols=" << m4.n_columns
+                                                           << " rows=" << m4.n_rows
+                                                           << " constraints="
+                                                           << m4.n_constraints
+                                                           << " quotient_len="
+                                                           << m4.quotient_len);
+
+    constexpr uint64_t kHandoffFastK1Cells = 960256;
+    constexpr uint64_t kHandoffFastK2Cells = 1920512;
+    BOOST_TEST_MESSAGE("handoff fast-budget comparison: claimed k=1 cells="
+                       << kHandoffFastK1Cells << " claimed k=2 cells="
+                       << kHandoffFastK2Cells << " real-production k=1 cells="
+                       << m1.cell_count << " real-production k=2 cells=" << m2.cell_count);
+    if (m2.n_columns > matmul::v4::rc::kRCFri3AlgBatchMaxColumns ||
+        m4.n_columns > matmul::v4::rc::kRCFri3AlgBatchMaxColumns) {
+        BOOST_TEST_MESSAGE("NO-GO: production-width single-level aggregate cannot be proven: "
+                           "V_CS column count exceeds ALG FRI batch cap "
+                           << matmul::v4::rc::kRCFri3AlgBatchMaxColumns
+                           << " (k=2 cols=" << m2.n_columns
+                           << ", k=4 cols=" << m4.n_columns
+                           << "). Root VerifyAggregate wall-clock is unmeasured because "
+                           "no root proof can be emitted.");
+        BOOST_CHECK_GT(m2.n_columns, matmul::v4::rc::kRCFri3AlgBatchMaxColumns);
+        return;
+    }
+
+    auto prove_and_verify = [&](uint32_t k, const uint256& agg_seed) {
+        std::vector<aq::AirQuotientProof<Fp3, AlgB3>> children(k, child_pr.proof);
+        const auto prove_t0 = std::chrono::steady_clock::now();
+        ar::AggregateResult agg = ar::ProveAggregate(child_cs, children, child_seed, agg_seed, fam);
+        const double prove_s = Since(prove_t0);
+        BOOST_REQUIRE_MESSAGE(agg.ok, agg.note);
+        BOOST_CHECK_MESSAGE(agg.witness_satisfies, agg.note);
+        std::string why;
+        const auto verify_t0 = std::chrono::steady_clock::now();
+        const bool ok = ar::VerifyAggregate(agg.proof, agg.pis, agg_seed, k, fam, &why);
+        const double verify_s = Since(verify_t0);
+        BOOST_CHECK_MESSAGE(ok, why);
+        BOOST_TEST_MESSAGE("aggregate k=" << k << " prove_s=" << prove_s
+                                          << " verify_s=" << verify_s
+                                          << " budget_s=" << kStageIBudgetS
+                                          << " proof_bytes="
+                                          << EstimateAlgAirProofBytes(agg.proof)
+                                          << " real_cells="
+                                          << agg.measurement.cell_count
+                                          << " real_cols="
+                                          << agg.measurement.n_columns
+                                          << " real_rows="
+                                          << agg.measurement.n_rows
+                                          << " real_constraints="
+                                          << agg.measurement.n_constraints
+                                          << " note=\"" << agg.note
+                                          << "\" verify_why=\"" << why << "\"");
+        return agg;
+    };
+
+    ar::AggregateResult agg2 = prove_and_verify(2, agg2_seed);
+    ar::AggregateResult agg4 = prove_and_verify(4, agg4_seed);
+    BOOST_CHECK_EQUAL(agg2.measurement.cell_count, m2.cell_count);
+    BOOST_CHECK_EQUAL(agg4.measurement.cell_count, m4.cell_count);
+
+    // Negative: corrupt one opened row value in one child. Native child verify
+    // rejects; the aggregate witness is unsatisfied; ProveAggregate force-
+    // commits the inexact quotient and VerifyAggregate rejects the root.
+    auto bad_child = child_pr.proof;
+    BOOST_REQUIRE(!bad_child.batch.queries.empty());
+    BOOST_REQUIRE(!bad_child.batch.queries[0].row.values.empty());
+    bad_child.batch.queries[0].row.values[0].c0 =
+        gf::Add(bad_child.batch.queries[0].row.values[0].c0, gf::FromU64(1));
+    std::string bad_child_why;
+    const bool bad_child_native_ok =
+        aq::AirQuotientVerify<Fp3, AlgB3>(child_cs, bad_child, child_seed, &bad_child_why);
+    BOOST_CHECK(!bad_child_native_ok);
+    ar::AggregateWitness bad_w =
+        ar::BuildAggregateWitness(child_cs, {bad_child, child_pr.proof}, child_seed, fam);
+    BOOST_REQUIRE_MESSAGE(bad_w.ok, bad_w.note);
+    uint32_t first_row = 0;
+    std::string first_name;
+    const uint32_t bad_violations =
+        ar::CountWitnessViolationsOnH(bad_w.cs, bad_w.columns, &first_row, &first_name);
+    BOOST_CHECK_GT(bad_violations, 0U);
+
+    const auto bad_t0 = std::chrono::steady_clock::now();
+    ar::AggregateResult bad_agg =
+        ar::ProveAggregate(child_cs, {bad_child, child_pr.proof}, child_seed, agg2_seed, fam);
+    const double bad_prove_s = Since(bad_t0);
+    BOOST_REQUIRE_MESSAGE(bad_agg.ok, bad_agg.note);
+    BOOST_CHECK(!bad_agg.witness_satisfies);
+    std::string bad_why;
+    const auto bad_v0 = std::chrono::steady_clock::now();
+    const bool bad_ok = ar::VerifyAggregate(bad_agg.proof, bad_agg.pis, agg2_seed, 2, fam,
+                                            &bad_why);
+    const double bad_verify_s = Since(bad_v0);
+    BOOST_CHECK(!bad_ok);
+    BOOST_TEST_MESSAGE("negative tamper: child_native_why=\"" << bad_child_why
+                                                              << "\" violations="
+                                                              << bad_violations
+                                                              << " first(row="
+                                                              << first_row
+                                                              << ",name="
+                                                              << first_name
+                                                              << ") force_prove_s="
+                                                              << bad_prove_s
+                                                              << " verify_s="
+                                                              << bad_verify_s
+                                                              << " aggregate_why=\""
+                                                              << bad_why << "\"");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
